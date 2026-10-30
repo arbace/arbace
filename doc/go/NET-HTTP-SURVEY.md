@@ -887,11 +887,11 @@ goi-check-nethttp-arbace`. A script is a `go.*` namespace: Go declarations for w
 | `handlerfunc_conv` | an Arbace fn to a parameter of the unnamed func type, `(conv http/HandlerFunc f)` in Go | fail, `:conv-of-arbace-fn` |
 | `repl_server_kept` | an `httptest.Server` started by one Go function and asked from others, the handler redefined between | fail, `:server-kept` |
 
-4 of 8 pass (100 s). The four non-passes are findings, each its class:
+4 of 8 pass (100 s; 5 of 8 after NH19 (a)). The four non-passes are findings, each its class:
 
 - `:reify-unlisted` (deferred, NH2 (a)): reify takes listed interfaces only, `reify: http.Handler is not an interface
   of a listed package`. Listing `net/http` is what makes them pass.
-- `:conv-of-arbace-fn` (open, NH19): `(conv HF f)` with `f` an Arbace fn given to a parameter of the unnamed func type
+- `:conv-of-arbace-fn` (open, NH19; fixed by NH19 (a), below): `(conv HF f)` with `f` an Arbace fn given to a parameter of the unnamed func type
   gives the Arbace fn back unnamed (`%T` `func(...)`, no `ServeHTTP`: the server panics). With a Go closure, or with
   the parameter declared as the named type (`handlerfunc`'s way), it is right. Repro: `.tmp/nh12/p2.ae`.
 - `:server-kept` (open, NH20): a server returned from a Go function panics `goi: retyping a *http.connReader (8
@@ -906,6 +906,28 @@ evaluated from the checkout where it differs from the embedded copy) in addition
 
 **The scratch**: `.tmp/worktrees/nethttp-nh11/.tmp/nh12/` (`p1.ae` to `p4.ae`, the probes; `corpus.log`,
 `essential.log`, `rec.log`; `*.got`, the programs' outputs).
+
+## As built: NH19 (a) (2026-10-30)
+
+**The cause.** `arbace/go/build.ae`'s `conv-node`, between function types, passed the frame's value on unchanged
+(`[:R (exk x :R)]`). A frame holds a func as an interpreted closure or as a real Go func. A closure gets its named
+type later, when `toMem` makes the Go func of the static type at the interface conversion (`.goFunc c t`), so
+`http.HandlerFunc(closure)` was right. An Arbace fn given to a parameter of an unnamed func type is a real Go func
+made by `adaptArbaceFn` (`func(...)`, the unnamed reflect type); `toMem` leaves a Go func as it is, so the converted
+value kept the unnamed type and had no `ServeHTTP`. With the parameter declared as the named type, `FromArbace`
+adapted straight to the named type.
+
+**The fix.** In `conv-node`, a func-to-func conversion between types of two descriptors (and not of a nil operand)
+is now `ConvR` of the operand as Go memory holds it (`iface-content` at the source type: a closure becomes a Go func
+of the source type, a Go func stays), reflect-converted to the target type. Identical types and nil stay as before.
+Only `arbace/go/build.ae` changed (evaluated from the checkout where it differs from the embedded copy); no
+compiled `go/arbace/goi` file changed, so no build is needed. A converted closure is now a Go func in the frame
+(calls through it work as for any Go func).
+
+**Numbers.** `bin/goi check --corpus nethttp --arbace`: 5 of 8 pass (was 4), `handlerfunc_conv` passes, its class removed from `divergences.edn` (3 classes, 3 non-passes), recorded; `--corpus nethttp` 56 of 60 as before; `--essential` 801 of 801; `bin/goi test` all pass.
+
+**Test.** `test/goi/repl.ae` (package `go.rt.fnconv`): `%T` of the converted value, its method called on an Arbace fn
+and on a Go closure literal, and a converted nil func still `== nil`. Probe: `.tmp/nh12/p2.ae` (A, D now `p2.HF`).
 
 ### Proposals NH19 onward
 
