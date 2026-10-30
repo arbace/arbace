@@ -969,11 +969,11 @@ paths, SHA-256 of each file, the rev4 tarball's pin as studied).
   own libraries): 18 of Dybvig's hygiene cases (Dybvig, Hieb and Bruggeman 1992; TSPL4 8: `my-or`'s `t` and a
   shadowed `if`, a free reference from a macro, `swap!`'s `tmp`, a keyword shadowed by a variable, `=>` shadowed,
   literals, macro-defining macros, `letrec-syntax`, `loop`/`break` by `datum->syntax`, `bound-identifier=?`,
-  `free-identifier=?`, `generate-temporaries`, nested ellipses and `(... ...)`, internal defines shadowing), 12 of
+  `free-identifier=?`, `generate-temporaries`, nested ellipses and `(... ...)`, internal defines shadowing), 10 of
   the report's examples (11.19 `be-like-begin`, `p.car` by `identifier-syntax` with `set!`, `ten`, 12's `rec`,
-  `while`, `make-variable-transformer`, `quasisyntax`, fenders, `define-record-type` with parent and protocol), 11
+  `while`, `make-variable-transformer`, `quasisyntax`, fenders, `define-record-type` with parent and protocol), 12
   derived forms, 4 libraries with phases (`(for L expand)`, `rename`, `prefix`, `only`, `except`, an exported macro
-  whose helper is not captured), `eval` with `environment`, and 19 error cases (6 of them the `&syntax` checks of
+  whose helper is not captured), `eval` with `environment`, and 19 error cases (5 of them the `&syntax` checks of
   Racket's suite, which it leaves commented as "not a runtime test": `(set! p.car 15)`, `(rec 5 ...)`, a duplicate
   `let` binding, `else` shadowed in `case`, `(color purpel)`). Each case is expanded by psyntax on Arbace and, when
   it expands, run on the bootstrap host; Chez's run of the original is recorded (`tools/psyntax/run.ss`,
