@@ -433,7 +433,8 @@ source, and the AST of the print is the original's:
 (cpp/group (cpp/struct [] (c/var ^int a)) (c/typedef T1 c/base))                         ; typedef struct { int a; } T1;
 (cpp/group (cpp/struct S2 [] (c/var ^int a)) (c/typedef S2 c/base) (c/typedef PS2 (* c/base)))
 (cpp/group (cpp/enum E3 [e1]) (c/var ^c/base ev))                                         ; enum E3 { e1 } ev;
-(cpp/group (cpp/struct A [] (c/var ^long-long a)) (c/var ^c/base x (cpp/paren 65535)))   ; struct A {...} x(65535);
+; struct A {...} x(65535);
+(cpp/group (cpp/struct A [] (c/var ^long-long a)) (c/var ^c/base x (cpp/paren 65535)))
 ```
 
 The reader makes a group when the oracle's declaration of the class overlaps the extent of a variable, field or typedef (clang lists them

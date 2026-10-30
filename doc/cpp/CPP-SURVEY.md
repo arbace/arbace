@@ -1478,3 +1478,91 @@ cases, the spec lines. **Not done**: CP65 (c), the 84 and 13 known cases beyond 
 
 - CP73 (c): numeric literals from macros as `(cpp/macro "NULL" 0)`; CP74 (b): macro forms' inner nodes checked against
   `g++ -E`, a later gate check; CP75 (b): `(cpp/group ...)` for declaration groups with unnamed classes, with CP65 (c).
+
+## As built: CX5d (2026-10-30)
+
+On `cpp-cx2` (light tier: stage 0 by `ARBACE_HOST_EXE`, 4 jobs, `GOMEMLIMIT=1500MiB`, no gate, no build of Arbace's executables, no lock). Done: CP73 (c), CP75 (b), three
+new corpora, a round of converter fixes that the new corpora found (macros whose expansions are not whole statements), the spec text. **Not done**: CP65 (c) (see CX5d.3),
+`pp-check`'s digests for the new corpora, the whole corpora (samples only), CP74 (b).
+
+### CX5d.1 Numbers (level 5 required for a pass; objects on)
+
+| corpus | files | read | l1 | l3 | l4 g++ | l4 clang | l5 `:full` | pass | known | failing | files without a text form |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| samples | 8 | 8 | 8 | 8 | 7 | 8 | 8 | 7 | 1 | 0 | 7 (6) |
+| whim++ | 10 | 10 | 10 | 10 | 10 | 10 | 10 | 10 | 0 | 0 | 7 (6) |
+| g++.dg every 10th | 1,807 (747 rejected) | 1,060 | 1,045 (1,044) | 1,025 (1,024) | 964 | 1,043 | 1,060 | 976 | 84 | 0 | **849** (804) |
+| libstdc++ every 40th | 244 (32 rejected) | 212 | 208 | 209 | 201 | 202 | 212 | 199 | 13 | 0 | 106 (103) |
+| **g++.old-deja every 10th** (new) | 323 (88 rejected) | 234 | 228 | 227 | 228 | 228 | 234 | 225 | 10 | 0 | 214 |
+| **c-c++-common as C++, every 10th** (new) | 326 (79 rejected) | 247 | 242 | 241 | 201 (13 originals g++ rejects) | 243 | 247 | 211 | 36 | 0 | 214 |
+| **HotSpot, every 25th .cpp of 1,237** (new) | 50 (8 rejected) | 42 | 39 | 38 | 40 | 41 | 42 | 38 | 4 | 0 | 35 |
+
+In brackets CX5c's. The "known" counts are against the known file after this step's classing (`test/repr/cpp/roundtrip-known.edn`: 104 entries, 154 now); before it the new
+corpora's failing files were 4 (HotSpot), 10 (old-deja) and 36 (c-c++-common), all of them now classed. `bin/repr-c roundtrip --corpus c23conf,tcc-tests2`: c23conf 49 of 49 pass, tcc-tests2 85 pass and 3 known,
+as before (nothing under `arbace/repr/c/` changed). `bin/repr-cpp spec-check`: 13 blocks, 0 unreadable. `pp-check --corpus cpp-lexical`: 19 files, lex 19 agree, pp 14 agree, 4 both reject, 1 known.
+Before the fixes of CX5d.2 the new corpora were: HotSpot 25 pass of 42 read (17 failing), old-deja 223 of 234 (11), c-c++-common 208 of 247 (39).
+
+Text forms by key, g++.dg (sum of the files' counts): macro forms 1,390 (872 in CX5c), `(cpp/macro ...)` and `(cpp/group ...)` counted among them or beside (groups 75), invocations still text 0 (517
+in CX5c, 512 of them one file, the `#embed` test, which is a macro-spelled run of numbers now wrapped), overlapping declaration groups still union text 10 (77).
+
+### CX5d.2 What changed
+
+- **CP73 (c), `(cpp/macro "NULL" nil)`.** A macro invocation that stands for a value that cannot carry metadata (a number, `nullptr` as `nil`, a boolean) is the wrapper
+  `(cpp/macro "text" value)` (`macro-form`, `ex` site only); the printer writes the text as an operand of precedence 0 (`print.ae`, `expr`). The forms keep the value. The survey's 528
+  were 512 `#embed` numbers of one file and 16 others: the wrapper turned them all into forms (11 `cpp/macro` in g++.dg besides the nil ones).
+- **CP75 (b), `(cpp/group head declarator*)`.** A class or enum definition (or `struct A *p;`'s elaborated forward declaration) and the variables, fields and typedefs declared with it:
+  `typedef struct { int a; } T1;`, `struct A {...} x(65535);`, `typedef struct S2 {...} S2, *PS2;`, `struct L {...} l1, *l2;` in a body. The converter rewrites each declarator's type string
+  (`struct T1`, `struct (unnamed at f.cpp:1:1)`, the class' name) to one identifier that becomes `c/base` (`*grp*`, `grp-sub`, `rename-base`; `group-with`, `group-of` for a DeclStmt and `items-of` for
+  declaration contexts; the typedef name of an unnamed class is found among the siblings that overlap it, `grp-names`); the printer writes the head in the specifiers' place, one statement
+  (`item!`, `cpp/group`; spec §7.1, as C's `c/group`). g++.dg: 75 groups, the 77 overlapping unions are 10; old-deja 21, c-c++-common 20.
+- **Macros that are not whole nodes** (found by HotSpot's `CHECK`, `for_each_*` and `EXCEPTION_MARK`, which expand to pieces):
+  - a compound statement written by a macro (`{ ... }` in the expansion) is a macro form of its own (`whole-macro?`), without the `;` after it (that is a null statement);
+  - a null statement inside the previous macro text's `;` is not a form (the text holds it; `block-forms`' `lsemi`);
+  - statements of one invocation that do not nest (`f(a, CHECK);` is the call, the `if` and the cast `(void)(0` of `CHECK`'s expansion): the first form carries the union of the
+    texts, the others none (`block-forms`, and for a declaration `Klass* k = f(CHECK);` the binding and the absorbed statements); a declaration followed by a longer `for`
+    from the same invocation leaves the text to the `for` (`covered`);
+  - elements of one invocation in an argument or initializer list (`LOG_TAGS(x)`, `VM_OPS_DO(f)`) carry the text once, the others `:cpp/macro ""` or `(cpp/macro "" v)`, which the printer leaves out of the
+    list (`exs`, `blank-macro?`).
+- **Default arguments** inherited from the declaration in the class are not written again on a class template's out-of-class member (`params-of`: the parameter's text has no `=`); a constructor's
+  function-try-block prints `try : inits` in gcc's order.
+- **Corpora** (`test/cpp/corpora.edn`): `gxx-old-deja` and `c-c++-common` sampled by `--sample 10` through `ppcheck lists` (323 and 326 files); a new entry `hotspot-x86-linux`: the 1,237 `.cpp` of
+  `share/`, `cpu/x86`, `os/linux`, `os/posix` and `os_cpu/linux_x86`, with `:cxx-args` (the build's own arguments from `build/linux-x86_64-server-release/hotspot/variant-server/libjvm/objs/*.o.cmdline`,
+  `{jdk26u}` resolved by `lists`, the generated headers from the host's build tree) and `:absolute true`. `ppcheck.ae`'s `file-entry` and `lists` read `:cxx-args`. HotSpot gets one deviation: `-D__NetBSD__`
+  (see CP76).
+- `rtcheck`'s text-form count leaves out `:group` as it does `:macro-form`.
+
+### CX5d.3 Not done, and why
+
+- **CP65 (c)** (name unnamed template parameters in the print; a normal form that drops template parameter names). None of the 68 new failures needs it (print-rejected ones are friend template-ids,
+  dependent names, unbalanced macros, access) and it costs the norm cache (the key has the norm flag; a new norm form invalidates every `.norm` entry, about half of the 1.5 GB cache). Not built.
+- **The new known cases** (50): HotSpot 4: `stubGenerator_x86_64_cbrt.cpp` (a table first text, then forms), `adlc/formsopt.cpp` (`assert`'s `__LINE__`, positions of nested expansions), `c1_ValueStack.cpp`
+  (temporaries named by `__LINE__` inside an argument that spans lines), `opto/phaseX.cpp` (doc comments: the dump holds a `FullComment`, the print has no comment); old-deja 10 (friend template-id `foo<>`,
+  dependent names, `new A` with an array typedef printing `(lit __size_t 10)`, ...); c-c++-common 36, 29 of them g++-objects-location (ubsan, asan, strub: positions in the code), 2 ast-differs, 2 forms-differ, 3 print-rejected
+  (`#embed`, delimited escape, `__attribute__` after a declarator).
+- **Rejected by the oracle**: HotSpot 8 of 50: 7 because `-D__NetBSD__` makes `os.hpp` include `os_bsd.hpp` where the linux files expect `os::Linux`, 1 a deleted function (`foreignGlobals.cpp`).
+- CP74 (b), `pp-check` digests for the new corpora (`--record`), whole corpora, the other 9 of 10 remaining overlapping unions of g++.dg.
+
+### CX5d.4 Proposals (CP76-CP81)
+
+- **CP76 HotSpot under clang on musl.** The build's flags make clang reject every file: musl's headers declare no exception specifications and `forbiddenFunctions.hpp` declares `noexcept`. Options: (a) `-D__NetBSD__`
+  (built: HotSpot's `NOT_BSD(noexcept)` drops them; 7 of 50 files then fail to read `os::Linux`); (b) a shim header given by `-include` (the same declarations without `noexcept`, then the build's own flags);
+  (c) read with g++ only (no clang levels); (d) an oracle on glibc headers (not on this host). *Recommended: (b)*: no deviation from the build's flags; (a) is the stopgap.
+- **CP77 Doc comments in the AST level.** Clang's dump holds `FullComment` for `///` and `/** */`; a print in `:lines` has no comments. Options: (a) classed `ast-differs` (built, 1 of 50 HotSpot files, 3 in g++.dg);
+  (b) `norm.go` drops `FullComment`, with the norm flag's own cache version so only `.norm` entries are rebuilt (the disk: delete the old ones first); (c) the printer keeps doc comments (`:full` has them). *Recommended: (b).*
+- **CP78 CP65 (c).** Options: (a) wait for a case (none in the 68 new failures); (b) build the normal form now. *Recommended: (a)*; (b) with CP77's cache change in one go if a case appears.
+- **CP79 Macros that expand to pieces, in expressions and declarations.** Built for statements, declarations of a block and list elements. Open: an expression statement split across a `{`...`}` (`TRAPS` in parameter lists),
+  `assert`-like macros with `__LINE__` in nested expansions (`#line` before the text puts the first line right but a text that spans lines moves a nested `__LINE__`). Options: (a) classed (built); (b) a `#line`
+  before every line of a multi-line text (the lines then match the source's); (c) never keep a macro text across lines. *Recommended: (b)*.
+- **CP80 The sample widths.** Options: (a) every 10th/25th (built); (b) the whole corpora in a window after the tag (g++.old-deja 3,229, c-c++-common 3,251, HotSpot 1,237 .cpp); (c) every 3rd now. *Recommended: (b)*, the light tier's disk (the dump cache is at its 1.5 GB) does not allow (c).
+- **CP81 `(cpp/macro "" v)` and `^{:cpp/macro ""}` in lists.** The empty text marks an element the previous element's text already holds. Options: (a) built; (b) a list-level metadata `{:cpp/macro-groups [[0 3]]}`. *Recommended: (a)*, local and data-visible.
+
+### CX5d.5 Heavy list, slips, shipped files, scratch
+
+- Heavy (after the tag): the whole g++.old-deja, c-c++-common and HotSpot (`bin/repr-cpp pp-check --corpus gxx-old-deja,c-c++-common,hotspot-x86-linux --record` for the digests, then the round trip with objects); the libstdc++ testsuite and g++.dg whole;
+  `bin/gate` essential (the gate key includes `arbace/`); `pp-check` on the new corpora.
+- Slips: two uses of `<(...)` / `/dev/null` in test commands (`done < <(true)`, `diff <(true) /dev/null`, and `2>/dev/null` / `> /dev/null` in five one-line probes), none left a process; two foreground commands passed the tool's 120 s limit and moved to
+  background (stopped by task id); one probe of mine hung on a macro the converter could not finish before the CX5d fixes (stopped by task id). Disk touched 90% once (GT7 was running): trimmed Go's cache older than 30 minutes and my own dumps; it is 56% now.
+  The cache of cxxdump is at 1.5 GB (the limit).
+- Shipped files changed (tools' namespaces; re-seed relevant if embedded): `arbace/repr/cpp/convert.ae`, `print.ae`, `rtcheck.ae`, `ppcheck.ae`; data `test/cpp/corpora.edn`, `test/repr/cpp/roundtrip-known.edn`; docs `doc/cpp/SPEC.md`, `doc/cpp/CPP-SURVEY.md`.
+- Scratch: `.tmp/cx/r-{samples,wpp,lt,hs,od,cc,dg}/` (results.tsv, read.tsv, summary.edn, classes.tsv, forms), `.tmp/cx/r-*.log`, `.tmp/cx/runall10.sh`, `.tmp/cx/{hs,od,cc}.list`, `.tmp/cx/lists2/`, `.tmp/cx/lists3/`,
+  `.tmp/cx/classify.sh`, `.tmp/cx/fd.py` (first difference of two files), `.tmp/cx/repr-c-rt3.log`, `.tmp/cx/t5/` (the group probes).
