@@ -15,6 +15,20 @@
     (.mkdirs (.getParentFile f))
     (spit f s)))
 
+(defn- full-level
+  "Level 5 (mode :full): the file read in mode :full, written as .ae text and read back, printed: the original's bytes.
+  \"same\", \"differs\" or \"refused: CLASS\"."
+  [^String dump ^String src ^String nm ^String std]
+  (try
+    (let [rd (rc/read-cpp dump src nm std true)]
+      (if (:refused rd)
+        (str "refused: " (name (:refused rd)))
+        (let [[ff forms] (rc/read-unit-text (rc/unit-text rd))
+              t (rc/print-cpp ff forms)]
+          (if (java.util.Arrays/equals (.getBytes ^String t "ISO-8859-1") (java.nio.file.Files/readAllBytes (.toPath (java.io.File. src))))
+            "same" "differs"))))
+    (catch Throwable e (str "crash: " (str/replace (str e) #"[\t\n]" " ")))))
+
 (defn- one
   "One file: [name status texts detail]; status ok, refused, crash."
   [^String work ^String nm ^String std ^String dump ^String src ^String forms-dir ^String print-dir]
@@ -27,7 +41,7 @@
               n (reduce + (vals (:texts rd)))]
           (spit-utf8 (str forms-dir "/" nm ".ae") ae)
           (when print-dir (spit-utf8 (str print-dir "/" nm) txt))
-          [nm "ok" n (pr-str (:texts rd))])))
+          [nm "ok" n (pr-str (:texts rd)) (if print-dir (full-level dump src nm std) "-")])))
     (catch Throwable e
       [nm "crash" 0 (str/replace (str e) #"[\t\n]" " ")])))
 
@@ -76,7 +90,7 @@
         obj (fn [side who nm] (status (str work "/obj/" side "/" who "/" nm ".status")))
         rows (for [nm names]
                (let [o (status (str work "/orig/" nm ".status"))
-                     [_ rs texts detail] (get r1 nm)
+                     [_ rs texts detail full] (get r1 nm)
                      read (cond (not= o "0") "oracle-rejects" (nil? rs) "no-read" :else rs)
                      l1 (when (= read "ok") (and (= "ok" (second (get r2 nm))) (same? (str work "/forms/" nm ".ae") (str work "/forms2/" nm ".ae"))))
                      l3 (when (= read "ok") (and (= "0" (status (str work "/dump2/" nm ".status"))) (same? (str work "/orig/" nm ".norm") (str work "/dump2/" nm ".norm"))))
@@ -88,10 +102,11 @@
                                     (not= b "0") false
                                     :else (same? (str work "/obj/orig/" who "/" nm ".o") (str work "/obj/print/" who "/" nm ".o"))))))
                      g (l4 "gxx") c (l4 "clang")
-                     pass (and (= read "ok") l1 l3 (not (false? g)) (not (false? c)))
+                     l5 (or full "-")
+                     pass (and (= read "ok") l1 l3 (contains? #{"same" "-"} l5) (not (false? g)) (not (false? c)))
                      k (get kfiles nm)
                      verdict (cond (= read "oracle-rejects") "oracle-rejects" pass "pass" k "known" :else "fail")]
-                 [nm verdict (if k (name k) "-") read (str l1) (str l3) (str g) (str c) (or texts "-")]))
+                 [nm verdict (if k (name k) "-") read (str l1) (str l3) (str g) (str c) (or texts "-") (or full "-")]))
         rows (vec rows)
         cnt (fn [pred] (count (filter pred rows)))
         summary {:files (count rows)
@@ -102,6 +117,9 @@
                  :oracle-rejects (cnt #(= (nth % 3) "oracle-rejects"))
                  :l1 (cnt #(= (nth % 4) "true")) :l3 (cnt #(= (nth % 5) "true"))
                  :l4-gxx (cnt #(= (nth % 6) "true")) :l4-gxx-orig-fails (cnt #(= (nth % 6) ":orig-fails"))
+                 :l5-full (cnt #(= (nth % 9) "same")) :l5-differs (cnt #(= (nth % 9) "differs"))
+                 :l5-refused (frequencies (keep #(when (str/starts-with? (nth % 9) "refused") (nth % 9)) rows))
+                 :l5-crash (cnt #(str/starts-with? (nth % 9) "crash"))
                  :l4-clang (cnt #(= (nth % 7) "true")) :l4-clang-orig-fails (cnt #(= (nth % 7) ":orig-fails"))
                  :no-text-form (cnt #(and (= (nth % 3) "ok") (= (nth % 8) "0")))
                  :known (frequencies (keep #(when (= (second %) "known") (nth % 2)) rows))}]

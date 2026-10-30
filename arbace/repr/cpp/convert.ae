@@ -183,13 +183,16 @@
      inc! dec! pre-inc! pre-dec! addr deref not bit-not bit-and bit-or bit-xor and or comma sizeof alignof sizeof-type alignof-type
      conv ? aget -> init stmt-expr throw typeid typeid-type noexcept sizeof... pack-expand co-await co-yield co-return operator
      lit nil true false this real imag access fn array member-ptr typename decltype decltype-auto constrained expr template
-     auto complex atomic quote var def loop recur fn* new delete & && * <> try catch catch-all byte-string})
+     auto complex atomic quote var def loop recur fn* new delete & && * <> try catch catch-all byte-string
+     #_"nil, true and false are literals in a quoted set: their symbols are added below"})
+
+(def ^:private reserved* (into reserved [(symbol "nil") (symbol "true") (symbol "false")]))
 
 (defn ident
   "An identifier as a symbol, escaped when the reader or the printer would read it as something else."
   [^String s]
   (let [s (utf8 s)]
-    (if (or (contains? reserved (symbol s)) (not (re-matches #"[A-Za-z_$\x{80}-\x{10FFFF}][A-Za-z0-9_$\x{80}-\x{10FFFF}]*" s)))
+    (if (or (contains? reserved* (symbol s)) (not (re-matches #"[A-Za-z_$\x{80}-\x{10FFFF}][A-Za-z0-9_$\x{80}-\x{10FFFF}]*" s)))
       (list 'c/id s)
       (symbol s))))
 
@@ -198,7 +201,7 @@
   [x]
   (cond
     (symbol? x) (let [parts (str/split (str x) #"/")]
-                  (if (some #(contains? reserved (symbol %)) parts)
+                  (if (some #(contains? reserved* (symbol %)) parts)
                     (if (= 1 (count parts)) (list 'c/id (str x)) (list 'c/id (str/replace (str x) "/" "::")))
                     x))
     (vector? x) (with-meta (mapv #(if (= % '&) % (esc-name %)) x) (meta x))
@@ -1351,21 +1354,25 @@
             (recur (next rs) (conj out {:e e :fs fs :text? (some #(and (seq? %) (= (first %) 'cpp/text)) fs)
                                         :unnamed? (boolean (#{"CXXRecordDecl" "EnumDecl"} (kind n)))}))))))))
 
-(defn- place
+(defn- place-offs
   "The items with the directives that stand between them, in the file's order (a directive inside an item is that
-  item's: its members place it, or it is left out)."
+  item's: its members place it, or it is left out): [[offset form] ...], the offset of the item's (or the directive's)
+  first byte on its first form, nil on the item's other forms and on an item with no extent (`:full`'s cuts)."
   [items]
   (let [within (fn [d it] (when-let [[b e] (:e it)] (and (<= (long b) (long (:off d))) (< (long (:off d)) (long e)))))
-        mine (remove (fn [d] (some #(within d %) items)) *directives*)]
+        mine (remove (fn [d] (some #(within d %) items)) *directives*)
+        item-pairs (fn [it] (map-indexed (fn [i f] [(when (zero? i) (some-> (:e it) first)) f]) (:fs it)))]
     (loop [its (seq items) ds (seq (sort-by :off mine)) out []]
       (cond
         (and ds its) (let [it (first its) d (first ds)]
                        (if (and (:e it) (< (long (:off d)) (long (first (:e it)))))
-                         (recur its (next ds) (conj out (:form d)))
-                         (recur (next its) ds (into out (:fs it)))))
-        ds (recur nil (next ds) (conj out (:form (first ds))))
-        its (recur (next its) nil (into out (:fs (first its))))
+                         (recur its (next ds) (conj out [(:off d) (:form d)]))
+                         (recur (next its) ds (into out (item-pairs it)))))
+        ds (recur nil (next ds) (conj out [(:off (first ds)) (:form (first ds))]))
+        its (recur (next its) nil (into out (item-pairs (first its))))
         :else out))))
+
+(defn- place [items] (mapv second (place-offs items)))
 
 (defn members
   "The forms of a declaration context's members, with its directives."
@@ -1450,5 +1457,5 @@
                                      :let [m (re-find #"^#\s*line\s+(\d+)" (:text d))] :when m]
                                  [(:end d) (Long/parseLong (second m))]))]
       (let [its (items-of nodes :top)
-            forms (place its)]
-        {:forms (vec forms) :texts @texts}))))
+            pairs (place-offs its)]
+        {:forms (mapv second pairs) :offsets (mapv first pairs) :texts @texts}))))
