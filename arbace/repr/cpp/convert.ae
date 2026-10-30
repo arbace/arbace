@@ -655,6 +655,45 @@
     (let [[d] (decl-forms (first (kids var)) :local)] (apply list 'cpp/decl (rest d)))
     (ex n)))
 
+(defn- split-top
+  "A text split at its top-level commas (outside brackets and literals)."
+  [^String t]
+  (loop [i 0 d 0 q nil start 0 out []]
+    (if (>= i (.length t))
+      (conj out (subs t start))
+      (let [c (.charAt t i)]
+        (cond
+          q (cond (= c \\) (recur (+ i 2) d q start out)
+                  (= c q) (recur (inc i) d nil start out)
+                  :else (recur (inc i) d q start out))
+          (or (= c \") (= c \')) (recur (inc i) d c start out)
+          (#{\( \[ \{} c) (recur (inc i) (inc d) nil start out)
+          (#{\) \] \}} c) (recur (inc i) (dec d) nil start out)
+          (and (= c \,) (zero? d)) (recur (inc i) d nil (inc i) (conj out (subs t start i)))
+          :else (recur (inc i) d nil start out))))))
+
+(defn- attr-arg [^String a]
+  (let [a (str/trim a)]
+    (cond
+      (re-matches #"(0|[1-9][0-9]{0,17})" a) (Long/parseLong a)
+      (re-matches #"[A-Za-z_][A-Za-z0-9_]*" a) (let [x (ident a)] x)
+      (re-matches #"\"[ -!#-\[\]-~]*\"" a) (subs a 1 (dec (.length a)))
+      :else (list 'cpp/text (utf8 a)))))
+
+(defn- attr-form
+  "An attribute's written text as C's encoding (SPEC §5.6, CP44 (b)): `name` or `ns/name`, `[name arg*]` with
+  arguments (a number, an identifier, a plain string, else (cpp/text \"...\")), `[name]` for `name()`; anything
+  that is not a name with an argument list stays (cpp/text ...)."
+  [^String t]
+  (let [t (utf8 (str/trim t))]
+    (if-let [[_ nm args] (re-matches #"(?s)([A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)?)\s*(?:\((.*)\))?" t)]
+      (let [nm (symbol (str/replace nm "::" "/"))]
+        (cond
+          (nil? args) nm
+          (str/blank? args) [nm]
+          :else (into [nm] (map attr-arg (split-top args)))))
+      (list 'cpp/text t))))
+
 (defn stmt-items
   "A statement's items (a label or case is an item before the statement it labels)."
   [n]
@@ -668,7 +707,7 @@
                                items (stmt-items st)]
                            (if (empty? as)
                              items
-                             (into [(vary-meta (first items) assoc :cpp/attrs (mapv (fn [a] (or (some-> (ntext a) utf8) (gap :attr "in a macro"))) as))]
+                             (into [(vary-meta (first items) assoc :cpp/attrs (mapv (fn [a] (attr-form (or (ntext a) (gap :attr "in a macro")))) as))]
                                    (rest items))))
         "CompoundStmt" [(apply list 'do (compound-forms n))]
         "NullStmt" ['(c/null)]
@@ -841,14 +880,14 @@
                       t (utf8 (text-at b e))
                       before (str/trimr (text-at (max 0 (- (long b) 40)) b))]
                   (cond
-                    (re-find #"^(alignas|_Alignas)\b" t) (update m :cpp/alignas (fnil conj []) t)
+                    (re-find #"^(alignas|_Alignas)\b" t) (update m :cpp/alignas (fnil conj []) (if-let [[_ k] (re-matches #"alignas\s*\(\s*([1-9][0-9]{0,9})\s*\)" t)] (Long/parseLong k) t))
                     ;; after a comma: the list it is in, the nearer opener
                     (and (.endsWith ^String before ",")
                          (> (.lastIndexOf ^String (text-at (max 0 (- (long b) 400)) b) "__attribute__")
                             (.lastIndexOf ^String (text-at (max 0 (- (long b) 400)) b) "[[")))
-                    (update m :c/gnu-attrs (fnil conj []) t)
-                    (re-find #"(\[\[|,)\s*(using\s+[A-Za-z_]+\s*:)?$" before) (update m :cpp/attrs (fnil conj []) t)
-                    (re-find #"(__attribute__\s*\(\(|,)$" before) (update m :c/gnu-attrs (fnil conj []) t)
+                    (update m :c/gnu-attrs (fnil conj []) (attr-form t))
+                    (re-find #"(\[\[|,)\s*(using\s+[A-Za-z_]+\s*:)?$" before) (update m :cpp/attrs (fnil conj []) (attr-form t))
+                    (re-find #"(__attribute__\s*\(\(|,)$" before) (update m :c/gnu-attrs (fnil conj []) (attr-form t))
                     :else (gap :attr (kind a)))))))
           {} (filter #(.endsWith ^String (kind %) "Attr") (kids n))))
 
