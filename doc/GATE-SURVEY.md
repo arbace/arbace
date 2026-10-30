@@ -1693,3 +1693,135 @@ where stage 0 was kept), `--full`, the javac-tool path of GTS57 (the same code, 
 
 The user decided both as recommended: GTS60 (b), so `bin/lib/tmpdir.bash` puts TamaGo's `bin/` first on `PATH` at the
 next change that rekeys the executables anyway (NH11's merge after the tag is one); GTS61 (b), as built.
+
+## As built: GT7's fix round (2026-10-30)
+
+Branch `gate-gt7fix`, from main `68b2bba6` (the commit of GT7's first clean `--full`, `bin/gate --full --clean --tag
+arbace-reaps-3-crops-v2`, started 2026-10-29 16:59; its summary `.tmp/gt7-full/run.log`, its clone
+`.tmp/gate-clean/68b2bba6.../`). Built: the fixes of what that run found, a watchdog for the audit's reducer, the
+audit's rule for hashed-only reads, and `bin/gate --clean --only`, the rerun of some steps merged into the record. No
+shipped file changed: nothing under `arbace/`, `go/`, `overlay/`, `jdk/`, `tamago/`, `seed/`; `bin/lib/gate-run.bash`
+and `test/gate/plan.ae`, which every key holds, are unchanged too (below: the rule that lets a rerun keep the
+other steps' passes), and so are `gate_key`, `arbace_javac_key` and the program hosts' identities.
+
+**The first clean run's findings** (status by step in the clone's `.tmp/gate/*.status`, `*.audit-status`):
+
+| finding | cause | fix |
+|---|---|---|
+| `goi-check` failed: `gcgort.go` timeout (20 s) | 112 and 118 s of CPU (94 and 105 s system time: the GC's threads on 64 CPUs under ptrace) against `limited 20`'s 100 (`goi-check.cpu.tsv`; 32 s quiet unaudited, 37-53 s loaded at GT7's essential runs) | `test/goi/timeouts.txt`: 60 (300 s of CPU, 2.5 times the audited time) |
+| `repr-go` frozen 3.5 hours under the audit, killed at 04:08 (137) | the reducer stopped reading strace's FIFO (`repr-go.paths` stopped at 40 × 64 KiB, its last full buffer, at 00:42, during the second conversion, `$GOROOT/test`'s); strace blocked on the full FIFO, every traced process on strace. Once the reducer was killed strace wrote on (89 MB of `Broken pipe` in the log within a minute): the FIFO was full and strace alive, so the reader did not read with data pending. The reducer has no goroutine pipeline and no bounded channel: one goroutine reads the FIFO (an `os.Open`ed FIFO is non-blocking and waits in Go's netpoller), parses, writes a regular file. Not reproduced (a stress run of 8 parallel tree walks through the FIFO, `.tmp/gt7fix/`, read it all); the futex wait the main session saw is what a Go program parked on its netpoller, or one stopped, shows | the reducer reads the FIFO by a blocking descriptor (`syscall.Open` + `os.NewFile`: not pollable, plain `read(2)`, no netpoller between strace's writes and the reader) and ignores SIGTSTP, SIGTTIN, SIGTTOU; a **watchdog** (below) turns any stall into a loud failure in minutes |
+| 7 Java steps' passes not recorded, 2,581-2,603 undeclared each | `bin/java-check` (the forms cache's reader key) and `bin/clojure-tests --java-fixtures` (the provenance's host) call `repr_java_host`, whose `arbace_javac_fresh` computes `arbace_javac_key`: `xargs sha256sum` over every source of javac's tool (2,601 files: `tamago/goroot/` 2,269, `arbace/lang/` 142, `go/arbace/` 142, `arbace/j2g/` 20, repr/haskell, rust and c 19, `tools/godump/` 8, `go/arbace.ae`). On `:javac-prog` (GT5) the audit covers only the rest key's files, the sources being in the tool's units. GT5 audited the `:prog` steps but never the `:javac-prog` ones (no tool at its key); go-smoke's like case went back to `:gate` | the reducer marks a read by `sha256sum` **H** (hashed only); `gate.audit` covers a hashed-only read of a file in the full key of a step's program host or of its `:uses` producers' (on `:prog` gate_key's files, on `:javac-prog` arbace_javac_key's): the identity check, which GT5's design keys by the units instead. A read by any other process stays a read. Proved: `repr_java_host` traced alone with the new reducer, 4,848 H lines, 26 R; `gate.audit` as java-fixtures: **0 undeclared, 2,601 hashed only, covered** (the run's 2,601 exactly) |
+| java-compiled-full: 19 undeclared | the same key computation (repr/haskell, rust, c: in arbace_javac_key, not in gate_key), the step on `:gate` with `:uses java-read/forms.sha256` (`:javac-prog`) | covered by its producer's host (above) |
+| java-print: `test/jrt/classfile.ae`; java-forms-verify: `test/java/check-read.edn`, `test/java/divergences.edn` | real reads (the print level's class files; `--forms verify` judges the read) beside the 2,601 | declared |
+| programs-full: `bin/repr-clojure` | `--build-program` translates a sample's `.clj` with repr/clojure (REAP7b) | declared |
+| javac-tool: `bin/javac-vendor`, `jdk/javac/provenance.edn` | `jdk/javac/provenance.edn`: hashed by `bin/arbace-go`'s `reader_key` (the compiled reader's cache, `find jdk/javac ... \| xargs sha256sum`); `bin/javac-vendor`: the build's own command, which `arbace_javac_key` does not hash: a real gap (a change to `tool` keeps a stale tool) | the hashed read covered as a build's inner cache key; `bin/javac-vendor` a known gap: the step's `:audit-known` (new; the audit reports it as `KNOWN GAPS`, not failing) until GTS72 decides: adding it to the key rekeys every step |
+| repr-java failed: the baseline's `clojure/lang/Range.ae` | RPS151 (a) (JN9f, `2a2925fc`: a constant's widening and boxing written) changed it; `test/repr/java/expected/baseline.sha256` was not updated (no `--full` since GT5). Deterministic: two conversions here on the clone's tool gave the same new hash | the manifest line (`bin/repr-java check --update`'s line, from the conversion) |
+| repr-java-roundtrip.jdk failed: `java/time/format/Parsed.ae` forms and ae, `{:tag Long} \| nil` | RPS151 again: the converter writes `^Long (Long/valueOf (if ...))` for a primitive conditional passed as a Long, the printer `Long.valueOf(...)`, which reads back untagged (an explicit `Long.valueOf` needs no tag) | a known difference with its reason (`test/repr/java/roundtrip/jdk-known.edn`); the converter's fix changes `jdk/forms` (shipped): GTS75 |
+| java-judge failed: 272 new levels disagreements, 1 print test in no class | the six levels' records predate GT6's CPU limits and JC6b: 437 compiled and 253 interp tests recorded as timeouts or failures now pass (272 of them compiled only: `levels-known.edn`); `t03447` TestFloatVect's print differs by a constant's shape, `0 \| (float 0.0)` (RPS151's widening) | the records written from the run's saved results (`bin/java-check --judge --record`: `check-{interp,compiled,classes,print}.edn`, `levels-known.edn`); `t03447` in `:print-shapes` (its title names a constant's shape); the judgment again: 0 problems. Not recorded: diagnostics' `t07536`, whose message depends on the checkout's path length (GTS76), a non-failing "changed" |
+
+**The reducer's watchdog** (`tools/gateaudit/watch.go`). A reducer whose input is a FIFO writes a heartbeat beside it,
+`NAME.fifo.progress` ("UNIX-TIME BYTES-READ LINES PENDING", every 5 s from a goroutine of its own; PENDING by
+FIONREAD), and starts itself again as its watchdog (`-watch PID`), in a process group of its own. Every
+`GATE_AUDIT_POLL_S` (30) seconds the watchdog calls the reducer stalled when, for `GATE_AUDIT_STALL_S` (600) seconds,
+its heartbeat is stale (it does not run: stopped, or its runtime wedged), or bytes wait in the FIFO and none is read,
+or when the reducer is gone while strace still holds the FIFO (twice in a row). Then: the reason in
+`NAME.reduce.stalled` and appended to `NAME.log`, strace's process tree (the step's traced processes first, then
+strace) and the reducer SIGKILLed by PID; the step ends with 137, `bin/gate`'s summary says `AUDIT STALLED NAME:
+reason` and fails, the clean record's `:audit` is `"reducer stalled: ..."`; `bin/gate --audit` the same. The watchdog
+never opens the FIFO (it finds strace by `/proc/PID/fd` links) and exits with the reducer. It lives in the reducer
+and `bin/gate`, not in `bin/lib/gate-run.bash`, whose change would rekey every step (the rule below); the runner
+starts the reducer as before (`GATE_AUDIT_WATCH=0`: no watchdog). Tested (`.tmp/gt7fix/reducer-test.sh`, a traced
+loop of `cat` and `ls` through a FIFO as `step()` runs it): a normal run, no watchdog left; a reader that stops reading
+(`GATE_AUDIT_TEST_STALL_AFTER=3000`): `64730 bytes wait in the FIFO and none was read for 8 s`, the step 137 in 15 s; a
+SIGSTOPped reducer: `its heartbeat is 8 s old`; a SIGKILLed reducer: `the reducer exited while strace still writes`;
+the same lines as before on a regular file (3,877 lines of a 46,395-line trace, byte for byte against the old
+reducer); through the gate, a toy step (`.tmp/gt7fix/toy2/stall.edn`): `FAILED toy-busy`, the next step ran, `AUDIT
+STALLED toy-busy: 64832 bytes wait ...`, the gate failed, the record's `:audit "reducer stalled: ..."`.
+
+**`bin/gate [--full] --clean --tag TAG --only STEP,...|failed|changed`** (`make gate-full-clean-only TAG=... [ONLY=...]`,
+`test/gate/clean.ae`). The clone, its empty caches and its pins as `--clean`; the base is `test/gate/clean-TAG.edn` (the
+record so far) and the logs of its runs, `.tmp/gate-clean/SHA.logs/` (the rerun's own `SHA.logs` or, at a commit run
+before, `SHA.logs.N`). After the first plan `gate.clean select ... builds` drops the builds no selected check needs;
+after the builds `select ... checks` decides each check:
+
+- *selected*: the steps named (a step with parts names its parts), `failed` (the base's steps that did not pass clean
+  with their audit ok, and those it does not hold), `changed` (the steps whose key material, `plan/NAME.inputs` less
+  the producers' output digests, differs from the run they passed at), closed over `:uses` both ways (a producer's
+  output exists in the fresh clone only by running it; a consumer of a rerun producer is keyed by what it makes again);
+  run and audited as in a clean run;
+- *every other check*: skipped on its clean pass (`skipped NAME (passed clean at SHA, its key unchanged ...)`), and
+  **the run stops** when one of them changed (`N steps not selected have changed since their clean pass, their keys not
+  the ones they passed at: ... (add them, or: changed)`).
+
+At the end `gate.clean merge` writes the record: the base's steps with this run's in their place, each step with
+`:run`, an index of `:runs` (each run's commit, date, mode, status, selection, logs, pins and hosts), `:commit` the
+latest run's, `:status :passed` when every step passed clean with its audit ok. **What the record means**: every
+step passed in a fresh clone with empty caches, audited, at the key the record gives it; a step rerun passed at a
+later commit, and at that commit every step not rerun had the key it passed at (the selection checked their material
+line by line), so each pass still stands for the tag's commit's inputs. The rule chosen (GTS73 (a)): a rerun may be at
+a new commit when its differences touch only the rerun steps' keys; a fix that touches the gate's logic, gate_key or a
+host's identity rekeys every step, and `changed` then selects them all. Tested on a toy table (`.tmp/gt7fix/toy2/`,
+the inner mode): run A (every step; one failing, one audit undeclared); run B1 `--only failed` after a change to a
+passed producer's input: **refused**, `toy-read` named; run B2 `--only failed,changed`: the build not needed (no
+selected check needs it), the two failed steps, the changed producer and its consumer (`a consumer of a step rerun`)
+ran, the other two skipped on their clean passes, the merged record `:status :passed` with `:run 0` and `:run 1` steps.
+
+**What the rerun selects** (`select` on this branch's plan with the clone's units, against the first run's statuses so
+far; `.tmp/gt7fix/sel.tsv`): the failed and unrecorded steps (goi-check, repr-java, repr-java-roundtrip.jdk, the seven
+Java levels, java-judge, programs-full, repr-go and the steps after it the first run had not reached) and the steps
+this branch's records rekey: through `test/goi/timeouts.txt` (`:goi`: goi-aot-essential, reap and repr-go-native's 22
+parts), `test/java/check-*.edn` (java-check, java-check-judge, java-compiled, reap), `test/repr/java/`
+(`:repr-java`: javac-classes, javac-verify, jrt-convert, repr-java-roundtrip's other parts, the 19 parts of
+repr-java-parse, -front, -attr, -nojavac). The other steps (go-smoke, suite-go, oracle-go, diffcheck,
+suite-aot-essential, programs, generated, j2g-edge, provenance, javac-check, fixpoint, suite-aot) keep their keys and
+their passes.
+
+## Proposals (GTS70-GTS77)
+
+- **GTS70 The reducer's stall.**
+  - Options: (a) as built: the blocking read, job-control signals ignored, the watchdog (a stall fails the step in
+    `GATE_AUDIT_STALL_S`, 10 minutes, with its reason); (b) also a reader goroutine draining the FIFO into memory
+    ahead of the parser, so strace never waits on the parsing (a bounded backlog, say 1 GiB); (c) strace's output to
+    a regular file and the reducer after the step (no FIFO, no stall; repr-go's trace is tens of GB of disk).
+  - *Recommended: (a)*: the cause is not reproduced, and the one blocking point the reducer had, netpoll on the FIFO,
+    is gone; whatever else stops it now costs ten minutes and a named failure, not hours; (b) treats a slow parser,
+    which nothing measured shows (the reducer is 23 times faster than awk, GT5).
+- **GTS71 Hashed-only reads.**
+  - Options: (a) as built: a read by `sha256sum` of a file in the full key of a step's program host or its producers'
+    is the host's identity check, covered and listed; (b) the seven steps moved to `:javac` as go-smoke was (GT5),
+    losing their cutoff on a j2g change; (c) the gate hands the steps the key it computed (`gate_env`'s jkey) and
+    `arbace_javac_fresh` compares it with the tool's `.key` instead of hashing, so a step hashes nothing.
+  - *Recommended: (a) now, (c) at the next change that rekeys every step anyway (as GTS60 (b))*: (c) is the narrower
+    claim (no rule about which process read a file), but it edits `bin/lib/javac-key.bash`, in every key; (a) keeps the
+    audit's other reads exact (a source read by the tool or by Arbace is still undeclared).
+- **GTS72 `bin/javac-vendor` in `arbace_javac_key`.**
+  - Options: (a) added at the next change that rekeys the executables anyway, `:audit-known` then removed; (b) now (a
+    clean rerun of every step); (c) kept as a known gap.
+  - *Recommended: (a)*: the script is javac-tool's own command (its `tool` passes the build's options), so a change to
+    it can keep a stale tool; the gap is narrow and named in the audit's report meanwhile.
+- **GTS73 The rule for `--only`.**
+  - Options: (a) as built: a new commit allowed when every check not rerun keeps its key material (checked line by line
+    against the run it passed at), the record naming each step's run; (b) the rerun at the first run's commit only (no
+    fix can be in it); (c) a full clean run after any change.
+  - *Recommended: (a)*: a key is the step's whole input, never the commit (GTS2 (a)), so a pass at an unchanged key is
+    the same claim at either commit; (b) cannot carry the fixes, (c) costs a day per finding.
+- **GTS74 The Java levels' records from the clean run.**
+  - Options: (a) as built: `check-{interp,compiled,classes,print}.edn` and `levels-known.edn` written from the clean
+    run's saved results (437 compiled and 253 interp tests recorded as timeouts or failures before GT6's CPU limits and
+    JC6b now pass; 272 tests pass compiled only); (b) recorded from an everyday `--full` after the tag.
+  - *Recommended: (a)*: the clean run is the quiet, audited run the records should come from, and the judgment of its
+    own results is the check that fails without them.
+- **GTS75 The converter's `^Long` over its own `Long/valueOf` (RPS151).**
+  - Options: (a) as built: a known round-trip difference of `java/time/format/Parsed.ae`; the converter drops the tag
+    on a boxing it writes, after the tag (`jdk/forms` changes: the re-seed's business); (b) now (shipped forms, every key).
+  - *Recommended: (a)*: the forms mean the same Java; the fix belongs with the next re-seed.
+- **GTS76 `t07536`'s path-dependent diagnostic.**
+  - Options: (a) java-check masks the work directory before it shortens a reason (the clean clone's longer path leaves
+    `RUN/classes/Bar.` where main's leaves `RUN/classes/Bar.class, 26`); (b) the record follows the clean run's; (c) as
+    built: the record kept, a non-failing "changed" in the clean run.
+  - *Recommended: (a)*: a result that depends on the checkout's path is the harness's, and GT7's fresh path exposed it
+    (like run 1's `UserDirChangedTest`).
+- **GTS77 The watchdog's limits.**
+  - Options: (a) as built: 10 minutes without progress (`GATE_AUDIT_STALL_S`), polled every 30 s; (b) 3 minutes.
+  - *Recommended: (a)*: a working reducer drains a 64 KiB pipe in milliseconds and beats every 5 s; ten minutes of a
+    stall is no false alarm and still bounds the loss to minutes.
