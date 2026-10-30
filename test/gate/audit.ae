@@ -20,7 +20,15 @@
   counted: what the step wrote or derived (.tmp/, target/), .git/ (the commit is not in a key; the
   version stamp is its business), files that are not in the checkout's table. A file only stat'ed is
   listed apart (its existence, not its content, was asked). Reads outside the checkout are
-  summarized by directory: the pinned roots (TamaGo's go, the JDK build tree) belong to :pins."
+  summarized by directory: the pinned roots (TamaGo's go, the JDK build tree) belong to :pins.
+
+  Since GT7's fix round (doc/GATE-SURVEY.md, \"As built: GT7's fix round\") the reducer marks a read by
+  sha256sum H (hashed only). A file hashed only, not otherwise read, is covered (advisory, listed)
+  where the hash is an identity check: a program host's full key (on :prog gate_key's files, on
+  :javac-prog arbace_javac_key's, the steps' and their :uses producers' hosts: repr/java's
+  repr_java_host hashes the tool's sources to check that the tool is the checkout's, GT5's design
+  keys the step by the tool's units instead), or a build's inner cache key (javac-tool's reader_key
+  hashes jdk/javac/ to keep the compiled reader by key). Read by any other process it is a read."
   (:require [arbace.string :as str]
             [arbace.java.io :as io]
             [gate.plan :as plan])
@@ -61,6 +69,10 @@
    :stage0 (concat seed-pins ["seed/arbace-seed-go.tar.xz" "bin/seed" "bin/lib/seed-go.bash"])
    :frozen ["test/oracle/frozen-jar.sha256"]
    :go [] :jdk []})
+
+;; GT7's fix round: the full key whose files a host's identity check hashes (bin/lib/repr-java/host.bash's
+;; repr_java_host: arbace_javac_fresh; bin/arbace-go --gate: gate_key)
+(def ^:private identity-host {:prog :gate :javac-prog :javac :gate :gate :javac :javac})
 
 (defn- parent [^String p] (let [i (.lastIndexOf p "/")] (if (pos? i) (subs p 0 i) "")))
 
@@ -106,7 +118,16 @@
         ;; the gate's logic, and the heavy lock's command (GATE_HEAVY_CMD, the tools' ARBACE_HEAVY_CMD: it
         ;; takes the lock and runs the command, it decides nothing; GT7's clean audit found it in every
         ;; :inner step)
+        ;; GT7's fix round: what a hashed-only read (H) may be covered by: the identity checks of the
+        ;; step's hosts and its producers' (their full keys), and every file for a build (its inner caches)
+        id-hosts (distinct (keep identity-host (concat (:hosts step) (mapcat :hosts prods))))
+        hashable (into #{} (matching cache (keys files) (expand {} (vec (mapcat host-files id-hosts)))))
+        build? (= :build (:kind step))
+        hashed (atom [])
         implicit (set (concat ["bin/lib/gate-run.bash" "test/gate/plan.ae" "bin/heavy-lock"] (:pins step)))
+        ;; GT7's fix round: a step's :audit-known, reads its key is known to miss (a proposal decides them):
+        ;; reported, not failing
+        known-gaps (set (map str (:audit-known step)))
         declared? (fn [f] (or (contains? selected f) (contains? implicit f)))
         dirs (into #{} (mapcat (fn [f] (take-while seq (iterate parent (parent f)))) (keys files)))
         sel-dirs (into #{} (mapcat (fn [f] (take-while seq (iterate parent (parent f)))) (concat selected implicit)))
@@ -126,6 +147,9 @@
         (cond
           (or (o "R") (o "X")) (do (swap! read-files conj r)
                                    (when-not (declared? r) (swap! undecl-read conj r)))
+          (o "H") (do (swap! read-files conj r)
+                      (when-not (declared? r)
+                        (if (or build? (contains? hashable r)) (swap! hashed conj r) (swap! undecl-read conj r))))
           (o "W") (swap! wrote conj r)
           (o "S") (do (swap! read-files conj r)
                       (when-not (declared? r) (swap! undecl-stat conj r))))
@@ -142,6 +166,11 @@
       (println (str "== audit " nm ": " (count selected) " declared files (+ " (count (:pins step)) " pins), "
                     (count in-root) " paths of the checkout touched: " (count @read-files) " tracked files read, "
                     @scratch " in .tmp/ or target/, " @git " in .git/"))
+      (let [k (sort (filter known-gaps @undecl-read))]
+        (when (seq k)
+          (println (str "KNOWN GAPS (the table's :audit-known: reads the step's key misses, not failing it): " (count k)))
+          (doseq [l k] (println (str "   " l)))))
+      (swap! undecl-read #(vec (remove known-gaps %)))
       (let [u (sort @undecl-read)]
         (println (str "UNDECLARED reads (opened or executed): " (count u)))
         (doseq [l (grouped u)] (println l))
@@ -157,6 +186,11 @@
         (when (seq top)
           (println (str "directory listings, no declared file below (advisory): " (count all) " directories, topmost: "
                         (str/join ", " (take 12 top)) (when (> (count top) 12) ", ...")))))
+      (when (seq @hashed)
+        (println (str "hashed only, covered (" (if build? "a build's inner cache keys" (str "the identity checks of " (str/join " " (map str id-hosts))))
+                      "; advisory): " (count @hashed) " files, by directory: "
+                      (str/join ", " (map (fn [[d n]] (str d "/ " n))
+                                          (take 8 (sort-by (comp - val) (frequencies (map #(str/join "/" (take 2 (str/split % #"/"))) @hashed)))))))))
       (when (seq @undecl-stat)
         (println (str "stat only, undeclared (their existence, not their content): " (count @undecl-stat) " files")))
       (when (seq @wrote)

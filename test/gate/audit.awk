@@ -6,6 +6,8 @@
 #   X an execve         R an open for reading, readlink    S a stat, access
 #   D an open of a directory (O_DIRECTORY)                 W an open for writing, a creation,
 #                                                          a removal or a rename
+#   H an open for reading by sha256sum (GT7's fix round: hashed only, a key's computation; gate.audit
+#     covers it where it is a host's identity check or a build's inner cache key)
 # Usage: awk -v root=/path/to/checkout -f test/gate/audit.awk STRACE-OUTPUT > PATHS
 
 function norm(p,   n, a, i, out, k, r) {
@@ -23,6 +25,7 @@ function unq(s) { gsub(/\\"/, "\"", s); gsub(/\\\\/, "\\", s); return s }
 # git's reads (the version stamp's describe --dirty, status) are not inputs: the commit is not in a key
 function emit(op, path, pid,   k) {
   if (exe[pid] ~ /\/git(-[a-z-]+)?$/) return
+  if (op == "R" && exe[pid] ~ /\/sha256sum$/) op = "H"
   k = op "\t" path
   if (!(k in seen)) { seen[k] = 1; print k }
 }
