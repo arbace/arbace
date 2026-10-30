@@ -1414,3 +1414,7 @@ Unchanged from CX4b/CX5a except level 5. `bin/repr-c roundtrip` untouched (no fi
 - Slips: one `<(...)` used in a diff command (failed harmlessly, no process left); a pointless noop subagent spawn. Disk was at 86-87% from other jobs; I trimmed Go's cache and my own scratch.
 - Shipped files changed (tools' namespaces, re-seed relevant if embedded): `arbace/repr/cpp.ae`, `arbace/repr/cpp/{convert,print,rtcheck,types,ppcheck}.ae`; data `test/cpp/corpora.edn`.
 - Scratch: `.tmp/cx/h-samples`, `h-wpp`, `h-lt`, `h-dg` (results.tsv, summary.edn, read.tsv), `.tmp/cx/g5-dg` (the first `:full` run), `.tmp/cx/lattr.tsv`.
+
+### Decided (CP70-CP72; the user, 2026-10-30)
+
+- CP70 (a), CP71 item-granular until an editor needs finer cuts, CP72 (a): kept as built.
