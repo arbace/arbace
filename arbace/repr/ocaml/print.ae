@@ -1,0 +1,1012 @@
+(ns arbace.repr.ocaml.print
+  "The printer of repr/ocaml, mode :lines (doc/ocaml/SPEC.md, doc/ocaml/OCAML-SURVEY.md \"As built: O2\"):
+  OCaml forms as OCaml text in a canonical layout (arbace.repr.ocaml.doc's engine).  The text parses to
+  the Parsetree the forms came from (positions aside): every construct is printed with the parentheses
+  its context needs, by a level for each syntactic category (expressions 0 sequence, 1 open-ended,
+  2 if, 3 assignment, 4 tuple, 5 || ... 13 unary minus, 14 application, 15 field, 16 atomic;
+  patterns 0 alias, 1 or, 2 tuple, 3 ::, 4 constructor application, 5 atomic; types 0 alias, 1 arrow,
+  2 tuple, 3 constructor application, 4 atomic), and the attributes of a node as `(node) [@a]`."
+  (:require [arbace.repr.ocaml.doc :as d]
+            [arbace.string :as str]))
+
+(declare tv econstr-doc param-lpd ex pat ty ty* mt me items-doc ce ct label-prefix* with-doc)
+
+;; ---- the forms ----
+
+(defn- fl [f] (let [v (vec (rest f))] (if (and (seq v) (map? (peek v))) (pop v) v)))
+(defn- mt-of [f] (let [l (last f)] (when (map? l) l)))
+(defn- hd [f] (first f))
+
+(defn- bad [what f] (throw (ex-info (str "ocaml print: unknown " what " form: " (pr-str f)) {})))
+
+;; ---- names ----
+
+(defn- ident-like? [^String s] (boolean (re-matches #"[A-Za-z_\u0080-￿][A-Za-z0-9_'\u0080-￿]*" s)))
+
+(defn- nm [x]
+  (cond
+    (symbol? x) (str x)
+    (string? x) x
+    (keyword? x) (name x)
+    (seq? x) (case (hd x) name (second x) at (nm (second x)) (bad "name" x))
+    :else (bad "name" x)))
+
+(def ^:private op-words #{"mod" "land" "lor" "lxor" "lsl" "lsr" "asr" "or"})
+
+(def ^:private keywords
+  #{"and" "as" "assert" "begin" "class" "constraint" "do" "done" "downto" "else" "end" "exception" "external"
+    "false" "for" "fun" "function" "functor" "if" "in" "include" "inherit" "initializer" "lazy" "let" "match"
+    "method" "module" "mutable" "new" "nonrec" "object" "of" "open" "private" "rec" "sig" "struct" "then" "to"
+    "true" "try" "type" "val" "virtual" "when" "while" "with"})
+
+(defn- idn
+  "An identifier: a keyword as a raw identifier"
+  [^String s]
+  (if (keywords s) (str "\\#" s) s))
+
+(defn- vname
+  "A value name: an operator in parentheses"
+  [^String s]
+  (cond (op-words s) (str "( " s " )")
+        (ident-like? s) (idn s)
+        :else (str "( " s " )")))
+
+(defn- path-name [^String s]
+  (loop [s s prefix ""]
+    (if-let [m (re-matches #"([A-Z][A-Za-z0-9_'\u0080-￿]*)\.(.+)" s)]
+      (recur (nth m 2) (str prefix (nth m 1) "."))
+      (str prefix (vname s)))))
+
+(defn- lid [x]
+  (cond
+    (symbol? x) (if (re-find #"\." (str x)) (path-name (str x)) (vname (str x)))
+    (keyword? x) (case x :true "\\#true" :false "\\#false" (bad "longident" x))
+    (seq? x) (case (hd x)
+               name (path-name (second x))
+               at (lid (second x))
+               ldot (str (lid (second x)) "." (vname (nm (nth x 2))))
+               lapply (str (lid (second x)) "(" (lid (nth x 2)) ")")
+               (bad "longident" x))
+    :else (bad "longident" x)))
+
+(defn- tname
+  "A type, class, module or constructor name: identifiers as they are, operators in parentheses"
+  [x] (let [s (lid x)] s))
+
+(defn- cname
+  "A constructor name in a declaration"
+  [x]
+  (let [s (nm x)]
+    (case s "[]" "[]" "()" "()" "::" "(::)" "true" "true" "false" "false" (tname x))))
+
+(defn- ckw [x]
+  (case x :unit "()" :nil "[]" :cons "::" :true "true" :false "false" (lid x)))
+
+;; ---- literals ----
+
+(defn- hex2 [n] (let [h (Integer/toHexString (int n))] (if (< (count h) 2) (str "0" h) h)))
+(defn- dec3 [n] (let [s (str n)] (str (subs "000" (count s)) s)))
+
+(defn- esc-char [n quote]
+  (cond
+    (= n 34) (if (= quote \") "\\\"" "\"")
+    (= n 39) (if (= quote \') "\\'" "'")
+    (= n 92) "\\\\"
+    (= n 10) "\\n"
+    (= n 9) "\\t"
+    (= n 13) "\\r"
+    (= n 8) "\\b"
+    (and (>= n 32) (< n 127)) (str (char n))
+    :else (str "\\" (dec3 n))))
+
+(defn- string-lit [s]
+  (if (string? s)
+    (let [sb (StringBuilder. "\"")]
+      (dotimes [i (count s)]
+        (let [n (int (.charAt ^String s i))]
+          (.append sb (cond (< n 128) (esc-char n \")
+                            :else (str (char n))))))
+      (.append sb "\"")
+      (str sb))
+    ;; bytes
+    (let [sb (StringBuilder. "\"")]
+      (doseq [n s] (.append sb (if (< n 128) (esc-char n \") (str "\\x" (hex2 n)))))
+      (.append sb "\"")
+      (str sb))))
+
+(defn- const-text [c]
+  (case (hd c)
+    int (str (second c) (if (nth c 2 nil) (str (char (nth c 2))) ""))
+    float (str (second c) (if (nth c 2 nil) (str (char (nth c 2))) ""))
+    char (str "'" (esc-char (second c) \') "'")
+    string (if-let [dl (nth c 2 nil)]
+             (d/raw (str "{" dl "|" (second c) "|" dl "}"))
+             (string-lit (second c)))
+    (bad "constant" c)))
+
+(defn- const-neg? [c]
+  (and (#{'int 'float} (hd c)) (str/starts-with? (second c) "-")))
+
+;; ---- helpers ----
+
+(defn- paren [doc] (d/cat "(" (d/nest 1 doc) ")"))
+(defn- lv [level doc] [level doc])
+(defn- sp [& ds] (apply d/cat ds))
+
+(defn- attr-doc [a sep]
+  (let [[n payload] (fl a)]
+    (d/grp "[" sep (nm n)
+           (case (hd payload)
+             str (let [its (second payload)]
+                   (if (empty? its) "" (d/cat " " (d/nest 2 (items-doc its false)))))
+             sig (d/cat ": " (d/nest 2 (items-doc (second payload) true)))
+             typ (d/cat ": " (ty (second payload) -1))
+             pat (let [[p g] (fl payload)]
+                   (d/cat "? " (pat p 0) (when g (d/cat " when " (ex g 0)))))
+             (bad "payload" payload))
+           (if (empty? (if (= (hd payload) 'str) (second payload) [1])) "]" " ]"))))
+
+(defn- ext-doc [e sep]
+  (let [[n payload] (fl e)]
+    (d/grp "[" sep (nm n)
+           (case (hd payload)
+             str (let [its (second payload)]
+                   (if (empty? its) "" (d/cat " " (d/nest 2 (items-doc its false)))))
+             sig (d/cat ": " (d/nest 2 (items-doc (second payload) true)))
+             typ (d/cat ": " (ty (second payload) -1))
+             pat (let [[p g] (fl payload)]
+                   (d/cat "? " (pat p 0) (when g (d/cat " when " (ex g 0)))))
+             (bad "payload" payload))
+           (if (empty? (if (= (hd payload) 'str) (second payload) [1])) "]" " ]"))))
+
+(defn- attrs-after [doc attrs sep]
+  (if (seq attrs)
+    (apply d/cat doc (map (fn [a] (d/cat " " (attr-doc a sep))) attrs))
+    doc))
+
+(defn- item-attrs [doc f] (attrs-after doc (:attrs (mt-of f)) "@@"))
+
+(defn- label-prefix [l]
+  (cond (nil? l) "" (str/starts-with? (name l) "?") (str (name l) ":") :else (str "~" (name l) ":")))
+
+;; ---- expressions ----
+
+(def ^:private sym-chars "!$%&*+-./:<=>?@^|~")
+
+(defn- op-name? [^String s]
+  (and (pos? (count s)) (every? #(>= (.indexOf ^String sym-chars (int %)) 0) s)))
+
+(defn- infix-class
+  "[level left-assoc?] of an infix operator name, or nil"
+  [^String s]
+  (cond
+    (#{"mod" "land" "lor" "lxor"} s) [11 true]
+    (#{"lsl" "lsr" "asr"} s) [12 false]
+    (= s "or") [5 false]
+    (= s "||") [5 false]
+    (or (= s "&&") (= s "&")) [6 false]
+    (not (op-name? s)) nil
+    (str/starts-with? s "**") [12 false]
+    (#{\* \/ \%} (first s)) [11 true]
+    (#{\+ \-} (first s)) [10 true]
+    (#{\@ \^} (first s)) [8 false]
+    (= s ":=") [3 false]
+    (= s "!=") [7 true]
+    (#{\= \< \> \| \& \$} (first s)) [7 true]
+    :else nil))
+
+(defn- prefix-op? [^String s]
+  (and (op-name? s) (> (count s) 0)
+       (or (and (= (first s) \!) (not= s "!="))
+           (and (#{\~ \?} (first s)) (> (count s) 1)))))
+
+(def ^:private unary {"~-" "-" "~+" "+" "~-." "-." "~+." "+."})
+
+(defn- plain-name
+  "The name of an identifier expression when it is one name, not a path"
+  [e]
+  (when (and (= 'ident (hd e)) (empty? (:attrs (mt-of e))))
+    (let [x (first (fl e))]
+      (cond (symbol? x) (when-not (re-find #"\." (str x)) (str x))
+            (and (seq? x) (= 'name (hd x)) (not (re-matches #"[A-Z].*\..+" (second x)))) (second x)
+            :else nil))))
+
+(defn- unlabeled [args n] (and (= (count args) n) (every? #(nil? (first %)) args)))
+
+(defn- tuple-expr? [e] (and (= 'tuple (hd e)) (empty? (:attrs (mt-of e)))))
+
+(defn- trailing-cases?
+  "Whether the expression ends in match cases that would swallow a following case"
+  [e]
+  (if (seq (:attrs (mt-of e)))
+    false
+    (let [f (fl e)]
+      (case (hd e)
+        (match try) true
+        function (let [b (nth f 2)] (if (= 'cases (hd b)) true (trailing-cases? (second b))))
+        let (trailing-cases? (nth f 2))
+        letop (trailing-cases? (nth f 2))
+        struct-item (trailing-cases? (second f))
+        sequence (trailing-cases? (second f))
+        ifthenelse (if (= 3 (count f)) (trailing-cases? (nth f 2)) (trailing-cases? (second f)))
+        false))))
+
+(defn- list-chain
+  "The elements of a list literal (a chain of ::) or nil"
+  [e]
+  (loop [e e acc []]
+    (if (and (= 'construct (hd e)) (empty? (:attrs (mt-of e))))
+      (let [f (fl e)]
+        (cond
+          (and (= :nil (first f)) (= 1 (count f))) acc
+          (and (= :cons (first f)) (= 2 (count f)) (= 'tuple (hd (second f)))
+               (empty? (:attrs (mt-of (second f)))) (= 2 (count (first (fl (second f)))))
+               (every? #(not (vector? %)) (first (fl (second f)))))
+          (let [[h t] (first (fl (second f)))]
+            (if (seq (:attrs (mt-of h)))
+              (recur t (conj acc h))
+              (recur t (conj acc h))))
+          :else nil))
+      nil)))
+
+(defn- list-doc [xs f]
+  (if (empty? xs)
+    "[]"
+    (d/grp "[ " (d/nest 2 (d/join (d/cat ";" :line) (map f xs))) " ]")))
+
+(declare bnd cases-doc param-doc fun-doc class-struct-doc)
+
+(defn- cstr-doc [c]
+  (when c
+    (case (hd c)
+      constraint (d/cat " : " (ty (second c) 1))
+      coerce (let [[from to] (fl c)]
+               (d/cat (when from (d/cat " : " (ty from 1))) " :> " (ty to 1)))
+      (bad "constraint" c))))
+
+(defn- function-kw [cases]
+  (attrs-after "function" (:attrs (mt-of cases)) "@"))
+
+(defn- body-doc [b]
+  (case (hd b)
+    body (let [e (second b)]
+           (if (and (= 'function (hd e)) (empty? (first (fl e))) (empty? (:attrs (mt-of e))))
+             (paren (ex e 0))
+             (ex e 0)))
+    cases (d/cat (function-kw b) :hard (cases-doc (second b)))
+    (bad "function body" b)))
+
+(defn fun-doc [e]
+  (let [[params cstr body] (fl e)]
+    (if (empty? params)
+      (if (= 'cases (hd body))
+        (d/cat (function-kw body) :hard (cases-doc (second body)))
+        (ex (second body) 0))
+      (d/grp (d/grp "fun " (d/join :line (map param-doc params)) (cstr-doc cstr) " ->")
+             (d/nest 2 :line (body-doc body))))))
+
+(defn param-doc [p]
+  (case (hd p)
+    newtype (str "(type " (nm (second p)) ")")
+    param (param-lpd (fl p))
+    (bad "parameter" p)))
+
+(defn- param-lpd [[l dflt pt]]
+            (cond
+              (nil? l) (pat pt 5)
+              (and (nil? dflt) (str/starts-with? (name l) "?")) (d/cat (name l) ":" (pat pt 5))
+              (nil? dflt) (d/cat "~" (name l) ":" (pat pt 5))
+              :else
+              (let [inner (if (and (= 'constraint (hd pt)) (empty? (:attrs (mt-of pt))))
+                            (let [[p0 t0] (fl pt)] (d/cat (pat p0 2) " : " (ty t0 0)))
+                            (pat pt 2))]
+                (d/cat (if (str/starts-with? (name l) "?") (str (name l) ":") (str "~" (name l) ":"))
+                       "(" inner " = " (ex dflt 0) ")"))))
+
+(defn- case-doc [c last?]
+  (let [[p g r] (fl c)
+        rhs (if (and (not last?) (trailing-cases? r)) (paren (ex r 0)) (ex r 0))]
+    (d/grp "| " (pat p 0) (when g (d/cat " when " (ex g 0))) " ->" (d/nest 4 :line rhs))))
+
+(defn cases-doc [cs]
+  (let [n (count cs)]
+    (d/join :hard (map-indexed (fn [i c] (case-doc c (= i (dec n)))) cs))))
+
+(defn- args-doc [args]
+  (map (fn [[l a]] (d/cat (label-prefix l) (ex a 16))) args))
+
+(def ^:private index-re #"\.([^()\[\]{}]*)([(\[{])[)\]}](<-)?")
+
+(defn- apply-doc [e]
+  (let [[h args] (fl e)
+        hn (plain-name h)
+        n (count args)]
+    (cond
+      ;; infix
+      (and hn (unlabeled args 2) (infix-class hn))
+      (let [[level left?] (infix-class hn)
+            [a b] (map second args)]
+        (lv level (d/grp (ex a (if left? level (inc level))) " " hn
+                         (d/nest 2 :line (ex b (if left? (inc level) level))))))
+      ;; unary minus
+      (and hn (unlabeled args 1) (unary hn) (not= 'constant (hd (second (first args)))))
+      (lv 13 (d/cat (unary hn) " " (ex (second (first args)) 14)))
+      ;; prefix operators
+      (and hn (unlabeled args 1) (prefix-op? hn))
+      (let [a (second (first args))
+            an (plain-name (if (= 'apply (hd a)) (first (fl a)) a))
+            pre? (and (= 'apply (hd a)) an (prefix-op? an))]
+        (lv 16 (d/cat hn (if pre? " " "") (ex a 16))))
+      ;; indexing
+      (and (= 'ident (hd h)) (symbol? (first (fl h))) (empty? (:attrs (mt-of h))))
+      (let [s (str (first (fl h)))]
+        (cond
+          (and (#{"Array.get" "String.get"} s) (unlabeled args 2))
+          (lv 15 (d/cat (ex (second (first args)) 15) (if (= s "Array.get") ".(" ".[") (ex (second (second args)) 0)
+                        (if (= s "Array.get") ")" "]")))
+          (and (#{"Array.set" "String.set"} s) (unlabeled args 3))
+          (lv 3 (d/grp (ex (second (first args)) 15) (if (= s "Array.set") ".(" ".[") (ex (second (second args)) 0)
+                       (if (= s "Array.set") ") <-" "] <-")
+                       (d/nest 2 :line (ex (second (nth args 2)) 3))))
+          :else (lv 14 (d/grp (ex h 16) (d/nest 2 (map #(d/cat :line %) (args-doc args)))))))
+      ;; user indexing operators .%( )
+      (and (= 'ident (hd h)) (seq? (first (fl h))) (= 'name (hd (first (fl h))))
+           (re-matches index-re (second (first (fl h)))))
+      (let [[_ op open set?] (re-matches index-re (second (first (fl h))))
+            close (case open "(" ")" "[" "]" "}")
+            get? (and (not set?) (unlabeled args 2))
+            set-ok? (and set? (unlabeled args 3))]
+        (if (or get? set-ok?)
+          (let [recv (ex (second (first args)) 15)
+                idx (d/cat "." op open (ex (second (second args)) 1) close)]
+            (if get?
+              (lv 15 (d/cat recv idx))
+              (lv 3 (d/grp recv idx " <-" (d/nest 2 :line (ex (second (nth args 2)) 3))))))
+          (lv 14 (d/grp (ex h 16) (d/nest 2 (map #(d/cat :line %) (args-doc args)))))))
+      :else
+      (lv 14 (d/grp (ex h 16) (d/nest 2 (map #(d/cat :line %) (args-doc args))))))))
+
+(defn- construct-doc [e]
+  (let [[l arg] (fl e)]
+    (cond
+      (nil? arg) (lv 16 (ckw l))
+      (and (= l :cons) (= 'tuple (hd arg)) (empty? (:attrs (mt-of arg)))
+           (= 2 (count (first (fl arg)))) (not-any? vector? (first (fl arg))))
+      (if-let [xs (list-chain e)]
+        (lv 16 (list-doc xs #(ex % 5)))
+        (let [[a b] (first (fl arg))]
+          (lv 9 (d/grp (ex a 10) " ::" (d/nest 2 :line (ex b 9))))))
+      (= l :cons) (lv 14 (d/grp "(::)" (d/nest 2 :line (ex arg 16))))
+      :else (lv 14 (d/grp (ckw l) (d/nest 2 :line (ex arg 16)))))))
+
+(defn- tuple-elems [elems ctx]
+  (d/join (d/cat "," :line)
+          (map (fn [x] (if (vector? x)
+                         (d/cat "~" (name (first x)) ":" (ex (second x) 16))
+                         (ex x ctx)))
+               elems)))
+
+(declare item-doc)
+
+(defn- struct-item-head [item]
+  (if (= 'extension (hd item))
+    ;; let module%ext[@a] M = ME in ...: the extension's name and the attributes after the item's keyword
+    (let [[n payload] (fl (first (fl item)))
+          inner (first (second payload))
+          attrs (:attrs (mt-of inner))
+          bare (if (map? (last inner)) (apply list (butlast inner)) inner)]
+      (d/cat "let " (item-doc bare false (apply d/cat "%" (nm n) (map #(attr-doc % "@") attrs)))))
+    (d/cat "let " (item-doc item false))))
+
+(defn- bop-doc [b kw]
+  (let [[n p e] (fl b)]
+    (d/grp (nm n) " " (pat p 2) " =" (d/nest 2 :line (ex e 0)))))
+
+(defn- ex* [e]
+  (let [f (fl e)]
+    (case (hd e)
+      ident (lv 16 (lid (first f)))
+      constant (let [c (first f)] (lv (if (const-neg? c) 13 16) (const-text c)))
+      let (let [[flag bs body] f]
+            (lv 1 (d/cat (d/join :hard (map-indexed (fn [i b] (d/cat (if (zero? i) (if (= flag :rec) "let rec" "let") "and") " " (bnd b))) bs))
+                         " in" :hard (ex body 0))))
+      function (lv 1 (fun-doc e))
+      apply (apply-doc e)
+      match (lv 1 (d/cat (d/grp "match " (ex (first f) 0) " with") :hard (cases-doc (second f))))
+      try (lv 1 (d/cat (d/grp "try " (ex (first f) 0)) :hard "with" :hard (cases-doc (second f))))
+      tuple (lv 4 (tuple-elems (first f) 5))
+      construct (construct-doc e)
+      variant (let [[n arg] f]
+                (if arg
+                  (lv 14 (d/grp "`" (nm n) (d/nest 2 :line (ex arg 16))))
+                  (lv 16 (str "`" (nm n)))))
+      record (let [[fields base] f]
+               (lv 16 (d/grp "{ " (d/nest 2 (when base (d/cat (ex base 15) " with" :line))
+                                          (d/join (d/cat ";" :line)
+                                                  (map (fn [[l v]]
+                                                         (d/grp (lid l) " =" (d/nest 2 :line (if (tuple-expr? v) (ex v 5) (ex v 2)))))
+                                                       fields)))
+                             " }")))
+      field (lv 15 (d/cat (ex (first f) 15) "." (lid (second f))))
+      setfield (lv 3 (d/grp (ex (first f) 15) "." (lid (second f)) " <-" (d/nest 2 :line (ex (nth f 2) 3))))
+      array (lv 16 (if (empty? (first f)) "[| |]"
+                       (d/grp "[| " (d/nest 3 (d/join (d/cat ";" :line) (map #(ex % 5) (first f)))) " |]")))
+      ifthenelse (let [[c t el] f]
+                   (lv 2 (d/grp "if " (ex c 0) " then" (d/nest 2 :line (ex t 5))
+                                (when el
+                                  (if (and (= 'ifthenelse (hd el)) (empty? (:attrs (mt-of el))))
+                                    (d/cat :line "else " (second (ex* el)))
+                                    (d/cat :line "else" (d/nest 2 :line (ex el 5))))))))
+      sequence (lv 0 (d/cat (ex (first f) 2) ";" :hard (ex (second f) 0)))
+      while (lv 14 (d/cat (d/grp "while " (ex (first f) 0) " do") (d/nest 2 :hard (ex (second f) 0)) :hard "done"))
+      for (let [[p lo hi dir body] f]
+            (lv 14 (d/cat (d/grp "for " (pat p 5) " = " (ex lo 0) (if (= dir :to) " to " " downto ") (ex hi 0) " do")
+                          (d/nest 2 :hard (ex body 0)) :hard "done")))
+      constraint (lv 16 (d/grp "(" (d/nest 1 (ex (first f) 2) " :" :line (ty (second f) 0)) ")"))
+      coerce (let [[x from to] f]
+               (lv 16 (d/grp "(" (d/nest 1 (ex x 2) (when from (d/cat " : " (ty from 0))) " :>" :line (ty to 0)) ")")))
+      send (lv 15 (d/cat (ex (first f) 15) "#" (idn (nm (second f)))))
+      new (lv 16 (d/cat "new " (lid (first f))))
+      setinstvar (lv 3 (d/grp (idn (nm (first f))) " <-" (d/nest 2 :line (ex (second f) 3))))
+      override (lv 16 (if (empty? (first f)) "{< >}"
+                          (d/grp "{< " (d/nest 3 (d/join (d/cat ";" :line)
+                                                          (map (fn [[n v]] (d/grp (idn (nm n)) " =" (d/nest 2 :line (ex v 2)))) (first f))))
+                                 " >}")))
+      struct-item (lv 1 (d/cat (struct-item-head (first f)) " in" :hard (ex (second f) 0)))
+      assert (lv 14 (d/cat "assert " (ex (first f) 16)))
+      lazy (lv 14 (d/cat "lazy " (ex (first f) 16)))
+      poly (second (ex* (first f)))
+      object (lv 14 (class-struct-doc (first f)))
+      newtype (lv 1 (d/grp "fun (type " (nm (first f)) ") ->" (d/nest 2 :line (ex (second f) 0))))
+      pack (let [[m pkg] f]
+             (lv 16 (d/grp "(module " (me m 0) (when pkg (d/cat " : " (second (ty* [:pkg pkg])))) ")")))
+      letop (let [[b0 bs body] f]
+              (lv 1 (d/cat (d/join :hard (cons (bop-doc b0 "let") (map #(bop-doc % "and") bs)))
+                           " in" :hard (ex body 0))))
+      extension (lv 16 (ext-doc (first f) "%"))
+      unreachable (lv 16 ".")
+      (bad "expression" e))))
+
+(defn- wrap [level doc ctx] (if (< level ctx) (paren doc) doc))
+
+(defn ex [e ctx]
+  (let [attrs (:attrs (mt-of e))
+        [level doc] (ex* e)]
+    (if (seq attrs)
+      (wrap 1 (attrs-after (paren doc) attrs "@") ctx)
+      (wrap level doc ctx))))
+
+(defn- bnd [b]
+  (let [[p e vc] (fl b)
+        sugar? (and (nil? vc) (#{'var} (hd p)) (empty? (:attrs (mt-of p)))
+                    (= 'function (hd e)) (empty? (:attrs (mt-of e)))
+                    (let [[ps c bd] (fl e)]
+                      (and (not (empty? ps)) (or (= 'cases (hd bd)) true))))
+        core
+        (cond
+          sugar?
+          (let [[ps c bd] (fl e)]
+            (d/grp (vname (nm (first (fl p)))) (d/nest 4 (map #(d/cat " " (param-doc %)) ps)) (cstr-doc c) " ="
+                   (d/nest 2 :line (body-doc bd))))
+          :else
+          (d/grp (pat p (if vc 5 2))
+                 (when vc
+                   (case (hd vc)
+                     constraint (let [[names t] (fl vc)]
+                                  (d/cat " : " (when (seq names) (d/cat "type " (d/join " " (map nm names)) ". ")) (ty t -1)))
+                     coercion (let [[from to] (fl vc)]
+                                (d/cat (when from (d/cat " : " (ty from 0))) " :> " (ty to 0)))
+                     (bad "value constraint" vc)))
+                 " =" (d/nest 2 :line (ex e 0))))]
+    (item-attrs core b)))
+
+;; ---- patterns ----
+
+(defn- pat-list [e]
+  (loop [e e acc []]
+    (if (and (= 'construct (hd e)) (empty? (:attrs (mt-of e))))
+      (let [f (fl e)]
+        (cond
+          (and (= :nil (first f)) (= 1 (count f))) acc
+          (and (= :cons (first f)) (= 3 (count f)) (empty? (second f)) (= 'tuple (hd (nth f 2)))
+               (empty? (:attrs (mt-of (nth f 2)))) (= :closed (second (fl (nth f 2))))
+               (= 2 (count (first (fl (nth f 2))))) (not-any? vector? (first (fl (nth f 2)))))
+          (let [[h t] (first (fl (nth f 2)))] (recur t (conj acc h)))
+          :else nil))
+      nil)))
+
+(defn- pat* [p]
+  (let [f (fl p)]
+    (case (hd p)
+      any (lv 5 "_")
+      var (lv 5 (vname (nm (first f))))
+      alias (lv 0 (d/cat (pat (first f) 0) " as " (vname (nm (second f)))))
+      constant (let [c (first f)] (lv (if (const-neg? c) 4 5) (const-text c)))
+      interval (lv 4 (d/cat (const-text (first f)) " .. " (const-text (second f))))
+      tuple (let [[elems flag] f]
+              (let [body (d/cat (d/join (d/cat "," :line)
+                                   (map (fn [x] (if (vector? x)
+                                                  (d/cat "~" (name (first x)) ":" (pat (second x) 5))
+                                                  (pat x 3))) elems))
+                           (when (= flag :open) ", .."))]
+                (if (= flag :open) (lv 5 (paren body)) (lv 2 body))))
+      construct (let [[l vars arg] f]
+                  (cond
+                    (nil? arg) (lv 5 (ckw l))
+                    (and (= l :cons) (= 'tuple (hd arg)) (empty? (:attrs (mt-of arg))))
+                    (if-let [xs (pat-list p)]
+                      (lv 5 (list-doc xs #(pat % 1)))
+                      (let [[a b] (first (fl arg))]
+                        (lv 3 (d/grp (pat a 4) " ::" (d/nest 2 :line (pat b 3))))))
+                    :else (lv 4 (d/grp (ckw l) (when (seq vars) (d/cat " (type " (d/join " " (map nm vars)) ")"))
+                                       (d/nest 2 :line (pat arg 5))))))
+      variant (let [[n arg] f]
+                (if arg (lv 4 (d/grp "`" (nm n) (d/nest 2 :line (pat arg 5)))) (lv 5 (str "`" (nm n)))))
+      record (let [[fields flag] f]
+               (lv 5 (d/grp "{ " (d/nest 2 (d/join (d/cat ";" :line)
+                                                    (concat (map (fn [[l q]] (d/grp (lid l) " =" (d/nest 2 :line (pat q 1)))) fields)
+                                                            (when (= flag :open) ["_"]))))
+                            " }")))
+      array (lv 5 (if (empty? (first f)) "[| |]"
+                      (d/grp "[| " (d/nest 3 (d/join (d/cat ";" :line) (map #(pat % 1) (first f)))) " |]")))
+      or (lv 1 (d/grp (pat (first f) 1) (d/cat :line "| ") (pat (second f) 2)))
+      constraint (lv 5 (d/grp "(" (d/nest 1 (pat (first f) 0) " :" :line (ty (second f) 0)) ")"))
+      type (lv 4 (d/cat "#" (lid (first f))))
+      lazy (lv 4 (d/cat "lazy " (pat (first f) 5)))
+      unpack (let [[n pkg] f]
+               (lv 5 (d/grp "(module " (if n (tname n) "_")
+                            (when pkg (d/cat " : " (second (ty* [:pkg pkg])))) ")")))
+      exception (lv 0 (d/cat "exception " (pat (first f) 4)))
+      effect (lv 0 (d/cat "effect " (pat (first f) 4) ", " (pat (second f) 5)))
+      extension (lv 5 (ext-doc (first f) "%"))
+      open (lv 5 (d/cat (lid (first f)) ".(" (pat (second f) 0) ")"))
+      (bad "pattern" p))))
+
+(defn pat [p ctx]
+  (let [attrs (:attrs (mt-of p))
+        [level doc] (pat* p)]
+    (if (seq attrs)
+      (paren (attrs-after doc attrs "@"))
+      (wrap level doc ctx))))
+
+;; ---- types ----
+
+(defn- pkg-doc [pkg]
+  (let [[l cs] (fl pkg)]
+    (d/cat (lid l)
+           (when (seq cs)
+             (d/cat " with " (d/join " and " (map (fn [[n t]] (d/cat "type " (lid n) " = " (ty t 0))) cs)))))))
+
+(defn- ty* [t]
+  (if (= (first t) :pkg)
+    (lv 4 (pkg-doc (second t)))
+    (let [f (fl t)]
+      (case (hd t)
+        any (lv 4 "_")
+        var (lv 4 (tv (first f)))
+        arrow (let [[l a b] f]
+                (lv 1 (d/grp (label-prefix* l)
+                             (ty a (if (and (= 'tuple (hd a)) (some vector? (first (fl a)))) 3 2))
+                             " ->" (d/nest 2 :line (ty b 1)))))
+        tuple (lv 2 (d/join (d/cat " *" :line)
+                            (map (fn [x] (if (vector? x)
+                                           (d/cat (name (first x)) ":" (ty (second x) 3))
+                                           (ty x 3))) (first f))))
+        constr (let [[l args] f]
+                 (case (count args)
+                   0 (lv 4 (lid l))
+                   1 (lv 3 (d/grp (ty (first args) 3) " " (lid l)))
+                   (lv 3 (d/grp "(" (d/nest 1 (d/join (d/cat "," :line) (map #(ty % 0) args))) ") " (lid l)))))
+        object (let [[fields flag] f]
+                 (lv 4 (d/grp "< " (d/nest 2 (d/join (d/cat ";" :line)
+                                                     (concat
+                                                      (map (fn [x]
+                                                             (attrs-after
+                                                              (case (hd x)
+                                                                tag (d/cat (idn (nm (first (fl x)))) " : " (ty (second (fl x)) -1))
+                                                                inherit (ty (first (fl x)) 0)
+                                                                (bad "object field" x))
+                                                              (:attrs (mt-of x)) "@"))
+                                                           fields)
+                                                      (when (= flag :open) [".."]))))
+                              " >")))
+        class (let [[l args] f]
+                (lv 3 (d/grp (case (count args)
+                               0 nil
+                               1 (d/cat (ty (first args) 3) " ")
+                               (d/cat "(" (d/join ", " (map #(ty % 0) args)) ") "))
+                             "#" (lid l))))
+        alias (lv 0 (d/grp (ty (first f) 1) " as " (tv (second f))))
+        variant (let [[rows flag labels] f
+                      rows-doc (d/join (d/cat :line "| ")
+                                       (map (fn [r]
+                                              (attrs-after
+                                               (case (hd r)
+                                                 rtag (let [[n c? ts] (fl r)]
+                                                        (d/cat "`" (nm n)
+                                                               (when (or (seq ts) (not c?))
+                                                                 (d/cat " of " (when c? "& ")
+                                                                        (d/join " & " (map #(ty % 3) ts))))))
+                                                 rinherit (ty (first (fl r)) 0)
+                                                 (bad "row" r))
+                                               (:attrs (mt-of r)) "@"))
+                                            rows))]
+                  (lv 4 (d/grp (cond (some? labels) "[< " (= flag :open) "[> " :else "[ ")
+                               (d/nest 3 rows-doc)
+                               (when (seq labels) (d/cat " > " (d/join " " (map #(str "`" (nm %)) labels))))
+                               " ]")))
+        poly (lv -1 (d/grp (d/join " " (map tv (first f))) "." (d/nest 2 :line (ty (second f) 0))))
+        package (lv 4 (d/grp "(module " (pkg-doc (first f)) ")"))
+        open (lv 4 (d/cat (lid (first f)) ".(" (ty (second f) 0) ")"))
+        extension (lv 4 (ext-doc (first f) "%"))
+        functor (let [[l n pkg body] f]
+                  (lv 1 (d/grp (label-prefix* l) "(module " (if n (tname n) "_") " : " (pkg-doc pkg) ") ->"
+                               (d/nest 2 :line (ty body 1)))))
+        (bad "type" t)))))
+
+(defn- label-prefix* [l]
+  (cond (nil? l) "" (str/starts-with? (name l) "?") (str (name l) ":") :else (str (name l) ":")))
+
+(defn ty [t ctx]
+  (let [attrs (when-not (= (first t) :pkg) (:attrs (mt-of t)))
+        [level doc] (ty* t)]
+    (if (seq attrs)
+      (paren (attrs-after doc attrs "@"))
+      (wrap level doc ctx))))
+
+;; ---- declarations ----
+
+(defn- tv [n] (let [s (nm n)] (if (str/includes? s "'") (str "' " s) (str "'" s))))
+
+(defn- tyvar-text [t] (case (hd t) var (tv (second t)) any "_" (bad "type parameter" t)))
+
+(defn- params-doc [params]
+  (let [one (fn [[t v i]] (str (if (= i :!) "!" "") (case v :+ "+" :- "-" :+- "+-" "") (tyvar-text t)))]
+    (case (count params)
+      0 nil
+      1 (one (first params))
+      (d/cat "(" (d/join ", " (map one params)) ")"))))
+
+(defn- ldecl-doc [l]
+  (let [[n m t] (fl l)]
+    (attrs-after (d/grp (when (= m :mutable) "mutable ") (idn (nm n)) " :" (d/nest 2 :line (ty t -1))) (:attrs (mt-of l)) "@")))
+
+(defn- record-doc [lds]
+  (d/grp "{ " (d/nest 2 (d/join (d/cat ";" :line) (map ldecl-doc lds))) " }"))
+
+(defn- vars-doc [vars]
+  (when (seq vars) (d/cat (d/join " " (map tv vars)) ". ")))
+
+(defn- cargs-doc
+  "A constructor's arguments and result (the part after its name) as `of ...` or `: ...`"
+  [vars args res]
+  (let [args-d (cond
+                 (and (vector? args) (empty? args)) nil
+                 (vector? args) (d/join " * " (map #(ty % 3) args))
+                 (= 'record (hd args)) (record-doc (first (fl args)))
+                 :else (bad "constructor arguments" args))]
+    (if res
+      (d/cat " : " (vars-doc vars) (when args-d (d/cat args-d " -> ")) (ty res 1))
+      (when args-d (d/cat " of " args-d)))))
+
+(defn- cdecl-doc [c]
+  (let [[n vars args res] (fl c)]
+    (attrs-after (d/cat (cname n) (cargs-doc vars args res)) (:attrs (mt-of c)) "@")))
+
+(defn- kind-doc [kind]
+  (cond
+    (= kind :open) ".."
+    (= (hd kind) 'variant) (if (empty? (first (fl kind)))
+                             "|"
+                             (d/grp (d/nest 2 (map #(d/cat :line "| " (cdecl-doc %)) (first (fl kind))))))
+    (= (hd kind) 'record) (record-doc (first (fl kind)))
+    (= (hd kind) 'external) (str "external " (string-lit (first (fl kind))))
+    :else (bad "type kind" kind)))
+
+(defn- decl-body
+  "A type declaration after its keyword: parameters, name, manifest, kind, constraints"
+  [dc name eq]
+  (let [[_n params cons kind priv manifest] (fl dc)
+        n name
+        abstract? (= kind :abstract)
+        pd (params-doc params)]
+    (d/grp (when pd (d/cat pd " ")) n
+           (cond
+             (and manifest abstract?)
+             (d/cat eq " " (when (= priv :private) "private ") (ty manifest 0))
+             manifest
+             (d/cat eq " " (ty manifest 0) " = " (when (= priv :private) "private ") (kind-doc kind))
+             (not abstract?)
+             (d/cat eq " " (when (= priv :private) "private ") (kind-doc kind)))
+           (map (fn [c] (let [[a b] (fl c)] (d/cat " constraint " (ty a 0) " = " (ty b 0)))) cons))))
+
+(defn- decl-doc [dc]
+  (item-attrs (decl-body dc (tname (first (fl dc))) " =") dc))
+
+(defn- econstr-doc [ec]
+  (let [[n kind] (fl ec)]
+    (attrs-after
+     (d/cat (cname n)
+            (case (hd kind)
+              decl (let [[vars args res] (fl kind)] (cargs-doc vars args res))
+              rebind (d/cat " = " (lid (first (fl kind))))
+              (bad "extension constructor" kind)))
+     (:attrs (mt-of ec)) "@")))
+
+;; ---- modules ----
+
+(defn- mt* [m]
+  (let [f (fl m)]
+    (case (hd m)
+      ident (lv 2 (lid (first f)))
+      signature (lv 2 (if (empty? (first f)) "sig end"
+                          (d/cat "sig" (d/nest 2 :hard (items-doc (first f) true)) :hard "end")))
+      functor (let [[p body] f]
+                (lv 0 (d/grp "functor " (case p :unit "()" (let [[n t] (fl p)] (d/cat "(" (if n (tname n) "_") " : " (mt t 0) ")")))
+                             " ->" (d/nest 2 :line (mt body 0)))))
+      with (lv 1 (d/grp (mt (first f) 1) " with " (d/join " and " (map-indexed (fn [i c] (with-doc c)) (second f)))))
+      typeof (lv 0 (d/cat "module type of " (me (first f) 3)))
+      extension (lv 2 (ext-doc (first f) "%"))
+      alias (lv 2 (d/cat "(module " (lid (first f)) ")"))
+      (bad "module type" m))))
+
+(defn- with-doc [c]
+  (let [f (fl c)]
+    (case (hd c)
+      type (d/cat "type " (decl-body (second f) (lid (first f)) " ="))
+      typesubst (d/cat "type " (decl-body (second f) (lid (first f)) " :="))
+      module (d/cat "module " (lid (first f)) " = " (lid (second f)))
+      modsubst (d/cat "module " (lid (first f)) " := " (lid (second f)))
+      modtype (d/cat "module type " (lid (first f)) " = " (mt (second f) 0))
+      modtypesubst (d/cat "module type " (lid (first f)) " := " (mt (second f) 0))
+      (bad "with constraint" c))))
+
+(defn mt [m ctx]
+  (let [attrs (:attrs (mt-of m))
+        [level doc] (mt* m)]
+    (if (seq attrs)
+      (if (= 'typeof (hd m))
+        (paren (attrs-after (paren doc) attrs "@"))
+        (paren (attrs-after doc attrs "@")))
+      (wrap level doc ctx))))
+
+(defn- me* [m]
+  (let [f (fl m)]
+    (case (hd m)
+      ident (lv 2 (lid (first f)))
+      structure (lv 2 (if (empty? (first f)) "struct end"
+                          (d/cat "struct" (d/nest 2 :hard (items-doc (first f) false)) :hard "end")))
+      functor (let [[p body] f]
+                (lv 0 (d/grp "functor " (case p :unit "()" (let [[n t] (fl p)] (d/cat "(" (if n (tname n) "_") " : " (mt t 0) ")")))
+                             " ->" (d/nest 2 :line (me body 0)))))
+      apply (lv 1 (d/cat (me (first f) 1) "(" (me (second f) 0) ")"))
+      apply-unit (lv 1 (d/cat (me (first f) 1) "()"))
+      constraint (lv 2 (d/grp "(" (d/nest 1 (me (first f) 0) " :" :line (mt (second f) 0)) ")"))
+      unpack (lv 2 (d/cat "(val " (ex (first f) 0) ")"))
+      extension (lv 2 (ext-doc (first f) "%"))
+      (bad "module expression" m))))
+
+(defn me [m ctx]
+  (let [attrs (:attrs (mt-of m))
+        [level doc] (me* m)]
+    (if (seq attrs) (paren (attrs-after doc attrs "@")) (wrap level doc ctx))))
+
+;; ---- classes ----
+
+(defn- class-params [ps]
+  (when (seq ps)
+    (d/cat "[" (d/join ", " (map (fn [[t v i]] (str (if (= i :!) "!" "") (case v :+ "+" :- "-" :+- "+-" "") (tyvar-text t))) ps)) "] ")))
+
+(defn- self-doc [p]
+  (if (= 'any (hd p)) nil (d/cat " (" (pat p 0) ")")))
+
+(defn- cfield-doc [fd]
+  (let [f (fl fd)
+        core
+        (case (hd fd)
+          inherit (let [[flag c n] f]
+                    (d/cat "inherit" (if (= flag :override) "!" "") " " (ce c 0) (when n (d/cat " as " (nm n)))))
+          val (let [[n m kind] f]
+                (case (hd kind)
+                  virtual (d/cat "val " (when (= m :mutable) "mutable ") "virtual " (idn (nm n)) " : " (ty (second kind) 0))
+                  concrete (let [[flag e] (fl kind)]
+                             (d/grp "val" (if (= flag :override) "!" "") " " (when (= m :mutable) "mutable ") (idn (nm n)) " ="
+                                    (d/nest 2 :line (ex e 0))))))
+          method (let [[n pr kind] f]
+                   (case (hd kind)
+                     virtual (d/cat "method " (when (= pr :private) "private ") "virtual " (idn (nm n)) " : " (ty (second kind) -1))
+                     concrete (let [[flag e] (fl kind)
+                                    [e0 t0] (if (= 'poly (hd e)) (fl e) [e nil])]
+                                (d/grp "method" (if (= flag :override) "!" "") " " (when (= pr :private) "private ") (idn (nm n))
+                                       (when t0 (d/cat " : " (ty t0 -1))) " ="
+                                       (d/nest 2 :line (ex e0 0))))))
+          constraint (d/cat "constraint " (ty (first f) 0) " = " (ty (second f) 0))
+          initializer (d/grp "initializer" (d/nest 2 :line (ex (first f) 0)))
+          attribute (attr-doc (first f) "@@@")
+          extension (ext-doc (first f) "%%")
+          (bad "class field" fd))]
+    (if (#{'attribute} (hd fd)) core (item-attrs core fd))))
+
+(defn class-struct-doc [cs]
+  (let [[self fields] (fl cs)]
+    (if (empty? fields)
+      (d/cat "object" (self-doc self) " end")
+      (d/cat "object" (self-doc self) (d/nest 2 :hard (d/join :hard (map cfield-doc fields))) :hard "end"))))
+
+(defn- ctfield-doc [fd]
+  (let [f (fl fd)
+        core
+        (case (hd fd)
+          inherit (d/cat "inherit " (ct (first f) 0))
+          val (let [[n m v t] f]
+                (d/cat "val " (when (= m :mutable) "mutable ") (when (= v :virtual) "virtual ") (idn (nm n)) " : " (ty t 0)))
+          method (let [[n p v t] f]
+                   (d/cat "method " (when (= p :private) "private ") (when (= v :virtual) "virtual ") (idn (nm n)) " : " (ty t -1)))
+          constraint (d/cat "constraint " (ty (first f) 0) " = " (ty (second f) 0))
+          attribute (attr-doc (first f) "@@@")
+          extension (ext-doc (first f) "%%")
+          (bad "class type field" fd))]
+    (if (= 'attribute (hd fd)) core (item-attrs core fd))))
+
+(defn- ce* [c]
+  (let [f (fl c)]
+    (case (hd c)
+      constr (let [[l ts] f]
+               (lv 2 (d/cat (when (seq ts) (d/cat "[" (d/join ", " (map #(ty % 0) ts)) "] ")) (lid l))))
+      structure (lv 2 (class-struct-doc (first f)))
+      fun (let [[l dflt p body] f]
+            (lv 0 (d/grp "fun " (param-lpd [l dflt p]) " ->" (d/nest 2 :line (ce body 0)))))
+      apply (lv 1 (d/grp (ce (first f) 1) (d/nest 2 (map (fn [[l a]] (d/cat :line (label-prefix l) (ex a 16))) (second f)))))
+      let (let [[flag bs body] f]
+            (lv 0 (d/cat (d/join :hard (map-indexed (fn [i b] (d/cat (if (zero? i) (if (= flag :rec) "let rec" "let") "and") " " (bnd b))) bs))
+                         " in" :hard (ce body 0))))
+      constraint (lv 2 (d/grp "(" (ce (first f) 0) " : " (ct (second f) 0) ")"))
+      open (let [[o body] f]
+             (lv 0 (d/cat "let open" (if (= (second (fl o)) :override) "!" "") " " (lid (first (fl o))) " in" :hard (ce body 0))))
+      extension (lv 2 (ext-doc (first f) "%"))
+      (bad "class expression" c))))
+
+(defn ce [c ctx]
+  (let [attrs (:attrs (mt-of c))
+        [level doc] (ce* c)]
+    (if (seq attrs) (attrs-after doc attrs "@") (wrap level doc ctx))))
+
+(defn- ct* [c]
+  (let [f (fl c)]
+    (case (hd c)
+      constr (let [[l ts] f]
+               (lv 2 (d/cat (when (seq ts) (d/cat "[" (d/join ", " (map #(ty % 0) ts)) "] ")) (lid l))))
+      signature (let [[self fields] (fl (first f))]
+                  (lv 2 (if (empty? fields)
+                          (d/cat "object" (when-not (= 'any (hd self)) (d/cat " (" (ty self 0) ")")) " end")
+                          (d/cat "object" (when-not (= 'any (hd self)) (d/cat " (" (ty self 0) ")"))
+                                 (d/nest 2 :hard (d/join :hard (map ctfield-doc fields))) :hard "end"))))
+      arrow (let [[l t body] f]
+              (lv 0 (d/grp (label-prefix* l) (ty t 2) " ->" (d/nest 2 :line (ct body 0)))))
+      open (let [[o body] f]
+             (lv 0 (d/cat "let open" (if (= (second (fl o)) :override) "!" "") " " (lid (first (fl o))) " in" :hard (ct body 0))))
+      extension (lv 2 (ext-doc (first f) "%"))
+      (bad "class type" c))))
+
+(defn ct [c ctx]
+  (let [attrs (:attrs (mt-of c))
+        [level doc] (ct* c)]
+    (if (seq attrs) (attrs-after doc attrs "@") (wrap level doc ctx))))
+
+(defn- class-infos-doc [ci kw sig? type?]
+  (let [[virt params n body] (fl ci)]
+    (item-attrs
+     (d/grp kw (when (= virt :virtual) " virtual") " " (class-params params) (idn (nm n))
+            (if (or sig? type?)
+              (if type? (d/cat " =" (d/nest 2 :line (ct body 0))) (d/cat " :" (d/nest 2 :line (ct body 0))))
+              (d/cat " =" (d/nest 2 :line (ce body 0)))))
+     ci)))
+
+;; ---- items ----
+
+(defn- prims-doc [prims] (map #(d/cat " " (string-lit %)) prims))
+
+(defn- item-doc
+  ([it sig?] (item-doc it sig? nil))
+  ([it sig? sfx]
+  (let [f (fl it)]
+    (case (hd it)
+      eval (item-attrs (ex (first f) 0) it)
+      value (if sig?
+              (let [[n t prims] f]
+                (item-attrs (if (seq prims)
+                              (d/grp "external " (vname (nm n)) " :" (d/nest 2 :line (ty t -1)) " =" (prims-doc prims))
+                              (d/grp "val " (vname (nm n)) " :" (d/nest 2 :line (ty t -1))))
+                            it))
+              (let [[flag bs] f]
+                (d/join :hard (map-indexed (fn [i b] (d/cat (if (zero? i) (if (= flag :rec) "let rec" "let") "and") " " (bnd b))) bs))))
+      primitive (let [[n t prims] f]
+                  (item-attrs (d/grp "external " (vname (nm n)) " :" (d/nest 2 :line (ty t -1)) (when (seq prims) " =") (prims-doc prims)) it))
+      type (let [[flag ds] f]
+             (d/join :hard (map-indexed (fn [i dc] (d/cat (if (zero? i) (if (= flag :nonrec) (d/cat "type" sfx " nonrec") (d/cat "type" sfx)) "and") " " (decl-doc dc))) ds)))
+      typesubst (d/join :hard (map-indexed (fn [i dc] (d/cat (if (zero? i) "type" "and") " " (item-attrs (decl-body dc (tname (first (fl dc))) " :=") dc)))
+                                           (first f)))
+      typext (let [[l params ecs priv] f]
+               (item-attrs
+                (d/grp "type" sfx " " (let [pd (params-doc params)] (when pd (d/cat pd " "))) (lid l) " +="
+                       (when (= priv :private) " private")
+                       (d/nest 2 (map #(d/cat :line "| " (econstr-doc %)) ecs)))
+                it))
+      exception (item-attrs (d/cat "exception" sfx " " (econstr-doc (first f))) it)
+      module (let [[n m] f]
+               (item-attrs
+                (if sig?
+                  (if (and (= 'alias (hd m)) (empty? (:attrs (mt-of m))))
+                    (d/cat "module " (if n (tname n) "_") " = " (lid (first (fl m))))
+                    (d/grp "module " (if n (tname n) "_") " :" (d/nest 2 :line (mt m 0))))
+                  (d/grp "module" sfx " " (if n (tname n) "_") " =" (d/nest 2 :line (me m 0))))
+                it))
+      recmodule (d/join :hard
+                        (map-indexed
+                         (fn [i b]
+                           (let [[n m] (fl b)
+                                 kw (if (zero? i) "module rec" "and")
+                                 tname (fn [x] (if (nil? x) "_" (tname x)))]
+                             (item-attrs
+                              (if sig?
+                                (d/grp kw " " (tname n) " :" (d/nest 2 :line (mt m 2)))
+                                (if (and (= 'constraint (hd m)) (empty? (:attrs (mt-of m))))
+                                  (d/grp kw " " (tname n) " :" (d/nest 2 :line (mt (second (fl m)) 2)) " =" (d/nest 2 :line (me (first (fl m)) 0)))
+                                  (d/grp kw " " (tname n) " =" (d/nest 2 :line (me m 0)))))
+                              b)))
+                         (first f)))
+      modsubst (item-attrs (d/cat "module " (tname (first f)) " := " (lid (second f))) it)
+      modtype (let [[n m] f]
+                (item-attrs (if m
+                              (d/grp "module type " (tname n) " =" (d/nest 2 :line (mt m 0)))
+                              (d/cat "module type " (tname n)))
+                            it))
+      modtypesubst (item-attrs (d/grp "module type " (tname (first f)) " :=" (d/nest 2 :line (mt (second f) 0))) it)
+      open (let [[x flag] f]
+             (item-attrs (d/cat "open" (if (= flag :override) "!" "") sfx " " (if sig? (lid x) (me x 0))) it))
+      include (item-attrs (d/cat "include " (if sig? (mt (first f) 0) (me (first f) 0))) it)
+      class (d/join :hard (map-indexed (fn [i ci] (class-infos-doc ci (if (zero? i) "class" "and") sig? false)) (first f)))
+      class-type (d/join :hard (map-indexed (fn [i ci] (class-infos-doc ci (if (zero? i) "class type" "and") sig? true)) (first f)))
+      attribute (attr-doc (first f) "@@@")
+      extension (item-attrs (ext-doc (first f) "%%") it)
+      (bad "item" it)))))
+
+(defn items-doc [items sig?]
+  (loop [items (seq items) prev nil acc []]
+    (if-not items
+      (apply d/cat acc)
+      (let [it (first items)
+            ev? (and (not sig?) (= 'eval (hd it)))
+            pev? (and prev (not sig?) (= 'eval (hd prev)))
+            sep (cond (nil? prev) nil
+                      (or ev? pev?) (d/cat :hard ";;" :hard :hard)
+                      :else (d/cat :hard :hard))]
+        (recur (next items) it (conj acc sep (item-doc it sig?)))))))
+
+;; ---- files ----
+
+(defn- dir-arg [a]
+  (case (hd a)
+    string (string-lit (second a))
+    int (str (second a))
+    ident (lid (second a))
+    bool (str (second a))
+    (bad "directive argument" a)))
+
+(defn print-file
+  "The text of a file of forms (ocaml/impl, ocaml/intf or ocaml/toplevel)"
+  ([forms] (print-file forms 100))
+  ([forms width]
+   (let [doc (case (hd forms)
+               ocaml/impl (items-doc (first (fl forms)) false)
+               ocaml/intf (items-doc (first (fl forms)) true)
+               ocaml/toplevel (d/join (d/cat :hard :hard)
+                                      (map (fn [ph]
+                                             (case (hd ph)
+                                               def (d/cat (items-doc (first (fl ph)) false) :hard ";;")
+                                               directive (let [[n a] (fl ph)]
+                                                           (d/cat "#" (nm n) (when a (d/cat " " (dir-arg a))) " ;;"))
+                                               (bad "phrase" ph)))
+                                           (first (fl forms))))
+               (bad "file" forms))]
+     (str (d/render doc width) "\n"))))

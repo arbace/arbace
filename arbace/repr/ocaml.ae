@@ -1,0 +1,173 @@
+(ns arbace.repr.ocaml
+  "Command line of repr/ocaml (doc/ocaml/SPEC.md, doc/ocaml/OCAML-SURVEY.md \"As built: O2\"), run by
+  bin/repr-ocaml as -m arbace.repr.ocaml VERB ...:
+
+    read [-o DIR] DUMP...           each helper dump (tools/ocdump) to OCaml forms in mode :lines
+                                    (arbace.repr.ocaml.convert: positions removed, heads checked), one
+                                    .ae under DIR (default .tmp/repr-ocaml/forms), read back and compared
+    read --root DIR -o OUT          every DUMP under DIR (named REL.ae), OUT/REL.ae
+    print [-o DIR] FORMS.ae...      the printer (arbace.repr.ocaml.print): one file under DIR (default
+                                    .tmp/repr-ocaml/printed) named as the forms file less its .ae
+    print --root DIR -o OUT         every forms file under DIR, OUT/REL
+    compare --orig DIR --cand DIR [--printed DIR] [--known FILE] [--record] [--report FILE]
+                                    the round trip's tree level: for each ORIG/REL.ae (the helper's dump
+                                    of the original) the dump of the printed file CAND/REL.ae equal
+                                    without positions and the file names; a file the helper rejects is
+                                    classed (kind, message, class) against FILE (test/ocaml/
+                                    roundtrip-known.edn), a printed file the helper rejects is a failure;
+                                    with --printed the forms of CAND printed again equal the printed text"
+  (:require [arbace.repr.ocaml.convert :as cv]
+            [arbace.repr.ocaml.print :as pr]
+            [arbace.string :as str])
+  (:import [java.io File]))
+
+(defn- parse-args [args with-value]
+  (loop [as args opts {} pos []]
+    (if (empty? as)
+      {:opts opts :args pos}
+      (let [[a & more] as]
+        (cond
+          (contains? with-value a) (recur (rest more) (assoc opts a (first more)) pos)
+          (str/starts-with? a "-") (recur more (assoc opts a true) pos)
+          :else (recur more opts (conj pos a)))))))
+
+(defn- files-under [^String dir ext]
+  (->> (file-seq (File. dir))
+       (filter #(and (.isFile ^File %) (str/ends-with? (.getName ^File %) ext)))
+       (map #(.getPath ^File %))
+       sort))
+
+(defn- rel [^String root ^String path]
+  (let [r (str (.getCanonicalPath (File. root)) "/")
+        p (.getCanonicalPath (File. path))]
+    (if (str/starts-with? p r) (subs p (count r)) path)))
+
+(defn- spit-mk [^String path text]
+  (let [f (File. path)]
+    (.mkdirs (.getParentFile f))
+    (spit f text)))
+
+(defn- strip-ae [^String s] (if (str/ends-with? s ".ae") (subs s 0 (- (count s) 3)) s))
+
+;; ---- read ----
+
+(defn- do-read [{:keys [opts args]}]
+  (let [out (get opts "-o" ".tmp/repr-ocaml/forms")
+        root (get opts "--root")
+        files (if root (files-under root ".ae") args)
+        bad (atom 0)]
+    (doseq [f files]
+      (let [r (if root (rel root f) (.getName (File. ^String f)))]
+        (try
+          (let [x (cv/convert (slurp f))
+                text (cv/write-forms x)]
+            (cv/read-check text x)
+            (spit-mk (str out "/" r) text))
+          (catch Throwable t
+            (swap! bad inc)
+            (println "FAIL" r (.getMessage t))))))
+    (println (str "read: " (count files) " dumps, " @bad " failures"))
+    (System/exit (if (zero? @bad) 0 1))))
+
+;; ---- print ----
+
+(defn- do-print [{:keys [opts args]}]
+  (let [out (get opts "-o" ".tmp/repr-ocaml/printed")
+        root (get opts "--root")
+        files (if root (files-under root ".ae") args)
+        bad (atom 0) skipped (atom 0)]
+    (doseq [f files]
+      (let [r (strip-ae (if root (rel root f) (.getName (File. ^String f))))]
+        (try
+          (let [x (read-string (slurp f))]
+            (if (cv/error-form? x)
+              (swap! skipped inc)
+              (spit-mk (str out "/" r) (pr/print-file x))))
+          (catch Throwable t
+            (swap! bad inc)
+            (println "FAIL" r (.getMessage t))))))
+    (println (str "print: " (count files) " files, " @skipped " error dumps skipped, " @bad " failures"))
+    (System/exit (if (zero? @bad) 0 1))))
+
+;; ---- compare ----
+
+(defn- first-diff
+  "The path to the first difference of two forms, with both sides"
+  [a b path]
+  (cond
+    (= a b) nil
+    (and (sequential? a) (sequential? b) (not= (count a) (count b)) (not= (first a) (first b)))
+    [path (pr-str (if (seq? a) (first a) :seq)) (pr-str (if (seq? b) (first b) :seq))]
+    (and (sequential? a) (sequential? b))
+    (or (some (fn [i] (first-diff (nth a i) (nth b i) (conj path (if (seq? a) (str (first a) "." i) i))))
+              (range (min (count a) (count b))))
+        [path (str "length " (count a)) (str "length " (count b))])
+    (and (map? a) (map? b))
+    (or (some (fn [k] (first-diff (get a k) (get b k) (conj path k))) (distinct (concat (keys a) (keys b)))) [path "map" "map"])
+    :else [path (let [s (pr-str a)] (subs s 0 (min 160 (count s)))) (let [s (pr-str b)] (subs s 0 (min 160 (count s))))]))
+
+(defn- reject-class [r kind]
+  (cond (str/includes? r "templates/") :template
+        (= kind :syntax) :syntax-error
+        (= kind :lexer) :lexer-error
+        :else :other-error))
+
+(defn- do-compare [{:keys [opts]}]
+  (let [orig (get opts "--orig") cand (get opts "--cand") printed (get opts "--printed")
+        known-file (get opts "--known")
+        known-all (if (and known-file (.exists (File. ^String known-file)))
+                    (read-string (slurp known-file)) {})
+        files (files-under orig ".ae")
+        names (set (map #(strip-ae (rel orig %)) files))
+        known (if (get opts "--record") {} (select-keys known-all names))
+        ok (atom 0) rejects (atom {}) diffs (atom {}) fails (atom []) unstable (atom 0)]
+    (doseq [f files]
+      (let [r (strip-ae (rel orig f))
+            a (cv/convert (slurp f))]
+        (if (cv/error-form? a)
+          (let [[_ kind msg] a]
+            (swap! rejects assoc r {:class (reject-class r kind) :kind kind :message msg}))
+          (let [cf (str cand "/" r ".ae")]
+            (if-not (.exists (File. ^String cf))
+              (swap! diffs assoc r {:class :not-printed :message "no dump of the printed file (the printer failed)"})
+              (let [b (try (cv/convert (slurp cf)) (catch Throwable t (list 'ocaml/error :other (.getMessage t))))]
+                (cond
+                  (cv/error-form? b)
+                  (swap! diffs assoc r {:class :printed-rejected :message (pr-str (rest b))})
+                  :else
+                  (let [d (first-diff (cv/without-file a) (cv/without-file b) [])]
+                    (if d
+                      (swap! diffs assoc r {:class :diff :at (first d) :orig (second d) :printed (nth d 2)})
+                      (do (swap! ok inc)
+                          (when printed
+                            (let [pf (str printed "/" r)
+                                  again (pr/print-file b)]
+                              (when-not (= again (slurp pf)) (swap! unstable inc)
+                                (println "UNSTABLE" r))))))))))))))
+    (let [unexpected-rej (remove (fn [[r v]] (= (select-keys (get known r) [:class :kind :message]) (select-keys v [:class :kind :message]))) @rejects)
+          unexpected-diff (remove (fn [[r v]] (= (select-keys (get known r) [:class :at :orig :printed :message]) v)) @diffs)
+          gone (remove (fn [[r _]] (or (contains? @rejects r) (contains? @diffs r))) known)
+          n (count files)]
+      (doseq [[r m] @fails] (println "FAIL" r m))
+      (doseq [[r v] unexpected-rej] (println "UNEXPECTED REJECT" r (pr-str v)))
+      (doseq [[r v] unexpected-diff] (println "DIFF" r (pr-str v)))
+      (doseq [[r _] gone] (println "GONE (listed, no longer occurs)" r))
+      (println (str "compare: " n " files: " @ok " equal, " (count @rejects) " rejected by the helper ("
+                    (pr-str (frequencies (map :class (vals @rejects)))) "), " (count @diffs) " differ, "
+                    (count @fails) " failures, " @unstable " unstable"))
+      (when (get opts "--report")
+        (spit-mk (get opts "--report")
+                 (pr-str {:files n :equal @ok :rejected @rejects :differ @diffs :failures @fails :unstable @unstable})))
+      (when (get opts "--record")
+        (spit-mk known-file (str ";; recorded by `bin/repr-ocaml roundtrip --record`: the files the helper rejects (class, kind, message) and the differences\n"
+                                 (str "{" (str/join "\n " (map (fn [[k v]] (str (pr-str k) " " (pr-str v))) (into (sorted-map) (merge (apply dissoc known-all names) @rejects @diffs)))) "}") "\n")))
+      (System/exit (if (and (empty? @fails) (empty? unexpected-rej) (empty? unexpected-diff) (empty? gone) (zero? @unstable)) 0 1)))))
+
+(defn -main [& args]
+  (let [[verb & more] args
+        pa (fn [wv] (parse-args more wv))]
+    (case verb
+      "read" (do-read (pa #{"-o" "--root"}))
+      "print" (do-print (pa #{"-o" "--root"}))
+      "compare" (do-compare (pa #{"--orig" "--cand" "--printed" "--known" "--report"}))
+      (do (println "usage: -m arbace.repr.ocaml read|print|compare ...") (System/exit 2)))))

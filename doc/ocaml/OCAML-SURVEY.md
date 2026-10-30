@@ -707,3 +707,109 @@ edits ran while reading the spec before the final text was fixed, no effect on a
 `arbace.java.shell` probe was refused by the permission classifier and not retried. The scratch the survey cites: `.tmp/specgen/`
 (the spec's examples as extracted and dumped), `.tmp/repr-ocaml/` (the tarball and its extraction), `.tmp/ocdump/` (the helper's
 build), in the worktree `.tmp/worktrees/ocaml-o1`.
+
+## As built: O2 (2026-10-30)
+
+Milestone O2, repr/ocaml in mode `:lines`, built on the branch `ocaml-o1` on top of O1 (`4da530ec`), under the light tier (beside GT7's
+clean run: no gate, no Arbace build, no lock, at most 4 threads, under 2 GB: the biggest run, the printer over go-whim's 57k-line
+`editor.ml`, peaked at 1.35 GB; the reads at 0.4 GB; GOMEMLIMIT 1500MiB). The proposals OC20-OC27 are not decided yet; the work followed
+their recommendations: OC22 (a) and OC24 (a) only touch O3/O2's corpora (the generated `boot/menhir/parser.ml` is not in a corpus yet),
+OC26 (c) says the gate step belongs with the round trip, and **no gate step was added** (see the heavy list), OC27 (a) the helper writes six
+numbers and the converter drops them.
+
+**What is in the tree**
+
+- `arbace/repr/ocaml.ae` (the command: `read`, `print`, `compare`), `arbace/repr/ocaml/convert.ae` (the converter), `print.ae` (the
+  printer, about 1,000 lines), `doc.ae` (the layout engine: Wadler's groups, nest, hard lines, lazy indentation, width 100). Evaluated on
+  stage 0 from the checkout, not embedded: the gate bookkeeping is the same as repr/haskell's and repr/c's, `test/gate/steps.edn`'s
+  `:tools`, `test/gate/audit.ae`'s `:gate` host and `bin/lib/version.bash`'s `arbace_embedded_sources` (so `gate_key` and the executables'
+  keys do not move). The planner (`gate.plan`, run on main's stage 0 over this tree with a toy hosts file, both modes) accepts the table.
+  `arbace/j2g/embed.ae`'s `excluded` list was **not** touched (shipped; OC30).
+- `bin/repr-ocaml`: `read [-o DIR] FILE...`, `print`, `roundtrip [--record] [--jobs N] [CORPUS...] | --spec`, `check`; Makefile targets
+  `repr-ocaml-roundtrip`, `-roundtrip-all`, `-check` (`make check-makefile` passes). `test/ocaml/roundtrip-known.edn`: the files the helper
+  rejects (class, kind, message) and the recorded non-passes.
+- The converter reads the helper's dump, removes positions if there are any (`:loc :ghost :stack :content-loc`, `(at N loc)` as `N`, empty maps
+  left behind dropped: a `--loc` dump and a plain one give the same bytes), checks every head against the closed set of the spec (S5), writes
+  the `.ae` text (own writer: `(var x)` stays `(var x)`, S29), and reads it back and compares. `read --root` over the stdlib, the compiler's
+  sources and back end: 744 dumps, 0 failures, 14 to 31 s each corpus.
+- The printer prints each category with a level table (expressions 0-16, patterns 0-5, types 0-4, module types, module expressions, class
+  expressions and types), so the parentheses are the context's; `fun`/`function`/`match` are parenthesized where they would swallow what follows;
+  attributes of a node print as `(node) [@a]` (expressions, open-ended nodes) or `(node [@a])` (types, patterns, modules); docstrings are the
+  attributes `[@@ocaml.doc "..."]` the Parsetree has (mode `:full` will print the comments, O3); keywords used as names print as raw identifiers
+  (`\#and`), operator-like words as `( mod )`; `a.(i)`, `s.[i]`, `a.(i) <- v`, `a.%(i)` are printed as the sugar the parser desugared.
+
+**The check** (`bin/repr-ocaml roundtrip`): the helper dumps the original (positions off), the printer prints the forms, the helper dumps the print,
+the two trees are equal without the file name, and the forms of the print printed again equal the printed text (the printer is stable). A file the
+helper rejects is classed (kind, message, class) and compared with the record; one the printer or the helper rejects after the print, or whose trees
+differ, is a recorded non-pass with its first difference. It fails on an unrecorded one and on a recorded one that no longer occurs.
+
+| corpus | files | equal | helper rejects | non-pass | seconds (dump / print / redump) |
+|---|---:|---:|---:|---:|---|
+| stdlib | 150 | 148 | 2 (`templates/*.template.mli`) | 0 | 1 / 11 / 1 |
+| compiler-sources | 248 | 248 | 0 | 0 | 2 / 24 / 3 |
+| compiler-backend | 346 | 346 | 0 | 0 | 2 / 13 / 2 |
+| samples | 8 | 8 | 0 | 0 | 0 / 1 / 0 |
+| whiml (go-whim) | 8 | 8 | 0 | 0 | 4 / 24 / 3 |
+| testsuite | 1,862 | 1,790 | 61 (56 syntax, 5 lexer errors) | 11 | 10 / 32 / 9 |
+| spec's worked examples | 218 | 218 | 0 | 0 | 1 / 1 / 1 |
+
+All 0 unstable. The exit criteria hold: the stdlib, the compiler's sources and the samples read and are equal after the print; the classes for the
+files the helper rejects are in `roundtrip-known.edn` (`:template`, `:syntax-error`, `:lexer-error`). The 11 non-passes of the testsuite, each recorded
+with its first difference:
+
+- `lexing/newlines.ml` (`:diff`): a quoted string `{|...|}` whose value has a CR before an LF: the lexer normalizes CRLF in the printed literal, so the
+  value cannot be written back as a quoted string (and as an ordinary string the delimiter, part of the tree, is lost).
+- `parsing/attributes.ml`, `parsing/shortcut_ext_attr.ml`, `typing-deprecated/deprecated.ml`, `warnings/w53.ml` (`:diff`): attribute placement the
+  printer does not reproduce: an attribute on a packed module (`(module M [@a])`), on the class of `class%foo[@foo]`, inside a tuple, and on a
+  functor body (`[@@inline]` after a functor item against `[@inline]` on its body).
+- `parsetree/source.ml` (the printer fails: an item `nil` in a payload), `parsing/docstrings.ml`, `parsing/rawidents.ml`,
+  `typing-objects/Tests.ml`, `typing-objects/dummy.ml`, `typing-poly/poly_params.ml` (the helper rejects the print): syntax the printer writes wrongly
+  (raw identifiers as record labels, a docstring on an external, polymorphic method/parameter spellings, class bodies).
+
+**What the check found that the spec did not have** (the printer's work made them visible)
+
+- `Pmty_alias` **is** produced: a signature item `module N = M` (the stdlib's `stdLabels.mli`); SPEC §7.1's row said the parser never produces it, and is
+  corrected.
+- `let type t = A in e`, `let type t += A in e` and `let module%foo[@foo] M = M in e`: `Pexp_struct_item` holds any structure item (5.5's
+  let-items), not only `open`, `module` and `exception`.
+- Attributes of a `function` with cases sit on the `cases` node, not the `function`.
+- `>]` and `>}` lex as one token (object types before a closing bracket need a space); `'a'` lexes as a character (type variables with a `'` in
+  their name print as `' a'`); `(float) [@unboxed]` after an arrow binds to the whole arrow (attributes of types go inside the parentheses).
+- `fun x -> function ...` and `let f x = function ...` fold into one node, `fun x -> (function ...)` does not: the printer parenthesizes a
+  parameterless `function` in a body.
+
+**Checks run** (all light: at most 4 threads, under 1.4 GB): `bin/repr-ocaml roundtrip` over every corpus above and `--spec`, `read --root` over the
+three big corpora, the `--loc` equivalence of the converter, `make check-makefile`, the planner on main's stage 0 in both modes. **Not run**: the
+gate (essential or full), any Arbace build, the other `bin/repr-ocaml` checks of O1 (they did not change; `spec-check` still passes through the same helper), 
+`make gate-audit`. **The heavy list** (the window after the tag): `bin/gate` essential and `--full` (nothing in them changed but the key
+bookkeeping above, so the passes should be skipped by key; the canary reruns one), `bin/gate --audit` for the steps whose `:tools` list changed,
+and the round trip of the generated `boot/menhir/parser.ml` (67k lines; OC24 (a), not in a corpus yet, needs about 1.5 GB for the print).
+
+**Proposals** (OC30 onward; each with options and the recommended one first)
+
+- **OC30 `arbace/j2g/embed.ae`'s `excluded`.** (a) add `"arbace/repr/ocaml.ae" "arbace/repr/ocaml/"` at the next re-seed (the file is shipped: a change
+  moves the executables' keys); until then a build in between would embed the namespaces, harmless because the tool loads the checkout's copy when it
+  differs; (b) add it now, with a re-seed of its own; (c) embed repr/ocaml from the start (compiled with the program, tens of ms faster per file, a larger
+  executable). *Recommended: (a)*, as for repr/scheme (SC24): the re-seed batch is O9's or C5/C6's.
+- **OC31 The gate step for the round trip** (OC26 (c) said "at O2"). (a) a step `repr-ocaml` in `:full` only, `bin/repr-ocaml check` with the
+  inputs `arbace/repr/ocaml*`, `tools/ocdump/`, `test/ocaml/`, `bin/repr-ocaml`, a host pin on ocamlopt and compiler-libs, `:mem-gib 2`, `:phase :full`
+  (about 3 minutes with stdlib, compilers, whiml, samples, spec; the testsuite another 1.5); (b) the same plus the testsuite (`roundtrip-all`);
+  (c) none until O3's `:full` joins it. *Recommended: (a)*, added in the window after the tag because the step is shipped data whose effect I could not
+  run with the gate parked; it is a one-entry change.
+- **OC32 The 11 recorded non-passes of the testsuite.** (a) leave them recorded, fix the printer's own bugs (the six where the helper rejects or the
+  printer fails) in O3, whose `:full` mode needs the attribute placement exactly; the CRLF quoted string stays recorded for good; (b) fix them now;
+  (c) drop the testsuite from the round trip. *Recommended: (a)*: 1,790 of 1,801 readable files are equal and the rest are corners no other corpus has.
+- **OC33 The printed layout.** (a) as built: canonical, width 100, groups that break when a line is too long, one blank line between items, cases one
+  to a line, docstrings as attributes; (b) the layout of the original from the positions (`--loc`), a line to a form as repr/haskell's `:lines`;
+  (c) an `ocamlformat`-like profile (what a person writes, `let f x = ...` with the `in` on the line). *Recommended: (a)*: `:full` (O3) is the mode that
+  keeps the person's layout, and (b) needs positions the converter drops (OC27 (a)).
+- **OC34 Token spellings that the Parsetree does not keep.** The printer chooses: `fun x ->` for `function` with params, `let f x =` sugar when the
+  pattern is a variable, `a.(i)` for `Array.get a i`, list literals for `::` chains ending in `[]`, parentheses wherever the level table asks. (a) as
+  built; (b) never use the sugar (print every desugared form as the application), which the equality check would also accept. *Recommended: (a)*: the
+  trees are equal either way and (a) reads like OCaml.
+
+**Rule slips**: a corpus run exceeded the tool's two-minute foreground limit and was moved to the background; I edited `arbace/repr/ocaml/convert.ae`
+(a no-op for positions-off dumps) while a background testsuite round trip was running, which loads it (the run's result was unchanged, and the
+testsuite was run again afterwards on the final sources); one placeholder subagent was launched by mistake (no tools, no effect). No `/dev/null` in a
+command line.
+Scratch the survey cites: `.tmp/repr-ocaml/rt/NAME/` (orig dumps, printed files, cand dumps, `report.edn`) in the worktree `.tmp/worktrees/ocaml-o1`.

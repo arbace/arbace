@@ -1,7 +1,8 @@
 #!/bin/bash
 # repr/ocaml, OCaml's bridge (doc/ocaml/OCAML-SURVEY.md, doc/ocaml/SPEC.md): so far (O1, "As built: O1") the
 # spec's checks, the helper tools/ocdump on the host's compiler-libs (OC3 (a)) and the corpora's pins.
-# The converter and the printer come with O2.
+# O2 adds the converter and the printer (arbace.repr.ocaml{,.convert,.print,.doc}, evaluated on stage 0 from
+# the checkout, not embedded), read, print and the round trip:
 #
 #   bin/repr-ocaml ocdump-build   build tools/ocdump/ocdump.ml into .tmp/ocdump/ocdump with the host's ocamlopt
 #                                 against compiler-libs (-I +compiler-libs ocamlcommon.cmxa; no ocamlfind, no
@@ -18,7 +19,20 @@
 #   bin/repr-ocaml spec-check     doc/ocaml/SPEC.md: every forms block reads with Arbace's reader; every entry
 #                                 with a source equals ocdump's output for it; every Parsetree constructor of
 #                                 5.5.0's parsetree.mli is in the spec's checklist
-# All run on small inputs, in seconds (corpus fetch: one 4.7 MB download).
+#   bin/repr-ocaml read [-o DIR] FILE...   FILE.ml/.mli to OCaml forms (mode :lines) under DIR (default
+#                                 .tmp/repr-ocaml/forms/NAME.ae): the helper's dump, converted, read back
+#   bin/repr-ocaml print [-o DIR] FORMS.ae...   forms to OCaml text under DIR (default .tmp/repr-ocaml/printed)
+#   bin/repr-ocaml roundtrip [--record] [--jobs N] [CORPUS...]
+#                                 O2's check over corpora (default stdlib compiler-sources compiler-backend
+#                                 samples; also whiml testsuite): each file dumped by the helper, printed from
+#                                 its forms, the printed file dumped, the two trees equal (positions apart),
+#                                 the printed forms printed again equal the printed text; a file the helper
+#                                 rejects is classed against test/ocaml/roundtrip-known.edn (--record
+#                                 rewrites it); runs at most N (default 4) helper processes, one Arbace
+#                                 run per step, GOMEMLIMIT 1500MiB
+#   bin/repr-ocaml roundtrip --spec   the same over the spec's worked examples (doc/ocaml/SPEC.md)
+#   bin/repr-ocaml check          the round trip over the default corpora and the spec's examples
+# The checks of O1 run on small inputs, in seconds (corpus fetch: one 4.7 MB download).
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 . "$root/bin/lib/tmpdir.bash"
@@ -194,7 +208,118 @@ cmd_spec_check() {
   return $bad
 }
 
+# dump_one REL: the helper on one file of $BASE into $OUT/REL$SUF (xargs runs it in a bash -c; exported)
+dump_one() {
+  local rel=$1 flag=""
+  case $rel in *.mli) flag=--intf ;; esac
+  mkdir -p "$OUT/$(dirname "$rel")"
+  "$OCD" $flag --file "$rel" "$BASE/$rel" > "$OUT/$rel${SUF:-.ae}"
+}
+export -f dump_one
+
+# rt_arbace VERB ARGS...: the tool namespace on stage 0, evaluated from the checkout, light limits
+rt_arbace() {
+  local exe; exe=$(arbace_exe)
+  ARBACE_PATH="$root" GOMEMLIMIT=${REPR_OCAML_GOMEMLIMIT:-1500MiB} GOMAXPROCS=${REPR_OCAML_THREADS:-4} \
+    "$exe" -m arbace.repr.ocaml "$@"
+}
+
+cmd_read() {
+  need_ocdump
+  local out="$root/.tmp/repr-ocaml/forms" tmp="$root/.tmp/repr-ocaml/read-dumps" f b flag
+  if [ "${1:-}" = "-o" ]; then out=$2; shift 2; fi
+  rm -rf "$tmp"; mkdir -p "$tmp"
+  for f in "$@"; do
+    b=$(basename "$f"); flag=""; case $b in *.mli) flag=--intf ;; esac
+    "$OCD" $flag --file "$b" "$f" > "$tmp/$b.ae"
+  done
+  rt_arbace read --root "$tmp" -o "$out"
+}
+
+cmd_print() { rt_arbace print "$@"; }
+
+# corpus_list ID: the corpus's files, one path per line relative to its base; sets CORPUS_BASE
+corpus_list() {
+  local id=$1 cid f ml mli l pin paths base
+  while read -r cid f ml mli l pin paths; do
+    [ "$cid" = "$id" ] || continue
+    case $pin in
+      :ocaml-5.5.0) base=$TOP ;;
+      :go-whim) base=$(edn :pins :go-whim :root); paths=whiml ;;
+      :root) base=$root/test/ocaml/samples; paths=. ;;
+    esac
+    CORPUS_BASE=$base
+    IFS=, read -ra pa <<< "$paths"
+    (cd "$base" && find "${pa[@]}" -type f \( -name '*.ml' -o -name '*.mli' \) | sed 's|^\./||' | LC_ALL=C sort)
+    return 0
+  done < <(corpus_rows)
+  echo "repr-ocaml: no corpus $id" >&2; return 1
+}
+
+# rt_one NAME BASE LISTFILE: the round trip of the files of LISTFILE under BASE
+rt_one() {
+  local name=$1 base=$2 list=$3 jobs=${REPR_OCAML_JOBS:-4} w="$root/.tmp/repr-ocaml/rt/$1"
+  rm -rf "$w"; mkdir -p "$w"
+  export OCD BASE="$base"
+  local t0=$SECONDS
+  OUT="$w/orig" SUF=.ae xargs -a "$list" -P "$jobs" -n 1 bash -c 'dump_one "$0"'
+  local t1=$SECONDS
+  rt_arbace print --root "$w/orig" -o "$w/printed" > "$w/print.log" || { tail -20 "$w/print.log"; }
+  local t2=$SECONDS
+  # the printed file's dump: its name is the original's
+  BASE="$w/printed" OUT="$w/cand" SUF=.ae xargs -a "$list" -P "$jobs" -n 1 bash -c 'dump_one "$0"' 2>/dev/null || true
+  local t3=$SECONDS
+  local extra=() rc=0; [ -n "${RECORD:-}" ] && extra+=(--record)
+  rt_arbace compare --orig "$w/orig" --cand "$w/cand" --printed "$w/printed" --known "$root/test/ocaml/roundtrip-known.edn" \
+    --report "$w/report.edn" "${extra[@]}" || rc=$?
+  echo "  $name: dump $((t1 - t0)) s, print $((t2 - t1)) s, redump $((t3 - t2)) s"
+  return $rc
+}
+
+cmd_roundtrip() {
+  need_ocdump; cmd_corpus_fetch >/dev/null
+  local spec="" ids=() bad=0 id list
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --record) RECORD=1 ;;
+      --jobs) shift; REPR_OCAML_JOBS=$1 ;;
+      --spec) spec=1 ;;
+      *) ids+=("$1") ;;
+    esac
+    shift
+  done
+  [ ${#ids[@]} = 0 ] && [ -z "$spec" ] && ids=(stdlib compiler-sources compiler-backend samples)
+  for id in "${ids[@]}"; do
+    list="$root/.tmp/repr-ocaml/rt-$id.list"; mkdir -p "$(dirname "$list")"
+    corpus_list "$id" > "$list"
+    echo "== $id ($(wc -l < "$list") files)"
+    rt_one "$id" "$CORPUS_BASE" "$list" || bad=1
+  done
+  if [ -n "$spec" ]; then
+    echo "== spec examples"
+    local d="$root/.tmp/repr-ocaml/spec" n
+    cmd_spec_check >/dev/null 2>&1 || true
+    # each example's source as a file of its own: .ml (or .mli for sigitems and intf)
+    list="$root/.tmp/repr-ocaml/rt-spec.list"; : > "$list"
+    local f id2 kind
+    mkdir -p "$d/files"
+    for f in "$d"/*.kind; do
+      id2=$(basename "$f" .kind); kind=$(cat "$f")
+      case $kind in
+        intf|sigitem) cp "$d/$id2.mli" "$d/files/$id2.mli"; echo "$id2.mli" >> "$list" ;;
+        *) cp "$d/$id2.ml" "$d/files/$id2.ml"; echo "$id2.ml" >> "$list" ;;
+      esac
+    done
+    rt_one spec "$d/files" "$list" || bad=1
+  fi
+  return $bad
+}
+
 case "${1:-}" in
+  read) shift; cmd_read "$@" ;;
+  print) shift; cmd_print "$@" ;;
+  roundtrip) shift; cmd_roundtrip "$@" ;;
+  check) cmd_roundtrip && cmd_roundtrip --spec ;;
   ocdump-build) cmd_ocdump_build ;;
   dump) shift; cmd_dump "$@" ;;
   corpus)

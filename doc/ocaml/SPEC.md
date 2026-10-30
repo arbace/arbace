@@ -835,7 +835,7 @@ Class fields (`class_field`): `(inherit FLAG CE [NAME])` (`inherit`, `inherit!`,
 | `(with MT [CONSTRAINT...])` | `MT with type t = T and module M = N` | §7.3 |
 | `(typeof ME)` | `module type of ME` | |
 | `(extension EXT)` | `[%id]` | |
-| `(alias LID)` | `(module M)` | never produced by the parser (the typechecker's); no source gives it |
+| `(alias LID)` | `module N = M` in a signature | the module type of a signature item `module N = M` (`Psig_module` with `Pmty_alias`; found at O2, stdlib's `stdLabels.mli`: the O1 text said the parser never produces it); the printer writes the item, not `(module M)` |
 
 ### 7.2 Module expressions
 
