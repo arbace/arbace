@@ -190,6 +190,17 @@ covers what.
   GNU Lesser General Public License version 2.1 with the OCaml LGPL linking exception (below). The test
   data `test/ocaml/oi/testdata/` and the tables in `go/arbace/oi/lexdata*_test.ae` and `parsedata_test.ae`
   are outputs of the host's OCaml 5.5.0 (ocaml, ocamllex, ocamlyacc) over Arbace's own test programs.
+- `jdk/ocaml/` (OCaml's runtime as Java forms, the package `ocaml.rt`; doc/ocaml/OCAML-SURVEY.md, "As built: O6
+  (write-ahead)") and `arbace/o2j.ae` (o2j, Lambda to Java forms): the values, the application, the program's
+  start (`Block`, `Closure`, `Pap`, `Native`, `Code`, `Exn`, `Exit`, `Fatal`, `I64`, `NInt`, `Custom`, `Rt`, `Main`, `Gil`,
+  `Dom`, `TState`) and o2j are Arbace's own, under the Eclipse Public License 1.0; the externals are ports to Java
+  forms of oi's Go ports (above) of the OCaml Core System's runtime, `runtime/*.c` of the same OCaml 5.5.0 tarball:
+  `ExtNum`, `ExtStr` (ints.c, floats.c, str.c), `Compare` (compare.c), `Hash` (hash.c), `ExtArray` (array.c), `Marshal`
+  (extern.c, intern.c), `ExtIo`, `Channel`, `Fd` (io.c, sys.c's open and close), `ExtSys` (sys.c, signals.c), `ExtGc`
+  (gc_ctrl.c, weak.c, finalise.c, backtrace.c, memprof.c), `ExtDigest`, `Blake2` (md5.c, blake2.c), `ExtLxm`
+  (the LXM generator), `ExtBigarray`, `BigArray` (bigarray.c's part oi has), `ExtLex` (lexing.c, parsing.c), and the
+  parts of `ExtCore`, `Effects` and `Fiber` that follow obj.c, alloc.c, lazy.c, sync.c, domain.c and fiber.c:
+  under the GNU Lesser General Public License version 2.1 with the OCaml LGPL linking exception (below).
 - `x509roots/` (`x509roots/go/arbace/x509roots/fallback/bundle.ae` and `bundle/`, with
   `bundle/bundle.der`; x509roots/README.md, doc/go/BOX-NOTES.md "TLS (option 2)"): the package
   `bundle` of the module `golang.org/x/crypto/x509roots/fallback`, https://go.googlesource.com/crypto

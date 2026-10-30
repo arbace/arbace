@@ -1,0 +1,206 @@
+;; The GC's, memprof's, weak arrays' and ephemerons', finalisers' and backtraces' externals
+;; (gc_ctrl.c, gc_stats.c, memprof.c, weak.c, finalise.c, backtrace.c), ported from oi's
+;; ext_sys.go: the counters are zeros (OC64 (a)), weak arrays and ephemerons hold their keys and
+;; data strongly (OC68 (a)), finalisers are accepted and never run, no backtrace is recorded.
+
+(in-ns 'ocaml.rt)
+
+(import '(java.util Arrays))
+
+(defclass ^:public ^:final ExtGc
+  (field ^:static ^boolean runtimeWarnings false)
+  (field ^:static ^boolean backtraceActive false)
+  (field ^:static ^boolean memprofSampling false)
+  (field ^:static ^long forcedMajorCount 0)
+  (field ^:static ^:final ^Object/1 gcControl
+    (new Object/1 [(Long/valueOf 262144) (Long/valueOf 0) (Long/valueOf 120) (Long/valueOf 0) (Long/valueOf 0)
+                   (Long/valueOf 134217728) (Long/valueOf 0) (Long/valueOf 0) (Long/valueOf 44)
+                   (Long/valueOf 100) (Long/valueOf 8192)]))
+  (field ^:static ^:final ^String/1 tweakNames (new String/1 ["mark_stack_prune_factor" "small_heap_limit"]))
+  (field ^:static ^:final ^long/1 tweakVals (new long/1 [32 128]))
+  (field ^:static ^:final ^long/1 tweakInit (new long/1 [32 128]))
+  ;; the "no value" of an ephemeron's slot
+  (field ^:static ^:final ephNone (Block. 251 (new Object/1 0)))
+
+
+  (method ^:static gcStat []
+    (let [rt (Runtime/getRuntime)
+          total (unchecked-divide (.totalMemory rt) 8)
+          used (unchecked-divide (unchecked-subtract (.totalMemory rt) (.freeMemory rt)) 8)
+          free (unchecked-divide (.freeMemory rt) 8)]
+      (Block. 0 (new Object/1
+                  [(Double/valueOf 0.0) (Double/valueOf 0.0) (Double/valueOf 0.0)
+                   (Long/valueOf 0) (Long/valueOf 0)
+                   (Long/valueOf total) (Long/valueOf 1) (Long/valueOf used) (Long/valueOf 0)
+                   (Long/valueOf free) (Long/valueOf 0) (Long/valueOf 0) (Long/valueOf 0) (Long/valueOf 0)
+                   (Long/valueOf total) (Long/valueOf 0) (Long/valueOf forcedMajorCount) (Long/valueOf 0)]))))
+
+  (method ^:public ^:static caml_gc_stat [u] (ExtGc/gcStat))
+  (method ^:public ^:static caml_gc_quick_stat [u] (ExtGc/gcStat))
+  (method ^:public ^:static caml_gc_counters [u]
+    (Block. 0 (new Object/1 [(Double/valueOf 0.0) (Double/valueOf 0.0) (Double/valueOf 0.0)])))
+  (method ^:public ^:static caml_gc_minor_words [u] (Double/valueOf 0.0))
+  (method ^:public ^:static caml_gc_get [u] (Block. 0 (.clone gcControl)))
+  (method ^:public ^:static caml_gc_set [c]
+    (let [f (.-f (cast Block c))
+          n (Math/min (alength f) (alength gcControl))]
+      (loop [^int i 0]
+        (when (< i n) (aset gcControl i (aget f i)) (recur (unchecked-inc-int i))))
+      Rt/UNIT))
+  (method ^:public ^:static caml_gc_minor [u] Rt/UNIT)
+  (method ^:public ^:static caml_gc_major [u] Rt/UNIT)
+  (method ^:public ^:static caml_gc_full_major [u]
+    (set! forcedMajorCount (unchecked-add forcedMajorCount 1))
+    Rt/UNIT)
+  (method ^:public ^:static caml_gc_compaction [u] Rt/UNIT)
+  (method ^:public ^:static caml_gc_major_slice [n] (Long/valueOf 0))
+  (method ^:public ^:static caml_get_minor_free [u] (Long/valueOf 262144))
+
+  (method ^:static tweakIndex ^int [name]
+    (let [s (Rt/utf8 name)]
+      (loop [^int i 0]
+        (cond (>= i (alength tweakNames)) (throw (Rt/invalidArg "Gc.Tweak: parameter not found"))
+              (.equals (aget tweakNames i) s) i
+              :else (recur (unchecked-inc-int i))))))
+  (method ^:public ^:static caml_gc_tweak_get [name]
+    (Long/valueOf (aget tweakVals (ExtGc/tweakIndex name))))
+  (method ^:public ^:static caml_gc_tweak_set [name v]
+    (aset tweakVals (ExtGc/tweakIndex name) (Rt/l v))
+    Rt/UNIT)
+  (method ^:public ^:static caml_gc_tweak_list_active [u]
+    (let [^:mutable ^Object l (Long/valueOf 0)]
+      (loop [^int i (unchecked-dec-int (alength tweakNames))]
+        (when (>= i 0)
+          (when (not (== (aget tweakVals i) (aget tweakInit i)))
+            (set! l (Rt/cons (Rt/tuple (new Object/1 [(Rt/s (aget tweakNames i)) (Long/valueOf (aget tweakVals i))])) l)))
+          (recur (unchecked-dec-int i))))
+      l))
+
+  (method ^:public ^:static caml_runtime_variant [u] (Rt/s ""))
+  (method ^:public ^:static caml_runtime_parameters [u]
+    (Rt/s (java-str "b=" (if backtraceActive 1 0) ",c=0,e=16,l=" (Rt/l (aget gcControl 5))
+                    ",M=" (Rt/l (aget gcControl 8)) ",m=" (Rt/l (aget gcControl 9))
+                    ",n=" (Rt/l (aget gcControl 10)) ",o=" (Rt/l (aget gcControl 2))
+                    ",p=0,s=" (Rt/l (aget gcControl 0)) ",t=0,v=" (Rt/l (aget gcControl 3))
+                    ",V=0,W=" (if runtimeWarnings 1 0))))
+  (method ^:public ^:static caml_ml_enable_runtime_warnings [b]
+    (set! runtimeWarnings (Rt/t b))
+    Rt/UNIT)
+  (method ^:public ^:static caml_ml_runtime_warnings_enabled [u] (Rt/b runtimeWarnings))
+  (method ^:public ^:static caml_ml_gc_ramp_up [f]
+    (let [v (Rt/ap1 f Rt/UNIT)]
+      (Rt/tuple (new Object/1 [v (Long/valueOf 0)]))))
+  (method ^:public ^:static caml_ml_gc_ramp_down [w] Rt/UNIT)
+
+  ;; finalise.c: accepted, never called
+  (method ^:public ^:static caml_final_register [f v]
+    (when (instance? Long v) (throw (Rt/invalidArg "Gc.finalise")))
+    Rt/UNIT)
+  (method ^:public ^:static caml_final_register_called_without_value [f v]
+    (when (instance? Long v) (throw (Rt/invalidArg "Gc.finalise")))
+    Rt/UNIT)
+  (method ^:public ^:static caml_final_release [u] Rt/UNIT)
+
+  ;; weak.c: [| link; data; key0; key1; ... |] as strong blocks (tag 251)
+  (method ^:static ephLen ^int [e] (alength (.-f (cast Block e))))
+  (method ^:static ephCopy [v]
+    (if (or (instance? Block v) (instance? double/1 v) (instance? byte/1 v)) (Rt/dup v) v))
+  (method ^:static ephGet [e ^int off ^boolean cp]
+    (let [v (aget (.-f (cast Block e)) off)]
+      (cond (identical? v ephNone) Rt/NONE
+            cp (Rt/some (ExtGc/ephCopy v))
+            :else (Rt/some v))))
+  (method ^:static ephKeyOffset ^int [e n ^String msg]
+    (let [off (unchecked-add (Rt/l n) 2)]
+      (when (or (< off 2) (>= off (ExtGc/ephLen e))) (throw (Rt/invalidArg msg)))
+      (unchecked-int off)))
+  (method ^:static ephCreate [n]
+    (let [k (Rt/l n)]
+      (when (or (< k 0) (> k 72057594037927935)) (throw (Rt/invalidArg "Weak.create")))
+      (let [f (new Object/1 (unchecked-int (unchecked-add k 2)))]
+        (Arrays/fill f ephNone)
+        (aset f 0 (Long/valueOf 0))
+        (Block. 251 f))))
+  (method ^:static ephBlit [es ofs ed ofd n]
+    (let [os (unchecked-add (Rt/l ofs) 2) od (unchecked-add (Rt/l ofd) 2) l (Rt/l n)]
+      (when (or (< os 2) (< l 0) (> (unchecked-add os l) (ExtGc/ephLen es))
+                (< od 2) (> (unchecked-add od l) (ExtGc/ephLen ed)))
+        (throw (Rt/invalidArg "Weak.blit")))
+      (System/arraycopy (.-f (cast Block es)) (unchecked-int os) (.-f (cast Block ed)) (unchecked-int od) (unchecked-int l))
+      Rt/UNIT))
+
+  (method ^:public ^:static caml_ephe_create [n] (ExtGc/ephCreate n))
+  (method ^:public ^:static caml_weak_create [n] (ExtGc/ephCreate n))
+  (method ^:public ^:static caml_ephe_set_key [e n k]
+    (aset (.-f (cast Block e)) (ExtGc/ephKeyOffset e n "Weak.set") k)
+    Rt/UNIT)
+  (method ^:public ^:static caml_ephe_unset_key [e n]
+    (aset (.-f (cast Block e)) (ExtGc/ephKeyOffset e n "Weak.set") ephNone)
+    Rt/UNIT)
+  (method ^:public ^:static caml_weak_set [e n o]
+    (let [off (ExtGc/ephKeyOffset e n "Weak.set")]
+      (if (and (instance? Block o) (not (identical? o ephNone)))
+        (aset (.-f (cast Block e)) off (aget (.-f (cast Block o)) 0))
+        (aset (.-f (cast Block e)) off ephNone))
+      Rt/UNIT))
+  (method ^:public ^:static caml_ephe_set_data [e d]
+    (aset (.-f (cast Block e)) 1 d)
+    Rt/UNIT)
+  (method ^:public ^:static caml_ephe_unset_data [e]
+    (aset (.-f (cast Block e)) 1 ephNone)
+    Rt/UNIT)
+  (method ^:public ^:static caml_ephe_get_key [e n] (ExtGc/ephGet e (ExtGc/ephKeyOffset e n "Weak.get") false))
+  (method ^:public ^:static caml_weak_get [e n] (ExtGc/ephGet e (ExtGc/ephKeyOffset e n "Weak.get") false))
+  (method ^:public ^:static caml_ephe_get_key_copy [e n] (ExtGc/ephGet e (ExtGc/ephKeyOffset e n "Weak.get") true))
+  (method ^:public ^:static caml_weak_get_copy [e n] (ExtGc/ephGet e (ExtGc/ephKeyOffset e n "Weak.get") true))
+  (method ^:public ^:static caml_ephe_get_data [e] (ExtGc/ephGet e 1 false))
+  (method ^:public ^:static caml_ephe_get_data_copy [e] (ExtGc/ephGet e 1 true))
+  (method ^:public ^:static caml_ephe_check_key [e n]
+    (Rt/b (not (identical? (aget (.-f (cast Block e)) (ExtGc/ephKeyOffset e n "Weak.check")) ephNone))))
+  (method ^:public ^:static caml_weak_check [e n]
+    (Rt/b (not (identical? (aget (.-f (cast Block e)) (ExtGc/ephKeyOffset e n "Weak.check")) ephNone))))
+  (method ^:public ^:static caml_ephe_check_data [e]
+    (Rt/b (not (identical? (aget (.-f (cast Block e)) 1) ephNone))))
+  (method ^:public ^:static caml_ephe_blit_key [es ofs ed ofd n] (ExtGc/ephBlit es ofs ed ofd n))
+  (method ^:public ^:static caml_weak_blit [es ofs ed ofd n] (ExtGc/ephBlit es ofs ed ofd n))
+  (method ^:public ^:static caml_ephe_blit_data [es ed]
+    (aset (.-f (cast Block ed)) 1 (aget (.-f (cast Block es)) 1))
+    Rt/UNIT)
+
+  ;; backtrace.c: nothing is recorded
+  (method ^:public ^:static caml_record_backtrace [b]
+    (set! backtraceActive (Rt/t b))
+    Rt/UNIT)
+  (method ^:public ^:static caml_backtrace_status [u] (Rt/b backtraceActive))
+  (method ^:public ^:static caml_ml_debug_info_status [u] (Long/valueOf 0))
+  (method ^:public ^:static caml_get_exception_raw_backtrace [u] (Block. 0 (new Object/1 0)))
+  (method ^:public ^:static caml_get_exception_backtrace [u] Rt/NONE)
+  (method ^:public ^:static caml_get_current_callstack [n] (Block. 0 (new Object/1 0)))
+  (method ^:public ^:static caml_restore_raw_backtrace [e b] Rt/UNIT)
+  (method ^:public ^:static caml_raw_backtrace_length [b] (Long/valueOf (long (alength (.-f (cast Block b))))))
+  (method ^:public ^:static caml_convert_raw_backtrace [b]
+    (when (> (alength (.-f (cast Block b))) 0) (throw (Rt/failwith "No debug information available")))
+    (Block. 0 (new Object/1 0)))
+  (method ^:public ^:static caml_convert_raw_backtrace_slot [s]
+    (throw (Rt/failwith "No debug information available")))
+  (method ^:public ^:static caml_raw_backtrace_slot [b n]
+    (let [f (.-f (cast Block b)) i (Rt/l n)]
+      (when (or (< i 0) (>= i (alength f)))
+        (throw (Rt/invalidArg "Printexc.get_raw_backtrace_slot: index out of bounds")))
+      (aget f (unchecked-int i))))
+  (method ^:public ^:static caml_raw_backtrace_next_slot [s] Rt/NONE)
+
+  ;; memprof.c: sampling never fires
+  (method ^:public ^:static caml_memprof_start [lambda csize tracker]
+    (when (or (not (instance? Double lambda)) (< (Rt/l csize) 0)
+              (not (and (>= (Rt/d lambda) 0.0) (<= (Rt/d lambda) 1.0))))
+      (throw (Rt/invalidArg "Gc.Memprof.start")))
+    (when memprofSampling (throw (Rt/failwith "Gc.Memprof.start: profile already running.")))
+    (set! memprofSampling true)
+    (Custom. "_memprof" nil))
+  (method ^:public ^:static caml_memprof_is_sampling [u] (Rt/b memprofSampling))
+  (method ^:public ^:static caml_memprof_stop [u]
+    (when (not memprofSampling) (throw (Rt/failwith "Gc.Memprof.stop: no profile running.")))
+    (set! memprofSampling false)
+    Rt/UNIT)
+  (method ^:public ^:static caml_memprof_discard [t] Rt/UNIT))

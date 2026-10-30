@@ -1,0 +1,128 @@
+;; BLAKE2b's state (runtime/blake2.c): the OCaml value of a Blake2 context is a Custom "_blake2"
+;; holding this object. Ported from oi's ext_digest.go (blake2Ctx).
+
+(in-ns 'ocaml.rt)
+
+(import '(java.util Arrays))
+
+(defclass ^:public ^:final Blake2
+  (field ^:public ^long/1 h)
+  (field ^:public ^long/1 length)
+  (field ^:public ^byte/1 buffer)
+  (field ^:public ^int numbytes)
+
+  (field ^:public ^:static ^:final ^long/1 IV (new long/1 [(Long/parseUnsignedLong "6a09e667f3bcc908" 16)
+                                                           (Long/parseUnsignedLong "bb67ae8584caa73b" 16)
+                                                           (Long/parseUnsignedLong "3c6ef372fe94f82b" 16)
+                                                           (Long/parseUnsignedLong "a54ff53a5f1d36f1" 16)
+                                                           (Long/parseUnsignedLong "510e527fade682d1" 16)
+                                                           (Long/parseUnsignedLong "9b05688c2b3e6c1f" 16)
+                                                           (Long/parseUnsignedLong "1f83d9abfb41bd6b" 16)
+                                                           (Long/parseUnsignedLong "5be0cd19137e2179" 16)]))
+  ;; the 12 rounds' permutations, 16 entries each
+  (field ^:public ^:static ^:final ^byte/1 SIGMA
+    (new byte/1 [0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15
+                 14 10 4 8 9 15 13 6 1 12 0 2 11 7 5 3
+                 11 8 12 0 5 2 15 13 10 14 3 6 7 1 9 4
+                 7 9 3 1 13 12 11 14 2 6 5 10 4 0 15 8
+                 9 0 5 7 2 4 10 15 14 1 11 12 6 8 3 13
+                 2 12 6 10 0 11 8 3 4 13 7 5 15 14 1 9
+                 12 5 1 15 14 13 4 10 0 7 6 3 9 2 8 11
+                 13 11 7 14 12 1 3 9 5 0 15 4 8 6 2 10
+                 6 15 14 9 11 3 0 8 12 2 13 7 1 4 10 5
+                 10 2 8 4 7 6 1 5 15 11 9 14 3 12 13 0
+                 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15
+                 14 10 4 8 9 15 13 6 1 12 0 2 11 7 5 3]))
+
+  (constructor ^:public [this ^int hashlen ^byte/1 key]
+    (set! (.-h this) (.clone IV))
+    (set! (.-length this) (new long/1 2))
+    (set! (.-buffer this) (new byte/1 128))
+    (set! (.-numbytes this) 0)
+    (let [keylen0 (alength key)]
+      (aset h 0 (bit-xor (aget h 0)
+                         (bit-or (bit-or 16842752 (bit-shift-left (long keylen0) 8)) (long hashlen))))
+      (when (> keylen0 0)
+        (let [keylen (if (> keylen0 64) 64 keylen0)]
+          (System/arraycopy key 0 buffer 0 keylen)
+          (set! numbytes 128)))))
+
+  (method ^:public ^:static le64 ^long [^byte/1 d ^int off]
+    (let [^:mutable ^long x 0]
+      (loop [^int i 7]
+        (when (>= i 0)
+          (set! x (bit-or (bit-shift-left x 8) (bit-and (long (aget d (unchecked-add-int off i))) 255)))
+          (recur (unchecked-dec-int i))))
+      x))
+
+  (method ^:private ^:static mix ^void [^long/1 v ^int a ^int b ^int c ^int d ^long x ^long y]
+    (aset v a (unchecked-add (aget v a) (unchecked-add (aget v b) x)))
+    (aset v d (Long/rotateRight (bit-xor (aget v d) (aget v a)) 32))
+    (aset v c (unchecked-add (aget v c) (aget v d)))
+    (aset v b (Long/rotateRight (bit-xor (aget v b) (aget v c)) 24))
+    (aset v a (unchecked-add (aget v a) (unchecked-add (aget v b) y)))
+    (aset v d (Long/rotateRight (bit-xor (aget v d) (aget v a)) 16))
+    (aset v c (unchecked-add (aget v c) (aget v d)))
+    (aset v b (Long/rotateRight (bit-xor (aget v b) (aget v c)) 63)))
+
+  (method ^:public compress ^void [this ^byte/1 data ^int off ^int nb ^boolean last]
+    (aset length 0 (unchecked-add (aget length 0) (long nb)))
+    (when (< (Long/compareUnsigned (aget length 0) (long nb)) 0)
+      (aset length 1 (unchecked-inc (aget length 1))))
+    (let [v (new long/1 16) m (new long/1 16)]
+      (System/arraycopy h 0 v 0 8)
+      (System/arraycopy IV 0 v 8 8)
+      (aset v 12 (bit-xor (aget v 12) (aget length 0)))
+      (aset v 13 (bit-xor (aget v 13) (aget length 1)))
+      (when last (aset v 14 (bit-not (aget v 14))))
+      (loop [^int i 0]
+        (when (< i 16)
+          (aset m i (Blake2/le64 data (unchecked-add-int off (unchecked-multiply-int i 8))))
+          (recur (unchecked-inc-int i))))
+      (loop [^int r 0]
+        (when (< r 12)
+          (let [s (unchecked-multiply-int r 16)]
+            (Blake2/mix v 0 4 8 12 (aget m (aget SIGMA s)) (aget m (aget SIGMA (unchecked-add-int s 1))))
+            (Blake2/mix v 1 5 9 13 (aget m (aget SIGMA (unchecked-add-int s 2))) (aget m (aget SIGMA (unchecked-add-int s 3))))
+            (Blake2/mix v 2 6 10 14 (aget m (aget SIGMA (unchecked-add-int s 4))) (aget m (aget SIGMA (unchecked-add-int s 5))))
+            (Blake2/mix v 3 7 11 15 (aget m (aget SIGMA (unchecked-add-int s 6))) (aget m (aget SIGMA (unchecked-add-int s 7))))
+            (Blake2/mix v 0 5 10 15 (aget m (aget SIGMA (unchecked-add-int s 8))) (aget m (aget SIGMA (unchecked-add-int s 9))))
+            (Blake2/mix v 1 6 11 12 (aget m (aget SIGMA (unchecked-add-int s 10))) (aget m (aget SIGMA (unchecked-add-int s 11))))
+            (Blake2/mix v 2 7 8 13 (aget m (aget SIGMA (unchecked-add-int s 12))) (aget m (aget SIGMA (unchecked-add-int s 13))))
+            (Blake2/mix v 3 4 9 14 (aget m (aget SIGMA (unchecked-add-int s 14))) (aget m (aget SIGMA (unchecked-add-int s 15)))))
+          (recur (unchecked-inc-int r))))
+      (loop [^int i 0]
+        (when (< i 8)
+          (aset h i (bit-xor (aget h i) (bit-xor (aget v i) (aget v (unchecked-add-int i 8)))))
+          (recur (unchecked-inc-int i))))))
+
+  (method ^:public update ^void [this ^byte/1 data0 ^int ofs0 ^int len0]
+    (label :done
+      (let [^:mutable ^int ofs ofs0 ^:mutable ^int len len0]
+        (when (> numbytes 0)
+          (let [n (unchecked-subtract-int 128 numbytes)]
+            (when (<= len n)
+              (System/arraycopy data0 ofs buffer numbytes len)
+              (set! numbytes (unchecked-add-int numbytes len))
+              (break :done nil))
+            (System/arraycopy data0 ofs buffer numbytes n)
+            (.compress this buffer 0 128 false)
+            (set! ofs (unchecked-add-int ofs n))
+            (set! len (unchecked-subtract-int len n))))
+        (while (> len 128)
+          (.compress this data0 ofs 128 false)
+          (set! ofs (unchecked-add-int ofs 128))
+          (set! len (unchecked-subtract-int len 128)))
+        (System/arraycopy data0 ofs buffer 0 len)
+        (set! numbytes len))))
+
+  (method ^:public fin ^byte/1 [this ^int hashlen]
+    (Arrays/fill buffer numbytes 128 (unchecked-byte 0))
+    (.compress this buffer 0 numbytes true)
+    (let [out (new byte/1 hashlen)]
+      (loop [^int i 0]
+        (when (< i hashlen)
+          (aset out i (unchecked-byte (unsigned-bit-shift-right (aget h (unchecked-divide-int i 8))
+                                                               (unchecked-multiply-int 8 (unchecked-remainder-int i 8)))))
+          (recur (unchecked-inc-int i))))
+      out)))

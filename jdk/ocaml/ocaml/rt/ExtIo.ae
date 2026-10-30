@@ -1,0 +1,186 @@
+;; The channel externals (runtime/io.c: caml_ml_open_descriptor_in/out, caml_ml_output*,
+;; caml_ml_input*, flush, seek, pos, size, close...), caml_sys_open and caml_sys_close over the file
+;; descriptor table (class Fd), and caml_output_value / caml_input_value over the channels
+;; (extern.c, intern.c: Marshal's bytes). Ported from oi's ext_io.go, ext_marshal_chan.go and the
+;; two externals of ext_sys.go. A channel is the class Channel; its OCaml value a Custom "_chan".
+;;
+;; Not externals but the runtime's own: flushStd (at_exit and the fatal error path: flushes every
+;; open output channel, ignoring errors; oi's FlushStd) and reset (forgets every channel and
+;; descriptor of the previous program, for a runner that runs many programs in one process).
+
+(in-ns 'ocaml.rt)
+
+(defclass ^:public ^:final ExtIo
+
+  ;; ---- helpers
+
+  (method ^:public ^:static chan ^Channel [v]
+    (if (and (instance? Custom v) (instance? Channel (.-v (cast Custom v))))
+      (cast Channel (.-v (cast Custom v)))
+      (throw (Rt/internal (java-str "not a channel: " (Rt/describe v))))))
+  ;; the range ofs, n of a byte string: Invalid_argument "index out of bounds" otherwise
+  (method ^:public ^:static chk ^void [b o n]
+    (let [ofs (Rt/l o) len (Rt/l n)]
+      (when (or (< ofs 0) (< len 0) (> (unchecked-add ofs len) (alength (cast byte/1 b))))
+        (throw (Rt/invalidArg "index out of bounds")))))
+  (method ^:public ^:static flushStd ^void [] (Channel/flushStd))
+  (method ^:public ^:static reset ^void []
+    (.clear Channel/all)
+    (Fd/reset))
+
+  ;; ---- io.c
+
+  (method ^:public ^:static caml_ml_open_descriptor_in [fd] (.-cust (Channel. (Rt/ii fd) false)))
+  (method ^:public ^:static caml_ml_open_descriptor_out [fd] (.-cust (Channel. (Rt/ii fd) true)))
+  (method ^:public ^:static caml_ml_set_channel_name [c name] (set! (.-name (ExtIo/chan c)) name) Rt/UNIT)
+  (method ^:public ^:static caml_ml_out_channels_list [dummy]
+    (let [^:mutable ^Object res (Long/valueOf 0)]
+      ;; built oldest first by consing, ending with the newest at the head
+      (loop [^int i (unchecked-dec-int (.size Channel/all))]
+        (when (>= i 0)
+          (let [c (cast Channel (.get Channel/all i))]
+            (when (and (.-isOut c) (not (== (.-fd c) -1)))
+              (set! res (Rt/cons (.-cust c) res))))
+          (recur (unchecked-dec-int i))))
+      res))
+  (method ^:public ^:static caml_channel_descriptor [c]
+    (let [ch (ExtIo/chan c)]
+      (when (== (.-fd ch) -1) (throw (Fd/sysError 9 nil)))
+      (Long/valueOf (long (.-fd ch)))))
+  (method ^:public ^:static caml_ml_close_channel [c] (.close (ExtIo/chan c)) Rt/UNIT)
+  (method ^:public ^:static caml_ml_channel_size [c] (Rt/wrap (.size (ExtIo/chan c))))
+  (method ^:public ^:static caml_ml_channel_size_64 [c] (I64. (.size (ExtIo/chan c))))
+  (method ^:public ^:static caml_ml_set_binary_mode [c b] Rt/UNIT)
+  (method ^:public ^:static caml_ml_is_binary_mode [c]
+    (Rt/b (== 0 (bit-and (.-flags (ExtIo/chan c)) 2))))
+  (method ^:public ^:static caml_ml_flush [c]
+    (let [ch (ExtIo/chan c)]
+      (while (not (.flushPartial ch false)))
+      Rt/UNIT))
+  (method ^:public ^:static caml_ml_flush_partial [c] (Rt/b (.flushPartial (ExtIo/chan c) false)))
+  (method ^:public ^:static caml_ml_set_buffered [c b]
+    (let [ch (ExtIo/chan c)]
+      (if (Rt/t b)
+        (set! (.-flags ch) (bit-and-int (.-flags ch) (bit-not-int 8)))
+        (do (set! (.-flags ch) (bit-or-int (.-flags ch) 8))
+            (when (not (== (.-fd ch) -1)) (.flush ch))))
+      Rt/UNIT))
+  (method ^:public ^:static caml_ml_is_buffered [c]
+    (Rt/b (== 0 (bit-and (.-flags (ExtIo/chan c)) 8))))
+  (method ^:public ^:static caml_ml_output_char [c ch]
+    (let [x (ExtIo/chan c)]
+      (.putch x (Rt/ii ch))
+      (.flushIfUnbuffered x)
+      Rt/UNIT))
+  (method ^:public ^:static caml_ml_output_int [c w]
+    (let [x (ExtIo/chan c)]
+      (.putword x (Rt/ii w))
+      (.flushIfUnbuffered x)
+      Rt/UNIT))
+  (method ^:public ^:static caml_ml_output [c b o n]
+    (let [x (ExtIo/chan c)]
+      (ExtIo/chk b o n)
+      (.writeBytes x (cast byte/1 b) (Rt/ii o) (Rt/ii n))
+      (.flushIfUnbuffered x)
+      Rt/UNIT))
+  (method ^:public ^:static caml_ml_output_bytes [c b o n] (ExtIo/caml_ml_output c b o n))
+  (method ^:public ^:static caml_ml_output_bigarray [c ba pos n]
+    (let [x (ExtIo/chan c) d (.-data (BigArray/of ba)) p (unchecked-add-int (Rt/ii pos) (.-off (BigArray/of ba))) len (Rt/ii n)
+          buf (new byte/1 len)]
+      (loop [^int i 0]
+        (when (< i len)
+          (aset buf i (unchecked-byte (let [e (aget d (unchecked-add-int p i))] (if (instance? Long e) (Rt/l e) (Rt/bv e)))))
+          (recur (unchecked-inc-int i))))
+      (.writeBytes x buf 0 len)
+      Rt/UNIT))
+  (method ^:public ^:static caml_ml_seek_out [c p] (.seekOut (ExtIo/chan c) (Rt/l p)) Rt/UNIT)
+  (method ^:public ^:static caml_ml_seek_out_64 [c p] (.seekOut (ExtIo/chan c) (Rt/bv p)) Rt/UNIT)
+  (method ^:public ^:static caml_ml_pos_out [c] (Rt/wrap (.posOut (ExtIo/chan c))))
+  (method ^:public ^:static caml_ml_pos_out_64 [c] (I64. (.posOut (ExtIo/chan c))))
+  (method ^:public ^:static caml_ml_input_char [c] (Long/valueOf (long (.getch (ExtIo/chan c)))))
+  (method ^:public ^:static caml_ml_input_int [c] (Long/valueOf (long (.getword (ExtIo/chan c)))))
+  (method ^:public ^:static caml_ml_input [c b o n]
+    (let [x (ExtIo/chan c)]
+      (ExtIo/chk b o n)
+      (Long/valueOf (long (.getblock x (cast byte/1 b) (Rt/ii o) (Rt/ii n))))))
+  (method ^:public ^:static caml_ml_input_bigarray [c ba pos n]
+    (let [x (ExtIo/chan c) d (.-data (BigArray/of ba)) p (unchecked-add-int (Rt/ii pos) (.-off (BigArray/of ba))) len (Rt/ii n)
+          buf (new byte/1 len)
+          got (.getblock x buf 0 len)]
+      (loop [^int i 0]
+        (when (< i got)
+          (aset d (unchecked-add-int p i) (Long/valueOf (bit-and (long (aget buf i)) 255)))
+          (recur (unchecked-inc-int i))))
+      (Long/valueOf (long got))))
+  (method ^:public ^:static caml_ml_seek_in [c p] (.seekIn (ExtIo/chan c) (Rt/l p)) Rt/UNIT)
+  (method ^:public ^:static caml_ml_seek_in_64 [c p] (.seekIn (ExtIo/chan c) (Rt/bv p)) Rt/UNIT)
+  (method ^:public ^:static caml_ml_pos_in [c] (Rt/wrap (.posIn (ExtIo/chan c))))
+  (method ^:public ^:static caml_ml_pos_in_64 [c] (I64. (.posIn (ExtIo/chan c))))
+  (method ^:public ^:static caml_ml_input_scan_line [c] (Long/valueOf (long (.scanLine (ExtIo/chan c)))))
+
+  ;; ---- ext_sys.go: open and close
+
+  (method ^:public ^:static caml_sys_open [path flags perm]
+    (let [p (Rt/utf8 path)
+          ^:mutable ^long bits 0
+          ^:mutable ^Object l flags]
+      (when (>= (.indexOf p 0) 0) (throw (Fd/sysError 2 p)))
+      (while (instance? Block l)
+        (let [b (cast Block l)]
+          (set! bits (bit-or bits (switch (Rt/ii (aget (.-f b) 0))
+                                    1 1
+                                    2 3
+                                    3 4
+                                    4 8
+                                    5 16
+                                    0)))
+          (set! l (aget (.-f b) 1))))
+      (let [r (Fd/open (ExtSys/resolve p) bits)]
+        (when (< r 0) (throw (Fd/sysError (unchecked-negate r) p)))
+        (Long/valueOf r))))
+  (method ^:public ^:static caml_sys_close [fd]
+    (let [r (Fd/close (Rt/l fd))]
+      (when (< r 0) (throw (Fd/sysError (unchecked-negate r) nil)))
+      Rt/UNIT))
+
+  ;; ---- extern.c, intern.c over the channels
+
+  (method ^:public ^:static caml_output_value [c v flags]
+    (let [x (ExtIo/chan c) b (Marshal/toBytes v flags)]
+      (.writeBytes x b 0 (alength b))
+      Rt/UNIT))
+  (method ^:public ^:static caml_input_value [c]
+    (let [x (ExtIo/chan c) head (.readFull x 20)
+          magic (bit-and (bit-or (bit-or (bit-shift-left (bit-and (long (aget head 0)) 255) 24)
+                                         (bit-shift-left (bit-and (long (aget head 1)) 255) 16))
+                                 (bit-or (bit-shift-left (bit-and (long (aget head 2)) 255) 8)
+                                         (bit-and (long (aget head 3)) 255)))
+                         4294967295)]
+      (cond
+        (== magic 2224400062)
+        (let [n (ExtIo/be head 4 4)
+              data (.readFull x (unchecked-int n))
+              all (new byte/1 (unchecked-add-int 20 (unchecked-int n)))]
+          (System/arraycopy head 0 all 0 20)
+          (System/arraycopy data 0 all 20 (unchecked-int n))
+          (Marshal/fromBytes all 0))
+        (== magic 2224400063)
+        (let [rest (.readFull x 12)
+              h (new byte/1 32)]
+          (System/arraycopy head 0 h 0 20)
+          (System/arraycopy rest 0 h 20 12)
+          (let [n (ExtIo/be h 8 8)
+                data (.readFull x (unchecked-int n))
+                all (new byte/1 (unchecked-add-int 32 (unchecked-int n)))]
+            (System/arraycopy h 0 all 0 32)
+            (System/arraycopy data 0 all 32 (unchecked-int n))
+            (Marshal/fromBytes all 0)))
+        :else (throw (Rt/failwith "input_value: bad object")))))
+  ;; a big-endian unsigned integer of w bytes at ofs
+  (method ^:public ^:static be ^long [^byte/1 b ^int ofs ^int w]
+    (let [^:mutable ^long x 0]
+      (loop [^int i 0]
+        (when (< i w)
+          (set! x (bit-or (bit-shift-left x 8) (bit-and (long (aget b (unchecked-add-int ofs i))) 255)))
+          (recur (unchecked-inc-int i))))
+      x)))

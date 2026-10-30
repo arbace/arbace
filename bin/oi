@@ -32,9 +32,20 @@
 #                                  pass, or fail with a reason; judged against test/ocaml/check-oi.edn
 #                                  (--record rewrites it) and test/ocaml/divergences.edn (every non-pass
 #                                  in a class) by test/ocaml/oi_check.ae on stage 0
-#   bin/oi divergences             the recorded results judged against the classes alone (no runs)
+#   bin/oi divergences [--aot]     the recorded results judged against the classes alone (no runs)
+#   bin/oi aot-lib                 AOT (O6, OC7 (a)): the stdlib's Lambda (bin/oi stdlib's) translated by
+#                                  arbace.o2j into Java forms over the runtime jdk/ocaml/, into .tmp/o6/lib/
+#                                  (kept by the translator's, the runtime's and the stdlib's key)
+#   bin/oi aot-run FILE.ml [ARG...]
+#                                  FILE's Lambda translated with the stdlib's and run at the light level: the
+#                                  Java forms defined by the Java forms' interpreter on stage 0 (test/ocaml/o2j/run.ae)
+#   bin/oi check --aot [--record] [--jobs N] [--only RE]
+#                                  the run corpus translated and run at the light level, many programs a process
+#                                  (OC88), against ocamlopt's recorded runs and oi's: test/ocaml/check-aot.edn,
+#                                  classes test/ocaml/divergences-aot.edn, by test/ocaml/o2j_check.ae; the compiled
+#                                  level (j2g, bin/build-go) is the heavy list's (survey, "As built: O6 (write-ahead)")
 #
-# Environment: OI_JOBS (default 3), OI_TIMEOUT (seconds a program, default 120), OI_GOMEMLIMIT (default
+# Environment: O2J_JOBS (check --aot's processes, default 2), O2J_GOMEMLIMIT (default 900MiB), OI_JOBS (default 3), OI_TIMEOUT (seconds a program, default 120), OI_GOMEMLIMIT (default
 # 400MiB: the light tier), ARBACE_HOST_EXE (stage 0 for the judgment and repr/go's print).
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -242,12 +253,13 @@ cmd_corpus() {
 }
 
 opts() {
-  ONLY=""; RECORD=0
+  ONLY=""; RECORD=0; AOT=0
   while [ $# -gt 0 ]; do
     case $1 in
-      --jobs) JOBS=$2; shift 2 ;;
+      --jobs) JOBS=$2; OPT_JOBS=$2; shift 2 ;;
       --only) ONLY=$2; shift 2 ;;
       --record) RECORD=1; shift ;;
+      --aot) AOT=1; shift ;;
       *) die "unknown option $1" ;;
     esac
   done
@@ -318,7 +330,9 @@ oi_one() {
 }
 
 cmd_check() {
-  opts "$@"; cmd_stdlib > "$OI_DIR/stdlib.log"; cmd_corpus > "$OI_DIR/corpus.log"; cmd_build
+  opts "$@"
+  if [ "$AOT" = 1 ]; then cmd_check_aot; return; fi
+  cmd_stdlib > "$OI_DIR/stdlib.log"; cmd_corpus > "$OI_DIR/corpus.log"; cmd_build
   export -f oi_one; export OI_DIR TESTS TESTLIB TIMEOUT EXE LIB OCD GOMEMLIMIT
   local out=$OI_DIR/check.tsv
   selected | awk -F'\t' '$2 == "run" { printf "%s%c%s%c%s%c%s%c%s%c", $1, 0, $3, 0, $4, 0, $5, 0, $6, 0 }' | xargs -0 -n 5 -P "$JOBS" bash -c 'oi_one "$@"' _ > "$out.new"
@@ -329,7 +343,148 @@ cmd_check() {
 }
 
 cmd_divergences() {
+  if [ "${1:-}" = --aot ]; then
+    "$(arbace_exe)" "$root/test/ocaml/o2j_check.ae" divergences "$root/test/ocaml/check-aot.edn" "$root/test/ocaml/divergences-aot.edn"; return
+  fi
   "$(arbace_exe)" "$root/test/ocaml/oi_check.ae" divergences "$RESULTS" "$CLASSES"
+}
+
+
+# ---- AOT: o2j (O6)
+
+O2J=$root/.tmp/o6
+O2J_LIB=$O2J/lib
+O2J_RT=$root/jdk/ocaml/ocaml/rt
+
+o2j_key() {
+  { cat "$LIB/key"; cat "$root/arbace/o2j.ae" "$root/jdk/ocaml/ocaml/rt.ae" "$O2J_RT"/*.ae | sha256sum; } | sha256sum | cut -d' ' -f1
+}
+
+o2j() {
+  ARBACE_PATH=$root O2J_RT=$O2J_RT GOMEMLIMIT=${O2J_GOMEMLIMIT:-900MiB} GOMAXPROCS=1 "$(arbace_exe)" -m arbace.o2j "$@"
+}
+
+cmd_aot_lib() {
+  cmd_stdlib > "$OI_DIR/stdlib.log"
+  local key; key=$(o2j_key)
+  if [ -f "$O2J_LIB/key" ] && [ "$(cat "$O2J_LIB/key")" = "$key" ]; then echo "oi: aot-lib up to date ($O2J_LIB)"; return 0; fi
+  rm -rf "$O2J_LIB"; mkdir -p "$O2J_LIB"
+  o2j lib "$LIB" "$O2J_LIB" > "$O2J/lib-missing.txt"
+  echo "$key" > "$O2J_LIB/key"
+  echo "oi: aot-lib: $(ls "$O2J_LIB" | grep -c '\.ae$') units, $(du -sh "$O2J_LIB" | cut -f1); the runtime lacks $(awk -F'\t' '/^missing/{print $3}' "$O2J/lib-missing.txt" | sort -u | wc -l) of the externals and primitives they name ($O2J/lib-missing.txt)"
+}
+
+o2j_run() {
+  ARBACE_PATH=$root/jdk/ocaml TMPDIR=$O2J/tmp GOMEMLIMIT=${O2J_GOMEMLIMIT:-900MiB} GOMAXPROCS=1 "$(arbace_exe)" "$root/test/ocaml/o2j/run.ae" "$@"
+}
+
+cmd_aot_run() {
+  [ $# -ge 1 ] || die "usage: bin/oi aot-run FILE.ml [ARG...]"
+  local file=$1; shift
+  cmd_aot_lib > "$O2J/aot-lib.log"
+  mkdir -p "$O2J/tmp"
+  local d; d=$(mktemp -d "$O2J/run.XXXXXX")
+  local u; u=$(basename "$file" .ml); u=$(echo "${u:0:1}" | tr a-z A-Z)${u:1}
+  dump "$d/$u.ae" "$(cd "$(dirname "$file")" && pwd)/$(basename "$file")" -I .
+  if grep -q '^(ocaml/error' "$d/$u.ae"; then cat "$d/$u.ae" >&2; rm -rf "$d"; exit 2; fi
+  o2j prog "$O2J_LIB" "$d/out" "$d/$u.ae" > "$d/translate.log"
+  local st=0
+  o2j_run $(cat "$d/out/files.txt") -- "$@" || st=$?
+  rm -rf "$d"
+  exit $st
+}
+
+# o2j_dump ID FLAGS INCS: the program's Lambda (as oi_one dumps it) into .tmp/o6/run/ID/
+o2j_dump() {
+  local id=$1 flags=$2 incs=$3
+  local d=$O2J/run/$id src=$TESTS/$id.ml
+  rm -rf "$d"; mkdir -p "$d"
+  local base; base=$(basename "$id")
+  local u; u=$(echo "${base:0:1}" | tr a-z A-Z)${base:1}
+  local I=""; [ -n "$incs" ] && I="-I $TESTLIB"
+  cp "$src" "$d/"
+  (cd "$d" && "$OCD" --mode lambda --simplify $flags $I --prefix "$base" --file "$base.ml" "$base.ml" > "$u.ae" 2> "dump.log")
+  rm -f "$d/$base.cmi" "$d/$base.cmo"
+}
+
+# o2j_shard LIST RESULTS: LIST's programs in batches (run.ae --batch), again after a timeout or a
+# crash for the programs left, the one that stopped the batch written with its status
+o2j_shard() {
+  local list=$1 res=$2 left=$1.left st
+  cp "$list" "$left"
+  : > "$res"
+  while [ -s "$left" ]; do
+    st=0
+    o2j_run --batch "$left" "$res" "$TIMEOUT" "$O2J_LIB/" > "$left.log" 2>&1 || st=$?
+    # the programs of left without a result
+    awk -F'\t' 'NR==FNR { done[$1] = 1; next } !($1 in done)' "$res" "$left" > "$left.new"
+    if [ "$st" != 0 ] && [ "$st" != 3 ] && [ -s "$left.new" ]; then
+      printf '%s\tcrash %s\t0\n' "$(head -1 "$left.new" | cut -f1)" "$st" >> "$res"
+      tail -5 "$left.log" | tr '\n\t' '  ' >> "$O2J/crash.log"; echo >> "$O2J/crash.log"
+      tail -n +2 "$left.new" > "$left"
+    else
+      mv "$left.new" "$left"
+    fi
+  done
+  rm -f "$left" "$left.new" "$left.log"
+}
+
+cmd_check_aot() {
+  cmd_stdlib > "$OI_DIR/stdlib.log"; cmd_corpus > "$OI_DIR/corpus.log"; cmd_aot_lib > "$O2J/aot-lib.log"
+  local jobs=${O2J_JOBS:-2}
+  [ -n "${OPT_JOBS:-}" ] && jobs=$OPT_JOBS
+  mkdir -p "$O2J/tmp" "$O2J/run"; : > "$O2J/crash.log"
+  export -f o2j_dump; export O2J TESTS TESTLIB OCD
+  selected | awk -F'\t' '$2 == "run" { printf "%s%c%s%c%s%c", $1, 0, $3, 0, $4, 0 }' | xargs -0 -n 3 -P 4 bash -c 'o2j_dump "$@"' _
+  # translate: one stage 0 process for all
+  local tl=$O2J/translate.list bl=$O2J/batch.list
+  : > "$tl"; : > "$bl"
+  # (\037 between the fields: read collapses empty fields between tabs)
+  selected | awk -F'\t' '$2 == "run"' | tr '\t' '\037' | while IFS=$'\037' read -r id kind flags incs args env; do
+    local base u d; base=$(basename "$id"); u=$(echo "${base:0:1}" | tr a-z A-Z)${base:1}; d=$O2J/run/$id
+    if grep -q '^(ocaml/error' "$d/$u.ae"; then continue; fi
+    printf '%s\t%s%s\n' "$d/out" "${incs:+$TESTLIB/Testing.ae	}" "$d/$u.ae" >> "$tl"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$d/o2j.out" "$d/out/files.txt" "$(echo "$u" | tr A-Z a-z)" "$(echo "$args" | tr ' ' '\t')" "$env" >> "$bl"
+  done
+  o2j progs "$O2J_LIB" "$tl" > "$O2J/translate.log" 2>&1 || { tail -5 "$O2J/translate.log"; die "translate"; }
+  # the programs with an environment run alone; the rest in shards
+  local i
+  awk -F'\t' '$NF == ""' "$bl" | sed 's/\t$//' > "$bl.batch"
+  rm -f "$O2J"/shard.*
+  split -n "l/$jobs" -d "$bl.batch" "$O2J/shard."
+  for i in "$O2J"/shard.[0-9]*; do o2j_shard "$i" "$i.res" & done
+  wait
+  cat "$O2J"/shard.*.res > "$O2J/results.tsv"
+  awk -F'\t' '$NF != "" { a = ""; for (i = 5; i < NF; i++) a = a (a == "" ? "" : " ") $i; print $1 "\037" $2 "\037" $3 "\037" a "\037" $NF }' "$bl" |
+  while IFS=$'\037' read -r id out files args env; do
+    local st=0 t0 t1; t0=$(date +%s.%N)
+    (cd "$(dirname "$out")" && for kv in $env; do export "$kv"; done; o2j_run $(cat "$files") -- $args) > "$out" 2>&1 || st=$?
+    t1=$(date +%s.%N)
+    printf '%s\t%s\t%s\n' "$id" "$st" "$(echo "$t1 - $t0" | bc)" >> "$O2J/results.tsv"
+  done
+  # check.tsv as oi's: ID STATUS SHA BYTES SECONDS NOTE
+  local out=$O2J/check-aot.tsv
+  : > "$out.new"
+  selected | awk -F'\t' '$2 == "run" {print $1}' | while read -r id; do
+    local base u d r st secs note=""; base=$(basename "$id"); u=$(echo "${base:0:1}" | tr a-z A-Z)${base:1}; d=$O2J/run/$id
+    if grep -q '^(ocaml/error' "$d/$u.ae"; then
+      printf '%s\t-\t-\t0\t0\tdump: %s\n' "$id" "$(head -c 200 "$d/$u.ae" | tr '\n\t' '  ')" >> "$out.new"; continue
+    fi
+    r=$(grep -m1 -F "refused	$d/out	" "$O2J/translate.log" | cut -f3 || true)
+    if [ -n "$r" ]; then printf '%s\t-\t-\t0\t0\trefused: %s\n' "$id" "$r" >> "$out.new"; continue; fi
+    st=$(awk -F'\t' -v id="$id" '$1 == id {print $2}' "$O2J/results.tsv" | head -1)
+    secs=$(awk -F'\t' -v id="$id" '$1 == id {print $3}' "$O2J/results.tsv" | head -1)
+    [ -f "$d/o2j.out" ] || : > "$d/o2j.out"
+    note=$(grep -a -m1 -o 'o2j: .*' "$d/o2j.out" | head -c 300 | tr '\t' ' ' || true)
+    case $st in timeout) note="timeout ${TIMEOUT}s"; st=124 ;; crash*) note="$st"; st=125 ;; "") note="no result"; st=125 ;; esac
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$st" "$(sha256sum < "$d/o2j.out" | cut -d' ' -f1)" "$(wc -c < "$d/o2j.out")" "$secs" "$note" >> "$out.new"
+    rm -f "$d/$u.ae"
+  done
+  LC_ALL=C sort "$out.new" > "$out"; rm -f "$out.new"
+  local mode=judge; [ "$RECORD" = 1 ] && mode=record
+  [ -n "$ONLY" ] && mode=$mode-only
+  "$(arbace_exe)" "$root/test/ocaml/o2j_check.ae" "$mode" "$out" "$OI_DIR/corpus.tsv" "$REFS" "$OI_DIR/check.tsv" \
+    "$root/test/ocaml/check-aot.edn" "$root/test/ocaml/divergences-aot.edn"
 }
 
 cmd=${1:-}
@@ -345,6 +500,8 @@ case $cmd in
   corpus) cmd_corpus ;;
   record-ref) cmd_record_ref "$@" ;;
   check) cmd_check "$@" ;;
-  divergences) cmd_divergences ;;
+  divergences) cmd_divergences "$@" ;;
+  aot-lib) cmd_aot_lib ;;
+  aot-run) cmd_aot_run "$@" ;;
   *) die "unknown command $cmd" ;;
 esac

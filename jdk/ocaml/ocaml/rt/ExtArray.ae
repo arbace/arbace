@@ -1,0 +1,220 @@
+;; OCaml's array primitives (runtime/array.c), ported from oi's ext_array.go: caml_array_*,
+;; caml_floatarray_*, caml_uniform_array_*, caml_make_vect, caml_make_array ... An empty array is
+;; a Block of tag 0 without fields; a non-empty float array is a double/1.
+
+(in-ns 'ocaml.rt)
+
+(import '(java.util Arrays))
+
+(defclass ^:public ^:final ExtArray
+
+  (field ^:static ^:final ^long MAX_WOSIZE 18014398509481983)
+
+  (method ^:static emptyArray [] (Block. 0 (new Object/1 0)))
+
+  ;; the floats of a float array (an empty one for the empty array)
+  (method ^:static floatsOf ^double/1 [v]
+    (cond (instance? double/1 v) (cast double/1 v)
+          (and (instance? Block v) (== (alength (.-f (cast Block v))) 0)) (new double/1 0)
+          :else (throw (Rt/internal (java-str "not a float array: " (Rt/describe v))))))
+
+  (method ^:static fieldsOf ^Object/1 [v]
+    (cond (instance? Block v) (.-f (cast Block v))
+          :else (throw (Rt/internal (java-str "not a block: " (Rt/describe v))))))
+
+  (method ^:static checkNew [^long n ^String msg]
+    (when (or (< n 0) (> n MAX_WOSIZE)) (throw (Rt/invalidArg msg)))
+    (when (> n 2147483639) (throw (Exn. Rt/Out_of_memory))))
+
+  (method ^:static totalLength ^long [^int/1 lengths]
+    (let [^:mutable ^long size 0]
+      (loop [^int i 0]
+        (when (< i (alength lengths))
+          (let [l (long (aget lengths i))]
+            (when (> l (unchecked-subtract 4611686018427387903 size)) (throw (Rt/invalidArg "Array.concat")))
+            (set! size (unchecked-add size l)))
+          (recur (unchecked-inc-int i))))
+      size))
+
+  (method ^:static floatGather [^Object/1 arrays ^int/1 offsets ^int/1 lengths]
+    (let [size (ExtArray/totalLength lengths)]
+      (when (== size 0) (return (ExtArray/emptyArray)))
+      (ExtArray/checkNew size "Array.concat")
+      (let [res (new double/1 (unchecked-int size))
+            ^:mutable ^int at 0]
+        (loop [^int i 0]
+          (when (< i (alength arrays))
+            (when (> (aget lengths i) 0)
+              (System/arraycopy (ExtArray/floatsOf (aget arrays i)) (aget offsets i) res at (aget lengths i))
+              (set! at (unchecked-add-int at (aget lengths i))))
+            (recur (unchecked-inc-int i))))
+        res)))
+
+  (method ^:static uniformGather [^Object/1 arrays ^int/1 offsets ^int/1 lengths]
+    (let [size (ExtArray/totalLength lengths)]
+      (when (== size 0) (return (ExtArray/emptyArray)))
+      (ExtArray/checkNew size "Array.concat")
+      (let [res (new Object/1 (unchecked-int size))
+            ^:mutable ^int at 0]
+        (loop [^int i 0]
+          (when (< i (alength arrays))
+            (when (> (aget lengths i) 0)
+              (System/arraycopy (ExtArray/fieldsOf (aget arrays i)) (aget offsets i) res at (aget lengths i))
+              (set! at (unchecked-add-int at (aget lengths i))))
+            (recur (unchecked-inc-int i))))
+        (Block. 0 res))))
+
+  ;; mode 0: by the first non-empty array's kind, 1 float, 2 uniform
+  (method ^:static gather [^int mode ^Object/1 arrays ^int/1 offsets ^int/1 lengths]
+    (switch mode
+      1 (ExtArray/floatGather arrays offsets lengths)
+      2 (ExtArray/uniformGather arrays offsets lengths)
+      (let [^:mutable ^boolean isFloat false]
+        (label :find
+          (loop [^int i 0]
+            (when (< i (alength arrays))
+              (if (== (Rt/alen (aget arrays i)) 0)
+                (recur (unchecked-inc-int i))
+                (do (set! isFloat (instance? double/1 (aget arrays i))) (break :find))))))
+        (if isFloat
+          (ExtArray/floatGather arrays offsets lengths)
+          (ExtArray/uniformGather arrays offsets lengths)))))
+
+  (method ^:static gatherSub [^int mode a ofs len]
+    (ExtArray/gather mode (new Object/1 [a]) (new int/1 [(Rt/ii ofs)]) (new int/1 [(Rt/ii len)])))
+
+  (method ^:static gatherAppend [^int mode a1 a2]
+    (ExtArray/gather mode (new Object/1 [a1 a2]) (new int/1 [0 0]) (new int/1 [(Rt/alen a1) (Rt/alen a2)])))
+
+  (method ^:static gatherConcat [^int mode al]
+    (let [^:mutable ^int n 0]
+      (loop [^:mutable ^Object l al]
+        (when (instance? Block l) (set! n (unchecked-inc-int n)) (recur (aget (.-f (cast Block l)) 1))))
+      (let [arrays (new Object/1 n) offsets (new int/1 n) lengths (new int/1 n)
+            ^:mutable ^Object l al
+            ^:mutable ^int i 0]
+        (while (instance? Block l)
+          (let [c (cast Block l) a (aget (.-f c) 0)]
+            (aset arrays i a)
+            (aset lengths i (Rt/alen a))
+            (set! i (unchecked-inc-int i))
+            (set! l (aget (.-f c) 1))))
+        (ExtArray/gather mode arrays offsets lengths))))
+
+  ;; ---- get and set
+
+  (method ^:static floatGet [a i ^boolean check]
+    (let [f (ExtArray/floatsOf a) k (Rt/l i)]
+      (when (and check (or (< k 0) (>= k (alength f)))) (throw (Rt/boundError)))
+      (Double/valueOf (aget f (unchecked-int k)))))
+  (method ^:static floatSet [a i x ^boolean check]
+    (let [f (ExtArray/floatsOf a) k (Rt/l i) d (Rt/d x)]
+      (when (and check (or (< k 0) (>= k (alength f)))) (throw (Rt/boundError)))
+      (aset f (unchecked-int k) d)
+      Rt/UNIT))
+  (method ^:static addrGet [a i ^boolean check]
+    (let [f (ExtArray/fieldsOf a) k (Rt/l i)]
+      (when (and check (or (< k 0) (>= k (alength f)))) (throw (Rt/boundError)))
+      (aget f (unchecked-int k))))
+  (method ^:static addrSet [a i x ^boolean check]
+    (let [f (ExtArray/fieldsOf a) k (Rt/l i)]
+      (when (and check (or (< k 0) (>= k (alength f)))) (throw (Rt/boundError)))
+      (aset f (unchecked-int k) x)
+      Rt/UNIT))
+  (method ^:static anyGet [a i ^boolean check]
+    (if (instance? double/1 a) (ExtArray/floatGet a i check) (ExtArray/addrGet a i check)))
+  (method ^:static anySet [a i x ^boolean check]
+    (if (instance? double/1 a) (ExtArray/floatSet a i x check) (ExtArray/addrSet a i x check)))
+
+  (method ^:public ^:static caml_array_get_addr [a i] (ExtArray/addrGet a i true))
+  (method ^:public ^:static caml_floatarray_get [a i] (ExtArray/floatGet a i true))
+  (method ^:public ^:static caml_array_get [a i] (ExtArray/anyGet a i true))
+  (method ^:public ^:static caml_array_set_addr [a i x] (ExtArray/addrSet a i x true))
+  (method ^:public ^:static caml_floatarray_set [a i x] (ExtArray/floatSet a i x true))
+  (method ^:public ^:static caml_array_set [a i x] (ExtArray/anySet a i x true))
+  (method ^:public ^:static caml_floatarray_unsafe_get [a i] (ExtArray/floatGet a i false))
+  (method ^:public ^:static caml_array_unsafe_get [a i] (ExtArray/anyGet a i false))
+  (method ^:public ^:static caml_floatarray_unsafe_set [a i x] (ExtArray/floatSet a i x false))
+  (method ^:public ^:static caml_array_unsafe_set [a i x] (ExtArray/anySet a i x false))
+
+  ;; ---- make
+
+  (method ^:static floatMake [n ^double d]
+    (let [k (Rt/l n)]
+      (when (== k 0) (return (ExtArray/emptyArray)))
+      (ExtArray/checkNew k "Array.make")
+      (let [f (new double/1 (unchecked-int k))]
+        (Arrays/fill f d)
+        f)))
+  (method ^:static floatCreate [n ^String msg]
+    (let [k (Rt/l n)]
+      (when (== k 0) (return (ExtArray/emptyArray)))
+      (ExtArray/checkNew k msg)
+      (new double/1 (unchecked-int k))))
+  (method ^:static uniformMake [n init]
+    (let [k (Rt/l n)]
+      (when (== k 0) (return (ExtArray/emptyArray)))
+      (ExtArray/checkNew k "Array.make")
+      (let [f (new Object/1 (unchecked-int k))]
+        (Arrays/fill f init)
+        (Block. 0 f))))
+  (method ^:static anyMake [n init]
+    (if (instance? Double init)
+      (ExtArray/floatMake n (.doubleValue (cast Double init)))
+      (ExtArray/uniformMake n init)))
+
+  (method ^:public ^:static caml_floatarray_create [n] (ExtArray/floatCreate n "Float.Array.create"))
+  (method ^:public ^:static caml_floatarray_make [n d] (ExtArray/floatMake n (Rt/d d)))
+  (method ^:public ^:static caml_uniform_array_make [n init] (ExtArray/uniformMake n init))
+  (method ^:public ^:static caml_array_make [n init] (ExtArray/anyMake n init))
+  (method ^:public ^:static caml_make_vect [n init] (ExtArray/anyMake n init))
+  (method ^:public ^:static caml_array_create_float [n] (ExtArray/floatCreate n "Float.Array.create"))
+  (method ^:public ^:static caml_make_float_vect [n] (ExtArray/floatCreate n "Float.Array.create"))
+
+  ;; an array of boxed floats becomes a float array
+  (method ^:static ofUniform [init]
+    (let [f (ExtArray/fieldsOf init)]
+      (if (or (== (alength f) 0) (not (instance? Double (aget f 0))))
+        init
+        (let [r (new double/1 (alength f))]
+          (loop [^int i 0]
+            (when (< i (alength f))
+              (aset r i (Rt/d (aget f i)))
+              (recur (unchecked-inc-int i))))
+          r))))
+  (method ^:public ^:static caml_array_of_uniform_array [init] (ExtArray/ofUniform init))
+  (method ^:public ^:static caml_make_array [init] (ExtArray/ofUniform init))
+
+  ;; ---- blit and fill
+
+  (method ^:static blit [a1 o1 a2 o2 n]
+    (let [len (Rt/l n)]
+      (when (== len 0) (return Rt/UNIT))
+      (if (instance? double/1 a2)
+        (System/arraycopy (ExtArray/floatsOf a1) (Rt/ii o1) (cast double/1 a2) (Rt/ii o2) (unchecked-int len))
+        (System/arraycopy (ExtArray/fieldsOf a1) (Rt/ii o1) (ExtArray/fieldsOf a2) (Rt/ii o2) (unchecked-int len)))
+      Rt/UNIT))
+  (method ^:public ^:static caml_floatarray_blit [a1 o1 a2 o2 n] (ExtArray/blit a1 o1 a2 o2 n))
+  (method ^:public ^:static caml_uniform_array_blit [a1 o1 a2 o2 n] (ExtArray/blit a1 o1 a2 o2 n))
+  (method ^:public ^:static caml_array_blit [a1 o1 a2 o2 n] (ExtArray/blit a1 o1 a2 o2 n))
+
+  (method ^:static fill [a ofs n x]
+    (let [o (Rt/ii ofs) e (unchecked-add-int (Rt/ii ofs) (Rt/ii n))]
+      (cond (instance? double/1 a) (Arrays/fill (cast double/1 a) o e (Rt/d x))
+            (instance? Block a) (Arrays/fill (.-f (cast Block a)) o e x))
+      Rt/UNIT))
+  (method ^:public ^:static caml_floatarray_fill [a ofs n x] (ExtArray/fill a ofs n x))
+  (method ^:public ^:static caml_uniform_array_fill [a ofs n x] (ExtArray/fill a ofs n x))
+  (method ^:public ^:static caml_array_fill [a ofs n x] (ExtArray/fill a ofs n x))
+
+  ;; ---- sub, append, concat
+
+  (method ^:public ^:static caml_floatarray_sub [a ofs len] (ExtArray/gatherSub 1 a ofs len))
+  (method ^:public ^:static caml_uniform_array_sub [a ofs len] (ExtArray/gatherSub 2 a ofs len))
+  (method ^:public ^:static caml_array_sub [a ofs len] (ExtArray/gatherSub 0 a ofs len))
+  (method ^:public ^:static caml_floatarray_append [a1 a2] (ExtArray/gatherAppend 1 a1 a2))
+  (method ^:public ^:static caml_uniform_array_append [a1 a2] (ExtArray/gatherAppend 2 a1 a2))
+  (method ^:public ^:static caml_array_append [a1 a2] (ExtArray/gatherAppend 0 a1 a2))
+  (method ^:public ^:static caml_floatarray_concat [al] (ExtArray/gatherConcat 1 al))
+  (method ^:public ^:static caml_uniform_array_concat [al] (ExtArray/gatherConcat 2 al))
+  (method ^:public ^:static caml_array_concat [al] (ExtArray/gatherConcat 0 al)))

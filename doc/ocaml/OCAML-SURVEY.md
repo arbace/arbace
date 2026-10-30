@@ -1180,3 +1180,168 @@ ran on the executable built from it before the edit (the run used the built bina
 of input, and repl-check ran on the rebuilt one). Scratch the survey cites: `.tmp/oi/` in the worktree (`lib/` the stdlib's dumps,
 `stdlib-build/`, `testlib/`, `ref/` and `run/` the programs' outputs, `check.tsv`, `ref.tsv`, `corpus.tsv`, `check8.log` the recorded
 run, `src/` the Go the forms were read from, `sub/` the subagents' sandboxes, `API.md` their brief).
+
+### Decided (OC20-OC71; the user, 2026-10-30)
+
+The user decided OC20-OC71 as the survey recommends, the staged ones at their stage; the gate steps (OC26, OC31, OC42,
+OC56, OC67) and the re-seed items (OC30) in the window after the tag. Where they bind on O6: OC53 (a) (the bytecode
+translation is AOT's input too), OC60 (a) (the simplified Lambda), OC65 (a) (the value representation boxed, `any` in
+oi, Object in the Java forms: O6 keeps it, OC82 (a)), OC66 (a) (ocamlopt's runs are the AOT level's reference), OC69 (a)
+(the depth limit, which O6's compiled level takes over, OC92 (a)), OC61 (a) (the run corpus).
+
+## As built: O6 (write-ahead) (2026-10-30)
+
+Milestone O6, AOT (OC7 (a)): Lambda → Java forms over a runtime `jdk/ocaml/` → j2g. Built on the branch `ocaml-o1` on top of O5
+(`ce89c9de`), under the light tier (no gate, no build of Arbace's executables or of javac's tool, no lock: the translator and the
+checks on stage 0 `target/seed/amd64/arbace`, one Go thread a process, two processes, under 1 GB each). **Write-ahead**: the
+translator and the runtime are built and checked at the **light level** (the Java forms the translator writes, defined and run by
+Arbace's Java forms interpreter, `arbace.classes.interp`, the interpreter of `bin/java-check`'s interp level and of the REPL); the
+**compiled level** (j2g's `--program`, `bin/build-go`, the programs run as Go) is the heavy list's. OC20-OC71 are decided (above);
+OC80-OC95 below are not, and the work followed their recommendations.
+
+**What is in the tree**
+
+- `arbace/o2j.ae`, `arbace.o2j` (OC80): a unit's Lambda dump (bin/oi stdlib's and the programs' dumps, OC60 (a)) to one Java form,
+  the class `ocaml.u.M_<Unit>`: the module block the static field `G`, its initialisation the static method `init`, the constants
+  static fields; each Lambda function a member class `F<n>` extending `ocaml.rt.Closure`, its free variables fields given to its
+  constructor, its code the method `a<arity>` (`an` above six), a letrec's closures made first and their mutual fields set after;
+  an application calls `a<n>` when the closure's arity is the argument count, else `Rt/ap` (partial and over-application); the
+  arguments right to left, then the function (ocamlc's order: `basic/eval_order_*` pass); a function's self-application in tail
+  position a loop (`continue`), other calls calls (OC84 (a)); `staticcatch` a label around its body, `staticraise` a break to it,
+  its variables fresh mutable locals (an or-pattern's identifiers are bound again inside); `switch` Java's switch on the int or the
+  block's tag, `stringswitch` on the Latin-1 string; `trywith` a catch of every Throwable, `Rt/exnValue` the OCaml exception
+  (Stack_overflow for the Java stack's overflow); `send` the object's method table looked up as `caml_get_public_method`; the
+  primitives `Rt`'s methods, the externals the runtime's static methods of the C name and arity, found by reading the runtime's
+  forms (OC90 (a)), or a throw of `Rt/missing` (counted: `missing` lines). Verbs `lib` (the stdlib's 71 units and `deps.edn`),
+  `prog` and `progs` (a program's units, the library units it links in the library's order as oi's Link, its main class
+  `ocaml.u.M__main` with `inits` and `main`, `files.txt`), `unit`, `main`. A tool's namespace, evaluated from the checkout.
+- `jdk/ocaml/` (OC81): OCaml's runtime as Java forms, the package `ocaml.rt` (`jdk/ocaml/ocaml/rt.ae` loads `ocaml/rt/*.ae`, one class a
+  file), 36 classes, 5,000 lines: the values (OC82 (a): `Long` ints, `Double` floats, `byte/1` strings and bytes, `double/1` float
+  arrays and records, `Block`, `Closure`/`Pap`/`Native`, `Integer` int32, `I64`, `NInt`, `Custom`, `Fiber`), `Rt` (the primitives: 63-bit
+  arithmetic, physical equality, blocks, arrays, strings, the boxed integers, application, exceptions and their printing), `Main`
+  (a program's start and end: the inits, at_exit, the uncaught exception as OCaml's runtime prints it, exit, `reset`), `Effects`,
+  `Fiber`, `Gil`, `Dom`, `TState` (OC6 (a) as oi: a fiber a Java thread handing off by `SynchronousQueue`s under one lock, domains
+  Java threads), `ExtCore` (named values, Obj, objects, lazy values, recursive values, atomics, DLS, mutexes, conditions, domains),
+  and the externals ported by four Sonnet subagents from oi's Go (each in a sandbox copy, checked on stage 0 against oi's tests,
+  whose data are the host OCaml's): `ExtNum`, `ExtStr` (1,322 checks: every format, parse and boxed-integer case of oi's tables),
+  `Compare`, `Hash` (oi's 36 golden hashes), `ExtArray`, `Marshal` (53 golden marshallings byte for byte), `ExtIo`, `Channel`, `Fd`
+  (io.c's buffering, descriptors), `ExtDigest`, `Blake2`, `ExtLex` (both lexer engines and the parser engine against oi's traces),
+  `ExtSys`, `ExtGc`, `ExtLxm`, `ExtBigarray`, `BigArray`. **443 externals**, every one the stdlib names (`bin/oi aot-lib`: none missing,
+  no primitive unsupported), none missing in the run corpus's 303 translated programs.
+- `test/ocaml/o2j/run.ae`: the light level's runner on stage 0: one program (`FILE... -- ARG...`), or many in one process (`--batch`,
+  OC88 (a)): the library's units defined once, a program's own each time, its stdout and stderr one stream into its file
+  (`System/setOut`, `setErr`), its working directory its own (`ExtSys/cwd`), the runtime reset, a program past the timeout ending the
+  batch (the driver runs the rest again).
+- `bin/oi aot-lib`, `aot-run FILE.ml`, `check --aot [--record] [--jobs N] [--only RE]`, `divergences --aot`; `test/ocaml/o2j_check.ae` (the
+  judgment, on stage 0: against ocamlopt's recorded runs, OC66 (a), and against oi's run of each program); records
+  `test/ocaml/check-aot.edn` ([PROGRAM RESULT REASON OI]), `test/ocaml/divergences-aot.edn` (oi's classes plus `:light-depth` and
+  `:light-speed`, kind `:light`), `test/ocaml/aot-known.edn`. Makefile `oi-aot-lib`, `oi-check-aot`, `oi-divergences-aot`.
+  `LICENSE.md` and `jdk/README.md` name `jdk/ocaml/`.
+
+**The numbers** (`bin/oi check --aot --record`, the light level, two processes; the last run 74 min 52 s)
+
+| | |
+|---|---|
+| the run corpus (OC61 (a)): programs / translated by o2j / refused | 309 / 309 / 0 (0 externals missing) |
+| **pass** (status and output equal to ocamlopt's run) | **248 of 309** (oi: 273) |
+| non-pass, every one in a class | 61: `:gc-and-memory` 27, `:light-speed` 24, `:light-depth` 3, `:bigarray` 3, `:backtraces` 2, `:obj-representation` 2 |
+| **failing (not in a class)** | **0** |
+| against oi (status and output) | 274 the same (246 passing in both, 2 passing here where oi does not, 26 failing alike), 35 differ: the 27 the light level's classes stop (oi passes them) and 8 failing differently (the collector's classes) |
+| the stdlib translated (`aot-lib`) | 71 units, 3.4 MB of Java forms, 6 s; a program's units with their library 0.05 s each (303 in 14 s, 550 MB) |
+| the light level's speed | the library's units defined once a process (about 13 s for the formats' closure); a program 0.05 s to 30 s; 259 programs ended with status 0 in 1,497 s summed |
+
+The 27 programs oi passes and the light level does not are the interpreter's: 24 past the 120 s limit (the Java forms interpreted
+on an interpreter, each OCaml call an interpreted method call and each primitive another: about ten times oi's time; `basic/tailcalls`'s
+10^7 steps, `lib-hashtbl/htbl`, the `lazy/` and `parallel/` loops) and 3 deeper than its 10,000 frames (J2G-SPEC §10.5; `misc/sieve`,
+`effect-syntax/coroutines`, `parallel/test_issue_11094`). Neither is the compiled level's (OC87, OC92).
+
+**Checks run** (all light): `bin/oi check --aot --record` three times (the last above, the record), `bin/oi check --aot --record --only
+tool-ocamltest-var-expansion`, `bin/oi divergences --aot` (248 pass, 0 failing), `bin/oi aot-lib`, `bin/oi aot-run` on probes, the
+subagents' probes (above), `make check-makefile`. **Not run**: the gate (essential or full), any build of Arbace's executables, j2g, `bin/build-go`,
+the compiled level; `bin/oi check` (oi's own: nothing of oi changed).
+
+**The heavy list (for the window after the tag)**
+
+1. The compiled level: o2j's per-program package (OC93 (a): `ocaml.p<N>.M_<Unit>`, the stdlib's units once in `ocaml.u`), the run corpus's
+   Java forms with `jdk/ocaml/` translated by `bin/j2g --program` in shards as `bin/java-check`'s compiled level, built by `bin/build-go`,
+   run, judged by `test/ocaml/o2j_check.ae` against ocamlopt's runs and the light level's (`bin/oi check --aot --level compiled`, to write;
+   the light level stays `--level light`); the depth counter of OC92 (a) first.
+2. j2g's world: the runtime asks of the JDK `java.util.concurrent.SynchronousQueue`, `ThreadLocal`, `RandomAccessFile`, `java.nio.file.Files`,
+   `BigDecimal` (the float formats), `ProcessBuilder`: `bin/j2g-edge update` if j2g refuses a class outside its edge, and jrt's closure
+   (`doc/go/java-surface.edn`, `bin/jrt-convert update`) for the ones the shipped world lacks.
+3. The keys: `jdk/ocaml/` is under `jdk/`, so `arbace_runtime_key` and `gate_key` move with this branch: the gate's builds (`bin/arbace-go
+   --gate-build`), and a re-seed with the batch of OC30 when the runtime is wanted in the shipped program (OC94).
+4. A gate step `oi-aot` (`--full`: `bin/oi check --aot`, 75 min at two processes, 1.8 GB; essential: none until the compiled level, OC95),
+   its inputs (`arbace/o2j.ae`, `jdk/ocaml/`, `test/ocaml/o2j/`, `test/ocaml/o2j_check.ae`, the records, `bin/oi`), `bin/gate --audit` for it.
+5. `bin/gate` essential and `--full` on the branch.
+
+**Shipped files changed**: `jdk/ocaml/` (new, 37 files: Java forms under `jdk/`, which the runtime key and `gate_key` cover; no shipped
+program loads or translates them yet), `jdk/README.md` (a row), `arbace/o2j.ae` (new; under `arbace/`, so in `gate_key`; a tool's namespace,
+not embedded: `arbace/j2g/embed.ae` untouched). Nothing of `go/`, `overlay/`, `arbace/lang`, `seed/` changed.
+
+**Proposals** (OC80 onward; each with options and the recommended one first)
+
+- **OC80 The translator's name and place.** (a) `arbace.o2j` in `arbace/o2j.ae`, a tool's namespace, as built (the translators' naming: c2j,
+  j2g; "o" for OCaml's Lambda); (b) `arbace.repr.ocaml.aot` (beside the reader; but repr is the text's bridge, not a translator); (c) `arbace.ocaml.l2j`.
+  *Recommended: (a)*: the naming survey's rule (doc/NAMING-SURVEY.md) is source-to-target letters, and the translator is not a repr.
+- **OC81 The runtime's place.** (a) `jdk/ocaml/` as a root of package paths, the package `ocaml.rt`, hand-written and outside `bin/jrt-convert`'s
+  closure, as built (the task's place); (b) `overlay/jdk/ocaml/` (jrt's own Java's place; it is not a JDK class's variant either); (c) Go forms
+  under `go/arbace/oi` (OC7 (b): no j2g, but then no light level on the interpreter). *Recommended: (a)*, with `jdk/README.md`'s row saying it
+  is not generated.
+- **OC82 The value representation in the Java forms** (OC65 for the AOT). (a) every value an Object, ints boxed `Long`, as built (one
+  representation for every Lambda value kind; `Long/valueOf`'s cache for the small ones); (b) unboxed `long` and `double` locals and
+  parameters where Lambda's value kinds say `[int]` and `[float]`, boxed at the joins (closures, blocks, generic calls); (c) a value class of
+  two fields (as OC65 (b)). *Recommended: (a) now, (b) with the compiled level's measurements*: (a) is what passes 248 programs; (b) is
+  the compiled code's speed and needs no runtime change (the methods take Objects either way).
+- **OC83 Closures.** (a) a member class per Lambda function, arity methods `a1`-`a6` and `an`, as built (the application checks the arity
+  and calls the method: one Java frame an OCaml call); (b) one class per unit with a switch over the functions' numbers (fewer classes, a
+  switch a call); (c) Java lambdas over `Object/1` (an array a call). *Recommended: (a)*: the call is a virtual call, as j2g translates
+  best, and the light level's depth is one frame a call.
+- **OC84 Tail calls.** (a) a function's own tail calls loops, the rest plain calls, as built (the testsuite's `tailcalls` is self-recursive
+  apart from its mutual part); (b) a trampoline for every tail call (each tail call returns a thunk to the caller's loop: proper tail
+  calls, a cost on every call); (c) (a) plus a trampoline for letrec groups whose functions call one another in tail position.
+  *Recommended: (a), then (c) if the compiled level's corpus shows mutual tail recursion deeper than OC92's limit*: no program of the corpus
+  fails for it at the light level (its 3 depth failures are non-tail recursion).
+- **OC85 Exceptions.** (a) `Exn` without a stack trace, `trywith` catching every Throwable and asking `Rt/exnValue` (the stack's overflow as
+  Stack_overflow, the runtime's signals rethrown), as built; (b) catch `Exn` only (a StackOverflowError would not be OCaml's). *Recommended: (a)*.
+- **OC86 A unit's state.** (a) static fields (`G`, the constants) and a static `init`, as built (a program per process; the batch runner
+  initialises the units again); (b) a program object holding the globals (several programs in one process without redefining classes;
+  the compiled level's shards could then link one stdlib). *Recommended: (a)*; (b) only if OC93's shards want one stdlib for every program.
+- **OC87 The light level.** (a) the Java forms interpreted on stage 0 as the AOT check until the compiled level runs, its own classes
+  `:light-speed`, `:light-depth`, as built; (b) no light level (the AOT check only compiled). *Recommended: (a)*: it tests the
+  translator and the runtime without a build, as the light tier needs; it stays the AOT's quick level after the compiled one (OC95).
+- **OC88 Programs per process.** (a) many programs a process (the library defined once: 13 s saved a program), a timeout ending the batch
+  and the driver going on, as built; (b) one process a program (75 min become about 2 hours, 900 MB each). *Recommended: (a)*.
+- **OC89 The AOT level's reference.** (a) ocamlopt's runs, `Sys.backend_type` `Native`, as built (OC66 (a)); (b) ocamlc's (the Lambda is the
+  bytecode translation's). *Recommended: (a)*: the runs agree on the corpus but where ocamlopt differs, the AOT's is ocamlopt's behaviour.
+- **OC90 The externals' table.** (a) read from the runtime's forms (`(method ^:public ^:static caml_...`), the arity the parameters', as built;
+  (b) a table file beside the runtime. *Recommended: (a)*: one source of truth, and a missing external is a counted `missing` line.
+- **OC91 Floats' last digit.** The num subagent found 23 of 735 sampled results of the math functions (exp, log, cos, pow, hypot...) one ulp
+  from glibc's: jrt's `java.lang.Math`. (a) a class when a program shows it (none does at the light level); (b) port glibc's (or CORE-MATH's)
+  correctly rounded functions as the runtime's own. *Recommended: (a)*, (b) when the compiled level's corpus shows one.
+- **OC92 The compiled level's depth.** Translated code does not count its depth and Go's stack overflow is fatal (J2G-SPEC V1). (a) a depth
+  counter in the closures' calls (a field of the thread's state, OC69 (a)'s 200,000), Stack_overflow beyond; (b) none: a deep recursion
+  kills the program (a class); (c) the counter only in the functions o2j finds recursive. *Recommended: (a)*: the testsuite's
+  Stack_overflow programs need it, and the counter is one increment and decrement a call.
+- **OC93 The compiled level's programs.** Unit names repeat across the corpus (`Test`, `Main`...), and j2g's `--program` makes one Go program
+  of its classes. (a) o2j writes a program's own units in a package of its own (`ocaml.p<N>`), the stdlib once in `ocaml.u`, the programs in
+  shards of a few dozen, each shard one Go program with a dispatcher on the program's number, as `bin/java-check`'s compiled level does;
+  (b) one Go program a test program (303 builds). *Recommended: (a)*.
+- **OC94 The runtime in the shipped program.** (a) not until a REPL or `bin/oi` needs AOT in the shipped executable: the compiled level
+  builds programs of their own (`--build-program`'s way), so no re-seed for O6; (b) embed `jdk/ocaml/` in the shipped world now.
+  *Recommended: (a)*.
+- **OC95 The gate.** (a) `--full`: `bin/oi check --aot` (the light level) in the `repr-ocaml` chain, beside oi's; essential: the compiled
+  level's subset when it exists (as OC67 (a)'s); (b) the light level's subset in the essential gate now (the programs passing in under a
+  second: about 150, two minutes with the library's definition). *Recommended: (a)*: the essential gate's time is better spent on the
+  compiled level, which is what ships.
+
+**Rule slips**: (1) `>/dev/null` and `2>/dev/null` in two of my commands (a background wait loop's `ls ... >/dev/null 2>&1`, and a `cat`'s
+`2>/dev/null` in a prim count); (2) the first two AOT runs ran the batch in the worktree's directory, so test programs wrote `data0`,
+`data42`, `test.out` and an empty `foo/` into the worktree's root (deleted; the runner now gives each program its own directory); (3) O5's
+agent's two leftover wait loops (since 10:37, PIDs 3686 and 52119, `sleep` loops waiting on files that never came) still had their working
+directory in the worktree, so "no process left" could not be reached by waiting: I checked that they did nothing but sleep and that the
+worktree was clean at `ce89c9de`, and started; they were not stopped (not mine); (4) the light tier's thread count: four Sonnet subagents
+ran their stage-0 probes (one thread each) beside my own runs for about ten minutes, up to six threads in all; (5) disk at 87%: the rule's
+trim of Go's cache was refused by the harness's classifier, so it was not done. Scratch the survey cites: `.tmp/o6/` in the worktree (`lib/`
+the stdlib's Java forms, `run/ID/` the programs' dumps' outputs and Java forms, `check-aot.tsv`, `check3.log` the recorded run, `sub/` the
+subagents' sandboxes, `API.md` their brief, `externals.tsv` the externals' table).

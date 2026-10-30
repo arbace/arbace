@@ -1,0 +1,263 @@
+;; The system interface of OCaml's runtime (sys.c, signals.c): exit, the arguments and
+;; environment, the file system, time, the shell, signal handlers (recorded, never delivered),
+;; the system's constants. Ported from oi's ext_sys.go, without caml_sys_open and caml_sys_close
+;; (the channels' file descriptors) nor the domain externals (Effects).
+;;
+;; Java has no chdir: ExtSys keeps the working directory (cwd) and `ExtSys/resolve` turns a path
+;; into an absolute one against it; whoever opens files should resolve its names the same way.
+
+(in-ns 'ocaml.rt)
+
+(import '(java.io File IOException)
+        '(java.nio.file Files Path Paths CopyOption StandardCopyOption LinkOption
+                        NoSuchFileException FileAlreadyExistsException DirectoryNotEmptyException
+                        AccessDeniedException NotDirectoryException FileSystemException
+ DirectoryStream)
+        '(java.security SecureRandom))
+
+(defclass ^:public ^:final ExtSys
+  (field ^:public ^:static ^String cwd (System/getProperty "user.dir"))
+  (field ^:static ^:final ^long startNanos (System/nanoTime))
+  (field ^:static ^:final ^long/1 sigAct (new long/1 65))
+  (field ^:static ^:final ^Object/1 sigHandler (new Object/1 65))
+  (field ^:static ^:final ^int/1 posixSignals
+    (new int/1 [6 14 8 1 4 2 9 13 3 11 15 10 12 17 18 19 20 21 22 26 27 7 29 31 5 23 24 25 29 28]))
+
+  ;; ---- paths and errors
+
+  (method ^:static fail ^RuntimeException [^String name ^String text]
+    (Rt/sysError (java-str name ": " text)))
+  (method ^:static failNoArg ^RuntimeException [^String text] (Rt/sysError text))
+
+  ;; caml_string_is_c_safe
+  (method ^:static cSafe ^boolean [s]
+    (let [b (cast byte/1 s)]
+      (loop [^int i 0]
+        (cond (>= i (alength b)) true
+              (== (aget b i) 0) false
+              :else (recur (unchecked-inc-int i))))))
+
+  (method ^:public ^:static resolve ^String [^String p]
+    (if (.startsWith p "/") p (java-str cwd "/" p)))
+
+  ;; strerror's text of a file system exception
+  (method ^:static errText ^String [^Throwable e]
+    (cond (instance? NoSuchFileException e) "No such file or directory"
+          (instance? FileAlreadyExistsException e) "File exists"
+          (instance? DirectoryNotEmptyException e) "Directory not empty"
+          (instance? AccessDeniedException e) "Permission denied"
+          (instance? NotDirectoryException e) "Not a directory"
+          (and (instance? FileSystemException e) (not (nil? (.getReason (cast FileSystemException e)))))
+          (.getReason (cast FileSystemException e))
+          (instance? java.nio.file.InvalidPathException e) "No such file or directory"
+          :else "Input/output error"))
+
+  ;; the name as a Java string, ENOENT (as caml_sys_check_path) for a NUL byte
+  (method ^:static name ^String [v]
+    (let [s (Rt/utf8 v)]
+      (when (not (ExtSys/cSafe v)) (throw (ExtSys/fail s "No such file or directory")))
+      s))
+  ;; the path of a name; an empty or invalid name does not exist
+  (method ^:static pathOf ^Path [^String s]
+    (when (.isEmpty s) (throw (ExtSys/fail s "No such file or directory")))
+    (try (Paths/get (ExtSys/resolve s) (new String/1 0))
+         (catch java.nio.file.InvalidPathException e (throw (ExtSys/fail s "No such file or directory")))))
+
+  ;; stat's failure, if any: the text (ENOENT, or ENOTDIR when an ancestor is not a directory), or nil
+  (method ^:static statError ^String [^String s]
+    (let [f (File. (ExtSys/resolve s))]
+      (if (and (not (.isEmpty s)) (.exists f))
+        nil
+        (let [^:mutable ^File a (.getParentFile (.getAbsoluteFile f))
+              ^:mutable ^String r "No such file or directory"]
+          (label :L
+            (while (not (nil? a))
+              (when (.exists a)
+                (when (not (.isDirectory a)) (set! r "Not a directory"))
+                (break :L nil))
+              (set! a (.getParentFile a))))
+          r))))
+
+  (method ^:public ^:static caml_sys_exit [code] (throw (Exit. (Rt/ii code))))
+
+  (method ^:public ^:static caml_sys_file_exists [n]
+    (if (not (ExtSys/cSafe n))
+      Rt/FALSE
+      (let [s (Rt/utf8 n)]
+        (Rt/b (and (not (.isEmpty s)) (.exists (File. (ExtSys/resolve s))))))))
+
+  (method ^:static modeTest [n ^boolean dir]
+    (let [s (ExtSys/name n)]
+      (when (.isEmpty s) (throw (ExtSys/fail s "No such file or directory")))
+      (let [f (File. (ExtSys/resolve s))]
+        (when (not (.exists f))
+          (let [t (ExtSys/statError s)]
+            (throw (ExtSys/fail s (if (nil? t) "No such file or directory" t)))))
+        (Rt/b (if dir (.isDirectory f) (.isFile f))))))
+  (method ^:public ^:static caml_sys_is_directory [n] (ExtSys/modeTest n true))
+  (method ^:public ^:static caml_sys_is_regular_file [n] (ExtSys/modeTest n false))
+
+  (method ^:public ^:static caml_sys_remove [n]
+    (let [s (ExtSys/name n) p (ExtSys/pathOf s)]
+      (when (Files/isDirectory p (new LinkOption/1 [LinkOption/NOFOLLOW_LINKS]))
+        (throw (ExtSys/fail s "Is a directory")))
+      (try (Files/delete p)
+           (catch Exception e (if (instance? Exn e) (throw e) (throw (ExtSys/fail s (ExtSys/errText e))))))
+      Rt/UNIT))
+
+  (method ^:public ^:static caml_sys_rename [a b]
+    (let [o (ExtSys/pathOf (ExtSys/name a)) d (ExtSys/pathOf (ExtSys/name b))]
+      ;; rename(2)'s refusals that Java's move does not make: a directory onto a file, a file onto
+      ;; a directory, a directory into itself
+      (let [fo (.toFile o) fd (.toFile d)
+            ao (.toString (.normalize (.toAbsolutePath o))) ad (.toString (.normalize (.toAbsolutePath d)))]
+        (when (and (.isDirectory fo) (.exists fd) (not (.isDirectory fd))) (throw (ExtSys/failNoArg "Not a directory")))
+        (when (and (.exists fo) (not (.isDirectory fo)) (.isDirectory fd)) (throw (ExtSys/failNoArg "Is a directory")))
+        (when (and (.isDirectory fo) (.startsWith ad (java-str ao "/"))) (throw (ExtSys/failNoArg "Invalid argument"))))
+      ;; rename(2) of a path to itself succeeds and does nothing (Java's move would remove it)
+      (when-not (and (.exists (.toFile o)) (= (.normalize (.toAbsolutePath o)) (.normalize (.toAbsolutePath d))))
+       (try (Files/move o d (new CopyOption/1 [StandardCopyOption/ATOMIC_MOVE StandardCopyOption/REPLACE_EXISTING]))
+           (catch Exception e (if (instance? Exn e) (throw e) (throw (ExtSys/failNoArg (ExtSys/errText e)))))))
+      Rt/UNIT))
+
+  (method ^:public ^:static caml_sys_chdir [n]
+    (let [s (ExtSys/name n) p (ExtSys/pathOf s)]
+      (let [t (ExtSys/statError s)]
+        (when (not (nil? t)) (throw (ExtSys/fail s t))))
+      (when (not (Files/isDirectory p (new LinkOption/1 0))) (throw (ExtSys/fail s "Not a directory")))
+      (set! cwd (.toString (.normalize p)))
+      Rt/UNIT))
+
+  (method ^:public ^:static caml_sys_mkdir [n m]
+    (let [s (ExtSys/name n) p (ExtSys/pathOf s)]
+      (when (.exists (File. (ExtSys/resolve s))) (throw (ExtSys/fail s "File exists")))
+      (let [par (.getParentFile (.getAbsoluteFile (File. (ExtSys/resolve s))))]
+        (when (not (nil? par))
+          (let [t (ExtSys/statError (.getPath par))]
+            (when (not (nil? t)) (throw (ExtSys/fail s t)))
+            (when (not (.isDirectory par)) (throw (ExtSys/fail s "Not a directory"))))))
+      (try (Files/createDirectory p (new java.nio.file.attribute.FileAttribute/1 0))
+           (catch Exception e (if (instance? Exn e) (throw e) (throw (ExtSys/fail s (ExtSys/errText e))))))
+      Rt/UNIT))
+
+  (method ^:public ^:static caml_sys_rmdir [n]
+    (let [s (ExtSys/name n) p (ExtSys/pathOf s)]
+      (let [t (ExtSys/statError s)]
+        (when (not (nil? t)) (throw (ExtSys/fail s t))))
+      (when (not (Files/isDirectory p (new LinkOption/1 [LinkOption/NOFOLLOW_LINKS])))
+        (throw (ExtSys/fail s "Not a directory")))
+      (try (Files/delete p)
+           (catch Exception e (if (instance? Exn e) (throw e) (throw (ExtSys/fail s (ExtSys/errText e))))))
+      Rt/UNIT))
+
+  (method ^:public ^:static caml_sys_read_directory [n]
+    (let [s (ExtSys/name n) p (ExtSys/pathOf s)
+          names (java.util.ArrayList.)]
+      (let [t (ExtSys/statError s)]
+        (when (not (nil? t)) (throw (ExtSys/fail s t))))
+      (when (not (.isDirectory (File. (ExtSys/resolve s)))) (throw (ExtSys/fail s "Not a directory")))
+      (try (let [ds (Files/newDirectoryStream p)]
+             (try (let [it (.iterator ds)]
+                    (while (.hasNext it)
+                      (.add names (Rt/ofUtf8 (.toString (.getFileName (cast Path (.next it))))))))
+                  (finally (.close ds))))
+           (catch Exception e (if (instance? Exn e) (throw e) (throw (ExtSys/fail s (ExtSys/errText e))))))
+      (Block. 0 (.toArray names (new Object/1 0)))))
+
+  (method ^:public ^:static caml_sys_getcwd [u] (Rt/ofUtf8 cwd))
+
+  (method ^:static getenv ^String [n]
+    (if (ExtSys/cSafe n) (System/getenv (Rt/utf8 n)) nil))
+  (method ^:public ^:static caml_sys_getenv [n]
+    (let [v (ExtSys/getenv n)]
+      (when (nil? v) (throw (Rt/notFound)))
+      (Rt/ofUtf8 v)))
+  (method ^:public ^:static caml_sys_unsafe_getenv [n] (ExtSys/caml_sys_getenv n))
+  (method ^:public ^:static caml_sys_getenv_opt [n]
+    (let [v (ExtSys/getenv n)]
+      (if (nil? v) Rt/NONE (Rt/some (Rt/ofUtf8 v)))))
+
+  (method ^:static argvBlock []
+    (let [a Rt/argv r (new Object/1 (alength a))]
+      (loop [^int i 0]
+        (when (< i (alength a)) (aset r i (Rt/ofUtf8 (aget a i))) (recur (unchecked-inc-int i))))
+      (Block. 0 r)))
+  (method ^:static argv0 ^String []
+    (if (> (alength Rt/argv) 0) (aget Rt/argv 0) ""))
+  (method ^:public ^:static caml_sys_argv [u] (ExtSys/argvBlock))
+  (method ^:public ^:static caml_sys_get_argv [u]
+    (Rt/tuple (new Object/1 [(Rt/ofUtf8 (ExtSys/argv0)) (ExtSys/argvBlock)])))
+  (method ^:public ^:static caml_sys_executable_name [u] (Rt/ofUtf8 (ExtSys/argv0)))
+  (method ^:public ^:static caml_sys_proc_self_exe [u]
+    (if (.isEmpty (ExtSys/argv0)) Rt/NONE (Rt/some (Rt/ofUtf8 (ExtSys/argv0)))))
+
+  (method ^:public ^:static caml_sys_system_command [c]
+    (when (not (ExtSys/cSafe c)) (throw (ExtSys/fail (Rt/utf8 c) "Invalid argument")))
+    (let [pb (ProcessBuilder. (new String/1 ["/bin/sh" "-c" (Rt/utf8 c)]))]
+      (.directory pb (File. cwd))
+      (.inheritIO pb)
+      (try (Long/valueOf (long (.waitFor (.start pb))))
+           (catch IOException e (throw (ExtSys/fail (Rt/utf8 c) "No such file or directory")))
+           (catch InterruptedException e (Long/valueOf 255)))))
+
+  ;; the time the program has run (the wall clock since the runtime started: Java has no CPU time)
+  (method ^:static elapsed ^double []
+    (/ (double (unchecked-subtract (System/nanoTime) startNanos)) 1.0E9))
+  (method ^:public ^:static caml_sys_time [u] (Double/valueOf (ExtSys/elapsed)))
+  (method ^:public ^:static caml_sys_time_include_children [b] (Double/valueOf (ExtSys/elapsed)))
+
+  (method ^:public ^:static caml_sys_random_seed [u]
+    (let [buf (new byte/1 12)]
+      (.nextBytes (SecureRandom.) buf)
+      (let [r (new Object/1 12)]
+        (loop [^int i 0]
+          (when (< i 12)
+            (aset r i (Long/valueOf (long (bit-and (long (aget buf (unchecked-subtract-int 11 i))) 255))))
+            (recur (unchecked-inc-int i))))
+        (Block. 0 r))))
+
+  (method ^:public ^:static caml_sys_get_config [u]
+    (Rt/tuple (new Object/1 [(Rt/s "Unix") (Long/valueOf 64) (Long/valueOf 0)])))
+
+  ;; Java cannot ask whether a descriptor is a terminal: never one
+  (method ^:public ^:static caml_sys_isatty [ch] Rt/FALSE)
+
+  (method ^:public ^:static caml_xdg_defaults [u] (Long/valueOf 0))
+  (method ^:public ^:static caml_sys_temp_dir_name [u] (Rt/s ""))
+  (method ^:public ^:static caml_sys_io_buffer_size [u] (Long/valueOf 65536))
+  (method ^:public ^:static caml_sys_const_big_endian [u] (Long/valueOf 0))
+  (method ^:public ^:static caml_sys_const_word_size [u] (Long/valueOf 64))
+  (method ^:public ^:static caml_sys_const_int_size [u] (Long/valueOf 63))
+  (method ^:public ^:static caml_sys_const_max_wosize [u] (Long/valueOf 18014398509481983))
+  (method ^:public ^:static caml_sys_const_ostype_unix [u] (Long/valueOf 1))
+  (method ^:public ^:static caml_sys_const_ostype_win32 [u] (Long/valueOf 0))
+  (method ^:public ^:static caml_sys_const_ostype_cygwin [u] (Long/valueOf 0))
+  (method ^:public ^:static caml_sys_const_backend_type [u] (Long/valueOf Rt/backendType))
+
+  ;; signals.c: handlers are recorded, no real signal is delivered
+  (method ^:static convertSignal ^long [^long n]
+    (if (and (< n 0) (>= n (unchecked-negate (long (alength posixSignals)))))
+      (long (aget posixSignals (unchecked-int (unchecked-subtract (unchecked-negate n) 1))))
+      n))
+  (method ^:public ^:static caml_sys_convert_signal_number [n]
+    (Long/valueOf (ExtSys/convertSignal (Rt/l n))))
+  (method ^:public ^:static caml_sys_rev_convert_signal_number [n]
+    (let [x (Rt/l n)]
+      (loop [^int i 0]
+        (cond (>= i (alength posixSignals)) (Long/valueOf x)
+              (== (long (aget posixSignals i)) x) (Long/valueOf (unchecked-subtract (unchecked-negate (long i)) 1))
+              :else (recur (unchecked-inc-int i))))))
+  (method ^:public ^:static caml_install_signal_handler [s b]
+    (let [sig (ExtSys/convertSignal (Rt/l s))]
+      (when (or (<= sig 0) (>= sig 65)) (throw (Rt/invalidArg "Sys.signal: unavailable signal")))
+      (when (or (== sig 9) (== sig 19)) (throw (ExtSys/failNoArg "Invalid argument")))
+      (let [act (cond (and (instance? Long b) (== (Rt/l b) 0)) 0
+                      (and (instance? Long b) (== (Rt/l b) 1)) 1
+                      :else 2)
+            i (unchecked-int sig)
+            res (if (== (aget sigAct i) 2)
+                  (Block. 0 (new Object/1 [(aget sigHandler i)]))
+                  (Long/valueOf (aget sigAct i)))]
+        (aset sigAct i act)
+        (when (instance? Block b) (aset sigHandler i (aget (.-f (cast Block b)) 0)))
+        res))))

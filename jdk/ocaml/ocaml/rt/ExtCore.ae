@@ -1,0 +1,190 @@
+;; The core's externals (oi's ext.go, ext_domain.go, a part of ext_sys.go): named values, Obj,
+;; objects' identifiers and method lookup, lazy values, recursive values' dummies, effects'
+;; stacks and continuations, domain-local storage, atomics, mutexes, conditions, domains.
+
+(in-ns 'ocaml.rt)
+
+(defclass ^:public ^:final ExtCore
+
+  (field ^:public ^:static ^long ooId 0)
+
+  ;; caml_register_named_value (callback.c)
+  (method ^:public ^:static caml_register_named_value [name v]
+    (.put Rt/named (Rt/utf8 name) v)
+    Rt/UNIT)
+
+  ;; ---- Obj (obj.c)
+
+  (method ^:public ^:static caml_obj_tag [x] (Long/valueOf (long (Rt/tag x))))
+  (method ^:public ^:static caml_obj_size [x] (Long/valueOf (long (Rt/size x))))
+  (method ^:public ^:static caml_obj_set_tag [x t] (set! (.-tag (cast Block x)) (Rt/ii t)) Rt/UNIT)
+  (method ^:public ^:static caml_obj_block [t n]
+    (let [tag (Rt/ii t) k (Rt/ii n)]
+      (cond
+        (or (== tag 255) (and (== tag 247) (< k 2)) (and (== tag 252) (== k 0))) (throw (Rt/invalidArg "Obj.new_block"))
+        (== tag 252) (new byte/1 (unchecked-dec-int (unchecked-multiply-int k 8)))
+        (and (== tag 253) (== k 1)) (Double/valueOf 0.0)
+        (== tag 254) (new double/1 k)
+        :else (let [f (new Object/1 k)]
+                (java.util.Arrays/fill f (Long/valueOf 0))
+                (Block. tag f)))))
+  (method ^:public ^:static caml_obj_with_tag [t x]
+    (let [d (Rt/dup x)]
+      (when (instance? Block d) (set! (.-tag (cast Block d)) (Rt/ii t)))
+      d))
+  (method ^:public ^:static caml_obj_dup [x] (Rt/dup x))
+  (method ^:public ^:static caml_obj_raw_field [x i] (NInt. (Rt/l (Rt/field x (Rt/ii i)))))
+  (method ^:public ^:static caml_obj_set_raw_field [x i v]
+    (Rt/setField x (Rt/ii i) (Long/valueOf (.-v (cast NInt v)))))
+  (method ^:public ^:static caml_obj_reachable_words [x] (Long/valueOf (long (unchecked-inc-int (Rt/size x)))))
+  (method ^:public ^:static caml_obj_is_shared [x] Rt/TRUE)
+  (method ^:public ^:static caml_obj_compare_and_swap [x i old v]
+    (let [f (.-f (cast Block x)) k (Rt/ii i)]
+      (if (Rt/eq (aget f k) old) (do (aset f k v) Rt/TRUE) Rt/FALSE)))
+
+  ;; ---- objects (obj.c, oo ids)
+
+  (method ^:public ^:static caml_fresh_oo_id [x]
+    (locking ExtCore (set! ooId (unchecked-inc ooId)) (Long/valueOf ooId)))
+  (method ^:public ^:static caml_set_oo_id [x]
+    (locking ExtCore (set! ooId (unchecked-inc ooId)))
+    (aset (.-f (cast Block x)) 1 (Long/valueOf ooId))
+    x)
+  ;; caml_get_public_method: the binary search of the object's method table (field 0), its
+  ;; methods at odd indexes after their labels
+  (method ^:public ^:static caml_get_public_method [obj tag]
+    (let [meths (.-f (cast Block (aget (.-f (cast Block obj)) 0)))
+          t (Rt/l tag)
+          ^:mutable ^int li 3
+          ^:mutable ^int hi (unchecked-int (unchecked-add (unchecked-multiply (Rt/l (aget meths 0)) 2) 1))]
+      (while (< li hi)
+        (let [mi (bit-or-int (bit-shift-right-int (unchecked-add-int li hi) 1) 1)]
+          (if (< t (Rt/l (aget meths mi)))
+            (set! hi (unchecked-subtract-int mi 2))
+            (set! li mi))))
+      (if (and (< li (alength meths)) (== (Rt/l (aget meths li)) t))
+        (aget meths (unchecked-dec-int li))
+        ;; not found: the dummy method raising, as caml_get_public_method's caller expects a closure
+        (Rt/native 1 (lambda Code [^Object/1 a] (throw (Rt/internal "method not found")))))))
+
+  ;; ---- lazy values (lazy.c)
+
+  (method ^:public ^:static caml_lazy_make_forward [v] (Block. 250 (new Object/1 [v])))
+  (method ^:public ^:static caml_lazy_update_to_forcing [v]
+    (if (and (instance? Block v) (== (.-tag (cast Block v)) 246))
+      (do (set! (.-tag (cast Block v)) 244) (Long/valueOf 0))
+      (Long/valueOf 1)))
+  (method ^:public ^:static caml_lazy_update_to_forward [v] (set! (.-tag (cast Block v)) 250) Rt/UNIT)
+  (method ^:public ^:static caml_lazy_reset_to_lazy [v] (set! (.-tag (cast Block v)) 246) Rt/UNIT)
+
+  ;; ---- recursive values (alloc.c)
+
+  (method ^:static dummy [^int n]
+    (let [f (new Object/1 n)] (java.util.Arrays/fill f (Long/valueOf 0)) (Block. 0 f)))
+  (method ^:public ^:static caml_alloc_dummy [n] (ExtCore/dummy (Rt/ii n)))
+  (method ^:public ^:static caml_alloc_dummy_function [n arity] (ExtCore/dummy (Rt/ii n)))
+  (method ^:public ^:static caml_alloc_dummy_float [n] (new double/1 (Rt/ii n)))
+  (method ^:public ^:static caml_alloc_dummy_lazy [u] (ExtCore/dummy 1))
+  (method ^:public ^:static caml_update_dummy [d v]
+    (cond
+      (instance? Block d)
+      (let [b (cast Block d)]
+        (cond (instance? Block v) (do (set! (.-tag b) (.-tag (cast Block v)))
+                                      (set! (.-f b) (.clone (.-f (cast Block v)))))
+              (instance? Closure v) (do (set! (.-tag b) 247) (set! (.-f b) (new Object/1 [v])))
+              :else (throw (Rt/internal (java-str "caml_update_dummy with " (Rt/describe v))))))
+      (instance? double/1 d)
+      (let [s (cast double/1 v)] (System/arraycopy s 0 d 0 (alength s))))
+    Rt/UNIT)
+  (method ^:public ^:static caml_update_dummy_lazy [d v]
+    (let [t (Rt/tag v)]
+      (if (or (== t 246) (== t 244) (== t 250))
+        (ExtCore/caml_update_dummy d v)
+        (let [b (cast Block d)]
+          (set! (.-f b) (new Object/1 [v]))
+          (set! (.-tag b) 250)
+          Rt/UNIT))))
+
+  ;; ---- effects (fiber.c)
+
+  (method ^:public ^:static caml_alloc_stack [hval hexn heff] (Fiber. hval hexn heff))
+  (method ^:public ^:static caml_continuation_use_noexc [k] (Effects/continuationUse k))
+  (method ^:public ^:static caml_continuation_use_and_update_handler_noexc [k hval hexn heff]
+    (let [s (Effects/continuationUse k)]
+      (when (instance? Fiber s)
+        (let [fb (cast Fiber s)] (set! (.-hval fb) hval) (set! (.-hexn fb) hexn) (set! (.-heff fb) heff)))
+      s))
+  (method ^:public ^:static caml_get_continuation_callstack [k n] (Block. 0 (new Object/1 0)))
+
+  ;; ---- domain-local storage, atomics (domain.c, memory.c)
+
+  (method ^:public ^:static caml_domain_dls_set [v] (set! (.-dls (.-dom (Effects/st))) v) Rt/UNIT)
+  (method ^:public ^:static caml_domain_dls_get [u] (.-dls (.-dom (Effects/st))))
+  (method ^:public ^:static caml_domain_dls_compare_and_set [old v]
+    (let [d (.-dom (Effects/st))]
+      (if (Rt/eq (.-dls d) old) (do (set! (.-dls d) v) Rt/TRUE) Rt/FALSE)))
+  (method ^:public ^:static caml_atomic_load_field [x i] (Rt/field x (Rt/ii i)))
+  (method ^:public ^:static caml_atomic_exchange_field [x i v]
+    (let [f (.-f (cast Block x)) k (Rt/ii i) old (aget f k)] (aset f k v) old))
+  (method ^:public ^:static caml_atomic_cas_field [x i old v]
+    (let [f (.-f (cast Block x)) k (Rt/ii i)]
+      (if (Rt/eq (aget f k) old) (do (aset f k v) Rt/TRUE) Rt/FALSE)))
+  (method ^:public ^:static caml_atomic_fetch_add_field [x i n]
+    (let [f (.-f (cast Block x)) k (Rt/ii i) old (aget f k)]
+      (aset f k (Rt/add old n))
+      old))
+  (method ^:public ^:static caml_atomic_make_contended [v] (Block. 0 (new Object/1 [v])))
+  (method ^:public ^:static caml_process_pending_actions_with_root [v] v)
+
+  ;; ---- mutexes and conditions (ext_domain.go: on the Gil's condition)
+
+  ;; a mutex: Object/1 [locked owner]; a condition: long/1 [waiters tokens]
+  (method ^:public ^:static caml_ml_mutex_new [u] (Custom. "_mutex" (new Object/1 [Boolean/FALSE nil])))
+  (method ^:static mlock ^void [m]
+    (let [s (cast Object/1 (.-v (cast Custom m))) me (Effects/st)]
+      (when (and (identical? (aget s 0) Boolean/TRUE) (identical? (aget s 1) me))
+        (throw (Rt/sysError "Mutex.lock: Resource deadlock avoided")))
+      (while (identical? (aget s 0) Boolean/TRUE) (Gil/await))
+      (aset s 0 Boolean/TRUE)
+      (aset s 1 me)))
+  (method ^:static munlock ^void [m]
+    (let [s (cast Object/1 (.-v (cast Custom m)))]
+      (when (or (not (identical? (aget s 0) Boolean/TRUE)) (not (identical? (aget s 1) (Effects/st))))
+        (throw (Rt/sysError "Mutex.unlock: Operation not permitted")))
+      (aset s 0 Boolean/FALSE)
+      (aset s 1 nil)
+      (Gil/broadcast)))
+  (method ^:public ^:static caml_ml_mutex_lock [m] (ExtCore/mlock m) Rt/UNIT)
+  (method ^:public ^:static caml_ml_mutex_unlock [m] (ExtCore/munlock m) Rt/UNIT)
+  (method ^:public ^:static caml_ml_mutex_try_lock [m]
+    (let [s (cast Object/1 (.-v (cast Custom m)))]
+      (if (identical? (aget s 0) Boolean/TRUE)
+        Rt/FALSE
+        (do (aset s 0 Boolean/TRUE) (aset s 1 (Effects/st)) Rt/TRUE))))
+  (method ^:public ^:static caml_ml_condition_new [u] (Custom. "_condition" (new long/1 2)))
+  (method ^:public ^:static caml_ml_condition_wait [c m]
+    (let [s (cast long/1 (.-v (cast Custom c)))]
+      (ExtCore/munlock m)
+      (aset s 0 (unchecked-inc (aget s 0)))
+      (while (== (aget s 1) 0) (Gil/await))
+      (aset s 1 (unchecked-dec (aget s 1)))
+      (aset s 0 (unchecked-dec (aget s 0)))
+      (ExtCore/mlock m)
+      Rt/UNIT))
+  (method ^:public ^:static condWake ^void [c ^boolean all]
+    (let [s (cast long/1 (.-v (cast Custom c)))]
+      (if all
+        (when (> (aget s 0) 0) (aset s 1 (aget s 0)))
+        (when (> (aget s 0) (aget s 1)) (aset s 1 (unchecked-inc (aget s 1)))))
+      (Gil/broadcast)))
+  (method ^:public ^:static caml_ml_condition_signal [c] (ExtCore/condWake c false) Rt/UNIT)
+  (method ^:public ^:static caml_ml_condition_broadcast [c] (ExtCore/condWake c true) Rt/UNIT)
+
+  ;; ---- domains (domain.c)
+
+  (method ^:public ^:static caml_domain_spawn [f ts] (Effects/spawn f ts))
+  (method ^:public ^:static caml_ml_domain_id [u] (Long/valueOf (.-id (.-dom (Effects/st)))))
+  (method ^:public ^:static caml_ml_domain_index [u] (Long/valueOf (.-id (.-dom (Effects/st)))))
+  (method ^:public ^:static caml_ml_domain_cpu_relax [u] (Gil/yield) Rt/UNIT)
+  (method ^:public ^:static caml_recommended_domain_count [u] (Long/valueOf 128))
+  (method ^:public ^:static caml_domain_count [u] (Long/valueOf (unchecked-inc Effects/domainsRunning))))
