@@ -585,3 +585,14 @@ no runtime commitment.
   doc/haskell/SPEC.md and HASKELL-NOTES.md, doc/rust/SPEC.md (the helper pattern); doc/go/GOI-SPEC.md (the
   interpreter's design); `tools/hsdump`, `tools/rsdump`.
 - Probes: `.tmp/ocaml/t.ml`, `u.ml`, `e.ml` in the worktree `.tmp/worktrees/ocaml-survey` (scratch, gitignored).
+
+## Decided (2026-10-30): OC1-OC16
+
+The user decided all sixteen as recommended. In short:
+- OCaml 5.5.0.
+- The oracle is a `tools/ocdump` helper on compiler-libs. `apk add ocaml5-compiler-libs` happens when O1 starts, not
+  before.
+- Types come from the oracle in v1.
+- Lambda is interpreted; effects run as goroutines with channel hand-off; AOT goes Lambda → Java forms → j2g.
+- The stdlib is vendored as OCaml forms under the LGPL with the linking exception.
+- The order after C23 is left open: the crop order, OCaml or Scheme first, the user's "decide later".

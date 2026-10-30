@@ -546,3 +546,15 @@ git history:
   C++ (`wpp/`), are Scheme (`whimsical/`, R6RS on Chez Scheme 10) and OCaml (`whiml/`, OCaml 5.5.0). Both toolchains
   are on the host. Surveys `doc/scheme/SCHEME-SURVEY.md` and `doc/ocaml/OCAML-SURVEY.md` are being written (Sonnet,
   light work).
+
+## 2026-10-30: the OCaml and Scheme surveys merged and decided (the user)
+
+- **doc/ocaml/OCAML-SURVEY.md** (Sonnet): OCaml 5.5.0 on the host (Alpine `ocaml5-5.5.0-r0`). compiler-libs is not
+  installed (`ocaml5-compiler-libs`, 70 MiB), and no stdlib or testsuite sources are on the host, so the corpus is
+  ocaml/ocaml's tag `5.5.0`. The Parsetree drops comments, so `:full` needs the token stream. go-whim's `whiml/` is
+  58,346 lines, mostly generated. The plan is O1-O9, 37-63 days.
+- **doc/scheme/SCHEME-SURVEY.md** (Sonnet): Chez Scheme 10.3.0 (R6RS only: `#vu8(`, no `(scheme base)`).
+  go-whim's `whimsical/` is 54,257 lines of R6RS with `(chezscheme)` extras. The plan is SM1-SM9, 44-75 days. The hard
+  parts are the expander, re-entrant `call/cc` on Go, and the numeric tower.
+- **Decided (the user):** OC1-OC16 and SC1-SC14 as recommended. The order of the two crops after C23 is left for later.
+  Scratch: `.tmp/ocaml/`, `.tmp/scheme/`.

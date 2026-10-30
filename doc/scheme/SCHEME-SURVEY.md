@@ -655,3 +655,15 @@ The rest (SC2, SC7-SC12, SC14) can be taken as recommended and revisited when th
 `.tmp/scheme/` of the worktree `.tmp/worktrees/scheme-survey`: `p.ss` (§2.4: `write` of a list of data, the tower,
 `call/cc` with `dynamic-wind`, the 10^7 tail loop), `q.ss` (a `call/cc` escape), `r.ss` (`(import (scheme base))`:
 "library (scheme base) not found"). Run as `chez --script FILE`; the whole took under a second.
+
+## Decided (2026-10-30): SC1-SC14
+
+The user decided all fourteen as recommended. In short:
+- R6RS first; R7RS-small later as a library layer, judged by Chibi.
+- The host's Chez 10.3.0 is the reference, its runs recorded as data.
+- The corpora are fetched and pinned in stages when SM1 starts.
+- The evaluator is an interpreter in Go forms, `go/arbace/scm`.
+- psyntax is vendored as the expander once its license is settled.
+- `call/cc` is re-entrant, on heap continuation frames, with AOT by CPS.
+- Complex numbers are deferred as a recorded class.
+- The order after C23, against OCaml, is left open (the user: "decide later").
