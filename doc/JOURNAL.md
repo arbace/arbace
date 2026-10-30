@@ -606,3 +606,30 @@ git history:
   built on branch `ocaml-o1`) and Scheme (SM1-SM3 on `scheme-sm1`) fill the gaps, their order still open.
 - The branches built today at light load, waiting for the post-tag window: `c23-c3b`, `c23-c4`, `nethttp-nh11`,
   `nethttp-nh2`, `java-jn10`, `ocaml-o1`, `scheme-sm1`, `cpp-cx1`, `cpp-cx2`.
+
+## 2026-10-30: GT7's reruns 2 and 3, the stale watchdog, the platform's maker
+
+- **Run 2** (`cb01f62c`, the 67 checks): 66 passed clean, every audit ok. One failed: goi-aot, on
+  `fixedbugs/issue16037_run.go` ("compile: signal: killed"). dmesg shows no OOM kill. The program passed in run 1,
+  so the likely cause is its CPU or wall limit under the host's load.
+- **Rerun 2** (`02c384e6`, `--only failed`): stopped at `--only`'s selection after the builds. No selected step needs
+  javac's tool, so it was not built. 29 unselected Java steps then had `host javac-prog pending` in their material,
+  which differs from their clean passes, and the gate counted them as changed. A proposal for later: `gate.clean`'s
+  selection builds the hosts the unselected steps' keys name, or compares a pending host by its build key.
+- **Rerun 3** (`02c384e6`, `--only failed,repr-java-parse.samples`): selected the 1-second step so the tool would be
+  built. Two findings:
+  - goi-aot's first attempt hit strace's known abort (`ptrace(PTRACE_LISTEN): I/O error`), and `run_one` ran it again
+    at the same FIFO path. The first attempt's watchdog outlived its reducer and saw the second attempt's strace
+    holding a FIFO at that path. It took that strace for its own and killed the second attempt 34 s in ("AUDIT
+    STALLED: the reducer exited while strace still writes"). Fix: `tools/gateaudit/watch.go` knows its FIFO by
+    device, inode and change time, and ends when the path names another file. The change time is needed because
+    ext4 gave the new FIFO the freed inode number (reproduced: the inode-only fix still killed the writer). Tested in
+    `.tmp/gt7-rerun3/wt`: a retry's writer survives, and a killed reducer with a live writer is still caught.
+    `tools/gateaudit` is in no key.
+  - repr-java-parse.samples' audit found an undeclared read of `bin/javac-vendor`. `bin/repr-java` makes the
+    checkout's platform (`.tmp/repr-java-platform`) once, by `bin/javac-vendor platform`, in the first step that
+    needs it. In run 1 an earlier step made it; this time the parse part ran first. It is the same gap as
+    javac-tool's (GTS72 (a)): `:audit-known ["bin/javac-vendor"]` on repr-java-parse, which rekeys its 7 parts
+    (about 4 minutes in run 1). Any other `bin/repr-java` step run first would show it too. They get the
+    declaration with GTS72's rekey.
+- **Rerun 4:** `--only failed,changed`: goi-aot and repr-java-parse's 7 parts.

@@ -11,6 +11,12 @@
 //   - the reducer is gone while a writer (strace) still holds the FIFO (it died before strace ended:
 //     strace would go on, its trace lost, its log filling with EPIPE).
 //
+// The FIFO is known by its inode and change time as the watchdog starts: a step the runner runs again after an aborted
+// trace (bin/lib/gate-run.bash's run_one) makes a new FIFO at the same path, and the first attempt's
+// watchdog, its reducer gone, must not take the second attempt's strace for its own (GT7's rerun 3: it
+// killed goi-aot's second attempt 34 s in). A path that names another file, or none, ends the watchdog
+// (the change time too: ext4 gives the new FIFO the inode number the old one freed).
+//
 // A stall fails the step loudly instead of hanging: the reason in NAME.reduce.stalled (beside the
 // FIFO, NAME.fifo) and appended to the step's log (NAME.log), the writer's process tree (strace and
 // the step's traced processes) and the reducer killed (SIGKILL, by PID). The step then ends with 137;
@@ -27,6 +33,15 @@ import (
 	"syscall"
 	"time"
 )
+
+// fileID: a file's device, inode and change time, "" when it is gone
+func fileID(path string) string {
+	var st syscall.Stat_t
+	if err := syscall.Stat(path, &st); err != nil {
+		return ""
+	}
+	return fmt.Sprintf("%d:%d:%d.%09d", st.Dev, st.Ino, st.Ctim.Sec, st.Ctim.Nsec)
+}
 
 // envSecs: an environment variable's seconds, else def
 func envSecs(name string, def int64) int64 {
@@ -171,6 +186,7 @@ func watch(red int, fifo, progress string) {
 		fifo = p
 	}
 	st0 := startTime(red)
+	id := fileID(fifo)
 	base := strings.TrimSuffix(fifo, ".fifo")
 	var lastBytes int64 = -1
 	since := time.Now().Unix()
@@ -179,6 +195,9 @@ func watch(red int, fifo, progress string) {
 		time.Sleep(poll)
 		now := time.Now().Unix()
 		why := ""
+		if fileID(fifo) != id || id == "" {
+			return // the FIFO removed, or another attempt's at its path
+		}
 		if startTime(red) != st0 || st0 == "" {
 			// the reducer ended; a writer that still holds the FIFO is strace tracing on without it
 			// (twice in a row: strace closes the FIFO as it exits, a moment after the reducer's EOF)
