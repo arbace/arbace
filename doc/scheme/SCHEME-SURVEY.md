@@ -1411,3 +1411,193 @@ The SM5 list (listing `go/arbace/scm` in j2g's package list, `arbace.lang.Scheme
 the shipped executable; `bin/repr-scheme check` over the new corpora (`:srfi-N` read by repr/scheme and printed back, the
 `:full` round trip over `scheme/lib`'s files, which the SM2-SM3 check should do before the tag); `bin/gate --audit`
 for the new inputs (`scheme/lib`, `tools/scheme`, the SRFI tests).
+
+## As built: SM7 (write-ahead) (2026-10-30)
+
+Branch `scheme-sm1`, on `abd43f2f`. SM7 (AOT) is built **write-ahead** in the light tier beside GT7's clean run, as
+SM5 and SM6 were: no gate, no build of Arbace's executables, no lock, under 2 GB and 4 threads. Decided and followed:
+SC9 (a) (core forms → Go forms over `go/arbace/scm`, not through c2j) and SC6 (a) (AOT as a CPS translation over the
+evaluator's heap frames). The real `arbace.build.go` shards under the lock and the shipped integration are on the
+heavy list below; here each compiled program is a small Go module of its own over `arbace/scm`, printed by repr/go on
+stage 0 and built by TamaGo's go (`CGO_ENABLED=0`, a private `GOCACHE` in `.tmp/si/aot/gocache`, `-p 2`), its
+executable and packages deleted after its run. Undecided proposals taken as recommended: SC60 (a) (the dumper mirrors
+the evaluator's `Compile` in Go), SC61 (a) left for the heavy list, SC62 (a) (the light driver kept: it is also the
+AOT's front end), SC64 (a) and SC65 (a) (compiled code calls the same control primitives), SC69 (b) as a bounded speed
+pass for compiled code (below), SC84 (a) (single-value checks kept, as in the evaluator). The compiler, the dumper and
+the runtime's half are mine; a Sonnet agent wrote the harness's `bin/si srfi --aot` and `bin/si bench` and their
+Makefile targets (`si-aot-check`, `si-aot-check-record`, `si-srfi-aot`, `si-bench`).
+
+### What was built
+
+- **The dumper** (`go/arbace/scm/aot.ae`, `DumpBoot`, `DumpProgram`; the light driver's `--aot-boot OUT` and
+  `--aot-dump OUT FILE`): psyntax on si expands the program as `RunProgram` does, but instead of running it the dumper
+  writes, for each library the program needs from a source file (each after the libraries it invokes: the
+  libraries' `inv*` fields, the order `invoke-library` follows) its invoke code, and the program's core form: one
+  *unit* each, as data the Clojure reader reads. A unit's forms are resolved exactly as the evaluator's `comp`
+  resolves them (a mirror of it): lexical references by depth and index (`(l D I)`), letrec's checked ones (`(lc D I
+  K)`), free symbols as locations (`(g NAME)` interned, in the store; `(gp NAME UID)` a gensym, the program's own),
+  `(primitive NAME)` as psyntax's location (`(pl NAME)`, when its `primitive-locations` gives one), a primitive value
+  (`(pv NAME)`), a control primitive (`(pc NAME)`), a plain one with its arity and implementations (`(pp NAME MIN MAX
+  IMPL)`) or a missing one (`(pm NAME)`); `if`, `seq`, `setl`, `setg`, `lam` (clauses), `letrec`, `app`. Constants are
+  a table per unit, by identity for objects, each written by `write` and checked to read back (`aotSame`: structure,
+  strings and bytevectors by content, gensyms by name and uid); a constant that does not read back refuses the unit
+  with the reason. psyntax's boot is dumped form by form, each before it is evaluated, so its primitives resolve as
+  they do when it boots.
+- **The compiler** `arbace.scheme.aot` (`arbace/scheme/aot.ae`, 564 lines, on the tools' host): a unit becomes a Go
+  package. A lambda's clause is a Node type whose `Run` is its body over the clause's environment (the evaluator's
+  `Env`, so closures, `set!` and letrec are the evaluator's frames); a `case-lambda` a `*scm.Lambda` built at init;
+  the forms of the unit `top` Nodes run by `M.Exec`. The CPS: a form is compiled against a continuation, `:tail` (a
+  value is `return v, true`, a call `return m.ApplyN(f, ...)`), a jump to a continuation function, or a generator of
+  the statements that use the value; a non-tail call reifies its continuation as a package-level function `kN` of
+  the value and of the temporaries and environments live in it (found by a walk of its generated body), pushes it
+  as a compiled frame (`M.PushK`: a new frame kind `kCode` whose `E`, `A` and `V` hold the live values, so no Go
+  closure is allocated; a continuation with nothing live is pushed as a plain `GoK`) and transfers to the callee by
+  Apply: the continuation is the evaluator's list of heap frames, so `call/cc` captures it in O(1) and re-enters it any
+  number of times, `dynamic-wind`'s winds and the handler stack are the evaluator's, tail calls push nothing, and depth
+  is bounded by memory. Sequences and letrec's inits are compiled from their last element, iteratively, each step
+  with a call continuing in a function of its own: the generated code is flat (a suite's 2,000-test body is 2,000
+  small functions, not 2,000 nested closures). Simple forms (constants, references, `lambda`, plain primitives
+  applied to simple operands, `if` of simple parts) are Go expressions; the evaluation order is the evaluator's
+  (operator, then operands left to right, a value read before a later call bound to a temporary); single-value
+  contexts are checked where the evaluator checks them (`scm.Single` in a continuation of an operand, a test, a
+  `set!` or an init; `scm.SingleV` on a primitive's result unless it is one of the primitives that give one value).
+  Constants are read back at init by `scm.ReadAOT` (the reader with `#{NAME UID}`, one gensym per uid), the
+  program's own locations are `scm.NewLoc`s (not in the store, so labels psyntax makes at run time cannot clash),
+  interned ones `M.LocOf` in `setup`. Its Go forms are printed by repr/go (`bin/build-go --print-only --layout lines`).
+- **Libraries as packages**: each library a program needs is a package `arbace/scmaot/PKG/lib/NAME` with `Run(m)`
+  (its invoke code) and its locations as exported variables (`G<n>`), owned by the first unit that names them (the
+  library that defines them, invoked first) and imported by the units after it; the program is the main package
+  `arbace/scmaot/PKG/prog`, which runs psyntax's boot when it needs it, then each library's `Run` in invoke order, then
+  its own.
+- **The expander compiled and linked**: psyntax's boot is a unit too, the package `arbace/scmaot/psyntax` (`Boot`:
+  its 7 forms compiled; 395,762 bytes of core forms, 1.47 MB of Go, compiled once per input and compiler by hash into
+  `.tmp/si/aot/psyntax-KEY/`, 5 s and 0.6 GB to compile with Go). A program that names a primitive psyntax provides
+  (`eval`, `environment`, `syntax-violation`, ...) links it and boots it at start, then sets the library path as si
+  does: `eval` in a compiled program expands with the compiled psyntax and evaluates the expansion with the linked
+  evaluator (`eval-core`). Racket's `eval.sps` (eval of `(environment '(rnrs))` and of a prefixed `only` set, and
+  `eval` at expand time inside `let-syntax`) passes compiled, in 0.04 s.
+- **The runtime's half** (`go/arbace/scm/aot.ae`, `eval.ae`): `Single`, `SingleV`, `GlobalRef`, `RefChecked`, `NewEnv`,
+  `NewLoc`, `PrimProc`, `PrimValue`, `MissingPrim`, `ApplyPrim`, `ReadAOT`; the frame kind `kCode` with `KFn` and
+  `PushK` (`K` gains the field `A`); the speed pass: `Apply0`..`Apply4` (a closure whose one clause takes the
+  arguments gets its environment and values in one allocation) and fast paths for `+ - < <= > >= =` on fixnums
+  (overflow checked), `car cdr cons null? not pair? eq?`, each falling back to the primitive's own function for its
+  errors and the tower.
+- **Compile-time rejections**: a program psyntax rejects (an `&syntax`, a library not found, Larceny's programs with a
+  library in the program) is rejected when compiled as when run; the expansion's error is the compiled run's
+  outcome (status 255, its message on stderr), judged as a run.
+- **`bin/si`**: `aot [--lib DIR]... FILE [ARG]...` (compile and run one program), `check --aot [--record] [--only
+  ID]...` (every program of the check compiled and run into `.tmp/si/aot/runs`, judged as si's against Chez's records,
+  a refusal an item `refused ID: WHY` classed by `test/scheme/divergences-aot.edn` first, then compared with si's
+  interpreted runs, `arbace.scheme.check compare`), `srfi --aot`, `bench`; `arbace.scheme.check judge --aot`,
+  `compare`, `divergences --aot`; results `test/scheme/check-aot-linux-amd64.edn`. Go's cache of the compiled programs
+  is cleaned when it passes 500 MB (`aot_cache_trim`).
+
+### The checks, numbers
+
+- **`bin/si check --aot`: 44 of 47 programs pass, 3 non-pass items, 0 failing**: 45 programs compiled (39 run, 6
+  rejected at compile time as Chez and si reject them: Racket's `run.sps` and `test.sps`, Larceny's `cpoint`, `earley`,
+  `nboyer`, `run-benchmark`), 2 refused with a reason (`:syntax-constants`: Racket's `syntax-case.sps` and Larceny's
+  `regression.sch` keep psyntax's syntax objects among their constants, SC90), and `:chez-conditions` (1) as si.
+  **Interpreted and compiled compared: 45 of 47 the same (status and stdout byte for byte), 2 refused, 0 differing.**
+  Compiling the 47 took 116 s in all (expansion on si, stage 0's compile and print, Go's build: 1 to 18 s a program,
+  Racket's base the largest), running them 44 s (fib 40 is 41 s of it).
+- **Speed** (wall seconds, this host, beside GT7's clean run). **fib 40: compiled 41.3 s, si 83.8 s, Chez 0.85 s**
+  (compiled 2.0x si, 49x Chez). fib 35: si 7.46, compiled 5.48 before the speed pass and 3.88 after it, Chez 0.16.
+  `bin/si bench --n 30` (`.tmp/si/aot/bench.tsv`): fib 30 si 0.63, compiled 0.37, Chez 0.08. **Racket's 25 suite
+  programs that run: si 16.5 s, compiled 0.33 s, Chez 3.26 s** (compiling them took 82 s). Both si's and Chez's figures
+  include expanding the program and its libraries at run time, and si's include psyntax's boot; the compiled
+  program expanded at compile time, so it is faster than Chez on these short programs and slower on call-heavy code.
+  A profile of fib compiled: about 40% allocation and GC, about 30% the machine's loop and resume (each call returns
+  to the loop, and each value goes through `resume`). That is the constant factor of CPS over heap frames that SC6 (a)
+  accepted; SC95 proposes the next step.
+- `bin/si srfi --aot`: **11 of 11 SRFI programs compiled pass, the same output as si's**. `bin/si unit`: pass. The
+  speed pass changed `eval.ae`'s frames, so I ran si's checks again: `bin/si check` 46 of 47, 1 item in a class, 0
+  failing (as SM6); `bin/si test --si` 61 of 64, 3 known, 0 failing; `bin/si srfi` 11 of 11. The compare against these
+  runs is still 45 the same, 2 refused, 0 differing. `make check-makefile`: rc 0.
+- Not run: the essential gate (the light tier); anything on Arbace's executables; `bin/si check --aot` under
+  `bin/lib/limit.bash`'s CPU limits; arm64.
+
+### Proposals (SC90 onward)
+
+- **SC90 Syntax objects among a program's constants.**
+  - Options: (a) as built: the unit is refused (`:syntax-constants`, 2 programs); (b) write a record constant as a
+    recipe: its record type named by the psyntax location that holds it (psyntax's rtds are globals of the compiled
+    psyntax), its fields as constants, the labels of its ribs installed by the compiled program as psyntax installs
+    them (the libraries' substs and envs, SC94 (b)); (c) expand such a unit again at start from its source (compiled
+    psyntax linked, the unit evaluated by the linked evaluator): the program is then only partly compiled.
+  - *Recommended: (b) with SC94 (b)*: the constant cannot travel as text, so a recipe is the fix, and its labels need
+    the compiled libraries installed in psyntax anyway; (c) only as a stopgap, since it is not AOT.
+- **SC91 Where the AOT compiler lives.**
+  - Options: (a) as built: the dumper in Go (`scm`, a mirror of `comp`, so a program's forms resolve as the evaluator
+    resolves them) and the compiler in Arbace (`arbace.scheme.aot`, on the tools' host, Go forms out); (b) all in Go
+    (scm writes Go forms as text), so a shipped si compiles without the tools' host; (c) the compiler in Scheme, run
+    by si.
+  - *Recommended: (a)*: forms to forms is Arbace's way (c2j, j2g), the IR is small, and stage 0 compiles psyntax in 6 s;
+    the dumper must stay in Go because only the running expander knows the resolution.
+- **SC92 Constants.**
+  - Options: (a) as built: each unit's constants written as text and read back at init (`ReadAOT`, gensyms by uid);
+    (b) Go code that builds each constant.
+  - *Recommended: (a)*: one string per unit, the reader already exact for every datum the corpora quote; (b) only
+    where SC90 (b) needs recipes.
+- **SC93 Libraries as packages, separately compiled.**
+  - Options: (a) as built: per program, under `arbace/scmaot/PKG/lib/`, each program's copy built (Go's cache shares
+    nothing between programs: the paths differ); (b) a library's package keyed by the hash of its IR and its
+    dependencies' keys (`arbace/scmaot/lib/HASH`), shared by the programs and by the shipped build, its locations
+    named by their order in the library, so the same library compiles once.
+  - *Recommended: (b)* with the shipped path (the heavy list): Racket's `(tests r6rs test)` is compiled 26 times now.
+- **SC94 eval and the program's own libraries.**
+  - Options: (a) as built: the compiled program does not install its libraries in psyntax; `(environment '(a user
+    library))` in a compiled program finds the library's source on the library path and expands and invokes it
+    again (a second instance; no check program does it); (b) install each compiled library in psyntax at start
+    (`install-library` with its subst and env from the dump, its invoke procedure the compiled `Run`, its state
+    invoked), a patch of psyntax's exports and `bin/si boot` again.
+  - *Recommended: (b)*: it makes `eval` see the program's own libraries as compiled, as Chez's compiled programs do; a
+    day's work with SC90 (b).
+- **SC95 Speed beyond CPS on heap frames.**
+  - Options: (a) as built: CPS over the evaluator's frames with compiled frames and the speed pass (fib 40 41 s, 2.0x
+    si, 49x Chez); (b) direct entry: a compiled caller runs a compiled callee's body directly while a depth counter
+    allows (no return to the machine's loop for the entry), the continuation still on the heap; (c) direct style for
+    calls of known compiled procedures with the heap frames made only when `call/cc` captures (generalized stack
+    inspection: each Go frame's handler pushes its heap frame as a capture unwinds the Go stack; Pettyjohn, Clements,
+    Marshall, Krishnamurthi, Felleisen, "Continuations from generalized stack inspection", ICFP 2005), the evaluator's
+    frames kept for the interpreter; (d) self tail calls as loops and unboxed fixnum locals (a type pass).
+  - *Recommended: (d) then (b), and (c) as its own decision*: (d) and (b) are bounded (days) and keep SC6 (a); (c) is the
+    route to Chez's order of speed (10x and more) but changes the decided design and the machine's invariants, so it
+    is the user's call.
+- **SC96 Compile time.**
+  - Options: (a) as built: per program one dump, one stage-0 compile, one print, one Go build (1-18 s); (b) one
+    stage-0 process for the whole check (all IRs compiled and printed at once), Go building the programs in turn.
+  - *Recommended: (b)* for the check (stage 0's start and repr/go's are most of a small program's 2 s); (a) stays for
+    `bin/si aot`.
+- **SC97 Compile-time rejections.**
+  - Options: (a) as built: the expansion's error is the compiled run's outcome (status 255 and the message), judged as
+    a run; (b) a refusal class.
+  - *Recommended: (a)*: Chez's `compile-program` rejects them the same way; they are results, not gaps.
+- **SC98 Which primitives skip the single-value check.**
+  - Options: (a) as built: a list of the common primitives that give one value (`single-prims` in
+    `arbace.scheme.aot`); (b) a flag per primitive in `scm` (`Prim.Multi`), set where a primitive returns `*Values`,
+    the dumper passing it.
+  - *Recommended: (b)*: the runtime knows; the list can go stale when a primitive changes.
+- **SC99 psyntax in compiled programs.**
+  - Options: (a) as built: linked and booted only when the program names a primitive psyntax provides (most programs
+    need neither: the suites but `eval.sps` start in milliseconds); (b) always linked.
+  - *Recommended: (a)*.
+
+### Rule slips
+
+- I waited 25 minutes for the SM6 agent's processes to leave the worktree; one remained, a `cat` blocked on its
+  stdin since 15:03 (before SM6's commit at 15:08), writing `/tmp/claude-0/x.sps`, outside the worktree. I took it as
+  stale and went on; I did not stop it (it is the SM6 session's).
+- One command of mine used `>/dev/null` (a diff), and one `pgrep` (to look for the running fib); both read-only.
+- The first experiments built in the session's scratchpad with the worktree's `.tmp/si/gocache` as GOCACHE once.
+
+### The heavy list (needs Arbace's executables or the lock), and checks not run
+
+1. **The real build**: `bin/si check --aot` through `arbace.build.go` on the gate's executable (the programs as
+   shards of one build under the big lock, as `bin/goi check --aot` builds), against the same records.
+2. **The shipped integration** (with SC61): `go/arbace/scm` and the compiled psyntax (`arbace/scmaot/psyntax`) listed
+   in j2g's package list, so the executable's si boots compiled psyntax; `bin/si aot` on the shipped executable;
+   SC93 (b)'s shared library packages; the re-seed after SM7 (SC14 (a)).
+3. **The gate**: this branch's first essential gate (`go/` changed: the executables rebuilt), `bin/gate --audit` for
+   the new inputs (`arbace/scheme/aot.ae`, `test/scheme/divergences-aot.edn`, `test/scheme/check-aot-linux-amd64.edn`).
+4. Not run: `bin/si check --aot` under CPU limits; on arm64; the SRFI programs compiled on the shipped path.

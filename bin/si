@@ -29,7 +29,21 @@
 #                                        recorded runs (test/scheme/si/ref-chez.edn; --record-ref: run Chez first and
 #                                        rewrite it), every non-pass in a class of test/scheme/divergences.edn
 #                                        (--record: write test/scheme/check-linux-amd64.edn)
+#   bin/si aot [--lib DIR]... FILE [ARG]...  a top-level program compiled (SM7: core forms to Go forms by
+#                                        arbace.scheme.aot, printed by repr/go, built by TamaGo's go over
+#                                        arbace/scm, psyntax's package linked when it uses eval) and run
+#   bin/si check --aot [--record] [--only ID]...
+#                                        the check's programs compiled and run (.tmp/si/aot/runs), judged
+#                                        as si's (refused: an item with the reason, test/scheme/divergences-aot.edn;
+#                                        --record: test/scheme/check-aot-linux-amd64.edn), then compared with
+#                                        si's interpreted runs (.tmp/si/runs, bin/si check's)
 #   bin/si srfi [N...]                  the SRFIs' programs (test/scheme/srfi/srfi-N*.sps) run on si with the libraries of scheme/lib
+#   bin/si srfi --aot [N...]            the same programs compiled (aot_compile) and run, judged the same way, their
+#                                        stdout compared with si's interpreted run of each ("same"/"differs")
+#   bin/si bench [--n N]                 timings for the speed report: larceny's fib (stdin N, default 40) and the R6RS
+#                                        suite's programs, wall seconds on si, compiled (compile time apart) and on Chez,
+#                                        one after another: a TSV (program, si_s, aot_s, chez_s, compile_s) and a total
+#                                        line, also in .tmp/si/aot/bench.tsv
 #   bin/si divergences [RESULTS]         the recorded check's non-pass items by class
 #   bin/si check-suite                   Racket's R6RS suite's libraries and programs expanded (the corpus of
 #                                        test/scheme/corpora.edn), its &syntax cases (test/scheme/expand/suite-syntax.edn)
@@ -106,6 +120,133 @@ check_runs() {
   done < "$dir/list.tsv"
 }
 
+# si's AOT (SM7, doc/scheme/SCHEME-SURVEY.md, "As built: SM7 (write-ahead)"): core forms to Go forms by
+# arbace.scheme.aot (on the tools' host), printed by repr/go (bin/build-go --print-only), built with TamaGo's go
+# over arbace/scm into one small executable per program (the light tier: not Arbace's executable).
+aot_dir=$root/.tmp/si/aot
+aot_mod=$aot_dir/mod
+aot_go() {
+  local goroot=${ARBACE_GOROOT:-/root/tamago-go}
+  (cd "$aot_mod" && env GOROOT="$goroot" GOTOOLCHAIN=local GOFLAGS= GOWORK=off GO111MODULE=on GOPROXY=off CGO_ENABLED=0 \
+     GOCACHE="${SI_AOT_GOCACHE:-$aot_dir/gocache}" GOMAXPROCS=${GOMAXPROCS:-4} "$goroot/bin/go" "$@")
+}
+# aot_module: the module the compiled programs build in: arbace/scm as printed for the light driver, psyntax's
+# package compiled (cached by its input's and the compiler's hash)
+aot_module() {
+  [ -x "$si_light" ] || light
+  mkdir -p "$aot_mod/scm" "$aot_mod/scmaot" "$aot_dir/bin"
+  printf 'module arbace\n\ngo 1.27\n' > "$aot_mod/go.mod"
+  rm -f "$aot_mod"/scm/*.go
+  for f in "$light_dir"/print/mod/scm/*.go; do case $f in *_test.go) ;; *) cp "$f" "$aot_mod/scm/" ;; esac; done
+  si_exec --aot-boot "$aot_dir/psyntax.ir"
+  local key; key=$(cat "$aot_dir/psyntax.ir" "$root/arbace/scheme/aot.ae" | sha256sum | cut -c1-16)
+  local cached=$aot_dir/psyntax-$key
+  if [ ! -d "$cached" ]; then
+    local src=$aot_dir/src-psyntax w=$aot_dir/print-psyntax
+    rm -rf "$src" "$w" "$aot_dir"/psyntax-*
+    echo "si aot: compiling psyntax ($(wc -c < "$aot_dir/psyntax.ir") bytes of core forms)" >&2
+    arbace_tool -m arbace.scheme.aot psyntax "$aot_dir/psyntax.ir" "$src"
+    "$root/bin/build-go" --print-only --module arbace --layout lines --work "$w" "$src" >&2
+    mkdir -p "$cached"; cp "$w"/mod/scmaot/psyntax/*.go "$cached/"
+    rm -rf "$src" "$w"
+  fi
+  rm -rf "$aot_mod/scmaot/psyntax"; mkdir -p "$aot_mod/scmaot/psyntax"; cp "$cached"/*.go "$aot_mod/scmaot/psyntax/"
+}
+# aot_compile PKG DIR FILE OUT [LIB...]: program FILE (in directory DIR) expanded by psyntax on si, its units
+# compiled to Go forms, printed into the module's arbace/scmaot/PKG and built into OUT; on a refusal, OUT.refused
+# holds the reason
+aot_compile() {
+  local pkg=$1 d=$2 file=$3 out=$4; shift 4
+  local ir=$aot_dir/ir/$pkg.ir src=$aot_dir/src/$pkg w=$aot_dir/print/$pkg log=$aot_dir/log/$pkg
+  mkdir -p "$aot_dir/ir" "$aot_dir/log"; rm -rf "$src" "$w" "$aot_mod/scmaot/$pkg" "$out" "$out".{refused,cout,cerr,crc}
+  local largs=(); for l in "$@"; do largs+=(--lib "$l"); done
+  local st=0
+  (cd "$d" && timeout "${SI_TIMEOUT:-600}" env GOMEMLIMIT=${SI_GOMEMLIMIT:-1500MiB} GOMAXPROCS=${GOMAXPROCS:-4} \
+     "$si_light" --pp "$light_dir/psyntax.pp.ss" ${largs[@]+"${largs[@]}"} --aot-dump "$ir" "$file" < "$light_dir/empty.in" > "$log.dump" 2> "$log.dump-err") || st=$?
+  if [ $st != 0 ]; then
+    # rejected when compiled, as by si and by Chez when run: the compile-time error is the compiled run's outcome
+    if [ $st = 255 ]; then cp "$log.dump" "$out.cout"; cp "$log.dump-err" "$out.cerr"; echo 255 > "$out.crc"; return 0; fi
+    echo "the expansion fails: status $st: $(grep -m1 . "$log.dump-err")" > "$out.refused"; return 0
+  fi
+  if ! arbace_tool -m arbace.scheme.aot program "$ir" "$src" "$pkg" "$file" "$@" > "$log.compile" 2>&1; then
+    echo "the compiler refuses it: $(grep -m1 'refused\|Exception\|rror' "$log.compile" || tail -1 "$log.compile")" > "$out.refused"; return 0
+  fi
+  if ! "$root/bin/build-go" --print-only --module arbace --layout lines --work "$w" "$src" > "$log.print" 2>&1; then
+    echo "repr/go does not print it: $(tail -1 "$log.print")" > "$out.refused"; return 0
+  fi
+  mkdir -p "$aot_mod/scmaot"; cp -r "$w/mod/scmaot/$pkg" "$aot_mod/scmaot/$pkg"; rm -rf "$src" "$w"
+  if ! aot_go build -p 2 -trimpath -o "$out" "./scmaot/$pkg/prog" > "$log.build" 2>&1; then
+    echo "go build fails: $(grep -m1 . "$log.build")" > "$out.refused"; return 0
+  fi
+}
+# aot_cache_trim: Go's cache of the compiled programs kept under 500 MB
+aot_cache_trim() {
+  local c=${SI_AOT_GOCACHE:-$aot_dir/gocache}
+  [ -d "$c" ] || return 0
+  if [ "$(du -sm "$c" | cut -f1)" -gt "${SI_AOT_GOCACHE_MB:-500}" ]; then aot_go clean -cache; fi
+}
+# check_runs_aot DIR [IDS...]: each program of programs.edn compiled (aot_compile) and run as check_runs runs it
+# on si, into DIR/ID.out, .err, .rc (or DIR/ID.refused), DIR/ID.time the seconds compiling and running; the
+# executable and its packages deleted after its run
+check_runs_aot() {
+  local dir=$1; shift
+  local corpora=${ARBACE_SCHEME_CORPORA:-$root/.tmp/scheme/corpora}
+  mkdir -p "$dir" "$root/.tmp/si/suite-lib"; ln -sfn "$corpora/racket-r6rs" "$root/.tmp/si/suite-lib/tests"
+  aot_module
+  arbace_tool -e '(doseq [p (:programs (read-string (slurp "'"$root"'/test/scheme/si/programs.edn")))] (println (str (:id p) "\t" (if (:corpus p) "c" "r") "\t" (:file p) "\t" (or (:input p) ""))))' > "$dir/list.tsv"
+  local id kind file input base d f n=0
+  while IFS=$'\t' read -r id kind file input; do
+    if [ $# -gt 0 ]; then case " $* " in *" $id "*) ;; *) continue ;; esac; fi
+    base=$root; [ "$kind" = c ] && base=$corpora
+    f=$base/$file; d=$(dirname "$f")
+    local o=$dir/${id//\//__} in=$dir/empty.in pkg=p_$(echo "$id" | tr -c 'A-Za-z0-9\n' '_')
+    : > "$in"; [ -n "$input" ] && in=$corpora/$input
+    rm -f "$o.out" "$o.err" "$o.rc" "$o.refused" "$o.time" "$o.compile-error"
+    local t0 t1 t2; t0=$(date +%s.%N)
+    aot_compile "$pkg" "$d" "$(basename "$f")" "$aot_dir/bin/$pkg" "$root/.tmp/si/suite-lib" "$root/scheme/lib"
+    t1=$(date +%s.%N)
+    if [ -f "$aot_dir/bin/$pkg.refused" ]; then
+      mv "$aot_dir/bin/$pkg.refused" "$o.refused"; echo "aot $id: refused: $(cat "$o.refused")" >&2
+    elif [ -f "$aot_dir/bin/$pkg.crc" ]; then
+      mv "$aot_dir/bin/$pkg.cout" "$o.out"; mv "$aot_dir/bin/$pkg.cerr" "$o.err"; mv "$aot_dir/bin/$pkg.crc" "$o.rc"; : > "$o.compile-error"
+      echo "aot $id: rejected at compile time (status 255): $(grep -m1 . "$o.err")" >&2
+    else
+      (cd "$d" && timeout "${SI_TIMEOUT:-600}" env GOMEMLIMIT=${SI_GOMEMLIMIT:-1500MiB} GOMAXPROCS=${GOMAXPROCS:-4} \
+         "$aot_dir/bin/$pkg" ${SI_AOT_ARGS:-} < "$in" > "$o.out" 2> "$o.err"; echo $? > "$o.rc") || true
+      echo "aot $id: status $(cat "$o.rc")" >&2
+    fi
+    t2=$(date +%s.%N)
+    echo "$t0 $t1 $t2" | awk '{printf "compile %.2f run %.2f\n", $2-$1, $3-$2}' > "$o.time"
+    rm -rf "$aot_dir/bin/$pkg" "$aot_mod/scmaot/$pkg"
+    n=$((n+1)); [ $((n % 8)) = 0 ] && aot_cache_trim
+  done < "$dir/list.tsv"
+  aot_cache_trim
+}
+
+# bench_time OUT CMD...: CMD's wall seconds on stdout (its stdout/stderr discarded into OUT.out/.err, stdin from $bench_in)
+bench_time() {
+  local o=$1; shift
+  local t0 t1; t0=$(date +%s.%N)
+  timeout "${SI_TIMEOUT:-600}" "$@" < "$bench_in" > "$o.out" 2> "$o.err" || true
+  t1=$(date +%s.%N); echo "$t0 $t1" | awk '{printf "%.2f", $2-$1}'
+}
+# bench_one ID DIR FILE IN: one row of the bench table (si, compiled, Chez; the compile time apart)
+bench_one() {
+  local id=$1 d=$2 f=$3 in=$4 pkg=p_bench_$(echo "$1" | tr -c 'A-Za-z0-9\n' '_')
+  local o=$aot_dir/bench/$(echo "$id" | tr -c 'A-Za-z0-9\n' '_') si_s aot_s chez_s ct t0 t1
+  bench_in=$in
+  si_s=$(cd "$d" && bench_time "$o.si" env GOMEMLIMIT=${SI_GOMEMLIMIT:-1500MiB} GOMAXPROCS=${GOMAXPROCS:-4} "$si_light" --pp "$light_dir/psyntax.pp.ss" --lib "$root/.tmp/si/suite-lib" --lib "$root/scheme/lib" "$(basename "$f")")
+  t0=$(date +%s.%N)
+  aot_compile "$pkg" "$d" "$(basename "$f")" "$aot_dir/bin/$pkg" "$root/.tmp/si/suite-lib" "$root/scheme/lib"
+  t1=$(date +%s.%N); ct=$(echo "$t0 $t1" | awk '{printf "%.2f", $2-$1}')
+  if [ -f "$aot_dir/bin/$pkg.refused" ]; then aot_s=refused; echo "bench $id: refused: $(cat "$aot_dir/bin/$pkg.refused")" >&2
+  elif [ -f "$aot_dir/bin/$pkg.crc" ]; then aot_s=rejected
+  else aot_s=$(cd "$d" && bench_time "$o.aot" env GOMEMLIMIT=${SI_GOMEMLIMIT:-1500MiB} GOMAXPROCS=${GOMAXPROCS:-4} "$aot_dir/bin/$pkg"); fi
+  rm -rf "$aot_dir/bin/$pkg" "$aot_dir/bin/$pkg".{refused,cout,cerr,crc} "$aot_mod/scmaot/$pkg"
+  chez_s=$(cd "$d" && bench_time "$o.chez" "$CHEZ" --libdirs "$root/.tmp/si/suite-lib" --program "$(basename "$f")")
+  printf '%s\t%s\t%s\t%s\t%s\n' "$id" "$si_s" "$aot_s" "$chez_s" "$ct"
+}
+
 cmd=${1:-}; [ $# -eq 0 ] || shift
 case $cmd in
   vendor)
@@ -145,12 +286,32 @@ case $cmd in
     arbace_tool -m arbace.scheme.expand test ;;
   unit) si_print_build test "$@" ;;
   light) light ;;
+  aot)
+    aot_module; : > "$light_dir/empty.in"
+    libs=(); while [ "${1:-}" = --lib ]; do libs+=("$(cd "$2" && pwd)"); shift 2; done
+    [ $# -ge 1 ] || { echo "usage: bin/si aot [--lib DIR]... FILE [ARG]..." >&2; exit 2; }
+    f=$(cd "$(dirname "$1")" && pwd)/$(basename "$1"); shift
+    aot_compile p_run "$(dirname "$f")" "$(basename "$f")" "$aot_dir/bin/p_run" ${libs[@]+"${libs[@]}"} "$root/scheme/lib"
+    if [ -f "$aot_dir/bin/p_run.refused" ]; then echo "si aot: refused: $(cat "$aot_dir/bin/p_run.refused")" >&2; exit 3; fi
+    if [ -f "$aot_dir/bin/p_run.crc" ]; then cat "$aot_dir/bin/p_run.cout"; cat "$aot_dir/bin/p_run.cerr" >&2; exit 255; fi
+    rc=0; (cd "$(dirname "$f")" && GOMEMLIMIT=${SI_GOMEMLIMIT:-1500MiB} GOMAXPROCS=${GOMAXPROCS:-4} "$aot_dir/bin/p_run" "$@") || rc=$?
+    rm -rf "$aot_dir/bin/p_run" "$aot_mod/scmaot/p_run"; exit $rc ;;
   run) [ -x "$si_light" ] || light; si_exec "$@" ;;
   check)
-    rec_ref=0 rec=() only=()
+    rec_ref=0 rec=() only=() aot=0
     while [ $# -gt 0 ]; do
-      case $1 in --record-ref) rec_ref=1; shift ;; --record) rec=(--record); shift ;; --only) only+=("$2"); shift 2 ;; *) echo "check: $1?" >&2; exit 2 ;; esac
+      case $1 in --record-ref) rec_ref=1; shift ;; --record) rec=(--record); shift ;; --only) only+=("$2"); shift 2 ;; --aot) aot=1; shift ;; *) echo "check: $1?" >&2; exit 2 ;; esac
     done
+    if [ $aot = 1 ]; then
+      mkdir -p "$light_dir"; "$root/bin/repr-scheme" corpus fetch racket-r6rs larceny-r6rs > "$light_dir/fetch.log"
+      light; : > "$light_dir/empty.in"
+      rm -rf "$aot_dir/runs"; check_runs_aot "$aot_dir/runs" ${only[@]+"${only[@]}"}
+      oargs=(); for i in ${only[@]+"${only[@]}"}; do oargs+=(--only "$i"); done
+      rc=0; arbace_tool -m arbace.scheme.check judge "$aot_dir/runs" --aot ${rec[@]+"${rec[@]}"} ${oargs[@]+"${oargs[@]}"} || rc=$?
+      if [ -d "$root/.tmp/si/runs" ]; then arbace_tool -m arbace.scheme.check compare "$root/.tmp/si/runs" "$aot_dir/runs" ${oargs[@]+"${oargs[@]}"} || rc=1
+      else echo "si aot: no interpreted runs to compare with (bin/si check first)"; fi
+      exit $rc
+    fi
     mkdir -p "$light_dir"; "$root/bin/repr-scheme" corpus fetch racket-r6rs larceny-r6rs > "$light_dir/fetch.log"
     if [ $rec_ref = 1 ]; then
       rm -rf "$root/.tmp/si/ref"; check_runs chez "$root/.tmp/si/ref" ${only[@]+"${only[@]}"}
@@ -160,7 +321,58 @@ case $cmd in
     rm -rf "$root/.tmp/si/runs"; check_runs si "$root/.tmp/si/runs" ${only[@]+"${only[@]}"}
     oargs=(); for i in ${only[@]+"${only[@]}"}; do oargs+=(--only "$i"); done
     arbace_tool -m arbace.scheme.check judge "$root/.tmp/si/runs" ${rec[@]+"${rec[@]}"} ${oargs[@]+"${oargs[@]}"} ;;
+  bench)
+    n=40
+    while [ $# -gt 0 ]; do case $1 in --n) n=$2; shift 2 ;; *) echo "bench: $1?" >&2; exit 2 ;; esac; done
+    mkdir -p "$light_dir" "$aot_dir/bench"; "$root/bin/repr-scheme" corpus fetch racket-r6rs larceny-r6rs > "$light_dir/fetch.log"
+    corpora=${ARBACE_SCHEME_CORPORA:-$root/.tmp/scheme/corpora}
+    mkdir -p "$root/.tmp/si/suite-lib"; ln -sfn "$corpora/racket-r6rs" "$root/.tmp/si/suite-lib/tests"
+    light; aot_module
+    echo "$n" > "$aot_dir/bench/fib.in"; : > "$aot_dir/bench/empty.in"
+    arbace_tool -e '(doseq [p (:programs (read-string (slurp "'"$root"'/test/scheme/si/programs.edn")))] (when (:suite p) (println (str (:id p) "\t" (:file p)))))' > "$aot_dir/bench/list.tsv"
+    tsv=$aot_dir/bench.tsv; : > "$tsv.new"
+    printf 'program\tsi_s\taot_s\tchez_s\tcompile_s\n' | tee -a "$tsv.new"
+    bench_one "larceny/fib (n=$n)" "$corpora/larceny-r6rs" "$corpora/larceny-r6rs/fib.sch" "$aot_dir/bench/fib.in" | tee -a "$tsv.new"
+    while IFS=$'\t' read -r id file; do
+      bench_one "$id" "$(dirname "$corpora/$file")" "$corpora/$file" "$aot_dir/bench/empty.in" | tee -a "$tsv.new"
+      aot_cache_trim
+    done < "$aot_dir/bench/list.tsv"
+    aot_cache_trim
+    awk -F'\t' 'NR>2 && $1 !~ /^larceny/ { si+=$2; if ($3 ~ /^[0-9.]+$/) aot+=$3; chez+=$4; c+=$5 }
+      END { printf "total (suite)\t%.2f\t%.2f\t%.2f\t%.2f\n", si, aot, chez, c }' "$tsv.new" | tee -a "$tsv.new"
+    mv "$tsv.new" "$tsv" ;;
   srfi)
+    aot=0; if [ "${1:-}" = --aot ]; then aot=1; shift; fi
+    if [ $aot = 1 ]; then
+      [ -x "$si_light" ] || light
+      aot_module; : > "$light_dir/empty.in"
+      rc=0; ran=0; mkdir -p "$aot_dir/srfi"
+      for f in "$root"/test/scheme/srfi/srfi-*.sps; do
+        b=$(basename "$f" .sps); n=${b#srfi-}; n=${n%%-*}
+        if [ $# -gt 0 ]; then case " $* " in *" $n "*) ;; *) continue ;; esac; fi
+        pkg=p_srfi_$(echo "$b" | tr -c 'A-Za-z0-9\n' '_'); o=$aot_dir/srfi/$b
+        ran=$((ran+1))
+        aot_compile "$pkg" "$(dirname "$f")" "$(basename "$f")" "$aot_dir/bin/$pkg" "$root/scheme/lib"
+        if [ -f "$aot_dir/bin/$pkg.refused" ]; then
+          echo "FAIL $b: refused: $(cat "$aot_dir/bin/$pkg.refused")"; rc=1; rm -f "$aot_dir/bin/$pkg.refused"; rm -rf "$aot_mod/scmaot/$pkg"; continue
+        elif [ -f "$aot_dir/bin/$pkg.crc" ]; then
+          mv "$aot_dir/bin/$pkg.cout" "$o.out"; mv "$aot_dir/bin/$pkg.cerr" "$o.err"; mv "$aot_dir/bin/$pkg.crc" "$o.rc"
+        else
+          (cd "$(dirname "$f")" && timeout "${SI_TIMEOUT:-300}" env GOMEMLIMIT=${SI_GOMEMLIMIT:-1500MiB} GOMAXPROCS=${GOMAXPROCS:-4} \
+             "$aot_dir/bin/$pkg" < "$light_dir/empty.in" > "$o.out" 2> "$o.err"; echo $? > "$o.rc") || true
+        fi
+        rm -rf "$aot_dir/bin/$pkg" "$aot_mod/scmaot/$pkg"
+        # si's interpreted run of the same program
+        ii=$light_dir/srfi-$b; : > "$ii.in"
+        (cd "$(dirname "$f")" && timeout "${SI_TIMEOUT:-300}" env GOMEMLIMIT=${SI_GOMEMLIMIT:-1500MiB} GOMAXPROCS=${GOMAXPROCS:-4} \
+           "$si_light" --pp "$light_dir/psyntax.pp.ss" --lib "$root/scheme/lib" "$(basename "$f")" < "$ii.in" > "$ii.out" 2> "$ii.err"; echo $? > "$ii.rc") || true
+        st=$(cat "$o.rc"); fails=$(grep -c '^FAIL' "$o.out" || true)
+        if cmp -s "$o.out" "$ii.out"; then same=same; else same=differs; fi
+        if [ "$st" = 0 ] && [ "$fails" = 0 ]; then echo "pass $b: $(tail -1 "$o.out") ($same as si)"; else echo "FAIL $b: status $st, $fails FAIL lines ($o.out, $o.err) ($same as si)"; rc=1; fi
+      done
+      aot_cache_trim
+      echo "srfi --aot: $ran programs"; exit $rc
+    fi
     # bin/si srfi [N...]: test/scheme/srfi/srfi-N*.sps (SM6: the SRFIs as libraries under scheme/lib/srfi/) run on si
     # (the light driver); a program passes when its status is 0 and it prints no line starting "FAIL"
     [ -x "$si_light" ] || light

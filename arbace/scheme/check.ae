@@ -7,7 +7,13 @@
   the programs (si and Chez) into a directory of ID.out, ID.err, ID.rc; this namespace records and judges.
 
     record-ref DIR             Chez's runs in DIR into test/scheme/si/ref-chez.edn
-    judge DIR [--record]       si's runs in DIR judged; --record writes test/scheme/check-linux-amd64.edn
+    judge DIR [--record] [--aot]
+                               si's runs in DIR judged; --record writes test/scheme/check-linux-amd64.edn;
+                               --aot: the compiled runs (bin/si check --aot, SM7), a program the AOT refuses
+                               an item \"refused ID: WHY\", the classes of test/scheme/divergences-aot.edn
+                               first, the results test/scheme/check-aot-linux-amd64.edn
+    compare SI-DIR AOT-DIR     the interpreted and the compiled runs of each program compared (status and
+                               stdout): the same, differing, or refused
     divergences [RESULTS]      the recorded results' items by class (none unclassified)"
   (:require [arbace.string :as str]))
 
@@ -20,8 +26,10 @@
 
 (defn- run-of [dir id]
   (let [f (fn [ext] (let [x (java.io.File. (str dir "/" (fid id) "." ext))] (when (.exists x) (slurp x))))]
-    (when-let [rc (f "rc")]
-      {:status (Long/parseLong (str/trim rc)) :out (or (f "out") "") :err (or (f "err") "")})))
+    (if-let [why (f "refused")]
+      {:refused (str/trim why)}
+      (when-let [rc (f "rc")]
+        {:status (Long/parseLong (str/trim rc)) :out (or (f "out") "") :err (or (f "err") "")}))))
 
 (defn- first-line [s] (first (str/split-lines (or s ""))))
 
@@ -50,6 +58,7 @@
   (cond
     (nil? ref) [(str "no-reference " id)]
     (nil? r) [(str "not-run " id)]
+    (:refused r) [(str "refused " id ": " (:refused r))]
     (and (= (:status r) (:status ref)) (= (:out r) (:out ref))) []
     :else
     (let [ours (suite-failures (:out r)) theirs (suite-failures (:out ref))
@@ -66,7 +75,13 @@
                 i (count (take-while true? (map = ol tl)))]
             [(str "differs " id " line " (inc i) ": " (pr-str (nth ol i nil)) " for " (pr-str (nth tl i nil)))]))))))
 
-(defn load-classes [] (read-string (slurp (path "test/scheme/divergences.edn"))))
+(def ^:dynamic *aot* false)
+
+(defn load-classes []
+  (vec (concat (when *aot* (read-string (slurp (path "test/scheme/divergences-aot.edn"))))
+               (read-string (slurp (path "test/scheme/divergences.edn"))))))
+
+(defn- results-file [] (path (if *aot* "test/scheme/check-aot-linux-amd64.edn" "test/scheme/check-linux-amd64.edn")))
 
 (defn class-of [classes item]
   (:id (first (filter (fn [c] (some #(re-find % item) (:match c))) classes))))
@@ -91,9 +106,10 @@
     (if (seq bad) 1 0)))
 
 (defn- write-results [results]
-  (spit (path "test/scheme/check-linux-amd64.edn")
-        (str ";; si's check (bin/si check --record): each program's verdict and non-pass items with their classes\n"
-             ";; (test/scheme/divergences.edn); generated.\n[\n"
+  (spit (results-file)
+        (str (if *aot*
+               ";; si's AOT check (bin/si check --aot --record): each compiled program's verdict and non-pass items with their\n;; classes (test/scheme/divergences-aot.edn, then test/scheme/divergences.edn); generated.\n[\n"
+               ";; si's check (bin/si check --record): each program's verdict and non-pass items with their classes\n;; (test/scheme/divergences.edn); generated.\n[\n")
              (str/join "" (map #(str (pr-str %) "\n") results)) "]\n")))
 
 (defn- cmd-judge [[dir & opts]]
@@ -101,11 +117,31 @@
         results (judge dir only)]
     (doseq [{:keys [id verdict items]} results]
       (println (name verdict) id (if (seq items) (str "(" (count items) " items)") "")))
-    (when (and (some #{"--record"} opts) (empty? only)) (write-results results) (println "wrote test/scheme/check-linux-amd64.edn"))
+    (when (and (some #{"--record"} opts) (empty? only)) (write-results results) (println "wrote" (results-file)))
     (summary results)))
 
+(defn- cmd-compare
+  "The interpreted runs in si-dir and the compiled runs in aot-dir, program by program."
+  [[si-dir aot-dir & opts]]
+  (let [only (set (map second (filter #(= "--only" (first %)) (partition 2 1 opts))))
+        rows (for [{:keys [id]} (programs)
+                   :when (or (empty? only) (contains? only id))
+                   :let [a (run-of si-dir id) b (run-of aot-dir id)]]
+               [id (cond
+                     (or (nil? a) (nil? b)) :not-run
+                     (:refused b) :refused
+                     (and (= (:status a) (:status b)) (= (:out a) (:out b))) :same
+                     :else :differs)
+                b])]
+    (doseq [[id v b] rows :when (not= v :same)]
+      (println (name v) id (if (:refused b) (str ": " (:refused b)) "")))
+    (let [fr (frequencies (map second rows))]
+      (println (get fr :same 0) "of" (count rows) "programs: the compiled run the same as the interpreted one (status and stdout);"
+               (get fr :refused 0) "refused," (get fr :differs 0) "differing," (get fr :not-run 0) "not run")
+      (if (pos? (+ (get fr :differs 0) (get fr :not-run 0))) 1 0))))
+
 (defn- cmd-divergences [[file]]
-  (let [results (read-string (slurp (or file (path "test/scheme/check-linux-amd64.edn"))))
+  (let [results (read-string (slurp (or file (results-file))))
         classes (load-classes)
         items (for [r results i (:items r)] (assoc i :class (class-of classes (:item i))))]
     (doseq [c classes :let [is (filter #(= (:id c) (:class %)) items)] :when (seq is)]
@@ -116,8 +152,9 @@
 (defn -main [& [cmd & args]]
   (let [rc (case cmd
              "record-ref" (cmd-record-ref args)
-             "judge" (cmd-judge args)
-             "divergences" (cmd-divergences args)
-             (do (println "usage: arbace.scheme.check record-ref DIR | judge DIR [--record] | divergences [RESULTS]") 2))]
+             "judge" (binding [*aot* (boolean (some #{"--aot"} args))] (cmd-judge (remove #{"--aot"} args)))
+             "compare" (cmd-compare args)
+             "divergences" (binding [*aot* (boolean (some #{"--aot"} args))] (cmd-divergences (remove #{"--aot"} args)))
+             (do (println "usage: arbace.scheme.check record-ref DIR | judge DIR [--record] [--aot] | compare SI-DIR AOT-DIR | divergences [--aot] [RESULTS]") 2))]
     (shutdown-agents)
     (System/exit rc)))
