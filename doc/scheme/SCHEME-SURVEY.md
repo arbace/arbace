@@ -1802,3 +1802,12 @@ after I started (`/usr/bin/chibi-scheme`, the coordinator's message); I used it 
 3. **The boot batch** (SC100 (b), SC105 (b), SC107 (b), SC106 (c)) and the re-seed.
 4. **Chibi**: the suite beyond line 801 (a newer Chibi), the benchmarks' answers on Chibi (see below), `define-library` SRFI corpora.
 5. Not run: the essential gate; arm64; `bin/si check --aot` under CPU limits; the fetch of `bib` and `sum1.data`.
+
+### Decided (SC100-SC114; the user, 2026-10-30)
+
+- SC100 (b), SC105 (b), SC106 (c) with (b), SC107 (b): the boot batch, psyntax patched and booted as light work on this
+  branch, shipped with the batched re-seed after `arbace-reaps-3-crops-v2`.
+- SC101 (b), SC102 (b), SC103 (b): sqrt's branch cut, datum labels in R7RS mode, the R7RS flag in si's printer.
+- SC104 (a) now, (b) once `define-library` exists.
+- SC108 (b), SC109 (b) in the window after the tag, SC110 (b) then (c), SC111 (b), SC113 (b).
+- SC112 (a) once `go/arbace/scm` is in the shipped executable, (c) until then; SC114 (b) with the re-seed.
