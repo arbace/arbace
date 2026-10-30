@@ -1473,3 +1473,8 @@ cases, the spec lines. **Not done**: CP65 (c), the 84 and 13 known cases beyond 
 - Slips: I used a process substitution `<(...)` in four commands (harmless diffs and a join, no process left) and one background launch with `nohup ... &` inside a `&&` chain that died with the tool call (no process left); a first commit attempt printed an ignored-path hint but committed. Disk 85% throughout; no Go cache trim needed.
 - Shipped files changed (tools' namespaces; re-seed relevant if embedded): `arbace/repr/cpp/convert.ae`, `print.ae`, `rtcheck.ae`; data `test/repr/cpp/roundtrip-known.edn`; doc `doc/cpp/SPEC.md`.
 - Scratch: `.tmp/cx/j-samples`, `j-wpp`, `j-lt`, `j-dg` (results.tsv, read.tsv, summary.edn), `.tmp/cx/j-*.log`, `.tmp/cx/runall6.sh`, `.tmp/cx/repr-c-rt2.log`, `.tmp/cx/k41.list` (the 41 non-location known cases).
+
+### Decided (CP73-CP75; the user, 2026-10-30)
+
+- CP73 (c): numeric literals from macros as `(cpp/macro "NULL" 0)`; CP74 (b): macro forms' inner nodes checked against
+  `g++ -E`, a later gate check; CP75 (b): `(cpp/group ...)` for declaration groups with unnamed classes, with CP65 (c).
