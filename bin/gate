@@ -77,6 +77,17 @@
 #                                   the main checkout's .tmp/oracle-frozen/ one (FROZEN_JAR), checked by its
 #                                   pin, else built in the clone from its tag
 #        bin/gate [--full] --clean --plan  the plan such a run makes (an empty store, every part)
+#        bin/gate [--full] --clean --tag TAG --only STEP,...|failed|changed  (GT7's fix round, doc/GATE-SURVEY.md,
+#                                   "As built: GT7's fix round") a clean rerun of some steps: a fresh clone of HEAD's
+#                                   commit as above, the builds the selected steps need made fresh, those steps
+#                                   alone run and audited, their entries merged into test/gate/clean-TAG.edn (each
+#                                   step naming the run it passed clean at, :run of :runs). The selection: the steps
+#                                   named (a step with parts names its parts), failed (the record's steps that did not
+#                                   pass clean, audit ok, or that it lacks), changed (those whose key material differs
+#                                   from the run they passed at, .tmp/gate-clean/SHA.logs/gate/plan/), closed over :uses
+#                                   both ways; every other check skipped on its clean pass, and the run stopped when
+#                                   one of them changed since (its key is not the one it passed clean at): the rule
+#                                   that makes the merged record mean every step passed clean at its key
 #        bin/gate --pins [FILE]     what a clean run takes from outside its clone, by its pins: TamaGo's go
 #                                   (seed/goroot.sha256), jdk26u's commit and its build tree's platform
 #                                   (jdk/javac/platform.sha256), the system JDK (javac 26), the frozen jar
@@ -302,8 +313,8 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 . "$root/bin/lib/renamed-env.bash" # stops on a stale G2A_*, J2A_*, A2G_* or C2A_*
 cd "$root"
 unset ARBACE_HOST_EXE J2G_GO_EXE REPR_GO_EXE
-usage() { echo "usage: bin/gate [--full] [--rerun] | bin/gate [--full] --plan [--builds] | bin/gate --why STEP | bin/gate --audit [STEP...] | bin/gate --prune [--dry-run] | bin/gate [--full] --clean [--tag TAG] [--plan] | bin/gate --pins [FILE] | bin/gate --full --concurrent" >&2; exit 2; }
-full= plan_only= why= rerun= audit= prune= dry= clean= clean_tag= pins= pins_out= concurrent= builds=
+usage() { echo "usage: bin/gate [--full] [--rerun] | bin/gate [--full] --plan [--builds] | bin/gate --why STEP | bin/gate --audit [STEP...] | bin/gate --prune [--dry-run] | bin/gate [--full] --clean [--tag TAG] [--only STEP,...|failed|changed] [--plan] | bin/gate --pins [FILE] | bin/gate --full --concurrent" >&2; exit 2; }
+full= plan_only= why= rerun= audit= prune= dry= clean= clean_tag= pins= pins_out= concurrent= builds= only=
 steps_arg=() orig_args=("$@")
 while [ $# -gt 0 ]; do
   case $1 in
@@ -312,6 +323,7 @@ while [ $# -gt 0 ]; do
     --builds) builds=1 ;;
     --clean) clean=1 ;;
     --tag) [ $# -ge 2 ] || usage; clean_tag=$2; shift ;;
+    --only) [ $# -ge 2 ] || usage; only=$2; shift ;;
     --pins) pins=1; if [ $# -ge 2 ] && [ "${2#-}" = "$2" ]; then pins_out=$2; shift; fi ;;
     --concurrent) concurrent=1; full=1 ;;
     --why) [ $# -ge 2 ] || usage; why=$2; full=1; shift ;;
@@ -327,6 +339,7 @@ done
 mode=essential; [ -n "$full" ] && mode=full
 [ -n "$builds" ] && [ -z "$plan_only" ] && usage
 [ -n "$clean" ] && { [ -n "$concurrent$audit$why$prune" ] && usage; }
+[ -n "$only" ] && { [ -n "$clean" ] && [ -z "$plan_only" ] || usage; }
 . "$root/bin/lib/gate-run.bash"
 . "$root/bin/lib/tools.bash"
 
@@ -421,6 +434,16 @@ clean_launch() {
   git clone -q --shared --no-checkout "$common" "$dir" && git -C "$dir" checkout -q --detach "$sha" \
     || { echo "gate --clean: the clone failed" >&2; return 1; }
   mkdir -p "$dir/.tmp/tmp" "$dir/.tmp/gocache"
+  # --only (GT7's fix round): the record so far is the base; the rerun's logs beside the earlier runs'
+  local only_env=() logs_name=$sha.logs i=1
+  if [ -n "$only" ]; then
+    [ -f "$root/test/gate/clean-$tag.edn" ] || { echo "gate --clean --only: no record test/gate/clean-$tag.edn to rerun steps of" >&2; return 2; }
+    cp "$root/test/gate/clean-$tag.edn" "$dir/.tmp/clean-base.edn" || return 1
+    while [ -e "$base/$logs_name" ]; do logs_name=$sha.logs.$i; i=$((i + 1)); done
+    out=$base/$logs_name
+    only_env=(GATE_CLEAN_ONLY="$only" GATE_CLEAN_BASE="$dir/.tmp/clean-base.edn" GATE_CLEAN_LOGS_ROOT="$base" GATE_CLEAN_LOGS_NAME="$logs_name")
+    echo "   --only $only: the steps that failed or changed since test/gate/clean-$tag.edn's runs, merged into it"
+  fi
   # the frozen jar: the main checkout's (pinned: the clone's pins step checks it), else the clone builds it
   frozen=${FROZEN_JAR:-$main/.tmp/oracle-frozen/arbace-for-java-26-v4.jar}
   [ -f "$frozen" ] || frozen=
@@ -431,7 +454,7 @@ clean_launch() {
     esac
   done
   env ${unset[@]+"${unset[@]}"} TMPDIR="$dir/.tmp/tmp" GOCACHE="$dir/.tmp/gocache" GATE_CLEAN_INNER=1 GATE_CLEAN_TAG="$tag" \
-      ARBACE_HEAVY_LOCK="${ARBACE_HEAVY_LOCK:-$main/.tmp/big.lock}" ${frozen:+FROZEN_JAR="$frozen"} \
+      ARBACE_HEAVY_LOCK="${ARBACE_HEAVY_LOCK:-$main/.tmp/big.lock}" ${frozen:+FROZEN_JAR="$frozen"} ${only_env[@]+"${only_env[@]}"} \
       "$dir/bin/gate" ${full:+--full} --clean 2>&1 | tee "$base/$sha.out"
   st=${PIPESTATUS[0]}
   rm -rf "${out:?}"; mkdir -p "$out"
@@ -496,6 +519,8 @@ clean_record() {
     if [ -f "$logs/$n.audit-status" ]; then
       case $(cat "$logs/$n.audit-status") in ok) a=:ok ;; step-failed) a=:step-failed ;; *) a="\"$(cat "$logs/$n.audit-status")\"" ;; esac
     fi
+    # GT7's fix round: a stalled reducer (its watchdog killed the step)
+    [ -f "$logs/$n.reduce.stalled" ] && a="\"reducer stalled: $(head -1 "$logs/$n.reduce.stalled" | tr -d '"')\""
     k=${key[$n]:-}; [ "$k" = - ] && k=
     prog=
     if [ -f "$logs/$n.cpu.tsv" ]; then
@@ -547,7 +572,12 @@ fi
 if [ -n "$prune" ]; then gate_prune $dry; exit; fi
 if [ -n "$audit" ]; then
   bin/seed --build --no-aot > "$root/.tmp/gate-audit-stage0.log" 2>&1 || { tail -5 "$root/.tmp/gate-audit-stage0.log"; exit 1; }
-  gate_audit "${steps_arg[@]}"; exit
+  rm -f "${GATE_AUDIT_DIR:-$root/.tmp/gate-audit}"/*.reduce.stalled
+  gate_audit "${steps_arg[@]}"; st=$?
+  for f in "${GATE_AUDIT_DIR:-$root/.tmp/gate-audit}"/*.reduce.stalled; do
+    [ -f "$f" ] && { echo "AUDIT STALLED $(basename "$f" .reduce.stalled): $(cat "$f")"; st=1; }
+  done
+  exit $st
 fi
 if [ -n "$plan_only$why" ]; then
   d=$root/.tmp/gate-plan
@@ -593,6 +623,38 @@ sampler &
 sampler_pid=$!
 trap 'kill "$sampler_pid" 2>"$logs/sampler.err"' EXIT
 
+# GT7's fix round: a reducer's watchdog that found it stalled (tools/gateaudit/watch.go) left NAME.reduce.stalled
+# beside the step's FIFO and killed the step: said loudly in the summary, and the gate fails
+stall_report() {
+  local f n
+  for f in "$logs"/*.reduce.stalled; do
+    [ -f "$f" ] || continue
+    n=$(basename "$f" .reduce.stalled)
+    echo "   AUDIT STALLED  $n: $(cat "$f") (the reducer's watchdog killed the step; $logs/$n.reduce.err)"
+    status=1
+  done
+}
+# --clean --only (GT7's fix round): which steps this rerun runs (test/gate/clean.ae's select, against the base
+# record and the logs of its runs): MODE builds after the first plan (a build no selected check needs is not
+# made), checks once the builds are made (a check not selected skipped on its clean pass, and the run stopped
+# when one of them changed since)
+only_apply() {
+  local m=$1 d n w
+  arbace_tool -p "$root/test" -m gate.clean select "$root" "$logs" "$GATE_CLEAN_BASE" "$GATE_CLEAN_LOGS_ROOT" "$GATE_CLEAN_ONLY" "$m" \
+    > "$logs/only-$m.tsv" 2> "$logs/only-$m.err"
+  local st=$?
+  if [ $st != 0 ]; then
+    grep '^error' "$logs/only-$m.tsv" | cut -f3; cat "$logs/only-$m.err"; echo "== gate FAILED: --only's selection ($(secs "$start"))"; exit 1
+  fi
+  while IFS=$'\t' read -r d n w; do
+    case $d in
+      none) dec[$n]=none ;;
+      skip) dec[$n]=skip; why[$n]=$w; echo "$w" > "$logs/$n.why"; echo skip > "$logs/$n.status"; touch "$logs/$n.done" ;;
+    esac
+  done < "$logs/only-$m.tsv"
+  echo "   ok  --only $GATE_CLEAN_ONLY ($m): $(grep -c '^run' "$logs/only-$m.tsv") to run, $(grep -c '^skip\|^none' "$logs/only-$m.tsv") not ($logs/only-$m.tsv)"
+}
+
 # the clean run (GT7): first what it takes from outside the clone, by its pins; the audit's reducer
 if [ -n "${GATE_CLEAN_INNER:-}" ]; then
   pre_step pins '^pins:' 12 "$root/bin/gate" --pins "$logs/pins.edn"
@@ -619,6 +681,7 @@ if [ -n "$audit_all" ]; then
   echo "   ok  stage0's audit"
 fi
 sed -n '1p' "$logs/plan.log" | sed 's/^/     /'
+[ -n "${GATE_CLEAN_ONLY:-}" ] && only_apply builds
 
 # the builds (go-build; with --full javac-tool), one after the other, when needed: all of them before
 # the checks (GT5), so that the program hosts' units are known to a second plan
@@ -643,6 +706,7 @@ if [ -n "$built" ]; then
   echo "   ok  plan, again after the builds ($(secs "$t0"); .tmp/gate/plan.log, the first .tmp/gate/plan1.log)"
   sed -n '1p' "$logs/plan.log" | sed 's/^/     /'
 fi
+[ -n "${GATE_CLEAN_ONLY:-}" ] && only_apply checks
 
 # the essential checks, concurrently on the cached executables. The heavy ones (the whole-program
 # j2g runs, the suite's 12 processes) take the heavy lock each, one at a time (GT6: it replaces
@@ -656,6 +720,7 @@ else
   wait "${pids[@]}"
 fi
 for n in $(names_of essential); do [ "${kind[$n]}" = build ] || report "$n"; done
+stall_report
 
 if [ -n "$full" ]; then
   if [ -n "${GATE_FULL_PARALLEL:-}" ]; then
@@ -666,6 +731,7 @@ if [ -n "$full" ]; then
     for n in $(names_of full); do run_one "$n"; done
   fi
   for n in $(names_of full); do [ "${kind[$n]}" = build ] || report "$n"; done
+  stall_report
   # GTS34 (a): the store trimmed at the end of every --full (seconds)
   gate_prune > "$logs/prune.log" 2>&1 || echo "gate: warning: the store's prune failed ($logs/prune.log)"
   tail -1 "$logs/prune.log" | sed 's/^/   /'
@@ -677,6 +743,14 @@ done
 peak=$(awk -F'\t' '$2 == "gate" && $3 > m {m = $3} END {print m + 0}' "$logs/mem.tsv" 2>"$logs/count.err")
 low=$(awk -F'\t' '$2 == "MemAvailable" && (m == "" || $3 < m) {m = $3} END {print m + 0}' "$logs/mem.tsv" 2>"$logs/count.err")
 echo "   $ran steps run, $skipped skipped; the gate's processes at most $(gib "$peak"), the host's MemAvailable at least $(gib "$low") (.tmp/gate/mem.tsv)"
-[ -n "${GATE_CLEAN_INNER:-}" ] && clean_record > "$logs/clean-record.edn"
+if [ -n "${GATE_CLEAN_INNER:-}" ]; then
+  clean_record > "$logs/clean-record.edn"
+  # --only: the record merged with the base's (the steps of earlier runs kept, each with its run)
+  if [ -n "${GATE_CLEAN_ONLY:-}" ]; then
+    mv "$logs/clean-record.edn" "$logs/clean-record.run.edn"
+    arbace_tool -p "$root/test" -m gate.clean merge "$GATE_CLEAN_BASE" "$logs/clean-record.run.edn" "$GATE_CLEAN_ONLY" \
+      "${GATE_CLEAN_LOGS_NAME:-}" "$logs/clean-record.edn" | sed 's/^/   /'
+  fi
+fi
 if [ $status = 0 ]; then echo "== gate passed ($(secs "$start"))"; else echo "== gate FAILED ($(secs "$start"))"; fi
 exit $status
