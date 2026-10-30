@@ -1,0 +1,665 @@
+(ns arbace.repr.cpp.print
+  "C++ text from C++ forms (doc/cpp/SPEC.md; doc/cpp/CPP-SURVEY.md, \"As built: CX3, CX4\"): `print-unit` prints a
+  unit's forms in mode :lines, repr/c's canonical layout extended to C++ (arbace.repr.c.print: one statement a
+  line, four spaces an indent, the source's parentheses kept and none added where the forms came from a read;
+  braces where the source had a compound statement, a bare branch where it had none, :c/bare). Types are printed
+  as specifiers and a declarator around the name, C's way, with references, pointers to members, template-ids,
+  qualified names, function qualifiers and trailing return types; a text form is its text."
+  (:require [arbace.string :as str]))
+
+(set! *warn-on-reflection* true)
+
+(defn- fail [^String msg x] (throw (ex-info (str "print: " msg ": " (pr-str x)) {:cpp/print true})))
+
+(def ^:dynamic *indent* 0)
+(defn- pad ^String [] (apply str (repeat *indent* "    ")))
+
+(defn- join-sp ^String [& parts] (str/join " " (remove str/blank? (map str (remove nil? parts)))))
+
+(declare expr-str expr type-name split-type name-str params-str decl-str stmts! block-lines attrs-head)
+
+;; ---------------------------------------------------------------------------------------------
+;; Literals
+
+(defn- esc-unit
+  "One code unit of a literal's body; `narrow-bytes` escapes every unit above 0x7f (a byte string)."
+  ^String [^long u quote next-q narrow-bytes]
+  (cond
+    (= u 10) "\\n" (= u 9) "\\t" (= u 92) "\\\\"
+    (= u (long (int quote))) (str "\\" quote)
+    (and (= u 63) next-q) "\\?"
+    (or (< u 32) (= u 127)) (format "\\%03o" u)
+    (< u 128) (str (char u))
+    narrow-bytes (format "\\%03o" u)
+    (or (<= 0xD800 u 0xDFFF) (> u 0x10FFFF)) (fail "a code unit" u)
+    :else (String. (Character/toChars (int u)))))
+
+(defn- quote-units ^String [units quote narrow-bytes]
+  (let [v (vec units) b (StringBuilder.)]
+    (.append b (str quote))
+    (dotimes [i (count v)]
+      (.append b (esc-unit (long (v i)) quote (= 63 (get v (inc i))) narrow-bytes)))
+    (.append b (str quote))
+    (str b)))
+
+(defn- str-units [^String s] (map long (.toArray (.codePoints s))))
+
+(def ^:private char-prefix {'char "" 'wchar_t "L" 'char8_t "u8" 'char16_t "u" 'char32_t "U"})
+
+(def ^:private int-suffix
+  {'int "" 'unsigned "u" 'long "l" 'unsigned-long "ul" 'long-long "ll" 'unsigned-long-long "ull"})
+
+(defn- float-text ^String [x]
+  (let [s (if (instance? java.math.BigDecimal x) (.toString ^java.math.BigDecimal x) (str x))]
+    (if (re-find #"[.eE]" s) s (str s ".0"))))
+
+(defn literal-text
+  "A literal's text, or nil when `x` is no literal."
+  ^String [x]
+  (cond
+    (nil? x) "nullptr"
+    (true? x) "true"
+    (false? x) "false"
+    (char? x) (quote-units [(long (int x))] \' false)
+    (string? x) (quote-units (str-units x) \" false)
+    (integer? x) (str (bigint x))
+    (instance? Double x) (let [s (Double/toString (double x))] s)
+    (and (seq? x) (= (first x) 'byte-string)) (quote-units (second x) \" true)
+    (and (seq? x) (= (first x) 'lit))
+    (let [[_ t v] x]
+      (cond
+        (and (contains? char-prefix t) (vector? v)) (str (char-prefix t) (quote-units v \" (= t 'char8_t)))
+        (and (contains? char-prefix t) (integer? v))
+        (let [v (long v)
+              v (if (= t 'char) (bit-and v 0xff) v)]
+          (str (char-prefix t) (if (< 31 v 127) (quote-units [v] \' false) (str "'\\x" (Long/toHexString v) "'"))))
+        (and (integer? v) (contains? int-suffix t)) (str (bigint v) (int-suffix t))
+        (= t 'float) (str (float-text v) "f")
+        (= t 'long-double) (str (float-text v) "L")
+        :else (fail "a literal" x)))
+    :else nil))
+
+;; ---------------------------------------------------------------------------------------------
+;; Names
+
+(defn- op-text ^String [o]
+  (case o
+    not "!" and "&&" or "||" bit-and "&" bit-or "|" bit-xor "^" bit-not "~" comma "," inc "++" dec "--"
+    call "()" subscript "[]" new " new" delete " delete" co-await " co_await" bit-and= "&=" bit-or= "|=" bit-xor= "^="
+    (if (string? o) (str " " o) (name o))))
+
+(defn- type-arg?
+  "A template argument that is a type form (a symbol is printed the same either way)."
+  [a]
+  (or (symbol? a)
+      (and (seq? a)
+           (or (contains? '#{const volatile restrict array fn member-ptr typename cpp/elaborated decltype constrained atomic complex
+                             <> cpp/scope cpp/global template c/id typeof-text} (first a))
+               (and (contains? '#{* & &&} (first a)) (= 2 (count a)))))))
+
+(defn name-str
+  "A name form's text: a/b is a::b, (<> n args) n<args>, (cpp/scope ...) its parts joined by ::."
+  ^String [x]
+  (cond
+    (symbol? x) (str/replace (str x) "/" "::")
+    (seq? x)
+    (case (first x)
+      c/id (second x)
+      cpp/text (second x)
+      cpp/global (str "::" (name-str (second x)))
+      cpp/scope (str/join "::" (map name-str (rest x)))
+      template (str "template " (name-str (second x)))
+      cpp/dtor-name (str "~" (name-str (second x)))
+      operator (let [[_ o t] x]
+                 (case o
+                   conv (str "operator " (type-name t))
+                   lit (str "operator\"\"" t)
+                   (str "operator" (op-text o))))
+      <> (let [args (map (fn [a] (if (type-arg? a) (type-name a) (expr-str a 16))) (nnext x))
+               s (str/join ", " args)]
+           (str (name-str (second x)) "<" s (if (.endsWith s ">") " >" ">")))
+      pack-expand (str (name-str (second x)) "...")
+      (fail "a name" x))
+    :else (fail "a name" x)))
+
+;; ---------------------------------------------------------------------------------------------
+;; Types
+
+(def ^:private cv '#{const volatile restrict})
+
+(defn- ptr-like? [t] (and (seq? t) ('#{* & && member-ptr} (first t))))
+
+(defn- fn-quals ^String [m]
+  (join-sp (when (:const m) "const") (when (:volatile m) "volatile")
+           (case (:cpp/ref m) :& "&" :&& "&&" nil)
+           (let [n (:noexcept m)]
+             (cond (true? n) "noexcept" (false? n) "noexcept(false)" (nil? n) nil
+                   :else (str "noexcept(" (expr-str n 17) ")")))
+           (when-let [t (:cpp/throw m)] (str "throw(" t ")"))))
+
+(defn- base-str ^String [t]
+  (cond
+    (symbol? t) (if (.contains (str t) "/") (name-str t) (str/replace (str t) "-" " "))
+    (seq? t)
+    (case (first t)
+      (c/id cpp/text cpp/global cpp/scope <> template) (name-str t)
+      typename (str "typename " (name-str (second t)))
+      cpp/elaborated (str (name (second t)) " " (name-str (nth t 2)))
+      decltype (str "decltype(" (expr-str (second t) 17) ")")
+      constrained (str (name-str (second t)) " auto")
+      atomic (str "_Atomic(" (type-name (second t)) ")")
+      complex (str "_Complex " (base-str (second t)))
+      typeof-text (str "__typeof__(" (second t) ")")
+      (fail "a type" t))
+    :else (fail "a type" t)))
+
+(defn split-type
+  "A type form around the declarator text `inner`: [specifiers declarator]."
+  [t ^String inner]
+  (loop [t t inner inner]
+    (cond
+      (and (seq? t) (cv (first t)))
+      (let [[qs x] (loop [t t qs []] (if (and (seq? t) (cv (first t))) (recur (second t) (conj qs (first t))) [qs t]))]
+        (if (ptr-like? x)
+          (recur (with-meta x (assoc (meta x) :cpp/after-quals qs)) inner)
+          (let [[s d] (split-type x inner)] [(str (str/join " " (map name qs)) " " s) d])))
+      (ptr-like? t)
+      (let [[h a b] t
+            u (if (= h 'member-ptr) b a)
+            qs (:cpp/after-quals (meta t))
+            op (case h * "*" & "&" && "&&" member-ptr (str (name-str a) "::*"))
+            in (str op (when (seq qs) (str (str/join " " (map name qs)) (when (seq inner) " "))) inner)
+            in (if (and (seq? u) ('#{array fn} (first u))) (str "(" in ")") in)]
+        (recur u in))
+      (and (seq? t) (= (first t) 'array))
+      (let [[size u] (if (= 3 (count t)) [(nth t 1) (nth t 2)] [nil (nth t 1)])]
+        (recur u (str inner "[" (if (some? size) (expr-str size 17) "") "]")))
+      (and (seq? t) (= (first t) 'fn))
+      (let [[_ ps r] t
+            m (meta t)
+            q (fn-quals m)
+            in (str inner "(" (params-str ps) ")" (when (seq q) (str " " q)))]
+        (if (:cpp/trailing m)
+          (recur 'auto (str in " -> " (type-name r)))
+          (recur r in)))
+      (and (seq? t) (= (first t) 'pack-expand))
+      (recur (second t) (str "..." (when (seq inner) " ") inner))
+      :else [(base-str t) inner])))
+
+(defn type-name ^String [t] (let [[s d] (split-type t "")] (join-sp s d)))
+
+;; ---------------------------------------------------------------------------------------------
+;; Expressions: [text precedence], 0 primary, 1 postfix, 2 unary, 3 cast, 4 .* ->*, 5 * / %, 6 + -, 7 shifts,
+;; 8 <=>, 9 relational, 10 equality, 11 &, 12 ^, 13 |, 14 &&, 15 ||, 16 ?: = throw, 17 comma
+
+(def ^:private binops
+  {'.* [4 ".*"] '->* [4 "->*"] '* [5 "*"] '/ [5 "/"] '% [5 "%"] '+ [6 "+"] '- [6 "-"] '<< [7 "<<"] '>> [7 ">>"] '<=> [8 "<=>"]
+   '< [9 "<"] '> [9 ">"] '<= [9 "<="] '>= [9 ">="] '== [10 "=="] '!= [10 "!="] 'bit-and [11 "&"] 'bit-xor [12 "^"]
+   'bit-or [13 "|"] 'and [14 "&&"] 'or [15 "||"] 'comma [17 ","]})
+
+(def ^:private assign-ops
+  {'+ "+=" '- "-=" '* "*=" '/ "/=" '% "%=" '<< "<<=" '>> ">>=" 'bit-and "&=" 'bit-xor "^=" 'bit-or "|="})
+
+(defn- prefix ^String [^String op ^String operand]
+  (if (and (seq operand) (#{\+ \- \&} (last op)) (= (last op) (first operand)))
+    (str op " " operand)
+    (str op operand)))
+
+(defn- args-str
+  "Arguments' text; with `f` and `start`, the children of `f` from index `start` (its parentheses metadata
+  applies)."
+  (^String [xs] (str/join ", " (map #(expr-str % 16) xs)))
+  (^String [f start] (let [pm (meta f) v (vec f)] (str/join ", " (map #(expr-str (v %) 16 pm %) (range start (count v)))))))
+
+(defn- new-init ^String [init]
+  ;; a new-expression's initializer: (args) or {args}
+  (cond (nil? init) ""
+        (= (first init) 'cpp/paren) (str "(" (args-str init 1) ")")
+        (= (first init) 'cpp/brace) (str "{" (args-str init 1) "}")
+        :else (fail "a new initializer" init)))
+
+(defn- lambda-str ^String [x]
+  (let [[_ caps ps & body] x
+        m (meta ps)
+        cap (fn [c] (cond (= c '&) "&" (= c '=) "=" (= c 'this) "this" (= c '(deref this)) "*this"
+                          (and (seq? c) (= (first c) '&)) (str "&" (name-str (second c)))
+                          :else (name-str c)))
+        head (str "[" (str/join ", " (map cap caps)) "]"
+                  (when-not (:cpp/no-params m) (str "(" (params-str ps) ")"))
+                  (when (some #{'mutable} (:cpp/specs m)) " mutable")
+                  (when-let [r (:tag m)] (str " -> " (type-name r))))
+        b (StringBuilder.)]
+    (binding [*indent* (inc *indent*)] (stmts! b body))
+    (str head " {\n" b (pad) "}")))
+
+(defn expr
+  "A form's text and precedence."
+  [x]
+  (let [m (when (instance? arbace.lang.IMeta x) (meta x))]
+    (if (:c/paren m)
+      (let [p (:c/paren m) n (if (true? p) 1 (long p))
+            [s _] (expr (vary-meta x dissoc :c/paren))]
+        [(str (apply str (repeat n "(")) s (apply str (repeat n ")"))) 0])
+      (if-let [l (literal-text x)]
+        [l (if (and (number? x) (neg? x)) 2 0)]
+        (cond
+          (symbol? x) [(name-str x) 0]
+          (seq? x)
+          (let [[h & args] x
+                a (fn [i need] (expr-str (nth x i) need m i))]
+            (case h
+              (c/id cpp/text cpp/global cpp/scope <> template operator) [(name-str x) 0]
+              (+ -) (if (= 1 (count args))
+                      [(prefix (name h) (a 1 2)) 2]
+                      (let [[p op] (binops h)] [(str (a 1 p) " " op " " (a 2 (dec p))) p]))
+              (* / % << >> <=> < > <= >= == != bit-and bit-xor bit-or and or .* ->*)
+              (let [[p op] (binops h)] [(str (a 1 p) " " op " " (a 2 (dec p))) p])
+              comma [(str (a 1 17) ", " (a 2 16)) 17]
+              set! (if (= 3 (count x))
+                     [(str (a 1 15) " = " (a 2 16)) 16]
+                     [(str (a 1 15) " " (or (assign-ops (nth x 2)) (fail "an assignment operator" x)) " " (a 3 16)) 16])
+              inc! [(str (a 1 1) "++") 1]
+              dec! [(str (a 1 1) "--") 1]
+              pre-inc! [(prefix "++" (a 1 2)) 2]
+              pre-dec! [(prefix "--" (a 1 2)) 2]
+              addr [(prefix "&" (a 1 3)) 2]
+              (deref arbace.core/deref) [(str "*" (a 1 3)) 2]
+              not [(str "!" (a 1 3)) 2]
+              bit-not [(str "~" (a 1 3)) 2]
+              real [(str "__real__ " (a 1 3)) 2]
+              imag [(str "__imag__ " (a 1 3)) 2]
+              cpp/extension [(str "__extension__ " (a 1 3)) 2]
+              co-await [(str "co_await " (a 1 3)) 2]
+              co-yield [(str "co_yield " (a 1 16)) 16]
+              sizeof (let [s (a 1 2)] [(if (.startsWith ^String s "(") (str "sizeof" s) (str "sizeof " s)) 2])
+              alignof (let [s (a 1 2)] [(if (.startsWith ^String s "(") (str "alignof" s) (str "alignof " s)) 2])
+              cpp/gnu-alignof (let [s (a 1 2)] [(if (.startsWith ^String s "(") (str "__alignof__" s) (str "__alignof__ " s)) 2])
+              sizeof-type [(str "sizeof(" (type-name (nth x 1)) ")") 2]
+              alignof-type [(str "alignof(" (type-name (nth x 1)) ")") 2]
+              cpp/gnu-alignof-type [(str "__alignof__(" (type-name (nth x 1)) ")") 2]
+              sizeof... [(str "sizeof...(" (name-str (nth x 1)) ")") 2]
+              noexcept [(str "noexcept(" (a 1 17) ")") 2]
+              typeid [(str "typeid(" (a 1 17) ")") 1]
+              typeid-type [(str "typeid(" (type-name (nth x 1)) ")") 1]
+              conv [(str "(" (type-name (nth x 1)) ")" (a 2 3)) 3]
+              (cpp/static-cast cpp/dynamic-cast cpp/reinterpret-cast cpp/const-cast)
+              [(str ({'cpp/static-cast "static_cast" 'cpp/dynamic-cast "dynamic_cast" 'cpp/reinterpret-cast "reinterpret_cast"
+                      'cpp/const-cast "const_cast"} h) "<" (type-name (nth x 1)) ">(" (a 2 17) ")") 1]
+              cpp/construct [(str (type-name (nth x 1)) "(" (args-str x 2) ")") 1]
+              cpp/brace [(str (type-name (nth x 1)) "{" (args-str x 2) "}") 1]
+              cpp/init-list [(str "{" (args-str x 1) "}") 0]
+              cpp/paren [(str "(" (args-str x 1) ")") 0]
+              ? [(str (a 1 15) " ? " (a 2 17) " : " (a 3 16)) 16]
+              aget [(str (a 1 1) "[" (str/join ", " (map #(a % 17) (range 2 (count x)))) "]") 1]
+              -> [(str (a 1 1) "->" (name-str (nth x 2))) 1]
+              throw (if (= 1 (count x)) ["throw" 16] [(str "throw " (a 1 16)) 16])
+              pack-expand [(str (a 1 1) "...") 1]
+              cpp/new (let [m (meta x) [_ t init] x]
+                        [(str (when (:cpp/global m) "::") "new " (type-name t) (new-init init)) 2])
+              cpp/new-array (let [m (meta x) [_ t n init] x
+                                  [s d] (split-type t (str "[" (expr-str n 17) "]"))]
+                              [(str (when (:cpp/global m) "::") "new " s d (new-init init)) 2])
+              cpp/delete [(str (when (:cpp/global (meta x)) "::") "delete " (a 1 3)) 2]
+              cpp/delete-array [(str (when (:cpp/global (meta x)) "::") "delete[] " (a 1 3)) 2]
+              cpp/lambda [(lambda-str x) 0]
+              cpp/udl [(str (nth x 1) (nth x 2)) 0]
+              stmt-expr (let [b (StringBuilder.)]
+                          (binding [*indent* (inc *indent*)] (stmts! b (rest x)))
+                          [(str "({\n" b (pad) "})") 0])
+              c/call [(str (a 1 1) "(" (args-str x 2) ")") 1]
+              (cond
+                (and (symbol? h) (.startsWith (name h) ".-") (= 2 (count x)))
+                [(str (a 1 1) "." (subs (name h) 2)) 1]
+                (and (seq? h) (= (first h) 'cpp/brace) (= 2 (count x)) false) nil
+                :else [(str (a 0 1) "(" (str/join ", " (map #(a % 16) (range 1 (count x)))) ")") 1])))
+          :else (fail "an expression" x))))))
+
+(defn expr-str
+  "The text of `x`, child `i` of a form of metadata `pm`, parenthesized when looser than `need`."
+  (^String [x need] (expr-str x need nil nil))
+  (^String [x need pm i]
+   (let [ap (get (:c/aparen pm) i)
+         [s p] (expr x)]
+     (cond
+       ap (str (apply str (repeat ap "(")) s (apply str (repeat ap ")")))
+       (> (long p) (long need)) (str "(" s ")")
+       :else s))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Declarations
+
+(defn params-str ^String [ps]
+  (str/join ", "
+            (map (fn [p]
+                   (cond
+                     (= p '&) "..."
+                     (and (or (symbol? p) (and (seq? p) (= (first p) 'c/id))) (contains? (meta p) :tag))
+                     (let [m (meta p)
+                           [s d] (split-type (:tag m) (name-str p))]
+                       (str (join-sp (attrs-head m) s d) (when (contains? m :cpp/default) (str " = " (expr-str (:cpp/default m) 16)))))
+                     :else (type-name p)))
+                 ps)))
+
+(defn- attrs-head ^String [m]
+  (join-sp (when-let [a (seq (:cpp/attrs m))] (str/join " " (map #(str "[[" % "]]") a)))
+           (when-let [a (seq (:c/gnu-attrs m))] (str/join " " (map #(str "__attribute__((" % "))") a)))
+           (when-let [a (seq (:cpp/alignas m))] (str/join " " a))))
+
+(defn- decl-head ^String [m]
+  (join-sp (attrs-head m) (when (:friend m) "friend") (when (:typedef m) "typedef")
+           (when (:extern m) "extern") (when (:static m) "static") (when (:thread_local m) "thread_local")
+           (when (:mutable m) "mutable") (when (:inline m) "inline") (when (:virtual m) "virtual") (when (:explicit m) "explicit")
+           (when (:constexpr m) "constexpr") (when (:consteval m) "consteval") (when (:constinit m) "constinit")))
+
+(defn- init-str
+  "A declaration's initializer: (x), {x}, = {x} (:cpp/copy) or = e."
+  ^String [init]
+  (cond
+    (and (seq? init) (= (first init) 'cpp/paren)) (str "(" (args-str init 1) ")")
+    (and (seq? init) (= (first init) 'cpp/brace))
+    (str (when (:cpp/copy (meta init)) " = ") "{" (args-str init 1) "}")
+    :else (str " = " (expr-str init 16))))
+
+(defn- var-parts
+  "A c/var's [specifiers declarator-with-initializer]."
+  [f]
+  (let [[_ x & init] f
+        m (meta x)
+        [s d] (split-type (:tag m) (name-str x))
+        bits (when (contains? m :c/bits) (str " : " (expr-str (:c/bits m) 16)))]
+    [(join-sp (decl-head m) s) (str d bits (when (seq init) (init-str (first init))))]))
+
+(defn- fn-declarator
+  "A function's [specifiers declarator] from its name and parameter vector (the name's metadata holds the
+  qualifiers, the vector's tag the return type; none for a constructor, destructor or conversion)."
+  [x ps ret?]
+  (let [m (meta x)
+        quals (select-keys m [:const :volatile :cpp/ref :noexcept :cpp/throw :cpp/trailing])
+        r (:tag (meta ps))
+        t (with-meta (list 'fn ps r) quals)
+        [s d] (if (and ret? (some? r))
+                (split-type t (name-str x))
+                [nil (let [q (fn-quals quals)] (str (name-str x) "(" (params-str ps) ")" (when (seq q) (str " " q))))])
+        tail (join-sp (when (:override m) "override") (when (:final m) "final"))]
+    [(join-sp (decl-head m) s) (join-sp d tail)]))
+
+(defn- line [^StringBuilder b ^String s] (.append b (pad)) (.append b s) (.append b "\n"))
+
+(defn- tparam-str ^String [p]
+  (let [[h x & opts] p
+        o (apply hash-map opts)
+        pack (:pack o)]
+    (case h
+      typename (str (if (contains? o :constraint) (name-str (:constraint o)) "typename") (when pack "...") (when-not (= x '_) (str " " (name-str x)))
+                    (when (contains? o :default) (str " = " (type-name (:default o)))))
+      value (let [[s d] (split-type (:tag (meta x)) (str (when pack "...") (when-not (= x '_) (name-str x))))]
+              (str (join-sp s d) (when (contains? o :default) (str " = " (expr-str (:default o) 16)))))
+      cpp/text (second p)
+      (fail "a template parameter" p))))
+
+(declare item! body!)
+
+(defn- block! [^StringBuilder b items]
+  (line b "{")
+  (binding [*indent* (inc *indent*)] (stmts! b items))
+  (line b "}"))
+
+(defn- fn-body! [^StringBuilder b head body]
+  (let [f (first body)]
+    (cond
+      (= f '(cpp/defaulted)) (line b (str head " = default;"))
+      (= f '(cpp/deleted)) (line b (str head " = delete;"))
+      (and (seq? f) (= (first f) 'cpp/function-try))
+      (do (line b head)
+          (line b "try")
+          (block! b (rest (second f)))
+          (doseq [c (drop 2 f)] (body! b c)))
+      :else (do (line b head) (block! b body)))))
+
+(defn- meminit-str ^String [i]
+  (let [[who & args] i]
+    (str (if (symbol? who) (name-str who) (type-name who))
+         (if (:brace (meta i)) (str "{" (args-str i 1) "}") (str "(" (args-str i 1) ")")))))
+
+(defn- members! [^StringBuilder b ms]
+  (binding [*indent* (inc *indent*)]
+    (doseq [x ms]
+      (if (and (seq? x) (= (first x) 'access))
+        (binding [*indent* (dec *indent*)] (line b (str (name (second x)) ":")))
+        (item! b x)))))
+
+(defn- record-head ^String [f]
+  (let [m (meta f)
+        kw (subs (name (first f)) 0)
+        [nm bases] (if (vector? (second f)) [nil (second f)] [(second f) (nth f 2 nil)])]
+    (str (join-sp kw (when nm (name-str nm)) (when (:final m) "final"))
+         (when (seq bases)
+           (str " : " (str/join ", " (map (fn [bt] (let [bm (meta bt)]
+                                                     (join-sp (when (:virtual bm) "virtual")
+                                                              (cond (:public bm) "public" (:private bm) "private" (:protected bm) "protected")
+                                                              (type-name bt))))
+                                          bases)))))))
+
+(defn- enum-text ^String [f]
+  (let [m (meta f)
+        kw (case (first f) cpp/enum "enum" cpp/enum-class "enum class" cpp/enum-struct "enum struct")
+        [nm es] (if (vector? (second f)) [nil (second f)] [(second f) (nth f 2 nil)])
+        head (str (join-sp kw (when nm (name-str nm))) (when-let [u (:cpp/underlying m)] (str " : " (type-name u))))]
+    (if es
+      (str head " { " (str/join ", " (map (fn [e] (if (seq? e) (if (= (first e) 'c/id) (second e) (str (name-str (first e)) " = " (expr-str (second e) 16 (meta e) 1))) (name-str e))) es)) " }")
+      head)))
+
+(defn- declare-str ^String [f]
+  (let [[h x ps] f
+        m (meta x)
+        [s d] (fn-declarator x ps true)]
+    (str (join-sp s d) (when (:pure m) " = 0") ";")))
+
+(defn decl-str
+  "A one-line declaration's text, its ; included."
+  ^String [f]
+  (case (first f)
+    c/var (let [[s d] (var-parts f)] (str (join-sp s d) ";"))
+    c/declare (declare-str f)
+    c/typedef (let [[_ x t] f [s d] (split-type t (name-str x))] (str "typedef " (join-sp s d) ";"))
+    cpp/alias (let [[_ x t] f] (str "using " (name-str x) " = " (type-name t) ";"))
+    cpp/using (str "using " (when (:typename (meta f)) "typename ") (name-str (second f)) ";")
+    cpp/using-namespace (str "using namespace " (name-str (second f)) ";")
+    cpp/using-enum (str "using enum " (name-str (second f)) ";")
+    c/static-assert (let [[_ e msg] f] (str "static_assert(" (expr-str e 16 (meta f) 1) (when (> (count f) 2) (str ", " (expr-str msg 16 (meta f) 2))) ");"))
+    cpp/text (second f)
+    cpp/decls (let [parts (map (fn [g] (case (first g) c/var (var-parts g) (fail "a declaration in a group" g))) (rest f))]
+                (when-not (apply = (map first parts)) (fail "declarators of different specifiers" f))
+                (str (join-sp (first (first parts)) (str/join ", " (map second parts))) ";"))
+    (cpp/enum cpp/enum-class cpp/enum-struct) (str (enum-text f) ";")
+    (cpp/struct cpp/class cpp/union) (if (vector? (nth f 2 nil)) nil (if (vector? (second f)) nil (str (record-head f) ";")))
+    nil))
+
+(defn- tag-def? [f] (and (seq? f) ('#{cpp/struct cpp/class cpp/union} (first f)) (or (vector? (second f)) (vector? (nth f 2 nil)))))
+
+(defn item!
+  "A declaration or directive at the current indent."
+  [^StringBuilder b f]
+  (let [m (meta f)]
+    (cond
+      (not (seq? f)) (fail "an item" f)
+      :else
+      (case (first f)
+        c/include (.append b (str (if (some #{:next} f) "#include_next " "#include ") (second f) "\n"))
+        c/pragma (.append b (str "#pragma " (second f) "\n"))
+        c/directive (.append b (str (second f) "\n"))
+        cpp/text (line b (second f))
+        c/defn (let [[_ x ps & body] f [s d] (fn-declarator x ps true)] (fn-body! b (join-sp s d) body))
+        cpp/ctor (let [[_ nm ps inits & body] f
+                       [s d] (fn-declarator (with-meta nm m) ps false)
+                       head (join-sp s d)]
+                   (cond
+                     (:cpp/declare m) (line b (str head ";"))
+                     (#{'(cpp/defaulted) '(cpp/deleted)} inits) (fn-body! b head [inits])
+                     (and (seq inits) (vector? inits) (seq? (first body)) (= (first (first body)) 'cpp/function-try))
+                     (fn-body! b (str head " : " (str/join ", " (map meminit-str inits))) body)
+                     :else (fn-body! b (if (seq inits) (str head " : " (str/join ", " (map meminit-str inits))) head) body)))
+        cpp/dtor (let [[_ nm & body] f
+                       nm (if (and (seq? nm) (= (first nm) 'cpp/scope))
+                            (apply list 'cpp/scope (concat (butlast (rest nm)) [(list 'cpp/dtor-name (last nm))]))
+                            (list 'cpp/dtor-name nm))
+                       [s d] (fn-declarator (with-meta nm m) [] false)
+                       head (join-sp s d)]
+                   (if (:cpp/declare m) (line b (str head (when (:pure m) " = 0") ";")) (fn-body! b head body)))
+        (cpp/struct cpp/class cpp/union)
+        (if (tag-def? f)
+          (let [ms (if (vector? (second f)) (drop 2 f) (drop 3 f))]
+            (line b (record-head f))
+            (line b "{")
+            (members! b ms)
+            (line b "};"))
+          (line b (decl-str f)))
+        cpp/namespace (let [[_ nm & items] f]
+                        (line b (str (when (:inline m) "inline ") "namespace" (when nm (str " " (name-str nm)))))
+                        (line b "{")
+                        (doseq [x items] (item! b x))
+                        (line b "}"))
+        cpp/linkage (let [[_ lang & items] f]
+                      (if (:cpp/single m)
+                        (let [ib (StringBuilder.)]
+                          (doseq [x items] (item! ib x))
+                          (.append b (str (pad) "extern \"" lang "\" " (str/triml (str ib)))))
+                        (do (line b (str "extern \"" lang "\""))
+                            (line b "{")
+                            (doseq [x items] (item! b x))
+                            (line b "}"))))
+        cpp/template (let [[_ ps d] f]
+                       (line b (str "template <" (str/join ", " (map tparam-str ps)) ">"))
+                       (item! b d))
+        cpp/friend (let [x (second f)]
+                     (cond
+                       (and (seq? x) (= (first x) 'cpp/template))
+                       (do (line b (str "template <" (str/join ", " (map tparam-str (second x))) ">"))
+                           (item! b (list 'cpp/friend (nth x 2))))
+                       (and (seq? x) ('#{cpp/struct cpp/class cpp/union} (first x)) (not (tag-def? x)))
+                       (line b (str "friend " (record-head x) ";"))
+                       :else
+                       (if (and (seq? x) ('#{c/declare c/defn cpp/ctor cpp/dtor} (first x)))
+                       (let [ib (StringBuilder.)]
+                         (binding [*indent* 0] (item! ib x))
+                         (.append b (str (pad) "friend " (str ib))))
+                       (line b (str "friend " (type-name x) ";")))))
+        access (binding [*indent* (max 0 (dec *indent*))] (line b (str (name (second f)) ":")))
+        (if-let [s (decl-str f)] (line b s) (fail "a declaration" f))))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Statements
+
+(def ^:private decl-heads '#{c/var c/declare c/typedef cpp/alias cpp/using cpp/using-namespace cpp/using-enum c/static-assert cpp/decls cpp/struct cpp/class
+                             cpp/union cpp/enum cpp/enum-class cpp/enum-struct c/defn cpp/template})
+
+(defn- cond-str ^String [c pm i]
+  (if (and (seq? c) (= (first c) 'cpp/decl))
+    (let [[s d] (var-parts (apply list 'c/var (rest c)))] (join-sp s d))
+    (expr-str c 17 pm i)))
+
+(defn- init-prefix ^String [m]
+  (when-let [is (:cpp/init m)]
+    (str (str/join " " (map (fn [x] (if (and (seq? x) (decl-heads (first x))) (decl-str x) (str (expr-str x 17) ";"))) is)) " ")))
+
+(defn- branch! [^StringBuilder b s bare]
+  (if bare
+    (binding [*indent* (inc *indent*)] (stmts! b [s]))
+    (block! b (if (and (seq? s) (= (first s) 'do)) (rest s) [s]))))
+
+(defn- outdent [^StringBuilder b ^String s] (binding [*indent* (max 0 (dec *indent*))] (line b s)))
+
+(defn- for-init ^String [v]
+  (cond
+    (empty? v) ";"
+    (and (= 1 (count v)) (not (and (seq? (first v)) (decl-heads (first (first v)))))) (str (expr-str (first v) 17) ";")
+    (= 1 (count v)) (decl-str (first v))
+    :else (fail "a for's init" v)))
+
+(defn body!
+  "A catch clause."
+  [^StringBuilder b c]
+  (let [[_ pv & body] c]
+    (line b (str "catch (" (if (= pv '[&]) "..." (params-str pv)) ")"))
+    (block! b body)))
+
+(declare stmt!*)
+
+(defn- stmt! [^StringBuilder b s nxt]
+  (if-let [as (:cpp/attrs (when (instance? arbace.lang.IMeta s) (meta s)))]
+    (let [ib (StringBuilder.)]
+      (stmt!* ib (vary-meta s dissoc :cpp/attrs) nxt)
+      (.append b (str (pad) (str/join " " (map #(str "[[" % "]]") as)) " " (str/triml (str ib)))))
+    (stmt!* b s nxt)))
+
+(defn- stmt!* [^StringBuilder b s nxt]
+  (let [m (meta s)]
+    (cond
+      (not (seq? s)) (line b (str (expr-str s 17) ";"))
+      :else
+      (let [[h & args] s]
+        (case h
+          do (block! b args)
+          let (do (doseq [f (first args)]
+                    (if (and (seq? f) (or (tag-def? f) (#{'c/defn 'cpp/template 'cpp/text} (first f))))
+                      (item! b f)
+                      (line b (or (decl-str f) (fail "a local declaration" f)))))
+                  (stmts! b (rest args)))
+          when (do (line b (str "if " (when (:constexpr m) "constexpr ") "(" (init-prefix m) (cond-str (first args) m 1) ")"))
+                   (if (:c/bare m) (branch! b (second args) true) (block! b (rest args))))
+          if (do (line b (str "if " (when (:constexpr m) "constexpr ") "(" (init-prefix m) (cond-str (first args) m 1) ")"))
+                 (branch! b (second args) (contains? (:c/bare m) 2))
+                 (line b "else")
+                 (branch! b (nth args 2) (contains? (:c/bare m) 3)))
+          switch (do (line b (str "switch (" (init-prefix m) (cond-str (first args) m 1) ")"))
+                     (if (:c/bare m) (branch! b (second args) true) (block! b (rest args))))
+          while (do (line b (str "while (" (cond-str (first args) m 1) ")"))
+                    (if (:c/bare m) (branch! b (second args) true) (block! b (rest args))))
+          do-while (do (line b "do")
+                       (if (:c/bare m) (branch! b (second args) true) (block! b (rest args)))
+                       (line b (str "while (" (expr-str (first args) 17 m 1) ");")))
+          for (let [[init c st & body] args
+                    cs (if (= c '_) "" (str " " (expr-str c 17 m 2)))
+                    ss (if (= st '_) "" (str " " (expr-str st 17 m 3)))]
+                (line b (str "for (" (for-init init) cs ";" ss ")"))
+                (if (:c/bare m) (branch! b (first body) true) (block! b body)))
+          cpp/for-each (let [[v & body] args
+                             inits (butlast (butlast v))
+                             x (last (butlast v))
+                             r (last v)
+                             [s d] (split-type (:tag (meta x)) (name-str x))]
+                         (line b (str "for (" (str/join " " (map decl-str inits)) (when (seq inits) " ") (join-sp (decl-head (meta x)) s d) " : " (expr-str r 16) ")"))
+                         (if (:c/bare m) (branch! b (first body) true) (block! b body)))
+          label (outdent b (str (name (first args)) ":"))
+          case (outdent b (str "case " (expr-str (first args) 16 m 1) (when (second args) (str " ... " (expr-str (second args) 16 m 2))) ":"))
+          default (outdent b "default:")
+          goto (line b (str "goto " (name (first args)) ";"))
+          break (line b "break;")
+          continue (line b "continue;")
+          c/null (line b ";")
+          return (line b (if (seq args) (str "return " (expr-str (first args) 17 m 1) ";") "return;"))
+          co-return (line b (if (seq args) (str "co_return " (expr-str (first args) 17 m 1) ";") "co_return;"))
+          c/expr (line b (str (expr-str (first args) 17 m 1) ";"))
+          cpp/text (line b (second s))
+          cpp/try (let [[_ blk & cs] s]
+                    (line b "try")
+                    (block! b (rest blk))
+                    (doseq [c cs] (body! b c)))
+          (if (decl-heads h)
+            (item! b s)
+            (line b (str (expr-str s 17) ";"))))))))
+
+(defn stmts! [^StringBuilder b items]
+  (let [v (vec items)]
+    (dotimes [i (count v)] (stmt! b (v i) (get v (inc i))))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Units
+
+(defn print-unit
+  "A unit's forms (its cpp/file form left out) as C++ text in mode :lines."
+  ^String [forms]
+  (let [b (StringBuilder.)]
+    (binding [*indent* 0]
+      (doseq [f forms] (item! b f)))
+    (str b)))

@@ -23,8 +23,9 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
+	"path/filepath"
 	"strings"
+	"time"
 )
 
 // obj is a JSON object with its keys in document order, which the delta-encoded locations need.
@@ -184,11 +185,12 @@ func (s *state) trackAny(v any) {
 var containers = map[string]bool{"TranslationUnitDecl": true, "NamespaceDecl": true, "LinkageSpecDecl": true, "ExportDecl": true}
 
 type filter struct {
-	main     string
-	implicit bool
-	st       state
-	kept     int64
-	dropped  int64
+	main      string
+	implicit  bool
+	instances bool // keep the instantiations under a template whole (else their template arguments alone)
+	st        state
+	kept      int64
+	dropped   int64
 }
 
 func (f *filter) inMain(file string) bool { return file == f.main }
@@ -199,26 +201,98 @@ func (f *filter) isImplicit(n *obj) bool {
 	return b
 }
 
+var templates = map[string]bool{"ClassTemplateDecl": true, "FunctionTemplateDecl": true, "VarTemplateDecl": true}
+
+// skipVal reads a value (its first token already read) without keeping it, following its locations.
+func (f *filter) skipVal(dec *json.Decoder, tok json.Token) error {
+	d, ok := tok.(json.Delim)
+	if !ok {
+		return nil
+	}
+	if d == '[' {
+		for dec.More() {
+			t, err := dec.Token()
+			if err != nil {
+				return err
+			}
+			if err := f.skipVal(dec, t); err != nil {
+				return err
+			}
+		}
+		_, err := dec.Token()
+		return err
+	}
+	for dec.More() {
+		kt, err := dec.Token()
+		if err != nil {
+			return err
+		}
+		k := kt.(string)
+		t, err := dec.Token()
+		if err != nil {
+			return err
+		}
+		switch k {
+		case "loc", "range":
+			v, err := parseValue(dec, t)
+			if err != nil {
+				return err
+			}
+			if k == "loc" {
+				f.st.fill(v)
+			} else if r, ok := v.(*obj); ok {
+				for j := range r.keys {
+					f.st.fill(r.vals[j])
+				}
+			}
+		default:
+			if err := f.skipVal(dec, t); err != nil {
+				return err
+			}
+		}
+	}
+	_, err := dec.Token()
+	return err
+}
+
+// ctx says where a node stands: under a kept node (all is kept), under a template (an instantiation is summarized).
+type ctx struct {
+	keepAll       bool
+	underTemplate bool
+}
+
 // node reads one node object (its "{" already read). A container's inner array is streamed; emit, when not
-// nil, is called with each kept child of the translation unit instead of collecting it.
-func (f *filter) node(dec *json.Decoder, emit func(*obj)) (n *obj, keep bool, err error) {
+// nil, is called with each kept child of the translation unit instead of collecting it. A node of a container
+// whose location is not in the main file has its inner nodes skipped (their locations followed); an
+// instantiation under a template keeps only its template arguments unless -instances.
+func (f *filter) node(dec *json.Decoder, emit func(*obj), c ctx) (n *obj, keep bool, err error) {
 	n = &obj{}
 	own := ""
-	stream := false
+	ownSeen := false
 	for dec.More() {
 		kt, err := dec.Token()
 		if err != nil {
 			return nil, false, err
 		}
 		k := kt.(string)
-		if k == "inner" && containers[n.str("kind")] {
-			stream = true
+		kind := n.str("kind")
+		if k == "inner" {
 			t, err := dec.Token()
 			if err != nil {
 				return nil, false, err
 			}
 			if d, _ := t.(json.Delim); d != '[' {
-				return nil, false, fmt.Errorf("inner of a container is not an array")
+				return nil, false, fmt.Errorf("inner is not an array")
+			}
+			container := containers[kind] && !c.keepAll
+			_, pattern := n.get("TemplateInstantiationPattern")
+			instance := !f.instances && (pattern || (c.underTemplate && (kind == "ClassTemplateSpecializationDecl" || kind == "VarTemplateSpecializationDecl")))
+			if !container && !c.keepAll && ownSeen && !f.inMain(own) {
+				// a header's node: nothing of it is kept
+				if err := f.skipVal(dec, t); err != nil {
+					return nil, false, err
+				}
+				continue
 			}
 			kids := []any{}
 			for dec.More() {
@@ -229,19 +303,34 @@ func (f *filter) node(dec *json.Decoder, emit func(*obj)) (n *obj, keep bool, er
 				if d, _ := t.(json.Delim); d != '{' {
 					return nil, false, fmt.Errorf("a child is not an object")
 				}
-				c, ck, err := f.node(dec, nil)
+				var ch *obj
+				var ck bool
+				switch {
+				case container:
+					ch, ck, err = f.node(dec, nil, ctx{})
+				case instance:
+					ch, ck, err = f.summaryChild(dec)
+				default:
+					ch, _, err = f.node(dec, nil, ctx{keepAll: true, underTemplate: templates[kind]})
+					ck = true
+				}
 				if err != nil {
 					return nil, false, err
 				}
-				if ck {
-					f.kept++
-					if emit != nil {
-						emit(c)
+				if container {
+					if ck {
+						f.kept++
+						if emit != nil {
+							emit(ch)
+							continue
+						}
 					} else {
-						kids = append(kids, c)
+						f.dropped++
+						continue
 					}
-				} else {
-					f.dropped++
+				}
+				if ck {
+					kids = append(kids, ch)
 				}
 			}
 			if _, err := dec.Token(); err != nil {
@@ -250,7 +339,7 @@ func (f *filter) node(dec *json.Decoder, emit func(*obj)) (n *obj, keep bool, er
 			if emit == nil {
 				n.keys = append(n.keys, "inner")
 				n.vals = append(n.vals, kids)
-				if len(kids) > 0 {
+				if container && len(kids) > 0 {
 					keep = true
 				}
 			}
@@ -269,19 +358,11 @@ func (f *filter) node(dec *json.Decoder, emit func(*obj)) (n *obj, keep bool, er
 		switch k {
 		case "loc":
 			own = f.st.fill(v)
+			ownSeen = true
 		case "range":
 			if r, ok := v.(*obj); ok {
 				for j := range r.keys {
 					f.st.fill(r.vals[j])
-				}
-			}
-		case "inner":
-			// a non-container's children, parsed whole
-			if arr, ok := v.([]any); ok {
-				for _, c := range arr {
-					if co, ok := c.(*obj); ok {
-						f.st.track(co)
-					}
 				}
 			}
 		default:
@@ -291,11 +372,53 @@ func (f *filter) node(dec *json.Decoder, emit func(*obj)) (n *obj, keep bool, er
 	if _, err := dec.Token(); err != nil {
 		return nil, false, err
 	}
-	_ = stream
 	if f.inMain(own) && (f.implicit || !f.isImplicit(n)) {
 		keep = true
 	}
 	return n, keep, nil
+}
+
+// summaryChild reads a child of an instantiation: a TemplateArgument is kept without its inner nodes (the
+// type's structure; its qualType stays), anything else is skipped.
+func (f *filter) summaryChild(dec *json.Decoder) (*obj, bool, error) {
+	n := &obj{}
+	for dec.More() {
+		kt, err := dec.Token()
+		if err != nil {
+			return nil, false, err
+		}
+		k := kt.(string)
+		t, err := dec.Token()
+		if err != nil {
+			return nil, false, err
+		}
+		if n.str("kind") != "" && (n.str("kind") != "TemplateArgument" || k == "inner") && k != "loc" && k != "range" {
+			if err := f.skipVal(dec, t); err != nil {
+				return nil, false, err
+			}
+			continue
+		}
+		v, err := parseValue(dec, t)
+		if err != nil {
+			return nil, false, err
+		}
+		n.keys = append(n.keys, k)
+		n.vals = append(n.vals, v)
+		switch k {
+		case "loc":
+			f.st.fill(v)
+		case "range":
+			if r, ok := v.(*obj); ok {
+				for j := range r.keys {
+					f.st.fill(r.vals[j])
+				}
+			}
+		default:
+			f.st.trackAny(v)
+		}
+	}
+	_, err := dec.Token()
+	return n, n.str("kind") == "TemplateArgument", err
 }
 
 func write(w io.Writer, v any) {
@@ -407,7 +530,22 @@ func ednString(s string) string {
 	return b.String()
 }
 
+// options are the filter's: the main file, whether implicit declarations are kept, the output format, and
+// whether the output is normalized for a comparison (norm: the AST of a print against the original's).
+type options struct {
+	main      string
+	implicit  bool
+	edn       bool
+	norm      bool
+	instances bool
+}
+
 func run(in io.Reader, out io.Writer, main string, implicit bool, edn bool) (kept, dropped int64, err error) {
+	return runOpts(in, out, options{main: main, implicit: implicit, edn: edn})
+}
+
+func runOpts(in io.Reader, out io.Writer, o options) (kept, dropped int64, err error) {
+	main, implicit, edn := o.main, o.implicit, o.edn
 	dec := json.NewDecoder(bufio.NewReaderSize(in, 1<<20))
 	dec.UseNumber()
 	t, err := dec.Token()
@@ -417,7 +555,7 @@ func run(in io.Reader, out io.Writer, main string, implicit bool, edn bool) (kep
 	if d, _ := t.(json.Delim); d != '{' {
 		return 0, 0, fmt.Errorf("the dump does not start with an object")
 	}
-	f := &filter{main: main, implicit: implicit}
+	f := &filter{main: main, implicit: implicit, instances: o.instances}
 	bw := bufio.NewWriterSize(out, 1<<20)
 	if edn {
 		fmt.Fprintf(bw, "{:cxxdump 1 :main %s}\n", ednString(main))
@@ -425,6 +563,9 @@ func run(in io.Reader, out io.Writer, main string, implicit bool, edn bool) (kep
 		fmt.Fprintf(bw, "{\"cxxdump\":1,\"main\":%q}\n", main)
 	}
 	emit := func(c *obj) {
+		if o.norm {
+			normalize(c)
+		}
 		if edn {
 			writeEdn(bw, c)
 		} else {
@@ -432,7 +573,7 @@ func run(in io.Reader, out io.Writer, main string, implicit bool, edn bool) (kep
 		}
 		bw.WriteString("\n")
 	}
-	if _, _, err := f.node(dec, emit); err != nil {
+	if _, _, err := f.node(dec, emit, ctx{}); err != nil {
 		return f.kept, f.dropped, err
 	}
 	return f.kept, f.dropped, bw.Flush()
@@ -445,54 +586,79 @@ func main() {
 	outName := flag.String("o", "", "output file (default standard output)")
 	format := flag.String("format", "edn", "output format: edn (Clojure-reader data, one form a line) or json (JSON Lines)")
 	clang := flag.String("clang", "clang++", "the clang driver")
+	instances := flag.Bool("instances", false, "keep the instantiations under the main file's templates whole (default: their template arguments and names alone)")
+	norm := flag.Bool("norm", false, "normalize the kept tree for a comparison: no ids, locations or ranges, positions in names masked")
+	layouts := flag.Bool("layouts", false, "also run a CodeGen pass with -fdump-record-layouts and write the main file's record layouts")
+	statsName := flag.String("stats", "", "write the run's numbers (bytes, declarations, seconds, peak memory) as one Clojure-reader map to FILE")
+	cacheDir := flag.String("cache", "", "keep the output in DIR by key (the arguments, the main file, clang's version), checked against the digests of every file the unit read")
 	flag.Parse()
 	args := flag.Args()
-	out := io.Writer(os.Stdout)
-	if *outName != "" {
-		fh, err := os.Create(*outName)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "cxxdump:", err)
-			os.Exit(1)
-		}
-		defer fh.Close()
-		out = fh
-	}
 	if *mainFile == "" && len(args) > 0 {
 		*mainFile = args[len(args)-1]
 	}
-	var in io.Reader = os.Stdin
-	var cmd *exec.Cmd
-	if !*stdin {
-		if len(args) == 0 {
-			fmt.Fprintln(os.Stderr, "usage: cxxdump [-main NAME] [-implicit=false] -- CLANG-ARGS... FILE")
-			os.Exit(2)
-		}
-		full := append([]string{"-Xclang", "-ast-dump=json", "-fsyntax-only"}, args...)
-		cmd = exec.Command(*clang, full...)
-		cmd.Stderr = os.Stderr
-		p, err := cmd.StdoutPipe()
+	o := options{main: *mainFile, implicit: *implicit, edn: *format == "edn", norm: *norm, instances: *instances}
+	if *stdin {
+		out, closeOut := openOut(*outName)
+		cin := &countReader{r: os.Stdin}
+		start := time.Now()
+		kept, dropped, err := runOpts(cin, out, o)
+		closeOut()
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "cxxdump:", err)
 			os.Exit(1)
 		}
-		if err := cmd.Start(); err != nil {
+		writeStats(*statsName, stats{in: cin.n, kept: kept, dropped: dropped, wall: time.Since(start), status: "ok"})
+		return
+	}
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: cxxdump [-main NAME] [-implicit=false] [-norm] [-layouts] [-cache DIR] [-stats FILE] -- CLANG-ARGS... FILE")
+		os.Exit(2)
+	}
+	j := job{clang: *clang, args: args, opts: o, layouts: *layouts}
+	if *cacheDir != "" {
+		st, hit, err := cached(*cacheDir, j, *outName)
+		if err != nil {
 			fmt.Fprintln(os.Stderr, "cxxdump:", err)
 			os.Exit(1)
 		}
-		in = p
-	}
-	kept, dropped, err := run(in, out, *mainFile, *implicit, *format == "edn")
-	if cmd != nil {
-		io.Copy(io.Discard, in) // let clang finish
-		if werr := cmd.Wait(); werr != nil {
-			// the oracle rejects the unit (its diagnostics are on the standard error): the filter's own
-			// error, if any, is only the dump cut short
-			err = fmt.Errorf("clang rejected the unit: %v", werr)
+		st.cache = map[bool]string{true: "hit", false: "miss"}[hit]
+		if line, err := os.ReadFile(filepath.Join(*cacheDir, st.key+".stats")); hit && err == nil {
+			// the numbers of the run that made the entry, marked as a hit
+			l := strings.Replace(strings.TrimSpace(string(line)), `:cache "miss"`, `:cache "hit"`, 1)
+			if *statsName == "" {
+				fmt.Fprintln(os.Stderr, "cxxdump: stats", l)
+			} else {
+				os.WriteFile(*statsName, []byte(l+"\n"), 0o644)
+			}
+		} else {
+			writeStats(*statsName, st)
 		}
+		if st.status != "ok" {
+			os.Stderr.WriteString(st.stderr)
+			fmt.Fprintln(os.Stderr, "cxxdump: clang rejected the unit")
+			os.Exit(1)
+		}
+		return
 	}
+	out, closeOut := openOut(*outName)
+	st, err := j.do(out, "", os.Stderr)
+	closeOut()
+	writeStats(*statsName, st)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "cxxdump:", err)
 		os.Exit(1)
 	}
-	fmt.Fprintf(os.Stderr, "cxxdump: kept %d, dropped %d declarations of %s\n", kept, dropped, strings.TrimSpace(*mainFile))
+	fmt.Fprintf(os.Stderr, "cxxdump: kept %d, dropped %d declarations of %s\n", st.kept, st.dropped, strings.TrimSpace(*mainFile))
+}
+
+func openOut(name string) (io.Writer, func()) {
+	if name == "" {
+		return os.Stdout, func() {}
+	}
+	fh, err := os.Create(name)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "cxxdump:", err)
+		os.Exit(1)
+	}
+	return fh, func() { fh.Close() }
 }

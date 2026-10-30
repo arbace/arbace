@@ -1110,6 +1110,44 @@ facts' storage (CP21), the spelling of qualified names (CP22), the compiler whos
 preprocessor takes (CP23), the helper's output format (CP24), the libTooling packages (CP25), header units' forms (CP26),
 `cpp` as a user's namespace (CP28), and the set of standards (CP27).
 
+### 18.3 As built: CX4's encoding (2026-10-30)
+
+The converter of CX4 (`arbace.repr.cpp.convert`, survey "As built: CX3, CX4") writes the forms above with these
+departures and additions, each a proposal of the survey (CP40 and on) until the user decides:
+
+- **A braced list without a type** in an expression (`return {1, 2};`, `f({1})`, `x = {}`) is `(cpp/init-list e*)`;
+  `(cpp/brace T e*)` is always the typed `T{e*}`; in an initializer's place (`c/var`, `cpp/new`, a member initializer)
+  `(cpp/brace e*)` is the declaration's own braces, `^:cpp/copy` for `= {...}` (§9.4 wrote both as `cpp/brace`, which a
+  printer cannot tell apart: a type symbol and an expression symbol look the same). CP40.
+- **Text forms.** A node the converter has no form for, or whose first or last token comes from a macro expansion, is
+  `(cpp/text "...")`: the source text of its extent, a macro invocation with its argument list as written (§9.4 of the C
+  forms recovers invocations the same way; here the unit is the outermost node whose boundary touches an expansion).
+  As a statement or a declaration the text holds its `;`; an expression statement of a text is `(c/expr (cpp/text ...))`.
+  The converter counts them by kind; a unit with none is fully structured. CP41.
+- **Constructor and destructor declarations** (no body) are `^:cpp/declare (cpp/ctor S [params])` and
+  `^:cpp/declare (cpp/dtor S)`; without the flag `(cpp/dtor S)` is `~S() {}` (§7.2). CP42.
+- **Elaborated type specifiers** are `(cpp/elaborated struct S)` in a type position (clang prints `struct S` where the source
+  wrote it; N9 is kept, not normalized, so that the oracle's types of the print equal the original's). CP43.
+- **Attributes** are kept as their texts by syntax, in the name's metadata: `:cpp/attrs ["nodiscard" "gnu::cold"]`
+  (`[[...]]`), `:c/gnu-attrs ["noinline"]` (`__attribute__((...))`), `:cpp/alignas ["alignas(16)"]`; on a statement
+  `:cpp/attrs` on its form (`[[fallthrough]];`); `override` and `final` are `^:override`, `^:final`. Printed before the
+  declaration (§5.6 of the C forms places them; CP44).
+- **User-defined literals** are `(cpp/udl "LITERAL" "SUFFIX")`, the literal part's spelling and the suffix (§9.4's value
+  form waits for the literal operator's fact). **Literals** otherwise follow the C forms: an `int` is a number, another
+  integer type `(lit unsigned 3)`, `(lit long 3)`; a `char` a character or `(lit char 200)`, the others `(lit wchar_t 65)`,
+  `(lit char16_t 65)`; a string a string, a narrow one with bytes that are not UTF-8 `(byte-string [...])`, a prefixed one
+  `(lit wchar_t [code units])`; `double` a number, `(lit float 2.5M)`, `(lit long-double 2.5M)`; `nullptr` `nil`, `__null`
+  the symbol.
+- **A declaration statement with several declarators** (`int a, *b;`) is `(cpp/decls (c/var ...) (c/var ...))` in a `let`'s
+  bindings (one `DeclStmt` in the oracle's AST: two declarations would be two). At namespace scope and in a class the
+  declarators are separate forms (the AST has no statement there).
+- **A null statement** is `(c/null)`; a name that is one of the printer's heads or not a readable symbol is `(c/id "...")`
+  (`when`, `init`, `access`, `nil`, ...).
+- **Template parameters**: `(typename T :constraint Num)` prints `Num T`; `class` and `typename` are one (N8) and the AST level
+  normalizes `tagUsed` on template type parameters to match.
+- **Parameters' types** are read from the parameter's text when it reads as a declaration (clang prints a parameter's type
+  decayed and desugared: `va_list ap` as `__va_list_tag *`), else from clang's type.
+
 ## 19. Sources
 
 - The survey: [CPP-SURVEY.md](CPP-SURVEY.md) §1-§4, §11 (CX1), §12 (CP1-CP14, decided 2026-10-30).

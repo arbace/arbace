@@ -1,0 +1,51 @@
+#!/bin/bash
+# tools/cxxdump over a corpus list (doc/cpp/CPP-SURVEY.md, "As built: CX3"): each file of LIST (pp-check's gxx.list format:
+# NAME, STD, G++'S ARGS, PATH, THE MODELLED ARGS, tab-separated) dumped by the oracle through the filter, in the file's
+# directory with its relative name (so __FILE__ is the corpus' own), with the modelled options clang is given (-std, -D,
+# -U, -I, -O; -fmodules-ts dropped); the output and numbers kept by key in CACHE (cxxdump -cache). Writes OUT/NAME.edn,
+# OUT/NAME.stats and OUT/summary.tsv (name, status, cache, JSON bytes, output bytes, kept, dropped, seconds, filter KiB,
+# clang KiB) and prints the totals.
+# Usage: bin/repr-cpp cxxdump-check LIST OUT [--layouts] [--jobs N] [--cache DIR]
+set -uo pipefail
+root=$(cd "$(dirname "$0")/../../.." && pwd)
+. "$root/bin/lib/tmpdir.bash"
+list=$1 out=$2; shift 2
+layouts= jobs=${REPR_CPP_THREADS:-4} cache=${REPR_CPP_CXXDUMP_CACHE:-$root/.tmp/repr-cpp/cxxdump-cache}
+while [ $# -gt 0 ]; do
+  case $1 in
+    --layouts) layouts=-layouts; shift ;;
+    --jobs) jobs=$2; shift 2 ;;
+    --cache) cache=$2; shift 2 ;;
+    *) echo "cxxdump-check: unknown option $1" >&2; exit 2 ;;
+  esac
+done
+exe=$root/.tmp/repr-cpp/cxxdump
+[ -x "$exe" ] || "$root/bin/repr-cpp" cxxdump-build >&2
+mkdir -p "$out" "$cache"; out=$(cd "$out" && pwd); cache=$(cd "$cache" && pwd)
+one() {
+  local name=$1 std=$2 path=$4 cargs=$5 dir rel
+  rel=$name; dir=${path%"/$rel"}
+  cargs=${cargs//-fmodules-ts/}; cargs=${cargs//-fmodules/}
+  mkdir -p "$(dirname "$out/$name")"
+  # shellcheck disable=SC2086
+  (cd "$dir" && timeout 300 "$exe" -implicit=false $layouts -cache "$cache" -stats "$out/$name.stats" -o "$out/$name.edn" -- -x c++ -std=$std $cargs "$rel") 2> "$out/$name.err"
+}
+export -f one; export out exe layouts cache
+tr '\t\n' '\037\0' < "$list" | xargs -0 -P "$jobs" -I{} nice bash -c 'IFS=$'"'"'\037'"'"' read -r n s a p c <<< "$1"; one "$n" "$s" "$a" "$p" "$c"' _ {}
+: > "$out/summary.tsv"
+cut -f1 "$list" | while read -r n; do
+  s=$(cat "$out/$n.stats" 2>"$TMPDIR/cxxdump-check.err")
+  [ -n "$s" ] || s='{:status "no-stats"}'
+  printf '%s\t%s\n' "$n" "$s" >> "$out/summary.tsv"
+done
+awk -F'\t' '{
+  st=$2; gsub(/.*:status "/,"",st); gsub(/".*/,"",st); c[st]++; n++
+  if (match($2,/:json-bytes [0-9]+/)) { v=substr($2,RSTART+12,RLENGTH-12)+0; jb+=v; if (v>mx) {mx=v; mxn=$1} }
+  if (match($2,/:out-bytes [0-9]+/)) ob+=substr($2,RSTART+11,RLENGTH-11)
+  if (match($2,/:seconds [0-9.]+/)) { v=substr($2,RSTART+9,RLENGTH-9)+0; sec+=v; if (v>ms) ms=v }
+  if (match($2,/:filter-rss-kib [0-9]+/)) { v=substr($2,RSTART+16,RLENGTH-16)+0; if (v>fr) fr=v }
+  if (match($2,/:clang-rss-kib [0-9]+/)) { v=substr($2,RSTART+15,RLENGTH-15)+0; if (v>cr) cr=v }
+} END {
+  printf "cxxdump-check: %d files;", n; for (k in c) printf " %s %d", k, c[k]; printf "\n"
+  printf "  JSON %.1f MB (largest %.1f MB, %s), output %.2f MB, %.1f s summed (slowest %.2f s), peak filter %d MiB, clang %d MiB\n", jb/1e6, mx/1e6, mxn, ob/1e6, sec, ms, fr/1024, cr/1024
+}' "$out/summary.tsv" | tee "$out/totals.txt"
