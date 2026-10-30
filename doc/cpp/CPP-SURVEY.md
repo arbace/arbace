@@ -712,3 +712,156 @@ The user decided all fourteen as recommended. In short:
 - Exceptions use a pending-exception flag.
 - The corpora start with the pinned gcc tarball, wpp and HotSpot.
 - C23 comes first. The crop order against OCaml and Scheme is left for later.
+
+## As built: CX1 (2026-10-30)
+
+CX1, the spec and the pins, on the branch `cpp-cx1` from main `cb01f62c`, in a few hours of work (against 2-3 days). GT7's clean run was going: the
+light tier of `.tmp/agent-rules.md` held (under 2 GB and 4 threads, no gate, no Arbace build, no lock); the only Arbace run was stage 0's
+`-e` on small forms, 0.25 s each. No shipped file changed (nothing under `arbace/`, `go/`, `overlay/`, `jdk/`, `seed/`; `Makefile` gained
+targets, `test/gate/steps.edn` untouched).
+
+### CX1.1 What was built
+
+- **`doc/cpp/SPEC.md`** (1,123 lines): C++ forms for the survey's §1 and §3, extending the C forms (CP10 (a)): principles, a first example
+  (P1 as forms), the round trip's levels (the AST of the print is level 3), units and names, types, declarations, classes, templates
+  and concepts, code (casts, new/delete, lambdas, fold, try, range-for, coroutines), the preprocessing layer, `:full`, the
+  oracle's facts (§12.1, the table of what the converter attaches) and the converter's table of clang's node kinds (§12.2, 94
+  kinds), `tools/cxxdump`'s design (§13), the host data and the layouts (§14), the closed list of reserved heads (§16.1), seven worked
+  examples (whim++'s `host.hpp`, `host.cpp`, `editor.cpp`, `editor.hpp`, the most vexing parse P6, layouts P5, a suspending coroutine P8).
+  **All 12 forms blocks read with Arbace's reader on stage 0** (`bin/repr-cpp spec-check`; the check was seen to fail on `a::b`).
+- **`test/cpp/corpora.edn`**: the pins and 11 corpora in `test/c/corpora.edn`'s format (§CX1.3).
+- **`test/cpp/host/`**: the host data for `-std=c++23` and the other fifteen (§CX1.4), recorded by `bin/repr-cpp host record`, rechecked
+  by `host check` (second run: "the recorded answers stand", 7 s).
+- **`tools/cxxdump`** (`main.go` 498 lines, `main_test.go`, `go.mod`): the oracle's filter, built and tested with TamaGo's go
+  (`CGO_ENABLED=0`; `go vet`, `gofmt`, `go test` clean) (§CX1.5).
+- **`bin/repr-cpp`**: `host record|check`, `pins check`, `spec-check`, `cxxdump-build|cxxdump-test|cxxdump`; Makefile targets
+  `repr-cpp-host-record`, `repr-cpp-host-check`, `repr-cpp-pins-check`, `repr-cpp-spec-check`, `repr-cpp-cxxdump-build`,
+  `repr-cpp-cxxdump-test`; `make check-makefile` passes.
+
+### CX1.2 The probes settled
+
+- **P5, record layouts.** `-Xclang -fdump-record-layouts[-simple]` on `-fsyntax-only` prints nothing, because clang computes a layout when
+  CodeGen needs one; with `-S -emit-llvm` it prints, for each record the code uses, the AST layout (`-simple`: `Size`, `DataSize`,
+  `Alignment`, `BaseOffsets`, `FieldOffsets` in bits; the full form: a byte-offset table with `(B vtable pointer)`, primary bases, bit-field
+  ranges `0:0-2`, `sizeof`, `dsize`, `align`, `nvsize`, `nvalign`) and the IR layout (`CGRecordLayout`: `%struct.D = type { %struct.B.base,
+  i8, double }`, `%struct.B.base = type <{ ptr, i32 }>`, `%struct.F = type { i8, i8, [2 x i8] }`); the data layout string is
+  `e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128`. g++'s `-c -fdump-lang-class` gives sizes and vtables
+  (`Class D size=24 align=8 base size=24`, `D::_ZTV1D: 3 entries`) as the second opinion; it writes `FILE.cpp.001l.class` beside the *output*
+  file. Proposal CP20.
+- **P8, a suspending coroutine.** A generator (`co_yield`, `suspend_always`, `final_suspend`) at `-O0`: **zero `llvm.coro.*` calls**; the IR
+  has the ramp `@_Z5counti` and the split `.resume`, `.destroy`, `.cleanup` functions, three `__await_suspend_wrapper__init|yield|final`
+  helpers and the library's calls (`coroutine_handle::resume` through the frame), the body in `.resume` a `switch` on the suspend
+  index. g++ and clang builds both return 3 from the probe (0+1+2). The survey's guess ("the passes ran at -O0") is confirmed.
+  libstdc++'s coroutine types are in the inline namespace `std::__n4861` (`St7__n4861` in the mangling). Spec §14.3.
+- **P3 answered for the helper:** a streaming Go filter handles the 608 MB JSON of `io.cpp` in **9.9 s wall and 199 MB peak** (RSS) in all,
+  clang's own 8.5 s included; it keeps 1 declaration (28,968 bytes) of 7,619; the `<vector>` program of P1 keeps 6 of 2,736 (46,540
+  bytes). Clang's JSON prints locations as deltas (`file` and `line` only on change) and `includedFrom` on every header location; the
+  filter follows every location in document order, in dropped nodes too, and writes them absolute. A first reading of the P3 note
+  ("the main file's declarations carry no `file` key") was true only after the first of them, which does carry it.
+
+### CX1.3 The pins
+
+- **gcc 15.2.0**: the tarball of C23's pin, reused (`test/c/corpora.edn`): SHA-256 `438fd996...25d24e`, 101,056,276 bytes; `bin/repr-cpp pins check` confirms the
+  tarball in the main checkout's `.tmp/c1/gcc/` still matches.
+- **llvm-project, clang 23.1.4**: the tag `llvmorg-23.1.4` (tag object `f2c432f2...`, GitHub: signature valid; commit `7a941dfb2877a0b8cf30323fefa85ad019e0b0f5`, tagged
+  2026-10-20), the release asset `llvm-project-23.1.4.src.tar.xz`, **179,272,572 bytes (under the 200 MB limit, so it was fetched)**, SHA-256
+  `819ecf7351f1a66f76b2d701d8942faaf5faeb324cb90c9d5b090de142434bb2` (equal to the digest GitHub publishes for the asset), SHA-512
+  `14435317...bde23` (equal to the one in Alpine's APKBUILD for the same file: a source other than the asset's host). `xz -t` passes and `tar -t`
+  lists 197,228 entries. The `.sig` (466 bytes) was not verified (no gpg). The tarball stays in the worktree's `.tmp/llvm/` (scratch,
+  gitignored), nothing of it extracted. Also pinned, **not fetched**: the release's `test-suite-23.1.4.src.tar.xz` (172,751,524 bytes, SHA-256
+  `f3c8d4da...f562` from the assets API) for CP8 (b).
+- **Alpine's `clang23` APKBUILD** at aports commit `8a39512a7631101da2e7883603b5ca5e1f55ecc6` ("main/clang23: upgrade to 23.1.4"): SHA-256
+  `b299a9b7...a9b66`, 15,153 bytes, the six source patches' SHA-512s (musl triples, stack protector and fortify by default, as-needed). It is pinned by
+  digest and URL, not committed (it is Alpine's file; a copy would need a LICENSE.md entry): `bin/repr-cpp pins check` reads it from `.tmp/cpp-pins/`.
+- **Counts the listings gave** (the survey's §8 was from memory for LLVM and from the survey's own greps for gcc): `g++.dg` 18,066 `.C`/`.cc` (as the
+  survey), **`g++.old-deja` 3,229** (the survey said 3,258: it counted more extensions), **`c-c++-common` 3,324 files, 3,251 `.c`** (the survey: 4,086), libstdc++
+  testsuite **9,726** `.cc` (9,725), headers 862 files in the tarball and **834 installed**, `libstdc++-v3/src` 181 files (the survey: 194), `gcc/cp` 58. LLVM
+  (the survey's "to verify"): `clang/test/SemaCXX` **1,453 files, 1,424 `.cpp`** (the survey guessed about 2,000), `clang/test/CXX` 947 (916 `.cpp`),
+  `Parser` 420, `Lexer` 170, `Preprocessor` 468, `Modules` 2,251, `CodeGenCXX` 1,298; **no `clang/test/std`** in this release; `libcxx/test/std` **8,717 files**
+  (7,977 `.pass.cpp`, 539 `.fail.cpp`/`.verify.cpp`; the survey said over ten thousand), `libcxx/include` 1,688, `libcxx/src` 115. The corpora file records these.
+
+### CX1.4 The apk question (CP2) and the host data
+
+`apk search -e` finds `clang23-dev`, `llvm23-dev`, `clang23-libs`, `llvm23-libs`, `clang23-libclang`, `clang23-headers`, `clang23-static`, `llvm23`,
+`llvm23-static`, `llvm23-gtest` (all `23.1.4-r0`). Nothing was installed; `apk add -s clang23-dev llvm23-dev` simulates **7 packages**: `clang23-extra-tools` (47 MiB),
+`clang23-libclang` (56 MiB), `clang23-dev` (32 MiB), `llvm23` (111 MiB), `llvm23-test-utils`, its pyc package and `llvm23-dev` (37 MiB), about **250 MiB**. The file lists
+(`apk fetch --stdout PKG | tar -t`, a download without an install): `clang23-dev` holds 1,084 clang headers (`usr/lib/llvm23/include/clang/Tooling/Tooling.h`,
+`ASTMatchers/ASTMatchers.h`, `AST/ASTContext.h`) and the `libclang-cpp.so` link; `llvm23-dev` holds `llvm-config`, `include/llvm/IR/Module.h` and the cmake config.
+`libclang-cpp.so.23.1` (95 MiB, `clang23-libs`) and `libLLVM` (`llvm23-libs`, 180 MiB) are already installed, so a dumper linked to the monolithic
+`libclang-cpp.so` needs **no static package** (`clang23-static` 828 MiB and `llvm23-static` 445 MiB are for `libclangTooling.a` and friends). Proposal CP25.
+
+The host data (`test/cpp/host/`, 643 KB): predefined macros of g++ and clang for **sixteen standards** each (`c++23`: 495 and 502 macros; `c++98` to `c++26` and the
+`gnu++` ones), the search lists (in C++ the compiler's own include directory is **last**: g++'s `/usr/lib/gcc/.../15.2.0/include`, clang's
+`/usr/lib/llvm23/lib/clang/23/include`; libstdc++'s three directories, `/usr/include/fortify`, `/usr/include` first in both), 69 `__has_*` answers of both compilers
+(`carries_dependency`: g++ 0, clang 200809L; clang answers with an `L` suffix), 38 `sizeof`/`alignof` pairs that **g++'s and clang's runs agree on** (checked: the
+recorder fails on a difference), the date macros at the fixed epoch (as C's CS43), 834 header digests. `SOURCE_DATE_EPOCH` fixes `__DATE__` in both compilers.
+
+### CX1.5 `tools/cxxdump`
+
+See spec §13. The first version is not small by line count (498 lines with its EDN writer) but it is one file with no dependency: stream the TU's `inner`
+array with `encoding/json` tokens, an ordered tree per element, containers streamed recursively, locations followed in document order and made absolute, the kept
+nodes written as **Clojure-reader data** (Arbace has no JSON reader: `arbace.core/read` reads the output; checked on P1's and `io.cpp`'s). `-implicit=false`, `-stdin`,
+`-format json`. A unit clang rejects ends with "clang rejected the unit" and clang's diagnostics on the standard error.
+
+### CX1.6 Checks
+
+Run (all light): `bin/repr-cpp host record` then `host check` (second run: the answers stand); `pins check` (gcc, llvm, APKBUILD match; clang 23.1.4 and g++ 15.2.0;
+the six apk packages found); `spec-check` (12 blocks, 0 unreadable; and 1 of 1 unreadable on an injected `a::b`); `go vet`, `gofmt -l`, `go test` of `tools/cxxdump`; `make
+check-makefile`; the cxxdump runs of §CX1.2. **Not run:** `bin/gate` in any form (GT7's clean run; the essential gate is the user's rule per merge, to run after GT7); any Arbace
+build; cxxdump over a corpus.
+
+**Heavy or later checks left for after the tag** (none is a gate step yet: `test/gate/steps.edn` was not touched):
+1. `bin/gate` (essential) in the worktree, and adding the light steps `repr-cpp host check`, `pins check`, `spec-check`, `cxxdump-test` to `test/gate/steps.edn` with their
+   inputs (the planner needs the declared files; the audit reads them).
+2. cxxdump over the g++.dg compile corpus (10,899 files, sharded, `-fsyntax-only` with libstdc++ headers: seconds each, hours in all) for the filter's total
+   time, the peak memory per file and the files clang rejects; CX3's numbers.
+3. cxxdump equality with an independent whole-dump filter over a sample of 100 corpus files (this milestone compared one small dump by hand and by a Python parse, not a corpus).
+4. HotSpot's 3,810 files through cxxdump (which of them read at all without HotSpot's build flags).
+5. `bin/repr-cpp host check` on the other hosts the gate runs on, and after any Alpine update (the record is exact).
+6. The 862 libstdc++ headers in the tarball against the 834 installed (which 28 are not, and whether the corpus needs them): the tarball extraction.
+7. Verifying the llvm tarball's `.sig` where a gpg exists.
+
+### CX1.7 Proposals (CP20-CP28)
+
+Each with options, the recommended one first; the spec's choices stand until the user decides.
+
+- **CP20 Where record layouts come from.**
+  - Options: (a) from the oracle by a CodeGen pass with `-fdump-record-layouts-simple` (the AST layout in bits: sizes, offsets, bases), once per unit, parsed by the helper into the `:layout` facts; the IR's struct types
+    for eval (CX6); (b) from the IR's struct types and the data layout string alone (no text to parse; no bit-field offsets, no vptr or primary-base knowledge); (c) a libTooling dumper (`ASTRecordLayout`, CP25 (b)).
+  - *Recommended: (a).* It is the only source of source-level layouts (bit-field ranges, primary bases, `nvsize`); (b) is what eval needs and costs nothing extra; (c) waits for CP25.
+- **CP21 Where the facts live.**
+  - Options: (a) a sibling file `NAME.facts.ae`: one map from a path of child indices to a fact map (spec §12.1); (b) metadata on the forms, with every literal that needs a fact wrapped in a carrier form; (c) not stored: recomputed by rerunning the oracle when a consumer needs them.
+  - *Recommended: (a).* A literal cannot carry metadata (the C forms' constraint); (b) changes the forms for the sake of the facts; (c) makes every consumer depend on clang being present, and the facts are what CP4's "the oracle compiles, Arbace runs" records.
+- **CP22 How a qualified name is written.**
+  - Options: (a) one symbol with `/` (`std/chrono/seconds`; the Clojure reader's symbol has the first `/` as its namespace separator and the printer joins it back); (b) a list `(cpp/qual std chrono seconds)`; (c) dotted `std.chrono.seconds` (collides with Java-style class names in the reader's eyes).
+  - *Recommended: (a).* The reader refuses `std::chrono`; (a) keeps the forms short and a symbol still a symbol; (b) is the escape for the one case (a) cannot write, a qualified name whose parts include a template-id, which is `(cpp/scope (<> W int) get)` already.
+- **CP23 Whose predefined macros and search list the preprocessor takes.**
+  - Options: (a) clang's (the oracle's AST is made with them, so the preprocessor and the AST agree token for token); (b) g++'s (the judge); (c) the corpus action's choice.
+  - *Recommended: (a),* with g++'s recorded (it is, `test/cpp/host/predefined/gxx/`) for the class `gxx-clang` of units whose `#if`s differ (`__GNUC__`, `__clang__`, feature-test macros that differ: 495 against 502 macros at `c++23`).
+- **CP24 The helper's output format.**
+  - Options: (a) Clojure-reader data, one form a line (built); (b) JSON Lines (built as `-format json`); (c) a compact S-expression per clang kind in `godump`'s style, designed with the converter at CX3.
+  - *Recommended: (a) for CX3,* and (c) only if the converter's reading of the data shows its size is a cost (the filtered data of P1 is 46 KB for 7 lines; the filtered data of a 60,000-line file like `editor.cpp` is the thing to measure at CX3).
+- **CP25 libTooling packages.**
+  - Options: (a) none now: the JSON route costs 9.9 s and 199 MB for the worst probe; decide at CX3 on the numbers over a corpus; (b) install `clang23-dev` and `llvm23-dev` (7 packages, about 250 MiB) at CX3 and write the dumper in C++ for tokens, layouts and macro callbacks; (c) install now.
+  - *Recommended: (a).* Tokens, comments and alternative spellings come from the shared lexer (CX2); layouts from CP20; what is left for libTooling is only speed.
+- **CP26 Whether header units have forms.**
+  - Options: (a) the helper drops the headers' declarations; `c/include` keeps the name and digest; a header's forms exist when a corpus entry names it (`libstdcxx-headers`, a program's own headers); (b) every included header read into forms (the AST of `<iostream>` is 600 MB, the forms would be hundreds of MB per header closure); (c) only the program's own headers (wpp's `editor.hpp`) and none of the system's.
+  - *Recommended: (a).* It is the only one that scales to 18,066 files that include libstdc++; (c) is what v1's programs need and (a) contains it.
+- **CP27 The set of standards the host data records.**
+  - Options: (a) sixteen (`c++98`..`c++26`, `gnu++98`..`gnu++26`, both compilers; 643 KB); (b) `c++23`, `gnu++23` and `c++17` (3 per compiler; 120 KB); (c) `c++23` only.
+  - *Recommended: (a).* The corpora's tests set their own `-std` (g++.dg has C++98 to C++26), the cost is one recorder run, and a missing standard is a failure at CX2's token check.
+- **CP28 A user's namespace called `cpp`.**
+  - Options: (a) escape such a name with `(c/id "cpp::x")` (a reserved prefix, like C's reserved heads); (b) rename the family to `cxx/` (a user namespace called `cxx` is as likely); (c) refuse such a program.
+  - *Recommended: (a).* A program with a namespace called `cpp` is rare (none in the corpora so far); `cpp/x` for a head `x` that is not a C++ keyword (`file`, `alias`, `scope`, ...) is the only clash and the converter can test it.
+- **CP29 `cpp/enum` always, or `c/enum` when valid C.**
+  - Options: (a) `cpp/enum` (and `cpp/enum-class`) in every C++ unit, `c/enum` only in C; (b) `c/enum` when the enumeration is valid C, `cpp/enum` otherwise.
+  - *Recommended: (a).* One head per language for a printer; the spec says it so; (b) makes the same source text read differently under C and C++ readers for no gain.
+
+### CX1.8 Rule slips and notes
+
+- The first stage 0 `-e` run that failed (`clojure.java.io` not available) wrote an error report to `/tmp` before `TMPDIR` was set in that shell; I removed that one file (`/tmp/arbace-10217912861722075296.edn`).
+  The 34 other `arbace-*` files in `/tmp` are not from this task. All later runs had `TMPDIR` under the worktree's `.tmp/tmp`.
+- `python3 -I` was used on my own files and on the release's JSON (a downloaded file, parsed with `-I` in a scratch directory), not on the downloaded tarballs.
+- The tarball (179 MB) and the APKBUILD are in the worktree's `.tmp/llvm/` and `.tmp/cpp-pins/` (the scratch the pins check reads; copy it before the worktree is removed);
+  the gcc tarball and stage 0 were read from the main checkout, read-only.
+- The first draft of the stage 0 call used `/dev/null` in a probe of `cxxdump` (`-o /dev/null`): a slip of the rule against `/dev/null`; the output was a file elsewhere in the next runs.
