@@ -1,0 +1,365 @@
+;; Package crt is C's run time in Arbace (doc/C23-SURVEY.md §6.3, §6.5, CS9 (a); doc/c/SPEC.md §12):
+;; one flat 64-bit little-endian address space per C program, made of slabs of Go memory; the
+;; program's exit and signals as Go panics; the integers wider than 64 bits as 64-bit limbs (CS35);
+;; and the libc's syscall layer, the Linux system calls musl 1.2.6 makes on linux/amd64, over Go's
+;; os and syscall. Shared by ci, the interpreter (arbace/ci), and AOT (C6). It imports std only.
+(in-ns 'go.arbace.crt) (go/file "mem.go" :doc "Package crt is C's run time in Arbace (doc/C23-SURVEY.md §6.3, §6.5, CS9 (a); doc/c/SPEC.md §12):\none flat 64-bit little-endian address space per C program, made of slabs of Go memory; the\nprogram's exit and signals as Go panics; the integers wider than 64 bits as 64-bit limbs (CS35);\nand the libc's syscall layer, the Linux system calls musl 1.2.6 makes on linux/amd64, over Go's\nos and syscall. Shared by ci, the interpreter (arbace/ci), and AOT (C6). It imports std only.\n" :imports [
+
+
+    ^{:line 9} [binary "encoding/binary"]
+    ^{:line 10} [math "math"]
+    ^{:line 11} [sort "sort"]])
+
+
+
+
+
+(go/const "The address space's regions (SPEC §12.1): nothing below Text; Text holds no bytes (a function's\naddress is Text + 16 * its index, a label's LabelBase + its code); static data from Data, the heap\n(brk) from Heap, mmap's from MapBase upward, the stack's 8 MiB below StackTop.\n"
+  ^{:line 18} [^{:tag uint64 :val 4194304} Text 0x0000000000400000]
+  ^{:line 19} [^{:tag uint64 :val 6291456} LabelBase 0x0000000000600000]
+  ^{:line 20} [^{:tag uint64 :val 16777216} Rodata0 0x0000000001000000]
+  ^{:line 21} [^{:tag uint64 :val 134217728} Data 0x0000000008000000]
+  ^{:line 22} [^{:tag uint64 :val 4294967296} Heap 0x0000000100000000]
+  ^{:line 23} [^{:tag uint64 :val 139637976727552} MapBase 0x00007f0000000000]
+  ^{:line 24} [^{:tag uint64 :val 140737471578112} StackTop 0x00007fffff000000]
+  ^{:line 25} [^{:tag uint64 :val 8388608} StackSize (<< 8 20)]
+  ^{:line 26} [^{:tag uint64 :val 4096} PageSize 4096])
+
+
+
+(go/type Slab "Slab is one mapped region: the bytes [Base, Base+len(B)), read-only when RO.\n" (struct
+    ^{:line 31 :tag uint64} Base
+    ^{:line 32 :tag (slice byte)} B
+    ^{:line 33 :tag bool} RO
+    ^{:line 34 :tag string} Name))
+
+
+
+^{:go/end 38} (go/method End "End is the address after the slab's last byte.\n" ^uint64 [^{:tag (* Slab)} s] (+ (.-Base s) (conv uint64 (len (.-B s)))))
+
+
+
+(go/type Fault "Fault is a signal the machine raises: a load or store at an address with no object (SIGSEGV),\nan integer division by zero (SIGFPE). It is a Go panic value; the run reports 128 + Sig.\n" (struct
+    ^{:line 43 :tag int} Sig
+    ^{:line 44 :tag uint64} Addr
+    ^{:line 45 :tag string} Msg))
+
+
+^{:go/end 48} (go/method Error ^string [^{:tag (* Fault)} f] (.-Msg f))
+
+
+(go/type Exit "Exit is the program's end: exit_group's status, or 128 + a signal's number when Signal is set.\n" (struct
+    ^{:line 52 :tag int} Code
+    ^{:line 53 :tag int} Signal))
+
+
+^{:go/end 56} (go/method Error ^string [^{:tag (* Exit)} e] "exit")
+
+
+(go/const "Signal numbers of linux/amd64.\n"
+  ^{:line 60} [^{:val 1} SIGHUP 1]
+  ^{:line 61} [^{:val 2} SIGINT 2]
+  ^{:line 62} [^{:val 3} SIGQUIT 3]
+  ^{:line 63} [^{:val 4} SIGILL 4]
+  ^{:line 64} [^{:val 5} SIGTRAP 5]
+  ^{:line 65} [^{:val 6} SIGABRT 6]
+  ^{:line 66} [^{:val 7} SIGBUS 7]
+  ^{:line 67} [^{:val 8} SIGFPE 8]
+  ^{:line 68} [^{:val 9} SIGKILL 9]
+  ^{:line 69} [^{:val 10} SIGUSR1 10]
+  ^{:line 70} [^{:val 11} SIGSEGV 11]
+  ^{:line 71} [^{:val 12} SIGUSR2 12]
+  ^{:line 72} [^{:val 13} SIGPIPE 13]
+  ^{:line 73} [^{:val 14} SIGALRM 14]
+  ^{:line 74} [^{:val 15} SIGTERM 15]
+  ^{:line 75} [^{:val 17} SIGCHLD 17])
+
+
+
+(go/type Mem "Mem is a program's address space.\n" (struct
+    ^{:line 80 :tag (slice (* Slab))} slabs ; sorted by Base, disjoint
+    ^{:line 81 :tag (* Slab)} last
+    ^{:line 82 :tag (* Slab)} prev
+    ^{:line 83 :tag (* Slab)} Stack
+    ^{:line 84 :tag uint64} DataNext ; the next free byte of static data
+    ^{:line 85 :tag (* Slab)} data
+    ^{:line 86 :tag uint64} brkBase
+    ^{:line 87 :tag uint64} brk
+    ^{:line 88 :tag (* Slab)} heap
+    ^{:line 89 :tag uint64} mapNext
+    ^{:line 90 :tag (* Slab)} RO ; read-only static data (string literals, const objects)
+    ^{:line 91 :tag uint64} roNext))
+
+
+
+^{:go/end 99} (go/func NewMem "NewMem is an address space with its stack, an empty heap and room for static data.\n" ^{:tag (* Mem)} []
+  (let [m (addr (lit Mem :DataNext Data :brkBase Heap :brk Heap :mapNext MapBase))]
+    (set! (.-Stack m) (.Map m (- StackTop StackSize) StackSize false "stack"))
+    ^{:line 98} m))
+
+
+^{:go/end 103} (go/func fault [^uint64 a]
+  (panic (addr (lit Fault :Sig SIGSEGV :Addr a :Msg "segmentation fault"))))
+
+
+
+^{:go/end 123} (go/method find "find is the slab holding [a, a+n), or nil.\n" ^{:tag (* Slab)} [^{:tag (* Mem)} m ^uint64 a ^uint64 n]
+  (when [s (.-last m)] (and (!= s nil) (< (- a (.-Base s)) (conv uint64 (len (.-B s)))) (<= (- (+ a n) (.-Base s)) (conv uint64 (len (.-B s)))))
+    (return s))
+
+  (when [s (.-prev m)] (and (!= s nil) (< (- a (.-Base s)) (conv uint64 (len (.-B s)))) (<= (- (+ a n) (.-Base s)) (conv uint64 (len (.-B s)))))
+    (set! (values (.-prev m) (.-last m)) (values (.-last m) s))
+    (return s))
+
+  ^{:go/breaks [[3 122]]} (let [i (sort/Search (len (.-slabs m)) ^{:go/end 114} (fn ^bool [^int i] (> (.End (aget (.-slabs m) i)) a)))]
+    (when (< i (len (.-slabs m)))
+      (let [s (aget (.-slabs m) i)]
+        (when (and (>= a (.-Base s)) (<= (+ a n) (.End s)) (>= (+ a n) a))
+          (set! (values (.-prev m) (.-last m)) (values (.-last m) s))
+          (return s))))
+
+
+    nil))
+
+
+
+^{:go/end 126} (go/method Slab "Slab is the slab holding the address a, or nil.\n" ^{:tag (* Slab)} [^{:tag (* Mem)} m ^uint64 a] (.find m a 1))
+
+
+^{:go/end 139} (go/method R "R is the bytes [a, a+n) for reading: a slice of the slab's memory.\n" ^{:tag (slice byte)} [^{:tag (* Mem)} m ^uint64 a ^uint64 n]
+  (let [s (.find m a n)]
+    (when (== s nil)
+      (when (== n 0)
+        (return nil))
+
+      (fault a))
+
+    (let [o (- a (.-Base s))]
+      (subslice (.-B s) o (+ o n) (+ o n)))))
+
+
+
+^{:go/end 152} (go/method W "W is the bytes [a, a+n) for writing.\n" ^{:tag (slice byte)} [^{:tag (* Mem)} m ^uint64 a ^uint64 n]
+  (let [s (.find m a n)]
+    (when (or (== s nil) (.-RO s))
+      (when (== n 0)
+        (return nil))
+
+      (fault a))
+
+    (let [o (- a (.-Base s))]
+      (subslice (.-B s) o (+ o n) (+ o n)))))
+
+
+^{:go/end 154} (go/method Load8 ^uint8 [^{:tag (* Mem)} m ^uint64 a] (aget (.R m a 1) 0))
+^{:go/end 155} (go/method Load16 ^uint16 [^{:tag (* Mem)} m ^uint64 a] (.Uint16 binary/LittleEndian (.R m a 2)))
+^{:go/end 156} (go/method Load32 ^uint32 [^{:tag (* Mem)} m ^uint64 a] (.Uint32 binary/LittleEndian (.R m a 4)))
+^{:go/end 157} (go/method Load64 ^uint64 [^{:tag (* Mem)} m ^uint64 a] (.Uint64 binary/LittleEndian (.R m a 8)))
+^{:go/end 160} (go/method LoadF32 ^float32 [^{:tag (* Mem)} m ^uint64 a]
+  (math/Float32frombits (.Uint32 binary/LittleEndian (.R m a 4))))
+
+^{:go/end 163} (go/method LoadF64 ^float64 [^{:tag (* Mem)} m ^uint64 a]
+  (math/Float64frombits (.Uint64 binary/LittleEndian (.R m a 8))))
+
+^{:go/end 164} (go/method Store8 [^{:tag (* Mem)} m ^uint64 a ^uint8 v] (aset (.W m a 1) 0 v))
+^{:go/end 165} (go/method Store16 [^{:tag (* Mem)} m ^uint64 a ^uint16 v] (.PutUint16 binary/LittleEndian (.W m a 2) v))
+^{:go/end 166} (go/method Store32 [^{:tag (* Mem)} m ^uint64 a ^uint32 v] (.PutUint32 binary/LittleEndian (.W m a 4) v))
+^{:go/end 167} (go/method Store64 [^{:tag (* Mem)} m ^uint64 a ^uint64 v] (.PutUint64 binary/LittleEndian (.W m a 8) v))
+^{:go/end 170} (go/method StoreF32 [^{:tag (* Mem)} m ^uint64 a ^float32 v]
+  (.PutUint32 binary/LittleEndian (.W m a 4) (math/Float32bits v)))
+
+^{:go/end 173} (go/method StoreF64 [^{:tag (* Mem)} m ^uint64 a ^float64 v]
+  (.PutUint64 binary/LittleEndian (.W m a 8) (math/Float64bits v)))
+
+
+
+^{:go/end 183} (go/method Move "Move copies n bytes from src to dst, the ranges possibly overlapping (memmove).\n" [^{:tag (* Mem)} m ^uint64 dst ^uint64 src ^uint64 n]
+  (when (== n 0)
+    (return))
+
+  (let [s (.R m src n)
+      ^{:line 181} d (.W m dst n)]
+    (copy d s)))
+
+
+
+^{:go/end 194} (go/method Fill "Fill sets n bytes at dst to c.\n" [^{:tag (* Mem)} m ^uint64 dst ^byte c ^uint64 n]
+  (when (== n 0)
+    (return))
+
+  (let [d (.W m dst n)]
+    (range [i d]
+      (aset d i c))))
+
+
+
+
+^{:go/end 210} (go/method CString "CString is the NUL-terminated string at a.\n" ^string [^{:tag (* Mem)} m ^uint64 a]
+  (let [s (.find m a 1)]
+    (when (== s nil)
+      (fault a))
+
+    ^{:go/breaks [4]} (let [o (- a (.-Base s))]
+      (for [i o] (< i (conv uint64 (len (.-B s)))) (inc! i)
+        (when (== (aget (.-B s) i) 0)
+          (return (conv string (subslice (.-B s) o i)))))
+
+
+      (fault (.End s))
+      "")))
+
+
+^{:go/end 217} (go/method insert [^{:tag (* Mem)} m ^{:tag (* Slab)} s]
+  (let [i (sort/Search (len (.-slabs m)) ^{:go/end 213} (fn ^bool [^int i] (> (.-Base (aget (.-slabs m) i)) (.-Base s))))]
+    (set! (.-slabs m) (append (.-slabs m) nil))
+    (copy (subslice (.-slabs m) (+ i 1)) (subslice (.-slabs m) i))
+    (aset (.-slabs m) i s)))
+
+
+^{:go/breaks [[4 225]] :go/end 226} (go/method overlaps ^bool [^{:tag (* Mem)} m ^uint64 base ^uint64 size]
+  (range [_ s (.-slabs m)]
+    (when (and (< base (.End s)) (< (.-Base s) (+ base size)))
+      (return true)))
+
+
+  false)
+
+
+
+^{:go/end 234} (go/method Map "Map maps size zero bytes at base (a fixed address).\n" ^{:tag (* Slab)} [^{:tag (* Mem)} m ^uint64 base ^uint64 size ^bool ro ^string name]
+  (let [s (addr (lit Slab :Base base :B (make (slice byte) size) :RO ro :Name name))]
+    (.insert m s)
+    (set! (values (.-last m) (.-prev m)) (values nil nil))
+    ^{:line 233} s))
+
+
+
+
+^{:go/end 261} (go/method Unmap "Unmap removes the pages [base, base+size) from every slab, splitting one that holds them\npartly; it reports whether anything was mapped there.\n" ^bool [^{:tag (* Mem)} m ^uint64 base ^uint64 size]
+  (let [end (+ base size)
+      ^{:line 240 :tag (slice (* Slab))} out (zero (slice (* Slab)))
+      ^{:line 241} hit false]
+    (range [_ s (.-slabs m)]
+      (when (or (<= end (.-Base s)) (>= base (.End s)) (== s (.-Stack m)))
+        (set! out (append out s))
+        (continue))
+
+      (set! hit true)
+      (when (< (.-Base s) base)
+        (set! out (append out (addr (lit Slab :Base (.-Base s) :B (subslice (.-B s) _ (- base (.-Base s)) (- base (.-Base s))) :RO (.-RO s) :Name (.-Name s))))))
+
+      (when (> (.End s) end)
+        (set! out (append out (addr (lit Slab :Base end :B (subslice (.-B s) (- end (.-Base s))) :RO (.-RO s) :Name (.-Name s))))))
+
+      (when (== s (.-heap m))
+        (set! (.-heap m) nil)))
+
+
+    (set! (.-slabs m) out)
+    (set! (values (.-last m) (.-prev m)) (values nil nil))
+    ^{:line 260} hit))
+
+
+^{:go/end 263} (go/func pageUp ^uint64 [^uint64 n] (bit-and-not (- (+ n PageSize) 1) (- PageSize 1)))
+
+
+^{:go/end 279} (go/method Mmap "Mmap maps size zero bytes at a free address (anonymous mmap), page-aligned.\n" ^uint64 [^{:tag (* Mem)} m ^uint64 hint ^uint64 size]
+  (set! size (pageUp size))
+  (when (and (!= hint 0) (== (% hint PageSize) 0) (not (.overlaps m hint size)))
+    (.Map m hint size false "mmap")
+    (return hint))
+
+  (let [a (.-mapNext m)]
+    (while (.overlaps m a size)
+      (set! a + PageSize))
+
+    (set! (.-mapNext m) (+ a size PageSize)) ; a guard page between mappings
+    (.Map m a size false "mmap")
+    ^{:line 278} a))
+
+
+
+
+^{:go/end 305} (go/method Brk "Brk sets the program break (brk(2)): 0 asks for the current break; a break below the heap's\nstart or beyond 1 GiB above it is refused, the old one returned.\n" ^uint64 [^{:tag (* Mem)} m ^uint64 a]
+  (when (or (== a 0) (< a (.-brkBase m)) (> a (+ (.-brkBase m) (<< 1 30))))
+    (return (.-brk m)))
+
+  (if (== (.-heap m) nil)
+    (let [n (pageUp (- a (.-brkBase m)))]
+      (when (> n 0)
+        (set! (.-heap m) (addr (lit Slab :Base (.-brkBase m) :B (make (slice byte) n (max n (<< 1 20))) :Name "heap")))
+        (.insert m (.-heap m))))
+
+    (when [need (pageUp (- a (.-brkBase m)))] (> need (conv uint64 (len (.-B (.-heap m)))))
+      (if (<= need (conv uint64 (cap (.-B (.-heap m)))))
+        (set! (.-B (.-heap m)) (subslice (.-B (.-heap m)) _ need))
+
+        (let [nb (make (slice byte) need (* 2 need))]
+          (copy nb (.-B (.-heap m)))
+          (set! (.-B (.-heap m)) nb)))))
+
+
+  (set! (values (.-last m) (.-prev m)) (values nil nil))
+  (set! (.-brk m) a)
+  ^{:line 304} a)
+
+
+
+^{:go/end 327} (go/method Static "Static is n bytes of zeroed static storage aligned to align (the program's .data and .bss).\n" ^uint64 [^{:tag (* Mem)} m ^uint64 n ^uint64 align]
+  (when (== align 0)
+    (set! align 1))
+
+  (let [a (bit-and-not (- (+ (.-DataNext m) align) 1) (- align 1))]
+    (when (or (== (.-data m) nil) (> (+ a n) (.End (.-data m))))
+      (let [size (pageUp (max (+ n align) (<< 1 20)))
+          ^{:line 315} base (pageUp (.-DataNext m))]
+        (when (!= (.-data m) nil)
+          (set! base (+ (pageUp (.End (.-data m))) PageSize)))
+
+        (set! (.-data m) (.Map m base size false "data"))
+        (set! a (bit-and-not (- (+ base align) 1) (- align 1)))))
+
+    (set! (.-DataNext m) (+ a n))
+    (when (== n 0)
+      (inc! (.-DataNext m))) ; distinct objects have distinct addresses
+
+    ^{:line 326} a))
+
+
+
+^{:go/end 353} (go/method Rodata "Rodata is n bytes of read-only static storage aligned to align, writable until Seal.\n" ^uint64 [^{:tag (* Mem)} m ^uint64 n ^uint64 align]
+  (when (== align 0)
+    (set! align 1))
+
+  (when (== (.-RO m) nil)
+    (set! (.-RO m) (.Map m Rodata0 0 false "rodata"))
+    (set! (.-B (.-RO m)) (make (slice byte) 0 (<< 64 20)))
+    (set! (.-roNext m) (.-Base (.-RO m))))
+
+  (let [a (bit-and-not (- (+ (.-roNext m) align) 1) (- align 1))
+      ^{:line 340} end (+ a n)]
+    (when (== n 0)
+      (inc! end))
+
+    (when (> (- end (.-Base (.-RO m))) (conv uint64 (cap (.-B (.-RO m)))))
+      (panic "crt: read-only data beyond 64 MiB"))
+
+    (when (> (- end (.-Base (.-RO m))) (conv uint64 (len (.-B (.-RO m)))))
+      (set! (.-B (.-RO m)) (subslice (.-B (.-RO m)) _ (- end (.-Base (.-RO m))))))
+
+    (set! (.-roNext m) end)
+    (set! (values (.-last m) (.-prev m)) (values nil nil))
+    ^{:line 352} a))
+
+
+
+^{:go/end 360} (go/method Seal "Seal makes the read-only data read-only (after the program's static initialization).\n" [^{:tag (* Mem)} m]
+  (when (!= (.-RO m) nil)
+    (set! (.-RO (.-RO m)) true)))
+
+
+
+
+^{:go/end 367} (go/method Unseal "Unseal makes it writable again (the REPL loading more units).\n" [^{:tag (* Mem)} m]
+  (when (!= (.-RO m) nil)
+    (set! (.-RO (.-RO m)) false)))

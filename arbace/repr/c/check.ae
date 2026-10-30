@@ -56,6 +56,14 @@
 
 (defn- line-of [f] (or (:line (meta f)) *line*))
 
+(defn- record!
+  "CS95 (a): the result of the form `f` (an expression's {:t :v :lv :bits ...}, a declarator's entry) in
+  the identity map of a check-unit asked for :results (ci's builder, arbace.c.build)."
+  [f r]
+  (when-let [^IdentityHashMap m (cx :results)]
+    (when (or (seq? f) (symbol? f) (vector? f)) (.put m f r)))
+  r)
+
 (defmacro ^:private at-line [f & body]
   `(binding [*line* (line-of ~f)] ~@body))
 
@@ -971,7 +979,7 @@
             (let [q (quals (if arrow (:to (decay (unq (:t r)))) (:t r)))
                   mt (if (seq q) (reduce qual (:t mm) q) (:t mm))]
               (do (when (:attr-mode (:t mm)) (feat! :cc-attr-mode))
-                  (res mt :lv true :bits (:bits mm) :malign (:align mm))))
+                  (res mt :lv true :bits (:bits mm) :malign (:align mm) :member mm)))
             (do (err! (str "no member named '" m "' in '" (tstr t) "'")) (res t-invalid)))))
       (do (when-not (= :invalid (:k t)) (err! (str "request for member '" m "' in something not a structure or union"))) (res t-invalid)))))
 
@@ -1006,6 +1014,7 @@
                          (res (:t (implicit-fn! fname)))))
              (if bk (res (:t bk)) (ex f)))
         rf (if (and fname (nil? known)) (emit! rf) rf)
+        _ (record! f rf)
         ft (callee-fn (:t rf))
         ras (if (= fname "__builtin_has_attribute") [(ex (first args))] (mapv ex args))]
     (when (and (nil? ft) (not= :invalid (:k (unq (:t rf)))))
@@ -1058,10 +1067,13 @@
                           t (when-not (= tf :default) (parse-type tf))
                           r (ex e)]
                       (cond
-                        (= tf :default) (reset! default r)
-                        (and (nil? @chosen) (compatible? ct (unq t))) (reset! chosen r))
-                      r)))]
-    (or @chosen @default (res t-invalid))))
+                        (= tf :default) (reset! default [r a])
+                        (and (nil? @chosen) (compatible? ct (unq t))) (reset! chosen [r a]))
+                      r)))
+        [r a] (or @chosen @default [(res t-invalid) nil])]
+    ;; the chosen association, for ci's builder (CS95 (a))
+    (when a (record! a :chosen))
+    r))
 
 (defn- init-count
   "The number of elements an initializer gives an array of element type `et` (6.7.11)."
@@ -1133,8 +1145,14 @@
   (loop [r (ex p) ms (seq ms)]
     (if ms (recur (emit! (member-of r (name (first ms)) true)) (next ms)) r)))
 
+(declare ex*)
+
 (defn ex
-  "An expression form's result, its annotations written."
+  "An expression form's result, its annotations written (and recorded, CS95 (a))."
+  [f]
+  (record! f (ex* f)))
+
+(defn- ex*
   [f]
   (at-line f
     (cond
@@ -1321,7 +1339,8 @@
             (feat! :cc-redeclared)
             (when-let [^java.util.Set fs (:feats prev)] (.add fs :cc-redeclared)))
         t (if (and prev (#{:obj :fn} (:kind prev))) (composite (:t prev) t) t)
-        e {:kind kind :t t :linkage lk :v (when (and (:constexpr m) (some? init)) (:v init)) :m m :feats (cx :feats)}]
+        e {:kind kind :t t :linkage lk :v (when (and (:constexpr m) (some? init)) (:v init)) :m m :feats (cx :feats)
+           :id (Object.) :file-scope (file-scope?) :name n}]
     (attr-args! m)
     ;; cc types a library function gcc knows as a builtin by its __builtin_ declaration
     (when (and fn? (not param) (lookup (str "__builtin_" n))) (feat! :cc-builtin-types))
@@ -1347,17 +1366,17 @@
     (if (auto-type? m)
       (let [r (ex init) t (decay (unq (:t r)))]
         (feat! :cc-auto)
-        (declare-object! n t m :obj nil false))
+        (record! nm (declare-object! n t m :obj nil false)))
       (let [t (vectorize (parse-type (or (:tag m) 'int)) m)
             t (if (contains? m :c/alignas) (do (ex (:c/alignas m)) t) t)
             _ (when-let [at (:c/alignas-type m)] (parse-type at))
             t (complete-array t (when has-init init))
             ;; the object is in scope in its own initializer (6.2.1)
-            e (declare-object! n t m (if (= :fn (:k (unq t))) :fn :obj) nil false)]
+            e (record! nm (declare-object! n t m (if (= :fn (:k (unq t))) :fn :obj) nil false))]
         (when has-init
           (let [r (if (and (seq? init) (= 'init (first init))) (do (check-init init) nil) (ex init))]
             (when (and (:constexpr m) r (some? (:v r)))
-              (declare! n (assoc e :v (conv-val (:v r) t))))
+              (record! nm (declare! n (assoc e :v (conv-val (:v r) t)))))
             (when (and (= :array (:k (unq t))) (vla? t)) nil)))
         e))))
 
@@ -1372,7 +1391,7 @@
                              (if (and nm (or (:tag pm) (:c/implicit-int pm) (seq? p) kr))
                                (let [t (parse-type (or (:tag pm) 'int))]
                                  (declare! nm {:kind :obj :t (case (:k (unq t)) :array (ptr (:of (unq t))) :fn (ptr t) t) :linkage :n})
-                                 [nm t pm])
+                                 [nm t pm p])
                                (let [t (parse-type p)]
                                  (when-not (and (= :void (:k t)) (= 1 (count ps))) [nil t pm])))))
                          ps))
@@ -1393,14 +1412,16 @@
     (with-scope ;; the parameters' scope (the body's block shares it)
       (let [[named ft] (params-of ps ret)]
         (pop-scope!) ;; the function itself is declared in the enclosing scope
-        (declare-object! n ft m :fn nil false)
+        (record! nm (declare-object! n ft m :fn nil false))
         (push-scope!)
-        (doseq [[pn pt pm] named]
+        (doseq [[pn pt pm psym] named]
           (when pn
-            (if (and kr (:c/implicit-int pm))
-              ;; an identifier list's undeclared parameter: no declarator of cc's tree
-              (binding [*cx* (assoc *cx* :annotating (atom false))] (declare-object! pn pt pm :obj nil true))
-              (declare-object! pn pt pm :obj nil true))))
+            (record! psym
+                     (if (and kr (:c/implicit-int pm))
+                       ;; an identifier list's undeclared parameter: no declarator of cc's tree
+                       (binding [*cx* (assoc *cx* :annotating (atom false))] (declare-object! pn pt pm :obj nil true))
+                       (declare-object! pn pt pm :obj nil true)))))
+        (record! ps ft)
         (binding [*cx* (assoc *cx* :fn-name n :fn-ret (:ret ft))]
           (check-block-items body))))))
 
@@ -1410,9 +1431,9 @@
         n (ident nm)]
     (if (vector? ps)
       (let [t (parse-type (list 'fn ps (or (:tag (meta ps)) 'int)))]
-        (declare-object! n t m :fn nil false))
+        (record! nm (declare-object! n t m :fn nil false)))
       (let [t (parse-type (:tag m))]
-        (declare-object! n t m :fn nil false)))))
+        (record! nm (declare-object! n t m :fn nil false))))))
 
 (defn- check-typedef [f]
   (let [[_ nm tf] f
@@ -1423,7 +1444,7 @@
             (assoc t :talign al) t)]
     (attr-args! m)
     (ann! (str "d " n " n " (tstr t)))
-    (declare! n {:kind :typedef :t t})))
+    (record! nm (declare! n {:kind :typedef :t t}))))
 
 (defn check-decl
   "A declaration form (§6)."
@@ -1559,9 +1580,10 @@
   "Checks a read (arbace.repr.c/read-c's {:forms :units}) at the standard `std` (a keyword), the
   builtins' forms `builtins` declared first: {:errors [...] :items [[line [annotation...]] ...]} (the
   items when `annotate`)."
-  [rd std builtins & {:keys [annotate ldouble-size unsigned-char]}]
+  [rd std builtins & {:keys [annotate ldouble-size unsigned-char results]}]
   (let [c (assoc (new-cx std {:ldouble-size (or ldouble-size 16) :unsigned-char unsigned-char})
-                 :units (into {} (for [[k u] (:units rd)] [(str k) u])))
+                 :units (into {} (for [[k u] (:units rd)] [(str k) u]))
+                 :results (when results (IdentityHashMap.)))
         items (ArrayList.)]
     (binding [*cx* c]
       (push-scope!)
@@ -1576,4 +1598,5 @@
             (check-top f))
           (when (and annotate (seq? f) (:line (meta f)) (not (#{'c/include 'c/define 'c/undef 'c/directive 'c/pragma} (first f))))
             (.add items [(:line (meta f)) (vec a) fs]))))
-      {:errors (vec (cx :errors)) :items (vec items)})))
+      (cond-> {:errors (vec (cx :errors)) :items (vec items)}
+        results (assoc :results (cx :results))))))

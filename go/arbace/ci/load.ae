@@ -1,0 +1,552 @@
+;; ci: the registry (doc/go/GOI-SPEC.md §4.2's factories): a node program, the builder's output
+;; (arbace.c.build), as data (nested lists of strings, int64s and lists) made into functions,
+;; statics and nodes. From Arbace the data comes through arbace.lang.CInterp's natives; on the
+;; light path (tools/cirun) from its text, read by Parse. The kinds are listed in Load's switches;
+;; doc/c/CI.md is their reference.
+(in-ns 'go.arbace.ci) (go/file "load.go" :doc "ci: the registry (doc/go/GOI-SPEC.md §4.2's factories): a node program, the builder's output\n(arbace.c.build), as data (nested lists of strings, int64s and lists) made into functions,\nstatics and nodes. From Arbace the data comes through arbace.lang.CInterp's natives; on the\nlight path (tools/cirun) from its text, read by Parse. The kinds are listed in Load's switches;\ndoc/c/CI.md is their reference.\n" :imports [
+
+
+    ^{:line 9} [hex "encoding/hex"]
+    ^{:line 10} [fmt "fmt"]
+    ^{:line 11} [math "math"]
+    ^{:line 12} [strconv "strconv"]
+    ^{:line 13} [strings "strings"]
+
+    ^{:line 15} [crt "arbace/crt"]])
+
+
+
+
+^{:go/end 34} (go/func Parse "Parse reads a node program's text: lists ( ... ) and [ ... ], decimal integers, strings with\nGo's escapes, bare words (as strings); ; starts a comment to the end of the line.\n" [^string s] :results [(slice any) error]
+  (let [p (addr (lit parser :s s))
+      ^{:line 22 :tag (slice any)} out (zero (slice any))]
+    (while true
+      (.skip p)
+      (when (>= (.-i p) (len (.-s p)))
+        (return out nil))
+
+      (let [(values x err) (.read p)]
+        (when (!= err nil)
+          (return nil err))
+
+        (set! out (append out x))))))
+
+
+
+(go/type parser (struct
+    ^{:line 37 :tag string} s
+    ^{:line 38 :tag int} i))
+
+
+^{:go/end 54} (go/method skip [^{:tag (* parser)} p]
+  (while (< (.-i p) (len (.-s p)))
+    (let [c (aget (.-s p) (.-i p))]
+      (cond (== c \;)
+        (while (and (< (.-i p) (len (.-s p))) (!= (aget (.-s p) (.-i p)) \newline))
+          (inc! (.-i p)))
+
+        (or (== c \space) (== c \newline) (== c \tab) (== c \return) (== c \,))
+        (inc! (.-i p)) :else
+
+        (return)))))
+
+
+
+
+^{:go/end 114} (go/method read [^{:tag (* parser)} p] :results [any error]
+  (.skip p)
+  (when (>= (.-i p) (len (.-s p)))
+    (return nil (fmt/Errorf "ci: unexpected end of the node program")))
+
+  (let [c (aget (.-s p) (.-i p))]
+    (switch
+      (case [(or (== c \() (== c \[))]
+        (let [end (conv byte \))]
+          (when (== c \[)
+            (set! end \]))
+
+          (inc! (.-i p))
+          (let [l (lit (slice any))]
+            (while true
+              (.skip p)
+              (when (>= (.-i p) (len (.-s p)))
+                (return nil (fmt/Errorf "ci: unclosed list")))
+
+              (when (== (aget (.-s p) (.-i p)) end)
+                (inc! (.-i p))
+                (return l nil))
+
+              (let [(values x err) (.read p)]
+                (when (!= err nil)
+                  (return nil err))
+
+                (set! l (append l x)))))))
+
+      (case [(== c \")]
+        (let [j (+ (.-i p) 1)]
+          (while (and (< j (len (.-s p))) (!= (aget (.-s p) j) \"))
+            (when (== (aget (.-s p) j) \\)
+              (inc! j))
+
+            (inc! j))
+
+          (let [(values str err) (strconv/Unquote (subslice (.-s p) (.-i p) (+ j 1)))]
+            (when (!= err nil)
+              (return nil (fmt/Errorf "ci: bad string at %d: %v" (.-i p) err)))
+
+            (set! (.-i p) (+ j 1))
+            (return str nil))))
+      (default
+        (let [j (.-i p)]
+          (while (and (< j (len (.-s p))) (not (strings/ContainsRune " \n\t\r,()[];\"" (conv rune (aget (.-s p) j)))))
+            (inc! j))
+
+          (let [w (subslice (.-s p) (.-i p) j)]
+            (set! (.-i p) j)
+            (when [(values v err) (strconv/ParseInt w 10 64)] (== err nil)
+              (return v nil))
+
+            (when [(values v err) (strconv/ParseUint w 10 64)] (== err nil)
+              (return (conv int64 v) nil))
+
+            (return w nil)))))))
+
+
+
+
+(go/type Loader "Loader makes a node program's parts in a Prog.\n" (struct
+    ^{:line 118 :tag (* Prog)} P
+
+
+    ^{:line 121 :tag (* Func) :doc "Entry is the function the program's (entry ID) names; Start, __libc_start_main's when\n(start LIBC MAIN) names it.\n"} Entry ^{:tag (* Func) :doc "Entry is the function the program's (entry ID) names; Start, __libc_start_main's when\n(start LIBC MAIN) names it.\n"} Start
+
+    ^{:line 123 :tag (map int bool) :doc "Funcs whose code is set.\n"} Defined))
+
+
+^{:go/end 126} (go/func NewLoader ^{:tag (* Loader)} [^{:tag (* Prog)} p] (addr (lit Loader :P p :Defined (lit (map int bool)))))
+
+^{:go/end 142} (go/func toI ^int64 [^any x]
+  (type-switch [v x]
+    (case [int64]
+      (return v))
+    (case [int]
+      (return (conv int64 v)))
+    (case [string]
+      (let [(values n err) (strconv/ParseInt v 10 64)]
+        (when (!= err nil)
+          (panic (fmt/Sprintf "ci: not an integer: %q" v)))
+
+        (return n))))
+
+  (panic (fmt/Sprintf "ci: not an integer: %v" x)))
+
+
+^{:go/end 149} (go/func toS ^string [^any x]
+  (when [(values s ok) (assert string x)] ok
+    (return s))
+
+  (panic (fmt/Sprintf "ci: not a string: %v" x)))
+
+
+^{:go/end 159} (go/func toL ^{:tag (slice any)} [^any x]
+  (when [(values l ok) (assert (slice any) x)] ok
+    (return l))
+
+  (when (== x nil)
+    (return nil))
+
+  (panic (fmt/Sprintf "ci: not a list: %v" x)))
+
+
+^{:go/breaks [[5 168]] :go/end 169} (go/func isNil ^bool [^any x]
+  (when (== x nil)
+    (return true))
+
+  (when [(values s ok) (assert string x)] (and ok (== s "nil"))
+    (return true))
+
+  false)
+
+
+^{:go/end 175} (go/func wt ^crt/WType [^any x]
+  (let [s (toS x)
+      (values n _) (strconv/Atoi (subslice s 1))]
+    (lit crt/WType :N n :Signed (== (aget s 0) \s))))
+
+
+
+^{:go/end 253} (go/method Top "Top makes one top-level command of a node program.\n" [^{:tag (* Loader)} l ^any x]
+  (let [c (toL x)
+      ^{:line 180} p (.-P l)]
+    (switch (toS (aget c 0))
+      (case ["fn"]
+        (.Fn p (conv int (toI (aget c 1))) (toS (aget c 2))))
+      (case ["native"]
+        (let [f (.Fn p (conv int (toI (aget c 1))) (toS (aget c 2)))]
+          (when [n (aget Natives (toS (aget c 3)))] (!= n nil)
+            (set! (.-Native f) n))))
+
+      (case ["static"]
+        (let [idx (conv int (toI (aget c 1)))]
+          (while (<= (len (.-Statics p)) idx)
+            (set! (.-Statics p) (append (.-Statics p) 0)))
+
+          (let [(values size align) (values (conv uint64 (toI (aget c 2))) (conv uint64 (toI (aget c 3))))]
+            (if (!= (toI (aget c 4)) 0)
+              (aset (.-Statics p) idx (.Rodata (.-M p) size align))
+
+              (aset (.-Statics p) idx (.Static (.-M p) size align))))))
+
+      (case ["alias"]
+        ;; (alias IDX OF OFF): a static that is another's address plus an offset
+        (let [idx (conv int (toI (aget c 1)))]
+          (while (<= (len (.-Statics p)) idx)
+            (set! (.-Statics p) (append (.-Statics p) 0)))
+
+          (aset (.-Statics p) idx (+ (aget (.-Statics p) (toI (aget c 2))) (conv uint64 (toI (aget c 3)))))))
+      (case ["at"]
+        (aset (.-Statics p) (toI (aget c 1)) (conv uint64 (toI (aget c 2)))))
+      (case ["fnalias"]
+        (let [(values f g) (values (aget (.-Funcs p) (toI (aget c 1))) (aget (.-Funcs p) (toI (aget c 2))))]
+          (set! (values (.-Code f) (.-Native f)) (values (.-Code g) (.-Native g)))
+          (when (and (== (.-Code f) nil) (== (.-Native f) nil))
+            (set! (.-Native f) (aget Natives (.-Name g))))))
+
+      (case ["data"]
+        (let [(values b err) (hex/DecodeString (toS (aget c 3)))]
+          (when (!= err nil)
+            (panic err))
+
+          (let [a (+ (aget (.-Statics p) (toI (aget c 1))) (conv uint64 (toI (aget c 2))))]
+            (.Unseal (.-M p))
+            (copy (.W (.-M p) a (conv uint64 (len b))) b))))
+      (case ["code"]
+        (let [f (aget (.-Funcs p) (toI (aget c 1)))
+            ^{:line 225} code (addr (lit Code :NI (conv int (toI (aget c 2))) :NF (conv int (toI (aget c 3))) :FrameSize (conv uint64 (toI (aget c 4))) :Variadic (!= (toI (aget c 5)) 0) :RetF32 (!= (toI (aget c 6)) 0)))]
+          (range [_ pa (toL (aget c 7))]
+            (let [q (toL pa)]
+              (switch (toS (aget q 0))
+                (case ["pi"]
+                  (set! (.-Params code) (append (.-Params code) (lit Param :K \i :Slot (conv int (toI (aget q 1)))))))
+                (case ["pf"]
+                  (set! (.-Params code) (append (.-Params code) (lit Param :K \f :Slot (conv int (toI (aget q 1))) :F32 (!= (toI (aget q 2)) 0)))))
+                (case ["pm"]
+                  (set! (.-Params code) (append (.-Params code) (lit Param :K \m :Off (conv uint64 (toI (aget q 1))) :T (toS (aget q 2)) :Size (conv uint64 (toI (aget q 3)))))))
+                (case ["pw"]
+                  (set! (.-Params code) (append (.-Params code) (lit Param :K \m :Off (conv uint64 (toI (aget q 1))) :Wide true :WT (wt (aget q 2)))))))))
+
+
+          (set! (.-Body code) (.S l (aget c 8)))
+          (set! (.-Code f) code)
+          (set! (.-Native f) nil)
+          (aset (.-Defined l) (.-ID f) true)))
+      (case ["init"]
+        (set! (.-Inits p) (append (.-Inits p) (.S l (aget c 1)))))
+      (case ["entry"]
+        (set! (.-Entry l) (aget (.-Funcs p) (toI (aget c 1)))))
+      (case ["start"]
+        (set! (.-Start l) (aget (.-Funcs p) (toI (aget c 1))))
+        (set! (.-Entry l) (aget (.-Funcs p) (toI (aget c 2)))))
+      (default
+        (panic (+ "ci: no command " (toS (aget c 0))))))))
+
+
+
+
+^{:go/end 274} (go/method E "E is an effect node.\n" ^E [^{:tag (* Loader)} l ^any x]
+  (let [c (toL x)]
+    (switch (toS (aget c 0))
+      (case ["ei"]
+        (return (EI (.I l (aget c 1)))))
+      (case ["ef"]
+        (return (EF (.F l (aget c 1)))))
+      (case ["ew"]
+        (return (EW (.W l (aget c 1)))))
+      (case ["ecall"]
+        (return (CallE (.call l c))))
+      (case ["vastart"]
+        (return (VaStart (.I l (aget c 1)))))
+      (case ["nop"]
+        (return ^{:go/end 270} (fn [(* Frame)]))))
+
+    ;; an integer node as an effect
+    (EI (.I l x))))
+
+
+^{:go/end 282} (go/method Es ^{:tag (slice E)} [^{:tag (* Loader)} l ^any x]
+  (let [^{:tag (slice E)} out (zero (slice E))]
+    (range [_ e (toL x)]
+      (set! out (append out (.E l e))))
+
+    ^{:line 281} out))
+
+
+^{:go/end 290} (go/method callee ^Callee [^{:tag (* Loader)} l ^any x]
+  (let [c (toL x)]
+    (when (== (toS (aget c 0)) "fnref")
+      (return (lit Callee :Fn (aget (.-Funcs (.-P l)) (toI (aget c 1))))))
+
+    (lit Callee :Ptr (.I l x))))
+
+
+
+^{:go/end 313} (go/method call "call: (KIND CALLEE [args] SRET SOFF), an arg (ai e), (af e), (aw e), (am e size).\n" ^{:tag (* CallSpec)} [^{:tag (* Loader)} l ^{:tag (slice any)} c]
+  (let [cs (addr (lit CallSpec :Callee (.callee l (aget c 1))))]
+    (range [_ a (toL (aget c 2))]
+      (let [q (toL a)]
+        (switch (toS (aget q 0))
+          (case ["ai"]
+            (set! (.-Args cs) (append (.-Args cs) (lit ArgNode :K \i :I (.I l (aget q 1))))))
+          (case ["af"]
+            (set! (.-Args cs) (append (.-Args cs) (lit ArgNode :K \f :F (.F l (aget q 1))))))
+          (case ["aw"]
+            (set! (.-Args cs) (append (.-Args cs) (lit ArgNode :K \w :W (.W l (aget q 1))))))
+          (case ["am"]
+            (set! (.-Args cs) (append (.-Args cs) (lit ArgNode :K \m :I (.I l (aget q 1)) :Size (conv uint64 (toI (aget q 2))))))))))
+
+
+    (when (and (> (len c) 3) (!= (toI (aget c 3)) 0))
+      (set! (.-SRet cs) true)
+      (set! (.-SOff cs) (toI (aget c 4))))
+
+    ^{:line 312} cs))
+
+
+
+^{:go/end 402} (go/method I "I is an integer node.\n" ^I [^{:tag (* Loader)} l ^any x]
+  (let [c (toL x)
+      ^{:line 318} k (toS (aget c 0))]
+    (switch k
+      (case ["i"]
+        (return (IConst (toI (aget c 1)))))
+      (case ["il"]
+        (return (ILocal (conv int (toI (aget c 1))))))
+      (case ["is"]
+        (return (ISet (conv int (toI (aget c 1))) (.I l (aget c 2)))))
+      (case ["fp"]
+        (return (FPAddr (toI (aget c 1)))))
+      (case ["va"]
+        (return (VAAddr)))
+      (case ["g"]
+        (return (IStatic (.-P l) (conv int (toI (aget c 1))))))
+      (case ["fa"]
+        (return (IFunc (aget (.-Funcs (.-P l)) (toI (aget c 1))))))
+      (case ["ld"]
+        (return (ILoad (toS (aget c 1)) (.I l (aget c 2)))))
+      (case ["st"]
+        (return (IStore (toS (aget c 1)) (.I l (aget c 2)) (.I l (aget c 3)))))
+      (case ["cv"]
+        (return (IConv (toS (aget c 1)) (.I l (aget c 2)))))
+      (case ["bin"]
+        (return (IBin (toS (aget c 1)) (toS (aget c 2)) (.I l (aget c 3)) (.I l (aget c 4)))))
+      (case ["cmp"]
+        (return (ICmp (toS (aget c 1)) (toS (aget c 2)) (.I l (aget c 3)) (.I l (aget c 4)))))
+      (case ["neg"]
+        (return (INeg (toS (aget c 1)) (.I l (aget c 2)))))
+      (case ["bnot"]
+        (return (INot (toS (aget c 1)) (.I l (aget c 2)))))
+      (case ["lnot"]
+        (return (ILNot (.I l (aget c 1)))))
+      (case ["and"]
+        (return (IAnd (.I l (aget c 1)) (.I l (aget c 2)))))
+      (case ["or"]
+        (return (IOr (.I l (aget c 1)) (.I l (aget c 2)))))
+      (case ["if"]
+        (return (IIf (.I l (aget c 1)) (.I l (aget c 2)) (.I l (aget c 3)))))
+      (case ["elvis"]
+        (return (IElvis (.I l (aget c 1)) (.I l (aget c 2)))))
+      (case ["seq"]
+        (return (ISeq (.Es l (aget c 1)) (.I l (aget c 2)))))
+      (case ["sx"]
+        (return (IStmt (.S l (aget c 1)) (.I l (aget c 2)))))
+      (case ["copy"]
+        (return (ICopy (.I l (aget c 1)) (.I l (aget c 2)) (conv uint64 (toI (aget c 3))))))
+      (case ["zero"]
+        (return (IZero (.I l (aget c 1)) (conv uint64 (toI (aget c 2))))))
+      (case ["adds"]
+        (return (IAddScaled (.I l (aget c 1)) (.I l (aget c 2)) (toI (aget c 3)))))
+      (case ["pdiff"]
+        (return (IPtrDiff (.I l (aget c 1)) (.I l (aget c 2)) (toI (aget c 3)))))
+      (case ["bld"]
+        (return (IBitLoad (toS (aget c 1)) (.I l (aget c 2)) (conv uint (toI (aget c 3))) (conv uint (toI (aget c 4))) (!= (toI (aget c 5)) 0))))
+      (case ["bst"]
+        (return (IBitStore (toS (aget c 1)) (.I l (aget c 2)) (.I l (aget c 3)) (conv uint (toI (aget c 4))) (conv uint (toI (aget c 5))) (!= (toI (aget c 6)) 0))))
+      (case ["f2i"]
+        (return (F2I (toS (aget c 1)) (.F l (aget c 2)))))
+      (case ["fcmp"]
+        (return (FCmp (toS (aget c 1)) (.F l (aget c 2)) (.F l (aget c 3)))))
+      (case ["ftest"]
+        (return (FTest (.F l (aget c 1)))))
+      (case ["w2i"]
+        (return (W2I (toS (aget c 1)) (wt (aget c 2)) (.W l (aget c 3)))))
+      (case ["wcmp"]
+        (return (WCmp (toS (aget c 1)) (wt (aget c 2)) (.W l (aget c 3)) (.W l (aget c 4)))))
+      (case ["wtest"]
+        (return (WTest (wt (aget c 1)) (.W l (aget c 2)))))
+      (case ["call"]
+        (return (CallI (.call l c))))
+      (case ["vaarg"]
+        (return (VaArg (.I l (aget c 1)) (conv uint64 (toI (aget c 2))))))
+      (case ["alloca"]
+        (return (Alloca (.I l (aget c 1)))))
+      (case ["labaddr"]
+        (return (IConst (+ (conv int64 labelBase) (toI (aget c 1))))))
+      (case ["trap"]
+        (let [msg (toS (aget c 1))]
+          (return ^{:go/end 396} (fn ^int64 [(* Frame)] (panic (addr (lit crt/Fault :Sig crt/SIGILL :Msg msg))))))))
+
+    (when [n (aget iBuiltins k)] (!= n nil)
+      (return (n l c)))
+
+    (panic (+ "ci: no integer node " k))))
+
+
+
+^{:go/end 442} (go/method F "F is a floating node.\n" ^F [^{:tag (* Loader)} l ^any x]
+  (let [c (toL x)
+      ^{:line 407} k (toS (aget c 0))]
+    (switch k
+      (case ["f"]
+        (return (FConst (math/Float64frombits (conv uint64 (toI (aget c 1)))))))
+      (case ["fl"]
+        (return (FLocal (conv int (toI (aget c 1))))))
+      (case ["fs"]
+        (return (FSet (conv int (toI (aget c 1))) (.F l (aget c 2)))))
+      (case ["fld"]
+        (return (FLoad (toS (aget c 1)) (.I l (aget c 2)))))
+      (case ["fst"]
+        (return (FStore (toS (aget c 1)) (.I l (aget c 2)) (.F l (aget c 3)))))
+      (case ["fbin"]
+        (return (FBin (toS (aget c 1)) (!= (toI (aget c 2)) 0) (.F l (aget c 3)) (.F l (aget c 4)))))
+      (case ["fneg"]
+        (return (FNeg (.F l (aget c 1)))))
+      (case ["r32"]
+        (return (FRound32 (.F l (aget c 1)))))
+      (case ["i2f"]
+        (return (I2F (toS (aget c 1)) (!= (toI (aget c 2)) 0) (.I l (aget c 3)))))
+      (case ["fif"]
+        (return (FIf (.I l (aget c 1)) (.F l (aget c 2)) (.F l (aget c 3)))))
+      (case ["fseq"]
+        (return (FSeq (.Es l (aget c 1)) (.F l (aget c 2)))))
+      (case ["fsx"]
+        (return (FStmt (.S l (aget c 1)) (.F l (aget c 2)))))
+      (case ["fcall"]
+        (return (CallF (.call l c))))
+      (case ["w2f"]
+        (return (W2F (wt (aget c 1)) (!= (toI (aget c 2)) 0) (.W l (aget c 3))))))
+
+    (when [n (aget fBuiltins k)] (!= n nil)
+      (return (n l c)))
+
+    (panic (+ "ci: no floating node " k))))
+
+
+
+^{:go/end 482} (go/method W "W is a wide node.\n" ^W [^{:tag (* Loader)} l ^any x]
+  (let [c (toL x)
+      ^{:line 447} k (toS (aget c 0))]
+    (switch k
+      (case ["w"]
+        (let [t (wt (aget c 1))
+            (values v ok) (crt/WParse t (toS (aget c 2)))]
+          (when (not ok)
+            (panic (+ "ci: bad wide constant " (toS (aget c 2)))))
+
+          (return (WConst v))))
+      (case ["wld"]
+        (return (WLoad (wt (aget c 1)) (.I l (aget c 2)))))
+      (case ["wst"]
+        (return (WStore (wt (aget c 1)) (.I l (aget c 2)) (.W l (aget c 3)))))
+      (case ["wbin"]
+        (return (WBin (toS (aget c 1)) (wt (aget c 2)) (.W l (aget c 3)) (.W l (aget c 4)))))
+      (case ["wsh"]
+        (return (WShift (toS (aget c 1)) (wt (aget c 2)) (.W l (aget c 3)) (.I l (aget c 4)))))
+      (case ["wneg"]
+        (return (WNeg (wt (aget c 1)) (.W l (aget c 2)))))
+      (case ["wnot"]
+        (return (WNot (wt (aget c 1)) (.W l (aget c 2)))))
+      (case ["i2w"]
+        (return (I2W (wt (aget c 1)) (toS (aget c 2)) (.I l (aget c 3)))))
+      (case ["w2w"]
+        (return (W2W (wt (aget c 1)) (wt (aget c 2)) (.W l (aget c 3)))))
+      (case ["f2w"]
+        (return (F2W (wt (aget c 1)) (.F l (aget c 2)))))
+      (case ["wif"]
+        (return (WIf (.I l (aget c 1)) (.W l (aget c 2)) (.W l (aget c 3)))))
+      (case ["wseq"]
+        (return (WSeq (.Es l (aget c 1)) (.W l (aget c 2)))))
+      (case ["wcall"]
+        (return (CallW (.call l c)))))
+
+    (panic (+ "ci: no wide node " k))))
+
+
+
+^{:go/end 534} (go/method S "S is a statement node.\n" ^Stmt [^{:tag (* Loader)} l ^any x]
+  (let [c (toL x)]
+    (switch (toS (aget c 0))
+      (case ["x"]
+        (return (addr (lit ExprStmt :E (.E l (aget c 1))))))
+      (case ["do"]
+        (let [^{:tag (slice Stmt)} ss (zero (slice Stmt))]
+          (range [_ s (toL (aget c 1))]
+            (set! ss (append ss (.S l s))))
+
+          (return (NewSeq ss))))
+      (case ["when"]
+        (let [^Stmt b (zero Stmt)]
+          (when (and (> (len c) 3) (not (isNil (aget c 3))))
+            (set! b (.S l (aget c 3))))
+
+          (return (NewIf (.I l (aget c 1)) (.S l (aget c 2)) b))))
+      (case ["loop"]
+        (let [^I cond (zero I)]
+          (when (not (isNil (aget c 1)))
+            (set! cond (.I l (aget c 1))))
+
+          (let [^E step (zero E)]
+            (when (not (isNil (aget c 2)))
+              (set! step (.E l (aget c 2))))
+
+            (return (NewLoop cond step (.S l (aget c 3)) (!= (toI (aget c 4)) 0))))))
+      (case ["lab"]
+        (return (addr (lit Label :Code (conv Ctl (toI (aget c 1)))))))
+      (case ["jmp"]
+        (return (addr (lit Jump :C (conv Ctl (toI (aget c 1)))))))
+      (case ["igoto"]
+        (return (addr (lit IGoto :E (.I l (aget c 1))))))
+      (case ["ret"]
+        (when (== (len c) 1)
+          (return (addr (lit Return))))
+
+        (return (addr (lit Return :Set (.retE l (aget c 1))))))
+      (case ["sw"]
+        (let [^{:tag (slice Case)} cases (zero (slice Case))]
+          (range [_ k (toL (aget c 3))]
+            (let [q (toL k)]
+              (set! cases (append cases (lit Case :Lo (toI (aget q 0)) :Hi (toI (aget q 1)) :Code (conv Ctl (toI (aget q 2))))))))
+
+          (return (NewSwitch (.I l (aget c 1)) (!= (toI (aget c 2)) 0) cases (conv Ctl (toI (aget c 4))) (.S l (aget c 5))))))
+      (case ["sj"]
+        (return (addr (lit SjStmt :S (.S l (aget c 1)))))))
+
+    (panic (+ "ci: no statement " (toS (aget c 0))))))
+
+
+^{:go/end 549} (go/method retE ^E [^{:tag (* Loader)} l ^any x]
+  (let [c (toL x)]
+    (switch (toS (aget c 0))
+      (case ["reti"]
+        (return (RetI (.I l (aget c 1)))))
+      (case ["retf"]
+        (return (RetF (.F l (aget c 1)))))
+      (case ["retw"]
+        (return (RetW (.W l (aget c 1)))))
+      (case ["retm"]
+        (return (RetM (.I l (aget c 1)) (conv int (toI (aget c 2))) (conv uint64 (toI (aget c 3)))))))
+
+    (panic (+ "ci: no return " (toS (aget c 0))))))
+
+
+(go/var iBuiltins (lit (map string (func [^{:tag (* Loader)} l ^{:tag (slice any)} c] [I]))))
+(go/var fBuiltins (lit (map string (func [^{:tag (* Loader)} l ^{:tag (slice any)} c] [F]))))

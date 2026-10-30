@@ -1,0 +1,86 @@
+#!/bin/bash
+# ci's check (doc/C23-SURVEY.md §6, "As built: C5 (write-ahead)"; CS14 (a)): every program of the run corpora
+# read by repr/c, checked (arbace.repr.c.check, long double as double, CS35), linked with musl 1.2.6's forms
+# (arbace.c.musl) and built into a node program (arbace.c.build), run by ci's back end with an empty standard
+# input, no arguments, 10 s, its status and standard output's SHA-256 against gcc 15.2's -O0 run recorded in
+# test/c/ref-gcc15.edn (a program whose -O0 and -O2 runs differ is compared on its status alone); every program
+# that does not pass in a class of test/c/divergences.edn (arbace.c.run's judge). The light path: ci's back end
+# is tools/cirun (bin/ci cirun-build), outside Arbace's executable; on an executable built with ci, CI_EXE runs
+# the node programs by `arbace -m arbace.c.repl run-nodes` instead (the heavy list's).
+#
+# Usage: bin/ci check [--corpus C,...] [--only LIST] [--record] [--judge] [--resume]
+#   --corpus   the run corpora (default those test/c/ref-gcc15.edn records)
+#   --only     a file of ids (CORPUS/NAME) to check alone
+#   --record   test/c/check-linux-amd64.edn rewritten from the run (the other corpora's lines kept)
+#   --judge    the last run judged again (its results against the classes), nothing run
+#   --resume   node programs already built kept
+#   CI_THREADS (default 3): the builder's threads; CI_JOBS (default 4): the runs'
+# Writes under .tmp/ci-check/ (CI_CHECK_WORK): CORPUS/list.tsv, CORPUS/nodes/ID.nodes, nodes.tsv, run.tsv,
+# results.edn. Exit status 0 when nothing fails.
+set -uo pipefail
+root=$(cd "$(dirname "$0")/../../.." && pwd)
+. "$root/bin/lib/tmpdir.bash"
+. "$root/bin/lib/tools.bash"
+cd "$root"
+
+all=torture-execute,torture-execute-mirror,tcc-tests2,compcert,mir,cxgo,benchmarksgame
+corpora=$all only= record= judge= resume=
+while [ $# -gt 0 ]; do
+  case $1 in
+    --corpus) corpora=$2; shift 2 ;;
+    --only) only=$(cd "$(dirname "$2")" && pwd)/$(basename "$2"); shift 2 ;;
+    --record) record=1; shift ;;
+    --judge) judge=1; shift ;;
+    --resume) resume=1; shift ;;
+    *) sed -n '11,18p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+  esac
+done
+work=${CI_CHECK_WORK:-$root/.tmp/ci-check}
+threads=${CI_THREADS:-3}
+jobs=${CI_JOBS:-4}; [ "$jobs" -gt 4 ] && jobs=4
+cirun=${CIRUN:-$root/.tmp/ci/cirun}
+mkdir -p "$work"
+IFS=, read -r -a ids <<< "$corpora"
+
+if [ -z "$judge" ]; then
+  [ -x "$cirun" ] || "$root/bin/ci" cirun-build || exit 1
+  "$root/bin/ci" musl prepare || exit 1
+  gowhim=${GOWHIM:-$(cd "${root%%/.tmp/worktrees/*}/.." && pwd)/go-whim}
+  modcache=$(GOFLAGS= "${ARBACE_GOROOT:-/root/tamago-go}/bin/go" env GOMODCACHE)
+  roots="{:gomodcache \"$modcache\" :go-whim \"$gowhim\" :gcc-15.2.0 \"\" :checkout \"$root\"}"
+  : > "$work/empty-stdin"
+  for id in "${ids[@]}"; do
+    d=$work/$id
+    if [ -z "$resume" ]; then rm -rf "${d:?}"; fi
+    mkdir -p "$d/nodes"
+    if [ ! -s "$d/gcc.list" ]; then
+      arbace_tool -m arbace.repr.c.ppcheck lists "$work" "$roots" "$id" > "$d.lists.log" 2>&1 || { cat "$d.lists.log"; exit 1; }
+    fi
+    base=$(cat "$d/base.txt")
+    # ID BASE STD ARGS READNAME, the programs gcc built
+    awk -F'\t' -v c="$id" -v b="$base" '{print c "/" $1 "\t" b "\t" $2 "\t" $3 "\t" $4}' "$d/gcc.list" \
+      | while IFS=$'\t' read -r i b s a r; do
+          [ -n "$only" ] && ! grep -qxF "$i" "$only" && continue
+          [ -n "$resume" ] && [ -s "$work/$i.nodes" ] && continue
+          grep -qF "{:id \"$i\" :status :no-build" test/c/ref-gcc15.edn && continue
+          printf '%s\t%s\t%s\t%s\t%s\n' "$i" "$b" "$s" "$a" "$r"
+        done > "$d/list.tsv"
+    if [ -s "$d/list.tsv" ]; then
+      (cd "$root" && arbace_tool -m arbace.c.run test/c/host nodes-list "$work" "$d/list.tsv" "$threads") > "$d/nodes.log" 2>&1
+      [ -f "$work/nodes.tsv" ] && cat "$work/nodes.tsv" >> "$d/nodes.tsv" && rm -f "$work/nodes.tsv"
+    fi
+    # each node program run
+    run1() { # ID
+      local i=$1 f=$work/$1.nodes rd st sum bytes
+      rd=$(mktemp -d "$work/run.XXXXXX")
+      (cd "$rd" && timeout 10 "$cirun" "$f" < "$work/empty-stdin" > out 2> err); st=$?
+      [ $st = 124 ] && st=timeout
+      sum=$(sha256sum < "$rd/out" | cut -d' ' -f1); bytes=$(wc -c < "$rd/out")
+      printf '%s\t%s\t%s\t%s\t%s\n' "$i" "$st" "$sum" "$bytes" "$(grep -m1 '^cirun: fault' "$rd/err" | cut -c1-200 | tr '\t' ' ')"
+      rm -rf "$rd"
+    }
+    export -f run1; export work cirun
+    awk -F'\t' '$2 == "ok" {print $1}' "$d/nodes.tsv" | xargs -P "$jobs" -I{} bash -c 'run1 "$1"' _ {} > "$d/run.tsv"
+  done
+fi
+arbace_tool -m arbace.c.run test/c/host judge "$work" test/c/ref-gcc15.edn test/c/divergences.edn "${record:+--record}" "${ids[@]}"

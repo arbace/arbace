@@ -1,0 +1,100 @@
+;; ci: calls (doc/c/SPEC.md §7.6, §13.3): the arguments evaluated right to left as gcc 15.2's -O0
+;; code does on x86-64 (CS31 (a)), passed as Args; a static call holds the callee's cell, so a
+;; redefinition at the REPL is seen; a call through a pointer finds the function by its address.
+(in-ns 'go.arbace.ci) (go/file "call.go" :doc "ci: calls (doc/c/SPEC.md §7.6, §13.3): the arguments evaluated right to left as gcc 15.2's -O0\ncode does on x86-64 (CS31 (a)), passed as Args; a static call holds the callee's cell, so a\nredefinition at the REPL is seen; a call through a pointer finds the function by its address.\n" :imports [
+
+    ^{:line 6} [crt "arbace/crt"]])
+
+(go/const ^{:val 6291456} labelBase crt/LabelBase)
+
+
+
+(go/type ArgNode "AI, AF, AW, AM are argument nodes: an integer, a floating value (F32: rounded to float, a\nprototype's float parameter), a wide value, an aggregate of Size bytes at an address.\n" (struct
+    ^{:line 13 :tag byte} K
+    ^{:line 14 :tag I} I
+    ^{:line 15 :tag F} F
+    ^{:line 16 :tag W} W
+    ^{:line 17 :tag uint64} Size))
+
+
+^{:go/end 36} (go/func evalArgs ^{:tag (slice Arg)} [^{:tag (* Frame)} fr ^{:tag (slice ArgNode)} as]
+  (let [out (make (slice Arg) (len as))]
+    (for [i (- (len as) 1)] (>= i 0) (dec! i)
+      (let [a (addr (aget as i))]
+        (switch (.-K a)
+          (case [\i]
+            (aset out i (lit Arg :K \i :I ((.-I a) fr))))
+          (case [\f]
+            (aset out i (lit Arg :K \f :F ((.-F a) fr))))
+          (case [\w]
+            (aset out i (lit Arg :K \w :W ((.-W a) fr))))
+          (case [\m]
+            (aset out i (lit Arg :K \m :Addr (conv uint64 ((.-I a) fr)) :Size (.-Size a)))))))
+
+
+    ^{:line 35} out))
+
+
+
+(go/type Callee "Callee is the function a call node calls: a cell (static) or an address (a pointer's value).\n" (struct
+    ^{:line 40 :tag (* Func)} Fn
+    ^{:line 41 :tag I} Ptr))
+
+
+
+
+(go/type CallSpec "SRet is a call's aggregate result: the caller's temporary at frame offset Off, its address\npassed to the callee as its hidden first argument.\n" (struct
+    ^{:line 47 :tag Callee} Callee
+    ^{:line 48 :tag (slice ArgNode)} Args
+    ^{:line 49 :tag bool} SRet
+    ^{:line 50 :tag int64} SOff))
+
+
+^{:go/end 65} (go/method call ^Arg [^{:tag (* CallSpec)} c ^{:tag (* Frame)} fr]
+  (let [^{:tag (* Func)} f (zero (* Func))]
+    (if (!= (.-Fn (.-Callee c)) nil)
+      (set! f (.-Fn (.-Callee c)))
+
+      (set! f (.FuncAt (.-P (.-T fr)) (conv uint64 ((.-Ptr (.-Callee c)) fr)))))
+
+    (let [args (evalArgs fr (.-Args c))]
+      (when (.-SRet c)
+        (set! args (append (lit (slice Arg) (lit _ :K \i :I (conv int64 (+ (.-Base fr) (conv uint64 (.-SOff c)))))) (spread args))))
+
+      (.Call (.-P (.-T fr)) (.-T fr) f args))))
+
+
+^{:go/end 67} (go/func CallI ^I [^{:tag (* CallSpec)} c] ^{:go/end 67} (fn ^int64 [^{:tag (* Frame)} fr] (.-I (.call c fr))))
+^{:go/end 68} (go/func CallF ^F [^{:tag (* CallSpec)} c] ^{:go/end 68} (fn ^float64 [^{:tag (* Frame)} fr] (.-F (.call c fr))))
+^{:go/end 69} (go/func CallW ^W [^{:tag (* CallSpec)} c] ^{:go/end 69} (fn ^crt/Wide [^{:tag (* Frame)} fr] (.-W (.call c fr))))
+^{:go/end 70} (go/func CallE ^E [^{:tag (* CallSpec)} c] ^{:go/end 70} (fn [^{:tag (* Frame)} fr] (.call c fr)))
+
+
+
+
+^{:go/end 83} (go/func VaArg "VaArg reads the next variadic argument through the va_list at the address ap (a void * holding\nthe next slot's address, SPEC §7.9's __builtin_va_list) and advances it by size rounded to 8:\nthe slot's address.\n" ^I [^I ap ^uint64 size]
+  ^{:go/end 82} (fn ^int64 [^{:tag (* Frame)} fr]
+    (let [p (conv uint64 (ap fr))
+        ^{:line 78} m (.-M (.-T fr))
+        ^{:line 79} cur (.Load64 m p)]
+      (.Store64 m p (+ cur (bit-and-not (+ size 7) 7)))
+      (conv int64 cur))))
+
+
+
+
+^{:go/end 88} (go/func VaStart "VaStart sets the va_list at ap to the frame's first variadic argument.\n" ^E [^I ap]
+  ^{:go/end 87} (fn [^{:tag (* Frame)} fr] (.Store64 (.-M (.-T fr)) (conv uint64 (ap fr)) (.-VA fr))))
+
+
+
+^{:go/end 102} (go/func Alloca "Alloca allocates n bytes on the C stack (16-aligned), freed when the function returns.\n" ^I [^I n]
+  ^{:go/end 101} (fn ^int64 [^{:tag (* Frame)} fr]
+    (let [t (.-T fr)
+        ^{:line 94} sz (bit-and-not (+ (conv uint64 (n fr)) 15) 15)
+        ^{:line 95} nsp (- (.-SP t) sz)]
+      (when (< nsp (- crt/StackTop crt/StackSize))
+        (panic (addr (lit crt/Fault :Sig crt/SIGSEGV :Msg "stack overflow (alloca)"))))
+
+      (set! (.-SP t) nsp)
+      (conv int64 nsp))))

@@ -1,0 +1,268 @@
+(ns arbace.c.musl
+  "ci's libc (doc/C23-SURVEY.md §6.5, CS11 (a), CS12 (a); doc/c/SPEC.md §12.5): musl 1.2.6 as C forms, read
+  by repr/c in a configuration of Arbace's where long double is double (CS35: __SIZEOF_LONG_DOUBLE__ 8,
+  __LDBL_MANT_DIG__ 53, musl's arch/arm/bits/float.h before arch/x86_64's: LDBL_MANT_DIG 53), with musl's
+  own include path and options (-std=c99 -ffreestanding -D_XOPEN_SOURCE=700), its generic C sources (an
+  x86_64 source whose body is assembly is a native of go/arbace/ci), linked into a program as a static
+  link pulls archive members: a unit when it defines a symbol the program still needs, a weak definition
+  satisfying a reference, a strong one overriding a weak.
+
+  The release tarball (test/c/corpora.edn's :musl-1.2.6, its SHA-256 checked) is extracted and configured
+  by bin/ci musl prepare into .tmp/ci-musl/musl-1.2.6 (CI_MUSL); `read-all` reads its sources into the
+  forms cache .tmp/ci-musl/forms (CI_MUSL_FORMS: one .ae per source and its header units, the index
+  index.edn), read again from there."
+  (:require [arbace.repr.c :as rc]
+            [arbace.repr.c.host :as host]
+            [arbace.c.build :as build]
+            [arbace.string :as str])
+  (:import (java.io File)
+           (java.util ArrayDeque HashMap HashSet)))
+
+(set! *warn-on-reflection* true)
+
+(defn- env [^String k ^String d] (or (System/getenv k) d))
+
+(defn musl-root ^String [^String root] (env "CI_MUSL" (str root "/.tmp/ci-musl/musl-1.2.6")))
+(defn forms-root ^String [^String root] (env "CI_MUSL_FORMS" (str root "/.tmp/ci-musl/forms")))
+
+(def options ["-std=c99" "-D_XOPEN_SOURCE=700"])
+
+(defn config
+  "repr/c's configuration for musl's sources (the reference's c99 macros, freestanding, long double as double)."
+  [h ^String root]
+  (let [m (musl-root root)
+        fc (host/file-config options "c99")]
+    [fc (assoc (host/config h fc m)
+               :include []
+               :sys [(str root "/.tmp/ci-musl/ldbl53") "arch/x86_64" "arch/generic" "obj/src/internal" "src/include"
+                     "src/internal" "obj/include" "include"]
+               :predefined (-> ^String (get (:predefined h) "c99")
+                               (.replace "#define __STDC_HOSTED__ 1" "#define __STDC_HOSTED__ 0")
+                               (.replace "#define __SIZEOF_LONG_DOUBLE__ 16" "#define __SIZEOF_LONG_DOUBLE__ 8")
+                               (.replace "#define __LDBL_MANT_DIG__ 64" "#define __LDBL_MANT_DIG__ 53")
+                               (.replace "#define __LDBL_DIG__ 18" "#define __LDBL_DIG__ 15")
+                               (.replace "#define __LDBL_MAX_EXP__ 16384" "#define __LDBL_MAX_EXP__ 1024")
+                               (.replace "#define __LDBL_MIN_EXP__ (-16381)" "#define __LDBL_MIN_EXP__ (-1021)")
+                               (str "#define _XOPEN_SOURCE 700\n"))
+               :trigraphs false)]))
+
+(def excluded-dirs
+  "musl's source directories a static program of ci's does not link: the dynamic linker."
+  #{"src/ldso"})
+
+(def native-replaced
+  "The generic sources whose x86_64 version is assembly (src/*/x86_64/*.s) and that a generic C stub would
+  get wrong: left out, the functions natives of go/arbace/ci (setjmp, longjmp, the thread pointer, the
+  cancellable syscall's entry). The other generic versions of x86_64's assembly are kept (memcpy, the
+  long double math, which is double's, CS35; fenv, round to nearest only, CS34 (a))."
+  #{"src/setjmp/setjmp.c" "src/setjmp/longjmp.c" "src/signal/sigsetjmp.c" "src/signal/restore.c"
+    "src/thread/__set_thread_area.c" "src/thread/__unmapself.c" "src/thread/clone.c" "src/thread/syscall_cp.c"
+    "src/process/vfork.c"})
+
+(defn sources
+  "musl's C sources as its Makefile selects them for a static libc.a, the generic ones (src/*/*.c and
+  src/malloc/mallocng/*.c), relative to the root."
+  [^String root]
+  (let [m (File. (musl-root root))
+        src (File. m "src")]
+    (vec (sort (for [^File d (concat (.listFiles src) [(File. src "malloc/mallocng")])
+                     :when (.isDirectory d)
+                     :let [rel (subs (.getPath d) (inc (count (.getPath m))))]
+                     :when (not (excluded-dirs rel))
+                     ^File f (.listFiles d)
+                     :when (and (.isFile f) (.endsWith (.getName f) ".c"))
+                     :let [p (str rel "/" (.getName f))]
+                     :when (not (native-replaced p))]
+                 p)))))
+
+;; ---------------------------------------------------------------------------------------------
+;; The index: what each unit defines and references, from its forms
+
+(defn- attr-names
+  "The attribute names and alias targets in a declaration's metadata: [#{names} alias-target]."
+  [m]
+  (let [names (HashSet.) alias (atom nil)]
+    (letfn [(walk [x]
+              (cond
+                (symbol? x) (.add names (str/replace (name x) #"^__|__$" ""))
+                (vector? x) (let [[n a] x]
+                              (when (and (symbol? n) (#{"alias" "__alias__"} (name n)) (string? a)) (reset! alias a))
+                              (doseq [y x] (walk y)))
+                (seq? x) (doseq [y x] (walk y))
+                :else nil))]
+      (doseq [k [:c/attrs :c/after-attrs :c/decl-attrs :c/gnu-attrs :c/def-attrs :c/end-attrs :c/decl-end-attrs]]
+        (walk (get m k))))
+    [(set names) @alias]))
+
+(defn- sym-name [x] (cond (symbol? x) (name x) (and (seq? x) (= 'c/id (first x))) (second x)))
+
+(defn unit-defs
+  "A unit's definitions: {name {:weak bool :alias target-or-nil}} (external ones only)."
+  [forms]
+  (let [out (HashMap.)]
+    (letfn [(decl [f]
+              (when (seq? f)
+                (case (first f)
+                  c/group (doseq [d (drop 2 f)] (decl d))
+                  (c/defn c/var c/declare)
+                  (let [nm (second f) m (meta nm) n (sym-name nm)
+                        [as alias] (attr-names m)
+                        weak (contains? as "weak")]
+                    (when (and n (not (:static m)))
+                      (cond
+                        alias (.put out n {:weak weak :alias alias})
+                        (= 'c/defn (first f)) (.put out n {:weak weak})
+                        (and (= 'c/var (first f)) (not (:extern m)) (not (= :fn (:k (:tag m))))) (.put out n {:weak weak}))))
+                  nil)))]
+      (doseq [f forms] (decl f)))
+    (into {} out)))
+
+(defn refs
+  "The names the code of forms may reference: every symbol in function bodies, initializers, array sizes
+  and attributes' arguments (a superset of the external names it references), not the declared names."
+  [forms]
+  (let [acc (HashSet.)]
+    (letfn [(walk [x]
+              (cond
+                (symbol? x) (when-not (namespace x) (.add acc (name x)))
+                (or (seq? x) (vector? x)) (doseq [y x] (walk y))
+                :else nil))
+            (decl [f]
+              (when (seq? f)
+                (case (first f)
+                  c/defn (let [[_ nm _ & body] f] (walk body) (walk-meta (meta nm)))
+                  c/var (let [[_ nm & init] f] (walk init) (walk-meta (meta nm)))
+                  (c/declare c/typedef) (walk-meta (meta (second f)))
+                  c/group (doseq [d (drop 2 f)] (decl d))
+                  nil)))
+            (walk-meta [m]
+              ;; an alias's target is a reference
+              (let [[_ alias] (attr-names m)] (when alias (.add acc alias))))]
+      (doseq [f forms] (decl f)))
+    acc))
+
+;; ---------------------------------------------------------------------------------------------
+;; Reading into the cache
+
+(defn- spit-mk [^String path ^String s]
+  (.mkdirs (.getParentFile (File. path)))
+  (spit path s))
+
+(defn read-one
+  "One source read into the cache: :ok, or [:error msg]."
+  [h ^String root ^String src]
+  (let [[fc cfg] (config h root)
+        rd (rc/read-c cfg fc src false)]
+    (cond
+      (:error rd) [:error (str/join "; " (take 2 (:error rd)))]
+      (:refused rd) [:error (str (:refused rd) ": " (:message rd))]
+      :else (let [fr (forms-root root)]
+              (doseq [[p t] (rc/unit-texts rd src)]
+                (let [out (str fr "/" p)]
+                  (when-not (and (.startsWith ^String p "c/h/") (.exists (File. out)))
+                    (spit-mk out t))))
+              (spit-mk (str fr "/" src ".units") (pr-str (vec (map str (keys (:units rd))))))
+              :ok))))
+
+(defn read-all
+  "Every source not in the cache read (in `threads` threads); the index written. Returns the errors."
+  [h ^String root threads]
+  (let [srcs (sources root)
+        fr (forms-root root)
+        todo (vec (remove #(.exists (File. (str fr "/" % ".ae"))) srcs))
+        errs (java.util.concurrent.ConcurrentHashMap.)
+        q (java.util.concurrent.ConcurrentLinkedQueue. ^java.util.Collection todo)
+        n (atom 0)
+        workers (doall (for [_ (range threads)]
+                         (future
+                           (loop []
+                             (when-let [s (.poll q)]
+                               (let [r (try (read-one h root s) (catch Throwable e [:error (str e)]))]
+                                 (when (vector? r) (.put errs s (second r)))
+                                 (let [k (swap! n inc)] (when (zero? (mod k 50)) (binding [*out* *err*] (println "musl: read" k "of" (count todo)))))
+                                 (recur)))))))]
+    (doseq [w workers] @w)
+    (into {} errs)))
+
+(defn load-unit
+  "A cached source's read: {:forms :units} as arbace.repr.c/read-c gives (its header units' forms)."
+  [^String root ^String src]
+  (let [fr (forms-root root)
+        [_ forms] (rc/read-unit-text (slurp (str fr "/" src ".ae")))
+        us (read-string (slurp (str fr "/" src ".units")))]
+    {:forms forms
+     :units (into {} (for [u us]
+                       (let [[hf hforms] (rc/read-unit-text (slurp (str fr "/c/h/" (subs u 4) ".ae")))]
+                         [(symbol u) {:forms hforms :header (second hf)}])))}))
+
+(defn index
+  "The index of the cached sources: {src {:defs .. :refs #{..}}}, made once (index.edn) and kept."
+  [^String root]
+  (let [f (File. (str (forms-root root) "/index.edn"))]
+    (if (.exists f)
+      (read-string (slurp f))
+      (let [ix (into (sorted-map)
+                     (for [s (sources root)
+                           :when (.exists (File. (str (forms-root root) "/" s ".ae")))]
+                       (let [u (load-unit root s)
+                             all (concat (:forms u) (mapcat :forms (vals (:units u))))]
+                         [s {:defs (unit-defs (:forms u)) :refs (set (refs all))}])))]
+        (spit f (pr-str ix))
+        ix))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Linking
+
+(defn library
+  "musl as a library: {:root :index :by-name {name [src ...]} :checked (atom {src unit})}."
+  [h ^String root]
+  (let [ix (index root)
+        by (HashMap.)]
+    (doseq [[s {:keys [defs]}] ix
+            [n d] defs]
+      (.put by n (conj (or (.get by n) []) [s (:weak d)])))
+    {:root root :h h :index ix :by-name by :checked (atom {})}))
+
+(def roots
+  "What every program needs of the libc: its start, exit."
+  ["__libc_start_main" "exit"])
+
+(defn closure
+  "The musl sources a program of units needs: those defining a symbol the program or a linked unit
+  references and no linked unit defines (a strong definition preferred)."
+  [lib prog-defs prog-refs]
+  (let [{:keys [index ^HashMap by-name]} lib
+        defined (HashSet. ^java.util.Collection prog-defs)
+        linked (java.util.LinkedHashSet.)
+        q (ArrayDeque.)]
+    (doseq [r (concat roots prog-refs)] (.add q r))
+    (while (not (.isEmpty q))
+      (let [n (.poll q)]
+        (when-not (.contains defined n)
+          (when-let [cands (.get by-name n)]
+            (let [[s _] (or (first (remove second cands)) (first cands))]
+              (when (.add linked s)
+                (let [{:keys [defs refs]} (get index s)]
+                  (doseq [d (keys defs)] (.add defined d))
+                  (doseq [r refs] (when-not (.contains defined r) (.add q r))))))))))
+    (vec linked)))
+
+(defn checked-unit
+  "A musl source read from the cache and checked (kept in the library)."
+  [lib ^String src]
+  (or (get @(:checked lib) src)
+      (let [rd (load-unit (:root lib) src)
+            [fc _] (config (:h lib) (:root lib))
+            u (assoc ((resolve 'arbace.c.run/check-read) (:h lib) fc rd) :src src)]
+        (swap! (:checked lib) assoc src u)
+        u)))
+
+(defn build-linked
+  "The node program of the program's units linked with what they need of musl."
+  [lib units]
+  (let [pdefs (set (mapcat #(keys (unit-defs (:forms (:rd %)))) units))
+        prefs (set (mapcat #(refs (concat (:forms (:rd %)) (mapcat :forms (vals (:units (:rd %)))))) units))
+        srcs (closure lib pdefs prefs)
+        _ (when (System/getenv "CI_TRACE") (binding [*out* *err*] (println "musl: linked" (count srcs) srcs)))
+        mus (mapv #(checked-unit lib %) srcs)]
+    (build/build-program (into (vec units) mus) :libc-start true)))
