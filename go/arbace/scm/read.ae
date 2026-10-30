@@ -32,6 +32,8 @@
 (go/method FoldCase ^bool [^{:tag (* StringSource)} p] (.-fold p))
 (go/method SetFoldCase [^{:tag (* StringSource)} p ^bool b] (set! (.-fold p) b))
 
+(go/var ^{:tag bool :doc "R7RS makes the reader accept R7RS's lexical syntax beyond R6RS's: #u8( bytevectors, |...| identifiers and the other identifier characters R6RS leaves out (the driver's --r7rs; SM8).\n"} R7RS)
+
 (go/type reader "reader is the state of one read.\n"
   (struct ^CharSource src ^{:tag (slice rune)} buf ^int pos ^bool fold ^FoldState fs ^bool gensyms))
 
@@ -223,6 +225,7 @@
             (case [\r] (set! out (append out 13)))
             (case [\"] (set! out (append out \")))
             (case [\\] (set! out (append out \\)))
+            (case [\|] (if R7RS (set! out (append out \|)) (return (.readFail r "invalid string character \\~c" (conv Char d)))))
             (case [\x]
               (let [^{:tag (slice rune)} ds nil]
                 (while true
@@ -273,6 +276,10 @@
     (case ["esc"] (return 27 true))
     (case ["space"] (return 32 true))
     (case ["delete"] (return 127 true)))
+  (when R7RS
+    (switch name
+      (case ["null"] (return 0 true))
+      (case ["escape"] (return 27 true))))
   (return 0 false))
 
 (go/method readChar "readChar reads a character literal, the #\\ consumed.\n" ^any [^{:tag (* reader)} r]
@@ -323,6 +330,8 @@
               (set! out (append out (conv rune v)))
               (set! i (+ j 1))
               (set! first false)))
+          R7RS
+          (do (set! out (append out c)) (set! first false) (inc! i))
           (or (== c \') (== c \`) (== c \,) (== c \{) (== c \}) (== c \|))
           (return (.readFail r "~a syntax is not allowed in #!r6rs mode" (Str (+ t " symbol"))))
           :else
@@ -337,6 +346,43 @@
         (set! name (strings/ToLower name)))
       (Intern name))))
 
+;; R7RS's |...| identifier: the bar consumed; \x41; and \a \b \t \n \r \\ \| escapes, no case folding.
+(go/method readBarSymbol ^any [^{:tag (* reader)} r]
+  (let [^{:tag (slice rune)} out nil]
+    (while true
+      (let [(values c ok) (.next r)]
+        (when (not ok)
+          (return (.readEof r "symbol")))
+        (when (== c \|)
+          (break))
+        (when (!= c \\)
+          (set! out (append out c))
+          (continue))
+        (let [(values d ok2) (.next r)]
+          (when (not ok2)
+            (return (.readEof r "symbol")))
+          (switch d
+            (case [\a] (set! out (append out 7)))
+            (case [\b] (set! out (append out 8)))
+            (case [\t] (set! out (append out 9)))
+            (case [\n] (set! out (append out 10)))
+            (case [\r] (set! out (append out 13)))
+            (case [\x]
+              (let [^{:tag (slice rune)} hx nil]
+                (while true
+                  (let [(values e ok3) (.next r)]
+                    (when (not ok3)
+                      (return (.readEof r "symbol")))
+                    (when (== e 59)
+                      (break))
+                    (set! hx (append hx e))))
+                (let [(values v good) (hexValue hx)]
+                  (when (not good)
+                    (return (.readFail r "invalid code point in symbol hex escape")))
+                  (set! out (append out (conv rune v))))))
+            (default (set! out (append out d)))))))
+    (Intern (conv string out))))
+
 (go/method classify "classify is the datum of an identifier or number token.\n" ^any [^{:tag (* reader)} r ^{:tag (slice rune)} tok]
   (let [c (aget tok 0)
         t (conv string tok)]
@@ -346,7 +392,7 @@
           (return v)))
       (when (== t ".")
         (return (.readFail r "unexpected dot (.)")))
-      (when (not (isPeculiar t))
+      (when (and (not R7RS) (not (isPeculiar t)))
         (return (.readFail r "~a syntax is not allowed in #!r6rs mode" (Str (+ t " symbol"))))))
     (.identifier r tok)))
 
@@ -458,7 +504,7 @@
             (return v)))))
     (let [tok (conv string (.token r false))
           l (strings/ToLower tok)]
-      (when (== tok "vu8")
+      (when (or (== tok "vu8") (and R7RS (== tok "u8")))
         (let [(values p ok2) (.peek r)]
           (when (and ok2 (== p \())
             (.next r)
@@ -507,6 +553,9 @@
       (case [\}]
         (return (.readFail r "~a syntax is not allowed in #!r6rs mode" (Str "close brace"))))
       (case [\|]
+        (when R7RS
+          (.next r)
+          (return (.readBarSymbol r)))
         (return (.readFail r "~a syntax is not allowed in #!r6rs mode" (Str "|...| symbol escape"))))
       (case [\#]
         (return (.hash r))))
@@ -546,3 +595,44 @@
           (break))
         (set! out (append out d))))
     out))
+
+
+(go/func SelfEvalForms "SelfEvalForms is datum d with each vector and bytevector literal outside a quotation written (quote v): R7RS lets them evaluate to themselves, R6RS's expander does not. The program's forms are walked once after they are read (quote stops the walk, quasiquote continues under its unquotes); SM8.\n" ^any [^any d]
+  (return (selfEval d 0)))
+
+(go/func headName "headName is the name of the symbol d, \"\" if d is none.\n" ^string [^any d]
+  (let [(values sym ok) (assert (* Symbol) d)]
+    (when ok
+      (return (.-Name sym)))
+    (return "")))
+
+(go/func selfEval ^any [^any d ^int level]
+  (type-switch [v d]
+    (case [(* Vector)] (return (List (Intern "quote") d)))
+    (case [(* Bytevector)] (return (List (Intern "quote") d)))
+    (case [(* Pair)]
+      (let [h (headName (.-Car v))]
+        (when (== h "quote")
+          (return d))
+        (when (== h "quasiquote")
+          (return (addr (lit Pair :Car (.-Car v) :Cdr (selfEvalQQ (.-Cdr v) 1)))))
+        (return (addr (lit Pair :Car (selfEval (.-Car v) 0) :Cdr (selfEvalTail (.-Cdr v)))))))
+    (default (return d))))
+
+(go/func selfEvalTail ^any [^any d]
+  (type-switch [v d]
+    (case [(* Pair)] (return (addr (lit Pair :Car (selfEval (.-Car v) 0) :Cdr (selfEvalTail (.-Cdr v))))))
+    (default (return d))))
+
+(go/func selfEvalQQ ^any [^any d ^int level]
+  (type-switch [v d]
+    (case [(* Pair)]
+      (let [(values head isSym) (assert (* Symbol) (.-Car v))]
+        (when (and isSym (== (.-Name head) "quasiquote"))
+          (return (addr (lit Pair :Car (.-Car v) :Cdr (selfEvalQQ (.-Cdr v) (+ level 1))))))
+        (when (and isSym (or (== (.-Name head) "unquote") (== (.-Name head) "unquote-splicing")))
+          (if (== level 1)
+            (return (addr (lit Pair :Car (.-Car v) :Cdr (selfEvalTail (.-Cdr v)))))
+            (return (addr (lit Pair :Car (.-Car v) :Cdr (selfEvalQQ (.-Cdr v) (- level 1)))))))
+        (return (addr (lit Pair :Car (selfEvalQQ (.-Car v) level) :Cdr (selfEvalQQ (.-Cdr v) level))))))
+    (default (return d))))
