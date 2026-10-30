@@ -154,14 +154,16 @@
   metadata, are the node's text form as before. `semi`: a statement's or a declaration's text, the ; included."
   [n why semi conv]
   (let [tf (binding [*texts* nil] (text-form n why semi))
+        why (atom why)
         fs (try (binding [*in-macro* true] (vec (conv)))
-                (catch arbace.lang.ExceptionInfo e (if (:cpp/gap (ex-data e)) nil (throw e))))]
+                (catch arbace.lang.ExceptionInfo e
+                  (if (:cpp/gap (ex-data e)) (do (reset! why (str @why "/" (name (:cpp/gap (ex-data e))))) nil) (throw e))))]
     (if (and (seq fs) (every? #(instance? arbace.lang.IObj %) fs))
       (let [m (meta tf)]
         (when *texts* (swap! *texts* update :macro-form (fnil inc 0)))
         (into [(vary-meta (first fs) assoc :cpp/macro (second tf) :cpp/line (:cpp/line m))]
               (map #(vary-meta % assoc :cpp/macro "") (rest fs))))
-      (do (when *texts* (swap! *texts* update (keyword why) (fnil inc 0))) [tf]))))
+      (do (when *texts* (swap! *texts* update (keyword @why) (fnil inc 0))) [tf]))))
 
 (defmacro ^:private or-text
   "The body's form, or on a gap the node's text."
@@ -430,23 +432,73 @@
 
 (defn- callee-form [f args] (apply mk (if (or (symbol? f) (seq? f)) f (list 'c/call f)) args))
 
+(defn- split-top
+  "The text split at the commas outside brackets, parentheses, braces, strings and <> of templates."
+  [^String t]
+  (loop [i 0 d 0 q nil st 0 out []]
+    (if (>= i (count t))
+      (conj out (subs t st))
+      (let [c (.charAt t i)]
+        (cond
+          q (recur (inc i) d (if (and (= c q) (not= \\ (.charAt t (dec i)))) nil q) st out)
+          (or (= c \") (= c \')) (recur (inc i) d c st out)
+          (#{\( \[ \{} c) (recur (inc i) (inc d) nil st out)
+          (#{\) \] \}} c) (recur (inc i) (dec d) nil st out)
+          (and (= c \,) (zero? d)) (recur (inc i) d nil (inc i) (conj out (subs t st i)))
+          :else (recur (inc i) d nil st out))))))
+
+(defn- split-id
+  "An explicit instantiation's declaration `body` with its declarator-id's template-id (`f<S>`, `N<int>::f<int>`) cut out:
+  [body-with-__ID__ the-id-text] or nil. The id ends at the last > before the first top-level ( or the text's end."
+  [^String body]
+  (let [n (count body)
+        stop (loop [i 0 d 0] (cond (>= i n) n
+                                   (and (= \( (.charAt body i)) (zero? d)) i
+                                   (= \< (.charAt body i)) (recur (inc i) (inc d))
+                                   (= \> (.charAt body i)) (recur (inc i) (dec d))
+                                   :else (recur (inc i) d)))
+        e (loop [i (dec stop)] (cond (< i 0) nil (= \> (.charAt body i)) (inc i) (Character/isWhitespace (.charAt body i)) (recur (dec i)) :else nil))]
+    (when e
+      (let [back-args (fn [i] ; i just past a >: the index of its matching <
+                        (loop [j (dec i) d 0] (cond (< j 0) nil
+                                                    (= \> (.charAt body j)) (recur (dec j) (inc d))
+                                                    (= \< (.charAt body j)) (if (= d 1) j (recur (dec j) (dec d)))
+                                                    :else (recur (dec j) d))))
+            back-id (fn [j] (loop [k j] (if (and (> k 0) (let [c (.charAt body (dec k))] (or (Character/isLetterOrDigit c) (= c \_)))) (recur (dec k)) k)))
+            start (loop [e e]
+                    (when-let [lt (back-args e)]
+                      (let [lt (loop [k lt] (if (and (> k 0) (Character/isWhitespace (.charAt body (dec k)))) (recur (dec k)) k))
+                            st (back-id lt)]
+                        (cond (and (>= st 2) (= "::" (subs body (- st 2) st)))
+                              (if (= \> (.charAt body (- st 3)))
+                                (recur (- st 2))
+                                (back-id (- st 2)))
+                              :else st))))]
+        (when start [(str (subs body 0 start) "__ID__" (subs body e)) (subs body start e)])))))
+
 (defn- lambda-form [n]
   (let [^String t (or (ntext n) (gap :lambda "a lambda in a macro"))
         [b _] (rng n)
         close (loop [i 1 d 1] (cond (>= i (count t)) (gap :lambda "captures") (= \[ (.charAt t i)) (recur (inc i) (inc d))
                                     (= \] (.charAt t i)) (if (= d 1) i (recur (inc i) (dec d))) :else (recur (inc i) d)))
         caps (str/trim (subs t 1 close))
+        cls (first (filter #(= (kind %) "CXXRecordDecl") (kids n)))
+        mids (atom (vec (butlast (remove #(= (kind %) "CXXRecordDecl") (kids n)))))
         cap-forms (if (= caps "")
                     []
                     (mapv (fn [^String c]
                             (let [c (str/trim c)]
                               (cond
+                                (re-matches #"(?s)&?\s*[A-Za-z_][A-Za-z0-9_]*\s*=[^=].*" c)
+                                (let [[_ amp nm] (re-find #"^(&?)\s*([A-Za-z_][A-Za-z0-9_]*)" c)
+                                      e (or (first @mids) (gap :lambda "an init-capture's initializer"))]
+                                  (swap! mids subvec 1)
+                                  (if (= amp "&") (list '& (ident nm) (ex e)) (list '= (ident nm) (ex e))))
                                 (= c "&") '& (= c "=") '= (= c "this") 'this (= c "*this") '(deref this)
                                 (re-matches #"[A-Za-z_][A-Za-z0-9_]*" c) (ident c)
                                 (re-matches #"&\s*[A-Za-z_][A-Za-z0-9_]*" c) (list '& (ident (str/trim (subs c 1))))
                                 :else (gap :lambda "a capture"))))
-                          (str/split caps #",")))
-        cls (first (filter #(= (kind %) "CXXRecordDecl") (kids n)))
+                          (split-top caps)))
         op (first (filter #(and (= (kind %) "CXXMethodDecl") (= (:name %) "operator()")) (kids cls)))
         _ (when-not op (gap :lambda "a generic lambda"))
         body (last (kids n))
@@ -1058,6 +1110,25 @@
                                        :else [(type-for p)])]
                           (apply list 'cpp/catch pv (compound-forms body)))))]))))
 
+(defn- written-ret
+  "CP65 (b): a return type clang prints as the injected class name's template-id (`S9<T> &` for `S9 &`), as written when the
+  words before the name are that class's bare name, else `r`."
+  [n r]
+  (let [base (loop [x r] (if (and (seq? x) (#{'& '&& '* 'const 'volatile} (first x))) (recur (last x)) x))]
+    (if (and (seq? base) (= (first base) '<>) (symbol? (second base)))
+      (try
+        (let [ts (prefix-tokens n)
+              spec #{"static" "extern" "inline" "constexpr" "constinit" "consteval" "virtual" "explicit" "friend" "typedef"}
+              ts (vec (remove #(contains? spec (nth % 1)) ts))
+              w (when (seq ts) (esc-name (ty/parse-type (str/join " " (map #(nth % 1) ts)))))
+              wbase (loop [x w] (if (and (seq? x) (#{'& '&& '* 'const 'volatile} (first x))) (recur (last x)) x))]
+          (if (and wbase (= wbase (second base)) (not (some #(= "::" (nth % 1)) ts)))
+            (let [sub (fn sub [x] (cond (= x base) wbase (and (seq? x) (#{'& '&& '* 'const 'volatile} (first x))) (apply list (first x) (map sub (rest x))) :else x))]
+              (sub r))
+            r))
+        (catch arbace.lang.ExceptionInfo _ r))
+      r)))
+
 (defn fn-form [n]
   (let [k (kind n)
         ft (type-of (qt n))
@@ -1066,6 +1137,7 @@
         written (prefix-words n)
         r (nth ft 2)
         r (if (and (contains? written "auto") (not (:cpp/trailing (meta ft)))) 'auto r)
+        r (if (and r (not (:cpp/trailing (meta ft))) (not= r 'auto)) (written-ret n r) r)
         m (merge (spec-meta n) (attrs-of n) (fn-meta ft))
         body (fn-body n)
         declare? (nil? body)]
@@ -1089,6 +1161,10 @@
             m (if (re-find #"\bnoexcept\b" (let [t (-> (or (ntext n) "") (str/replace #"//[^\n]*" "") (str/replace #"(?s)/\*.*?\*/" "")) i (.indexOf ^String t "{")] (if (neg? i) t (subs t 0 i)))) m (dissoc m :noexcept))]
         (addm f (cond-> (dissoc m :const :volatile :cpp/ref) declare? (assoc :cpp/declare true))))
       (let [nm (or (decl-name n) (gap :fn "a name"))
+            ;; a conversion function's name is its return type, qualifiers included (clang's name drops them)
+            nm (if (and (= k "CXXConversionDecl") (seq? nm) (= (first nm) 'operator) (= (second nm) 'conv) r (not= r (nth nm 2 nil)))
+                 (with-meta (list 'operator 'conv r) (meta nm))
+                 nm)
             ps (if (or (= k "CXXConversionDecl")) ps (with-meta ps {:tag r}))
             x (addm nm m)]
         (if declare?
@@ -1374,14 +1450,21 @@
                 f (if kw
                     (let [nm (or (name-of (str/trim (subs body (count kw)))) (gap :template "an instantiated class"))]
                       (list (symbol (str "cpp/" kw)) nm))
-                    (let [[ty nm] (or (ty/parse-decl body) (gap :template "an instantiated declaration"))
-                          nm (if (string? nm) (ident nm) (esc-name nm))]
+                    (let [[body idt] (or (split-id body) [body nil])
+                          [ty nm] (or (ty/parse-decl body) (gap :template "an instantiated declaration"))
+                          nm (if idt (or (name-of idt) (gap :template "an instantiated name")) (if (string? nm) (ident nm) (esc-name nm)))]
                       (if (and (seq? ty) (= (first ty) 'fn))
-                        (list 'c/declare (addm (vary-meta nm assoc :tag (nth ty 2)) (dissoc (meta ty) :tag)) (second ty))
+                        (list 'c/declare (addm nm (dissoc (meta ty) :tag)) (vary-meta (let [ps (second ty)
+                                                                         pl (first (filter #(= (kind %) "FunctionProtoTypeLoc") (kids n)))
+                                                                         names (when pl (mapv :name (filter #(= (kind %) "ParmVarDecl") (kids pl))))]
+                                                                     (if (and names (= (count names) (count ps)) (some some? names))
+                                                                       (with-meta (mapv (fn [t nm] (if nm (with-meta (ident nm) {:tag t}) t)) ps names) (meta ps))
+                                                                       ps))
+                                                                   assoc :tag (nth ty 2)))
                         (list 'c/var (vary-meta nm assoc :tag (esc-name ty))))))
                 f (list 'cpp/instantiate f)]
             [(if ext (vary-meta f assoc :extern true) f)])
-          "EmptyDecl" [(text-form n "EmptyDecl")]
+          "EmptyDecl" ['(c/null)]
           [(text-form n k true)])
         (catch arbace.lang.ExceptionInfo e
           (if (:cpp/gap (ex-data e)) [(text-form n (str k "/" (name (:cpp/gap (ex-data e)))) true)] (throw e))))))))
