@@ -78,7 +78,7 @@ What differs from the crops:
   as `('a,'b,'c) format`) need types. The read level can keep the syntax; eval cannot (§6).
 - **OCaml's standard library is OCaml** (`stdlib/*.ml`, about 70 modules), plus a C runtime
   (`runtime/*.c`, bytecode and native). Eval needs primitives for the C part (`caml_*` externals), a
-  list of a few hundred (probe E3 counts them from `.cmi` is impossible without sources; §3 gives what
+  list of a few hundred (unmeasured: the sources are not on the host; §3 gives what
   could be measured).
 
 ## 2. The host and prior art
@@ -157,7 +157,7 @@ Probes (seconds, in `.tmp/ocaml/`):
   so line counts of `stdlib/*.ml` (about 70 modules) and the testsuite are not measured; they are the first
   task of O1 (pin the tag, count).
 - **E4, the toolchain on the host**: `ocamlc`, `ocamlc.opt` 9.7 MB, `ocamlopt`, `ocaml` toplevel 28 MB,
-  `ocamllex`, `ocamldep`, `ocamlcmt`, `ocamldebug`, `ocamlcp`. `ocaml5.5.0` as of 2026-07-23 builds.
+  `ocamllex`, `ocamldep`, `ocamlcmt`, `ocamldebug`, `ocamlcp`.
 
 ## 4. OCaml forms
 
@@ -536,7 +536,7 @@ Each with options, the recommended one first.
     (This survey did not read the net/http or Scheme surveys; the user's statement that a Scheme survey exists
     "beside this" is taken as given: coordinate their shared items, e.g. a delimited-continuation mechanism,
     which Scheme's `call/cc` and OCaml's effects both need, OC6 and Scheme's.)
-- **OC16 Racket of effort: how to split work.**
+- **OC16 How to split the work between models.**
   - Options: (a) O1-O4 by Sonnet in parallel (spec, helper, converter, printer), O5-O6 by Opus; (b) all Opus; (c) all Sonnet.
   - *Recommended: (a)*, per §11.
 
@@ -566,7 +566,7 @@ no runtime commitment.
   is unmeasured; re-estimated after O4.
 - **OCaml-LGPL**: vendoring the stdlib puts LGPL text in the tree; the exception covers linking the runtime, not
   every redistribution; `LICENSE.md` must be exact (OC13).
-- **No Menhir on the host** (not in the packages queried): a port of `parser.mly` needs the generated parser from
+- **Menhir was not checked for on the host**: a port of `parser.mly` needs the generated parser from
   the compiler source (`boot/menhir/parser.ml`), whose license is the compiler's.
 
 ## 15. Sources
