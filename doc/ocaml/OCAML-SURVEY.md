@@ -596,3 +596,114 @@ The user decided all sixteen as recommended. In short:
 - Lambda is interpreted; effects run as goroutines with channel hand-off; AOT goes Lambda → Java forms → j2g.
 - The stdlib is vendored as OCaml forms under the LGPL with the linking exception.
 - The order after C23 is left open: the crop order, OCaml or Scheme first, the user's "decide later".
+
+## As built: O1 (2026-10-30)
+
+Milestone O1, the spec and the pins, built on the branch `ocaml-o1` from main `cb01f62c`, under the light tier (beside GT7's
+clean run: no gate, no Arbace build, no lock, under 2 GB, at most 4 threads; the helper and the probes on small inputs).
+No shipped file changed (nothing under `arbace/`, `go/`, `overlay/`, `jdk/`, `seed/`); no re-seed.
+
+**What is in the tree**
+
+- `doc/ocaml/SPEC.md`: OCaml forms for the whole Parsetree of 5.5.0 (every constructor of `parsetree.mli` and
+  `asttypes.mli` in its §12 checklist), 218 worked examples, each *checked against the helper's output*, the choices S1-S29
+  (§13.1), the other modes' forms (§11). The vocabulary is the Parsetree's constructor names (OC8 (a)), so the helper writes forms
+  directly.
+- `tools/ocdump/ocdump.ml` (about 850 lines), `tools/ocdump/OCAML_VERSION` (5.5.0), `tools/ocdump/spec_extract.py` (extracts the
+  spec's examples for the check): the helper on compiler-libs, OC3 (a). Modes `parse` (impl, `--intf`, `--use-file`),
+  `types` (the inferred signature and a `(expr "type")`/`(pat "type")` annotation per Typedtree node, with positions),
+  `lambda` (the bytecode translation as structured forms), `tokens`; `--loc` for positions (`:loc` with line, column, end line,
+  end column, offset, end offset; `:ghost`; `(at name loc)`). It builds with `ocamlopt -I +compiler-libs -w -a ocamlcommon.cmxa
+  ocdump.ml` in 3 s, no ocamlfind, no dune.
+- `bin/repr-ocaml`: `ocdump-build`, `dump`, `corpus fetch|count|check`, `samples`, `spec-check`; Makefile targets
+  `repr-ocaml-ocdump`, `-spec-check`, `-samples`, `-corpus`, `-corpus-count` (`make check-makefile` passes);
+  `test/ocaml/spec_check.ae` (the comparison, on stage 0).
+- `test/ocaml/corpora.edn`: the pins and the six corpora. `test/ocaml/samples/`: eight files (`core.ml`, `effects.ml`, `types.ml`,
+  `modules.ml`, `classes.ml`, `attrs.ml`, `ops.ml`, `core.mli`; 246 lines), `core.ml` and `effects.ml` also typed and lowered.
+- `doc/ALPINE.md`: `ocaml5-compiler-libs` in the apk line (it depends on `ocaml5`, which leaves the line), and a row of the table.
+  `LICENSE.md` unchanged: no OCaml file entered the tree (the samples are Arbace's; the corpora are fetched into `.tmp/`, read in
+  place and not distributed; `parsetree.mli` is quoted by constructor name only).
+
+**The pins**
+
+| pin | value |
+|---|---|
+| tarball (the corpus) | `https://caml.inria.fr/pub/distrib/ocaml-5.5/ocaml-5.5.0.tar.xz`, 4,712,612 bytes, SHA-256 `fcc6ae665d1ec51d52510eaac7834a86a9806bf5a258bb7cca78733fccf015ba` |
+| GitHub archive of tag `5.5.0` (what Alpine builds; a cross-check) | 5,008,847 bytes, SHA-256 `c018052c...aed3`, SHA-512 equal to aports `main/ocaml5/APKBUILD`'s line (commit `f5238509`); it **lacks `testsuite/tests`**, a subset of the release otherwise (stdlib, parsing identical) |
+| go-whim | `/root/go-whim` commit `80c49bf5`, tree of `whiml/` `28bd9e10` |
+| host | ocamlopt 5.5.0, apk `ocaml5{,-runtime,-compiler-libs}-5.5.0-r0`, flambda false, `ocamlcommon.cmxa` SHA-256 `d36ebf51...0c75` |
+
+**Corpus counts** (`bin/repr-ocaml corpus count`; `.ml` + `.mli`, `wc -l` over the concatenation)
+
+| corpus | files | ml | mli | lines | helper rejects |
+|---|---:|---:|---:|---:|---|
+| stdlib | 150 | 71 | 79 | 52,692 | 2 (`templates/*.template.mli`, macro templates) |
+| compiler-sources (parsing, typing, lambda, utils, driver) | 248 | 121 | 127 | 110,242 | 0 |
+| compiler-backend (asmcomp, bytecomp, middle_end, toplevel, file_formats) | 346 | 181 | 165 | 64,245 | 0 |
+| testsuite (all of `testsuite/`) | 1,862 | 1,761 | 101 | 179,633 | 61 (syntax-error and lexer tests) |
+| whiml | 8 | 7 | 1 | 58,479 | 0 |
+| samples | 8 | 7 | 1 | 246 | 0 |
+
+The testsuite's `tests/` directory alone is 1,829 files and 174,422 lines; 1,506 `.ml` files have an ocamltest `(* TEST` header and 556
+have a `.reference`, so the plain run programs for eval are a fraction near 556 of 1,761, about 30% (the survey's guess, 30-50%, was
+at the low end). The tree also has 18 `.mll` and 9 `.mly` sources, not read (generated sources, OC24).
+The stdlib is 150 files, not "about 70 pairs": 71 `.ml`, 79 `.mli`.
+
+**Numbers from the probes** (sequential, one process a file): the helper reads the stdlib in 2.7 s, the compiler's front in 6.0 s,
+the back in 5.2 s, the whole testsuite in 23 s, whiml in 3.7 s (`editor.ml`, 57k lines: 3.6 s, 1.0 GB with `--loc`, 22.7 MB of forms);
+the generated menhir parser (`boot/menhir/parser.ml`, 67,281 lines) in 1.5 s and 134 MB.
+
+**Checks run** (all light, seconds, on stage 0 `target/seed/amd64/arbace` or the helper): `bin/repr-ocaml spec-check` (218 of 218
+examples equal, all forms read by Arbace's reader, the checklist complete), `samples` (8 files, 20 outputs read), `corpus check`
+(counts and pins hold), `make check-makefile`, `bin/alpine-env check`. **Not run**: the essential gate and every heavy check, by
+the light tier's rule; nothing here changes what the gate runs (no step added, OC26), so none is owed by the post-tag window beyond
+the gate itself.
+
+**What the spec found that the survey did not have**
+
+- OCaml 5.5.0's Parsetree is *not* 5.1's: `Pexp_function` is one node for `fun` and `function` (params, constraint, body), `Pexp_open`,
+  `Pexp_letmodule` and `Pexp_letexception` are gone for `Pexp_struct_item`, tuples carry labels (and open patterns), there is
+  `Ptyp_functor` (modular explicits), `Pmod_apply_unit`, `Ptype_external`, `Pconst_*` with locations and `Ppat_effect`.
+- **`include functor` is not 5.5.0 syntax** (a syntax error); the O1 row's list had it from memory (S25).
+- `Pmty_alias` is never produced by the parser. `-1` is one integer constant. Indexing `a.(i)` is `Array.get` applied.
+- The compiler's native translation (`transl_implementation` with no flambda) asserts in a native context; `ocdump` takes the bytecode
+  translation (S20, E5), which is what `ocamlc -dlambda` prints.
+- Arbace's printer writes `(var x)` as `#'x`: the head `var` is a special form's name (S29).
+- The release tarball has the testsuite and the GitHub archive of the tag does not (E6).
+
+**Proposals** (OC20 onward; each with options and the recommended one first)
+
+- **OC20 The Typedtree's form (O4).** (a) annotations only, as built: one `(expr "type" loc)` / `(pat "type" loc)` per node plus
+  the inferred signature, enough for the toplevel's value printing and for judging types by position; (b) the Typedtree as a
+  tree of forms (about 100 constructors, `exp_extra`, environments dropped, types as the printer's text or as `Types` data);
+  (c) (a) now and (b) restricted to what oi needs. *Recommended: (a)*, decided again at O4/O5 by what oi asks (survey §6.3 chose Lambda
+  as the input); (b) is the entry to a checker (OC4 (b)) and would not pay before it.
+- **OC21 Lambda's primitives.** (a) the compiler's printed text as strings, as built (`"makeblock 0"`, `"field_imm 2"`); (b) parsed
+  into a head and arguments (`(prim makeblock 0 [..])`), by a table of the ~150 primitives, the table being the work O5 does anyway.
+  *Recommended: (a)* until O5 starts, then (b) in the helper, since the table and the semantics are one job.
+- **OC22 The comments' form for `:full` (O3).** (a) the token dump with locations (`--mode tokens`, built) woven back by position,
+  comments as `(comment "text" loc)` entries of a side vector in the file's metadata; (b) a native lexer first (a port of
+  `lexer.mll`, O6a's half). *Recommended: (a)*; (b) only if the weave shows ghost-position trouble.
+- **OC23 Non-ASCII identifiers.** (a) `(name "text")`, as built (S3); (b) bare symbols for Unicode letters Arbace's reader reads as
+  symbols. *Recommended: (a)*: the corpora have almost none and (b) needs a reader experiment per script.
+- **OC24 `.mll`, `.mly` and the generated parser.** (a) not read, as built (generated sources); `boot/menhir/parser.ml` (67,281
+  lines, read in 1.5 s) joins the compiler corpus at O2 as the biggest generated sample; (b) read `.mll`/`.mly` with a grammar of
+  their own (a new, small repr, 27 files); (c) neither. *Recommended: (a)*, (b) never unless O6a (the native parser) wants the grammar as data.
+- **OC25 Which tarball is the pin.** (a) the release tarball (as built: it has the testsuite; hash from caml.inria.fr, cross-checked
+  against Alpine's SHA-512 by content equality of the shared trees); (b) the GitHub archive (the Alpine one) plus the testsuite from
+  the release. *Recommended: (a)*: one file, one hash; the archive stays listed as the cross-check.
+- **OC26 The checks in the gate.** (a) not yet: `spec-check`, `samples`, `corpus check` are run by hand and by `make` until O2, since they
+  need `ocaml5-compiler-libs` on the host and the gate's steps are shipped data; (b) light essential steps now (`bin/repr-ocaml
+  spec-check` with its inputs `doc/ocaml/SPEC.md`, `tools/ocdump/`, `test/ocaml/`, a host pin on ocamlopt); (c) at O2 with the round
+  trip. *Recommended: (c)*: the steps belong with the first check that has a record to keep; (b) would be the first step that fails on a
+  host without the apk.
+- **OC27 Positions in the forms.** (a) six numbers `[line col end-line end-col offset end-offset]` (as built); (b) offsets only,
+  lines and columns derived from the text (smaller dumps: `editor.ml` is 22.7 MB of forms with the six numbers per node and 1 GB to
+  write); (c) the compiler's `-dparsetree` style `file[l,bol+c]`. *Recommended: (a)* for the helper, with the converter free to drop to
+  (b) in the stored forms of `:full` (the text is there).
+
+**Rule slips**: `sed -i ... /dev/null` was run once by mistake (a no-op; the rule forbids naming `/dev/null` in commands); two Python
+edits ran while reading the spec before the final text was fixed, no effect on anything outside the worktree; the first
+`arbace.java.shell` probe was refused by the permission classifier and not retried. The scratch the survey cites: `.tmp/specgen/`
+(the spec's examples as extracted and dumped), `.tmp/repr-ocaml/` (the tarball and its extraction), `.tmp/ocdump/` (the helper's
+build), in the worktree `.tmp/worktrees/ocaml-o1`.

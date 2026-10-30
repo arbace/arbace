@@ -21,7 +21,7 @@ apk add alex alpine-base alpine-sdk alsa-lib-dev atop autoconf automake bat bubb
   cargo chez-scheme chrony clang clojure cloud-init coreutils cpio cups-dev dhcpcd diffutils \
   doas dosfstools e2fsprogs-extra fastfetch findutils fontconfig-dev gcc-cross-embedded gdb \
   github-cli go grep grub-efi happy hdparm htop hyperfine joker linux-virt maven mosh mount \
-  newlib nvme-cli ocaml5 openjdk25-src openssh openssh-server-pam perf pigz procps proot py3-pip \
+  newlib nvme-cli ocaml5-compiler-libs openjdk25-src openssh openssh-server-pam perf pigz procps proot py3-pip \
   qemu-aarch64 qemu-guest-agent qemu-system-aarch64 reptyr rsync sed strace tmux tree ugrep vim \
   wget zellij zip
 ```
@@ -75,6 +75,7 @@ scripts and has not yet been tried on a fresh host.
 | Bootstrapping TamaGo's Go from source | `go` (Alpine's Go, used for nothing else) |
 | repr/haskell's helper `tools/hsdump` and its checks (`bin/repr-haskell`, since 2026-10-17): GHC's parser through its `ghc` library, CPP through GHC's driver; the interface level (`roundtrip --iface`, since R2): `ghc --make`, `ghc --show-iface`, `hsc2hs`; R6 (2026-10-18): `hsc2hs` run by the helper, GHC's `unlit` through its driver | `ghc` (9.14.1, pinned by `tools/hsdump/GHC_VERSION` and checked; on this host by `cabal`; its CPP and `hsc2hs` run `cc` from `gcc`, a dependency of `ghc`; `hsc2hs` and `unlit` ship in `ghc`) |
 | repr/rust's helper `tools/rsdump` and its checks (`bin/repr-rust`, since 2026-10-17): rustc's parser through its `rustc_private` crates (the helper is built against `rustc-dev`'s metadata and links the host's `librustc_driver`), std's sources as the corpus | `rust` (1.99.1, pinned by `tools/rsdump/RUSTC_VERSION` and checked; on this host by `cargo`); `rustc-dev` and `rust-src` of the same build are fetched by `apk fetch` into `.tmp/repr-rust/apks/`, pinned by `tools/rsdump/apks.sha256`, and only extracted there, never installed; the behaviour level (RR5, 2026-10-18) links the UI suite's programs with `cc` from `gcc` (a dependency of `rust`), builds compiletest's C helper `rust_test_helpers.c` with it, and builds std by `cargo`'s `-Zbuild-std` (offline, `rust-src`'s vendored crates); `rustc-1.99.1-src.tar.xz` is downloaded into `.tmp/repr-rust/src/`, pinned by its SHA-256 in `test/rust/corpus-rustc-1.99.1-ui.edn` |
+| repr/ocaml's helper `tools/ocdump` and its checks (`bin/repr-ocaml`, O1, 2026-10-30): OCaml's own parser, typer and Lambda through `compiler-libs` (`ocamlopt -I +compiler-libs ocamlcommon.cmxa`; no ocamlfind, no dune, no opam) | `ocaml5-compiler-libs` (5.5.0-r0, installed by the user 2026-10-30, 70 MiB; pinned with the compiler by `tools/ocdump/OCAML_VERSION` and `test/ocaml/corpora.edn`'s `:host`, checked by `bin/repr-ocaml corpus check`; it depends on `ocaml5` and `ocaml5-runtime`, so the line names it alone); the corpus, OCaml's release tarball `ocaml-5.5.0.tar.xz`, is downloaded into `.tmp/repr-ocaml/src/` and pinned by its SHA-256 |
 
 Since 2026-10-16 nothing Arbace builds needs a C toolchain: go-whim's tests and their C guests
 (which needed `clang` and a linker), jrt's `--race` and `bin/j2g-race` (Go's race detector needs

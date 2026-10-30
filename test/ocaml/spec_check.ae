@@ -1,0 +1,61 @@
+;; The comparison half of `bin/repr-ocaml spec-check` (doc/ocaml/SPEC.md §12): reads the entries the
+;; script extracted into DIR (NNN.kind, NNN.forms: the spec's forms text, NNN.dump: ocdump's output
+;; for the entry's source, wrapped by its kind) and requires, for each, that the forms read, that the
+;; dump reads, and that the spec's forms equal the part of the dump the kind names. Prints one line per
+;; failure and a summary; exits 1 when any entry fails.
+(require '[arbace.java.io :as io]
+         '[arbace.string :as str])
+
+(defn read-all [text] (read-string (str "[" text "\n]")))
+
+(defn binding-of [dump]
+  ;; (ocaml/impl [(value :nonrec [(binding PAT EXPR ...)]) ...] meta)
+  (let [item (first (second dump))]
+    (first (nth item 2))))
+
+(defn butlast-meta [form]
+  (if (map? (last form)) (apply list (butlast form)) form))
+
+(defn extract [kind dump]
+  (case kind
+    "impl"    (butlast-meta dump)
+    "intf"    (butlast-meta dump)
+    "item"    (first (second dump))
+    "sigitem" (first (second dump))
+    "expr"    (nth (binding-of dump) 2)
+    "pat"     (nth (binding-of dump) 1)
+    "type"    (nth (first (nth (first (second dump)) 2)) 6)
+    "module"  (nth (first (second dump)) 2)
+    "modtype" (nth (first (second dump)) 2)
+    (throw (ex-info (str "unknown kind " kind) {}))))
+
+(let [dir (first *command-line-args*)
+      files (sort (map #(.getName %) (.listFiles (io/file dir))))
+      ids (distinct (map #(first (str/split % #"\.")) files))
+      fails (atom 0) n (atom 0)]
+  (doseq [id ids]
+    (swap! n inc)
+    (try
+      (if-not (.exists (io/file dir (str id ".kind")))
+        (read-all (slurp (str dir "/" id ".forms")))
+      (let [kind (str/trim (slurp (str dir "/" id ".kind")))
+            src  (str/trim (slurp (str dir "/" id ".src")))
+            spec (read-all (slurp (str dir "/" id ".forms")))
+            dump (read-string (slurp (str dir "/" id ".dump")))]
+        (cond
+          (= (first dump) 'ocaml/error)
+          (do (swap! fails inc) (println "FAIL" id kind "ocdump rejects:" (pr-str src) (pr-str (rest dump))))
+          (not= 1 (count spec))
+          (do (swap! fails inc) (println "FAIL" id kind "forms block has" (count spec) "forms:" (pr-str src)))
+          :else
+          (let [want (extract kind dump) got (first spec)]
+            (when (not= want got)
+              (swap! fails inc)
+              (println "FAIL" id kind (pr-str src))
+              (println "  spec :" (pr-str got))
+              (println "  ocdump:" (pr-str want)))))))
+      (catch Throwable t
+        (swap! fails inc)
+        (println "FAIL" id "error:" (.getMessage t)))))
+  (println (str "spec-check: " (- @n @fails) " of " @n " entries equal ocdump's output"))
+  (System/exit (if (zero? @fails) 0 1)))

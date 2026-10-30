@@ -1,0 +1,210 @@
+#!/bin/bash
+# repr/ocaml, OCaml's bridge (doc/ocaml/OCAML-SURVEY.md, doc/ocaml/SPEC.md): so far (O1, "As built: O1") the
+# spec's checks, the helper tools/ocdump on the host's compiler-libs (OC3 (a)) and the corpora's pins.
+# The converter and the printer come with O2.
+#
+#   bin/repr-ocaml ocdump-build   build tools/ocdump/ocdump.ml into .tmp/ocdump/ocdump with the host's ocamlopt
+#                                 against compiler-libs (-I +compiler-libs ocamlcommon.cmxa; no ocamlfind, no
+#                                 dune); rebuilt when the source, the pin or compiler-libs' library change
+#   bin/repr-ocaml dump [--loc] [--intf] [--use-file] [--mode parse|types|lambda|tokens] [--file NAME] [FILE]
+#                                 run the helper (stdin when FILE is absent); OC4 (a): types, lambda
+#   bin/repr-ocaml corpus fetch   the release tarball into .tmp/repr-ocaml/src/ (downloaded once when absent,
+#                                 checked by its SHA-256 from test/ocaml/corpora.edn) and extracted
+#   bin/repr-ocaml corpus count   the files and lines of every corpus, as test/ocaml/corpora.edn records them
+#   bin/repr-ocaml corpus check   the counts equal the recorded ones; the pins hold (tarball, go-whim's commit
+#                                 and tree, ocamlopt, compiler-libs)
+#   bin/repr-ocaml samples        test/ocaml/samples/: every file read by ocdump, no error, its forms read by
+#                                 Arbace's reader; the typed ones also typed and lowered to Lambda
+#   bin/repr-ocaml spec-check     doc/ocaml/SPEC.md: every forms block reads with Arbace's reader; every entry
+#                                 with a source equals ocdump's output for it; every Parsetree constructor of
+#                                 5.5.0's parsetree.mli is in the spec's checklist
+# All run on small inputs, in seconds (corpus fetch: one 4.7 MB download).
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+. "$root/bin/lib/tmpdir.bash"
+cd "$root"
+
+OCD_DIR="$root/.tmp/ocdump"
+OCD="$OCD_DIR/ocdump"
+SRC_DIR="$root/.tmp/repr-ocaml/src"
+TOP="$root/.tmp/repr-ocaml/ocaml-5.5.0"
+CORPORA="$root/test/ocaml/corpora.edn"
+
+# stage 0 reads the data: ARBACE_HOST_EXE, else the checkout's stage 0, else the main checkout's
+arbace_exe() {
+  if [ -n "${ARBACE_HOST_EXE:-}" ]; then echo "$ARBACE_HOST_EXE"; return; fi
+  local arch main
+  case $(uname -m) in x86_64) arch=amd64 ;; aarch64) arch=arm64 ;; *) arch=$(uname -m) ;; esac
+  if [ -x "$root/target/seed/$arch/arbace" ]; then echo "$root/target/seed/$arch/arbace"; return; fi
+  main=$(cd "$(git rev-parse --git-common-dir)/.." && pwd)
+  if [ -x "$main/target/seed/$arch/arbace" ]; then echo "$main/target/seed/$arch/arbace"; return; fi
+  echo "repr-ocaml: no stage 0 (bin/seed --build, or ARBACE_HOST_EXE)" >&2; return 1
+}
+
+# edn KEYPATH...: a value of test/ocaml/corpora.edn
+edn() {
+  local exe; exe=$(arbace_exe)
+  "$exe" -e "(print (let [v (get-in (read-string (slurp \"$CORPORA\")) [$*])] (if (string? v) v (pr-str v))))"
+}
+
+pin_version() { cat "$root/tools/ocdump/OCAML_VERSION"; }
+
+ocdump_key() {
+  { cat "$root/tools/ocdump/ocdump.ml" "$root/tools/ocdump/OCAML_VERSION"
+    ocamlopt -version
+    sha256sum "$(ocamlopt -where)/compiler-libs/ocamlcommon.cmxa" | cut -d' ' -f1; } | sha256sum | cut -d' ' -f1
+}
+
+cmd_ocdump_build() {
+  local want have key
+  want=$(pin_version); have=$(ocamlopt -version)
+  if [ "$want" != "$have" ]; then
+    echo "repr-ocaml: ocamlopt is $have, tools/ocdump/OCAML_VERSION pins $want" >&2; return 1
+  fi
+  if [ ! -f "$(ocamlopt -where)/compiler-libs/ocamlcommon.cmxa" ]; then
+    echo "repr-ocaml: compiler-libs is not installed (apk add ocaml5-compiler-libs, doc/ALPINE.md)" >&2; return 1
+  fi
+  key=$(ocdump_key)
+  if [ -x "$OCD" ] && [ "$(cat "$OCD_DIR/key" 2>/dev/null)" = "$key" ]; then
+    echo "ocdump: up to date ($OCD)"; return 0
+  fi
+  mkdir -p "$OCD_DIR/build"
+  cp "$root/tools/ocdump/ocdump.ml" "$OCD_DIR/build/ocdump.ml"
+  (cd "$OCD_DIR/build" && ocamlopt -I +compiler-libs -w -a ocamlcommon.cmxa ocdump.ml -o "$OCD")
+  echo "$key" > "$OCD_DIR/key"
+  echo "ocdump: built $OCD (OCaml $have)"
+}
+
+need_ocdump() { cmd_ocdump_build >/dev/null; }
+
+cmd_dump() { need_ocdump; exec "$OCD" "$@"; }
+
+tarball() { echo "$root/$(edn :pins :ocaml-5.5.0 :fetched-into)"; }
+
+cmd_corpus_fetch() {
+  local tb url sha got
+  tb=$(tarball); url=$(edn :pins :ocaml-5.5.0 :url); sha=$(edn :pins :ocaml-5.5.0 :sha256)
+  mkdir -p "$(dirname "$tb")"
+  if [ ! -f "$tb" ]; then curl -fsSL -m 600 -o "$tb" "$url"; fi
+  got=$(sha256sum "$tb" | cut -d' ' -f1)
+  if [ "$got" != "$sha" ]; then echo "repr-ocaml: $tb is $got, pinned $sha" >&2; return 1; fi
+  if [ ! -f "$TOP/VERSION" ]; then
+    mkdir -p "$TOP"; tar -xJf "$tb" -C "$TOP" --strip-components=1
+  fi
+  echo "ocaml-5.5.0: $tb (sha256 ok), extracted into $TOP"
+}
+
+# count ROOT PATH... : "files ml mli lines"
+count() {
+  local base=$1; shift
+  local list
+  list=$(cd "$base" && find "$@" -type f \( -name '*.ml' -o -name '*.mli' \) | LC_ALL=C sort)
+  local files ml mli lines
+  files=$(printf '%s\n' "$list" | grep -c . || true)
+  ml=$(printf '%s\n' "$list" | grep -c '\.ml$' || true)
+  mli=$(printf '%s\n' "$list" | grep -c '\.mli$' || true)
+  lines=$(cd "$base" && printf '%s\n' "$list" | xargs cat | wc -l)
+  echo "$files $ml $mli $lines"
+}
+
+corpus_rows() { # id files ml mli lines pin paths
+  local exe; exe=$(arbace_exe)
+  "$exe" -e "(doseq [c (:corpora (read-string (slurp \"$CORPORA\")))] (println (name (:id c)) (:files c) (:ml c) (:mli c) (:lines c) (or (get-in c [:where :pin]) :root) (arbace.string/join \",\" (get-in c [:where :paths]))))"
+}
+
+cmd_corpus_count_or_check() {
+  local mode=$1 bad=0 id f ml mli l pin paths got base
+  cmd_corpus_fetch >/dev/null
+  while read -r id f ml mli l pin paths; do
+    case $pin in
+      :ocaml-5.5.0) base=$TOP ;;
+      :go-whim) base=$(edn :pins :go-whim :root) ;;
+      :root) base=$root/test/ocaml/samples; paths=. ;;
+      *) echo "unknown pin $pin" >&2; return 1 ;;
+    esac
+    [ "$pin" = ":go-whim" ] && paths=whiml
+    IFS=, read -ra pa <<< "$paths"
+    got=$(count "$base" "${pa[@]}")
+    printf '%-17s files %5s ml %5s mli %4s lines %7s' "$id" $got | awk '{printf "%s %s %s %s %s %s %s %s %s %s %s\n",$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11}'
+    if [ "$mode" = check ] && [ "$got" != "$f $ml $mli $l" ]; then
+      echo "  MISMATCH: recorded $f $ml $mli $l" >&2; bad=1
+    fi
+  done < <(corpus_rows)
+  if [ "$mode" = check ]; then
+    local sha got_tree gw
+    gw=$(edn :pins :go-whim :root)
+    [ "$(git -C "$gw" rev-parse HEAD)" = "$(edn :pins :go-whim :commit)" ] || { echo "  go-whim's commit moved" >&2; bad=1; }
+    [ "$(git -C "$gw" rev-parse HEAD:whiml)" = "$(edn :pins :go-whim :tree)" ] || { echo "  go-whim's whiml tree moved" >&2; bad=1; }
+    [ -z "$(git -C "$gw" status --porcelain whiml)" ] || { echo "  go-whim's whiml has local changes" >&2; bad=1; }
+    [ "$(ocamlopt -version)" = "$(edn :pins :host :ocamlopt)" ] || { echo "  ocamlopt is not the pinned one" >&2; bad=1; }
+    sha=$(sha256sum "$(ocamlopt -where)/compiler-libs/ocamlcommon.cmxa" | cut -d' ' -f1)
+    [ "$sha" = "$(edn :pins :host :ocamlcommon.cmxa-sha256)" ] || { echo "  compiler-libs' ocamlcommon.cmxa is not the pinned one" >&2; bad=1; }
+    [ "$(cat "$root/tools/ocdump/OCAML_VERSION")" = "$(edn :pins :host :ocamlopt)" ] || { echo "  OCAML_VERSION differs from the pin" >&2; bad=1; }
+    if [ $bad = 0 ]; then echo "corpus check: counts and pins hold"; else return 1; fi
+  fi
+}
+
+cmd_samples() {
+  need_ocdump
+  local exe; exe=$(arbace_exe)
+  local out="$root/.tmp/repr-ocaml/samples"; rm -rf "$out"; mkdir -p "$out"
+  local f b n=0 bad=0 typed
+  typed=$("$exe" -e "(print (arbace.string/join \" \" (:typed (first (filter #(= :samples (:id %)) (:corpora (read-string (slurp \"$CORPORA\"))))))))")
+  for f in "$root"/test/ocaml/samples/*.ml "$root"/test/ocaml/samples/*.mli; do
+    b=$(basename "$f"); n=$((n + 1))
+    local flag=""; case $b in *.mli) flag=--intf ;; esac
+    "$OCD" $flag --loc --file "$b" "$f" > "$out/$b.loc.ae"
+    "$OCD" $flag --file "$b" "$f" > "$out/$b.ae"
+    if grep -q '^(ocaml/error' "$out/$b.ae"; then echo "FAIL $b: $(head -c 200 "$out/$b.ae")"; bad=$((bad + 1)); fi
+    for m in $typed; do
+      if [ "$m" = "$b" ]; then
+        for mode in types lambda; do
+          "$OCD" --mode $mode --file "$b" "$f" > "$out/$b.$mode.ae"
+          if grep -q '^(ocaml/error' "$out/$b.$mode.ae"; then echo "FAIL $b ($mode): $(head -c 300 "$out/$b.$mode.ae")"; bad=$((bad + 1)); fi
+        done
+      fi
+    done
+  done
+  # one Arbace run reads every output
+  "$exe" -e "(let [fs (filter #(.endsWith (.getName %) \".ae\") (.listFiles (java.io.File. \"$out\")))] (doseq [f fs] (read-string (str \"[\" (slurp f) \"]\"))) (println (count fs) \"outputs read by Arbace's reader\"))" || bad=$((bad + 1))
+  if [ $bad = 0 ]; then echo "samples: $n files read, no error"; else echo "samples: $bad failures"; return 1; fi
+}
+
+cmd_spec_check() {
+  need_ocdump
+  local exe d spec="$root/doc/ocaml/SPEC.md" bad=0
+  exe=$(arbace_exe)
+  d="$root/.tmp/repr-ocaml/spec"; rm -rf "$d"; mkdir -p "$d"
+  python3 -I "$root/tools/ocdump/spec_extract.py" "$spec" "$d"
+  local f id kind flag
+  for f in "$d"/*.kind; do
+    [ -e "$f" ] || continue
+    id=$(basename "$f" .kind); kind=$(cat "$f"); flag=""
+    case $kind in intf|sigitem) flag=--intf; src="$d/$id.mli" ;; *) src="$d/$id.ml" ;; esac
+    "$OCD" $flag --file "$id.ml" "$src" > "$d/$id.dump"
+  done
+  "$exe" "$root/test/ocaml/spec_check.ae" "$d" || bad=1
+  # coverage: every constructor of parsetree.mli (and asttypes.mli) is in the spec
+  cmd_corpus_fetch >/dev/null
+  local missing=0 c
+  for c in $(cat "$TOP/parsing/parsetree.mli" "$TOP/parsing/asttypes.mli" | grep -o '\b\(P[a-z]*_[a-z_]*\|Pcstr_[a-z]*\|Cfk_[a-z]*\|Pvc_[a-z]*\|Rtag\|Rinherit\|Otag\|Oinherit\|Unit\|Named\|Nolabel\|Labelled\|Optional\|Const_[a-z0-9]*\|Immutable\|Mutable\|Private\|Public\|Virtual\|Concrete\|Override\|Fresh\|Closed\|Open\|Upto\|Downto\|Nonrecursive\|Recursive\|Covariant\|Contravariant\|NoVariance\|Bivariant\|Injective\|NoInjectivity\)\b' | sort -u); do
+    if ! grep -q "\b$c\b" "$spec"; then echo "MISSING from the spec: $c"; missing=$((missing + 1)); fi
+  done
+  if [ $missing = 0 ]; then echo "spec-check: every constructor of parsetree.mli and asttypes.mli is in the spec's checklist"; else bad=1; fi
+  return $bad
+}
+
+case "${1:-}" in
+  ocdump-build) cmd_ocdump_build ;;
+  dump) shift; cmd_dump "$@" ;;
+  corpus)
+    case "${2:-}" in
+      fetch) cmd_corpus_fetch ;;
+      count) cmd_corpus_count_or_check count ;;
+      check) cmd_corpus_count_or_check check ;;
+      *) sed -n '2,25p' "$0"; exit 2 ;;
+    esac ;;
+  samples) cmd_samples ;;
+  spec-check) cmd_spec_check ;;
+  *) sed -n '2,25p' "$0"; exit 2 ;;
+esac

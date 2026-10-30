@@ -16,7 +16,7 @@ CLOJURE_TESTS_GO ?= target/arbace-go/amd64/arbace-tests
   toolchain-verify box-vendor-verify x509roots-verify repr-go-roundtrip repr-go-roundtrip-text repr-go-native-check \
   repr-java-check repr-java-roundtrip repr-java-text repr-java-jdk repr-java-parse-check repr-java-front-check repr-java-attr-check repr-java-nojavac-check repr-clojure-check repr-clojure-roundtrip repr-haskell-roundtrip repr-haskell-iface repr-haskell-text repr-haskell-layout repr-haskell-test repr-rust-roundtrip repr-rust-iface repr-rust-text repr-rust-pretty repr-rust-behaviour repr-rust-code repr-rust-all repr-rust-test repr-c-host-record repr-c-host-check repr-c-ccdump repr-c-check repr-c-record repr-c-parse-check goi-annotations goi-test goi-check goi-check-aot goi-check-aot-essential goi-check-nethttp goi-divergences goi-divergences-aot java-check java-check-compiled java-check-compiled-essential java-check-print java-check-nread java-check-diagnostics java-check-essential java-check-ref alpine-check clean \
   suite-aot suite-aot-essential suite-divergences java-forms-verify java-forms-update reap-record-native-check \
-  repr-c-gcc-tests check-makefile
+  repr-c-gcc-tests repr-ocaml-ocdump repr-ocaml-spec-check repr-ocaml-samples repr-ocaml-corpus repr-ocaml-corpus-count check-makefile
 
 help: ## list the targets
 	@awk 'BEGIN {FS = ":.*## "} /^## / {printf "\n%s\n", substr($$0, 4)} \
@@ -279,6 +279,18 @@ java-check-ref: ## Java's conformance check's reference recorded afresh with the
 	bin/java-check --record-ref
 goi-divergences-aot: ## the AOT level's divergences: every program not passing in a class of test/goi/divergences-aot.edn (bin/goi divergences --aot)
 	bin/goi divergences --aot
+
+## repr/ocaml, OCaml's bridge (doc/ocaml/SPEC.md; O1: the spec, the helper and the pins)
+repr-ocaml-ocdump: ## build the helper tools/ocdump into .tmp/ocdump/ with the host's ocamlopt on compiler-libs (bin/repr-ocaml ocdump-build)
+	bin/repr-ocaml ocdump-build
+repr-ocaml-spec-check: ## doc/ocaml/SPEC.md: every forms block reads, every example equals ocdump's output, every Parsetree constructor is in the checklist (bin/repr-ocaml spec-check)
+	bin/repr-ocaml spec-check
+repr-ocaml-samples: ## test/ocaml/samples/ read by ocdump and by Arbace's reader; the typed ones typed and lowered to Lambda (bin/repr-ocaml samples)
+	bin/repr-ocaml samples
+repr-ocaml-corpus: ## the corpora's counts and pins of test/ocaml/corpora.edn hold: OCaml 5.5.0's tarball (fetched once), go-whim's whiml, the host's compiler (bin/repr-ocaml corpus check)
+	bin/repr-ocaml corpus check
+repr-ocaml-corpus-count: ## the files and lines of every OCaml corpus (bin/repr-ocaml corpus count)
+	bin/repr-ocaml corpus count
 
 ## The host and housekeeping
 alpine-check: ## one minimal apk add line reinstalls exactly the host's packages (bin/alpine-env check)
