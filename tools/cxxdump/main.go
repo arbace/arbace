@@ -456,9 +456,18 @@ func writeEdn(w io.Writer, v any) {
 	switch x := v.(type) {
 	case *obj:
 		io.WriteString(w, "{")
+		var seen map[string]int
 		for i, k := range x.keys {
 			if i > 0 {
 				io.WriteString(w, " ")
+			}
+			// clang writes a key twice in a few nodes (UsingType's "type"): the Clojure reader refuses a map with a repeated
+			// key, so the later ones are written as "type-2", "type-3"
+			if seen == nil {
+				seen = map[string]int{}
+			}
+			if seen[k]++; seen[k] > 1 {
+				k = fmt.Sprintf("%s-%d", k, seen[k])
 			}
 			io.WriteString(w, ":")
 			io.WriteString(w, ednKey(k))

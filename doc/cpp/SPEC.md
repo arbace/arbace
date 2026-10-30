@@ -1148,6 +1148,27 @@ departures and additions, each a proposal of the survey (CP40 and on) until the 
 - **Parameters' types** are read from the parameter's text when it reads as a declaration (clang prints a parameter's type
   decayed and desugared: `va_list ap` as `__va_list_tag *`), else from clang's type.
 
+CX4b (the fix round after CX4, survey "As built: CX4b, CX5a") adds:
+
+- **A copy-initializer that is a typed or parenthesized construction** (`int c = int{i};`) is the form with `^:cpp/expr` in its
+  metadata: `(c/var ^int c ^:cpp/expr (cpp/brace int i))`, printed ` = int{i}` (without the flag `(cpp/brace e*)` in an
+  initializer's place is the declaration's own braces, CP40).
+- **A member initializer that is a pack expansion** (`T(args)...`) has `^:pack` on its form.
+- **Placement new** is `(cpp/new T init? :place [p*])` and `(cpp/new-array T n init? :place [p*])` (§9.4, as the table's row).
+- **Explicit instantiations** are `(cpp/instantiate decl)` with `^:extern` for `extern template`; the declaration is `(c/declare
+  name ^ret [params])`, `(c/var ^T name)` or `(cpp/class (<> W int))` (§8), read from the text.
+- **Structured bindings** are `(cpp/structured ^{:tag T} [a b] init?)` (§9.4's table), `T` the written specifiers
+  (`auto`, `(& (const auto))`, ...), `init` as a variable's (`^:cpp/expr`, `(cpp/paren e)`, `(cpp/brace e*)`).
+- **Partial specializations** are `(cpp/template [params] (cpp/struct (<> V T *) [bases] members))` with the written template-id
+  (read from the text); under an enclosing template's header the outer headers wrap it, as for an out-of-line member.
+- **Nested namespace definitions** keep their inline parts: `namespace A::inline B::C` is `(cpp/namespace A/B/C ...)` with
+  `{:cpp/inline-parts [1]}` on the name symbol.
+- **Abbreviated function templates** (`void f(auto p)`) are the function alone: the invented template parameters are not forms.
+- **Directives** (`c/include`, `c/pragma`, `c/directive`) stand between a compound statement's statements too, and the ones inside
+  an executed `#if` group are kept (the helper's `{:executed [LINE ...]}` line, CP45 (a)); the conditional lines themselves are not.
+  A `#pragma` that clang reads as a loop hint is the directive, not an attribute of the statement.
+- A dependent construction `T(a)` / `T{a}` is `(cpp/construct T a)` / `(cpp/brace T a)`.
+
 ## 19. Sources
 
 - The survey: [CPP-SURVEY.md](CPP-SURVEY.md) §1-§4, §11 (CX1), §12 (CP1-CP14, decided 2026-10-30).

@@ -117,6 +117,18 @@
     (subs t 0 (dec (count t)))
     t))
 
+(def ^:dynamic *line-dirs* "the main file's #line directives: [[end-offset line] ...]" [])
+
+(defn- count-nl ^long [^String s ^long from ^long to]
+  (loop [i from n 0] (if (< i to) (recur (inc i) (if (= \newline (.charAt s (int i))) (inc n) n)) n)))
+
+(defn- logical-line
+  "The line of offset `b` as the compiler numbers it: the physical one, or counted from the last #line before it."
+  ^long [^String s ^long b]
+  (if-let [[end n] (last (filter #(<= (long (first %)) b) *line-dirs*))]
+    (+ (long n) (count-nl s (inc (long end)) b))
+    (inc (count-nl s 0 b))))
+
 (defn text-form
   "The node as its source text, or a refusal; `semi`: a statement's or a declaration's text, the ; after it
   included. A node from a macro expansion is its extent's text, the invocations as written."
@@ -126,7 +138,11 @@
      (let [s ^String *src*
            e (if semi (semi-end e) e)]
        (when *texts* (swap! *texts* update (keyword why) (fnil inc 0)))
-       (list 'cpp/text (utf8 (close-split (text-at b e)))))
+       ;; a macro invocation keeps its line: its expansion may hold __LINE__ (the printer writes a #line before it)
+       (let [f (list 'cpp/text (utf8 (close-split (text-at b e))))]
+         (if (and semi (macro-node? n)) ; a statement or declaration: the printer can put a #line before it
+           (vary-meta f assoc :cpp/line (logical-line s b))
+           f)))
      (gap (keyword why) (str "no form for " why ", and its text is not plain")))))
 
 (defmacro ^:private or-text
@@ -1284,7 +1300,7 @@
                     (let [nm (or (name-of (str/trim (subs body (count kw)))) (gap :template "an instantiated class"))]
                       (list (symbol (str "cpp/" kw)) nm))
                     (let [[ty nm] (or (ty/parse-decl body) (gap :template "an instantiated declaration"))
-                          nm (esc-name nm)]
+                          nm (if (string? nm) (ident nm) (esc-name nm))]
                       (if (and (seq? ty) (= (first ty) 'fn))
                         (list 'c/declare (addm (vary-meta nm assoc :tag (nth ty 2)) (dissoc (meta ty) :tag)) (second ty))
                         (list 'c/var (vary-meta nm assoc :tag (esc-name ty))))))
@@ -1415,7 +1431,7 @@
         line-of (fn [off] (let [i (java.util.Collections/binarySearch starts (int off))]
                             (if (neg? i) (- (- i) 1) (inc i))))]
     (vec (for [d (directive-lines s)
-               :when (not (#{"if" "ifdef" "ifndef" "elif" "elifdef" "elifndef" "else" "endif"} (:verb d)))
+               :when (not (#{"if" "ifdef" "ifndef" "elif" "elifdef" "elifndef" "else" "endif" "line"} (:verb d)))
                :when (or (zero? (long (:depth d))) (and executed (contains? executed (long (line-of (:off d))))))]
            (assoc d :form (directive-form d))))))
 
@@ -1427,7 +1443,10 @@
   [nodes ^String src ^String main executed]
   (let [texts (atom {})]
     (binding [*src* src *main* main *texts* texts
-              *directives* (active-directives src executed)]
+              *directives* (active-directives src executed)
+              *line-dirs* (vec (for [d (directive-lines src) :when (and (= "line" (:verb d)) (zero? (long (:depth d))))
+                                     :let [m (re-find #"^#\s*line\s+(\d+)" (:text d))] :when m]
+                                 [(:end d) (Long/parseLong (second m))]))]
       (let [its (items-of nodes :top)
             forms (place its)]
         {:forms (vec forms) :texts @texts}))))

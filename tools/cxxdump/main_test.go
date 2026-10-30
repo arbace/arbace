@@ -85,3 +85,14 @@ func TestNorm(t *testing.T) {
 		t.Fatalf("norm kept ids or locations:\n%s", out.String())
 	}
 }
+
+// A key clang writes twice (UsingType's "type") is written once under its name and then as "type-2".
+func TestRepeatedKey(t *testing.T) {
+	o := &obj{keys: []string{"kind", "type", "decl", "type"}, vals: []any{"UsingType", "a", "b", "c"}}
+	var b strings.Builder
+	writeEdn(&b, o)
+	want := `{:kind "UsingType" :type "a" :decl "b" :type-2 "c"}`
+	if b.String() != want {
+		t.Fatalf("got %s want %s", b.String(), want)
+	}
+}
