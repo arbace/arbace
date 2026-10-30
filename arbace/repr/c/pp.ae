@@ -50,19 +50,46 @@
 
 (defn- num-tok ^Tok [^Tok at ^String s] (Tok. :PPNUMBER s "" (.-pf at) (.-po at) nil nil))
 
+(def ^:private builtin-macro-names
+  #{"__FILE__" "__LINE__" "__COUNTER__" "__INCLUDE_LEVEL__" "__BASE_FILE__" "__FILE_NAME__" "__TIMESTAMP__"})
+
+(defn- udl-split
+  "Arbace (CX2): a user-defined literal whose ud-suffix is a macro's name, as libcpp reads it
+  (is_macro_not_literal_suffix: the suffix is not part of the literal, it is expanded): the literal and
+  the identifier, two tokens; else the token."
+  [macros ^Tok v]
+  (let [src (.-src v)
+        q (long (.lastIndexOf ^String src (if (= (.-ch v) :UDLSTRING) 34 39)))
+        suffix (subs src (inc q))]
+    (if (or (.get ^HashMap macros suffix) (builtin-macro-names suffix))
+      (let [lit (subs src 0 (inc q))
+            first-c (.charAt lit 0)
+            wide? (or (= first-c \L) (= first-c \U) (and (= first-c \u) (not= (.charAt lit 1) \8)))
+            string? (= (.-ch v) :UDLSTRING)
+            kind (if string? (if wide? :LONGSTRINGLITERAL :STRINGLITERAL) (if wide? :LONGCHARCONST :CHARCONST))]
+        [(Tok. kind lit (.-sep v) (.-pf v) (.-po v) (.-m v) (.-hs v))
+         (Tok. :IDENTIFIER suffix "" (.-pf v) (+ (.-po v) (.length lit)) (.-m v) (.-hs v))])
+      [v])))
+
+(declare macros-of)
+
 (defn tokens->cpp
   "tokens2CppTokens: a line's tokens with a `\\space` token before each one that has a separator
-  (but the first, with `skip-first-sep`)."
-  [toks skip-first-sep]
+  (but the first, with `skip-first-sep`). Arbace (CX2): given the macros (`macros`, a HashMap), the user-defined
+  literals whose suffix is a macro's name are split (`udl-split`)."
+  ([toks skip-first-sep] (tokens->cpp toks skip-first-sep nil))
+  ([toks skip-first-sep macros]
   (let [out (ArrayList.)]
     (loop [i 0 ts (seq toks)]
       (when ts
         (let [^Tok v (first ts)]
           (when (and (or (not (zero? i)) (not skip-first-sep)) (has-sep? v))
             (.add out sp-tok))
-          (.add out v)
+          (if (and macros (#{:UDLSTRING :UDLCHAR} (.-ch v)))
+            (doseq [x (udl-split macros v)] (.add out x))
+            (.add out v))
           (recur (inc i) (next ts)))))
-    out))
+    out)))
 
 (defn- trim
   "toksTrim: the `\\space` tokens at both ends dropped."
@@ -99,7 +126,7 @@
 (declare next-line)
 
 (defn- tkz-fill [^Tkz t]
-  (.addAll ^ArrayList (.-in t) ^java.util.Collection (tokens->cpp (next-line (.-cpp t)) false)))
+  (.addAll ^ArrayList (.-in t) ^java.util.Collection (tokens->cpp (next-line (.-cpp t)) false (macros-of (.-cpp t)))))
 
 (defn- tkz-peek ^Tok [^Tkz t ^long i]
   (let [^ArrayList in (.-in t) ^longs h (.-h t)]
@@ -208,6 +235,10 @@
 
 (deftype Cpp [cfg ^HashMap macros ^HashMap mstack ^HashMap groups ^HashSet undefs ^ArrayList stack
               ^objects o ^ArrayList errs ^ArrayList warns ^ArrayList layer ^HashMap files ^HashSet once])
+
+(defn- macros-of
+  "The macros table when the unit is C++ (whose user-defined literals may be split by it), else nil."
+  [c] (when (:cxx (.-cfg ^Cpp c)) (.-macros ^Cpp c)))
 
 (defn- eh [^Cpp c msg] (.add ^ArrayList (.-errs c) msg))
 (defn- slot [^Cpp c k] (aget ^objects (.-o c) k))
@@ -369,7 +400,7 @@
   [^String name ^java.io.File file trigraphs?]
   (.add ^java.util.Set opened (.getAbsolutePath file))
   (let [bs (lex/read-bytes (.getPath file))
-        key [name (java.util.Arrays/hashCode bs) (alength bs) (boolean trigraphs?)]]
+        key [name (java.util.Arrays/hashCode bs) (alength bs) (if (number? trigraphs?) trigraphs? (boolean trigraphs?))]]
     (or (.get ^java.util.concurrent.ConcurrentHashMap file-cache key)
         (let [errs (ArrayList.)
               f (lex/new-file name bs)
@@ -462,11 +493,27 @@
   #{"__has_attribute" "__has_c_attribute" "__has_builtin" "__has_feature" "__has_extension"
     "__has_cpp_attribute"})
 
+(def ^:private alt-tokens
+  "Arbace (CX2): C++'s alternative tokens (5.5, [lex.digraph]) other than the digraphs: name, kind and
+  spelling of the operator."
+  {"and" [:ANDAND "&&"] "or" [:OROR "||"] "not" [\! "!"] "xor" [\^ "^"] "bitand" [\& "&"] "bitor" [\| "|"]
+   "compl" [\~ "~"] "not_eq" [:NEQ "!="] "and_eq" [:ANDASSIGN "&="] "or_eq" [:ORASSIGN "|="]
+   "xor_eq" [:XORASSIGN "^="]})
+
+(defn- alt-name-error
+  "Arbace (CX2): whether `nm` is an alternative token in a C++ unit (g++: it cannot be used as a macro
+  name as it is an operator in C++), an error reported at `t`."
+  [^Cpp c ^Tok t ^String nm]
+  (when (and (:cxx (.-cfg c)) (contains? alt-tokens nm))
+    (eh c (str (pos-str t) ": \"" nm "\" cannot be used as a macro name as it is an operator in C++"))
+    true))
+
 (defn- is-defined?
   "cpp.isDefined: a macro, or one of the operators gcc reports as defined."
   [^Cpp c ^Tok t ^String nm]
   (boolean
-    (or (macro c t nm)
+    (or (and (alt-name-error c t nm) false)
+        (macro c t nm)
         (#{"__has_include" "__has_include__" "__has_include_next"} nm)
         ;; Arbace: gcc's other operators are defined too (cc: not)
         (has-ops nm) (= nm "__has_embed"))))
@@ -648,12 +695,18 @@
     (empty? ((:opt-bodies m) (- k (long (:opt-base m)))))
     (or (>= k (count aps)) (empty? (aps k)))))
 
+(defn- lexed-token
+  "The one preprocessing token `text` lexes as (`mask`: the scanner's features, C++'s for a C++ unit),
+  or nil."
+  [^String text mask]
+  (let [[ts _] (lex/tokens (lex/new-file "<paste>" (.getBytes text "ISO-8859-1")) mask)
+        ts (remove #(= (ch %) \newline) ts)]
+    (when (and (= 1 (count ts)) (= (src (first ts)) text)) (first ts))))
+
 (defn- single-token?
   "Whether `text` lexes as one preprocessing token."
-  [^String text]
-  (let [[ts _] (lex/tokens (lex/new-file "<paste>" (.getBytes text "ISO-8859-1")))
-        ts (remove #(= (ch %) \newline) ts)]
-    (and (= 1 (count ts)) (= (src (first ts)) text))))
+  ([^String text] (single-token? text false))
+  ([^String text mask] (boolean (lexed-token text mask))))
 
 (defn- glue
   "cpp.glue: the last of `ls` pasted to the first of `rs`. Arbace: a placemarker (__VA_OPT__'s) pastes
@@ -668,11 +721,16 @@
       :else
       (let [^Tok t (peek ls)
             ^Tok r0 (if (seq rs) (rs 0) lex/eof-tok)
-            k (if (and (= (.-ch t) :IDENTIFIER) (= (.-src t) "L"))
+            cxx (:cxx (.-cfg c))
+            text (str (.-src t) (.-src r0))
+            lexed (when (and cxx (seq rs) (pos? (.length ^String (.-src r0)))) (lexed-token text (:trigraphs (.-cfg c))))
+            k (cond
+                lexed (.-ch ^Tok lexed) ; Arbace (CX2): C++'s paste gives whatever the lexer reads the text as
+                (and (= (.-ch t) :IDENTIFIER) (= (.-src t) "L"))
                 (case (.-ch r0) :STRINGLITERAL :LONGSTRINGLITERAL :CHARCONST :LONGCHARCONST (.-ch t))
-                (.-ch t))
-            text (str (.-src t) (.-src r0))]
-        (if (and (seq rs) (pos? (.length ^String (.-src r0))) (not (single-token? text)))
+                :else (.-ch t))]
+        (if (and (seq rs) (pos? (.length ^String (.-src r0)))
+                 (not (if cxx lexed (single-token? text))))
           (do (eh c (str (pos-str t) ": pasting \"" (.-src t) "\" and \"" (.-src r0)
                          "\" does not give a valid preprocessing token"))
               (-> ls (conj sp-tok) (into rs)))
@@ -1056,7 +1114,7 @@
                           (do (ts-shift s) (if (has-include? c t arg (= nm "__has_include_next")) 1 0))
                           (do (eh c (str (pos-str (token s)) ": expected ')'")) 0))))))
               ;; Arbace: true and false are 1 and 0 in C23's #if (6.10.1)
-              (and (= nm "true") (#{:c23 :gnu23} (:std (.-cfg c)))) 1
+              (and (= nm "true") (or (#{:c23 :gnu23} (:std (.-cfg c))) (:cxx (.-cfg c)))) 1 ; Arbace (CX2): C++ too
               (= (rune-of s) \()
               (loop [] (ts-shift s) (case (ch (token s)) (\) :eof) (do (ts-shift s) 0) (recur)))
               :else 0)))
@@ -1207,7 +1265,14 @@
   "cpp.eval: a #if's tokens expanded and evaluated: Long, UVal or nil."
   [^Cpp c s0]
   (let [w (ArrayList.)]
-    (expand c false true (toks (tokens->cpp s0 false)) w)
+    (expand c false true (toks (tokens->cpp s0 false (macros-of c))) w)
+    ;; Arbace (CX2): C++'s alternative tokens are the operators in a #if
+    (when (:cxx (.-cfg c))
+      (dotimes [i (.size w)]
+        (let [^Tok x (.get w i)]
+          (when (= (.-ch x) :IDENTIFIER)
+            (when-let [[k sp] (alt-tokens (.-src x))]
+              (.set w i (Tok. k sp (.-sep x) (.-pf x) (.-po x) (.-m x) (.-hs x))))))))
     (let [p (toks w)]
       (skip-blank p)
       (if (zero? (.size ^ArrayList (.-a p)))
@@ -1244,7 +1309,8 @@
         ^Included cur (slot c INCLUDED)]
     (or (when cur
           (let [using (clean (.-using cur))
-                i (.indexOf ^java.util.List sys using)]
+                ;; Arbace (CX2): the list's entries compared cleaned (C++'s has .. in libstdc++'s)
+                i (long (or (first (keep-indexed (fn [i d] (when (= (clean d) using) i)) sys)) -1))]
             (when (>= i 0) (subvec sys (inc i)))))
         sys)))
 
@@ -1284,7 +1350,7 @@
           (slot! c CLOSED true))
       :else
       (let [w (ArrayList.)
-            _ (expand c false true (toks (tokens->cpp (subvec line 2) true)) w)
+            _ (expand c false true (toks (tokens->cpp (subvec line 2) true (macros-of c))) w)
             s (vec w)]
         (if (empty? s)
           (do (eh c (str (pos-str verb) ": #include expects \"FILENAME\" or <FILENAME>")) (slot! c CLOSED true))
@@ -1398,7 +1464,7 @@
   [^Cpp c line]
   (let [^Tok verb (line 1)
         w (ArrayList.)
-        _ (expand c false true (toks (tokens->cpp (subvec (pop line) 2) true)) w)
+        _ (expand c false true (toks (tokens->cpp (subvec (pop line) 2) true (macros-of c))) w)
         s (vec w)
         raw (if (seq s) (include-arg s) "")
         n-arg (if (and (seq s) (= (ch (s 0)) \<)) (inc (count (take-while #(not= (ch %) \>) s))) 1)
@@ -1452,7 +1518,8 @@
 
 (defn- define-macro! [^Cpp c ^Tok nm params rl min-args var-arg fn-like]
   (let [s (src nm)]
-    (when (or (not (protected-macros s)) (= (nth (lex/tok-position nm) 0) "<predefined>"))
+    (when (and (or (not (protected-macros s)) (= (nth (lex/tok-position nm) 0) "<predefined>"))
+               (not (alt-name-error c nm s)))
       (.put ^HashMap (.-macros c) s (new-macro nm params rl min-args var-arg fn-like)))))
 
 (defn- define! [^Cpp c line]
@@ -1464,12 +1531,13 @@
             ln (subvec ln 1)]
         (if (and (= (ch (ln 0)) \() (not (has-sep? (ln 0))))
           (let [[fp rl0 min-args va] (parse-macro-params c (pop ln))]
-            (define-macro! c nm fp (tokens->cpp (trim rl0) true) min-args va true))
-          (define-macro! c nm nil (tokens->cpp (trim (pop ln)) true) -1 -1 false))))))
+            (define-macro! c nm fp (tokens->cpp (trim rl0) true (macros-of c)) min-args va true))
+          (define-macro! c nm nil (tokens->cpp (trim (pop ln)) true (macros-of c)) -1 -1 false))))))
 
 (defn- undef! [^Cpp c line]
   (when (>= (count line) 3)
     (let [nm (src (line 2))]
+      (alt-name-error c (line 2) nm)
       (when-not (protected-macros nm)
         (.add ^HashSet (.-undefs c) nm)
         (.remove ^HashMap (.-macros c) nm)))))

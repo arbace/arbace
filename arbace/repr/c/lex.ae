@@ -131,7 +131,10 @@
    :LONGSTRINGLITERAL "long string literal" :LSH "'<<'" :LSHASSIGN "'<<='" :MODASSIGN "'%='"
    :MULASSIGN "'*='" :NEQ "'!='" :ORASSIGN "'|='" :OROR "'||'" :PPNUMBER "preprocessing number"
    :PPPASTE "'##'" :RSH "'>>'" :RSHASSIGN "'>>='" :STRINGLITERAL "string literal" :SUBASSIGN "'-='"
-   :XORASSIGN "'^='" :eof "<EOF>"})
+   :XORASSIGN "'^='" :eof "<EOF>"
+   ;; Arbace (CX2): C++'s
+   :COLONCOLON "'::'" :ARROWSTAR "'->*'" :DOTSTAR "'.*'" :SPACESHIP "'<=>'"
+   :UDLSTRING "user-defined string literal" :UDLCHAR "user-defined character literal"})
 
 (defn quote-rune-ascii
   "Go's strconv.QuoteRuneToASCII (fmt's %+q of a rune)."
@@ -183,23 +186,40 @@
 (def ^:const CLOSED 4) (def ^:const JOINED 5) (def ^:const SEP 6) (def ^:const SRC 7)
 ;; Arbace (CS50 (a)): whether phase 1 replaces trigraphs, and whether the token being scanned holds one
 (def ^:const TRIGRAPHS 8) (def ^:const TRI 9)
+;; Arbace (CX2): the C++ features of the standard being read, a bit mask (0 for C); `F-CXX` set makes the
+;; lexer C++'s: the alternative spellings of the punctuators, `::`, `->*`, `.*`, and the features gated
+;; by the standard as gcc's libcpp gates them (lang_defaults)
+(def ^:const FEAT 10)
+(def ^:const F-CXX 2)         ; C++'s lexer
+(def ^:const F-ULIT 4)        ; u"", U"", u8"", u'', U'' (C++11)
+(def ^:const F-RAW 8)         ; R"d(...)d" and its prefixes (C++11)
+(def ^:const F-UDL 16)        ; user-defined literals (C++11)
+(def ^:const F-DIGSEP 32)     ; digit separators (C++14)
+(def ^:const F-U8CHAR 64)     ; u8'a' (C++17)
+(def ^:const F-SPACESHIP 128) ; <=> (C++20)
+(def ^:const F-LTCOLON 256)   ; the <:: rule (C++11)
+(def ^:const F-MODULES 512)   ; import <h>; and export import "h"; as header-name directives (-fmodules-ts)
 
 (def ^:const EOF -1)
 ;; cppScan's states
 (def ^:const AT-LINE-START 0) (def ^:const HASH 1) (def ^:const OTHER 2) (def ^:const HEADER-NAME 3)
+(def ^:const EXPORT 4) ; Arbace (CX2): after `export` at a line's start
 
 (deftype Scanner [^CFile f ^bytes buf ^long len ^longs st eh])
 
 (defn scanner
   "A scanner of `f`; `eh` is called with each error's message (a string); `trigraphs?` (Arbace,
-  CS50 (a)): phase 1 replaces trigraphs, as gcc does at -std=c89 to c17 and with -trigraphs."
+  CS50 (a)): phase 1 replaces trigraphs, as gcc does at -std=c89 to c17 and with -trigraphs. Arbace
+  (CX2): a number is the C++ features mask (`F-CXX` ... above) with bit 0 the trigraphs."
   (^Scanner [^CFile f eh] (scanner f eh false))
   (^Scanner [^CFile f eh trigraphs?]
   (let [^bytes buf (.-buf f)
-        st (long-array 10)
-        len (alength buf)]
+        st (long-array 11)
+        len (alength buf)
+        mask (if (number? trigraphs?) (long trigraphs?) (if trigraphs? 1 0))]
     (aset st CH EOF)
-    (aset st TRIGRAPHS (if trigraphs? 1 0))
+    (aset st TRIGRAPHS (bit-and mask 1))
+    (aset st FEAT (bit-and mask -2))
     (when (and (>= len 3) (= (aget buf 0) (unchecked-byte 0xef)) (= (aget buf 1) (unchecked-byte 0xbb))
                (= (aget buf 2) (unchecked-byte 0xbf)))
       (aset st OFF 3))
@@ -207,6 +227,19 @@
 
 (defmacro ^:private st [s k] (list 'aget (with-meta (list '.-st (vary-meta s assoc :tag 'arbace.repr.c.lex.Scanner)) {:tag 'longs}) k))
 (defmacro ^:private st! [s k v] (list 'aset (with-meta (list '.-st (vary-meta s assoc :tag 'arbace.repr.c.lex.Scanner)) {:tag 'longs}) k (list 'long v)))
+
+(defn- cxx?
+  "Arbace (CX2): whether the scanner reads C++."
+  [^Scanner s] (not (zero? (bit-and (long (st s FEAT)) F-CXX))))
+
+(defn- cfeat?
+  "Arbace (CX2): whether a C++ feature (a bit of the mask) is on: false in C."
+  [^Scanner s ^long bit] (not (zero? (bit-and (long (st s FEAT)) bit))))
+
+(defn- feat?
+  "Arbace (CX2): whether a feature C reads always (digit separators, u'a', u8'a') is on: true in C, by
+  the standard's bit in C++."
+  [^Scanner s ^long bit] (or (not (cxx? s)) (cfeat? s bit)))
 
 (defn- peek-byte
   "scanner.peek: the byte `d` after the offset, or -1 past the end."
@@ -424,6 +457,25 @@
       (= c 85) (do (shift s) (when (hex-quad s) (hex-quad s)) true)
       :else (not= (shift s) EOF))))
 
+(declare ucn-length skip-ucn)
+
+(defn- udl-suffix
+  "Arbace (CX2): C++11's ud-suffix, an identifier touching the closing quote of a string or character
+  literal, consumed; the token's kind then :UDLSTRING or :UDLCHAR (the preprocessor splits the suffix
+  off again where it is a macro's name, as libcpp's is_macro_not_literal_suffix does), else `kind`."
+  [^Scanner s kind ^long q]
+  (if (cfeat? s F-UDL)
+    (let [c (rune s)]
+      (if (or (letter? c) (= c 95) (pos? (long (ucn-length s))))
+        (do (loop []
+              (let [c (rune s)]
+                (cond
+                  (or (letter? c) (= c 95) (digit? c)) (do (shift s) (recur))
+                  (pos? (long (ucn-length s))) (do (skip-ucn s (ucn-length s)) (recur)))))
+            (if (= q 34) :UDLSTRING :UDLCHAR))
+        kind))
+    kind))
+
 (defn- quoted
   "scanner.characterConstant and stringLiteral: to the closing quote `q`; `what` names it in the
   error."
@@ -438,7 +490,7 @@
           (shift s))
         (recur))))
   (if (= (rune s) q)
-    (do (shift s) (new-token s kind))
+    (do (shift s) (new-token s (udl-suffix s kind q)))
     (do (err s (str (pos-str s (st s SRC)) ": " what " not terminated"))
         (fail s))))
 
@@ -463,7 +515,7 @@
         (= c 46) (do (shift s) (recur))
         (contains? #{101 69 112 80} c) (do (shift s) (let [c (rune s)] (when (or (= c 43) (= c 45)) (shift s))) (recur))
         (= c 39) (let [c2 (peek-byte s 1)]
-                   (if (or (and (>= c2 48) (<= c2 57)) (and (>= c2 97) (<= c2 122)) (and (>= c2 65) (<= c2 90)) (= c2 95))
+                   (if (and (feat? s F-DIGSEP) (or (and (>= c2 48) (<= c2 57)) (and (>= c2 97) (<= c2 122)) (and (>= c2 65) (<= c2 90)) (= c2 95)))
                      (do (shift s) (shift s) (recur))
                      (new-token s :PPNUMBER)))
         (or (digit? c) (letter? c) (= c 95)) (do (shift s) (recur))
@@ -485,6 +537,39 @@
   ^Tok [^Scanner s c eq]
   (if (= (shift s) 61) (do (shift s) (new-token s eq)) (new-token s c)))
 
+(defn- raw-string
+  "Arbace (CX2): a C++11 raw string literal (5.13.5), its prefix of `plen` characters at the offset: its
+  characters taken as they stand in the file (phases 1 and 2 reverted), to the `)d\"` that closes it."
+  ^Tok [^Scanner s kind ^long plen]
+  (let [buf ^bytes (.-buf s) len (.-len s)
+        q (+ (long (st s OFF)) plen)
+        start (st s SRC)]
+    (loop [i (inc q)]
+      (let [b (if (< i len) (bit-and (long (aget buf i)) 0xff) -1)]
+        (cond
+          (= b 40)
+          (let [dl (- i q 1)
+                end (loop [j (inc i)]
+                      (cond
+                        (>= j len) -1
+                        (and (= (bit-and (long (aget buf j)) 0xff) 41)
+                             (<= (+ j dl 2) len)
+                             (= (bit-and (long (aget buf (+ j dl 1))) 0xff) 34)
+                             (loop [k 0] (cond (>= k dl) true
+                                               (not= (aget buf (+ j 1 k)) (aget buf (+ q 1 k))) false
+                                               :else (recur (inc k)))))
+                        (+ j dl 2)
+                        :else (recur (inc j))))]
+            (if (neg? end)
+              (do (err s (str (pos-str s start) ": unterminated raw string")) (fail s))
+              (do (loop [j q] (when (< j end) (when (= (aget buf j) 10) (add-line (.-f s) (inc j))) (recur (inc j))))
+                  (st! s OFF end) (st! s CH EOF) (st! s JOINED 0) (st! s TRI 0)
+                  (rune s)
+                  (new-token s (udl-suffix s kind 34)))))
+          (or (< b 0) (> (- i q) 17) (contains? #{32 41 92 34 10 9 11 12 13} b))
+          (do (err s (str (pos-str s start) ": invalid character in raw string delimiter")) (fail s))
+          :else (recur (inc i)))))))
+
 (defn scan0
   "scanner.cppScan0: the next preprocessing token (6.4); an :eof token at the end."
   ^Tok [^Scanner s]
@@ -492,11 +577,27 @@
   (st! s SRC (st s OFF))
   (let [c (rune s)]
     (case (int c)
-      (40 41 44 58 59 63 91 10 93 123 125 126) (do (shift s) (new-token s (char c)))
+      (40 41 44 59 63 91 10 93 123 125 126) (do (shift s) (new-token s (char c)))
+      ;; Arbace (CX2): C++'s :: and the digraph :>
+      58 (if (cxx? s)
+           (case (int (shift s))
+             58 (do (shift s) (new-token s :COLONCOLON))
+             62 (do (shift s) (new-token s \]))
+             (new-token s \:))
+           (do (shift s) (new-token s \:)))
       42 (op1 s \* :MULASSIGN)
       61 (op1 s \= :EQ)
       94 (op1 s \^ :XORASSIGN)
-      37 (op1 s \% :MODASSIGN)
+      37 (if (cxx? s)
+           ;; the digraphs %> { , %: # and %:%: ##
+           (case (int (shift s))
+             61 (do (shift s) (new-token s :MODASSIGN))
+             62 (do (shift s) (new-token s \}))
+             58 (if (and (= (peek-byte s 1) 37) (= (peek-byte s 2) 58))
+                  (do (shift s) (shift s) (shift s) (new-token s :PPPASTE))
+                  (do (shift s) (new-token s \#)))
+             (new-token s \%))
+           (op1 s \% :MODASSIGN))
       47 (op1 s \/ :DIVASSIGN)
       33 (op1 s \! :NEQ)
       43 (case (int (shift s))
@@ -510,7 +611,8 @@
       45 (case (int (shift s))
            61 (do (shift s) (new-token s :SUBASSIGN))
            45 (do (shift s) (new-token s :DEC))
-           62 (do (shift s) (new-token s :ARROW))
+           62 (do (shift s)
+                  (if (and (cxx? s) (= (rune s) 42)) (do (shift s) (new-token s :ARROWSTAR)) (new-token s :ARROW)))
            (new-token s \-))
       124 (case (int (shift s))
             61 (do (shift s) (new-token s :ORASSIGN))
@@ -519,7 +621,15 @@
       35 (if (= (shift s) 35) (do (shift s) (new-token s :PPPASTE)) (new-token s \#))
       60 (case (int (shift s))
            60 (if (= (shift s) 61) (do (shift s) (new-token s :LSHASSIGN)) (new-token s :LSH))
-           61 (do (shift s) (new-token s :LEQ))
+           61 (do (shift s)
+                  (if (and (cfeat? s F-SPACESHIP) (= (rune s) 62)) (do (shift s) (new-token s :SPACESHIP)) (new-token s :LEQ)))
+           ;; Arbace (CX2): the digraphs <: [ and <% {, but C++11's <:: is < and :: unless a : or > follows
+           58 (if (and (cxx? s)
+                       (not (and (cfeat? s F-LTCOLON) (= (peek-byte s 1) 58)
+                                 (not (contains? #{58 62} (peek-byte s 2))))))
+                (do (shift s) (new-token s \[))
+                (new-token s \<))
+           37 (if (cxx? s) (do (shift s) (new-token s \{)) (new-token s \<))
            (new-token s \<))
       62 (case (int (shift s))
            62 (if (= (shift s) 61) (do (shift s) (new-token s :RSHASSIGN)) (new-token s :RSH))
@@ -529,12 +639,24 @@
            (do (shift s) (shift s) (shift s) (new-token s :DDD))
            (do (shift s)
                (let [c2 (rune s)]
-                 (if (and (>= c2 48) (<= c2 57)) (ppnumber s) (new-token s \.)))))
+                 (cond
+                   (and (>= c2 48) (<= c2 57)) (ppnumber s)
+                   (and (= c2 42) (cxx? s)) (do (shift s) (new-token s :DOTSTAR))
+                   :else (new-token s \.)))))
       34 (quoted s :STRINGLITERAL 34 "string literal")
       39 (quoted s :CHARCONST 39 "character constant")
       -1 (do (st! s CLOSED 1) (new-token s :eof))
       (let [p1 (peek-byte s 1) p2 (peek-byte s 2)]
         (cond
+          ;; Arbace (CX2): C++11's raw string literals, R"d(...)d" and LR, uR, UR, u8R
+          (and (cfeat? s F-RAW) (= c 82) (= p1 34)) (raw-string s :STRINGLITERAL 1)
+          (and (cfeat? s F-RAW) (= c 76) (= p1 82) (= p2 34)) (raw-string s :LONGSTRINGLITERAL 2)
+          (and (cfeat? s F-RAW) (cfeat? s F-ULIT) (or (= c 117) (= c 85)) (= p1 82) (= p2 34)) (raw-string s :LONGSTRINGLITERAL 2)
+          (and (cfeat? s F-RAW) (cfeat? s F-ULIT) (= c 117) (= p1 56) (= p2 82) (= (peek-byte s 3) 34)) (raw-string s :STRINGLITERAL 3)
+          ;; C++ before C++11 reads u"a", U"a", u8"a" as an identifier and a string literal
+          (and (not (feat? s F-ULIT)) (or (= c 117) (= c 85)) (or (= p1 34) (= p1 39))) (identifier s)
+          (and (not (feat? s F-ULIT)) (= c 117) (= p1 56) (or (= p2 34) (= p2 39))) (identifier s)
+          (and (not (feat? s F-U8CHAR)) (= c 117) (= p1 56) (= p2 39)) (identifier s)
           (and (= c 76) (= p1 39)) (do (shift s) (quoted s :LONGCHARCONST 39 "character constant"))
           (and (= c 76) (= p1 34)) (do (shift s) (quoted s :LONGSTRINGLITERAL 34 "string literal"))
           (and (= c 117) (= p1 56) (= p2 34)) (do (shift s) (shift s) (quoted s :STRINGLITERAL 34 "string literal"))
@@ -575,15 +697,30 @@
   (let [state (st s STATE)]
     (cond
       (= state AT-LINE-START)
+      (let [t (scan0 s)
+            mod? (cfeat? s F-MODULES)
+            id (when (and mod? (= (.-ch t) :IDENTIFIER)) (.-src t))]
+        (st! s STATE (cond (= (.-ch t) \newline) AT-LINE-START (= (.-ch t) \#) HASH
+                           ;; Arbace (CX2): C++20's module directives, `import <h>;` and `export import "h";`
+                           (= id "import") HEADER-NAME
+                           (= id "export") EXPORT
+                           :else OTHER))
+        t)
+      (= state EXPORT)
       (let [t (scan0 s)]
-        (st! s STATE (cond (= (.-ch t) \newline) AT-LINE-START (= (.-ch t) \#) HASH :else OTHER))
+        (st! s STATE (cond (= (.-ch t) \newline) AT-LINE-START
+                           (and (= (.-ch t) :IDENTIFIER) (= (.-src t) "import")) HEADER-NAME
+                           :else OTHER))
         t)
       (= state HASH)
       (let [t (scan0 s)]
         (st! s STATE (if (and (= (.-ch t) :IDENTIFIER) (contains? header-verbs (.-src t))) HEADER-NAME OTHER))
         t)
       (= state HEADER-NAME)
-      (do (st! s STATE OTHER) (header-name s))
+      (do (st! s STATE OTHER)
+          (let [t (header-name s)]
+            (when (and (cxx? s) (= (.-ch t) \newline)) (st! s STATE AT-LINE-START))
+            t))
       :else
       (let [t (scan0 s)]
         (when (= (.-ch t) \newline) (st! s STATE AT-LINE-START))
