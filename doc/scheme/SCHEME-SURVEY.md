@@ -697,11 +697,11 @@ host: no gate, no Arbace build, no lock; every run on stage 0 (`target/seed/amd6
   `.tmp/scheme/corpora/`; nothing is distributed, so no `LICENSE.md` entry (C's corpora are the precedent). Not
   fetched yet: Chez's mats, the SRFI suites, ecraven's benchmarks (SC3 (a)'s later stages, SM8).
 - **`test/scheme/probes.edn`** (SM1): 1,249 probes, 129 KB: this survey's 2.4 programs (the whole program, `|a b|`,
-  `#u8(`, `(import (scheme base))`, `#;`, the tower, `call/cc`), 372 token texts (delimiters, comments,
-  dots, character names, string escapes, quote forms, symbols), 855 number tokens (15 prefix combinations times 57
-  bodies), 18 files of 500 random numbers (Python `Random(2026)`: random doubles by bit pattern, powers of ten,
-  random big integers and ratios), and the characters, strings and symbols of every code point below U+0100 and
-  some above.
+  `#u8(`, `(import (scheme base))`, `#;`, the tower, `call/cc`), 181 token texts (delimiters, comments,
+  dots, character names, string escapes, quote forms, symbols), 1,050 number tokens (15 prefix combinations times 70
+  bodies), 8 files of about 500 random numbers (Python `Random(2026)`: random doubles by bit pattern, powers of ten,
+  random big integers and ratios), and 3 files of the characters, strings and symbols of every code point below U+0100 and
+  some above (181 + 1,050 + 8 + 7 + 3 = 1,249).
 - **`arbace/repr/scheme{.ae,/}`** (SM2), evaluated on stage 0 and not embedded (SC24): `read` (the reader:
   atmosphere, lists, vectors, bytevectors, strings, characters, identifiers with inline hex escapes, the
   tokens' classes, offsets in Chez's characters), `number` (the R6RS grammar with Chez's exactness, polar and
@@ -718,7 +718,7 @@ host: no gate, no Arbace build, no lock; every run on stage 0 (`target/seed/amd6
 
 ### The check, numbers
 
-`bin/repr-scheme check`: 1,325 files and probes (76 corpus files and 1,249 probes), 4,863 + 1,121 data
+`bin/repr-scheme check`: 1,325 files and probes (76 corpus files and 1,249 probes), 1,140 data in the corpora and 4,863 in the probes
 (the corpora's: Racket 190, Larceny 159, whimsical 8 top-level data (the library `(whimsical editor)` is one
 datum of 2.97 MB), Chibi 783 before Chez's refusal), **equal to Chez's reading in all 1,325**: the forms (E-tree,
 lists apart from vectors, exact from inexact, flonums by bits), the offsets, `write`'s text byte for byte, and for
