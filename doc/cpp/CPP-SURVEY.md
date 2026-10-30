@@ -1362,3 +1362,55 @@ includes `arbace/`).
   at CX5. CP47: no libTooling dumper, the JSON route stays.
 - CP60-CP66 as recommended: CP60, CP63 (a); CP61 (a) now, (d) at CX5; CP62 (a) while the oracle is clang, (b) at CX5 if a
   g++-judged level needs it; CP64 (a) with (c) past 2 GB; CP65 (b) and (c) at CX5; CP66 (b).
+
+## As built: CX5b (2026-10-30)
+
+A short step on `cpp-cx2` (light tier, stage 0 with `ARBACE_HOST_EXE`, no gate, no build, no lock). Done: `:full`, CP44 (b), CP66 (b), two
+reader fixes. **Not done** (time, and each needs its own measured round): CP41 (b) macro forms, CP65 (b) and (c), the text-form shrinking, the 88 and 19 known cases.
+
+### CX5b.1 Numbers (same samples, objects on)
+
+| corpus | files | read | l1 | l3 | l4 g++ | l4 clang | **l5 `:full`** | pass | known | failing |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| samples | 8 | 8 | 8 | 8 | 7 | 8 | **8** | 7 | 1 | 0 |
+| whim++ | 10 | 10 | 10 | 10 | 10 | 10 | **10** | 10 | 0 | 0 |
+| g++.dg every 10th | 1,807 (747 rejected) | 1,060 | 1,041 | 1,020 | 961 | 1,039 | **1,060** | 972 | 88 | 0 |
+| libstdc++ testsuite every 40th | 244 (32 rejected) | 212 | 202 | 203 | 195 | 196 | **212** | 193 | 19 | 0 |
+
+Unchanged from CX4b/CX5a except level 5. `bin/repr-c roundtrip` untouched (no file under `arbace/repr/c/` changed; not rerun).
+
+### CX5b.2 What changed
+
+- **`:full`** (`arbace.repr.cpp`, `read-cpp ... full`, `bin/repr-cpp read --full`): item-granular as C3b: the text before the first item is the file form's
+  `:c/head`, each item's text to the next item's first byte is `:c/text` on its first form (`""` on the rest of the item). Directives are cut points too.
+  The cuts are exact at any offsets, so the print is the original byte for byte; an item whose offset is before an earlier one (the alias declaration of a
+  `#pragma weak`) gets `""`. The unit is written as `.ae`, read back and printed (latin-1 bytes). The round trip's level 5 (`rtcheck`) does that and
+  compares with the source; **a file passes only with level 5 `same`**. Sub-item text (class members) is not cut (spec §11 says v1 is item-granular).
+- **CP44 (b)**: `:cpp/attrs` and `:c/gnu-attrs` hold `name`, `ns/name`, `[name arg*]` (argument: integer, identifier, plain string, else `(cpp/text "...")`),
+  `:cpp/alignas` integers for `alignas(N)`; statements' attributes too. 172 attribute-using g++.dg files: 115 pass, 5 known as before.
+- **CP66 (b)**: `:include-dirs ["util" ""]` in the `libstdcxx-testsuite` entry of `test/cpp/corpora.edn`, `ppcheck lists` adds the `-I`s; the list is byte-equal to the hand-made one.
+- **Readability fixes** found by level 5 (the `.ae` of three files could not be read back): `(operator "/=")` (`/=` is no symbol), variables named `nil`, `true`, `false` are `(c/id ...)`.
+- **CP48 (b)**: with `:full` the print of a file is its original, so g++'s objects of it are the original's by construction; the 47 `gxx-objects-location` files stay classed
+  (the object check was not rerun on the `:full` print: it compiles the same bytes under the same name).
+- **CP61 (d)**: `:full` keeps every line where it was; the `#line` before macro texts stays in `:lines`. CP62 (b) was not needed.
+
+### CX5b.3 Not done, and why
+
+- **CP41 (b)** macro forms: designed, not built. Plan: at the three sites that make a macro node a text (`ex`, `stmt-items`, `decl-forms`), convert the node's own AST under a
+  dynamic flag and attach `^{:cpp/macro "invocation text" :cpp/line N}`; the printer writes the text; siblings of one invocation (same extent start) carry `""` after the first;
+  a gap inside falls back to the text as now. Safe by construction for levels 1 and 3 (same text, same dump); the risk is the converter reading macro-spelled ranges (gaps, so fallbacks).
+- CP65 (b)/(c), init-capture lambdas, explicit instantiations, `EmptyDecl`, overlapping groups, the known cases: untouched.
+
+### CX5b.4 Proposals (CP70-CP72)
+
+- **CP70 Is level 5 part of "pass"?** Options: (a) yes (built); (b) reported beside. *Recommended: (a)*: `:full` is a contract of the printer.
+- **CP71 Sub-item text for `:full`.** Options: (a) item-granular only (built); (b) members of classes and statements of bodies cut too (edits to one member keep the rest); (c) per token.
+  *Recommended: (a) until an editor needs (b)*; it is the C3b choice.
+- **CP72 Operator names that are no symbols.** Options: (a) a string `(operator "/=")` (built, as `new[]`); (b) a word (`div=`). *Recommended: (a)*, consistent with §6.3's strings.
+
+### CX5b.5 Heavy list, slips, shipped files, scratch
+
+- Heavy (after the tag): the whole libstdc++ testsuite with level 5; `bin/gate` essential (gate key includes `arbace/`); `bin/repr-cpp pp-check`/`spec-check` were not run (spec not edited: §5.6/§11 should mention the attribute encoding and `/=`).
+- Slips: one `<(...)` used in a diff command (failed harmlessly, no process left); a pointless noop subagent spawn. Disk was at 86-87% from other jobs; I trimmed Go's cache and my own scratch.
+- Shipped files changed (tools' namespaces, re-seed relevant if embedded): `arbace/repr/cpp.ae`, `arbace/repr/cpp/{convert,print,rtcheck,types,ppcheck}.ae`; data `test/cpp/corpora.edn`.
+- Scratch: `.tmp/cx/h-samples`, `h-wpp`, `h-lt`, `h-dg` (results.tsv, summary.edn, read.tsv), `.tmp/cx/g5-dg` (the first `:full` run), `.tmp/cx/lattr.tsv`.
