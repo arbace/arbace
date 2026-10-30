@@ -996,3 +996,236 @@ and all 862 headers (§CX2.5).
 - **`/dev/null`** appeared in four of my read-only probe commands (`awk ... /dev/null`, `sed ... /dev/null`, `grep -c . /dev/null`): a slip of the rule; nothing was written there.
 - `sleep` inside `timeout bash -c 'until ...'` loops to wait for a background run (the tool blocks a bare foreground `sleep`).
 - The gcc tarball was extracted into the worktree's `.tmp/cpp-gcc/` (g++.dg, g++.old-deja, c-c++-common, libstdc++-v3's include and testsuite), after its SHA-256 was checked against the pin; the scratch (`.tmp/cpp-gcc/`, `.tmp/repr-cpp-check/`) is the sample runs' work directory.
+
+## As built: CX3, CX4 (2026-10-30)
+
+CX3, the oracle's helper, and CX4, repr/cpp in mode `:lines`, on the branch `cpp-cx2` (on top of CX2's `e8702613`), in one working
+day (against 4-6 and 10-16). GT7's clean run was going: the light tier of `.tmp/agent-rules.md` held (4 threads, under 2 GB,
+no gate, no Arbace build, no lock); every Arbace run was evaluated on stage 0 (`/root/arbace/target/seed/amd64/arbace`,
+`ARBACE_HOST_EXE` set). The proposals CP20-CP35 are undecided; the recommendations were followed and are named below where
+they bind. No shipped file changed: the new code is tools' namespaces evaluated from the checkout (`arbace/repr/cpp*`), a
+Go helper and scripts; `arbace/repr/c/` is untouched.
+
+### CX3.1 What was built: `tools/cxxdump`
+
+| file | lines | what |
+|---|---:|---|
+| `tools/cxxdump/main.go` | 664 | the streaming filter (CX1's, reworked): a container's (`TranslationUnitDecl`, `NamespaceDecl`, `LinkageSpecDecl`, `ExportDecl`) children streamed one at a time; **a header's node is skipped as it streams** once its `loc` (which clang prints before `inner`) says it is not the main file's, its inner nodes read token by token with only their locations followed (`skipVal`), so no header node is held; **an instantiation under a main-file template keeps only its `TemplateArgument`s without their type trees** (`-instances` keeps them whole); `-norm`; `-implicit=false` as before |
+| `tools/cxxdump/run.go` | 515 | the run (clang, the filter, the numbers), the layouts pass, the cache |
+| `tools/cxxdump/norm.go` | 45 | the AST level's normal form: no `id`, `loc`, `range`, `previousDecl`, `parentDeclContextId`, `referencedMemberDecl`, no value that is a node id, the positions clang writes into names (`(lambda at a.cpp:6:20)`) masked as `at *`, `tagUsed` of a template type parameter dropped (N8) |
+| `bin/lib/repr-cpp/cxxdump-check` | 51 | cxxdump over a list (pp-check's `gxx.list` format), in each file's directory under its relative name, the numbers in `summary.tsv` and `totals.txt` |
+
+- **Layouts (CP20 (a), recommended and followed).** `-layouts` runs a second clang pass, `-S -emit-llvm -Xclang -fdump-record-layouts`
+  (the IR to a scratch file), and parses both dumps: each `*** Dumping AST Record Layout` block (the type as clang prints it, `sizeof`,
+  `dsize`, `align`, `nvsize`, `nvalign`, the vtable pointer's offset, the direct bases with offset, primary and virtual, the fields with
+  name, declaration, byte offset and bit range) is paired with the `*** Dumping IRgen Record Layout` block that follows it for the same
+  record (its `Record:` line gives the declaration's kind and location, its `LLVMType:` the IR type); the main file's records are
+  written as `{:layout {...}}` lines after the declarations (spec §17.6's facts, in the helper's output; the facts file of CP21 is CX5's,
+  CP49). A unit whose code CodeGen refuses keeps its AST (`:layouts-error true` in its numbers).
+- **Numbers (`-stats FILE`).** Each run writes one map: the JSON bytes read, the output bytes, the declarations kept and dropped, the
+  layouts, the wall seconds of the AST pass and of the layouts pass, the peak resident sets of the filter and of clang (getrusage), the
+  status (`ok`, `rejected`, `filter-error`) and the cache's answer.
+- **The cache (`-cache DIR`).** The key is the SHA-256 of the filter's version, clang's `--version`, the options, the arguments and the
+  main file's bytes; the AST pass runs with `-MD -MF` and the entry keeps the SHA-256 of every file the unit read (`KEY.deps`); an entry
+  is used only when all of them still have their digests (a header changed is a miss). A rejection is kept too (clang's standard error
+  with it); a unit clang stops before it writes its dependencies is not cached.
+
+### CX3.2 Numbers
+
+| run | JSON | kept | wall | filter peak | clang peak |
+|---|---:|---:|---:|---:|---:|
+| survey P3's `io.cpp` (`<iostream>`, `<vector>`, `<algorithm>`) | 607.7 MB | 1 declaration, 26 KB | 6.7 s | **88 MB** | 199 MB |
+| P1's `a.cpp` (`<vector>`) | 127.2 MB | 6, 38.5 KB | 1.2 s | 20 MB | 121 MB |
+| `g++.dg/template/crash124.C` (1,024 nested instantiations, rejected) | **6,807.6 MB** | 5, 1.8 MB | 17.5 s | **32 MB** (CX1's filter: 872 MB and 221 MB kept) | 103 MB |
+| `g++.dg` every 10th file (1,807), 4 at a time, `-layouts` | 13,253.5 MB | 62.9 MB | 135.7 s summed (slowest 16.7 s) | 146 MiB (`warn/Wsequence-point-4.C`: 2.55 GB of JSON, 15.5 MB kept) | 123 MiB |
+
+Of the 1,807: clang accepts 1,060, rejects 746 (the error tests, and g++'s extensions and dialect options clang refuses), and one does not
+end (`cpp0x/pr104668.C`: clang loops after its errors; 300 s timeout). 601 layouts were written; three units' CodeGen failed
+(`cannot compile this flexible array initializer yet`). A second run is all cache hits. **The filter's memory is bounded by the largest
+main-file declaration**, not by the unit: the 6.8 GB dump of a 21-line test is filtered in 32 MB.
+
+### CX3.3 The libTooling decision (CP2, CP25)
+
+The numbers say the JSON route costs what clang's dump costs: the filter keeps pace with the pipe (9.9 s became 6.7 s on P3 with the
+header nodes skipped), its memory is bounded, and a corpus file costs 0.075 s on average. What CX4 needed from beyond the JSON was
+**spellings** (written `auto`, `explicit`, a declaration's qualifier, template arguments of a name, a parameter's type as written,
+macro invocations' extents), which the converter reads from the main file's text through the dump's ranges (CX4.2); a libTooling
+dumper would give the same through `TypeLoc`s and the `Lexer`. **CP25 stays (a): no packages installed**, the decision recorded with
+its numbers (CP47 restates it for the user with CX4's experience).
+
+### CX4.1 What was built: repr/cpp in mode `:lines`
+
+| Arbace / script | what |
+|---|---|
+| `arbace/repr/cpp/types.ae` | a small C++ tokenizer and the reader of clang's printed types (`qualType`) and of written names: specifiers (builtin words to the C forms' symbols, `unsigned int` is `unsigned`), qualified names (`std/vector`, `(cpp/scope (<> std/vector int) size_type)`, `(cpp/global x)`), template-ids with type, literal and text arguments, `operator` names, abstract and named declarators (pointers, references, pointers to members, arrays, function types with cv, ref-qualifier, `noexcept`, `throw()`, trailing return), `parse-decl` for a parameter's or a variable's written text |
+| `arbace/repr/cpp/convert.ae` | the converter: clang's node kinds to C++ forms (spec §12.2's table) for declarations (namespaces nested and inline, linkage blocks, classes with bases, access and members, constructors with member initializers, destructors, conversion and operator functions, `= default`, `= delete`, function-try-blocks, enums, typedefs, aliases, `using`, `using namespace`, `using enum`, `static_assert`, friends, function, class, variable and alias templates with type, non-type, pack and constrained parameters and defaults, explicit specializations), statements (blocks as `let` around the items after a declaration, `if` with init and condition declarations and `constexpr`, `when`, loops, range-for, `switch`, labels, `case`, `goto`, `try`/`catch`, attributed statements, coroutines' `co_return`), expressions (operators and overloaded operators back to their operator forms, calls, members, casts with their reference from the value category, constructions, braced lists, `new`/`delete`, `throw`, `typeid`, `sizeof`/`alignof`, `noexcept`, packs, lambdas with simple captures, `co_yield`/`co_await`, literals); the directives outside conditionals placed between the items of the top level, namespaces, linkage blocks and classes; text forms (CP41) for the rest, counted by kind |
+| `arbace/repr/cpp/print.ae` | the printer: repr/c's canonical layout extended (one statement a line, four spaces an indent, braces exactly where the source had a compound statement, the source's parentheses and no others: every parenthesis the oracle's AST needs is a `ParenExpr` the forms keep), types as specifiers and a declarator around the name |
+| `arbace/repr/cpp.ae` | `read-cpp` (a dump and the main file's text into `{:ns :file-form :forms :texts}`), `unit-text` (repr/c's `.ae` layout), `print-cpp`; `bin/repr-cpp read`, `print` |
+| `arbace/repr/cpp/rtcheck.ae`, `bin/lib/repr-cpp/roundtrip` | the round trip: the originals dumped (in their directories, under their relative names, `-iquote` their directory), read and printed under `WORK/print/` at the same relative names; the prints dumped and read again; level 1 the two `.ae` texts byte for byte; level 3 the two `-norm` dumps byte for byte; level 4 the objects of g++ (`-O0 -fno-stack-protector`, the file's options) and of clang (the modelled options) byte for byte, `-fdebug-prefix-map` for the files that ask `-g`; judged against `test/repr/cpp/roundtrip-known.edn` |
+| `test/cpp/samples/` | eight sample programs: P1, P6 (both readings), P8's coroutine, the layouts probe, `<iostream>` and `<algorithm>`, `auto` and lambdas, classes, declarations of every kind |
+
+### CX4.2 How the converter reads what the AST does not keep
+
+- **Types** are clang's printed types read back, which are the written ones with typedef sugar and qualifiers as written, but for
+  three cases where the text decides: a deduced type (`auto x = 1` prints as `int`; `auto l = [...]` as `(lambda at ...)`): the
+  written specifiers before the name are read instead, `^auto`, `^{:tag (& (const auto))}`; an array (clang prints the bound's value,
+  `char buf[NUMBUFLEN]` as `char[65]`: the print would lose the reference to `NUMBUFLEN`, an AST difference): the declaration's text
+  read as a declaration; a parameter (clang prints it decayed and desugared, `va_list ap` as `__va_list_tag *`): likewise (CP46).
+- **Names** of references are their written text read as a name (`std::cout`, `n::id<int>`, `::n::g`), so template arguments and
+  qualifiers are kept; a declaration's qualifier (`int D::f()`) is read backwards from its name; `explicit`, `inline`, `constexpr`,
+  `consteval`, `constinit` are the written words before the name (the JSON has no `explicit`; its `inline` and `constexpr` are also
+  the implicit ones).
+- **Initializers** follow the declaration's `init` style (`c`, `call`, `list`; a member's from the text between its name and its
+  initializer); `std::vector<int> v{1, 2}` is one pair of braces (the list's braces are the construction's), `T x;` with a class `T`
+  has no initializer (clang's zero-argument construction).
+- **Macros** (CP41): the outermost node whose first or last token comes from an expansion is its extent's text, the invocation as
+  written with its arguments; a statement or a declaration from a macro likewise, its `;` included. This recovers the
+  invocations (and so `__LINE__`, `assert`'s file and line) without the preprocessor; a file of nested directives keeps only the ones
+  outside every conditional group (CP45).
+- **Implicit nodes** (`isImplicit`, instantiations, the implicit special members, default arguments, default member initializers,
+  the implicit `this`, conversions through conversion functions, `CXXDefaultInitExpr`s of an aggregate's omitted members) are left
+  out; the oracle recreates them from the print.
+- **Grouped declarations.** A declaration statement of several declarators is `cpp/decls` (one `DeclStmt`); `struct S {...} s;` at
+  namespace scope is two forms (the AST has two declarations, the variable's type `struct S` elaborated); a declaration whose text
+  overlaps another's and holds an unnamed class or a text form is one text (`typedef struct {...} T;`).
+
+### CX4.3 Numbers
+
+`bin/repr-cpp roundtrip` (4 at a time; the final runs, after the last edit of the converter and printer):
+
+| corpus | files | oracle rejects | read | text-free | l1 | l3 | l4 g++ (orig fails) | l4 clang (orig fails) | pass | known |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `test/cpp/samples/` | 8 | 0 | 8 | 6 | 8 | 8 | 7 (0) | 8 (0) | 7 | 1 |
+| whim++ (`/root/go-whim/wpp/src` at `80c49bf5`, 10 files, 75,292 lines) | 10 | 0 | 10 | 6 | 10 | 10 | 10 (0) | 10 (0) | **10** | 0 |
+| `g++.dg`, every 10th file (CX2's sample) | 1,807 | 747 | 1,060 | 703 | 1,005 | 976 | 916 (34) | 1,001 (3) | **918** | 142 |
+
+- **No file fails**: every file passes every level it reaches, or the oracle rejects it (`oracle-rejects`: clang refuses 747 of the
+  sample, the error tests and g++'s own dialect), or the known file lists it with a class (`test/repr/cpp/roundtrip-known.edn`). Of the
+  sample's `dg-do compile` files: 549 pass, 86 known, 433 rejected by the oracle; `dg-do run` 107, 26, 36; `dg-do link` 18, 2, 3.
+- **whim++ round-trips whole**: `editor.cpp` (61,921 lines; one text form, an initializer) and `editor.hpp` (11,090; 16) read, print,
+  read again to the same forms, give clang's AST of the original, and give g++'s and clang's objects byte for byte; the printed
+  `host.cpp` includes the printed `editor.hpp` (CP50). The three files with text forms hold 101 of them, every one a macro invocation or a
+  member array's initializer group (`printf.cpp`'s `va_arg`s, `term.cpp`'s `sigaction` fields).
+- **The known classes** (142): `gxx-objects-location` 52 (and the coroutine sample: g++ -O0's code depends on positions inside a
+  function, `-fcompare-debug`, `-fsanitize`; the AST and clang's objects equal; CP48), `print-rejected` 41, `ast-differs` 34,
+  `forms-differ` 14, `objects-differ` 1: the last four are the converter's and printer's open cases, classed by the first level that
+  fails (CX4.5).
+- **Text forms**: 2,300 in 357 of the 1,060 read files; by kind, macro invocations 1,354 (the outermost node touching an expansion:
+  `static_assert`s through `SA(...)` macros 349, declarations from macros 144, expressions and statements 861), groups of overlapping
+  declarations 198, partial specializations 103, placement `new` 68, explicit instantiations 42, `CXXUnresolvedConstructExpr` 39,
+  structured bindings 71, lambdas with init captures or specifiers, `asm`, type traits, deduction guides (the rest).
+- **Speed and memory** (light tier, 4 at a time): the sample's dumps 307 s (clang, the original and its normal form), the forms and
+  prints 12 s, the prints read again 37 s, the four compilations of each file 62 s: about 7 minutes for 1,807 files. whim++: 44 s to
+  read and print its 2.2 MB on stage 0 (`editor.cpp`'s dump is 90 MB of Clojure-reader data), 54 s again, 14 s of objects. One Arbace
+  process stayed under the 1.5 GiB `GOMEMLIMIT`.
+- **The first pass and the fix rounds**: the first full sample gave 765 passing and 295 failing; my rounds and a Sonnet subagent's
+  (out-of-line template members' headers read from the text, the constructor and destructor names, clang's `type-parameter-D-I`
+  spellings back to the parameters' names, inherited default arguments, attributes after declarators and on classes, record
+  declarations with declarators as one text, the array filler's elements) brought it to 918 and 142, each round checked against the
+  samples and whim++.
+
+### CX4.4 Checks
+
+Run (all light): `bin/repr-cpp roundtrip` on the samples, whim++ and the g++.dg sample (final runs above); `bin/repr-cpp cxxdump-check`
+on the g++.dg sample with `-layouts`, twice (the second all hits); `go vet`, `gofmt -l`, `go test` of `tools/cxxdump` (four tests:
+the filter, the Clojure-reader output, the skipped header nodes with the instantiations' summary, the normal form); `make
+check-makefile`; **C's results unchanged**: `bin/repr-c roundtrip --corpus c23conf,tcc-tests2` gives c23conf 49 pass and tcc-tests2 85
+pass and 3 known, C3b's numbers (no file under `arbace/repr/c/` changed). **Not run:** `bin/gate` in any form; any Arbace build; the whole
+g++.dg (CX4.7); `bin/repr-cpp pp-check` (the lexer and preprocessor did not change); `bin/repr-cpp spec-check` (no forms block was added
+to the spec).
+
+### CX4.5 What is left
+
+- The open classes: dependent names in templates with unnamed parameters (clang's `type-parameter-0-0` has no name to give back),
+  abbreviated function templates and constrained `auto` parameters, unexpanded packs in lambdas, deduction guides and CTAD's
+  `DeducedTemplateSpecializationType`, conversion functions to function references, `__LINE__` inside a structured node (a node whose
+  boundary is not the macro's), `isReferenced` lost through canonical template arguments, `int (T::*)` printed without its parentheses
+  (a `ParenType` the type reader drops), pragma placement inside functions.
+- The directives inside conditional groups (CP45), the structured forms of what is text now (partial specializations, explicit
+  instantiations, placement `new`, structured bindings, init captures, requires-clauses and concepts' definitions), the facts file
+  (CP49): CX5's, with `:full`.
+
+
+### CX4.6 Proposals (CP40-CP50)
+
+Each with options, the recommended one marked, and why; the built choice stands until the user decides.
+
+- **CP40 A braced list without a type.**
+  - Options: (a) `(cpp/init-list e*)` in an expression, `(cpp/brace T e*)` typed, `(cpp/brace e*)` only in an initializer's place
+    (built); (b) one head `cpp/brace` with `^:cpp/typed` metadata on the typed one; (c) the spec's §9.4 as written (ambiguous).
+  - *Recommended: (a).* A printer cannot tell `T{x}` from `{T, x}` by the symbols (a type symbol and a value symbol look alike); a head
+    keeps hand-written forms right, metadata does not.
+- **CP41 Text forms and the macro unit.**
+  - Options: (a) the outermost node whose boundary touches a macro expansion is its extent's text, and a node with no form yet is
+    its text, counted by kind (built); (b) recover invocations from the shared preprocessor's stream (C3b's way: the run of tokens at
+    one invocation's position), structured forms with `:c/macro` for whole nodes; (c) refuse such units.
+  - *Recommended: (a) now, (b) at CX5* with the directive layer (CP45): (a) is exact and needs no preprocessor run; (b) keeps the
+    structure of what the macros expand to as C does, at the preprocessor's cost (CX2: 28 s for a first `<vector>`).
+- **CP42 Constructor and destructor declarations.**
+  - Options: (a) `^:cpp/declare (cpp/ctor S [params])`, `^:cpp/declare (cpp/dtor S)` (built); (b) heads of their own
+    (`cpp/ctor-declare`); (c) `(cpp/dtor S (do))` for a definition, `(cpp/dtor S)` a declaration (changing §7.2).
+  - *Recommended: (c)* for the destructor and (a) for the constructor until then: §7.2's `(cpp/dtor S)` for `~S(){}` is the
+    ambiguous one; a constructor's member-initializer vector already tells a definition.
+- **CP43 Elaborated type specifiers.**
+  - Options: (a) `(cpp/elaborated struct S)` (built); (b) `^:cpp/elaborated S` metadata as §5.1 says; (c) normalize them away
+    (N9) and class the AST difference.
+  - *Recommended: (a).* clang's type of the print equals the original's only if the keyword is printed, and metadata on a type symbol
+    inside a tag is easy to lose.
+- **CP44 Attributes.**
+  - Options: (a) their texts by syntax (`:cpp/attrs`, `:c/gnu-attrs`, `:cpp/alignas`; built); (b) structured as C's `:c/attrs`
+    vectors (a name and arguments as forms); (c) facts only.
+  - *Recommended: (b) at CX5*, (a) until then: C's encoding exists and the printer is shared in spirit; the texts were the fast way
+    to a correct print.
+- **CP45 Directives inside conditional groups.**
+  - Options: (a) the shared preprocessor's layer (the executed directives' offsets) for a main file whose directives nest in
+    conditionals (`convert` takes the set; not wired yet); (b) the directives outside every group only (built); (c) the conditional
+    lines kept with their active groups' items.
+  - *Recommended: (a).* (b) drops an active `#define` under an `#if`, which a later text form or the headers may need; the layer is CX2's
+    and C3b's.
+- **CP46 Written types against clang's printed types.**
+  - Options: (a) clang's types, the written text for deduced types, arrays and parameters (built); (b) the written text for every
+    declaration through `parse-decl`; (c) libTooling's `TypeLoc`s (CP25 (b)).
+  - *Recommended: (a).* clang's types are already the written ones up to the three cases, and they read without the macros a
+    written declaration may hold.
+- **CP47 The libTooling dumper (CP2, CP25 restated with CX3's numbers).**
+  - Options: (a) no packages: the JSON filter is bounded (32 MB for a 6.8 GB dump) and keeps pace with clang; (b) install
+    `clang23-dev llvm23-dev` (about 250 MiB) and write the dumper in C++ for tokens and `TypeLoc`s.
+  - *Recommended: (a).* Every spelling CX4 needed was in the text the dump's ranges point at.
+- **CP48 g++'s location-dependent objects.**
+  - Options: (a) a class `gxx-objects-location` per file, judged by the AST level and clang's objects (built); (b) compare g++'s objects
+    of the `:full` print instead (CX5), which keeps every byte's place; (c) drop g++ from level 4.
+  - *Recommended: (a) and (b) at CX5*: C3b found the same of gcc 15 (`:objects`), and the `:full` print settles it.
+- **CP49 The facts file.**
+  - Options: (a) CX5 writes `NAME.facts.ae` (CP21 (a)) from the dump: layouts (CX3's `-layouts`), instances (the summaries), mangled
+    names, types; (b) facts in the `.ae` as metadata; (c) none until eval needs them (CX6).
+  - *Recommended: (a)* with CX5: the data is in the dump already and CX6's lowering will read it.
+- **CP50 A corpus's own headers in the round trip.**
+  - Options: (a) the prints of a corpus's headers stand beside the prints of its sources, so a printed source includes the printed
+    header (built: whim++'s `host.cpp` includes the printed `editor.hpp`); (b) `-iquote` the original directory first, every print
+    against the original headers.
+  - *Recommended: (a).* It is the stronger check: a program printed whole compiles to the same objects.
+### CX4.7 The heavy list (for a window after the tag)
+
+1. `bin/gate` (essential) in the worktree; `arbace/repr/cpp*` is under `arbace/` and changes the gate's key (the executables rebuild,
+   about 8 minutes) though nothing shipped loads it.
+2. The whole `g++.dg` (18,066 files): `bin/repr-cpp cxxdump-check` (about 25 minutes of clang at 4 jobs, 135 s for a tenth) and
+   `bin/repr-cpp roundtrip` (about 70 minutes at 4 jobs, 7 minutes for a tenth; the converter's one process holds a corpus's reads,
+   to measure: shard by directory if it passes 2 GB), then the known file rewritten from the classes.
+3. `g++.old-deja`, `c-c++-common` as C++, the libstdc++ testsuite and headers, HotSpot (its build flags), through both.
+4. `test/gate/steps.edn`: the light steps `repr-cpp cxxdump-test` and `roundtrip` on the samples and whim++ (seconds and 2 minutes),
+   with their inputs (`arbace/repr/cpp*`, `tools/cxxdump`, `bin/lib/repr-cpp/*`, `test/cpp/samples`, `test/repr/cpp/roundtrip-known.edn`,
+   go-whim's pin).
+5. CX2's list stands (its full corpora, `host check` on another host).
+
+### CX4.8 Rule slips and notes
+
+- **Threads**: for a few minutes a `bin/repr-c roundtrip` (3 threads) started beside a running `bin/repr-cpp roundtrip` (4); I stopped it
+  by its task and ran it again later at 2 threads, while the subagent's runs used 4: about six threads in all for that run (the light tier
+  says 4 an agent).
+- **A stage 0 build in the worktree**: the Sonnet subagent once ran `bin/repr-cpp` without `ARBACE_HOST_EXE`, which started a stage 0
+  build (`target/seed`); it removed it; the leftover `target/arbace-go/host-compile-seed.*` was moved to `.tmp/sub/slip/`.
+- No source was edited while a check that loaded it ran (the subagent's rounds and mine took turns); the wrapper scripts were not edited
+  during their runs but for `bin/repr-cpp` (exec'd into the round trip before the edit) and the Makefile.
+- The scratch the numbers come from: `.tmp/cx/f-samples/`, `.tmp/cx/f-wpp/`, `.tmp/cx/f-dg/` (`results.tsv`, `read.tsv`, `classes.tsv`,
+  `summary.edn`), `.tmp/cx/dg/` (cxxdump-check's numbers), `.tmp/sub/` (the subagent's rounds), the cxxdump cache `.tmp/repr-cpp/cxxdump-cache/`;
+  copy them before the worktree is removed.

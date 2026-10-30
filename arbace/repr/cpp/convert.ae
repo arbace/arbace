@@ -86,11 +86,24 @@
 (defn- ntext ^String [n] (when-let [[b e] (rng n)] (text-at b e)))
 
 (defn- semi-end
-  "The end of a text that a ; follows (after white space): past the ;."
+  "The end of a text that a ; follows (after white space): past the ;. Attributes written after the declarator are
+  not in a node's range: up to the ; they precede."
   ^long [^long e]
   (let [s ^String *src*
         j (loop [j e] (if (and (< j (.length s)) (Character/isWhitespace (.charAt s (int j)))) (recur (inc j)) j))]
-    (if (and (< j (.length s)) (= \; (.charAt s (int j)))) (inc j) e)))
+    (cond
+      (and (< j (.length s)) (= \; (.charAt s (int j)))) (inc j)
+      (re-find #"^(__attribute__|__attribute|__asm__|__asm|asm|alignas|__declspec|\[\[)" (subs s (int j) (min (.length s) (+ (int j) 14))))
+      (let [k (loop [k (long j) d 0]
+                (if (>= k (.length s))
+                  nil
+                  (let [c (.charAt s (int k))]
+                    (cond (#{\( \[ \{} c) (recur (inc k) (inc d))
+                          (#{\) \] \}} c) (if (zero? d) nil (recur (inc k) (dec d)))
+                          (and (= c \;) (zero? d)) (inc k)
+                          :else (recur (inc k) d)))))]
+        (or k e))
+      :else e)))
 
 (defn text-form
   "The node as its source text, or a refusal; `semi`: a statement's or a declaration's text, the ; after it
@@ -99,10 +112,7 @@
   ([n why semi]
    (if-let [[b e] (if (macro-node? n) (macro-extent n) (rng n))]
      (let [s ^String *src*
-           e (if semi
-               (let [j (loop [j (long e)] (if (and (< j (.length s)) (Character/isWhitespace (.charAt s (int j)))) (recur (inc j)) j))]
-                 (if (and (< j (.length s)) (= \; (.charAt s (int j)))) (inc j) e))
-               e)]
+           e (if semi (semi-end e) e)]
        (when *texts* (swap! *texts* update (keyword why) (fnil inc 0)))
        (list 'cpp/text (utf8 (text-at b e))))
      (gap (keyword why) (str "no form for " why ", and its text is not plain")))))
@@ -169,11 +179,22 @@
                (with-meta (apply list (first x) (map esc-name (rest x))) (meta x)))
     :else x))
 
+(def ^:dynamic *tparams* "the enclosing templates' parameter names, by depth: [[name ...] ...]" [])
+
+(defn- subst-tparams
+  "clang's canonical `type-parameter-D-I` spelling as the parameter's name, where the enclosing templates are known."
+  ^String [^String s]
+  (if (and s (str/includes? s "-parameter-"))
+    (str/replace s #"(?:type|value|template)-parameter-(\d+)-(\d+)"
+                 (fn [[m d i]] (let [nm (get-in *tparams* [(Long/parseLong d) (Long/parseLong i)])] (if (seq nm) nm m))))
+    s))
+
 (defn- type-of
   "A type string as a type form."
-  [^String s]
+  [^String s0]
+  (let [s (subst-tparams s0)]
   (when (or (nil? s) (re-find #"\((lambda|unnamed|anonymous) " s)) (gap :type (str "an unwritable type " s)))
-  (esc-name (ty/parse-type s)))
+  (esc-name (ty/parse-type s))))
 
 (defn- name-of
   "A written name (a text) as a name form, or nil."
@@ -218,7 +239,7 @@
 (defn- decl-name
   "A declaration's name form: its written qualifier and its name (operator names as forms)."
   [n]
-  (let [nm ^String (:name n)
+  (let [nm ^String (subst-tparams (:name n))
         q (qualifier n)
         full (str q nm)]
     (cond
@@ -351,7 +372,8 @@
 
 (defn- init-list [n]
   ;; an InitListExpr's written elements (the trailing value-initialized ones are the oracle's)
-  (let [ks (vec (kids n))
+  (let [;; with an array filler, clang's JSON writes the filler and then the elements under :array_filler
+        ks (vec (or (seq (kids n)) (rest (:array_filler n))))
         ks (loop [ks ks] (if (and (seq ks) (#{"ImplicitValueInitExpr" "CXXDefaultInitExpr"} (kind (peek ks)))) (recur (pop ks)) ks))]
     (when (some #(= (kind %) "ImplicitValueInitExpr") ks) (gap :init "value-initialized elements inside a list"))
     (when (:array_filler n) (when (some #(= (kind %) "DesignatedInitExpr") ks) (gap :init "designators")))
@@ -404,6 +426,7 @@
   [n]
   (let [k (kind n)]
     (cond
+      (none? n) (gap :empty "an expression the dump does not hold")
       (and (macro-node? n) (not (contains? transparent k))) (text-form n "macro")
       (contains? transparent k)
       (ex (first (kids n)))
@@ -718,14 +741,34 @@
               (if (or (implicit? a) (:inherited a))
                 m
                 (let [[b e] (or (rng a) (gap :attr (str (kind a) " in a macro")))
+                      ;; an alignas attribute's range is its keyword: the parenthesis after it is part of it
+                      e (if (re-find #"^(alignas|_Alignas)$" (text-at b e))
+                          (let [s ^String *src*
+                                j (loop [j (long e)] (if (and (< j (.length s)) (Character/isWhitespace (.charAt s (int j)))) (recur (inc j)) j))]
+                            (if (and (< j (.length s)) (= \( (.charAt s (int j))))
+                              (loop [k (inc j) d 1]
+                                (cond (>= k (.length s)) e
+                                      (= \( (.charAt s (int k))) (recur (inc k) (inc d))
+                                      (= \) (.charAt s (int k))) (if (= d 1) (inc k) (recur (inc k) (dec d)))
+                                      :else (recur (inc k) d)))
+                              e))
+                          e)
                       t (utf8 (text-at b e))
                       before (str/trimr (text-at (max 0 (- (long b) 40)) b))]
                   (cond
                     (re-find #"^(alignas|_Alignas)\b" t) (update m :cpp/alignas (fnil conj []) t)
+                    ;; after a comma: the list it is in, the nearer opener
+                    (and (.endsWith ^String before ",")
+                         (> (.lastIndexOf ^String (text-at (max 0 (- (long b) 400)) b) "__attribute__")
+                            (.lastIndexOf ^String (text-at (max 0 (- (long b) 400)) b) "[[")))
+                    (update m :c/gnu-attrs (fnil conj []) t)
                     (re-find #"(\[\[|,)\s*(using\s+[A-Za-z_]+\s*:)?$" before) (update m :cpp/attrs (fnil conj []) t)
                     (re-find #"(__attribute__\s*\(\(|,)$" before) (update m :c/gnu-attrs (fnil conj []) t)
                     :else (gap :attr (kind a)))))))
           {} (filter #(.endsWith ^String (kind %) "Attr") (kids n))))
+
+(defn- has-attrs? [n]
+  (some #(and (.endsWith ^String (kind %) "Attr") (not (implicit? %)) (not (:inherited %))) (kids n)))
 
 (defn- spec-meta [n]
   (let [ws (prefix-words n)]
@@ -864,18 +907,21 @@
     (case k
       "CXXConstructorDecl"
       (let [inits (vec (keep meminit (filter #(= (kind %) "CXXCtorInitializer") (kids n))))
-            nm (decl-name n)
+            ;; clang names a template's constructor `A<T>`: the written name is `A`
+            nm (decl-name (update n :name #(first (str/split % #"<"))))
             f (cond
                 declare? (list 'cpp/ctor nm ps)
                 (#{'(cpp/defaulted) '(cpp/deleted)} (first body)) (list 'cpp/ctor nm ps (first body))
                 :else (apply list 'cpp/ctor nm ps inits body))]
         (addm f (cond-> (dissoc m :const :volatile :cpp/ref) declare? (assoc :cpp/declare true))))
       "CXXDestructorDecl"
-      (let [nm (let [q (qualifier n)] (if q (or (name-of (str q (:name n))) (gap :name q)) (ident (subs (:name n) 1))))
+      (let [nm (let [q (qualifier n) dn (first (str/split (:name n) #"<"))] (if q (or (name-of (str q dn)) (gap :name q)) (ident (subs dn 1))))
             nm (if (and (seq? nm) (= (first nm) 'cpp/scope) (seq? (last nm)) (= (first (last nm)) 'cpp/dtor-name))
                  (apply list 'cpp/scope (concat (butlast (rest nm)) [(second (last nm))]))
                  nm)
-            f (apply list 'cpp/dtor nm body)]
+            f (apply list 'cpp/dtor nm body)
+            ;; a destructor's type says noexcept when the spec is implicit: only a written one is the form's
+            m (if (re-find #"\bnoexcept\b" (let [t (or (ntext n) "") i (.indexOf t "{")] (if (neg? i) t (subs t 0 i)))) m (dissoc m :noexcept))]
         (addm f (cond-> (dissoc m :const :volatile :cpp/ref) declare? (assoc :cpp/declare true))))
       (let [nm (or (decl-name n) (gap :fn "a name"))
             ps (if (or (= k "CXXConversionDecl")) ps (with-meta ps {:tag r}))
@@ -909,17 +955,24 @@
         cs (filter #(= (kind %) "EnumConstantDecl") (kids n))
         t (ntext n)
         def? (or (seq cs) (and t (str/includes? t "{")))
-        m (cond-> {} (:fixedUnderlyingType n) (assoc :cpp/underlying (type-of (get-in n [:fixedUnderlyingType :qualType]))))
+        m (cond-> (attrs-of n) (:fixedUnderlyingType n) (assoc :cpp/underlying (type-of (get-in n [:fixedUnderlyingType :qualType]))))
         es (mapv (fn [c]
                    (let [x (first (remove #(.endsWith ^String (kind %) "Attr") (kids c)))]
                      (if x (mk (ident (:name c)) (ex x)) (ident (:name c)))))
                  cs)]
     (addm (apply list tag (concat (when nm [nm]) (when def? [es]))) m)))
 
+(defn- written-default
+  "A parameter's default argument node, unless it is inherited from an earlier declaration (the parameter's text has no `=`)."
+  [p]
+  (let [t (ntext p)]
+    (when (or (nil? t) (str/includes? t "="))
+      (first (filter #(= (kind %) "TemplateArgument") (kids p))))))
+
 (defn- tparam [p]
   (case (kind p)
     "TemplateTypeParmDecl"
-    (let [d (first (filter #(= (kind %) "TemplateArgument") (kids p)))
+    (let [d (written-default p)
           other (remove #(#{"TemplateArgument" "ConceptSpecializationExpr"} (kind %)) (kids p))
           constrained (some #(= (kind %) "ConceptSpecializationExpr") (kids p))
           _ (when (seq other) (gap :template (str "a type parameter's " (kind (first other)))))
@@ -934,7 +987,7 @@
         d (concat [:default (type-of (qt d))])
         true (->> (apply list))))
     "NonTypeTemplateParmDecl"
-    (let [d (first (filter #(= (kind %) "TemplateArgument") (kids p)))
+    (let [d (written-default p)
           dx (when d (first (kids d)))]
       (cond-> (list 'value (with-meta (if (:name p) (ident (:name p)) '_) {:tag (type-for p)}))
         (:isParameterPack p) (concat [:pack true])
@@ -944,6 +997,72 @@
 
 (def ^:private tparam-kinds #{"TemplateTypeParmDecl" "NonTypeTemplateParmDecl" "TemplateTemplateParmDecl"})
 
+(defn- tt [ts i] (nth (get ts i) 1 nil))
+(defn- arg-end [ts i]
+  (loop [j i d 0]
+    (let [t (tt ts j)]
+      (cond
+        (nil? t) nil
+        (and (zero? d) (#{"," ">"} t)) j
+        (#{"(" "[" "{" "<"} t) (recur (inc j) (inc d))
+        (#{")" "]" "}" ">"} t) (recur (inc j) (dec d))
+        :else (recur (inc j) d)))))
+(defn- tkind [ts i] (nth (get ts i) 0 nil))
+
+;; The template headers an out-of-line member of a class template is written under (`template <class T> void A<T>::f()`):
+;; clang's tree has none of them, they are read from the text.
+(defn- header-param [ts i e]
+  (let [w (str/join " " (map #(nth % 1) (subvec ts i e)))
+        f (tt ts i)]
+    (cond
+      (#{"typename" "class"} f)
+      (let [pack (= "..." (tt ts (inc i)))
+            j (if pack (+ i 2) (inc i))
+            nm (when (and (= (inc j) e) (= :id (tkind ts j))) (tt ts j))]
+        (if (or (= j e) nm)
+          (cond-> (list 'typename (if nm (ident nm) '_)) pack (concat [:pack true]))
+          (list 'cpp/text w)))
+      (= f "template") (list 'cpp/text w)
+      :else
+      (let [pack (some #(= "..." (nth % 1)) (subvec ts i e))
+            w (str/join " " (map #(nth % 1) (remove #(= "..." (nth % 1)) (subvec ts i e))))
+            [t nm] (try (ty/parse-decl w) (catch Exception _ nil))]
+        (if t
+          (cond-> (list 'value (with-meta (if nm (ident (str nm)) '_) {:tag (esc-name t)})) pack (concat [:pack true]))
+          (list 'cpp/text w))))))
+
+(defn- outer-headers
+  "The parameter lists of the template headers a text starts with: [[param ...] ...]."
+  [^String t]
+  (let [ts (ty/tokens t)]
+    (loop [i 0 out []]
+      (if (and (= "template" (tt ts i)) (= "<" (tt ts (inc i))))
+        (if (= ">" (tt ts (+ i 2)))
+          (recur (+ i 3) (conj out []))
+          (let [[ps j] (loop [j (+ i 2) ps []]
+                         (let [e (arg-end ts j)]
+                           (when-not e (gap :template "a header"))
+                           (let [ps (conj ps (header-param ts j e))]
+                             (if (= ">" (tt ts e)) [ps (inc e)] (recur (inc e) ps)))))]
+            (recur (long j) (conj out (vec ps)))))
+        out))))
+
+(declare wrap-headers header-names)
+(defn- with-headers
+  "The forms of a declaration written under template headers its tree does not have (an out-of-line member, an explicit specialization)."
+  [n outer? mk-fs]
+  (let [t (when outer? (ntext n))]
+    (if (and t (str/starts-with? t "template"))
+      (let [hs (outer-headers t)]
+        (binding [*tparams* (into *tparams* (header-names hs))]
+          (mapv #(wrap-headers % hs) (vec (mk-fs)))))
+      (mk-fs))))
+
+(defn- header-names [hs]
+  (vec (for [ps hs :when (seq ps)] (vec (map #(str (second %)) ps)))))
+
+(defn- wrap-headers [f hs] (reduce (fn [f ps] (list 'cpp/template ps f)) f (reverse hs)))
+
 (defn template-form [n ctx]
   (let [ks (kids n)
         ps (take-while #(tparam-kinds (kind %)) ks)
@@ -952,8 +1071,12 @@
         ;; a requires-clause is not read yet
         t (ntext n)
         _ (when (and t (re-find #"\brequires\b" t)) (gap :template "a requires clause"))
-        [f] (decl-forms d ctx)]
-    (list 'cpp/template (mapv tparam ps) f)))
+        [db] (rng d)
+        [nb] (rng n)
+        outer (when (and db nb (< (long db) (long nb))) (outer-headers (text-at db nb)))]
+    (binding [*tparams* (conj (into *tparams* (header-names outer)) (vec (map #(or (:name %) "") ps)))]
+      (let [[f] (decl-forms d ctx false)]
+        (wrap-headers (list 'cpp/template (mapv tparam ps) f) outer)))))
 
 (defn- spec-args [n]
   (for [a (filter #(= (kind %) "TemplateArgument") (kids n))]
@@ -965,7 +1088,8 @@
 
 (defn decl-forms
   "A declaration's forms (none for an implicit one)."
-  [n ctx]
+  ([n ctx] (decl-forms n ctx true))
+  ([n ctx outer?]
   (let [k (kind n)]
     (cond
       (none? n) []
@@ -975,13 +1099,13 @@
       (try
         (when (and (macro-node? n) (not (#{"NamespaceDecl" "LinkageSpecDecl"} k))) (gap :macro "a declaration from a macro"))
         (case k
-          "VarDecl" (var-form n ctx)
+          "VarDecl" (with-headers n outer? #(var-form n ctx))
           "FieldDecl" (var-form n ctx)
-          ("FunctionDecl" "CXXMethodDecl" "CXXConstructorDecl" "CXXDestructorDecl" "CXXConversionDecl") [(fn-form n)]
+          ("FunctionDecl" "CXXMethodDecl" "CXXConstructorDecl" "CXXDestructorDecl" "CXXConversionDecl") (with-headers n outer? #(vector (fn-form n)))
           "CXXRecordDecl" [(record-form n ctx)]
           "EnumDecl" [(enum-form n)]
-          "TypedefDecl" [(list 'c/typedef (or (decl-name n) (gap :typedef "a name")) (type-of (qt n)))]
-          "TypeAliasDecl" [(list 'cpp/alias (decl-name n) (type-of (qt n)))]
+          "TypedefDecl" (do (when (has-attrs? n) (gap :attr "a typedef's attributes")) [(list 'c/typedef (or (decl-name n) (gap :typedef "a name")) (type-of (qt n)))])
+          "TypeAliasDecl" (do (when (has-attrs? n) (gap :attr "an alias's attributes")) [(list 'cpp/alias (decl-name n) (type-of (qt n)))])
           "NamespaceDecl"
           (let [[nm inner] (loop [nm [(:name n)] n n]
                              (let [ks (remove implicit? (kids n))]
@@ -1012,7 +1136,13 @@
           "AccessSpecDecl" [(list 'access (keyword (:access n)))]
           "FriendDecl"
           (if-let [t (:type n)]
-            [(list 'cpp/friend (type-of (:qualType t)))]
+            ;; a template-id's arguments are the written ones (clang prints the template's own parameter names)
+            [(list 'cpp/friend
+                   (or (when (str/includes? (:qualType t) "<")
+                         (when-let [w (ntext n)]
+                           (try (type-of (str/trim (-> w (str/replace #"^friend\s+" "") (str/replace #";\s*$" ""))))
+                                (catch arbace.lang.ExceptionInfo _ nil))))
+                       (type-of (:qualType t))))]
             [(list 'cpp/friend (first (decl-forms (first (kids n)) ctx)))])
           ("FunctionTemplateDecl" "ClassTemplateDecl" "VarTemplateDecl" "TypeAliasTemplateDecl") [(template-form n ctx)]
           "ClassTemplateSpecializationDecl"
@@ -1022,10 +1152,10 @@
                 args (spec-args n)
                 f (with-meta (apply list tag (apply list '<> nm args) (rest f)) (meta f))]
             [(list 'cpp/template [] f)])
-          "EmptyDecl" []
+          "EmptyDecl" [(text-form n "EmptyDecl")]
           [(text-form n k true)])
         (catch arbace.lang.ExceptionInfo e
-          (if (:cpp/gap (ex-data e)) [(text-form n (str k "/" (name (:cpp/gap (ex-data e)))) true)] (throw e)))))))
+          (if (:cpp/gap (ex-data e)) [(text-form n (str k "/" (name (:cpp/gap (ex-data e)))) true)] (throw e))))))))
 
 (defn local-decl
   "A DeclStmt's binding forms: one declaration, or (cpp/decls ...) for several in one statement."
@@ -1033,7 +1163,7 @@
   (let [ds (kids n)
         fs (vec (mapcat #(decl-forms % :local) ds))]
     (if (> (count ds) 1)
-      (if (some #(= (kind %) "CXXRecordDecl") ds)
+      (if (or (some #(#{"CXXRecordDecl" "EnumDecl"} (kind %)) ds) (some #(and (seq? %) (= (first %) 'cpp/text)) fs))
         [(text-form n "DeclStmt/record" true)]
         [(apply list 'cpp/decls fs)])
       fs)))
@@ -1065,7 +1195,7 @@
               (when *texts* (swap! *texts* update :overlap (fnil inc 0)))
               (recur (next rs) (conj (pop out) {:e [b en] :fs [t] :text? true})))
             (recur (next rs) (conj out {:e e :fs fs :text? (some #(and (seq? %) (= (first %) 'cpp/text)) fs)
-                                        :unnamed? (and (#{"CXXRecordDecl" "EnumDecl"} (kind n)) (empty? (str (:name n))))}))))))))
+                                        :unnamed? (boolean (#{"CXXRecordDecl" "EnumDecl"} (kind n)))}))))))))
 
 (defn- place
   "The items with the directives that stand between them, in the file's order (a directive inside an item is that
