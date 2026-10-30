@@ -16,7 +16,7 @@ CLOJURE_TESTS_GO ?= target/arbace-go/amd64/arbace-tests
   toolchain-verify box-vendor-verify x509roots-verify repr-go-roundtrip repr-go-roundtrip-text repr-go-native-check \
   repr-java-check repr-java-roundtrip repr-java-text repr-java-jdk repr-java-parse-check repr-java-front-check repr-java-attr-check repr-java-nojavac-check repr-clojure-check repr-clojure-roundtrip repr-haskell-roundtrip repr-haskell-iface repr-haskell-text repr-haskell-layout repr-haskell-test repr-rust-roundtrip repr-rust-iface repr-rust-text repr-rust-pretty repr-rust-behaviour repr-rust-code repr-rust-all repr-rust-test repr-c-host-record repr-c-host-check repr-c-ccdump repr-c-check repr-c-record repr-c-parse-check goi-annotations goi-test goi-check goi-check-aot goi-check-aot-essential goi-check-nethttp goi-divergences goi-divergences-aot java-check java-check-compiled java-check-compiled-essential java-check-print java-check-nread java-check-diagnostics java-check-essential java-check-ref alpine-check clean \
   suite-aot suite-aot-essential suite-divergences java-forms-verify java-forms-update reap-record-native-check \
-  repr-c-gcc-tests repr-ocaml-ocdump repr-ocaml-spec-check repr-ocaml-samples repr-ocaml-corpus repr-ocaml-corpus-count repr-ocaml-roundtrip repr-ocaml-roundtrip-all repr-ocaml-check repr-ocaml-text repr-ocaml-cmi repr-ocaml-dumps oi-stdlib oi-build oi-check oi-divergences oi-record-ref oi-repl oi-aot-lib oi-check-aot oi-divergences-aot check-makefile
+  repr-c-gcc-tests repr-ocaml-ocdump repr-ocaml-spec-check repr-ocaml-samples repr-ocaml-corpus repr-ocaml-corpus-count repr-ocaml-roundtrip repr-ocaml-roundtrip-all repr-ocaml-check repr-ocaml-text repr-ocaml-cmi repr-ocaml-dumps oi-stdlib oi-build oi-check oi-divergences oi-record-ref oi-repl oi-aot-lib oi-check-aot oi-divergences-aot oi-suite-check oi-suite-check-aot oi-suite-divergences oi-suite-expect oi-suite-rollup oi-suite-record-ref repr-ocaml-opam check-makefile
 
 help: ## list the targets
 	@awk 'BEGIN {FS = ":.*## "} /^## / {printf "\n%s\n", substr($$0, 4)} \
@@ -319,6 +319,22 @@ oi-check-aot: ## O6: the run programs translated by o2j and run at the light lev
 	bin/oi check --aot
 oi-divergences-aot: ## O6: the AOT level's recorded results against test/ocaml/divergences-aot.edn's classes (bin/oi divergences --aot)
 	bin/oi divergences --aot
+oi-suite-record-ref: ## O7: ocamlc's and ocamlopt's runs of the suite corpus (the testsuite's run tests O5 does not hold, the opam set's programs) into test/ocaml/ref-suite.edn (bin/oi suite record-ref)
+	bin/oi suite record-ref
+oi-suite-check: ## O7: the suite corpus on oi against ocamlc's runs, every non-pass classed (bin/oi suite check)
+	bin/oi suite check
+oi-suite-check-aot: ## O7: the suite corpus at the light AOT level against ocamlopt's runs and oi's (bin/oi suite check --aot)
+	bin/oi suite check --aot
+oi-suite-divergences: ## O7: the suite corpus' recorded results against test/ocaml/divergences-suite{,-aot}.edn (bin/oi suite divergences; --aot)
+	bin/oi suite divergences
+	bin/oi suite divergences --aot
+oi-suite-expect: ## O7: the testsuite's expect tests on the host's expect tool (testsuite/tools/expect.ml on compiler-libs) into test/ocaml/ref-expect.edn (bin/oi suite expect)
+	bin/oi suite expect
+oi-suite-rollup: ## O7: every .ml and .mli of testsuite/ in a result or a class, from the levels' records, no runs (bin/oi suite rollup)
+	bin/oi suite rollup
+repr-ocaml-opam: ## O7: the opam set (fetched at pinned versions): read, round trip and :full text, dumps (bin/repr-ocaml roundtrip --text, dumps over the :opam-* corpora)
+	bin/repr-ocaml roundtrip --text opam-sexplib0 opam-fmt opam-astring opam-uutf opam-re opam-yojson opam-containers opam-pprint opam-cmdliner opam-base64
+	bin/repr-ocaml dumps opam-sexplib0 opam-fmt opam-astring opam-uutf opam-re opam-yojson opam-containers opam-pprint opam-cmdliner opam-base64
 repr-ocaml-check: ## O2's check: the round trip over the default corpora and over the spec's worked examples (bin/repr-ocaml check)
 	bin/repr-ocaml check
 

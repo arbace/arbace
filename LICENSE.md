@@ -201,6 +201,12 @@ covers what.
   (the LXM generator), `ExtBigarray`, `BigArray` (bigarray.c's part oi has), `ExtLex` (lexing.c, parsing.c), and the
   parts of `ExtCore`, `Effects` and `Fiber` that follow obj.c, alloc.c, lazy.c, sync.c, domain.c and fiber.c:
   under the GNU Lesser General Public License version 2.1 with the OCaml LGPL linking exception (below).
+- The opam set of the OCaml crop (test/ocaml/corpora.edn, the pins `:opam-NAME`; doc/ocaml/OCAML-SURVEY.md, "As built: O7"):
+  sources of ten opam packages, fetched at pinned versions into `.tmp/` and read in place by the checks, **not distributed**
+  (nothing of them is in the tree; each keeps its own license and notices): sexplib0 v0.17.0 (MIT), fmt 0.11.0, astring
+  0.8.5, uutf 1.0.4, cmdliner 2.1.1 and base64 3.5.2 (ISC), re 1.14.0 (LGPL-2.1-or-later with the OCaml LGPL linking
+  exception), pprint 20230830 (LGPL-2.0-only with the OCaml LGPL linking exception), yojson 3.0.0 (BSD-3-Clause),
+  containers 3.18 (BSD-2-Clause), as their opam files state. `test/ocaml/opam/load.ml` is Arbace's own.
 - `x509roots/` (`x509roots/go/arbace/x509roots/fallback/bundle.ae` and `bundle/`, with
   `bundle/bundle.der`; x509roots/README.md, doc/go/BOX-NOTES.md "TLS (option 2)"): the package
   `bundle` of the module `golang.org/x/crypto/x509roots/fallback`, https://go.googlesource.com/crypto
