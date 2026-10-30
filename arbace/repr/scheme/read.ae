@@ -1,0 +1,377 @@
+(ns arbace.repr.scheme.read
+  "The reader of R6RS's lexical syntax (report 4.2, chapter 4 and the appendix's grammar) as Chez Scheme 10.3.0
+  reads it in R6RS mode, text to Scheme forms (doc/scheme/SPEC.md, 3 and 5). `(read-all text)` gives the
+  top-level data of a text, each with its start and end offsets, or the data before an error and the error.
+
+    (read-all \"(a . b) #(1 2) #vu8(3)\" {})
+      => {:data [{:off [0 7] :form (scm/dot (a) b)} ...] :error nil}
+
+  The offsets are Chez's: characters (Unicode scalar values), not UTF-16 units. An error is {:class
+  KEYWORD :message STRING :at OFFSET}: the class is what the check compares with Chez's refusal."
+  (:require [arbace.string :as str]
+            [arbace.repr.scheme.forms :as fm]
+            [arbace.repr.scheme.number :as num]
+            [arbace.repr.scheme.unicode :as uc]))
+
+
+(defn- fail [kind msg ^long at]
+  (throw (ex-info msg {:class kind :at at})))
+
+;; the reader's state: [pos fold-case r6rs] as a long array, :chez for the mode of Chez's default (r6rs 0)
+(defmacro ^:private pos [st] `(aget ~(with-meta st {:tag "[J"}) 0))
+
+(defn ws?
+  "Is the character whitespace (report 4.2.1: tab, line feed, line tab, form feed, return, next line, Zs, Zl, Zp)?"
+  [c]
+  (let [n (int c)]
+    (or (== n 32) (and (>= n 9) (<= n 13)) (== n 0x85)
+        (and (> n 127)
+             (let [t (Character/getType n)]
+               (or (== t Character/SPACE_SEPARATOR) (== t Character/LINE_SEPARATOR) (== t Character/PARAGRAPH_SEPARATOR)))))))
+
+(defn delimiter?
+  "Does the character end a token (whitespace, ( ) [ ] \" ; and #)?"
+  [c]
+  (let [n (int c)]
+    (or (ws? c) (== n 40) (== n 41) (== n 91) (== n 93) (== n 34) (== n 59) (== n 35))))
+
+(defn initial-cp?
+  "Is the scalar value `cp` an <initial>: Chez's table above U+007F (arbace.repr.scheme.unicode)."
+  [^long cp]
+  (if (< cp 128)
+    (or (and (>= cp 97) (<= cp 122)) (and (>= cp 65) (<= cp 90))
+        (contains? #{33 36 37 38 42 47 58 60 61 62 63 94 95 126} cp))
+    (uc/in-ranges? uc/initial-ranges cp)))
+
+(defn subsequent-cp?
+  "Is `cp` a <subsequent>?"
+  [^long cp]
+  (if (< cp 128)
+    (or (initial-cp? cp) (and (>= cp 48) (<= cp 57)) (contains? #{43 45 46 64} cp))
+    (uc/in-ranges? uc/subsequent-ranges cp)))
+
+(def ^:private char-names
+  {"nul" 0 "alarm" 7 "backspace" 8 "tab" 9 "linefeed" 10 "newline" 10 "vtab" 11 "page" 12 "return" 13
+   "esc" 27 "space" 32 "delete" 127})
+
+(defn- hex-digit? [c] (or (and (>= (int c) 48) (<= (int c) 57)) (and (>= (int c) 97) (<= (int c) 102)) (and (>= (int c) 65) (<= (int c) 70))))
+
+(defn- scalar? [^long cp] (and (>= cp 0) (<= cp 0x10FFFF) (not (and (>= cp 0xD800) (<= cp 0xDFFF)))))
+
+(declare read-datum skip-atmosphere read-token-body)
+
+(defn- read-token
+  "The text from `i` to the next delimiter, as [end token]; an inline hex escape \\x41; is part of it (its
+  semicolon is no comment). `hash-ok`: a # does not end it (inside a number with a prefix)."
+  ([^String s ^long i] (read-token s i false))
+  ([^String s ^long i hash-ok]
+  (let [n (.length s)]
+    (loop [j i]
+      (cond
+        (>= j n) [j (subs s i j)]
+        (= (.charAt s j) \\)
+        (let [k (if (and (< (inc j) n) (= (.charAt s (inc j)) \x))
+                  (loop [k (+ j 2)] (if (and (< k n) (hex-digit? (.charAt s k))) (recur (inc k)) k))
+                  -1)]
+          (if (and (> k (+ j 2)) (< k n) (= (.charAt s k) \;))
+            (recur (inc k))
+            (recur (inc j))))
+        (and (delimiter? (.charAt s j)) (not (and hash-ok (= (.charAt s j) \#)))) [j (subs s i j)]
+        :else (recur (inc j)))))))
+
+(defn- eof [what ^long at] (fail :unexpected-eof (str "unexpected end-of-file reading " what) at))
+
+(defn- skip-block-comment
+  "`i` at the `#|`: the index after the matching `|#`."
+  ^long [^String s ^long i]
+  (let [n (.length s)]
+    (loop [j (+ i 2) depth 1]
+      (cond (>= (inc j) n) (eof "block comment" i)
+            (and (= (.charAt s j) \|) (= (.charAt s (inc j)) \#)) (if (== depth 1) (+ j 2) (recur (+ j 2) (dec depth)))
+            (and (= (.charAt s j) \#) (= (.charAt s (inc j)) \|)) (recur (+ j 2) (inc depth))
+            :else (recur (inc j) depth)))))
+
+(defn- skip-atmosphere
+  "Whitespace and comments, directives and datum comments from the state's position on."
+  [^String s ^longs st mode]
+  (let [n (.length s)]
+    (loop [i (aget st 0)]
+      (if (>= i n)
+        (aset st 0 (long i))
+        (let [c (.charAt s i)]
+          (cond
+            (ws? c) (recur (inc i))
+            (= c \;) (recur (long (loop [j (inc i)]
+                               (if (and (< j n) (let [d (int (.charAt s j))] (not (or (== d 10) (== d 13) (== d 0x85) (== d 0x2028) (== d 0x2029))))) (recur (inc j)) j))))
+            (and (= c \#) (< (inc i) n))
+            (let [d (.charAt s (inc i))]
+              (cond
+                (= d \|) (recur (skip-block-comment s i))
+                (= d \;) (do (aset st 0 (long (+ i 2)))
+                              (read-datum s st mode true)
+                              (recur (long (aget st 0))))
+                (= d \!) (let [[e tok] (read-token s (+ i 2))]
+                            (when (and (empty? tok) (>= e n)) (eof "#! syntax" i))
+                            (case tok
+                              "r6rs" (do (aset st 2 1) (recur (long e)))
+                              "fold-case" (do (aset st 1 1) (recur (long e)))
+                              "no-fold-case" (do (aset st 1 0) (recur (long e)))
+                              (fail :invalid-sharp (str "invalid syntax #!" tok) i)))
+                :else (aset st 0 (long i))))
+            :else (aset st 0 (long i))))))))
+
+(defn- cp-at [^String s ^long i] (.codePointAt s (int i)))
+
+(defn- read-string-lit [^String s ^longs st]
+  (let [start (aget st 0)
+        n (.length s)
+        sb (StringBuilder.)]
+    (loop [i (inc start)]
+      (when (>= i n) (eof "string" start))
+      (let [c (.charAt s i)]
+        (cond
+          (= c \") (do (aset st 0 (long (inc i))) (.toString sb))
+          (= c \\)
+          (do (when (>= (inc i) n) (eof "string" start))
+              (let [d (.charAt s (inc i))]
+                (case d
+                  \a (do (.append sb (char 7)) (recur (+ i 2)))
+                  \b (do (.append sb (char 8)) (recur (+ i 2)))
+                  \t (do (.append sb \tab) (recur (+ i 2)))
+                  \n (do (.append sb \newline) (recur (+ i 2)))
+                  \v (do (.append sb (char 11)) (recur (+ i 2)))
+                  \f (do (.append sb (char 12)) (recur (+ i 2)))
+                  \r (do (.append sb \return) (recur (+ i 2)))
+                  \" (do (.append sb \") (recur (+ i 2)))
+                  \\ (do (.append sb \\) (recur (+ i 2)))
+                  \x (let [j (loop [j (+ i 2)] (if (and (< j n) (hex-digit? (.charAt s j))) (recur (inc j)) j))]
+                       (cond (>= j n) (eof "string" start)
+                             (or (== j (+ i 2)) (not= (.charAt s j) \;)) (fail :bad-string-escape "invalid string hex escape" (inc i))
+                             :else (let [cp (BigInteger. (subs s (+ i 2) j) 16)]
+                                     (when (or (> (.bitLength cp) 31) (not (scalar? (.longValue cp))))
+                                       (fail :bad-string-escape "invalid code point in string hex escape" (inc i)))
+                                     (.appendCodePoint sb (.intValue cp))
+                                     (recur (long (inc j))))))
+                  ;; \<intraline whitespace>*<line ending><intraline whitespace>*
+                  (let [intra? (fn [ch] (or (= ch \tab) (and (> (int ch) 127) (== (Character/getType (int ch)) Character/SPACE_SEPARATOR)) (= ch \space)))
+                        j (loop [j (inc i)] (if (and (< j n) (intra? (.charAt s j))) (recur (inc j)) j))]
+                    (if (and (< j n) (contains? #{\newline \return (char 0x85) (char 0x2028)} (.charAt s j)))
+                      (let [j (if (and (= (.charAt s j) \return) (< (inc j) n) (= (.charAt s (inc j)) \newline)) (+ j 2) (inc j))
+                            j (loop [j j] (if (and (< j n) (intra? (.charAt s j))) (recur (inc j)) j))]
+                        (recur (long j)))
+                      (fail :bad-string-escape (str "invalid string character \\" d) (inc i)))))))
+          :else (do (.append sb c) (recur (inc i))))))))
+
+(defn- read-char-lit [^String s ^longs st]
+  (let [start (aget st 0)
+        n (.length s)
+        i (+ start 2)]
+    (when (>= i n) (eof "character" start))
+    (let [cp (cp-at s i)
+          j (+ i (Character/charCount (int cp)))
+          [e tail] (read-token s j)]
+      (aset st 0 (long e))
+      (if (empty? tail)
+        (fm/char-form cp)
+        (let [name (str (String. (Character/toChars (int cp))) tail)]
+          (cond
+            (contains? char-names name) (fm/char-form (char-names name))
+            (and (== cp (int \x)) (every? hex-digit? tail))
+            (let [v (BigInteger. ^String tail 16)]
+              (if (and (<= (.bitLength v) 31) (scalar? (.longValue v)))
+                (fm/char-form (.longValue v))
+                (fail :bad-char-name (str "invalid character name #\\" name) start)))
+            :else (fail :bad-char-name (str "invalid character name #\\" name) start)))))))
+
+(defn- identifier
+  "The symbol name of the token `t` (hex escapes resolved), or throws; `mode` :chez accepts what Chez's
+  default reader does of the identifiers the corpora need."
+  [^String t ^long at fold]
+  (let [n (.length t)
+        sb (StringBuilder.)]
+    ;; resolve \xHEX; escapes and check the characters
+    (loop [i 0 first (not (or (= t "+") (= t "-") (= t "...") (.startsWith t "->")))]
+      (when (< i n)
+        (let [cp (cp-at t i)
+              len (Character/charCount (int cp))]
+          (cond
+            (== cp (int \\))
+            (let [j (loop [j (+ i 2)] (if (and (< j n) (hex-digit? (.charAt t j))) (recur (inc j)) j))]
+              (if (and (< (inc i) n) (= (.charAt t (inc i)) \x) (< j n) (> j (+ i 2)) (= (.charAt t j) \;))
+                (let [v (BigInteger. (subs t (+ i 2) j) 16)]
+                  (when (or (> (.bitLength v) 31) (not (scalar? (.longValue v))))
+                    (fail :bad-symbol "invalid code point in symbol hex escape" at))
+                  (.appendCodePoint sb (.intValue v))
+                  (recur (inc j) false))
+                (fail :bad-symbol "invalid symbol escape" at)))
+            (contains? #{(int \') (int \`) (int \,) (int \{) (int \}) (int \|)} cp)
+            (fail :bad-symbol (str "delimiter " (char cp) " is not allowed in #!r6rs mode") at)
+            (if first (initial-cp? cp) (subsequent-cp? cp))
+            (do (.appendCodePoint sb (int cp)) (recur (+ i len) false))
+            :else (fail :bad-symbol "symbol syntax is not allowed in #!r6rs mode" at)))))
+    (let [name (.toString sb)]
+      (if fold (.toLowerCase name java.util.Locale/ROOT) name))))
+
+(defn- peculiar-or-valid?
+  "R6RS: a token that is no number is an identifier; the identifiers that start with a character an
+  <initial> excludes (+ - . ->) are the peculiar ones only."
+  [^String t]
+  (let [c (.charAt t 0)]
+    (if (or (= c \+) (= c \-) (= c \.) (Character/isDigit c))
+      (or (= t "+") (= t "-") (= t "...") (.startsWith t "->"))
+      true)))
+
+(defn- classify-token
+  "The form of the token `t`: a number, or an identifier's symbol."
+  [^String t ^long at ^longs st]
+  (let [c (.charAt t 0)]
+    (let [v (when (or (Character/isDigit c) (= c \+) (= c \-) (= c \.))
+              (try (num/parse t)
+                   (catch arbace.lang.ExceptionInfo e (fail :bad-number (ex-message e) at))))]
+      (if (some? v)
+        (fm/number-form v)
+        (do
+          (when (and (= c \.) (= t ".")) (fail :bad-dot "unexpected dot (.)" at))
+          (when (and (or (Character/isDigit c) (= c \+) (= c \-) (= c \.)) (= (num/classify-failure t) :not-allowed))
+            (fail :bad-number (str t " number syntax is not allowed in #!r6rs mode") at))
+          (when-not (peculiar-or-valid? t) (fail :bad-symbol (str t " symbol syntax is not allowed in #!r6rs mode") at))
+          (fm/sym (identifier t at (== (aget st 1) 1))))))))
+
+(defn- read-seq
+  "The data of a list or vector from after the opener to the closer: [items tail] (tail nil unless a dot)."
+  [^String s ^longs st mode ^long start what vector?]
+  (let [n (.length s)]
+    (loop [items (transient []) tail nil seen-dot false]
+      (skip-atmosphere s st mode)
+      (let [i (aget st 0)]
+        (when (>= i n) (eof what start))
+        (let [c (.charAt s i)]
+          (cond
+            (or (= c \)) (= c \]))
+            (do (when (and seen-dot (nil? tail)) (fail :bad-dot "expected one item after dot (.)" i))
+                (aset st 0 (long (inc i)))
+                [(persistent! items) tail seen-dot])
+            (and (= c \.) (or (>= (inc i) n) (delimiter? (.charAt s (inc i))) (contains? #{\' \` \,} (.charAt s (inc i)))))
+            (do (when (or vector? seen-dot (zero? (count items))) (fail :bad-dot "unexpected dot (.)" i))
+                (aset st 0 (long (inc i)))
+                (skip-atmosphere s st mode)
+                (let [j (aget st 0)]
+                  (when (>= j n) (eof what start))
+                  (when (contains? #{\) \]} (.charAt s j)) (fail :bad-dot "expected one item after dot (.)" j))
+                  (let [d (read-datum s st mode false)]
+                    (recur items d true))))
+            :else
+            (do (when seen-dot (fail :bad-dot "unexpected dot (.)" i))
+                (let [d (read-datum s st mode false)]
+                  (recur (conj! items d) tail seen-dot)))))))))
+
+(defn- read-datum
+  "The datum at the state's position (after the atmosphere is skipped here), the position after it left in the
+  state. `in-comment`: reading under #; (end of text there is an error as everywhere)."
+  [^String s ^longs st mode in-comment]
+  (skip-atmosphere s st mode)
+  (let [n (.length s)
+        i (aget st 0)]
+    (when (>= i n) (eof "datum" i))
+    (let [c (.charAt s i)]
+      (cond
+        (or (= c \() (= c \[))
+        (do (aset st 0 (long (inc i)))
+            (let [[items tail dot?] (read-seq s st mode i "list" false)]
+              (cond dot? (fm/dotted items tail)
+                    :else (apply list items))))
+        (or (= c \)) (= c \])) (fail :unexpected-close "unexpected close parenthesis" i)
+        (= c \") (read-string-lit s st)
+        (= c \') (do (aset st 0 (long (inc i))) (list 'quote (read-datum s st mode false)))
+        (= c \`) (do (aset st 0 (long (inc i))) (list 'quasiquote (read-datum s st mode false)))
+        (= c \,) (if (and (< (inc i) n) (= (.charAt s (inc i)) \@))
+                    (do (aset st 0 (long (+ i 2))) (list 'unquote-splicing (read-datum s st mode false)))
+                    (do (aset st 0 (long (inc i))) (list 'unquote (read-datum s st mode false))))
+        (or (= c \{) (= c \})) (fail :bad-symbol "brace syntax is not allowed in #!r6rs mode" i)
+        (= c \|) (fail :bad-symbol "|...| symbol escape syntax is not allowed in #!r6rs mode" i)
+        (= c \#)
+        (do (when (>= (inc i) n) (eof "# prefix" i))
+            (let [d (.charAt s (inc i))]
+              (cond
+                (= d \() (do (aset st 0 (long (+ i 2)))
+                              (let [[items] (read-seq s st mode i "vector" true)] (vec items)))
+                (= d \\) (read-char-lit s st)
+                (= d \') (do (aset st 0 (long (+ i 2))) (list 'syntax (read-datum s st mode false)))
+                (= d \`) (do (aset st 0 (long (+ i 2))) (list 'quasisyntax (read-datum s st mode false)))
+                (= d \,) (if (and (< (+ i 2) n) (= (.charAt s (+ i 2)) \@))
+                            (do (aset st 0 (long (+ i 3))) (list 'unsyntax-splicing (read-datum s st mode false)))
+                            (do (aset st 0 (long (+ i 2))) (list 'unsyntax (read-datum s st mode false))))
+                (and (= d \v) (.startsWith s "vu8(" (+ i 1)))
+                (do (aset st 0 (long (+ i 5)))
+                    (let [[items] (read-seq s st mode i "bytevector" true)]
+                      (doseq [x items]
+                        (when-not (and (integer? x) (<= 0 x 255)) (fail :bad-bytevector "invalid value in bytevector" i)))
+                      (apply list fm/bytevector-tag items)))
+                :else
+                (let [j (loop [j i] (if (and (< (inc j) n) (= (.charAt s j) \#) (contains? #{\x \b \o \d \e \i \X \B \O \D \E \I} (.charAt s (inc j)))) (recur (+ j 2)) j))
+                      [e tok] (if (> j i) (let [[e t] (read-token s j true)] [e (str (subs s i j) t)]) (let [[e t] (read-token s (inc i))] [e (str "#" t)]))]
+                  (when (and (> j i) (= e j)) (if (>= e n) (eof "number" i) (fail :bad-number "invalid number syntax" i)))
+                  (aset st 0 (long e))
+                  (let [l (.toLowerCase ^String tok)]
+                    (cond
+                      (contains? #{"#t" "#true"} l) true
+                      (contains? #{"#f" "#false"} l) false
+                      (and (> (count tok) 1) (contains? #{\x \b \o \d \e \i} (.charAt l 1)))
+                      (let [fail-number (fn [msg]
+                                          ;; Chez: an incomplete number at the end of the text is the end of the text;
+                                          ;; what its default reader reads is "not allowed"; the rest, invalid
+                                          (if (.contains ^String msg "cannot represent")
+                                            (fail :bad-number msg i)
+                                            (if (and (>= e n) (= (num/classify-failure tok) :incomplete))
+                                              (eof "number" i)
+                                              (fail :bad-number msg i))))
+                            v (try (num/parse tok) (catch arbace.lang.ExceptionInfo ex (fail-number (ex-message ex))))]
+                        (if (some? v) (fm/number-form v) (fail-number (str "invalid number syntax " tok))))
+                      :else (fail :invalid-sharp (str "invalid sharp-sign prefix " tok) i)))))))
+        :else
+        (let [[e tok] (read-token-body s i)]
+          (aset st 0 (long e))
+          (when (and (>= e n) (re-find #"\\x[0-9a-fA-F]*$" tok)) (eof "symbol" i))
+          (classify-token tok i st))))))
+
+(defn- read-token-body
+  "An identifier or number token from `i`: up to a delimiter."
+  [^String s ^long i]
+  (read-token s i))
+
+(defn- offsets
+  "A function from a UTF-16 index of `s` to Chez's character offset."
+  [^String s]
+  (if (== (.length s) (.codePointCount s 0 (.length s)))
+    identity
+    (let [supp (long-array (filter #(Character/isHighSurrogate (.charAt s %)) (range (.length s))))
+          k (alength supp)]
+      (fn [^long i]
+        ;; the number of high surrogates before i
+        (let [cnt (loop [lo 0 hi k] (if (< lo hi) (let [m (quot (+ lo hi) 2)] (if (< (aget supp m) i) (recur (inc m) hi) (recur lo m))) lo))]
+          (- i cnt))))))
+
+(defn read-all
+  "Every top-level datum of `s`: {:data [{:off [start end] :form f}] :error nil-or-{:class :message :at}}.
+  opts: :mode :r6rs (default; the text is read as after #!r6rs) or :chez."
+  [^String s opts]
+  (let [st (long-array [0 0 (if (= (:mode opts :r6rs) :r6rs) 1 0)])
+        mode (:mode opts :r6rs)
+        off (offsets s)
+        n (.length s)]
+    (loop [acc (transient [])]
+      (let [res (try
+                  (skip-atmosphere s st mode)
+                  (let [i (aget st 0)]
+                    (if (>= i n)
+                      :done
+                      (let [d (read-datum s st mode false)]
+                        {:off [(off i) (off (aget st 0))] :form d})))
+                  (catch arbace.lang.ExceptionInfo e
+                    (let [m (ex-data e)]
+                      (if (:class m)
+                        {:error {:class (:class m) :message (ex-message e) :at (off (:at m))}}
+                        (throw e)))))]
+        (cond (= res :done) {:data (persistent! acc) :error nil}
+              (:error res) {:data (persistent! acc) :error (:error res)}
+              :else (recur (conj! acc res)))))))

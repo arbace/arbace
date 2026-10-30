@@ -667,3 +667,143 @@ The user decided all fourteen as recommended. In short:
 - `call/cc` is re-entrant, on heap continuation frames, with AOT by CPS.
 - Complex numbers are deferred as a recorded class.
 - The order after C23, against OCaml, is left open (the user: "decide later").
+
+## As built: SM1, SM2 (2026-10-30)
+
+Branch `scheme-sm1`, from main `cb01f62c`. SM1 (the spec, the oracle, the corpora) and SM2 (repr/scheme's reader
+and printer in `:lines`, `bin/repr-scheme`, the check) are done, built with the light tier in GT7's quiet
+host: no gate, no Arbace build, no lock; every run on stage 0 (`target/seed/amd64/arbace` of the main checkout,
+`ARBACE_HOST_EXE`) under `GOMEMLIMIT=1500MiB`, `GOMAXPROCS=4`. No shipped file changed (SC24).
+
+### What was built
+
+- **`doc/scheme/SPEC.md`** (SM1): Scheme forms for R6RS's lexical syntax and core language: the table of datum to
+  form (3.1 of this survey, refined: characters are Clojure characters below U+10000 and `(scm/char N)` above; the
+  bare-symbol rule is an ASCII character class, validated against the Clojure reader; `(a . (b c))` is
+  `(a b c)`: a dotted tail that is a list is spliced), positions beside the forms, the core forms' shapes, Chez's
+  R6RS mode, the printer's `write` rules, the oracle and corpora. 9 Scheme/forms example pairs, checked by
+  `bin/repr-scheme spec-check` (the reader on the Scheme text, equal to the forms read by Arbace's reader).
+- **`tools/schemedump/dump.ss`** (SM1): the oracle on `/usr/bin/chez` 10.3.0. Per file one map line: every
+  top-level datum with Chez's offsets, the datum spelled as forms (an independent implementation in Scheme), Chez's
+  `write` of it, and Chez's error (message, offset) if `read` stopped; the text is read after `#!r6rs` (R6RS
+  mode; `--mode default` for Chez's own). `--scan KIND`: seven lexical and printing predicates over all
+  1,112,064 Unicode scalar values as ranges. 0.2 s for the three R6RS corpora, 1.5 s for whimsical.
+- **`test/scheme/corpora.edn`** (SM1, SC3 (a)'s first stage and whimsical): each file pinned by SHA-256, the
+  license text too. Racket's `r6rs-test/tests/r6rs` at `racket/r6rs` `5d4c4169` (56 `.sls`/`.sps` files, 213,483
+  bytes; Apache-2.0 OR MIT), Larceny's `test/R6RS` at `larcenists/larceny` `2ae8dd90` (13 `.sch`, 72,307 bytes;
+  Larceny's own license, permissive with a notice condition), Chibi's `tests/r7rs-tests.scm` at
+  `ashinn/chibi-scheme` `b2087f3a` (1 file, 73,609 bytes; BSD-3-Clause), go-whim's whimsical at `80c49bf5`, tree
+  `9738db48` (6 files, 3,048,853 bytes), checked by tree hash. Fetched by `bin/repr-scheme corpus fetch` into
+  `.tmp/scheme/corpora/`; nothing is distributed, so no `LICENSE.md` entry (C's corpora are the precedent). Not
+  fetched yet: Chez's mats, the SRFI suites, ecraven's benchmarks (SC3 (a)'s later stages, SM8).
+- **`test/scheme/probes.edn`** (SM1): 1,249 probes, 129 KB: this survey's 2.4 programs (the whole program, `|a b|`,
+  `#u8(`, `(import (scheme base))`, `#;`, the tower, `call/cc`), 372 token texts (delimiters, comments,
+  dots, character names, string escapes, quote forms, symbols), 855 number tokens (15 prefix combinations times 57
+  bodies), 18 files of 500 random numbers (Python `Random(2026)`: random doubles by bit pattern, powers of ten,
+  random big integers and ratios), and the characters, strings and symbols of every code point below U+0100 and
+  some above.
+- **`arbace/repr/scheme{.ae,/}`** (SM2), evaluated on stage 0 and not embedded (SC24): `read` (the reader:
+  atmosphere, lists, vectors, bytevectors, strings, characters, identifiers with inline hex escapes, the
+  tokens' classes, offsets in Chez's characters), `number` (the R6RS grammar with Chez's exactness, polar and
+  mantissa-width rules), `forms` (the spellings, `tree=`), `print` (Chez's `write`), `unicode` (Chez's identifier
+  tables), `check`, and the command line (`read`, `print`, `prepare`, `check-dumps`, `spec-check`). About 1,000 lines.
+- **`bin/repr-scheme`**: `corpus fetch|list`, `dump`, `read`, `print`, `spec-check`, `check [--quick] [--record]`.
+  Makefile targets `repr-scheme-fetch`, `-check`, `-check-quick`, `-record`, `-spec`; `make check-makefile` passes.
+- **Gate bookkeeping**: `arbace/repr/scheme.ae` and `arbace/repr/scheme/` are out of `test/gate/steps.edn`'s
+  `:tools`, of `test/gate/audit.ae`'s `:gate` host and of `bin/lib/version.bash`'s `arbace_embedded_sources` (so out
+  of `gate_key`, as repr/haskell's and repr/c's are). The planner (`gate.plan plan`, run directly on stage 0)
+  accepts the table: 31 steps planned. `bin/arbace-go` is unchanged: its `find` lists name `bin/lib/repr-*`
+  directories and `repr-scheme` has none. Editing `bin/lib/version.bash` changes `gate_key` (it is a hashed script):
+  the next gate rebuilds the executables once (about 8 minutes) whatever the sources do.
+
+### The check, numbers
+
+`bin/repr-scheme check`: 1,325 files and probes (76 corpus files and 1,249 probes), 4,863 + 1,121 data
+(the corpora's: Racket 190, Larceny 159, whimsical 8 top-level data (the library `(whimsical editor)` is one
+datum of 2.97 MB), Chibi 783 before Chez's refusal), **equal to Chez's reading in all 1,325**: the forms (E-tree,
+lists apart from vectors, exact from inexact, flonums by bits), the offsets, `write`'s text byte for byte, and for
+the 712 probes Chez refuses (and Chibi's R7RS file, refused at `#u8(` as `:invalid-sharp`) the same error class.
+The scans agree on all seven predicates over every scalar value. The bare-symbol rule is checked against the
+Clojure reader over 24,864 names (18,577 bare): no name read back as another symbol. `test/scheme/check-known.edn`
+is empty: no known difference. Cost: 2 m 30 s (the scans take most), peak 1.28 GB resident (whimsical's 3 MB
+`editor.ss` read in 22 s alone); `--quick` (no scans) 45 s.
+
+What the checks found and the reader now does (the reference's behaviour, not the report's, where they differ):
+Chez's Unicode tables are older than the JDK's (4,790 code points the JDK calls constituents, Chez refuses), so the
+tables are data (SC21); `#` is a delimiter but not inside a number's prefixes (`#e#x10`); an inline hex escape's `;`
+is no comment; a dotted tail that is a list is spliced; an incomplete number at the end of the text is the
+end of the text, not a bad number, and what Chez's default reader reads (`#x1.5`, `1/2e3`) is "not allowed" and
+a bad number; `|53` widths make any real inexact in any radix; `#i1/0` is `+inf.0`; `#e1@2` cannot be represented;
+Java's shortest digits differ from Chez's on ties (`2.0553773091453202e15` against `...3e15`: Chez rounds up) and give
+two digits where one suffices (`4.9e-324`); subnormals print with `|` and their bits of precision.
+
+### Proposals (SC20 onward)
+
+- **SC20 Chez's default reader.**
+  - Options: (a) R6RS mode only, the reference read after `#!r6rs`; files with `|a b|`, `{`, `#!eof`, `1+` as symbols,
+    `#3(a)`, datum labels are refused by both, judged by class; Chez's default mode a layer `:chez` later, when code
+    that needs it is in a corpus (whimsical reads in R6RS mode whole); (b) both modes now, the check over both;
+    (c) Chez's default mode only.
+  - *Recommended: (a)*: the corpora and the standard (SC1 (a)) are R6RS, and the check shows the strict reader
+    equal on all of them; (b) doubles the lexer for nothing the corpora ask. Revisit at SM8 (Chez's mats are written
+    in the default mode).
+- **SC21 Unicode tables.**
+  - Options: (a) Chez 10.3.0's identifier tables as data (`arbace.repr.scheme.unicode`, 896 and 782 ranges, from
+    `dump.ss --scan`, checked equal each run); (b) the report's categories over the JDK's `Character/getType`, the
+    4,790 differences as a recorded class; (c) vendor a Unicode data version matching Chez's.
+  - *Recommended: (a)*: exact to the reference with 20 KB of data, and the scan check says when Chez changes
+    (10.4, a new apk). Case folding (`#!fold-case`, `string-upcase`, `char-general-category`) is open for SM6.
+- **SC22 Printing flonums.**
+  - Options: (a) Java's shortest digits with Chez's fixups (tie up, one digit, layout from 1e-3 to 1e10,
+    subnormal widths), checked on 3,000 random numbers and the exponents' sweep; (b) a port of Chez's printer
+    (Steele-White free-format) for all digits; (c) accept the last-digit differences as a class.
+  - *Recommended: (a)*, widening the random probes at SM5 (the number tower's `number->string` with radix and
+    precision is the larger job); (b) if a difference shows that (a)'s fixups do not cover.
+- **SC23 Judging errors.**
+  - Options: (a) the class of the refusal, and the data before it; (b) the class and the offset; (c) Chez's message.
+  - *Recommended: (a)*: Chez's offsets mean different things in its two message formats (a character offset or a
+    line and column) and its messages are English text; the nine classes are what the evaluator's `&lexical` will
+    need. The offsets of the reader's errors are kept and informational; (b) can be added once the dump gives all
+    offsets as one.
+- **SC24 Keeping repr/scheme out of the executable.**
+  - Options: (a) add `"arbace/repr/scheme.ae" "arbace/repr/scheme/"` to `arbace/j2g/embed.ae`'s `excluded` at the
+    next change of a shipped file (SM3's re-seed batch), and until then leave the gate bookkeeping as built (a
+    build made in between would embed the namespaces, harmless: the tool loads the checkout's copy when it
+    differs); (b) now, in this branch (a shipped file changes: `gate_key` changes with it and the next re-seed
+    carries it); (c) embed repr/scheme from SM3 on (compiled with the program).
+  - *Recommended: (a)*: this milestone was to change no shipped file; SM3 compiles the reader for the evaluator
+    anyway (survey 4.1), where (c) is decided.
+- **SC25 Where the corpora live.**
+  - Options: (a) as built: fetched into `.tmp/scheme/corpora` by pins, read in place (probes, 129 KB, committed);
+    (b) commit the 142 corpus files (about 360 KB) for a gate without a network; (c) fetch at each check.
+  - *Recommended: (a)*: the same as C's and the other bridges'; the essential gate would run `corpus fetch` once
+    (seconds, 76 files) or the check from a copy kept in the shared `.tmp/`; (b) if the user wants offline checks.
+    Larceny's `test/R6RS` is mostly Larceny-specific scripts (13 `.sch`): as a read corpus it is enough, as a
+    judge of the evaluator it is not (SM5 wants Racket's suite, run programs, and Chez's mats).
+- **SC26 The check in the gates.**
+  - Options: (a) not in the essential gate yet: `bin/repr-scheme check` takes 2 m 30 s and 1.3 GB and needs Chez;
+    add a `--quick` essential step at SM3 (45 s) and the full check in `--full` with the other bridges; (b) the
+    full check in the essential gate now; (c) never.
+  - *Recommended: (a)*: the bridges' checks run in `--full` or by hand; this one is light enough for the
+    essential gate once the user wants a Scheme row in `bin/reap` (SM9).
+
+### Rule slips
+
+- `bin/gate --plan` (run to check the table, as the task said) started `bin/seed --build` in the worktree
+  (stage 0 is not in a fresh worktree): it stopped in the prepare phase (`target/seed/prepare`, no `go build`
+  ran, nothing kept) when I stopped the task; I removed `target/` and the lock, and ran the planner directly
+  (`ARBACE_PATH=... -m gate.plan plan ...`) on the main checkout's stage 0 instead. So `bin/gate --plan` is not
+  light in a worktree without `target/seed`.
+- Four runs of the check went to the background past the tool's 120 s limit; none exceeded 1.3 GB.
+
+### Heavy checks left for the window after the tag
+
+1. **The essential gate in this branch** (`/root/arbace/.tmp/heavy bin/gate`): first run rebuilds the executables
+   (`bin/lib/version.bash` is in `gate_key`'s inputs), about 8 minutes; the rest should be skipped at their keys
+   (no executable-embedded source changed: `arbace/repr/scheme` is out of the keys). It also proves `make
+   check-makefile` and the table in the real planner with stage 0 built.
+2. `bin/gate --audit` of the steps whose declared inputs mention `:tools` (diffcheck, the suite, the oracle) to
+   see the exclusions hold, and `bin/gate --plan` on main after the merge to show the new steps' keys.
+3. `bin/repr-scheme check` once under the big lock's quiet host (it is light, but its first run in a clean
+   checkout fetches 76 files; Chez's presence is a precondition, `apk add chez-scheme`).
+4. The re-seed batch (SM3 on): SC24's `embed.ae` line; `bin/generated-check`, `bin/j2g-edge verify` after it.

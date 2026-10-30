@@ -1,0 +1,95 @@
+(ns arbace.repr.scheme.forms
+  "Scheme forms' spellings (doc/scheme/SPEC.md, 3): how a Scheme datum is held as an Arbace form, and the
+  comparison of two forms that tells a vector from a list, a flonum from an exact integer and -0.0 from 0.0
+  (Clojure's `=` does none of these)."
+  (:require [arbace.string :as str]))
+
+(set! *warn-on-reflection* true)
+
+(def dot-tag 'scm/dot)
+(def sym-tag 'scm/sym)
+(def char-tag 'scm/char)
+(def flonum-tag 'scm/flonum)
+(def complex-tag 'scm/complex)
+(def bytevector-tag 'scm/bytevector)
+
+(defn- bare-char? [c]
+  (let [n (int c)]
+    (or (and (>= n 97) (<= n 122)) (and (>= n 65) (<= n 90)) (and (>= n 48) (<= n 57))
+        (contains? #{33 36 38 42 43 45 46 60 61 62 63 95} n))))   ; ! $ & * + - . < = > ? _
+
+(defn bare-symbol?
+  "Is the Scheme symbol named `s` held as the Clojure symbol of that name (SPEC 3.1: when the Clojure reader
+  reads the name back as that symbol)?"
+  [^String s]
+  (let [n (count s)]
+    (and (pos? n)
+         (loop [i 0] (or (== i n) (and (bare-char? (.charAt s i)) (recur (inc i)))))
+         (let [c (.charAt s 0)]
+           (and (not (Character/isDigit c))
+                (or (not (or (= c \+) (= c \-) (= c \.))) (== n 1) (not (Character/isDigit (.charAt s 1))))
+                (not (and (= c \.) (== n 1)))))
+         (not (contains? #{"nil" "true" "false"} s)))))
+
+(defn sym
+  "The form of the Scheme symbol named `name`."
+  [^String name]
+  (if (bare-symbol? name) (symbol name) (list sym-tag name)))
+
+(defn char-form
+  "The form of the character with scalar value `cp`."
+  [cp]
+  (if (< cp 0x10000) (char cp) (list char-tag cp)))
+
+(defn real-form
+  "A real number as a form: a flonum without a Clojure spelling (an infinity, a NaN) as (scm/flonum \"+inf.0\")."
+  [x]
+  (cond (and (instance? Double x) (Double/isNaN x)) (list flonum-tag "+nan.0")
+        (and (instance? Double x) (Double/isInfinite x)) (list flonum-tag (if (pos? x) "+inf.0" "-inf.0"))
+        :else x))
+
+(defn number-form
+  "The form of a number the reader returns: a real, or [:complex re im]."
+  [x]
+  (if (vector? x) (list complex-tag (real-form (nth x 1)) (real-form (nth x 2))) (real-form x)))
+
+(defn- exact-int? [x] (or (instance? Long x) (instance? Integer x) (instance? arbace.lang.BigInt x) (instance? java.math.BigInteger x)))
+
+(defn tree=
+  "Are the forms `a` and `b` the same Scheme datum? Lists and vectors apart, exact and inexact apart, flonums
+  by their bits."
+  [a b]
+  (cond
+    (instance? Double a) (and (instance? Double b) (== (Double/doubleToLongBits a) (Double/doubleToLongBits b)))
+    (instance? Double b) false
+    (exact-int? a) (and (exact-int? b) (= a b))
+    (instance? arbace.lang.Ratio a) (and (instance? arbace.lang.Ratio b) (= a b))
+    (vector? a) (and (vector? b) (== (count a) (count b)) (every? true? (map tree= a b)))
+    (vector? b) false
+    (seq? a) (and (seq? b) (== (count a) (count b)) (every? true? (map tree= a b)))
+    (seq? b) false
+    :else (= a b)))
+
+(defn first-difference
+  "A path to the first place the forms differ, as [path a b], or nil when they are tree=."
+  [a b]
+  (cond
+    (tree= a b) nil
+    (and (vector? a) (vector? b) (= (count a) (count b)))
+    (some (fn [[i x y]] (when-let [[p u v] (first-difference x y)] [(into [i] p) u v])) (map vector (range) a b))
+    (and (seq? a) (seq? b) (= (count a) (count b)))
+    (some (fn [[i x y]] (when-let [[p u v] (first-difference x y)] [(into [i] p) u v])) (map vector (range) a b))
+    :else [[] a b]))
+
+(defn scheme-list?
+  "Is the form `x` a Scheme list (proper) rather than one of the tagged spellings of a non-list?"
+  [x]
+  (and (seq? x) (not (contains? #{dot-tag sym-tag char-tag flonum-tag complex-tag bytevector-tag} (first x)))))
+
+(defn dotted
+  "The form of the datum (items... . tail): the tail a list is spliced in, a dotted tail merged, else `scm/dot`."
+  [items tail]
+  (cond
+    (and (seq? tail) (= (first tail) dot-tag)) (list dot-tag (apply list (concat items (second tail))) (nth tail 2))
+    (scheme-list? tail) (apply list (concat items tail))
+    :else (list dot-tag (apply list items) tail)))

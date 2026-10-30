@@ -1,0 +1,176 @@
+(ns arbace.repr.scheme.check
+  "repr/scheme's check (doc/scheme/SPEC.md, 9; bin/repr-scheme check): Arbace's reading and writing of a text
+  against the dump Chez Scheme made of it (tools/schemedump/dump.ss): the data equal (E-tree), their offsets,
+  `write` equal (E-write), and an error of Chez's matched by an error of the same class (E-error)."
+  (:require [arbace.string :as str]
+            [arbace.repr.scheme.forms :as fm]
+            [arbace.repr.scheme.read :as rd]
+            [arbace.repr.scheme.print :as pr]))
+
+(def chez-classes
+  "Chez's messages (position taken off) to the reader's error classes, first match."
+  [[#"unexpected close parenthesis" :unexpected-close]
+   [#"unexpected end-of-file" :unexpected-eof]
+   [#"unexpected dot|expected one item after dot" :bad-dot]
+   [#"invalid sharp-sign prefix|invalid syntax #!|#!\S* syntax is not allowed|#<n>|#\[|#%|#\{|#vfx|invalid boolean" :invalid-sharp]
+   [#"invalid character name|invalid delimiter .* for character" :bad-char-name]
+   [#"invalid string character|in string hex escape|invalid code point value|after \\<intraline" :bad-string-escape]
+   [#"invalid number syntax|cannot represent|number syntax is not allowed" :bad-number]
+   [#"found in bytevector" :bad-bytevector]
+   [#"symbol syntax is not allowed|symbol escape|delimiter . is not allowed|open brace|close brace|symbol hex escape|invalid .*symbol" :bad-symbol]])
+
+(declare first-diff-path char-or-nil)
+
+(defn chez-class [^String msg]
+  (or (some (fn [[re k]] (when (re-find re msg) k)) chez-classes) :other))
+
+(defn- first-diff
+  "The first way Arbace's reading `mine` ({:data :error}) differs from Chez's dump `dump`, or nil."
+  [mine dump]
+  (let [md (:data mine) dd (:data dump)
+        n (min (count md) (count dd))]
+    (or (some (fn [i]
+                (let [a (nth md i) b (nth dd i)]
+                  (cond
+                    (not (fm/tree= (:form a) (:form b)))
+                    {:kind :tree :index i :at (first-diff-path (:form a) (:form b)) :off (:off b)}
+                    (not= (:off a) (:off b)) {:kind :off :index i :mine (:off a) :chez (:off b)}
+                    :else (let [w (pr/write-form (:form a))]
+                            (when (not= w (:write b))
+                              {:kind :write :index i :mine w :chez (:write b) :off (:off b)})))))
+              (range n))
+        (when (not= (count md) (count dd))
+          {:kind :count :mine (count md) :chez (count dd)})
+        (let [ma (:error mine) ca (:error dump)]
+          (cond (and ma ca) (let [cc (chez-class (:message ca))]
+                              (when (not= cc (:class ma))
+                                {:kind :error-class :mine (:class ma) :chez cc :chez-message (:message ca) :at [(:at ma) (:at ca)]}))
+                ma {:kind :error-extra :mine (:class ma) :message (:message ma) :at (:at ma)}
+                ca {:kind :error-missing :chez (chez-class (:message ca)) :chez-message (:message ca) :at (:at ca)})))))
+
+(defn- first-diff-path [a b] (fm/first-difference a b))
+
+(defn compare-file
+  "Compare the text of a file with its dump: nil when they agree, else the first difference."
+  [^String text dump]
+  (first-diff (rd/read-all text {}) dump))
+
+(defn read-dumps
+  "The maps of a dump file written by dump.ss: one per file, in order."
+  [^String path]
+  (let [rdr (java.io.PushbackReader. (java.io.StringReader. (slurp path)))]
+    (loop [acc []]
+      (let [x (read {:eof ::eof} rdr)]
+        (if (= x ::eof) acc (recur (conj acc x)))))))
+
+;; ---- scans
+
+(defn- ranges-of [pred]
+  (loop [n 0 start nil acc []]
+    (cond (== n 0x110000) (if start (conj acc [start (dec n)]) acc)
+          (and (>= n 0xD800) (<= n 0xDFFF)) (recur (inc n) nil (if start (conj acc [start (dec n)]) acc))
+          (pred n) (recur (inc n) (or start n) acc)
+          :else (recur (inc n) nil (if start (conj acc [start (dec n)]) acc)))))
+
+(defn- cps [^String s] (vec (.toArray (.codePoints s))))
+(defn- cp-string ^String [n] (String. (Character/toChars (int n))))
+
+(def scan-predicates
+  "The scans of dump.ss, as Arbace's own predicates."
+  {:whitespace (fn [n] (and (rd/ws? (char-or-nil n)) true))
+   :ident-initial (fn [n] (rd/initial-cp? n))
+   :ident-subsequent (fn [n] (rd/subsequent-cp? n))
+   :string-escaped (fn [n] (not= 3 (.codePointCount ^String (pr/write-string (cp-string n)) 0 (count (pr/write-string (cp-string n))))))
+   :char-hex (fn [n] (let [s (pr/write-char n)] (and (> (count s) 3) (= (nth s 2) \x))))
+   :symbol-escaped-first (fn [n] (not= (cp-string n) (pr/write-symbol (cp-string n))))
+   :symbol-escaped-rest (fn [n] (not= (str "a" (cp-string n)) (pr/write-symbol (str "a" (cp-string n)))))})
+
+(defn- char-or-nil [n] (if (< n 0x10000) (char n) \a))
+
+(defn scan-diffs
+  "For a scan dump {:scan KIND :ranges ...}: [] when Arbace's predicate gives the same ranges, else the
+  differing ranges (symmetric difference as ranges, at most 20)."
+  [{:keys [scan ranges]}]
+  (let [mine (ranges-of (scan-predicates scan))
+        set-of (fn [rs] (into (sorted-set) (mapcat (fn [[lo hi]] (range lo (inc hi))) rs)))
+        a (set-of mine) b (set-of (map vec ranges))
+        only-mine (remove b a) only-chez (remove a b)]
+    {:scan scan :ranges (count ranges) :only-mine (take 20 only-mine) :only-chez (take 20 only-chez)
+     :n-only-mine (count only-mine) :n-only-chez (count only-chez)}))
+
+;; ---- the check
+
+(defn- load-edn [path] (read-string (slurp path)))
+
+(defn corpus-dir [root id]
+  (str (or (System/getenv "ARBACE_SCHEME_CORPORA") (str root "/.tmp/scheme/corpora")) "/" (name id)))
+
+(defn corpus-files
+  "[[key absolute-path] ...] of a corpus of corpora.edn."
+  [root c]
+  (let [base (if (:where c)
+               (str (or (System/getenv "GOWHIM") (str root "/../go-whim")) "/" (get-in c [:where :path]))
+               (corpus-dir root (:id c)))]
+    (mapv (fn [p] [(str (name (:id c)) "/" p) (str base "/" p)]) (sort (keys (:files c))))))
+
+(defn prepare
+  "Write DIR/files-ID.txt (one path a line) for each corpus, the probes' files DIR/probes/*.ss; returns the
+  keys by path."
+  [root dir]
+  (let [corpora (:corpora (load-edn (str root "/test/scheme/corpora.edn")))
+        probes (load-edn (str root "/test/scheme/probes.edn"))]
+    (.mkdirs (java.io.File. (str dir "/probes")))
+    (doseq [c corpora]
+      (let [fs (corpus-files root c)]
+        (doseq [[_ p] fs] (when-not (.exists (java.io.File. ^String p)) (throw (ex-info (str "missing " p " (bin/repr-scheme corpus fetch)") {}))))
+        (spit (str dir "/files-" (name (:id c)) ".txt") (str (str/join "\n" (map second fs)) "\n"))))
+    (doseq [{:keys [id text]} probes]
+      (spit (str dir "/probes/" id ".ss") text))
+    {:corpora (mapv :id corpora) :probes (count probes)}))
+
+(defn diff-line [k d] (str k "  " (pr-str (dissoc d :kind)) "  [" (name (:kind d)) "]"))
+
+(defn check-dumps
+  "Compare every dump in DIR (dump-ID.edn, dump-probes.edn, scan-*.edn) with Arbace's reading. Returns
+  {:results {key diff-or-nil} :scans [...] :counts {...}}."
+  [root dir]
+  (let [corpora (:corpora (load-edn (str root "/test/scheme/corpora.edn")))
+        keyed (into {} (mapcat (fn [c] (map (fn [[k p]] [p k]) (corpus-files root c))) corpora))
+        probe-dir (str dir "/probes/")
+        results (atom (sorted-map))]
+    (doseq [f (cons "probes" (map (comp name :id) corpora))
+            :let [path (str dir "/dump-" f ".edn")]
+            :when (.exists (java.io.File. ^String path))]
+      (doseq [d (read-dumps path)]
+        (let [p (:file d)
+              k (or (keyed p) (when (.startsWith ^String p probe-dir) (str "probe/" (subs p (count probe-dir) (- (count p) 3)))) p)
+              text (slurp p)]
+          (swap! results assoc k (compare-file text d)))))
+    (let [scans (vec (for [f (sort (.list (java.io.File. ^String dir))) :when (.startsWith ^String f "scan-")]
+                       (scan-diffs (load-edn (str dir "/" f)))))]
+      {:results @results :scans scans})))
+
+(defn judge
+  "Results against the known differences (a map key -> {:kind K ...}): [unlisted gone] lists."
+  [results known]
+  (let [diffs (into {} (filter (comp some? val) results))
+        unlisted (for [[k d] diffs :let [kn (get known k)] :when (or (nil? kn) (not= (:kind kn) (:kind d)))] [k d])
+        gone (for [[k kn] known :when (not (contains? diffs k))] [k kn])]
+    {:unlisted (vec unlisted) :gone (vec gone)}))
+
+(defn symbol-rule
+  "The bare-symbol rule (forms/bare-symbol?) against the Clojure reader over every name of up to four
+  characters of a small alphabet and some more: a name taken as bare must read back as that symbol alone.
+  {:names N :bare M :bad [names]}"
+  []
+  (let [alpha (seq "aZ09+-.!$&*<=>?_")
+        names (concat (for [a alpha] (str a))
+                      (for [a alpha b alpha] (str a b))
+                      (for [a alpha b alpha c alpha] (str a b c))
+                      (for [a (seq "a+-.0") b alpha c alpha d alpha] (str a b c d))
+                      ["nil" "true" "false" "..." "->x" "a.b.c" "+inf" "-inf" "a1" "x-y" "<=" "1+" "-1" "+.5" ".5" "..a"])
+        bare (filter fm/bare-symbol? names)
+        bad (remove (fn [n] (try (let [x (read-string n)] (and (symbol? x) (nil? (namespace x)) (= (name x) n)))
+                                 (catch Throwable _ false)))
+                    bare)]
+    {:names (count names) :bare (count bare) :bad (vec (take 20 bad))}))

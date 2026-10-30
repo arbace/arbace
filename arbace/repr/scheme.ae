@@ -1,0 +1,132 @@
+(ns arbace.repr.scheme
+  "Command line of repr/scheme (doc/scheme/SPEC.md), run by bin/repr-scheme as -m arbace.repr.scheme VERB ...:
+
+    read [-o DIR] FILE...
+        each Scheme file (R6RS lexical syntax) to its Scheme forms: one datum a line, SPEC 3's spellings,
+        to DIR/FILE.ae (default: standard output); an error is reported with its class and offset.
+    print FILE.ae...
+        each forms file (data the Clojure reader reads) to Scheme text, Chez's `write` of each datum, one
+        a line (:lines, SPEC 7).
+    prepare DIR
+        the check's inputs: the corpora's file lists and the probes' files under DIR.
+    check-dumps [--record] DIR
+        Arbace's reading and writing of every file against Chez's dumps in DIR; judged by
+        test/scheme/check-known.edn."
+  (:require [arbace.string :as str]
+            [arbace.repr.scheme.forms :as fm]
+            [arbace.repr.scheme.read :as rd]
+            [arbace.repr.scheme.print :as pr]
+            [arbace.repr.scheme.check :as ck]))
+
+(defn- root [] (or (System/getenv "ARBACE_ROOT") "."))
+
+(defn- read-file [f]
+  (let [{:keys [data error]} (rd/read-all (slurp f) {})]
+    {:forms (mapv :form data) :error error}))
+
+(defn- cmd-read [args]
+  (let [out (when (= (first args) "-o") (second args))
+        files (if out (drop 2 args) args)
+        status (atom 0)]
+    (doseq [f files]
+      (let [{:keys [forms error]} (read-file f)
+            text (str ";; " f "\n" (str/join "\n" (map pr-str forms)) "\n")]
+        (if out
+          (let [o (java.io.File. (str out "/" f ".ae"))]
+            (.mkdirs (.getParentFile o))
+            (spit o text))
+          (print text))
+        (when error
+          (reset! status 1)
+          (binding [*out* *err*]
+            (println (str f ": " (name (:class error)) " at " (:at error) ": " (:message error)))))))
+    @status))
+
+(defn- cmd-print [args]
+  (doseq [f args]
+    (let [rdr (java.io.PushbackReader. (java.io.StringReader. (slurp f)))]
+      (loop []
+        (let [x (read {:eof ::eof} rdr)]
+          (when-not (= x ::eof)
+            (println (pr/write-form x))
+            (recur))))))
+  0)
+
+(defn- cmd-prepare [[dir]]
+  (let [r (ck/prepare (root) dir)]
+    (println (pr-str r))
+    0))
+
+(def ^:private rule-bad (atom false))
+
+(defn- cmd-check-dumps [args]
+  (let [record (some #{"--record"} args)
+        dir (first (remove #{"--record"} args))
+        {:keys [results scans]} (ck/check-dumps (root) dir)
+        known-file (str (root) "/test/scheme/check-known.edn")
+        known (if (.exists (java.io.File. known-file)) (read-string (slurp known-file)) {})
+        n (count results)
+        diffs (filter (comp some? val) results)
+        {:keys [unlisted gone]} (ck/judge results known)
+        scan-bad (filter #(or (pos? (:n-only-mine %)) (pos? (:n-only-chez %))) scans)]
+    (println (str "files and probes: " n ", equal to Chez: " (- n (count diffs))
+                  ", differing: " (count diffs) " (listed " (- (count diffs) (count unlisted)) ")"))
+    (let [r (ck/symbol-rule)]
+      (println (str "symbol rule: " (:names r) " names, " (:bare r) " bare, bad " (pr-str (:bad r))))
+      (when (seq (:bad r)) (reset! rule-bad true)))
+    (doseq [s scans] (println (str "scan " (name (:scan s)) ": " (:ranges s) " ranges, only mine " (:n-only-mine s) ", only Chez " (:n-only-chez s))))
+    (doseq [[k d] unlisted] (println (str "UNLISTED " (ck/diff-line k d))))
+    (doseq [[k kn] gone] (println (str "GONE " k " " (pr-str kn))))
+    (doseq [s scan-bad] (println (str "SCAN " (pr-str s))))
+    (when record
+      (spit (str (root) "/test/scheme/check-known.edn")
+            (str ";; Known differences between repr/scheme and Chez (bin/repr-scheme check --record): key -> {:kind ...}\n"
+                 (pr-str (into (sorted-map) (map (fn [[k d]] [k (select-keys d [:kind :chez :mine])]) diffs)))
+                 "\n")))
+    (if (or (and (not record) (or (seq unlisted) (seq gone))) (seq scan-bad) @rule-bad) 1 0)))
+
+(defn- spec-blocks
+  "The fenced blocks of a markdown file: [[lang text] ...]."
+  [text]
+  (let [lines (str/split text #"\n")]
+    (loop [ls lines in nil lang nil buf [] acc []]
+      (if (empty? ls)
+        acc
+        (let [l (first ls)]
+          (cond
+            (and (nil? in) (.startsWith ^String l "```") (> (count l) 3)) (recur (rest ls) true (subs l 3) [] acc)
+            (and in (= l "```")) (recur (rest ls) nil nil [] (conj acc [lang (str/join "\n" buf)]))
+            in (recur (rest ls) in lang (conj buf l) acc)
+            :else (recur (rest ls) nil nil [] acc)))))))
+
+(defn- cmd-spec-check [[file]]
+  (let [blocks (spec-blocks (slurp (or file "doc/scheme/SPEC.md")))
+        pairs (loop [bs blocks acc []]
+                (cond (empty? bs) acc
+                      (and (= (ffirst bs) "scheme") (seq (rest bs)) (= (first (second bs)) "forms")) (recur (drop 2 bs) (conj acc [(second (first bs)) (second (second bs))]))
+                      :else (recur (rest bs) acc)))
+        forms-blocks (filter #(= (first %) "forms") blocks)
+        bad (atom 0)]
+    (doseq [[text forms] pairs]
+      (let [{:keys [data error]} (rd/read-all text {})
+            mine (mapv :form data)
+            rdr (java.io.PushbackReader. (java.io.StringReader. forms))
+            theirs (loop [acc []] (let [x (read {:eof ::eof} rdr)] (if (= x ::eof) acc (recur (conj acc x)))))
+            ok (and (nil? error) (fm/tree= (apply list mine) (apply list theirs)))]
+        (when-not ok
+          (swap! bad inc)
+          (println "SPEC MISMATCH" (pr-str text) "\n  reader:" (pr-str mine) (pr-str error) "\n  forms: " (pr-str theirs)))))
+    (println (str "spec examples: " (count pairs) " scheme/forms pairs, " (count forms-blocks) " forms blocks all read, mismatches " @bad))
+    (if (and (zero? @bad) (== (count pairs) (count forms-blocks))) 0 1)))
+
+(defn -main [& args]
+  (let [[verb & more] args
+        status (case verb
+                 "read" (cmd-read more)
+                 "print" (cmd-print more)
+                 "prepare" (cmd-prepare more)
+                 "check-dumps" (cmd-check-dumps more)
+                 "spec-check" (cmd-spec-check more)
+                 (do (println "usage: -m arbace.repr.scheme read|print|prepare|check-dumps ...") 2))]
+    (flush)
+    (System/exit status)))
