@@ -80,10 +80,35 @@
 
 (define (sort-symbols ls) (list-sort (lambda (a b) (string<? (symbol->string a) (symbol->string b))) ls))
 
+;;; R5RS's environments (SC63 (a), SM6): (null-environment 5) and (scheme-report-environment 5) are the libraries
+;;; psyntax's expander looks up as (psyntax null-environment-5) and (psyntax scheme-report-environment-5). The null
+;;; environment holds R5RS's syntactic keywords (section 7.1, with the auxiliary ones); the report environment
+;;; R5RS's bindings: (rnrs base), (rnrs r5rs), the simple I/O of (rnrs io simple), (rnrs mutable-pairs) and
+;;; (rnrs mutable-strings): a superset of R5RS's names (the report environment is a view of R6RS's).
+(define r5rs-keywords
+  '(quote lambda if set! begin cond case and or let let* letrec do delay quasiquote define define-syntax
+    let-syntax letrec-syntax syntax-rules else => unquote unquote-splicing ... _))
+
+(define r5rs-libraries '((rnrs base) (rnrs r5rs) (rnrs io simple) (rnrs mutable-pairs) (rnrs mutable-strings)))
+
+(define (union-names ls)
+  (let f ((ls (apply append ls)) (seen '()))
+    (cond ((null? ls) (sort-symbols seen))
+          ((memq (car ls) seen) (f (cdr ls) seen))
+          (else (f (cdr ls) (cons (car ls) seen))))))
+
+(define r5rs-null-names
+  (let ((have (apply append (map library-exports r5rs-libraries))))
+    (filter (lambda (n) (memq n have)) r5rs-keywords)))
+
+(define r5rs-report-names (union-names (map library-exports r5rs-libraries)))
+
 (define library-legend
   (append
     (map (lambda (n) (list n (sort-symbols (library-exports n)) #t)) r6rs-libraries)
-    (list (list '(psyntax system $bootstrap) bootstrap-exports #f))))
+    (list (list '(psyntax null-environment-5) r5rs-null-names #f)
+          (list '(psyntax scheme-report-environment-5) r5rs-report-names #f)
+          (list '(psyntax system $bootstrap) bootstrap-exports #f))))
 
 (define all-names
   (let f ((ls (apply append (map cadr library-legend))) (seen '()))

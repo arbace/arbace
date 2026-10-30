@@ -16,10 +16,10 @@
   (let [(values n ok) (assert int64 x)]
     (and ok (== n 0))))
 
-(go/func pnIsReal ^bool [^any x] (IsNumber x))
+(go/func pnIsReal ^bool [^any x] (IsReal x))
 
 (go/func pnReal ^any [^string who ^any x]
-  (when (not (IsNumber x))
+  (when (not (IsReal x))
     (NotA who "real number" x))
 
   x)
@@ -208,8 +208,11 @@
       (pnReal who x)))
 
   (for [i 0] (< (+ i 1) (len args)) (inc! i)
-    (when (not (pnTest kind (Cmp who (aget args i) (aget args (+ i 1)))))
-      (return false)))
+    (if (and (== kind 0) (or (isComplex (aget args i)) (isComplex (aget args (+ i 1)))))
+      (when (not (cxEq (aget args i) (aget args (+ i 1))))
+        (return false))
+      (when (not (pnTest kind (Cmp who (aget args i) (aget args (+ i 1)))))
+        (return false))))
 
   true)
 
@@ -270,7 +273,9 @@
     (case [float64]
       (return (== v 0)))
     (case [(* big/Int) (* big/Rat)]
-      (return false)))
+      (return false))
+    (case [(* Complex)]
+      (return (and (== (Cmp "zero?" (.-Re v) (pnI 0)) 0) (== (Cmp "zero?" (.-Im v) (pnI 0)) 0)))))
 
   (NotA "zero?" "number" x)
   false)
@@ -293,6 +298,8 @@
 
 (go/func pnExact ^any [^string who ^any x]
   (type-switch [v x]
+    (case [(* Complex)]
+      (return (MkRect (pnExact who (.-Re v)) (pnExact who (.-Im v)))))
     (case [float64]
       (when (or (math/IsInf v 0) (math/IsNaN v))
         (AssertionViolation who "no exact representation for ~s" x))
@@ -304,6 +311,8 @@
 
 (go/func pnInexact ^any [^string who ^any x]
   (pnNum who x)
+  (when [(values z ok) (assert (* Complex) x)] ok
+    (return (MkRect (ToFloat (.-Re z)) (ToFloat (.-Im z)))))
   (ToFloat x))
 
 ;; ---------------------------------------------------------------------------------------
@@ -313,10 +322,10 @@
   (.Div (new big/Int) (.Num q) (.Denom q)))
 
 (go/func pnDivMod "pnDivMod is R6RS's div and mod (centered: div0 and mod0) of reals x and y.\n" [^string who ^bool centered ^any x ^any y] :results [any any]
-  (when (not (IsNumber x))
+  (when (not (IsReal x))
     (AssertionViolation who "undefined for ~s" x))
 
-  (when (not (IsNumber y))
+  (when (not (IsReal y))
     (AssertionViolation who "undefined for ~s" y))
 
   (let [(values _ xf) (assert float64 x)
@@ -633,12 +642,15 @@
     (when (== n 0)
       (AssertionViolation "log" "undefined for ~s" x)))
 
+  (when (isComplex x)
+    (return (cxLog x)))
+
   (when (< (Sign "log" x) 0)
-    (Unimplemented "log" "complex numbers (SC7)"))
+    (return (cxLogReal x)))
 
   (when [(values f ok) (assert float64 x)] ok
     (when (and (math/Signbit f) (!= f 0))
-      (Unimplemented "log" "complex numbers (SC7)"))
+      (return (cxLogReal x)))
 
     (return (pnLn f)))
 
@@ -646,7 +658,7 @@
 
 (go/func pnSqrtBig ^any [^{:tag (* big/Int)} v]
   (when (< (.Sign v) 0)
-    (Unimplemented "sqrt" "complex numbers (SC7)"))
+    (return (cxSqrtNeg v)))
 
   (let [s (.Sqrt (new big/Int) v)]
     (when (== (.Cmp (.Mul (new big/Int) s s) v) 0)
@@ -663,7 +675,7 @@
   (type-switch [v x]
     (case [int64]
       (when (< v 0)
-        (Unimplemented "sqrt" "complex numbers (SC7)"))
+        (return (cxSqrtNeg x)))
 
       (when (< v (<< 1 52))
         (let [r (conv int64 (math/Sqrt (conv float64 v)))]
@@ -683,7 +695,7 @@
       (return (pnSqrtBig v)))
     (case [(* big/Rat)]
       (when (< (.Sign v) 0)
-        (Unimplemented "sqrt" "complex numbers (SC7)"))
+        (return (cxSqrtNeg x)))
 
       (let [n (.Sqrt (new big/Int) (.Num v))
           d (.Sqrt (new big/Int) (.Denom v))]
@@ -697,22 +709,29 @@
           (return (math/Sqrt f)))))
     (case [float64]
       (when (< v 0)
-        (Unimplemented "sqrt" "complex numbers (SC7)"))
+        (return (cxSqrtNeg x)))
 
-      (return (math/Sqrt v))))
+      (return (math/Sqrt v)))
+    (case [(* Complex)]
+      (return (cxSqrt x))))
 
   (NotA "sqrt" "number" x)
   nil)
 
-(go/func pnDefTrig "pnTrig: exact argument exactArg gives exact result exactRes; domain (when > 0) is |x| <= 1.\n" [^string name ^{:tag (func [float64] [float64])} f ^int64 exactArg ^int64 exactRes ^bool unit]
+(go/func pnDefTrig "pnTrig: exact argument exactArg gives exact result exactRes; domain (when > 0) is |x| <= 1.\n" [^string name ^int which ^{:tag (func [float64] [float64])} f ^int64 exactArg ^int64 exactRes ^bool unit]
   (Def1 name (fn ^any [^any x]
       (pnNum name x)
+      (when (isComplex x)
+        (return (cxTrig name which x)))
+
       (when [(values n ok) (assert int64 x)] (and ok (== n exactArg))
         (return exactRes))
 
       (let [v (ToFloat x)]
         (when (and unit ^:go/paren (or (> v 1) (< v -1)))
-          (Unimplemented name "complex numbers (SC7)"))
+          (if (== which 3)
+            (return (cxAsinReal v))
+            (return (cxAcosReal v))))
 
         (f v)))))
 
@@ -813,6 +832,9 @@
 (go/func pnExpt ^any [^any x ^any y]
   (pnNum "expt" x)
   (pnNum "expt" y)
+  (when (or (isComplex x) (isComplex y))
+    (return (cxExpt x y)))
+
   (type-switch y
     (case [int64 (* big/Int)]
       (when (pnExZero y)
@@ -847,7 +869,7 @@
 
   (let [(values fx fy) (values (ToFloat x) (ToFloat y))]
     (when (and (< fx 0) (not (math/IsInf fy 0)) (not (math/IsNaN fy)) (!= fy (math/Trunc fy)))
-      (Unimplemented "expt" "complex numbers (SC7)"))
+      (return (cxExpt x y)))
 
     (pnPow fx fy)))
 
@@ -1094,12 +1116,12 @@
   ;; numeric tower predicates
   (Def1 "number?" (fn ^any [^any x] (IsNumber x)))
   (Def1 "complex?" (fn ^any [^any x] (IsNumber x)))
-  (Def1 "real?" (fn ^any [^any x] (IsNumber x)))
+  (Def1 "real?" (fn ^any [^any x] (IsReal x)))
   (Def1 "rational?" (fn ^any [^any x] (IsRational x)))
   (Def1 "integer?" (fn ^any [^any x] (IsInteger x)))
-  (Def1 "real-valued?" (fn ^any [^any x] (IsNumber x)))
-  (Def1 "rational-valued?" (fn ^any [^any x] (IsRational x)))
-  (Def1 "integer-valued?" (fn ^any [^any x] (IsInteger x)))
+  (Def1 "real-valued?" (fn ^any [^any x] (or (IsReal x) (cxRealValued x))))
+  (Def1 "rational-valued?" (fn ^any [^any x] (or (IsRational x) (and (cxRealValued x) (IsRational (.-Re (assert (* Complex) x)))))))
+  (Def1 "integer-valued?" (fn ^any [^any x] (or (IsInteger x) (and (cxRealValued x) (IsInteger (.-Re (assert (* Complex) x)))))))
   (Def1 "exact?" (fn ^any [^any x] (pnNum "exact?" x) (IsExact x)))
   (Def1 "inexact?" (fn ^any [^any x] (pnNum "inexact?" x) (not (IsExact x))))
   (Def1 "exact-integer?" (fn ^any [^any x] (IsExactInteger x)))
@@ -1174,6 +1196,9 @@
 
   (Def1 "exp" (fn ^any [^any x]
       (pnNum "exp" x)
+      (when (isComplex x)
+        (return (cxExp x)))
+
       (when (pnExZero x)
         (return (pnI 1)))
 
@@ -1187,16 +1212,19 @@
       (pnNum "log" (aget args 1))
       (pnDiv (pnLog (aget args 0)) (pnLog (aget args 1)))))
 
-  (pnDefTrig "sin" pnSin 0 0 false)
-  (pnDefTrig "cos" pnCos 0 1 false)
-  (pnDefTrig "tan" pnTan 0 0 false)
-  (pnDefTrig "asin" pnAsin 0 0 true)
-  (pnDefTrig "acos" pnAcos 1 0 true)
+  (pnDefTrig "sin" 0 pnSin 0 0 false)
+  (pnDefTrig "cos" 1 pnCos 0 1 false)
+  (pnDefTrig "tan" 2 pnTan 0 0 false)
+  (pnDefTrig "asin" 3 pnAsin 0 0 true)
+  (pnDefTrig "acos" 4 pnAcos 1 0 true)
   (Def "atan" 1 2 (fn ^any [^{:tag (slice any)} args]
       (when (== (len args) 2)
         (return (pnAtan2Num (aget args 0) (aget args 1))))
 
       (pnNum "atan" (aget args 0))
+      (when (isComplex (aget args 0))
+        (return (cxTrig "atan" 5 (aget args 0))))
+
       (when (pnExZero (aget args 0))
         (return (pnI 0)))
 
@@ -1252,45 +1280,45 @@
 
         (StringToNumber (.String s) radix))))
 
-  (Def2 "make-rectangular" ^{:go/breaks [6] :go/end 1368} (fn ^any [^any a ^any b]
+  (Def2 "make-rectangular" (fn ^any [^any a ^any b]
       (pnReal "make-rectangular" a)
       (pnReal "make-rectangular" b)
-      (when (pnExZero b)
-        (return a))
+      (MkRect a b)))
 
-      (Unimplemented "make-rectangular" "complex numbers (SC7)")
-      nil))
-
-  (Def2 "make-polar" ^{:go/breaks [6] :go/end 1377} (fn ^any [^any a ^any b]
+  (Def2 "make-polar" (fn ^any [^any a ^any b]
       (pnReal "make-polar" a)
       (pnReal "make-polar" b)
-      (when (or (pnExZero b) (pnExZero a))
-        (return a))
-
-      (Unimplemented "make-polar" "complex numbers (SC7)")
-      nil))
+      (MakePolar a b)))
 
   (Def1 "real-part" (fn ^any [^any x]
       (when (not (IsNumber x))
         (NotA "real-part" "complex number" x))
 
-      x))
+      (let [(values re _) (cxParts x)]
+        re)))
 
   (Def1 "imag-part" (fn ^any [^any x]
       (when (not (IsNumber x))
         (NotA "imag-part" "complex number" x))
 
-      (pnI 0)))
+      (let [(values _ im) (cxParts x)]
+        im)))
 
   (Def1 "magnitude" (fn ^any [^any x]
       (when (not (IsNumber x))
         (NotA "magnitude" "complex number" x))
+
+      (when (isComplex x)
+        (return (cxMagnitude x)))
 
       (pnAbs "magnitude" x)))
 
   (Def1 "angle" (fn ^any [^any x]
       (when (not (IsNumber x))
         (NotA "angle" "complex number" x))
+
+      (when (isComplex x)
+        (return (cxAngle x)))
 
       (when (pnExZero x)
         (AssertionViolation "angle" "undefined for ~s" x))

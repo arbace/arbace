@@ -12,7 +12,7 @@
 (in-ns 'go.arbace.scm)
 
 (go/file "eval.go"
-  :imports [])
+  :imports [[strconv "strconv"]])
 
 (go/type Env "Env is a lexical frame: the values of a lambda's parameters or of a letrec's variables.\n"
   (struct ^{:tag (slice any)} V ^{:tag (* Env)} Up))
@@ -89,7 +89,16 @@ of locations, psyntax's primitive locations, and the barriers of nested runs (in
 (go/method pushRestoreH [^{:tag (* M)} m ^{:tag (* Hs)} h]
   (set! (.-k m) (addr (lit K :Next (.-k m) :Kind kRestoreH :X h))))
 
+(go/func single "single raises Chez's error when v, delivered to a single-value context, is not one value.\n" [^any v]
+  (let [(values vs ok) (assert (* Values) v)]
+    (when (and ok (!= (len (.-V vs)) 1))
+      (Violation CondAssertion "" (+ "returned " (strconv/Itoa (len (.-V vs))) " values to single value return context")))))
+
 (go/method resume "resume delivers v to frame k (already popped).\n" [^{:tag (* M)} m ^{:tag (* K)} k ^any v] :results [any bool]
+  (when (!= (.-Kind k) kSeq)
+    (when (!= (.-Kind k) kGo)
+      (when (!= (.-Kind k) kRestoreH)
+        (single v))))
   (switch (.-Kind k)
     (case [kSeq] (return (seqFrom m (assert (* Seq) (.-N k)) (.-E k) (.-I k))))
     (case [kIf]
@@ -433,7 +442,10 @@ continuable one, its value is the raise's.\n"
   (return (.Run (.-T n) m e)))
 
 (go/type IfS "IfS is an if whose three parts are simple.\n" (struct ^Simple T ^Simple C ^Simple A))
-(go/method Run [^{:tag (* IfS)} n ^{:tag (* M)} m ^{:tag (* Env)} e] :results [any bool] (return (.Ev n e) true))
+(go/method Run [^{:tag (* IfS)} n ^{:tag (* M)} m ^{:tag (* Env)} e] :results [any bool]
+  (when (Truthy (.Ev (.-T n) e))
+    (return (.Run (.-C n) m e)))
+  (return (.Run (.-A n) m e)))
 (go/method Ev ^any [^{:tag (* IfS)} n ^{:tag (* Env)} e]
   (when (Truthy (.Ev (.-T n) e))
     (return (.Ev (.-C n) e)))
@@ -447,7 +459,7 @@ continuable one, its value is the raise's.\n"
     (for [] (< i last) (inc! i)
       (let [s (aget (.-ss n) i)]
         (if (!= s nil)
-          (.Ev s e)
+          (.Run s m e)
           (do (.push m kSeq n e (+ i 1))
               (return (.Run (aget (.-Es n) i) m e))))))
     (return (.Run (aget (.-Es n) last) m e))))
@@ -511,8 +523,12 @@ continuable one, its value is the raise's.\n"
 
 (go/type PrimApp "PrimApp is a plain primitive applied to simple operands.\n"
   (struct ^{:tag (* Prim)} P ^{:tag (slice Simple)} Args))
-(go/method Run [^{:tag (* PrimApp)} n ^{:tag (* M)} m ^{:tag (* Env)} e] :results [any bool] (return (.Ev n e) true))
+(go/method Run [^{:tag (* PrimApp)} n ^{:tag (* M)} m ^{:tag (* Env)} e] :results [any bool] (return (.evU n e) true))
 (go/method Ev ^any [^{:tag (* PrimApp)} n ^{:tag (* Env)} e]
+  (let [v (.evU n e)]
+    (single v)
+    v))
+(go/method evU ^any [^{:tag (* PrimApp)} n ^{:tag (* Env)} e]
   (let [p (.-P n) a (.-Args n)]
     (switch (len a)
       (case [1] (when (!= (.-F1 p) nil) (return ((.-F1 p) (.Ev (aget a 0) e)))))

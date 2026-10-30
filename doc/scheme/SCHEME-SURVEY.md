@@ -1284,3 +1284,130 @@ and the check are Opus's.
    compiled namespaces` is printed by the tools meanwhile; they run evaluated); then `bin/gate --audit`, and the
    SM1-SM4 items above. `bin/generated-check`, `bin/j2g-edge verify` at the re-seed.
 5. Not run: the essential gate in this branch; si under `bin/lib/limit.bash`'s CPU limits; si on arm64.
+
+## As built: SM6 (write-ahead) (2026-10-30)
+
+Branch `scheme-sm1`, on `41f6cb01`. SM6 (the other libraries) is built in the light tier beside GT7's clean run, as
+SM5 was: no gate, no build of Arbace's executables, no lock; `go/arbace/scm` printed by repr/go and built by
+TamaGo's go into the light driver. Undecided proposals taken as recommended: SC66 (a) (complex numbers first,
+lifting `:complex`), SC63 (a) (the R5RS environments at boot), SC41 (a) still (the boot needs Chez), SC62 (a), SC64
+(a), SC65 (a), SC67 (a), SC68 (a), SC69 and SC70 as they stood (no speed pass in SM6: SC69 (b) stays for the shipped
+path). Sonnet agents wrote the normalization (private copy, merged here) and the SRFI ports (three agents,
+disjoint files); the complex part, the evaluator's single-value check, the boot's R5RS libraries and the records
+are mine.
+
+### What was built
+
+- **Complex numbers** (`go/arbace/scm/complex.ae`, SC66 (a)): `*Complex{Re, Im}` with real parts, both exact (imaginary
+  part not exact zero) or both flonums, Chez's invariant (`(make-rectangular 1 2.5)` is `1.0+2.5i`, an exact zero
+  imaginary part collapses, `1.5+0.0i` stays complex). `MkRect` keeps it. `+ - * /` run the real operations on the
+  parts (Chez's exact-zero rules carry over: `(* 0 1.5+2.0i)` is 0; `(- 0.0+1.0i)` is `-0.0-1.0i`), division by Smith's
+  method for flonums (`(/ 1e200+1e200i 1e200+1e200i)` is `1.0+0.0i` as on Chez), exact `sqrt` of exact complex
+  numbers (`(sqrt -3-4i)` is `1-2i`), exact integer `expt` by squaring (`(expt 1+i -2)` is `0-1/2i`), `exp`, `log`
+  (`ln |z|` as half the log of the squared magnitude, as Chez rounds it), `expt`, `sin cos tan asin acos atan` (math/cmplx
+  with Chez's branch choices for real arguments outside the domain: `(asin 2)`, `(acos -2)`), `make-polar`,
+  `magnitude`, `angle`, `real-part`, `imag-part`, `exact`, `inexact`, `=`, `zero?`, `real?` (false for `1+0.0i`) and
+  `real-valued?` (true), hashing, `eqv?`, `number->string` and `string->number` in every radix (Chez prints `0+1i`,
+  not `+i`; `-i` was read as `+i` and is fixed). The negative-real cases of `sqrt`, `log`, `expt` (`(sqrt -4)` is `0+2i`)
+  no longer raise. `real?`-style checks now use `IsReal` (the old `IsNumber` took a complex number for a real).
+  Differences kept: the last digit of 6 of 160 compared results of `sqrt +i`, `tan`, `asin`, `acos`, `atan`, `expt`
+  and `exp` of complex arguments (Go's math/cmplx is one ulp off Chez's libm there); no suite test sees them.
+- **Single-value contexts** (`eval.ae`): a `*Values` of other than one value delivered to an `if` test, an operand,
+  a `set!` or a `letrec` init raises Chez's `&assertion` "returned N values to single value return context" (a
+  `begin` statement, a tail position and `call-with-values` accept them). Racket's base suite tests this
+  (`(let ((v (div-and-mod +inf.0 1))) ...)`) after its complex part, which it never reached before.
+- **Unicode normalization** (`normalize.ae`, `normdata.ae`, `norm_test.ae`; `tools/scheme/normdata.{ss,py}`,
+  `normtests.ss`; `test/scheme/si/norm-chez.tsv`, 278 KB): `string-normalize-nfd|nfc|nfkd|nfkc` for every string, equal
+  to Chez 10.3.0 (Unicode 16.0). The tables are generated from Chez's own normalizers (decompositions, primary
+  composites, class order; the numeric classes attached from Python's `unicodedata` and checked against Chez's order:
+  930 combining characters in 55 classes, no difference), as one string constant (103 KB) parsed on first use; Hangul
+  is algorithmic. Test: all 1,088 blocks of 1,024 scalar values and 3,500 random strings, four forms each, by hash.
+  The unicode suite's 121 tests pass (8 failed before).
+- **R5RS environments** (`tools/psyntax/boot.ss`, SC63 (a)): `(psyntax null-environment-5)` (R5RS's keywords) and
+  `(psyntax scheme-report-environment-5)` (the names of `(rnrs base)`, `(rnrs r5rs)`, `(rnrs io simple)`,
+  `(rnrs mutable-pairs)`, `(rnrs mutable-strings)`: a superset of R5RS's) in the boot's library table;
+  `bin/si boot` again (36 s), `psyntax.pp.ae` changed by 14 lines. The r5rs suite file passes.
+- **SRFIs as libraries** under `scheme/lib/srfi/` (`bin/si` puts `scheme/lib` on every run's library path; names
+  `(srfi :N name)` and `(srfi :N)`, files `srfi/%3aN/name.sls` and `srfi/%3aN.sls`, psyntax's naming): SRFI 1, 13, 14, 26,
+  39, 69, 98, 125, 128, 133, 158, each from the official repository at a pinned commit (corpora `:srfi-N` in
+  `test/scheme/corpora.edn`, fetched by `bin/repr-scheme corpus fetch`, the originals' sha256 and what the port changed
+  in `scheme/lib/srfi/provenance-N.edn`, licenses in `LICENSE.md`). The repositories are
+  `scheme-requests-for-implementation/srfi-N` (the brief's `scheme-requests-process` does not exist). Where
+  the repository has tests they are used with a small counting harness (125, 128, 133, 158, 14 in part); SRFI 1, 13, 26
+  and 98 have none: the tests are the SRFI documents' examples and cases checked on Chez. Deviations:
+  SRFI 14 is rewritten over code point ranges (the reference is Latin-1 only); SRFI 125 runs on R6RS hashtables
+  (SRFI 126, which the original needs, is not ported); SRFI 98 reads `/proc/self/environ` (no `getenv` primitive);
+  SRFI 1 and 133 export names that clash with `(rnrs)`'s (a program imports with `except`/`only`, as the tests do).
+  `bin/si srfi [N...]` (Makefile `si-srfi`) runs `test/scheme/srfi/srfi-N*.sps`.
+- **(rnrs ...) libraries**: bytevectors, unicode, io ports with transcoders, files, programs, enums, sorting, the
+  three arithmetic libraries, records and the mutable-* libraries were built in SM5; their suite files are now all in
+  a result (below).
+
+### The checks, numbers
+
+- **`bin/si check`: 46 of 47 programs pass, 1 non-pass item, 0 failing** (SM5: 42 of 46, 13 items): the classes
+  `:complex` (1), `:normalization` (8) and `:r5rs-environments` (3) are gone, `:chez-conditions` (1) stays. The new
+  program `si/complex` (162 expressions of complex arithmetic, the single-value check) is judged against Chez's run.
+  Racket's base suite now runs to its end (it stopped at its first complex `test/approx`).
+- **SRFI programs, `bin/si srfi`: 11 of 11, 1,031 checks** on si (1: 201, 13: 207, 14: 182, 26: 38, 39: 26, 69: 81, 98: 14,
+  125: 92, 128: 158, 133: 152, 158: 80), also on Chez through a view of `scheme/lib` with `%3a` renamed `:` (Chez
+  does not decode `%3a`). `bin/repr-scheme corpus fetch srfi-N` re-fetches and checks all pins.
+- `bin/si unit`: pass. `bin/si test --si`: 61 of 64, 3 known, 0 failing (as SM5). `make check-makefile`: rc 0.
+- Not run: `bin/si test` on the bootstrap host after the evaluator change is unaffected (it runs on Arbace's host),
+  not rerun; no gate; si under CPU limits; the SRFI programs under Chez through the repo's own script (the agents'
+  views are in `.tmp/ag6/`).
+
+### Proposals (SC80 onward)
+
+- **SC80 Where the SRFIs' files live and their names.**
+  - Options: (a) as built: `scheme/lib/srfi/%3aN/NAME.sls` plus `%3aN.sls`, psyntax's file names, vendored with notices
+    and provenance beside; (b) a corpus fetched at run time (as the suites) with the ports as patches; (c) embed in
+    the executable.
+  - *Recommended: (a)* now (344 KB, the ports are edited files, not copies); (c) with the shipped path (SC61) so a
+    user's `(import (srfi :1))` works with no directory.
+- **SC81 Chez and `%3a`.**
+  - Options: (a) keep psyntax's naming, run Chez on a view with `:` names (as the agents did), `bin/si srfi --chez`
+    building the view; (b) name the files with a plain `:` (Linux allows it; Chez finds them, psyntax's `library-name->file-name`
+    patched to match).
+  - *Recommended: (a)*, and add the `--chez` flag at the re-seed batch: no patch of psyntax.
+- **SC82 The reference tests of SRFIs 1, 13, 26, 98 (none in the repositories).**
+  - Options: (a) as built: the SRFI document's examples plus cases checked on Chez; (b) fetch other implementations'
+    suites (chibi's `tests/srfi/1-tests.scm`, Gauche's, srfi-test from Chicken) pinned like the rest, in SM8;
+  - *Recommended: (b)* in SM8 with the R7RS corpus (SC1's step): chibi's suite is the broader judge for SRFI 1 and 13.
+- **SC83 Unicode data of Go versus Chez.**
+  - Options: (a) as built: character classification from Go's tables (the SRFI 14 agent
+    measured 2,283 `Ll` against Chez's 2,258), normalization from Chez's tables; (b) dump the category, case and
+    numeric tables from Chez as well, so si equals Chez at every scalar value, as normalization does.
+  - *Recommended: (b)* if a program is to print the same bytes on both; today no suite test sees the difference. Cost:
+    about 100 KB of generated data and a generator beside `normdata`.
+- **SC84 Multiple values in single-value contexts.**
+  - Options: (a) as built: checked in the machine's frames and in `PrimApp.Ev` (a nested simple operand), Chez's
+    message and condition; (b) unchecked (the old behaviour: a `*Values` flows as a value).
+  - *Recommended: (a)*: Racket's base suite tests it; the cost is a type assertion per frame resume.
+- **SC85 Complex transcendental accuracy.**
+  - Options: (a) as built: math/cmplx, last-digit differences classed nowhere (no test sees them); (b) port Chez's
+    formulas (C99 `casin` etc.) over `big.Float` as the real functions are.
+  - *Recommended: (a)* until a program or suite prints them; (b) is a day's work.
+- **SC86 An environment primitive.**
+  - Options: (a) add `getenv`/`environ` to `prim_control.ae` (next to `command-line`) and have SRFI 98 use it; (b) keep the
+    `/proc/self/environ` read.
+  - *Recommended: (a)* at the heavy list's item 1 (the shipped path needs `os.Environ` anyway); (b) is Linux-only.
+- **SC87 `getenv` in the R6RS sense and `(rnrs programs)` tests.** None: Racket's `programs.sls` passes (`command-line`, `exit`).
+  Recorded for completeness; no option.
+
+### Rule slips
+
+- A `chez` run of `cp ... /dev/null` was written by the normalization agent (no effect).
+- Two background `bin/si check --record` runs overlapped for a minute after I found that `check --record-ref --only ID`
+  rewrites `ref-chez.edn` with that one program only; I stopped the first by PID, restored the file from git and
+  recorded all references again. Up to four agents (with me) ran at once, each under 2 GB and GOMAXPROCS 2 to 4.
+- One shell command started in `/root/arbace` (the main checkout) after a backgrounded `cd ... &&` chain; it only read
+  (`git status`, `du`).
+
+### The heavy list and checks not run
+
+The SM5 list (listing `go/arbace/scm` in j2g's package list, `arbace.lang.SchemeInterp`, the gate, the re-seed) stands, with:
+`scheme/lib` and `normdata.ae` shipped with the executable (SC80 (c)); `getenv` (SC86); `bin/si srfi` and `check` on
+the shipped executable; `bin/repr-scheme check` over the new corpora (`:srfi-N` read by repr/scheme and printed back, the
+`:full` round trip over `scheme/lib`'s files, which the SM2-SM3 check should do before the tag); `bin/gate --audit`
+for the new inputs (`scheme/lib`, `tools/scheme`, the SRFI tests).

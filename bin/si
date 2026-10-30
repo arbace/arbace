@@ -29,6 +29,7 @@
 #                                        recorded runs (test/scheme/si/ref-chez.edn; --record-ref: run Chez first and
 #                                        rewrite it), every non-pass in a class of test/scheme/divergences.edn
 #                                        (--record: write test/scheme/check-linux-amd64.edn)
+#   bin/si srfi [N...]                  the SRFIs' programs (test/scheme/srfi/srfi-N*.sps) run on si with the libraries of scheme/lib
 #   bin/si divergences [RESULTS]         the recorded check's non-pass items by class
 #   bin/si check-suite                   Racket's R6RS suite's libraries and programs expanded (the corpus of
 #                                        test/scheme/corpora.edn), its &syntax cases (test/scheme/expand/suite-syntax.edn)
@@ -81,7 +82,7 @@ si_print_build() {
      esac)
 }
 # si_exec [--lib DIR]... FILE ARGS: the light driver, under the light tier's memory and threads
-si_exec() { GOMEMLIMIT=${SI_GOMEMLIMIT:-1500MiB} GOMAXPROCS=${GOMAXPROCS:-4} "$si_light" --pp "$light_dir/psyntax.pp.ss" "$@"; }
+si_exec() { GOMEMLIMIT=${SI_GOMEMLIMIT:-1500MiB} GOMAXPROCS=${GOMAXPROCS:-4} "$si_light" --pp "$light_dir/psyntax.pp.ss" --lib "$root/scheme/lib" "$@"; }
 
 # check_runs IMPL DIR [IDS...]: each program of programs.edn run by IMPL (si or chez) in its file's directory,
 # its stdin the :input file, into DIR/ID.out, .err, .rc
@@ -99,7 +100,7 @@ check_runs() {
     : > "$in"; [ -n "$input" ] && in=$corpora/$input
     case $impl in
       chez) (cd "$d" && timeout "${SI_TIMEOUT:-600}" "$CHEZ" --libdirs "$root/.tmp/si/suite-lib" --program "$(basename "$f")" < "$in" > "$o.out" 2> "$o.err"; echo $? > "$o.rc") || true ;;
-      si) (cd "$d" && timeout "${SI_TIMEOUT:-600}" env GOMEMLIMIT=${SI_GOMEMLIMIT:-1500MiB} GOMAXPROCS=${GOMAXPROCS:-4} "$si_light" --pp "$light_dir/psyntax.pp.ss" --lib "$root/.tmp/si/suite-lib" "$(basename "$f")" < "$in" > "$o.out" 2> "$o.err"; echo $? > "$o.rc") || true ;;
+      si) (cd "$d" && timeout "${SI_TIMEOUT:-600}" env GOMEMLIMIT=${SI_GOMEMLIMIT:-1500MiB} GOMAXPROCS=${GOMAXPROCS:-4} "$si_light" --pp "$light_dir/psyntax.pp.ss" --lib "$root/.tmp/si/suite-lib" --lib "$root/scheme/lib" "$(basename "$f")" < "$in" > "$o.out" 2> "$o.err"; echo $? > "$o.rc") || true ;;
     esac
     echo "$impl $id: status $(cat "$o.rc")" >&2
   done < "$dir/list.tsv"
@@ -159,6 +160,21 @@ case $cmd in
     rm -rf "$root/.tmp/si/runs"; check_runs si "$root/.tmp/si/runs" ${only[@]+"${only[@]}"}
     oargs=(); for i in ${only[@]+"${only[@]}"}; do oargs+=(--only "$i"); done
     arbace_tool -m arbace.scheme.check judge "$root/.tmp/si/runs" ${rec[@]+"${rec[@]}"} ${oargs[@]+"${oargs[@]}"} ;;
+  srfi)
+    # bin/si srfi [N...]: test/scheme/srfi/srfi-N*.sps (SM6: the SRFIs as libraries under scheme/lib/srfi/) run on si
+    # (the light driver); a program passes when its status is 0 and it prints no line starting "FAIL"
+    [ -x "$si_light" ] || light
+    rc=0; ran=0
+    for f in "$root"/test/scheme/srfi/srfi-*.sps; do
+      b=$(basename "$f" .sps); n=${b#srfi-}; n=${n%%-*}
+      if [ $# -gt 0 ]; then case " $* " in *" $n "*) ;; *) continue ;; esac; fi
+      o=$light_dir/srfi-$b; : > "$o.in"
+      (cd "$(dirname "$f")" && timeout "${SI_TIMEOUT:-300}" env GOMEMLIMIT=${SI_GOMEMLIMIT:-1500MiB} GOMAXPROCS=${GOMAXPROCS:-4} \
+         "$si_light" --pp "$light_dir/psyntax.pp.ss" --lib "$root/scheme/lib" "$(basename "$f")" < "$o.in" > "$o.out" 2> "$o.err"; echo $? > "$o.rc") || true
+      ran=$((ran+1)); st=$(cat "$o.rc"); fails=$(grep -c '^FAIL' "$o.out" || true)
+      if [ "$st" = 0 ] && [ "$fails" = 0 ]; then echo "pass $b: $(tail -1 "$o.out")"; else echo "FAIL $b: status $st, $fails FAIL lines ($o.out, $o.err)"; rc=1; fi
+    done
+    echo "srfi: $ran programs"; exit $rc ;;
   divergences) arbace_tool -m arbace.scheme.check divergences "$@" ;;
   expand|fixpoint) arbace_tool -m arbace.scheme.expand "$cmd" "$@" ;;
   *) sed -n '2,/^set -e/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
