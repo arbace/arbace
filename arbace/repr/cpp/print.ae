@@ -105,7 +105,7 @@
     (symbol? x) (if (= x 'decltype-auto) "decltype(auto)" (str/replace (str x) "/" "::"))
     (seq? x)
     (case (first x)
-      c/id (second x)
+      c/id (if (= (second x) "decltype-auto") "decltype(auto)" (second x))
       cpp/text (second x)
       cpp/global (str "::" (name-str (second x)))
       cpp/scope (str/join "::" (map name-str (rest x)))
@@ -213,6 +213,14 @@
   (^String [xs] (str/join ", " (map #(expr-str % 16) xs)))
   (^String [f start] (let [pm (meta f) v (vec f)] (str/join ", " (map #(expr-str (v %) 16 pm %) (range start (count v)))))))
 
+(defn- split-place
+  "A new-expression's form without its trailing `:place [args]` and the arguments: [form args]."
+  [x]
+  (let [v (vec x) i (.indexOf ^java.util.List v :place)]
+    (if (neg? i) [x nil] [(apply list (subvec v 0 i)) (nth v (inc i))])))
+
+(defn- place-str ^String [pl] (if (seq pl) (str "(" (args-str pl) ") ") ""))
+
 (defn- new-init ^String [init]
   ;; a new-expression's initializer: (args) or {args}
   (cond (nil? init) ""
@@ -296,11 +304,11 @@
               -> [(str (a 1 1) "->" (name-str (nth x 2))) 1]
               throw (if (= 1 (count x)) ["throw" 16] [(str "throw " (a 1 16)) 16])
               pack-expand [(str (a 1 1) "...") 1]
-              cpp/new (let [m (meta x) [_ t init] x]
-                        [(str (when (:cpp/global m) "::") "new " (type-name t) (new-init init)) 2])
-              cpp/new-array (let [m (meta x) [_ t n init] x
+              cpp/new (let [m (meta x) [x pl] (split-place x) [_ t init] x]
+                        [(str (when (:cpp/global m) "::") "new " (place-str pl) (type-name t) (new-init init)) 2])
+              cpp/new-array (let [m (meta x) [x pl] (split-place x) [_ t n init] x
                                   [s d] (split-type t (str "[" (expr-str n 17) "]"))]
-                              [(str (when (:cpp/global m) "::") "new " s d (new-init init)) 2])
+                              [(str (when (:cpp/global m) "::") "new " (place-str pl) s d (new-init init)) 2])
               cpp/delete [(str (when (:cpp/global (meta x)) "::") "delete " (a 1 3)) 2]
               cpp/delete-array [(str (when (:cpp/global (meta x)) "::") "delete[] " (a 1 3)) 2]
               cpp/lambda [(lambda-str x) 0]
@@ -465,6 +473,10 @@
   (case (first f)
     c/var (let [[s d] (var-parts f)] (str (join-sp s d) ";"))
     c/declare (declare-str f)
+    cpp/structured (let [[_ names & init] f
+                         m (meta names)
+                         [s d] (split-type (:tag m) (str "[" (str/join ", " (map name-str names)) "]"))]
+                     (str (join-sp (decl-head m) s) " " d (when (seq init) (init-str (first init))) ";"))
     c/typedef (let [[_ x t] f [s d] (split-type t (name-str x))] (str "typedef " (join-sp s d) ";"))
     cpp/alias (let [[_ x t] f] (str "using " (name-str x) " = " (type-name t) ";"))
     cpp/using (str "using " (when (:typename (meta f)) "typename ") (name-str (second f)) ";")
@@ -493,6 +505,9 @@
         c/pragma (.append b (str "#pragma " (second f) "\n"))
         c/directive (.append b (str (second f) "\n"))
         cpp/text (line b (second f))
+        cpp/instantiate (let [ib (StringBuilder.)]
+                          (binding [*indent* 0] (item! ib (second f)))
+                          (line b (str (when (:extern m) "extern ") "template " (str/triml (str/trimr (str ib))))))
         c/defn (let [[_ x ps & body] f [s d] (fn-declarator x ps true)] (fn-body! b (join-sp s d) body))
         cpp/ctor (let [[_ nm ps inits & body] f
                        [s d] (fn-declarator (with-meta nm m) ps false)
@@ -519,7 +534,10 @@
             (line b "};"))
           (line b (decl-str f)))
         cpp/namespace (let [[_ nm & items] f]
-                        (line b (str (when (:inline m) "inline ") "namespace" (when nm (str " " (name-str nm)))))
+                        (line b (str (when (:inline m) "inline ") "namespace" (when nm (str " " (let [ip (set (:cpp/inline-parts (meta nm)))]
+                                                                                                    (if (seq ip)
+                                                                                                      (str/join "::" (map-indexed (fn [i p] (str (when (ip i) "inline ") p)) (str/split (name-str nm) #"::")))
+                                                                                                      (name-str nm)))))))
                         (line b "{")
                         (doseq [x items] (item! b x))
                         (line b "}"))
@@ -542,6 +560,8 @@
                            (item! b (list 'cpp/friend (nth x 2))))
                        (and (seq? x) ('#{cpp/struct cpp/class cpp/union} (first x)) (not (tag-def? x)))
                        (line b (str "friend " (record-head x) ";"))
+                       (and (seq? x) (= (first x) 'cpp/text) (str/starts-with? (second x) "friend"))
+                       (line b (if (.endsWith ^String (second x) ";") (second x) (str (second x) ";")))
                        :else
                        (if (and (seq? x) ('#{c/declare c/defn cpp/ctor cpp/dtor} (first x)))
                        (let [ib (StringBuilder.)]
@@ -554,7 +574,7 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; Statements
 
-(def ^:private decl-heads '#{c/var c/declare c/typedef cpp/alias cpp/using cpp/using-namespace cpp/using-enum c/static-assert cpp/decls cpp/struct cpp/class
+(def ^:private decl-heads '#{c/var c/declare cpp/structured c/typedef cpp/alias cpp/using cpp/using-namespace cpp/using-enum c/static-assert cpp/decls cpp/struct cpp/class
                              cpp/union cpp/enum cpp/enum-class cpp/enum-struct c/defn cpp/template})
 
 (defn- cond-str ^String [c pm i]
@@ -603,6 +623,9 @@
       :else
       (let [[h & args] s]
         (case h
+          c/include (.append b (str (if (some #{:next} s) "#include_next " "#include ") (first args) "\n"))
+          c/pragma (.append b (str "#pragma " (first args) "\n"))
+          c/directive (.append b (str (first args) "\n"))
           do (block! b args)
           let (do (doseq [f (first args)]
                     (if (and (seq? f) (or (tag-def? f) (#{'c/defn 'cpp/template 'cpp/text} (first f))))

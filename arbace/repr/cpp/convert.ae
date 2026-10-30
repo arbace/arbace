@@ -110,6 +110,13 @@
         (or k e))
       :else e)))
 
+(defn- close-split
+  "A range that ends at a `>>` token the template-id uses half of (`vt<T>>` closing a parameter list): without the extra >."
+  ^String [^String t]
+  (if (and (.endsWith t ">>") (> (count (filter #(= \> %) t)) (count (filter #(= \< %) t))))
+    (subs t 0 (dec (count t)))
+    t))
+
 (defn text-form
   "The node as its source text, or a refusal; `semi`: a statement's or a declaration's text, the ; after it
   included. A node from a macro expansion is its extent's text, the invocations as written."
@@ -119,7 +126,7 @@
      (let [s ^String *src*
            e (if semi (semi-end e) e)]
        (when *texts* (swap! *texts* update (keyword why) (fnil inc 0)))
-       (list 'cpp/text (utf8 (text-at b e))))
+       (list 'cpp/text (utf8 (close-split (text-at b e)))))
      (gap (keyword why) (str "no form for " why ", and its text is not plain")))))
 
 (defmacro ^:private or-text
@@ -178,7 +185,7 @@
                   (if (some #(contains? reserved (symbol %)) parts)
                     (if (= 1 (count parts)) (list 'c/id (str x)) (list 'c/id (str/replace (str x) "/" "::")))
                     x))
-    (vector? x) (with-meta (mapv esc-name x) (meta x))
+    (vector? x) (with-meta (mapv #(if (= % '&) % (esc-name %)) x) (meta x))
     (seq? x) (if (#{'operator 'cpp/text 'c/id} (first x))
                x
                (with-meta (apply list (first x) (map esc-name (rest x))) (meta x)))
@@ -329,7 +336,7 @@
   {"-" '- "+" '+ "!" 'not "~" 'bit-not "&" 'addr "*" 'deref "__real" 'real "__imag" 'imag "__extension__" 'cpp/extension
    "co_await" 'co-await})
 
-(declare ex stmt-items block-forms decl-forms var-form local-decl params-of type-for)
+(declare ex stmt-items block-forms compound-forms decl-forms var-form local-decl params-of type-for)
 
 (def ^:private transparent
   #{"ImplicitCastExpr" "MaterializeTemporaryExpr" "CXXBindTemporaryExpr" "ExprWithCleanups" "ConstantExpr" "FullExpr"
@@ -424,7 +431,7 @@
              ret (with-meta {:tag ret})
              mutable (vary-meta assoc :cpp/specs '[mutable])
              (nil? params-text) (vary-meta assoc :cpp/no-params true))]
-    (apply mk 'cpp/lambda cap-forms ps (block-forms (kids body)))))
+    (apply mk 'cpp/lambda cap-forms ps (compound-forms body))))
 
 (defn ex
   "An expression's form."
@@ -449,16 +456,20 @@
           ("DeclRefExpr" "UnresolvedLookupExpr" "DependentScopeDeclRefExpr") (ref-name n)
           "CXXThisExpr" 'this
           "MemberExpr"
-          (let [base (first (kids n))
-                sb (strip base)
+          (let [[base sb arrow] (loop [base (first (kids n)) arrow (:isArrow n)]
+                                  ;; the members of an anonymous union or struct are reached through its unnamed member
+                                  (let [sb (strip base)]
+                                    (if (and (= (kind sb) "MemberExpr") (= "" (:name sb)))
+                                      (recur (first (kids sb)) (:isArrow sb))
+                                      [base sb arrow])))
                 nm ^String (:name n)]
             (cond
               (and (= (kind sb) "CXXThisExpr") (implicit? sb)) (ref-name n)
               (not (re-matches #"[A-Za-z_$][A-Za-z0-9_$]*" nm)) (gap :member nm)
               (let [t (ntext n)] (and t (not (re-find (re-pattern (str "(\\.|->)\\s*" nm "\\s*$")) t)))) (gap :member "a qualified member")
-              (and (:isArrow n) (= (kind sb) "CXXOperatorCallExpr") (= (operator-of sb) "->"))
+              (and arrow (= (kind sb) "CXXOperatorCallExpr") (= (operator-of sb) "->"))
               (mk '-> (ex (second (kids sb))) (ident nm))
-              (:isArrow n) (mk '-> (ex base) (ident nm))
+              arrow (mk '-> (ex base) (ident nm))
               :else (mk (symbol (str ".-" (utf8 nm))) (ex base))))
           "CXXDependentScopeMemberExpr"
           (let [nm ^String (:member n) base (first (kids n))]
@@ -534,17 +545,31 @@
                 _ (when-not (and (seq? pt) (= (first pt) '*)) (gap :new "the allocated type"))
                 t (second pt)
                 ks (vec (kids n))
-                _ (when (:isPlacement n) (gap :new "placement"))
                 [size ks] (if (:isArray n) [(ex (first ks)) (subvec ks 1)] [nil ks])
+                ;; the children are the array size, the initializer, then the placement arguments
+                has-init (boolean (#{"call" "list"} (:initStyle n)))
+                ;; the placement arguments are the last children, as many as operator new takes after the size
+                np (when (:isPlacement n)
+                     (let [qs (get-in n [:operatorNewDecl :type :qualType])
+                           ft (try (type-of qs) (catch arbace.lang.ExceptionInfo _ nil))]
+                       (if (and (seq? ft) (= (first ft) 'fn))
+                         (max 0 (- (count (second ft)) 1 (if (and qs (str/includes? qs "align_val_t")) 1 0)))
+                         (count (if has-init (rest ks) ks)))))
+                place (when (:isPlacement n) (mapv ex (take-last np ks)))
+                ks (if has-init [(first ks)] [])
                 init (case (:initStyle n)
                        "call" (let [x (strip (first ks))]
-                                (apply mk 'cpp/paren (if (= (kind x) "CXXConstructExpr") (construct-args x) [(ex (first ks))])))
+                                (apply mk 'cpp/paren (case (kind x)
+                                                       "CXXConstructExpr" (construct-args x)
+                                                       "ParenListExpr" (map ex (kids x))
+                                                       [(ex (first ks))])))
                        "list" (let [x (strip (first ks))]
                                 (apply mk 'cpp/brace (if (= (kind x) "InitListExpr") (init-list x) (construct-args x))))
                        nil)
                 f (if (:isArray n)
                     (if init (mk 'cpp/new-array t size init) (mk 'cpp/new-array t size))
-                    (if init (mk 'cpp/new t init) (mk 'cpp/new t)))]
+                    (if init (mk 'cpp/new t init) (mk 'cpp/new t)))
+                f (if place (with-meta (apply list (concat f [:place place])) (meta f)) f)]
             (if (:isGlobal n) (vary-meta f assoc :cpp/global true) f))
           "CXXDeleteExpr"
           (let [f (mk (if (:isArrayAsWritten n) 'cpp/delete-array 'cpp/delete) (ex (first (kids n))))]
@@ -567,7 +592,7 @@
                             (mk 'co-yield (ex (second (kids o))))
                             (gap :co-yield "an operand")))
           "CoawaitExpr" (mk 'co-await (ex (first (kids n))))
-          "StmtExpr" (apply mk 'stmt-expr (block-forms (kids (first (kids n)))))
+          "StmtExpr" (apply mk 'stmt-expr (compound-forms (first (kids n))))
           "UserDefinedLiteral" (let [t (or (ntext n) (gap :udl "in a macro"))
                                      [_ lit suf] (re-matches #"(?s)(.*?['\"0-9.])([A-Za-z_][A-Za-z0-9_]*)" t)]
                                  (if lit (list 'cpp/udl (utf8 lit) suf) (gap :udl t)))
@@ -582,11 +607,11 @@
   "An if's branch: (do ...) for a compound statement, else its one statement."
   [n]
   (if (= (kind n) "CompoundStmt")
-    (apply list 'do (block-forms (kids n)))
+    (apply list 'do (compound-forms n))
     (let [items (stmt-items n)]
       (if (= 1 (count items)) (first items) (gap :branch "a labeled statement as a branch")))))
 
-(defn- body-forms [n] (if (= (kind n) "CompoundStmt") (block-forms (kids n)) (stmt-items n)))
+(defn- body-forms [n] (if (= (kind n) "CompoundStmt") (compound-forms n) (stmt-items n)))
 
 (defn- expr-stmt
   "An expression statement: the expression's form, (c/expr x) for a value, a symbol or a text."
@@ -611,12 +636,14 @@
       (when (and (macro-node? n) (not (#{"CompoundStmt" "DeclStmt"} k)))
         (gap :macro "a statement from a macro"))
       (case k
-        "AttributedStmt" (let [as (filter #(.endsWith ^String (kind %) "Attr") (kids n))
+        "AttributedStmt" (let [as (filter #(and (.endsWith ^String (kind %) "Attr") (not= (kind %) "LoopHintAttr")) (kids n)) ; a loop hint is a #pragma, a directive of the body
                                st (first (remove #(.endsWith ^String (kind %) "Attr") (kids n)))
                                items (stmt-items st)]
-                           (into [(vary-meta (first items) assoc :cpp/attrs (mapv (fn [a] (or (some-> (ntext a) utf8) (gap :attr "in a macro"))) as))]
-                                 (rest items)))
-        "CompoundStmt" [(apply list 'do (block-forms (kids n)))]
+                           (if (empty? as)
+                             items
+                             (into [(vary-meta (first items) assoc :cpp/attrs (mapv (fn [a] (or (some-> (ntext a) utf8) (gap :attr "in a macro"))) as))]
+                                   (rest items))))
+        "CompoundStmt" [(apply list 'do (compound-forms n))]
         "NullStmt" ['(c/null)]
         "ReturnStmt" [(if-let [x (first (kids n))] (mk 'return (ex x)) '(return))]
         "BreakStmt" ['(break)]
@@ -680,14 +707,14 @@
                  (cond-> {} init (assoc :cpp/init (if (= (kind init) "DeclStmt") (vec (local-decl init)) [(ex init)])) (bare? s) (assoc :c/bare true)))])
         "CXXTryStmt"
         (let [[b & cs] (kids n)]
-          [(apply list 'cpp/try (apply list 'do (block-forms (kids b)))
+          [(apply list 'cpp/try (apply list 'do (compound-forms b))
                   (for [c cs]
                     (let [[p body] (kids c)
                           pv (cond
                                (none? p) '[&]
                                (:name p) [(with-meta (ident (:name p)) {:tag (type-for p)})]
                                :else [(type-for p)])]
-                      (apply list 'cpp/catch pv (block-forms (kids body))))))])
+                      (apply list 'cpp/catch pv (compound-forms body)))))])
         "DeclStmt" (gap :decl "a declaration as a statement")
         (if (or (.endsWith k "Expr") (.endsWith k "Operator") (.endsWith k "Literal") (contains? transparent k))
           [(expr-stmt (ex n))]
@@ -695,18 +722,44 @@
       (catch arbace.lang.ExceptionInfo e
         (if (:cpp/gap (ex-data e)) [(text-form n (str k "/" (name (:cpp/gap (ex-data e)))) true)] (throw e))))))
 
+(declare ^:dynamic *directives*)
+(def ^:dynamic *pending* "the directives of the compound statement being converted that no statement holds: an atom of a sorted vector" nil)
+
+(defn- flush-before
+  "The forms of the pending directives that stand before offset `off` (all of them when nil), removed from the pending."
+  [off]
+  (if-let [a *pending*]
+    (let [[mine rest] (split-with #(or (nil? off) (< (long (:off %)) (long off))) @a)]
+      (reset! a (vec rest))
+      (mapv :form mine))
+    []))
+
 (defn block-forms
-  "A block's items: its declarations as a let around the items after them."
+  "A block's items: its declarations as a let around the items after them; the pending directives between them."
   [ns]
   (loop [ns (seq ns) out []]
     (if-not ns
       out
-      (let [n (first ns)]
+      (let [n (first ns)
+            out (into out (flush-before (first (extent n))))]
         (if (= (kind n) "DeclStmt")
           (let [[ds more] (split-with #(= (kind %) "DeclStmt") ns)
                 binds (vec (mapcat local-decl ds))]
             (conj out (apply list 'let binds (block-forms more))))
           (recur (next ns) (into out (stmt-items n))))))))
+
+(defn compound-forms
+  "A compound statement's items, the directives that stand inside it between its statements among them (CP45)."
+  [n]
+  (let [[b e] (when (seq *directives*) (extent n))
+        ks (kids n)
+        within (fn [d it] (when-let [[x y] (extent it)] (and (<= (long x) (long (:off d))) (< (long (:off d)) (long y)))))
+        ds (when b (vec (sort-by :off (remove (fn [d] (some #(within d %) ks)) (filter #(< (long b) (long (:off %)) (long e)) *directives*)))))]
+    (if (seq ds)
+      (binding [*pending* (atom ds)]
+        (let [fs (block-forms ks)]
+          (into fs (flush-before nil))))
+      (binding [*pending* nil] (block-forms ks)))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Declarations
@@ -897,15 +950,15 @@
       (= (:explicitlyDefaulted n) "default") ['(cpp/defaulted)]
       (:explicitlyDeleted n) ['(cpp/deleted)]
       (nil? b) nil
-      (= (kind b) "CompoundStmt") (block-forms (kids b))
+      (= (kind b) "CompoundStmt") (compound-forms b)
       :else (let [[tb & cs] (kids b)]
-              [(apply list 'cpp/function-try (apply list 'do (block-forms (kids tb)))
+              [(apply list 'cpp/function-try (apply list 'do (compound-forms tb))
                       (for [c cs]
                         (let [[p body] (kids c)
                               pv (cond (none? p) '[&]
                                        (:name p) [(with-meta (ident (:name p)) {:tag (type-for p)})]
                                        :else [(type-for p)])]
-                          (apply list 'cpp/catch pv (block-forms (kids body))))))]))))
+                          (apply list 'cpp/catch pv (compound-forms body)))))]))))
 
 (defn fn-form [n]
   (let [k (kind n)
@@ -935,7 +988,7 @@
                  nm)
             f (apply list 'cpp/dtor nm body)
             ;; a destructor's type says noexcept when the spec is implicit: only a written one is the form's
-            m (if (re-find #"\bnoexcept\b" (let [t (or (ntext n) "") i (.indexOf t "{")] (if (neg? i) t (subs t 0 i)))) m (dissoc m :noexcept))]
+            m (if (re-find #"\bnoexcept\b" (let [t (-> (or (ntext n) "") (str/replace #"//[^\n]*" "") (str/replace #"(?s)/\*.*?\*/" "")) i (.indexOf ^String t "{")] (if (neg? i) t (subs t 0 i)))) m (dissoc m :noexcept))]
         (addm f (cond-> (dissoc m :const :volatile :cpp/ref) declare? (assoc :cpp/declare true))))
       (let [nm (or (decl-name n) (gap :fn "a name"))
             ps (if (or (= k "CXXConversionDecl")) ps (with-meta ps {:tag r}))
@@ -1048,7 +1101,7 @@
 (defn- outer-headers
   "The parameter lists of the template headers a text starts with: [[param ...] ...]."
   [^String t]
-  (let [ts (ty/tokens t)]
+  (let [ts (ty/tokens (-> t (str/replace #"(?s)/\*.*?\*/" " ") (str/replace #"//[^\n]*" " ")))]
     (loop [i 0 out []]
       (if (and (= "template" (tt ts i)) (= "<" (tt ts (inc i))))
         (if (= ">" (tt ts (+ i 2)))
@@ -1090,7 +1143,9 @@
         outer (when (and db nb (< (long db) (long nb))) (outer-headers (text-at db nb)))]
     (binding [*tparams* (conj (into *tparams* (header-names outer)) (vec (map #(or (:name %) "") ps)))]
       (let [[f] (decl-forms d ctx false)]
-        (wrap-headers (list 'cpp/template (mapv tparam ps) f) outer)))))
+        ;; the invented parameters of an abbreviated function template (`void f(auto p)`) are not written
+        (let [eps (remove :isImplicit ps)]
+          (wrap-headers (if (seq eps) (list 'cpp/template (mapv tparam eps) f) f) outer))))))
 
 (defn- spec-args [n]
   (for [a (filter #(= (kind %) "TemplateArgument") (kids n))]
@@ -1121,12 +1176,13 @@
           "TypedefDecl" (do (when (has-attrs? n) (gap :attr "a typedef's attributes")) [(list 'c/typedef (or (decl-name n) (gap :typedef "a name")) (type-of (qt n)))])
           "TypeAliasDecl" (do (when (has-attrs? n) (gap :attr "an alias's attributes")) [(list 'cpp/alias (decl-name n) (type-of (qt n)))])
           "NamespaceDecl"
-          (let [[nm inner] (loop [nm [(:name n)] n n]
-                             (let [ks (remove implicit? (kids n))]
-                               (if (and (= 1 (count ks)) (:isNested (first ks)))
-                                 (recur (conj nm (:name (first ks))) (first ks))
-                                 [nm n])))
-                f (apply list 'cpp/namespace (if (first nm) (symbol (str/join "/" (map utf8 nm))) nil) (members inner))]
+          (let [[nm inner inl] (loop [nm [(:name n)] n n inl []]
+                                 (let [ks (remove implicit? (kids n))]
+                                   (if (and (= 1 (count ks)) (:isNested (first ks)))
+                                     (recur (conj nm (:name (first ks))) (first ks) (if (:isInline (first ks)) (conj inl (count nm)) inl))
+                                     [nm n inl])))
+                sym (when (first nm) (let [y (symbol (str/join "/" (map utf8 nm)))] (if (seq inl) (with-meta y {:cpp/inline-parts inl}) y)))
+                f (apply list 'cpp/namespace sym (members inner))]
             [(if (:isInline n) (vary-meta f assoc :inline true) f)])
           "LinkageSpecDecl"
           (let [f (apply list 'cpp/linkage (:language n) (members n))]
@@ -1166,6 +1222,66 @@
                 args (spec-args n)
                 f (with-meta (apply list tag (apply list '<> nm args) (rest f)) (meta f))]
             [(list 'cpp/template [] f)])
+          "ClassTemplatePartialSpecializationDecl"
+          ;; template <params> struct V<T *> {...}: the parameters are the node's, the written template-id is read from the text
+          (let [ks (kids n)
+                ps (filter #(tparam-kinds (kind %)) ks)
+                t (or (ntext n) (gap :template "a partial specialization in a macro"))
+                ts (ty/tokens (utf8 t))
+                ;; after the headers' closing >
+                he (loop [j 0]
+                     (if (and (= "template" (tt ts j)) (= "<" (tt ts (inc j))))
+                       (recur (loop [j (+ j 2) d 1]
+                                (let [x (tt ts j)]
+                                  (cond (nil? x) (gap :template "a partial specialization's header")
+                                        (= x "<") (recur (inc j) (inc d))
+                                        (= x ">") (if (= d 1) (inc j) (recur (inc j) (dec d)))
+                                        :else (recur (inc j) d)))))
+                       j))
+                outer (butlast (outer-headers t))
+                ki (or (first (filter #(#{"struct" "class" "union"} (tt ts %)) (range he (count ts)))) (gap :template "a partial specialization's keyword"))
+                ;; skip attributes between the keyword and the name
+                ni (loop [j (inc ki)]
+                     (cond (= "[" (tt ts j)) (let [e (loop [k j d 0] (let [x (tt ts k)] (cond (nil? x) k (= x "[") (recur (inc k) (inc d)) (= x "]") (if (= d 1) (inc k) (recur (inc k) (dec d))) :else (recur (inc k) d))))] (recur e))
+                           (= "alignas" (tt ts j)) (recur (+ j 4))
+                           :else j))
+                [nm _] (or (ty/parse-name* ts ni) (gap :template "a partial specialization's name"))
+                nm (esc-name nm)]
+            (binding [*tparams* (conj (into *tparams* (header-names outer)) (vec (map #(or (:name %) "") ps)))]
+              (let [f (record-form (-> n (assoc :name nil)
+                                       (update :inner (fn [xs] (remove #(or (tparam-kinds (kind %)) (= (kind %) "TemplateArgument")) xs)))) ctx)
+                    f (with-meta (apply list (first f) nm (rest f)) (meta f))]
+                [(wrap-headers (list 'cpp/template (mapv tparam ps) f) outer)])))
+          "BindingDecl" []
+          "DecompositionDecl"
+          ;; auto &[a, b] = e;  =>  (cpp/structured ^{:tag (& auto)} [a b] e)
+          (let [ks (kids n)
+                bs (filter #(= (kind %) "BindingDecl") ks)
+                x (first (remove #(or (= (kind %) "BindingDecl") (.endsWith ^String (kind %) "Attr")) ks))
+                _ (when (or (nil? x) (empty? bs)) (gap :decomposition "no initializer"))
+                names (mapv #(if (:name %) (ident (:name %)) '_) bs)
+                m (merge {:tag (type-for n)} (spec-meta n))
+                init (init-form n x)]
+            [(if (= init ::none)
+               (list 'cpp/structured (with-meta names m))
+               (list 'cpp/structured (with-meta names m) init))])
+          "ExplicitInstantiationDecl"
+          ;; template [extern] class W<int>; / template void f<S>(int); : the declaration read from the text
+          (let [[b e] (or (rng n) (gap :template "an instantiation in a macro"))
+                t (str/trim (utf8 (text-at b (semi-end e))))
+                ext (boolean (re-find #"^extern\s+template\b" t))
+                body (-> t (str/replace #"^(extern\s+)?template\s*" "") (str/replace #"\s*;$" "") str/trim)
+                kw (second (re-find #"^(class|struct|union)\s+" body))
+                f (if kw
+                    (let [nm (or (name-of (str/trim (subs body (count kw)))) (gap :template "an instantiated class"))]
+                      (list (symbol (str "cpp/" kw)) nm))
+                    (let [[ty nm] (or (ty/parse-decl body) (gap :template "an instantiated declaration"))
+                          nm (esc-name nm)]
+                      (if (and (seq? ty) (= (first ty) 'fn))
+                        (list 'c/declare (addm (vary-meta nm assoc :tag (nth ty 2)) (dissoc (meta ty) :tag)) (second ty))
+                        (list 'c/var (vary-meta nm assoc :tag (esc-name ty))))))
+                f (list 'cpp/instantiate f)]
+            [(if ext (vary-meta f assoc :extern true) f)])
           "EmptyDecl" [(text-form n "EmptyDecl")]
           [(text-form n k true)])
         (catch arbace.lang.ExceptionInfo e
@@ -1191,7 +1307,7 @@
   "A declaration context's items: [[begin end form] ...] (an item's extent its node's; a node whose text overlaps
   the one before it and either is a text form joins it: the two written as one text)."
   [ns ctx]
-  (let [ns (remove #(or (implicit? %) (contains? % :TemplateInstantiationPattern) (#{"TemplateArgument"} (kind %)) (.endsWith ^String (str (kind %)) "Attr")) ns)
+  (let [ns (remove #(or (implicit? %) (contains? % :TemplateInstantiationPattern) (#{"TemplateArgument" "BindingDecl"} (kind %)) (.endsWith ^String (str (kind %)) "Attr")) ns)
         raw (for [n ns
                   :let [fs (decl-forms n ctx)]
                   :when (seq fs)]

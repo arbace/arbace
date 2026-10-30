@@ -21,7 +21,7 @@ import (
 )
 
 // version is part of every cache key: a change of the filter's output changes it.
-const version = "cxxdump-5"
+const version = "cxxdump-6"
 
 type countReader struct {
 	r io.Reader

@@ -2,7 +2,7 @@ package main
 
 // The normal form of a kept tree for the AST level of the round trip (doc/cpp/SPEC.md §3, level 3): the print's
 // AST equals the original's modulo positions and the dump's per-run ids. Removed: every node's id, loc and
-// range; the keys whose value is another node's id; the ids inside the declaration references; and in strings
+// range; isReferenced; the keys whose value is another node's id; the ids inside the declaration references; and in strings
 // the positions clang writes into the names of unnamed entities ("(lambda at a.cpp:6:20)", "(unnamed struct at
 // ...)"), masked as "at *".
 
@@ -14,7 +14,8 @@ var (
 )
 
 var dropKeys = map[string]bool{"id": true, "loc": true, "range": true, "previousDecl": true, "parentDeclContextId": true,
-	"referencedMemberDecl": true}
+	"referencedMemberDecl": true,
+	"isReferenced":         true} // clang's bookkeeping of a name lookup (an injected class name, a typedef used in a text form), not structure: the references themselves are kept (CP60)
 
 func normalize(v any) any {
 	switch x := v.(type) {
