@@ -6355,3 +6355,226 @@ The user decided all four as recommended:
 - **JFS137 (b) for the gate, (a) at the tag:** the gate's executables are keyed without the closure, and the reader is
   evaluated from the checkout. Releases and the tag embed it. If the audit rejects (b), (a) is used throughout.
 - **JFS138 (b) then (a):** part 2 (the pack) comes first as a small step to measure it, then parts 1 and 3.
+
+## As built: JN10 (write-ahead) (2026-10-30)
+
+JN10's code written ahead of the tag `arbace-reaps-3-crops-v2`, as JFS138 (b) then (a) orders it: part 2 (the java.base
+pack, JFS131 (b), JFS135 (a)) first, then part 1 (JFS130 (a), the read closure apart from javac's half) as far as light
+work goes. On the branch `java-jn10` from main `cb01f62c`, in the light tier beside GT7's clean run (the user,
+2026-10-30: under 2 GB and 4 threads, no gate, no builds of executables or javac's tool, no lock): every run was
+evaluated on stage 0 (`target/seed/amd64/arbace`, the seed's, `GOMAXPROCS=4 GOMEMLIMIT=1500MiB`) from the worktree,
+single-threaded. Nothing ran on javac's tool, so nothing that needs javac's classes was run; those checks are listed in
+JN10w.7, for the window after the tag.
+
+**The pack is 8.6 MB**: java.base's 7,434 class files (29,295,925 bytes at the platform's pin) stripped to what
+`classfile/parse` reads come to 8,602,109 bytes raw (29.4%), 1,664,916 deflated by `gzip -9` (5.7%), 1,031,028 by `xz -9`.
+That is JFS135's open number, and well under JN10.9's risk 6 (12 MB deflated): JFS131 (b) stands. **The proof holds**:
+`(parse (strip b))` equals `(parse b)` for each of java.base's 7,434 classes, and for all 27,598 class files of the 68
+modules (a one-off, JN10w.3); the pack written twice is the same bytes; read as a platform it is the directory's
+(modules, packages, class names, every class parsed), and the native declarations tier over it answers as over the
+directory (JN10w.3). **Part 1's door and its first interface are built**: `arbace.repr.java.javac-hook`, and
+`arbace.repr.java.tree` split into its native part (in the closure, no javac name) and `arbace.repr.java.javac-tree`
+(javac's half); the converter's flags are decls' constants; `bin/repr-java closure-check` guards the closure as a
+ratchet. Seven closure files still name javac (JN10w.4); the rest of part 1 (attr, model, nattr, resolve, expr,
+convert, java.ae) and part 3 are not begun.
+
+### JN10w.1 What was built
+
+| file | what |
+|---|---|
+| `arbace/repr/java/platform.ae` (new, `arbace.repr.java.platform`) | the platform interface (`modules`, `packages`, `class-names`, `class-bytes`, `exists?`, `index`) as a map of functions, with `dir-platform` (exploded modules, the code decls had), `pack-platform` (a pack's bytes; `file-pack`, `resource-pack`: `jdk/platform/java.base.decls` through the class loader's resources, the checkout's on the tools' host via `ARBACE_PATH`, the embedded one in a shipped program), `composite` (each module from the first platform that has it), `default-platform` (below), `as-platform`; the pack's writer (`pack-classes`, `pack-bytes`, `pack!`), `same-parse?` and `check`; `-main` (`pack`, `check`) |
+| `arbace/repr/java/classfile.ae` | `strip` and `kept-attributes`: the class file rebuilt with the attributes parse reads (class: Signature, InnerClasses, Runtime(In)VisibleAnnotations, Record, PermittedSubclasses; field: Signature, the annotations, ConstantValue; method: Signature, the annotations, Exceptions), its constant pool rebuilt of the entries those name, numbered in the order first named (the result depends on the input alone); the Record attribute kept with no components (JFS141) |
+| `arbace/repr/java/decls.ae` | the platform through `platform.ae`: `registry`'s `:platform` a platform (a string the directory's, nil the default), `platform-index` over it, `read-class-file` of a class path's file or of the platform's `[platform module path]` (cached by the platform's id), `package-class-names` and `platform-class` by `pf/class-names` and `pf/exists?`; no `File` on the platform's side (the class path's and the source path's directories stay files) |
+| `arbace/repr/java.ae` | `registry-units` takes `pf/default-platform`; a patched module (`read-jdk`'s `--patch-module`) the platform lacks is `javac-needed!` ("platform module M": the shipped program's pack holds java.base alone) |
+| `arbace/repr/java/javac_hook.ae` (new, `arbace.repr.java.javac-hook`) | the atom `hooks` ({entry fn}), `install!`, `call!`, the macro `call-fixed!` (no `apply`: the tree's hot accessors, JN10.9's risk 3), `hook`, `installed?`, `entries`, `try-load-javac-half!` (requires `arbace.repr.java.javac-read` when javac's classes are there; that namespace is part 1's later step), its own `javac-needed!` (decls' error data, so that `decls/javac-needed-reason` reads it) |
+| `arbace/repr/java/tree.ae` | no javac name: each function answers a native tree (a map) or nil itself and hands any other value to `:tree/NAME` (`jc?`, `tag`, `field`, `var-decl?`, `rule-case?`, `open-module?`, `class-kind`, `literal-value`, `start`, `end`, `pos`, `skip-parens`, `tree-name`, `full-name`, `diamond?`, `children`); `field-order`, the native trees' walk order, is now a static table (javac's reflection order of each tag's class's public fields, own then the superclasses': jrt's `Class.getFields`), generated from jdk26u's `JCTree.java` (JN10w.4); `*end-positions*` without its javac hint; `tag-classes` and the macro `def-field` moved |
+| `arbace/repr/java/javac_tree.ae` (new, `arbace.repr.java.javac-tree`) | javac's half of the tree interface: tree.ae's functions as they were before the split, both branches, verbatim (the old file is their source), installed as `:tree/NAME`; at load `field-order-check` (tree.ae's static table against javac's reflection) and `flags-check` (decls' 25 flag constants the converter reads against javac's `Flags`), each an error when it differs |
+| `arbace/repr/java/javac.ae`, `jtypes.ae` | require `arbace.repr.java.javac-tree`, so that wherever javac reads or javac's types are bound (every javac path of the tool) the tree's hooks are installed |
+| `arbace/repr/java/convert.ae`, `model.ae`, `resolve.ae` | javac's `Flags/X` statics are decls' `d/X` (25 names; JFS143), the `Flags` imports gone |
+| `bin/repr-java` | the verbs `platform-pack [OUT]` and `platform-check [PACK]` (on the tools' host, from the platform at its pin: `REPR_JAVA_PLATFORM`, else `.tmp/repr-java-platform` made by `bin/javac-vendor platform`; its java.base hashed against the pin's line), `closure-check [--known FILE] [--update]`; all three before the tool's lookup (no javac's tool) |
+| `jdk/platform/java.base.decls`, `jdk/platform/provenance.edn` (new) | the pack (deterministic, raw; its format in platform.ae's docstring) and its provenance: `:sha256`, `:bytes`, `:jdk` (the platform's pin, as the other provenance files name it), `:java.base` (the pin's line), `:writer`, `:strip` (the hash of `classfile.ae` and `platform.ae`) |
+| `test/repr/java/closure.ae` (new, `repr.java.closure`), `test/repr/java/closure-known.edn` (new) | closure-check: the closure from `arbace.repr.java`'s requires (the reader's ns forms) less javac's half (`javac`, `jtree`, `jtypes`, `javac-tree`, `javac-model`, `javac-read`); per file every symbol naming javac (a full name in com.sun.tools.javac, com.sun.source, javax.tools or javax.lang.model, a short name imported from them, an alias of the half, a require of the half; metadata walked) against the known counts (a ratchet: no file over its count, a file not listed clean); then every clean namespace whose requires are clean required in one process |
+| `bin/provenance-check` | the pack's hash and pin against `jdk/platform/provenance.edn` |
+| `bin/lib/repr-java/host.bash` | `repr_java_reader_hash` covers `platform`, `javac_hook`, `javac_tree` and the pack |
+| `bin/lib/version.bash` (`arbace_runtime_key`), `bin/arbace-go` (`gate_key`) | `jdk/platform/` left out: no program embeds it yet (JFS147) |
+| `test/gate/steps.edn`, `bin/gate`, `doc/GATE-SURVEY.md` | the essential step `repr-java-closure` (stage 0, seconds) and the `--full` step `repr-java-platform` (chain java, stage 0, the pin; about 2.5 minutes); `provenance`'s inputs gain `jdk/platform/` |
+| `Makefile` | `repr-java-closure-check`, `repr-java-platform-pack`, `repr-java-platform-check` |
+
+The platform a read takes (`pf/default-platform`): `REPR_JAVA_PLATFORM`'s directory alone when it is set (javac's
+tool's runs: unchanged, so that every check on the tool reads as before); with `REPR_JAVA_PACK=1` also, the pack first
+and the directory for the other modules (JFS131 (b) and (a): the composite, its java.base the pack's); with no directory
+the pack alone (the shipped program's read). JFS142 is whether the tool's default becomes the composite.
+
+### JN10w.2 The pack's numbers (JFS135's open number)
+
+| | bytes | of the class files |
+|---|---:|---:|
+| java.base's class files at the pin (7,434, module-info included) | 29,295,925 | 100% |
+| the pack, raw (`jdk/platform/java.base.decls`) | 8,602,109 | 29.4% |
+| the pack, `gzip -9` (about what j2g's zlib stores in an executable) | 1,664,916 | 5.7% |
+| the pack, `xz -9` (about what the seed's tar.xz adds) | 1,031,028 | 3.5% |
+
+`bin/repr-java platform-pack` on stage 0: 14.7 s, 436 MB peak, one thread. The pack is stored raw (JFS140): j2g compresses
+the resources it embeds (`arbace.j2g.zlib`, SA21) and git compresses the blob, so a per-entry deflate would only add an
+inflate per class read. The shipped program's growth from the pack is therefore about 1.7 MB (of JN10.6's +27 MB, which is
+the closure's code); JN9f.8's estimate of 6-8 MB was of a deflated pack, which comes to a fifth of that.
+
+### JN10w.3 strip and the proof
+
+`(parse (strip b)) = (parse b)` is compared on parse's data with its floats and doubles as their raw bits (so that a
+`NaN` constant equals itself and `-0.0` is not `0.0`; Clojure's `=` would say otherwise of both).
+
+| check (stage 0, one thread) | result |
+|---|---|
+| java.base's 7,434 class files (`platform-check`) | equal for each (71 s) |
+| all 68 modules' 27,598 class files (a one-off, `.tmp/jn10/t7.ae`) | equal for each, 0 unequal (282 s, 353 MB) |
+| the pack written twice | the same bytes (`ca3cae11...`) |
+| the pack against a fresh pack of the directory (`platform-check`) | byte for byte |
+| the pack read as a platform against the directory: modules, packages, class names, each class parsed, the index of java.base | the same: modules, packages, names, all 7,434 parses, the index (`platform-check: passed`, 141 s in all, 417 MB) |
+| decls over the pack against decls over the directory (`.tmp/jn10/t4.ae`): every top-level class of 15 java.base packages (java.lang, java.util, java.io, java.nio, java.time, java.util.concurrent, ...), its flags, type parameters, supertype, interfaces, fields' and methods' declared types and member classes, by flat names | 884 classes, 0 errors, 0 differ (35 s, 849 MB; java.lang alone: 145, 0, 0) |
+
+The first version of the index comparison failed on the default package: every module's `module-info.class` puts `""`
+in the directory's index under all 68 modules, the pack's under java.base alone; the check now compares the directory's
+index restricted to the pack's modules. (The first run of the check also had `-main`'s arguments in the wrong order and took the pack's
+path for the module list; the 68 modules' row above is the one-off's own run.)
+
+### JN10w.4 Part 1 as far as it went
+
+- **The inventory** (`.tmp/jn10/javac-sites.txt`, a Sonnet agent's): the closure is 22 files (23 with `javac_hook`); 8
+  named javac (`java.ae`, `attr`, `convert`, `expr`, `model`, `nattr`, `resolve`, `tree`), 916 sites by the inventory's
+  count (an import, a hint, an `instance?`, a static, a `jt/` or `javac/` reference each once per line): `model` 239,
+  `tree` 191, `convert` 142, `attr` 139, `nattr` 128, `resolve` 42, `expr` 20, `java.ae` 15. No javac name reached by
+  reflection on a string (`names.ae`'s `Class/forName` asks for platform names; `infer.ae` resolves `nattr/ntype` lazily).
+- **The hook** (`javac_hook.ae`) and **the tree** (`tree.ae`, `javac_tree.ae`): the closure's tree interface tests the
+  native model first (`nil` or a map) and hands any other value to javac's half, which is the old function whole; so on
+  the tool every answer is the old one by construction (risk 2 of JN10.9 is confined to the dispatch, `map?` against
+  `instance? JCTree`: no value is both). tree.ae loads on stage 0, walks the native trees of the samples
+  (`.tmp/jn10/t3.ae`: Features.java's 1,337 nodes, 92 tags) and answers `javac needed: javac's half: tree/tag` for a
+  non-tree.
+- **The tree's field order.** tree.ae's `children` walked a native tree in the order javac's reflection gives the tag's
+  class's fields (so that both trees are walked alike, which the converter's output depends on); the reflection needs
+  javac's classes. It is now a table, generated from jdk26u's `JCTree.java` (`.tmp/jn10/fields.py`: each nested class's
+  public instance fields in declaration order, then its superclass chain's, jrt's `Class.getFields` order,
+  `go/arbace/jrt/reflect.ae`'s `publicFields`; `.tmp/jn10/gen_order.ae`: filtered to `tree-fields`, every tag's
+  `tree-fields` found in its class) and checked against the reflection by `javac_tree.ae` when it loads on the tool
+  (JFS144).
+- **The flags** (JFS143): JN10.3's `jflags.ae` was not needed: decls already holds javac's flag values as the native
+  provider's table (`decls.ae` 91-102), so the converter, model and resolve read `d/FINAL` and the rest, and the tool
+  asserts each against javac's `Flags` at load (`flags-check`).
+- **The guard** (`bin/repr-java closure-check`, a Sonnet agent's): passes now (`closure-check: passed`, 23 files, 16 clean, 15 namespaces loaded in one process, `.tmp/jn10/closure.log`); a count above the known one
+  fails (tested with a lowered scratch copy, `--known`). Known counts by the reader's count (every symbol occurrence):
+  `java.ae` 17, `attr` 144, `convert` 108, `expr` 23, `model` 249, `nattr` 133, `resolve` 43: 717 in all (763 before the
+  flags were decls' constants; tree.ae was clean already when the guard first counted).
+
+### JN10w.5 Shipped files
+
+None of the shipped program's files changed in what it builds: `arbace/repr/java` is not embedded yet (`arbace/j2g/
+embed.ae`'s `excluded`, `arbace_embedded_sources`), and `jdk/platform/` is in no key a program depends on
+(`arbace_runtime_key`, `gate_key` leave it out, JFS147). So `arbace_runtime_key` is unchanged (the seed's
+`target/seed/aot` stays a base). What moves: `gate_key` (its inputs `bin/lib/version.bash` and `bin/arbace-go` changed:
+one gate build, about 8 minutes, in the window), `arbace_javac_key` (it hashes `arbace/`, `jdk/` and `bin/lib`: javac's
+tool rebuilt once, two builds since the reader's key changes too), the reader hash (`repr_java_reader_hash`: the four
+provenance files stale, as expected; `REPR_JAVA_STALE_OK=1`). The files that join the batched re-seed when part 1's
+embedding lands (JN10.6): the closure's namespaces (`arbace/repr/java.ae` and the 22 files of JN10w.4 with `platform.ae`
+and `javac_hook.ae`), `jdk/platform/java.base.decls` as a resource, `arbace/j2g/embed.ae`, `bin/lib/version.bash`,
+`bin/arbace-go`; none of them is embedded on this branch.
+
+### JN10w.6 The checks run
+
+- `bin/repr-java platform-pack` (through `-main`) and `platform-check`'s parts, `.tmp/jn10/run-pack.log`,
+  `run-check2.log`; the decls comparison `run-decls2.log` (JN10w.3).
+- `bin/repr-java platform-check` end to end (`.tmp/jn10/verb-check.log`): passed, the pack's hash and strip's sources
+  the provenance's (138 s, 415 MB).
+- The one-off over the 68 modules (`.tmp/jn10/t7.ae`, `run-all68.log`): 27,598 class files, 0 unequal.
+- `bin/repr-java platform-pack` wrote `jdk/platform/` (13.2 s), the same bytes as the scratch pack; `bin/provenance-check`:
+  the pack's line passes, the four reader-hash lines are stale as expected (JN10w.5).
+- `pf/default-platform` without a directory (the pack through the resource, 195 packages) and with `REPR_JAVA_PACK=1`
+  (the composite, 68 modules).
+- tree.ae, decls, platform and the closure's clean namespaces loaded on stage 0 (`closure-check`'s load step).
+- `make check-makefile`.
+- Not run (javac's classes needed, or a gate): everything in JN10w.7.
+
+### JN10w.7 Heavy checks for the post-tag window
+
+In this order, on the branch merged with main after the tag, under the rules of the day (the big lock where marked):
+
+1. `bin/repr-java closure-check --update` if a file moved since, then `bin/repr-java closure-check` (seconds).
+2. `bin/javac-vendor build` (javac's tool: two builds, the reader's key changed; big lock, about 40 minutes each). Its
+   first test is that `arbace.repr.java.javac-tree` loads: `field-order-check` and `flags-check` pass or the tool's
+   every read fails at once.
+3. `REPR_JAVA_STALE_OK=1 bin/repr-java parse-check --corpus samples,baseline` and `front-check --corpus samples,baseline`
+   (the tree split: the forms of both trees equal, byte for byte, the known files unchanged), then the full corpora:
+   `bin/repr-java parse-check`, `front-check`, `attr-check`, `nojavac-check` (big lock; their known files
+   `test/repr/java/*-check-known.edn` unchanged).
+4. `bin/repr-java check --suite` and `check --jdk` (against `test/repr/java/expected/jdk26u.sha256`: no forms file moves).
+5. JN10 part 2's check (b): `REPR_JAVA_PACK=1 bin/repr-java attr-check` and `REPR_JAVA_PACK=1 bin/repr-java
+   nojavac-check` (the native provider over the pack for java.base and the directory for the rest), the facts and forms
+   equal to the directory's run, the known files unchanged.
+6. `bin/repr-java platform-check` (stage 0, about 2.5 minutes) and its one-off over the 68 modules (JFS146).
+7. Speed (JN10.9 risk 3): `bin/repr-java parse --javac --time` and nojavac-check's total against JN9f's 540 s (budget 5%).
+8. The provenance writers, in the order JN10.7 gives, on the final tool: `bin/jrt-convert update`, `bin/javac-vendor
+   convert`, `bin/clojure-tests --java-fixtures update`, `bin/java-check --forms update` (each forms tree unchanged: a
+   diff is a bug), then `bin/provenance-check`.
+9. `bin/java-check --levels read,nread` (3,282 / 39 / 0 as recorded in `test/java/check-nread.edn`).
+10. `bin/gate --audit repr-java-closure provenance` (the new step's and the changed step's declared inputs), `bin/gate`
+    (essential), and `bin/gate --full --plan` (`repr-java-platform` planned); `bin/gate --full` at JN10's merge.
+
+### JN10w.8 Proposals
+
+- **JFS140 The pack's entries: raw or deflated.**
+  - Options: (a) raw, as built (j2g compresses the embedded resource, git the blob); (b) each entry deflated, inflated on
+    demand (JN10.4's plan), with a deterministic DEFLATE (`arbace.j2g.zlib`); (c) the whole pack deflated once.
+  - *Recommended: (a)*: the executable stores it at about 1.7 MB either way, and (b) adds an inflate per class read and a
+    second compressor on the reader's path; (c) is (a) with the same double compression.
+- **JFS141 strip's Record attribute.**
+  - Options: (a) kept with no components, as built (parse asks only whether there is one); (b) kept whole, its components'
+    names, descriptors and signatures (a few kB more); (c) dropped and the record flag recorded otherwise.
+  - *Recommended: (a)*: the proof is parse's equality, which (a) passes; when parse reads the components (javac's
+    `RECORD` component accessors are already methods), (b) is a change of `kept-attributes` and a re-pack, which the
+    provenance's `:strip` hash then demands.
+- **JFS142 The tool's default platform.**
+  - Options: (a) as built: the directory alone on the tool, the composite only with `REPR_JAVA_PACK=1`, the pack alone
+    without a directory; (b) the composite by default wherever both exist, once JN10w.7's step 5 passes, so every native
+    read on the tool reads java.base from the pack the shipped program reads; (c) (a) and a `--full` step of attr-check
+    with `REPR_JAVA_PACK=1`.
+  - *Recommended: (b)*: the checks on the tool then check the shipped reader's platform too, at no cost (the pack is
+    smaller to read than 7,434 files); (c) doubles a 40 GiB step.
+- **JFS143 javac's flag values.**
+  - Options: (a) decls' table, as built, asserted against javac's `Flags` when javac's half loads; (b) JN10.3's
+    `jflags.ae`, a second table.
+  - *Recommended: (a)*: one table of javac's values, the native provider's, which attr-check already compares fact by fact.
+- **JFS144 The native trees' field order.**
+  - Options: (a) the static table generated from `JCTree.java`, asserted against javac's reflection when javac's half loads
+    (as built); (b) generated on the tool by reflection and committed (a verb of `bin/repr-java`); (c) the native parser's
+    own field order, the converter made indifferent to it.
+  - *Recommended: (a)*, with (b)'s generator kept as `.tmp`'s script made a test if the assertion ever fires: the table
+    changes only with jdk26u's `JCTree.java`, the assertion says when; (c) moves forms.
+- **JFS145 What closure-check counts.**
+  - Options: (a) the ratchet, as built (no file over its known count; part 1 lowers the counts to zero, then the known
+    file is `{}`); (b) zero at once (the guard fails until part 1 is done); (c) the counts and also c2j's compile of the
+    closure on stage 0 (the shipped build's own guard, JN10.9 risk 1).
+  - *Recommended: (a) now, (c) when the counts reach zero*: (a) lets part 1 land file by file with the gate green; (c)
+    needs the closure free of javac first.
+- **JFS146 platform-check in the gate.**
+  - Options: (a) as built: `--full` (stage 0, about 2.5 minutes) and the pack's hash in the essential `provenance`;
+    (b) the 68 modules too (`platform-check --all`, about 5 minutes), recorded once and at each re-pack; (c) essential.
+  - *Recommended: (a), with (b) as an option of the verb run at each re-pack*: the pack changes only with strip, parse or the
+    pin, all of which the provenance's `:strip` and `:jdk` catch in the essential gate.
+- **JFS147 The pack and the keys.**
+  - Options: (a) `jdk/platform/` out of `arbace_runtime_key` and `gate_key` until the closure is embedded, as built; (b) in
+    them now (the runtime key moves for no program change: every build's compiled namespaces stale, the seed's aot base
+    gone until a re-seed); (c) the pack outside `jdk/`.
+  - *Recommended: (a)*: no program reads it before part 1's embedding, which puts it in the embedded resources and then
+    removes the exclusion (one change, batched with the re-seed); (c) breaks JFS135 (a)'s path.
+
+### JN10w.9 Sources and scratch
+
+- jdk26u at `baf63fbe42b8758448fee570a9d9bb914272d259` (`/root/jdk26u`):
+  `src/jdk.compiler/share/classes/com/sun/tools/javac/tree/JCTree.java` (the field order),
+  `src/jdk.compiler/share/classes/com/sun/tools/javac/code/Flags.java` (the flags' values, as decls has them); the
+  platform's java.base at its pin (`jdk/javac/platform.sha256`). JVMS 4.4, 4.7 (the attributes kept).
+- The worktree's `.tmp/jn10/` (scratch, not tracked): `env.sh` (the light runs' environment), `t0.ae`-`t6.ae` (the probes:
+  parse, strip, pack, tree, decls over pack and directory, the index), `javac-sites.txt` and `inv.py` (the inventory),
+  `fields.py`, `fields.json`, `fields.edn`, `gen_order.ae`, `order.out` (the field order), `tree.orig.ae` (tree.ae before
+  the split, javac_tree's source), `java.base.decls` (the pack written twice), `run-pack.log`, `run-check.log`,
+  `run-check2.log`, `run-decls.log`, `run-decls2.log`, `verbs.bash`.
