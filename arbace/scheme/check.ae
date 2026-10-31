@@ -2,7 +2,7 @@
   "si's check (doc/scheme/SCHEME-SURVEY.md, \"As built: SM5 (write-ahead)\"): the run programs of
   test/scheme/si/programs.edn run on si and judged against Chez Scheme 10.3.0's runs recorded in
   test/scheme/si/ref-chez.edn (status and stdout byte for byte; for the R6RS suites' programs, test by
-  test). Every non-pass is an item \"KIND PROGRAM DETAIL\" and must fall in a class of
+  test, the totals equal; a reference that is an error, the same kind of error, error-of: review 009, finding 1). Every non-pass is an item \"KIND PROGRAM DETAIL\" and must fall in a class of
   test/scheme/divergences.edn (goi's format: the first class whose :match finds the item). bin/si runs
   the programs (si and Chez) into a directory of ID.out, ID.err, ID.rc; this namespace records and judges.
 
@@ -44,13 +44,33 @@
 
 ;;; The suites' output: a header, then "N tests passed" or the failures, each "Expression:\n EXPR\nResult:...".
 
-(defn suite-failures
-  "The failing tests of a Racket R6RS suite run's output, as a map from the expression's text to the
-  whole block; nil when the output has no test report."
+(defn suite-report
+  "A Racket R6RS suite run's report: {:tests N :failures [[EXPR RESULT] ...]} (every failing test in order, duplicates
+  kept), nil when the output has no test report. N is the total its last report line gives (\"N tests passed\" or
+  \"M of N tests failed.\")."
   [^String out]
-  (when (re-find #"(?m)^\d+ (tests passed|of \d+ tests failed\.)$" out)
-    (into {} (for [[_ e res] (re-seq #"(?s)Expression:\n (.*?)\nResult:(.*?)\nExpected:" out)]
-               [e (str/trim res)]))))
+  (when-let [ls (seq (re-seq #"(?m)^(?:(\d+) tests passed|\d+ of (\d+) tests failed\.)$" out))]
+    {:tests (reduce + (map (fn [[_ a b]] (Long/parseLong (or a b))) ls))
+     :failures (vec (for [[_ e res] (re-seq #"(?s)Expression:\n (.*?)\nResult:(.*?)\nExpected:" out)]
+                      ;; Chez writes a record type's name as its gensym, #{err kixdzb...-2}; si writes the name
+                      [e (str/replace (str/trim res) #"#\{(\S+) [^}\s]+\}" "$1")]))}))
+
+;; Review 009, finding 1: a run whose reference is an error is judged on the error's kind, not on the status alone (si exits
+;; 255 on every uncaught error). The kinds both sides spell differently are named; any other error is its first line.
+(def error-kinds
+  [[:library-not-found #"library (\(.*\)) not found"]                                  ; Chez
+   [:library-not-found #"cannot locate library in library-path with irritants \((\(.*\))\)"] ; si's psyntax
+   [:unbound-identifier #"unbound identifier (\S+?)(?: at line .*)?$"]                   ; Chez
+   [:unbound-identifier #"^Exception in (\S+): unbound identifier$"]                     ; si
+   [:program-without-import #"invalid top-level program import subform()"]               ; Chez: a form before the import
+   [:program-without-import #"top-level program is missing an \(import ---\) clause()"]])  ; si
+
+(defn error-of
+  "The kind of error a run's first stderr line says: [KIND SUBJECT], or [:text LINE] when no kind is named; nil for no line."
+  [line]
+  (when (seq line)
+    (or (some (fn [[k re]] (when-let [m (re-find re line)] [k (when (vector? m) (not-empty (second m)))])) error-kinds)
+        [:text (str/trim line)])))
 
 (defn- items-of
   "The non-pass items of program id: ours r against the reference ref."
@@ -59,21 +79,38 @@
     (nil? ref) [(str "no-reference " id)]
     (nil? r) [(str "not-run " id)]
     (:refused r) [(str "refused " id ": " (:refused r))]
-    (and (= (:status r) (:status ref)) (= (:out r) (:out ref))) []
     :else
-    (let [ours (suite-failures (:out r)) theirs (suite-failures (:out ref))
-          crash (fn [] (str "crash " id " status " (:status r) ": " (first-line (:err r))))]
-      (if (and suite ours theirs (= (:status r) (:status ref)))
-        (concat
-          (for [[e b] (sort ours) :when (not (contains? theirs e))]
-            (str "fails " id " " e " => " (str/replace b "\n" " ")))
-          (for [[e _] (sort theirs) :when (not (contains? ours e))]
-            (str "passes " id " " e)))
-        (if (not= (:status r) (:status ref))
-          [(crash)]
-          (let [ol (str/split-lines (:out r)) tl (str/split-lines (:out ref))
-                i (count (take-while true? (map = ol tl)))]
-            [(str "differs " id " line " (inc i) ": " (pr-str (nth ol i nil)) " for " (pr-str (nth tl i nil)))]))))))
+    (let [same-status (= (:status r) (:status ref))
+          ;; an error on both sides: the same kind of error (finding 1)
+          err-items (when (and same-status (not= 0 (:status ref)))
+                      (let [a (error-of (first-line (:err r))) b (error-of (:err ref))]
+                        (when (not= a b)
+                          [(str "error-differs " id ": " (pr-str a) " for Chez's " (pr-str b))])))]
+      (if (and same-status (= (:out r) (:out ref)))
+        (vec err-items)
+        (let [ours (suite-report (:out r)) theirs (suite-report (:out ref))
+              crash (fn [] (str "crash " id " status " (:status r) ": " (first-line (:err r))))]
+          (if (and suite ours theirs same-status)
+            ;; the failures as multisets of [expression result]: a test both fail with other results is an item, and the
+            ;; totals must agree (a run that stops early prints a smaller "N tests passed")
+            (let [fo (frequencies (:failures ours)) ft (frequencies (:failures theirs))
+                  exprs-o (set (map first (:failures ours)))
+                  extra (fn [a b] (mapcat (fn [[k n]] (repeat (- n (get b k 0)) k)) (sort-by str a)))]
+              (concat
+                (when (not= (:tests ours) (:tests theirs))
+                  [(str "count " id ": " (:tests ours) " tests for Chez's " (:tests theirs))])
+                (for [[e b] (extra fo ft)]
+                  (str "fails " id " " e " => " (str/replace b "\n" " ")))
+                (for [[e _] (extra ft fo) :when (not (contains? exprs-o e))]
+                  (str "passes " id " " e))
+                err-items))
+            (if (not same-status)
+              [(crash)]
+              (let [ol (str/split-lines (:out r)) tl (str/split-lines (:out ref))
+                    i (count (take-while true? (map = ol tl)))]
+                (concat
+                  [(str "differs " id " line " (inc i) ": " (pr-str (nth ol i nil)) " for " (pr-str (nth tl i nil)))]
+                  err-items)))))))))
 
 (def ^:dynamic *aot* false)
 
@@ -130,13 +167,14 @@
                [id (cond
                      (or (nil? a) (nil? b)) :not-run
                      (:refused b) :refused
-                     (and (= (:status a) (:status b)) (= (:out a) (:out b))) :same
+                     (and (= (:status a) (:status b)) (= (:out a) (:out b))
+                          (or (= 0 (:status a)) (= (error-of (first-line (:err a))) (error-of (first-line (:err b)))))) :same
                      :else :differs)
                 b])]
     (doseq [[id v b] rows :when (not= v :same)]
       (println (name v) id (if (:refused b) (str ": " (:refused b)) "")))
     (let [fr (frequencies (map second rows))]
-      (println (get fr :same 0) "of" (count rows) "programs: the compiled run the same as the interpreted one (status and stdout);"
+      (println (get fr :same 0) "of" (count rows) "programs: the compiled run the same as the interpreted one (status, stdout and an error's kind);"
                (get fr :refused 0) "refused," (get fr :differs 0) "differing," (get fr :not-run 0) "not run")
       (if (pos? (+ (get fr :differs 0) (get fr :not-run 0))) 1 0))))
 
