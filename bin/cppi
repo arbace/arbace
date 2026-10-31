@@ -24,13 +24,20 @@
 #                               against test/cpp/runtime/ir.sha256 (--update rewrites them), each unit's round trip through LLVM
 #                               forms (the objects equal), lowered, compiled by gcc -O0, archived: OUT/liblstdc++.a,
 #                               OUT/liblstdc++exp.a and the pending-flag layer OUT/rt.o (arbace/cpp/rt/eh.c.ae); the units'
-#                               levels in OUT/results.tsv and OUT/summary.edn (default OUT .tmp/cppi/runtime)
+#                               levels in OUT/results.tsv and OUT/summary.edn (default OUT .tmp/cppi/runtime); OUT/key.txt the
+#                               digests of what it was built from (runtime-key), OUT/key their digest, written once it passes
+#   bin/cppi runtime-key [OUT|--print]
+#                               OUT's key against the checkout's (the lowering, repr/llvm, repr/c, eh.c.ae, units.edn and the
+#                               shims, the IR's pin, runtime-build's own steps, gcc's flags, gcc, clang and the tools' host):
+#                               "current", or "stale" and the inputs that differ (exit 1); --print: the checkout's key lines
+#   bin/cppi selftest [NAME...] the checks' own tests (test/cpp/selftest/NAME.sh: the review 007 cases)
 #   bin/cppi lower-check LIST WORK [--jobs N] [--runtime OUT]
 #                               each file of LIST: the IR (clang++ -O0 -S -emit-llvm), the original (the IR linked by clang++)
 #                               run, g++'s build run (the reference's opinion, recorded), the IR's round trip through LLVM
 #                               forms (read, print, clang -c: the object equal to the original IR's), the lowering, gcc -O0
 #                               on the lowered C linked with the lowered runtime (no native libstdc++; runtime-build first when
-#                               OUT has none) and its run: the status and stdout equal to the original's; judged against
+#                               OUT has none or its key is not the checkout's, CPPI_RUNTIME_STALE=refuse: refused instead, exit
+#                               4) and its run: the status and stdout equal to the original's; judged against
 #                               test/cpp/lower-known.edn into WORK/results.tsv and WORK/summary.edn
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -170,10 +177,36 @@ rt_two() { # rt_two UNIT: the print's object against the IR's, gcc -O0 on the lo
 }
 export -f rt_ir rt_two
 
+runtime_key() { # what the lowered runtime is built from, a digest a line (review 007's finding 1): the namespaces the lowering
+  # loads, the pending-flag layer, the units and their shims, the IR's pin, runtime-build's own steps, gcc's flags, the
+  # toolchain and the tools' host
+  local exe
+  ( cd "$root" && sha256sum arbace/cpp/lower.ae arbace/cpp/rt/eh.c.ae arbace/repr/llvm.ae arbace/repr/llvm/*.ae arbace/repr/c.ae \
+      arbace/repr/c/*.ae test/cpp/runtime/units.edn test/cpp/runtime/shims/* test/cpp/runtime/ir.sha256 )
+  printf '%s  bin/cppi:rt_ir,rt_two,runtime_build\n' "$(declare -f rt_ir rt_two runtime_build | sha256sum | cut -d' ' -f1)"
+  printf '%s  GCC_FLAGS\n' "$(printf '%s' "$GCC_FLAGS" | sha256sum | cut -d' ' -f1)"
+  printf '%s  gcc --version\n' "$(gcc --version | head -1 | sha256sum | cut -d' ' -f1)"
+  printf '%s  clang --version\n' "$(clang --version | head -1 | sha256sum | cut -d' ' -f1)"
+  . "$root/bin/lib/host.bash"
+  exe=$(arbace_host_exe)
+  printf '%s  the tools'"'"' host\n' "$(sha256sum < "$exe" | cut -d' ' -f1)"
+}
+
+runtime_key_check() { # runtime_key_check OUT: 0 when OUT's key is the checkout's, else 1 and the inputs that differ on stderr
+  local out=$1 want
+  runtime_key > "$TMPDIR/cppi-key.$$"
+  want=$(sha256sum < "$TMPDIR/cppi-key.$$" | cut -d' ' -f1)
+  if [ -f "$out/liblstdc++.a" ] && [ -f "$out/key" ] && [ "$(cat "$out/key")" = "$want" ]; then rm -f "$TMPDIR/cppi-key.$$"; return 0; fi
+  if [ ! -f "$out/key.txt" ]; then echo "  no key (built before keys, or not built): $out" >&2
+  else diff "$out/key.txt" "$TMPDIR/cppi-key.$$" | sed -n 's/^> [0-9a-f]*  /  differs: /p' >&2 || true; fi
+  rm -f "$TMPDIR/cppi-key.$$"; return 1
+}
+
 runtime_build() {
   rt=$root/.tmp/cppi/runtime; local update="" jobs=${CPPI_JOBS:-4} t
   while [ $# -gt 0 ]; do case $1 in --update) update=1; shift ;; --jobs) jobs=$2; shift 2 ;; -*) echo "runtime-build: unknown option $1" >&2; exit 2 ;; *) rt=$1; shift ;; esac; done
   mkdir -p "$rt"; rt=$(cd "$rt" && pwd); export rt
+  rm -f "$rt/key" "$rt/key.txt"
   disk_ok
   t=$(tarball_check)
   mkdir -p "$root/.tmp/cppi/gcc"
@@ -217,6 +250,9 @@ runtime_build() {
   t3=$(date +%s)
   echo "runtime-build: IR $((t1-t0)) s, read, print and lower $((t2-t1)) s, gcc $((t3-t2)) s" | tee "$rt/times.txt"
   arbace_tool -m arbace.cpp.lower runtime-judge "$rt"
+  # every unit passed (runtime-judge exits 1 otherwise): the key of what it was built from
+  runtime_key > "$rt/key.txt"
+  sha256sum < "$rt/key.txt" | cut -d' ' -f1 > "$rt/key"
 }
 
 disk_ok() { # the light tier's disk rule: stop past 80% (CPPI_DISK_MAX)
@@ -228,7 +264,15 @@ lower_check() {
   local list=$1; work=$2; shift 2
   local jobs=${CPPI_JOBS:-4} rtdir=$root/.tmp/cppi/runtime
   while [ $# -gt 0 ]; do case $1 in --jobs) jobs=$2; shift 2 ;; --runtime) rtdir=$2; shift 2 ;; *) echo "lower-check: unknown option $1" >&2; exit 2 ;; esac; done
-  [ -f "$rtdir/liblstdc++.a" ] || ( runtime_build "$rtdir" --jobs "$jobs" )
+  # the runtime is used only at the checkout's key (review 007's finding 1): rebuilt, or refused (CPPI_RUNTIME_STALE=refuse)
+  if ! runtime_key_check "$rtdir"; then
+    if [ "${CPPI_RUNTIME_STALE:-rebuild}" = refuse ]; then
+      echo "lower-check: the runtime in $rtdir is not at the checkout's key (bin/cppi runtime-build $rtdir)" >&2; exit 4
+    fi
+    echo "lower-check: the runtime in $rtdir is not at the checkout's key: runtime-build" >&2
+    ( runtime_build "$rtdir" --jobs "$jobs" )
+    runtime_key_check "$rtdir" || { echo "lower-check: the runtime in $rtdir is still not at the checkout's key" >&2; exit 4; }
+  fi
   rtdir=$(cd "$rtdir" && pwd)
   mkdir -p "$work"; work=$(cd "$work" && pwd); export work
   cp "$list" "$work/list.tsv"
@@ -283,6 +327,9 @@ case ${1:-} in
   lower) shift; arbace_tool -m arbace.cpp.lower lower "$@" ;;
   runtime) arbace_tool -m arbace.cpp.lower lower-rt "$root/arbace/cpp/rt/eh.c.ae" "$2" ;;
   runtime-build) shift; runtime_build "$@" ;;
+  runtime-key) if [ "${2:-}" = --print ]; then runtime_key; exit 0; fi
+               out=${2:-$root/.tmp/cppi/runtime}; if runtime_key_check "$out"; then echo current; else echo stale; exit 1; fi ;;
+  selftest) shift; exec "$root/test/cpp/selftest/run" "$@" ;;
   testsuite) testsuite ;;
   list) case ${2:-} in
           samples) list_samples ;;
