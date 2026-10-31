@@ -39,10 +39,12 @@
 ;;       run at one only, against the results file B (the eval level's), and the totals of both and
 ;;       of UPSTREAM (test/baseline-results.edn, the frozen JVM baseline's run: upstream's suite on the
 ;;       JDK passes every one of its assertions).
-;;   report OUT EXPECTED RESULTS NSS
+;;   report OUT EXPECTED RESULTS NSS [whole]
 ;;       Read the OUT/<ns>.edn results of the namespaces NSS (a space-separated string) and
 ;;       OUT/generative.edn, print per-namespace counts and totals, write all results to RESULTS
-;;       (shaped like EXPECTED) and compare them with EXPECTED. Exits 1 on any regression.
+;;       (shaped like EXPECTED) and compare them with EXPECTED. With whole (NSS is the whole list,
+;;       no NAMESPACE arguments), a namespace EXPECTED records that NSS lacks and EXPECTED does not
+;;       skip is a regression too (the listing no longer finds it). Exits 1 on any regression.
 ;;
 ;; Like run_test.clj it sets java.awt.headless. The run and generative modes also run on the Go
 ;; build (bin/clojure-tests with CLOJURE_TESTS_GO), which has no java.io.File: they read and
@@ -249,7 +251,13 @@
                 (str n " failed to load"))
               (when (not= (:tests r) (:tests e)) [(str (:tests r) " specs, expected " (:tests e))])))))
 
-(defn- report [out expected-file results-file nss]
+;; with the whole list run (report's whole), the reference's namespaces that did not run: neither
+;; listed nor skipped (a file the listing no longer finds: its ns form unreadable, or gone)
+(defn- unlisted [expected nss]
+  (let [ran (set nss) skipped (set (keys (:skipped expected)))]
+    (sort-by str (remove #(or (ran %) (skipped %)) (keys (:namespaces expected))))))
+
+(defn- report [out expected-file results-file nss whole]
   (let [expected (or (read-edn expected-file) {})
         nss      (map symbol (re-seq #"\S+" nss))
         results  (into (sorted-map)
@@ -273,6 +281,10 @@
                     (seq (:failing r)) "expected failures"
                     :else ""))
         (line n "-" "-" "-" "-" "-" "REGRESSION")))
+    (when (seq whole)
+      (doseq [n (unlisted expected nss)]
+        (swap! bad conj [n ["expected namespace not run: not listed (its file not found as a namespace)"]])
+        (line n "-" "-" "-" "-" "-" "REGRESSION (not listed)")))
     (let [rs (keep val results)
           sum (fn [k] (reduce + (keep k rs)))]
       (line (format "TOTAL: %d namespaces (%d failed to load), %d skipped"
@@ -301,7 +313,7 @@
       (do (println "\nno regressions against" expected-file)
           (System/exit 0)))))
 
-(let [[mode a b c d] *command-line-args*]
+(let [[mode a b c d e] *command-line-args*]
   (case mode
     "list"       (let [expected (read-edn b)
                        skipped (set (keys (:skipped expected)))]
@@ -315,4 +327,4 @@
     "generative" (run-generative a b c d)
     "compile"    (compile-suite a b c)
     "levels"     (levels a b c)
-    "report"     (report a b c d)))
+    "report"     (report a b c d e)))
