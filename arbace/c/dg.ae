@@ -1,0 +1,408 @@
+(ns arbace.c.dg
+  "The C23 corpus's dg actions and the read level's error judge (doc/C23-SURVEY.md, \"As built: C7
+  (write-ahead)\"; bin/ci dg, its driver bin/lib/ci/dg): gcc's testsuite files carry DejaGnu directives in
+  comments, `{ dg-do run }`, `{ dg-options \"-std=c23\" }`, `{ dg-error \"re\" \"\" { target c } .-1 }`.
+  `analyze` reads them (Tcl's lists: braces, quotes, backslashes) into a file's action, options and
+  expected diagnostics by line and kind; `read-file` reads and checks a file as bin/ci diagnose does and
+  keeps the checker's errors by line; `gcc-lines` parses gcc 15.2's own diagnostics of the file (made by
+  bin/lib/ci/dg), which validate the directives (the host's gcc is the reference, CS14 (a)); `verdict`
+  judges the checker's errors against the directives: every expected error line has an error of the
+  checker's, and the checker gives none on a line that expects none. Commands: directives, read, gcc, judge."
+  (:require [arbace.repr.c :as rc]
+            [arbace.repr.c.host :as host]
+            [arbace.repr.c.parse :as parse]
+            [arbace.repr.c.pp :as pp]
+            [arbace.repr.c.lex :as lex]
+            [arbace.repr.c.annot :as annot]
+            [arbace.string :as str])
+  (:import [java.util.concurrent Executors Callable]))
+
+(set! *warn-on-reflection* true)
+
+;; ---------------------------------------------------------------------------------------------
+;; Tcl lists
+
+(defn- scan-braced
+  "From index `i` (just after an opening brace) to its matching brace: [content index-after], nil when
+  the text ends first."
+  [^String s i]
+  (let [n (count s)]
+    (loop [j (long i) depth 1]
+      (if (>= j n)
+        nil
+        (let [c (.charAt s j)]
+          (cond
+            (= c \\) (recur (+ j 2) depth)
+            (= c \{) (recur (inc j) (inc depth))
+            (= c \}) (if (= depth 1) [(subs s i j) (inc j)] (recur (inc j) (dec depth)))
+            :else (recur (inc j) depth)))))))
+
+(defn- read-quoted
+  "The quoted word starting at index `i` (the quote): [text index-after]."
+  [^String s i]
+  (let [n (count s) b (StringBuilder.)]
+    (loop [j (inc i)]
+      (cond
+        (>= j n) [(str b) j]
+        (= (.charAt s j) \") [(str b) (inc j)]
+        (and (= (.charAt s j) \\) (< (inc j) n) (#{\" \{ \} \\} (.charAt s (inc j))))
+        (do (.append b (.charAt s (inc j))) (recur (+ j 2)))
+        :else (do (.append b (.charAt s j)) (recur (inc j)))))))
+
+(defn tcl-words
+  "The words of a Tcl list: bare words, \"quoted\" (a backslash before a quote, brace or backslash
+  dropped) and {braced} (taken as they are)."
+  [^String s]
+  (let [n (count s)]
+    (loop [i 0 out []]
+      (let [i (loop [i i] (if (and (< i n) (Character/isWhitespace (.charAt s i))) (recur (inc i)) i))]
+        (if (>= i n)
+          out
+          (let [c (.charAt s i)]
+            (cond
+              (= c \") (let [[w e] (read-quoted s i)] (recur e (conj out w)))
+              (= c \{)
+              (if-let [[content e] (scan-braced s (inc i))]
+                (recur e (conj out content))
+                (conj out (subs s (inc i))))
+              :else
+              (let [e (loop [j i] (if (and (< j n) (not (Character/isWhitespace (.charAt s j)))) (recur (inc j)) j))]
+                (recur e (conj out (subs s i e)))))))))))
+
+;; ---------------------------------------------------------------------------------------------
+;; A file's directives
+
+(defn- line-starts [^String text]
+  (loop [i 0 out [0]]
+    (if (< i (count text))
+      (recur (inc i) (if (= (.charAt text i) \newline) (conj out (inc i)) out))
+      out)))
+
+(defn- line-of
+  "The 1-based line of index `i` given the line starts."
+  [starts i]
+  (loop [lo 0 hi (dec (count starts))]
+    (if (>= lo hi)
+      (inc lo)
+      (let [mid (quot (+ lo hi 1) 2)]
+        (if (<= (long (nth starts mid)) i) (recur mid hi) (recur lo (dec mid)))))))
+
+(defn directives
+  "Every `{ dg-NAME ... }` of a file: [{:name \"error\" :line L :words [...]}], the words after the name."
+  [^String text]
+  (let [starts (line-starts text)
+        m (re-matcher #"\{\s*dg-([a-z0-9-]+)" text)]
+    (loop [from 0 out []]
+      (if (and (< from (count text)) (.find m (int from)))
+        (let [s (.start m) nm (.group m 1)
+              e (.end m)]
+          (if-let [[content end] (scan-braced text (inc s))]
+            (let [after (subs content (- e (inc s)))]
+              (recur (long end) (conj out {:name nm :line (line-of starts s) :words (tcl-words after)})))
+            (recur (long e) out)))
+        out))))
+
+(defn sel-info
+  "A selector word (`target c`, `xfail *-*-*`, ...): {:applies bool :xfail bool}. C++-only selectors do
+  not apply; any other target selector is taken to apply on the reference host (gcc's own run of the file,
+  `gcc-lines`, shows where that is wrong)."
+  [sel]
+  (if (nil? sel)
+    {:applies true :xfail false}
+    (let [t (str/trim sel)
+          xf (.startsWith t "xfail")
+          tg (.startsWith t "target")
+          body (str/trim (subs t (cond xf 5 tg 6 :else 0)))
+          neg (boolean (re-find #"^\{?\s*!" body))
+          cxx (boolean (re-find #"c\+\+" body))
+          nonc (boolean (re-matches #"\{?\s*!\s*c\s*\}?" body))]
+      (cond
+        xf {:applies true :xfail (not (and cxx (not neg)))}
+        tg {:applies (if cxx neg (not nonc)) :xfail false}
+        :else {:applies true :xfail false}))))
+
+(defn- resolve-line [spec dl]
+  (cond
+    (or (nil? spec) (= spec ".")) dl
+    (re-matches #"\d+" spec) (let [n (Long/parseLong spec)] (if (zero? n) :any n))
+    :else (if-let [[_ sg d] (re-matches #"\.([+-])(\d+)" spec)]
+            ((if (= sg "+") + -) dl (Long/parseLong d))
+            dl)))
+
+(def message-kinds {"error" :error "warning" :warning "message" :note "note" :note "bogus" :bogus})
+
+(defn analyze
+  "A file's dg data: {:action (:run :compile :link :assemble :preprocess), :expect {kind [line ...]},
+  :xfail {kind [line ...]}, :any {kind n} (a line of 0), :excess bool, :sources [names], :requires [...],
+  :skips [...], :other [directive names]}. `dg-do` takes the first whose selector applies; the default
+  action is compile."
+  [^String text]
+  (let [ds (directives text)
+        acc (reduce
+             (fn [a {:keys [name line words]}]
+               (cond
+                 (= name "do")
+                 (let [[act sel] words]
+                   (if (and (not (:action a)) (:applies (sel-info sel)) (not (:xfail (sel-info sel))))
+                     (assoc a :action (keyword act))
+                     a))
+                 (contains? message-kinds name)
+                 (let [[_ _ sel spec] words
+                       {:keys [applies xfail]} (sel-info sel)
+                       k (message-kinds name)
+                       l (resolve-line spec line)]
+                   (cond
+                     (not applies) a
+                     (= l :any) (update-in a [:any k] (fnil inc 0))
+                     xfail (update-in a [:xfail k] (fnil conj []) l)
+                     :else (update-in a [:expect k] (fnil conj []) l)))
+                 (= name "excess-errors") (assoc a :excess true)
+                 (= name "additional-sources") (update a :sources (fnil into []) (str/split (str/trim (str (first words))) #"\s+"))
+                 (= name "require-effective-target") (update a :requires (fnil conj []) (first words))
+                 (#{"skip-if" "xfail-if" "require" "options" "additional-options" "prune-output" "final" "timeout" "add-options"
+                    "set-compiler-env-var" "message-kinds"} name)
+                 (if (= name "skip-if") (update a :skips (fnil conj []) (vec words)) a)
+                 :else (update a :other (fnil conj []) name)))
+             {} ds)]
+    (-> acc
+        (update :action #(or % :compile))
+        (update :other #(vec (distinct %)))
+        (update :expect #(into (sorted-map) %))
+        (update :xfail #(into (sorted-map) %)))))
+
+;; ---------------------------------------------------------------------------------------------
+;; The checker's errors
+
+(defn error-line
+  "[file-or-nil line] of a diagnostic's text (`LINE:COL: msg` or `FILE:LINE:COL: msg`), nil when it has none."
+  [^String e]
+  (when-let [[_ f l] (re-find #"^(?:(.*?):)?(\d+):\d+:" e)]
+    [f (Long/parseLong l)]))
+
+(defn- slurp-latin1 ^String [^String path] (String. (lex/read-bytes path) "ISO-8859-1"))
+
+(defn- one-line ^String [x] (str/replace (str x) #"[\t\n\r]" " "))
+
+(defn read-file
+  "A corpus entry (ppcheck's files.edn) read and checked, as bin/ci diagnose does: {:status (:ok, :read-error,
+  :refused, :timeout, :crash), :lines {line n} (the main file's errors by line), :other n (errors of
+  other files), :message first-error}."
+  [h ^String base e action]
+  (let [fc (:fc e)
+        cfg (host/config h fc base)
+        budget (* 1000000000 (Long/parseLong (or (System/getenv "REPR_C_READ_BUDGET") "120")))
+        rn (or (:read e) (:name e))
+        base-name (let [n (:name e)] (subs n (inc (.lastIndexOf ^String n "/"))))
+        rd (binding [parse/*deadline* (+ (System/nanoTime) budget)]
+             (try (if (= action :preprocess)
+                    (let [r (pp/preprocess cfg rn)] (if (seq (:errors r)) {:error (:errors r)} {:pp-only true}))
+                    (rc/read-c cfg fc rn false))
+                  (catch Throwable x (if (:deadline (ex-data x)) {:timeout true} {:crash (str x)}))))
+        tally (fn [status errs msg]
+                (let [ls (keep error-line errs)
+                      mine (filter (fn [[f _]] (or (nil? f) (.endsWith ^String f base-name))) ls)]
+                  {:status status
+                   :lines (into (sorted-map) (frequencies (map second mine)))
+                   :other (- (count ls) (count mine))
+                   :unlocated (- (count errs) (count ls))
+                   :message (one-line (or (first errs) msg ""))}))]
+    (cond
+      (:timeout rd) {:status :timeout :lines {} :message "the evaluated read's budget spent"}
+      (:crash rd) {:status :crash :lines {} :message (one-line (:crash rd))}
+      (:error rd) (tally :read-error (:error rd) "")
+      (:refused rd) {:status :refused :lines {} :message (one-line (:message rd))}
+      (:pp-only rd) {:status :ok :lines {} :other 0 :unlocated 0 :message ""}
+      :else
+      (let [[text errs] (try (annot/port-dump h fc rd)
+                             (catch StackOverflowError _ [nil ["stack overflow"]])
+                             (catch Throwable x [nil [(str x)]]))]
+        (if (nil? text)
+          {:status :crash :lines {} :message (one-line (first errs))}
+          (tally :ok errs ""))))))
+
+;; ---------------------------------------------------------------------------------------------
+;; gcc's diagnostics
+
+(defn gcc-lines
+  "gcc's diagnostics (-fdiagnostics-plain-output) of a file as {:error {line n} :warning {line n} :note {line n}},
+  the lines of `base-name` alone, and :other (errors of other files), :fatal."
+  [^String out ^String base-name]
+  (reduce
+   (fn [a l]
+     (if-let [[_ f ln kind] (re-find #"^(.*?):(\d+):(?:\d+:)? (fatal error|error|warning|note): " l)]
+       (let [k (case kind "fatal error" :error "error" :error "warning" :warning "note" :note)
+             k (if (and (= k :error) (not (.endsWith ^String f base-name))) :other k)]
+         (cond-> (if (= k :other)
+                   (update a :other (fnil inc 0))
+                   (update-in a [k (Long/parseLong ln)] (fnil inc 0)))
+           (= kind "fatal error") (assoc :fatal true)))
+       a))
+   {:error (sorted-map) :warning (sorted-map) :note (sorted-map)}
+   (str/split-lines out)))
+
+;; ---------------------------------------------------------------------------------------------
+;; The verdict
+
+(defn gcc-agrees
+  "Whether the directives' errors are gcc's own errors: :yes, or the way they differ (:missing lines gcc
+  did not give, :extra lines gcc gave that no directive expects), as [:differ missing extra]."
+  [dg gcc]
+  (let [exp (set (get-in dg [:expect :error]))
+        xf (set (get-in dg [:xfail :error]))
+        any (get-in dg [:any :error] 0)
+        got (set (keys (:error gcc)))
+        missing (sort (remove (fn [l] (or (got l) (zero? 0) false)) (remove xf exp)))
+        missing (vec (remove got (remove xf exp)))
+        extra (vec (remove (fn [l] (or (exp l) (xf l))) got))
+        extra (if (pos? any) [] extra)]
+    (if (and (empty? missing) (empty? extra) (not (:fatal gcc)))
+      :yes
+      [:differ missing extra])))
+
+(defn verdict
+  "The checker's read judged against the file's directives: [:pass], or [:fail kind detail] with kind one
+  of :refused :timeout :crash (the read gave no judgment), :missed (an expected error line without one of
+  the checker's), :extra (an error on a line that expects none), :both, :stopped (a read error ends the
+  file before its later expected lines: the missed lines are after it)."
+  [dg r]
+  (let [st (:status r)]
+    (if (#{:refused :timeout :crash} st)
+      (if (and (empty? (get-in dg [:expect :error])) (zero? (get-in dg [:any :error] 0)) (not (:excess dg)))
+        [:fail st (:message r)]
+        [:fail st (:message r)])
+      (let [exp (set (get-in dg [:expect :error]))
+            allowed (into exp (get-in dg [:xfail :error]))
+            ours (set (keys (:lines r)))
+            anyn (get-in dg [:any :error] 0)
+            missed (vec (sort (remove ours exp)))
+            extra (vec (sort (remove allowed ours)))
+            missed (if (and (pos? anyn) (seq ours) (empty? exp)) [] missed)
+            extra (if (or (pos? anyn) (:excess dg)) [] extra)
+            missed (if (and (:excess dg) (seq ours)) [] missed)
+            extra (if (pos? (get-in dg [:any :error] 0)) [] extra)
+            first-ours (first ours)]
+        (cond
+          (and (empty? missed) (empty? extra)
+               (or (not (:excess dg)) (seq ours) (pos? anyn))
+               (or (zero? anyn) (seq ours) (seq exp))
+               (or (pos? anyn) (:excess dg) (seq exp) (empty? ours)))
+          [:pass]
+          (and (seq missed) (seq extra)) [:fail :both (str "missed " missed " extra " extra)]
+          (seq missed) [:fail :missed (str "missed " missed)]
+          (seq extra) [:fail :extra (str "extra " extra)]
+          :else [:fail :missed (str "no error " (when (:excess dg) "(dg-excess-errors)") (when (pos? anyn) "(line 0)"))])))))
+
+;; ---------------------------------------------------------------------------------------------
+;; The commands
+
+(defn- esc-name ^String [^String n] (str/replace n "/" "__"))
+
+(defn- entries [work id] (read-string (slurp (str work "/" id "/files.edn"))))
+
+(defn- base-of [work id] (str/trim (slurp (str work "/" id "/base.txt"))))
+
+(defn directives-cmd [work id]
+  (let [base (base-of work id)
+        rows (into (sorted-map)
+                   (for [e (entries work id)]
+                     [(:name e) (assoc (analyze (slurp-latin1 (str base "/" (:name e))))
+                                       :opts (host/dg-options (slurp-latin1 (str base "/" (:name e))))
+                                       :args (vec (:args (:fc e))) :std (:std (:fc e)))]))]
+    (spit (str work "/" id "/gcc.list")
+          (str/join (for [[nm d] rows] (str nm "\t" (name (:action d)) "\t" (str/join " " (:opts d)) "\n"))))
+    (spit (str work "/" id "/dg.edn") (str "[\n" (str/join "\n" (map (fn [[k v]] (pr-str [k v])) rows)) "\n]\n"))
+    (println (str id ": " (count rows) " files; actions "
+                  (pr-str (into (sorted-map) (frequencies (map (comp :action val) rows))))
+                  "; with dg-error " (count (filter #(seq (get-in (val %) [:expect :error])) rows))))))
+
+(defn read-cmd [work id]
+  (let [base (base-of work id)
+        h (host/load-host "test/c/host")
+        threads (Integer/parseInt (or (System/getenv "REPR_C_THREADS") "3"))
+        pool (Executors/newFixedThreadPool threads)
+        t0 (System/nanoTime)
+        es (entries work id)
+        dgs (into {} (read-string (slurp (str work "/" id "/dg.edn"))))
+        futs (mapv (fn [e] (.submit pool ^Callable (fn [] [(:name e) (try (read-file h base e (:action (get dgs (:name e))))
+                                                                           (catch Throwable x {:status :crash :lines {} :message (one-line x)}))])))
+                   es)
+        rs (mapv #(.get ^java.util.concurrent.Future %) futs)]
+    (.shutdown pool)
+    (spit (str work "/" id "/read.edn") (str "[\n" (str/join "\n" (map pr-str rs)) "\n]\n"))
+    (println (str id ": " (count rs) " files read " (pr-str (into (sorted-map) (frequencies (map (comp :status second) rs))))
+                  ", " (Math/round (/ (- (System/nanoTime) t0) 1e9)) " s"))))
+
+(defn gcc-cmd [work id]
+  (let [dg (into {} (read-string (slurp (str work "/" id "/dg.edn"))))
+        rows (into (sorted-map)
+                   (for [e (entries work id)
+                         :let [f (java.io.File. (str work "/" id "/gcc/" (esc-name (:name e)) ".txt"))]
+                         :when (.exists f)
+                         :let [nm (:name e)
+                               bn (subs nm (inc (.lastIndexOf ^String nm "/")))
+                               g (gcc-lines (slurp-latin1 (.getPath f)) bn)
+                               st (str/trim (slurp (str work "/" id "/gcc/" (esc-name nm) ".status")))]]
+                     [nm (assoc g :status (Long/parseLong st) :agrees (gcc-agrees (get dg nm) g))]))]
+    (spit (str work "/" id "/gcc.edn") (str "[\n" (str/join "\n" (map pr-str rows)) "\n]\n"))
+    (println (str id ": gcc " (count rows) " files; directives agree "
+                  (count (filter #(= :yes (:agrees (val %))) rows)) ", differ "
+                  (count (remove #(= :yes (:agrees (val %))) rows))))))
+
+(defn- classify [classes row]
+  (let [s (str (name (nth row 1)) " " (nth row 2))]
+    (some (fn [c] (when (some #(re-find (re-pattern (str %)) s) (:match c)) (:id c))) classes)))
+
+(defn judge-cmd
+  "judge WORK CLASSES [--record FILE] ID...: each file's row [ID RESULT REASON] ... "
+  [work classes-file & args]
+  (let [record (when (= (first args) "--record") (second args))
+        ids (if record (drop 2 args) args)
+        classes (read-string (slurp classes-file))
+        known (let [f (java.io.File. "test/c/dg-known.edn")] (if (.exists f) (read-string (slurp f)) {}))
+        rows
+        (vec
+         (for [id ids
+               :let [dg (into {} (read-string (slurp (str work "/" id "/dg.edn"))))
+                     rd (into {} (read-string (slurp (str work "/" id "/read.edn"))))
+                     gc (let [f (java.io.File. (str work "/" id "/gcc.edn"))] (if (.exists f) (into {} (read-string (slurp f))) {}))]
+               [nm d] (sort dg)]
+           (let [r (get rd nm)
+                 g (get gc nm)
+                 v (verdict d r)
+                 ;; the directives' own check: gcc's errors on the file against what they expect
+                 ga (:agrees g)
+                 base (if (= (first v) :pass)
+                        [(str id "/" nm) :pass (str (name (:action d)))]
+                        [(str id "/" nm) :fail (str (name (second v)) ": " (nth v 2))])
+                 kr (get known (str id "/" nm))
+                 row (cond-> base
+                       (and (= :fail (second base)) kr) (assoc 2 (str "known " kr " (" (nth base 2) ")")))
+                 cls (when (not= :pass (second row)) (classify classes row))]
+             (cond-> row
+               cls (conj cls)
+               (and (not (nil? g)) (not= ga :yes) (not= :pass (second row))) (assoc 2 (str (nth row 2) " [gcc: " (pr-str (rest ga)) "]"))))))
+        by-id (fn [id] (filter #(.startsWith ^String (first %) (str id "/")) rows))]
+    (doseq [id ids]
+      (let [rs (by-id id)
+            by (frequencies (map #(if (= :pass (second %)) :pass (or (nth % 3 nil) :fail)) rs))]
+        (println (format "%-16s %4d files: %s" id (count rs) (str/join ", " (map (fn [[k v]] (str (name k) " " v)) (sort-by (comp - val) by)))))))
+    (when record
+      (let [old (if (.exists (java.io.File. ^String record)) (read-string (slurp record)) [])
+            keep (remove (fn [[id]] (some #(str/starts-with? id (str % "/")) ids)) old)
+            all (sort-by first (concat keep (map (fn [[id r reason]] [id r reason]) rows)))]
+        (spit record (str ";; the read level's error judge over the C23 corpus (bin/ci dg --record): each file, [ID RESULT REASON],\n"
+                          ";; the checker's errors against the dg directives by line and kind; its classes test/c/divergences-dg.edn.\n[\n"
+                          (str/join "\n" (map pr-str all)) "\n]\n"))
+        (println "recorded" record)))
+    (let [failing (filter #(and (not= :pass (second %)) (nil? (nth % 3 nil))) rows)]
+      (doseq [r (take 40 failing)] (println "FAIL" (first r) (nth r 2)))
+      (spit (str work "/judge-rows.edn") (str "[\n" (str/join "\n" (map pr-str rows)) "\n]\n"))
+      (System/exit (if (seq failing) 1 0)))))
+
+(defn -main [verb & args]
+  (case verb
+    "directives" (let [[work & ids] args] (doseq [id ids] (directives-cmd work id)) (shutdown-agents))
+    "read" (let [[work & ids] args] (doseq [id ids] (read-cmd work id)) (shutdown-agents))
+    "gcc" (let [[work & ids] args] (doseq [id ids] (gcc-cmd work id)) (shutdown-agents))
+    "judge" (apply judge-cmd args)
+    (do (println "dg: directives, read, gcc or judge") (System/exit 2))))
