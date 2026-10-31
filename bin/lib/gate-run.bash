@@ -370,9 +370,11 @@ names_of() { local n; for n in "${order[@]}"; do [ "${phase[$n]}" = "$1" ] && ec
 
 # GTS27 (a): per step the last ARBACE_GATE_KEEP (5) passes and every pass younger than
 # ARBACE_GATE_KEEP_DAYS (30) kept, the rest removed (a pass is KEY.edn, KEY.log, KEY.inputs); the
-# executables' directories (the gate's, javac's) older than a day but the newest 3 of each removed
+# executables' directories (the gate's, javac's) older than a day but the newest 3 of each removed; a
+# KEY.log, KEY.inputs or KEY.out with no KEY.edn, and a temporary, removed once older than a day
 gate_prune() {  # gate_prune [--dry-run]
   local dry= keep=${ARBACE_GATE_KEEP:-5} days=${ARBACE_GATE_KEEP_DAYS:-30} d n f k i pat npass=0 nkeep=0 freed=0 sz b now
+  local norphan=0 old
   now=$(date +%s)
   [ "${1:-}" = --dry-run ] && dry=1
   [ -d "$store" ] || { echo "gate --prune: no store $store"; return 0; }
@@ -387,9 +389,23 @@ gate_prune() {  # gate_prune [--dry-run]
       echo "gate --prune: ${dry:+would remove }$n/$(basename "$k" | cut -c1-12) ($(stat -c %y "$f" | cut -c1-10), $sz bytes)"
       [ -n "$dry" ] || rm -rf "${k:?}.edn" "${k:?}.log" "${k:?}.inputs" "${k:?}.out"
     done <<< "$(ls -t "$d" | sed -n "s|^\([0-9a-f]*\.edn\)$|$d\1|p")"
+    # re-review 020, finding 7: a pass's companions left with no record (a record_pass or publish_passes
+    # interrupted after the old record's removal or the companions' rename) removed once older than a day,
+    # as the temporaries below; a younger one may be a publication in progress
+    while IFS= read -r k; do
+      [ -n "$k" ] && [ ! -e "$d$k.edn" ] || continue
+      old=()
+      for f in "$d$k.log" "$d$k.inputs" "$d$k.out"; do
+        [ -e "$f" ] && [ $(( now - $(stat -c %Y "$f") )) -ge 86400 ] && old+=("$f")
+      done
+      [ ${#old[@]} -gt 0 ] || continue
+      norphan=$((norphan + 1))
+      echo "gate --prune: ${dry:+would remove }$n/${k:0:12} (no record: its$(for f in "${old[@]}"; do printf ' .%s' "${f##*.}"; done))"
+      [ -n "$dry" ] || rm -rf "${old[@]}"
+    done <<< "$(ls "$d" | sed -nE 's/^([0-9a-f]+)\.(log|inputs|out)$/\1/p' | sort -u)"
     [ -n "$dry" ] || find "$d" -maxdepth 1 -name '.*' -mmin +1440 -exec rm -rf {} + 2>"$store/.prune.err"
   done
-  echo "gate --prune: $npass passes, $nkeep kept, $((npass - nkeep)) ${dry:+would be }removed ($freed bytes) in $store"
+  echo "gate --prune: $npass passes, $nkeep kept, $((npass - nkeep)) ${dry:+would be }removed ($freed bytes), $norphan left without a record ${dry:+would be }removed in $store"
   for pat in gate javac; do
     i=0
     while IFS= read -r f; do
