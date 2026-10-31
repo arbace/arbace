@@ -10,7 +10,9 @@ Pieces:
 - `arbace.repr.llvm` (`arbace/repr/llvm.ae`, `arbace/repr/llvm/{read,print}.ae`): IR text → LLVM forms (`read`), LLVM
   forms → IR text (`print`), the forms as `.ae` text (`module-text`); `bin/repr-llvm read|print|roundtrip`.
 - `arbace.cpp.lower` (`arbace/cpp/lower.ae`): LLVM forms → C forms; `bin/cppi lower`, `bin/cppi lower-check`.
-- The runtime of exceptions, `arbace/cpp/rt/eh.c.ae`: C forms written by hand, printed by repr/c (`bin/cppi runtime`).
+- The runtime (CX7, §10): libsupc++ and libstdc++-v3/src compiled to IR by the oracle and lowered by `arbace.cpp.lower`
+  (`bin/cppi runtime-build`, `test/cpp/runtime/units.edn`), and the pending-flag layer of exceptions,
+  `arbace/cpp/rt/eh.c.ae`: C forms written by hand, printed by repr/c (`bin/cppi runtime`).
 
 All three are tools' namespaces evaluated from the checkout on the tools' host (stage 0); nothing is embedded.
 
@@ -139,8 +141,8 @@ The C forms are those of doc/c/SPEC.md, printed by repr/c's printer at `:gnu23` 
   (struct T)) N))` with N the data layout's size: C's layout and the IR's agree or gcc refuses the unit.
 - **Names.** A global keeps its name when C takes it, else `g$` and its escape (`.` as `$_`, other bytes `$XX`) with an
   `__asm__` label holding the linker's name; locals are `l$` and their escape, labels `:b$NAME`. `main` is `cx$main`,
-  called by a C `main` that checks for an uncaught exception. The Itanium entry points the runtime replaces are
-  renamed (`__cxa_throw` → `cx$throw` ...); those of `std::exception_ptr` are refused (`:exception-ptr`) until CX7.
+  called by a C `main` that checks for an uncaught exception. No other name is the lowering's own: since CX7 the Itanium
+  ABI's entry points (`__cxa_throw` ...) are libsupc++'s, lowered (§10); CX6 renamed them to a hand-written runtime's.
 - **Functions.** One `c/defn` per define (linkage: `internal`/`private` static, `linkonce`/`weak` `__attribute__((weak))`,
   `available_externally` a declaration only), prototypes first; `llvm.global_ctors` as `constructor` attributes. The
   IR is already lowered to the ABI, so C's parameter and return types reproduce its calls: `byval(T)` parameters are
@@ -151,39 +153,63 @@ The C forms are those of doc/c/SPEC.md, printed by repr/c's printer at `:gnu23` 
   dynamic ones, `__builtin_alloca_with_align`); `load`/`store` through a cast pointer (`volatile` kept);
   `getelementptr` as `(char *)base +` the offsets the data layout gives, constant parts folded; arithmetic at the wide
   unsigned type (wrapping), signed operations on the signed views; `icmp` signed or unsigned, `fcmp`'s ordered and
-  unordered predicates by C's comparisons; casts by C's conversions and `__builtin_bit_cast`; atomics as plain
+  unordered predicates by C's comparisons; casts by C's conversions, a `bitcast` between non-pointer types by
+  `__builtin_memcpy` from a compound literal of the source type in a statement expression (gcc's C has no
+  `__builtin_bit_cast`); an inline `asm` whose template is empty and which has no result (a compiler barrier, `asm
+  volatile("" : : "rm"(x))`) as nothing, other inline assembly refused (`:inline-asm`); atomics as plain
   operations (single-threaded, CP1); `unreachable` as `__builtin_trap()`.
 - **Intrinsics** by a table: `memcpy`/`memmove`/`memset`, `lifetime.*` and the other hints (nothing), `expect`,
   `threadlocal.address`, `objectsize`, `is.constant`, `trap`, `va_start`/`va_end`/`va_copy` (`__builtin_va_*` on the
   `va_list` the IR allocated), `stacksave`/`stackrestore`, the `*.with.overflow` family (`__builtin_*_overflow`),
-  `smax`/`smin`/`umax`/`umin`, `abs`, `ctpop`/`ctlz`/`cttz`, `bswap`, `fmuladd` (unfused, as clang's x86-64 code),
+  `smax`/`smin`/`umax`/`umin`, `abs`, `ctpop`/`ctlz`/`cttz` (`i128` by halves), `bswap`, `fmuladd` (unfused, as clang's
+  x86-64 code), `frexp` (`__builtin_frexp*` into the result's two fields), `x86.sse2.pause` (nothing),
   `eh.typeid.for` (a number per type_info), the math functions (`fabs`, `sqrt`, `floor`, ... as `__builtin_*`). Others
   are refused (`:intrinsic`), `llvm.coro.*` among them (`:coroutine`; clang's `-O0` pipeline runs CoroSplit, so the
   IR it writes holds none: the coroutine sample lowers and runs).
 - **Constants**: integers as `(lit unsigned N)`/`(lit unsigned-long N)` (an `i128` by shifts), doubles as their
-  shortest decimal, floats `(lit float x)`, NaNs by their bits, `x86_fp80` as the exact decimal of its 64-bit
+  shortest decimal, floats `(lit float x)`, NaNs by their payload (`__builtin_nan("0x...")`, `__builtin_nans` for a
+  signaling one, negated for the sign: constant expressions, also in static initializers), `x86_fp80` as the exact decimal of its 64-bit
   significand (`(lit long-double 1.25M)`); static initializers as `(init ...)` with address constants
-  `(conv (* void) (+ (conv (* char) (addr g)) 16))`.
+  `(conv (* void) (+ (conv (* char) (addr g)) 16))`; a static thread-local has its definition only (C has no tentative
+  definition of one).
 
 ## 8. Exceptions (CP7, the survey's §5.4)
 
-`cx$pending` is set by `cx$throw` (the renamed `__cxa_throw`), `cx$rethrow` and `cx$resume` (`resume`). A `call` that
-may unwind (not `nounwind` at the call or the callee, not an intrinsic) is followed by `if (cx$pending) return z;`
-(`z` the function's zero value); an `invoke` by `if (cx$pending) goto unwind; else goto normal;` (with the edges' phi
-copies). A landing pad's `landingpad` computes its two fields: the in-flight object (`cx$exception()`) and the
-selector: the first `catch` clause whose type_info `cx$catches` (null: every exception) gives that type_info's number
-(the same `llvm.eh.typeid.for` gives), else 0 for a `cleanup`, else the frame does not handle the exception and returns
-with the flag still set; then the flag is cleared. `cx$catches` asks the clause's `std::type_info` its `__do_catch`
-(the virtual slot libsupc++ gives it), after dereferencing a thrown pointer (`__is_pointer_p`), and records the adjusted
-pointer `__cxa_begin_catch` returns; the handler counts, rethrow and `__cxa_end_catch`'s destruction follow libsupc++'s
-`handlerCount` rules. `filter` clauses are refused (`:filter`, C++98's dynamic exception specifications). An exception
-that leaves `main` calls `cx$uncaught` (a message on stderr, then `abort()`: status 134, as libstdc++'s `std::terminate`).
+Since CX7 the runtime of exceptions is libsupc++'s own code, lowered (§10): `__cxa_allocate_exception`, `__cxa_throw`,
+`__cxa_begin_catch`, `__cxa_end_catch`, `__cxa_rethrow`, `std::exception_ptr` (`__cxa_init_primary_exception`,
+`std::rethrow_exception`, dependent exceptions), `std::terminate` and its verbose handler, the `type_info` classes. Only
+the two parts that need DWARF unwinding are replaced, by the hand-written pending-flag layer `arbace/cpp/rt/eh.c.ae`
+(CP86 (c)): the unwinder (libgcc's `_Unwind_RaiseException`, `_Unwind_Resume`, `_Unwind_Resume_or_Rethrow`,
+`_Unwind_DeleteException`) and the personality routine (`eh_personality.cc`'s `__gxx_personality_v0` and
+`__cxa_call_unexpected`).
+
+`cx$pending` is raised by the unwinder's entry points (which `__cxa_throw`, `__cxa_rethrow` and `std::rethrow_exception`
+call) and by `cx$resume` (the `resume` instruction); each records the in-flight `_Unwind_Exception` and returns at once.
+A `call` that may unwind (not `nounwind` at the call or the callee, not an intrinsic) is followed by `if (cx$pending)
+return z;` (`z` the function's zero value): so `__cxa_throw` itself returns after `_Unwind_RaiseException`, before the
+`std::terminate` that follows it in libsupc++; an `invoke` by `if (cx$pending) goto unwind; else goto normal;` (with the
+edges' phi copies). A landing pad's `landingpad` computes its two fields: the in-flight `_Unwind_Exception`
+(`cx$exception()`, what the IR passes to `__cxa_begin_catch`) and the selector: the first `catch` clause whose type_info
+`cx$catches` (null: every exception) gives that type_info's number (the same `llvm.eh.typeid.for` gives); a `filter`
+clause (a dynamic exception specification) gives -1 unless one of its types catches the exception (an empty one always:
+the IR's `ehspec.unexpected` path calls `__cxa_call_unexpected`); else 0 for a `cleanup`, else the frame does not handle
+the exception and returns with the flag still set; then the flag is cleared. `cx$catches` does for one clause what the
+personality's search phase does (`get_adjusted_ptr`): the thrown object and type from the exception's header (a primary
+exception's or, for a dependent one, its primary's; a foreign exception only matches `catch (...)`), the thrown pointer
+dereferenced when the thrown type is a pointer (`__is_pointer_p`), then the clause's `std::type_info`'s own `__do_catch`
+(virtual slot 4), and on a match the adjusted pointer stored in the header's `adjustedPtr`, where `__cxa_begin_catch`
+reads it. The flag is lowered while `__do_catch` runs (it is lowered code, whose calls return at once while the flag is
+set) and raised again after. An exception that leaves `main` calls `cx$uncaught`, which does what `__cxa_throw` does when
+no handler is found: `__cxa_begin_catch` on it, then `std::terminate()` (libstdc++'s verbose handler: "terminate called
+after throwing an instance of 'T'", `what()`, `abort()`, status 134).
 
 What differs from the Itanium ABI, by design: there is no search phase, so an exception that no handler catches runs
 the cleanups of the frames it leaves before `std::terminate` (libstdc++ terminates first: the class
-`uncaught-cleanups` when a cleanup prints); an exception thrown inside the shared libstdc++ (`std::vector::at`,
-`std::__throw_*`, `operator new`'s `bad_alloc`) unwinds natively through the lowered C frames, which have no landing
-pads, so the lowered program cannot catch it (the class `library-throw`, gone at CX7 when libstdc++ is lowered too).
+`uncaught-cleanups` when a cleanup prints); native code that calls lowered code (musl's `qsort`, `pthread_once`, an
+`atexit` handler) does not test the flag, so an exception thrown through a native frame returns into it as if nothing
+were thrown (the class `native-callback-throw`; the C library is native until C5's musl as C forms). Until CX6 the
+library itself was native and exceptions it threw unwound natively through the lowered frames (the classes
+`library-throw` and `callback-throw`, gone with CX7).
 
 ## 9. The classes of the lowering check
 
@@ -191,10 +217,40 @@ Every file of `bin/cppi lower-check` that does not pass is in a class of `test/c
 
 | class | what |
 |---|---|
-| `library-throw` | the program catches an exception libstdc++.so throws (§8) |
-| `callback-throw` | a virtual function of the program throws while libstdc++'s code calls it: the flag returns into native frames (§8) |
-| `exception-ptr` | `std::exception_ptr`, `std::current_exception`, `std::rethrow_exception`, `std::make_exception_ptr` (CX7) |
-| a refusal's class (`filter`, `inline-asm`, `vector`, `intrinsic`, `coroutine`, `datalayout`, ...) | the lowering refuses the construct (none in the checked lists) |
+| `uncaught-cleanups` | an uncaught exception runs cleanups that print before `std::terminate` (§8) |
+| `native-callback-throw` | an exception thrown through a native frame of the C library (§8) |
+| a refusal's class (`inline-asm`, `vector`, `intrinsic`, `coroutine`, `datalayout`, ...) | the lowering refuses the construct |
 
-The testsuite's own library (`util/`'s `testsuite_*.cc`) and `libstdc++exp` are linked natively with both programs, as libstdc++ is, so they are no class.
-The numbers are in the survey's "As built: CX6 (write-ahead)".
+Since CX7 the lowered program links the lowered runtime (§10), not libstdc++.so, and the testsuite's own library
+(`util/`'s `testsuite_*.cc`) is lowered with it: clang compiles it to IR in each run, the lowering and gcc make
+`WORK/libltestc++.a`. The original (CP83 (a): the same IR linked by clang) links the native libstdc++ and libtestc++.
+The numbers are in the survey's "As built: CX6 (write-ahead)" and "As built: CX7 (write-ahead)".
+
+## 10. The runtime (CX7)
+
+`bin/cppi runtime-build [OUT]` (default `.tmp/cppi/runtime`; `bin/cppi lower-check` runs it when `OUT` has no library)
+builds the runtime a lowered program links in place of libstdc++.so, from `test/cpp/runtime/units.edn`:
+
+1. **Sources**: libsupc++ and libstdc++-v3/src of the pinned gcc 15.2.0 tarball (with `libiberty/cp-demangle.c`, which
+   libsupc++ compiles as C, and `libgcc/unwind-pe.h`), extracted into `.tmp/cppi/gcc/`, its digest checked. The units are
+   the members of the static `libstdc++.a` the build makes for this host's configuration (Makefile.am's lists: libsupc++,
+   `src/c++98` ... `src/c++26`, the compatibility files of `libstdc++.la`, configure's links for the generic locale
+   model, `os/generic`, the atomic builtins and `basic_file_stdio`) and those of `libstdc++exp` (the contracts and the
+   Filesystem TS; not `std::stacktrace`, which needs libbacktrace). The configured headers are the host's
+   (`/usr/include/c++/15.2.0`, Alpine's gcc 15.2.0, the same g++ and the test programs use). The build's two generated
+   files (`tzdata.zi.h`, `bits/largefile-config.h`) are made from the tarball as its Makefiles make them; two units go
+   through a wrapper of `test/cpp/runtime/shims/` (clang rejects `assert_fail.cc`'s `[[__noreturn__]]` on a later
+   declaration; `random.cc`'s rdrand and rdseed use g++'s builtins). Not lowered (`:excluded`): `eh_personality.cc`
+   (replaced, §8), `src/c++17/cow-string-inst.cc` (clang rejects it), `stacktrace.cc`.
+2. **IR** by the oracle, `clang++ -O0 -S -emit-llvm` with each directory's `-std` and template flags and the per-file
+   rules, from the tarball's root with `-ffile-prefix-map`s, so the IR names its sources by their paths in the tarball and
+   does not depend on the checkout's place; the digests against `test/cpp/runtime/ir.sha256` (`--update` rewrites them).
+3. **The forms' round trip** of each unit (§6: `clang -c` of the print equals `clang -c` of the IR), **the lowering**, gcc
+   `-O0` (§7's flags) on the lowered C; the objects archived as `OUT/liblstdc++.a` (all but `exp/`) and
+   `OUT/liblstdc++exp.a`, the pending-flag layer as `OUT/rt.o`. `OUT/results.tsv` and `OUT/summary.edn` record each unit's
+   levels; every unit is to pass them all.
+
+A lowered program links `rt.o -Wl,--start-group [libltestc++.a liblstdc++exp.a] liblstdc++.a -Wl,--end-group -lm` by gcc:
+the C library (musl) and libgcc are native (C5 lowers musl), no libstdc++.so. What the lowered runtime does not have, by
+the configuration or by CP1: threads beyond the C library's (`std::thread` runs on musl's pthreads, natively, but the
+pending flag and the atomics are single-threaded), `std::random_device`'s rdrand and rdseed, `std::stacktrace`.
