@@ -1976,3 +1976,19 @@ On the branch `cpp-cx7` after the decisions, in the light tier (stage 0 by `ARBA
 ### Decided (CP110; the user, 2026-10-31)
 
 As recommended: (c) now (4 threads, 20,000 throws each), (b) only if a regression slips past it.
+
+## As built: CP110 (c) (2026-10-31)
+
+On the branch `cpp-cx7`, in the light tier (stage 0 by `ARBACE_HOST_EXE`, 4 jobs, no gate, no build of Arbace's executables).
+
+- **What changed.** `test/cpp/runtime/samples/threads.cpp` runs 4 `std::thread`s, each throwing and catching 20,000 times (a `std::runtime_error` when `i % 4 == id`, an `int` when
+  `i % 5 == 0`, `yield()` between, each thread checking that it sees only its own exception). It prints `11000 11000 11000 11000`, status 0, as g++'s build and the original do.
+- **Numbers.** `bin/cppi lower-check` over the samples and runtime samples: 12 of 12 (10 agree with g++'s build, 2 compile-only; the summary equals CP103 (b)'s, so
+  `test/cpp/lower-results.edn` changes in its comment only). The sample's lowered run is short: the whole check was native 7 s, read, print and lower 23 s, gcc and runs
+  2 s (34 s wall for the 12 files); the sample is far under 30 s.
+- **The negative run (evidence for (c)'s strength).** In a scratch copy of the tree (`.tmp/neg`, not committed) `cx$pending` was made non-thread-local in
+  `arbace/cpp/rt/eh.c.ae` and in the lowering's `extern` (`arbace/cpp/lower.ae`), and the runtime rebuilt by `runtime-build` (198 of 198; its `--update` was needed there only
+  because the IR's path-mapped digests differ in another root). The sample's lowered C, with the `extern` likewise, linked against that runtime and run 10 times:
+  **10 of 10 runs failed** (7 `terminate called after throwing std::runtime_error`, 2 segmentation faults, 1 `terminate called without an active exception`;
+  the unchanged build passed 10 of 10). So the sample catches the regression every time, and (b) (a `--shared-flag` switch) stays unneeded.
+- **Rule slips.** None. `python3` was used for multi-line edits.
