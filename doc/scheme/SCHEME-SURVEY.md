@@ -2274,3 +2274,78 @@ Open: none decided yet.
 ### Decided (SC140-SC143; the user, 2026-10-31)
 
 All as recommended: SC140 (b); SC141 (b), (c) when the compiled level runs the mats; SC142 (b); SC143 (c).
+
+## As built: SC140-SC143 (write-ahead) (2026-10-31)
+
+Branch `scheme-sm1`, on `f5286ace`. The items of "Decided (SC140-SC143; the user, 2026-10-31)", built in the light tier (no gate, no build of Arbace's
+executables or javac's tool, no lock; stage 0 as the tools' host, at most 4 threads and `GOMEMLIMIT` 1000-1500 MiB, one si run at a time). Done: SC140 (b), SC141 (b),
+SC142 (b), SC143 (c). Not done: SC141 (c) (when the compiled level runs the mats). The shipped Go did not change.
+
+### What was built
+
+- **SC140 (b), the verbose printer**: `test/scheme/mats/run.sps` prints a failing clause (`CLAUSEFAIL`) with `r7rs-write`, which labels cycles; `SI_MAT_VERBOSE` is off when
+  unset, empty or `0`. Checked: 4.ms under `SI_MAT_VERBOSE=1` ends (rc 0, 106 `CLAUSEFAIL` lines, `ormap`'s `(quote #0=(a . #0#))` printed with its label), where it hung before.
+- **SC141 (b), class `mats-timing`** (4): the sorts' 20 s timing clause (5_2.ms `sort`, `list-sort`, `sort!` clause 20; 5_6.ms `vector-sort` clause 16), out of `mats-error-checks`
+  (17 to 13). `define-integrable`'s clause 2 ("time limit" too) is not a timing clause (it loops) and stays in `mats-error-checks`.
+- **SC143 (c), Chibi 0.12.0 as the reference** (`bin/si r7rs --chibi [--record]`, Makefile `si-r7rs-chibi[-record]`, `test/scheme/ref-r7rs-chibi.edn`): the host's `chibi-scheme` runs the suite
+  through `test/scheme/chibi/driver.scm`. Run directly, `chibi-scheme r7rs-tests.scm` stops at line 801 (`invalid numeric syntax`, a read error ends a file run), so the driver reads the
+  file form by form (a form Chibi cannot read counts as failing tests, one per `(test ` in its text), evaluates each in the interaction environment with the suite's imports, and wraps
+  `(chibi test)`'s reporter to print a line a test in SM8's format (the default reporter still keeps the group summaries). **Chibi: 1,234 tests, 1,227 pass, 7 fail**, all in two classes:
+  `r7rs-chibi-reader` 6 (`+nan.0+5.0i`, `+nan.0i`, `+nan.0+nan.0i`, `+nan.0+inf.0i` read as symbols; `1.0+nan.0i` and `+inf.0+nan.0i` unreadable) and `r7rs-chibi-syntax-rules` 1 (the 4.3
+  `let-syntax` test with a literal before an ellipsis). Chibi runs 9 more tests than si (the numeric-syntax loops of 6.13 differ). `bin/si r7rs` pairs the two sequences by an alignment of
+  the sources (longest common subsequence, then in-order pairing of equal-sized gaps; `lcs-pairs`) and carries Chibi's status in each test of `check-r7rs-linux-amd64.edn`
+  (`:vs-chibi`): **si against Chibi: 1,209 both pass, 7 only si passes (Chibi's seven), 9 only Chibi passes (the nine denormal printings, which Chibi prints as the suite accepts; their
+  sources differ from Chibi's loop tests, so they are paired by position in the gap), 0 both fail, 0 si tests unpaired, 9 Chibi tests unpaired.**
+- **SC142 (b), Chibi's own tests of the three libraries** (`bin/si chibi-tests [--record]`, Makefile `si-chibi-tests[-record]`, `test/scheme/check-chibi-tests-linux-amd64.edn`): `diff-test.sld`, `optional-test.sld`
+  and `term/ansi-test.sld` vendored beside the libraries (from the host's chibi-scheme package, unchanged; SHA-256 in `scheme/vendor/chibi/provenance.edn`, `LICENSE.md`'s Chibi section extended). Chibi
+  runs `(run-tests)` (`ANSI_ESCAPES_ENABLED=1`: the tests expect escapes); si runs the library's tests one form at a time (`test/scheme/chibi/split-run.sps`: the declarations read as data,
+  the else branches' inline test macros and definitions evaluated in one interaction environment, then each form of `run-tests`), because a whole-library run of `optional-test` ends at the expansion of
+  the first test that fails. The marks are compared test by test. **diff 9 of 9 (Chibi 9), term ansi 234 of 234 (Chibi 234), optional 12 of 25 (Chibi 25)**; the 13 are one class,
+  `chibi-optional-fallback`: `(chibi optional)` defines `let-optionals*` in a `cond-expand` else branch (Chibi has it built in) that takes `(var default)` pairs and a rest, not a bare variable beside
+  them (`opt-lambda`, `opt-lambda*`, `let-optionals`, `define-opt` with `(a (b 11) ...)` or `(a . b)`: "not an identifier"), and `optional-test`'s inline `test-error` takes one expression where the test gives two ("invalid syntax").
+  No finding against si itself: its `cond-expand` in expression position, `syntax-rules` and `define-library` ran the other 271 tests as Chibi did.
+
+### The checks, numbers (before: SC130 batch; after: this batch)
+
+- **Chibi's R7RS suite on si: 1,225 tests, 1,216 pass, 9 fail** (as before; with SM8's `(chibi test)` and Chibi's own the same test by test: 1,216 both pass, 9 both fail). Chez: 1,205 pass, 20 fail (as before; si
+  against Chez 1,205 / 11 / 0 / 9). New: Chibi 1,227 pass of 1,234, si against Chibi above. Every non-pass in a class, 0 in none.
+- **Chez's mats on si: 911 mats, 282 pass (282), 89 fail (89), 529 do not run (529), 11 skipped (11)**; 886 non-pass items (886), **0 in no class**: `mats-chez-identifier` 521, `mats-chez-reader` 228, `mats-chez-syntax` 31,
+  `mats-numeric` 18, `mats-arity-one` 15, `mats-format` 14, **`mats-error-checks` 13 (17)**, `mats-chezscheme-subset` 11, `mats-parameters` 11, `mats-chez-checks` 10, **`mats-timing` 4 (new)**, `mats-eq-identity` 4,
+  `mats-chez-module` 3, `mats-toplevel` 3. Clauses of the mats that do not run: 4,288 pass, 568 fail, 9,131 do not run (as before). No skip, no rerun.
+- **Chibi's own tests of the libraries**: 268 of 268 for Chibi, 255 of 268 for si (above). 
+- **Every corpus file in a result or a class**: 220 files, 0 in neither.
+- **No regression**: `bin/si check` 46 of 47 (1 in a class, 0 failing); `bin/si check --aot` 45 of 47 the same compiled (2 refused, 0 differing); `bin/si srfi` 11 of 11; `bin/si test --si` 61 of 64, 3 known, 0 failing; `bin/si test` 60 of 64,
+  4 known, 0 failing, 31 of 39 the same as Chez's `expand`; `bin/si check-suite` rc 0; `bin/si fixpoint` 6 of 6; `bin/si boot --check` gives the committed `psyntax.pp.ae`; `bin/si unit` ok; `bin/si r7rs --chibi-test` as before; `make check-makefile` rc 0.
+
+### Proposals (SC150 onward)
+
+- **SC150 `(chibi optional)` for si.** The vendored library's fallback rejects a bare variable; Chibi's tests of it fail 13 of 25 on si.
+  - Options: (a) leave it classed (`chibi-optional-fallback`); (b) `scheme/lib/chibi/optional.sls` of si's own beside the vendored one (Chibi's `let-optionals*` semantics: a bare variable is required, written in `syntax-rules`), used before the vendored directory; (c) patch the vendored `optional.sld`'s else branch (the vendored files stop being unchanged).
+  - *Recommended: (b)*: keeps the vendored files byte for byte, and the test then runs on a library that does what the tests ask; only when a program needs `opt-lambda`.
+- **SC151 The ecraven benchmarks against Chibi.** Chibi 0.12.0 is on the host and could time and judge ecraven's 58 programs beside Chez.
+  - Options: (a) not; (b) `bin/si ecraven --chibi` recording Chibi's verdicts and seconds in `test/scheme/ref-ecraven-chibi.edn`; (c) also Chibi's `(scheme ...)` library tests beyond `r7rs-tests.scm`.
+  - *Recommended: (b)*: same shape as the Chez reference; Chibi is an interpreter, so its times are the fairer comparison for si.
+- **SC152 Chibi's other `*-test.sld` files** (about 40 under `/usr/share/chibi/chibi/`, `(chibi string)`, `(chibi match)`, `(chibi loop)`, `(chibi iset)`, `(chibi json)`...). `split-run.sps` runs any of them whose library si can load.
+  - Options: (a) stop at the three; (b) vendor the pure-Scheme libraries with their tests (`match`, `loop`, `string`, `iset`, `json`, `csv`) as one corpus; (c) wait for the libraries a program needs.
+  - *Recommended: (c)*: each needs `(chibi ...)` internals (`er-macro-transformer`, native stubs) the probe has not looked at; (b) piece by piece after SC150.
+- **SC153 Pairing by source.** The R7RS pairing of Chibi's tests with si's is by an alignment of printed sources; nine tests pair by position.
+  - Options: (a) as built; (b) give the tests numbers by section and ordinal in the driver and in SM8's library (both read the same file), pairing exactly; (c) drop the pairing, compare sections' totals.
+  - *Recommended: (a)*: the nine are the float-printing tests, listed apart; (b) if a second reference with other differences comes.
+
+### Rule slips
+
+- Twice I started a second waiting loop while one ran (stopped by task id each time); a `make check-makefile >/dev/null 2>&1` (a `/dev/null` in a throwaway check); a few foreground waits with `timeout N tail -f` (killed by their timeout, nothing left running).
+- A foreground chibi run of the first driver (quadratic `string-ref` on a UTF-8 string) outlasted the shell's two minutes; stopped by task id.
+
+### Checks not run
+
+Not run: the essential gate; ecraven on si (the shipped Go did not change; the last numbers, 58 and 54 right, stand), `bin/si ecraven --chez`; arm64 and the box; `bin/si r7rs`'s numbers on the compiled level; `bin/si bench`.
+
+### Shipped files changed
+
+None (no file of `go/arbace/scm` or `scheme/psyntax`). Not shipped (test and data): `scheme/vendor/chibi/**` (three `.sld`, `provenance.edn`), `test/scheme/**` (`chibi/driver.scm`, `chibi/split-run.sps`, `ref-r7rs-chibi.edn`,
+`check-chibi-tests-linux-amd64.edn`, the classes, `mats/run.sps`, the results), `bin/si`, `arbace/scheme/corpora.ae`, the Makefile, `LICENSE.md`.
+
+### Scratch cited
+
+`.tmp/sc/` in this worktree: `S_*.log` (this batch's runs), `Q_v1.log` (4.ms verbose), `batch.sh`, `ct/` (the Chibi probes), `div.bak`; `.tmp/si/{mats,r7rs,r7rs-chez,r7rs-chibi,r7rs-own,chibi-tests}` the runs judged.
