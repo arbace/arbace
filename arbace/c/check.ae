@@ -306,11 +306,17 @@
                                  (or (identical? ra rb)
                                      (and (= (.get ra :tag) (.get rb :tag)) (some? (.get ra :tag))
                                           (if (and (.get ra :complete) (.get rb :complete))
-                                            ;; C23 (6.2.7): the same members, of compatible types (self-references cut off)
+                                            ;; C23 (6.2.7): the same members, of compatible types (self-references cut off);
+                                            ;; enumerations: the same constants and values, and a fixed underlying type the same (CS152)
                                             (and (= (map :name (.get ra :members)) (map :name (.get rb :members)))
+                                                 (or (not= ka :enum)
+                                                     (and (= (.get ra :consts) (.get rb :consts))
+                                                          (= (boolean (.get ra :fixed)) (boolean (.get rb :fixed)))
+                                                          (or (not (.get ra :fixed)) (compatible? (unq (.get ra :under)) (unq (.get rb :under))))))
                                                  (or (> (long *compat-depth*) 2)
                                                      (binding [*compat-depth* (inc (long *compat-depth*))]
-                                                       (every? true? (map (fn [x y] (and (= (:bits x) (:bits y)) (mcompat? (:t x) (:t y))))
+                                                       (every? true? (map (fn [x y] (and (= (:bits x) (:bits y)) (= (boolean (:mpacked x)) (boolean (:mpacked y))) (= (:align x) (:align y))
+                                                                     (mcompat? (:t x) (:t y))))
                                                                           (.get ra :members) (.get rb :members))))))
                                             (identical? (.get ra :scope) (.get rb :scope))))))
         :bitint (and (= (:n a) (:n b)) (= (boolean (:u a)) (boolean (:u b))))
@@ -692,13 +698,18 @@
 
 (def ^:dynamic *base* nil) ; c/base: a c/group's shared type
 
+(def ^:dynamic *auto-init*
+  "Whether the initializer of a C23 `auto` object is being checked: a tag it declares is an error (CS152)."
+  false)
+
 (defn- tag-ref
   "The tag `kind tag` referenced, declared in the current scope when not visible (or when `here`)."
   [kind ^String tag here]
   (let [found (if here (.get ^HashMap (:tags (top-scope)) tag) (lookup-tag tag))]
     (if (and found (= kind (.get ^HashMap found :kind)))
       found
-      (let [r (new-rec kind tag)] (.put ^HashMap (:tags (top-scope)) tag r) r))))
+      (do (when *auto-init* (err! (str "'" (name kind) " " tag "' declared in underspecified object initializer")))
+          (let [r (new-rec kind tag)] (.put ^HashMap (:tags (top-scope)) tag r) r)))))
 
 (declare check-struct check-enum)
 
@@ -789,8 +800,8 @@
         complex {:k :complex :of (parse-type a)}
         bit-int (do (feat! :cc-bitint) {:k :bitint :n (bitint-width a false)})
         unsigned-bit-int (do (feat! :cc-bitint) {:k :bitint :n (bitint-width a true) :u true})
-        typeof (let [r (ex a)] (or (:t r) t-invalid))
-        typeof-unqual (let [r (ex a)] (unq (or (:t r) t-invalid)))
+        typeof (let [r (ex a)] (when (:bits r) (err! "'typeof' applied to a bit-field")) (or (:t r) t-invalid))
+        typeof-unqual (let [r (ex a)] (when (:bits r) (err! "'typeof_unqual' applied to a bit-field")) (unq (or (:t r) t-invalid)))
         typeof-type (parse-type a)
         typeof-unqual-type (unq (parse-type a))
         c/id (parse-type (symbol a))
@@ -813,7 +824,7 @@
            (cond
              (and (seq? m) (= 'c/static-assert (first m))) (do ((resolve 'arbace.c.check/check-decl) m) [])
              (and (seq? m) (= 'c/bits (first m)))
-             (let [[_ t w] m tt (parse-type t) wv (:v (exi w))]
+             (let [[_ t w] m tt (parse-type t) wv (:v (binding [*line* (or (:line (meta m)) *line*)] (exi w)))]
                [{:name nil :t tt :bits (long (or wv 0))}])
              (and (seq? m) (= 'c/group (first m)))
              (let [bt (parse-type (second m))]
@@ -825,7 +836,7 @@
                    _ (attr-args! mm)
                    t (vectorize (parse-type (:tag mm)) mm)
                    _ (binding [*line* (or (:line mm) *line*)] (decl-position-attrs! mm :member t))
-                   bits (when (contains? mm :c/bits) (:v (exi (:c/bits mm))))
+                   bits (when (contains? mm :c/bits) (:v (binding [*line* (or (:line mm) *line*)] (exi (:c/bits mm)))))
                    as (attrs-of mm :c/attrs :c/after-attrs :c/decl-attrs)
                    al (some #(when (= "aligned" (first %)) (aligned-value (second %))) as)
                    al (if-let [x (:c/alignas mm)] (max (long (or al 1)) (long (or (:v (exi x)) 1))) al)
@@ -855,12 +866,38 @@
                   (every? true? (map type-eq (:params a) (:params b))))
          (compatible? a b))))
 
+(defn- vm-type?
+  "Whether a type is variably modified: a variable-length array, a pointer to or array of one (a struct with such a member
+  too, to a depth)."
+  ([t] (vm-type? t 0))
+  ([t depth]
+   (case (:k t)
+     :array (boolean (or (:vla t) (vm-type? (:of t) depth)))
+     :ptr (vm-type? (:to t) depth)
+     (:struct :union) (and (< (long depth) 3)
+                           (boolean (some #(vm-type? (:t %) (inc (long depth))) (.get ^HashMap (:rec t) :members))))
+     false)))
+
+;; CS152: a struct or union with a variable-length array member is itself of variable size (gcc: it may not be initialized
+;; but with an empty initializer)
+(defn- vla-struct?
+  ([t] (vla-struct? t 0))
+  ([t depth]
+   (let [t (unq t)]
+     (boolean (and (#{:struct :union} (:k t)) (< (long depth) 3)
+                   (some (fn [m] (let [mt (unq (:t m))]
+                                   (or (and (= :array (:k mt)) (:vla mt)) (vla-struct? mt (inc (long depth))))))
+                         (.get ^HashMap (:rec t) :members)))))))
+
 (defn- rec-same?
   "Whether the new definition `b` of a tag repeats the definition `a` (C23 6.2.7): the same members in order, with the
-  same names, types, widths and alignments."
+  same names, types, widths and alignments. A definition with a variably modified member is never the same (CS152:
+  gcc's \"redefinition\" for `struct f { int a[n]; }` twice)."
   [^HashMap a ^HashMap b]
   (let [ma (.get a :members) mb (.get b :members)]
     (and (= (count ma) (count mb))
+         (not-any? #(vm-type? (:t %)) ma)
+         (not-any? #(vm-type? (:t %)) mb)
          (every? true? (map (fn [x y] (and (= (:name x) (:name y)) (= (:bits x) (:bits y)) (= (:align x) (:align y))
                                            (= (boolean (:mpacked x)) (boolean (:mpacked y)))
                                            (type-eq (:t x) (:t y))))
@@ -969,9 +1006,10 @@
           (if es
             (let [e (first es)
                   [nm vf] (if (vector? e) [(ident (first e)) (second e)] [(ident e) nil])
+                  has-vf (and (vector? e) (>= (count e) 2)) ; `X = nullptr` has the value nil in the forms
                   _ (binding [*line* (or (:line (meta e)) *line*)] (tag-attrs! (:c/attrs (meta e)) true))
-                  rv (when vf (exi vf))
-                  v (if vf (when (integer? (:v rv)) (:v rv)) nxt)
+                  rv (when has-vf (exi vf))
+                  v (if has-vf (when (integer? (:v rv)) (:v rv)) nxt)
                   _ (when (and under (some? v) (integer? v) (not= :bitint (:k (unq under))) (not= (wrap v under) v))
                       (err! (if vf "enumerator value outside the range of the underlying type" "overflow in enumeration values")))
                   v (if (and under (some? v)) (wrap v under) v)
@@ -1376,6 +1414,7 @@
   (let [[_ ctl & assocs] f
         type-op (:c/type (meta f))
         ;; a type operand keeps its qualifiers (C2y), an expression's lvalue conversion drops them (DR 481)
+        _ (when type-op (pedwarn-c2y! "ISO C does not support use of type name as the controlling operand of '_Generic' before C2Y"))
         ct (if type-op (parse-type ctl) (let [r (ex ctl)] (unq (decay (unq (:t r))))))
         chosen (atom nil)
         default (atom nil)
@@ -1455,7 +1494,7 @@
         (and (seq? e) (= 'at (first e))) (doseq [d (rest e)]
                                             (cond (keyword? d) nil
                                                   (vector? d) (doseq [x d] (exi x))
-                                                  :else (ex d)))
+                                                  :else (exi d)))
         (and et (not (seq? e))) (let [r (ex e)] (ptr-conv! et r "initialization") r)
         :else (check-init e)))
     (and (seq? init) (= 'c/embed (first init))) nil
@@ -1490,6 +1529,8 @@
           (or (= :invalid ka) (= :invalid kb)) nil
           (or (= :void ka) (= :void kb) (compatible? ua ub)
               (and (int-type? ua) (int-type? ub)
+                   ;; two enumerations that are not compatible (another content, another fixed type) are incompatible (CS152)
+                   (not (and (= :enum ka) (= :enum kb)))
                    (let [ca (int-class (if (= :enum ka) (:k (enum-under ua)) ka))
                          cb (int-class (if (= :enum kb) (:k (enum-under ub)) kb))]
                      (and ca (= ca cb)))))
@@ -1550,6 +1591,7 @@
                       (when-not (or (int-type? t) (complex-type? t) (#{:invalid :vector} (:k t))) (err! "wrong type argument to bit-complement"))
                       (emit! (res t :v (when (and (integer? (:v r)) (int-type? t)) (wrap (.not (biginteger (:v r))) t)))))
             addr (let [r (ex (first args))]
+                   (when (:bits r) (err! "cannot take address of bit-field"))
                    (emit! (res (ptr (:t r)) :addr true)))
             arbace.core/deref (let [r (ex (first args))] (emit! (res (deref-type (:t r)) :lv true)))
             ? (if (= 3 n)
@@ -1576,7 +1618,9 @@
                        rv (ex v)
                        _ (assign-check e rv)]
                    (emit! (res (unq (:t e)) :av (let [v (or (:v rv) (:av rv))] (when (integer? v) (conv-val v (:t e)))))))
-            (inc! dec! pre-inc! pre-dec!) (let [r (ex (first args))] (assign-check r nil) (emit! (res (unq (:t r)) :bits (:bits r))))
+            (inc! dec! pre-inc! pre-dec!) (let [r (ex (first args))]
+                                            (when (complex-type? (unq (:t r))) (pedwarn-c2y! "ISO C does not support '++' and '--' on complex types before C2Y"))
+                                            (assign-check r nil) (emit! (res (unq (:t r)) :bits (:bits r))))
             aget (let [[a i] args
                        ra (ex a) ri (ex i)]
                    (emit! (res (deref-type (binary-index-type ra ri)) :lv true)))
@@ -1590,9 +1634,10 @@
                    (emit! (res (unq t) :v (conv-val (:v r) t) :vla-expr (:vla-expr r)
                                :nfp (or (:nfp r) (float-type? (unq (:t r)))))))
             sizeof (let [r (ex (first args))]
+                     (when (:bits r) (err! "'sizeof' applied to a bit-field"))
                      (emit! (if (vla? (:t r)) (res t-ulong) (sizeof-res (:t r)))))
             sizeof-type (let [t (parse-type (first args))] (emit! (if (vla? t) (res t-ulong) (sizeof-res t))))
-            alignof (let [r (ex (first args))] (emit! (res t-ulong :v (or (:malign r) (align-of (unq (:t r)))))))
+            alignof (let [r (ex (first args))] (when (:bits r) (err! "'_Alignof' applied to a bit-field")) (emit! (res t-ulong :v (or (:malign r) (align-of (unq (:t r)))))))
             alignof-type (let [t (parse-type (first args))]
                            (when (incomplete-type? t) (err! "invalid application of 'alignof' to incomplete type"))
                            (emit! (res t-ulong :v (align-of (unq t)))))
@@ -1789,7 +1834,7 @@
         has-init (seq more)
         init (first more)]
     (if (auto-type? m)
-      (let [r (ex init) t (decay (unq (:t r)))]
+      (let [r (binding [*auto-init* true] (ex init)) t (decay (unq (:t r)))]
         (feat! :cc-auto)
         (record! nm (declare-object! n t m :obj nil false)))
       (let [t (vectorize (parse-type (or (:tag m) 'int)) m)
@@ -1799,12 +1844,26 @@
             ;; C23: `{}` gives an array of unknown size none (gcc: the zero-size diagnostic), a variable-length array only `{}`
             _ (when (and has-init (not (cx :permissive)) (= :array (:k (unq t))) (nil? (:n (unq t))) (not (:vla (unq t))) empty-init)
                 (err! "zero or negative size array"))
-            _ (when (and has-init (vla? t) (not empty-init))
+            _ (when (and has-init (or (vla? t)
+                                       ;; not through typeof: the composite type of two structs may not be of variable size
+                                       (and (vla-struct? t)
+                                            (not (some #{'typeof 'typeof-type 'typeof-unqual 'typeof-unqual-type} (tree-seq coll? seq (:tag m))))))
+                                   (not empty-init))
                 (err! "variable-sized object may not be initialized except with an empty initializer"))
             ;; an array of wide characters is not initialized by a narrow (or u8) string literal
             _ (when (and has-init (= :array (:k (unq t))) (int-type? (unq (:of (unq t)))) (> (long (size-of (unq (:of (unq t))))) 1))
                 (when (string-bytes (if (and (seq? init) (= 'init (first init)) (= 2 (count init))) (second init) init))
                   (err! "array initialized from a string literal with type array of unsigned char")))
+            ;; CS152: an initializer defines the object, and so does a file-scope thread-local one without `extern` (C23 6.9.3: a
+            ;; thread-local declaration is no tentative definition); a second definition in the scope is a redefinition, a
+            ;; thread-local array of unknown size has no storage
+            defines (and (not= :fn (:k (unq t))) (or has-init (and (file-scope?) (:thread_local m) (not (:extern m)))))
+            ^HashSet defd (let [^IdentityHashMap d (cx :defs) ord (:ord (top-scope))]
+                            (or (.get d ord) (let [s (HashSet.)] (.put d ord s) s)))
+            _ (when (and defines (.contains defd n)) (err! (str "redefinition of '" n "'")))
+            _ (when defines (.add defd n))
+            _ (when (and (not has-init) defines (:thread_local m) (= :array (:k (unq t))) (nil? (:n (unq t))) (not (:vla (unq t))))
+                (err! (if (:static m) (str "array size missing in '" n "'") (str "storage size of '" n "' isn't known"))))
             t (complete-array t (when has-init init))
             ;; the object is in scope in its own initializer (6.2.1)
             e (record! nm (declare-object! n t m (if (= :fn (:k (unq t))) :fn :obj) nil false))]
@@ -1812,7 +1871,7 @@
           (let [r (if (and (seq? init) (= 'init (first init))) (do (check-init init (let [ut (unq t)]
                                                                                         (when (and (= :array (:k ut)) (let [k (:k (unq (:of ut)))] (or (int-type? (unq (:of ut))) (#{:float :double :ptr :nullptr} k))))
                                                                                           (unq (:of ut))))) nil) (ex init))
-                _ (when r (ptr-conv! t r "initialization"))
+                _ (when r (binding [*line* (or (and (seq? init) (:line (meta init))) *line*)] (ptr-conv! t r "initialization")))
                 _ (when (:constexpr m) (constexpr-check! t init r))]
             (when (and (:constexpr m) r (some? (:v r)))
               (record! nm (declare! n (assoc e :v (conv-val (:v r) t)))))
@@ -2014,17 +2073,18 @@
                   (with-scope (check-block-items body)))
                 nil)
           case (let [[a b] args
-                     ra (exi a) rb (when b (exi b))]
+                     has-b (> (count args) 1) ; `nullptr` is nil in the forms
+                     ra (exi a) rb (when has-b (exi b))]
                  ;; a duplicate case value, ranges overlapping (gcc converts the labels to the controlling type)
                  (when-let [{:keys [t seen]} *switch*]
                    (let [iv (fn [r] (let [v (:v r)] (when (integer? v) (wrap v t))))
                          lo (iv ra)
-                         hi (if b (iv rb) lo)]
+                         hi (if has-b (iv rb) lo)]
                      (when (and (some? lo) (some? hi) (<= lo hi))
                        (when (some (fn [[l h]] (and (<= lo h) (<= l hi))) @seen)
                          (err! "duplicate case value"))
                        (swap! seen conj [lo hi]))))
-                 (when b (pedwarn-c2y! "ISO C does not support range expressions in switch statements before C2Y"))
+                 (when has-b (pedwarn-c2y! "ISO C does not support range expressions in switch statements before C2Y"))
                  nil)
           c/asm (do (feat! :asm) nil)
           (continue break) (do (when (seq args)
@@ -2082,7 +2142,7 @@
 
 (defn- new-cx [std opts]
   {:std std :scopes (ArrayList.) :errors (ArrayList.) :annot nil :annotating (atom false)
-   :done-units (HashSet.) :units {} :pack-state (atom {}) :ldouble-size (:ldouble-size opts 16)
+   :done-units (HashSet.) :defs (IdentityHashMap.) :units {} :pack-state (atom {}) :ldouble-size (:ldouble-size opts 16)
    :unsigned-char (:unsigned-char opts) :pedantic (:pedantic opts) :ext-lines (:ext-lines opts)
    :permissive (:permissive opts) :no-c2y-compat (:no-c2y-compat opts) :no-c23-compat (:no-c23-compat opts) :exec-charset (:exec-charset opts)})
 
