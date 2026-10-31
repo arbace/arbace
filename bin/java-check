@@ -428,6 +428,11 @@ run_exe() {
   echo "java-check: no executable (JAVA_CHECK_EXE, bin/arbace-go --gate-build or --build)" >&2; return 1
 }
 
+# read_finished LOG: bin/repr-java read's LOG shows a read that finished (its summary line, "N Java
+# files, N converted, ...", or a file's FAILED line): its failure is the sources', cached by their key;
+# one that did not finish (a crash, Go's out of memory, the tool missing) is not (report 003's finding 6)
+read_finished() { grep -qE '^[0-9]+ Java files, [0-9]+ converted, |^FAILED ' "$1"; }
+
 # read_opts: javac's options for repr/java's read (the source level and the encoding; the rest
 # change javac's output, not the forms)
 read_opts() {
@@ -739,7 +744,10 @@ check_one() {
         echo "$key" > "$p/forms.key"
         # one reader per key: two descriptions of one file share their source set
         exec 7> "$forms.lock"; flock 7
-        if [ ! -f "$forms.result" ] && [ -n "${forms_only:-}" ]; then
+        if [ ! -f "$forms.result" ] && [ -n "${forms_only:-}" ] && [ -f "$forms.unfinished" ]; then
+          # the read ran and did not finish (not cached, report 003's finding 6): the test unread, no miss
+          cp "$forms.unfinished" "$p/read.result"
+        elif [ ! -f "$forms.result" ] && [ -n "${forms_only:-}" ]; then
           # GTS41 (c), GT7: the read's cache forced (JAVA_CHECK_FORMS_ONLY=1): a level that consumes the
           # read's output never reads; a miss is the test's failure and the run's (forms-misses)
           printf 'fail\tthe forms cache missed (JAVA_CHECK_FORMS_ONLY=1): %s\n' "$forms" > "$p/read.result"
@@ -749,14 +757,23 @@ check_one() {
           st=0
           (cd "$root" && bin/repr-java read ${ro[@]+"${ro[@]}"} "$forms.tmp" "$p/src") > "$forms.log" 2>&1 || st=$?
           # GTS35 (a): the result written to a temporary and renamed, once complete; a read killed by a
-          # signal (status above 128: an OOM kill, the audit's) is no result and is not cached
+          # signal (status above 128: an OOM kill, the audit's) is no result and is not cached, nor is a
+          # read that did not finish (no summary line, no FAILED line: Go's out of memory exits 2, the
+          # tool or the platform missing; report 003's finding 6): the test's failure (the same reason),
+          # read again next time, KEY.unfinished telling a forced cache's consumers that the read ran
+          rm -f "$forms.unfinished"
           if [ "$st" = 0 ] && grep -q ' converted, 0 failed, 0 javac errors' "$forms.log"; then
             mv "$forms.tmp" "$forms"; printf 'pass\t\n' > "$forms.result.$$" && mv "$forms.result.$$" "$forms.result"
           elif [ "$st" -gt 128 ]; then
             rm -rf "$forms.tmp"; printf 'fail\tthe read was killed (status %s), not cached\n' "$st" > "$p/read.result"
           else
             reason=$( { grep -m1 '^FAILED ' "$forms.log" | sed 's|^FAILED [^ ]* ||'; grep -m1 -E 'error|Exception|failed' "$forms.log"; } | head -1 | tr '\t' ' ' | cut -c1-300)
-            rm -rf "$forms.tmp"; printf 'fail\t%s\n' "${reason:-status $st}" > "$forms.result.$$" && mv "$forms.result.$$" "$forms.result"
+            rm -rf "$forms.tmp"
+            if read_finished "$forms.log"; then
+              printf 'fail\t%s\n' "${reason:-status $st}" > "$forms.result.$$" && mv "$forms.result.$$" "$forms.result"
+            else
+              printf 'fail\t%s\n' "${reason:-status $st}" > "$p/read.result"; cp "$p/read.result" "$forms.unfinished"
+            fi
           fi
         fi
         flock -u 7; exec 7>&-
@@ -826,6 +843,11 @@ nread_one() {
     fi
     if [ "$st" != 0 ] || ! grep -q ' converted, 0 failed, 0 javac errors' "$nf.log"; then
       reason=$( { grep -m1 '^FAILED ' "$nf.log" | sed 's|^FAILED [^ ]* ||'; grep -m1 -E 'error|Exception|failed' "$nf.log"; } | head -1 | tr '\t' ' ' | cut -c1-300)
+      # a read that did not finish is not cached either (report 003's finding 6)
+      if ! read_finished "$nf.log"; then
+        rm -rf "$nf.tmp"; flock -u 6; exec 6>&-
+        printf '%s\tnread\tfail\t%s\n' "$id" "${reason:-status $st}" | sed -e "s|$p|RUN|g" -e "s|$root|.|g"; return 0
+      fi
       printf 'fail\t%s\n' "${reason:-status $st}" > "$nf.result.new"
     # (each file's first line names the source it was read from: the test whose read filled the cache)
     elif ! diff -r -x 'repr-java-*.edn' -I '^;; Converted from ' "$forms" "$nf.tmp" > "$nf.diff" 2>&1; then
@@ -889,7 +911,7 @@ check() {
   jc plan "$ref" "$work" ${pargs[@]+"${pargs[@]}"} >&2
   jc plan-diag "$ref" "$work" "$levels" >&2
   echo "== java-check: $(wc -l < "$work/run.list") tests at the levels $levels, $jobs at a time (the executable $rexe)" >&2
-  export -f limited limited_cpu check_one nread_one read_opts first_line root_cause classes_sha judge run_actions run_dirs mask_hashes mask_dirs test_dir check_diag diag_actions diag_root diag_norm diag_first_diff
+  export -f limited limited_cpu check_one nread_one read_opts read_finished first_line root_cause classes_sha judge run_actions run_dirs mask_hashes mask_dirs test_dir check_diag diag_actions diag_root diag_norm diag_first_diff
   export root work formsc forms_only save jdktest levels timeout from_committed load rexe reader_key="${reader_key:-}" classes_opts_s="${classes_opts[*]}"
   xargs -a "$work/run.list" -P "$jobs" -I{} bash -c 'classes_opts=($classes_opts_s); check_one "$1"' _ {} | LC_ALL=C sort > "$work/results.tsv"
   case ",$levels," in *,interp,*) export -f again interp_one; export jobs; again interp "$work/results.tsv" interp_one ;; esac
@@ -950,7 +972,7 @@ print_ro() {
 # by the sources, the options and the reader (as check_one's read level); writes OUT-LINK.dir (the
 # forms) or OUT-LINK.err (the reason)
 print_read() {
-  local link=$1 src=$2 cache=$3 key f st reason
+  local link=$1 src=$2 cache=$3 key f st reason unfinished=""
   shift 3
   key=$( { echo "$reader_key"; printf '%s\n' "$@" ${ro[@]+"${ro[@]}"}; (cd "$src" && find . -type f -name '*.java' | LC_ALL=C sort | xargs -d '\n' sha256sum); } | sha256sum | cut -c1-24)
   mkdir -p "$cache"; f=$cache/$key
@@ -959,11 +981,15 @@ print_read() {
     rm -rf "$f" "$f.tmp"
     st=0
     (cd "$root" && bin/repr-java read "$@" ${ro[@]+"${ro[@]}"} "$f.tmp" "$src") > "$f.log" 2>&1 || st=$?
-    # GTS35 (a): the result renamed once complete; a read killed by a signal not cached
+    # GTS35 (a): the result renamed once complete; a read killed by a signal not cached, nor one that
+    # did not finish (report 003's finding 6)
     if [ "$st" = 0 ] && grep -q ' converted, 0 failed, 0 javac errors' "$f.log"; then
       mv "$f.tmp" "$f"; printf 'pass\t\n' > "$f.result.$$" && mv "$f.result.$$" "$f.result"
     elif [ "$st" -gt 128 ]; then
       rm -rf "$f.tmp"
+    elif ! read_finished "$f.log"; then
+      rm -rf "$f.tmp"
+      unfinished=$( { grep -m1 -E 'error|Exception|failed' "$f.log" || echo "status $st"; } | tr '\t' ' ' | cut -c1-300)
     else
       reason=$( { grep -m1 '^FAILED ' "$f.log" | sed 's|^FAILED [^ ]* ||'; grep -m1 -E 'error|Exception|failed' "$f.log"; } | head -1 | tr '\t' ' ' | cut -c1-300)
       rm -rf "$f.tmp"; printf 'fail\t%s\n' "${reason:-status $st}" > "$f.result.$$" && mv "$f.result.$$" "$f.result"
@@ -973,6 +999,7 @@ print_read() {
   rm -f "$link.dir" "$link.err"
   if grep -qs '^pass' "$f.result"; then echo "$f" > "$link.dir"
   elif [ -f "$f.result" ]; then cut -f2- "$f.result" > "$link.err"
+  elif [ -n "$unfinished" ]; then echo "$unfinished" > "$link.err"
   else echo "the read was killed (status $st), not cached" > "$link.err"; fi
 }
 
@@ -1020,7 +1047,7 @@ print_level() {
     grep -q '^kind	diagnostics' "$work/run/$id/plan.tsv" && continue
     if [ -f "$work/run/$id/forms.dir" ]; then echo "$id" >> "$list"; else printf '%s\tprint\tunread\tthe read failed\n' "$id"; fi
   done < "$work/run.list"
-  export -f print_ro print_read print_full_one print_check_one
+  export -f print_ro print_read read_finished print_full_one print_check_one
   echo "== java-check print: $(wc -l < "$list") tests read in mode :full ($(since_t0))" >&2
   xargs -a "$list" -P "$jobs" -I{} bash -c 'print_full_one "$1"' _ {}
   echo "== java-check print: printed (java.print, the tools' host) ($(since_t0))" >&2
