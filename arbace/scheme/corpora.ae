@@ -443,17 +443,23 @@
 
 (defn- run-stamps
   "Review 009, finding 6: the stamps bin/si writes beside each output of DIR (NAME.stamp: the key of what made the run, its time
-  limit); {:names :timeouts {NAME seconds} :key K}, or {:refused WHY} for a directory with no outputs, an output without a stamp
-  (an older bin/si's) or outputs of more than one key (a partial run by another si, harness or library)."
-  [dir]
+  limit, the repetition count of a benchmark run); {:names :timeouts {NAME seconds} :key K :count C}, or {:refused WHY} for a directory
+  with no outputs, an output without a stamp (an older bin/si's), outputs of more than one key (a partial run by another si, harness
+  or library) or of more than one count. Re-review 025, finding E: OPTS' `--key K` (bin/si passes the key of what it would run now)
+  refuses a directory made by another key, consistent as it is: outputs of a si, library or harness that changed since."
+  [dir opts]
   (let [names (when (.isDirectory (java.io.File. ^String dir)) (run-names dir))
         st (into {} (for [n names :let [t (slurp-or (str dir "/" n ".stamp"))]]
-                      [n (when t (let [[_ k to] (re-find #"key=(\S+) timeout=(\S+)" t)] {:key k :timeout (parse-long to)}))]))
-        keys (set (keep :key (vals st)))]
+                      [n (when t (let [[_ k to c] (re-find #"key=(\S+) timeout=(\S+)(?: count=(\S+))?" t)] {:key k :timeout (parse-long to) :count c}))]))
+        keys (set (keep :key (vals st)))
+        counts (set (map :count (vals st)))
+        now (second (drop-while #(not= % "--key") opts))]
     (cond (empty? names) {:refused (str "no outputs in " dir)}
           (some nil? (vals st)) {:refused (str "outputs without a stamp (an older run): " (str/join " " (take 8 (keep (fn [[n v]] (when-not v n)) st))))}
           (> (count keys) 1) {:refused (str "outputs of " (count keys) " different runs (keys " (str/join ", " (sort keys)) "): run them all again")}
-          :else {:names names :key (first keys) :timeouts (into {} (map (fn [[n v]] [n (:timeout v)]) st))})))
+          (> (count counts) 1) {:refused (str "outputs of different repetition counts (" (str/join ", " (sort (map str counts))) "): run them all again")}
+          (and now (not= now (first keys))) {:refused (str "outputs of a run that is not the current one (key " (first keys) ", now " now "): run them all again")}
+          :else {:names names :key (first keys) :count (first counts) :timeouts (into {} (map (fn [[n v]] [n (:timeout v)]) st))})))
 
 (defn- refuse [why] (println "refused:" why) 2)
 
@@ -465,15 +471,15 @@
   "A reference's run of ecraven's benchmarks, the answers and times of its CSVLINEs; --record writes FILE. SM8b (SC113 (b)): Chez Scheme
   10.3.0 through the same R7RS libraries (their Chez variants); SC151: Chibi-Scheme 0.12.0 on the benchmark programs as they are."
   [impl label file header [dir & opts]]
-  (if-let [why (:refused (run-stamps dir))] (refuse why)
-  (let [{:keys [timeouts]} (run-stamps dir)
+  (if-let [why (:refused (run-stamps dir opts))] (refuse why)
+  (let [stamps (run-stamps dir opts) {:keys [timeouts]} stamps
         results (vec (for [n (run-names dir)
                            :let [out (or (slurp-or (str dir "/" n ".out")) "") err (or (slurp-or (str dir "/" n ".err")) "")
                                  rc (str/trim (slurp (str dir "/" n ".rc")))
                                  t (csv-seconds impl out)]]
                        {:id (str "ecraven/" n)
                         :verdict (cond (re-find #"INCORRECT" out) :incorrect t :correct (= rc "124") :timeout :else :error)
-                        :seconds t :rc rc :timeout (timeouts n)
+                        :seconds t :rc rc :timeout (timeouts n) :key (:key stamps) :count (:count stamps)
                         :detail (when-not t (clip (or (first-line err) (first-line out) "") 160))}))
         fr (frequencies (map :verdict results))]
     (println (str "ecraven on " label ":") (count results) "benchmarks:" (get fr :correct 0) "correct," (get fr :incorrect 0) "incorrect,"
@@ -503,16 +509,16 @@
                    args))
 
 (defn- cmd-ecraven [[dir & opts]]
-  (if-let [why (:refused (run-stamps dir))] (refuse why)
+  (if-let [why (:refused (run-stamps dir opts))] (refuse why)
   (let [cs (classes) ref (chez-ref) cref (chibi-ref)
-        {:keys [names timeouts]} (run-stamps dir)
+        stamps (run-stamps dir opts) {:keys [names timeouts]} stamps
         results (vec (for [n names
                            :let [out (or (slurp-or (str dir "/" n ".out")) "") err (or (slurp-or (str dir "/" n ".err")) "")
                                  rc (str/trim (slurp (str dir "/" n ".rc")))
                                  it (bench-item n out err rc)]]
                        {:id (str "ecraven/" n) :corpus :ecraven-r7rs
                         :verdict (if it :non-pass :pass)
-                        :seconds (csv-seconds "si" out) :timeout (timeouts n)
+                        :seconds (csv-seconds "si" out) :timeout (timeouts n) :key (:key stamps) :count (:count stamps)
                         :chez (some-> (get ref (str "ecraven/" n)) (select-keys [:verdict :seconds]))
                         :chibi (some-> (get cref (str "ecraven/" n)) (select-keys [:verdict :seconds]))
                         :items (if it [{:item it :class (class-of cs it)}] [])}))]
@@ -585,16 +591,16 @@
                       {:pass 0 :fail 0 :notrun 0} lines)}))
 
 (defn- cmd-mats [[dir & opts]]
-  (if-let [why (:refused (run-stamps dir))] (refuse why)
+  (if-let [why (:refused (run-stamps dir opts))] (refuse why)
   (let [cs (classes)
-        {files :names timeouts :timeouts} (run-stamps dir)
+        stamps (run-stamps dir opts) {files :names timeouts :timeouts} stamps
         results (vec (for [b files
                            :let [file (str b ".ms")
                                  out (or (slurp-or (str dir "/" b ".out")) "") err (or (slurp-or (str dir "/" b ".err")) "")
                                  rc (str/trim (slurp (str dir "/" b ".rc")))
                                  {:keys [mats items clauses]} (mat-file-items file out err rc)
                                  fr (frequencies (map :status mats))]]
-                       {:id (str "mats/" file) :corpus :chez-mats :timeout (timeouts b)
+                       {:id (str "mats/" file) :corpus :chez-mats :timeout (timeouts b) :key (:key stamps)
                         :verdict (if (empty? items) :pass :non-pass)
                         :mats (count mats) :pass (get fr :pass 0) :fail (get fr :fail 0) :notrun (get fr :notrun 0) :skip (get fr :skip 0)
                         :clauses-alone clauses
@@ -752,8 +758,8 @@
   its passing checks counted, judged against the recorded counts (test/scheme/check-srfi-linux-amd64.edn): an SRFI program that
   prints nothing or fewer checks fails. Only the programs in DIR are judged; one the record holds with no output is absent."
   [[dir & opts]]
-  (if-let [why (:refused (run-stamps dir))] (refuse why)
-  (let [{:keys [names]} (run-stamps dir)
+  (if-let [why (:refused (run-stamps dir opts))] (refuse why)
+  (let [{:keys [names]} (run-stamps dir opts)
         results (vec (for [n names] (srfi-result dir n)))
         file "test/scheme/check-srfi-linux-amd64.edn"
         rec (recorded-results file) recording? (boolean (some #{"--record"} opts))]
