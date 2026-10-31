@@ -69,14 +69,40 @@
   "WORK/results.tsv and WORK/summary.edn from the files' levels against the known file (NAME -> class): a non-pass is known
   when its name is listed, else failing; and against the recorded results (test/cpp/lower-results.edn's :files, NAME ->
   [status outcome]; review 007's finding 2): a file recorded :pass that does not pass is a regression, failing whatever
-  else holds (an oracle rejection or a known class included). A list with no file is refused."
-  ([^String work ^String known-path] (judge work known-path nil))
-  ([^String work ^String known-path ^String results-path]
+  else holds (an oracle rejection or a known class included). A list with no file is refused.
+
+  A run of a recorded list is held to the whole list (review 018's R4): the record's summaries (:samples, :libstdcxx-every-15th:
+  top-level keys whose map has :files) each own the names of :files that start with one of its `:prefixes` (`{:samples
+  [\"samples/\" \"runtime/\"]}`; the one summary without prefixes owns the rest). RECORDED is a summary's key (\"samples\"): the run
+  is that list; \"none\": no list; else (nil, \"auto\") the list whose names more than half the run holds. A run of a recorded list
+  fails when a name recorded for it is missing from the run, or when the run's count is not the summary's :files."
+  ([^String work ^String known-path] (judge work known-path nil nil))
+  ([^String work ^String known-path ^String results-path] (judge work known-path results-path nil))
+  ([^String work ^String known-path ^String results-path ^String recorded-mode]
   (let [known (if (.exists (java.io.File. known-path)) (read-string (slurp known-path)) {})
-        recorded (if (and results-path (.exists (java.io.File. results-path))) (:files (read-string (slurp results-path))) {})
+        rec-all (if (and results-path (.exists (java.io.File. results-path))) (read-string (slurp results-path)) {})
+        recorded (:files rec-all {})
+        prefixes (:prefixes rec-all {})
+        summaries (into {} (filter (fn [[k v]] (and (map? v) (number? (:files v)) (not= k :cx6))) rec-all))
+        claimed? (fn [nm] (some (fn [[_ ps]] (some #(str/starts-with? nm %) ps)) prefixes))
+        group-of (fn [k] (set (for [nm (keys recorded)
+                                    :when (if-let [ps (get prefixes k)] (some #(str/starts-with? nm %) ps) (not (claimed? nm)))]
+                                nm)))
         names (for [l (str/split-lines (slurp (str work "/list.tsv"))) :when (seq l)] (first (str/split l #"\t")))
         _ (when (empty? names) (println "lower-check: the list has no file") (System/exit 2))
         rs (mapv #(file-result work %) names)
+        run-names (set names)
+        listed (cond (= recorded-mode "none") nil
+                     (and recorded-mode (not= recorded-mode "auto")) (keyword recorded-mode)
+                     :else (let [best (first (sort-by (comp - second)
+                                                      (for [k (keys summaries)]
+                                                        [k (count (filter run-names (group-of k)))])))]
+                             (when (and best (> (* 2 (second best)) (count (group-of (first best))))) (first best))))
+        _ (when (and listed (not (contains? summaries listed)))
+            (println (str "lower-check: no recorded list " listed)) (System/exit 2))
+        rec-missing (when listed (vec (sort (remove run-names (group-of listed)))))
+        rec-count-bad (when listed (not= (count run-names) (:files (get summaries listed))))
+        recorded-bad (boolean (when listed (or (seq rec-missing) rec-count-bad)))
         regression? (fn [r] (and (= :pass (first (get recorded (:name r)))) (not= :pass (:outcome r))))
         ;; a known file is known only at the level its class names (review 007's finding 8): a refusal's class at the lowering
         ;; with that refusal, the run classes at the run
@@ -94,6 +120,7 @@
         summary {:files (count rs) :pass (cnt :pass) :known (cnt :known) :failing (cnt :failing) :oracle-rejected (cnt :oracle-rejected)
                  :outcomes (by (comp name :outcome)) :forms (by #(or (:rt %) "-")) :objects (by :obj) :lowering (by :lower)
                  :gxx (by :gxx) :regressions (count (filter regression? rs))
+                 :recorded-list (when listed (name listed)) :recorded-missing (count rec-missing)
                  :known-classes (into (sorted-map) (frequencies (keep #(when (= :known (status %)) (name (get known (:name %)))) rs)))}]
     (spit (str work "/results.tsv") (str "name\tstatus\toutcome\tforms\tobject\tlowering\tgcc\trun\tgxx\torig\tlow\tclass\n" (str/join "\n" lines) "\n"))
     (spit (str work "/summary.edn") (str (pr-str summary) "\n"))
@@ -102,7 +129,10 @@
     (doseq [r rs :when (= :failing (status r))]
       (println "  failing:" (:name r) (name (:outcome r)) (:lower r) (if (regression? r) "(recorded :pass)" "")
                (if-let [c (get known (:name r))] (str "(known as " (name c) ")") "")))
-    (when (pos? (:failing summary)) (System/exit 1)))))
+    (when recorded-bad
+      (println (str "lower-check: the run of the recorded list " (name listed) " has " (count run-names) " files, the record " (:files (get summaries listed))
+                    "; " (count rec-missing) " recorded names missing" (when (seq rec-missing) (str ": " (str/join " " (take 8 rec-missing)))))))
+    (when (or recorded-bad (pos? (:failing summary))) (System/exit 1)))))
 
 (defn runtime-judge
   "OUT/results.tsv and OUT/summary.edn of bin/cppi runtime-build: each unit's levels (the oracle's IR, the forms' round trip, the
@@ -134,6 +164,6 @@
   "bin/cppi's judges: judge WORK KNOWN [RESULTS], runtime-judge OUT."
   [verb & args]
   (case verb
-    "judge" (let [[work known results] args] (judge work known results))
+    "judge" (let [[work known results recorded] args] (judge work known results recorded))
     "runtime-judge" (runtime-judge (first args))
     (do (println "cppi check: judge or runtime-judge") (System/exit 2))))
