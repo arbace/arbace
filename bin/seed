@@ -34,7 +34,8 @@
 #                            seed.sha256 and pins, the rest of a stale stage 0 in OUT removed
 #                            (src/, aot/, the logs: re-review 020), checked again after linking (a
 #                            rebuild in FROM meanwhile: the links dropped, exit 1); OUT kept
-#                            already: nothing linked; builds nothing
+#                            already: nothing linked; builds nothing; waits for a build in FROM's
+#                            checkout (its stage 0 lock, at most ARBACE_SEED_LINK_WAIT s)
 #                            (review 001's fixes: bin/gate's stage0 step and bin/lib/host.bash in a
 #                            linked worktree; FROM's rebuild, rm -rf, cannot pull OUT away)
 #        bin/seed --make [ARCHIVE]
@@ -55,6 +56,8 @@
 #   ARBACE_GOROOT     Go's toolchain (default /root/tamago-go, TamaGo's go1.27.1): its VERSION
 #                     and the SHA-256 of its sources (VERSION and src/) must be those pinned in
 #                     seed/goroot.sha256 and named by SEED.edn (SA4)
+#   ARBACE_SEED_LINK_WAIT  --link's longest wait for FROM's checkout's stage 0 build, in seconds
+#                     (default 1200), then the refusal
 # Exit status: 0 when the hash matches (and, for --build, the executables are built; for
 # --verify, the seed printed again is identical and its executable rebuilds itself).
 set -uo pipefail
@@ -187,6 +190,31 @@ case ${1:-} in
     go_check > "$TMPDIR/seed-kept.log" || exit 1
     mkdir -p "$root/.tmp"
     if [ "${SEED_BUILD_LOCKED:-}" != 1 ]; then exec 9> "$root/.tmp/seed-build.lock"; flock 9; fi
+    # re-review 020, finding 2: FROM's checkout's stage 0 build lock too (FROM is CHECKOUT/target/seed and
+    # CHECKOUT/.tmp/seed-build.lock exists: bin/seed --build's and bin/lib/host.bash's there), shared (links
+    # run beside each other, a build there excludes them), so that a link during the main checkout's rebuild
+    # waits for it and links the new stage 0, rather than refusing for a reason that is not the real one
+    # (FROM has no executable or pins yet) or letting bin/gate's stage0 step start a second build at once;
+    # at most ARBACE_SEED_LINK_WAIT seconds (default 1200: a build and its compiled namespaces), then the
+    # refusal names the build. Not when that lock is this checkout's own (held above)
+    fromdir=$from; while [ "$fromdir" != / ] && [ "${fromdir%/}" != "$fromdir" ]; do fromdir=${fromdir%/}; done
+    case $fromdir in
+      */target/seed)
+        fromlock=${fromdir%/target/seed}/.tmp/seed-build.lock
+        if [ -f "$fromlock" ] && ! [ "$fromlock" -ef "$root/.tmp/seed-build.lock" ]; then
+          linkwait=${ARBACE_SEED_LINK_WAIT:-1200}
+          exec 8< "$fromlock"
+          if ! flock -n -s 8; then
+            echo "bin/seed: waiting for ${fromdir%/target/seed}'s stage 0 build (its lock $fromlock; at most $linkwait s)" >&2
+            # (busybox's flock has no -w: polled each second)
+            waited=0
+            until flock -n -s 8; do
+              [ "$waited" -lt "$linkwait" ] || { echo "bin/seed: not linked: ${fromdir%/target/seed} is building its stage 0 (its lock $fromlock held after $linkwait s)"; exit 1; }
+              sleep 1; waited=$((waited + 1))
+            done
+          fi
+        fi ;;
+    esac
     pins=$(seed_go_pins "$goseed" "$archs")
     if seed_kept "$out" > "$TMPDIR/seed-link.why"; then
       echo "bin/seed: stage 0 kept: $out ($archs), its pins this checkout's (nothing linked)"; exit 0
