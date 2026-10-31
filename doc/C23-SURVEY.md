@@ -2882,7 +2882,7 @@ Each with options, the recommended one first; none decided.
 
 Nothing of C7 needed more than the light tier. What C7 adds to C5.7's and C6.7's lists: (1) `bin/ci dg` and the seven run groups as steps of the
 gate (CS135) once the executable has ci and cf2g; (2) the 22 `_BitInt` programs over 128 bits need ci's wide nodes (`w2w`, `i2w`, `wld`, `wbin`),
-a change to `go/arbace/ci` and so a shipped file built only by the next executable; (3) the run groups with `dg-additional-sources` (5 files) as
+a change to `go/arbace/ci` and so a shipped file built only by the next executable; (3) the run groups with `dg-additional-sources` (4 files) as
 multi-file programs once the corpora take them; (4) the `torture` groups of gcc (`gcc.dg/torture`'s `dg-do run` outside the c23 files) are not in CS33.
 
 ### C7.5 Checks and scratch
