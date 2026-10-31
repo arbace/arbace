@@ -3083,3 +3083,9 @@ Scratch in the worktree's `.tmp/`: `c7/` (logs, capped at 1 MB), `ci-dg/`, `ci-c
 
 Rule slips: a `> /dev/null` in one nohup redirect (previous agent); the CS143 families in one commit (they share `pp.ae`, `lex.ae`, `pedantic.ae`) plus a later small commit `7de9cb4f`; CS141 committed by temporarily
 reverting hunks (no stash was used); this follow-up's run waited with a sleep longer than the tool's foreground limit once, which moved it to the background (no effect on results).
+
+### Decided (CS150-CS156; the user, 2026-10-31)
+
+All as recommended: CS150 (a), for the three files only; CS151 (b) until a Unicode names table exists; CS152 (a), family
+by family as CS133; CS153 (a) now, (b) later; CS154 (a); CS155 (a), with C8's gate step (CS135); CS156 (a) in the heavy
+window.
