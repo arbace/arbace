@@ -3250,3 +3250,8 @@ Each with options, the recommended one first; none decided.
 Shipped files changed: none (nothing under `go/`, `overlay/`, `jdk/`).
 Scratch in the worktree's `.tmp/`: `c7/` (logs: `dg160*.log`, `ess160.log`, `final.log`, `final.sh`), `c7s/` (`l4.txt`-`l9.txt`: file lists for `one`), `t/` (probe files), `ci-dg-one/`, `dg-before160.edn` (the record before), `ci-check/`, `repr-c-roundtrip/`.
 Rule slips: none known.
+
+### Decided (CS170-CS174; the user, 2026-10-31)
+
+All as recommended: CS170 (a), for c23-bool-errors-3 only, (b) not now; CS171 (a); CS172 (a), with a dg run; CS173 (a);
+CS174 (a), c23-tag-6 and c23-tag-enum-5, then (b), `constexpr` representability.
