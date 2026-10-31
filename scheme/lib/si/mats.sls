@@ -7,7 +7,8 @@
 ;;;;
 ;;;; (run-mat NAME CLAUSES): CLAUSES is a list of (KIND . THUNK), KIND 'true (the clause must return #t), 'error
 ;;;; (it must raise: its thunk is the clause's datum, evaluated by the evaluator the harness set, as Chez evaluates
-;;;; an error? clause on its own, so a macro that fails to expand raises there) or 'warning (it may return). Returns (STATUS COUNT DETAIL): STATUS pass or fail, COUNT the clauses
+;;;; an error? clause on its own, so a macro that fails to expand raises there) or 'warning (it must raise a &warning
+;;;; condition, as Chez's mat.ss asks; review 009, finding 9: it passed whatever it did). Returns (STATUS COUNT DETAIL): STATUS pass or fail, COUNT the clauses
 ;;;; run, DETAIL the first failing clause "N: why".
 (library (si mats)
   (export run-mat set-evaluator! set-clause-ms! watchdog == fl~= ~= nan pi +pi +pi/2 +pi/4 -pi -pi/2 -pi/4 +e -e)
@@ -84,6 +85,9 @@
                                      (string-append "unbound identifier " (call-with-string (condition-who (cdr r)))))
                                     ((eq? (car r) 'raised) #f)
                                     (else "did not raise")))
+                     ((warning) (cond ((and (eq? (car r) 'raised) (warning? (cdr r))) #f)
+                                      ((eq? (car r) 'raised) (string-append "error: " (condition-text (cdr r))))
+                                      (else "did not warn")))
                      (else #f))))
               (if why
                   (list 'fail n (string-append (number->string n) ": " why))
