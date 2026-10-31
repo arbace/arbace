@@ -92,7 +92,10 @@
 #                                 with gc's flags); a run program's time limit 10 s, its action's
 #                                 -t, or its line in test/goi/timeouts.txt; the results against
 #                                 test/goi/check-linux-amd64.edn: a program passing there and not
-#                                 now fails the check; --record writes it. --essential: the
+#                                 now fails the check, as does a listed program with no result (its
+#                                 job killed) and, in a whole check, a program of the reference
+#                                 this run did not list (its forms gone); --record writes it (not
+#                                 over a program with no result). --essential: the
 #                                 programs of test/goi/essential.txt (GS12, the essential gate's).
 #                                 GR7b: and its errorcheck programs (the corpus linux-errtest:
 #                                 bin/repr-go read --corpus linux-errtest when missing), each
@@ -1027,6 +1030,24 @@ refresh_corpora() {
   fi
 }
 
+# missing_rows LIST RESULTS [REF [ONLY]]: the programs without a row in RESULTS (report 002, finding 3:
+# the regression comparison looked only at the rows there were): each program of LIST ("no result":
+# its job printed no row, killed), and each program of the reference REF (only those that match the
+# regular expression ONLY, as check's --only) that LIST does not name ("missing": a program the list
+# dropped, its forms gone); one line each
+missing_rows() {
+  local list=$1 res=$2 ref=${3:-} only=${4:-}
+  { cut -f1 "$res" | sed 's/^/R\t/'
+    sed 's/^/L\t/' "$list"
+    if [ -n "$ref" ]; then
+      sed -n 's/^ *\["\([^"]*\)" :\([a-z]*\).*/\1\t\2/p' "$ref" \
+        | while IFS=$'\t' read -r x y; do [ -z "$only" ] || printf '%s\n' "$x" | grep -qE "$only" || continue; printf 'F\t%s\t%s\n' "$x" "$y"; done
+    fi; } \
+    | awk -F'\t' '$1 == "R" { r[$2] = 1; next } ($2 in r) || seen[$2]++ { next }
+                  $1 == "L" { print "   no result: " $2 " (its job printed no row)"; next }
+                  { print "   missing: " $2 " (recorded " $3 "): not in this run'"'"'s list (no forms?)" }'
+}
+
 # check [--record] [--jobs N] [--essential] [--only REGEX]: the check (§11): every run program of
 # $GOROOT/test (the corpus linux-test, repr/go's conversion: bin/repr-go read --corpus linux-test,
 # run first when missing) interpreted against gc; results in .tmp/goi-check/results.tsv, against
@@ -1176,15 +1197,16 @@ check() {
   export -f limited limited_cpu ref_commit check_one check_dir check_err check_err_aot action_of action_words gc_ref aot_build aot_dir_root stderr_head gc_env box_run box_input
   export root goroot rexe hexe cforms dforms cwork gcwork empty box bundle aot eforms efull edumps etsv gocmp esyntax eraw
   local t0=$SECONDS
-  xargs -a "$list" -P "$jobs" -I{} bash -c 'case $(action_of "$goroot/test/$1") in errorcheck*) if [ -n "$aot" ]; then check_err_aot "$1"; else check_err "$1"; fi ;; *dir|*"dir "*) dirtest=1 check_dir "$1" ;; *) check_one "$1" ;; esac' _ {} \
-    | LC_ALL=C sort > "$cwork/results.tsv"
+  # a job that dies prints no row: xargs's status is not the check's (missing_rows reports the program)
+  { xargs -a "$list" -P "$jobs" -I{} bash -c 'case $(action_of "$goroot/test/$1") in errorcheck*) if [ -n "$aot" ]; then check_err_aot "$1"; else check_err "$1"; fi ;; *dir|*"dir "*) dirtest=1 check_dir "$1" ;; *) check_one "$1" ;; esac' _ {} \
+      || echo "goi check: xargs exited $?" >&2; } | LC_ALL=C sort > "$cwork/results.tsv"
   # a program that timed out among the others runs again alone: under the host's load a program near
   # the limit (bug358, nosplit) times out at 16 at a time and passes by itself; its second result stands
   awk -F'\t' '$2=="error" && $3 ~ /^timeout/ { print $1 }' "$cwork/results.tsv" > "$cwork/timeouts.txt"
   if [ -s "$cwork/timeouts.txt" ] && [ -z "$bundle" ]; then
     echo "== goi check: $(wc -l < "$cwork/timeouts.txt") timed out, run again one at a time" >&2
     xargs -a "$cwork/timeouts.txt" -P 1 -I{} bash -c 'case $(action_of "$goroot/test/$1") in errorcheck*) if [ -n "$aot" ]; then check_err_aot "$1"; else check_err "$1"; fi ;; *dir|*"dir "*) dirtest=1 check_dir "$1" ;; *) check_one "$1" ;; esac' _ {} \
-      > "$cwork/retried.tsv"
+      > "$cwork/retried.tsv" || echo "goi check: xargs exited $? (the retry)" >&2
     awk -F'\t' 'NR==FNR { r[$1] = $0; next } ($1 in r) { print r[$1]; next } { print }' "$cwork/retried.tsv" "$cwork/results.tsv" \
       | LC_ALL=C sort > "$cwork/results.r" && mv "$cwork/results.r" "$cwork/results.tsv"
   fi
@@ -1211,6 +1233,13 @@ check() {
   kn=$(awk -F'\t' '$2=="known"' "$cwork/results.tsv" | wc -l); skip=$(awk -F'\t' '$2=="skip"' "$cwork/results.tsv" | wc -l)
   echo "goi check${aot:+ --aot}: $total programs: $pass pass, $fail fail, $err error, $uns unsupported, $kn known, $skip skipped; $((SECONDS - t0)) s"
   { awk -F'\t' '$2=="fail" || $2=="error"' "$cwork/results.tsv" | head -30 | sed 's/^/   /'; } || true
+  # the programs with no row (report 002, finding 3): a listed program whose job printed none, and in
+  # a whole check (not --essential, not the box's) a program of the reference this run did not list
+  # (its forms gone: the list takes the programs repr/go converted); neither recorded over
+  local missing
+  missing=$(missing_rows "$list" "$cwork/results.tsv" "$( [ -n "$record$essential$box" ] || [ ! -f "$ref" ] || echo "$ref")" "$only")
+  [ -z "$missing" ] || echo "$missing"
+  if [ -n "$record" ] && [ -n "$missing" ]; then echo "   not recorded: programs without a result" >&2; return 1; fi
   if [ -n "$record" ]; then
     { if [ -n "$box" ]; then
         echo ";; goi's check in the box (doc/go/GOI-SPEC.md \"As built: GR7a\", GS13): the programs of test/goi/box.txt"
@@ -1243,8 +1272,8 @@ check() {
   sed -n 's/^ *\["\([^"]*\)" :pass.*/\1/p' "$ref" > "$cwork/ref-pass.txt"
   regress=$(awk -F'\t' 'NR==FNR { p[$1] = 1; next }
                         ($1 in p) && $2 != "pass" { print "   regression: " $1 ": " $2 " " $3 }' "$cwork/ref-pass.txt" "$cwork/results.tsv")
-  if [ -n "$regress" ]; then
-    echo "$regress"
+  if [ -n "$regress" ] || [ -n "$missing" ]; then
+    [ -z "$regress" ] || echo "$regress"
     return 1
   fi
   echo "   no regression against $(basename "$ref")"
