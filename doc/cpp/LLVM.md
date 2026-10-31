@@ -192,9 +192,9 @@ Every file of `bin/cppi lower-check` that does not pass is in a class of `test/c
 | class | what |
 |---|---|
 | `library-throw` | the program catches an exception libstdc++.so throws (§8) |
-| `libtestc++` | the test needs libstdc++'s testsuite library (`testsuite_hooks.cc` and the like): the original does not link |
-| `exception-ptr` | `std::exception_ptr`, `std::current_exception`, `std::rethrow_exception`, nested exceptions (CX7) |
-| `long-double` | ... (none while gcc is the judge) |
-| `coroutine`, `filter`, `inline-asm`, `vector`, `intrinsic`, ... | the lowering refuses the construct |
+| `callback-throw` | a virtual function of the program throws while libstdc++'s code calls it: the flag returns into native frames (§8) |
+| `exception-ptr` | `std::exception_ptr`, `std::current_exception`, `std::rethrow_exception`, `std::make_exception_ptr` (CX7) |
+| a refusal's class (`filter`, `inline-asm`, `vector`, `intrinsic`, `coroutine`, `datalayout`, ...) | the lowering refuses the construct (none in the checked lists) |
 
+The testsuite's own library (`util/`'s `testsuite_*.cc`) and `libstdc++exp` are linked natively with both programs, as libstdc++ is, so they are no class.
 The numbers are in the survey's "As built: CX6 (write-ahead)".
