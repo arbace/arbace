@@ -39,6 +39,11 @@ cmd_suite_corpus() {
     }' "$OI_DIR/corpus.tsv" "$S/actions.tsv" > "$out.ts"
   # the packages' programs (test/ocaml/opam-programs.tsv: PKG ID FLAGS ARGS UNITS), a package whose sources are not fetched out
   : > "$out.opam"
+  # every package of the set extracted, else the 33 opam rows would leave the corpus unseen (review 008's finding 4)
+  local pkg
+  for pkg in $(grep -v '^#' "$root/test/ocaml/opam-programs.tsv" | cut -f1 | LC_ALL=C sort -u); do
+    [ -f "$OPAM/$pkg/.extracted" ] || die "suite corpus: the opam package $pkg is not fetched out (bin/repr-ocaml corpus fetch)"
+  done
   if [ -d "$OPAM" ]; then
     grep -v '^#' "$root/test/ocaml/opam-programs.tsv" | awk -F'\t' 'NF >= 5 && $2 != "class" { printf "opam/%s/%s\trun\t%s\t\t%s\t\t%s\t%s\n", $1, $2, $3, $4, "'"$OPAM"'/" $1, $5 }
       NF >= 3 && $2 == "class" { printf "opam/%s/%s\tclass\t%s\n", $1, $3, $4 }' >> "$out.opam"
