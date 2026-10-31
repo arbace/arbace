@@ -1385,10 +1385,22 @@
     "__builtin_constant_p" (res t-int :v (if (some? (:v (first ras))) 1 0))
     "__builtin_choose_expr" (let [c (:v (first ras))] (if (and (number? c) (not (zero? c))) (second ras) (nth ras 2 (res t-int))))
     "__builtin_expect" (res t-long :v (:v (first ras)))
+    ;; CS174 (b): a signaling NaN of the call's type (its kind in :snan: a conversion to another type is not exact), and a
+    ;; complex number made of two real parts (kept in :parts)
+    ("__builtin_nans" "__builtin_nansf" "__builtin_nansl")
+    (let [k (case b "__builtin_nans" :double "__builtin_nansf" :float :ldouble)]
+      (res {:k k} :snan k))
+    "__builtin_complex" (when (= 2 (count ras))
+                          (res {:k :complex :of (unq (:t (first ras)))} :parts (vec ras)))
     ("__builtin_inf" "__builtin_huge_val") (res t-double :v Double/POSITIVE_INFINITY)
     ("__builtin_inff" "__builtin_huge_valf") (res t-float :v Double/POSITIVE_INFINITY)
     ("__builtin_infl" "__builtin_huge_vall") (res {:k :ldouble} :v Double/POSITIVE_INFINITY)
-    nil))
+    ;; CS174 (b): decimal infinities and NaNs of the call's type (`__builtin_infd32 ()`, `__builtin_nansd64 ("")`)
+    (when-let [[_ w bits] (re-matches #"__builtin_(inf|nan|nans)d(32|64|128)" b)]
+      (let [k (case bits "32" :dec32 "64" :dec64 :dec128)]
+        (res {:k k} :snan (when (= w "nans") k))))))
+
+(def ^:private dec-kinds #{:dec32 :dec64 :dec128 :dec64x})
 
 (defn- lit-form
   "(lit T v): a constant of type T."
@@ -1400,6 +1412,8 @@
       (and (seq? v) (= 'imaginary (first v))) (res t)
       (instance? Character v) (res t :v (wrap (long (int (char v))) t))
       (integer? v) (res t :v (if (int-type? t) (wrap v t) v))
+      ;; CS174 (b): a decimal constant keeps its digits and exponent (the quantum), :v is its double
+      (and (instance? java.math.BigDecimal v) (dec-kinds (:k (unq t)))) (res t :v (.doubleValue ^java.math.BigDecimal v) :dec v)
       (number? v) (res t :v (if (#{:float :float32} (:k (unq t))) (.doubleValue (Float/valueOf (.floatValue (Double/valueOf (double v))))) (double v)))
       :else (res t))))
 
@@ -1586,8 +1600,9 @@
                 (when-not (or (arith-type? t) (#{:invalid :vector} (:k t)) (and (= h '+) (ptr-type? t)))
                   (err! (str "wrong type argument to unary " h)))
                 (emit! (case h
-                         + (res pt :v (:v r))
-                         - (res pt :v (when (some? (:v r)) (if (int-type? pt) (wrap (-' (:v r)) pt) (- (double (:v r))))))
+                         + (res pt :v (:v r) :dec (:dec r))
+                         - (res pt :v (when (some? (:v r)) (if (int-type? pt) (wrap (-' (:v r)) pt) (- (double (:v r)))))
+                                :dec (when-let [d (:dec r)] (.negate ^java.math.BigDecimal d)))
                          (res pt))))
               (loop [acc (ex (first args)) xs (next args)]
                 (if xs
@@ -1657,10 +1672,14 @@
                                _ (when (and (empty? els) (= :array (:k t)) (nil? (:n t)) (not (:vla t)))
                                    (err! "array of unknown size with empty initializer"))
                                t (if (and (= :array (:k t)) (nil? (:n t)))
-                                   (assoc t :n (init-count (:of t) (apply list 'init els))) t)]
-                           (check-init (apply list 'init els))
+                                   (assoc t :n (init-count (:of t) (apply list 'init els))) t)
+                               ;; CS174 (b): a single plain element's result, for the constexpr check
+                               one (when (and (= 1 (count els)) (not (keyword? (first els)))
+                                              (not (and (seq? (first els)) ('#{init at c/embed} (first (first els))))))
+                                     (first els))
+                               r1 (if one (check-init one) (do (check-init (apply list 'init els)) nil))]
                            (when (vla? t) (err! "compound literal has variable size"))
-                           (when (:constexpr (meta f)) (constexpr-check! t (first els) nil))
+                           (when (:constexpr (meta f)) (constexpr-check! t (first els) r1))
                            (emit! (res t :lv true :av (when (and (scalar-type? (unq t)) (= 1 (count els)))
                                                         (let [e (first els)] (cond (integer? e) e (instance? Character e) (long (int (char e))) :else nil))))))
             stmt-expr (let [r (with-scope (check-block-items args))]
@@ -1816,12 +1835,65 @@
       (string? init) [(bs [init]) false]
       :else nil)))
 
+(def ^:private dec-limits
+  ;; [digits of the coefficient, least and greatest exponent of the quantum] of the interchange formats
+  {:dec32 [7 -101 90] :dec64 [16 -398 369] :dec128 [34 -6176 6111] :dec64x [34 -6176 6111]})
+
+(defn- dec-fits?
+  "Whether the decimal `x` is a value of the format `k`. A constant of a decimal type (`strict`) must keep its coefficient and
+  quantum; a value of another kind may be written with the trailing zeros stripped and its exponent raised to the format's."
+  [^java.math.BigDecimal x k strict]
+  (let [[p qmin qmax] (dec-limits k)
+        zero (zero? (.signum x))
+        x (if (or strict zero) x (.stripTrailingZeros x))
+        digits (if zero 1 (count (str (.abs (.unscaledValue x)))))
+        q (if (and zero (not strict)) 0 (- (.scale x)))
+        [digits q] (if (and (not strict) (not zero) (> q qmax)) [(+ digits (- q qmax)) qmax] [digits q])]
+    (and (<= digits p) (<= qmin q qmax))))
+
+(defn- constexpr-float-bad
+  "CS174 (b), C23 6.7.2: the message when the constexpr floating (or decimal) object of element kind `ek` cannot hold the
+  initializer's part `pr` exactly, else nil: a binary object given a decimal value, a signaling NaN of another type, a value
+  float cannot hold, an integer beyond the significand, a decimal beyond the format's digits and quantum range."
+  [pr ek dec-obj]
+  (let [v (:v pr) pt (unq (:t pr)) src-dec (dec-kinds (:k pt))
+        nr "'constexpr' initializer not representable in type of object"]
+    (cond
+      (and src-dec (not dec-obj)) "'constexpr' initializer for a binary floating-point type is of decimal type"
+      (:snan pr) (when (not= (:snan pr) ek) nr)
+      (and dec-obj (:dec pr)) (when-not (dec-fits? (:dec pr) ek true) nr)
+      (nil? v) nil
+      (and dec-obj (integer? v) (int-type? pt)) (when-not (dec-fits? (java.math.BigDecimal. (biginteger v)) ek false) nr)
+      (and dec-obj (instance? Double v) (float-type? pt) (not src-dec))
+      (let [d (double v)] (when (and (not (Double/isNaN d)) (not (Double/isInfinite d)) (not (dec-fits? (java.math.BigDecimal. d) ek false))) nr))
+      dec-obj nil
+      (and (integer? v) (int-type? pt))
+      (when (case ek
+              (:float :float32) (not= 0 (.compareTo (java.math.BigDecimal. (double (.floatValue ^Number v))) (java.math.BigDecimal. (biginteger v))))
+              (:double :float64) (not= 0 (.compareTo (java.math.BigDecimal. (.doubleValue ^Number v)) (java.math.BigDecimal. (biginteger v))))
+              :ldouble (> (.bitLength (biginteger (if (neg? v) (- v) v))) 64)
+              false)
+        nr)
+      (and (instance? Double v) (float-type? pt))
+      (let [d (double v)]
+        (when (and (not (Double/isNaN d)) (not (Double/isInfinite d))
+                   (case ek (:float :float32) (not= d (double (.floatValue (Double/valueOf d)))) false))
+          nr))
+      :else nil)))
+
 (defn- constexpr-check!
   "C23 6.7.2's constraints on a constexpr object's initializer that gcc diagnoses: a floating or complex value for an
   integer object, and a string whose elements the element type cannot represent (a plain literal's are `char`s)."
   [t init r]
   (let [ut (unq t)]
     (cond
+      ;; CS174 (b), C23 6.7.2: a floating or complex object's initializer is exactly representable in its type: a signaling NaN
+      ;; of another type, a value float cannot hold, an integer beyond the significand
+      (and r (or (float-type? ut) (complex-type? ut)))
+      (let [ek (:k (unq (if (complex-type? ut) (:of ut) ut)))
+            dec-obj (dec-kinds ek)
+            msg (some (fn [pr] (constexpr-float-bad pr ek dec-obj)) (or (:parts r) [r]))]
+        (when msg (err! msg)))
       (and (= :array (:k ut)) (int-type? (unq (:of ut))))
       (when-let [[bs u8] (string-bytes (if (and (seq? init) (= 'init (first init)) (= 2 (count init))) (second init) init))]
         (let [et (:k (unq (:of ut)))
