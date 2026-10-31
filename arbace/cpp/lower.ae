@@ -72,19 +72,12 @@
 (defn- label-kw [x] (keyword (str "b$" (if x (esc (lname-str x)) "entry"))))
 
 (def ^:private runtime-renames
-  {"__cxa_allocate_exception" "cx$allocate_exception" "__cxa_free_exception" "cx$free_exception" "__cxa_throw" "cx$throw"
-   "__cxa_begin_catch" "cx$begin_catch" "__cxa_end_catch" "cx$end_catch" "__cxa_rethrow" "cx$rethrow"
-   "__cxa_get_exception_ptr" "cx$get_exception_ptr" "__cxa_bad_cast" "cx$bad_cast" "__cxa_bad_typeid" "cx$bad_typeid"
-   "__cxa_throw_bad_array_new_length" "cx$throw_bad_array_new_length" "_ZSt19uncaught_exceptionsv" "cx$uncaught_exceptions"
-   "_ZSt18uncaught_exceptionv" "cx$uncaught_exception" "__cxa_uncaught_exceptions" "cx$uncaught_exceptions"
-   "__cxa_current_exception_type" "cx$current_exception_type" "main" "cx$main"})
+  "The names the lowering gives its own: main (called by a C main that checks for an uncaught exception, §8). Since CX7 the
+  Itanium ABI's entry points are libsupc++'s own, lowered with libstdc++ (bin/cppi runtime-build); only the unwinder and the
+  personality routine are the hand-written pending-flag layer, arbace/cpp/rt/eh.c.ae (CP86 (c))."
+  {"main" "cx$main"})
 
-(def ^:private refused-externals
-  {"__cxa_init_primary_exception" :exception-ptr "_ZSt17current_exceptionv" :exception-ptr
-   "_ZSt17rethrow_exceptionNSt15__exception_ptr13exception_ptrE" :exception-ptr "__cxa_call_unexpected" :filter
-   "_ZNSt15__exception_ptr13exception_ptr9_M_addrefEv" :exception-ptr "_ZNSt15__exception_ptr13exception_ptr10_M_releaseEv" :exception-ptr
-   "__cxa_current_primary_exception" :exception-ptr "__cxa_rethrow_primary_exception" :exception-ptr
-   "_ZSt17__throw_bad_allocv" nil})
+(def ^:private refused-externals {})
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Types and layout (the IR's data layout: e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128)
@@ -264,12 +257,16 @@
             ct ({"float" 'float "double" 'double "x86_fp80" 'long-double} tn)
             _ (when-not ct (refuse :float-type "the type " tn))
             body (cond
-                   (Double/isNaN d) (list 'bit-cast 'double (list 'lit 'unsigned-long (bigint (BigInteger. (Long/toUnsignedString (Double/doubleToRawLongBits d))))))
+                   ;; a NaN by its payload (a constant expression, also in static initializers)
+                   (Double/isNaN d) (let [bits (Double/doubleToRawLongBits d)
+                                          payload (bit-and bits 0x7ffffffffffff)
+                                          quiet (bit-test bits 51)]
+                                      (list (if quiet '__builtin_nan '__builtin_nans) (str "0x" (Long/toHexString payload))))
                    (Double/isInfinite ad) '(__builtin_inf)
                    (= ct 'double) ad
                    :else (list 'lit ct ad))
             body (if (and (Double/isNaN d) (not= ct 'double)) (list 'conv ct body) body)]
-        (if (and neg (not (Double/isNaN d))) (list '- body) body)))))
+        (if (or (and neg (not (Double/isNaN d))) (and (Double/isNaN d) (neg? (Double/doubleToRawLongBits d)))) (list '- body) body)))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Values
@@ -423,7 +420,11 @@
       bitcast (cond
                 (and (ptr-type? t1) (ptr-type? t2)) e
                 (= t1 t2) e
-                :else (list 'bit-cast c2 e))
+                ;; gcc's C has no __builtin_bit_cast: the bytes copied through a compound literal of the source type
+                :else (list 'stmt-expr (list 'let [(list 'c/var (with-meta 'cx$u {:tag c2}))]
+                                             (list '__builtin_memcpy (list 'addr 'cx$u) (list 'addr (list 'compound-lit (ctype t1) e))
+                                                   (first (size-align t2)))
+                                             'cx$u)))
       (refuse :op "the cast " op))))
 
 (defn const-expr
@@ -547,7 +548,7 @@
       (re-matches #"llvm\.memcpy(\.inline)?\..*" nm) [(list '__builtin_memcpy (a 0) (a 1) (uval (a 2) (w 2)))]
       (re-matches #"llvm\.memmove\..*" nm) [(list '__builtin_memmove (a 0) (a 1) (uval (a 2) (w 2)))]
       (re-matches #"llvm\.memset(\.inline)?\..*" nm) [(list '__builtin_memset (a 0) (list 'conv 'int (a 1)) (uval (a 2) (w 2)))]
-      (re-matches #"llvm\.(lifetime|dbg|assume|experimental\.noalias|sideeffect|donothing|prefetch|var\.annotation|invariant\.end|codeview)\b.*" nm) []
+      (re-matches #"llvm\.(lifetime|dbg|assume|experimental\.noalias|sideeffect|donothing|prefetch|var\.annotation|invariant\.end|codeview|x86\.sse2\.pause)\b.*" nm) []
       (re-matches #"llvm\.(expect|expect\.with\.probability)\..*" nm) (set-res (a 0))
       (re-matches #"llvm\.(threadlocal\.address|launder\.invariant\.group|strip\.invariant\.group|invariant\.start)\..*" nm) (set-res (a (if (str/includes? nm "invariant.start") 1 0)))
       (re-matches #"llvm\.is\.constant\..*" nm) (set-res (int-lit 0 1))
@@ -570,6 +571,17 @@
             v #(if sgn (sval (a %) wd) (uval (a %) wd))]
         (set-res (list '? (list (if (= op "max") '> '<) (v 0) (v 1)) (a 0) (a 1))))
       (re-matches #"llvm\.abs\..*" nm) (let [wd (w 0)] (set-res (mask (list '? (list '< (sval (a 0) wd) 0) (list '- (uval (a 0) wd)) (uval (a 0) wd)) wd)))
+      (re-matches #"llvm\.(ctpop|ctlz|cttz)\.i128" nm)
+      (let [x (uval (a 0) 128)
+            hi (list 'conv 'unsigned-long-long (list '>> x 64)) lo (list 'conv 'unsigned-long-long x)
+            e (case (nth parts 1)
+                "ctpop" (list '+ (list '__builtin_popcountll hi) (list '__builtin_popcountll lo))
+                "ctlz" (list '? (list '!= hi 0) (list '__builtin_clzll hi) (list '? (list '!= lo 0) (list '+ 64 (list '__builtin_clzll lo)) 128))
+                "cttz" (list '? (list '!= lo 0) (list '__builtin_ctzll lo) (list '? (list '!= hi 0) (list '+ 64 (list '__builtin_ctzll hi)) 128)))]
+        (set-res (list 'conv 'unsigned-__int128 e)))
+      (re-matches #"llvm\.frexp\.(f32|f64|f80)\.i32" nm)
+      (let [sfx ({"f32" "f" "f64" "" "f80" "l"} (nth parts 2))]
+        [(list 'set! (list '.-f0 res) (list (symbol (str "__builtin_frexp" sfx)) (a 0) (list 'conv '(* int) (list 'addr (list '.-f1 res)))))])
       (re-matches #"llvm\.ctpop\..*" nm) (let [wd (w 0)] (when (> wd 64) (refuse :intrinsic nm)) (set-res (list '__builtin_popcountll (list 'conv 'unsigned-long-long (a 0)))))
       (re-matches #"llvm\.ctlz\..*" nm) (let [wd (w 0)] (when (> wd 64) (refuse :intrinsic nm))
                                           (set-res (list '? (list '== (a 0) 0) wd (list '- (list '__builtin_clzll (list 'conv 'unsigned-long-long (a 0))) (- 64 wd)))))
@@ -614,11 +626,16 @@
         rt (if (and (seq? ty) (= (first ty) 'fn)) (second ty) ty)
         variadic (and (seq? ty) (= (first ty) 'fn) (some #{'&} (nth ty 2)))
         gname (when (or (and (symbol? callee) (= (namespace callee) "g")) (and (seq? callee) (= (first callee) 'g))) (gname-str callee))
-        _ (when (and (seq? callee) (= (first callee) 'asm)) (refuse :inline-asm "inline assembly"))
+        empty-asm (and (seq? callee) (= (first callee) 'asm) (= "" (second callee)) (= rt 'void))
+        ;; an empty template with no outputs is a compiler barrier (`asm volatile("" : : "rm"(x))`): nothing at -O0
+        _ (when (and (seq? callee) (= (first callee) 'asm) (not empty-asm)) (refuse :inline-asm "inline assembly"))
         _ (when-let [c (and gname (get refused-externals gname))] (refuse c "calls " gname))
         cres (when (and res (not= rt 'void)) res)]
-    (if (and gname (str/starts-with? gname "llvm."))
+    (cond
+      empty-asm []
+      (and gname (str/starts-with? gname "llvm."))
       (intrinsic gname args cres rt)
+      :else
       (let [info (when gname (get *globals* gname))
             arg-exprs (vec (for [a args]
                              (let [bt (param-attr a :byval) v (typed-value [(first a) (peek a)])]
@@ -657,7 +674,13 @@
                       (case (first c)
                         catch (let [[_ ct cv] c]
                                 (list '? (list 'cx$catches (if (= cv 'null) '(conv (* void) 0) (value cv ct))) (int-lit (typeid cv) 32) acc))
-                        filter (refuse :filter "a filter clause")))
+                        ;; a filter (a dynamic exception specification): the exception is rejected (selector -1, the
+                        ;; IR's ehspec.unexpected path) unless one of the listed types catches it
+                        filter (let [[_ ft fv] c
+                                     tis (when (and (seq? fv) (= (first fv) 'array)) (map (fn [[et ev]] (value ev et)) (rest fv)))]
+                                 (if (empty? tis)
+                                   (int-lit -1 32)
+                                   (list '? (apply list 'or (map #(list 'cx$catches %) tis)) acc (int-lit -1 32))))))
                     (int-lit (if cleanup 0 nomatch) 32)
                     (reverse clauses))]
     [(list 'set! (list '.-f0 res) '(cx$exception))
@@ -892,9 +915,12 @@
                       [(list 'c/var (with-meta (:c info) (if (nil? init) (assoc (dissoc m :static) :extern true) (dissoc m :c/decl-attrs))))
                        (when (some? init) (list 'c/var (with-meta (:c info) m) (cinit init t)))]))
             gvars (vec (for [[d df] gvars]
-                         (if (and df (not (:static (meta (second d)))))
+                         (cond
+                           (and df (not (:static (meta (second d)))))
                            [(list 'c/var (vary-meta (second d) assoc :extern true)) df]
-                           [d df])))
+                           ;; a static thread-local has no tentative definition in C: its definition alone
+                           (and df (:thread_local (meta (second d)))) [nil df]
+                           :else [d df])))
             defs (vec (for [[f info] fns :when (and (= (first f) 'llvm/define) (not= :available_externally (:linkage (apply hash-map (drop 4 f)))))]
                         (let [o (apply hash-map (drop 4 f))
                               prio (get ctor-fns (gname-str (second f)))
@@ -982,6 +1008,32 @@
     (doseq [r rs :when (= :failing (status r))] (println "  failing:" (:name r) (name (:outcome r)) (:lower r)))
     (when (pos? (:failing summary)) (System/exit 1))))
 
+(defn runtime-judge
+  "OUT/results.tsv and OUT/summary.edn of bin/cppi runtime-build: each unit's levels (the oracle's IR, the forms' round trip, the
+  objects, the lowering, gcc); every unit of test/cpp/runtime/units.edn is to pass them all."
+  [^String out]
+  (let [units (for [l (str/split-lines (slurp (str out "/units.tsv"))) :when (seq l)] (first (str/split l #"\t")))
+        rs (vec (for [u units]
+                  (let [d (str out "/units/" u "/") st #(slurp? (str d %))
+                        ir (st "ir.status") rt (some-> (st "rt.status") (str/split #"\t") first)
+                        obj (or (st "object") "none") refused (st "lower.refused") gcc (st "gcc.status")
+                        outcome (cond (not= ir "0") :ir (not= rt "ok") :forms (not= obj "same") :object refused :lowering
+                                      (not= gcc "0") :gcc :else :pass)]
+                    {:unit u :outcome outcome :ir (or ir "-") :forms (or rt "-") :object obj
+                     :lower (if refused (first (str/split refused #"\t")) "ok") :gcc (or gcc "-")})))
+        by (fn [f] (into (sorted-map) (frequencies (map f rs))))
+        summary {:units (count rs) :pass (count (filter #(= :pass (:outcome %)) rs)) :outcomes (by (comp name :outcome))
+                 :objects (by :object) :lowering (by :lower)
+                 :libsupc++ (count (filter #(str/starts-with? (:unit %) "libsupc++/") rs))
+                 :libstdc++exp (count (filter #(str/starts-with? (:unit %) "exp/") rs))}]
+    (spit (str out "/results.tsv") (str "unit\toutcome\tir\tforms\tobject\tlowering\tgcc\n"
+                                        (str/join "\n" (for [r rs] (str/join "\t" [(:unit r) (name (:outcome r)) (:ir r) (:forms r) (:object r) (:lower r) (:gcc r)])))
+                                        "\n"))
+    (spit (str out "/summary.edn") (str (pr-str summary) "\n"))
+    (println (str "runtime-build: " (count rs) " units, " (:pass summary) " pass"))
+    (doseq [r rs :when (not= :pass (:outcome r))] (println "  failing:" (:unit r) (name (:outcome r)) (:lower r)))
+    (when (not= (:pass summary) (count rs)) (System/exit 1))))
+
 ;; ---------------------------------------------------------------------------------------------
 ;; bin/cppi lower
 
@@ -1041,4 +1093,5 @@
                    (.shutdown pool)
                    (println (count futs) "lowered or refused"))
     "judge" (let [[work known] args] (judge work known))
+    "runtime-judge" (runtime-judge (first args))
     (do (println "cppi: lower, lower-rt, lower-list or judge") (System/exit 2))))
