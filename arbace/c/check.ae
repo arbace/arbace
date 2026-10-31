@@ -620,7 +620,9 @@
         v (when (integer? v) (long v))]
     (when (< (std-num) 123) (pedwarn! (str "ISO C does not support '" (when unsigned "unsigned ") "_BitInt(" v ")' before C23")))
     (cond
-      (nil? v) 32
+      (nil? v) (do (when (and (symbol? a) (let [e (lookup (name a))] (and e (= :obj (:kind e)) (nil? (:v e)))))
+                     (err! "'_BitInt' argument is not an integer constant expression"))
+                   32)
       (<= v 0) (do (err! (str "'_BitInt' argument '" v "' is not a positive integer constant expression")) 32)
       (and (not unsigned) (< v 2)) (do (err! "'signed _BitInt' argument must be at least 2") 32)
       (> v 65535) (do (err! (str "'_BitInt' argument '" v "' is larger than 'BITINT_MAXWIDTH' '65535'")) 32)
@@ -698,6 +700,14 @@
         (do (err! (str "unknown type form " (pr-str h))) t-invalid)))
     :else t-invalid))
 
+(defn- exi
+  "An expression that must be an integer constant expression's operand (a width, an alignment, an enumerator's value,
+  a case label, a designator): nullptr is not one."
+  [x]
+  (let [r (ex x)]
+    (when (= :nullptr (:k (unq (:t r)))) (err! "not an integer constant expression"))
+    r))
+
 (defn- member-forms
   "A member list's members: [{:name :t :bits :align}] (anonymous members with :name nil)."
   [ms]
@@ -706,7 +716,7 @@
            (cond
              (and (seq? m) (= 'c/static-assert (first m))) (do ((resolve 'arbace.c.check/check-decl) m) [])
              (and (seq? m) (= 'c/bits (first m)))
-             (let [[_ t w] m tt (parse-type t) wv (:v (ex w))]
+             (let [[_ t w] m tt (parse-type t) wv (:v (exi w))]
                [{:name nil :t tt :bits (long (or wv 0))}])
              (and (seq? m) (= 'c/group (first m)))
              (let [bt (parse-type (second m))]
@@ -717,10 +727,10 @@
              (let [mm (meta m)
                    _ (attr-args! mm)
                    t (vectorize (parse-type (:tag mm)) mm)
-                   bits (when (contains? mm :c/bits) (:v (ex (:c/bits mm))))
+                   bits (when (contains? mm :c/bits) (:v (exi (:c/bits mm))))
                    as (attrs-of mm :c/attrs :c/after-attrs :c/decl-attrs)
                    al (some #(when (= "aligned" (first %)) (aligned-value (second %))) as)
-                   al (if-let [x (:c/alignas mm)] (max (long (or al 1)) (long (or (:v (ex x)) 1))) al)
+                   al (if-let [x (:c/alignas mm)] (max (long (or al 1)) (long (or (:v (exi x)) 1))) al)
                    al (if-let [x (:c/alignas-type mm)] (max (long (or al 1)) (align-of (parse-type x))) al)]
                [(cond-> {:name (ident m) :t t}
                   (some? bits) (assoc :bits (long bits))
@@ -783,7 +793,7 @@
             _ (when redef (.put redef :redefining true))
             ms (member-forms body)
             _ (attr-args! fm)
-            _ (when (contains? fm :c/alignas) (ex (:c/alignas fm)))
+            _ (when (contains? fm :c/alignas) (exi (:c/alignas fm)))
             as (apply attrs-of fm all-attr-keys)
             packed (some #(= "packed" (first %)) as)
             al (some #(when (= "aligned" (first %)) (aligned-value (second %))) as)]
@@ -859,7 +869,7 @@
           (if es
             (let [e (first es)
                   [nm vf] (if (vector? e) [(ident (first e)) (second e)] [(ident e) nil])
-                  rv (when vf (ex vf))
+                  rv (when vf (exi vf))
                   v (if vf (when (integer? (:v rv)) (:v rv)) nxt)
                   _ (when (and under (some? v) (integer? v) (not= :bitint (:k (unq under))) (not= (wrap v under) v))
                       (err! (if vf "enumerator value outside the range of the underlying type" "overflow in enumeration values")))
@@ -1137,7 +1147,7 @@
    "__builtin_islessgreater" t-int "__builtin_va_start" t-void "__builtin_va_end" t-void "__builtin_c23_va_start" t-void
    "__builtin_prefetch" t-void "__builtin_assume_aligned" (ptr t-void) "__builtin_strlen" t-ulong "__builtin_huge_valf" t-float})
 
-(declare ptr-conv! constexpr-check! attr-decl-check!)
+(declare ptr-conv! constexpr-check! attr-decl-check! exi)
 
 (defn- call
   "A call's result: the callee's result, its arguments checked."
@@ -1197,6 +1207,15 @@
       (integer? v) (res t :v (if (int-type? t) (wrap v t) v))
       (number? v) (res t :v (if (#{:float :float32} (:k (unq t))) (.doubleValue (Float/valueOf (.floatValue (Double/valueOf (double v))))) (double v)))
       :else (res t))))
+
+(defn- incomplete-type?
+  "An array of unknown size (not variable-length) or a record not yet complete."
+  [t]
+  (let [t (unq t)]
+    (case (:k t)
+      :array (or (and (nil? (:n t)) (not (:vla t))) (incomplete-type? (:of t)))
+      (:struct :union) (not (.get ^HashMap (:rec t) :complete))
+      false)))
 
 (defn- sizeof-res [t]
   (let [s (size-of (unq t))]
@@ -1282,7 +1301,7 @@
         (keyword? e) nil
         (and (seq? e) (= 'at (first e))) (doseq [d (rest e)]
                                             (cond (keyword? d) nil
-                                                  (vector? d) (doseq [x d] (ex x))
+                                                  (vector? d) (doseq [x d] (exi x))
                                                   :else (ex d)))
         :else (check-init e)))
     (and (seq? init) (= 'c/embed (first init))) nil
@@ -1405,13 +1424,18 @@
                      (emit! (if (vla? (:t r)) (res t-ulong) (sizeof-res (:t r)))))
             sizeof-type (let [t (parse-type (first args))] (emit! (if (vla? t) (res t-ulong) (sizeof-res t))))
             alignof (let [r (ex (first args))] (emit! (res t-ulong :v (or (:malign r) (align-of (unq (:t r)))))))
-            alignof-type (let [t (parse-type (first args))] (emit! (res t-ulong :v (align-of (unq t)))))
+            alignof-type (let [t (parse-type (first args))]
+                           (when (incomplete-type? t) (err! "invalid application of 'alignof' to incomplete type"))
+                           (emit! (res t-ulong :v (align-of (unq t)))))
             generic (emit! (generic-select f))
             compound-lit (let [[tf & els] args
                                t (parse-type tf)
+                               _ (when (and (empty? els) (= :array (:k t)) (nil? (:n t)) (not (:vla t)))
+                                   (err! "array of unknown size with empty initializer"))
                                t (if (and (= :array (:k t)) (nil? (:n t)))
                                    (assoc t :n (init-count (:of t) (apply list 'init els))) t)]
                            (check-init (apply list 'init els))
+                           (when (vla? t) (err! "compound literal has variable size"))
                            (when (:constexpr (meta f)) (constexpr-check! t (first els) nil))
                            (emit! (res t :lv true :av (when (and (scalar-type? (unq t)) (= 1 (count els)))
                                                         (let [e (first els)] (cond (integer? e) e (instance? Character e) (long (int (char e))) :else nil))))))
@@ -1515,6 +1539,8 @@
 (defn- declare-object!
   "A declared object or function: entered in its scope, its d annotation written."
   [^String n t m kind init param]
+  (when (or (= n "_Bool") (and (= n "bool") (c23?))) (err! (str "'" n "' cannot be used here")))
+  (when (:c/bad-specs m) (err! "two or more data types in declaration specifiers"))
   (let [t (if param (case (:k (unq t)) :array (ptr (:of (unq t))) :fn (ptr t) t) t) ; a parameter's adjusted type (6.7.7.4)
         fn? (= :fn (:k (unq t)))
         lk (linkage-of n m fn? param)
@@ -1558,6 +1584,7 @@
       (and (seq? init) (= 'byte-string (first init))) [(bs (rest init)) false]
       (and (seq? init) (= 'lit (first init)) (= 'unsigned-char (second init))
            (seq? (nth init 2 nil)) (= 'byte-string (first (nth init 2)))) [(bs (rest (nth init 2))) true]
+      (and (seq? init) (= 'lit (first init)) (= 'unsigned-char (second init)) (string? (nth init 2 nil))) [(bs [(nth init 2)]) true]
       (string? init) [(bs [init]) false]
       :else nil)))
 
@@ -1593,8 +1620,18 @@
         (feat! :cc-auto)
         (record! nm (declare-object! n t m :obj nil false)))
       (let [t (vectorize (parse-type (or (:tag m) 'int)) m)
-            t (if (contains? m :c/alignas) (do (ex (:c/alignas m)) t) t)
+            t (if (contains? m :c/alignas) (do (exi (:c/alignas m)) t) t)
             _ (when-let [at (:c/alignas-type m)] (parse-type at))
+            empty-init (and (seq? init) (= '(init) init))
+            ;; C23: `{}` gives an array of unknown size none (gcc: the zero-size diagnostic), a variable-length array only `{}`
+            _ (when (and has-init (= :array (:k (unq t))) (nil? (:n (unq t))) (not (:vla (unq t))) empty-init)
+                (err! "zero or negative size array"))
+            _ (when (and has-init (vla? t) (not empty-init))
+                (err! "variable-sized object may not be initialized except with an empty initializer"))
+            ;; an array of wide characters is not initialized by a narrow (or u8) string literal
+            _ (when (and has-init (= :array (:k (unq t))) (int-type? (unq (:of (unq t)))) (> (long (size-of (unq (:of (unq t))))) 1))
+                (when (string-bytes (if (and (seq? init) (= 'init (first init)) (= 2 (count init))) (second init) init))
+                  (err! "array initialized from a string literal with type array of unsigned char")))
             t (complete-array t (when has-init init))
             ;; the object is in scope in its own initializer (6.2.1)
             e (record! nm (declare-object! n t m (if (= :fn (:k (unq t))) :fn :obj) nil false))]
@@ -1673,6 +1710,8 @@
         t (if-let [al (some #(when (= "aligned" (first %)) (aligned-value (second %))) (attrs-of m :c/attrs :c/after-attrs :c/decl-attrs))]
             (assoc t :talign al) t)]
     (attr-args! m)
+    (when (:c/bad-specs m) (err! "two or more data types in declaration specifiers"))
+    (when (or (= n "_Bool") (and (= n "bool") (c23?))) (err! (str "'" n "' cannot be defined via 'typedef'")))
     (let [prev (.get ^HashMap (:ord (top-scope)) n)]
       (when (and prev (= :typedef (:kind prev)) (not (type-eq (:t prev) t)))
         (err! (str "conflicting types for '" n "'"))))
@@ -1693,9 +1732,10 @@
       c/group (let [[_ tf & ds] f
                     bt (parse-type tf)]
                 (binding [*base* bt] (doseq [d ds] (check-decl d))))
-      c/static-assert (let [[_ e] f r (ex e)]
-                        (if (and (integer? (:v r)) (zero? (:v r))) (err! "static assertion failed")))
-      c/declare-specs (do (when (and (:c/implicit-int (meta f)) (seq (:c/decl-attrs (meta f))))
+      c/static-assert (let [[_ e] f r (exi e)]
+                        (if (and (integer? (:v r)) (zero? (:v r)) (not= :nullptr (:k (unq (:t r))))) (err! "static assertion failed")))
+      c/declare-specs (do (when (:c/bad-specs (meta f)) (err! "two or more data types in declaration specifiers"))
+                          (when (and (:c/implicit-int (meta f)) (seq (:c/decl-attrs (meta f))))
                             ;; `[[...]];` at file scope reads as attribute-only specifiers
                             (attr-decl-check! (cons 'c/attr-decl (:c/decl-attrs (meta f))) nil :top))
                           (parse-type (second f)))
@@ -1781,7 +1821,7 @@
                   (with-scope (check-block-items body)))
                 nil)
           case (let [[a b] args
-                     ra (ex a) rb (when b (ex b))]
+                     ra (exi a) rb (when b (exi b))]
                  ;; a duplicate case value, ranges overlapping (gcc converts the labels to the controlling type)
                  (when-let [{:keys [t seen]} *switch*]
                    (let [iv (fn [r] (let [v (:v r)] (when (integer? v) (wrap v t))))

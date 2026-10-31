@@ -1346,7 +1346,7 @@
           dirs (if (.startsWith nm "/")
                  [""]
                  (concat (when quoted [(dir-of cur)]) (:embed-dirs (.-cfg c))))
-          ps (embed-params params)
+          ps (embed-params c params)
           known #{"limit" "prefix" "suffix" "if_empty" "gnu::offset" "gnu::base64"}
           ;; gcc: gnu::base64 only on "." and without limit or gnu::offset
           b64 (when (and quoted (= nm ".") (contains? ps "gnu::base64")
@@ -1371,17 +1371,23 @@
         (cond (nil? bs) 0 (zero? (alength ^bytes bs)) 2 :else 1)
         bs))))
 
+(def ^:private embed-known #{"limit" "prefix" "suffix" "if_empty" "gnu::offset" "gnu::base64"})
+
 (defn- embed-params
-  "Arbace: an #embed's parameters: {name tokens}, the tokens of prefix(...), suffix(...), if_empty(...)."
-  [toks]
+  "Arbace: an #embed's parameters: {name tokens}, the tokens of prefix(...), suffix(...), if_empty(...); the
+  diagnostics gcc gives (a name expected, a repeated parameter, a missing parenthesis) to `c`."
+  [^Cpp c toks]
   (loop [ts (vec (remove #(= (ch %) \space) toks)) acc {}]
     (if (empty? ts)
       acc
       (let [^Tok t (ts 0)
+            _ (when-not (= (ch t) :IDENTIFIER) (eh c (str (pos-str t) ": expected parameter name")))
             [nm ts] (if (and (= (ch t) :IDENTIFIER) (> (count ts) 3) (= (ch (ts 1)) \:) (= (ch (ts 2)) \:))
                       [(str (src t) "::" (src (ts 3))) (subvec ts 4)]
                       [(src t) (subvec ts 1)])
-            nm (str/join "::" (map #(str/replace % #"^__(.*)__$" "$1") (str/split nm #"::")))]
+            nm (str/join "::" (map #(str/replace % #"^__(.*)__$" "$1") (str/split nm #"::")))
+            _ (when (contains? acc nm) (eh c (str (pos-str t) ": duplicate embed parameter '" nm "'")))
+            _ (when (and (= (ch t) :IDENTIFIER) (contains? embed-known nm) (not (and (seq ts) (= (ch (ts 0)) \()))) (eh c (str (pos-str t) ": expected '('")))]
         (if (and (seq ts) (= (ch (ts 0)) \())
           (let [[body rest] (loop [i 1 level 0]
                               (cond
@@ -1403,7 +1409,7 @@
         s (vec w)
         raw (if (seq s) (include-arg s) "")
         n-arg (if (and (seq s) (= (ch (s 0)) \<)) (inc (count (take-while #(not= (ch %) \>) s))) 1)
-        params (embed-params (drop n-arg s))
+        params (embed-params c (drop n-arg s))
         bs (when (seq raw) (embed-resource c (if (seq s) (s 0) verb) raw (drop n-arg s) false))
         nl (peek line)]
     (record! c {:directive "embed" :pos (lex/tok-position (line 0)) :off (.-po ^Tok (line 0)) :file (some-> ^CFile (.-pf ^Tok (line 0)) .-name) :text (line-text line) :resource raw})
