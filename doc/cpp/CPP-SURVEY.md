@@ -1972,3 +1972,7 @@ On the branch `cpp-cx7` after the decisions, in the light tier (stage 0 by `ARBA
   (c) more threads and iterations in the sample (4 threads, 20,000 throws), still seconds. *Recommended: (c)* now, (b) only if a regression slips past it.
 - **Rule slips.** The first `runtime-build` of this task was started in a command without `ARBACE_HOST_EXE` exported (the export was dropped from one call), so
   `bin/seed --build` began in the worktree; stopped within a minute by its task, and `target/seed` (partial) deleted. `python3` was used for multi-line edits.
+
+### Decided (CP110; the user, 2026-10-31)
+
+As recommended: (c) now (4 threads, 20,000 throws each), (b) only if a regression slips past it.
