@@ -2353,3 +2353,63 @@ None (no file of `go/arbace/scm` or `scheme/psyntax`). Not shipped (test and dat
 ### Decided (SC150-SC153; the user, 2026-10-31)
 
 All as recommended: SC150; SC151; SC152, until a program needs the libraries; SC153, as built.
+
+## As built: SC150, SC151 (2026-10-31)
+
+Branch `scheme-sm1`, on `67c99c98`. The items of "Decided (SC150-SC153; the user, 2026-10-31)", built in the light tier (no gate, no build of Arbace's executables or javac's
+tool, no lock; stage 0 as the tools' host). Done: SC150, SC151. Not done: SC152 (until a program needs the libraries), SC153 (as built, nothing to do). The shipped Go did not change.
+
+### What was built
+
+- **SC150, si's own `(chibi optional)`** (`scheme/lib/chibi/optional.sls`, R6RS): `optional.scm`'s definitions (comments left out) with `let-optionals*` written as Chibi's built-in one
+  behaves: a bare variable beside the `(var default)` pairs takes the next element (`(car tmp)`), an identifier at the tail is the rest list (copied), and `list-copy` is a local
+  definition (`(rnrs)` has none). The vendored `optional.sld`, `optional.scm` and `optional-test.sld` stay byte for byte. Library path: `bin/si chibi-tests` puts a directory holding only
+  this file (`.tmp/si/chibi-tests/lib`, copied from `scheme/lib`) before `scheme/vendor/chibi`, so that the vendored `(chibi test)` and the others still come before `scheme/lib`'s; a program on
+  `--lib scheme/lib` alone takes si's own `(chibi optional)` (nothing vendored is on that path). `LICENSE.md`'s Chibi section names the file.
+  **`chibi optional-test`: 24 of 25 on si (12 before), Chibi 25.** The 13 failures were `let-optionals*`'s ("not an identifier"); 12 of them pass now. The one left is the test file's own:
+  its inline `test-error` (the `cond-expand` else branch for Schemes other than Chibi) takes one expression and `define-opt`'s test calls it with two ("invalid syntax" at expansion). The
+  class `chibi-optional-fallback` is narrowed to exactly that ("fails chibi-tests/optional test N: invalid syntax"), `:decided "SC150"`.
+- **SC151, `bin/si ecraven --chibi [--record]`** (`ecraven-chibi` in `arbace.scheme.corpora`, which shares `cmd-ecraven-ref` with `--chez`; `CHIBI` names another executable): the host's `chibi-scheme`
+  (0.12.0) runs each of the 58 programs as ecraven's Makefile builds them (source plus `common.scm`, the repetition count 1, `inputs/NAME.input` on stdin; `(this-scheme-implementation-name)` is
+  "chibi"), 60 s a program (`SI_TIMEOUT`), recorded in `test/scheme/ref-ecraven-chibi.edn` (verdict and seconds of the CSVLINE, as Chez's `ref-ecraven-chez.edn`). `bin/si ecraven` carries it in each
+  result of `check-ecraven-linux-amd64.edn` as `:chibi {:verdict :seconds}` beside `:chez`. New `--judge`: no run, the last run's outputs judged and recorded again (used here: see below).
+  **Chibi: 48 correct, 0 incorrect, 10 timeouts (60 s), 0 errors**; the timeouts are Chibi being an interpreter (`cpstak`, `ctak`, `gcbench`, `graphs`, `lattice`, `paraffins`, `earley`, `ntakl`, `read0`, `takl`), not wrong answers.
+  si against Chibi (si's last full run: 54 right, 4 in classes): 48 both pass; 6 pass on si and time out on Chibi (`cpstak`, `ctak`, `gcbench`, `graphs`, `lattice`, `paraffins`); 4 fail on si (`earley`, `ntakl`, `read0`, `takl`: `ecraven-reader-corners`
+  1, `ecraven-too-slow` 3) and time out on Chibi; none passes on Chibi and fails on si. Of the 48 both pass, si is faster on 17 and slower on 31 (median 2.0 times Chibi's seconds on those 31, from times that are noisy on a loaded host).
+
+### The checks, numbers (before: SC140-SC143 batch; after: this batch)
+
+- **Chibi's R7RS suite on si: 1,225 tests, 1,216 pass, 9 fail** (as before); against Chez 1,205 / 11 / 0 / 9 and against Chibi 1,209 / 7 / 9 / 0 (as before). 9 in `r7rs-float-printing`, 0 in no class.
+- **Chibi's own tests of the libraries**: diff 9 of 9, term ansi 234 of 234, **optional 24 of 25 (12)**; si 267 of 268 (255), Chibi 268 of 268. 1 non-pass item (13), 0 in no class.
+- **ecraven**: no new si run (the host loaded; the shipped Go did not change): `bin/si ecraven --judge --record` judged the outputs of the last full run in the worktree again; verdicts identical to the recorded ones (54 of 58, 4 in classes, 0 failing), the seconds are that run's, so
+  the recorded `:seconds` of `check-ecraven-linux-amd64.edn` changed (a later run than the earlier record, the load differing) and `:chibi` was added.
+- **No regression**: `bin/si srfi` 11 of 11; `bin/si unit` ok; `make check-makefile` rc 0. The mats load nothing that changed (not rerun: Chez's mats on si as in SC140-SC143).
+
+### Proposals (SC160 onward)
+
+- **SC160 Chibi's `test-error` in `optional-test`.** The last non-pass of the library's tests is the test file's inline macro.
+  - Options: (a) leave it classed; (b) run it with si's `(chibi test)` (vendored, whose `test-error` takes Chibi's two forms) by evaluating the `chibi` branch's import in `split-run.sps` for this file; (c) a second class entry per kind.
+  - *Recommended: (a)*: (b) tests si's idea of Chibi's branch, not the file as it is written for other Schemes.
+- **SC161 ecraven's times on si and Chibi on a quiet host.** The seconds on both sides are from a loaded host (the Chibi run alone, si's from an earlier run).
+  - Options: (a) as recorded; (b) rerun si's full ecraven once the host is idle, recording both at once; (c) also a third column, Chibi at the repetition counts of ecraven's own `run.sh`.
+  - *Recommended: (b)*: it makes the ratio above mean something; (c) only if a comparison with published numbers is wanted.
+- **SC162 `ecraven-too-slow` against Chibi.** Three of the four si failures also time out on Chibi at 60 s.
+  - Options: (a) as classed; (b) record Chibi's times at a 600 s limit for these ten, to see whether they finish; (c) lower `SI_TIMEOUT` expectations and class by Chibi's behaviour.
+  - *Recommended: (b)*: one run of ten programs gives the reference a real time; (a) otherwise.
+
+### Rule slips
+
+- A `/dev/null` in a throwaway `sed` command (a no-op) and a `<(...)` in a `diff` that compared the recorded ecraven results; neither left anything. A second monitor on the waiting loop started and stopped by task id; one `noop`/placeholder monitor ended by itself.
+- `bin/si ecraven --judge-only` (not an option) was taken as a benchmark name: it ran nothing and judged the existing outputs, without recording.
+
+### Checks not run
+
+The essential gate; ecraven on si; `bin/si check`, `check --aot`, `test`, `check-suite`, `fixpoint`, `boot --check` (nothing they load changed); Chez's mats; `bin/si r7rs --chez`, `--chibi-test` (unchanged); arm64 and the box.
+
+### Shipped files changed
+
+None. Not shipped: `scheme/lib/chibi/optional.sls`, `LICENSE.md`, `bin/si`, `arbace/scheme/corpora.ae`, `test/scheme/**` (`ref-ecraven-chibi.edn`, `check-ecraven-linux-amd64.edn`, `check-chibi-tests-linux-amd64.edn`, `divergences-corpora.edn`).
+
+### Scratch cited
+
+`.tmp/sc/` in this worktree: `C1.log`, `C2.log` (chibi-tests), `E1.log` (the Chibi ecraven run), `R*.log` (the reruns), `ecr.bak` (the earlier ecraven record); `.tmp/si/{ecraven-chibi,chibi-tests}`.

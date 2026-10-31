@@ -465,28 +465,33 @@ case $cmd in
     mkdir -p "$light_dir"; : > "$light_dir/empty.in"
     [ -x "$si_light" ] || light
     d=$light_dir/chibi-tests; rm -rf "$d"; mkdir -p "$d"
+    # SC150: si's own (chibi optional) (scheme/lib/chibi/optional.sls: the vendored one's else branch rejects a bare variable beside
+    # the (var default) pairs) goes first on the library path, alone in its directory so that the vendored (chibi test) etc. still come before scheme/lib's
+    mkdir -p "$d/lib/chibi"; cp "$root/scheme/lib/chibi/optional.sls" "$d/lib/chibi/optional.sls"
     for lib in "diff:chibi diff-test:chibi/diff-test.sld" "optional:chibi optional-test:chibi/optional-test.sld" "term-ansi:chibi term ansi-test:chibi/term/ansi-test.sld"; do
       n=${lib%%:*}; rest=${lib#*:}; name=${rest%%:*}; sld=${rest#*:}
       printf '(import (scheme base) (%s)) (run-tests)\n' "$name" > "$d/$n.scm"
       (cd "$d" && timeout "${SI_TIMEOUT:-300}" env ANSI_ESCAPES_ENABLED=1 "${CHIBI:-chibi-scheme}" "$n.scm" < "$light_dir/empty.in" > "$n.chibi.out" 2> "$n.chibi.err"; echo $? > "$n.chibi.rc") || true
       (cd "$d" && timeout "${SI_TIMEOUT:-300}" env ANSI_ESCAPES_ENABLED=1 GOMEMLIMIT=${SI_GOMEMLIMIT:-1000MiB} GOMAXPROCS=${GOMAXPROCS:-2} \
-         "$si_light" --pp "$light_dir/psyntax.pp.ss" --lib "$root/scheme/vendor/chibi" --lib "$root/scheme/lib" --r7rs "$root/test/scheme/chibi/split-run.sps" "$root/scheme/vendor/chibi/$sld" < "$light_dir/empty.in" > "$n.si.out" 2> "$n.si.err"; echo $? > "$n.si.rc") || true
+         "$si_light" --pp "$light_dir/psyntax.pp.ss" --lib "$d/lib" --lib "$root/scheme/vendor/chibi" --lib "$root/scheme/lib" --r7rs "$root/test/scheme/chibi/split-run.sps" "$root/scheme/vendor/chibi/$sld" < "$light_dir/empty.in" > "$n.si.out" 2> "$n.si.err"; echo $? > "$n.si.rc") || true
     done
     arbace_tool -m arbace.scheme.corpora chibi-tests "$d" ${rec[@]+"${rec[@]}"} ;;
   ecraven)
-    # bin/si ecraven [--count N] [--record] [NAME...]: ecraven's r7rs-benchmarks run on si in R7RS mode (their own): each benchmark's
+    # bin/si ecraven [--count N] [--chez|--chibi] [--judge] [--record] [NAME...]: ecraven's r7rs-benchmarks run on si in R7RS mode (their own): each benchmark's
     # source with common.scm appended (as ecraven's Makefile does) and its inputs/NAME.input on stdin with the repetition
     # count replaced by N (default 1); a benchmark checks its own result (the CSVLINE with a time, or INCORRECT);
     # SI_TIMEOUT seconds a benchmark (default 60). Judged by test/scheme/divergences-corpora.edn;
-    # --record: test/scheme/check-ecraven-linux-amd64.edn
+    # --record: test/scheme/check-ecraven-linux-amd64.edn; --chez, --chibi (SC151): the reference run instead (Chez 10.3.0 through the libraries' Chez variants,
+    # Chibi 0.12.0's chibi-scheme), --record: test/scheme/ref-ecraven-{chez,chibi}.edn;
+    # --judge: no run, the last run's outputs judged again (against a reference recorded since)
     mkdir -p "$light_dir"; : > "$light_dir/empty.in"
-    count=1; rec=(); names=(); impl=si
-    while [ $# -gt 0 ]; do case $1 in --count) count=$2; shift 2 ;; --record) rec=(--record); shift ;; --chez) impl=chez; shift ;; *) names+=("$1"); shift ;; esac; done
+    count=1; rec=(); names=(); impl=si; judge=
+    while [ $# -gt 0 ]; do case $1 in --count) count=$2; shift 2 ;; --record) rec=(--record); shift ;; --chez) impl=chez; shift ;; --chibi) impl=chibi; shift ;; --judge) judge=1; shift ;; *) names+=("$1"); shift ;; esac; done
     "$root/bin/repr-scheme" corpus fetch ecraven-r7rs > "$light_dir/fetch.log"
     corpora=${ARBACE_SCHEME_CORPORA:-$root/.tmp/scheme/corpora}; ec=$corpora/ecraven-r7rs
-    if [ $impl = chez ]; then d=$light_dir/ecraven-chez; chez_libdir; else [ -x "$si_light" ] || light; d=$light_dir/ecraven; fi
+    if [ $impl = chez ]; then d=$light_dir/ecraven-chez; chez_libdir; elif [ $impl = chibi ]; then d=$light_dir/ecraven-chibi; else [ -x "$si_light" ] || light; d=$light_dir/ecraven; fi
     mkdir -p "$d" "$ec/outputs"   # slatex writes outputs/z0.scm
-    if [ ${#names[@]} -eq 0 ]; then rm -rf "$d"; mkdir -p "$d"; for f in "$ec"/inputs/*.input; do names+=("$(basename "$f" .input)"); done; fi
+    if [ -n "$judge" ]; then names=(); elif [ ${#names[@]} -eq 0 ]; then rm -rf "$d"; mkdir -p "$d"; for f in "$ec"/inputs/*.input; do names+=("$(basename "$f" .input)"); done; fi
     for n in "${names[@]}"; do
       [ -f "$ec/src/$n.scm" ] || { echo "no benchmark $n" >&2; continue; }
       # Chez reads a program in R6RS's mode: #!chezscheme takes its own lexical syntax, --program the R7RS program's scope
@@ -494,7 +499,10 @@ case $cmd in
       # the input: the file with its first number (the count) replaced
       awk -v c="$count" 'BEGIN{done=0} { if (!done && match($0, /^[ \t]*[0-9]+/)) { sub(/^[ \t]*[0-9]+/, c); done=1 } print }' "$ec/inputs/$n.input" > "$d/$n.in"
       s=$(date +%s)
-      if [ $impl = chez ]; then
+      if [ $impl = chibi ]; then
+        # SC151: Chibi 0.12.0 (CHIBI, the host's chibi-scheme) runs the same program file; the program's own imports are (scheme ...) libraries
+        (cd "$ec" && timeout "${SI_TIMEOUT:-60}" "${CHIBI:-chibi-scheme}" "$d/$n.sps" < "$d/$n.in" > "$d/$n.out" 2> "$d/$n.err"; echo $? > "$d/$n.rc") || true
+      elif [ $impl = chez ]; then
         (cd "$ec" && timeout "${SI_TIMEOUT:-60}" "$CHEZ" --libdirs "$chez_lib" --program "$d/$n.sps" < "$d/$n.in" > "$d/$n.out" 2> "$d/$n.err"; echo $? > "$d/$n.rc") || true
       else
         (cd "$ec" && timeout "${SI_TIMEOUT:-60}" env GOMEMLIMIT=${SI_GOMEMLIMIT:-1500MiB} GOMAXPROCS=${GOMAXPROCS:-2} \
@@ -503,6 +511,7 @@ case $cmd in
       echo "$n: rc $(cat "$d/$n.rc") $(( $(date +%s) - s )) s: $(grep -h 'CSVLINE' "$d/$n.out" | head -1)"
     done
     if [ $impl = chez ]; then arbace_tool -m arbace.scheme.corpora ecraven-chez "$d" ${rec[@]+"${rec[@]}"}
+    elif [ $impl = chibi ]; then arbace_tool -m arbace.scheme.corpora ecraven-chibi "$d" ${rec[@]+"${rec[@]}"}
     elif [ -z "${ARBACE_ECRAVEN_NOJUDGE:-}" ]; then arbace_tool -m arbace.scheme.corpora ecraven "$d" ${rec[@]+"${rec[@]}"}; fi ;;
   mats)
     # bin/si mats [--record] [FILE...]: Chez's mats (the corpus chez-mats) on si: each (mat NAME e ...) of a .ms file
