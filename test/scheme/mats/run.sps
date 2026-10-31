@@ -98,7 +98,8 @@
   (let ((v (get-environment-variable "SI_MAT_MS"))) (or (and v (string->number v)) 20000)))
 (set-clause-ms! mat-ms)
 
-(define verbose (and (get-environment-variable "SI_MAT_VERBOSE") #t))
+;; SC140 (b): SI_MAT_VERBOSE set to anything but "" and "0" prints each failing clause, with R7RS's write (labels a cycle)
+(define verbose (let ((v (get-environment-variable "SI_MAT_VERBOSE"))) (and v (not (string=? v "")) (not (string=? v "0")))))
 (define (message-of e)
   (if (and (condition? e) (message-condition? e) (string=? (condition-message e) "variable ~s is not bound")
            (irritants-condition? e) (pair? (condition-irritants e)) (symbol? (car (condition-irritants e))))
@@ -173,7 +174,7 @@
                  ((pass) (loop (cdr cs) (+ k 1) (+ p 1) f n fail notrun))
                  ((notrun) (loop (cdr cs) (+ k 1) p f (+ n 1) fail (or notrun (caddr r))))
                  (else
-                  (when verbose (display "CLAUSEFAIL ") (write name) (display " ") (display k) (display " ") (write (car cs)) (newline) (line))
+                  (when verbose (display "CLAUSEFAIL ") (write name) (display " ") (display k) (display " ") (r7rs-write (car cs) (current-output-port)) (newline) (line))
                   (let ((d (caddr r)))   ; "1: why" -> "K: why"
                     (loop (cdr cs) (+ k 1) p (+ f 1) n
                           (or fail (cons k (string-append (number->string k) (substring d 1 (string-length d)))))
