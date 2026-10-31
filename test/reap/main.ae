@@ -6,10 +6,18 @@
   first whose :match finds \"RESULT REASON\" (test/goi/divergences.edn's format), and the matrix
   prints pass / by design / deferred per cell. A non-pass no class takes, a class's :kind neither
   :design nor :deferred (nor mapped by the cell's :kind-map), or a reference missing fails the
-  verb; a cell none of whose checks is recorded yet prints \"no check yet\" and does not.
+  verb; a cell none of whose checks is recorded yet prints \"no check yet\" and does not. The
+  matrix itself is a record, test/reap/matrix.edn (report 021's finding 1: a judge that passed
+  everything raised the matrix, and the classes alone could not tell): each cell's counts and each
+  source's passes, non-passes and class counts; any difference from it fails the verb until
+  --record writes it, so that every change of a check's record shows as a change of the matrix.
+  A source's cases are checked against the tests it must have (:ref, :same-cases).
 
   -main [--entries]          the matrix, each cell's sources and classes (--entries: every
-                             non-pass under its class), the classes awaiting the user's decision
+                             non-pass under its class), the classes awaiting the user's decision,
+                             against test/reap/matrix.edn
+  -main --record [--entries] the same, test/reap/matrix.edn written from it when nothing else
+                             fails (the differences it records printed)
   -main --suite RESULTS      the Clojure suite's results RESULTS (bin/clojure-tests' RUN/results.edn,
                              or its reference) judged per test against the Clojure classes
                              (bin/clojure-tests --divergences)
@@ -147,7 +155,7 @@
 
 (defmethod read-source :results [src]
   (let [rows (read-edn (:file src))]
-    {:pass (count (filter #(= :pass (second %)) rows))
+    {:pass (count (filter #(= :pass (second %)) rows)) :ids (mapv first rows)
      :entries (vec (for [[id r why] rows :when (not= :pass r)] (entry id r why)))}))
 
 (defmethod read-source :jforms-excluded [src]
@@ -161,7 +169,7 @@
 
 (defmethod read-source :java-check [src]
   (let [rows (read-edn (:file src))]
-    {:pass (count (filter #(= :pass (nth % 2)) rows))
+    {:pass (count (filter #(= :pass (nth % 2)) rows)) :ids (mapv first rows)
      :entries (vec (for [[id _ r why] rows :when (not= :pass r)] (assoc (entry id r why) :level (:level src))))}))
 
 (defmethod read-source :roundtrip [src]
@@ -184,6 +192,41 @@
 (defmethod read-source :text-known [src]
   {:pass nil :entries (vec (for [[p why] (sort-by key (read-edn (:file src)))] (entry p :known (str "text: " why))))
    :detail "the known file only: the level's passing files are not recorded"})
+
+;; the cases a source must have (report 021's finding 1: a shrunk record is a valid record)
+
+(def ^:private ref-ids
+  (memoize
+   (fn [f diagnostics?]
+     ;; java.check/report's expected: the tests the JDK passes, the golden-diagnostics tests at the
+     ;; level diagnostics, the others at the other levels
+     (set (for [t (read-edn f) :when (= :pass (:jdk t))
+                :when (= diagnostics? (= :compile-fail-ref (:category t)))]
+            (:id t))))))
+
+(defn- case-problems
+  "A source's cases (its rows' ids) against those it must have: a :java-check source's against
+  :ref's tests of its :level (test/java/ref-jdk26.edn), a :results source's against the programs
+  of :same-cases (goi's AOT level against its eval level's); an id recorded twice is a problem too."
+  [src r]
+  (when-let [ids (:ids r)]
+    (let [want (cond (:ref src) (ref-ids (:ref src) (= :diagnostics (:level src)))
+                     (:same-cases src) (set (map first (read-edn (:same-cases src)))))
+          have (set ids)
+          some-of (fn [xs] (str (str/join " " (take 5 xs)) (when (> (count xs) 5) " ...")))]
+      (concat
+       (for [[id k] (sort-by key (frequencies ids)) :when (> k 1)]
+         (str (:name src) ": " id " recorded " k " times in " (:file src)))
+       (when want
+         (let [miss (sort (remove have want))
+               extra (sort (remove want have))]
+           (concat
+            (when (seq miss)
+              [(str (:name src) ": " (count miss) " cases of " (or (:ref src) (:same-cases src))
+                    " not in " (:file src) ": " (some-of miss))])
+            (when (seq extra)
+              [(str (:name src) ": " (count extra) " cases of " (:file src) " not in "
+                    (or (:ref src) (:same-cases src)) ": " (some-of extra))]))))))))
 
 ;; the classes
 
@@ -219,6 +262,7 @@
         (merge src r
                {:present true :classes-file cf :entries (vec es)
                 :problems (vec (concat
+                                (case-problems src r)
                                 (for [e es :when (nil? (:class e))]
                                   (str (:name src) ": " (:id e) " in no class of " cf ": " (name (:result e)) " " (:reason e)))
                                 (for [c (distinct (keep :class es)) :when (nil? (kind-of cell c))]
@@ -274,11 +318,87 @@
     (doseq [l (:languages spec)]
       (println (str "| " (nm l) " | " (str/join " | " (for [v (:levels spec)] (cell-text (get cells [l v])))) " |")))))
 
-(defn- run [spec entries?]
+;; the matrix as a record (report 021's finding 1): test/reap/matrix.edn
+
+(def ^:private matrix-file "test/reap/matrix.edn")
+
+(defn- source-record [s]
+  (if-not (:present s)
+    {:name (:name s) :absent true}
+    {:name (:name s) :pass (:pass s) :not (reduce + (map :n (:entries s)))
+     :classes (vec (sort-by (comp str first)
+                            (for [[c xs] (group-by :class (:entries s)) :when c]
+                              [(:id c) (reduce + (map :n xs))])))}))
+
+(defn- cell-record [k c]
+  {:cell k :checked (:checked c) :pass (:pass c) :design (:design c) :deferred (:deferred c)
+   :pending (:pending c) :sources (mapv source-record (:sources c))})
+
+(defn- matrix-text [records]
+  (str ";; The REAP matrix as bin/reap computes it from the checks' records (report 021's finding 1):\n"
+       ";; per cell its pass / by design / deferred (and pending), per source its passes (nil: the\n"
+       ";; check records only its non-passes), non-passes and their classes. bin/reap fails on any\n"
+       ";; difference from it; bin/reap --record writes it. Read with the Clojure reader.\n"
+       "[\n"
+       (str/join "\n"
+                 (for [r records]
+                   (str " {:cell " (pr-str (:cell r)) " :checked " (pr-str (:checked r))
+                        " :pass " (:pass r) " :design " (:design r) " :deferred " (:deferred r)
+                        " :pending " (:pending r) "\n  :sources\n  ["
+                        (str/join "\n   "
+                                  (for [s (:sources r)]
+                                    (if (:absent s)
+                                      (str "{:name " (pr-str (:name s)) " :absent true}")
+                                      (str "{:name " (pr-str (:name s)) " :pass " (pr-str (:pass s))
+                                           " :not " (:not s) "\n    :classes " (pr-str (:classes s)) "}"))))
+                        "]}")))
+       "\n]\n"))
+
+(defn- matrix-diffs
+  "The differences between the matrix computed, RECORDS, and test/reap/matrix.edn."
+  [records nm]
+  (if-not (exists? matrix-file)
+    [(str "no " matrix-file " (bin/reap --record writes it)")]
+    (let [old (into {} (for [r (read-edn matrix-file)] [(:cell r) r]))
+          cname (fn [k] (str (nm (first k)) " " (nm (second k))))
+          diff (fn [what f a b] (when (not= a b) [(str what ": " (name f) " " (pr-str a) ", recorded " (pr-str b))]))]
+      (concat
+       (for [k (keys old) :when (not (some #(= k (:cell %)) records))]
+         (str (pr-str k) ": recorded, not a cell of test/reap/cells.edn"))
+       (mapcat
+        (fn [r]
+          (let [o (old (:cell r)) cn (cname (:cell r))]
+            (if-not o
+              [(str cn ": not recorded")]
+              (concat
+               (mapcat #(diff cn % (get r %) (get o %)) [:checked :pass :design :deferred :pending])
+               (let [os (into {} (for [s (:sources o)] [(:name s) s]))]
+                 (concat
+                  (for [s (:sources o) :when (not (some #(= (:name s) (:name %)) (:sources r)))]
+                    (str cn ", " (:name s) ": recorded, not a source of the cell"))
+                  (mapcat
+                   (fn [s]
+                     (let [x (os (:name s)) sn (str cn ", " (:name s))]
+                       (if-not x
+                         [(str sn ": not recorded")]
+                         (concat
+                          (mapcat #(diff sn % (get s %) (get x %)) [:absent :pass :not])
+                          (let [a (into {} (:classes s)) b (into {} (:classes x))]
+                            (for [id (sort-by str (distinct (concat (keys a) (keys b))))
+                                  :when (not= (get a id) (get b id))]
+                              (str sn ": class " (name id) " " (or (get a id) 0) ", recorded " (or (get b id) 0))))))))
+                   (:sources r))))))))
+        records)))))
+
+(defn- run [spec entries? record?]
   (let [cells (into {} (for [[k c] (:cells spec)] [k (judge-cell c)]))
         nm (:names spec)
         order (for [l (:languages spec) v (:levels spec)] [l v])
-        problems (mapcat (fn [k] (mapcat :problems (:sources (cells k)))) order)]
+        judged (mapcat (fn [k] (mapcat :problems (:sources (cells k)))) order)
+        records (for [k order] (cell-record k (cells k)))
+        diffs (map #(str matrix-file ": " %) (matrix-diffs records nm))
+        write? (and record? (empty? judged))
+        problems (if record? judged (concat judged diffs))]
     (println "reap: the REAP matrix (doc/FULL-SUPPORT-SURVEY.md, RPS13): pass / by design / deferred per cell,")
     (println "      summed over the cell's checks, each in its unit; + : a check records only its non-passes;")
     (println "      the checks beside a level (RPS16) and the cells' sources below")
@@ -299,9 +419,15 @@
           (println (str "   " f " " (:id c) ": " (:title c) " (" (name (:kind c)) ", "
                         (count (filter #(= [f c] %) pending)) " cases)")))))
     (println)
+    (when write?
+      (spit (path matrix-file) (matrix-text records))
+      (println (str "reap: wrote " matrix-file (if (seq diffs) ", its changes:" ", unchanged")))
+      (doseq [d diffs] (println (str "   " d)))
+      (println))
     (println (str "reap: " (count (filter :checked (vals cells))) " of " (count cells) " cells checked, "
                   (count (remove :checked (vals cells))) " with no check yet; "
-                  (count problems) " problems"))
+                  (count problems) " problems"
+                  (when (and record? (not write?)) (str "; " matrix-file " not written"))))
     (doseq [p problems] (println (str "   " p)))
     (empty? problems)))
 
@@ -351,6 +477,6 @@
           ok (case (first args)
                "--suite" (suite-only spec (second args))
                "record-native-check" (record-native-check (second args) (nth args 2))
-               (run spec (some #{"--entries"} args)))]
+               (run spec (some #{"--entries"} args) (some #{"--record"} args)))]
       (shutdown-agents)
       (System/exit (if ok 0 1)))))
