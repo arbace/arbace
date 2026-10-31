@@ -6718,3 +6718,45 @@ In this order, on the branch merged with main after the tag:
   the assertion fires), JFS145 (a) now and (c) when the counts reach zero, JFS146 (a) with (b) as an option of the verb at each
   re-pack, JFS147 (a), JFS148 (a), JFS149 (a), JFS150 (a) now and (b) at the embedding, JFS151 (a), JFS152 (a) until part 3's
   shipped-check counts the fallbacks by module.
+
+## As built: review 010's fixes (2026-10-31)
+
+The four findings of the helper review (`.tmp/review-010.md`, the java-jn10 half), each in its own commit, each with a test
+that needs no build.
+
+- **Finding 1, `bin/provenance-check` compares `:strip`.** The essential `provenance` step now also compares the pack's
+  `:strip` (sha256 of the sha256sum lines of `arbace/repr/java/classfile.ae` and `platform.ae`, as `bin/repr-java`'s
+  `strip_hash` computes it) with `jdk/platform/provenance.edn`, so a change to either file that leaves the committed pack stale
+  fails the essential gate, as JFS146's rationale assumed. Tested on a scratch copy (`git archive` of the branch) with a line
+  appended to classfile.ae: no `:strip` line is printed and the exit is 1 for it; on the branch the line passes
+  (`:strip 9525b5cb5ff2`). The four reader-hash lines are stale on this branch by design (`REPR_JAVA_STALE_OK`, the batched
+  rewrite), and `bin/repr-java` itself is in the reader hash, so this edit joins them.
+- **Finding 2, `platform-pack` refuses another platform.** When `$plat/java.base` does not hash to the pin's line, `platform-pack`
+  prints the warning and a refusal and exits 1. `REPR_JAVA_PACK_ANY=1` asks otherwise explicitly: the pack is written and the
+  provenance records the directory's hash as `:java.base` (the `:jdk` field is still the pin's, which `platform-check` on the
+  right platform catches by its byte comparison). `platform-check` keeps its warning. Tested with a one-file fake platform
+  directory: exit 1 and the message; the real check path is unchanged.
+- **Finding 3, `closure-check` reach.** `javax.annotation.processing.` and `jdk.internal.jrt.javac.` join the four javac
+  prefixes, and the closure follows `arbace.classes.*` (analyze, env, go, lower, opcodes, parse, types: 7 files) besides
+  `arbace.repr.java.*`, so they are scanned, counted against the known file and, if clean, loaded (31 files now, the known file
+  `{}`, passed on stage 0). Tested: the branch passes; a scratch copy with `jdk.internal.jrt.javac.Main` quoted in
+  `arbace/classes/env.ae` fails ("1 sites, not in the known file"). Still not sites: strings and dynamic loads (the intended
+  door `javac_hook`'s `require`), and a syntax-quoted short class name.
+- **Finding 4, `field-order-check` the key set.** It also reports `[tag :missing nil]` for a tag of `tag-classes` (javac's
+  tags, operators included) that `tr/field-order` lacks, and `[tag :extra nil]` for one it has beyond them; the load-time
+  assertion throws on either. The 105 tags of both agree (checked on stage 0 from the sources). Tested on javac's tool
+  `arbace-javac-63071998` (built from main, read-only), with `ARBACE_PATH` at the checkout so the branch's `javac_tree.ae` and
+  `tree.ae` load over the embedded ones: the assertion passes against javac's real classes; with `:ERRONEOUS` dropped from a
+  scratch `tree.ae` it throws `([:ERRONEOUS :missing nil])`. What this cannot show: the tool's other embedded namespaces are
+  main's, so it proves this assertion's logic and the table against javac's reflection, not the branch's whole javac half
+  (that is JN10p.5's c2j compile and checks).
+- **Not run:** `bin/repr-java platform-check` (it reads all of java.base's class files from a platform directory on the stage 0
+  host; only its `platform-pack` branch changed, and the pack, `:sha256` and `:strip` are the committed ones).
+
+**What JN10p.5's heavy checks must also check:** `bin/provenance-check` passes after the writers' rewrite (the four reader-hash
+lines; `:strip` and `:sha256` as committed unless the pack is re-made); `bin/repr-java platform-check` on the pin's platform
+(also proves `REPR_JAVA_PACK_ANY` was not used for the committed pack: `:java.base` is the pin's line); `closure-check` with the
+known file `{}` after the half is compiled into the tool; javac's tool built from this branch loads (both load-time assertions
+run at its first read, `field-order-check` now with the tag sets).
+
+No proposals (JFS160 none).
