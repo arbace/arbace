@@ -165,12 +165,15 @@ mem_of() {  # mem_of NAME FIELD: a number of NAME.mem
 }
 # pass_reads FILE [NAME]: a pass record that reads (GTS80 (a)): not empty, record_pass's shape, its step
 # NAME, closed; an empty or cut one (a full disk's, GT7's rerun 4) is no pass. The planner reads it with
-# the Clojure reader and skips one that does not read
+# the Clojure reader and skips one that does not read. Review 001, finding 5: a key with no value (a
+# keyword followed by another or by the closing brace: an odd-length map, which the reader rejects) is
+# no pass either (record_pass's values are never keywords)
 pass_reads() {
   [ -s "$1" ] || return 1
   head -c 9 "$1" | grep -q '^{:step "' || return 1
   [ -z "${2:-}" ] || head -1 "$1" | grep -qF "{:step \"$2\" :key \"" || return 1
-  grep -q ':log-sha256 "[0-9a-f]\{64\}"' "$1" && [ "$(tail -c 2 "$1")" = "}" ]
+  grep -q ':log-sha256 "[0-9a-f]\{64\}"' "$1" && [ "$(tail -c 2 "$1")" = "}" ] || return 1
+  ! tr '\n' ' ' < "$1" | grep -qE '(^|[ {]):[a-z0-9-]+[[:space:]]*(}|[[:space:]]:[a-z])'
 }
 record_pass() {  # record_pass NAME: its pass in the store at its key (GTS7 (a)), with its outputs (GT5)
   # GTS80 (a): every file through a temporary name renamed into place, the record last (a pass is its
@@ -188,9 +191,14 @@ record_pass() {  # record_pass NAME: its pass in the store at its key (GTS7 (a))
     cp -a "$logs/out/$name" "$t.out.tmp" && diff -rq "$logs/out/$name" "$t.out.tmp" > "$t.diff.tmp" \
       && rm -f "$t.diff.tmp" && rm -rf "${d:?}/$k.out" && mv -T "$t.out.tmp" "$d/$k.out" || { rm -rf "${t:?}".*; return 1; }
   fi
+  # review 001, finding 5: a number not measured is nil, so that the record is a whole map (an empty value
+  # made it odd-length, which the Clojure reader rejects)
+  local secs cpu rss tree
+  secs=$(cat "$logs/$name.secs" 2>"$logs/mem-of.err") cpu=$(mem_of "$name" cpu-s) rss=$(mem_of "$name" maxrss-kib) \
+    tree=$(mem_of "$name" tree-peak-kib)
   printf '{:step "%s" :key "%s" :commit "%s" :dirty %s :worktree "%s" :date "%s"\n :secs %s :cpu-s %s :maxrss-kib %s :tree-peak-kib %s\n :log-sha256 "%s"%s}\n' \
-    "$name" "$k" "$commit" "$dirty" "$root" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(cat "$logs/$name.secs")" \
-    "$(mem_of "$name" cpu-s)" "$(mem_of "$name" maxrss-kib)" "$(mem_of "$name" tree-peak-kib)" \
+    "$name" "$k" "$commit" "$dirty" "$root" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${secs:-nil}" \
+    "${cpu:-nil}" "${rss:-nil}" "${tree:-nil}" \
     "$(sha256sum < "$logs/$name.log" | cut -c1-64)" \
     "$([ -n "${GATE_CLEAN_INNER:-}" ] && echo ' :clean true')" > "$t.edn.tmp" \
     && pass_reads "$t.edn.tmp" "$name" && mv -f "$t.edn.tmp" "$d/$k.edn" || { rm -rf "${t:?}".*; return 1; }
