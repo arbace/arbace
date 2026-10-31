@@ -670,3 +670,16 @@ git history:
   - CP79 (b), CP91 (b) and CP92 (b): the line of a macro form, list pieces.
   - OC102, OC104, OC105 (b) and OC106 (b): 366 of 370 expect tests pass, from 259.
 - **Next:** the demonstrations (GTS42), the concurrent `--full` (GTS37), the v2 record, the tag.
+- **The demonstrations (GTS42)**, `bin/gate-demos --record`:
+  - The first run's base plan ran 4 repr-java-parse parts. Their passes in the shared store were empty files:
+    rerun 4's publication, written at 01:35 while the disk was full. Rerun 5's publication did not replace them,
+    because `bin/gate --clean` publishes with `cp -an`, which never overwrites; the planner ignored them.
+  - I rebuilt the 4 records from rerun 5's kept logs (`.tmp/gate-clean/f2f168c5....logs/gate`), in `record_pass`'s
+    format, `:clean true`. Each part's material hashes to its planned key.
+  - The demonstrations, run again:
+    - base: nothing runs (74 skip);
+    - classes: java-check-judge, java-forms-verify, java-judge and reap;
+    - j2g: 33 run, 40 skip.
+  - Recorded in the record's `:demonstrations`.
+  - A proposal for later (GTS80): publication replaces an empty or unreadable pass, and `record_pass` writes its
+    three files through temporary names.
