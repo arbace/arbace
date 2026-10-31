@@ -715,3 +715,18 @@ git history:
     concurrent `--full`, before the tag.
   - Proposal GTS81: each check family gets a negative control, a case that must fail, so that a judge that passes
     everything fails the gate.
+- **Re-recorded** with the fixed judge (`bin/java-check --levels interp|compiled --save`, the gate's executables
+  d24c0b71 and javac's tool 63071998; interp 71 minutes, compiled 3 hours: the failing and deadlocking tests now run
+  out their limits), then `--judge --record`:
+  - interp 1,848 pass, 142 fail, 51 timeout, 23 differ, 1 flaky, 1,256 load-failed (the draft's 6ad08d82: 1,807, 141,
+    91, 21, 5);
+  - compiled 1,921 pass, 393 fail, 14 timeout, 23 differ, 2 flaky, 968 refused (the draft: 1,915, 393, 23, 21, 1).
+- **Against the draft:**
+  - GT6's CPU limits turned 38 interp and 7 compiled timeouts into passes; that much of the old claim holds.
+  - Four interp tests got worse: t03832 DekkerTest (timeout to fail), t04272 (pass to differ, classed `environment`,
+    unstable), t04327 (pass to flaky, the known pair), t07649 (timeout to differ, `memory-limit`).
+- **Two tests were in no class:**
+  - t03832 DekkerTest fails only interpreted: the interpreter's volatile fields are not sequentially consistent. A
+    deferred class `interp-volatile`, JCS127 (a), decided by the user: the fix after the tag.
+  - t07728 ReflectOutOfMemoryError joins `memory-limit` (JCS99 (a)).
+- **levels-known.edn** lost the bug's entries: 84 recorded, 0 new. Every interp and compiled non-pass is in a class.

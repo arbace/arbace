@@ -3648,6 +3648,19 @@ builds; and one `cp ... /dev/null` while looking at the key file, against the ru
   modules about 0, since they are not in the runtime. The deferred JDK areas (JCS90-JCS96) are on hold. JCS120 (b) and
   JC7 stay as planned.
 
+## Decided (2026-10-31): JCS127
+
+- **JCS127 The interpreter's volatile fields.** t03832 (`hotspot/jtreg/compiler/membars/DekkerTest.java`) fails at the
+  level interp ("FAILED. Got 10 failed ITERATIONS") and passes compiled. The interpreter reads and writes a volatile field
+  as a plain one, so Dekker's mutual exclusion over volatiles breaks between threads. Until 2026-10-31 the test hid
+  behind a timeout, then behind `bin/java-check`'s shadowed judge. Options: (a) a deferred class `interp-volatile` now,
+  and the fix after the tag: the interpreter's volatile reads and writes through `sync/atomic`, as j2g's translation
+  orders them; (b) the fix before the tag; (c) a `:flaky` class. *Recommended: (a).*
+  - **Decided (the user): (a).**
+- t07728 (`hotspot/jtreg/runtime/reflect/ReflectOutOfMemoryError.java`, compiled: "TEST_BUG: failed to provoke
+  OutOfMemoryError"; interp: timeout) joins `memory-limit`, under that class's own decision, JCS99 (a): Go's collector
+  has no heap ceiling.
+
 ## As built: the negative controls (GTS81 (a), 2026-10-31, write-ahead)
 
 doc/GATE-SURVEY.md's GTS81 (a) (the 2026-10-31 finding: a second `judge` in `bin/java-check` made every interp and
