@@ -179,7 +179,7 @@ cmd_suite_check_aot() {
     [ -f "$d/error" ] && continue
     last=$(echo "$units" | awk '{print $NF}'); b=$(basename "${last%.*}")
     printf '%s\t%s%s\n' "$A/out/$id" "${incs:+$TESTLIB/Testing.ae	}" "$(paste -sd'\t' "$d/units.list")" >> "$tl"
-    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$d/o2j.out" "$A/out/$id/files.txt" "$(echo "$b" | tr A-Z a-z)" "$(echo "$args" | tr ' ' '\t')" "$env" >> "$bl"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$d/o2j.out" "$A/out/$id/files.txt" "$d/$(echo "${b:0:1}" | tr a-z A-Z)${b:1}.ae" "$(echo "$args" | tr ' ' '\t')" "$env" >> "$bl"
   done
   o2j progs "$O2J_LIB" "$tl" > "$A/translate.log" 2>&1 || { tail -5 "$A/translate.log"; die "translate"; }
   local i
@@ -238,7 +238,7 @@ cmd_suite() {
     divergences) cmd_suite_divergences "$@" ;;
     actions) suite_actions ;;
     roles) cmd_suite_roles ;;
-    expect) cmd_suite_expect ;;
+    expect) opts "$@"; cmd_suite_expect ;;
     rollup) cmd_suite_rollup "$@" ;;
     *) die "unknown suite verb $verb" ;;
   esac
