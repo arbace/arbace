@@ -3457,3 +3457,9 @@ version); `ci-dg/`, `ci-check/` (the last runs); the Go cache deleted.
 Rule slips: an exploration `grep` once redirected its errors to `/dev/null`, and a `diff` of two lists once used `<(...)`; both ran, neither
 wrote anything. For a minute two waiting loops ran at once (a `Monitor` beside a backgrounded `until` loop; the monitor was stopped). The
 compiled shard was stopped at the disk limit rather than finished.
+
+### Decided (CS180-CS184; the user, 2026-10-31)
+
+All as recommended: CS180 (a); CS181 (b), starting with gnu23-tag-composite-5; CS182 (a), CS162 not now; CS183 (b),
+CS161 still not now; CS184 (a): the dg check stops here, CS164's heavy checks and `bin/ci annotations` run before the
+branch is merged.
