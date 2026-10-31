@@ -46,6 +46,9 @@
 # The files whose forms may differ are test/repr/java/front-check-known.edn's, by corpus: none since
 # JFS70, which made the converter's pins independent of the history of the javac run (until then three
 # files of jdk26u).
+# Each read must exit 0 and print both sides' summaries with the same counts (a read that died or
+# never started writes nothing, or the same partial set, to both sides), diff (GNU diff) must not
+# fail, and a corpus must give at least one forms file.
 # Exit status: 0 when every corpus converts without failure and the differing files are known ones.
 set -uo pipefail
 root=$(cd "$(dirname "$0")/../../.." && pwd)
@@ -87,51 +90,76 @@ jdk_src=${JDK_SRC:-/root/jdk26u/src}
 jdk=$(dirname "$jdk_src")
 mkdir -p "$work"
 status=0
+# the comparison needs GNU diff (diffutils, doc/ALPINE.md): busybox's takes no -x, and a diff that
+# fails on every pair would leave every corpus "equal"
+diff --version 2> /dev/null | grep -q GNU \
+  || { echo "front-check: $(command -v diff) is not GNU diff (diffutils, doc/ALPINE.md)" >&2; exit 2; }
 
-# same DIR LOG: no failures in LOG; the forms files of DIR/javac and DIR/native that differ (the
-# reports aside) listed in DIR.differ (the corpus's paths, MODULE/...), DIR.diff the differences
+# same DIR LOG STATUS: the read (or the two reads) exited 0 (STATUS: the first non-zero status), LOG
+# holds both sides' summaries ("N Java files, M converted, ...": javac's trees' and the native trees',
+# or the two reads') with the same counts and no failures (a read that died, or never started, wrote
+# nothing or the same partial set to both sides: their diff alone would call them equal); the forms
+# files of DIR/javac and DIR/native that differ (the reports aside; GNU diff, binary files too)
+# listed in DIR.differ (the corpus's paths, MODULE/...), DIR.diff the differences. A failure is
+# also written into LOG as a line FAILED: ..., which the corpus's verdict reads.
 same() {
-  local d=$1 log=$2 rel
+  local d=$1 log=$2 st=$3 rel sums ds
+  same_fail() { echo "FAILED: $1" >> "$log"; echo "  $(basename "$d"): FAILED: $1 ($log)"; }
+  if [ "$st" != 0 ]; then
+    tail -5 "$log" | sed 's/^/    /'; same_fail "the read exited $st"; return 1
+  fi
   if grep -q '^FAILED\| [1-9][0-9]* failed' "$log"; then
     echo "  $(basename "$d"): conversion failures ($log):"; grep '^FAILED' "$log" | head -5; return 1
   fi
-  diff -r -x 'repr-java-*.edn' "$d/javac" "$d/native" > "$d.diff"
+  sums=$(grep -E '^[0-9]+ Java files, [0-9]+ converted, ' "$log" | sed -E 's/^([0-9]+) Java files, ([0-9]+) converted, .*/\1 \2/')
+  if [ "$(echo "$sums" | grep -c .)" != 2 ]; then
+    same_fail "$(echo "$sums" | grep -c .) summaries of the read, not 2 (javac's side and the native side)"; return 1
+  fi
+  if [ "$(echo "$sums" | LC_ALL=C sort -u | wc -l)" != 1 ]; then
+    same_fail "the two sides read different files: $(echo "$sums" | sed 's/\(.*\) \(.*\)/\1 files, \2 converted/' | paste -sd ';' -)"; return 1
+  fi
+  diff -rq -x 'repr-java-*.edn' "$d/javac" "$d/native" > "$d.list" 2> "$d.err"; ds=$?
+  if [ "$ds" -gt 1 ]; then
+    head -5 "$d.err" | sed 's/^/    /'; same_fail "diff exited $ds"; return 1
+  fi
+  if [ -s "$d.list" ]; then diff -r -x 'repr-java-*.edn' "$d/javac" "$d/native" > "$d.diff" 2>&1; else : > "$d.diff"; fi
   rel=$(basename "$d")
   [ "$(basename "$(dirname "$d")")" = "$c" ] || rel=""
-  { grep '^diff ' "$d.diff" | awk '{print $NF}' | sed "s|^$d/native/||; s|^|${rel:+$rel/}|"
-    grep '^Only in ' "$d.diff" | sed 's/ /_/g'; } > "$d.differ"
+  # every line of diff -rq counts: Files A and B differ (the path), Only in ..., any other
+  { grep '^Files .* differ$' "$d.list" | sed "s|^Files $d/javac/.* and $d/native/\(.*\) differ\$|\1|; s|^|${rel:+$rel/}|"
+    grep -v '^Files .* differ$' "$d.list" | sed 's/ /_/g'; } > "$d.differ"
   return 0
 }
 
 # read_both DIR ARGS...: bin/repr-java read --front both --split into DIR/javac, DIR/native
 read_both() {
-  local d=$1; shift
+  local d=$1 st=0 s; shift
   rm -rf "$d"; mkdir -p "$d"
   if [ -n "$nojavac" ]; then
-    bin/repr-java read --check --front javac "$d/javac" "$@" > "$d.log" 2>&1
+    bin/repr-java read --check --front javac "$d/javac" "$@" > "$d.log" 2>&1 || st=$?
     local t0; t0=$(date +%s.%N)
-    bin/repr-java read --check --no-javac "$d/native" "$@" >> "$d.log" 2>&1
+    bin/repr-java read --check --no-javac "$d/native" "$@" >> "$d.log" 2>&1 || { s=$?; [ "$st" != 0 ] || st=$s; }
     awk -v a="$t0" -v b="$(date +%s.%N)" 'BEGIN {printf "%.1f\n", b - a}' > "$d.time"
   else
-    bin/repr-java read --check --front both --split "${attr_opts[@]}" --native-out "$d/native" "$d/javac" "$@" > "$d.log" 2>&1
+    bin/repr-java read --check --front both --split "${attr_opts[@]}" --native-out "$d/native" "$d/javac" "$@" > "$d.log" 2>&1 || st=$?
   fi
-  same "$d" "$d.log"
+  same "$d" "$d.log" "$st"
 }
 
 # read_jdk DIR MODULE SRC THREADS [all]: read-jdk --front both --split, from WORK (its patch
 # directories), REPR_JAVA_THREADS chunks; with all, REPR_JAVA_PATCH_ALL (the vendoring scripts')
 read_jdk() {
-  local d=$1 m=$2 src=$3 threads=$4 all=${5:-}
+  local d=$1 m=$2 src=$3 threads=$4 all=${5:-} st=0 s
   rm -rf "$d"; mkdir -p "$d"
   if [ -n "$nojavac" ]; then
-    jdk_read "$threads" "$all" --front javac "$d/javac" "$m" "$src" > "$d.log" 2>&1
+    jdk_read "$threads" "$all" --front javac "$d/javac" "$m" "$src" > "$d.log" 2>&1 || st=$?
     local t0; t0=$(date +%s.%N)
-    jdk_read "$threads" "$all" --no-javac "$d/native" "$m" "$src" >> "$d.log" 2>&1
+    jdk_read "$threads" "$all" --no-javac "$d/native" "$m" "$src" >> "$d.log" 2>&1 || { s=$?; [ "$st" != 0 ] || st=$s; }
     awk -v a="$t0" -v b="$(date +%s.%N)" 'BEGIN {printf "%.1f\n", b - a}' > "$d.time"
   else
-    jdk_read "$threads" "$all" --front both --split "${attr_opts[@]}" --native-out "$d/native" "$d/javac" "$m" "$src" > "$d.log" 2>&1
+    jdk_read "$threads" "$all" --front both --split "${attr_opts[@]}" --native-out "$d/native" "$d/javac" "$m" "$src" > "$d.log" 2>&1 || st=$?
   fi
-  same "$d" "$d.log"
+  same "$d" "$d.log" "$st"
 }
 
 # jdk_read THREADS ALL ARGS...: bin/repr-java read-jdk --check ARGS... from WORK
@@ -197,7 +225,9 @@ for c in ${corpora//,/ }; do
   arbace_tool -e "(let [k (get (read-string (slurp \"$known\")) :$c)] (doseq [f (sort (if (map? k) (:forms k) k))] (println f)))" \
     | LC_ALL=C sort > "$work/$c.known"
   if grep -qs '^FAILED' $(find "$work/$c" -maxdepth 2 -name '*.log'); then
-    verdict="FAILED (conversion failures)"; status=1
+    verdict="FAILED (failed reads or conversions: the logs' FAILED lines)"; status=1
+  elif [ "$n" = 0 ]; then
+    verdict="FAILED (no forms file: the corpus read nothing)"; status=1
   elif ! cmp -s "$work/$c.differ" "$work/$c.known" && [ -n "$(LC_ALL=C comm -23 "$work/$c.differ" "$work/$c.known")" ]; then
     verdict="DIFFERENT beyond the known ($known):"; status=1
   elif [ -s "$work/$c.differ" ]; then
