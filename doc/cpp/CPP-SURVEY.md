@@ -1750,3 +1750,8 @@ and c-c++-common tenths whole (only their 24 `ast-differs` files), the whole Hot
   a gate key that covers `bin/` and `test/cpp/` would; the step's declared inputs are the coordinator's to check.
 - Slips: two throwaway commands used a `<(...)` process substitution (a diff of two echoes, a `head -0`); no effect on any result.
 - Scratch: `.tmp/cp76/` (`L`, `L10`, `Lg`: the lists; `rt/hs50`, `rt/hs50b`, `rt/hs10`, `rt/ls`, `rt/smp`, `rt/ast`, `rt/ast2`: the runs; `shim.hpp`, `try.sh`: the first shim and a one-file clang run), `.tmp/repr-cpp/` (the filter and its cache), `.tmp/cpp-gcc/` (36 MB of the testsuites).
+
+### Decided (CP90-CP93; the user, 2026-10-31)
+
+All as recommended: CP90 (a), counted in the whole-corpus run; CP91 (b), as CP79 (b), then (c) if (b) leaves HotSpot
+cases; CP92 (a) now, (b) with CP79; CP93 (a), (b) if the corpus widens to other platforms.
