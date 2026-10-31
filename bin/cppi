@@ -65,43 +65,57 @@ list_libstdcxx() { # the run tests: no directive but run, no threads, shared lib
   done < "$TMPDIR/cppi-run.list"
 }
 
+cap() { # cap FILE: standard input into FILE, at most 1 MB (a compiler's errors over a binary can be gigabytes)
+  head -c 1048576 > "$1"
+}
+
 one() { # one NAME STD ARGS PATH: the native steps of one file into $work/files/NAME/
   local n=$1 std=$2 args=$3 p=$4 d=$work/files/$1
   mkdir -p "$d"
   # shellcheck disable=SC2086
-  ( cd "$d" && timeout 300 clang++ -x c++ -std=$std $args -O0 -S -emit-llvm "$p" -o x.ll ) > "$d/ir.log" 2>&1; echo $? > "$d/ir.status"
+  ( cd "$d" && timeout 300 clang++ -x c++ -std=$std $args -O0 -S -emit-llvm "$p" -o x.ll; echo $? > ir.status ) 2>&1 | cap "$d/ir.log"
   [ "$(cat "$d/ir.status")" = 0 ] || return 0
-  ( cd "$d" && timeout 300 clang++ x.ll -o orig $LIBS ) > "$d/orig-link.log" 2>&1; echo $? > "$d/orig-link.status"
-  ( cd "$d" && timeout 300 clang -c x.ll -o x.o ) > "$d/obj.log" 2>&1
+  ( cd "$d" && timeout 300 clang++ x.ll -o orig $LIBS; echo $? > orig-link.status ) 2>&1 | cap "$d/orig-link.log"
+  ( cd "$d" && timeout 300 clang -c x.ll -o x.o ) 2>&1 | cap "$d/obj.log"
   grep -q "undefined reference to \`main'" "$d/orig-link.log" && echo 1 > "$d/no-main"
   if [ "$(cat "$d/orig-link.status")" = 0 ]; then
-    ( cd "$d" && timeout "${CPPI_RUN_TIMEOUT:-120}" ./orig > orig.out 2> orig.err ); echo $? > "$d/orig.status"
+    ( cd "$d" && timeout "${CPPI_RUN_TIMEOUT:-120}" ./orig 2> orig.err | cap orig.out; echo "${PIPESTATUS[0]}" > orig.status; truncate -s '<1M' orig.err )
   fi
   # shellcheck disable=SC2086
-  ( cd "$d" && timeout 300 g++ -x c++ -std=$std $args -O0 "$p" -o gxx $LIBS ) > "$d/gxx-link.log" 2>&1; echo $? > "$d/gxx-link.status"
+  ( cd "$d" && timeout 300 g++ -x c++ -std=$std $args -O0 "$p" -x none -o gxx $LIBS; echo $? > gxx-link.status ) 2>&1 | cap "$d/gxx-link.log"
   if [ "$(cat "$d/gxx-link.status")" = 0 ]; then
-    ( cd "$d" && timeout "${CPPI_RUN_TIMEOUT:-120}" ./gxx > gxx.out 2> gxx.err ); echo $? > "$d/gxx.status"
+    ( cd "$d" && timeout "${CPPI_RUN_TIMEOUT:-120}" ./gxx 2> gxx.err | cap gxx.out; echo "${PIPESTATUS[0]}" > gxx.status; truncate -s '<1M' gxx.err )
   fi
-  rm -f "$d/gxx" ; return 0
+  rm -f "$d/gxx" "$d/x.o.tmp"; return 0
 }
 
 two() { # two NAME: the print's object, gcc on the lowered C and its run
   local n=$1 d=$work/files/$1
-  [ -f "$d/print.ll" ] && { ( cd "$d" && timeout 300 clang -c print.ll -o print.o ) > "$d/print-obj.log" 2>&1; echo $? > "$d/print-obj.status"; }
+  [ -f "$d/print.ll" ] && { ( cd "$d" && timeout 300 clang -c print.ll -o print.o; echo $? > print-obj.status ) 2>&1 | cap "$d/print-obj.log"; }
+  # the objects compared here and dropped, with the forms' texts (the disk: a few MB a file)
+  if [ -f "$d/x.o" ] && [ -f "$d/print.o" ]; then
+    if cmp -s "$d/x.o" "$d/print.o"; then echo same > "$d/object"; else echo differs > "$d/object"; fi
+  fi
+  rm -f "$d/x.o" "$d/print.o" "$d/forms.ae" "$d/print.ll" "$d/lowered.c.ae" "$d/lowered.o"
   if [ -f "$d/lowered.c" ]; then
     # shellcheck disable=SC2086
     if [ -f "$d/no-main" ]; then
-      ( cd "$d" && timeout 300 gcc $GCC_FLAGS -c lowered.c -o lowered.o ) > "$d/gcc.log" 2>&1; echo $? > "$d/gcc.status"
+      ( cd "$d" && timeout 300 gcc $GCC_FLAGS -c lowered.c -o lowered.o; echo $? > gcc.status ) 2>&1 | cap "$d/gcc.log"
       return 0
     fi
-    ( cd "$d" && timeout 300 gcc $GCC_FLAGS lowered.c "$work/rt.o" -o low $LIBS ) > "$d/gcc.log" 2>&1; echo $? > "$d/gcc.status"
+    ( cd "$d" && timeout 300 gcc $GCC_FLAGS lowered.c "$work/rt.o" -o low $LIBS; echo $? > gcc.status ) 2>&1 | cap "$d/gcc.log"
     if [ "$(cat "$d/gcc.status")" = 0 ]; then
-      ( cd "$d" && timeout "${CPPI_RUN_TIMEOUT:-120}" ./low > low.out 2> low.err ); echo $? > "$d/low.status"
+      ( cd "$d" && timeout "${CPPI_RUN_TIMEOUT:-120}" ./low 2> low.err | cap low.out; echo "${PIPESTATUS[0]}" > low.status; truncate -s '<1M' low.err )
     fi
   fi
   rm -f "$d/low" "$d/orig"; return 0
 }
-export -f one two; export GCC_FLAGS LIBS
+export -f cap one two; export GCC_FLAGS LIBS
+
+disk_ok() { # the light tier's disk rule: stop past 80% (CPPI_DISK_MAX)
+  local u; u=$(df --output=pcent "$root" | tail -1 | tr -dc 0-9)
+  [ "$u" -le "${CPPI_DISK_MAX:-80}" ] || { echo "lower-check: the disk is at $u%, stopping" >&2; exit 3; }
+}
 
 lower_check() {
   local list=$1; work=$2; shift 2
@@ -109,6 +123,7 @@ lower_check() {
   while [ $# -gt 0 ]; do case $1 in --jobs) jobs=$2; shift 2 ;; *) echo "lower-check: unknown option $1" >&2; exit 2 ;; esac; done
   mkdir -p "$work"; work=$(cd "$work" && pwd); export work
   cp "$list" "$work/list.tsv"
+  disk_ok
   # the testsuite's own library (testsuite_hooks.cc and the others of util/), native as libstdc++ is: compiled by g++ once
   LIBS="-lstdc++ -lm"
   if [ -d "$ts_root/util" ] && grep -q "$ts_root" "$work/list.tsv"; then
@@ -124,6 +139,7 @@ lower_check() {
   t0=$(date +%s)
   tr '\t\n' '\037\0' < "$work/list.tsv" | xargs -0 -P "$jobs" -I{} nice bash -c 'IFS=$'"'"'\037'"'"' read -r n s a p <<< "$1"; one "$n" "$s" "$a" "$p"' _ {}
   t1=$(date +%s)
+  disk_ok
   arbace_tool -m arbace.cpp.lower lower-rt "$root/arbace/cpp/rt/eh.c.ae" "$work/rt.c"
   # shellcheck disable=SC2086
   gcc $GCC_FLAGS -c "$work/rt.c" -o "$work/rt.o"
@@ -132,6 +148,7 @@ lower_check() {
   done > "$work/lower.tsv"
   CPPI_THREADS=$jobs arbace_tool -m arbace.cpp.lower lower-list "$work/lower.tsv"
   t2=$(date +%s)
+  disk_ok
   cut -f1 "$work/list.tsv" | tr '\n' '\0' | xargs -0 -P "$jobs" -I{} nice bash -c 'two "$1"' _ {}
   t3=$(date +%s)
   echo "lower-check: native $((t1-t0)) s, read, print and lower $((t2-t1)) s, gcc and runs $((t3-t2)) s" | tee "$work/times.txt"
