@@ -921,20 +921,45 @@ void __atomic_store();
       (when new-block (close-scope! p))
       r)))
 
+;; Arbace (CS194 (a)): C2y's selection statements with a declaration (N3356): `if (int i = 42)`, `if (int i, j; i = 42)`,
+;; `switch (int i = 42; i)`: an optional init declaration ending in `;`, then the condition, an expression or a declaration
+;; (without its `;`). The head is in the SelectionStatement's :Declaration (the init), :Token5 (its `;`), :Declaration2 (the
+;; condition's) or :ExpressionList.
+(declare cond-declaration)
+
+(defn- decl-start? [^Parser p]
+  (or (declaration-specifier? (pkct p 0) true)
+      (and (std-attr-at? p 0) (declaration-specifier? (pkct p (std-attrs-end-from p 0)) true))))
+
+(defn- selection-head! [^Parser p ^HashMap r]
+  (if (decl-start? p)
+    (let [d (cond-declaration p)]
+      (if (= (rn p) \;)
+        (do (s! r :Declaration d)
+            (s! r :Token5 (sh p))
+            (if (decl-start? p)
+              (s! r :Declaration2 (cond-declaration p))
+              (s! r :ExpressionList (expression p false))))
+        (s! r :Declaration2 d)))
+    (s! r :ExpressionList (expression p false))))
+
 (defn selection-statement [^Parser p]
   (new-scope! p)
   (let [r (case (rn p)
             :eof (unexpected-eof p)
-            :IF (let [r (node "SelectionStatement" :Case :SelectionStatementIf :Token (sh p) :Token2 (must p \()
-                              :ExpressionList (expression p false) :Token3 (must p \)) :Statement (statement p true))]
+            :IF (let [r (node "SelectionStatement" :Case :SelectionStatementIf :Token (sh p) :Token2 (must p \())
+                      _ (selection-head! p r)
+                      _ (s! r :Token3 (must p \)))
+                      _ (s! r :Statement (statement p true))]
                   (.put r :scope (slot p SCOPE))
                   (when (= (rn p) :ELSE)
                     (s! r :Case :SelectionStatementIfElse)
                     (s! r :Token4 (sh p))
                     (s! r :Statement2 (statement p true)))
                   r)
-            :SWITCH (let [r (node "SelectionStatement" :Case :SelectionStatementSwitch :Token (sh p) :Token2 (must p \()
-                                  :ExpressionList (expression p false) :Token3 (must p \)))
+            :SWITCH (let [r (node "SelectionStatement" :Case :SelectionStatementSwitch :Token (sh p) :Token2 (must p \())
+                          _ (selection-head! p r)
+                          _ (s! r :Token3 (must p \)))
                           ctx (slot p SWITCH)]
                       (.put r :scope (slot p SCOPE))
                       (slot! p SWITCH r)
@@ -1418,6 +1443,16 @@ void __atomic_store();
           (empty-declaration-attrs! p ds r)
           (bool-after-tag! p ds r)
           r)))))
+
+;; A declaration without its `;` (CS194 (a)): a selection statement's init or condition declaration.
+(defn- cond-declaration [^Parser p]
+  (let [[ds ok] (declaration-specifiers p)]
+    (when ok
+      (let [r (node "Declaration" :Case :DeclarationDecl :DeclarationSpecifiers ds :InitDeclaratorList (init-declarator-list-opt p ds nil true)
+                    :AttributeSpecifierList (attribute-specifier-list-opt p))]
+        (empty-declaration-attrs! p ds r)
+        (bool-after-tag! p ds r)
+        r))))
 
 (defn- static-assert-declaration [^Parser p] ; go-whim: C23 6.7.12, the message is optional
   (let [r (node "StaticAssertDeclaration" :Token (must p :STATICASSERT) :Token2 (must p \() :ConstantExpression (constant-expression p))]

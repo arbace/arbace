@@ -1283,7 +1283,26 @@
 (defn- else-if [st]
   (when (and st (= (cs st) :StatementSelection) (nil? (g st :AttributeSpecifierList)) (nil? (group-at st)))
     (let [s (g st :SelectionStatement)]
-      (when (#{:SelectionStatementIf :SelectionStatementIfElse} (cs s)) s))))
+      (when (and (#{:SelectionStatementIf :SelectionStatementIfElse} (cs s)) (nil? (g s :Declaration)) (nil? (g s :Declaration2))) s))))
+
+;; Arbace (CS194 (a)): C2y's selection statements with a declaration. `if (D; E) S` is `{ D; if (E) S }` (the declaration's
+;; scope is the whole statement, the else branch's too); a condition declaration `if (int i = 42)` declares i and tests it.
+;; The block is marked :c/sel-decl, for the checker's pedwarn before C2y.
+(defn- sel-expr
+  "A selection statement's controlling expression: its expression, or the variable its condition declaration declares."
+  [s]
+  (if-let [d (g s :Declaration2)]
+    (let [x (second (value (last (declaration d))))] (if (iobj? x) (with-meta x nil) x))
+    (expr (g s :ExpressionList))))
+
+(defn- sel-wrap
+  "The block that declares a selection statement's declarations around its form `f`."
+  [s f]
+  (if (or (g s :Declaration) (g s :Declaration2))
+    (let [ds (concat (when-let [d (g s :Declaration)] (map #(at d %) (declaration d)))
+                     (when-let [d (g s :Declaration2)] (map #(at d %) (declaration d))))]
+      (addm (first (lets (concat (map (fn [f] [:decl f]) ds) [[:stmt f]]))) {:c/sel-decl true}))
+    f))
 
 (defn- opt-expr [e] (if (nil? e) '_ (expr e)))
 
@@ -1329,14 +1348,15 @@
           :StatementSelection
           (let [s (g st :SelectionStatement)]
             [(at st
+               (sel-wrap s
                (case (cs s)
-                 :SelectionStatementIf (bare (Lv (list* 'when (expr (g s :ExpressionList)) (body (g s :Statement)))) (g s :Statement))
+                 :SelectionStatementIf (bare (Lv (list* 'when (sel-expr s) (body (g s :Statement)))) (g s :Statement))
                  :SelectionStatementIfElse
                  (if (else-if (g s :Statement2))
                    (let [bares (java.util.TreeSet.)
                          clauses (loop [s s out []]
                                    (when-not (braced? (g s :Statement)) (.add bares (long (+ 2 (count out)))))
-                                   (let [out (conj out (expr (g s :ExpressionList)) (branch (g s :Statement)))]
+                                   (let [out (conj out (sel-expr s) (branch (g s :Statement)))]
                                      (if (= (cs s) :SelectionStatementIfElse)
                                        (if-let [s2 (else-if (g s :Statement2))]
                                          (recur s2 out)
@@ -1344,10 +1364,10 @@
                                              (conj out :else (branch (g s :Statement2)))))
                                        out)))]
                      (addm (Lv (cons 'cond clauses)) (if (seq bares) {:c/bare (set bares)} {})))
-                   (addm (L 'if (expr (g s :ExpressionList)) (branch (g s :Statement)) (branch (g s :Statement2)))
+                   (addm (L 'if (sel-expr s) (branch (g s :Statement)) (branch (g s :Statement2)))
                          (let [b (cond-> #{} (not (braced? (g s :Statement))) (conj 2) (not (braced? (g s :Statement2))) (conj 3))]
                            (if (seq b) {:c/bare b} {}))))
-                 :SelectionStatementSwitch (bare (Lv (list* 'switch (expr (g s :ExpressionList)) (body (g s :Statement)))) (g s :Statement))))])
+                 :SelectionStatementSwitch (bare (Lv (list* 'switch (sel-expr s) (body (g s :Statement)))) (g s :Statement)))))])
           :StatementIteration
           (let [s (g st :IterationStatement)]
             [(at st
