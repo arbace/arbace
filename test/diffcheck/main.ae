@@ -14,7 +14,8 @@
   Usage: run EXE GEN [-j JOBS] [--timeout S] [--expected FILE | --write-expected FILE] [SEL...]
   (SEL: parts of corpus paths). Prints a line per corpus, the first mismatches of each; all of
   them in .tmp/diffcheck/check.txt. With --expected FILE (test/diffcheck/known.edn) it passes
-  when the mismatching cases are exactly those FILE records, with their reasons (the oracle's
+  when the mismatching cases are exactly those FILE records, with their reasons, and each known
+  case's recorded pair (:got: the two runs' kinds and a digest of both) is this run's (the oracle's
   format, oracle.runner/check-known); --write-expected FILE rewrites it (oracle.runner/write-known)."
   (:require [arbace.string :as str]
             [arbace.java.io :as io]
@@ -57,6 +58,17 @@
 
 (defn- canon [x] (oracle.driver/emit (walk/postwalk #(if (map? %) (into (sorted-map) %) %) x)))
 
+(defn- disagreements
+  "The cases on which the two runs' records a and b (by id) disagree, [case x y]: a case without a
+  record in a run is {:missing true} there, and a disagreement even when both runs lack it (two
+  runs that print nothing for a case do not agree on it)."
+  [cases a b]
+  (for [e cases
+        :let [x (get a (:id e) {:missing true})
+              y (get b (:id e) {:missing true})]
+        :when (or (:missing x) (:missing y) (not= (canon x) (canon y)))]
+    [e x y]))
+
 (defn- short-str [x n]
   (let [s (if (string? x) x (pr-str x))]
     (if (> (count s) n) (str (subs s 0 n) "...") s)))
@@ -66,9 +78,14 @@
 
 (defn check
   "Runs the selected corpora; {:ok :mismatches [{:case :form}...] :incomplete n
-  :incomplete-files #{} :files #{}} as oracle.runner/check returns."
+  :incomplete-files #{} :files #{} :errors [...]} as oracle.runner/check returns (an error: a
+  selector that selects no corpus, or no corpus selected)."
   [exe gen jobs timeout sel]
-  (let [corpora (filter #(selected? sel %) (runner/read-expected (io/file gen "corpora.edn")))
+  (let [all (runner/read-expected (io/file gen "corpora.edn"))
+        corpora (filter #(selected? sel %) all)
+        errors (vec (concat (for [s sel :when (not-any? #(str/includes? (:file %) s) all)]
+                              (str "the selector " s " selects no corpus"))
+                            (when (empty? corpora) ["no corpus selected"])))
         work (for [c corpora, k [0 1]] [c k])
         results (@#'runner/pool-map jobs (fn [[c k]]
                                         (let [[na fa nb fb] (runs c)
@@ -91,19 +108,18 @@
             pair (if (:compiled c) :clojure :java)
             _ (doseq [e (:cases c) :let [id (str (:file c) ":" (:line e))] :when (wanted id)]
                 (swap! by-id assoc id {:x (get (:by a) (:id e)) :y (get (:by b) (:id e))}))
-            mism (doall
-                   (for [e (:cases c)
-                         :let [x (get (:by a) (:id e) {:missing true})
-                               y (get (:by b) (:id e) {:missing true})]
-                         :when (differs? x y)]
-                     [e x y]))
+            mism (doall (disagreements (:cases c) (:by a) (:by b)))
             done? (and (:done a) (:done b))
+            ;; the Java forms' pair: a case whose classes stay interpreted in both runs (defined by
+            ;; more than one case, or in jforms-excluded.edn) compares the interpreter with itself
+            jc (if (= pair :java) (:jcompiled c 0) (count (:cases c)))
             line (format "%-44s %-7s %5d/%5d agree %6d ms %6d ms%s" (:file c) (name pair)
                          (- (count (:cases c)) (count mism)) (count (:cases c)) (:ms a) (:ms b)
-                         (str (when-not (:done a) (str ", " na " run incomplete (exit " (:exit a) ")"))
+                         (str (when (= pair :java) (str ", " jc " with their classes compiled"))
+                              (when-not (:done a) (str ", " na " run incomplete (exit " (:exit a) ")"))
                               (when-not (:done b) (str ", " nb " run incomplete (exit " (:exit b) ")"))))]
         (swap! total + (count (:cases c))) (swap! bad + (count mism))
-        (swap! pair-totals update pair (fnil (fn [[n m]] [(+ n (count (:cases c))) (+ m (count mism))]) [0 0]))
+        (swap! pair-totals update pair (fnil (fn [[n m j]] [(+ n (count (:cases c))) (+ m (count mism)) (+ j jc)]) [0 0 0]))
         (when-not done? (swap! incomplete inc) (swap! cut conj (:file c)))
         (println line)
         (.append report (str "== " line "\n"))
@@ -111,8 +127,12 @@
           (.append report (str nm " stderr: " (short-str (:err r) 4000) "\n")))
         (doseq [[[e x y] i] (map vector mism (range))]
           (let [id (str (:file c) ":" (:line e))]
-            (swap! ids conj {:case id :form (short-str (:text e) 100)})
+            (swap! ids conj {:case id :form (short-str (:text e) 100)
+                             ;; the pair's kinds and a digest of both (oracle.runner/known-changes)
+                             :got (str (runner/result-kind x) " / " (runner/result-kind y) " "
+                                       (runner/digest (str (canon x) "\n" (canon y))))})
             (let [what (str "  " id " " (short-str (:text e) 200) "\n"
+                            (when (and (:missing x) (:missing y)) "    no record in either run\n")
                             (str/join (for [k (conj result-keys :missing) :when (not= (get x k) (get y k))]
                                         (str "    " k "\n      " na (apply str (repeat (- 12 (count na)) " ")) (short-str (get x k) 600)
                                              "\n      " nb (apply str (repeat (- 12 (count nb)) " ")) (short-str (get y k) 600) "\n"))))]
@@ -120,12 +140,15 @@
               (when (< i 5) (print what)))))))
     (.mkdirs (io/file runner/root ".tmp/diffcheck"))
     (spit (io/file runner/root ".tmp/diffcheck/check.txt") (str report))
-    (doseq [[pair [n m]] (sort @pair-totals)]
-      (println (format "== %s's pair: %d of %d cases agree, %d disagree" (name pair) (- n m) n m)))
+    (doseq [[pair [n m j]] (sort @pair-totals)]
+      (println (format "== %s's pair: %d of %d cases agree, %d disagree%s" (name pair) (- n m) n m
+                       (if (= pair :java) (str "; " j " cases with their classes compiled, the others' classes interpreted in both runs") ""))))
     (println (format "== %d of %d cases agree, %d disagree (all in .tmp/diffcheck/check.txt)%s"
                      (- @total @bad) @total @bad
                      (if (pos? @incomplete) (str "; " @incomplete " corpora incomplete") "")))
-    {:ok (and (zero? @bad) (zero? @incomplete))
+    (doseq [x errors] (println "== error:" x))
+    {:ok (and (zero? @bad) (zero? @incomplete) (empty? errors))
+     :errors errors
      :mismatches @ids
      :incomplete @incomplete
      :incomplete-files @cut
@@ -148,7 +171,9 @@
     (spit f (str ";; The known disagreements of the per-form differential check (bin/diffcheck,\n"
                  ";; doc/FUTAMURA-SURVEY.md, \"F2 as built\"): it passes when the disagreeing cases are\n"
                  ";; exactly these. Rewritten by bin/diffcheck --write-expected, which keeps the reasons\n"
-                 ";; of the cases still disagreeing; edit the reasons by hand.\n"
+                 ";; of the cases still disagreeing; edit the reasons by hand. :got is what the case's\n"
+                 ";; two runs were (their kinds and a digest of both), compared as its group's :match\n"
+                 ";; says (:result, the default; :kind; :any).\n"
                  body)
           :encoding "UTF-8")
     ok))
@@ -166,11 +191,13 @@
         [exe gen & sel] (:sel opts)
         ok (case cmd
              "run" (let [r (check exe gen (:jobs opts) (:timeout opts) (vec sel))]
-                     (let [k (cond
-                            (:write-expected opts) (write-known (io/file (:write-expected opts)) r)
-                            (:expected opts) (runner/check-known (io/file (:expected opts)) r)
-                            :else (:ok r))
-                           ;; GTS81 (a): the controls judged in every mode, and printed
+                     ;; a check of nothing fails whatever the reference (mac/013); GTS81 (a): the controls
+                     ;; judged in every mode, and printed
+                     (let [k (and (empty? (:errors r))
+                                  (cond
+                                    (:write-expected opts) (write-known (io/file (:write-expected opts)) r)
+                                    (:expected opts) (runner/check-known (io/file (:expected opts)) r)
+                                    :else (:ok r)))
                            c (runner/controls-ok? r)]
                        (and k c))))]
     (shutdown-agents)
