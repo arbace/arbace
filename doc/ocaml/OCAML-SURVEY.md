@@ -1396,7 +1396,7 @@ the recommendations. The compiled level and the gate are the heavy list's.
 | **AOT (light), testsuite programs** | **310 pass** (248 and 62 new), 74 classed |
 | opam set, oi / AOT | 33 programs: 22 pass at both levels, 1 classed `speed` / `light-speed` (`uutf/test_uutf`, past 120 s), 10 classed (no external dependencies in the set: yojson and containers need cppo or dune's generated shims, six tests need alcotest, b0, Base, unix, ppx_expect) |
 | opam set, library builds flat by ocamlc | 8 of 10 packages (astring, uutf, sexplib0, pprint, fmt, base64, cmdliner, re); yojson, containers classed |
-| opam set, read and round trip | 540 files: 527 equal, 12 rejected (yojson's cppo files, `pkg/pkg.ml` and `build.ml` of the build scripts), 1 differs (`re/lib_test/expect/test_pcre.ml`, a printer corner); `:full` text equal for all 527 |
+| opam set, read and round trip | 540 files: 522 equal, 17 rejected (yojson's 11 cppo and conditional files, the `pkg/pkg.ml`, `build.ml` and `astring_top_init.ml` of the build scripts and toplevel), 1 differs (`re/lib_test/expect/test_pcre.ml`, a printer corner); `:full` text equal for all 522 |
 | opam set, typed and Lambda dumps | all read and shaped, none classed, none unstable (containers: 163 typed, 86 Lambda) |
 | expect tests on the host's expect tool | 370: 259 pass, 108 differ, 3 error |
 | failing (not in a class), every level | 0 |
@@ -1461,3 +1461,12 @@ removed the two named directories with absolute paths instead; the disk was at 9
 minutes when the round-trip checks ran beside the AOT check (2 processes + 2 + 1). Scratch the survey cites: `.tmp/o7/` in the worktree (`corpus.tsv`,
 `ref.tsv`, `check.tsv`, `aot/`, `roles.tsv`, `headers.tsv`, `expect.tsv`, `*.log` the recorded runs, `src/` and `meta/` the opam tarballs and their opam
 files, `exp/` the expect tool), `.tmp/repr-ocaml/opam/` the extracted packages and `.tmp/repr-ocaml/src/opam/` the tarballs.
+
+### Decided (OC80-OC95, OC100-OC109; the user, 2026-10-31)
+
+All as recommended:
+- OC80 (a), OC81 (a), OC82 (a) now and (b) with the compiled level's measurements, OC83 (a), OC84 (a) and then (c) if
+  the compiled level's corpus shows mutual tail recursion deeper than OC92's limit, OC85 (a), OC86 (a), OC87 (a),
+  OC88 (a), OC89 (a), OC90 (a), OC91 (a), OC92 (a), OC93 (a), OC94 (a), OC95 (a).
+- OC100 (a), OC101 (a) now, OC102 (b), OC103 (a), OC104 (b) at the next change to oi, OC105 (b) then (c),
+  OC106 (b) with OC105 (b), OC107 (a), OC108 (a), OC109 (c).
