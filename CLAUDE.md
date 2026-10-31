@@ -395,7 +395,9 @@ Prior art:
   (GTS79 (b)); since GTS81 (a) each check family has a negative control, a case's run judged against another case's
   reference by the family's own judge, that must fail (`test/java/controls.edn`, `test/goi/controls.txt`,
   `test/clojure/controls.edn`, `test/oracle/controls.edn`, `test/diffcheck/controls.edn`): one that passes fails the
-  step (doc/GATE-SURVEY.md, "As built: GTS72, GTS79-GTS82 (write-ahead)"); `--full
+  step (doc/GATE-SURVEY.md, "As built: GTS72, GTS79-GTS82 (write-ahead)"; since GTS84-GTS86 also Java's diagnostics and
+  print levels and goi's errorcheck and directory tests, every control judged from its subject's own run: "As built:
+  GTS83-GTS87 (write-ahead)"); `--full
   --concurrent` runs the chains at once under the big lock held once, the heavy steps on a lock of the
   gate's own (GTS37 (a)); `bin/gate-demos` repeats GTS42 (a)'s two demonstrations as plans (`bin/gate
   --full --plan --builds`); the executables and javac's tool are kept by key in

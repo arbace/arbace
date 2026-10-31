@@ -3662,7 +3662,7 @@ EvalOrder's reference (both exit 0, another stdout: `differ`; another class file
 run's, `--judge`'s) takes the controls' rows apart from the tests (no record, class, essential or levels entry) and
 fails the run on a control that passes (`control passed: ...`) or that has no judged result (`fail` or `differ`)
 while its subject reached the judge (`control not judged: ...`); `--essential-compiled` the same in its own tail.
-The levels read, diagnostics and print have no control: their verdicts are a tool's status and log (read), a
+The levels read, diagnostics and print had no control then: their verdicts are a tool's status and log (read), a
 golden file compared inside `diag_actions` (diagnostics) and the five steps of `java.print/judge` (print), with no
 reference of another test to judge against without a run of its own (doc/GATE-SURVEY.md, "As built: GTS72,
 GTS79-GTS82 (write-ahead)", GTS84).

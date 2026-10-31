@@ -1518,7 +1518,7 @@ at `--aot` built and run) and compares its run, by the same comparison, with gc'
 `main.main` twice against `f(40)=...`) are `fail`; `controls_judged` fails the check when a control passes
 or has another result while its subject passes, and takes the controls out of the results before the
 counts, the known differences, `--record` and the regression rule (no program of the records or the
-divergences). The errorcheck and directory tests' judges (`check_err`, `check_dir`) have no control yet.
+divergences). The errorcheck and directory tests' judges (`check_err`, `check_dir`) had no control then.
 
 Since GTS85 (b) and GTS86 (b) (doc/GATE-SURVEY.md, "As built: GTS83-GTS87 (write-ahead)") a control is no program
 of the list: each checker, once its subject's run reached the comparison, judges that run a second time against
