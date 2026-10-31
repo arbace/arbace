@@ -1094,12 +1094,34 @@
        (or (int-type? (unq (:t r)))
            (and (ptr-type? (unq (:t r))) (void-type? (unq (:to (unq (:t r)))))))))
 
+(defn- null-const-npc?
+  "A null pointer constant for nullptr_t conversions: an integer constant expression of value 0 without a floating
+  conversion in it, or a (void *) 0."
+  [r]
+  (and (null-const? r) (not (:nfp r))))
+
 (defn- binary
   "A binary operator's result from its operands' results."
   [op ra rb]
   (let [ta (decay (unq (:t ra))) tb (decay (unq (:t rb)))
-        pa (promote ta (:bits ra)) pb (promote tb (:bits rb))]
+        pa (promote ta (:bits ra)) pb (promote tb (:bits rb))
+        np? (or (= :nullptr (:k ta)) (= :nullptr (:k tb)))]
     (cond
+      ;; C23 6.5.9, 6.5.8, 6.5.6: nullptr_t compares equal-wise with pointers, nullptr_t and null pointer constants only; it
+      ;; is no operand of an ordered comparison with a pointer, nor of arithmetic
+      (and np? (contains? '#{== !=} op))
+      (do (when-not (or (= :invalid (:k ta)) (= :invalid (:k tb)))
+            (let [other (if (= :nullptr (:k ta)) tb ta) ro (if (= :nullptr (:k ta)) rb ra)]
+              (when-not (or (ptr-type? other) (= :nullptr (:k other)) (null-const-npc? ro))
+                (err! (str "invalid operands to binary " op)))))
+          (res t-int))
+      (and np? (contains? '#{< <= > >=} op))
+      (do (when-not (or (= :invalid (:k ta)) (= :invalid (:k tb)))
+            (err! (if (or (ptr-type? ta) (ptr-type? tb)) "ordered comparison of pointer with null pointer" (str "invalid operands to binary " op))))
+          (res t-int))
+      (and np? (contains? '#{+ - * / % << >> bit-and bit-or bit-xor} op)
+           (not (#{:invalid :vector} (:k ta))) (not (#{:invalid :vector} (:k tb))))
+      (do (err! (str "invalid operands to binary " op)) (res t-int))
       (or (= :vector (:k ta)) (= :vector (:k tb))) (res (if (= :vector (:k ta)) ta tb))
       (cmp-ops op)
       (res t-int :v (when (and (arith-type? ta) (arith-type? tb))
@@ -1141,13 +1163,34 @@
       (do (when (and (#{:struct :union} (:k ta)) (not= :invalid (:k tb))) (err! (str "invalid operands to binary " op)))
           (res (if (ptr-type? ta) ta (if (ptr-type? tb) tb t-int)))))))
 
+(defn- unq-elem
+  "A type without the qualifiers of its own or of an array's elements (a pointer's target, 6.7.4.3)."
+  [t]
+  (if (= :array (:k t)) (assoc t :of (unq-elem (:of t))) (unq t)))
+
+(declare int-class)
+
+(defn- compatible-ptr-targets?
+  "Pointer targets compatible but for the integer classes gcc only warns about (signedness), as `ptr-conv!` takes them."
+  [ua ub]
+  (let [ka (:k ua) kb (:k ub)]
+    (and (int-type? ua) (int-type? ub)
+         (let [ca (int-class (if (= :enum ka) (:k (enum-under ua)) ka))
+               cb (int-class (if (= :enum kb) (:k (enum-under ub)) kb))]
+           (and ca (= ca cb))))))
+
 (defn- cond-type
   "The type of c ? a : b (6.5.15)."
   [ra rb]
   (let [ta (decay (unq (:t ra))) tb (decay (unq (:t rb)))]
     (cond
-      (and (arith-type? ta) (arith-type? tb)) (usual (promote ta (:bits ra)) (promote tb (:bits rb)))
+      ;; C23 6.5.15: a nullptr_t operand pairs with a pointer or another nullptr_t only (a null pointer constant does not help)
+      (and (not= :nullptr (:k ta)) (not= :nullptr (:k tb)) (arith-type? ta) (arith-type? tb))
+      (usual (promote ta (:bits ra)) (promote tb (:bits rb)))
       (and (record-type? ta) (compatible? ta tb)) ta
+      (and (or (= :nullptr (:k ta)) (= :nullptr (:k tb))) (not (and (= :nullptr (:k ta)) (= :nullptr (:k tb))))
+           (not (ptr-type? ta)) (not (ptr-type? tb)) (not (#{:invalid :void} (:k ta))) (not (#{:invalid :void} (:k tb))))
+      (do (err! "type mismatch in conditional expression") ta)
       (and (void-type? ta) (void-type? tb)) t-void
       (or (void-type? ta) (void-type? tb)) t-void
       (and (ptr-type? ta) (null-const? rb)) ta
@@ -1155,11 +1198,16 @@
       (and (= :nullptr (:k ta)) (ptr-type? tb)) tb
       (and (= :nullptr (:k tb)) (ptr-type? ta)) ta
       (and (ptr-type? ta) (ptr-type? tb))
-      (let [ea (:to ta) eb (:to tb) q (disj (into (quals ea) (quals eb)) :atomic)]
+      (let [ea (:to ta) eb (:to tb) q (disj (into (quals ea) (quals eb)) :atomic)
+            ua (unq-elem ea) ub (unq-elem eb)]
         (cond
-          (void-type? (unq ea)) (ptr (cond-> t-void (seq q) (assoc :q q)))
-          (void-type? (unq eb)) (ptr (cond-> t-void (seq q) (assoc :q q)))
-          :else (ptr (cond-> (unq ea) (seq q) (assoc :q q)))))
+          (or (= :invalid (:k ua)) (= :invalid (:k ub))) ta
+          (void-type? ua) (ptr (cond-> t-void (seq q) (assoc :q q)))
+          (void-type? ub) (ptr (cond-> t-void (seq q) (assoc :q q)))
+          ;; 6.5.15 p6: pointers to qualified or unqualified versions of compatible types give a pointer to the composite
+          ;; type with the qualifiers of both (CS141); else gcc's "pointer type mismatch"
+          (or (compatible? ua ub) (compatible-ptr-targets? ua ub)) (ptr (reduce qual ua q))
+          :else (do (err! "pointer type mismatch in conditional expression") (ptr (reduce qual ua q)))))
       (ptr-type? ta) ta
       (ptr-type? tb) tb
       :else ta)))
@@ -1372,9 +1420,13 @@
     (inc (code-unit-count (unq (parse-type (second init))) (nth init 2)))
     :else nil))
 
+(declare ptr-conv!)
+
 (defn- check-init
-  "An initializer's expressions checked (its values' types are the object's, converted)."
-  [init]
+  "An initializer's expressions checked (its values' types are the object's, converted). `et`, the element type of a
+  one-dimensional array of scalars, has the plain elements converted as an initialization (nullptr_t's rules, CS141)."
+  ([init] (check-init init nil))
+  ([init et]
   (cond
     (and (seq? init) (= 'init (first init)))
     (doseq [e (rest init)]
@@ -1384,9 +1436,10 @@
                                             (cond (keyword? d) nil
                                                   (vector? d) (doseq [x d] (exi x))
                                                   :else (ex d)))
+        (and et (not (seq? e))) (let [r (ex e)] (ptr-conv! et r "initialization") r)
         :else (check-init e)))
     (and (seq? init) (= 'c/embed (first init))) nil
-    :else (ex init)))
+    :else (ex init))))
 
 (defn- unq*
   "A type without the qualifiers at its top (and, for an array, on its elements)."
@@ -1403,6 +1456,12 @@
   one integer class differing in signedness are only a warning), and a pedwarn for a discarded qualifier."
   [dst rs ctx]
   (let [dt (unq dst) st (decay (unq (:t rs)))]
+    ;; C23 6.3.2.4 (nullptr_t): to a pointer or bool from nullptr_t, to nullptr_t from nullptr_t or a null pointer constant only
+    (cond
+      (and (= :nullptr (:k st)) (not (#{:ptr :nullptr :bool :invalid :vector} (if (= :enum (:k dt)) (:k (enum-under dt)) (:k dt)))))
+      (err! (str "incompatible types when converting nullptr_t to " (tstr dt) " in " ctx))
+      (and (= :nullptr (:k dt)) (not (#{:nullptr :invalid} (:k st))) (not (null-const-npc? rs)))
+      (err! (str "incompatible types when converting " (tstr st) " to nullptr_t in " ctx)))
     (when (and (ptr-type? dt) (ptr-type? st) (not (null-const? rs)))
       (let [a (:to dt) b (:to st)
             ua (unq* a) ub (unq* b)
@@ -1494,15 +1553,22 @@
             aset (let [[a i v] args
                        ra (ex a) ri (ex i)
                        e (emit! (res (deref-type (binary-index-type ra ri)) :lv true))
-                       rv (ex v)]
+                       rv (ex v)
+                       _ (assign-check e rv)]
                    (emit! (res (unq (:t e)) :av (let [v (or (:v rv) (:av rv))] (when (integer? v) (conv-val v (:t e)))))))
             (inc! dec! pre-inc! pre-dec!) (let [r (ex (first args))] (assign-check r nil) (emit! (res (unq (:t r)) :bits (:bits r))))
             aget (let [[a i] args
                        ra (ex a) ri (ex i)]
                    (emit! (res (deref-type (binary-index-type ra ri)) :lv true)))
             -> (let [[p & ms] args] (nested-arrow p ms))
-            conv (let [[tf e] args t (parse-type tf) r (ex e)]
-                   (emit! (res (unq t) :v (conv-val (:v r) t) :vla-expr (:vla-expr r))))
+            conv (let [[tf e] args t (parse-type tf) r (ex e)
+                       _ (when (and (= :nullptr (:k (unq t))) (not (#{:nullptr :invalid} (:k (decay (unq (:t r))))))
+                                    (not (null-const-npc? r)))
+                           (err! (str "conversion of " (tstr (decay (unq (:t r)))) " to nullptr_t")))
+                       _ (when (and (= :nullptr (:k (decay (unq (:t r))))) (not (#{:ptr :nullptr :bool :invalid :void} (if (= :enum (:k (unq t))) (:k (enum-under (unq t))) (:k (unq t))))))
+                           (err! (str "conversion of nullptr_t to " (tstr (unq t)))))]
+                   (emit! (res (unq t) :v (conv-val (:v r) t) :vla-expr (:vla-expr r)
+                               :nfp (or (:nfp r) (float-type? (unq (:t r)))))))
             sizeof (let [r (ex (first args))]
                      (emit! (if (vla? (:t r)) (res t-ulong) (sizeof-res (:t r)))))
             sizeof-type (let [t (parse-type (first args))] (emit! (if (vla? t) (res t-ulong) (sizeof-res t))))
@@ -1723,7 +1789,9 @@
             ;; the object is in scope in its own initializer (6.2.1)
             e (record! nm (declare-object! n t m (if (= :fn (:k (unq t))) :fn :obj) nil false))]
         (when has-init
-          (let [r (if (and (seq? init) (= 'init (first init))) (do (check-init init) nil) (ex init))
+          (let [r (if (and (seq? init) (= 'init (first init))) (do (check-init init (let [ut (unq t)]
+                                                                                        (when (and (= :array (:k ut)) (let [k (:k (unq (:of ut)))] (or (int-type? (unq (:of ut))) (#{:float :double :ptr :nullptr} k))))
+                                                                                          (unq (:of ut))))) nil) (ex init))
                 _ (when r (ptr-conv! t r "initialization"))
                 _ (when (:constexpr m) (constexpr-check! t init r))]
             (when (and (:constexpr m) r (some? (:v r)))
@@ -1908,7 +1976,8 @@
                        (recur (nnext xs))))
                    nil)
           switch (let [rc (ex (first args))
-                       ct (promote (unq (:t rc)))]
+                       ct (promote (unq (:t rc)))
+                       _ (when (or (= :nullptr (:k ct)) (float-type? ct) (ptr-type? ct) (record-type? ct)) (err! "switch quantity not an integer"))]
                    (binding [*switch* (when (and (int-type? ct) (not= :bool (:k ct))) {:t ct :seen (atom [])})
                              *in-switch* true]
                      (with-scope (check-block-items (rest args))))
