@@ -683,3 +683,35 @@ git history:
   - Recorded in the record's `:demonstrations`.
   - A proposal for later (GTS80): publication replaces an empty or unreadable pass, and `record_pass` writes its
     three files through temporary names.
+
+## 2026-10-31: bin/java-check's two judges
+
+- **Found** while refreshing the v2 record. Java's interp and compiled records held no failure at all: every
+  `:fail`, `:differ`, `:timeout` and `:flaky` of 2026-10-29 had become `:pass` (interp 258, compiled 438).
+- **Cause:** GT5 (903b053e, 2026-10-28) added `bin/java-check --judge` as a function named `judge`, defined
+  after the run's own `judge` (the status and stdout against the JDK's). Bash keeps the last definition. Each run's
+  `res=$(judge ST OUT ERR)` therefore called the subcommand, which printed "no results ST" on stderr and nothing on
+  stdout, and an empty result is `pass`.
+  - Since then, every interp and compiled run that loaded counted as a pass, whatever its status or output, and
+    even when the executable did not exist (exit 127; my probe).
+  - Load failures, refusals and reads are decided outside `judge`, so they stayed honest.
+- **What it affects:**
+  - The levels interp and compiled, through `run_actions`: the gate's java-interp and java-compiled-full, the essential
+    java-check and java-compiled, and the `again` retry.
+  - The records rewritten by GT7's fix round (4836664f), and with them the Java eval and AOT cells.
+  - That fix round's journal claim that GT6's CPU limits had turned 437 compiled and 253 interp timeouts into passes is
+    wrong, and is corrected here: those were the bug's passes. The records at the draft (6ad08d82) predate GT5 and are
+    honest.
+- **Not affected:** the other levels (read, classes, diagnostics, print), whose fresh results still show their
+  failures, and the other checks: goi, goi-aot, diffcheck, the suite, the oracle.
+- **The search for others:** no other function is defined twice in a script of `bin/`, `tools/` or `test/`, and none
+  collides with the libraries it sources (two levels deep). Among Arbace's tool and check namespaces, the only
+  duplicate definition is an identical `spread?` in goi's checker.
+- **Fix:** the subcommand's function is `judge_saved`. Two tests that the bug passed (t03210 jls/Exceptions,
+  t03491 CRCTest) fail again with their reasons of 2026-10-29, and `--judge` judges saved results as before.
+- **Next (the user's decision):**
+  - Interp and compiled are re-run with the fixed judge and re-recorded, every non-pass classed.
+  - The Java steps rekey (`bin/java-check` is in their keys), so they get a clean rerun (`--only changed`) and a keyed
+    concurrent `--full`, before the tag.
+  - Proposal GTS81: each check family gets a negative control, a case that must fail, so that a judge that passes
+    everything fails the gate.
