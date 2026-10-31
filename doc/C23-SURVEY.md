@@ -3463,3 +3463,8 @@ compiled shard was stopped at the disk limit rather than finished.
 All as recommended: CS180 (a); CS181 (b), starting with gnu23-tag-composite-5; CS182 (a), CS162 not now; CS183 (b),
 CS161 still not now; CS184 (a): the dg check stops here, CS164's heavy checks and `bin/ci annotations` run before the
 branch is merged.
+
+### Decided (CS190-CS195; the user, 2026-10-31)
+
+All as recommended: CS190 (a), the 145-program shard when the disk allows, the full `--aot --record` in the heavy
+window; CS191 (a), (b) with C8; CS192 (a); CS193 (a); CS194 (a); CS195 (a).
