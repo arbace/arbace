@@ -259,6 +259,8 @@
       (w t 0))
     (str b)))
 
+(def ^:dynamic *compat-depth* 0)
+
 (defn compatible?
   "Type compatibility (6.2.7), qualifiers compared."
   [a b]
@@ -280,7 +282,13 @@
                                  (or (identical? ra rb)
                                      (and (= (.get ra :tag) (.get rb :tag)) (some? (.get ra :tag))
                                           (if (and (.get ra :complete) (.get rb :complete))
-                                            (= (map :name (.get ra :members)) (map :name (.get rb :members)))
+                                            ;; C23 (6.2.7): the same members, of compatible types (self-references cut off)
+                                            (and (= (map :name (.get ra :members)) (map :name (.get rb :members)))
+                                                 (or (> (long *compat-depth*) 2)
+                                                     (binding [*compat-depth* (inc (long *compat-depth*))]
+                                                       (every? true? (map (fn [x y] (and (= (:bits x) (:bits y)) (compatible? (:t x) (:t y))
+                                                                                   (or (not= :array (:k (:t x))) (= (:n (:t x)) (:n (:t y))))))
+                                                                          (.get ra :members) (.get rb :members))))))
                                             (identical? (.get ra :scope) (.get rb :scope))))))
         :bitint (and (= (:n a) (:n b)) (= (boolean (:u a)) (boolean (:u b))))
         :complex (compatible? (:of a) (:of b))
@@ -577,6 +585,20 @@
 
 (defn- spec-attrs-packed [m] (some #(= "packed" (first %)) (apply attrs-of m all-attr-keys)))
 
+(defn- bitint-width
+  "The width of _BitInt(a) (6.7.3.1): gcc's errors for a width that is not positive, below 2 for the signed type, or
+  above BITINT_MAXWIDTH (x86-64: 65535), and the pedwarn before C23."
+  ^long [a unsigned]
+  (let [v (:v (ex a))
+        v (when (integer? v) (long v))]
+    (when (< (std-num) 123) (pedwarn! (str "ISO C does not support '" (when unsigned "unsigned ") "_BitInt(" v ")' before C23")))
+    (cond
+      (nil? v) 32
+      (<= v 0) (do (err! (str "'_BitInt' argument '" v "' is not a positive integer constant expression")) 32)
+      (and (not unsigned) (< v 2)) (do (err! "'signed _BitInt' argument must be at least 2") 32)
+      (> v 65535) (do (err! (str "'_BitInt' argument '" v "' is larger than 'BITINT_MAXWIDTH' '65535'")) 32)
+      :else v)))
+
 (defn parse-type
   "A type form's type (§5.1); struct, union and enum definitions in it defined where they stand,
   their annotations and their expressions' written."
@@ -639,8 +661,8 @@
         (struct union) (check-struct f (keyword (name h)))
         enum (check-enum f)
         complex {:k :complex :of (parse-type a)}
-        bit-int (do (feat! :cc-bitint) {:k :bitint :n (long (or (:v (ex a)) 32))})
-        unsigned-bit-int (do (feat! :cc-bitint) {:k :bitint :n (long (or (:v (ex a)) 32)) :u true})
+        bit-int (do (feat! :cc-bitint) {:k :bitint :n (bitint-width a false)})
+        unsigned-bit-int (do (feat! :cc-bitint) {:k :bitint :n (bitint-width a true) :u true})
         typeof (let [r (ex a)] (or (:t r) t-invalid))
         typeof-unqual (let [r (ex a)] (unq (or (:t r) t-invalid)))
         typeof-type (parse-type a)
@@ -680,6 +702,36 @@
              :else (let [t (parse-type m)] [{:name nil :t t}])))
          ms)))
 
+(declare rec-same?)
+
+(defn- type-eq
+  "The same type (not just compatible): tagged types by identity."
+  [a b]
+  (and (= (:k a) (:k b)) (= (quals a) (quals b))
+       (case (:k a)
+         (:struct :union) (or (identical? (:rec a) (:rec b))
+                              ;; tagless types repeated in a repeated definition are the same
+                              (let [^HashMap ra (:rec a) ^HashMap rb (:rec b)]
+                                (and (nil? (.get ra :tag)) (nil? (.get rb :tag)) (.get ra :complete) (.get rb :complete)
+                                     (rec-same? ra rb))))
+         :ptr (type-eq (:to a) (:to b))
+         :array (and (type-eq (:of a) (:of b)) (= (or (:n a) 0) (or (:n b) 0)))
+         :fn (and (type-eq (:ret a) (:ret b)) (= (count (:params a)) (count (:params b))) (= (boolean (:variadic a)) (boolean (:variadic b)))
+                  (every? true? (map type-eq (:params a) (:params b))))
+         (compatible? a b))))
+
+(defn- rec-same?
+  "Whether the new definition `b` of a tag repeats the definition `a` (C23 6.2.7): the same members in order, with the
+  same names, types, widths and alignments."
+  [^HashMap a ^HashMap b]
+  (let [ma (.get a :members) mb (.get b :members)]
+    (and (= (count ma) (count mb))
+         (every? true? (map (fn [x y] (and (= (:name x) (:name y)) (= (:bits x) (:bits y)) (= (:align x) (:align y))
+                                           (= (boolean (:mpacked x)) (boolean (:mpacked y)))
+                                           (type-eq (:t x) (:t y))))
+                            ma mb))
+         (= (.get a :min-align) (.get b :min-align)))))
+
 (defn- check-struct
   "A struct or union type form: a reference or a definition."
   [f kind]
@@ -689,13 +741,19 @@
         fm (meta f)]
     (if (nil? body)
       {:k kind :rec (if tag (tag-ref kind tag false) (new-rec kind nil))}
-      (let [^HashMap r (if tag
-                         (let [^HashMap here (.get ^HashMap (:tags (top-scope)) tag)]
-                           (if (and here (= kind (.get here :kind)) (not (.get here :complete)) (not (.get here :defining)))
-                             here
-                             (let [r (new-rec kind tag)] (.put ^HashMap (:tags (top-scope)) tag r) r)))
+      (let [^HashMap here (when tag (.get ^HashMap (:tags (top-scope)) tag))
+            ;; C23 (6.7.3.3): a complete tag defined again in its scope is the same type when the contents are the
+            ;; same; the body is then read against the existing type (its own tag names it), else gcc's error
+            nested (and here (= kind (.get here :kind)) (or (.get here :defining) (.get here :redefining)))
+            redef (when (and here (= kind (.get here :kind)) (.get here :complete) (not nested)) here)
+            _ (when nested (err! (str "nested redefinition of '" (name kind) " " tag "'")))
+            ^HashMap r (if tag
+                         (if (and here (= kind (.get here :kind)) (not (.get here :complete)) (not nested))
+                           here
+                           (let [r (new-rec kind tag)] (when-not redef (.put ^HashMap (:tags (top-scope)) tag r)) r))
                          (new-rec kind nil))
             _ (.put r :defining true)
+            _ (when redef (.put redef :redefining true))
             ms (member-forms body)
             _ (attr-args! fm)
             _ (when (contains? fm :c/alignas) (ex (:c/alignas fm)))
@@ -706,7 +764,14 @@
         (when (cx :pack) (feat! :cc-attr-layout))
         (layout! r ms kind packed (cx :pack))
         (.remove r :defining)
-        (let [t {:k kind :rec r}]
+        (when redef (.remove redef :redefining))
+        (let [t (if (and redef (rec-same? redef r))
+                  {:k kind :rec redef}
+                  (do (when redef
+                        (err! (str "redefinition of '" (name kind) " " tag "'"))
+                        (.put ^HashMap (:tags (top-scope)) tag r))
+                      {:k kind :rec r}))
+              ^HashMap r (:rec t)]
           (when (seq as) (feat! :cc-attr-layout))
           ;; cc's tree has no member list for {}: no s line
           (when (seq body) (ann! (str "s " (tstr t) " " (.get r :size) " " (.get r :align))))
@@ -731,20 +796,35 @@
       :else t-long)))
 
 (defn- check-enum [f]
-  (let [args (rest f)
+  (let [line0 *line*
+        args (rest f)
         tag (when-not (vector? (first args)) (ident (first args)))
         body (first (filter vector? args))
         under (when-let [u (:c/underlying (meta f))] (parse-type u))]
+    (when (and under (= :bitint (:k (unq under))))
+      (err! "invalid 'enum' underlying type"))
     (if (nil? body)
-      (let [^HashMap r (if tag (tag-ref :enum tag (some? under)) (new-rec :enum nil))]
+      (let [^HashMap pre (when (and tag under) (.get ^HashMap (:tags (top-scope)) tag))
+            _ (when (and pre (= :enum (.get pre :kind)) (not (.get pre :fixed)))
+                (err! "'enum' declared both with and without fixed underlying type"))
+            ^HashMap r (if tag (tag-ref :enum tag (some? under)) (new-rec :enum nil))]
         (when under (.put r :under (unq under)) (.put r :fixed true))
         {:k :enum :rec r})
-      (let [^HashMap r (if tag
-                         (let [^HashMap here (.get ^HashMap (:tags (top-scope)) tag)]
-                           (if (and here (= :enum (.get here :kind)) (not (.get here :complete)))
-                             here
-                             (let [r (new-rec :enum tag)] (.put ^HashMap (:tags (top-scope)) tag r) r)))
+      (let [^HashMap here (when tag (.get ^HashMap (:tags (top-scope)) tag))
+            _ (when (and here under (= :enum (.get here :kind)) (not (.get here :fixed)) (not (.get here :complete)))
+                (err! "'enum' declared both with and without fixed underlying type"))
+            _ (when (and here (nil? under) (= :enum (.get here :kind)) (.get here :fixed) (not (.get here :complete)))
+                (err! "'enum' declared with but defined without fixed underlying type"))
+            nested (and here (= :enum (.get here :kind)) (or (.get here :defining) (.get here :redefining)))
+            redef (when (and here (= :enum (.get here :kind)) (.get here :complete) (not nested)) here)
+            _ (when nested (err! (str "nested redefinition of 'enum " tag "'")))
+            ^HashMap r (if tag
+                         (if (and here (= :enum (.get here :kind)) (not (.get here :complete)) (not nested))
+                           here
+                           (let [r (new-rec :enum tag)] (.put ^HashMap (:tags (top-scope)) tag r) r))
                          (new-rec :enum nil))
+            _ (.put r :defining true)
+            _ (when redef (.put redef :redefining true))
             t {:k :enum :rec r}
             under (or under (when (.get r :fixed) (.get r :under)))]
         (when under (.put r :under (unq under)) (.put r :fixed true))
@@ -754,6 +834,8 @@
                   [nm vf] (if (vector? e) [(ident (first e)) (second e)] [(ident e) nil])
                   rv (when vf (ex vf))
                   v (if vf (when (integer? (:v rv)) (:v rv)) nxt)
+                  _ (when (and under (some? v) (integer? v) (not= :bitint (:k (unq under))) (not= (wrap v under) v))
+                      (err! (if vf "enumerator value outside the range of the underlying type" "overflow in enumeration values")))
                   v (if (and under (some? v)) (wrap v under) v)
                   _ (when under (feat! :cc-enum-type))
                   ;; C23 (6.7.3.3): during the definition a constant that int cannot hold has its
@@ -761,15 +843,35 @@
                   ct (cond under t ; the constants of a fixed type are of the enumerated type
                            (or (nil? v) (<= -2147483648 v 2147483647)) t-int
                            vf (let [et (unq (:t rv))] (if (int-type? et) (promote et) (enum-type-of [v])))
-                           :else (let [[_ signed] (int-bits pt)]
+                           :else (let [[bits signed] (int-bits pt)]
+                                   ;; the previous constant plus one overflowing a 64-bit (or wider) type (gcc: an error)
+                                   (when (and (>= (long bits) 64) (not= (wrap v pt) v)) (err! "overflow in enumeration values"))
                                    (cond (= (wrap v pt) v) pt signed t-long :else t-ulong)))]
               (ann! (str "n " nm " " (if (some? v) v "?")))
-              (declare! nm {:kind :enumconst :t ct :v v})
+              ;; a constant a repeated definition repeats is the same declaration (C23 6.7.3.3)
+              (when-not (and redef (let [oc (.get redef :consts)] (and (contains? oc nm) (= (get oc nm) v))))
+                (when (= :enumconst (:kind (.get ^HashMap (:ord (top-scope)) nm)))
+                  (binding [*line* line0] (err! (str "redeclaration of enumerator '" nm "'"))))
+                (declare! nm {:kind :enumconst :t ct :v v}))
               (recur (next es) (when (some? v) (+' v 1)) ct (if (some? v) (conj vals v) vals) (conj names nm)))
             (do (when-not under (.put r :under (if (seq vals) (enum-type-of vals) t-uint)))
                 (.put r :complete true)
+                (.remove r :defining)
+                (when redef (.remove redef :redefining))
+                (.put r :consts (zipmap names vals))
+                ;; a repeated definition (C23 6.7.3.3): the same enumerators with the same values, the same underlying type
+                (when redef
+                  (if (and (= (.get redef :consts) (.get r :consts))
+                           (= (boolean (.get redef :fixed)) (boolean (.get r :fixed)))
+                           (or (not (.get r :fixed)) (type-eq (.get redef :under) (.get r :under))))
+                    (.put ^HashMap (:tags (top-scope)) tag redef)
+                    (err! (str "redefinition of 'enum " tag "'"))))
+                ;; no integer type holds a negative value and one above intmax_t (gcc: a pedwarn)
+                (when (and (not under) (some neg? vals) (some #(> % 9223372036854775807) vals))
+                  (pedwarn! "enumeration values exceed range of largest integer"))
                 ;; C23: once complete, when a constant is outside int's range every constant has the enumerated type
-                (when (and (not under) (c23?) (some #(not (<= -2147483648 % 2147483647)) vals))
+                (when (and (not under) (c23?) (some #(not (<= -2147483648 % 2147483647)) vals)
+                           (not (and redef (identical? redef (.get ^HashMap (:tags (top-scope)) tag)))))
                   (doseq [nm names] (when-let [e (lookup nm)] (declare! nm (assoc e :t t))))))))
         t))))
 
@@ -1008,6 +1110,8 @@
    "__builtin_islessgreater" t-int "__builtin_va_start" t-void "__builtin_va_end" t-void "__builtin_c23_va_start" t-void
    "__builtin_prefetch" t-void "__builtin_assume_aligned" (ptr t-void) "__builtin_strlen" t-ulong "__builtin_huge_valf" t-float})
 
+(declare ptr-conv! constexpr-check!)
+
 (defn- call
   "A call's result: the callee's result, its arguments checked."
   [f args form]
@@ -1029,6 +1133,14 @@
         ras (if (= fname "__builtin_has_attribute") [(ex (first args))] (mapv ex args))]
     (when (and (nil? ft) (not= :invalid (:k (unq (:t rf)))))
       (err! "called object is not a function or function pointer"))
+    (when (and ft (:proto ft) (not (:variadic ft)) (not (:builtin rf))
+               (> (count ras) (count (:params ft))))
+      (err! "too many arguments to function"))
+    (when (and ft (:proto ft) (not (:builtin rf)) (< (count ras) (count (:params ft))))
+      (err! "too few arguments to function"))
+    (when (and ft (:proto ft) (not (:builtin rf)))
+      (doseq [[i pt] (map-indexed vector (:params ft))]
+        (when-let [ra (nth ras i nil)] (ptr-conv! pt ra (str "passing argument " (inc i))))))
     (or (when-let [b (or (:builtin rf) (when (and known fname (str/starts-with? fname "__builtin_")) fname))]
           (call-builtin b ras ft))
         (res (if ft (:ret ft) t-int)))))
@@ -1149,6 +1261,37 @@
     (and (seq? init) (= 'c/embed (first init))) nil
     :else (ex init)))
 
+(defn- unq*
+  "A type without the qualifiers at its top (and, for an array, on its elements)."
+  [t]
+  (if (= :array (:k t)) (update (unq t) :of unq*) (unq t)))
+
+(def ^:private int-class
+  {:bool :bool :char :char :schar :char :uchar :char :short :short :ushort :short :int :int :uint :int
+   :long :long :ulong :long :llong :llong :ullong :llong :int128 :i128 :uint128 :i128})
+
+(defn- ptr-conv!
+  "6.5.17.2 / 6.5.2.2 / 6.8.7.4: the pointer result `rs` converted to the pointer type `dst` in `ctx` (assignment,
+  initialization, argument or return): gcc 14+ gives an error for pointee types that are not compatible (types of
+  one integer class differing in signedness are only a warning), and a pedwarn for a discarded qualifier."
+  [dst rs ctx]
+  (let [dt (unq dst) st (decay (unq (:t rs)))]
+    (when (and (ptr-type? dt) (ptr-type? st) (not (null-const? rs)))
+      (let [a (:to dt) b (:to st)
+            ua (unq* a) ub (unq* b)
+            ka (:k ua) kb (:k ub)]
+        (cond
+          (or (= :invalid ka) (= :invalid kb)) nil
+          (or (= :void ka) (= :void kb) (compatible? ua ub)
+              (and (int-type? ua) (int-type? ub)
+                   (let [ca (int-class (if (= :enum ka) (:k (enum-under ua)) ka))
+                         cb (int-class (if (= :enum kb) (:k (enum-under ub)) kb))]
+                     (and ca (= ca cb)))))
+          (let [qa (quals a) qb (quals b)]
+            (when-not (every? qa qb)
+              (pedwarn! (str ctx " discards qualifier from pointer target type"))))
+          :else (err! (str ctx ": incompatible pointer type")))))))
+
 (defn- assign-check [rl rr]
   (when (and (:lv rl) (contains? (quals (:t rl)) :const) (not (:init rl)))
     (err! "assignment of read-only location")))
@@ -1213,6 +1356,7 @@
             set! (if (= 2 n)
                    (let [l (ex (first args)) r (ex (second args))]
                      (assign-check l r)
+                     (ptr-conv! (:t l) r "assignment")
                      ;; cc gives an assignment the value it stores when that is an integer constant (:av: written, never folded)
                      (emit! (res (unq (:t l)) :bits (:bits l) :av (let [v (or (:v r) (:av r))] (when (integer? v) (conv-val v (:t l)))))))
                    (let [l (ex (first args)) r (ex (nth args 2))]
@@ -1241,6 +1385,7 @@
                                t (if (and (= :array (:k t)) (nil? (:n t)))
                                    (assoc t :n (init-count (:of t) (apply list 'init els))) t)]
                            (check-init (apply list 'init els))
+                           (when (:constexpr (meta f)) (constexpr-check! t (first els) nil))
                            (emit! (res t :lv true :av (when (and (scalar-type? (unq t)) (= 1 (count els)))
                                                         (let [e (first els)] (cond (integer? e) e (instance? Character e) (long (int (char e))) :else nil))))))
             stmt-expr (let [r (with-scope (check-block-items args))]
@@ -1351,6 +1496,14 @@
             ;; cc gives every declaration of a redeclared identifier one type
             (feat! :cc-redeclared)
             (when-let [^java.util.Set fs (:feats prev)] (.add fs :cc-redeclared)))
+        ;; a block-scope extern redeclares the file scope's identifier (6.2.2)
+        prev* (or (when (and prev (#{:obj :fn} (:kind prev))) prev)
+                  (when (and (:extern m) (not (file-scope?)))
+                    (let [^ArrayList sc (cx :scopes) p (.get ^HashMap (:ord (.get sc 1)) n)]
+                      (when (and p (#{:obj :fn} (:kind p))) p))))
+        _ (when (and prev* (not param) (not (compatible? (:t prev*) t))
+                     (not= :invalid (:k (:t prev*))) (not= :invalid (:k t)))
+            (err! (str "conflicting types for '" n "'")))
         t (if (and prev (#{:obj :fn} (:kind prev))) (composite (:t prev) t) t)
         e {:kind kind :t t :linkage lk :v (when (and (:constexpr m) (some? init)) (:v init)) :m m :feats (cx :feats)
            :id (Object.) :file-scope (file-scope?) :name n}]
@@ -1367,6 +1520,38 @@
 
 (defn- auto-type? [m]
   (or (:c/auto-type m) (and (:auto m) (:c/implicit-int m) (c23?))))
+
+(defn- string-bytes
+  "The bytes of a string form's value and whether it is a u8 literal: [bytes u8?], or nil for another form."
+  [init]
+  (let [bs (fn [parts] (vec (mapcat (fn [p] (cond (string? p) (map #(bit-and (long %) 255) (.getBytes ^String p "UTF-8"))
+                                                  (integer? p) [(bit-and (long p) 255)]))
+                                    parts)))]
+    (cond
+      (and (seq? init) (= 'byte-string (first init))) [(bs (rest init)) false]
+      (and (seq? init) (= 'lit (first init)) (= 'unsigned-char (second init))
+           (seq? (nth init 2 nil)) (= 'byte-string (first (nth init 2)))) [(bs (rest (nth init 2))) true]
+      (string? init) [(bs [init]) false]
+      :else nil)))
+
+(defn- constexpr-check!
+  "C23 6.7.2's constraints on a constexpr object's initializer that gcc diagnoses: a floating or complex value for an
+  integer object, and a string whose elements the element type cannot represent (a plain literal's are `char`s)."
+  [t init r]
+  (let [ut (unq t)]
+    (cond
+      (and (= :array (:k ut)) (int-type? (unq (:of ut))))
+      (when-let [[bs u8] (string-bytes (if (and (seq? init) (= 'init (first init)) (= 2 (count init))) (second init) init))]
+        (let [et (:k (unq (:of ut)))
+              char-signed (char-signed?)
+              [lo hi] (case et :uchar [0 255] :schar [-128 127] :char (if char-signed [-128 127] [0 255]) nil)]
+          (when lo
+            (when (some (fn [b] (let [v (if (and (not u8) char-signed (> b 127)) (- b 256) b)] (or (< v lo) (> v hi)))) bs)
+              (err! "'constexpr' initializer not representable in type of object")))))
+      (and r (int-type? ut) (not= :bool (:k ut)))
+      (let [it (unq (:t r))]
+        (when (or (float-type? it) (complex-type? it))
+          (err! "'constexpr' integer initializer is not an integer constant expression"))))))
 
 (defn- check-var
   "(c/var name init?)."
@@ -1387,7 +1572,9 @@
             ;; the object is in scope in its own initializer (6.2.1)
             e (record! nm (declare-object! n t m (if (= :fn (:k (unq t))) :fn :obj) nil false))]
         (when has-init
-          (let [r (if (and (seq? init) (= 'init (first init))) (do (check-init init) nil) (ex init))]
+          (let [r (if (and (seq? init) (= 'init (first init))) (do (check-init init) nil) (ex init))
+                _ (when r (ptr-conv! t r "initialization"))
+                _ (when (:constexpr m) (constexpr-check! t init r))]
             (when (and (:constexpr m) r (some? (:v r)))
               (record! nm (declare! n (assoc e :v (conv-val (:v r) t)))))
             (when (and (= :array (:k (unq t))) (vla? t)) nil)))
@@ -1420,6 +1607,8 @@
         m (meta nm)
         n (ident nm)
         kr (:c/kr (meta ps))
+        _ (when (and kr (seq ps) (>= (std-num) 123))
+            (binding [*line* (or (:line (meta ps)) *line*)] (pedwarn! "old-style function definition")))
         ;; the result type first: a struct it defines is the enclosing scope's
         ret (parse-type (or (:tag (meta ps)) 'int))]
     (with-scope ;; the parameters' scope (the body's block shares it)
@@ -1444,6 +1633,7 @@
         n (ident nm)]
     (if (vector? ps)
       (let [t (parse-type (list 'fn ps (or (:tag (meta ps)) 'int)))]
+        (when (:thread_local m) (err! "storage class specifier '_Thread_local' in a function declaration"))
         (record! nm (declare-object! n t m :fn nil false)))
       (let [t (parse-type (:tag m))]
         (record! nm (declare-object! n t m :fn nil false))))))
@@ -1456,6 +1646,9 @@
         t (if-let [al (some #(when (= "aligned" (first %)) (aligned-value (second %))) (attrs-of m :c/attrs :c/after-attrs :c/decl-attrs))]
             (assoc t :talign al) t)]
     (attr-args! m)
+    (let [prev (.get ^HashMap (:ord (top-scope)) n)]
+      (when (and prev (= :typedef (:kind prev)) (not (type-eq (:t prev) t)))
+        (err! (str "conflicting types for '" n "'"))))
     (ann! (str "d " n " n " (tstr t)))
     (record! nm (declare! n {:kind :typedef :t t}))))
 
@@ -1553,7 +1746,10 @@
           c/asm (do (feat! :asm) nil)
           (default label goto continue break c/local-labels c/attr-decl) nil
           goto* (do (ex (first args)) nil)
-          return (when (seq args) (ex (first args)) nil)
+          return (when (seq args)
+                   (let [r (ex (first args))]
+                     (when-let [rt (cx :fn-ret)] (ptr-conv! rt r "return")))
+                   nil)
           (c/define c/undef c/directive c/pragma c/include) nil
           (if (decl-form? s)
             (do (check-decl s) nil)
