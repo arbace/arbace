@@ -140,7 +140,7 @@
        (when *texts* (swap! *texts* update (keyword why) (fnil inc 0)))
        ;; a macro invocation keeps its line: its expansion may hold __LINE__ (the printer writes a #line before it)
        (let [f (list 'cpp/text (utf8 (close-split (text-at b e))))]
-         (if (and semi (macro-node? n)) ; a statement or declaration: the printer can put a #line before it
+         (if (macro-node? n) ; the printer can put a #line before it (CP79 (b), CP91 (b))
            (vary-meta f assoc :cpp/line (logical-line s b))
            f)))
      (gap (keyword why) (str "no form for " why ", and its text is not plain")))))
@@ -150,6 +150,12 @@
   "A node whose first and last tokens come from one macro expansion (a compound statement the macro's body writes with its braces)."
   [n] (let [r (:range n) b (:begin r) e (:end r)]
         (boolean (and (macro-loc? b) (macro-loc? e) (:expansionLoc b) (= (:expansionLoc b) (:expansionLoc e))))))
+
+(defn- uses-scratch?
+  "True when a token of the node's tree is spelled in clang's scratch space: a __LINE__, __FILE__ or __COUNTER__, a pasted or
+  stringized token. Such an invocation's expansion depends on where it stands (CP91 (b))."
+  [n]
+  (boolean (some #(= "<scratch space>" (get-in % [:range :begin :spellingLoc :file])) (tree-seq #(seq (:inner %)) :inner n))))
 
 (def ^:dynamic *in-macro* "true while a macro node's own AST is converted (CP41 (b)): its nodes are not macro texts again" false)
 
@@ -166,11 +172,13 @@
     (if (and (not semi) (= 1 (count fs)) (not (instance? arbace.lang.IObj (first fs))))
       ;; CP73 (c): a value that cannot carry metadata (a number from INT_MAX or NULL, true) is wrapped: (cpp/macro "text" value)
       (do (when *texts* (swap! *texts* update :macro-form (fnil inc 0)))
-          [(list 'cpp/macro (second tf) (first fs))])
+          [(if (and (:cpp/line (meta tf)) (uses-scratch? n)) ; CP91 (b): and its line when the expansion depends on it
+             (list 'cpp/macro (second tf) (first fs) (:cpp/line (meta tf)))
+             (list 'cpp/macro (second tf) (first fs)))])
     (if (and (seq fs) (every? #(instance? arbace.lang.IObj %) fs))
       (let [m (meta tf)]
         (when *texts* (swap! *texts* update :macro-form (fnil inc 0)))
-        (into [(vary-meta (first fs) assoc :cpp/macro (second tf) :cpp/line (:cpp/line m))]
+        (into [(vary-meta (first fs) assoc :cpp/macro (second tf) :cpp/line (when (or semi (uses-scratch? n)) (:cpp/line m)))]
               (map #(vary-meta % assoc :cpp/macro "") (rest fs))))
       (do (when *texts* (swap! *texts* update (keyword @why) (fnil inc 0))) [tf])))))
 
@@ -452,13 +460,45 @@
       (exs (kids s))
       (exs as))))
 
+(defn- gap-comma?
+  "True when the source between offsets `b` and `e` holds a comma outside comments and directive lines."
+  [^String s ^long b ^long e]
+  (let [e (min e (.length s))]
+    (loop [i b bol true]
+      (if (>= i e)
+        false
+        (let [c (.charAt s i)]
+          (cond
+            (= c \,) true
+            (= c \newline) (recur (inc i) true)
+            (Character/isWhitespace c) (recur (inc i) bol)
+            (and bol (= c \#)) (recur (loop [j i] (cond (>= j e) j
+                                                       (and (= (.charAt s j) \newline) (not (and (pos? j) (= (.charAt s (dec j)) \\)))) j
+                                                       :else (recur (inc j)))) true)
+            (and (= c \/) (< (inc i) e) (= (.charAt s (inc i)) \/)) (recur (loop [j i] (if (or (>= j e) (= (.charAt s j) \newline)) j (recur (inc j)))) bol)
+            (and (= c \/) (< (inc i) e) (= (.charAt s (inc i)) \*)) (recur (let [k (.indexOf s "*/" (int (+ i 2)))] (if (neg? k) e (+ k 2))) false)
+            :else (recur (inc i) false)))))))
+
+(defn- with-line
+  "The macro form `f` (a wrapper or a form with metadata) given the line `l` for the printer's #line."
+  [f l]
+  (if (seq? f)
+    (if (= (first f) 'cpp/macro) (list 'cpp/macro (second f) (nth f 2) l) f)
+    (vary-meta f assoc :cpp/line l)))
+
+(defn- nosep
+  "The element `f` marked: the list's separator after its invocation's elements is left out (the expansion holds it)."
+  [f]
+  (if (instance? arbace.lang.IObj f) (vary-meta f assoc :cpp/nosep true) f))
+
 (defn exs
   "The forms of expression nodes `ns`; where consecutive ones come from one macro invocation (the elements an invocation like
-  LOG_TAGS(x) expands to) the first carries its text and the others an empty one (CP41 (b): the printer writes the text once)."
+  LOG_TAGS(x) expands to) the first carries its text and the others an empty one (CP41 (b): the printer writes the text once).
+  When an element of the run depends on the line (THREAD_AND_LOCATION's __LINE__) the first carries the line (CP91 (b))."
   [ns]
-  (loop [ns (seq ns) out [] lmx nil]
+  (loop [ns (seq ns) out [] lmx nil first-i nil scr false]
     (if-not ns
-      out
+      (if (and first-i scr) (assoc out first-i (with-line (out first-i) (logical-line *src* (long (first lmx))))) out)
       (let [n (first ns)
             mx (when (macro-node? n) (macro-extent n))
             f (ex n)
@@ -468,8 +508,18 @@
                 (and (seq? f) (= (first f) 'cpp/macro)) (list 'cpp/macro "" (nth f 2))
                 (and (instance? arbace.lang.IObj f) (:cpp/macro (meta f))) (vary-meta f assoc :cpp/macro "")
                 :else f)
-            carries? (or (and (seq? f) (= (first f) 'cpp/macro)) (and (instance? arbace.lang.IObj f) (:cpp/macro (meta f))))]
-        (recur (next ns) (conj out f) (when (and mx carries?) mx))))))
+            carries? (or (and (seq? f) (= (first f) 'cpp/macro)) (and (instance? arbace.lang.IObj f) (:cpp/macro (meta f))))
+            ;; the run ends here unless this element continues it
+            out (if (and (not sib?) first-i scr) (assoc out first-i (with-line (out first-i) (logical-line *src* (long (first lmx))))) out)
+            ;; CP92 (b): an invocation whose expansion carries its own commas (EPSILONGC_ONLY_ARG(x) is `x,`) and is followed by no comma in the source
+            out (if (and (not sib?) first-i lmx (extent n) (not (gap-comma? *src* (long (second lmx)) (long (first (extent n))))))
+                  (assoc out first-i (nosep (out first-i)))
+                  out)
+            nfirst (cond sib? first-i (and mx carries?) (count out) :else nil)
+            nscr (if sib? (or scr (and mx (uses-scratch? n))) (boolean (and mx carries? (uses-scratch? n))))]
+        (recur (next ns) (conj out f) (when (and mx carries?) mx) nfirst nscr)))))
+
+(declare ^:dynamic *directives*)
 
 (defn- init-list [n]
   ;; an InitListExpr's written elements (the trailing value-initialized ones are the oracle's)
@@ -478,7 +528,23 @@
         ks (loop [ks ks] (if (and (seq ks) (#{"ImplicitValueInitExpr" "CXXDefaultInitExpr"} (kind (peek ks)))) (recur (pop ks)) ks))]
     (when (some #(= (kind %) "ImplicitValueInitExpr") ks) (gap :init "value-initialized elements inside a list"))
     (when (:array_filler n) (when (some #(= (kind %) "DesignatedInitExpr") ks) (gap :init "designators")))
-    (exs ks)))
+    (let [fs (exs ks)]
+      (if (seq *directives*)
+        (let [[b e] (extent n)
+              exts (mapv extent ks)
+              ds (when b (sort-by :off (filter (fn [d] (and (< (long b) (long (:off d)) (long e))
+                                                            (not-any? (fn [x] (and x (<= (long (first x)) (long (:off d))) (< (long (:off d)) (long (second x))))) exts)))
+                                               *directives*)))]
+          ;; CP92 (b): the directives that stand between the elements (`#define VM_CLASS_NAME(...)` before the invocation that uses it)
+          (if (seq ds)
+            (loop [i 0 ds (seq ds) out []]
+              (let [d (first ds)]
+                (cond
+                  (and d (or (>= i (count fs)) (when-let [x (exts i)] (< (long (:off d)) (long (first x)))))) (recur i (next ds) (conj out (:form d)))
+                  (< i (count fs)) (recur (inc i) ds (conj out (fs i)))
+                  :else out)))
+            fs))
+        fs))))
 
 (defn- callee-form [f args] (apply mk (if (or (symbol? f) (seq? f)) f (list 'c/call f)) args))
 
