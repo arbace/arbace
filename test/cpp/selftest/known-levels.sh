@@ -5,11 +5,13 @@
 . "$(dirname "$0")/lib-rt.bash"
 # the round trip
 known=$t/rt-known.edn
-echo '{:files {"crash.C" :gxx-objects-location "loc.C" :gxx-objects-location "pr.C" :print-rejected "ast.C" :ast-differs "fd.C" :print-rejected "rj.C" :forms-differ}}' > "$known"
+echo '{:files {"crash.C" :gxx-objects-location "loc.C" :gxx-objects-location "pr.C" :print-rejected "ast.C" :ast-differs "fd.C" :print-rejected "rj.C" :forms-differ "rc.C" :read-crash}}' > "$known"
 w=$t/rt; mkdir -p "$w"
 for n in loc.C pr.C ast.C fd.C rj.C; do rt_file "$w" "$n"; done
 mkdir -p "$w/orig"; echo 0 > "$w/orig/crash.C.status"; printf 'crash.C\tc++23\t\tP\t\n' >> "$w/list.tsv"
 printf 'crash.C\tcrash\t0\tjava.lang.NullPointerException\n' >> "$w/read.tsv"
+mkdir -p "$w/orig"; echo 0 > "$w/orig/rc.C.status"; printf 'rc.C\tc++23\t\tP\t\n' >> "$w/list.tsv"
+printf 'rc.C\tcrash\t0\tprint: a literal\n' >> "$w/read.tsv"
 rt_obj "$w" loc.C gxx 0 0 differs; rt_obj "$w" loc.C clang 0 0
 echo "(other forms)" > "$w/forms2/pr.C.ae"; echo 1 > "$w/dump2/pr.C.status"; echo "pr.C:1:1: error: a rejected print" > "$w/dump2/pr.C.err"; rt_obj "$w" pr.C gxx 0 1; rt_obj "$w" pr.C clang 0 1
 echo "(other norm)" > "$w/dump2/ast.C.norm"; rt_obj "$w" ast.C gxx 0 0; rt_obj "$w" ast.C clang 0 0 differs
@@ -21,6 +23,7 @@ arbace_tool -m arbace.repr.cpp.rtcheck judge "$w" "$known" > "$t/rt.log" 2>&1; s
 v() { awk -F'\t' -v n="$2" '$1==n {print $2}' "$1/results.tsv"; }
 [ $st = 1 ] && ok "the round trip's judge fails (exit 1)" || bad "the round trip's judge: exit $st"
 [ "$(v "$w" crash.C)" = fail ] && ok "a gxx-objects-location file that crashes in read fails" || bad "crash.C: $(v "$w" crash.C)"
+[ "$(v "$w" rc.C)" = known ] && ok "a read crash is known only as read-crash" || bad "rc.C: $(v "$w" rc.C)"
 [ "$(v "$w" loc.C)" = known ] && ok "g++'s objects alone differing: known as gxx-objects-location" || bad "loc.C: $(v "$w" loc.C)"
 [ "$(v "$w" pr.C)" = known ] && ok "level 1 failing: known as print-rejected" || bad "pr.C: $(v "$w" pr.C)"
 [ "$(v "$w" fd.C)" = fail ] && ok "forms that differ are not print-rejected" || bad "fd.C: $(v "$w" fd.C)"
