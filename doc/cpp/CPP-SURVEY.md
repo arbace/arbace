@@ -1566,3 +1566,102 @@ in CX5c, 512 of them one file, the `#embed` test, which is a macro-spelled run o
 - Shipped files changed (tools' namespaces; re-seed relevant if embedded): `arbace/repr/cpp/convert.ae`, `print.ae`, `rtcheck.ae`, `ppcheck.ae`; data `test/cpp/corpora.edn`, `test/repr/cpp/roundtrip-known.edn`; docs `doc/cpp/SPEC.md`, `doc/cpp/CPP-SURVEY.md`.
 - Scratch: `.tmp/cx/r-{samples,wpp,lt,hs,od,cc,dg}/` (results.tsv, read.tsv, summary.edn, classes.tsv, forms), `.tmp/cx/r-*.log`, `.tmp/cx/runall10.sh`, `.tmp/cx/{hs,od,cc}.list`, `.tmp/cx/lists2/`, `.tmp/cx/lists3/`,
   `.tmp/cx/classify.sh`, `.tmp/cx/fd.py` (first difference of two files), `.tmp/cx/repr-c-rt3.log`, `.tmp/cx/t5/` (the group probes).
+
+## As built: CX6 (write-ahead) (2026-10-31)
+
+On the branch `cpp-cx6` from `cpp-cx2` at 088afb6f (CX1-CX5d), in the light tier (stage 0 by `ARBACE_HOST_EXE`, 4 jobs, `GOMEMLIMIT=1500MiB`, no gate, no build
+of Arbace's executables, no lock), before C23's ci (C5) exists: the lowered C forms are judged by gcc `-O0`, as the plan's exit says. The spec of the forms and of
+the lowering is `doc/cpp/LLVM.md` (new). C23's pieces used: repr/c's printer and its `.ae` reader (`arbace.repr.c`, already on this branch from C3b); no c23 branch
+was merged.
+
+### CX6.1 What was built
+
+- **`arbace.repr.llvm`** (`arbace/repr/llvm.ae`, `llvm/read.ae`, `llvm/print.ae`): LLVM IR text as LLVM forms (LLVM.md §1-§5): one regex lexer pass, a
+  recursive-descent parser of LangRef's grammar as clang 23 writes it at `-O0` (types, constants and constant expressions, every instruction kind clang emits there
+  and the atomics, attributes and attribute groups, metadata with the specialized nodes kept as text, comdats, aliases), the printer back to IR in one canonical
+  spelling, the `.ae` layout (a define's instructions a line each). LLVM 23's new spellings are read: `f0x…` bit patterns, `+inf`/`-inf`/`+qnan`, `/* */` operand
+  comments. `bin/repr-llvm read|print|roundtrip` (forms, `.ae` text read back, print, read again, then `clang -c` of print and original compared).
+- **`arbace.cpp.lower`** (`arbace/cpp/lower.ae`): LLVM forms → C forms (LLVM.md §7): C structs of the data layout's sizes with a static assertion each, a variable
+  per SSA value, labels and gotos, phi copies on the edges, allocas as aligned byte arrays, GEP as folded byte offsets, the intrinsics table (memory, overflow,
+  min/max, bit counts, `is.fpclass`, math, `va_*`, `eh.typeid.for` ...), linkage as `static`/`weak`/`alias`/`constructor` attributes, `__asm__` labels for names C
+  cannot spell, `x86_fp80` as `long-double` and `{ x86_fp80, x86_fp80 }` as `_Complex long double` (the ABI returns it in x87 registers), every defined function
+  `aligned(2)` at least (Itanium's member function pointers keep the virtual flag in an address's low bit; gcc `-O0` does not align functions, clang does).
+- **Exceptions per §5.4** (LLVM.md §8): the pending flag, the tests after calls that may unwind, invokes as branches, landing pads matched by the runtime
+  `arbace/cpp/rt/eh.c.ae` (C forms by hand, printed by repr/c), which asks each clause's `type_info` its own `__do_catch` and follows libsupc++'s handler counts
+  (rethrow, nested catches, `bad_cast`, `bad_typeid`, `bad_array_new_length`).
+- **`bin/cppi`**: `lower`, `runtime`, `testsuite` (the testsuite extracted from the pinned tarball, its digest checked), `list samples|libstdcxx`, `lower-check` (IR,
+  original run, g++'s run recorded, the forms' round trip with the objects, the lowering, gcc and the run, judged by `arbace.cpp.lower/judge` against
+  `test/cpp/lower-known.edn`; logs capped at 1 MB, objects and texts dropped once compared, a disk guard at 80%). The testsuite's programs link its `util/` library
+  (libtestc++, built by g++ once a run) and `libstdc++exp` natively, as libstdc++. Makefile: `repr-llvm-roundtrip`, `cppi-lower-check`, `cppi-testsuite`.
+- Results: `test/cpp/lower-results.edn` (both summaries and every file's status), known file `test/cpp/lower-known.edn` (12 entries, three classes).
+
+### CX6.2 Numbers
+
+| list | files | forms equal (`.ae` and again) | objects equal (`clang -c` print = original) | lowered | gcc compiles | runs as the original | known | failing |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| samples (`test/cpp/samples`, 2 without `main`: compiled only) | 8 | 8 | 8 | 8 | 8 | 6 of 6 (+2 compile) | 0 | 0 |
+| libstdc++ testsuite, every 15th run test (234 of 3,874) | 234 | 234 | 234 | 232 | 232 | 222 | 12 | 0 |
+
+Known classes: `library-throw` 6 (an exception the shared libstdc++ throws: `std::stoi`, `deque`'s `length_error`, `basic_ios::clear`, `use_facet`'s `bad_cast`,
+`regex_error`), `callback-throw` 4 (a streambuf's virtual throws inside libstdc++'s code), `exception-ptr` 2. g++'s own build agrees with clang's original on 233 of
+234 (`27_io/objects/wchar_t/2523-2_xin.cc` differs, recorded, not judged). Times (4 jobs): native steps 106 s, Arbace's read, round trip, lowering and C print 846 s
+(about 14 s a file a thread on stage 0, evaluated: the IR of a libstdc++ test is 0.2 to 2 MB), gcc and runs 56 s. The lowered programs run slower than clang's
+`-O0` (the slowest, `25_algorithms/pstl/alg_sorting/set_union.cc`: 15 s against 50 s), so runs have a 120 s cap. An earlier run (every 15th before the list
+left out xfail and debug-mode tests, 259 files) found the bugs fixed since: LLVM 23's float spellings, `getelementptr` with metadata, aliases, a global
+initialised by a global, `/* */` comments, `_Complex long double`, function alignment; it had 212 passing before them.
+
+### CX6.3 Not done, and why
+
+- **ci** (C5) is not built: gcc is the judge. The lowering's C uses what ci will need to take: GNU attributes (`weak`, `alias`, `aligned`, `constructor`,
+  `packed`), `__builtin_*` (memory, overflow, `bit_cast`, `alloca_with_align`, `fpclassify`, `complex`, math), `_Alignas`, `__asm__` labels, `_Complex long double`.
+- **The runtime (CX7)**: libstdc++ and libsupc++ are the host's shared library; the classes `library-throw` and `callback-throw` are the cost (CP82).
+- **Not exercised by the corpus** (written, untested): vectors beyond load/store/element access, `i128` switches, odd integer widths beyond `i1`, `cmpxchg` and
+  `atomicrmw` on real programs, dynamic allocas, `va_start` in a lowered variadic function, `filter` clauses (refused).
+- The g++.dg `dg-do run` tests (1,811) and the whole testsuite (heavy list).
+
+### CX6.4 The heavy list (for a window after the tag)
+
+- `bin/cppi lower-check` over every run test of the libstdc++ testsuite (`bin/cppi list libstdcxx --sample 1`: 3,874 files; about 16 hours of stage 0 at 4 jobs,
+  2 GB of work files at most with the caps) and over g++.dg's `dg-do run` tests (a list maker to add, the `dg-options` read as `test/cpp/corpora.edn` says).
+- `bin/gate` essential (the gate key includes `arbace/`, which CX6 adds to: `arbace/repr/llvm*`, `arbace/cpp/`).
+
+### CX6.5 Proposals (CP82-CP88)
+
+- **CP82 Exceptions that cross libstdc++'s native frames before CX7.** Options: (a) the classes `library-throw` and `callback-throw` until CX7 lowers libstdc++ with
+  the program (built); (b) the runtime defines the real `__cxa_throw` (the executable interposes the library's) and the lowered code arms a `setjmp` barrier around
+  each call into the library, the barrier turning a native throw into the pending flag; (c) gcc `-fexceptions` on the lowered C plus a small C++ personality shim.
+  *Recommended: (a)*: (b) and (c) are host-only machinery that ci and AOT do not need once CX7 lowers the library.
+- **CP83 The original a lowered program is compared with.** Options: (a) the IR linked by clang (built: the same IR, so a difference is the lowering's), g++'s run
+  recorded beside it; (b) g++'s build (CP11's judge); (c) both required equal. *Recommended: (a)* for the lowering check, g++'s disagreements recorded (1 of 234) and
+  judged at CX8 where CP11 applies.
+- **CP84 `x86_fp80`.** Options: (a) C forms' `long-double` with the IR's layout (built; gcc computes in x87, exact; ci computes in double, CS35's class
+  `long-double`); (b) the lowering computes in `double` itself and stores the x87 format by bit manipulation, so gcc and ci agree; (c) software x87 in the runtime.
+  *Recommended: (a)*: the class is CS35's decision, and (b) would make gcc's judgment differ from the original on purpose.
+- **CP85 Function alignment.** Options: (a) `__attribute__((aligned(2)))` on every lowered definition, the IR's `align N` when larger (built); (b) `aligned(16)`,
+  clang's; (c) gcc's `-falign-functions` in the judge only. *Recommended: (a)*: the ABI's need, stated in the forms, which ci's layout of functions must honour.
+- **CP86 Where the hand-written runtime lives.** Options: (a) `arbace/cpp/rt/eh.c.ae`, C forms beside the lowering (built); (b) `test/cpp/rt/`; (c) generated by the
+  lowering from libsupc++'s IR at CX7, the pending-flag layer kept by hand. *Recommended: (a)* now, (c)'s split at CX7.
+- **CP87 The lowering's speed.** About 14 s a file a thread on stage 0 (evaluated); a REPL needs better. Options: (a) leave it until CX10's re-seed embeds and
+  compiles `arbace.repr.llvm` and `arbace.cpp.lower` (c2j), as the survey planned; (b) profile and tune the evaluated code now (the lexer and the C printer's
+  read of the `.ae` text are the candidates); (c) keep the lowered C forms as data and skip the `.ae` text in the check. *Recommended: (a)*, with (c) for the
+  heavy list's runs.
+- **CP88 The spec's place.** Options: (a) `doc/cpp/LLVM.md`, its own spec as each family of forms has (built); (b) a part of `doc/cpp/SPEC.md`. *Recommended: (a)*.
+
+### CX6.6 Rule slips, shipped files, scratch
+
+- **The disk (a serious slip).** In the first runs of the testsuite with libtestc++, `g++ -x c++ ... -o gxx LIBS` took the archive `libtestc++.a` as C++ source
+  (the `-x c++` applied to it), and each test's `gxx-link.log` held the archive's bytes as errors, over 500 MB a file: `.tmp/cx6` grew to 46 GB and filled the host's
+  disk, which killed the main checkout's clean gate run. The coordinator truncated the logs; I stopped my run, deleted the runs (`w-lt2`, `w-fix`, ...), put the
+  libraries in link position (`-x none`), capped every log at 1 MB, dropped the objects and texts once compared and added a disk guard (80%); the final runs
+  kept `.tmp/cx6` at 163 MB and the disk at 56%.
+- Other slips: `/dev/null` in two commands (a wait loop's `grep -q . /dev/null`, a timing probe's `> /dev/null`); none left a process. Two foreground commands
+  passed the tool's limit and moved to the background (waited for, not killed). One run stopped by task id (the one above).
+- Shipped files (tools' namespaces, evaluated from the checkout, not embedded; re-seed relevant only when CX10 embeds them): new `arbace/repr/llvm.ae`,
+  `arbace/repr/llvm/read.ae`, `arbace/repr/llvm/print.ae`, `arbace/cpp/lower.ae`, `arbace/cpp/rt/eh.c.ae`; new `bin/cppi`, `bin/repr-llvm`; `Makefile` (three
+  targets); data `test/cpp/lower-known.edn`, `test/cpp/lower-results.edn`; docs `doc/cpp/LLVM.md`, this section. Nothing of `arbace/repr/c/` or `arbace/repr/cpp/`
+  changed.
+- The cxxdump cache (the side task): `tools/cxxdump` already shards it by the key's first byte (256 directories, commit 431dbc97, 2026-10-30), about 280 entries a
+  directory at 1.5 GB; the htree warnings were from the flat directory before it. That top directory keeps a 10 MB index from then (ext4 never shrinks one): moving
+  the 256 shards into a fresh directory would drop it (cpp-cx2's scratch, not touched).
+- Scratch: `.tmp/cx6/w-samples/`, `.tmp/cx6/w-lt2/` (results.tsv, summary.edn, times.txt, each file's IR, lowered C and logs), `.tmp/cx6/keep/w-lt/` (the first run's
+  results), `.tmp/cx6/{samples,lt,lt2}.list`, `.tmp/cx6/rl/` (the samples' IR round trip), `.tmp/cx6/t/` (probes), `.tmp/cppi/gcc/` (the extracted testsuite, 36 MB).
