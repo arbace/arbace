@@ -2497,3 +2497,8 @@ worktree's `.tmp/rv020/` (removed with `git worktree remove`), read the review 0
 by path (copied, never run there), and ran the main checkout's stage 0 as `ARBACE_HOST_EXE` (`gts80.sh`'s gate.plan
 `passes` on synthetic stores, `GOMAXPROCS=4`). The scratch `bin/gate-demos` runs made and removed scratch worktrees of
 the fake repository only.
+
+## Decided (2026-10-31): GTS95-GTS97, GTS100, GTS101
+
+The user decided all five as recommended: GTS95 (b), at the next rekey; GTS96 (a); GTS97 (a); GTS100 (a), (c) when the
+box comes back; GTS101 (b), at the next change to `bin/gate`.
