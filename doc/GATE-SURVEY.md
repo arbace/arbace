@@ -2065,3 +2065,8 @@ list: GTS87.
 **Slips.** The GTS82 test ran `git worktree prune` once (shared git metadata: it removes only entries whose directories
 are gone; dropped from the script after); the tests read the main checkout's `target/seed/pins` and `seed.sha256` (read
 only, as GTS82's fallback does) and ran its stage 0 (as `ARBACE_HOST_EXE`).
+
+## Decided (2026-10-31): GTS83-GTS89
+
+The user decided all seven as recommended: GTS83 (a); GTS84 (a); GTS85 (b); GTS86 (b); GTS87 (a), built on this
+branch before the merge; GTS88 (a), built after the merge from the v2 record's logs; GTS89 (a), as built.
