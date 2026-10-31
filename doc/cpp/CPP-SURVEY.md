@@ -2088,3 +2088,89 @@ or judged work directories). `make check-makefile` passes (target `cppi-selftest
   `test/gate/steps.edn` not touched.
 - Scratch: `.tmp/r7/` (`base/`: HEAD's snapshot; the round trips `rt-before-*`, `rt-after-*`; lower-check `w-samples`, `w-lt`; `L/`, the lists; `t/`, the probes),
   `.tmp/cppi/runtime` (the runtime at the key), `.tmp/cpp-selftest/`.
+
+## As built: re-review 018's fixes (2026-10-31)
+
+On the branch `cpp-cx7` (light tier: stage 0 by `ARBACE_HOST_EXE`, 4 jobs, `GOMEMLIMIT=1500MiB`, no gate, no lock). Re-review 018 (a helper VM's, at 8dce18fe: R1-R9) checked against the
+code: every finding holds. Each fix is a commit with a test of `bin/cppi selftest`, run against a snapshot of the commit before (it fails) and after (it passes). The
+selftests are 17 now (13 before; new: `stale-norm`, `cxxdump-version`, `recorded-list`, `stderr-cap`), 17 pass.
+
+### Per finding
+
+| # | holds | the fix | the test (before → after) |
+|---|---|---|---|
+| R1 (medium) | yes: the `-norm` dump's status was dropped, `orig/`, `dump2/`, `forms*`, `obj/` never emptied | `bin/lib/repr-cpp/roundtrip` keeps the `-norm` status (`NAME.norm.status`, its stderr beside), empties `orig print forms forms2 dump2 obj` and the result files at its start; `rtcheck`'s judge makes a failing original `-norm` dump, a print's dump that failed other than by clang's own diagnostic, and a failing print `-norm` dump `dump-error-norm-N` / `dump-error-print-N` / `dump-error-print-norm-N` (fail, known or not); `REPR_CPP_CXXDUMP_EXE` and `REPR_CPP_ROUNDTRIP_KNOWN` name another cxxdump and known file (cf109a72) | `stale-norm`: a cxxdump failing only in norm mode passed in a reused WORK (stale `.norm` files), and known `ast-differs` / `print-rejected` files stayed known on a dump failure (4 bad) → fail, `dump-error-norm-3`, `dump-error-print-3` |
+| R2 (medium) | yes, see below | the round trip run on the four corpora; one reclass (ce50b892) | below |
+| R3 (low) | (a) yes: `version = "cxxdump-7"`; (b) the count is right, the note was stale | (a) `cxxdump-8`, and a cached non-rejection says "clang failed on the unit (STATUS)"; (b) `tar -t` of the pinned tarball and its `listing.txt` both give **9,725** `.cc` under `libstdc++-v3/testsuite/` (CX1's 9,726 was a count that included one entry that is not a `.cc` file of the tarball; not found again); `:count` stays 9,725 and its note says so (35bb6b5e) | `cxxdump-version`: cache version 7 → 8 or later (a check of the built executable's string and `run.go`'s), a rejection still cached and served as one |
+| R4 (low) | yes | `lower-results.edn` gets `:prefixes` (which names a summary's list owns); the judge holds a run of a recorded list (`--recorded KEY\|none\|auto`, auto: the list more than half of whose names the run holds) to the whole record: a recorded name missing from the run, or a count other than the summary's `:files`, fails (f3939582). Not built: CP123, CP124 | `recorded-list`: 13 of the 14 samples, a named run of them and 15 files passed (3 bad) → fail naming the missing file / the counts |
+| R5 (low) | yes, all four | the key has the pin that was used (`CPPI_HEADERS_PIN`), `apk list -I musl-dev musl` and a digest of `/usr/include/*.h`; `runtime-build` writes the key at its start (`key.start`) and moves it to `key.txt` once every unit passes (7b169584) | `runtime-key`: no musl line, the key ignoring `CPPI_HEADERS_PIN`, no `key.start` (3 bad) → right |
+| R6 (low) | yes | level 1 split in `rtcheck`: `:l1-rejected` (the print's dump failed, clang's rejection) fits `print-rejected`, `:l1-differs` fits `forms-differ`; the run classes `uncaught-cleanups`, `native-callback-throw` need `differs` or `stderr-differs` (f572b2d4) | `known-levels`: forms that differ known as `print-rejected` and the reverse, two timeouts known as `uncaught-cleanups` (3 bad) → fail |
+| R7 (low) | yes | each run (original, g++'s, lowered) under `ulimit -f 1024` (1 MiB; SIGXFSZ, status 153, past it), the `truncate` gone; `comparable?` also requires stderr below the cap (f572b2d4) | `stderr-cap` (a program writing 3 MiB to stderr): exit 0 with identical first MiB passed (3 bad) → stopped at the cap, not comparable, failing. A program that writes a file over 1 MiB in a test is stopped too: none in the lists |
+| R8 (info) | yes | documented in LLVM.md §7 (a volatile odd-width access is a plain memcpy; harmless at -O0); not changed (7f786d5e) | - |
+| R9 (nit) | yes | `pp-shrink` finds the host tarball as `bin/repr-cpp` does, reads the pin from the copy and dies unless the copy changed, and requires "the extraction of" in the log; `headers-pin` changes the first digit to another digit; `ctor-throw` requires `low.err` (7f786d5e) | the three pass; the old `pp-shrink` passes too (the fix is the test's: it now cannot pass without reaching tar) |
+
+### R2: the round trip over the other corpora (objects on, cache cold: cxxdump-8)
+
+| corpus | files | rejected | read ok | pass | known | failing | CX5d (pass / known / rejected) |
+|---|---:|---:|---:|---:|---:|---:|---|
+| samples (9, bare names) | 9 | 0 | 9 | 8 | 1 | 0 | 8 / 1 / 0 |
+| HotSpot every 25th | 50 | 1 | 49 | 47 | 2 | 0 | 38 / 4 / 8 (CX5d's cmdline; CP79 (b) since: 47, 2, 1) |
+| libstdc++ testsuite every 40th | 244 | 32 | 212 | 199 | 13 | 0 | 199 / 13 / 32 |
+| g++.old-deja every 10th | 323 | 88 | 234 | 225 | 10 | 0 (after the reclass; 1 before) | 225 / 10 / 88 |
+| c-c++-common every 10th | 326 | 79 | 247 | 211 | 36 | 0 | 211 / 36 / 79 |
+| g++.dg every 10th | 1,807 | 745 | 1,060 | 977 | 83 | **2 dump errors** | 976 / 84 / 747 |
+
+The lists are CX5d's (1,807 / 323 / 326 / 244: the same counts). Every known file but two fails at the level of its class under the stricter rules; the other 12 `ast-differs` and
+`print-rejected` guesses of the review did not occur. What did not fit:
+
+- **`g++.old-deja/g++.law/cvt22.C`** (known `print-rejected`): its *read* throws (`print: a literal: (lit __size_t 10)`: `new A` with `typedef int A[10]`, clang's implicit array size is
+  an `IntegerLiteral` of type `__size_t`, which has no spelling). Not caused by the fixes: the same crash on the reviewed tree (9e34a1f5), where the old judge called it
+  known. Reclassed from its recorded level (read, a crash) to the new class `read-crash` (fits only a failure of the read), as a real converter case, not as a rejected print; the converter's
+  fix (an implicit array size is not written) is open. 
+- **g++.dg, `cpp0x/pr104668.C` and `modules/target-aarch64-1_b.C`**: counted among the oracle's rejections before, they are cxxdump's `dump-error`: clang runs past our 300 s
+  timeout on the first (124), and crashes with a segmentation fault on the second (cxxdump: "clang failed (not a rejection)"). Both are the oracle's failures, now visible, failing. They stay
+  failing until finding 3's remainder (CP123, a recorded set of such names) is built. Nothing is hidden: the g++.dg round trip exits 1.
+- g++.dg's 84 → 83 known and 976 → 977 pass: `ubsan/float-cast-overflow-bf.C` (reclassed in review 007) passes now; the other known files are at their classes' levels.
+- The 51 `:orig-fails` names: 34 g++-only and 3 clang-only appear in g++.dg's run and 13 and 1 in c-c++-common's, as before; `l4-unrecorded-orig-fails` is 0 in every corpus (libstdc++'s
+  testsuite has none, as the review expected, and none occurred).
+- Names: no bare name collided across the corpora in these runs (CP127 stays proposed).
+
+### Numbers (before → after)
+
+- `bin/cppi selftest`: 13 → 17 tests, all pass.
+- `bin/cppi runtime-build` (the key changed): 198 of 198 units before and after (IR 26 s, read, print and lower 162 s, gcc 17 s); `bin/cppi runtime-key`: current.
+- `bin/cppi lower-check`: the samples and runtime samples 14 of 14 before (review 007's fixes) and after (native 8 s, Arbace's steps 22 s, gcc and runs 3 s; the recorded list `samples` held to its 14);
+  libstdc++ every 15th 234 of 234 before and after, 0 known, 0 regressions, g++'s build agrees on 233 (native 101 s, Arbace's steps 833 s, gcc and runs 53 s; the record
+  `libstdcxx-every-15th` held to its 234).
+- The round trips above.
+
+### Not done, and why
+
+- A recorded set of the oracle's rejections and failures per corpus (CP123), the round trip's results record (CP124): proposals below. The converter's fix for `cvt22.C`.
+- The atomics, `stackrestore`, the thread start (CP120-CP122), as before.
+
+### Proposals (CP130-CP134)
+
+- **CP130 The oracle's failures in the round trip.** `pr104668.C` (clang over 300 s) and `target-aarch64-1_b.C` (clang segfaults) make g++.dg's round trip exit 1. Options: (a) as built:
+  they fail; (b) a section `:oracle-fails` in the known file (NAME -> `:timeout` / `:crash`, with the class of failure checked), a dump error counting as known only for a
+  listed name and the same kind; (c) (b) and CP123's set of rejected names, so that a rejection becomes a failure when it is new. *Recommended: (c)*, written with the whole-corpus runs (CP80 (b)).
+- **CP131 The implicit array size of `new A`.** Options: (a) the class `read-crash` (built); (b) the converter leaves out an array size whose literal lies at the type name (the
+  allocated type's spelling `A` then needs the typedef's name: the dump has `qualType` of the allocated type, `int *`, only) and prints `new A`; (c) (b) with the type read from the source text. *Recommended: (c)* when
+  CP75's text-keeping work resumes; one file in the samples of five corpora.
+- **CP132 Recorded lists, the judge's heuristic.** `--recorded auto` takes a run for a recorded list when it holds more than half of its names. Options: (a) as built; (b) lists named
+  in `lists` by a header line, the judge reading it; (c) the record keyed by the list maker's command (`bin/cppi list libstdcxx --sample 15`). *Recommended: (b)*.
+- **CP133 The tolerance for slow oracle runs.** 300 s for cxxdump and the compilers is a limit of the light tier (4 jobs, cold cache). Options: (a) as built; (b) 900 s for a name
+  listed in `:oracle-fails` only. *Recommended: (a)*; a hang is a finding.
+- **CP134 Selftests that run the tools' host.** The selftests that need the host (`arbace_tool`) are not run by the VM that reviews. Options: (a) as built; (b) a `ARBACE_HOST_EXE=/bin/true` dry mode that
+  skips them cleanly, printing which were skipped. *Recommended: (b)*, small.
+
+### Rule slips, shipped files, scratch
+
+- Slips: one command redirected output to `/dev/null` (the first launch of the round trips' driver script). One background launch of the g++.dg round trip lacked `export
+  ARBACE_HOST_EXE`: the round trip's first Arbace step built stage 0 in the worktree (`bin/seed --build`, 352 s, then the namespaces compiled by the host started; the
+  compile reached 1.9 GB resident) before I saw it; the run finished with that stage 0 as its host (the dump and read steps do not depend on it for their results, and the
+  selftests and other runs used stage 0 of the main checkout). I could not stop it (the permission system refused `kill`, twice); `target/` and the build's scratch were deleted afterwards. A
+  waiting loop ran beside another for a few minutes. The disk stood at 77-81% (the coordinator raised the stop line to 84%), never past it.
+- Shipped: `bin/cppi`, `bin/lib/repr-cpp/roundtrip`, `arbace/cpp/check.ae`, `arbace/repr/cpp/rtcheck.ae`, `tools/cxxdump/{main,run}.go`, `test/cpp/{corpora,lower-results}.edn`,
+  `test/repr/cpp/roundtrip-known.edn`, `test/cpp/selftest/` (new tests `stale-norm`, `cxxdump-version`, `recorded-list`, `stderr-cap` and its program; the others changed), `doc/cpp/LLVM.md`, this section.
+- Scratch: `.tmp/r8-keep/` (the round trips' results and summaries, lower-check's logs), `.tmp/cppi/runtime` (at the key), `.tmp/cpp-selftest/`; the rest deleted.
