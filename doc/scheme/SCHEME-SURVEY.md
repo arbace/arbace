@@ -2349,3 +2349,7 @@ None (no file of `go/arbace/scm` or `scheme/psyntax`). Not shipped (test and dat
 ### Scratch cited
 
 `.tmp/sc/` in this worktree: `S_*.log` (this batch's runs), `Q_v1.log` (4.ms verbose), `batch.sh`, `ct/` (the Chibi probes), `div.bak`; `.tmp/si/{mats,r7rs,r7rs-chez,r7rs-chibi,r7rs-own,chibi-tests}` the runs judged.
+
+### Decided (SC150-SC153; the user, 2026-10-31)
+
+All as recommended: SC150; SC151; SC152, until a program needs the libraries; SC153, as built.
