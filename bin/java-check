@@ -557,7 +557,10 @@ compiled_one_on() { compiled_one "$2" "$1" | sed -e "s|$root|.|g"; }
 # is its test's result, never the shard's: survey §7.2), then built by bin/build-go, a test whose
 # Go does not compile taken out likewise (go build -gcflags=-e, every error of package lang), and
 # each test's actions run on the program; the program and its trees removed after the runs. Prints
-# the results (ID compiled RESULT REASON) into DIR/results.tsv
+# the results (ID compiled RESULT REASON) into DIR/results.tsv. It runs with errexit off (run_shard
+# calls it on the left of ||), so each step's failure is tested: a shard whose eighth round still
+# refused tests (no program for the rest) fails, run_shard gives its tests error (report 003's
+# finding 2)
 compiled_shard() {
   local k=$1 s=$2 round st n overlay
   overlay=$(program_overlay) || return 1
@@ -588,6 +591,10 @@ compiled_shard() {
     n=$(sed -n 's/^java-check refused: \([0-9]*\) tests.*/\1/p' "$s/goerrors$round.log")
     [ "${n:-0}" != 0 ] || { grep -v '^==' "$s/build$round.log" | tail -20 >&2; echo "java-check compiled: shard $k: the build failed, no test to blame ($s/build$round.log)" >&2; return 1; }
   done
+  if [ -s "$s/built.txt" ] && [ ! -x "$s/prog" ]; then
+    echo "java-check compiled: shard $k: j2g still refused tests in round $round, no program for the other $(wc -l < "$s/built.txt") ($s/refusals$round.log)" >&2
+    return 1
+  fi
   rm -rf "$s/out" "$s/work"
   {
     awk -F'\t' '{print $1 "\tcompiled\trefused\t" $2}' "$s/refused.tsv"
@@ -673,7 +680,9 @@ aot_fresh() {
 
 # compiled_level: the compiled level of the tests WORK/run.list holds (their read level passed),
 # in shards of SHARD_SIZE tests (--shard-size), one after another (a j2g run takes up to 20 GiB);
-# their results appended to WORK/results.tsv; unread tests 'unread'
+# their results appended to WORK/results.tsv; unread tests 'unread'. check calls it on the left of
+# ||, so errexit is off here and in what it calls: java.check's shards failing or a shard without
+# results fails it (report 003's finding 2)
 compiled_level() {
   gotable=${JAVA_CHECK_GOTABLE:-} heavy=${JAVA_CHECK_HEAVY:-}
   java_check_base || return 1
@@ -684,12 +693,13 @@ compiled_level() {
   # --shard K: that shard again, the others' results kept (the same plan makes the same shards)
   [ -n "$shard_only" ] || rm -rf "$work/j2g"
   mkdir -p "$work/j2g"
-  jc shards "$work" "$shard_size" >&2
+  jc shards "$work" "$shard_size" >&2 || { echo "java-check compiled: java.check's shards failed" >&2; return 1; }
   local s
   for s in $(cd "$work/j2g" && ls -d s* | sed 's/^s//' | sort -n); do
     if [ -z "$shard_only" ] || [[ ",$shard_only," == *",$s,"* ]]; then
       run_shard "$s" "$work/j2g/s$s"
     fi
+    [ -f "$work/j2g/s$s/results.tsv" ] || { echo "java-check compiled: shard $s has no results ($work/j2g/s$s)" >&2; return 1; }
     cat "$work/j2g/s$s/results.tsv"
   done
   # the golden-diagnostics tests (the diagnostics level's, JC3) have no compiled level
