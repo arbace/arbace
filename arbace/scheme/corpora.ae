@@ -5,6 +5,8 @@
   :match finds the item) and writes the results. Every file of the three corpora (test/scheme/corpora.edn) is
   in a result or a class: `files` checks it.
 
+    r7rs-rewrite IN OUT      Chibi's r7rs-tests.scm as Chez reads it (SM8c, SC117 (b))
+    r7rs-chez DIR [--record] DIR/out, DIR/rc: the rewritten suite run by Chez; test/scheme/ref-r7rs-chez.edn
     r7rs DIR [--record]      DIR/out, DIR/rc: Chibi's r7rs-tests.scm run on si: one result a test;
                              --record writes test/scheme/check-r7rs-linux-amd64.edn
     ecraven DIR [--record]   DIR/NAME.{out,err,rc}: one result a benchmark; test/scheme/check-ecraven-linux-amd64.edn
@@ -52,10 +54,43 @@
           (recur (rest ls) tests sections cur)))
       {:tests tests :sections sections})))
 
+(declare rewrite-for-chez)
+
+(defn- chez-r7rs-ref [] (when-let [t (slurp-or (path "test/scheme/ref-r7rs-chez.edn"))] (first (read-string t))))
+
+(defn- cmd-r7rs-rewrite
+  "r7rs-rewrite IN OUT: Chibi's r7rs-tests.scm as Chez reads it (rewrite-for-chez)."
+  [[in out]]
+  (spit out (rewrite-for-chez (slurp in)))
+  0)
+
+(defn- cmd-r7rs-chez
+  "SM8c (SC117 (b)): the rewritten suite run by Chez 10.3.0 through the same R7RS libraries (DIR/out, DIR/err, DIR/rc);
+  one answer a test; --record: test/scheme/ref-r7rs-chez.edn. A test Chez does not pass is classed (r7rs-chez-*)."
+  [[dir & opts]]
+  (let [out (or (slurp-or (str dir "/out")) "") rc (str/trim (or (slurp-or (str dir "/rc")) "?"))
+        {:keys [tests]} (parse-r7rs out) cs (classes)
+        items (vec (for [t tests :when (= :fail (:status t))
+                         :let [item (str "chez-fails r7rs/chibi " (:what t) " => " (str/join " " (:detail t)))]]
+                     {:item item :class (class-of cs item)}))
+        total (count tests) pass (count (filter #(= :pass (:status %)) tests))
+        result {:id "r7rs/chibi/chez" :corpus :chibi-r7rs :rc rc :tests total :pass pass :fail (- total pass)
+                :items items :per-test (mapv (fn [t] [(:n t) (:status t) (clip (:what t) 70)]) tests)}]
+    (println "r7rs on Chez: status" rc "-" total "tests," pass "pass," (- total pass) "fail,"
+             (count (remove :class items)) "in no class")
+    (doseq [[c n] (sort-by str (frequencies (keep :class items)))] (println " " n (name c)))
+    (when (some #{"--record"} opts)
+      (write-results "test/scheme/ref-r7rs-chez.edn"
+                     ";; Chibi's r7rs-tests.scm, rewritten for Chez (arbace.scheme.corpora/rewrite-for-chez), run by Chez Scheme 10.3.0 through\n;; Arbace's R7RS libraries' Chez variants (bin/si r7rs --chez --record): Chez's answer to each test, SM8c, SC117 (b); generated."
+                     [result]))
+    (if (every? :class items) 0 1)))
+
 (defn- cmd-r7rs [[dir & opts]]
   (let [out (or (slurp-or (str dir "/out")) "") rc (str/trim (or (slurp-or (str dir "/rc")) "?"))
         {:keys [tests sections]} (parse-r7rs out)
         cs (classes)
+        ref (chez-r7rs-ref)
+        chez (into {} (map (fn [[n st _]] [n st]) (:per-test ref)))
         items (vec (concat
                      (for [t tests :when (= :fail (:status t))
                            :let [item (str "fails r7rs/chibi " (:what t) " => " (str/join " " (:detail t)))]]
@@ -63,17 +98,77 @@
                      (when-not (= rc "0") [(let [i (str "crash r7rs/chibi status " rc ": " (first-line (slurp-or (str dir "/err"))))]
                                              {:item i :class (class-of cs i)})])))
         total (count tests) pass (count (filter #(= :pass (:status %)) tests))
-        top (last sections)
+        ;; si against Chez, test by test (the same file, so the same numbers)
+        vs (frequencies (for [t tests] [(:status t) (get chez (:n t) :none)]))
+        vs-chez {:both-pass (get vs [:pass :pass] 0) :si-only-pass (get vs [:pass :fail] 0)
+                 :chez-only-pass (get vs [:fail :pass] 0) :both-fail (get vs [:fail :fail] 0)}
         result {:id "r7rs/chibi" :corpus :chibi-r7rs :verdict (if (empty? items) :pass :non-pass)
                 :tests total :pass pass :fail (- total pass)
                 :sections (vec (butlast sections)) :items items
-                :per-test (mapv (fn [t] [(:n t) (:status t) (clip (:what t) 70)]) tests)}]
+                :vs-chez (when ref vs-chez)
+                :per-test (mapv (fn [t] (let [c (get chez (:n t))]
+                                          (cond-> [(:n t) (:status t) (clip (:what t) 70)] c (conj c))))
+                                tests)}]
     (println "r7rs: status" rc "-" total "tests," pass "pass," (- total pass) "fail")
+    (when ref
+      (println "against Chez (the same tests):" vs-chez))
     (when (some #{"--record"} opts)
       (write-results "test/scheme/check-r7rs-linux-amd64.edn"
-                     ";; Chibi's r7rs-tests.scm on si (bin/si r7rs --record): the result of each test (number, status, the expression),\n;; the sections' counts and the failing tests' items with their classes (test/scheme/divergences-corpora.edn); generated."
+                     ";; Chibi's r7rs-tests.scm on si (bin/si r7rs --record): the result of each test (number, status, the expression, Chez's status\n;; from test/scheme/ref-r7rs-chez.edn), the sections' counts and the failing tests' items with their classes\n;; (test/scheme/divergences-corpora.edn); generated."
                      [result]))
     (summary [result])))
+
+(defn rewrite-for-chez
+  "SM8c (SC117 (b)): Chibi's r7rs-tests.scm for Chez, lexically (no test is changed): `#!chezscheme` first (Chez's own
+  lexical syntax), `#u8(` as `#vu8(`, a vector outside a quotation quoted (R7RS 4.1.2 evaluates it to itself,
+  Chez's --program does not), and the escapes of a bar symbol (R7RS's backslash-bar, backslash-quote, \\n ...) as
+  hex escapes (Chez reads a backslash there literally). Strings, comments, characters and quotations are kept as they are."
+  [^String s]
+  (let [n (count s) sb (StringBuilder. "#!chezscheme\n")
+        ws? (fn [c] (or (= c \space) (= c \tab) (= c \return) (= c \newline)))
+        delim? (fn [c] (or (ws? c) (= c \() (= c \)) (= c \") (= c \;) (= c \')))
+        esc {\a "7" \b "8" \t "9" \n "A" \r "D" \| "7C" \\ "5C" \" "22"}
+        atom-end (fn [j] (loop [j j] (if (and (< j n) (not (delim? (.charAt s j)))) (recur (inc j)) j)))]
+    ;; stack: a vector of booleans (is the open list/vector a quotation); pending: nil, :q (after ' or `), :c (after ,)
+    (loop [i 0 stack [] pending nil]
+      (if (>= i n)
+        (str sb)
+        (let [c (.charAt s i)
+              quoted? (case pending :q true :c false (boolean (peek stack)))]
+          (cond
+            (= c \") (let [j (loop [j (inc i)] (if (= (.charAt s j) \") j (recur (+ j (if (= (.charAt s j) \\) 2 1)))))]
+                       (.append sb (subs s i (inc j))) (recur (inc j) stack nil))
+            (= c \;) (let [j (let [k (.indexOf s "\n" i)] (if (neg? k) n k))]
+                       (.append sb (subs s i j)) (recur j stack pending))
+            (.startsWith s "#|" i) (let [j (loop [d 1 j (+ i 2)]
+                                             (cond (zero? d) j
+                                                   (.startsWith s "|#" j) (recur (dec d) (+ j 2))
+                                                   (.startsWith s "#|" j) (recur (inc d) (+ j 2))
+                                                   :else (recur d (inc j))))]
+                                     (.append sb (subs s i j)) (recur j stack pending))
+            (.startsWith s "#;" i) (do (.append sb "#;") (recur (+ i 2) stack pending))
+            (.startsWith s "#\\" i) (let [j (loop [j (+ i 3)] (if (and (< j n) (not (delim? (.charAt s j)))) (recur (inc j)) j))]
+                                      (.append sb (subs s i j)) (recur j stack nil))
+            (.startsWith s "#u8(" i) (do (.append sb "#vu8(") (recur (+ i 4) (conj stack true) nil))
+            (.startsWith s "#(" i) (do (.append sb (if quoted? "#(" "'#(")) (recur (+ i 2) (conj stack true) nil))
+            (= c \() (let [j (loop [j (inc i)] (if (and (< j n) (ws? (.charAt s j))) (recur (inc j)) j))
+                           head (subs s j (atom-end j))]
+                       (.append sb "(")
+                       (recur (inc i) (conj stack (or quoted? (= head "quote") (= head "quasiquote"))) nil))
+            (= c \)) (do (.append sb ")") (recur (inc i) (pop stack) nil))
+            (or (= c \') (= c \`)) (do (.append sb c) (recur (inc i) stack :q))
+            (= c \,) (let [j (if (and (< (inc i) n) (= (.charAt s (inc i)) \@)) (+ i 2) (inc i))]
+                       (.append sb (subs s i j)) (recur j stack :c))
+            (= c \|) (let [_ (.append sb "|")
+                           j (loop [j (inc i)]
+                               (cond (= (.charAt s j) \|) j
+                                     (and (= (.charAt s j) \\) (contains? esc (.charAt s (inc j))))
+                                     (do (.append sb (str "\\x" (esc (.charAt s (inc j))) ";")) (recur (+ j 2)))
+                                     (= (.charAt s j) \\) (do (.append sb (subs s j (+ j 2))) (recur (+ j 2)))
+                                     :else (do (.append sb (.charAt s j)) (recur (inc j)))))]
+                       (.append sb "|") (recur (inc j) stack nil))
+            (ws? c) (do (.append sb c) (recur (inc i) stack pending))
+            :else (let [j (atom-end i)] (.append sb (subs s i j)) (recur j stack nil))))))))
 
 ;; ------------------------------------------------------------------------------------------ ecraven's benchmarks
 
@@ -247,6 +342,8 @@
 (defn -main [& [cmd & args]]
   (let [rc (case cmd
              "r7rs" (cmd-r7rs args)
+             "r7rs-chez" (cmd-r7rs-chez args)
+             "r7rs-rewrite" (cmd-r7rs-rewrite args)
              "ecraven" (cmd-ecraven args)
              "mats" (cmd-mats args)
              "ecraven-chez" (cmd-ecraven-chez args)
