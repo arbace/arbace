@@ -2499,3 +2499,38 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
+
+## Chibi Scheme: BSD 3-Clause License
+
+Covers `scheme/vendor/chibi/` (Chibi-Scheme 0.12.0's `(chibi test)`, `(chibi diff)`, `(chibi optional)` and `(chibi term ansi)`, their `.sld` files and the
+`.scm` files they include, unchanged; `scheme/vendor/chibi/provenance.edn`): Copyright (c) 2010-2025 Alex Shinn, as the head of `test.scm` states it, "BSD-style
+license: http://synthcode.com/license.txt". The package the files came from did not carry that license file; the text below is the BSD 3-Clause License, the
+license Chibi-Scheme is released under, with the copyright holder's name. `scheme/lib/chibi/test.sls` is Arbace's own, written from the description in
+`r7rs-tests.scm`'s header (SM8), under the Eclipse Public License 1.0.
+
+```
+Copyright (c) 2009-2025 Alex Shinn
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions
+are met:
+1. Redistributions of source code must retain the above copyright
+   notice, this list of conditions and the following disclaimer.
+2. Redistributions in binary form must reproduce the above copyright
+   notice, this list of conditions and the following disclaimer in the
+   documentation and/or other materials provided with the distribution.
+3. The name of the author may not be used to endorse or promote products
+   derived from this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR
+IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
+OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
+IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT,
+INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
+NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
+THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+```
