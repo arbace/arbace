@@ -251,6 +251,12 @@ corpus_name() {
   if [ "$1" = tamago ]; then echo "$2"; else echo "$1-$2"; fi
 }
 
+# nonempty_list FILE: a corpus's list of programs or directory tests has an entry ($GOROOT/test
+# absent, or a list maker that printed nothing, would make an empty corpus that checks as equal)
+nonempty_list() {
+  [ -s "$1" ] || { echo "corpus: the list $1 is empty (no \$GOROOT/test under $goroot, or bin/repr-go check --list-* printed nothing)" >&2; return 1; }
+}
+
 # corpus_dump CORPUS: the helper's dumps of a corpus into .tmp/godump/corpus/NAME (NAME.tsv the
 # helper's summary), afresh; prints the summary line and the packages not dumped
 corpus_dump() {
@@ -267,17 +273,20 @@ corpus_dump() {
     tests)
       godump -tests -goos "$cgoos" -goarch "$carch" -o "$out" std > "$out.tsv" || true ;;
     test|test-arm64)
-      REPR_GO_GOOS=$cgoos test_programs "$carch" > "$work/corpus/$name-programs.txt"
+      REPR_GO_GOOS=$cgoos test_programs "$carch" > "$work/corpus/$name-programs.txt" || return 1
+      nonempty_list "$work/corpus/$name-programs.txt" || return 1
       (cd "$goroot/test" && xargs -a "$work/corpus/$name-programs.txt" \
          env GOROOT="$goroot" "$helper" -go "$goroot/bin/go" -goos "$cgoos" -goarch "$carch" -files -o "$out") \
         > "$out.tsv" || true ;;
     errtest)
-      REPR_GO_GOOS=$cgoos errorcheck_programs "$carch" > "$work/corpus/$name-programs.txt"
+      REPR_GO_GOOS=$cgoos errorcheck_programs "$carch" > "$work/corpus/$name-programs.txt" || return 1
+      nonempty_list "$work/corpus/$name-programs.txt" || return 1
       (cd "$goroot/test" && xargs -a "$work/corpus/$name-programs.txt" \
          env GOROOT="$goroot" "$helper" -go "$goroot/bin/go" -goos "$cgoos" -goarch "$carch" -files -o "$out") \
         > "$out.tsv" || true ;;
     dirtest|dirtest-arm64)
-      REPR_GO_GOOS=$cgoos dir_tests "$carch" > "$work/corpus/$name-list.txt"
+      REPR_GO_GOOS=$cgoos dir_tests "$carch" > "$work/corpus/$name-list.txt" || return 1
+      nonempty_list "$work/corpus/$name-list.txt" || return 1
       (cd "$goroot/test" && xargs -a "$work/corpus/$name-list.txt" \
          env GOROOT="$goroot" "$helper" -go "$goroot/bin/go" -goos "$cgoos" -goarch "$carch" -dirs -o "$out") \
         > "$out.tsv" || true ;;
@@ -329,14 +338,15 @@ native_spec() {
     tests) mode=:packages more=':args ["std"] :tests true' ;;
     test|test-arm64)
       mode=:files cwd=$goroot/test list=$work/corpus/$name-programs.txt
-      [ -s "$list" ] || REPR_GO_GOOS=$cgoos test_programs "$carch" > "$list" ;;
+      [ -s "$list" ] || REPR_GO_GOOS=$cgoos test_programs "$carch" > "$list" || return 1 ;;
     errtest)
       mode=:files cwd=$goroot/test list=$work/corpus/$name-programs.txt
-      [ -s "$list" ] || REPR_GO_GOOS=$cgoos errorcheck_programs "$carch" > "$list" ;;
+      [ -s "$list" ] || REPR_GO_GOOS=$cgoos errorcheck_programs "$carch" > "$list" || return 1 ;;
     dirtest|dirtest-arm64)
       mode=:dirs cwd=$goroot/test list=$work/corpus/$name-list.txt
-      [ -s "$list" ] || REPR_GO_GOOS=$cgoos dir_tests "$carch" > "$list" ;;
+      [ -s "$list" ] || REPR_GO_GOOS=$cgoos dir_tests "$carch" > "$list" || return 1 ;;
   esac
+  [ -z "$list" ] || nonempty_list "$list" || return 1
   [ -z "$list" ] || more=":args-file \"$list\""
   spec=$work/corpus/$name.load.edn
   printf '{:name "%s" :dumps "%s" :tsv "%s.tsv"\n :loads [{:goroot "%s" :goos "%s" :goarch "%s" :mode %s :cwd "%s" %s}]}\n' \
@@ -345,20 +355,30 @@ native_spec() {
 }
 
 # native_dumps CORPUS FRESH: the helper's dumps of CORPUS (made when missing, or FRESH) and the
-# loader's spec of it; prints the spec's path
+# loader's spec of it; prints the spec's path. Runs in a command substitution, where errexit does
+# not hold: each step's failure returns, and a corpus the helper dumped nothing of fails (an empty
+# corpus would check as 0 of 0 equal).
 native_dumps() {
   local c=$1 fresh=$2 cgoos cwhat carch name
   case $c in
     goos-*|cmd-*|box|purego|x509roots)
       if [ -n "$fresh" ] || [ ! -d "$work/corpus/$c" ] || [ ! -f "$work/corpus/$c.load.edn" ]; then
-        "$root/bin/lib/repr-go/native-corpus" "$c" "$work/corpus/$c" >&2
+        "$root/bin/lib/repr-go/native-corpus" "$c" "$work/corpus/$c" >&2 || { echo "native-check: $c: the helper's dumps failed" >&2; return 1; }
       fi
-      echo "$work/corpus/$c.load.edn" ;;
+      name=$c ;;
     *)
       corpus_config "$c"
       name=$(corpus_name "$cgoos" "$cwhat")
-      if [ -n "$fresh" ] || [ ! -d "$work/corpus/$name" ]; then build >&2; corpus_dump "$c" >&2; fi
-      native_spec "$c" ;;
+      if [ -n "$fresh" ] || [ ! -d "$work/corpus/$name" ]; then
+        build >&2 || return 1
+        corpus_dump "$c" >&2 || { echo "native-check: $c: the helper's dumps failed" >&2; return 1; }
+      fi ;;
+  esac
+  awk -F'\t' '$1 == "ok" || $1 == "errors" { n++ } END { exit !n }' "$work/corpus/$name.tsv" 2> /dev/null \
+    || { echo "native-check: $c: the helper dumped no package ($work/corpus/$name.tsv)" >&2; return 1; }
+  case $c in
+    goos-*|cmd-*|box|purego|x509roots) echo "$work/corpus/$c.load.edn" ;;
+    *) native_spec "$c" ;;
   esac
 }
 
