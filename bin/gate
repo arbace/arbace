@@ -416,6 +416,36 @@ main_checkout() {
 # .tmp/gate-clean/SHA.logs/, its passes (marked :clean) into the store and its executables' directories
 # into ARBACE_GATE_EXES where absent (GATE_CLEAN_PUBLISH=0: not), and the clone removed (on a failure
 # kept, its Go cache removed; GATE_CLEAN_KEEP=1: kept)
+# publish_passes FROM TO: the clean run's passes (FROM/NAME/KEY.{edn,log,inputs,out}) into the store TO:
+# a pass TO holds already and that reads (pass_reads) is kept; one absent, empty or cut (GT7's rerun 4:
+# written on a full disk, then kept by cp -an against rerun 5's) is replaced, its files through
+# temporary names, the record last (GTS80 (a)); a FROM pass that does not read is not published
+publish_passes() {
+  local from=$1 to=$2 d n e k t f pub=0 rep=0 kept=0 bad=0
+  for d in "$from"/*/; do
+    [ -d "$d" ] || continue
+    n=$(basename "$d")
+    mkdir -p "$to/$n" || return 1
+    for e in "$d"*.edn; do
+      [ -f "$e" ] || continue
+      k=$(basename "$e" .edn)
+      pass_reads "$e" "$n" || { echo "   gate --clean: warning: $e does not read: not published" >&2; bad=$((bad + 1)); continue; }
+      if pass_reads "$to/$n/$k.edn" "$n"; then kept=$((kept + 1)); continue; fi
+      [ -e "$to/$n/$k.edn" ] && rep=$((rep + 1))
+      t=$to/$n/.$k.pub.$$
+      rm -rf "${t:?}".*
+      for f in log inputs out; do
+        [ -e "$d$k.$f" ] || continue
+        cp -a "$d$k.$f" "$t.$f" && rm -rf "${to:?}/$n/$k.$f" && mv -T "$t.$f" "$to/$n/$k.$f" \
+          || { rm -rf "${t:?}".*; echo "   gate --clean: warning: the pass $n/$k not published" >&2; continue 2; }
+      done
+      cp "$e" "$t.edn" && pass_reads "$t.edn" "$n" && mv -f "$t.edn" "$to/$n/$k.edn" \
+        || { rm -rf "${t:?}".*; echo "   gate --clean: warning: the pass $n/$k not published" >&2; continue; }
+      pub=$((pub + 1))
+    done
+  done
+  echo "   $pub passes (:clean) published into $to ($rep of them replacing one that did not read), $kept there already$( [ "$bad" = 0 ] || echo ", $bad not reading not published")"
+}
 clean_launch() {
   local sha tag main common dir base st v keep=() unset=() frozen out t0 n d e store_to exes_to
   t0=$(date +%s)
@@ -468,15 +498,11 @@ clean_launch() {
   fi
   echo "   the logs: ${out#$root/}/"
   if [ "${GATE_CLEAN_PUBLISH:-1}" != 0 ]; then
-    # the passes (:clean) into the store the everyday gate reads, beside its own (none replaced); the
-    # executables and javac's tool, when the run passed, into the shared directory where absent
+    # the passes (:clean) into the store the everyday gate reads, beside its own (none replaced but one
+    # that is empty or does not read, GTS80 (a): publish_passes); the executables and javac's tool, when
+    # the run passed, into the shared directory where absent
     store_to=${ARBACE_GATE_STORE:-$main/.tmp/gate-pass} exes_to=${ARBACE_GATE_EXES:-$main/.tmp/gate-exe}
-    n=0
-    for d in "$dir/.tmp/gate-pass"/*/; do
-      [ -d "$d" ] || continue
-      mkdir -p "$store_to/$(basename "$d")" && cp -an "$d". "$store_to/$(basename "$d")/" && n=$((n + $(ls "$d" | grep -c '\.edn$')))
-    done
-    echo "   $n passes (:clean) published into $store_to"
+    publish_passes "$dir/.tmp/gate-pass" "$store_to"
     if [ "$st" = 0 ]; then
       for e in "$dir/.tmp/gate-exe"/*; do
         [ -d "$e" ] || continue

@@ -160,22 +160,35 @@ step() {  # step NAME HEAVY COMMAND...: one step, logged, timed, measured (GT1);
 mem_of() {  # mem_of NAME FIELD: a number of NAME.mem
   sed -n "s/.*:$2 \([0-9.]*\).*/\1/p" "$logs/$1.mem" 2>"$logs/mem-of.err"
 }
+# pass_reads FILE [NAME]: a pass record that reads (GTS80 (a)): not empty, record_pass's shape, its step
+# NAME, closed; an empty or cut one (a full disk's, GT7's rerun 4) is no pass. The planner reads it with
+# the Clojure reader and skips one that does not read
+pass_reads() {
+  [ -s "$1" ] || return 1
+  head -c 9 "$1" | grep -q '^{:step "' || return 1
+  [ -z "${2:-}" ] || head -1 "$1" | grep -qF "{:step \"$2\" :key \"" || return 1
+  grep -q ':log-sha256 "[0-9a-f]\{64\}"' "$1" && [ "$(tail -c 2 "$1")" = "}" ]
+}
 record_pass() {  # record_pass NAME: its pass in the store at its key (GTS7 (a)), with its outputs (GT5)
-  local name=$1 k=${key[$1]} d=$store/$1 tmp
+  # GTS80 (a): every file through a temporary name renamed into place, the record last (a pass is its
+  # .edn), each checked whole first: a full disk leaves temporary files (removed), never a cut pass
+  local name=$1 k=${key[$1]} d=$store/$1 t
   mkdir -p "$d" || return 1
-  tmp=$d/.$k.$$
-  cp "$logs/$name.log" "$d/$k.log" && cp "$logs/plan/$name.inputs" "$d/$k.inputs" || return 1
+  t=$d/.$k.$$
+  rm -rf "${t:?}".*
+  cp "$logs/$name.log" "$t.log" && cmp -s "$logs/$name.log" "$t.log" \
+    && cp "$logs/plan/$name.inputs" "$t.inputs" && cmp -s "$logs/plan/$name.inputs" "$t.inputs" \
+    && mv -f "$t.log" "$d/$k.log" && mv -f "$t.inputs" "$d/$k.inputs" || { rm -rf "${t:?}".*; return 1; }
   if [ "${outputs[$name]}" = yes ]; then
-    rm -rf "${d:?}/.$k.out.$$"
-    cp -a "$logs/out/$name" "$d/.$k.out.$$" && rm -rf "${d:?}/$k.out" && mv -T "$d/.$k.out.$$" "$d/$k.out" || return 1
+    cp -a "$logs/out/$name" "$t.out" && diff -rq "$logs/out/$name" "$t.out" > "$t.diff" \
+      && rm -f "$t.diff" && rm -rf "${d:?}/$k.out" && mv -T "$t.out" "$d/$k.out" || { rm -rf "${t:?}".*; return 1; }
   fi
-  printf '{:step "%s" :key "%s" :commit "%s" :dirty %s :worktree "%s" :date "%s"\n :secs %s :cpu-s %s :maxrss-kib %s :tree-peak-kib %s\n :log-sha256 "%s"}\n' \
+  printf '{:step "%s" :key "%s" :commit "%s" :dirty %s :worktree "%s" :date "%s"\n :secs %s :cpu-s %s :maxrss-kib %s :tree-peak-kib %s\n :log-sha256 "%s"%s}\n' \
     "$name" "$k" "$commit" "$dirty" "$root" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(cat "$logs/$name.secs")" \
     "$(mem_of "$name" cpu-s)" "$(mem_of "$name" maxrss-kib)" "$(mem_of "$name" tree-peak-kib)" \
-    "$(sha256sum < "$logs/$name.log" | cut -c1-64)" > "$tmp" || return 1
-  # GT7: a pass of the clean run (bin/gate --clean) says so
-  [ -n "${GATE_CLEAN_INNER:-}" ] && sed -i '$ s/}$/ :clean true}/' "$tmp"
-  mv "$tmp" "$d/$k.edn"
+    "$(sha256sum < "$logs/$name.log" | cut -c1-64)" \
+    "$([ -n "${GATE_CLEAN_INNER:-}" ] && echo ' :clean true')" > "$t.edn" \
+    && pass_reads "$t.edn" "$name" && mv -f "$t.edn" "$d/$k.edn" || { rm -rf "${t:?}".*; return 1; }
 }
 
 # the plan's steps, from plan.tsv: NAME DECISION KEY PHASE CHAIN NEEDS START-AFTER HEAVY MEM BUDGET
