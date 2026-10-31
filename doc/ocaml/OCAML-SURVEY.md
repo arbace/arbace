@@ -1558,3 +1558,74 @@ for a few minutes while `go vet` and `go test` ran at `GOMAXPROCS=3` beside one 
 
 All as recommended: OC110 (a) now, (c) at O8; OC111 (a); OC112 (b) at the next gate window, (c) with OC105 (c);
 OC113 (a).
+
+## As built: review 008's fixes (2026-10-31)
+
+Review 008 (a helper VM's, at `1cf3de9a`, light only: nothing was run) made nine findings, none high. Each was checked against the code; all nine hold.
+Each fix is its own commit on `ocaml-o1`, with a test that fails before and passes after (`test/ocaml/judges_test.bash`, `repr_levels_test.bash`,
+`aot_oi_column_test.bash`, `embed_check.ae`).
+
+| # | holds | the fix | the test |
+|---|---|---|---|
+| 1 | yes | the AOT levels' OI column comes from oi's rows for the same programs and the same oi build: `bin/oi` writes `check.tsv.key` (`oi_key`: the driver's forms and the stdlib's key) beside every oi check; `check --aot` and `suite check --aot` reuse `check.tsv` only when the key is current and run oi (`oi_rows_for`) for the programs it lacks, into a file of their own; `o2j_check.ae` exits 2 when the oi file is missing instead of writing `-` | `aot_oi_column_test.bash`: three programs judged with `check.tsv` absent, left by `--only`, and stale; before: 3 CHANGED rows in two of the three states, after: none |
+| 2 | yes | see below | `judges_test.bash` (the speed class, the boundary), and the rerun below |
+| 3 | yes | `arbace/j2g/embed.ae`'s `excluded` names `arbace/repr/ocaml.ae` and `arbace/repr/ocaml/` (as repr/c's, CS36 (a)), until OCaml's heavy window; the keys (`arbace_embedded_sources`, the audit's `:gate` host, `steps.edn`'s `:tools`) already excluded it, so they now describe what is embedded. `arbace.o2j` stays embedded and keyed (it is in `gate_key`); line 1280's "not embedded" corrected. Shipped file changed: `embed.ae`, so the keys move | `bin/repr-ocaml embed-check` (`test/ocaml/embed_check.ae`): `arbace.j2g.embed/sources` has no repr/ocaml path and every embedded path is in `arbace_embedded_sources`; before: five repr/ocaml paths, exit 1; after: 131 embedded, all keyed |
+| 4 | yes | a judge reports a recorded program with no row in a full run (`GONE`, exit 1) and a full `--record` prints `DROPPED` for each program it drops (both judges); the opam fetch lists its pins to a file first, so a failing read stops it; the suite corpus refuses an opam package not extracted. The suite corpus's class rows are not written (the review's second half): a test that actions.awk newly classes now shows as `GONE` in both suite levels, and writing the class rows would make the rollup read them as run tests | `judges_test.bash`: 5 cases (oi and AOT, judge, record, `--only` not affected); 4 fail before |
+| 5 | yes | `suite rollup` always runs `suite roles` (seconds) | `judges_test.bash`: a bogus `roles.tsv` is regenerated; fails before |
+| 6 | yes | the programs with an environment run under the same limit as the rest, through `o2j_env_runs` (one function for both levels, `limited_cpu`, a `timeout` row on 124 or 137); their argv.(0) is the dump as the batch rows' (`O2J_ARGV0`, `run.ae`'s single mode) | `judges_test.bash`: `OI_TIMEOUT=1` on `tool-ocamltest-var-expansion/subst1` is a `timeout 1s of CPU` row; fails before (the program ran to the end) |
+| 7 | yes | a known entry may carry the kind of failure it was made for (`["id" "gc: ..." "output differs ("]`, a prefix or a vector of them); a listed program that now fails otherwise (a crash, a status, a loop) keeps its own reason and so falls in no class; all 88 entries of `oi-known.edn` and `aot-known.edn` carry theirs (taken from the records: `output differs (` 32, `status ` 43, `timeout ` 10, two `o2j:` and one `oi:` panic). The speed classes match `^slow timeout ` and a timeout is `slow` only for the programs of `oi-slow.edn` (2) and `aot-slow.edn` (26: the program corpus 21, the suite 5); a listed program that passes is reported `STALE` | `judges_test.bash`: a known program that crashes is failing (oi and AOT), a timeout not listed is failing, a listed one is the speed class; fail before |
+| 8 | yes | see below | `repr_levels_test.bash`: 9 cases, 6 fail before |
+| 9 | yes | `bin/oi suite expect` is a check as the other verbs: it writes `.tmp/o7/expect-run.edn`, compares it with `ref-expect.edn` (a whole run: the file; `--only`: every row of the run in the record) and exits 1 on a difference; `--record` rewrites the record, from a whole run (`OI_EXPECT_RECORD` names another record file, for the test) | `judges_test.bash`: a run equal to the record passes and leaves the committed file as it was; one against a tampered record fails; fails before |
+
+**Finding 2, the light AOT level's record.** The 24 timeouts of `check-aot.edn` (and the suite's 5) were the batch's wall-clock `Thread.join`, 120 s in a process
+shared with the other shard, on a loaded host: the last judged run of the previous section differed from the record in three rows. The fix follows the project's
+way (`bin/lib/limit.bash`, GT6): a program the batch stops at its wall limit is run again alone under `limited_cpu` with `OI_TIMEOUT` seconds of CPU time
+(`ulimit -t`, which counts every thread of the process and barely moves with the host's load) and a wall cap of four times it, and its status is that run's
+(`timeout` on 124, 137 or 152; the reason is `timeout 120s of CPU`). Not the factor five of `limited`: the level runs one thread of Go (`GOMAXPROCS=1`), so CPU
+time is at most wall time, and the CPU limit equals the wall limit of a quiet host. The single-process start (the library's load, about 10 CPU seconds) is inside
+the limit. The programs whose timeout is their speed are named (`aot-slow.edn`) and judged `slow` (class `:light-speed`); the known `gc:` programs that
+time out keep their `known` reason.
+
+**Finding 8, the levels of `bin/repr-ocaml`.** (a) `test/ocaml/floors.tsv` (15 rows, `--record` writes them): the files the `.cmi` level compiles alone and its `:lines`
+print, the files each corpus's dumps compile alone, the spec's entries (218) may not drop; a missing row is a failure. (b) `compare --record` writes nothing and exits
+1 on a file the printer did not print, a print the helper rejects, or an unstable print. (c) `full` counts a layout rejection under the round trip's rejection
+only when the round trip's record is itself a rejection, not a `:diff`. (d) a `dumps-known.edn` entry whose dump no longer errs is a failure. (e)
+`spec_check.ae` fails on no entries. The floors found a nondeterminism at once: `stdlib/set.ml` compiles alone in some runs of the dumps' parallel passes and not in
+others (116 or 115 files), so that floor is 115.
+
+**The numbers**
+
+| | before | after |
+|---|---|---|
+| oi, program corpus (309) | 273 pass, 0 failing | 273 pass, 0 failing, 0 CHANGED (judged, 6 min 37 s) |
+| oi, suite corpus (108) | 87 pass, 2 `speed` | 87 pass, 2 `slow` (the two timeouts, now named), 0 failing |
+| AOT (light), program corpus | 248 pass in the record (251 on one run: the record does not reproduce, 3 rows differ at the 120 s wall limit) | **251 pass, 21 slow** (`timeout 120s of CPU`), 37 `fail` (all `known`), 0 failing; 117 min at two shards on a loaded host (load average 20 to 22) |
+| AOT (light), suite corpus | 86 pass | 86 pass, 5 slow, 0 failing (21 min) |
+| rollup | 0 files without a result or class; AOT 312 pass | 0; AOT 315 pass, oi 338 |
+| `bin/repr-ocaml roundtrip --text --cmi-lines` (stdlib, compiler-sources, compiler-backend, samples), judged | | exit 0, 4 min 28 s, floors met |
+| `bin/repr-ocaml dumps` (six corpora), judged | | exit 0 (after the stdlib floor, 115), 3 min 43 s |
+| `spec-check`, `embed-check` | | exit 0 (218 entries), exit 0 |
+| AOT (light), a rerun on the same loaded host of 10 programs (the 6 slow at the former 120 s wall boundary, `hamming`, `nucleic`, `fftba`, `lib-seq/test`), judged | the former record: 3 rows flipped in one run | 16 min: 9 of 10 as recorded (5 `slow`, 4 pass; `hamming` and `nucleic` passed at 103 s and 98 s of wall time in the batch), 1 not: `misc/bdd`, recorded `slow`, passed under 120 s of CPU this time |
+
+`misc/bdd` is the CPU limit's own boundary (a program at 100 to 130 CPU seconds moves a few percent with load, GC threads and cache). The judge therefore
+takes a program that is listed in `aot-slow.edn` and recorded `slow` and now passes as no change (it prints `STALE`, the row stays as recorded; a listed program
+recorded as a pass that times out is a change, and so is any other flip); `judges_test.bash` has the case.
+
+**Not done / limits**: the compiled level and the gate are untouched (the heavy list); the fixes need no gate window except finding 3 (`embed.ae` moves the keys: the next
+`bin/gate` build step rebuilds). The batch runner's leftover threads (the review's speculative point) was not looked into. The finding-7 kinds were taken from the
+records of this branch, so they say "the failure each known program has now", not why.
+
+**Proposals** (OC120 onward; each with options and the recommended one first)
+
+- **OC120 Where the checks of this section run.** `judges_test.bash`, `repr_levels_test.bash` and `aot_oi_column_test.bash` are scripts; `embed-check` is a verb. (a) as built, run by
+  hand; (b) one gate step `ocaml-judges` (light, seconds for `repr_levels_test` and the judge cases, 5 minutes with `aot_oi_column_test` and `expect`), keyed by `bin/oi`,
+  `bin/lib/oi/`, `test/ocaml/*.ae` and the known and slow lists; (c) fold them into `bin/repr-ocaml check`. *Recommended: (b)* at the next gate window with OC112 (b).
+- **OC121 The light level's wall-clock limit for unlisted programs.** A program near the limit that is not in `aot-slow.edn` now gets its CPU time decided by the rerun alone,
+  but still pays 120 s of wall time in the batch first. (a) as built; (b) run every program at the light level alone under `limited_cpu` (no batch: the library's load, about 10 s,
+  309 times); (c) a first batch limit of 60 s, the rerun deciding. *Recommended: (a)*: a slow program costs one rerun; (b) triples the level's time.
+- **OC122 Closing the nondeterminism the floor found.** `stdlib/set.ml` compiles alone in some runs of `dumps`' parallel passes. (a) record the lower floor (as built);
+  (b) make the passes deterministic (compile a pass's files one at a time into a copy of the previous pass's directory, then merge); (c) drop the stdlib from the floors. *Recommended: (b)*
+  with the dependency-order build (OC51 (b)), which removes the pass order altogether.
+- **OC123 `bin/oi`'s whole run as one step.** The OI column now costs the AOT level an oi run when the key is stale (6 minutes for the program corpus). (a) as built;
+  (b) the AOT level always runs oi's rows first and `check` shares them (one oi run for both levels); (c) read oi's recorded results (`check-oi.edn`, a status and digest-less record) as the
+  review proposed. *Recommended: (b)* when the gate steps `oi` and `oi-aot` exist; (c) loses the column's meaning (same output and status).

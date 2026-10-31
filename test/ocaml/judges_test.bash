@@ -75,4 +75,10 @@ sed 's/\("basic\/patmatch_for_multiple.ml" \)"pass"/\1"diff"/; s/\("tests\/basic
 cmp -s "$W/ref-expect.tampered" "$root/test/ocaml/ref-expect.edn" && { echo "FAIL expect: the test's tampering did not apply"; bad=1; }
 out=$(cd "$root" && OI_EXPECT_RECORD=$W/ref-expect.tampered bin/oi suite expect --only "$only" 2>&1); st=$?
 expect "expect: a run that differs from the record fails" 1 'not in the record' "$out" $st
+
+# finding 2: a listed slow program recorded as slow that passes this time (the CPU limit's boundary) is not a change
+printf 'a\t0\th\t1\t1.0\t\nb\t0\th\t1\t1.0\t\nc\t0\th\t1\t1.0\t\n' > "$k/check.tsv"
+printf '[\n ["a" "fail" "known gc: a finaliser (output differs (1 bytes, ocamlopt 1))" "differs"]\n ["b" "slow" "timeout 120s" "same"]\n ["c" "pass" "" "same"]\n]\n' > "$k/aot-results.edn"
+printf 'a\t0\tx\t1\t1.0\t\nb\t0\th\t1\t1.0\t\nc\t0\th\t1\t1.0\t\n' > "$k/check.tsv"
+out=$(judge_aot judge "$k/check.tsv" "$k/corpus.tsv" "$k/refs.edn" "$k/oi.tsv" "$k/aot-results.edn" "$k/classes.edn"); expect "aot: a slow program that passes at the boundary is not a change" 0 'STALE b' "$out" $?
 exit $bad
