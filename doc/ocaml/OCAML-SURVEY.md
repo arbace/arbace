@@ -1553,3 +1553,8 @@ untouched. `go/arbace/oi/ext.ae` is oi's package, not yet in goi's table (the dr
 redirection); (2) a `rm -f *` in a scratch directory (`.tmp/oc/x`, a fresh `cd`) was refused by the harness and not run; I used a new directory instead; (3) up to 5 threads
 for a few minutes while `go vet` and `go test` ran at `GOMAXPROCS=3` beside one AOT shard. Scratch the survey cites: `.tmp/oc/` in the worktree (`*.log` of the runs,
 `exp/` the first tool experiments, `ref-expect.*.edn` the earlier expect records), `.tmp/o7/exp/` (the tool and `repo/`).
+
+### Decided (OC110-OC113; the user, 2026-10-31)
+
+All as recommended: OC110 (a) now, (c) at O8; OC111 (a); OC112 (b) at the next gate window, (c) with OC105 (c);
+OC113 (a).
