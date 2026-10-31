@@ -3174,3 +3174,79 @@ Rule slips: one foreground `sleep 240` beyond the tool's limit moved a command t
 
 All as recommended: CS160, starting with gnu23-attr-syntax-2/3; CS161, not now; CS162, not now; CS163, not now;
 CS164, with CS156 in the heavy window; CS165.
+
+## As built: CS160, CS165 (2026-10-31)
+
+On the branch `c23-c7`, in the light tier, after "Decided (CS160-CS165)": two commits (`1962d884`, `c91b1e65`; the second holds the rest, the families sharing `parse.ae` and `check.ae`
+too closely to split by hand). Outside the shipped tree (CS100 (b)): `arbace/c/{check,dg}.ae`, `arbace/repr/c/{parse,convert,pp}.ae`, `test/c/`; nothing under `go/`, `overlay/`, `jdk/`.
+
+### C7I.1 What was built
+
+| family | where | what |
+|---|---|---|
+| `gnu23-attr-syntax-2/3` | `parse.ae` (`*recover*`) | an attribute after the identifier list of a function declarator inside parentheses (`(*f(a, b) [[]])()`) and one in a K&R declaration list (`int x; [[]] int y;`) are errors the parse goes on after; `__auto_type [[...]] x`: empty attributes read, a nonempty list a soft error ("'__auto_type' followed by") |
+| `c23-attr-syntax-3` | `parse.ae`, `dg.ae` | attributes before `_Static_assert` (file scope, block), after a label where a statement is expected (`x: [[]];` as the body of an `if`), before the type of `sizeof (...)`, after `struct`/`union`/`enum` where the tag is not defined and is not followed by `;`; with the file's `-pedantic-errors` (`*recover*` is `:pedantic` then, `dg.ae` binds it) a declaration with specifiers and no declarators that begins with attributes is an "empty declaration", and a qualified tag with attributes an "invalid use of attributes in empty declaration" |
+| `c23-attr-syntax-5` | `parse.ae`, `check.ae`, `convert.ae` | an unprefixed attribute that is no standard one takes balanced tokens as its arguments (`[[unknown_attribute(!)]]`); "ignored" after `*` (`int *[[x]] p`), on an unnamed parameter's specifiers, and a function definition's attributes at the declarator's line (`:line` of the name, not of `void` on its own line) |
+| `c23-has-c-attribute-4` | `pp.ae` | `__has_c_attribute`'s operand: not an identifier, no identifier after the scope, no closing parenthesis (on `__has_cpp_attribute` too; `__has_attribute` as before) |
+| `bitint-75` | `check.ae` | an `asm` operand with a register-only constraint (`"r"`, `"+r"`, no `m`, `o`, `g`, digit...) naming an object of a `_BitInt` wider than 128 bits: "impossible constraint in 'asm'" (the statement is kept as text; a regular expression finds the operands); `bitint-81` (`"rm"`) was a false error of the first version and stays passing |
+| CS165 | `test/c/essential-dg.txt` | `c23-attr-syntax-6`, `c23-thread-local-2` and, for the families CS160 made pass, `gnu23-attr-syntax-2`, `c23-attr-syntax-3`, `-5`, `c23-has-c-attribute-4`, `bitint-75`: 100 files, `bin/ci dg --essential` 100 of 100 |
+
+### C7I.2 The numbers
+
+`bin/ci dg --record`, 627 files (before: the record at `e98e3fc6`; after: the record at `c91b1e65`):
+
+| class | before | after |
+|---|---:|---:|
+| pass | 587 | **593** |
+| decl-diag | 19 | 16 |
+| attr-diag | 3 | 0 |
+| pedantic-diag | 2 | 2 |
+| pp-diag | 3 | 3 |
+| parse-gap | 3 | 3 |
+| read-refused | 10 | 10 |
+| not in a class | 0 | 0 |
+
+Per group, pass: gcc-c23 254 of 270 (251), gcc-cpp-c23 16 (16), gcc-c23-sub 23 (23), gcc-gnu23 49 of 51 (47), gcc-embed 39 (39), gcc-va-opt 11 (11), gcc-bitint 201 of 201 (200).
+New passes (6, none lost): `gnu23-attr-syntax-2`, `gnu23-attr-syntax-3`, `c23-attr-syntax-3`, `c23-attr-syntax-5`, `c23-has-c-attribute-4`, `bitint-75`. The classes move by message: the three attr-diag files and `c23-attr-syntax-3`
+(parse-gap by its "both") passed, and a file or two changed class between decl-diag and parse-gap as their first missed message changed.
+`c23-attr-syntax-5` and `-3` were stopped by hard parse errors (`_Static_assert` after attributes at line 19, `(!)` as arguments at line 47), which hid every later line.
+`c23-attr-syntax-5` was the "ignored" family of other positions the entry named: the checker had them all but three.
+
+The run level, after the last change: `bin/ci check --record` over all corpora: unchanged but `compcert/perlin.c`, which timed out again (`differ status timeout`) under the run's load, restored with `git checkout` (the committed record, perlin passes, stands).
+`bin/repr-c check --c23`: 62 files, 59 pass, 3 expected failures, 0 failing. The round trip (`bin/repr-c roundtrip --corpus c23conf,c23,tcc-tests2 --no-run`): c23conf 49 of 49, c23 62 of 62, tcc-tests2 85 pass and 3 known.
+tcc-tests2's level-1 "differ" (1) is `64_macro_nesting.c`, status `known`, class `:macro-context` in `test/repr/c/roundtrip-known.edn` (checked in `.tmp/repr-c-roundtrip/tcc-tests2/files.tsv`: the form's `:c/macro "CAT(A,B)"` against `AB`); the two "-" are the known `18_include.c` (split-declaration) and `95_bitfields.c` (self-include) whose reads are refused. Nothing new there.
+
+### C7I.3 Checks not run
+
+As in C7H.3: the compiled level (`bin/ci check --aot`), `bin/repr-c parse-check` and `check --tokens` (CS164, with CS156: `parse.ae` and `pp.ae` changed, `parse.ae` only behind `*recover*`, `pp.ae`'s new errors only for `__has_c_attribute`'s malformed operands, which no corpus but the dg one has; the round trips and cc's comparisons are the evidence), `bin/ci annotations`, `bin/gate`, `bin/ci repl-session`. The Java check was not touched.
+
+### C7I.4 What is left
+
+CS160's list is done: attr-diag is empty. parse-gap (3): `c23-complit-5` (both, needs CS161), `embed-11` (the include path of the test's own directory), `embed-2` (an extra `#embed` pedwarn). decl-diag (16) as in C7H.4 less `gnu23-attr-syntax-*`, `c23-attr-syntax-3`; pedantic-diag (2): `c23-digit-separators-2`, `embed-1x`.
+The recovery's sites are now ten (`attribute` skipping, `__auto_type`, K&R list, identifier-list attribute, `_Static_assert`, label, `sizeof`, struct/enum tag, empty declaration, balanced arguments), each local, none a resynchronization.
+
+### C7I.5 Proposals (CS170-CS174)
+
+Each with options, the recommended one first; none decided.
+
+- **CS170 The next recovery sites.** The remaining files stopped by hard parse errors (`c23-bool-errors-3`, `c23-stdarg-11`, `c23-complit-5`, `embed-18/27/4`) are CS161's.
+  - Options: (a) keep adding local sites as a family needs them (what CS160 did: one soft error, one skipped construct); (b) CS161's generic resynchronization at `;` or `}`; (c) leave.
+  - *Recommended: (a)* only for `c23-bool-errors-3` (`true`/`false` as enumerators: one site); (b) stays not now, since CS160 showed the local sites reach files without false errors in passing ones.
+- **CS171 The pedantic flag in `*recover*`.** It is now `true` or `:pedantic`, so that the parser's soft errors that gcc gives only under `-pedantic-errors` ("empty declaration") are not false errors elsewhere.
+  - Options: (a) keep the value as it is; (b) a map (`{:pedantic ... :std ...}`) for the next such rules; (c) move those rules into the checker by carrying the prefix attributes in the forms (changes the forms' text, the round trips' references).
+  - *Recommended: (a)* until a second option is needed; (c) only with a reason beyond the dg check.
+- **CS172 Definitions' diagnostics at the declarator's line.** `convert.ae` now gives a definition with attributes after its declarator the name's line; gcc reports all of a definition's declaration errors at the name (`void` and `f (void)` on two lines).
+  - Options: (a) the same for every definition; (b) as built, only with attributes; (c) the attribute token's own line.
+  - *Recommended: (a)* with a dg run (a passing file's other diagnostics may move), after CS163's two files if they are taken.
+- **CS173 `asm` operands.** The check reads the statement's text with a regular expression.
+  - Options: (a) leave (one file, one rule); (b) the converter reads the operands into forms (`c/asm` with outputs, inputs, clobbers), the checker then types them (constraints against types, `"m"` of a register...); (c) drop the rule.
+  - *Recommended: (a)* until a second asm rule appears.
+- **CS174 The next family.** Remaining by size: `constexpr` representability (`c23-constexpr-9`, `c23-constexpr-dfp-2`, 60 lines), `c23-enum-7` (CS162), `c23-tag-6` and `c23-tag-enum-5` (one site each), `c23-complit-5/8`.
+  - Options: (a) `c23-tag-6` and `c23-tag-enum-5` (completeness in `_Generic`, nested enum redefinition); (b) `constexpr` representability; (c) stop the dg check here.
+  - *Recommended: (a)*, two small files; (b) next, as one rule covers 60 lines.
+
+### C7I.6 Shipped files, scratch and rule slips
+
+Shipped files changed: none (nothing under `go/`, `overlay/`, `jdk/`).
+Scratch in the worktree's `.tmp/`: `c7/` (logs: `dg160*.log`, `ess160.log`, `final.log`, `final.sh`), `c7s/` (`l4.txt`-`l9.txt`: file lists for `one`), `t/` (probe files), `ci-dg-one/`, `dg-before160.edn` (the record before), `ci-check/`, `repr-c-roundtrip/`.
+Rule slips: none known.
