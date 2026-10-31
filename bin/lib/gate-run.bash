@@ -179,21 +179,23 @@ record_pass() {  # record_pass NAME: its pass in the store at its key (GTS7 (a))
   # GTS80 (a): every file through a temporary name renamed into place, the record last (a pass is its
   # .edn), each checked whole first: a full disk leaves temporary files (removed), never a cut pass. The
   # temporaries are dotfiles ending in .tmp, never .edn (review 001, finding 3: gate.plan's passes reads
-  # *.edn, a killed gate's leftover would count as a pass)
-  local name=$1 k=${key[$1]} d=$store/$1 t
+  # *.edn, a killed gate's leftover would count as a pass). Review 001, finding 6: every file written and
+  # checked under its temporary name before any is renamed, so that a failure to write (at a key that has a
+  # pass already: --rerun, the canary) leaves the old record with its own log; then the old record removed,
+  # the companions renamed, the record last (a failure there leaves no pass, never one with another's log)
+  local name=$1 k=${key[$1]} d=$store/$1 t f secs cpu rss tree
   mkdir -p "$d" || return 1
   t=$d/.$k.$$
   rm -rf "${t:?}".*
   cp "$logs/$name.log" "$t.log.tmp" && cmp -s "$logs/$name.log" "$t.log.tmp" \
     && cp "$logs/plan/$name.inputs" "$t.inputs.tmp" && cmp -s "$logs/plan/$name.inputs" "$t.inputs.tmp" \
-    && mv -f "$t.log.tmp" "$d/$k.log" && mv -f "$t.inputs.tmp" "$d/$k.inputs" || { rm -rf "${t:?}".*; return 1; }
+    || { rm -rf "${t:?}".*; return 1; }
   if [ "${outputs[$name]}" = yes ]; then
     cp -a "$logs/out/$name" "$t.out.tmp" && diff -rq "$logs/out/$name" "$t.out.tmp" > "$t.diff.tmp" \
-      && rm -f "$t.diff.tmp" && rm -rf "${d:?}/$k.out" && mv -T "$t.out.tmp" "$d/$k.out" || { rm -rf "${t:?}".*; return 1; }
+      && rm -f "$t.diff.tmp" || { rm -rf "${t:?}".*; return 1; }
   fi
   # review 001, finding 5: a number not measured is nil, so that the record is a whole map (an empty value
   # made it odd-length, which the Clojure reader rejects)
-  local secs cpu rss tree
   secs=$(cat "$logs/$name.secs" 2>"$logs/mem-of.err") cpu=$(mem_of "$name" cpu-s) rss=$(mem_of "$name" maxrss-kib) \
     tree=$(mem_of "$name" tree-peak-kib)
   printf '{:step "%s" :key "%s" :commit "%s" :dirty %s :worktree "%s" :date "%s"\n :secs %s :cpu-s %s :maxrss-kib %s :tree-peak-kib %s\n :log-sha256 "%s"%s}\n' \
@@ -201,7 +203,14 @@ record_pass() {  # record_pass NAME: its pass in the store at its key (GTS7 (a))
     "${cpu:-nil}" "${rss:-nil}" "${tree:-nil}" \
     "$(sha256sum < "$logs/$name.log" | cut -c1-64)" \
     "$([ -n "${GATE_CLEAN_INNER:-}" ] && echo ' :clean true')" > "$t.edn.tmp" \
-    && pass_reads "$t.edn.tmp" "$name" && mv -f "$t.edn.tmp" "$d/$k.edn" || { rm -rf "${t:?}".*; return 1; }
+    && pass_reads "$t.edn.tmp" "$name" || { rm -rf "${t:?}".*; return 1; }
+  rm -f "$d/$k.edn" || { rm -rf "${t:?}".*; return 1; }
+  for f in log inputs out; do
+    [ -e "$t.$f.tmp" ] || continue
+    if [ "$f" = out ]; then rm -rf "${d:?}/$k.out" && mv -T "$t.out.tmp" "$d/$k.out"
+    else mv -f "$t.$f.tmp" "$d/$k.$f"; fi || { rm -rf "${t:?}".*; return 1; }
+  done
+  mv -f "$t.edn.tmp" "$d/$k.edn" || { rm -rf "${t:?}".*; return 1; }
 }
 
 # the plan's steps, from plan.tsv: NAME DECISION KEY PHASE CHAIN NEEDS START-AFTER HEAVY MEM BUDGET
