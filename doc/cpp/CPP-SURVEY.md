@@ -1806,7 +1806,7 @@ The 7 `__LINE__` cases of the 13 new ones, `adlc/formsopt` (objects: below), the
 
 HotSpot 10th: `stubGenerator_x86_64_cbrt` (a table whose first item is text), `stubGenerator_x86_64_poly1305` (`ATTRIBUTE_ALIGNED(64)`'s `AlignedAttr` lost), `asm/assembler` (a `ParenExpr` the print adds),
 `opto/memnode` (a function-like macro's name used as a function), `runtime/jniHandles` (`true /* external_guard */` as a template argument): all unchanged and not macros-with-lines. 25th: `cbrt` and
-`adlc/formsopt.cpp`, now `objects-differ`: forms, AST and clang's objects... the objects of both compilers differ only in `__FILE__` of a quoted header (`share/adlc/forms.hpp` against the absolute path the
+`adlc/formsopt.cpp`, now `objects-differ`: forms and AST are equal, the objects of both compilers differ only in `__FILE__` of a quoted header (`share/adlc/forms.hpp` against the absolute path the
 print's `-iquote` finds it by); see CP95.
 
 ### Not run
