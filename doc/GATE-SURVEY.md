@@ -2070,3 +2070,136 @@ only, as GTS82's fallback does) and ran its stage 0 (as `ARBACE_HOST_EXE`).
 
 The user decided all seven as recommended: GTS83 (a); GTS84 (a); GTS85 (b); GTS86 (b); GTS87 (a), built on this
 branch before the merge; GTS88 (a), built after the merge from the v2 record's logs; GTS89 (a), as built.
+
+## As built: GTS83-GTS87 (write-ahead) (2026-10-31)
+
+Branch `gate-post-v2`, after "As built: GTS72, GTS79-GTS82 (write-ahead)", in the light tier: no `bin/gate` run (not even
+`--plan`), no build of the executables or of javac's tool, no store touched. Each part tested on synthetic material and
+scratch copies (the scripts named below, in the worktree's `.tmp/`). No shipped file changed.
+
+**GTS83 (a): the gate's stage 0 in a linked worktree** (`bin/gate`, `bin/seed`, `bin/lib/seed-go.bash`). The pins line
+`bin/seed --build` writes and keeps a stage 0 by is now one function, `seed_go_pins ARCHIVE ARCHS` (the seed's SHA-256,
+`seed/goroot.sha256`'s, the digest of `bin/seed` and `bin/lib/seed-go.bash`, the toolchain's root, the architectures:
+GTS53's identity, the `:stage0` host's), byte for byte the inline formula it replaces. `bin/seed --kept DIR [--arch A]`
+says whether DIR is a stage 0 `--build` would keep here (its executables, its `seed.sha256` this seed's, its `pins` this
+line): exit 0 with `stage 0 kept: ...`, else the reason, building nothing. `bin/gate`'s `stage0_choose`: in a linked
+worktree (git's common directory another checkout's `.git`) whose own stage 0 `--kept` refuses, the main checkout's when
+`--kept` accepts it; the stage0 step is then `bin/seed --kept MAIN/target/seed` (its summary line the same regex) and
+`ARBACE_HOST_EXE` is the main checkout's executable for the gate and every step; else `bin/seed --build --no-aot` as
+before. The main checkout, the clean run (`GATE_CLEAN_INNER`, a clone of its own) and a worktree with a current stage 0
+of its own are unchanged; `bin/gate --audit` chooses the same way. The identity is the whole line, stricter than GTS82's
+fallback in `bin/lib/host.bash` (the seed's and Go's pins only): a pass claims the `:stage0` identity, which holds the
+scripts' digest. Tested (`.tmp/gts83/test.sh`, 22 cases, a scratch repository of its own: a fake main checkout with a
+fake seed archive, its linked worktree, a clone; fake executables, no build): `seed_go_pins` equal to the old formula;
+`--kept` on none, its own, the worktree's view of main's, another toolchain root, another architecture set, another
+`seed.sha256`; `stage0_choose` (extracted from `bin/gate`) in the main checkout, the linked worktree (main's taken, the
+host set), the clean mode, the clone, a worktree whose `bin/seed` or Go pin differs (builds), one with a current stage 0
+of its own (kept by `--build`), a stale one (main's); the step's summary regex on `--kept`'s line.
+
+**GTS84 (a): Java's diagnostics and print controls** (`bin/java-check`, `test/java/check.ae`, `test/java/print.ae`,
+`test/java/controls.edn`; doc/classes/JAVA-CONFORMANCE-SURVEY.md, "As built: the negative controls"). The golden
+comparison is `diag_golden` (out of `diag_actions`) and `check_diag`'s judgment `diag_judge P SUF EXP`, both the tests'
+and the controls'. **c00002**: t06443 T5017953's javac output against t06444 T6304921's golden file (`plan-diag`'s
+`control-diag CID EXIT DIR/FILE`): the subject's actions up to its first golden one, that action's status against the
+reference's and its output against `T6304921.out`. **c00001 at print**: `control-print CID REF` in the subject's plan,
+`control-reference CID` in the reference's; `print_check_one` writes `print/classes.res.CID` by `classes_verdict` and
+keeps `print/c2` of both; `java.print/judge` prints the control's row from the steps' own comparisons crossed
+(`control-steps`: `forms-result` of the subject's F2 against the reference's F1, `text-result` of its full print against
+the reference's source, the classes' digest then `classes-result` against the reference's printed class files), `differ`
+only when every crossed step differs, `pass` naming a step that passed what differs, `left` when the reference was not
+printed in the run (a selection), `unjudged` when no step was taken. `controls-judged!` prints `left` and leaves it. Read
+is left. Tested (`.tmp/gts84/test.sh`, 27 cases): the plans from the real reference (t03208's `control-print`, t03209's
+`control-reference`, GTS81's lines unchanged, t06443's `control-diag` naming T6304921.out, t06444 none); `check_diag` on
+the real jdk26u tests read in place with the system JDK's javac as the javac (as `record_diag` runs it): t06443 and
+t06444 pass, c00002 differs at line 1, the subject's own golden file as the reference passes it, another status fails
+it, a `diag_judge` that passes everything passes the control too; `diag_judge` bounded to the first golden action;
+`print_check_one` on synthetic trees (javac faked): the control's digest, the trees kept for the pair and removed for a
+test of no control; `java.print/judge` on synthetic print runs on stage 0: differ at forms, text and classes, the
+subject against itself passes naming the three, one step passing what differs (classes) passes naming it, the reference
+absent is left; the report (`bin/java-check --judge`) on synthetic results: c00002 and c00001 at print differ (exit 0),
+c00002 passing, missing, c00001 left (exit 0), unjudged, passing (exit 1). Not run: either level on javac on Arbace.
+
+**GTS85 (b), GTS86 (b): goi's errorcheck and directory controls, judged from the subject's own run** (`bin/goi`,
+`test/goi/controls.txt`; doc/go/GOI-SPEC.md §11.3). A control is no entry of the program list any more: each checker,
+once its subject reached its comparison, judges the same run again under the control's id (`controls_of SUBJECT`, the
+level's lines whose subject it is; none in the box's runs). The comparisons are functions both use: `run_verdict`
+(`check_one`), `dir_verdict` (`check_dir`), `syn_verdict` and `err_verdict` (`check_err`'s two paths), `err_aot_verdict`
+(`check_err_aot`). New controls: `_control/append1-vs-assign1` and `_control/dedup-vs-issue11053` (typeparam/dedup's
+output against fixedbugs/issue11053.out) at interp, `_control/const6-vs-bug046` and `_control/issue48337a-vs-dedup` at
+aot, beside GTS81's two; every subject is in its level's essential list and passes in the records. A subject that ends
+before the comparison prints no control row (the control "not judged", no failure); a subject not in the run fails the
+check, but a selection (`--only`) leaves it; the quiet retry's merge adds the rows a retried subject brings. At `--aot` a
+control costs no `aot_build`. Tested (`.tmp/gts85/test.sh`, 13 cases, the real programs of `$GOROOT/test`, gc's
+references real, `tools/gocmp` built here with TamaGo's go, goi faked: `go run` of the program, the subject's golden
+output, gc's own compile for the errors): `check_one` one goi run for subject and control, the control fails on
+stderr, two gc references; `check_dir` one run, the control fails against issue11053.out; `check_err` one run, the
+control fails on assign1's missing errors, and on its syntax path; comparisons that pass everything make the three
+controls pass (status 1); a subject absent fails, with `--only` is left; a subject timing out leaves the control not
+judged; `err_aot_verdict` on gc's errors of const6 (its own pass, against bug046's comments fail); the retry's merge.
+Not run: `check_one`'s and `check_dir`'s AOT paths (`aot_build`), `check_err_aot` end to end, goi itself.
+
+**GTS87 (a): GTS71 (c)** (`bin/lib/gate-run.bash`, `bin/lib/javac-key.bash`, `test/gate/audit.ae`). `gate_env` exports
+`GATE_JAVAC_KEY` (its `jkey`, `arbace_javac_key` of the checkout) and `GATE_JAVAC_KEY_ROOT` (the checkout's physical
+path); `arbace_javac_fresh` (`repr_java_host`, `bin/javac-vendor check --from`) compares the tool's `.key` with it when
+the root is this checkout, else hashes as before (by hand, another checkout). The H rule's `identity-host` keeps `:prog`
+(gate_key's files: its steps' tools compute the executables' keys, `arbace_runtime_key` and `arbace_aot_key` through
+`program_base` and `bin/java-check`) and `:gate` (a no-op: a step on `:gate` or `:javac` declares its host's files
+anyway); `:javac-prog`'s went (it served only `arbace_javac_fresh`: GT7's fix round counted exactly the 2,601 files of
+`arbace_javac_key` hashed in java-fixtures and java-classes), and so did `:javac`'s no-op. The builds' rule stays
+(javac-tool's `reader_key`, `bin/javac-vendor tool`'s and `--build-java`'s own `arbace_javac_key`, go-build's
+`gate_key`). Tested (`.tmp/gts87/test.sh`, 10 cases): `arbace_javac_fresh` under strace: the handed key, no
+`sha256sum` run; a stale tool refused without hashing; a key for another root, or none, hashed (the same key);
+`gate_env` (scratch executables, store and lock) exports both; `gate.audit` on synthetic traces: java-classes hashing
+three of the tool's sources undeclared here and covered with main's `audit.ae`, java-check hashing the runtime's still
+covered by `:gate`'s identity, javac-tool's declared by its host.
+
+**What the merge must check** (with "As built: GTS72, GTS79-GTS82"'s list).
+
+- The first gate in the main checkout rebuilds stage 0 once (`bin/seed` and `bin/lib/seed-go.bash` changed, so its pins
+  line did); then a gate in a linked worktree says `stage 0 kept: /root/arbace/target/seed (amd64), its pins this
+  checkout's (GTS83 (a) ...)` in its stage0 line and builds none; before that rebuild it builds its own, as now.
+- goi-check's and goi-aot-essential's logs: three controls each `fail, as a control must`; goi-aot-essential faster by
+  one `aot_build` (GTS81's control built its subject again); the full `goi-check` and `goi-aot` the same.
+- java-diagnostics: `control c00002 ...: differ, as a control must`; java-print: c00001 at print `differ` (both judged
+  again by java-check-judge from the saved results); java-classes, interp and compiled as before.
+- The clean run's audit of the `:javac-prog` steps (java-fixtures, java-classes, java-forms-verify, the repr-java tree
+  checks): no `hashed only` line and audit ok; an undeclared read of a tool source there is a route the H rule hid,
+  to be declared (or handed the key the same way).
+- GTS81's test scripts are superseded where they assumed the old shapes (`.tmp/gts81/java/test.sh`'s "t03209 has none":
+  it now has `control-reference`; `.tmp/gts81/goi/test.sh` dispatches `_control/` ids, which no checker takes now).
+
+## Proposals (GTS90-GTS94)
+
+- **GTS90 Which pins let a worktree's gate take main's stage 0.**
+  - Options: (a) as built: the whole pins line (the scripts' digest and the toolchain's root too: the `:stage0` claim);
+    (b) GTS82's two fields (seed and Go), so a worktree that changed `bin/seed` still takes main's (its stage0 pass then
+    names scripts that did not build it).
+  - *Recommended: (a)*: a pass at the `:stage0` identity must be about the stage 0 it ran on; a change to the seed's
+    scripts is rare and is exactly when a fresh build is the check.
+- **GTS91 Java's read level's control** (left by GTS84 (a)).
+  - Options: (a) a crossed control at `--forms verify` (java-forms-verify): t03208's fresh forms compared, by
+    `forms_cmd`'s comparison, with t03209's committed forms in `test/java/forms/`; (b) one in the read level itself,
+    the subject's `forms.sha` against another test's recorded digest (none is recorded: a new record); (c) none.
+  - *Recommended: (a)*: the committed forms are the one recorded output of the read, and their comparison is the only
+    judge there besides the reader's status; it needs no record of its own.
+- **GTS92 goi's controls in the box.**
+  - Options: (a) as built: none in the box's runs (`controls_of` returns nothing there); (b) the box's console
+    comparison crossed too, when the box is unparked.
+  - *Recommended: (a) now, (b) with the box's return*: the box is parked (2026-10-26) and its comparison is a third one
+    (the console as one stream), worth a control when it runs again.
+- **GTS93 A print control's reference outside a selection.**
+  - Options: (a) as built: `left` (`--only` without t03209); (b) `print_level` adds a control's reference to its list
+    when its subject is there (one more test printed).
+  - *Recommended: (a)*: the gate's java-print step runs every test; a selection is a person's diagnosis, where the
+    control saying it was left is enough.
+- **GTS94 The handed key for the tool build too.**
+  - Options: (a) as built: `bin/javac-vendor tool` and `bin/arbace-go --build-java` hash `arbace_javac_key` themselves
+    (the javac-tool step is on `:javac`, its files declared); (b) both take `GATE_JAVAC_KEY` as `arbace_javac_fresh`
+    does.
+  - *Recommended: (a)*: no audit rule depends on it, and a build that computes its own key cannot record another
+    checkout's by a stale environment.
+
+**Slips.** None of the rules': the tests created a scratch git repository with a linked worktree of its own under the
+worktree's `.tmp/` (its metadata its own, removed with `git worktree remove`), read the main checkout's
+`target/seed/pins` and ran its stage 0 as `ARBACE_HOST_EXE`, ran the system JDK's javac on two jdk26u tests in place
+(`-J-Xmx512m`, output in the worktree's `.tmp/`), and built `tools/gocmp` with TamaGo's go into the worktree's `.tmp/`.
