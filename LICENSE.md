@@ -718,6 +718,12 @@ covers what.
   same authors): all under the MIT License below ("psyntax"). `compat.ae`, `internal.ae`, `patches.edn`,
   `tools/psyntax/chez/`, `tools/psyntax/run.ss` and `tools/psyntax/expand.ss` are Arbace's own, under the
   Eclipse Public License 1.0 (Ikarus's own `psyntax.compat.ss`, under the GPL version 3, is not vendored).
+- `scheme/lib/srfi/` (the SRFIs' reference implementations ported as R6RS libraries, their tests in
+  `test/scheme/srfi/`): each SRFI's section below, "SRFI 1" to "SRFI 133", names its repository, its
+  revision and its license.
+- `scheme/vendor/chibi/` (Chibi Scheme 0.12's `(chibi test)` and the libraries it imports, with three of
+  their tests; `scheme/vendor/chibi/provenance.edn`) and `scheme/lib/chibi/optional.sls`, derived from
+  it: under the BSD 3-Clause License below ("Chibi Scheme").
 - `seed/arbace-seed-go.tar.xz` (since S4, 2026-10-13; doc/STANDALONE-NOTES.md, "S4: the
   Go-source seed"): the seed of the bootstrap, Arbace's Go program as the Go-hosted fixpoint
   printed it, the source of the Go build's executables (above): the main package with its
@@ -2502,14 +2508,19 @@ SOFTWARE.
 
 ## Chibi Scheme: BSD 3-Clause License
 
-Covers `scheme/vendor/chibi/` (Chibi-Scheme 0.12.0's `(chibi test)`, `(chibi diff)`, `(chibi optional)` and `(chibi term ansi)`, their `.sld` files and the
-`.scm` files they include, and the three libraries' own tests `diff-test.sld`, `optional-test.sld` and `term/ansi-test.sld` (SC142), unchanged; `scheme/vendor/chibi/provenance.edn`): Copyright (c) 2010-2025 Alex Shinn, as the head of `test.scm` states it, "BSD-style
-license: http://synthcode.com/license.txt". The package the files came from did not carry that license file; the text below is the BSD 3-Clause License, the
-license Chibi-Scheme is released under, with the copyright holder's name. `scheme/lib/chibi/optional.sls` (SC150) is `optional.scm`'s definitions (Alex Shinn, the same license) with `let-optionals*` written afresh for si. `scheme/lib/chibi/test.sls` is Arbace's own, written from the description in
-`r7rs-tests.scm`'s header (SM8), under the Eclipse Public License 1.0.
+Covers `scheme/vendor/chibi/` (Chibi-Scheme 0.12's `(chibi test)`, `(chibi diff)`, `(chibi optional)` and `(chibi term ansi)`, their `.sld` files and the
+`.scm` files they include, and the three libraries' own tests `diff-test.sld`, `optional-test.sld` and `term/ansi-test.sld` (SC142), unchanged:
+byte for byte the files of `lib/chibi/` in https://github.com/ashinn/chibi-scheme at the tag `0.12`, commit
+`08e23be118e7de8cf29d606bc4793371c0ace680`, as the host's chibi-scheme package installs them; `scheme/vendor/chibi/provenance.edn`). The license is
+the repository's `COPYING` at that tag, quoted below verbatim (SHA-256 `86805fe7af1bd20d5f5050d86c61d6fe038452cb08c6106a08761e010d37da43`, the same
+file test/scheme/corpora.edn pins for the chibi-r7rs corpus; the package does not install it). The files keep their own notices: `test.scm`'s
+"Copyright (c) 2010-2025 Alex Shinn. All rights reserved. BSD-style license: http://synthcode.com/license.txt" (that page gives the same text with
+2000-2015), `ansi.scm`'s 2010-2014. `scheme/lib/chibi/optional.sls` (SC150) is `optional.scm`'s definitions (Alex Shinn, the same license) with
+`let-optionals*` written afresh for si. `scheme/lib/chibi/test.sls` is Arbace's own, written from the description in `r7rs-tests.scm`'s header (SM8),
+under the Eclipse Public License 1.0.
 
 ```
-Copyright (c) 2009-2025 Alex Shinn
+Copyright (c) 2009-2021 Alex Shinn
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
