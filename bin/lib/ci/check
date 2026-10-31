@@ -11,9 +11,9 @@
 # Usage: bin/ci check [--corpus C,...] [--only LIST] [--record] [--judge] [--resume]
 #   --corpus   the run corpora (default those test/c/ref-gcc15.edn records)
 #   --only     a file of ids (CORPUS/NAME) to check alone
-#   --record   test/c/check-linux-amd64.edn rewritten from the run (the other corpora's lines kept)
+#   --record   test/c/check-linux-amd64.edn rewritten from the run (the other corpora's lines kept; not with --only)
 #   --judge    the last run judged again (its results against the classes), nothing run
-#   --resume   node programs already built kept
+#   --resume   the programs already run kept (their runs in run.tsv), the others built and run
 #   CI_THREADS (default 3): the builder's threads; CI_JOBS (default 4): the runs'; CI_KEEP_NODES: keep every
 #   node program (by default only those of a run that did not exit 0)
 # Writes under .tmp/ci-check/ (CI_CHECK_WORK): CORPUS/list.tsv, CORPUS/nodes/ID.nodes, nodes.tsv, run.tsv,
@@ -36,6 +36,12 @@ while [ $# -gt 0 ]; do
     *) sed -n '11,18p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
   esac
 done
+# a subset's run never rewrites the corpora's record (review 006, finding 5); its judge does not fail on the
+# record's rows it leaves out (CI_SUBSET)
+if [ -n "$only" ]; then
+  [ -n "$record" ] && { echo "bin/ci check: --record records whole corpora, not --only's subset" >&2; exit 2; }
+  export CI_SUBSET=1
+fi
 work=${CI_CHECK_WORK:-$root/.tmp/ci-check}
 threads=${CI_THREADS:-3}
 jobs=${CI_JOBS:-4}; [ "$jobs" -gt 4 ] && jobs=4
@@ -63,13 +69,15 @@ if [ -z "$judge" ]; then
     grep -o '{:id "[^"]*" :status :no-build' test/c/ref-gcc15.edn | cut -d'"' -f2 > "$d/no-build.txt"
     : > "$d/done.txt"
     if [ -n "$resume" ] && [ -f "$d/run.tsv" ]; then cut -f1 "$d/run.tsv" > "$d/done.txt"; fi
-    awk -F'\t' -v c="$id" -v b="$base" -v only="${only:-}" -v nb="$d/no-build.txt" -v done="$d/done.txt" '
-      BEGIN { while ((getline l < nb) > 0) skip[l] = 1; while ((getline l < done) > 0) skip[l] = 1
+    # list.tsv: every program the judge judges (whole under --resume too); todo.tsv: those not run yet
+    awk -F'\t' -v c="$id" -v b="$base" -v only="${only:-}" -v nb="$d/no-build.txt" '
+      BEGIN { while ((getline l < nb) > 0) skip[l] = 1
               if (only != "") { while ((getline l < only) > 0) want[l] = 1 } }
       { i = c "/" $1; if (i in skip) next; if (only != "" && !(i in want)) next
         print i "\t" b "\t" $2 "\t" $3 "\t" $4 }' "$d/gcc.list" > "$d/list.tsv"
-    if [ -s "$d/list.tsv" ]; then
-      (cd "$root" && arbace_tool -m arbace.c.run test/c/host nodes-list "$work" "$d/list.tsv" "$threads") > "$d/nodes.log" 2>&1
+    awk -F'\t' 'BEGIN { while ((getline l < ARGV[2]) > 0) done[l] = 1; ARGV[2] = "" } !($1 in done)' "$d/list.tsv" "$d/done.txt" > "$d/todo.tsv"
+    if [ -s "$d/todo.tsv" ]; then
+      (cd "$root" && arbace_tool -m arbace.c.run test/c/host nodes-list "$work" "$d/todo.tsv" "$threads") > "$d/nodes.log" 2>&1
       [ -f "$work/nodes.tsv" ] && cat "$work/nodes.tsv" >> "$d/nodes.tsv" && rm -f "$work/nodes.tsv"
     fi
     # each node program run
@@ -85,7 +93,10 @@ if [ -z "$judge" ]; then
       [ -n "${CI_KEEP_NODES:-}" ] || [ "$st" != 0 ] || rm -f "$f"
     }
     export -f run1; export work cirun
-    awk -F'\t' '$2 == "ok" {print $1}' "$d/nodes.tsv" | xargs -P "$jobs" -I{} bash -c 'run1 "$1"' _ {} > "$d/run.tsv"
+    # the runs appended (--resume keeps the earlier ones), only those of todo.tsv
+    [ -n "$resume" ] || : > "$d/run.tsv"
+    awk -F'\t' 'BEGIN { while ((getline l < ARGV[2]) > 0) { split(l, f, "\t"); t[f[1]] = 1 }; ARGV[2] = "" } $2 == "ok" && ($1 in t) && !seen[$1]++ {print $1}' "$d/nodes.tsv" "$d/todo.tsv" \
+      | xargs -P "$jobs" -I{} bash -c 'run1 "$1"' _ {} >> "$d/run.tsv"
   done
 fi
 arbace_tool -m arbace.c.run test/c/host judge "$work" test/c/ref-gcc15.edn test/c/divergences.edn "${record:+--record}" "${ids[@]}"

@@ -450,6 +450,8 @@
   (let [record (when (= (first args) "--record") (second args))
         ids (if record (drop 2 args) args)
         classes (read-string (slurp classes-file))
+        ;; the committed record, read before --record rewrites it
+        committed (let [f (java.io.File. "test/c/check-dg-linux-amd64.edn")] (if (.exists f) (read-string (slurp f)) []))
         known (let [f (java.io.File. "test/c/dg-known.edn")] (if (.exists f) (read-string (slurp f)) {}))
         rows
         (vec
@@ -487,7 +489,27 @@
                           (str/join "\n" (map pr-str all)) "\n]\n"))
         (println "recorded" record)))
     (let [essential (System/getenv "CI_DG_ESSENTIAL")
-          failing (filter #(and (not= :pass (second %)) (or essential (nil? (nth % 3 nil)))) rows)]
+          ;; the committed record (review 006, finding 3): a file it passes that does not pass now fails, whatever its
+          ;; class; its files the run does not hold are reported (they fail unless the run is a subset: CI_DG_ONLY)
+          old committed
+          now (into {} (map (juxt first identity) rows))
+          old-in (filter (fn [[fid]] (some #(str/starts-with? fid (str % "/")) ids)) old)
+          regress (for [[fid r] old-in :let [n (get now fid)] :when (and n (= :pass r) (not= :pass (second n))
+                                                                 ;; an unclassed one (or any under --essential) fails already
+                                                                 (not essential) (nth n 3 nil))]
+                    [fid :fail (str "regression: recorded pass, now " (nth n 2))])
+          absent (for [[fid] old-in :when (not (contains? now fid))] fid)
+          ;; --essential: every listed file found (review 006, finding 11)
+          listed (when-let [only (System/getenv "CI_DG_ONLY")]
+                   (into [] (remove #(or (str/blank? %) (.startsWith ^String % "#")) (map str/trim (str/split-lines (slurp only))))))
+          missing (when listed (remove #(contains? now %) listed))
+          failing (concat (filter #(and (not= :pass (second %)) (or essential (nil? (nth % 3 nil)))) rows)
+                          regress
+                          (when-not listed (map (fn [fid] [fid :fail "absent from the run"]) absent))
+                          (map (fn [fid] [fid :fail "listed, not found in its group"]) missing))]
+      (when listed
+        (println (count (filter #(= :pass (second (get now %))) listed)) "of" (count listed) "listed files pass"))
+      (when (and (seq absent) (not listed)) (println (count absent) "recorded files absent from the run" (pr-str (vec (take 10 absent)))))
       (doseq [r (take 40 failing)] (println "FAIL" (first r) (nth r 2)))
       (spit (str work "/judge-rows.edn") (str "[\n" (str/join "\n" (map pr-str rows)) "\n]\n"))
       (System/exit (if (seq failing) 1 0)))))

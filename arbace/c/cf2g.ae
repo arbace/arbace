@@ -859,7 +859,8 @@
         record (some #{"--record"} more)
         corpora (remove #{"--record" ""} more)
         refs (into {} (map (juxt :id identity) (read-all reff)))
-        classes (into (vec (read-string (slurp diva))) (read-string (slurp divf)))
+        ;; speed (an interpreted run's timeout) is not a class of the compiled level: a compiled program that hangs fails
+        classes (into (vec (read-string (slurp diva))) (remove #(= :speed (:id %)) (read-string (slurp divf))))
         known (let [f (java.io.File. "test/c/check-known.edn")] (if (.exists f) (read-string (slurp f)) {}))
         known-aot (let [f (java.io.File. "test/c/check-aot-known.edn")] (if (.exists f) (read-string (slurp f)) {}))
         klass (fn [[_ r reason]]
@@ -888,8 +889,14 @@
                       (let [irow (get interp-rows id)
                             row (if (= :pass (second row)) row (conj row (klass row)))]
                         (conj (if (= 3 (count row)) (conj row nil) row) (when irow (second irow)))))))
+        cmp ((resolve 'arbace.c.run/compare-record) rows "test/c/check-aot-linux-amd64.edn" corpora)
         failing (filter #(and (not= :pass (second %)) (nil? (nth % 3 nil))) rows)
-        d @diff]
+        d @diff
+        ;; diffcheck's kind reaches the status (review 006, finding 3): a program the interpreted level passes (its
+        ;; record) that does not pass compiled, and a run that differs from a passing interpreted run
+        ipass? (fn [id] (= :pass (second (get interp-rows id))))
+        interp-only (filter (fn [r] (and (not= :pass (second r)) (= :pass (nth r 4 nil)))) rows)
+        differ-bad (filter (fn [[id]] (ipass? id)) (:differ d))]
     (spit (str work "/results.edn") (str "[\n" (str/join "\n" (map pr-str rows)) "\n]\n"))
     (doseq [c corpora]
       (let [rs (filter #(str/starts-with? (first %) (str c "/")) rows)
@@ -911,8 +918,14 @@
                      ";; test/c/divergences-aot.edn, then test/c/divergences.edn.\n[\n"
                      (str/join "\n" (map pr-str all)) "\n]\n"))
         (println "recorded" f)))
-    (doseq [r (take 40 failing)] (println "FAIL" (first r) (nth r 2)))
-    (System/exit (if (seq failing) 1 0))))
+    (let [fids (set (map first failing))
+          failing (concat failing
+                          (remove #(fids (first %))
+                                  (concat (map (fn [r] [(first r) :fail (str "interpreted only: " (nth r 2))]) interp-only)
+                                          (map (fn [[id why]] [id :fail (str "differs from a passing interpreted run: " why)]) differ-bad)
+                                          ((resolve 'arbace.c.run/report-record) cmp))))]
+      (doseq [r (take 40 failing)] (println "FAIL" (first r) (nth r 2)))
+      (System/exit (if (seq failing) 1 0)))))
 
 (defn -main
   "translate NODES OUTDIR [PKG PATH]: one node program into OUTDIR/prog.go (default package main);

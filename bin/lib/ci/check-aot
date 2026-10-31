@@ -14,11 +14,12 @@
 #   --corpus   the run corpora (default those test/c/ref-gcc15.edn records)
 #   --only     a file of ids (CORPUS/NAME) to check alone
 #   --sample   every Nth program of each corpus only
-#   --record   test/c/check-aot-linux-amd64.edn rewritten from the run (the other corpora's lines kept)
+#   --record   test/c/check-aot-linux-amd64.edn rewritten from the run (the other corpora's lines kept; not with --only
+#              or --sample)
 #   --judge    the last run judged again, nothing run
 #   --resume   the programs already run kept
 #   CI_AOT_NODES=1: each node program also run by the interpreter (tools/cirun), into .tmp/ci-aot/interp/CORPUS/run.tsv,
-#   the comparison's other side (CI_INTERP then names .tmp/ci-aot/interp by default)
+#   the comparison's other side (CI_INTERP then names .tmp/ci-aot/interp by default; else bin/ci check's .tmp/ci-check)
 #   CI_THREADS (default 3), CI_JOBS (default 4, at most 4), CI_GO_P (default 2), CI_SHARD (default 40 programs)
 # Writes under .tmp/ci-aot/ (CI_AOT_WORK): CORPUS/list.tsv, nodes.tsv, run.tsv, build.log; results.edn.
 set -uo pipefail
@@ -37,12 +38,18 @@ while [ $# -gt 0 ]; do
     --record) record=1; shift ;;
     --judge) judge=1; shift ;;
     --resume) resume=1; shift ;;
-    *) sed -n '13,22p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+    *) sed -n '13,23p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
   esac
 done
+# a subset's run never rewrites the corpora's record (review 006, finding 5); its judge does not fail on the
+# record's rows it leaves out (CI_SUBSET)
+if [ -n "$only" ] || [ "$sample" != 1 ]; then
+  [ -n "$record" ] && { echo "bin/ci check --aot: --record records whole corpora, not --only's or --sample's subset" >&2; exit 2; }
+  export CI_SUBSET=1
+fi
 work=${CI_AOT_WORK:-$root/.tmp/ci-aot}
-work=${CI_AOT_WORK:-$root/.tmp/ci-aot}
-if [ -n "${CI_AOT_NODES:-}" ]; then interp=${CI_INTERP:-$work/interp}; else interp=${CI_INTERP:-$root/.tmp/ci-interp}; fi
+# the interpreted side: this run's (CI_AOT_NODES), else bin/ci check's work directory (review 006, finding 11)
+if [ -n "${CI_AOT_NODES:-}" ]; then interp=${CI_INTERP:-$work/interp}; else interp=${CI_INTERP:-$root/.tmp/ci-check}; fi
 threads=${CI_THREADS:-3}
 jobs=${CI_JOBS:-4}; [ "$jobs" -gt 4 ] && jobs=4
 gop=${CI_GO_P:-2}
@@ -74,10 +81,8 @@ if [ -z "$judge" ]; then
     if [ -z "$resume" ]; then rm -rf "${d:?}" "$work/interp/$id"; fi
     mkdir -p "$d"
     if [ ! -s "$d/gcc.list" ]; then
-      lists=${CI_LISTS:-$root/.tmp/ci-interp}
-      if [ -s "$lists/$id/gcc.list" ]; then cp "$lists/$id/gcc.list" "$lists/$id/base.txt" "$d/"
-      else arbace_tool -m arbace.repr.c.ppcheck lists "$work" "$roots" "$id" > "$d.lists.log" 2>&1 || { cat "$d.lists.log"; exit 1; }
-      fi
+      # the corpus's list made here, never taken from another work directory (review 006, finding 11)
+      arbace_tool -m arbace.repr.c.ppcheck lists "$work" "$roots" "$id" > "$d.lists.log" 2>&1 || { cat "$d.lists.log"; exit 1; }
     fi
     base=$(cat "$d/base.txt")
     grep -o '{:id "[^"]*" :status :no-build' test/c/ref-gcc15.edn | cut -d'"' -f2 > "$d/no-build.txt"
@@ -155,7 +160,7 @@ if [ -z "$judge" ]; then
       rm -rf "$mod/progs" "$mod/shard"
       rm -f "$s" "$s.pkgs"
       # the disk: the programs' compiled packages are not used again
-      find "${CI_GOCACHE:-$root/.tmp/gocache}" -type f -mmin +15 -delete 2>/dev/null
+      find "${CI_GOCACHE:-$root/.tmp/gocache}" -type f -mmin +15 -delete 2>> "$work/gocache-trim.log" || true
       echo "ci aot: $id $(basename "$s"): $(wc -l < "$s.list") programs, $(wc -l < "$s.built") built, $(df -h "$root" | awk 'NR==2 {print $5}') disk"
     done
     # the interpreted side's work directory, for arbace.c.run's judge (cf2g's refusals and Go errors are not its)

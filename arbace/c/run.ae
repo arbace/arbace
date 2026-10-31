@@ -96,8 +96,36 @@
           :else [id :fail (str (if same-status "differ stdout" (str "differ status " (if (keyword? st) (name st) st) " (gcc " (if (keyword? want) (name want) want) ")"))
                                (when (seq fault) (str " " fault)) ld)])))))
 
+(defn compare-record
+  "A judge's rows against its committed record (review 006, finding 3), for the corpora judged: {:regressions [[id why]]
+  (a row the record passes that does not pass now, whatever its class; a known row whose reason changed), :absent [id]
+  (the record's rows of these corpora the run does not hold)}."
+  [rows ^String recf corpora]
+  (let [old (let [f (java.io.File. recf)] (if (.exists f) (read-string (slurp f)) []))
+        in? (fn [^String id] (some #(str/starts-with? id (str % "/")) corpora))
+        now (into {} (map (juxt first identity) rows))
+        old-in (filter #(in? (first %)) old)]
+    {:regressions (vec (for [[id r reason] old-in
+                             :let [n (get now id)]
+                             :when n
+                             :when (or (and (= :pass r) (not= :pass (second n)))
+                                       (and (str/starts-with? (str reason) "known ") (not= reason (nth n 2))))]
+                         [id (str "recorded " (name r) (when (not= :pass r) (str " " reason)) ", now " (name (second n)) " " (nth n 2))]))
+     :absent (vec (for [[id] old-in :when (not (contains? now id))] id))}))
+
+(defn report-record
+  "Prints compare-record's result; the rows that fail because of it (absent rows only when the run is not a subset:
+  CI_SUBSET, set by --only and --sample)."
+  [{:keys [regressions absent]}]
+  (doseq [[id why] (take 40 regressions)] (println "REGRESSION" id why))
+  (when (seq absent)
+    (println (count absent) "recorded rows absent from the run" (if (System/getenv "CI_SUBSET") "(a subset run)" "") (pr-str (vec (take 10 absent)))))
+  (concat (map (fn [[id why]] [id :fail (str "regression: " why)]) regressions)
+          (when-not (System/getenv "CI_SUBSET") (map (fn [id] [id :fail "absent from the run"]) absent))))
+
 (defn- judge
-  "judge WORK REF DIVERGENCES [--record] CORPUS...: each program's result against gcc's run and the classes."
+  "judge WORK REF DIVERGENCES [--record] CORPUS...: each program's result against gcc's run and the classes, and against
+  the committed record (compare-record)."
   [[work reff divf & more]]
   (let [record (some #{"--record"} more)
         corpora (remove #{"--record" ""} more)
@@ -118,6 +146,7 @@
                                 [id :fail (str "known " kr " (" (nth row 2) ")")]
                                 row)]
                       (if (= :pass (second row)) row (conj row (klass row))))))
+        cmp (compare-record rows "test/c/check-linux-amd64.edn" corpora)
         failing (filter #(and (not= :pass (second %)) (nil? (nth % 3 nil))) rows)]
     (spit (str work "/results.edn") (str "[\n" (str/join "\n" (map pr-str rows)) "\n]\n"))
     (doseq [c corpora]
@@ -133,8 +162,10 @@
                      ";; against gcc 15.2's -O0 run (test/c/ref-gcc15.edn); its classes test/c/divergences.edn.\n[\n"
                      (str/join "\n" (map pr-str all)) "\n]\n"))
         (println "recorded" f)))
-    (doseq [r (take 40 failing)] (println "FAIL" (first r) (nth r 2)))
-    (System/exit (if (seq failing) 1 0))))
+    (let [fids (set (map first failing))
+          failing (concat failing (remove #(fids (first %)) (report-record cmp)))]
+      (doseq [r (take 40 failing)] (println "FAIL" (first r) (nth r 2)))
+      (System/exit (if (seq failing) 1 0)))))
 
 (defn -main
   "bin/ci nodes HOST-DIR [--std S] [OPTION...] -o OUT FILE...: FILE... (one program) read, checked, built
