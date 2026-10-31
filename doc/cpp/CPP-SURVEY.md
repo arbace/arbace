@@ -1671,3 +1671,84 @@ initialised by a global, `/* */` comments, `_Complex long double`, function alig
 All as recommended: CP76 (b) (`-D__NetBSD__`, (a), the stopgap until then), CP77 (b), CP78 (a), CP79 and CP81 as
 their entries recommend, CP80 (b) in a window after the tag, CP82 (a), CP83 (a) (g++'s disagreements recorded),
 CP84 (a), CP85 (a), CP86 (a) now and (c)'s split at CX7, CP87 (a), CP88 (a).
+
+## As built: CP76 (b), CP77 (b) (2026-10-31)
+
+On `cpp-cx6` (light tier: stage 0 by `ARBACE_HOST_EXE`, 4 jobs, `GOMEMLIMIT=1500MiB`, no gate, no build of Arbace's executables). Both decisions of "Decided (CP76-CP88)" built.
+
+### CP76 (b).1 What changed
+
+- **No `-D__NetBSD__`.** The HotSpot entry (`hotspot-x86-linux`, `test/cpp/corpora.edn`) is given the build's own options and nothing else for g++. The options are those of
+  `build/linux-x86_64-server-release/hotspot/variant-server/libjvm/objs/NAME.o.cmdline` (g++ 15.2, musl); `-D`, `-I` and `-std` options are the same for every `.cpp` of
+  libjvm, now in the build's order (`-I` order decides which header a name finds). `share/adlc/*.cpp` (12 files) is the host tool adlc, which the build compiles with other options
+  (`tools/adlc/objs/NAME.o.cmdline`): the entry's new `:cxx-args-for [{:path-regex ... :args [...]}]` gives it its own (`ppcheck.ae`, `file-entry`, `lists`).
+  `bin/repr-cpp hotspot-flags LIST` (`bin/lib/repr-cpp/hotspot-flags`) checks a list against each file's own command line (the `-D`, `-I` options in order, the `-std` as a set,
+  the precompiled header's `-I` left out): the 50 files and the 124 of the wider sample, 0 differ. The corpus entry's flags are the source of truth only through that check.
+- **g++-only options, dropped by a rule.** The round trip gives clang (its dump, its objects) only the modelled options `-std`, `-D`, `-I` (and `-O`; `host/file-config`'s `:args`),
+  g++ all of them (`:all-args`): `-fno-lifetime-dse`, `-Wtrampolines` and `-Wunused-const-variable=1` never reach clang (the entry has the first; warnings were already left
+  out), and `-include precompiled.hpp` with its `-I` is in neither (it is not in the entry). The rule is the code's, recorded in the entry's comment.
+- **The shim, `test/cpp/shims/musl-noexcept.hpp`**, given by `-include` to clang only (the entry's new `:clang-args`, `{checkout}` resolved by `lists`, appended to the modelled
+  options: `ppcheck.ae`). musl declares the C library without exception specifications and HotSpot (`forbiddenFunctions.hpp`, `forbiddenFunctions_posix.hpp`) redeclares 20
+  of the functions `noexcept`; clang rejects a mismatch in either direction (a pre-declaration `noexcept` before musl's headers gives "is missing exception specification"
+  at musl's, which I tried first). The shim defines each of those names as a function-like macro that repeats itself followed by `noexcept` (a macro does not expand itself
+  again), includes `<string.h> <stdlib.h> <stdio.h> <unistd.h> <wchar.h>` so that musl's declarations read `char *strdup (const char *) noexcept;`, and undefines the macros.
+  Nothing of HotSpot, the build's flags or the headers is changed. The macro form (and not renamed pre-declarations) is needed because libstdc++'s `<cstdlib>` undefines names
+  and takes `using ::malloc` after musl's header.
+- **A converter fix the new files found.** A variable declared with its class (`struct L : B { explicit L(int); } l(1);` in a body) took `explicit` from the class body's
+  tokens as its own specifier (`prefix-tokens` spans from the class keyword to the variable's name): the print had `explicit struct`. `prefix-tokens` leaves out what
+  is inside braces (`convert.ae`). `psParallelCompact.cpp` passes.
+
+### CP77 (b).1 What changed
+
+- `tools/cxxdump/norm.go`: `normalize` drops every `FullComment` (the doc comment clang attaches to a declaration) from lists. The cache key has its own part for a `-norm`
+  run, `normVersion = "norm-2"` in `run.go` (the `-norm` flag's `true` was in the key; the `.edn` entries, without `-norm`, keep their keys), so only the `.norm` entries
+  are rebuilt. This worktree's cache was empty (cpp-cx2's, 1.5 GB, was not touched: after merging, delete its `.norm` entries first; they are the files `*.norm` named in the
+  key's stats, a `find CACHE -name '*.out'` of the runs with `-norm` — the other cache directory's owner decides). A test (`TestNormFullComment`) covers the drop.
+- Cases: `share/opto/phaseX.cpp` (HotSpot) and `warn/Winit-list2.C` (g++.dg) pass; their entries are out of `roundtrip-known.edn`. The other 18 `ast-differs` files of the g++.dg tenth and the
+  4 of old-deja and c-c++-common rerun are still `ast-differs` (not doc comments: the survey's "3 in g++.dg" were 1 by this check).
+
+### Numbers
+
+| | files | read | rejected | l1 | l3 | l4 g++ | l4 clang | l5 `:full` | pass | known | failing |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| HotSpot every 25th, CX5d (`-D__NetBSD__`) | 50 | 42 | 8 (7 `os::Linux`, 1 deleted function) | 39 | 38 | 40 | 41 | 42 | 38 | 4 | 0 |
+| HotSpot every 25th, now | 50 | **49** | 1 (`foreignGlobals.cpp`) | 46 | 46 | 47 | 48 | 49 | **46** | 3 | 0 |
+| HotSpot every 10th (new, 124 files) | 124 | 115 | 9 | 100 | 100 | 102 | 103 | 115 | 100 | 15 | 0 |
+
+The seven files that failed on `os::Linux` read (all 50 sampled files read but the one clang rejects). Before the converter fix and the two classings, the 25th sample had 1 failing
+(`psParallelCompact.cpp`), the 10th 13. Known now (`test/repr/cpp/roundtrip-known.edn`: 154, minus 2, plus 13 = 165): HotSpot 25th `stubGenerator_x86_64_cbrt.cpp`, `adlc/formsopt.cpp`,
+`c1_ValueStack.cpp` (`forms-differ`: a table first text, `__LINE__` in nested expansions); the 10th's 13 new: 9 `forms-differ` (7 `__LINE__` of `assert`-like macros in nested
+expansions or macro arguments: `templateInterpreterGenerator_x86`, `adlc/archDesc`, `memAllocator`, `shenandoahVerifier`, `klass`, `nativeLookup`, `reflection`; `stubGenerator_x86_64_poly1305`:
+`ATTRIBUTE_ALIGNED(64)`'s `AlignedAttr` lost; `asm/assembler.cpp`: the print adds a `ParenExpr`) and 4 `print-rejected` (`vmClasses.cpp`, `gcConfig.cpp`: macros that expand to pieces of
+a list, CP79; `opto/memnode.cpp`: a function-like macro's name used as a function, printed `isa_intptr_t()()`; `jniHandles.cpp`: `true /* external_guard */` as a template argument printed as `true / * external_guard * /`).
+The 9 oracle rejections of the 10th are one class: clang's "attempt to use a deleted function" at a `new T(...)` whose class has a deleted `operator delete`
+(`allocation.hpp:396`; with `-fno-exceptions` clang still looks the deallocation function up, g++ does not); they are the oracle's, as `foreignGlobals.cpp` was.
+Regressions: `samples` (8: 7 pass, `coroutine.cpp` g++ objects as before), libstdc++ testsuite every 100th (98 files: 78 pass, 19 oracle rejections, 1 known, 0 failing).
+Times (4 jobs, cold cache): the 124 files 289 s dumps, 65 s forms, 273 s again, 252 s objects.
+
+### Not run
+
+`bin/repr-cpp pp-check` (its roots do not name the JDK checkout: `bin/lib/repr-cpp/pp-check` now has `:jdk26u` as `${JDK:-/root/jdk26u}`; `lists` was run directly), `cxxdump-check`, the g++.dg, old-deja
+and c-c++-common tenths whole (only their 24 `ast-differs` files), the whole HotSpot corpus (CP80 (b), after the tag), `make check-makefile` (no target touched).
+
+### Proposals (CP90-CP93)
+
+- **CP90 Deleted `operator delete` and `new` under clang.** 9 of 124 HotSpot files (7%, so about 90 of 1,237) are rejected by clang only for that. Options: (a) classed as
+  oracle rejections (built); (b) `-faligned-allocation`-like switches do not apply: a second shim line cannot undelete HotSpot's member, but clang's `-fno-assume-sane-operator-new`
+  does not either; a per-corpus option `-fcxx-exceptions` (clang then accepts: the unwinding path wants the deleted function, g++'s `-fno-exceptions` does not) is not the build's
+  flag; (c) read those files with g++'s dump instead (not an option: the oracle is clang). *Recommended: (a)*, count them in the whole-corpus run.
+- **CP91 `__LINE__` in nested macro expansions** (the largest HotSpot class: 8 of the 13 new known cases and 3 of the first 4). Same as CP79. Options: (a) classed (built); (b) CP79 (b), a
+  `#line` before every line of a multi-line macro text; (c) `assert`-like macros kept as text, never as forms, when their expansion holds `__LINE__`. *Recommended: (b)*, as CP79; (c) if (b) leaves the HotSpot cases.
+- **CP92 Macros whose expansion is part of a list** (`VM_CLASSES_DO(VM_CLASS_NAME)`, `EPSILONGC_ONLY_ARG(...)`). Options: (a) classed (built); (b) a list element text that spans
+  several elements (CP81's `(cpp/macro "" v)` extended to the invocation the elements come from); (c) a macro's expansion read back as forms at its own site (an `#define`d
+  fragment as text). *Recommended: (a)* for now, (b) with CP79.
+- **CP93 A shim for the other direction.** The shim lists the 20 functions HotSpot redeclares; another HotSpot version or platform (`bsd`, `windows`) redeclares others. Options: (a) the list as it is (built),
+  a failing file shows the missing name; (b) generate the list from `FORBID_*` lines of the checkout in `lists`. *Recommended: (a)*; (b) if the corpus widens to other platforms.
+
+### Shipped files, rule slips, scratch
+
+- Shipped: `arbace/repr/cpp/ppcheck.ae` (`:clang-args`, `:cxx-args-for`), `arbace/repr/cpp/convert.ae` (`prefix-tokens`), `tools/cxxdump/{norm.go,run.go,main_test.go}`, `bin/repr-cpp`, `bin/lib/repr-cpp/{hotspot-flags,pp-check}`,
+  `test/cpp/corpora.edn`, `test/cpp/shims/musl-noexcept.hpp`, `test/repr/cpp/roundtrip-known.edn`, this file. Nothing of `bin/gate`'s data (`test/gate/steps.edn`) names the new script or the shim:
+  a gate key that covers `bin/` and `test/cpp/` would; the step's declared inputs are the coordinator's to check.
+- Slips: two throwaway commands used a `<(...)` process substitution (a diff of two echoes, a `head -0`); no effect on any result.
+- Scratch: `.tmp/cp76/` (`L`, `L10`, `Lg`: the lists; `rt/hs50`, `rt/hs50b`, `rt/hs10`, `rt/ls`, `rt/smp`, `rt/ast`, `rt/ast2`: the runs; `shim.hpp`, `try.sh`: the first shim and a one-file clang run), `.tmp/repr-cpp/` (the filter and its cache), `.tmp/cpp-gcc/` (36 MB of the testsuites).
