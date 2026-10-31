@@ -15,7 +15,7 @@ printf 'samples/auto.cpp\tc++23\t\tA\nx/slow.cpp\tc++23\t\tB\nx/bad.cpp\tc++23\t
 echo 1 > "$w/files/samples/auto.cpp/ir.status"; echo "auto.cpp:3:1: error: unknown type name 'foo'" > "$w/files/samples/auto.cpp/ir.log"
 echo 124 > "$w/files/x/slow.cpp/ir.status"; : > "$w/files/x/slow.cpp/ir.log"
 echo 1 > "$w/files/x/bad.cpp/ir.status"; echo "bad.cpp:1:2: error: expected ';'" > "$w/files/x/bad.cpp/ir.log"
-arbace_tool -m arbace.cpp.lower judge "$w" "$root/test/cpp/lower-known.edn" "$root/test/cpp/lower-results.edn" > "$t/w2.log" 2>&1; st=$?
+arbace_tool -m arbace.cpp.check judge "$w" "$root/test/cpp/lower-known.edn" "$root/test/cpp/lower-results.edn" > "$t/w2.log" 2>&1; st=$?
 [ $st = 1 ] && ok "the judge fails (exit 1)" || bad "judge: exit $st"
 grep -q $'^samples/auto.cpp\tfailing\t' "$w/results.tsv" && ok "a recorded pass rejected now is failing" || bad "auto.cpp: $(grep auto "$w/results.tsv")"
 grep -q $'^x/slow.cpp\tfailing\tir\t' "$w/results.tsv" && ok "a timeout is failing (ir)" || bad "slow.cpp: $(grep slow "$w/results.tsv")"
