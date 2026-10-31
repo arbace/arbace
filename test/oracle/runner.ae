@@ -384,6 +384,14 @@
   "The parts of file paths --exclude leaves out (the box's subset: doc/go/BOX-NOTES.md, S1)."
   (atom []))
 
+(defn sel-misses
+  "The selectors of sel (parts, or parts of file paths) that select none of the files part-paths
+  ([part path] pairs): a typo selects nothing, and a check of nothing passes."
+  [sel part-paths]
+  (vec (for [^String s sel
+             :when (not-any? (fn [[part p]] (if (some #{s} parts) (= s part) (str/includes? p s))) part-paths)]
+         s)))
+
 (defn- selected [sel part ^File f]
   (and (or (empty? sel)
            (some (fn [^String s] (if (some #{s} parts) (= s part) (.contains ^String (rel f) s))) sel))
@@ -470,18 +478,26 @@
   "Runs the expected files of the selected parts (or files) against the implementation cmd;
   prints the mismatches (all of them to .tmp/oracle/check.txt) and a summary. Returns
   {:ok (every case matches) :mismatches [{:case id :form text}...] :incomplete runs
-   :files #{the corpus files checked}}."
+   :files #{the corpus files checked} :errors [why the check itself is wrong]}: an error when a
+  selector selects no file or nothing is selected (a typo, an --exclude of everything, an
+  ARBACE_ORACLE_EXPECTED without expected files)."
   [cmd jobs timeout sel]
-  (let [work (for [part parts
-                   ^File f (->> (file-seq (io/file expected-dir part))
-                                (filter #(.endsWith (.getName ^File %) ".edn"))
-                                (sort-by #(.getPath ^File %)))
-                   :let [e (read-expected f)
-                         src (io/file root (:source e))]
+  (let [all (for [part parts
+                  ^File f (->> (file-seq (io/file expected-dir part))
+                               (filter #(.endsWith (.getName ^File %) ".edn"))
+                               (sort-by #(.getPath ^File %)))
+                  :let [e (read-expected f)
+                        src (io/file root (:source e))]]
+              [part src e])
+        work (for [[part src e :as w] all
                    :when (selected sel part src)
                    ;; the reference has no Go forms: goi's cases are the Go build's (S54)
                    :when (not (and (= cmd default-impl) (goi-source? src)))]
-               [part src e])
+               w)
+        errors (vec (concat (for [s (sel-misses sel (map (fn [[part src]] [part (rel src)]) all))]
+                              (str "the selector " s " selects no corpus file"))
+                            (when (empty? work)
+                              [(str "no corpus file selected (the expected files under " expected-dir ")")])))
         run-one (fn [[part src e]]
                   (let [ks (result-keys part)
                         cases (mapv #(apply dissoc % :missing (remove #{:class :sig} ks)) (:cases e))
@@ -534,7 +550,9 @@
     (println (format "== %d of %d cases match (%d by V11: helpful NullPointerException messages compared by class only), %d mismatches (all in .tmp/oracle/check.txt)%s"
                      (- @total @bad) @total @v11 @bad
                      (if (pos? @incomplete) (str "; " @incomplete " runs incomplete") "")))
-    {:ok (and (zero? @bad) (zero? @incomplete))
+    (doseq [x errors] (println "== error:" x))
+    {:ok (and (zero? @bad) (zero? @incomplete) (empty? errors))
+     :errors errors
      :mismatches @ids
      :incomplete @incomplete
      :incomplete-files @cut
@@ -671,9 +689,12 @@
              "check" (let [[impl & sel] (:sel opts)
                            impl (if (= impl "jvm") default-impl impl)]
                        (let [r (check impl (:jobs opts) (:timeout opts) (vec sel))]
-                         (cond
-                           (:write-expected opts) (write-known (io/file (:write-expected opts)) impl r)
-                           (:expected opts) (check-known (io/file (:expected opts)) r)
-                           :else (:ok r)))))]
+                         ;; a check of nothing (or of a selector that selects nothing) fails whatever
+                         ;; the reference
+                         (and (empty? (:errors r))
+                              (cond
+                                (:write-expected opts) (write-known (io/file (:write-expected opts)) impl r)
+                                (:expected opts) (check-known (io/file (:expected opts)) r)
+                                :else (:ok r))))))]
     (shutdown-agents)
     (System/exit (if ok 0 1))))
