@@ -2413,3 +2413,7 @@ None. Not shipped: `scheme/lib/chibi/optional.sls`, `LICENSE.md`, `bin/si`, `arb
 ### Scratch cited
 
 `.tmp/sc/` in this worktree: `C1.log`, `C2.log` (chibi-tests), `E1.log` (the Chibi ecraven run), `R*.log` (the reruns), `ecr.bak` (the earlier ecraven record); `.tmp/si/{ecraven-chibi,chibi-tests}`.
+
+### Decided (SC160-SC162; the user, 2026-10-31)
+
+All as recommended: SC160; SC161 and SC162 on a quiet host, after the tag's runs.
