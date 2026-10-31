@@ -648,7 +648,11 @@ func main() {
 		}
 		if st.status != "ok" {
 			os.Stderr.WriteString(st.stderr)
-			fmt.Fprintln(os.Stderr, "cxxdump: clang rejected the unit")
+			if st.status == "rejected" {
+				fmt.Fprintln(os.Stderr, "cxxdump: clang rejected the unit")
+			} else {
+				fmt.Fprintln(os.Stderr, "cxxdump: clang failed on the unit ("+st.status+")")
+			}
 			os.Exit(exitStatus(st.status))
 		}
 		return

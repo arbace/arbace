@@ -20,8 +20,9 @@ import (
 	"time"
 )
 
-// version is part of every cache key: a change of the filter's output changes it.
-const version = "cxxdump-7"
+// version is part of every cache key: a change of the filter's output, or of the statuses a run is cached with, changes it
+// (cxxdump-8: review 007's fixes cached a clang that was killed as "rejected" before; those entries are not served any more).
+const version = "cxxdump-8"
 
 // normVersion is the normal form's own part of the key of a -norm run: a change of norm.go (CP77 (b): no FullComment) changes it and
 // only the .norm entries, not the dumps', are rebuilt.
