@@ -250,6 +250,10 @@
                   {:status status
                    :lines (into (sorted-map) (frequencies (map second mine)))
                    ;; each main-file line's first error, for the verdict's message (review 006, finding 11)
+                   ;; CS193 (a): every main-file error's text by line (at most 8 a line), for the message count
+                   :all-texts (into (sorted-map) (for [[l es] (group-by (comp second error-line)
+                                                                        (filter #(when-let [[f _] (error-line %)] (or (nil? f) (.endsWith ^String f base-name))) errs))]
+                                                   [l (vec (for [e (take 8 es)] (let [t (one-line e)] (subs t 0 (min 160 (count t))))))]))
                    :texts (into (sorted-map) (for [[l es] (group-by (comp second error-line)
                                                                     (filter #(when-let [[f _] (error-line %)] (or (nil? f) (.endsWith ^String f base-name))) errs))]
                                                [l (let [t (one-line (first es))] (subs t 0 (min 160 (count t))))]))
@@ -375,6 +379,20 @@
           short0 [:fail :missed (str "line 0 expects " anyn " error" (when (> anyn 1) "s") ", got " n-extra " beyond the expected lines")]
           :else [:fail :missed (str "no error " (when excess "(dg-excess-errors)"))])))))
 
+(defn msg-mismatch
+  "CS193 (a): for a file that passes, its expected error lines whose dg-error regexes match none of the checker's
+  messages on that line: a vector of [line [regex...] [message...]]. A report, not a verdict: the checker's wordings
+  differ from gcc's. Lines the checker did not reach (a read error stood for them) are not counted."
+  [dg r]
+  (let [msgs (:msgs dg)
+        reached? (fn [l] (or (not= :read-error (:status r)) (= :preprocess (:action dg))))]
+    (vec (for [[l res] msgs
+               :when (and (contains? (:lines r) l) (reached? l))
+               :let [texts (get (:all-texts r) l (some-> (get (:texts r) l) vector))
+                     hit? (fn [re] (some (fn [t] (try (re-find (re-pattern re) t) (catch Throwable _ false))) texts))]
+               :when (not-any? hit? res)]
+           [l (vec res) (vec texts)]))))
+
 ;; ---------------------------------------------------------------------------------------------
 ;; The commands
 
@@ -491,6 +509,24 @@
       (let [rs (by-id id)
             by (frequencies (map #(if (= :fail (second %)) (or (nth % 3 nil) :fail) (second %)) rs))]
         (println (format "%-16s %4d files: %s" id (count rs) (str/join ", " (map (fn [[k v]] (str (name k) " " v)) (sort-by (comp - val) by)))))))
+    ;; CS193 (a): the passes whose dg-error regexes do not match the checker's messages on the expected lines
+    (let [dgm (into {} (for [id ids [nm d] (read-string (slurp (str work "/" id "/dg.edn")))] [(str id "/" nm) d]))
+          rdm (into {} (for [id ids [nm r] (read-string (slurp (str work "/" id "/read.edn")))] [(str id "/" nm) r]))
+          mm (into (sorted-map)
+                   (for [[fid r] rows :when (= :pass r)
+                         :let [d (get dgm fid) rd (get rdm fid)
+                               m (when (and d rd (seq (:msgs d))) (msg-mismatch d rd))]
+                         :when (seq m)]
+                     [fid m]))
+          with-msgs (count (filter (fn [[fid r]] (and (= :pass r) (seq (:msgs (get dgm fid))))) rows))
+          fam (fn [re] (let [w (str/split (str/replace (str re) #"[^A-Za-z0-9_ '#-]+" " ") #"\s+")] (str/join " " (take 3 (remove str/blank? w)))))
+          fams (frequencies (for [[_ m] mm [_ res _] m r res] (fam r)))]
+      (println (format "dg-error messages: %d of %d passes with expected errors have %d lines whose regex matches none of the checker's messages"
+                       (count mm) with-msgs (reduce + (map (comp count val) mm))))
+      (doseq [id ids :let [n (count (filter #(.startsWith ^String % (str id "/")) (keys mm)))] :when (pos? n)]
+        (println (format "  %-16s %3d files" id n)))
+      (doseq [[f n] (take 12 (sort-by (comp - val) fams))] (println (format "  family %-40s %3d lines" (str "\"" f "\"") n)))
+      (spit (str work "/msg-mismatch.edn") (str "[\n" (str/join "\n" (map pr-str mm)) "\n]\n")))
     (when (seq disagree)
       (println (count disagree) "passes whose directives gcc does not agree with:" (pr-str (vec (take 10 disagree)))))
     (when record
