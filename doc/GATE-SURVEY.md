@@ -2378,3 +2378,122 @@ its control fails against issue11053's). Without one, `dir_verdict` would expect
 worktree's `.tmp/` (removed with `git worktree remove`), ran the main checkout's stage 0 as `ARBACE_HOST_EXE` (gate.plan's
 `passes` on synthetic stores), and `.tmp/gts85/test.sh` ran TamaGo's go (gc's references, `go run` of four programs,
 GOMAXPROCS=4).
+
+## As built: re-review 020's fixes (write-ahead) (2026-10-31)
+
+Re-review 020 (the helper VM's, of `gate-post-v2` at `9a362397`: review 001's fixes, light) found seven things; each
+was checked against branch `gate-merge` at `bf6a281d` (`gate-post-v2` with mac/011-014 merged, report 015's
+rehearsal), and each fix is a commit of its own there, in the light tier as the earlier rounds: no `bin/gate` run, no
+build of the executables, of javac's tool or of a real stage 0, no store touched. The tests are scratch scripts in the
+worktree's `.tmp/rv020/` (`lib.sh`: a scratch repository with a fake main checkout, a fake seed and a linked worktree,
+the scripts copied from the branch or, with `REV=COMMIT`, from that commit, so that each test is run before its fix
+too); each fails at the commit before its fix and passes after. Review 001's own tests, rerun from copies
+(`.tmp/rv020/fix1-001.sh` 59 cases, `gts80.sh` 39, `gts83.sh` 23), pass unchanged. No shipped file changed.
+
+**Finding 1 (medium): an interrupted `--link` broke the next one. Holds.** A link killed after an executable's rename
+and before `pins` left OUT holding FROM's executable (the same inode) and no `pins`; the next link's `mv` of a second
+link of that inode over it is refused by coreutils ("are the same file"; busybox's rename does nothing and leaves the
+temporary), so the second call failed, removed the executable, and only a third linked (through `bin/gate`, the stage0
+step built one of its own). Fix (`bin/seed`): an executable already FROM's (`-ef`) is left in place (the post-check
+verifies it); the dead runs' temporaries (`OUT/*.link.*`, `OUT/ARCH/arbace.link.*`) are removed under the lock, which no
+other link of OUT holds; a run stopped by INT or TERM removes its own. Test `.tmp/rv020/f1.sh` (13 cases): a link killed
+by `kill -9` while it copies `seed.sha256` (a `cp` shim), plus a dead run's executable temporary; the next link links
+(no "same file"), kept, no temporary left; a link stopped by TERM leaves no temporary and the next links. At `bf6a281d`
+8 fail.
+
+**Finding 2 (low-medium): `--link` did not wait for main's rebuild. Holds.** Fix (`bin/seed`): when FROM is
+`CHECKOUT/target/seed` and `CHECKOUT/.tmp/seed-build.lock` exists and is not this checkout's own (a `-o` link from the
+checkout's own stage 0, as `bin/gate-demos` does from a worktree, would wait on itself), `--link` takes that lock shared
+(links run beside each other; `bin/seed --build` and `bin/lib/host.bash` there take it exclusive) after its own and
+before deciding, printing `bin/seed: waiting for CHECKOUT's stage 0 build ...` on stderr; at most
+`ARBACE_SEED_LINK_WAIT` seconds (default 1200: a build with its compiled namespaces; polled each second, busybox's
+`flock` has no `-w`), then the refusal `not linked: CHECKOUT is building its stage 0 (its lock ... held after N s)`. The
+order is always the worktree's lock, then main's: nothing takes a worktree's lock while holding main's, so no cycle.
+Test `.tmp/rv020/f2.sh` (13 cases): main's lock held while its directory is removed and a stage 0 written 2 s later:
+the link waits, then links the rebuilt one; a build longer than `ARBACE_SEED_LINK_WAIT=1`: refused within the wait,
+naming the build, not "has no amd64/arbace"; no build or no lock file in main: no wait; FROM of the checkout itself: no
+deadlock; main's lock free afterwards. At `972f7fa7` 6 fail.
+
+**Finding 3 (low): `bin/gate-demos` from a stale main checkout refused. Holds.** Fix (`bin/gate-demos`,
+`stage0_link`): the invoking checkout's stage 0 is made current before it is linked into the scratch worktree, as its
+own tools would: in the main checkout `bin/seed --build --no-aot` (kept when its pins are the checkout's, in about
+70 ms; else built, about 10 minutes and 8 GB, with a line `the main checkout's stage 0 is not current (...): bin/seed
+--build --no-aot` first), in a linked worktree `bin/seed --link MAIN/target/seed` (its own kept, else main's linked);
+when none is current, what to run (`bin/seed --build --no-aot` in the main checkout) and no plan (exit 1). Test
+`.tmp/rv020/f3.sh` (14 cases, the whole `bin/gate-demos --keep` on a fake checkout whose `seed_go_build` writes a
+fake stage 0; the plans fail there, there being no `bin/gate`, which is not what is checked): from main with other
+pins, built and the scratch worktree running the new one; from main current, nothing built, the scratch worktree
+main's inode; from a worktree, main's linked into it and the scratch worktree; from a worktree with main stale, what
+to run and no plan. At `e3cb0478` 11 fail.
+
+**Finding 4 (low): the `:uses` cut-off decided on a record's existence. Holds.** Fix (`bin/lib/gate-run.bash`,
+`run_one`): `pass_reads FILE NAME` in place of `[ -f ]`, as `publish_passes` and the planner decide; a record that does
+not read lets the step run, and its pass replaces it. Test `.tmp/rv020/f4.sh` (7 cases, `run_one` sourced with `step`
+faked, a step decided `after` with a record at its cut-off key): a record that reads cut off; no record, an empty one, a
+cut one, an odd-length one and another step's record run; the run's pass replaces the bad one. At `5df57cce` 5 fail.
+
+**Finding 5 (low): `--link` left the rest of a stale stage 0. Holds.** Fix (`bin/seed`): once FROM is kept and before
+linking, what `bin/seed --build` writes into a stage 0 directory is removed from OUT: `src/` (the seed unpacked),
+`prepare/`, `prepare.ae`, `prepare.log`, `build-*.log`, `aot/`, `aot.key`, `aot.runtime`, and another architecture's
+`ARCH/arbace` (its directory too when that leaves it empty); any other file of OUT stays (`-o` may name any directory),
+and nothing is removed when OUT is kept already or the link is refused. A linked stage 0 so has no `src/`:
+`bin/lib/repr-go/plan-check` (the box's, parked) refuses in a linked worktree with its own message ("no
+target/seed/src/mod (bin/seed --build)") rather than reading another seed's module (GTS100). Test `.tmp/rv020/f5.sh`
+(8 cases): a stale own stage 0 with all of them and a `notes.txt`: after the link only `amd64/arbace`, `pins`,
+`seed.sha256` and `notes.txt`; kept already: its `aot/` stays; refused: OUT untouched. At `251bec79` 1 fails.
+
+**Finding 6 (low): `--essential-compiled`'s split by `NR == FNR`. Fixed before this round** by the rehearsal's
+follow-up `5549f17b` (`FILENAME == ARGV[1]` in the three awk calls; an empty `controls.ids` no longer takes
+`results.tsv` for the ids). What remained: with no id read (`test/java/controls.edn` emptied, or its controls not one
+`{:id "..." ...}` a line, the `sed`'s shape), no control is split off and the control's row from its subject's run is
+judged as a test's: a `differ` printed a "not passing" line while the count of passes stayed whole, so the step exited
+0 with its control unjudged. Fix (`bin/java-check`): an empty `controls.ids` fails the step (`no control id in
+.../test/java/controls.edn`). Test `.tmp/rv020/f6.sh` (10 cases: GTS81's and review 001's seven, on the tail extracted
+from the script, and three new: no id with a timed-out subject, no id, the file on one line): at `e443577e` the three
+new fail (exit 0); at `5549f17b^` (the `NR == FNR` split) the step failed with `2 tests: 0 pass`, the finding.
+
+**Finding 7 (low): companions with no record never pruned. Holds.** Fix (`bin/lib/gate-run.bash`, `gate_prune`): per
+step directory, each `KEY.log`, `KEY.inputs` or `KEY.out` with no `KEY.edn` and older than a day (as the temporaries'
+rule: a younger one may be a publication in progress, `publish_passes` moving the companions before the record) is
+removed, named on a line of its own (`gate --prune: STEP/KEY12 (no record: its .log .inputs .out)`), counted in the
+summary (`..., N left without a record removed in STORE`); `--dry-run` names them. Test `.tmp/rv020/f7.sh` (6 cases):
+a pass two days old with its record kept whole (one of the last 5), orphans two days old removed (named by
+`--dry-run`, which removes nothing), fresh orphans kept. At `64f9dd12` 3 fail.
+
+**Commits** (on `gate-merge`, after `bf6a281d`): `251bec79` (1), `972f7fa7` (5), `e3cb0478` (2), `5df57cce` (3),
+`64f9dd12` (4), `e443577e` (7), `1fbe580c` (6).
+
+**What the merge must check** (with the earlier lists).
+
+- In a linked worktree, once main's stage 0 is rebuilt with this branch's `bin/seed`: a link with a stale stage 0 of
+  the worktree's own leaves `target/seed` holding `ARCH/arbace`, `seed.sha256` and `pins` alone; a link run while main
+  rebuilds (`bin/seed --build` in main) prints `waiting for /root/arbace's stage 0 build` and then links the new one
+  (through `bin/gate`, the stage0 step's line comes after the wait: `stage0_choose` writes `bin/seed`'s output to a file,
+  GTS101); a link killed partway (Ctrl-C) is repaired by the next tool call.
+- `bin/gate-demos` from the main checkout right after the merge's rebuild: no "not current" line (main's own stage 0
+  current), the scratch worktree's executable main's inode.
+- The first `bin/gate --full`'s `--prune`: its summary line names the orphans removed; any it lists should be keys
+  of interrupted runs (GT7's reruns), never one with a record.
+- `--essential-compiled` with today's `test/java/controls.edn`: its control line as before (the ids c00001 and c00002
+  read).
+- `after` steps (`:uses`): their "cut off" skips as before; a record that does not read at a cut-off key now runs the
+  step (none is expected in the store after GTS80's publication).
+
+**Proposals (GTS100-GTS101).**
+
+- **GTS100 A linked stage 0's `src/`.** `--link` now removes a stale `src/` and links none, so
+  `bin/lib/repr-go/plan-check` (the box's plan check, parked) refuses in a linked worktree. Options: (a) as built (its
+  message names `bin/seed --build`); (b) `--link` hard-links FROM's `src/` too (`cp -al`, checked by `diff -rq`);
+  (c) plan-check unpacks the seed's `mod/` into its own work directory (the seed archive is the checkout's). *Recommended:
+  (a) now, (c) with the box's return*: plan-check is the only reader, and its input is the seed, not stage 0's copy.
+- **GTS101 The gate's stage0 line during a wait.** `stage0_choose` sends `bin/seed --link`'s output to a file and
+  prints it after, so a gate in a worktree waiting up to 20 minutes for main's rebuild shows nothing meanwhile.
+  Options: (a) as built; (b) `stage0_choose` prints the `waiting for` line as it comes (`bin/seed`'s stderr to the
+  terminal, its stdout to the file). *Recommended: (b)*, at the next change to `bin/gate` (in every key with the
+  planner): one line, the difference between a gate that waits and one that hangs.
+
+**Slips.** None of the rules': the tests made scratch repositories with linked worktrees of their own under the
+worktree's `.tmp/rv020/` (removed with `git worktree remove`), read the review 001 tests from `gate-post-v2`'s `.tmp/`
+by path (copied, never run there), and ran the main checkout's stage 0 as `ARBACE_HOST_EXE` (`gts80.sh`'s gate.plan
+`passes` on synthetic stores, `GOMAXPROCS=4`). The scratch `bin/gate-demos` runs made and removed scratch worktrees of
+the fake repository only.
