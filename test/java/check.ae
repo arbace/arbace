@@ -29,8 +29,12 @@
         now is a regression (unless its result is flaky: bin/java-check ran it again and the
         second run passed, JCS71 (a); a test recorded flaky counts as passing); every test not passing in a class of DIVERGENCES (its result and
         reason matched, as test/goi/divergences.edn's), each class's count and the numbers by
-        area; --record writes the results as CHECKDIR/check-LEVEL.edn. Exit 1 on a regression,
-        an unclassified test or an essential test not passing."
+        area; --record writes the results as CHECKDIR/check-LEVEL.edn. Every test REF passes on the
+        JDK must have a row at each level of LEVELS (the diagnostics level's the golden-diagnostics
+        tests, the other levels' the rest), unless --partial: a test without one is missing (a run
+        that lost rows, or judged nothing, fails; its recorded line is kept by --record); with
+        --essential every test of FILE must have one. Exit 1 on a regression, an unclassified test,
+        a missing test or an essential test not passing or missing."
   (:require [arbace.string :as str]
             [arbace.java.io :as io])
   (:import (java.io File PushbackReader)))
@@ -537,13 +541,25 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; report
 
+(defn- at-level?
+  "Whether the class C of DIVERGENCES applies at LEVEL: its :level, else one of its :levels (a class of
+  several levels, report 003's findings 5 and 7: the world's classes are the run levels'), else any."
+  [c level]
+  (cond (:level c) (= level (:level c))
+        (:levels c) (boolean (some #{level} (:levels c)))
+        :else true))
+
 (defn- classify
-  "A non-passing test's class: the first of its level (or of none) that names the test in :tests
-  or one of whose :match regexps finds \"RESULT REASON\"."
+  "A non-passing test's class: the first of its level (at-level?) that names the test in :tests
+  or one of whose :match regexps finds \"RESULT REASON\". A flaky result (JCS71 (a): a would-be
+  regression whose second run passed) only by a class that names it, in :tests or by a :match
+  anchored to it (^flaky): the other patterns (the world's classes, unanchored) do not take it, so
+  that a test flaky and named by no class fails the check (report 003's finding 4)."
   [classes level id result reason]
-  (let [s (str (name result) " " reason)]
-    (or (some (fn [c] (when (and (or (nil? (:level c)) (= level (:level c)))
-                                 (or (some #{id} (:tests c)) (some #(re-find % s) (:match c))))
+  (let [s (str (name result) " " reason)
+        takes? (fn [re] (or (not= :flaky result) (str/starts-with? (str re) "^flaky")))]
+    (or (some (fn [c] (when (and (at-level? c level)
+                                 (or (some #{id} (:tests c)) (some #(and (takes? %) (re-find % s)) (:match c))))
                         (:id c)))
               classes)
         :unclassified)))
@@ -608,6 +624,11 @@
         partial? (or (flags "--partial") (some? (o "--essential")))
         essential (some->> (o "--essential") lines (remove #(str/starts-with? % "#")) (map #(first (str/split % #"\s+"))) set)
         tests (into {} (for [t (ref-tests ref)] [(:id t) t]))
+        ;; the tests a whole run has at a level (plan's and plan-diag's): those the JDK passes, the
+        ;; golden-diagnostics tests at the level diagnostics, the others at the other levels
+        expected (fn [lv] (set (for [t (vals tests) :when (= :pass (:jdk t))
+                                     :when (= (= :diagnostics lv) (= :compile-fail-ref (:category t)))]
+                                 (:id t))))
         classes (read-edn divergences)
         all-results (for [[id lv r reason] (tsv (str work "/results.tsv"))] [id (keyword lv) (keyword r) (or reason "")])
         ;; GTS81 (a): the controls' rows judged apart, no test of the records, classes or lists
@@ -629,22 +650,35 @@
                   pass-like? #(#{:pass :flaky} %)
                   ;; a test a class marked :unstable names by :tests (flaky, or path-dependent: its
                   ;; stdout pads to a width by the length of the checkout's path) can differ on
-                  ;; both runs of a would-be regression: no regression, its class holds it
-                  unstable (set (for [c classes :when (and (:unstable c) (or (nil? (:level c)) (= lv (:level c))))
+                  ;; both runs of a would-be regression: no regression, its class holds it (at its
+                  ;; levels alone, report 003's finding 7)
+                  unstable (set (for [c classes :when (and (:unstable c) (at-level? c lv))
                                       id (:tests c)] id))
                   regress (filter #(and (pass-like? (first (rec (first %)))) (not (pass-like? (nth % 2)))
                                         (not (unstable (first %)))) rs)
                   flaky (filter #(= :flaky (nth % 2)) rs)
                   now-pass (filter #(and (rec (first %)) (not (pass-like? (first (rec (first %))))) (pass? %)) rs)
                   fresh (filter #(and (not (pass? %)) (not= :pass (first (rec (first %))))
-                                      (not= [(nth % 2) (nth % 3)] (rec (first %)))) rs)]
-            :when (seq rs)]
+                                      (not= [(nth % 2) (nth % 3)] (rec (first %)))) rs)
+                  ;; a test with no row: a whole run's (not partial) expected test, or an essential one
+                  have (set (map first rs))
+                  missing (when-not partial? (sort (remove have (expected lv))))
+                  ess-missing (when essential (sort (remove have essential)))]
+            ;; a level with no rows is judged too (its tests all missing), but in a partial run
+            :when (or (seq rs) (not partial?) essential)]
       (println (str "java-check " (name lv) ": " (count rs) " tests: "
                     (str/join ", " (for [[r xs] (sort-by (comp - count val) by)] (str (count xs) " " (name r))))))
       (println (str "   against " (.getName (io/file f)) ": "
                     (count (filter #(= [(nth % 2) (nth % 3)] (rec (first %))) rs)) " as recorded, "
                     (count fresh) " new or changed, " (count now-pass) " now passing, " (count regress) " regressions"
                     (when (seq flaky) (str ", " (count flaky) " flaky (run again, JCS71 (a))"))))
+      (when (seq missing)
+        (println (format "   %5d missing (no result in this run)" (count missing)))
+        (doseq [id missing]
+          (swap! problems conj (str "missing: " id " " (:test (tests id)) ": no result at the level " (name lv)
+                                    (when-let [[r reason] (rec id)] (str " (recorded " (name r) " " reason ")"))))))
+      (doseq [id ess-missing]
+        (swap! problems conj (str "essential: " id " " (:test (tests id)) " has no result at the level " (name lv))))
       (doseq [x regress] (swap! problems conj (str "regression: " (first x) " " (:test (tests (first x))) ": " (name (nth x 2)) " " (nth x 3))))
       (doseq [x (take 20 now-pass)] (println (str "   now passing: " (first x) " " (:test (tests (first x))))))
       (doseq [x flaky] (println (str "   flaky: " (first x) " " (:test (tests (first x))) ": " (nth x 3))))
@@ -669,9 +703,10 @@
                                 ";; per test of test/java/ref-jdk26.edn the JDK passes, its jtreg name, its result and reason."
                                 ";; A test passing here and not in a run is a regression. bin/java-check --record writes it."
                                 "["]
-                               ;; a partial run (--only, --corpus, --essential) updates its tests' lines
+                               ;; a partial run (--only, --corpus, --essential) updates its tests' lines;
+                               ;; a whole run's missing tests keep theirs (the run fails on them)
                                (let [now (into {} (for [[id _ r reason] rs] [id [r reason]]))
-                                     all (if partial? (merge rec now) now)]
+                                     all (if partial? (merge rec now) (merge (select-keys rec missing) now))]
                                  (for [[id [r reason]] (sort-by key all)]
                                    (str " [" (q id) " " (q (:test (tests id))) " " r " " (q reason) "]")))
                                ["]"]))
