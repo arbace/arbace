@@ -75,7 +75,9 @@
 #   bin/goi check [--record] [--jobs N] [--essential] [--only REGEX]
 #                                 the check (§11): the run programs of $GOROOT/test (repr/go's
 #                                 conversion, the corpus linux-test: bin/repr-go read --corpus
-#                                 linux-test when missing) each interpreted by bin/goi run against
+#                                 linux-test when missing or stale: each corpus below is kept by
+#                                 a key, DIR.goi-key, of Go's version, $GOROOT/test's pin and
+#                                 repr/go's sources, and read again when it changes) each interpreted by bin/goi run against
 #                                 gc's build and run of the original (RPS12, since REAP2; until
 #                                 then of the forms printed), as Go's test driver builds it (GOPATH
 #                                 mode, in its directory; cached in .tmp/goi-check/gcref, by the
@@ -959,6 +961,68 @@ print("\n".join(out))
 ' "$froot" "$ns" "$file" "${#paths[@]}" ${paths[@]+"${paths[@]}"} ${pargs[@]+"${pargs[@]}"}
 }
 
+# corpus_key: the key of repr/go's corpora goi's check is judged on (report 002, finding 1; until then
+# each was read only when its directory was missing, so a long-lived checkout judged goi on the forms
+# of whatever repr/go first made them): Go's version, $GOROOT/test's pin and the sources that make
+# them (repr/go's converter and native reader, goi's checker it answers with, the loader, the helper
+# and tools/gocmp, whose lists name the programs), as check_nethttp keys its forms
+corpus_key() {
+  { cat "$goroot/VERSION"; cat "$root/seed/goroot-test.sha256"
+    (cd "$root" && find arbace/repr/go.ae arbace/repr/go arbace/go/check.ae arbace/go/check arbace/box/plan.ae \
+       bin/repr-go bin/lib/repr-go bin/lib/repr-go-host.bash tools/godump tools/gocmp go/arbace/repr -type f \
+       | LC_ALL=C sort | xargs sha256sum); } | sha256sum | cut -c1-24
+}
+
+# corpus_stale DIR KEY [LIST...]: whether the corpus DIR must be made again: missing, or made from
+# another key than KEY (DIR.goi-key, written once it is made); when it must, its key and the program
+# lists LIST it was made from (bin/repr-go's, .tmp/godump/corpus: made again when missing) are removed
+corpus_stale() {
+  local d=$1 k=$2 l; shift 2
+  [ -d "$d" ] && [ -f "$d.goi-key" ] && [ "$(cat "$d.goi-key")" = "$k" ] && return 1
+  rm -f "$d.goi-key"
+  for l in "$@"; do rm -f "$l"; done
+  return 0
+}
+
+# refresh_corpora: check's corpora (its variables: cforms, dforms, eforms, efull, edumps, etsv, aot,
+# ckey) read by bin/repr-go when stale (corpus_stale)
+refresh_corpora() {
+  local gd=$root/.tmp/godump/corpus
+  if corpus_stale "$cforms" "$ckey" "$gd/linux-test-programs.txt"; then
+    echo "== bin/repr-go read --corpus linux-test (.tmp/goi-check/read.log)" >&2
+    "$root/bin/repr-go" read --corpus linux-test > "$cwork/read.log" 2>&1 || { tail "$cwork/read.log" >&2; return 1; }
+    echo "$ckey" > "$cforms.goi-key"
+  fi
+  if corpus_stale "$dforms" "$ckey" "$gd/linux-dirtest-list.txt"; then
+    echo "== bin/repr-go read --corpus linux-dirtest (.tmp/goi-check/read-dirtest.log)" >&2
+    "$root/bin/repr-go" read --corpus linux-dirtest > "$cwork/read-dirtest.log" 2>&1 || { tail "$cwork/read-dirtest.log" >&2; return 1; }
+    echo "$ckey" > "$dforms.goi-key"
+  fi
+  if [ -n "$aot" ] && { corpus_stale "$efull" "$ckey" "$gd/linux-errtest-programs.txt" || [ ! -f "$efull.tsv" ]; }; then
+    echo "== bin/repr-go read --full --corpus linux-errtest (.tmp/goi-check/read-errtest-full.log)" >&2
+    "$root/bin/repr-go" read --full --corpus linux-errtest > "$gcwork/read-errtest-full.log" 2>&1 \
+      || grep -q '^converted [0-9]* of [0-9]* dumps.*, 0 did not read back$' "$gcwork/read-errtest-full.log" \
+      || { tail "$gcwork/read-errtest-full.log" >&2; return 1; }
+    echo "$ckey" > "$efull.goi-key"
+  fi
+  if corpus_stale "$eforms" "$ckey" "$gd/linux-errtest-programs.txt" || [ ! -f "$etsv" ]; then
+    echo "== bin/repr-go read --corpus linux-errtest (.tmp/goi-check/read-errtest.log)" >&2
+    # its invalid programs repr/go cannot convert fail the read (GC47: unsupported, each with its
+    # reason below), so a read that converted the rest is the read's success
+    "$root/bin/repr-go" read --corpus linux-errtest > "$cwork/read-errtest.log" 2>&1 \
+      || grep -q '^converted [0-9]* of [0-9]* dumps.*, 0 did not read back$' "$cwork/read-errtest.log" \
+      || { tail "$cwork/read-errtest.log" >&2; return 1; }
+    echo "$ckey" > "$eforms.goi-key"
+  fi
+  # go/types' errors of the error tests, the oracle of "gc's phases after type checking": the
+  # helper's dumps (bin/repr-go corpus), made when missing or stale (GPS33)
+  if corpus_stale "$edumps" "$ckey" || [ ! -s "$edumps-programs.txt" ]; then
+    echo "== bin/repr-go corpus linux-errtest: go/types' errors (.tmp/goi-check/dump-errtest.log)" >&2
+    "$root/bin/repr-go" corpus linux-errtest > "$cwork/dump-errtest.log" 2>&1 || { tail "$cwork/dump-errtest.log" >&2; return 1; }
+    echo "$ckey" > "$edumps.goi-key"
+  fi
+}
+
 # check [--record] [--jobs N] [--essential] [--only REGEX]: the check (§11): every run program of
 # $GOROOT/test (the corpus linux-test, repr/go's conversion: bin/repr-go read --corpus linux-test,
 # run first when missing) interpreted against gc; results in .tmp/goi-check/results.tsv, against
@@ -1032,34 +1096,12 @@ check() {
     mkdir -p "$bundle"; bundle=$(cd "$bundle" && pwd); rm -rf "$bundle/in" "$bundle/want"
   fi
   mkdir -p "$cwork/bin"
-  if [ ! -d "$cforms" ]; then
-    echo "== bin/repr-go read --corpus linux-test (.tmp/goi-check/read.log)" >&2
-    "$root/bin/repr-go" read --corpus linux-test > "$cwork/read.log" 2>&1 || { tail "$cwork/read.log" >&2; return 1; }
-  fi
-  if [ ! -d "$dforms" ]; then
-    echo "== bin/repr-go read --corpus linux-dirtest (.tmp/goi-check/read-dirtest.log)" >&2
-    "$root/bin/repr-go" read --corpus linux-dirtest > "$cwork/read-dirtest.log" 2>&1 || { tail "$cwork/read-dirtest.log" >&2; return 1; }
-  fi
-  if [ -n "$aot" ] && { [ ! -d "$efull" ] || [ ! -f "$efull.tsv" ]; }; then
-    echo "== bin/repr-go read --full --corpus linux-errtest (.tmp/goi-check/read-errtest-full.log)" >&2
-    "$root/bin/repr-go" read --full --corpus linux-errtest > "$gcwork/read-errtest-full.log" 2>&1 \
-      || grep -q '^converted [0-9]* of [0-9]* dumps.*, 0 did not read back$' "$gcwork/read-errtest-full.log" \
-      || { tail "$gcwork/read-errtest-full.log" >&2; return 1; }
-  fi
-  if [ ! -d "$eforms" ] || [ ! -f "$etsv" ]; then
-    echo "== bin/repr-go read --corpus linux-errtest (.tmp/goi-check/read-errtest.log)" >&2
-    # its invalid programs repr/go cannot convert fail the read (GC47: unsupported, each with its
-    # reason below), so a read that converted the rest is the read's success
-    "$root/bin/repr-go" read --corpus linux-errtest > "$cwork/read-errtest.log" 2>&1 \
-      || grep -q '^converted [0-9]* of [0-9]* dumps.*, 0 did not read back$' "$cwork/read-errtest.log" \
-      || { tail "$cwork/read-errtest.log" >&2; return 1; }
-  fi
-  # go/types' errors of the error tests, the oracle of "gc's phases after type checking": the
-  # helper's dumps (bin/repr-go corpus), made when missing (GPS33)
-  if [ ! -d "$edumps" ] || [ ! -s "$edumps-programs.txt" ]; then
-    echo "== bin/repr-go corpus linux-errtest: go/types' errors (.tmp/goi-check/dump-errtest.log)" >&2
-    "$root/bin/repr-go" corpus linux-errtest > "$cwork/dump-errtest.log" 2>&1 || { tail "$cwork/dump-errtest.log" >&2; return 1; }
-  fi
+  # repr/go's corpora, kept by key (corpus_key; report 002, finding 1), refreshed by one check at a time
+  ckey=$(corpus_key)
+  mkdir -p "$root/.tmp/repr-go"
+  exec 9> "$root/.tmp/repr-go/goi-corpora.lock"
+  flock 9
+  refresh_corpora || return 1
   # the errorcheck programs' judge (tools/gocmp: Go's test driver's) and gc's standard library
   # for their references (the test driver's importcfg)
   gocmp=$gcwork/bin/gocmp
@@ -1095,7 +1137,7 @@ check() {
   fi
   [ -n "$only" ] && { grep -E "$only" "$list" > "$list.only" || true; mv "$list.only" "$list"; }
   # GP6: gc's syntax errors of the error tests to check (bin/repr-go syntax-errors: gc's syntax
-  # run by goi from tamago/cmd's forms), and the raw forms of the error tests (made when missing
+  # run by goi from tamago/cmd's forms), and the raw forms of the error tests (made when missing or stale
   # and one to check has no final forms though go/parser accepts it: the converter cannot convert it)
   esyntax=$cwork/syntax
   eraw=$root/.tmp/repr-go/raw/linux-errtest
@@ -1110,13 +1152,17 @@ check() {
       [ -f "$eforms/go/test/${q%.go}.ae" ] && continue
       if awk -F'\t' -v k="$q" '$2 == k && $1 != "fail" { f = 1 } END { exit !f }' "$etsv"; then need=1; break; fi
     done < "$list.err"
-    if [ -n "$need" ] && [ ! -d "$eraw/go" ]; then
+    if [ -n "$need" ] && { [ ! -d "$eraw/go" ] || corpus_stale "$eraw" "$ckey"; }; then
       echo "== bin/repr-go read --reader native --raw --corpus linux-errtest (.tmp/goi-check/read-errtest-raw.log)" >&2
+      rm -f "$eraw.goi-key"
       "$root/bin/repr-go" read --reader native --raw --corpus linux-errtest > "$cwork/read-errtest-raw.log" 2>&1 \
         || { tail "$cwork/read-errtest-raw.log" >&2; return 1; }
+      echo "$ckey" > "$eraw.goi-key"
     fi
   fi
   rm -f "$list.err"
+  # the corpora read: the lock released (corpus_key)
+  exec 9>&-
   # the programs that run the go command (go run, go tool: const7.go, linkmain_run.go, issue21576.go, ...)
   # run TamaGo's, the pinned toolchain, not the host's on PATH (GT7: the clean run's empty GOCACHE made the
   # host's go 1.27.2 compile std within issue21576.go's minute, under gc and goi alike; the host's go is
