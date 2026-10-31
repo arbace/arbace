@@ -9,7 +9,9 @@
       :logs, .tmp/gate-clean/SHA.logs: gate/plan/NAME.inputs, the material each step's key was the hash
       of). ONLY: comma-separated tokens, a step (a step with parts names its parts), failed (the base
       record's steps that did not pass clean with their audit ok, and those it does not hold), changed
-      (the steps whose material differs from the base run's, the producers' output digests aside). The
+      (the steps whose material differs from the base run's, the producers' output digests aside; a
+      program host pending here, its build not made, taken as the base's when its build's key and rest,
+      LOGS/hosts.edn's :gate and :prog-rest or :javac and :javac-prog-rest, are the base run's, GTS79 (b)). The
       selection is closed over :uses both ways (a producer's output is made in the fresh clone only by
       running it; a consumer of a rerun producer is keyed by what it makes again). MODE builds: a line
       per build, run (a selected check needs it) or none; MODE checks: a line per check, run or skip
@@ -44,13 +46,34 @@
   "the record's runs: :runs, or the one run a first record is"
   [rec]
   (or (:runs rec) [{:commit (:commit rec) :date (:date rec) :mode (:mode rec) :status (:status rec)
-                    :wall-s (:wall-s rec) :only "all" :logs (str (:commit rec) ".logs")}]))
+                    :wall-s (:wall-s rec) :only "all" :logs (str (:commit rec) ".logs") :hosts (:hosts rec)}]))
 
 (defn- material
   "a step's key material without the producers' output digests (uses lines), or nil"
   [^String f]
   (when (.isFile (File. f))
     (vec (remove #(str/starts-with? % "uses ") (str/split-lines (slurp f))))))
+
+;; GTS79 (b): a program host pending in this run's plan (its build not made: no selected check needs it) is
+;; compared by its build's key: the identity of :prog (:javac-prog) is a function of the build at the key
+;; :gate (:javac) and of its rest :prog-rest (:javac-prog-rest), both known before the build. When both are
+;; the base run's, the host is the one the step passed at, and its line is the base's
+(def ^:private prog-build {"prog" [:gate :prog-rest] "javac-prog" [:javac :javac-prog-rest]})
+
+(defn- host-pending
+  "the material NOW with each pending program host's line replaced by THEN's line of that host, when the
+  host's build key and rest (HOSTS-NOW, HOSTS-THEN: hosts.edn's maps) are the same; [lines replaced], the
+  replaced hosts' names"
+  [now then hosts-now hosts-then]
+  (let [then-line (into {} (for [l then :let [[_ h] (re-find #"^host (\S+) " l)] :when h] [h l]))
+        same? (fn [h] (let [ks (prog-build h)]
+                        (and ks hosts-now hosts-then
+                             (every? #(let [a (get hosts-now %)] (and (some? a) (= a (get hosts-then %)))) ks))))
+        out (for [l now
+                  :let [[_ h] (re-find #"^host (\S+) pending$" l)
+                        b (when h (then-line h))]]
+              (if (and b (not (str/ends-with? b " pending")) (same? h)) [b h] [l nil]))]
+    [(mapv first out) (vec (keep second out))]))
 
 (defn- passed? [e]
   (and (= :pass (:status e)) (contains? #{:ok :none} (:audit e))))
@@ -65,7 +88,15 @@
         base-material (fn [n]
                         (when-let [e (entries n)]
                           (material (str logs-root "/" (:logs (nth runs (or (:run e) 0))) "/gate/plan/" n ".inputs"))))
-        changed? (fn [n] (not= (base-material n) (material (str logs "/plan/" n ".inputs"))))
+        hosts-now (let [f (str logs "/hosts.edn")] (when (.isFile (File. f)) (read-file f)))
+        base-hosts (fn [n] (when-let [e (entries n)] (:hosts (nth runs (or (:run e) 0)))))
+        ;; GTS79 (b): [material, the pending hosts taken by their build's key]
+        compared (memoize (fn [n]
+                            (let [now (material (str logs "/plan/" n ".inputs")) then (base-material n)]
+                              (if (and now then)
+                                (host-pending now then hosts-now (base-hosts n))
+                                [now []]))))
+        changed? (fn [n] (not= (base-material n) (first (compared n))))
         toks (remove str/blank? (str/split only #","))
         named (fn [t] (filter #(or (= % t) (str/starts-with? % (str t "."))) names))
         bad (remove #(or (#{"failed" "changed"} %) (seq (named %))) toks)
@@ -98,7 +129,12 @@
                      (println (str "run\t" n "\t" (@why n)))
                      (let [e (entries n) r (nth runs (or (:run e) 0))]
                        (println (str "skip\t" n "\tpassed clean at " (subs (str (:commit r)) 0 (min 8 (count (str (:commit r)))))
-                                     ", its key unchanged (" (:only r) " run of " (:date r) ")")))))
+                                     ", its key unchanged (" (:only r) " run of " (:date r) ")"
+                                     (when-let [hs (seq (second (compared n)))]
+                                       (str "; " (str/join ", " (map #(str "host " % " not built, its build's key "
+                                                                           (subs (str (get hosts-now (first (prog-build %)))) 0 12)
+                                                                           " the one it passed at") hs))
+                                            " (GTS79 (b))")))))))
                  (when (seq stale)
                    (println (str "error\t-\tgate --only: " (count stale) " steps not selected have changed since their clean pass, "
                                  "their keys not the ones they passed at: " (str/join " " stale) " (add them, or: changed)"))
