@@ -1,21 +1,22 @@
 ;;;; bin/si mats' harness (SM8, SM8b): runs the mats of one Chez .ms file (argv: FILE [SKIPFILE]) on si, in R7RS reading mode.
-;;;; Per top-level datum of the file: a (mat NAME CLAUSE ...) is run as one body, in an environment of (chezscheme)
+;;;; Per top-level datum of the file: a (mat NAME CLAUSE ...) is run, its clauses one after the other as top-level forms of a
+;;;; new interaction environment (SC121 (c), as Chez does: a definition in one clause is seen by the next) of (chezscheme)
 ;;;; (si's subset of Chez's library, SC110 (b)) and (si mats), after the file's definitions above it (define,
 ;;;; define-syntax, define-record-type, define-values, each checked alone first), under si's watchdog (SC111 (b): a
 ;;;; mat that runs past SI_MAT_MS milliseconds, default 20000, fails); a clause (error? E) must raise, any other clause
-;;;; must return #t. A mat that does not expand has its clauses run one by one (SC110 (c)), each with the prelude, so
-;;;; Chez-specific clauses do not hide the portable ones. Output, one line a result, flushed:
+;;;; must return #t. A clause that does not expand (an identifier of Chez's own) is not run: the mat is NOTRUN and the
+;;;; other clauses' results are counted (CLAUSES), so Chez-specific clauses do not hide the portable ones. Output, one line a result, flushed:
 ;;;;   BEGIN NAME                 before a mat
 ;;;;   MAT NAME PASS N            all N clauses ran as they should
 ;;;;   MAT NAME FAIL N DETAIL     the clause DETAIL ("K: why") failed
 ;;;;   MAT NAME NOTRUN WHY        the mat did not expand or run: WHY is the expander's message
-;;;;   CLAUSES NAME P F N         after a NOTRUN: its clauses run alone, P passed, F failed, N did not run
+;;;;   CLAUSES NAME P F N         after a NOTRUN: its clauses' results, P passed, F failed, N did not run
 ;;;;   MAT NAME SKIP WHY          a form the harness does not run (parameters, mat/cf, a name in SKIPFILE)
 ;;;;   READ POSITION WHY          a top-level datum the reader refuses (its text is skipped)
 ;;;;   DEF NAME NOTRUN WHY        a definition that does not expand alone (left out)
 ;;;;   FILE N-datums M-mats       at the end
 (import (rnrs) (rnrs eval) (rnrs mutable-pairs) (si mats) (only (srfi :98) get-environment-variable)
-        (only (psyntax system $all) r7rs-write))
+        (only (psyntax system $all) r7rs-write new-interaction-environment))
 
 (define argv (cdr (command-line)))
 (define path (car argv))
@@ -98,6 +99,12 @@
 (set-clause-ms! mat-ms)
 
 (define (message-of e)
+  (if (and (condition? e) (message-condition? e) (string=? (condition-message e) "variable ~s is not bound")
+           (irritants-condition? e) (pair? (condition-irritants e)) (symbol? (car (condition-irritants e))))
+      ;; an interaction environment resolves a free identifier when the clause runs (SC121 (c)): said as the expander says it
+      (string-append "unbound identifier " (symbol->string (car (condition-irritants e))))
+      (message-of* e)))
+(define (message-of* e)
   (let ((s (cond ((and (condition? e) (message-condition? e))
                   (string-append (condition-message e)
                                  (if (and (irritants-condition? e) (pair? (condition-irritants e)))
@@ -123,12 +130,19 @@
 (define data 0)
 (define mats 0)
 
-(define (chez-clause c)
+;; SC121 (c): Chez evaluates a mat's clauses one after the other at the top level, so a definition in one clause is seen by the
+;; next; the clauses are evaluated in a new interaction environment with the mat's prelude, each as a top-level form
+(define (chez-clause c env2)
   (if (and (pair? c) (memq (car c) '(error? sanitized-error?)) (pair? (cdr c)) (null? (cddr c)))
-      `(cons 'error ',(cadr c))
+      (cons 'error (cadr c))
       (if (and (pair? c) (eq? (car c) 'warning?) (pair? (cdr c)) (null? (cddr c)))
-          `(cons 'warning (lambda () ,(cadr c)))
-          `(cons 'true (lambda () ,c)))))
+          (cons 'warning (lambda () (eval (cadr c) env2)))
+          (cons 'true (lambda () (eval c env2))))))
+
+(define (make-mat-env)
+  (let ((env2 (new-interaction-environment env)))
+    (for-each (lambda (d) (guard (e (#t #f)) (eval d env2))) (reverse prelude))
+    env2))
 
 (define (run-one name clauses)
   (set! mats (+ mats 1))
@@ -138,18 +152,30 @@
     ((and (pair? clauses) (pair? (car clauses)) (eq? (caar clauses) 'parameters))
      (display "MAT ") (write name) (display " SKIP parameters") (newline))
     (else
-     (set-evaluator! (lambda (expr) (eval `(let () ,@(reverse prelude) ,expr) env)))
-     (let ((form `(let () ,@(reverse prelude) (run-mat ',name (list ,@(map chez-clause clauses))))))
-       (let ((r (timed (lambda () (guard (e (#t (cons 'notrun e))) (cons 'ok (eval form env)))))))
-         (display "MAT ") (write name)
-         (if (eq? (car r) 'notrun)
-             (begin (display " NOTRUN ") (display (message-of (cdr r))))
-             (let ((res (cdr r)))
-               (if (eq? (car res) 'pass)
-                   (begin (display " PASS ") (display (cadr res)))
-                   (begin (display " FAIL ") (display (cadr res)) (display " ") (display (caddr res))))))
-         (newline)
-         (when (eq? (car r) 'notrun) (line) (run-clauses name clauses))))))
+     (let ((env2 (timed (lambda () (make-mat-env)))))
+       (set-evaluator! (lambda (expr) (eval expr env2)))
+       (let loop ((cs clauses) (k 1) (p 0) (f 0) (n 0) (fail #f) (notrun #f))
+         (if (null? cs)
+             (begin
+               (display "MAT ") (write name)
+               (cond ((> n 0) (display " NOTRUN ") (display (message-of notrun)))
+                     (fail (display " FAIL ") (display (car fail)) (display " ") (display (cdr fail)))
+                     (else (display " PASS ") (display p)))
+               (newline)
+               (when (> n 0)
+                 (line)
+                 (display "CLAUSES ") (write name) (display " ") (display p) (display " ") (display f) (display " ")
+                 (display n) (newline)))
+             (let ((r (guard (e (#t (list 'notrun 1 e)))
+                        (run-mat name (list (chez-clause (car cs) env2))))))
+               (case (car r)
+                 ((pass) (loop (cdr cs) (+ k 1) (+ p 1) f n fail notrun))
+                 ((notrun) (loop (cdr cs) (+ k 1) p f (+ n 1) fail (or notrun (caddr r))))
+                 (else
+                  (let ((d (caddr r)))   ; "1: why" -> "K: why"
+                    (loop (cdr cs) (+ k 1) p (+ f 1) n
+                          (or fail (cons k (string-append (number->string k) (substring d 1 (string-length d)))))
+                          notrun))))))))))
   (line))
 
 ;; the watchdog around a thunk
@@ -158,18 +184,6 @@
   (let ((v (guard (e (#t (watchdog 0) (raise e))) (thunk))))
     (watchdog 0)
     v))
-
-;; a mat that does not expand: each clause alone (SC110 (c))
-(define (run-clauses name clauses)
-  (let loop ((cs clauses) (p 0) (f 0) (n 0))
-    (if (null? cs)
-        (begin (display "CLAUSES ") (write name) (display " ") (display p) (display " ") (display f) (display " ")
-               (display n) (newline))
-        (let* ((form `(let () ,@(reverse prelude) (run-mat ',name (list ,(chez-clause (car cs))))))
-               (r (timed (lambda () (guard (e (#t (cons 'notrun e))) (cons 'ok (eval form env)))))))
-          (cond ((eq? (car r) 'notrun) (loop (cdr cs) p f (+ n 1)))
-                ((eq? (cadr r) 'pass) (loop (cdr cs) (+ p 1) f n))
-                (else (loop (cdr cs) p (+ f 1) n)))))))
 
 (define (add-def! d)
   (let ((r (timed (lambda ()

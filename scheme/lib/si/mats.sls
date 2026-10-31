@@ -57,7 +57,7 @@
   (define (watchdog-error? e)
     (and (condition? e) (who-condition? e) (eq? (condition-who e) 'watchdog)))
   (define (unbound-id? e)
-    (and (condition? e) (message-condition? e) (string=? (condition-message e) "unbound identifier")))
+    (and (condition? e) (message-condition? e) (member (condition-message e) '("unbound identifier" "variable ~s is not bound"))))
 
   (define (run-mat name clauses)
     (let loop ((cs clauses) (n 1))
@@ -70,6 +70,9 @@
                                  (let ((v (if (eq? kind 'error) (evaluator thunk) (thunk)))) (cons 'value v)))))
                         (watchdog 0)
                         r))))
+            (if (and (eq? (car r) 'raised) (or (and (not (eq? kind 'error)) (syntax-violation? (cdr r))) (unbound-id? (cdr r))))
+              ;; the clause does not expand (SC121 (c)): it is not run
+              (list 'notrun n (cdr r))
             (let ((why
                    (case kind
                      ((true) (cond ((eq? (car r) 'raised) (string-append "error: " (condition-text (cdr r))))
@@ -84,4 +87,4 @@
                      (else #f))))
               (if why
                   (list 'fail n (string-append (number->string n) ": " why))
-                  (loop (cdr cs) (+ n 1)))))))))
+                  (loop (cdr cs) (+ n 1))))))))))
