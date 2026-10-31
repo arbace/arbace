@@ -104,22 +104,9 @@
             (recur (long e) out)))
         out))))
 
-(def ^:private host-targets
-  (delay (let [f (java.io.File. "test/c/dg-targets.edn")]
-           (if (.exists f) (read-string (slurp f)) {:triple "x86_64-linux-gnu" :effective {}}))))
-
-(defn- glob-match? [^String pat ^String s]
-  (boolean (re-matches (re-pattern (-> pat (str/replace "." "\\.") (str/replace "*" ".*") (str/replace "?" "."))) s)))
-
-(defn- sel-atom
-  "A selector's atom: an effective-target name (the host's table, true when the table has none) or a target triple's
-  pattern (`x86_64-*-*`) matched against the host's triple."
-  [^String w]
-  (cond
-    ;; every C++ name is false for C, listed or not (c++14, c++17_down, c++20; review 006, finding 8)
-    (.startsWith w "c++") false
-    (re-find #"[-*]" w) (glob-match? w (:triple @host-targets))
-    :else (let [m (:effective @host-targets)] (if (contains? m w) (boolean (get m w)) true))))
+;; the dg-do, dg-error and xfail selectors: host/target-atom's values on the reference host, a name test/c/dg-targets.edn does
+;; not list taken to hold (the judge's rule since CS142; the option lines keep it :unknown and report it, review 027, finding 5)
+(defn- sel-atom [^String w] (let [v (host/target-atom w)] (if (= :unknown v) true v)))
 
 (defn eval-selector
   "A selector expression of DejaGnu's target lists on the reference host (test/c/dg-targets.edn): host/eval-selector with
@@ -415,9 +402,11 @@
   (let [base (base-of work id)
         rows (into (sorted-map)
                    (for [e (entries work id)]
-                     [(:name e) (assoc (analyze (slurp-latin1 (str base "/" (:name e))))
-                                       :opts (host/dg-options (slurp-latin1 (str base "/" (:name e))) (str/replace base #"/+$" ""))
-                                       :args (vec (:args (:fc e))) :std (:std (:fc e)))]))]
+                     (let [txt (slurp-latin1 (str base "/" (:name e)))
+                           oi (host/dg-options-info txt (str/replace base #"/+$" ""))]
+                       [(:name e) (cond-> (assoc (analyze txt) :opts (:opts oi) :args (vec (:args (:fc e))) :std (:std (:fc e)))
+                                    ;; option lines kept whose selector the targets' table cannot decide (review 027, finding 5)
+                                    (seq (:uncertain oi)) (assoc :opts-uncertain (:uncertain oi)))])))]
     (spit (str work "/" id "/gcc.list")
           (str/join (for [[nm d] rows] (str nm "\t" (name (:action d)) "\t" (str/join " " (:opts d)) "\n"))))
     (spit (str work "/" id "/dg.edn") (str "[\n" (str/join "\n" (map (fn [[k v]] (pr-str [k v])) rows)) "\n]\n"))
@@ -426,7 +415,10 @@
       (if-let [only (System/getenv "CI_DG_ONLY")] (spit m (str only "\n")) (.delete m)))
     (println (str id ": " (count rows) " files; actions "
                   (pr-str (into (sorted-map) (frequencies (map (comp :action val) rows))))
-                  "; with dg-error " (count (filter #(seq (get-in (val %) [:expect :error])) rows))))))
+                  "; with dg-error " (count (filter #(seq (get-in (val %) [:expect :error])) rows))))
+    (when-let [u (seq (filter (comp :opts-uncertain val) rows))]
+      (println (str id ": " (count u) " files keep option lines whose selector test/c/dg-targets.edn cannot decide: "
+                    (pr-str (vec (take 10 (map (fn [[k v]] [k (:opts-uncertain v)]) u)))))))))
 
 (defn read-cmd [work id]
   (let [base (base-of work id)
