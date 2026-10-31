@@ -2034,3 +2034,8 @@ read,system,value,write}.ae`, `scheme/psyntax/psyntax.pp.ae` (with `scheme/psynt
 `check2.log`, `aot.log`, `fixpoint.log`, `check-suite.log`, `test-host.log`, `rnrs-names.txt` (Chez's export list
 of the five R6RS libraries, the input of `chezscheme.sls`'s export list), the probes `t3.scm` ... `t9.ss`;
 `.tmp/si/mats`, `.tmp/si/ecraven`, `.tmp/si/ecraven-chez`, `.tmp/si/r7rs` (the runs judged).
+
+### Decided (SC115-SC122; the user, 2026-10-31)
+
+All as recommended: SC115 (a), SC116 (c), SC117 (b), SC118 (b) after SC116, SC119 (b), SC120 (a), SC121 (c),
+SC122 (a) then (b).
