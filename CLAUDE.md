@@ -406,7 +406,8 @@ Prior art:
   (`bin/provenance-check`) compares the provenance files' reader hash with repr/java's; each step's wall and CPU seconds and peak RSS
   (busybox `time -v`) in `.tmp/gate/NAME.mem`, a 5 s memory sampler's `.tmp/gate/mem.tsv`. The
   steps: the Makefile's scripts (`make check-makefile`), the seed's hash, stage 0 built from
-  it (`bin/seed --build`, kept by the seed's and Go's pins), the executable and the test build by stage 0 (`bin/arbace-go
+  it (`bin/seed --build`, kept by the seed's and Go's pins; in a linked worktree without a current one of its own the main
+  checkout's when its pins are the worktree's, `bin/seed --kept`, GTS83 (a)), the executable and the test build by stage 0 (`bin/arbace-go
   --gate-build`, cached by key in `ARBACE_GATE_CACHE`, for the gate `ARBACE_GATE_EXES/KEY`, and keyed by a hash of what they are built from,
   `gate_key`: `arbace/` less repr/java, repr/haskell and repr/rust, `go/`, `overlay/` and `jdk/` less
   javac's world and the provenance files, `x509roots/`, the fixtures' forms, the build's scripts, the
