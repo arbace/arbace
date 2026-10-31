@@ -1,0 +1,114 @@
+(ns arbace.repr.llvm
+  "repr/llvm, LLVM IR's bridge (doc/cpp/LLVM.md; doc/cpp/CPP-SURVEY.md §5.2, \"As built: CX6\"): `read-ll` reads IR
+  text into LLVM forms (arbace.repr.llvm.read), `module-text` writes them as .ae text (a top-level form a line, a
+  function's blocks and instructions a line each), `print-ll` prints forms back to IR (arbace.repr.llvm.print). The
+  judge is clang: `clang -c` of the print gives the original's object. `-main` is bin/repr-llvm read, print and the
+  Arbace half of its round trip."
+  (:require [arbace.repr.llvm.read :as rd]
+            [arbace.repr.llvm.print :as pr]
+            [arbace.repr.c.layout :as layout]
+            [arbace.string :as str])
+  (:import [java.util.concurrent Executors Callable Future]))
+
+(set! *warn-on-reflection* true)
+
+(defn latin1 ^String [^String path]
+  (String. (java.nio.file.Files/readAllBytes (.toPath (java.io.File. path))) "ISO-8859-1"))
+
+(defn spit-latin1 [^String path ^String s]
+  (when-let [p (.getParentFile (java.io.File. path))] (.mkdirs p))
+  (java.nio.file.Files/write (.toPath (java.io.File. path)) (.getBytes s "ISO-8859-1")
+                             ^"[Ljava.nio.file.OpenOption;" (make-array java.nio.file.OpenOption 0)))
+
+(defn read-ll
+  "The LLVM forms of the IR text at `path`."
+  [^String path]
+  (rd/read-module (latin1 path)))
+
+(defn print-ll ^String [forms] (pr/print-module forms))
+
+(defn- define-text
+  "A define's .ae text: its header on one line, each block's label and each instruction on its own line."
+  ^String [f]
+  (let [v (vec f)
+        bi (.indexOf ^java.util.List v :body)
+        head (subvec v 0 bi)
+        blocks (nth v (inc bi))
+        b (StringBuilder.)]
+    (.append b (subs (layout/form-str (apply list head)) 0 (dec (count (layout/form-str (apply list head))))))
+    (.append b " :body\n [")
+    (doseq [[i blk] (map-indexed vector blocks)]
+      (let [[_ l & is] blk]
+        (when (pos? i) (.append b "\n  "))
+        (.append b (str "(block " (layout/form-str l)))
+        (doseq [x is] (.append b "\n   ") (.append b (layout/form-str x)))
+        (.append b ")")))
+    (.append b "])")
+    (str b)))
+
+(defn module-text
+  "A module's .ae text: (in-ns 'llvm.NAME) and its forms, a top-level form a line (a define over several)."
+  ^String [^String ns forms]
+  (str "(in-ns '" ns ")\n"
+       (str/join "\n" (map #(if (= (first %) 'llvm/define) (define-text %) (layout/form-str %)) forms))
+       "\n"))
+
+(defn read-module-text
+  "The forms of a module's .ae text (its in-ns left out)."
+  [^String text]
+  (let [r (arbace.lang.LineNumberingPushbackReader. (java.io.StringReader. text))
+        eof (Object.)
+        forms (loop [out []] (let [x (read r false eof)] (if (identical? x eof) out (recur (conj out x)))))]
+    (vec (remove #(and (seq? %) (= (first %) 'in-ns)) forms))))
+
+(defn- strip-line
+  "A form without the reader's :line and :column metadata (the comparison of level 1)."
+  [x]
+  (cond
+    (seq? x) (apply list (map strip-line x))
+    (vector? x) (mapv strip-line x)
+    :else x))
+
+(defn ns-name-of ^String [^String path]
+  (let [b (.getName (java.io.File. path))
+        b (str/replace b #"\.ll$" "")]
+    (str "llvm." (str/replace b #"[^A-Za-z0-9_-]" "_"))))
+
+(defn roundtrip-one
+  "One file's round trip on the Arbace side: read, the .ae text, read back (equal), print. Writes WORK/forms/NAME.ae and
+  WORK/print/NAME.ll; [name status detail]."
+  [^String nm ^String ll ^String work]
+  (try
+    (let [forms (read-ll ll)
+          ae (module-text (ns-name-of ll) forms)
+          back (read-module-text ae)
+          same (= (strip-line back) forms)
+          txt (print-ll forms)
+          again (rd/read-module txt)]
+      (spit (str work "/forms/" nm ".ae") ae)
+      (spit-latin1 (str work "/print/" nm ".ll") txt)
+      (cond
+        (not same) [nm "ae-differs" ""]
+        (not= again forms) [nm "forms-differ" ""]
+        :else [nm "ok" ""]))
+    (catch Throwable e
+      [nm (if-let [c (:llvm/refused (ex-data e))] (str "refused:" (name c)) "crash")
+       (str/replace (str (.getMessage e)) #"[\t\n]" " ")])))
+
+(defn -main
+  "bin/repr-llvm read FILE.ll [-o OUT.ae]; print FILE.ae [-o OUT.ll]; rt LIST WORK (NAME<tab>PATH.ll lines: the
+  Arbace half of the round trip, WORK/rt.tsv)."
+  [verb & args]
+  (case verb
+    "read" (let [[f _ o] args t (module-text (ns-name-of f) (read-ll f))] (if o (spit o t) (print t)) (flush))
+    "print" (let [[f _ o] args t (print-ll (read-module-text (slurp f)))] (if o (spit-latin1 o t) (print t)) (flush))
+    "rt" (let [[lst work] args
+               rows (for [l (str/split-lines (slurp lst)) :when (seq l)] (str/split l #"\t"))
+               threads (Integer/parseInt (or (System/getenv "REPR_LLVM_THREADS") "4"))
+               pool (Executors/newFixedThreadPool threads)
+               futs (mapv (fn [[n p]] (.submit pool ^Callable (fn [] (roundtrip-one n p work)))) rows)
+               res (mapv #(.get ^Future %) futs)]
+           (.shutdown pool)
+           (spit (str work "/rt.tsv") (str (str/join "\n" (map #(str/join "\t" %) res)) "\n"))
+           (println (count res) "files," (count (filter #(= "ok" (second %)) res)) "read and printed"))
+    (do (println "repr/llvm: read, print or rt") (System/exit 2))))
