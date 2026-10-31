@@ -200,3 +200,37 @@
     (is (not (:unsupported d)))
     (is (= [8 9 10] (vec (keys (:lines r)))))
     (is (= [:pass] (dg/verdict d r)))))
+
+;; review 027, finding 3: --judge --record after a subset's run refuses, in the three judges
+
+(defn- sh-status
+  "The exit status of `cmd` run in the checkout with the environment `env` added (its output dropped)."
+  [env & cmd]
+  (let [pb (ProcessBuilder. ^java.util.List (vec cmd))
+        log (java.io.File/createTempFile "judge-sh" ".log" (java.io.File. (str (System/getProperty "user.dir") "/.tmp")))]
+    (.directory pb (java.io.File. ^String (System/getProperty "user.dir")))
+    (doseq [[k v] env] (.put (.environment pb) k v))
+    (.redirectErrorStream pb true)
+    (.redirectOutput pb log)
+    (let [st (.waitFor (.start pb))] (.delete log) st)))
+
+(deftest judge-record-after-subset
+  (let [root (System/getProperty "user.dir")
+        work (doto (java.io.File. (str root "/.tmp/judge-test-subset")) (.mkdirs))
+        d (doto (java.io.File. work "judge-zz") (.mkdirs))
+        recs ["test/c/check-linux-amd64.edn" "test/c/check-aot-linux-amd64.edn" "test/c/check-dg-linux-amd64.edn"]
+        before (mapv slurp recs)]
+    (try
+      (spit (java.io.File. d "list.tsv") "judge-zz/x.c\t.\tc23\t\tx.c\n")
+      (spit (java.io.File. d "nodes.tsv") "")
+      (spit (java.io.File. d "run.tsv") "")
+      (spit (java.io.File. d "dg.edn") "[[\"x.c\" {:action :compile :expect {}}]]")
+      (spit (java.io.File. d "read.edn") "[[\"x.c\" {:status :ok :lines {} :other 0 :unlocated 0 :message \"\"}]]")
+      (spit (java.io.File. d "subset") "ids.txt\n")
+      (is (= 2 (sh-status {"CI_CHECK_WORK" (.getPath work)} "bin/ci" "check" "--judge" "--record" "--corpus" "judge-zz")))
+      (is (= 2 (sh-status {"CI_AOT_WORK" (.getPath work) "CI_INTERP" (.getPath work)} "bin/ci" "check" "--aot" "--judge" "--record" "--corpus" "judge-zz")))
+      (is (= 2 (sh-status {"CI_DG_WORK" (.getPath work)} "bin/ci" "dg" "--judge" "--record" "--corpus" "judge-zz")))
+      (is (= [true true true] (mapv #(= %1 (slurp %2)) before recs)))
+      (finally
+        (doseq [[f s] (map vector recs before)] (when (not= s (slurp f)) (spit f s)))
+        (doseq [f (reverse (file-seq work))] (.delete ^java.io.File f))))))

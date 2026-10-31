@@ -421,6 +421,9 @@
     (spit (str work "/" id "/gcc.list")
           (str/join (for [[nm d] rows] (str nm "\t" (name (:action d)) "\t" (str/join " " (:opts d)) "\n"))))
     (spit (str work "/" id "/dg.edn") (str "[\n" (str/join "\n" (map (fn [[k v]] (pr-str [k v])) rows)) "\n]\n"))
+    ;; review 027, finding 3: a run of CI_DG_ONLY's files leaves the marker GROUP/subset, which a later --judge --record reads
+    (let [m (java.io.File. (str work "/" id "/subset"))]
+      (if-let [only (System/getenv "CI_DG_ONLY")] (spit m (str only "\n")) (.delete m)))
     (println (str id ": " (count rows) " files; actions "
                   (pr-str (into (sorted-map) (frequencies (map (comp :action val) rows))))
                   "; with dg-error " (count (filter #(seq (get-in (val %) [:expect :error])) rows))))))
@@ -467,6 +470,11 @@
   [work classes-file & args]
   (let [record (when (= (first args) "--record") (second args))
         ids (if record (drop 2 args) args)
+        ;; review 027, finding 3: a subset's files (CI_DG_ONLY now, or the marker its run left) never rewrite the record
+        subset (or (System/getenv "CI_DG_ONLY") (some #(.exists (java.io.File. (str work "/" % "/subset"))) ids))
+        _ (when (and record subset)
+            (binding [*out* *err*] (println "ci dg judge: --record records whole groups: the run judged was a subset (CI_DG_ONLY)"))
+            (System/exit 2))
         classes (read-string (slurp classes-file))
         ;; the committed record, read before --record rewrites it
         committed (let [f (java.io.File. "test/c/check-dg-linux-amd64.edn")] (if (.exists f) (read-string (slurp f)) []))
@@ -561,11 +569,11 @@
           missing (when listed (remove #(contains? now %) listed))
           failing (concat (filter #(and (= :fail (second %)) (or essential (nil? (nth % 3 nil)))) rows)
                           regress
-                          (when-not listed (map (fn [fid] [fid :fail "absent from the run"]) absent))
+                          (when-not subset (map (fn [fid] [fid :fail "absent from the run"]) absent))
                           (map (fn [fid] [fid :fail "listed, not found in its group"]) missing))]
       (when listed
         (println (count (filter #(= :pass (second (get now %))) listed)) "of" (count listed) "listed files pass"))
-      (when (and (seq absent) (not listed)) (println (count absent) "recorded files absent from the run" (pr-str (vec (take 10 absent)))))
+      (when (and (seq absent) (not subset)) (println (count absent) "recorded files absent from the run" (pr-str (vec (take 10 absent)))))
       (doseq [r (take 40 failing)] (println "FAIL" (first r) (nth r 2)))
       (spit (str work "/judge-rows.edn") (str "[\n" (str/join "\n" (map pr-str rows)) "\n]\n"))
       (System/exit (if (seq failing) 1 0)))))
