@@ -5,8 +5,8 @@
 ;;;; summary; this one prints a line per test, which bin/si r7rs reads as the per-test result:
 ;;;;   TEST N PASS|FAIL <expression>          (a failure continues with "  expected: X" and "  got: Y" lines)
 ;;;;   BEGIN name / END name PASSED FAILED   and at test-exit a SUMMARY line.
-;;;; Equality is equal?, with inexact numbers compared to a relative 1e-6 (Chibi uses an approximate comparison
-;;;; for inexact numbers too; SC104).
+;;;; Equality is Chibi's test-equal?: equal?, or an inexact real expected compared to a relative 1e-6 (Chibi's
+;;;; tolerance is 1e-5; SC104), a non-real expected part by part.
 (library (chibi test)
   (export test test-begin test-end test-assert test-error test-values test-exit)
   (import (rnrs) (rnrs mutable-strings))
@@ -16,16 +16,18 @@
   (define failed 0)
   (define stack '())
 
-  (define (approx? a b)
-    (cond ((and (real? a) (real? b) (or (inexact? a) (inexact? b)))
-           (or (= a b) (and (not (= a a)) (not (= b b)))
-               (<= (abs (- a b)) (* 1e-6 (max 1 (abs a) (abs b))))))
-          ((and (number? a) (number? b) (or (inexact? a) (inexact? b)) (not (and (real? a) (real? b))))
-           (and (approx? (real-part a) (real-part b)) (approx? (imag-part a) (imag-part b))))
-          ((and (pair? a) (pair? b)) (and (approx? (car a) (car b)) (approx? (cdr a) (cdr b))))
-          ((and (vector? a) (vector? b) (= (vector-length a) (vector-length b)))
-           (let loop ((i 0)) (or (= i (vector-length a)) (and (approx? (vector-ref a i) (vector-ref b i)) (loop (+ i 1))))))
-          (else (equal? a b))))
+  ;; Chibi's test-equal? (scheme/vendor/chibi/chibi/test.scm): equal?, or an inexact real expected and a real got within
+  ;; the tolerance, or a non-real expected compared part by part; inside lists and vectors equal? alone (review 009,
+  ;; finding 4: either side inexact took the tolerance, so an exact expectation passed with an inexact result)
+  (define (approx? expected got)
+    (cond ((equal? expected got) #t)
+          ((real? expected)
+           (and (inexact? expected) (real? got)
+                (or (and (not (= expected expected)) (not (= got got)))
+                    (<= (abs (- expected got)) (* 1e-6 (max 1 (abs expected) (abs got)))))))
+          ((and (number? expected) (number? got))
+           (and (approx? (real-part expected) (real-part got)) (approx? (imag-part expected) (imag-part got))))
+          (else #f)))
 
   (define (short-text x)
     (call-with-values open-string-output-port
