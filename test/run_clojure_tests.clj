@@ -57,7 +57,7 @@
 ;; write files through FileInputStream and FileOutputStream only.
 
 (System/setProperty "java.awt.headless" "true")
-(require '[clojure.test :as t])
+(require '[clojure.test :as t] '[clojure.string :as str])
 
 (defn- read-edn [f]
   (let [f (java.io.File. ^String f)]
@@ -241,13 +241,22 @@
       (println (format "  %-70s AOT %-10s eval %s" (str (if (= :generative n) "spec " "") (or t n)) (name x) (name y))))
     (shutdown-agents)))
 
+(defn- load-error-text
+  "A load error's message without what varies from run to run: generated names' numbers, identity
+  hashes."
+  [s]
+  (-> (str s) (str/replace #"__\d+" "__N") (str/replace #"\beval\d+" "evalN") (str/replace #"@[0-9a-f]{4,}\b" "@N")))
+
 (defn- regressions
-  "Why the actual result r of a namespace is worse than the expected one e, or nil."
+  "Why the actual result r of a namespace is worse than the expected one e, or nil. A recorded
+  load error passes only as itself (its message, load-error-text)."
   [e r]
   (let [e (or e {:test 0 :pass 0 :fail 0 :error 0})]
     (cond
       (nil? r) ["no result (crashed or timed out)"]
       (and (:load-error r) (not (:load-error e))) [(str "load error: " (:load-error r))]
+      (and (:load-error r) (not= (load-error-text (:load-error r)) (load-error-text (:load-error e))))
+      [(str "load error: " (:load-error r) ", expected " (:load-error e))]
       :else
       (concat
         (when (not= (:test r) (:test e)) [(str "ran " (:test r) " tests, expected " (:test e))])
