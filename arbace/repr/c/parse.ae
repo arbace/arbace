@@ -677,8 +677,16 @@ void __atomic_store();
 ;; ---------------------------------------------------------------------------------------------
 ;; 6.9 External definitions
 
+(defn- drop-attrs-before! 
+  "CS160 (*recover*): C23 attributes before `_Static_assert` (not allowed there): gcc reports them and goes on without."
+  [^Parser p]
+  (when (and *recover* (std-attr-at? p 0) (= (pkc p (std-attrs-end p)) :STATICASSERT))
+    (eh-soft! p (str (tpos (tok0 p)) ": unexpected '[', expected declaration specifiers"))
+    (attribute-specifier-list-opt p)))
+
 (defn- external-declaration [^Parser p]
   (loop []
+    (drop-attrs-before! p)
     (let [c (rn p)]
       (cond
         (= c :eof) nil
@@ -727,7 +735,10 @@ void __atomic_store();
   (loop [r nil prev nil]
     (if (in? (rn p) \{ :eof)
       r
-      (let [dl (node "DeclarationList" :Declaration (declaration p nil nil false))]
+      (let [_ (when (and *recover* (std-attr-at? p 0)) ; CS160: gcc refuses attributes in a declaration list and goes on
+                (eh-soft! p (str (tpos (tok0 p)) ": unexpected '[', expected declaration specifiers"))
+                (attribute-specifier-list-opt p))
+            dl (node "DeclarationList" :Declaration (declaration p nil nil false))]
         (link! prev dl :DeclarationList)
         (recur (or r dl) dl)))))
 
@@ -768,7 +779,11 @@ void __atomic_store();
                 (when (and (= c \}) (pos? i)) (s! es :LabelAttributeSpecifierList (attribute-specifier-list-opt p))) ; CS144: GNU attributes before `}` stand after the label
                 es))
         :else (do (slot! p LDOK true) (statement p false))))
-    (statement p false)))
+    (do
+      ;; CS160: an attribute declaration after a label where a statement is expected
+      (when (and *recover* (std-attr-at? p 0) (= (pkc p (std-attrs-end p)) \;))
+        (eh-soft! p (str (tpos (tok0 p)) ": unexpected '[', expected statement")))
+      (statement p false))))
 
 (defn- inject-func-tokens [^Parser p ^PTok lbrace ^String nm]
   (let [kinds [:STATIC :CONST :CHAR :IDENTIFIER \[ \] \= :STRINGLITERAL \;]
@@ -844,6 +859,7 @@ void __atomic_store();
 
 (defn block-item [^Parser p]
   (loop []
+    (drop-attrs-before! p)
     (let [c (rn p true)]
       (cond
         (or (statement? c) (expression? c) (and (= c :TYPENAME) (= (pkc p 1) \:)))
@@ -1173,14 +1189,20 @@ void __atomic_store();
       \- (unary-op p :UnaryExpressionMinus ctn?)
       \~ (unary-op p :UnaryExpressionCpl ctn?)
       \! (unary-op p :UnaryExpressionNot ctn?)
-      :SIZEOF (if (and (= (pkc p 1) \() (storage-class-specifier? (pkct p 2)))
+      :SIZEOF (if (and *recover* (= (pkc p 1) \() (std-attr-at? p 2) (specifier-qualifier? (pkct p (std-attrs-end-from p 2)) true))
+                ;; CS160: gcc refuses attributes before a type name and reads the type
+                (let [sz (sh p) lp (sh p)
+                      _ (do (eh-soft! p (str (tpos (tok0 p)) ": unexpected '[', expected type name")) (attribute-specifier-list-opt p))
+                      tn (type-name p) rp (must p \))]
+                  (node "UnaryExpression" :Case :UnaryExpressionSizeofType :Token sz :Token2 lp :TypeName tn :Token3 rp))
+              (if (and (= (pkc p 1) \() (storage-class-specifier? (pkct p 2)))
                 (node "UnaryExpression" :Case :UnaryExpressionSizeofExpr :Token (sh p) :UnaryExpression (compound-literal-storage p ctn?))
                 (if (and (= (pkc p 1) \() (specifier-qualifier? (pkct p 2) true))
                 (let [sz (sh p) lp (sh p) tn (type-name p) rp (must p \))]
                   (if (= (rn p) \{)
                     (node "UnaryExpression" :Case :UnaryExpressionSizeofExpr :Token sz :UnaryExpression (unary-expression p lp tn rp ctn?))
                     (node "UnaryExpression" :Case :UnaryExpressionSizeofType :Token sz :Token2 lp :TypeName tn :Token3 rp)))
-                (node "UnaryExpression" :Case :UnaryExpressionSizeofExpr :Token (sh p) :UnaryExpression (unary-expression p nil nil nil ctn?))))
+                (node "UnaryExpression" :Case :UnaryExpressionSizeofExpr :Token (sh p) :UnaryExpression (unary-expression p nil nil nil ctn?)))))
       (\( :CHARCONST :FLOATCONST :GENERIC :IDENTIFIER :INTCONST :LONGCHARCONST :LONGSTRINGLITERAL :STRINGLITERAL)
       (postfix-expression p nil nil nil ctn?)
       :INC (node "UnaryExpression" :Case :UnaryExpressionInc :Token (sh p) :UnaryExpression (unary-expression p nil nil nil ctn?))
@@ -1335,13 +1357,40 @@ void __atomic_store();
 
 (declare static-assert-declaration init-declarator-list-opt)
 
+(defn- empty-declaration-attrs!
+  "CS160 (*recover* :pedantic, the file's -pedantic-errors): a declaration without declarators whose specifiers begin with
+  C23 attributes is an empty declaration, and a qualified tag with attributes after its keyword an invalid use of attributes."
+  [^Parser p ds ^HashMap r]
+  (when (and (= *recover* :pedantic) ds (nil? (.get r :InitDeclaratorList)) (.get r :Token))
+    (let [specs (loop [n ds acc []] (if n (recur (.get ^HashMap n :DeclarationSpecifiers) (conj acc n)) acc))
+          std? (fn [asl] (loop [a asl] (when a (or (= \[ (ch (.get ^HashMap (.get ^HashMap a :AttributeSpecifier) :Token))) (recur (.get ^HashMap a :AttributeSpecifierList))))))
+          prefix (and (some #(= (.get ^HashMap % :Case) :DeclarationSpecifiersTypeSpec) specs)
+                      (some #(and (= (.get ^HashMap % :Case) :DeclarationSpecifiersAttr) (std? (.get ^HashMap % :AttributeSpecifierList))) specs))
+          qual (some #(= (.get ^HashMap % :Case) :DeclarationSpecifiersTypeQual) specs)
+          tagattrs (some (fn [n] (when-let [ts (.get ^HashMap n :TypeSpecifier)]
+                                   (case (.get ^HashMap ts :Case)
+                                     :TypeSpecifierStructOrUnion (.get ^HashMap (.get ^HashMap ts :StructOrUnionSpecifier) :AttributeSpecifierList)
+                                     :TypeSpecifierEnum (.get ^HashMap (.get ^HashMap ts :EnumSpecifier) :AttributeSpecifierList)
+                                     nil)))
+                         specs)
+          at (tpos (.get r :Token))]
+      (cond
+        prefix (eh-soft! p (str at ": empty declaration"))
+        (and qual tagattrs (std? tagattrs)) (eh-soft! p (str at ": invalid use of attributes in empty declaration"))))))
+
 (defn- declaration [^Parser p ds d declare]
   (case (rn p)
     :STATICASSERT (node "Declaration" :Case :DeclarationAssert :StaticAssertDeclaration (static-assert-declaration p))
-    :AUTOTYPE (let [nm (pk p 1 true)]
+    :AUTOTYPE (let [;; CS160 (*recover*): gcc takes empty C23 attributes after `__auto_type` and refuses the others
+                    kw (when (and *recover* (std-attr-at? p 1)) (sh p))
+                    _ (when kw
+                        (let [t (tok0 p) emp (and (= (pkc p 2) \]) (= (pkc p 3) \]))]
+                          (attribute-specifier-list-opt p)
+                          (when-not emp (eh-soft! p (str (tpos t) ": '__auto_type' followed by a nonempty attribute")))))
+                    nm (pk p (if kw 0 1) true)]
                 (if-not (= (ch nm) :IDENTIFIER)
                   (do (eh p (str (tpos nm) ": unexpected " (rname (ch nm)) ", expected identifier")) (sh p) (sh p) nil)
-                  (let [r (node "Declaration" :Case :DeclarationAuto :Token (sh p) :Declarator (declarator p nil nil false))]
+                  (let [r (node "Declaration" :Case :DeclarationAuto :Token (or kw (sh p)) :Declarator (declarator p nil nil false))]
                     (s! r :Token2 (must p \=))
                     (s! r :Initializer (initializer p nil))
                     (s! r :Token3 (must p \;))
@@ -1350,8 +1399,10 @@ void __atomic_store();
                     r)))
     (let [[ds ok] (if ds [ds true] (declaration-specifiers p))]
       (when ok
-        (node "Declaration" :Case :DeclarationDecl :DeclarationSpecifiers ds :InitDeclaratorList (init-declarator-list-opt p ds d declare)
-              :AttributeSpecifierList (attribute-specifier-list-opt p) :Token (must p \;))))))
+        (let [r (node "Declaration" :Case :DeclarationDecl :DeclarationSpecifiers ds :InitDeclaratorList (init-declarator-list-opt p ds d declare)
+                      :AttributeSpecifierList (attribute-specifier-list-opt p) :Token (must p \;))]
+          (empty-declaration-attrs! p ds r)
+          r)))))
 
 (defn- static-assert-declaration [^Parser p] ; go-whim: C23 6.7.12, the message is optional
   (let [r (node "StaticAssertDeclaration" :Token (must p :STATICASSERT) :Token2 (must p \() :ConstantExpression (constant-expression p))]
@@ -1476,7 +1527,12 @@ void __atomic_store();
     (when (= (rn p) \()
       (s! r :Case :AttributeValueExpr)
       (s! r :Token2 (sh p))
-      (if (and (#{"" "gnu" "__gnu__"} (src (.get r :Prefix))) (not (balanced-garbage? p)))
+      (if (and (#{"" "gnu" "__gnu__"} (src (.get r :Prefix))) (not (balanced-garbage? p))
+               ;; CS160 (*recover*): an unprefixed attribute that is no standard one is ignored, its arguments balanced tokens
+               (not (and *recover* (= "" (src (.get r :Prefix)))
+                         (not (#{"deprecated" "fallthrough" "maybe_unused" "nodiscard" "noreturn" "_Noreturn" "unsequenced" "reproducible"
+                                 "__deprecated__" "__fallthrough__" "__maybe_unused__" "__nodiscard__" "__noreturn__" "__unsequenced__" "__reproducible__"}
+                                (src (.get r :Token)))))))
         (s! r :ArgumentExpressionList (argument-expression-list-opt p false))
         (s! r :BalancedTokenSequence (balanced-token-sequence-opt p)))
       (s! r :Token3 (must p \))))
@@ -1700,7 +1756,12 @@ void __atomic_store();
                        r))]
            (recur r))
       \[ (if (std-attr-at? p 0) ; go-whim: C23 attributes after the declarator, not an array
-           r
+           (if (and *recover* (= (.get ^HashMap r :Case) :DirectDeclaratorFuncIdent) (= (pkc p (std-attrs-end p)) \)))
+             ;; CS160: gcc refuses attributes after an identifier list inside parentheses and goes on
+             (do (eh-soft! p (str (tpos (tok0 p)) ": unexpected '[', expected ')'"))
+                 (attribute-specifier-list-opt p)
+                 (recur r))
+             r)
            (let [c (pkct p 1)]
              (cond
                (and (= c \*) (= (pkc p 2) \])) ; CS144: `[*]`
@@ -2041,6 +2102,9 @@ void __atomic_store();
     (.add ^ArrayList (.-toks p) 0 kw)
     (let [r (enum-specifier p)]
       (when r (s! r :AttributeSpecifierList attrs))
+      ;; CS160: as for a struct tag
+      (when (and *recover* r attrs (= (.get ^HashMap r :Case) :EnumSpecifierTag) (not= (rn p) \;))
+        (eh-soft! p (str (tpos (tok0 p)) ": unexpected " (rname (ch (tok0 p))) ", expected ';'")))
       r)))
 
 (defn- enum-specifier [^Parser p]
@@ -2142,7 +2206,11 @@ void __atomic_store();
                              (s! r :Token3 (must p \}))
                              (s! r :AttributeSpecifierList2 (attribute-specifier-list-opt p))
                              r)
-                      (do (s! r :Case :StructOrUnionSpecifierTag) r)))
+                      (do (s! r :Case :StructOrUnionSpecifierTag)
+                          ;; CS160: attributes after the keyword of a tag only where it is defined or the declaration is just `struct [[...]] s;`
+                          (when (and *recover* attrs (not= (rn p) \;))
+                            (eh-soft! p (str (tpos (tok0 p)) ": unexpected " (rname (ch (tok0 p))) ", expected ';'")))
+                          r)))
       (unexpected p "struct or union specifier"))))
 
 (declare struct-declaration)
