@@ -1378,6 +1378,20 @@ void __atomic_store();
         prefix (eh-soft! p (str at ": empty declaration"))
         (and qual tagattrs (std? tagattrs)) (eh-soft! p (str at ": invalid use of attributes in empty declaration"))))))
 
+(defn- bool-after-tag!
+  "CS170 (*recover*): `typedef enum { ... } bool;` (C23's `bool` is a keyword, the type of the declaration complete after the
+  braces, nothing to declare): gcc reports the keyword where it expects `;`, an identifier or `(`."
+  [^Parser p ds ^HashMap r]
+  (when (and *recover* ds (nil? (.get r :InitDeclaratorList)))
+    (loop [n ds def? false]
+      (when n
+        (let [ts (.get ^HashMap n :TypeSpecifier)
+              cs (when ts (.get ^HashMap ts :Case))
+              def? (or def? (and (= cs :TypeSpecifierEnum) (= (.get ^HashMap (.get ^HashMap ts :EnumSpecifier) :Case) :EnumSpecifierDef)))]
+          (if (and def? (= cs :TypeSpecifierBool))
+            (eh-soft! p (str (tpos (.get ^HashMap ts :Token)) ": expected ';', identifier or '(' before '" (src (.get ^HashMap ts :Token)) "'"))
+            (recur (.get ^HashMap n :DeclarationSpecifiers) def?)))))))
+
 (defn- declaration [^Parser p ds d declare]
   (case (rn p)
     :STATICASSERT (node "Declaration" :Case :DeclarationAssert :StaticAssertDeclaration (static-assert-declaration p))
@@ -1402,6 +1416,7 @@ void __atomic_store();
         (let [r (node "Declaration" :Case :DeclarationDecl :DeclarationSpecifiers ds :InitDeclaratorList (init-declarator-list-opt p ds d declare)
                       :AttributeSpecifierList (attribute-specifier-list-opt p) :Token (must p \;))]
           (empty-declaration-attrs! p ds r)
+          (bool-after-tag! p ds r)
           r)))))
 
 (defn- static-assert-declaration [^Parser p] ; go-whim: C23 6.7.12, the message is optional
@@ -2153,13 +2168,23 @@ void __atomic_store();
 
 (declare enumerator)
 
+(defn- keyword-enumerator!
+  "CS170 (*recover*): `true` and `false` are keywords of C23 (here macros of the prelude, so the lookahead i is the integer
+  constant 1 or 0 made of them) and gcc refuses them as enumeration constants: reported, the token read as the identifier."
+  [^Parser p ^long i]
+  (when *recover*
+    (let [^PTok t (pk p i) m (.-m t) nm (when (and (= (.-ch t) :INTCONST) (map? m)) (some-> ^Tok (:name m) .-src))]
+      (when (#{"true" "false"} nm)
+        (eh-soft! p (str (tpos t) ": cannot use keyword '" nm "' as enumeration constant"))
+        (.set ^ArrayList (.-toks p) (int i) (PTok. :IDENTIFIER nm (.-sep t) (.-pf t) (.-po t) (.-m t) (.-seq t)))))))
+
 (defn- enumerator-list [^Parser p]
   (let [r (node "EnumeratorList" :Enumerator (enumerator p))]
     (loop [prev r]
       (case (rn p)
         :eof (unexpected-eof p)
         \} r
-        \, (if (= (pkct p 1) :IDENTIFIER)
+        \, (if (do (keyword-enumerator! p 1) (= (pkct p 1) :IDENTIFIER))
              (let [e (node "EnumeratorList" :Token (sh p) :Enumerator (enumerator p))]
                (link! prev e :EnumeratorList)
                (recur e))
@@ -2167,7 +2192,8 @@ void __atomic_store();
         (do (unexpected p "enumerator") (recur prev))))))
 
 (defn- enumerator [^Parser p]
-  (let [r (case (pkc p 1)
+  (let [_ (keyword-enumerator! p 0)
+        r (case (pkc p 1)
             (\} \,) (node "Enumerator" :Case :EnumeratorIdent :Token (must p :IDENTIFIER))
             \= (node "Enumerator" :Case :EnumeratorExpr :Token (must p :IDENTIFIER) :Token2 (sh p) :ConstantExpression (constant-expression p))
             (:ATTRIBUTE \[) (let [t (must p :IDENTIFIER) ; go-whim: '[', C23's [[...]]
