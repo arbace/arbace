@@ -2763,3 +2763,139 @@ run's compiled and interpreted runs, and a stray `diff <(true)` in the final res
 worktree); one probe run with `TMPDIR` unset wrote its error report to `/tmp` (removed); a `--resume` of four programs
 took the earlier shards' logs for shards (`shard.[0-9]*`), whose rows were repaired by hand and then replaced by the
 recorded run (the glob is now `shard.[0-9][0-9][0-9][0-9]`).
+
+## As built: C7 (write-ahead) (2026-10-31)
+
+C7, the C23 corpus and its error tests, on the branch `c23-c7` from `c23-c6` (`bdf99d5e`), in the light tier (under 2 GB,
+at most 4 threads, no gate, no build of Arbace's executables), so **write-ahead** as C5 and C6 were: the new namespace
+`arbace.c.dg` runs evaluated from the checkout on stage 0 (under `arbace/c/`, excluded from the embedded tree by CS100 (b));
+the run level reuses C5's and C6's checks (tools/cirun, cf2g's shards) unchanged but for the corpora they take. The corpus
+is CS33's seven gcc groups of `test/c/corpora.edn` (`:gcc-c23`, `:gcc-cpp-c23`, `:gcc-c23-sub`, `:gcc-gnu23`, `:gcc-embed`,
+`:gcc-va-opt`, `:gcc-bitint`: 627 files of gcc 15.2.0's testsuite, from the pinned tarball extracted by `bin/repr-c
+gcc-tests` into `.tmp/repr-c/`); gcc 15.2's `gcc.dg/c2x-*` has no file in 15.2 (renamed `c23-*`, as the manifest says). No Decided
+section asks for clang's `test/C/C23` here: **not done** (CS136).
+
+### C7.1 What was built
+
+| part | where | what |
+|---|---|---|
+| the directives | `arbace/c/dg.ae` (`arbace.c.dg`) | DejaGnu's directives read as Tcl lists (braced, quoted and bare words, backslashes): `dg-do` (the first whose selector applies; default compile), `dg-options` (through `host/dg-options`), `dg-error`/`dg-warning`/`dg-message`/`dg-note`/`dg-bogus` with their line (`.`, `.+N`, `.-N`, an absolute number, 0 for any) and selector (a C++ target does not apply; `xfail` kept apart), `dg-excess-errors`, `dg-additional-sources`, `dg-require-effective-target`, `dg-skip-if`. Per file: action, options, expected lines by kind, the error messages by line |
+| gcc's side | `bin/lib/ci/dg` | gcc 15.2 on every file in its own directory with its dg-options (`-S`, `-E` for `dg-do preprocess`, `-fdiagnostics-plain-output`, output capped at 20 KB), its diagnostics by line and kind parsed; **they validate the directives**: the expected error lines are gcc's own error lines |
+| the read level's judge | `arbace.c.dg` `read-file`, `verdict` | each file read and checked as `bin/ci diagnose` does (a `dg-do preprocess` file by the preprocessor alone, `pp/preprocess`), the errors by line of the main file (errors of included files counted apart); pass when every expected error line has an error of the checker's and the checker gives none on a line that expects none (an `xfail` line allowed, `dg-excess-errors` and line 0 meaning any); else `missed` (an expected line without an error), `extra` (an error where none is expected), `both`, or `refused`, `timeout`, `crash` (no judgment); the reason holds the lines and gcc's expected message |
+| the classes, results | `test/c/divergences-dg.edn`, `test/c/check-dg-linux-amd64.edn` | six classes (below); `[ID RESULT REASON]` for each of the 627 files |
+| the run groups | `test/c/corpora.edn` `:gcc-*-run` (`:like` the group, `:dg-do :run`), `arbace.repr.c.ppcheck` (`:like`, `run-files`) | the group's files whose action is `dg-do run` (a selector for C++ apart) and that have no `dg-additional-sources` (one file a program): 176 programs |
+| the run levels | `bin/ci check`, `bin/ci check --aot` | `gcc-*` ids now extract the testsuite (`check`, `check-aot`); gcc's runs recorded in `test/c/ref-gcc15.edn` (`bin/ci record-ref --only`); `test/c/check-linux-amd64.edn`, `check-aot-linux-amd64.edn` recorded; classes of `divergences.edn` extended (below); 17 programs in `check-known.edn` |
+| the command | `bin/ci dg [--corpus C,...] [--record] [--judge]`, `make ci-dg` | lists, directives, gcc, read, judge; about 8 minutes for the seven groups at 3 threads |
+
+### C7.2 The numbers
+
+**The directives against gcc**: of 627 files, 606 have directives whose expected errors are exactly gcc 15.2's errors on the
+file; 21 differ, each for a selector or an option the judge does not evaluate (the DFP files' `no-dfp` targets, the
+`#embed` files' `--embed-dir`/`-I` through `dg-additional-options` and `dg-prune-output`, an `xfail`). The judge uses the
+directives; the 21 are named in the results when they do not pass (`[gcc: ...]` in the reason).
+
+**The read level** (checker's errors by line and kind against the `dg-error` lines), 627 files:
+
+| group | files | pass | decl-diag | attr-diag | pedantic-diag | pp-diag | parse-gap | read-refused |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| gcc-c23 | 270 | 145 | 60 | 24 | 11 | 0 | 25 | 5 |
+| gcc-cpp-c23 | 16 | 7 | 0 | 0 | 1 | 6 | 2 | 0 |
+| gcc-c23-sub | 30 | 21 | 1 | 0 | 0 | 0 | 6 | 2 |
+| gcc-gnu23 | 51 | 30 | 15 | 1 | 1 | 0 | 4 | 0 |
+| gcc-embed | 47 | 36 | 2 | 0 | 2 | 5 | 2 | 0 |
+| gcc-va-opt | 12 | 9 | 0 | 0 | 1 | 2 | 0 | 0 |
+| gcc-bitint | 201 | 189 | 6 | 2 | 1 | 0 | 2 | 1 |
+| **total** | **627** | **437** | **84** | **27** | **17** | **13** | **41** | **8** |
+
+**None unclassed**: every non-pass is in a class. By the file's expectation: of the 471 files that expect no error, 428 pass (no false
+error) and 43 fail (parser gaps and refusals on valid or off-line code); of the 156 files that expect errors, **9 pass and 147
+fail**: the checker diagnoses, for the C23 corpus, almost none of what gcc rejects beyond syntax (C4's CS92 (a) and CS94 (a), which
+left the rest to this judge). The classes: `decl-diag` (conflicting and redefined tags and types, incompatible pointers,
+`constexpr`, enumeration and VLA rules, static assertion), `attr-diag` (standard attributes with arguments, ignored or misplaced:
+the checker keeps attributes as data), `pedantic-diag` (the pedwarns of `-pedantic-errors`, which the checker has no mode for),
+`pp-diag` (`#embed` parameters repeated or malformed, invalid or non-NFC universal character names, `__VA_OPT__` misuse),
+`parse-gap` (C23 the parser rejects: `va_start` and `...` without a named parameter, storage classes in compound literals, `_Generic`
+with a type argument, named loops, `decimal64x`, `#embed` in an initializer) and `read-refused` (a declarator the converter reads
+as not a function's, `d32` suffixes by design, an integer suffix beyond 128 bits, one read over the 120 s budget, one crash on a
+malformed binary constant).
+
+**The run level** (`dg-do run`, 176 programs against gcc 15.2's runs; interpreted and compiled by cf2g, 2 jobs of `go build`):
+
+| group | programs | pass | other classes |
+|---|---:|---:|---|
+| gcc-c23-run | 47 | 27 | parse-gap 6, vla 5, complex-int 3, long-double 2, fenv 2, threads 1, gcc-builtin 1 |
+| gcc-cpp-c23-run | 1 | 1 | |
+| gcc-c23-sub-run | 6 | 0 | parse-gap 3, by-design 2, gcc-builtin 1 |
+| gcc-gnu23-run | 13 | 8 | vla 3, gcc-builtin 1, by-design 1 |
+| gcc-embed-run | 17 | 11 | by-design 4, checker 1, parse-gap 1 |
+| gcc-va-opt-run | 2 | 2 | |
+| gcc-bitint-run | 90 | 43 | wide 22, gcc-builtin 17, by-design 7, abi 1 |
+| **total** | **176** | **92** | **84, none failing** |
+
+Compiled against interpreted: 92 pass both, 84 neither, **0 compiled only, 0 interpreted only**; 122 runs with the same status and
+standard output, none differing. The classes added to `divergences.edn`: `fenv` (new: FE_INVALID of a signaling NaN, SPEC §12.5), `parse-gap`
+(new: `read-error` rows), and matches added to `by-design` (decimal floating suffixes), `gcc-builtin` (`__builtin_*` and `__atomic_*`
+functions called but undefined: `popcountg`, `stdc_*`, `*_overflow_p`, `clear_padding`, `__atomic_is_lock_free`) and `threads`
+(`__clone`). The 22 `wide` programs are `_BitInt` wider than 128 bits: ci's back end has no node for their conversions and loads
+(`w2w`, `i2w`, `wld`, `wbin`: a panic, status 2).
+
+### C7.3 Proposals (CS130-CS136)
+
+Each with options, the recommended one first; none decided.
+
+- **CS130 `fenv`: floating-point exception flags.** Built as a class (2 programs).
+  - Options: (a) a class by design until a program outside gcc's own tests needs them; (b) flags kept by ci's arithmetic (FE_INVALID,
+    FE_DIVBYZERO, ...) and `fetestexcept`/`feclearexcept` over them, cf2g's float operations through the same helpers; (c) a class `deferred`.
+  - *Recommended: (a)*: two tests in 176 and the arithmetic would pay for it everywhere.
+- **CS131 The parse gaps.** 41 files at the read level and 10 programs of the run level (the same constructs).
+  - Options: (a) a slice of repr/c before C8 fixing the listed constructs (`va_start (ap)` and `...` as the first parameter, storage-class
+    compound literals, `_Generic` over a type, named loops, labels before declarations, `decimal64x`), the known file shrinking; (b) leave them
+    recorded until the heavy window; (c) split: those that also make a C23 program fail to run first.
+  - *Recommended: (c)*: 10 programs fail to run for them, the rest are error tests whose first lines the parser already misses.
+- **CS132 A pedantic mode of the checker.** 17 files (and part of `decl-diag`) need `-pedantic-errors`.
+  - Options: (a) the checker takes the file's `-pedantic`/`-pedantic-errors` (as `:unsigned-char` is taken from `-funsigned-char`) and
+    diagnoses the C23 pedwarns of the corpus (imaginary constants, `0o` prefixes, digit separators in older standards, `__VA_OPT__` before C2y);
+    (b) leave `-pedantic-errors` to the checked mode (C8's, CS11); (c) never.
+  - *Recommended: (a)* restricted to what the c23 files test, since both the options and the diagnostics are on the files' lines.
+- **CS133 Widening the checker's diagnostics.** 84 `decl-diag` and 27 `attr-diag` files; 147 of 156 error tests fail.
+  - Options: (a) by family, in the order of the counts in the results (tag compatibility and redefinition, 24 files; `constexpr` and
+    enumeration ranges, 16; attribute arguments, 24; incompatible pointers and conversions, 10), each family a commit with the judge as its
+    check; (b) leave as recorded; (c) only the families a run program needs.
+  - *Recommended: (a)* in C7's follow-up, in the light tier: the judge is cheap (about 4 minutes for the groups' reads) and exact by line.
+- **CS134 The 21 files whose directives gcc does not meet.** Selectors (`dfp`, `bitint`, `int128` targets), `dg-additional-options` with
+  `${srcdir}` and `--embed-dir`, `dg-prune-output`.
+  - Options: (a) evaluate the selectors the reference host settles (its target triple and effective targets as a small table recorded from
+    `gcc -dumpmachine` and probes) and the options as DejaGnu composes them; (b) as built: the directives judged, gcc's disagreement noted in the
+    result; (c) the judge takes gcc's diagnostics as the expectation where the two differ.
+  - *Recommended: (b)* now, (a) if the 21 matter once CS133 starts: they are 3% of the corpus.
+- **CS135 The essential subset.** Not made (C8's, with the gate step).
+  - Options: (a) `test/c/essential-dg.txt` with the files that pass at each level plus one of each class, `bin/ci dg --essential` a gate step
+    of seconds (the read of about 60 files) and the run groups' passing programs in `essential.txt`/`essential-aot.txt`; (b) the whole groups
+    in the gate (8 minutes of reading).
+  - *Recommended: (a)*.
+- **CS136 clang's `test/C/C23`.** Not fetched: the survey's pin has no revision for it.
+  - Options: (a) after CS133, pin an LLVM release tarball's `clang/test/C/C23` and `clang/test/Sema` (Apache-2.0 WITH LLVM-exception; `-verify`
+    directives `expected-error {{...}}` by line, a second judge on the same verdict); (b) not at all, gcc's corpus is the reference (CS14 (a)).
+  - *Recommended: (b)* until the gcc groups' error tests mostly pass, then (a).
+
+### C7.4 What is left (the heavy list)
+
+Nothing of C7 needed more than the light tier. What C7 adds to C5.7's and C6.7's lists: (1) `bin/ci dg` and the seven run groups as steps of the
+gate (CS135) once the executable has ci and cf2g; (2) the 22 `_BitInt` programs over 128 bits need ci's wide nodes (`w2w`, `i2w`, `wld`, `wbin`),
+a change to `go/arbace/ci` and so a shipped file built only by the next executable; (3) the run groups with `dg-additional-sources` (5 files) as
+multi-file programs once the corpora take them; (4) the `torture` groups of gcc (`gcc.dg/torture`'s `dg-do run` outside the c23 files) are not in CS33.
+
+### C7.5 Checks and scratch
+
+Run: `bin/ci dg` over the seven groups (lists, directives, gcc, reads at 3 threads, the judge; recorded), `bin/ci record-ref --only` for the
+seven run groups, `bin/ci check --record` and `bin/ci check --aot --record` with `CI_AOT_NODES=1` over them, `make check-makefile`. Not run:
+`bin/gate`, the essential gate, anything of C5.7/C6.7, `bin/ci annotations` (unchanged), `bin/ci repl-session`. A first judge run
+had `dg-do preprocess` files read to the end as C (the parser's errors on the preprocessed text counted); the judge now stops at the
+preprocessor for them (the 11 + 10 + 15 + 6 + 2 files of the groups, 44 in all).
+
+Shipped files changed: none under `go/`, `overlay/`, `jdk/`. Not shipped (CS100 (b)): `arbace/c/dg.ae` (new), `arbace/repr/c/ppcheck.ae` (`:like`,
+`run-files`); `bin/ci`, `bin/lib/ci/{dg,check,check-aot}`, `test/c/` (`corpora.edn` seven `-run` entries, `divergences.edn`, `divergences-dg.edn`, `check-known.edn`,
+`ref-gcc15.edn`, `check-dg-linux-amd64.edn`, `check-linux-amd64.edn`, `check-aot-linux-amd64.edn`), the Makefile (`ci-dg`), this survey.
+
+The worktree's `.tmp/` (kept): `ci-dg/` (the groups' lists, `dg.edn`, `gcc.edn`, `read.edn`, `gcc/` outputs, `judge-rows.edn`), `ci-check/`, `ci-aot/` (the
+run groups' lists and runs), `c7/` (logs), `repr-c/gcc-15.2.0/` (the extracted testsuite, 220 MB), `ci-musl/` (musl extracted and read), `ci/` (cirun).
