@@ -1126,3 +1126,40 @@ The scratch: `.tmp/worktrees/nethttp-nh2/.tmp/nh2/` (`gotable-{linux,tamago}-{am
 ### Decided (NH22-NH26; the user, 2026-10-30)
 
 - NH22 (a), NH23 (a), NH24 (a), NH25 (a), NH26 (c), as recommended.
+
+## As built: review 010's fixes (2026-10-31)
+
+Review 010 (a helper VM's, the nethttp-nh2 half) found five things in the judging. Four are fixed in `bin/goi`, each in
+its own commit; the fifth waits.
+
+- Finding 1, the six `cb_*` programs judged by nothing: `nethttp_report` (the corpus level and `--arbace`) now lists
+  the rows whose program has no entry in the record ("new, unrecorded: N, names") and fails on them unless
+  `--record`. A regression (a recorded pass that does not pass) is still reported, and both can show at once. NH25 (a)
+  is unchanged: the callbacks are recorded at NH3 by `bin/goi check --corpus nethttp --record`, which writes every row
+  whatever it is; from then on a `cb_*` that was a pass and fails is a regression.
+- Finding 3: `--corpus nethttp --arbace --only REGEX` matching nothing printed nothing and ended with status 1
+  (errexit on grep). The selection is guarded and says "no program matches REGEX"; the corpus level says the same for
+  an empty list.
+- Finding 4: the report takes the record's command, the survey section and the executable from its caller. The
+  arbace set's record now names `--corpus nethttp --arbace --record` and "As built: NH12 (a)", and both goi levels say
+  "net/http listed" (this branch lists it). The gc level's header is as before.
+- Finding 5: a record carries a line "recorded on: ..." (the gate's executable key when the executable is under
+  `gate-exe/`, else its path, and ARBACE_PATH when set). The arbace set's current record got a hand-written header
+  saying it was recorded on the gate's executable ee3f4cf75b39a30b8f35 with the checkout's `arbace/go`, without
+  re-recording.
+- Finding 2 (a run's non-passes classified, not only the committed record) is left: it belongs with a `bin/goi` change
+  after the tag on main (it would touch `goi.divergences` and the verb's flow for every corpus).
+
+How tested: `bash -n bin/goi`, and the report functions extracted and run on synthetic results (an unrecorded row
+fails, `--record` writes it with the new header, the next run passes, a recorded pass turned fail is a regression,
+the no-match guard on a pattern that matches and one that does not). No executable with net/http listed was built,
+so `bin/goi check --corpus nethttp` itself did not run.
+
+What the next build's run must check:
+- `bin/goi check --corpus nethttp` before `--record` must print "new, unrecorded: 6, cb_..." and fail; after `--record`
+  (heavy list item 4) the six are in the record, and the rewritten headers say listed and name the executable. Read
+  the six rows' results before accepting the record: a crash recorded is a crash accepted.
+- The re-recorded arbace set's header replaces the hand-written one.
+- `--only` with no match prints the message at both levels.
+
+Proposals (NH30): none.
