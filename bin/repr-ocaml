@@ -19,6 +19,8 @@
 #   bin/repr-ocaml spec-check     doc/ocaml/SPEC.md: every forms block reads with Arbace's reader; every entry
 #                                 with a source equals ocdump's output for it; every Parsetree constructor of
 #                                 5.5.0's parsetree.mli is in the spec's checklist
+#   floors: the levels that skip what they cannot do (the .cmi level's files compiled alone, the dumps', the spec's entries) are
+#           compared with test/ocaml/floors.tsv and fail on a drop; --record (roundtrip, types|lambda|dumps, spec-check) rewrites it
 #   bin/repr-ocaml embed-check    the sources a shipped build embeds (arbace/j2g/embed.ae) are keyed (bin/lib/version.bash)
 #                                 and none is repr/ocaml's (test/ocaml/embed_check.ae)
 #   bin/repr-ocaml read [-o DIR] FILE...   FILE.ml/.mli to OCaml forms (mode :lines) under DIR (default
@@ -79,6 +81,22 @@ arbace_exe() {
 edn() {
   local exe; exe=$(arbace_exe)
   "$exe" -e "(print (let [v (get-in (read-string (slurp \"$CORPORA\")) [$*])] (if (string? v) v (pr-str v))))"
+}
+
+# floor KIND CORPUS N: a level that skips what it cannot do (a file ocamlc does not compile alone, an extraction) must not skip more:
+# N is not below the count test/ocaml/floors.tsv records for KIND and CORPUS (review 008's finding 8); with RECORD set the count is
+# written (--record), a missing record is a failure
+FLOORS="$root/test/ocaml/floors.tsv"
+floor() {
+  local kind=$1 c=$2 n=$3 want
+  if [ -n "${RECORD:-}" ]; then
+    { grep -v -P "^$kind\t$c\t" "$FLOORS" 2>/dev/null || true; printf '%s\t%s\t%s\n' "$kind" "$c" "$n"; } | LC_ALL=C sort > "$FLOORS.new"
+    mv "$FLOORS.new" "$FLOORS"; echo "  floor $kind $c: $n recorded"; return 0
+  fi
+  want=$(awk -F'\t' -v k="$kind" -v c="$c" '$1 == k && $2 == c { print $3 }' "$FLOORS" 2>/dev/null)
+  if [ -z "$want" ]; then echo "  FLOOR $kind $c: no count recorded in test/ocaml/floors.tsv (--record)"; return 1; fi
+  if [ "$n" -lt "$want" ]; then echo "  FLOOR $kind $c: $n, below the recorded $want"; return 1; fi
+  return 0
 }
 
 pin_version() { cat "$root/tools/ocdump/OCAML_VERSION"; }
@@ -231,6 +249,7 @@ cmd_samples() {
 }
 
 cmd_spec_check() {
+  [ "${1:-}" = --record ] && RECORD=1
   need_ocdump
   local exe d spec="$root/doc/ocaml/SPEC.md" bad=0
   exe=$(arbace_exe)
@@ -244,6 +263,7 @@ cmd_spec_check() {
     "$OCD" $flag --file "$id.ml" "$src" > "$d/$id.dump"
   done
   "$exe" "$root/test/ocaml/spec_check.ae" "$d" || bad=1
+  floor spec-entries all "$(ls "$d"/*.kind 2>/dev/null | wc -l)" || bad=1
   # coverage: every constructor of parsetree.mli (and asttypes.mli) is in the spec
   cmd_corpus_fetch >/dev/null
   local missing=0 c
@@ -420,6 +440,7 @@ rt_cmi() {
   local skip; skip=$(wc -l < "$w/cmi/pending")
   echo "  $name cmi: $n compiled alone ($pass passes), $same cmi equal, $diff differ, $skip not compiled alone by the original"
   local rc=0; [ $diff = 0 ] || rc=1
+  floor cmi-compiled "$name" "$n" || rc=1
   if [ -n "${CMI_LINES:-}" ]; then rt_cmi_lines "$name" "$base" "$all" || rc=1; fi
   return $rc
 }
@@ -442,6 +463,7 @@ rt_cmi_lines() {
     fi
   done < "$w/cmi/done"
   echo "  $name cmi of the :lines print (-no-keep-locs): $n files, $same equal"
+  floor cmi-lines "$name" "$n" || return 1
   [ $n = $same ]
 }
 
@@ -498,6 +520,7 @@ dumps_corpus() {
   n=$(wc -l < "$W/compilable")
   t1=$(now)
   echo "== $id: $(wc -l < "$list") files, $n compile alone ($pass passes, $(awk "BEGIN{printf \"%.0f\", $t1 - $t0}") s)"
+  floor dumps-compilable "$id" "$n" || DUMPS_BAD=1
   for m in $modes; do
     local lst="$W/compilable"
     [ "$m" = lambda ] && { grep -v '\.mli$' "$W/compilable" > "$W/compilable.ml" || true; lst="$W/compilable.ml"; }
@@ -521,6 +544,7 @@ cmd_dumps() {
   while [ $# -gt 0 ]; do
     case $1 in
       --jobs) shift; REPR_OCAML_JOBS=$1 ;;
+      --record) RECORD=1 ;;
       --loc) DUMP_FLAGS="${DUMP_FLAGS:-} --loc"; export DUMP_FLAGS ;;
       --simplify) DUMP_FLAGS="${DUMP_FLAGS:-} --simplify"; export DUMP_FLAGS ;;
       *) ids+=("$1") ;;
@@ -602,7 +626,7 @@ case "${1:-}" in
       *) sed -n '2,40p' "$0"; exit 2 ;;
     esac ;;
   samples) cmd_samples ;;
-  spec-check) cmd_spec_check ;;
+  spec-check) shift; cmd_spec_check "$@" ;;
   embed-check) cmd_embed_check ;;
   *) sed -n '2,40p' "$0"; exit 2 ;;
 esac

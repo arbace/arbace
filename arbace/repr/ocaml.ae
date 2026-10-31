@@ -176,12 +176,18 @@
       (when (get opts "--report")
         (spit-mk (get opts "--report")
                  (pr-str {:files n :equal @ok :rejected @rejects :differ @diffs :failures @fails :unstable @unstable})))
-      (when (get opts "--record")
-        (spit-mk known-file (str ";; recorded by `bin/repr-ocaml roundtrip --record`: the files the helper rejects (class, kind, message) and the differences\n"
-                                 (str "{" (str/join "\n " (map (fn [[k v]] (str (pr-str k) " " (pr-str v))) (into (sorted-map) (merge (apply dissoc known-all names) @rejects @diffs)))) "}") "\n")))
-      (System/exit (if (or (get opts "--record")
+      ;; a record accepts the helper's rejections and the trees' differences (data about the corpus), not the printer's own failures:
+      ;; a file not printed or printed to text the helper rejects, or a print that is not stable (review 008's finding 8)
+      (let [print-failures (filter (fn [[_ v]] (#{:not-printed :printed-rejected} (:class v))) @diffs)]
+        (when (get opts "--record")
+          (doseq [[r v] print-failures] (println "NOT RECORDED (the printer's failure)" r (pr-str (:class v))))
+          (when (and (empty? print-failures) (zero? @unstable))
+            (spit-mk known-file (str ";; recorded by `bin/repr-ocaml roundtrip --record`: the files the helper rejects (class, kind, message) and the differences\n"
+                                     (str "{" (str/join "\n " (map (fn [[k v]] (str (pr-str k) " " (pr-str v))) (into (sorted-map) (merge (apply dissoc known-all names) @rejects @diffs)))) "}") "\n"))))
+        (System/exit (if (if (get opts "--record")
+                           (and (empty? print-failures) (zero? @unstable))
                            (and (empty? @fails) (empty? unexpected-rej) (empty? unexpected-diff) (empty? gone) (zero? @unstable)))
-                     0 1)))))
+                       0 1))))))
 
 ;; ---- full ----
 
@@ -203,7 +209,9 @@
                 x (cv/convert-full ptext ltext)]
             (if (cv/error-form? x)
               (let [[_ kind msg] x]
-                (if (contains? rt-known r)
+                ;; counted under the round trip's rejection only when the round trip's record is itself a rejection of the parse: a file
+                ;; it lists as a :diff has a parse, so a rejection of its layout dump is this level's own (review 008's finding 8)
+                (if (#{:syntax-error :lexer-error :template :other-error :not-utf8} (:class (get rt-known r)))
                   (swap! rejects assoc r {:class :helper-rejected :kind kind})
                   (swap! rejects assoc r {:class (if (= kind :encoding) :not-utf8 (reject-class r kind)) :kind kind :message msg})))
               (let [text (cv/write-forms x)
@@ -249,7 +257,7 @@
           (let [res (lm/check-dump mode text)]
             (if-let [e (:error res)]
               (if (contains? known r)
-                (swap! st update :classed inc)
+                (do (swap! st update :classed inc) (swap! st update :errs (fnil conj #{}) r))
                 (do (swap! st update :err inc) (swap! bad conj (str r ": " e))))
               (do (swap! st update :ok inc)
                   (swap! st update :nodes + (reduce + (vals (:counts res))))
@@ -263,13 +271,18 @@
               (swap! st update :unstable inc)
               (swap! bad conj (str r ": differs in the second run")))))))
     (let [{:keys [ok err bytes nodes unstable classed counts]} @st
-          secs (some-> (get opts "--times") parse-double)]
+          secs (some-> (get opts "--times") parse-double)
+          ;; a listed file that is in this run and whose dump is no longer an error (review 008's finding 8)
+          present (set (map #(let [x (rel root %)] (subs x 0 (- (count x) (count suffix)))) files))
+          errs (:errs @st)
+          stale (for [r (keys known) :when (and (contains? present r) (not (contains? (or errs #{}) r)))] r)]
+      (doseq [r stale] (swap! bad conj (str r ": listed in dumps-known.edn, but its dump is no longer an error")))
       (doseq [b (take 30 @bad)] (println "FAIL" b))
       (println (str "dumps " mode ": " (count files) " files, " ok " read and shaped, " classed " classed errors, "
                     err " failures, " unstable " unstable; " bytes " bytes, " nodes " nodes"
                     (when (and secs (pos? secs)) (str "; " (format "%.1f" secs) " s, " (long (/ bytes secs)) " bytes/s"))))
       (println " heads:" (pr-str (into (sorted-map) (map (fn [[k v]] [(str k) v]) counts))))
-      (System/exit (if (and (zero? err) (zero? unstable)) 0 1)))))
+      (System/exit (if (and (zero? err) (zero? unstable) (empty? stale)) 0 1)))))
 
 (defn -main [& args]
   (let [[verb & more] args
