@@ -10,7 +10,7 @@
 ;;;; operations, integer-length, bignum? and ratnum?, boxes, append!, reverse!, list-copy, fluid-let,
 ;;;; psyntax's module and import (Chez's internal modules), real-time and cpu-time (si's clock), and make-parameter and
 ;;;; parameterize (SRFI 39's).
-;;;; Read in Chez's lexical mode (#!chezscheme: si's R7RS mode, which takes 1+ and #%name). Not provided: Chez's format directives beyond si's, define-record, define-ftype and the foreign interface,
+;;;; Read in Chez's lexical mode (#!chezscheme: si's R7RS mode, which takes 1+ and #%name). format is (si format) (SC122 (b)). Not provided: define-record, define-ftype and the foreign interface,
 ;;;; the compiler's parameters (optimize-level, enable-cp0, ...), threads.
 (library (chezscheme)
   (export
@@ -117,7 +117,8 @@
     exclusive-cond define-values)
   (import (rnrs) (rnrs eval) (rnrs mutable-pairs) (rnrs mutable-strings) (rnrs r5rs)
           (srfi :39 parameters)
-          (only (psyntax system $all) format gensym module import real-time cpu-time))
+          (only (psyntax system $all) gensym module import real-time cpu-time)
+          (si format))
 
   (define (cmp who ok?)
     (lambda (x . r)
@@ -218,8 +219,6 @@
                (unless (null? vs) ((car refs) (car vs)) (loop (cdr vs) (cdr refs))))
              (set! new old)))
          (dynamic-wind swap! (lambda () b1 b2 ...) swap!)))))
-  (define (printf fmt . args) (display (apply format fmt args)))
-  (define (fprintf port fmt . args) (display (apply format fmt args) port))
   (define pretty-print (case-lambda ((x) (write x) (newline)) ((x p) (write x p) (newline p))))
   (define (andmap f l . ls)
     (let loop ((ls (cons l ls)) (last #t))
