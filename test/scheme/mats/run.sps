@@ -154,11 +154,11 @@
 
 (define (run-one name clauses)
   (set! mats (+ mats 1))
-  (display "BEGIN ") (write name) (newline) (line)
+  (newline) (display "BEGIN ") (write name) (newline) (line)
   (cond
-    ((member name skip) (display "MAT ") (write name) (display " SKIP in the skip list") (newline))
+    ((member name skip) (newline) (display "MAT ") (write name) (display " SKIP in the skip list") (newline))
     ((and (pair? clauses) (pair? (car clauses)) (eq? (caar clauses) 'parameters))
-     (display "MAT ") (write name) (display " SKIP parameters") (newline))
+     (newline) (display "MAT ") (write name) (display " SKIP parameters") (newline))
     (else
      (let ((env2 (timed (lambda () (make-mat-env)))))
        (set-evaluator! (lambda (expr) (eval expr env2)))
@@ -166,14 +166,14 @@
        (let loop ((cs clauses) (k 1) (p 0) (f 0) (n 0) (fail #f) (notrun #f))
          (if (null? cs)
              (begin
-               (display "MAT ") (write name)
+               (newline) (display "MAT ") (write name)
                (cond ((> n 0) (display " NOTRUN ") (display (message-of notrun)))
                      (fail (display " FAIL ") (display (car fail)) (display " ") (display (cdr fail)))
                      (else (display " PASS ") (display p)))
                (newline)
                (when (> n 0)
                  (line)
-                 (display "CLAUSES ") (write name) (display " ") (display p) (display " ") (display f) (display " ")
+                 (newline) (display "CLAUSES ") (write name) (display " ") (display p) (display " ") (display f) (display " ")
                  (display n) (newline)))
              (let ((r (guard (e (#t (list 'notrun 1 e)))
                         (run-mat name (list (chez-clause (car cs) env2))))))
@@ -184,7 +184,7 @@
                   (when verbose (display "CLAUSEFAIL ") (write name) (display " ") (display k) (display " ") (r7rs-write (car cs) (current-output-port)) (newline) (line))
                   (let* ((d (caddr r))   ; "1: why" -> "K: why"
                          (kd (string-append (number->string k) (substring d 1 (string-length d)))))
-                    (display "CLAUSE ") (write name) (display " ") (display kd) (newline) (line)
+                    (newline) (display "CLAUSE ") (write name) (display " ") (display kd) (newline) (line)
                     (loop (cdr cs) (+ k 1) p (+ f 1) n (or fail (cons k kd)) notrun))))))))))
   (line))
 
@@ -201,7 +201,7 @@
                (eval `(let () ,@(reverse prelude) ,d (if #f #f)) env)
                (cons 'ok #f))))))
     (if (eq? (car r) 'notrun)
-        (begin (display "DEF ") (write (if (pair? (cdr d)) (let ((n (cadr d))) (if (pair? n) (car n) n)) d))
+        (begin (newline) (display "DEF ") (write (if (pair? (cdr d)) (let ((n (cadr d))) (if (pair? n) (car n) n)) d))
                (display " NOTRUN ") (display (message-of (cdr r))) (newline) (line))
         (set! prelude (cons d prelude)))))
 
@@ -212,7 +212,7 @@
           (r (guard (e (#t (cons 'bad e))) (cons 'good (read (open-string-input-port str))))))
      (cond
        ((eq? (car r) 'bad)
-        (display "READ ") (display (car seg)) (display " ") (display (message-of (cdr r))) (newline) (line))
+        (newline) (display "READ ") (display (car seg)) (display " ") (display (message-of (cdr r))) (newline) (line))
        (else
         (let ((d (cdr r)))
           (cond
@@ -220,9 +220,9 @@
              (run-one (cadr d) (cddr d)))
             ((and (pair? d) (memq (car d) '(mat/cf)))
              (set! mats (+ mats 1))
-             (display "MAT ") (write (if (pair? (cdr d)) (cdr d) d)) (display " SKIP mat/cf") (newline) (line))
+             (newline) (display "MAT ") (write (if (pair? (cdr d)) (cdr d) d)) (display " SKIP mat/cf") (newline) (line))
             ((def-form? d) (add-def! d))
             (else #f)))))))
  (segments text))
 
-(display "FILE ") (display data) (display " ") (display mats) (newline)
+(newline) (display "FILE ") (display data) (display " ") (display mats) (newline)

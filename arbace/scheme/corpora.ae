@@ -525,7 +525,10 @@
         (recur (rest ls) [] (conj acc {:name name :status (keyword (str/lower-case st)) :rest (or detail "") :clauses pending}))
         (if-let [[_ _ kd] (re-find #"^CLAUSE (.*?) (\d+: .*)$" l)]
           (recur (rest ls) (conj pending kd) acc)
-          (recur (rest ls) pending acc)))
+          ;; re-review 025, finding C: the harness's own count of the failing clauses (its CLAUSES line, after the NOTRUN mat's line)
+          (if-let [[_ _ f] (re-find #"^CLAUSES (.*) \d+ (\d+) \d+$" l)]
+            (recur (rest ls) pending (if (seq acc) (conj (pop acc) (assoc (peek acc) :clauses-f (parse-long f))) acc))
+            (recur (rest ls) pending acc))))
       acc)))
 
 (defn- mat-file-items [file out err rc]
@@ -542,6 +545,20 @@
                      :notrun (cons (str "notrun mats/" file " mat " name ": " (clip rest 160)) (clause-items name clauses))
                      :skip [(str "skip mats/" file " mat " name ": " (clip rest 160))])]
              i)
+        ;; finding C: the CLAUSE lines read against the harness's own counts. A failing clause that wrote to stdout without a newline
+        ;; glues its CLAUSE line to that text and loses it: for a NOTRUN mat its CLAUSES line (F failing) says so; for a FAIL mat its
+        ;; line's K is the first failing clause, which the first CLAUSE line must be
+        cross (for [{:keys [name status rest clauses clauses-f]} mats
+                    :let [k1 (some-> (re-find #"^(\d+) " rest) second)
+                          c1 (some-> (first clauses) (->> (re-find #"^(\d+):")) second)]
+                    :when (case status
+                            :notrun (not= clauses-f (count clauses))
+                            :fail (and (seq clauses) (not= k1 c1))
+                            false)]
+                (str "count mats/" file " mat " name ": "
+                     (if (= status :notrun)
+                       (str (if clauses-f (str "the harness counted " clauses-f " failing clauses") "no CLAUSES line") ", " (count clauses) " CLAUSE lines read")
+                       (str "the FAIL line's first failing clause is " k1 ", the first CLAUSE line's is " c1))))
         done (set (map :name mats))
         hung (last (remove done (keep #(when (str/starts-with? % "BEGIN ") (subs % 6)) lines)))
         crash (when (and (not= rc "0")) [(str "crash mats/" file " status " rc (when hung (str " in mat " hung)) ": " (clip (or (first-line err) "") 120))])
@@ -549,7 +566,7 @@
         [_ fdata fmats] (some #(re-find #"^FILE (\d+) (\d+)$" %) lines)
         counted (when (and (= rc "0") (or (nil? fmats) (not= (parse-long fmats) (count mats))))
                   [(str "count mats/" file " " (if fmats (str fmats " mats run, " (count mats) " results read") "no FILE line"))])]
-    {:mats mats :items (vec (concat reads defs ms crash counted))
+    {:mats mats :items (vec (concat reads defs ms crash counted cross))
      ;; SM8b (SC110 (c)): the clauses of the mats that do not expand, run alone
      :clauses (reduce (fn [acc l]
                         (if-let [[_ p f n] (re-find #"^CLAUSES .* (\d+) (\d+) (\d+)$" l)]
