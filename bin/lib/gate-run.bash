@@ -268,7 +268,9 @@ run_one() {  # run_one NAME: a step of the plan, as decided (once: a build of th
     # GT5: the key once the producers ran, their outputs' digests appended to the plan's material
     for u in ${uses[$n]}; do echo "uses $u $(out_sha "$logs/out/$u")" >> "$logs/plan/$n.inputs"; done
     key[$n]=$(sha256sum < "$logs/plan/$n.inputs" | cut -c1-64)
-    if [ -f "$store/$n/${key[$n]}.edn" ] && [ -z "${rerun:-}" ]; then
+    # (re-review 020, finding 4: a record that reads, pass_reads, as the planner's and publish_passes'
+    # decisions: an empty, cut or odd-length one at the key is no pass, and the step runs)
+    if [ -z "${rerun:-}" ] && pass_reads "$store/$n/${key[$n]}.edn" "$n"; then
       why[$n]="cut off: its producers' outputs as at its pass; $(pass_desc "$store/$n/${key[$n]}.edn")"
       dec[$n]=skip; echo "${why[$n]}" > "$logs/$n.why"
       restore_out "$n" || { echo "notrun its outputs" > "$logs/$n.status"; touch "$logs/$n.done"; return 1; }
