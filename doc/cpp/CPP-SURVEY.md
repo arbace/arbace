@@ -1992,3 +1992,99 @@ On the branch `cpp-cx7`, in the light tier (stage 0 by `ARBACE_HOST_EXE`, 4 jobs
   **10 of 10 runs failed** (7 `terminate called after throwing std::runtime_error`, 2 segmentation faults, 1 `terminate called without an active exception`;
   the unchanged build passed 10 of 10). So the sample catches the regression every time, and (b) (a `--shared-flag` switch) stays unneeded.
 - **Rule slips.** None. `python3` was used for multi-line edits.
+
+## As built: review 007's fixes (2026-10-31)
+
+On the branch `cpp-cx7` (light tier: stage 0 by `ARBACE_HOST_EXE`, 4 jobs, `GOMEMLIMIT=1500MiB`, no gate, no build of Arbace's executables or javac's tool, no lock).
+Review 007 (a helper VM's, at 9e34a1f5 with cpp-cx6: 14 findings, three high) checked against the code and on the host: every finding holds, 4 and 9 confirmed
+by probes the VM could not run. Each fix is a commit with a test of `bin/cppi selftest` (new: `test/cpp/selftest/NAME.sh`, `make cppi-selftest`), run against the
+tree before the fix (a snapshot of the previous commit) and after: it fails before and passes after. One refactor commit: the judges moved from `arbace.cpp.lower`
+to `arbace.cpp.check` (c1f6253d), so a judge's change does not change the runtime's key.
+
+### Per finding
+
+| # | holds | the fix | the test (before → after) |
+|---|---|---|---|
+| 1 (high) | yes: `[ -f liblstdc++.a ] \|\| runtime_build` | `runtime-build` writes `OUT/key.txt` (digests of `arbace/cpp/lower.ae`, `rt/eh.c.ae`, `arbace/repr/llvm*`, `arbace/repr/c*`, `units.edn`, the shims, `ir.sha256`, `headers.sha256`, its own steps by `declare -f`, `GCC_FLAGS`, gcc's and clang's versions, the tools' host) and `OUT/key` once every unit passes; `lower-check` rebuilds a runtime at another key, or refuses it (`CPPI_RUNTIME_STALE=refuse`, exit 4); `bin/cppi runtime-key [OUT\|--print]` (6cb66108) | `runtime-key`: lower-check ran on a stale runtime (5 bad) → refused, the changed input named |
+| 2 (high) | yes: `(not= ir "0") :oracle-rejected`; the recorded results unread | an IR not made is the oracle's rejection only with status 1 and one of clang's own diagnostics (`FILE:LINE:COL: error:`), else outcome `ir`, failing; a file `test/cpp/lower-results.edn` records `:pass` that does not pass is failing (a regression, whatever else holds); an empty list refused (639e730d) | `ir-failure`: a broken `clang++`, a timeout and an empty list passed (6 bad) → fail |
+| 3 (high) | yes: any nonzero dump status was `oracle-rejects`; a killed clang was cached as rejected | `tools/cxxdump` exits 1 only when clang exits 1 without a crash report, 3 for its own failures and a clang killed, crashed or exiting otherwise (never cached); rtcheck's read is `oracle-rejects` only for status 1 with a clang diagnostic, else `dump-error-N` or `no-dump`, failing, known or not (fd4a737a). Not built: a recorded set of rejected names per corpus (CP123) | `dump-failure`: a filter error and a kill exit 1, cached, the round trip passing (6 bad) → 3, uncached, failing |
+| 4 | yes, confirmed: clang emits `load i24`/`store i40` for `struct S { unsigned a : 24; unsigned char c; }`; the lowered run printed `5 0` for `5 2` | an odd width is loaded masked to it; a width whose store size is below its container's (i24, i40, i48, i56) is loaded and stored by `__builtin_memcpy` of the store size (a load into a zeroed container); `mask` takes widths to 128 (4040f674). `_BitInt` is not in the sample: g++ does not take it in C++ | `odd-width`, sample `test/cpp/samples/bitfields.cpp` (i24, i40, i48, i56, a 17-bit field): `3 0`/`1 0 0` against `3 2`/`1 7 9` → the original's output |
+| 5 | yes: `one`, `rt_ir` never cleared their directories | each file's and unit's directory, and the testsuite's `util/`, emptied before its steps (f8a961d8) | `stale-levels`: a print that stopped compiling passed on the earlier `object`, an earlier refusal failed a file that lowers (2 bad) → right |
+| 6 | yes: stdout and status only | stderr compared too (`stderr-differs`, failing) (a86165a7) | `run-stderr`: differing terminate messages passed → fail |
+| 7 | yes: `:orig-fails` and a missing object passed | a compiler may fail on the original only where the known file's new `:orig-fails` records it (NAME → `#{:gxx :clang}`: CX5d's 51 files of g++.dg, g++.old-deja and c-c++-common every 10th, from those runs' results); missing objects fail unless the run had `--no-objects` (the driver passes it) (d878bf5a) | `rt-objects`: an unrecorded rejection and missing objects passed (3 bad) → fail |
+| 8 | yes: a listed name was known at any level | the round trip's judge finds the first failing level (read, l1, l3, l4 g++ alone or both, l5; a results column) and keeps a file known only when its class names it (`print-rejected`, `forms-differ` l1; `ast-differs` l3; `objects-differ` l4; `gxx-objects-location` g++'s l4 alone); lower-check's refusal classes only at that refusal, the run classes at the run. Known file: `ubsan/float-cast-overflow-bf.C` reclassed `forms-differ` → `gxx-objects-location` (CX5d's levels) (f816d76a) | `known-levels`: a `gxx-objects-location` file crashing in read and an `inline-asm` file failing its run were known (4 bad) → fail |
+| 9 | the thread routine yes (probe: the original 134 with `terminate called after throwing an instance of 'int'`, the lowered `after`, 0); the constructors in part: within one unit clang's `_GLOBAL__sub_I_` already returns at the throw, and the run terminated at the next `noexcept` frame of another constructor, but a constructor of another priority (`constructor(300)`) ran and printed | each `llvm.global_ctors` entry is a C constructor wrapper `cx$ctor$N` that calls the function, then `cx$uncaught` when the flag is set; the thread start named in §8's `native-callback-throw` (LLVM.md, the known file's comment; CP104 (c), no case in the lists) (78c924ca) | `ctor-throw`, sample `test/cpp/runtime/samples/ctor-throw.cpp`: `a later constructor` on stderr (stderr-differs) → the original's |
+| 10 | yes: `tar ... \|\| true; touch`; `(not sample)` never true | `.extracted` only when tar succeeds (else exit 1); `lists` refuses a tree whose count is not the manifest's, sampled or not; `check` fails naming a recorded digest's file not in the tree. The guard found `libstdcxx-testsuite`'s `:count` one off: the tarball holds 9,725 `.cc` (9726 since CX1), corrected; the other counted corpora match (5be1d857) | `pp-shrink`: a truncated tarball marked extracted, 18 of 19 files accepted, a renamed file not named (4 bad) → refused, named |
+| 11 | yes | `bin/repr-llvm roundtrip` exits 1 unless every file's forms are equal and its objects the same (4701a396) | `llvm-roundtrip`: an unreadable IR exited 0 → 1 |
+| 12 | yes (no case on the lists: their statuses are 0, 1, 3, 7, 11, 134) | a run is compared only when it ended by itself: not 124, not 128 and up but 134, stdout under the 1 MB cap; else `not-comparable`, failing (37224f74) | `run-comparable`: two timeouts and two capped outputs passed (3 bad) → fail; an abort pair passes |
+| 13 | yes: `atomicrmw`, `cmpxchg` and atomic loads and stores plain, `fence` nothing, `llvm.stackrestore` nothing (`stacksave` gives null), so a dynamic alloca in a loop grows the stack; threads.cpp shares no atomic state | not changed (CP103 (c) deferred; CP121, CP122) | - |
+| 14 | yes: `runtime-build` checked `ir.sha256` only | CP101 (c) built (small): `runtime-build` checks `/usr/include/c++/15.2.0` against `test/cpp/host/headers.sha256` (bin/repr-cpp host record's pin of the 834 headers, the same set) before the IR and stops naming the header (`CPPI_HEADERS_PIN` names another pin); the pin is in the key (f14900c6) | `headers-pin`: a changed digest went on to the IR (timeout) → stops at once |
+
+### Numbers (before → after)
+
+- `bin/cppi runtime-build`: 198 of 198 units before (CP103 (b)) and after (with the odd widths and the constructor wrappers; IR 25 s, read, print and lower 155 s, gcc
+  19 s); the summary equals `test/cpp/runtime/build-results.edn`'s. The runtime now has its key (`bin/cppi runtime-key`: current).
+
+- `bin/cppi lower-check` (now with stderr compared, only runs that ended by themselves, the recorded results compared): the samples and runtime samples 12 of 12
+  before (CP110 (c)), 14 of 14 after (the 12 and `bitfields.cpp`, `ctor-throw.cpp`; 12 agree with g++'s build, 2 compile-only; native 8 s, Arbace's steps 25 s,
+  gcc and runs 2 s); libstdc++ every 15th 234 of 234 before and after, none known, 0 regressions, g++'s build agrees on 233 (the same `2523-2_xin.cc`; native 109 s,
+  Arbace's steps 834 s, gcc and runs 53 s). `test/cpp/lower-results.edn` records both (the samples' summary and their two new files).
+
+- `bin/repr-cpp roundtrip` (objects on), HotSpot every 25th: 50 files, 49 read, 47 pass, 2 known (`stubGenerator_x86_64_cbrt` at l1 as `forms-differ`,
+  `adlc/formsopt` at l4 as `objects-differ`: both at their classes' levels), 1 oracle rejection (`foreignGlobals.cpp`, clang's diagnostic), 0 failing, 0 dump errors,
+  before and after (CP79 (b)'s numbers). The samples by bare names: 8 files, 7 pass, 1 known (`coroutine.cpp`, `gxx-objects-location` at g++'s l4 alone) before; after
+  9 (with `bitfields.cpp`, which passes): 8 pass, 1 known, 0 failing. (Named `samples/NAME`, as CX5d's runs named them, HEAD fails `coroutine.cpp`: CP127.)
+
+`bin/cppi selftest`: 13 tests, 13 pass (41 s; `ctor-throw` uses the lowered runtime, rebuilt when not at the key; the others a minimal runtime of the pending flag
+or judged work directories). `make check-makefile` passes (target `cppi-selftest`).
+
+### Not done, and why
+
+- Finding 3's third part (a recorded set of rejected names per corpus) and the round trip's results against a record: CP123, CP124.
+- The thread start as a native frame stays a class (CP104 (c)); a wrapper is CP120.
+- The atomics and `stackrestore`: CP121, CP122. The other corpora of the round trip (g++.dg, g++.old-deja, c-c++-common, libstdc++ every 10th or 40th) were not rerun:
+  finding 8's rule may make some of their known files fail where their first failing level is not their class (the CX5d results show one, reclassed above, and two
+  `ast-differs` files that crashed in a scratch run of cpp-cx6).
+
+### Proposals (CP120-CP127)
+
+- **CP120 The thread start.** An exception that leaves a `std::thread`'s callable ends the thread silently (g++: `std::terminate`). Options: (a) the class
+  `native-callback-throw` (built, documented); (b) the pending-flag layer wraps `pthread_create`'s routine (CP104 (b)'s kind of wrapper: the routine called, then
+  `cx$uncaught` when the flag is set), with a runtime sample; (c) the lowering wraps every function whose address is passed to a native function. *Recommended: (b)*:
+  one wrapper, `std::thread` is a feature since CP103 (b), and the probe of this step shows the case.
+- **CP121 Atomics now that threads run.** Options: (a) plain operations (CP1, built); (b) `atomicrmw`, `cmpxchg`, atomic loads and stores and `fence` as gcc's
+  `__atomic_*` builtins with the IR's orderings (CP103 (c)); (c) (b) and a runtime sample sharing state across threads (`std::shared_ptr` and `exception_ptr`
+  refcounts, a function-local static initialized by two threads). *Recommended: (c)*: the lowered libstdc++ runs on real pthreads, so the refcounts race today.
+- **CP122 `stacksave`/`stackrestore`.** Options: (a) nothing (built; a VLA in a loop grows the stack); (b) dynamic allocas between a save and its restore from a
+  per-frame arena the restore rewinds; (c) refuse a `stackrestore` whose region holds a dynamic alloca (`:vla`). *Recommended: (a)* until a case; (c) if the heavy
+  list shows one that overflows.
+- **CP123 Recorded rejections in the round trip.** Options: (a) as built: a rejection is clang's own diagnostic; (b) each corpus's rejected names recorded (or
+  `pp-gxx.sha256`'s `rejected` entries, g++ rejecting too), a file rejected now and not recorded failing. *Recommended: (b)*, written with the whole-corpus runs
+  (CP80 (b)).
+- **CP124 The round trip's results recorded.** Options: (a) the known file only (built); (b) a results file per corpus as `test/cpp/lower-results.edn`, a recorded
+  pass that does not pass failing. *Recommended: (b)*: the same guard lower-check has now.
+- **CP125 The selftests in the gate.** Options: (a) by hand (`bin/cppi selftest`, built); (b) a light gate step (its inputs `bin/cppi`, `bin/repr-cpp`,
+  `bin/repr-llvm`, `bin/lib/repr-cpp/`, `arbace/cpp/`, `arbace/repr/cpp/`, `tools/cxxdump`, `test/cpp/selftest/`), `ctor-throw` with it only when the runtime is at
+  its key. *Recommended: (b)*, the coordinator's step table.
+- **CP126 The runtime key's scope.** Options: (a) conservative (built: all of `arbace/repr/c/`, the whole host executable: a re-seed or a converter change rebuilds,
+  about 3.5 minutes); (b) the namespaces the lowering loads, from `ARBACE_LOADED_LOG` once; (c) (a) and CP100 (c)'s shared store keyed by it. *Recommended: (a)*,
+  (c) when CP100 (c) is built.
+- **CP127 Names in the round trip's known file.** The file keys bare names (`coroutine.cpp`); a list naming the sample `samples/coroutine.cpp` (as lower-check's lists
+  do) fails it (HEAD's samples run under those names: 7 pass, 1 fail). Options: (a) bare names, the samples' lists made with bare names (as this step's); (b) names
+  qualified by the corpus (`samples/`, `gxx-dg/`) in the known file and the lists. *Recommended: (b)*: the known file covers several corpora, and two corpora could
+  share a name.
+
+### Rule slips, shipped files, scratch
+
+- Slips: one probe used a `<(...)` process substitution (a `cmp` of two lists), one a `/dev/null` (a `grep` of LLVM.md) and one waiting loop a `2>/dev/fd/1`; a
+  second waiting loop was started while one ran (stopped by its task at once). One test was first run without `ARBACE_HOST_EXE` exported: `bin/lib/host.bash` tried a
+  stage 0 build in the test's copy of the tree, which has no seed, and stopped at once (nothing built); `lib.bash` now refuses to run without it. An Arbace error
+  report went to /tmp once (a probe without `bin/lib/tmpdir.bash`; deleted). The disk stood at 77-79% (the main checkout's clean gate run beside), never past 80%; a
+  stale `go-build` directory of an earlier slip (605 MB in `.tmp/tmp`) was deleted. `python3` was used for multi-line edits. Two commit messages read backwards in
+  part (a86165a7: "it passes at c1f6253d, fails now" means the judge passed the differing run before and fails it now).
+- Shipped: `bin/cppi`, `bin/repr-cpp`, `bin/repr-llvm`, `bin/lib/repr-cpp/{roundtrip,pp-check}`, `arbace/cpp/lower.ae`, `arbace/cpp/check.ae` (new),
+  `arbace/repr/cpp/{rtcheck,ppcheck}.ae`, `tools/cxxdump/{main,run}.go`, `Makefile` (`cppi-selftest`), `test/cpp/selftest/` (new), `test/cpp/samples/bitfields.cpp`,
+  `test/cpp/runtime/samples/ctor-throw.cpp`, `test/cpp/{corpora,lower-known,lower-results}.edn`, `test/repr/cpp/roundtrip-known.edn`, `doc/cpp/LLVM.md`, this section.
+  `test/gate/steps.edn` not touched.
+- Scratch: `.tmp/r7/` (`base/`: HEAD's snapshot; the round trips `rt-before-*`, `rt-after-*`; lower-check `w-samples`, `w-lt`; `L/`, the lists; `t/`, the probes),
+  `.tmp/cppi/runtime` (the runtime at the key), `.tmp/cpp-selftest/`.
