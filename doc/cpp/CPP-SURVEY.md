@@ -1734,9 +1734,7 @@ and c-c++-common tenths whole (only their 24 `ast-differs` files), the whole Hot
 ### Proposals (CP90-CP93)
 
 - **CP90 Deleted `operator delete` and `new` under clang.** 9 of 124 HotSpot files (7%, so about 90 of 1,237) are rejected by clang only for that. Options: (a) classed as
-  oracle rejections (built); (b) `-faligned-allocation`-like switches do not apply: a second shim line cannot undelete HotSpot's member, but clang's `-fno-assume-sane-operator-new`
-  does not either; a per-corpus option `-fcxx-exceptions` (clang then accepts: the unwinding path wants the deleted function, g++'s `-fno-exceptions` does not) is not the build's
-  flag; (c) read those files with g++'s dump instead (not an option: the oracle is clang). *Recommended: (a)*, count them in the whole-corpus run.
+  oracle rejections (built); (b) read them with `-fcxx-exceptions` (clang then accepts, but it is not the build's flag and changes the AST); (c) a shim that undeletes the member (changes HotSpot's declarations). *Recommended: (a)*, count them in the whole-corpus run.
 - **CP91 `__LINE__` in nested macro expansions** (the largest HotSpot class: 8 of the 13 new known cases and 3 of the first 4). Same as CP79. Options: (a) classed (built); (b) CP79 (b), a
   `#line` before every line of a multi-line macro text; (c) `assert`-like macros kept as text, never as forms, when their expansion holds `__LINE__`. *Recommended: (b)*, as CP79; (c) if (b) leaves the HotSpot cases.
 - **CP92 Macros whose expansion is part of a list** (`VM_CLASSES_DO(VM_CLASS_NAME)`, `EPSILONGC_ONLY_ARG(...)`). Options: (a) classed (built); (b) a list element text that spans
