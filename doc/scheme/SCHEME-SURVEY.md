@@ -2175,3 +2175,7 @@ SC119 (b), SC121 (c), SC122 (a) then (b). Not done: SC118 (b) (optional, below).
 
 `.tmp/sc/` in this worktree: the runs' logs (`L_*.log` the first batch, `M_*.log` the last, `run*.out`), the probes (`ie.sps`, `f1.sps`, `f2.sps`, `dm.*`, `eq.sps`), `rw.py` and `rw2.py`
 (the Python prototypes of the rewrite, replaced by `rewrite-for-chez`), `m/` (format.ms and bytevector.ms mat runs with `SI_MAT_VERBOSE=1`); `.tmp/si/{mats,ecraven,r7rs,r7rs-chez}` the runs judged.
+
+### Decided (SC130-SC134; the user, 2026-10-31)
+
+All as recommended: SC130 (a); SC131 (a); SC132 (a); SC133 (b) now, (c) when the gate runs it; SC134 (b).
