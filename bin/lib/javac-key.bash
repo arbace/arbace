@@ -8,7 +8,8 @@
 #                          bin/arbace-go's gate_key (Arbace's sources, go/, overlay/ with javac's
 #                          variants and jrt's own Java, jdk/ with javac's forms and edge and the
 #                          platform's pin, x509roots/, the build's scripts, the seed's and Go's
-#                          pins, Go's version), without what repr/java writes (the provenance
+#                          pins, Go's version), and bin/javac-vendor, the tool build's own
+#                          command (GTS72 (a), doc/GATE-SURVEY.md), without what repr/java writes (the provenance
 #                          files above: the tool's output, which names the key; the suite's
 #                          fixtures, the test build's input) and the check scripts of
 #                          bin/lib/repr-* and bin/lib/frozen.bash (they run the tool, they do not
@@ -24,7 +25,7 @@ arbace_javac_key() {
          ! -path 'bin/lib/repr-java/*' ! -path 'bin/lib/repr-go/*' ! -path 'bin/lib/repr-clojure/*' \
          ! -path 'bin/lib/repr-haskell/*' ! -path 'bin/lib/repr-rust/*' ! -path bin/lib/frozen.bash \
          ! -path bin/lib/gate-run.bash | LC_ALL=C sort
-    printf '%s\n' seed/arbace-seed-go.tar.xz.sha256 seed/goroot.sha256 bin/arbace-go bin/j2g bin/repr-go bin/build-go bin/jrt bin/seed bin/goi
+    printf '%s\n' seed/arbace-seed-go.tar.xz.sha256 seed/goroot.sha256 bin/arbace-go bin/j2g bin/repr-go bin/build-go bin/jrt bin/seed bin/goi bin/javac-vendor
   } | xargs -d '\n' sha256sum
     cat "${ARBACE_GOROOT:-/root/tamago-go}/VERSION") | sha256sum | cut -c1-64
 }
@@ -38,7 +39,7 @@ arbace_javac_rest_key() {
          ! -path 'bin/lib/repr-java/*' ! -path 'bin/lib/repr-go/*' ! -path 'bin/lib/repr-clojure/*' \
          ! -path 'bin/lib/repr-haskell/*' ! -path 'bin/lib/repr-rust/*' ! -path bin/lib/frozen.bash \
          ! -path bin/lib/gate-run.bash | LC_ALL=C sort
-    printf '%s\n' seed/arbace-seed-go.tar.xz.sha256 seed/goroot.sha256 bin/arbace-go bin/j2g bin/repr-go bin/build-go bin/jrt bin/seed bin/goi
+    printf '%s\n' seed/arbace-seed-go.tar.xz.sha256 seed/goroot.sha256 bin/arbace-go bin/j2g bin/repr-go bin/build-go bin/jrt bin/seed bin/goi bin/javac-vendor
   } | xargs -d '\n' sha256sum
     cat "${ARBACE_GOROOT:-/root/tamago-go}/VERSION") | sha256sum | cut -c1-64
 }
