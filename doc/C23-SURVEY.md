@@ -3169,3 +3169,8 @@ Shipped files changed: none (nothing under `go/`, `overlay/`, `jdk/`).
 Scratch in the worktree's `.tmp/`: `c7/` (logs), `c7s/` (gcc probes, `dg1`: a copy of `bin/lib/ci/dg` that keeps a given `CI_DG_ONLY`, `one`: its driver for a list of files), `ci-dg/`, `ci-dg-one/`, `ci-dg-essential/`, `ci-check/`.
 
 Rule slips: one foreground `sleep 240` beyond the tool's limit moved a command to the background (no effect on results; the dg run it waited on was started in the background already).
+
+### Decided (CS160-CS165; the user, 2026-10-31)
+
+All as recommended: CS160, starting with gnu23-attr-syntax-2/3; CS161, not now; CS162, not now; CS163, not now;
+CS164, with CS156 in the heavy window; CS165.
