@@ -7,10 +7,13 @@
 # the dg-error lines (a line expected and not given, a line given and not expected), every non-pass in a
 # class of test/c/divergences-dg.edn.
 #
-# Usage: bin/ci dg [--corpus C,...] [--record] [--judge]
+# Usage: bin/ci dg [--corpus C,...] [--record] [--judge] [--essential]
 #   --corpus   test/c/corpora.edn's ids (default the six groups below)
 #   --record   test/c/check-dg-linux-amd64.edn rewritten from the run (the other groups' lines kept)
 #   --judge    the last run judged again, nothing run
+#   --essential  CS146: only the files of test/c/essential-dg.txt (one of each diagnostic family and a few that expect no
+#              error), read and judged, no gcc run (its directives are the file's), every one must pass; seconds to a
+#              minute, in .tmp/ci-dg-essential (not --record)
 #   REPR_C_THREADS (default 3): the read's threads; CI_JOBS (default 4): gcc's jobs
 # Writes under .tmp/ci-dg/ (CI_DG_WORK): CORPUS/{files.edn,dg.edn,gcc.list,gcc/,gcc.edn,read.edn}; the gcc
 # outputs are capped at 20 KB a file.
@@ -21,16 +24,22 @@ root=$(cd "$(dirname "$0")/../../.." && pwd)
 cd "$root"
 export GOMEMLIMIT=${GOMEMLIMIT:-1800MiB}
 all=gcc-c23,gcc-cpp-c23,gcc-c23-sub,gcc-gnu23,gcc-embed,gcc-va-opt,gcc-bitint
-corpora=$all record= judge=
+corpora=$all record= judge= essential=
 while [ $# -gt 0 ]; do
   case $1 in
     --corpus) corpora=$2; shift 2 ;;
     --record) record=1; shift ;;
     --judge) judge=1; shift ;;
+    --essential) essential=1; shift ;;
     *) sed -n '15,19p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
   esac
 done
 work=${CI_DG_WORK:-$root/.tmp/ci-dg}
+if [ -n "$essential" ]; then
+  [ -n "$record" ] && { echo "bin/ci dg: --essential does not record" >&2; exit 2; }
+  work=${CI_DG_WORK:-$root/.tmp/ci-dg-essential}
+  export CI_DG_ONLY="$root/test/c/essential-dg.txt" CI_DG_ESSENTIAL=1
+fi
 jobs=${CI_JOBS:-4}; [ "$jobs" -gt 4 ] && jobs=4
 mkdir -p "$work"
 IFS=, read -r -a ids <<< "$corpora"
@@ -42,6 +51,11 @@ if [ -z "$judge" ]; then
   for id in "${ids[@]}"; do rm -rf "${work:?}/$id"; done
   arbace_tool -m arbace.repr.c.ppcheck lists "$work" "$roots" "${ids[@]}" 2>&1 | grep -v 'Reflection\|recur arg\|Auto-boxing' | head -c 100000
   arbace_tool -m arbace.c.dg directives "$work" "${ids[@]}" 2>&1 | grep -v 'Reflection\|recur arg\|Auto-boxing' | head -c 100000
+  if [ -n "$essential" ]; then
+    arbace_tool -m arbace.c.dg read "$work" "${ids[@]}" 2>&1 | grep -v 'Reflection\|recur arg\|Auto-boxing' | head -c 100000
+    arbace_tool -m arbace.c.dg judge "$work" test/c/divergences-dg.edn "${ids[@]}" 2>&1 | grep -v 'Reflection\|recur arg\|Auto-boxing' | head -c 200000
+    exit "${PIPESTATUS[0]}"
+  fi
   gi=$(gcc -print-file-name=include)
   gcc1() { # WORK ID BASE NAME ACTION OPTS
     local w=$1 id=$2 base=$3 nm=$4 act=$5 opts=$6 d f o
