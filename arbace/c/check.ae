@@ -266,6 +266,25 @@
 
 (def ^:dynamic *compat-depth* 0)
 
+(declare compatible?)
+
+(defn- mcompat?
+  "Compatibility of two struct members' types (C23 6.2.7 with GNU's variable and zero-length arrays): tagless records by
+  their members, variable-length arrays by their elements, [] as [0]."
+  [a b]
+  (let [a (if (:q a) a a) ka (:k a) kb (:k b)]
+    (cond
+      (and (#{:struct :union} ka) (= ka kb) (nil? (.get ^HashMap (:rec a) :tag)) (nil? (.get ^HashMap (:rec b) :tag))
+           (.get ^HashMap (:rec a) :complete) (.get ^HashMap (:rec b) :complete))
+      (let [ma (.get ^HashMap (:rec a) :members) mb (.get ^HashMap (:rec b) :members)]
+        (and (= (count ma) (count mb))
+             (every? true? (map (fn [x y] (and (= (:name x) (:name y)) (= (:bits x) (:bits y)) (mcompat? (:t x) (:t y)))) ma mb))))
+      (and (= :ptr ka) (= :ptr kb)) (and (= (quals a) (quals b)) (mcompat? (:to a) (:to b)))
+      (and (= :array ka) (= :array kb))
+      (and (= (quals a) (quals b)) (mcompat? (:of a) (:of b))
+           (or (:vla a) (:vla b) (= (or (:n a) 0) (or (:n b) 0))))
+      :else (compatible? a b))))
+
 (defn compatible?
   "Type compatibility (6.2.7), qualifiers compared."
   [a b]
@@ -291,8 +310,7 @@
                                             (and (= (map :name (.get ra :members)) (map :name (.get rb :members)))
                                                  (or (> (long *compat-depth*) 2)
                                                      (binding [*compat-depth* (inc (long *compat-depth*))]
-                                                       (every? true? (map (fn [x y] (and (= (:bits x) (:bits y)) (compatible? (:t x) (:t y))
-                                                                                   (or (not= :array (:k (:t x))) (= (:n (:t x)) (:n (:t y))))))
+                                                       (every? true? (map (fn [x y] (and (= (:bits x) (:bits y)) (mcompat? (:t x) (:t y))))
                                                                           (.get ra :members) (.get rb :members))))))
                                             (identical? (.get ra :scope) (.get rb :scope))))))
         :bitint (and (= (:n a) (:n b)) (= (boolean (:u a)) (boolean (:u b))))
@@ -618,7 +636,7 @@
   ^long [a unsigned]
   (let [v (:v (ex a))
         v (when (integer? v) (long v))]
-    (when (< (std-num) 123) (pedwarn! (str "ISO C does not support '" (when unsigned "unsigned ") "_BitInt(" v ")' before C23")))
+    (when (and (< (std-num) 123) (not (cx :no-c23-compat))) (pedwarn! (str "ISO C does not support '" (when unsigned "unsigned ") "_BitInt(" v ")' before C23")))
     (cond
       (nil? v) (do (when (and (symbol? a) (let [e (lookup (name a))] (and e (= :obj (:kind e)) (nil? (:v e)))))
                      (err! "'_BitInt' argument is not an integer constant expression"))
@@ -1336,6 +1354,8 @@
           (let [qa (quals a) qb (quals b)]
             (when-not (every? qa qb)
               (pedwarn! (str ctx " discards qualifier from pointer target type"))))
+          ;; pointers to tagged types of one tag with other contents: gcc's pedwarn of C23's tag compatibility
+          (cx :permissive) nil
           :else (err! (str ctx ": incompatible pointer type")))))))
 
 (defn- assign-check [rl rr]
@@ -1554,7 +1574,10 @@
                   (when (and (:extern m) (not (file-scope?)))
                     (let [^ArrayList sc (cx :scopes) p (.get ^HashMap (:ord (.get sc 1)) n)]
                       (when (and p (#{:obj :fn} (:kind p))) p))))
-        _ (when (and prev* (not param) (not (compatible? (:t prev*) t))
+        tyof? (fn [mm] (or (:c/auto-type mm) (:auto mm)
+                           (some #{'typeof 'typeof-type 'typeof-unqual 'typeof-unqual-type} (tree-seq coll? seq (:tag mm)))))
+        _ (when (and prev* (not param) (not (tyof? m)) (not (tyof? (:m prev*)))
+                     (not (compatible? (if (:constexpr (:m prev*)) (qual (:t prev*) :const) (:t prev*)) (if (:constexpr m) (qual t :const) t)))
                      (not= :invalid (:k (:t prev*))) (not= :invalid (:k t)))
             (err! (str "conflicting types for '" n "'")))
         t (if (and prev (#{:obj :fn} (:kind prev))) (composite (:t prev) t) t)
@@ -1733,7 +1756,7 @@
                     bt (parse-type tf)]
                 (binding [*base* bt] (doseq [d ds] (check-decl d))))
       c/static-assert (let [[_ e] f r (exi e)]
-                        (if (and (integer? (:v r)) (zero? (:v r)) (not= :nullptr (:k (unq (:t r))))) (err! "static assertion failed")))
+                        (if (and (integer? (:v r)) (zero? (:v r)) (not= :nullptr (:k (unq (:t r)))) (not (cx :exec-charset))) (err! "static assertion failed")))
       c/declare-specs (do (when (:c/bad-specs (meta f)) (err! "two or more data types in declaration specifiers"))
                           (when (and (:c/implicit-int (meta f)) (seq (:c/decl-attrs (meta f))))
                             ;; `[[...]];` at file scope reads as attribute-only specifiers
@@ -1891,15 +1914,15 @@
   {:std std :scopes (ArrayList.) :errors (ArrayList.) :annot nil :annotating (atom false)
    :done-units (HashSet.) :units {} :pack-state (atom {}) :ldouble-size (:ldouble-size opts 16)
    :unsigned-char (:unsigned-char opts) :pedantic (:pedantic opts) :ext-lines (:ext-lines opts)
-   :no-c2y-compat (:no-c2y-compat opts)})
+   :permissive (:permissive opts) :no-c2y-compat (:no-c2y-compat opts) :no-c23-compat (:no-c23-compat opts) :exec-charset (:exec-charset opts)})
 
 (defn check-unit
   "Checks a read (arbace.repr.c/read-c's {:forms :units}) at the standard `std` (a keyword), the
   builtins' forms `builtins` declared first: {:errors [...] :items [[line [annotation...]] ...]} (the
   items when `annotate`)."
-  [rd std builtins & {:keys [annotate ldouble-size unsigned-char results pedantic ext-lines notes no-c2y-compat]}]
+  [rd std builtins & {:keys [annotate ldouble-size unsigned-char results pedantic ext-lines notes no-c2y-compat no-c23-compat exec-charset permissive]}]
   (let [c (assoc (new-cx std {:ldouble-size (or ldouble-size 16) :unsigned-char unsigned-char :pedantic pedantic :ext-lines ext-lines
-                                      :no-c2y-compat no-c2y-compat})
+                                      :permissive permissive :no-c2y-compat no-c2y-compat :no-c23-compat no-c23-compat :exec-charset exec-charset})
                  :units (into {} (for [[k u] (:units rd)] [(str k) u]))
                  :results (when results (IdentityHashMap.)))
         items (ArrayList.)]
