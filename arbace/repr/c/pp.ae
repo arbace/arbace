@@ -604,13 +604,20 @@
     (if-not (= (ch p) \()
       (do (eh c (str (pos-str p) ": operator \"" op "\" requires a parenthesized identifier")) ts)
       (do (ts-shift ts)
-          (let [parts (loop [acc []]
-                        (let [t (ts-shift ts)]
-                          (cond
-                            (= (ch t) \)) acc
-                            (= (ch t) :eof) acc
-                            (= (ch t) \space) (recur acc)
-                            :else (recur (conj acc (src t))))))
+          (let [raw (loop [acc []]
+                      (let [t (ts-shift ts)]
+                        (cond
+                          (= (ch t) \)) acc
+                          (= (ch t) :eof) acc
+                          (= (ch t) \space) (recur acc)
+                          :else (recur (conj acc t)))))
+                ;; Arbace (CS143): the macros in an attribute name of __has_c_attribute are expanded (C23 6.10.1)
+                toks* (if (contains? #{"__has_c_attribute" "__has_cpp_attribute"} op)
+                        (let [w (ArrayList.)]
+                          (expand c false false (toks (conj raw lex/eof-tok)) w)
+                          (vec (remove #(or (= (ch %) :eof) (= (ch %) \space)) w)))
+                        raw)
+                parts (mapv src toks*)
                 nm (str/join parts)
                 v (has-answer c op nm)]
             (ts-prepend ts [(Tok. :PPNUMBER (str v) "" (.-pf ^Tok p) (.-po ^Tok p) nil nil)])
@@ -955,6 +962,7 @@
   ^long [^Cpp c ^Tok t]
   (let [s (.-src t)
         long? (= (.-ch t) :LONGCHARCONST)
+        u8? (.startsWith ^String s "u8") ; Arbace (CS143): a u8 character constant is unsigned (char8_t, C23 6.4.4.5)
         s (cond long? (subs s 1) (.startsWith ^String s "u8") (subs s 2) :else s)
         s (subs s 1 (dec (count s)))
         byte? (not long?)
@@ -1000,7 +1008,7 @@
                           [r n] (lex/decode-rune bs 0 (alength bs))]
                       (when (not= (long n) (count s)) (eh c (str (pos-str t) ": invalid character constant")))
                       [(long r) false]))]
-    (if (and byte? (>= r 0x80) (<= r 0xff)) (long (unchecked-byte r)) r)))
+    (if (and byte? (not u8?) (>= r 0x80) (<= r 0xff)) (long (unchecked-byte r)) r)))
 
 (defn- int-const
   "cpp.intConst: a pp-number's value, Long or UVal; Arbace: C23's binary constants, digit
@@ -1050,7 +1058,10 @@
 (defn- primary-expression [^Cpp c ^Toks s eval]
   (let [t (token s)]
     (case (ch t)
-      (:CHARCONST :LONGCHARCONST) (do (ts-shift s) (char-const-value c t))
+      (:CHARCONST :LONGCHARCONST) (do (ts-shift s)
+                                      (let [v (char-const-value c t)]
+                                        ;; Arbace (CS143): a u8 character constant is unsigned in #if (C23 6.4.4.5)
+                                        (if (and (= (ch t) :CHARCONST) (.startsWith ^String (src t) "u8")) (UVal. v) v)))
       :IDENTIFIER
       (do (ts-shift s)
           (let [nm (src t)]
