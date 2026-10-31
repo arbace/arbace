@@ -54,6 +54,9 @@ gate_env() {
   gkey=$("$root/bin/arbace-go" --gate-key) || return 1
   . "$root/bin/lib/javac-key.bash"
   jkey=$(arbace_javac_key "$root") || return 1
+  # GTS71 (c), GTS87 (a): javac's tool key handed to the steps, for bin/lib/javac-key.bash's arbace_javac_fresh
+  # (repr_java_host, bin/javac-vendor check --from): the tool's .key compared with it, none of its sources hashed
+  export GATE_JAVAC_KEY=$jkey GATE_JAVAC_KEY_ROOT=$(cd "$root" && pwd -P)
   export ARBACE_GATE_CACHE=$exes/${gkey:0:20} GATE_CACHE=$exes/${gkey:0:20} GATE_JAVAC_DIR=$exes/javac-${jkey:0:20}
   export GATE_EXE=$GATE_CACHE/amd64/arbace GATE_TESTS=$GATE_CACHE/amd64/arbace-tests
   export GATE_JAVAC=$GATE_JAVAC_DIR/arbace-javac GATE_JOBS=${GATE_TEST_JOBS:-12}

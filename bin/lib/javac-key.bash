@@ -17,7 +17,11 @@
 #   arbace_javac_fresh WHO EXE
 #                          prints EXE's key, recorded beside it by the tool build (EXE.key), when
 #                          it is the checkout's; else stops (status 1) with a message naming the
-#                          build, or with REPR_JAVA_STALE_OK=1 (experiments) warns and prints it
+#                          build, or with REPR_JAVA_STALE_OK=1 (experiments) warns and prints it.
+#                          The checkout's key is the one bin/gate computed and hands its steps
+#                          (GATE_JAVAC_KEY, when GATE_JAVAC_KEY_ROOT is this checkout: GTS71 (c),
+#                          GTS87 (a), doc/GATE-SURVEY.md), so that a step hashes none of the tool's
+#                          sources; else arbace_javac_key's, hashed here
 
 arbace_javac_key() {
   (cd "$1" && {
@@ -47,7 +51,12 @@ arbace_javac_rest_key() {
 arbace_javac_fresh() {
   local who=$1 e=$2 k want
   k=$([ ! -f "$e.key" ] || cat "$e.key")
-  want=$(arbace_javac_key "$root")
+  # GTS87 (a): the gate's key of this checkout, handed to its steps (gate_env), else hashed
+  if [ -n "${GATE_JAVAC_KEY:-}" ] && [ "${GATE_JAVAC_KEY_ROOT:-}" = "$(cd "$root" && pwd -P)" ]; then
+    want=$GATE_JAVAC_KEY
+  else
+    want=$(arbace_javac_key "$root")
+  fi
   if [ -z "$k" ] || [ "$k" != "$want" ]; then
     if [ "${REPR_JAVA_STALE_OK:-}" = 1 ]; then
       echo "$who: warning: $e is not built from the checkout's sources (key ${k:-none}, the checkout's $want); used anyway (REPR_JAVA_STALE_OK=1)" >&2
