@@ -2503,7 +2503,7 @@ SOFTWARE.
 ## Chibi Scheme: BSD 3-Clause License
 
 Covers `scheme/vendor/chibi/` (Chibi-Scheme 0.12.0's `(chibi test)`, `(chibi diff)`, `(chibi optional)` and `(chibi term ansi)`, their `.sld` files and the
-`.scm` files they include, unchanged; `scheme/vendor/chibi/provenance.edn`): Copyright (c) 2010-2025 Alex Shinn, as the head of `test.scm` states it, "BSD-style
+`.scm` files they include, and the three libraries' own tests `diff-test.sld`, `optional-test.sld` and `term/ansi-test.sld` (SC142), unchanged; `scheme/vendor/chibi/provenance.edn`): Copyright (c) 2010-2025 Alex Shinn, as the head of `test.scm` states it, "BSD-style
 license: http://synthcode.com/license.txt". The package the files came from did not carry that license file; the text below is the BSD 3-Clause License, the
 license Chibi-Scheme is released under, with the copyright holder's name. `scheme/lib/chibi/test.sls` is Arbace's own, written from the description in
 `r7rs-tests.scm`'s header (SM8), under the Eclipse Public License 1.0.

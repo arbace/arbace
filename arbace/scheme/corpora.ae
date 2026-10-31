@@ -8,6 +8,10 @@
     r7rs-rewrite IN OUT      Chibi's r7rs-tests.scm as Chez reads it (SM8c, SC117 (b))
     r7rs-own DIR [--record]  DIR/out, DIR/rc: the suite run with Chibi's own (chibi test); test/scheme/check-r7rs-chibi-test-linux-amd64.edn
     r7rs-chez DIR [--record] DIR/out, DIR/rc: the rewritten suite run by Chez; test/scheme/ref-r7rs-chez.edn
+    chibi-tests DIR [--record] DIR/NAME.{si,chibi}.{out,rc}: Chibi's own tests of the vendored libraries, on si and on Chibi (SC142 (b));
+                             test/scheme/check-chibi-tests-linux-amd64.edn
+    r7rs-chibi DIR [--record] DIR/out, DIR/rc: the suite run by Chibi-Scheme 0.12.0 (test/scheme/chibi/driver.scm), SC143 (c);
+                             test/scheme/ref-r7rs-chibi.edn
     r7rs DIR [--record]      DIR/out, DIR/rc: Chibi's r7rs-tests.scm run on si: one result a test;
                              --record writes test/scheme/check-r7rs-linux-amd64.edn
     ecraven DIR [--record]   DIR/NAME.{out,err,rc}: one result a benchmark; test/scheme/check-ecraven-linux-amd64.edn
@@ -59,6 +63,49 @@
 
 (defn- chez-r7rs-ref [] (when-let [t (slurp-or (path "test/scheme/ref-r7rs-chez.edn"))] (first (read-string t))))
 
+;; SC143 (c): Chibi-Scheme 0.12.0 as a second reference. Its tests are not the same sequence as si's (a test under a cond-expand,
+;; the numeric syntax tests' loops), so a test of Chibi is paired with a test of si by an alignment of the two sequences of
+;; sources (the longest common subsequence of equal sources; between two common ones, the same number on each side pair in order).
+(defn- chibi-r7rs-ref [] (when-let [t (slurp-or (path "test/scheme/ref-r7rs-chibi.edn"))] (first (read-string t))))
+
+(defn- parse-chibi [out]
+  (loop [ls (str/split-lines out) tests []]
+    (if-let [l (first ls)]
+      (if-let [[_ n st what] (re-find #"^TEST (\d+) (PASS|FAIL) (.*)$" l)]
+        (let [detail (take-while #(re-find #"^  (expected|got|error): " %) (rest ls))]
+          (recur (drop (inc (count detail)) ls)
+                 (conj tests {:n (Long/parseLong n) :status (if (= st "PASS") :pass :fail) :what what
+                              :detail (mapv str/trim detail)})))
+        (recur (rest ls) tests))
+      tests)))
+
+(defn- lcs-pairs
+  "The pairs [i j] of an alignment of the vectors a and b: their longest common subsequence, and between two common elements
+  the elements of the two gaps in order when the gaps are of the same size."
+  [a b]
+  (let [n (count a) m (count b) w (inc m) t (int-array (* (inc n) w))]
+    (loop [i (dec n)]
+      (when (>= i 0)
+        (loop [j (dec m)]
+          (when (>= j 0)
+            (aset t (+ (* i w) j)
+                  (if (= (nth a i) (nth b j))
+                    (inc (aget t (+ (* (inc i) w) (inc j))))
+                    (max (aget t (+ (* (inc i) w) j)) (aget t (+ (* i w) (inc j))))))
+            (recur (dec j))))
+        (recur (dec i))))
+    (let [common (loop [i 0 j 0 acc []]
+                   (cond (or (= i n) (= j m)) acc
+                         (= (nth a i) (nth b j)) (recur (inc i) (inc j) (conj acc [i j]))
+                         (>= (aget t (+ (* (inc i) w) j)) (aget t (+ (* i w) (inc j)))) (recur (inc i) j acc)
+                         :else (recur i (inc j) acc)))
+          bounds (concat [[-1 -1]] common [[n m]])]
+      (vec (mapcat (fn [[[i0 j0] [i1 j1]]]
+                     (let [gi (- i1 i0 1) gj (- j1 j0 1)]
+                       (concat (when (and (pos? gi) (= gi gj)) (map (fn [k] [(+ i0 1 k) (+ j0 1 k)]) (range gi)))
+                               (when (< i1 n) [[i1 j1]]))))
+                   (map vector bounds (rest bounds)))))))
+
 (defn- cmd-r7rs-rewrite
   "r7rs-rewrite IN OUT: Chibi's r7rs-tests.scm as Chez reads it (rewrite-for-chez)."
   [[in out]]
@@ -86,12 +133,38 @@
                      [result]))
     (if (every? :class items) 0 1)))
 
+(defn- cmd-r7rs-chibi
+  "SC143 (c): the suite run by Chibi-Scheme 0.12.0 through test/scheme/chibi/driver.scm (DIR/out, DIR/err, DIR/rc); one answer a
+  test, in Chibi's own order; --record: test/scheme/ref-r7rs-chibi.edn. A test Chibi does not pass is classed (r7rs-chibi-*)."
+  [[dir & opts]]
+  (let [out (or (slurp-or (str dir "/out")) "") rc (str/trim (or (slurp-or (str dir "/rc")) "?"))
+        tests (parse-chibi out) cs (classes)
+        items (vec (for [t tests :when (= :fail (:status t))
+                         :let [item (str "chibi-fails r7rs/chibi " (:what t) " => " (str/join " " (:detail t)))]]
+                     {:item item :class (class-of cs item)}))
+        total (count tests) pass (count (filter #(= :pass (:status %)) tests))
+        result {:id "r7rs/chibi/chibi" :corpus :chibi-r7rs :rc rc :tests total :pass pass :fail (- total pass)
+                :items items :per-test (mapv (fn [t] [(:n t) (:status t) (clip (:what t) 70)]) tests)}]
+    (println "r7rs on Chibi 0.12.0: status" rc "-" total "tests," pass "pass," (- total pass) "fail,"
+             (count (remove :class items)) "in no class")
+    (doseq [[c n] (sort-by str (frequencies (keep :class items)))] (println " " n (name c)))
+    (when (some #{"--record"} opts)
+      (write-results "test/scheme/ref-r7rs-chibi.edn"
+                     ";; Chibi's r7rs-tests.scm run by Chibi-Scheme 0.12.0 (the host's chibi-scheme) through test/scheme/chibi/driver.scm\n;; (bin/si r7rs --chibi --record): Chibi's answer to each test in its own order, SC143 (c); generated."
+                     [result]))
+    (if (every? :class items) 0 1)))
+
 (defn- cmd-r7rs [[dir & opts]]
   (let [out (or (slurp-or (str dir "/out")) "") rc (str/trim (or (slurp-or (str dir "/rc")) "?"))
         {:keys [tests sections]} (parse-r7rs out)
         cs (classes)
         ref (chez-r7rs-ref)
         chez (into {} (map (fn [[n st _]] [n st]) (:per-test ref)))
+        ;; SC143 (c): Chibi's answers, paired with si's tests by the alignment of the sources
+        cref (chibi-r7rs-ref)
+        cper (:per-test cref)
+        pairs (when cref (lcs-pairs (mapv #(clip (:what %) 70) tests) (mapv #(nth % 2) cper)))
+        chibi (into {} (map (fn [[i j]] [(:n (nth tests i)) (second (nth cper j))]) pairs))
         items (vec (concat
                      (for [t tests :when (= :fail (:status t))
                            :let [item (str "fails r7rs/chibi " (:what t) " => " (str/join " " (:detail t)))]]
@@ -103,16 +176,24 @@
         vs (frequencies (for [t tests] [(:status t) (get chez (:n t) :none)]))
         vs-chez {:both-pass (get vs [:pass :pass] 0) :si-only-pass (get vs [:pass :fail] 0)
                  :chez-only-pass (get vs [:fail :pass] 0) :both-fail (get vs [:fail :fail] 0)}
+        vsc (frequencies (for [t tests] [(:status t) (get chibi (:n t) :none)]))
+        vs-chibi {:both-pass (get vsc [:pass :pass] 0) :si-only-pass (get vsc [:pass :fail] 0)
+                  :chibi-only-pass (get vsc [:fail :pass] 0) :both-fail (get vsc [:fail :fail] 0)
+                  :si-tests-unpaired (+ (get vsc [:pass :none] 0) (get vsc [:fail :none] 0))
+                  :chibi-tests-unpaired (- (count cper) (count pairs))}
         result {:id "r7rs/chibi" :corpus :chibi-r7rs :verdict (if (empty? items) :pass :non-pass)
                 :tests total :pass pass :fail (- total pass)
                 :sections (vec (butlast sections)) :items items
                 :vs-chez (when ref vs-chez)
-                :per-test (mapv (fn [t] (let [c (get chez (:n t))]
-                                          (cond-> [(:n t) (:status t) (clip (:what t) 70)] c (conj c))))
+                :vs-chibi (when cref vs-chibi)
+                :per-test (mapv (fn [t] (let [c (get chez (:n t)) ch (get chibi (:n t))]
+                                          (cond-> [(:n t) (:status t) (clip (:what t) 70)] (or c ch) (conj c) ch (conj ch))))
                                 tests)}]
     (println "r7rs: status" rc "-" total "tests," pass "pass," (- total pass) "fail")
     (when ref
       (println "against Chez (the same tests):" vs-chez))
+    (when cref
+      (println "against Chibi 0.12.0 (paired by source):" vs-chibi))
     (when (some #{"--record"} opts)
       (write-results "test/scheme/check-r7rs-linux-amd64.edn"
                      ";; Chibi's r7rs-tests.scm on si (bin/si r7rs --record): the result of each test (number, status, the expression, Chez's status\n;; from test/scheme/ref-r7rs-chez.edn), the sections' counts and the failing tests' items with their classes\n;; (test/scheme/divergences-corpora.edn); generated."
@@ -380,11 +461,70 @@
       (when (> (count is) 6) (println "    ...")))
     (summary (map (fn [r] (assoc r :items (map #(assoc % :class (class-of cs (:item %))) (:items r)))) all))))
 
+;; ------------------------------------------------------------------------------ Chibi's own tests of the vendored libraries
+
+;; SC142 (b): (chibi diff-test), (chibi optional-test) and (chibi term ansi-test) of Chibi 0.12.0, each run test by test
+;; (test/scheme/chibi/split-run.sps) on si and (run-tests) on Chibi; a test prints a mark (a dot for a pass, x, !), the marks in order are
+;; the answers; the FAIL:/ERROR: lines after a mark tell why on si.
+(def chibi-test-libs [["diff" "chibi/diff-test.sld"] ["optional" "chibi/optional-test.sld"] ["term-ansi" "chibi/term/ansi-test.sld"]])
+
+(defn- test-marks
+  "The marks of an output, with the detail of each non-pass mark: [{:mark c :detail s-or-nil}]."
+  [out]
+  (let [plain (str/replace out #"\u001b\[[0-9;]*m" "")]
+    (reduce (fn [marks l]
+              (if-let [[_ ms] (re-find #"^\s*(?:term\.ansi|diff|optional)?([.xX!]+)\s*$" l)]
+                (into marks (map (fn [c] {:mark c}) ms))
+                (if-let [[_ d] (re-find #"^\s*(?:FAIL|ERROR): (.*)$" l)]
+                  (let [n (count marks) c (when (pos? n) (:mark (nth marks (dec n))))
+                        start (loop [i n] (if (and (pos? i) (= c (:mark (nth marks (dec i)))) (not (:detail (nth marks (dec i))))) (recur (dec i)) i))]
+                    (if (and c (not= c \.))
+                      (into (subvec marks 0 start) (map (fn [m] (assoc m :detail d)) (subvec marks start)))
+                      marks))
+                  marks)))
+            [] (str/split-lines plain))))
+
+(defn- cmd-chibi-tests
+  "chibi-tests DIR [--record]: DIR/NAME.si.out and NAME.chibi.out (and .rc) of each library; one result a library, the marks of si
+  against Chibi's, test by test; --record: test/scheme/check-chibi-tests-linux-amd64.edn."
+  [[dir & opts]]
+  (let [cs (classes)
+        results
+        (vec (for [[n f] chibi-test-libs
+                   :let [si-out (or (slurp-or (str dir "/" n ".si.out")) "") si-rc (str/trim (or (slurp-or (str dir "/" n ".si.rc")) "?"))
+                         ch-out (or (slurp-or (str dir "/" n ".chibi.out")) "") ch-rc (str/trim (or (slurp-or (str dir "/" n ".chibi.rc")) "?"))
+                         sm (test-marks si-out) cm (test-marks ch-out)
+                         same (= (count sm) (count cm))
+                         pass? (fn [m] (= \. (:mark m)))
+                         items (vec (concat
+                                      (for [[i m] (map-indexed vector sm) :when (not (pass? m))
+                                            :let [item (str "fails chibi-tests/" n " test " (inc i) ": " (or (:detail m) (str "mark " (:mark m))))]]
+                                        {:item item :class (class-of cs item)})
+                                      (when-not (= si-rc "0") [(let [i (str "crash chibi-tests/" n " status " si-rc)] {:item i :class (class-of cs i)})])
+                                      (when-not same [(let [i (str "marks chibi-tests/" n " " (count sm) " marks on si, " (count cm) " on Chibi")] {:item i :class (class-of cs i)})])))
+                         vs (frequencies (for [[a b] (map vector sm cm)] [(pass? a) (pass? b)]))]]
+               {:id (str "chibi-tests/" n) :corpus :chibi-tests :library f :verdict (if (empty? items) :pass :non-pass)
+                :si {:rc si-rc :tests (count sm) :pass (count (filter pass? sm)) :fail (count (remove pass? sm))}
+                :chibi {:rc ch-rc :tests (count cm) :pass (count (filter pass? cm)) :fail (count (remove pass? cm))}
+                :vs-chibi (when same {:both-pass (get vs [true true] 0) :si-only-pass (get vs [true false] 0)
+                                      :chibi-only-pass (get vs [false true] 0) :both-fail (get vs [false false] 0)})
+                :items items
+                :per-test (when same (mapv (fn [a b] [(str (:mark a)) (str (:mark b))]) sm cm))}))]
+    (doseq [r results]
+      (println (:id r) "- si" (:si r) "- Chibi" (:chibi r) (or (:vs-chibi r) "marks differ in number")))
+    (when (some #{"--record"} opts)
+      (write-results "test/scheme/check-chibi-tests-linux-amd64.edn"
+                     ";; Chibi-Scheme 0.12.0's own tests of the libraries vendored in scheme/vendor/chibi (diff-test, optional-test, term/ansi-test) on si\n;; (test by test, test/scheme/chibi/split-run.sps) and on Chibi (bin/si chibi-tests --record, SC142 (b)): the marks of both, per library; generated."
+                     results))
+    (summary results)))
+
 (defn -main [& [cmd & args]]
   (let [rc (case cmd
              "r7rs" (cmd-r7rs args)
              "r7rs-chez" (cmd-r7rs-chez args)
              "r7rs-own" (cmd-r7rs-own args)
+             "r7rs-chibi" (cmd-r7rs-chibi args)
+             "chibi-tests" (cmd-chibi-tests args)
              "r7rs-rewrite" (cmd-r7rs-rewrite args)
              "ecraven" (cmd-ecraven args)
              "mats" (cmd-mats args)
