@@ -1,0 +1,129 @@
+(in-ns 'c.cpp.rt.eh) (c/file "eh.c" :std :gnu23)
+;; The exceptions of the lowered C++ (doc/cpp/CPP-SURVEY.md §5.4, "As built: CX6"), as C forms: a pending flag instead
+;; of unwinding. The lowering renames the Itanium ABI's __cxa_* entry points to these cx$ ones; a thrown object has a
+;; header in front of it; a landing pad asks cx$catches for each catch clause, whose matching is the type_info's own
+;; __do_catch (its virtual slot 4, as libsupc++ defines it; __is_pointer_p is slot 2). Single-threaded (CP1).
+
+(c/declare calloc ^{:tag (* void)} [unsigned-long unsigned-long])
+(c/declare free ^void [(* void)])
+(c/declare abort ^void [void])
+(c/declare write ^long [int (* (const void)) unsigned-long])
+(c/declare _ZSt9terminatev ^void [void])
+(c/var ^:extern ^{:tag (array char)} _ZTVSt8bad_cast)
+(c/var ^:extern ^char _ZTISt8bad_cast)
+(c/declare _ZNSt8bad_castD1Ev ^void [(* void)])
+(c/var ^:extern ^{:tag (array char)} _ZTVSt10bad_typeid)
+(c/var ^:extern ^char _ZTISt10bad_typeid)
+(c/declare _ZNSt10bad_typeidD1Ev ^void [(* void)])
+(c/var ^:extern ^{:tag (array char)} _ZTVSt20bad_array_new_length)
+(c/var ^:extern ^char _ZTISt20bad_array_new_length)
+(c/declare _ZNSt20bad_array_new_lengthD1Ev ^void [(* void)])
+
+(c/struct cx$hdr [^{:tag (* void)} ti ^{:tag (* (fn [(* void)] void))} dtor ^{:tag (* void)} adjusted ^int handlers
+                  ^{:tag (* (struct cx$hdr))} next ^long pad])
+(c/static-assert (== (sizeof-type (struct cx$hdr)) 48))
+
+(c/var ^int cx$pending 0)
+(c/var ^:static ^{:tag (* (struct cx$hdr))} cx$cur)
+(c/var ^:static ^{:tag (* (struct cx$hdr))} cx$caught)
+(c/var ^:static ^int cx$uncaught_n)
+
+(c/defn ^:static cx$hdr_of ^{:tag (* (struct cx$hdr))} [^{:tag (* void)} o]
+  (return (- (conv (* (struct cx$hdr)) o) 1)))
+
+(c/defn cx$allocate_exception ^{:tag (* void)} [^unsigned-long n]
+  (let [^{:tag (* (struct cx$hdr))} h (calloc 1 (+ (sizeof-type (struct cx$hdr)) n))]
+    (when (== h 0) (abort))
+    (return (+ h 1))))
+
+(c/defn cx$free_exception ^void [^{:tag (* void)} o]
+  (free (cx$hdr_of o)))
+
+(c/defn cx$throw ^void [^{:tag (* void)} o ^{:tag (* void)} ti ^{:tag (* void)} dtor]
+  (let [^{:tag (* (struct cx$hdr))} h (cx$hdr_of o)]
+    (set! (-> h ti) ti)
+    (set! (-> h dtor) (conv (* (fn [(* void)] void)) dtor))
+    (set! (-> h adjusted) o)
+    (set! cx$cur h)
+    (set! cx$pending 1)
+    (inc! cx$uncaught_n)))
+
+(c/defn cx$exception ^{:tag (* void)} [void]
+  (return (+ cx$cur 1)))
+
+(c/defn cx$catches ^int [^{:tag (* void)} ti]
+  (let [^{:tag (* (struct cx$hdr))} h cx$cur
+        ^{:tag (* void)} p (+ h 1)]
+    (when (== ti 0)
+      (set! (-> h adjusted) p)
+      (return 1))
+    (let [^{:tag (* (* void))} tvt @(conv (* (* (* void))) (-> h ti))
+          ^{:tag (* (* void))} cvt @(conv (* (* (* void))) ti)]
+      (when ((conv (* (fn [(* void)] _Bool)) (aget tvt 2)) (-> h ti))
+        (set! p @(conv (* (* void)) p)))
+      (when ((conv (* (fn [(* void) (* void) (* (* void)) unsigned] _Bool)) (aget cvt 4)) ti (-> h ti) (addr p) 1)
+        (set! (-> h adjusted) p)
+        (return 1))
+      (return 0))))
+
+(c/defn cx$begin_catch ^{:tag (* void)} [^{:tag (* void)} o]
+  (let [^{:tag (* (struct cx$hdr))} h (cx$hdr_of o)]
+    (set! (-> h handlers) (? (< (-> h handlers) 0) (+ (- (-> h handlers)) 1) (+ (-> h handlers) 1)))
+    (when (!= h cx$caught)
+      (set! (-> h next) cx$caught)
+      (set! cx$caught h))
+    (dec! cx$uncaught_n)
+    (return (-> h adjusted))))
+
+(c/defn cx$get_exception_ptr ^{:tag (* void)} [^{:tag (* void)} o]
+  (return (-> (cx$hdr_of o) adjusted)))
+
+(c/defn cx$end_catch ^void [void]
+  (let [^{:tag (* (struct cx$hdr))} h cx$caught]
+    (when (== h 0) (return))
+    (if (< (-> h handlers) 0)
+      (when (== (pre-inc! (-> h handlers)) 0)
+        (set! cx$caught (-> h next)))
+      (when (== (pre-dec! (-> h handlers)) 0)
+        (set! cx$caught (-> h next))
+        (when (-> h dtor) ((-> h dtor) (+ h 1)))
+        (free h)))))
+
+(c/defn cx$rethrow ^void [void]
+  (let [^{:tag (* (struct cx$hdr))} h cx$caught]
+    (when (== h 0) (_ZSt9terminatev))
+    (set! (-> h handlers) (- (-> h handlers)))
+    (inc! cx$uncaught_n)
+    (set! cx$cur h)
+    (set! cx$pending 1)))
+
+(c/defn cx$resume ^void [^{:tag (* void)} o]
+  (set! cx$cur (cx$hdr_of o))
+  (set! cx$pending 1))
+
+(c/defn cx$uncaught_exceptions ^int [void]
+  (return cx$uncaught_n))
+
+(c/defn cx$uncaught_exception ^_Bool [void]
+  (return (> cx$uncaught_n 0)))
+
+(c/defn cx$current_exception_type ^{:tag (* void)} [void]
+  (return (? cx$caught (-> cx$caught ti) (conv (* void) 0))))
+
+(c/defn cx$uncaught ^void [void]
+  (write 2 "terminate called after throwing an exception\n" 45)
+  (abort))
+
+(c/defn ^:static cx$throw_std ^void [^{:tag (* char)} vt ^{:tag (* void)} ti ^{:tag (* void)} dtor]
+  (let [^{:tag (* void)} o (cx$allocate_exception 8)]
+    (set! @(conv (* (* void)) o) (+ vt 16))
+    (cx$throw o ti dtor)))
+
+(c/defn cx$bad_cast ^void [void]
+  (cx$throw_std _ZTVSt8bad_cast (addr _ZTISt8bad_cast) (conv (* void) _ZNSt8bad_castD1Ev)))
+
+(c/defn cx$bad_typeid ^void [void]
+  (cx$throw_std _ZTVSt10bad_typeid (addr _ZTISt10bad_typeid) (conv (* void) _ZNSt10bad_typeidD1Ev)))
+
+(c/defn cx$throw_bad_array_new_length ^void [void]
+  (cx$throw_std _ZTVSt20bad_array_new_length (addr _ZTISt20bad_array_new_length) (conv (* void) _ZNSt20bad_array_new_lengthD1Ev)))
