@@ -3,7 +3,7 @@
 rt_file() {
   local w=$1 n=$2 d
   for d in orig dump2 forms forms2; do mkdir -p "$w/$d/$(dirname "$n")"; done
-  echo 0 > "$w/orig/$n.status"; echo 0 > "$w/dump2/$n.status"
+  echo 0 > "$w/orig/$n.status"; echo 0 > "$w/dump2/$n.status"; echo 0 > "$w/orig/$n.norm.status"; echo 0 > "$w/dump2/$n.norm.status"
   echo "(norm)" > "$w/orig/$n.norm"; echo "(norm)" > "$w/dump2/$n.norm"
   echo "(forms)" > "$w/forms/$n.ae"; echo "(forms)" > "$w/forms2/$n.ae"
   printf '%s\tok\t0\t{}\tsame\n' "$n" >> "$w/read.tsv"; printf '%s\tok\t0\t{}\t-\n' "$n" >> "$w/read2.tsv"

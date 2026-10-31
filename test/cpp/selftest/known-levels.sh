@@ -11,7 +11,7 @@ for n in loc.C pr.C ast.C; do rt_file "$w" "$n"; done
 mkdir -p "$w/orig"; echo 0 > "$w/orig/crash.C.status"; printf 'crash.C\tc++23\t\tP\t\n' >> "$w/list.tsv"
 printf 'crash.C\tcrash\t0\tjava.lang.NullPointerException\n' >> "$w/read.tsv"
 rt_obj "$w" loc.C gxx 0 0 differs; rt_obj "$w" loc.C clang 0 0
-echo "(other forms)" > "$w/forms2/pr.C.ae"; echo 1 > "$w/dump2/pr.C.status"; rt_obj "$w" pr.C gxx 0 1; rt_obj "$w" pr.C clang 0 1
+echo "(other forms)" > "$w/forms2/pr.C.ae"; echo 1 > "$w/dump2/pr.C.status"; echo "pr.C:1:1: error: a rejected print" > "$w/dump2/pr.C.err"; rt_obj "$w" pr.C gxx 0 1; rt_obj "$w" pr.C clang 0 1
 echo "(other norm)" > "$w/dump2/ast.C.norm"; rt_obj "$w" ast.C gxx 0 0; rt_obj "$w" ast.C clang 0 0 differs
 arbace_tool -m arbace.repr.cpp.rtcheck judge "$w" "$known" > "$t/rt.log" 2>&1; st=$?
 v() { awk -F'\t' -v n="$2" '$1==n {print $2}' "$1/results.tsv"; }
