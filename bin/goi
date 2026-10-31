@@ -88,7 +88,8 @@
 #                                 imports, against the test's golden output (standard output and
 #                                 error combined, status 0). Each is pass,
 #                                 fail, error, unsupported (the reason), known
-#                                 (test/goi/check-known.edn, with the reason) or skip (an action
+#                                 (test/goi/check-known.edn, with the reason; a reason "speed: ..."
+#                                 only for a timeout) or skip (an action
 #                                 with gc's flags); a run program's time limit 10 s, its action's
 #                                 -t, or its line in test/goi/timeouts.txt; the results against
 #                                 test/goi/check-linux-amd64.edn: a program passing there and not
@@ -180,7 +181,7 @@
 #                                 non-passes in the classes of test/nethttp/divergences.edn
 #                                 (bin/goi divergences --nethttp); --gc-only: the gc level alone,
 #                                 --update-want: rewrites the want.out files from gc's runs
-#   bin/goi divergences [--aot] [--table | --programs]
+#   bin/goi divergences [--aot | --nethttp] [--results FILE] [--table | --programs]
 #                                 v1's divergences (GR10, GOI-SPEC.md "v1's divergences"): every
 #                                 program not passing in test/goi/check-linux-amd64.edn,
 #                                 check-box-amd64.edn and check-box-arm64.edn in a class of
@@ -188,7 +189,9 @@
 #                                 failing or in error, every program of test/goi/essential.txt
 #                                 passing; prints each class's count (--table: the spec's table,
 #                                 --programs: the programs by class; test/goi/divergences.ae).
-#                                 bin/goi check runs it after a whole check that passes. --aot:
+#                                 bin/goi check runs it after a whole check that passes, on
+#                                 that run's results in place of the linux/amd64 (or AOT, or
+#                                 net/http) reference (--results FILE: results.tsv). --aot:
 #                                 the AOT level's reference in the classes of
 #                                 test/goi/divergences-aot.edn
 #
@@ -1048,6 +1051,17 @@ missing_rows() {
                   { print "   missing: " $2 " (recorded " $3 "): not in this run'"'"'s list (no forms?)" }'
 }
 
+# apply_known KNOWN RESULTS: RESULTS (PROGRAM, RESULT, REASON) with the known differences KNOWN
+# (PROGRAM, REASON) applied: a listed program that does not pass is known, with the listed reason;
+# but a reason of speed ("speed: ...", a program beyond the limit) takes only a timeout (report 002,
+# finding 4: any result was rewritten, so a speed program that now crashed stayed known with its old
+# reason in the run and the record). Prints the rows
+apply_known() {
+  awk -F'\t' 'NR==FNR { k[$1] = $2; next }
+               ($1 in k) && $2 != "pass" && (k[$1] !~ /^speed: / || ($2 == "error" && $3 ~ /^timeout/)) { $2 = "known"; $3 = k[$1] }
+               { print $1 "\t" $2 "\t" $3 }' "$1" "$2"
+}
+
 # check [--record] [--jobs N] [--essential] [--only REGEX]: the check (§11): every run program of
 # $GOROOT/test (the corpus linux-test, repr/go's conversion: bin/repr-go read --corpus linux-test,
 # run first when missing) interpreted against gc; results in .tmp/goi-check/results.tsv, against
@@ -1219,12 +1233,11 @@ check() {
     return 0
   fi
   # the known differences: a program listed there is known, with its reason, unless it passes
+  # (apply_known: a speed's only when it timed out)
   if [ -f "$known" ]; then
     # in the box, the box's own known differences too (test/goi/check-box-known.edn)
     cat "$known" $bknown | sed -n 's/^ *\["\([^"]*\)" "\(.*\)"\]$/\1\t\2/p' > "$cwork/known.tsv"
-    awk -F'\t' 'NR==FNR { k[$1] = $2; next }
-                 ($1 in k) && $2 != "pass" { $2 = "known"; $3 = k[$1] } { print $1 "\t" $2 "\t" $3 }' "$cwork/known.tsv" "$cwork/results.tsv" > "$cwork/results.k" \
-      && mv "$cwork/results.k" "$cwork/results.tsv"
+    apply_known "$cwork/known.tsv" "$cwork/results.tsv" > "$cwork/results.k" && mv "$cwork/results.k" "$cwork/results.tsv"
   fi
   local total pass fail err uns kn skip
   total=$(wc -l < "$cwork/results.tsv")
@@ -1279,7 +1292,9 @@ check() {
   echo "   no regression against $(basename "$ref")"
   # the whole check: its reference's divergences classified (GR10)
   if [ -z "$only" ] && [ -z "$essential" ] && [ -z "$box" ]; then
-    GOI_ROOT=$root arbace_tool -p "$root/test" -m goi.divergences ${aot:+--aot}
+    # this run's results in the classes, not the record's (report 002, finding 4: a recorded non-pass
+    # that now fails or errs was reported nowhere until the next --record)
+    GOI_ROOT=$root arbace_tool -p "$root/test" -m goi.divergences ${aot:+--aot} --results "$cwork/results.tsv"
   fi
 }
 
@@ -1396,7 +1411,7 @@ check_nethttp() {
   xargs -a "$list" -P "$jobs" -I{} bash -c 'nethttp_one "$1"' _ {} | LC_ALL=C sort > "$nwork/results.tsv"
   nethttp_report goi "$nwork/results.tsv" "$nd/check-linux-amd64.edn" "$record" "goi's check of test/nethttp (interpreted, net/http unlisted)" || return 1
   if [ -z "$only" ] && [ -z "$record" ]; then
-    GOI_ROOT=$root arbace_tool -p "$root/test" -m goi.divergences --nethttp
+    GOI_ROOT=$root arbace_tool -p "$root/test" -m goi.divergences --nethttp --results "$nwork/results.tsv"
   fi
   echo "goi check --corpus nethttp: $((SECONDS - t0)) s" >&2
 }
