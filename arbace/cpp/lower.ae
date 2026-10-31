@@ -167,6 +167,11 @@
                    (list 'c/static-assert (list '== (list 'sizeof-type (list 'struct tag)) s)))))
         tag)))
 
+(defn- complex-ld?
+  "{ x86_fp80, x86_fp80 }: clang's _Complex long double, which the ABI returns in x87 registers (a C struct of two long
+  doubles would return in memory), so it is C's complex type."
+  [t] (= t '(struct x86_fp80 x86_fp80)))
+
 (defn ctype
   "The C type form of an LLVM type."
   [t]
@@ -178,6 +183,7 @@
                     "ptr" '(* void) "float" 'float "double" 'double "x86_fp80" 'long-double "fp128" '_Float128 "half" '_Float16
                     "void" 'void
                     (refuse :type "type " t))
+      (complex-ld? t) '(complex long-double)
       (seq? t) (case (first t)
                  ptr '(* void)
                  (struct packed array vector) (list 'struct (struct-tag t))
@@ -314,6 +320,7 @@
         (ptr-type? t) '(conv (* void) 0)
         (int-bits t) (int-lit 0 (int-bits t))
         (float-type? t) (list 'conv (ctype t) 0)
+        (complex-ld? t) '(__builtin_complex (lit long-double 0.0) (lit long-double 0.0))
         (aggregate? t) (list 'compound-lit (ctype t))
         :else (refuse :value "a zero of " (pr-str t)))
       :else (local-sym v))
@@ -326,9 +333,11 @@
     (let [elems (if (= (first v) 'c-string)
                   (map #(int-lit (int %) 8) (second v))
                   (map (fn [[et ev]] (value ev et)) (rest v)))]
-      (if ('#{array vector c-string} (first v))
+      (cond
+        (complex-ld? t) (apply list '__builtin_complex elems)
+        ('#{array vector c-string} (first v))
         (list 'compound-lit (ctype t) (apply list 'init elems))
-        (apply list 'compound-lit (ctype t) elems)))
+        :else (apply list 'compound-lit (ctype t) elems)))
     (seq? v) (const-expr v t)
     :else (refuse :value "the value " (pr-str v))))
 
@@ -443,9 +452,10 @@
   [v t]
   (cond
     (and (symbol? v) (#{"zeroinitializer" "undef" "poison"} (name v)) (nil? (namespace v)))
-    (if (aggregate? t) '(init) (value v t))
+    (if (and (aggregate? t) (not (complex-ld? t))) '(init) (value v t))
     (and (seq? v) (= (first v) 'c-string)) (list 'init (apply list 'init (map #(int-lit (int %) 8) (second v))))
     (and (seq? v) ('#{array vector} (first v))) (list 'init (apply list 'init (map (fn [[et ev]] (cinit ev et)) (rest v))))
+    (complex-ld? t) (value v t)
     (and (seq? v) ('#{struct packed} (first v))) (apply list 'init (map (fn [[et ev]] (cinit ev et)) (rest v)))
     :else (value v t)))
 
@@ -566,6 +576,18 @@
       (re-matches #"llvm\.cttz\..*" nm) (let [wd (w 0)] (when (> wd 64) (refuse :intrinsic nm))
                                           (set-res (list '? (list '== (a 0) 0) wd (list '__builtin_ctzll (list 'conv 'unsigned-long-long (a 0))))))
       (re-matches #"llvm\.bswap\.i(16|32|64)" nm) (set-res (list (symbol (str "__builtin_bswap" (w 0))) (a 0)))
+      (re-matches #"llvm\.is\.fpclass\..*" nm)
+      (let [x (a 0) m (long (peek (nth args 1)))
+            c (list '__builtin_fpclassify 0 1 2 3 4 x) sg (list '__builtin_signbit x)
+            term (fn [cls neg] (list 'and (list '== c cls) (if neg sg (list 'not sg))))
+            ts (cond-> []
+                 (= 3 (bit-and m 3)) (conj (list '== c 0))
+                 (= 1 (bit-and m 3)) (conj (list '__builtin_issignaling x))
+                 (= 2 (bit-and m 3)) (conj (list 'and (list '== c 0) (list 'not (list '__builtin_issignaling x))))
+                 (bit-test m 2) (conj (term 1 true)) (bit-test m 3) (conj (term 2 true)) (bit-test m 4) (conj (term 3 true))
+                 (bit-test m 5) (conj (term 4 true)) (bit-test m 6) (conj (term 4 false)) (bit-test m 7) (conj (term 3 false))
+                 (bit-test m 8) (conj (term 2 false)) (bit-test m 9) (conj (term 1 false)))]
+        (set-res (if (empty? ts) 0 (apply list 'or ts))))
       (re-matches #"llvm\.fmuladd\..*" nm) (set-res (list '+ (list '* (a 0) (a 1)) (a 2)))
       (re-matches #"llvm\.eh\.typeid\.for.*" nm) (set-res (int-lit (typeid (peek (nth args 0))) 32))
       (and (re-matches #"llvm\.([a-z0-9]+)\.(f32|f64|f80)" nm) (math-fns (nth parts 1)))
@@ -696,16 +718,19 @@
                      (set (loop [e (value a t) t t is is]
                             (if (empty? is) e
                                 (let [rt (resolve-type t) i (first is)]
+                                  (if (complex-ld? rt)
+                                    (recur (list (if (zero? i) 'real 'imag) e) 'x86_fp80 (rest is))
                                   (if ('#{struct packed} (first rt))
                                     (recur (list (symbol (str ".-f" i)) e) (nth (rest rt) i) (rest is))
-                                    (recur (list 'aget (list '.-e e) i) (nth rt 2) (rest is))))))))
+                                    (recur (list 'aget (list '.-e e) i) (nth rt 2) (rest is)))))))))
       insertvalue (let [[[t a] [vt v] & is] (rest x)
                         place (loop [e res t t is is]
                                 (if (empty? is) e
                                     (let [rt (resolve-type t) i (first is)]
-                                      (if ('#{struct packed} (first rt))
-                                        (recur (list (symbol (str ".-f" i)) e) (nth (rest rt) i) (rest is))
-                                        (recur (list 'aget (list '.-e e) i) (nth rt 2) (rest is))))))]
+                                      (cond
+                                        (complex-ld? rt) (recur (list (if (zero? i) 'real 'imag) e) 'x86_fp80 (rest is))
+                                        ('#{struct packed} (first rt)) (recur (list (symbol (str ".-f" i)) e) (nth (rest rt) i) (rest is))
+                                        :else (recur (list 'aget (list '.-e e) i) (nth rt 2) (rest is))))))]
                     [(list 'set! res (value a t)) (list 'set! place (value v vt))])
       extractelement (let [[[t v] i] (rest x)] (set (list 'aget (list '.-e (value v t)) (typed-value i))))
       insertelement (let [[[t v] e i] (rest x)] [(list 'set! res (value v t)) (list 'set! (list 'aget (list '.-e res) (typed-value i)) (typed-value e))])
@@ -873,7 +898,10 @@
             defs (vec (for [[f info] fns :when (and (= (first f) 'llvm/define) (not= :available_externally (:linkage (apply hash-map (drop 4 f)))))]
                         (let [o (apply hash-map (drop 4 f))
                               prio (get ctor-fns (gname-str (second f)))
-                              m (linkage-meta o (:asm info) (when prio [(if (= prio 65535) 'constructor ['constructor prio])]))]
+                              ;; aligned: Itanium's member function pointers take the low bit of a function's address
+                              ;; for the virtual flag (clang aligns every function at 16; gcc -O0 does not)
+                              m (linkage-meta o (:asm info) (concat [['aligned (max 2 (long (or (:align o) 2)))]]
+                                                                    (when prio [(if (= prio 65535) 'constructor ['constructor prio])])))]
                           (lower-define f (assoc info :c-decl (with-meta (:c info) m))))))
             main (get globals "main")
             wrapper (when (and main (= (:kind main) :fn) (= (first (:form main)) 'llvm/define))
@@ -889,7 +917,7 @@
                   (list 'c/declare 'cx$resume (with-meta [(with-meta 'o {:tag '(* void)})] {:tag 'void}))
                   (list 'c/declare 'cx$uncaught (with-meta ['void] {:tag 'void}))]]
         [(list 'c/file c-name :std :gnu23)
-         (vec (concat (:defs @*structs*) head protos (keep first gvars) (keep second gvars) defs aliases (when wrapper [wrapper])))]))))
+         (vec (concat (:defs @*structs*) head protos aliases (keep first gvars) (keep second gvars) defs (when wrapper [wrapper])))]))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; The judgment of bin/cppi lower-check
@@ -964,9 +992,9 @@
 
 (defn lower-file
   "Lowers the IR at `ll`: {:c text :ae text} or {:refused class :message m}."
-  [^String ll ^String c-name]
+  [ll ^String c-name]
   (try
-    (let [forms (llvm/read-ll ll)
+    (let [forms (if (string? ll) (llvm/read-ll ll) ll)
           [ff cs] (lower-module forms c-name)
           ns (str "c.cpp." (str/replace (str/replace c-name #"\.c$" "") #"[^A-Za-z0-9_]" "_"))
           ae (c-forms-text ns ff cs)
@@ -1000,9 +1028,10 @@
                        pool (java.util.concurrent.Executors/newFixedThreadPool (Integer/parseInt (or (System/getenv "CPPI_THREADS") "4")))
                        futs (mapv (fn [[n ll dir]]
                                     (.submit pool ^java.util.concurrent.Callable
-                                             (fn [] (let [[_ rt d] (llvm/roundtrip-one (str dir "/forms.ae") ll (str dir "/print.ll"))
+                                             (fn [] (let [forms (try (llvm/read-ll ll) (catch Throwable e nil))
+                                                          [_ rt d] (llvm/roundtrip-one (str dir "/forms.ae") (or forms ll) (str dir "/print.ll"))
                                                           _ (spit (str dir "/rt.status") (str rt "\t" d "\n"))
-                                                          r (lower-file ll (str n ".c"))]
+                                                          r (lower-file (or forms ll) (str n ".c"))]
                                                       (if (:refused r)
                                                         (spit (str dir "/lower.refused") (str (name (:refused r)) "\t" (str/replace (str (:message r)) #"[\t\n]" " ") "\n"))
                                                         (do (spit (str dir "/lowered.c.ae") (:ae r)) (llvm/spit-latin1 (str dir "/lowered.c") (:c r))))
