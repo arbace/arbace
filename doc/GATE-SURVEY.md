@@ -1887,3 +1887,28 @@ as built. Test t03447's class `:print-shapes` (a constant printed as `0` against
   step's key names; (b) a pending program host compared by its build's key (`arbace_javac_key`, `gate_key`) rather than as
   changed; (c) the workaround (select one cheap step that needs the host). *Recommended: (a)*.
   - **Decided (the user, 2026-10-31): (b).** After the tag, at the next change that rekeys every step.
+
+## Decided (2026-10-31): GTS80-GTS82
+
+The user decided the three as recommended, after the tag, at the next change that rekeys every step (GTS79 (b) with
+them; built ahead on branch `gate-post-v2`, "As built: GTS72, GTS79-GTS82 (write-ahead)" below).
+
+- **GTS80 Passes written on a full disk** (GT7's rerun 4). `bin/gate --clean` publishes with `cp -an` (none replaced), so
+  rerun 4's empty pass files, written at 01:35 with the disk full, kept rerun 5's passes out of the store; the planner
+  ignored them, and the demonstrations' base plan ran 4 steps until they were rebuilt from rerun 5's logs. Options:
+  (a) `record_pass` writes its `.edn`, `.log` and `.inputs` through temporary names renamed into place, and the
+  publication replaces a pass that is empty or does not read; (b) the planner's check alone, `--prune` removing empty
+  files; (c) nothing. *Recommended: (a)*, at the next change that rekeys every step (it edits `bin/lib/gate-run.bash`).
+  - **Decided (the user, 2026-10-31): (a).**
+- **GTS81 A negative control per check family** (2026-10-31: `bin/java-check`'s two judges, GT5 to the tag's eve, every
+  interp and compiled run passing). Options: (a) one deliberately failing case per check family (Java's levels, goi, the
+  suite, the oracle, diffcheck, the crops' checks), recorded as expected to fail; a run where it passes fails the step;
+  (b) Java's levels only; (c) none. *Recommended: (a)*, after the tag, with the next change that rekeys every step.
+  - **Decided (the user, 2026-10-31): (a).**
+- **GTS82 Stage 0 built in a worktree by mistake** (2026-10-31: twice an agent ran a tool in a linked worktree without
+  `ARBACE_HOST_EXE`, and `bin/lib/host.bash`'s `arbace_host_exe` started `bin/seed --build` there, a 10-minute, 8 GB
+  build). Options: (a) in a linked worktree with no `ARBACE_HOST_EXE` and no stage 0 of its own, use the main
+  checkout's stage 0 when its seed and Go pins match, else refuse with a message; `ARBACE_SEED_BUILD=1` builds anyway;
+  (b) fall back to the main checkout's whenever it matches, building only when nothing matches; (c) no change.
+  *Recommended: (a)*, after the tag (`bin/lib/host.bash` is in many keys).
+  - **Decided (the user, 2026-10-31): (a).**
