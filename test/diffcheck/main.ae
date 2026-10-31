@@ -58,6 +58,17 @@
 
 (defn- canon [x] (oracle.driver/emit (walk/postwalk #(if (map? %) (into (sorted-map) %) %) x)))
 
+(defn- disagreements
+  "The cases on which the two runs' records a and b (by id) disagree, [case x y]: a case without a
+  record in a run is {:missing true} there, and a disagreement even when both runs lack it (two
+  runs that print nothing for a case do not agree on it)."
+  [cases a b]
+  (for [e cases
+        :let [x (get a (:id e) {:missing true})
+              y (get b (:id e) {:missing true})]
+        :when (or (:missing x) (:missing y) (not= (canon x) (canon y)))]
+    [e x y]))
+
 (defn- short-str [x n]
   (let [s (if (string? x) x (pr-str x))]
     (if (> (count s) n) (str (subs s 0 n) "...") s)))
@@ -89,19 +100,18 @@
     (doseq [[c [a b]] (map vector corpora by-corpus)]
       (let [[na _ nb _] (runs c)
             pair (if (:compiled c) :clojure :java)
-            mism (doall
-                   (for [e (:cases c)
-                         :let [x (get (:by a) (:id e) {:missing true})
-                               y (get (:by b) (:id e) {:missing true})]
-                         :when (not= (canon x) (canon y))]
-                     [e x y]))
+            mism (doall (disagreements (:cases c) (:by a) (:by b)))
             done? (and (:done a) (:done b))
+            ;; the Java forms' pair: a case whose classes stay interpreted in both runs (defined by
+            ;; more than one case, or in jforms-excluded.edn) compares the interpreter with itself
+            jc (if (= pair :java) (:jcompiled c 0) (count (:cases c)))
             line (format "%-44s %-7s %5d/%5d agree %6d ms %6d ms%s" (:file c) (name pair)
                          (- (count (:cases c)) (count mism)) (count (:cases c)) (:ms a) (:ms b)
-                         (str (when-not (:done a) (str ", " na " run incomplete (exit " (:exit a) ")"))
+                         (str (when (= pair :java) (str ", " jc " with their classes compiled"))
+                              (when-not (:done a) (str ", " na " run incomplete (exit " (:exit a) ")"))
                               (when-not (:done b) (str ", " nb " run incomplete (exit " (:exit b) ")"))))]
         (swap! total + (count (:cases c))) (swap! bad + (count mism))
-        (swap! pair-totals update pair (fnil (fn [[n m]] [(+ n (count (:cases c))) (+ m (count mism))]) [0 0]))
+        (swap! pair-totals update pair (fnil (fn [[n m j]] [(+ n (count (:cases c))) (+ m (count mism)) (+ j jc)]) [0 0 0]))
         (when-not done? (swap! incomplete inc) (swap! cut conj (:file c)))
         (println line)
         (.append report (str "== " line "\n"))
@@ -114,6 +124,7 @@
                              :got (str (runner/result-kind x) " / " (runner/result-kind y) " "
                                        (runner/digest (str (canon x) "\n" (canon y))))})
             (let [what (str "  " id " " (short-str (:text e) 200) "\n"
+                            (when (and (:missing x) (:missing y)) "    no record in either run\n")
                             (str/join (for [k (conj result-keys :missing) :when (not= (get x k) (get y k))]
                                         (str "    " k "\n      " na (apply str (repeat (- 12 (count na)) " ")) (short-str (get x k) 600)
                                              "\n      " nb (apply str (repeat (- 12 (count nb)) " ")) (short-str (get y k) 600) "\n"))))]
@@ -121,8 +132,9 @@
               (when (< i 5) (print what)))))))
     (.mkdirs (io/file runner/root ".tmp/diffcheck"))
     (spit (io/file runner/root ".tmp/diffcheck/check.txt") (str report))
-    (doseq [[pair [n m]] (sort @pair-totals)]
-      (println (format "== %s's pair: %d of %d cases agree, %d disagree" (name pair) (- n m) n m)))
+    (doseq [[pair [n m j]] (sort @pair-totals)]
+      (println (format "== %s's pair: %d of %d cases agree, %d disagree%s" (name pair) (- n m) n m
+                       (if (= pair :java) (str "; " j " cases with their classes compiled, the others' classes interpreted in both runs") ""))))
     (println (format "== %d of %d cases agree, %d disagree (all in .tmp/diffcheck/check.txt)%s"
                      (- @total @bad) @total @bad
                      (if (pos? @incomplete) (str "; " @incomplete " corpora incomplete") "")))
