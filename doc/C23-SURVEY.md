@@ -2899,3 +2899,11 @@ Shipped files changed: none under `go/`, `overlay/`, `jdk/`. Not shipped (CS100 
 
 The worktree's `.tmp/` (kept): `ci-dg/` (the groups' lists, `dg.edn`, `gcc.edn`, `read.edn`, `gcc/` outputs, `judge-rows.edn`), `ci-check/`, `ci-aot/` (the
 run groups' lists and runs), `c7/` (logs), `repr-c/gcc-15.2.0/` (the extracted testsuite, 220 MB), `ci-musl/` (musl extracted and read), `ci/` (cirun).
+
+### Decided (CS120-CS127, CS130-CS136; the user, 2026-10-31)
+
+All as recommended:
+- C6's: CS120 (a), CS121 (a), CS122 (a) in the heavy window, CS123 (a) in the heavy window, measured on CompCert's
+  benchmarks, CS124 (a), CS125 (a), CS126 (a) now and (b) with C8, CS127 (a).
+- C7's: CS130 (a), CS131 (c), CS132 (a) restricted to what the c23 files test, CS133 (a) in C7's follow-up in the
+  light tier, CS134 (b) now, CS135 (a), CS136 (b) until most of the gcc groups' error tests pass, then (a).
