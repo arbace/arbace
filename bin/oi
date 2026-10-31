@@ -58,6 +58,7 @@
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 . "$root/bin/lib/tmpdir.bash"
+. "$root/bin/lib/limit.bash"
 
 OI_DIR=$root/.tmp/oi
 OCD=$root/.tmp/ocdump/ocdump
@@ -396,25 +397,40 @@ cmd_aot_lib() {
   echo "oi: aot-lib: $(ls "$O2J_LIB" | grep -c '\.ae$') units, $(du -sh "$O2J_LIB" | cut -f1); the runtime lacks $(awk -F'\t' '/^missing/{print $3}' "$O2J/lib-missing.txt" | sort -u | wc -l) of the externals and primitives they name ($O2J/lib-missing.txt)"
 }
 
-# O2J_LIMIT=SECONDS: the run is killed after that long (status 124, 137 after the grace), a program of the single mode
-# (the batch has its own limit); O2J_ARGV0: the program's argv.(0) (test/ocaml/o2j/run.ae)
 o2j_run() {
-  local lim=(); [ -n "${O2J_LIMIT:-}" ] && lim=(timeout -k 5 "$O2J_LIMIT")
-  ARBACE_PATH=$root/jdk/ocaml TMPDIR=$O2J/tmp GOMEMLIMIT=${O2J_GOMEMLIMIT:-900MiB} GOMAXPROCS=1 "${lim[@]}" "$(arbace_exe)" "$root/test/ocaml/o2j/run.ae" "$@"
+  ARBACE_PATH=$root/jdk/ocaml TMPDIR=$O2J/tmp GOMEMLIMIT=${O2J_GOMEMLIMIT:-900MiB} GOMAXPROCS=1 "$(arbace_exe)" "$root/test/ocaml/o2j/run.ae" "$@"
+}
+
+# o2j_run_cpu CPU WALL ARGS...: o2j_run with the project's limits (bin/lib/limit.bash, limited_cpu): CPU seconds of CPU time (the kernel
+# counts all the process's threads, so the host's load barely moves it), and WALL seconds as a cap for a program that waits; a run
+# killed by either is status 137 or 124 (the callers' "timeout"). O2J_ARGV0 is the program's argv.(0) (test/ocaml/o2j/run.ae)
+o2j_run_cpu() {
+  local cpu=$1 wall=$2; shift 2
+  limited_cpu "$cpu" "$wall" env ARBACE_PATH="$root/jdk/ocaml" TMPDIR="$O2J/tmp" GOMEMLIMIT="${O2J_GOMEMLIMIT:-900MiB}" GOMAXPROCS=1 \
+    "$(arbace_exe)" "$root/test/ocaml/o2j/run.ae" "$@"
+}
+
+# the AOT level's limit: TIMEOUT seconds of CPU a program (the wall time of a quiet host, one thread of Go), the wall cap four times it
+o2j_cpu() { echo "$TIMEOUT $((TIMEOUT * 4))"; }
+
+# o2j_alone ID OUT FILES ARGV0 ARGS...: one program alone in a process under o2j_cpu's limits; "timeout" for the status a limit kills with
+o2j_alone() {
+  local id=$1 out=$2 files=$3 argv0=$4 st=0 t0 t1; shift 4
+  t0=$(date +%s.%N)
+  (cd "$(dirname "$out")" && O2J_ARGV0=$argv0 o2j_run_cpu $(o2j_cpu) $(cat "$files") -- "$@") > "$out" 2>&1 || st=$?
+  t1=$(date +%s.%N)
+  case $st in 124|137|152) st=timeout ;; esac
+  printf '%s\t%s\t%s\n' "$id" "$st" "$(echo "$t1 - $t0" | bc)"
 }
 
 # o2j_env_runs BL RES: the programs of BL (batch.list: ID OUT FILES ARGV0 ARGS... ENV) that have an environment, each alone
-# (the batch shares one process), under TIMEOUT as the batch's rows are (a row "timeout" at 124 and 137), their results
-# appended to RES (ID, status, seconds); argv.(0) the program's dump as the other rows' (review 008's finding 6)
+# (the batch shares one process), under o2j_cpu's limits, their results appended to RES (ID, status, seconds); argv.(0) the
+# program's dump as the other rows' (review 008's finding 6)
 o2j_env_runs() {
   local bl=$1 res=$2
   awk -F'\t' '$NF != "" { a = ""; for (i = 5; i < NF; i++) a = a (a == "" ? "" : " ") $i; print $1 "\037" $2 "\037" $3 "\037" $4 "\037" a "\037" $NF }' "$bl" |
   while IFS=$'\037' read -r id out files argv0 args env; do
-    local st=0 t0 t1; t0=$(date +%s.%N)
-    (cd "$(dirname "$out")" && for kv in $env; do export "$kv"; done; O2J_ARGV0=$argv0 O2J_LIMIT=$TIMEOUT o2j_run $(cat "$files") -- $args) > "$out" 2>&1 || st=$?
-    t1=$(date +%s.%N)
-    case $st in 124|137) st=timeout ;; esac
-    printf '%s\t%s\t%s\n' "$id" "$st" "$(echo "$t1 - $t0" | bc)" >> "$res"
+    ( for kv in $env; do export "$kv"; done; o2j_alone "$id" "$out" "$files" "$argv0" $args ) >> "$res"
   done
 }
 
@@ -456,6 +472,18 @@ o2j_shard() {
   while [ -s "$left" ]; do
     st=0
     o2j_run --batch "$left" "$res" "$TIMEOUT" "$O2J_LIB/" > "$left.log" 2>&1 || st=$?
+    # a program the batch stopped at its wall-clock limit again alone under the CPU limit: a loaded host (the process shared with
+    # the others, two shards at once) slows the wall time, not the CPU time it needs (review 008's finding 2)
+    if [ "$st" = 3 ]; then
+      local tid; tid=$(awk -F'\t' '$2 == "timeout" { id = $1 } END { print id }' "$res")
+      if [ -n "$tid" ]; then
+        local tl; tl=$(awk -F'\t' -v id="$tid" '$1 == id' "$list" | head -1)
+        grep -v -F "$tid$(printf '\t')timeout" "$res" > "$res.new" || true; mv "$res.new" "$res"
+        local tid2 out files argv0 args
+        IFS=$'\t' read -r tid2 out files argv0 args <<< "$tl"
+        o2j_alone "$tid" "$out" "$files" "$argv0" $(echo "$args" | tr '\t' ' ') >> "$res"
+      fi
+    fi
     # the programs of left without a result
     awk -F'\t' 'NR==FNR { done[$1] = 1; next } !($1 in done)' "$res" "$left" > "$left.new"
     if [ "$st" != 0 ] && [ "$st" != 3 ] && [ -s "$left.new" ]; then
@@ -514,7 +542,7 @@ cmd_check_aot() {
     secs=$(awk -F'\t' -v id="$id" '$1 == id {print $3}' "$O2J/results.tsv" | head -1)
     [ -f "$d/o2j.out" ] || : > "$d/o2j.out"
     note=$(grep -a -m1 -o 'o2j: .*' "$d/o2j.out" | head -c 300 | tr '\t' ' ' || true)
-    case $st in timeout) note="timeout ${TIMEOUT}s"; st=124 ;; crash*) note="$st"; st=125 ;; "") note="no result"; st=125 ;; esac
+    case $st in timeout) note="timeout ${TIMEOUT}s of CPU"; st=124 ;; crash*) note="$st"; st=125 ;; "") note="no result"; st=125 ;; esac
     printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$st" "$(sha256sum < "$d/o2j.out" | cut -d' ' -f1)" "$(wc -c < "$d/o2j.out")" "$secs" "$note" >> "$out.new"
     rm -f "$d/$u.ae"
   done

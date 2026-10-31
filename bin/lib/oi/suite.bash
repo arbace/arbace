@@ -209,7 +209,7 @@ cmd_suite_check_aot() {
     secs=$(awk -F'\t' -v id="$id" '$1 == id {print $3}' "$A/results.tsv" | head -1)
     [ -f "$d/o2j.out" ] || : > "$d/o2j.out"
     note=$(grep -a -m1 -o 'o2j: .*' "$d/o2j.out" | head -c 300 | tr '\t' ' ' || true)
-    case $st in timeout) note="timeout ${TIMEOUT}s"; st=124 ;; crash*) note="$st"; st=125 ;; "") note="no result"; st=125 ;; esac
+    case $st in timeout) note="timeout ${TIMEOUT}s of CPU"; st=124 ;; crash*) note="$st"; st=125 ;; "") note="no result"; st=125 ;; esac
     printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$st" "$(sha256sum < "$d/o2j.out" | cut -d' ' -f1)" "$(wc -c < "$d/o2j.out")" "$secs" "$note" >> "$out.new"
   done
   LC_ALL=C sort "$out.new" > "$out"; rm -f "$out.new"

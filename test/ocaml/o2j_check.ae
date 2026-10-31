@@ -38,17 +38,31 @@
             (not= st (:status want)) ["fail" (str "status " st ", ocamlopt " (:status want))]
             :else ["fail" (str "output differs (" bytes " bytes, ocamlopt " (:bytes want) ")")]))))))
 
-(defn known-of [path]
-  (if (.exists (java.io.File. ^String path)) (into {} (read-string (slurp path))) {}))
+(defn known-of
+  "ID -> [TEXT KINDS]: an entry is [ID TEXT] or [ID TEXT KINDS], KINDS a prefix of the run's reason or a vector of them."
+  [path]
+  (if (.exists (java.io.File. ^String path))
+    (into {} (for [[id text kinds] (read-string (slurp path))] [id [text (when kinds (if (string? kinds) [kinds] (vec kinds)))]]))
+    {}))
+
+(defn slow-of
+  "The programs a speed class names (test/ocaml/aot-slow.edn: [ID ...]): those whose timeout is the speed, not a hang."
+  [path]
+  (if (.exists (java.io.File. ^String path)) (set (read-string (slurp path))) #{}))
 
 (def ^:dynamic *known* {})
+(def ^:dynamic *slow* #{})
 
 (defn with-known
-  "A failing program test/ocaml/aot-known.edn lists: its reason there (\"known REASON (the run's)\")."
+  "A failing program test/ocaml/aot-known.edn lists: its text there (\"known TEXT (the run's reason)\"), when the run's reason is
+  of the kind the entry was made for (a listed program that now crashes, prints wrong output or loops is not that known thing);
+  a listed program whose timeout is its speed (aot-slow.edn): \"slow\"."
   [id [res reason :as r]]
-  (if-let [k (get *known* id)]
-    (if (#{"fail" "refused"} res) [res (str "known " k " (" reason ")")] r)
-    r))
+  (let [[text kinds] (get *known* id)]
+    (cond
+      (and text (#{"fail" "refused"} res) (or (nil? kinds) (some #(str/starts-with? reason %) kinds))) [res (str "known " text " (" reason ")")]
+      (and (contains? *slow* id) (= res "fail") (str/starts-with? reason "timeout ")) ["slow" reason]
+      :else r)))
 
 (defn vs-oi
   "Whether the run's status and output are oi's: same, differs, or - (one of them did not run)."
@@ -99,10 +113,13 @@
         only? (str/ends-with? mode "-only")
         ids (if only? (keys runs) (keys corp))
         known (known-of (str (.getParent (java.io.File. ^String results-edn)) "/aot-known.edn"))
-        rows (binding [*known* known]
+        slow (slow-of (str (.getParent (java.io.File. ^String results-edn)) "/aot-slow.edn"))
+        rows (binding [*known* known *slow* slow]
                (vec (for [id ids] (conj (into [id] (with-known id (result-of id (corp id) rf runs))) (vs-oi id runs ois)))))
         _ (doseq [[id res] rows :when (and (= res "pass") (contains? known id))]
             (println (str "STALE " id ": passes, but test/ocaml/aot-known.edn lists it")))
+        _ (doseq [[id res] rows :when (and (= res "pass") (contains? slow id))]
+            (println (str "STALE " id ": passes, but test/ocaml/aot-slow.edn lists it")))
         old (when (.exists (java.io.File. ^String results-edn)) (read-string (slurp results-edn)))
         merged (if only?
                  (let [m (into (sorted-map) (for [[id & r] old] [id (vec r)]))]

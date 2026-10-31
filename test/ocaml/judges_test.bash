@@ -46,4 +46,22 @@ expect "rollup: a stale roles.tsv is regenerated, not judged" 0 'testsuite: 0 fi
 # finding 6: a program with an environment runs under OI_TIMEOUT (1 s: the stdlib's load alone takes longer), as a row "timeout"
 out=$(cd "$root" && OI_TIMEOUT=1 bin/oi check --aot --only 'tool-ocamltest-var-expansion/subst1' 2>&1 | grep -a 'subst1'); st=$?
 expect "aot: a program with an environment is under the time limit" 1 'timeout 1s' "$out" $st
+
+# finding 7 (and 2): a known entry is kept only for the kind of failure it was made for; a timeout is a speed class only for the listed programs
+k=$W/known; mk "$k"
+printf '[{:id :gc :match [#"^fail known gc: "]} {:id :speed :match [#"^slow timeout "]}]\n' > "$k/classes.edn"
+printf '[\n ["a" "fail" "known gc: a finaliser (output differs (1 bytes, ocamlc 1))"]\n ["b" "pass" ""]\n ["c" "pass" ""]\n]\n' > "$k/oi-results.edn"
+printf '[\n ["a" "fail" "known gc: a finaliser (output differs (1 bytes, ocamlopt 1))" "differs"]\n ["b" "pass" "" "same"]\n ["c" "pass" "" "same"]\n]\n' > "$k/aot-results.edn"
+printf '[["a" "gc: a finaliser" "output differs"]]\n' > "$k/oi-known.edn"; cp "$k/oi-known.edn" "$k/aot-known.edn"
+printf 'a\t0\tx\t1\t1.0\t\nb\t0\th\t1\t1.0\t\nc\t0\th\t1\t1.0\t\n' > "$k/check.tsv"
+out=$(judge_oi judge "$k/check.tsv" "$k/corpus.tsv" "$k/refs.edn" "$k/oi-results.edn" "$k/classes.edn"); expect "oi: a known program failing as recorded stays known" 0 'oi: 2 pass, 0 failing' "$out" $?
+printf 'a\t125\tx\t1\t1.0\tcrash 7\nb\t0\th\t1\t1.0\t\nc\t0\th\t1\t1.0\t\n' > "$k/check.tsv"
+out=$(judge_oi judge "$k/check.tsv" "$k/corpus.tsv" "$k/refs.edn" "$k/oi-results.edn" "$k/classes.edn"); expect "oi: a known program that now crashes is failing" 1 'FAILING a: fail crash 7' "$out" $?
+out=$(judge_aot judge "$k/check.tsv" "$k/corpus.tsv" "$k/refs.edn" "$k/oi.tsv" "$k/aot-results.edn" "$k/classes.edn"); expect "aot: a known program that now crashes is failing" 1 'FAILING a: fail crash 7' "$out" $?
+printf 'a\t0\tx\t1\t1.0\t\nb\t124\tx\t0\t120\ttimeout 120s\nc\t0\th\t1\t1.0\t\n' > "$k/check.tsv"
+printf '[\n ["a" "fail" "known gc: a finaliser (output differs (1 bytes, ocamlopt 1))" "differs"]\n ["b" "fail" "timeout 120s" "differs"]\n ["c" "pass" "" "same"]\n]\n' > "$k/aot-results.edn"
+out=$(judge_aot judge "$k/check.tsv" "$k/corpus.tsv" "$k/refs.edn" "$k/oi.tsv" "$k/aot-results.edn" "$k/classes.edn"); expect "aot: a timeout of a program not listed as slow is failing" 1 'FAILING b: fail timeout 120s' "$out" $?
+printf '["b"]\n' > "$k/aot-slow.edn"
+printf '[\n ["a" "fail" "known gc: a finaliser (output differs (1 bytes, ocamlopt 1))" "differs"]\n ["b" "slow" "timeout 120s" "differs"]\n ["c" "pass" "" "same"]\n]\n' > "$k/aot-results.edn"
+out=$(judge_aot judge "$k/check.tsv" "$k/corpus.tsv" "$k/refs.edn" "$k/oi.tsv" "$k/aot-results.edn" "$k/classes.edn"); expect "aot: a timeout of a listed slow program is the speed class" 0 'classes: .*:speed 1' "$out" $?
 exit $bad
