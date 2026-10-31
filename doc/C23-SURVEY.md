@@ -3333,3 +3333,127 @@ Each with options, the recommended one first; none decided.
 Shipped files changed: none (nothing under `go/`, `overlay/`, `jdk/`).
 Scratch in the worktree's `.tmp/`: `c7/` (logs `r1`-`r4*.log`, `ess1`-`ess3.log`, `final2.log`, `dgrec.log`; `check-tag.patch`, `check-full.ae`, `fn.ae`, `rows-before172.edn`), `c7s/` (`m1.txt`-`m5.txt`: file lists for `one`), `t/` (probe files), `dg-orig.edn`, `dg-rec.edn`.
 Rule slips: none that ran. A heredoc of a Python helper once held the text `open('/dev/null')` in a branch that never executed (`if False`), which the rule forbids even in text; nothing was opened.
+
+## As built: review 006's fixes (2026-10-31)
+
+On the branch `c23-c7`, in the light tier, after review 006 (a helper VM's, at `1048d639`, before CS170-CS174; its report in the worktree's
+`.tmp/review-006.md`): each finding checked against the code at `aee075e4` first; all eleven hold (finding 10 confirmed on this amd64 host).
+Commits `e09c6b9e` (2), `e8d75815` (1), `20790ae8` (4), `4d3c9bbc` (10), `54d13edf` (3, 5, part of 11), `daa096c0` (6-9, the rest of 11),
+`5a989374` (the run level's record), then this section. The judges' unit tests are new: `test/c/judge_test.ae` (`bin/ci judge-test`, `make
+ci-judge-test`), on made-up reads and on the small files of `test/c/judge/`, 17 tests, 38 assertions; and `test/c/run/`, a corpus of Arbace's
+own run programs (`test/c/corpora.edn`'s `:ci-run`, judged as the run corpora are, gcc's runs in `test/c/ref-gcc15.edn`).
+
+### R6.1 Per finding
+
+| # | holds | the fix | the test (fails before, passes after) |
+|---|---|---|---|
+| 1 (high) | yes: `verdict` read neither `:unlocated` nor `:other` and judged a `:read-error` as an `:ok` read; a preprocessor panic was `{:pp-only true}`; a missing row passed | `verdict`: `:stopped` for errors of another file or without a line (unless a line-0 directive or `dg-excess-errors` takes them), for a read that failed with no message, and for a read error before the file's later expected lines; `:crash` for a missing row; `read-file` makes a panic of the preprocessor (pp/preprocess's `:panic`) a crash | `no-read-row`, `stray-errors-stop`, `stray-errors-line-zero`, `read-error-accounted`, `read-error-stops-early`, `included-header-error` (`test/c/judge/inc-error.c`), `preprocessor-panic` (`pp-panic.c`): 11 of 13 assertions fail on the verdict before |
+| 2 (high) | yes: `binary` negated `k` at its own type (`build.ae`'s `p - k`) | `(ex-neg (conv k long))`, as `assign`; both back ends take the builder's node | `test/c/run/ptr-sub-unsigned.c` (the review's program: gcc 3, ci faulted, "no slab") and `ptr-sub-narrow.c` (`unsigned char`, `unsigned short`, `_Bool`, `unsigned`, `signed char` -128, `short`, `unsigned long`, `char *` minus `unsigned char`, `-=`): both faulted before, pass interpreted and compiled |
+| 3 (medium) | yes: the judges exited non-zero only for a row in no class; `parse-gap`'s `fail extra: .*` and `fail both: .*`, `read-refused`'s timeouts and crashes, `decl-diag`'s `expected`, the run level's `read-error` and `long-double` (any failure of a long-double program) were catch-alls; `--aot`'s comparison never reached the status | `arbace.c.run/compare-record` in the three judges: a row the committed record passes that does not pass now fails whatever its class, a known row whose reason changed fails, the record's rows the run does not hold are reported (and fail unless the run is a subset, `CI_SUBSET`); `--aot` fails on an "interpreted only" row and on a run that differs from a passing interpreted one, and `speed` is no class of the compiled level; the classes narrowed (below) | `record-regressions`; a dg judge against a record with a refused file made a pass exits 1 with `REGRESSION`; the full runs below listed exactly the rows that moved |
+| 4 (medium) | yes: cirun, `AotMain` and the shard's main exited 2 for their own failures, as Go does on a panic, and stdout was lost | their own failures (usage, read, parse, no entry, no package, a panic recovered in main) print "cirun: internal: ..." ("ciaot: ...") after flushing stdout and exit 70; `run1` keeps the line; `result` fails it whatever gcc's status, a known id does not hide it | `runner-internal-not-a-pass` (2 of 3 assertions fail before); cirun on a malformed node program: 70 and the line (before: 2) |
+| 5 (medium) | yes: `--record` with `--only`, `--sample` or `--resume` rewrote a corpus from the subset | `--record` with `--only` (and `--aot`'s `--sample`) refuses (status 2); `bin/ci check --resume` keeps `list.tsv` whole, runs `todo.tsv`, appends `run.tsv` (as `--aot` did) | both refusals; a `--resume` of ci-run with one of three runs kept judges 3 of 3 (it ran the two once each: a first version ran them twice from `nodes.tsv`'s repeated rows, fixed) |
+| 6 (low-medium) | yes | `dg-excess-errors` keeps the missed lines; a line-0 directive takes as many errors as it counts (the extra lines and the errors outside the main file), no fewer and no more | `excess-keeps-missed`, `line-zero-counts`; no file of the corpus moved |
+| 7 (low-medium) | yes, both halves | in a file not only preprocessed, a read error stands for an expected line only when every directive of that line expects a syntax, lexical or preprocessor diagnostic (`syntax-expectation?`); the checker's errors in an included unit are `FILE:LINE:` (`check.ae`'s `*unit*`, each of the unit's forms at its own line) | `read-error-not-semantic`, `included-unit-checker-error` (`test/c/judge/inc-check.c` and `.h`) |
+| 8 (low) | yes: `{ target { c \|\| c++11 } }` was dropped, `c++14`/`c++17_down`/`c++20` held; `host/dg-options` cut a selector at its first brace; `gcc-agrees` had a dead line | every `c++*` name false (`sel-atom`), the special case gone; `host/dg-options` reads a selector with its braces matched and skips a line whose selector does not hold for C (`host/for-c?`; `host/eval-selector` shared with `arbace.c.dg`); the passes gcc does not agree with are counted and named (12: the embed files' `${srcdir}` directories and `c23-ucn-2`) | `cxx-selectors` (2 of 4 assertions fail before) |
+| 9 (low) | yes: 8 passes were unsupported; `c23-enum-3` is `{ target { ! int128 } }`, unsupported on this host as DejaGnu says | `:unsupported` is its own result, not a pass and not a failure; a later `dg-do` that holds wins | `later-dg-do-wins` |
+| 10 (low) | yes, on this amd64 host: gcc 15.2 -O0 compiles `(unsigned long)d` as `comisd 2^63; jnb; cvttsd2siq` and prints `8000000000000000` for a NaN; ci printed 0 | `f2i`'s `u64`/`p` branch is `!(x >= 2^63)`; cf2g's `F2IConv` shares it | `test/c/run/nan-to-unsigned.c` (NaN as double and float, 1e30, -1, 9.3e18 to `unsigned long` and `unsigned`, NaN to `long`): fails with the cirun of before (differ stdout), passes |
+| 11 (low) | yes, each item | `--essential` fails on a listed file not found and prints "N of M listed files pass"; `check --aot` without `CI_AOT_NODES` compares with `.tmp/ci-check` and makes its own lists; the testsuite's root dropped from the dg messages (the record is the same in any checkout); "got:" is the extra line's own error; `verdict`'s duplicate branches and `check-aot`'s repeated line gone, and its `2>/dev/null` | `extra-line-message`, `messages-without-root` |
+
+### R6.2 The numbers
+
+The dg check, 627 files (`bin/ci dg --record`, the last a full run with gcc; between, the seven groups' read and judge with gcc's outputs unchanged):
+
+| | pass | unsupported | in a class | not in a class |
+|---|---:|---:|---:|---:|
+| before (`aee075e4`) | 598 (8 of them unsupported) | - | 29 | 0 |
+| after finding 1 | 596 | - | 31 | 0 |
+| after findings 6-9, 11 | **586** | **8** | 33 | 0 |
+
+Finding 1 costs 2 passes, neither a real one: `c23-has-c-attribute-4` (the five expected errors and a sixth without a position, "-: operator
+"__has_c_attribute" requires a parenthesized identifier": now pp-diag) and `c23-if-decls-2` (six parse errors in the included
+`c23-if-decls-1.c`, C2Y's if declarations, which gcc accepts there: now parse-gap). No read row was missing and no `dg-do preprocess` file
+panicked. Finding 9 moves the 8 unsupported files out of pass (`c23-enum-3`, `c23-float-11`, `c23-no-dfp-1`, `c23-float-no-dfp-1` to `-4`,
+`gnu23-builtins-no-dfp-1`). Finding 7 costs 2 more, again no real passes: `gnu23-varmod-1` (the read's "label undefined: err" stood for
+"jump into scope": decl-diag) and c-c++-common `embed-10` (a parse error stood for "makes pointer from integer without a cast": parse-gap,
+the `${srcdir}` embed directory); `c23-complit-5` misses three more lines (39-41, "storage class specifier in", which its read errors had
+answered). (`daa096c0`'s message says those three came from the C++ selectors: wrong, they are finding 7's.) `c23-ucn-1` would have been a
+third, its lexical "is outside the UCS codespace" being a read error by right; `syntax-expectation?` takes it. Per group, pass: gcc-c23 249 of
+270 (+7 unsupported), gcc-cpp-c23 16, gcc-c23-sub 24 of 30, gcc-gnu23 47 of 51 (+1 unsupported), gcc-embed 38 of 47, gcc-va-opt 11 of 12,
+gcc-bitint 201. `bin/ci dg --essential`: 102 of 102; the list lost three files that were never real passes (`c23-has-c-attribute-4`, `embed-10`,
+`gnu23-varmod-1`).
+
+The classes narrowed (finding 3): dg's `parse-gap` keeps its parser-message alternatives and gains three exact ones (`c23-if-decls-1.c`'s
+`unexpected 'int'`, `-: unexpected EOF`, embed-10's line 5), `read-refused` its four refusals only, `decl-diag`'s `expected` became gcc's
+`expected expression before` and a single quoted token, `pp-diag` gains the port's errors without a position (`-: operator
+"__has_c_attribute"`, `-: expected '('`), `pedantic-diag` the checker's `#embed` pedwarn inside `__extension__` (`embed-2`, which `fail
+extra: .*` held); the run level's `long-double` is an abort or a differing stdout of a long-double program and `_Generic`'s refusal
+(`pr39228` and `va-arg-pack-1` now in `gcc-builtin`, where their undefined builtins put them), its `parse-gap` (`read-error`, matching nothing)
+removed, `wide` gains ci's "no integer node" of the wide nodes, and a class `signals` is new.
+
+The run level, `bin/ci check --record` over the fifteen corpora (the seven, the seven gcc-*-run groups and ci-run): 3,761 programs, **3,457 pass**
+(3,455 of 3,758 before). Gained: ci-run's 3 and `gcc-c23-run/c23-float-6` (CS174 (b)'s typed `__builtin_nans*`, not recorded then: its nodes
+are refused at `d9bc924e` and built at `9dcebbdb`). Lost: `torture-execute/20101011-1.c` and its mirror's: their `dg-additional-options
+"-DSIGNAL_SUPPRESS" { target { ! signal } }` no longer applies (finding 8's whole selector; before it was cut at its first brace and held),
+so the program's SIGFPE handler is tested, which ci does not call (the known class `signals`; gcc's reference, recorded with the option,
+exits 0 without it too). The nine gcc-bitint-run programs whose wide nodes ci lacks are "internal: cirun: internal: ci: no integer node ..."
+now (finding 4), in `wide`. The record comparison listed exactly these 11 rows as regressions before they were recorded. (`5a989374`'s
+message says 3,459: it is 3,457.)
+
+The compiled level: not rerun to the end. The builder change reaches the programs that call `ex-neg` on a type narrower than 64 bits
+(a scan of the fifteen corpora with the old builder, `ex-neg` wrapped: 129 programs, a superset, unary minus among them; `.tmp/r6/all.hits`);
+their shard with ci-run's three (`bin/ci check --aot --only`, `CI_AOT_NODES=1`, 132 programs) was stopped after its first shard (benchmarksgame, 4
+built) when the host's disk reached 80% (a clean gate run in the main checkout was writing; this worktree's `.tmp/` was 0.6 GB), as the brief's
+limit says. `test/c/check-aot-linux-amd64.edn` is unchanged; its rows for `20101011-1` (pass, with the old option) and the nine wide
+gcc-bitint-run programs are stale until the next `--aot --record` (CS190).
+
+### R6.3 Checks not run
+
+The compiled shard above (CS190); `bin/repr-c check --c23` and the round trip (`check.ae`'s `*unit*` and `host/dg-options` changed; not run, the
+disk at 80%); `bin/ci annotations`, `bin/repr-c parse-check` and `check --tokens` (as in C7J.3); `bin/gate`; `bin/ci repl-session`.
+
+### R6.4 Proposals (CS190-CS195)
+
+Each with options, the recommended one first; none decided.
+
+- **CS190 The compiled level after review 006** (the builder's `p - k`, finding 4's internal line, finding 8's options for `20101011-1`).
+  - Options: (a) the shard of the scan's 129 programs, ci-run's 3, the two `20101011-1` and the nine wide programs (`--only`, light, about 15
+    minutes) as soon as the disk allows, then `--aot --record` over the fifteen corpora in the heavy window; (b) only the full `--aot --record`
+    in the heavy window; (c) ci-run's three alone.
+  - *Recommended: (a)*: the scan bounds what the change reaches, and the full record needs the window's time anyway.
+- **CS191 Signals delivered to a handler** (`20101011-1`: `sigaction`'s SIGFPE handler; the class `signals`).
+  - Options: (a) keep it known until C8; (b) crt delivers a synchronous fault (SIGFPE, SIGSEGV, SIGBUS) to a handler `signal` or `sigaction`
+    installed, on the faulting thread's C stack, the handler's return resuming after the instruction as the kernel does for SIGFPE (it does not
+    return in this test: it exits); (c) also asynchronous signals (`raise`, `kill` to itself).
+  - *Recommended: (a)* now, (b) with C8: one program, and (b) touches both back ends' fault path.
+- **CS192 `${srcdir}` in dg-options** (`host/dg-options` writes "." for it, so `--embed-directory=${srcdir}/c-c++-common/cpp/embed-dir` is
+  relative to the file's own directory, where neither gcc nor the read finds it: embed-10 and embed-11 fail for both, and 12 passes are files
+  whose directives gcc does not agree with).
+  - Options: (a) `${srcdir}` as the testsuite's root (the group's base), then gcc and the dg record again; (b) leave it, the 12 named by the
+    judge.
+  - *Recommended: (a)*: one substitution, and the judge's count of gcc's disagreements shows what it fixes.
+- **CS193 The dg verdict by message as well as by line** (finding 7's remaining half: a checker error on the right line for the wrong reason
+  passes).
+  - Options: (a) count, per pass, the expected lines whose dg-error regex does not match the checker's message on that line (the messages
+    differ in wording, so a count to read first, not a failure); (b) fail on a mismatch with a table of the checker's wordings against gcc's;
+    (c) leave it by line.
+  - *Recommended: (a)*: it measures the problem before a table is written.
+- **CS194 C2Y's if declarations in the parser** (`c23-if-decls-1/2`: the parser rejects `if (int i = 42)`, so one file stands on a read error and
+  the other is stopped by its include).
+  - Options: (a) read them (C2Y's selection statements with a declaration), with gcc's pedwarn before C2Y under `-pedantic-errors`; (b) leave.
+  - *Recommended: (a)*: two files, one grammar rule, and the pedwarn is the checker's existing `pedwarn!`.
+- **CS195 `:unsupported` in the numbers** (8 dg files; the REAP matrix and the As built tables counted them as passes).
+  - Options: (a) report pass of supported (586 of 619) with the unsupported apart; (b) count them as non-passes (586 of 627).
+  - *Recommended: (a)*, as DejaGnu reports UNSUPPORTED apart.
+
+### R6.5 Shipped files, scratch and rule slips
+
+Shipped files changed: `go/arbace/ci/aot.ae` (finding 4) and `go/arbace/ci/expr.ae` (finding 10), under `go/`, so in the gate's key; nothing under
+`overlay/` or `jdk/`. Not shipped: `arbace/c/{build,check,dg,run,cf2g}.ae`, `arbace/repr/c/host.ae`, `tools/cirun/main.go`, `bin/ci`,
+`bin/lib/ci/{check,check-aot}`, `test/c/` (`judge_test.ae`, `judge/`, `run/`, `corpora.edn`, `ref-gcc15.edn`, the classes, `check-known.edn`,
+`essential-dg.txt`, the dg and run records), the Makefile (`ci-judge-test`), `LICENSE.md` (`test/c/run/`, `test/c/judge/`).
+Scratch in the worktree's `.tmp/`: `r6/` (the scan `scan.ae` and `all.hits`, `aot-only.txt`, the dg logs `dg1.log`, `dgA.log`, `dgD.log`,
+`dgE.log`, `dgE2.log`, the run level's `checkF.log`, `checkF2.log`, the stopped `aotG.log`, `before.sh` which runs the tests on a file's older
+version); `ci-dg/`, `ci-check/` (the last runs); the Go cache deleted.
+Rule slips: an exploration `grep` once redirected its errors to `/dev/null`, and a `diff` of two lists once used `<(...)`; both ran, neither
+wrote anything. For a minute two waiting loops ran at once (a `Monitor` beside a backgrounded `until` loop; the monitor was stopped). The
+compiled shard was stopped at the disk limit rather than finished.
