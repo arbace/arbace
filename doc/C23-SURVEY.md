@@ -2940,7 +2940,14 @@ By the file's expectation: of the 471 files that expect no error, **452 pass** (
 parser), and of the 156 that expect errors **81 pass** (9 before). Per group, pass: gcc-c23 222 of 270 (145), gcc-cpp-c23 7 of 16 (7),
 gcc-c23-sub 23 of 30 (21), gcc-gnu23 38 of 51 (30), gcc-embed 37 of 47 (36), gcc-va-opt 9 of 12 (9), gcc-bitint 197 of 201 (189).
 `read-refused` rose by two because the four `decimal64x` files now parse and the converter refuses their `d64x` suffix by design (CS3 (a)).
-The run level: RUNLEVEL_NUMBERS.
+The run level (`dg-do run`, 176 programs against gcc's runs): **98 pass** (92 before): gcc-c23-run 32 of 47 (27), gcc-gnu23-run 8 of 13 (8), gcc-embed-run 12 of 17 (11),
+gcc-bitint-run 43 of 90, gcc-cpp-c23-run 1, gcc-va-opt-run 2, gcc-c23-sub-run 0 of 6; the programs that failed to parse (`parse-gap`) are all read: the six `va_start`/`...` programs, `c23-complit-2` (which
+now parses and faults at run time: the new class `complit-static`, `test/c/divergences.edn`, `check-known.edn`) and `embed-13`; the three `decimal64x` programs are `by-design`. Compiled against interpreted (cf2g, `CI_AOT_NODES=1`):
+98 and 98, 0 compiled only, 0 interpreted only. The six older corpora (torture-execute and its mirror, tcc-tests2, compcert, mir, cxgo, benchmarksgame): unchanged, interpreted and compiled, after one fix
+(below).
+
+One run-level slip of this slice, caught by that check: the first `bin/ci check` after the pointer-conversion check failed 15 programs of the torture corpora and mir, which gcc builds with `-fpermissive -w`
+(`bin/lib/ci/record-ref`); the checker called by `arbace.c.run` now runs `-fpermissive` (`:permissive`), and those 15 pass again.
 
 ### C7F.3 What was built
 
@@ -2995,5 +3002,5 @@ Each with options, the recommended one first; none decided.
 ### C7F.6 Checks and scratch
 
 Run: `bin/ci dg --record` (twice: the corrected judge, then the final), `bin/repr-c check --c23`, `bin/repr-c roundtrip --corpus c23conf,c23,tcc-tests2 --no-run`, `bin/ci check --record`, `bin/ci check --aot --record`
-RUNLEVEL_CHECKS. Not run: `bin/gate`, `bin/ci annotations` (needs tools/ccdump), `bin/repr-c parse-check` and `check --tokens` (same), `bin/ci repl-session`.
+(a first `check --record` with `--only` rewrote the record to the 15 lines: restored from git and recorded again in full; a `compcert/qsort.c` timeout under the host's load was not recorded). Not run: `bin/gate`, `bin/ci annotations` (needs tools/ccdump), `bin/repr-c parse-check` and `check --tokens` (same), `bin/ci repl-session`.
 The worktree's `.tmp/`: `ci-dg/`, `ci-check/`, `ci-aot/`, `c7/` (logs, capped at 1 MB), `dgsave/` (gcc's outputs), `t/` (probes), `dg*.sh` (the read/judge loop), `repr-c/gcc-15.2.0/` (220 MB).
