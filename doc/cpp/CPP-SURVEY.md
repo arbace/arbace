@@ -2173,3 +2173,8 @@ The lists are CX5d's (1,807 / 323 / 326 / 244: the same counts). Under the stric
 - Shipped: `bin/cppi`, `bin/lib/repr-cpp/roundtrip`, `arbace/cpp/check.ae`, `arbace/repr/cpp/rtcheck.ae`, `tools/cxxdump/{main,run}.go`, `test/cpp/{corpora,lower-results}.edn`,
   `test/repr/cpp/roundtrip-known.edn`, `test/cpp/selftest/` (new tests `stale-norm`, `cxxdump-version`, `recorded-list`, `stderr-cap` and its program; the others changed), `doc/cpp/LLVM.md`, this section.
 - Scratch: `.tmp/r8-keep/` (the round trips' results and summaries, lower-check's logs), `.tmp/cppi/runtime` (at the key), `.tmp/cpp-selftest/`; the rest deleted.
+
+### Decided (CP120-CP127; the user, 2026-10-31)
+
+All as recommended: CP120 (b); CP121 (c); CP122 (a); CP123 (b), with the whole-corpus runs; CP124 (b); CP125 (b), the
+coordinator's gate step at the merge; CP126 (a); CP127 (b).
