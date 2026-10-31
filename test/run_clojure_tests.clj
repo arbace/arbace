@@ -16,7 +16,9 @@
 ;;       to OUT:
 ;;         {:ns NS :test n :pass n :fail n :error n
 ;;          :failing {test-name {:fail n :error n}}  ; per top-level deftest
-;;          :load-error "message"}                   ; only if NS itself failed to load
+;;          :load-error "message"                    ; only if NS itself failed to load
+;;          :evaluated #{path}}                      ; CLOJURE_TESTS_AOT: the sources loaded
+;;                                                   ; from source, without a compiled loader
 ;;       Unlike run_test.clj, a namespace that fails to load is reported instead of aborting.
 ;;   generative DIR OUT [NSLIST [EXPECTED]]
 ;;       What src/script/run_test_generative.clj does (clojure.test.generative.runner/-main on
@@ -32,7 +34,11 @@
 ;;       suite source recorded as the program records an embedded one (CLOJURE_TESTS_AOT's hook,
 ;;       test/suite_aot_hook.ae), then every recorded unit (the runtime's and the suite's) compiled
 ;;       by arbace.c2j into the directory OUT. With CLOJURE_TESTS_AOT set, run and generative load
-;;       the suite's sources through their compiled loaders (the same hook).
+;;       the suite's sources through their compiled loaders (the same hook); a source loaded from
+;;       source instead (no compiled loader: never recorded, or not in the program) is listed in
+;;       the result's :evaluated, and report counts it a regression unless the reference names it
+;;       in :not-compiled (c2j does not compile it) or :evaluated {path reason} (optional: known to
+;;       load from source, e.g. loaded only at run time).
 ;;   levels A B UPSTREAM
 ;;       The two levels' results compared (RPS16: a finding, not a class): the namespaces, tests and
 ;;       specs of the results file A (the AOT level's) that pass at one level and not the other, or
@@ -114,6 +120,13 @@
     (load-file f)
     ((resolve 'suite-aot.hook/install!) mode)))
 
+(defn- aot-evaluated
+  "With CLOJURE_TESTS_AOT, the paths of the suite's sources the hook loaded from source so far
+  for want of a compiled loader, or nil."
+  []
+  (when (System/getenv "CLOJURE_TESTS_AOT")
+    (some->> (resolve 'suite-aot.hook/evaluated) deref deref seq (into (sorted-set)))))
+
 (defn- run-ns [ns-sym out nslist expected]
   (skip-at-load! expected)
   (aot-hook! :compiled)
@@ -135,7 +148,8 @@
                                                     (:type m) inc))
                                            (report m))]
                         (select-keys (t/run-tests ns-sym) [:test :pass :fail :error]))))]
-    (spit-file out (pr-str (assoc result :ns ns-sym :failing @failing)))
+    (spit-file out (pr-str (cond-> (assoc result :ns ns-sym :failing @failing)
+                             (aot-evaluated) (assoc :evaluated (aot-evaluated)))))
     (shutdown-agents)
     (System/exit 0)))
 
@@ -167,7 +181,8 @@
                    :failing (into (sorted-set) (map :test failed))
                    :load-errors (into (sorted-set) load-errs)
                    :iters (reduce + (keep :iter results))
-                   :config cfg}]
+                   :config cfg}
+          summary (cond-> summary (aot-evaluated) (assoc :evaluated (aot-evaluated)))]
       (prn summary)
       (spit-file out (pr-str summary)))
     (shutdown-agents)
@@ -186,7 +201,8 @@
     (when-let [err (try-require 'clojure.test.generative.runner)]
       (println "aot: not loaded: clojure.test.generative.runner" err))
     ;; a source c2j does not compile loads from source at the AOT level (bin/clojure-tests
-    ;; compares them with the reference's :not-compiled)
+    ;; compares them with the reference's :not-compiled, and the namespaces not loaded above with
+    ;; its :not-loaded)
     ((resolve 'suite-aot.hook/compile!) out)
     (real-shutdown-agents)
     (System/exit 0)))
@@ -251,6 +267,21 @@
                 (str n " failed to load"))
               (when (not= (:tests r) (:tests e)) [(str (:tests r) " specs, expected " (:tests e))])))))
 
+(defn- unexpected-evaluated
+  "The sources of the result r (a namespace's or test.generative's) loaded from source at the AOT
+  level (:evaluated) that the reference expected does not name in :not-compiled (c2j does not
+  compile them) nor in :evaluated (known to load from source)."
+  [expected r]
+  (let [known (set (map str (concat (keys (:not-compiled expected)) (keys (:evaluated expected)))))]
+    (seq (remove #(known (str %)) (:evaluated r)))))
+
+(defn- strip-evaluated
+  "r with only its unexpected :evaluated sources, or none."
+  [expected r]
+  (if-let [ev (unexpected-evaluated expected r)]
+    (assoc r :evaluated (vec ev))
+    (some-> r (dissoc :evaluated))))
+
 ;; with the whole list run (report's whole), the reference's namespaces that did not run: neither
 ;; listed nor skipped (a file the listing no longer finds: its ns form unreadable, or gone)
 (defn- unlisted [expected nss]
@@ -261,10 +292,10 @@
   (let [expected (or (read-edn expected-file) {})
         nss      (map symbol (re-seq #"\S+" nss))
         results  (into (sorted-map)
-                       (for [n nss] [n (some-> (read-edn (str out "/" n ".edn")) (dissoc :ns))]))
+                       (for [n nss] [n (some->> (read-edn (str out "/" n ".edn")) (strip-evaluated expected) (#(dissoc % :ns)))]))
         gen-file (str out "/generative.edn")
         gen-ran  (.exists (java.io.File. (str out "/generative.log")))
-        gen      (some-> (read-edn gen-file) (select-keys [:tests :failures :failing :load-errors]))
+        gen      (some->> (read-edn gen-file) (strip-evaluated expected) (#(select-keys % [:tests :failures :failing :load-errors :evaluated])))
         bad      (atom [])
         line     (fn [n t a p f e s]
                    (println (format "%-62s %5s %6s %6s %5s %5s  %s" n t a p f e s)))]
@@ -285,6 +316,10 @@
       (doseq [n (unlisted expected nss)]
         (swap! bad conj [n ["expected namespace not run: not listed (its file not found as a namespace)"]])
         (line n "-" "-" "-" "-" "-" "REGRESSION (not listed)")))
+    ;; the AOT level: a source loaded from source, not through a compiled loader, runs at the eval
+    ;; level (each process loads every namespace, so a load's fallback is in every result)
+    (doseq [[src n] (sort-by key (frequencies (mapcat :evaluated (cons gen (vals results)))))]
+      (swap! bad conj ['aot-level [(str src " loaded from source, not through a compiled loader (in " n " runs)")]]))
     (let [rs (keep val results)
           sum (fn [k] (reduce + (keep k rs)))]
       (line (format "TOTAL: %d namespaces (%d failed to load), %d skipped"

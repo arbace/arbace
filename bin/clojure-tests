@@ -31,7 +31,11 @@
 #                    RUN/aot-build/arbace-aot, cached by the key of what it is made from; j2g's
 #                    whole-program run, about 20 GiB: a heavy command), and each test namespace run
 #                    on it, loaded through its compiled loader (the hook's compiled mode), against
-#                    test/arbace-go-aot-results.edn (CLOJURE_TESTS_RUN defaults to aot); then the
+#                    test/arbace-go-aot-results.edn (CLOJURE_TESTS_RUN defaults to aot; the sources c2j
+#                    does not compile must be its :not-compiled, the namespaces that do not load while
+#                    compiling its :not-loaded, and a source a run loads from source for want of a
+#                    compiled loader is a regression unless it names it in :not-compiled or
+#                    :evaluated); then the
 #                    two levels compared (the runner's levels mode: what passes at one level and
 #                    not at the other, against test/arbace-go-results.edn, and both levels' totals
 #                    against upstream's, test/baseline-results.edn: a finding, RPS16, not a
@@ -439,6 +443,28 @@ while read -r coord sha; do
 done <<< "$deps"
 flock -u 9
 
+# aot_sources_check AB: the compiling's log AB/compile.log against the reference: the sources c2j
+# did not compile (they load from source) must be its :not-compiled, and the namespaces that did not
+# load while recording (never recorded, so never compiled: they would run evaluated, judged as the
+# AOT level) its :not-loaded (optional {ns reason}, none when absent)
+aot_sources_check() {
+  local ab=$1 kind key
+  for kind in "not compiled" "not loaded"; do
+    key=${kind/ /-}
+    { grep "^aot: $kind: " "$ab/compile.log" || true; } | cut -d' ' -f4 | LC_ALL=C sort > "$ab/$key.txt"
+    host_run -e "(doseq [s (sort-by str (keys (:$key (read-string (slurp \"$expected\")))))] (println s))" \
+      > "$ab/$key-expected.txt" || return 1
+    if ! diff "$ab/$key-expected.txt" "$ab/$key.txt" > "$ab/$key.diff"; then
+      cat "$ab/$key.diff"
+      case $kind in
+        "not compiled") echo "clojure-tests --aot: the sources c2j does not compile are not the reference's :not-compiled ($ab/compile.log)" >&2 ;;
+        *) echo "clojure-tests --aot: the namespaces that did not load while compiling (they would run evaluated) are not the reference's :not-loaded ($ab/compile.log)" >&2 ;;
+      esac
+      return 1
+    fi
+  done
+}
+
 # aot_build: --aot's program (step 3): the gate's executables (bin/arbace-go --gate-build), the
 # suite compiled on its test build (the runner's compile mode), j2g on its executable (the
 # checkout's runtime, as bin/diffcheck's), bin/build-go; cached in RUN/aot-build by the key of the
@@ -491,15 +517,7 @@ aot_build() {
     || { tail -20 "$ab/compile.log"; echo "clojure-tests --aot: the compiling failed ($ab/compile.log)" >&2; return 1; }
   grep '^aot:' "$ab/compile.log" | head -40
   [ -f "$ab/aot/packages.edn" ] || { echo "clojure-tests --aot: nothing compiled ($ab/compile.log)" >&2; return 1; }
-  # the sources c2j did not compile (they load from source): the reference's :not-compiled
-  grep '^aot: not compiled: ' "$ab/compile.log" | cut -d' ' -f4 | LC_ALL=C sort > "$ab/not-compiled.txt"
-  host_run -e "(doseq [s (sort (keys (:not-compiled (read-string (slurp \"$expected\")))))] (println s))" \
-    > "$ab/not-compiled-expected.txt" || return 1
-  if ! diff "$ab/not-compiled-expected.txt" "$ab/not-compiled.txt" > "$ab/not-compiled.diff"; then
-    cat "$ab/not-compiled.diff"
-    echo "clojure-tests --aot: the sources c2j does not compile are not the reference's :not-compiled ($ab/compile.log)" >&2
-    return 1
-  fi
+  aot_sources_check "$ab" || return 1
   echo "   compiled: $(( $(date +%s) - t0 )) s"
   t0=$(date +%s)
   program_j2g "$gexe" "$ab/j2g.log" "$ab/j2g" --input "$root/test/java-fixtures/forms" --input "$ab/aot" \
