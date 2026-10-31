@@ -30,6 +30,7 @@
 #   JDK_SRC   jdk26u's src directory (default /root/jdk26u/src)
 #   REPR_JAVA_THREADS (default 12), REPR_JAVA_CHUNK (files per javac task, default 50)
 # REPR_JAVA_EXE (bin/repr-java) names javac's tool executable.
+# A corpus with no file (jdk26u absent at JDK_SRC, an empty tree) fails.
 # Exit status: 0 when every corpus's differing files are the known ones.
 set -uo pipefail
 root=$(cd "$(dirname "$0")/../../.." && pwd)
@@ -62,6 +63,8 @@ check() {
   rm -rf "${work:?}/$corpus"
   bin/repr-java main -m arbace.repr.java.jtree check "$work/$corpus" "$r" "$@" > "$work/$corpus.log" 2>&1
   [ -f "$work/$corpus/files.tsv" ] || { tail -20 "$work/$corpus.log"; echo "$corpus: the check did not run ($work/$corpus.log)"; return 1; }
+  # a corpus of no file compares nothing (a missing or empty tree): not a pass
+  [ -s "$work/$corpus/files.tsv" ] || { tail -5 "$work/$corpus.log"; echo "$corpus: FAILED: no file compared, the corpus is empty ($r)"; return 1; }
   echo "$corpus: $(tail -1 "$work/$corpus.log") [$((SECONDS - t0)) s]"
   # the differing files against the known ones
   awk -F'\t' '$2 != "equal" {print $1}' "$work/$corpus/files.tsv" | LC_ALL=C sort > "$work/$corpus.differ"
@@ -80,6 +83,13 @@ jdk_originals() {
   local orig=$work/jdk-originals
   arbace_jdk_originals "$orig" "$work/jrt.log" || return 1
   echo "$orig/src/java.base"
+}
+
+# jdk26u_src CORPUS: jdk26u's src directory is there, with modules (the corpora jdk26u, mutants and
+# tests read it; they are the gate's, so a host without it fails them, naming JDK_SRC)
+jdk26u_src() {
+  compgen -G "$jdk_src/*/share/classes" > /dev/null \
+    || { echo "$1: FAILED: no jdk26u modules at $jdk_src/*/share/classes (JDK_SRC)"; return 1; }
 }
 
 # javac_sources: javac's sources, jdk/javac/sources.txt's files, into WORK/javac-src/MODULE
@@ -110,14 +120,17 @@ for c in ${corpora//,/ }; do
     baseline) frozen=$(frozen_clojure) && check baseline "$frozen" || status=1 ;;
     jdk) o=$(jdk_originals) && check jdk "$(echo "$o" | tail -1)" || status=1 ;;
     javac) s=$(javac_sources) && check javac "$s" || status=1 ;;
-    jdk26u) mods=$(cd "$jdk_src" && ls -d */share/classes)
+    jdk26u) jdk26u_src jdk26u || { status=1; continue; }
+            mods=$(cd "$jdk_src" && ls -d */share/classes)
             check jdk26u "$jdk_src" $mods || status=1
-            echo "jdk26u: $(echo "$mods" | wc -l) modules, $(awk -F'\t' '$2 != "equal"' "$work/jdk26u/files.tsv" | cut -d/ -f1 | LC_ALL=C sort -u | wc -l) with a file whose trees differ" ;;
-    mutants) rm -rf "$work/mutants-src"
+            [ ! -f "$work/jdk26u/files.tsv" ] || echo "jdk26u: $(echo "$mods" | wc -l) modules, $(awk -F'\t' '$2 != "equal"' "$work/jdk26u/files.tsv" | cut -d/ -f1 | LC_ALL=C sort -u | wc -l) with a file whose trees differ" ;;
+    mutants) jdk26u_src mutants || { status=1; continue; }
+             rm -rf "$work/mutants-src"
              bin/repr-java main -m arbace.repr.java.jtree mutate "$work/mutants-src" "$jdk_src" 4000 2 4 26 \
                $(cd "$jdk_src" && ls -d */share/classes) > "$work/mutate.log" 2>&1 \
                && check mutants "$work/mutants-src" || { tail -5 "$work/mutate.log"; status=1; } ;;
-    tests) check tests "$jdk/test" || status=1 ;;
+    tests) [ -d "$jdk/test" ] || { echo "tests: FAILED: no jdk26u tests at $jdk/test (JDK_SRC's parent)"; status=1; continue; }
+           check tests "$jdk/test" || status=1 ;;
     *) echo "parse-check: no corpus $c (samples, baseline, jdk, javac, jdk26u, mutants, tests)" >&2; exit 2 ;;
   esac
 done
