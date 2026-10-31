@@ -1755,3 +1755,72 @@ and c-c++-common tenths whole (only their 24 `ast-differs` files), the whole Hot
 
 All as recommended: CP90 (a), counted in the whole-corpus run; CP91 (b), as CP79 (b), then (c) if (b) leaves HotSpot
 cases; CP92 (a) now, (b) with CP79; CP93 (a), (b) if the corpus widens to other platforms.
+
+## As built: CP79 (b), CP91 (b), CP92 (b) (2026-10-31)
+
+On `cpp-cx6` (light tier: stage 0 by `ARBACE_HOST_EXE`, 4 jobs, `GOMEMLIMIT=1500MiB`, no gate, no build of Arbace's executables). The decisions of "Decided (CP76-CP88)" and
+"Decided (CP90-CP93)" for macros whose expansion depends on the place or is a piece of a list. CP91 (c) was not needed: (b) leaves no `__LINE__` case in the samples.
+
+### What changed
+
+- **The line of a macro form (CP79 (b), CP91 (b)).** `:cpp/line` was written for the statements and declarations whose text ends in `;` only; a macro statement that is a
+  block (`assert(...)` of adlc: `{ if (!(c)) {...__LINE__...} }`), an expression macro (`__ pc()` = `Disassembler::hook<...>(__FILE__, __LINE__, _masm)->`) or a run of list
+  elements (`THREAD_AND_LOCATION` = `THREAD, __FILE__, __LINE__`) had none and so the print's own line numbered its `__LINE__`. Now every macro form has the line it stood at
+  (`macro-form`), and the printer writes `#line N /*arbace*/` before the text. For an **expression** the directive is written only when the expansion depends on the place: the
+  converter looks for a token of the node's tree spelled in clang's `<scratch space>` (`uses-scratch?`: where clang puts the result of `__LINE__`, `__FILE__`, `__COUNTER__`, `##` and
+  `#`; a false positive only adds a directive), and the directive goes on lines of its own inside the expression (`at-line`); the wrapper `(cpp/macro "text" v)` takes the line as a
+  fourth element. In a list the first element of a run carries the line when any element of the run uses scratch (`exs`, `with-line`). A `#line` before **every line** of a multi-line text was not
+  needed: the printer writes the text verbatim, so its lines number as the source's after the one directive (all `__LINE__` cases of the samples pass with it). The `#line` reader of
+  the converter (`*line-dirs*`) takes digit separators (`#line 4'56'7'8'9`), which `g++.dg/cpp1y/digit-sep-line.C` showed once every directive was written.
+- **Macros that expand to pieces of a list (CP92 (b)).** (1) An invocation whose expansion holds its own commas (`EPSILONGC_ONLY_ARG(x)` is `x,`) is followed in the source by no
+  comma before the next element: `exs` marks its first element `^:cpp/nosep` (`gap-comma?` scans the source between the run and the next element, outside comments and directive
+  lines) and the printer leaves the comma after it out (`join-args`). (2) A directive that stands between the elements of an initializer list (`#define VM_CLASS_NAME(name, symbol) ...`
+  before `VM_CLASSES_DO(VM_CLASS_NAME)`, the `#undef` after it) was left out of the forms (a directive inside an item is the item's) and the print used the undefined macro; `init-list`
+  now places the directives between the elements as `(c/directive "...")` elements, printed on lines of their own with no comma. Directives inside a list in a function body are
+  still left out (see CP97).
+- Spec §11 (the line, the wrapper's fourth element, `:cpp/nosep`, directive elements).
+- Known file: ten HotSpot entries out (`templateInterpreterGenerator_x86`, `adlc/archDesc`, `c1_ValueStack`, `vmClasses`, `gcConfig`, `memAllocator`, `shenandoahVerifier`, `klass`, `nativeLookup`,
+  `reflection`), `adlc/formsopt.cpp` from `forms-differ` to `objects-differ` (155 entries, was 165).
+
+### Numbers (level 5 required for a pass; objects on)
+
+| corpus | files | read | l1 | l3 | l4 g++ | l4 clang | pass | known | failing |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| HotSpot every 25th, before (CP76 (b)) | 50 | 49 | 46 | 46 | 47 | 48 | 46 | 3 | 0 |
+| HotSpot every 25th, now | 50 | 49 | 48 | 48 | 47 | 48 | **47** | **2** | 0 |
+| HotSpot every 10th, before | 124 | 115 | 100 | 100 | 102 | 103 | 100 | 15 | 0 |
+| HotSpot every 10th, now | 124 | 115 | 110 | 110 | 111 | 112 | **110** | **5** | 0 |
+| g++.dg every 10th, before (CX5d, and Winit-list2 of CP77 (b)) | 1,807 (747 rejected) | 1,060 | 1,045 | 1,025 | 964 | 1,043 | 976 (977) | 84 (83) | 0 |
+| g++.dg every 10th, now | 1,807 (747 rejected) | 1,060 | 1,045 | 1,026 | 964 | 1,043 | **977** | 83 | 0 |
+| g++.old-deja every 10th | 323 (88 rejected) | 234 | 228 | 227 | 228 | 228 | 225 | 10 | 0 |
+| c-c++-common as C++, every 10th | 326 (79 rejected) | 247 | 242 | 241 | 201 (13 originals g++ rejects) | 243 | 211 | 36 | 0 |
+| libstdc++ every 100th | 98 (19 rejected) | 79 | 78 | 78 | 77 | 77 | 77 | 2 | 0 |
+| samples | 8 | 8 | 8 | 8 | 7 | 8 | 7 | 0 (1) | 0 |
+
+Old-deja and c-c++-common are as before. libstdc++'s every 100th was run without objects in CP76 (b) (78 pass, 1 known); with objects `22_locale/time_get/get_monthname/wchar_t/wrapped_env.cc`
+is `objects-differ`, its known entry (not a regression). The samples' `coroutine.cpp` is `gxx-objects-location` in the known file under the name `coroutine.cpp`, the run names it
+`samples/coroutine.cpp` (as in CP76 (b)). `bin/repr-cpp spec-check`: 13 blocks, 0 unreadable. The classed cases are the 15 HotSpot files of CP76 (b)'s list (the 10th's 15 plus `formsopt`): 10 pass now.
+The 7 `__LINE__` cases of the 13 new ones, `adlc/formsopt` (objects: below), the `TRAPS`-style `klass`, `nativeLookup`, `reflection`, `memAllocator` and the list pieces `vmClasses` and `gcConfig` are among them.
+
+### Left, every one in a class
+
+HotSpot 10th: `stubGenerator_x86_64_cbrt` (a table whose first item is text), `stubGenerator_x86_64_poly1305` (`ATTRIBUTE_ALIGNED(64)`'s `AlignedAttr` lost), `asm/assembler` (a `ParenExpr` the print adds),
+`opto/memnode` (a function-like macro's name used as a function), `runtime/jniHandles` (`true /* external_guard */` as a template argument): all unchanged and not macros-with-lines. 25th: `cbrt` and
+`adlc/formsopt.cpp`, now `objects-differ`: forms, AST and clang's objects... the objects of both compilers differ only in `__FILE__` of a quoted header (`share/adlc/forms.hpp` against the absolute path the
+print's `-iquote` finds it by); see CP95.
+
+### Not run
+
+`bin/gate`, `bin/repr-cpp pp-check`, `cxxdump-check`, the whole HotSpot corpus (CP80 (b)), the c-c++-common and old-deja whole corpora, `bin/repr-c roundtrip` (nothing under `arbace/repr/c/` changed), `make check-makefile` (no target touched).
+
+### Proposals (CP95-CP97)
+
+- **CP95 `__FILE__` of a quoted header in the harness's objects.** The original is compiled as `share/adlc/formsopt.cpp` and finds `"forms.hpp"` by the file's own directory (`__FILE__` = `share/adlc/forms.hpp`); the print is in
+  another root and finds it by `-iquote` (the absolute path). 2 files in the samples (`formsopt.cpp`, libstdc++'s `wrapped_env.cc`). Options: (a) classed `objects-differ` (built); (b) `-ffile-prefix-map=ORIGDIR/=` for both compilers on both builds
+  (g++ and clang apply it to `__FILE__`); (c) put the print's files in a copy of the original directory. *Recommended: (b)*: no change to the print or the forms.
+- **CP96 The five HotSpot 10th cases that are not macros with lines** (`cbrt`, `poly1305`, `assembler`, `memnode`, `jniHandles`). Options: (a) classed (built); (b) one fix a case: a table whose first text is a
+  declaration's comment, the attribute macro kept as text on the declaration, the `ParenExpr` as the AST has it, the macro name used as a function wrapped as `(cpp/macro ...)`, a comment inside a template argument kept in the text;
+  (c) wait for the whole HotSpot corpus (CP80 (b)) and fix by count. *Recommended: (c)*: these are 5 of 124, each a different cause.
+- **CP97 Directives inside a list in a function body.** The directive placement of `init-list` reads the unit's `*directives*`; a function body's directives are the compound statement's pending ones (`compound-forms`) and a directive inside
+  a statement is left out there. No case in the samples. Options: (a) as built (top level and class bodies); (b) the same placement for a local declaration's list, with `*pending*` giving the directives that stand inside an element range;
+  (c) a directive inside a statement kept as text of that statement. *Recommended: (a)* until a case shows (the whole HotSpot corpus will say).
