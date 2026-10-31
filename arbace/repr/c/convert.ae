@@ -599,8 +599,10 @@
   (let [els (cond (vector? ds) ds
                   (= (nt ds) "DeclarationSpecifiers") (chain ds :DeclarationSpecifiers)
                   :else (chain ds :SpecifierQualifierList))
-        tspecs (ArrayList.) quals (ArrayList.) m (HashMap.) at (ArrayList.)]
+        tspecs (ArrayList.) quals (ArrayList.) m (HashMap.) at (ArrayList.) tat (ArrayList.)]
     (doseq [e els]
+      ;; CS140: an attribute after a type specifier stood after the type (it appertains to it, not to the declaration)
+      (let [add-attrs (fn [as] (.addAll at as) (when (pos? (.size tspecs)) (.addAll tat as)))]
       (case (cs e)
         :DeclarationSpecifiersStorage
         (let [sc (g e :StorageClassSpecifier)]
@@ -611,7 +613,7 @@
         (:DeclarationSpecifiersTypeQual :SpecifierQualifierListTypeQual)
         (let [q (g e :TypeQualifier)]
           (if (= (cs q) :TypeQualifierAttr)
-            (.addAll at (attrs (g q :AttributeSpecifierList)))
+            (add-attrs (attrs (g q :AttributeSpecifierList)))
             (.add quals (qual-syms (tch (g q :Token))))))
         :DeclarationSpecifiersFunc (.put m (if (= (cs (g e :FunctionSpecifier)) :FunctionSpecifierNoreturn) :noreturn :inline) true)
         (:DeclarationSpecifiersAlignSpec :SpecifierQualifierListAlignSpec)
@@ -619,8 +621,8 @@
           (if (= (cs a) :AlignmentSpecifierType)
             (.put m :c/alignas-type (type-name-form (g a :TypeName)))
             (.put m :c/alignas (value (expr (g a :ConstantExpression))))))
-        :DeclarationSpecifiersAttr (.addAll at (attrs (g e :AttributeSpecifierList)))
-        nil))
+        :DeclarationSpecifiersAttr (add-attrs (attrs (g e :AttributeSpecifierList)))
+        nil)))
     (let [b (base-type (vec tspecs) ds)
           typedef (.remove m :typedef)
           ;; gcc's "two or more data types in declaration specifiers" (a data type word beside _Bool or _BitInt)
@@ -634,6 +636,7 @@
                                        :TypeSpecifierDouble :TypeSpecifierVoid :TypeSpecifierComplex :TypeSpecifierBool])))
               (.put m :c/bad-specs true))]
       (when (seq at) (.put m :c/decl-attrs (vec at)))
+      (when (seq tat) (.put m :c/type-attrs (vec tat)))
       {:type (wrap-quals (or b 'int) (vec quals))
        :implicit-int (nil? b)
        :typedef (boolean typedef)
@@ -667,7 +670,21 @@
         a (cond star (list 'array '* t)
                 size (L 'array size t)
                 :else (list 'array t))]
-    (addm a (cond-> {} (seq qs) (assoc :c/quals qs) st (assoc :c/static true)))))
+    (addm a (cond-> {} (seq qs) (assoc :c/quals qs) st (assoc :c/static true)
+                    (g dd :AttributeSpecifierList) (assoc :c/attrs (attrs (g dd :AttributeSpecifierList)))))))
+
+(defn- fn-type [params t dd]
+  (let [f (list 'fn params t)]
+    (if-let [a (g dd :AttributeSpecifierList)] (addm f {:c/attrs (attrs a)}) f)))
+
+(defn- trailing-pos
+  "Where attributes after the declarator `d` stood (CS140): after an array or a function declarator, else nil (the name's)."
+  [d]
+  (when d
+    (case (cs (g d :DirectDeclarator))
+      (:DirectDeclaratorArr :DirectDeclaratorStaticArr :DirectDeclaratorArrStatic :DirectDeclaratorStar) :array
+      (:DirectDeclaratorFuncParam :DirectDeclaratorFuncIdent) :function
+      nil)))
 
 (defn declarator
   "A declarator applied to the type `t`: [name-token type kr-names]; the name's attributes in :attrs."
@@ -679,9 +696,9 @@
                               (recur (pointer-type t (g d2 :Pointer)) (g d2 :DirectDeclarator) out-attrs))
       (:DirectDeclaratorArr :DirectDeclaratorStaticArr :DirectDeclaratorArrStatic :DirectDeclaratorStar)
       (recur (array-type t dd :AssignmentExpression) (g dd :DirectDeclarator) out-attrs)
-      :DirectDeclaratorFuncParam (recur (list 'fn (params-vector (g dd :ParameterTypeList)) t) (g dd :DirectDeclarator) out-attrs)
+      :DirectDeclaratorFuncParam (recur (fn-type (params-vector (g dd :ParameterTypeList)) t dd) (g dd :DirectDeclarator) out-attrs)
       :DirectDeclaratorFuncIdent
-      (recur (list 'fn (with-meta (mapv #(ident-tok (g % :Token2)) (chain (g dd :IdentifierList) :IdentifierList)) {:c/kr true}) t)
+      (recur (fn-type (with-meta (mapv #(ident-tok (g % :Token2)) (chain (g dd :IdentifierList) :IdentifierList)) {:c/kr true}) t dd)
              (g dd :DirectDeclarator) out-attrs)
       (refuse :declarator (str "direct declarator " (cs dd)) dd))))
 
@@ -700,7 +717,7 @@
                                             t))
           (:DirectAbstractDeclaratorArr :DirectAbstractDeclaratorStaticArr :DirectAbstractDeclaratorArrStar)
           (recur (array-type t dad :AssignmentExpression) (g dad :DirectAbstractDeclarator))
-          :DirectAbstractDeclaratorFunc (recur (list 'fn (params-vector (g dad :ParameterTypeList)) t) (g dad :DirectAbstractDeclarator))
+          :DirectAbstractDeclaratorFunc (recur (fn-type (params-vector (g dad :ParameterTypeList)) t dad) (g dad :DirectAbstractDeclarator))
           (refuse :declarator (str "direct abstract declarator " (cs dad)) dad))))))
 
 (defn type-name-form
@@ -731,8 +748,9 @@
                          :ParameterDeclarationDecl
                          (let [[nt t as] (declarator type (g pd :Declarator))
                                m (cond-> sm as (assoc :c/attrs as))
-                               x (name-with nt t m)]
-                           (with-attrs x :c/after-attrs (g pd :AttributeSpecifierList)))
+                               x (at (g pd :Declarator) (name-with nt t m))]
+                           (cond-> (with-attrs x :c/after-attrs (g pd :AttributeSpecifierList))
+                             (and (g pd :AttributeSpecifierList) (trailing-pos (g pd :Declarator))) (addm {:c/after-at (trailing-pos (g pd :Declarator))})))
                          :ParameterDeclarationAbstract
                          (let [t (abstract type (g pd :AbstractDeclarator))]
                            (if (seq sm) (addm t {:c/spec sm}) t)))))
@@ -757,7 +775,7 @@
                                      (if-let [d (g sdr :Declarator)]
                                        (let [[nt t as] (declarator base d)
                                              m (cond-> sm as (assoc :c/attrs as))
-                                             nm (name-with nt t m)]
+                                             nm (at d (name-with nt t m))]
                                          (if (some? bits)
                                            (if (instance? Lit bits)
                                              (addm nm {:c/bits (value bits) :c/bits-meta (.-m ^Lit bits)})
@@ -766,7 +784,10 @@
                                        (L 'c/bits base bits))))
                                  decls)
                      forms (if (and (seq after) (seq forms))
-                             (conj (pop forms) (addm (peek forms) {:c/after-attrs after}))
+                             (conj (pop forms) (addm (peek forms)
+                                                     (cond-> {:c/after-attrs after}
+                                                       (trailing-pos (g (g (last decls) :StructDeclarator) :Declarator))
+                                                       (assoc :c/after-at (trailing-pos (g (g (last decls) :StructDeclarator) :Declarator))))))
                              forms)]
                  (cond
                    (empty? decls) [(addm type (cond-> {} (seq sm) (assoc :c/spec sm) (seq after) (assoc :c/after-attrs after)))]
@@ -795,7 +816,7 @@
                                  (let [en (g l :Enumerator)
                                        nm (ident-tok (g en :Token))
                                        x (if (= (cs en) :EnumeratorExpr) (V [nm (expr (g en :ConstantExpression))]) nm)]
-                                   (with-attrs x :c/attrs (g en :AttributeSpecifierList))))
+                                   (at en (with-attrs x :c/attrs (g en :AttributeSpecifierList)))))
                                (chain (g e :EnumeratorList) :EnumeratorList))]))
             (list 'enum tag))
         f (if under (addm f {:c/underlying under}) f)]
@@ -1117,7 +1138,9 @@
                                m (cond-> sm
                                    as (assoc :c/attrs as)
                                    (and (pos? i) (not shared)) (assoc :c/grouped true))
-                               m (if-let [a (attrs (g id :AttributeSpecifierList))] (assoc m :c/after-attrs a) m)
+                               m (if-let [a (attrs (g id :AttributeSpecifierList))]
+                                   (cond-> (assoc m :c/after-attrs a) (trailing-pos (g id :Declarator)) (assoc :c/after-at (trailing-pos (g id :Declarator))))
+                                   m)
                                m (if-let [a (attrs (g idl :AttributeSpecifierList))] (assoc m :c/list-attrs a) m)
                                init (if (= (cs id) :InitDeclaratorInit) (initializer (g id :Initializer)) ::none)]
                            (decl-form spec nt t m init (when-let [a (g id :Asm)] (tokens-text (node-tokens a))))))]
@@ -1277,7 +1300,11 @@
                              :LabeledStatementCaseLabel (L 'case (expr (g ls :ConstantExpression)))
                              :LabeledStatementRange (L 'case (expr (g ls :ConstantExpression)) (expr (g ls :ConstantExpression2)))
                              :LabeledStatementDefault (list 'default)))
-                lbl (with-attrs lbl :c/attrs (g st :AttributeSpecifierList))]
+                lbl (with-attrs lbl :c/attrs (g st :AttributeSpecifierList))
+                inner (g ls :Statement)
+                lbl (if (and inner (= (cs inner) :StatementExpr)) ; GNU attributes after the label before `}` (CS144)
+                      (with-attrs lbl :c/attrs (g (g inner :ExpressionStatement) :LabelAttributeSpecifierList))
+                      lbl)]
             (into [lbl] (when-let [s (g ls :Statement)] (stmt-items s))))
           :StatementCompound [(at st (Lv (cons 'do (compound-items (g st :CompoundStatement)))))]
           :StatementExpr
@@ -1285,7 +1312,8 @@
                 as (concat (attrs (g st :AttributeSpecifierList)) (attrs (g es :AttributeSpecifierList))
                            (when-let [ds (g es :declarationSpecifiers)] (get-in (specifiers ds) [:meta :c/decl-attrs])))]
             (cond
-              (g es :ExpressionList) [(at st (expr-stmt (g es :ExpressionList)))]
+              (g es :ExpressionList) (let [it (at st (expr-stmt (g es :ExpressionList)))] ; CS140: the attributes the statement stood with
+                                       [(if (seq as) (addm it {:c/attrs (vec as)}) it)])
               (seq as) [(at st (Lv (cons 'c/attr-decl as)))]
               :else []))
           :StatementSelection

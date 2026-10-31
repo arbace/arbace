@@ -469,6 +469,61 @@
                       (not (contains? (or (:c/aparen am) #{}) 1))))
             (err! (str "expected string-literal in the '" n "' attribute"))))))
 
+;; CS140: where a standard attribute stood. The forms keep it (convert.ae): :c/type-attrs (after the type specifiers),
+;; :c/attrs on an array or function type (after its declarator), :c/after-at (:array or :function) for the declarator's
+;; trailing attributes, :c/attrs on a statement or label.
+(def ^:private std-position-attrs #{"deprecated" "fallthrough" "maybe_unused" "nodiscard" "noreturn" "_Noreturn" "reproducible" "unsequenced"})
+(def ^:private fn-type-attrs #{"reproducible" "unsequenced"})
+
+(defn- std-names
+  "The standard (unprefixed, not GNU) attributes of a vector that have a position rule."
+  [v]
+  (for [[n _ _ ns gnu] (attr-items v) :when (and (nil? ns) (not gnu) (std-position-attrs n))] n))
+
+(defn- ignored! [n] (pedwarn! (str "'" n "' attribute ignored")))
+
+(defn- tag-attrs!
+  "A struct, union or enum specifier's (or an enumerator's) attributes: noreturn applies to functions only; a
+  enumerator is no type, so nodiscard does not apply either."
+  [v enumerator?]
+  (doseq [n (std-names v)]
+    (cond
+      (contains? #{"noreturn" "_Noreturn"} n) (err! (str "'" n "' attribute can only be applied to functions"))
+      (and enumerator? (= n "nodiscard")) (err! "'nodiscard' attribute can only be applied to functions or to structure, union or enumeration types"))))
+
+(defn- type-pos-attrs!
+  "Standard attributes written after a type (specifiers, an array declarator, a function declarator): ignored, but a
+  function declarator's reproducible and unsequenced."
+  [v where]
+  (doseq [n (std-names v)
+          :when (not (and (= where :function) (contains? fn-type-attrs n)))]
+    (ignored! n)))
+
+(defn- base-fn-type?
+  "Whether the specifiers of a declaration whose type form is `f` give a function type: a typedef name of one, or a typeof."
+  [f]
+  (let [b (loop [f f] (if (and (seq? f) (contains? '#{* array fn const volatile restrict atomic _Nonnull} (first f))) (recur (last f)) f))]
+    (boolean
+      (or (and (symbol? b) (not (base-syms b)) (let [e (lookup (name b))] (and e (= :typedef (:kind e)) (= :fn (:k (unq (:t e)))))))
+          (and (seq? b) (contains? '#{typeof typeof-type typeof-unqual typeof-unqual-type} (first b)))))))
+
+(defn- decl-position-attrs!
+  "A declaration's attributes by where they stood, and the entity they stand with (`kind` :fn, :obj, :typedef, :member, ...)."
+  [m kind t]
+  (type-pos-attrs! (:c/type-attrs m)
+                   (if (base-fn-type? (:tag m)) :function :type))
+  (when-let [w (:c/after-at m)] (type-pos-attrs! (:c/after-attrs m) w))
+  (when (:c/def-attrs m) (type-pos-attrs! (:c/def-attrs m) :function))
+  (let [fn-ent? (or (= kind :fn) (= :fn (:k (unq t))))
+        own (concat (std-names (:c/decl-attrs m)) (std-names (:c/attrs m)) (when-not (:c/after-at m) (std-names (:c/after-attrs m))))
+        typed (set (std-names (:c/type-attrs m)))]
+    (doseq [n own :when (not (and (contains? typed n) (not (contains? (set (std-names (:c/attrs m))) n))))]
+      (cond
+        (= n "fallthrough") (ignored! n)
+        (and (contains? #{"noreturn" "_Noreturn"} n) (not fn-ent?)) (err! (str "'" n "' attribute can only be applied to functions"))
+        (and (= n "nodiscard") (not fn-ent?)) (err! "'nodiscard' attribute can only be applied to functions or to structure, union or enumeration types")
+        (and (contains? fn-type-attrs n) fn-ent?) (err! (str "standard '" n "' attribute can only be applied to function declarators or type specifiers with function type"))))))
+
 (defn- attr-args!
   "The arguments of the attributes in metadata `m` checked as expressions (cc's checker types them: an
   identifier among them that names nothing, a parameter of the attribute's own, skipped)."
@@ -650,6 +705,7 @@
   "A type form's type (§5.1); struct, union and enum definitions in it defined where they stand,
   their annotations and their expressions' written."
   [f]
+  (when-let [sp (and (instance? arbace.lang.IMeta f) (:c/spec (meta f)))] (type-pos-attrs! (:c/type-attrs sp) :type))
   (cond
     (nil? f) t-int
     (symbol? f)
@@ -673,6 +729,7 @@
         (_Nonnull __seg_gs __seg_fs) (parse-type a)
         atomic (qual (parse-type a) :atomic)
         array (cond
+                (do (type-pos-attrs! (:c/attrs (meta f)) :array) false) nil
                 (= a '*) (assoc (arr (parse-type b) nil) :vla true)
                 (= 2 (count f)) (arr (parse-type a) nil)
                 :else (let [r (ex a) n (:v r) el (parse-type b)]
@@ -680,7 +737,8 @@
                           ;; an array of a variably modified element is itself a VLA (6.7.7.3)
                           (and (integer? n) (not (:vla-expr r)) (not (vla? el))) (arr el (long n))
                           :else (assoc (arr el nil) :vla true))))
-        fn (let [ps a ret (parse-type (if (> (count f) 2) b (or (:tag (meta ps)) 'int)))
+        fn (let [ps a _ (type-pos-attrs! (:c/attrs (meta f)) :function)
+                 ret (parse-type (if (> (count f) 2) b (or (:tag (meta ps)) 'int)))
                  kr (:c/kr (meta ps))
                  variadic (= '& (last ps))
                  ps (if variadic (butlast ps) ps)
@@ -694,6 +752,7 @@
                                                 (parse-type (:tag pm))
                                                 kr t-int
                                                 :else (parse-type p))
+                                        _ (when (and nm pm) (binding [*line* (or (:line pm) *line*)] (decl-position-attrs! pm :param t)))
                                         at (case (:k t) :array (ptr (:of t)) :fn (ptr t) t)]
                                     (when (and nm (not kr) (or (:tag pm) (seq? p)))
                                       ;; in scope for the later parameters' types (int a[n])
@@ -745,6 +804,7 @@
              (let [mm (meta m)
                    _ (attr-args! mm)
                    t (vectorize (parse-type (:tag mm)) mm)
+                   _ (binding [*line* (or (:line mm) *line*)] (decl-position-attrs! mm :member t))
                    bits (when (contains? mm :c/bits) (:v (exi (:c/bits mm))))
                    as (attrs-of mm :c/attrs :c/after-attrs :c/decl-attrs)
                    al (some #(when (= "aligned" (first %)) (aligned-value (second %))) as)
@@ -793,7 +853,8 @@
   (let [args (rest f)
         tag (when-not (vector? (first args)) (ident (first args)))
         body (first (filter vector? args))
-        fm (meta f)]
+        fm (meta f)
+        _ (tag-attrs! (:c/attrs fm) false)]
     (if (nil? body)
       {:k kind :rec (if tag (tag-ref kind tag false) (new-rec kind nil))}
       (let [^HashMap here (when tag (.get ^HashMap (:tags (top-scope)) tag))
@@ -856,6 +917,7 @@
         tag (when-not (vector? (first args)) (ident (first args)))
         body (first (filter vector? args))
         under (when-let [u (:c/underlying (meta f))] (parse-type u))]
+    (tag-attrs! (:c/attrs (meta f)) false)
     (when (and under (= :bitint (:k (unq under))))
       (err! "invalid 'enum' underlying type"))
     (if (nil? body)
@@ -887,6 +949,7 @@
           (if es
             (let [e (first es)
                   [nm vf] (if (vector? e) [(ident (first e)) (second e)] [(ident e) nil])
+                  _ (binding [*line* (or (:line (meta e)) *line*)] (tag-attrs! (:c/attrs (meta e)) true))
                   rv (when vf (exi vf))
                   v (if vf (when (integer? (:v rv)) (:v rv)) nxt)
                   _ (when (and under (some? v) (integer? v) (not= :bitint (:k (unq under))) (not= (wrap v under) v))
@@ -1584,6 +1647,7 @@
         e {:kind kind :t t :linkage lk :v (when (and (:constexpr m) (some? init)) (:v init)) :m m :feats (cx :feats)
            :id (Object.) :file-scope (file-scope?) :name n}]
     (attr-args! m)
+    (binding [*line* (or (:line m) *line*)] (decl-position-attrs! m kind t))
     ;; cc types a library function gcc knows as a builtin by its __builtin_ declaration
     (when (and fn? (not param) (lookup (str "__builtin_" n))) (feat! :cc-builtin-types))
     (ann! (str "d " n " " (lname lk) " " (tstr (if param (case (:k (unq t)) :array (ptr (:of (unq t))) :fn (ptr t) t) t))))
@@ -1733,6 +1797,7 @@
         t (if-let [al (some #(when (= "aligned" (first %)) (aligned-value (second %))) (attrs-of m :c/attrs :c/after-attrs :c/decl-attrs))]
             (assoc t :talign al) t)]
     (attr-args! m)
+    (decl-position-attrs! (assoc m :tag tf) :typedef t)
     (when (:c/bad-specs m) (err! "two or more data types in declaration specifiers"))
     (when (or (= n "_Bool") (and (= n "bool") (c23?))) (err! (str "'" n "' cannot be defined via 'typedef'")))
     (let [prev (.get ^HashMap (:ord (top-scope)) n)]
@@ -1787,6 +1852,7 @@
   "An attribute declaration `[[...]];` (C23 6.7.13.1): the standard attributes in it are ignored (a pedwarn), except
   fallthrough, which is an error at top level, outside a switch and where no case or default label follows."
   [f next where]
+  (std-attr-check! {:c/attrs (vec (rest f))})
   (doseq [[n _ _ ns gnu] (attr-items (rest f)) :when (and (nil? ns) (not gnu))]
     (cond
       (= n "fallthrough")
@@ -1798,12 +1864,25 @@
       (or (contains? std-no-arg-attrs n) (contains? std-string-attrs n))
       (pedwarn! (str "'" n "' attribute ignored")))))
 
+(defn- stmt-attrs!
+  "The standard attributes a statement or label stood with (CS140): ignored on a statement, and on a label for
+  deprecated and fallthrough; nodiscard and noreturn apply to no label."
+  [s]
+  (when-let [v (and (seq? s) (not (decl-form? s)) (not= 'c/attr-decl (first s)) (:c/attrs (meta s)))]
+    (let [lbl (contains? '#{label case default} (first s))]
+      (at-line s
+        (doseq [n (std-names v)]
+          (cond
+            (or (not lbl) (contains? #{"deprecated" "fallthrough"} n)) (ignored! n)
+            (contains? #{"nodiscard" "noreturn" "_Noreturn"} n) (err! (str "'" n "' attribute can only be applied to declarations other than labels"))))))))
+
 (defn- check-block-items
   "A statement list; the result of its last expression statement (a statement expression's value)."
   [items]
   (let [last-r (atom nil)]
     (doseq [[s nxt] (map vector items (concat (rest items) [nil]))]
       (when (and (seq? s) (= 'c/attr-decl (first s))) (at-line s (attr-decl-check! s nxt :block)))
+      (stmt-attrs! s)
       (reset! last-r (check-stmt s)))
     @last-r))
 

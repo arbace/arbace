@@ -630,8 +630,12 @@ void __atomic_store();
 
 (defn- std-attr-at? [^Parser p i] (and (= (pkc p i) \[) (= (pkc p (inc (long i))) \[)))
 
-(defn- std-attrs-end ^long [^Parser p]
-  (loop [i 0 depth 0]
+(declare std-attrs-end-from)
+
+(defn- std-attrs-end ^long [^Parser p] (std-attrs-end-from p 0))
+
+(defn- std-attrs-end-from ^long [^Parser p ^long i0]
+  (loop [i i0 depth 0]
     (if (or (pos? depth) (std-attr-at? p i))
       (case (pkc p i)
         :eof i
@@ -716,6 +720,8 @@ void __atomic_store();
 
 (defn- skip-attribute-specifiers ^long [^Parser p ^long i]
   (loop [i i]
+    (if (std-attr-at? p i) ; CS144: and C23's [[...]], after a label before a declaration or `}`
+      (recur (std-attrs-end-from p i))
     (if (= (pkc p i) :ATTRIBUTE)
       (if-not (= (pkc p (inc i)) \()
         i
@@ -729,7 +735,7 @@ void __atomic_store();
                       (recur (inc i) depth))))]
           ;; cc returns i at eof before the loop's increment; the post statement runs first
           (if (= (first r) :eof) (dec (long (second r))) (recur (long (second r))))))
-      i)))
+      i))))
 
 (defn- synth-semi [^PTok colon] (tree/with-texts (tree/with-ch colon \;) "" ";"))
 
@@ -741,7 +747,10 @@ void __atomic_store();
         (and (= c :TYPENAME) (= (pkc p (inc i)) \:))
         (do (slot! p LDOK true) (statement p false))
         (or (declaration-specifier? c true) (= c :STATICASSERT) (= c :AUTOTYPE) (= c \}))
-        (node "Statement" :Case :StatementExpr :ExpressionStatement (node "ExpressionStatement" :Token (synth-semi colon)))
+        (node "Statement" :Case :StatementExpr :ExpressionStatement
+              (let [es (node "ExpressionStatement" :Token (synth-semi colon))]
+                (when (and (= c \}) (pos? i)) (s! es :LabelAttributeSpecifierList (attribute-specifier-list-opt p))) ; CS144: GNU attributes before `}` stand after the label
+                es))
         :else (do (slot! p LDOK true) (statement p false))))
     (statement p false)))
 
@@ -956,7 +965,8 @@ void __atomic_store();
                          :Token3 (must p \)) :Statement (statement p true))
             :DO (node "IterationStatement" :Case :IterationStatementDo :Token (sh p) :Statement (statement p true) :Token2 (must p :WHILE)
                       :Token3 (must p \() :ExpressionList (expression p false) :Token4 (must p \)) :Token5 (must p \;))
-            :FOR (if (declaration-specifier? (pkct p 2) true)
+            :FOR (if (or (declaration-specifier? (pkct p 2) true)
+                         (and (std-attr-at? p 2) (declaration-specifier? (pkct p (std-attrs-end-from p 2)) true))) ; CS144
                    (node "IterationStatement" :Case :IterationStatementForDecl :Token (sh p) :Token2 (must p \() :Declaration (declaration p nil nil true)
                          :ExpressionList (expression p true) :Token3 (must p \;) :ExpressionList2 (expression p true) :Token4 (must p \))
                          :Statement (statement p true))
@@ -1419,6 +1429,21 @@ void __atomic_store();
           (link! prev l :BalancedTokenSequence)
           (recur (or r l) l open))))))
 
+(defn- balanced-garbage?
+  "An attribute's argument tokens that are not expressions' (a `;`, a bracket closed by another kind): gcc ignores an unknown
+  attribute's arguments as balanced tokens (CS144)."
+  [^Parser p]
+  (loop [i 0 open []]
+    (let [c (pkc p i)]
+      (cond
+        (= c :eof) false
+        (= c \;) true
+        (in? c \( \[ \{) (recur (inc i) (conj open ({\( \) \[ \] \{ \}} c)))
+        (in? c \) \] \}) (cond (empty? open) false
+                              (not= (peek open) c) true
+                              :else (recur (inc i) (pop open)))
+        :else (recur (inc i) open)))))
+
 (defn- std-attribute [^Parser p]
   (let [r (node "AttributeValue" :Case :AttributeValueIdent)]
     (when (and (= (pkc p 1) \:) (= (pkc p 2) \:))
@@ -1429,7 +1454,7 @@ void __atomic_store();
     (when (= (rn p) \()
       (s! r :Case :AttributeValueExpr)
       (s! r :Token2 (sh p))
-      (if (#{"" "gnu" "__gnu__"} (src (.get r :Prefix)))
+      (if (and (#{"" "gnu" "__gnu__"} (src (.get r :Prefix))) (not (balanced-garbage? p)))
         (s! r :ArgumentExpressionList (argument-expression-list-opt p false))
         (s! r :BalancedTokenSequence (balanced-token-sequence-opt p)))
       (s! r :Token3 (must p \))))
@@ -1609,8 +1634,21 @@ void __atomic_store();
             (unexpected p "direct declarator"))]
     (direct-declarator2 p r declare)))
 
+(defn- std-attrs-then-suffix?
+  "C23 attributes followed by another array or function suffix: they stood after the suffix before them (CS140, CS144)."
+  [^Parser p]
+  (and (std-attr-at? p 0) (let [c (pkc p (std-attrs-end p))] (or (= c \[) (= c \()))))
+
+(defn- suffix-attrs!
+  "The attributes after a suffix `r`, kept on it (:AttributeSpecifierList)."
+  [^Parser p ^HashMap r]
+  (s! r :AttributeSpecifierList (attribute-specifier-list-opt p))
+  r)
+
 (defn- direct-declarator2 [^Parser p dd declare]
   (loop [r dd]
+    (if (std-attrs-then-suffix? p)
+      (recur (suffix-attrs! p r))
     (case (rn p)
       \( (let [r (do (new-scope! p)
                      (let [r (if (= (pkct p 1) :IDENTIFIER)
@@ -1626,6 +1664,8 @@ void __atomic_store();
            r
            (let [c (pkct p 1)]
              (cond
+               (and (= c \*) (= (pkc p 2) \])) ; CS144: `[*]`
+               (recur (node "DirectDeclarator" :Case :DirectDeclaratorStar :DirectDeclarator r :Token (sh p) :Token2 (sh p) :Token3 (sh p)))
                (expression? c)
                (recur (node "DirectDeclarator" :Case :DirectDeclaratorArr :DirectDeclarator r :Token (sh p)
                             :AssignmentExpression (assignment-expression p true) :Token2 (must p \])))
@@ -1645,7 +1685,7 @@ void __atomic_store();
                                           :TypeQualifiers (type-qualifier-list p true false) :AssignmentExpression (assignment-expression p true)
                                           :Token3 (must p \])))
                :else (do (unexpected p "direct declarator") (recur r)))))
-      r)))
+      r))))
 
 (defn- param! [^Parser p ^HashMap il ^PTok t ^HashMap r0]
   (let [param (node "Parameter")]
@@ -1722,8 +1762,9 @@ void __atomic_store();
            (if (or (specifier-qualifier? (rn p true) true) dots)
              (let [dad (node "DirectAbstractDeclarator" :Case :DirectAbstractDeclaratorFunc :Token lparen
                              :ParameterTypeList (parameter-type-list-opt p) :Token2 (must p \)))]
-               (if (in? (rn p) \, \))
-                 (node "AbstractDeclarator" :Case :AbstractDeclaratorDecl :Pointer ptr0 :DirectAbstractDeclarator dad)
+               (if (or (in? (rn p) \, \)) (std-attr-at? p 0)) ; CS144: attributes after the function
+                 (node "AbstractDeclarator" :Case :AbstractDeclaratorDecl :Pointer ptr0
+                       :DirectAbstractDeclarator (if (std-attr-at? p 0) (direct-abstract-declarator2 p dad) dad))
                  (doad-unexpected p)))
              (case (rn p true)
                \) (let [dad (node "DirectAbstractDeclarator" :Case :DirectAbstractDeclaratorFunc :Token lparen :Token2 (sh p))]
@@ -2206,6 +2247,7 @@ void __atomic_store();
                       :ParameterTypeList (parameter-type-list-opt p) :Token2 (must p \))))
       \[ (let [c (pkct p 1)]
            (cond
+             (std-attr-at? p 0) (recur (suffix-attrs! p r)) ; CS144: attributes after a suffix of an abstract declarator
              (= c \]) (recur (node "DirectAbstractDeclarator" :Case :DirectAbstractDeclaratorArr :DirectAbstractDeclarator r :Token (sh p) :Token2 (must p \])))
              (expression? c) (recur (node "DirectAbstractDeclarator" :Case :DirectAbstractDeclaratorArr :DirectAbstractDeclarator r :Token (sh p)
                                           :AssignmentExpression (assignment-expression p true) :Token2 (must p \])))
