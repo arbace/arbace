@@ -1295,12 +1295,30 @@
 
 (defn- decl-head? [x] (and (seq? x) ('#{c/var c/declare c/typedef c/struct c/union c/enum c/group c/static-assert c/defn c/local-labels c/attr-decl c/declare-specs} (first x))))
 
+(def ^:dynamic *vla-block* nil) ; the block being built: an atom, its [mark last] slots once it declares a VLA (CS106)
+(def ^:dynamic *vla-stack* [])  ; the mark slots of the enclosing blocks that declare VLAs, outermost first
+(def ^:dynamic *vla-brk* 0)     ; the depth of *vla-stack* at the innermost break's target (a loop or switch)
+(def ^:dynamic *vla-cont* 0)    ; at the innermost continue's (a loop)
+
+(defn- vla-leave
+  "A break or continue: the stack pointer restored to the outermost VLA block it leaves (CS106)."
+  [depth jmp]
+  (if (> (count *vla-stack*) depth)
+    (list 'do [(list 'x (list 'ei (list 'vlarestore (nth *vla-stack* depth)))) jmp])
+    jmp))
+
 (defn- vla-alloc [e tf-form loc]
-  ;; (array n T): n evaluated, n * sizeof(T) bytes on the stack
+  ;; (array n T): n evaluated, n * sizeof(T) bytes on the stack; the storage of the declaration's previous
+  ;; execution, and of its block's previous entry, freed (CS106: ci's VlaAlloc, VlaMark)
   (let [t (unq (:t e))
         nf (second tf-form)
-        n (conv (ex nf) chk/t-ulong)]
-    (list 'x (list 'ei (list 'is (:slot loc) (list 'alloca (list 'is (:size loc) (list 'bin "mul" "u64" (:n n) (vla-elem-size (:of t))))))))))
+        n (conv (ex nf) chk/t-ulong)
+        size (list 'is (:size loc) (list 'bin "mul" "u64" (:n n) (vla-elem-size (:of t))))]
+    (if *vla-block*
+      (let [[_ l] (or @*vla-block* (reset! *vla-block* [(new-slot! :i) (new-slot! :i)]))
+            md (new-slot! :i) ed (new-slot! :i)]
+        (list 'x (list 'ei (list 'is (:slot loc) (list 'vlalloc md ed l size)))))
+      (list 'x (list 'ei (list 'is (:slot loc) (list 'alloca size)))))))
 
 (defn- local-decl
   "A block's declaration: the statements it runs."
@@ -1380,7 +1398,8 @@
     (let [[h & args] s]
       (case h
         do (do-node args)
-        let (let [[bv & body] args
+        let (binding [*vla-block* (atom nil)]
+             (let [[bv & body] args
                   decls (loop [xs (seq bv) out []]
                           (if-not xs
                             out
@@ -1388,15 +1407,20 @@
                               (if (decl-head? x)
                                 (recur (next xs) (into out (local-decl x)))
                                 (recur (nnext xs) (into out (local-decl (with-meta (list 'c/var x (second xs)) (meta x)))))))))]
-              (list 'do (into decls (stmts body))))
+              (if-let [[m l] @*vla-block*]
+                (let [ss (into decls (binding [*vla-stack* (conj *vla-stack* m)] (stmts body)))]
+                  (list 'do (-> [(list 'x (list 'ei (list 'vlamark m l)))]
+                                (into ss)
+                                (conj (list 'x (list 'ei (list 'vlarestore m)))))))
+                (list 'do (into decls (stmts body))))))
         when (list 'when (truth (ex (first args))) (do-node (rest args)))
         if (let [[c a b] args] (list 'when (truth (ex c)) (do-node [a]) (do-node [b])))
         cond (let [pairs (partition 2 args)]
                (reduce (fn [else [c st]]
                          (if (= c :else) (do-node [st]) (list 'when (truth (ex c)) (do-node [st]) else)))
                        nil (reverse pairs)))
-        while (list 'loop (truth (ex (first args))) 'nil (do-node (rest args)) 0)
-        do-while (list 'loop (truth (ex (first args))) 'nil (do-node (rest args)) 1)
+        while (list 'loop (truth (ex (first args))) 'nil (binding [*vla-brk* (count *vla-stack*) *vla-cont* (count *vla-stack*)] (do-node (rest args))) 0)
+        do-while (list 'loop (truth (ex (first args))) 'nil (binding [*vla-brk* (count *vla-stack*) *vla-cont* (count *vla-stack*)] (do-node (rest args))) 1)
         for (let [[init c step & body] args
                   pre (cond
                         (empty? init) []
@@ -1404,13 +1428,13 @@
                         :else (:pre (let [x (stmt* (list 'let init))] {:pre (second x)})))
                   cn (if (= c '_) 'nil (truth (ex c)))
                   sn (if (= step '_) 'nil (effect (ex step)))]
-              (list 'do (conj (vec pre) (list 'loop cn sn (do-node body) 0))))
+              (list 'do (conj (vec pre) (list 'loop cn sn (binding [*vla-brk* (count *vla-stack*) *vla-cont* (count *vla-stack*)] (do-node body)) 0))))
         switch (let [[e & body] args
                      x (ex e)
                      pt (promoted (res-of e))
                      xv (conv x pt)
                      cases (atom {:cases [] :default 0})
-                     b (binding [*switch* {:cases cases :t pt}] (do-node body))]
+                     b (binding [*switch* {:cases cases :t pt} *vla-brk* (count *vla-stack*)] (do-node body))]
                  (list 'sw (:n xv) (if (unsigned-ty? (ity pt)) 1 0) (mapv vec (:cases @cases)) (:default @cases) b))
         case (let [[a b] args
                    c (fresh-code!)
@@ -1427,8 +1451,8 @@
         label (list 'lab (label-code! (first args)))
         goto (list 'jmp (label-code! (first args)))
         goto* (list 'igoto (:n (conv (ex (first args)) chk/t-ulong)))
-        break '(jmp 2)
-        continue '(jmp 3)
+        break (vla-leave *vla-brk* '(jmp 2))
+        continue (vla-leave *vla-cont* '(jmp 3))
         return (if (empty? args)
                  '(ret)
                  (let [rt (:fn-ret @*f*)

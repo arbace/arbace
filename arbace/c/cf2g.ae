@@ -1,0 +1,952 @@
+(ns arbace.c.cf2g
+  "cf2g, C's AOT (doc/C23-SURVEY.md §7, CS13 (a), CS17 (a); \"As built: C6 (write-ahead)\"): a C program's
+  node program (arbace.c.build's output, the lowered C forms ci's back end runs, CS120) translated into Go
+  forms over go/arbace/ci and go/arbace/crt, printed by repr/go and built by Go's compiler. Each function
+  of the program with code is a Go function of package-level name fID, the Native of its Func (ci.Enter's
+  frame in the C stack, its slots Go locals); its statements and expressions flattened into one block of
+  assignments, conditional gotos and labels, so that C's gotos into blocks, loops and switches (Duff's
+  device) and switch's cases are Go's gotos; expressions in temporaries wherever an operand's evaluation
+  has an effect, in ci's order (the builder's: gcc -O0's); setjmp's function body a closure under
+  ci.SjRun. The program's data (fn, native, static, data, at, alias, fnalias, start) stays node program
+  text, loaded by ci's Loader as on the interpreted path, so both lay out memory alike. A node or a jump
+  the translator cannot express is refused, with its reason (class aot-*).
+
+  translate gives the Go forms of one program's package; -main: `translate NODES OUTDIR [PKG]` and
+  `translate-list LIST THREADS` (bin/ci check --aot's)."
+  (:require [arbace.string :as str]
+            [arbace.walk :as walk]
+            [arbace.repr.go.print :as gp]))
+
+(set! *warn-on-reflection* true)
+
+(defn- refuse [cls & msg]
+  (throw (ex-info (apply str msg) {:cf2g/refused cls})))
+
+;; ---------------------------------------------------------------------------------------------
+;; The node program
+
+(defn read-nodes
+  "A node program's commands from its text (arbace.c.build/program-text's)."
+  [^String text]
+  (let [r (arbace.lang.LineNumberingPushbackReader. (java.io.StringReader. text)) eof (Object.)]
+    (binding [*read-eval* false]
+      (loop [out []] (let [x (read r false eof)] (if (identical? x eof) out (recur (conj out x))))))))
+
+(defn- nm "A word of a node: a string or a bare word." ^String [x] (if (string? x) x (name x)))
+(defn- lng "An integer of a node: wrapped to 64 bits (the loader's ParseUint)." ^long [x]
+  (cond (instance? Long x) x
+        (string? x) (.longValue (biginteger x))
+        :else (.longValue (biginteger x))))
+(defn- head [c] (nm (first c)))
+(defn- nil-node? [x] (or (nil? x) (and (symbol? x) (= 'nil x)) (= "nil" x)))
+
+;; ---------------------------------------------------------------------------------------------
+;; Types of ci's integer nodes (go/arbace/ci/expr.ae)
+
+(defn- bit-width
+  "[n signed] of a _BitInt type sN/uN (and gcc's wide bit-field types), nil for the others."
+  [^String t]
+  (when (and (>= (count t) 2) (#{\s \u} (first t)) (not (#{"u8" "u16" "u32" "u64"} t))
+             (every? #(Character/isDigit (char %)) (subs t 1)))
+    [(Long/parseLong (subs t 1)) (= \s (first t))]))
+
+(defn- unsigned? [t]
+  (if-let [[n s] (bit-width t)] (and (pos? n) (not s)) (contains? #{"u8" "u16" "u32" "u64" "b" "p"} t)))
+
+(defn- width ^long [t]
+  (if-let [[n] (bit-width t)]
+    (if (pos? n) n 64)
+    (case t ("i8" "u8" "b") 8 ("i16" "u16") 16 ("i32" "u32") 32 64)))
+
+(defn- norm
+  "e (an int64 expression) normalized to t, as ci.Norm."
+  [t e]
+  (if-let [[n s] (bit-width t)]
+    (if (and (pos? n) (< n 64))
+      (let [sh (- 64 n)]
+        (if s (list '>> (list '<< e sh) sh)
+            (list 'conv 'int64 (list '>> (list '<< (list 'conv 'uint64 e) sh) sh))))
+      e)
+    (case t
+      "i8" (list 'conv 'int64 (list 'conv 'int8 e))
+      "u8" (list 'conv 'int64 (list 'conv 'uint8 e))
+      "i16" (list 'conv 'int64 (list 'conv 'int16 e))
+      "u16" (list 'conv 'int64 (list 'conv 'uint16 e))
+      "i32" (list 'conv 'int64 (list 'conv 'int32 e))
+      "u32" (list 'conv 'int64 (list 'conv 'uint32 e))
+      "b" (list 'ci/Bool e)
+      e)))
+
+(defn- needs-norm? [t]
+  (if-let [[n] (bit-width t)] (and (pos? n) (< n 64)) (contains? #{"i8" "u8" "i16" "u16" "i32" "u32" "b"} t)))
+
+(defn- ua [a] (list 'conv 'uint64 a))
+
+(defn- load-expr [t a]
+  (case t
+    "i8" (list 'conv 'int64 (list 'conv 'int8 (list '.Load8 'M (ua a))))
+    ("u8" "b") (list 'conv 'int64 (list '.Load8 'M (ua a)))
+    "i16" (list 'conv 'int64 (list 'conv 'int16 (list '.Load16 'M (ua a))))
+    "u16" (list 'conv 'int64 (list '.Load16 'M (ua a)))
+    "i32" (list 'conv 'int64 (list 'conv 'int32 (list '.Load32 'M (ua a))))
+    "u32" (list 'conv 'int64 (list '.Load32 'M (ua a)))
+    ("i64" "u64" "p") (list 'conv 'int64 (list '.Load64 'M (ua a)))
+    (list 'ci/Load 'M t (ua a))))
+
+(defn- store-stmt [t a x]
+  (let [t (if-let [[n] (bit-width t)]
+            (if (pos? n) (cond (<= n 8) "u8" (<= n 16) "u16" (<= n 32) "u32" :else "u64") t)
+            t)]
+    (case t
+      ("i8" "u8" "b") (list '.Store8 'M (ua a) (list 'conv 'uint8 x))
+      ("i16" "u16") (list '.Store16 'M (ua a) (list 'conv 'uint16 x))
+      ("i32" "u32") (list '.Store32 'M (ua a) (list 'conv 'uint32 x))
+      (list '.Store64 'M (ua a) (list 'conv 'uint64 x)))))
+
+;; ---------------------------------------------------------------------------------------------
+;; The translation state
+
+(def ^:dynamic *pkg* nil)   ; the program's state (an atom): :wtypes, :wconsts, :compiled
+(def ^:dynamic *fn* nil)    ; the function's (an atom): :vars [[sym type]], :n
+(def ^:dynamic *scope* nil) ; the label scope (an atom): :defs, :used, :codes, :dispatch
+(def ^:dynamic *jumps* nil) ; the innermost {:brk kw :cont kw}
+(def ^:dynamic *lret* :Lret)
+(def ^:dynamic *in-sj* false)
+
+(defn- fresh! [prefix type]
+  (let [n (:n (swap! *fn* update :n inc))
+        s (symbol (str prefix n))]
+    (swap! *fn* update :vars conj [s type])
+    s))
+
+(defn- tmp! [k] (case k :i (fresh! "t" 'int64) :f (fresh! "u" 'float64) :w (fresh! "w" 'crt/Wide)))
+(defn- label! [] (keyword (str "G" (:n (swap! *fn* update :n inc)))))
+(defn- goto! [kw] (swap! *scope* update :used conj kw) (list 'goto kw))
+(defn- deflabel! [kw] (swap! *scope* update :defs conj kw) (list 'label kw))
+(defn- code-label [c] (keyword (str "L" c)))
+
+(defn- wtype!
+  "The package variable holding the WType of a node's \"sN\"/\"uN\" word."
+  [x]
+  (let [s (nm x) sym (symbol (str "WT" s))]
+    (swap! *pkg* update :wtypes assoc sym [(Long/parseLong (subs s 1)) (= \s (first s))])
+    sym))
+
+(defn- slot? [e] (and (symbol? e) (re-matches #"[if][0-9]+" (name e))))
+
+(def ^:private pure-heads
+  '#{+ - * conv bit-and bit-or bit-xor bit-not << >> == != < <= > >= aget ci/B ci/Bool math/Float64frombits})
+
+(defn- stable?
+  "Whether e's value cannot change before it is used (no slot, no load, no call)."
+  [e]
+  (cond (or (number? e) (string? e) (char? e) (keyword? e) (boolean? e)) true
+        (symbol? e) (not (slot? e))
+        (seq? e) (and (contains? pure-heads (first e)) (every? stable? (rest e)))
+        :else false))
+
+(defn- pure?
+  "Whether evaluating e has no effect but a load's possible fault (no call that writes)."
+  [e]
+  (cond (seq? e) (let [h (first e)]
+                   (and (or (contains? pure-heads h) (#{'.Load8 '.Load16 '.Load32 '.Load64 '.LoadF32 '.LoadF64 '.LoadWide 'ci/Load} h)
+                            (and (symbol? h) (str/starts-with? (name h) "WT")))
+                        (every? pure? (rest e))))
+        :else true))
+
+(defn- seqx
+  "Children compiled as [kind [stmts expr]] in evaluation order: [stmts exprs], an expression bound to a
+  temporary when a later child has statements and it is not stable."
+  [parts]
+  (let [v (vec parts) n (count v)
+        later (vec (for [i (range n)] (some (fn [[_ [s]]] (seq s)) (subvec v (inc i)))))]
+    (loop [i 0 stmts [] exprs []]
+      (if (= i n)
+        [stmts exprs]
+        (let [[k [s e]] (nth v i)]
+          (if (and (nth later i) (not (stable? e)))
+            (let [t (tmp! k)]
+              (recur (inc i) (-> stmts (into s) (conj (list 'set! t e))) (conj exprs t)))
+            (recur (inc i) (into stmts s) (conj exprs e))))))))
+
+(defn- bind
+  "[stmts temp] : e's value in a fresh temporary of kind k."
+  [k [s e]]
+  (let [t (tmp! k)] [(conj (vec s) (list 'set! t e)) t]))
+
+(defn- cnd "An int64 condition as a Go bool." [e]
+  (if (and (seq? e) (= 'ci/B (first e))) (second e) (list '!= e 0)))
+
+(defn- has-label? [stmts] (some #(and (seq? %) (= 'label (first %))) stmts))
+
+(defn- branch
+  "if (c) then else, c a Go bool: a Go if when neither branch holds a label, else gotos."
+  [c then else]
+  (cond
+    (and (not (has-label? then)) (not (has-label? else)))
+    (cond (and (empty? then) (empty? else)) []
+          (empty? else) [(apply list 'when c then)]
+          (empty? then) [(apply list 'when (list 'not c) else)]
+          :else [(list 'if c (apply list 'do then) (apply list 'do else))])
+    :else
+    (let [le (label!) lend (label!)]
+      (-> [(list 'when (list 'not c) (goto! le))]
+          (into then) (conj (goto! lend) (deflabel! le))
+          (into else) (conj (deflabel! lend))))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Expressions: each gives [stmts expr]
+
+(declare ix fx wx stmt effect call-expr)
+
+(defn- bin-int [op t a b]
+  (let [n? (needs-norm? t) w (width t) u (unsigned? t)
+        nr (fn [e] (if n? (norm t e) e))
+        mask (if (< w 64) (dec (bit-shift-left 1 w)) -1)
+        umask (if (< w 64) mask 18446744073709551615N)
+        smask (if (<= w 32) 31 63)]
+    (case op
+      "add" (nr (list '+ a b))
+      "sub" (nr (list '- a b))
+      "mul" (nr (list '* a b))
+      "and" (nr (list 'bit-and a b))
+      "or" (nr (list 'bit-or a b))
+      "xor" (nr (list 'bit-xor a b))
+      ("div" "rem") (if u
+                      (nr (list (if (= op "div") 'ci/UDiv 'ci/URem) a b umask))
+                      (nr (list (if (= op "div") 'ci/SDiv 'ci/SRem) a b
+                                (if (< w 64) (- (bit-shift-left 1 (dec w))) Long/MIN_VALUE))))
+      "shl" (nr (list '<< a (list 'conv 'uint (list 'bit-and b smask))))
+      "shr" (if u
+              (nr (list 'conv 'int64 (list '>> (if (< w 64) (list 'bit-and (list 'conv 'uint64 a) umask) (list 'conv 'uint64 a))
+                                           (list 'conv 'uint (list 'bit-and b smask)))))
+              (nr (list '>> a (list 'conv 'uint (list 'bit-and b smask)))))
+      (refuse :aot-node "no integer operator " op))))
+
+(defn- cmp-op [op]
+  (case op "eq" '== "ne" '!= "lt" '< "le" '<= "gt" '> "ge" '>= (refuse :aot-node "no comparison " op)))
+
+(defn- fround "float64 e, explicitly converted (no fusion, Go's spec), rounded to float when f32." [f32 e]
+  (if f32 (list 'conv 'float64 (list 'conv 'float32 e)) (list 'conv 'float64 e)))
+
+(defn- fconst [bits]
+  (list 'math/Float64frombits (let [b (long bits)] (if (neg? b) (+ (bigint b) 18446744073709551616N) b))))
+
+(defn- ix
+  "An integer node: [stmts int64-expr]."
+  [c]
+  (let [k (head c) a (vec (rest c))]
+    (case k
+      "i" [[] (lng (a 0))]
+      "il" [[] (symbol (str "i" (lng (a 0))))]
+      "is" (let [[s e] (ix (a 1)) sl (symbol (str "i" (lng (a 0))))]
+             (if (stable? e) [(conj (vec s) (list 'set! sl e)) e]
+                 (let [[s t] (bind :i [s e])] [(conj s (list 'set! sl t)) t])))
+      "fp" [[] (list '+ 'base (lng (a 0)))]
+      "va" [[] 'vaa]
+      "g" [[] (list 'aget 'G (lng (a 0)))]
+      "fa" [[] (+ 4194304 (* 16 (lng (a 0))))]
+      "labaddr" (do (swap! *scope* update :addr-taken conj (lng (a 0))) [[] (+ 6291456 (lng (a 0)))])
+      "ld" (let [[s e] (ix (a 1))] [s (load-expr (nm (a 0)) e)])
+      "st" (let [t (nm (a 0))
+                 [s [ad v]] (seqx [[:i (ix (a 1))] [:i (ix (a 2))]])
+                 [s x] (bind :i [s (if (needs-norm? t) (norm t v) v)])]
+             [(conj s (store-stmt t ad x)) x])
+      "cv" (let [[s e] (ix (a 1))] [s (norm (nm (a 0)) e)])
+      "bin" (let [[s [x y]] (seqx [[:i (ix (a 2))] [:i (ix (a 3))]])]
+              [s (bin-int (nm (a 0)) (nm (a 1)) x y)])
+      "cmp" (let [[s [x y]] (seqx [[:i (ix (a 2))] [:i (ix (a 3))]])
+                  u (unsigned? (nm (a 1)))
+                  w (fn [e] (if u (list 'conv 'uint64 e) e))]
+              [s (list 'ci/B (list (cmp-op (nm (a 0))) (w x) (w y)))])
+      "neg" (let [[s e] (ix (a 1))] [s (norm (nm (a 0)) (list '- e))])
+      "bnot" (let [[s e] (ix (a 1))] [s (norm (nm (a 0)) (list 'bit-not e))])
+      "lnot" (let [[s e] (ix (a 0))] [s (list 'ci/B (list '== e 0))])
+      ("and" "or")
+      (let [[sa ea] (ix (a 0)) [sb eb] (ix (a 1)) andp (= k "and")]
+        (if (empty? sb)
+          [sa (list 'ci/B (list (if andp 'and 'or) (cnd ea) (cnd eb)))]
+          (let [t (tmp! :i)
+                [s2 eb2] [sb eb]]
+            [(-> (vec sa)
+                 (conj (list 'set! t (if andp 0 1)))
+                 (into (branch (if andp (cnd ea) (list 'not (cnd ea)))
+                               (into (vec s2) [(list 'set! t (list 'ci/B (cnd eb2)))])
+                               [])))
+             t])))
+      "if" (let [[sc ec] (ix (a 0)) [sa ea] (ix (a 1)) [sb eb] (ix (a 2)) t (tmp! :i)]
+             [(into (vec sc) (branch (cnd ec) (conj (vec sa) (list 'set! t ea)) (conj (vec sb) (list 'set! t eb)))) t])
+      "elvis" (let [[s t] (bind :i (ix (a 0))) [sb eb] (ix (a 1))]
+                [(into s (branch (list '== t 0) (conj (vec sb) (list 'set! t eb)) [])) t])
+      "seq" (let [es (mapcat effect (a 0)) [s e] (ix (a 1))] [(into (vec es) s) e])
+      "sx" (let [ss (stmt (a 0)) [s e] (ix (a 1))] [(into (vec ss) s) e])
+      "copy" (let [[s [d sr]] (seqx [[:i (ix (a 0))] [:i (ix (a 1))]])
+                   [s d] (if (stable? d) [s d] (bind :i [s d]))]
+               [(conj s (list '.Move 'M (ua d) (ua sr) (lng (a 2)))) d])
+      "zero" (let [[s d] (bind :i (ix (a 0)))]
+               [(conj s (list '.Fill 'M (ua d) 0 (lng (a 1)))) d])
+      "adds" (let [[s [x y]] (seqx [[:i (ix (a 0))] [:i (ix (a 1))]])]
+               [s (list '+ x (list '* y (lng (a 2))))])
+      "pdiff" (let [[s [x y]] (seqx [[:i (ix (a 0))] [:i (ix (a 1))]]) sz (lng (a 2))]
+                [s (if (zero? sz) (list '- x y) (list '/ (list '- x y) sz))])
+      "bld" (let [[s e] (ix (a 1))]
+              [s (list 'ci/BitLoad 'M (nm (a 0)) (ua e) (lng (a 2)) (lng (a 3)) (not= 0 (lng (a 4))))])
+      "bst" (let [[s [ad v]] (seqx [[:i (ix (a 1))] [:i (ix (a 2))]])]
+              (bind :i [s (list 'ci/BitStore 'M (nm (a 0)) (ua ad) v (lng (a 3)) (lng (a 4)) (not= 0 (lng (a 5))))]))
+      "f2i" (let [[s e] (fx (a 1))] [s (list 'ci/F2IConv (nm (a 0)) e)])
+      "fcmp" (let [[s [x y]] (seqx [[:f (fx (a 1))] [:f (fx (a 2))]])]
+               [s (list 'ci/B (list (cmp-op (nm (a 0))) x y))])
+      "ftest" (let [[s e] (fx (a 0))] [s (list 'ci/B (list '!= e 0))])
+      "w2i" (let [[s e] (wx (a 2))]
+              [s (norm (nm (a 0)) (list 'conv 'int64 (list '.Uint64 (wtype! (a 1)) e)))])
+      "wcmp" (let [[s [x y]] (seqx [[:w (wx (a 2))] [:w (wx (a 3))]])]
+               [s (list 'ci/B (list (cmp-op (nm (a 0))) (list '.Cmp (wtype! (a 1)) x y) 0))])
+      "wtest" (let [[s e] (wx (a 1))] [s (list 'ci/B (list 'not (list '.IsZero (wtype! (a 0)) e)))])
+      "call" (let [[s e] (call-expr c)] (bind :i [s (list '.-I e)]))
+      "vaarg" (let [[s e] (ix (a 0))] (bind :i [s (list 'ci/VaArgAt 'M e (lng (a 1)))]))
+      "alloca" (let [[s e] (ix (a 0))] (bind :i [s (list 'ci/AllocaT 't e)]))
+      "vlamark" [[(list 'ci/VlaMarkAt 't (list 'addr (symbol (str "i" (lng (a 0))))) (symbol (str "i" (lng (a 1)))))] 0]
+      "vlarestore" (let [m (symbol (str "i" (lng (a 0))))]
+                     [[(list 'when (list '!= m 0) (list 'set! '(.-SP t) (list 'conv 'uint64 m)))] 0])
+      "vlalloc" (let [[s e] (ix (a 3)) sl #(list 'addr (symbol (str "i" (lng %))))]
+                  (bind :i [s (list 'ci/VlaAllocAt 't (sl (a 0)) (sl (a 1)) (sl (a 2)) e)]))
+      "trap" (bind :i [[] (list 'ci/Trap (nm (a 0)))])
+      (refuse :aot-node "no integer node " k))))
+
+(defn- fx
+  "A floating node: [stmts float64-expr]."
+  [c]
+  (let [k (head c) a (vec (rest c))]
+    (case k
+      "f" [[] (fconst (lng (a 0)))]
+      "fl" [[] (symbol (str "f" (lng (a 0))))]
+      "fs" (let [[s e] (fx (a 1)) sl (symbol (str "f" (lng (a 0))))]
+             (if (stable? e) [(conj (vec s) (list 'set! sl e)) e]
+                 (let [[s t] (bind :f [s e])] [(conj s (list 'set! sl t)) t])))
+      "fld" (let [[s e] (ix (a 1))]
+              [s (if (= "f32" (nm (a 0))) (list 'conv 'float64 (list '.LoadF32 'M (ua e))) (list '.LoadF64 'M (ua e)))])
+      "fst" (let [f32 (= "f32" (nm (a 0)))
+                  [s [ad v]] (seqx [[:i (ix (a 1))] [:f (fx (a 2))]])
+                  [s x] (bind :f [s (if f32 (fround true v) v)])]
+              [(conj s (if f32 (list '.StoreF32 'M (ua ad) (list 'conv 'float32 x)) (list '.StoreF64 'M (ua ad) x))) x])
+      "fbin" (let [[s [x y]] (seqx [[:f (fx (a 2))] [:f (fx (a 3))]])
+                   op (case (nm (a 0)) "add" '+ "sub" '- "mul" '* "div" '/ (refuse :aot-node "no floating operator " (nm (a 0))))]
+               [s (fround (not= 0 (lng (a 1))) (list op x y))])
+      "fneg" (let [[s e] (fx (a 0))] [s (list '- e)])
+      "r32" (let [[s e] (fx (a 0))] [s (fround true e)])
+      "i2f" (let [t (nm (a 0)) f32 (not= 0 (lng (a 1))) [s e] (ix (a 2))
+                  e (if (#{"u64" "p"} t) (list 'conv 'uint64 e) e)]
+              [s (if f32 (list 'conv 'float64 (list 'conv 'float32 e)) (list 'conv 'float64 e))])
+      "fif" (let [[sc ec] (ix (a 0)) [sa ea] (fx (a 1)) [sb eb] (fx (a 2)) t (tmp! :f)]
+              [(into (vec sc) (branch (cnd ec) (conj (vec sa) (list 'set! t ea)) (conj (vec sb) (list 'set! t eb)))) t])
+      "fseq" (let [es (mapcat effect (a 0)) [s e] (fx (a 1))] [(into (vec es) s) e])
+      "fsx" (let [ss (stmt (a 0)) [s e] (fx (a 1))] [(into (vec ss) s) e])
+      "fcall" (let [[s e] (call-expr c)] (bind :f [s (list '.-F e)]))
+      "w2f" (let [[s e] (wx (a 2)) v (list '.Float64 (wtype! (a 0)) e)]
+              [s (if (not= 0 (lng (a 1))) (fround true v) v)])
+      (refuse :aot-node "no floating node " k))))
+
+(defn- wconst! [t text]
+  (let [sym (symbol (str "WC" (count (:wconsts @*pkg*))))]
+    (swap! *pkg* update :wconsts conj [sym t text])
+    sym))
+
+(defn- wx
+  "A wide node: [stmts crt.Wide-expr]."
+  [c]
+  (let [k (head c) a (vec (rest c))]
+    (case k
+      "w" [[] (wconst! (wtype! (a 0)) (nm (a 1)))]
+      "wld" (let [[s e] (ix (a 1))] [s (list '.LoadWide 'M (ua e) (wtype! (a 0)))])
+      "wst" (let [wt (wtype! (a 0))
+                  [s [ad v]] (seqx [[:i (ix (a 1))] [:w (wx (a 2))]])
+                  [s x] (bind :w [s (list '.Norm wt v)])]
+              [(conj s (list '.StoreWide 'M (ua ad) wt x)) x])
+      "wbin" (let [wt (wtype! (a 1)) [s [x y]] (seqx [[:w (wx (a 2))] [:w (wx (a 3))]])]
+               [s (case (nm (a 0))
+                    "add" (list '.Add wt x y) "sub" (list '.Sub wt x y) "mul" (list '.Mul wt x y)
+                    "and" (list '.And wt x y) "or" (list '.Or wt x y) "xor" (list '.Xor wt x y)
+                    "div" (list 'ci/WDiv wt x y) "rem" (list 'ci/WRem wt x y)
+                    (refuse :aot-node "no wide operator " (nm (a 0))))])
+      "wsh" (let [wt (wtype! (a 1)) [s [x n]] (seqx [[:w (wx (a 2))] [:i (ix (a 3))]])]
+              [s (list (if (= "shl" (nm (a 0))) '.Shl '.Shr) wt x (list 'conv 'uint64 n))])
+      "wneg" (let [[s e] (wx (a 1))] [s (list '.Neg (wtype! (a 0)) e)])
+      "wnot" (let [[s e] (wx (a 1))] [s (list '.Not (wtype! (a 0)) e)])
+      "i2w" (let [wt (wtype! (a 0)) [s e] (ix (a 2))]
+              [s (if (unsigned? (nm (a 1))) (list 'crt/WFromUint64 wt (list 'conv 'uint64 e)) (list 'crt/WFromInt64 wt e))])
+      "w2w" (let [[s e] (wx (a 2))] [s (list '.Conv (wtype! (a 0)) e (wtype! (a 1)))])
+      "f2w" (let [[s e] (fx (a 1))] [s (list 'crt/WFromFloat64 (wtype! (a 0)) e)])
+      "wif" (let [[sc ec] (ix (a 0)) [sa ea] (wx (a 1)) [sb eb] (wx (a 2)) t (tmp! :w)]
+              [(into (vec sc) (branch (cnd ec) (conj (vec sa) (list 'set! t ea)) (conj (vec sb) (list 'set! t eb)))) t])
+      "wseq" (let [es (mapcat effect (a 0)) [s e] (wx (a 1))] [(into (vec es) s) e])
+      "wcall" (let [[s e] (call-expr c)] (bind :w [s (list '.-W e)]))
+      (refuse :aot-node "no wide node " k))))
+
+(defn- call-expr
+  "(KIND CALLEE [args] SRET SOFF): [stmts call-expr], the callee first, then the arguments right to left."
+  [c]
+  (let [[_ callee args sret soff] c
+        static (when (= "fnref" (head callee)) (lng (second callee)))
+        [sc ce] (if static [[] nil] (bind :i (ix callee)))
+        args (vec args)
+        ;; right to left
+        parts (vec (for [q (rseq args)]
+                     (case (head q)
+                       "ai" [:i (ix (second q))]
+                       "af" [:f (fx (second q))]
+                       "aw" [:w (wx (second q))]
+                       "am" [:i (ix (second q))]
+                       (refuse :aot-node "no argument " (head q)))))
+        [sa exprs] (seqx parts)
+        exprs (vec (rseq exprs))
+        lits (vec (for [[q e] (map vector args exprs)]
+                    (case (head q)
+                      "ai" (list 'lit '_ :K \i :I e)
+                      "af" (list 'lit '_ :K \f :F e)
+                      "aw" (list 'lit '_ :K \w :W e)
+                      "am" (list 'lit '_ :K \m :Addr (ua e) :Size (lng (nth q 2))))))
+        lits (if (and sret (not= 0 (lng sret)))
+               (into [(list 'lit '_ :K \i :I (list '+ 'base (lng soff)))] lits)
+               lits)
+        argv (apply list 'lit '(slice ci/Arg) lits)
+        call (cond
+               (and static (contains? (:compiled @*pkg*) static)) (list (symbol (str "cf" static)) 't argv)
+               static (list '.Call 'P 't (list 'aget 'F static) argv)
+               :else (list '.CallAddr 'P 't (ua ce) argv))]
+    [(into (vec sc) sa) call]))
+
+(defn- effect
+  "An effect node: its statements."
+  [c]
+  (let [k (head c) a (vec (rest c))
+        drop-pure (fn [[s e]] (if (and (pure? e) (stable? e)) (vec s) (conj (vec s) (list 'set! '_ e))))]
+    (case k
+      "ei" (let [e (a 0) h (head e)]
+             (case h
+               "is" (let [[s v] (ix (second (rest e)))] (conj (vec s) (list 'set! (symbol (str "i" (lng (second e)))) v)))
+               "st" (first (ix e))
+               "copy" (first (ix e)) "zero" (first (ix e)) "bst" (first (ix e))
+               "call" (let [[s ce] (call-expr e)] (conj s ce))
+               "seq" (into (vec (mapcat effect (second e))) (effect (list 'ei (nth e 2))))
+               "sx" (into (vec (stmt (second e))) (effect (list 'ei (nth e 2))))
+               (drop-pure (ix e))))
+      "ef" (let [e (a 0)]
+             (case (head e)
+               "fs" (let [[s v] (fx (nth e 2))] (conj (vec s) (list 'set! (symbol (str "f" (lng (second e)))) v)))
+               "fcall" (let [[s ce] (call-expr e)] (conj s ce))
+               (drop-pure (fx e))))
+      "ew" (let [e (a 0)]
+             (if (= "wcall" (head e)) (let [[s ce] (call-expr e)] (conj s ce)) (drop-pure (wx e))))
+      "ecall" (let [[s ce] (call-expr c)] (conj s ce))
+      "vastart" (let [[s e] (ix (a 0))] (conj (vec s) (list '.Store64 'M (ua e) (list 'conv 'uint64 'vaa))))
+      "nop" []
+      ;; an integer node as an effect
+      (effect (list 'ei c)))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Statements: each gives its statements, flat
+
+(defn- ret-jump [] (if *in-sj* [(list 'set! 'retd true) (goto! *lret*)] [(goto! *lret*)]))
+
+(defn- jump [code]
+  (case (long code)
+    0 []
+    1 (ret-jump)
+    2 (if-let [b (:brk *jumps*)] [(goto! b)] (ret-jump))
+    3 (if-let [c (:cont *jumps*)] [(goto! c)] (ret-jump))
+    [(goto! (code-label code))]))
+
+(defn- ret-stmt [c]
+  (if (= 1 (count c))
+    (ret-jump)
+    (let [r (second c) k (head r) a (vec (rest r))]
+      (into
+       (case k
+         "reti" (let [[s e] (ix (a 0))] (conj (vec s) (list 'set! 'ret (list 'lit 'ci/Arg :K \i :I e))))
+         "retf" (let [[s e] (fx (a 0))] (conj (vec s) (list 'set! 'ret (list 'lit 'ci/Arg :K \f :F e))))
+         "retw" (let [[s e] (wx (a 0))] (conj (vec s) (list 'set! 'ret (list 'lit 'ci/Arg :K \w :W e))))
+         "retm" (let [[s e] (bind :i (ix (a 0))) dst (symbol (str "i" (lng (a 1))))]
+                  (conj s (list '.Move 'M (ua dst) (ua e) (lng (a 2)))
+                        (list 'set! 'ret (list 'lit 'ci/Arg :K \i :I dst))))
+         (refuse :aot-node "no return " k))
+       (ret-jump)))))
+
+(defn- switch-stmt [[_ e uns cases dflt body]]
+  (let [[s v] (bind :i (ix e))
+        unsigned (not= 0 (lng uns))
+        brk (label!)
+        cases (mapv (fn [q] (mapv lng q)) cases)
+        exact (reduce (fn [m [lo hi code]] (if (and (= lo hi) (not (contains? m lo))) (assoc m lo code) m))
+                      (array-map) cases)
+        ranges (sort-by first (filter (fn [[lo hi]] (not= lo hi)) cases))
+        dflt (lng dflt)
+        dispatch (concat
+                  (when (seq exact)
+                    [(apply list 'switch v
+                            (for [[val code] (sort-by first exact)] (list 'case [val] (goto! (code-label code)))))])
+                  (for [[lo hi code] ranges]
+                    (list 'when (if unsigned
+                                  (list 'and (list '>= (list 'conv 'uint64 v) (list 'conv 'uint64 lo)) (list '<= (list 'conv 'uint64 v) (list 'conv 'uint64 hi)))
+                                  (list 'and (list '>= v lo) (list '<= v hi)))
+                          (goto! (code-label code))))
+                  [(if (zero? dflt) (goto! brk) (goto! (code-label dflt)))])
+        inner (binding [*jumps* (assoc *jumps* :brk brk)] (stmt body))]
+    (-> s (into dispatch) (into inner) (conj (deflabel! brk)))))
+
+(defn- loop-stmt [[_ c step body do?]]
+  (let [top (label!) cont (label!) brk (label!)
+        cond-stmts (fn [] (if (nil-node? c) []
+                              (let [[s e] (ix c)] (conj (vec s) (list 'when (list 'not (cnd e)) (goto! brk))))))
+        first-check (if (or (not= 0 (lng do?)) (nil-node? c)) [] (cond-stmts))
+        inner (binding [*jumps* {:brk brk :cont cont}] (stmt body))
+        stepper (if (nil-node? step) [] (effect step))]
+    (-> (vec first-check)
+        (conj (deflabel! top))
+        (into inner)
+        (conj (deflabel! cont))
+        (into stepper)
+        (into (cond-stmts))
+        (conj (goto! top) (deflabel! brk)))))
+
+(declare sj-body)
+
+(defn- stmt
+  "A statement node: its statements."
+  [c]
+  (let [k (head c) a (vec (rest c))]
+    (case k
+      "x" (effect (a 0))
+      "do" (vec (mapcat stmt (a 0)))
+      "when" (let [[s e] (ix (a 0))
+                   then (stmt (a 1))
+                   else (if (and (> (count a) 2) (not (nil-node? (a 2)))) (stmt (a 2)) [])]
+               (into (vec s) (branch (cnd e) then else)))
+      "loop" (loop-stmt c)
+      "lab" (let [code (lng (a 0))] (swap! *scope* update :codes conj code) [(deflabel! (code-label code))])
+      "jmp" (jump (lng (a 0)))
+      "igoto" (let [[s e] (ix (a 0)) t (tmp! :i)]
+                (conj (vec s) (list 'set! t (list '- e 6291456)) (list 'igoto-dispatch t)))
+      "ret" (ret-stmt c)
+      "sw" (switch-stmt c)
+      "sj" (let [code (lng (a 0)) sv (tmp! :i)]
+             (swap! *scope* update :sj conj code)
+             (-> [(deflabel! (code-label code))
+                  (list 'set! sv (list 'conv 'int64 (list '.SjSet 'fr code)))]
+                 (into (stmt (a 1)))
+                 (conj (list '.SjSet 'fr (list 'conv 'ci/Ctl sv)))))
+      "sjbody" (sj-body (a 0))
+      (refuse :aot-node "no statement " k))))
+
+(defn- finish-scope
+  "The scope's statements with igoto's dispatches made, the labels no goto names dropped; a goto to a
+  label outside the scope refused."
+  [stmts]
+  (let [sc @*scope*
+        targets (fn [] (sort (into (set (:codes sc)) (:sj sc))))
+        stmts (vec (mapcat (fn [s]
+                             (if (and (seq? s) (= 'igoto-dispatch (first s)))
+                               [(apply list 'switch (second s)
+                                       (concat (for [code (targets)] (list 'case [code] (goto! (code-label code))))
+                                               [(list 'default (goto! *lret*))]))]
+                               [s]))
+                           stmts))
+        sc @*scope*
+        undefined (remove (:defs sc) (:used sc))]
+    (when (seq undefined)
+      (refuse :aot-goto "a jump to a label outside its function's block: " (str/join " " (map name (sort undefined)))))
+    (vec (remove (fn [s] (and (seq? s) (= 'label (first s)) (not (contains? (:used sc) (second s))))) stmts))))
+
+(defn- new-scope [] (atom {:defs #{} :used #{} :codes #{} :sj #{} :addr-taken #{}}))
+
+(defn- sj-body
+  "A body that calls setjmp: a closure under ci.SjRun, entered again at a setjmp statement's code."
+  [body]
+  (when *in-sj* (refuse :aot-node "a setjmp body inside another"))
+  (let [inner (binding [*scope* (new-scope) *lret* :Sret *in-sj* true *jumps* nil]
+                (let [ss (stmt body)
+                      sjs (sort (:sj @*scope*))
+                      entry (when (seq sjs)
+                              [(apply list 'switch 'enter
+                                      (for [code sjs] (list 'case [code] (goto! (code-label code)))))])
+                      all (-> (vec entry) (into ss) (conj (deflabel! :Sret)))]
+                  (finish-scope all)))]
+    (swap! *fn* assoc :sj true)
+    [(list 'ci/SjRun 'fr (apply list 'fn [(with-meta 'enter {:tag 'ci/Ctl})] inner))
+     (list 'when 'retd (goto! *lret*))]))
+
+;; ---------------------------------------------------------------------------------------------
+;; Functions
+
+(def ^:private arith-heads '#{+ - * / % bit-and bit-or bit-xor bit-and-not bit-not << >> conv})
+
+(defn- unconst
+  "An operation of constants alone made one of values (its first int64 constant as ci.K's): Go's exact
+  constant arithmetic would refuse what overflows; the machine's wraps."
+  [x]
+  (cond
+    ;; a non-constant shift of an untyped constant takes the constant's type from the context (Go's spec),
+    ;; which may be narrower than int64: the constant made an int64 value
+    (and (seq? x) (#{'<< '>>} (first x)) (instance? Long (second x)) (not (every? number? (rest x))))
+    (apply list (first x) (list 'ci/K (second x)) (drop 2 x))
+    :else
+  (if (and (seq? x) (contains? arith-heads (first x)))
+    (let [args (if (= 'conv (first x)) (drop 2 x) (rest x))
+          pre (if (= 'conv (first x)) (take 2 x) (take 1 x))]
+      (if (and (seq args) (every? #(or (instance? Long %) (instance? arbace.lang.BigInt %) (instance? java.math.BigInteger %)) args))
+        (let [i (first (keep-indexed (fn [i a] (when (instance? Long a) i)) args))]
+          (if i
+            (apply list (concat pre (assoc (vec args) i (list 'ci/K (nth (vec args) i)))))
+            x))
+        x))
+    x)))
+
+(defn- unconst-all [forms] (walk/postwalk unconst forms))
+
+(defn- reads
+  "The symbols the forms read (a set!'s target is written, not read)."
+  [forms]
+  (let [acc (java.util.HashSet.)]
+    (letfn [(walk [x]
+              (cond (symbol? x) (.add acc x)
+                    (and (seq? x) (= 'set! (first x)) (symbol? (second x))) (doseq [y (drop 2 x)] (walk y))
+                    (or (seq? x) (vector? x)) (doseq [y x] (walk y))
+                    :else nil))]
+      (walk forms))
+    acc))
+
+(defn- decls-let
+  "The function's variables declared around the body: those it reads (Go refuses a variable declared and
+  not used), the assignments of the others made to _."
+  [vars body]
+  (let [^java.util.HashSet rd (reads body)
+        dead (set (remove #(.contains rd %) (map first vars)))
+        body (if (empty? dead)
+               body
+               (walk/postwalk (fn [x] (if (and (seq? x) (= 'set! (first x)) (contains? dead (second x)))
+                                        (apply list 'set! '_ (drop 2 x))
+                                        x))
+                              body))
+        live (remove (comp dead first) vars)
+        bs (vec (mapcat (fn [[s t]] [(with-meta s {:tag t}) (list 'zero t)]) live))]
+    (if (empty? bs)
+      body
+      [(apply list 'let bs body)])))
+
+(defn- slot-vars [ni nf]
+  (concat (for [i (range ni)] [(symbol (str "i" i)) 'int64])
+          (for [i (range nf)] [(symbol (str "f" i)) 'float64])))
+
+(defn- param-lit [q]
+  (case (head q)
+    "pi" (list 'lit 'ci/Param :K \i :Slot (lng (nth q 1)))
+    "pf" (list 'lit 'ci/Param :K \f :Slot (lng (nth q 1)) :F32 (not= 0 (lng (nth q 2))))
+    "pm" (list 'lit 'ci/Param :K \m :Off (lng (nth q 1)) :T (nm (nth q 2)) :Size (lng (nth q 3)))
+    "pw" (list 'lit 'ci/Param :K \m :Off (lng (nth q 1)) :Wide true :WT (wtype! (nth q 2)))
+    (refuse :aot-node "no parameter " (head q))))
+
+(defn- param-stmts [params]
+  (vec (keep-indexed
+        (fn [i q]
+          (case (head q)
+            "pi" (list 'when (list '> (list 'len 'args) i) (list 'set! (symbol (str "i" (lng (nth q 1)))) (list '.-I (list 'aget 'args i))))
+            "pf" (list 'when (list '> (list 'len 'args) i)
+                       (list 'set! (symbol (str "f" (lng (nth q 1))))
+                             (if (not= 0 (lng (nth q 2))) (fround true (list '.-F (list 'aget 'args i))) (list '.-F (list 'aget 'args i)))))
+            nil))
+        params)))
+
+(defn- code-fn
+  "(code ID NI NF FRAME VARIADIC RETF32 PARAMS BODY): the Go function fID and its Code variable CID."
+  [[_ id ni nf frame variadic retf32 params body]]
+  (let [id (lng id) fname (symbol (str "cf" id)) cname (symbol (str "CC" id))]
+    (binding [*fn* (atom {:vars [] :n 0}) *scope* (new-scope) *lret* :Lret *in-sj* false *jumps* nil]
+      (let [plits (mapv param-lit params)
+            ss (stmt body)
+            ss (finish-scope (-> (param-stmts params) (into ss) (conj (deflabel! :Lret))))
+            vars (concat (slot-vars (lng ni) (lng nf)) (:vars @*fn*)
+                         (when (:sj @*fn*) [['retd 'bool]]))
+            tail [(list 'ci/Leave 't 'fr 'sp)
+                  (if (not= 0 (lng retf32))
+                    (list 'set! (list '.-F 'ret) (fround true (list '.-F 'ret)))
+                    nil)
+                  '(return ret)]
+            body (unconst-all (decls-let vars (concat ss (remove nil? tail))))]
+        [(list 'go/var cname (list 'addr (list 'lit 'ci/Code :FrameSize (lng frame) :Variadic (not= 0 (lng variadic))
+                                              :Params (apply list 'lit '(slice ci/Param) plits))))
+         (list 'go/func fname (with-meta [(with-meta 't {:tag '(* ci/Thread)}) (with-meta 'args {:tag '(slice ci/Arg)})] {})
+               :results ['ci/Arg]
+               (apply list 'let ['(values fr sp) (list 'ci/Enter 't (list 'aget 'F id) cname 'args)
+                           'base (list 'conv 'int64 (list '.-Base 'fr))
+                           'vaa (list 'conv 'int64 (list '.-VA 'fr))
+                           (with-meta 'ret {:tag 'ci/Arg}) '(zero ci/Arg)]
+                     '(set! _ base) '(set! _ vaa)
+                     body))]))))
+
+(defn- init-fn
+  "(init STMT) or (init NI NF STMT): the Go function inN, a ci.GoStmt of the program's Inits."
+  [n c]
+  (let [[ni nf s] (if (= 2 (count c)) [0 0 (second c)] [(lng (nth c 1)) (lng (nth c 2)) (nth c 3)])
+        fname (symbol (str "in" n))]
+    (binding [*fn* (atom {:vars [] :n 0}) *scope* (new-scope) *lret* :Lret *in-sj* false *jumps* nil]
+      (let [ss (finish-scope (conj (vec (stmt s)) (deflabel! :Lret)))
+            vars (concat (slot-vars ni nf) (:vars @*fn*) (when (:sj @*fn*) [['retd 'bool]]))
+            body (unconst-all (decls-let vars (concat ss ['(return ci/CNext)])))]
+        (list 'go/func fname (with-meta [(with-meta 'fr {:tag '(* ci/Frame)})] {}) :results ['ci/Ctl]
+              (apply list 'let ['t '(.-T fr)
+                          'base '(conv int64 (.-Base fr))
+                          'vaa '(conv int64 (.-VA fr))
+                          (with-meta 'ret {:tag 'ci/Arg}) '(zero ci/Arg)]
+                    '(set! _ t) '(set! _ base) '(set! _ vaa) '(set! _ ret)
+                    body))))))
+
+(defn- text-of [cmds]
+  (binding [*print-length* nil *print-level* nil]
+    (let [sb (StringBuilder.)] (doseq [c cmds] (.append sb (pr-str c)) (.append sb "\n")) (str sb))))
+
+(defn translate
+  "The Go forms of the node program cmds as the package pkg (path PATH, a main package when pkg is main):
+  [forms {:functions n}]. Throws ex-info with :cf2g/refused for a node it cannot express."
+  [cmds pkg path]
+  (binding [*pkg* (atom {:wtypes (sorted-map) :wconsts [] :compiled (set (for [c cmds :when (= "code" (head c))] (lng (second c))))})]
+    (let [;; the commands in order: runs of data as text, a code a compiled function, an init a GoStmt
+          steps (reduce (fn [acc c]
+                          (case (head c)
+                            "code" (conj acc [:code c])
+                            "init" (conj acc [:init c])
+                            (if (= :data (first (peek acc)))
+                              (conj (pop acc) [:data (conj (second (peek acc)) c)])
+                              (conj acc [:data [c]]))))
+                        [] cmds)
+          ninit (volatile! -1)
+          decls (vec (mapcat (fn [[k x]]
+                               (case k
+                                 :code (code-fn x)
+                                 :init [(init-fn (vswap! ninit inc) x)]
+                                 :data []))
+                             steps))
+          ndata (volatile! -1) ninit2 (volatile! -1)
+          data-vars (vec (keep (fn [[k x]] (when (= k :data) (list 'go/var (symbol (str "D" (vswap! ndata inc))) (text-of x)))) steps))
+          _ (vreset! ndata -1)
+          setup (vec (mapcat (fn [[k x]]
+                               (case k
+                                 :data [(list '.TopText 'l (symbol (str "D" (vswap! ndata inc))))]
+                                 :code (let [id (lng (second x))] [(list '.SetCompiled 'l id (symbol (str "cf" id)))])
+                                 :init [(list 'set! '(.-Inits p) (list 'append '(.-Inits p) (list 'lit 'ci/Init :S (list 'conv 'ci/GoStmt (symbol (str "in" (vswap! ninit2 inc)))))))]))
+                             steps))
+          st @*pkg*
+          wvars (for [[sym [n s]] (:wtypes st)] (list 'go/var sym (list 'lit 'crt/WType :N n :Signed s)))
+          wcs (for [[sym t text] (:wconsts st)] (list 'go/var sym (list 'ci/MustWide t text)))
+          main? (= "main" (str pkg))
+          entry (if main?
+                  (list 'go/func 'main [] (list 'Main '(subslice os/Args 1)))
+                  nil)
+          run (list 'go/func 'Main [(with-meta 'args {:tag '(slice string)})]
+                    (list 'ci/AotMain 'args
+                          (apply list 'fn [(with-meta 'p {:tag '(* ci/Prog)}) (with-meta 'l {:tag '(* ci/Loader)})]
+                                 '(set! P p) '(set! M (.-M p))
+                                 (concat setup ['(set! F (.-Funcs p)) '(set! G (.StaticsI p))]))))
+          ns-sym (symbol (str "go." (str/replace (str path) "/" ".")))
+          forms (concat
+                 [(list 'ns ns-sym '(:require [arbace.go :as go]))
+                  (list 'go/package (symbol (str pkg)) :path (str path) :files ["prog.go"])
+                  (list 'in-ns (list 'quote ns-sym))
+                  (list 'go/file "prog.go"
+                        :doc "A C program compiled by cf2g (arbace.c.cf2g) from its node program.\n"
+                        :imports (vec (concat (when main? '[[os "os"]]) '[[math "math"] [ci "arbace/ci"] [crt "arbace/crt"]])))
+                  '(go/var _ math/Pi)
+                  '(go/var _ crt/Text)
+                  '(go/var ^{:tag (* ci/Prog)} P)
+                  '(go/var ^{:tag (* crt/Mem)} M)
+                  '(go/var ^{:tag (slice (* ci/Func))} F)
+                  '(go/var ^{:tag (slice int64)} G)]
+                 wvars wcs data-vars decls
+                 [run] (when entry [entry]))]
+      [(vec forms) {:functions (count (:compiled st))}])))
+
+(defn go-text
+  "The Go text of translate's forms (repr/go's printer, its gofmt layout)."
+  ^String [forms]
+  (let [pkg (gp/collect-forms forms)]
+    (val (first (gp/print-forms pkg {:layout :gofmt :line-directives? false})))))
+
+(defn translate-file
+  "The node program at nodes-path translated into out-dir/prog.go as package pkg (path path): {:status :ok
+  :functions n :bytes b} or {:status :refused :class c :message m}."
+  [^String nodes-path ^String out-dir pkg path]
+  (try
+    (let [[forms info] (translate (read-nodes (slurp nodes-path)) pkg path)
+          text (go-text forms)
+          d (java.io.File. out-dir)]
+      (.mkdirs d)
+      (spit (java.io.File. d "prog.go") text)
+      (assoc info :status :ok :bytes (count text)))
+    (catch arbace.lang.ExceptionInfo e
+      (if-let [c (:cf2g/refused (ex-data e))]
+        {:status :refused :class c :message (.getMessage e)}
+        (throw e)))))
+
+(defn- tsv [^String f]
+  (let [x (java.io.File. f)]
+    (if (.exists x) (mapv #(str/split % #"\t" -1) (remove str/blank? (str/split-lines (slurp x)))) [])))
+
+(defn- compile-list
+  "compile-list HOST-DIR OUT LIST THREADS: each line of LIST (ID BASE STD ARGS READNAME PKG, tab-separated: a
+  program of one file) read, checked, linked with musl, built into its node program and translated into the
+  package OUT/progs/PKG (path arbace/progs/PKG); OUT/nodes.tsv lists ID STATUS [CLASS MESSAGE FLAGS], as
+  arbace.c.run's nodes-list does (a refusal of cf2g's the status refused with its class)."
+  [[host-dir out list threads]]
+  (require 'arbace.c.run 'arbace.repr.c.host 'arbace.c.musl 'arbace.c.build)
+  (let [h ((resolve 'arbace.repr.c.host/load-host) host-dir)
+        root (System/getProperty "user.dir")
+        lib ((resolve 'arbace.c.musl/library) h root)
+        read-unit (resolve 'arbace.c.run/read-unit)
+        uses-ld (resolve 'arbace.c.run/uses-long-double?)
+        build-linked (resolve 'arbace.c.musl/build-linked)
+        lines (vec (remove str/blank? (str/split-lines (slurp list))))
+        q (java.util.concurrent.ConcurrentLinkedQueue. ^java.util.Collection lines)
+        res (java.util.concurrent.ConcurrentHashMap.)
+        clean (fn [s] (str/replace (str s) #"[\t\n\r]" " "))
+        workers (doall
+                 (for [_ (range (Long/parseLong (or threads "3")))]
+                   (future
+                     (loop []
+                       (when-let [^String l (.poll q)]
+                         (let [[id base std argstr rdn pkg] (str/split l #"\t" -1)
+                               opts (vec (cons (str "-std=" std) (remove str/blank? (str/split (or argstr "") #" "))))
+                               r (try
+                                   (let [u (read-unit h opts base rdn)]
+                                     (if (not= :ok (:status u))
+                                       [(name (:status u)) "" (:message u)]
+                                       (let [ld (if (uses-ld (:forms (:rd u))) "long-double" "")
+                                             cmds (try (build-linked lib [u])
+                                                       (catch arbace.lang.ExceptionInfo e
+                                                         (if-let [c (:ci/refused (ex-data e))]
+                                                           {:refused c :message (.getMessage e)}
+                                                           (throw e))))]
+                                         (if (map? cmds)
+                                           ["refused" (name (:refused cmds)) (:message cmds) ld]
+                                           (let [r (try (let [[forms] (translate cmds pkg (str "arbace/progs/" pkg))
+                                                              d (java.io.File. (str out "/progs/" pkg))]
+                                                          (.mkdirs d)
+                                                          (when (System/getenv "CI_AOT_NODES")
+                                                            (spit (java.io.File. d "prog.nodes") ((resolve 'arbace.c.build/program-text) cmds)))
+                                                          (spit (java.io.File. d "prog.go") (go-text forms))
+                                                          nil)
+                                                        (catch arbace.lang.ExceptionInfo e
+                                                          (if-let [c (:cf2g/refused (ex-data e))]
+                                                            ["refused" (name c) (.getMessage e) ld]
+                                                            (throw e))))]
+                                             (or r ["ok" "" "" ld]))))))
+                                   (catch Throwable e ["build-error" "" (str (.getName (class e)) ": " (.getMessage e))]))]
+                           (.put res id (str/join "\t" (cons id (map clean r)))))
+                         (recur))))))]
+    (doseq [w workers] @w)
+    (spit (str out "/nodes.tsv") (str (str/join "\n" (sort (vals res))) "\n"))
+    (shutdown-agents)
+    (System/exit 0)))
+
+(defn- read-all [^String f]
+  (if (.exists (java.io.File. f)) (read-nodes (slurp f)) []))
+
+(defn- judge
+  "judge WORK REF DIVERGENCES DIVERGENCES-AOT INTERP [--record] CORPUS...: each program's compiled run
+  against gcc's (arbace.c.run/result's rule), every non-pass in a class of the two files (the
+  interpreter's, then AOT's own); and against the interpreted run (INTERP: a directory of the
+  interpreted check's CORPUS/run.tsv), diffcheck's kind: the same status and standard output."
+  [[work reff divf diva interp & more]]
+  (require 'arbace.c.run)
+  (let [result (resolve 'arbace.c.run/result)
+        record (some #{"--record"} more)
+        corpora (remove #{"--record" ""} more)
+        refs (into {} (map (juxt :id identity) (read-all reff)))
+        classes (into (vec (read-string (slurp diva))) (read-string (slurp divf)))
+        known (let [f (java.io.File. "test/c/check-known.edn")] (if (.exists f) (read-string (slurp f)) {}))
+        known-aot (let [f (java.io.File. "test/c/check-aot-known.edn")] (if (.exists f) (read-string (slurp f)) {}))
+        klass (fn [[_ r reason]]
+                (let [s (str (name r) " " reason)]
+                  (some (fn [c] (when (some #(re-find % s) (:match c)) (:id c))) classes)))
+        interp-rows (let [f (java.io.File. "test/c/check-linux-amd64.edn")] (if (.exists f) (into {} (map (juxt first identity) (read-string (slurp f)))) {}))
+        diff (atom {:same 0 :differ [] :no-interp 0})
+        rows (vec (for [c corpora
+                        :let [nodes (into {} (map (juxt first identity) (tsv (str work "/" c "/nodes.tsv"))))
+                              runs (into {} (map (juxt first identity) (tsv (str work "/" c "/run.tsv"))))
+                              iruns (into {} (map (juxt first identity) (tsv (str interp "/" c "/run.tsv"))))]
+                        [id] (tsv (str work "/" c "/list.tsv"))]
+                    (let [row (result id (get refs id) (get nodes id) (get runs id))
+                          mid (str/replace id "torture-execute-mirror/" "torture-execute/")
+                          kr (or (get known-aot id) (get known-aot mid) (get known id) (get known mid))
+                          row (if (and (not= :pass (second row)) kr)
+                                [id :fail (str "known " kr " (" (nth row 2) ")")]
+                                row)
+                          [_ ist isum] (get iruns id)
+                          [_ cst csum] (get runs id)]
+                      (cond (and ist cst) (if (and (= ist cst) (= isum csum))
+                                            (swap! diff update :same inc)
+                                            (swap! diff update :differ conj [id (str "interpreted " ist " " (subs (str isum) 0 (min 12 (count (str isum))))
+                                                                                     ", compiled " cst " " (subs (str csum) 0 (min 12 (count (str csum)))))]))
+                            cst (swap! diff update :no-interp inc))
+                      (let [irow (get interp-rows id)
+                            row (if (= :pass (second row)) row (conj row (klass row)))]
+                        (conj (if (= 3 (count row)) (conj row nil) row) (when irow (second irow)))))))
+        failing (filter #(and (not= :pass (second %)) (nil? (nth % 3 nil))) rows)
+        d @diff]
+    (spit (str work "/results.edn") (str "[\n" (str/join "\n" (map pr-str rows)) "\n]\n"))
+    (doseq [c corpora]
+      (let [rs (filter #(str/starts-with? (first %) (str c "/")) rows)
+            by (frequencies (map #(if (= :pass (second %)) :pass (or (nth % 3 nil) :fail)) rs))]
+        (println (format "%-24s %5d programs: %s" c (count rs) (str/join ", " (map (fn [[k v]] (str (name k) " " v)) (sort-by (comp - val) by)))))))
+    (let [both (frequencies (map (fn [r] [(= :pass (second r)) (= :pass (nth r 4 nil))]) rows))]
+      (println "compiled against interpreted (results):" (get both [true true] 0) "both pass,"
+               (get both [false false] 0) "neither," (get both [true false] 0) "compiled only," (get both [false true] 0) "interpreted only")
+      (println "compiled against interpreted (runs: status and stdout):" (:same d) "the same," (count (:differ d)) "differ,"
+               (:no-interp d) "with no interpreted run")
+      (doseq [[id why] (take 40 (:differ d))] (println "  DIFFER" id why)))
+    (when record
+      (let [f "test/c/check-aot-linux-amd64.edn"
+            old (if (.exists (java.io.File. f)) (read-string (slurp f)) [])
+            keep (remove (fn [[id]] (some #(str/starts-with? id (str % "/")) corpora)) old)
+            all (sort-by first (concat keep (map (fn [[id r reason]] [id r reason]) rows)))]
+        (spit f (str ";; ci's AOT check (bin/ci check --aot --record): each program of the run corpora compiled by cf2g,\n"
+                     ";; [ID RESULT REASON], against gcc 15.2's -O0 run (test/c/ref-gcc15.edn); its classes\n"
+                     ";; test/c/divergences-aot.edn, then test/c/divergences.edn.\n[\n"
+                     (str/join "\n" (map pr-str all)) "\n]\n"))
+        (println "recorded" f)))
+    (doseq [r (take 40 failing)] (println "FAIL" (first r) (nth r 2)))
+    (System/exit (if (seq failing) 1 0))))
+
+(defn -main
+  "translate NODES OUTDIR [PKG PATH]: one node program into OUTDIR/prog.go (default package main);
+  translate-list LIST THREADS: each line ID NODES OUTDIR PKG PATH (tab-separated) translated, a line
+  ID STATUS CLASS MESSAGE FUNCTIONS BYTES a program printed on the standard output."
+  [verb & args]
+  (case verb
+    "translate"
+    (let [[nodes out pkg path] args
+          r (translate-file nodes out (or pkg "main") (or path "ciprog"))]
+      (if (= :ok (:status r))
+        (do (println "cf2g:" (:functions r) "functions," (:bytes r) "bytes") (System/exit 0))
+        (do (binding [*out* *err*] (println (str "refused (" (name (:class r)) "): " (:message r)))) (System/exit 1))))
+    "translate-list"
+    (let [[list threads] args
+          lines (vec (remove str/blank? (str/split-lines (slurp list))))
+          q (java.util.concurrent.ConcurrentLinkedQueue. ^java.util.Collection lines)
+          out (java.util.concurrent.ConcurrentHashMap.)
+          clean (fn [s] (str/replace (str s) #"[\t\n\r]" " "))
+          workers (doall
+                   (for [_ (range (Long/parseLong (or threads "2")))]
+                     (future
+                       (loop []
+                         (when-let [^String l (.poll q)]
+                           (let [[id nodes od pkg path] (str/split l #"\t" -1)
+                                 r (try (translate-file nodes od pkg path)
+                                        (catch Throwable e {:status :error :class :aot-error :message (str (.getName (class e)) ": " (.getMessage e))}))]
+                             (.put out id (str/join "\t" (map clean [id (name (:status r)) (if (:class r) (name (:class r)) "") (or (:message r) "")
+                                                                    (or (:functions r) "") (or (:bytes r) "")]))))
+                           (recur))))))]
+      (doseq [w workers] @w)
+      (doseq [l (sort (vals out))] (println l))
+      (shutdown-agents)
+      (System/exit 0))
+    "compile-list" (compile-list args)
+    "judge" (judge args)
+    (do (println "cf2g: translate NODES OUTDIR [PKG PATH] | translate-list LIST THREADS | compile-list HOST OUT LIST THREADS | judge ...") (System/exit 2))))
