@@ -69,6 +69,23 @@
 ;; sources (the longest common subsequence of equal sources; between two common ones, the same number on each side pair in order).
 (defn- chibi-r7rs-ref [] (when-let [t (slurp-or (path "test/scheme/ref-r7rs-chibi.edn"))] (first (read-string t))))
 
+;; Review 009, finding 5: the number of tests each run of the suite gives (test/scheme/corpora.edn's chibi-r7rs :tests); a run
+;; that stops early with status 0 would lose its last tests silently
+(defn- expected-tests [impl]
+  (get-in (first (filter #(= :chibi-r7rs (:id %)) (:corpora (read-string (slurp (path "test/scheme/corpora.edn")))))) [:tests impl]))
+
+(defn- count-item [impl total]
+  (let [e (expected-tests impl)]
+    (when (not= e total) (str "count r7rs/chibi " (name impl) " " total " tests, expected " e))))
+
+(defn- reference-check
+  "A reference's run of the suite (Chez's, Chibi's) is recorded only when it ended (status 0), gave the expected number of tests and
+  no form of the file raised outside a test (the driver's FORMERROR lines): the reasons, empty when it may be recorded."
+  [impl rc out total]
+  (concat (when-not (= rc "0") [(str "status " rc)])
+          (when-let [c (count-item impl total)] [c])
+          (for [l (str/split-lines out) :when (str/starts-with? l "FORMERROR ")] (str "a form raised: " (clip (subs l 10) 120)))))
+
 (defn- parse-chibi [out]
   (loop [ls (str/split-lines out) tests []]
     (if-let [l (first ls)]
@@ -128,11 +145,12 @@
     (println "r7rs on Chez: status" rc "-" total "tests," pass "pass," (- total pass) "fail,"
              (count (remove :class items)) "in no class")
     (doseq [[c n] (sort-by str (frequencies (keep :class items)))] (println " " n (name c)))
-    (when (some #{"--record"} opts)
+    (doseq [b (reference-check :chez rc out total)] (println "  BAD RUN" b))
+    (when (and (some #{"--record"} opts) (empty? (reference-check :chez rc out total)))
       (write-results "test/scheme/ref-r7rs-chez.edn"
                      ";; Chibi's r7rs-tests.scm, rewritten for Chez (arbace.scheme.corpora/rewrite-for-chez), run by Chez Scheme 10.3.0 through\n;; Arbace's R7RS libraries' Chez variants (bin/si r7rs --chez --record): Chez's answer to each test, SM8c, SC117 (b); generated."
                      [result]))
-    (if (every? :class items) 0 1)))
+    (if (and (every? :class items) (empty? (reference-check :chez rc out total))) 0 1)))
 
 (defn- cmd-r7rs-chibi
   "SC143 (c): the suite run by Chibi-Scheme 0.12.0 through test/scheme/chibi/driver.scm (DIR/out, DIR/err, DIR/rc); one answer a
@@ -149,11 +167,12 @@
     (println "r7rs on Chibi 0.12.0: status" rc "-" total "tests," pass "pass," (- total pass) "fail,"
              (count (remove :class items)) "in no class")
     (doseq [[c n] (sort-by str (frequencies (keep :class items)))] (println " " n (name c)))
-    (when (some #{"--record"} opts)
+    (doseq [b (reference-check :chibi rc out total)] (println "  BAD RUN" b))
+    (when (and (some #{"--record"} opts) (empty? (reference-check :chibi rc out total)))
       (write-results "test/scheme/ref-r7rs-chibi.edn"
                      ";; Chibi's r7rs-tests.scm run by Chibi-Scheme 0.12.0 (the host's chibi-scheme) through test/scheme/chibi/driver.scm\n;; (bin/si r7rs --chibi --record): Chibi's answer to each test in its own order, SC143 (c); generated."
                      [result]))
-    (if (every? :class items) 0 1)))
+    (if (and (every? :class items) (empty? (reference-check :chibi rc out total))) 0 1)))
 
 (defn- cmd-r7rs [[dir & opts]]
   (let [out (or (slurp-or (str dir "/out")) "") rc (str/trim (or (slurp-or (str dir "/rc")) "?"))
@@ -171,12 +190,21 @@
                            :let [item (str "fails r7rs/chibi " (:what t) " => " (str/join " " (:detail t)))]]
                        {:item item :class (class-of cs item)})
                      (when-not (= rc "0") [(let [i (str "crash r7rs/chibi status " rc ": " (first-line (slurp-or (str dir "/err"))))]
-                                             {:item i :class (class-of cs i)})])))
+                                             {:item i :class (class-of cs i)})])
+                     ;; finding 5: the expected number of tests, and a test whose status differs from both references' (each
+                     ;; paired) is an item that needs a class (si passing where Chez and Chibi fail is a sign of a lax judge)
+                     (when-let [c (count-item :si (count tests))] [{:item c :class nil}])
+                     (when (and ref cref)
+                       (for [t tests :let [c (get chez (:n t)) ch (get chibi (:n t))]
+                             :when (and c ch (not= (:status t) c) (not= (:status t) ch))
+                             :let [i (str "against-references r7rs/chibi " (:what t) ": si " (name (:status t)) ", Chez " (name c) ", Chibi " (name ch))]]
+                         {:item i :class (class-of cs i)}))))
         total (count tests) pass (count (filter #(= :pass (:status %)) tests))
         ;; si against Chez, test by test (the same file, so the same numbers)
         vs (frequencies (for [t tests] [(:status t) (get chez (:n t) :none)]))
         vs-chez {:both-pass (get vs [:pass :pass] 0) :si-only-pass (get vs [:pass :fail] 0)
-                 :chez-only-pass (get vs [:fail :pass] 0) :both-fail (get vs [:fail :fail] 0)}
+                 :chez-only-pass (get vs [:fail :pass] 0) :both-fail (get vs [:fail :fail] 0)
+                 :si-tests-unpaired (+ (get vs [:pass :none] 0) (get vs [:fail :none] 0))}
         vsc (frequencies (for [t tests] [(:status t) (get chibi (:n t) :none)]))
         vs-chibi {:both-pass (get vsc [:pass :pass] 0) :si-only-pass (get vsc [:pass :fail] 0)
                   :chibi-only-pass (get vsc [:fail :pass] 0) :both-fail (get vsc [:fail :fail] 0)
