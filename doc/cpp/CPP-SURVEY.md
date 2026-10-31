@@ -1824,3 +1824,121 @@ print's `-iquote` finds it by); see CP95.
 - **CP97 Directives inside a list in a function body.** The directive placement of `init-list` reads the unit's `*directives*`; a function body's directives are the compound statement's pending ones (`compound-forms`) and a directive inside
   a statement is left out there. No case in the samples. Options: (a) as built (top level and class bodies); (b) the same placement for a local declaration's list, with `*pending*` giving the directives that stand inside an element range;
   (c) a directive inside a statement kept as text of that statement. *Recommended: (a)* until a case shows (the whole HotSpot corpus will say).
+
+## As built: CX7 (write-ahead) (2026-10-31)
+
+On the branch `cpp-cx7` from `cpp-cx6` at 3ee6a526, in the light tier (stage 0 by `ARBACE_HOST_EXE`, 4 jobs, `GOMEMLIMIT=1500MiB`, no gate, no build of Arbace's
+executables, no lock). ci (C5) is on the C23 branches, not here, so gcc `-O0` stays the judge, as in CX6: the exit's "run on ci" is the heavy list's. The spec is
+`doc/cpp/LLVM.md` §8 (rewritten) and §10 (new). The user's CP95 (b) (decided on `cpp-cx6` after this branch's point, not merged here) does not touch the lowering
+check; the runtime's build already compiles with `-ffile-prefix-map` (below), in its spirit.
+
+### CX7.1 What was built
+
+- **The runtime's build, `bin/cppi runtime-build [OUT] [--update]`** (`make cppi-runtime-build`): `test/cpp/runtime/units.edn` lists the 198 units, the members of the
+  static `libstdc++.a` the gcc build makes for this host's configuration (Makefile.am's lists and per-file rules; configure's links for the generic locale model,
+  `os/generic`, the atomic builtins, `basic_file_stdio`; the compatibility files of `libstdc++.la`, without whose `ignore(streamsize)` `<istream>` does not link) and
+  those of `libstdc++exp` (contracts, the Filesystem TS): 64 of libsupc++ (with `cp-demangle.c` as C), 127 of `src/`, 7 of `libstdc++exp`. Excluded and why
+  (`:excluded`): `eh_personality.cc` (replaced, below), `src/c++17/cow-string-inst.cc` (clang rejects its explicit instantiations' exception specifications),
+  `stacktrace.cc` (libbacktrace), the long double compatibility files (not on x86-64). The oracle compiles each from the pinned tarball's root against the host's
+  configured headers (Alpine's gcc 15.2.0, the same g++ and the test programs use), with `-ffile-prefix-map`s, so the IR names its sources by their paths in the
+  tarball: two builds in two directories gave the same 198 digests and byte-identical archives. The IR (38 MB) is pinned by `test/cpp/runtime/ir.sha256`
+  (CX6's way of pinning an input: a digest the build checks, `--update` after a look). The build's two generated headers are made from the tarball as its
+  Makefiles make them; two units go through wrappers (`test/cpp/runtime/shims/`: clang rejects `assert_fail.cc`'s later `[[__noreturn__]]`; `random.cc`'s rdrand
+  and rdseed use g++'s builtins). Each unit's LLVM forms round trip (the objects equal), the lowering, gcc; `OUT/liblstdc++.a` (13.7 MB), `OUT/liblstdc++exp.a`,
+  `OUT/rt.o`; `OUT/results.tsv`, `summary.edn`; recorded in `test/cpp/runtime/build-results.edn`.
+- **CP86 (c)'s split**: `arbace/cpp/rt/eh.c.ae` is now only the pending-flag layer (about 60 lines of C forms): the unwinder's entry points
+  (`_Unwind_RaiseException`, `_Unwind_Resume`, `_Unwind_Resume_or_Rethrow`, `_Unwind_DeleteException`) raise the flag; `cx$catches` is the personality's search
+  phase for one clause over libsupc++'s real exception header (primary and dependent exceptions, foreign ones, `adjustedPtr`); `cx$uncaught` does what `__cxa_throw`
+  does when no handler is found (`__cxa_begin_catch`, `std::terminate`: the verbose handler's message and `what()`, as g++'s); `__cxa_call_unexpected`.
+  Everything else is libsupc++ lowered: `__cxa_*`, `std::exception_ptr`, RTTI and `__dynamic_cast`, the guards, `new`/`delete`, `std::terminate`, the emergency
+  pool, the thread-local exception globals. One fix the split needed: the matching runs lowered `__do_catch`/`__do_upcast`, whose calls return at once while the
+  flag is set, so `cx$catches` lowers the flag while it matches.
+- **`arbace.cpp.lower`** for the library's IR: no `__cxa` renames and no `:exception-ptr` refusals; `filter` clauses (C++98's `throw()` in `src/c++98`: 53 units used
+  them); an empty inline `asm` with no result as nothing (the compiler barrier of `thread.cc`); `llvm.frexp`, `ctlz`/`cttz`/`ctpop` on `i128`,
+  `llvm.x86.sse2.pause`; a non-pointer `bitcast` by `__builtin_memcpy` in a statement expression (gcc's C has no `__builtin_bit_cast`, which CX6 printed but no
+  test reached); NaN constants by payload (`__builtin_nan("0x...")`, usable in static initializers); a static thread-local without a tentative definition.
+- **`bin/cppi lower-check`** links the lowered program with the lowered runtime (`rt.o`, `liblstdc++.a`, for the testsuite also `liblstdc++exp.a` and the
+  testsuite's `util/` compiled by clang and lowered in the run: `libltestc++.a`), by gcc, with musl and libgcc native and no libstdc++.so (`ldd` of a lowered
+  program lists musl alone); `--runtime OUT`, built when missing. The original is CP83 (a)'s, the same IR linked by clang against the native libraries.
+  `bin/cppi list runtime`: CX7's samples, `test/cpp/runtime/samples/` (`hello.cpp`, the exit's program with `std::exception_ptr` and `stoi`'s throw;
+  `library.cpp`: guards, nothrow and aligned `new`, the library's throws (`length_error`, `bad_alloc`, `use_facet`'s `bad_cast`, `bad_variant_access`,
+  `bad_function_call`, `bad_any_cast`, `ios_base::failure`), a streambuf's `overflow` throwing inside libstdc++, nested exceptions, `dynamic_cast`, `typeid`,
+  the "C" locale, `stringstream`, `to_chars`/`from_chars`, `std::format`; `uncaught.cpp`: the terminate message and status 134).
+
+### CX7.2 Numbers
+
+| list | files | forms equal | objects equal | lowered | gcc compiles | runs as the original | known | failing |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| the runtime's units (`runtime-build`) | 198 | 198 | 198 | 198 | 198 | n/a | 0 | 0 |
+| samples and runtime samples | 11 | 11 | 11 | 11 | 11 | 9 of 9 (+2 compile) | 0 | 0 |
+| libstdc++ testsuite, every 15th run test (CX6's 234) | 234 | 234 | 234 | 234 | 234 | **234** | **0** | 0 |
+
+CX6's known classes are gone: `library-throw` 6, `callback-throw` 4 and `exception-ptr` 2 all pass (CX6: 222 pass, 12 known). g++'s own build agrees with clang's
+original on 233 of 234 (`27_io/objects/wchar_t/2523-2_xin.cc` differs, as in CX6, recorded, not judged), and on the 9 runnable samples. The exit's `hello world`
+(`<iostream>`, `vector`, `string`, `map`, `sort`, exceptions, RTTI) prints g++'s output byte for byte, stdout and stderr. Times (4 jobs): `runtime-build` 4 to 5
+minutes (IR 39 s, read, round trip and lowering 195 to 215 s, gcc 20 to 26 s; the lowering is about 1 s per 100 KB of IR evaluated, faster than CX6's estimate
+per file because the units are small); the testsuite's every 15th: native 127 s, Arbace's steps 1,065 s, gcc, links and runs 78 s (CX6: 106, 846 and 56 s: the
+link against the 13.7 MB archive and the testsuite's util/ lowered per run add to them). The work directories stay small: `.tmp/cppi/runtime` 52 MB, the
+testsuite run's 163 MB, the disk under 75% throughout.
+
+### CX7.3 Not done, and why
+
+- **ci and musl (C5)**: on the C23 branches; the lowered runtime and the lowered programs are C forms ci will have to take (the attributes and builtins of CX6.3,
+  plus `_Thread_local`, statement expressions, `__builtin_nan`), and musl stays native until C5 lowers it (heavy list).
+- **Threads** (CP1): the pending flag and the atomics are single-threaded; `std::thread` and the mutexes call musl's pthreads natively. `std::random_device`
+  has no rdrand or rdseed token; `std::stacktrace` is not built. An exception thrown through a native frame of the C library (`qsort`'s comparator, an
+  `atexit` handler) returns into it unnoticed: the class `native-callback-throw` (LLVM.md §8), no case in the lists.
+- The g++.dg `dg-do run` tests and the whole testsuite (heavy list). `bin/gate`. The `ios_failure` type info rewrite of the gcc build (`cxx11-ios_failure.cc`'s
+  assembly is edited by `sed` so one `catch` takes both ABIs' `ios_base::failure`): not done, no case in the lists.
+
+### CX7.4 The heavy list (for a window after the tag)
+
+- **The ci leg**: after the C23 branches merge, `runtime-build` and `lower-check` with ci (C5) as the judge in place of gcc and musl as C forms, the exit's
+  `hello world` on ci with g++'s output.
+- `bin/cppi lower-check` over every run test of the libstdc++ testsuite (`bin/cppi list libstdcxx --sample 1`: 3,874 files; about 5 hours of stage 0 at 4 jobs
+  at this run's rate, 3 GB of work files) and over g++.dg's `dg-do run` tests (CX6.4's list maker still to add), against the lowered runtime.
+- `bin/gate` essential (the gate key includes `arbace/`: `arbace/cpp/` changed).
+
+### CX7.5 Proposals (CP100-CP105)
+
+- **CP100 Where the lowered runtime is kept.** Options: (a) built in each checkout's `.tmp/cppi/runtime` by `runtime-build`, from the pinned tarball and the IR's
+  digests (built; 5 minutes); (b) the lowered C forms of the runtime committed (a derived work of libstdc++ in the tree: LICENSE.md's GPL-3.0 with the Runtime
+  Library Exception entry then, and the forms' review); (c) a store shared by the worktrees keyed by the IR digests and the lowering's sources, as the gate keeps
+  its executables. *Recommended: (a)* now, (c) when CX8's checks and C6's AOT translate it often.
+- **CP101 The configured headers the runtime is built against.** Options: (a) the host's installed ones (built: Alpine's gcc 15.2.0, those g++ and the
+  programs use, so library and programs agree; a change shows as changed IR digests); (b) the tarball's own headers configured by its `configure` for the
+  host (no gcc build otherwise needed, but a second configuration to keep equal to Alpine's); (c) (a) with the configured headers' digests pinned beside the IR
+  (`test/cpp/host/`'s way). *Recommended: (c)*: the digests name the cause of a changed IR before the IR is looked at.
+- **CP102 Units the oracle does not compile as g++ does** (`assert_fail.cc`, `random.cc`, `src/c++17/cow-string-inst.cc`). Options: (a) the two wrappers and the
+  one exclusion (built); (b) the files patched as text by a recorded script; (c) those units' IR left out and their symbols taken from the native
+  `libstdc++.a` (a mixed program). *Recommended: (a)*: the sources stay the tarball's, and what is lost (the old ABI's C++17 `string_view` members, rdrand) is
+  named in `units.edn`.
+- **CP103 The pending flag and threads.** Options: (a) single-threaded, CP1 (built); (b) `cx$pending` and the in-flight exception `_Thread_local` now (one
+  keyword in `eh.c.ae`; the exception globals already are, as libsupc++ declares them), so a thread's exception cannot leak into another when `std::thread` runs on
+  musl; (c) (b) and the atomics lowered to `__atomic_*` builtins. *Recommended: (b)*: cheap and makes the runtime's state as per-thread as libsupc++'s;
+  (c) waits for a decision on threads in v1.
+- **CP104 Exceptions through native frames** (`native-callback-throw`). Options: (a) a class until C5 lowers musl (built: no case yet); (b) the pending-flag
+  layer wraps the C library's callback-taking functions (`qsort`, `bsearch`, `atexit`, `pthread_once`) to stop at the native frame and re-raise after it;
+  (c) both: (a) now, (b) if the corpora show cases before C5. *Recommended: (c)*.
+- **CP105 Uncaught exceptions and the search phase.** The class `uncaught-cleanups` (cleanups run before `std::terminate`) stays; with libsupc++ lowered,
+  a phase-1 emulation is possible: each `invoke` site pushes its landing pad's catch clauses on a shadow stack, so `_Unwind_RaiseException` can know whether any
+  frame catches and call `std::terminate` at the throw, as g++ does. Options: (a) the class (built); (b) the shadow stack (a cost on every `invoke`); (c) (b)
+  only for frames whose landing pads have cleanups that call I/O. *Recommended: (a)* until CX8's run corpora count the class; (b) if they show it is common.
+
+### CX7.6 Rule slips, shipped files, scratch
+
+- **A stage-0 build started** (a slip): one `runtime-build` run was started in a new shell without `ARBACE_HOST_EXE`, so `bin/lib/host.bash` began
+  `bin/seed --build` in the worktree; I stopped it within 20 s by its task (before `go build` produced anything) and deleted the worktree's `target/seed`
+  (132 MB of extracted seed). No other process of mine was left.
+- **`/dev/null` in one script** (a slip): a scratch helper (`.tmp/cx7/lowrun.sh`, its first version) redirected clang's stderr to `/dev/null` once; rewritten
+  without it.
+- `python3` was used for multi-line edits of the sources (no package installed).
+- Shipped files (tools' namespaces, evaluated from the checkout, not embedded; re-seed relevant only when CX10 embeds them): `arbace/cpp/lower.ae`,
+  `arbace/cpp/rt/eh.c.ae`; `bin/cppi` (`runtime-build`, `list runtime`, `lower-check --runtime`); `Makefile` (`cppi-runtime-build`); data
+  `test/cpp/runtime/{units.edn,ir.sha256,build-results.edn}`, `test/cpp/runtime/shims/{assert_fail,random}.cc`, `test/cpp/runtime/samples/*.cpp`,
+  `test/cpp/lower-known.edn` (empty), `test/cpp/lower-results.edn`; docs `doc/cpp/LLVM.md`, this section. LICENSE.md has no libstdc++ entry and gains none: nothing
+  of libstdc++ is in the tree (the sources are read from the pinned tarball, the IR and the lowered library are built into `.tmp/`; the shims include the
+  tarball's files, they copy nothing), as §7 says (the entry comes when the first artifact ships, CP100 (b)).
+- Scratch: `.tmp/cppi/runtime/` (the runtime: units' IR, logs, archives), `.tmp/cppi/gcc/` (the extracted sources and testsuite), `.tmp/cx7/w-lt/` and
+  `.tmp/cx7/w-samples/` (the recorded runs: results.tsv, summary.edn, times.txt, each file's IR, lowered C and logs), `.tmp/cx7/lists/`, `.tmp/cx7/hello/`,
+  `.tmp/cx7/t1/` (the debugging of `cx$catches`), `.tmp/cx7/ir/` and `.tmp/cx7/src/` (the first exploration's IR and sources).
