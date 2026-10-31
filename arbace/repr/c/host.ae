@@ -48,14 +48,69 @@
   [^String s]
   (->> (str/split (str/trim s) #"\s+") (remove str/blank?) (map #(str/replace % "\\\"" "\""))))
 
+(defn eval-selector
+  "A selector expression of DejaGnu's target lists (`! dfp`, `bitint && int128`, `{ x86_64-*-* i?86-*-* }`, `c || c++11`),
+  each atom's value `(atom-value word)`: `!`, `&&`, `||`, parentheses and braces, words side by side taken as alternatives."
+  [^String body atom-value]
+  (let [toks (vec (re-seq #"\|\||&&|!|\(|\)|\{|\}|[^\s(){}!&|]+" body))
+        pos (atom 0)
+        peek* #(get toks @pos)
+        next* #(let [t (get toks @pos)] (swap! pos inc) t)
+        open? #(contains? #{"(" "{"} %)
+        close? #(contains? #{")" "}"} %)
+        atom-start? #(let [t (peek*)] (and t (or (= t "!") (open? t) (not (or (close? t) (= t "&&") (= t "||"))))))]
+    (letfn [(un []
+              (let [t (next*)]
+                (cond (nil? t) true
+                      (= t "!") (not (un))
+                      (open? t) (let [v (alt)] (when (close? (peek*)) (next*)) v)
+                      :else (boolean (atom-value t)))))
+            (conj* []
+              (loop [v (un)]
+                (if (= (peek*) "&&") (do (next*) (let [w (un)] (recur (and v w)))) v)))
+            (alt []
+              (loop [v (conj*)]
+                (cond (= (peek*) "||") (do (next*) (let [w (conj*)] (recur (or v w))))
+                      (atom-start?) (let [w (conj*)] (recur (or v w)))
+                      :else v)))]
+      (if (empty? toks) true (alt)))))
+
+(defn- braced-after
+  "The braced text starting at the first non-space character from index i of s when it is `{`, its braces matched: the
+  text inside, else nil."
+  [^String s i]
+  (let [n (count s)
+        i (loop [i (long i)] (if (and (< i n) (Character/isWhitespace (.charAt s i))) (recur (inc i)) i))]
+    (when (and (< i n) (= (.charAt s i) \{))
+      (loop [j (inc i) depth 1]
+        (when (< j n)
+          (let [c (.charAt s j)]
+            (cond (= c \{) (recur (inc j) (inc depth))
+                  (= c \}) (if (= depth 1) (subs s (inc i) j) (recur (inc j) (dec depth)))
+                  :else (recur (inc j) depth))))))))
+
+(defn for-c?
+  "Whether a dg selector (`target c++`, `target { ! c++ }`, `target { c || c++11 }`) holds for C: the C++ names (`c++`, `c++11`,
+  `c++17_down`, ...) false, every other name true (review 006, finding 8)."
+  [^String sel]
+  (let [t (str/trim (or sel ""))
+        body (cond (.startsWith t "target") (subs t 6) (.startsWith t "xfail") (subs t 5) :else t)]
+    (eval-selector body #(not (.startsWith ^String % "c++")))))
+
 (defn dg-options
   "The options of a gcc testsuite file's dg-options and dg-additional-options lines, in order: those
-  for C (a line whose selector is `{ target c++ }` skipped), ${srcdir} as the testsuite's root (\".\")."
+  for C (a line whose selector does not hold for C skipped, `for-c?`; the selector's braces matched),
+  ${srcdir} as the testsuite's root (\".\")."
   [^String text]
-  (vec (mapcat (fn [[_ _ opts sel]]
-                 (when-not (and sel (re-find #"c\+\+" sel))
-                   (shell-words (str/replace opts "${srcdir}" "."))))
-               (re-seq #"\{\s*dg-(additional-)?options\s+\"((?:[^\"\\]|\\.)*)\"\s*(\{[^}]*\})?" text))))
+  (let [m (re-matcher #"\{\s*dg-(additional-)?options\s+\"((?:[^\"\\]|\\.)*)\"" text)]
+    (loop [out []]
+      (if (.find m)
+        (let [opts (.group m 2)
+              sel (braced-after text (.end m))]
+          (recur (if (and sel (not (for-c? sel)))
+                   out
+                   (into out (shell-words (str/replace opts "${srcdir}" "."))))))
+        out))))
 
 (defn file-config
   "A file's configuration from `opts` (a compiler's options) and `default-std`: {:std :pre :inc

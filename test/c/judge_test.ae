@@ -78,3 +78,56 @@
     (.delete f)
     (is (= ["c/a.c" "c/b.c"] (mapv first (:regressions r))))
     (is (= ["c/c.c"] (:absent r)))))
+
+;; finding 6: dg-excess-errors and a line-0 directive no longer wave missed and extra lines through
+
+(deftest excess-keeps-missed
+  (let [d (dg/analyze "/* { dg-do compile } */\n/* { dg-excess-errors \"x\" } */\nint a; /* { dg-error \"e\" } */\nint b; /* { dg-error \"e\" } */\n")]
+    (is (= :missed (second (dg/verdict d (ok {3 1, 9 1})))))
+    (is (= [:pass] (dg/verdict d (ok {3 1, 4 1, 9 1}))))))
+
+(deftest line-zero-counts
+  (let [d (dg/analyze "/* { dg-do compile } */\n/* { dg-error \"e\" \"\" { target *-*-* } 0 } */\n")]
+    (is (= [:pass] (dg/verdict d (ok {5 1}))))
+    (is (= :extra (second (dg/verdict d (ok {5 1, 6 1, 7 1})))))
+    (is (= :missed (second (dg/verdict d (ok {})))))))
+
+;; finding 7: a read error stands for a syntax expectation only; an included unit's checker errors carry its file
+
+(deftest read-error-not-semantic
+  (let [d (dg/analyze "/* { dg-do compile } */\nif (int i = 1); /* { dg-error \"ISO C does not support if declarations\" } */\n")]
+    (is (= :missed (second (dg/verdict d {:status :read-error :lines {2 1} :other 0 :unlocated 0 :message "2:4: unexpected 'int'"})))))
+  (let [d (dg/analyze "/* { dg-do compile } */\nint x = ; /* { dg-error \"expected expression\" } */\n")]
+    (is (= [:pass] (dg/verdict d {:status :read-error :lines {2 1} :other 0 :unlocated 0 :message "2:9: unexpected ';'"})))))
+
+(deftest included-unit-checker-error
+  (let [r (read-one "inc-check.c" :compile)]
+    (is (= :ok (:status r)))
+    (is (empty? (:lines r)))
+    (is (= 1 (:other r)))
+    (is (str/starts-with? (:stray r) "inc-check.h:2: "))))
+
+;; finding 8: the C++ names false for C, whatever the table lists; dg-options' selectors read whole
+
+(deftest cxx-selectors
+  (is (true? (:applies (dg/sel-info "target { c || c++11 }"))))
+  (is (false? (:applies (dg/sel-info "target c++20"))))
+  (is (true? (:applies (dg/sel-info "target { ! c++ }"))))
+  (is (= ["-DX"] (host/dg-options "/* { dg-options \"-DX\" { target { ! c++ } } } */\n/* { dg-options \"-std=c++20\" { target c++ } } */"))))
+
+;; finding 9: an unsupported test is no pass, and a later dg-do that holds wins
+
+(deftest later-dg-do-wins
+  (let [d (dg/analyze "/* { dg-do run { target { ! int128 } } } */\n/* { dg-do compile { target int128 } } */\n")]
+    (is (= :compile (:action d)))
+    (is (not (:unsupported d))))
+  (is (:unsupported (dg/analyze "/* { dg-do compile { target { ! int128 } } } */\n"))))
+
+;; finding 11: an extra line's own message; no checkout's paths in the messages
+
+(deftest extra-line-message
+  (let [d (dg/analyze "/* { dg-do compile } */\nint a; /* { dg-error \"e\" } */\n")]
+    (is (= "extra [9] got: 9: b" (nth (dg/verdict d (assoc (ok {2 1, 9 1}) :texts {2 "2: a" 9 "9: b"} :message "2: a")) 2)))))
+
+(deftest messages-without-root
+  (is (not (str/includes? (:stray (read-one "inc-error.c" :compile)) judge-dir))))
