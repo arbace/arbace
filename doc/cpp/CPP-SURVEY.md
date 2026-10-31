@@ -1942,3 +1942,8 @@ testsuite run's 163 MB, the disk under 75% throughout.
 - Scratch: `.tmp/cppi/runtime/` (the runtime: units' IR, logs, archives), `.tmp/cppi/gcc/` (the extracted sources and testsuite), `.tmp/cx7/w-lt/` and
   `.tmp/cx7/w-samples/` (the recorded runs: results.tsv, summary.edn, times.txt, each file's IR, lowered C and logs), `.tmp/cx7/lists/`, `.tmp/cx7/hello/`,
   `.tmp/cx7/t1/` (the debugging of `cx$catches`), `.tmp/cx7/ir/` and `.tmp/cx7/src/` (the first exploration's IR and sources).
+
+### Decided (CP100-CP105; the user, 2026-10-31)
+
+All as recommended: CP100 (a) now, (c) when CX8's checks and C6's AOT translate it often; CP101 (c); CP102 (a);
+CP103 (b); CP104 (c); CP105 (a) until CX8's run corpora count the class, (b) if they show it is common.
