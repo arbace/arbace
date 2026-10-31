@@ -3089,3 +3089,83 @@ reverting hunks (no stash was used); this follow-up's run waited with a sleep lo
 All as recommended: CS150 (a), for the three files only; CS151 (b) until a Unicode names table exists; CS152 (a), family
 by family as CS133; CS153 (a) now, (b) later; CS154 (a); CS155 (a), with C8's gate step (CS135); CS156 (a) in the heavy
 window.
+
+## As built: CS150, CS152, CS153 (2026-10-31)
+
+On the branch `c23-c7`, in the light tier, after "Decided (CS150-CS156)": three commits (`1f88907b`, `a01025df`, `0ced324b`). Outside the shipped tree
+(CS100 (b)): `arbace/c/{check,dg}.ae`, `arbace/repr/c.ae`, `arbace/repr/c/{parse,convert}.ae`, `bin/lib/ci/dg`, `test/c/`; nothing under `go/`, `overlay/`, `jdk/`.
+
+### C7H.1 What was built
+
+| part | where | what |
+|---|---|---|
+| CS153 (a) | `bin/lib/ci/dg` | `REPR_C_READ_BUDGET` defaults to 300 s in `bin/ci dg` (header too); the reads of `arbace.repr.c.rtcheck` and `annot` keep 120 s |
+| CS150 (a), the three files: "attributes before C23" (`c23-attr-syntax-6`), `vector_size` validation (`bitint-21`) and the file that shares them (`c23-attr-syntax-7`, the "'vector_size' attribute ignored" lines) | `arbace/c/check.ae` | `std-attr-misc!`: under `-pedantic-errors` every `[[...]]` attribute before C23 is a pedwarn (not on a `__extension__` line) and an unprefixed attribute that is no standard one is "ignored" (an error, `__extension__` or not: gcc errs there; `ignored!` no longer skips those lines); `(...)` without a named parameter before C23; `vector_size` of a `_BitInt` ("invalid vector type"); the second `__extension__` of `[[__extension__ __extension__]]` (the preprocessor drops both) as an "'extension' attribute ignored" note (`:always`, read-c) |
+| CS150 (a), gcc's recovery in `[[...]]` | `arbace/repr/c/parse.ae`, `arbace/repr/c.ae`, `arbace/c/dg.ae` | `parse/*recover*` (off everywhere but `bin/ci dg`, so cc's comparisons, the round trips and `parse-check` read as before): a stray token in a standard attribute is an error, the rest of the attribute is skipped to its `]]` and the parse goes on; the read then returns its tree (`:recovered`) and the checker's errors count beside the parser's (`:parse-errors`); two colons are the scope only when nothing separates them (`gnu : : x`, a macro's `:/**/:`: the parser sees a preprocessor space as a separator), a pasted C23 `::` is one token |
+| CS152 (a), tags and enumerations | `arbace/c/check.ae` | a redefinition with a variably modified member is never "the same" (`vm-type?`); enumerations are compatible only with the same constants and values and, when fixed, a compatible underlying type; pointers between two incompatible enumerations are an error (the integer-class rule no longer joins them); packed and aligned members count in struct compatibility |
+| CS152 (a), objects | `arbace/c/check.ae` | an initializer defines an object, and so does a file-scope thread-local one without `extern` (C23): a second definition is "redefinition"; a thread-local array of unknown size has no storage ("storage size", "array size missing"); a struct with a variable-length array member given a non-empty initializer (not through `typeof`: a composite type may not be variable); the initializer's line for pointer conversions (`= &x` on the second line of a declaration) |
+| CS152 (a), expressions | `arbace/c/check.ae`, `arbace/repr/c/convert.ae` | `&`, `sizeof`, `alignof`, `typeof`, `typeof_unqual` of a bit-field; `nullptr` (the form `nil`) as an enumerator's value, a designator and the end of a case range, an unnamed bit-field's width at its own line; complex `++`/`--` before C2y; a type name controlling `_Generic` before C2y; tags declared in the initializer of an `auto` object |
+| the classes | `test/c/divergences-dg.edn` | "used but never defined" joins `decl-diag` (`c23-typeof-2` now fails there instead of at its bit-field lines) |
+
+### C7H.2 The numbers
+
+`bin/ci dg --record`, 627 files (before: the record of C7G.2, at `f3de897e`; after: the record at `0ced324b`):
+
+| class | before | after |
+|---|---:|---:|
+| pass | 572 | **587** |
+| decl-diag | 30 | 19 |
+| attr-diag | 6 | 3 |
+| pedantic-diag | 3 | 2 |
+| pp-diag | 3 | 3 |
+| parse-gap | 3 | 3 |
+| read-refused | 10 | 10 |
+| not in a class | 0 | 0 |
+
+Per group, pass: gcc-c23 251 of 270 (242), gcc-cpp-c23 16 of 16 (16), gcc-c23-sub 23 of 30 (23), gcc-gnu23 47 of 51 (42), gcc-embed 39 of 47 (39), gcc-va-opt 11 of 12 (11), gcc-bitint 200 of 201 (199).
+New passes (15, none lost): CS150 `c23-attr-syntax-6`, `c23-attr-syntax-7`, `bitint-21`; CS152 `gnu23-tag-3`, `gnu23-tag-5`, `gnu23-tag-composite-1`, `gnu23-empty-init-2`, `gnu23-auto-1`,
+`c23-thread-local-2`, `c23-complex-1` (was pedantic-diag), `c23-tag-enum-1`, `c23-tag-enum-4`, `c23-nullptr-6`, `c23-tag-composite-3`, `c23-generic-1`.
+`bin/ci dg --essential`: 93 of 93. A first full run of the CS152 changes lost nothing but gave `gnu23-tag-composite-5` a false error (its composite type is not of variable size); the rule skips `typeof` declarations, the file is "missed" again as before.
+
+The run level: `bin/ci check --record` over all seven corpora: unchanged but `compcert/perlin.c`, which timed out under the load of this run (`differ status timeout`), so the record was restored with `git checkout` (the committed one, perlin passes, stands). `bin/repr-c check --c23`: 62 files, 59 pass, 3 expected failures, 0 failing. The round trip (`bin/repr-c roundtrip --corpus c23conf,c23,tcc-tests2 --no-run`): c23conf 49 of 49, c23 62 of 62, tcc-tests2 85 pass and 3 known, as before.
+
+### C7H.3 Checks not run
+
+The compiled level (`bin/ci check --aot`): the changes do not reach the builder's node programs (the interpreted run is unchanged). `bin/repr-c parse-check` and `check --tokens` (they need tools/ccdump with go-whim's module cache; CS145/CS156): `parse.ae` changed, but only behind `*recover*` and for the bit-field member form's `:line` metadata in `convert.ae`; the round trips are the evidence. `bin/ci annotations`, `bin/gate`, `bin/ci repl-session`.
+
+### C7H.4 What is left (CS152's stop rule: one file a family)
+
+`decl-diag` 19 (some in the embed group): `c23-enum-7` (the empty-declaration and underlying-type rules, 30 lines of a dozen messages), `c23-complit-5` and `c23-complit-8` (storage classes of compound literals; an inline function's `static` literal),
+`c23-constexpr-9` and `c23-constexpr-dfp-2` (floating `constexpr` representability), `c23-tag-6` (completeness inside `_Generic`), `c23-tag-composite-11` (a jump into a variably modified scope), `c23-tag-enum-5` (nested enum redefinitions),
+`c23-typeof-2` ("used but never defined" of a static function used in an evaluated `typeof`), `c23-bool-errors-3` (`true`/`false` as enumerators: the parser refuses them), `gnu23-tag-2` (`transaction_safe`), `gnu23-tag-composite-5` (the composite of two variable-size structs).
+`attr-diag` 3 (`c23-attr-syntax-3`, `-5`, `has-c-attribute-4`, `bitint-75`, with `gnu23-attr-syntax-2/3` under parse-gap and others), the rest as in C7G.4.
+
+### C7H.5 Proposals (CS160-CS165)
+
+Each with options, the recommended one first; none decided.
+
+- **CS160 The attribute and parse diagnostics beyond the three files** (`c23-attr-syntax-3/5`, `gnu23-attr-syntax-2/3`, `c23-has-c-attribute-4`, `bitint-75`).
+  - Options: (a) by pattern, now that `*recover*` exists (`gnu23-attr-syntax-2/3` are `expected ...` errors the recovery may reach, `attr-syntax-5` is the "ignored" family of other positions); (b) leave.
+  - *Recommended: (a)*, beginning with `gnu23-attr-syntax-2/3`.
+- **CS161 Recovery for the parser's hard errors in the dg check** (`c23-bool-errors-3`, `c23-stdarg-11`, `c23-complit-5`'s extras, embed files): gcc reports every error of a file, the parser stops at the first it cannot continue from.
+  - Options: (a) widen `*recover*` to a resynchronization at the next `;` or `}` of the declaration, errors counted soft only when the tree stays usable; (b) leave, the files stay in `decl-diag`/`parse-gap`.
+  - *Recommended: (b)* for now: each file needs its own message set as well, and a false error in a passing file is worse than a missing one; revisit with CS160.
+- **CS162 `c23-enum-7`** (empty declarations and underlying types of enumerations).
+  - Options: (a) implement the dozen rules (storage class, qualifier, `alignas`, `inline`, `auto`/`register`, "may not be specified here", wrong kind of tag, incompatible underlying types, `restrict`); (b) leave.
+  - *Recommended: (b)*: one file; (a) only with CS161.
+- **CS163 Static functions used but never defined, and `static` literals in inline functions** (`c23-typeof-2`, `c23-complit-8`): both need a per-function record at the end of the unit (used in an evaluated context, defined or not; `extern` declared later).
+  - Options: (a) a unit-end pass with the evaluated/unevaluated distinction (`sizeof`, `typeof` of non-variable types, `_Generic` operands); (b) leave.
+  - *Recommended: (b)*: two files, and an unevaluated-context tracking the checker lacks.
+- **CS164 `parse-check` and `check --tokens` with `*recover*`** (CS156's heavy window).
+  - Options: (a) run them in the window to show the default (off) parser unchanged, with `convert.ae`'s one `:line` change; (b) accept the argument that the code is behind a dynamic var.
+  - *Recommended: (a)*, together with CS156.
+- **CS165 The essential list.**
+  - Options: (a) add `c23-attr-syntax-6` (recovery, "before C23", `(...)`) and `c23-thread-local-2` (definitions) to `test/c/essential-dg.txt` (95 files); (b) leave at 93.
+  - *Recommended: (a)*: the recovery is the one mechanism of the dg check the essential subset does not exercise.
+
+### C7H.6 Shipped files, scratch and rule slips
+
+Shipped files changed: none (nothing under `go/`, `overlay/`, `jdk/`).
+Scratch in the worktree's `.tmp/`: `c7/` (logs), `c7s/` (gcc probes, `dg1`: a copy of `bin/lib/ci/dg` that keeps a given `CI_DG_ONLY`, `one`: its driver for a list of files), `ci-dg/`, `ci-dg-one/`, `ci-dg-essential/`, `ci-check/`.
+
+Rule slips: one foreground `sleep 240` beyond the tool's limit moved a command to the background (no effect on results; the dg run it waited on was started in the background already).
