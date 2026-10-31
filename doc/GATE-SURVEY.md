@@ -2360,8 +2360,8 @@ its control fails against issue11053's). Without one, `dir_verdict` would expect
 - **GTS95 The log's digest checked.** `:log-sha256` is written but read by nothing (finding 6), so a record and a log
   that do not belong together go unnoticed. Options: (a) as now; (b) `pass_reads` (so `record_pass` and
   `publish_passes`) also checks the digest against its `KEY.log` when there is one, and gate.plan's `passes` drops a
-  record whose log's digest differs. *Recommended: (b)*, at the next rekey (both are in every key): a log is a few
-  hundred KB at most, one `sha256sum` a pass read.
+  record whose log's digest differs. *Recommended: (b)*, at the next rekey (both are in every key): one `sha256sum` of
+  the log a pass read, the cost of the reads the planner makes already.
 - **GTS96 The cost of the linked worktree's check.** `arbace_host_exe` runs `bin/seed --kept` at every tool call in a
   linked worktree (about 70 ms: the 19 MB seed hashed by `go_check`). Options: (a) as built; (b) `--kept --quick`
   for host.bash, the pins line compared with the archive's `.sha256` taken as it is (the gate's stage0 step keeps the
