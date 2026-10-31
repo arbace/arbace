@@ -3138,7 +3138,7 @@ The compiled level (`bin/ci check --aot`): the changes do not reach the builder'
 `decl-diag` 19 (some in the embed group): `c23-enum-7` (the empty-declaration and underlying-type rules, 30 lines of a dozen messages), `c23-complit-5` and `c23-complit-8` (storage classes of compound literals; an inline function's `static` literal),
 `c23-constexpr-9` and `c23-constexpr-dfp-2` (floating `constexpr` representability), `c23-tag-6` (completeness inside `_Generic`), `c23-tag-composite-11` (a jump into a variably modified scope), `c23-tag-enum-5` (nested enum redefinitions),
 `c23-typeof-2` ("used but never defined" of a static function used in an evaluated `typeof`), `c23-bool-errors-3` (`true`/`false` as enumerators: the parser refuses them), `gnu23-tag-2` (`transaction_safe`), `gnu23-tag-composite-5` (the composite of two variable-size structs).
-`attr-diag` 3 (`c23-attr-syntax-3`, `-5`, `has-c-attribute-4`, `bitint-75`, with `gnu23-attr-syntax-2/3` under parse-gap and others), the rest as in C7G.4.
+The attribute files of CS150's list that stay failing (`c23-attr-syntax-3`, `-5`, `c23-has-c-attribute-4`, `bitint-75`, `gnu23-attr-syntax-2/3`) are spread over `attr-diag` (3), `decl-diag` and `parse-gap` by their messages; the rest as in C7G.4.
 
 ### C7H.5 Proposals (CS160-CS165)
 
