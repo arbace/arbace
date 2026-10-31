@@ -1277,7 +1277,7 @@ the compiled level; `bin/oi check` (oi's own: nothing of oi changed).
 
 **Shipped files changed**: `jdk/ocaml/` (new, 37 files: Java forms under `jdk/`, which the runtime key and `gate_key` cover; no shipped
 program loads or translates them yet), `jdk/README.md` (a row), `arbace/o2j.ae` (new; under `arbace/`, so in `gate_key`; a tool's namespace,
-not embedded: `arbace/j2g/embed.ae` untouched). Nothing of `go/`, `overlay/`, `arbace/lang`, `seed/` changed.
+embedded and keyed, as every `arbace/` namespace outside embed.ae's `excluded`; `arbace/repr/ocaml` since review 008 is excluded there). Nothing of `go/`, `overlay/`, `arbace/lang`, `seed/` changed.
 
 **Proposals** (OC80 onward; each with options and the recommended one first)
 
