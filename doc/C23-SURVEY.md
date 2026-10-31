@@ -3468,3 +3468,96 @@ branch is merged.
 
 All as recommended: CS190 (a), the 145-program shard when the disk allows, the full `--aot --record` in the heavy
 window; CS191 (a), (b) with C8; CS192 (a); CS193 (a); CS194 (a); CS195 (a).
+
+## As built: CS192-CS195 (2026-10-31)
+
+On the branch `c23-c7`, in the light tier, as decided (CS190-CS195): `a21e3f28` (CS192), `a849f362` and `f012488a` (CS193), `163b7c36`
+(CS194 and CS195 together) and `68c47007` (roundtrip-known), then this section. Each with a judge-test (`bin/ci judge-test`: 21 tests, 50 assertions,
+from 17 and 38). CS190 (the compiled level's shard) was not run, as asked.
+
+### CS192 (a): `${srcdir}` in dg-options
+
+`host/dg-options` takes the testsuite's root as a second argument (the group's base, `gcc/testsuite`; "." when not given); `arbace.c.dg`'s
+`directives-cmd` and `ppcheck/file-entry` pass it, so gcc and the read see `--embed-directory=<root>/c-c++-common/cpp/embed-dir`. Test:
+`srcdir-in-dg-options`. The dg record moved in two rows: `embed-11` fail (stopped: 4 errors, "-: unexpected EOF") to **pass**, and `embed-10`
+(still a read error at line 5, but no longer marked as gcc disagreeing). The passes whose directives gcc does not agree with: 12 to **3**
+(`embed-7`, `embed-8`, `c23-ucn-2`: not looked into). Pass 586 to 587.
+
+### CS193 (a): the verdict by message, counted
+
+`arbace.c.dg/msg-mismatch` (test `message-mismatch-report`) lists, for a pass, the expected error lines whose dg-error regexes match none of the
+checker's messages on that line (all of a line's errors, `:all-texts` in `read.edn`; lines a read error stood for are not counted);
+`bin/ci dg` prints the count and writes the files to `.tmp/ci-dg/msg-mismatch.edn`; no verdict changes. Counting found a bug of its own:
+`tcl-words` kept the backslash before a non-alphanumeric in a quoted word (`\\\(` came out `\\(`, not Tcl's `\(`), so regexes with escaped
+parentheses never matched; fixed (test `tcl-quoted-backslashes`; text-only changes in three recorded reasons, `c23-stdarg-11`, `embed-18`,
+`embed-27`). The count with the fix: **30 of the 126 passes that expect errors (146 lines)** have lines whose regex matches no message of
+the checker's. By group: gcc-c23 17 files, gcc-gnu23 5, gcc-embed 5, gcc-bitint 2, gcc-cpp-c23 1. Families (lines): "assignment discards
+'const'" 22 (the checker says "discards qualifier from pointer target type"), "redefinition of struct or union" 19 (the checker names the tag:
+"redefinition of 'struct q'"), "passing argument N ... incompatible pointer type" 20 (the checker prints the types), array initialized "from a
+string literal" 12, "'#embed' expects" 5, "can only be applied to functions" 5, "extra tokens" 4, "both 'long' and '_BitInt'" 4 (the checker:
+"two or more data types"), "division by zero in #embed" 4, "duplicate (or overlapping) case value" 2 (the checker: "duplicate case value"),
+"enumerator value outside the range" 2, "- began here" 4, and a few single ones. Reading the 30 by eye, 25 are the same diagnostic in other
+words; about 5 may be a different reason for the same line: `c23-bool-errors-1/2` (the checker: "two or more data types in declaration
+specifiers", gcc: "'bool' cannot be defined via 'typedef'", "cannot be used here"), `c23-tag-enum-6` (redeclaration of an enumerator for
+"outside the range"), `embed-9` (No such file for "no include path in which to search"), perhaps `c23-nullptr-6`. So the line verdict has let
+through a few right-line, wrong-reason passes, and mostly wording.
+
+### CS194 (a): C2y's if and switch declarations
+
+The parser reads `if (int i = 42)`, `if (int i, j; i = 42)`, `if (D; E)`, `switch (int i = 42; i)` (`selection-head!`: an optional init
+declaration ending in `;`, then an expression or a declaration without its `;`; the tree's SelectionStatement gains `:Declaration`,
+`:Declaration2`, `:Token5`). The converter writes the statement as the block that declares them (`(let [^int i 42] (when i))`, marked
+`:c/sel-decl`; the condition declaration's variable is the condition), the checker gives `pedwarn-c2y!` "ISO C does not support if declarations
+before C2Y" on a marked block (off under `-Wno-c23-c2y-compat`, as gcc). ci runs them: `if (int i = 42) ...; if (int i = 0, j = 5; i + j > 3)
+...; switch (int s = 3; s) ...` gave 64 as computed by hand. Test: `if-declarations` on the new `test/c/judge/if-decl.c` (the three pedwarns and
+an undeclared `i` after the statement; with `-Wno-c23-c2y-compat` only the last). Files: `c23-if-decls-1` passed before for the wrong reason
+(the read's error stood for the expected lines; now the checker gives all six pedwarns), `c23-if-decls-2` fail to **pass**. Pass 587 to 588.
+Two limits: gcc 15.2 rejects `if (int k = 7; int m = k - 7)` (an init declaration and then a condition declaration), which the parser reads;
+the printer writes the block, not the statement, so `c23-if-decls-1` is `converter-gap` in `roundtrip-known.edn` (it was `cc-grammar`), and
+`-2` passes.
+
+### CS195 (a): passes of supported files
+
+`bin/ci dg` prints per group "pass N of M supported, unsupported U" and a total line. The dg check, 627 files (the last full run, with gcc):
+
+| | files | unsupported | pass | in a class | not in a class |
+|---|---:|---:|---:|---:|---:|
+| after review 006's fixes | 627 | 8 | 586 of 619 | 33 | 0 |
+| after CS192 | 627 | 8 | 587 of 619 | 32 | 0 |
+| after CS194 (final) | 627 | 8 | **588 of 619** | 31 | 0 |
+
+Per group, pass of supported: gcc-c23 250 of 263 (+7 unsupported), gcc-cpp-c23 16 of 16, gcc-c23-sub 24 of 30, gcc-gnu23 47 of 50 (+1),
+gcc-embed 39 of 47, gcc-va-opt 11 of 12, gcc-bitint 201 of 201. `bin/ci dg --essential`: 102 of 102. Classes: `parse-gap` lost its
+if-declaration alternatives (and `embed-11`'s EOF), its text says so.
+
+### Checks run at the end
+
+`bin/repr-c check --c23`: 62 files, 59 pass, 3 expected failures, 0 failing (the controls refuse). The round trip, `--no-run`: c23conf 49 of
+49 pass (levels 1-3 equal), c23 62 of 62, tcc-tests2 88 files, 85 pass and 3 known, none failing. `gcc-c23` (270 files; the if-decls files are
+there; the other corpora of the list were not run): 253 pass, 15 known, **2 failing**: `c23-bool-errors-1` and `-2` (level 1: the reread's forms
+lose `:c/bad-specs`, the specifier conflict CS133 marks; they come from CS133 and this group's round trip had not been run since, so not
+caused by this branch's changes, but not checked against an older commit either), and "31 known entries stale" (entries of other corpora in the
+file, not listed in this run). Not run: `bin/ci annotations`, `bin/repr-c parse-check`, `check --tokens`, `bin/gate`, the compiled level.
+
+### Proposals (CS200-CS203)
+
+Each with options, the recommended one first; none decided.
+
+- **CS200 The message count as a verdict** (30 files, 146 lines, above).
+  - Options: (a) a table of equivalences per family (the checker's wording against gcc's regex, about twelve families) in `test/c/`, a pass
+    failing when a line matches neither a regex nor the table, and the five different-reason files in a known list with a class
+    (`wrong-reason`) so they are visible; (b) change the checker's wording to gcc's for these families (the oracle and annotations checks
+    compare messages with cc's, so each change needs them rerun); (c) leave the count as a report.
+  - *Recommended: (a)*: it turns the count into a guard without touching the wording the other checks fix, and it names the wrong-reason files.
+- **CS201 The directives gcc does not agree with** (`embed-7`, `embed-8`, `c23-ucn-2`; `embed-10`'s read error).
+  - Options: (a) look at each (gcc's output against the directives; a selector or a message), one line each in the survey; (b) leave them named
+    by the judge.
+  - *Recommended: (a)*: four files, and the judge already lists them.
+- **CS202 If declarations in the printer and against gcc** (the block print; the init-then-condition form gcc 15.2 rejects).
+  - Options: (a) the printer writes a `:c/sel-decl` block back as `if (D; E)` and the parser refuses (or marks) the init-then-condition form
+    gcc rejects, so `c23-if-decls-1` round trips and leaves `converter-gap`; (b) leave both.
+  - *Recommended: (b) for now, (a) with the next printer work*: two files and one unusual form.
+- **CS203 `c23-bool-errors-1/2` in the gcc-c23 round trip** (level 1 loses `:c/bad-specs`).
+  - Options: (a) record both as `converter-gap` in `roundtrip-known.edn` (their print is a different program than gcc rejects); (b) have the
+    converter keep `:c/bad-specs` through the print; (c) first check them against the commit before CS133's follow-ups.
+  - *Recommended: (c) then (a)*: the failure is old and the files are error tests whose print gcc rejects anyway.
