@@ -480,12 +480,25 @@
   [v]
   (for [[n _ _ ns gnu] (attr-items v) :when (and (nil? ns) (not gnu) (std-position-attrs n))] n))
 
-(defn- ignored! [n] (pedwarn! (str "'" n "' attribute ignored")))
+(defn- ignored!
+  "gcc's -Wattributes error for an attribute it ignores, under -pedantic-errors; `__extension__` on the line does not
+  silence it (CS150: gcc errs on `[[__extension__ vector_size (4)]]`)."
+  [n]
+  (when (= :errors (cx :pedantic)) (err! (str "'" n "' attribute ignored"))))
+
+(defn- std-attr-misc!
+  "CS150, the standard-syntax attributes `[[...]]` of an attribute vector under -pedantic-errors: any of them before C23
+  is a pedwarn (not on a line with `__extension__`), and an unprefixed one that is no standard attribute is ignored."
+  [v]
+  (doseq [[n _ _ ns gnu] (attr-items v) :when (not gnu)]
+    (when (< (std-num) 123) (pedwarn! "ISO C does not support '[[]]' attributes before C23"))
+    (when (and (nil? ns) (not (std-position-attrs n))) (ignored! n))))
 
 (defn- tag-attrs!
   "A struct, union or enum specifier's (or an enumerator's) attributes: noreturn applies to functions only; a
   enumerator is no type, so nodiscard does not apply either."
   [v enumerator?]
+  (std-attr-misc! v)
   (doseq [n (std-names v)]
     (cond
       (contains? #{"noreturn" "_Noreturn"} n) (err! (str "'" n "' attribute can only be applied to functions"))
@@ -495,6 +508,7 @@
   "Standard attributes written after a type (specifiers, an array declarator, a function declarator): ignored, but a
   function declarator's reproducible and unsequenced."
   [v where]
+  (std-attr-misc! v)
   (doseq [n (std-names v)
           :when (not (and (= where :function) (contains? fn-type-attrs n)))]
     (ignored! n)))
@@ -512,6 +526,7 @@
   [m kind t]
   (type-pos-attrs! (:c/type-attrs m)
                    (if (base-fn-type? (:tag m)) :function :type))
+  (doseq [k [:c/attrs :c/decl-attrs :c/list-attrs :c/decl-end-attrs :c/end-attrs]] (std-attr-misc! (get m k)))
   (when-let [w (:c/after-at m)] (type-pos-attrs! (:c/after-attrs m) w))
   (when (:c/def-attrs m) (type-pos-attrs! (:c/def-attrs m) :function))
   (let [fn-ent? (or (= kind :fn) (= :fn (:k (unq t))))
@@ -566,7 +581,11 @@
     (if-let [[_ args] (first (filter #(= "vector_size" (first %)) as))]
       (let [n (const-int (first args))]
         (feat! :vector-types)
-        (if (integer? n) {:k :vector :of (unq t) :n (long n)} t))
+        (cond
+          ;; CS150: gcc has no vector of _BitInt
+          (= :bitint (:k (unq t))) (do (err! "invalid vector type for attribute 'vector_size'") t)
+          (integer? n) {:k :vector :of (unq t) :n (long n)}
+          :else t))
       t)))
 
 (defn- aligned-value
@@ -742,6 +761,7 @@
                  kr (:c/kr (meta ps))
                  variadic (= '& (last ps))
                  ps (if variadic (butlast ps) ps)
+                 _ (when (and variadic (empty? ps) (< (std-num) 123)) (pedwarn! "ISO C requires a named argument before '...'"))
                  _ (push-scope!)
                  pts (vec (keep (fn [p]
                                   (let [pm (meta p)
@@ -1921,6 +1941,7 @@
   fallthrough, which is an error at top level, outside a switch and where no case or default label follows."
   [f next where]
   (std-attr-check! {:c/attrs (vec (rest f))})
+  (std-attr-misc! (vec (rest f)))
   (doseq [[n _ _ ns gnu] (attr-items (rest f)) :when (and (nil? ns) (not gnu))]
     (cond
       (= n "fallthrough")
@@ -1930,7 +1951,7 @@
                      (not (and (seq? next) (#{'case 'default} (first next))))
                      (err! "attribute 'fallthrough' not preceding a case label or default label")))
       (or (contains? std-no-arg-attrs n) (contains? std-string-attrs n))
-      (pedwarn! (str "'" n "' attribute ignored")))))
+      (ignored! n))))
 
 (defn- stmt-attrs!
   "The standard attributes a statement or label stood with (CS140): ignored on a statement, and on a label for
@@ -1939,6 +1960,7 @@
   (when-let [v (and (seq? s) (not (decl-form? s)) (not= 'c/attr-decl (first s)) (:c/attrs (meta s)))]
     (let [lbl (contains? '#{label case default} (first s))]
       (at-line s
+        (std-attr-misc! v)
         (doseq [n (std-names v)]
           (cond
             (or (not lbl) (contains? #{"deprecated" "fallthrough"} n)) (ignored! n)
@@ -2088,7 +2110,7 @@
           (when (and annotate (seq? f) (:line (meta f)) (not (#{'c/include 'c/define 'c/undef 'c/directive 'c/pragma} (first f))))
             (.add items [(:line (meta f)) (vec a) fs]))))
       ;; the lexical pedantic notes (arbace.repr.c.pedantic), errors under -pedantic-errors
-      (doseq [[ln msg] notes]
-        (when-not (contains? (or ext-lines #{}) ln) (.add ^ArrayList (cx :errors) (str ln ": " msg))))
+      (doseq [[ln msg always] notes]
+        (when (or always (not (contains? (or ext-lines #{}) ln))) (.add ^ArrayList (cx :errors) (str ln ": " msg))))
       (cond-> {:errors (vec (cx :errors)) :items (vec items)}
         results (assoc :results (cx :results))))))

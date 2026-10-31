@@ -329,6 +329,7 @@ void __atomic_store();
 
 (def ^:const SCOPE 0) (def ^:const FNSCOPE 1) (def ^:const GOTOS 2) (def ^:const SWITCH 3)
 (def ^:const SEQ 4) (def ^:const LDOK 5) (def ^:const COMPLIT 6) (def ^:const ORDER 7) (def ^:const EOFERRS 8)
+(def ^:const SOFT 9) (def ^:const HARD 10)
 
 (deftype Parser [nx ^ArrayList errs ^ArrayList toks kw ^objects st])
 
@@ -362,7 +363,14 @@ void __atomic_store();
   cc then runs until tools/ccdump's timeout, whose dump is a panic too."
   100000)
 
+(defn- eh-soft!
+  "An error of the recovery (*recover*): counted apart, the parse goes on."
+  [^Parser p ^String msg]
+  (.add ^ArrayList (.-errs p) msg)
+  (aset ^objects (.-st p) SOFT (inc (long (or (aget ^objects (.-st p) SOFT) 0)))))
+
 (defn- eh [^Parser p ^String msg]
+  (aset ^objects (.-st p) HARD (inc (long (or (aget ^objects (.-st p) HARD) 0))))
   (.add ^ArrayList (.-errs p) msg)
   (let [^ArrayList ts (.-toks p)]
     (when (and (pos? (.size ts)) (= (.-ch ^PTok (.get ts 0)) :eof))
@@ -431,16 +439,24 @@ void __atomic_store();
             c)]
     (PTok. c s sep (.-pf t) (.-po t) (.-m t) seq)))
 
+(def ^:dynamic *recover*
+  "Arbace (CS150): gcc's recovery in a standard attribute (a token that is not `]` after the list: the rest of the
+  attribute skipped to its closing brackets, the parse going on), for the dg check, which judges every error line of a
+  file; off for the round trips and cc's comparisons, whose parser stops there as cc's does."
+  false)
+
 (defn- next! [^Parser p]
-  (loop [^StringBuilder b nil]
+  (loop [^StringBuilder b nil sp false]
     (let [^Tok t ((.-nx p))
           c (.-ch t)]
       (cond
-        (= c \space) (recur b)
-        (= c \newline) (let [b (or b (StringBuilder.))] (.append b (.-sep t)) (.append b "\n") (recur b))
-        :else (let [seq (inc (long (slot p SEQ)))]
+        (= c \space) (recur b true)
+        (= c \newline) (let [b (or b (StringBuilder.))] (.append b (.-sep t)) (.append b "\n") (recur b sp))
+        :else (let [seq (inc (long (slot p SEQ)))
+                    ;; CS150 (*recover*): a space token of the preprocessor (a comment of a macro's body) before the token
+                    sp-sep (if (and *recover* sp (= "" (.-sep t))) " " (.-sep t))]
                 (slot! p SEQ seq)
-                (.add ^ArrayList (.-toks p) (conv p t (if (and b (pos? (.length b))) (str b (.-sep t)) (.-sep t)) seq)))))))
+                (.add ^ArrayList (.-toks p) (conv p t (if (and b (pos? (.length b))) (str b sp-sep) sp-sep) seq)))))))
 
 (defn- typename-tok?
   "checkTypeName: whether t, an identifier, names a typedef in the current scope."
@@ -1446,10 +1462,16 @@ void __atomic_store();
 
 (defn- std-attribute [^Parser p]
   (let [r (node "AttributeValue" :Case :AttributeValueIdent)]
-    (when (and (= (pkc p 1) \:) (= (pkc p 2) \:))
-      (s! r :Prefix (attribute-name p))
-      (s! r :Colon (sh p))
-      (s! r :Colon2 (sh p)))
+    ;; CS150 (*recover*): gcc takes two colons as the scope only when nothing separates them (`gnu : : x` is an error)
+    (cond
+      (and (= (pkc p 1) \:) (= (pkc p 2) \:) (or (not *recover*) (= "" (.-sep (pk p 2)))))
+      (do (s! r :Prefix (attribute-name p))
+          (s! r :Colon (sh p))
+          (s! r :Colon2 (sh p)))
+      ;; C23's pasted `::` is one token
+      (and *recover* (= (pkc p 1) \:) (= "::" (src (pk p 1))))
+      (do (s! r :Prefix (attribute-name p))
+          (s! r :Colon (sh p))))
     (s! r :Token (attribute-name p))
     (when (= (rn p) \()
       (s! r :Case :AttributeValueExpr)
@@ -1471,11 +1493,28 @@ void __atomic_store();
           (recur (or r l) l))
         r))))
 
+;; CS150: gcc reports a stray token in `[[...]]` and goes on after the attribute (the dg check's recovery).
+(defn- recover-attribute! [^Parser p]
+  (let [t (tok0 p)]
+    (eh-soft! p (str (tpos t) ": unexpected " (rname (ch t)) ", expected " (rname \]))))
+  (loop [depth 0 closers 0]
+    (let [c (rn p)]
+      (cond
+        (or (= c :eof) (in? c \; \{ \})) nil
+        (= c \[) (do (sh p) (recur (inc depth) 0))
+        (= c \]) (do (sh p)
+                     (cond (pos? depth) (recur (dec depth) 0)
+                           (= closers 1) nil
+                           :else (recur 0 1)))
+        :else (do (sh p) (recur depth 0))))))
+
 (defn- std-attribute-specifier [^Parser p]
   (let [r (node "AttributeSpecifier" :Token (sh p) :Token2 (sh p))]
     (s! r :AttributeValueList (std-attribute-list-opt p))
-    (s! r :Token4 (must p \]))
-    (s! r :Token5 (must p \]))
+    (if (and *recover* (not (in? (rn p) \] :eof)))
+      (recover-attribute! p)
+      (do (s! r :Token4 (must p \]))
+          (s! r :Token5 (must p \]))))
     r))
 
 (defn- attributed-statement [^Parser p label-decl-ok]
@@ -2304,7 +2343,7 @@ void __atomic_store();
   or {:panic msg} where cc would panic."
   [cfg sources ^String main]
   (let [{:keys [errors next layer]} (pp/stream cfg sources main)
-        st (object-array 9)
+        st (object-array 11)
         _ (do (aset st SCOPE (new-scope* nil)) (aset st SEQ (Long/valueOf 0)) (aset st LDOK false))
         p (Parser. next errors (ArrayList.) (keywords (:predefined cfg)) st)]
     (try
@@ -2315,7 +2354,8 @@ void __atomic_store();
                      (let [x (first a)] (when (= (.get ^HashMap x :node) "Declarator") x)))
                 errs (dedupe-errors errors)
                 errs (if pd errs (conj errs "<bultin>: missing definition of '__predefined_declarator'"))]
-            {:tree tu :errors errs :layer layer})
+            (cond-> {:tree tu :errors errs :layer layer}
+              (and (pos? (long (or (aget st SOFT) 0))) (zero? (long (or (aget st HARD) 0)))) (assoc :recovered true)))
           (let [t (sh p)]
             (eh p (str (tpos t) ": unexpected " (rname (ch t)) ", expected EOF"))
             {:tree tu :errors (dedupe-errors errors) :notree true :layer layer})))
