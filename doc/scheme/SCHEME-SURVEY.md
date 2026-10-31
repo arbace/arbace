@@ -2179,3 +2179,94 @@ SC119 (b), SC121 (c), SC122 (a) then (b). Not done: SC118 (b) (optional, below).
 ### Decided (SC130-SC134; the user, 2026-10-31)
 
 All as recommended: SC130 (a); SC131 (a); SC132 (a); SC133 (b) now, (c) when the gate runs it; SC134 (b).
+
+## As built: SC130, SC133 (b), SC134 (write-ahead) (2026-10-31)
+
+Branch `scheme-sm1`, on `580b3c4c`. The items of "Decided (SC130-SC134; the user, 2026-10-31)", built **write-ahead** in the light
+tier beside the gate (no gate, no build of Arbace's executables or javac's tool, no lock; stage 0 as the tools' host, the light driver,
+at most 4 threads and `GOMEMLIMIT` 1000-1500 MiB, one run at a time). Done: SC130 (a), SC133 (b), SC134 (b). Not done: SC133 (c) (when the gate runs the mats), SC131 and SC132 (decided (a), as built).
+
+### What was built
+
+- **SC130 (a), Chibi's own `(chibi test)`**: `scheme/vendor/chibi/` holds Chibi-Scheme 0.12.0's `(chibi test)`, `(chibi diff)`, `(chibi optional)` and `(chibi term ansi)`
+  (the `.sld` files and the `.scm` files they include), **unchanged** (SHA-256 in `scheme/vendor/chibi/provenance.edn`; the files are those the host's
+  chibi-scheme package installs under `/usr/share/chibi/chibi/`, which records no upstream commit; BSD 3-Clause, Copyright (c) Alex Shinn, `LICENSE.md`,
+  "Chibi Scheme: BSD 3-Clause License": the package carried no license file, so the section gives the standard 3-clause text with the holder's name, as the head of
+  `test.scm` points to it). The one change to si it needed: psyntax's `define-library` accepts a `define`, `define-syntax`, `define-record-type` or
+  `define-values` directly as a declaration (in `(chibi test)`'s `cond-expand` fallback `string-contains`; Chibi takes it, R7RS's grammar does not),
+  as a body form (`scheme/psyntax/patches.edn`; psyntax rebooted, `bin/si boot`). `(srfi 1)` beside `(scheme base)` (SC116) and `(srfi 13)`'s `string-contains` were
+  already there. `bin/si r7rs --chibi-test [--record]` (Makefile `si-r7rs-chibi-test[-record]`) runs the suite with the vendored directory
+  before `scheme/lib` on the library path (so `(chibi test)` is Chibi's; SM8's `scheme/lib/chibi/test.sls` stays beside it, the library whose per-test lines
+  `bin/si r7rs` reads), `ANSI_ESCAPES_ENABLED=0`; Chibi's output has a mark a test (a dot for a pass), and `arbace.scheme.corpora r7rs-own` reads the marks in order
+  and compares them with SM8's per-test results (`test/scheme/check-r7rs-chibi-test-linux-amd64.edn`). **Both runs: 1,225 tests, 1,216 pass, 9 fail, test by test the
+  same (1,216 both pass, 9 both fail, 0 only one passes)**; the nine are `r7rs-float-printing`. Chibi's own summary line says the same ("1216 out of 1225 (99.3%)").
+  The Chez run keeps SM8's library (Chez's `(chibi test)` is `scheme/lib/chibi/test.sls`; `chez_libdir` links only it).
+- **SC134 (b), the sorts and circular arguments**: finding: `list-sort`, `vector-sort`, `vector-sort!` and `sort` already raised on a circular or improper list (their
+  argument is read by `ArgList`, whose walk is `ListSlice`'s slow/fast pointers, SM8b), so the cyclic-list clauses of 5_2.ms's `sort`, `list-sort` and `sort!` already
+  passed; nothing in Go needed a `dlWalk` call. What failed was two others: `(chezscheme)`'s `sort` and `sort!` took a vector (Chez's are lists only: 6 of each mat's clauses
+  "did not raise"), and `merge` (Scheme) looped on a cyclic list until the watchdog. Now `sort`, `sort!` are `list-sort`, and `merge` calls `length` on both lists first (raises on
+  an improper or circular list, as Chez's). 5_2.ms: `merge` passes (was FAIL, 6 clauses), `sort` and `sort!` fail only on clause 20, which `list-sort` fails too:
+  the mats' timing test (200 passes of 25 sorts of up to 1,000 random elements under the clause's 20 s limit, with Chez's internal `$merge-sort`), which si interpreted does not
+  finish in time: still `mats-error-checks` (the class's regex takes the "time limit" error).
+- **SC133 (b), the mats' file limit**: `bin/si mats` takes `SI_TIMEOUT` with the default 400 s a file (was 120), in the header too. A finding while rerunning: the
+  harness prints a failing clause's datum when `SI_MAT_VERBOSE` is *set*, whatever its value, and a failing clause that holds a datum label (4.ms's `ormap`, `'#1#` after
+  `'#1=(a . #1#)`) is a circular datum that the printer does not end on: 4.ms hung under `SI_MAT_VERBOSE=0` (a first rerun I made so; one mat skipped, then OOM-killed, status 137,
+  recorded by `mats-hang`), not otherwise. The recorded run is made with the variable unset.
+
+### The checks, numbers (before: SC115-SC122's batch; after: this batch)
+
+- **Chibi's R7RS suite on si: 1,225 tests, 1,216 pass, 9 fail** (as before), with SM8's `(chibi test)` and with Chibi's own, the same test by test (above). **Chez: 1,205 pass, 20 fail**
+  (as before, rerun; si against Chez: 1,205 both pass, 11 only si passes, 0 only Chez, 9 both fail).
+- **Chez's mats on si: 911 mats, 282 pass (281), 89 fail (90), 529 do not run (529), 11 skipped (11)**; 886 non-pass items (887), **0 in no class**: `mats-chez-identifier` 521, `mats-chez-reader` 228,
+  `mats-chez-syntax` 31, `mats-error-checks` 17 (18), `mats-numeric` 18, `mats-arity-one` 15, `mats-format` 14, `mats-chezscheme-subset` 11, `mats-parameters` 11, `mats-chez-checks` 10,
+  `mats-eq-identity` 4, `mats-chez-module` 3, `mats-toplevel` 3. Clauses of the mats that do not run, in order in the one environment: 4,288 pass (4,289), 568 fail (569), 9,131 do not run (9,129).
+  The whole run: no skip, no rerun, 400 s a file (5_3.ms under it).
+- **ecraven's benchmarks on si: 58, 54 right** (as before), made in two runs on the loaded host (not recorded: `check-ecraven-linux-amd64.edn` is unchanged): the default 60 s a benchmark gave 47 right, 10 `ecraven-too-slow`
+  (ack, cpstak, earley, fib, graphs, nboyer, ntakl, sboyer, tak, takl) and read0; those ten again at `SI_TIMEOUT=300`: seven right (ack 155 s, cpstak 162, fib 67, graphs 85, nboyer 147, sboyer 121, tak 147),
+  `earley`, `ntakl`, `takl` past 300 s (`ecraven-too-slow`, as SM8b); 47 + 7 = 54, read0 INCORRECT by construction (`ecraven-read0-incorrect-everywhere`/`ecraven-reader-corners` as recorded). The times are the loaded host's
+  (load average 10 to 14), several times SM8b's; the shipped Go did not change this batch.
+- **Every corpus file in a result or a class**: 220 files, 0 in neither.
+- **No regression**: `bin/si check` 46 of 47 (1 in a class, 0 failing); `bin/si check --aot` 45 of 47 compiled runs the same as the interpreted (2 refused, 0 differing); `bin/si srfi` 11 of 11;
+  `bin/si test --si` 61 of 64, 3 known, 0 failing; `bin/si test` 60 of 64, 4 known, 0 failing, 31 of 39 the same as Chez's `expand`; `bin/si check-suite` rc 0 (the libraries and programs expanded); `bin/si fixpoint` 6 of 6; `bin/si boot --check` gives the
+  committed `psyntax.pp.ae`; `bin/si unit` ok; `make check-makefile` rc 0.
+
+### Proposals (SC140 onward)
+
+- **SC140 The mats harness's verbose printer on circular data.** `SI_MAT_VERBOSE` (set to anything) hangs on a failing clause with a datum label.
+  - Options: (a) as is, the variable documented as "unset or set" in the harness header; (b) print with `write` under a cycle-safe printer (R7RS `write` with labels: si has `write-shared`/`write` datum labels), or print the clause's text from the source; (c) cap the printed length.
+  - *Recommended: (b)*: `write` is already R7RS's and labels cycles; a one-line change in `test/scheme/mats/run.sps`.
+- **SC141 The mats' timing clauses** (`sort`, `list-sort`, `sort!` clause 20, and the like): 20 s clauses that measure speed, not behaviour.
+  - Options: (a) classed `mats-error-checks` as is; (b) a class of their own (`mats-timing`), so the error-check class holds only error checks; (c) the harness runs them with a longer clause limit (`set-clause-ms!`) when the mat names a timing test.
+  - *Recommended: (b)*: the honest name, no change to the run; (c) only when the compiled level runs the mats.
+- **SC142 Vendoring `(chibi test)` further.** The vendored directory could also feed other Chibi test files (`chibi/*-test.sld`), which import `(chibi test)`.
+  - Options: (a) stop here; (b) run Chibi's own `*-test.sld` suites of libraries si has equivalents of (`(chibi diff)`, `(chibi optional)`, `(chibi term ansi)`, now vendored) as a corpus; (c) also vendor Chibi's `lib/` R7RS tests for `(scheme ...)` libraries beyond r7rs-tests.scm.
+  - *Recommended: (b)*: three libraries that are now loaded for the first time are best checked by their own tests (`diff-test.sld`, `ansi-test.sld`, `optional`'s).
+- **SC143 Chibi's `(chibi test)` on Chez.** The Chez run of the suite uses SM8's library; Chibi's own needs `(srfi 1)`-style imports and `cond-expand` in `define-library`, which Chez's R6RS reader does not read.
+  - Options: (a) as built; (b) a rewrite of Chibi's `.sld` into R6RS `library` forms for the Chez run; (c) Chibi's own as the reference outside Chez (run on Chibi, which is installed): its answers beside Chez's and si's.
+  - *Recommended: (c)*: it is the real reference for the suite; Chibi 0.12.0 is on the host, so the run needs nothing built (`chibi-scheme r7rs-tests.scm`).
+
+### Rule slips
+
+- I wrote `/dev/null` twice in the runner of the corpora batch (`.tmp/sc/runall.sh`'s launch) and in the waiters (`2>/dev/null` in `until grep -q ... 2>/dev/null`), and the coordinator pointed out six duplicate waiters,
+  which I stopped by task id; the waiters now use `grep -qs`.
+- One `sha256sum -c <(true)` (a process substitution, meaningless: it checked nothing) while writing the provenance; no effect.
+- Foreground `sleep` in the first polling loops returned at once (blocked by the harness) and so told me nothing; later waits use `until grep` loops.
+- The first rerun of the full mats ran under `SI_MAT_VERBOSE=0` and recorded nothing (the file `check-mats-linux-amd64.edn` was restored with `git checkout` before the real run); see SC133 above.
+
+### The heavy list, and checks not run
+
+1. Shipping, with the batched re-seed: `psyntax.pp.ae` changed (booted once more, `define-library`'s body forms); `go/arbace/scm` did not change this batch.
+2. Not run: the essential gate; arm64 and the box; ecraven at full size, compiled (SC109); `bin/si ecraven --chez` (Chez's times: SM8b's file kept); `bin/si bench`; the AOT of the R7RS programs and of `(si format)`; `bin/si r7rs`'s numbers on the compiled level;
+   `bin/si check-suite`'s and the others' numbers are the batch's as above.
+
+### Shipped files changed
+
+`scheme/psyntax/psyntax.pp.ae` (with `scheme/psyntax/patches.edn`, its input). Not shipped (test and data): `scheme/lib/chezscheme.sls`, `scheme/vendor/chibi/**`, `test/scheme/**` (the results), `bin/si`, `arbace/scheme/corpora.ae`, the Makefile, `LICENSE.md`.
+
+### Scratch cited
+
+`.tmp/sc/` in this worktree: `N_mats.log` (the hung verbose run), `N2_mats.log` (the recorded mats run), `P_*.log` (the checks and ecraven), `n52*.log` (5_2.ms), `om*.sps` and `om/` (the ormap probes), `ct1.out` (the suite on Chibi's own); `.tmp/si/{mats,r7rs,r7rs-own,r7rs-chez,ecraven}` the runs judged.
+
+### Decided (SC140 onward)
+
+Open: none decided yet.
