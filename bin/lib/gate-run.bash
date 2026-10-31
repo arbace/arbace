@@ -71,9 +71,21 @@ plan_inputs() {  # plan_inputs DIR: DIR/files.sha256 and DIR/hosts.edn
   mkdir -p "$d"
   find . \( -path ./.git -o -path ./.tmp -o -path ./target -o -path ./.claude \) -prune -o -type f -printf '%P\n' \
     | LC_ALL=C sort | xargs -d '\n' sha256sum > "$d/files.sha256" || return 1
+  # :jdk (queue 023, report 022 finding 3): the release files of the JDK the steps run, java's (the frozen
+  # jar's JVM, bin/lib/frozen.bash) and javac's (the reference javac), each resolved from PATH through its
+  # links; none when neither is there
+  local b r h=
+  for b in java javac; do
+    r=none
+    jdk=$(command -v "$b") && jdk=$(readlink -f "$jdk") && [ -f "${jdk%/bin/$b}/release" ] \
+      && r=$(sha256sum < "${jdk%/bin/$b}/release" | cut -c1-64)
+    h="$h$b $r
+"
+  done
   rel=none
-  jdk=$(command -v javac) && jdk=$(readlink -f "$jdk") && [ -f "${jdk%/bin/javac}/release" ] \
-    && rel=$(sha256sum < "${jdk%/bin/javac}/release" | cut -c1-64)
+  [ "$h" = "java none
+javac none
+" ] || rel=$(printf '%s' "$h" | sha256sum | cut -c1-64)
   # the program hosts (GT5, GTS4 (b), (c)): the units of the build at this key (units.tsv), pending
   # when there is no build yet, none for a build made before the units were recorded
   local pu=pending ju=pending
