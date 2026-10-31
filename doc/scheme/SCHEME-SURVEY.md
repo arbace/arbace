@@ -2270,3 +2270,7 @@ at most 4 threads and `GOMEMLIMIT` 1000-1500 MiB, one run at a time). Done: SC13
 ### Decided (SC140 onward)
 
 Open: none decided yet.
+
+### Decided (SC140-SC143; the user, 2026-10-31)
+
+All as recommended: SC140 (b); SC141 (b), (c) when the compiled level runs the mats; SC142 (b); SC143 (c).
