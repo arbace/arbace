@@ -3693,3 +3693,12 @@ so `java.check/report` does not look for it): t03208's fresh forms against t0320
 `test/java/forms/` must differ; the verify prints `control c00001 (forms): ... differ ..., as they must`, and fails
 with `control passed: c00001 (forms): ...` when they are equal. A control whose subject was not read in the run or whose
 reference is not committed is `left`. No read, no record and no step of its own: the verify's fresh forms judged twice.
+
+**What the controls catch** (review 001, finding 7; doc/GATE-SURVEY.md, "As built: review 001's fixes"). Each catches
+a judge that passes everything, or one skipped, which is what GTS81 asks; none catches every partial one. At interp and
+compiled the subject and the reference both exit 0 and their stdout differ: a `judge` that ignores stdout passes c00001
+and is caught, one that ignores the status alone is not. At classes, print's classes step and `:forms` (the read level)
+the two trees differ by their file names (each test's own classes, its `package tNNNNN` prefix) as well as their
+contents: a comparison that ignored the files' contents would still fail them. At diagnostics c00002's output and the
+golden file differ by the file names in the messages (`T5017953.java:...` against `T6304921.java:...`) as well as the
+messages' keys: not a judge that ignores the messages' text.

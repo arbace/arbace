@@ -1535,6 +1535,17 @@ timeout) prints no control row, and the control is "not judged" without failing 
 not in the run fails it (the controls' subjects are in both essential lists), except in a selection (`--only`),
 which leaves it. The quiet retry of a subject that timed out brings its control rows with it.
 
+What the controls catch (review 001, findings 7 and 8; doc/GATE-SURVEY.md, "As built: review 001's fixes"). Each
+catches a comparison that passes everything, or one that is skipped, which is what GTS81 asks; none catches every
+partial one. The run controls' subject and reference both exit 0, and their streams differ in every byte: a
+`run_verdict` that ignored the status would still fail them, one that ignored stdout and stderr would not. The
+directory control's output differs from the golden file throughout (status 0 both): not a `dir_verdict` that ignores
+the status. The errorcheck controls (`_control/append1-vs-assign1`, `_control/const6-vs-bug046`) differ by the file
+name: `gocmp errorcheck` matches errors by the reference's base name, so every error of the subject is unmatched and
+every `// ERROR` of the reference missing, whatever the line or message matching does: they do not catch a judge
+that ignores message text or line numbers. A control's reference is gc's run with the reference's own action (its
+`-t`, its flags at `--aot`, its arguments: `action_parse`, as for a program of the list), not the subject's.
+
 ### 11.4 The annotation check
 
 `bin/goi annotations [CORPUS...]` checks, without running anything, every package of
