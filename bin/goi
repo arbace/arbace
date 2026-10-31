@@ -90,7 +90,10 @@
 #                                 with gc's flags); a run program's time limit 10 s, its action's
 #                                 -t, or its line in test/goi/timeouts.txt; the results against
 #                                 test/goi/check-linux-amd64.edn: a program passing there and not
-#                                 now fails the check; --record writes it. --essential: the
+#                                 now fails the check; --record writes it. The negative controls
+#                                 (GTS81 (a), test/goi/controls.txt): a subject's run judged against
+#                                 another program's gc run, in every run but the box's; one that
+#                                 passes fails the check. --essential: the
 #                                 programs of test/goi/essential.txt (GS12, the essential gate's).
 #                                 GR7b: and its errorcheck programs (the corpus linux-errtest:
 #                                 bin/repr-go read --corpus linux-errtest when missing), each
@@ -480,13 +483,23 @@ aot_build() {
 # (aot_build) and run; compared: exit status, standard output byte for byte, standard error up to
 # the goroutines' traces. Prints PROGRAM<TAB>RESULT<TAB>REASON.
 check_one() {
-  local p=$1 g=$goroot/test/$1 f act args=() bflags=() w=() tmo=10 ns ref r rc st reason x
+  local id=$1 p=$1 g f act args=() bflags=() w=() tmo=10 ns ref r rc st reason x refp="" rf=""
+  # GTS81 (a): a negative control (test/goi/controls.txt): its subject's program run as every program,
+  # judged against its reference's gc run; printed under the control's id
+  case $id in
+    _control/*)
+      read -r p refp <<< "$(awk -v l="${aot:+aot}" -v i="$id" '!/^#/ && $1 == (l == "" ? "interp" : l) && $2 == i { print $3, $4 }' "$root/test/goi/controls.txt")"
+      [ -n "$refp" ] || { printf '%s\terror\tno such control in test/goi/controls.txt\n' "$id"; return; }
+      rf=$cforms/go/test/${refp%.go}.ae
+      [ -f "$rf" ] || { printf '%s\terror\tno forms of its reference (%s)\n' "$id" "${rf#$root/}"; return; } ;;
+  esac
+  g=$goroot/test/$p
   f=$cforms/go/test/${p%.go}.ae
-  [ -f "$f" ] || { printf '%s\terror\tno forms (%s)\n' "$p" "${f#$root/}"; return; }
+  [ -f "$f" ] || { printf '%s\terror\tno forms (%s)\n' "$id" "${f#$root/}"; return; }
   act=$(action_of "$g")
   if [ -n "${aot:-}" ]; then
     # the action's words as the test driver splits them, its flags go build's (RPS17)
-    x=$(action_words "$act" 2>&1) || { printf '%s\terror\tthe action cannot be split: %s\n' "$p" "$act"; return; }
+    x=$(action_words "$act" 2>&1) || { printf '%s\terror\tthe action cannot be split: %s\n' "$id" "$act"; return; }
     while IFS= read -r x; do w+=("$x"); done <<< "$x"
     set -- "${w[@]}"
   else
@@ -496,17 +509,17 @@ check_one() {
   while [ $# -gt 0 ] && [ "${1#-}" != "$1" ]; do
     case $1 in
       -t) tmo=$2; shift 2 ;;
-      -goexperiment|-godebug) printf '%s\tskip\tthe action sets %s: %s\n' "$p" "${1#-}" "$act"; return ;;
+      -goexperiment|-godebug) printf '%s\tskip\tthe action sets %s: %s\n' "$id" "${1#-}" "$act"; return ;;
       *) if [ -n "${aot:-}" ]; then bflags+=("$1"); shift
-         else printf '%s\tskip\tthe action needs gc flags: %s\n' "$p" "$act"; return; fi ;;
+         else printf '%s\tskip\tthe action needs gc flags: %s\n' "$id" "$act"; return; fi ;;
     esac
   done
   # a program's own limit (test/goi/timeouts.txt), where the default is too short for it
   tmo=$(awk -v p="$p" -v t="$tmo" '$1 == p { t = $2 } END { print t }' "$root/test/goi/timeouts.txt")
   args=("$@")
   ns=$(sed -n '1s/^(ns \([^ )]*\).*/\1/p' "$f")
-  gc_ref "$p" "$f" "$tmo" || return
-  r=$cwork/run/$p
+  gc_ref "${refp:-$p}" "${rf:-$f}" "$tmo" || return
+  r=$cwork/run/$id
   mkdir -p "$(dirname "$r")"
   st=0
   if [ -n "${bundle:-}" ]; then
@@ -514,7 +527,7 @@ check_one() {
     mkdir -p "$(dirname "$bundle/in/$p")" "$(dirname "$bundle/want/$p")"
     box_input "$cforms" "$ns" "${f#$cforms/}" ${args[@]+"${args[@]}"} > "$bundle/in/$p.in"
     cat "$ref/out" "$ref/err" > "$bundle/want/$p.want"
-    printf '%s\tbundled\t%s %s one\n' "$p" "$((tmo + ${GOI_BOX_TIMEOUT:-60}))" "$(cat "$ref/exit")"; return
+    printf '%s\tbundled\t%s %s one\n' "$id" "$((tmo + ${GOI_BOX_TIMEOUT:-60}))" "$(cat "$ref/exit")"; return
   fi
   if [ -n "${aot:-}" ]; then
     # the program's package file and its forms directory, alone in a forms root
@@ -522,7 +535,7 @@ check_one() {
     cp "$f" "$r.src/go/test/${p%.go}.ae"
     [ -d "${f%.ae}" ] && cp -R "${f%.ae}" "$r.src/go/test/${p%.go}"
     if ! aot_build "$r.src" "$r.exe" "$r.build.log" ${bflags[@]+"${bflags[@]}"}; then
-      printf '%s\terror\tthe AOT build failed: %s\n' "$p" "$(grep -v '^$' "$r.build.log" | head -2 | tr '\n' ' ' | cut -c1-240)"; return
+      printf '%s\terror\tthe AOT build failed: %s\n' "$id" "$(grep -v '^$' "$r.build.log" | head -2 | tr '\n' ' ' | cut -c1-240)"; return
     fi
     (cd "$goroot/test" && limited "$tmo" "$r.exe" ${args[@]+"${args[@]}"} > "$r.out" 2> "$r.err.raw" < "$empty") || st=$?
     rm -rf "$r.exe" "$r.src"
@@ -533,9 +546,9 @@ check_one() {
   fi
   stderr_head "$r.err.raw" > "$r.err"
   case $st in
-    125) [ -z "${aot:-}" ] && { printf '%s\tunsupported\t%s\n' "$p" "$(sed -n 's/^goi: unsupported: //p' "$r.err.raw" | head -1)"; return; } ;;
-    126) [ -z "${aot:-}" ] && { printf '%s\terror\t%s\n' "$p" "$(sed -n 's/^goi: error: //p' "$r.err.raw" | head -1 | cut -c1-300)"; return; } ;;
-    124|137|152) printf '%s\terror\ttimeout (%s s)\n' "$p" "$tmo"; return ;;
+    125) [ -z "${aot:-}" ] && { printf '%s\tunsupported\t%s\n' "$id" "$(sed -n 's/^goi: unsupported: //p' "$r.err.raw" | head -1)"; return; } ;;
+    126) [ -z "${aot:-}" ] && { printf '%s\terror\t%s\n' "$id" "$(sed -n 's/^goi: error: //p' "$r.err.raw" | head -1 | cut -c1-300)"; return; } ;;
+    124|137|152) printf '%s\terror\ttimeout (%s s)\n' "$id" "$tmo"; return ;;
   esac
   if [ -n "${box:-}" ]; then
     # the box's console: TamaGo writes a Go program's file descriptors 1 and 2 to it, and the
@@ -544,21 +557,41 @@ check_one() {
     cat "$r.out" "$r.err.raw" > "$r.all.raw"; stderr_head "$r.all.raw" > "$r.all"
     cat "$ref/out" "$ref/err" > "$r.gc-all"
     if [ "$st" = "$(cat "$ref/exit")" ] && cmp -s "$r.all" "$r.gc-all"; then
-      printf '%s\tpass\t\n' "$p"
+      printf '%s\tpass\t\n' "$id"
     else
-      printf '%s\tfail\tstatus %s (gc %s)%s\n' "$p" "$st" "$(cat "$ref/exit")" \
+      printf '%s\tfail\tstatus %s (gc %s)%s\n' "$id" "$st" "$(cat "$ref/exit")" \
         "$(cmp -s "$r.all" "$r.gc-all" || printf ', the console differs: %s' "$(diff "$r.gc-all" "$r.all" | grep '^[<>]' | head -2 | tr '\n' ' ' | cut -c1-200)")"
     fi
     return
   fi
   if [ "$st" = "$(cat "$ref/exit")" ] && cmp -s "$r.out" "$ref/out" && cmp -s "$r.err" "$ref/err"; then
-    printf '%s\tpass\t\n' "$p"
+    printf '%s\tpass\t\n' "$id"
   else
     reason="status $st (gc $(cat "$ref/exit"))"
     cmp -s "$r.out" "$ref/out" || reason="$reason, stdout differs"
     cmp -s "$r.err" "$ref/err" || reason="$reason, stderr differs: $(diff "$ref/err" "$r.err" | grep '^[<>]' | head -2 | tr '\n' ' ' | cut -c1-200)"
-    printf '%s\tfail\t%s\n' "$p" "$reason"
+    printf '%s\tfail\t%s\n' "$id" "$reason"
   fi
+}
+
+# controls_judged LEVEL RESULTS: GTS81 (a): each negative control of LEVEL (interp, aot; test/goi/controls.txt)
+# in RESULTS (check_one's lines): fail is a control's result (its subject's run against another program's
+# gc run); pass, or another result while its subject passes, a problem (status 1); printed
+controls_judged() {
+  local lv=$1 res=$2 bad=0 c sub r rest
+  awk -v l="$lv" '!/^#/ && NF == 4 && $1 == l' "$root/test/goi/controls.txt" > "$res.controls"
+  while read -r _ c sub _; do
+    r=$(awk -F'\t' -v c="$c" '$1 == c { print $2 "\t" $3; exit }' "$res")
+    rest=$(awk -F'\t' -v c="$sub" '$1 == c { print $2; exit }' "$res")
+    case ${r%%	*} in
+      fail) echo "   control $c ($sub judged against another program's gc run): fail, as a control must" ;;
+      pass) echo "   control passed: $c: the check's comparison passes what differs"; bad=1 ;;
+      *) if [ "$rest" = pass ] || [ -z "$rest" ]; then echo "   control not judged: $c: ${r:-no result}${rest:+ (its subject passes)}"; bad=1
+         else echo "   control $c: not judged (${r:-no result}), its subject $rest"; fi ;;
+    esac
+  done < "$res.controls"
+  rm -f "$res.controls"
+  return $bad
 }
 
 # aot_dir_root ROOT MAIN: a directory test's forms, copied into the forms root ROOT, made a module
@@ -1094,6 +1127,8 @@ check() {
     awk 'NR % 2 == 1' "$list" > "$list.half" && mv "$list.half" "$list"
   fi
   [ -n "$only" ] && { grep -E "$only" "$list" > "$list.only" || true; mv "$list.only" "$list"; }
+  # GTS81 (a): the negative controls of the level (test/goi/controls.txt), in every run but the box's
+  [ -n "$box" ] || awk -v l="$([ -n "$aot" ] && echo aot || echo interp)" '!/^#/ && NF == 4 && $1 == l { print $2 }' "$root/test/goi/controls.txt" >> "$list"
   # GP6: gc's syntax errors of the error tests to check (bin/repr-go syntax-errors: gc's syntax
   # run by goi from tamago/cmd's forms), and the raw forms of the error tests (made when missing
   # and one to check has no final forms though go/parser accepts it: the converter cannot convert it)
@@ -1126,14 +1161,14 @@ check() {
   export -f limited limited_cpu ref_commit check_one check_dir check_err check_err_aot action_of action_words gc_ref aot_build aot_dir_root stderr_head gc_env box_run box_input
   export root goroot rexe hexe cforms dforms cwork gcwork empty box bundle aot eforms efull edumps etsv gocmp esyntax eraw
   local t0=$SECONDS
-  xargs -a "$list" -P "$jobs" -I{} bash -c 'case $(action_of "$goroot/test/$1") in errorcheck*) if [ -n "$aot" ]; then check_err_aot "$1"; else check_err "$1"; fi ;; *dir|*"dir "*) dirtest=1 check_dir "$1" ;; *) check_one "$1" ;; esac' _ {} \
+  xargs -a "$list" -P "$jobs" -I{} bash -c 'case $1 in _control/*) check_one "$1"; exit ;; esac; case $(action_of "$goroot/test/$1") in errorcheck*) if [ -n "$aot" ]; then check_err_aot "$1"; else check_err "$1"; fi ;; *dir|*"dir "*) dirtest=1 check_dir "$1" ;; *) check_one "$1" ;; esac' _ {} \
     | LC_ALL=C sort > "$cwork/results.tsv"
   # a program that timed out among the others runs again alone: under the host's load a program near
   # the limit (bug358, nosplit) times out at 16 at a time and passes by itself; its second result stands
   awk -F'\t' '$2=="error" && $3 ~ /^timeout/ { print $1 }' "$cwork/results.tsv" > "$cwork/timeouts.txt"
   if [ -s "$cwork/timeouts.txt" ] && [ -z "$bundle" ]; then
     echo "== goi check: $(wc -l < "$cwork/timeouts.txt") timed out, run again one at a time" >&2
-    xargs -a "$cwork/timeouts.txt" -P 1 -I{} bash -c 'case $(action_of "$goroot/test/$1") in errorcheck*) if [ -n "$aot" ]; then check_err_aot "$1"; else check_err "$1"; fi ;; *dir|*"dir "*) dirtest=1 check_dir "$1" ;; *) check_one "$1" ;; esac' _ {} \
+    xargs -a "$cwork/timeouts.txt" -P 1 -I{} bash -c 'case $1 in _control/*) check_one "$1"; exit ;; esac; case $(action_of "$goroot/test/$1") in errorcheck*) if [ -n "$aot" ]; then check_err_aot "$1"; else check_err "$1"; fi ;; *dir|*"dir "*) dirtest=1 check_dir "$1" ;; *) check_one "$1" ;; esac' _ {} \
       > "$cwork/retried.tsv"
     awk -F'\t' 'NR==FNR { r[$1] = $0; next } ($1 in r) { print r[$1]; next } { print }' "$cwork/retried.tsv" "$cwork/results.tsv" \
       | LC_ALL=C sort > "$cwork/results.r" && mv "$cwork/results.r" "$cwork/results.tsv"
@@ -1153,6 +1188,17 @@ check() {
     awk -F'\t' 'NR==FNR { k[$1] = $2; next }
                  ($1 in k) && $2 != "pass" { $2 = "known"; $3 = k[$1] } { print $1 "\t" $2 "\t" $3 }' "$cwork/known.tsv" "$cwork/results.tsv" > "$cwork/results.k" \
       && mv "$cwork/results.k" "$cwork/results.tsv"
+  fi
+  # GTS81 (a): the negative controls judged, then taken out of the results (no program of the records,
+  # the known differences or the divergences): a control must fail, by the comparison, against its
+  # reference's gc run; one that passes, or does not reach the comparison while its subject passes,
+  # fails the check
+  if [ -z "$box" ]; then
+    local cst=0
+    controls_judged "$([ -n "$aot" ] && echo aot || echo interp)" "$cwork/results.tsv" > "$cwork/controls.txt" || cst=$?
+    cat "$cwork/controls.txt"
+    grep -v '^_control/' "$cwork/results.tsv" > "$cwork/results.c" || true; mv "$cwork/results.c" "$cwork/results.tsv"
+    [ "$cst" = 0 ] || { echo "goi check${aot:+ --aot}: FAILED: a negative control (test/goi/controls.txt)" >&2; return 1; }
   fi
   local total pass fail err uns kn skip
   total=$(wc -l < "$cwork/results.tsv")

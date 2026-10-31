@@ -1508,6 +1508,18 @@ finalizer timing, `%T` of interpreted types (G8), `GODEBUG` behaviour). The refe
 program passing there and not now) and `--record` writes a new reference, as `bin/repr-go
 roundtrip` does.
 
+**The negative controls** (doc/GATE-SURVEY.md, GTS81 (a), 2026-10-31). The regression rule never sees a
+comparison that passes what differs, so each level has a program that must fail: `test/goi/controls.txt`'s
+lines `LEVEL ID SUBJECT REFERENCE`. Every run but the box's adds the level's controls to its programs
+(`--essential` and `--only` too); `check_one` runs the subject as every program (its forms interpreted, or
+at `--aot` built and run) and compares its run, by the same comparison, with gc's run of the reference
+(`gc_ref`'s, cached with the reference's own entry), under the control's id. `_control/helloworld-vs-printbig`
+(interp: hello, world against printbig's two numbers on stderr) and `_control/issue21879-vs-fibish` (aot:
+`main.main` twice against `f(40)=...`) are `fail`; `controls_judged` fails the check when a control passes
+or has another result while its subject passes, and takes the controls out of the results before the
+counts, the known differences, `--record` and the regression rule (no program of the records or the
+divergences). The errorcheck and directory tests' judges (`check_err`, `check_dir`) have no control yet.
+
 ### 11.4 The annotation check
 
 `bin/goi annotations [CORPUS...]` checks, without running anything, every package of
