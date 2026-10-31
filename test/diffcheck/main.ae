@@ -79,15 +79,23 @@
         by-corpus (partition 2 results)
         report (StringBuilder.)
         total (atom 0) bad (atom 0) incomplete (atom 0) ids (atom []) cut (atom (sorted-set))
-        pair-totals (atom {})]
+        pair-totals (atom {})
+        ;; GTS81 (a): the negative controls (test/diffcheck/controls.edn, oracle.runner/controls-ok?): a
+        ;; case's first run against another case's second, by the same comparison
+        controls (runner/read-controls (io/file runner/root "test/diffcheck/controls.edn"))
+        wanted (into #{} (mapcat (juxt :subject :reference)) controls)
+        by-id (atom {})
+        differs? (fn [x y] (not= (canon x) (canon y)))]
     (doseq [[c [a b]] (map vector corpora by-corpus)]
       (let [[na _ nb _] (runs c)
             pair (if (:compiled c) :clojure :java)
+            _ (doseq [e (:cases c) :let [id (str (:file c) ":" (:line e))] :when (wanted id)]
+                (swap! by-id assoc id {:x (get (:by a) (:id e)) :y (get (:by b) (:id e))}))
             mism (doall
                    (for [e (:cases c)
                          :let [x (get (:by a) (:id e) {:missing true})
                                y (get (:by b) (:id e) {:missing true})]
-                         :when (not= (canon x) (canon y))]
+                         :when (differs? x y)]
                      [e x y]))
             done? (and (:done a) (:done b))
             line (format "%-44s %-7s %5d/%5d agree %6d ms %6d ms%s" (:file c) (name pair)
@@ -121,7 +129,13 @@
      :mismatches @ids
      :incomplete @incomplete
      :incomplete-files @cut
-     :files (into #{} (map :file) corpora)}))
+     :files (into #{} (map :file) corpora)
+     :controls (doall (for [c controls
+                            :let [sub (@by-id (:subject c)) ref (@by-id (:reference c))]]
+                        ;; a record a run did not write is no record: not judged
+                        (assoc c :result (cond (not (and (:x sub) (:y ref))) :missing
+                                               (differs? (:x sub) (:y ref)) :differ
+                                               :else :pass))))}))
 
 (defn write-known
   "Rewrites the known disagreements f from a check's (oracle.runner/write-known's rules: a
@@ -152,9 +166,12 @@
         [exe gen & sel] (:sel opts)
         ok (case cmd
              "run" (let [r (check exe gen (:jobs opts) (:timeout opts) (vec sel))]
-                     (cond
-                       (:write-expected opts) (write-known (io/file (:write-expected opts)) r)
-                       (:expected opts) (runner/check-known (io/file (:expected opts)) r)
-                       :else (:ok r))))]
+                     (let [k (cond
+                            (:write-expected opts) (write-known (io/file (:write-expected opts)) r)
+                            (:expected opts) (runner/check-known (io/file (:expected opts)) r)
+                            :else (:ok r))
+                           ;; GTS81 (a): the controls judged in every mode, and printed
+                           c (runner/controls-ok? r)]
+                       (and k c))))]
     (shutdown-agents)
     (System/exit (if ok 0 1))))

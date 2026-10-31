@@ -356,6 +356,18 @@ not compile. Positions are in UTF-16 units.
 - Text in the sources: write non-ASCII characters as `\uXXXX` escapes (some editors and agent
   tools turn `\uXXXX` in written text into the characters themselves).
 
+## The negative controls
+
+doc/GATE-SURVEY.md's GTS81 (a): a check whose comparison passes what differs would pass every case, and
+the known mismatches' "now passing" rule sees it only on a case that mismatches. `test/oracle/controls.edn`
+names pairs of cases of the corpus, `{:id :subject CASE :reference CASE :why}`: `bin/oracle check`
+compares the subject's actual record with the reference's expected one by the check's own comparison
+(`oracle.runner/check`'s `differs`: `canon` and V11) and `controls-ok?` fails the run when they do not
+differ (`control passed: ...`) or when either has no record while its file ran (`control not judged`);
+a control whose files are not selected, or a run incomplete, is printed and left. control-1:
+collections.ae:6's `[]` against :7's `[1 2 3]`. No case and no run of its own, in every mode (`--expected`,
+`--write-expected`, plain); `bin/diffcheck` shares `controls-ok?` (doc/FUTAMURA-SURVEY.md, "F2 as built").
+
 ## Exclusions
 
 Everything recorded is deterministic; left out is what is nondeterministic in an area, the

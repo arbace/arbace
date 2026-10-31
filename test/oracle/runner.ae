@@ -430,6 +430,36 @@
   (let [s (if (string? x) x (pr-str x))]
     (if (> (count s) n) (str (subs s 0 n) "...") s)))
 
+;; GTS81 (a): the negative controls (doc/GATE-SURVEY.md, "As built: GTS72, GTS79-GTS82 (write-ahead)";
+;; doc/go/ORACLE.md, "The negative controls"): [{:id :subject CASE :reference CASE :why}...], a case's
+;; record (the oracle: its actual; diffcheck: its first run's) compared by the check's own comparison with
+;; another case's (the oracle: its expected; diffcheck: its second run's); they differ, or the comparison
+;; passes what differs and the check fails (controls-ok?)
+
+(defn read-controls [^File f]
+  (if (.isFile f)
+    (with-open [r (java.io.PushbackReader. (io/reader f :encoding "UTF-8"))]
+      (binding [*read-eval* false] (read r)))
+    []))
+
+(defn controls-ok?
+  "The check's controls (its result's :controls, each with :result :differ, :pass or :missing: a
+  case not run): true when each that ran differs; one that passes, or whose cases did not both run
+  while every run completed, is printed and makes it false"
+  [{:keys [controls incomplete files]}]
+  (let [ok (atom true)
+        ran? (fn [id] (contains? files (subs id 0 (.lastIndexOf ^String id ":"))))]
+    (doseq [{:keys [id subject reference result]} controls]
+      (case result
+        :differ (println (str "   control " id " (" subject " against " reference "): differs, as a control must (GTS81 (a))"))
+        :pass (do (reset! ok false)
+                  (println (str "   control passed: " id " (" subject " against " reference "): the comparison passes what differs")))
+        :missing (if (or (and incomplete (pos? incomplete)) (not (and (ran? subject) (ran? reference))))
+                   (println (str "   control " id ": not judged (" subject " or " reference " not selected, or runs incomplete)"))
+                   (do (reset! ok false)
+                       (println (str "   control not judged: " id ": " subject " or " reference " has no record though its file ran"))))))
+    @ok))
+
 (defn case-id
   "A case's name in reports and in a reference of known mismatches: its corpus file and its line
   (forms) or index (classes, regex), as test/oracle/forms/numbers.ae:42."
@@ -442,7 +472,8 @@
   {:ok (every case matches) :mismatches [{:case id :form text}...] :incomplete runs
    :files #{the corpus files checked}}."
   [cmd jobs timeout sel]
-  (let [work (for [part parts
+  (let [controls-wanted (into #{} (mapcat (juxt :subject :reference)) (read-controls (io/file root "test/oracle/controls.edn")))
+        work (for [part parts
                    ^File f (->> (file-seq (io/file expected-dir part))
                                 (filter #(.endsWith (.getName ^File %) ".edn"))
                                 (sort-by #(.getPath ^File %)))
@@ -469,17 +500,26 @@
                      r))
                  work rs)
         report (StringBuilder.)
-        total (atom 0) bad (atom 0) incomplete (atom 0) v11 (atom 0) ids (atom []) cut (atom (sorted-set))]
+        total (atom 0) bad (atom 0) incomplete (atom 0) v11 (atom 0) ids (atom []) cut (atom (sorted-set))
+        ;; GTS81 (a): each case's expected and actual records by id, for the negative controls
+        by-id (atom {})
+        ;; the comparison: [differs? accepted-by-V11]; compared as printed, so that -0.0 differs from
+        ;; 0.0 and ##NaN equals itself
+        canon (fn [x] (emit (walk/postwalk #(if (map? %) (into (sorted-map) %) %) x)))
+        differs (fn [ks e a]
+                  (let [[a n] (accept-helpful-npes e a)]
+                    [(not= (canon (select-keys e ks)) (canon (select-keys a ks))) n]))]
     (doseq [{:keys [src part cases expected done noise err exit ms]} rs]
       (let [ks (conj (result-keys part) :missing)
-            ;; compared as printed, so that -0.0 differs from 0.0 and ##NaN equals itself
-            canon (fn [x] (emit (walk/postwalk #(if (map? %) (into (sorted-map) %) %) x)))
             accepted (atom 0)
+            _ (when (seq controls-wanted)
+                (doseq [[e a] (map vector expected cases) :let [id (case-id src e)] :when (controls-wanted id)]
+                  (swap! by-id assoc id {:e e :a a :ks ks})))
             mism (doall
                    (keep (fn [[e a]]
-                           (let [[a n] (accept-helpful-npes e a)]
-                             (if (not= (canon (select-keys e ks)) (canon (select-keys a ks)))
-                               [e a]
+                           (let [[d n] (differs ks e a)]
+                             (if d
+                               [e (first (accept-helpful-npes e a))]
                                (do (when (pos? n) (swap! accepted inc)) nil))))
                          (map vector expected cases)))
             line (format "%-40s %5d/%5d ok %6d ms%s" (rel src) (- (count expected) (count mism)) (count expected) ms
@@ -509,7 +549,14 @@
      :mismatches @ids
      :incomplete @incomplete
      :incomplete-files @cut
-     :files (into #{} (map (fn [[_ src]] (rel src))) work)}))
+     :files (into #{} (map (fn [[_ src]] (rel src))) work)
+     ;; GTS81 (a): the subject's actual record against the reference's expected one, by the comparison
+     :controls (doall (for [c (read-controls (io/file root "test/oracle/controls.edn"))
+                     :let [sub (@by-id (:subject c)) ref (@by-id (:reference c))]]
+                 ;; a case the run did not reach (merge-results' :missing) is no record: not judged
+                 (assoc c :result (cond (or (not (and sub ref)) (:missing (:a sub))) :missing
+                                        (first (differs (:ks sub) (:e ref) (:a sub))) :differ
+                                        :else :pass))))}))
 
 ;; ----- known mismatches: check --expected FILE, check --write-expected FILE
 ;; A reference lists an implementation's known mismatches in groups, each with its reason:
@@ -604,9 +651,12 @@
              "check" (let [[impl & sel] (:sel opts)
                            impl (if (= impl "jvm") default-impl impl)]
                        (let [r (check impl (:jobs opts) (:timeout opts) (vec sel))]
-                         (cond
-                           (:write-expected opts) (write-known (io/file (:write-expected opts)) impl r)
-                           (:expected opts) (check-known (io/file (:expected opts)) r)
-                           :else (:ok r)))))]
+                         (let [k (cond
+                                (:write-expected opts) (write-known (io/file (:write-expected opts)) impl r)
+                                (:expected opts) (check-known (io/file (:expected opts)) r)
+                                :else (:ok r))
+                               ;; GTS81 (a): the controls judged in every mode, and printed
+                               c (controls-ok? r)]
+                           (and k c)))))]
     (shutdown-agents)
     (System/exit (if ok 0 1))))
