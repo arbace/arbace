@@ -1665,3 +1665,9 @@ initialised by a global, `/* */` comments, `_Complex long double`, function alig
   the 256 shards into a fresh directory would drop it (cpp-cx2's scratch, not touched).
 - Scratch: `.tmp/cx6/w-samples/`, `.tmp/cx6/w-lt2/` (results.tsv, summary.edn, times.txt, each file's IR, lowered C and logs), `.tmp/cx6/keep/w-lt/` (the first run's
   results), `.tmp/cx6/{samples,lt,lt2}.list`, `.tmp/cx6/rl/` (the samples' IR round trip), `.tmp/cx6/t/` (probes), `.tmp/cppi/gcc/` (the extracted testsuite, 36 MB).
+
+### Decided (CP76-CP88; the user, 2026-10-31)
+
+All as recommended: CP76 (b) (`-D__NetBSD__`, (a), the stopgap until then), CP77 (b), CP78 (a), CP79 and CP81 as
+their entries recommend, CP80 (b) in a window after the tag, CP82 (a), CP83 (a) (g++'s disagreements recorded),
+CP84 (a), CP85 (a), CP86 (a) now and (c)'s split at CX7, CP87 (a), CP88 (a).
