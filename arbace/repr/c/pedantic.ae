@@ -1,0 +1,57 @@
+(ns arbace.repr.c.pedantic
+  "The checker's pedantic mode, its lexical part (doc/C23-SURVEY.md, \"As built: C7's follow-up (CS131, CS132,
+  CS133)\"; CS132 (a), restricted to what the C23 corpus's files test): the pedwarns of gcc that
+  -pedantic-errors turns into errors and that are about the spelling of tokens, found on the main file's own
+  preprocessing tokens (before macro expansion, which the corpus's lines do not need): '0o' constants before
+  C2y, `wb` suffixes before C23, adjacent string literals of two different prefixes, `#embed` before C23.
+  `notes` gives [[line message] ...]; arbace.repr.c reads them into a read when the file's options ask for
+  -pedantic-errors."
+  (:require [arbace.repr.c.lex :as lex]
+            [arbace.string :as str]))
+
+(set! *warn-on-reflection* true)
+
+(defn- std-year
+  "The standard's year as the checker has it (arbace.c.check/std-num)."
+  ^long [std]
+  (case std (:c89 :c94 :gnu89) 89 (:c99 :gnu99) 99 (:c11 :gnu11) 111 (:c17 :gnu17) 117 (:c2y :gnu2y) 124 123))
+
+(defn- prefix-of
+  "A string literal's encoding prefix: \"\" for none, else L, u8, u or U."
+  ^String [^String s]
+  (cond (.startsWith s "u8") "u8" (.startsWith s "L") "L" (.startsWith s "u") "u" (.startsWith s "U") "U" :else ""))
+
+(defn notes
+  "The pedantic notes of the file `name` (bytes `bs`) at the standard `std`: [[line message] ...]."
+  [^String name ^bytes bs std]
+  (let [yr (std-year std)
+        [toks _] (lex/tokens (lex/new-file name bs))
+        line-of (fn [t] (second (lex/tok-position t)))
+        out (java.util.ArrayList.)]
+    (loop [ts (seq toks) bol true]
+      (if-let [t (first ts)]
+        (let [ch (.-ch ^arbace.repr.c.lex.Tok t)
+              src (.-src ^arbace.repr.c.lex.Tok t)
+              nl (= ch \newline)
+              ]
+          (when (and (= ch :PPNUMBER) (< yr 124) (re-find #"^0[oO]" src))
+            (.add out [(line-of t) "'0o' prefixed constants are a C2Y feature"]))
+          (when (and (= ch :PPNUMBER) (< yr 123) (re-find #"(?i)^(0[xb])?[0-9a-f']*[uU]?wb[uU]?$" src))
+            (.add out [(line-of t) "ISO C does not support literal 'wb' suffixes before C23"]))
+          (when (and bol (= ch \#) (< yr 123))
+            (let [n (second ts)]
+              (when (and n (= (.-src ^arbace.repr.c.lex.Tok n) "embed"))
+                (.add out [(line-of t) "'#embed' before C23 is a GCC extension"]))))
+          (recur (next ts) (or nl false)))
+        nil))
+    ;; string literal runs: adjacent (no new-line between) literals
+    (loop [ts (seq toks) run []]
+      (let [t (first ts)
+            str? (and t (#{:STRINGLITERAL :LONGSTRINGLITERAL} (.-ch ^arbace.repr.c.lex.Tok t)))]
+        (cond
+          str? (recur (next ts) (conj run t))
+          :else
+          (do (when (> (count (set (remove #{""} (map #(prefix-of (.-src ^arbace.repr.c.lex.Tok %)) run)))) 1)
+                (.add out [(line-of (first run)) "non-standard concatenation of string literals"]))
+              (when ts (recur (next ts) []))))))
+    (vec out)))

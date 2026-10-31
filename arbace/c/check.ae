@@ -29,6 +29,7 @@
 
 (def ^:dynamic *cx* nil)
 (def ^:dynamic *line* 0)
+(def ^:dynamic *switch* nil) ; the innermost switch's {:t promoted type :seen atom of [lo hi]}
 
 (defn- cx [k] (get *cx* k))
 
@@ -53,6 +54,13 @@
   (let [^ArrayList es (cx :errors)]
     (when (< (.size es) 100)
       (.add es (str *line* ": " msg)))))
+
+(defn- pedwarn!
+  "A pedwarn of gcc's, an error under -pedantic-errors (CS132): only when the file's options ask for that, and not
+  on a line with `__extension__`."
+  [^String msg]
+  (when (and (= :errors (cx :pedantic)) (not (contains? (or (cx :ext-lines) #{}) *line*)))
+    (err! msg)))
 
 (defn- line-of [f] (or (:line (meta f)) *line*))
 
@@ -1239,7 +1247,8 @@
                         (emit! (res (if r (decay (unq (:t r))) t-void))))
             lit (emit! (lit-form f))
             byte-string (emit! (res (arr t-char (inc (byte-string-len args))) :str true))
-            imaginary (emit! (res {:k :complex :of t-double}))
+            imaginary (do (when (< (std-num) 124) (pedwarn! "imaginary constants are a C2Y feature or GCC extension"))
+                          (emit! (res {:k :complex :of t-double})))
             va-arg (let [[ap tf] args
                          t (unq (parse-type tf))]
                      ;; cc's Builtin: (*(T*)__builtin_va_arg_impl(ap))
@@ -1514,7 +1523,11 @@
                        (with-scope (check-stmt (second xs)))
                        (recur (nnext xs))))
                    nil)
-          switch (do (ex (first args)) (with-scope (check-block-items (rest args))) nil)
+          switch (let [rc (ex (first args))
+                       ct (promote (unq (:t rc)))]
+                   (binding [*switch* (when (and (int-type? ct) (not= :bool (:k ct))) {:t ct :seen (atom [])})]
+                     (with-scope (check-block-items (rest args))))
+                   nil)
           (while do-while) (do (ex (first args)) (with-scope (check-block-items (rest args))) nil)
           for (let [[init c step & body] args]
                 (with-scope
@@ -1526,6 +1539,16 @@
                 nil)
           case (let [[a b] args
                      ra (ex a) rb (when b (ex b))]
+                 ;; a duplicate case value, ranges overlapping (gcc converts the labels to the controlling type)
+                 (when-let [{:keys [t seen]} *switch*]
+                   (let [iv (fn [r] (let [v (:v r)] (when (integer? v) (wrap v t))))
+                         lo (iv ra)
+                         hi (if b (iv rb) lo)]
+                     (when (and (some? lo) (some? hi) (<= lo hi))
+                       (when (some (fn [[l h]] (and (<= lo h) (<= l hi))) @seen)
+                         (err! "duplicate case value"))
+                       (swap! seen conj [lo hi]))))
+                 (when (and b (< (std-num) 124)) (pedwarn! "ISO C does not support range expressions in switch statements before C2Y"))
                  nil)
           c/asm (do (feat! :asm) nil)
           (default label goto continue break c/local-labels c/attr-decl) nil
@@ -1578,14 +1601,14 @@
 (defn- new-cx [std opts]
   {:std std :scopes (ArrayList.) :errors (ArrayList.) :annot nil :annotating (atom false)
    :done-units (HashSet.) :units {} :pack-state (atom {}) :ldouble-size (:ldouble-size opts 16)
-   :unsigned-char (:unsigned-char opts)})
+   :unsigned-char (:unsigned-char opts) :pedantic (:pedantic opts) :ext-lines (:ext-lines opts)})
 
 (defn check-unit
   "Checks a read (arbace.repr.c/read-c's {:forms :units}) at the standard `std` (a keyword), the
   builtins' forms `builtins` declared first: {:errors [...] :items [[line [annotation...]] ...]} (the
   items when `annotate`)."
-  [rd std builtins & {:keys [annotate ldouble-size unsigned-char results]}]
-  (let [c (assoc (new-cx std {:ldouble-size (or ldouble-size 16) :unsigned-char unsigned-char})
+  [rd std builtins & {:keys [annotate ldouble-size unsigned-char results pedantic ext-lines notes]}]
+  (let [c (assoc (new-cx std {:ldouble-size (or ldouble-size 16) :unsigned-char unsigned-char :pedantic pedantic :ext-lines ext-lines})
                  :units (into {} (for [[k u] (:units rd)] [(str k) u]))
                  :results (when results (IdentityHashMap.)))
         items (ArrayList.)]
@@ -1602,5 +1625,8 @@
             (check-top f))
           (when (and annotate (seq? f) (:line (meta f)) (not (#{'c/include 'c/define 'c/undef 'c/directive 'c/pragma} (first f))))
             (.add items [(:line (meta f)) (vec a) fs]))))
+      ;; the lexical pedantic notes (arbace.repr.c.pedantic), errors under -pedantic-errors
+      (doseq [[ln msg] notes]
+        (when-not (contains? (or ext-lines #{}) ln) (.add ^ArrayList (cx :errors) (str ln ": " msg))))
       (cond-> {:errors (vec (cx :errors)) :items (vec items)}
         results (assoc :results (cx :results))))))
