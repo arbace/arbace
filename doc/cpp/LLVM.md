@@ -99,7 +99,8 @@ constant in a node is `[T v]`.
 (= %lp (landingpad (struct ptr i32) :cleanup (catch ptr g/_ZTIi) (catch ptr null)))
 (br i1 %c %then %else) (br %next) (switch i32 %x %default [[i32 1 %one] [i32 2 %two]])
 (ret i32 0) (ret void) (resume (struct ptr i32) %lp) (unreachable)
-(br %for.cond :md [!llvm.loop !8])               ; metadata attachments, in order
+;; metadata attachments, in order:
+(br %for.cond :md [!llvm.loop !8])
 ```
 
 The rest: `fneg`, `fcmp`, every cast, `extractvalue`/`insertvalue` (indices after the typed operands),
