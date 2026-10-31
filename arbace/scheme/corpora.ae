@@ -417,22 +417,33 @@
 
 ;; ------------------------------------------------------------------------------------------ Chez's mats
 
-(defn- parse-mats [out]
-  (for [l (str/split-lines out)
-        :let [m (re-find #"^MAT (.*?) (PASS|FAIL|NOTRUN|SKIP)(?: (.*))?$" l)]
-        :when m]
-    (let [[_ name st rest] m] {:name name :status (keyword (str/lower-case st)) :rest (or rest "")})))
+(defn- parse-mats
+  "The mats of a run's output in order, each {:name :status :rest :clauses}, :clauses the \"K: why\" of each failing
+  clause the harness printed (CLAUSE lines) since the previous mat's line (review 009, finding 2)."
+  [out]
+  (loop [ls (str/split-lines out) pending [] acc []]
+    (if-let [l (first ls)]
+      (if-let [[_ name st detail] (re-find #"^MAT (.*?) (PASS|FAIL|NOTRUN|SKIP)(?: (.*))?$" l)]
+        (recur (rest ls) [] (conj acc {:name name :status (keyword (str/lower-case st)) :rest (or detail "") :clauses pending}))
+        (if-let [[_ _ kd] (re-find #"^CLAUSE (.*?) (\d+: .*)$" l)]
+          (recur (rest ls) (conj pending kd) acc)
+          (recur (rest ls) pending acc)))
+      acc)))
 
 (defn- mat-file-items [file out err rc]
   (let [mats (parse-mats out)
         lines (str/split-lines out)
         reads (for [l lines :when (str/starts-with? l "READ ")] (str "notrun mats/" file " read: " (clip (subs l 5) 160)))
         defs (for [l lines :when (str/starts-with? l "DEF ")] (str "notrun mats/" file " definition " (clip (subs l 4) 160)))
-        ms (for [{:keys [name status rest]} mats :when (not= status :pass)]
-             (case status
-               :fail (str "fails mats/" file " mat " name ": " (clip rest 160))
-               :notrun (str "notrun mats/" file " mat " name ": " (clip rest 160))
-               :skip (str "skip mats/" file " mat " name ": " (clip rest 160))))
+        ;; every failing clause is an item, \"fails mats/F mat NAME: K K: why\" (the FAIL line's own format), of a FAIL mat
+        ;; and of a NOTRUN one; a FAIL mat without CLAUSE lines (an output of the harness before them) keeps its line's item
+        clause-items (fn [name cl] (for [kd cl] (str "fails mats/" file " mat " name ": " (second (re-find #"^(\d+):" kd)) " " (clip kd 160))))
+        ms (for [{:keys [name status rest clauses]} mats :when (not= status :pass)
+                 i (case status
+                     :fail (if (seq clauses) (clause-items name clauses) [(str "fails mats/" file " mat " name ": " (clip rest 160))])
+                     :notrun (cons (str "notrun mats/" file " mat " name ": " (clip rest 160)) (clause-items name clauses))
+                     :skip [(str "skip mats/" file " mat " name ": " (clip rest 160))])]
+             i)
         done (set (map :name mats))
         hung (last (remove done (keep #(when (str/starts-with? % "BEGIN ") (subs % 6)) lines)))
         crash (when (and (not= rc "0")) [(str "crash mats/" file " status " rc (when hung (str " in mat " hung)) ": " (clip (or (first-line err) "") 120))])

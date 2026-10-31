@@ -10,6 +10,8 @@
 ;;;;   MAT NAME PASS N            all N clauses ran as they should
 ;;;;   MAT NAME FAIL N DETAIL     the clause DETAIL ("K: why") failed
 ;;;;   MAT NAME NOTRUN WHY        the mat did not expand or run: WHY is the expander's message
+;;;;   CLAUSE NAME K: WHY         before the MAT line, one a failing clause K of a FAIL or a NOTRUN mat, every one (review 009,
+;;;;                              finding 2: the MAT line names only the first, and a NOTRUN mat's failures were only counted)
 ;;;;   CLAUSES NAME P F N         after a NOTRUN: its clauses' results, P passed, F failed, N did not run
 ;;;;   MAT NAME SKIP WHY          a form the harness does not run (parameters, mat/cf, a name in SKIPFILE)
 ;;;;   READ POSITION WHY          a top-level datum the reader refuses (its text is skipped)
@@ -175,10 +177,10 @@
                  ((notrun) (loop (cdr cs) (+ k 1) p f (+ n 1) fail (or notrun (caddr r))))
                  (else
                   (when verbose (display "CLAUSEFAIL ") (write name) (display " ") (display k) (display " ") (r7rs-write (car cs) (current-output-port)) (newline) (line))
-                  (let ((d (caddr r)))   ; "1: why" -> "K: why"
-                    (loop (cdr cs) (+ k 1) p (+ f 1) n
-                          (or fail (cons k (string-append (number->string k) (substring d 1 (string-length d)))))
-                          notrun))))))))))
+                  (let* ((d (caddr r))   ; "1: why" -> "K: why"
+                         (kd (string-append (number->string k) (substring d 1 (string-length d)))))
+                    (display "CLAUSE ") (write name) (display " ") (display kd) (newline) (line)
+                    (loop (cdr cs) (+ k 1) p (+ f 1) n (or fail (cons k kd)) notrun))))))))))
   (line))
 
 ;; the watchdog around a thunk
