@@ -3647,3 +3647,22 @@ builds; and one `cp ... /dev/null` while looking at the key file, against the ru
   passes 732 interpreted and 766 compiled of 1,807; the VM's 619/692 of 752; the language's 440 of 515; the other
   modules about 0, since they are not in the runtime. The deferred JDK areas (JCS90-JCS96) are on hold. JCS120 (b) and
   JC7 stay as planned.
+
+## As built: the negative controls (GTS81 (a), 2026-10-31, write-ahead)
+
+doc/GATE-SURVEY.md's GTS81 (a) (the 2026-10-31 finding: a second `judge` in `bin/java-check` made every interp and
+compiled run pass) gives each level a case that must not pass. `test/java/controls.edn` names each control: an id
+(`c00001`), a subject test, a reference test and the levels. `java.check/plan` writes the reference's expected results
+into the subject's plan (`control CID EXIT OUT LEN DET MASKED DET-MASKED`, its first action; `control-classes CID
+DIGEST`); `bin/java-check` judges the subject's own run a second time against them, by the level's judge
+(`run_actions`' `judge` for interp and compiled, `classes_verdict` for classes), and prints the row under the
+control's id. No test, no build and no run of its own: c00001 is t03208 EnumsRecords' run judged against t03209
+EvalOrder's reference (both exit 0, another stdout: `differ`; another class file set: `differ`), at interp
+(`--essential` too: both are essential), compiled (`--essential-compiled` too) and classes. `java.check/report` (the
+run's, `--judge`'s) takes the controls' rows apart from the tests (no record, class, essential or levels entry) and
+fails the run on a control that passes (`control passed: ...`) or that has no judged result (`fail` or `differ`)
+while its subject reached the judge (`control not judged: ...`); `--essential-compiled` the same in its own tail.
+The levels read, diagnostics and print have no control: their verdicts are a tool's status and log (read), a
+golden file compared inside `diag_actions` (diagnostics) and the five steps of `java.print/judge` (print), with no
+reference of another test to judge against without a run of its own (doc/GATE-SURVEY.md, "As built: GTS72,
+GTS79-GTS82 (write-ahead)", GTS84).

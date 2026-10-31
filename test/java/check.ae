@@ -462,6 +462,33 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; plan: the check's per-test plan, from the reference
 
+;; GTS81 (a): the negative controls, test/java/controls.edn beside the reference
+(defn- controls-of [ref]
+  (let [f (io/file (.getParent (io/file ref)) "controls.edn")]
+    (if (.isFile f) (read-edn (.getPath f)) [])))
+
+(defn- controls-judged!
+  "GTS81 (a): the controls' results of RESULTS at the level LV (rows [id lv result reason]) against
+  their subjects' (the run without them): a control that passes is a problem (the judge passes a run
+  against another test's reference), and so is one missing or not judged (load-failed, timeout, ...)
+  while its subject ran at that level and reached the judge (its result pass, fail or differ); printed"
+  [controls lv results problems]
+  (doseq [c controls :when (some #{lv} (:levels c))
+          :let [sub (first (filter #(and (= (:subject c) (first %)) (= lv (second %))) results))
+                row (first (filter #(and (= (:id c) (first %)) (= lv (second %))) results))
+                what (str "control " (:id c) " (" (:subject c) "'s run judged against " (:reference c) "'s reference)")]
+          :when (or sub row)]
+    (cond
+      (and row (#{:fail :differ} (nth row 2)))
+      (println (str "   " what ": " (name (nth row 2)) ", as a control must (GTS81 (a))"))
+      (and row (#{:pass :flaky} (nth row 2)))
+      (swap! problems conj (str "control passed: " what " at " (name lv) ": the level's judge passes what differs"))
+      (and sub (#{:pass :fail :differ} (nth sub 2)))
+      (swap! problems conj (str "control not judged: " what " at " (name lv) ": "
+                                (if row (str (name (nth row 2)) " " (nth row 3)) "no result")))
+      :else
+      (println (str "   " what ": not judged, its subject " (if sub (name (nth sub 2)) "not run") " at " (name lv))))))
+
 (defn plan [ref work & opts]
   (let [o (apply hash-map opts)
         only (some-> (o "--only") re-pattern)
@@ -473,7 +500,12 @@
                  :when (or (nil? corp) (corp (:corpus t)))
                  :when (or (nil? only) (re-find only (str (:id t) " " (:test t))))]
              t)]
-    (doseq [t ts]
+    (doseq [[controls by-id] [(let [cs (controls-of ref)] [cs (if (seq cs) (into {} (for [t (ref-tests ref)] [(:id t) t])) {})])]
+            t ts
+            :let [cs (for [c controls :when (= (:subject c) (:id t))
+                           :let [r (by-id (:reference c)) r0 (first (:runs r))]
+                           :when r0]
+                       [c r r0])]]
       (write-lines (str work "/run/" (:id t) "/plan.tsv")
                    (concat [(str "test\t" (:test t)) (str "dir\t" (:dir t)) (str "root\t" (name (:root t :jdk26u))) (str "classes\t" (:classes t))]
                            (for [x (:javac t)] (str "javac\t" x))
@@ -482,7 +514,13 @@
                            (for [[i r] (map-indexed vector (:runs t))]
                              (str/join "\t" (concat ["run" i (:exit r) (:out r) (:out-len r) (if (:det r) "1" "0")
                                                       (or (:out-masked r) "-") (if (:det-masked r) "1" "0") (:main r)]
-                                                     (:args r)))))))
+                                                     (:args r))))
+                           ;; GTS81 (a): the controls whose subject the test is: their reference's first
+                           ;; action's expected status and stdout, its class files' digest
+                           (for [[c r r0] cs]
+                             (str/join "\t" ["control" (:id c) (:exit r0) (:out r0) (:out-len r0) (if (:det r0) "1" "0")
+                                             (or (:out-masked r0) "-") (if (:det-masked r0) "1" "0")]))
+                           (for [[c r] cs] (str "control-classes\t" (:id c) "\t" (:classes r))))))
     (write-lines (str work "/run.list") (map :id ts))
     (println (str "java-check plan: " (count ts) " tests"))))
 
@@ -561,7 +599,11 @@
         essential (some->> (o "--essential") lines (remove #(str/starts-with? % "#")) (map #(first (str/split % #"\s+"))) set)
         tests (into {} (for [t (ref-tests ref)] [(:id t) t]))
         classes (read-edn divergences)
-        results (for [[id lv r reason] (tsv (str work "/results.tsv"))] [id (keyword lv) (keyword r) (or reason "")])
+        all-results (for [[id lv r reason] (tsv (str work "/results.tsv"))] [id (keyword lv) (keyword r) (or reason "")])
+        ;; GTS81 (a): the controls' rows judged apart, no test of the records, classes or lists
+        controls (controls-of ref)
+        control-ids (set (map :id controls))
+        results (remove #(control-ids (first %)) all-results)
         problems (atom [])]
     (doseq [lv (map keyword (str/split levels #","))
             :let [rs (sort-by first (filter #(= lv (second %)) results))
@@ -624,6 +666,7 @@
                                    (str " [" (q id) " " (q (:test (tests id))) " " r " " (q reason) "]")))
                                ["]"]))
         (println (str "   recorded " f))))
+    (doseq [lv (map keyword (str/split levels #","))] (controls-judged! controls lv all-results problems))
     (levels-against! checkdir tests results (set (map keyword (str/split levels #","))) record? partial? problems)
     (doseq [p @problems] (println (str "   " p)))
     (shutdown-agents)
