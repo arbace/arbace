@@ -2736,3 +2736,95 @@ status 0, a last line `srfi-N: P passed, F failed` with F zero, no FAIL line, P 
 
 `go/arbace/scm/prim_io.ae` (one condition), `scheme/lib/chezscheme.sls`. Not shipped: `arbace/scheme/{check,corpora}.ae`, `bin/si`, `Makefile`,
 `test/scheme/**` (`mats/run.sps`, `divergences-corpora.edn`, `check-{linux,mats,srfi}-*.edn`).
+
+## As built: re-review 025's fixes (2026-10-31)
+
+Branch `scheme-sm1`, on `3cc584a2`, light tier (stage 0 as the tools' host, the light driver; no gate, no build of Arbace's executables or
+javac's tool, no lock). Re-review 025 (a helper VM's, at `2b4a9b7c`, before SC170-SC173: `.tmp/review-025.md`) checked against the code at
+`3cc584a2`, finding by finding. One commit each; the tests are scratch runs of the judges on synthetic copies of the last outputs
+(`.tmp/rf/tA.sh` ... `tE.sh`; "before" is the tree of the commit before the fix extracted into `.tmp/rf/old`, "after" the checkout). No
+shipped file changed.
+
+### Per finding
+
+- **A (medium), the R7RS count check refuses a good run: holds.** `test-precision` runs its second test only when the first passed, so a run
+  gives 1,212 tests outside the macro, 11 first tests and one second test for each first test that passed (si and Chez 2 of 11: 1,225; Chibi
+  11 of 11: 1,234). *Fix*: `test/scheme/corpora.edn` holds `:tests {:outside 1212 :sites 11}`; `count-item` judges a run against 1,212 + 11 +
+  its passing `(pair? ls)` tests, for si's run, the two references and r7rs-own. The review's run of this case showed a second effect the fix
+  also had to meet: `against-references` and `vs-chez` paired Chez's tests with si's by number, which shifts by one once the count does (a
+  fixed print gave three bogus items). Chez's tests are now paired as Chibi's by the alignment of the sources (letters and digits, the first 25,
+  since the rewritten suite writes `(quote #(...))` and escapes strings), `against-references` takes the pairs made by source only (the lesser
+  note on finding 11), and the paired counts are as recorded (1,205 / 11 / 0 / 9 / 0 unpaired). *Test* (`tA.sh`: the recorded output; the same
+  with test 1200 passing and its second test inserted; the same cut at test 1,100): the fixed run has the item "count r7rs/chibi si 1226
+  tests, expected 1225" in no class before, none after (only the regression lines against the record, accepted by `--record`); the cut run
+  still fails ("1099 tests, expected 1223"). *Numbers*: `bin/si r7rs` 1,225 tests, 1,216 pass, 9 fail, as before; `--chez` 1,205 of 1,225,
+  `--chibi` 1,227 of 1,234, `--chibi-test` 1,216 of 1,225 (0 disagreements); 0 in no class, no regression.
+- **A2 (medium), `ecraven-too-slow` too tight: holds.** The record has lattice at 51.9 s and gcbench at 41.5 s of 60. *Fix*: the class is
+  `:volatile true` and lists the ten and lattice and gcbench, its pattern ending at `timeout$` (the time limit itself, status 124); an item of a
+  `:volatile` class comes and goes without a regression line (`regressions`: no `new-item`, `item-absent`, `pass-fails` or `verdict` line when
+  the differing items are all volatile), so a benchmark that finishes leaves the class and one that times out joins it without failing the
+  check. *Test* (`tA2.sh`, copies of the last outputs): lattice timing out: 1 failing item and two regression lines before, none after; ack
+  timing out (recorded as passing at 300 s): the same; earley (recorded timeout) finishing: two regression lines before, none after; fib
+  INCORRECT: fails before and after. Not done: a longer `SI_TIMEOUT` by name for the benchmarks within 2x of the limit (SC191).
+- **B (low-medium), `mats-hang` unanchored: holds** (0 recorded items; the class cited 5_3.ms, stale). *Fix*: the class is removed, and the dead
+  third pattern of `mats-chez-identifier` (0 recorded items; `run-mat` makes every unbound identifier a `notrun`). *Test* (`tB.sh`: 4.ms's
+  output with a time limit in a mat): 0 failing before (class `mats-hang`), 1 failing after. The dead `error`-unbound branch of
+  `scheme/lib/si/mats.sls` stays (editing `scheme/lib` stales every si key, below; SC192).
+- **C (low), the CLAUSE lines not cross-checked: holds** (nothing wrong today: 568 against 568). *Fix*: `parse-mats` reads each NOTRUN mat's
+  `CLAUSES` line; a NOTRUN mat whose failing-clause count differs from its CLAUSE lines, or a FAIL mat whose line's K is not its first CLAUSE
+  line's, is an item `count mats/F mat NAME: ...` in no class; `run.sps` starts each of its lines (BEGIN, MAT, CLAUSE, CLAUSES, FILE, DEF,
+  READ) on a new line. *Test* (`tC.sh`: 4.ms's output with the CLAUSE line of a one-failure NOTRUN mat deleted and the first CLAUSE line of
+  a FAIL mat deleted): 0 failing before, 2 after; the real outputs 0 before and after.
+- **D (low), `cmd-ecraven-ref` exits 0 and records any run: holds.** *Fix*: a benchmark that errors where the record's did not, or another
+  number of benchmarks, is `BAD RUN`: exit 1, and `--record` refuses it. *Test* (`tD.sh`: Chez's directory with every status 1): before rc 0 and
+  the record overwritten; after rc 1 and the record untouched. The real Chez and Chibi directories: rc 0.
+- **E (low), stamps and a consistent stale directory: holds.** *Fix*: bin/si passes every judge `--key` (what it would run now); the judges
+  refuse (exit 2) a directory whose key is another; `--count N` is in the stamp and a mix of counts is refused; ecraven and mats results record
+  `:key` (ecraven also `:count`). *Test* (`tE.sh`: a wrong key; a copy with one benchmark at count 5): judged before, refused after.
+  Consequence found by it: **the last ecraven outputs of si and of Chez are stale** (key `fd21fd6e...` and `95ede4d4...`, now `862bcb72...`
+  and `81b101c0...`: `scheme/lib` changed in SC170 after they were made), so `bin/si ecraven --judge` and `--chez --judge` now exit 2; Chibi's
+  (the executable alone) judge as before. Judged without the key their numbers are the record's (si 54 of 58, 0 in no class). Not rerun (hours);
+  the record keeps its text, without `:key` (SC190).
+- **Lesser notes.** Finding 1's error-spelling map: needs si's real errors, not verifiable here and the fallback is the safe side; unchanged.
+  Finding 11's `against-references` with position pairs: holds, fixed with A. Finding 8's "0.12.0": the provenance states both the tag `0.12` and
+  the binary's version; unchanged (and `scheme/vendor` is in si's key).
+
+### The checks, numbers (before: SC170-SC173; after: this batch)
+
+- `bin/si r7rs` (si, `--chez`, `--chibi`, `--chibi-test`): as above, no regression. `bin/si ecraven --chibi --judge`: 48 correct, 10 timeouts,
+  no regression.
+- **`bin/si mats` rerun whole (9 m, no skip, no rerun): 911 mats, 282 pass, 87 fail, 531 not run, 11 skipped; the clauses of the mats not run
+  4,389 pass, 332 fail, 9,271 do not run; 1,534 non-pass items, 0 in no class, no regression** (the numbers of the record after the fxquotient
+  change); the CLAUSE cross-check made no item. `--record` then added `:key` to the 37 results (nothing else changed).
+
+### Proposals (SC190 onward)
+
+- **SC190 The stale ecraven outputs of si and Chez.** Options: (a) leave them until the heavy window's compiled runs; (b) rerun Chez now (it runs
+  in minutes per benchmark; the verdicts of the review's own run equal the record) and si in the window; (c) a `--restamp` that adopts old outputs
+  under the new key when the change is named. *Recommended: (b)*; (c) would undo finding E.
+- **SC191 The benchmarks near the limit.** Options: (a) as built (`:volatile` class); (b) a longer `SI_TIMEOUT` by name (lattice, gcbench, mperm,
+  nqueens) as the 300 s rerun does for ten; (c) both. *Recommended: (a)* until a rerun flaps; (b) then.
+- **SC192 The dead `error`/unbound branch of `(si mats)` `run-mat`.** Options: (a) drop it with the next change to `scheme/lib`; (b) now, and
+  rerun the long ecraven runs afterwards. *Recommended: (a)*.
+- **SC193 `:volatile` for other time-dependent classes** (`mats-timing`, the 20 s watchdog's clauses). Options: (a) none; (b) mark them when a
+  rerun shows them flap; (c) mark now. *Recommended: (b)*: the record is the reviewed state.
+
+### Rule slips
+
+- Once `> /dev/null 2>&1` on a `bin/si ecraven --judge` I started by mistake (it judged without `--record`; nothing written).
+- Two monitors on the mats run for a few seconds (one stopped at once), and one `sleep` the tool blocked.
+- `bin/si corpora ecraven ... --record` as a test wrote the real record once (the bin script sets `ARBACE_ROOT`); reverted with `git checkout`
+  before the commit.
+
+### Checks not run
+
+The gate; `check`, `check --aot`, `srfi`, the ecraven runs; everything that builds Arbace's executables.
+
+### Shipped files changed
+
+None. Not shipped: `arbace/scheme/corpora.ae`, `bin/si`, `test/scheme/{corpora.edn,divergences-corpora.edn,mats/run.sps,check-mats-*.edn}`.
+
+### Scratch cited
+
+`.tmp/rf/` in this worktree: `tA.sh`-`tE.sh`, the synthetic directories `a-*`, `b-*`, `c-*`, `d-broken`, `e-count`, `old/` (the tree before each fix),
+`rk.bash` (the run key), the logs `r7rs*.log`, `ec*.log`, `mats-full.log`.
