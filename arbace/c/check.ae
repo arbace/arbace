@@ -83,6 +83,11 @@
 (defn- c23? [] (>= (std-num) 123))
 (defn- c99? [] (>= (std-num) 99))
 
+(defn- pedwarn-c2y!
+  "A pedwarn about a C2y feature used in C23 (Wc23-c2y-compat; -Wno-c23-c2y-compat turns it off)."
+  [^String msg]
+  (when (and (< (long (std-num)) 124) (not (cx :no-c2y-compat))) (pedwarn! msg)))
+
 ;; ---------------------------------------------------------------------------------------------
 ;; Types
 
@@ -407,17 +412,20 @@
 ;; Attributes: GNU's packed and aligned, C23's gnu::
 
 (defn- attr-items
-  "The attributes of a metadata vector, each [name args] (GNU's (__attribute__ a ...) spread)."
-  [v]
-  (mapcat (fn [a]
-            (cond
-              (and (seq? a) (= '__attribute__ (first a))) (attr-items (rest a))
-              ;; another vendor's attribute's arguments are balanced tokens, not expressions
-              (vector? a) [[(let [n (first a)] (if (symbol? n) (str/replace (name n) #"^__|__$" "") (str n)))
-                            (let [n (first a)] (if (and (symbol? n) (namespace n) (not= "gnu" (namespace n))) [] (vec (rest a))))]]
-              (symbol? a) [[(str/replace (name a) #"^__|__$" "") []]]
-              :else []))
-          v))
+  "The attributes of a metadata vector, each [name args parens ns gnu] (GNU's (__attribute__ a ...) spread): `parens`
+  when the attribute is written with an argument list (even an empty one), `ns` its prefix, `gnu` for the GNU spelling."
+  ([v] (attr-items v false))
+  ([v gnu]
+   (mapcat (fn [a]
+             (cond
+               (and (seq? a) (= '__attribute__ (first a))) (attr-items (rest a) true)
+               ;; another vendor's attribute's arguments are balanced tokens, not expressions
+               (vector? a) [[(let [n (first a)] (if (symbol? n) (str/replace (name n) #"^__|__$" "") (str n)))
+                             (let [n (first a)] (if (and (symbol? n) (namespace n) (not= "gnu" (namespace n))) [] (vec (rest a))))
+                             true (let [n (first a)] (when (symbol? n) (namespace n))) gnu (meta a)]]
+               (symbol? a) [[(str/replace (name a) #"^__|__$" "") [] false (namespace a) gnu nil]]
+               :else []))
+           v)))
 
 (defn- attrs-of [m & ks] (mapcat #(attr-items (get m %)) ks))
 
@@ -425,11 +433,30 @@
 
 (declare ex const-int check-type parse-type)
 
+(def ^:private std-no-arg-attrs #{"maybe_unused" "noreturn" "_Noreturn" "reproducible" "unsequenced" "fallthrough"})
+(def ^:private std-string-attrs #{"deprecated" "nodiscard"})
+
+(defn- std-attr-check!
+  "C23 6.7.13.2's attribute argument rules for the standard attributes written as [[...]]: those that take no
+  argument given a (possibly empty) argument list, deprecated and nodiscard given an empty list or anything but one
+  plain string literal."
+  [m]
+  (doseq [[n args parens ns gnu am] (apply attrs-of m all-attr-keys)
+          :when (and parens (not gnu) (nil? ns))]
+    (cond
+      (contains? std-no-arg-attrs n) (err! (str "'" n "' attribute does not take any arguments"))
+      (contains? std-string-attrs n)
+      (cond (empty? args) (err! "parentheses must be omitted if attribute argument list is empty")
+            (not (and (= 1 (count args)) (or (string? (first args)) (and (seq? (first args)) (= 'byte-string (ffirst args))))
+                      (not (contains? (or (:c/aparen am) #{}) 1))))
+            (err! (str "expected string-literal in the '" n "' attribute"))))))
+
 (defn- attr-args!
   "The arguments of the attributes in metadata `m` checked as expressions (cc's checker types them: an
   identifier among them that names nothing, a parameter of the attribute's own, skipped)."
   [m]
   (when m
+    (std-attr-check! m)
     (doseq [[_ args] (apply attrs-of m all-attr-keys)
             a args]
       (cond
@@ -623,7 +650,7 @@
         const (qual (parse-type a) :const)
         volatile (qual (parse-type a) :volatile)
         restrict (qual (parse-type a) :restrict)
-        _Nonnull (parse-type a)
+        (_Nonnull __seg_gs __seg_fs) (parse-type a)
         atomic (qual (parse-type a) :atomic)
         array (cond
                 (= a '*) (assoc (arr (parse-type b) nil) :vla true)
@@ -1110,7 +1137,7 @@
    "__builtin_islessgreater" t-int "__builtin_va_start" t-void "__builtin_va_end" t-void "__builtin_c23_va_start" t-void
    "__builtin_prefetch" t-void "__builtin_assume_aligned" (ptr t-void) "__builtin_strlen" t-ulong "__builtin_huge_valf" t-float})
 
-(declare ptr-conv! constexpr-check!)
+(declare ptr-conv! constexpr-check! attr-decl-check!)
 
 (defn- call
   "A call's result: the callee's result, its arguments checked."
@@ -1392,7 +1419,7 @@
                         (emit! (res (if r (decay (unq (:t r))) t-void))))
             lit (emit! (lit-form f))
             byte-string (emit! (res (arr t-char (inc (byte-string-len args))) :str true))
-            imaginary (do (when (< (std-num) 124) (pedwarn! "imaginary constants are a C2Y feature or GCC extension"))
+            imaginary (do (when (< (std-num) 124) (pedwarn-c2y! "imaginary constants are a C2Y feature or GCC extension"))
                           (emit! (res {:k :complex :of t-double})))
             va-arg (let [[ap tf] args
                          t (unq (parse-type tf))]
@@ -1668,8 +1695,12 @@
                 (binding [*base* bt] (doseq [d ds] (check-decl d))))
       c/static-assert (let [[_ e] f r (ex e)]
                         (if (and (integer? (:v r)) (zero? (:v r))) (err! "static assertion failed")))
-      c/declare-specs (parse-type (second f))
-      (c/local-labels c/attr-decl) nil
+      c/declare-specs (do (when (and (:c/implicit-int (meta f)) (seq (:c/decl-attrs (meta f))))
+                            ;; `[[...]];` at file scope reads as attribute-only specifiers
+                            (attr-decl-check! (cons 'c/attr-decl (:c/decl-attrs (meta f))) nil :top))
+                          (parse-type (second f)))
+      c/attr-decl (attr-decl-check! f nil :top)
+      c/local-labels nil
       nil)))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -1687,11 +1718,29 @@
           (do (check-decl x) (recur (next xs)))
           (do (check-decl (with-meta (list 'c/var x (second xs)) (meta x))) (recur (nnext xs))))))))
 
+(def ^:dynamic *in-switch* false)
+
+(defn- attr-decl-check!
+  "An attribute declaration `[[...]];` (C23 6.7.13.1): the standard attributes in it are ignored (a pedwarn), except
+  fallthrough, which is an error at top level, outside a switch and where no case or default label follows."
+  [f next where]
+  (doseq [[n _ _ ns gnu] (attr-items (rest f)) :when (and (nil? ns) (not gnu))]
+    (cond
+      (= n "fallthrough")
+      (case where
+        :top (err! "'fallthrough' attribute at top level")
+        :block (cond (not *in-switch*) (err! "invalid use of attribute 'fallthrough'")
+                     (not (and (seq? next) (#{'case 'default} (first next))))
+                     (err! "attribute 'fallthrough' not preceding a case label or default label")))
+      (or (contains? std-no-arg-attrs n) (contains? std-string-attrs n))
+      (pedwarn! (str "'" n "' attribute ignored")))))
+
 (defn- check-block-items
   "A statement list; the result of its last expression statement (a statement expression's value)."
   [items]
   (let [last-r (atom nil)]
-    (doseq [s items]
+    (doseq [[s nxt] (map vector items (concat (rest items) [nil]))]
+      (when (and (seq? s) (= 'c/attr-decl (first s))) (at-line s (attr-decl-check! s nxt :block)))
       (reset! last-r (check-stmt s)))
     @last-r))
 
@@ -1718,7 +1767,8 @@
                    nil)
           switch (let [rc (ex (first args))
                        ct (promote (unq (:t rc)))]
-                   (binding [*switch* (when (and (int-type? ct) (not= :bool (:k ct))) {:t ct :seen (atom [])})]
+                   (binding [*switch* (when (and (int-type? ct) (not= :bool (:k ct))) {:t ct :seen (atom [])})
+                             *in-switch* true]
                      (with-scope (check-block-items (rest args))))
                    nil)
           (while do-while) (do (ex (first args)) (with-scope (check-block-items (rest args))) nil)
@@ -1741,10 +1791,13 @@
                        (when (some (fn [[l h]] (and (<= lo h) (<= l hi))) @seen)
                          (err! "duplicate case value"))
                        (swap! seen conj [lo hi]))))
-                 (when (and b (< (std-num) 124)) (pedwarn! "ISO C does not support range expressions in switch statements before C2Y"))
+                 (when b (pedwarn-c2y! "ISO C does not support range expressions in switch statements before C2Y"))
                  nil)
           c/asm (do (feat! :asm) nil)
-          (default label goto continue break c/local-labels c/attr-decl) nil
+          (continue break) (do (when (seq args)
+                                 (pedwarn-c2y! (str "ISO C does not support '" (name h) "' statement with an identifier operand before C2Y")))
+                               nil)
+          (default label goto c/local-labels c/attr-decl) nil
           goto* (do (ex (first args)) nil)
           return (when (seq args)
                    (let [r (ex (first args))]
@@ -1797,14 +1850,16 @@
 (defn- new-cx [std opts]
   {:std std :scopes (ArrayList.) :errors (ArrayList.) :annot nil :annotating (atom false)
    :done-units (HashSet.) :units {} :pack-state (atom {}) :ldouble-size (:ldouble-size opts 16)
-   :unsigned-char (:unsigned-char opts) :pedantic (:pedantic opts) :ext-lines (:ext-lines opts)})
+   :unsigned-char (:unsigned-char opts) :pedantic (:pedantic opts) :ext-lines (:ext-lines opts)
+   :no-c2y-compat (:no-c2y-compat opts)})
 
 (defn check-unit
   "Checks a read (arbace.repr.c/read-c's {:forms :units}) at the standard `std` (a keyword), the
   builtins' forms `builtins` declared first: {:errors [...] :items [[line [annotation...]] ...]} (the
   items when `annotate`)."
-  [rd std builtins & {:keys [annotate ldouble-size unsigned-char results pedantic ext-lines notes]}]
-  (let [c (assoc (new-cx std {:ldouble-size (or ldouble-size 16) :unsigned-char unsigned-char :pedantic pedantic :ext-lines ext-lines})
+  [rd std builtins & {:keys [annotate ldouble-size unsigned-char results pedantic ext-lines notes no-c2y-compat]}]
+  (let [c (assoc (new-cx std {:ldouble-size (or ldouble-size 16) :unsigned-char unsigned-char :pedantic pedantic :ext-lines ext-lines
+                                      :no-c2y-compat no-c2y-compat})
                  :units (into {} (for [[k u] (:units rd)] [(str k) u]))
                  :results (when results (IdentityHashMap.)))
         items (ArrayList.)]
