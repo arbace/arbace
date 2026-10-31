@@ -279,6 +279,18 @@
                     (count results) (count (filter :load-error rs)) (count (:skipped expected)))
             (sum :test) (+ (sum :pass) (sum :fail) (sum :error))
             (sum :pass) (sum :fail) (sum :error) ""))
+    ;; GTS81 (a): the negative controls (CLOJURE_TESTS_CONTROLS, test/clojure/controls.edn: [{:id :subject NS
+    ;; :reference NS}]): the subject's result judged by regressions against the reference's expected one,
+    ;; which must find it worse (another count of tests); none found, the judge passes what differs
+    (doseq [{:keys [id subject reference]} (some-> (System/getenv "CLOJURE_TESTS_CONTROLS") read-edn)
+            :let [r (get results subject) e (get-in expected [:namespaces reference])
+                  what (str "control " id " (" subject "'s result against " reference "'s expected)")]]
+      (cond
+        (not (contains? results subject)) (println (str what ": not judged, " subject " not run"))
+        (nil? r) (println (str what ": not judged, " subject " has no result"))
+        (nil? e) (swap! bad conj [(symbol (str "control-" id)) [(str what ": not judged, no expected result of " reference)]])
+        (seq (regressions e r)) (println (str what ": " (first (regressions e r)) ", as a control must (GTS81 (a))"))
+        :else (swap! bad conj [(symbol (str "control-" id)) [(str "control passed: " what ": the judge passes what differs")]])))
     (when gen-ran
       (println "test.generative:" (or gen "no result (crashed?)"))
       (when-let [why (seq (generative-regressions (:generative expected) gen))]
