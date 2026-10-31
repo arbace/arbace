@@ -21,6 +21,23 @@
   ^String [^String s]
   (cond (.startsWith s "u8") "u8" (.startsWith s "L") "L" (.startsWith s "u") "u" (.startsWith s "U") "U" :else ""))
 
+(defn- ucn-decode
+  "An identifier's text with its universal character names and its UTF-8 bytes (read as ISO-8859-1) as characters."
+  ^String [^String src]
+  (let [u (String. (.getBytes src "ISO-8859-1") "UTF-8")
+        m (re-matcher #"\\u([0-9a-fA-F]{4})|\\U([0-9a-fA-F]{8})" u)
+        sb (StringBuilder.)]
+    (loop [from 0]
+      (if (.find m (int from))
+        (let [cp (Long/parseLong (or (.group m 1) (.group m 2)) 16)]
+          (.append sb (subs u from (.start m)))
+          (.append sb (if (<= cp 0x10FFFF) (String. (Character/toChars (int cp))) "?"))
+          (recur (.end m)))
+        (.append sb (subs u from))))
+    (.toString sb)))
+
+(defn- identifier-ascii? [cp] (or (= cp 95) (and (>= cp 48) (<= cp 57)) (and (>= cp 65) (<= cp 90)) (and (>= cp 97) (<= cp 122))))
+
 (defn notes
   "The pedantic notes of the file `name` (bytes `bs`) at the standard `std`: [[line message] ...]."
   [^String name ^bytes bs std no-c2y no-c23]
@@ -28,7 +45,7 @@
         [toks _] (lex/tokens (lex/new-file name bs))
         line-of (fn [t] (second (lex/tok-position t)))
         out (java.util.ArrayList.)]
-    (loop [ts (seq toks) bol true]
+    (loop [ts (seq toks) bol true def? false]
       (if-let [t (first ts)]
         (let [ch (.-ch ^arbace.repr.c.lex.Tok t)
               src (.-src ^arbace.repr.c.lex.Tok t)
@@ -42,7 +59,36 @@
             (let [n (second ts)]
               (when (and n (= (.-src ^arbace.repr.c.lex.Tok n) "embed"))
                 (.add out [(line-of t) "'#embed' before C23 is a GCC extension"]))))
-          (recur (next ts) (or nl false)))
+          ;; CS143: C23 (Unicode) rules for the characters of an identifier: XID_Start first, XID_Continue after, no ASCII
+          ;; character by a UCN, and normalization form C
+          (when (and (= ch :IDENTIFIER) (>= yr 123) (or (re-find #"\\[uU][0-9a-fA-F]" src) (re-find #"[\u0080-\u00ff]" src)))
+            (let [txt (ucn-decode src)
+                  cps (vec (.toArray (.codePoints ^String txt)))
+                  bad (first (keep-indexed (fn [i cp]
+                                             (when (or (and (< cp 128) (not (identifier-ascii? cp)))
+                                                       (and (>= cp 128) (not (if (zero? i) (Character/isUnicodeIdentifierStart (int cp))
+                                                                                 (Character/isUnicodeIdentifierPart (int cp))))))
+                                               cp))
+                                           cps))]
+              (cond
+                (some? bad) (.add out [(line-of t) (str "character U+" (format "%04X" bad) " is not valid in an identifier")])
+                (not (java.text.Normalizer/isNormalized ^CharSequence txt java.text.Normalizer$Form/NFC))
+                (.add out [(line-of t) "universal character names in the identifier are not in NFC"]))))
+          ;; CS143: N3353's delimited escape sequences before C2y
+          (when (and (contains? #{:CHARCONST :LONGCHARCONST :STRINGLITERAL :LONGSTRINGLITERAL} ch) (< yr 124) (not no-c2y)
+                     (re-find #"(?<!\\)(?:\\\\)*\\[uxo]\{" src))
+            (.add out [(line-of t) "delimited escape sequences are only valid in C2Y"]))
+          ;; CS143: a universal character name beyond the code space in a character constant or string literal
+          (when (and (contains? #{:CHARCONST :LONGCHARCONST :STRINGLITERAL :LONGSTRINGLITERAL} ch)
+                     (some (fn [m] (let [v (Long/parseLong (second m) 16)] (and (> v 0x10FFFF) (<= v 0x7FFFFFFF)))) (re-seq #"(?<!\\)(?:\\\\)*\\U([0-9a-fA-F]{8})" src)))
+            (.add out [(line-of t) "universal character name is outside the UCS codespace"]))
+          ;; CS143: __VA_OPT__ in a #define of strict C before C2y
+          (when (and def? (= ch :IDENTIFIER) (= src "__VA_OPT__") (contains? #{:c89 :c94 :c99 :c11 :c17} std))
+            (.add out [(line-of t) "'__VA_OPT__' is not available until C2Y"]))
+          (recur (next ts) (or nl false)
+                 (cond nl false
+                       (and bol (= ch \#) (second ts) (= (.-src ^arbace.repr.c.lex.Tok (second ts)) "define")) true
+                       :else def?)))
         nil))
     ;; string literal runs: adjacent (no new-line between) literals
     (loop [ts (seq toks) run []]
