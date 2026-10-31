@@ -71,6 +71,18 @@ plan_inputs() {  # plan_inputs DIR: DIR/files.sha256 and DIR/hosts.edn
   mkdir -p "$d"
   find . \( -path ./.git -o -path ./.tmp -o -path ./target -o -path ./.claude \) -prune -o -type f -printf '%P\n' \
     | LC_ALL=C sort | xargs -d '\n' sha256sum > "$d/files.sha256" || return 1
+  # queue 023, report 022 finding 9: a symbolic link is keyed by its target's text (the SHA-256 of
+  # readlink's output: find -type f skipped it, so no key held it); a name sha256sum escapes (a backslash or
+  # a newline in it: its line starts with \ and gate.plan's fixed columns would misread it) refuses the plan
+  local l
+  find . \( -path ./.git -o -path ./.tmp -o -path ./target -o -path ./.claude \) -prune -o -type l -printf '%P\n' \
+    | LC_ALL=C sort | while IFS= read -r l; do
+        printf '%s  %s\n' "$(readlink -- "$l" | tr -d '\n' | sha256sum | cut -c1-64)" "$l"
+      done >> "$d/files.sha256" || return 1
+  if grep -q '^\\' "$d/files.sha256"; then
+    echo "gate: file names the plan cannot key (a backslash or a newline in them): $(grep '^\\' "$d/files.sha256" | head -3 | cut -c67- | tr '\n' ' ')" >&2
+    return 1
+  fi
   # :jdk (queue 023, report 022 finding 3): the release files of the JDK the steps run, java's (the frozen
   # jar's JVM, bin/lib/frozen.bash) and javac's (the reference javac), each resolved from PATH through its
   # links; none when neither is there
