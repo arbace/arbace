@@ -16,5 +16,16 @@ printf 'min.cpp\tc++23\t\t%s\n' "$root/test/cpp/selftest/min.cpp" > "$t/list.tsv
 CPPI_RUNTIME_STALE=refuse "$t/tree/bin/cppi" lower-check "$t/list.tsv" "$t/w" --runtime "$rt" > "$t/lc.log" 2>&1; st=$?
 [ $st = 4 ] && ok "lower-check refuses the stale runtime (exit 4)" || bad "lower-check on a stale runtime: exit $st"
 [ ! -d "$t/w/files" ] && ok "no native step ran" || bad "lower-check ran with the stale runtime"
+# review 018's R5: the key holds the musl headers, the pin that was used, and is taken at the build's start
+grep -q 'musl-dev package' "$rt/key.txt" && grep -q '/usr/include/\*.h' "$rt/key.txt" && ok "the key covers the musl headers" || bad "no musl line in the key"
+cp "$root/test/cpp/host/headers.sha256" "$t/pin2"; echo "0000000000000000000000000000000000000000000000000000000000000000  /nonexistent/header.h" >> "$t/pin2"
+pk() { grep 'headers pin' <<< "$1" | cut -d' ' -f1; }
+a=$("$t/tree/bin/cppi" runtime-key --print); b=$(CPPI_HEADERS_PIN=$t/pin2 "$t/tree/bin/cppi" runtime-key --print)
+[ "$(pk "$a")" != "$(pk "$b")" ] && ok "the key records the pin CPPI_HEADERS_PIN names" || bad "the key ignores CPPI_HEADERS_PIN"
+# runtime-build stops at the doctored pin; the key it took at its start stands in OUT/key.start, no key.txt
+git_ok=1; rb=$t/rb
+CPPI_HEADERS_PIN=$t/pin2 "$t/tree/bin/cppi" runtime-build "$rb" > "$t/rb.log" 2>&1; st=$?
+[ $st != 0 ] && [ ! -f "$rb/key.txt" ] && [ -f "$rb/key.start" ] && ok "runtime-build took its key at the start (key.start), key.txt only at the end" || bad "runtime-build: exit $st, files: $(ls "$rb" 2>&1 | tr '\n' ' ')"
+[ "$(pk "$(cat "$rb/key.start")")" = "$(pk "$b")" ] && ok "key.start is the key of the pin used" || bad "key.start differs from the key at the start"
 rm -rf "$t/tree"
 finish
