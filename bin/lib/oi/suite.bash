@@ -197,13 +197,7 @@ cmd_suite_check_aot() {
   for i in "$A"/shard.[0-9]*; do o2j_shard "$i" "$i.res" & done
   wait
   cat "$A"/shard.*.res > "$A/results.tsv" 2>&1 || : > "$A/results.tsv"
-  awk -F'\t' '$NF != "" { a = ""; for (i = 5; i < NF; i++) a = a (a == "" ? "" : " ") $i; print $1 "\037" $2 "\037" $3 "\037" a "\037" $NF }' "$bl" |
-  while IFS=$'\037' read -r id out files args env; do
-    local st=0 t0 t1; t0=$(date +%s.%N)
-    (cd "$(dirname "$out")" && for kv in $env; do export "$kv"; done; o2j_run $(cat "$files") -- $args) > "$out" 2>&1 || st=$?
-    t1=$(date +%s.%N)
-    printf '%s\t%s\t%s\n' "$id" "$st" "$(echo "$t1 - $t0" | bc)" >> "$A/results.tsv"
-  done
+  o2j_env_runs "$bl" "$A/results.tsv"
   local out=$A/check.tsv
   : > "$out.new"
   suite_selected | awk -F'\t' '$2 == "run" {print $1}' | while read -r id; do

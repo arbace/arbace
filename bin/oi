@@ -396,8 +396,26 @@ cmd_aot_lib() {
   echo "oi: aot-lib: $(ls "$O2J_LIB" | grep -c '\.ae$') units, $(du -sh "$O2J_LIB" | cut -f1); the runtime lacks $(awk -F'\t' '/^missing/{print $3}' "$O2J/lib-missing.txt" | sort -u | wc -l) of the externals and primitives they name ($O2J/lib-missing.txt)"
 }
 
+# O2J_LIMIT=SECONDS: the run is killed after that long (status 124, 137 after the grace), a program of the single mode
+# (the batch has its own limit); O2J_ARGV0: the program's argv.(0) (test/ocaml/o2j/run.ae)
 o2j_run() {
-  ARBACE_PATH=$root/jdk/ocaml TMPDIR=$O2J/tmp GOMEMLIMIT=${O2J_GOMEMLIMIT:-900MiB} GOMAXPROCS=1 "$(arbace_exe)" "$root/test/ocaml/o2j/run.ae" "$@"
+  local lim=(); [ -n "${O2J_LIMIT:-}" ] && lim=(timeout -k 5 "$O2J_LIMIT")
+  ARBACE_PATH=$root/jdk/ocaml TMPDIR=$O2J/tmp GOMEMLIMIT=${O2J_GOMEMLIMIT:-900MiB} GOMAXPROCS=1 "${lim[@]}" "$(arbace_exe)" "$root/test/ocaml/o2j/run.ae" "$@"
+}
+
+# o2j_env_runs BL RES: the programs of BL (batch.list: ID OUT FILES ARGV0 ARGS... ENV) that have an environment, each alone
+# (the batch shares one process), under TIMEOUT as the batch's rows are (a row "timeout" at 124 and 137), their results
+# appended to RES (ID, status, seconds); argv.(0) the program's dump as the other rows' (review 008's finding 6)
+o2j_env_runs() {
+  local bl=$1 res=$2
+  awk -F'\t' '$NF != "" { a = ""; for (i = 5; i < NF; i++) a = a (a == "" ? "" : " ") $i; print $1 "\037" $2 "\037" $3 "\037" $4 "\037" a "\037" $NF }' "$bl" |
+  while IFS=$'\037' read -r id out files argv0 args env; do
+    local st=0 t0 t1; t0=$(date +%s.%N)
+    (cd "$(dirname "$out")" && for kv in $env; do export "$kv"; done; O2J_ARGV0=$argv0 O2J_LIMIT=$TIMEOUT o2j_run $(cat "$files") -- $args) > "$out" 2>&1 || st=$?
+    t1=$(date +%s.%N)
+    case $st in 124|137) st=timeout ;; esac
+    printf '%s\t%s\t%s\n' "$id" "$st" "$(echo "$t1 - $t0" | bc)" >> "$res"
+  done
 }
 
 cmd_aot_run() {
@@ -481,13 +499,7 @@ cmd_check_aot() {
   for i in "$O2J"/shard.[0-9]*; do o2j_shard "$i" "$i.res" & done
   wait
   cat "$O2J"/shard.*.res > "$O2J/results.tsv"
-  awk -F'\t' '$NF != "" { a = ""; for (i = 5; i < NF; i++) a = a (a == "" ? "" : " ") $i; print $1 "\037" $2 "\037" $3 "\037" a "\037" $NF }' "$bl" |
-  while IFS=$'\037' read -r id out files args env; do
-    local st=0 t0 t1; t0=$(date +%s.%N)
-    (cd "$(dirname "$out")" && for kv in $env; do export "$kv"; done; o2j_run $(cat "$files") -- $args) > "$out" 2>&1 || st=$?
-    t1=$(date +%s.%N)
-    printf '%s\t%s\t%s\n' "$id" "$st" "$(echo "$t1 - $t0" | bc)" >> "$O2J/results.tsv"
-  done
+  o2j_env_runs "$bl" "$O2J/results.tsv"
   # check.tsv as oi's: ID STATUS SHA BYTES SECONDS NOTE
   local out=$O2J/check-aot.tsv
   : > "$out.new"

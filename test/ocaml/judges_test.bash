@@ -42,4 +42,8 @@ S=$root/.tmp/o7; cp "$S/roles.tsv" "$W/roles.keep" 2>/dev/null
 printf 'tests/nothing/stale.ml\ttest\trun\tx\n' > "$S/roles.tsv"
 out=$(cd "$root" && bin/oi suite rollup 2>&1); st=$?
 expect "rollup: a stale roles.tsv is regenerated, not judged" 0 'testsuite: 0 files without a result or a class' "$out" $st
+
+# finding 6: a program with an environment runs under OI_TIMEOUT (1 s: the stdlib's load alone takes longer), as a row "timeout"
+out=$(cd "$root" && OI_TIMEOUT=1 bin/oi check --aot --only 'tool-ocamltest-var-expansion/subst1' 2>&1 | grep -a 'subst1'); st=$?
+expect "aot: a program with an environment is under the time limit" 0 'timeout 1s' "$out" $st
 exit $bad
