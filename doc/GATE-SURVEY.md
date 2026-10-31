@@ -2208,3 +2208,24 @@ worktree's `.tmp/` (its metadata its own, removed with `git worktree remove`), r
 
 The user decided all five as recommended: GTS90 (a), the whole pins line, as built; GTS91 (a), built on this branch
 before the merge; GTS92 (a), (b) when the box is unparked; GTS93 (a), as built; GTS94 (a).
+
+## As built: GTS91 (write-ahead)
+
+GTS91 (a), decided 2026-10-31. `bin/java-check --forms verify` (the step `java-forms-verify`) gains Java's read level's
+negative control. `forms_same` is the verify's comparison (`diff -r -x provenance.edn`, now a function), and
+`forms_controls` runs it crossed: the controls of `test/java/controls.edn` with `:forms` in their `:levels` (c00001,
+beside its other levels; `:forms` is no level of `check`, so `java.check/report` ignores it) compare the subject's fresh
+forms (t03208, `WORK/forms-new`) with the reference's committed ones (t03209, `test/java/forms/`), which must differ.
+Equal forms print `control passed: c00001 (forms): ...` and fail the verify even when the forms verify; a subject or
+reference not in the run (the essential list without it, a forms tree without it) is `left`, as GTS93 (a) has it for
+print (`forms_cmd` has no `--only`: it always reads the whole essential list). The step's inputs gained
+`test/java/controls.edn`. Documented in `bin/java-check`'s header, doc/classes/JAVA-CONFORMANCE-SURVEY.md beside GTS81's
+and GTS84's controls, and CLAUDE.md's line on the controls.
+
+Tested (`.tmp/gts91/test.sh`, the real committed forms as the "fresh" ones, no read): the real comparison differs (rc 0);
+`forms_same` replaced by one that always says equal makes the control pass (rc 1, the verify fails); t03208's forms
+replaced by t03209's pass the control (rc 1); no t03208 in the run is `left` (rc 0). A real read was not run (javac's tool
+and the gate's builds were off limits): the merge should see `bin/gate --full`'s java-forms-verify print the control's
+line.
+
+Proposals (GTS95): none.

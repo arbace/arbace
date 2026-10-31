@@ -3685,3 +3685,11 @@ then `classes-result` against the reference's printed class files, its original'
 comparison that passes what differs makes it `pass` (`crossed steps passed: ...`), so each of the three is covered.
 A control whose reference was not printed in the run (a selection: `--only`) is `left`, which the report prints and
 leaves; `unjudged` (no step taken) while its subject passed is `control not judged`.
+
+**GTS91 (a): read** (doc/GATE-SURVEY.md, "As built: GTS91 (write-ahead)"). The read level's one recorded output is the
+essential tests' committed forms, compared at `bin/java-check --forms verify`: `forms_same` (`diff -r`, the provenance
+apart) is that comparison and `forms_controls` its control. c00001 gains `:forms` in `:levels` (no level of the run,
+so `java.check/report` does not look for it): t03208's fresh forms against t03209's committed ones in
+`test/java/forms/` must differ; the verify prints `control c00001 (forms): ... differ ..., as they must`, and fails
+with `control passed: c00001 (forms): ...` when they are equal. A control whose subject was not read in the run or whose
+reference is not committed is `left`. No read, no record and no step of its own: the verify's fresh forms judged twice.

@@ -397,7 +397,7 @@ Prior art:
   `test/clojure/controls.edn`, `test/oracle/controls.edn`, `test/diffcheck/controls.edn`): one that passes fails the
   step (doc/GATE-SURVEY.md, "As built: GTS72, GTS79-GTS82 (write-ahead)"; since GTS84-GTS86 also Java's diagnostics and
   print levels and goi's errorcheck and directory tests, every control judged from its subject's own run: "As built:
-  GTS83-GTS87 (write-ahead)"); `--full
+  GTS83-GTS87 (write-ahead)"; since GTS91 (a) also the read level's forms at `bin/java-check --forms verify`); `--full
   --concurrent` runs the chains at once under the big lock held once, the heavy steps on a lock of the
   gate's own (GTS37 (a)); `bin/gate-demos` repeats GTS42 (a)'s two demonstrations as plans (`bin/gate
   --full --plan --builds`); the executables and javac's tool are kept by key in
