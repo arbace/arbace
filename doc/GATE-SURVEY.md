@@ -2203,3 +2203,8 @@ covered by `:gate`'s identity, javac-tool's declared by its host.
 worktree's `.tmp/` (its metadata its own, removed with `git worktree remove`), read the main checkout's
 `target/seed/pins` and ran its stage 0 as `ARBACE_HOST_EXE`, ran the system JDK's javac on two jdk26u tests in place
 (`-J-Xmx512m`, output in the worktree's `.tmp/`), and built `tools/gocmp` with TamaGo's go into the worktree's `.tmp/`.
+
+## Decided (2026-10-31): GTS90-GTS94
+
+The user decided all five as recommended: GTS90 (a), the whole pins line, as built; GTS91 (a), built on this branch
+before the merge; GTS92 (a), (b) when the box is unparked; GTS93 (a), as built; GTS94 (a).
