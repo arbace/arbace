@@ -106,8 +106,10 @@
 #                                 positions included, those of the helper's), and E-forms (GP5:
 #                                 their .ae text byte for byte in modes :lines and :full; where the
 #                                 helper's conversion fails, the native one failing with its
-#                                 message). The helper's dumps
-#                                 made when missing (--fresh: afresh); --headers: the loader alone,
+#                                 message). The helper's dumps and
+#                                 the program lists made when missing or when what they are made
+#                                 from changed (NAME.key; --fresh: afresh); a corpus whose list is
+#                                 empty, or that the helper dumped nothing of, fails; --headers: the loader alone,
 #                                 the headers and the sets, no parse (seconds); exits non-zero on
 #                                 a difference that test/repr/go/native-known.edn does not list;
 #                                 report in .tmp/repr-go/native-check[-headers].report.edn
@@ -354,24 +356,52 @@ native_spec() {
   echo "$spec"
 }
 
-# native_dumps CORPUS FRESH: the helper's dumps of CORPUS (made when missing, or FRESH) and the
-# loader's spec of it; prints the spec's path. Runs in a command substitution, where errexit does
+# dumps_key CORPUS: what the helper's dumps of CORPUS and its lists are made from: the toolchain
+# (ARBACE_GOROOT, the pins seed/goroot.sha256 and seed/goroot-test.sha256), the helper's and the
+# lists' sources (tools/godump, tools/gocmp), the scripts that make them, and for a vendored corpus
+# the vendoring script native-corpus reads (its module pins) and for box box/ (cmd-*: the toolchain's
+# tree alone; each file one the gate step's inputs declare); prints its SHA-256
+dumps_key() {
+  local more=()
+  case $1 in
+    goos-*) more=(bin/tamago-vendor) ;;
+    box) more=(bin/box-vendor box) ;;
+    purego) more=(bin/box-vendor) ;;
+    x509roots) more=(bin/x509roots-vendor) ;;
+  esac
+  { echo "$goroot"
+    (cd "$root" && find seed/goroot.sha256 seed/goroot-test.sha256 tools/godump tools/gocmp bin/repr-go \
+       bin/lib/repr-go/native-corpus bin/lib/repr-go/check ${more[@]+"${more[@]}"} -type f -print0 2> /dev/null \
+       | LC_ALL=C sort -z | xargs -0 -r sha256sum) || true
+  } | sha256sum | cut -c1-64
+}
+
+# native_dumps CORPUS FRESH: the helper's dumps of CORPUS (made when missing, when what they are
+# made from changed, dumps_key, NAME.key, or FRESH) and the loader's spec of it; prints the spec's
+# path. Runs in a command substitution, where errexit does
 # not hold: each step's failure returns, and a corpus the helper dumped nothing of fails (an empty
 # corpus would check as 0 of 0 equal).
 native_dumps() {
-  local c=$1 fresh=$2 cgoos cwhat carch name
+  local c=$1 fresh=$2 cgoos cwhat carch name key
+  key=$(dumps_key "$c") || return 1
   case $c in
     goos-*|cmd-*|box|purego|x509roots)
-      if [ -n "$fresh" ] || [ ! -d "$work/corpus/$c" ] || [ ! -f "$work/corpus/$c.load.edn" ]; then
+      name=$c
+      if [ -n "$fresh" ] || [ ! -d "$work/corpus/$c" ] || [ ! -f "$work/corpus/$c.load.edn" ] \
+         || [ "$(cat "$work/corpus/$c.key" 2> /dev/null)" != "$key" ]; then
+        rm -f "$work/corpus/$c.key"
         "$root/bin/lib/repr-go/native-corpus" "$c" "$work/corpus/$c" >&2 || { echo "native-check: $c: the helper's dumps failed" >&2; return 1; }
-      fi
-      name=$c ;;
+        echo "$key" > "$work/corpus/$c.key"
+      fi ;;
     *)
       corpus_config "$c"
       name=$(corpus_name "$cgoos" "$cwhat")
-      if [ -n "$fresh" ] || [ ! -d "$work/corpus/$name" ]; then
+      if [ -n "$fresh" ] || [ ! -d "$work/corpus/$name" ] || [ "$(cat "$work/corpus/$name.key" 2> /dev/null)" != "$key" ]; then
+        # the lists too: native_spec keeps a list that is not empty
+        rm -f "$work/corpus/$name.key" "$work/corpus/$name-programs.txt" "$work/corpus/$name-list.txt"
         build >&2 || return 1
         corpus_dump "$c" >&2 || { echo "native-check: $c: the helper's dumps failed" >&2; return 1; }
+        echo "$key" > "$work/corpus/$name.key"
       fi ;;
   esac
   awk -F'\t' '$1 == "ok" || $1 == "errors" { n++ } END { exit !n }' "$work/corpus/$name.tsv" 2> /dev/null \
