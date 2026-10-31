@@ -1947,3 +1947,28 @@ testsuite run's 163 MB, the disk under 75% throughout.
 
 All as recommended: CP100 (a) now, (c) when CX8's checks and C6's AOT translate it often; CP101 (c); CP102 (a);
 CP103 (b); CP104 (c); CP105 (a) until CX8's run corpora count the class, (b) if they show it is common.
+
+## As built: CP103 (b) (2026-10-31)
+
+On the branch `cpp-cx7` after the decisions, in the light tier (stage 0 by `ARBACE_HOST_EXE`, 4 jobs, `GOMEMLIMIT=1500MiB`, no gate, no build of Arbace's executables).
+
+- **What changed.** `cx$pending` and the in-flight exception `cx$cur` of `arbace/cpp/rt/eh.c.ae` are `_Thread_local` (`^:thread_local`, the metadata the lowering gives a
+  thread-local global: C forms' thread storage class), so the runtime's exception state is per thread as libsupc++'s `__cxa_get_globals` is. One more place
+  needed it: `arbace.cpp.lower` declared the lowered code's `extern int cx$pending` without the class, which the linker refused (`TLS definition ... mismatches
+  non-TLS reference`: all 10 non-trivial samples failed until the declaration was `extern _Thread_local`); every lowered unit of the runtime carries that
+  declaration, so `runtime-build` was rerun.
+- **The sample**, `test/cpp/runtime/samples/threads.cpp`: two `std::thread`s (`<thread>` links: libstdc++'s `thread.cc` lowered, musl's pthreads native) each
+  throw and catch 2,000 times (a `std::runtime_error` and an `int`, `std::this_thread::yield()` between, to interleave), each checking that it only sees its own
+  exception; it prints `1199 1201` (g++'s build and the original print the same, the status 0). The `hello`/`library` samples are unchanged.
+- **Numbers.** `runtime-build`: 198 of 198 (IR 24 s, lowering 154 s, gcc 18 s; the summary equals `build-results.edn`'s). `lower-check` over the samples and runtime
+  samples: 12 of 12 (11 before; the new one runs as the original and g++'s build agrees: 10 agree, 2 compile-only). Over libstdc++ every 15th: 234 of 234, none
+  known, g++'s build agrees on 233 (the same `2523-2_xin.cc` differs) (native 101 s, Arbace's steps 865 s, gcc and runs 54 s). Recorded in
+  `test/cpp/lower-results.edn` (samples 12). The work directories stay near 1.2 GB for `.tmp`, the disk at 75%.
+- **Not changed.** The atomics and the guards stay as libsupc++'s lowering has them (option (c) of CP103 waits for a decision on threads in v1); with the flag
+  per thread, an exception thrown through a native frame is still a class (CP104). The sample does not prove the flag was shared before: without
+  `_Thread_local` the two threads race on one flag, which this sample would show only on an unlucky interleaving.
+- **Proposal CP110 Proving the race.** Options: (a) the sample as built (per-thread correctness, a regression guard); (b) also a negative check: lower the runtime
+  once with the flag non-TLS (a `--shared-flag` switch of `runtime-build`) and require the sample to fail at least once in N runs, to show the sample has teeth;
+  (c) more threads and iterations in the sample (4 threads, 20,000 throws), still seconds. *Recommended: (c)* now, (b) only if a regression slips past it.
+- **Rule slips.** The first `runtime-build` of this task was started in a command without `ARBACE_HOST_EXE` exported (the export was dropped from one call), so
+  `bin/seed --build` began in the worktree; stopped within a minute by its task, and `target/seed` (partial) deleted. `python3` was used for multi-line edits.
