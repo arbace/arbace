@@ -102,10 +102,52 @@
             (recur (long e) out)))
         out))))
 
+(def ^:private host-targets
+  (delay (let [f (java.io.File. "test/c/dg-targets.edn")]
+           (if (.exists f) (read-string (slurp f)) {:triple "x86_64-linux-gnu" :effective {}}))))
+
+(defn- glob-match? [^String pat ^String s]
+  (boolean (re-matches (re-pattern (-> pat (str/replace "." "\\.") (str/replace "*" ".*") (str/replace "?" "."))) s)))
+
+(defn- sel-atom
+  "A selector's atom: an effective-target name (the host's table, true when the table has none) or a target triple's
+  pattern (`x86_64-*-*`) matched against the host's triple."
+  [^String w]
+  (if (re-find #"[-*]" w)
+    (glob-match? w (:triple @host-targets))
+    (let [m (:effective @host-targets)] (if (contains? m w) (boolean (get m w)) true))))
+
+(defn eval-selector
+  "A selector expression of DejaGnu's target lists (`! dfp`, `bitint && int128`, `{ x86_64-*-* i?86-*-* }`, `c || c++11`)
+  on the reference host (test/c/dg-targets.edn): `!`, `&&`, `||`, parentheses and braces, words side by side taken as
+  alternatives."
+  [^String body]
+  (let [toks (vec (re-seq #"\|\||&&|!|\(|\)|\{|\}|[^\s(){}!&|]+" body))
+        pos (atom 0)
+        peek* #(get toks @pos)
+        next* #(let [t (get toks @pos)] (swap! pos inc) t)
+        open? #(contains? #{"(" "{"} %)
+        close? #(contains? #{")" "}"} %)
+        atom-start? #(let [t (peek*)] (and t (or (= t "!") (open? t) (not (or (close? t) (= t "&&") (= t "||"))))))]
+    (letfn [(un []
+              (let [t (next*)]
+                (cond (nil? t) true
+                      (= t "!") (not (un))
+                      (open? t) (let [v (alt)] (when (close? (peek*)) (next*)) v)
+                      :else (sel-atom t))))
+            (conj* []
+              (loop [v (un)]
+                (if (= (peek*) "&&") (do (next*) (let [w (un)] (recur (and v w)))) v)))
+            (alt []
+              (loop [v (conj*)]
+                (cond (= (peek*) "||") (do (next*) (let [w (conj*)] (recur (or v w))))
+                      (atom-start?) (let [w (conj*)] (recur (or v w)))
+                      :else v)))]
+      (if (empty? toks) true (alt)))))
+
 (defn sel-info
-  "A selector word (`target c`, `xfail *-*-*`, ...): {:applies bool :xfail bool}. C++-only selectors do
-  not apply; any other target selector is taken to apply on the reference host (gcc's own run of the file,
-  `gcc-lines`, shows where that is wrong)."
+  "A selector word (`target c`, `xfail *-*-*`, ...): {:applies bool :xfail bool}. A target selector is evaluated on the
+  reference host (`eval-selector`, test/c/dg-targets.edn); C++-only selectors do not apply; the others hold."
   [sel]
   (if (nil? sel)
     {:applies true :xfail false}
@@ -115,10 +157,11 @@
           body (str/trim (subs t (cond xf 5 tg 6 :else 0)))
           neg (boolean (re-find #"^\{?\s*!" body))
           cxx (boolean (re-find #"c\+\+" body))
-          nonc (boolean (re-matches #"\{?\s*!\s*c\s*\}?" body))]
+          nonc (boolean (re-matches #"\{?\s*!\s*c\s*\}?" body))
+          v (eval-selector body)]
       (cond
-        xf {:applies true :xfail (not (and cxx (not neg)))}
-        tg {:applies (if cxx neg (not nonc)) :xfail false}
+        xf {:applies true :xfail (if (and cxx (not neg)) false v)}
+        tg {:applies (cond nonc false cxx (and neg v) :else v) :xfail false}
         :else {:applies true :xfail false}))))
 
 (defn- resolve-line [spec dl]
@@ -143,9 +186,14 @@
                (cond
                  (= name "do")
                  (let [[act sel] words]
-                   (if (and (not (:action a)) (:applies (sel-info sel)) (not (:xfail (sel-info sel))))
-                     (assoc a :action (keyword act))
-                     a))
+                   (cond
+                     (:action a) a
+                     (and (:applies (sel-info sel)) (not (:xfail (sel-info sel)))) (assoc a :action (keyword act))
+                     ;; a target selector that does not hold on the host: the test is unsupported there (DejaGnu's "N")
+                     (and sel (not (:xfail (sel-info sel))) (re-find #"^\s*target" (str sel))
+                          (not (re-find #"c\+\+" (str sel))))
+                     (assoc a :action (keyword act) :unsupported true)
+                     :else a))
                  (contains? message-kinds name)
                  (let [[_ _ sel spec] words
                        {:keys [applies xfail]} (sel-info sel)
@@ -373,11 +421,11 @@
                [nm d] (sort dg)]
            (let [r (get rd nm)
                  g (get gc nm)
-                 v (verdict d r)
+                 v (if (:unsupported d) [:pass] (verdict d r))
                  ;; the directives' own check: gcc's errors on the file against what they expect
                  ga (:agrees g)
                  base (if (= (first v) :pass)
-                        [(str id "/" nm) :pass (str (name (:action d)))]
+                        [(str id "/" nm) :pass (if (:unsupported d) (str (name (:action d)) " (unsupported on this target)") (str (name (:action d))))]
                         [(str id "/" nm) :fail (str (name (second v)) ": " (nth v 2))])
                  kr (get known (str id "/" nm))
                  row (cond-> base
