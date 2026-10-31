@@ -1824,3 +1824,8 @@ print's `-iquote` finds it by); see CP95.
 - **CP97 Directives inside a list in a function body.** The directive placement of `init-list` reads the unit's `*directives*`; a function body's directives are the compound statement's pending ones (`compound-forms`) and a directive inside
   a statement is left out there. No case in the samples. Options: (a) as built (top level and class bodies); (b) the same placement for a local declaration's list, with `*pending*` giving the directives that stand inside an element range;
   (c) a directive inside a statement kept as text of that statement. *Recommended: (a)* until a case shows (the whole HotSpot corpus will say).
+
+### Decided (CP95-CP97; the user, 2026-10-31)
+
+All as recommended: CP95 (b), `-ffile-prefix-map` for both compilers on both builds; CP96 (c), fixed by count after
+the whole HotSpot corpus (CP80 (b)); CP97 (a) until a case shows.
