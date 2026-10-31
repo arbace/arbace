@@ -193,14 +193,20 @@ mem_of() {  # mem_of NAME FIELD: a number of NAME.mem
 # the Clojure reader and skips one that does not read. Review 001, finding 5: a key with no value (a
 # keyword followed by another or by the closing brace: an odd-length map, which the reader rejects) is
 # no pass either (record_pass's values are never keywords). KEY (queue 023, report 022 finding 8): the record's
-# :key is KEY, the name it is kept under (a record copied or written by hand under another key is not its pass)
-pass_reads() {  # pass_reads FILE [NAME [KEY]]
+# :key is KEY, the name it is kept under (a record copied or written by hand under another key is not its pass).
+# LOG (GTS95 (b)): the record's :log-sha256 is the digest of its log, when there is one: LOG, by default FILE's
+# KEY.log beside it (a record and a log that do not belong together, e.g. a log replaced or cut, are no pass)
+pass_reads() {  # pass_reads FILE [NAME [KEY [LOG]]]
   [ -s "$1" ] || return 1
   head -c 9 "$1" | grep -q '^{:step "' || return 1
   [ -z "${2:-}" ] || head -1 "$1" | grep -qF "{:step \"$2\" :key \"${3:-}" || return 1
   [ -z "${3:-}" ] || head -1 "$1" | grep -qF "{:step \"$2\" :key \"$3\"" || return 1
   grep -q ':log-sha256 "[0-9a-f]\{64\}"' "$1" && [ "$(tail -c 2 "$1")" = "}" ] || return 1
-  ! tr '\n' ' ' < "$1" | grep -qE '(^|[ {]):[a-z0-9-]+[[:space:]]*(}|[[:space:]]:[a-z])'
+  ! tr '\n' ' ' < "$1" | grep -qE '(^|[ {]):[a-z0-9-]+[[:space:]]*(}|[[:space:]]:[a-z])' || return 1
+  local log=${4:-}
+  [ -n "$log" ] || case $1 in *.edn) log=${1%.edn}.log ;; esac
+  [ -n "$log" ] && [ -e "$log" ] || return 0
+  [ "$(sha256sum < "$log" | cut -c1-64)" = "$(sed -n 's/.*:log-sha256 "\([0-9a-f]\{64\}\)".*/\1/p' "$1" | head -1)" ]
 }
 # inputs_unchanged NAME (queue 023, report 022 finding 2): the plan's file, pin and logic lines of NAME
 # (plan/NAME.inputs, hashed when the plan was made) hashed again: a file edited while the step ran (in this
@@ -246,7 +252,7 @@ record_pass() {  # record_pass NAME: its pass in the store at its key (GTS7 (a))
     "${cpu:-nil}" "${rss:-nil}" "${tree:-nil}" \
     "$(sha256sum < "$logs/$name.log" | cut -c1-64)" \
     "$([ -n "${GATE_CLEAN_INNER:-}" ] && echo ' :clean true')" > "$t.edn.tmp" \
-    && pass_reads "$t.edn.tmp" "$name" "$k" || { rm -rf "${t:?}".*; return 1; }
+    && pass_reads "$t.edn.tmp" "$name" "$k" "$t.log.tmp" || { rm -rf "${t:?}".*; return 1; }
   rm -f "$d/$k.edn" || { rm -rf "${t:?}".*; return 1; }
   for f in log inputs out; do
     [ -e "$t.$f.tmp" ] || continue
