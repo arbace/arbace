@@ -863,6 +863,69 @@
          (vec (concat (:defs @*structs*) head protos (keep first gvars) (keep second gvars) defs (when wrapper [wrapper])))]))))
 
 ;; ---------------------------------------------------------------------------------------------
+;; The judgment of bin/cppi lower-check
+
+(defn- slurp? [^String p] (let [f (java.io.File. p)] (when (.exists f) (str/trim (slurp f)))))
+(defn- same-bytes? [^String a ^String b]
+  (let [fa (java.io.File. a) fb (java.io.File. b)]
+    (and (.exists fa) (.exists fb)
+         (java.util.Arrays/equals (java.nio.file.Files/readAllBytes (.toPath fa)) (java.nio.file.Files/readAllBytes (.toPath fb))))))
+
+(defn file-result
+  "One file's levels and outcome: {:name :outcome :ir :rt :obj :lower :gcc :run :gxx}; outcome :pass, :oracle-rejected
+  (clang rejects the file: not a lowering's case), or the first level that did not hold."
+  [^String work ^String n]
+  (let [d (str work "/files/" n "/")
+        st #(slurp? (str d %))
+        ir (st "ir.status")
+        rt (some-> (st "rt.status") (str/split #"\t") first)
+        obj (cond (not (.exists (java.io.File. (str d "print.o")))) "none" (same-bytes? (str d "x.o") (str d "print.o")) "same" :else "differs")
+        refused (st "lower.refused")
+        gcc (st "gcc.status")
+        orig (st "orig.status") low (st "low.status")
+        run (cond (nil? orig) "no-original" (nil? low) "none"
+                  (and (= orig low) (same-bytes? (str d "orig.out") (str d "low.out"))) "same" :else "differs")
+        gxx (cond (nil? (st "gxx.status")) "none"
+                  (and (= orig (st "gxx.status")) (same-bytes? (str d "orig.out") (str d "gxx.out"))) "agrees" :else "differs")
+        no-main (= "1" (st "no-main"))
+        run (if (and no-main (= gcc "0")) "no-main" run)
+        outcome (cond
+                  (not= ir "0") :oracle-rejected
+                  (and (not no-main) (not= (st "orig-link.status") "0")) :original-link
+                  (not= rt "ok") :forms
+                  (not= obj "same") :object
+                  refused :lowering
+                  (not= gcc "0") :gcc
+                  (not (#{"same" "no-main"} run)) :run
+                  :else :pass)]
+    {:name n :outcome outcome :ir ir :rt rt :obj obj :lower (if refused (first (str/split refused #"\t")) "ok") :gcc (or gcc "-")
+     :run run :gxx gxx :orig-status orig :low-status low}))
+
+(defn judge
+  "WORK/results.tsv and WORK/summary.edn from the files' levels against the known file (NAME -> class): a non-pass is known
+  when its name is listed, else failing."
+  [^String work ^String known-path]
+  (let [known (if (.exists (java.io.File. known-path)) (read-string (slurp known-path)) {})
+        names (for [l (str/split-lines (slurp (str work "/list.tsv"))) :when (seq l)] (first (str/split l #"\t")))
+        rs (mapv #(file-result work %) names)
+        status (fn [r] (cond (= :pass (:outcome r)) :pass (= :oracle-rejected (:outcome r)) :oracle-rejected
+                             (contains? known (:name r)) :known :else :failing))
+        lines (for [r rs] (str/join "\t" [(:name r) (name (status r)) (name (:outcome r)) (:rt r) (:obj r) (:lower r) (:gcc r) (:run r) (:gxx r)
+                                         (or (:orig-status r) "-") (or (:low-status r) "-") (if-let [c (get known (:name r))] (name c) "-")]))
+        cnt (fn [k] (count (filter #(= k (status %)) rs)))
+        by (fn [f] (into (sorted-map) (frequencies (map f rs))))
+        summary {:files (count rs) :pass (cnt :pass) :known (cnt :known) :failing (cnt :failing) :oracle-rejected (cnt :oracle-rejected)
+                 :outcomes (by (comp name :outcome)) :forms (by #(or (:rt %) "-")) :objects (by :obj) :lowering (by :lower)
+                 :gxx (by :gxx)
+                 :known-classes (into (sorted-map) (frequencies (keep #(when (= :known (status %)) (name (get known (:name %)))) rs)))}]
+    (spit (str work "/results.tsv") (str "name\tstatus\toutcome\tforms\tobject\tlowering\tgcc\trun\tgxx\torig\tlow\tclass\n" (str/join "\n" lines) "\n"))
+    (spit (str work "/summary.edn") (str (pr-str summary) "\n"))
+    (println (str "lower-check: " (count rs) " files, " (:pass summary) " pass, " (:known summary) " known, " (:failing summary) " failing, "
+                  (:oracle-rejected summary) " rejected by the oracle"))
+    (doseq [r rs :when (= :failing (status r))] (println "  failing:" (:name r) (name (:outcome r)) (:lower r)))
+    (when (pos? (:failing summary)) (System/exit 1))))
+
+;; ---------------------------------------------------------------------------------------------
 ;; bin/cppi lower
 
 (defn c-forms-text
@@ -908,7 +971,9 @@
                        pool (java.util.concurrent.Executors/newFixedThreadPool (Integer/parseInt (or (System/getenv "CPPI_THREADS") "4")))
                        futs (mapv (fn [[n ll dir]]
                                     (.submit pool ^java.util.concurrent.Callable
-                                             (fn [] (let [r (lower-file ll (str n ".c"))]
+                                             (fn [] (let [[_ rt d] (llvm/roundtrip-one (str dir "/forms.ae") ll (str dir "/print.ll"))
+                                                          _ (spit (str dir "/rt.status") (str rt "\t" d "\n"))
+                                                          r (lower-file ll (str n ".c"))]
                                                       (if (:refused r)
                                                         (spit (str dir "/lower.refused") (str (name (:refused r)) "\t" (str/replace (str (:message r)) #"[\t\n]" " ") "\n"))
                                                         (do (spit (str dir "/lowered.c.ae") (:ae r)) (llvm/spit-latin1 (str dir "/lowered.c") (:c r))))
@@ -917,4 +982,5 @@
                    (doseq [f futs] (.get ^java.util.concurrent.Future f))
                    (.shutdown pool)
                    (println (count futs) "lowered or refused"))
-    (do (println "cppi: lower, lower-rt or lower-list") (System/exit 2))))
+    "judge" (let [[work known] args] (judge work known))
+    (do (println "cppi: lower, lower-rt, lower-list or judge") (System/exit 2))))

@@ -1,0 +1,139 @@
+#!/bin/bash
+# cppi, C++'s eval (doc/cpp/CPP-SURVEY.md §5, "As built: CX6"; doc/cpp/LLVM.md): the oracle (clang -O0) compiles a C++
+# translation unit to LLVM IR, repr/llvm reads it as LLVM forms (arbace.repr.llvm), and arbace.cpp.lower lowers them to C
+# forms, printed as C by repr/c. Until ci (C23's C5) runs C forms, gcc -O0 is the second judge: it compiles the printed
+# C with the runtime of exceptions (arbace/cpp/rt/eh.c.ae, C forms) and the program runs as the original. All of it on the
+# tools' host (stage 0, evaluated from the checkout); the light tier by default (CPPI_JOBS 4, GOMEMLIMIT 1500MiB).
+#
+#   bin/cppi lower FILE.ll [-o OUT.c] [--forms OUT.ae]
+#                               FILE's IR lowered to C forms (OUT.ae) and printed as C (OUT.c, default FILE.c)
+#   bin/cppi runtime OUT.c      the runtime of exceptions printed as C
+#   bin/cppi testsuite          libstdc++-v3/testsuite extracted from the pinned gcc 15.2.0 tarball into .tmp/cppi/gcc/
+#                               (REPR_CPP_GCC_TARBALL, default the main checkout's .tmp/c1/gcc/gcc-15.2.0.tar.xz)
+#   bin/cppi list samples|libstdcxx [--sample N]
+#                               a check list on the standard output (NAME, STD, ARGS, PATH, tab-separated): test/cpp/samples, or
+#                               the testsuite's run tests (no compile/link/preprocess/error directive, no threads, no shared
+#                               libraries, named locales or file I/O requirements), every Nth (default 15)
+#   bin/cppi lower-check LIST WORK [--jobs N]
+#                               each file of LIST: the IR (clang++ -O0 -S -emit-llvm), the original (the IR linked by clang++)
+#                               run, g++'s build run (the reference's opinion, recorded), the IR's round trip through LLVM
+#                               forms (read, print, clang -c: the object equal to the original IR's), the lowering, gcc -O0
+#                               on the lowered C and its run: the status and stdout equal to the original's; judged against
+#                               test/cpp/lower-known.edn into WORK/results.tsv and WORK/summary.edn
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+. "$root/bin/lib/tmpdir.bash"
+. "$root/bin/lib/tools.bash"
+main_checkout=$root
+case $root in */.tmp/worktrees/*) main_checkout=${root%%/.tmp/worktrees/*} ;; esac
+export GOMAXPROCS=${GOMAXPROCS:-4} GOMEMLIMIT=${GOMEMLIMIT:-1500MiB}
+ts_root=$root/.tmp/cppi/gcc/gcc-15.2.0/libstdc++-v3/testsuite
+GCC_FLAGS="-std=gnu23 -O0 -w -fno-builtin -fno-strict-aliasing -ffp-contract=off"
+
+testsuite() {
+  local t=${REPR_CPP_GCC_TARBALL:-$main_checkout/.tmp/c1/gcc/gcc-15.2.0.tar.xz} want
+  want=$(GOMEMLIMIT=1GiB arbace_tool -e "(print (get-in (read-string (slurp \"$root/test/cpp/corpora.edn\")) [:pins :gcc-15.2.0 :sha256]))")
+  [ "$(sha256sum "$t" | cut -d' ' -f1)" = "$want" ] || { echo "testsuite: $t is not the pinned tarball" >&2; exit 1; }
+  mkdir -p "$root/.tmp/cppi/gcc"
+  tar -xJf "$t" -C "$root/.tmp/cppi/gcc" gcc-15.2.0/libstdc++-v3/testsuite
+  echo "testsuite: $ts_root"
+}
+
+list_samples() {
+  local f
+  for f in "$root"/test/cpp/samples/*.cpp; do printf '%s\t%s\t%s\t%s\n' "samples/$(basename "$f")" c++23 "" "$f"; done
+}
+
+list_libstdcxx() { # the run tests: no directive but run, no threads, shared libraries, named locales or file I/O
+  local n=${1:-15} f std opts
+  [ -d "$ts_root" ] || { echo "list: no testsuite (bin/cppi testsuite)" >&2; exit 1; }
+  ( cd "$ts_root" && find . -name '*.cc' -path './[0-9][0-9]_*' | LC_ALL=C sort ) | sed 's|^\./||' > "$TMPDIR/cppi-all.list"
+  ( cd "$ts_root" && grep -L -E "dg-do (compile|link|preprocess)|dg-error|dg-additional-sources|dg-require-(thread|effective-target pthread)|-pthread|dg-require-sharedlib|dg-require-namedlocale|dg-require-fileio|dg-require-gthreads" $(cat "$TMPDIR/cppi-all.list") ) \
+    | grep -v '^30_threads' | awk -v n="$n" 'NR % n == 1' > "$TMPDIR/cppi-run.list"
+  while read -r f; do
+    std=gnu++17
+    if grep -q -E 'target c\+\+26' "$ts_root/$f"; then std=gnu++26
+    elif grep -q -E 'target c\+\+23' "$ts_root/$f"; then std=gnu++23
+    elif grep -q -E 'target c\+\+2[0a]' "$ts_root/$f"; then std=gnu++20; fi
+    opts=$(grep -o 'dg-options "[^"]*"' "$ts_root/$f" | head -1 | sed 's/dg-options "//; s/"$//' || true)
+    s=$(printf '%s' "$opts" | grep -o -- '-std=[a-z+0-9]*' | tail -1 | sed 's/-std=//' || true)
+    [ -n "$s" ] && std=$s
+    opts=$(printf '%s' "$opts" | tr ' ' '\n' | grep -E '^-(D|U|f(no-)?(exceptions|rtti|char8_t|sized-deallocation|aligned-new))' | tr '\n' ' ' || true)
+    printf '%s\t%s\t%s\t%s\n' "$f" "$std" "-I$ts_root/util $opts" "$ts_root/$f"
+  done < "$TMPDIR/cppi-run.list"
+}
+
+one() { # one NAME STD ARGS PATH: the native steps of one file into $work/files/NAME/
+  local n=$1 std=$2 args=$3 p=$4 d=$work/files/$1
+  mkdir -p "$d"
+  # shellcheck disable=SC2086
+  ( cd "$d" && timeout 300 clang++ -x c++ -std=$std $args -O0 -S -emit-llvm "$p" -o x.ll ) > "$d/ir.log" 2>&1; echo $? > "$d/ir.status"
+  [ "$(cat "$d/ir.status")" = 0 ] || return 0
+  ( cd "$d" && timeout 300 clang++ x.ll -o orig -lm ) > "$d/orig-link.log" 2>&1; echo $? > "$d/orig-link.status"
+  ( cd "$d" && timeout 300 clang -c x.ll -o x.o ) > "$d/obj.log" 2>&1
+  grep -q "undefined reference to \`main'" "$d/orig-link.log" && echo 1 > "$d/no-main"
+  if [ "$(cat "$d/orig-link.status")" = 0 ]; then
+    ( cd "$d" && timeout 20 ./orig > orig.out 2> orig.err ); echo $? > "$d/orig.status"
+  fi
+  # shellcheck disable=SC2086
+  ( cd "$d" && timeout 300 g++ -x c++ -std=$std $args -O0 "$p" -o gxx -lm ) > "$d/gxx-link.log" 2>&1; echo $? > "$d/gxx-link.status"
+  if [ "$(cat "$d/gxx-link.status")" = 0 ]; then
+    ( cd "$d" && timeout 20 ./gxx > gxx.out 2> gxx.err ); echo $? > "$d/gxx.status"
+  fi
+  rm -f "$d/gxx" ; return 0
+}
+
+two() { # two NAME: the print's object, gcc on the lowered C and its run
+  local n=$1 d=$work/files/$1
+  [ -f "$d/print.ll" ] && { ( cd "$d" && timeout 300 clang -c print.ll -o print.o ) > "$d/print-obj.log" 2>&1; echo $? > "$d/print-obj.status"; }
+  if [ -f "$d/lowered.c" ]; then
+    # shellcheck disable=SC2086
+    if [ -f "$d/no-main" ]; then
+      ( cd "$d" && timeout 300 gcc $GCC_FLAGS -c lowered.c -o lowered.o ) > "$d/gcc.log" 2>&1; echo $? > "$d/gcc.status"
+      return 0
+    fi
+    ( cd "$d" && timeout 300 gcc $GCC_FLAGS lowered.c "$work/rt.o" -o low -lstdc++ -lm ) > "$d/gcc.log" 2>&1; echo $? > "$d/gcc.status"
+    if [ "$(cat "$d/gcc.status")" = 0 ]; then
+      ( cd "$d" && timeout 20 ./low > low.out 2> low.err ); echo $? > "$d/low.status"
+    fi
+  fi
+  rm -f "$d/low" "$d/orig"; return 0
+}
+export -f one two; export GCC_FLAGS
+
+lower_check() {
+  local list=$1; work=$2; shift 2
+  local jobs=${CPPI_JOBS:-4}
+  while [ $# -gt 0 ]; do case $1 in --jobs) jobs=$2; shift 2 ;; *) echo "lower-check: unknown option $1" >&2; exit 2 ;; esac; done
+  mkdir -p "$work"; work=$(cd "$work" && pwd); export work
+  cp "$list" "$work/list.tsv"
+  local t0 t1 t2 t3
+  t0=$(date +%s)
+  tr '\t\n' '\037\0' < "$work/list.tsv" | xargs -0 -P "$jobs" -I{} nice bash -c 'IFS=$'"'"'\037'"'"' read -r n s a p <<< "$1"; one "$n" "$s" "$a" "$p"' _ {}
+  t1=$(date +%s)
+  arbace_tool -m arbace.cpp.lower lower-rt "$root/arbace/cpp/rt/eh.c.ae" "$work/rt.c"
+  # shellcheck disable=SC2086
+  gcc $GCC_FLAGS -c "$work/rt.c" -o "$work/rt.o"
+  cut -f1 "$work/list.tsv" | while read -r n; do
+    [ -f "$work/files/$n/x.ll" ] && printf '%s\t%s\t%s\n' "$n" "$work/files/$n/x.ll" "$work/files/$n"
+  done > "$work/lower.tsv"
+  CPPI_THREADS=$jobs arbace_tool -m arbace.cpp.lower lower-list "$work/lower.tsv"
+  t2=$(date +%s)
+  cut -f1 "$work/list.tsv" | tr '\n' '\0' | xargs -0 -P "$jobs" -I{} nice bash -c 'two "$1"' _ {}
+  t3=$(date +%s)
+  echo "lower-check: native $((t1-t0)) s, read, print and lower $((t2-t1)) s, gcc and runs $((t3-t2)) s" | tee "$work/times.txt"
+  arbace_tool -m arbace.cpp.lower judge "$work" "$root/test/cpp/lower-known.edn"
+}
+
+case ${1:-} in
+  lower) shift; arbace_tool -m arbace.cpp.lower lower "$@" ;;
+  runtime) arbace_tool -m arbace.cpp.lower lower-rt "$root/arbace/cpp/rt/eh.c.ae" "$2" ;;
+  testsuite) testsuite ;;
+  list) case ${2:-} in
+          samples) list_samples ;;
+          libstdcxx) n=15; [ "${3:-}" = --sample ] && n=$4; list_libstdcxx "$n" ;;
+          *) echo "list: samples or libstdcxx" >&2; exit 2 ;;
+        esac ;;
+  lower-check) shift; lower_check "$@" ;;
+  *) sed -n '2,/^set -e/p' "$0" | sed '$d;s/^# \{0,1\}//' >&2; exit 2 ;;
+esac
