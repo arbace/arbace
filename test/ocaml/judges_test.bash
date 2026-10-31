@@ -64,4 +64,15 @@ out=$(judge_aot judge "$k/check.tsv" "$k/corpus.tsv" "$k/refs.edn" "$k/oi.tsv" "
 printf '["b"]\n' > "$k/aot-slow.edn"
 printf '[\n ["a" "fail" "known gc: a finaliser (output differs (1 bytes, ocamlopt 1))" "differs"]\n ["b" "slow" "timeout 120s" "differs"]\n ["c" "pass" "" "same"]\n]\n' > "$k/aot-results.edn"
 out=$(judge_aot judge "$k/check.tsv" "$k/corpus.tsv" "$k/refs.edn" "$k/oi.tsv" "$k/aot-results.edn" "$k/classes.edn"); expect "aot: a timeout of a listed slow program is the speed class" 0 'classes: .*:speed 1' "$out" $?
+
+# finding 9: bin/oi suite expect is a check: the run against the record, the committed record untouched without --record
+only='basic/patmatch_for_multiple'
+before=$(sha256sum "$root/test/ocaml/ref-expect.edn")
+out=$(cd "$root" && bin/oi suite expect --only "$only" 2>&1); st=$?
+expect "expect: a run equal to the record passes" 0 'equals the record' "$out" $st
+[ "$before" = "$(sha256sum "$root/test/ocaml/ref-expect.edn")" ] || { echo "FAIL expect: the committed record was rewritten by a plain run"; bad=1; }
+sed 's/\("basic\/patmatch_for_multiple.ml" \)"pass"/\1"diff"/; s/\("tests\/basic\/patmatch_for_multiple.ml" \)"pass"/\1"diff"/' "$root/test/ocaml/ref-expect.edn" > "$W/ref-expect.tampered"
+cmp -s "$W/ref-expect.tampered" "$root/test/ocaml/ref-expect.edn" && { echo "FAIL expect: the test's tampering did not apply"; bad=1; }
+out=$(cd "$root" && OI_EXPECT_RECORD=$W/ref-expect.tampered bin/oi suite expect --only "$only" 2>&1); st=$?
+expect "expect: a run that differs from the record fails" 1 'not in the record' "$out" $st
 exit $bad

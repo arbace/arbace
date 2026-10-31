@@ -55,7 +55,7 @@ cmd_suite_roles() {
 # ---- the expect action, run by the host's expect tool (testsuite/tools/expect.ml built against compiler-libs)
 
 EXPECT_DIR=$root/.tmp/o7/exp
-EXPECT_RESULTS=$root/test/ocaml/ref-expect.edn
+EXPECT_RESULTS=${OI_EXPECT_RECORD:-$root/test/ocaml/ref-expect.edn}
 
 cmd_suite_expect_build() {
   need_tree; mkdir -p "$EXPECT_DIR"
@@ -131,17 +131,33 @@ cmd_suite_expect() {
   }' "$S/headers.tsv" > "$S/expect.list"
   if [ -n "${ONLY:-}" ]; then grep -E "^tests/($ONLY)" "$S/expect.list" > "$S/expect.list.only" || true; mv "$S/expect.list.only" "$S/expect.list"; fi
   export -f suite_expect_one; export EXPECT_DIR T_ROOT
-  local out=$S/expect.tsv
-  [ -n "${ONLY:-}" ] && out=$S/expect-only.tsv; EXPECT_RESULTS_ALL=$EXPECT_RESULTS; [ -n "${ONLY:-}" ] && EXPECT_RESULTS=$S/expect-only.edn
+  local out=$S/expect.tsv gen=$S/expect-run.edn
+  [ -n "${ONLY:-}" ] && { out=$S/expect-only.tsv; gen=$S/expect-only.edn; }
   tr '\n' '\0' < "$S/expect.list" | xargs -0 -n 1 -P "${JOBS:-3}" bash -c 't=$(printf "\t"); suite_expect_one "${0%%"$t"*}" "${0#*"$t"}"' > "$out.new"
   LC_ALL=C sort "$out.new" > "$out"; rm -f "$out.new"
-  { echo ";; The expect action's host runs (bin/oi suite expect; doc/ocaml/OCAML-SURVEY.md, \"As built: OC102, OC104, OC105 (b), OC106 (b)\"): testsuite/tools/expect.ml"
+  { echo ";; The expect action's host runs (bin/oi suite expect --record; doc/ocaml/OCAML-SURVEY.md, \"As built: OC102, OC104, OC105 (b), OC106 (b)\"): testsuite/tools/expect.ml"
     echo ";; built against the host's compiler-libs, linked whole, and run as ocamltest runs it (-repo-root the tree's stdlib), on the file, then with -principal on the correction:"
     echo ";; [FILE RESULT NOTE], RESULT pass (the final correction equals the file), diff, error, skip (the header's constraint or build sequence). Read with the Clojure reader."
     echo "["
     sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' "$out" | awk -F'\t' '{ printf " [\"%s\" \"%s\" \"%s\"]\n", $1, $2, $3 }'
-    echo "]"; } > "$EXPECT_RESULTS"
-  echo "oi: expect: $(wc -l < "$out") tests: $(cut -f2 "$out" | sort | uniq -c | tr '\n' ' ')($EXPECT_RESULTS)"
+    echo "]"; } > "$gen"
+  echo "oi: expect: $(wc -l < "$out") tests: $(cut -f2 "$out" | sort | uniq -c | tr '\n' ' ')($gen)"
+  # a check, as the other verbs: the run against the record (review 008's finding 9); --record rewrites the record, from a whole run
+  if [ "${RECORD:-0}" = 1 ]; then
+    [ -z "${ONLY:-}" ] || die "expect --record needs the whole run (no --only)"
+    cp "$gen" "$EXPECT_RESULTS"; echo "oi: expect: recorded $EXPECT_RESULTS"; return 0
+  fi
+  if [ -z "${ONLY:-}" ]; then
+    cmp -s "$gen" "$EXPECT_RESULTS" || { diff "$EXPECT_RESULTS" "$gen" | head -20 >&2; echo "oi: expect: the run differs from $EXPECT_RESULTS" >&2; return 1; }
+  else
+    # the rows of this run (a subset) all in the record
+    grep '^ \[' "$gen" > "$S/expect-rows.txt" || true
+    if grep -v -x -F -f "$EXPECT_RESULTS" "$S/expect-rows.txt" > "$S/expect-notrec.txt"; then
+      sed 's/^/oi: expect: not in the record: /' "$S/expect-notrec.txt" >&2
+      echo "oi: expect: the rows differ from $EXPECT_RESULTS" >&2; return 1
+    fi
+  fi
+  echo "oi: expect: the run equals the record ($EXPECT_RESULTS)"
 }
 
 # the rollup: every file of testsuite/ a row of test/ocaml/testsuite-results.edn, judged (no run: the records of the levels)
