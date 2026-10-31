@@ -3009,3 +3009,77 @@ The worktree's `.tmp/`: `ci-dg/`, `ci-check/`, `ci-aot/`, `c7/` (logs, capped at
 
 All as recommended: CS140 (a); CS141 (a) after CS140; CS142 (a); CS143 (a), one family a commit; CS144 (a) with
 CS140; CS145 (a) in the heavy window; CS146 (a) with the files the follow-up made pass.
+
+## As built: CS140-CS144, CS146 (2026-10-31)
+
+On the branch `c23-c7`, in the light tier, after "Decided (CS140-CS146)": the user's decisions carried out, eight commits (`49ff3437..HEAD`). Everything stays
+outside the shipped tree (CS100 (b)): `arbace/c/{check,dg}.ae`, `arbace/repr/c/*`, `arbace/repr/c.ae`, `bin/ci`'s libraries, `test/c/`; nothing under `go/`, `overlay/`, `jdk/`.
+
+### C7G.1 What was built
+
+| part | where | what |
+|---|---|---|
+| CS140 (a) + CS144 (a), attributes | `arbace/repr/c/parse.ae`, `convert.ae`, `tree.ae`, `print.ae`, `arbace/c/check.ae` | attributes after array and function suffixes, in type names, after labels and in `for` declarations, `[*]`, `gnu::` balanced tokens; the forms keep `:c/type-attrs`, `:c/attrs` on array and function types, `:c/after-at`, `:c/attrs` on expression statements; the printer puts type-position attributes after the type specifiers (CS140's last commit); the checker's "ignored" diagnostics, "can only be applied" for noreturn/nodiscard, reproducible/unsequenced |
+| CS141 (a), `?:` | `arbace/c/check.ae` | composite pointer types with merged qualifiers or "pointer type mismatch", `nullptr_t` rules, the read-only check through `aset` |
+| CS142 (a), targets | `test/c/dg-targets.edn`, `arbace/c/dg.ae` | target selectors evaluated from a table recorded from `gcc` probes; a file whose selector is false is "unsupported", counted as a pass |
+| CS143 (a), the preprocessor | `arbace/repr/c/pp.ae`, `lex.ae`, `pedantic.ae` | `#embed` parameter errors, `#if` "operator has no right operand", `__VA_OPT__` errors, `#elifdef` after `#else`, C23 `::` paste, UCN and identifier rules, N3353 delimited escapes, lexical pedantic notes in preprocess-only files; later `u8` character constants unsigned in `#if`, macros expanded in a `__has_c_attribute` name |
+| CS146 (a), essential | `bin/ci`, `bin/lib/ci/dg`, `test/c/essential-dg.txt`, `Makefile` | `bin/ci dg --essential` (93 files, read and judged, no gcc run), `make ci-dg-essential`; 93 of 93 pass |
+
+### C7G.2 The numbers
+
+`bin/ci dg --record` with `REPR_C_READ_BUDGET=300`, 627 files (before: the record of C7F.2):
+
+| class | before | after |
+|---|---:|---:|
+| pass | 533 | **572** |
+| decl-diag | 36 | 30 |
+| attr-diag | 14 | 6 |
+| pedantic-diag | 7 | 3 |
+| pp-diag | 12 | 3 |
+| parse-gap | 15 | 3 |
+| read-refused | 10 | 10 |
+| not in a class | 0 | 0 |
+
+Per group, pass: gcc-c23 242 of 270 (222), gcc-cpp-c23 16 of 16 (7), gcc-c23-sub 23 of 30 (23), gcc-gnu23 42 of 51 (38), gcc-embed 39 of 47 (37), gcc-va-opt 11 of 12 (9), gcc-bitint 199 of 201 (197).
+`c23-binary-constants-1`, which timed out at the 120 s read budget under the host's load, passes at 300 s (CS153).
+
+The run level: `bin/ci check --record` unchanged (committed in `fdf6de6e`; a `compcert/perlin.c` timeout under load passes). The compiled level (`bin/ci check --aot --record`): see C7G.5.
+`bin/repr-c check --c23`: 62 files, 0 failing; the round trip: all pass.
+
+### C7G.3 Checks not run
+
+`bin/repr-c parse-check` and `check --tokens` (CS145/CS156: need tools/ccdump with go-whim's module cache), `bin/ci annotations` (same), `bin/gate`, `bin/ci repl-session`.
+
+### C7G.4 Proposals (CS150-CS156)
+
+Each with options, the recommended one first; none decided.
+
+- **CS150 The remaining attribute and parse diagnostics** (`attr-syntax-3/5/6/7`, `gnu23-attr-syntax-2/3`, `has-c-attribute-4`, `bitint-21/75`).
+  - Options: (a) by pattern, starting with "attributes before C23" and `vector_size` validation; (b) leave.
+  - *Recommended: (a)* for those 3 files only.
+- **CS151 `gnu::base64` and `#embed` string-literal diagnostics** (`embed-4/18/27`, `embed-6/7`).
+  - Options: (a) escape decoding (`\N{name}` needs a Unicode names table) and strict base64; (b) leave.
+  - *Recommended: (b)* until a names table exists.
+- **CS152 The decl-diag long tail.**
+  - Options: (a) family by family as CS133; (b) leave; (c) only what run programs need.
+  - *Recommended: (a)*.
+- **CS153 The read budget under load.**
+  - Options: (a) the default of `bin/ci dg` raised to 300 s; (b) cache `parse-type` results of `typeof` and typedefs; (c) leave.
+  - *Recommended: (a)* now, (b) later.
+- **CS154 Decimal-float suffixes `d32` and `d64x`**, refused by design (CS3 (a)).
+  - Options: (a) keep refusing; (b) read them as a decimal-float literal form.
+  - *Recommended: (a)*.
+- **CS155 `bin/ci dg --essential` as a gate step** (C8's CS135).
+  - Options: (a) a step with `test/c/essential-dg.txt` and the checker's sources as inputs; (b) leave it manual.
+  - *Recommended: (a)*.
+- **CS156 CS145 again.** The lexer now differs from cc in identifier continuation, `#embed` header names, UCN errors and delimited escapes.
+  - Options: (a) run `parse-check` and `check --tokens` in the heavy window and record the new known entries; (b) accept the divergence classes now.
+  - *Recommended: (a)*.
+
+### C7G.5 Shipped files, scratch and rule slips
+
+Shipped files changed: none (nothing under `go/`, `overlay/`, `jdk/`).
+Scratch in the worktree's `.tmp/`: `c7/` (logs, capped at 1 MB), `ci-dg/`, `ci-check/`, `ci-aot/`.
+
+Rule slips: a `> /dev/null` in one nohup redirect (previous agent); the CS143 families in one commit (they share `pp.ae`, `lex.ae`, `pedantic.ae`) plus a later small commit `7de9cb4f`; CS141 committed by temporarily
+reverting hunks (no stash was used); this follow-up's run waited with a sleep longer than the tool's foreground limit once, which moved it to the background (no effect on results).
