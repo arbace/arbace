@@ -3255,3 +3255,81 @@ Rule slips: none known.
 
 All as recommended: CS170 (a), for c23-bool-errors-3 only, (b) not now; CS171 (a); CS172 (a), with a dg run; CS173 (a);
 CS174 (a), c23-tag-6 and c23-tag-enum-5, then (b), `constexpr` representability.
+
+## As built: CS170, CS172, CS174 (2026-10-31)
+
+On the branch `c23-c7`, in the light tier, after "Decided (CS170-CS174)": four commits, one change each (`c95acb83` CS170 (a), `d9bc924e` CS174 (a), `9dcebbdb` CS174 (b), `04e87f97` CS172 (a)).
+Outside the shipped tree (CS100 (b)): `arbace/c/check.ae`, `arbace/repr/c/{parse,convert}.ae`, `test/c/`; nothing under `go/`, `overlay/`, `jdk/`.
+
+### C7J.1 What was built
+
+| entry | where | what |
+|---|---|---|
+| CS170 (a) | `parse.ae` (`*recover*`) | two sites for `c23-bool-errors-3`: `true`/`false` as enumerators (the prelude's macros, so the lookahead is the integer constant `1`/`0` made of them; the macro's name is read from the token) are reported as gcc does ("cannot use keyword ... as enumeration constant") and read as identifiers, in the first position and after a comma; `typedef enum { ... } bool;` (a definition of an enumeration followed by C23's `bool` and no declarator) reports the keyword where gcc expects `;`. Nothing general: CS161 stays not now |
+| CS174 (a) | `check.ae` | `c23-tag-6`: a `_Generic` association whose type is incomplete (a struct under its own definition, a tag never defined) is an error; `c23-tag-enum-5`: an enumeration whose definition is nested in its own (in an enumerator's expression, or in the text of its fixed underlying type, which is checked before the tag is entered) marks the outer definition, whose enumerators are then new declarations, so the repeated ones are redeclared as gcc says (the exemption for a repeated definition of C23 6.7.3.3 does not apply) |
+| CS174 (b) | `check.ae` | `constexpr` representability of floating, complex and decimal objects (`constexpr-float-bad`): a signaling NaN of another type (`__builtin_nans`, `-nansf`, `-nansl`, the decimal `-nansd32/64/128` are typed, the signaling kind in `:snan`); a double float cannot hold (underflow, overflow, a significand beyond 24 bits); an integer beyond the significand (float, double; long double 64 bits); `__builtin_complex`'s two parts one by one (it was typed int before); a real initializer of a complex object; a binary object given a decimal value ("initializer for a binary floating-point type is of decimal type"); a decimal object given a value that does not fit the format's digits and quantum range (`dec-limits`: 7/16/34 digits, quanta -101..90, -398..369, -6176..6111; decimal constants keep their `BigDecimal` in `:dec`, so `0e-200DD` and 20-digit constants are caught, unary minus carries it; integers and binary values go through their exact expansion with trailing zeros stripped); a compound literal's single plain element reaches the check with its result |
+| CS172 (a) | `convert.ae` | every function definition of the main file has the name's line (`:line` of the declarator), not only those with attributes (CS160) or an old-style list; a full dg read before and after: the rows of the 627 files equal line for line (result, class and message), the record unchanged |
+
+The decimal case answers CS174 (b)'s question: the decimal types allowed it. They are types of the checker (`:dec32`, `:dec64`, `:dec128`, `:dec64x`) and the converter keeps a decimal constant's digits and exponent as a `BigDecimal`; only the arithmetic of decimals is not modelled, and the rule needs none.
+
+### C7J.2 The numbers
+
+`bin/ci dg --record` (a full run with gcc), 627 files; before: the record at `3ccd3b8e` (CS160's), after: the record at `04e87f97`:
+
+| class | before | after |
+|---|---:|---:|
+| pass | 593 | **598** |
+| decl-diag | 16 | 11 |
+| pedantic-diag | 2 | 2 |
+| pp-diag | 3 | 3 |
+| parse-gap | 3 | 3 |
+| read-refused | 10 | 10 |
+| attr-diag | 0 | 0 |
+| not in a class | 0 | 0 |
+
+Per group, pass: gcc-c23 258 of 270 (254), gcc-cpp-c23 16 (16), gcc-c23-sub 24 of 30 (23), gcc-gnu23 49 of 51 (49), gcc-embed 39 (39), gcc-va-opt 11 (11), gcc-bitint 201 of 201 (201).
+New passes (5, none lost), all from decl-diag: `c23-bool-errors-3`, `c23-tag-6`, `c23-tag-enum-5`, `c23-constexpr-9`, `c23-constexpr-dfp-2`. The record moves by commit: 594, 596, 598, 598; the numbers after the first three come
+from the dg read and judge of the six groups (`arbace.c.dg read`, `judge --record`, no gcc rerun, the gcc outputs being unchanged), the last from the full `bin/ci dg --record`, which left the file as committed.
+`c23-binary-constants-1` timed out (`the evaluated read's budget spent`) in two of the intermediate reads, while the host was loaded by a clean gate run beside it (load average above 15), and passes alone and in the full run; its line was kept in the commits.
+`bin/ci dg --essential`: 105 of 105 (before: 100; added `c23-bool-errors-3`, `c23-tag-6`, `c23-tag-enum-5`, `c23-constexpr-9`, `c23-constexpr-dfp-2`).
+
+The run level, after the last change: `bin/ci check --record` over all corpora: unchanged but `compcert/perlin.c`, which timed out again (`differ status timeout`) under the run's load, restored with `git checkout` (the committed record, perlin passes, stands).
+`bin/repr-c check --c23`: 62 files, 59 pass, 3 expected failures, 0 failing. The round trip (`bin/repr-c roundtrip --corpus c23conf,c23,tcc-tests2 --no-run`): c23conf 49 of 49, c23 62 of 62, tcc-tests2 85 pass and 3 known (as in C7I.2: `64_macro_nesting.c`, `18_include.c`, `95_bitfields.c`).
+
+### C7J.3 Checks not run
+
+As in C7I.3: the compiled level (`bin/ci check --aot`), `bin/repr-c parse-check` and `check --tokens` (CS164, with CS156; `parse.ae` changed only behind `*recover*`), `bin/ci annotations` (`check.ae` changed: `__builtin_complex`, `__builtin_nans*` and the decimal builtins now have types and the constexpr rule is new; the run level and the round trips are the evidence, since `annotations` compares with cc's checker over corpora that hold no constexpr), `bin/gate`, `bin/ci repl-session`. The Java check was not touched.
+
+### C7J.4 What is left
+
+decl-diag (11): `c23-complit-5` (needs CS161), `c23-complit-8`, `c23-typeof-2` (CS163), `c23-enum-7` (CS162), `c23-stdarg-11`, `c23-tag-composite-11` (jump into the scope of a VLA-typed tag), `gnu23-tag-2` (conflicting types), `gnu23-tag-composite-5` (VLA initialization), `embed-18`, `embed-27`, `embed-4` (hard parse errors, CS161).
+read-refused (10): `c23-auto-3`, `c23-constexpr-3` ("a function definition whose declarator is not a function's"), `c23-binary-constants-3`, `c23-utf8char-3`, and the decimal-suffix files (`c23-constants-3/4`, `c23-decimal64x-1` to `-4`: by design, CS3 (a)).
+pedantic-diag (2): `c23-digit-separators-2`, `embed-4` (gcc.dg/cpp, traditional C). parse-gap (3): `c23-stdint-1`, `embed-11`, `embed-2`. pp-diag (3): `embed-6`, `embed-7`, `va-opt-6`.
+The recovery's sites are now twelve (ten of C7I.4, the enumerator keywords and `bool` after a tag).
+Note for `c23-constexpr-3` (refused by the converter): its integer and float lines (`v102`-`v105`, `__LONG_LONG_MAX__` into float and double) are covered by the new rule once the file reads.
+
+### C7J.5 Proposals (CS180-CS184)
+
+Each with options, the recommended one first; none decided.
+
+- **CS180 The converter's refusal of definitions whose declarator is not a function's** (`c23-auto-3`, `c23-constexpr-3`; the message of both is "convert: a function definition whose declarator is not a function's").
+  - Options: (a) read what the files hold (probably a function returning a pointer to function or a typeof-declarator definition) and lift the refusal for it; (b) leave it refused by design (the C forms have no node for it); (c) in the dg check only, recover by skipping the definition's body.
+  - *Recommended: (a)*, after looking at the two files' declarators: if the case is one declarator shape, it is one site, and c23-constexpr-3 then exercises CS174 (b)'s integer lines and `v98`-`v100` (complex given to a real object), which the checker has yet to give.
+- **CS181 The next decl-diag group: tags and VLAs** (`gnu23-tag-2`, `gnu23-tag-composite-5`, `c23-tag-composite-11`: three files, one or two lines each, C23's composite tag types with variably modified members).
+  - Options: (a) all three in one change, in the checker's record types (compatibility of a tag redefined with a VLA member, the initializer of a variable-sized object, the jump into a VLA's scope for the new tag); (b) only `gnu23-tag-composite-5` (VLA initialization, the smallest); (c) leave.
+  - *Recommended: (b)* first, then the others by what the first shows; they share a model (a tag with a member of variably modified type) that does not exist in the checker yet.
+- **CS182 CS163 and CS162** (static functions used and never defined, `static` literals in inline functions: `c23-typeof-2`, `c23-complit-8`; empty declarations of enumerations: `c23-enum-7`), carried over from C7I.5 and still "not now".
+  - Options: (a) CS163's two files with one per-function record at the end of the unit (used in an evaluated context, defined or not, declared `extern` later); (b) CS162 with the enum rules for empty declarations (thirty lines in one file, with CS161's recovery); (c) leave both.
+  - *Recommended: (a)*: two files, one mechanism; (c) for CS162 until a second file needs its rules.
+- **CS183 CS161 and the embed files** (`embed-18/27/4`, `c23-stdarg-11`, `c23-complit-5`: files stopped by hard parse errors, 5 files with 100+ lines).
+  - Options: (a) the generic resynchronization at `;` or `}` in `*recover*` (CS161), judged by the whole dg run and the false errors in passing files; (b) one local site per file as in CS170 (embed's `#embed` parameter lists: `expected ')'` after malformed parameters), (c) leave.
+  - *Recommended: (b)* for `embed-18/27/4` if their malformed parameters are one construct (three files, 90 lines), (a) still not now: the sites so far reached their files without a false error in a passing one.
+- **CS184 Where to stop the dg check.** 598 of 627, the rest 29 files in classes recorded as deferred or gaps, most of the remaining being a file each.
+  - Options: (a) take CS180 and CS182 (a) and then stop, the checker's other lines being the long tail of gcc's diagnostics; (b) go on by size until the classes are empty; (c) stop now and move the light tier to the other agenda items (CS164's `parse-check`/`--tokens` with CS156, in the heavy window, then `bin/ci annotations`).
+  - *Recommended: (a)*, with (c)'s heavy checks run before the branch is merged, since `check.ae` and `parse.ae` changed in the last three rounds and the checks of CS164 and `annotations` have not run on them.
+
+### C7J.6 Shipped files, scratch and rule slips
+
+Shipped files changed: none (nothing under `go/`, `overlay/`, `jdk/`).
+Scratch in the worktree's `.tmp/`: `c7/` (logs `r1`-`r4*.log`, `ess1`-`ess3.log`, `final2.log`, `dgrec.log`; `check-tag.patch`, `check-full.ae`, `fn.ae`, `rows-before172.edn`), `c7s/` (`m1.txt`-`m5.txt`: file lists for `one`), `t/` (probe files), `dg-orig.edn`, `dg-rec.edn`.
+Rule slips: none that ran. A heredoc of a Python helper once held the text `open('/dev/null')` in a branch that never executed (`if False`), which the rule forbids even in text; nothing was opened.
