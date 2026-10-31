@@ -7,7 +7,9 @@
       PLANDIR holds files.sha256 (the checkout's files, bin/gate's) and hosts.edn; prints the report
       and exits 1 when the step read a file of the checkout it does not declare (an open or an execve
       of a file the step's key does not cover); a directory listed with no declared file below it is
-      advisory. LOADED (GT5, GTS4 (c)): the namespaces the step's Arbace processes loaded, one
+      advisory; since queue 023 (report 022, finding 6) also when it wrote a checked-in file (not in its
+  :audit-known), or read a tree outside the checkout that the keys know only by a pin or host it does not
+  declare ($GOROOT/test, TamaGo's go, jdk26u, a JDK's java or javac run: outside-problems). LOADED (GT5, GTS4 (c)): the namespaces the step's Arbace processes loaded, one
       scriptbase a line (ARBACE_LOADED_LOG, RT.load): the audit fails on one of its :never-loads
 
   Since GT5 a step's :uses cover the inputs of the steps they name (their outputs, in its key, are
@@ -99,6 +101,38 @@
 (def ^:private system-roots
   ["/usr/" "/lib/" "/lib64/" "/bin/" "/sbin/" "/etc/" "/proc/" "/sys/" "/dev/" "/run/" "/var/" "/opt/"
    "/root/.cache/go-build/" "/root/.config/" "/root/go/pkg/"])
+
+;; queue 023, report 022 finding 6: what the audit fails on beyond the undeclared reads of the checkout
+(defn failing-writes
+  "the checked-in files the step wrote (opened for writing) that its :audit-known does not list: a step that
+  rewrites a tracked file changes its neighbours' inputs while they run, and its own key's"
+  [wrote known]
+  (sort (remove #(contains? known %) wrote)))
+
+(defn outside-problems
+  "the reads outside the checkout whose tree is known to the keys only by a pin or a host the step does not
+  declare: [[NEED N EXAMPLE] ...]. OPS {path #{op}}; GOROOT TamaGo's (its test/ needs
+  seed/goroot-test.sha256, the rest :go or seed/goroot.sha256), JDK26U jdk26u (jdk/javac/platform.sha256);
+  a JDK's java or javac executed needs :jdk. DECLARED? a checkout file the step (or a :uses producer, a
+  host) declares; HOSTS the step's and its producers' hosts"
+  [ops ^String goroot ^String jdk26u declared? hosts]
+  (let [under? (fn [^String p ^String r] (and (seq r) (or (= p r) (str/starts-with? p (str r "/")))))
+        hs (set hosts)
+        needs (for [[^String p o] ops
+                    :let [need (cond
+                                 (and (o "X") (re-find #"/bin/javac?$" p) (not (under? p goroot)))
+                                 (when-not (hs :jdk) ":jdk (a JDK's java or javac run)")
+                                 (not (or (o "R") (o "X") (o "D"))) nil
+                                 (under? p (str goroot "/test"))
+                                 (when-not (declared? "seed/goroot-test.sha256") "the pin seed/goroot-test.sha256 ($GOROOT/test)")
+                                 (under? p goroot)
+                                 (when-not (or (hs :go) (declared? "seed/goroot.sha256")) "the host :go or the pin seed/goroot.sha256 (TamaGo's go)")
+                                 (under? p jdk26u)
+                                 (when-not (declared? "jdk/javac/platform.sha256") "the pin jdk/javac/platform.sha256 (jdk26u)"))]
+                    :when need]
+                [need p])]
+    (vec (for [[need ps] (sort-by key (group-by first needs))]
+           [need (count ps) (first (sort (map second ps)))]))))
 
 (defn -main [root plandir nm paths-file & [loaded-file]]
   (let [{:keys [groups steps]} (read-file (or (System/getenv "GATE_STEPS") (str root "/test/gate/steps.edn")))
@@ -203,7 +237,8 @@
       (when (seq @undecl-stat)
         (println (str "stat only, undeclared (their existence, not their content): " (count @undecl-stat) " files")))
       (when (seq @wrote)
-        (println (str "written checked-in files: " (count @wrote)))
+        (println (str "written checked-in files: " (count @wrote)
+                      (when (seq (filter known-gaps @wrote)) " (some in :audit-known, not failing)")))
         (doseq [l (grouped (sort @wrote))] (println l)))
       (when (seq roots)
         (println "outside the checkout (read):")
@@ -233,7 +268,18 @@
                                                  "none loaded"))))))
       (when (and (seq never) (not loaded))
         (println "namespaces loaded: no record (ARBACE_LOADED_LOG: an executable before GT5 does not write it)"))
-      (let [bad (+ (count @undecl-read) (count unloadable))]
-        (println (if (zero? bad) (str "audit " nm ": ok")
-                     (str "audit " nm ": " (count @undecl-read) " undeclared" (when (seq unloadable) (str ", " (count unloadable) " never-loads loaded")))))
-        (System/exit (if (zero? bad) 0 1))))))
+      ;; queue 023, report 022 finding 6: a tracked file written, an outside tree read without its pin or host
+      (let [wbad (failing-writes @wrote known-gaps)
+            obad (outside-problems ops (or (System/getenv "ARBACE_GOROOT") "/root/tamago-go")
+                                   (or (System/getenv "JDK") "/root/jdk26u")
+                                   declared? (concat (:hosts step) (mapcat :hosts prods)))]
+        (when (seq obad)
+          (println (str "UNDECLARED outside the checkout (a tree the keys know by a pin or host the step lacks): " (count obad)))
+          (doseq [[need n ex] obad] (println (str "   " need ": " n " paths, e.g. " ex))))
+        (let [bad (+ (count @undecl-read) (count unloadable) (count wbad) (count obad))]
+          (println (if (zero? bad) (str "audit " nm ": ok")
+                       (str "audit " nm ": " (count @undecl-read) " undeclared"
+                            (when (seq wbad) (str ", " (count wbad) " checked-in files written"))
+                            (when (seq obad) (str ", " (count obad) " outside trees undeclared"))
+                            (when (seq unloadable) (str ", " (count unloadable) " never-loads loaded")))))
+          (System/exit (if (zero? bad) 0 1)))))))

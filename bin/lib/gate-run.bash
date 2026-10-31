@@ -8,6 +8,7 @@
 #   plan_inputs DIR      DIR/files.sha256 and DIR/hosts.edn, run_plan DIR [--rerun]: the plan
 #   step NAME HEAVY CMD  one step, logged, timed, measured (GT1); a heavy one under GATE_HEAVY_CMD
 #   record_pass, load_plan, run_one, report, pre_step, run_chain, chains_of, names_of
+#   inputs_unchanged NAME  the plan's file, pin and logic lines hashed again before a pass is recorded
 #   gate_prune [--dry-run]  the store and the executables trimmed (GTS27 (a))
 #   gate_audit [STEP...] the strace audit of the declared inputs (GT4)
 #   audit_reducer DIR, audit_reduce FIFO, audit_compare NAME STATUS
@@ -70,9 +71,33 @@ plan_inputs() {  # plan_inputs DIR: DIR/files.sha256 and DIR/hosts.edn
   mkdir -p "$d"
   find . \( -path ./.git -o -path ./.tmp -o -path ./target -o -path ./.claude \) -prune -o -type f -printf '%P\n' \
     | LC_ALL=C sort | xargs -d '\n' sha256sum > "$d/files.sha256" || return 1
+  # queue 023, report 022 finding 9: a symbolic link is keyed by its target's text (the SHA-256 of
+  # readlink's output: find -type f skipped it, so no key held it); a name sha256sum escapes (a backslash or
+  # a newline in it: its line starts with \ and gate.plan's fixed columns would misread it) refuses the plan
+  local l
+  find . \( -path ./.git -o -path ./.tmp -o -path ./target -o -path ./.claude \) -prune -o -type l -printf '%P\n' \
+    | LC_ALL=C sort | while IFS= read -r l; do
+        printf '%s  %s\n' "$(readlink -- "$l" | tr -d '\n' | sha256sum | cut -c1-64)" "$l"
+      done >> "$d/files.sha256" || return 1
+  if grep -q '^\\' "$d/files.sha256"; then
+    echo "gate: file names the plan cannot key (a backslash or a newline in them): $(grep '^\\' "$d/files.sha256" | head -3 | cut -c67- | tr '\n' ' ')" >&2
+    return 1
+  fi
+  # :jdk (queue 023, report 022 finding 3): the release files of the JDK the steps run, java's (the frozen
+  # jar's JVM, bin/lib/frozen.bash) and javac's (the reference javac), each resolved from PATH through its
+  # links; none when neither is there
+  local b r h=
+  for b in java javac; do
+    r=none
+    jdk=$(command -v "$b") && jdk=$(readlink -f "$jdk") && [ -f "${jdk%/bin/$b}/release" ] \
+      && r=$(sha256sum < "${jdk%/bin/$b}/release" | cut -c1-64)
+    h="$h$b $r
+"
+  done
   rel=none
-  jdk=$(command -v javac) && jdk=$(readlink -f "$jdk") && [ -f "${jdk%/bin/javac}/release" ] \
-    && rel=$(sha256sum < "${jdk%/bin/javac}/release" | cut -c1-64)
+  [ "$h" = "java none
+javac none
+" ] || rel=$(printf '%s' "$h" | sha256sum | cut -c1-64)
   # the program hosts (GT5, GTS4 (b), (c)): the units of the build at this key (units.tsv), pending
   # when there is no build yet, none for a build made before the units were recorded
   local pu=pending ju=pending
@@ -167,15 +192,33 @@ mem_of() {  # mem_of NAME FIELD: a number of NAME.mem
 # NAME, closed; an empty or cut one (a full disk's, GT7's rerun 4) is no pass. The planner reads it with
 # the Clojure reader and skips one that does not read. Review 001, finding 5: a key with no value (a
 # keyword followed by another or by the closing brace: an odd-length map, which the reader rejects) is
-# no pass either (record_pass's values are never keywords)
-pass_reads() {
+# no pass either (record_pass's values are never keywords). KEY (queue 023, report 022 finding 8): the record's
+# :key is KEY, the name it is kept under (a record copied or written by hand under another key is not its pass)
+pass_reads() {  # pass_reads FILE [NAME [KEY]]
   [ -s "$1" ] || return 1
   head -c 9 "$1" | grep -q '^{:step "' || return 1
-  [ -z "${2:-}" ] || head -1 "$1" | grep -qF "{:step \"$2\" :key \"" || return 1
+  [ -z "${2:-}" ] || head -1 "$1" | grep -qF "{:step \"$2\" :key \"${3:-}" || return 1
+  [ -z "${3:-}" ] || head -1 "$1" | grep -qF "{:step \"$2\" :key \"$3\"" || return 1
   grep -q ':log-sha256 "[0-9a-f]\{64\}"' "$1" && [ "$(tail -c 2 "$1")" = "}" ] || return 1
   ! tr '\n' ' ' < "$1" | grep -qE '(^|[ {]):[a-z0-9-]+[[:space:]]*(}|[[:space:]]:[a-z])'
 }
+# inputs_unchanged NAME (queue 023, report 022 finding 2): the plan's file, pin and logic lines of NAME
+# (plan/NAME.inputs, hashed when the plan was made) hashed again: a file edited while the step ran (in this
+# worktree, by another agent or step) means the run tested other content than its key's, NAME.recheck
+# names the files. The hosts' identities and the :uses digests are not hashed again
+inputs_unchanged() {
+  awk '($1 == "file" || $1 == "pin" || $1 == "logic") && $2 != "missing" { p = $0; sub(/^[a-z]+ [0-9a-f]+ /, "", p); print $2 "  " p }' \
+    "$logs/plan/$1.inputs" > "$logs/$1.recheck.sha256" || return 1
+  [ -s "$logs/$1.recheck.sha256" ] || return 0
+  (cd "$root" && sha256sum -c "$logs/$1.recheck.sha256") > "$logs/$1.recheck" 2>&1
+}
 record_pass() {  # record_pass NAME: its pass in the store at its key (GTS7 (a)), with its outputs (GT5)
+  # queue 023, report 022 finding 2: not recorded when an input changed while the step ran (its key is the
+  # plan's snapshot's)
+  if ! inputs_unchanged "$1"; then
+    echo "gate: the pass of $1 not recorded: its inputs changed while it ran: $(grep -v ': OK$' "$logs/$1.recheck" | head -5 | tr '\n' ' ')($logs/$1.recheck)" >&2
+    return 1
+  fi
   # GTS80 (a): every file through a temporary name renamed into place, the record last (a pass is its
   # .edn), each checked whole first: a full disk leaves temporary files (removed), never a cut pass. The
   # temporaries are dotfiles ending in .tmp, never .edn (review 001, finding 3: gate.plan's passes reads
@@ -203,7 +246,7 @@ record_pass() {  # record_pass NAME: its pass in the store at its key (GTS7 (a))
     "${cpu:-nil}" "${rss:-nil}" "${tree:-nil}" \
     "$(sha256sum < "$logs/$name.log" | cut -c1-64)" \
     "$([ -n "${GATE_CLEAN_INNER:-}" ] && echo ' :clean true')" > "$t.edn.tmp" \
-    && pass_reads "$t.edn.tmp" "$name" || { rm -rf "${t:?}".*; return 1; }
+    && pass_reads "$t.edn.tmp" "$name" "$k" || { rm -rf "${t:?}".*; return 1; }
   rm -f "$d/$k.edn" || { rm -rf "${t:?}".*; return 1; }
   for f in log inputs out; do
     [ -e "$t.$f.tmp" ] || continue
@@ -270,7 +313,7 @@ run_one() {  # run_one NAME: a step of the plan, as decided (once: a build of th
     key[$n]=$(sha256sum < "$logs/plan/$n.inputs" | cut -c1-64)
     # (re-review 020, finding 4: a record that reads, pass_reads, as the planner's and publish_passes'
     # decisions: an empty, cut or odd-length one at the key is no pass, and the step runs)
-    if [ -z "${rerun:-}" ] && pass_reads "$store/$n/${key[$n]}.edn" "$n"; then
+    if [ -z "${rerun:-}" ] && pass_reads "$store/$n/${key[$n]}.edn" "$n" "${key[$n]}"; then
       why[$n]="cut off: its producers' outputs as at its pass; $(pass_desc "$store/$n/${key[$n]}.edn")"
       dec[$n]=skip; echo "${why[$n]}" > "$logs/$n.why"
       restore_out "$n" || { echo "notrun its outputs" > "$logs/$n.status"; touch "$logs/$n.done"; return 1; }

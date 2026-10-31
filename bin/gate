@@ -93,6 +93,9 @@
 #                                   (jdk/javac/platform.sha256), the system JDK (javac 26), the frozen jar
 #                                   (test/oracle/frozen-jar.sha256, when FROZEN_JAR names it), the frozen
 #                                   tree's tag; $GOROOT/test's digest recorded (FILE: as a map)
+#        bin/gate --outside-pins    (queue 023, report 022 finding 4; the ordinary gate's pre-step outside)
+#                                   TamaGo's go and \$GOROOT/test hashed against seed/goroot.sha256 and
+#                                   seed/goroot-test.sha256, jdk26u's work tree clean (when there)
 #        bin/gate --full --concurrent  (GTS37 (a)) --full's chains at once (GATE_FULL_PARALLEL=1) under the
 #                                   host's big lock taken once for the whole run (bin/heavy-lock;
 #                                   GATE_CONCURRENT_HELD=1: the caller holds it), its heavy steps and the
@@ -104,6 +107,8 @@
 #                0. makefile      make check-makefile: every bin/ script the Makefile (the
 #                                 newcomers' interface) runs exists (seconds)
 #                1. seed          bin/seed --check: the seed is the pinned one
+#                   outside       bin/gate --outside-pins: TamaGo's go, its $GOROOT/test and jdk26u
+#                                 against their pins (queue 023; not in the clean run, whose pins step does it)
 #                2. stage0        bin/seed --build --no-aot: stage 0, the host of the build's tools,
 #                                 built from the seed by Go's toolchain (target/seed; kept by the
 #                                 seed's and Go's pins since GT3, GTS12 (a); seconds with Go's
@@ -308,7 +313,10 @@
 # store of passes; GATE_FULL_PARALLEL=1: --full's chains concurrently, the java chain after
 # javac-tool (serial is the default since GT3, GTS13 (a): the chains at once overload a 62 GB host,
 # 20 GiB j2g runs, repr-go-native's reads, REAP9, 2026-10-26; GATE_FULL_SERIAL is accepted, a
-# no-op); GATE_FRESH_G1=1: the fixpoint builds its G1 (the clean run's hook, GT7).
+# no-op); GATE_FRESH_G1=1: the fixpoint builds its G1 (the clean run's hook, GT7). Every other variable
+# of the tools' families (ARBACE_*, GATE_*, J2G_*, REPR_*, JAVA_CHECK_*, CLOJURE_TESTS_*, GOI_*, FROZEN_*,
+# ...: gate_scrub_env) is dropped and named on stderr, since no key holds it (queue 023, report 022
+# finding 1); GATE_STEPS, GATE_PROG_UNITS, GATE_JAVAC_PROG_UNITS need ARBACE_GATE_STORE.
 # Exit status: 0 when every step passed or was skipped.
 
 set -uo pipefail
@@ -319,7 +327,7 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
 unset ARBACE_HOST_EXE J2G_GO_EXE REPR_GO_EXE
 usage() { echo "usage: bin/gate [--full] [--rerun] | bin/gate [--full] --plan [--builds] | bin/gate --why STEP | bin/gate --audit [STEP...] | bin/gate --prune [--dry-run] | bin/gate [--full] --clean [--tag TAG] [--only STEP,...|failed|changed] [--plan] | bin/gate --pins [FILE] | bin/gate --full --concurrent" >&2; exit 2; }
-full= plan_only= why= rerun= audit= prune= dry= clean= clean_tag= pins= pins_out= concurrent= builds= only=
+full= plan_only= why= rerun= audit= prune= dry= clean= clean_tag= pins= pins_out= concurrent= builds= only= outside=
 steps_arg=() orig_args=("$@")
 while [ $# -gt 0 ]; do
   case $1 in
@@ -331,6 +339,7 @@ while [ $# -gt 0 ]; do
     --only) [ $# -ge 2 ] || usage; only=$2; shift ;;
     --pins) pins=1; if [ $# -ge 2 ] && [ "${2#-}" = "$2" ]; then pins_out=$2; shift; fi ;;
     --concurrent) concurrent=1; full=1 ;;
+    --outside-pins) outside=1 ;;
     --why) [ $# -ge 2 ] || usage; why=$2; full=1; shift ;;
     --rerun) rerun=1 ;;
     --audit) audit=1; full=1 ;;
@@ -345,6 +354,49 @@ mode=essential; [ -n "$full" ] && mode=full
 [ -n "$builds" ] && [ -z "$plan_only" ] && usage
 [ -n "$clean" ] && { [ -n "$concurrent$audit$why$prune" ] && usage; }
 [ -n "$only" ] && { [ -n "$clean" ] && [ -z "$plan_only" ] || usage; }
+
+# Queue 023 (report 022, finding 1): the caller's environment. A key holds a step's declared :env alone,
+# so a variable the steps' tools read that changes a verdict (CLOJURE_TESTS_EXPECTED, FROZEN_JAR,
+# REPR_JAVA_STALE_OK, JAVA_CHECK_LOAD, REPR_GO_READER, ARBACE_PATH, ...) would make a pass at a key that
+# does not hold it, in the store the worktrees share. The rule: the tools' own variable families are
+# dropped, as clean_launch drops them (ARBACE_*, GATE_*, J2G_*, REPR_*, JAVA_CHECK_*, CLOJURE_TESTS_*,
+# GOI_*, FROZEN_*, JAVAC_*, BOX_*, JRT_*, GOCMP_*, NETHTTP_*, GOWHIM_*, TAMAGO_*, ORACLE_*, REAP_*,
+# SMOKE_*, SURFACE*, the Go toolchain's GOFLAGS, GOROOT, GOOS, GOARCH, GOMEMLIMIT), but those that choose
+# only where things are kept, how the steps are scheduled and locked, and how the audit and the report
+# work (never what passes), and those a step declares in :env (keyed): gate_keep_env. GATE_STEPS,
+# GATE_PROG_UNITS and GATE_JAVAC_PROG_UNITS (the gate's own tests: a toy table, units given) are refused
+# unless ARBACE_GATE_STORE names a store of their own. Not in the clean run (clean_launch drops its own
+# list and passes FROZEN_JAR on, checked by the pins) nor --pins (it checks what it is given).
+gate_keep_env() {
+  case $1 in
+    ARBACE_GOROOT|ARBACE_HEAVY_LOCK|ARBACE_HEAVY_HELD|ARBACE_GATE_STORE|ARBACE_GATE_EXES|ARBACE_GATE_KEEP|ARBACE_GATE_KEEP_DAYS) return 0 ;;
+    ARBACE_GOCACHE_KEEP_MIN) return 0 ;;
+    GATE_HEAVY_CMD|GATE_TEST_JOBS|GATE_FRESH_G1|GATE_FULL_PARALLEL|GATE_FULL_SERIAL|GATE_CANARY|GATE_ALL_PARTS) return 0 ;;
+    GATE_CONCURRENT_HELD|GATE_CONCURRENT_LOCK|GATE_CPU_LOG|GATE_AUDIT_*) return 0 ;;
+    GATE_STEPS|GATE_PROG_UNITS|GATE_JAVAC_PROG_UNITS) [ -n "${ARBACE_GATE_STORE:-}" ] ;;
+    *) return 1 ;;
+  esac
+}
+gate_scrub_env() {
+  local v dropped=()
+  for v in GATE_STEPS GATE_PROG_UNITS GATE_JAVAC_PROG_UNITS; do
+    if [ -n "${!v+x}" ] && [ -z "${ARBACE_GATE_STORE:-}" ]; then
+      echo "gate: $v is set (the gate's own tests: another table or the units given) but ARBACE_GATE_STORE is not: its passes would go into the shared store; set ARBACE_GATE_STORE to a store of its own, or unset $v" >&2
+      exit 2
+    fi
+  done
+  for v in $(compgen -e); do
+    gate_keep_env "$v" && continue
+    case $v in
+      ARBACE_*|GATE_*|J2G_*|REPR_*|JAVA_CHECK_*|CLOJURE_TESTS_*|GOI_*|FROZEN_*|JAVAC_*|BOX_*|HEAVY_LOCK_*|JRT_*|GOCMP_*|NETHTTP_*|GOWHIM_*|TAMAGO_*|ORACLE_*|REAP_*|SMOKE_*|SURFACE*|GOFLAGS|GOROOT|GOOS|GOARCH|GOMEMLIMIT)
+        unset "$v"; dropped+=("$v") ;;
+    esac
+  done
+  [ ${#dropped[@]} -eq 0 ] || echo "gate: the environment's ${dropped[*]} dropped (no key holds them; doc/GATE-SURVEY.md, queue 023)" >&2
+}
+if [ -z "${GATE_CLEAN_INNER:-}" ] && [ -z "$pins" ] && { [ -z "$clean" ] || [ -n "$plan_only" ]; }; then
+  gate_scrub_env
+fi
 . "$root/bin/lib/gate-run.bash"
 . "$root/bin/lib/tools.bash"
 
@@ -406,6 +458,35 @@ clean_pins() {
   return $st
 }
 
+# outside_pins (queue 023, report 022 finding 4): the trees outside the checkout that the keys know by their
+# pins alone, checked against them by every ordinary gate before stage 0 (the clean run's pins step does it
+# there): TamaGo's go, its sources' hash and VERSION (seed/goroot.sha256: the :go identity is its VERSION
+# alone, and bin/seed checks the sources only when it builds), $GOROOT/test (seed/goroot-test.sha256: the
+# steps that read it declare the pin, whose tree only --pins hashed), jdk26u's work tree clean of changes to
+# tracked files when it is there (java-check's check_pin compares its commit alone). About 2-5 s. Exit 1 on
+# a mismatch
+outside_pins() {
+  local st=0 g ph pv have gt tp jdk dirty
+  . "$root/bin/lib/seed-go.bash"
+  g=$(seed_go_goroot)
+  ph=$(grep -v '^#' "$seed_go_pin" | awk 'NF {print $1; exit}'); pv=$(grep -v '^#' "$seed_go_pin" | awk 'NF {print $2; exit}')
+  have=$(seed_go_goroot_hash "$g" 2>"$TMPDIR/outside-pins.err") || have=none
+  if [ "$have" = "$ph" ] && [ "$(head -1 "$g/VERSION" 2>"$TMPDIR/outside-pins.err")" = "$pv" ]; then
+    echo "outside: TamaGo's go $g, $pv, its sources seed/goroot.sha256's"
+  else echo "outside: FAILED: TamaGo's go $g is $(head -1 "$g/VERSION" 2>"$TMPDIR/outside-pins.err") with sources $have; seed/goroot.sha256 pins $pv, $ph"; st=1; fi
+  gt=$(seed_go_test_hash "$g" 2>"$TMPDIR/outside-pins.err") || gt=none
+  tp=$(grep -v '^#' "$root/seed/goroot-test.sha256" 2>"$TMPDIR/outside-pins.err" | awk 'NF {print $1; exit}')
+  if [ -n "$tp" ] && [ "$gt" = "$tp" ]; then echo "outside: \$GOROOT/test seed/goroot-test.sha256's"
+  else echo "outside: FAILED: \$GOROOT/test of $g is $gt; seed/goroot-test.sha256 pins ${tp:-nothing}"; st=1; fi
+  jdk=${JDK:-/root/jdk26u}
+  if [ -e "$jdk/.git" ]; then
+    dirty=$(git -C "$jdk" status --porcelain --untracked-files=no 2>&1 | head -5)
+    if [ -z "$dirty" ]; then echo "outside: jdk26u $jdk, no change to its tracked files"
+    else echo "outside: FAILED: jdk26u $jdk has changes to tracked files (the platform's pin names its commit): $(echo "$dirty" | tr '\n' ' ')"; st=1; fi
+  else echo "outside: jdk26u: no checkout at $jdk (JDK; the steps that read it fail on their own)"; fi
+  return $st
+}
+
 # the main checkout (git's common directory), as gate_env finds it
 main_checkout() {
   local common
@@ -434,8 +515,8 @@ publish_passes() {
     for e in "$d"*.edn; do
       [ -f "$e" ] || continue
       k=$(basename "$e" .edn)
-      pass_reads "$e" "$n" || { echo "   gate --clean: warning: $e does not read: not published" >&2; bad=$((bad + 1)); continue; }
-      if pass_reads "$to/$n/$k.edn" "$n"; then kept=$((kept + 1)); continue; fi
+      pass_reads "$e" "$n" "$k" || { echo "   gate --clean: warning: $e does not read: not published" >&2; bad=$((bad + 1)); continue; }
+      if pass_reads "$to/$n/$k.edn" "$n" "$k"; then kept=$((kept + 1)); continue; fi
       [ -e "$to/$n/$k.edn" ] && rep=$((rep + 1))
       t=$to/$n/.$k.pub.$$
       rm -rf "${t:?}".*
@@ -444,7 +525,7 @@ publish_passes() {
         cp -a "$d$k.$f" "$t.$f.tmp" && rm -rf "${to:?}/$n/$k.$f" && mv -T "$t.$f.tmp" "$to/$n/$k.$f" \
           || { rm -rf "${t:?}".*; echo "   gate --clean: warning: the pass $n/$k not published" >&2; continue 2; }
       done
-      cp "$e" "$t.edn.tmp" && pass_reads "$t.edn.tmp" "$n" && mv -f "$t.edn.tmp" "$to/$n/$k.edn" \
+      cp "$e" "$t.edn.tmp" && pass_reads "$t.edn.tmp" "$n" "$k" && mv -f "$t.edn.tmp" "$to/$n/$k.edn" \
         || { rm -rf "${t:?}".*; echo "   gate --clean: warning: the pass $n/$k not published" >&2; continue; }
       pub=$((pub + 1))
     done
@@ -568,6 +649,7 @@ clean_record() {
 }
 
 if [ -n "$pins" ]; then clean_pins "$pins_out"; exit; fi
+if [ -n "$outside" ]; then outside_pins; exit; fi
 if [ -n "$clean" ] && [ -z "${GATE_CLEAN_INNER:-}" ]; then
   if [ -z "$plan_only" ]; then clean_launch; exit; fi
   # --clean --plan: the plan a clean run makes (an empty store and executables' directory, every part,
@@ -712,6 +794,8 @@ fi
 # before the plan, one after the other: each needs the one before (steps.edn's :pre)
 pre_step makefile - 0 make -s check-makefile
 pre_step seed 'pinned' 1 bin/seed --check
+# queue 023, report 022 finding 4: the trees outside the checkout against their pins (the clean run's pins step above)
+[ -n "${GATE_CLEAN_INNER:-}" ] || pre_step outside '^outside:' 3 "$root/bin/gate" --outside-pins
 stage0_choose
 audit_step=${audit_all:+1} pre_step stage0 'bin/seed: .*arbace|stage 0 in|stage 0 kept' 2 "${stage0_cmd[@]}"
 # the plan (GT2): each step's key, run or skipped
@@ -799,7 +883,7 @@ if [ -n "${GATE_CLEAN_INNER:-}" ]; then
   if [ -n "${GATE_CLEAN_ONLY:-}" ]; then
     mv "$logs/clean-record.edn" "$logs/clean-record.run.edn"
     arbace_tool -p "$root/test" -m gate.clean merge "$GATE_CLEAN_BASE" "$logs/clean-record.run.edn" "$GATE_CLEAN_ONLY" \
-      "${GATE_CLEAN_LOGS_NAME:-}" "$logs/clean-record.edn" | sed 's/^/   /'
+      "${GATE_CLEAN_LOGS_NAME:-}" "$logs/clean-record.edn" "$root" | sed 's/^/   /'
   fi
 fi
 if [ $status = 0 ]; then echo "== gate passed ($(secs "$start"))"; else echo "== gate FAILED ($(secs "$start"))"; fi
