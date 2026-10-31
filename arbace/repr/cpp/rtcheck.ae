@@ -78,6 +78,13 @@
     (into {} (for [l (str/split-lines (slurp p)) :when (seq l) :let [r (str/split l #"\t" -1)]] [(first r) r]))
     {}))
 
+(defn oracle-rejects?
+  "Whether a dump's status and stderr are clang rejecting the file (review 007's finding 3): cxxdump's status 1 (clang exited
+  1; cxxdump's own failures, a crash or a kill of clang are 3, a timeout of ours 124) and one of clang's own diagnostics
+  (`FILE:LINE:COL: error:` or `fatal error:`) in its stderr."
+  [st ^String err]
+  (boolean (and (= st "1") err (re-find #"(?m)^[^\s:][^:\n]*:[0-9]+:[0-9]+: (fatal )?error: " err))))
+
 (defn judge
   "The levels of each file of WORK's list, against the known file: WORK/results.tsv (name, verdict, class, read, l1,
   l3, l4 g++, l4 clang, text forms) and WORK/summary.edn; prints the table's line. Exit status 1 when a file fails."
@@ -91,7 +98,10 @@
         rows (for [nm names]
                (let [o (status (str work "/orig/" nm ".status"))
                      [_ rs texts detail full] (get r1 nm)
-                     read (cond (not= o "0") "oracle-rejects" (nil? rs) "no-read" :else rs)
+                     read (cond (= o "0") (if (nil? rs) "no-read" rs)
+                                (oracle-rejects? o (some-> (bytes-of (str work "/orig/" nm ".err")) (String. "UTF-8"))) "oracle-rejects"
+                                (nil? o) "no-dump"
+                                :else (str "dump-error-" o))
                      l1 (when (= read "ok") (and (= "ok" (second (get r2 nm))) (same? (str work "/forms/" nm ".ae") (str work "/forms2/" nm ".ae"))))
                      l3 (when (= read "ok") (and (= "0" (status (str work "/dump2/" nm ".status"))) (same? (str work "/orig/" nm ".norm") (str work "/dump2/" nm ".norm"))))
                      l4 (fn [who]
@@ -105,7 +115,10 @@
                      l5 (or full "-")
                      pass (and (= read "ok") l1 l3 (contains? #{"same" "-"} l5) (not (false? g)) (not (false? c)))
                      k (get kfiles nm)
-                     verdict (cond (= read "oracle-rejects") "oracle-rejects" pass "pass" k "known" :else "fail")]
+                     ;; a dump that failed for another reason than clang's rejection is the check's failure, never known
+                     verdict (cond (= read "oracle-rejects") "oracle-rejects" pass "pass"
+                                   (or (= read "no-dump") (str/starts-with? read "dump-error")) "fail"
+                                   k "known" :else "fail")]
                  [nm verdict (if k (name k) "-") read (str l1) (str l3) (str g) (str c) (or texts "-") (or full "-")]))
         rows (vec rows)
         cnt (fn [pred] (count (filter pred rows)))
@@ -115,6 +128,7 @@
                  :refused (cnt #(= (nth % 3) "refused"))
                  :crash (cnt #(= (nth % 3) "crash"))
                  :oracle-rejects (cnt #(= (nth % 3) "oracle-rejects"))
+                 :dump-errors (cnt #(or (= (nth % 3) "no-dump") (str/starts-with? (nth % 3) "dump-error")))
                  :l1 (cnt #(= (nth % 4) "true")) :l3 (cnt #(= (nth % 5) "true"))
                  :l4-gxx (cnt #(= (nth % 6) "true")) :l4-gxx-orig-fails (cnt #(= (nth % 6) ":orig-fails"))
                  :l5-full (cnt #(= (nth % 9) "same")) :l5-differs (cnt #(= (nth % 9) "differs"))

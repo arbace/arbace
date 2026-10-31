@@ -14,6 +14,10 @@
 // "file" and "line"). The output is Clojure-reader data (-format json: JSON Lines), one form a line: a header line, then one line per kept top-level declaration
 // (a container is kept when it is in the main file or holds a kept declaration, with only the kept ones inside).
 // Built with TamaGo's Go, CGO_ENABLED=0.
+//
+// Exit statuses (review 007's finding 3): 0 the dump written; 1 clang rejected the unit (it exited 1 on its own
+// diagnostics, the oracle's verdict); 2 usage; 3 any other failure, cxxdump's own (the filter, I/O, the cache) or clang's
+// that is not a rejection (killed by a signal, crashed, another exit status). Only 0 and 1 are kept in the cache.
 package main
 
 import (
@@ -614,7 +618,7 @@ func main() {
 		closeOut()
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "cxxdump:", err)
-			os.Exit(1)
+			os.Exit(exitOwn)
 		}
 		writeStats(*statsName, stats{in: cin.n, kept: kept, dropped: dropped, wall: time.Since(start), status: "ok"})
 		return
@@ -628,7 +632,7 @@ func main() {
 		st, hit, err := cached(*cacheDir, j, *outName)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "cxxdump:", err)
-			os.Exit(1)
+			os.Exit(exitOwn)
 		}
 		st.cache = map[bool]string{true: "hit", false: "miss"}[hit]
 		if line, err := os.ReadFile(filepath.Join(*cacheDir, st.key[:2], st.key+".stats")); hit && err == nil {
@@ -645,7 +649,7 @@ func main() {
 		if st.status != "ok" {
 			os.Stderr.WriteString(st.stderr)
 			fmt.Fprintln(os.Stderr, "cxxdump: clang rejected the unit")
-			os.Exit(1)
+			os.Exit(exitStatus(st.status))
 		}
 		return
 	}
@@ -655,7 +659,7 @@ func main() {
 	writeStats(*statsName, st)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "cxxdump:", err)
-		os.Exit(1)
+		os.Exit(exitStatus(st.status))
 	}
 	fmt.Fprintf(os.Stderr, "cxxdump: kept %d, dropped %d declarations of %s\n", st.kept, st.dropped, strings.TrimSpace(*mainFile))
 }
@@ -667,7 +671,21 @@ func openOut(name string) (io.Writer, func()) {
 	fh, err := os.Create(name)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "cxxdump:", err)
-		os.Exit(1)
+		os.Exit(exitOwn)
 	}
 	return fh, func() { fh.Close() }
+}
+
+// The exit statuses: exitRejected only for clang's own rejection of the unit (status "rejected"); everything else
+// that fails is exitOwn.
+const (
+	exitRejected = 1
+	exitOwn      = 3
+)
+
+func exitStatus(status string) int {
+	if status == "rejected" {
+		return exitRejected
+	}
+	return exitOwn
 }
