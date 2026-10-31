@@ -480,20 +480,18 @@ aot_build() {
   return $s
 }
 
-# check_one PROGRAM: one program of the check (§11.1): gc's reference (the original built by gc
-# and run, gc_ref: RPS12, since REAP2; until then the forms printed by repr/go and built) and goi's
-# run (bin/goi run, program mode), or with --aot (REAP2) the forms built by arbace.build.go
-# (aot_build) and run; compared: exit status, standard output byte for byte, standard error up to
-# the goroutines' traces. Prints PROGRAM<TAB>RESULT<TAB>REASON.
-check_one() {
-  local id=$1 p=$1 g f act args=() bflags=() w=() tmo=10 ns ref r rc st reason x c refp rf
-  g=$goroot/test/$p
-  f=$cforms/go/test/${p%.go}.ae
-  [ -f "$f" ] || { printf '%s\terror\tno forms (%s)\n' "$id" "${f#$root/}"; return; }
-  act=$(action_of "$g")
+# action_parse PROGRAM: PROGRAM's action line (action_of) as check_one runs it: sets the caller's tmo (-t, then
+# test/goi/timeouts.txt's), bflags (at --aot the action's flags, go build's: RPS17) and args (bash's dynamic
+# scope: the caller declares them local), each from its default; returns 1 with the caller's why the line to
+# print after the id (RESULT<TAB>REASON) when the program is not run so. Review 001, finding 8: check_one's
+# controls build their reference with its own action's flags and arguments, not the subject's
+action_parse() {
+  local p=$1 act x w=()
+  tmo=10 bflags=() args=()
+  act=$(action_of "$goroot/test/$p")
   if [ -n "${aot:-}" ]; then
     # the action's words as the test driver splits them, its flags go build's (RPS17)
-    x=$(action_words "$act" 2>&1) || { printf '%s\terror\tthe action cannot be split: %s\n' "$id" "$act"; return; }
+    x=$(action_words "$act" 2>&1) || { why="error	the action cannot be split: $act"; return 1; }
     while IFS= read -r x; do w+=("$x"); done <<< "$x"
     set -- "${w[@]}"
   else
@@ -503,14 +501,27 @@ check_one() {
   while [ $# -gt 0 ] && [ "${1#-}" != "$1" ]; do
     case $1 in
       -t) tmo=$2; shift 2 ;;
-      -goexperiment|-godebug) printf '%s\tskip\tthe action sets %s: %s\n' "$id" "${1#-}" "$act"; return ;;
+      -goexperiment|-godebug) why="skip	the action sets ${1#-}: $act"; return 1 ;;
       *) if [ -n "${aot:-}" ]; then bflags+=("$1"); shift
-         else printf '%s\tskip\tthe action needs gc flags: %s\n' "$id" "$act"; return; fi ;;
+         else why="skip	the action needs gc flags: $act"; return 1; fi ;;
     esac
   done
   # a program's own limit (test/goi/timeouts.txt), where the default is too short for it
   tmo=$(awk -v p="$p" -v t="$tmo" '$1 == p { t = $2 } END { print t }' "$root/test/goi/timeouts.txt")
   args=("$@")
+}
+
+# check_one PROGRAM: one program of the check (§11.1): gc's reference (the original built by gc
+# and run, gc_ref: RPS12, since REAP2; until then the forms printed by repr/go and built) and goi's
+# run (bin/goi run, program mode), or with --aot (REAP2) the forms built by arbace.build.go
+# (aot_build) and run; compared: exit status, standard output byte for byte, standard error up to
+# the goroutines' traces. Prints PROGRAM<TAB>RESULT<TAB>REASON.
+check_one() {
+  local id=$1 p=$1 g f args=() bflags=() tmo=10 ns ref r rc st reason x c refp rf why
+  g=$goroot/test/$p
+  f=$cforms/go/test/${p%.go}.ae
+  [ -f "$f" ] || { printf '%s\terror\tno forms (%s)\n' "$id" "${f#$root/}"; return; }
+  action_parse "$p" || { printf '%s\t%s\n' "$id" "$why"; return; }
   ns=$(sed -n '1s/^(ns \([^ )]*\).*/\1/p' "$f")
   gc_ref "$p" "$f" "$tmo" || return
   r=$cwork/run/$id
@@ -560,11 +571,15 @@ check_one() {
   fi
   run_verdict "$id" "$st" "$r" "$ref"
   # GTS81 (a), GTS86 (b): the negative controls whose subject this program is (test/goi/controls.txt): this
-  # run judged again, by run_verdict, against the reference's gc run (gc_ref's, cached with its own entry),
-  # under the control's id; no run or build of its own
+  # run judged again, by run_verdict, against the reference's gc run (gc_ref's, cached with its own entry: the
+  # reference's own action, flags, arguments and limit, action_parse's, review 001, finding 8), under the
+  # control's id; no run or build of its own. The loop is a pipeline's subshell: action_parse's tmo, bflags
+  # and args, and gc_ref's ref (it sets check_one's local ref, the reference's directory), change there
+  # alone, so that the subject's are untouched after it, and run_verdict reads the reference's ref
   controls_of "$p" | while read -r c refp; do
     rf=$cforms/go/test/${refp%.go}.ae
     [ -f "$rf" ] || { printf '%s\terror\tno forms of its reference (%s)\n' "$c" "${rf#$root/}"; continue; }
+    action_parse "$refp" || { printf '%s\terror\tits reference is not run: %s\n' "$c" "$(printf '%s' "$why" | tr '\t' ' ')"; continue; }
     gc_ref "$refp" "$rf" "$tmo" > "$r.cref" || { printf '%s\terror\t%s\n' "$c" "$(cut -f3 "$r.cref")"; continue; }
     run_verdict "$c" "$st" "$r" "$ref"
   done
@@ -1220,7 +1235,7 @@ check() {
   # pinned by nothing)
   export PATH=$goroot/bin:$PATH
   echo "== goi check: $(wc -l < "$list") programs, $jobs at a time" >&2
-  export -f limited limited_cpu ref_commit check_one check_dir check_err check_err_aot run_verdict dir_verdict syn_verdict err_verdict err_aot_verdict controls_of action_of action_words gc_ref aot_build aot_dir_root stderr_head gc_env box_run box_input
+  export -f limited limited_cpu ref_commit action_parse check_one check_dir check_err check_err_aot run_verdict dir_verdict syn_verdict err_verdict err_aot_verdict controls_of action_of action_words gc_ref aot_build aot_dir_root stderr_head gc_env box_run box_input
   export root goroot rexe hexe cforms dforms cwork gcwork empty box bundle aot eforms efull edumps etsv gocmp esyntax eraw
   local t0=$SECONDS
   xargs -a "$list" -P "$jobs" -I{} bash -c 'case $(action_of "$goroot/test/$1") in errorcheck*) if [ -n "$aot" ]; then check_err_aot "$1"; else check_err "$1"; fi ;; *dir|*"dir "*) dirtest=1 check_dir "$1" ;; *) check_one "$1" ;; esac' _ {} \
