@@ -2907,3 +2907,93 @@ All as recommended:
   benchmarks, CS124 (a), CS125 (a), CS126 (a) now and (b) with C8, CS127 (a).
 - C7's: CS130 (a), CS131 (c), CS132 (a) restricted to what the c23 files test, CS133 (a) in C7's follow-up in the
   light tier, CS134 (b) now, CS135 (a), CS136 (b) until most of the gcc groups' error tests pass, then (a).
+
+## As built: C7's follow-up (CS131, CS132, CS133) (2026-10-31)
+
+On the branch `c23-c7`, in the light tier, after the Decided section above: the parse gaps (CS131 (c)), the checker's pedantic mode
+(CS132 (a)) and its diagnostics by family (CS133 (a)). Everything stays outside the shipped tree (CS100 (b)): `arbace/c/{check,dg}.ae`,
+`arbace/repr/c/*` and `arbace/repr/c.ae` (not in the gate's key, `bin/lib/version.bash`); nothing under `go/`, `overlay/`, `jdk/`.
+
+### C7F.1 A finding first: the judge did not see the checker's errors
+
+C7's judge located an error by `LINE:COL:` or `FILE:LINE:COL:`; the checker writes `LINE: message`. Its errors were counted as
+"unlocated" and judged neither for the lines that expect an error nor for the lines that do not. So C7's 437 passes counted the reader's
+and the preprocessor's errors alone, and a false error of the checker could not show. `arbace.c.dg/error-line` takes `LINE: msg` now, and the
+file lists are made again by `bin/ci dg` (the checker reads the file's options from `:fc`). The numbers below are with the corrected judge.
+
+### C7F.2 The numbers
+
+`bin/ci dg` over the seven groups, 627 files (before: C7's record at `2fb50012`; after: this record):
+
+| class | before | after |
+|---|---:|---:|
+| pass | 437 | **533** |
+| decl-diag | 84 | 36 |
+| attr-diag | 27 | 14 |
+| pedantic-diag | 17 | 7 |
+| pp-diag | 13 | 12 |
+| parse-gap | 41 | 15 |
+| read-refused | 8 | 10 |
+| not in a class | 0 | 0 |
+
+By the file's expectation: of the 471 files that expect no error, **452 pass** (428 before: no passing no-error file was lost, 24 gained by the
+parser), and of the 156 that expect errors **81 pass** (9 before). Per group, pass: gcc-c23 222 of 270 (145), gcc-cpp-c23 7 of 16 (7),
+gcc-c23-sub 23 of 30 (21), gcc-gnu23 38 of 51 (30), gcc-embed 37 of 47 (36), gcc-va-opt 9 of 12 (9), gcc-bitint 197 of 201 (189).
+`read-refused` rose by two because the four `decimal64x` files now parse and the converter refuses their `d64x` suffix by design (CS3 (a)).
+The run level: RUNLEVEL_NUMBERS.
+
+### C7F.3 What was built
+
+| part | where | what |
+|---|---|---|
+| CS131 (c), the parser | `arbace/repr/c/parse.ae`, `convert.ae`, `tree.ae`, `print.ae` | `_Generic` over a type name (`:c/type` on the form, which the checker and the printer already read); storage classes in `sizeof`/`alignof` compound literals; `...` as the first and only parameter (also `(...)` in an abstract declarator, but not after a GNU attribute); abstract declarators ending at `,` and `()`/`(int)` in a type name; C23 `va_start (ap, anything)` (`__builtin_c23_va_start`: gcc skips the tokens after the first argument); `_Decimal32x`/`_Decimal64x`; `enum E : 2` in a generic association (the colon is the association's); a narrow or u8 string before a prefixed one (gcc's non-standard concatenation); `break L;`/`continue L;` (named loops); `__seg_gs`/`__seg_fs` as qualifiers; `0o` and `wb`/`wbu` in `#if`; `typeof` of a parenthesized literal (a `Lit` object leaked into the form); an empty prefixed character constant and a bare `0b` are refusals, not crashes |
+| CS132 (a), the pedantic mode | `arbace/repr/c/host.ae`, `c.ae`, `pedantic.ae`, `arbace/c/check.ae` | the file's `-pedantic-errors` (`:pedantic`) and `-Wno-c23-c2y-compat`, `-Wno-c11-c23-compat`, `-fpermissive`, `-fsigned-char`/`-funsigned-char` (with `__CHAR_UNSIGNED__`), `-fexec-charset` (static assertions not judged) are the checker's options; `pedwarn!` makes an error only then and not on a line with `__extension__` (`read-c` finds them); `arbace.repr.c.pedantic/notes`: the lexical pedwarns on the main file's own tokens (`0o` before C2y, `wb` before C23, adjacent string literals of two prefixes, `#embed` before C23); in the checker: imaginary constants, case ranges, named loops, `_BitInt(N)` before C23, old-style definitions in C23, qualifier discard |
+| CS133 (a), diagnostics | `arbace/c/check.ae` | tags: a repeated definition in a scope is the same type when the members are (C23 6.2.7; it merges), else "redefinition", a nested redefinition; tagged types compare by members (self-references cut off, variable-length and zero-length members, tagless members by their members); a conflicting redeclaration of an object or function (a block-scope `extern` against the file scope's), a typedef redefined with another type; enums: a repeated definition, an implicit constant overflowing a 64-bit type, a value outside a fixed type, `declared both with and without` a fixed type, a constant redeclared by another enum, `_BitInt` underlying types, values beyond `intmax_t` (pedantic); pointer conversion (assignment, initialization, argument, return): incompatible pointees are errors (not under `-fpermissive`), a discarded qualifier a pedwarn; call arity against a prototype; `constexpr` integer objects given a floating or complex value, `constexpr` strings whose elements the element type cannot represent; duplicate case values (ranges included); `_BitInt` widths; empty initializers of unknown-size arrays, variable-length arrays given non-empty initializers, variable-size compound literals; arrays of wide characters given a narrow or u8 string; `alignof` of an incomplete type; `nullptr` where an integer constant is required; `bool`/`_Bool` as names; data-type words beside `_Bool`/`_BitInt`; `[[...]]` arguments (`deprecated`/`nodiscard` take one string, the others none, `()` is an error for `deprecated` and `nodiscard`); attribute declarations (`[[deprecated]];` ignored, `[[fallthrough]];` at top level, outside a switch, or before no case label); `#embed` parameters (a name expected, repeated, `(` expected) |
+| the judge | `arbace/c/dg.ae` | the checker's `LINE: msg` located (C7F.1) |
+| ci's own run | `arbace/c/run.ae` | the checker runs `-fpermissive` (the references are built with `-fpermissive -w`, `bin/lib/ci/record-ref`) |
+
+### C7F.4 What is left, by class (all in `test/c/divergences-dg.edn`)
+
+- `decl-diag` 36: the `qual` family (the conditional operator's pointer types and qualifiers, `c23-qual-4/5/6`, 3 files), `nullptr` (comparison, arithmetic, conversion: `c23-nullptr-3`, and the lines of `nullptr-6`
+  the member and designator contexts do not locate), enum and complit specifier rules (`c23-enum-7`, `c23-complit-5/8`), `typeof` of a bit-field, `static` never defined,
+  thread-local redefinitions, tag compatibility in composite types and jumps into scopes (`tag-composite-3/11`, `tag-6`), floating `constexpr` representability (`constexpr-9`, the dfp files),
+  `bitint-115/117` (incompatible `_BitInt` pointers), `gnu23-tag-3/5`, VM types in members, `auto` with a statement expression.
+- `attr-diag` 14: the type-position attributes ("ignored" on `int [[x]] v`, on array and function declarators, on statements and labels: the forms do not say where the attribute stood, 8 files),
+  `vector_size`, `weak`, `has_c_attribute`, GNU attributes before `...`.
+- `pedantic-diag` 7: digit separators, complex `++`, delimited escapes, `__VA_OPT__` before C2y, `_Decimal` without DFP.
+- `pp-diag` 12: `#embed` parameter values (`embed-3/4/16/18/27`), universal character names (`ucn-1/2`, `ucnid-*`), `__VA_OPT__`, `#elifdef`, pasting.
+- `parse-gap` 15: attributes inside abstract declarators and arrays (`attr-syntax-1/2`, `gnu23-attrs-2`), labels with GNU attributes before `}` (`labels-3`), `[*]` in a member's function-pointer
+  parameter (`gnu23-tag-4`), and the files whose expectations depend on a target selector (CS134: `inff`, `dfp`), a pp macro (`__STDC_VERSION_STDINT_H__`, `__has_c_attribute (foo)`), `u8` in `#if`.
+- `read-refused` 10: `d32`/`d64x` suffixes (by design), an integer suffix beyond 128 bits, `auto;` and `constexpr extern` declarators the converter reads as no function's, a macro-heavy file past the budget.
+
+### C7F.5 Proposals (CS140-CS146)
+
+Each with options, the recommended one first; none decided.
+
+- **CS140 Where an attribute stood.** The "ignored" family (8 files, about 200 lines) needs the position of each standard attribute: after the type specifiers, on an array or function declarator, on a statement, a label.
+  - Options: (a) the converter keeps a position tag in the attribute vectors (`:c/attrs-at`), printed nowhere, read by the checker; (b) a second walk over the tree in the checker's front end; (c) leave the family.
+  - *Recommended: (a)*: the tree knows it and the forms lose it.
+- **CS141 The conditional operator's types.** `?:` with pointers needs the composite type with merged qualifiers, `nullptr` rules and the "pointer type mismatch" error (`qual-4/5/6`, `nullptr-3`, 4 files).
+  - Options: (a) rewrite `cond-type` after 6.5.15 p6-p7 and C23 `nullptr_t`, then the conversions of `ptr-conv!` use it; (b) leave.
+  - *Recommended: (a)* once CS140 is done: it also repairs the macro-built types of the torture files.
+- **CS142 Target selectors (CS134 again).** Five files fail only because their selectors (`! inff`, `! dfp`) are not evaluated; with the corrected judge CS134 (b) costs 5 passes (`float-11`, `float-no-dfp-1/3`, `no-dfp-1`, `builtins-no-dfp-1`).
+  - Options: (a) a table of the host's effective targets recorded from `gcc` probes, read by the judge; (b) as built.
+  - *Recommended: (a)*, small.
+- **CS143 The preprocessor's diagnostics.** 12 files: `#embed` parameter values, UCNs, `__VA_OPT__`.
+  - Options: (a) a slice of repr/c's preprocessor after gcc's libcpp messages, file by file, in the light tier; (b) heavy window; (c) leave.
+  - *Recommended: (a)*, one family a commit like CS133.
+- **CS144 The remaining parse gaps.** 7 files (attributes in abstract declarators and arrays, labels, `[*]`).
+  - Options: (a) the parser takes a GNU/standard attribute in every declarator position cc's grammar lacks (go-whim has most); (b) leave.
+  - *Recommended: (a)*, with CS140 (the same positions).
+- **CS145 The parser's and the preprocessor's own checks.** This slice changed repr/c's parser, converter and preprocessor; the checks against cc (`bin/repr-c parse-check`, `check --tokens`) need tools/ccdump (Go with go-whim's module cache) and were not run; `bin/repr-c check --c23` and `roundtrip` over c23conf, c23 and tcc-tests2 were.
+  - Options: (a) run both in the heavy window and record the new known entries (`_Generic (type`, `...` first, named loops are not cc's); (b) accept the divergence classes now.
+  - *Recommended: (a)*.
+- **CS146 The essential subset (CS135) with the corrected judge.** `bin/ci dg --essential` now sees false errors of the checker, which makes it a good gate step.
+  - Options: (a) as CS135 (a); (b) all groups.
+  - *Recommended: (a)*, now with the files this slice made pass.
+
+### C7F.6 Checks and scratch
+
+Run: `bin/ci dg --record` (twice: the corrected judge, then the final), `bin/repr-c check --c23`, `bin/repr-c roundtrip --corpus c23conf,c23,tcc-tests2 --no-run`, `bin/ci check --record`, `bin/ci check --aot --record`
+RUNLEVEL_CHECKS. Not run: `bin/gate`, `bin/ci annotations` (needs tools/ccdump), `bin/repr-c parse-check` and `check --tokens` (same), `bin/ci repl-session`.
+The worktree's `.tmp/`: `ci-dg/`, `ci-check/`, `ci-aot/`, `c7/` (logs, capped at 1 MB), `dgsave/` (gcc's outputs), `t/` (probes), `dg*.sh` (the read/judge loop), `repr-c/gcc-15.2.0/` (220 MB).
