@@ -1520,6 +1520,21 @@ or has another result while its subject passes, and takes the controls out of th
 counts, the known differences, `--record` and the regression rule (no program of the records or the
 divergences). The errorcheck and directory tests' judges (`check_err`, `check_dir`) have no control yet.
 
+Since GTS85 (b) and GTS86 (b) (doc/GATE-SURVEY.md, "As built: GTS83-GTS87 (write-ahead)") a control is no program
+of the list: each checker, once its subject's run reached the comparison, judges that run a second time against
+the reference under the control's id (`controls_of`), so a control has no run, build or timeout of its own (at
+`--aot`, no second `aot_build`). The comparisons are functions both use: `run_verdict` (`check_one`: status,
+stdout, stderr against `gc_ref`'s run), `dir_verdict` (`check_dir`: status 0 and the output against a golden
+file), `syn_verdict` and `err_verdict` (`check_err`: gc's syntax errors or goi's errors against a file's `// ERROR`
+comments, `gocmp errorcheck`), `err_aot_verdict` (`check_err_aot`: gc's errors of the printed forms). The
+controls: `_control/helloworld-vs-printbig`, `_control/append1-vs-assign1` (append1's errors against assign1's
+`// ERROR` lines: missing errors) and `_control/dedup-vs-issue11053` (typeparam/dedup's output against
+fixedbugs/issue11053.out) at interp; `_control/issue21879-vs-fibish`, `_control/const6-vs-bug046` and
+`_control/issue48337a-vs-dedup` at aot. A subject that ends before the comparison (unsupported, an error, a
+timeout) prints no control row, and the control is "not judged" without failing the check; a subject that is
+not in the run fails it (the controls' subjects are in both essential lists), except in a selection (`--only`),
+which leaves it. The quiet retry of a subject that timed out brings its control rows with it.
+
 ### 11.4 The annotation check
 
 `bin/goi annotations [CORPUS...]` checks, without running anything, every package of
