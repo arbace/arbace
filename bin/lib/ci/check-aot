@@ -164,6 +164,29 @@ if [ -z "$judge" ]; then
         # ID PKG lines (an id may hold spaces): the package names the program, the id is looked up again
         [ -x "$exe" ] && cut -f2 "$s.built" | xargs -P "$jobs" -I{} bash -c 'run1 "$(awk -F"\t" -v p="$1" '"'"'$2 == p {print $1}'"'"' "$2")" "$1"' _ {} "$s.built" >> "$d/run.tsv"
         for f in "$ilog".[0-9]*; do [ -f "$f" ] && cat "$f" >> "$ilog" && rm -f "$f"; done
+        # the quiet retry (review 027, finding 6): a program of the shard that timed out, compiled or interpreted, which
+        # the level's record passes, is run again alone, once (compiled: the shard's executable; interpreted: cirun on
+        # its node program), and that run is the one judged
+        cut -f1 "$s.built" | while IFS= read -r i; do
+          p=$(awk -F'\t' -v i="$i" '$1 == i {print $2}' "$s.built")
+          if awk -F'\t' -v i="$i" '$1 == i && $2 == "timeout" {f = 1} END {exit !f}' "$d/run.tsv" \
+             && grep -qF "[\"$i\" :pass " test/c/check-aot-linux-amd64.edn; then
+            r=$(CI_AOT_NODES= run1 "$i" "$p")
+            echo "ci aot: $i timed out compiled; run again alone: $(printf '%s' "$r" | cut -f2)"
+            R=$r awk -F'\t' -v i="$i" '$1 == i { print ENVIRON["R"]; next } { print }' "$d/run.tsv" > "$d/run.tsv.new" && mv "$d/run.tsv.new" "$d/run.tsv"
+          fi
+          if [ -f "$ilog" ] && [ -f "$mod/progs/$p/prog.nodes" ] \
+             && awk -F'\t' -v i="$i" '$1 == i && $2 == "timeout" {f = 1} END {exit !f}' "$ilog" \
+             && grep -qF "[\"$i\" :pass " test/c/check-linux-amd64.edn; then
+            rd=$(mktemp -d "$work/run.XXXXXX")
+            (cd "$rd" && timeout 10 "$cirun" "$mod/progs/$p/prog.nodes" < "$work/empty-stdin" > out 2> err); st=$?
+            [ $st = 124 ] && st=timeout
+            r=$(printf '%s\t%s\t%s\t%s\t%s' "$i" "$st" "$(sha256sum < "$rd/out" | cut -d' ' -f1)" "$(wc -c < "$rd/out")" "$(grep -m1 '^cirun: \(fault\|internal\)' "$rd/err" | cut -c1-200 | tr '\t' ' ')")
+            rm -rf "$rd"
+            echo "ci aot: $i timed out interpreted; run again alone: $st"
+            R=$r awk -F'\t' -v i="$i" '$1 == i { print ENVIRON["R"]; next } { print }' "$ilog" > "$ilog.new" && mv "$ilog.new" "$ilog"
+          fi
+        done
         rm -f "$exe"
       fi
       rm -rf "$mod/progs" "$mod/shard"

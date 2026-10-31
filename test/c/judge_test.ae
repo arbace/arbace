@@ -1,7 +1,9 @@
 (ns c.judge-test
   "The unit tests of ci's judges (bin/ci judge-test; doc/C23-SURVEY.md, \"As built: review 006's fixes\"): the dg
   check's verdict (arbace.c.dg) on made-up reads and on the small files of test/c/judge/, and the run level's
-  result and record comparison (arbace.c.run). Each test names the finding of the review it covers."
+  result and record comparison (arbace.c.run); since review 027 also the checker's rules it found (dg files of
+  test/c/judge/) and the scripts' refusals and retries (bin/ci check and dg on made-up work directories under .tmp/, and
+  bin/ci check on ci-run's ptr-sub-unsigned.c with a stand-in cirun). Each test names the finding of the review it covers."
   (:require [arbace.test :refer :all]
             [arbace.c.dg :as dg]
             [arbace.c.run :as run]
@@ -277,3 +279,29 @@
   (is (true? (host/for-c? "target { c || frobnicate }")))
   ;; the dg-do and dg-error selectors keep their rule: an unlisted name holds
   (is (true? (:applies (dg/sel-info "target frobnicate")))))
+
+;; review 027, finding 6: a recorded pass that timed out (a loaded host) is run or read again alone, once, before it counts
+
+(deftest quiet-retry-of-a-timeout
+  ;; the dg read's retry: only a recorded pass's timeout is read again, and the second read stands
+  (let [calls (atom [])
+        rs [["a.c" {:status :timeout :lines {}}] ["b.c" {:status :timeout :lines {}}] ["c.c" {:status :ok :lines {}}]]
+        out (dg/retry-timeouts rs #{"a.c" "c.c"} (fn [nm] (swap! calls conj nm) {:status :ok :lines {3 1}}))]
+    (is (= ["a.c"] @calls))
+    (is (= [:ok :timeout :ok] (mapv (comp :status second) out)))
+    (is (:retried (second (first out)))))
+  ;; the run level's: ci-run's ptr-sub-unsigned.c (a recorded pass) on a cirun whose first run hangs past the 10 s
+  (let [root (System/getProperty "user.dir")
+        work (doto (java.io.File. (str root "/.tmp/judge-test-retry")) (.mkdirs))
+        ids (java.io.File. work "ids.txt")
+        real (or (System/getenv "CIRUN") (str root "/.tmp/ci/cirun"))]
+    (when-not (.exists (java.io.File. ^String real)) (sh-status {} "bin/ci" "cirun-build"))
+    (try
+      (spit ids "ci-run/ptr-sub-unsigned.c\n")
+      (is (= 0 (sh-status {"CI_CHECK_WORK" (.getPath work) "CIRUN" (str root "/test/c/judge/cirun-slow-once")
+                           "CIRUN_REAL" real
+                           "CIRUN_ONCE" (str (.getPath work) "/once")}
+                          "bin/ci" "check" "--corpus" "ci-run" "--only" (.getPath ids))))
+      (is (.exists (java.io.File. work "once")))
+      (finally
+        (doseq [f (reverse (file-seq work))] (.delete ^java.io.File f))))))

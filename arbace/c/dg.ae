@@ -420,6 +420,19 @@
       (println (str id ": " (count u) " files keep option lines whose selector test/c/dg-targets.edn cannot decide: "
                     (pr-str (vec (take 10 (map (fn [[k v]] [k (:opts-uncertain v)]) u)))))))))
 
+(defn retry-timeouts
+  "The quiet retry (review 027, finding 6; goi's and java-check's): each read of `rs` ([name result]) that spent its budget,
+  of a file `passed?` (the committed record passes it), read again alone, once, by `reread` (name -> result); that read
+  stands, marked :retried."
+  [rs passed? reread]
+  (mapv (fn [[nm r]]
+          (if (and (= :timeout (:status r)) (passed? nm))
+            (let [r2 (try (reread nm) (catch Throwable x {:status :crash :lines {} :message (one-line x)}))]
+              (println (str "dg: " nm " spent its read's budget; read again alone: " (name (:status r2))))
+              [nm (assoc r2 :retried true)])
+            [nm r]))
+        rs))
+
 (defn read-cmd [work id]
   (let [base (base-of work id)
         h (host/load-host "test/c/host")
@@ -431,8 +444,13 @@
         futs (mapv (fn [e] (.submit pool ^Callable (fn [] [(:name e) (try (read-file h base e (:action (get dgs (:name e))))
                                                                            (catch Throwable x {:status :crash :lines {} :message (one-line x)}))])))
                    es)
-        rs (mapv #(.get ^java.util.concurrent.Future %) futs)]
-    (.shutdown pool)
+        rs (mapv #(.get ^java.util.concurrent.Future %) futs)
+        _ (.shutdown pool)
+        passed (let [f (java.io.File. "test/c/check-dg-linux-amd64.edn")]
+                 (into #{} (for [[fid r] (if (.exists f) (read-string (slurp f)) []) :when (= :pass r)] fid)))
+        by-name (into {} (map (juxt :name identity) es))
+        rs (retry-timeouts rs #(contains? passed (str id "/" %))
+                           (fn [nm] (read-file h base (get by-name nm) (:action (get dgs nm)))))]
     (spit (str work "/" id "/read.edn") (str "[\n" (str/join "\n" (map pr-str rs)) "\n]\n"))
     (println (str id ": " (count rs) " files read " (pr-str (into (sorted-map) (frequencies (map (comp :status second) rs))))
                   ", " (Math/round (/ (- (System/nanoTime) t0) 1e9)) " s"))))
