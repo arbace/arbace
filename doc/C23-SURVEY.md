@@ -3004,3 +3004,8 @@ Each with options, the recommended one first; none decided.
 Run: `bin/ci dg --record` (twice: the corrected judge, then the final), `bin/repr-c check --c23`, `bin/repr-c roundtrip --corpus c23conf,c23,tcc-tests2 --no-run`, `bin/ci check --record`, `bin/ci check --aot --record`
 (a first `check --record` with `--only` rewrote the record to the 15 lines: restored from git and recorded again in full; a `compcert/qsort.c` timeout under the host's load was not recorded). Not run: `bin/gate`, `bin/ci annotations` (needs tools/ccdump), `bin/repr-c parse-check` and `check --tokens` (same), `bin/ci repl-session`.
 The worktree's `.tmp/`: `ci-dg/`, `ci-check/`, `ci-aot/`, `c7/` (logs, capped at 1 MB), `dgsave/` (gcc's outputs), `t/` (probes), `dg*.sh` (the read/judge loop), `repr-c/gcc-15.2.0/` (220 MB).
+
+### Decided (CS140-CS146; the user, 2026-10-31)
+
+All as recommended: CS140 (a); CS141 (a) after CS140; CS142 (a); CS143 (a), one family a commit; CS144 (a) with
+CS140; CS145 (a) in the heavy window; CS146 (a) with the files the follow-up made pass.
