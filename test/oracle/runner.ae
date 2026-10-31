@@ -474,13 +474,30 @@
   [^File src e]
   (str (rel src) ":" (or (:line e) (:i e))))
 
+(def ^:private drift-keys
+  "The keys of a case that come from its source (source-cases), by part."
+  {"forms" [:id :line :form] "classes" [:i :src] "regex" [:i :pattern :flags :inputs :replace]})
+
+(defn case-drift
+  "How the cases of a corpus file's source (source-cases) differ from those of its expected file,
+  compared by the keys ks: nil when they agree."
+  [ks src-cases exp-cases]
+  (let [a (mapv #(select-keys % ks) src-cases)
+        b (mapv #(select-keys % ks) exp-cases)]
+    (if (not= (count a) (count b))
+      (str (count a) " cases in the source, " (count b) " recorded")
+      (when-let [[x y] (first (remove (fn [[x y]] (= x y)) (map vector a b)))]
+        (str "the source's case " (pr-str x) " recorded as " (pr-str y))))))
+
 (defn check
   "Runs the expected files of the selected parts (or files) against the implementation cmd;
   prints the mismatches (all of them to .tmp/oracle/check.txt) and a summary. Returns
   {:ok (every case matches) :mismatches [{:case id :form text}...] :incomplete runs
    :files #{the corpus files checked} :errors [why the check itself is wrong]}: an error when a
   selector selects no file or nothing is selected (a typo, an --exclude of everything, an
-  ARBACE_ORACLE_EXPECTED without expected files)."
+  ARBACE_ORACLE_EXPECTED without expected files), and when the expected files are not the
+  selected corpus files' (drift: a source without an expected file, an expected file without its
+  source, a source edited and not recorded again: its cases' texts and lines, case-drift)."
   [cmd jobs timeout sel]
   (let [all (for [part parts
                   ^File f (->> (file-seq (io/file expected-dir part))
@@ -489,7 +506,19 @@
                   :let [e (read-expected f)
                         src (io/file root (:source e))]]
               [part src e])
-        work (for [[part src e :as w] all
+        drift (vec (concat
+                     (for [[part ^File src] all :when (and (selected sel part src) (not (.exists src)))]
+                       (str (rel src) ": an expected file of no source"))
+                     (let [by-src (into {} (map (fn [[_ ^File src e]] [(.getPath src) e])) all)]
+                       (for [part parts ^File f (source-files part) :when (selected sel part f)
+                             :let [e (by-src (.getPath f))
+                                   why (if e
+                                         (case-drift (drift-keys part) (source-cases part f) (:cases e))
+                                         "no expected file")]
+                             :when why]
+                         (str (rel f) ": " why " (bin/oracle record " (rel f) ")")))))
+        work (for [[part ^File src e :as w] all
+                   :when (.exists src)
                    :when (selected sel part src)
                    ;; the reference has no Go forms: goi's cases are the Go build's (S54)
                    :when (not (and (= cmd default-impl) (goi-source? src)))]
@@ -497,7 +526,8 @@
         errors (vec (concat (for [s (sel-misses sel (map (fn [[part src]] [part (rel src)]) all))]
                               (str "the selector " s " selects no corpus file"))
                             (when (empty? work)
-                              [(str "no corpus file selected (the expected files under " expected-dir ")")])))
+                              [(str "no corpus file selected (the expected files under " expected-dir ")")])
+                            drift))
         run-one (fn [[part src e]]
                   (let [ks (result-keys part)
                         cases (mapv #(apply dissoc % :missing (remove #{:class :sig} ks)) (:cases e))
