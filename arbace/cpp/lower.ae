@@ -231,8 +231,24 @@
 (defn fp-lit
   "A floating constant's C expression (`text`: LLVM's spelling)."
   [^String text t]
-  (let [tn (name t)]
+  (let [tn (name t)
+        ct0 ({"float" 'float "double" 'double "x86_fp80" 'long-double} tn)
+        sfx ({"float" "f" "double" "" "x86_fp80" "l"} tn)]
     (cond
+      (re-matches #"[-+](inf|qnan|snan|nan)(\(.*\))?" text)
+      (let [neg (str/starts-with? text "-") k (subs text 1)
+            _ (when-not ct0 (refuse :float-type "the type " tn))
+            body (cond (= k "inf") (list (symbol (str "__builtin_inf" sfx)))
+                       (= k "qnan") (list (symbol (str "__builtin_nan" sfx)) "")
+                       (= k "snan") (list (symbol (str "__builtin_nans" sfx)) "")
+                       :else (refuse :float-format "the NaN " text))]
+        (if neg (list '- body) body))
+      (and (str/starts-with? text "f0x") (= 20 (- (count text) 3))) (fp80-value (subs text 3))
+      (and (str/starts-with? text "f0x") (= 8 (- (count text) 3)) (= tn "float"))
+      (let [f (Float/intBitsToFloat (unchecked-int (Long/parseLong (subs text 3) 16)))]
+        (fp-lit (str "0x" (Long/toHexString (Double/doubleToRawLongBits (double f)))) t))
+      (and (str/starts-with? text "f0x") (= 16 (- (count text) 3))) (fp-lit (subs text 1) t)
+      (str/starts-with? text "f0x") (refuse :float-format "the constant " text)
       (str/starts-with? text "0xK") (fp80-value (subs text 3))
       (re-matches #"0x[KLMHR].*" text) (refuse :float-format "the constant " text)
       :else
@@ -808,9 +824,14 @@
                              [s {:c c :asm asm :kind (if (#{'llvm/global 'llvm/alias} (first f)) :var :fn) :form f
                                  :attrs (:attrs (apply hash-map (if (#{'llvm/global 'llvm/alias} (first f)) (let [r (drop 3 f)] (if (keyword? (first r)) r (rest r))) (drop 4 f))))
                                  :sig (when (#{'llvm/declare 'llvm/define} (first f)) (fn-sig f))}])))]
-    (when (some #(= (first %) 'llvm/alias) forms) (refuse :alias "an alias"))
+
     (when (some #(= (first %) 'llvm/module-asm) forms) (refuse :inline-asm "module asm"))
-    (binding [*types* types *attr-groups* groups *structs* (atom {:tags {} :defs [] :n 0}) *globals* globals
+    (binding [*types* types *attr-groups* groups *structs* (atom {:tags {} :defs [] :n 0})
+              *globals* (into globals (for [[s info] globals :when (= (first (:form info)) 'llvm/alias)]
+                                        (let [[_ _ t [_ target]] (:form info)
+                                              tg (when (or (symbol? target) (and (seq? target) (= (first target) 'g))) (get globals (gname-str target)))]
+                                          (when-not (and (seq? t) (= (first t) 'fn) tg (:sig tg)) (refuse :alias "an alias of a variable or an expression"))
+                                          [s (assoc info :kind :fn :sig (:sig tg) :target tg)])))
               *typeids* (atom {})]
       (let [fns (for [f forms :when (#{'llvm/declare 'llvm/define} (first f))
                       :let [s (gname-str (second f))] :when (not (str/starts-with? s "llvm."))]
@@ -822,6 +843,14 @@
                                 prio (get ctor-fns (gname-str (second f)))]
                             (list 'c/declare (with-meta (:c info) (linkage-meta o (:asm info) (when prio [(if (= prio 65535) 'constructor ['constructor prio])])))
                                   (with-meta pvec {:tag (ctype rt)})))))
+            aliases (vec (for [[_ info] *globals* :when (:target info)]
+                           (let [o (apply hash-map (drop 4 (:form info)))
+                                 [rt ps var bvs] (:sig info)
+                                 cps (vec (map-indexed (fn [i t] (if-let [bt (nth bvs i)] (ctype bt) (ctype t))) ps))
+                                 pvec (cond-> (if (empty? cps) (if var [] ['void]) cps) var (conj '&))
+                                 tname (str (:c (:target info)))
+                                 lm (linkage-meta o (:asm info) [['alias tname]])]
+                             (list 'c/declare (with-meta (:c info) (dissoc lm :static)) (with-meta pvec {:tag (ctype rt)})))))
             gvars (for [f forms :when (= (first f) 'llvm/global)
                         :let [s (gname-str (second f))] :when (not (special s))]
                     (let [[_ _ t & more] f
@@ -860,7 +889,7 @@
                   (list 'c/declare 'cx$resume (with-meta [(with-meta 'o {:tag '(* void)})] {:tag 'void}))
                   (list 'c/declare 'cx$uncaught (with-meta ['void] {:tag 'void}))]]
         [(list 'c/file c-name :std :gnu23)
-         (vec (concat (:defs @*structs*) head protos (keep first gvars) (keep second gvars) defs (when wrapper [wrapper])))]))))
+         (vec (concat (:defs @*structs*) head protos (keep first gvars) (keep second gvars) defs aliases (when wrapper [wrapper])))]))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; The judgment of bin/cppi lower-check
