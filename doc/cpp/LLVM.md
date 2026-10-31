@@ -136,7 +136,7 @@ The C forms are those of doc/c/SPEC.md, printed by repr/c's printer at `:gnu23` 
 - **Types.** `iN` is its container's unsigned type (`unsigned-char`, `unsigned-short`, `unsigned`, `unsigned-long`,
   `unsigned-__int128`; `i1` an `unsigned-char` 0 or 1; widths between masked: loaded masked to the width, and a width whose
   store size is smaller than its container's (`i24`, `i40`, `i48`, `i56`: bit-field access units clang does not widen over the
-  next field) loaded and stored by its store size's bytes, `__builtin_memcpy`, as LLVM reads and writes it), `ptr` is `(* void)`, `float`, `double`,
+  next field) loaded and stored by its store size's bytes, `__builtin_memcpy`, as LLVM reads and writes it; a `load volatile` or `store volatile` of such a width is a plain `__builtin_memcpy`: the qualifier is dropped on that path, harmless for the gcc -O0 builds the check makes, a known divergence of review 018's R8), `ptr` is `(* void)`, `float`, `double`,
   `x86_fp80` as `long-double` (CS35: ci computes it as `double`, the class `long-double`; gcc as x87), aggregates as C
   structs whose members are `f0`, `f1` ... (arrays and vectors as a struct of one member `e`, packed structs
   `__attribute__((packed))`, vectors aligned as LLVM aligns them), each followed by `(c/static-assert (== (sizeof-type

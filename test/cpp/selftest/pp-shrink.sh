@@ -5,11 +5,18 @@
 tree=$t/tree; mkdir -p "$tree/test/repr" "$tree/test/cpp"
 cp -r "$root/bin" "$root/arbace" "$tree/"; cp -r "$root/test/cpp/." "$tree/test/cpp/"; cp -r "$root/test/repr/cpp" "$tree/test/repr/"
 # 1. a tarball that ends early (its digest pinned in the copy): tar fails, nothing is marked extracted
-head -c 2000000 /root/arbace/.tmp/c1/gcc/gcc-15.2.0.tar.xz > "$t/short.tar.xz"
+# (review 018's R9: the tarball is the host's, as bin/repr-cpp finds it; the pin is read from the copy, and the copy must change,
+# else pp-check would stop at its digest check before tar and this part would pass without reaching the extraction)
+main=$root; case $root in */.tmp/worktrees/*) main=${root%%/.tmp/worktrees/*} ;; esac
+tb=${REPR_CPP_GCC_TARBALL:-$main/.tmp/c1/gcc/gcc-15.2.0.tar.xz}
+head -c 2000000 "$tb" > "$t/short.tar.xz"
 sum=$(sha256sum "$t/short.tar.xz" | cut -d' ' -f1)
-sed -i "s|:sha256 \"438fd996826b0c82485a29da03a72d71d6e3541a83ec702df4271f6fe025d24e\"|:sha256 \"$sum\"|" "$tree/test/cpp/corpora.edn"
+pin=$(sha256sum "$tb" | cut -d' ' -f1)
+cp "$tree/test/cpp/corpora.edn" "$t/corpora.before"
+sed -i "s|:sha256 \"$pin\"|:sha256 \"$sum\"|" "$tree/test/cpp/corpora.edn"
+cmp -s "$t/corpora.before" "$tree/test/cpp/corpora.edn" && die "the copy's pin was not replaced (the tarball's digest $pin is not in corpora.edn)"
 REPR_CPP_GCC_TARBALL=$t/short.tar.xz REPR_CPP_CHECK_WORK=$t/w1 timeout 300 "$tree/bin/repr-cpp" pp-check --corpus cpp-lexical > "$t/1.log" 2>&1; st=$?
-[ $st != 0 ] && ok "a failed extraction stops pp-check (exit $st)" || bad "a failed extraction: exit 0"
+[ $st != 0 ] && grep -q "the extraction of" "$t/1.log" && ok "a failed extraction stops pp-check at tar (exit $st)" || bad "a failed extraction: exit $st: $(tail -2 "$t/1.log")"
 [ ! -f "$tree/.tmp/cpp-gcc/.extracted" ] && ok "and is not marked extracted" || bad "a failed extraction is marked extracted"
 rm -rf "$tree/.tmp/cpp-gcc"
 # 2. lists on a shrunken corpus (one file of test/cpp/lexical gone): refused
