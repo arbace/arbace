@@ -3666,3 +3666,22 @@ The levels read, diagnostics and print have no control: their verdicts are a too
 golden file compared inside `diag_actions` (diagnostics) and the five steps of `java.print/judge` (print), with no
 reference of another test to judge against without a run of its own (doc/GATE-SURVEY.md, "As built: GTS72,
 GTS79-GTS82 (write-ahead)", GTS84).
+
+**GTS84 (a): diagnostics and print** (doc/GATE-SURVEY.md, "As built: GTS83-GTS87 (write-ahead)"). Two of the three
+now have one; read is left (its verdict is the reader's own status and summary line, nothing of another test to
+cross). The golden comparison came out of `diag_actions` as `diag_golden OUT GOLDEN PREFIX` and the judgment of
+`check_diag` as `diag_judge P SUF EXP` (each action's status against EXP's, each golden action's `dI.golden`, a
+control's `dI.CID.golden`), both used by the tests and the controls alike. **c00002** is t06443 T5017953's javac
+output judged against t06444 T6304921's golden file (`java.check/plan-diag` writes `control-diag CID EXIT
+DIR/FILE`, the reference's first golden action): the subject's actions up to its first golden one, that action's
+status against the reference's (both 1) and its output against `T6304921.out` (`differ`, line 1). At print,
+**c00001** gains the level (`control-print CID REF` in the subject's plan, `control-reference CID` in the
+reference's): `print_check_one` writes `print/classes.res.CID` (the printed class files' digest against the
+reference's JDK digest, by `classes_verdict`) and keeps `print/c2` for both; `java.print/judge` prints the control's
+row from the steps' own comparisons crossed (`control-steps`): forms (`forms-result`, the subject's F2 against the
+reference's F1), text (`text-result`, the full print against the reference's renamed source), classes (the digest,
+then `classes-result` against the reference's printed class files, its original's as it passes). Unlike a test's
+(the first step that does not pass), a control's row is `differ` only when every crossed step differs: one
+comparison that passes what differs makes it `pass` (`crossed steps passed: ...`), so each of the three is covered.
+A control whose reference was not printed in the run (a selection: `--only`) is `left`, which the report prints and
+leaves; `unjudged` (no step taken) while its subject passed is `control not judged`.

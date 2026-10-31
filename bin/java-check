@@ -75,7 +75,11 @@
 #                      (JCS45 (a)): a new one fails the check, --record writes the file. The negative
 #                      controls (GTS81 (a), test/java/controls.edn): a subject test's run judged a
 #                      second time, by the level's own judge (interp and compiled: judge; classes:
-#                      classes_verdict), against another test's reference, under the control's id; a
+#                      classes_verdict; diagnostics: diag_judge, against the reference's golden file,
+#                      diag_golden; print: java.print/judge's steps, against the reference's original,
+#                      each crossed step required to differ, GTS84 (a)), against another test's
+#                      reference, under the control's id (a print control whose reference was not
+#                      printed in the run is left); a
 #                      control that passes, or is not judged while its subject reached the judge,
 #                      fails the run (java.check/report, --judge and --essential-compiled alike); the
 #                      controls are no tests of the records, classes or lists. Default 8
@@ -289,7 +293,7 @@ record_ref() {
   echo "== java-check: the JDK's javac and runs, twice ($((SECONDS - t0)) s)" >&2
   xargs -a "$list" -P "$jobs" -I{} bash -c 'classes_opts=($classes_opts_s); record_runs "$1"' _ {}
   echo "== java-check: the golden-diagnostics tests by the JDK's javac ($((SECONDS - t0)) s)" >&2
-  export -f record_diag diag_actions diag_root diag_norm diag_first_diff
+  export -f record_diag diag_actions diag_root diag_norm diag_first_diff diag_golden
   : > "$work/empty"
   xargs -a "$list" -P "$jobs" -I{} bash -c 'record_diag "$1"' _ {}
   cp "$ref" "$work/ref-before.edn"
@@ -319,6 +323,21 @@ diag_first_diff() {
        END { n = (na > nb ? na : nb)
              for (i = 1; i <= n; i++) if (!(i in a) || !(i in b) || a[i] != b[i]) {
                printf "line %d: %s (the golden file: %s)", i, (i in a ? substr(a[i], 1, 160) : "nothing"), (i in b ? substr(b[i], 1, 160) : "nothing"); exit } }' "$1" "$2" | tr '\t' ' '
+}
+
+# diag_golden OUT GOLDEN PREFIX: javac's normalized output OUT against the golden file GOLDEN as jtreg
+# compares them: PREFIX.golden 1 when they are equal line by line (GOLDEN normalized), else 0 and PREFIX.diff
+# (the first difference, or no golden file)
+diag_golden() {
+  local o=$1 g=$2 x=$3
+  if [ -f "$g" ]; then
+    diag_norm "$g" "$x.gold"
+    if cmp -s "$o" "$x.gold"; then echo 1 > "$x.golden"
+    else echo 0 > "$x.golden"; diag_first_diff "$o" "$x.gold" > "$x.diff"; fi
+    rm -f "$x.gold"
+  else
+    echo 0 > "$x.golden"; echo "no golden file $(basename "$g")" > "$x.diff"
+  fi
 }
 
 # diag_actions DIR PLAN OUT JAVAC...: the test's @build and @compile actions (PLAN's act lines) in
@@ -371,16 +390,7 @@ diag_actions() {
     first_line "$out/d$i.out" > "$out/d$i.err1"
     ref=$(printf '%s\n' "${modes//\//$'\n'}" | sed -n 's/^ref=//p')
     rm -f "$out/d$i.golden" "$out/d$i.diff"
-    if [ -n "$ref" ]; then
-      if [ -f "$dir/$ref" ]; then
-        diag_norm "$dir/$ref" "$out/d$i.gold"
-        if cmp -s "$out/d$i.out" "$out/d$i.gold"; then echo 1 > "$out/d$i.golden"
-        else echo 0 > "$out/d$i.golden"; diag_first_diff "$out/d$i.out" "$out/d$i.gold" > "$out/d$i.diff"; fi
-        rm -f "$out/d$i.gold"
-      else
-        echo 0 > "$out/d$i.golden"; echo "no golden file $ref" > "$out/d$i.diff"
-      fi
-    fi
+    [ -z "$ref" ] || diag_golden "$out/d$i.out" "$dir/$ref" "$out/d$i"
     rm -f "$out/d$i.raw"
   done < "$plan"
   rm -rf "$cls"
@@ -399,23 +409,46 @@ record_diag() {
 # when each action's status is the JDK javac's and each ref= action's output the golden file, as the
 # JDK javac's is; fail (a status differs) or differ (an output) otherwise
 check_diag() {
-  local id=$1 p=$work/run/$1 dir k i e g st res=""
+  local id=$1 p=$work/run/$1 dir k i e g st c gold res
   dir=$jdktest/$(awk -F'\t' '$1=="dir"{print $2}' "$p/plan.tsv")
   diag_actions "$dir" "$p/plan.tsv" "$p" "$root/bin/repr-java" javac
+  awk -F'\t' '$1 == "exp"' "$p/plan.tsv" > "$p/exp.tsv"
+  res=$(diag_judge "$p" "" "$p/exp.tsv")
+  # GTS84 (a), test/java/controls.edn: the controls whose subject this test is (plan lines control-diag CID
+  # EXIT GOLDEN, their reference's first golden action): this run's actions up to its first golden one judged
+  # again by diag_judge, that action's output against the reference's golden file (diag_golden) and its status
+  # against the reference's, under the control's id
+  while IFS=$'\t' read -r k c e gold; do
+    [ "$k" = control-diag ] || continue
+    i=$(awk -F'\t' '$4 == 1 { print $2; exit }' "$p/exp.tsv")
+    [ -n "$i" ] || continue
+    awk -F'\t' -v OFS='\t' -v i="$i" -v e="$e" '$2 + 0 > i + 0 { exit } $2 == i { $3 = e } { print }' "$p/exp.tsv" > "$p/exp.$c.tsv"
+    diag_golden "$p/d$i.out" "$jdktest/$gold" "$p/d$i.$c"
+    printf '%s\tdiagnostics\t%s\n' "$c" "$(diag_judge "$p" ".$c" "$p/exp.$c.tsv")" | sed -e "s|$p|RUN|g" -e "s|$root|.|g" -e "s|$jdktest/||g"
+  done < "$p/plan.tsv"
+  printf '%s\tdiagnostics\t%s\n' "$id" "$res" | sed -e "s|$p|RUN|g" -e "s|$root|.|g" -e "s|$jdktest/||g"
+}
+
+# diag_judge P SUF EXP: the diagnostics level's judgment of the run in P (diag_actions' files) against the
+# expectations EXP (exp I EXIT GOLDEN lines): each action's status (dI.exit) the expected one and each golden
+# action's comparison with its golden file (dI.golden, a control's dI.SUF.golden: diag_golden) equal;
+# prints RESULT<TAB>REASON (pass, fail: a status, differ: an output), the compiler's crash named
+diag_judge() {
+  local p=$1 suf=$2 k i e g st res=""
   while IFS=$'\t' read -r k i e g; do
     [ "$k" = exp ] || continue
     st=$(cat "$p/d$i.exit")
     if [ "$st" != "$e" ]; then
       res="fail	action $i: status $st (the JDK's $e): $(cat "$p/d$i.err1")"; break
-    elif [ "$g" = 1 ] && [ "$(cat "$p/d$i.golden")" != 1 ]; then
-      res="differ	action $i: the output differs from the golden file, $(cat "$p/d$i.diff")"; break
+    elif [ "$g" = 1 ] && [ "$(cat "$p/d$i$suf.golden")" != 1 ]; then
+      res="differ	action $i: the output differs from the golden file, $(cat "$p/d$i$suf.diff")"; break
     fi
-  done < "$p/plan.tsv"
+  done < "$3"
   # a crash of the compiler: its exception named in the reason
   if [ -n "$res" ] && grep -q '^An exception has occurred in the compiler' "$p/d$i.out"; then
     res="$res; the compiler's crash: $(grep -m1 -E '^[A-Za-z0-9_.$]+(Exception|Error)' "$p/d$i.out" | tr '\t' ' ' | cut -c1-200)"
   fi
-  printf '%s\tdiagnostics\t%s\n' "$id" "${res:-pass	}" | sed -e "s|$p|RUN|g" -e "s|$root|.|g" -e "s|$jdktest/||g"
+  printf '%s\n' "${res:-pass	}"
 }
 
 # ---------------------------------------------------------------------------------------------
@@ -903,7 +936,7 @@ check() {
   jc plan "$ref" "$work" ${pargs[@]+"${pargs[@]}"} >&2
   jc plan-diag "$ref" "$work" "$levels" >&2
   echo "== java-check: $(wc -l < "$work/run.list") tests at the levels $levels, $jobs at a time (the executable $rexe)" >&2
-  export -f limited limited_cpu check_one nread_one read_opts first_line root_cause classes_sha classes_verdict judge run_actions run_dirs mask_hashes mask_dirs test_dir check_diag diag_actions diag_root diag_norm diag_first_diff
+  export -f limited limited_cpu check_one nread_one read_opts first_line root_cause classes_sha classes_verdict judge run_actions run_dirs mask_hashes mask_dirs test_dir check_diag diag_actions diag_root diag_norm diag_first_diff diag_golden diag_judge
   export root work formsc forms_only save jdktest levels timeout from_committed load rexe reader_key="${reader_key:-}" classes_opts_s="${classes_opts[*]}"
   xargs -a "$work/run.list" -P "$jobs" -I{} bash -c 'classes_opts=($classes_opts_s); check_one "$1"' _ {} | LC_ALL=C sort > "$work/results.tsv"
   case ",$levels," in *,interp,*) export -f again interp_one; export jobs; again interp "$work/results.tsv" interp_one ;; esac
@@ -1010,8 +1043,16 @@ print_check_one() {
     { grep -m1 ': error: ' "$pp/javac.log" || grep -m1 -E 'error|Exception' "$pp/javac.log"; } | sed -e "s|^$pp/lines/||" -e 's|^\./||' | tr '\t' ' ' | cut -c1-300 > "$pp/javac.err1" || true
     rm -rf "$pp/c2"; return 0
   fi
-  if [ "$(classes_sha "$pp/c2" | cut -c1-16)" = "$(awk -F'\t' '$1=="classes"{print $2}' "$p/plan.tsv")" ]; then
-    echo pass > "$pp/classes.res"; rm -rf "$pp/c2"
+  k=$(classes_sha "$pp/c2" | cut -c1-16)
+  # GTS84 (a): a control's subject (control-print CID REF) judges its printed class files' digest again, against
+  # the reference's (control-classes CID DIGEST), into classes.res.CID; it and a control's reference
+  # (control-reference CID) keep them (print/c2) for java.print's judge of the control
+  awk -F'\t' '$1 == "control-print" { print $2 }' "$p/plan.tsv" | while read -r rel; do
+    classes_verdict "$k" "$(awk -F'\t' -v c="$rel" '$1 == "control-classes" && $2 == c { print $3 }' "$p/plan.tsv")" | cut -f1 > "$pp/classes.res.$rel"
+  done
+  if [ "$(classes_verdict "$k" "$(awk -F'\t' '$1=="classes"{print $2}' "$p/plan.tsv")" | cut -f1)" = pass ]; then
+    echo pass > "$pp/classes.res"
+    grep -q '^control-print	\|^control-reference	' "$p/plan.tsv" || rm -rf "$pp/c2"
   else
     awk -F'\t' '$1=="file"{print $3}' "$p/plan.tsv" > "$pp/files-orig.txt"
     mkdir -p "$pp/c1"
@@ -1031,7 +1072,7 @@ print_level() {
     grep -q '^kind	diagnostics' "$work/run/$id/plan.tsv" && continue
     if [ -f "$work/run/$id/forms.dir" ]; then echo "$id" >> "$list"; else printf '%s\tprint\tunread\tthe read failed\n' "$id"; fi
   done < "$work/run.list"
-  export -f print_ro print_read print_full_one print_check_one
+  export -f print_ro print_read print_full_one print_check_one classes_sha classes_verdict
   echo "== java-check print: $(wc -l < "$list") tests read in mode :full ($(since_t0))" >&2
   xargs -a "$list" -P "$jobs" -I{} bash -c 'print_full_one "$1"' _ {}
   echo "== java-check print: printed (java.print, the tools' host) ($(since_t0))" >&2
