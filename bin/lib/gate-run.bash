@@ -8,6 +8,7 @@
 #   plan_inputs DIR      DIR/files.sha256 and DIR/hosts.edn, run_plan DIR [--rerun]: the plan
 #   step NAME HEAVY CMD  one step, logged, timed, measured (GT1); a heavy one under GATE_HEAVY_CMD
 #   record_pass, load_plan, run_one, report, pre_step, run_chain, chains_of, names_of
+#   inputs_unchanged NAME  the plan's file, pin and logic lines hashed again before a pass is recorded
 #   gate_prune [--dry-run]  the store and the executables trimmed (GTS27 (a))
 #   gate_audit [STEP...] the strace audit of the declared inputs (GT4)
 #   audit_reducer DIR, audit_reduce FIFO, audit_compare NAME STATUS
@@ -175,7 +176,23 @@ pass_reads() {
   grep -q ':log-sha256 "[0-9a-f]\{64\}"' "$1" && [ "$(tail -c 2 "$1")" = "}" ] || return 1
   ! tr '\n' ' ' < "$1" | grep -qE '(^|[ {]):[a-z0-9-]+[[:space:]]*(}|[[:space:]]:[a-z])'
 }
+# inputs_unchanged NAME (queue 023, report 022 finding 2): the plan's file, pin and logic lines of NAME
+# (plan/NAME.inputs, hashed when the plan was made) hashed again: a file edited while the step ran (in this
+# worktree, by another agent or step) means the run tested other content than its key's, NAME.recheck
+# names the files. The hosts' identities and the :uses digests are not hashed again
+inputs_unchanged() {
+  awk '($1 == "file" || $1 == "pin" || $1 == "logic") && $2 != "missing" { p = $0; sub(/^[a-z]+ [0-9a-f]+ /, "", p); print $2 "  " p }' \
+    "$logs/plan/$1.inputs" > "$logs/$1.recheck.sha256" || return 1
+  [ -s "$logs/$1.recheck.sha256" ] || return 0
+  (cd "$root" && sha256sum -c "$logs/$1.recheck.sha256") > "$logs/$1.recheck" 2>&1
+}
 record_pass() {  # record_pass NAME: its pass in the store at its key (GTS7 (a)), with its outputs (GT5)
+  # queue 023, report 022 finding 2: not recorded when an input changed while the step ran (its key is the
+  # plan's snapshot's)
+  if ! inputs_unchanged "$1"; then
+    echo "gate: the pass of $1 not recorded: its inputs changed while it ran: $(grep -v ': OK$' "$logs/$1.recheck" | head -5 | tr '\n' ' ')($logs/$1.recheck)" >&2
+    return 1
+  fi
   # GTS80 (a): every file through a temporary name renamed into place, the record last (a pass is its
   # .edn), each checked whole first: a full disk leaves temporary files (removed), never a cut pass. The
   # temporaries are dotfiles ending in .tmp, never .edn (review 001, finding 3: gate.plan's passes reads
