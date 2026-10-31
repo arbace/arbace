@@ -26,8 +26,16 @@
 #                            DIR (a stage 0 built elsewhere) is one --build would keep here: its
 #                            executables of the architectures, its seed.sha256 and pins this
 #                            checkout's (exit 0, "stage 0 kept"); else why (exit 1); builds
-#                            nothing (GTS83 (a): bin/gate in a linked worktree takes the main
-#                            checkout's stage 0 by it)
+#                            nothing (GTS83 (a))
+#        bin/seed --link FROM [-o OUT] [--arch A[,B]]
+#                            FROM (a stage 0 --kept accepts: the main checkout's target/seed, from
+#                            a linked worktree) taken into OUT (default target/seed) by hard links
+#                            of its executables (copies where a link fails) and copies of its
+#                            seed.sha256 and pins,
+#                            checked again after linking (a rebuild in FROM meanwhile: the links
+#                            dropped, exit 1); OUT kept already: nothing linked; builds nothing
+#                            (review 001's fixes: bin/gate's stage0 step and bin/lib/host.bash in a
+#                            linked worktree; FROM's rebuild, rm -rf, cannot pull OUT away)
 #        bin/seed --make [ARCHIVE]
 #                            pack a build's printed module into ARCHIVE (default the seed) and pin
 #                            its hash in ARCHIVE.sha256: the last bin/arbace-go --build, or
@@ -67,6 +75,19 @@ go_check() {
   else
     echo "$goseed: SHA-256 $got, pinned $want" >&2; return 1
   fi
+}
+
+# seed_kept DIR: DIR is a stage 0 bin/seed --build would keep here ($archs' executables, seed.sha256 this
+# seed's, pins the line $pins); else prints why and returns 1 (--kept, --link)
+seed_kept() {
+  local d=$1 a have
+  for a in ${archs//,/ }; do
+    [ -x "$d/$a/arbace" ] || { echo "$d has no $a/arbace"; return 1; }
+  done
+  [ "$(cat "$d/seed.sha256" 2>"$TMPDIR/seed-kept.err")" = "$(cut -d' ' -f1 "$goseed.sha256")" ] \
+    || { echo "$d's seed.sha256 is not this seed's"; return 1; }
+  have=$(cat "$d/pins" 2>"$TMPDIR/seed-kept.err")
+  [ "$have" = "$pins" ] || { echo "$d is built from other pins (${have:-none}; here: $pins)"; return 1; }
 }
 
 case ${1:-} in
@@ -131,23 +152,73 @@ case ${1:-} in
       fi
     fi ;;
   --kept)
-    # GTS83 (a): DIR (a stage 0 built elsewhere: bin/gate's main checkout's) is the one bin/seed --build
-    # would keep here: its executables of these architectures, its seed.sha256 this seed's, its pins
-    # this checkout's line (seed_go_pins); prints so and exits 0, else prints why and exits 1. Builds nothing.
+    # GTS83 (a): DIR (a stage 0 built elsewhere) is the one bin/seed --build would keep here: its executables
+    # of these architectures, its seed.sha256 this seed's, its pins this checkout's line (seed_go_pins);
+    # prints so and exits 0, else prints why and exits 1. Builds nothing.
     shift
     out=${1:-} archs=$(seed_go_host_arch)
     [ "${2:-}" = --arch ] && archs=${3:-$archs}
     [ -n "$out" ] || { echo "usage: bin/seed --kept DIR [--arch A[,B]]" >&2; exit 2; }
     go_check > "$TMPDIR/seed-kept.log" || exit 1
     pins=$(seed_go_pins "$goseed" "$archs")
-    for a in ${archs//,/ }; do
-      [ -x "$out/$a/arbace" ] || { echo "bin/seed: $out has no $a/arbace"; exit 1; }
-    done
-    [ "$(cat "$out/seed.sha256" 2>"$TMPDIR/seed-kept.err")" = "$(cut -d' ' -f1 "$goseed.sha256")" ] \
-      || { echo "bin/seed: $out's seed.sha256 is not this seed's"; exit 1; }
-    have=$(cat "$out/pins" 2>"$TMPDIR/seed-kept.err")
-    [ "$have" = "$pins" ] || { echo "bin/seed: $out is built from other pins (${have:-none}; here: $pins)"; exit 1; }
+    why=$(seed_kept "$out") || { echo "bin/seed: $why"; exit 1; }
     echo "bin/seed: stage 0 kept: $out ($archs), its pins this checkout's (GTS83 (a): built nothing)" ;;
+  --link)
+    # review 001's fixes (doc/GATE-SURVEY.md): FROM (the main checkout's target/seed, from a linked
+    # worktree) taken into OUT (default this checkout's target/seed), when --kept FROM holds: its
+    # executables by hard links (a copy where a link fails, e.g. across filesystems), its seed.sha256 and
+    # pins copied. OUT is then this checkout's own stage 0, which FROM's rm -rf (its rebuild) cannot pull
+    # away and --build or --kept OUT keeps by itself. OUT kept already: nothing linked. Checked after
+    # linking: FROM still kept and each file FROM's (a rebuild there meanwhile), else OUT's are dropped
+    # (exit 1). Under the stage 0 build's lock of this checkout (SEED_BUILD_LOCKED=1: the caller holds it).
+    shift
+    from= out=$root/target/seed archs=$(seed_go_host_arch)
+    while [ $# -gt 0 ]; do
+      case $1 in
+        -o) out=$2; shift 2 ;;
+        --arch) archs=$2; shift 2 ;;
+        -*) echo "usage: bin/seed --link FROM [-o OUT] [--arch A[,B]]" >&2; exit 2 ;;
+        *) from=$1; shift ;;
+      esac
+    done
+    [ -n "$from" ] || { echo "usage: bin/seed --link FROM [-o OUT] [--arch A[,B]]" >&2; exit 2; }
+    case $out in /*) ;; *) out=$PWD/$out ;; esac
+    go_check > "$TMPDIR/seed-kept.log" || exit 1
+    mkdir -p "$root/.tmp"
+    if [ "${SEED_BUILD_LOCKED:-}" != 1 ]; then exec 9> "$root/.tmp/seed-build.lock"; flock 9; fi
+    pins=$(seed_go_pins "$goseed" "$archs")
+    if seed_kept "$out" > "$TMPDIR/seed-link.why"; then
+      echo "bin/seed: stage 0 kept: $out ($archs), its pins this checkout's (nothing linked)"; exit 0
+    fi
+    why=$(seed_kept "$from") || { echo "bin/seed: not linked: $why"; exit 1; }
+    mkdir -p "$out"
+    [ "$(cd "$from" && pwd -P)" != "$(cd "$out" && pwd -P)" ] || { echo "bin/seed: not linked: $from is $out"; exit 1; }
+    files= how=
+    for a in ${archs//,/ }; do files="$files $a/arbace"; done
+    files="$files seed.sha256 pins" # pins last: OUT reads as kept only once every file is in
+    # unlink: OUT holds no stage 0 of these pins (each placed file removed: a stale own one is gone too)
+    unlink_out() { local f; for f in $files; do rm -f "$out/$f" "$out/$f.link.$$"; done; }
+    rm -f "$out/pins" "$out/seed.sha256"
+    for f in $files; do
+      mkdir -p "$(dirname "$out/$f")"
+      rm -f "$out/$f.link.$$"
+      # the executables hard-linked; seed.sha256 and pins copied (a few bytes: no write here reaches FROM's)
+      if case $f in */arbace) ;; *) false ;; esac && ln "$from/$f" "$out/$f.link.$$" 2> "$TMPDIR/seed-link.err"; then
+        how=${how:-hard links}
+      elif cp -p "$from/$f" "$out/$f.link.$$" 2> "$TMPDIR/seed-link.err"; then
+        case $f in */arbace) how=copies ;; esac
+      else unlink_out; echo "bin/seed: not linked: $from/$f: $(head -1 "$TMPDIR/seed-link.err")"; exit 1; fi
+      mv -f "$out/$f.link.$$" "$out/$f" || { unlink_out; echo "bin/seed: not linked: $out/$f not renamed"; exit 1; }
+    done
+    # a rebuild in FROM meanwhile (its --build removes pins first, rm -rf, writes pins last): each linked
+    # file still FROM's (the same inode, or for a copy the same bytes), then FROM and OUT both kept
+    for f in $files; do
+      [ "$out/$f" -ef "$from/$f" ] || cmp -s "$out/$f" "$from/$f" \
+        || { unlink_out; echo "bin/seed: not linked: $from/$f changed while linking (a rebuild there?)"; exit 1; }
+    done
+    why=$(seed_kept "$from") || { unlink_out; echo "bin/seed: not linked: after linking, $why"; exit 1; }
+    why=$(seed_kept "$out") || { unlink_out; echo "bin/seed: not linked: after linking, $why"; exit 1; }
+    echo "bin/seed: stage 0 kept: $out ($archs), linked from $from ($how), its pins this checkout's (review 001: built nothing)" ;;
   --verify)
     go_check || exit 1
     # the pinned toolchain, the one the seed names (SA4)

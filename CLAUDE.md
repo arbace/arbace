@@ -69,8 +69,9 @@ Prior art:
   need of that tree as data (repr/java's corpus, the baseline of Clojure's suite) from the tag,
   extracted into `.tmp/frozen/` by `bin/lib/tools.bash`.
 - Stage 0 hosts Arbace's tools (`bin/lib/host.bash`'s `arbace_host_exe`: `ARBACE_HOST_EXE`, else
-  stage 0, built when missing or when the seed changed; in a linked worktree the main checkout's when its seed's and
-  Go's pins match, else a refusal: `ARBACE_SEED_BUILD=1` builds, GTS82 (a)): c2j, j2g, repr/go, repr/clojure, the suite's runner,
+  stage 0, built when missing or when the seed changed; in a linked worktree its own when `bin/seed --kept` keeps it,
+  else the main checkout's hard-linked into it when its pins line is the worktree's (`bin/seed --link`), else a refusal:
+  `ARBACE_SEED_BUILD=1` builds, GTS82 (a), review 001's fixes): c2j, j2g, repr/go, repr/clojure, the suite's runner,
   compiled into it (S6, SA133), a tool's namespace whose source in the checkout differs from the
   embedded copy loaded from the checkout instead, evaluated (`bin/lib/tools.bash`'s
   `arbace_tool`, `ARBACE_PATH`). The JVM runs only the frozen jar of `arbace-for-java-26-v4` (built from its tag,
@@ -409,7 +410,7 @@ Prior art:
   (busybox `time -v`) in `.tmp/gate/NAME.mem`, a 5 s memory sampler's `.tmp/gate/mem.tsv`. The
   steps: the Makefile's scripts (`make check-makefile`), the seed's hash, stage 0 built from
   it (`bin/seed --build`, kept by the seed's and Go's pins; in a linked worktree without a current one of its own the main
-  checkout's when its pins are the worktree's, `bin/seed --kept`, GTS83 (a)), the executable and the test build by stage 0 (`bin/arbace-go
+  checkout's when its pins are the worktree's, `bin/seed --kept`, hard-linked into the worktree's `target/seed`, `bin/seed --link`, GTS83 (a)), the executable and the test build by stage 0 (`bin/arbace-go
   --gate-build`, cached by key in `ARBACE_GATE_CACHE`, for the gate `ARBACE_GATE_EXES/KEY`, and keyed by a hash of what they are built from,
   `gate_key`: `arbace/` less repr/java, repr/haskell and repr/rust, `go/`, `overlay/` and `jdk/` less
   javac's world and the provenance files, `x509roots/`, the fixtures' forms, the build's scripts, the
