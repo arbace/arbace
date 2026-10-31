@@ -975,7 +975,12 @@
         args (rest f)
         tag (when-not (vector? (first args)) (ident (first args)))
         body (first (filter vector? args))
-        under (when-let [u (:c/underlying (meta f))] (parse-type u))]
+        pre0 (when tag (.get ^HashMap (:tags (top-scope)) tag))
+        under (when-let [u (:c/underlying (meta f))] (parse-type u))
+        ;; CS174 (a): the underlying type's own text defined this enumeration (`enum f : typeof (sizeof (enum f : T { B })) { B }`)
+        nested-under (boolean (and tag body under
+                                   (let [^HashMap now (.get ^HashMap (:tags (top-scope)) tag)]
+                                     (and now (not (identical? now pre0)) (= :enum (.get now :kind)) (.get now :complete)))))]
     (tag-attrs! (:c/attrs (meta f)) false)
     (when (and under (= :bitint (:k (unq under))))
       (err! "invalid 'enum' underlying type"))
@@ -993,7 +998,8 @@
                 (err! "'enum' declared with but defined without fixed underlying type"))
             nested (and here (= :enum (.get here :kind)) (or (.get here :defining) (.get here :redefining)))
             redef (when (and here (= :enum (.get here :kind)) (.get here :complete) (not nested)) here)
-            _ (when nested (err! (str "nested redefinition of 'enum " tag "'")))
+            _ (when (or nested nested-under) (err! (str "nested redefinition of 'enum " tag "'")))
+            _ (when nested (.put here :nested-seen true)) ; CS174 (a): the enumerators of the outer definition are new declarations
             ^HashMap r (if tag
                          (if (and here (= :enum (.get here :kind)) (not (.get here :complete)) (not nested))
                            here
@@ -1027,7 +1033,7 @@
                                    (cond (= (wrap v pt) v) pt signed t-long :else t-ulong)))]
               (ann! (str "n " nm " " (if (some? v) v "?")))
               ;; a constant a repeated definition repeats is the same declaration (C23 6.7.3.3)
-              (when-not (and redef (let [oc (.get redef :consts)] (and (contains? oc nm) (= (get oc nm) v))))
+              (when-not (and redef (not nested-under) (not (.get r :nested-seen)) (let [oc (.get redef :consts)] (and (contains? oc nm) (= (get oc nm) v))))
                 (when (= :enumconst (:kind (.get ^HashMap (:ord (top-scope)) nm)))
                   (binding [*line* line0] (err! (str "redeclaration of enumerator '" nm "'"))))
                 (declare! nm {:kind :enumconst :t ct :v v}))
@@ -1423,6 +1429,8 @@
         rs (doall (for [a assocs]
                     (let [[tf e] a
                           t (when-not (= tf :default) (parse-type tf))
+                          ;; CS174 (a): a type name of an association is a complete object type (6.5.2 p2)
+                          _ (when (and t (incomplete-type? t)) (err! "'_Generic' association has incomplete type"))
                           r (ex e)]
                       (cond
                         (= tf :default) (reset! default [r a])
