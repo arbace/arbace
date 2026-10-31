@@ -2588,3 +2588,8 @@ Not shipped: `arbace/scheme/{check,corpora}.ae`, `bin/si`, the Makefile, `LICENS
 `runs-t1.keep` (finding 1), `m/` (2, 9, 10), `anchors.py`, `rewrite.py`, `classtest.ae`, `gen/` (3), `ct/` (4), `r5/` (5), `mix/` (6),
 `embed-test.ae` (7), `dl/` (8: COPYING and the tag's files), `pairs.ae` (11), `bb/` (12), `div.sps`; the runs' logs `F1_*.log`, `M_*.log`,
 `R*.log`, `E_*.log`; `.tmp/si/{runs,aot/runs,mats,r7rs,r7rs-chez,r7rs-chibi,r7rs-own,ecraven,ecraven-chez,ecraven-chibi}` the runs judged.
+
+### Decided (SC170-SC174; the user, 2026-10-31)
+
+All as recommended: SC170 (b), starting with the 188 "incorrect number of arguments"; SC171 (b); SC172 (b); SC173 (b);
+SC174 (a).
