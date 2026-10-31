@@ -1,0 +1,57 @@
+(ns c.judge-test
+  "The unit tests of ci's judges (bin/ci judge-test; doc/C23-SURVEY.md, \"As built: review 006's fixes\"): the dg
+  check's verdict (arbace.c.dg) on made-up reads and on the small files of test/c/judge/, and the run level's
+  result and record comparison (arbace.c.run). Each test names the finding of the review it covers."
+  (:require [arbace.test :refer :all]
+            [arbace.c.dg :as dg]
+            [arbace.repr.c.host :as host]
+            [arbace.string :as str]))
+
+(def ^:private judge-dir (str (System/getProperty "user.dir") "/test/c/judge"))
+
+(defn- ok [lines] {:status :ok :lines (into (sorted-map) lines) :other 0 :unlocated 0 :message ""})
+
+(defn- read-one
+  "A file of test/c/judge/ read as the dg check reads it (arbace.c.dg/read-file) for `action`."
+  [name action]
+  (let [h (host/load-host "test/c/host")
+        fc (host/file-config ["-std=gnu23"] "gnu23")]
+    (dg/read-file h judge-dir {:name name :read (str judge-dir "/" name) :fc fc} action)))
+
+;; finding 1: a read that failed, errors not in the main file, a missing row, a preprocessor's panic
+
+(deftest no-read-row
+  (is (= :crash (second (dg/verdict (dg/analyze "/* { dg-do compile } */") nil)))))
+
+(deftest stray-errors-stop
+  (let [d (dg/analyze "/* { dg-do compile } */")]
+    (is (= :stopped (second (dg/verdict d {:status :read-error :lines {} :other 1 :unlocated 0 :message "x.h:1:1: e"}))))
+    (is (= :stopped (second (dg/verdict d {:status :read-error :lines {} :other 0 :unlocated 1 :message "panic: e"}))))
+    (is (= :stopped (second (dg/verdict d {:status :ok :lines {} :other 2 :unlocated 0 :message "x.h:1:1: e"}))))
+    (is (= :stopped (second (dg/verdict d {:status :read-error :lines {} :other 0 :unlocated 0 :message ""}))))))
+
+(deftest stray-errors-line-zero
+  ;; a line-0 directive takes errors wherever they are
+  (let [d (dg/analyze "/* { dg-do compile } */\n/* { dg-error \"e\" \"\" { target *-*-* } 0 } */")]
+    (is (= [:pass] (dg/verdict d {:status :read-error :lines {} :other 1 :unlocated 0 :message "x.h:1:1: e"})))))
+
+(deftest read-error-accounted
+  (let [d (dg/analyze "/* { dg-do compile } */\nint x = ; /* { dg-error \"expected\" } */\n")]
+    (is (= [:pass] (dg/verdict d {:status :read-error :lines {2 1} :other 0 :unlocated 0 :message "2: e"})))))
+
+(deftest read-error-stops-early
+  (let [d (dg/analyze "/* { dg-do compile } */\nint x = ; /* { dg-error \"expected\" } */\nint y = ; /* { dg-error \"expected\" } */\n")]
+    (is (= :stopped (second (dg/verdict d {:status :read-error :lines {2 1} :other 0 :unlocated 0 :message "2: e"}))))))
+
+(deftest included-header-error
+  (let [r (read-one "inc-error.c" :compile)
+        d (dg/analyze (slurp (str judge-dir "/inc-error.c")))]
+    (is (pos? (long (:other r))))
+    (is (= :stopped (second (dg/verdict d r))))))
+
+(deftest preprocessor-panic
+  (let [r (read-one "pp-panic.c" :preprocess)
+        d (dg/analyze (slurp (str judge-dir "/pp-panic.c")))]
+    (is (= :crash (:status r)))
+    (is (str/includes? (:message r) "panic"))
+    (is (= :crash (second (dg/verdict d r))))))

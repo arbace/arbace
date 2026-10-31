@@ -255,7 +255,12 @@
                                        :when (not (.contains ^String m "concatenation"))]
                                    (str l ": " m))))
                           errs (concat (:errors r) pn)]
-                      (if (seq errs) {:error (vec errs)} {:pp-only true}))
+                      (cond
+                        ;; the preprocessor's panic (pp/preprocess's :panic, a "panic:" warning): its output stopped there, so the
+                        ;; file is not judged (review 006, finding 1)
+                        (:panic r) {:crash (str "the preprocessor stopped: " (or (first (filter #(str/starts-with? (str %) "panic:") (:warnings r))) "panic"))}
+                        (seq errs) {:error (vec errs)}
+                        :else {:pp-only true}))
                     (rc/read-c cfg fc rn false))
                   (catch Throwable x (if (:deadline (ex-data x)) {:timeout true} {:crash (str x)}))))
         tally (fn [status errs msg]
@@ -265,6 +270,8 @@
                    :lines (into (sorted-map) (frequencies (map second mine)))
                    :other (- (count ls) (count mine))
                    :unlocated (- (count errs) (count ls))
+                   ;; the first error not located in the main file (another file's, or one with no line)
+                   :stray (one-line (or (first (remove (fn [e] (when-let [[f _] (error-line e)] (or (nil? f) (.endsWith ^String f base-name)))) errs)) ""))
                    :message (one-line (or (first errs) msg ""))}))]
     (cond
       (:timeout rd) {:status :timeout :lines {} :message "the evaluated read's budget spent"}
@@ -324,33 +331,47 @@
 
 (defn verdict
   "The checker's read judged against the file's directives: [:pass], or [:fail kind detail] with kind one
-  of :refused :timeout :crash (the read gave no judgment), :missed (an expected error line without one of
-  the checker's), :extra (an error on a line that expects none), :both, :stopped (a read error ends the
-  file before its later expected lines: the missed lines are after it)."
+  of :refused :timeout :crash (the read gave no judgment; also a missing read row and a preprocessor's panic),
+  :missed (an expected error line without one of the checker's), :extra (an error on a line that expects none),
+  :both, :stopped (the read gave errors the directives cannot account for: errors not located in the main
+  file, with no line-0 directive or dg-excess-errors to take them; a read that failed with no message; or a
+  read error that ends the file before its later expected lines: the missed lines are after it)."
   [dg r]
-  (let [st (:status r)]
-    (if (#{:refused :timeout :crash} st)
-      (if (and (empty? (get-in dg [:expect :error])) (zero? (get-in dg [:any :error] 0)) (not (:excess dg)))
-        [:fail st (:message r)]
-        [:fail st (:message r)])
+  (let [st (:status r)
+        anyn (long (get-in dg [:any :error] 0))
+        stray (+ (long (or (:other r) 0)) (long (or (:unlocated r) 0)))]
+    (cond
+      ;; a file the read did not reach (review 006, finding 1): no judgment
+      (nil? r) [:fail :crash "no read row"]
+      (#{:refused :timeout :crash} st) [:fail st (:message r)]
+      ;; errors of another file (an included header) or without a line: the directives of this file do not
+      ;; place them, so only a line-0 directive or dg-excess-errors accounts for them (review 006, finding 1)
+      (and (pos? stray) (zero? anyn) (not (:excess dg)))
+      [:fail :stopped (str stray " error" (when (> stray 1) "s") " not located in the main file: " (or (not-empty (:stray r)) (:message r)))]
+      ;; a read that failed and said nothing: the checker never ran
+      (and (= st :read-error) (empty? (:lines r)) (zero? stray))
+      [:fail :stopped (str "the read failed" (if (str/blank? (:message r)) " with no message" (str ": " (:message r))))]
+      :else
       (let [exp (set (get-in dg [:expect :error]))
             allowed (into exp (get-in dg [:xfail :error]))
             ours (set (keys (:lines r)))
-            anyn (get-in dg [:any :error] 0)
+            ;; any error of the read, the main file's or (taken by a line-0 directive or dg-excess-errors) another's
+            some-err (or (seq ours) (pos? stray))
             missed (vec (sort (remove ours exp)))
             extra (vec (sort (remove allowed ours)))
-            missed (if (and (pos? anyn) (seq ours) (empty? exp)) [] missed)
+            missed (if (and (pos? anyn) some-err (empty? exp)) [] missed)
             extra (if (or (pos? anyn) (:excess dg)) [] extra)
-            missed (if (and (:excess dg) (seq ours)) [] missed)
-            extra (if (pos? (get-in dg [:any :error] 0)) [] extra)
-            first-ours (first ours)]
+            missed (if (and (:excess dg) some-err) [] missed)]
         (cond
           (and (empty? missed) (empty? extra)
-               (or (not (:excess dg)) (seq ours) (pos? anyn))
-               (or (zero? anyn) (seq ours) (seq exp))
+               (or (not (:excess dg)) some-err (pos? anyn))
+               (or (zero? anyn) some-err (seq exp))
                (or (pos? anyn) (:excess dg) (seq exp) (empty? ours)))
           [:pass]
           (and (seq missed) (seq extra)) [:fail :both (str "missed " missed " extra " extra (msg-of dg missed))]
+          ;; a read error ends the file: the expected lines after its last error were never read
+          (and (seq missed) (= st :read-error) (seq ours) (every? #(> (long %) (long (apply max ours))) missed))
+          [:fail :stopped (str "missed " missed " after the read's last error at " (apply max ours) (msg-of dg missed))]
           (seq missed) [:fail :missed (str "missed " missed (msg-of dg missed))]
           (seq extra) [:fail :extra (str "extra " extra " got: " (:message r))]
           :else [:fail :missed (str "no error " (when (:excess dg) "(dg-excess-errors)") (when (pos? anyn) "(line 0)"))])))))
