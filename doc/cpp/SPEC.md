@@ -680,7 +680,16 @@ function's text is its item's); alternative tokens (N7) as `:c/ops`. Sub-item la
 with the invocation as written in the metadata, `^{:cpp/macro "ASSERT (x);" :cpp/line 12}` (`:cpp/line`: the line it stood at,
 for `__LINE__`): the printer writes the text; the nodes of one invocation after the first carry `:cpp/macro ""`. A value that cannot carry metadata (a number, `nullptr`
 as `nil`, a boolean: `INT_MAX`, `NULL`, `SIGSEGV`) is wrapped, `(cpp/macro "INT_MAX" 2147483647)`: the printer writes the text (an operand of
-precedence 0), the forms keep the value (CP73 (c)); the wrapper is only for expressions. Where the expansion
+precedence 0), the forms keep the value (CP73 (c)); the wrapper is only for expressions. `:cpp/line` is on every
+macro form of a statement or a declaration and on an expression whose expansion depends on the place (a token spelled in the oracle's scratch
+space: `__LINE__`, `__FILE__`, `##`, `#`); the wrapper then has the line as a fourth element, `(cpp/macro "__LINE__" 12 12)`.
+The printer writes `#line N` before the text (on a line of its own, inside an expression too: CP79 (b), CP91 (b)), the text's own
+lines then number as in the source. In a list (arguments, initializers) the elements one invocation expands to carry the text once on
+the first (`:cpp/macro ""` on the others, CP81), and the first carries the line when any of them depends on it; a first element marked
+`^:cpp/nosep` has no comma printed after it (the expansion holds its own, `EPSILONGC_ONLY_ARG(x)` is `x,`: CP92 (b), decided by the
+source: no comma stands between the invocation and the next element). A preprocessing directive that stands between the elements of an
+initializer list (`#define VM_CLASS_NAME(name, symbol) ...` before `VM_CLASSES_DO(VM_CLASS_NAME)`) is an element `(c/directive "...")`,
+printed on lines of its own with no comma. Where the expansion
 cannot be converted the invocation is `(cpp/text "...")`. The
 oracle's `range`s (begin and end offsets with macro-expansion pairs) place each node among the lexer's tokens.
 
