@@ -146,7 +146,7 @@ The C forms are those of doc/c/SPEC.md, printed by repr/c's printer at `:gnu23` 
   called by a C `main` that checks for an uncaught exception. No other name is the lowering's own: since CX7 the Itanium
   ABI's entry points (`__cxa_throw` ...) are libsupc++'s, lowered (§10); CX6 renamed them to a hand-written runtime's.
 - **Functions.** One `c/defn` per define (linkage: `internal`/`private` static, `linkonce`/`weak` `__attribute__((weak))`,
-  `available_externally` a declaration only), prototypes first; `llvm.global_ctors` as `constructor` attributes. The
+  `available_externally` a declaration only), prototypes first; `llvm.global_ctors` as `constructor` wrappers (§8). The
   IR is already lowered to the ABI, so C's parameter and return types reproduce its calls: `byval(T)` parameters are
   the struct by value (the body takes its address), `sret` a pointer, coerced aggregates C structs of the same members.
 - **Bodies.** A C variable per SSA value, declared at the top (so `goto` never jumps into a scope); each block a
@@ -208,8 +208,13 @@ after throwing an instance of 'T'", `what()`, `abort()`, status 134).
 What differs from the Itanium ABI, by design: there is no search phase, so an exception that no handler catches runs
 the cleanups of the frames it leaves before `std::terminate` (libstdc++ terminates first: the class
 `uncaught-cleanups` when a cleanup prints); native code that calls lowered code (musl's `qsort`, `pthread_once`, an
-`atexit` handler) does not test the flag, so an exception thrown through a native frame returns into it as if nothing
-were thrown (the class `native-callback-throw`; the C library is native until C5's musl as C forms). Until CX6 the
+`atexit` handler, and musl's thread start, which calls libstdc++'s lowered `execute_native_thread_routine`: an exception
+that leaves a `std::thread`'s callable ends the thread silently, where g++ calls `std::terminate`) does not test the flag,
+so an exception thrown through a native frame returns into it as if nothing were thrown (the class
+`native-callback-throw`; the C library is native until C5's musl as C forms). The C library's loop over the constructors
+is not such a frame: each `llvm.global_ctors` entry is a C `constructor` wrapper (`cx$ctor$N`) that calls the function and
+then `cx$uncaught` when the flag is set, so a throw that leaves a dynamic initializer terminates there, before a later
+constructor or `main` runs (review 007's finding 9). Until CX6 the
 library itself was native and exceptions it threw unwound natively through the lowered frames (the classes
 `library-throw` and `callback-throw`, gone with CX7).
 

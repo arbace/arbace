@@ -878,7 +878,7 @@
         dl (some #(when (= (first %) 'llvm/datalayout) (second %)) forms)
         _ (when (and dl (not= dl expected-layout)) (refuse :datalayout "the data layout " dl))
         ctors (some #(when (and (= (first %) 'llvm/global) (= (gname-str (second %)) "llvm.global_ctors")) %) forms)
-        ctor-fns (when ctors (into {} (for [[_ [_ [_ prio] [_ fv]]] (rest (nth ctors 3))] [(gname-str fv) prio])))
+        ctor-list (when ctors (vec (for [[_ [_ [_ prio] [_ fv]]] (rest (nth ctors 3))] [(gname-str fv) prio])))
         _ (when (some #(and (= (first %) 'llvm/global) (= (gname-str (second %)) "llvm.global_dtors")) forms) (refuse :dtors "llvm.global_dtors"))
         special #{"llvm.global_ctors" "llvm.used" "llvm.compiler.used" "llvm.global.annotations"}
         globals (into {} (for [f forms
@@ -905,9 +905,8 @@
             protos (vec (for [[f info] fns]
                           (let [[_ _ rt ps & more] f o (apply hash-map more)
                                 cps (c-params ps)
-                                pvec (cond-> (if (empty? cps) (if (some #{'&} ps) [] ['void]) cps) (some #{'&} ps) (conj '&))
-                                prio (get ctor-fns (gname-str (second f)))]
-                            (list 'c/declare (with-meta (:c info) (linkage-meta o (:asm info) (when prio [(if (= prio 65535) 'constructor ['constructor prio])])))
+                                pvec (cond-> (if (empty? cps) (if (some #{'&} ps) [] ['void]) cps) (some #{'&} ps) (conj '&))]
+                            (list 'c/declare (with-meta (:c info) (linkage-meta o (:asm info)))
                                   (with-meta pvec {:tag (ctype rt)})))))
             aliases (vec (for [[_ info] *globals* :when (:target info)]
                            (let [o (apply hash-map (drop 4 (:form info)))
@@ -941,12 +940,19 @@
                            :else [d df])))
             defs (vec (for [[f info] fns :when (and (= (first f) 'llvm/define) (not= :available_externally (:linkage (apply hash-map (drop 4 f)))))]
                         (let [o (apply hash-map (drop 4 f))
-                              prio (get ctor-fns (gname-str (second f)))
                               ;; aligned: Itanium's member function pointers take the low bit of a function's address
                               ;; for the virtual flag (clang aligns every function at 16; gcc -O0 does not)
-                              m (linkage-meta o (:asm info) (concat [['aligned (max 2 (long (or (:align o) 2)))]]
-                                                                    (when prio [(if (= prio 65535) 'constructor ['constructor prio])])))]
+                              m (linkage-meta o (:asm info) [['aligned (max 2 (long (or (:align o) 2)))]])]
                           (lower-define f (assoc info :c-decl (with-meta (:c info) m))))))
+            ;; llvm.global_ctors: each a C constructor that calls the function and then, as a throw that leaves a dynamic
+            ;; initializer terminates, calls cx$uncaught when the pending flag is set (review 007's finding 9): no later
+            ;; constructor and no main runs with an exception in flight
+            ctor-defs (vec (for [[i [s prio]] (map-indexed vector ctor-list) :let [info (get globals s)] :when info]
+                             (list 'c/defn (with-meta (symbol (str "cx$ctor$" i))
+                                             {:static true :c/decl-attrs [(list '__attribute__ (if (= prio 65535) 'constructor ['constructor prio]))]})
+                                   (with-meta ['void] {:tag 'void})
+                                   (list (:c info))
+                                   '(when cx$pending (cx$uncaught)))))
             main (get globals "main")
             wrapper (when (and main (= (:kind main) :fn) (= (first (:form main)) 'llvm/define))
                       (let [[_ ps] (:sig main) n (count ps)
@@ -961,7 +967,7 @@
                   (list 'c/declare 'cx$resume (with-meta [(with-meta 'o {:tag '(* void)})] {:tag 'void}))
                   (list 'c/declare 'cx$uncaught (with-meta ['void] {:tag 'void}))]]
         [(list 'c/file c-name :std :gnu23)
-         (vec (concat (:defs @*structs*) head protos aliases (keep first gvars) (keep second gvars) defs (when wrapper [wrapper])))]))))
+         (vec (concat (:defs @*structs*) head protos aliases (keep first gvars) (keep second gvars) defs ctor-defs (when wrapper [wrapper])))]))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; bin/cppi lower
