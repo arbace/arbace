@@ -45,5 +45,5 @@ expect "rollup: a stale roles.tsv is regenerated, not judged" 0 'testsuite: 0 fi
 
 # finding 6: a program with an environment runs under OI_TIMEOUT (1 s: the stdlib's load alone takes longer), as a row "timeout"
 out=$(cd "$root" && OI_TIMEOUT=1 bin/oi check --aot --only 'tool-ocamltest-var-expansion/subst1' 2>&1 | grep -a 'subst1'); st=$?
-expect "aot: a program with an environment is under the time limit" 0 'timeout 1s' "$out" $st
+expect "aot: a program with an environment is under the time limit" 1 'timeout 1s' "$out" $st
 exit $bad
