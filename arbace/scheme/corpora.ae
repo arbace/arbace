@@ -340,6 +340,22 @@
 (defn- run-names [dir]
   (sort (map #(second (re-find #"^(.*)\.rc$" (.getName ^java.io.File %))) (filter #(str/ends-with? (.getName ^java.io.File %) ".rc") (.listFiles (java.io.File. ^String dir))))))
 
+(defn- run-stamps
+  "Review 009, finding 6: the stamps bin/si writes beside each output of DIR (NAME.stamp: the key of what made the run, its time
+  limit); {:names :timeouts {NAME seconds} :key K}, or {:refused WHY} for a directory with no outputs, an output without a stamp
+  (an older bin/si's) or outputs of more than one key (a partial run by another si, harness or library)."
+  [dir]
+  (let [names (when (.isDirectory (java.io.File. ^String dir)) (run-names dir))
+        st (into {} (for [n names :let [t (slurp-or (str dir "/" n ".stamp"))]]
+                      [n (when t (let [[_ k to] (re-find #"key=(\S+) timeout=(\S+)" t)] {:key k :timeout (parse-long to)}))]))
+        keys (set (keep :key (vals st)))]
+    (cond (empty? names) {:refused (str "no outputs in " dir)}
+          (some nil? (vals st)) {:refused (str "outputs without a stamp (an older run): " (str/join " " (take 8 (keep (fn [[n v]] (when-not v n)) st))))}
+          (> (count keys) 1) {:refused (str "outputs of " (count keys) " different runs (keys " (str/join ", " (sort keys)) "): run them all again")}
+          :else {:names names :key (first keys) :timeouts (into {} (map (fn [[n v]] [n (:timeout v)]) st))})))
+
+(defn- refuse [why] (println "refused:" why) 2)
+
 (defn- ref-of [file] (when-let [t (slurp-or (path file))] (into {} (map (juxt :id identity) (read-string t)))))
 (defn- chez-ref [] (ref-of "test/scheme/ref-ecraven-chez.edn"))
 (defn- chibi-ref [] (ref-of "test/scheme/ref-ecraven-chibi.edn"))
@@ -348,20 +364,22 @@
   "A reference's run of ecraven's benchmarks, the answers and times of its CSVLINEs; --record writes FILE. SM8b (SC113 (b)): Chez Scheme
   10.3.0 through the same R7RS libraries (their Chez variants); SC151: Chibi-Scheme 0.12.0 on the benchmark programs as they are."
   [impl label file header [dir & opts]]
-  (let [results (vec (for [n (run-names dir)
+  (if-let [why (:refused (run-stamps dir))] (refuse why)
+  (let [{:keys [timeouts]} (run-stamps dir)
+        results (vec (for [n (run-names dir)
                            :let [out (or (slurp-or (str dir "/" n ".out")) "") err (or (slurp-or (str dir "/" n ".err")) "")
                                  rc (str/trim (slurp (str dir "/" n ".rc")))
                                  t (csv-seconds impl out)]]
                        {:id (str "ecraven/" n)
                         :verdict (cond (re-find #"INCORRECT" out) :incorrect t :correct (= rc "124") :timeout :else :error)
-                        :seconds t :rc rc
+                        :seconds t :rc rc :timeout (timeouts n)
                         :detail (when-not t (clip (or (first-line err) (first-line out) "") 160))}))
         fr (frequencies (map :verdict results))]
     (println (str "ecraven on " label ":") (count results) "benchmarks:" (get fr :correct 0) "correct," (get fr :incorrect 0) "incorrect,"
              (get fr :timeout 0) "timeouts," (get fr :error 0) "errors")
     (when (some #{"--record"} opts)
       (write-results file header results))
-    0))
+    0)))
 
 (defn- cmd-ecraven-chez [args]
   (cmd-ecraven-ref "chez" "Chez" "test/scheme/ref-ecraven-chez.edn"
@@ -374,15 +392,16 @@
                    args))
 
 (defn- cmd-ecraven [[dir & opts]]
+  (if-let [why (:refused (run-stamps dir))] (refuse why)
   (let [cs (classes) ref (chez-ref) cref (chibi-ref)
-        names (sort (map #(second (re-find #"^(.*)\.rc$" (.getName ^java.io.File %))) (filter #(str/ends-with? (.getName ^java.io.File %) ".rc") (.listFiles (java.io.File. ^String dir)))))
+        {:keys [names timeouts]} (run-stamps dir)
         results (vec (for [n names
                            :let [out (or (slurp-or (str dir "/" n ".out")) "") err (or (slurp-or (str dir "/" n ".err")) "")
                                  rc (str/trim (slurp (str dir "/" n ".rc")))
                                  it (bench-item n out err rc)]]
                        {:id (str "ecraven/" n) :corpus :ecraven-r7rs
                         :verdict (if it :non-pass :pass)
-                        :seconds (csv-seconds "si" out)
+                        :seconds (csv-seconds "si" out) :timeout (timeouts n)
                         :chez (some-> (get ref (str "ecraven/" n)) (select-keys [:verdict :seconds]))
                         :chibi (some-> (get cref (str "ecraven/" n)) (select-keys [:verdict :seconds]))
                         :items (if it [{:item it :class (class-of cs it)}] [])}))]
@@ -390,7 +409,7 @@
       (write-results "test/scheme/check-ecraven-linux-amd64.edn"
                      ";; ecraven's r7rs-benchmarks on si (bin/si ecraven --record, repetition count 1): each benchmark's verdict (its own\n;; check of its result) and non-pass items with their classes (test/scheme/divergences-corpora.edn); generated."
                      results))
-    (summary results)))
+    (summary results))))
 
 ;; ------------------------------------------------------------------------------------------ Chez's mats
 
@@ -422,15 +441,16 @@
                       {:pass 0 :fail 0 :notrun 0} lines)}))
 
 (defn- cmd-mats [[dir & opts]]
+  (if-let [why (:refused (run-stamps dir))] (refuse why)
   (let [cs (classes)
-        files (sort (map #(second (re-find #"^(.*)\.rc$" (.getName ^java.io.File %))) (filter #(str/ends-with? (.getName ^java.io.File %) ".rc") (.listFiles (java.io.File. ^String dir)))))
+        {files :names timeouts :timeouts} (run-stamps dir)
         results (vec (for [b files
                            :let [file (str b ".ms")
                                  out (or (slurp-or (str dir "/" b ".out")) "") err (or (slurp-or (str dir "/" b ".err")) "")
                                  rc (str/trim (slurp (str dir "/" b ".rc")))
                                  {:keys [mats items clauses]} (mat-file-items file out err rc)
                                  fr (frequencies (map :status mats))]]
-                       {:id (str "mats/" file) :corpus :chez-mats
+                       {:id (str "mats/" file) :corpus :chez-mats :timeout (timeouts b)
                         :verdict (if (empty? items) :pass :non-pass)
                         :mats (count mats) :pass (get fr :pass 0) :fail (get fr :fail 0) :notrun (get fr :notrun 0) :skip (get fr :skip 0)
                         :clauses-alone clauses
@@ -443,7 +463,7 @@
       (write-results "test/scheme/check-mats-linux-amd64.edn"
                      ";; Chez's mats on si (bin/si mats --record): per .ms file the mats' counts (pass, fail, not run, skipped) and the items\n;; of every mat that does not pass, with their classes (test/scheme/divergences-corpora.edn); generated."
                      results))
-    (summary results)))
+    (summary results))))
 
 ;; ------------------------------------------------------------------------------------------ every file
 

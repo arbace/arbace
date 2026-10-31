@@ -57,6 +57,7 @@
 #   bin/si chibi-tests [--record]        SC142 (b): Chibi 0.12.0's own tests of the vendored libraries (diff, optional, term ansi) on si and on Chibi,
 #                                        test by test (test/scheme/check-chibi-tests-linux-amd64.edn)
 #   bin/si ecraven [--count N] [--record] [NAME...]  ecraven's r7rs-benchmarks on si, repetition count N (default 1), SI_TIMEOUT s each
+#                                        (default 60); each output stamped with what made it and its limit, a judge refuses a mix
 #   bin/si ecraven --chez [--count N] [--record] [NAME...]  the same on Chez through the R7RS libraries' Chez variants
 #                                        (scheme/lib/**/NAME.chezscheme.sls, SM8b): the reference's answers and times,
 #                                        test/scheme/ref-ecraven-chez.edn
@@ -125,6 +126,21 @@ chez_libdir() {
   for x in "$root"/scheme/lib/scheme "$root"/scheme/lib/chibi; do ln -s "$x" "$chez_lib/"; done
   for x in "$root"/scheme/lib/srfi/%3a*; do b=$(basename "$x"); ln -s "$x" "$chez_lib/srfi/:${b#%3a}"; done
 }
+
+# run_key IMPL [FILE...]: the key of what makes a corpus run (review 009, finding 6): for si the light driver, psyntax's
+# boot text and the libraries (scheme/lib, scheme/vendor), for chez and chibi the executable (and scheme/lib for Chez's
+# variants), then the FILEs (a harness); stamp DIR/NAME.stamp: the key and the time limit beside each output, so that a
+# judge refuses a directory that mixes runs of another si (or holds none)
+run_key() {
+  local impl=$1; shift
+  { case $impl in
+      si) sha256sum < "$si_light"; sha256sum < "$light_dir/psyntax.pp.ss"; (cd "$root" && find scheme/lib scheme/vendor -type f | LC_ALL=C sort | xargs sha256sum) ;;
+      chez) sha256sum < "$(command -v "$CHEZ")"; (cd "$root" && find scheme/lib -type f | LC_ALL=C sort | xargs sha256sum) ;;
+      chibi) sha256sum < "$(command -v "${CHIBI:-chibi-scheme}")" ;;
+    esac
+    local f; for f in "$@"; do sha256sum < "$f"; done; } | sha256sum | cut -c1-16
+}
+stamp() { printf 'key=%s timeout=%s\n' "$run_key_v" "$2" > "$1.stamp"; }
 
 # check_runs IMPL DIR [IDS...]: each program of programs.edn run by IMPL (si or chez) in its file's directory,
 # its stdin the :input file, into DIR/ID.out, .err, .rc
@@ -492,8 +508,9 @@ case $cmd in
     if [ $impl = chez ]; then d=$light_dir/ecraven-chez; chez_libdir; elif [ $impl = chibi ]; then d=$light_dir/ecraven-chibi; else [ -x "$si_light" ] || light; d=$light_dir/ecraven; fi
     mkdir -p "$d" "$ec/outputs"   # slatex writes outputs/z0.scm
     if [ -n "$judge" ]; then names=(); elif [ ${#names[@]} -eq 0 ]; then rm -rf "$d"; mkdir -p "$d"; for f in "$ec"/inputs/*.input; do names+=("$(basename "$f" .input)"); done; fi
-    for n in "${names[@]}"; do
-      [ -f "$ec/src/$n.scm" ] || { echo "no benchmark $n" >&2; continue; }
+    for n in ${names[@]+"${names[@]}"}; do [ -f "$ec/src/$n.scm" ] || { echo "bin/si ecraven: no benchmark $n" >&2; exit 2; }; done
+    run_key_v=$(run_key $impl)
+    for n in ${names[@]+"${names[@]}"}; do
       # Chez reads a program in R6RS's mode: #!chezscheme takes its own lexical syntax, --program the R7RS program's scope
       { [ $impl = chez ] && echo '#!chezscheme'; cat "$ec/src/$n.scm"; echo; cat "$ec/src/common.scm"; echo "(define (this-scheme-implementation-name) \"$impl\")"; cat "$ec/src/common-postlude.scm"; } > "$d/$n.sps"
       # the input: the file with its first number (the count) replaced
@@ -508,6 +525,7 @@ case $cmd in
         (cd "$ec" && timeout "${SI_TIMEOUT:-60}" env GOMEMLIMIT=${SI_GOMEMLIMIT:-1500MiB} GOMAXPROCS=${GOMAXPROCS:-2} \
            "$si_light" --pp "$light_dir/psyntax.pp.ss" --lib "$root/scheme/lib" "$d/$n.sps" < "$d/$n.in" > "$d/$n.out" 2> "$d/$n.err"; echo $? > "$d/$n.rc") || true
       fi
+      stamp "$d/$n" "${SI_TIMEOUT:-60}"
       echo "$n: rc $(cat "$d/$n.rc") $(( $(date +%s) - s )) s: $(grep -h 'CSVLINE' "$d/$n.out" | head -1)"
     done
     if [ $impl = chez ]; then arbace_tool -m arbace.scheme.corpora ecraven-chez "$d" ${rec[@]+"${rec[@]}"}
@@ -527,6 +545,8 @@ case $cmd in
     corpora=${ARBACE_SCHEME_CORPORA:-$root/.tmp/scheme/corpora}; mt=$corpora/chez-mats/mats
     d=$light_dir/mats; mkdir -p "$d"
     if [ ${#files[@]} -eq 0 ]; then rm -rf "$d"; mkdir -p "$d"; for f in "$mt"/*.ms; do files+=("$(basename "$f")"); done; fi
+    for f in "${files[@]}"; do [ -f "$mt/$f" ] || { echo "bin/si mats: no file $f in $mt" >&2; exit 2; }; done
+    run_key_v=$(run_key si "$root/test/scheme/mats/run.sps")
     for f in "${files[@]}"; do
       b=${f%.ms}
       # a mat that hangs (a cyclic list, a thread, a wait) is skipped on the next run of the file: its name goes in
@@ -540,6 +560,7 @@ case $cmd in
         awk '/^BEGIN /{b=substr($0,7)} /^MAT /{b=""} END{if (b!="") print b}' "$d/$b.out" >> "$d/$b.skip"
         echo "  $f: timeout, skipping mat $(tail -1 "$d/$b.skip") and running again"
       done
+      stamp "$d/$b" "${SI_TIMEOUT:-400}"
       echo "$f: rc $(cat "$d/$b.rc") $(grep -c '^MAT ' "$d/$b.out") mats"
     done
     arbace_tool -m arbace.scheme.corpora mats "$d" ${rec[@]+"${rec[@]}"} ;;
