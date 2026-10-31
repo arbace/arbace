@@ -18,9 +18,13 @@
 ;;;;   DEF NAME NOTRUN WHY        a definition that does not expand alone (left out)
 ;;;;   FILE N-datums M-mats       at the end
 (import (rnrs) (rnrs eval) (rnrs mutable-pairs) (si mats) (only (srfi :98) get-environment-variable)
-        (only (psyntax system $all) r7rs-write new-interaction-environment))
+        (only (chezscheme) interaction-environment)
+        (only (psyntax system $all) r7rs-write new-interaction-environment library-path))
 
 (define argv (cdr (command-line)))
+;; SC170 (b): Chez finds a library in the current directory first (its library-directories default is "."): a mat that writes a
+;; library file (testfile-g2.ss) and imports it
+(library-path (append (library-path) '(".")))
 (define path (car argv))
 (define skip
   (if (pair? (cdr argv))
@@ -158,6 +162,7 @@
     (else
      (let ((env2 (timed (lambda () (make-mat-env)))))
        (set-evaluator! (lambda (expr) (eval expr env2)))
+       (interaction-environment env2)   ; SC170 (b): (eval x) of a clause evaluates in the mat's environment, as in Chez
        (let loop ((cs clauses) (k 1) (p 0) (f 0) (n 0) (fail #f) (notrun #f))
          (if (null? cs)
              (begin

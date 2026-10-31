@@ -114,11 +114,66 @@
     unbox set-box! box? append! reverse! list-copy fluid-let module import real-time cpu-time make-parameter parameterize
     atom? exact-nonnegative-integer? char- string-truncate! enumerate
     fxnonnegative? fxnonpositive? subst substq substv subst! substq! substv! remq! remv! remove! call/1cc
-    exclusive-cond define-values)
-  (import (rnrs) (rnrs eval) (rnrs mutable-pairs) (rnrs mutable-strings) (rnrs r5rs)
+    exclusive-cond define-values interaction-environment transcoder?)
+  ;; SC170 (b): Chez's wider forms of eval (the environment optional), dynamic-wind (a leading critical flag), fx+ fx* fx-
+  ;; (any number of arguments) and the file procedures' options ('replace, 'truncate) replace (rnrs)'s
+  (import (except (rnrs) file-options fx+ fx* fx- for-each dynamic-wind open-output-file call-with-output-file with-output-to-file)
+          (rename (only (rnrs) fx+ fx* fx- for-each dynamic-wind open-output-file call-with-output-file with-output-to-file)
+                  (fx+ fx2+) (fx* fx2*) (fx- fx2-) (dynamic-wind r6-dynamic-wind) (for-each r6-for-each) (open-output-file r6-open-output-file)
+                  (call-with-output-file r6-call-with-output-file) (with-output-to-file r6-with-output-to-file))
+          (except (rnrs eval) eval) (rename (only (rnrs eval) eval) (eval r6-eval))
+          (rnrs mutable-pairs) (rnrs mutable-strings) (rnrs r5rs)
           (srfi :39 parameters)
-          (only (psyntax system $all) gensym module import real-time cpu-time)
+          (only (psyntax system $all) gensym module import real-time cpu-time make-file-options)
           (si format))
+
+;; SC170 (b): Chez's file-options names more than R6RS's three (replace, append, compressed, exclusive, ...): the universe is si's
+  (define-syntax file-options
+    (lambda (x)
+      (syntax-case x ()
+        ((_ opt ...) (for-all identifier? #'(opt ...)) #'(make-file-options '(opt ...))))))
+  (define (transcoder? x) (guard (e (#t #f)) (transcoder-codec x) #t))
+  (define ienv #f)
+  (define interaction-environment
+    (case-lambda
+      ((e) (set! ienv e))
+      (() (or ienv (begin (set! ienv (environment '(chezscheme))) ienv)))))
+  (define eval
+    (case-lambda
+      ((x) (r6-eval x (interaction-environment)))
+      ((x e) (r6-eval x e))))
+  (define dynamic-wind
+    (case-lambda
+      ((before thunk after) (r6-dynamic-wind before thunk after))
+      ((critical? before thunk after) (r6-dynamic-wind before thunk after))))
+  (define fx+ (case-lambda (() 0) ((x) (fx2+ x 0)) ((x y) (fx2+ x y)) ((x y . r) (apply fx+ (fx2+ x y) r))))
+  (define fx* (case-lambda (() 1) ((x) (fx2* x 1)) ((x y) (fx2* x y)) ((x y . r) (apply fx* (fx2* x y) r))))
+  (define fx- (case-lambda ((x) (fx2- x)) ((x y) (fx2- x y)) ((x y . r) (apply fx- (fx2- x y) r))))
+  ;; Chez's for-each returns what its last call returns (the call is a tail call; none: void), which a mat reads
+  (define for-each
+    (case-lambda
+      ((p l) (if (and (pair? l) (list? l))
+                 (let loop ((l l)) (if (null? (cdr l)) (p (car l)) (begin (p (car l)) (loop (cdr l)))))
+                 (r6-for-each p l)))
+      ((p l1 l2) (if (and (pair? l1) (pair? l2) (list? l1) (list? l2) (= (length l1) (length l2)))
+                     (let loop ((l1 l1) (l2 l2)) (if (null? (cdr l1)) (p (car l1) (car l2)) (begin (p (car l1) (car l2)) (loop (cdr l1) (cdr l2)))))
+                     (r6-for-each p l1 l2)))
+      ((p l . ls) (apply r6-for-each p l ls))))
+  (define (replace-existing! who f opts)
+    (let ((opts (apply append (map (lambda (o) (if (list? o) o (list o))) opts))))
+      (when (and (pair? opts) (or (memq 'replace opts) (memq 'truncate opts)) (file-exists? f)) (delete-file f))))
+  (define open-output-file
+    (case-lambda
+      ((f) (r6-open-output-file f))
+      ((f . opts) (replace-existing! 'open-output-file f opts) (r6-open-output-file f))))
+  (define call-with-output-file
+    (case-lambda
+      ((f proc) (r6-call-with-output-file f proc))
+      ((f proc . opts) (replace-existing! 'call-with-output-file f opts) (r6-call-with-output-file f proc))))
+  (define with-output-to-file
+    (case-lambda
+      ((f thunk) (r6-with-output-to-file f thunk))
+      ((f thunk . opts) (replace-existing! 'with-output-to-file f opts) (r6-with-output-to-file f thunk))))
 
   (define (cmp who ok?)
     (lambda (x . r)
@@ -243,8 +298,8 @@
   (define fxlogor fxior)
   (define fxlogxor fxxor)
   (define fxlognot fxnot)
-  (define (fxquotient x y) (fxquotient* x y))
-  (define (fxquotient* x y) (let ((q (quotient x y))) (if (fixnum? q) q (assertion-violation 'fxquotient "result is not a fixnum" q))))
+  (define fxquotient (case-lambda ((x) (fxquotient* 1 x)) ((x y) (fxquotient* x y)) ((x y . r) (apply fxquotient (fxquotient* x y) r))))
+  (define (fxquotient* x y) (let ((q (begin (unless (and (fixnum? x) (fixnum? y)) (assertion-violation 'fxquotient "not a fixnum" x y)) (quotient x y)))) (if (fixnum? q) q (assertion-violation 'fxquotient "result is not a fixnum" q))))
   (define (fxremainder x y) (fx- x (fx* y (fxquotient x y))))
   (define (fxmodulo x y) (modulo x y))
   (define (fxabs x) (if (fx<? x 0) (fx- 0 x) x))
@@ -252,7 +307,17 @@
   (define (bignum? x) (and (integer? x) (exact? x) (not (fixnum? x))))
   (define (ratnum? x) (and (rational? x) (exact? x) (not (integer? x))))
   (define-record-type (box-type box box?) (fields (mutable v unbox set-box!)))
-  (define (append! . ls) (apply append ls))
+  ;; append! links the last pair of each non-empty list to the next list (Chez's, destructive: SC170 (b))
+  (define (append! . ls)
+    (let loop ((ls ls))
+      (cond ((null? ls) '())
+            ((null? (cdr ls)) (car ls))
+            ((not (list? (car ls))) (assertion-violation 'append! "not a proper list" (car ls)))
+            (else
+             (let ((rest (loop (cdr ls))))
+               (if (null? (car ls))
+                   rest
+                   (begin (set-cdr! (last-pair (car ls)) rest) (car ls))))))))
   (define (reverse! l) (reverse l))
   (define (list-copy l) (if (pair? l) (cons (car l) (list-copy (cdr l))) l))
   (define (atom? x) (not (pair? x)))
