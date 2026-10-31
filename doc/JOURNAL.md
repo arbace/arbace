@@ -633,3 +633,14 @@ git history:
     (about 4 minutes in run 1). Any other `bin/repr-java` step run first would show it too. They get the
     declaration with GTS72's rekey.
 - **Rerun 4:** `--only failed,changed`: goi-aot and repr-java-parse's 7 parts.
+- **Rerun 4** (`f2f168c5`) died with the disk full. Another worktree's scratch had reached 46 GB: an agent's link
+  logs, g++ given a `.a` archive as a source file. The logs were truncated, and the agent's tool now caps its logs
+  and guards the disk. The record was untouched.
+- **Rerun 5** (`f2f168c5`): the 7 repr-java-parse parts passed clean, every audit ok. The watchdog fix held:
+  goi-aot came through two strace aborts and ran its whole course, 45 minutes. One program failed:
+  `fixedbugs/issue16037_run.go`, its compile "signal: killed", as in run 2. The program runs `go build` itself, and
+  its compile inherits the per-process `ulimit -t` of the default limit (50 s of CPU). Under ptrace most of that is
+  system time: the program's tree used 61 s of CPU, 53 of it system time. Fix: its own limit in
+  `test/goi/timeouts.txt`, 30 (150 s), as gcgort.go and issue13160.go have. The file is in the `:goi` inputs, so
+  goi, goi-aot, goi-check, goi-aot-essential and the 24 repr-go-native parts rerun: about 3 hours of checks.
+- **Rerun 6:** `--only failed,changed`.
