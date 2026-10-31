@@ -2593,3 +2593,146 @@ Not shipped: `arbace/scheme/{check,corpora}.ae`, `bin/si`, the Makefile, `LICENS
 
 All as recommended: SC170 (b), starting with the 188 "incorrect number of arguments"; SC171 (b); SC172 (b); SC173 (b);
 SC174 (a).
+
+## As built: SC170-SC173 (2026-10-31)
+
+Branch `scheme-sm1`, light tier (stage 0 as the tools' host, the light driver, at most 4 threads and `GOMEMLIMIT` 1000-1500 MiB a process; no
+gate, no build of Arbace's executables or javac's tool, no lock). The light driver was rebuilt once (`bin/si light`, one line of Go, below).
+
+### SC170 (b): the 479 failing clauses of mats that do not run
+
+Method: the 479 items of `mats-notrun-clauses` read from `test/scheme/check-mats-linux-amd64.edn`, their clauses printed (a paren-matching
+scratch reader, `.tmp/an/clause.py`), the Chez 10.3.0 answer probed where si's differed (`.tmp/an/p1.sps`, `p2.sps`), the fixes made, `bin/si mats`
+rerun whole four times (about 10 minutes each, no skip, no rerun).
+
+*The 188 "incorrect number of arguments", by procedure*: 148 `with-output-to-file` / `call-with-output-file` with a third argument (Chez's
+options, `'replace`), 32 anonymous procedures called with one or no argument, 7 `dynamic-wind` with four, 12 `fx+` `fx*` `fx-` `fxquotient`. Of the
+32: 17 are `(eval x)` with one argument (the interaction environment; 8.ms define-property, bytevector.ms's `eval` of a call, misc.ms eval and eval2,
+self-evaluating-vectors), 3 `for-each`'s value, the rest the expander's (let-syntax splicing in 8.ms, 5 clauses), `argcnt-check`'s message text and
+the clauses of a mat that did not run.
+
+*si's own, fixed* (all in `scheme/lib/chezscheme.sls` but the last; Chez probed first):
+- `eval` with one argument, evaluated in `(interaction-environment)`, which the harness sets to the mat's environment (`run.sps`).
+- `dynamic-wind` with Chez's leading critical flag.
+- `fx+`, `fx*`, `fx-` of any number of arguments (`(fx+)` 0, `(fx*)` 1, `(fx- x)` negation, left fold) and `fxquotient` (one argument:
+  `(fxquotient 1 x)`, as Chez; three or more: left fold; a non-fixnum argument raises).
+- `with-output-to-file`, `call-with-output-file`, `open-output-file` with options (`'replace`, `'truncate`, a list of them): an existing file is
+  deleted first.
+- `file-options` takes Chez's names (`replace`, `append`, `compressed`, ... any name of si's universe), not only R6RS's three.
+- `for-each` returns what its last call returns (Chez's; a tail call; none: void); improper or unequal lists still go to (rnrs)'s.
+- `append!` is destructive and refuses an improper list; `transcoder?`.
+- Go, `go/arbace/scm/prim_io.ae` `openFileOut`: the `replace` file option replaces an existing file as `no-fail` does (the `File already exists`
+  of `open-file-output-port` with `(file-options replace)`). `bin/si unit` (go test of arbace/scm) passes.
+- The harness (`test/scheme/mats/run.sps`): `(library-path)` ends with `"."` (Chez finds a library file a mat writes in the current directory), and
+  `bin/si mats` runs each file in a work directory of its own with the corpus' files linked in (the files a mat writes, `testfile*`, stayed in the
+  corpus directory and the next run met them: 18 new "File already exists" items on the second run, none after).
+
+*Numbers* (before: review 009's rerun; after: this one):
+
+| | before | after |
+|---|---|---|
+| mats pass / fail / not run / skipped | 282 / 89 / 529 / 11 | 282 / 87 / 531 / 11 |
+| clauses of the mats not run, alone: pass / fail / do not run | 4,288 / 568 / 9,131 | 4,389 / 332 / 9,271 |
+| non-pass items | 1,785 | 1,534 |
+| `mats-notrun-clauses` | 479 | 0 (class split, below) |
+| "incorrect number of arguments" in them | 188 | 3 |
+| in no class | 0 | 0 |
+
+So **251 items moved** (1,785 to 1,534): 101 more clauses pass and 236 fewer fail in the not-run mats. The mats' pass count is the same (a mat
+passes only when all its clauses do; the mats that gained still name an identifier of Chez's); two FAIL mats became NOT RUN (4.ms `dynamic-wind`,
+`unbound identifier gook`, and `exclusive-cond`, `profile-clear-database`: their failing clauses were the arity ones, now fixed, and what is left is the
+mat's first clause that does not run).
+
+*The rest, classed by cause and anchored* (`test/scheme/divergences-corpora.edn`, in place of `mats-notrun-clauses`, each named by file, mat and
+clause, generated from the record by `.tmp/an/reclass.py`): 243 clauses.
+
+| class | n | cause |
+|---|---|---|
+| `mats-returned-false` | 142 | a clause that reads what a clause that did not run made (a custom port, a compiled library, a `$destroy`), Chez's identity of continuations and constants (`call/1cc`, the empty bytevector, `case` on a list), file-port positions in io.ms |
+| `mats-library-missing` | 55 | a library file or compiled library a clause that did not run writes |
+| `mats-files-missing` | 28 | a file Chez's `fasl-write`, `compile-file` or `strip-fasl-file` makes, or one an earlier failing clause left |
+| `mats-clause-errors` | 13 | ports closed by an earlier clause (io.ms port-operations4), shift counts and overflow at the fixnum bounds, a reader refusal |
+| `mats-chez-arity` | 3 | Chez's message text (`argcnt-check`), `with-input-from-file`'s options |
+| `mats-did-not-raise` | 2 | 6.ms compression's checks |
+
+Of the 479, 236 no longer fail (si's own, fixed, or consequences of it: the unwritten library and test files); the 243 left were not found to be
+si's own beyond what is fixed, but the 142 "returned #f" are classed by shape, not clause by clause (proposal SC180).
+
+*Test* (before side: the earlier light driver and library): `.tmp/an/m1.ms`, 12 clauses (one-argument `eval`, `fx+` and relatives,
+`fxquotient`, four-argument `dynamic-wind`, `with-output-to-file` with `'replace` twice) fail 8 before and pass after; `m3.ms` (`append!`,
+`transcoder?`), `m4.ms` (`fxquotient` with a bignum, `append!` of an improper list, `open-output-file` with `'(replace)`), `m2.ms` (a library
+file written by a mat and imported) pass.
+
+### SC171 (b): a regression step for the corpora's judges
+
+`arbace.scheme.corpora/regressions` (one function) and `regress-code`: a judge compares its results with the record before writing it. Lines
+`regress KIND ID: DETAIL`: `pass-fails` (a recorded pass that does not pass), `verdict` (a reference's or a benchmark's), `new-item` (an item
+the record lacks: a clause that fails anew, or a known one that fails for another reason, being a new text), `class-changed`, `item-absent` (a
+recorded item the run does not make), `counts` (tests, pass, fail, mats, not run, skipped), `result-absent` (a recorded result with no output),
+`result-new`. The run exits 1 unless it records (`--record` accepts: the record is the reviewed state). Used by every judge that has a record: mats,
+ecraven, ecraven-chez and -chibi (verdicts), r7rs, r7rs-own, r7rs-chez, r7rs-chibi, chibi-tests and the new srfi. *Test*
+(`.tmp/an/rt.ae`, synthetic): a recorded pass that fails, another reason for a known item, an absent item and result, a class change, a count:
+0 lines before (no step), 7 after; identical results: 0. *Reruns*: ecraven, r7rs (1,225 tests, 1,216 pass, 9 `r7rs-float-printing`): none against the
+record; mats: 592 against the previous record before it was re-recorded (the SC170 changes), none after.
+
+### SC172 (b): a suite's stdout outside its tests
+
+`arbace.scheme.check`: `known-differences` names the rewrites of Chez's output, one by one (`:chez-record-gensym`: `#{err kixdzb...-2}` written as
+`err`); a suite program whose report and failures agree must now equal Chez's output, rewritten, byte for byte, else a `differs` item; each result
+records the known differences that applied (`:known-differences`; racket/base: `[:chez-record-gensym]`; the final empty line needed no rule: the two
+outputs are equal after the rewrite). *Test* (`.tmp/an/runs-t`, the recorded runs with a line added to racket/base's output): passes before (46 of 47),
+an item in no class after (45 of 47, 1 failing). *Rerun*: `bin/si check --record`: **46 of 47** (1 `chez-conditions`), as before.
+
+### SC173 (b): `bin/si srfi`
+
+`bin/si srfi [--record] [N...]` runs the programs into `.tmp/si/srfi` (stamped as the other corpora), `arbace.scheme.corpora srfi` judges them:
+status 0, a last line `srfi-N: P passed, F failed` with F zero, no FAIL line, P and F as recorded in `test/scheme/check-srfi-linux-amd64.edn`
+(new; `make si-srfi-record`). **11 programs, 1,231 checks pass, 0 fail** (1: 201, 13: 207, 14: 182, 26: 38, 39: 26, 69: 81, 98: 14, 125: 92, 128:
+158, 133: 152, 158: 80). *Test*: a program that prints nothing and a program with one check fewer: pass before, items and `regress` lines after
+(exit 1). `bin/si srfi --aot` is as before (not judged by counts, not run: it builds Go programs).
+
+### Checks rerun
+
+`bin/si mats` (above); `bin/si r7rs` 1,216 of 1,225, no regression; `bin/si check` 46 of 47; `bin/si srfi` 1,231 checks; `bin/si unit` ok;
+`bin/si corpora files` 220 files, 0 in neither; `bin/si corpora divergences` rc 0; `make check-makefile` rc 0. Not run: `check --aot`,
+`srfi --aot`, ecraven (they build Go programs or take hours; nothing they run imports `(chezscheme)`), the gate.
+
+### Proposals (SC180 onward)
+
+- **SC180 The 243 clauses left in the not-run classes** (142 "returned #f" classed by shape).
+  - Options: (a) leave them; (b) one mat at a time, find the first clause that does not run in each of the roughly 40 mats and implement what it
+    names where small (`make-custom-textual-input-port` and its relatives for io.ms's 39 clauses, `vector-cas!`, `box-cas!`, `compile-library`'s
+    outputs), moving the rest to `mats-chez-identifier`; (c) judge a not-run mat's clauses only up to its first clause that does not run.
+  - *Recommended: (b)* for the ports (the largest, and R6RS's custom ports are portable), (a) for compiled libraries and fasl; (c) hides again what
+    review 009's finding 2 made visible.
+- **SC181 `bin/si check`'s and the AOT judges' regression step.** `check.ae` has its own summary and records; the new step is in corpora.
+  - Options: (a) leave; (b) move `regressions` to its own namespace both require; (c) (b) and `bin/si check --aot` against the interpreted record.
+  - *Recommended: (b)*, then the check's two records are covered.
+- **SC182 Partial runs and `result-absent`.** A partial `bin/si mats FILE` in a directory of the same key judges the others from their old
+  outputs; a partial `srfi N` wipes nothing, but a record lacking the others reports them absent only if their outputs are gone.
+  - Options: (a) as built; (b) a partial run judges and records only the files it ran (`--only`); (c) refuse partial runs.
+  - *Recommended: (b)*, as `bin/java-check --only` does.
+- **SC183 Where the Scheme-level Chez variants live.** `fx+`, `eval`, `for-each` and the file procedures are `case-lambda` wrappers in
+  `chezscheme.sls` (slower than the primitives, used by Chez programs and the mats only).
+  - Options: (a) as built; (b) move the hot ones (`fx+ fx* fx-`, `for-each`) to the Go primitives at the next heavy window; (c) a second library
+    `(chezscheme fast)`.
+  - *Recommended: (a)* until a Chez program measures slower; (b) when si ships (SC112).
+- **SC184 The Go change** (`replace` in `openFileOut`) is in `go/`, so it is shipped code: it changes the executable's key at the next gate
+  (`go/`), and `bin/seed`'s Scheme-less seed is unaffected.
+  - Options: (a) keep (one line, tested by `bin/si unit` and the mats); (b) revert it and keep only the Scheme wrapper's delete-first; (c) also give
+    `open-output-file`, `call-with-output-file` and `with-output-to-file` the options natively.
+  - *Recommended: (a)*; (c) with SC183 (b).
+
+### Rule slips
+
+- Twice `> /dev/null 2>&1` on a judge run (the record written, the output not wanted); nothing left behind.
+- Two waiting loops at once for a few seconds (a first one moved to the background by the tool's timeout, stopped at once); one `sleep 240` the
+  tool blocked.
+- `bin/si mats` started with the disk at 81% (the stop line then was 80%; the gate's clone, the line moved to 84% by the coordinator); I deleted my
+  `.tmp/si/aot` and the scratch copy of the old tree.
+- A `git checkout` of a record I had written for analysis, then written again: the record is the final one.
+
+### Shipped files changed
+
+`go/arbace/scm/prim_io.ae` (one condition), `scheme/lib/chezscheme.sls`. Not shipped: `arbace/scheme/{check,corpora}.ae`, `bin/si`, `Makefile`,
+`test/scheme/**` (`mats/run.sps`, `divergences-corpora.edn`, `check-{linux,mats,srfi}-*.edn`).

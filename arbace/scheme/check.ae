@@ -42,6 +42,28 @@
     (println "recorded" (count runs) "runs of Chez into test/scheme/si/ref-chez.edn")
     0))
 
+;; SC172 (b): byte equality of stdout is the rule for a suite program too; the known differences between Chez's output and si's
+;; are named here, each one a rewrite of Chez's output, and a program whose output differs in any other way is an item
+(def known-differences
+  [{:name :chez-record-gensym
+    :why "Chez writes a record type's name as its gensym, #{err kixdzb...-2}; si writes the name"
+    :rewrite (fn [s] (str/replace s #"#\{(\S+) [^}\s]+\}" "$1"))}])
+
+(defn applied-differences
+  "The names of the known differences Chez's output out shows (a rewrite that changes it)."
+  [out]
+  (vec (for [{:keys [name rewrite]} known-differences :when (not= out (rewrite out))] name)))
+
+(defn expected-out
+  "Chez's output with the known differences rewritten: what si's must equal byte for byte."
+  [out]
+  (reduce (fn [s {:keys [rewrite]}] (rewrite s)) out known-differences))
+
+(defn- differs-item [id ours theirs]
+  (let [ol (str/split-lines ours) tl (str/split-lines theirs)
+        i (count (take-while true? (map = ol tl)))]
+    (str "differs " id " line " (inc i) ": " (pr-str (nth ol i nil)) " for " (pr-str (nth tl i nil)))))
+
 ;;; The suites' output: a header, then "N tests passed" or the failures, each "Expression:\n EXPR\nResult:...".
 
 (defn suite-report
@@ -53,7 +75,7 @@
     {:tests (reduce + (map (fn [[_ a b]] (Long/parseLong (or a b))) ls))
      :failures (vec (for [[_ e res] (re-seq #"(?s)Expression:\n (.*?)\nResult:(.*?)\nExpected:" out)]
                       ;; Chez writes a record type's name as its gensym, #{err kixdzb...-2}; si writes the name
-                      [e (str/replace (str/trim res) #"#\{(\S+) [^}\s]+\}" "$1")]))}))
+                      [e (expected-out (str/trim res))]))}))
 
 ;; Review 009, finding 1: a run whose reference is an error is judged on the error's kind, not on the status alone (si exits
 ;; 255 on every uncaught error). The kinds both sides spell differently are named; any other error is its first line.
@@ -96,14 +118,18 @@
             (let [fo (frequencies (:failures ours)) ft (frequencies (:failures theirs))
                   exprs-o (set (map first (:failures ours)))
                   extra (fn [a b] (mapcat (fn [[k n]] (repeat (- n (get b k 0)) k)) (sort-by str a)))]
-              (concat
-                (when (not= (:tests ours) (:tests theirs))
-                  [(str "count " id ": " (:tests ours) " tests for Chez's " (:tests theirs))])
-                (for [[e b] (extra fo ft)]
-                  (str "fails " id " " e " => " (str/replace b "\n" " ")))
-                (for [[e _] (extra ft fo) :when (not (contains? exprs-o e))]
-                  (str "passes " id " " e))
-                err-items))
+              (let [report (concat
+                             (when (not= (:tests ours) (:tests theirs))
+                               [(str "count " id ": " (:tests ours) " tests for Chez's " (:tests theirs))])
+                             (for [[e b] (extra fo ft)]
+                               (str "fails " id " " e " => " (str/replace b "\n" " ")))
+                             (for [[e _] (extra ft fo) :when (not (contains? exprs-o e))]
+                               (str "passes " id " " e)))]
+                ;; the report agrees: the rest of stdout must too (SC172 (b)), but for the known differences
+                (concat report
+                        (when (and (empty? report) (not= (:out r) (expected-out (:out ref))))
+                          [(differs-item id (:out r) (expected-out (:out ref)))])
+                        err-items)))
             (if (not same-status)
               [(crash)]
               (let [ol (str/split-lines (:out r)) tl (str/split-lines (:out ref))
@@ -131,6 +157,7 @@
                :let [r (run-of dir (:id p))
                      items (vec (items-of p r (refs (:id p))))]]
            {:id (:id p) :verdict (if (empty? items) :pass :non-pass)
+            :known-differences (when (and r (:suite p) (refs (:id p))) (not-empty (applied-differences (:out (refs (:id p))))))
             :items (mapv (fn [i] {:item i :class (class-of classes i)}) items)}))))
 
 (defn- summary [results]

@@ -37,7 +37,7 @@
 #                                        as si's (refused: an item with the reason, test/scheme/divergences-aot.edn;
 #                                        --record: test/scheme/check-aot-linux-amd64.edn), then compared with
 #                                        si's interpreted runs (.tmp/si/runs, bin/si check's)
-#   bin/si srfi [N...]                  the SRFIs' programs (test/scheme/srfi/srfi-N*.sps) run on si with the libraries of scheme/lib
+#   bin/si srfi [--record] [N...]       the SRFIs' programs (test/scheme/srfi/srfi-N*.sps) run on si with the libraries of scheme/lib, judged by their counted checks (SC173)
 #   bin/si srfi --aot [N...]            the same programs compiled (aot_compile) and run, judged the same way, their
 #                                        stdout compared with si's interpreted run of each ("same"/"differs")
 #   bin/si bench [--n N]                 timings for the speed report: larceny's fib (stdin N, default 40) and the R6RS
@@ -426,20 +426,26 @@ case $cmd in
       aot_cache_trim
       echo "srfi --aot: $ran programs"; exit $rc
     fi
-    # bin/si srfi [N...]: test/scheme/srfi/srfi-N*.sps (SM6: the SRFIs as libraries under scheme/lib/srfi/) run on si
-    # (the light driver); a program passes when its status is 0 and it prints no line starting "FAIL"
+    # bin/si srfi [--record] [N...]: test/scheme/srfi/srfi-N*.sps (SM6: the SRFIs as libraries under scheme/lib/srfi/) run on si
+    # (the light driver) into .tmp/si/srfi; judged by the checks counted (SC173 (b)): status 0, no FAIL line, the report line
+    # "srfi-N: P passed, F failed" last with F zero, and P, F as recorded (test/scheme/check-srfi-linux-amd64.edn, --record)
+    need_gnu_timeout
+    rec=(); sel=()
+    while [ $# -gt 0 ]; do case $1 in --record) rec=(--record); shift ;; *) sel+=("$1"); shift ;; esac; done
     [ -x "$si_light" ] || light
-    rc=0; ran=0
+    d=$light_dir/srfi; run_key_v=$(run_key si)
+    mkdir -p "$d"
+    if [ ${#sel[@]} -eq 0 ]; then find "$d" -maxdepth 1 -type f -delete; fi
     for f in "$root"/test/scheme/srfi/srfi-*.sps; do
       b=$(basename "$f" .sps); n=${b#srfi-}; n=${n%%-*}
-      if [ $# -gt 0 ]; then case " $* " in *" $n "*) ;; *) continue ;; esac; fi
-      o=$light_dir/srfi-$b; : > "$o.in"
+      if [ ${#sel[@]} -gt 0 ]; then case " ${sel[*]} " in *" $n "*) ;; *) continue ;; esac; fi
+      o=$d/$b; : > "$d/empty.in"
       (cd "$(dirname "$f")" && timeout "${SI_TIMEOUT:-300}" env GOMEMLIMIT=${SI_GOMEMLIMIT:-1500MiB} GOMAXPROCS=${GOMAXPROCS:-4} \
-         "$si_light" --pp "$light_dir/psyntax.pp.ss" --lib "$root/scheme/lib" "$(basename "$f")" < "$o.in" > "$o.out" 2> "$o.err"; echo $? > "$o.rc") || true
-      ran=$((ran+1)); st=$(cat "$o.rc"); fails=$(grep -c '^FAIL' "$o.out" || true)
-      if [ "$st" = 0 ] && [ "$fails" = 0 ]; then echo "pass $b: $(tail -1 "$o.out")"; else echo "FAIL $b: status $st, $fails FAIL lines ($o.out, $o.err)"; rc=1; fi
+         "$si_light" --pp "$light_dir/psyntax.pp.ss" --lib "$root/scheme/lib" "$(basename "$f")" < "$d/empty.in" > "$o.out" 2> "$o.err"; echo $? > "$o.rc") || true
+      stamp "$o" "${SI_TIMEOUT:-300}"
+      echo "$b: rc $(cat "$o.rc") $(tail -1 "$o.out")"
     done
-    echo "srfi: $ran programs"; exit $rc ;;
+    arbace_tool -m arbace.scheme.corpora srfi "$d" ${rec[@]+"${rec[@]}"} ;;
   r7rs)
     # bin/si r7rs [--record]: Chibi's r7rs-tests.scm (the corpus chibi-r7rs) run on si in R7RS mode (its own, SM8b) with the
     # R7RS libraries of scheme/lib/scheme and (chibi test): one result a test (SM8), judged by the file's own pass/fail,
@@ -562,7 +568,10 @@ case $cmd in
       # $d/$b.skip, up to six times, and the rc of the last run stands (a hung mat is an item "crash ... in mat NAME")
       : > "$d/$b.skip"; tries=0
       while :; do
-        (cd "$mt" && timeout "${SI_TIMEOUT:-400}" env GOMEMLIMIT=${SI_GOMEMLIMIT:-1000MiB} GOMAXPROCS=${GOMAXPROCS:-2} \
+        # SC170 (b): each run in a work directory of its own, the corpus' files linked in: the files a mat writes (testfile*) stay
+        # out of the corpus, where the next run would find them ("File already exists")
+        w=$d/work-$b; rm -rf "$w"; mkdir -p "$w"; (cd "$mt" && for x in *; do [ -d "$x" ] || ln -s "$mt/$x" "$w/$x"; done)
+        (cd "$w" && timeout "${SI_TIMEOUT:-400}" env GOMEMLIMIT=${SI_GOMEMLIMIT:-1000MiB} GOMAXPROCS=${GOMAXPROCS:-2} \
            "$si_light" --pp "$light_dir/psyntax.pp.ss" --lib "$root/scheme/lib" --r7rs "$root/test/scheme/mats/run.sps" "$mt/$f" "$d/$b.skip" < "$light_dir/empty.in" > "$d/$b.out" 2> "$d/$b.err"; echo $? > "$d/$b.rc") || true
         [ "$(cat "$d/$b.rc")" = 124 ] && [ $tries -lt 6 ] || break
         tries=$((tries+1))
@@ -575,7 +584,7 @@ case $cmd in
       stamp "$d/$b" "${SI_TIMEOUT:-400}"
       echo "$f: rc $(cat "$d/$b.rc") $(grep -c '^MAT ' "$d/$b.out") mats"
     done
-    arbace_tool -m arbace.scheme.corpora mats "$d" ${rec[@]+"${rec[@]}"} ;;
+    find "$d" -maxdepth 1 -name 'work-*' -type d -exec rm -rf {} + ; arbace_tool -m arbace.scheme.corpora mats "$d" ${rec[@]+"${rec[@]}"} ;;
   corpora) arbace_tool -m arbace.scheme.corpora "$@" ;;
   divergences) arbace_tool -m arbace.scheme.check divergences "$@" ;;
   expand|fixpoint) arbace_tool -m arbace.scheme.expand "$cmd" "$@" ;;
