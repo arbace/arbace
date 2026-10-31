@@ -23,6 +23,10 @@ import (
 // version is part of every cache key: a change of the filter's output changes it.
 const version = "cxxdump-7"
 
+// normVersion is the normal form's own part of the key of a -norm run: a change of norm.go (CP77 (b): no FullComment) changes it and
+// only the .norm entries, not the dumps', are rebuilt.
+const normVersion = "norm-2"
+
 type countReader struct {
 	r io.Reader
 	n int64
@@ -426,7 +430,11 @@ func clangVersion(clang string) string {
 
 func (j job) key() (string, error) {
 	h := sha256.New()
-	fmt.Fprintf(h, "%s\x00%s\x00%v %v %v %v %v %v\x00", version, clangVersion(j.clang), j.opts.implicit, j.opts.edn, j.opts.norm, j.layouts, j.opts.instances, j.opts.main)
+	norm := fmt.Sprint(j.opts.norm)
+	if j.opts.norm {
+		norm = normVersion
+	}
+	fmt.Fprintf(h, "%s\x00%s\x00%v %v %v %v %v %v\x00", version, clangVersion(j.clang), j.opts.implicit, j.opts.edn, norm, j.layouts, j.opts.instances, j.opts.main)
 	for _, a := range j.args {
 		h.Write([]byte(a))
 		h.Write([]byte{0})

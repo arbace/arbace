@@ -4,7 +4,8 @@ package main
 // AST equals the original's modulo positions and the dump's per-run ids. Removed: every node's id, loc and
 // range; isReferenced; the keys whose value is another node's id; the ids inside the declaration references; and in strings
 // the positions clang writes into the names of unnamed entities ("(lambda at a.cpp:6:20)", "(unnamed struct at
-// ...)"), masked as "at *".
+// ...)"), masked as "at *"; and (CP77 (b)) every FullComment, the doc comment clang attaches to a declaration (`///`, `/** */`),
+// which a print in mode :lines does not have (mode :full keeps comments in the text, not in the AST).
 
 import "regexp"
 
@@ -35,10 +36,14 @@ func normalize(v any) any {
 		x.keys, x.vals = keys, vals
 		return x
 	case []any:
-		for i := range x {
-			x[i] = normalize(x[i])
+		out := x[:0]
+		for _, e := range x {
+			if o, ok := e.(*obj); ok && o.str("kind") == "FullComment" {
+				continue
+			}
+			out = append(out, normalize(e))
 		}
-		return x
+		return out
 	case string:
 		return reAt.ReplaceAllString(x, " at *")
 	}

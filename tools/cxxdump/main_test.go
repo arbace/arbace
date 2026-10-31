@@ -86,6 +86,18 @@ func TestNorm(t *testing.T) {
 	}
 }
 
+// CP77 (b): the normal form has no FullComment, whatever the declaration it is attached to.
+func TestNormFullComment(t *testing.T) {
+	d := &obj{keys: []string{"kind", "name", "inner"}, vals: []any{"FunctionDecl", "f", []any{
+		&obj{keys: []string{"kind", "inner"}, vals: []any{"FullComment", []any{&obj{keys: []string{"kind"}, vals: []any{"ParagraphComment"}}}}},
+		&obj{keys: []string{"kind"}, vals: []any{"CompoundStmt"}}}}}
+	n := normalize(d).(*obj)
+	inner := n.vals[2].([]any)
+	if len(inner) != 1 || inner[0].(*obj).str("kind") != "CompoundStmt" {
+		t.Fatalf("FullComment kept: %v", inner)
+	}
+}
+
 // A key clang writes twice (UsingType's "type") is written once under its name and then as "type-2".
 func TestRepeatedKey(t *testing.T) {
 	o := &obj{keys: []string{"kind", "type", "decl", "type"}, vals: []any{"UsingType", "a", "b", "c"}}
