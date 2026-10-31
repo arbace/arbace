@@ -291,8 +291,14 @@
 (defn- mask [e ^long w]
   (cond
     (#{8 16 32 64 128} w) e
-    (> w 64) (refuse :wide-int "i" w)
-    :else (list 'bit-and e (int-lit (.subtract (.shiftLeft BigInteger/ONE (int w)) BigInteger/ONE) (if (<= w 32) 32 64)))))
+    (> w 128) (refuse :wide-int "i" w)
+    :else (list 'bit-and e (int-lit (.subtract (.shiftLeft BigInteger/ONE (int w)) BigInteger/ONE) (cond (<= w 32) 32 (<= w 64) 64 :else 128)))))
+
+(defn- store-bytes
+  "An integer type's store size in bytes when it is smaller than its container's (i24: 3 of 4, i40: 5 of 8), else nil:
+  LLVM's load and store of the type read and write those bytes only (review 007's finding 4)."
+  [^long w]
+  (let [ss (quot (+ w 7) 8)] (when (< ss (quot (container-bits w) 8)) ss)))
 
 (declare value gep-expr const-expr)
 
@@ -726,10 +732,22 @@
                    (swap! *fn* update :allocas conj (with-meta m {:tag (list 'array (max n 1) 'unsigned-char) :c/alignas al}))
                    (set (list 'conv '(* void) m)))
                  (set (list '__builtin_alloca_with_align (if cnt (list '* (uval (typed-value cnt) (int-bits (first cnt))) s) s) (* 8 al)))))
-      load (let [[t pv] [(second x) (nth x 2)] ct (ctype t) ct (if (:volatile o) (list 'volatile ct) ct)]
-             (set (list 'deref (list 'conv (list '* ct) (typed-value pv)))))
-      store (let [[v pv] [(second x) (nth x 2)] ct (ctype (first v)) ct (if (:volatile o) (list 'volatile ct) ct)]
-              [(list 'set! (list 'deref (list 'conv (list '* ct) (typed-value pv))) (typed-value v))])
+      ;; an integer of an odd width: loaded masked to it, and when its store size is smaller than its container's (i24, i40,
+      ;; i48, i56: bit-field access units clang does not widen over the next field) loaded and stored by those bytes only
+      load (let [[t pv] [(second x) (nth x 2)] ct0 (ctype t) ct (if (:volatile o) (list 'volatile ct0) ct0) w (int-bits t)
+                 ss (when w (store-bytes w))]
+             (cond
+               ss (set (mask (list 'stmt-expr (list 'let [(list 'c/var (with-meta 'cx$u {:tag ct0}) (int-lit 0 w))]
+                                                    (list '__builtin_memcpy (list 'addr 'cx$u) (typed-value pv) ss)
+                                                    'cx$u))
+                             w))
+               w (set (mask (list 'deref (list 'conv (list '* ct) (typed-value pv))) w))
+               :else (set (list 'deref (list 'conv (list '* ct) (typed-value pv))))))
+      store (let [[v pv] [(second x) (nth x 2)] ct0 (ctype (first v)) ct (if (:volatile o) (list 'volatile ct0) ct0) w (int-bits (first v))
+                  ss (when w (store-bytes w))]
+              (if ss
+                [(list '__builtin_memcpy (typed-value pv) (list 'addr (list 'compound-lit ct0 (typed-value v))) ss)]
+                [(list 'set! (list 'deref (list 'conv (list '* ct) (typed-value pv))) (typed-value v))]))
       getelementptr (let [[st base & idxs] args] (set (gep-expr st (typed-value base) (take-while vector? idxs))))
       phi []
       select (let [[c a b] args]

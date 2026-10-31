@@ -21,7 +21,7 @@ finish() { [ "$nbad" = 0 ] && echo "selftest $(basename "$0" .sh): ok" || echo "
 fake_runtime() {
   local d=$1 tree=${2:-$root}
   mkdir -p "$d"
-  printf '_Thread_local int cx$pending;\n' > "$d/rt.c"
+  printf '_Thread_local int cx$pending;\nvoid cx$uncaught(void) { __builtin_abort(); }\n' > "$d/rt.c"
   gcc -c "$d/rt.c" -o "$d/rt.o"
   ar rcs "$d/liblstdc++.a"; ar rcs "$d/liblstdc++exp.a"
   "$tree/bin/cppi" runtime-key --print > "$d/key.txt" || return 1
