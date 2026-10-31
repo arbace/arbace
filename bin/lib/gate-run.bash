@@ -174,24 +174,26 @@ pass_reads() {
 }
 record_pass() {  # record_pass NAME: its pass in the store at its key (GTS7 (a)), with its outputs (GT5)
   # GTS80 (a): every file through a temporary name renamed into place, the record last (a pass is its
-  # .edn), each checked whole first: a full disk leaves temporary files (removed), never a cut pass
+  # .edn), each checked whole first: a full disk leaves temporary files (removed), never a cut pass. The
+  # temporaries are dotfiles ending in .tmp, never .edn (review 001, finding 3: gate.plan's passes reads
+  # *.edn, a killed gate's leftover would count as a pass)
   local name=$1 k=${key[$1]} d=$store/$1 t
   mkdir -p "$d" || return 1
   t=$d/.$k.$$
   rm -rf "${t:?}".*
-  cp "$logs/$name.log" "$t.log" && cmp -s "$logs/$name.log" "$t.log" \
-    && cp "$logs/plan/$name.inputs" "$t.inputs" && cmp -s "$logs/plan/$name.inputs" "$t.inputs" \
-    && mv -f "$t.log" "$d/$k.log" && mv -f "$t.inputs" "$d/$k.inputs" || { rm -rf "${t:?}".*; return 1; }
+  cp "$logs/$name.log" "$t.log.tmp" && cmp -s "$logs/$name.log" "$t.log.tmp" \
+    && cp "$logs/plan/$name.inputs" "$t.inputs.tmp" && cmp -s "$logs/plan/$name.inputs" "$t.inputs.tmp" \
+    && mv -f "$t.log.tmp" "$d/$k.log" && mv -f "$t.inputs.tmp" "$d/$k.inputs" || { rm -rf "${t:?}".*; return 1; }
   if [ "${outputs[$name]}" = yes ]; then
-    cp -a "$logs/out/$name" "$t.out" && diff -rq "$logs/out/$name" "$t.out" > "$t.diff" \
-      && rm -f "$t.diff" && rm -rf "${d:?}/$k.out" && mv -T "$t.out" "$d/$k.out" || { rm -rf "${t:?}".*; return 1; }
+    cp -a "$logs/out/$name" "$t.out.tmp" && diff -rq "$logs/out/$name" "$t.out.tmp" > "$t.diff.tmp" \
+      && rm -f "$t.diff.tmp" && rm -rf "${d:?}/$k.out" && mv -T "$t.out.tmp" "$d/$k.out" || { rm -rf "${t:?}".*; return 1; }
   fi
   printf '{:step "%s" :key "%s" :commit "%s" :dirty %s :worktree "%s" :date "%s"\n :secs %s :cpu-s %s :maxrss-kib %s :tree-peak-kib %s\n :log-sha256 "%s"%s}\n' \
     "$name" "$k" "$commit" "$dirty" "$root" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(cat "$logs/$name.secs")" \
     "$(mem_of "$name" cpu-s)" "$(mem_of "$name" maxrss-kib)" "$(mem_of "$name" tree-peak-kib)" \
     "$(sha256sum < "$logs/$name.log" | cut -c1-64)" \
-    "$([ -n "${GATE_CLEAN_INNER:-}" ] && echo ' :clean true')" > "$t.edn" \
-    && pass_reads "$t.edn" "$name" && mv -f "$t.edn" "$d/$k.edn" || { rm -rf "${t:?}".*; return 1; }
+    "$([ -n "${GATE_CLEAN_INNER:-}" ] && echo ' :clean true')" > "$t.edn.tmp" \
+    && pass_reads "$t.edn.tmp" "$name" && mv -f "$t.edn.tmp" "$d/$k.edn" || { rm -rf "${t:?}".*; return 1; }
 }
 
 # the plan's steps, from plan.tsv: NAME DECISION KEY PHASE CHAIN NEEDS START-AFTER HEAVY MEM BUDGET
