@@ -644,3 +644,29 @@ git history:
   `test/goi/timeouts.txt`, 30 (150 s), as gcgort.go and issue13160.go have. The file is in the `:goi` inputs, so
   goi, goi-aot, goi-check, goi-aot-essential and the 24 repr-go-native parts rerun: about 3 hours of checks.
 - **Rerun 6:** `--only failed,changed`.
+
+## 2026-10-31: GT7 passes
+
+- **Rerun 6** (`814483c4`, `--only failed,changed`, 174 minutes): goi, goi-aot, goi-check, goi-aot-essential, reap
+  and the 24 repr-go-native parts ran, every audit ok. goi-aot came through without a retry this time
+  (`issue16037_run.go` passed under its own limit).
+- **The record** `test/gate/clean-arbace-reaps-3-crops-v2.edn` merges 33 steps of this run and 53 of earlier
+  runs: every step passed clean (`:status :passed`, the record's `:runs` naming each step's run). 27 passes
+  (`:clean`) and javac's tool were published into the shared store.
+- **Decided (the user): GTS79 (b).** A pending program host is compared by its build's key, at the next change that
+  rekeys every step (doc/GATE-SURVEY.md, "Decided (2026-10-31): GTS79").
+- **Decided (the user) on the crops' branches today, all as recommended:**
+  - OC80-OC95 and OC100-OC109 (`ocaml-o1`);
+  - SC115-SC122 (`scheme-sm1`);
+  - CP76-CP88 and CP90-CP93 (`cpp-cx6`);
+  - CS120-CS127 and CS130-CS136 (`c23-c7`).
+- **Built overnight and this morning in the light tier, on branches waiting for the post-tag window:**
+  - C6 (cf2g, C23's AOT): all 3,582 programs translated and compiled, 3,366 pass, none failing.
+  - C7 (gcc 15.2's C23 groups, 627 files, the dg judge).
+  - CX6 (LLVM forms, the lowering to C forms, the exception runtime): 222 of 234 libstdc++ tests run as the
+    original, none failing.
+  - CP76 (b) and CP77 (b): HotSpot read by clang under the JDK build's own flags (jdk26u's recorded command
+    lines, a `-include` shim for musl's exception specifications).
+  - CP79 (b), CP91 (b) and CP92 (b): the line of a macro form, list pieces.
+  - OC102, OC104, OC105 (b) and OC106 (b): 366 of 370 expect tests pass, from 259.
+- **Next:** the demonstrations (GTS42), the concurrent `--full` (GTS37), the v2 record, the tag.

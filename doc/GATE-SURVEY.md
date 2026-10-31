@@ -1880,3 +1880,10 @@ before I killed its process group.
 The user decided all nine as recommended. GTS72 (`bin/javac-vendor` into `arbace_javac_key`), GTS75 (the converter's tag
 fix) and GTS78's second half (GTS51's recorded CPU times) come at the next change that rekeys everything; the rest are
 as built. Test t03447's class `:print-shapes` (a constant printed as `0` against `(float 0.0)`) is confirmed by the user.
+
+## Decided (2026-10-31): GTS79
+
+- **GTS79 `--only` and a program host not built** (GT7's rerun 2). Options: (a) the selection builds every host an unselected
+  step's key names; (b) a pending program host compared by its build's key (`arbace_javac_key`, `gate_key`) rather than as
+  changed; (c) the workaround (select one cheap step that needs the host). *Recommended: (a)*.
+  - **Decided (the user, 2026-10-31): (b).** After the tag, at the next change that rekeys every step.
