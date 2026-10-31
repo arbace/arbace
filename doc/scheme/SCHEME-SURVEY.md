@@ -2417,3 +2417,174 @@ None. Not shipped: `scheme/lib/chibi/optional.sls`, `LICENSE.md`, `bin/si`, `arb
 ### Decided (SC160-SC162; the user, 2026-10-31)
 
 All as recommended: SC160; SC161 and SC162 on a quiet host, after the tag's runs.
+
+## As built: review 009's fixes (2026-10-31)
+
+Branch `scheme-sm1`, on `fe8154fc`. Review 009 (a helper VM's, at `fe8154fc`, `.tmp/review-009.md` in the worktree: 12 findings, two high)
+checked against the code, finding by finding, and fixed in the light tier (no gate, no build of Arbace's executables or javac's tool, no lock;
+stage 0 as the tools' host, the light driver, at most 4 threads and `GOMEMLIMIT` 1000-1500 MiB a process). One commit a finding where they are
+independent, each with a test that fails before the fix and passes after (a scratch copy of the runs, synthetic outputs, or a run on stage 0; the
+"before" side run by the tree of `fe8154fc` extracted into `.tmp/rv/old`). The shipped Go did not change.
+
+### Per finding
+
+- **1 (high), `bin/si check` passes a program Chez rejects whenever si fails: holds.** Six references (`racket/run`, `racket/test`,
+  `larceny/cpoint`, `earley`, `nboyer`, `run-benchmark`) are status 255 with empty stdout, and si exits 255 on any uncaught error, so status and
+  stdout matched whatever si's error. *Fix* (`arbace/scheme/check.ae`): a run whose reference has a non-zero status must give the same kind of
+  error (`error-of` on the first stderr line: library not found, unbound identifier and a program without its import first, each with its
+  subject, the two implementations' spellings mapped; any other error is its whole first line), else an item `error-differs`. The suite branch
+  compares the report's total (`count` item) and the failing tests as multisets of `[expression result]` (a test both fail with other results is
+  an item; duplicates kept); Chez's gensym record names in results (`#{err kixdzb...-2}`) are written as the name. The AOT comparison takes the
+  error's kind too. *Test*: `.tmp/rv/runs-t1` (the recorded runs with `racket/test`'s error made a reader error, `racket/enums` "20 tests passed"
+  for 26, a result of `racket/base` changed): 46 of 47 pass before, three items in no class after. The six's si errors are the same kinds as
+  Chez's (si: "cannot locate library in library-path with irritants ((tests r6rs run))" for "library (tests r6rs run) not found", ...), so the
+  numbers stand: **`bin/si check` 46 of 47** (1 `chez-conditions`), **`check --aot` 44 of 47, 45 of 47 the same compiled** (2 refused).
+- **2 (high), the mats' failing clauses inside NOTRUN mats, and all but the first of a FAIL mat, not judged: holds** (568 and the rest). *Fix*:
+  `test/scheme/mats/run.sps` prints `CLAUSE NAME K: why` for every failing clause before the mat's line, and the judge makes each an item
+  `fails mats/F mat NAME: K K: why` (the FAIL line's own format, so the reason classes apply): of a FAIL mat in place of its line's first clause,
+  of a NOTRUN mat beside the NOTRUN item. *Test*: `.tmp/rv/m/t.ms` (a mat with two failing clauses, a NOTRUN mat with one, a `warning?` that
+  returns): 2 items before, 5 after. *Rerun* (`bin/si mats`, 8 m 48 s, no skip, no rerun): the mats' counts as before (911, 282 pass, 89 fail,
+  529 not run, 11 skipped; clauses of the NOTRUN mats 4,288 pass, 568 fail, 9,131 not run), **1,785 non-pass items (886 before), 0 in no class**.
+  The classes that grew, and why: `mats-numeric` 184 (18: the later failing clauses of the same 5_3, fl and ieee mats, 161, and 23 in NOTRUN
+  mats), `mats-error-checks` 133 (13: the other `error?` clauses Chez raises on and si does not, 52 of them in NOTRUN mats), `mats-format` 91
+  (14: the 91 failing clauses of the 14 mats SC122 counted), `mats-chez-checks` 42 (10), `mats-arity-one` 26 (15), `mats-chezscheme-subset` 17
+  (11), `mats-timing` 5 (4: `vector-sort!`'s clause 16, in a NOTRUN mat), `mats-r7rs-syntax-rules` 4 (0: it now comes before
+  `mats-error-checks`, which took clause 4, and clauses 5-7 are items); new: `mats-notrun-clauses` 479 (the failing clauses of NOTRUN mats no
+  reason class takes, each named by file, mat and clause: mostly consequences of the clauses that did not run, a library or a definition an
+  earlier clause makes, 89 "cannot locate library", Chez's arities, 188 "incorrect number of arguments", 139 "returned #f"; SC170) and
+  `mats-expander-loops` 3 (finding 3).
+- **3 (medium), classes broad enough to absorb whole files or any failure; SC141's split did not take: holds.** *Fix*
+  (`test/scheme/divergences-corpora.edn`): each class of failing clauses lists the files, mats and clause numbers recorded today with its reason
+  (generated from the record, `.tmp/rv/anchors.py`, `.tmp/rv/rewrite.py`), so a clause that fails anew, in any mat, is in no class;
+  `mats-error-checks` holds "did not raise" and "looped" only (SC141 takes now: `mats-timing` 5, and define-integrable's three time limits a
+  class of their own, `mats-expander-loops`: the mutually recursive integrables expand without end in psyntax); `mats-r7rs-syntax-rules` before
+  `mats-error-checks`; `mats-hang` a timeout in a mat only (a time limit outside a mat, at a file's start, is in no class); `mats-toplevel`
+  anchored to `^notrun mats/`; `ecraven-too-slow` the ten benchmarks known to need more than 60 s (ack, cpstak, earley, fib, graphs, nboyer,
+  ntakl, sboyer, tak, takl). Not done: a regression step against the recorded results (SC171); the notrun classes by reason
+  (`mats-chez-identifier`, `-reader`, `-syntax`) stay by reason (SC171). *Test*: `.tmp/rv/classtest.ae`, five synthetic items (a new clause of
+  5_3.ms, a time limit in 4.ms, a timeout outside a mat, an r7rs item with mats-toplevel's text, a timeout of browse): classed before, in no class
+  after; the recorded items keep their classes (0 in no class).
+- **4 (medium), SM8's `(chibi test)` passes an exact expectation with an inexact result; r7rs-own's disagreements not judged: holds.** *Fix*:
+  `scheme/lib/chibi/test.sls`'s `approx?` is Chibi's `test-equal?` (equal?, or an inexact real expected within the tolerance of a real got, or a
+  non-real expected part by part; equal? alone inside lists and vectors; SC104's 1e-6 kept); a test on which Chibi's own library and SM8's
+  disagree is an item in no class (`disagrees r7rs/chibi test N`). *Test*: `.tmp/rv/ct/t.scm`, nine exactness tests: 9 pass before, 5 pass and 4
+  fail after, the same four Chibi 0.12.0 fails on them; a synthetic run of Chibi's library with a failing mark made a pass: no item before, one
+  after. *Rerun*: **si 1,216 of 1,225, 9 `r7rs-float-printing`; Chez 1,205 of 1,225; Chibi's library the same test by test** (1,216 both pass,
+  9 both fail): nothing was masked.
+- **5 (medium), truncated or empty R7RS runs accepted; the references only displayed: holds.** *Fix*: `test/scheme/corpora.edn`'s chibi-r7rs
+  carries the counts (`:tests {:si 1225 :chez 1225 :chibi 1234}`), a different count is an item in no class (si's run, Chibi's library's run); a
+  test whose si status differs from both paired references' is an item `against-references` that needs a class (none today); `:vs-chez` counts
+  si's unpaired tests; `bin/si r7rs --chez` and `--chibi` record only a run that ended with status 0, gave its count and printed no `FORMERROR`
+  (else BAD RUN and exit 1). `cmd-ecraven-ref`'s exit status: finding 6. *Test*: the suite's outputs cut at test 1,001 (`.tmp/rv/r5`): si's
+  passed and Chez's (status 1) recorded before; a count item, and BAD RUN with the record refused, after. Numbers as above, Chibi 1,227 of 1,234.
+- **6 (medium), stale and empty outputs judged as a fresh run: holds** (the survey's own `--judge-only` slip was this). *Fix*: `bin/si ecraven`
+  and `mats` write `NAME.stamp` beside each output (`run_key`: the light driver, psyntax's boot text, scheme/lib and scheme/vendor for si, the
+  executable for Chez and Chibi, the harness for the mats; and the time limit), refuse an unknown benchmark or file before running (exit 2);
+  the judges (ecraven, its two references, mats) refuse (exit 2) a directory with no outputs, an output without a stamp or outputs of more than
+  one key, and each result records its `:timeout`, so a record made at two limits says so (SC130's 60 s and 300 s). *Test*: `.tmp/rv/mix`
+  (two stamps of different keys) and an empty directory: judged with exit 0 before, refused after; `bin/si ecraven nosuch`, `mats nosuch.ms`
+  exit 2. *Rerun*: ecraven on si, Chez and Chibi, stamped (below).
+- **7 (medium), `arbace/scheme/*` and `arbace/repr/scheme*` embedded but in no key: holds** (`arbace.j2g.embed/sources` gave 16 of them).
+  *Fix*, as C23's CS100 (b) did for repr/c and as preferred until Scheme's heavy window: `arbace/j2g/embed.ae`'s `excluded` lists
+  `arbace/repr/scheme.ae`, `arbace/repr/scheme/`, `arbace/scheme/`, which `bin/lib/version.bash`, `test/gate/steps.edn` and the audit already
+  assumed. Nothing embedded requires them (only comments of `go/arbace/scm` name them); bin/si and bin/repr-scheme run them evaluated from the
+  checkout. When si ships (SC112 (a)), the choice is to embed them and drop the three exclusions together. *Test*: `.tmp/rv/embed-test.ae`: 146
+  embedded, 16 Scheme's, before; 130 and 0 after.
+- **8 (medium), LICENSE.md's Chibi section: holds.** The host's package (`chibi-scheme-0.12-r0`, `apk info -L`) installs no license file and
+  there is no `/usr/share/doc`; I used the repository's `COPYING` at the tag `0.12` (commit `08e23be118e7de8cf29d606bc4793371c0ace680`, fetched,
+  SHA-256 `86805fe7...`, the same file `test/scheme/corpora.edn` pins for the chibi-r7rs corpus). *Fix*: the section quotes it verbatim
+  ("Copyright (c) 2009-2021 Alex Shinn"), names the repository, tag and commit, says the files keep their own notices (test.scm 2010-2025,
+  ansi.scm 2010-2014); `scheme/vendor/chibi/provenance.edn` names the tag and commit (the 11 vendored files fetched from the tag: byte for byte the
+  same); the file's opening index lists `scheme/lib/srfi/` and `scheme/vendor/chibi/`. *Test*: the section's block compared with COPYING: line 1
+  differs before, identical after.
+- **9 (low), a `warning?` clause always passes: holds.** *Fix*: `(si mats)` passes it only on a raised `&warning` ("did not warn", or the other
+  condition's error). *Test*: `(warning? (+ 1 2))` passes before, fails after; `(warning? (warningf 'x "w"))` passes both. The corpus: no clause
+  changed status (the mats' and the NOTRUN clauses' counts are as before).
+- **10 (low), the harness's count not cross-checked; the rerun loop repeats identically: holds.** *Fix*: a run that ended without a `FILE` line,
+  or whose mat count differs from the results read, is an item `count mats/F` in no class (none in the corpus); bin/si stops rerunning a file
+  whose time limit came outside a mat. *Test*: a synthetic `FILE 5 6` for five results: no item before, the count item after; `SI_TIMEOUT=1
+  bin/si mats 3.ms` stops after one run.
+- **11 (low), pairing with Chibi by position, and SC143's claim: partly.** The nine denormal tests pair by source, not by position: their
+  source `(pair? ls)` is the same text on both sides, eleven tests of one loop in the same order, so they are the same tests and Chibi passing
+  them is evidence; SC143's "paired by position" was wrong, its conclusion stands. The pairs made by position are 55 others: the same tests
+  written differently by si and by Chibi (`9.007199254740991e15` for `9007199254740991.0`, `#vu8(` for `#u8(`, `|+nan.0+5.0i|`), 49 both pass,
+  6 pass on si only (Chibi's reader). *Fix*: `lcs-pairs` marks them and `:vs-chibi` counts them (`:paired-by-position 55`); they stay in the
+  buckets. *Test*: the count absent before, 55 after.
+- **12 (low), bookkeeping: holds.** *Fix*: `make si-ecraven-chibi[-record]`; bin/si's header names `--chibi` and `--judge` and the mats'
+  `(chezscheme)` environments; `bin/si ecraven` and `mats` refuse to run (exit 2) unless `timeout` is coreutils' (status 124, doc/ALPINE.md).
+  *Test*: with busybox's `timeout` first on PATH, `bin/si mats` ran before and exits 2 after; `make check-makefile` rc 0.
+- **The review's "not covered" `(div 7.0 0.0)`**: Chez 10.3.0 gives `+inf.0`, as si does (probed, `.tmp/rv/div.sps`).
+
+### The checks, numbers (before: SC150-SC151's records; after: this batch)
+
+- **`bin/si check`: 46 of 47** (1 `chez-conditions`, 0 failing) and **`check --aot` 44 of 47, 45 of 47 the same compiled** (2 refused): as
+  before, now with the six rejected programs judged by their error's kind.
+- **Chibi's R7RS suite on si: 1,225 tests, 1,216 pass, 9 fail** (`r7rs-float-printing`), as before, with Chibi's exactness; **Chez 1,205 of
+  1,225, Chibi 1,227 of 1,234**, as before; against Chez 1,205 / 11 / 0 / 9 (0 si tests unpaired), against Chibi 1,209 / 7 / 9 / 0 (55
+  pairs by position); Chibi's own `(chibi test)` the same test by test (0 disagreements). 0 `against-references` items, 0 in no class.
+- **Chez's mats on si: 911 mats, 282 pass, 89 fail, 529 not run, 11 skipped** (as before); **1,785 non-pass items (886), 0 in no class**,
+  the classes as in finding 2.
+- **ecraven's benchmarks**, rerun stamped (each result with its `:timeout`): **Chez 57 correct, 1 error; Chibi 48 correct, 10 timeouts at
+  60 s** (verdicts as recorded); **si 54 of 58 right**, as recorded (no verdict changed): at the default 60 s 47 right, 10 `ecraven-too-slow`
+  and read0 (`ecraven-reader-corners`); the ten again at `SI_TIMEOUT=300` (the record says which: 48 results at 60 s, 10 at 300 s): seven right
+  (ack 146 s, cpstak 152, fib 67, graphs 85, nboyer 148, sboyer 127, tak 157), earley, ntakl and takl past 300 s. The 54's seconds sum to
+  1,103 s (the host loaded, SC161).
+- **Every corpus file in a result or a class**: `bin/si corpora files` 220 files, 0 in neither; `bin/si corpora divergences` rc 0; `make
+  check-makefile` rc 0.
+
+### Proposals (SC170 onward)
+
+- **SC170 The 479 failing clauses of mats that do not run** (`mats-notrun-clauses`, named one by one, not analyzed).
+  - Options: (a) leave them classed by name; (b) analyze them by cause, piece by piece, and split the class into consequences (a library or a
+    definition of a clause that did not run, Chez's arities) and divergences of si's own, fixing the latter; (c) stop judging a NOTRUN mat's
+    clauses after its first clause that does not run (its later clauses depend on it), judging the earlier ones only.
+  - *Recommended: (b)*, starting with the 188 "incorrect number of arguments" (some, `for-each` with one argument in 4.ms, may be si's); (c)
+    would hide again what finding 2 made visible.
+- **SC171 A regression step for the corpora's judges.** The anchors catch a clause that fails anew, not a known clause that fails for another
+  reason, nor a notrun mat whose reason class (`mats-chez-identifier`, `-reader`, `-syntax`) takes any reason of its kind: a binding lost from
+  `(chezscheme)` would read as Chez's own identifier.
+  - Options: (a) the anchors alone, as built; (b) each judge compares the run's items with the recorded results, an item text not recorded
+    fails the run unless `--record` (as goi's check against its record); (c) (b) and the notrun classes anchored by mat name too.
+  - *Recommended: (b)*: one function in `arbace.scheme.corpora` for every corpus, and the record is the reviewed state.
+- **SC172 A suite's output that differs outside its tests.** In `bin/si check`'s suite branch, a run whose stdout differs from Chez's but whose
+  report and failures agree still passes (racket/base differs only by Chez's gensym record names and a final empty line).
+  - Options: (a) as is; (b) normalize the two known differences and make any other difference a `differs` item; (c) compare the test report
+    alone and drop the other lines from the comparison, documented.
+  - *Recommended: (b)*: it keeps byte equality the rule and names its exceptions.
+- **SC173 `bin/si srfi`'s verdict** (the review's "not covered": status 0 and no FAIL line, so an SRFI test that prints nothing passes).
+  - Options: (a) as is; (b) record each program's count of passing checks (its last line) in a results file and judge against it, as the
+    other corpora; (c) (b) and a class file for the SRFI programs.
+  - *Recommended: (b)*: the same shape as finding 5's counts.
+- **SC174 Re-stamping on a rebuilt light driver.** Finding 6's key changes with any change to scheme/lib or the light driver, so a partial
+  rerun after an edit refuses the old outputs; a long run (ecraven at 300 s) then has to be redone whole.
+  - Options: (a) as built (strict); (b) a `--restamp` that takes the old outputs as the new key's when the change is named (recorded in the
+    results); (c) the key of the program's own inputs only (the libraries it imports).
+  - *Recommended: (a)*: the strictness is the point of the finding; revisit if the heavy window's compiled runs make reruns expensive.
+
+### Rule slips
+
+- Twice a forbidden construct in a throwaway command: `diff <(true) <(true)` (a process substitution, which compared nothing) after editing
+  LICENSE.md, and `2>/dev/null` on a `du` listing my `.tmp`; neither left anything or affected a result.
+- The disk reached 80% (other work on the host) during the ecraven reruns: I stopped them (takl at 300 s killed) and resumed once it was
+  back at 78% (takl rerun alone at 300 s, then `bin/si ecraven --judge --record`: the same key, so the stamps allowed it).
+- I edited `bin/si` while a `bin/si mats` run executed it; bash had parsed the whole `case` it was in, so the run was not affected (its log
+  and results as expected).
+
+### Checks not run
+
+The essential gate; `bin/si srfi`, `unit`, `test`, `test --si`, `check-suite`, `fixpoint`, `boot --check` (nothing they load changed:
+no Go, psyntax or library they import); `bin/si chibi-tests` (it runs the vendored `(chibi test)`, not SM8's); arm64 and the box; the
+heavy list as before (SC109, SC112).
+
+### Shipped files changed
+
+None of `go/` or `scheme/psyntax/`. `arbace/j2g/embed.ae` (the build's embedding: three exclusions; nothing embedded requires them).
+Not shipped: `arbace/scheme/{check,corpora}.ae`, `bin/si`, the Makefile, `LICENSE.md`, `scheme/lib/chibi/test.sls`, `scheme/lib/si/mats.sls`,
+`scheme/vendor/chibi/provenance.edn`, `test/scheme/**` (`mats/run.sps`, `corpora.edn`, `divergences-corpora.edn`, the results).
+
+### Scratch cited
+
+`.tmp/rv/` in this worktree: `old/` (the tree of `fe8154fc`, the tests' "before"), `t.sh`, `t-old.sh`, `hunks.py` (one commit a finding),
+`runs-t1.keep` (finding 1), `m/` (2, 9, 10), `anchors.py`, `rewrite.py`, `classtest.ae`, `gen/` (3), `ct/` (4), `r5/` (5), `mix/` (6),
+`embed-test.ae` (7), `dl/` (8: COPYING and the tag's files), `pairs.ae` (11), `bb/` (12), `div.sps`; the runs' logs `F1_*.log`, `M_*.log`,
+`R*.log`, `E_*.log`; `.tmp/si/{runs,aot/runs,mats,r7rs,r7rs-chez,r7rs-chibi,r7rs-own,ecraven,ecraven-chez,ecraven-chibi}` the runs judged.
