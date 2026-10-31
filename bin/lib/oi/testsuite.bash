@@ -146,7 +146,9 @@ cmd_suite_expect() {
 
 # the rollup: every file of testsuite/ a row of test/ocaml/testsuite-results.edn, judged (no run: the records of the levels)
 cmd_suite_rollup() {
-  [ -f "$S/roles.tsv" ] || cmd_suite_roles > "$S/roles.log"
+  # always from the tree as it is: a roles.tsv kept from an earlier tree, header reading or actions.awk would be judged against
+  # the levels' new records (review 008's finding 5); it takes seconds
+  cmd_suite_roles > "$S/roles.log"
   local mode=judge; [ "${1:-}" = --record ] && mode=record
   "$(arbace_exe)" "$root/test/ocaml/testsuite_check.ae" "$mode" "$S/roles.tsv" "$root/test/ocaml/testsuite-results.edn"
 }

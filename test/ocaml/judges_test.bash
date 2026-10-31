@@ -36,4 +36,10 @@ out=$(judge_aot judge "$d/check.tsv" "$d/corpus.tsv" "$d/refs.edn" "$d/oi.tsv" "
 cp "$d/aot-results.edn" "$d/aot-rec.edn"
 out=$(judge_aot record "$d/check.tsv" "$d/corpus.tsv" "$d/refs.edn" "$d/oi.tsv" "$d/aot-rec.edn" "$d/classes.edn"); expect "aot: a full record says what it drops" 0 '^DROPPED d' "$out" $?
 
+
+# finding 5: the rollup does not judge a roles.tsv left by an earlier tree, header reading or actions.awk
+S=$root/.tmp/o7; cp "$S/roles.tsv" "$W/roles.keep" 2>/dev/null
+printf 'tests/nothing/stale.ml\ttest\trun\tx\n' > "$S/roles.tsv"
+out=$(cd "$root" && bin/oi suite rollup 2>&1); st=$?
+expect "rollup: a stale roles.tsv is regenerated, not judged" 0 'testsuite: 0 files without a result or a class' "$out" $st
 exit $bad
