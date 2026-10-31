@@ -3043,7 +3043,7 @@ outside the shipped tree (CS100 (b)): `arbace/c/{check,dg}.ae`, `arbace/repr/c/*
 Per group, pass: gcc-c23 242 of 270 (222), gcc-cpp-c23 16 of 16 (7), gcc-c23-sub 23 of 30 (23), gcc-gnu23 42 of 51 (38), gcc-embed 39 of 47 (37), gcc-va-opt 11 of 12 (9), gcc-bitint 199 of 201 (197).
 `c23-binary-constants-1`, which timed out at the 120 s read budget under the host's load, passes at 300 s (CS153).
 
-The run level: `bin/ci check --record` unchanged (committed in `fdf6de6e`; a `compcert/perlin.c` timeout under load passes). The compiled level (`bin/ci check --aot --record`): see C7G.5.
+The run level: `bin/ci check --record` unchanged (committed in `fdf6de6e`; a `compcert/perlin.c` timeout under load passes). The compiled level (`bin/ci check --aot --record`, `CI_AOT_NODES=1`): every result as recorded before (the record file is unchanged); the compiled run passes every compcert program (24) and `spectral-norm`, which the interpreted run times out on under load (10 programs, the only differences: interpreted timeouts, 0 interpreted-only passes). The same `--aot` run re-recorded the interpreted level with a `compcert/perlin.c` timeout; that record was restored from git, the committed one (perlin passes) stands.
 `bin/repr-c check --c23`: 62 files, 0 failing; the round trip: all pass.
 
 ### C7G.3 Checks not run
