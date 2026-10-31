@@ -6,7 +6,9 @@
   first whose :match finds \"RESULT REASON\" (test/goi/divergences.edn's format), and the matrix
   prints pass / by design / deferred per cell. A non-pass no class takes, a class's :kind neither
   :design nor :deferred (nor mapped by the cell's :kind-map), or a reference missing fails the
-  verb; a cell none of whose checks is recorded yet prints \"no check yet\" and does not. The
+  verb, and so does a file a source names gone (but the :file of a source with :until, a check
+  not recorded yet: a cell none of whose checks is recorded yet prints \"no check yet\"), a stale
+  :until, a source of passes with no case, an :include that selects nothing. The
   matrix itself is a record, test/reap/matrix.edn (report 021's finding 1: a judge that passed
   everything raised the matrix, and the classes alone could not tell): each cell's counts and each
   source's passes, non-passes and class counts; any difference from it fails the verb until
@@ -21,9 +23,10 @@
   -main --suite RESULTS      the Clojure suite's results RESULTS (bin/clojure-tests' RUN/results.edn,
                              or its reference) judged per test against the Clojure classes
                              (bin/clojure-tests --divergences)
-  -main record-native-check REPORT OUT
+  -main record-native-check REPORT OUT CORPORA
                              test/repr/go/native-check-results.edn written from bin/repr-go
-                             native-check's report (.tmp/repr-go/native-check.report.edn)"
+                             native-check's report (.tmp/repr-go/native-check.report.edn), which
+                             must have every corpus of CORPORA (bin/repr-go's native_corpora)"
   (:require [arbace.string :as str]
             [arbace.java.io :as io])
   (:import (java.io File PushbackReader)))
@@ -33,6 +36,8 @@
 (defn- path [^String f] (if (str/starts-with? f "/") f (str *root* "/" f)))
 
 (defn- exists? [f] (and f (.isFile (File. ^String (path f)))))
+
+(defn- dir? [f] (and f (.isDirectory (File. ^String (path f)))))
 
 (defn- read-edn [f]
   (with-open [r (PushbackReader. (io/reader (path f)))]
@@ -83,6 +88,7 @@
         gen-entries (concat (for [s (sort (map str (:failing gen)))] (entry s :fail (str "spec " s)))
                             (for [n (sort (map str (:load-errors gen)))] (entry n :error (str "load " n))))]
     {:pass (+ (reduce + (keep :pass per)) (if gen (- (:tests gen) (count (:failing gen))) 0))
+     :selected (count nss)
      :entries (vec (concat (mapcat :entries per) gen-entries))
      :detail (str (count nss) " namespaces, " (format "%,d" (long (reduce + (keep :assertions per)))) " assertions passing"
                   (when gen (str ", test.generative " (- (:tests gen) (count (:failing gen))) " of " (:tests gen) " specs")))}))
@@ -116,7 +122,7 @@
         sel (set (map first files))
         es (for [g (:mismatches (read-edn (:file src))) c (:cases g) :when (sel (case-file (:case c)))]
              (entry (:case c) :known (:reason g)))]
-    {:pass (- (reduce + (map second files)) (count es)) :entries (vec es)
+    {:pass (- (reduce + (map second files)) (count es)) :entries (vec es) :selected (count files)
      :detail (str (count files) " files")}))
 
 (defmethod read-source :known-mismatches [src]
@@ -247,21 +253,40 @@
   (let [k (:kind c)]
     (if (#{:design :deferred} k) k (get (:kind-map cell) k))))
 
+(defn- missing-files
+  "The files a source names that are not there: its :file, :upstream, :known, :ref and :same-cases,
+  and the oracle's :expected directory (report 021's finding 3: a directory gone gave no cases)."
+  [src]
+  (concat (for [k [:file :upstream :known :ref :same-cases] :let [f (get src k)] :when (and f (not (exists? f)))] f)
+          (when-let [d (:expected src)] (when-not (dir? d) [d]))))
+
 (defn- judge-source
-  "A source read and judged: its entries with their classes."
+  "A source read and judged: its entries with their classes. Every file it names must be there,
+  but the :file of a source with :until (a check not recorded yet: then its cell prints \"no check
+  yet\"), and an :until whose :file is there is stale, a problem (report 021's finding 3: the stale
+  :until keys made a record deleted a cell with no check, or a source gone from its cell's sums);
+  a source of passes with no case at all, or whose :include selects nothing, is a problem too."
   [cell src]
   (let [file (or (:file src) "")
-        present (or (= :repr-clojure-rules (:reader src)) (exists? (:file src)))
+        miss (missing-files src)
+        not-yet (and (:until src) (= [(:file src)] miss))
+        present (and (empty? miss) (or (= :repr-clojure-rules (:reader src)) (exists? (:file src))))
         cf (or (:classes src) (:classes cell))]
     (if-not present
       (assoc src :present false
-                 :problems (when-not (:until src) [(str (:name src) ": no " file)]))
+                 :problems (when-not not-yet (vec (for [f miss] (str (:name src) ": no " f)))))
       (let [r (read-source src)
             classes (classes-of cf)
             es (for [e (:entries r)] (let [c (classify classes e)] (assoc e :class c :kind (when c (kind-of cell c)))))]
         (merge src r
                {:present true :classes-file cf :entries (vec es)
                 :problems (vec (concat
+                                (when (:until src)
+                                  [(str (:name src) ": " file " is recorded: its :until " (:until src) " is stale")])
+                                (when (and (:pass r) (zero? (+ (:pass r) (reduce + (map :n (:entries r))))))
+                                  [(str (:name src) ": no case in " (or (:file src) (:expected src)))])
+                                (when (and (:include src) (= 0 (:selected r)))
+                                  [(str (:name src) ": its :include " (:include src) " selects nothing")])
                                 (case-problems src r)
                                 (for [e es :when (nil? (:class e))]
                                   (str (:name src) ": " (:id e) " in no class of " cf ": " (name (:result e)) " " (:reason e)))
@@ -448,9 +473,13 @@
     (empty? problems)))
 
 (defn- record-native-check
-  "The summary of bin/repr-go native-check's report, the read level's reference."
-  [report out]
+  "The summary of bin/repr-go native-check's report, the read level's reference, written only when
+  the report has every corpus of CORPORA (bin/repr-go's native_corpora, space-separated; report
+  021's finding 3: a report of native-check --corpus X made a record of one corpus)."
+  [report out corpora]
   (let [r (with-open [rd (PushbackReader. (io/reader report))] (read rd))
+        want (remove str/blank? (str/split (str/trim (or corpora "")) #"\s+"))
+        miss (remove (set (map :corpus (:corpora r))) want)
         at (str (java.time.Instant/ofEpochMilli (.lastModified (File. ^String report))))
         lines (concat
                [";; bin/repr-go native-check's numbers (doc/FULL-SUPPORT-SURVEY.md, REAP1): per corpus its dumps, those"
@@ -467,16 +496,20 @@
                       "\n   :raw-only [" (str/join "\n              " (map #(pr-str [(str (first %)) (str (second %))]) (:raw-only c))) "]"
                       "\n   :extra [" (str/join "\n           " (map #(pr-str [(str (first %)) (str/join " | " (take 2 (str/split (str (second %)) #" \| ")))]) (:extra c))) "]}"))
                ["  ]}"])]
-    (spit out (str (str/join "\n" lines) "\n"))
-    (println (str "reap: wrote " out " (" (count (:corpora r)) " corpora)"))
-    true))
+    (if (or (empty? want) (seq miss))
+      (do (println (str "reap: " report (if (empty? want) " not judged: no list of corpora" (str " lacks the corpora " (str/join " " miss)))
+                        " (a run of bin/repr-go native-check over every corpus); " out " not written"))
+          false)
+      (do (spit out (str (str/join "\n" lines) "\n"))
+          (println (str "reap: wrote " out " (" (count (:corpora r)) " corpora)"))
+          true))))
 
 (defn -main [& args]
   (binding [*root* (or (System/getenv "REAP_ROOT") ".")]
     (let [spec (read-edn "test/reap/cells.edn")
           ok (case (first args)
                "--suite" (suite-only spec (second args))
-               "record-native-check" (record-native-check (second args) (nth args 2))
+               "record-native-check" (record-native-check (second args) (nth args 2) (nth args 3 nil))
                (run spec (some #{"--entries"} args) (some #{"--record"} args)))]
       (shutdown-agents)
       (System/exit (if ok 0 1)))))
