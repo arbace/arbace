@@ -954,9 +954,18 @@
     (and (.exists fa) (.exists fb)
          (java.util.Arrays/equals (java.nio.file.Files/readAllBytes (.toPath fa)) (java.nio.file.Files/readAllBytes (.toPath fb))))))
 
+(defn oracle-rejection?
+  "Whether a compile's status and log are clang rejecting the source (review 007's finding 2): status 1 and one of clang's
+  own diagnostics (`FILE:LINE:COL: error:` or `fatal error:`) in the log. Any other failure (a timeout of ours, 124; a tool
+  missing, 126 or 127; a signal, 128 and up; a missing file or another driver error, `clang++: error: ...`) is not the
+  oracle's verdict on the source."
+  [status ^String log]
+  (boolean (and (= status "1") log (re-find #"(?m)^[^\s:][^:\n]*:[0-9]+:[0-9]+: (fatal )?error: " log))))
+
 (defn file-result
   "One file's levels and outcome: {:name :outcome :ir :rt :obj :lower :gcc :run :gxx}; outcome :pass, :oracle-rejected
-  (clang rejects the file: not a lowering's case), or the first level that did not hold."
+  (clang rejects the file with its own diagnostics: not a lowering's case), :ir (the IR was not made for another reason:
+  a failure of the check's), or the first level that did not hold."
   [^String work ^String n]
   (let [d (str work "/files/" n "/")
         st #(slurp? (str d %))
@@ -973,7 +982,8 @@
         no-main (= "1" (st "no-main"))
         run (if (and no-main (= gcc "0")) "no-main" run)
         outcome (cond
-                  (not= ir "0") :oracle-rejected
+                  (and (not= ir "0") (oracle-rejection? ir (st "ir.log"))) :oracle-rejected
+                  (not= ir "0") :ir
                   (and (not no-main) (not= (st "orig-link.status") "0")) :original-link
                   (not= rt "ok") :forms
                   (not= obj "same") :object
@@ -986,12 +996,18 @@
 
 (defn judge
   "WORK/results.tsv and WORK/summary.edn from the files' levels against the known file (NAME -> class): a non-pass is known
-  when its name is listed, else failing."
-  [^String work ^String known-path]
+  when its name is listed, else failing; and against the recorded results (test/cpp/lower-results.edn's :files, NAME ->
+  [status outcome]; review 007's finding 2): a file recorded :pass that does not pass is a regression, failing whatever
+  else holds (an oracle rejection or a known class included). A list with no file is refused."
+  ([^String work ^String known-path] (judge work known-path nil))
+  ([^String work ^String known-path ^String results-path]
   (let [known (if (.exists (java.io.File. known-path)) (read-string (slurp known-path)) {})
+        recorded (if (and results-path (.exists (java.io.File. results-path))) (:files (read-string (slurp results-path))) {})
         names (for [l (str/split-lines (slurp (str work "/list.tsv"))) :when (seq l)] (first (str/split l #"\t")))
+        _ (when (empty? names) (println "lower-check: the list has no file") (System/exit 2))
         rs (mapv #(file-result work %) names)
-        status (fn [r] (cond (= :pass (:outcome r)) :pass (= :oracle-rejected (:outcome r)) :oracle-rejected
+        regression? (fn [r] (and (= :pass (first (get recorded (:name r)))) (not= :pass (:outcome r))))
+        status (fn [r] (cond (= :pass (:outcome r)) :pass (regression? r) :failing (= :oracle-rejected (:outcome r)) :oracle-rejected
                              (contains? known (:name r)) :known :else :failing))
         lines (for [r rs] (str/join "\t" [(:name r) (name (status r)) (name (:outcome r)) (:rt r) (:obj r) (:lower r) (:gcc r) (:run r) (:gxx r)
                                          (or (:orig-status r) "-") (or (:low-status r) "-") (if-let [c (get known (:name r))] (name c) "-")]))
@@ -999,14 +1015,14 @@
         by (fn [f] (into (sorted-map) (frequencies (map f rs))))
         summary {:files (count rs) :pass (cnt :pass) :known (cnt :known) :failing (cnt :failing) :oracle-rejected (cnt :oracle-rejected)
                  :outcomes (by (comp name :outcome)) :forms (by #(or (:rt %) "-")) :objects (by :obj) :lowering (by :lower)
-                 :gxx (by :gxx)
+                 :gxx (by :gxx) :regressions (count (filter regression? rs))
                  :known-classes (into (sorted-map) (frequencies (keep #(when (= :known (status %)) (name (get known (:name %)))) rs)))}]
     (spit (str work "/results.tsv") (str "name\tstatus\toutcome\tforms\tobject\tlowering\tgcc\trun\tgxx\torig\tlow\tclass\n" (str/join "\n" lines) "\n"))
     (spit (str work "/summary.edn") (str (pr-str summary) "\n"))
     (println (str "lower-check: " (count rs) " files, " (:pass summary) " pass, " (:known summary) " known, " (:failing summary) " failing, "
                   (:oracle-rejected summary) " rejected by the oracle"))
-    (doseq [r rs :when (= :failing (status r))] (println "  failing:" (:name r) (name (:outcome r)) (:lower r)))
-    (when (pos? (:failing summary)) (System/exit 1))))
+    (doseq [r rs :when (= :failing (status r))] (println "  failing:" (:name r) (name (:outcome r)) (:lower r) (if (regression? r) "(recorded :pass)" "")))
+    (when (pos? (:failing summary)) (System/exit 1)))))
 
 (defn runtime-judge
   "OUT/results.tsv and OUT/summary.edn of bin/cppi runtime-build: each unit's levels (the oracle's IR, the forms' round trip, the
@@ -1092,6 +1108,6 @@
                    (doseq [f futs] (.get ^java.util.concurrent.Future f))
                    (.shutdown pool)
                    (println (count futs) "lowered or refused"))
-    "judge" (let [[work known] args] (judge work known))
+    "judge" (let [[work known results] args] (judge work known results))
     "runtime-judge" (runtime-judge (first args))
     (do (println "cppi: lower, lower-rt, lower-list or judge") (System/exit 2))))

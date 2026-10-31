@@ -15,3 +15,18 @@ ok() { echo "ok:  $*"; }
 bad() { echo "BAD: $*"; nbad=$((nbad+1)); }
 die() { echo "BAD: $*"; exit 1; }
 finish() { [ "$nbad" = 0 ] && echo "selftest $(basename "$0" .sh): ok" || echo "selftest $(basename "$0" .sh): $nbad bad"; [ "$nbad" = 0 ]; }
+
+# fake_runtime DIR [TREE]: a runtime at TREE's key (default the checkout) that holds only the pending flag (rt.o) and empty
+# archives: enough for a program that uses no library (min.cpp), without runtime-build's minutes
+fake_runtime() {
+  local d=$1 tree=${2:-$root}
+  mkdir -p "$d"
+  printf '_Thread_local int cx$pending;\n' > "$d/rt.c"
+  gcc -c "$d/rt.c" -o "$d/rt.o"
+  ar rcs "$d/liblstdc++.a"; ar rcs "$d/liblstdc++exp.a"
+  "$tree/bin/cppi" runtime-key --print > "$d/key.txt" || return 1
+  sha256sum < "$d/key.txt" | cut -d' ' -f1 > "$d/key"
+}
+
+# min_list FILE [NAME]: a lower-check list of test/cpp/selftest/min.cpp
+min_list() { printf '%s\tc++23\t\t%s\n' "${2:-min.cpp}" "$root/test/cpp/selftest/min.cpp" > "$1"; }
