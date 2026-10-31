@@ -59,7 +59,10 @@
 (defn- suite-results
   "Clojure's suite: one case per test (a skipped namespace counts its upstream tests, at least one),
   against upstream's results (every assertion passes there); test.generative's specs with
-  :generative."
+  :generative. Upstream's tests (and specs) a namespace that ran does not have, neither run nor
+  skipped, are an entry :missing (a deftest lost in translation), and with :compiled (the AOT
+  level) each source the results' :not-compiled or :evaluated name (loaded from source, its tests
+  not compiled) an entry :not-compiled (report 021's finding 7)."
   [src res up]
   (let [nss (filter #(selected? src (str %)) (keys (:namespaces up)))
         skipped (:skipped res)
@@ -80,17 +83,27 @@
                   {:pass (- (:test r) (count failing))
                    :assertions (:pass r)
                    :entries (concat
+                             (let [lost (- (:test u) (:test r) (count st))]
+                               (when (pos? lost)
+                                 [(entry ns :missing (str ns ": " lost " of upstream's " (:test u) " tests neither run nor skipped") lost)]))
                              (for [[t why] (sort-by (comp str key) st)]
                                (entry (str ns "/" t) :skip (str ns "/" t ": " why)))
                              (for [[t {:keys [fail error]}] (sort-by (comp str key) failing)]
                                (entry (str ns "/" (name t)) (if (pos? fail) :fail :error)
                                       (str ns "/" (name t) " (fail " fail ", error " error ")"))))})))
         gen (when (:generative src) (:generative res))
+        gen-lost (when (and gen (:generative up)) (- (:tests (:generative up)) (:tests gen)))
         gen-entries (concat (for [s (sort (map str (:failing gen)))] (entry s :fail (str "spec " s)))
-                            (for [n (sort (map str (:load-errors gen)))] (entry n :error (str "load " n))))]
+                            (for [n (sort (map str (:load-errors gen)))] (entry n :error (str "load " n)))
+                            (when (and gen-lost (pos? gen-lost))
+                              [(entry "test.generative" :missing (str "test.generative: " gen-lost " of upstream's "
+                                                                      (:tests (:generative up)) " specs not run") gen-lost)]))
+        not-compiled (when (:compiled src)
+                       (for [[f why] (sort-by (comp str key) (merge (:not-compiled res) (:evaluated res)))]
+                         (entry f :not-compiled (str f ": loaded from source: " why))))]
     {:pass (+ (reduce + (keep :pass per)) (if gen (- (:tests gen) (count (:failing gen))) 0))
      :selected (count nss)
-     :entries (vec (concat (mapcat :entries per) gen-entries))
+     :entries (vec (concat (mapcat :entries per) gen-entries not-compiled))
      :detail (str (count nss) " namespaces, " (format "%,d" (long (reduce + (keep :assertions per)))) " assertions passing"
                   (when gen (str ", test.generative " (- (:tests gen) (count (:failing gen))) " of " (:tests gen) " specs")))}))
 
