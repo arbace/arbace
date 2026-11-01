@@ -25,11 +25,11 @@
   (sp 'fl-mid 1 "ab"))
 ;; re-review 044, M3: a string output port overwrites after set-port-position!, it does not truncate
 (let-values ([(p ex) (open-string-output-port)])
-  (put-string p "abc") (set-port-position! p 1) (put-string p "X") (show 'ov (port-position p) (ex)))
+  (put-string p "abc") (set-port-position! p 1) (put-string p "X") (let* ([a (port-position p)] [b (ex)]) (show 'ov a b)))
 (let-values ([(p ex) (open-string-output-port)])
   (put-string p "ab") (set-port-position! p 0) (show 'ov0 (ex)))
 (let ([p (open-output-string)])
-  (put-string p "abcd") (set-port-position! p 0) (put-string p "Z") (show 'ov1 (get-output-string p) (port-position p)))
+  (put-string p "abcd") (set-port-position! p 0) (put-string p "Z") (let* ([a (get-output-string p)] [b (port-position p)]) (show 'ov1 a b)))
 (show 'len (port-has-port-length? (open-string-input-port "ab")) (port-length (open-string-input-port "abc")))
 ;; re-review 044, M2: nonblocking mode on string, bytevector and binary console ports (#t, #f, settable); the textual console and custom ports have none
 (let-values ([(bp bex) (open-bytevector-output-port)] [(sp sex) (open-string-output-port)])
