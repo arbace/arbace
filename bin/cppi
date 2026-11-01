@@ -13,8 +13,9 @@
 #   bin/cppi runtime OUT.c      the runtime of exceptions printed as C
 #   bin/cppi testsuite          libstdc++-v3/testsuite extracted from the pinned gcc 15.2.0 tarball into .tmp/cppi/gcc/
 #                               (REPR_CPP_GCC_TARBALL, default the main checkout's .tmp/c1/gcc/gcc-15.2.0.tar.xz)
-#   bin/cppi list samples|runtime|libstdcxx [--sample N]
-#                               a check list on the standard output (NAME, STD, ARGS, PATH, tab-separated): test/cpp/samples,
+#   bin/cppi list samples|runtime|samples+runtime|libstdcxx [--sample N]
+#                               a check list on the standard output (NAME, STD, ARGS, PATH, tab-separated; a first line `#list KEY` names the recorded list
+#                               it is, `#part NAME` a part of one; `samples+runtime`: the recorded `samples`): test/cpp/samples,
 #                               test/cpp/runtime/samples (CX7), or
 #                               the testsuite's run tests (no compile/link/preprocess/error directive, no threads, no shared
 #                               libraries, named locales, file I/O or debug mode requirements, no xfail), every Nth (default 15)
@@ -62,19 +63,25 @@ testsuite() {
   echo "testsuite: $ts_root"
 }
 
+# A list may begin with a header line `#list KEY` (review 018's CP132 (b)): the recorded list of test/cpp/lower-results.edn it is
+# (samples, libstdcxx-every-15th), which lower-check holds the run to. No header: no recorded list. `#part NAME` marks a part of
+# one, never held.
 list_samples() {
   local f
+  [ "${1:-}" = body ] || echo "#part samples"
   for f in "$root"/test/cpp/samples/*.cpp; do printf '%s\t%s\t%s\t%s\n' "samples/$(basename "$f")" c++23 "" "$f"; done
 }
 
 list_runtime() { # CX7's samples of the runtime (test/cpp/runtime/samples)
   local f
+  [ "${1:-}" = body ] || echo "#part samples"
   for f in "$root"/test/cpp/runtime/samples/*.cpp; do printf '%s\t%s\t%s\t%s\n' "runtime/$(basename "$f")" c++23 "" "$f"; done
 }
 
 list_libstdcxx() { # the run tests: no directive but run, no threads, shared libraries, named locales or file I/O
   local n=${1:-15} f std opts
   [ -d "$ts_root" ] || { echo "list: no testsuite (bin/cppi testsuite)" >&2; exit 1; }
+  if [ "$n" = 15 ]; then echo "#list libstdcxx-every-15th"; else echo "#part libstdcxx-every-$n"; fi
   ( cd "$ts_root" && find . -name '*.cc' -path './[0-9][0-9]_*' | LC_ALL=C sort ) | sed 's|^\./||' > "$TMPDIR/cppi-all.list"
   ( cd "$ts_root" && grep -L -E "dg-do (compile|link|preprocess)|dg-error|dg-additional-sources|dg-require-(thread|effective-target pthread)|-pthread|dg-require-sharedlib|dg-require-namedlocale|dg-require-fileio|dg-require-gthreads|dg-require-debug-mode|xfail" $(cat "$TMPDIR/cppi-all.list") ) \
     | grep -v '^30_threads' | awk -v n="$n" 'NR % n == 1' > "$TMPDIR/cppi-run.list"
@@ -288,7 +295,7 @@ lower_check() {
   local jobs=${CPPI_JOBS:-4} rtdir=$root/.tmp/cppi/runtime recorded=auto
   while [ $# -gt 0 ]; do case $1 in --jobs) jobs=$2; shift 2 ;; --runtime) rtdir=$2; shift 2 ;; --recorded) recorded=$2; shift 2 ;; *) echo "lower-check: unknown option $1" >&2; exit 2 ;; esac; done
   # an empty list is a list maker's failure (bin/cppi list libstdcxx > L without the testsuite), not a check that passes
-  grep -q . "$list" || { echo "lower-check: $list has no file" >&2; exit 2; }
+  grep -v '^#' "$list" | grep -q . || { echo "lower-check: $list has no file" >&2; exit 2; }
   # the runtime is used only at the checkout's key (review 007's finding 1): rebuilt, or refused (CPPI_RUNTIME_STALE=refuse)
   if ! runtime_key_check "$rtdir"; then
     if [ "${CPPI_RUNTIME_STALE:-rebuild}" = refuse ]; then
@@ -300,7 +307,8 @@ lower_check() {
   fi
   rtdir=$(cd "$rtdir" && pwd)
   mkdir -p "$work"; work=$(cd "$work" && pwd); export work
-  cp "$list" "$work/list.tsv"
+  grep -v '^#' "$list" > "$work/list.tsv" || true
+  rm -f "$work/list.key"; sed -n 's/^#list //p' "$list" | head -1 > "$work/list.key"
   disk_ok
   # the testsuite's own library (testsuite_hooks.cc and the others of util/), native as libstdc++ is: compiled by g++ once
   # the lowered programs link the lowered runtime (runtime-build) and, for the testsuite, util/ lowered with them: no native
@@ -359,6 +367,7 @@ case ${1:-} in
   list) case ${2:-} in
           samples) list_samples ;;
           runtime) list_runtime ;;
+          samples+runtime) echo "#list samples"; list_samples body; list_runtime body ;;
           libstdcxx) n=15; [ "${3:-}" = --sample ] && n=$4; list_libstdcxx "$n" ;;
           *) echo "list: samples, runtime or libstdcxx" >&2; exit 2 ;;
         esac ;;
