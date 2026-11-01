@@ -138,10 +138,10 @@ suite_oi_one() {
   local tl=""; [ -n "$incs" ] && tl="$TESTLIB/Testing.ae"
   local st=0 t0 t1 note=""
   t0=$(date +%s.%N)
-  (cd "$d" && limited_cpu "$TIMEOUT" "$((TIMEOUT * 2))" env $env "$EXE" run "$LIB" $tl $(cat "$d/units.list") -- $args > "$d/oi.out" 2>&1) || st=$?
+  (cd "$d" && limited_cpu "$TIMEOUT" "$(oi_wall)" env $env "$EXE" run "$LIB" $tl $(cat "$d/units.list") -- $args > "$d/oi.out" 2>&1) || st=$?
   t1=$(date +%s.%N)
   note=$(grep -a -m1 -o 'oi: .*' "$d/oi.out" | head -c 300 | tr '\t' ' ' || true)
-  case $st in 137|152) st=124 ;; esac
+  st=$(oi_status "$st" "$(echo "$t1 - $t0" | bc)")
   [ "$st" = 124 ] && note="timeout ${TIMEOUT}s"
   printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$st" "$(sha256sum < "$d/oi.out" | cut -d' ' -f1)" "$(wc -c < "$d/oi.out")" "$(echo "$t1 - $t0" | bc)" "$note"
 }

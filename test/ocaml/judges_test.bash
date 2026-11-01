@@ -126,3 +126,11 @@ printf '[\n ["a" "fail" "known gc: a finaliser (output differs (1 bytes, ocamlop
 printf 'a\t0\tx\t1\t1.0\t\nb\t0\th\t1\t1.0\t\nc\t0\th\t1\t1.0\t\n' > "$k/check.tsv"
 out=$(judge_aot judge "$k/check.tsv" "$k/corpus.tsv" "$k/refs.edn" "$k/oi.tsv" "$k/aot-results.edn" "$k/classes.edn"); expect "aot: a slow program that passes at the boundary is not a change" 0 'STALE b' "$out" $?
 exit $bad
+
+# re-review 042's finding 1: oi's wall cap is four times its CPU limit (as o2j_cpu), and 137 (SIGKILL) is a timeout only when the run lasted
+# OI_TIMEOUT seconds: an OOM kill earlier stays a failure
+out=$(cd "$root" && OI_TIMEOUT=120 bin/oi oi-limits 2>&1); expect "oi: the wall cap is four times the CPU limit" 0 '^120 480$' "$out" $?
+out=$(cd "$root" && OI_TIMEOUT=120 bin/oi oi-status 137 5 2>&1); expect "oi: 137 after 5 s is an OOM kill, not a timeout" 0 '^137$' "$out" $?
+out=$(cd "$root" && OI_TIMEOUT=120 bin/oi oi-status 137 121.5 2>&1); expect "oi: 137 after the CPU limit is a timeout" 0 '^124$' "$out" $?
+out=$(cd "$root" && OI_TIMEOUT=120 bin/oi oi-status 152 3 2>&1); expect "oi: 152 (SIGXCPU) is a timeout" 0 '^124$' "$out" $?
+out=$(cd "$root" && OI_TIMEOUT=120 bin/oi oi-status 2 3 2>&1); expect "oi: another status is kept" 0 '^2$' "$out" $?
