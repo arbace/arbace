@@ -1,0 +1,1736 @@
+(ns arbace.c.build
+  "ci's builder (doc/C23-SURVEY.md §6.1, \"As built: C5 (write-ahead)\"; doc/c/SPEC.md §7, §12, §13): a
+  program's checked C forms (arbace.c.check's results, CS95 (a)) made into a node program, the data
+  ci's back end (go/arbace/ci's Loader) makes into functions, statics and nodes, as goi's builder makes
+  goi's (doc/go/GOI-SPEC.md §4.1). The builder makes no decision the checker has not made: types,
+  constants, layout, linkage and the chosen _Generic association are the checker's; it decides only the
+  machine's: slots, the frame's memory, label codes, the conversions' nodes, the order of evaluation
+  (CS31 (a): a call's arguments right to left, in the back end).
+
+  A node program is a vector of commands (lists of symbols, longs and strings): (fn ID NAME), (native
+  ID NAME NATIVE), (static IDX SIZE ALIGN RO), (data IDX OFF HEX), (code ID NI NF FRAME VARIADIC RETF32
+  PARAMS BODY), (init STMT), (start LIBC MAIN) or (entry MAIN). Floating constants are their bits as a
+  long. `program-text` prints one for tools/cirun; arbace.c.repl hands the same data to
+  arbace.lang.CInterp."
+  (:require [arbace.c.check :as chk]
+            [arbace.string :as str])
+  (:import (java.util ArrayList HashMap IdentityHashMap)))
+
+(set! *warn-on-reflection* true)
+
+;; ---------------------------------------------------------------------------------------------
+;; The configuration: ci's types (CS35: long double is double), char's signedness
+
+(def ^:dynamic *cfg* {:ldouble-size 8})
+
+(defmacro ^:private with-types [& body]
+  `(binding [chk/*cx* (merge {:ldouble-size 8} *cfg*)] ~@body))
+
+(declare cparts cmake complex? seq-node temp-i frame-temp new-slot!)
+
+(defn- refuse [cls & msg]
+  (throw (ex-info (apply str msg) {:ci/refused cls})))
+
+;; ---------------------------------------------------------------------------------------------
+;; Types as the machine sees them
+
+(def unq chk/unq)
+
+(defn- under
+  "A type with its enumeration replaced by its compatible integer type, unqualified."
+  [t]
+  (let [t (unq t)] (if (= :enum (:k t)) (unq (chk/enum-under t)) t)))
+
+(defn size-of ^long [t]
+  (let [s (with-types (chk/size-of (unq t)))]
+    (if (nil? s) (refuse :incomplete "size of an incomplete type " (chk/tstr t)) (long s))))
+
+(defn align-of ^long [t] (long (with-types (chk/align-of (unq t)))))
+
+(defn- wide? [t]
+  (let [t (under t)]
+    (or (#{:int128 :uint128} (:k t)) (and (= :bitint (:k t)) (> (long (:n t)) 64)))))
+
+(defn kind
+  "A type's node kind: :i (integers of at most 64 bits, pointers, bool), :f, :w (wider integers), :m (an
+  aggregate: its address), :v (void)."
+  [t]
+  (let [t (under t)]
+    (case (:k t)
+      :void :v
+      (:float :double :ldouble :float32 :float64 :float32x :float64x) :f
+      (:struct :union :array) :m
+      :complex (if (#{:float :double :ldouble :float32 :float64 :float32x} (:k (under (:of t)))) :m
+                 (refuse :complex "GNU's complex integer types (deferred)"))
+      (:float16 :float128 :float128x :bf16 :dec32 :dec64 :dec128 :dec64x) (refuse :by-design "the type " (chk/tstr t) " (SPEC §14)")
+      :vector (refuse :by-design "GNU vector types (SPEC §14)")
+      :fn :i
+      (if (wide? t) :w :i))))
+
+(defn ity
+  "An integer type's machine name: i8 u8 i16 u16 i32 u32 i64 u64 b p, sN/uN for a _BitInt(N) of at most 64 bits."
+  [t]
+  (let [t (under t)]
+    (case (:k t)
+      :bool "b"
+      :char (if (:unsigned-char *cfg*) "u8" "i8")
+      :schar "i8" :uchar "u8" :short "i16" :ushort "u16" :int "i32" :uint "u32"
+      (:long :llong) "i64" (:ulong :ullong) "u64"
+      (:ptr :nullptr :fn :array) "p"
+      :bitint (let [n (long (:n t))]
+                (cond (and (= n 8)) (if (:u t) "u8" "i8")
+                      (= n 16) (if (:u t) "u16" "i16")
+                      (= n 32) (if (:u t) "u32" "i32")
+                      (= n 64) (if (:u t) "u64" "i64")
+                      :else (str (if (:u t) "u" "s") n)))
+      "i64")))
+
+(defn wty [t]
+  (let [t (under t)]
+    (case (:k t)
+      :int128 "s128" :uint128 "u128"
+      :bitint (str (if (:u t) "u" "s") (:n t)))))
+
+(defn- f32? [t] (#{:float :float32} (:k (under t))))
+(defn- fty [t] (if (f32? t) "f32" "f64"))
+
+(defn- ptr? [t] (#{:ptr :nullptr} (:k (under t))))
+(defn- unsigned-ty? [^String s] (#{"u8" "u16" "u32" "u64" "b" "p"} s))
+
+;; ---------------------------------------------------------------------------------------------
+;; The program being built
+
+(defn- new-prog []
+  {:out (ArrayList.)          ; the commands
+   :fns (HashMap.)            ; key -> id (a global function by name, a static one by [unit name])
+   :fn-names (ArrayList.)     ; id -> name
+   :statics (HashMap.)        ; key -> idx
+   :nstatic (atom 0)
+   :strings (HashMap.)        ; [elt-size hex] -> idx
+   :inits (ArrayList.)
+   :defs (HashMap.)           ; fn key -> true once defined
+   :aliases (ArrayList.)      ; (fnalias ID TARGET), (alias IDX TARGET OFF)
+   :undefined (ArrayList.)    ; (at IDX 0): the objects no unit defines
+   :entries (HashMap.)        ; [unit name] -> a file-scope entry (alias targets)
+   :natives #{}})
+
+(def ^:dynamic *p* nil)       ; the program
+(def ^:dynamic *u* nil)       ; the unit: {:idx :results :std}
+(def ^:dynamic *f* nil)       ; the function: its state (an atom)
+
+(defn- emit! [cmd] (.add ^ArrayList (:out *p*) cmd))
+
+(defn fn-id
+  "The function of the key (a name, or [unit name] for a static one): its id, declared when new."
+  [key ^String nm]
+  (let [^HashMap fs (:fns *p*)]
+    (or (.get fs key)
+        (let [id (.size ^ArrayList (:fn-names *p*))]
+          (.add ^ArrayList (:fn-names *p*) nm)
+          (.put fs key id)
+          (emit! (list 'fn id nm))
+          id))))
+
+(defn- static-idx
+  "A static object's index, allocated (SIZE ALIGN RO) when new."
+  [key size align ro]
+  (let [^HashMap ss (:statics *p*)]
+    (or (.get ss key)
+        (let [i (swap! (:nstatic *p*) inc)]
+          (.put ss key i)
+          (emit! (list 'static i size align (if ro 1 0) (str (if (vector? key) (last key) key))))
+          i))))
+
+(defn- hex-of ^String [^bytes b]
+  (let [sb (StringBuilder.)]
+    (dotimes [i (alength b)] (.append sb (format "%02x" (bit-and 0xff (aget b i)))))
+    (str sb)))
+
+(defn- string-static
+  "A string literal's array (its code units of `esize` bytes and the NUL) in read-only memory: its index."
+  [^bytes bs ^long esize]
+  (let [hx (hex-of bs)
+        k [esize hx]
+        ^HashMap ss (:strings *p*)]
+    (or (.get ss k)
+        (let [i (swap! (:nstatic *p*) inc)
+              n (+ (alength bs) esize)]
+          (.put ss k i)
+          (emit! (list 'static i n (max 1 esize) 1))
+          (when (pos? (alength bs)) (emit! (list 'data i 0 hx)))
+          i))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Literals (§8)
+
+(defn- utf8 ^bytes [^String s] (.getBytes s "UTF-8"))
+
+(defn- code-units
+  "The code units of a string-ish literal part for an element of `esize` bytes."
+  [x ^long esize]
+  (cond
+    (string? x) (case esize
+                  1 (vec (map #(bit-and 0xff (long %)) (utf8 x)))
+                  2 (vec (map long (.toCharArray ^String x)))
+                  (vec (.toArray (.codePoints ^String x))))
+    (integer? x) [(long x)]
+    (and (seq? x) ('#{byte-string code-units} (first x))) (vec (mapcat #(code-units % esize) (rest x)))
+    :else (refuse :literal "a string literal part " (pr-str x))))
+
+(defn- units->bytes ^bytes [units ^long esize]
+  (let [b (byte-array (* esize (count units)))]
+    (doseq [[i u] (map-indexed vector units)]
+      (dotimes [j esize] (aset b (+ (* i esize) j) (unchecked-byte (bit-shift-right (long u) (* 8 j))))))
+    b))
+
+(defn- string-form?
+  [x]
+  (or (string? x)
+      (and (seq? x) (= 'byte-string (first x)))
+      (and (seq? x) (= 'lit (first x)) (let [v (nth x 2 nil)] (or (string? v) (and (seq? v) ('#{byte-string code-units} (first v))))))))
+
+(defn- string-units
+  "A string form's [units esize]."
+  [x]
+  (if (and (seq? x) (= 'lit (first x)))
+    (let [esize (case (second x) (unsigned-char char signed-char) 1 (unsigned-short short) 2 4)]
+      [(code-units (nth x 2) esize) esize])
+    [(code-units x 1) 1]))
+
+;; ---------------------------------------------------------------------------------------------
+;; Nodes: an expression's node with its kind and type, {:k :n :t}
+
+(defn- ex-res [f] (let [^IdentityHashMap m (:results *u*)] (when (and m (or (seq? f) (symbol? f) (vector? f))) (.get m f))))
+
+(defn- lit-res
+  "A bare literal's type and value (the checker's rules, §8)."
+  [x]
+  (cond
+    (instance? Long x) (let [v (long x)] {:t (if (<= -2147483648 v 2147483647) chk/t-int chk/t-long) :v v})
+    (instance? arbace.lang.BigInt x) {:t (if (<= (compare x 18446744073709551615N) 0) chk/t-ulong {:k :int128}) :v x}
+    (instance? Character x) {:t chk/t-int :v (long (int (char x)))}
+    (instance? Double x) {:t chk/t-double :v x}
+    (instance? java.math.BigDecimal x) {:t chk/t-double :v (.doubleValue ^java.math.BigDecimal x)}
+    (ratio? x) {:t chk/t-double :v (double x)}
+    (instance? Boolean x) {:t chk/t-bool :v (if x 1 0)}
+    (nil? x) {:t chk/t-nullptr :v 0}
+    (string? x) {:t (chk/arr chk/t-char (inc (alength (.getBytes ^String x "UTF-8"))))}
+    :else nil))
+
+(defn- res-of [f] (or (ex-res f) (lit-res f) (refuse :checker "no result for " (pr-str f))))
+
+(defn- fbits [v] (Double/doubleToRawLongBits (double v)))
+
+(defn- int-const
+  "The node of the integer constant v at type t."
+  [v t]
+  (case (kind t)
+    :w (list 'w (wty t) (str v))
+    :f (list 'f (fbits v))
+    (list 'i (let [v (chk/wrap v (under t))] (long (if (instance? arbace.lang.BigInt v) (.longValue ^arbace.lang.BigInt v) v))))))
+
+(defn- const-node
+  "A constant value v of type t as a node of t's kind."
+  [v t]
+  (case (kind t)
+    :f (list 'f (fbits (if (f32? t) (.doubleValue (Float/valueOf (.floatValue (Double/valueOf (double v))))) (double v))))
+    :w (list 'w (wty t) (str (chk/wrap (if (integer? v) v (bigint (long v))) (under t))))
+    :i (if (integer? v)
+         (int-const v t)
+         (list 'i (long (double v))))
+    (refuse :constant "a constant of type " (chk/tstr t))))
+
+;; conversions (6.3)
+
+(defn- truth
+  "A node as a condition: an I node, nonzero when true."
+  [{:keys [k n t]}]
+  (case (cond (and (= k :m) (= :array (:k (unq t)))) :i (complex? t) :c :else k)
+    :c (let [[pre re im] (cparts {:k k :n n :t t})]
+         (list 'seq pre (list 'or (list 'ftest (:n re)) (list 'ftest (:n im)))))
+    :i n
+    :f (list 'ftest n)
+    :w (list 'wtest (wty t) n)
+    (refuse :checker "a condition of type " (chk/tstr t))))
+
+(declare cparts cmake complex? seq-node temp-i frame-temp new-slot!)
+
+(defn conv
+  "The node x converted to type t."
+  [x t]
+  (let [{:keys [k n] ft :t} x
+        tk (kind t)]
+    (cond
+      (and (complex? t) (complex? ft))
+      (if (= (:k (under (:of (under t)))) (:k (under (:of (under ft))))) (assoc x :t t)
+          (let [[pre re im] (cparts x)] (cmake t re im pre)))
+      (complex? t) (cmake t (conv x (:of (under t))) {:k :f :t chk/t-double :n (list 'f 0)} [])
+      (and (complex? ft) (not= tk :v))
+      (let [[pre re im] (cparts x)]
+        (if (= :bool (:k (under t)))
+          {:k :i :t t :n (list 'seq pre (list 'or (list 'ftest (:n re)) (list 'ftest (:n im))))}
+          (conv (seq-node pre re) t)))
+      (= tk :v) {:k :v :n (case k :i (list 'ei n) :f (list 'ef n) :w (list 'ew n) :m (list 'ei n) :v n) :t t}
+      (= :bool (:k (under t))) {:k :i :n (if (and (= k :i) (= "b" (ity ft))) n (list 'cv "b" (truth x))) :t t}
+      :else
+      (case [k tk]
+        [:i :i] (let [a (ity ft) b (ity t)]
+                  {:k :i :t t :n (if (or (= a b) (#{"i64" "u64" "p"} b) (and (#{"i64" "u64" "p"} a) (#{"i64" "u64" "p"} b))) n (list 'cv b n))})
+        [:i :f] {:k :f :t t :n (list 'i2f (ity ft) (if (f32? t) 1 0) n)}
+        [:f :i] {:k :i :t t :n (list 'f2i (ity t) n)}
+        [:f :f] {:k :f :t t :n (if (and (f32? t) (not (f32? ft))) (list 'r32 n) n)}
+        [:i :w] {:k :w :t t :n (list 'i2w (wty t) (ity ft) n)}
+        [:w :i] {:k :i :t t :n (list 'w2i (ity t) (wty ft) n)}
+        [:w :w] {:k :w :t t :n (if (= (wty t) (wty ft)) n (list 'w2w (wty t) (wty ft) n))}
+        [:w :f] {:k :f :t t :n (list 'w2f (wty ft) (if (f32? t) 1 0) n)}
+        [:f :w] {:k :w :t t :n (list 'f2w (wty t) n)}
+        [:m :m] (assoc x :t t)
+        [:i :m] (if (= :union (:k (under t)))
+                  ;; GNU's cast to a union: the member of the operand's type
+                  (let [m (or (first (filter #(with-types (chk/compatible? (unq (:t %)) (unq ft))) (:members (into {} (:rec (under t))))))
+                              (refuse :conversion "a cast to a union without a member of type " (chk/tstr ft)))
+                        tmp (frame-temp t)]
+                    {:k :m :t t :n (list 'seq [(list 'ei (list 'zero tmp (size-of t))) (list 'ei (list 'st (ity (:t m)) tmp n))] tmp)})
+                  (refuse :conversion "a conversion from " (chk/tstr ft) " to " (chk/tstr t)))
+        [:f :m] (if (= :union (:k (under t)))
+                  (let [m (or (first (filter #(with-types (chk/compatible? (unq (:t %)) (unq ft))) (:members (into {} (:rec (under t))))))
+                              (refuse :conversion "a cast to a union without a member of type " (chk/tstr ft)))
+                        tmp (frame-temp t)]
+                    {:k :m :t t :n (list 'seq [(list 'ei (list 'zero tmp (size-of t))) (list 'ef (list 'fst (fty (:t m)) tmp n))] tmp)})
+                  (refuse :conversion "a conversion from " (chk/tstr ft) " to " (chk/tstr t)))
+        [:m :i] {:k :i :t t :n n} ; an array's address
+        (refuse :conversion "a conversion from " (chk/tstr ft) " to " (chk/tstr t))))))
+
+(defn- complex? [t] (= :complex (:k (under t))))
+
+(declare temp-i frame-temp seq-node)
+
+(defn- cparts
+  "A complex node's parts: [effects re im], its address evaluated once."
+  [x]
+  (let [ft (under (:of (under (:t x))))
+        s (temp-i)
+        a (list 'il s)]
+    [[(list 'ei (list 'is s (:n x)))]
+     {:k :f :t ft :n (list 'fld (fty ft) a)}
+     {:k :f :t ft :n (list 'fld (fty ft) (list 'adds a '(i 1) (size-of ft)))}]))
+
+(defn- cmake
+  "A complex value of type t from its parts (effects pre first): a temporary's address."
+  [t re im pre]
+  (let [ft (under (:of (under t)))
+        tmp (frame-temp t)
+        es (size-of ft)
+        r (conv re ft) i (conv im ft)]
+    {:k :m :t t
+     :n (list 'seq (vec (concat pre [(list 'ef (list 'fst (fty ft) tmp (:n r)))
+                                     (list 'ef (list 'fst (fty ft) (list 'adds tmp '(i 1) es) (:n i)))]))
+              tmp)}))
+
+(defn- carith
+  "A complex operator at the complex type ot (gcc -O0's formulas; its __muldc3 and __divdc3 handle
+  infinities and NaNs more carefully: SPEC §13's class complex-edge when a program shows it)."
+  [op a b ot]
+  (let [ft (under (:of (under ot)))
+        f32 (if (f32? ft) 1 0)
+        [pa ar ai] (cparts (conv a ot))
+        [pb br bi] (cparts (conv b ot))
+        ;; the parts in F slots: each read once
+        s (fn [] (new-slot! :f))
+        [s1 s2 s3 s4] [(s) (s) (s) (s)]
+        sets [(list 'ef (list 'fs s1 (:n ar))) (list 'ef (list 'fs s2 (:n ai))) (list 'ef (list 'fs s3 (:n br))) (list 'ef (list 'fs s4 (:n bi)))]
+        A (list 'fl s1) B (list 'fl s2) C (list 'fl s3) D (list 'fl s4)
+        fb (fn [o x y] (list 'fbin o f32 x y))
+        [re im] (case op
+                  + [(fb "add" A C) (fb "add" B D)]
+                  - [(fb "sub" A C) (fb "sub" B D)]
+                  * [(fb "sub" (fb "mul" A C) (fb "mul" B D)) (fb "add" (fb "mul" A D) (fb "mul" B C))]
+                  / (let [den (fb "add" (fb "mul" C C) (fb "mul" D D))]
+                      [(fb "div" (fb "add" (fb "mul" A C) (fb "mul" B D)) den)
+                       (fb "div" (fb "sub" (fb "mul" B C) (fb "mul" A D)) den)])
+                  (refuse :complex "the operator " op " on complex operands"))]
+    (cmake ot {:k :f :t ft :n re} {:k :f :t ft :n im} (vec (concat pa pb sets)))))
+
+(defn- effect
+  "A node as an effect."
+  [{:keys [k n]}]
+  (case k :i (list 'ei n) :f (list 'ef n) :w (list 'ew n) :m (list 'ei n) :v n))
+
+;; ---------------------------------------------------------------------------------------------
+;; The function's state
+
+(defn- fstate [] @*f*)
+
+(defn- new-slot! [k]
+  (let [key (if (= k :f) :nf :ni)
+        n (get @*f* key)]
+    (swap! *f* update key inc)
+    n))
+
+(defn- frame-alloc!
+  "size bytes of the frame's memory, aligned: the offset."
+  ^long [^long size ^long align]
+  (let [a (max 1 align)
+        off (* a (quot (+ (long (:frame @*f*)) (dec a)) a))]
+    (swap! *f* assoc :frame (+ off (max size 1)))
+    off))
+
+(defn- label-code! [kw]
+  (let [ls (:labels @*f*)]
+    (or (get ls kw)
+        (let [c (+ 16 (count ls))] (swap! *f* assoc-in [:labels kw] c) c))))
+
+(defn- fresh-code! []
+  (let [c (+ 16 (count (:labels @*f*)))] (swap! *f* assoc-in [:labels (Object.)] c) c))
+
+;; where locals live: entry id -> {:loc :slot-i k | :slot-f k | :mem off | :static idx | :vla slot}
+
+(defn- local-of [e] (get (:locals @*f*) (:id e)))
+
+(defn- addressed?
+  "Whether the local `n` is in memory: its address is taken (by name, anywhere in the function), or its
+  type is an aggregate or a wide integer."
+  [^String n t]
+  (or (contains? (:addressed @*f*) n) (#{:m :w} (kind t))))
+
+(defn- bind-local!
+  "A local object's place (6.2.4: automatic storage), or a static's."
+  [e t]
+  (let [loc (cond
+              (:static (:m e)) {:loc :static :idx (static-idx [:local (:id e)] (size-of t) (align-of t)
+                                                                (contains? (chk/quals t) :const))}
+              (and (= :array (:k (unq t))) (:vla (unq t))) {:loc :vla :slot (new-slot! :i) :size (new-slot! :i)}
+              (addressed? (:name e) t) {:loc :mem :off (frame-alloc! (size-of t) (align-of t))}
+              :else (case (kind t)
+                      :f {:loc :slot-f :k (new-slot! :f)}
+                      {:loc :slot-i :k (new-slot! :i)}))]
+    (swap! *f* assoc-in [:locals (:id e)] loc)
+    loc))
+
+;; ---------------------------------------------------------------------------------------------
+;; Globals and functions by name
+
+(defn- global-key [e]
+  (if (= :i (:linkage e)) [(:idx *u*) (:name e)] (:name e)))
+
+(defn- fn-ref [e]
+  (fn-id (global-key e) (:name e)))
+
+(defn- global-obj-idx
+  "A file-scope object's (or a block-scope extern's) static index: allocated by the program's linking
+  (arbace.c.build/link), else here with its declared type."
+  [e]
+  (let [k (global-key e)
+        t (:t e)]
+    (or (.get ^HashMap (:statics *p*) [:obj k])
+        ;; not defined by any unit: a weak reference's (address 0), or one the linker defines
+        (let [i (static-idx [:obj k] (max 1 (or (try (size-of t) (catch Exception _ nil)) 1)) (align-of t) false)]
+          (.add ^ArrayList (:undefined *p*) (list 'at i 0))
+          i))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Places: {:mode :slot-i|:slot-f|:mem, :k slot, :a address-node, :t type, :bits field}
+
+(declare ex ex-as build-stmt build-init-stores call-node member-place arrow-place ex-neg seq-node-eff fill-designated anon-members)
+
+(defn- place-load [{:keys [mode k a t bits bitoff unit]}]
+  (case mode
+    :slot-i {:k :i :n (list 'il k) :t t}
+    :slot-f {:k :f :n (list 'fl k) :t t}
+    :mem (if bits
+           {:k :i :t t :n (list 'bld unit a bitoff bits (if (unsigned-ty? (ity t)) 0 1))}
+           (case (kind t)
+             :i {:k :i :n (list 'ld (ity t) a) :t t}
+             :f {:k :f :n (list 'fld (fty t) a) :t t}
+             :w {:k :w :n (list 'wld (wty t) a) :t t}
+             :m {:k :m :n a :t t}
+             :v {:k :v :n (list 'ei a) :t t}))))
+
+(defn- place-store
+  "A store of the node v (of the place's type) into the place: the node, its value the value stored."
+  [{:keys [mode k a t bits bitoff unit]} v]
+  (case mode
+    :slot-i {:k :i :t t :n (list 'is k (:n v))}
+    :slot-f {:k :f :t t :n (list 'fs k (:n v))}
+    :mem (if bits
+           {:k :i :t t :n (list 'bst unit a (:n v) bitoff bits (if (unsigned-ty? (ity t)) 0 1))}
+           (case (kind t)
+             :i {:k :i :t t :n (list 'st (ity t) a (:n v))}
+             :f {:k :f :t t :n (list 'fst (fty t) a (:n v))}
+             :w {:k :w :t t :n (list 'wst (wty t) a (:n v))}
+             :m {:k :m :t t :n (list 'copy a (:n v) (size-of t))}))))
+
+(defn- vla-elem-size
+  "The size of an element of a VLA type form `(array n T)` at run time: a node."
+  [t]
+  (let [t (unq t)]
+    (if (and (= :array (:k t)) (:vla t))
+      (refuse :vla "a variably modified element type")
+      (list 'i (size-of t)))))
+
+(defn- ptr-target-size
+  "The size of what a pointer type points to (1 for void and functions, GNU's)."
+  ^long [t]
+  (let [to (unq (:to (unq (chk/decay (unq t)))))]
+    (if (#{:void :fn} (:k to)) 1 (size-of to))))
+
+(defn- aget-place
+  "The place a[i] of element type t (i[a] too)."
+  [a i t]
+  (let [ra (res-of a) ta (chk/decay (unq (:t ra)))
+        [base idx] (if (ptr? ta) [a i] [i a])
+        bn (ex base)
+        in (conv (ex idx) chk/t-long)]
+    {:mode :mem :t t :a (list 'adds (:n bn) (:n in) (size-of t))}))
+
+(defn- place
+  "A form's place (an lvalue)."
+  [f]
+  (let [r (res-of f)
+        t (:t r)]
+    (cond
+      (or (symbol? f) (and (seq? f) (= 'c/id (first f))))
+      (let [e (:entry r)
+            nm (if (symbol? f) (name f) (second f))]
+        (cond
+          (= nm "__func__") {:mode :mem :t t :a (list 'g (let [n (:fn-name @*f*) bs (utf8 n)] (string-static bs 1)))}
+          (nil? e) (refuse :checker "no declaration of " nm)
+          (= :fn (:kind e)) {:mode :fn :t t :e e}
+          :else
+          (let [loc (when *f* (local-of e))]
+            (cond
+              loc (case (:loc loc)
+                    :slot-i {:mode :slot-i :k (:k loc) :t t}
+                    :slot-f {:mode :slot-f :k (:k loc) :t t}
+                    :mem {:mode :mem :a (list 'fp (:off loc)) :t t}
+                    :static {:mode :mem :a (list 'g (:idx loc)) :t t}
+                    :vla {:mode :mem :a (list 'il (:slot loc)) :t t})
+              (#{:x :i} (:linkage e)) {:mode :mem :a (list 'g (global-obj-idx e)) :t t}
+              :else (refuse :checker "a local outside its function: " nm)))))
+      (seq? f)
+      (let [[h & args] f]
+        (cond
+          (= h 'arbace.core/deref) {:mode :mem :a (:n (ex-as (first args) :i)) :t t}
+          (= h 'aget) (aget-place (first args) (second args) t)
+          (= h '->) (arrow-place f)
+          (str/starts-with? (name h) ".-")
+          (let [base (first args)
+                bp (place base)
+                mm (:member r)]
+            (member-place bp mm t))
+          (= h 'compound-lit) {:mode :mem :t t :a (:n (ex f))}
+          (#{'real 'imag} h) (refuse :by-design "__real__ and __imag__ (SPEC §14)")
+          (string-form? f) {:mode :mem :t t :a (:n (ex f))}
+          (= h 'c/expr) (place (first args))
+          (= h '?) {:mode :mem :t t :a (:n (ex f))} ; GNU's lvalue conditional of aggregates
+          (= h 'comma) {:mode :mem :t t :a (:n (ex f))}
+          (and (= h 'set!) (= :m (kind t))) {:mode :mem :t t :a (:n (ex f))}
+          (= :m (kind t)) {:mode :mem :t t :a (:n (ex f))} ; a call's aggregate result, a statement expression's
+          :else (refuse :forms "not a place: " (pr-str f))))
+      (string? f) {:mode :mem :t t :a (:n (ex f))}
+      :else (refuse :forms "not a place: " (pr-str f)))))
+
+(defn- member-place
+  "The member mm of the aggregate at place bp."
+  [bp mm t]
+  (let [a (list 'adds (:a bp) '(i 1) (long (:off mm)))]
+    (if (:bits mm)
+      (let [ft (unq (:t mm))
+            usize (max 1 (size-of ft))
+            boff (long (or (:bitoff mm) 0))
+            [unit-size boff2 a2] (if (> (+ boff (long (:bits mm))) (* 8 usize))
+                                   [8 boff a]
+                                   [usize boff a])]
+        {:mode :mem :a a2 :t (:t mm) :bits (:bits mm) :bitoff boff2
+         :unit (case (long unit-size) 1 "u8" 2 "u16" 4 "u32" "u64")})
+      {:mode :mem :a a :t t})))
+
+;; arrow paths: (-> p a b) is p->a then .b
+
+(defn- arrow-place
+  "(-> p a b): p->a->b, each step through a pointer."
+  [f]
+  (let [[_ p & ms] f
+        r (res-of f)]
+    (loop [pt (chk/decay (unq (:t (res-of p)))) addr (:n (ex-as p :i)) ms (seq ms)]
+      (let [rt (unq (:to pt))
+            m (name (first ms))
+            mm (when (:rec rt) (with-types (#'chk/member rt m)))
+            _ (when-not mm (refuse :checker "no member " m " in " (chk/tstr rt) " of " (pr-str f)))
+            q (chk/quals (:to pt))
+            mt (if (seq q) (reduce chk/qual (:t mm) q) (:t mm))
+            np (member-place {:mode :mem :a addr} mm mt)]
+        (if (next ms)
+          (let [x (place-load np)]
+            (recur (chk/decay (unq mt)) (:n x) (next ms)))
+          (assoc np :t (if (:bits np) (:t np) (:t r))))))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Expressions
+
+(defn- temp-i [] (new-slot! :i))
+
+(defn- op-sym [h]
+  (case h + "add" - "sub" * "mul" / "div" % "rem" << "shl" >> "shr" bit-and "and" bit-or "or" bit-xor "xor"
+        == "eq" != "ne" < "lt" <= "le" > "gt" >= "ge"))
+
+(defn- promoted
+  "An operand's promoted type; a bit-field wider than int of a 64-bit type is gcc's N-bit type (its
+  arithmetic wraps at its width: pr32244-1, bitfld-3)."
+  [r]
+  (let [t (with-types (chk/promote (chk/decay (unq (:t r))) (:bits r)))
+        b (:bits r)]
+    (if (and b (> (long b) 32) (< (long b) 64) (#{:long :ulong :llong :ullong} (:k (under t))))
+      {:k :bitint :n (long b) :u (#{:ulong :ullong} (:k (under t))) :bitfield true}
+      t)))
+
+(defn- arith
+  "The operator op over the nodes a and b at the operation type ot (the usual arithmetic conversions'),
+  the result of type rt."
+  [op a b ot]
+  (if (complex? ot)
+    (carith op a b ot)
+  (let [a (conv a ot) b (conv b ot) o (op-sym op)]
+    (case (kind ot)
+      :i {:k :i :t ot :n (list 'bin o (ity ot) (:n a) (:n b))}
+      :f (if (#{"add" "sub" "mul" "div"} o)
+           {:k :f :t ot :n (list 'fbin o (if (f32? ot) 1 0) (:n a) (:n b))}
+           (refuse :checker "the operator " op " on floating operands"))
+      :w {:k :w :t ot :n (list 'wbin o (wty ot) (:n a) (:n b))}))))
+
+(defn- shift [op a b]
+  (let [ta (:t a) o (op-sym op) cnt (conv b chk/t-long)]
+    (case (kind ta)
+      :i {:k :i :t ta :n (list 'bin o (ity ta) (:n a) (:n cnt))}
+      :w {:k :w :t ta :n (list 'wsh o (wty ta) (:n a) (:n cnt))})))
+
+(defn- compare-nodes [op a b ra rb]
+  (let [ta (chk/decay (unq (:t a))) tb (chk/decay (unq (:t b)))
+        o (op-sym op)]
+    (if (or (ptr? ta) (ptr? tb) (= :fn (:k ta)) (= :fn (:k tb)))
+      {:k :i :t chk/t-int :n (list 'cmp o "p" (:n (conv a chk/t-ulong)) (:n (conv b chk/t-ulong)))}
+      (let [ot (with-types (chk/usual (promoted ra) (promoted rb)))]
+       (if (complex? ot)
+        (let [[pa ar ai] (cparts (conv a ot)) [pb br bi] (cparts (conv b ot))
+              eq (list 'and (list 'fcmp "eq" (:n ar) (:n br)) (list 'fcmp "eq" (:n ai) (:n bi)))]
+          {:k :i :t chk/t-int :n (list 'seq (vec (concat pa pb)) (if (= o "eq") eq (list 'lnot eq)))})
+       (let [a (conv a ot) b (conv b ot)]
+        {:k :i :t chk/t-int
+         :n (case (kind ot)
+              :i (list 'cmp o (ity ot) (:n a) (:n b))
+              :f (list 'fcmp o (:n a) (:n b))
+              :w (list 'wcmp o (wty ot) (:n a) (:n b)))}))))))
+
+(defn- binary [h x y rx ry rt]
+  (let [tx (chk/decay (unq (:t x))) ty (chk/decay (unq (:t y)))]
+    (cond
+      (#{'== '!= '< '<= '> '>=} h) (compare-nodes h x y rx ry)
+      (#{'<< '>>} h) (shift h (conv x (promoted rx)) y)
+      (and (= h '+) (ptr? tx)) {:k :i :t tx :n (list 'adds (:n x) (:n (conv y chk/t-long)) (ptr-target-size tx))}
+      (and (= h '+) (ptr? ty)) {:k :i :t ty :n (list 'adds (:n y) (:n (conv x chk/t-long)) (ptr-target-size ty))}
+      (and (= h '-) (ptr? tx) (ptr? ty)) {:k :i :t chk/t-long :n (list 'pdiff (:n x) (:n y) (ptr-target-size tx))}
+      ;; the subtrahend widened to long before it is negated, as `assign` does: negated at its own type, an unsigned
+      ;; one narrower than 64 bits (or a _Bool) zero-extends to a large positive offset (review 006, finding 2)
+      (and (= h '-) (ptr? tx)) {:k :i :t tx :n (list 'adds (:n x) (:n (ex-neg (conv y chk/t-long))) (ptr-target-size tx))}
+      :else (arith h x y (with-types (chk/usual (promoted rx) (promoted ry)))))))
+
+(defn- ex-neg [y]
+  (case (:k y)
+    :i {:k :i :t (:t y) :n (list 'neg (ity (:t y)) (:n y))}
+    :w {:k :w :t (:t y) :n (list 'wneg (wty (:t y)) (:n y))}))
+
+(defn ex-as
+  "A form's node converted to the node kind k (for addresses: :i)."
+  [f k]
+  (let [x (ex f)]
+    (if (and (= k :i) (= :m (:k x))) (assoc x :k :i) x)))
+
+(defn- seq-node
+  "Effects es then the value x."
+  [es x]
+  (if (empty? es)
+    x
+    (assoc x :n (case (:k x)
+                  (:i :m) (list 'seq (vec es) (:n x))
+                  :f (list 'fseq (vec es) (:n x))
+                  :w (list 'wseq (vec es) (:n x))
+                  :v (list 'ei (list 'seq (vec (concat es [(:n x)])) '(i 0)))))))
+
+(defn- if-node [c a b t]
+  (case (kind t)
+    (:i :m) {:k (kind t) :t t :n (list 'if c (:n a) (:n b))}
+    :f {:k :f :t t :n (list 'fif c (:n a) (:n b))}
+    :w {:k :w :t t :n (list 'wif c (:n a) (:n b))}
+    :v {:k :v :t t :n (list 'ei (list 'if c (list 'seq [(:n a)] '(i 0)) (list 'seq [(:n b)] '(i 0))))}))
+
+(defn- assign [f]
+  (let [[_ pl-f a b] f
+        r (res-of f)
+        pr (res-of pl-f)
+        pt (:t pr)
+        pl (if (and (seq? pl-f) (= '-> (first pl-f))) (arrow-place pl-f) (place pl-f))
+        pt (:t pl)]
+    (if (nil? b)
+      ;; (set! place e)
+      (let [v (conv (ex a) pt)]
+        (place-store pl v))
+      ;; (set! place op e)
+      (let [op a e b
+            re (res-of e)
+            ev0 (ex e)
+            ;; gcc -O0 evaluates the right operand before it loads the left one (pr58943)
+            [ev rpre] (case (:k ev0)
+                        :i (let [s (temp-i)] [{:k :i :t (:t ev0) :n (list 'il s)} [(list 'ei (list 'is s (:n ev0)))]])
+                        :f (let [s (new-slot! :f)] [{:k :f :t (:t ev0) :n (list 'fl s)} [(list 'ef (list 'fs s (:n ev0)))]])
+                        [ev0 []])
+            [pl pre] (if (= :mem (:mode pl))
+                       (let [s (temp-i)] [(assoc pl :a (list 'il s)) (conj rpre (list 'ei (list 'is s (:a pl))))])
+                       [pl rpre])
+            old (place-load pl)
+            nv (cond
+                 (and (ptr? pt) (#{'+ '-} op))
+                 {:k :i :t pt :n (list 'adds (:n old) (:n (conv (if (= op '-) (ex-neg (conv ev chk/t-long)) ev) chk/t-long)) (ptr-target-size pt))}
+                 (#{'<< '>>} op) (shift op (conv old (promoted pr)) ev)
+                 :else (arith op old ev (with-types (chk/usual (promoted pr) (promoted re)))))]
+        (seq-node pre (place-store pl (conv nv pt)))))))
+
+(defn- incdec [f]
+  (let [[h pl-f] f
+        pr (res-of pl-f)
+        pl (if (and (seq? pl-f) (= '-> (first pl-f))) (arrow-place pl-f) (place pl-f))
+        pt (:t pl)
+        [pl pre] (if (= :mem (:mode pl))
+                   (let [s (temp-i)] [(assoc pl :a (list 'il s)) [(list 'ei (list 'is s (:a pl)))]])
+                   [pl []])
+        old (place-load pl)
+        delta (if (#{'inc! 'pre-inc!} h) 1 -1)
+        nv (cond
+             (ptr? pt) {:k :i :t pt :n (list 'adds (:n old) (list 'i delta) (ptr-target-size pt))}
+             (= :bool (:k (under pt))) {:k :i :t pt :n (if (= delta 1) '(i 1) (list 'lnot (:n old)))}
+             :else (let [ot (promoted pr)]
+                     (conv (arith '+ old {:k :i :t chk/t-int :n (list 'i delta)} ot) pt)))]
+    (if (#{'pre-inc! 'pre-dec!} h)
+      (seq-node pre (place-store pl (conv nv pt)))
+      ;; postfix: the old value saved
+      (let [k (kind pt)
+            s (if (= k :f) (new-slot! :f) (temp-i))
+            save (case k :f (list 'ef (list 'fs s (:n old))) :w (refuse :wide "++ of a wide integer") (list 'ei (list 'is s (:n old))))
+            pl2 pl
+            nv2 (cond
+                  (ptr? pt) {:k :i :t pt :n (list 'adds (list 'il s) (list 'i delta) (ptr-target-size pt))}
+                  (= :bool (:k (under pt))) {:k :i :t pt :n (if (= delta 1) '(i 1) (list 'lnot (list 'il s)))}
+                  :else (let [ot (promoted pr)]
+                          (conv (arith '+ {:k k :t pt :n (if (= k :f) (list 'fl s) (list 'il s))} {:k :i :t chk/t-int :n (list 'i delta)} ot) pt)))]
+        (seq-node (conj pre save (effect (place-store pl2 nv2)))
+                  {:k k :t pt :n (if (= k :f) (list 'fl s) (list 'il s))})))))
+
+(def ^:dynamic *static-init* false) ; building a static object's initializer (its own frame of slots)
+
+(defn- init-cmd
+  "A static initializer's command: (init NI NF STMT), run before the program starts in a frame of its slots."
+  [fs stores]
+  (let [st (if fs @fs {:ni 0 :nf 0})]
+    (list 'init (:ni st) (:nf st) (list 'x (list 'ei (list 'seq (vec stores) '(i 0)))))))
+
+(defn- frame-temp
+  "A temporary aggregate of type t in the frame: its address node."
+  [t]
+  (if (and *f* (not *static-init*))
+    (list 'fp (frame-alloc! (size-of t) (align-of t)))
+    (list 'g (static-idx [:temp (Object.)] (size-of t) (align-of t) false))))
+
+(defn- compound-lit [f]
+  (let [r (res-of f)
+        t (:t r)
+        [_ _ & els] f
+        static? (or (:static (meta f)) (nil? *f*) *static-init*)
+        a (if static?
+            (list 'g (static-idx [:clit (Object.)] (size-of t) (align-of t) false))
+            (frame-temp t))
+        stores (build-init-stores t a (apply list 'init els) (not static?))]
+    (if static?
+      (do (.add ^ArrayList (:inits *p*) (init-cmd *f* stores))
+          (place-load {:mode :mem :a a :t t}))
+      (seq-node stores (place-load {:mode :mem :a a :t t})))))
+
+(defn- string-node [f t]
+  (let [[units esize] (string-units f)]
+    {:k :m :t t :n (list 'g (string-static (units->bytes units esize) esize))}))
+
+(defn- stmt-expr [f]
+  (let [items (vec (rest f))
+        ;; the value is the last item's when it is an expression
+        lst (loop [l (peek items)] (if (and (seq? l) (= 'let (first l))) (recur (last l)) l))
+        r (res-of f)
+        t (:t r)]
+    (if (= :v (kind t))
+      {:k :v :t t :n (list 'ei (list 'sx (build-stmt (apply list 'do items)) '(i 0)))}
+      (let [;; the value is computed by the last item into a slot
+            k (kind t)
+            s (if (= k :f) (new-slot! :f) (temp-i))
+            _ (when (= k :w) (refuse :wide "a wide statement expression"))
+            setv (list 'c/stmt-value s k t lst)
+            ;; the last expression statement, in the innermost let of the block's end (§7.2)
+            with-value (fn wv [items]
+                         (let [lst (peek items)]
+                           (if (and (seq? lst) (= 'let (first lst)))
+                             (conj (pop items) (apply list 'let (second lst) (wv (vec (drop 2 lst)))))
+                             (conj (pop items) setv))))
+            body (build-stmt (apply list 'do (with-value items)))]
+        {:k k :t t :n (case k :f (list 'fsx body (list 'fl s)) (list 'sx body (list 'il s)))}))))
+
+(defn ex
+  "A form's node: {:k :n :t}."
+  [f]
+  (cond
+    (or (symbol? f) (and (seq? f) (= 'c/id (first f))))
+    (let [r (res-of f)
+          e (:entry r)]
+      (cond
+        (some? (:v r)) (if (and e (= :obj (:kind e)) (not (:constexpr (:m e))))
+                         (place-load (place f))
+                         {:k (kind (:t r)) :t (:t r) :n (const-node (:v r) (:t r))})
+        (and e (= :fn (:kind e))) {:k :i :t (chk/ptr (:t r)) :n (list 'fa (fn-ref e))}
+        (and (nil? e) (:builtin r)) (refuse :builtin "the builtin " (:builtin r) " as a value")
+        :else (let [pl (place f)
+                    x (place-load pl)]
+                (if (= :array (:k (unq (:t pl)))) (assoc x :k :i :t (chk/decay (unq (:t pl)))) x))))
+    (seq? f)
+    (let [[h & args] f
+          n (count args)
+          r (res-of f)
+          t (:t r)]
+      (if (and (some? (:v r)) (not (#{'set! 'aset 'inc! 'dec! 'pre-inc! 'pre-dec! 'comma 'c/call} h)) (not (and (seq? h) true))
+               (#{:i :f :w} (try (kind t) (catch Exception _ nil)))
+               (not (and (symbol? h) (#{'and 'or} h) false)))
+        {:k (kind t) :t t :n (const-node (:v r) t)}
+        (if-not (symbol? h)
+          (call-node f h args r)
+          (case h
+            (+ - * / % << >> bit-and bit-or bit-xor)
+            (if (= 1 n)
+              (let [x (ex (first args)) pt (promoted (res-of (first args)))]
+                (case h
+                  + (conv x pt)
+                  - (let [x (conv x pt)]
+                      (if (complex? pt)
+                        (let [[p re im] (cparts x)] (cmake pt {:k :f :t (:t re) :n (list 'fneg (:n re))} {:k :f :t (:t im) :n (list 'fneg (:n im))} p))
+                        (case (:k x) :f {:k :f :t pt :n (list 'fneg (:n x))} (ex-neg x))))
+                  (refuse :forms "unary " h)))
+              (loop [acc (ex (first args)) racc (res-of (first args)) xs (next args)]
+                (if xs
+                  (let [y (ex (first xs)) ry (res-of (first xs))
+                        z (binary h acc y racc ry t)]
+                    (recur z {:t (:t z)} (next xs)))
+                  acc)))
+            (== != < <= > >=) (binary h (ex (first args)) (ex (second args)) (res-of (first args)) (res-of (second args)) t)
+            and (reduce (fn [acc y] {:k :i :t chk/t-int :n (list 'and (:n acc) (truth (ex y)))})
+                        {:k :i :t chk/t-int :n (list 'cv "b" (truth (ex (first args))))} (rest args))
+            or (reduce (fn [acc y] {:k :i :t chk/t-int :n (list 'or (:n acc) (truth (ex y)))})
+                       {:k :i :t chk/t-int :n (list 'cv "b" (truth (ex (first args))))} (rest args))
+            not {:k :i :t chk/t-int :n (list 'lnot (truth (ex (first args))))}
+            bit-not (let [x (conv (ex (first args)) t)]
+                      (case (if (complex? t) :c (:k x))
+                        :c (let [[p re im] (cparts x)] (cmake t re {:k :f :t (:t im) :n (list 'fneg (:n im))} p))
+                        :i {:k :i :t t :n (list 'bnot (ity t) (:n x))}
+                        :w {:k :w :t t :n (list 'wnot (wty t) (:n x))}))
+            addr (let [a (first args)
+                       ra (res-of a)]
+                   (cond
+                     (and (or (symbol? a) (and (seq? a) (= 'c/id (first a)))) (= :fn (:kind (:entry ra))))
+                     {:k :i :t t :n (list 'fa (fn-ref (:entry ra)))}
+                     (and (seq? a) (= 'arbace.core/deref (first a))) (assoc (ex-as (second a) :i) :t t)
+                     :else (let [pl (if (and (seq? a) (= '-> (first a))) (arrow-place a) (place a))]
+                             (when-not (= :mem (:mode pl)) (refuse :builder "the address of a register place " (pr-str a)))
+                             {:k :i :t t :n (:a pl)})))
+            arbace.core/deref (let [a (first args)
+                                    rt (unq t)]
+                                (if (= :fn (:k rt))
+                                  (assoc (ex-as a :i) :t (chk/ptr rt))
+                                  (let [x (place-load (place f))]
+                                    (if (= :array (:k rt)) (assoc x :k :i :t (chk/decay rt)) x))))
+            ? (if (= 3 n)
+                (let [[c a b] args
+                      cv (truth (ex c))]
+                  (if (= :v (kind t))
+                    (if-node cv (conv (ex a) t) (conv (ex b) t) t)
+                    (if-node cv (conv (ex-as a :i) t) (conv (ex-as b :i) t) t)))
+                (let [[a b] args
+                      x (conv (ex a) t)]
+                  (if (= :i (:k x))
+                    {:k :i :t t :n (list 'elvis (:n x) (:n (conv (ex b) t)))}
+                    (let [s (if (= :f (:k x)) (new-slot! :f) (temp-i))]
+                      (refuse :forms "GNU ?: of a non-integer")))))
+            comma (let [xs (mapv ex args)]
+                    (seq-node (mapv effect (pop xs)) (peek xs)))
+            set! (assign f)
+            aset (let [[a i v] args
+                       ra (res-of a) ri (res-of i)
+                       ta (chk/decay (unq (:t ra))) ti (chk/decay (unq (:t ri)))
+                       et (unq (:to (if (ptr? ta) ta ti)))
+                       pl (aget-place a i et)]
+                   (place-store pl (conv (ex v) et)))
+            (inc! dec! pre-inc! pre-dec!) (incdec f)
+            aget (let [pl (place f)
+                       x (place-load pl)]
+                   (if (= :array (:k (unq t))) (assoc x :k :i :t (chk/decay (unq t))) x))
+            -> (let [pl (arrow-place f)
+                     x (place-load pl)]
+                 (if (= :array (:k (unq (:t pl)))) (assoc x :k :i :t (chk/decay (unq (:t pl)))) x))
+            conv (let [[_ e] args
+                       x (ex e)]
+                   (if (= :array (:k (unq (:t x)))) (conv (assoc x :k :i :t (chk/decay (unq (:t x)))) t) (conv x t)))
+            (sizeof sizeof-type alignof alignof-type offsetof types-compatible? classify-type has-attribute?)
+            (if (some? (:v r)) {:k :i :t t :n (int-const (:v r) t)}
+                (if (= h 'sizeof)
+                  (let [a (first args)
+                        e (:entry (ex-res a))
+                        loc (when (and e *f*) (local-of e))]
+                    (if (= :vla (:loc loc))
+                      {:k :i :t t :n (list 'il (:size loc))}
+                      (refuse :vla "sizeof of a VLA")))
+                  (refuse :vla "sizeof of a variably modified type")))
+            generic (let [chosen (or (some #(when (= :chosen (ex-res %)) %) (drop 2 f))
+                                     (refuse :checker "_Generic without a chosen association"))]
+                      (ex (second chosen)))
+            compound-lit (compound-lit f)
+            stmt-expr (stmt-expr f)
+            lit (let [[tf v] args]
+                  (cond
+                    (string-form? f)
+                    (string-node f t)
+                    (and (seq? v) (= 'imaginary (first v)))
+                    (cmake t {:k :f :t chk/t-double :n '(f 0)} {:k :f :t chk/t-double :n (list 'f (fbits (double (second v))))} [])
+                    :else
+                    {:k (kind t) :t t :n (const-node (:v r) t)}))
+            byte-string (string-node f t)
+            va-arg (let [[ap tf] args
+                         apl (place ap)
+                         aa (if (= :mem (:mode apl)) (:a apl) (refuse :builder "va_arg of a register place"))
+                         slot {:k :i :t t :n (list 'vaarg aa (if (= :m (kind t)) (size-of t) (max 8 (size-of t))))}]
+                     (place-load {:mode :mem :a (:n slot) :t t}))
+            label-addr {:k :i :t t :n (list 'labaddr (label-code! (first args)))}
+            c/call (call-node f (first args) (rest args) r)
+            c/expr (ex (first args))
+            c/effect {:k :v :t chk/t-void :n (first args)}
+            (real imag) (refuse :by-design "__real__ and __imag__ (SPEC §14)")
+            imaginary (let [v (first args)
+                            ;; (imaginary 2.0), (imaginary (lit float 2.0)): 2.0i, 2.0fi
+                            [v ft] (if (and (seq? v) (= 'lit (first v)))
+                                     [(nth v 2) (if (#{'float} (second v)) chk/t-float chk/t-double)]
+                                     [v chk/t-double])
+                            t (if (complex? t) t {:k :complex :of ft})]
+                        (cmake t {:k :f :t chk/t-double :n '(f 0)} {:k :f :t chk/t-double :n (list 'f (fbits (double v)))} []))
+            convertvector (refuse :by-design "GNU vector types (SPEC §14)")
+            bit-cast (let [[_ e] args x (ex e)
+                           tmp (frame-temp t)]
+                       (refuse :builder "__builtin_bit_cast"))
+            init (refuse :forms "an initializer list as an expression")
+            (if (str/starts-with? (name h) ".-")
+              (let [base (first args)
+                    rb (res-of base)
+                    bx (ex-as base :i)
+                    pl (member-place {:mode :mem :a (:n bx)} (:member r) t)
+                    x (place-load pl)]
+                (if (= :array (:k (unq t))) (assoc x :k :i :t (chk/decay (unq t))) x))
+              (call-node f h args r))))))
+    (string? f) (string-node f (chk/arr chk/t-char (inc (alength (utf8 f)))))
+    (number? f) (let [r (lit-res f)] {:k (kind (:t r)) :t (:t r) :n (const-node (:v r) (:t r))})
+    (char? f) {:k :i :t chk/t-int :n (list 'i (long (int (char f))))}
+    (instance? Boolean f) {:k :i :t chk/t-bool :n (list 'i (if f 1 0))}
+    (nil? f) {:k :i :t chk/t-nullptr :n '(i 0)}
+    :else (refuse :forms "an expression " (pr-str f))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Calls (§7.6, CS31 (a))
+
+(def ^:private builtin-aliases
+  ;; __builtin_X that are the library's X
+  #{"abort" "exit" "_exit" "memcpy" "memmove" "memset" "memcmp" "strlen" "strcmp" "strncmp" "strcpy" "strncpy"
+    "strcat" "strncat" "strchr" "strrchr" "strstr" "strspn" "strcspn" "strpbrk" "printf" "fprintf" "sprintf"
+    "snprintf" "vprintf" "vfprintf" "vsprintf" "vsnprintf" "puts" "putchar" "fputs" "fputc" "fwrite" "malloc"
+    "calloc" "realloc" "free" "abs" "labs" "llabs" "imaxabs" "sqrt" "sqrtf" "sqrtl" "fabs" "fabsf" "fabsl" "floor"
+    "floorf" "ceil" "ceilf" "round" "roundf" "trunc" "truncf" "copysign" "copysignf" "copysignl" "fmod" "pow"
+    "powf" "exp" "log" "log10" "sin" "cos" "tan" "atan" "atan2" "frexp" "ldexp" "modf" "nan" "nanf" "nanl" "isalnum"
+    "isalpha" "isdigit" "isspace" "isupper" "islower" "toupper" "tolower" "isprint" "isxdigit" "bcmp" "bcopy" "bzero"
+    "index" "rindex" "stpcpy" "strdup" "strndup" "mempcpy" "memchr" "strnlen" "fmin" "fmax" "fminf" "fmaxf"
+    "lround" "llround" "lrint" "llrint" "rint" "nearbyint" "scalbn" "cabs" "conj" "creal" "cimag" "ffs"
+    "ffsl" "ffsll" "fputs_unlocked" "putchar_unlocked" "printf_unlocked" "fprintf_unlocked" "isascii" "toascii"
+    "strcasecmp" "strncasecmp" "memrchr" "aligned_alloc" "posix_memalign" "atoi" "atol" "strtol" "exp2" "log2"
+    "cbrt" "hypot" "expm1" "log1p" "sinh" "cosh" "tanh" "asin" "acos" "fdim" "fma" "remainder" "logb" "ilogb"})
+
+(def ^:private builtin-natives
+  ;; builtins whose meaning is the machine's: natives of tools' natives table (go/arbace/ci/builtins.ae)
+  #{"__builtin_clz" "__builtin_clzl" "__builtin_clzll" "__builtin_ctz" "__builtin_ctzl" "__builtin_ctzll"
+    "__builtin_popcount" "__builtin_popcountl" "__builtin_popcountll" "__builtin_parity" "__builtin_parityl"
+    "__builtin_parityll" "__builtin_bswap16" "__builtin_bswap32" "__builtin_bswap64" "__builtin_clrsb"
+    "__builtin_clrsbl" "__builtin_clrsbll" "__builtin_ffs" "__builtin_ffsl" "__builtin_ffsll"
+    "__builtin_isnan" "__builtin_isinf" "__builtin_isinf_sign" "__builtin_isfinite" "__builtin_isnormal"
+    "__builtin_signbit" "__builtin_signbitf" "__builtin_signbitl" "__builtin_fpclassify" "__builtin_isunordered"
+    "__builtin_trap" "__builtin_unreachable"})
+
+(defn- callee-type [r]
+  (let [t (unq (:t r))]
+    (if (= :fn (:k t)) t (let [to (unq (:to (chk/decay t)))] (when (= :fn (:k to)) to)))))
+
+(defn- arg-node
+  "An argument converted to the parameter type pt, or default-promoted (pt nil)."
+  [a pt]
+  (let [ra (res-of a)
+        x (ex a)
+        x (if (= :array (:k (unq (:t x)))) (assoc x :k :i :t (chk/decay (unq (:t x)))) x)
+        t (or pt (let [t (chk/decay (unq (:t x)))]
+                   (cond (f32? t) chk/t-double
+                         (= :i (kind t)) (if (ptr? t) t (with-types (chk/promote t (:bits ra))))
+                         :else t)))
+        x (conv x t)]
+    (case (:k x)
+      :i (list 'ai (:n x))
+      :f (list 'af (:n x))
+      :w (list 'aw (:n x))
+      :m (list 'am (:n x) (size-of (:t x))))))
+
+(defn- builtin-call
+  "A call of a builtin by name, or nil when it is an ordinary call."
+  [^String nm args r]
+  (let [t (:t r)]
+    (case nm
+      ("__builtin_expect" "__builtin_expect_with_probability")
+      ;; its other arguments evaluated too (pr85156: __builtin_expect(c, z++))
+      (seq-node (mapv #(effect (ex %)) (rest args)) (conv (ex (first args)) t))
+      ("__builtin_assume_aligned") (conv (ex (first args)) t)
+      ("__builtin_va_start" "__builtin_c23_va_start")
+      (let [pl (place (first args))
+            _ (when-not (= :mem (:mode pl)) (refuse :builder "va_start of a register place"))]
+        {:k :v :t chk/t-void :n (seq-node-eff (mapv #(effect (ex %)) (rest (rest args))) (list 'vastart (:a pl)))})
+      "__builtin_va_end" {:k :v :t chk/t-void :n (effect (ex (first args)))}
+      "__builtin_va_copy" (let [d (place (first args)) s (conv (ex (second args)) chk/t-ulong)]
+                            {:k :v :t chk/t-void :n (list 'ei (list 'st "u64" (:a d) (:n s)))})
+      "__builtin_classify_type"
+      (let [at (chk/decay (unq (:t (res-of (first args)))))
+            at (under at)]
+        {:k :i :t chk/t-int
+         :n (list 'i (case (:k at)
+                       :void 0 :bool 4 (:char :schar :uchar :short :ushort :int :uint :long :ulong :llong :ullong :int128 :uint128) 1
+                       :bitint 18 :ptr 5 (:float :double :ldouble :float32 :float64) 8 :complex 9 :struct 12 :union 13 :fn 10 -1))})
+      ("__builtin_alloca" "__builtin_alloca_with_align" "alloca") {:k :i :t t :n (list 'alloca (:n (conv (ex (first args)) chk/t-ulong)))}
+      "__builtin_constant_p" {:k :i :t chk/t-int :n '(i 0)}
+      "__builtin_object_size" {:k :i :t t :n (list 'i (if (#{0 1} (some-> (second args) lit-res :v)) -1 0))}
+      "__builtin_dynamic_object_size" {:k :i :t t :n '(i -1)}
+      ("__builtin_prefetch") {:k :v :t chk/t-void :n (seq-node-eff (mapv #(effect (ex %)) args) (list 'nop))}
+      "__builtin_frame_address" {:k :i :t t :n (if *f* '(fp 0) '(i 0))}
+      "__builtin_return_address" {:k :i :t t :n '(i 0)}
+      ("__builtin_inf" "__builtin_huge_val" "__builtin_infl" "__builtin_huge_vall") {:k :f :t t :n (list 'f (fbits Double/POSITIVE_INFINITY))}
+      ("__builtin_inff" "__builtin_huge_valf") {:k :f :t t :n (list 'f (fbits Double/POSITIVE_INFINITY))}
+      ("__builtin_nan" "__builtin_nanl" "__builtin_nanf") {:k :f :t t :n (list 'f (fbits Double/NaN))}
+      ("__builtin_nans" "__builtin_nansf" "__builtin_nansl") {:k :f :t t :n (list 'f (fbits Double/NaN))}
+      ("__builtin_isgreater" "__builtin_isgreaterequal" "__builtin_isless" "__builtin_islessequal" "__builtin_islessgreater")
+      (let [[a b] args xa (ex a) xb (ex b)
+            ot (with-types (chk/usual (promoted (res-of a)) (promoted (res-of b))))
+            fa (:n (conv xa ot)) fb (:n (conv xb ot))]
+        {:k :i :t chk/t-int
+         :n (case nm
+              "__builtin_isgreater" (list 'fcmp "gt" fa fb)
+              "__builtin_isgreaterequal" (list 'fcmp "ge" fa fb)
+              "__builtin_isless" (list 'fcmp "lt" fa fb)
+              "__builtin_islessequal" (list 'fcmp "le" fa fb)
+              (list 'or (list 'fcmp "lt" fa fb) (list 'fcmp "gt" fa fb)))})
+      nil)))
+
+(defn- seq-node-eff [es e] (if (empty? es) e (list 'ei (list 'seq (vec (conj es e)) '(i 0)))))
+
+(def ^:private overflow-builtins
+  #{"__builtin_add_overflow" "__builtin_sub_overflow" "__builtin_mul_overflow"
+    "__builtin_sadd_overflow" "__builtin_saddl_overflow" "__builtin_saddll_overflow"
+    "__builtin_uadd_overflow" "__builtin_uaddl_overflow" "__builtin_uaddll_overflow"
+    "__builtin_ssub_overflow" "__builtin_ssubl_overflow" "__builtin_ssubll_overflow"
+    "__builtin_usub_overflow" "__builtin_usubl_overflow" "__builtin_usubll_overflow"
+    "__builtin_smul_overflow" "__builtin_smull_overflow" "__builtin_smulll_overflow"
+    "__builtin_umul_overflow" "__builtin_umull_overflow" "__builtin_umulll_overflow"})
+
+(defn- overflow-call
+  "__builtin_OP_overflow(a, b, res): the exact result's wrap into *res's type, 1 when it does not fit."
+  [^String nm args]
+  (let [[a b p] args
+        op (cond (str/includes? nm "add") "add" (str/includes? nm "sub") "sub" :else "mul")
+        rt (unq (:to (chk/decay (unq (:t (res-of p))))))
+        ta (chk/decay (unq (:t (res-of a)))) tb (chk/decay (unq (:t (res-of b))))
+        w {:k :int128}
+        ;; computed in 128 bits, then checked against the result type (exact for operands of up to 64 bits)
+        xa (conv (ex a) w) xb (conv (ex b) w)
+        s (temp-i)
+        tmp (frame-temp w)
+        v {:k :w :t w :n (list 'wbin op "s128" (:n xa) (:n xb))}
+        pa (:n (ex-as p :i))]
+    (when (or (wide? ta) (wide? tb) (wide? rt)) (refuse :wide "__builtin_*_overflow on wide integers"))
+    {:k :i :t chk/t-bool
+     :n (list 'seq [(list 'ew (list 'wst "s128" tmp (:n v)))
+                    (list 'ei (list 'is s pa))
+                    (list 'ei (list 'st (ity rt) (list 'il s) (list 'w2i (ity rt) "s128" (list 'wld "s128" tmp))))]
+              (list 'wcmp "ne" "s128" (list 'i2w "s128" (ity rt) (list 'ld (ity rt) (list 'il s))) (list 'wld "s128" tmp)))}))
+
+(defn call-node [f h args r]
+  (let [hn (when (or (symbol? h) (and (seq? h) (= 'c/id (first h)))) (if (symbol? h) (name h) (second h)))
+        hr (ex-res h)
+        e (:entry hr)
+        t (:t r)
+        nm (or (:builtin hr) (when (and (nil? e) hn) hn) (when (and e (= :fn (:kind e))) (:name e)))
+        b (when (and nm (or (nil? e) (str/starts-with? nm "__builtin_") (= nm "alloca"))) (builtin-call nm args r))]
+    (cond
+      b b
+      (and nm (overflow-builtins nm)) (overflow-call nm args)
+      :else
+      (let [lib (when (and nm (str/starts-with? nm "__builtin_")) (subs nm 10))
+            nm (cond
+                 (and lib (builtin-aliases lib)) lib
+                 (and lib (builtin-natives nm)) nm
+                 :else nm)
+            direct (when (and nm (or (nil? e) (= :fn (:kind e)) lib))
+                     (if (and e (= :fn (:kind e)) (not lib)) (list 'fnref (fn-ref e)) (list 'fnref (fn-id nm nm))))
+            ft (callee-type hr)
+            ft (or ft {:k :fn :ret t :params [] :proto false})
+            ps (:params ft)
+            np (count ps)
+            argns (vec (map-indexed (fn [i a] (arg-node a (when (and (:proto ft) (< i np)) (nth ps i)))) args))
+            callee (or direct (list 'ei (:n (ex-as h :i))))
+            callee (if direct callee (:n (ex-as h :i)))
+            rk (kind t)]
+        (case rk
+          :i {:k :i :t t :n (list 'call callee argns)}
+          :f {:k :f :t t :n (list 'fcall callee argns)}
+          :w {:k :w :t t :n (list 'wcall callee argns)}
+          :v {:k :v :t t :n (list 'ecall callee argns)}
+          :m (let [tmp (frame-alloc! (size-of t) (align-of t))]
+               {:k :m :t t :n (list 'call callee argns 1 tmp)}))))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Initializers (6.7.11): the stores that give an object its initial value
+
+(defn- int-of [x]
+  (cond (integer? x) (long x) (char? x) (long (int (char x)))
+        :else (let [r (res-of x)] (if (integer? (:v r)) (long (:v r)) (refuse :checker "a designator that is not constant")))))
+
+(defn- subobjects
+  "An aggregate's subobjects: [[key type offset member] ...] (an array's by index: lazily, by n)."
+  [t]
+  (let [t (unq t)]
+    (case (:k t)
+      (:struct :union) (let [^HashMap rec (:rec t)
+                             ms (remove #(and (:bits %) (nil? (:name %))) (.get rec :members))]
+                         (vec (for [m ms] [(keyword (or (:name m) "")) (:t m) (:off m) m])))
+      nil)))
+
+(defn- elem-store
+  "The stores of a scalar or aggregate value x (a form) into the object of type t at a."
+  [t a x mm]
+  (let [pl (if (:bits mm)
+             (member-place {:mode :mem :a a} mm t)
+             {:mode :mem :a a :t t})]
+    [(effect (place-store pl (conv (let [v (ex x)] (if (and (= :array (:k (unq (:t v)))) (not= :array (:k (unq t)))) (assoc v :k :i :t (chk/decay (unq (:t v)))) v)) (:t pl))))]))
+
+(defn- addr+ [a off] (if (zero? (long off)) a (list 'adds a '(i 1) (long off))))
+
+(declare fill)
+
+(defn- char-array? [t]
+  (and (= :array (:k (unq t))) (#{:char :schar :uchar :short :ushort :int :uint :long :ulong :bool} (:k (under (:of (unq t)))))))
+
+(defn- string-stores [t a x]
+  (let [[units esize] (string-units x)
+        n (:n (unq t))
+        es (size-of (:of (unq t)))
+        units (if n (vec (take (quot (* (long n) es) esize) (concat units [0]))) (conj units 0))
+        bs (units->bytes units esize)]
+    [(list 'ei (list 'copy a (list 'g (string-static bs esize)) (alength bs)))]))
+
+(defn- fill-list
+  "The stores of a braced list els into the object of type t at a: [stores rest]. braced: the list is
+  this object's own braces (designators apply here); else elided (a designator ends it)."
+  [t a els braced]
+  (let [t (unq t)
+        out (ArrayList.)]
+    (case (:k t)
+      :array
+      (let [et (:of t) es (size-of et) n (:n t)]
+        (loop [els els i 0]
+          (cond
+            (empty? els) [(vec out) els]
+            (and n (>= i n) (not (and braced (or (keyword? (first els)) (and (seq? (first els)) (= 'at (first (first els)))))))) [(vec out) els]
+            :else
+            (let [e (first els)]
+              (if (and (seq? e) (= 'at (first e)))
+                (if-not braced
+                  [(vec out) els]
+                  (let [[d & more] (rest e)
+                        v (second els)
+                        [lo hi] (if (vector? d) [(int-of (first d)) (int-of (second d))] [(int-of d) (int-of d)])]
+                    (doseq [j (range lo (inc hi))]
+                      (let [sa (addr+ a (* j es))]
+                        (if (seq more)
+                          (.addAll out (first (fill-designated et sa more v)))
+                          (.addAll out (first (fill et sa [v] true))))))
+                    (recur (nnext els) (inc hi))))
+                (let [[st rst] (fill et (addr+ a (* i es)) els false)]
+                  (.addAll out st)
+                  (recur rst (inc i))))))))
+      (:struct :union)
+      (let [subs (subobjects t)
+            union? (= :union (:k t))]
+        (loop [els els i 0]
+          (cond
+            (empty? els) [(vec out) els]
+            :else
+            (let [e (first els)
+                  desig (cond (keyword? e) [e] (and (seq? e) (= 'at (first e))) (vec (rest e)))]
+              (cond
+                (and desig (not braced)) [(vec out) els]
+                (and desig (= braced :anon)
+                     (not (some #(= (first %) (first desig)) (anon-members t)))) [(vec out) els]
+                desig (let [k (first desig)
+                            j (first (keep-indexed (fn [j s] (when (= (first s) k) j)) subs))
+                            ;; a member of an anonymous member (6.7.11: its members are the struct's)
+                            anon (when-not j
+                                   (first (keep-indexed (fn [j s] (when (and (= (first s) (keyword ""))
+                                                                             (some #(= (first %) k) (anon-members (second s))))
+                                                                    j))
+                                                        subs)))
+                            _ (when-not (or j anon) (refuse :builder "no member " k " to designate"))
+                            v (second els)]
+                        (if anon
+                          ;; the elements after go on in the anonymous member (gcc: {.b = 1, 2} gives c 2)
+                          (let [[_ st off] (nth subs anon)
+                                [st2 rst] (fill-list st (addr+ a off) els :anon)]
+                            (.addAll out st2)
+                            (recur rst (if union? (count subs) (inc anon))))
+                          (let [[_ st off mm] (nth subs j)
+                                sa (addr+ a off)]
+                            (if (> (count desig) 1)
+                              (.addAll out (first (fill-designated st sa (rest desig) v)))
+                              (if (:bits mm)
+                                (.addAll out (elem-store st a v mm))
+                                (.addAll out (first (fill st sa [v] true)))))
+                            (recur (nnext els) (inc j)))))
+                (or (>= i (count subs)) (and union? (pos? i))) [(vec out) els]
+                :else (let [[_ st off mm] (nth subs i)]
+                        (if (:bits mm)
+                          (let [x (first els)
+                                x (if (and (seq? x) (= 'init (first x))) (second x) x)]
+                            (.addAll out (elem-store st a x mm))
+                            (recur (next els) (inc i)))
+                          (let [[st2 rst] (fill st (addr+ a off) els false)]
+                            (.addAll out st2)
+                            (recur rst (inc i))))))))))
+      ;; a scalar in braces: its first element
+      (let [[st rst] (fill t a els false)] [st rst]))))
+
+(defn- anon-members
+  "A record type's members, an anonymous member's own members among them."
+  [t]
+  (let [t (unq t)]
+    (when (#{:struct :union} (:k t))
+      (mapcat (fn [s] (if (= (first s) (keyword "")) (cons s (anon-members (second s))) [s])) (subobjects t)))))
+
+(defn- fill-designated
+  "A designator path's rest `ds` into the object of type t at a, given the value v: [stores]."
+  [t a ds v]
+  (let [d (first ds) t (unq t)]
+    (cond
+      (empty? ds) (fill t a [v] true)
+      (keyword? d) (let [subs (subobjects t)
+                         direct (first (filter #(= (first %) d) subs))
+                         anon (when-not direct (first (filter #(and (= (first %) (keyword "")) (some (fn [x] (= (first x) d)) (anon-members (second %)))) subs)))
+                         [_ st off mm] (or direct anon (refuse :builder "no member " d))]
+                     (if anon
+                       (fill-designated st (addr+ a off) ds v)
+                     (if (and (:bits mm) (= 1 (count ds)))
+                       [(elem-store st a v mm)]
+                       (fill-designated st (addr+ a off) (rest ds) v))))
+      :else (let [es (size-of (:of t))
+                  [lo hi] (if (vector? d) [(int-of (first d)) (int-of (second d))] [(int-of d) (int-of d)])]
+              [(vec (mapcat (fn [j] (first (fill-designated (:of t) (addr+ a (* j es)) (rest ds) v))) (range lo (inc hi))))]))))
+
+(defn- fill
+  "The stores of the initializer elements els (their first, or for an aggregate as many as it takes)
+  into the object of type t at a: [stores rest]."
+  [t a els braced]
+  (let [x (first els)
+        t (unq t)
+        k (kind t)]
+    (cond
+      (and (seq? x) (= 'init (first x)) (= 2 (count x)) (char-array? t) (string-form? (second x)))
+      [(string-stores t a (second x)) (rest els)]
+      (and (seq? x) (= 'init (first x)))
+      (if (= :m k)
+        [(first (fill-list t a (rest x) true)) (rest els)]
+        [(if (next x) (first (fill t a (rest x) true)) []) (rest els)])
+      (and (char-array? t) (string-form? x)) [(string-stores t a x) (rest els)]
+      (and (seq? x) (= 'c/embed (first x))) (refuse :embed "#embed in an initializer (CS75)")
+      (complex? t) [(elem-store t a x nil) (rest els)]
+      (= :m k)
+      (let [rx (res-of x)
+            xt (unq (:t rx))]
+        (if (and (#{:struct :union} (:k xt)) (with-types (chk/compatible? (unq xt) t)))
+          [[(list 'ei (list 'copy a (:n (ex-as x :i)) (size-of t)))] (rest els)]
+          (fill-list t a els false)))
+      :else [(elem-store t a x nil) (rest els)])))
+
+(defn build-init-stores
+  "The effects that initialize the object of type t at the address node a from the initializer form
+  init; zero: the object zeroed first (an automatic one; static storage is zero already)."
+  [t a init zero]
+  (let [t (unq t)
+        init (if (and (complex? t) (seq? init) (= 'init (first init))) (second init) init)
+        ;; { "abc" } for a character array is "abc" (6.7.11)
+        init (if (and (seq? init) (= 'init (first init)) (= 2 (count init)) (char-array? t) (string-form? (second init)))
+               (second init) init)
+        stores (if (and (seq? init) (= 'init (first init)))
+                 (if (and (= :m (kind t)) (not (complex? t))) (first (fill-list t a (rest init) true)) (first (fill t a (rest init) true)))
+                 (first (fill t a [init] true)))]
+    (if (and zero (= :m (kind t)))
+      (into [(list 'ei (list 'zero a (size-of t)))] stores)
+      (vec stores))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Statements (§7.2, §7.3)
+
+(def ^:dynamic *switch* nil) ; the current switch's cases (an atom of [[lo hi code] ...] and :default)
+
+(defn- decl-head? [x] (and (seq? x) ('#{c/var c/declare c/typedef c/struct c/union c/enum c/group c/static-assert c/defn c/local-labels c/attr-decl c/declare-specs} (first x))))
+
+(def ^:dynamic *vla-block* nil) ; the block being built: an atom, its [mark last] slots once it declares a VLA (CS106)
+(def ^:dynamic *vla-stack* [])  ; the mark slots of the enclosing blocks that declare VLAs, outermost first
+(def ^:dynamic *vla-brk* 0)     ; the depth of *vla-stack* at the innermost break's target (a loop or switch)
+(def ^:dynamic *vla-cont* 0)    ; at the innermost continue's (a loop)
+
+(defn- vla-leave
+  "A break or continue: the stack pointer restored to the outermost VLA block it leaves (CS106)."
+  [depth jmp]
+  (if (> (count *vla-stack*) depth)
+    (list 'do [(list 'x (list 'ei (list 'vlarestore (nth *vla-stack* depth)))) jmp])
+    jmp))
+
+(defn- vla-alloc [e tf-form loc]
+  ;; (array n T): n evaluated, n * sizeof(T) bytes on the stack; the storage of the declaration's previous
+  ;; execution, and of its block's previous entry, freed (CS106: ci's VlaAlloc, VlaMark)
+  (let [t (unq (:t e))
+        nf (second tf-form)
+        n (conv (ex nf) chk/t-ulong)
+        size (list 'is (:size loc) (list 'bin "mul" "u64" (:n n) (vla-elem-size (:of t))))]
+    (if *vla-block*
+      (let [[_ l] (or @*vla-block* (reset! *vla-block* [(new-slot! :i) (new-slot! :i)]))
+            md (new-slot! :i) ed (new-slot! :i)]
+        (list 'x (list 'ei (list 'is (:slot loc) (list 'vlalloc md ed l size)))))
+      (list 'x (list 'ei (list 'is (:slot loc) (list 'alloca size)))))))
+
+(defn- local-decl
+  "A block's declaration: the statements it runs."
+  [d]
+  (case (first d)
+    c/var (let [[_ nm & more] d
+                e (or (ex-res nm) (refuse :checker "no entry for " (pr-str nm)))
+                t (:t e)]
+            (cond
+              (= :fn (:k (unq t))) []
+              (#{:x :i} (:linkage e)) [] ; a block-scope extern
+              :else
+              (let [loc (bind-local! e t)]
+                (cond
+                  (= :static (:loc loc))
+                  (do (when (seq more)
+                        ;; its own slots; the function's labels (&&L) and statics (&x of a static local)
+                        (let [fs (atom {:ni 0 :nf 0 :frame 0 :labels (:labels @*f*) :locals (:locals @*f*) :addressed #{}})
+                              stores (binding [*static-init* true *f* fs] (build-init-stores t (list 'g (:idx loc)) (first more) false))]
+                          (swap! *f* assoc :labels (:labels @fs))
+                          (.add ^ArrayList (:inits *p*) (init-cmd fs stores))))
+                      [])
+                  (= :vla (:loc loc)) [(vla-alloc e (:tag (meta nm)) loc)]
+                  (empty? more) []
+                  :else
+                  (let [init (first more)]
+                    (case (:loc loc)
+                      :mem [(list 'x (list 'ei (list 'seq (build-init-stores t (list 'fp (:off loc)) init true) '(i 0))))]
+                      (let [x (if (and (seq? init) (= 'init (first init))) (second init) init)]
+                        [(list 'x (effect (place-store (if (= :slot-f (:loc loc)) {:mode :slot-f :k (:k loc) :t t} {:mode :slot-i :k (:k loc) :t t})
+                                                       (conv (ex x) t))))])))))))
+    c/group (vec (mapcat local-decl (drop 2 d)))
+    c/defn (refuse :by-design "GNU nested functions (SPEC §14)")
+    []))
+
+(defn- empty-asm?
+  "An asm statement whose template is empty (a compiler barrier: __asm__(\"\" : \"+r\"(x) : : \"memory\"))."
+  [f]
+  (let [t (str (second f))]
+    ;; an empty template with an output (\"=r\") may move a value: not a barrier
+    (boolean (and (re-find #"^\s*(__asm__|__asm|asm)\s*(__volatile__|volatile|__volatile)?\s*\(\s*\"\"" t)
+                  (not (re-find #"\"=" t))))))
+
+(defn- asm-body?
+  "A function body that is inline assembly (musl's arch/x86_64 inline functions): natives of ci's."
+  [body]
+  (letfn [(walk [x] (cond (seq? x) (if (= 'c/asm (first x)) (not (empty-asm? x)) (some walk x))
+                          (vector? x) (some walk x)
+                          :else false))]
+    (boolean (some walk body))))
+
+(defn- stmts [items] (vec (mapcat (fn [s] (let [x (build-stmt s)] (if (vector? x) x [x]))) items)))
+
+(defn- do-node [items] (list 'do (stmts items)))
+
+(def ^:private setjmp-names #{"setjmp" "_setjmp" "sigsetjmp" "__sigsetjmp" "__builtin_setjmp"})
+
+(defn- has-setjmp?
+  "Whether a statement's own expressions call setjmp (a compound statement's body is its statements', so a
+  block or a let is never the guarded statement: re-entering it would run its declarations again)."
+  [f]
+  (letfn [(in-expr [x] (cond (seq? x) (or (and (symbol? (first x)) (setjmp-names (name (first x)))) (some in-expr x))
+                             (vector? x) (some in-expr x)
+                             :else false))]
+    (cond
+      (not (seq? f)) false
+      ('#{do let} (first f)) false
+      ('#{when if while do-while switch} (first f)) (in-expr (second f))
+      (= 'cond (first f)) (some in-expr (take-nth 2 (rest f)))
+      (= 'for (first f)) (let [[_ init c step] f] (or (in-expr c) (in-expr step) (in-expr init)))
+      :else (in-expr f))))
+
+(defn- stmt*
+  [s]
+  (cond
+    (seq? s)
+    (let [[h & args] s]
+      (case h
+        do (do-node args)
+        let (binding [*vla-block* (atom nil)]
+             (let [[bv & body] args
+                  decls (loop [xs (seq bv) out []]
+                          (if-not xs
+                            out
+                            (let [x (first xs)]
+                              (if (decl-head? x)
+                                (recur (next xs) (into out (local-decl x)))
+                                (recur (nnext xs) (into out (local-decl (with-meta (list 'c/var x (second xs)) (meta x)))))))))]
+              (if-let [[m l] @*vla-block*]
+                (let [ss (into decls (binding [*vla-stack* (conj *vla-stack* m)] (stmts body)))]
+                  (list 'do (-> [(list 'x (list 'ei (list 'vlamark m l)))]
+                                (into ss)
+                                (conj (list 'x (list 'ei (list 'vlarestore m)))))))
+                (list 'do (into decls (stmts body))))))
+        when (list 'when (truth (ex (first args))) (do-node (rest args)))
+        if (let [[c a b] args] (list 'when (truth (ex c)) (do-node [a]) (do-node [b])))
+        cond (let [pairs (partition 2 args)]
+               (reduce (fn [else [c st]]
+                         (if (= c :else) (do-node [st]) (list 'when (truth (ex c)) (do-node [st]) else)))
+                       nil (reverse pairs)))
+        while (list 'loop (truth (ex (first args))) 'nil (binding [*vla-brk* (count *vla-stack*) *vla-cont* (count *vla-stack*)] (do-node (rest args))) 0)
+        do-while (list 'loop (truth (ex (first args))) 'nil (binding [*vla-brk* (count *vla-stack*) *vla-cont* (count *vla-stack*)] (do-node (rest args))) 1)
+        for (let [[init c step & body] args
+                  pre (cond
+                        (empty? init) []
+                        (and (= 1 (count init)) (not (decl-head? (first init)))) [(list 'x (effect (ex (first init))))]
+                        :else (:pre (let [x (stmt* (list 'let init))] {:pre (second x)})))
+                  cn (if (= c '_) 'nil (truth (ex c)))
+                  sn (if (= step '_) 'nil (effect (ex step)))]
+              (list 'do (conj (vec pre) (list 'loop cn sn (binding [*vla-brk* (count *vla-stack*) *vla-cont* (count *vla-stack*)] (do-node body)) 0))))
+        switch (let [[e & body] args
+                     x (ex e)
+                     pt (promoted (res-of e))
+                     xv (conv x pt)
+                     cases (atom {:cases [] :default 0})
+                     b (binding [*switch* {:cases cases :t pt} *vla-brk* (count *vla-stack*)] (do-node body))]
+                 (list 'sw (:n xv) (if (unsigned-ty? (ity pt)) 1 0) (mapv vec (:cases @cases)) (:default @cases) b))
+        case (let [[a b] args
+                   c (fresh-code!)
+                   pt (:t *switch*)
+                   v (fn [x] (let [v (:v (or (lit-res x) (res-of x)))]
+                               (long (let [w (chk/wrap (if (char? v) (long (int (char v))) v) pt)] (if (instance? arbace.lang.BigInt w) (.longValue ^arbace.lang.BigInt w) w)))))
+                   lo (v a) hi (if b (v b) lo)]
+               (when-not *switch* (refuse :forms "case outside a switch"))
+               (swap! (:cases *switch*) update :cases conj [lo hi c])
+               (list 'lab c))
+        default (let [c (fresh-code!)]
+                  (swap! (:cases *switch*) assoc :default c)
+                  (list 'lab c))
+        label (list 'lab (label-code! (first args)))
+        goto (list 'jmp (label-code! (first args)))
+        goto* (list 'igoto (:n (conv (ex (first args)) chk/t-ulong)))
+        break (vla-leave *vla-brk* '(jmp 2))
+        continue (vla-leave *vla-cont* '(jmp 3))
+        return (if (empty? args)
+                 '(ret)
+                 (let [rt (:fn-ret @*f*)
+                       x (ex (first args))]
+                   (case (kind rt)
+                     :v (list 'do [(list 'x (effect x)) '(ret)])
+                     :i (list 'ret (list 'reti (:n (conv x rt))))
+                     :f (list 'ret (list 'retf (:n (conv x rt))))
+                     :w (list 'ret (list 'retw (:n (conv x rt))))
+                     :m (list 'ret (list 'retm (:n x) 0 (size-of rt))))))
+        c/asm (if (empty-asm? s) '(do []) (refuse :by-design "inline assembly (SPEC §14)"))
+        (c/define c/undef c/directive c/pragma c/include c/attr-decl c/local-labels) '(do [])
+        c/effect (list 'x (first args))
+        c/stmt-value (let [[sl k t e] args
+                           x (conv (ex e) t)]
+                       (list 'x (case k :f (list 'ef (list 'fs sl (:n x))) (list 'ei (list 'is sl (:n x))))))
+        (if (decl-head? s)
+          (list 'do (local-decl s))
+          (list 'x (effect (ex s))))))
+    :else (list 'x (effect (ex s)))))
+
+(defn- calls-setjmp?
+  "Whether forms call setjmp anywhere (the function's body is then an SjBody)."
+  [f]
+  (cond
+    (seq? f) (or (and (symbol? (first f)) (setjmp-names (name (first f)))) (some calls-setjmp? f))
+    (vector? f) (some calls-setjmp? f)
+    :else false))
+
+(defn build-stmt [s]
+  (let [n (stmt* s)]
+    (if (has-setjmp? s) (list 'sj (fresh-code!) n) n)))
+
+;; ---------------------------------------------------------------------------------------------
+;; Functions
+
+(defn- addressed-names
+  "The names whose address the body takes: (addr x), and a va_list given to a va_ builtin."
+  [body]
+  (let [acc (java.util.HashSet.)]
+    (letfn [(walk [f]
+              (cond
+                (seq? f) (do (let [[h a] f]
+                               (when (and (= h 'addr) (symbol? a)) (.add acc (name a)))
+                               (when (and (= h 'addr) (seq? a) (= 'c/id (first a))) (.add acc (second a)))
+                               (when (and (= h 'va-arg) (symbol? a)) (.add acc (name a)))
+                               (when (and (symbol? h) (re-find #"^__builtin_(c23_)?va_" (name h)) (symbol? a)) (.add acc (name a)))
+                               ;; an array's or a member's address through the name
+                               (when (and (= h 'addr) (seq? a)) (walk-base a)))
+                             (doseq [x f] (walk x)))
+                (vector? f) (doseq [x f] (walk x))
+                :else nil))
+            (walk-base [a]
+              (cond (symbol? a) (.add acc (name a))
+                    (and (seq? a) (or (= 'aget (first a)) (str/starts-with? (str (first a)) ".-"))) (walk-base (second a))
+                    :else nil))]
+      (walk body))
+    (set acc)))
+
+(defn- param-spec [e t]
+  (let [loc (bind-local! e t)]
+    (case (:loc loc)
+      :slot-i (list 'pi (:k loc))
+      :slot-f (list 'pf (:k loc) (if (f32? t) 1 0))
+      :mem (case (kind t)
+             :m (list 'pm (:off loc) "" (size-of t))
+             :w (list 'pw (:off loc) (wty t))
+             :f (list 'pm (:off loc) (fty t) 8)
+             (list 'pm (:off loc) (ity t) 8))
+      (refuse :builder "a parameter's place"))))
+
+(def asm-natives
+  "The functions whose body is inline assembly that are natives of go/arbace/ci: musl 1.2.6's arch/x86_64
+  inline functions (atomic_arch.h, syscall_arch.h, pthread_arch.h)."
+  #{"a_cas" "a_cas_p" "a_swap" "a_fetch_add" "a_and" "a_or" "a_and_64" "a_or_64" "a_inc" "a_dec" "a_store"
+    "a_barrier" "a_spin" "a_crash" "a_ctz_64" "a_clz_64" "__get_tp" "__syscall0" "__syscall1" "__syscall2"
+    "__syscall3" "__syscall4" "__syscall5" "__syscall6"})
+
+(defn build-fn
+  "A c/defn: its (code ...) command, or (native ...) for a body of inline assembly."
+  [f]
+  (let [[_ nm ps & body] f
+        body* body
+        e (or (ex-res nm) (refuse :checker "no entry for the function " nm))
+        ft (unq (:t e))
+        rt (:ret ft)
+        id (fn-ref e)
+        kr (:c/kr (meta ps))]
+    (if (asm-body? body)
+      (if (asm-natives (:name e))
+        (list 'native id (:name e) (:name e))
+        (refuse :by-design (:name e) ": inline assembly (SPEC §14)"))
+    (try
+    (binding [*f* (atom {:ni 0 :nf 0 :frame 0 :labels {} :locals {} :fn-ret rt :fn-name (:name e)
+                         :addressed (addressed-names body)})]
+      (let [sret (when (= :m (kind rt)) (new-slot! :i))
+            pspecs (vec (for [p ps :when (not (#{'& 'void} p))
+                              :let [pe (ex-res p)]
+                              :when pe]
+                          (param-spec pe (:t pe))))
+            ;; K&R parameters arrive default-promoted: converted to their declared types
+            kr-convs (when kr
+                       (vec (for [p ps :let [pe (ex-res p)] :when pe
+                                  :let [loc (local-of pe) t (:t pe)]
+                                  :when (and (= :slot-i (:loc loc)) (not (#{"i64" "u64" "p"} (ity t))))]
+                              (list 'x (list 'ei (list 'is (:k loc) (list 'cv (ity t) (list 'il (:k loc)))))))))
+            b (stmts body)
+            b (if (= "main" (:name e)) (conj b '(ret (reti (i 0)))) b)
+            st @*f*]
+        (list 'code id (:ni st) (:nf st) (:frame st) (if (:variadic ft) 1 0) (if (f32? rt) 1 0)
+              (vec (if sret (cons (list 'pi sret) pspecs) pspecs))
+              (let [body (list 'do (into (vec kr-convs) b))]
+                (if (calls-setjmp? body*) (list 'sjbody body) body)))))
+      (catch arbace.lang.ExceptionInfo x
+        (throw (ex-info (str (:name e) ": " (.getMessage x)) (ex-data x))))))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Programs: units checked, linked by name, built
+
+(defn- unit-forms
+  "A unit's top-level forms with its header units' spliced in where their c/include stands (once each)."
+  [rd]
+  (let [done (java.util.HashSet.)
+        out (ArrayList.)
+        units (into {} (for [[k u] (:units rd)] [(str k) u]))]
+    (letfn [(walk [forms]
+              (doseq [f forms]
+                (if (and (seq? f) (= 'c/include (first f)))
+                  (let [u (second (drop-while #(not= % :unit) f))]
+                    (when (and u (.add done (str u)))
+                      (when-let [uf (get units (str u))] (walk (:forms uf)))))
+                  (.add out f))))]
+      (walk (:forms rd)))
+    (vec out)))
+
+(defn- file-objects
+  "The file-scope object declarations of a unit's forms: [[form entry] ...]."
+  [forms]
+  (vec (mapcat (fn [f]
+                 (when (seq? f)
+                   (case (first f)
+                     c/var [[f (ex-res (second f))]]
+                     c/group (keep #(when (and (seq? %) (= 'c/var (first %))) [% (ex-res (second %))]) (drop 2 f))
+                     nil)))
+               forms)))
+
+(defn- decl-attrs
+  "A declaration's weak and alias attributes: [weak alias-target]."
+  [m]
+  (let [names (java.util.HashSet.) alias (atom nil)]
+    (letfn [(walk [x]
+              (cond
+                (symbol? x) (.add names (str/replace (name x) #"^__|__$" ""))
+                (vector? x) (let [[n a] x]
+                              (when (and (symbol? n) (#{"alias" "__alias__"} (name n)) (string? a)) (reset! alias a))
+                              (doseq [y x] (walk y)))
+                (seq? x) (doseq [y x] (walk y))
+                :else nil))]
+      (doseq [k [:c/attrs :c/after-attrs :c/decl-attrs :c/gnu-attrs :c/def-attrs :c/end-attrs :c/decl-end-attrs]]
+        (walk (get m k))))
+    [(contains? names "weak") @alias]))
+
+(defn- ex-res-name
+  "The file-scope entry named n in unit u (an alias's target)."
+  [u ^String n]
+  (.get ^HashMap (:entries *p*) [(:idx u) n]))
+
+(defn- tentative-or-def? [f e]
+  (and e (= :obj (:kind e)) (#{:x :i} (:linkage e)) (not (:extern (:m e)))))
+
+(defn- flex-extra
+  "The bytes a static struct's initialized flexible array member adds (GNU: struct W w = {{...}, {1, 2, 3}};
+  the object is as large as its initializer)."
+  ^long [t init]
+  (let [t (under t)]
+    (if (and (= :struct (:k t)) (seq? init) (= 'init (first init)))
+      (let [^HashMap rec (:rec t)
+            ms (.get rec :members)
+            lm (last ms)
+            els (rest init)]
+        (if (and lm (= :array (:k (unq (:t lm)))) (nil? (:n (unq (:t lm))))
+                 (not-any? #(or (keyword? %) (and (seq? %) (= 'at (first %)))) els)
+                 (= (count els) (count ms)))
+          (let [et (:of (unq (:t lm)))
+                n (with-types (#'chk/init-count et (if (and (seq? (last els)) (= 'init (first (last els)))) (last els) (list 'init (last els)))))]
+            (* (long (or n 0)) (size-of et)))
+          0))
+      0)))
+
+(defn build-program
+  "The node program of checked units [{:rd :results :std :unsigned-char}] (a program's, in link order):
+  the commands, with (entry main) or, when `libc-start` names __libc_start_main, (start ...). Throws
+  ex-info with :ci/refused CLASS for a construct out of eval (SPEC §14) or not built yet."
+  [units & {:keys [libc-start]}]
+  (binding [*p* (new-prog)]
+    (let [units (vec (map-indexed (fn [i u] (assoc u :idx i :forms (unit-forms (:rd u)))) units))
+          defs (HashMap.)]
+      ;; the file-scope entries by name, per unit (alias targets)
+      (doseq [u units
+              f (:forms u)
+              :when (seq? f)
+              d (if (= 'c/group (first f)) (drop 2 f) [f])
+              :when (and (seq? d) ('#{c/defn c/var c/declare} (first d)))]
+        (binding [*u* u]
+          (when-let [e (ex-res (second d))]
+            (when (map? e)
+              (let [k [(:idx u) (:name e)] old (.get ^HashMap (:entries *p*) k)]
+                (when (or (nil? old) (= 'c/defn (first d))) (.put ^HashMap (:entries *p*) k e)))))))
+      ;; the objects: each external one's defining declaration (its complete type), allocated first
+      (doseq [u units]
+        (binding [*u* u *cfg* (assoc *cfg* :unsigned-char (:unsigned-char u))]
+          (doseq [[f e] (file-objects (:forms u))]
+            (when (and e (= :obj (:kind e)) (#{:x :i} (:linkage e)) (not (second (decl-attrs (meta (second f))))))
+              (let [k (global-key e)
+                    old (.get defs k)
+                    has-init (> (count f) 2)]
+                (when (and (or has-init (tentative-or-def? f e))
+                           (or (nil? old)
+                          (and has-init (not (:init old)))
+                          (and (not (:init old)) (tentative-or-def? f e) (not (:def old)))))
+                  (.put defs k {:e e :f f :init has-init :def (tentative-or-def? f e) :u u})))))))
+      (doseq [[k {:keys [e f init def u]}] defs]
+        (binding [*u* u *cfg* (assoc *cfg* :unsigned-char (:unsigned-char u))]
+          (let [t (:t e)
+                ro (and (contains? (chk/quals t) :const) init)]
+            (static-idx [:obj k] (max 1 (+ (size-of t) (flex-extra t (when init (nth f 2))))) (align-of t) ro))))
+      (doseq [[k {:keys [e f init def u]}] defs]
+        (binding [*u* u *cfg* (assoc *cfg* :unsigned-char (:unsigned-char u))]
+          (let [t (:t e)
+                idx (.get ^HashMap (:statics *p*) [:obj k])]
+            (when init
+              (let [fs (atom {:ni 0 :nf 0 :frame 0 :labels {} :locals {} :addressed #{}})
+                    stores (binding [*static-init* true *f* fs] (build-init-stores t (list 'g idx) (nth f 2) false))]
+                (.add ^ArrayList (:inits *p*) (init-cmd fs stores)))))))
+;; the functions: static ones always, an external one's strong definition over a weak one
+      (let [chosen (HashMap.)]
+        (doseq [u units
+                f (:forms u)
+                :when (seq? f)
+                d (if (= 'c/group (first f)) (drop 2 f) [f])
+                :when (and (seq? d) ('#{c/defn c/var c/declare} (first d)))]
+          (binding [*u* u]
+            (let [e (ex-res (second d))
+                  m (meta (second d))
+                  [weak alias] (decl-attrs m)]
+              (when (and e (or (= 'c/defn (first d)) alias))
+                (let [k (global-key e)
+                      old (.get chosen k)
+                      cand {:u u :f d :weak weak :alias alias :e e}]
+                  (when (or (nil? old) (and (:weak old) (not weak)))
+                    (.put chosen k cand)))))))
+        (doseq [[k {:keys [u f alias e]}] chosen]
+          (binding [*u* u *cfg* (assoc *cfg* :unsigned-char (:unsigned-char u))]
+            (if alias
+              (let [te (ex-res-name u alias)]
+                (if (= :fn (:kind e))
+                  (.add ^ArrayList (:aliases *p*) (list 'fnalias (fn-ref e) (if te (fn-ref te) (fn-id alias alias))))
+                  ;; a weak alias of an object another unit defines is not taken
+                  (when (and te (not (and (.containsKey defs k) (not (:alias (.get defs k))))))
+                    (.add ^ArrayList (:aliases *p*) (list 'alias (global-obj-idx e) (global-obj-idx te) 0)))))
+              (emit! (build-fn f))))))
+      ;; the undefined weak objects are at address 0
+      (doseq [a (:undefined *p*)] (emit! a))
+      (doseq [a (:aliases *p*)] (emit! a))
+      (doseq [i (:inits *p*)] (emit! i))
+      (let [main (.get ^HashMap (:fns *p*) "main")]
+        (when-not main (refuse :no-main "no main"))
+        (emit! (if libc-start
+                 (list 'start (fn-id "__libc_start_main" "__libc_start_main") main)
+                 (list 'entry main))))
+      (vec (:out *p*)))))
+
+(defn program-text
+  "A node program as text, a command a line (go/arbace/ci's Parse reads it)."
+  ^String [cmds]
+  (let [sb (StringBuilder.)]
+    (binding [*print-length* nil *print-level* nil]
+      (doseq [c cmds] (.append sb (pr-str c)) (.append sb "\n")))
+    (str sb)))

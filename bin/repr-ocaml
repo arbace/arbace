@@ -1,0 +1,667 @@
+#!/bin/bash
+# repr/ocaml, OCaml's bridge (doc/ocaml/OCAML-SURVEY.md, doc/ocaml/SPEC.md): so far (O1, "As built: O1") the
+# spec's checks, the helper tools/ocdump on the host's compiler-libs (OC3 (a)) and the corpora's pins.
+# O2 adds the converter and the printer (arbace.repr.ocaml{,.convert,.print,.doc}, evaluated on stage 0 from
+# the checkout, not embedded), read, print and the round trip:
+#
+#   bin/repr-ocaml ocdump-build   build tools/ocdump/ocdump.ml into .tmp/ocdump/ocdump with the host's ocamlopt
+#                                 against compiler-libs (-I +compiler-libs ocamlcommon.cmxa; no ocamlfind, no
+#                                 dune); rebuilt when the source, the pin or compiler-libs' library change
+#   bin/repr-ocaml dump [--loc] [--intf] [--use-file] [--mode parse|types|lambda|tokens] [--file NAME] [FILE]
+#                                 run the helper (stdin when FILE is absent); OC4 (a): types, lambda
+#   bin/repr-ocaml corpus fetch   the release tarball into .tmp/repr-ocaml/src/ (downloaded once when absent,
+#                                 checked by its SHA-256 from test/ocaml/corpora.edn) and extracted
+#   bin/repr-ocaml corpus count   the files and lines of every corpus, as test/ocaml/corpora.edn records them
+#   bin/repr-ocaml corpus check   the counts equal the recorded ones; the pins hold (tarball, go-whim's commit
+#                                 and tree, ocamlopt, compiler-libs)
+#   bin/repr-ocaml samples        test/ocaml/samples/: every file read by ocdump, no error, its forms read by
+#                                 Arbace's reader; the typed ones also typed and lowered to Lambda
+#   bin/repr-ocaml spec-check     doc/ocaml/SPEC.md: every forms block reads with Arbace's reader; every entry
+#                                 with a source equals ocdump's output for it; every Parsetree constructor of
+#                                 5.5.0's parsetree.mli is in the spec's checklist
+#   floors: the levels that skip what they cannot do (the .cmi level's files compiled alone, the dumps', the spec's entries) are
+#           compared with test/ocaml/floors.tsv and fail on a drop; --record (roundtrip, types|lambda|dumps, spec-check) rewrites it
+#   bin/repr-ocaml embed-check    the sources a shipped build embeds (arbace/j2g/embed.ae) are keyed (bin/lib/version.bash)
+#                                 and none is repr/ocaml's (test/ocaml/embed_check.ae)
+#   bin/repr-ocaml read [-o DIR] FILE...   FILE.ml/.mli to OCaml forms (mode :lines) under DIR (default
+#                                 .tmp/repr-ocaml/forms/NAME.ae): the helper's dump, converted, read back
+#   bin/repr-ocaml print [-o DIR] FORMS.ae...   forms to OCaml text under DIR (default .tmp/repr-ocaml/printed)
+#   bin/repr-ocaml roundtrip [--record] [--jobs N] [CORPUS...]
+#                                 O2's check over corpora (default stdlib compiler-sources compiler-backend
+#                                 samples; also whiml testsuite): each file dumped by the helper, printed from
+#                                 its forms, the printed file dumped, the two trees equal (positions apart),
+#                                 the printed forms printed again equal the printed text; a file the helper
+#                                 rejects is classed against test/ocaml/roundtrip-known.edn (--record
+#                                 rewrites it); runs at most N (default 4) helper processes, one Arbace
+#                                 run per step, GOMEMLIMIT 1500MiB
+#   bin/repr-ocaml roundtrip --spec   the same over the spec's worked examples (doc/ocaml/SPEC.md)
+#   bin/repr-ocaml check          the round trip over the default corpora and the spec's examples
+#   bin/repr-ocaml read --full [-o DIR] FILE...   mode :full (O3): the forms with the file's text in the metadata's
+#                                 :layout (the helper's token and comment dump, OC22 (a)); `print --full FORMS.ae...` prints
+#                                 the original back, byte for byte
+#   bin/repr-ocaml roundtrip --text [CORPUS...]   O3: after the O2 check, the :full forms written and read back, the
+#                                 text printed from them equal to the original (cmp, and Arbace's compare); files the
+#                                 layout dump rejects are classed in test/ocaml/full-known.edn
+#   bin/repr-ocaml roundtrip --cmi [CORPUS...]    O3: and the .cmi level: each file compiled by ocamlc -c from the original's
+#                                 directory and from the print's, the .cmi bytes equal (a file the original does not compile
+#                                 alone is counted: its first error is in .tmp/repr-ocaml/rt/NAME/cmi/skipped.txt)
+#   bin/repr-ocaml roundtrip --cmi-lines [CORPUS...]  and the :lines print's .cmi with -no-keep-locs equal to the original's
+#                                 with -no-keep-locs
+#   bin/repr-ocaml types|lambda|dumps [--jobs N] [--loc] [--simplify] [CORPUS...]
+#                                 O4: the typed (Typedtree annotations + signature) and Lambda (the bytecode translation,
+#                                 --simplify: after Simplif) dumps of every file ocamlc -c compiles alone (passes, as the
+#                                 .cmi level), run twice; each dump read by Arbace's reader and checked against SPEC §11.2's
+#                                 shapes, the two runs byte for byte equal; sizes, node counts and seconds printed
+#                                 (default corpora: samples stdlib compiler-sources compiler-backend whiml testsuite;
+#                                 outputs under .tmp/repr-ocaml/ty/CORPUS/{types,lambda}.1)
+# The checks of O1 run on small inputs, in seconds (corpus fetch: one 4.7 MB download).
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+. "$root/bin/lib/tmpdir.bash"
+cd "$root"
+
+OCD_DIR="$root/.tmp/ocdump"
+OCD="$OCD_DIR/ocdump"
+SRC_DIR="$root/.tmp/repr-ocaml/src"
+TOP="$root/.tmp/repr-ocaml/ocaml-5.5.0"
+CORPORA="$root/test/ocaml/corpora.edn"
+
+# stage 0 reads the data: ARBACE_HOST_EXE, else the checkout's stage 0, else the main checkout's
+arbace_exe() {
+  if [ -n "${ARBACE_HOST_EXE:-}" ]; then echo "$ARBACE_HOST_EXE"; return; fi
+  local arch main
+  case $(uname -m) in x86_64) arch=amd64 ;; aarch64) arch=arm64 ;; *) arch=$(uname -m) ;; esac
+  if [ -x "$root/target/seed/$arch/arbace" ]; then echo "$root/target/seed/$arch/arbace"; return; fi
+  main=$(cd "$(git rev-parse --git-common-dir)/.." && pwd)
+  if [ -x "$main/target/seed/$arch/arbace" ]; then echo "$main/target/seed/$arch/arbace"; return; fi
+  echo "repr-ocaml: no stage 0 (bin/seed --build, or ARBACE_HOST_EXE)" >&2; return 1
+}
+
+# edn KEYPATH...: a value of test/ocaml/corpora.edn
+edn() {
+  local exe; exe=$(arbace_exe)
+  "$exe" -e "(print (let [v (get-in (read-string (slurp \"$CORPORA\")) [$*])] (if (string? v) v (pr-str v))))"
+}
+
+# floor KIND CORPUS N: a level that skips what it cannot do (a file ocamlc does not compile alone, an extraction) must not skip more:
+# N is not below the count test/ocaml/floors.tsv records for KIND and CORPUS (review 008's finding 8); with RECORD set the count is
+# written (--record), a missing record is a failure
+# A corpus with no row is a failure only for the corpora the default invocations name (the rows that were recorded and may not be
+# deleted); another corpus (an opam package, the testsuite's .cmi level) is not checked and says so (re-review 030's finding 2).
+# RECORD counts only as 1 (a RECORD=0 in the environment is not recording).
+FLOORS="${REPR_OCAML_FLOORS:-$root/test/ocaml/floors.tsv}"
+# the corpora of the default invocations: `dumps` and `roundtrip` without a corpus named; the floor's list of corpora that must have a row is
+# these (re-review 042's finding 3: a hand copy would let a corpus added to a default list pass unchecked)
+DEFAULT_DUMPS_CORPORA=(samples stdlib compiler-sources compiler-backend whiml testsuite)
+DEFAULT_RT_CORPORA=(stdlib compiler-sources compiler-backend samples)
+floor() {
+  local kind=$1 c=$2 n=$3 want
+  # a corpus compiles at least one file, and --record does not record a count of 0 (re-review 049)
+  if [ "$n" -le 0 ]; then echo "  FLOOR $kind $c: $n, nothing compiles"; return 1; fi
+  if [ "${RECORD:-}" = 1 ]; then
+    { grep -v -P "^$kind\t$c\t" "$FLOORS" 2>/dev/null || true; printf '%s\t%s\t%s\n' "$kind" "$c" "$n"; } | LC_ALL=C sort > "$FLOORS.new"
+    mv "$FLOORS.new" "$FLOORS"; echo "  floor $kind $c: $n recorded"; return 0
+  fi
+  want=$(awk -F'\t' -v k="$kind" -v c="$c" '$1 == k && $2 == c { print $3 }' "$FLOORS" 2>/dev/null)
+  if [ -z "$want" ]; then
+    local must="" d
+    case "$kind" in
+      cmi-*) for d in "${DEFAULT_RT_CORPORA[@]}"; do [ "$c" = "$d" ] && must=1; done ;;
+      dumps-compilable) for d in "${DEFAULT_DUMPS_CORPORA[@]}"; do [ "$c" = "$d" ] && must=1; done ;;
+      spec-entries) must=1 ;;
+    esac
+    if [ -z "$must" ]; then echo "  floor $kind $c: $n, no count recorded (not checked; --record)"; return 0; fi
+    echo "  FLOOR $kind $c: no count recorded in test/ocaml/floors.tsv (--record)"; return 1
+  fi
+  if [ "$n" -lt "$want" ]; then echo "  FLOOR $kind $c: $n, below the recorded $want"; return 1; fi
+  return 0
+}
+
+pin_version() { cat "$root/tools/ocdump/OCAML_VERSION"; }
+
+ocdump_key() {
+  { cat "$root/tools/ocdump/ocdump.ml" "$root/tools/ocdump/OCAML_VERSION"
+    ocamlopt -version
+    sha256sum "$(ocamlopt -where)/compiler-libs/ocamlcommon.cmxa" | cut -d' ' -f1; } | sha256sum | cut -d' ' -f1
+}
+
+cmd_ocdump_build() {
+  local want have key
+  want=$(pin_version); have=$(ocamlopt -version)
+  if [ "$want" != "$have" ]; then
+    echo "repr-ocaml: ocamlopt is $have, tools/ocdump/OCAML_VERSION pins $want" >&2; return 1
+  fi
+  if [ ! -f "$(ocamlopt -where)/compiler-libs/ocamlcommon.cmxa" ]; then
+    echo "repr-ocaml: compiler-libs is not installed (apk add ocaml5-compiler-libs, doc/ALPINE.md)" >&2; return 1
+  fi
+  key=$(ocdump_key)
+  if [ -x "$OCD" ] && [ "$(cat "$OCD_DIR/key" 2>/dev/null)" = "$key" ]; then
+    echo "ocdump: up to date ($OCD)"; return 0
+  fi
+  mkdir -p "$OCD_DIR/build"
+  cp "$root/tools/ocdump/ocdump.ml" "$OCD_DIR/build/ocdump.ml"
+  (cd "$OCD_DIR/build" && ocamlopt -I +compiler-libs -w -a ocamlcommon.cmxa ocdump.ml -o "$OCD")
+  echo "$key" > "$OCD_DIR/key"
+  echo "ocdump: built $OCD (OCaml $have)"
+}
+
+need_ocdump() { cmd_ocdump_build >/dev/null; }
+
+cmd_dump() { need_ocdump; exec "$OCD" "$@"; }
+
+tarball() { echo "$root/$(edn :pins :ocaml-5.5.0 :fetched-into)"; }
+
+cmd_corpus_fetch() {
+  local tb url sha got
+  tb=$(tarball); url=$(edn :pins :ocaml-5.5.0 :url); sha=$(edn :pins :ocaml-5.5.0 :sha256)
+  mkdir -p "$(dirname "$tb")"
+  if [ ! -f "$tb" ]; then curl -fsSL -m 600 -o "$tb" "$url"; fi
+  got=$(sha256sum "$tb" | cut -d' ' -f1)
+  if [ "$got" != "$sha" ]; then echo "repr-ocaml: $tb is $got, pinned $sha" >&2; return 1; fi
+  if [ ! -f "$TOP/VERSION" ]; then
+    mkdir -p "$TOP"; tar -xJf "$tb" -C "$TOP" --strip-components=1
+  fi
+  echo "ocaml-5.5.0: $tb (sha256 ok), extracted into $TOP"
+  cmd_opam_fetch
+}
+
+# the opam set (O7, OC101): every pin with a :package, fetched once, checked by SHA-256 and SHA-512, extracted under
+# .tmp/repr-ocaml/opam/NAME (the tarball's top directory stripped)
+cmd_opam_fetch() {
+  local exe n url sha sha5 into top b got pins="$root/.tmp/repr-ocaml/opam-pins.txt"
+  exe=$(arbace_exe)
+  # the pins listed first, so a failure of the tool stops the fetch (a process substitution would end the loop silently, review 008's finding 4)
+  mkdir -p "$(dirname "$pins")"
+  "$exe" -e "(doseq [[k v] (:pins (read-string (slurp \"$CORPORA\"))) :when (:package v)] (println (:package v) (:url v) (:sha256 v) (:sha512 v) (:fetched-into v) (:top v)))" > "$pins" || { echo "repr-ocaml: the opam pins cannot be read" >&2; return 1; }
+  [ -s "$pins" ] || { echo "repr-ocaml: no opam pin in $CORPORA" >&2; return 1; }
+  while read -r n url sha sha5 into top; do
+    b="$root/$into"; mkdir -p "$(dirname "$b")"
+    if [ ! -f "$b" ]; then curl -fsSL -m 600 -o "$b" "$url"; fi
+    got=$(sha256sum "$b" | cut -d' ' -f1)
+    if [ "$got" != "$sha" ]; then echo "repr-ocaml: $b is $got, pinned $sha" >&2; return 1; fi
+    got=$(sha512sum "$b" | cut -d' ' -f1)
+    if [ "$got" != "$sha5" ]; then echo "repr-ocaml: $b has SHA-512 $got, pinned $sha5" >&2; return 1; fi
+    if [ ! -f "$root/.tmp/repr-ocaml/opam/$n/.extracted" ]; then
+      rm -rf "$root/.tmp/repr-ocaml/opam/$n"; mkdir -p "$root/.tmp/repr-ocaml/opam/$n"
+      tar -xf "$b" -C "$root/.tmp/repr-ocaml/opam/$n" --strip-components=1
+      touch "$root/.tmp/repr-ocaml/opam/$n/.extracted"
+    fi
+  done < "$pins"
+}
+
+# count ROOT PATH... : "files ml mli lines"
+count() {
+  local base=$1; shift
+  local list
+  list=$(cd "$base" && find "$@" -type f \( -name '*.ml' -o -name '*.mli' \) | LC_ALL=C sort)
+  local files ml mli lines
+  files=$(printf '%s\n' "$list" | grep -c . || true)
+  ml=$(printf '%s\n' "$list" | grep -c '\.ml$' || true)
+  mli=$(printf '%s\n' "$list" | grep -c '\.mli$' || true)
+  lines=$(cd "$base" && printf '%s\n' "$list" | xargs cat | wc -l)
+  echo "$files $ml $mli $lines"
+}
+
+corpus_rows() { # id files ml mli lines pin paths
+  local exe; exe=$(arbace_exe)
+  "$exe" -e "(doseq [c (:corpora (read-string (slurp \"$CORPORA\")))] (println (name (:id c)) (:files c) (:ml c) (:mli c) (:lines c) (or (get-in c [:where :pin]) :root) (arbace.string/join \",\" (get-in c [:where :paths]))))"
+}
+
+cmd_corpus_count_or_check() {
+  local mode=$1 bad=0 id f ml mli l pin paths got base
+  cmd_corpus_fetch >/dev/null
+  while read -r id f ml mli l pin paths; do
+    case $pin in
+      :ocaml-5.5.0) base=$TOP ;;
+      :go-whim) base=$(edn :pins :go-whim :root) ;;
+      :root) base=$root/test/ocaml/samples; paths=. ;;
+      :opam-*) base=$root/.tmp/repr-ocaml/opam ;;
+      *) echo "unknown pin $pin" >&2; return 1 ;;
+    esac
+    [ "$pin" = ":go-whim" ] && paths=whiml
+    IFS=, read -ra pa <<< "$paths"
+    got=$(count "$base" "${pa[@]}")
+    printf '%-17s files %5s ml %5s mli %4s lines %7s' "$id" $got | awk '{printf "%s %s %s %s %s %s %s %s %s %s %s\n",$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11}'
+    if [ "$mode" = check ] && [ "$got" != "$f $ml $mli $l" ]; then
+      echo "  MISMATCH: recorded $f $ml $mli $l" >&2; bad=1
+    fi
+  done < <(corpus_rows)
+  if [ "$mode" = check ]; then
+    local sha got_tree gw
+    gw=$(edn :pins :go-whim :root)
+    [ "$(git -C "$gw" rev-parse HEAD)" = "$(edn :pins :go-whim :commit)" ] || { echo "  go-whim's commit moved" >&2; bad=1; }
+    [ "$(git -C "$gw" rev-parse HEAD:whiml)" = "$(edn :pins :go-whim :tree)" ] || { echo "  go-whim's whiml tree moved" >&2; bad=1; }
+    [ -z "$(git -C "$gw" status --porcelain whiml)" ] || { echo "  go-whim's whiml has local changes" >&2; bad=1; }
+    [ "$(ocamlopt -version)" = "$(edn :pins :host :ocamlopt)" ] || { echo "  ocamlopt is not the pinned one" >&2; bad=1; }
+    sha=$(sha256sum "$(ocamlopt -where)/compiler-libs/ocamlcommon.cmxa" | cut -d' ' -f1)
+    [ "$sha" = "$(edn :pins :host :ocamlcommon.cmxa-sha256)" ] || { echo "  compiler-libs' ocamlcommon.cmxa is not the pinned one" >&2; bad=1; }
+    [ "$(cat "$root/tools/ocdump/OCAML_VERSION")" = "$(edn :pins :host :ocamlopt)" ] || { echo "  OCAML_VERSION differs from the pin" >&2; bad=1; }
+    if [ $bad = 0 ]; then echo "corpus check: counts and pins hold"; else return 1; fi
+  fi
+}
+
+cmd_samples() {
+  need_ocdump
+  local exe; exe=$(arbace_exe)
+  local out="$root/.tmp/repr-ocaml/samples"; rm -rf "$out"; mkdir -p "$out"
+  local f b n=0 bad=0 typed
+  typed=$("$exe" -e "(print (arbace.string/join \" \" (:typed (first (filter #(= :samples (:id %)) (:corpora (read-string (slurp \"$CORPORA\"))))))))")
+  for f in "$root"/test/ocaml/samples/*.ml "$root"/test/ocaml/samples/*.mli; do
+    b=$(basename "$f"); n=$((n + 1))
+    local flag=""; case $b in *.mli) flag=--intf ;; esac
+    "$OCD" $flag --loc --file "$b" "$f" > "$out/$b.loc.ae"
+    "$OCD" $flag --file "$b" "$f" > "$out/$b.ae"
+    if grep -q '^(ocaml/error' "$out/$b.ae"; then echo "FAIL $b: $(head -c 200 "$out/$b.ae")"; bad=$((bad + 1)); fi
+    for m in $typed; do
+      if [ "$m" = "$b" ]; then
+        for mode in types lambda; do
+          "$OCD" --mode $mode --file "$b" "$f" > "$out/$b.$mode.ae"
+          if grep -q '^(ocaml/error' "$out/$b.$mode.ae"; then echo "FAIL $b ($mode): $(head -c 300 "$out/$b.$mode.ae")"; bad=$((bad + 1)); fi
+        done
+      fi
+    done
+  done
+  # one Arbace run reads every output
+  "$exe" -e "(let [fs (filter #(.endsWith (.getName %) \".ae\") (.listFiles (java.io.File. \"$out\")))] (doseq [f fs] (read-string (str \"[\" (slurp f) \"]\"))) (println (count fs) \"outputs read by Arbace's reader\"))" || bad=$((bad + 1))
+  if [ $bad = 0 ]; then echo "samples: $n files read, no error"; else echo "samples: $bad failures"; return 1; fi
+}
+
+cmd_spec_check() {
+  [ "${1:-}" = --record ] && RECORD=1
+  need_ocdump
+  local exe d spec="$root/doc/ocaml/SPEC.md" bad=0
+  exe=$(arbace_exe)
+  d="$root/.tmp/repr-ocaml/spec"; rm -rf "$d"; mkdir -p "$d"
+  python3 -I "$root/tools/ocdump/spec_extract.py" "$spec" "$d"
+  local f id kind flag
+  for f in "$d"/*.kind; do
+    [ -e "$f" ] || continue
+    id=$(basename "$f" .kind); kind=$(cat "$f"); flag=""
+    case $kind in intf|sigitem) flag=--intf; src="$d/$id.mli" ;; *) src="$d/$id.ml" ;; esac
+    "$OCD" $flag --file "$id.ml" "$src" > "$d/$id.dump"
+  done
+  "$exe" "$root/test/ocaml/spec_check.ae" "$d" || bad=1
+  floor spec-entries all "$(ls "$d"/*.kind 2>/dev/null | wc -l)" || bad=1
+  # coverage: every constructor of parsetree.mli (and asttypes.mli) is in the spec
+  cmd_corpus_fetch >/dev/null
+  local missing=0 c
+  for c in $(cat "$TOP/parsing/parsetree.mli" "$TOP/parsing/asttypes.mli" | grep -o '\b\(P[a-z]*_[a-z_]*\|Pcstr_[a-z]*\|Cfk_[a-z]*\|Pvc_[a-z]*\|Rtag\|Rinherit\|Otag\|Oinherit\|Unit\|Named\|Nolabel\|Labelled\|Optional\|Const_[a-z0-9]*\|Immutable\|Mutable\|Private\|Public\|Virtual\|Concrete\|Override\|Fresh\|Closed\|Open\|Upto\|Downto\|Nonrecursive\|Recursive\|Covariant\|Contravariant\|NoVariance\|Bivariant\|Injective\|NoInjectivity\)\b' | sort -u); do
+    if ! grep -q "\b$c\b" "$spec"; then echo "MISSING from the spec: $c"; missing=$((missing + 1)); fi
+  done
+  if [ $missing = 0 ]; then echo "spec-check: every constructor of parsetree.mli and asttypes.mli is in the spec's checklist"; else bad=1; fi
+  return $bad
+}
+
+# dump_one REL: the helper on one file of $BASE into $OUT/REL$SUF (xargs runs it in a bash -c; exported)
+dump_one() {
+  local rel=$1 flag=""
+  case $rel in *.mli) flag=--intf ;; esac
+  mkdir -p "$OUT/$(dirname "$rel")"
+  "$OCD" $flag --file "$rel" "$BASE/$rel" > "$OUT/$rel${SUF:-.ae}"
+}
+export -f dump_one
+
+# rt_arbace VERB ARGS...: the tool namespace on stage 0, evaluated from the checkout, light limits
+rt_arbace() {
+  local exe; exe=$(arbace_exe)
+  ARBACE_PATH="$root" GOMEMLIMIT=${REPR_OCAML_GOMEMLIMIT:-1500MiB} GOMAXPROCS=${REPR_OCAML_THREADS:-4} \
+    "$exe" -m arbace.repr.ocaml "$@"
+}
+
+cmd_read() {
+  need_ocdump
+  local out="$root/.tmp/repr-ocaml/forms" tmp="$root/.tmp/repr-ocaml/read-dumps" f b flag
+  if [ "${1:-}" = "-o" ]; then out=$2; shift 2; fi
+  rm -rf "$tmp"; mkdir -p "$tmp"
+  for f in "$@"; do
+    b=$(basename "$f"); flag=""; case $b in *.mli) flag=--intf ;; esac
+    "$OCD" $flag --file "$b" "$f" > "$tmp/$b.ae"
+  done
+  rt_arbace read --root "$tmp" -o "$out"
+}
+
+cmd_print() { rt_arbace print "$@"; }
+
+# read --full: forms in mode :full (O3): the parse dump and the layout dump (ocdump --mode tokens) converted together
+cmd_read_full() {
+  need_ocdump
+  local out="$root/.tmp/repr-ocaml/forms-full" tmp="$root/.tmp/repr-ocaml/read-full" f b flag
+  if [ "${1:-}" = "-o" ]; then out=$2; shift 2; fi
+  rm -rf "$tmp"; mkdir -p "$tmp/src" "$tmp/parse" "$tmp/layout"
+  for f in "$@"; do
+    b=$(basename "$f"); flag=""; case $b in *.mli) flag=--intf ;; esac
+    cp "$f" "$tmp/src/$b"
+    "$OCD" $flag --file "$b" "$f" > "$tmp/parse/$b.ae"
+    "$OCD" --mode tokens --file "$b" "$f" > "$tmp/layout/$b.ae"
+  done
+  rt_arbace full --src "$tmp/src" --parse "$tmp/parse" --layout "$tmp/layout" --out "$tmp/printed" --forms "$out" \
+    --rt-known "$root/test/ocaml/roundtrip-known.edn"
+}
+
+# corpus_list ID: the corpus's files, one path per line relative to its base; sets CORPUS_BASE
+corpus_list() {
+  local id=$1 cid f ml mli l pin paths base
+  while read -r cid f ml mli l pin paths; do
+    [ "$cid" = "$id" ] || continue
+    case $pin in
+      :ocaml-5.5.0) base=$TOP ;;
+      :go-whim) base=$(edn :pins :go-whim :root); paths=whiml ;;
+      :root) base=$root/test/ocaml/samples; paths=. ;;
+      :opam-*) base=$root/.tmp/repr-ocaml/opam ;;
+    esac
+    CORPUS_BASE=$base
+    IFS=, read -ra pa <<< "$paths"
+    (cd "$base" && find "${pa[@]}" -type f \( -name '*.ml' -o -name '*.mli' \) | sed 's|^\./||' | LC_ALL=C sort)
+    return 0
+  done < <(corpus_rows)
+  echo "repr-ocaml: no corpus $id" >&2; return 1
+}
+
+# rt_one NAME BASE LISTFILE: the round trip of the files of LISTFILE under BASE
+rt_one() {
+  local name=$1 base=$2 list=$3 jobs=${REPR_OCAML_JOBS:-4} w="$root/.tmp/repr-ocaml/rt/$1"
+  rm -rf "$w"; mkdir -p "$w"
+  export OCD BASE="$base"
+  local t0=$SECONDS
+  OUT="$w/orig" SUF=.ae xargs -a "$list" -P "$jobs" -n 1 bash -c 'dump_one "$0"'
+  local t1=$SECONDS
+  rt_arbace print --root "$w/orig" -o "$w/printed" > "$w/print.log" || { tail -20 "$w/print.log"; }
+  local t2=$SECONDS
+  # the printed file's dump: its name is the original's
+  BASE="$w/printed" OUT="$w/cand" SUF=.ae xargs -a "$list" -P "$jobs" -n 1 bash -c 'dump_one "$0"' 2>/dev/null || true
+  local t3=$SECONDS
+  local extra=() rc=0; [ "${RECORD:-}" = 1 ] && extra+=(--record)
+  rt_arbace compare --orig "$w/orig" --cand "$w/cand" --printed "$w/printed" --known "$root/test/ocaml/roundtrip-known.edn" \
+    --report "$w/report.edn" "${extra[@]}" || rc=$?
+  echo "  $name: dump $((t1 - t0)) s, print $((t2 - t1)) s, redump $((t3 - t2)) s"
+  if [ -n "${TEXT:-}" ]; then rt_text "$name" "$base" "$list" || rc=1; fi
+  if [ -n "${CMI:-}" ]; then rt_cmi "$name" "$base" "$list" || rc=1; fi
+  return $rc
+}
+
+# layout_one REL: the helper's token and comment dump of one file (mode :full's layout)
+layout_one() {
+  local rel=$1
+  mkdir -p "$OUT/$(dirname "$rel")"
+  "$OCD" --mode tokens --file "$rel" "$BASE/$rel" > "$OUT/$rel.ae"
+}
+export -f layout_one
+
+# rt_text NAME BASE LISTFILE: mode :full (O3), after rt_one: the layout dumps, the forms in mode :full written
+# and read back, the text printed from them equal to the original byte for byte (cmp, beside Arbace's own compare)
+rt_text() {
+  local name=$1 base=$2 list=$3 jobs=${REPR_OCAML_JOBS:-4} w="$root/.tmp/repr-ocaml/rt/$1" rc=0 t0=$SECONDS
+  export OCD
+  BASE="$base" OUT="$w/layout" xargs -a "$list" -P "$jobs" -n 1 bash -c 'layout_one "$0"'
+  local t1=$SECONDS
+  rm -rf "$w/full" "$w/full-forms"
+  local extra=(); [ "${RECORD:-}" = 1 ] && extra+=(--record)
+  rt_arbace full --src "$base" --parse "$w/orig" --layout "$w/layout" --out "$w/full" --forms "$w/full-forms" \
+    --known "$root/test/ocaml/full-known.edn" --rt-known "$root/test/ocaml/roundtrip-known.edn" "${extra[@]}" || rc=1
+  local n=0 bad=0 rel
+  while read -r rel; do
+    [ -f "$w/full/$rel" ] || continue
+    n=$((n + 1))
+    cmp -s "$base/$rel" "$w/full/$rel" || { echo "  CMP differs: $rel"; bad=$((bad + 1)); }
+  done < "$list"
+  echo "  $name text: layout $((t1 - t0)) s, full $((SECONDS - t1)) s; cmp: $n printed files, $bad differ"
+  [ $bad = 0 ] || rc=1
+  return $rc
+}
+
+# cmi_compile BASE REL OUT [ALL]: ocamlc -c on the file named REL from BASE, the output under OUT (REL's directory),
+# found again by -I (ALL: every directory of OUT, for the compiler's and the stdlib's sources, whose files need one
+# another); the exit status says whether it compiled
+cmi_compile() {
+  local base=$1 rel=$2 out=$3 all=${4:-} flags=(-w -a ${CMI_FLAGS:-}) d
+  mkdir -p "$out/$(dirname "$rel")"
+  if [ -n "$all" ]; then
+    while read -r d; do flags+=(-I "$d"); done < <(find "$out" -type d)
+  else
+    flags+=(-I "$out/$(dirname "$rel")")
+  fi
+  case $rel in
+    *.mli) (cd "$base" && ocamlc -c "${flags[@]}" -o "$out/${rel%.mli}.cmi" "$rel") ;;
+    *) (cd "$base" && ocamlc -c "${flags[@]}" -o "$out/${rel%.ml}.cmo" "$rel") ;;
+  esac
+}
+
+# rt_cmi NAME BASE LISTFILE: the .cmi level, after rt_text: each file compiled by ocamlc from the original's directory
+# and from the print's (mode :full), same relative name, in passes (a file whose dependencies are not compiled yet waits
+# for the next pass; the corpora of sources, not the testsuite, see each other's outputs), the .cmi bytes equal; a file the original does not compile alone is counted, with its first error line in cmi/skipped.txt
+rt_cmi() {
+  local name=$1 base=$2 list=$3 w="$root/.tmp/repr-ocaml/rt/$1" n=0 same=0 diff=0 f b pass progress all=""
+  case $name in testsuite|samples|whiml) ;; *) all=1 ;; esac
+  rm -rf "$w/cmi"; mkdir -p "$w/cmi/orig" "$w/cmi/print"; : > "$w/cmi/done"
+  { grep '\.mli$' "$list"; grep -v '\.mli$' "$list"; } > "$w/cmi/pending"
+  for pass in 1 2 3 4 5 6 7 8; do
+    progress=0; : > "$w/cmi/next"
+    while read -r f; do
+      [ -f "$w/full/$f" ] || continue
+      case $f in *.mli) b="${f%.mli}.cmi" ;; *) b="${f%.ml}.cmi" ;; esac
+      if cmi_compile "$base" "$f" "$w/cmi/orig" $all > "$w/cmi/orig.log" 2>&1 && [ -f "$w/cmi/orig/$b" ]; then
+        n=$((n + 1)); progress=1; echo "$f" >> "$w/cmi/done"
+        if cmi_compile "$w/full" "$f" "$w/cmi/print" $all > "$w/cmi/print.log" 2>&1 && cmp -s "$w/cmi/orig/$b" "$w/cmi/print/$b"; then
+          same=$((same + 1))
+        else
+          diff=$((diff + 1)); echo "  CMI differs: $f"
+        fi
+      else
+        echo "$f" >> "$w/cmi/next"
+        echo "$f: $(grep -m1 -i '^Error' "$w/cmi/orig.log" || head -c 100 "$w/cmi/orig.log")" > "$w/cmi/err.$(echo "$f" | tr / _)"
+      fi
+    done < "$w/cmi/pending"
+    mv "$w/cmi/next" "$w/cmi/pending"
+    [ $progress = 1 ] || break
+  done
+  cat "$w"/cmi/err.* > "$w/cmi/skipped.txt" 2>/dev/null || : > "$w/cmi/skipped.txt"
+  local skip; skip=$(wc -l < "$w/cmi/pending")
+  echo "  $name cmi: $n compiled alone ($pass passes), $same cmi equal, $diff differ, $skip not compiled alone by the original"
+  local rc=0; [ $diff = 0 ] || rc=1
+  floor cmi-compiled "$name" "$n" || rc=1
+  if [ -n "${CMI_LINES:-}" ]; then rt_cmi_lines "$name" "$base" "$all" || rc=1; fi
+  return $rc
+}
+
+# rt_cmi_lines NAME BASE ALL: the same files (those rt_cmi compiled, in its order) with -no-keep-locs (the .cmi without
+# locations) from the original and from the :lines print (the canonical layout, positions differ): the .cmi bytes equal
+rt_cmi_lines() {
+  local name=$1 base=$2 all=$3 w="$root/.tmp/repr-ocaml/rt/$1" n=0 same=0 f b
+  rm -rf "$w/cmi/orig-nk" "$w/cmi/lines"; mkdir -p "$w/cmi/orig-nk" "$w/cmi/lines"
+  while read -r f; do
+    case $f in *.mli) b="${f%.mli}.cmi" ;; *) b="${f%.ml}.cmi" ;; esac
+    [ -f "$w/printed/$f" ] || continue
+    n=$((n + 1))
+    if CMI_FLAGS=-no-keep-locs cmi_compile "$base" "$f" "$w/cmi/orig-nk" $all > "$w/cmi/orig.log" 2>&1 \
+       && CMI_FLAGS=-no-keep-locs cmi_compile "$w/printed" "$f" "$w/cmi/lines" $all > "$w/cmi/print.log" 2>&1 \
+       && cmp -s "$w/cmi/orig-nk/$b" "$w/cmi/lines/$b"; then
+      same=$((same + 1))
+    else
+      echo "  CMI (:lines, -no-keep-locs) differs: $f"
+    fi
+  done < "$w/cmi/done"
+  echo "  $name cmi of the :lines print (-no-keep-locs): $n files, $same equal"
+  floor cmi-lines "$name" "$n" || return 1
+  [ $n = $same ]
+}
+
+# ---- O4: the typed and Lambda dumps over the corpora ----
+
+# ty_try REL: ocamlc -c on REL (the .cmi level of O3 into $W/cmi, found again by -I), the result in the pass's files
+ty_try() {
+  local rel=$1 out="$W/cmi"
+  if cmi_compile "$BASE" "$rel" "$out" $ALL > "$W/log.$(echo "$rel" | tr / _)" 2>&1; then
+    echo "$rel" >> "$W/pass.ok"
+  else
+    echo "$rel" >> "$W/pass.next"
+  fi
+}
+# ty_dir DIR: the pending files of directory DIR, one at a time in the pending order (the .mli first)
+ty_dir() {
+  awk -v d="$1" '{ n = ($0 ~ /\//) ? $0 : "."; if (n != ".") sub(/\/[^\/]*$/, "", n); if (n == d) print }' "$W/pending" |
+    while read -r f; do ty_try "$f"; done
+}
+# ty_pass (OC122 (b)): a pass is deterministic. A file sees what the files before it in the pass compiled (x.ml may see x.mli's .cmi
+# or write it itself, as `LC_ALL=C sort` orders x.ml before x.mli; another .ml may also write it: set.ml racing set.mli was the 115 or 116 files of the stdlib), so the files that see one
+# another's outputs are compiled one at a time in the order of the list: all of the corpora whose files see each other (ALL: the
+# stdlib, the compiler, the opam packages), else (a file sees only its own directory) one directory at a time, the directories in parallel
+ty_pass() {
+  if [ -n "$ALL" ]; then
+    xargs -a "$W/pending" -P 1 -n 1 bash -c 'ty_try "$0"'
+  else
+    awk '{ n = ($0 ~ /\//) ? $0 : "."; if (n != ".") sub(/\/[^\/]*$/, "", n); if (!(n in seen)) { seen[n] = 1; print n } }' "$W/pending" |
+      xargs -P "${REPR_OCAML_JOBS:-4}" -n 1 bash -c 'ty_dir "$0"'
+  fi
+}
+export -f ty_try cmi_compile ty_dir
+
+# ty_one MODE REL: ocdump --mode MODE on REL from $BASE, with -I as ocamlc had them, into $OUT/REL.MODE.ae
+ty_one() {
+  local mode=$1 rel=$2 flag="" inc=() d
+  case $rel in *.mli) flag=--intf; [ "$mode" = lambda ] && return 0 ;; esac
+  if [ -n "$ALL" ]; then
+    while read -r d; do inc+=(-I "$d"); done < <(find "$W/cmi" -type d)
+  else
+    inc+=(-I "$W/cmi/$(dirname "$rel")")
+  fi
+  mkdir -p "$OUT/$(dirname "$rel")"
+  local pre="$W/cmi/${rel%.ml*}"
+  (cd "$BASE" && "$OCD" --mode "$mode" $flag ${DUMP_FLAGS:-} "${inc[@]}" --prefix "$pre" --file "$rel" "$rel") > "$OUT/$rel.$mode.ae" 2>> "$W/stderr.log"
+}
+export -f ty_one
+
+now() { date +%s.%N; }
+
+# dumps_corpus ID MODES: the compilable files of corpus ID (what ocamlc -c compiles alone, in passes), dumped in each
+# mode (types, lambda) twice, timed, checked by Arbace (arbace.repr.ocaml dumps)
+dumps_corpus() {
+  local id=$1 modes=$2 jobs=${REPR_OCAML_JOBS:-4} list pass t0 t1 t2 m n
+  list="$root/.tmp/repr-ocaml/rt-$id.list"; mkdir -p "$(dirname "$list")"
+  corpus_list "$id" > "$list"
+  export OCD BASE="$CORPUS_BASE" ALL="" W="$root/.tmp/repr-ocaml/ty/$id"
+  case $id in testsuite|samples|whiml) ;; *) ALL=1 ;; esac
+  rm -rf "$W"; mkdir -p "$W/cmi"
+  { grep '\.mli$' "$list" || true; grep -v '\.mli$' "$list" || true; } > "$W/pending"
+  : > "$W/done"
+  t0=$(now)
+  for pass in 1 2 3 4 5 6 7 8 9 10 11 12; do
+    : > "$W/pass.ok"; : > "$W/pass.next"
+    ty_pass
+    cat "$W/pass.ok" >> "$W/done"
+    [ -s "$W/pass.ok" ] || break
+    LC_ALL=C sort "$W/pass.next" > "$W/pending"
+  done
+  LC_ALL=C sort "$W/done" > "$W/compilable"
+  n=$(wc -l < "$W/compilable")
+  t1=$(now)
+  echo "== $id: $(wc -l < "$list") files, $n compile alone ($pass passes, $(awk "BEGIN{printf \"%.0f\", $t1 - $t0}") s)"
+  floor dumps-compilable "$id" "$n" || DUMPS_BAD=1
+  for m in $modes; do
+    local lst="$W/compilable"
+    [ "$m" = lambda ] && { grep -v '\.mli$' "$W/compilable" > "$W/compilable.ml" || true; lst="$W/compilable.ml"; }
+    t0=$(now)
+    OUT="$W/$m.1" xargs -a "$lst" -P "$jobs" -n 1 bash -c 'ty_one '"$m"' "$0"'
+    t1=$(now)
+    OUT="$W/$m.2" xargs -a "$lst" -P "$jobs" -n 1 bash -c 'ty_one '"$m"' "$0"'
+    t2=$(now)
+    rt_arbace dumps --mode "$m" --root "$W/$m.1" --again "$W/$m.2" --known "$root/test/ocaml/dumps-known.edn" \
+      --times "$(awk "BEGIN{printf \"%.2f\", $t1 - $t0}")" || DUMPS_BAD=1
+    echo "   $m: first run $(awk "BEGIN{printf \"%.1f\", $t1 - $t0}") s, second $(awk "BEGIN{printf \"%.1f\", $t2 - $t1}") s ($jobs processes)"
+    [ -n "${KEEP_ALL:-}" ] || rm -rf "$W/$m.2"
+  done
+}
+
+# cmd_dumps MODES [--jobs N] [--loc] [--simplify] [CORPUS...]
+cmd_dumps() {
+  need_ocdump; cmd_corpus_fetch >/dev/null
+  local modes=$1 ids=(); shift
+  DUMPS_BAD=""
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --jobs) shift; REPR_OCAML_JOBS=$1 ;;
+      --record) RECORD=1 ;;
+      --loc) DUMP_FLAGS="${DUMP_FLAGS:-} --loc"; export DUMP_FLAGS ;;
+      --simplify) DUMP_FLAGS="${DUMP_FLAGS:-} --simplify"; export DUMP_FLAGS ;;
+      *) ids+=("$1") ;;
+    esac
+    shift
+  done
+  [ ${#ids[@]} = 0 ] && ids=("${DEFAULT_DUMPS_CORPORA[@]}")
+  local id
+  for id in "${ids[@]}"; do dumps_corpus "$id" "$modes"; done
+  [ -z "$DUMPS_BAD" ]
+}
+
+cmd_roundtrip() {
+  need_ocdump; cmd_corpus_fetch >/dev/null
+  local spec="" ids=() bad=0 id list
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --record) RECORD=1 ;;
+      --jobs) shift; REPR_OCAML_JOBS=$1 ;;
+      --spec) spec=1 ;;
+      --text) TEXT=1 ;;
+      --cmi) TEXT=1; CMI=1 ;;
+      --cmi-lines) TEXT=1; CMI=1; CMI_LINES=1 ;;
+      *) ids+=("$1") ;;
+    esac
+    shift
+  done
+  [ ${#ids[@]} = 0 ] && [ -z "$spec" ] && ids=("${DEFAULT_RT_CORPORA[@]}")
+  for id in "${ids[@]}"; do
+    list="$root/.tmp/repr-ocaml/rt-$id.list"; mkdir -p "$(dirname "$list")"
+    corpus_list "$id" > "$list"
+    echo "== $id ($(wc -l < "$list") files)"
+    rt_one "$id" "$CORPUS_BASE" "$list" || bad=1
+  done
+  if [ -n "$spec" ]; then
+    echo "== spec examples"
+    local d="$root/.tmp/repr-ocaml/spec" n
+    cmd_spec_check >/dev/null 2>&1 || true
+    # each example's source as a file of its own: .ml (or .mli for sigitems and intf)
+    list="$root/.tmp/repr-ocaml/rt-spec.list"; : > "$list"
+    local f id2 kind
+    mkdir -p "$d/files"
+    for f in "$d"/*.kind; do
+      id2=$(basename "$f" .kind); kind=$(cat "$f")
+      case $kind in
+        intf|sigitem) cp "$d/$id2.mli" "$d/files/$id2.mli"; echo "$id2.mli" >> "$list" ;;
+        *) cp "$d/$id2.ml" "$d/files/$id2.ml"; echo "$id2.ml" >> "$list" ;;
+      esac
+    done
+    rt_one spec "$d/files" "$list" || bad=1
+  fi
+  return $bad
+}
+
+# the shipped build embeds nothing of repr/ocaml and nothing its keys (bin/lib/version.bash) do not name (review 008, finding 3)
+cmd_embed_check() {
+  . "$root/bin/lib/version.bash"
+  local list="$root/.tmp/repr-ocaml/embedded-sources.txt"
+  mkdir -p "$(dirname "$list")"; arbace_embedded_sources "$root" > "$list"
+  ARBACE_PATH="$root" GOMEMLIMIT=${REPR_OCAML_GOMEMLIMIT:-1500MiB} GOMAXPROCS=${REPR_OCAML_THREADS:-4} \
+    "$(arbace_exe)" "$root/test/ocaml/embed_check.ae" "$root" "$list"
+}
+
+case "${1:-}" in
+  read) shift; if [ "${1:-}" = "--full" ]; then shift; cmd_read_full "$@"; else cmd_read "$@"; fi ;;
+  print) shift; cmd_print "$@" ;;
+  roundtrip) shift; cmd_roundtrip "$@" ;;
+  types) shift; cmd_dumps "types" "$@" ;;
+  lambda) shift; cmd_dumps "lambda" "$@" ;;
+  dumps) shift; cmd_dumps "types lambda" "$@" ;;
+  check) cmd_roundtrip && cmd_roundtrip --spec ;;
+  ocdump-build) cmd_ocdump_build ;;
+  dump) shift; cmd_dump "$@" ;;
+  corpus)
+    case "${2:-}" in
+      fetch) cmd_corpus_fetch ;;
+      count) cmd_corpus_count_or_check count ;;
+      check) cmd_corpus_count_or_check check ;;
+      *) sed -n '2,40p' "$0"; exit 2 ;;
+    esac ;;
+  samples) cmd_samples ;;
+  spec-check) shift; cmd_spec_check "$@" ;;
+  embed-check) cmd_embed_check ;;
+  *) sed -n '2,40p' "$0"; exit 2 ;;
+esac

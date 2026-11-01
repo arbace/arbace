@@ -1,0 +1,88 @@
+#!/bin/bash
+# ci's dg check (doc/C23-SURVEY.md, "As built: C7 (write-ahead)"): the C23 corpus of gcc 15.2's testsuite
+# (test/c/corpora.edn's :gcc-* groups) by its DejaGnu directives. Per group: the files listed (ppcheck's
+# `lists`), their directives read (arbace.c.dg: dg-do, dg-options, dg-error/warning/note by line and kind),
+# gcc 15.2 run on each file with its dg-options (-S, or -E for dg-do preprocess; its diagnostics validate the
+# directives), each file read and checked by repr/c and arbace.c.check, and the checker's errors judged against
+# the dg-error lines (a line expected and not given, a line given and not expected), every non-pass in a
+# class of test/c/divergences-dg.edn.
+#
+# Usage: bin/ci dg [--corpus C,...] [--record] [--judge] [--essential]
+#   --corpus   test/c/corpora.edn's ids (default the six groups below)
+#   --record   test/c/check-dg-linux-amd64.edn rewritten from the run (the other groups' lines kept)
+#   --judge    the last run judged again, nothing run (gcc's kept outputs read afresh; the directives and the read as that run left them)
+#   --essential  CS146: only the files of test/c/essential-dg.txt (one of each diagnostic family and a few that expect no
+#              error), read and judged, no gcc run (its directives are the file's), every one must pass; seconds to a
+#              minute, in .tmp/ci-dg-essential (not --record)
+#   REPR_C_THREADS (default 3): the read's threads; CI_JOBS (default 4): gcc's jobs; REPR_C_READ_BUDGET (default 300,
+#              CS153: 120 timed out a file under the host's load): a file's read budget in seconds
+# Writes under .tmp/ci-dg/ (CI_DG_WORK): CORPUS/{files.edn,dg.edn,gcc.list,gcc/,gcc.edn,read.edn}; the gcc
+# outputs are filtered to their diagnostic lines (bin/lib/ci/gcc-diag.bash, CS201), at most 1 MB a file.
+# The negative control (GTS81 (a), test/c/controls.edn, :level :dg): a file's read judged against another's directives must
+# not pass, else the judgment fails (--essential too); it is no row of the counts or the record.
+set -uo pipefail
+root=$(cd "$(dirname "$0")/../../.." && pwd)
+. "$root/bin/lib/tmpdir.bash"
+. "$root/bin/lib/tools.bash"
+cd "$root"
+export GOMEMLIMIT=${GOMEMLIMIT:-1800MiB}
+export REPR_C_READ_BUDGET=${REPR_C_READ_BUDGET:-300}
+all=gcc-c23,gcc-cpp-c23,gcc-c23-sub,gcc-gnu23,gcc-embed,gcc-va-opt,gcc-bitint
+corpora=$all record= judge= essential=
+while [ $# -gt 0 ]; do
+  case $1 in
+    --corpus) corpora=$2; shift 2 ;;
+    --record) record=1; shift ;;
+    --judge) judge=1; shift ;;
+    --essential) essential=1; shift ;;
+    *) sed -n '15,19p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+  esac
+done
+work=${CI_DG_WORK:-$root/.tmp/ci-dg}
+if [ -n "$essential" ]; then
+  [ -n "$record" ] && { echo "bin/ci dg: --essential does not record" >&2; exit 2; }
+  work=${CI_DG_WORK:-$root/.tmp/ci-dg-essential}
+  export CI_DG_ONLY="$root/test/c/essential-dg.txt" CI_DG_ESSENTIAL=1
+fi
+jobs=${CI_JOBS:-4}; [ "$jobs" -gt 4 ] && jobs=4
+mkdir -p "$work"
+IFS=, read -r -a ids <<< "$corpora"
+if [ -z "$judge" ]; then
+  gccroot=$(bin/repr-c gcc-tests) || exit 1
+  gowhim=${GOWHIM:-$(cd "${root%%/.tmp/worktrees/*}/.." && pwd)/go-whim}
+  modcache=$(GOFLAGS= "${ARBACE_GOROOT:-/root/tamago-go}/bin/go" env GOMODCACHE)
+  roots="{:gomodcache \"$modcache\" :go-whim \"$gowhim\" :gcc-15.2.0 \"$gccroot\" :checkout \"$root\"}"
+  for id in "${ids[@]}"; do rm -rf "${work:?}/$id"; done
+  arbace_tool -m arbace.repr.c.ppcheck lists "$work" "$roots" "${ids[@]}" 2>&1 | grep -v 'Reflection\|recur arg\|Auto-boxing' | head -c 100000
+  arbace_tool -m arbace.c.dg directives "$work" "${ids[@]}" 2>&1 | grep -v 'Reflection\|recur arg\|Auto-boxing' | head -c 100000
+  if [ -n "$essential" ]; then
+    arbace_tool -m arbace.c.dg read "$work" "${ids[@]}" 2>&1 | grep -v 'Reflection\|recur arg\|Auto-boxing' | head -c 100000
+    arbace_tool -m arbace.c.dg judge "$work" test/c/divergences-dg.edn "${ids[@]}" 2>&1 | grep -v 'Reflection\|recur arg\|Auto-boxing' | head -c 200000
+    exit "${PIPESTATUS[0]}"
+  fi
+  . "$root/bin/lib/ci/gcc-diag.bash"
+  gi=$(gcc -print-file-name=include)
+  gcc1() { # WORK ID BASE NAME ACTION OPTS
+    local w=$1 id=$2 base=$3 nm=$4 act=$5 opts=$6 d f o
+    d=$w/$id/gcc; mkdir -p "$d"; f=$(echo "$nm" | sed 's#/#__#g')
+    o=$d/$f.o
+    # shellcheck disable=SC2086
+    (cd "$base/$(dirname "$nm")" && LC_ALL=C timeout 60 gcc $opts -isystem "$gi" -fdiagnostics-plain-output $([ "$act" = preprocess ] && printf %s -E || printf %s -S) -o "$o" "$(basename "$nm")") 2>&1 | gcc_diag > "$d/$f.txt"
+    echo "${PIPESTATUS[0]}" > "$d/$f.status"
+    rm -f "$o"
+  }
+  export -f gcc1 gcc_diag; export gi
+  for id in "${ids[@]}"; do
+    base=$(cat "$work/$id/base.txt")
+    awk -F'\t' -v w="$work" -v id="$id" -v b="$base" '{print w "\037" id "\037" b "\037" $1 "\037" $2 "\037" $3}' "$work/$id/gcc.list" | tr '\n' '\0' \
+      | xargs -0 -P "$jobs" -I{} bash -c 'IFS=$'"'"'\037'"'"' read -r w id b n a o <<< "$1"; gcc1 "$w" "$id" "$b" "$n" "$a" "$o"' _ {}
+  done
+  arbace_tool -m arbace.c.dg gcc "$work" "${ids[@]}" 2>&1 | grep -v 'Reflection\|recur arg\|Auto-boxing' | head -c 100000
+  arbace_tool -m arbace.c.dg read "$work" "${ids[@]}" 2>&1 | grep -v 'Reflection\|recur arg\|Auto-boxing' | head -c 100000
+fi
+# review 057, finding 5: a judge-only run reads the kept gcc outputs afresh (the checker's rules for gcc's agreement may have changed)
+if [ -n "$judge" ] && [ -z "$essential" ]; then
+  arbace_tool -m arbace.c.dg gcc "$work" "${ids[@]}" 2>&1 | grep -v 'Reflection\|recur arg\|Auto-boxing' | head -c 100000
+  [ "${PIPESTATUS[0]}" -eq 0 ] || { echo "bin/ci dg: reading gcc's kept outputs failed" >&2; exit 1; }
+fi
+arbace_tool -m arbace.c.dg judge "$work" test/c/divergences-dg.edn ${record:+--record test/c/check-dg-linux-amd64.edn} "${ids[@]}" 2>&1 | grep -v 'Reflection\|recur arg\|Auto-boxing' | head -c 200000

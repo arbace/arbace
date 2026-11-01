@@ -1,0 +1,795 @@
+(ns c.judge-test
+  "The unit tests of ci's judges (bin/ci judge-test; doc/C23-SURVEY.md, \"As built: review 006's fixes\"): the dg
+  check's verdict (arbace.c.dg) on made-up reads and on the small files of test/c/judge/, and the run level's
+  result and record comparison (arbace.c.run); since review 027 also the checker's rules it found (dg files of
+  test/c/judge/) and the scripts' refusals and retries (bin/ci check and dg on made-up work directories under .tmp/, and
+  bin/ci check on ci-run's ptr-sub-unsigned.c with a stand-in cirun). Each test names the finding of the review it covers."
+  (:require [arbace.test :refer :all]
+            [arbace.c.dg :as dg]
+            [arbace.c.run :as run]
+            [arbace.repr.c :as rc]
+            [arbace.repr.c.annot :as annot]
+            [arbace.repr.c.parse :as cparse]
+            [arbace.c.check :as chk]
+            [arbace.repr.c.host :as host]
+            [arbace.string :as str]))
+
+(def ^:private judge-dir (str (System/getProperty "user.dir") "/test/c/judge"))
+
+(defn- ok [lines] {:status :ok :lines (into (sorted-map) lines) :other 0 :unlocated 0 :message ""})
+
+(defn- read-one
+  "A file of test/c/judge/ read as the dg check reads it (arbace.c.dg/read-file) for `action`, with `opts` (default -std=gnu23)."
+  ([name action] (read-one name action ["-std=gnu23"]))
+  ([name action opts]
+  (let [h (host/load-host "test/c/host")
+        fc (host/file-config opts "gnu23")]
+    (dg/read-file h judge-dir {:name name :read (str judge-dir "/" name) :fc fc} action))))
+
+;; finding 1: a read that failed, errors not in the main file, a missing row, a preprocessor's panic
+
+(deftest no-read-row
+  (is (= :crash (second (dg/verdict (dg/analyze "/* { dg-do compile } */") nil)))))
+
+(deftest stray-errors-stop
+  (let [d (dg/analyze "/* { dg-do compile } */")]
+    (is (= :stopped (second (dg/verdict d {:status :read-error :lines {} :other 1 :unlocated 0 :message "x.h:1:1: e"}))))
+    (is (= :stopped (second (dg/verdict d {:status :read-error :lines {} :other 0 :unlocated 1 :message "panic: e"}))))
+    (is (= :stopped (second (dg/verdict d {:status :ok :lines {} :other 2 :unlocated 0 :message "x.h:1:1: e"}))))
+    (is (= :stopped (second (dg/verdict d {:status :read-error :lines {} :other 0 :unlocated 0 :message ""}))))))
+
+(deftest stray-errors-line-zero
+  ;; a line-0 directive takes errors wherever they are
+  (let [d (dg/analyze "/* { dg-do compile } */\n/* { dg-error \"e\" \"\" { target *-*-* } 0 } */")]
+    (is (= [:pass] (dg/verdict d {:status :read-error :lines {} :other 1 :unlocated 0 :message "x.h:1:1: e"})))))
+
+(deftest read-error-accounted
+  (let [d (dg/analyze "/* { dg-do compile } */\nint x = ; /* { dg-error \"expected\" } */\n")]
+    (is (= [:pass] (dg/verdict d {:status :read-error :lines {2 1} :other 0 :unlocated 0 :message "2: e"})))))
+
+(deftest read-error-stops-early
+  (let [d (dg/analyze "/* { dg-do compile } */\nint x = ; /* { dg-error \"expected\" } */\nint y = ; /* { dg-error \"expected\" } */\n")]
+    (is (= :stopped (second (dg/verdict d {:status :read-error :lines {2 1} :other 0 :unlocated 0 :message "2: e"}))))))
+
+(deftest included-header-error
+  (let [r (read-one "inc-error.c" :compile)
+        d (dg/analyze (slurp (str judge-dir "/inc-error.c")))]
+    (is (pos? (long (:other r))))
+    (is (= :stopped (second (dg/verdict d r))))))
+
+(deftest preprocessor-panic
+  (let [r (read-one "pp-panic.c" :preprocess)
+        d (dg/analyze (slurp (str judge-dir "/pp-panic.c")))]
+    (is (= :crash (:status r)))
+    (is (str/includes? (:message r) "panic"))
+    (is (= :crash (second (dg/verdict d r))))))
+
+;; finding 4: the runner's own failure (status 70 and its refusal line) is never the program's status
+
+(def ^:private empty-sha "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+
+(deftest runner-internal-not-a-pass
+  (let [ref {:id "c/x.c" :status 2 :stdout empty-sha}
+        node ["c/x.c" "ok" "" "" ""]]
+    (is (= :pass (second (run/result "c/x.c" ref node ["c/x.c" "2" empty-sha "0" ""]))))
+    (is (= :fail (second (run/result "c/x.c" ref node ["c/x.c" "2" empty-sha "0" "cirun: internal: index out of range [3] with length 3"]))))
+    (is (= :fail (second (run/result "c/x.c" (assoc ref :status 70) node ["c/x.c" "70" empty-sha "0" "ciaot: internal: no entry"]))))))
+
+;; finding 3: a run against its committed record
+
+(deftest record-regressions
+  (let [f (java.io.File/createTempFile "rec" ".edn" (java.io.File. (str (System/getProperty "user.dir") "/.tmp")))
+        _ (spit f (pr-str [["c/a.c" :pass ""] ["c/b.c" :fail "known asm: x (differ status 1 (gcc 0))"] ["c/c.c" :pass ""] ["d/z.c" :pass ""]]))
+        rows [["c/a.c" :fail "differ stdout" :long-double] ["c/b.c" :fail "known asm: x (differ status 139 (gcc 0))" :by-design]]
+        r (run/compare-record rows (.getPath f) ["c"])]
+    (.delete f)
+    (is (= ["c/a.c" "c/b.c"] (mapv first (:regressions r))))
+    (is (= ["c/c.c"] (:absent r)))))
+
+;; finding 6: dg-excess-errors and a line-0 directive no longer wave missed and extra lines through
+
+(deftest excess-keeps-missed
+  (let [d (dg/analyze "/* { dg-do compile } */\n/* { dg-excess-errors \"x\" } */\nint a; /* { dg-error \"e\" } */\nint b; /* { dg-error \"e\" } */\n")]
+    (is (= :missed (second (dg/verdict d (ok {3 1, 9 1})))))
+    (is (= [:pass] (dg/verdict d (ok {3 1, 4 1, 9 1}))))))
+
+(deftest line-zero-counts
+  (let [d (dg/analyze "/* { dg-do compile } */\n/* { dg-error \"e\" \"\" { target *-*-* } 0 } */\n")]
+    (is (= [:pass] (dg/verdict d (ok {5 1}))))
+    (is (= :extra (second (dg/verdict d (ok {5 1, 6 1, 7 1})))))
+    (is (= :missed (second (dg/verdict d (ok {})))))))
+
+;; finding 7: a read error stands for a syntax expectation only; an included unit's checker errors carry its file
+
+(deftest read-error-not-semantic
+  (let [d (dg/analyze "/* { dg-do compile } */\nif (int i = 1); /* { dg-error \"ISO C does not support if declarations\" } */\n")]
+    (is (= :missed (second (dg/verdict d {:status :read-error :lines {2 1} :other 0 :unlocated 0 :message "2:4: unexpected 'int'"})))))
+  (let [d (dg/analyze "/* { dg-do compile } */\nint x = ; /* { dg-error \"expected expression\" } */\n")]
+    (is (= [:pass] (dg/verdict d {:status :read-error :lines {2 1} :other 0 :unlocated 0 :message "2:9: unexpected ';'"})))))
+
+(deftest included-unit-checker-error
+  (let [r (read-one "inc-check.c" :compile)]
+    (is (= :ok (:status r)))
+    (is (empty? (:lines r)))
+    (is (= 1 (:other r)))
+    (is (str/starts-with? (:stray r) "inc-check.h:2: "))))
+
+;; finding 8: the C++ names false for C, whatever the table lists; dg-options' selectors read whole
+
+(deftest cxx-selectors
+  (is (true? (:applies (dg/sel-info "target { c || c++11 }"))))
+  (is (false? (:applies (dg/sel-info "target c++20"))))
+  (is (true? (:applies (dg/sel-info "target { ! c++ }"))))
+  (is (= ["-DX"] (host/dg-options "/* { dg-options \"-DX\" { target { ! c++ } } } */\n/* { dg-options \"-std=c++20\" { target c++ } } */"))))
+
+;; finding 9: an unsupported test is no pass, and a later dg-do that holds wins
+
+(deftest later-dg-do-wins
+  (let [d (dg/analyze "/* { dg-do run { target { ! int128 } } } */\n/* { dg-do compile { target int128 } } */\n")]
+    (is (= :compile (:action d)))
+    (is (not (:unsupported d))))
+  (is (:unsupported (dg/analyze "/* { dg-do compile { target { ! int128 } } } */\n"))))
+
+;; finding 11: an extra line's own message; no checkout's paths in the messages
+
+(deftest extra-line-message
+  (let [d (dg/analyze "/* { dg-do compile } */\nint a; /* { dg-error \"e\" } */\n")]
+    (is (= "extra [9] got: 9: b" (nth (dg/verdict d (assoc (ok {2 1, 9 1}) :texts {2 "2: a" 9 "9: b"} :message "2: a")) 2)))))
+
+(deftest messages-without-root
+  (is (not (str/includes? (:stray (read-one "inc-error.c" :compile)) judge-dir))))
+
+;; CS192 (a): ${srcdir} is the testsuite's root
+
+(deftest srcdir-in-dg-options
+  (let [t "/* { dg-additional-options \"--embed-directory=${srcdir}/c-c++-common/cpp/embed-dir\" } */"]
+    (is (= ["--embed-directory=/ts/c-c++-common/cpp/embed-dir"] (host/dg-options t "/ts")))
+    (is (= ["--embed-directory=./c-c++-common/cpp/embed-dir"] (host/dg-options t)))))
+
+;; CS193 (a): the message count, a report beside the verdict
+
+(deftest message-mismatch-report
+  (let [dg {:action :compile :msgs {3 ["expected ';'"] 5 ["wrong thing"]} :expect {:error [3 5]}}
+        r {:status :ok :lines {3 1 5 1}
+           :all-texts {3 ["3:9: expected ';' before 'x'"] 5 ["5:1: something else" "5:2: another"]}}]
+    (is (= [[5 ["wrong thing"] ["5:1: something else" "5:2: another"]]] (dg/msg-mismatch dg r)))
+    (is (= [:pass] (dg/verdict dg r)))
+    (is (= [] (dg/msg-mismatch dg (assoc-in r [:all-texts 5] ["5:2: a wrong thing here"]))))
+    ;; review 031's finding B: a file whose read failed is compared too (before: skipped)
+    (is (= [[5 ["wrong thing"] ["5:1: something else" "5:2: another"]]] (dg/msg-mismatch dg (assoc r :status :read-error))))))
+
+(deftest tcl-quoted-backslashes
+  (is (= ["_BitInt\\(63\\)"] (dg/tcl-words "\"_BitInt\\\\\\(63\\\\\\)\""))))
+
+;; CS194 (a): C2y's if and switch declarations are read, and the checker's pedwarn before C2y is the expected error
+
+(deftest if-declarations
+  (let [txt (slurp (str judge-dir "/if-decl.c"))
+        d (dg/analyze txt)
+        r (read-one "if-decl.c" :compile ["-std=c23" "-pedantic-errors"])]
+    (is (= :ok (:status r)))
+    (is (= [8 9 11 16] (vec (keys (:lines r)))))
+    (is (= [:pass] (dg/verdict d r)))
+    (is (= [] (dg/msg-mismatch d r))))
+  (let [r (read-one "if-decl.c" :compile ["-std=c23" "-pedantic-errors" "-Wno-c23-c2y-compat"])]
+    (is (= [16] (vec (keys (:lines r)))))))
+
+;; review 027's fixes: the checker's rules the re-review found too strict or too lax (each judged as a dg file)
+
+(deftest constexpr-float-in-float
+  ;; finding 1: float op float folded in float, not double
+  (let [d (dg/analyze (slurp (str judge-dir "/constexpr-float.c")))
+        r (read-one "constexpr-float.c" :compile ["-std=c23" "-pedantic-errors"])]
+    (is (= [11 12] (vec (keys (:lines r)))))
+    (is (= [:pass] (dg/verdict d r)))))
+
+(deftest constexpr-decimal-of-the-objects-type
+  ;; CS215: 1.000000000DF for a _Decimal32 is accepted (the constant is already _Decimal32); another type's stays strict
+  (let [d (dg/analyze (slurp (str judge-dir "/constexpr-decimal.c")))
+        r (read-one "constexpr-decimal.c" :compile ["-std=c23" "-pedantic-errors"])]
+    (is (= [8 10 16 17] (vec (keys (:lines r)))))
+    (is (= [:pass] (dg/verdict d r)))))
+
+(deftest constexpr-float16-and-long-double-fraction
+  ;; review 031's finding A: _Float16 and __bf16 values are rounded to their formats (a float object holds 0.1f16 exactly);
+  ;; 027 #8's missed error: 0.1L is not a double
+  (let [d (dg/analyze (slurp (str judge-dir "/constexpr-float16.c")))
+        r (read-one "constexpr-float16.c" :compile ["-std=c23" "-pedantic-errors"])]
+    (is (= [13 14 15 16 17 20 21] (vec (keys (:lines r)))))
+    (is (= [:pass] (dg/verdict d r)))))
+
+(deftest constexpr-float16-evaluated-in-float
+  ;; review 053's finding 1: _Float16 and __bf16 are evaluated in float, as gcc 15.2 on x86-64 does; their constants are rounded once
+  (let [d (dg/analyze (slurp (str judge-dir "/constexpr-float16-eval.c")))
+        r (read-one "constexpr-float16-eval.c" :compile ["-std=c23" "-pedantic-errors"])]
+    (is (= [5 6 8 9 22 23] (vec (keys (:lines r)))))
+    (is (= [:pass] (dg/verdict d r)))))
+
+(deftest constexpr-long-double-range
+  ;; review 053's finding 4: the exact exponent of a long double constant, infinite doubles included, every binary object kind
+  (let [d (dg/analyze (slurp (str judge-dir "/constexpr-ldouble-range.c")))
+        r (read-one "constexpr-ldouble-range.c" :compile ["-std=c23"])]
+    (is (not (:unsupported d)))
+    (is (= [5 6 7 8 9 11 12] (vec (keys (:lines r)))))
+    (is (= [:pass] (dg/verdict d r)))))
+
+(deftest constexpr-long-double-through-operators
+  ;; CS235 (a): :ld survives unary + and - and a cast to long double
+  (let [d (dg/analyze (slurp (str judge-dir "/constexpr-ldouble-ops.c")))
+        r (read-one "constexpr-ldouble-ops.c" :compile ["-std=c23"])]
+    (is (not (:unsupported d)))
+    (is (= [4 5 6 10] (vec (keys (:lines r)))))
+    (is (= [:pass] (dg/verdict d r)))))
+
+(deftest integer-to-float-rounds-once
+  ;; review 057's finding 4: no double rounding of an integer converted to float
+  (let [d (dg/analyze (slurp (str judge-dir "/constexpr-int-to-float.c")))
+        r (read-one "constexpr-int-to-float.c" :compile ["-std=c23"])]
+    (is (empty? (:lines r)))
+    (is (= [:pass] (dg/verdict d r)))))
+
+(deftest long-double-compared-exactly
+  ;; review 057's finding 4: 0.1L != 0.1
+  (let [d (dg/analyze (slurp (str judge-dir "/constexpr-ldouble-compare.c")))
+        r (read-one "constexpr-ldouble-compare.c" :compile ["-std=c23"])]
+    (is (not (:unsupported d)))
+    (is (empty? (:lines r)))
+    (is (= [:pass] (dg/verdict d r)))))
+
+(deftest float16-with-bf16-is-float16
+  ;; review 057's finding 4: usual arithmetic conversions of _Float16 and __bf16
+  (let [d (dg/analyze (slurp (str judge-dir "/generic-float16-bf16.c")))
+        r (read-one "generic-float16-bf16.c" :compile ["-std=c23"])]
+    (is (empty? (:lines r)))
+    (is (= [:pass] (dg/verdict d r)))))
+
+(deftest bf16-suffix-pedwarn
+  ;; review 057's finding 4: -pedantic-errors refuses the bf16 suffix, not f16
+  (let [d (dg/analyze (slurp (str judge-dir "/bf16-suffix.c")))
+        r (read-one "bf16-suffix.c" :compile ["-std=c23" "-pedantic-errors"])]
+    (is (= [5 7 8 9 15] (vec (keys (:lines r)))))
+    (is (= [:pass] (dg/verdict d r)))))
+
+(deftest equal-rank-float-types
+  ;; review 079's finding 6: _Float32 + float is _Float32, double + _Float32x is double, ...
+  (let [d (dg/analyze (slurp (str judge-dir "/generic-float-ties.c")))
+        r (read-one "generic-float-ties.c" :compile ["-std=c23"])]
+    (is (empty? (:lines r)))
+    (is (= [:pass] (dg/verdict d r)))))
+
+(deftest generic-incomplete-association
+  ;; finding 2: an incomplete or a function association type is a pedwarn before C2y (an error only with -pedantic-errors)
+  (let [d (dg/analyze (slurp (str judge-dir "/generic-incomplete.c")))
+        r (read-one "generic-incomplete.c" :compile ["-std=c23" "-pedantic-errors"])]
+    (is (= [6 7 8] (vec (keys (:lines r)))))
+    (is (= [:pass] (dg/verdict d r)))
+    (is (= [] (dg/msg-mismatch d r))))
+  (is (empty? (:lines (read-one "generic-incomplete.c" :compile ["-std=c23"]))))
+  (is (empty? (:lines (read-one "generic-incomplete.c" :compile ["-std=c2y" "-pedantic-errors"])))))
+
+(deftest bit-field-results
+  ;; finding 7: sizeof, typeof and _Alignof of an assignment or an increment of a bit-field are accepted
+  (let [d (dg/analyze (slurp (str judge-dir "/bitfield-ops.c")))
+        r (read-one "bitfield-ops.c" :compile)]
+    (is (= [15 16 17 18] (vec (keys (:lines r)))))
+    (is (= [:pass] (dg/verdict d r)))))
+
+(deftest constexpr-long-double-and-snan
+  ;; finding 8: a wide integer long double holds exactly is accepted; a negated signaling NaN of another type is refused
+  (let [d (dg/analyze (slurp (str judge-dir "/constexpr-ldouble.c")))
+        r (read-one "constexpr-ldouble.c" :compile ["-std=c23"])]
+    (is (not (:unsupported d)))
+    (is (= [8 9 10] (vec (keys (:lines r)))))
+    (is (= [:pass] (dg/verdict d r)))))
+
+;; review 027, finding 3: --judge --record after a subset's run refuses, in the three judges
+
+(defn- sh-status
+  "The exit status of `cmd` run in the checkout with the environment `env` added (its output dropped)."
+  [env & cmd]
+  (let [pb (ProcessBuilder. ^java.util.List (vec cmd))
+        log (java.io.File/createTempFile "judge-sh" ".log" (java.io.File. (str (System/getProperty "user.dir") "/.tmp")))]
+    (.directory pb (java.io.File. ^String (System/getProperty "user.dir")))
+    (doseq [[k v] env] (.put (.environment pb) k v))
+    (.redirectErrorStream pb true)
+    (.redirectOutput pb log)
+    (let [st (.waitFor (.start pb))] (.delete log) st)))
+
+(declare sh-out-env)
+
+(defn- sh-out
+  "{:out} the standard output of `cmd` run in the checkout."
+  [& cmd]
+  (sh-out-env {} cmd))
+
+(defn- sh-out-env
+  [env cmd]
+  (let [pb (ProcessBuilder. ^java.util.List (vec cmd))]
+    (doseq [[k v] env] (.put (.environment pb) k v))
+    (.directory pb (java.io.File. ^String (System/getProperty "user.dir")))
+    (let [p (.start pb) out (slurp (.getInputStream p))] (.waitFor p) {:out out})))
+
+(deftest judge-record-after-subset
+  (let [root (System/getProperty "user.dir")
+        work (doto (java.io.File. (str root "/.tmp/judge-test-subset")) (.mkdirs))
+        d (doto (java.io.File. work "judge-zz") (.mkdirs))
+        recs ["test/c/check-linux-amd64.edn" "test/c/check-aot-linux-amd64.edn" "test/c/check-dg-linux-amd64.edn"]
+        before (mapv slurp recs)]
+    (try
+      (spit (java.io.File. d "list.tsv") "judge-zz/x.c\t.\tc23\t\tx.c\n")
+      (spit (java.io.File. d "nodes.tsv") "")
+      (spit (java.io.File. d "run.tsv") "")
+      (spit (java.io.File. d "dg.edn") "[[\"x.c\" {:action :compile :expect {}}]]")
+      (spit (java.io.File. d "read.edn") "[[\"x.c\" {:status :ok :lines {} :other 0 :unlocated 0 :message \"\"}]]")
+      (spit (java.io.File. d "subset") "ids.txt\n")
+      (is (= 2 (sh-status {"CI_CHECK_WORK" (.getPath work)} "bin/ci" "check" "--judge" "--record" "--corpus" "judge-zz")))
+      (is (= 2 (sh-status {"CI_AOT_WORK" (.getPath work) "CI_INTERP" (.getPath work)} "bin/ci" "check" "--aot" "--judge" "--record" "--corpus" "judge-zz")))
+      (is (= 2 (sh-status {"CI_DG_WORK" (.getPath work)} "bin/ci" "dg" "--judge" "--record" "--corpus" "judge-zz")))
+      (is (= [true true true] (mapv #(= %1 (slurp %2)) before recs)))
+      (finally
+        (doseq [[f s] (map vector recs before)] (when (not= s (slurp f)) (spit f s)))
+        (doseq [f (reverse (file-seq work))] (.delete ^java.io.File f))))))
+
+;; review 027, finding 4: a recorded pass that becomes unsupported is a regression; --essential fails on it
+
+(deftest pass-to-unsupported
+  (let [root (System/getProperty "user.dir")
+        work (doto (java.io.File. (str root "/.tmp/judge-test-unsupported")) (.mkdirs))
+        d (doto (java.io.File. work "gcc-c23") (.mkdirs))
+        only (java.io.File. work "only.txt")
+        rd "[[\"gcc.dg/c23-tag-6.c\" {:status :ok :lines {} :other 0 :unlocated 0 :message \"\"}]]"
+        judge (fn [dg & essential]
+                (spit (java.io.File. d "dg.edn") (str "[[\"gcc.dg/c23-tag-6.c\" " dg "]]"))
+                (if essential
+                  ;; --essential's judge (its environment) on a list of the one file
+                  (sh-status {"CI_DG_WORK" (.getPath work) "CI_DG_ONLY" (.getPath only) "CI_DG_ESSENTIAL" "1"} "bin/ci" "dg" "--judge" "--corpus" "gcc-c23")
+                  (sh-status {"CI_DG_WORK" (.getPath work)} "bin/ci" "dg" "--judge" "--corpus" "gcc-c23")))]
+    (try
+      (spit (java.io.File. d "read.edn") rd)
+      (spit (java.io.File. d "subset") "a subset: the group's other recorded files are not judged\n")
+      (spit only "gcc-c23/gcc.dg/c23-tag-6.c\n")
+      ;; c23-tag-6 is a recorded pass: as a pass (no expectation, nothing given) the judge passes; unsupported, it fails
+      (is (= 0 (judge "{:action :compile :expect {}}")))
+      (is (= 1 (judge "{:action :compile :expect {} :unsupported true}")))
+      (is (= 0 (judge "{:action :compile :expect {}}" :essential)))
+      (is (= 1 (judge "{:action :compile :expect {} :unsupported true}" :essential)))
+      (finally
+        (doseq [f (reverse (file-seq work))] (.delete ^java.io.File f))))))
+
+;; review 027, finding 5: option lines' selectors on the reference host's targets, an unlisted name unknown (the line kept,
+;; reported)
+
+(deftest option-selectors-on-the-host
+  (is (= ["-DX"] (host/dg-options "/* { dg-additional-options \"-DX\" { target { ! ia32 } } } */")))
+  (is (= [] (host/dg-options "/* { dg-options \"-mtune=i686\" { target { { i?86-*-* x86_64-*-* } && ia32 } } } */")))
+  (is (= [] (host/dg-options "/* { dg-additional-options \"-Wl,-u,_printf_float\" { target newlib_nano_io } } */")))
+  (is (= [] (host/dg-options "/* { dg-options \"-DY\" { target arm*-*-* } } */")))
+  (is (= ["-DZ"] (host/dg-options "/* { dg-options \"-DZ\" { target { x86_64-*-* i?86-*-* } } } */")))
+  (is (= {:opts ["-DW"] :uncertain ["target { ! frobnicate }"]}
+         (host/dg-options-info "/* { dg-additional-options \"-DW\" { target { ! frobnicate } } } */" ".")))
+  (is (= :unknown (host/for-c? "target { ! ia32 && frobnicate }")))
+  (is (false? (host/for-c? "target { ia32 && frobnicate }")))
+  (is (true? (host/for-c? "target { c || frobnicate }")))
+  ;; the dg-do and dg-error selectors keep their rule: an unlisted name holds
+  (is (true? (:applies (dg/sel-info "target frobnicate")))))
+
+;; review 027, finding 6: a recorded pass that timed out (a loaded host) is run or read again alone, once, before it counts
+
+(deftest quiet-retry-of-a-timeout
+  ;; the dg read's retry: only a recorded pass's timeout is read again, and the second read stands
+  (let [calls (atom [])
+        rs [["a.c" {:status :timeout :lines {}}] ["b.c" {:status :timeout :lines {}}] ["c.c" {:status :ok :lines {}}]]
+        out (dg/retry-timeouts rs #{"a.c" "c.c"} (fn [nm] (swap! calls conj nm) {:status :ok :lines {3 1}}))]
+    (is (= ["a.c"] @calls))
+    (is (= [:ok :timeout :ok] (mapv (comp :status second) out)))
+    (is (:retried (second (first out)))))
+  ;; the run level's: ci-run's ptr-sub-unsigned.c (a recorded pass) on a cirun whose first run hangs past the 10 s
+  (let [root (System/getProperty "user.dir")
+        work (doto (java.io.File. (str root "/.tmp/judge-test-retry")) (.mkdirs))
+        ids (java.io.File. work "ids.txt")
+        real (or (System/getenv "CIRUN") (str root "/.tmp/ci/cirun"))]
+    (when-not (.exists (java.io.File. ^String real)) (sh-status {} "bin/ci" "cirun-build"))
+    (try
+      (spit ids "ci-run/ptr-sub-unsigned.c\n")
+      (is (= 0 (sh-status {"CI_CHECK_WORK" (.getPath work) "CIRUN" (str root "/test/c/judge/cirun-slow-once")
+                           "CIRUN_REAL" real
+                           "CIRUN_ONCE" (str (.getPath work) "/once")}
+                          "bin/ci" "check" "--corpus" "ci-run" "--only" (.getPath ids))))
+      (is (.exists (java.io.File. work "once")))
+      (finally
+        (doseq [f (reverse (file-seq work))] (.delete ^java.io.File f))))))
+
+;; CS213: Go's fatal errors in cirun (stack exhaustion, out of memory, a concurrent map write) are internal failures, whatever
+;; the exit status (here the program's own, 3)
+
+(deftest go-fatal-error-is-internal
+  (let [ref {:status 3 :stdout "x"}]
+    (is (= :fail (second (run/result "a.c" ref ["a.c" "ok" "" "" ""] ["a.c" "3" "x" "0" "fatal error: stack overflow"]))))
+    (is (= :pass (second (run/result "a.c" ref ["a.c" "ok" "" "" ""] ["a.c" "3" "x" "0" ""])))))
+  (let [root (System/getProperty "user.dir")
+        work (doto (java.io.File. (str root "/.tmp/judge-test-fatal")) (.mkdirs))
+        ids (java.io.File. work "ids.txt")
+        real (or (System/getenv "CIRUN") (str root "/.tmp/ci/cirun"))]
+    (when-not (.exists (java.io.File. ^String real)) (sh-status {} "bin/ci" "cirun-build"))
+    (try
+      (spit ids "ci-run/ptr-sub-unsigned.c\n")
+      ;; the stand-in exits 3 as gcc's run of ptr-sub-unsigned.c does, after Go's fatal error lines: a REGRESSION now
+      (is (= 1 (sh-status {"CI_CHECK_WORK" (.getPath work) "CIRUN" (str root "/test/c/judge/cirun-fatal")}
+                          "bin/ci" "check" "--corpus" "ci-run" "--only" (.getPath ids))))
+      (finally
+        (doseq [f (reverse (file-seq work))] (.delete ^java.io.File f))))))
+
+;; CS211: the musl forms cache is keyed by the digest of repr/c's files (bin/ci musl key, fresh): a cache read by another
+;; repr/c is not fresh, so bin/ci musl read rereads it
+
+(deftest musl-forms-cache-key
+  (let [root (System/getProperty "user.dir")
+        work (doto (java.io.File. (str root "/.tmp/judge-test-musl-key")) (.mkdirs))
+        env {"CI_MUSL_FORMS" (.getPath work)}
+        key (str/trim (:out (sh-out "bin/ci" "musl" "key")))]
+    (try
+      (is (= 64 (count key)))
+      ;; no key file (a cache from before CS211) and a stale one: not fresh
+      (is (= 1 (sh-status env "bin/ci" "musl" "fresh")))
+      (spit (java.io.File. work "key") "0000\n")
+      (is (= 1 (sh-status env "bin/ci" "musl" "fresh")))
+      (spit (java.io.File. work "key") (str key "\n"))
+      (is (= 0 (sh-status env "bin/ci" "musl" "fresh")))
+      (finally
+        (doseq [f (reverse (file-seq work))] (.delete ^java.io.File f))))))
+
+;; CS212: the judges' residues of review 027. R2: a known row that now passes is an improvement; R4: the main file is the whole
+;; relative path; R7: a parser panic is a crash
+
+(deftest known-row-now-passing-is-no-regression
+  (let [work (doto (java.io.File. (str (System/getProperty "user.dir") "/.tmp/judge-test-improved")) (.mkdirs))
+        recf (java.io.File. work "rec.edn")]
+    (try
+      (spit recf (pr-str [["ci-run/a.c" :fail "known x"] ["ci-run/b.c" :fail "known y"] ["ci-run/c.c" :pass ""]]))
+      (let [c (run/compare-record [["ci-run/a.c" :pass ""] ["ci-run/b.c" :fail "known z"] ["ci-run/c.c" :fail "now fails"]] (.getPath recf) ["ci-run"])]
+        ;; a passes now: improved; b's reason changed: regression; c passed and fails: regression
+        (is (= ["ci-run/a.c"] (:improved c)))
+        (is (= ["ci-run/b.c" "ci-run/c.c"] (mapv first (:regressions c)))))
+      (finally (doseq [f (reverse (file-seq work))] (.delete ^java.io.File f))))))
+
+(deftest aot-interpreted-side-needs-its-run
+  ;; CS214 (R3): without CI_AOT_NODES and CI_INTERP the compiled runs are not compared with scratch of another state
+  (let [root (System/getProperty "user.dir")
+        work (doto (java.io.File. (str root "/.tmp/judge-test-interp")) (.mkdirs))
+        d (doto (java.io.File. work "ci-run") (.mkdirs))
+        id "ci-run/ptr-sub-unsigned.c"
+        empty-sum "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"]
+    (try
+      (spit (java.io.File. d "list.tsv") (str id "\t.\tc23\t\tptr-sub-unsigned.c\n"))
+      (spit (java.io.File. d "nodes.tsv") (str id "\tok\t\t\t\n"))
+      (spit (java.io.File. d "run.tsv") (str id "\t3\t" empty-sum "\t0\t\n"))
+      (let [o (:out (sh-out-env {"CI_AOT_WORK" (.getPath work) "CI_SUBSET" "1"}
+                                ["bin/ci" "check" "--aot" "--judge" "--corpus" "ci-run"]))]
+        (is (str/includes? o "not compared"))
+        (is (not (str/includes? o "with no interpreted run"))))
+      ;; a named directory is read
+      (let [o (:out (sh-out-env {"CI_AOT_WORK" (.getPath work) "CI_SUBSET" "1" "CI_INTERP" (.getPath work)}
+                                ["bin/ci" "check" "--aot" "--judge" "--corpus" "ci-run"]))]
+        (is (str/includes? o "the same")))
+      (finally (doseq [f (reverse (file-seq work))] (.delete ^java.io.File f))))))
+
+(deftest extension-lines-by-unit
+  ;; CS214 (R5): __extension__ silences a pedwarn on its own file's line, not another file's line of the same number. The forms
+  ;; read from C carry no line in a unit (the pedwarn stands on the #include's line), so the lines are given to a unit's forms
+  ;; as a reread unit's are
+  (let [h (host/load-host "test/c/host")
+        opts ["-std=c23" "-pedantic-errors"]
+        fc (host/file-config opts "gnu23")
+        builtins (annot/builtin-forms h fc)
+        errors (fn [main]
+                 (let [rd (rc/read-c (host/config h fc judge-dir) fc main false)
+                       rd (update rd :units (fn [us] (into {} (for [[k u] us]
+                                                                [k (update u :forms (fn [fs] (vec (map-indexed (fn [i g] (vary-meta g assoc :line (inc i))) fs))))]))))]
+                   (:errors (chk/check-unit rd :c23 builtins :pedantic :errors :ext-lines (:ext-lines rd) :base judge-dir :sys-dirs (:search h)))))]
+    ;; the header's own line 3 has __extension__: silenced (before: the main file's lines decided, and it has none)
+    (is (= [] (errors "ext-main-a.c")))
+    ;; the main file's line 3 has it, the header's line 3 does not: reported (before: silenced)
+    (is (= 1 (count (errors "ext-main-b.c"))))
+    ;; review 031's finding F: #pragma GCC system_header in the header makes it a system header
+    (is (= [] (errors "ext-main-d.c")))
+    (is (= 1 (count (errors "ext-main-e.c")))))
+  ;; CS231: -isystem DIR is searched after -I and is a system directory: no pedwarn in a header found through it; -I's is an error
+  (let [h (host/load-host "test/c/host")
+        dir (str judge-dir "/sys")
+        rd (fn [& opts]
+             (dg/read-file h judge-dir {:name "ext-main-f.c" :read (str judge-dir "/ext-main-f.c")
+                                        :fc (host/file-config (vec (concat ["-std=c23" "-pedantic-errors"] opts)) "gnu23")} :compile))]
+    (is (= [:ok 0] ((juxt :status :other) (rd "-isystem" dir))))
+    ;; review 057's finding 3: the joined spelling and unclean directories are system directories too; -isystem=DIR is a sysroot's (ignored)
+    (is (= [:ok 0] ((juxt :status :other) (rd (str "-isystem" dir)))))
+    (is (= [:ok 0] ((juxt :status :other) (rd "-isystem" (str judge-dir "/./sys")))))
+    (is (= [:ok 0] ((juxt :status :other) (rd "-isystem" (str dir "/")))))
+    (is (not= [:ok 0] ((juxt :status :other) (rd (str "-isystem=" dir)))))
+    ;; an angled include searches -I too (gcc), and the header there is not a system header: its pedwarn is an error
+    (is (= [:ok 1] ((juxt :status :other) (rd (str "-I" dir)))))))
+
+(defn- found-headers
+  "The paths (relative to test/c/judge/inc) of the header units the preprocessor finds for the main file `main` of
+  test/c/judge/inc/ with the directories of test/c/judge/inc given as `-iquote d`-style options (each option's directory name
+  is a name below inc/)."
+  [main & opts]
+  (let [inc (str judge-dir "/inc")
+        h (host/load-host "test/c/host")
+        opts (mapv (fn [o] (if (re-matches #"[a-z0-9]+" o) (str inc "/" o) o)) opts)
+        fc (host/file-config (vec (concat ["-std=c23"] opts)) "gnu23")
+        rd (rc/read-c (host/config h fc inc) fc main false)]
+    (vec (sort (map (fn [u] (str/replace (str (:path u)) (str inc "/") "")) (vals (:units rd)))))))
+
+(defn- found-vars
+  "The names of the variables the header units of `found-headers`' read declare, sorted."
+  [main & opts]
+  (let [inc (str judge-dir "/inc")
+        h (host/load-host "test/c/host")
+        opts (mapv (fn [o] (if (re-matches #"[a-z0-9]+" o) (str inc "/" o) o)) opts)
+        fc (host/file-config (vec (concat ["-std=c23"] opts)) "gnu23")
+        rd (rc/read-c (host/config h fc inc) fc main false)]
+    (vec (sort (map str (for [u (vals (:units rd)) f (:forms u) :when (and (seq? f) (= 'c/var (first f)))] (second f)))))))
+
+(deftest include-search-is-gccs
+  ;; review 079's finding 2, each case run with gcc 15.2 (-M): -iquote after the including file's directory and for quoted includes only,
+  ;; -idirafter last, a -I that names a system directory dropped, #include_next continuing in -I
+  (is (= ["q/zzh.h"] (found-headers "main-q.c" "-iquote" "q" "-I" "i" "-isystem" "s" "-idirafter" "a")))
+  (is (= ["i/zzh.h"] (found-headers "main-a.c" "-iquote" "q" "-I" "i" "-isystem" "s" "-idirafter" "a")))
+  (is (= ["a/zzh.h"] (found-headers "main-a.c" "-idirafter" "a")))
+  (is (= ["a/zzh.h"] (found-headers "main-q.c" "-idirafter" "a")))
+  (is (= ["i2/zzh.h"] (found-headers "main-a.c" "-I" "i" "-I" "i2" "-isystem" "i")))
+  (is (= ["i/zzh.h"] (found-headers "main-a.c" "-I" "i" "-isystem" "s" "-I" "s")))
+  (is (= ["a/zzh.h"] (found-headers "main-a.c" "-idirafter" "a" "-I" "a")))
+  (is (= ["i/zzh.h"] (found-headers "main-a.c" "-I" "i" "-I" "i" "-I" "i2")))
+  ;; the unit of n1/nx.h holds n2's variable too: its #include_next found n2/nx.h (gcc: n1/nx.h n2/nx.h)
+  (is (= ["n1" "n2"] (found-vars "main-n.c" "-I" "n1" "-I" "n2")))
+  (is (= ["n1" "n2"] (found-vars "main-nq.c" "-I" "n1" "-I" "n2")))
+  (is (= ["q/zzh.h"] (found-headers "main-q.c" "-iquote" "q" "-I" "i")))
+  ;; review 086's finding 3: an -iquote directory that is a system directory is dropped from the quote chain
+  (is (= ["i/zzh.h"] (found-headers "main-q.c" "-isystem" "s" "-iquote" "s" "-I" "i")))
+  (is (= ["i/zzh.h"] (found-headers "main-q.c" "-iquote" "s" "-isystem" "s" "-I" "i")))
+  (is (= ["s/zzh.h"] (found-headers "main-q.c" "-iquote" "s" "-I" "i"))))
+
+(deftest system-header-by-the-directory-found-through
+  ;; review 079's finding 3: a header is a system header by the search directory that found it (gcc), not by a path prefix
+  (let [h (host/load-host "test/c/host")
+        errs (fn [dir main & opts]
+               (let [base (str judge-dir "/sysx" (when dir (str "/" dir)))
+                     r (dg/read-file h base {:name main :read (str base "/" main)
+                                             :fc (host/file-config (vec (concat ["-std=c23" "-pedantic-errors"] opts)) "gnu23")} :compile)]
+                 [(:status r) (:other r)]))]
+    (is (= [:ok 1] (errs nil "m-sub.c" "-I" "sy" "-isystem" "sy/sub")))
+    (is (= [:ok 1] (errs nil "m-ph.c" "-isystem" "sy" "-I" "sy/sub")))
+    (is (= [:ok 1] (errs nil "m-ph.c" "-I" "sy")))
+    (is (= [:ok 0] (errs nil "m-ph.c" "-isystem" "sy")))
+    (is (= [:ok 0] (errs "dot" "m-ph.c" "-isystem" ".")))
+    (is (= [:ok 1] (errs "dot" "m-q.c" "-isystem" ".")))
+    ;; review 086's finding 1: a header a system header includes with quotes, found beside it, takes the includer's status
+    (is (= [:ok 0] (errs "qs" "m.c" "-isystem" "sy")))
+    ;; the preprocessor's enter records (a nested header is one unit with its includer for the checker, so the records show it)
+    (let [enters (fn [& opts]
+                   (let [fc (host/file-config (vec (concat ["-std=c23"] opts)) "gnu23")
+                         r (cparse/parse (host/config h fc (str judge-dir "/sysx/qs")) "m.c")]
+                     (mapv (juxt :path :system) (filter #(= "enter" (:directive %)) (:layer r)))))]
+      (is (= [["sy/a.h" true] ["sy/b.h" true]] (enters "-isystem" "sy")))
+      (is (= [["sy/a.h" false] ["sy/b.h" false]] (enters "-I" "sy"))))
+    (is (= [:ok 1] (errs "qs" "m.c" "-I" "sy")))))
+
+(deftest gcc-reread-without-status
+  ;; review 079's finding 5: a kept gcc output with no status (an interrupted run) is a difference, not an exception
+  (let [work (str (System/getProperty "user.dir") "/.tmp/judge-gcc-status")
+        d (java.io.File. (str work "/g/gcc"))]
+    (.mkdirs d)
+    (spit (str work "/g/files.edn") "[{:name \"a.c\"} {:name \"b.c\"}]")
+    (spit (str work "/g/base.txt") work)
+    (spit (str work "/g/dg.edn") (str "[[\"a.c\" " (pr-str (dg/analyze "/* { dg-do compile } */\n")) "] [\"b.c\" " (pr-str (dg/analyze "/* { dg-do compile } */\n")) "]]"))
+    (spit (str work "/g/gcc/a.c.txt") "")
+    (spit (str work "/g/gcc/a.c.status") "0\n")
+    (spit (str work "/g/gcc/b.c.txt") "")
+    (dg/gcc-cmd work "g")
+    (let [rows (into {} (read-string (slurp (str work "/g/gcc.edn"))))]
+      (is (= :yes (:agrees (get rows "a.c"))))
+      (is (= :missing (:status (get rows "b.c"))))
+      (is (not= :yes (:agrees (get rows "b.c")))))))
+
+(deftest run-budget-per-program
+  ;; CS216: a program listed in test/c/check-budget.edn (CI_BUDGETS) has more than the default 10 s; a stand-in cirun takes 12 s
+  (let [root (System/getProperty "user.dir")
+        work (doto (java.io.File. (str root "/.tmp/judge-test-budget")) (.mkdirs))
+        ids (java.io.File. work "ids.txt")
+        budgets (java.io.File. work "budget.edn")
+        real (or (System/getenv "CIRUN") (str root "/.tmp/ci/cirun"))
+        env {"CI_CHECK_WORK" (.getPath work) "CIRUN" (str root "/test/c/judge/cirun-slow") "CIRUN_REAL" real}]
+    (when-not (.exists (java.io.File. ^String real)) (sh-status {} "bin/ci" "cirun-build"))
+    (try
+      (spit ids "ci-run/ptr-sub-unsigned.c\n")
+      (spit budgets "{\"ci-run/ptr-sub-unsigned.c\" 30}\n")
+      (is (= "10" (str/trim (:out (sh-out-env {"CI_BUDGETS" (str (.getPath work) "/none.edn")} ["bash" "-c" ". bin/lib/ci/budget.bash; ci_budget ci-run/x.c"])))))
+      (is (= "30" (str/trim (:out (sh-out-env {"CI_BUDGETS" (.getPath budgets)} ["bash" "-c" ". bin/lib/ci/budget.bash; ci_budget ci-run/ptr-sub-unsigned.c"])))))
+      (is (= "30" (str/trim (:out (sh-out-env {} ["bash" "-c" "root=$PWD; . bin/lib/ci/budget.bash; ci_budget compcert/perlin.c"])))))
+      (is (= 1 (sh-status (assoc env "CI_BUDGETS" (str (.getPath work) "/none.edn")) "bin/ci" "check" "--corpus" "ci-run" "--only" (.getPath ids))))
+      (is (= 0 (sh-status (assoc env "CI_BUDGETS" (.getPath budgets)) "bin/ci" "check" "--corpus" "ci-run" "--only" (.getPath ids))))
+      (finally
+        (doseq [f (reverse (file-seq work))] (.delete ^java.io.File f))))))
+
+(deftest gcc-output-kept-whole
+  ;; CS201: gcc's output of a file with many warnings (c23-ucn-2: 186 lines, errors at its end) was cut at 20,000 bytes; the
+  ;; diagnostics are filtered now, not truncated, so the late errors are there. 8,000 warnings (0.7 MB, far over the old 20,000 bytes) and then an error:
+  (let [script (str "root=$PWD; . bin/lib/ci/gcc-diag.bash; "
+                    "{ i=0; while [ $i -lt 8000 ]; do echo \"t.c:$i:5: warning: a long warning line of the output $i, to make it big enough ok\"; "
+                    "echo \"  $i | #if U'x'\"; i=$((i+1)); done; echo \"t.c:972:5: error: late\"; echo \"t.c:973:1: fatal error: x: No such file or directory\"; "
+                    "echo 'compilation terminated.'; } | gcc_diag")
+        out (:out (sh-out-env {} ["bash" "-c" script]))
+        ls (str/split-lines out)]
+    (is (some #{"t.c:972:5: error: late"} ls))
+    (is (some #{"t.c:973:1: fatal error: x: No such file or directory"} ls))
+    (is (not-any? #(str/starts-with? % " ") ls))
+    (is (not-any? #{"compilation terminated."} ls))))
+
+(deftest fatal-error-at-an-expected-line
+  ;; CS201: `#embed "no-such-file"` is a fatal error on the line its dg-error expects: gcc agrees with the directives
+  (let [d (dg/analyze "/* { dg-do preprocess } */\n/* { dg-options \"\" } */\n\n#embed \"no-such-file\" /* { dg-error \"no-such-file: No such file or directory\" } */\n")
+        g (dg/gcc-lines "embed-7.c:4:8: fatal error: no-such-file: No such file or directory\n" "embed-7.c")]
+    (is (:fatal g))
+    (is (= :yes (dg/gcc-agrees d g)))
+    ;; a fatal error on another line than the directive's is still a difference
+    (is (not= :yes (dg/gcc-agrees d (dg/gcc-lines "embed-7.c:5:8: fatal error: x: No such file or directory\n" "embed-7.c")))))
+  ;; review 031's finding C: a fatal error in a header, or with no line, is not agreement with a file that expects none
+  (let [d (dg/analyze "/* { dg-do compile } */\nint x;\n")
+        d0 (dg/analyze "/* { dg-do compile } */\nint x;\n/* { dg-error \"\" \"\" { target *-*-* } 0 } */\n")]
+    (is (= :yes (dg/gcc-agrees d (dg/gcc-lines "" "a.c"))))
+    (is (not= :yes (dg/gcc-agrees d (dg/gcc-lines "h.h:1:10: fatal error: nope.h: No such file or directory\n" "a.c"))))
+    (is (not= :yes (dg/gcc-agrees d (dg/gcc-lines "cc1: fatal error: nope.h: No such file or directory\n" "a.c"))))
+    (is (= :yes (dg/gcc-agrees d0 (dg/gcc-lines "cc1: fatal error: nope.h: No such file or directory\n" "a.c"))))
+    ;; review 053's finding 6: a plain error in a header, or with no line
+    (is (not= :yes (dg/gcc-agrees d (dg/gcc-lines "h.h:3:1: error: bad\n" "a.c"))))
+    (is (not= :yes (dg/gcc-agrees d (dg/gcc-lines "cc1: error: bad\n" "a.c"))))
+    (is (= :yes (dg/gcc-agrees d0 (dg/gcc-lines "h.h:3:1: error: bad\n" "a.c"))))
+    ;; review 057's finding 5: the reason is in the differ
+    (is (= [:differ [] [] {:other 1 :fatal-other 0}] (dg/gcc-agrees d (dg/gcc-lines "h.h:3:1: error: bad\n" "a.c"))))
+    (is (= [:differ [] [] {:other 0 :fatal-other 1}] (dg/gcc-agrees d (dg/gcc-lines "cc1: fatal error: x\n" "a.c"))))))
+
+(deftest unlisted-selector-names-counted
+  ;; CS210 (b): the dg-do, dg-error and xfail selectors keep CS142's rule (an unlisted name holds) and report the names
+  (let [unk (atom #{})
+        d (binding [dg/*unknown-names* unk]
+            (dg/analyze (str "/* { dg-do compile { target no_such_effective_target } } */\n"
+                             "int x = ;\t/* { dg-error \"expected\" \"\" { target { c && another_unlisted_name } } } */\n"
+                             "int y = ;\t/* { dg-error \"expected\" \"\" { xfail c } } */\n")))]
+    (is (= #{"no_such_effective_target" "another_unlisted_name"} @unk))
+    (is (= :compile (:action d)))
+    (is (= [2] (get-in d [:expect :error])))
+    (is (= [3] (get-in d [:xfail :error]))))
+  ;; listed names are not counted
+  (let [unk (atom #{})]
+    (binding [dg/*unknown-names* unk] (dg/analyze "/* { dg-do compile { target c } } */\nint x = ;\t/* { dg-error \"e\" \"\" { target { ! ia32 } } } */\n"))
+    (is (= #{} @unk))))
+
+(deftest message-as-verdict
+  ;; CS200 (a): a pass whose dg-error regex matches none of the checker's messages needs a family of the wording table
+  (let [wording {:families [{:id :f :gcc "discards .const. qualifier" :checker "discards qualifier"}]
+                 :wrong-reason {"g/w.c" "another reason"}}
+        d (dg/analyze (str "/* { dg-do compile } */\nint x = 1;\t/* { dg-error \"discards 'const' qualifier\" } */\n"))
+        r (fn [msg] {:status :ok :lines {2 1} :all-texts {2 [(str "2: " msg)]} :texts {2 (str "2: " msg)} :other 0 :unlocated 0})]
+    ;; the regex matches: nothing to say
+    (is (nil? (dg/message-verdict wording "g/a.c" d (r "assignment discards 'const' qualifier"))))
+    ;; the family explains the checker's wording
+    (is (nil? (dg/message-verdict wording "g/a.c" d (r "assignment discards qualifier from pointer target type"))))
+    ;; neither: a regression, unless the file is listed as another reason
+    (is (= :message (first (dg/message-verdict wording "g/a.c" d (r "something else entirely")))))
+    (is (= [:wrong-reason "another reason"] (dg/message-verdict wording "g/w.c" d (r "something else entirely")))))
+  ;; the committed table covers the corpus: every family has the keys, and its patterns are regexes
+  (let [w (dg/load-wording)]
+    (is (seq (:families w)))
+    (is (every? (fn [f] (and (keyword? (:id f)) (re-pattern (:gcc f)) (re-pattern (:checker f)))) (:families w)))
+    (is (= 5 (count (:wrong-reason w))))
+    (is (every? (fn [[_ v]] (and (seq (:lines v)) (string? (:why v)))) (:wrong-reason w)))))
+
+(deftest read-error-prefix-is-not-the-message
+  ;; review 053's finding 3: the FILE:LINE:COL: of a read error is not part of the message a dg-error regex matches
+  (let [wording {:families [] :wrong-reason {}}
+        d (dg/analyze "/* { dg-do compile } */\nint x = 1;\n\nint y = 2;\n\nint z;\t/* { dg-error \"macro\" } */\n")
+        row (fn [txt] {:status :read-error :lines {6 1} :all-texts {6 [txt]} :texts {6 txt} :other 0 :unlocated 0})]
+    (is (= :message (first (dg/message-verdict wording "g/a.c" d (row "macro.c:6:1: expected ';' before 'y'")))))
+    (is (nil? (dg/message-verdict wording "g/a.c" d (row "x.c:6:1: unterminated macro call"))))))
+
+(deftest wording-families-pinned
+  ;; review 031's finding E: a family with :files applies to those files alone, its patterns are anchored, and a wrong-reason file
+  ;; names its lines: an unexplained line outside them fails
+  (let [w (dg/load-wording)
+        d (dg/analyze "/* { dg-do compile } */\nint x = 1;\n\nint y = 2;\t/* { dg-error \"redefinition\" } */\n")
+        r (fn [msg] {:status :ok :lines {4 1} :all-texts {4 [(str "4: " msg)]} :texts {4 (str "4: " msg)} :other 0 :unlocated 0})
+        tag "gcc-c23/gcc.dg/c23-tag-1.c"]
+    (is (nil? (dg/message-verdict w tag d (r "conflicting types for 'A'"))))
+    (is (= :message (first (dg/message-verdict w "gcc-c23/gcc.dg/other.c" d (r "conflicting types for 'A'")))))
+    (is (= :message (first (dg/message-verdict w tag d (r "something conflicting types for 'A' else"))))))
+  (let [wording {:families [] :wrong-reason {"g/w.c" {:lines [4] :why "another reason"}}}
+        d (dg/analyze "/* { dg-do compile } */\nint x = 1;\n\nint y = 2;\t/* { dg-error \"aa\" } */\nint z = 3;\t/* { dg-error \"bb\" } */\n")
+        r (fn [ls] {:status :ok :lines (into (sorted-map) (map #(vector % 1) ls)) :all-texts (into {} (map #(vector % [(str % ": other")]) ls))
+                    :texts (into {} (map #(vector % (str % ": other")) ls)) :other 0 :unlocated 0})]
+    (is (= [:wrong-reason "another reason"] (dg/message-verdict wording "g/w.c" d (r [4]))))
+    (is (= :message (first (dg/message-verdict wording "g/w.c" d (r [4 5])))))))
+
+(deftest bad-specs-keep-qualifiers
+  ;; review 031's finding G (CS203 (a)): a declare-specs printed from its words writes its qualifiers first, so the reread is equal
+  (let [h (host/load-host "test/c/host")
+        fc (host/file-config ["-std=c23"] "gnu23")
+        rd (rc/read-c (host/config h fc judge-dir) fc "bad-specs-quals.c" false)
+        txt (rc/print-c (:file-form rd) (:forms rd))]
+    (is (nil? (:error rd)))
+    (is (re-find #"const int bool;" txt))
+    (is (re-find #"volatile const char bool;" txt))))
+
+(deftest read-error-cannot-stand-for-a-semantic-message
+  ;; review 031's finding B: a read error stands for an expected line only when its text matches the line's regexes (or a family)
+  (let [wording {:families [] :wrong-reason {}}
+        d (dg/analyze "/* { dg-do compile } */\nint x = 1;\n\nint y = 2;\n\nf (x);\t/* { dg-error \"expected 'int' but argument\" } */\n")
+        row (fn [line txt] {:status :read-error :lines {line 1} :all-texts {line [txt]} :texts {line txt} :other 0 :unlocated 0})
+        l (first (keys (:msgs d)))]
+    (is (= [:pass] (dg/verdict d (row l "expected ';' before 'x'"))))
+    (is (= 1 (count (dg/msg-mismatch d (row l "expected ';' before 'x'")))))
+    (is (= :message (first (dg/message-verdict wording "g/a.c" d (row l "expected ';' before 'x'")))))
+    (is (nil? (dg/message-verdict wording "g/a.c" d (row l "expected 'int' but argument is of type 'char *'"))))))
+
+(deftest main-file-is-the-whole-path
+  ;; suffix.c includes xsuffix.c, whose name ends with the main's: its error is another file's
+  (let [r (read-one "suffix.c" :compile)]
+    (is (= {} (:lines r)))
+    (is (= 1 (:unlocated r)))
+    (is (= :stopped (second (dg/verdict (dg/analyze (slurp (str judge-dir "/suffix.c"))) r)))))
+  (let [g (dg/gcc-lines "x-embed-1.c:3:1: error: a\nembed-1.c:4:1: error: b\n" "embed-1.c")]
+    (is (= {4 1} (:error g)))
+    (is (= 1 (:other g)))))
+
+(deftest parser-panic-is-a-crash
+  (let [r (read-one "parser-panic.c" :compile)]
+    (is (= :crash (:status r)))
+    (is (= :crash (second (dg/verdict (dg/analyze (slurp (str judge-dir "/parser-panic.c"))) r))))))
+
+;; review 027, finding 9: CS172's layout, kept and documented (doc/C23-SURVEY.md, "As built: re-review 027's fixes"): a
+;; definition's name carries its declarator's line, so the .ae puts it on that line, as every nested form is put on its C line
+
+(deftest definition-name-layout
+  (let [root (System/getProperty "user.dir")
+        out (java.io.File. (str root "/.tmp/judge-test-layout"))]
+    (try
+      (is (= 0 (sh-status {} "bin/repr-c" "read" "-o" (.getPath out) "test/c/judge/gnu-defn.c")))
+      (let [lines (vec (str/split-lines (slurp (java.io.File. out "test/c/judge/gnu-defn.c.ae"))))]
+        (is (= "(c/defn" (nth lines 2)))
+        (is (str/starts-with? (str/trim (nth lines 3)) "^:static foo ^int [void]"))
+        (is (str/includes? (nth lines 5) "(return 1)"))
+        (is (= "(c/defn bar ^int [void] (return 2))" (nth lines 7))))
+      (finally
+        (doseq [f (reverse (file-seq out))] (.delete ^java.io.File f))))))
+
+;; GTS81 (a), queue 064: the negative controls (test/c/controls.edn). The dg level's control-result on made-up directives and
+;; reads: the subject's read against another file's directives differs, against its own passes (a control made to pass), and
+;; a reference absent from its group is not judged; a group not judged leaves it. The run level's on a made-up work directory.
+
+(deftest dg-controls
+  (let [d-a (dg/analyze "/* { dg-do compile } */\nint a; /* { dg-error \"e\" } */\n")
+        d-b (dg/analyze "/* { dg-do compile } */\n\nint b; /* { dg-error \"e\" } */\n")
+        dgs {"g" {"a.c" d-a "b.c" d-b}}
+        rds {"g" {"a.c" (assoc (ok {2 1}) :texts {2 "2: e"}) "b.c" (assoc (ok {3 1}) :texts {3 "3: e"})}}
+        w {:families [] :wrong-reason {}}
+        c {:subject "g/a.c" :reference "g/b.c"}]
+    (is (= [:pass] (dg/verdict d-a (get-in rds ["g" "a.c"]))))
+    (is (= :differs (dg/control-result w dgs rds c)))
+    (is (= :passes (dg/control-result w dgs rds (assoc c :reference "g/a.c"))))
+    (is (= :not-judged (dg/control-result w dgs rds (assoc c :reference "g/z.c"))))
+    (is (= :left (dg/control-result w (dissoc dgs "g") rds c)))))
+
+(deftest run-controls
+  (let [dir (java.io.File. (str (System/getProperty "user.dir") "/.tmp/ci-judge-test-controls/c"))
+        _ (.mkdirs dir)
+        w (.getParent dir)
+        sha-a "2dc0a3cd4a547ba69389f97f3b447bd4d487fe6216c3cacd2f9bf8c908dc127f"
+        refs {"c/a.c" {:id "c/a.c" :status 0 :stdout sha-a :o2 :same} "c/b.c" {:id "c/b.c" :status 0 :stdout empty-sha :o2 :same}}
+        c {:subject "c/a.c" :reference "c/b.c"}]
+    (spit (str dir "/list.tsv") "c/a.c\tbase\tc11\t\tc/a.c\n")
+    (spit (str dir "/nodes.tsv") "c/a.c\tok\t\t\t\n")
+    (spit (str dir "/run.tsv") (str "c/a.c\t0\t" sha-a "\t24\t\n"))
+    (is (= :differs (run/control-result w refs ["c"] c)))
+    (is (= :passes (run/control-result w refs ["c"] (assoc c :reference "c/a.c"))))
+    (is (= :not-judged (run/control-result w refs ["c"] (assoc c :reference "c/z.c"))))
+    (is (= :left (run/control-result w refs ["d"] c)))))

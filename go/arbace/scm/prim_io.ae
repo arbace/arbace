@@ -1,0 +1,769 @@
+;; si's runtime: primitives (prim_io): (rnrs io simple), (rnrs io ports), (rnrs files).
+(in-ns 'go.arbace.scm)
+
+(go/file "prim_io.go"
+  :imports [[os "os"] [strings "strings"]])
+
+(go/func charOrEof ^any [^rune r ^bool ok]
+  (when ok
+    (return (conv Char r)))
+  (conv any Eof))
+
+(go/func optOut "optOut is the textual output port argument i of a, or the current output port.\n"
+  ^{:tag (* Port)} [^string who ^{:tag (slice any)} a ^int i]
+  (when (> (len a) i)
+    (return (ArgTextOut who (aget a i))))
+  (checkOpen who curOut)
+  curOut)
+
+(go/func optIn ^{:tag (* Port)} [^string who ^{:tag (slice any)} a ^int i]
+  (when (> (len a) i)
+    (return (ArgTextIn who (aget a i))))
+  curIn)
+
+(go/func symOf ^string [^any x]
+  (let [(values s ok) (assert (* Symbol) x)]
+    (when ok
+      (return (.-Name s)))
+    ""))
+
+(go/func ArgTranscoder ^{:tag (* Transcoder)} [^string who ^any x]
+  (let [(values t ok) (assert (* Transcoder) x)]
+    (when (not ok)
+      (NotA who "transcoder" x))
+    t))
+
+(go/func optTranscoder "optTranscoder is the transcoder argument i of a (nil: none or #f).\n"
+  ^{:tag (* Transcoder)} [^string who ^{:tag (slice any)} a ^int i]
+  (when (or (<= (len a) i) (== (aget a i) (conv any false)))
+    (return nil))
+  (ArgTranscoder who (aget a i)))
+
+(go/func optBufMode ^string [^string who ^{:tag (slice any)} a ^int i]
+  (when (<= (len a) i)
+    (return "block"))
+  (let [s (symOf (aget a i))]
+    (when (not (or (== s "none") (== s "line") (== s "block")))
+      (AssertionViolation who "~s is not a valid buffer mode" (aget a i)))
+    s))
+
+(go/func optFileOptions ^{:tag (* EnumSet)} [^string who ^{:tag (slice any)} a ^int i]
+  (when (<= (len a) i)
+    (return (newEnumSet fileOptionsType)))
+  (let [(values o ok) (assert (* EnumSet) (aget a i))]
+    (when (or (not ok) (!= (.-T o) fileOptionsType))
+      (AssertionViolation who "~s is not a file-options object" (aget a i)))
+    o))
+
+(go/func ArgFileName ^string [^string who ^any x]
+  (.String (ArgString who x)))
+
+(go/func octet ^byte [^string who ^any x]
+  (let [(values n ok) (assert int64 x)]
+    (when (or (not ok) (< n 0) (> n 255))
+      (NotAn who "octet" x))
+    (conv byte n)))
+
+;; start/count arguments: a[i], a[i+1] against length n of object obj.
+(go/func rangeArgs "rangeArgs is the start and count of optional arguments a[i] and a[i+1] for an object of length n.\n"
+  [^string who ^{:tag (slice any)} a ^int i ^int n ^any obj] :results [int int]
+  (let [start 0
+        count n]
+    (when (> (len a) i)
+      (let [(values s ok) (assert int64 (aget a i))]
+        (when (or (not ok) (< s 0) (> s (conv int64 n)))
+          (AssertionViolation who "invalid start value ~s" (aget a i)))
+        (set! start (conv int s))
+        (set! count (- n start))))
+    (when (> (len a) (+ i 1))
+      (let [(values c ok) (assert int64 (aget a (+ i 1)))]
+        (when (or (not ok) (< c 0))
+          (AssertionViolation who "invalid count value ~s" (aget a (+ i 1))))
+        (when (> (+ (conv int64 start) c) (conv int64 n))
+          (AssertionViolation who "index ~s + count ~s is beyond the end of ~s" (conv int64 start) c obj))
+        (set! count (conv int c))))
+    (return start count)))
+
+(go/func countArg "countArg is a nonnegative fixnum count.\n" ^int [^string who ^any x]
+  (let [(values n ok) (assert int64 x)]
+    (when (or (not ok) (< n 0))
+      (NotA who "nonnegative fixnum" x))
+    (conv int n)))
+
+;; Reading helpers
+
+(go/func readChars "readChars reads up to n characters (n < 0: all), stopping early at a newline when line is set (consumed, not kept).\n"
+  [^{:tag (* Port)} p ^string who ^int n ^bool line] :results [(slice rune) bool]
+  (let [^{:tag (slice rune)} out nil
+        got false]
+    (while (or (< n 0) (< (len out) n))
+      (watchdogTick)
+      (let [(values r ok) (nextRune p who true)]
+        (when (not ok)
+          (break))
+        (set! got true)
+        (when (and line (== r \newline))
+          (return out true))
+        (set! out (append out r))))
+    (return out (or got (== n 0)))))
+
+;; Files
+
+(go/func openFileIn "openFileIn opens file name for input (a memory port over its bytes).\n"
+  ^{:tag (* Port)} [^string who ^string name ^{:tag (* Transcoder)} tr ^string buf]
+  (let [(values b err) (os/ReadFile name)]
+    (when (!= err nil)
+      (FileError who name err false))
+    (addr (lit Port :Kind pMem :In true :Binary (== tr nil) :Name name :Tr tr :BufMode buf :data b))))
+
+;; the ports with a nonblocking mode (Chez's): string and bytevector ports, file ports and the binary console; not the textual console or custom ports
+(go/func hasNonblocking ^bool [^{:tag (* Port)} p]
+  (or (== (.-Kind p) pMem) (== (.-Kind p) pString) (and (== (.-Kind p) pConsole) (.-Binary p))))
+
+(go/func openFileOut "openFileOut opens file name for output (and input when in) as file-options o say.\n"
+  ^{:tag (* Port)} [^string who ^string name ^{:tag (* EnumSet)} o ^bool in ^string buf ^{:tag (* Transcoder)} tr]
+  (let [(values _ serr) (os/Stat name)
+        exists (== serr nil)
+        flags (bit-or os/O_RDWR os/O_CREATE)
+        truncate (not (.Has o "no-truncate"))]
+    (when (and (.Has o "no-create") (not exists))
+      (FileError who name serr false))
+    ;; Chez's replace option (SC170 (b)): an existing file is replaced, as no-fail does
+    (when (and (not (.Has o "no-create")) exists (not (.Has o "no-fail")) (not (.Has o "replace")))
+      (FileError who name os/ErrExist false))
+    (when truncate
+      (set! flags (bit-or flags os/O_TRUNC)))
+    (let [(values f err) (os/OpenFile name flags 438)]
+      (when (!= err nil)
+        (FileError who name err false))
+      (let [^{:tag (slice byte)} data nil]
+        (when (not truncate)
+          (let [(values b _) (os/ReadFile name)]
+            (set! data b)))
+        (let [p (addr (lit Port :Kind pMem :In in :Out true :Binary (== tr nil) :Name name :Tr tr :BufMode buf :data data :f f :low (len data)))]
+          (aset openFiles p true)
+          p)))))
+
+;; withCurrent runs thunk with the current input or output port set to port, restored on every exit and
+;; re-entry; the port is closed when thunk returns.
+(go/func withCurrent [^{:tag (* M)} m ^{:tag (* Port)} port ^bool isOut ^any thunk] :results [any bool]
+  (let [^{:tag (* Port)} old nil
+        before (procOf "" 0 0 (fn [^{:tag (* M)} m1 ^{:tag (slice any)} a] :results [any bool]
+                 (if isOut
+                   (do (set! old curOut) (set! curOut port))
+                   (do (set! old curIn) (set! curIn port)))
+                 (return Unspec true)))
+        after (procOf "" 0 0 (fn [^{:tag (* M)} m1 ^{:tag (slice any)} a] :results [any bool]
+                (if isOut
+                  (set! curOut old)
+                  (set! curIn old))
+                (return Unspec true)))]
+    (.PushGo m (fn [^{:tag (* M)} m2 ^any v] :results [any bool]
+                 (closePort port)
+                 (return v true)))
+    (return (.DynamicWind m before thunk after))))
+
+;; callWith applies proc to port and closes the port (when close) after its value.
+(go/func callWith [^{:tag (* M)} m ^{:tag (* Port)} port ^any proc ^bool close] :results [any bool]
+  (.PushGo m (fn [^{:tag (* M)} m2 ^any v] :results [any bool]
+               (when close
+                 (closePort port))
+               (return v true)))
+  (return (.Apply m proc (lit (slice any) port))))
+
+(go/func extractor "extractor is a procedure of no arguments giving f's value.\n" ^any [^{:tag (func [] [any])} f]
+  (addr (lit Prim :Name "" :Min 0 :Max 0 :Fn (fn ^any [^{:tag (slice any)} a] (f)))))
+
+(go/func twoValues ^any [^any a ^any b] (addr (lit Values :V (lit (slice any) a b))))
+
+(go/func stringOutExtract ^any [^{:tag (* Port)} p]
+  (let [s (NewString (conv string (.-runes p)))]
+    (set! (.-runes p) nil)
+    (set! (.-rpos p) 0)
+    (set! (.-lastc p) 0)
+    s))
+
+(go/func bytesOutExtract ^any [^{:tag (* Port)} p]
+  (let [b (make (slice byte) (len (.-data p)))]
+    (copy b (.-data p))
+    (set! (.-data p) nil)
+    (set! (.-pos p) 0)
+    (addr (lit Bytevector :B b))))
+
+(go/func decodeAll "decodeAll is the characters of bytes b read by transcoder tr.\n"
+  ^any [^string who ^{:tag (slice byte)} b ^{:tag (* Transcoder)} tr]
+  (let [p (NewBytesInput b tr)
+        (values rs _) (readChars p who -1 false)]
+    (NewString (conv string rs))))
+
+(go/func portPosition ^any [^string who ^{:tag (* Port)} p]
+  (switch (.-Kind p)
+    (case [pString]
+      (when (.-In p)
+        (return (conv int64 (.-rpos p))))
+      (return (conv int64 (.-rpos p))))
+    (case [pMem] (return (conv int64 (.-pos p))))
+    (case [pCustom]
+      (when (== (.-Gp (.-cu p)) (conv any false))
+        (AssertionViolation who "~s does not support port-position" p))
+      ;; a textual port's position counts characters the custom port's write! has not seen yet: Chez writes them out first
+      (when (and (not (.-Binary p)) (.-Out p) (> (len (.-orunes (.-cu p))) 0))
+        (flushCustom p))
+      (let [r (CallProc (.-Gp (.-cu p)))
+            (values n ok) (assert int64 r)]
+        (when (not ok)
+          (AssertionViolation who "invalid result ~s from get-position" r))
+        (if (.-Binary p)
+          (set! n (+ (- n (conv int64 (- (len (.-data p)) (.-pos p)))) (conv int64 (len (.-obytes (.-cu p))))))
+          (set! n (+ (- n (conv int64 (- (len (.-runes p)) (.-rpos p)))) (conv int64 (len (.-orunes (.-cu p)))))))
+        (return n))))
+  (AssertionViolation who "~s does not support port-position" p)
+  nil)
+
+(go/func setPortPosition [^{:tag (* Port)} p ^any pos]
+  (let [(values n ok) (assert int64 pos)]
+    (when (or (not ok) (< n 0))
+      (AssertionViolation "set-port-position!" "~s is not a valid position" pos))
+    (checkOpen "set-port-position!" p)
+    (set! (.-ug p) nil)
+    (switch (.-Kind p)
+      (case [pString]
+        (let [lim (conv int64 (len (.-runes p)))]
+          ;; an output port may go past its end (Chez: the gap is NUL runes, written when something is)
+          (when (and (.-In p) (> n lim))
+            (RaiseObj (ioCondition (lit (slice (* Record)) (MakeSimple CondIOInvalidPosition pos) (MakeSimple CondIOPort p))
+                        "set-port-position!" "failed for position ~s on ~s: ~(~a~)" (lit (slice any) pos p (Str "out of range")))))
+          (cond (.-In p) (set! (.-rpos p) (conv int n))
+                :else (do (set! (.-rpos p) (conv int n))
+                          ;; fresh-line looks at the character before the new position (0 at 0); other kinds keep the last one written
+                          (cond (> n lim) (set! (.-lastc p) lcNul) ; past the end: the rune before is a NUL, not a newline, so fresh-line writes one
+                                (> n 0) (set! (.-lastc p) (lastMark (aget (.-runes p) (- (conv int n) 1))))
+                                :else (set! (.-lastc p) 0))))))
+      (case [pMem]
+        (when (and (not (.-Out p)) (> n (conv int64 (len (.-data p)))))
+          (RaiseObj (ioCondition (lit (slice (* Record)) (MakeSimple CondIOInvalidPosition pos) (MakeSimple CondIOPort p))
+                      "set-port-position!" "failed for position ~s on ~s: ~(~a~)" (lit (slice any) pos p (Str "out of range")))))
+        (set! (.-pos p) (conv int n)))
+      (case [pCustom]
+        (when (== (.-Sp (.-cu p)) (conv any false))
+          (AssertionViolation "set-port-position!" "~s does not support set-port-position!" p))
+        (flushCustom p)
+        (set! (.-data p) nil)
+        (set! (.-pos p) 0)
+        (set! (.-runes p) nil)
+        (set! (.-rpos p) 0)
+        (CallProc (.-Sp (.-cu p)) pos))
+      (default (AssertionViolation "set-port-position!" "~s does not support set-port-position!" p)))))
+
+(go/func hasPosition ^bool [^any x ^bool set]
+  (let [(values p ok) (assert (* Port) x)]
+    (when (and ok (== (.-Kind p) pCustom))
+      (if set
+        (return (!= (.-Sp (.-cu p)) (conv any false)))
+        (return (!= (.-Gp (.-cu p)) (conv any false)))))
+    (and ok (!= (.-Kind p) pConsole))))
+
+(go/func isOctets ^bool [^any x] (let [(values _ ok) (assert (* Bytevector) x)] ok))
+
+(go/func fileExistsOK ^bool [^string name]
+  (let [(values _ err) (os/Stat name)]
+    (== err nil)))
+
+
+(go/func init []
+  ;; ----- the current ports, eof
+  (Def "current-input-port" 0 1 (fn ^any [^{:tag (slice any)} a]
+    (when (== (len a) 0)
+      (return curIn))
+    (set! curIn (ArgTextIn "current-input-port" (aget a 0)))
+    Unspec))
+  (Def "current-output-port" 0 1 (fn ^any [^{:tag (slice any)} a]
+    (when (== (len a) 0)
+      (return curOut))
+    (set! curOut (ArgTextOut "current-output-port" (aget a 0)))
+    Unspec))
+  (Def "current-error-port" 0 1 (fn ^any [^{:tag (slice any)} a]
+    (when (== (len a) 0)
+      (return curErr))
+    (set! curErr (ArgTextOut "current-error-port" (aget a 0)))
+    Unspec))
+  (Def "eof-object" 0 0 (fn ^any [^{:tag (slice any)} a] (conv any Eof)))
+  (Def1 "eof-object?" (fn ^any [^any x] (== x (conv any Eof))))
+
+  ;; ----- predicates
+  (Def1 "port?" (fn ^any [^any x] (let [(values _ ok) (assert (* Port) x)] ok)))
+  (Def1 "input-port?" (fn ^any [^any x] (let [(values p ok) (assert (* Port) x)] (and ok (.-In p)))))
+  (Def1 "output-port?" (fn ^any [^any x] (let [(values p ok) (assert (* Port) x)] (and ok (.-Out p)))))
+  (Def1 "textual-port?" (fn ^any [^any x] (let [(values p ok) (assert (* Port) x)] (and ok (not (.-Binary p))))))
+  (Def1 "binary-port?" (fn ^any [^any x] (let [(values p ok) (assert (* Port) x)] (and ok (.-Binary p)))))
+  (Def1 "port-eof?" (fn ^any [^any x]
+    (let [(values p ok) (assert (* Port) x)]
+      (when (or (not ok) (not (.-In p)))
+        (NotA "port-eof?" "input port" x))
+      (checkOpen "port-eof?" p)
+      (when (.-Binary p)
+        (return (< (nextByte p false) 0)))
+      (let [(values _ ok2) (nextRune p "port-eof?" false)]
+        (not ok2)))))
+  (Def1 "buffer-mode?" (fn ^any [^any x]
+    (let [s (symOf x)] (or (== s "none") (== s "line") (== s "block")))))
+  (Def1 "output-port-buffer-mode" (fn ^any [^any x]
+    (let [p (ArgOutPort "output-port-buffer-mode" x)]
+      (when (== (.-BufMode p) "")
+        (return (Intern "block")))
+      (Intern (.-BufMode p)))))
+
+  ;; ----- closing and flushing
+  (Def1 "close-port" (fn ^any [^any x] (closePort (ArgPort "close-port" x)) Unspec))
+  (Def1 "close-input-port" (fn ^any [^any x] (closePort (ArgInPort "close-input-port" x)) Unspec))
+  (Def1 "close-output-port" (fn ^any [^any x] (closePort (ArgOutPort "close-output-port" x)) Unspec))
+  (Def "flush-output-port" 0 1 (fn ^any [^{:tag (slice any)} a]
+    (let [p curOut]
+      (when (> (len a) 0)
+        (set! p (ArgOutPort "flush-output-port" (aget a 0))))
+      (checkOpen "flush-output-port" p)
+      (if (== (.-Kind p) pConsole)
+        (.Flush stdoutW)
+        (flushFile p))
+      Unspec)))
+
+  ;; ----- textual input
+  (Def "read-char" 0 1 (fn ^any [^{:tag (slice any)} a]
+    (let [p (optIn "read-char" a 0)
+          (values r ok) (nextRune p "read-char" true)]
+      (charOrEof r ok))))
+  (Def "peek-char" 0 1 (fn ^any [^{:tag (slice any)} a]
+    (let [p (optIn "peek-char" a 0)
+          (values r ok) (nextRune p "peek-char" false)]
+      (charOrEof r ok))))
+  (Def1 "get-char" (fn ^any [^any x]
+    (let [(values r ok) (nextRune (ArgTextIn "get-char" x) "get-char" true)] (charOrEof r ok))))
+  (Def1 "lookahead-char" (fn ^any [^any x]
+    (let [(values r ok) (nextRune (ArgTextIn "lookahead-char" x) "lookahead-char" false)] (charOrEof r ok))))
+  (Def "read" 0 1 (fn ^any [^{:tag (slice any)} a]
+    (ReadDatum (optIn "read" a 0))))
+  (Def1 "get-datum" (fn ^any [^any x] (ReadDatum (ArgTextIn "get-datum" x))))
+  (Def1 "get-line" (fn ^any [^any x]
+    (let [(values rs ok) (readChars (ArgTextIn "get-line" x) "get-line" -1 true)]
+      (when ok
+        (return (NewString (conv string rs))))
+      (conv any Eof))))
+  (Def2 "get-string-n" (fn ^any [^any x ^any n]
+    (let [p (ArgTextIn "get-string-n" x)
+          k (countArg "get-string-n" n)
+          (values rs ok) (readChars p "get-string-n" k false)]
+      (when (or ok (== k 0))
+        (return (NewString (conv string rs))))
+      (conv any Eof))))
+  (Def "get-string-n!" 4 4 (fn ^any [^{:tag (slice any)} a]
+    (let [p (ArgTextIn "get-string-n!" (aget a 0))
+          s (ArgMutString "get-string-n!" (aget a 1))
+          (values start count) (rangeArgs "get-string-n!" (subslice a 2) 0 (len (.-R s)) (aget a 1))]
+      (let [(values rs _) (readChars p "get-string-n!" count false)]
+        (copy (subslice (.-R s) start) rs)
+        (when (and (== (len rs) 0) (> count 0))
+          (return (conv any Eof)))
+        (conv int64 (len rs))))))
+  (Def1 "get-string-all" (fn ^any [^any x]
+    (let [(values rs _) (readChars (ArgTextIn "get-string-all" x) "get-string-all" -1 false)]
+      (when (== (len rs) 0)
+        (return (conv any Eof)))
+      (NewString (conv string rs)))))
+
+  ;; ----- textual output
+  (Def "write-char" 1 2 (fn ^any [^{:tag (slice any)} a]
+    (let [c (ArgChar "write-char" (aget a 0))
+          p (optOut "write-char" a 1)]
+      (.putRunes p "write-char" (lit (slice rune) (conv rune c)))
+      Unspec)))
+  (Def2 "put-char" (fn ^any [^any x ^any c]
+    (let [p (ArgTextOut "put-char" x)
+          ch (ArgChar "put-char" c)]
+      (.putRunes p "put-char" (lit (slice rune) (conv rune ch)))
+      Unspec)))
+  (Def "newline" 0 1 (fn ^any [^{:tag (slice any)} a]
+    (.putGo (optOut "newline" a 0) "newline" "\n")
+    Unspec))
+  (Def "display" 1 2 (fn ^any [^{:tag (slice any)} a]
+    (let [p (optOut "display" a 1)]
+      (.putGo p "display" (WriteValue (aget a 0) true))
+      Unspec)))
+  (Def "write" 1 2 (fn ^any [^{:tag (slice any)} a]
+    (let [p (optOut "write" a 1)]
+      (.putGo p "write" (WriteValue (aget a 0) false))
+      Unspec)))
+  ;; R7RS's printer, for (scheme write) (SC103 (b)): write, display, write-shared and write-simple
+  (range [_ w (lit (slice string) "r7rs-write" "r7rs-display" "r7rs-write-shared" "r7rs-write-simple")]
+    (let [who w]
+      (Def who 1 2 (fn ^any [^{:tag (slice any)} a]
+        (let [p (optOut who a 1)
+              ^strings/Builder sb (zero strings/Builder)]
+          (WriteR7RS (addr sb) (aget a 0) (== who "r7rs-display") (== who "r7rs-write-shared") (== who "r7rs-write-simple"))
+          (.putGo p who (.String sb))
+          Unspec)))))
+  (Def2 "put-datum" (fn ^any [^any x ^any d]
+    (let [p (ArgTextOut "put-datum" x)]
+      (.putGo p "put-datum" (WriteValue d false))
+      Unspec)))
+  (Def "put-string" 2 4 (fn ^any [^{:tag (slice any)} a]
+    (let [p (ArgTextOut "put-string" (aget a 0))
+          s (ArgString "put-string" (aget a 1))
+          (values start count) (rangeArgs "put-string" (subslice a 2) 0 (len (.-R s)) (aget a 1))]
+      (.putRunes p "put-string" (subslice (.-R s) start (+ start count)))
+      Unspec)))
+
+  ;; ----- binary input
+  (Def1 "get-u8" (fn ^any [^any x]
+    (let [b (nextByte (ArgBinIn "get-u8" x) true)]
+      (when (< b 0) (return (conv any Eof)))
+      (conv int64 b))))
+  (Def1 "lookahead-u8" (fn ^any [^any x]
+    (let [b (nextByte (ArgBinIn "lookahead-u8" x) false)]
+      (when (< b 0) (return (conv any Eof)))
+      (conv int64 b))))
+  (Def2 "get-bytevector-n" (fn ^any [^any x ^any n]
+    (let [p (ArgBinIn "get-bytevector-n" x)
+          k (countArg "get-bytevector-n" n)
+          ^{:tag (slice byte)} out nil]
+      (while (< (len out) k)
+        (watchdogTick)
+        (let [b (nextByte p true)]
+          (when (< b 0) (break))
+          (set! out (append out (conv byte b)))))
+      (when (and (== (len out) 0) (> k 0))
+        (return (conv any Eof)))
+      (addr (lit Bytevector :B (append (make (slice byte) 0) (spread out)))))))
+  (Def "get-bytevector-n!" 4 4 (fn ^any [^{:tag (slice any)} a]
+    (let [p (ArgBinIn "get-bytevector-n!" (aget a 0))
+          bv (ArgBytevector "get-bytevector-n!" (aget a 1))
+          (values start count) (rangeArgs "get-bytevector-n!" (subslice a 2) 0 (len (.-B bv)) (aget a 1))
+          k 0]
+      (while (< k count)
+        (watchdogTick)
+        (let [b (nextByte p true)]
+          (when (< b 0) (break))
+          (aset (.-B bv) (+ start k) (conv byte b))
+          (inc! k)))
+      (when (and (== k 0) (> count 0))
+        (return (conv any Eof)))
+      (conv int64 k))))
+  (Def1 "get-bytevector-some" (fn ^any [^any x]
+    (let [p (ArgBinIn "get-bytevector-some" x)
+          ^{:tag (slice byte)} out nil]
+      (if (== (.-Kind p) pConsole)
+        (let [b (nextByte p true)]
+          (when (>= b 0)
+            (set! out (append out (conv byte b)))
+            (let [n (.Buffered stdinR)]
+              (for [i 0] (< i n) (inc! i)
+                (watchdogTick)
+                (set! out (append out (conv byte (nextByte p true))))))))
+        (do (when (and (== (.-Kind p) pCustom) (== (len (.-ug p)) 0))
+              (customFillBytes p))
+            ;; pushed-back bytes first, in order; a pushed-back end of file ends the answer (alone: it is the answer)
+            (while (> (len (.-ug p)) 0)
+              (let [x (aget (.-ug p) (- (len (.-ug p)) 1))]
+                (when (< x 0)
+                  (when (== (len out) 0)
+                    (set! (.-ug p) (subslice (.-ug p) _ (- (len (.-ug p)) 1)))
+                    (return (conv any Eof)))
+                  (return (addr (lit Bytevector :B (append (make (slice byte) 0) (spread out))))))
+                (set! (.-ug p) (subslice (.-ug p) _ (- (len (.-ug p)) 1)))
+                (set! out (append out (conv byte x)))))
+            (set! out (append out (spread (subslice (.-data p) (.-pos p)))))
+            (set! (.-pos p) (len (.-data p)))))
+      (when (== (len out) 0)
+        (return (conv any Eof)))
+      (addr (lit Bytevector :B (append (make (slice byte) 0) (spread out)))))))
+  (Def1 "get-bytevector-all" (fn ^any [^any x]
+    (let [p (ArgBinIn "get-bytevector-all" x)
+          ^{:tag (slice byte)} out nil]
+      (while true
+        (watchdogTick)
+        (let [b (nextByte p true)]
+          (when (< b 0) (break))
+          (set! out (append out (conv byte b)))))
+      (when (== (len out) 0)
+        (return (conv any Eof)))
+      (addr (lit Bytevector :B out)))))
+
+  ;; ----- binary output
+  (Def2 "put-u8" (fn ^any [^any x ^any o]
+    (let [p (ArgBinOut "put-u8" x)
+          b (octet "put-u8" o)]
+      (if (== (.-Kind p) pConsole)
+        (consoleWrite p (conv string (lit (slice byte) b)))
+        (writeBytes p (lit (slice byte) b)))
+      Unspec)))
+  (Def "put-bytevector" 2 4 (fn ^any [^{:tag (slice any)} a]
+    (let [p (ArgBinOut "put-bytevector" (aget a 0))
+          bv (ArgBytevector "put-bytevector" (aget a 1))
+          (values start count) (rangeArgs "put-bytevector" (subslice a 2) 0 (len (.-B bv)) (aget a 1))
+          b (subslice (.-B bv) start (+ start count))]
+      (if (== (.-Kind p) pConsole)
+        (consoleWrite p (conv string b))
+        (writeBytes p b))
+      Unspec)))
+
+  ;; ----- string and bytevector ports
+  (Def1 "open-string-input-port" (fn ^any [^any s]
+    (NewStringInput (append (lit (slice rune)) (spread (.-R (ArgString "open-string-input-port" s)))))))
+  (Def1 "open-input-string" (fn ^any [^any s]
+    (NewStringInput (append (lit (slice rune)) (spread (.-R (ArgString "open-input-string" s)))))))
+  (Def "open-output-string" 0 0 (fn ^any [^{:tag (slice any)} a] (NewStringOutput)))
+  (Def1 "get-output-string" (fn ^any [^any x]
+    (let [(values p ok) (assert (* Port) x)]
+      (when (or (not ok) (!= (.-Kind p) pString) (not (.-Out p)))
+        (NotA "get-output-string" "string output port" x))
+      (NewString (conv string (.-runes p))))))
+  (Def "open-string-output-port" 0 0 (fn ^any [^{:tag (slice any)} a]
+    (let [p (NewStringOutput)]
+      (twoValues p (extractor (fn ^any [] (stringOutExtract p)))))))
+  (DefCtl "call-with-string-output-port" 1 1 (fn [^{:tag (* M)} m ^{:tag (slice any)} a] :results [any bool]
+    (let [p (NewStringOutput)]
+      (.PushGo m (fn [^{:tag (* M)} m2 ^any v] :results [any bool] (return (stringOutExtract p) true)))
+      (return (.Apply m (ArgProc "call-with-string-output-port" (aget a 0)) (lit (slice any) p))))))
+  (Alias "call-with-output-string" "call-with-string-output-port")
+  (Def "open-bytevector-input-port" 1 2 (fn ^any [^{:tag (slice any)} a]
+    (let [bv (ArgBytevector "open-bytevector-input-port" (aget a 0))
+          tr (optTranscoder "open-bytevector-input-port" a 1)
+          b (make (slice byte) (len (.-B bv)))]
+      (copy b (.-B bv))
+      (NewBytesInput b tr))))
+  (Def "open-bytevector-output-port" 0 1 (fn ^any [^{:tag (slice any)} a]
+    (let [p (NewBytesOutput (optTranscoder "open-bytevector-output-port" a 0))]
+      (twoValues p (extractor (fn ^any [] (bytesOutExtract p)))))))
+  (DefCtl "call-with-bytevector-output-port" 1 2 (fn [^{:tag (* M)} m ^{:tag (slice any)} a] :results [any bool]
+    (let [p (NewBytesOutput (optTranscoder "call-with-bytevector-output-port" a 1))]
+      (.PushGo m (fn [^{:tag (* M)} m2 ^any v] :results [any bool] (return (bytesOutExtract p) true)))
+      (return (.Apply m (ArgProc "call-with-bytevector-output-port" (aget a 0)) (lit (slice any) p))))))
+  (DefCtl "call-with-port" 2 2 (fn [^{:tag (* M)} m ^{:tag (slice any)} a] :results [any bool]
+    (return (callWith m (ArgPort "call-with-port" (aget a 0)) (ArgProc "call-with-port" (aget a 1)) true))))
+
+  ;; ----- files
+  (Def1 "file-exists?" (fn ^any [^any x] (fileExistsOK (ArgFileName "file-exists?" x))))
+  (Def1 "delete-file" (fn ^any [^any x]
+    (let [name (ArgFileName "delete-file" x)
+          err (os/Remove name)]
+      (when (!= err nil)
+        (FileError "delete-file" name err true))
+      Unspec)))
+  (Def1 "make-file-options" (fn ^any [^any l] (enumConstruct "make-file-options" fileOptionsType l)))
+  (Def1 "open-input-file" (fn ^any [^any x]
+    (openFileIn "open-input-file" (ArgFileName "open-input-file" x) (NativeTranscoder) "block")))
+  (Def "open-output-file" 1 2 (fn ^any [^{:tag (slice any)} a]
+    (openFileOut "open-output-file" (ArgFileName "open-output-file" (aget a 0)) (newEnumSet fileOptionsType) false "block" (NativeTranscoder))))
+  (DefCtl "call-with-input-file" 2 2 (fn [^{:tag (* M)} m ^{:tag (slice any)} a] :results [any bool]
+    (let [name (ArgFileName "call-with-input-file" (aget a 0))
+          proc (ArgProc "call-with-input-file" (aget a 1))]
+      (return (callWith m (openFileIn "call-with-input-file" name (NativeTranscoder) "block") proc true)))))
+  (DefCtl "call-with-output-file" 2 2 (fn [^{:tag (* M)} m ^{:tag (slice any)} a] :results [any bool]
+    (let [name (ArgFileName "call-with-output-file" (aget a 0))
+          proc (ArgProc "call-with-output-file" (aget a 1))]
+      (return (callWith m (openFileOut "call-with-output-file" name (newEnumSet fileOptionsType) false "block" (NativeTranscoder)) proc true)))))
+  (DefCtl "with-input-from-file" 2 2 (fn [^{:tag (* M)} m ^{:tag (slice any)} a] :results [any bool]
+    (let [name (ArgFileName "with-input-from-file" (aget a 0))
+          thunk (ArgProc "with-input-from-file" (aget a 1))]
+      (return (withCurrent m (openFileIn "with-input-from-file" name (NativeTranscoder) "block") false thunk)))))
+  (DefCtl "with-output-to-file" 2 2 (fn [^{:tag (* M)} m ^{:tag (slice any)} a] :results [any bool]
+    (let [name (ArgFileName "with-output-to-file" (aget a 0))
+          thunk (ArgProc "with-output-to-file" (aget a 1))]
+      (return (withCurrent m (openFileOut "with-output-to-file" name (newEnumSet fileOptionsType) false "block" (NativeTranscoder)) true thunk)))))
+  (Def "open-file-input-port" 1 4 (fn ^any [^{:tag (slice any)} a]
+    (let [name (ArgFileName "open-file-input-port" (aget a 0))]
+      (optFileOptions "open-file-input-port" a 1)
+      (openFileIn "open-file-input-port" name (optTranscoder "open-file-input-port" a 3) (optBufMode "open-file-input-port" a 2)))))
+  (Def "open-file-output-port" 1 4 (fn ^any [^{:tag (slice any)} a]
+    (let [name (ArgFileName "open-file-output-port" (aget a 0))
+          o (optFileOptions "open-file-output-port" a 1)
+          buf (optBufMode "open-file-output-port" a 2)]
+      (openFileOut "open-file-output-port" name o false buf (optTranscoder "open-file-output-port" a 3)))))
+  (Def "open-file-input/output-port" 1 4 (fn ^any [^{:tag (slice any)} a]
+    (let [name (ArgFileName "open-file-input/output-port" (aget a 0))
+          o (optFileOptions "open-file-input/output-port" a 1)
+          buf (optBufMode "open-file-input/output-port" a 2)]
+      (openFileOut "open-file-input/output-port" name o true buf (optTranscoder "open-file-input/output-port" a 3)))))
+
+  ;; ----- standard ports
+  (Def "standard-input-port" 0 0 (fn ^any [^{:tag (slice any)} a]
+    (addr (lit Port :Kind pConsole :In true :Binary true :Name "stdin"))))
+  (Def "standard-output-port" 0 0 (fn ^any [^{:tag (slice any)} a]
+    (addr (lit Port :Kind pConsole :Out true :Binary true :Name "stdout"))))
+  (Def "standard-error-port" 0 0 (fn ^any [^{:tag (slice any)} a]
+    (addr (lit Port :Kind pConsole :Out true :Err true :Binary true :Name "stderr"))))
+
+  ;; ----- positions
+  (Def1 "port-has-port-position?" (fn ^any [^any x] (ArgPort "port-has-port-position?" x) (hasPosition x false)))
+  (Def1 "port-has-set-port-position!?" (fn ^any [^any x] (ArgPort "port-has-set-port-position!?" x) (hasPosition x true)))
+  (Def1 "port-position" (fn ^any [^any x]
+    (let [p (ArgPort "port-position" x)]
+      (checkOpen "port-position" p)
+      (portPosition "port-position" p))))
+  (Def2 "set-port-position!" (fn ^any [^any x ^any pos]
+    (setPortPosition (ArgPort "set-port-position!" x) pos)
+    Unspec))
+
+  ;; ----- Chez's unget-u8 and unget-char (SC180 (b)): a pushed-back item (the end of file too) is read before the port's own input;
+  ;; a character or byte can be pushed back only when the port has read something (Chez: room in the buffer), the end of file always
+  (Def2 "unget-u8" (fn ^any [^any x ^any v]
+    (let [p (ArgBinIn "unget-u8" x)
+          ^int b -1]
+      (when (!= v (conv any Eof))
+        (let [(values n ok) (assert int64 v)]
+          (when (or (not ok) (< n 0) (> n 255))
+            (NotA "unget-u8" "octet or eof object" v))
+          (set! b (conv int n))
+          (when (and (<= (.-pos p) 0) (not (.-rd p)))
+            (AssertionViolation "unget-u8" "cannot unget ~s on ~s" v p))))
+      (set! (.-ug p) (append (.-ug p) b))
+      Unspec)))
+  (Def2 "unget-char" (fn ^any [^any x ^any v]
+    (let [p (ArgTextIn "unget-char" x)
+          ^int b -1]
+      (when (!= v (conv any Eof))
+        (let [(values c ok) (assert Char v)]
+          (when (not ok)
+            (NotA "unget-char" "character or eof object" v))
+          (set! b (conv int c))
+          (when (and (<= (.-pos p) 0) (<= (.-rpos p) 0) (not (.-rd p)))
+            (AssertionViolation "unget-char" "cannot unget ~s on ~s" v p))))
+      (set! (.-ug p) (append (.-ug p) b))
+      Unspec)))
+
+  (Def "fresh-line" 0 1 (fn ^any [^{:tag (slice any)} a]
+    (let [p (optOut "fresh-line" a 0)]
+      (when (and (!= (.-lastc p) 0) (!= (.-lastc p) \newline))
+        (.putGo p "fresh-line" "\n"))
+      Unspec)))
+
+  ;; ----- port length and nonblocking mode (Chez's): a length for bytevector and file ports, no nonblocking mode
+  (Def1 "port-has-port-length?" (fn ^any [^any x]
+    (let [p (ArgPort "port-has-port-length?" x)]
+      (or (== (.-Kind p) pMem) (== (.-Kind p) pString)))))
+  (Def1 "port-has-set-port-length!?" (fn ^any [^any x]
+    (let [p (ArgPort "port-has-set-port-length!?" x)]
+      (and (== (.-Kind p) pMem) (!= (.-f p) nil) (.-Out p)))))
+  (Def1 "port-has-port-nonblocking??" (fn ^any [^any x]
+    (let [p (ArgPort "port-has-port-nonblocking??" x)] (hasNonblocking p))))
+  (Def1 "port-has-set-port-nonblocking!?" (fn ^any [^any x]
+    (let [p (ArgPort "port-has-set-port-nonblocking!?" x)] (hasNonblocking p))))
+  (Def1 "port-length" (fn ^any [^any x]
+    (let [p (ArgPort "port-length" x)]
+      (checkOpen "port-length" p)
+      (when (== (.-Kind p) pString)
+        (return (conv int64 (len (.-runes p)))))
+      (when (!= (.-Kind p) pMem)
+        (AssertionViolation "port-length" "not supported for ~s" p))
+      (conv int64 (len (.-data p))))))
+  (Def2 "set-port-length!" (fn ^any [^any x ^any n]
+    (let [p (ArgPort "set-port-length!" x)
+          k (countArg "set-port-length!" n)]
+      (checkOpen "set-port-length!" p)
+      (when (not (and (== (.-Kind p) pMem) (!= (.-f p) nil) (.-Out p)))
+        (AssertionViolation "set-port-length!" "not supported for ~s" x))
+      (flushFile p)
+      (if (< k (len (.-data p)))
+        (do (set! (.-data p) (subslice (.-data p) _ k))
+            (when (> (.-low p) k) (set! (.-low p) k))
+            (.Truncate (.-f p) (conv int64 k)))
+        (do (set! (.-data p) (append (.-data p) (spread (make (slice byte) (- k (len (.-data p)))))))
+            (set! (.-dirty p) true)))
+      Unspec)))
+  (Def1 "port-nonblocking?" (fn ^any [^any x]
+    (let [p (ArgPort "port-nonblocking?" x)]
+      (checkOpen "port-nonblocking?" p)
+      (when (not (hasNonblocking p))
+        (AssertionViolation "port-nonblocking?" "not supported for ~s" x))
+      ;; Chez answers the value given
+      (when (== (.-nb p) nil)
+        (return false))
+      (.-nb p))))
+  (Def2 "set-port-nonblocking!" (fn ^any [^any x ^any b]
+    (let [p (ArgPort "set-port-nonblocking!" x)]
+      (checkOpen "set-port-nonblocking!" p)
+      (when (not (hasNonblocking p))
+        (AssertionViolation "set-port-nonblocking!" "not supported for ~s" x))
+      ;; the mode is kept and has no effect on reads (nothing of si's ports blocks on a nonblocking request)
+      (set! (.-nb p) b)
+      Unspec)))
+
+  ;; ----- transcoders and codecs
+  (Def "utf-8-codec" 0 0 (fn ^any [^{:tag (slice any)} a] codecUTF8))
+  (Def "latin-1-codec" 0 0 (fn ^any [^{:tag (slice any)} a] codecLatin1))
+  (Def "utf-16-codec" 0 0 (fn ^any [^{:tag (slice any)} a] codecUTF16))
+  (Def "native-eol-style" 0 0 (fn ^any [^{:tag (slice any)} a] (Intern "none")))
+  (Def "native-transcoder" 0 0 (fn ^any [^{:tag (slice any)} a] (NativeTranscoder)))
+  (Def "make-transcoder" 1 3 (fn ^any [^{:tag (slice any)} a]
+    (let [(values c ok) (assert (* Codec) (aget a 0))
+          eol "none"
+          mode "replace"]
+      (when (not ok)
+        (NotA "make-transcoder" "codec" (aget a 0)))
+      (when (> (len a) 1)
+        (set! eol (symOf (aget a 1)))
+        (switch eol
+          (case ["lf" "cr" "crlf" "nel" "crnel" "ls" "none"])
+          (default (NotAn "make-transcoder" "eol-style" (aget a 1)))))
+      (when (> (len a) 2)
+        (set! mode (symOf (aget a 2)))
+        (switch mode
+          (case ["ignore" "raise" "replace"])
+          (default (NotAn "make-transcoder" "error-handling-mode" (aget a 2)))))
+      (addr (lit Transcoder :Codec c :Eol eol :Mode mode)))))
+  (Def1 "transcoder-codec" (fn ^any [^any x] (.-Codec (ArgTranscoder "transcoder-codec" x))))
+  (Def1 "transcoder-eol-style" (fn ^any [^any x] (Intern (.-Eol (ArgTranscoder "transcoder-eol-style" x)))))
+  (Def1 "transcoder-error-handling-mode" (fn ^any [^any x] (Intern (.-Mode (ArgTranscoder "transcoder-error-handling-mode" x)))))
+  (Def1 "port-transcoder" (fn ^any [^any x]
+    (let [p (ArgPort "port-transcoder" x)]
+      (when (and (!= (.-Tr p) nil) (not (.-Binary p)) (== (.-Kind p) pMem))
+        (return (conv any (.-Tr p))))
+      (conv any false))))
+  (Def2 "transcoded-port" (fn ^any [^any x ^any t]
+    (let [p (ArgPort "transcoded-port" x)
+          tr (ArgTranscoder "transcoded-port" t)]
+      (checkOpen "transcoded-port" p)
+      (when (or (not (.-Binary p)) (!= (.-Kind p) pMem))
+        (NotA "transcoded-port" "binary port" x))
+      (let [np (addr @p)]
+        (set! (.-Binary np) false)
+        (set! (.-Tr np) tr)
+        (set! (.-Closed p) true)
+        np))))
+  (Def2 "bytevector->string" (fn ^any [^any b ^any t]
+    (let [bv (ArgBytevector "bytevector->string" b)
+          tr (ArgTranscoder "bytevector->string" t)]
+      (decodeAll "bytevector->string" (.-B bv) tr))))
+  (Def2 "string->bytevector" (fn ^any [^any s ^any t]
+    (let [str (ArgString "string->bytevector" s)
+          tr (ArgTranscoder "string->bytevector" t)
+          p (NewBytesOutput tr)]
+      (addr (lit Bytevector :B (append (make (slice byte) 0) (spread (encodeRunes p "string->bytevector" (.-R str)))))))))
+
+  ;; ----- custom ports
+  (range [_ spec (lit (slice string) "binary-input" "binary-output" "textual-input" "textual-output" "binary-input/output" "textual-input/output")]
+    (let [sp spec
+          name (+ "make-custom-" sp "-port")
+          bin (strings/HasPrefix sp "binary")
+          in (strings/HasSuffix sp "input")
+          both (strings/HasSuffix sp "input/output")
+          ^int n 5]
+      (when both (set! n 6))
+      (Def name n n (fn ^any [^{:tag (slice any)} a]
+        (let [idArg (ArgString name (aget a 0))
+              c (addr (lit customPort))
+              k 1]
+          (when (or in both)
+            (set! (.-Rd c) (ArgProc name (aget a k)))
+            (inc! k))
+          (when (or (not in) both)
+            (set! (.-Wr c) (ArgProc name (aget a k)))
+            (inc! k))
+          (set! (.-Gp c) (aget a k))
+          (set! (.-Sp c) (aget a (+ k 1)))
+          (set! (.-Cl c) (aget a (+ k 2)))
+          (range [_ x (lit (slice any) (.-Gp c) (.-Sp c) (.-Cl c))]
+            (when (!= x (conv any false))
+              (ArgProc name x)))
+          (when (== (.-Rd c) nil) (set! (.-Rd c) (conv any false)))
+          (when (== (.-Wr c) nil) (set! (.-Wr c) (conv any false)))
+          (addr (lit Port :Kind pCustom :In (or in both) :Out (or (not in) both) :Binary bin :Name (.String idArg) :cu c))))))))

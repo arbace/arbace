@@ -1,0 +1,494 @@
+(ns arbace.repr.cpp.ppcheck
+  "repr/cpp's token check (doc/cpp/CPP-SURVEY.md, \"As built: CX2\"; bin/repr-cpp pp-check, its driver
+  bin/lib/repr-cpp/pp-check): the corpora of test/cpp/corpora.edn read in place, each file lexed and
+  preprocessed by arbace.repr.c.lex and arbace.repr.c.pp in C++ mode (arbace.repr.cpp.host), and judged by
+  the two compilers' recorded answers, as C's CS51 (a) judges by gcc -E's:
+  - the preprocessed stream: the SHA-256 of its tokens against g++ -E -P's (test/repr/cpp/pp-gxx.sha256), or both
+    reject the file, or the known file lists it with its class;
+  - the lexer: the file's raw tokens (position and text, no comments or white space, no header names) against
+    clang's `-Xclang -dump-raw-tokens` (test/repr/cpp/lex-clang.sha256), or the known file lists it.
+  Also `pp` and `lex`, bin/repr-cpp's commands."
+  (:require [arbace.repr.c.lex :as lex]
+            [arbace.repr.c.pp :as pp]
+            [arbace.repr.c.ppcheck :as cpc]
+            [arbace.repr.cpp.host :as host]
+            [arbace.string :as str])
+  (:import [arbace.repr.c.lex Tok]
+           [java.util.concurrent Executors Callable]))
+
+(set! *warn-on-reflection* true)
+
+(def known-file "test/repr/cpp/pp-check-known.edn")
+(def gxx-file "test/repr/cpp/pp-gxx.sha256")
+(def clang-file "test/repr/cpp/lex-clang.sha256")
+(def corpora-file "test/cpp/corpora.edn")
+
+;; ---------------------------------------------------------------------------------------------
+;; The corpora
+
+(defn- slurp-latin1 ^String [^String path] (String. (lex/read-bytes path) "ISO-8859-1"))
+
+(defn- name* ^String [k] (if (keyword? k) (name k) (str k)))
+
+(defn file-entry
+  "A file's entry: {:name :read :fc}, its configuration from the corpus' :std and its dg-options."
+  [corpus ^String base ^String name]
+  (let [std (let [s (:std corpus)] (if (or (nil? s) (= s :from-file)) host/default-std (name* s)))
+        std (or (host/canonical-std std) host/default-std)
+        text (slurp-latin1 (str base "/" name))
+        opts (if (= (:std corpus) :from-file) (host/dg-options text) [])
+        ;; CP66 (b): the corpus owns its harness' include paths (:include-dirs, relative to its directory, "" the directory)
+        opts (into (vec opts) (map #(str "-I" (str/replace (str base "/" %) #"/$" "")) (:include-dirs corpus)))
+        ;; CX5d: the corpus' own compiler arguments (:cxx-args, `{jdk26u}` and `{build}` resolved by `lists`), after the file's
+        ;; CP76 (b): a path the build compiles with other options (HotSpot's share/adlc/, a host tool) has them in :cxx-args-for
+        opts (into opts (or (some (fn [{:keys [path-regex args]}] (when (re-find (re-pattern path-regex) name) args)) (:cxx-args-for corpus))
+                            (:cxx-args corpus)))]
+    {:name name :read (if (:absolute corpus) (str base "/" name) name)
+     ;; CP76 (b): :clang-args (clang's alone, `{checkout}` resolved by `lists`) join the modelled options, not g++'s
+     :fc (let [fc (host/file-config opts std)] (update fc :args into (:clang-args corpus)))}))
+
+(defn- shard-of
+  "Files `n` of `of` (1-based) of a corpus' sorted list, or all: --sample N takes every Nth file."
+  [files sample] (if (and sample (> (long sample) 1)) (vec (take-nth (long sample) files)) files))
+
+(defn lists
+  "Writes WORK/CORPUS/files.edn (the entries), base.txt, gxx.list and clang.list for each corpus id; `roots` maps
+  a :root to its directory, `sample` keeps every Nth file."
+  [^String work roots sample ids]
+  (let [man (read-string (slurp corpora-file))]
+    (doseq [id ids]
+      (let [corpus (or (first (filter #(= (:id %) (keyword id)) (:corpora man)))
+                       (throw (ex-info (str "no corpus " id) {})))
+            dir (str (get roots (:root (:where corpus))) "/" (:path (:where corpus)))
+            dir (str/replace dir #"/$" "")
+            all (cpc/corpus-files corpus dir)
+            ;; review 007's finding 10: a tree with another number of files than the manifest's (a partial extraction, another
+            ;; tree) is refused, sampled or not
+            _ (when (and (:count corpus) (not= (long (:count corpus)) (count all)))
+                (throw (ex-info (str id ": the tree " dir " has " (count all) " files, the manifest counts " (:count corpus)
+                                     " (a partial extraction?)") {})))
+            files (shard-of all sample)
+            corpus (assoc corpus :absolute (or (:absolute corpus) (= (:root (:where corpus)) :gcc-15.2.0)))
+            subst (fn [as] (mapv (fn [^String a] (reduce-kv (fn [a k v] (str/replace a (str "{" (name k) "}") (str v))) a roots)) as))
+            corpus (update (update corpus :cxx-args subst) :cxx-args-for (fn [fs] (mapv #(update % :args subst) fs)))
+            corpus (update corpus :clang-args (fn [as] (mapv (fn [^String a] (reduce-kv (fn [a k v] (str/replace a (str "{" (name k) "}") (str v))) a roots)) as)))
+            entries (mapv #(file-entry corpus dir %) files)
+            d (str work "/" id)]
+        (.mkdirs (java.io.File. d))
+        (spit (str d "/base.txt") dir)
+        (spit (str d "/files.edn") (pr-str entries))
+        ;; NAME, STD, ARGS, FILE as the compilers are given them (the fields separated by tabs)
+        (spit (str d "/gxx.list")
+              (str/join (for [e entries]
+                          (str (:name e) "\t" (:std (:fc e)) "\t" (str/join " " (:all-args (:fc e))) "\t" (:read e) "\t" (str/join " " (:args (:fc e))) "\n"))))
+        ;; re-review 032's F4: the same list under a header naming its corpus for the round trip's oracle record (the key of
+        ;; test/repr/cpp/roundtrip-oracle.edn: the id, every Nth file or all)
+        (spit (str d "/roundtrip.list")
+              (str "#list " id (if (and sample (> (long sample) 1)) (str "-every-" sample) "-all") "\n" (slurp (str d "/gxx.list"))))
+        (println (str id ": " (count files) " files" (when (> (count all) (count files)) (str " of " (count all)))))))))
+
+;; ---------------------------------------------------------------------------------------------
+;; The judges' texts
+
+(defn tokens-digest [texts] (cpc/tokens-digest texts))
+
+(defn- ud-split
+  "A user-defined literal token's texts, the literal and its suffix (the compilers' output lets them touch)."
+  [^Tok t]
+  (let [^String s (.-src t)
+        q (long (.lastIndexOf s (if (= (.-ch t) :UDLSTRING) 34 39)))]
+    [(subs s 0 (inc q)) (cpc/norm-ident (subs s (inc q)))]))
+
+(defn port-texts
+  "The texts of the port's stream's tokens, identifiers in gcc's spelling, user-defined literals as literal and suffix."
+  [r]
+  (mapcat (fn [^Tok t]
+            (cond
+              (#{\space \newline} (.-ch t)) nil
+              (#{:UDLSTRING :UDLCHAR} (.-ch t)) (ud-split t)
+              (= (.-ch t) :IDENTIFIER) [(cpc/norm-ident (.-src t))]
+              :else [(.-src t)]))
+          (:tokens r)))
+
+(defn gxx-texts
+  "The tokens of g++ -E -P's output `text` (lexed in C++ mode, `mask`, but without user-defined literals,
+  which g++'s output lets touch their suffix): its directive lines (#pragma ...) dropped."
+  [^String text mask]
+  (let [f (lex/new-file "gxx" (.getBytes text "ISO-8859-1"))
+        [ts _] (lex/tokens f (bit-and (long mask) (bit-not lex/F-UDL)))
+        out (java.util.ArrayList.)]
+    (loop [ts (seq ts) bol true]
+      (when ts
+        (let [^Tok t (first ts)]
+          (cond
+            (= (.-ch t) \newline) (recur (next ts) true)
+            (and bol (= (.-ch t) \#) (zero? (.length ^String (.-sep t))))
+            (let [line (take-while #(not= (.-ch ^Tok %) \newline) (next ts))]
+              ;; #embed lines (-P keeps the resource as __base64__ strings): the integers they stand for, as C's check reads them
+              (when (and (seq line) (= (.-src ^Tok (first line)) "embed"))
+                (let [strs (loop [xs (drop-while #(not= (.-src ^Tok %) "__base64__") line) acc []]
+                             (if-let [^Tok x (first xs)]
+                               (recur (next xs) (if (#{:STRINGLITERAL} (.-ch x)) (conj acc (let [q (.-src x)] (subs q 1 (dec (count q))))) acc))
+                               acc))
+                      bs (when (seq strs) (.decode (java.util.Base64/getDecoder) ^String (apply str strs)))]
+                  (when bs
+                    (doseq [[i b] (map-indexed vector bs)]
+                      (when (pos? i) (.add out ","))
+                      (.add out (str (bit-and (long b) 0xff)))))))
+              (recur (drop (count line) (next ts)) true))
+            :else (do (.add out (if (= (.-ch t) :IDENTIFIER) (cpc/norm-ident (.-src t)) (.-src t)))
+                      (recur (next ts) false))))))
+    (vec out)))
+
+(defn raw-lines
+  "The raw tokens of `bytes` as the lexer scans them (no header names, no comments or new-lines), a line
+  `LINE:COL<tab>TEXT` each: what clang's -dump-raw-tokens gives, normalized."
+  [^bytes bs mask]
+  (let [f (lex/new-file "raw" bs)
+        s (lex/scanner f (fn [_] nil) mask)]
+    (loop [acc (transient [])]
+      (let [^Tok t (lex/scan0 s)]
+        (cond
+          (= (.-ch t) :eof) (persistent! acc)
+          (= (.-ch t) \newline) (recur acc)
+          :else (let [;; clang places a token at the line splices that touch it from the left
+                      po (loop [o (.-po t)]
+                           (cond
+                             (and (>= o 2) (= (aget bs (dec o)) 10) (= (aget bs (- o 2)) 92)) (recur (- o 2))
+                             (and (>= o 3) (= (aget bs (dec o)) 10) (= (aget bs (- o 2)) 13) (= (aget bs (- o 3)) 92)) (recur (- o 3))
+                             :else o))
+                      [_ l c] (lex/position f po)]
+                  (recur (conj! acc (str l ":" c "\t" (-> ^String (.-src t) (.replace "\\\n" "") (.replace "\\\r\n" "")))))))))))
+
+(defn- unescape
+  "clang's escaping of a token's text (\\\" \\\\ \\n \\t and octal bytes) undone."
+  ^String [^String s]
+  (if (neg? (.indexOf s "\\"))
+    s
+    (let [b (StringBuilder.) n (.length s)]
+      (loop [i 0]
+        (when (< i n)
+          (let [c (.charAt s i)]
+            (if (and (= c \\) (< (inc i) n))
+              (let [d (.charAt s (inc i))]
+                (cond
+                  (and (>= (int d) 48) (<= (int d) 55) (<= (+ i 4) n))
+                  (do (.append b (char (Long/parseLong (subs s (inc i) (+ i 4)) 8))) (recur (+ i 4)))
+                  :else (do (.append b (case d \n \newline \t \tab \r \return \a (char 7) \b (char 8) \f (char 12) \v (char 11) d))
+                            (recur (+ i 2)))))
+              (do (.append b c) (recur (inc i)))))))
+      (.toString b))))
+
+(defn clang-lines
+  "The raw tokens of clang's `-Xclang -dump-raw-tokens` output `text`, as raw-lines gives theirs: comments,
+  white space and the end-of-file token left out, splices taken out of the texts."
+  [^String text]
+  (vec (for [[_ kind t line col] (re-seq #"(?m)^([a-z_0-9]+) +'((?:.|\n)*?)' +Loc=<[^>]*?:(\d+):(\d+)>" text)
+             :let [t (-> ^String (unescape t) (.replace "\\\n" "") (.replace "\\\r\n" ""))]
+             :when (not (or (= kind "comment") (= kind "eof")
+                            (and (= kind "unknown") (str/blank? t))))]
+         (str line ":" col "\t" t))))
+
+(defn lines-digest [lines] (tokens-digest lines))
+
+;; ---------------------------------------------------------------------------------------------
+;; The recorded answers
+
+(defn- load-db [^String file]
+  (let [f (java.io.File. file)]
+    (if (.exists f)
+      (into {} (for [l (str/split-lines (slurp f)) :when (seq l)
+                     :let [i (.indexOf ^String l "  ")]]
+                 [(subs l (+ i 2)) (let [d (subs l 0 i)] (if (= d "rejected") :rejected d))]))
+      {})))
+
+(defn- read-or-nil ^String [^String p] (let [f (java.io.File. p)] (when (.exists f) (slurp-latin1 p))))
+
+(defn- status-of [^String d ^String path]
+  (str/trim (or (read-or-nil (str d "/" path ".status")) "?")))
+
+(defn gxx-digest
+  "g++ -E's digest of a file of WORK/ID (WORK/ID/gxx/NAME.i and .status): :rejected, a digest, or nil when g++ did not run."
+  [^String d ^String nm mask]
+  (let [g (read-or-nil (str d "/gxx/" nm ".i"))]
+    (cond (nil? g) nil
+          (not= (status-of d (str "gxx/" nm)) "0") :rejected
+          :else (tokens-digest (gxx-texts g mask)))))
+
+(defn clang-digest
+  "clang's raw tokens' digest of a file of WORK/ID (WORK/ID/clang/NAME.raw), :rejected when clang did not run, nil when absent."
+  [^String d ^String nm]
+  (let [g (read-or-nil (str d "/clang/" nm ".raw"))]
+    (cond (nil? g) nil
+          (not= (status-of d (str "clang/" nm)) "0") :rejected
+          :else (lines-digest (clang-lines g)))))
+
+;; ---------------------------------------------------------------------------------------------
+;; The check
+
+(defn- judge
+  "The reference's judgment: agree, both-reject, known, unrecorded, differ."
+  [rec mine known? errors?]
+  (cond (nil? rec) "unrecorded"
+        (= rec mine) "agree"
+        (and (= rec :rejected) errors?) "both-reject"
+        known? "known"
+        :else "differ"))
+
+(defn check-file
+  "One file: [name lex-status pp-status port-digest detail]."
+  [^String work ^String id host ^String base levels e gxx-db clang-db known-pp known-lex]
+  (let [nm (:name e)
+        d (str work "/" id)
+        cfg (assoc (host/config host (:fc e) base) :missing (:missing host))
+        mask (long (:trigraphs cfg))
+        key (str id "/" nm)
+        lex-st (when (levels "lex")
+                 (let [lines (try (raw-lines (lex/read-bytes (str base "/" nm)) mask) (catch Throwable x [(str "#panic " x)]))]
+                   (judge (get clang-db key) (lines-digest lines) (contains? known-lex nm) false)))
+        [pp-st dg]
+        (when (levels "pp")
+          (let [r (try (pp/preprocess cfg (:read e)) (catch Throwable x {:tokens [] :errors [(str x)] :panic true :crash (str x)}))
+                dg (tokens-digest (port-texts r))
+                _ (let [^java.io.File o (java.io.File. (str d "/port/" nm ".txt"))]
+                    (.mkdirs (.getParentFile o))
+                    (spit o (str (str/join "\n" (port-texts r)) "\n" (str/join "\n" (map #(str "#error " %) (:errors r))) "\n")))
+                st (if (:crash r)
+                     "crash"
+                     (judge (get gxx-db key) dg (contains? known-pp nm) (seq (:errors r))))]
+            [st dg]))]
+    [nm (or lex-st "-") (or pp-st "-") (or dg "-")]))
+
+(defn check
+  "The check of the corpus `id` under WORK (its lists made, the compilers run): WORK/ID/files.tsv (name, lex
+  status, pp status, the port's digest), report.edn; its summary line printed. 0 when no file fails."
+  [^String work ^String id levels]
+  (let [d (str work "/" id)
+        base (str/trim (slurp (str d "/base.txt")))
+        entries (read-string (slurp (str d "/files.edn")))
+        known-all (read-string (slurp known-file))
+        known-pp (get-in known-all [:pp (keyword id)] {})
+        known-lex (get-in known-all [:lex (keyword id)] {})
+        missing (java.util.concurrent.ConcurrentHashMap/newKeySet)
+        h (assoc (host/load-host "test/cpp/host" "gxx") :missing missing)
+        gxx-db (load-db gxx-file)
+        clang-db (load-db clang-file)
+        threads (Integer/parseInt (or (System/getenv "REPR_CPP_THREADS") "4"))
+        pool (Executors/newFixedThreadPool threads)
+        t0 (System/nanoTime)
+        futs (mapv (fn [e] (.submit pool ^Callable (fn [] (check-file work id h base levels e gxx-db clang-db known-pp known-lex)))) entries)
+        rs (mapv #(.get ^java.util.concurrent.Future %) futs)
+        secs (/ (- (System/nanoTime) t0) 1e9)
+        _ (.shutdown pool)
+        by (fn [i] (frequencies (map #(nth % i) rs)))
+        bad #{"differ" "unrecorded" "crash"}
+        lex-fail (filter #(bad (nth % 1)) rs)
+        pp-fail (filter #(bad (nth % 2)) rs)
+        ;; review 007's finding 10: a recorded digest whose file is not in the tree (a shrunken corpus) fails
+        vanished (sort (for [db [gxx-db clang-db] [k _] db
+                             :when (str/starts-with? k (str id "/"))
+                             :let [nm (subs k (inc (count id)))]
+                             :when (not (.exists (java.io.File. (str base "/" nm))))]
+                         nm))
+        vanished (vec (distinct vanished))
+        stale (concat (for [[nm _] known-pp :when (not (some (fn [r] (and (= (first r) nm) (= (nth r 2) "known"))) rs))] [:pp nm])
+                      (for [[nm _] known-lex :when (not (some (fn [r] (and (= (first r) nm) (= (nth r 1) "known"))) rs))] [:lex nm]))
+        bytes (reduce + (map #(.length (java.io.File. (str base "/" (:name %)))) entries))]
+    (spit (str d "/files.tsv") (str/join (map #(str (str/join "\t" %) "\n") rs)))
+    (spit (str d "/differ.txt") (str/join (map #(str (first %) "\tlex " (nth % 1) "\tpp " (nth % 2) "\n") (distinct (concat lex-fail pp-fail)))))
+    (spit (str d "/missing.tsv") (str/join (map #(str (first %) "\t" (second %) "\n") (sort missing))))
+    (let [report {:corpus id :files (count rs) :bytes bytes :seconds (Math/round (double secs)) :threads threads
+                  :lex (by 1) :pp (by 2) :lex-failing (count lex-fail) :pp-failing (count pp-fail)
+                  :stale-known (vec stale) :missing-has (count missing) :vanished (count vanished)}]
+      (spit (str d "/report.edn") (pr-str report))
+      (println (str id ": " (count rs) " files, lex " (pr-str (by 1)) ", pp " (pr-str (by 2)) ", " (Math/round (double secs)) " s"
+                    (when (seq lex-fail) (str "; " (count lex-fail) " lex files failing: " (str/join " " (map first (take 5 lex-fail)))))
+                    (when (seq pp-fail) (str "; " (count pp-fail) " pp files failing: " (str/join " " (map first (take 5 pp-fail)))))
+                    (when (seq stale) (str "; " (count stale) " known entries stale"))
+                    (when (seq vanished) (str "; " (count vanished) " recorded files not in the tree: " (str/join " " (take 5 vanished))))
+                    (when (seq missing) (str "; " (count missing) " __has answers not recorded"))))
+      (if (or (seq lex-fail) (seq pp-fail) (seq stale) (seq vanished)) 1 0))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Recording
+
+(defn- write-db [^String file db]
+  (spit file (str/join (for [[k g] (sort-by first db)] (str (if (= g :rejected) "rejected" g) "  " k "\n")))))
+
+(defn record-deltas
+  "Merges the option lists' deltas the recorder computed (WORK/ID/opts/N.key and N.delta) into
+  test/cpp/host/opt-deltas-gxx.edn."
+  [^String work ids]
+  (let [file "test/cpp/host/opt-deltas-gxx.edn"
+        old (let [^java.io.File f (java.io.File. file)] (if (.exists f) (read-string (slurp f)) {}))
+        new (into {} (for [id ids
+                           :let [^java.io.File dir (java.io.File. (str work "/" id "/opts"))]
+                           ^java.io.File k (or (seq (.listFiles dir)) [])
+                           :when (.endsWith (.getName k) ".key")
+                           :let [dp (str (subs (.getPath k) 0 (- (count (.getPath k)) 4)) ".delta")]
+                           :when (.exists (java.io.File. ^String dp))]
+                       [(str/trim (slurp-latin1 (.getPath k))) (slurp-latin1 dp)]))
+        all (merge old new)]
+    (spit file (str ";; The effect of g++'s options on its predefined macros (bin/repr-cpp pp-check --record): for a standard and the\n"
+                    ";; options the reference is given (a file's dg-options but the ones that write files), the lines added to\n"
+                    ";; test/cpp/host/predefined/gxx/STD.h (#define, and #undef of what the options remove). Read with the Clojure reader.\n"
+                    "{" (str/join "\n " (for [[k v] (sort all)] (str (pr-str k) " " (pr-str v)))) "}\n"))
+    (println (str "recorded " file ": " (count all) " option lists (" (count new) " this run)"))))
+
+(defn record
+  "Rewrites the recorded answers of the corpora `ids` from the compilers' runs under WORK: g++'s digests
+  (pp-gxx.sha256) and clang's raw-token digests (lex-clang.sha256), the other corpora's lines kept."
+  [^String work ids]
+  (let [man (read-string (slurp corpora-file))
+        ids (vec ids)
+        idset (set ids)
+        keep-other (fn [db] (into {} (remove (fn [[k _]] (idset (subs k 0 (.indexOf ^String k "/")))) db)))
+        gxx (keep-other (load-db gxx-file))
+        clang (keep-other (load-db clang-file))
+        pool (Executors/newFixedThreadPool (Integer/parseInt (or (System/getenv "REPR_CPP_THREADS") "4")))
+        rows (for [id ids
+                   :let [d (str work "/" id)
+                         entries (read-string (slurp (str d "/files.edn")))]
+                   e entries]
+               (let [mask (host/feature-mask (:std (:fc e)) (:trigraphs (:fc e)) (:modules (:fc e)))]
+                 [(str id "/" (:name e))
+                  (.submit pool ^Callable (fn [] (gxx-digest d (:name e) mask)))
+                  (.submit pool ^Callable (fn [] (clang-digest d (:name e))))]))
+        rows (doall rows)
+        res (doall (for [[k g c] rows] [k (.get ^java.util.concurrent.Future g) (.get ^java.util.concurrent.Future c)]))
+        _ (.shutdown pool)
+        gxx (into gxx (for [[k g _] res :when g] [k g]))
+        clang (into clang (for [[k _ c] res :when c] [k c]))]
+    (write-db gxx-file gxx)
+    (write-db clang-file clang)
+    (record-deltas work ids)
+    (println (str "recorded " gxx-file ": " (count gxx) " files, " clang-file ": " (count clang) " files"))))
+
+(defn classify
+  "A difference's class from the file's text and the compilers' statuses: the feature that explains it."
+  [^String path ^String what ^String d ^String nm]
+  (let [s (slurp-latin1 path)]
+    (cond
+      (re-find #"fmodules" s) :modules-ts
+      (re-find #"#\s*embed|__has_embed" s) :embed
+      (re-find #"-march=|-mcpu=|-mtune=|-m(32|x32|avx|sse)" s) :target-option
+      (and (= what "pp") (not= (status-of d (str "gxx/" nm)) "0")) :gxx-rejects
+      (re-find #"(?m)^\s*(export\s+)?(import|module)\b" s) :modules
+      (re-find #"__has_cpp_attribute|__has_attribute|__has_builtin|__has_include" s) :has-answer
+      (re-find #"R\"[^(\s]*\(" s) :raw-string
+      (re-find #"[\"'][A-Za-z_]" s) :udl
+      (re-find #"\?\?[=(/)'<!>-]" s) :trigraphs
+      (re-find #"\bGCC (poison|pch)" s) :pragma
+      :else :unclassified)))
+
+(defn record-known
+  "Rewrites the known file's entries of the corpora `ids` from WORK/ID/files.tsv: each file whose lex or pp status is
+  differ or unrecorded-with-a-recorded-peer is listed with its class (the old class kept, else `classify`'s)."
+  [^String work ids]
+  (let [known (read-string (slurp known-file))
+        known (reduce
+                (fn [known id]
+                  (let [d (str work "/" id)
+                        base (str/trim (slurp (str d "/base.txt")))
+                        rows (map #(str/split % #"\t") (str/split-lines (slurp (str d "/files.tsv"))))
+                        entries (fn [level idx]
+                                  (let [old (get-in known [level (keyword id)] {})]
+                                    (into (sorted-map)
+                                          (keep (fn [r] (when (#{"differ" "known"} (nth r idx))
+                                                          [(first r) {:class (or (:class (get old (first r)))
+                                                                                 (classify (str base "/" (first r)) (name level) d (first r)))}])))
+                                          rows)))]
+                    (-> known
+                        (assoc-in [:pp (keyword id)] (entries :pp 2))
+                        (assoc-in [:lex (keyword id)] (entries :lex 1)))))
+                known ids)]
+    (spit known-file
+          (str ";; The files of the C++ token check (bin/repr-cpp pp-check; doc/cpp/CPP-SURVEY.md, \"As built: CX2\") whose answers\n"
+               ";; are not the compilers': at :pp the stream's tokens are not g++ -E -P's (test/repr/cpp/pp-gxx.sha256), at :lex the\n"
+               ";; raw tokens are not clang's (test/repr/cpp/lex-clang.sha256), each with its class. Written by\n"
+               ";; bin/repr-cpp pp-check --record-known, the classes kept. Read with the Clojure reader.\n"
+               "{:classes\n " (pr-str (:classes known)) "\n"
+               (str/join
+                 (for [level [:pp :lex]]
+                   (str " " level "\n {"
+                        (str/join "\n  "
+                                  (for [[k v] (sort (get known level)) :when (seq v)]
+                                    (str k "\n  {" (str/join "\n   " (map (fn [[f e]] (str (pr-str f) " " (pr-str e))) v)) "}")))
+                        "}" (if (= level :lex) "}" "") "\n")))))
+    (println "recorded" known-file)))
+
+;; ---------------------------------------------------------------------------------------------
+;; bin/repr-cpp pp, lex
+
+(defn- cfg-of [args]
+  (let [[opts files] (split-with #(.startsWith ^String % "-") args)
+        h (host/load-host "test/cpp/host" (if (some #{"--clang"} opts) "clang" "gxx"))
+        opts (vec (remove #{"--text" "--clang"} opts))
+        fc (host/file-config opts host/default-std)]
+    [(host/config h fc ".") files (some #{"--text"} args)]))
+
+(defn pp-main [args]
+  (let [[cfg files text?] (cfg-of args)]
+    (doseq [f files]
+      (let [r (pp/preprocess cfg f)]
+        (print (if text? (pp/text r) (pp/dump r)))
+        (doseq [w (:warnings r)] (binding [*out* *err*] (println "warning:" w)))))
+    (flush)))
+
+(defn lex-main [args]
+  (let [[cfg files _] (cfg-of args)]
+    (doseq [f files]
+      (doseq [l (raw-lines (lex/read-bytes f) (:trigraphs cfg))] (println l)))
+    (flush)))
+
+(defn diff-main
+  "bin/repr-cpp pp-diff: the first difference between g++'s tokens and the port's of a file of WORK/ID."
+  [work id nm]
+  (let [d (str work "/" id)
+        e (first (filter #(= (:name %) nm) (read-string (slurp (str d "/files.edn")))))
+        mask (host/feature-mask (:std (:fc e)) (:trigraphs (:fc e)) (:modules (:fc e)))
+        g (vec (gxx-texts (or (read-or-nil (str d "/gxx/" nm ".i")) "") mask))
+        base (str/trim (slurp (str d "/base.txt")))
+        r (pp/preprocess (host/config (host/load-host "test/cpp/host" "gxx") (:fc e) base) (:read e))
+        p (vec (port-texts r))
+        errs (map #(str "#error " %) (:errors r))
+        n (max (count g) (count p))
+        i (first (for [i (range n) :when (not= (get g i) (get p i))] i))]
+    (println (str "digests: g++ " (tokens-digest g) " port " (tokens-digest p) " recorded " (get (load-db gxx-file) (str id "/" nm))))
+    (println (str nm ": g++ " (count g) " tokens (status " (status-of d (str "gxx/" nm)) "), port " (count p) " tokens, " (count errs) " errors"))
+    (doseq [x (take 3 errs)] (println " " x))
+    (when i
+      (println "first difference at" i)
+      (println " g++ :" (pr-str (mapv lex/esc (subvec g (max 0 (- i 6)) (min (count g) (+ i 6))))))
+      (println " port:" (pr-str (mapv lex/esc (subvec p (max 0 (- i 6)) (min (count p) (+ i 6)))))))))
+
+(defn lexdiff-main
+  "bin/repr-cpp: the first difference between clang's raw tokens and the port's of a file of WORK/ID."
+  [work id nm]
+  (let [d (str work "/" id)
+        base (str/trim (slurp (str d "/base.txt")))
+        e (first (filter #(= (:name %) nm) (read-string (slurp (str d "/files.edn")))))
+        mask (host/feature-mask (:std (:fc e)) (:trigraphs (:fc e)) (:modules (:fc e)))
+        c (clang-lines (or (read-or-nil (str d "/clang/" nm ".raw")) ""))
+        p (raw-lines (lex/read-bytes (str base "/" nm)) mask)
+        i (first (for [i (range (max (count c) (count p))) :when (not= (get c i) (get p i))] i))]
+    (println (str nm ": clang " (count c) " tokens, port " (count p)))
+    (when i
+      (println "first difference at" i)
+      (println " clang:" (pr-str (subvec c (max 0 (- i 3)) (min (count c) (+ i 4)))))
+      (println " port :" (pr-str (subvec p (max 0 (- i 3)) (min (count p) (+ i 4))))))))
+
+(defn -main [cmd & args]
+  (case cmd
+    "lexdiff" (apply lexdiff-main args)
+    "diff" (apply diff-main args)
+    "pp" (pp-main args)
+    "lex" (lex-main args)
+    "lists" (let [[work roots sample & ids] args] (lists work (read-string roots) (read-string sample) ids))
+    "check" (let [[work levels & ids] args
+                  st (reduce max 0 (map #(check work % (set (str/split levels #","))) ids))]
+              (shutdown-agents)
+              (System/exit st))
+    "record" (let [[work & ids] args] (record work ids))
+    "record-known" (let [[work & ids] args] (record-known work ids))
+    (do (println "ppcheck: pp, lex, lists, check, record or record-known") (System/exit 2))))

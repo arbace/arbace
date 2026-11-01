@@ -45,17 +45,9 @@
   rl-local, rl-field: by the declaration's twin, or by name), not built ones."
   (:require [arbace.repr.java.decls :as d]
             [arbace.repr.java.scope :as sc]
-            [arbace.repr.java.jtypes :as jt]
+            [arbace.repr.java.javac-hook :as hook]
             [arbace.string :as str])
-  (:import [com.sun.tools.javac.tree JCTree JCTree$JCVariableDecl JCTree$JCMethodDecl JCTree$JCClassDecl]
-           [com.sun.tools.javac.code Symbol Symbol$VarSymbol Symbol$MethodSymbol Symbol$ClassSymbol
-            Symbol$PackageSymbol Symbol$ModuleSymbol Symbol$TypeVariableSymbol Type Type$ClassType
-            Type$ArrayType Type$TypeVar Type$WildcardType Type$IntersectionClassType Type$UnionClassType
-            Type$MethodType Type$ForAll Attribute Attribute$Constant Attribute$Class Attribute$Enum
-            Attribute$Array Attribute$Compound Attribute$Error Attribute$TypeCompound BoundKind
-            TypeAnnotationPosition Kinds$Kind]
-           [com.sun.tools.javac.util Pair]
-           [java.util IdentityHashMap]))
+  (:import [java.util IdentityHashMap]))
 
 (set! *warn-on-reflection* true)
 
@@ -70,14 +62,8 @@
   (let [ans (sc/walk-unit uctx)
         ^IdentityHashMap tw (:twins index)
         sym->native (IdentityHashMap.)]
-    (doseq [^java.util.Map$Entry e (when tw (.entrySet tw))]
-      (let [n (.getKey e) j (.getValue e)]
-        (cond
-          (instance? JCTree$JCVariableDecl j) (when-let [s (.-sym ^JCTree$JCVariableDecl j)] (.put sym->native s n))
-          (instance? JCTree$JCClassDecl j) (when-let [s (.-sym ^JCTree$JCClassDecl j)] (.put sym->native s n))
-          (instance? JCTree$JCMethodDecl j)
-          (when-let [s (.-sym ^JCTree$JCMethodDecl j)]
-            (.put sym->native s n)))))
+    ;; javac's declarations' symbols -> their native nodes (javac's half's, JN10: twins only with javac)
+    (when tw (hook/call-fixed! :nattr/sym->native tw sym->native))
     (doto {:uctx uctx :reg (:reg uctx) :ans ans :twins tw :sym->native sym->native :check check :diffs diffs
      :file (:file uctx) :reads (java.util.HashMap.) :etypes (IdentityHashMap.) :choices (IdentityHashMap.)
      :checked (IdentityHashMap.) :polys (IdentityHashMap.) :pmts (IdentityHashMap.) :args-checked (IdentityHashMap.) :lambdas (IdentityHashMap.) :mrefs (IdentityHashMap.) :mref-kinds (IdentityHashMap.) :pattern-components (IdentityHashMap.)
@@ -132,39 +118,24 @@
 ;;; ------------------------------------------------------------------------------------------
 ;;; Data: javac's answers and the native ones, rendered alike
 
-(def ^:private CMASK
+(def CMASK
   (bit-or 0xfff d/SYNTHETIC d/ANNOTATION d/ENUM d/DEPRECATED d/DEFAULT d/SEALED d/NON_SEALED
           d/DEPRECATED_ANNOTATION d/DEPRECATED_REMOVAL d/RECORD))
-(def ^:private MMASK
+(def MMASK
   (bit-or 0xfff d/SYNTHETIC d/DEPRECATED d/VARARGS d/DEFAULT d/DEPRECATED_ANNOTATION d/DEPRECATED_REMOVAL
           d/RECORD d/BRIDGE d/COMPACT_RECORD_CONSTRUCTOR d/GENERATEDCONSTR d/ANONCONSTR))
-(def ^:private FMASK
+(def FMASK
   (bit-or 0xfff d/SYNTHETIC d/ENUM d/DEPRECATED d/HASINIT d/DEPRECATED_ANNOTATION d/DEPRECATED_REMOVAL
           d/RECORD d/GENERATED_MEMBER))
-(def ^:private LMASK (bit-or 0xfff d/PARAMETER d/HASINIT d/VARARGS d/UNION))
+(def LMASK (bit-or 0xfff d/PARAMETER d/HASINIT d/VARARGS d/UNION))
 
-(defn- local-sym? [^Symbol s]
-  (and (instance? Symbol$VarSymbol s)
-       (let [ok (str (.kind (.owner s)))]
-         (or (= "MTH" ok) (= "VAR" ok) (not (#{"TYP" "PCK"} ok))))))
-
-(defn jcid "A javac class symbol's identity: its flat name; a local class's its declaration's position." [p ^Symbol c]
-  (if (and (instance? Symbol$ClassSymbol c) (.isDirectlyOrIndirectlyLocal ^Symbol$ClassSymbol c))
-    (if-let [n (.get ^IdentityHashMap (:sym->native p) c)] [:local (:pos n)] [:local-unknown (str (.flatName ^Symbol$ClassSymbol c))])
-    (str (.flatName ^Symbol c))))
+(defn jcid "A javac class symbol's identity: its flat name; a local class's its declaration's position (javac's half's)." [p c]
+  (hook/call-fixed! :nattr/jcid p c))
 
 (defn ncid "A native class symbol's identity (jcid's)." [c]
   (if (d/local-class? c) [:local (:pos (:tree c))] (:flat c)))
 
 (declare jtype jcompound ntype ncompound)
-
-(defn- jtvar-owner [p ^Symbol o]
-  (cond
-    (instance? Symbol$ClassSymbol o) (jcid p o)
-    (instance? Symbol$MethodSymbol o) (if-let [n (.get ^IdentityHashMap (:sym->native p) o)]
-                                        [:m (:pos n)]
-                                        [:m (jcid p (.owner o)) (str (.name o))])
-    :else [:owner (str o)]))
 
 (def ^:dynamic *unit-file*
   "The file of the unit whose facts are rendered (a method of another file's source is named as a
@@ -181,36 +152,10 @@
               [:m (ncid (:owner o)) (:name o)])
     [:owner (str o)]))
 
-(defn- janns [p ^Type t] (mapv #(jcompound p %) (.getAnnotationMirrors t)))
-
 (defn jtype
-  "javac type `t` as data."
-  [p ^Type t]
-  (when t
-    (let [tg (jt/tag-name t)]
-      (case tg
-        ("BYTE" "SHORT" "CHAR" "INT" "LONG" "FLOAT" "DOUBLE" "BOOLEAN" "VOID") (keyword (str/lower-case tg))
-        "BOT" :null
-        "NONE" nil
-        "ARRAY" [:array (jtype p (.-elemtype ^Type$ArrayType t)) (janns p t)]
-        "TYPEVAR" (if (instance? com.sun.tools.javac.code.Type$CapturedType t)
-                    [:captured]
-                    [:tvar (str (.name (.-tsym t))) (jtvar-owner p (.owner (.-tsym t))) (janns p t)])
-        "WILDCARD" (let [w ^Type$WildcardType t]
-                     (condp = (.-kind w)
-                       BoundKind/UNBOUND [:wild :unbound nil]
-                       BoundKind/EXTENDS [:wild :extends (jtype p (.-type w))]
-                       BoundKind/SUPER [:wild :super (jtype p (.-type w))]))
-        "CLASS" (cond
-                  (instance? Type$IntersectionClassType t)
-                  [:inter (mapv #(jtype p %) (.getExplicitComponents ^Type$IntersectionClassType t))]
-                  (instance? Type$UnionClassType t)
-                  [:union (mapv #(jtype p %) (.getAlternativeTypes ^Type$UnionClassType t))]
-                  :else
-                  (let [o (.getEnclosingType t)]
-                    [:class (jcid p (.-tsym t)) (mapv #(jtype p %) (.getTypeArguments t))
-                     (when (= "CLASS" (jt/tag-name o)) (jtype p o)) (janns p t)]))
-        [:other tg]))))
+  "javac type `t` as data (javac's half's)."
+  [p t]
+  (when t (hook/call-fixed! :nattr/jtype p t)))
 
 (defn ntype
   "Native type `t` (arbace.repr.java.decls's) as data."
@@ -241,21 +186,7 @@
        :double (str (Double/doubleToLongBits (double v)))
        (str v))])
 
-(defn- jvalue [p ^Attribute a]
-  (cond
-    (instance? Attribute$Constant a)
-    (let [tg (jt/tag-name (.-type a))
-          k (if (= tg "CLASS") :string (keyword (str/lower-case tg)))]
-      (into [:const] (const-data k (.-value ^Attribute$Constant a))))
-    (instance? Attribute$Class a) [:class (jtype p (.getValue ^Attribute$Class a))]
-    (instance? Attribute$Enum a) [:enum (jcid p (.-tsym (.-type a))) (str (.-name ^Symbol (.-value ^Attribute$Enum a)))]
-    (instance? Attribute$Array a) [:array (mapv #(jvalue p %) (.-values ^Attribute$Array a))]
-    (instance? Attribute$Compound a) (jcompound p a)
-    :else [:error]))
-
-(defn jcompound [p ^Attribute$Compound c]
-  [:ann (jcid p (.-tsym (.-type c)))
-   (mapv (fn [^Pair pr] [(str (.-name ^Symbol (.-fst pr))) (jvalue p (.-snd pr))]) (.-values c))])
+(defn jcompound "javac's annotation compound `c` as data (javac's half's)." [p c] (hook/call-fixed! :nattr/jcompound p c))
 
 (defn- nvalue [v]
   (cond
@@ -269,43 +200,16 @@
 (defn ncompound [c]
   (when c [:ann (ncid (:c c)) (mapv (fn [[n v]] [n (nvalue v)]) (:values c))]))
 
-(defn- jflags [^Symbol s mask] (bit-and (.flags s) (long mask)))
-
-(defn- jtparams [p tvs]
-  (mapv (fn [^Type tv] [(str (.name (.-tsym tv))) (mapv #(jtype p %) (.getBounds jt/*types* tv))]) tvs))
-
 (defn- ntparams [tvs] (mapv (fn [tv] [(:name tv) (mapv ntype (d/tvar-bounds tv))]) tvs))
 
-(defn jlocal-id [p ^Symbol s]
-  (let [n (.get ^IdentityHashMap (:sym->native p) s)]
-    (if (map? n) [:local (:pos n)] [:local-unknown (str (.name s))])))
+(defn jlocal-id "javac's local `s` as data (javac's half's)." [p s] (hook/call-fixed! :nattr/jlocal-id p s))
 
 (defn nlocal-id [e] [:local (:pos (:decl e))])
 
 (defn jdata
-  "javac's symbol `s` as data (a declaration's: its identity, flags and declared type)."
-  [p ^Symbol s decl?]
-  (cond
-    (nil? s) nil
-    (instance? Symbol$VarSymbol s)
-    (if (local-sym? s)
-      [:local (jlocal-id p s) (str (.name s)) (jflags s LMASK) (when decl? (jtype p (.-type s)))]
-      [:field (jcid p (.owner s)) (str (.name s)) (if decl? (jflags s FMASK) 0) (when decl? (jtype p (.-type s)))])
-    (instance? Symbol$MethodSymbol s)
-    (let [m ^Symbol$MethodSymbol s
-          t (.-type m)]
-      [:method (jcid p (.owner m)) (str (.name m)) (jflags m MMASK)
-       [:mt (jtparams p (.getTypeArguments t)) (mapv #(jtype p %) (.getParameterTypes t))
-        (jtype p (.getReturnType t)) (mapv #(jtype p %) (.getThrownTypes t))]
-       (mapv #(str (.name ^Symbol %)) (.-params m))
-       (some->> (.-defaultValue m) (jvalue p))])
-    (instance? Symbol$ClassSymbol s)
-    (let [c ^Symbol$ClassSymbol s]
-      [:class (jcid p c) (jflags c CMASK) (jtparams p (.getTypeArguments (.-type c)))
-       (jtype p (.supertype jt/*types* (.-type c))) (mapv #(jtype p %) (.interfaces jt/*types* (.-type c)))])
-    (instance? Symbol$PackageSymbol s) [:package (str (.getQualifiedName ^Symbol$PackageSymbol s))]
-    (instance? Symbol$ModuleSymbol s) [:module (str (.-name s))]
-    :else [:other (str s)]))
+  "javac's symbol `s` as data (a declaration's: its identity, flags and declared type; javac's half's)."
+  [p s decl?]
+  (when (some? s) (hook/call-fixed! :nattr/jdata p s decl?)))
 
 (defn ndata-local
   "Native local entry `e` as data (jdata's of its symbol); its type nil when inferred (var, an
@@ -345,41 +249,24 @@
 ;;; ------------------------------------------------------------------------------------------
 ;;; javac's symbols of native declarations (the model's bridges, arbace.repr.java.model/javac-of)
 
-(defn- module-sym ^Symbol$ModuleSymbol [m]
-  (if m (.getModule jt/*syms* (jt/jname m)) (.-unnamedModule jt/*syms*)))
-
-(defn- twin-of [p n]
+(defn twin-of [p n]
   (when d/*no-javac* (d/javac-needed! "javac's symbol of a native one"))
   (.get ^IdentityHashMap (:twins p) n))
 
 (defn rl-class
   "javac's class symbol for native class `c`: its declaration's twin (a class of this unit), else
-  Symtab's of its module and flat name."
-  ^Symbol$ClassSymbol [p c]
-  (or (when-let [t (and (:src c) (twin-of p (:tree c)))] (.-sym ^JCTree$JCClassDecl t))
-      (when-not (d/local-class? c)
-        (let [m (module-sym (if (:src c) (:module (:reg c)) (:module c)))
-              s (.getClass jt/*syms* m (jt/jname (:flat c)))]
-          (when s (try (.complete s) (catch Throwable _ nil)) s)))
-      (throw (ex-info (str "repr/java nattr: no javac class " (:flat c)) {:flat (:flat c)}))))
+  Symtab's of its module and flat name (javac's half's)."
+  [p c]
+  (hook/call-fixed! :nattr/rl-class p c))
 
-(defn rl-method ^Symbol$MethodSymbol [p m]
-  (or (when-let [t (and (:tree m) (twin-of p (:tree m)))] (.-sym ^JCTree$JCMethodDecl t))
-      ;; a member's clone with another owner (decls/member-clone): the member's
-      (when-let [o (:clone-of m)] (rl-method p o))
-      (let [c (rl-class p (:owner m))]
-        (first (filter #(instance? Symbol$MethodSymbol %) (.getSymbolsByName (.members c) (jt/jname (:name m))))))))
+(defn rl-method "javac's method symbol for native method `m` (javac's half's)." [p m] (hook/call-fixed! :nattr/rl-method p m))
 
 (defn rl-local
-  "javac's variable symbol for native local entry `e`: its declaration's twin's (a compact
-  constructor's implicit parameter: its constructor's)."
-  ^Symbol$VarSymbol [p e]
-  (.-sym ^JCTree$JCVariableDecl (twin-of p (:decl e))))
+  "javac's variable symbol for native local entry `e`: its declaration's twin's (javac's half's)."
+  [p e]
+  (hook/call-fixed! :nattr/rl-local p e))
 
-(defn rl-field ^Symbol$VarSymbol [p f]
-  (or (when-let [t (and (:tree f) (twin-of p (:tree f)))] (.-sym ^JCTree$JCVariableDecl t))
-      (let [c (rl-class p (:owner f))]
-        (first (filter #(= "VAR" (str (.kind ^Symbol %))) (.getSymbolsByName (.members c) (jt/jname (:name f))))))))
+(defn rl-field "javac's field symbol for native field `f` (javac's half's)." [p f] (hook/call-fixed! :nattr/rl-field p f))
 
 ;;; ------------------------------------------------------------------------------------------
 ;;; The model behind the answers (JFS75 (b), arbace.repr.java.model): the unit's symbols native
@@ -388,7 +275,7 @@
   "`s` in the native model when it is javac's symbol of a declaration of this unit (its declaration's
   twin's native symbol: a local entry, a field, a method, a class), else `s`."
   [p s]
-  (if (instance? Symbol s)
+  (if (hook/jsym? s)
     (if-let [n (.get ^IdentityHashMap (:sym->native p) s)]
       (let [a (answer p n)] (or (:local a) (:field a) (:method a) (:class a) s))
       s)
@@ -512,14 +399,7 @@
     :tvar [:other (:name s)]
     [:other (str s)]))
 
-(defn jname-data "javac's symbol of a name in code as data." [p ^Symbol s]
-  (if (instance? Symbol$ClassSymbol s) (jdata p s true) (jdata p s false)))
-
-(defn- jconst [^Type t]
-  (when-let [v (.constValue t)]
-    (let [tg (jt/tag-name t)
-          k (if (= tg "CLASS") :string (keyword (str/lower-case tg)))]
-      (const-data k (if (instance? Boolean v) (if v 1 0) v)))))
+(defn jname-data "javac's symbol of a name in code as data (javac's half's)." [p s] (hook/call-fixed! :nattr/jname-data p s))
 
 (defn nconst-type
   "A native constant expression's type as data: its type and its constant ([kind value], nil for
@@ -529,32 +409,20 @@
     [(ntype (:t t)) (apply const-data (:const t))]
     [(ntype t) nil]))
 
-(defn jconst-type "javac's type `t` with its constant as data (nconst-type's)." [p ^Type t]
-  [(jtype p t) (when t (jconst t))])
+(defn jconst-type "javac's type `t` with its constant as data (nconst-type's; javac's half's)." [p t] (hook/call-fixed! :nattr/jconst-type p t))
 
 (defn nmtype-data "A native instantiated method type as data: [:mt params ret throws]." [mt]
   [:mt (mapv ntype (:params mt)) (ntype (:ret mt)) (mapv ntype (:throws mt))])
 
-(defn jmtype-data "javac's method type as data (nmtype-data's)." [p ^Type t]
-  [:mt (mapv #(jtype p %) (.getParameterTypes t)) (jtype p (.getReturnType t)) (mapv #(jtype p %) (.getThrownTypes t))])
+(defn jmtype-data "javac's method type as data (nmtype-data's; javac's half's)." [p t] (hook/call-fixed! :nattr/jmtype-data p t))
 
 (defn nop-data "A native operator symbol as data: [:operator name params ret]." [o]
   (let [mt (d/method-type o)]
     [:operator (:name o) (mapv ntype (:params mt)) (ntype (:ret mt))]))
 
-(defn jop-data "javac's operator symbol as data (nop-data's)." [p ^Symbol o]
-  (let [t (.-type o)]
-    [:operator (str (.-name o)) (mapv #(jtype p %) (.getParameterTypes t)) (jtype p (.getReturnType t))]))
+(defn jop-data "javac's operator symbol as data (nop-data's; javac's half's)." [p o] (hook/call-fixed! :nattr/jop-data p o))
 
 ;;; A class's members (JFS79): the native class's against javac's ClassSymbol.members()
-
-(defn- jerased-key [p ^Type t]
-  (let [tg (jt/tag-name t)]
-    (case tg
-      "ARRAY" [:array (jerased-key p (.-elemtype ^Type$ArrayType t))]
-      "CLASS" (jcid p (.-tsym t))
-      "TYPEVAR" (jerased-key p (.erasure t jt/*types*))
-      (str/lower-case tg))))
 
 (defn- nerased-key [t]
   (let [t (d/erasure t)]
@@ -565,20 +433,9 @@
       :else (str t))))
 
 (defn jmembers-data
-  "javac's class `c`'s members as data: a set of [:m name flags params ret], [:f name flags], [:c name]
-  (its anonymous constructor left out: the overload tier's), classes by their identities (jcid)."
-  [p ^Symbol$ClassSymbol c]
-  (into #{}
-        (keep (fn [^Symbol s]
-                (let [k (str (.kind s))]
-                  (case k
-                    "MTH" (let [t (.erasure s jt/*types*)]
-                            [:m (str (.-name s)) (bit-and (.flags s) (long MMASK))
-                             (mapv #(jerased-key p %) (.getParameterTypes t)) (jerased-key p (.getReturnType t))])
-                    "VAR" [:f (str (.-name s)) (bit-and (.flags s) (long FMASK))]
-                    "TYP" [:c (str (.-name s))]
-                    nil)))
-              (.getSymbols (.members c)))))
+  "javac's class `c`'s members as data (nmembers-data's; javac's half's)."
+  [p c]
+  (hook/call-fixed! :nattr/jmembers-data p c))
 
 (defn nmembers-data "Native class `c`'s members as data (jmembers-data's)." [c]
   (let [ms (d/members-all c)]
@@ -599,8 +456,8 @@
   "The fact :enter/members of class declaration `t` (native class `c`, javac's `js`): its members by
   name, flags and erased signature, javac's TypeEnter's generated ones included, an anonymous class's
   constructor the overload tier's (JFS103 (b); declined where that is)."
-  [p t c ^Symbol js]
-  (when (instance? Symbol$ClassSymbol js)
+  [p t c js]
+  (when (hook/jclass-sym? js)
     (let [nd (try (binding [d/*anon-ctor* (when-let [h @anon-ctor-hook] #(h p %))] (nmembers-data c))
                   (catch Throwable e
                     (if (:arbace.repr.java.decls/decline (ex-data e)) ::declined [:failed (str e)])))]
@@ -664,10 +521,8 @@
   [m]
   [:method (ncid (:owner m)) (:name m) (mapv nerased-key (:params (d/method-type m)))])
 
-(defn jmethod-id "javac's method symbol as data (nmethod-id's)." [p ^Symbol s]
-  (when s
-    [:method (jcid p (.owner s)) (str (.name s))
-     (mapv #(jerased-key p %) (.getParameterTypes (.erasure s jt/*types*)))]))
+(defn jmethod-id "javac's method symbol as data (nmethod-id's; javac's half's)." [p s]
+  (when s (hook/call-fixed! :nattr/jmethod-id p s)))
 
 ;;; The platform classes' members (JFS106 (b)): the class files the run read against javac's ClassSymbols
 

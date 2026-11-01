@@ -1,0 +1,330 @@
+(ns arbace.repr.cpp.rtcheck
+  "repr/cpp's round trip (doc/cpp/CPP-SURVEY.md, \"As built: CX3, CX4\"), the Arbace half of bin/repr-cpp
+  roundtrip: `forms` reads each file of a list from its oracle dump into forms (WORK/forms/NAME.ae) and prints them
+  (WORK/print/NAME, the same relative name under another root); `again` reads the prints' dumps into forms
+  (WORK/forms2/NAME.ae), level 1's other side. The levels are judged by the driver (cmp of the .ae texts, of the
+  normalized dumps, of the objects)."
+  (:require [arbace.repr.cpp :as rc]
+            [arbace.string :as str])
+  (:import [java.util.concurrent Executors Callable Future]))
+
+(set! *warn-on-reflection* true)
+
+(defn- spit-utf8 [^String path ^String s]
+  (let [f (java.io.File. path)]
+    (.mkdirs (.getParentFile f))
+    (spit f s)))
+
+(defn- full-level
+  "Level 5 (mode :full): the file read in mode :full, written as .ae text and read back, printed: the original's bytes.
+  \"same\", \"differs\" or \"refused: CLASS\"."
+  [^String dump ^String src ^String nm ^String std]
+  (try
+    (let [rd (rc/read-cpp dump src nm std true)]
+      (if (:refused rd)
+        (str "refused: " (name (:refused rd)))
+        (let [[ff forms] (rc/read-unit-text (rc/unit-text rd))
+              t (rc/print-cpp ff forms)]
+          (if (java.util.Arrays/equals (.getBytes ^String t "ISO-8859-1") (java.nio.file.Files/readAllBytes (.toPath (java.io.File. src))))
+            "same" "differs"))))
+    (catch Throwable e (str "crash: " (str/replace (str e) #"[\t\n]" " ")))))
+
+(defn- one
+  "One file: [name status texts detail]; status ok, refused, crash."
+  [^String work ^String nm ^String std ^String dump ^String src ^String forms-dir ^String print-dir]
+  (try
+    (let [rd (rc/read-cpp dump src nm std)]
+      (if (:refused rd)
+        [nm "refused" 0 (str (name (:refused rd)) ": " (str/replace (str (:message rd)) #"[\t\n]" " "))]
+        (let [ae (rc/unit-text rd)
+              txt (when print-dir (rc/print-cpp (:file-form rd) (:forms rd)))
+              n (reduce + (vals (dissoc (:texts rd) :macro-form :group)))]
+          (spit-utf8 (str forms-dir "/" nm ".ae") ae)
+          (when print-dir (spit-utf8 (str print-dir "/" nm) txt))
+          [nm "ok" n (pr-str (:texts rd)) (if print-dir (full-level dump src nm std) "-")])))
+    (catch Throwable e
+      [nm "crash" 0 (str/replace (str e) #"[\t\n]" " ")])))
+
+(defn run
+  "Each line of LIST (name, std, ...) whose dump DUMPS/NAME.edn exists: its forms under FORMS, its print under PRINT
+  (none when PRINT is \"-\"), its source SRC-ROOT/NAME; the results in OUT (name, status, text forms, detail)."
+  [^String list ^String dumps ^String src-root ^String forms-dir ^String print-dir ^String out]
+  (let [rows (for [l (str/split-lines (slurp list)) :when (seq l)] (str/split l #"\t" -1))
+        rows (filter (fn [[nm]] (.exists (java.io.File. (str dumps "/" nm ".edn")))) rows)
+        threads (Integer/parseInt (or (System/getenv "REPR_CPP_THREADS") "4"))
+        pool (Executors/newFixedThreadPool threads)
+        t0 (System/nanoTime)
+        futs (mapv (fn [[nm std]]
+                     (.submit pool ^Callable (fn [] (one nil nm std (str dumps "/" nm ".edn") (str src-root "/" nm) forms-dir
+                                                         (when-not (= print-dir "-") print-dir)))))
+                   rows)
+        rs (mapv #(.get ^Future %) futs)]
+    (.shutdown pool)
+    (spit out (str/join (map #(str (str/join "\t" %) "\n") rs)))
+    (println (str (count rs) " files: " (pr-str (frequencies (map second rs))) ", "
+                  (count (filter #(and (= (second %) "ok") (zero? (long (nth % 2)))) rs)) " without a text form, "
+                  (Math/round (double (/ (- (System/nanoTime) t0) 1e9))) " s"))))
+
+(defn- bytes-of [^String p]
+  (let [f (java.io.File. p)] (when (.exists f) (java.nio.file.Files/readAllBytes (.toPath f)))))
+
+(defn- same? [^String a ^String b]
+  (let [x (bytes-of a) y (bytes-of b)] (boolean (and x y (java.util.Arrays/equals ^bytes x ^bytes y)))))
+
+(defn- status [^String p] (let [b (bytes-of p)] (when b (str/trim (String. ^bytes b "UTF-8")))))
+
+(defn- tsv [^String p]
+  (if (.exists (java.io.File. p))
+    (into {} (for [l (str/split-lines (slurp p)) :when (seq l) :let [r (str/split l #"\t" -1)]] [(first r) r]))
+    {}))
+
+(defn oracle-rejects?
+  "Whether a dump's status and stderr are clang rejecting the file (review 007's finding 3): cxxdump's status 1 (clang exited
+  1; cxxdump's own failures, a crash or a kill of clang are 3, a timeout of ours 124) and one of clang's own diagnostics
+  (`FILE:LINE:COL: error:` or `fatal error:`) in its stderr."
+  [st ^String err]
+  (boolean (and (= st "1") err (re-find #"(?m)^[^\s:][^:\n]*:[0-9]+:[0-9]+: (fatal )?error: " err))))
+
+(defn- failure-kind
+  "The kind of a dump that failed and is not a rejection (CP130 (c); re-review 032's F3): 124, our timeout (:timeout); status 3 with
+  cxxdump saying that clang failed (not a rejection), a crash or a kill of clang (:crash). Nothing else is a kind: cxxdump's own
+  filter errors (also status 3), a status 1 without clang's diagnostic, a kill of cxxdump itself are the check's failures, never recorded."
+  [st ^String err]
+  (cond (= st "124") :timeout
+        (and (= st "3") err (re-find #"clang failed (\(not a rejection\)|on the unit \(clang-failed\))" err)) :crash))
+
+(defn record
+  "WORK's oracle rejections and failures as the entry of its corpus (WORK/list.key) in ORACLE-FILE (CP130 (c)): the names rejected by clang's
+  own diagnostics and the names whose dump failed, by kind; the other corpora's entries kept."
+  [^String work ^String oracle-file & [mode]]
+  (let [ck (let [f (java.io.File. (str work "/list.key"))] (when (.exists f) (str/trim (slurp f))))
+        _ (when-not (seq ck) (println "record: WORK has no list.key (the list's header line or --corpus)") (System/exit 2))
+        names (for [l (str/split-lines (slurp (str work "/list.tsv"))) :when (seq l)] (first (str/split l #"\t")))
+        sts (into {} (for [nm names] [nm [(status (str work "/orig/" nm ".status"))
+                                          (some-> (bytes-of (str work "/orig/" nm ".err")) (String. "UTF-8"))]]))
+        rej (vec (sort (for [[nm [st err]] sts :when (oracle-rejects? st err)] nm)))
+        fails (into (sorted-map) (for [[nm [st err]] sts :when (and (failure-kind st err) (not (oracle-rejects? st err)))] [nm (failure-kind st err)]))
+        all (if (.exists (java.io.File. oracle-file)) (read-string (slurp oracle-file)) {})
+        ;; re-review 032's F5: a run of part of the list updates the names it has and keeps the others; "replace" writes the run alone
+        prev (get-in all [:corpora ck])
+        have (set names)
+        kept-rej (if (= mode "replace") [] (remove have (:rejected prev)))
+        kept-fails (if (= mode "replace") {} (into {} (remove (fn [[nm _]] (have nm)) (:fails prev))))
+        rej (vec (sort (distinct (concat kept-rej rej))))
+        fails (into (sorted-map) (merge kept-fails fails))
+        kept (+ (count kept-rej) (count kept-fails))
+        all (assoc-in all [:corpora ck] {:rejected rej :fails fails})
+        out (str ";; The oracle's rejections (clang's own diagnostics) and failures (a dump that failed: :timeout, :crash) of the round trip's corpora, by name\n"
+                 ";; (review 018's CP130 (c); bin/repr-cpp roundtrip --record-oracle): a rejection or failure not listed fails the round trip. Read with the Clojure reader.\n"
+                 "{:corpora {\n"
+                 (str/join (for [[k v] (sort-by key (:corpora all))]
+                             (str " " (pr-str k) "\n {:fails " (pr-str (into (sorted-map) (:fails v))) "\n  :rejected [" (str/join "\n   " (map pr-str (:rejected v))) "]}\n")))
+                 "}}\n")]
+    (spit oracle-file out)
+    (println (str "record: " ck ": " (count rej) " rejected, " (count fails) " failing, in " oracle-file
+                 (when (pos? kept) (str "; " kept " recorded names the run does not have kept (--replace-oracle drops them)"))))))
+
+(defn judge
+  "The levels of each file of WORK's list, against the known file: WORK/results.tsv (name, verdict, class, read, l1,
+  l3, l4 g++, l4 clang, text forms) and WORK/summary.edn; prints the table's line. Exit status 1 when a file fails."
+  [^String work ^String known-file & [objects oracle-file results-dir results-mode]]
+  (let [known (if (.exists (java.io.File. known-file)) (read-string (slurp known-file)) {})
+        ;; CP130 (c): the oracle's rejections and failures of the corpus WORK/list.key names, recorded by name (and kind) in
+        ;; ORACLE-FILE: a rejection or failure not recorded fails; no key or no entry: unrecorded (any rejection stands)
+        okey (let [f (java.io.File. (str work "/list.key"))] (when (.exists f) (let [k (str/trim (slurp f))] (when (seq k) k))))
+        orec (when (and okey oracle-file (.exists (java.io.File. ^String oracle-file)))
+               (get-in (read-string (slurp oracle-file)) [:corpora okey]))
+        _ (cond (nil? okey) (.println System/err "rtcheck: no corpus key (a #list header or --corpus): the oracle's rejections and failures are taken on trust, no record is read")
+                (nil? orec) (.println System/err (str "rtcheck: no record for the corpus " okey " in " oracle-file ": its rejections and failures are taken on trust")))
+        rejected-rec (set (:rejected orec)) fails-rec (:fails orec {})
+        ;; CP127 (b): a file's name in the known file and the results is qualified by its corpus, the list's key without its
+        ;; sampling (`gxx-dg-every-10` -> `gxx-dg/NAME`); a name the list already writes under the corpus (`samples/x.cpp`, a list
+        ;; whose names are qualified) is kept, and a list without a key names its files as they are written
+        corpus (when okey (str/replace okey #"-(every-[0-9]+|all)$" ""))
+        qual (fn [^String nm] (if (and corpus (not (str/starts-with? nm (str corpus "/")))) (str corpus "/" nm) nm))
+        ;; CP124 (b): the recorded results of the list the key names (RESULTS-DIR/KEY.edn, NAME -> verdict): a recorded :pass that
+        ;; does not pass fails (a regression, whatever else holds), and a run of the list is held to the record's names; with
+        ;; RESULTS-MODE "record" the record is not read but written from this run, when no file fails
+        record? (contains? #{"record" "record-replace"} results-mode)
+        mode-replace (= results-mode "record-replace")
+        rfile (when (and okey (seq results-dir)) (str results-dir "/" okey ".edn"))
+        rrec (when (and rfile (not record?) (.exists (java.io.File. ^String rfile))) (read-string (slurp rfile)))
+        rec-files (:files rrec {})
+        ;; CP165 (b), CP172 (b): a recorded :known may carry its class, [:known :forms-differ]; the bare keyword (the old format) holds the verdict alone
+        rv (fn [x] (if (vector? x) (first x) x))
+        rc (fn [x] (when (vector? x) (second x)))
+        kfiles (:files known {})
+        ;; level 4 (review 007's finding 7): the objects are required unless the run had --no-objects; a compiler may fail on
+        ;; the original only where the known file's :orig-fails records it (NAME -> the compilers, #{:gxx :clang})
+        objects? (not= objects "no-objects")
+        ofails (:orig-fails known {})
+        names (for [l (str/split-lines (slurp (str work "/list.tsv"))) :when (seq l)] (first (str/split l #"\t")))
+        r1 (tsv (str work "/read.tsv"))
+        r2 (tsv (str work "/read2.tsv"))
+        obj (fn [side who nm] (status (str work "/obj/" side "/" who "/" nm ".status")))
+        rows (for [nm names]
+               (let [o (status (str work "/orig/" nm ".status"))
+                     [_ rs texts detail full] (get r1 nm)
+                     read (cond (= o "0") (if (nil? rs) "no-read" rs)
+                                (oracle-rejects? o (some-> (bytes-of (str work "/orig/" nm ".err")) (String. "UTF-8"))) "oracle-rejects"
+                                (nil? o) "no-dump"
+                                :else (str "dump-error-" o))
+                     ;; CP130 (c): against the record of this corpus' oracle failures
+                     oerr (some-> (bytes-of (str work "/orig/" nm ".err")) (String. "UTF-8"))
+                     read (cond (nil? orec) read
+                                (and (= read "oracle-rejects") (not (contains? rejected-rec nm))) "oracle-rejects-new"
+                                (and (re-matches #"dump-error-[0-9]+" read) (some? (failure-kind o oerr)) (= (get fails-rec nm) (failure-kind o oerr))) "oracle-fails"
+                                :else read)
+                     ;; the dumps' own failures (review 018's R1): the original's -norm dump, and the print's dump and -norm dump
+                     ;; failing for another reason than clang's rejection of the print are the check's failure, never known
+                     err-of (fn [side nm] (some-> (bytes-of (str work "/" side "/" nm ".err")) (String. "UTF-8")))
+                     nst (status (str work "/orig/" nm ".norm.status"))
+                     p (status (str work "/dump2/" nm ".status"))
+                     pn (status (str work "/dump2/" nm ".norm.status"))
+                     read (cond (not= read "ok") read
+                                (not= nst "0") (str "dump-error-norm-" (or nst "none"))
+                                (and p (not= p "0") (not (oracle-rejects? p (err-of "dump2" nm)))) (str "dump-error-print-" p)
+                                (and (= p "0") (not= pn "0")) (str "dump-error-print-norm-" (or pn "none"))
+                                :else read)
+                     l1 (when (= read "ok") (and (= "ok" (second (get r2 nm))) (same? (str work "/forms/" nm ".ae") (str work "/forms2/" nm ".ae"))))
+                     l3 (when (= read "ok") (and (= "0" (status (str work "/dump2/" nm ".status"))) (same? (str work "/orig/" nm ".norm") (str work "/dump2/" nm ".norm"))))
+                     l4 (fn [who]
+                          (when (= read "ok")
+                            (let [a (obj "orig" who nm) b (obj "print" who nm)]
+                              (cond (nil? a) (when objects? :missing)
+                                    (not= a "0") (if (contains? (get ofails (qual nm)) (keyword who)) :orig-fails :orig-fails-unrecorded)
+                                    (not= b "0") false
+                                    :else (same? (str work "/obj/orig/" who "/" nm ".o") (str work "/obj/print/" who "/" nm ".o"))))))
+                     g (l4 "gxx") c (l4 "clang")
+                     ok4? (fn [x] (or (true? x) (nil? x) (= x :orig-fails)))
+                     l5 (or full "-")
+                     pass (and (= read "ok") l1 l3 (contains? #{"same" "-"} l5) (ok4? g) (ok4? c))
+                     q (qual nm)
+                     k (get kfiles q)
+                     ;; the first level that fails (review 007's finding 8): a known file is known only when its class names
+                     ;; that level; the objects count as differing only when both were made and compared
+                     first (cond pass nil
+                                 (not= read "ok") :read
+                                 ;; level 1 is two classes (review 018's R6): the print rejected by clang (its dump's status 1 with a
+                                 ;; diagnostic: the failures of any other kind are dump errors above), and forms that differ
+                                 (not l1) (if (and p (not= p "0")) :l1-rejected :l1-differs)
+                                 (not l3) :l3
+                                 (not (and (ok4? g) (ok4? c))) (cond (not (every? #(or (ok4? %) (false? %)) [g c])) :l4-other
+                                                                     (and (false? g) (ok4? c)) :l4-gxx
+                                                                     :else :l4)
+                                 :else :l5)
+                     fits (get {:print-rejected #{:l1-rejected} :forms-differ #{:l1-differs} :ast-differs #{:l3}
+                                :objects-differ #{:l4 :l4-gxx} :gxx-objects-location #{:l4-gxx} :read-crash #{:read}} k #{})
+                     ;; a dump that failed for another reason than clang's rejection is the check's failure, never known
+                     verdict (cond (= read "oracle-rejects") "oracle-rejects" (= read "oracle-fails") "oracle-fails" pass "pass"
+                                   (= read "oracle-rejects-new") "fail"
+                                   (or (= read "no-dump") (str/starts-with? read "dump-error")) "fail"
+                                   (and k (contains? fits first)) "known" :else "fail")
+                     regression (and (= :pass (rv (get rec-files q))) (not= verdict "pass"))
+                     ;; report 043's F5: a recorded :known, :oracle-rejects or :oracle-fails that is now another non-pass verdict is
+                     ;; a change (a pass is an improvement, counted): the record holds every verdict
+                     changed (and (not regression) (contains? rec-files q) (not= :pass (rv (get rec-files q))) (not= verdict "pass") (not= verdict "fail")
+                                  (or (not= (keyword verdict) (rv (get rec-files q)))
+                                      (and (= verdict "known") (rc (get rec-files q)) (not= (rc (get rec-files q)) k))))
+                     verdict0 verdict
+                     verdict (if (or regression changed) "fail" verdict)]
+                 [q verdict (if k (name k) "-") read (str l1) (str l3) (str g) (str c) (or texts "-") (or full "-") (if first (name first) "-")
+                  (cond regression "regression" changed (str "changed:" (name (rv (get rec-files q))) (when (rc (get rec-files q)) (str ":" (name (rc (get rec-files q))))) ">" verdict0
+                                                       (when (and (= verdict0 "known") k) (str ":" (name k)))) :else "-")]))
+        rows (vec rows)
+        cnt (fn [pred] (count (filter pred rows)))
+        qs (set (map first rows))
+        rec-missing (when rrec (sort (remove qs (keys rec-files))))
+        rec-new (when rrec (sort (remove #(contains? rec-files %) (map first rows))))
+        summary {:files (count rows)
+                 :verdicts (frequencies (map second rows))
+                 :read-ok (cnt #(= (nth % 3) "ok"))
+                 :refused (cnt #(= (nth % 3) "refused"))
+                 :crash (cnt #(= (nth % 3) "crash"))
+                 :oracle-rejects (cnt #(= (nth % 3) "oracle-rejects"))
+                 :oracle-fails (cnt #(= (nth % 3) "oracle-fails")) :oracle-rejects-new (cnt #(= (nth % 3) "oracle-rejects-new"))
+                 :oracle-corpus (when orec okey)
+                 :oracle-record (cond orec okey okey (str "none for " okey) :else "none (no corpus key)")
+                 ;; recorded names that no longer reject or fail (their file reads ok) and those the run does not have (re-review 032's F2)
+                 :oracle-stale-ok (when orec (count (filter (fn [nm] (let [r (some #(when (= (first %) (qual nm)) (nth % 3)) rows)] (and r (not (#{"oracle-rejects" "oracle-fails"} r)))))
+                                                            (concat rejected-rec (keys fails-rec)))))
+                 :oracle-stale-missing (when orec (count (remove (set names) (concat rejected-rec (keys fails-rec)))))
+                 :oracle-stale (when orec (count (remove (fn [nm] (let [r (some #(when (= (first %) (qual nm)) (nth % 3)) rows)] (#{"oracle-rejects" "oracle-fails"} r)))
+                                                         (concat rejected-rec (keys fails-rec)))))
+                 :dump-errors (cnt #(or (= (nth % 3) "no-dump") (str/starts-with? (nth % 3) "dump-error")))
+                 :l1 (cnt #(= (nth % 4) "true")) :l3 (cnt #(= (nth % 5) "true"))
+                 :l4-gxx (cnt #(= (nth % 6) "true")) :l4-gxx-orig-fails (cnt #(= (nth % 6) ":orig-fails"))
+                 :l4-unrecorded-orig-fails (cnt #(or (= (nth % 6) ":orig-fails-unrecorded") (= (nth % 7) ":orig-fails-unrecorded")))
+                 :l4-missing (cnt #(or (= (nth % 6) ":missing") (= (nth % 7) ":missing")))
+                 :l5-full (cnt #(= (nth % 9) "same")) :l5-differs (cnt #(= (nth % 9) "differs"))
+                 :l5-refused (frequencies (keep #(when (str/starts-with? (nth % 9) "refused") (nth % 9)) rows))
+                 :l5-crash (cnt #(str/starts-with? (nth % 9) "crash"))
+                 :l4-clang (cnt #(= (nth % 7) "true")) :l4-clang-orig-fails (cnt #(= (nth % 7) ":orig-fails"))
+                 :no-text-form (cnt #(and (= (nth % 3) "ok") (= (nth % 8) "0")))
+                 :known (frequencies (keep #(when (= (second %) "known") (nth % 2)) rows))
+                 :results-record (cond record? (str "recording " okey) rrec okey okey (str "none for " okey) :else "none (no corpus key)")
+                 :regressions (cnt #(= (nth % 11) "regression"))
+                 :changed (cnt #(str/starts-with? (nth % 11) "changed:"))
+                 :improvements (when rrec (cnt #(and (= (second %) "pass") (contains? rec-files (first %)) (not= :pass (rv (get rec-files (first %)))))))
+                 :results-missing (when rrec (count rec-missing)) :results-new (when rrec (count rec-new))}]
+    (spit (str work "/results.tsv") (str/join (map #(str (str/join "\t" %) "\n") rows)))
+    (spit (str work "/summary.edn") (pr-str summary))
+    (println (pr-str summary))
+    (let [fails (filter #(= (second %) "fail") rows)
+          held-bad (or (seq rec-missing) (seq rec-new))
+          ;; report 043's F6: a corpus the oracle record has is a recorded corpus, so its results must be recorded too, unless
+          ;; RESULTS-DIR/pending.edn (a set of keys) says the record is still to be made; --record-results from a run whose names
+          ;; are not the existing record's is refused unless "record-replace" (--replace-results)
+          pending (let [f (java.io.File. (str results-dir "/pending.edn"))] (if (and (seq results-dir) (.exists f)) (set (read-string (slurp f))) #{}))
+          ;; report 052's N2: a pending key whose KEY.edn exists, or that the oracle record does not have, is stale (the removal
+          ;; the file asks for is enforced); N3: a key the oracle record (which exists) does not have is not held either
+          ocorpora (when (and oracle-file (.exists (java.io.File. ^String oracle-file))) (set (keys (:corpora (read-string (slurp oracle-file))))))
+          stale (when (and (seq results-dir) (not record?))
+                  (sort (filter (fn [k] (or (.exists (java.io.File. (str results-dir "/" k ".edn"))) (and ocorpora (not (contains? ocorpora k))))) pending)))
+          ;; CP164 (c): an improvement is a count in a sample run and a failure in a whole-corpus run (the key ends in -all), so the
+          ;; record of a whole corpus stays exact
+          improved-fail (and okey (re-find #"-all$" okey) (not record?) (pos? (or (:improvements summary) 0)))
+          unknown (and okey ocorpora (nil? orec) (not record?) (seq results-dir))
+          unheld (and orec okey (not record?) (seq results-dir) (nil? rrec) (not (contains? pending okey)))
+          rec-names (when (and record? rfile (.exists (java.io.File. ^String rfile))) (set (keys (:files (read-string (slurp rfile))))))
+          shrinks (and rec-names (not= mode-replace true) (not= rec-names (set (map first rows))))]
+      (when (seq fails)
+        (println (str (count fails) " failing: " (str/join " " (map #(str (first %) (when (= "regression" (nth % 11)) " (recorded :pass)")
+                                                                          (when (str/starts-with? (nth % 11) "changed:") (let [[a b] (str/split (subs (nth % 11) 8) #">")] (str " (recorded :" a ", now " b ")")))
+                                                                          (when (not= "-" (nth % 2)) (str " (known as " (nth % 2) ", fails at " (nth % 10) ")"))) (take 12 fails))))))
+      (when held-bad
+        (println (str "rtcheck: the run of the recorded list " okey " (" rfile ") has " (count rows) " files, the record " (count rec-files) "; "
+                      (count rec-missing) " recorded names missing" (when (seq rec-missing) (str ": " (str/join " " (take 8 rec-missing))))
+                      ", " (count rec-new) " names not recorded" (when (seq rec-new) (str ": " (str/join " " (take 8 rec-new)))))))
+      (when (seq stale)
+        (println (str "rtcheck: stale in " results-dir "/pending.edn: " (str/join " " stale) " (remove the key: its results are recorded, or the oracle record has no such corpus)")))
+      (when unknown
+        (println (str "rtcheck: the corpus " okey " has no record in " oracle-file " (a mistyped --corpus, or a new list: record it with --record-oracle): the run is not held")))
+      (when improved-fail
+        (println (str "rtcheck: " (:improvements summary) " recorded non-passes of the whole-corpus run " okey " now pass: write the record again (--record-results)")))
+      (when unheld
+        (println (str "rtcheck: the corpus " okey " has an oracle record but no recorded results in " results-dir " (list it in pending.edn while they are to be made, or record them with --record-results): the run is not held")))
+      (when (and (nil? rrec) okey (not record?) (seq results-dir))
+        (.println System/err (str "rtcheck: no recorded results for " okey " in " results-dir ": a pass is not held to a record")))
+      (when record?
+        (cond (nil? okey) (do (println "rtcheck: --record-results needs the corpus key (a #list header or --corpus)") (System/exit 2))
+              (seq fails) (println (str "rtcheck: not recorded: " (count fails) " failing"))
+              shrinks (println (str "rtcheck: not recorded: the run's " (count rows) " names are not the existing record's " (count rec-names) " in " rfile
+                                    " (" (count (remove qs rec-names)) " recorded names missing, " (count (remove rec-names qs)) " new; --replace-results rewrites the record)"))
+              :else (do (spit rfile (str ";; bin/repr-cpp roundtrip's recorded results of the list " okey " (CP124 (b); doc/cpp/CPP-SURVEY.md, \"As built: CP120, CP121, CP124,\n"
+                                         ";; CP127\"): NAME -> verdict (:pass, [:known CLASS], :oracle-rejects, :oracle-fails; CP165 (b): a bare :known holds the verdict alone), the names qualified by the corpus (CP127 (b)). A run of\n"
+                                         ";; the list fails on a recorded verdict that is not the run's (a :pass that does not pass, another non-pass verdict than the recorded one; a move to :pass is an\n"
+                                         ";; improvement, counted), a recorded name it does not have, or a name not recorded;\n"
+                                         ";; --record-results writes the file again from a run with no failure. Read with the Clojure reader.\n"
+                                         "{:key " (pr-str okey) "\n :summary " (pr-str (dissoc summary :results-record :regressions :changed :improvements :results-missing :results-new)) "\n :files {\n"
+                                         (str/join (for [r (sort-by first rows)] (str "  " (pr-str (first r)) " " (if (and (= (second r) "known") (not= (nth r 2) "-")) (pr-str [:known (keyword (nth r 2))]) (keyword (second r))) "\n")))
+                                         " }}\n"))
+                        (println (str "rtcheck: recorded " (count rows) " results of " okey " in " rfile)))))
+      (System/exit (if (or (seq fails) held-bad unheld shrinks (seq stale) unknown improved-fail) 1 0)))))
+
+(defn -main [cmd & args]
+  (case cmd
+    "run" (apply run args)
+    "judge" (apply judge args)
+    "record" (apply record args)
+    (do (println "rtcheck: run LIST DUMPS SRC-ROOT FORMS PRINT OUT") (System/exit 2))))

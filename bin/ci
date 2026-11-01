@@ -1,0 +1,83 @@
+#!/bin/bash
+# ci, C's eval (doc/C23-SURVEY.md §6, CS17 (a); "As built: C4", "As built: C5 (write-ahead)"): its checker,
+# arbace.c.check (types, conversions, constants, layout, linkage, _BitInt, constexpr, typeof, auto, _Generic
+# over C forms; evaluated from the checkout on the tools' host, CS36 (a)) and its oracle, cc's checker run by
+# tools/ccdump's types mode (cc.Translate); its builder arbace.c.build, its libc musl 1.2.6 as C forms
+# (arbace.c.musl) and its back end go/arbace/ci over go/arbace/crt, run on the light path by tools/cirun.
+#
+#   bin/ci run [--std S] [OPTION...] FILE... [-- ARG...]
+#                              FILE... (one program) read, checked, linked with musl, built and run by ci's back
+#                              end with ARG...; the program's status is the command's
+#   bin/ci nodes [--std S] [OPTION...] -o OUT FILE...
+#                              the program's node program (arbace.c.build's output) written to OUT
+#   bin/ci check [--corpus C,...] [--only LIST] [--record] [--judge] [--resume]
+#                              ci's check (bin/lib/ci/check, its header): every program of the run corpora run
+#                              against gcc 15.2's recorded run, every non-pass in a class of test/c/divergences.edn
+#   bin/ci check --aot [--corpus C,...] [--only LIST] [--sample N] [--record] [--judge] [--resume]
+#                              ci's AOT check (bin/lib/ci/check-aot, its header): every program of the run corpora
+#                              translated by cf2g (arbace.c.cf2g) into Go over go/arbace/ci and go/arbace/crt, built
+#                              by TamaGo's go in shards and run against gcc 15.2's recorded run and the interpreted
+#                              check's, every non-pass in a class of test/c/divergences-aot.edn or divergences.edn
+#   bin/ci dg [--corpus C,...] [--record] [--judge] [--essential]
+#                              the C23 corpus's dg check (bin/lib/ci/dg, its header): gcc 15.2's c23 tests by their
+#                              DejaGnu directives, the checker's errors judged by line and kind
+#   bin/ci aot NODES OUT       a node program (bin/ci nodes') translated by cf2g into OUT/prog.go, a main package
+#   bin/ci repl-session        the REPL session of doc/C23-SURVEY.md §6.6 (test/c/repl/letters.ae) run on the tools'
+#                              host, its output against test/c/repl/letters.out
+#   bin/ci judge-test          the judges' unit tests (test/c/judge_test.ae: the dg verdict, the run level's result and
+#                              record comparison, the checker's rules review 027 found, the scripts' subset refusal
+#                              and quiet retry: bin/ci check on ci-run's ptr-sub-unsigned.c), on the tools' host
+#   bin/ci divergences         the recorded check (test/c/check-linux-amd64.edn) judged against the classes
+#   bin/ci musl prepare        musl 1.2.6's tarball (test/c/corpora.edn's pin) extracted and configured into
+#                              .tmp/ci-musl/musl-1.2.6, its generated headers made
+#   bin/ci musl read           musl's sources read by repr/c into the forms cache .tmp/ci-musl/forms, indexed
+#   bin/ci musl fresh|ensure   exit 0 when the forms cache was read by this checkout's repr/c (forms/key, CS211); ensure: prepare,
+#                              then read when it was not (bin/ci check and check --aot do)
+#   bin/ci cirun-build         ci's back end, go/arbace/crt and go/arbace/ci printed by repr/go, with tools/cirun
+#                              built by TamaGo's go into .tmp/ci/cirun (CI_GO_SRC: a Go tree of the packages instead)
+#   bin/ci diagnose [--std S] [OPTION...] FILE...
+#                              each FILE read by repr/c and checked: the checker's errors (those gcc 15.2 gives)
+#   bin/ci annot [--std S] [OPTION...] FILE...
+#                              each FILE's annotations, in tools/ccdump's types format (arbace.repr.c.annot), and
+#                              its errors
+#   bin/ci annotations [--corpus C,...] [--record]
+#                              the checker's check (bin/lib/repr-c/annotations, its header): every file of the
+#                              corpora checked, its annotations equal to cc's checker's item by item where cc
+#                              translates it, its errors none where gcc accepts it, or the file in
+#                              test/repr/c/annot-known.edn with its class
+#   bin/ci record-ref [--corpus C,...] [--only]
+#                              gcc 15.2's runs of the single-file run corpora recorded as data,
+#                              test/c/ref-gcc15.edn (bin/lib/ci/record-ref, its header; CS14 (a))
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+. "$root/bin/lib/tmpdir.bash"
+. "$root/bin/lib/tools.bash"
+cmd=${1:-}
+[ $# -gt 0 ] && shift
+case $cmd in
+  diagnose) arbace_tool -m arbace.repr.c.annot check "$root/test/c/host" "$@" ;;
+  annot) arbace_tool -m arbace.repr.c.annot "$cmd" "$root/test/c/host" "$@" ;;
+  run) exec "$root/bin/lib/ci/run" "$@" ;;
+  nodes) "$root/bin/ci" musl ensure && arbace_tool -m arbace.c.run "$root/test/c/host" nodes "$@" ;;
+  check)
+    for a in "$@"; do [ "$a" = --aot ] && { args=(); for b in "$@"; do [ "$b" = --aot ] || args+=("$b"); done; exec "$root/bin/lib/ci/check-aot" "${args[@]}"; }; done
+    exec "$root/bin/lib/ci/check" "$@" ;;
+  dg) exec "$root/bin/lib/ci/dg" "$@" ;;
+  judge-test)
+    cd "$root" && arbace_tool -p "$root/test" -e "(require 'c.judge-test) (let [r (arbace.test/run-tests 'c.judge-test)] (shutdown-agents) (System/exit (if (zero? (+ (:fail r) (:error r))) 0 1)))" 2>&1 \
+      | { grep -v '^Reflection warning\|recur arg\|^Auto-boxing' || true; } | head -c 200000
+    exit "${PIPESTATUS[0]}" ;;
+  divergences) arbace_tool -m arbace.c.run "$root/test/c/host" divergences test/c/check-linux-amd64.edn test/c/divergences.edn ;;
+  aot) arbace_tool -m arbace.c.cf2g translate "$(cd "$(dirname "$1")" && pwd)/$(basename "$1")" "$2" ;;
+  musl) exec "$root/bin/lib/ci/musl" "$@" ;;
+  repl-session)
+    "$root/bin/ci" musl ensure
+    [ -x "${CIRUN:-$root/.tmp/ci/cirun}" ] || "$root/bin/ci" cirun-build
+    out=$TMPDIR/ci-repl-session.out
+    (cd "$root" && arbace_tool "$root/test/c/repl/letters.ae") 2>&1 | { grep -v '^Reflection warning\|recur arg\|^Auto-boxing' || true; } > "$out"
+    if diff "$root/test/c/repl/letters.out" "$out"; then echo "ci: the REPL session passes"; else echo "ci: the REPL session differs" >&2; exit 1; fi ;;
+  cirun-build) exec "$root/bin/lib/ci/cirun-build" "$@" ;;
+  annotations) exec "$root/bin/lib/repr-c/annotations" "$@" ;;
+  record-ref) exec "$root/bin/lib/ci/record-ref" "$@" ;;
+  *) sed -n '2,/^set -/p' "$0" | sed '$d; s/^# \{0,1\}//' >&2; exit 2 ;;
+esac

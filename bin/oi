@@ -1,0 +1,734 @@
+#!/bin/bash
+# oi, the interpreter of OCaml's Lambda (doc/ocaml/OCAML-SURVEY.md, O5; "As built: O5 (write-ahead)"):
+# the package arbace/oi (go/arbace/oi.ae, go/arbace/oi/*.ae: Go forms) runs the Lambda dumps of
+# tools/ocdump (the oracle's bytecode translation, simplified as ocamlc compiles it: OC52, OC60),
+# the stdlib's own Lambda first (built in dependency order, OC51 (c)). Until the package is listed in
+# goi's table and the shipped program carries it (the heavy list), its driver is a small Go program
+# built from the forms printed by repr/go with TamaGo's go (test/ocaml/oi/cmd.ae, OC62).
+#
+#   bin/oi stdlib                  the stdlib of the pinned tarball (bin/repr-ocaml corpus fetch) built by
+#                                  ocamlc in dependency order with its own flags (stdlib/Makefile,
+#                                  Compflags) and its Lambda dumped, into .tmp/oi/lib/ (order.txt the link
+#                                  order); the testsuite's lib/testing too (.tmp/oi/testlib/)
+#   bin/oi build                   the driver: go/arbace/oi's forms and test/ocaml/oi/cmd.ae printed by
+#                                  repr/go and built by TamaGo's go into .tmp/oi/bin/oi (kept by the forms'
+#                                  hash); OI_GO_SRC=DIR builds from a Go tree instead (development)
+#   bin/oi test                    go vet and go test on the printed package (its _test files' forms; the golden
+#                                  data in test/ocaml/oi/testdata/)
+#   bin/oi run FILE.ml [ARG...]    FILE's Lambda dumped and run on oi with the stdlib
+#   bin/oi repl                    the toplevel: phrases on stdin, each typed and lowered by the oracle,
+#                                  run on oi, its values printed with their types (OC12 (a))
+#   bin/oi repl-check              test/ocaml/oi/session.ml through the toplevel, the output equal to the ocaml
+#                                  toplevel's recorded in test/ocaml/oi/session.ref
+#   bin/oi corpus                  the run corpus: the testsuite's .ml files with a .reference, each
+#                                  header read (bin/lib/oi/header.awk): run, or a class (.tmp/oi/corpus.tsv)
+#   bin/oi record-ref [--jobs N] [--only RE]
+#                                  ocamlc's runs of the run corpus recorded as data: status and the
+#                                  output's digest (stdout and stderr in one file, as ocamltest), and
+#                                  whether it equals the .reference, and ocamlopt's beside it
+#                                  (test/ocaml/ref-ocaml55.edn)
+#   bin/oi check [--record] [--jobs N] [--only RE]
+#                                  every program of the run corpus run on oi against the recorded runs:
+#                                  pass, or fail with a reason; judged against test/ocaml/check-oi.edn
+#                                  (--record rewrites it) and test/ocaml/divergences.edn (every non-pass
+#                                  in a class) by test/ocaml/oi_check.ae on stage 0
+#   bin/oi pins [--attest]         the pins of the known files (kind "status ") against test/ocaml/pins-attested.tsv, the digests of the runs they were
+#                                  made for (no run); --attest writes it from the last runs' rows
+#   bin/oi divergences [--aot]     the recorded results judged against the classes alone (no runs)
+#   bin/oi aot-lib                 AOT (O6, OC7 (a)): the stdlib's Lambda (bin/oi stdlib's) translated by
+#                                  arbace.o2j into Java forms over the runtime jdk/ocaml/, into .tmp/o6/lib/
+#                                  (kept by the translator's, the runtime's and the stdlib's key)
+#   bin/oi aot-run FILE.ml [ARG...]
+#                                  FILE's Lambda translated with the stdlib's and run at the light level: the
+#                                  Java forms defined by the Java forms' interpreter on stage 0 (test/ocaml/o2j/run.ae)
+#   bin/oi check --aot [--record] [--jobs N] [--only RE]
+#                                  the run corpus translated and run at the light level, many programs a process
+#                                  (OC88), against ocamlopt's recorded runs and oi's: test/ocaml/check-aot.edn,
+#                                  classes test/ocaml/divergences-aot.edn, by test/ocaml/o2j_check.ae; the compiled
+#                                  level (j2g, bin/build-go) is the heavy list's (survey, "As built: O6 (write-ahead)"); the OI column is oi's
+#                                  rows for the same programs from the same oi build (.tmp/oi/check.tsv when its key is current, else a run);
+#                                  a program stopped by the batch's wall-clock limit runs again alone under limited_cpu (OI_TIMEOUT seconds of
+#                                  CPU, the wall cap four times), the programs with an environment likewise; a timeout is the speed class only for
+#                                  the programs of test/ocaml/aot-slow.edn (oi's: oi-slow.edn); a recorded program with no row is GONE
+#   bin/oi suite corpus|record-ref|check [--aot] [--record]|divergences [--aot]|actions|roles|expect|rollup [--record]
+#                                  O7 (survey, "As built: O7 (write-ahead)"; bin/lib/oi/suite.bash, testsuite.bash): the
+#                                  programs of the testsuite O5's corpus does not hold (no .reference, or ocamltest's modules:
+#                                  bin/lib/oi/actions.awk) and the opam set's (test/ocaml/opam-programs.tsv) as a second corpus of
+#                                  unit lists, run at oi's level and the light AOT level (test/ocaml/{ref,check}-suite*.edn,
+#                                  divergences-suite*.edn); roles: every .ml/.mli of testsuite/ a role and an action; expect: the
+#                                  expect action on the host's tool (test/ocaml/ref-expect.edn); rollup: every file in a result or
+#                                  a class (test/ocaml/testsuite-results.edn, divergences-testsuite.edn), from the records, no runs (roles
+#                                  regenerated each time); expect is a check against ref-expect.edn (--record rewrites it, from a whole run)
+#                                  and its negative control (GTS81 (a), test/ocaml/controls.txt): a test's final correction
+#                                  compared with another test's text must differ, else the check fails and nothing is recorded
+#
+# Environment: O2J_JOBS (check --aot's processes, default 2), O2J_LOAD_ALLOWANCE (CPU seconds the rerun of a program that timed out gets beyond OI_TIMEOUT, default 20; `bin/oi aot-cpu` prints the limits, `bin/oi key` and `suite key` the key of oi's rows), O2J_GOMEMLIMIT (default 900MiB), OI_JOBS (default 3), OI_TIMEOUT (seconds a program, default 120), OI_GOMEMLIMIT (default
+# 400MiB: the light tier), ARBACE_HOST_EXE (stage 0 for the judgment and repr/go's print).
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+. "$root/bin/lib/tmpdir.bash"
+. "$root/bin/lib/limit.bash"
+
+OI_DIR=$root/.tmp/oi
+OCD=$root/.tmp/ocdump/ocdump
+OCDUMP_KEY=${OI_OCDUMP_KEY:-$root/.tmp/ocdump/key}
+# the opam packages' pins (version, URL, hashes) as `bin/repr-ocaml corpus fetch` wrote them: the content of the suite's opam rows
+OPAM_PINS=${OI_OPAM_PINS:-$root/.tmp/repr-ocaml/opam-pins.txt}
+TOP=$root/.tmp/repr-ocaml/ocaml-5.5.0
+LIB=$OI_DIR/lib
+TESTLIB=$OI_DIR/testlib
+EXE=$OI_DIR/bin/oi
+TESTS=$TOP/testsuite/tests
+REFS=$root/test/ocaml/ref-ocaml55.edn
+RESULTS=$root/test/ocaml/check-oi.edn
+CLASSES=$root/test/ocaml/divergences.edn
+GO=${ARBACE_GOROOT:-/root/tamago-go}/bin/go
+JOBS=${OI_JOBS:-3}
+TIMEOUT=${OI_TIMEOUT:-120}
+export GOMEMLIMIT=${OI_GOMEMLIMIT:-400MiB}
+# the light tier: one thread of Go a program (JOBS programs at once)
+export GOMAXPROCS=${OI_GOMAXPROCS:-1}
+
+die() { echo "oi: $*" >&2; exit 2; }
+
+# oi's own level runs a program under limited_cpu: TIMEOUT seconds of CPU and a wall cap of four times that, as o2j_cpu (re-review 042's finding 1:
+# twice was a load band: a program needing more than half the cap in CPU timed out on a host slowed twofold)
+oi_wall() { echo $((TIMEOUT * 4)); }
+# oi_status STATUS CPU: the status of a run read as a timeout (124): the wall cap's 124, SIGXCPU's 152, and 137 (SIGKILL: `ulimit -t` kills with
+# SIGKILL when the soft and the hard limit are equal, and a Go program would ignore a SIGXCPU before it) only when the run's own CPU seconds
+# (user + system of the children, oi_cpu_secs) reach four fifths of TIMEOUT. The kernel's RLIMIT_CPU clock runs ahead of the one `times` reports
+# under load (re-review 056's finding 1: the kill landed at 86 to 89 % of the limit on an overcommitted host), so the margin is proportional; an OOM
+# kill or any other SIGKILL below four fifths of the limit stays a failure, whatever the host's load made of the wall time
+oi_status() {
+  case $1 in
+    152) echo 124 ;;
+    137) if [ "$(echo "$2 >= $TIMEOUT * 0.8" | bc)" = 1 ]; then echo 124; else echo 137; fi ;;
+    *) echo "$1" ;;
+  esac
+}
+# oi_cpu_secs T0 T1: the CPU seconds the children of this shell used between two `times > FILE` (user + system of the children, line 2); a comma
+# locale's times read, the sum printed in the C locale (a comma-locale awk would print "121,25", which oi_status's bc rejects: re-review 072, row 1b)
+oi_cpu_secs() {
+  LC_ALL=C awk 'function s(t,  a) { gsub(/,/, ".", t); split(t, a, "m"); sub(/s$/, "", a[2]); return a[1] * 60 + a[2] }
+       FNR == 2 { n++; t[n] = s($1) + s($2) } END { printf "%.2f\n", t[2] - t[1] }' "$1" "$2"
+}
+export -f oi_wall oi_status oi_cpu_secs
+
+arbace_exe() {
+  if [ -n "${ARBACE_HOST_EXE:-}" ]; then echo "$ARBACE_HOST_EXE"; return; fi
+  local arch main
+  case $(uname -m) in x86_64) arch=amd64 ;; aarch64) arch=arm64 ;; *) arch=$(uname -m) ;; esac
+  if [ -x "$root/target/seed/$arch/arbace" ]; then echo "$root/target/seed/$arch/arbace"; return; fi
+  main=$(cd "$(git -C "$root" rev-parse --git-common-dir)/.." && pwd)
+  if [ -x "$main/target/seed/$arch/arbace" ]; then echo "$main/target/seed/$arch/arbace"; return; fi
+  die "no stage 0 (bin/seed --build, or ARBACE_HOST_EXE)"
+}
+
+need_tree() {
+  "$root/bin/repr-ocaml" ocdump-build > "$OI_DIR/ocdump-build.log" 2>&1 || { cat "$OI_DIR/ocdump-build.log" >&2; die "ocdump"; }
+  "$root/bin/repr-ocaml" corpus fetch > "$OI_DIR/fetch.log" 2>&1 || { cat "$OI_DIR/fetch.log" >&2; die "corpus fetch"; }
+}
+
+# ---- the stdlib ----
+
+# the flags stdlib/Compflags gives a target (those that change the typing or the translation)
+stdlib_flags() {
+  case $1 in
+    stdlib.*) echo "-nopervasives -no-alias-deps" ;;
+    camlinternalFormatBasics*) echo "-nopervasives" ;;
+    *Labels.cm[ox]|stdlib__Float.cm[ox]) echo "-nolabels -no-alias-deps" ;;
+    stdlib__Oo.cmi) echo "-no-principal" ;;
+    *) echo "" ;;
+  esac
+}
+
+# a part of a key that cannot be had fails the key (re-review 042's finding 4: a failing part ended the group early and the key was the hash of
+# what came before, so a different limit or corpus gave the same key)
+stdlib_key() {
+  local k s
+  k=$(cat "$OCDUMP_KEY") || { echo "oi: key: cannot read ocdump's key $OCDUMP_KEY" >&2; return 1; }
+  s=$(sha256sum "$TOP/stdlib/"*.ml "$TOP/stdlib/"*.mli "$TOP/testsuite/lib/testing.ml" "$TOP/testsuite/lib/testing.mli") || { echo "oi: key: the stdlib's sources cannot be read" >&2; return 1; }
+  { echo "$k"; echo "$s"; cat "$0"; } | sha256sum | cut -d' ' -f1
+}
+
+cmd_stdlib() {
+  mkdir -p "$OI_DIR"; need_tree
+  local key; key=$(stdlib_key)
+  if [ -f "$LIB/key" ] && [ "$(cat "$LIB/key")" = "$key" ]; then echo "oi: stdlib up to date ($LIB)"; return 0; fi
+  local b=$OI_DIR/stdlib-build
+  rm -rf "$b" "$LIB" "$TESTLIB"; mkdir -p "$b" "$LIB" "$TESTLIB"
+  cp "$TOP"/stdlib/*.ml "$TOP"/stdlib/*.mli "$TOP"/stdlib/expand_module_aliases.awk "$b/"
+  sed -e 's/@configure_input@/generated by bin\/oi stdlib from sys.ml.in/' -e 's/@VERSION@/5.5.0/' \
+      -e 's/@OCAML_DEVELOPMENT_VERSION@/false/' -e 's/@OCAML_VERSION_MAJOR@/5/' -e 's/@OCAML_VERSION_MINOR@/5/' \
+      -e 's/@OCAML_VERSION_PATCHLEVEL@/0/' -e 's/@OCAML_RELEASE_EXTRA@/None/' "$TOP/stdlib/sys.ml.in" > "$b/sys.ml"
+  (cd "$b" && for f in stdlib.ml stdlib.mli *Labels.mli; do awk -f expand_module_aliases.awk "$f" > "$f.pp" && mv "$f.pp" "$f"; done)
+  # the link order: stdlib/StdlibModules' STDLIB_MODULE_BASENAMES, then std_exit
+  local mods
+  mods=$(sed -n '/^STDLIB_MODULE_BASENAMES = /,/^$/p' "$TOP/stdlib/StdlibModules" | tr -d '\\' | tail -n +2)
+  : > "$b/order.txt"
+  local m p
+  for m in $mods; do
+    case $m in stdlib|camlinternal*) p=$m ;; *) p=stdlib__$(echo "${m:0:1}" | tr a-z A-Z)${m:1} ;; esac
+    echo "$m $p" >> "$b/order.txt"
+  done
+  # compile in passes until every interface and implementation compiles (the .cmi the dumps type against)
+  local pass left log=$b/compile.log
+  : > "$log"
+  for pass in 1 2 3 4 5 6 7 8; do
+    left=0
+    while read -r m p; do
+      if [ -f "$b/$m.mli" ] && [ ! -f "$b/$p.cmi" ]; then
+        (cd "$b" && ocamlc -strict-sequence -absname -w -a -nostdlib -principal $(stdlib_flags "$p.cmi") -I . -o "$p.cmi" -c "$m.mli") >> "$log" 2>&1 || left=$((left + 1))
+      fi
+      if [ ! -f "$b/$p.cmo" ]; then
+        if [ ! -f "$b/$m.mli" ] || [ -f "$b/$p.cmi" ]; then
+          (cd "$b" && ocamlc -strict-sequence -absname -w -a -nostdlib -principal $(stdlib_flags "$p.cmo") -I . -o "$p.cmo" -c "$m.ml") >> "$log" 2>&1 || left=$((left + 1))
+        else
+          left=$((left + 1))
+        fi
+      fi
+    done < "$b/order.txt"
+    [ "$left" = 0 ] && break
+  done
+  [ "$left" = 0 ] || { tail -20 "$log" >&2; die "stdlib: $left files do not compile"; }
+  # the Lambda dumps, by unit name (Stdlib, Stdlib__List, CamlinternalFormat ...)
+  : > "$LIB/order.txt"
+  while read -r m p; do
+    local u
+    case $p in stdlib) u=Stdlib ;; stdlib__*) u=Stdlib__${p#stdlib__} ;; camlinternal*) u=Camlinternal${p#camlinternal} ;; esac
+    (cd "$b" && "$OCD" --mode lambda --simplify -nostdlib -principal -strict-sequence $(stdlib_flags "$p.cmo") -I . --prefix "$p" --file "$m.ml" "$m.ml") > "$LIB/$u.ae"
+    if grep -q '^(ocaml/error' "$LIB/$u.ae"; then cat "$LIB/$u.ae" >&2; die "stdlib: the dump of $m.ml is an error"; fi
+    echo "$u" >> "$LIB/order.txt"
+  done < "$b/order.txt"
+  # std_exit (linked last by ocamlc): its init is do_at_exit, which oi runs itself after the program
+  # the testsuite's lib/testing, against the installed stdlib (as the programs are)
+  cp "$TOP/testsuite/lib/testing.ml" "$TOP/testsuite/lib/testing.mli" "$TESTLIB/"
+  (cd "$TESTLIB" && ocamlc -w -a -c testing.mli testing.ml && "$OCD" --mode lambda --simplify -I . --prefix testing --file testing.ml testing.ml > Testing.ae)
+  echo "$key" > "$LIB/key"
+  echo "oi: stdlib: $(wc -l < "$LIB/order.txt") units, $(du -sh "$LIB" | cut -f1) of Lambda, in $LIB"
+}
+
+# ---- the driver ----
+
+forms_key() {
+  if [ -n "${OI_GO_SRC:-}" ]; then
+    find "$OI_GO_SRC" -name '*.go' -not -name '*_test.go' | LC_ALL=C sort | xargs sha256sum | sha256sum | cut -d' ' -f1
+  else
+    { find "$root/go/arbace/oi" "$root/test/ocaml/oi" -type f | LC_ALL=C sort | xargs sha256sum; sha256sum "$root/go/arbace/oi.ae"; } | sha256sum | cut -d' ' -f1
+  fi
+}
+
+cmd_build() {
+  mkdir -p "$OI_DIR/bin"
+  local key; key=$(forms_key)
+  if [ -x "$EXE" ] && [ "$(cat "$OI_DIR/bin/key" 2>&1)" = "$key" ]; then return 0; fi
+  local mod=$OI_DIR/mod
+  rm -rf "$mod"; mkdir -p "$mod/oi/cmd/oi"
+  printf 'module arbace\n\ngo 1.27\n' > "$mod/go.mod"
+  if [ -n "${OI_GO_SRC:-}" ]; then
+    cp "$OI_GO_SRC"/oi/*.go "$mod/oi/"; rm -f "$mod"/oi/*_test.go
+    cp "$OI_GO_SRC"/oi/cmd/oi/*.go "$mod/oi/cmd/oi/"
+  else
+    local exe; exe=$(arbace_exe)
+    ARBACE_HOST_EXE=$exe GOMAXPROCS=4 "$root/bin/repr-go" print "$root/go/arbace/oi.ae" "$mod/oi" > "$OI_DIR/print.log" 2>&1 || { cat "$OI_DIR/print.log" >&2; die "print go/arbace/oi"; }
+    ARBACE_HOST_EXE=$exe GOMAXPROCS=4 "$root/bin/repr-go" print "$root/test/ocaml/oi/cmd.ae" "$mod/oi/cmd/oi" >> "$OI_DIR/print.log" 2>&1 || { cat "$OI_DIR/print.log" >&2; die "print the driver"; }
+  fi
+  mkdir -p "$mod/oi/testdata"; cp "$root/test/ocaml/oi/testdata/"* "$mod/oi/testdata/"
+  (cd "$mod" && GOCACHE=$OI_DIR/gocache GOFLAGS=-p=4 GOMAXPROCS=4 CGO_ENABLED=0 GOTOOLCHAIN=local GOENV=off "$GO" build -trimpath -o "$EXE" ./oi/cmd/oi) || die "go build"
+  echo "$key" > "$OI_DIR/bin/key"
+}
+
+# the package's own tests (its _test files' forms), go vet and go test on the printed package
+cmd_test() {
+  cmd_build
+  (cd "$OI_DIR/mod" && GOCACHE=$OI_DIR/gocache GOFLAGS=-p=4 GOMAXPROCS=4 CGO_ENABLED=0 GOTOOLCHAIN=local GOENV=off "$GO" vet ./oi/... && \
+    GOCACHE=$OI_DIR/gocache GOFLAGS=-p=4 GOMAXPROCS=4 CGO_ENABLED=0 GOTOOLCHAIN=local GOENV=off "$GO" test ./oi)
+}
+
+# dump OUT FILE.ml [FLAGS...]: FILE's Lambda as ocamlc would compile it with FLAGS
+dump() {
+  local out=$1 file=$2; shift 2
+  (cd "$(dirname "$file")" && "$OCD" --mode lambda --simplify "$@" --prefix "$(basename "$file" .ml)" --file "$(basename "$file")" "$(basename "$file")") > "$out"
+}
+
+cmd_run() {
+  [ $# -ge 1 ] || die "usage: bin/oi run FILE.ml [ARG...]"
+  local file=$1; shift
+  cmd_stdlib > "$OI_DIR/stdlib.log"; cmd_build
+  local d; d=$(mktemp -d "$OI_DIR/run.XXXXXX")
+  local u; u=$(basename "$file" .ml); u=$(echo "${u:0:1}" | tr a-z A-Z)${u:1}
+  dump "$d/$u.ae" "$(cd "$(dirname "$file")" && pwd)/$(basename "$file")" -I .
+  if grep -q '^(ocaml/error' "$d/$u.ae"; then cat "$d/$u.ae" >&2; rm -rf "$d"; exit 2; fi
+  local st=0
+  "$EXE" run "$LIB" "$d/$u.ae" -- "$@" || st=$?
+  rm -rf "$d"
+  exit $st
+}
+
+# the recorded session: test/ocaml/oi/session.ml through the toplevel, its output against the ocaml
+# toplevel's (test/ocaml/oi/session.ref, recorded by ocaml -noprompt -nopromptcont, the banner left out)
+cmd_repl_check() {
+  local out=$OI_DIR/session.out
+  "$0" repl < "$root/test/ocaml/oi/session.ml" > "$out" 2>&1 || true
+  if cmp -s "$out" "$root/test/ocaml/oi/session.ref"; then
+    echo "oi: repl-check: $(grep -c ';;' "$root/test/ocaml/oi/session.ml") phrases, the output equal to the ocaml toplevel's"
+  else
+    diff "$root/test/ocaml/oi/session.ref" "$out" | head -40 || true; die "repl-check: the output differs from test/ocaml/oi/session.ref"
+  fi
+}
+
+cmd_repl() {
+  cmd_stdlib > "$OI_DIR/stdlib.log"; cmd_build
+  local w; w=$(mktemp -d "$OI_DIR/repl.XXXXXX")
+  local st=0
+  "$EXE" repl "$LIB" "$w" "$root/bin/lib/oi/phrase" || st=$?
+  rm -rf "$w"
+  exit $st
+}
+
+# ---- the corpus ----
+
+cmd_corpus() {
+  mkdir -p "$OI_DIR"; need_tree
+  local out=$OI_DIR/corpus.tsv r b h
+  : > "$out"
+  for r in $(cd "$TESTS" && find . -name '*.reference' | LC_ALL=C sort); do
+    b=${r#./}; b=${b%.reference}
+    [ -f "$TESTS/$b.ml" ] || continue
+    h=$(awk -f "$root/bin/lib/oi/header.awk" "$TESTS/$b.ml")
+    printf '%s\t%s\n' "$b" "$h" >> "$out"
+  done
+  echo "oi: corpus: $(wc -l < "$out") programs with a .reference, $(cut -f2 "$out" | grep -c '^run$' || true) run, $(cut -f2 "$out" | grep -c '^class$' || true) classed by their header ($out)"
+}
+
+opts() {
+  ONLY=""; RECORD=0; AOT=0
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --jobs) JOBS=$2; OPT_JOBS=$2; shift 2 ;;
+      --only) ONLY=$2; shift 2 ;;
+      --record) RECORD=1; shift ;;
+      --aot) AOT=1; shift ;;
+      *) die "unknown option $1" ;;
+    esac
+  done
+}
+
+selected() {
+  if [ -n "$ONLY" ]; then grep -E "^[^	]*($ONLY)" "$OI_DIR/corpus.tsv" || true; else cat "$OI_DIR/corpus.tsv"; fi
+}
+
+# ref_one ID FLAGS INCS ARGS ENV: compile and run the original with ocamlc and ocamlopt
+ref_one() {
+  local id=$1 flags=$2 incs=$3 args=$4 env=$5
+  local d=$OI_DIR/ref/$id src=$TESTS/$id.ml
+  rm -rf "$d"; mkdir -p "$d"
+  cp "$src" "$d/"
+  local base; base=$(basename "$id")
+  local libs="" olibs=""
+  if [ -n "$incs" ]; then libs="-I $TESTLIB $TESTLIB/testing.cmo"; olibs="-I $TESTLIB $TESTLIB/testing.ml"; fi
+  local line=""
+  for c in ocamlc ocamlopt; do
+    local ext=byte cst=0 st=0 extra=$libs
+    [ $c = ocamlopt ] && { ext=opt; extra=$olibs; }
+    if [ $c = ocamlopt ] && [ -n "$incs" ]; then mkdir -p "$d/optlib" && cp "$TESTLIB/testing.ml" "$TESTLIB/testing.mli" "$d/optlib/" && extra="-I $d/optlib $d/optlib/testing.mli $d/optlib/testing.ml"; fi
+    (cd "$d" && $c -w -a $flags $extra "$base.ml" -o "$base.$ext") > "$d/$c.log" 2>&1 || cst=$?
+    if [ $cst != 0 ]; then line="$line	compile-error	-	0"; continue; fi
+    (cd "$d" && env $env timeout "$TIMEOUT" "./$base.$ext" $args > "$d/$ext.out" 2>&1) || st=$?
+    line="$line	$st	$(sha256sum < "$d/$ext.out" | cut -d' ' -f1)	$(wc -c < "$d/$ext.out")"
+  done
+  local same=false
+  cmp -s "$d/byte.out" "$TESTS/$id.reference" && same=true
+  printf '%s%s\t%s\n' "$id" "$line" "$same"
+}
+
+cmd_record_ref() {
+  opts "$@"; cmd_stdlib > "$OI_DIR/stdlib.log"; cmd_corpus > "$OI_DIR/corpus.log"
+  export -f ref_one; export OI_DIR TESTS TESTLIB TIMEOUT
+  local out=$OI_DIR/ref.tsv
+  selected | awk -F'\t' '$2 == "run" { printf "%s%c%s%c%s%c%s%c%s%c", $1, 0, $3, 0, $4, 0, $5, 0, $6, 0 }' | xargs -0 -n 5 -P "$JOBS" bash -c 'ref_one "$@"' _ > "$out.new"
+  LC_ALL=C sort "$out.new" > "$out"; rm -f "$out.new"
+  "$(arbace_exe)" "$root/test/ocaml/oi_check.ae" record-ref "$out" "$OI_DIR/corpus.tsv" "$REFS"
+}
+
+# oi_one ID FLAGS INCS ARGS ENV: dump and run on oi; "ID<TAB>STATUS<TAB>SHA<TAB>BYTES<TAB>SECONDS<TAB>NOTE"
+oi_one() {
+  local id=$1 flags=$2 incs=$3 args=$4 env=$5
+  local d=$OI_DIR/run/$id src=$TESTS/$id.ml
+  rm -rf "$d"; mkdir -p "$d"
+  local base; base=$(basename "$id")
+  local u; u=$(echo "${base:0:1}" | tr a-z A-Z)${base:1}
+  local units=""
+  [ -n "$incs" ] && units="$TESTLIB/Testing.ae"
+  local I=""; [ -n "$incs" ] && I="-I $TESTLIB"
+  cp "$src" "$d/"
+  (cd "$d" && "$OCD" --mode lambda --simplify $flags $I --prefix "$base" --file "$base.ml" "$base.ml" > "$u.ae")
+  if grep -q '^(ocaml/error' "$d/$u.ae"; then
+    printf '%s\t-\t-\t0\t0\tdump: %s\n' "$id" "$(head -c 200 "$d/$u.ae" | tr '\n\t' '  ')"; return
+  fi
+  local st=0 t0 t1
+  t0=$(date +%s.%N); times > "$d/cpu0"
+  (cd "$d" && limited_cpu "$TIMEOUT" "$(oi_wall)" env $env "$EXE" run "$LIB" $units "$u.ae" -- $args > "$d/oi.out" 2>&1) || st=$?
+  t1=$(date +%s.%N); times > "$d/cpu1"
+  local note=""
+  note=$(grep -a -m1 -o 'oi: .*' "$d/oi.out" | head -c 300 | tr '\t' ' ' || true)
+  st=$(oi_status "$st" "$(oi_cpu_secs "$d/cpu0" "$d/cpu1")")
+  [ "$st" = 124 ] && note="timeout ${TIMEOUT}s"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$st" "$(sha256sum < "$d/oi.out" | cut -d' ' -f1)" "$(wc -c < "$d/oi.out")" "$(echo "$t1 - $t0" | bc)" "$note"
+  # keep the outputs that differ, drop the dump (large)
+  rm -f "$d/$u.ae"
+}
+
+# the key of an oi run: the driver's forms and the stdlib's (which holds ocdump's and this script's), so a check.tsv written
+# by another oi is not read as the current one's (the AOT levels' OI column, review 008's finding 1)
+# plus every other input of a row (re-review 030's finding 3): the limits (OI_TIMEOUT, OI_GOMEMLIMIT, OI_GOMAXPROCS), the library bin/lib/oi/
+# (suite.bash runs the suite's rows), bin/lib/limit.bash, the opam pins (re-review 042's finding 4) and the corpus file CORPUS (each program's flags, arguments and environment)
+oi_key() {
+  local f s p l c
+  f=$(forms_key) || { echo "oi: key: the driver's forms cannot be hashed" >&2; return 1; }
+  s=$(stdlib_key) || return 1
+  # the opam pins only for the suite's corpus (the program corpus reads no opam tree: a pin bump must not rerun its 309 rows)
+  p=""
+  if [ "$1" = "$S/corpus.tsv" ]; then
+    p=$(cat "$OPAM_PINS") || { echo "oi: key: the opam pins $OPAM_PINS cannot be read (bin/repr-ocaml corpus fetch)" >&2; return 1; }
+  fi
+  l=$(sha256sum "$root"/bin/lib/oi/* "$root/bin/lib/limit.bash") || { echo "oi: key: bin/lib cannot be hashed" >&2; return 1; }
+  c=$(sha256sum < "$1") || { echo "oi: key: the corpus $1 cannot be read" >&2; return 1; }
+  printf '%s\n' "$f" "$s" "timeout=$TIMEOUT gomemlimit=$GOMEMLIMIT gomaxprocs=$GOMAXPROCS" "$p" "$l" "$c" | sha256sum | cut -d' ' -f1
+}
+
+# oi_rows_for CHECK OUT SELECTED ONE-FN NFIELDS CORPUS: oi's rows of the selected run programs (SELECTED: a corpus file) into OUT: CHECK's
+# (bin/oi check's, or the suite's) rows when its key file is the current oi_key, and a run of the programs it does not hold
+oi_rows_for() {
+  local check=$1 out=$2 sel=$3 fn=$4 n=$5 corpus=$6
+  local key; key=$(oi_key "$corpus") || die "key: a part of oi's key cannot be had"
+  if [ -f "$check" ] && [ "$(cat "$check.key" 2>&1)" = "$key" ]; then cp "$check" "$out"; else : > "$out"; fi
+  awk -F'\t' -v n="$n" -v o="$out" 'FILENAME == o { have[$1] = 1; next } $2 == "run" && !($1 in have) {
+    printf "%s%c", $1, 0; for (i = 3; i <= n + 2; i++) printf "%s%c", $i, 0 }' "$out" "$sel" |
+    xargs -0 -r -n "$((n + 1))" -P "$JOBS" bash -c "$fn"' "$@"' _ >> "$out"
+}
+
+cmd_check() {
+  opts "$@"
+  if [ "$AOT" = 1 ]; then cmd_check_aot; return; fi
+  cmd_stdlib > "$OI_DIR/stdlib.log"; cmd_corpus > "$OI_DIR/corpus.log"; cmd_build
+  export -f oi_one limited_cpu; export OI_DIR TESTS TESTLIB TIMEOUT EXE LIB OCD GOMEMLIMIT
+  local out=$OI_DIR/check.tsv
+  selected | awk -F'\t' '$2 == "run" { printf "%s%c%s%c%s%c%s%c%s%c", $1, 0, $3, 0, $4, 0, $5, 0, $6, 0 }' | xargs -0 -n 5 -P "$JOBS" bash -c 'oi_one "$@"' _ > "$out.new"
+  LC_ALL=C sort "$out.new" > "$out"; rm -f "$out.new"; oi_key "$OI_DIR/corpus.tsv" > "$out.key"
+  local mode=judge; [ "$RECORD" = 1 ] && mode=record
+  [ -n "$ONLY" ] && mode=$mode-only
+  "$(arbace_exe)" "$root/test/ocaml/oi_check.ae" "$mode" "$out" "$OI_DIR/corpus.tsv" "$REFS" "$RESULTS" "$CLASSES"
+}
+
+cmd_divergences() {
+  cmd_pins || return 1
+  if [ "${1:-}" = --aot ]; then
+    "$(arbace_exe)" "$root/test/ocaml/o2j_check.ae" divergences "$root/test/ocaml/check-aot.edn" "$root/test/ocaml/divergences-aot.edn"; return
+  fi
+  "$(arbace_exe)" "$root/test/ocaml/oi_check.ae" divergences "$RESULTS" "$CLASSES"
+}
+
+
+# ---- AOT: o2j (O6)
+
+O2J=$root/.tmp/o6
+O2J_LIB=$O2J/lib
+O2J_RT=$root/jdk/ocaml/ocaml/rt
+
+o2j_key() {
+  { cat "$LIB/key"; cat "$root/arbace/o2j.ae" "$root/jdk/ocaml/ocaml/rt.ae" "$O2J_RT"/*.ae | sha256sum; } | sha256sum | cut -d' ' -f1
+}
+
+# the key of an AOT run's rows (re-review 056's finding 2): the translator, the runtime and the stdlib (o2j_key), the limits of the level and the
+# corpus file; written beside check-aot.tsv (bin/oi check --aot) and the suite's, read by `bin/oi pins --attest`
+aot_key() { printf '%s\n' "$(o2j_key)" "timeout=$TIMEOUT load=${O2J_LOAD_ALLOWANCE:-20}" "$(sha256sum < "$1")" | sha256sum | cut -d' ' -f1; }
+
+o2j() {
+  ARBACE_PATH=$root O2J_RT=$O2J_RT GOMEMLIMIT=${O2J_GOMEMLIMIT:-900MiB} GOMAXPROCS=1 "$(arbace_exe)" -m arbace.o2j "$@"
+}
+
+cmd_aot_lib() {
+  cmd_stdlib > "$OI_DIR/stdlib.log"
+  local key; key=$(o2j_key)
+  if [ -f "$O2J_LIB/key" ] && [ "$(cat "$O2J_LIB/key")" = "$key" ]; then echo "oi: aot-lib up to date ($O2J_LIB)"; return 0; fi
+  rm -rf "$O2J_LIB"; mkdir -p "$O2J_LIB"
+  o2j lib "$LIB" "$O2J_LIB" > "$O2J/lib-missing.txt"
+  echo "$key" > "$O2J_LIB/key"
+  echo "oi: aot-lib: $(ls "$O2J_LIB" | grep -c '\.ae$') units, $(du -sh "$O2J_LIB" | cut -f1); the runtime lacks $(awk -F'\t' '/^missing/{print $3}' "$O2J/lib-missing.txt" | sort -u | wc -l) of the externals and primitives they name ($O2J/lib-missing.txt)"
+}
+
+o2j_run() {
+  ARBACE_PATH=$root/jdk/ocaml TMPDIR=$O2J/tmp GOMEMLIMIT=${O2J_GOMEMLIMIT:-900MiB} GOMAXPROCS=1 "$(arbace_exe)" "$root/test/ocaml/o2j/run.ae" "$@"
+}
+
+# o2j_run_cpu CPU WALL ARGS...: o2j_run with the project's limits (bin/lib/limit.bash, limited_cpu): CPU seconds of CPU time (the kernel
+# counts all the process's threads, so the host's load barely moves it), and WALL seconds as a cap for a program that waits; a run
+# killed by either is status 137 or 124 (the callers' "timeout"). O2J_ARGV0 is the program's argv.(0) (test/ocaml/o2j/run.ae)
+o2j_run_cpu() {
+  local cpu=$1 wall=$2; shift 2
+  limited_cpu "$cpu" "$wall" env ARBACE_PATH="$root/jdk/ocaml" TMPDIR="$O2J/tmp" GOMEMLIMIT="${O2J_GOMEMLIMIT:-900MiB}" GOMAXPROCS=1 \
+    "$(arbace_exe)" "$root/test/ocaml/o2j/run.ae" "$@"
+}
+
+# the AOT level's limit: TIMEOUT seconds of CPU a program (the wall time of a quiet host, one thread of Go) plus O2J_LOAD_ALLOWANCE (default 20,
+# the library's load, about 10 CPU seconds, which the single-process rerun pays and the batch's program does not: re-review 030's finding 5), the
+# wall cap four times it
+o2j_cpu() { local c=$((TIMEOUT + ${O2J_LOAD_ALLOWANCE:-20})); echo "$c $((c * 4))"; }
+
+# o2j_alone ID OUT FILES ARGV0 ARGS...: one program alone in a process under o2j_cpu's limits; "timeout" for the status a limit kills with
+o2j_alone() {
+  local id=$1 out=$2 files=$3 argv0=$4 st=0 t0 t1; shift 4
+  t0=$(date +%s.%N)
+  (cd "$(dirname "$out")" && O2J_ARGV0=$argv0 o2j_run_cpu $(o2j_cpu) $(cat "$files") -- "$@") > "$out" 2>&1 || st=$?
+  t1=$(date +%s.%N)
+  case $st in 124|137|152) st=timeout ;; esac
+  printf '%s\t%s\t%s\n' "$id" "$st" "$(echo "$t1 - $t0" | bc)"
+}
+
+# o2j_env_runs BL RES: the programs of BL (batch.list: ID OUT FILES ARGV0 ARGS... ENV) that have an environment, each alone
+# (the batch shares one process), under o2j_cpu's limits, their results appended to RES (ID, status, seconds); argv.(0) the
+# program's dump as the other rows' (review 008's finding 6)
+o2j_env_runs() {
+  local bl=$1 res=$2
+  awk -F'\t' '$NF != "" { a = ""; for (i = 5; i < NF; i++) a = a (a == "" ? "" : " ") $i; print $1 "\037" $2 "\037" $3 "\037" $4 "\037" a "\037" $NF }' "$bl" |
+  while IFS=$'\037' read -r id out files argv0 args env; do
+    ( for kv in $env; do export "$kv"; done; o2j_alone "$id" "$out" "$files" "$argv0" $args ) >> "$res"
+  done
+}
+
+cmd_aot_run() {
+  [ $# -ge 1 ] || die "usage: bin/oi aot-run FILE.ml [ARG...]"
+  local file=$1; shift
+  cmd_aot_lib > "$O2J/aot-lib.log"
+  mkdir -p "$O2J/tmp"
+  local d; d=$(mktemp -d "$O2J/run.XXXXXX")
+  local u; u=$(basename "$file" .ml); u=$(echo "${u:0:1}" | tr a-z A-Z)${u:1}
+  dump "$d/$u.ae" "$(cd "$(dirname "$file")" && pwd)/$(basename "$file")" -I .
+  if grep -q '^(ocaml/error' "$d/$u.ae"; then cat "$d/$u.ae" >&2; rm -rf "$d"; exit 2; fi
+  o2j prog "$O2J_LIB" "$d/out" "$d/$u.ae" > "$d/translate.log"
+  local st=0
+  o2j_run $(cat "$d/out/files.txt") -- "$@" || st=$?
+  rm -rf "$d"
+  exit $st
+}
+
+# o2j_dump ID FLAGS INCS: the program's Lambda (as oi_one dumps it) into .tmp/o6/run/ID/
+o2j_dump() {
+  local id=$1 flags=$2 incs=$3
+  local d=$O2J/run/$id src=$TESTS/$id.ml
+  rm -rf "$d"; mkdir -p "$d"
+  local base; base=$(basename "$id")
+  local u; u=$(echo "${base:0:1}" | tr a-z A-Z)${base:1}
+  local I=""; [ -n "$incs" ] && I="-I $TESTLIB"
+  cp "$src" "$d/"
+  (cd "$d" && "$OCD" --mode lambda --simplify $flags $I --prefix "$base" --file "$base.ml" "$base.ml" > "$u.ae" 2> "dump.log")
+  rm -f "$d/$base.cmi" "$d/$base.cmo"
+}
+
+# o2j_shard LIST RESULTS: LIST's programs in batches (run.ae --batch), again after a timeout or a
+# crash for the programs left, the one that stopped the batch written with its status
+o2j_shard() {
+  local list=$1 res=$2 left=$1.left st
+  cp "$list" "$left"
+  : > "$res"
+  while [ -s "$left" ]; do
+    st=0
+    o2j_run --batch "$left" "$res" "$TIMEOUT" "$O2J_LIB/" > "$left.log" 2>&1 || st=$?
+    # a program the batch stopped at its wall-clock limit again alone under the CPU limit: a loaded host (the process shared with
+    # the others, two shards at once) slows the wall time, not the CPU time it needs (review 008's finding 2)
+    if [ "$st" = 3 ]; then
+      local tid; tid=$(awk -F'\t' '$2 == "timeout" { id = $1 } END { print id }' "$res")
+      if [ -n "$tid" ]; then
+        local tl; tl=$(awk -F'\t' -v id="$tid" '$1 == id' "$list" | head -1)
+        grep -v -F "$tid$(printf '\t')timeout" "$res" > "$res.new" || true; mv "$res.new" "$res"
+        local tid2 out files argv0 args
+        IFS=$'\t' read -r tid2 out files argv0 args <<< "$tl"
+        o2j_alone "$tid" "$out" "$files" "$argv0" $(echo "$args" | tr '\t' ' ') >> "$res"
+      fi
+    fi
+    # the programs of left without a result
+    awk -F'\t' 'NR==FNR { done[$1] = 1; next } !($1 in done)' "$res" "$left" > "$left.new"
+    if [ "$st" != 0 ] && [ "$st" != 3 ] && [ -s "$left.new" ]; then
+      printf '%s\tcrash %s\t0\n' "$(head -1 "$left.new" | cut -f1)" "$st" >> "$res"
+      tail -5 "$left.log" | tr '\n\t' '  ' >> "$O2J/crash.log"; echo >> "$O2J/crash.log"
+      tail -n +2 "$left.new" > "$left"
+    else
+      mv "$left.new" "$left"
+    fi
+  done
+  rm -f "$left" "$left.new" "$left.log"
+}
+
+cmd_check_aot() {
+  cmd_stdlib > "$OI_DIR/stdlib.log"; cmd_corpus > "$OI_DIR/corpus.log"; cmd_aot_lib > "$O2J/aot-lib.log"; cmd_build
+  # oi's rows for the same programs, from this oi build (review 008's finding 1)
+  export -f oi_one limited_cpu; export OI_DIR TESTS TESTLIB TIMEOUT EXE LIB OCD GOMEMLIMIT
+  mkdir -p "$O2J"; selected > "$O2J/selected.tsv"
+  oi_rows_for "$OI_DIR/check.tsv" "$O2J/oi.tsv" "$O2J/selected.tsv" oi_one 4 "$OI_DIR/corpus.tsv"
+  local jobs=${O2J_JOBS:-2}
+  [ -n "${OPT_JOBS:-}" ] && jobs=$OPT_JOBS
+  mkdir -p "$O2J/tmp" "$O2J/run"; : > "$O2J/crash.log"
+  export -f o2j_dump; export O2J TESTS TESTLIB OCD
+  selected | awk -F'\t' '$2 == "run" { printf "%s%c%s%c%s%c", $1, 0, $3, 0, $4, 0 }' | xargs -0 -n 3 -P 4 bash -c 'o2j_dump "$@"' _
+  # translate: one stage 0 process for all
+  local tl=$O2J/translate.list bl=$O2J/batch.list
+  : > "$tl"; : > "$bl"
+  # (\037 between the fields: read collapses empty fields between tabs)
+  selected | awk -F'\t' '$2 == "run"' | tr '\t' '\037' | while IFS=$'\037' read -r id kind flags incs args env; do
+    local base u d; base=$(basename "$id"); u=$(echo "${base:0:1}" | tr a-z A-Z)${base:1}; d=$O2J/run/$id
+    if grep -q '^(ocaml/error' "$d/$u.ae"; then continue; fi
+    printf '%s\t%s%s\n' "$d/out" "${incs:+$TESTLIB/Testing.ae	}" "$d/$u.ae" >> "$tl"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$d/o2j.out" "$d/out/files.txt" "$d/$u.ae" "$(echo "$args" | tr ' ' '\t')" "$env" >> "$bl"
+  done
+  o2j progs "$O2J_LIB" "$tl" > "$O2J/translate.log" 2>&1 || { tail -5 "$O2J/translate.log"; die "translate"; }
+  # the programs with an environment run alone; the rest in shards
+  local i
+  awk -F'\t' '$NF == ""' "$bl" | sed 's/\t$//' > "$bl.batch"
+  rm -f "$O2J"/shard.*
+  split -n "l/$jobs" -d "$bl.batch" "$O2J/shard."
+  for i in "$O2J"/shard.[0-9]*; do o2j_shard "$i" "$i.res" & done
+  wait
+  cat "$O2J"/shard.*.res > "$O2J/results.tsv"
+  o2j_env_runs "$bl" "$O2J/results.tsv"
+  # check.tsv as oi's: ID STATUS SHA BYTES SECONDS NOTE
+  local out=$O2J/check-aot.tsv
+  : > "$out.new"
+  selected | awk -F'\t' '$2 == "run" {print $1}' | while read -r id; do
+    local base u d r st secs note=""; base=$(basename "$id"); u=$(echo "${base:0:1}" | tr a-z A-Z)${base:1}; d=$O2J/run/$id
+    if grep -q '^(ocaml/error' "$d/$u.ae"; then
+      printf '%s\t-\t-\t0\t0\tdump: %s\n' "$id" "$(head -c 200 "$d/$u.ae" | tr '\n\t' '  ')" >> "$out.new"; continue
+    fi
+    r=$(grep -m1 -F "refused	$d/out	" "$O2J/translate.log" | cut -f3 || true)
+    if [ -n "$r" ]; then printf '%s\t-\t-\t0\t0\trefused: %s\n' "$id" "$r" >> "$out.new"; continue; fi
+    st=$(awk -F'\t' -v id="$id" '$1 == id {print $2}' "$O2J/results.tsv" | head -1)
+    secs=$(awk -F'\t' -v id="$id" '$1 == id {print $3}' "$O2J/results.tsv" | head -1)
+    [ -f "$d/o2j.out" ] || : > "$d/o2j.out"
+    note=$(grep -a -m1 -o 'o2j: .*' "$d/o2j.out" | head -c 300 | tr '\t' ' ' || true)
+    case $st in timeout) note="timeout ${TIMEOUT}s of CPU"; st=124 ;; crash*) note="$st"; st=125 ;; "") note="no result"; st=125 ;; esac
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$st" "$(sha256sum < "$d/o2j.out" | cut -d' ' -f1)" "$(wc -c < "$d/o2j.out")" "$secs" "$note" >> "$out.new"
+    rm -f "$d/$u.ae"
+  done
+  LC_ALL=C sort "$out.new" > "$out"; rm -f "$out.new"; aot_key "$OI_DIR/corpus.tsv" > "$out.key"
+  local mode=judge; [ "$RECORD" = 1 ] && mode=record
+  [ -n "$ONLY" ] && mode=$mode-only
+  "$(arbace_exe)" "$root/test/ocaml/o2j_check.ae" "$mode" "$out" "$OI_DIR/corpus.tsv" "$REFS" "$O2J/oi.tsv" \
+    "$root/test/ocaml/check-aot.edn" "$root/test/ocaml/divergences-aot.edn"
+}
+
+
+# ---- the pins' evidence (re-review 049's finding 5, 056's finding 2): a known entry of kind "status " carries a prefix of the output's sha256; the
+# digests of the runs the pins were checked against are committed in test/ocaml/pins-attested.tsv (LEVEL ID STATUS SHA256, level oi or aot; lines
+# starting with # say which commit and which keys of runs they come from), written by `bin/oi pins --attest` from the rows of runs whose key file
+# is the current key (oi: .tmp/oi/check.tsv, .tmp/o7/check.tsv with oi_key; aot: .tmp/o6/check-aot.tsv, .tmp/o7/aot/check.tsv with aot_key; a
+# missing or stale file is skipped and said) and checked, no run, by `bin/oi pins`, which `bin/oi divergences` and `suite divergences` run: every
+# pin has an attested row whose digest starts with it, and no attested row lacks a pin; a header key unlike the current key of a run present is noted
+PINS_ATTESTED=${OI_PINS_ATTESTED:-$root/test/ocaml/pins-attested.tsv}
+pins_of() { # LEVEL KNOWN.edn: LEVEL, ID and SHA prefix of each pin
+  awk -F'"' -v lv="$1" '/^ \[/ && $6 == "status " && $8 != "" { printf "%s\t%s\t%s\n", lv, $2, $8 }' "$2"
+}
+pins_all() { pins_of oi "${OI_KNOWN_DIR:-$root/test/ocaml}/oi-known.edn"; pins_of aot "${OI_KNOWN_DIR:-$root/test/ocaml}/aot-known.edn"; }
+# pins_runs LEVEL: "FILE TAG" for each rows file of the level whose key file is the current key (TAG: level, corpus and the key's first 12 digits)
+pins_runs() {
+  local lv=$1 spec f c k want t=${OI_PINS_RUNS:-$root/.tmp}
+  if [ "$lv" = oi ]; then set -- "$t/oi/check.tsv:$t/oi/corpus.tsv:program" "$t/o7/check.tsv:$t/o7/corpus.tsv:suite"
+  else set -- "$t/o6/check-aot.tsv:$t/oi/corpus.tsv:program" "$t/o7/aot/check.tsv:$t/o7/corpus.tsv:suite"; fi
+  for spec in "$@"; do
+    f=${spec%%:*}; c=${spec#*:}; c=${c%%:*}; k=${spec##*:}
+    if [ ! -f "$f" ] || [ ! -f "$f.key" ] || [ ! -f "$c" ]; then echo "oi: pins: $lv $k run skipped: $f or its key is missing" >&2; continue; fi
+    # OI_PINS_FAKE_KEY: the key every run must carry (a test of --attest that fabricates its runs: no tree, no stage 0)
+    if [ -n "${OI_PINS_FAKE_KEY:-}" ]; then want=$OI_PINS_FAKE_KEY
+    elif [ "$lv" = oi ]; then want=$(oi_key "$c"); else want=$(aot_key "$c"); fi
+    if [ "$(cat "$f.key")" != "$want" ]; then echo "oi: pins: $lv $k run skipped: $f was made by another key" >&2; continue; fi
+    echo "$f $lv-$k=${want:0:12}"
+  done
+}
+# pins_header_note: the keys the attested file's first line names against the current keys of the runs present (re-review 072's finding 2): a run
+# whose corpus file is there and whose current key can be had, and differs from the header's, is said, a note on stderr, not a failure (the rows
+# may still be the same: re-attest after a run of the current key)
+pins_header_note() {
+  local h tag k lv run c cur t=${OI_PINS_RUNS:-$root/.tmp}
+  h=$(head -1 "$PINS_ATTESTED")
+  case $h in '# attested '*', keys of the runs:'*) ;; *) echo "oi: pins: note: the first line of $PINS_ATTESTED names no keys of runs (bin/oi pins --attest writes them)" >&2; return 0 ;; esac
+  for tag in ${h#*, keys of the runs:}; do
+    k=${tag#*=}; run=${tag%%=*}; lv=${run%%-*}; run=${run#*-}
+    case $run in program) c=$t/oi/corpus.tsv ;; suite) c=$t/o7/corpus.tsv ;; *) continue ;; esac
+    [ -f "$c" ] || continue
+    if [ -n "${OI_PINS_FAKE_KEY:-}" ]; then cur=$OI_PINS_FAKE_KEY
+    elif [ "$lv" = oi ]; then cur=$(oi_key "$c" 2>/dev/null) || continue
+    else [ -r "$LIB/key" ] || continue; cur=$(aot_key "$c" 2>/dev/null) || continue; fi
+    [ "${cur:0:12}" = "$k" ] || echo "oi: pins: note: the attested rows of the $lv $run run come from key $k, the current key is ${cur:0:12}: they may be stale (a run of the current key, then bin/oi pins --attest)" >&2
+  done
+  return 0
+}
+cmd_pins() {
+  local pl=$OI_DIR/pins.list; pins_all | LC_ALL=C sort > "$pl"
+  [ -s "$pl" ] || die "pins: no pin found in the known files"
+  if [ "${1:-}" = --attest ]; then
+    local lv id sha st row bad=0 files tags="" f t files_oi files_aot
+    : > "$PINS_ATTESTED.new"
+    files_oi=$(pins_runs oi) || true; files_aot=$(pins_runs aot) || true
+    tags=$(printf '%s\n%s\n' "$files_oi" "$files_aot" | awk 'NF { printf " %s", $2 }')
+    while IFS=$'\t' read -r lv id sha; do
+      if [ "$lv" = oi ]; then files=$files_oi; else files=$files_aot; fi
+      row=""
+      while read -r f t; do
+        [ -n "$f" ] || continue
+        row=$(awk -F'\t' -v id="$id" '$1 == id { print $2 "\t" $3; exit }' "$f") || true
+        [ -n "$row" ] && break
+      done <<< "$files"
+      [ -n "$row" ] || { echo "pins: $lv $id: no row in a run of the current key" >&2; bad=1; continue; }
+      st=${row%%$'\t'*}; row=${row#*$'\t'}
+      case $row in "$sha"*) printf '%s\t%s\t%s\t%s\n' "$lv" "$id" "$st" "$row" >> "$PINS_ATTESTED.new" ;; *) echo "pins: $lv $id: the run's digest $row does not start with the pin $sha" >&2; bad=1 ;; esac
+    done < "$pl"
+    [ "$bad" = 0 ] || { rm -f "$PINS_ATTESTED.new"; die "pins: not attested"; }
+    { echo "# attested $(git -C "$root" describe --always --dirty 2>/dev/null || echo unknown), keys of the runs:$tags"
+      LC_ALL=C sort "$PINS_ATTESTED.new"; } > "$PINS_ATTESTED"; rm -f "$PINS_ATTESTED.new"
+    echo "oi: pins: $(grep -vc '^#' "$PINS_ATTESTED") attested in $PINS_ATTESTED"; return 0
+  fi
+  [ -r "$PINS_ATTESTED" ] || die "pins: $PINS_ATTESTED cannot be read (bin/oi pins --attest)"
+  local n=0 lv id sha rest bad=0
+  while IFS=$'\t' read -r lv id sha; do
+    n=$((n + 1))
+    awk -F'\t' -v lv="$lv" -v id="$id" -v sha="$sha" '$0 !~ /^#/ && $1 == lv && $2 == id && index($4, sha) == 1 { f = 1 } END { exit !f }' "$PINS_ATTESTED" || { echo "PIN $lv $id: no attested digest starts with $sha" >&2; bad=1; }
+  done < "$pl"
+  while IFS=$'\t' read -r lv id rest; do
+    case $lv in '#'*) continue ;; esac
+    awk -F'\t' -v lv="$lv" -v id="$id" '$1 == lv && $2 == id { f = 1 } END { exit !f }' "$pl" || { echo "STALE $lv $id: attested, but no longer pinned" >&2; bad=1; }
+  done < "$PINS_ATTESTED"
+  [ "$bad" = 0 ] || { echo "oi: pins: not attested" >&2; return 1; }
+  pins_header_note
+  echo "oi: pins: $n pins, each attested by a recorded digest"
+}
+
+# ---- the suite (O7)
+. "$root/bin/lib/oi/suite.bash"
+# the directories the verbs redirect into before they run (re-review 042 and 049: `bin/oi key` and `suite key` open .tmp/oi/corpus.log and
+# .tmp/o7/corpus.log before cmd_corpus's mkdir)
+mkdir -p "$OI_DIR" "$S" "$O2J"
+
+cmd=${1:-}
+[ -n "$cmd" ] || { sed -n '2,/^set -euo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 2; }
+shift
+case $cmd in
+  stdlib) cmd_stdlib ;;
+  build) cmd_build ;;
+  test) cmd_test ;;
+  run) cmd_run "$@" ;;
+  repl) cmd_repl ;;
+  repl-check) cmd_repl_check ;;
+  corpus) cmd_corpus ;;
+  key) cmd_corpus > "$OI_DIR/corpus.log"; oi_key "$OI_DIR/corpus.tsv" ;;
+  record-ref) cmd_record_ref "$@" ;;
+  check) cmd_check "$@" ;;
+  divergences) cmd_divergences "$@" ;;
+  aot-cpu) o2j_cpu ;;
+  pins) cmd_pins "$@" ;;
+  oi-limits) echo "$TIMEOUT $(oi_wall)" ;;
+  oi-status) oi_status "$@" ;;
+  oi-cpu) oi_cpu_secs "$@" ;;
+  aot-lib) cmd_aot_lib ;;
+  aot-run) cmd_aot_run "$@" ;;
+  suite) cmd_suite "$@" ;;
+  *) die "unknown command $cmd" ;;
+esac

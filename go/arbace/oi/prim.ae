@@ -1,0 +1,974 @@
+(in-ns 'go.arbace.oi) (go/file "prim.go" :imports [
+
+
+    ^{:line 4} [math "math"]
+    ^{:line 5} [bits "math/bits"]
+    ^{:line 6} [strconv "strconv"]
+    ^{:line 7} [strings "strings"]])
+
+
+;; Lambda's primitives (lambda/lambda.mli's primitive, as lambda/printlambda.ml's primitive
+;; prints them, OC21 (a)): the names are parsed when the unit is compiled; an external (Pccall)
+;; is a call of the Go function registered under its C name (Externals).
+
+^{:go/end 103} (go/method prim ^Node [^{:tag (* scope)} s ^string name ^SVec argv ^any form]
+  ;; the control primitives first: their arguments are not all evaluated
+  (switch name
+    (case ["&&"]
+      (let [(values a b) (values (.inner s (aget argv 0)) (.inner s (aget argv 1)))]
+        (return ^{:go/end 28} (fn ^Value [^{:tag (* Frame)} fr]
+            (let [v (a fr)]
+              (when (== v exitMark)
+                (return v))
+
+              (when (not (Truth v))
+                (return 0))
+
+              (b fr))))))
+
+    (case ["||"]
+      (let [(values a b) (values (.inner s (aget argv 0)) (.inner s (aget argv 1)))]
+        (return ^{:go/end 40} (fn ^Value [^{:tag (* Frame)} fr]
+            (let [v (a fr)]
+              (when (== v exitMark)
+                (return v))
+
+              (when (Truth v)
+                (return 1))
+
+              (b fr)))))))
+
+
+  (when (strings/HasPrefix name "setglobal ")
+    (let [g (.global (.-P (.-unit s)) (globalName (subslice name (len "setglobal "))))
+        ^{:line 44} a (.inner s (aget argv 0))]
+      (return ^{:go/end 50} (fn ^Value [^{:tag (* Frame)} fr]
+          (let [v (a fr)]
+            (set! (.-V g) v)
+            (set! (.-set g) true)
+            ^{:line 49} Unit)))))
+
+
+  (when (strings/HasPrefix name "global ")
+    (let [gname (globalName (subslice name (len "global ")))]
+      (when [(values b ok) (aget Predefs gname)] ok
+        (return ^{:go/end 55} (fn ^Value [(* Frame)] b)))
+
+      (let [g (.global (.-P (.-unit s)) gname)]
+        (return ^{:go/end 63} (fn ^Value [^{:tag (* Frame)} fr]
+            (when (not (.-set g))
+              (Internalf "global %s used before its unit was initialised" gname))
+
+            (.-V g))))))
+
+
+  (let [args (.args s argv)]
+    (when [n (fastPrim name args)] (!= n nil)
+      (return n))
+
+    (let [op (.primOp (.-unit s) name (len args))]
+      (switch (len args)
+        (case [0]
+          (return ^{:go/end 72} (fn ^Value [^{:tag (* Frame)} fr] (op (.-Th fr) nil))))
+        (case [1]
+          (let [a0 (aget args 0)]
+            (return ^{:go/end 81} (fn ^Value [^{:tag (* Frame)} fr]
+                (let [v0 (a0 fr)]
+                  (when (== v0 exitMark)
+                    (return v0))
+
+                  (op (.-Th fr) (lit (slice Value) v0)))))))
+
+        (case [2]
+          (let [(values a0 a1) (values (aget args 0) (aget args 1))]
+            (return ^{:go/end 94} (fn ^Value [^{:tag (* Frame)} fr]
+                (let [v1 (a1 fr)]
+                  (when (== v1 exitMark)
+                    (return v1))
+
+                  (let [v0 (a0 fr)]
+                    (when (== v0 exitMark)
+                      (return v0))
+
+                    (op (.-Th fr) (lit (slice Value) v0 v1)))))))))
+
+
+      ^{:go/end 102} (fn ^Value [^{:tag (* Frame)} fr]
+        (let [(values vs ok) (evalArgs args fr)]
+          (when (not ok)
+            (return exitMark))
+
+          (op (.-Th fr) vs))))))
+
+
+
+
+
+^{:go/end 113} (go/func globalName "globalName is a global's identifier as Ident.print prints it (\"Stdlib__List!\", \"Not_found/26!\")\nwithout its marks.\n" ^string [^string s]
+  (set! s (strings/TrimSuffix s "!"))
+  (when [i (strings/IndexByte s \/)] (>= i 0)
+    (set! s (subslice s _ i)))
+
+  ^{:line 112} s)
+
+
+
+(go/type Op "Op is a primitive's implementation over its evaluated arguments.\n" (func [^{:tag (* Thread)} th ^{:tag (slice Value)} a] [Value]))
+
+^{:go/end 118} (go/func intArg ^int [^Value v] (assert int v))
+
+^{:go/end 120} (go/func boundsErr [] (InvalidArg "index out of bounds"))
+
+^{:go/breaks [5] :go/end 143} (go/func field ^Value [^Value v ^int n]
+  (type-switch [b v]
+    (case [(* Block)]
+      (when (>= n (len (.-F b)))
+        (Internalf "field %d of a block of size %d (tag %d)" n (len (.-F b)) (.-Tag b)))
+
+      (return (aget (.-F b) n)))
+    (case [(* FloatArray)]
+      (return (aget (.-F b) n)))
+    (case [(* Closure)]
+      (when (== n 0)
+        (return b))
+
+      (when (and (!= (.-Code b) nil) (< (- n 2) (len (.-Env b))) (>= n 2))
+        (return (aget (.-Env b) (- n 2)))))
+
+    (case [(* Fiber)]
+      (Internalf "field of a stack")))
+
+  (Internalf "field %d of %s" n (Describe v))
+  nil)
+
+
+^{:go/end 155} (go/func setField [^Value v ^int n ^Value x]
+  (type-switch [b v]
+    (case [(* Block)]
+      (aset (.-F b) n x)
+      (return))
+    (case [(* FloatArray)]
+      (aset (.-F b) n (assert float64 x))
+      (return)))
+
+  (Internalf "setfield %d of %s" n (Describe v)))
+
+
+
+^{:go/end 271} (go/method primOp "primOp is the implementation of the primitive name with nargs arguments.\n" ^Op [^{:tag (* Compiler)} c ^string name ^int nargs]
+  (let [(values word rest _) (strings/Cut name " ")
+      ^{:line 160} num ^{:go/end 170} (fn ^int []
+        (let [f (strings/Fields rest)]
+          (when (== (len f) 0)
+            (Internalf "primitive %q: no number" name))
+
+          (let [(values n err) (strconv/Atoi (aget f 0))]
+            (when (!= err nil)
+              (Internalf "primitive %q: bad number" name))
+
+            ^{:line 169} n)))]
+
+    (switch word
+      (case ["makeblock" "makemutable"]
+        (let [tag (num)]
+          (when (== tag TagDoubleArray)
+            (return ^{:go/end 181} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+                (let [fs (make (slice float64) (len a))]
+                  (range [i x a]
+                    (aset fs i (assert float64 x)))
+
+                  (addr (lit FloatArray :F fs))))))
+
+
+          (return ^{:go/end 183} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (addr (lit Block :Tag tag :F a))))))
+      (case ["makelazyblock"]
+        (return ^{:go/end 185} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (addr (lit Block :Tag TagLazy :F a)))))
+      (case ["makeforwardblock"]
+        (return ^{:go/end 187} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (addr (lit Block :Tag TagForward :F a)))))
+      (case ["field_imm" "field_mut" "field_int"]
+        (let [n (num)]
+          (return ^{:go/end 190} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (field (aget a 0) n)))))
+      (case ["field_computed"]
+        (return ^{:go/end 192} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (field (aget a 0) (intArg (aget a 1))))))
+      (case ["floatfield"]
+        (let [n (num)]
+          (return ^{:go/end 195} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (aget (.-F (assert (* FloatArray) (aget a 0))) n)))))
+      (case ["duprecord"]
+        (return ^{:go/end 197} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (Dup (aget a 0)))))
+      (case ["runstack"]
+        (return ^{:go/end 199} (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a] (.runstack th (aget a 0) (aget a 1) (aget a 2)))))
+      (case ["perform"]
+        (return ^{:go/end 201} (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a] (.perform th (aget a 0)))))
+      (case ["resume"]
+        (return ^{:go/end 203} (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a] (.resume th (aget a 0) (aget a 1) (aget a 2) (aget a 3)))))
+      (case ["reperform"]
+        (return ^{:go/end 205} (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a] (.reperform th (aget a 0) (aget a 1) (aget a 2)))))
+      (case ["raise" "reraise" "raise_notrace"]
+        (return ^{:go/end 207} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (panic (addr (lit Exn :V (aget a 0))))))))
+
+    (when (strings/HasPrefix name "setfield_")
+      (when (strings/HasSuffix name "_computed")
+        (return ^{:go/end 211} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (setField (aget a 0) (intArg (aget a 1)) (aget a 2)) Unit)))
+
+      (let [n (num)]
+        (return ^{:go/end 214} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (setField (aget a 0) n (aget a 1)) Unit))))
+
+    (when (strings/HasPrefix name "setfloatfield")
+      (let [n (num)]
+        (return ^{:go/end 218} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (aset (.-F (assert (* FloatArray) (aget a 0))) n (assert float64 (aget a 1))) Unit))))
+
+    (when [op (intOp name)] (!= op nil)
+      (return op))
+
+    (when [op (floatOp name)] (!= op nil)
+      (return op))
+
+    (when [op (arrayOp name)] (!= op nil)
+      (return op))
+
+    (when [op (stringOp name)] (!= op nil)
+      (return op))
+
+    (when [op (bintOp name)] (!= op nil)
+      (return op))
+
+    (when (strings/HasPrefix name "sys.constant_")
+      (return (sysConstant (subslice name (len "sys.constant_")))))
+
+    (switch name
+      (case ["not"]
+        (return ^{:go/end 240} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (Bool (not (Truth (aget a 0)))))))
+      (case ["isint"]
+        (return ^{:go/end 242} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (let [(values _ ok) (assert int (aget a 0))] (Bool ok)))))
+      (case ["isout"]
+        (return ^{:go/end 244} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (Bool (> (conv uint (intArg (aget a 1))) (conv uint (intArg (aget a 0))))))))
+      (case ["ignore"]
+        (return ^{:go/end 246} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] Unit)))
+      (case ["opaque"]
+        (return ^{:go/end 248} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (aget a 0))))
+      (case ["bytes_to_string" "bytes_of_string"]
+        (return ^{:go/end 250} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (aget a 0))))
+      (case ["atomic_load"]
+        (return ^{:go/end 252} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (field (aget a 0) 0))))
+      (case ["dls_get"]
+        (return ^{:go/end 254} (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a] (.dlsGet th))))
+      (case ["poll"]
+        (return ^{:go/end 256} (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a] (.poll th) (aget a 0))))
+      (case ["bswap16"]
+        (return ^{:go/end 261} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+            (let [x (intArg (aget a 0))]
+              (bit-or (<< (bit-and x 0xff) 8) (bit-and (>> x 8) 0xff))))))
+
+      (case ["int_as_pointer"]
+        (return ^{:go/end 263} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (aget a 0)))))
+
+    (when (or (strings/HasPrefix name "Bigarray.") (strings/HasPrefix name "bigarray."))
+      (let [ext (bigarrayPrim name)]
+        (return (.external c ext nargs))))
+
+    ;; an external: its C name
+    (.external c name nargs)))
+
+
+
+^{:go/end 285} (go/method external "external is the Op calling the external named cname.\n" ^Op [^{:tag (* Compiler)} c ^string cname ^int nargs]
+  (when [(values e ok) (aget Externals cname)] ok
+    (return (conv Op e)))
+
+  (when (!= (.-Missing c) nil)
+    (inc! (aget (.-Missing c) cname)))
+
+  ^{:go/breaks [3] :go/end 284} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+    (Internalf "external %s is not implemented" cname)
+    nil))
+
+
+
+^{:go/end 309} (go/func bigarrayPrim ^string [^string name]
+  (switch
+    (case [(strings/HasPrefix name "Bigarray.dim_")]
+      (return (+ "caml_ba_dim_" (subslice name (len "Bigarray.dim_")))))
+    (case [(strings/Contains name "get16")]
+      (return "caml_ba_uint8_get16"))
+    (case [(strings/Contains name "get32")]
+      (return "caml_ba_uint8_get32"))
+    (case [(strings/Contains name "get64")]
+      (return "caml_ba_uint8_get64"))
+    (case [(strings/Contains name "set16")]
+      (return "caml_ba_uint8_set16"))
+    (case [(strings/Contains name "set32")]
+      (return "caml_ba_uint8_set32"))
+    (case [(strings/Contains name "set64")]
+      (return "caml_ba_uint8_set64"))
+    (case [(strings/Contains name "get")]
+      (return "caml_ba_get_generic"))
+    (case [(strings/Contains name "set")]
+      (return "caml_ba_set_generic")))
+
+  ^{:line 308} name)
+
+
+^{:go/end 405} (go/func intOp ^Op [^string name]
+  ^{:go/breaks [[5 404]]} (let [b2 ^{:go/end 314} (fn ^Op [^{:tag (func [^int x ^int y] [int])} f]
+        ^{:go/end 313} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (BoxInt (f (assert int (aget a 0)) (assert int (aget a 1))))))
+
+      ^{:line 315} cmp ^{:go/end 317} (fn ^Op [^{:tag (func [^int x ^int y] [bool])} f]
+        ^{:go/end 316} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (Bool (f (assert int (aget a 0)) (assert int (aget a 1))))))]
+
+    (switch name
+      (case ["~"]
+        (return ^{:go/end 320} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (BoxInt (Int (- (assert int (aget a 0))))))))
+      (case ["+"]
+        (return (b2 ^{:go/end 322} (fn ^int [^int x ^int y] (Int (+ x y))))))
+      (case ["-"]
+        (return (b2 ^{:go/end 324} (fn ^int [^int x ^int y] (Int (- x y))))))
+      (case ["*"]
+        (return (b2 ^{:go/end 326} (fn ^int [^int x ^int y] (Int (* x y))))))
+      (case ["/" "/u"]
+        (return (b2 ^{:go/end 333} (fn ^int [^int x ^int y]
+              (when (== y 0)
+                (RaiseDivisionByZero))
+
+              (Int (/ x y))))))
+
+      (case ["mod" "mod_unsafe"]
+        (return (b2 ^{:go/end 340} (fn ^int [^int x ^int y]
+              (when (== y 0)
+                (RaiseDivisionByZero))
+
+              (Int (% x y))))))
+
+      (case ["and"]
+        (return (b2 ^{:go/end 342} (fn ^int [^int x ^int y] (bit-and x y)))))
+      (case ["or"]
+        (return (b2 ^{:go/end 344} (fn ^int [^int x ^int y] (bit-or x y)))))
+      (case ["xor"]
+        (return (b2 ^{:go/end 346} (fn ^int [^int x ^int y] (bit-xor x y)))))
+      (case ["lsl"]
+        (return (b2 ^{:go/end 348} (fn ^int [^int x ^int y] (Int (conv int (<< (conv uint x) (bit-and (conv uint y) 63))))))))
+      (case ["lsr"]
+        (return (b2 ^{:go/end 354} (fn ^int [^int x ^int y]
+              ;; on the 63 bits: the sign bit of the 63-bit word is bit 62
+              (let [u (bit-and (conv uint64 x) (- (<< 1 63) 1))]
+                (Int (conv int (>> u (bit-and (conv uint y) 63)))))))))
+
+      (case ["asr"]
+        (return (b2 ^{:go/end 362} (fn ^int [^int x ^int y]
+              (let [s (conv uint y)]
+                (when (> s 62)
+                  (set! s 62))
+
+                (>> x s))))))
+
+      (case ["=="]
+        (return ^{:go/end 364} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (Bool (PhysEqual (aget a 0) (aget a 1))))))
+      (case ["!="]
+        (return ^{:go/end 366} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (Bool (not (PhysEqual (aget a 0) (aget a 1)))))))
+      (case ["<"]
+        (return (cmp ^{:go/end 368} (fn ^bool [^int x ^int y] (< x y)))))
+      (case ["<="]
+        (return (cmp ^{:go/end 370} (fn ^bool [^int x ^int y] (<= x y)))))
+      (case [">"]
+        (return (cmp ^{:go/end 372} (fn ^bool [^int x ^int y] (> x y)))))
+      (case [">="]
+        (return (cmp ^{:go/end 374} (fn ^bool [^int x ^int y] (>= x y)))))
+      (case ["compare_ints"]
+        (return (b2 ^{:go/breaks [[3 383]] :go/end 384} (fn ^int [^int x ^int y]
+              (switch
+                (case [(< x y)]
+                  (return -1))
+                (case [(> x y)]
+                  (return 1)))
+
+              0))))
+
+      (case ["int_of_float"]
+        (return ^{:go/end 386} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (FloatToInt (assert float64 (aget a 0))))))
+      (case ["float_of_int"]
+        (return ^{:go/end 388} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (conv float64 (assert int (aget a 0)))))))
+
+    (when (strings/HasPrefix name "+:=")
+      ;; offsetref
+      (let [(values n _) (strconv/Atoi (subslice name 3))]
+        (return ^{:go/end 397} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+            (let [b (assert (* Block) (aget a 0))]
+              (aset (.-F b) 0 (Int (+ (assert int (aget (.-F b) 0)) n)))
+              ^{:line 396} Unit)))))
+
+
+    (when (and (strings/HasSuffix name "+") (> (len name) 1))
+      (when [(values n err) (strconv/Atoi (subslice name _ (- (len name) 1)))] (== err nil)
+        (return ^{:go/end 401} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (BoxInt (Int (+ (assert int (aget a 0)) n)))))))
+
+
+    nil))
+
+
+
+
+^{:go/end 414} (go/func FloatToInt "FloatToInt is int_of_float: truncation, a value out of range unspecified (amd64's cvttsd2si\ngives the minimum, wrapped to 63 bits as the native code does: 0).\n" ^int [^float64 f]
+  (when (or (math/IsNaN f) (>= f 9223372036854775807.0M) (< f -9223372036854775808.0M))
+    (return (Int math/MinInt64)))
+
+  (Int (conv int f)))
+
+
+^{:go/end 460} (go/func floatOp ^Op [^string name]
+  ^{:go/breaks [[3 459]]} (let [b2 ^{:go/end 419} (fn ^Op [^{:tag (func [^float64 x ^float64 y] [float64])} f]
+        ^{:go/end 418} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (f (assert float64 (aget a 0)) (assert float64 (aget a 1)))))
+
+      ^{:line 420} cmp ^{:go/end 422} (fn ^Op [^{:tag (func [^float64 x ^float64 y] [bool])} f]
+        ^{:go/end 421} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (Bool (f (assert float64 (aget a 0)) (assert float64 (aget a 1))))))]
+
+    (switch name
+      (case ["~."]
+        (return ^{:go/end 425} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (- (assert float64 (aget a 0))))))
+      (case ["abs."]
+        (return ^{:go/end 427} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (math/Abs (assert float64 (aget a 0))))))
+      (case ["+."]
+        (return (b2 ^{:go/end 429} (fn ^float64 [^float64 x ^float64 y] (+ x y)))))
+      (case ["-."]
+        (return (b2 ^{:go/end 431} (fn ^float64 [^float64 x ^float64 y] (- x y)))))
+      (case ["*."]
+        (return (b2 ^{:go/end 433} (fn ^float64 [^float64 x ^float64 y] (* x y)))))
+      (case ["/."]
+        (return (b2 ^{:go/end 435} (fn ^float64 [^float64 x ^float64 y] (/ x y)))))
+      (case ["==."]
+        (return (cmp ^{:go/end 437} (fn ^bool [^float64 x ^float64 y] (== x y)))))
+      (case ["!=."]
+        (return (cmp ^{:go/end 439} (fn ^bool [^float64 x ^float64 y] (!= x y)))))
+      (case ["<."]
+        (return (cmp ^{:go/end 441} (fn ^bool [^float64 x ^float64 y] (< x y)))))
+      (case ["!<."]
+        (return (cmp ^{:go/end 443} (fn ^bool [^float64 x ^float64 y] (not (< x y))))))
+      (case ["<=."]
+        (return (cmp ^{:go/end 445} (fn ^bool [^float64 x ^float64 y] (<= x y)))))
+      (case ["!<=."]
+        (return (cmp ^{:go/end 447} (fn ^bool [^float64 x ^float64 y] (not (<= x y))))))
+      (case [">."]
+        (return (cmp ^{:go/end 449} (fn ^bool [^float64 x ^float64 y] (> x y)))))
+      (case ["!>."]
+        (return (cmp ^{:go/end 451} (fn ^bool [^float64 x ^float64 y] (not (> x y))))))
+      (case [">=."]
+        (return (cmp ^{:go/end 453} (fn ^bool [^float64 x ^float64 y] (>= x y)))))
+      (case ["!>=."]
+        (return (cmp ^{:go/end 455} (fn ^bool [^float64 x ^float64 y] (not (>= x y))))))
+      (case ["compare_floats"]
+        (return ^{:go/end 457} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (CompareFloats (assert float64 (aget a 0)) (assert float64 (aget a 1)))))))
+
+    nil))
+
+
+
+^{:go/end 480} (go/func CompareFloats "CompareFloats is caml_float_compare: NaN equal to itself and below every other float.\n" ^int [^float64 x ^float64 y]
+  (switch
+    (case [(< x y)]
+      (return -1))
+    (case [(> x y)]
+      (return 1))
+    (case [(== x y)]
+      (return 0)))
+
+  ^{:go/breaks [[3 479]]} (let [(values xn yn) (values (math/IsNaN x) (math/IsNaN y))]
+    (switch
+      (case [(and xn yn)]
+        (return 0))
+      (case [xn]
+        (return -1)))
+
+    1))
+
+
+^{:go/end 488} (go/func arrayKind ^string [^string name]
+  (let [i (strings/IndexByte name \[)]
+    (when (< i 0)
+      (return "gen"))
+
+    (strings/TrimSuffix (subslice name (+ i 1)) "]")))
+
+
+
+^{:go/breaks [6] :go/end 500} (go/func ArrayLength "ArrayLength is the length of an array value (a block, a float array, the empty atom).\n" ^int [^Value v]
+  (type-switch [x v]
+    (case [(* Block)]
+      (return (len (.-F x))))
+    (case [(* FloatArray)]
+      (return (len (.-F x)))))
+
+  (Internalf "array length of %s" (Describe v))
+  0)
+
+
+
+^{:go/breaks [6] :go/end 512} (go/func ArrayGet "ArrayGet is the element i of an array value, unchecked but for Go's own check.\n" ^Value [^Value v ^int i]
+  (type-switch [x v]
+    (case [(* Block)]
+      (return (aget (.-F x) i)))
+    (case [(* FloatArray)]
+      (return (aget (.-F x) i))))
+
+  (Internalf "array get of %s" (Describe v))
+  nil)
+
+
+
+^{:go/end 525} (go/func ArraySet "ArraySet sets the element i of an array value.\n" [^Value v ^int i ^Value e]
+  (type-switch [x v]
+    (case [(* Block)]
+      (aset (.-F x) i e)
+      (return))
+    (case [(* FloatArray)]
+      (aset (.-F x) i (assert float64 e))
+      (return)))
+
+  (Internalf "array set of %s" (Describe v)))
+
+
+
+^{:go/end 542} (go/func MakeArray "MakeArray is caml_make_array's view of a literal: a float array when its first element is a float.\n" ^Value [^string kind ^{:tag (slice Value)} a]
+  (when (== (len a) 0)
+    (return (addr (lit Block :Tag 0))))
+
+  (when (or (== kind "float") ^:go/paren (and (== kind "gen") (> (len a) 0)))
+    (when [(values _ ok) (assert float64 (aget a 0))] (or ok (== kind "float"))
+      (let [fs (make (slice float64) (len a))]
+        (range [i x a]
+          (aset fs i (assert float64 x)))
+
+        (return (addr (lit FloatArray :F fs))))))
+
+
+  (addr (lit Block :Tag 0 :F a)))
+
+
+^{:go/end 583} (go/func arrayOp ^Op [^string name]
+  (let [word name]
+    (when [i (strings/IndexByte name \[)] (>= i 0)
+      (set! word (subslice name _ i)))
+
+    ^{:go/breaks [[3 582]]} (let [kind (arrayKind name)
+        ^{:line 550} checked ^{:go/end 558} (fn ^Op [^{:tag (func [^Value v ^int i] [Value])} f]
+          ^{:go/end 557} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+            (let [i (assert int (aget a 1))]
+              (when (or (< i 0) (>= i (ArrayLength (aget a 0))))
+                (boundsErr))
+
+              (f (aget a 0) i))))]
+
+
+      (switch word
+        (case ["array.length"]
+          (return ^{:go/end 561} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (ArrayLength (aget a 0)))))
+        (case ["makearray" "makearray_imm"]
+          (return ^{:go/end 563} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (MakeArray kind (append (conv (slice Value) nil) (spread a))))))
+        (case ["duparray" "duparray_imm"]
+          (return ^{:go/end 565} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (Dup (aget a 0)))))
+        (case ["array.unsafe_get"]
+          (return ^{:go/end 567} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (ArrayGet (aget a 0) (assert int (aget a 1))))))
+        (case ["array.get"]
+          (return (checked ArrayGet)))
+        (case ["array.unsafe_set"]
+          (return ^{:go/end 571} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (ArraySet (aget a 0) (assert int (aget a 1)) (aget a 2)) Unit)))
+        (case ["array.set"]
+          (return ^{:go/end 580} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+              (let [i (assert int (aget a 1))]
+                (when (or (< i 0) (>= i (ArrayLength (aget a 0))))
+                  (boundsErr))
+
+                (ArraySet (aget a 0) i (aget a 2))
+                ^{:line 579} Unit)))))
+
+
+      nil)))
+
+
+^{:go/end 666} (go/func stringOp ^Op [^string name]
+  ^{:go/breaks [[3 665]]} (let [get ^{:go/end 595} (fn ^{:tag (slice byte)} [^{:tag (slice Value)} a ^bool check]
+        (let [b (.-B (assert (* Bytes) (aget a 0)))]
+          (when check
+            (let [i (assert int (aget a 1))]
+              (when (or (< i 0) (>= i (len b)))
+                (boundsErr))))
+
+
+          ^{:line 594} b))
+
+      ^{:line 596} load ^{:go/end 618} (fn ^Op [^int width ^bool check]
+        ^{:go/end 617} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+          (let [b (.-B (assert (* Bytes) (aget a 0)))
+              ^{:line 599} i (assert int (aget a 1))]
+            (when (or (< i 0) (> (+ i width) (len b)))
+              (when check
+                (boundsErr))
+
+              (boundsErr))
+
+            (let [^uint64 x (zero uint64)]
+              (for [k (- width 1)] (>= k 0) (dec! k)
+                (set! x (bit-or (<< x 8) (conv uint64 (aget b (+ i k))))))
+
+              (switch width
+                (case [2]
+                  (return (conv int x)))
+                (case [4]
+                  (return (conv int32 (conv uint32 x)))))
+
+              (conv int64 x)))))
+
+
+      ^{:line 619} store ^{:go/end 640} (fn ^Op [^int width]
+        ^{:go/end 639} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+          (let [b (.-B (assert (* Bytes) (aget a 0)))
+              ^{:line 622} i (assert int (aget a 1))]
+            (when (or (< i 0) (> (+ i width) (len b)))
+              (boundsErr))
+
+            (let [^uint64 x (zero uint64)]
+              (type-switch [v (aget a 2)]
+                (case [int]
+                  (set! x (conv uint64 v)))
+                (case [int32]
+                  (set! x (conv uint64 (conv uint32 v))))
+                (case [int64]
+                  (set! x (conv uint64 v))))
+
+              (for [k 0] (< k width) (inc! k)
+                (aset b (+ i k) (conv byte (>> x (* 8 k)))))
+
+              ^{:line 638} Unit))))]
+
+
+    (switch name
+      (case ["string.length" "bytes.length"]
+        (return ^{:go/end 643} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (len (.-B (assert (* Bytes) (aget a 0)))))))
+      (case ["string.unsafe_get" "bytes.unsafe_get"]
+        (return ^{:go/end 645} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (conv int (aget (.-B (assert (* Bytes) (aget a 0))) (assert int (aget a 1)))))))
+      (case ["string.get" "bytes.get"]
+        (return ^{:go/end 647} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (conv int (aget (get a true) (assert int (aget a 1)))))))
+      (case ["bytes.unsafe_set"]
+        (return ^{:go/end 649} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (aset (.-B (assert (* Bytes) (aget a 0))) (assert int (aget a 1)) (conv byte (assert int (aget a 2)))) Unit)))
+      (case ["bytes.set"]
+        (return ^{:go/end 651} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (aset (get a true) (assert int (aget a 1)) (conv byte (assert int (aget a 2)))) Unit)))
+      (case ["string.get16" "string.unsafe_get16" "bytes.get16" "bytes.unsafe_get16"]
+        (return (load 2 true)))
+      (case ["string.get32" "string.unsafe_get32" "bytes.get32" "bytes.unsafe_get32"]
+        (return (load 4 true)))
+      (case ["string.get64" "string.unsafe_get64" "bytes.get64" "bytes.unsafe_get64"]
+        (return (load 8 true)))
+      (case ["bytes.set16" "bytes.unsafe_set16"]
+        (return (store 2)))
+      (case ["bytes.set32" "bytes.unsafe_set32"]
+        (return (store 4)))
+      (case ["bytes.set64" "bytes.unsafe_set64"]
+        (return (store 8))))
+
+    nil))
+
+
+;; The boxed integers: int32 and nativeint as Go's int32 and Nativeint, int64 as int64.
+
+^{:go/end 788} (go/func bintOp ^Op [^string name]
+  (let [(values ^string kind ^string op) (zero string)]
+    (switch
+      (case [(strings/HasPrefix name "Int32.")]
+        (set! (values kind op) (values "int32" (subslice name 6))))
+      (case [(strings/HasPrefix name "Int64.")]
+        (set! (values kind op) (values "int64" (subslice name 6))))
+      (case [(strings/HasPrefix name "Nativeint.")]
+        (set! (values kind op) (values "nativeint" (subslice name 10))))
+      (case [(strings/HasPrefix name "compare_bints ")]
+        (return ^{:go/end 689} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+            ^{:go/breaks [[3 688]]} (let [(values x y) (values (bintVal (aget a 0)) (bintVal (aget a 1)))]
+              (switch
+                (case [(< x y)]
+                  (return -1))
+                (case [(> x y)]
+                  (return 1)))
+
+              0))))
+
+      (default
+        ;; conversions: int32_of_int64 and the like (Pcvtbint prints dst_of_src)
+        (when [i (strings/Index name "_of_")] (> i 0)
+          (let [(values dst src) (values (subslice name _ i) (subslice name (+ i 4)))]
+            (when (and (isBint dst) (isBint src))
+              (return ^{:go/end 695} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (mkBint dst (bintVal (aget a 0))))))))
+
+
+        (return nil)))
+
+    (let [b2 ^{:go/end 702} (fn ^Op [^{:tag (func [^int64 x ^int64 y] [int64])} f]
+          ^{:go/end 701} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (mkBint kind (f (bintVal (aget a 0)) (bintVal (aget a 1))))))
+
+        ^{:line 703} width (conv uint 64)]
+      (when (== kind "int32")
+        (set! width 32))
+
+      ^{:go/breaks [[3 787]]} (let [cmp ^{:go/end 709} (fn ^Op [^{:tag (func [^int64 x ^int64 y] [bool])} f]
+            ^{:go/end 708} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (Bool (f (bintVal (aget a 0)) (bintVal (aget a 1))))))]
+
+        (switch op
+          (case ["of_int"]
+            (return ^{:go/end 712} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (mkBint kind (conv int64 (assert int (aget a 0)))))))
+          (case ["to_int"]
+            (return ^{:go/end 714} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (Int (conv int (bintVal (aget a 0)))))))
+          (case ["neg"]
+            (return ^{:go/end 716} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (mkBint kind (- (bintVal (aget a 0)))))))
+          (case ["add"]
+            (return (b2 ^{:go/end 718} (fn ^int64 [^int64 x ^int64 y] (+ x y)))))
+          (case ["sub"]
+            (return (b2 ^{:go/end 720} (fn ^int64 [^int64 x ^int64 y] (- x y)))))
+          (case ["mul"]
+            (return (b2 ^{:go/end 722} (fn ^int64 [^int64 x ^int64 y] (* x y)))))
+          (case ["div" "div_unsafe"]
+            (return (b2 ^{:go/end 732} (fn ^int64 [^int64 x ^int64 y]
+                  (when (== y 0)
+                    (RaiseDivisionByZero))
+
+                  (when (== y -1)
+                    (return (- x)))
+
+                  (/ x y)))))
+
+          (case ["mod" "mod_unsafe"]
+            (return (b2 ^{:go/end 742} (fn ^int64 [^int64 x ^int64 y]
+                  (when (== y 0)
+                    (RaiseDivisionByZero))
+
+                  (when (== y -1)
+                    (return 0))
+
+                  (% x y)))))
+
+          (case ["and"]
+            (return (b2 ^{:go/end 744} (fn ^int64 [^int64 x ^int64 y] (bit-and x y)))))
+          (case ["or"]
+            (return (b2 ^{:go/end 746} (fn ^int64 [^int64 x ^int64 y] (bit-or x y)))))
+          (case ["xor"]
+            (return (b2 ^{:go/end 748} (fn ^int64 [^int64 x ^int64 y] (bit-xor x y)))))
+          (case ["lsl"]
+            (return ^{:go/end 752} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+                (mkBint kind (<< (bintVal (aget a 0)) (bit-and (conv uint (assert int (aget a 1))) (- width 1)))))))
+
+          (case ["lsr"]
+            (return ^{:go/end 761} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+                (let [x (bintVal (aget a 0))
+                    ^{:line 756} s (bit-and (conv uint (assert int (aget a 1))) (- width 1))]
+                  (when (== width 32)
+                    (return (mkBint kind (conv int64 (>> (conv uint32 x) s)))))
+
+                  (mkBint kind (conv int64 (>> (conv uint64 x) s)))))))
+
+          (case ["asr"]
+            (return ^{:go/end 765} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+                (mkBint kind (>> (bintVal (aget a 0)) (bit-and (conv uint (assert int (aget a 1))) (- width 1)))))))
+
+          (case ["bswap"]
+            (return ^{:go/end 773} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+                (let [x (bintVal (aget a 0))]
+                  (when (== width 32)
+                    (return (mkBint kind (conv int64 (bits/ReverseBytes32 (conv uint32 x))))))
+
+                  (mkBint kind (conv int64 (bits/ReverseBytes64 (conv uint64 x))))))))
+
+          (case ["=="]
+            (return (cmp ^{:go/end 775} (fn ^bool [^int64 x ^int64 y] (== x y)))))
+          (case ["!="]
+            (return (cmp ^{:go/end 777} (fn ^bool [^int64 x ^int64 y] (!= x y)))))
+          (case ["<"]
+            (return (cmp ^{:go/end 779} (fn ^bool [^int64 x ^int64 y] (< x y)))))
+          (case ["<="]
+            (return (cmp ^{:go/end 781} (fn ^bool [^int64 x ^int64 y] (<= x y)))))
+          (case [">"]
+            (return (cmp ^{:go/end 783} (fn ^bool [^int64 x ^int64 y] (> x y)))))
+          (case [">="]
+            (return (cmp ^{:go/end 785} (fn ^bool [^int64 x ^int64 y] (>= x y))))))
+
+        nil))))
+
+
+^{:go/end 790} (go/func isBint ^bool [^string s] (or (== s "int32") (== s "int64") (== s "nativeint")))
+
+^{:go/breaks [5] :go/end 803} (go/func bintVal ^int64 [^Value v]
+  (type-switch [x v]
+    (case [int32]
+      (return (conv int64 x)))
+    (case [int64]
+      (return x))
+    (case [Nativeint]
+      (return (conv int64 x))))
+
+  (Internalf "not a boxed integer: %s" (Describe v))
+  0)
+
+
+^{:go/end 813} (go/func mkBint ^Value [^string kind ^int64 x]
+  (switch kind
+    (case ["int32"]
+      (return (conv int32 x)))
+    (case ["int64"]
+      (return x)))
+
+  (conv Nativeint x))
+
+
+
+
+(go/var ^{:tag Value :doc "BackendType is what Sys.backend_type answers: Bytecode, as the reference runs are ocamlc's\nand the Lambda the bytecode translation (OC53 (a)).\n"} BackendType 1)
+
+^{:go/end 842} (go/func sysConstant ^Op [^string name]
+  (let [^Value v (zero Value)]
+    (switch name
+      (case ["big_endian"]
+        (set! v 0))
+      (case ["word_size"]
+        (set! v 64))
+      (case ["int_size"]
+        (set! v 63))
+      (case ["max_wosize"]
+        (set! v (- (<< 1 54) 1)))
+      (case ["ostype_unix"]
+        (set! v 1))
+      (case ["ostype_win32" "ostype_cygwin"]
+        (set! v 0))
+      (case ["backend_type"]
+        (return ^{:go/end 835} (fn ^Value [(* Thread) (slice Value)] BackendType)))
+      (case ["standard_library_default"]
+        (set! v (Str "/usr/lib/ocaml")))
+      (default
+        (Internalf "sys.constant_%s" name)))
+
+    ^{:go/end 841} (fn ^Value [(* Thread) (slice Value)] v)))
+
+
+
+^{:go/end 855} (go/func Dup "Dup is a shallow copy of a block (Obj.dup, duprecord, duparray).\n" ^Value [^Value v]
+  (type-switch [x v]
+    (case [(* Block)]
+      (return (addr (lit Block :Tag (.-Tag x) :F (append (conv (slice Value) nil) (spread (.-F x)))))))
+    (case [(* FloatArray)]
+      (return (addr (lit FloatArray :F (append (conv (slice float64) nil) (spread (.-F x)))))))
+    (case [(* Bytes)]
+      (return (addr (lit Bytes :B (append (conv (slice byte) nil) (spread (.-B x))))))))
+
+  ^{:line 854} v)
+
+
+
+^{:go/end 975} (go/func fastPrim "fastPrim is the node of a frequent primitive without the generic path's argument slice.\n" ^Node [^string name ^{:tag (slice Node)} args]
+  (when (== (len args) 1)
+    (let [a0 (aget args 0)
+        (values word rest _) (strings/Cut name " ")]
+      (switch word
+        (case ["field_imm" "field_mut" "field_int"]
+          (let [(values n err) (strconv/Atoi rest)]
+            (when (!= err nil)
+              (return nil))
+
+            (return ^{:go/end 877} (fn ^Value [^{:tag (* Frame)} fr]
+                (let [v (a0 fr)]
+                  (when [(values b ok) (assert (* Block) v)] (and ok (< n (len (.-F b))))
+                    (return (aget (.-F b) n)))
+
+                  (when (== v exitMark)
+                    (return v))
+
+                  (field v n)))))))
+
+
+      (switch name
+        (case ["isint"]
+          (return ^{:go/end 888} (fn ^Value [^{:tag (* Frame)} fr]
+              (let [v (a0 fr)]
+                (when (== v exitMark)
+                  (return v))
+
+                (let [(values _ ok) (assert int v)]
+                  (Bool ok))))))
+
+        (case ["not"]
+          (return ^{:go/end 896} (fn ^Value [^{:tag (* Frame)} fr]
+              (let [v (a0 fr)]
+                (when (== v exitMark)
+                  (return v))
+
+                (Bool (not (Truth v))))))))
+
+
+      (when (and (strings/HasSuffix name "+") (> (len name) 1))
+        (when [(values k err) (strconv/Atoi (subslice name _ (- (len name) 1)))] (== err nil)
+          (return ^{:go/end 906} (fn ^Value [^{:tag (* Frame)} fr]
+              (let [v (a0 fr)]
+                (when [(values i ok) (assert int v)] ok
+                  (return (BoxInt (Int (+ i k)))))
+
+                ^{:line 905} v)))))
+
+
+
+      (return nil)))
+
+  (when (!= (len args) 2)
+    (return nil))
+
+  ^{:go/breaks [[3 974]]} (let [(values a0 a1) (values (aget args 0) (aget args 1))
+      ^{:line 915} arith ^{:go/end 927} (fn ^Node [^{:tag (func [^int x ^int y] [int])} f]
+        ^{:go/end 926} (fn ^Value [^{:tag (* Frame)} fr]
+          (let [v1 (a1 fr)]
+            (when (== v1 exitMark)
+              (return v1))
+
+            (let [v0 (a0 fr)]
+              (when (== v0 exitMark)
+                (return v0))
+
+              (BoxInt (f (assert int v0) (assert int v1)))))))
+
+
+      ^{:line 928} cmp ^{:go/end 940} (fn ^Node [^{:tag (func [^int x ^int y] [bool])} f]
+        ^{:go/end 939} (fn ^Value [^{:tag (* Frame)} fr]
+          (let [v1 (a1 fr)]
+            (when (== v1 exitMark)
+              (return v1))
+
+            (let [v0 (a0 fr)]
+              (when (== v0 exitMark)
+                (return v0))
+
+              (Bool (f (assert int v0) (assert int v1)))))))]
+
+
+    (switch name
+      (case ["+"]
+        (return (arith ^{:go/end 943} (fn ^int [^int x ^int y] (Int (+ x y))))))
+      (case ["-"]
+        (return (arith ^{:go/end 945} (fn ^int [^int x ^int y] (Int (- x y))))))
+      (case ["*"]
+        (return (arith ^{:go/end 947} (fn ^int [^int x ^int y] (Int (* x y))))))
+      (case ["and"]
+        (return (arith ^{:go/end 949} (fn ^int [^int x ^int y] (bit-and x y)))))
+      (case ["or"]
+        (return (arith ^{:go/end 951} (fn ^int [^int x ^int y] (bit-or x y)))))
+      (case ["<"]
+        (return (cmp ^{:go/end 953} (fn ^bool [^int x ^int y] (< x y)))))
+      (case ["<="]
+        (return (cmp ^{:go/end 955} (fn ^bool [^int x ^int y] (<= x y)))))
+      (case [">"]
+        (return (cmp ^{:go/end 957} (fn ^bool [^int x ^int y] (> x y)))))
+      (case [">="]
+        (return (cmp ^{:go/end 959} (fn ^bool [^int x ^int y] (>= x y)))))
+      (case ["==" "!="]
+        (let [eq (== name "==")]
+          (return ^{:go/end 972} (fn ^Value [^{:tag (* Frame)} fr]
+              (let [v1 (a1 fr)]
+                (when (== v1 exitMark)
+                  (return v1))
+
+                (let [v0 (a0 fr)]
+                  (when (== v0 exitMark)
+                    (return v0))
+
+                  (Bool (== (PhysEqual v0 v1) eq)))))))))
+
+
+    nil))

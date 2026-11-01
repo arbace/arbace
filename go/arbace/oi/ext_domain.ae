@@ -1,0 +1,98 @@
+(in-ns 'go.arbace.oi) (go/file "ext_domain.go" :imports [
+
+    ^{:line 3} [sync "sync"]])
+
+;; Domains, mutexes and conditions (runtime/domain.c, sync.c): the locks' state is guarded by
+;; the interpreter's lock, and a thread that must wait waits on gilCond, which releases it.
+
+(go/var gilCond (sync/NewCond (addr gil)))
+
+(go/type ocMutex (struct
+    ^{:line 11 :tag bool} locked
+    ^{:line 12 :tag (* Thread)} owner))
+
+
+(go/type ocCond (struct
+    ^{:line 16 :tag int} waiters
+    ^{:line 17 :tag int} tokens))
+
+
+^{:go/end 20} (go/func mutexOf ^{:tag (* ocMutex)} [^Value v] (assert (* ocMutex) (.-V (assert (* Custom) v))))
+^{:go/end 21} (go/func condOf ^{:tag (* ocCond)} [^Value v] (assert (* ocCond) (.-V (assert (* Custom) v))))
+
+^{:go/end 31} (go/method lock [^{:tag (* ocMutex)} m ^{:tag (* Thread)} th]
+  (when (and (.-locked m) (== (.-owner m) th))
+    (RaiseSysError "Mutex.lock: Resource deadlock avoided"))
+
+  (while (.-locked m)
+    (.Wait gilCond))
+
+  (set! (values (.-locked m) (.-owner m)) (values true th)))
+
+
+^{:go/end 39} (go/method unlock [^{:tag (* ocMutex)} m ^{:tag (* Thread)} th]
+  (when (or (not (.-locked m)) (!= (.-owner m) th))
+    (RaiseSysError "Mutex.unlock: Operation not permitted"))
+
+  (set! (values (.-locked m) (.-owner m)) (values false nil))
+  (.Broadcast gilCond))
+
+
+^{:go/end 101} (go/func init []
+  (let [r RegisterExt]
+    (r "caml_ml_mutex_new" ^{:go/end 43} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (addr (lit Custom :Name "_mutex" :V (addr (lit ocMutex))))))
+    (r "caml_ml_mutex_lock" ^{:go/end 44} (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a] (.lock (mutexOf (aget a 0)) th) Unit))
+    (r "caml_ml_mutex_unlock" ^{:go/end 45} (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a] (.unlock (mutexOf (aget a 0)) th) Unit))
+    (r "caml_ml_mutex_try_lock" ^{:go/end 53} (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a]
+        ^{:go/breaks [4]} (let [m (mutexOf (aget a 0))]
+          (when (.-locked m)
+            (return 0))
+
+          (set! (values (.-locked m) (.-owner m)) (values true th))
+          1)))
+
+    (r "caml_ml_condition_new" ^{:go/end 54} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (addr (lit Custom :Name "_condition" :V (addr (lit ocCond))))))
+    (r "caml_ml_condition_wait" ^{:go/end 66} (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a]
+        (let [(values c m) (values (condOf (aget a 0)) (mutexOf (aget a 1)))]
+          (.unlock m th)
+          (inc! (.-waiters c))
+          (while (== (.-tokens c) 0)
+            (.Wait gilCond))
+
+          (dec! (.-tokens c))
+          (dec! (.-waiters c))
+          (.lock m th)
+          ^{:line 65} Unit)))
+
+    (r "caml_ml_condition_signal" ^{:go/end 74} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+        (let [c (condOf (aget a 0))]
+          (when (> (.-waiters c) (.-tokens c))
+            (inc! (.-tokens c))
+            (.Broadcast gilCond))
+
+          ^{:line 73} Unit)))
+
+    (r "caml_ml_condition_broadcast" ^{:go/end 82} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+        (let [c (condOf (aget a 0))]
+          (when (> (.-waiters c) 0)
+            (set! (.-tokens c) (.-waiters c))
+            (.Broadcast gilCond))
+
+          ^{:line 81} Unit)))
+
+    (r "caml_domain_spawn" ^{:go/end 100} (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a]
+        (let [ts (AsBlock (aget a 1))]
+          (SpawnDomain (aget a 0) ^{:go/end 99} (fn [^{:tag (* Thread)} dt ^Value exn]
+              (let [^Value res (zero Value)]
+                (if (== exn nil)
+                  ;; the body's result: Domain.spawn's body returns it
+                  (set! res (addr (lit Block :Tag 0 :F (lit (slice Value) (.-result dt)))))
+
+                  (set! res (addr (lit Block :Tag 1 :F (lit (slice Value) (addr (lit Block :Tag 0 :F (lit (slice Value) exn (addr (lit Block :Tag 0))))))))))
+
+                (aset (.-F ts) 0 (addr (lit Block :Tag 0 :F (lit (slice Value) res))))
+                (let [c (condOf (aget (.-F ts) 2))]
+                  (when (> (.-waiters c) 0)
+                    (set! (.-tokens c) (.-waiters c)))
+
+                  (.Broadcast gilCond))))))))))

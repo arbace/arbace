@@ -9,22 +9,31 @@
 #   go/arbace/repr/go/godump.ae, godump/   the native reader's dumper, from tamago/goroot's go/ast
 #   go/arbace/repr/go/internal/syntax.ae, syntax/
 #                                     gc's syntax renamed, from tamago/cmd's cmd/compile/internal/syntax
-# Both read the program's reflection, so they run on an executable built from the checkout: the
-# gate's (bin/arbace-go --gate-build, cached in .tmp/arbace-go-gate; a hit after bin/gate's
-# build), or EXE.
+# and goi's generated node factories (doc/go/GOI-SPEC.md §4.2), written by test/goi/gen_nodes.ae into
+# its OUT argument (no reflection: pure), and jrt's package-to-module table, bin/jrt modules --check:
+#   go/arbace/goi/ops.ae, registry.ae       test/goi/gen_nodes.ae
+#   go/arbace/jrt/module_table.ae           bin/jrt modules (from jdk/sources.txt, jdk/javac/sources.txt)
+# Not checked, by design (doc/GATE-SURVEY.md, GTS111): jrt's JVM-generated standin_*.ae, manifest.edn,
+# manifest_test.ae and reflect_tables.ae (bin/jrt standins, manifest): they come from the frozen JVM's
+# reflection, which a gate step would run only to compare; j2g-edge and the jrt-convert verifies already
+# hold the JVM's answers.
+# The first two read the program's reflection, so they run on an executable built from the checkout: the
+# gate's (bin/arbace-go --gate-build, cached in ARBACE_GATE_EXES/KEY20, bin/lib/gate-cache.bash; a hit
+# after bin/gate's build of the checkout's key), or EXE.
 #
 # Usage: bin/generated-check [--update] [EXE]
 #   --update  write the regenerated files over the committed ones instead of comparing
 set -uo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 . "$root/bin/lib/tmpdir.bash" # TMPDIR: .tmp/tmp when unset
+. "$root/bin/lib/gate-cache.bash" # arbace_gate_cache: the gate's builds, ARBACE_GATE_EXES/KEY20
 cd "$root" || exit 1
 update=
 [ "${1:-}" = --update ] && { update=1; shift; }
 exe=${1:-}
 if [ -z "$exe" ]; then
   bin/arbace-go --gate-build || exit 1
-  exe=${ARBACE_GATE_CACHE:-$root/.tmp/arbace-go-gate}/amd64/arbace
+  exe=$(arbace_gate_cache "$root")/amd64/arbace
 fi
 [ -x "$exe" ] || { echo "generated-check: no executable $exe" >&2; exit 2; }
 out=$root/.tmp/generated-check
@@ -32,8 +41,11 @@ mkdir -p "$out"
 status=0
 for pair in CompilerNodes.ae:test/c2j/gen_nodes.ae CompilerAOTFn.ae:test/c2j/gen_fns.ae; do
   file=${pair%%:*} gen=${pair#*:}
-  if ! "$exe" "$gen" > "$out/$file" 2> "$out/$file.err"; then
+  if ! ARBACE_PATH=$root "$exe" "$gen" > "$out/$file" 2> "$out/$file.err"; then
     echo "generated-check: $gen failed (see $out/$file.err)"; status=1; continue
+  fi
+  if [ ! -s "$out/$file" ]; then
+    echo "generated-check: $gen wrote nothing (see $out/$file.err)"; status=1; continue
   fi
   if [ -n "$update" ]; then
     cp "$out/$file" "arbace/lang/go/$file" && echo "generated-check: arbace/lang/go/$file written"
@@ -46,30 +58,81 @@ for pair in CompilerNodes.ae:test/c2j/gen_nodes.ae CompilerAOTFn.ae:test/c2j/gen
     status=1
   fi
 done
+# goi's generated pair: gen_nodes.ae writes both files into OUT
+gg=$out/goi
+rm -rf "$gg"; mkdir -p "$gg"
+if ! ARBACE_PATH=$root "$exe" test/goi/gen_nodes.ae "$gg" > "$gg.log" 2>&1; then
+  echo "generated-check: test/goi/gen_nodes.ae failed (see $gg.log)"; status=1
+else
+  for file in ops.ae registry.ae; do
+    if [ ! -s "$gg/$file" ]; then
+      echo "generated-check: test/goi/gen_nodes.ae wrote no $file (see $gg.log)"; status=1
+    elif [ -n "$update" ]; then
+      cp "$gg/$file" "go/arbace/goi/$file" && echo "generated-check: go/arbace/goi/$file written" || status=1
+    elif cmp -s "$gg/$file" "go/arbace/goi/$file"; then
+      echo "generated-check: go/arbace/goi/$file as test/goi/gen_nodes.ae writes it"
+    else
+      diff -u "go/arbace/goi/$file" "$gg/$file" > "$gg/$file.diff"
+      echo "generated-check: go/arbace/goi/$file is stale: test/goi/gen_nodes.ae writes otherwise ($gg/$file.diff;" \
+        "bin/generated-check --update)"
+      status=1
+    fi
+  done
+fi
+# jrt's module table
+if [ -n "$update" ]; then
+  bin/jrt modules && echo "generated-check: go/arbace/jrt/module_table.ae written" || status=1
+elif bin/jrt modules --check > "$out/module_table.log" 2>&1; then
+  echo "generated-check: go/arbace/jrt/module_table.ae as bin/jrt modules writes it"
+else
+  echo "generated-check: go/arbace/jrt/module_table.ae is stale: bin/jrt modules writes otherwise" \
+    "($out/module_table.log; bin/generated-check --update)"
+  status=1
+fi
 # repr/go's generated Go forms: every file the generator writes, and no other under the two trees
 rg=$out/repr-go
 rm -rf "$rg"; mkdir -p "$rg"
 # (arbace.go.table, whose form-text the generator writes with, is not embedded: from the checkout)
+gen=
 if ! ARBACE_PATH=$root "$exe" -m arbace.repr.go.parse generate "$rg" > "$rg.log" 2>&1; then
   echo "generated-check: arbace.repr.go.parse generate failed (see $rg.log)"; status=1
-elif [ -n "$update" ]; then
-  rm -rf go/arbace/repr/go/godump go/arbace/repr/go/internal/syntax
-  (cd "$rg" && find go -type f | LC_ALL=C sort) | while read -r f; do
-    mkdir -p "$(dirname "$f")" && cp "$rg/$f" "$f" && echo "generated-check: $f written"
-  done
 else
-  gen=$( (cd "$rg" && find go -type f | LC_ALL=C sort) )
-  have=$(find go/arbace/repr/go/godump.ae go/arbace/repr/go/godump go/arbace/repr/go/internal/syntax.ae \
-           go/arbace/repr/go/internal/syntax -type f 2>&1 | LC_ALL=C sort)
-  bad=
-  echo "$gen" > "$TMPDIR/generated-check.gen"; echo "$have" > "$TMPDIR/generated-check.have"
-  [ "$gen" = "$have" ] || bad="the files differ: $(diff "$TMPDIR/generated-check.gen" "$TMPDIR/generated-check.have" | grep '^[<>]' | tr '\n' ' ')"
-  for f in $gen; do cmp -s "$rg/$f" "$f" || bad="$bad $f"; done
-  if [ -z "$bad" ]; then
-    echo "generated-check: repr/go's $(echo "$gen" | wc -l) generated files in go/arbace/repr/go as arbace.repr.go.parse writes them"
+  # every file the generator wrote, whatever its directory (a file outside go/ is a difference)
+  gen=$( (cd "$rg" && find . -type f | LC_ALL=C sort | sed 's|^\./||') )
+  if [ -z "$gen" ]; then
+    echo "generated-check: arbace.repr.go.parse generate wrote no file (see $rg.log)"; status=1
+  elif [ -n "$update" ] && stray=$(for f in $gen; do case $f in
+      go/arbace/repr/go/godump.ae|go/arbace/repr/go/godump/*|go/arbace/repr/go/internal/syntax.ae|go/arbace/repr/go/internal/syntax/*) ;;
+      *) echo "$f" ;; esac; done) && [ -n "$stray" ]; then
+    # a file outside the four roots would be written anywhere in the checkout and still fail the check
+    echo "generated-check: arbace.repr.go.parse generate wrote outside its trees, nothing copied: $(echo $stray)"; status=1
+  elif [ -n "$update" ]; then
+    # copied aside first, every copy checked (no pipeline to lose a failure), and only then the old
+    # trees replaced
+    ok=1
+    for f in $gen; do
+      mkdir -p "$(dirname "$rg.new/$f")" && cp "$rg/$f" "$rg.new/$f" || { echo "generated-check: cannot copy $f"; ok=; }
+    done
+    if [ -n "$ok" ]; then
+      rm -rf go/arbace/repr/go/godump go/arbace/repr/go/internal/syntax
+      for f in $gen; do
+        mkdir -p "$(dirname "$f")" && cp "$rg.new/$f" "$f" && echo "generated-check: $f written" || status=1
+      done
+    else status=1; fi
+    rm -rf "$rg.new"
   else
-    echo "generated-check: repr/go's generated files are stale:$bad (bin/generated-check --update)"
-    status=1
+    have=$(find go/arbace/repr/go/godump.ae go/arbace/repr/go/godump go/arbace/repr/go/internal/syntax.ae \
+             go/arbace/repr/go/internal/syntax -type f 2>&1 | LC_ALL=C sort)
+    bad=
+    echo "$gen" > "$TMPDIR/generated-check.gen"; echo "$have" > "$TMPDIR/generated-check.have"
+    [ "$gen" = "$have" ] || bad="the files differ: $(diff "$TMPDIR/generated-check.gen" "$TMPDIR/generated-check.have" | grep '^[<>]' | tr '\n' ' ')"
+    for f in $gen; do cmp -s "$rg/$f" "$f" || bad="$bad $f"; done
+    if [ -z "$bad" ]; then
+      echo "generated-check: repr/go's $(echo "$gen" | wc -l) generated files in go/arbace/repr/go as arbace.repr.go.parse writes them"
+    else
+      echo "generated-check: repr/go's generated files are stale:$bad (bin/generated-check --update)"
+      status=1
+    fi
   fi
 fi
 exit $status

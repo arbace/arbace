@@ -237,7 +237,9 @@ the oracle's reference", "S4: the JVM removed"): the jar of the frozen branch's 
 `.tmp/oracle-frozen/` and checked against `test/oracle/frozen-jar.sha256`, run by `java` alone
 (`bin/lib/frozen.bash`, shared with the other tools that stay on a JVM), with the runner's
 namespaces given to it as `.clj` links (`frozen_view test`, `.tmp/frozen-view/test`).
-`ARBACE_ORACLE_JAR` (or `FROZEN_JAR`) takes an already built jar, unchecked;
+`ARBACE_ORACLE_JAR` (or `FROZEN_JAR`) takes an already built jar, checked against the pin line of its file
+name (a name with no line, or another hash, fails; another tag needs `FROZEN_ALLOW_UNPINNED=1`, which the gate
+refuses: GTS112);
 `ARBACE_ORACLE_EXPECTED` names the expected files' directory (default `test/oracle/expected`).
 Until S4 `ARBACE_ORACLE_REF` chose between `main`, `target/arbace.jar` through `bin/arbace-j`
 (the default), and `frozen`; `main` went with main's JVM build.
@@ -355,6 +357,18 @@ not compile. Positions are in UTF-16 units.
   identity-dependent output or a result over 3,000 characters.
 - Text in the sources: write non-ASCII characters as `\uXXXX` escapes (some editors and agent
   tools turn `\uXXXX` in written text into the characters themselves).
+
+## The negative controls
+
+doc/GATE-SURVEY.md's GTS81 (a): a check whose comparison passes what differs would pass every case, and
+the known mismatches' "now passing" rule sees it only on a case that mismatches. `test/oracle/controls.edn`
+names pairs of cases of the corpus, `{:id :subject CASE :reference CASE :why}`: `bin/oracle check`
+compares the subject's actual record with the reference's expected one by the check's own comparison
+(`oracle.runner/check`'s `differs`: `canon` and V11) and `controls-ok?` fails the run when they do not
+differ (`control passed: ...`) or when either has no record while its file ran (`control not judged`);
+a control whose files are not selected, or a run incomplete, is printed and left. control-1:
+collections.ae:6's `[]` against :7's `[1 2 3]`. No case and no run of its own, in every mode (`--expected`,
+`--write-expected`, plain); `bin/diffcheck` shares `controls-ok?` (doc/FUTAMURA-SURVEY.md, "F2 as built").
 
 ## Exclusions
 

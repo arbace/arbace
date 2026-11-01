@@ -1,0 +1,69 @@
+;; A program's start and end: its units' initialisation in link order (the translator's main
+;; class passes them as one Runnable), then Stdlib's at_exit (named "Pervasives.do_at_exit");
+;; an uncaught exception printed as OCaml's runtime prints it (Printexc's handler when the program
+;; links Printexc, else "Fatal error: exception ..."), status 2; exit's status; the runtime's
+;; fatal errors with their message.
+
+(in-ns 'ocaml.rt)
+
+(defclass ^:public ^:final Main
+
+  (method ^:public ^:static run ^int [^String/1 args ^Runnable inits]
+    (set! Rt/argv args)
+    (Gil/lock)
+    (let [^:mutable ^int st 0]
+      (try
+        (.run inits)
+        (Main/atExit)
+        (catch Throwable e (set! st (Main/fail e))))
+      (Main/flushStd)
+      (Gil/unlock)
+      st))
+
+  ;; the runtime's state as before any program ran (a runner that runs several programs in one
+  ;; process: the next program's units are initialised afresh)
+  (method ^:public ^:static reset ^void []
+    (.clear Rt/named)
+    (set! ExtCore/ooId 0)
+    (Effects/reset)
+    (ExtIo/reset))
+
+  (method ^:public ^:static atExit ^void []
+    (let [f (.get Rt/named "Pervasives.do_at_exit")]
+      (when (some? f) (Rt/ap1 f Rt/UNIT))))
+
+  (method ^:public ^:static flushStd ^void []
+    (.flush System/out)
+    (.flush System/err))
+
+  (method ^:public ^:static fail ^int [^Throwable e]
+    (cond
+      (instance? Exit e) (.-code (cast Exit e))
+      (instance? Fatal e) (do (Main/flushQuiet)
+                              (.println System/err (.getMessage e))
+                              (.-code (cast Fatal e)))
+      (instance? Exn e) (Main/uncaught (.-v (cast Exn e)))
+      (instance? StackOverflowError e) (Main/uncaught Rt/Stack_overflow)
+      :else (do (Main/flushQuiet)
+                (.println System/err (java-str "o2j: Java exception " e))
+                (when (some? (System/getenv "O2J_TRACE")) (.printStackTrace e))
+                125)))
+
+  (method ^:static flushQuiet ^void []
+    (try (ExtIo/flushStd) (catch Throwable _ nil))
+    (Main/flushStd))
+
+  (method ^:public ^:static uncaught ^int [exn]
+    (try
+      (let [h (.get Rt/named "Printexc.handle_uncaught_exception")]
+        (if (some? h)
+          (do (Rt/ap2 h exn Rt/FALSE) 2)
+          (let [msg (Rt/formatException exn)]
+            (try (Main/atExit) (catch Exn _ nil))
+            (Main/flushStd)
+            (.print System/err (java-str "Fatal error: exception " msg "\n"))
+            (.flush System/err)
+            2)))
+      (catch Exit x (.-code x))
+      (catch Exn _ 2)
+      (catch Fatal f (.println System/err (.getMessage f)) (.-code f)))))

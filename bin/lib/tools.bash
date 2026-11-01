@@ -28,7 +28,10 @@
 #                   freeze tag arbace-for-java-26-v1 into .tmp/frozen/: repr/java's
 #                   regression corpus, the Java forms tests' javac classes, the reference runs
 #                   of Clojure's suite. Re-extracted when the tag
-#                   moves. Its classes are dated after its sources, so javac does not recompile
+#                   moves or when the extracted clojure/ is not the tree pinned by
+#                   test/frozen-clojure.sha256 (the digest of its files' content, tree_digest:
+#                   the .rev marker alone is not trusted, a tree that lost files is extracted
+#                   again, a tag re-pointed at another tree fails). Its classes are dated after its sources, so javac does not recompile
 #                   them.
 
 repr_clojure_sources=(-s arbace.repr.clojure.text -s arbace.repr.clojure.rename -s arbace.repr.clojure.rules -s arbace.repr.clojure)
@@ -53,8 +56,13 @@ arbace_tool() {
   ARBACE_PATH=$path${ARBACE_PATH:+:$ARBACE_PATH} "$exe" "${init[@]}" "$@"
 }
 
+# tree_digest DIR: the sha256 of the sorted list of the sha256 and path of every file under DIR
+tree_digest() { (cd "$1" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -c1-64); }
+
 frozen_clojure() {
-  local tag=arbace-for-java-26-v1 dir=$root/.tmp/frozen rev tmp
+  local tag=arbace-for-java-26-v1 dir=$root/.tmp/frozen rev tmp want pin=$root/test/frozen-clojure.sha256
+  want=$(sed -n 's/^\([0-9a-f]\{64\}\)  clojure$/\1/p' "$pin" 2>&1) || want=
+  if [ -z "$want" ]; then echo "no digest of clojure/ pinned in $pin" >&2; return 1; fi
   if ! rev=$(git -C "$root" rev-parse -q --verify "refs/tags/$tag^{commit}"); then
     echo "the frozen clojure/ comes from the tag $tag, which this repository lacks:" \
          "git fetch origin tag $tag" >&2
@@ -64,10 +72,18 @@ frozen_clojure() {
   # one extraction at a time: concurrent checks (bin/gate) share .tmp/frozen
   exec 8> "$root/.tmp/frozen.lock"
   flock 8
-  if [ "$([ -f "$dir/.rev" ] && cat "$dir/.rev")" != "$rev" ]; then
+  if [ "$([ -f "$dir/.rev" ] && cat "$dir/.rev")" != "$rev" ] || [ ! -d "$dir/clojure" ] ||
+     [ "$(tree_digest "$dir/clojure")" != "$want" ]; then
     tmp=$(mktemp -d "$root/.tmp/frozen.XXXXXX") || { flock -u 8; return 1; }
     if ! git -C "$root" archive --format=tar "$rev" clojure | tar -x -C "$tmp"; then
       echo "could not extract clojure/ from $tag" >&2
+      rm -rf "$tmp"
+      flock -u 8
+      return 1
+    fi
+    if [ "$(tree_digest "$tmp/clojure")" != "$want" ]; then
+      echo "the clojure/ of $tag ($rev) is not the pinned tree: its digest is $(tree_digest "$tmp/clojure")," \
+           "$pin has $want" >&2
       rm -rf "$tmp"
       flock -u 8
       return 1

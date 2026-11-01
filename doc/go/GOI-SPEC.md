@@ -1508,6 +1508,44 @@ finalizer timing, `%T` of interpreted types (G8), `GODEBUG` behaviour). The refe
 program passing there and not now) and `--record` writes a new reference, as `bin/repr-go
 roundtrip` does.
 
+**The negative controls** (doc/GATE-SURVEY.md, GTS81 (a), 2026-10-31). The regression rule never sees a
+comparison that passes what differs, so each level has a program that must fail: `test/goi/controls.txt`'s
+lines `LEVEL ID SUBJECT REFERENCE`. Every run but the box's adds the level's controls to its programs
+(`--essential` and `--only` too); `check_one` runs the subject as every program (its forms interpreted, or
+at `--aot` built and run) and compares its run, by the same comparison, with gc's run of the reference
+(`gc_ref`'s, cached with the reference's own entry), under the control's id. `_control/helloworld-vs-printbig`
+(interp: hello, world against printbig's two numbers on stderr) and `_control/issue21879-vs-fibish` (aot:
+`main.main` twice against `f(40)=...`) are `fail`; `controls_judged` fails the check when a control passes
+or has another result while its subject passes, and takes the controls out of the results before the
+counts, the known differences, `--record` and the regression rule (no program of the records or the
+divergences). The errorcheck and directory tests' judges (`check_err`, `check_dir`) had no control then.
+
+Since GTS85 (b) and GTS86 (b) (doc/GATE-SURVEY.md, "As built: GTS83-GTS87 (write-ahead)") a control is no program
+of the list: each checker, once its subject's run reached the comparison, judges that run a second time against
+the reference under the control's id (`controls_of`), so a control has no run, build or timeout of its own (at
+`--aot`, no second `aot_build`). The comparisons are functions both use: `run_verdict` (`check_one`: status,
+stdout, stderr against `gc_ref`'s run), `dir_verdict` (`check_dir`: status 0 and the output against a golden
+file), `syn_verdict` and `err_verdict` (`check_err`: gc's syntax errors or goi's errors against a file's `// ERROR`
+comments, `gocmp errorcheck`), `err_aot_verdict` (`check_err_aot`: gc's errors of the printed forms). The
+controls: `_control/helloworld-vs-printbig`, `_control/append1-vs-assign1` (append1's errors against assign1's
+`// ERROR` lines: missing errors) and `_control/dedup-vs-issue11053` (typeparam/dedup's output against
+fixedbugs/issue11053.out) at interp; `_control/issue21879-vs-fibish`, `_control/const6-vs-bug046` and
+`_control/issue48337a-vs-dedup` at aot. A subject that ends before the comparison (unsupported, an error, a
+timeout) prints no control row, and the control is "not judged" without failing the check; a subject that is
+not in the run fails it (the controls' subjects are in both essential lists), except in a selection (`--only`),
+which leaves it. The quiet retry of a subject that timed out brings its control rows with it.
+
+What the controls catch (review 001, findings 7 and 8; doc/GATE-SURVEY.md, "As built: review 001's fixes"). Each
+catches a comparison that passes everything, or one that is skipped, which is what GTS81 asks; none catches every
+partial one. The run controls' subject and reference both exit 0, and their streams differ in every byte: a
+`run_verdict` that ignored the status would still fail them, one that ignored stdout and stderr would not. The
+directory control's output differs from the golden file throughout (status 0 both): not a `dir_verdict` that ignores
+the status. The errorcheck controls (`_control/append1-vs-assign1`, `_control/const6-vs-bug046`) differ by the file
+name: `gocmp errorcheck` matches errors by the reference's base name, so every error of the subject is unmatched and
+every `// ERROR` of the reference missing, whatever the line or message matching does: they do not catch a judge
+that ignores message text or line numbers. A control's reference is gc's run with the reference's own action (its
+`-t`, its flags at `--aot`, its arguments: `action_parse`, as for a program of the list), not the subject's.
+
 ### 11.4 The annotation check
 
 `bin/goi annotations [CORPUS...]` checks, without running anything, every package of

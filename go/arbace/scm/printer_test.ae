@@ -1,0 +1,158 @@
+;; printer's tests: number->string and string->number against Chez's recorded output.
+(in-ns 'go.arbace.scm)
+
+(go/file "printer_test.go" :imports [[testing "testing"] [os "os"] [strings "strings"] [strconv "strconv"] [math "math"]])
+
+(go/func TestFlonumFile [^{:tag (* testing/T)} t]
+  (let [p (os/Getenv "PRINTER_NUMS")]
+    (let [^string data numsData]
+      (when (!= p "")
+        (let [(values d err) (os/ReadFile p)]
+          (when (!= err nil)
+            (.Fatal t err))
+          (set! data (conv string d))))
+      (let [^int bad 0]
+        (range [_ line (strings/Split data "\n")]
+          (when (!= line "")
+            (let [fs (strings/SplitN line " " 3)
+                  (values bitsv _) (strconv/ParseUint (aget fs 0) 16 64)
+                  (values radix _) (strconv/Atoi (aget fs 1))
+                  got (NumberToString (math/Float64frombits bitsv) radix)]
+              (when (!= got (aget fs 2))
+                (inc! bad)
+                (when (< bad 20)
+                  (.Errorf t "%s radix %d: got %s want %s" (aget fs 0) radix got (aget fs 2)))))))
+        (when (> bad 0)
+          (.Errorf t "%d mismatches" bad))))))
+
+(go/var ^string s2nOut)
+
+(go/func s2nTry [^string s ^int radix]
+  (defer ((fn []
+            (let [r (recover)]
+              (when (!= r nil)
+                (set! s2nOut "COMPLEX"))))))
+  (let [v (StringToNumber s radix)]
+    (when (== v (conv any false))
+      (set! s2nOut "#f")
+      (return))
+    (when (isComplex v)
+      (set! s2nOut "COMPLEX")
+      (return))
+    (set! s2nOut (NumberToString v 10))))
+
+(go/func s2nText ^string [^string s ^int radix]
+  (set! s2nOut "")
+  (s2nTry s radix)
+  s2nOut)
+
+(go/func TestStringToNumberFile [^{:tag (* testing/T)} t]
+  (let [p (os/Getenv "PRINTER_S2N")]
+    (let [^string data s2nData]
+      (when (!= p "")
+        (let [(values d err) (os/ReadFile p)]
+          (when (!= err nil)
+            (.Fatal t err))
+          (set! data (conv string d))))
+      (let [^int bad 0]
+        (range [_ line (strings/Split data "\n")]
+          (when (!= line "")
+            (let [fs (strings/SplitN line "\t" 3)
+                  (values radix _) (strconv/Atoi (aget fs 0))
+                  got (s2nText (aget fs 1) radix)]
+              (when (!= got (aget fs 2))
+                (inc! bad)
+                (when (< bad 30)
+                  (.Errorf t "radix %d %q: got %s want %s" radix (aget fs 1) got (aget fs 2)))))))
+        (when (> bad 0)
+          (.Errorf t "%d mismatches" bad))))))
+
+(go/func TestReadBack [^{:tag (* testing/T)} t]
+  (let [p (os/Getenv "PRINTER_NUMS")]
+    (let [^string data numsData
+          ^int bad 0]
+      (when (!= p "")
+        (let [(values d _) (os/ReadFile p)]
+          (set! data (conv string d))))
+      (range [_ line (strings/Split data "\n")]
+        (when (!= line "")
+          (let [fs (strings/SplitN line " " 3)
+                (values bitsv _) (strconv/ParseUint (aget fs 0) 16 64)]
+            (when (== (aget fs 1) "10")
+              (let [x (StringToNumber (aget fs 2) 10)
+                    (values f ok) (assert float64 x)]
+                (when (or (not ok) (!= (math/Float64bits f) bitsv))
+                  (inc! bad)
+                  (when (< bad 10)
+                    (.Errorf t "read back %s: %v" (aget fs 2) x))))))))
+      (when (> bad 0)
+        (.Errorf t "%d mismatches" bad)))))
+
+(go/func wcheck [^{:tag (* testing/T)} t ^any v ^string w ^string d]
+  (let [gw (WriteValue v false)
+        gd (WriteValue v true)]
+    (when (!= gw w)
+      (.Errorf t "write: got %s want %s" gw w))
+    (when (!= gd d)
+      (.Errorf t "display: got %s want %s" gd d))))
+
+(go/func TestWrite [^{:tag (* testing/T)} t]
+  (wcheck t true "#t" "#t")
+  (wcheck t false "#f" "#f")
+  (wcheck t (conv int64 -5) "-5" "-5")
+  (wcheck t 1.5 "1.5" "1.5")
+  (wcheck t (conv Char \a) "#\\a" "a")
+  (wcheck t (conv Char \space) "#\\space" " ")
+  (wcheck t (conv Char 0) "#\\nul" "\u0000")
+  (wcheck t (conv Char 1) "#\\x1" "\u0001")
+  (wcheck t (conv Char 31) "#\\x1F" "\u001f")
+  (wcheck t (conv Char 127) "#\\delete" "\u007f")
+  (wcheck t (conv Char 133) "#\\x85" "\u0085")
+  (wcheck t (conv Char 128) "#\\\u0080" "\u0080")
+  (wcheck t (conv Char 955) "#\\λ" "λ")
+  (wcheck t (conv Char 27) "#\\esc" "\u001b")
+  (wcheck t (NewString "a\nb\t\"q\"\\ \u0001 \u007f \u0085   λ \u0007\u0008\u000b\u000c\u000d") "\"a\\nb\\t\\\"q\\\"\\\\ \\x1; \\x7F; \\x85; \\x2028; λ \\a\\b\\v\\f\\r\"" "a\nb\t\"q\"\\ \u0001 \u007f \u0085   λ \u0007\u0008\u000b\u000c\u000d")
+  (wcheck t (NewString "") "\"\"" "")
+  (wcheck t (Intern "abc") "abc" "abc")
+  (wcheck t (Intern "a b") "a\\x20;b" "a b")
+  (wcheck t (Intern "") "||" "")
+  (wcheck t (Intern "+") "+" "+")
+  (wcheck t (Intern "-") "-" "-")
+  (wcheck t (Intern "...") "..." "...")
+  (wcheck t (Intern "->") "->" "->")
+  (wcheck t (Intern "->x") "->x" "->x")
+  (wcheck t (Intern "-->") "\\x2D;->" "-->")
+  (wcheck t (Intern "+1") "\\x2B;1" "+1")
+  (wcheck t (Intern "1+") "\\x31;+" "1+")
+  (wcheck t (Intern "a#") "a\\x23;" "a#")
+  (wcheck t (Intern "a(") "a\\x28;" "a(")
+  (wcheck t (Intern "a\n") "a\\xA;" "a\n")
+  (wcheck t (Intern "..") "\\x2E;." "..")
+  (wcheck t (Intern "@a") "\\x40;a" "@a")
+  (wcheck t (Intern "a1.") "a1." "a1.")
+  (wcheck t (List (conv int64 1) (NewString "a") (conv Char \b) (Intern "c") 1.5) "(1 \"a\" #\\b c 1.5)" "(1 a b c 1.5)")
+  (wcheck t (List (Intern "quote") (Intern "x")) "(quote x)" "(quote x)")
+  (wcheck t (Cons (conv int64 1) (conv int64 2)) "(1 . 2)" "(1 . 2)")
+  (wcheck t (ListTail (lit (slice any) (conv int64 1) (conv int64 2)) (conv int64 3)) "(1 2 . 3)" "(1 2 . 3)")
+  (wcheck t (List (Intern "a") (List (Intern "b")) Null) "(a (b) ())" "(a (b) ())")
+  (wcheck t Null "()" "()")
+  (wcheck t Unspec "#<void>" "#<void>")
+  (wcheck t Eof "#!eof" "#!eof")
+  (wcheck t (NewVector (lit (slice any) (conv int64 1) (NewString "x") (List (conv int64 3)))) "#(1 \"x\" (3))" "#(1 x (3))")
+  (wcheck t (NewVector (lit (slice any))) "#()" "#()")
+  (wcheck t (addr (lit Bytevector :B (lit (slice byte) 1 2 255))) "#vu8(1 2 255)" "#vu8(1 2 255)")
+  (wcheck t (addr (lit Bytevector :B (lit (slice byte)))) "#vu8()" "#vu8()")
+  (wcheck t (addr (lit Values :V (lit (slice any) (conv int64 1) (NewString "a")))) "1 \"a\"" "1 a")
+  (wcheck t (addr (lit Prim :Name "car")) "#<procedure car>" "#<procedure car>")
+  (wcheck t (addr (lit Closure :L (addr (lit Lambda)))) "#<procedure>" "#<procedure>")
+  (wcheck t (addr (lit Closure :L (addr (lit Lambda :Name "f")))) "#<procedure f>" "#<procedure f>")
+  (wcheck t (addr (lit Cont)) "#<continuation>" "#<continuation>")
+  (wcheck t CondMessage "#<record type &message>" "#<record type &message>")
+  (wcheck t (MakeSimple CondMessage (NewString "hi")) "#<condition &message>" "#<condition &message>")
+  (wcheck t (addr (lit Compound)) "#<compound condition>" "#<compound condition>")
+  (let [pt (NewRTD (Intern "point") nil false false false (lit (slice Field) (lit Field :Name (Intern "x")) (lit Field :Name (Intern "y"))))
+        op (NewRTD (Intern "pt2") nil false false true (lit (slice Field) (lit Field :Name (Intern "a"))))]
+    (wcheck t (addr (lit Record :RTD pt :F (lit (slice any) (conv int64 1) (NewString "s")))) "#[point 1 \"s\"]" "#[point 1 s]")
+    (wcheck t (addr (lit Record :RTD op :F (lit (slice any) (conv int64 1)))) "#<pt2>" "#<pt2>"))
+  (let [g (Gensym "foo")]
+    (wcheck t g (+ "#{foo " (.-Uid g) "}") "foo")))

@@ -11,11 +11,14 @@
 # with $root set to the repository root. Defines:
 #
 #   frozen_jar     prints the path of the frozen jar: FROZEN_JAR (or ARBACE_ORACLE_JAR) when
-#                  set, unchecked; else the jar of the tag FROZEN_TAG (or ARBACE_ORACLE_TAG,
+#                  set; else the jar of the tag FROZEN_TAG (or ARBACE_ORACLE_TAG,
 #                  default arbace-for-java-26-v4), built once from the tag (the tag's own
 #                  bin/build-arbace in a temporary git worktree, a few minutes) into
-#                  .tmp/oracle-frozen/TAG.jar and checked against its pinned SHA-256,
-#                  test/oracle/frozen-jar.sha256 (sha256sum's format, one line per tag)
+#                  .tmp/oracle-frozen/TAG.jar. Either way the jar is checked against its pinned
+#                  SHA-256 (its file name's line of test/oracle/frozen-jar.sha256, sha256sum's
+#                  format, one line per tag, as bin/gate --pins checks FROZEN_JAR) and a mismatch
+#                  fails, as does a name with no pin line; FROZEN_ALLOW_UNPINNED=1 only warns,
+#                  for the paths that make a new pin (audit 041, finding 3; GTS112)
 #   frozen_view K  prints a directory to put before the jar on the class path: the checkout's
 #                  namespaces the frozen jar is to load from source, as .clj links (its loader
 #                  reads .clj only, not .ae), .tmp/frozen-view/K:
@@ -39,14 +42,39 @@
 #                  `java JVM-OPTION... -cp VIEW:JAR[:FROZEN_CP] arbace.lang.Main ARG...` with
 #                  frozen_view K (K: jar for the jar alone, test, tools)
 
+# frozen_pin JAR: JAR's SHA-256 against the pin line of its file name; fails on a mismatch and on
+# a name with no pin line (FROZEN_ALLOW_UNPINNED=1: a warning)
+frozen_pin() {
+  local jar=$1 name want got
+  name=$(basename "$jar")
+  want=
+  [ -f "$root/test/oracle/frozen-jar.sha256" ] &&
+    want=$(sed -n "s/^\([0-9a-f]\{64\}\)  $name\$/\1/p" "$root/test/oracle/frozen-jar.sha256")
+  got=$(sha256sum "$jar" | cut -d' ' -f1)
+  if [ -z "$want" ]; then
+    if [ "${FROZEN_ALLOW_UNPINNED:-}" = 1 ] && [ -n "${GATE_EXE:-}" ]; then
+      echo "frozen_jar: FROZEN_ALLOW_UNPINNED is refused inside the gate (a pass would be recorded at the pinned key on $name)" >&2
+      return 1
+    elif [ "${FROZEN_ALLOW_UNPINNED:-}" = 1 ]; then
+      echo "frozen_jar: warning: no pinned hash for $name in test/oracle/frozen-jar.sha256 (it is $got)" >&2
+    else
+      echo "frozen_jar: no pinned hash for $name in test/oracle/frozen-jar.sha256 (it is $got; FROZEN_ALLOW_UNPINNED=1 to use it)" >&2
+      return 1
+    fi
+  elif [ "$want" != "$got" ]; then
+    echo "frozen_jar: $jar: SHA-256 $got, pinned $want" >&2; return 1
+  fi
+}
+
 frozen_jar() {
   if [ -n "${FROZEN_JAR:-${ARBACE_ORACLE_JAR:-}}" ]; then
     local j=${FROZEN_JAR:-$ARBACE_ORACLE_JAR}
     case $j in /*) ;; *) j=$root/$j ;; esac
     [ -f "$j" ] || { echo "no frozen jar $j (FROZEN_JAR)" >&2; return 1; }
+    frozen_pin "$j" || return 1
     echo "$j"; return
   fi
-  local tag=${FROZEN_TAG:-${ARBACE_ORACLE_TAG:-arbace-for-java-26-v4}} dir=$root/.tmp/oracle-frozen wt st want got
+  local tag=${FROZEN_TAG:-${ARBACE_ORACLE_TAG:-arbace-for-java-26-v4}} dir=$root/.tmp/oracle-frozen wt st
   local jar=$dir/$tag.jar
   mkdir -p "$dir"
   (
@@ -63,13 +91,7 @@ frozen_jar() {
       [ $st = 0 ] || { echo "frozen_jar: the build of $tag failed, see $dir/$tag.log" >&2; exit 1; }
     fi
   ) 9> "$dir/.lock" || return 1
-  want=$(sed -n "s/^\([0-9a-f]\{64\}\)  $tag.jar\$/\1/p" "$root/test/oracle/frozen-jar.sha256" 2>"$dir/discard")
-  got=$(sha256sum "$jar" | cut -d' ' -f1)
-  if [ -z "$want" ]; then
-    echo "frozen_jar: warning: no pinned hash for $tag.jar in test/oracle/frozen-jar.sha256 (it is $got)" >&2
-  elif [ "$want" != "$got" ]; then
-    echo "frozen_jar: $jar: SHA-256 $got, pinned $want" >&2; return 1
-  fi
+  frozen_pin "$jar" || return 1
   echo "$jar"
 }
 

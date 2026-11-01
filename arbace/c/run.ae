@@ -1,0 +1,299 @@
+(ns arbace.c.run
+  "ci's programs (doc/C23-SURVEY.md §6, \"As built: C5 (write-ahead)\"): C files read by repr/c, checked
+  (arbace.c.check with its per-form results, CS95 (a), long double as double, CS35), linked with musl's
+  units (arbace.c.musl) and built into a node program (arbace.c.build) for ci's back end. On the light path
+  the node program is written for tools/cirun; on the executable arbace.c.repl hands it to
+  arbace.lang.CInterp. bin/ci run and check call `-main`."
+  (:require [arbace.repr.c :as rc]
+            [arbace.repr.c.host :as host]
+            [arbace.c.check :as chk]
+            [arbace.repr.c.annot :as annot]
+            [arbace.c.build :as build]
+            [arbace.string :as str]))
+
+(set! *warn-on-reflection* true)
+
+(def ^:dynamic *musl* nil) ; the musl library (arbace.c.musl/library), when linked
+
+(defn uses-long-double?
+  "Whether a program's main-file forms declare or convert to a long double type (SPEC §12.5's rule for the
+  class long-double): the type symbol anywhere in the forms or their metadata."
+  [forms]
+  (letfn [(walk [x]
+            (or (= 'long-double x)
+                (and (seq? x) (= 'lit (first x)) (= 'long-double (second x)))
+                (and (or (seq? x) (vector? x)) (some walk x))
+                (and (map? x) (some walk (vals x)))
+                (when-let [m (and (instance? arbace.lang.IObj x) (meta x))] (some walk (vals (dissoc m :line :column))))))]
+    (boolean (some walk forms))))
+
+(defn check-read
+  "A read checked for ci: {:rd :results :std :unsigned-char :errors}."
+  [h fc rd]
+  (let [uc (boolean (some #{"-funsigned-char"} (:args fc)))
+        r (chk/check-unit rd (keyword (:std fc)) (annot/builtin-forms h fc) :results true :ldouble-size 8 :unsigned-char uc
+                          ;; the references are built with -fpermissive -w (bin/lib/ci/record-ref)
+                          :permissive true)]
+    {:rd rd :results (:results r) :std (keyword (:std fc)) :unsigned-char uc :errors (:errors r)}))
+
+(defn read-unit
+  "The C file `path` (absolute, or relative to `base`) read and checked: a unit, or {:error ...}/{:refused ...}."
+  [h opts ^String base ^String path]
+  (let [fc (host/file-config opts "gnu23")
+        rd (rc/read-c (host/config h fc base) fc path false)]
+    (cond
+      (:error rd) {:status :read-error :message (str/join "; " (take 3 (:error rd)))}
+      (:refused rd) {:status :read-refused :message (str (name (:refused rd)) ": " (:message rd))}
+      :else (let [u (check-read h fc rd)
+                  ;; the reference builds with -fpermissive (gcc 15's implicit declarations a warning there)
+                  u (update u :errors (fn [es] (vec (remove #(re-find #"implicit declaration of function" %) es))))]
+              (if (seq (:errors u))
+                (assoc u :status :check-error :message (str/join "; " (take 3 (:errors u))))
+                (assoc u :status :ok))))))
+
+(defn nodes
+  "The node program of the units (the program's), linked with musl when *musl* is set: {:text} or
+  {:status :refused :class :message}."
+  [units]
+  (try
+    (let [cmds (if *musl*
+                 ((resolve 'arbace.c.musl/build-linked) *musl* units)
+                 (build/build-program units))]
+      {:status :ok :text (build/program-text cmds)})
+    (catch arbace.lang.ExceptionInfo e
+      (if-let [c (:ci/refused (ex-data e))]
+        {:status :refused :class c :message (.getMessage e)}
+        (throw e)))))
+
+(defn- tsv [^String f]
+  (let [x (java.io.File. f)]
+    (if (.exists x) (mapv #(str/split % #"\t" -1) (remove str/blank? (str/split-lines (slurp x)))) [])))
+
+(defn- read-all-forms [^String f]
+  (let [r (arbace.lang.LineNumberingPushbackReader. (java.io.StringReader. (slurp f))) eof (Object.)]
+    (loop [out []] (let [x (read r false eof)] (if (identical? x eof) out (recur (conj out x)))))))
+
+(defn result
+  "A program's result: [id result reason] (result :pass, :fail, :refused, :read-error, :check-error, :build-error)."
+  [id ref node run]
+  (let [[_ nst ncls nmsg flags] node
+        ld (if (= flags "long-double") " uses-long-double" "")]
+    (cond
+      (nil? node) [id :fail "not built"]
+      (not= nst "ok") [id (keyword nst) (str (when (seq ncls) (str ncls ": ")) nmsg ld)]
+      (nil? run) [id :fail "not run"]
+      :else
+      (let [[_ st sum bytes fault] run
+            want (:status ref)
+            st (if (= st "timeout") :timeout (Long/parseLong st))
+            same-status (= st want)
+            same-out (= sum (:stdout ref))]
+        (cond
+          ;; the runner's own failure ("cirun: internal: ...", "ciaot: internal: ...", status 70): never the program's
+          ;; status, whatever gcc's (review 006, finding 4); CS213: nor Go's own fatal errors (stack exhaustion, out of memory,
+          ;; a concurrent map write: "runtime: ..." and "fatal error: ...", exit 2 and no cirun line)
+          (re-find #"^(ci(run|aot): internal|fatal error: |runtime: )" (str fault)) [id :fail (str "internal: " fault ld)]
+          (and same-status (or same-out (= :differ (:o2 ref)))) [id :pass ""]
+          :else [id :fail (str (if same-status "differ stdout" (str "differ status " (if (keyword? st) (name st) st) " (gcc " (if (keyword? want) (name want) want) ")"))
+                               (when (seq fault) (str " " fault)) ld)])))))
+
+(defn compare-record
+  "A judge's rows against its committed record (review 006, finding 3), for the corpora judged: {:regressions [[id why]]
+  (a row the record passes that does not pass now, whatever its class; a known row whose reason changed), :absent [id]
+  (the record's rows of these corpora the run does not hold)}."
+  [rows ^String recf corpora]
+  (let [old (let [f (java.io.File. recf)] (if (.exists f) (read-string (slurp f)) []))
+        in? (fn [^String id] (some #(str/starts-with? id (str % "/")) corpora))
+        now (into {} (map (juxt first identity) rows))
+        old-in (filter #(in? (first %)) old)]
+    {:regressions (vec (for [[id r reason] old-in
+                             :let [n (get now id)]
+                             :when n
+                             :when (or (and (= :pass r) (not= :pass (second n)))
+                                       (and (str/starts-with? (str reason) "known ") (not= :pass (second n)) (not= reason (nth n 2))))]
+                         [id (str "recorded " (name r) (when (not= :pass r) (str " " reason)) ", now " (name (second n)) " " (nth n 2))]))
+     ;; CS212 (R2): a known row that now passes is an improvement, not a regression: re-record
+     :improved (vec (for [[id r reason] old-in
+                          :let [n (get now id)]
+                          :when (and n (not= :pass r) (= :pass (second n)))]
+                      id))
+     :absent (vec (for [[id] old-in :when (not (contains? now id))] id))}))
+
+(defn report-record
+  "Prints compare-record's result; the rows that fail because of it (absent rows only when the run is not a subset:
+  CI_SUBSET, set by --only and --sample)."
+  [{:keys [regressions absent improved]}]
+  (doseq [[id why] (take 40 regressions)] (println "REGRESSION" id why))
+  (when (seq improved) (println (count improved) "recorded failures now pass (an improvement, not a failure; re-record):" (pr-str (vec (take 10 improved)))))
+  (when (seq absent)
+    (println (count absent) "recorded rows absent from the run" (if (System/getenv "CI_SUBSET") "(a subset run)" "") (pr-str (vec (take 10 absent)))))
+  (concat (map (fn [[id why]] [id :fail (str "regression: " why)]) regressions)
+          (when-not (System/getenv "CI_SUBSET") (map (fn [id] [id :fail "absent from the run"]) absent))))
+
+(defn subset-record-refusal
+  "Review 027, finding 3: the message refusing --record when the run judged is a subset (CI_SUBSET, or a corpus's
+  WORK/CORPUS/subset marker that a run with --only or --sample leaves), else nil."
+  [work corpora]
+  (when (or (System/getenv "CI_SUBSET") (some #(.exists (java.io.File. (str work "/" % "/subset"))) corpora))
+    "--record records whole corpora: the run judged was a subset (--only or --sample)"))
+
+(defn controls
+  "GTS81 (a): the negative controls of a level (test/c/controls.edn, :run or :dg); the file must read."
+  [level]
+  (filterv #(= level (:level %)) (read-string (slurp "test/c/controls.edn"))))
+
+(defn control-result
+  "A :run control judged by result: :differs (it fails: a control must), :passes (the judge passes what differs),
+  :not-judged (the reference has no gcc run), :left (the subject's corpus not judged, the subject not in its list, not
+  built or not run: its own row says so)."
+  [work refs corpora {:keys [subject reference]}]
+  (let [c (first (str/split subject #"/"))]
+    (if-not (some #{c} corpora)
+      :left
+      (let [listed (set (map first (tsv (str work "/" c "/list.tsv"))))
+            node (first (filter #(= subject (first %)) (tsv (str work "/" c "/nodes.tsv"))))
+            run (first (filter #(= subject (first %)) (tsv (str work "/" c "/run.tsv"))))
+            ref (get refs reference)]
+        (cond
+          (not (listed subject)) :left
+          (nil? ref) :not-judged
+          (or (nil? node) (not= "ok" (second node)) (nil? run)) :left
+          (= :pass (second (result subject ref node run))) :passes
+          :else :differs)))))
+
+(defn controls-failing
+  "Each :run control's result printed (who: the judge's name); the failing ones as rows [ID :fail WHY]."
+  [who work refs corpora]
+  (vec (for [{:keys [id subject reference] :as c} (controls :run)
+             :let [v (control-result work refs corpora c)
+                   _ (println (case v
+                                :differs (str who ": control " id " (" subject " against " reference "'s gcc run): differs, as a control must (GTS81 (a))")
+                                :passes (str who ": control passed: " id " (" subject " against " reference "'s gcc run): the judge passes what differs")
+                                :not-judged (str who ": control not judged: " id ": " reference " has no gcc run")
+                                :left (str who ": control " id ": left (" subject " not in the run, not built or not run)")))]
+             :when (#{:passes :not-judged} v)]
+         [id :fail (str "control " (name v) " (test/c/controls.edn)")])))
+
+(defn- judge
+  "judge WORK REF DIVERGENCES [--record] CORPUS...: each program's result against gcc's run and the classes, and against
+  the committed record (compare-record)."
+  [[work reff divf & more]]
+  (let [record (some #{"--record"} more)
+        corpora (remove #{"--record" ""} more)
+        _ (when-let [m (and record (subset-record-refusal work corpora))]
+            (binding [*out* *err*] (println "ci judge:" m)) (System/exit 2))
+        refs (into {} (map (juxt :id identity) (read-all-forms reff)))
+        classes (read-string (slurp divf))
+        known (let [f (java.io.File. "test/c/check-known.edn")] (if (.exists f) (read-string (slurp f)) {}))
+        klass (fn [[_ r reason]]
+                (let [s (str (name r) " " reason)]
+                  (some (fn [c] (when (some #(re-find % s) (:match c)) (:id c))) classes)))
+        rows (vec (for [c corpora
+                        :let [nodes (into {} (map (juxt first identity) (tsv (str work "/" c "/nodes.tsv"))))
+                              runs (into {} (map (juxt first identity) (tsv (str work "/" c "/run.tsv"))))]
+                        [id] (tsv (str work "/" c "/list.tsv"))]
+                    (let [row (result id (get refs id) (get nodes id) (get runs id))
+                          ;; the mirror's copies of the torture tests share their entries
+                          kr (or (get known id) (get known (str/replace id "torture-execute-mirror/" "torture-execute/")))
+                          row (if (and (not= :pass (second row)) kr (not (str/starts-with? (str (nth row 2)) "internal: ")))
+                                [id :fail (str "known " kr " (" (nth row 2) ")")]
+                                row)]
+                      (if (= :pass (second row)) row (conj row (klass row))))))
+        cmp (compare-record rows "test/c/check-linux-amd64.edn" corpora)
+        failing (filter #(and (not= :pass (second %)) (nil? (nth % 3 nil))) rows)]
+    (spit (str work "/results.edn") (str "[\n" (str/join "\n" (map pr-str rows)) "\n]\n"))
+    (doseq [c corpora]
+      (let [rs (filter #(str/starts-with? (first %) (str c "/")) rows)
+            by (frequencies (map #(if (= :pass (second %)) :pass (or (nth % 3 nil) :fail)) rs))]
+        (println (format "%-24s %5d programs: %s" c (count rs) (str/join ", " (map (fn [[k v]] (str (name k) " " v)) (sort-by (comp - val) by)))))))
+    (when record
+      (let [f "test/c/check-linux-amd64.edn"
+            old (if (.exists (java.io.File. f)) (read-string (slurp f)) [])
+            keep (remove (fn [[id]] (some #(str/starts-with? id (str % "/")) corpora)) old)
+            all (sort-by first (concat keep (map (fn [[id r reason]] [id r reason]) rows)))]
+        (spit f (str ";; ci's check (bin/ci check --record): each program of the run corpora, [ID RESULT REASON],\n"
+                     ";; against gcc 15.2's -O0 run (test/c/ref-gcc15.edn); its classes test/c/divergences.edn.\n[\n"
+                     (str/join "\n" (map pr-str all)) "\n]\n"))
+        (println "recorded" f)))
+    (let [fids (set (map first failing))
+          failing (concat failing (remove #(fids (first %)) (report-record cmp))
+                          ;; GTS81 (a): the negative controls (test/c/controls.edn, :run), no row of the results or the record
+                          (controls-failing "ci judge" work refs corpora))]
+      (doseq [r (take 40 failing)] (println "FAIL" (first r) (nth r 2)))
+      (System/exit (if (seq failing) 1 0)))))
+
+(defn -main
+  "bin/ci nodes HOST-DIR [--std S] [OPTION...] -o OUT FILE...: FILE... (one program) read, checked, built
+  into the node program OUT; the exit status 0, else 1 with the reason on the standard error."
+  [host-dir verb & args]
+  (case verb
+    "nodes"
+    (let [h (host/load-host host-dir)
+          out (second (drop-while #(not= % "-o") args))
+          args (loop [as (seq args) acc []] (cond (nil? as) acc (= "-o" (first as)) (recur (nnext as) acc) :else (recur (next as) (conj acc (first as)))))
+          opts (vec (map #(if (str/starts-with? % "--std=") (str "-std=" (subs % 6)) %) (filter #(.startsWith ^String % "-") args)))
+          files (remove #(.startsWith ^String % "-") args)
+          us (mapv #(read-unit h opts "." %) files)
+          bad (first (remove #(= :ok (:status %)) us))]
+      (if bad
+        (do (binding [*out* *err*] (println (str (name (:status bad)) ": " (:message bad)))) (System/exit 1))
+        (let [r (binding [*musl* (when-not (System/getenv "CI_NO_MUSL")
+                                   ((requiring-resolve 'arbace.c.musl/library) h (System/getProperty "user.dir")))]
+                  (nodes us))]
+          (if (= :ok (:status r))
+            (do (spit out (:text r)) (System/exit 0))
+            (do (binding [*out* *err*] (println (str "refused (" (name (:class r)) "): " (:message r)))) (System/exit 1))))))
+    "nodes-list"
+    ;; nodes-list WORK LIST [THREADS]: each line of LIST (ID BASE STD ARGS READNAME, tab-separated: a
+    ;; program of one file) read, checked, linked with musl and built into WORK/ID.nodes; WORK/nodes.tsv
+    ;; lists ID STATUS [CLASS MESSAGE] (ok, read-error, read-refused, check-error, refused)
+    (let [[work list threads] args
+          h (host/load-host host-dir)
+          root (System/getProperty "user.dir")
+          lib ((requiring-resolve 'arbace.c.musl/library) h root)
+          lines (vec (remove str/blank? (str/split-lines (slurp list))))
+          q (java.util.concurrent.ConcurrentLinkedQueue. ^java.util.Collection lines)
+          out (java.util.concurrent.ConcurrentHashMap.)
+          clean (fn [s] (str/replace (str s) #"[\t\n\r]" " "))
+          workers (doall
+                   (for [_ (range (Long/parseLong (or threads "3")))]
+                     (future
+                       (loop []
+                         (when-let [^String l (.poll q)]
+                           (let [[id base std argstr rdn] (str/split l #"\t" -1)
+                                 opts (vec (cons (str "-std=" std) (remove str/blank? (str/split (or argstr "") #" "))))
+                                 r (try
+                                     (let [u (read-unit h opts base rdn)]
+                                       (if (not= :ok (:status u))
+                                         [(name (:status u)) "" (:message u)]
+                                         (let [n (binding [*musl* lib] (nodes [u]))
+                                               ld (if (uses-long-double? (:forms (:rd u))) "long-double" "")]
+                                           (if (= :ok (:status n))
+                                             (let [f (java.io.File. (str work "/" id ".nodes"))]
+                                               (.mkdirs (.getParentFile f))
+                                               (spit f (:text n))
+                                               ["ok" "" "" ld])
+                                             ["refused" (name (:class n)) (:message n) ld]))))
+                                     (catch Throwable e ["build-error" "" (str (.getName (class e)) ": " (.getMessage e))]))]
+                             (.put out id (str/join "\t" (cons id (map clean r)))))
+                           (recur))))))]
+      (doseq [w workers] @w)
+      (spit (str work "/nodes.tsv") (str (str/join "\n" (sort (vals out))) "\n"))
+      (System/exit 0))
+    "judge" (judge args)
+    "divergences"
+    ;; divergences RESULTS CLASSES: the recorded check's non-passes, each in a class or listed
+    (let [[resf divf] args
+          rows (read-string (slurp resf))
+          classes (read-string (slurp divf))
+        known (let [f (java.io.File. "test/c/check-known.edn")] (if (.exists f) (read-string (slurp f)) {}))
+          klass (fn [[_ r reason]]
+                  (let [s (str (name r) " " reason)]
+                    (some (fn [c] (when (some #(re-find % s) (:match c)) (:id c))) classes)))
+          non (remove #(= :pass (second %)) rows)
+          by (group-by klass non)]
+      (println (count rows) "programs," (- (count rows) (count non)) "pass")
+      (doseq [c classes] (println (format "  %-22s %5d  %s" (name (:id c)) (count (get by (:id c))) (:title c))))
+      (doseq [r (get by nil)] (println "UNCLASSED" (pr-str r)))
+      (System/exit (if (seq (get by nil)) 1 0)))
+    (do (println "ci: nodes, nodes-list, judge") (System/exit 2))))

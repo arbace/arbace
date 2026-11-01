@@ -1,0 +1,520 @@
+;; OCaml's Marshal (runtime/extern.c and intern.c: the small and big headers, no compression, byte
+;; for byte OCaml's on 64 bits), ported from oi's marshal.go: caml_output_value_to_bytes,
+;; caml_output_value_to_string, caml_output_value_to_buffer, caml_input_value_from_bytes,
+;; caml_input_value_from_string, caml_marshal_data_size; and for the channel versions, the static
+;; helpers toBytes (the marshalled bytes of a value, flags OCaml's list of extern_flags) and
+;; fromBytes (the value in a byte array at an offset).
+;;
+;; Divergence by design (as oi's): a boxed float, int32, int64 or nativeint has no identity, so two
+;; fields holding "the same" boxed number are written twice (the object counter still counts each).
+;; Custom blocks: java.lang.Integer "_i", I64 "_j", NInt "_n"; the other Customs are abstract.
+;; An object block (tag 248) read back gets a fresh oid (caml_fresh_oo_id's counter), unless it is a predefined
+;; exception's (a negative one).
+
+(in-ns 'ocaml.rt)
+
+(import '(java.io ByteArrayOutputStream) '(java.util IdentityHashMap Arrays))
+
+(defclass ^:public ^:final Marshal
+
+
+  ;; ---- the writer's state
+  (field ^:public ^ByteArrayOutputStream out)
+  (field ^:public ^int flags)
+  (field ^:public ^long count)
+  (field ^:public ^long size32)
+  (field ^:public ^long size64)
+  (field ^:public ^IdentityHashMap seen)
+
+  ;; ---- the reader's state
+  (field ^:public ^byte/1 src)
+  (field ^:public ^int pos)
+  (field ^:public ^int end)
+  (field ^:public ^String fun)
+  (field ^:public ^Object/1 objs)
+  (field ^:public ^int nobjs)
+  (field ^:public ^int counter)
+  (field ^:public ^Object/1 sf)
+  (field ^:public ^int/1 si)
+  (field ^:public ^int/1 so)
+  (field ^:public ^int sp)
+
+  (constructor ^:public [this] (set! (.-fun this) "input_val_from_string"))
+
+  ;; ================= extern.c
+
+  (method ^:public fail [this ^String msg] (throw (Rt/failwith msg)))
+  (method ^:public invalid [this ^String msg] (throw (Rt/invalidArg msg)))
+
+  (method ^:public b1 [this ^long b] (.write out (unchecked-int (bit-and b 255))))
+  (method ^:public be16 [this ^long v]
+    (.b1 this (bit-shift-right v 8)) (.b1 this v))
+  (method ^:public be32 [this ^long v]
+    (.b1 this (bit-shift-right v 24)) (.b1 this (bit-shift-right v 16)) (.b1 this (bit-shift-right v 8)) (.b1 this v))
+  (method ^:public be64 [this ^long v]
+    (.be32 this (bit-shift-right v 32)) (.be32 this v))
+  (method ^:public le64 [this ^long v]
+    (loop [^int i 0] (when (< i 8) (.b1 this (unsigned-bit-shift-right v (unchecked-multiply-int 8 i))) (recur (unchecked-inc-int i)))))
+  (method ^:public code8 [this ^long code ^long v] (.b1 this code) (.b1 this v))
+  (method ^:public code16 [this ^long code ^long v] (.b1 this code) (.be16 this v))
+  (method ^:public code32 [this ^long code ^long v] (.b1 this code) (.be32 this v))
+  (method ^:public code64 [this ^long code ^long v] (.b1 this code) (.be64 this v))
+
+  (method ^:public externInt [this ^long n]
+    (cond (and (>= n 0) (< n 64)) (.b1 this (unchecked-add 64 n))
+          (and (>= n -128) (< n 128)) (.code8 this 0 n)
+          (and (>= n -32768) (< n 32768)) (.code16 this 1 n)
+          (or (< n -1073741824) (>= n 1073741824))
+          (do (when (not (== (bit-and flags 4) 0))
+                (.fail this "output_value: integer cannot be read back on 32-bit platform"))
+              (.code64 this 3 n))
+          :else (.code32 this 2 n)))
+
+  (method ^:public shared [this ^long d]
+    (cond (< d 256) (.code8 this 4 d)
+          (< d 65536) (.code16 this 5 d)
+          (>= d 4294967296) (.code64 this 20 d)
+          :else (.code32 this 6 d)))
+
+  (method ^:public header [this ^long sz ^long tag]
+    (if (and (< tag 16) (< sz 8))
+      (.b1 this (unchecked-add (unchecked-add 128 tag) (bit-shift-left sz 4)))
+      (let [hd (unchecked-add (unchecked-add (bit-shift-left sz 10) 768) tag)]
+        (when (and (> sz 4194303) (not (== (bit-and flags 4) 0)))
+          (.fail this "output_value: array cannot be read back on 32-bit platform"))
+        (if (and (>= hd 0) (< hd 4294967296))
+          (.code32 this 8 hd)
+          (.code64 this 19 hd)))))
+
+  (method ^:public wstr [this ^byte/1 b]
+    (let [n (alength b)]
+      (cond (< n 32) (.b1 this (unchecked-add 32 (long n)))
+            (< n 256) (.code8 this 9 (long n))
+            :else (do (when (and (> n 16777211) (not (== (bit-and flags 4) 0)))
+                        (.fail this "output_value: string cannot be read back on 32-bit platform"))
+                      (.code32 this 10 (long n))))
+      (.write out b 0 n)))
+
+  (method ^:public float8 [this ^double d] (.le64 this (Double/doubleToRawLongBits d)))
+
+  ;; extern_record_location: the object gets the next number
+  (method ^:public record [this key]
+    (when (== (bit-and flags 1) 0)
+      (when (not (nil? key)) (.put seen key (Long/valueOf count)))
+      (set! count (unchecked-inc count))))
+
+  ;; a shared reference when x was already written
+  (method ^:public shareLookup ^boolean [this x]
+    (if (not (== (bit-and flags 1) 0))
+      false
+      (let [p (.get seen x)]
+        (if (nil? p)
+          false
+          (do (.shared this (unchecked-subtract count (.longValue (cast Long p)))) true)))))
+
+  (method ^:public rec [this root]
+    (when (== (bit-and flags 1) 0) (set! seen (IdentityHashMap.)))
+    (let [^:mutable ^Object/1 xf (new Object/1 16)
+          ^:mutable ^int/1 xi (new int/1 16)
+          ^:mutable ^int xp 0
+          ^:mutable ^Object v root]
+      (while true
+        (label :item
+          (while true
+            (cond
+              (instance? Long v) (do (.externInt this (.longValue (cast Long v))) (break :item))
+              (instance? Double v)
+              (do (.b1 this 12) (.float8 this (.doubleValue (cast Double v)))
+                  (set! size32 (unchecked-add size32 3)) (set! size64 (unchecked-add size64 2))
+                  (.record this nil) (break :item))
+              (instance? byte/1 v)
+              (let [x (cast byte/1 v)]
+                (when (.shareLookup this x) (break :item))
+                (.wstr this x)
+                (set! size32 (unchecked-add size32 (unchecked-add 1 (unchecked-divide (unchecked-add (long (alength x)) 4) 4))))
+                (set! size64 (unchecked-add size64 (unchecked-add 1 (unchecked-divide (unchecked-add (long (alength x)) 8) 8))))
+                (.record this x) (break :item))
+              (instance? double/1 v)
+              (let [x (cast double/1 v) n (alength x)]
+                (when (.shareLookup this x) (break :item))
+                (if (< n 256)
+                  (.code8 this 14 (long n))
+                  (do (when (and (> n 2097151) (not (== (bit-and flags 4) 0)))
+                        (.fail this "output_value: float array cannot be read back on 32-bit platform"))
+                      (.code32 this 7 (long n))))
+                (loop [^int i 0] (when (< i n) (.float8 this (aget x i)) (recur (unchecked-inc-int i))))
+                (set! size32 (unchecked-add size32 (unchecked-add 1 (unchecked-multiply (long n) 2))))
+                (set! size64 (unchecked-add size64 (unchecked-add 1 (long n))))
+                (.record this x) (break :item))
+              (instance? Integer v)
+              (do (.b1 this 25) (.b1 this 95) (.b1 this 105) (.b1 this 0)
+                  (.be32 this (long (.intValue (cast Integer v))))
+                  (set! size32 (unchecked-add size32 3)) (set! size64 (unchecked-add size64 3))
+                  (.record this nil) (break :item))
+              (instance? I64 v)
+              (do (.b1 this 25) (.b1 this 95) (.b1 this 106) (.b1 this 0)
+                  (.be64 this (.-v (cast I64 v)))
+                  (set! size32 (unchecked-add size32 4)) (set! size64 (unchecked-add size64 3))
+                  (.record this nil) (break :item))
+              (instance? NInt v)
+              (let [x (.-v (cast NInt v))]
+                (.b1 this 25) (.b1 this 95) (.b1 this 110) (.b1 this 0)
+                (if (and (>= x -2147483648) (<= x 2147483647))
+                  (do (.b1 this 1) (.be32 this x))
+                  (do (.b1 this 2) (.be64 this x)))
+                (set! size32 (unchecked-add size32 3)) (set! size64 (unchecked-add size64 3))
+                (.record this nil) (break :item))
+              (instance? Custom v) (.invalid this "output_value: abstract value (Custom)")
+              (instance? Closure v) (.invalid this "output_value: functional value")
+              (instance? Fiber v) (.invalid this "output_value: continuation value")
+              (instance? Block v)
+              (let [x (cast Block v) tag (.-tag x) f (.-f x)]
+                (when (== tag 250)
+                  (let [f0 (aget f 0)]
+                    (when (not (or (and (instance? Block f0)
+                                        (let [t (.-tag (cast Block f0))] (or (== t 250) (== t 246) (== t 244))))
+                                   (instance? Double f0)))
+                      (set! v f0)
+                      (continue))))
+                (when (== (alength f) 0)
+                  (.header this 0 (long tag))
+                  (break :item))
+                (when (.shareLookup this x) (break :item))
+                (when (== tag 251) (.invalid this "output_value: abstract value (Abstract)"))
+                (when (or (== tag 249) (== tag 247)) (.invalid this "output_value: functional value"))
+                (when (== tag 245) (.invalid this "output_value: continuation value"))
+                (.header this (long (alength f)) (long tag))
+                (set! size32 (unchecked-add size32 (unchecked-add 1 (long (alength f)))))
+                (set! size64 (unchecked-add size64 (unchecked-add 1 (long (alength f)))))
+                (.record this x)
+                (when (> (alength f) 1)
+                  (when (== xp (alength xf))
+                    (set! xf (Arrays/copyOf xf (unchecked-multiply-int xp 2)))
+                    (set! xi (Arrays/copyOf xi (unchecked-multiply-int xp 2))))
+                  (aset xf xp f)
+                  (aset xi xp 1)
+                  (set! xp (unchecked-inc-int xp)))
+                (set! v (aget f 0))
+                (continue))
+              :else (throw (Rt/internal (java-str "output_value: " (Rt/describe v)))))))
+        ;; the next item
+        (when (== xp 0) (return nil))
+        (let [k (unchecked-dec-int xp)
+              fr (cast Object/1 (aget xf k))
+              i (aget xi k)]
+          (set! v (aget fr i))
+          (if (== (unchecked-add-int i 1) (alength fr))
+            (set! xp k)
+            (aset xi k (unchecked-add-int i 1)))))))
+
+  (method ^:static convertFlags ^int [fl]
+    (let [^:mutable ^long n 0 ^:mutable ^Object l fl]
+      (while (instance? Block l)
+        (let [c (cast Block l)]
+          (set! n (bit-or n (bit-shift-left 1 (Rt/ii (aget (.-f c) 0)))))
+          (set! l (aget (.-f c) 1))))
+      (unchecked-int (bit-and n 7))))
+
+  ;; the bytes of Marshal.to_string: flags the OCaml list of extern_flags (No_sharing 0, Closures 1,
+  ;; Compat_32 2)
+  (method ^:public ^:static toBytes ^byte/1 [v fl]
+    (let [s (Marshal.)]
+      (set! (.-out s) (ByteArrayOutputStream.))
+      (set! (.-flags s) (Marshal/convertFlags fl))
+      (.rec s v)
+      (let [data (.toByteArray (.-out s))
+            n (long (alength data))
+            h (Marshal.)]
+        (set! (.-out h) (ByteArrayOutputStream.))
+        (if (or (>= n 4294967296) (>= (.-size32 s) 4294967296) (>= (.-size64 s) 4294967296))
+          (do (when (not (== (bit-and (.-flags s) 4) 0))
+                (throw (Rt/failwith "output_value: object too big to be read back on 32-bit platform")))
+              (.be32 h 2224400063)
+              (.be32 h 0)
+              (.be64 h n)
+              (.be64 h (.-count s))
+              (.be64 h (.-size64 s)))
+          (do (.be32 h 2224400062)
+              (.be32 h n)
+              (.be32 h (.-count s))
+              (.be32 h (.-size32 s))
+              (.be32 h (.-size64 s))))
+        (.write (.-out h) data 0 (alength data))
+        (.toByteArray (.-out h)))))
+
+  (method ^:public ^:static caml_output_value_to_bytes [v fl] (Marshal/toBytes v fl))
+  (method ^:public ^:static caml_output_value_to_string [v fl] (Marshal/toBytes v fl))
+  (method ^:public ^:static caml_output_value_to_buffer [buf ofs len v fl]
+    (let [o (Marshal/toBytes v fl)
+          n (Rt/l len)
+          ol (long (alength o))
+          hl (if (and (>= (alength o) 4) (== (Marshal/be32at o 0) 2224400063)) 32 20)]
+      (when (or (> (unchecked-subtract ol hl) (unchecked-subtract n 20)) (> ol n))
+        (throw (Rt/failwith "Marshal.to_buffer: buffer overflow")))
+      (System/arraycopy o 0 (cast byte/1 buf) (Rt/ii ofs) (alength o))
+      (Long/valueOf ol)))
+
+  ;; ================= intern.c
+
+  (method ^:static be32at ^long [^byte/1 b ^int p]
+    (bit-or (bit-or (bit-shift-left (bit-and (long (aget b p)) 255) 24)
+                    (bit-shift-left (bit-and (long (aget b (unchecked-add-int p 1))) 255) 16))
+            (bit-or (bit-shift-left (bit-and (long (aget b (unchecked-add-int p 2))) 255) 8)
+                    (bit-and (long (aget b (unchecked-add-int p 3))) 255))))
+
+  (method ^:public check [this ^long n]
+    (when (or (< n 0) (> n (long (unchecked-subtract-int end pos))))
+      (throw (Rt/failwith "input_value: invalid read"))))
+  (method ^:public u8 ^long [this]
+    (.check this 1)
+    (set! pos (unchecked-inc-int pos))
+    (bit-and (long (aget src (unchecked-dec-int pos))) 255))
+  (method ^:public s8 ^long [this] (long (unchecked-byte (.u8 this))))
+  (method ^:public u16 ^long [this]
+    (.check this 2)
+    (set! pos (unchecked-add-int pos 2))
+    (bit-or (bit-shift-left (bit-and (long (aget src (unchecked-subtract-int pos 2))) 255) 8)
+            (bit-and (long (aget src (unchecked-dec-int pos))) 255)))
+  (method ^:public s16 ^long [this] (long (unchecked-short (.u16 this))))
+  (method ^:public u32 ^long [this]
+    (.check this 4)
+    (set! pos (unchecked-add-int pos 4))
+    (Marshal/be32at src (unchecked-subtract-int pos 4)))
+  (method ^:public s32 ^long [this] (long (unchecked-int (.u32 this))))
+  (method ^:public u64 ^long [this]
+    (let [hi (.u32 this) lo (.u32 this)] (bit-or (bit-shift-left hi 32) lo)))
+  ;; a variable-length quantity: its value, overflow noted in ovf[0]
+  (method ^:public vlq ^long [this ^boolean/1 ovf]
+    (let [^:mutable ^long c (.u8 this)
+          ^:mutable ^long n (bit-and c 127)]
+      (while (not (== (bit-and c 128) 0))
+        (set! c (.u8 this))
+        (let [n7 (bit-shift-left n 7)]
+          (when (not (== n (unsigned-bit-shift-right n7 7))) (aset ovf 0 true))
+          (set! n (bit-or n7 (bit-and c 127)))))
+      n))
+  (method ^:public failf [this ^String msg] (throw (Rt/failwith (java-str fun ": " msg))))
+
+  (method ^:public recordObj [this v]
+    (when (not (nil? objs))
+      (when (>= counter nobjs) (throw (Rt/failwith "input_value: too many objects")))
+      (aset objs counter v)
+      (set! counter (unchecked-inc-int counter))))
+
+  (method ^:public push [this ^Object/1 f ^boolean object]
+    (when (== sp (alength sf))
+      (set! sf (Arrays/copyOf sf (unchecked-multiply-int sp 2)))
+      (set! si (Arrays/copyOf si (unchecked-multiply-int sp 2)))
+      (set! so (Arrays/copyOf so (unchecked-multiply-int sp 2))))
+    (aset sf sp f)
+    (aset si sp 0)
+    (aset so sp (if object 1 0))
+    (set! sp (unchecked-inc-int sp)))
+
+  (method ^:public readBlock [this ^long tag ^long size]
+    (if (== size 0)
+      (Block. (unchecked-int tag) (new Object/1 0))
+      (do (when (> size (long (unchecked-subtract-int end pos))) (throw (Rt/failwith "input_value: invalid read")))
+          (let [blk (Block. (unchecked-int tag) (new Object/1 (unchecked-int size)))]
+            (.recordObj this blk)
+            (when (== tag 248)
+              (when (< size 2) (.failf this "bad object block")))
+            (.push this (.-f blk) (== tag 248))
+            blk))))
+
+  (method ^:public readString [this ^long n]
+    (when (> n 144115188075855872) (.failf this "string too large"))
+    (.check this n)
+    (let [bs (Arrays/copyOfRange src pos (unchecked-add-int pos (unchecked-int n)))]
+      (set! pos (unchecked-add-int pos (unchecked-int n)))
+      (.recordObj this bs)
+      bs))
+
+  (method ^:public sharedRef [this ^long ofs0]
+    (let [ofs (unchecked-subtract (long counter) ofs0)]
+      (when (or (< ofs 0) (>= ofs (long counter))) (.failf this "invalid shared reference"))
+      (aget objs (unchecked-int ofs))))
+
+  (method ^:public doubleArray [this ^long n ^boolean little]
+    (when (== n 0) (.failf this "invalid double_array"))
+    (when (> n (unchecked-divide (long (unchecked-subtract-int end pos)) 8)) (throw (Rt/failwith "input_value: invalid read")))
+    (let [f (new double/1 (unchecked-int n))]
+      (loop [^int i 0]
+        (when (< i (alength f))
+          (let [^:mutable ^long bits 0]
+            (loop [^int j 0]
+              (when (< j 8)
+                (let [byt (bit-and (long (aget src (unchecked-add-int pos j))) 255)]
+                  (if little
+                    (set! bits (bit-or bits (bit-shift-left byt (unchecked-multiply-int 8 j))))
+                    (set! bits (bit-or (bit-shift-left bits 8) byt))))
+                (recur (unchecked-inc-int j))))
+            (set! pos (unchecked-add-int pos 8))
+            (aset f i (Double/longBitsToDouble bits)))
+          (recur (unchecked-inc-int i))))
+      (.recordObj this f)
+      f))
+
+  (method ^:public readDouble [this ^boolean little]
+    (.check this 8)
+    (let [^:mutable ^long bits 0]
+      (loop [^int j 0]
+        (when (< j 8)
+          (let [byt (bit-and (long (aget src (unchecked-add-int pos j))) 255)]
+            (if little
+              (set! bits (bit-or bits (bit-shift-left byt (unchecked-multiply-int 8 j))))
+              (set! bits (bit-or (bit-shift-left bits 8) byt))))
+          (recur (unchecked-inc-int j))))
+      (set! pos (unchecked-add-int pos 8))
+      (let [d (Double/valueOf (Double/longBitsToDouble bits))]
+        (.recordObj this d)
+        d)))
+
+  (method ^:public readCustom [this ^long code]
+    (let [^:mutable ^int e -1]
+      (loop [^int i pos]
+        (when (and (< i end) (< e 0))
+          (if (== (aget src i) 0) (set! e i) (recur (unchecked-inc-int i)))))
+      (when (< e 0) (.failf this "unterminated custom block identifier"))
+      (let [name (String. src pos (unchecked-subtract-int e pos) java.nio.charset.StandardCharsets/ISO_8859_1)]
+        (when (not (or (.equals name "_i") (.equals name "_j") (.equals name "_n")))
+          (.failf this (java-str "unknown custom block identifier " name)))
+        (when (not (== code 25)) (.failf this (java-str "wrong custom block kind " name)))
+        (set! pos (unchecked-inc-int e))
+        (let [v (cond (.equals name "_i") (Integer/valueOf (unchecked-int (.u32 this)))
+                      (.equals name "_j") (I64. (.u64 this))
+                      :else (let [k (.u8 this)]
+                              (cond (== k 1) (NInt. (long (unchecked-int (.u32 this))))
+                                    (== k 2) (NInt. (.u64 this))
+                                    :else (throw (Rt/failwith "input_value: ill-formed native integer")))))]
+          (.recordObj this v)
+          v))))
+
+  ;; the objects' identifiers are caml_fresh_oo_id's (one counter, ExtCore/ooId)
+  (method ^:public ^:static nextOid ^long []
+    (Rt/l (ExtCore/caml_fresh_oo_id Rt/UNIT)))
+
+  ;; the value at pos of the data (the header read)
+  (method ^:public readRec [this]
+    (let [root (new Object/1 1)]
+      (set! sf (new Object/1 16))
+      (set! si (new int/1 16))
+      (set! so (new int/1 16))
+      (set! sp 0)
+      (.push this root false)
+      (while (> sp 0)
+        (let [top (unchecked-dec-int sp)
+              fr (cast Object/1 (aget sf top))]
+          (when (and (== (aget so top) 1) (== (aget si top) 2))
+            ;; the oid is fresh once its first two fields are read (not for predefined slots)
+            (let [id (aget fr 1)]
+              (when (and (instance? Long id) (>= (.longValue (cast Long id)) 0))
+                (aset fr 1 (Long/valueOf (Marshal/nextOid))))))
+          (if (>= (aget si top) (alength fr))
+            (set! sp top)
+            (let [at (aget si top)
+                  code (unchecked-int (.u8 this))
+                  ^:mutable ^Object v nil]
+              (aset si top (unchecked-add-int at 1))
+              (cond
+                (>= code 128) (set! v (.readBlock this (bit-and code 15) (long (bit-and (bit-shift-right code 4) 7))))
+                (>= code 64) (set! v (Long/valueOf (long (bit-and code 63))))
+                (>= code 32) (set! v (.readString this (long (bit-and code 31))))
+                :else
+                (switch code
+                  0 (set! v (Long/valueOf (.s8 this)))
+                  1 (set! v (Long/valueOf (.s16 this)))
+                  2 (set! v (Long/valueOf (.s32 this)))
+                  3 (set! v (Long/valueOf (.u64 this)))
+                  4 (set! v (.sharedRef this (.u8 this)))
+                  5 (set! v (.sharedRef this (.u16 this)))
+                  6 (set! v (.sharedRef this (.u32 this)))
+                  20 (set! v (.sharedRef this (.u64 this)))
+                  (8 19)
+                  (let [hd (if (== code 8) (.u32 this) (.u64 this))
+                        tag (bit-and hd 255)
+                        size (unsigned-bit-shift-right hd 10)]
+                    (when (or (>= tag 251) (== tag 249) (== tag 245))
+                      (.failf this (java-str "invalid " (if (== code 8) "block32" "block64"))))
+                    (when (or (< size 0) (> size 18014398509481983))
+                      (throw (Rt/failwith "input_value: block size too large")))
+                    (set! v (.readBlock this tag size)))
+                  9 (set! v (.readString this (.u8 this)))
+                  10 (set! v (.readString this (.u32 this)))
+                  21 (set! v (.readString this (.u64 this)))
+                  (11 12) (set! v (.readDouble this (== code 12)))
+                  (14 13) (set! v (.doubleArray this (.u8 this) (== code 14)))
+                  (7 15) (set! v (.doubleArray this (.u32 this) (== code 7)))
+                  (23 22) (set! v (.doubleArray this (.u64 this) (== code 23)))
+                  16 (do (.u32 this) (.check this 16) (throw (Rt/failwith "input_value: unknown code module")))
+                  17 (.failf this "bad infix offset")
+                  18 (.failf this "custom blocks serialized with OCaml 4.08.0 (or prior) are no longer supported")
+                  (24 25) (set! v (.readCustom this (long code)))
+                  (.failf this "ill-formed message")))
+              (aset fr at v)))))
+      (aget root 0)))
+
+  ;; the header: its length and data length, and the object count in the fields
+  (field ^:public ^long headerLen)
+  (field ^:public ^long dataLen)
+  (field ^:public ^long numObjects)
+
+  (method ^:public parseHeader [this]
+    (let [magic (.u32 this)]
+      (cond
+        (== magic 2224400062)
+        (do (set! headerLen 20) (set! dataLen (.u32 this)) (set! numObjects (.u32 this)) (.u32 this) (.u32 this))
+        (== magic 2224400063)
+        (do (set! headerLen 32) (.u32 this) (set! dataLen (.u64 this)) (set! numObjects (.u64 this)) (.u64 this))
+        (== magic 2224400061)
+        (let [ovf (new boolean/1 1)]
+          (set! headerLen (bit-and (.u8 this) 63))
+          (set! dataLen (.vlq this ovf))
+          (.vlq this ovf)
+          (set! numObjects (.vlq this ovf))
+          (.vlq this ovf)
+          (.vlq this ovf)
+          (when (aget ovf 0) (.failf this "object too large to be read back on this platform"))
+          (.failf this "compressed object, cannot decompress"))
+        :else (.failf this "bad object"))))
+
+  ;; the value in b at ofs
+  (method ^:public ^:static fromBytes [^byte/1 b ^int ofs]
+    (when (< ofs 0) (throw (Rt/invalidArg "input_value_from_bytes")))
+    (let [s (Marshal.)]
+      (set! (.-src s) b)
+      (set! (.-pos s) ofs)
+      (set! (.-end s) (alength b))
+      (.parseHeader s)
+      (when (or (< (.-dataLen s) 0) (> (unchecked-add (.-headerLen s) (.-dataLen s)) (long (unchecked-subtract-int (alength b) ofs))))
+        (throw (Rt/failwith "input_val_from_string: bad length")))
+      (set! (.-end s) (unchecked-add-int ofs (unchecked-int (unchecked-add (.-headerLen s) (.-dataLen s)))))
+      (set! (.-pos s) (unchecked-add-int ofs (unchecked-int (.-headerLen s))))
+      (when (> (.-numObjects s) 0)
+        (set! (.-nobjs s) (unchecked-int (Math/min (.-numObjects s) (.-dataLen s))))
+        (set! (.-objs s) (new Object/1 (.-nobjs s))))
+      (.readRec s)))
+
+  (method ^:public ^:static caml_input_value_from_bytes [b ofs] (Marshal/fromBytes (cast byte/1 b) (Rt/ii ofs)))
+  (method ^:public ^:static caml_input_value_from_string [b ofs] (Marshal/fromBytes (cast byte/1 b) (Rt/ii ofs)))
+
+  (method ^:public ^:static caml_marshal_data_size [b ofs]
+    (let [bb (cast byte/1 b) o (Rt/l ofs)]
+      (when (or (< o 0) (> o (unchecked-subtract (long (alength bb)) 20)))
+        (throw (Rt/invalidArg "Marshal.data_size")))
+      (let [s (Marshal.)]
+        (set! (.-src s) bb)
+        (set! (.-pos s) (unchecked-int o))
+        (set! (.-end s) (alength bb))
+        (let [magic (.u32 s)]
+          (cond
+            (== magic 2224400062)
+            (Long/valueOf (unchecked-add 4 (.u32 s)))
+            (== magic 2224400063)
+            (do (.u32 s) (Long/valueOf (unchecked-add 16 (.u64 s))))
+            (== magic 2224400061)
+            (let [hl (bit-and (.u8 s) 63) ovf (new boolean/1 1) n (.vlq s ovf)]
+              (when (aget ovf 0)
+                (throw (Rt/failwith "Marshal.data_size: object too large to be read back on this platform")))
+              (Long/valueOf (unchecked-add (unchecked-subtract hl 16) n)))
+            :else (throw (Rt/failwith "Marshal.data_size: bad object"))))))))

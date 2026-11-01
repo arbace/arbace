@@ -1,0 +1,415 @@
+(ns arbace.repr.cpp.types
+  "C++ types and names from text (doc/cpp/SPEC.md §4.4, §5; doc/cpp/CPP-SURVEY.md, \"As built: CX3, CX4\"): the
+  oracle prints every type as a string (clang's `qualType`) and the converter reads the written names of the
+  source (a declaration's qualifier, a name's template arguments) from the main file's text; both are read here
+  into type forms and name forms. `tokens` is a small C++ tokenizer, `parse-type` a type (specifiers, then an
+  abstract declarator), `parse-name` a possibly qualified name with template arguments. Anything they do not
+  read throws `ex-info` with :cpp/gap, which the converter turns into a text form or a refusal."
+  (:require [arbace.string :as str]))
+
+(set! *warn-on-reflection* true)
+
+(defn gap [kind ^String msg] (throw (ex-info (str "cpp: " msg) {:cpp/gap kind})))
+
+;; ---------------------------------------------------------------------------------------------
+;; Tokens: [kind text start end], kind :id :num :str :chr :punct
+
+(def ^:private puncts
+  ["%:%:" "<<=" ">>=" "..." "->*" "<=>" "::" "->" "++" "--" "<<" "<=" ">=" "==" "!=" "&&" "||" "+=" "-=" "*=" "/="
+   "%=" "&=" "|=" "^=" ".*" "##" "<:" ":>" "<%" "%>" "%:"])
+
+(defn- id-start? [^long c] (or (<= 97 c 122) (<= 65 c 90) (= c 95) (= c 36) (>= c 128)))
+(defn- id-char? [^long c] (or (id-start? c) (<= 48 c 57)))
+
+(defn tokens
+  "The tokens of `s`. `>>` is two `>` tokens (template argument lists close one at a time)."
+  [^String s]
+  (let [n (.length s)]
+    (loop [i (identity 0) out (transient [])]
+      (if (>= i n)
+        (persistent! out)
+        (let [c (long (int (.charAt s i)))]
+          (cond
+            (<= c 32) (recur (inc i) out)
+            ;; a string or character literal with its prefix
+            (or (= c 34) (= c 39)
+                (and (id-start? c)
+                     (let [m (re-find #"^(u8|u|U|L|R|u8R|uR|UR|LR)[\"']" (subs s i (min n (+ i 4))))] (some? m))))
+            (let [j (loop [j i] (if (and (< j n) (not (#{\" \'} (.charAt s j)))) (recur (inc j)) j))
+                  q (.charAt s j)
+                  raw (and (> j i) (= \R (.charAt s (dec j))))
+                  e (if raw
+                      (let [d (subs s (inc j) (.indexOf s "(" (int (inc j))))
+                            k (.indexOf s (str ")" d "\"") (int (inc j)))]
+                        (if (neg? k) n (+ k 2 (count d))))
+                      (loop [k (inc j)]
+                        (cond (>= k n) n
+                              (= (.charAt s k) \\) (recur (+ k 2))
+                              (= (.charAt s k) q) (inc k)
+                              :else (recur (inc k)))))
+                  ;; a user-defined literal's suffix
+                  e (loop [k e] (if (and (< k n) (id-char? (long (int (.charAt s k))))) (recur (inc k)) k))]
+              (recur e (conj! out [(if (= q \") :str :chr) (subs s i e) i e])))
+            (id-start? c)
+            (let [e (loop [j (inc i)] (if (and (< j n) (id-char? (long (int (.charAt s j))))) (recur (inc j)) j))]
+              (recur e (conj! out [:id (subs s i e) i e])))
+            (or (<= 48 c 57) (and (= c 46) (< (inc i) n) (<= 48 (long (int (.charAt s (inc i)))) 57)))
+            (let [e (loop [j (inc i)]
+                      (if (< j n)
+                        (let [d (.charAt s j)]
+                          (cond
+                            (and (#{\+ \-} d) (#{\e \E \p \P} (.charAt s (dec j)))) (recur (inc j))
+                            (and (= d \') (< (inc j) n) (id-char? (long (int (.charAt s (inc j)))))) (recur (inc j))
+                            (or (id-char? (long (int d))) (= d \.)) (recur (inc j))
+                            :else j))
+                        j))]
+              (recur e (conj! out [:num (subs s i e) i e])))
+            (= c 62) (recur (inc i) (conj! out [:punct ">" i (inc i)]))
+            :else
+            (let [p (or (first (filter #(.startsWith s ^String % i) puncts)) (str (char c)))
+                  p (if (and (= p ">>=") false) p p)]
+              (recur (+ i (count p)) (conj! out [:punct p i (+ i (count p))])))))))))
+
+(defn- tk [ts i] (get ts i))
+(defn- tt ^String [ts i] (nth (tk ts i) 1 nil))
+(defn- tkind [ts i] (nth (tk ts i) 0 nil))
+
+;; ---------------------------------------------------------------------------------------------
+;; Builtin types: clang's spellings to the C forms' symbols (unsigned int is `unsigned`, as C's)
+
+(def builtin-words '#{void bool char short int long signed unsigned float double wchar_t char8_t char16_t char32_t
+                      __int128 _Complex __float128 _Float16 __bf16 __ibm128 _Float32 _Float64 _Float128 _Float32x _Float64x
+                      __int128_t __uint128_t})
+
+(defn builtin-symbol
+  "The symbol of a builtin type's words (in any order, as written or as clang prints them)."
+  [words]
+  (let [ws (frequencies words)
+        u (contains? ws "unsigned")
+        sg (contains? ws "signed")
+        l (get ws "long" 0)
+        cx (contains? ws "_Complex")
+        core (first (remove #{"unsigned" "signed" "long" "short" "int" "_Complex"} (keys ws)))
+        sym (cond
+              (contains? ws "short") (if u "unsigned-short" "short")
+              (= core "char") (cond u "unsigned-char" sg "signed-char" :else "char")
+              (= core "double") (if (pos? l) "long-double" "double")
+              (= core "__int128") (if u "unsigned-__int128" "__int128")
+              core core
+              (= l 2) (if u "unsigned-long-long" "long-long")
+              (= l 1) (if u "unsigned-long" "long")
+              u "unsigned"
+              :else "int")]
+    (if cx (list 'complex (symbol sym)) (symbol sym))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Names
+
+(declare parse-type* parse-name* template-args)
+
+(def op-names
+  "An operator function's symbol after `operator` (doc/cpp/SPEC.md §6.3)."
+  {"!" 'not "&&" 'and "||" 'or "&" 'bit-and "|" 'bit-or "^" 'bit-xor "~" 'bit-not "," 'comma "++" 'inc "--" 'dec
+   "()" 'call "[]" 'subscript "new" 'new "delete" 'delete "new[]" "new[]" "delete[]" "delete[]" "co_await" 'co-await
+   "&=" 'bit-and= "|=" 'bit-or= "^=" 'bit-xor= "/=" "/=" "=" '=})
+
+(defn op-symbol [^String op] (get op-names op (symbol op)))
+
+(defn- join-parts
+  "A qualified name's parts as one form: one symbol a/b/c when every part is an identifier, else (cpp/scope ...)
+  with the leading identifiers joined into the first part that is not one (std::vector<int>::size_type is
+  (cpp/scope (<> std/vector int) size_type))."
+  [parts global]
+  (let [[lead more] (split-with symbol? parts)
+        parts (if (and (seq lead) (seq more))
+                (let [p (first more)
+                      pre (str/join "/" (map name lead))
+                      join1 (fn [s] (symbol (str pre "/" (name s))))
+                      p (cond
+                          (and (seq? p) (= (first p) '<>) (symbol? (second p))) (apply list '<> (join1 (second p)) (nnext p))
+                          :else nil)]
+                  (if p (cons p (rest more)) parts))
+                parts)
+        x (if (every? symbol? parts)
+            (symbol (str/join "/" (map name parts)))
+            (if (= 1 (count parts)) (first parts) (apply list 'cpp/scope parts)))]
+    (if global (list 'cpp/global x) x)))
+
+(defn parse-name*
+  "A name at token i: [form next-i] or nil. A part is an identifier with template arguments, `operator OP`,
+  `~X`, `template X`."
+  [ts i]
+  (let [global (= (tt ts i) "::")
+        i (if global (inc i) i)]
+    (loop [i i parts []]
+      (let [t (tt ts i)
+            [part j] (cond
+                       (= t "template") (let [[p j] (parse-name* ts (inc i))] (when p [(list 'template p) j]))
+                       (= t "operator")
+                       (let [t2 (tt ts (inc i))]
+                         (cond
+                           (and (= t2 "(") (= (tt ts (+ i 2)) ")")) [(list 'operator 'call) (+ i 3)]
+                           (and (= t2 "[") (= (tt ts (+ i 2)) "]")) [(list 'operator 'subscript) (+ i 3)]
+                           (and (#{"new" "delete"} t2) (= (tt ts (+ i 2)) "[")) [(list 'operator (str t2 "[]")) (+ i 4)]
+                           (and (= t2 ">") (= (tt ts (+ i 2)) ">") (= (tt ts (+ i 3)) "=")) [(list 'operator (symbol ">>=")) (+ i 4)]
+                           (and (= t2 ">") (= (tt ts (+ i 2)) ">")) [(list 'operator (symbol ">>")) (+ i 3)]
+                           (and (= t2 ">") (= (tt ts (+ i 2)) "=")) [(list 'operator (symbol ">=")) (+ i 3)]
+                           (and (= t2 "\"\"") (= :id (tkind ts (+ i 2)))) [(list 'operator 'lit (tt ts (+ i 2))) (+ i 3)]
+                           (and (= :str (tkind ts (inc i))) (.startsWith ^String t2 "\"\"")) [(list 'operator 'lit (subs t2 2)) (+ i 2)]
+                           (= :punct (tkind ts (inc i))) [(list 'operator (op-symbol t2)) (+ i 2)]
+                           (#{"new" "delete" "co_await"} t2) [(list 'operator (op-symbol t2)) (+ i 2)]
+                           :else (let [[ty j] (parse-type* ts (inc i) true)] (when ty [(list 'operator 'conv ty) j]))))
+                       (and (= t "~") (= :id (tkind ts (inc i)))) [(list 'cpp/dtor-name (symbol (tt ts (inc i)))) (+ i 2)]
+                       (= :id (tkind ts i)) [(symbol t) (inc i)]
+                       :else nil)]
+        (if-not part
+          (when (seq parts) [(join-parts parts global) i])
+          (let [[part j] (if (and (= (tt ts j) "<") (not (and (seq? part) (= (first part) 'operator))))
+                           (if-let [[args k] (template-args ts (inc j))]
+                             [(apply list '<> part args) k]
+                             [part j])
+                           [part j])]
+            (if (= (tt ts j) "::")
+              (if (and (= (tt ts (inc j)) "*")) ; X::* is a pointer to member: the caller's
+                [(join-parts (conj parts part) global) j]
+                (recur (inc j) (conj parts part)))
+              [(join-parts (conj parts part) global) j])))))))
+
+(defn- arg-end
+  "The index of the , or > that ends a template argument starting at i (depth counted in () [] {} < >)."
+  [ts i]
+  (loop [j i d 0]
+    (let [t (tt ts j)]
+      (cond
+        (nil? t) nil
+        (and (zero? d) (#{"," ">"} t)) j
+        (#{"(" "[" "{" "<"} t) (recur (inc j) (inc d))
+        (#{")" "]" "}" ">"} t) (recur (inc j) (dec d))
+        :else (recur (inc j) d)))))
+
+(defn- text-of ^String [ts i j]
+  ;; the tokens' text, a space between tokens (the original spacing is not kept: a text form's own text is the source's)
+  ;; but a `>` that was glued to the token after it (`>=`, `>>`) stays glued
+  (let [sub (subvec ts i j)]
+    (apply str (map-indexed (fn [k t]
+                              (let [nx (get sub (inc k))]
+                                (str (nth t 1)
+                                     (when nx
+                                       (if (and (= ">" (nth t 1)) (= :punct (nth t 0)) (= (nth t 3) (nth nx 2))
+                                                (#{">" "=" ">="} (nth nx 1)))
+                                         "" " ")))))
+                            sub))))
+
+(defn- literal-arg [ts i j]
+  (when (= (inc i) j)
+    (let [[k t] (tk ts i)]
+      (cond
+        (and (= k :num) (re-matches #"[0-9]+" t)) (let [v (bigint t)] (if (<= v Long/MAX_VALUE) (long v) v))
+        (= t "true") true
+        (= t "false") false
+        (= t "nullptr") nil
+        :else nil))))
+
+(defn template-args
+  "The arguments of a template-id from token i (after `<`): [args next-i] or nil."
+  [ts i]
+  (if (= (tt ts i) ">")
+    [[] (inc i)]
+    (loop [i i out []]
+      (when-let [e (arg-end ts i)]
+        (let [pack (= (tt ts (dec e)) "...")
+              e2 (if pack (dec e) e)
+              lit (literal-arg ts i e2)
+              arg (cond
+                    (or (some? lit) (and (= (inc i) e2) (#{"true" "false" "nullptr"} (tt ts i)))) lit
+                    :else (let [[ty k] (try (parse-type* ts i true) (catch Exception _ nil))]
+                            (if (and ty (= k e2)) ty (list 'cpp/text (text-of ts i e2)))))
+              arg (if pack (list 'pack-expand arg) arg)
+              out (conj out arg)]
+          (if (= (tt ts e) ">")
+            [out (inc e)]
+            (recur (inc e) out)))))))
+
+(defn parse-name
+  "A whole string as a name form, or nil."
+  [^String s]
+  (let [ts (tokens s)
+        r (parse-name* ts 0)]
+    (when (and r (= (second r) (count ts))) (first r))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Types: specifiers, then an abstract declarator (clang's printing grammar, which is the written one)
+
+(def ^:private cv-words {"const" 'const "volatile" 'volatile "restrict" 'restrict "__restrict" 'restrict "__restrict__" 'restrict})
+
+(defn- wrap-cv [t cvs] (reduce (fn [t q] (list q t)) t (sort-by {'const 0 'volatile 1 'restrict 2} (distinct cvs))))
+
+(defn- balanced-end [ts i]
+  ;; i at an opening ( [ {: the index after its closing one
+  (loop [j (inc i) d 1]
+    (let [t (tt ts j)]
+      (cond (nil? t) nil
+            (#{"(" "[" "{"} t) (recur (inc j) (inc d))
+            (#{")" "]" "}"} t) (if (= d 1) (inc j) (recur (inc j) (dec d)))
+            :else (recur (inc j) d)))))
+
+(defn- specifiers
+  "The decl-specifiers of a type at token i: [base-type next-i] or nil."
+  [ts i]
+  (loop [i i cvs [] words [] base nil]
+    (let [t (tt ts i) k (tkind ts i)]
+      (cond
+        (contains? cv-words t) (recur (inc i) (conj cvs (cv-words t)) words base)
+        (and (= k :id) (contains? builtin-words (symbol t)) (nil? base)) (recur (inc i) cvs (conj words t) base)
+        (and (#{"auto"} t) (nil? base) (empty? words)) (recur (inc i) cvs words 'auto)
+        (and (= t "decltype") (= (tt ts (inc i)) "(") (nil? base) (empty? words))
+        (if (and (= (tt ts (+ i 2)) "auto") (= (tt ts (+ i 3)) ")"))
+          (recur (+ i 4) cvs words 'decltype-auto)
+          (let [e (or (balanced-end ts (inc i)) (gap :type "decltype"))]
+            (recur e cvs words (list 'decltype (list 'cpp/text (text-of ts (+ i 2) (dec e)))))))
+        (and (#{"__typeof__" "typeof" "__typeof"} t) (= (tt ts (inc i)) "(") (nil? base) (empty? words))
+        (let [e (or (balanced-end ts (inc i)) (gap :type "typeof"))]
+          (recur e cvs words (list 'typeof-text (text-of ts (+ i 2) (dec e)))))
+        (and (= t "_Atomic") (= (tt ts (inc i)) "(") (nil? base) (empty? words))
+        (let [[u j] (or (parse-type* ts (+ i 2) false) (gap :type "_Atomic"))]
+          (recur (inc j) cvs words (list 'atomic u)))
+        (and (#{"struct" "class" "union" "enum" "typename"} t) (nil? base) (empty? words))
+        (if (= (tt ts (inc i)) "(")
+          (gap :type (str "unnamed " t))
+          (let [[nm j] (or (parse-name* ts (inc i)) (gap :type t))]
+            (recur j cvs words (if (= t "typename") (list 'typename nm) (list 'cpp/elaborated (symbol t) nm)))))
+        (and (= t "(") (nil? base) (empty? words)) (gap :type "a placeholder type")
+        (and (#{"__attribute__" "__declspec"} t)) (gap :type "an attribute in a type")
+        (and (= k :id) (nil? base) (empty? words) (not (#{"operator" "noexcept" "throw"} t)))
+        (let [[nm j] (or (parse-name* ts i) (gap :type t))]
+          (if (= (tt ts j) "auto") ; a type-constraint: Num auto
+            (recur (inc j) cvs words (list 'constrained nm 'auto))
+            (recur j cvs words nm)))
+        (and (= t "::") (nil? base) (empty? words))
+        (let [[nm j] (or (parse-name* ts i) (gap :type "::"))] (recur j cvs words nm))
+        :else
+        (let [b (cond base base (seq words) (builtin-symbol words) :else nil)]
+          (when b [(wrap-cv b cvs) i]))))))
+
+(declare declarator)
+
+(defn- noexcept-spec [ts i]
+  ;; [meta next-i] for noexcept, noexcept(e), throw(...)
+  (cond
+    (and (= (tt ts i) "noexcept") (= (tt ts (inc i)) "("))
+    (let [e (balanced-end ts (inc i))
+          x (text-of ts (+ i 2) (dec e))]
+      [{:noexcept (case x "true" true "false" false (list 'cpp/text x))} e])
+    (= (tt ts i) "noexcept") [{:noexcept true} (inc i)]
+    (and (= (tt ts i) "throw") (= (tt ts (inc i)) "("))
+    (let [e (balanced-end ts (inc i))] [{:cpp/throw (text-of ts (+ i 2) (dec e))} e])
+    :else nil))
+
+(defn- params
+  "A function type's parameter types from token i (after `(`): [params next-i]."
+  [ts i]
+  (if (= (tt ts i) ")")
+    [[] (inc i)]
+    (loop [i i out []]
+      (cond
+        (= (tt ts i) "...") (if (= (tt ts (inc i)) ")") [(conj out '&) (+ i 2)] (gap :type "params"))
+        :else
+        (let [[t j] (or (parse-type* ts i false) (gap :type "a parameter"))
+              [t j] (if (= (tt ts j) "...") [(list 'pack-expand t) (inc j)] [t j])]
+          (cond
+            (= (tt ts j) ",") (recur (inc j) (conj out t))
+            (= (tt ts j) ")") [(conj out t) (inc j)]
+            :else (gap :type "params")))))))
+
+(defn- suffixes
+  "Array and function suffixes from token i: [f next-i], f applying them to a type."
+  [ts i]
+  (loop [i i fs []]
+    (cond
+      (= (tt ts i) "[")
+      (let [e (or (balanced-end ts i) (gap :type "array"))
+            n (when (> (- e i) 2)
+                (or (literal-arg ts (inc i) (dec e))
+                    (let [r (parse-name* ts (inc i))] (when (and r (= (second r) (dec e))) (first r)))
+                    (list 'cpp/text (text-of ts (inc i) (dec e)))))]
+        (recur e (conj fs (fn [t] (if (some? n) (list 'array n t) (list 'array t))))))
+      (= (tt ts i) "(")
+      (let [[ps j] (params ts (inc i))
+            [m j] (loop [j j m {}]
+                    (let [t (tt ts j)]
+                      (cond
+                        (= t "const") (recur (inc j) (assoc m :const true))
+                        (= t "volatile") (recur (inc j) (assoc m :volatile true))
+                        (= t "&") (recur (inc j) (assoc m :cpp/ref :&))
+                        (= t "&&") (recur (inc j) (assoc m :cpp/ref :&&))
+                        (#{"noexcept" "throw"} t) (let [[nm k] (noexcept-spec ts j)] (recur k (merge m nm)))
+                        :else [m j])))
+            [ret j] (if (= (tt ts j) "->")
+                      (let [[r k] (or (parse-type* ts (inc j) false) (gap :type "a trailing return"))] [r k])
+                      [nil j])]
+        (recur j (conj fs (fn [t]
+                            (let [r (if ret ret t)
+                                  m (if ret (assoc m :cpp/trailing true) m)
+                                  f (list 'fn (vec ps) r)]
+                              (if (seq m) (with-meta f m) f))))))
+      :else [(fn [t] (reduce (fn [t f] (f t)) t (reverse fs))) i])))
+
+(def ^:dynamic *name*
+  "When bound to an atom, a declarator may hold a name (a declaration's, not an abstract one): it is set there."
+  nil)
+
+(defn declarator
+  "An abstract declarator from token i: [f next-i], f applying it to the base type."
+  [ts i]
+  (let [[ptrs i] (loop [i i ps []]
+                   (let [t (tt ts i)]
+                     (cond
+                       (= t "*") (let [[cvs j] (loop [j (inc i) cvs []] (if-let [q (cv-words (tt ts j))] (recur (inc j) (conj cvs q)) [cvs j]))]
+                                   (recur j (conj ps (fn [u] (wrap-cv (list '* u) cvs)))))
+                       (= t "&") (recur (inc i) (conj ps (fn [u] (list '& u))))
+                       (= t "&&") (recur (inc i) (conj ps (fn [u] (list '&& u))))
+                       (or (= :id (tkind ts i)) (= t "::"))
+                       ;; X::* (a pointer to member)
+                       (let [r (parse-name* ts i)]
+                         (if (and r (= (tt ts (second r)) "::") (= (tt ts (inc (second r))) "*"))
+                           (let [c (first r)
+                                 [cvs j] (loop [j (+ 2 (second r)) cvs []] (if-let [q (cv-words (tt ts j))] (recur (inc j) (conj cvs q)) [cvs j]))]
+                             (recur j (conj ps (fn [u] (wrap-cv (list 'member-ptr c u) cvs)))))
+                           [ps i]))
+                       :else [ps i])))
+        ;; a nested declarator: ( followed by a pointer operator
+        nested (when (and (= (tt ts i) "(")
+                          (or (#{"*" "&" "&&" "^"} (tt ts (inc i)))
+                              (let [r (parse-name* ts (inc i))] (and r (= (tt ts (second r)) "::") (= (tt ts (inc (second r))) "*")))))
+                 (let [[f j] (declarator ts (inc i))]
+                   (when (= (tt ts j) ")") [f (inc j)])))
+        [inner i] (if nested nested [identity i])
+        i (if (and *name* (nil? nested) (= :id (tkind ts i)) (not (#{"const" "volatile" "noexcept" "throw"} (tt ts i))))
+            (do (reset! *name* (tt ts i)) (inc i))
+            i)
+        [suf i] (suffixes ts i)]
+    [(fn [base] (inner (suf (reduce (fn [t p] (p t)) base ptrs)))) i]))
+
+(defn parse-type*
+  "A type at token i: [type next-i] or nil; `in-args` stops at a template argument's end."
+  [ts i in-args]
+  (when-let [[base j] (specifiers ts i)]
+    (let [[f k] (declarator ts j)]
+      [(f base) k])))
+
+(defn parse-type
+  "A whole string as a type form (gap when it does not read)."
+  [^String s]
+  (let [ts (tokens s)
+        r (parse-type* ts 0 false)]
+    (if (and r (= (second r) (count ts)))
+      (first r)
+      (gap :type (str "type " s)))))
+
+(defn parse-decl
+  "A declaration's text (specifiers and a declarator holding the name, as a parameter is written): [type name] or nil."
+  [^String s]
+  (let [nm (atom nil)
+        ts (tokens s)
+        r (try (binding [*name* nm] (parse-type* ts 0 false)) (catch arbace.lang.ExceptionInfo _ nil))]
+    (when (and r (= (second r) (count ts))) [(first r) @nm])))

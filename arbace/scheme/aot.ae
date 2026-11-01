@@ -1,0 +1,564 @@
+(ns arbace.scheme.aot
+  "si's AOT (doc/scheme/SCHEME-SURVEY.md §6, SC9 (a), SC6 (a); \"As built: SM7 (write-ahead)\"): core forms
+  to Go forms over the runtime go/arbace/scm, not through c2j. Its input is the dumper's (arbace/scm's
+  aot.ae: DumpBoot, DumpProgram, the light driver's --aot-boot and --aot-dump): units (psyntax, a library,
+  the program), each its constants as Scheme text and its forms resolved as the evaluator resolves them.
+  Each unit becomes a Go package: a lambda's clause a Node type whose Run is its body; a non-tail call a
+  continuation function kN of the values live after it, pushed as a Go frame (PushGo) before the call
+  transfers by Apply, so the continuation is the evaluator's heap of frames (call/cc re-entrant, proper
+  tail calls, dynamic-wind and the handlers the evaluator's own); plain primitives applied to simple
+  operands are Go calls of their functions. The program is a main package over its libraries' packages
+  and, when it names a primitive psyntax provides (eval, environment, ...), psyntax's package, booted at
+  start: the expander compiled and linked, so eval works in a compiled program.
+
+    psyntax IR SRC                 psyntax's unit (--aot-boot's IR) as the package arbace/scmaot/psyntax
+                                   under SRC/go/arbace/
+    program IR SRC PKG FILE LIB... a program's units (--aot-dump's IR) as the packages under
+                                   arbace/scmaot/PKG/: its libraries' and the main package prog; FILE
+                                   the program's name for (command-line), LIB the library path for eval"
+  (:require [arbace.string :as str]))
+
+;;; ---------------------------------------------------------------------------------------
+;;; A unit's state: its fresh names, its package-level declarations, its init statements
+
+(def ^:dynamic *u* nil)
+
+(defn- fresh [prefix]
+  (let [n (:n @*u*)]
+    (swap! *u* update :n inc)
+    (symbol (str prefix n))))
+
+(defn- tmp [] (fresh "t"))
+(defn- envsym [] (fresh "e"))
+
+(defn- emit! [form] (swap! *u* update :decls conj form))
+(defn- init! [form] (swap! *u* update :inits conj form))
+(defn- setup! [form] (swap! *u* update :setups conj form))
+(defn- var! [sym tag] (emit! (list 'go/var (with-meta sym {:tag tag}))))
+
+(defn- tagged [sym tag] (with-meta sym {:tag tag}))
+
+(def ^:private m-param (tagged 'm '(* scm/M)))
+
+(defn- memo-sym
+  "The package-level name of key k in the unit's table t, made by mk the first time."
+  [t k mk]
+  (or (get-in @*u* [t k])
+      (let [s (mk)]
+        (swap! *u* assoc-in [t k] s)
+        s)))
+
+(defn- prim-sym [name]
+  (memo-sym :prims name
+            #(let [s (fresh "p")]
+               (var! s '(* scm/Prim))
+               (init! (list 'set! s (list 'scm/PrimProc name)))
+               s)))
+
+(defn- pval-sym [name]
+  (memo-sym :pvals name
+            #(let [s (fresh "v")]
+               (var! s 'any)
+               (init! (list 'set! s (list 'scm/PrimValue name)))
+               s)))
+
+(defn- shared-loc [name]
+  (memo-sym :shared name
+            #(let [s (fresh "s")]
+               (var! s '(* scm/Loc))
+               (setup! (list 'set! s (list '.LocOf 'm (list 'scm/Intern name))))
+               s)))
+
+(def ^:dynamic *locs*
+  "The program's own locations (a library's globals, gensyms): uid -> {:unit alias :sym G}, owned by the
+  first unit that names one."
+  nil)
+
+(defn- own-loc [name uid]
+  (if-let [{:keys [unit sym]} (get @*locs* uid)]
+    (if (= unit (:alias @*u*))
+      sym
+      (do (swap! *u* update :uses conj unit)
+          (symbol (str unit) (str sym))))
+    (let [s (fresh "G")]
+      (var! s '(* scm/Loc))
+      (init! (list 'set! s (list 'scm/NewLoc name)))
+      (swap! *locs* assoc uid {:unit (:alias @*u*) :sym s})
+      s)))
+
+(defn- loc-ref [[op name uid]]
+  (case op
+    (g pl) (shared-loc name)
+    gp (own-loc name uid)))
+
+;;; ---------------------------------------------------------------------------------------
+;;; The forms (the dumper's): (k I) (u) (l D I) (lc D I K) (g NAME) (gp NAME UID) (pl NAME) (pv NAME)
+;;; (pp NAME MIN MAX IMPL) (pc NAME) (pm NAME) (if T C A) (seq E...) (setl D I X) (setg G X)
+;;; (lam (REQ REST BODY)...) (letrec N (INIT...) BODY) (app F ARG...)
+
+(defn- arity-ok? [[_ _ mn mx] n] (and (>= n mn) (or (< mx 0) (<= n mx))))
+
+(defn- direct? [f n] (and (seq? f) (= 'pp (first f)) (arity-ok? f n)))
+
+(defn- simple? [x]
+  (case (first x)
+    (k u l lc g gp pl pv pp pc pm lam) true
+    app (let [[_ f & as] x] (and (direct? f (count as)) (every? simple? as)))
+    if (every? simple? (rest x))
+    false))
+
+(defn- env-expr
+  "Frame d's environment as a Go expression: the nearest frame at or inside it that the Go function
+  holds in a variable, then Up."
+  [fr d]
+  (let [j (last (filter #(:var (nth fr %)) (range (inc d))))]
+    (when (nil? j) (throw (ex-info "aot: no environment for a reference" {:d d})))
+    (reduce (fn [x _] (list '.-Up x)) (:var (nth fr j)) (range (- d j)))))
+
+(defn- cur-env [fr] (if (seq fr) (env-expr fr 0) nil))
+
+(def ^:private single-prims
+  "Plain primitives that give one value, always: their result needs no check in a single-value context
+  (the evaluator's PrimApp.Ev checks every primitive's; a *Values comes only from the others)."
+  #{"cons" "car" "cdr" "caar" "cadr" "cdar" "cddr" "caddr" "cdddr" "list" "vector" "vector-ref" "vector-set!"
+    "vector-length" "make-vector" "string-ref" "string-set!" "string-length" "make-string" "length" "append"
+    "reverse" "list-tail" "list-ref" "memq" "memv" "member" "assq" "assv" "assoc" "eq?" "eqv?" "equal?" "null?"
+    "pair?" "not" "zero?" "positive?" "negative?" "even?" "odd?" "+" "-" "*" "/" "<" ">" "<=" ">=" "=" "abs"
+    "quotient" "remainder" "modulo" "min" "max" "symbol?" "string?" "vector?" "procedure?" "number?"
+    "integer?" "char?" "boolean?" "set-car!" "set-cdr!" "void" "display" "write" "newline" "write-char"
+    "string-append" "substring" "string=?" "char=?" "symbol->string" "string->symbol" "number->string"
+    "exact" "inexact" "list->vector" "vector->list" "hashtable-ref" "hashtable-set!" "fx+" "fx-" "fx<?"
+    "fx=?" "fx>?" "fx<=?" "fx>=?" "char->integer" "integer->char" "bytevector-u8-ref" "bytevector-u8-set!"})
+
+(defn- may-multi? [name] (not (contains? single-prims name)))
+
+(def ^:private fast-prims
+  "The primitives with a fast path in arbace/scm (aot.go), by name and operand count: the helper, and
+  whether it takes the primitive (its fallback)."
+  {["+" 2] ['scm/FxAdd true] ["-" 2] ['scm/FxSub true] ["<" 2] ['scm/FxLt true] ["<=" 2] ['scm/FxLe true]
+   [">" 2] ['scm/FxGt true] [">=" 2] ['scm/FxGe true] ["=" 2] ['scm/FxEq true]
+   ["car" 1] ['scm/FastCar true] ["cdr" 1] ['scm/FastCdr true] ["cons" 2] ['scm/FastCons false]
+   ["null?" 1] ['scm/FastNull false] ["not" 1] ['scm/FastNot false] ["pair?" 1] ['scm/FastPair false]
+   ["eq?" 2] ['scm/FastEq false]})
+
+(defn- prim-call
+  "The Go call of plain primitive f (pp NAME MIN MAX IMPL) of Go value pe on the operands' exprs as."
+  [[_ name _ _ impl] pe as single?]
+  (let [n (count as)
+        has? #(str/includes? impl %)
+        fast (get fast-prims [name n])
+        call (cond
+               fast (let [[h p?] fast] (list* h (concat as (when p? [pe]))))
+               (and (= n 1) (has? "1")) (list (list '.-F1 pe) (nth as 0))
+               (and (= n 2) (has? "2")) (list (list '.-F2 pe) (nth as 0) (nth as 1))
+               (and (= n 3) (has? "3")) (list (list '.-F3 pe) (nth as 0) (nth as 1) (nth as 2))
+               (has? "n") (list (list '.-Fn pe) (list* 'lit '(slice any) as))
+               :else (list 'scm/ApplyPrim pe (list* 'lit '(slice any) as)))]
+    (if (and single? (may-multi? name)) (list 'scm/SingleV call) call)))
+
+(defn- effectful?
+  "Whether Go expression e does more than read: a call (a primitive's, a checked reference's)."
+  [e]
+  (and (seq? e) (not (contains? '#{aget addr .-V .-Up} (first e)))))
+
+(defn- temp? [x] (and (symbol? x) (nil? (namespace x)) (re-matches #"[et]\d+" (name x))))
+
+(declare atom* lambda-sym cx)
+
+(defn- atomize-list
+  "The exprs of simple forms xs in order and the statements before them; when a form needs statements
+  (a simple if), the effectful exprs before it are bound first, so the order of effects is kept."
+  [xs fr]
+  (loop [xs xs ss [] es []]
+    (if (empty? xs)
+      [ss es]
+      (let [[s e] (atom* (first xs) fr true)]
+        (if (and (seq s) (some effectful? es))
+          (let [bound (mapv (fn [e] (if (effectful? e) [(tmp) e] [nil e])) es)]
+            (recur (rest xs)
+                   (-> ss (into (for [[t e] bound :when t] [:bind t e])) (into s))
+                   (conj (mapv (fn [[t e]] (or t e)) bound) e)))
+          (recur (rest xs) (into ss s) (conj es e)))))))
+
+(defn- block
+  "Statements with markers ([:bind t e] t := e, [:var t] var t any) as Go forms: a declaration's body
+  is the rest of its block."
+  [stmts]
+  (loop [rev (reverse stmts) acc ()]
+    (if (empty? rev)
+      acc
+      (let [s (first rev)]
+        (cond
+          (and (vector? s) (= :bind (first s))) (recur (rest rev) (list (list* 'let [(nth s 1) (nth s 2)] acc)))
+          (and (vector? s) (= :var (first s))) (recur (rest rev) (list (list* 'let [(tagged (nth s 1) 'any) nil] acc)))
+          :else (recur (rest rev) (cons s acc)))))))
+
+(defn- do-form [stmts]
+  (let [b (block stmts)]
+    (if (= 1 (count b)) (first b) (list* 'do b))))
+
+(defn- atom*
+  "Simple form x as [statements expr]; single?: its value lands in a single-value context."
+  [x fr single?]
+  (case (first x)
+    k [[] (list 'aget 'K (second x))]
+    u [[] 'scm/Unspec]
+    l (let [[_ d i] x] [[] (list 'aget (list '.-V (env-expr fr d)) i)])
+    lc (let [[_ d i kx] x] [[] (list 'scm/RefChecked (list 'aget (list '.-V (env-expr fr d)) i) (list 'aget 'K kx))])
+    (g gp pl) [[] (list 'scm/GlobalRef (loc-ref x))]
+    (pp pc) [[] (prim-sym (second x))]
+    pv [[] (pval-sym (second x))]
+    pm [[] (list 'scm/MissingPrim (second x))]
+    lam [[] (list 'addr (list 'lit 'scm/Closure :L (lambda-sym x fr) :E (cur-env fr)))]
+    app (let [[_ f & as] x
+              [ss es] (atomize-list as fr)]
+          [ss (prim-call f (prim-sym (second f)) es single?)])
+    if (let [[_ t c a] x
+             [ts te] (atom* t fr true)
+             v (tmp)
+             [cs ce] (atom* c fr single?)
+             [as ae] (atom* a fr single?)]
+         [(into (vec ts) [[:var v] (list 'if (list 'scm/Truthy te)
+                                         (do-form (conj (vec cs) (list 'set! v ce)))
+                                         (do-form (conj (vec as) (list 'set! v ae))))])
+          v])))
+
+;;; ---------------------------------------------------------------------------------------
+;;; Continuations: :tail, a jump to a continuation function {:jump kN :live [...]}, or a generator
+;;; {:gen (fn [expr] statements) :single bool}
+
+(defn- tail? [k] (= k :tail))
+(defn- single-k? [k] (and (map? k) (boolean (:single k))))
+
+(defn- used-temps
+  "The temporaries and environments form uses that it does not bind, in order of first use."
+  [form]
+  (let [used (atom []) seen (atom #{}) bound (atom #{})]
+    (letfn [(walk [x]
+              (cond
+                (temp? x) (when-not (@seen x) (swap! seen conj x) (swap! used conj x))
+                (and (seq? x) (= 'let (first x)))
+                (let [bv (second x)]
+                  (doseq [[lhs rhs] (partition 2 bv)]
+                    (walk rhs)
+                    (when (symbol? lhs) (swap! bound conj lhs)))
+                  (doseq [y (nnext x)] (walk y)))
+                (or (seq? x) (vector? x)) (doseq [y x] (walk y))
+                :else nil))]
+      (walk form))
+    (vec (remove @bound @used))))
+
+(defn- param [s] (tagged s (if (= \e (first (name s))) '(* scm/Env) 'any)))
+
+(defn- reify-k
+  "k as a jump: its code a continuation function of the value and the temporaries live in it."
+  [k]
+  (if (:jump k)
+    k
+    (let [name (fresh "k")
+          p (tmp)
+          body (block (concat (when (:single k) [(list 'scm/Single p)]) ((:gen k) p)))
+          live (vec (remove #{p} (used-temps (cons 'do body))))]
+      (emit! (list* 'go/func name (into [m-param (tagged p 'any)] (map param live)) :results '[any bool] body))
+      {:jump name :live live})))
+
+(defn- deliver-k [k e]
+  (cond
+    (tail? k) [(list 'return e true)]
+    (:jump k) [(list 'return (list* (:jump k) 'm e (:live k)))]
+    :else ((:gen k) e)))
+
+(defn- env-temp? [s] (= \e (first (name s))))
+
+(defn- frame-fn
+  "The KFn of continuation function kN: its live values from the frame (PushK's E, A, V)."
+  [{:keys [jump live]}]
+  (memo-sym :frame-fns jump
+            #(let [f (symbol (str jump "_f"))
+                   e1 (first (filter env-temp? live))
+                   a1 (first (remove env-temp? live))
+                   more (vec (remove #{e1 a1} live))
+                   arg (fn [s] (cond (= s e1) (list '.-E 'k)
+                                     (= s a1) (list '.-A 'k)
+                                     :else (let [x (list 'aget (list '.-V 'k) (.indexOf more s))]
+                                             (if (env-temp? s) (list 'assert '(* scm/Env) x) x))))]
+               (emit! (list 'go/func f [m-param (tagged 'v 'any) (tagged 'k '(* scm/K))] :results '[any bool]
+                            (list 'return (list* jump 'm 'v (map arg live)))))
+               f)))
+
+(defn- push [k]
+  (let [{:keys [jump live] :as j} (reify-k k)]
+    (if (empty? live)
+      [(list '.PushGo 'm jump)]
+      (let [e1 (first (filter env-temp? live))
+            a1 (first (remove env-temp? live))
+            more (remove #{e1 a1} live)]
+        [(list '.PushK 'm (frame-fn j) e1 a1 (when (seq more) (list* 'lit '(slice any) more)))]))))
+
+(defn- discard [e]
+  (cond
+    (temp? e) [(list 'set! '_ e)]
+    (effectful? e) [e]
+    :else []))
+
+;;; ---------------------------------------------------------------------------------------
+;;; Statements
+
+(defn- finish-app [f es k]
+  (let [[fe & aes] es]
+    (if (direct? f (count aes))
+      (deliver-k k (prim-call f fe aes (single-k? k)))
+      (concat (when-not (tail? k) (push k))
+              [(list 'return (if (<= (count aes) 4)
+                               (list* (symbol (str ".Apply" (count aes))) 'm fe aes)
+                               (list '.Apply 'm fe (list* 'lit '(slice any) aes))))]))))
+
+(defn- pure? [e] (or (and (symbol? e) (not (temp? e))) (and (seq? e) (contains? '#{addr} (first e)))
+                     (and (seq? e) (= 'aget (first e)) (= 'K (second e)))))
+
+(defn- app-step [parts i acc lst fr k]
+  (if (= i (count parts))
+    (finish-app (first parts) acc k)
+    (let [x (nth parts i)]
+      (if (simple? x)
+        (let [[ss e] (atom* x fr true)]
+          (if (and (< i lst) (not (pure? e)))
+            (let [t (tmp)]
+              (concat ss [[:bind t e]] (app-step parts (inc i) (conj acc t) lst fr k)))
+            (concat ss (app-step parts (inc i) (conj acc e) lst fr k))))
+        (cx x fr {:single true
+                  :gen (fn [v]
+                         (if (temp? v)
+                           (app-step parts (inc i) (conj acc v) lst fr k)
+                           (let [t (tmp)]
+                             (concat [[:bind t v]] (app-step parts (inc i) (conj acc t) lst fr k)))))})))))
+
+(defn- cx-app [[_ f & as] fr k]
+  (let [parts (vec (cons f as))
+        lst (last (remove #(simple? (nth parts %)) (range (count parts))))]
+    (if (nil? lst)
+      (let [[ss es] (atomize-list parts fr)]
+        (concat ss (finish-app f es k)))
+      (app-step parts 0 [] lst fr k))))
+
+(defn- cx-if [[_ t c a] fr k]
+  (if (simple? t)
+    (let [[ss te] (atom* t fr true)
+          test (list 'scm/Truthy te)]
+      (cond
+        (tail? k) (concat ss [(list 'if test (do-form (cx c fr k)) (do-form (cx a fr k)))])
+        (and (simple? c) (simple? a))
+        (let [v (tmp) sg (single-k? k)
+              [cs ce] (atom* c fr sg)
+              [as ae] (atom* a fr sg)]
+          (concat ss [[:var v] (list 'if test (do-form (conj (vec cs) (list 'set! v ce))) (do-form (conj (vec as) (list 'set! v ae))))]
+                  (deliver-k k v)))
+        :else (let [j (reify-k k)]
+                (concat ss [(list 'if test (do-form (cx c fr j)) (do-form (cx a fr j)))]))))
+    (let [k2 (if (tail? k) k (reify-k k))]
+      (cx t fr {:single true
+                :gen (fn [tv] [(list 'if (list 'scm/Truthy tv) (do-form (cx c fr k2)) (do-form (cx a fr k2)))])}))))
+
+(defn- chain
+  "The statements of steps run in order, then rest: each step [x deliver] a form and the statements its
+  value v is put by ((deliver v) rest...); compiled from the last, iteratively (a program's body is a
+  long sequence): a step with a call continues in a continuation function holding the rest, so the
+  code is flat."
+  [steps rest-stmts fr single?]
+  (loop [steps (reverse steps) acc rest-stmts]
+    (if (empty? steps)
+      acc
+      (let [[x put] (first steps)
+            after acc]
+        (recur (rest steps)
+               (if (and (simple? x) (not= 'if (first x)))
+                 (let [[ss e] (atom* x fr single?)]
+                   (concat ss (put e after)))
+                 (cx x fr (reify-k {:single single? :gen (fn [v] (put v after))}))))))))
+
+(defn- cx-seq [xs fr k]
+  (chain (map (fn [x] [x (fn [v after] (concat (discard v) after))]) (butlast xs))
+         (cx (last xs) fr k) fr false))
+
+(defn- cx-letrec [[_ n inits body] fr k]
+  (let [ev (envsym)
+        fr2 (cons {:var ev} fr)]
+    (concat [[:bind ev (list 'scm/NewEnv n (cur-env fr))] (list 'set! '_ ev)]
+            (chain (map-indexed (fn [i x] [x (fn [v after] (cons (list 'aset (list '.-V ev) i v) after))]) inits)
+                   (cx body fr2 k) fr2 true))))
+
+(defn- cx
+  "Form x in frames fr, its value delivered to continuation k: Go statements."
+  [x fr k]
+  (if (and (simple? x) (not= 'if (first x)))
+    (let [[ss e] (atom* x fr (single-k? k))]
+      (concat ss (deliver-k k e)))
+    (case (first x)
+      if (cx-if x fr k)
+      seq (cx-seq (rest x) fr k)
+      setl (let [[_ d i y] x]
+             (cx y fr {:single true :gen (fn [v] (concat [(list 'aset (list '.-V (env-expr fr d)) i v)] (deliver-k k 'scm/Unspec)))}))
+      setg (let [[_ g y] x]
+             (cx y fr {:single true :gen (fn [v] (concat [(list 'set! (list '.-V (loc-ref g)) v)] (deliver-k k 'scm/Unspec)))}))
+      letrec (cx-letrec x fr k)
+      app (cx-app x fr k)
+      (throw (ex-info (str "aot: unknown form " (pr-str (first x))) {})))))
+
+(defn- lambda-sym [[_ & clauses] fr]
+  (let [ls (fresh "lam")
+        bodies (doall
+                 (for [[req rest body] clauses]
+                   (let [bt (fresh "b")
+                         ev (envsym)
+                         fr2 (cons {:var ev} (map #(assoc % :var nil) fr))
+                         stmts (block (cx body fr2 :tail))]
+                     (emit! (list 'go/type bt '(struct)))
+                     (emit! (list* 'go/method 'Run [(tagged 'n (list '* bt)) m-param (tagged ev '(* scm/Env))] :results '[any bool] stmts))
+                     [req rest bt])))]
+    (var! ls '(* scm/Lambda))
+    (init! (list 'set! ls (list 'addr (list 'lit 'scm/Lambda :Clauses
+                                            (list* 'lit '(slice (* scm/Clause))
+                                                   (for [[req rest bt] bodies]
+                                                     (list 'addr (list 'lit 'scm/Clause :Req req :Rest rest :Body (list 'addr (list 'lit bt))))))))))
+    ls))
+
+;;; ---------------------------------------------------------------------------------------
+;;; Units as packages
+
+(defn- compile-unit
+  "Unit u (the dumper's map) as the Go forms of a package's file: {:decls [...] :uses #{alias}}."
+  [{:keys [consts forms]} alias]
+  (binding [*u* (atom {:n 0 :decls [] :inits [] :setups [] :alias alias :uses #{}})]
+    (let [tops (doall
+                 (for [f forms]
+                   (let [tt (fresh "top")
+                         stmts (block (cx f [] :tail))]
+                     (emit! (list 'go/type tt '(struct)))
+                     (emit! (list* 'go/method 'Run [(tagged 'n (list '* tt)) m-param (tagged 'e '(* scm/Env))] :results '[any bool] stmts))
+                     tt)))
+          {:keys [decls inits setups uses]} @*u*]
+      {:uses uses
+       :decls (concat
+                [(list 'go/var (tagged 'K '(slice any)))]
+                decls
+                [(list* 'go/func 'init []
+                        (list 'set! 'K (list 'scm/ReadAOT (str/join "\n" consts)))
+                        (list 'when (list '!= (list 'len 'K) (count consts)) (list 'panic "scm aot: the constants do not read back"))
+                        inits)
+                 (list* 'go/func 'setup [m-param] setups)
+                 (list* 'go/func 'Run "Run runs the unit's forms on machine m.\n" [m-param]
+                        (list 'setup 'm)
+                        (for [tt tops] (list '.Exec 'm (list 'addr (list 'lit tt)) nil)))])})))
+
+(defn- clean
+  "Form x without the reader's positions in its metadata (the compiler's quoted Go forms carry them)."
+  [x]
+  (let [y (cond
+            (seq? x) (with-meta (apply list (map clean x)) (meta x))
+            (vector? x) (with-meta (mapv clean x) (meta x))
+            :else x)]
+    (if-let [md (and (instance? arbace.lang.IObj y) (meta y))]
+      (let [md (dissoc md :line :column :file :end-line :end-column)
+            md (if (contains? md :tag) (update md :tag clean) md)]
+        (with-meta y (when (seq md) md)))
+      y)))
+
+(defn- pf
+  "Form x as text, its metadata as ^{...} maps (the reader takes no list after ^)."
+  [x]
+  (let [md (when (instance? arbace.lang.IObj x) (meta x))
+        body (cond
+               (seq? x) (str "(" (str/join " " (map pf x)) ")")
+               (vector? x) (str "[" (str/join " " (map pf x)) "]")
+               (map? x) (str "{" (str/join " " (map (fn [[k v]] (str (pf k) " " (pf v))) x)) "}")
+               :else (pr-str x))]
+    (if (seq md) (str "^" (pf md) " " body) body)))
+
+(defn- pr-forms [forms]
+  (str/join "\n\n" (map (comp pf clean) forms)))
+
+(defn- write-package!
+  "The package files of Go package path (arbace/X/Y), name nm, its code file's forms, under src/go/."
+  [src path nm imports decls]
+  (let [rel (subs path (count "arbace/"))
+        dir (java.io.File. (str src "/go/arbace/" rel))
+        pkg-file (java.io.File. (str src "/go/arbace/" rel ".ae"))
+        ns-name (str "go.arbace." (str/replace rel "/" "."))
+        base (last (str/split rel #"/"))]
+    (.mkdirs dir)
+    (spit pkg-file (str ";; generated by arbace.scheme.aot (si's AOT); do not edit\n"
+                        (pf (list 'ns (symbol ns-name) '(:require [arbace.go :as go]))) "\n\n"
+                        (pr-str (list 'go/package (symbol nm) :path path :files ["unit.go"])) "\n\n"
+                        (pr-str (list 'load (str base "/unit"))) "\n"))
+    (spit (java.io.File. dir "unit.ae")
+          (str ";; generated by arbace.scheme.aot (si's AOT); do not edit\n"
+               (pr-str (list 'in-ns (list 'quote (symbol ns-name)))) "\n\n"
+               (pr-forms (cons (list 'go/file "unit.go" :imports imports) decls)) "\n"))))
+
+(defn- refused [units] (first (keep :refused units)))
+
+(defn- cmd-psyntax [[ir src]]
+  (let [u (read-string (slurp ir))]
+    (when-let [r (:refused u)] (println "refused:" r) (System/exit 3))
+    (binding [*locs* (atom {})]
+      (let [{:keys [decls]} (compile-unit u 'psyntax)
+            decls (concat decls [(list 'go/func 'Boot "Boot boots psyntax on machine m: its forms compiled.\n" [m-param] (list 'Run 'm))])]
+        (write-package! src "arbace/scmaot/psyntax" "psyntax" '[[scm "arbace/scm"]] decls)))
+    0))
+
+(defn- mangle [s]
+  (let [t (str/replace (str s) #"[^A-Za-z0-9]+" "_")
+        t (str/replace t #"^_+|_+$" "")]
+    (if (re-find #"^[0-9]" t) (str "l" t) (if (= "" t) "lib" t))))
+
+(defn- cmd-program [[ir src pkg file & libpath]]
+  (let [{:keys [units]} (read-string (slurp ir))]
+    (when-let [r (refused units)] (println "refused:" r) (System/exit 3))
+    (binding [*locs* (atom {})]
+      (let [libs (butlast units)
+            prog (last units)
+            names (loop [ls libs seen #{} out []]
+                    (if (empty? ls) out
+                        (let [b (mangle (:name (first ls)))
+                              b (if (seen b) (str b "_" (count out)) b)]
+                          (recur (rest ls) (conj seen b) (conj out b)))))
+            path-of #(str "arbace/scmaot/" pkg "/lib/" %)
+            lib-imports (fn [uses] (vec (for [a (sort (map str uses))] [(symbol a) (path-of a)])))
+            _ (doseq [[u nm] (map vector libs names)]
+                (let [{:keys [decls uses]} (compile-unit u (symbol nm))]
+                  (write-package! src (path-of nm) nm (into '[[scm "arbace/scm"]] (lib-imports uses)) decls)))
+            {:keys [decls uses]} (compile-unit prog 'main)
+            needs-psyntax (some #(str/includes? (pr-str (:forms %)) "(pl ") units)
+            main (list 'go/func 'main []
+                       (list 'set! 'scm/CommandLine (list 'append (list 'lit '(slice string) file) (list 'spread (list 'subslice 'os/Args 1))))
+                       (list 'when (list '== (list 'os/Getenv "GOGC") "") (list 'debug/SetGCPercent 400))
+                       (list 'when (list '!= (list 'os/Getenv "SI_CPUPROFILE") "")
+                             (list 'let [(list 'values 'f 'err) (list 'os/Create (list 'os/Getenv "SI_CPUPROFILE"))]
+                                   (list 'when (list '== 'err nil)
+                                         (list 'pprof/StartCPUProfile 'f)
+                                         (list 'set! 'scm/AtExit (list 'fn [] (list 'pprof/StopCPUProfile))))))
+                       (list 'let ['m (list 'scm/NewM)
+                                   'status (list* 'scm/Report
+                                                  [(list* 'fn []
+                                                          (concat
+                                                            (when needs-psyntax
+                                                              [(list 'psyntax/Boot 'm)
+                                                               (list '.SetLibraryPath 'm (list* 'lit '(slice string) libpath))])
+                                                            (for [nm names] (list (symbol nm "Run") 'm))
+                                                            [(list 'Run 'm)]))])]
+                             (list 'when (list '!= 'scm/AtExit nil) (list 'scm/AtExit))
+                             (list 'os/Exit 'status)))
+            imports (-> '[[os "os"] [debug "runtime/debug"] [pprof "runtime/pprof"] [scm "arbace/scm"]]
+                        (into (when needs-psyntax '[[psyntax "arbace/scmaot/psyntax"]]))
+                        (into (for [nm names] [(symbol nm) (path-of nm)])))]
+        (write-package! src (str "arbace/scmaot/" pkg "/prog") "main" imports (concat decls [main]))
+        (println "units:" (count units) "libraries:" (count libs) (if needs-psyntax "psyntax: linked" "psyntax: not needed"))))
+    0))
+
+(defn -main [& [cmd & args]]
+  (let [rc (case cmd
+             "psyntax" (cmd-psyntax args)
+             "program" (cmd-program args)
+             (do (println "usage: arbace.scheme.aot psyntax IR SRC | program IR SRC PKG FILE LIB...") 2))]
+    (shutdown-agents)
+    (System/exit rc)))

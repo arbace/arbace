@@ -1,0 +1,810 @@
+;; The externals for numbers (runtime/ints.c, runtime/floats.c), ported from oi's ext_num.go:
+;; C's printf of integers and floats (caml_format_int, caml_format_float, caml_hexstring_of_float,
+;; the int32, int64 and nativeint formats), the parsers (caml_int_of_string, caml_float_of_string
+;; with C's strtod and hexadecimal floats), the float functions, and the int32, int64 and
+;; nativeint arithmetic. Decimal conversions are exact (java.math.BigDecimal), as glibc's are.
+;; A conversion specification is a long/1: 0 minus, 1 plus, 2 space, 3 alt, 4 zero, 5 width,
+;; 6 precision (-1 none), 7 conversion letter, 8 index after it.
+
+(in-ns 'ocaml.rt)
+
+(import '(java.math BigDecimal MathContext RoundingMode))
+
+(defclass ^:public ^:final ExtNum
+
+  ;; ------------------------------------------------------------ formatting
+
+  (method ^:static parseSpec ^long/1 [^String s ^int i0]
+    (let [sp (new long/1 9) n (.length s)
+          ^:mutable ^int i i0
+          ^:mutable ^boolean go true]
+      (aset sp 6 -1)
+      (while (and go (< i n))
+        (let [c (.charAt s i)]
+          (cond (== c \-) (do (aset sp 0 1) (set! i (unchecked-inc-int i)))
+                (== c \+) (do (aset sp 1 1) (set! i (unchecked-inc-int i)))
+                (== c \space) (do (aset sp 2 1) (set! i (unchecked-inc-int i)))
+                (== c \#) (do (aset sp 3 1) (set! i (unchecked-inc-int i)))
+                (== c \0) (do (aset sp 4 1) (set! i (unchecked-inc-int i)))
+                :else (set! go false))))
+      (while (and (< i n) (>= (.charAt s i) \0) (<= (.charAt s i) \9))
+        (aset sp 5 (unchecked-add (unchecked-multiply (aget sp 5) 10) (long (unchecked-subtract-int (.charAt s i) 48))))
+        (set! i (unchecked-inc-int i)))
+      (when (and (< i n) (== (.charAt s i) \.))
+        (set! i (unchecked-inc-int i))
+        (aset sp 6 0)
+        (while (and (< i n) (>= (.charAt s i) \0) (<= (.charAt s i) \9))
+          (aset sp 6 (unchecked-add (unchecked-multiply (aget sp 6) 10) (long (unchecked-subtract-int (.charAt s i) 48))))
+          (set! i (unchecked-inc-int i))))
+      (while (and (< i n) (>= (.indexOf "lnLhqjzt" (.charAt s i)) 0))
+        (set! i (unchecked-inc-int i)))
+      (when (< i n)
+        (aset sp 7 (long (.charAt s i)))
+        (set! i (unchecked-inc-int i)))
+      (aset sp 8 (long i))
+      sp))
+
+  ;; the width: sign or prefix, then the digits, zero padded when asked
+  (method ^:static pad ^String [^long/1 sp ^String prefix ^String body ^boolean zeroOK]
+    (let [n (unchecked-add (long (.length prefix)) (long (.length body)))
+          w (aget sp 5)]
+      (if (>= n w)
+        (.concat prefix body)
+        (let [k (unchecked-int (unchecked-subtract w n))]
+          (cond (== (aget sp 0) 1) (java-str prefix body (.repeat " " k))
+                (and (== (aget sp 4) 1) zeroOK) (java-str prefix (.repeat "0" k) body)
+                :else (java-str (.repeat " " k) prefix body))))))
+
+  ;; C's printf of an integer conversion (d i u x X o c) of the value neg/mag (mag unsigned)
+  (method ^:static formatCInt ^String [^long/1 sp ^boolean neg ^long mag]
+    (let [conv (unchecked-int (aget sp 7))]
+      (if (== conv 99)
+        (ExtNum/pad sp "" (String/valueOf (unchecked-char (bit-and mag 255))) false)
+        (let [^:mutable ^String body ""
+              ^:mutable ^String prefix ""]
+          (switch conv
+            (100 105) (do (set! body (Long/toUnsignedString mag 10))
+                          (set! prefix (cond neg "-"
+                                             (== (aget sp 1) 1) "+"
+                                             (== (aget sp 2) 1) " "
+                                             :else ""))
+                          nil)
+            117 (do (set! body (Long/toUnsignedString mag 10)) nil)
+            120 (do (set! body (Long/toHexString mag)) nil)
+            88 (do (set! body (.toUpperCase (Long/toHexString mag))) nil)
+            111 (do (set! body (Long/toOctalString mag)) nil)
+            (throw (Rt/failwith "format_int: bad format")))
+          (when (and (== (aget sp 6) 0) (== mag 0))
+            (set! body ""))
+          (when (> (aget sp 6) (long (.length body)))
+            (set! body (.concat (.repeat "0" (unchecked-int (unchecked-subtract (aget sp 6) (long (.length body))))) body)))
+          (when (== (aget sp 3) 1)
+            (switch conv
+              120 (do (when (not (== mag 0)) (set! prefix "0x")) nil)
+              88 (do (when (not (== mag 0)) (set! prefix "0X")) nil)
+              111 (do (when (not (.startsWith body "0")) (set! body (.concat "0" body))) nil)
+              nil))
+          (ExtNum/pad sp prefix body (< (aget sp 6) 0))))))
+
+  ;; caml_alloc_sprintf(format, arg) for the integer formats of ints.c: signed is the value as a
+  ;; signed integer, nbits its width (the unsigned conversions see that many bits; 63 for int)
+  (method ^:static formatInteger [^String format ^long signed ^int nbits]
+    (let [sb (StringBuilder.) n (.length format)
+          ^:mutable ^int i 0]
+      (while (< i n)
+        (let [c (.charAt format i)]
+          (cond (not (== c \%)) (do (.append sb c) (set! i (unchecked-inc-int i)))
+                (and (< (unchecked-inc-int i) n) (== (.charAt format (unchecked-inc-int i)) \%))
+                (do (.append sb \%) (set! i (unchecked-add-int i 2)))
+                :else
+                (let [sp (ExtNum/parseSpec format (unchecked-inc-int i))
+                      conv (unchecked-int (aget sp 7))]
+                  (set! i (unchecked-int (aget sp 8)))
+                  (if (or (== conv 117) (== conv 120) (== conv 88) (== conv 111))
+                    (.append sb (ExtNum/formatCInt sp false
+                                  (if (< nbits 64)
+                                    (bit-and signed (unchecked-dec (bit-shift-left 1 (long nbits))))
+                                    signed)))
+                    (if (< signed 0)
+                      (.append sb (ExtNum/formatCInt sp true (unchecked-negate signed)))
+                      (.append sb (ExtNum/formatCInt sp false signed))))))))
+      (Rt/s (.toString sb))))
+
+  ;; %f of a non-negative finite number: the exact value rounded half to even
+  (method ^:static fixed ^String [^double abs ^int prec]
+    (.toPlainString (.setScale (BigDecimal. abs) prec RoundingMode/HALF_EVEN)))
+
+  ;; %e of a non-negative finite number
+  (method ^:static expo ^String [^double abs ^int prec ^boolean alt]
+    (let [^:mutable ^String digs ""
+          ^:mutable ^long ex 0]
+      (if (== abs 0.0)
+        (set! digs (.repeat "0" (unchecked-inc-int prec)))
+        (let [bd (.round (BigDecimal. abs) (MathContext. (unchecked-inc-int prec) RoundingMode/HALF_EVEN))
+              u (.toString (.unscaledValue bd))
+              p (.length u)]
+          (set! ex (unchecked-subtract (unchecked-subtract (long p) 1) (long (.scale bd))))
+          (set! digs (if (< p (unchecked-inc-int prec))
+                       (.concat u (.repeat "0" (unchecked-subtract-int (unchecked-inc-int prec) p)))
+                       u))))
+      (let [sb (StringBuilder.)]
+        (.append sb (.substring digs 0 1))
+        (when (or (> prec 0) alt) (.append sb "."))
+        (when (> prec 0) (.append sb (.substring digs 1)))
+        (.append sb "e")
+        (.append sb (if (< ex 0) "-" "+"))
+        (let [ae (Math/abs ex)]
+          (when (< ae 10) (.append sb "0"))
+          (.append sb ae))
+        (.toString sb))))
+
+  ;; trailing zeros of a fraction, and a bare point, removed
+  (method ^:static stripZeros ^String [^String s]
+    (if (>= (.indexOf s ".") 0)
+      (let [^:mutable ^int n (.length s)]
+        (while (and (> n 0) (== (.charAt s (unchecked-dec-int n)) \0))
+          (set! n (unchecked-dec-int n)))
+        (when (and (> n 0) (== (.charAt s (unchecked-dec-int n)) \.))
+          (set! n (unchecked-dec-int n)))
+        (.substring s 0 n))
+      s))
+
+  ;; glibc's %a of a non-negative finite number (prec -1: none)
+  (method ^:static cHex ^String [^double abs ^int prec ^boolean alt]
+    (let [b (Double/doubleToRawLongBits abs)
+          ^:mutable ^long ex (bit-and (unsigned-bit-shift-right b 52) 2047)
+          ^:mutable ^long m (bit-and b 4503599627370495)]
+      (if (== ex 0)
+        (when (not (== m 0)) (set! ex -1022))
+        (do (set! ex (unchecked-subtract ex 1023))
+            (set! m (bit-or m 4503599627370496))))
+      (when (and (>= prec 0) (< prec 13))
+        (let [i (unchecked-subtract 52 (unchecked-multiply (long prec) 4))
+              unit (bit-shift-left 1 i)
+              half (unsigned-bit-shift-right unit 1)
+              frac (bit-and m (unchecked-dec unit))]
+          (set! m (bit-and m (bit-not (unchecked-dec unit))))
+          (when (or (> frac half) (and (== frac half) (not (== (bit-and m unit) 0))))
+            (set! m (unchecked-add m unit)))))
+      (let [sb (StringBuilder.)
+            ^:mutable ^int n prec]
+        (.append sb "0x")
+        (.append sb (unchecked-char (unchecked-add 48 (unsigned-bit-shift-right m 52))))
+        (set! m (bit-and (bit-shift-left m 4) 72057594037927935))
+        (when (or (> n 0) (and (< n 0) (not (== m 0))) alt)
+          (.append sb "."))
+        (while (or (> n 0) (and (< n 0) (not (== m 0))))
+          (.append sb (.charAt "0123456789abcdef" (unchecked-int (unsigned-bit-shift-right m 52))))
+          (set! m (bit-and (bit-shift-left m 4) 72057594037927935))
+          (set! n (unchecked-dec-int n)))
+        (.append sb "p")
+        (when (>= ex 0) (.append sb "+"))
+        (.append sb ex)
+        (.toString sb))))
+
+  ;; C's printf of one floating conversion (f F e E g G a A) of d
+  (method ^:static formatCFloat ^String [^long/1 sp ^double d]
+    (let [neg (< (Double/doubleToRawLongBits d) 0)
+          abs (Math/abs d)
+          prefix (cond neg "-" (== (aget sp 1) 1) "+" (== (aget sp 2) 1) " " :else "")
+          conv (unchecked-int (aget sp 7))
+          upper (or (== conv 70) (== conv 69) (== conv 71) (== conv 65))]
+      (if (or (Double/isInfinite d) (Double/isNaN d))
+        (let [body (if (Double/isNaN d) "nan" "inf")]
+          (ExtNum/pad sp prefix (if upper (.toUpperCase body) body) false))
+        (let [prec0 (unchecked-int (aget sp 6))
+              alt (== (aget sp 3) 1)
+              ^:mutable ^String body ""]
+          (cond
+            (or (== conv 102) (== conv 70))
+            (let [prec (if (< prec0 0) 6 prec0)]
+              (set! body (ExtNum/fixed abs prec))
+              (when (and (== prec 0) alt) (set! body (.concat body "."))))
+            (or (== conv 101) (== conv 69))
+            (set! body (ExtNum/expo abs (if (< prec0 0) 6 prec0) alt))
+            (or (== conv 103) (== conv 71))
+            (let [prec1 (if (< prec0 0) 6 prec0)
+                  prec (if (== prec1 0) 1 prec1)
+                  e (ExtNum/expo abs (unchecked-dec-int prec) false)
+                  x (Integer/parseInt (.substring e (unchecked-inc-int (.indexOf e "e"))))]
+              (if (or (< x -4) (>= x prec))
+                (do (set! body (ExtNum/expo abs (unchecked-dec-int prec) alt))
+                    (when (not alt)
+                      (let [k (.indexOf body "e")]
+                        (set! body (.concat (ExtNum/stripZeros (.substring body 0 k)) (.substring body k))))))
+                (do (set! body (ExtNum/fixed abs (unchecked-subtract-int (unchecked-dec-int prec) x)))
+                    (if alt
+                      (when (< (.indexOf body ".") 0) (set! body (.concat body ".")))
+                      (set! body (ExtNum/stripZeros body))))))
+            (or (== conv 97) (== conv 65))
+            (set! body (ExtNum/cHex abs prec0 alt))
+            :else (throw (Rt/failwith "format_float: bad format")))
+          (ExtNum/pad sp prefix (if upper (.toUpperCase body) body) true)))))
+
+  (method ^:static formatFloatC [^String format ^double d]
+    (let [sb (StringBuilder.) n (.length format)
+          ^:mutable ^int i 0]
+      (while (< i n)
+        (let [c (.charAt format i)]
+          (cond (not (== c \%)) (do (.append sb c) (set! i (unchecked-inc-int i)))
+                (and (< (unchecked-inc-int i) n) (== (.charAt format (unchecked-inc-int i)) \%))
+                (do (.append sb \%) (set! i (unchecked-add-int i 2)))
+                :else
+                (let [sp (ExtNum/parseSpec format (unchecked-inc-int i))]
+                  (set! i (unchecked-int (aget sp 8)))
+                  (.append sb (ExtNum/formatCFloat sp d))))))
+      (Rt/s (.toString sb))))
+
+  (method ^:public ^:static caml_format_int [fmt n] (ExtNum/formatInteger (Rt/js fmt) (Rt/l n) 63))
+  (method ^:public ^:static caml_int32_format [fmt n] (ExtNum/formatInteger (Rt/js fmt) (Rt/bv n) 32))
+  (method ^:public ^:static caml_int64_format [fmt n] (ExtNum/formatInteger (Rt/js fmt) (Rt/bv n) 64))
+  (method ^:public ^:static caml_nativeint_format [fmt n] (ExtNum/formatInteger (Rt/js fmt) (Rt/bv n) 64))
+  (method ^:public ^:static caml_format_float [fmt d] (ExtNum/formatFloatC (Rt/js fmt) (Rt/d d)))
+
+  (method ^:public ^:static caml_hexstring_of_float [x p st]
+    (let [d (Rt/d x)
+          prec (unchecked-int (Rt/l p))
+          style (Rt/l st)
+          b (Double/doubleToRawLongBits d)
+          sb (StringBuilder.)]
+      (if (< b 0)
+        (.append sb "-")
+        (cond (== style 43) (.append sb "+")
+              (== style 32) (.append sb " ")))
+      (if (== (bit-and (unsigned-bit-shift-right b 52) 2047) 2047)
+        (.append sb (if (== (bit-and b 4503599627370495) 0) "infinity" "nan"))
+        (.append sb (ExtNum/cHex (Math/abs d) prec false)))
+      (Rt/s (.toString sb))))
+
+  ;; ------------------------------------------------------------ parsing
+
+  (method ^:static parseDigit ^int [^int c]
+    (cond (and (>= c 48) (<= c 57)) (unchecked-subtract-int c 48)
+          (and (>= c 65) (<= c 70)) (unchecked-add-int (unchecked-subtract-int c 65) 10)
+          (and (>= c 97) (<= c 102)) (unchecked-add-int (unchecked-subtract-int c 97) 10)
+          :else (unchecked-int -1)))
+
+  (method ^:static at ^int [^String s ^int i]
+    (if (< i (.length s)) (unchecked-int (.charAt s i)) (unchecked-int 0)))
+
+  ;; ints.c's parse_intnat
+  (method ^:static parseIntnat ^long [^String s ^int nbits ^String errmsg]
+    (let [len (.length s)
+          ^:mutable ^int p 0
+          ^:mutable ^long sign 1
+          ^:mutable ^long base 10
+          ^:mutable ^boolean signedness true]
+      (cond (== (ExtNum/at s p) 45) (do (set! sign -1) (set! p (unchecked-inc-int p)))
+            (== (ExtNum/at s p) 43) (set! p (unchecked-inc-int p)))
+      (when (== (ExtNum/at s p) 48)
+        (let [c (ExtNum/at s (unchecked-inc-int p))]
+          (cond (or (== c 120) (== c 88)) (do (set! base 16) (set! signedness false) (set! p (unchecked-add-int p 2)))
+                (or (== c 111) (== c 79)) (do (set! base 8) (set! signedness false) (set! p (unchecked-add-int p 2)))
+                (or (== c 98) (== c 66)) (do (set! base 2) (set! signedness false) (set! p (unchecked-add-int p 2)))
+                (or (== c 117) (== c 85)) (do (set! signedness false) (set! p (unchecked-add-int p 2))))))
+      (let [threshold (Long/divideUnsigned -1 base)
+            d0 (ExtNum/parseDigit (ExtNum/at s p))]
+        (when (or (< d0 0) (>= (long d0) base))
+          (throw (Rt/failwith errmsg)))
+        (let [^:mutable ^long res (long d0)
+              ^:mutable ^boolean go true]
+          (set! p (unchecked-inc-int p))
+          (while go
+            (let [c (ExtNum/at s p)]
+              (if (and (== c 95) (< p len))
+                (set! p (unchecked-inc-int p))
+                (let [d (ExtNum/parseDigit c)]
+                  (if (or (< d 0) (>= (long d) base) (>= p len))
+                    (set! go false)
+                    (do (when (> (Long/compareUnsigned res threshold) 0)
+                          (throw (Rt/failwith errmsg)))
+                        (set! res (unchecked-add (unchecked-multiply base res) (long d)))
+                        (when (< (Long/compareUnsigned res (long d)) 0)
+                          (throw (Rt/failwith errmsg)))
+                        (set! p (unchecked-inc-int p))))))))
+          (when (not (== p len))
+            (throw (Rt/failwith errmsg)))
+          (if signedness
+            (let [lim (bit-shift-left 1 (long (unchecked-dec-int nbits)))]
+              (if (>= sign 0)
+                (when (>= (Long/compareUnsigned res lim) 0) (throw (Rt/failwith errmsg)))
+                (when (> (Long/compareUnsigned res lim) 0) (throw (Rt/failwith errmsg)))))
+            (when (and (< nbits 64) (>= (Long/compareUnsigned res (bit-shift-left 1 (long nbits))) 0))
+              (throw (Rt/failwith errmsg))))
+          (if (< sign 0) (unchecked-negate res) res)))))
+
+  (method ^:public ^:static caml_int_of_string [s]
+    (Rt/wrap (ExtNum/parseIntnat (Rt/js s) 63 "int_of_string")))
+  (method ^:public ^:static caml_int32_of_string [s]
+    (Integer/valueOf (unchecked-int (ExtNum/parseIntnat (Rt/js s) 32 "Int32.of_string"))))
+  (method ^:public ^:static caml_int64_of_string [s]
+    (I64. (ExtNum/parseIntnat (Rt/js s) 64 "Int64.of_string")))
+  (method ^:public ^:static caml_nativeint_of_string [s]
+    (NInt. (ExtNum/parseIntnat (Rt/js s) 64 "Nativeint.of_string")))
+
+  ;; floats.c's caml_float_of_hex over s (after "0x"); malformed: Failure "float_of_string"
+  (method ^:static floatOfHex ^double [^String s]
+    (let [len (.length s)
+          ^:mutable ^long m 0
+          ^:mutable ^int nBits 0
+          ^:mutable ^int mBits 0
+          ^:mutable ^int xBits 0
+          ^:mutable ^int decPoint -1
+          ^:mutable ^long ex 0
+          ^:mutable ^int i 0]
+      (while (< i len)
+        (let [c (.charAt s i)]
+          (set! i (unchecked-inc-int i))
+          (cond
+            (== c \.)
+            (do (when (>= decPoint 0) (throw (Rt/failwith "float_of_string")))
+                (set! decPoint nBits))
+            (or (== c \p) (== c \P))
+            (let [rest (.substring s i)
+                  rl (.length rest)]
+              (when (== rl 0) (throw (Rt/failwith "float_of_string")))
+              (let [^:mutable ^int k 0]
+                (while (and (< k rl) (or (== (.charAt rest k) \space)
+                                         (and (>= (.charAt rest k) 9) (<= (.charAt rest k) 13))))
+                  (set! k (unchecked-inc-int k)))
+                (let [st k]
+                  (when (and (< k rl) (or (== (.charAt rest k) \+) (== (.charAt rest k) \-)))
+                    (set! k (unchecked-inc-int k)))
+                  (let [ds k]
+                    (while (and (< k rl) (>= (.charAt rest k) \0) (<= (.charAt rest k) \9))
+                      (set! k (unchecked-inc-int k)))
+                    (when (or (== k ds) (not (== k rl))) (throw (Rt/failwith "float_of_string")))
+                    (let [^:mutable ^long e 0]
+                      (try
+                        (set! e (Long/parseLong (.substring rest st k)))
+                        (catch NumberFormatException x
+                          (set! e (if (== (.charAt rest st) \-) Long/MIN_VALUE Long/MAX_VALUE))))
+                      (when (<= e -2147483648) (return 0.0))
+                      (when (>= e 2147483647)
+                        (return (if (== m 0) 0.0 Double/POSITIVE_INFINITY)))
+                      (set! ex e)))))
+              (set! i len))
+            :else
+            (let [d (ExtNum/parseDigit (unchecked-int c))]
+              (when (< d 0) (throw (Rt/failwith "float_of_string")))
+              (set! nBits (unchecked-add-int nBits 4))
+              (when (not (and (== d 0) (== m 0)))
+                (if (< mBits 60)
+                  (do (set! m (unchecked-add (bit-shift-left m 4) (long d)))
+                      (set! mBits (unchecked-add-int mBits 4)))
+                  (do (when (not (== d 0)) (set! m (bit-or m 1)))
+                      (set! xBits (unchecked-add-int xBits 4)))))))))
+      (when (== nBits 0) (throw (Rt/failwith "float_of_string")))
+      (let [adj (unchecked-add (long xBits) (if (>= decPoint 0) (long (unchecked-subtract-int decPoint nBits)) 0))]
+        (cond (and (> adj 0) (> ex (unchecked-subtract 2147483647 adj))) (set! ex 2147483647)
+              (and (< adj 0) (< ex (unchecked-subtract -2147483648 adj))) (set! ex -2147483648)
+              :else (set! ex (unchecked-add ex adj)))
+        (if (not (== ex 0))
+          (Math/scalb (double m) (unchecked-int ex))
+          (double m)))))
+
+  (method ^:static isSpace ^boolean [^int c] (or (== c 32) (and (>= c 9) (<= c 13))))
+
+  ;; strtod's parse of the whole of s (decimal, inf, infinity, nan, nan(chars)), leading white
+  ;; space allowed; Failure "float_of_string" when strtod would stop before the end
+  (method ^:static strtodAll ^double [^String s]
+    (let [n (.length s)
+          ^:mutable ^int i 0]
+      (while (and (< i n) (ExtNum/isSpace (unchecked-int (.charAt s i))))
+        (set! i (unchecked-inc-int i)))
+      (let [t (.substring s i)
+            neg (and (> (.length t) 0) (== (.charAt t 0) \-))
+            body (if (and (> (.length t) 0) (or (== (.charAt t 0) \+) (== (.charAt t 0) \-))) (.substring t 1) t)
+            low (.toLowerCase body)]
+        (cond
+          (or (.equals low "inf") (.equals low "infinity"))
+          (if neg Double/NEGATIVE_INFINITY Double/POSITIVE_INFINITY)
+          (.startsWith low "nan")
+          (let [rest (.substring low 3)]
+            (when (> (.length rest) 0)
+              (when (or (not (== (.charAt rest 0) \()) (not (== (.charAt rest (unchecked-dec-int (.length rest))) \))))
+                (throw (Rt/failwith "float_of_string")))
+              (loop [^int j 1]
+                (when (< j (unchecked-dec-int (.length rest)))
+                  (let [c (.charAt rest j)]
+                    (when (not (or (== c \_) (and (>= c \0) (<= c \9)) (and (>= c \a) (<= c \z))))
+                      (throw (Rt/failwith "float_of_string"))))
+                  (recur (unchecked-inc-int j)))))
+            (if neg (Double/longBitsToDouble -2251799813685248) Double/NaN))
+          :else
+          (let [bl (.length body)
+                ^:mutable ^int k 0
+                ^:mutable ^int nd 0]
+            (while (and (< k bl) (>= (.charAt body k) \0) (<= (.charAt body k) \9))
+              (set! k (unchecked-inc-int k)) (set! nd (unchecked-inc-int nd)))
+            (when (and (< k bl) (== (.charAt body k) \.))
+              (set! k (unchecked-inc-int k))
+              (while (and (< k bl) (>= (.charAt body k) \0) (<= (.charAt body k) \9))
+                (set! k (unchecked-inc-int k)) (set! nd (unchecked-inc-int nd))))
+            (when (== nd 0) (throw (Rt/failwith "float_of_string")))
+            (when (and (< k bl) (or (== (.charAt body k) \e) (== (.charAt body k) \E)))
+              (set! k (unchecked-inc-int k))
+              (when (and (< k bl) (or (== (.charAt body k) \+) (== (.charAt body k) \-)))
+                (set! k (unchecked-inc-int k)))
+              (let [^:mutable ^int ed 0]
+                (while (and (< k bl) (>= (.charAt body k) \0) (<= (.charAt body k) \9))
+                  (set! k (unchecked-inc-int k)) (set! ed (unchecked-inc-int ed)))
+                (when (== ed 0) (throw (Rt/failwith "float_of_string")))))
+            (when (not (== k bl)) (throw (Rt/failwith "float_of_string")))
+            (Double/parseDouble t))))))
+
+  ;; caml_float_of_string
+  (method ^:static floatOfString ^double [^String s0]
+    (let [s (.replace s0 "_" "")]
+      (when (== (.length s) 0) (throw (Rt/failwith "float_of_string")))
+      (let [sign (if (== (.charAt s 0) \-) -1.0 1.0)
+            src (if (or (== (.charAt s 0) \-) (== (.charAt s 0) \+)) (.substring s 1) s)]
+        (if (and (>= (.length src) 2) (== (.charAt src 0) \0) (or (== (.charAt src 1) \x) (== (.charAt src 1) \X)))
+          (unchecked-multiply sign (ExtNum/floatOfHex (.substring src 2)))
+          (do (when (>= (.indexOf s 0) 0) (throw (Rt/failwith "float_of_string")))
+              (ExtNum/strtodAll s))))))
+
+  (method ^:public ^:static caml_float_of_string [s]
+    (Double/valueOf (ExtNum/floatOfString (Rt/js s))))
+
+  ;; ------------------------------------------------------------ floats
+
+  (method ^:static fd [^double v] (Double/valueOf v))
+
+  (method ^:public ^:static caml_neg_float [x] (ExtNum/fd (unchecked-negate (Rt/d x))))
+  (method ^:public ^:static caml_abs_float [x] (ExtNum/fd (Math/abs (Rt/d x))))
+  (method ^:public ^:static caml_add_float [x y] (Rt/fadd x y))
+  (method ^:public ^:static caml_sub_float [x y] (Rt/fsub x y))
+  (method ^:public ^:static caml_mul_float [x y] (Rt/fmul x y))
+  (method ^:public ^:static caml_div_float [x y] (Rt/fdiv x y))
+  (method ^:public ^:static caml_eq_float [x y] (Rt/b (Rt/feq x y)))
+  (method ^:public ^:static caml_neq_float [x y] (Rt/b (not (Rt/feq x y))))
+  (method ^:public ^:static caml_lt_float [x y] (Rt/b (Rt/flt x y)))
+  (method ^:public ^:static caml_le_float [x y] (Rt/b (Rt/fle x y)))
+  (method ^:public ^:static caml_gt_float [x y] (Rt/b (Rt/fgt x y)))
+  (method ^:public ^:static caml_ge_float [x y] (Rt/b (Rt/fge x y)))
+  (method ^:public ^:static caml_float_compare [x y] (Rt/compareFloats x y))
+  (method ^:public ^:static caml_int_of_float [x] (Rt/intOfFloat x))
+  (method ^:public ^:static caml_float_of_int [x] (Rt/floatOfInt x))
+
+  (method ^:static trunc ^double [^double x] (if (< x 0.0) (Math/ceil x) (Math/floor x)))
+  ;; half away from zero
+  (method ^:static round ^double [^double x]
+    (if (or (Double/isNaN x) (Double/isInfinite x))
+      x
+      (let [t (ExtNum/trunc x)]
+        (if (>= (Math/abs (unchecked-subtract x t)) 0.5)
+          (unchecked-add t (Math/copySign 1.0 x))
+          t))))
+
+  (method ^:static frexpExp ^long [^double f]
+    (if (or (== f 0.0) (Double/isInfinite f) (Double/isNaN f))
+      0
+      (let [^:mutable ^double g f ^:mutable ^long e 0]
+        (when (< (Math/abs g) 2.2250738585072014E-308)
+          (set! g (unchecked-multiply g 4503599627370496.0))
+          (set! e -52))
+        (unchecked-add e (unchecked-subtract (bit-and (unsigned-bit-shift-right (Double/doubleToRawLongBits g) 52) 2047) 1022)))))
+  (method ^:static frexpFrac ^double [^double f]
+    (if (or (== f 0.0) (Double/isInfinite f) (Double/isNaN f))
+      f
+      (let [g (if (< (Math/abs f) 2.2250738585072014E-308) (unchecked-multiply f 4503599627370496.0) f)
+            x (Double/doubleToRawLongBits g)]
+        (Double/longBitsToDouble (bit-or (bit-and x -9218868437227405313) 4602678819172646912)))))
+
+  (method ^:public ^:static caml_frexp_float [a]
+    (let [x (Rt/d a)]
+      (Rt/tuple (new Object/1 [(Double/valueOf (ExtNum/frexpFrac x)) (Long/valueOf (ExtNum/frexpExp x))]))))
+  (method ^:public ^:static caml_ldexp_float [a e]
+    (let [n (Rt/l e)]
+      (ExtNum/fd (Math/scalb (Rt/d a) (unchecked-int (if (> n 100000) 100000 (if (< n -100000) -100000 n)))))))
+  (method ^:public ^:static caml_modf_float [a]
+    (let [x (Rt/d a)
+          ^:mutable ^double i 0.0
+          ^:mutable ^double f 0.0]
+      (cond (Double/isInfinite x) (do (set! i x) (set! f (Math/copySign 0.0 x)))
+            (Double/isNaN x) (do (set! i x) (set! f x))
+            (== x 0.0) (do (set! i x) (set! f x))
+            (< x 0.0) (let [p (Math/ceil x)] (set! i p) (set! f (unchecked-subtract x p)))
+            :else (let [p (Math/floor x)] (set! i p) (set! f (unchecked-subtract x p))))
+      (Rt/tuple (new Object/1 [(Double/valueOf f) (Double/valueOf i)]))))
+
+  (method ^:public ^:static caml_exp_float [x] (ExtNum/fd (Math/exp (Rt/d x))))
+  (method ^:public ^:static caml_exp2_float [x] (ExtNum/fd (Math/pow 2.0 (Rt/d x))))
+  (method ^:public ^:static caml_trunc_float [x] (ExtNum/fd (ExtNum/trunc (Rt/d x))))
+  (method ^:public ^:static caml_round_float [x] (ExtNum/fd (ExtNum/round (Rt/d x))))
+  (method ^:public ^:static caml_floor_float [x] (ExtNum/fd (Math/floor (Rt/d x))))
+  (method ^:public ^:static caml_ceil_float [x] (ExtNum/fd (Math/ceil (Rt/d x))))
+  (method ^:public ^:static caml_nextafter_float [x y] (ExtNum/fd (Math/nextAfter (Rt/d x) (Rt/d y))))
+  (method ^:public ^:static caml_fma_float [x y z] (ExtNum/fd (Math/fma (Rt/d x) (Rt/d y) (Rt/d z))))
+  (method ^:public ^:static caml_fmod_float [x y] (ExtNum/fd (unchecked-remainder (Rt/d x) (Rt/d y))))
+  (method ^:public ^:static caml_log_float [x] (ExtNum/fd (Math/log (Rt/d x))))
+  (method ^:public ^:static caml_log10_float [x] (ExtNum/fd (Math/log10 (Rt/d x))))
+
+  ;; Go's math.Log2
+  (method ^:static log2 ^double [^double x]
+    (let [fr (ExtNum/frexpFrac x) e (ExtNum/frexpExp x)]
+      (if (== fr 0.5)
+        (double (unchecked-dec e))
+        (unchecked-add (unchecked-multiply (Math/log fr) 1.4426950408889634) (double e)))))
+  (method ^:public ^:static caml_log2_float [x] (ExtNum/fd (ExtNum/log2 (Rt/d x))))
+  (method ^:public ^:static caml_sqrt_float [x] (ExtNum/fd (Math/sqrt (Rt/d x))))
+  (method ^:public ^:static caml_cbrt_float [x] (ExtNum/fd (Math/cbrt (Rt/d x))))
+
+  ;; C's pow where Java's differs: pow(1, y) and pow(-1, +-inf) are 1
+  (method ^:static pow ^double [^double x ^double y]
+    (cond (== x 1.0) 1.0
+          (and (== x -1.0) (Double/isInfinite y)) 1.0
+          :else (Math/pow x y)))
+  (method ^:public ^:static caml_power_float [x y] (ExtNum/fd (ExtNum/pow (Rt/d x) (Rt/d y))))
+
+  (method ^:public ^:static caml_sin_float [x] (ExtNum/fd (Math/sin (Rt/d x))))
+  (method ^:public ^:static caml_sinh_float [x] (ExtNum/fd (Math/sinh (Rt/d x))))
+  (method ^:public ^:static caml_cos_float [x] (ExtNum/fd (Math/cos (Rt/d x))))
+  (method ^:public ^:static caml_cosh_float [x] (ExtNum/fd (Math/cosh (Rt/d x))))
+  (method ^:public ^:static caml_tan_float [x] (ExtNum/fd (Math/tan (Rt/d x))))
+  (method ^:public ^:static caml_tanh_float [x] (ExtNum/fd (Math/tanh (Rt/d x))))
+  (method ^:public ^:static caml_asin_float [x] (ExtNum/fd (Math/asin (Rt/d x))))
+  (method ^:public ^:static caml_acos_float [x] (ExtNum/fd (Math/acos (Rt/d x))))
+  (method ^:public ^:static caml_atan_float [x] (ExtNum/fd (Math/atan (Rt/d x))))
+  (method ^:public ^:static caml_atan2_float [x y] (ExtNum/fd (Math/atan2 (Rt/d x) (Rt/d y))))
+  (method ^:public ^:static caml_hypot_float [x y] (ExtNum/fd (Math/hypot (Rt/d x) (Rt/d y))))
+  (method ^:public ^:static caml_expm1_float [x] (ExtNum/fd (Math/expm1 (Rt/d x))))
+  (method ^:public ^:static caml_log1p_float [x] (ExtNum/fd (Math/log1p (Rt/d x))))
+  (method ^:public ^:static caml_copysign_float [x y] (ExtNum/fd (Math/copySign (Rt/d x) (Rt/d y))))
+  (method ^:public ^:static caml_signbit_float [x] (Rt/b (< (Double/doubleToRawLongBits (Rt/d x)) 0)))
+
+  ;; Go's math.Asinh, Acosh, Atanh (fdlibm's)
+  (method ^:static asinh ^double [^double x0]
+    (if (or (Double/isNaN x0) (Double/isInfinite x0))
+      x0
+      (let [neg (< x0 0.0)
+            x (if neg (unchecked-negate x0) x0)
+            t (cond (> x 268435456.0) (unchecked-add (Math/log x) 0.6931471805599453)
+                    (> x 2.0) (Math/log (unchecked-add (unchecked-multiply 2.0 x)
+                                                       (unchecked-divide 1.0 (unchecked-add (Math/sqrt (unchecked-add (unchecked-multiply x x) 1.0)) x))))
+                    (< x 3.725290298461914E-9) x
+                    :else (Math/log1p (unchecked-add x (unchecked-divide (unchecked-multiply x x)
+                                                                         (unchecked-add 1.0 (Math/sqrt (unchecked-add 1.0 (unchecked-multiply x x))))))))]
+        (if neg (unchecked-negate t) t))))
+  (method ^:static acosh ^double [^double x]
+    (cond (or (< x 1.0) (Double/isNaN x)) Double/NaN
+          (== x 1.0) 0.0
+          (>= x 268435456.0) (unchecked-add (Math/log x) 0.6931471805599453)
+          (> x 2.0) (Math/log (unchecked-subtract (unchecked-multiply 2.0 x)
+                                                  (unchecked-divide 1.0 (unchecked-add x (Math/sqrt (unchecked-subtract (unchecked-multiply x x) 1.0))))))
+          :else (let [t (unchecked-subtract x 1.0)]
+                  (Math/log1p (unchecked-add t (Math/sqrt (unchecked-add (unchecked-multiply 2.0 t) (unchecked-multiply t t))))))))
+  (method ^:static atanh ^double [^double x0]
+    (cond (or (< x0 -1.0) (> x0 1.0) (Double/isNaN x0)) Double/NaN
+          (== x0 1.0) Double/POSITIVE_INFINITY
+          (== x0 -1.0) Double/NEGATIVE_INFINITY
+          :else
+          (let [neg (< x0 0.0)
+                x (if neg (unchecked-negate x0) x0)
+                t (cond (< x 3.725290298461914E-9) x
+                        (< x 0.5) (let [u (unchecked-add x x)]
+                                    (unchecked-multiply 0.5 (Math/log1p (unchecked-add u (unchecked-divide (unchecked-multiply u x) (unchecked-subtract 1.0 x))))))
+                        :else (unchecked-multiply 0.5 (Math/log1p (unchecked-divide (unchecked-add x x) (unchecked-subtract 1.0 x)))))]
+            (if neg (unchecked-negate t) t))))
+  (method ^:public ^:static caml_asinh_float [x] (ExtNum/fd (ExtNum/asinh (Rt/d x))))
+  (method ^:public ^:static caml_acosh_float [x] (ExtNum/fd (ExtNum/acosh (Rt/d x))))
+  (method ^:public ^:static caml_atanh_float [x] (ExtNum/fd (ExtNum/atanh (Rt/d x))))
+
+  ;; Go's math.Erf and Erfc (fdlibm's s_erf.c)
+  (method ^:static erfR1 ^double [^double z]
+    (unchecked-add 0.128379167095512558561 (unchecked-multiply z (unchecked-add -0.325042107247001499370 (unchecked-multiply z (unchecked-add -0.0284817495755985104766 (unchecked-multiply z (unchecked-add -0.00577027029648944159157 (unchecked-multiply z -2.37630166566501626084E-5)))))))))
+  (method ^:static erfS1 ^double [^double z]
+    (unchecked-add 1.0 (unchecked-multiply z (unchecked-add 0.397917223959155352819 (unchecked-multiply z (unchecked-add 0.0650222499887672944485 (unchecked-multiply z (unchecked-add 0.00508130628187576562776 (unchecked-multiply z (unchecked-add 1.32494738004321644526E-4 (unchecked-multiply z -3.96022827877536812320E-6))))))))))) 
+  (method ^:static erfP ^double [^double s]
+    (unchecked-add -0.00236211856075265944077 (unchecked-multiply s (unchecked-add 0.414856118683748331666 (unchecked-multiply s (unchecked-add -0.372207876035701323847 (unchecked-multiply s (unchecked-add 0.318346619901161753674 (unchecked-multiply s (unchecked-add -0.110894694282396677476 (unchecked-multiply s (unchecked-add 0.0354783043256182359371 (unchecked-multiply s -0.00216637559486879084300)))))))))))))
+  (method ^:static erfQ ^double [^double s]
+    (unchecked-add 1.0 (unchecked-multiply s (unchecked-add 0.106420880400844228286 (unchecked-multiply s (unchecked-add 0.540397917702171048937 (unchecked-multiply s (unchecked-add 0.0718286544141962662868 (unchecked-multiply s (unchecked-add 0.126171219808761642112 (unchecked-multiply s (unchecked-add 0.0136370839120290507362 (unchecked-multiply s 0.0119844998467991074170)))))))))))))
+  (method ^:static erfRA ^double [^double s]
+    (unchecked-add -0.00986494403484714822705 (unchecked-multiply s (unchecked-add -0.693858572707181764372 (unchecked-multiply s (unchecked-add -10.5586262253232909814 (unchecked-multiply s (unchecked-add -62.3753324503260060396 (unchecked-multiply s (unchecked-add -162.396669462573470355 (unchecked-multiply s (unchecked-add -184.605092906711035994 (unchecked-multiply s (unchecked-add -81.2874355063065934246 (unchecked-multiply s -9.81432934416914548592)))))))))))))))
+  (method ^:static erfSA ^double [^double s]
+    (unchecked-add 1.0 (unchecked-multiply s (unchecked-add 19.6512716674392571292 (unchecked-multiply s (unchecked-add 137.657754143519042600 (unchecked-multiply s (unchecked-add 434.565877475229228821 (unchecked-multiply s (unchecked-add 645.387271733267880336 (unchecked-multiply s (unchecked-add 429.008140027567833386 (unchecked-multiply s (unchecked-add 108.635005541779435134 (unchecked-multiply s (unchecked-add 6.57024977031928170135 (unchecked-multiply s -0.0604244152148580987438)))))))))))))))))
+  (method ^:static erfRB ^double [^double s]
+    (unchecked-add -0.00986494292470009928597 (unchecked-multiply s (unchecked-add -0.799283237680523006574 (unchecked-multiply s (unchecked-add -17.7579549177547519889 (unchecked-multiply s (unchecked-add -160.636384855821916062 (unchecked-multiply s (unchecked-add -637.566443368389627722 (unchecked-multiply s (unchecked-add -1025.09513161107724954 (unchecked-multiply s -483.519191608651397019)))))))))))))
+  (method ^:static erfSB ^double [^double s]
+    (unchecked-add 1.0 (unchecked-multiply s (unchecked-add 30.3380607434824582924 (unchecked-multiply s (unchecked-add 325.792512996573918826 (unchecked-multiply s (unchecked-add 1536.72958608443695994 (unchecked-multiply s (unchecked-add 3199.85821950859553908 (unchecked-multiply s (unchecked-add 2553.05040643316442583 (unchecked-multiply s (unchecked-add 474.528541206955367215 (unchecked-multiply s -22.4409524465858183362)))))))))))))))
+  ;; the tail of erf and erfc for 1.25 <= x: exp(-z*z-0.5625) * exp((z-x)*(z+x)+R/S) / x
+  (method ^:static erfTail ^double [^double x]
+    (let [s (unchecked-divide 1.0 (unchecked-multiply x x))
+          rr (if (< x 2.857142857142857) (ExtNum/erfRA s) (ExtNum/erfRB s))
+          ss (if (< x 2.857142857142857) (ExtNum/erfSA s) (ExtNum/erfSB s))
+          z (Double/longBitsToDouble (bit-and (Double/doubleToRawLongBits x) -4294967296))
+          r (unchecked-multiply (Math/exp (unchecked-subtract (unchecked-negate (unchecked-multiply z z)) 0.5625))
+                                (Math/exp (unchecked-add (unchecked-multiply (unchecked-subtract z x) (unchecked-add z x)) (unchecked-divide rr ss))))]
+      (unchecked-divide r x)))
+  (method ^:static erf ^double [^double x0]
+    (cond
+      (Double/isNaN x0) Double/NaN
+      (== x0 Double/POSITIVE_INFINITY) 1.0
+      (== x0 Double/NEGATIVE_INFINITY) -1.0
+      :else
+      (let [neg (< x0 0.0)
+            x (if neg (unchecked-negate x0) x0)]
+        (cond
+          (< x 0.84375)
+          (let [t (if (< x 3.725290298461914E-9)
+                    (if (< x 2.848094538889218E-306)
+                      (unchecked-multiply 0.125 (unchecked-add (unchecked-multiply 8.0 x) (unchecked-multiply 1.02703333676410069053 x)))
+                      (unchecked-add x (unchecked-multiply 0.128379167095512586316 x)))
+                    (let [z (unchecked-multiply x x)
+                          y (unchecked-divide (ExtNum/erfR1 z) (ExtNum/erfS1 z))]
+                      (unchecked-add x (unchecked-multiply x y))))]
+            (if neg (unchecked-negate t) t))
+          (< x 1.25)
+          (let [s (unchecked-subtract x 1.0)
+                q (unchecked-divide (ExtNum/erfP s) (ExtNum/erfQ s))]
+            (if neg
+              (unchecked-subtract -0.845062911510467529297 q)
+              (unchecked-add 0.845062911510467529297 q)))
+          (>= x 6.0) (if neg -1.0 1.0)
+          :else
+          (let [r (ExtNum/erfTail x)]
+            (if neg (unchecked-subtract r 1.0) (unchecked-subtract 1.0 r)))))))
+  (method ^:static erfc ^double [^double x0]
+    (cond
+      (Double/isNaN x0) Double/NaN
+      (== x0 Double/POSITIVE_INFINITY) 0.0
+      (== x0 Double/NEGATIVE_INFINITY) 2.0
+      :else
+      (let [neg (< x0 0.0)
+            x (if neg (unchecked-negate x0) x0)]
+        (cond
+          (< x 0.84375)
+          (let [t (if (< x 1.3877787807814457E-17)
+                    x
+                    (let [z (unchecked-multiply x x)
+                          y (unchecked-divide (ExtNum/erfR1 z) (ExtNum/erfS1 z))]
+                      (if (< x 0.25)
+                        (unchecked-add x (unchecked-multiply x y))
+                        (unchecked-add 0.5 (unchecked-add (unchecked-multiply x y) (unchecked-subtract x 0.5))))))]
+            (if neg (unchecked-add 1.0 t) (unchecked-subtract 1.0 t)))
+          (< x 1.25)
+          (let [s (unchecked-subtract x 1.0)
+                q (unchecked-divide (ExtNum/erfP s) (ExtNum/erfQ s))]
+            (if neg
+              (unchecked-add (unchecked-add 1.0 0.845062911510467529297) q)
+              (unchecked-subtract (unchecked-subtract 1.0 0.845062911510467529297) q)))
+          (< x 28.0)
+          (if (and neg (>= x 2.857142857142857) (> x 6.0))
+            2.0
+            (let [r (ExtNum/erfTail x)]
+              (if neg (unchecked-subtract 2.0 r) r)))
+          :else (if neg 2.0 0.0)))))
+  (method ^:public ^:static caml_erf_float [x] (ExtNum/fd (ExtNum/erf (Rt/d x))))
+  (method ^:public ^:static caml_erfc_float [x] (ExtNum/fd (ExtNum/erfc (Rt/d x))))
+
+  (method ^:public ^:static caml_classify_float [a]
+    (let [x (Rt/d a)]
+      (Long/valueOf (cond (Double/isNaN x) 4
+                          (Double/isInfinite x) 3
+                          (== x 0.0) 2
+                          (< (Math/abs x) 2.2250738585072014E-308) 1
+                          :else 0))))
+
+  ;; ------------------------------------------------------------ the tagged int
+
+  (method ^:public ^:static caml_int_compare [a b] (Rt/compareInts a b))
+  (method ^:public ^:static caml_bswap16 [a] (Rt/bswap16 a))
+
+  ;; ------------------------------------------------------------ int32 (java.lang.Integer)
+
+  (method ^:static i32 ^int [x] (.intValue (cast Integer x)))
+  (method ^:static bi [^int v] (Integer/valueOf v))
+  (method ^:static f2i32 ^int [^double f]
+    (if (or (Double/isNaN f) (>= f 2147483648.0) (<= f -2147483649.0))
+      -2147483648
+      (unchecked-int f)))
+  (method ^:static f2i64 ^long [^double f]
+    (if (or (Double/isNaN f) (>= f 9.223372036854775807E18) (< f -9.223372036854775808E18))
+      Long/MIN_VALUE
+      (unchecked-long f)))
+
+  (method ^:public ^:static caml_int32_neg [a] (ExtNum/bi (unchecked-negate-int (ExtNum/i32 a))))
+  (method ^:public ^:static caml_int32_add [a b] (ExtNum/bi (unchecked-add-int (ExtNum/i32 a) (ExtNum/i32 b))))
+  (method ^:public ^:static caml_int32_sub [a b] (ExtNum/bi (unchecked-subtract-int (ExtNum/i32 a) (ExtNum/i32 b))))
+  (method ^:public ^:static caml_int32_mul [a b] (ExtNum/bi (unchecked-multiply-int (ExtNum/i32 a) (ExtNum/i32 b))))
+  (method ^:public ^:static caml_int32_div [a b]
+    (let [x (ExtNum/i32 a) y (ExtNum/i32 b)]
+      (when (== y 0) (throw (Rt/divByZero)))
+      (ExtNum/bi (if (== y -1) (unchecked-negate-int x) (unchecked-divide-int x y)))))
+  (method ^:public ^:static caml_int32_mod [a b]
+    (let [x (ExtNum/i32 a) y (ExtNum/i32 b)]
+      (when (== y 0) (throw (Rt/divByZero)))
+      (ExtNum/bi (if (== y -1) (unchecked-int 0) (unchecked-remainder-int x y)))))
+  (method ^:public ^:static caml_int32_and [a b] (Integer/valueOf (bit-and-int (ExtNum/i32 a) (ExtNum/i32 b))))
+  (method ^:public ^:static caml_int32_or [a b] (Integer/valueOf (bit-or-int (ExtNum/i32 a) (ExtNum/i32 b))))
+  (method ^:public ^:static caml_int32_xor [a b] (Integer/valueOf (bit-xor-int (ExtNum/i32 a) (ExtNum/i32 b))))
+  (method ^:public ^:static caml_int32_shift_left [a b]
+    (ExtNum/bi (unchecked-int (bit-shift-left (long (ExtNum/i32 a)) (bit-and (Rt/l b) 31)))))
+  (method ^:public ^:static caml_int32_shift_right [a b]
+    (ExtNum/bi (unchecked-int (bit-shift-right (long (ExtNum/i32 a)) (bit-and (Rt/l b) 31)))))
+  (method ^:public ^:static caml_int32_shift_right_unsigned [a b]
+    (ExtNum/bi (unchecked-int (unsigned-bit-shift-right (bit-and (long (ExtNum/i32 a)) 4294967295) (bit-and (Rt/l b) 31)))))
+  (method ^:public ^:static caml_int32_bswap [a] (ExtNum/bi (Integer/reverseBytes (ExtNum/i32 a))))
+  (method ^:public ^:static caml_int32_of_int [a] (ExtNum/bi (unchecked-int (Rt/l a))))
+  (method ^:public ^:static caml_int32_to_int [a] (Long/valueOf (long (ExtNum/i32 a))))
+  (method ^:public ^:static caml_int32_of_float [a] (ExtNum/bi (ExtNum/f2i32 (Rt/d a))))
+  (method ^:public ^:static caml_int32_to_float [a] (ExtNum/fd (double (ExtNum/i32 a))))
+  (method ^:public ^:static caml_int32_compare [a b]
+    (let [x (ExtNum/i32 a) y (ExtNum/i32 b)] (Long/valueOf (if (< x y) -1 (if (> x y) 1 0)))))
+  (method ^:public ^:static caml_int32_bits_of_float [a]
+    (ExtNum/bi (Float/floatToRawIntBits (unchecked-float (Rt/d a)))))
+  (method ^:public ^:static caml_int32_float_of_bits [a]
+    (ExtNum/fd (double (Float/intBitsToFloat (ExtNum/i32 a)))))
+
+  ;; ------------------------------------------------------------ int64 (I64)
+
+  (method ^:static l64 ^long [x] (.-v (cast I64 x)))
+  (method ^:static bl [^long v] (I64. v))
+
+  (method ^:public ^:static caml_int64_neg [a] (ExtNum/bl (unchecked-negate (ExtNum/l64 a))))
+  (method ^:public ^:static caml_int64_add [a b] (ExtNum/bl (unchecked-add (ExtNum/l64 a) (ExtNum/l64 b))))
+  (method ^:public ^:static caml_int64_sub [a b] (ExtNum/bl (unchecked-subtract (ExtNum/l64 a) (ExtNum/l64 b))))
+  (method ^:public ^:static caml_int64_mul [a b] (ExtNum/bl (unchecked-multiply (ExtNum/l64 a) (ExtNum/l64 b))))
+  (method ^:public ^:static caml_int64_div [a b]
+    (let [x (ExtNum/l64 a) y (ExtNum/l64 b)]
+      (when (== y 0) (throw (Rt/divByZero)))
+      (ExtNum/bl (if (== y -1) (unchecked-negate x) (unchecked-divide x y)))))
+  (method ^:public ^:static caml_int64_mod [a b]
+    (let [x (ExtNum/l64 a) y (ExtNum/l64 b)]
+      (when (== y 0) (throw (Rt/divByZero)))
+      (ExtNum/bl (if (== y -1) 0 (unchecked-remainder x y)))))
+  (method ^:public ^:static caml_int64_and [a b] (ExtNum/bl (bit-and (ExtNum/l64 a) (ExtNum/l64 b))))
+  (method ^:public ^:static caml_int64_or [a b] (ExtNum/bl (bit-or (ExtNum/l64 a) (ExtNum/l64 b))))
+  (method ^:public ^:static caml_int64_xor [a b] (ExtNum/bl (bit-xor (ExtNum/l64 a) (ExtNum/l64 b))))
+  (method ^:public ^:static caml_int64_shift_left [a b] (ExtNum/bl (bit-shift-left (ExtNum/l64 a) (bit-and (Rt/l b) 63))))
+  (method ^:public ^:static caml_int64_shift_right [a b] (ExtNum/bl (bit-shift-right (ExtNum/l64 a) (bit-and (Rt/l b) 63))))
+  (method ^:public ^:static caml_int64_shift_right_unsigned [a b]
+    (ExtNum/bl (unsigned-bit-shift-right (ExtNum/l64 a) (bit-and (Rt/l b) 63))))
+  (method ^:public ^:static caml_int64_bswap [a] (ExtNum/bl (Long/reverseBytes (ExtNum/l64 a))))
+  (method ^:public ^:static caml_int64_of_int [a] (ExtNum/bl (Rt/l a)))
+  (method ^:public ^:static caml_int64_to_int [a] (Rt/wrap (ExtNum/l64 a)))
+  (method ^:public ^:static caml_int64_of_float [a] (ExtNum/bl (ExtNum/f2i64 (Rt/d a))))
+  (method ^:public ^:static caml_int64_to_float [a] (ExtNum/fd (double (ExtNum/l64 a))))
+  (method ^:public ^:static caml_int64_of_int32 [a] (ExtNum/bl (long (ExtNum/i32 a))))
+  (method ^:public ^:static caml_int64_to_int32 [a] (ExtNum/bi (unchecked-int (ExtNum/l64 a))))
+  (method ^:public ^:static caml_int64_of_nativeint [a] (ExtNum/bl (.-v (cast NInt a))))
+  (method ^:public ^:static caml_int64_to_nativeint [a] (NInt. (ExtNum/l64 a)))
+  (method ^:public ^:static caml_int64_compare [a b]
+    (let [x (ExtNum/l64 a) y (ExtNum/l64 b)] (Long/valueOf (if (< x y) -1 (if (> x y) 1 0)))))
+  (method ^:public ^:static caml_int64_bits_of_float [a] (ExtNum/bl (Double/doubleToRawLongBits (Rt/d a))))
+  (method ^:public ^:static caml_int64_float_of_bits [a] (ExtNum/fd (Double/longBitsToDouble (ExtNum/l64 a))))
+
+  ;; ------------------------------------------------------------ nativeint (NInt)
+
+  (method ^:static nv ^long [x] (.-v (cast NInt x)))
+  (method ^:static bn [^long v] (NInt. v))
+
+  (method ^:public ^:static caml_nativeint_neg [a] (ExtNum/bn (unchecked-negate (ExtNum/nv a))))
+  (method ^:public ^:static caml_nativeint_add [a b] (ExtNum/bn (unchecked-add (ExtNum/nv a) (ExtNum/nv b))))
+  (method ^:public ^:static caml_nativeint_sub [a b] (ExtNum/bn (unchecked-subtract (ExtNum/nv a) (ExtNum/nv b))))
+  (method ^:public ^:static caml_nativeint_mul [a b] (ExtNum/bn (unchecked-multiply (ExtNum/nv a) (ExtNum/nv b))))
+  (method ^:public ^:static caml_nativeint_div [a b]
+    (let [x (ExtNum/nv a) y (ExtNum/nv b)]
+      (when (== y 0) (throw (Rt/divByZero)))
+      (ExtNum/bn (if (== y -1) (unchecked-negate x) (unchecked-divide x y)))))
+  (method ^:public ^:static caml_nativeint_mod [a b]
+    (let [x (ExtNum/nv a) y (ExtNum/nv b)]
+      (when (== y 0) (throw (Rt/divByZero)))
+      (ExtNum/bn (if (== y -1) 0 (unchecked-remainder x y)))))
+  (method ^:public ^:static caml_nativeint_and [a b] (ExtNum/bn (bit-and (ExtNum/nv a) (ExtNum/nv b))))
+  (method ^:public ^:static caml_nativeint_or [a b] (ExtNum/bn (bit-or (ExtNum/nv a) (ExtNum/nv b))))
+  (method ^:public ^:static caml_nativeint_xor [a b] (ExtNum/bn (bit-xor (ExtNum/nv a) (ExtNum/nv b))))
+  (method ^:public ^:static caml_nativeint_shift_left [a b] (ExtNum/bn (bit-shift-left (ExtNum/nv a) (bit-and (Rt/l b) 63))))
+  (method ^:public ^:static caml_nativeint_shift_right [a b] (ExtNum/bn (bit-shift-right (ExtNum/nv a) (bit-and (Rt/l b) 63))))
+  (method ^:public ^:static caml_nativeint_shift_right_unsigned [a b]
+    (ExtNum/bn (unsigned-bit-shift-right (ExtNum/nv a) (bit-and (Rt/l b) 63))))
+  (method ^:public ^:static caml_nativeint_bswap [a] (ExtNum/bn (Long/reverseBytes (ExtNum/nv a))))
+  (method ^:public ^:static caml_nativeint_of_int [a] (ExtNum/bn (Rt/l a)))
+  (method ^:public ^:static caml_nativeint_to_int [a] (Rt/wrap (ExtNum/nv a)))
+  (method ^:public ^:static caml_nativeint_of_float [a] (ExtNum/bn (ExtNum/f2i64 (Rt/d a))))
+  (method ^:public ^:static caml_nativeint_to_float [a] (ExtNum/fd (double (ExtNum/nv a))))
+  (method ^:public ^:static caml_nativeint_of_int32 [a] (ExtNum/bn (long (ExtNum/i32 a))))
+  (method ^:public ^:static caml_nativeint_to_int32 [a] (ExtNum/bi (unchecked-int (ExtNum/nv a))))
+  (method ^:public ^:static caml_nativeint_compare [a b]
+    (let [x (ExtNum/nv a) y (ExtNum/nv b)] (Long/valueOf (if (< x y) -1 (if (> x y) 1 0))))))

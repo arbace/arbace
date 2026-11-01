@@ -1,0 +1,343 @@
+(ns arbace.repr.java.platform
+  "The platform the native provider reads its classes from (doc/classes/JAVA-FRONTEND-SURVEY.md, JN10
+  part 2, JFS131 (b) and (a), JFS135 (a); \"As built: JN10 (write-ahead)\"): the platform's modules, their
+  packages, the class files of a package and a class file's bytes, behind one small interface with two
+  implementations and their composite:
+
+  - `dir-platform`: exploded modules in a directory, DIR/MODULE/pkg/path/C.class (jdk26u's build tree as
+    jdk/javac/platform.sha256 pins it, REPR_JAVA_PLATFORM; JFS131 (a));
+  - `pack-platform`: a pack of declarations-only class files (arbace.repr.java.classfile's `strip`: what
+    `parse` reads, nothing else), one file, jdk/platform/java.base.decls for java.base (JFS131 (b), JFS135
+    (a)), written by `pack!` (bin/repr-java platform-pack) and read whole;
+  - `composite`: each module from the first platform that has it.
+
+  A platform is a map: :id (a string naming it, the caches' key), :modules (its module names, sorted)
+  and the functions :packages (fn [m] the module's packages: a directory with a class file, `/`-separated,
+  \"\" for the module's root), :names (fn [m rel] the base names of the class files in the module's
+  directory rel, without .class) and :bytes (fn [m path] the bytes of the class file MODULE/path, or nil).
+
+  The pack's format (every number big-endian; the entries sorted by path, so that the file depends on its
+  classes alone):
+
+    \"AEDECLS1\"                       8 bytes
+    u4 n                             the entries
+    n times: u2 len, len bytes        the entry's path, MODULE/pkg/path/C.class, UTF-8
+             u4 offset, u4 length     its class file, from the data's start
+    the data                         the stripped class files, one after another
+
+  The pack is stored raw: the shipped program's resources are compressed by j2g already (arbace.j2g.zlib,
+  SA21), and git compresses the committed file."
+  (:require [arbace.repr.java.classfile :as cf]
+            [arbace.string :as str])
+  (:import [java.io File ByteArrayOutputStream DataOutputStream]
+           [java.util.concurrent ConcurrentHashMap]))
+
+(set! *warn-on-reflection* true)
+
+(def magic "AEDECLS1")
+
+(def pack-resource
+  "The java.base pack's resource name (the checkout's file on the tools' host through ARBACE_PATH; the
+  shipped program's embedded resource)."
+  "jdk/platform/java.base.decls")
+
+;; ---------------------------------------------------------------------------------------
+;; the interface
+
+(defn modules "The platform's module names, sorted." [p] (:modules p))
+(defn packages "Module m's packages (`/`-separated, \"\" its root)." [p m] ((:packages p) m))
+(defn class-names "The base names of module m's class files in its directory rel (`/`-separated)." [p m rel] ((:names p) m rel))
+(defn class-bytes "The bytes of the class file MODULE/path, or nil." ^bytes [p m path] ((:bytes p) m path))
+(defn exists? "Is there a class file MODULE/path?" [p m path]
+  (if-let [f (:exists? p)] (boolean (f m path)) (some? (class-bytes p m path))))
+(defn has-module? [p m] (boolean (some #{m} (modules p))))
+
+(def ^:private ^ConcurrentHashMap indexes (ConcurrentHashMap.))
+
+(defn index
+  "{package [module ...]} of platform p: the dotted package names, each with its modules in their sorted
+  order (as decls' module-of-package takes the first)."
+  [p]
+  (or (.get indexes (:id p))
+      (let [idx (java.util.HashMap.)]
+        (doseq [m (modules p)
+                rel (sort (packages p m))
+                :let [pkg (str/replace rel "/" ".")]]
+          (.put idx pkg (conj (or (.get idx pkg) []) m)))
+        (.putIfAbsent indexes (:id p) (into {} idx))
+        (.get indexes (:id p)))))
+
+;; ---------------------------------------------------------------------------------------
+;; exploded modules in a directory
+
+(defn- dir-packages
+  "The directories under module directory md (a File) that hold a class file, relative, `/`-separated."
+  [^File md]
+  (let [base (count (.getPath md))
+        out (java.util.ArrayList.)]
+    (letfn [(walk [^File d]
+              (let [fs (.listFiles d)]
+                (when (some #(and (str/ends-with? (.getName ^File %) ".class") (.isFile ^File %)) fs)
+                  (.add out (subs (.getPath d) (min (count (.getPath d)) (inc base)))))
+                (doseq [^File f (sort-by #(.getName ^File %) fs) :when (.isDirectory f)] (walk f))))]
+      (walk md))
+    (vec out)))
+
+(def ^:private ^ConcurrentHashMap dirs (ConcurrentHashMap.))
+
+(defn dir-platform
+  "The exploded modules in directory `dir` (DIR/MODULE/pkg/path/C.class), one object per directory."
+  [^String dir]
+  (or (.get dirs dir)
+      (let [ms (vec (sort (for [^File m (.listFiles (File. dir)) :when (.isDirectory m)] (.getName m))))
+            pkgs (ConcurrentHashMap.)
+            file (fn ^File [m rel] (File. (str dir "/" m (when (seq rel) "/") rel)))
+            p {:id dir :kind :dir :dir dir :modules ms
+               :packages (fn [m]
+                           (or (.get pkgs m)
+                               (do (.putIfAbsent pkgs m (dir-packages (File. (str dir "/" m))))
+                                   (.get pkgs m))))
+               :names (fn [m rel]
+                        (vec (sort (for [^File f (or (.listFiles ^File (file m rel)) (make-array File 0))
+                                         :let [n (.getName f)]
+                                         :when (and (.isFile f) (str/ends-with? n ".class"))]
+                                     (subs n 0 (- (count n) 6))))))
+               :exists? (fn [m path] (.isFile ^File (file m path)))
+               :bytes (fn [m path]
+                        (let [f ^File (file m path)]
+                          (when (.isFile f) (java.nio.file.Files/readAllBytes (.toPath f)))))}]
+        (.putIfAbsent dirs dir p)
+        (.get dirs dir))))
+
+;; ---------------------------------------------------------------------------------------
+;; the pack
+
+(defn- u2 ^long [^bytes b ^long i] (bit-or (bit-shift-left (bit-and (long (aget b i)) 0xff) 8) (bit-and (long (aget b (inc i))) 0xff)))
+(defn- u4 ^long [^bytes b ^long i] (bit-or (bit-shift-left (u2 b i) 16) (u2 b (+ i 2))))
+
+(defn pack-entries
+  "The pack in bytes b as [[path offset length] ...] (offsets into b) in the pack's order."
+  [^bytes b]
+  (when-not (and (>= (alength b) 12) (= magic (String. b 0 8 "UTF-8")))
+    (throw (ex-info "platform: not a declarations pack" {})))
+  (let [n (u4 b 8)
+        [es data] (loop [k 0 i 12 out []]
+                    (if (= k n)
+                      [out i]
+                      (let [len (u2 b i)
+                            path (String. b (int (+ i 2)) (int len) "UTF-8")
+                            j (+ i 2 len)]
+                        (recur (inc k) (long (+ j 8)) (conj out [path (u4 b j) (u4 b (+ j 4))])))))]
+    (mapv (fn [[path off len]] [path (+ (long data) (long off)) len]) es)))
+
+(defn- dir-of ^String [^String path] (let [i (.lastIndexOf path "/")] (if (neg? i) "" (subs path 0 i))))
+
+(defn pack-platform
+  "The pack in bytes `b` (its format in the namespace's docstring) as a platform named `id`."
+  [^bytes b id]
+  (let [es (pack-entries b)
+        ;; module -> {rel [simple ...]}, path -> [offset length]
+        by-path (into {} (map (fn [[path off len]] [path [off len]])) es)
+        tree (reduce (fn [acc [path _ _]]
+                       (let [i (str/index-of path "/")
+                             m (subs path 0 i)
+                             rest (subs path (inc i))
+                             rel (dir-of rest)
+                             n (subs rest (if (seq rel) (inc (count rel)) 0))]
+                         (update-in acc [m rel] (fnil conj []) (subs n 0 (- (count n) 6)))))
+                     {} es)]
+    {:id id :kind :pack :modules (vec (sort (keys tree)))
+     :packages (fn [m] (vec (sort (keys (get tree m)))))
+     :names (fn [m rel] (vec (sort (get-in tree [m rel]))))
+     :exists? (fn [m path] (contains? by-path (str m "/" path)))
+     :bytes (fn [m path]
+              (when-let [[off len] (get by-path (str m "/" path))]
+                (java.util.Arrays/copyOfRange b (int off) (int (+ (long off) (long len))))))}))
+
+(defn read-all ^bytes [^java.io.InputStream in]
+  (let [out (ByteArrayOutputStream.)
+        buf (byte-array 65536)]
+    (loop []
+      (let [n (.read in buf)]
+        (when (pos? n) (.write out buf 0 n) (recur))))
+    (.close in)
+    (.toByteArray out)))
+
+(def ^:private pack-cache (atom {}))
+
+(defn resource-pack
+  "The java.base pack (pack-resource) as a platform, read once; nil when there is none."
+  []
+  (or (get @pack-cache pack-resource)
+      (when-let [in (.getResourceAsStream (arbace.lang.RT/baseLoader) ^String pack-resource)]
+        (let [p (pack-platform (read-all in) (str "pack:" pack-resource))]
+          (swap! pack-cache assoc pack-resource p)
+          p))))
+
+(defn file-pack
+  "The pack in file `path` as a platform."
+  [path]
+  (pack-platform (java.nio.file.Files/readAllBytes (.toPath (File. (str path)))) (str "pack:" path)))
+
+;; ---------------------------------------------------------------------------------------
+;; the composite
+
+(defn composite
+  "The platforms ps as one: each module from the first of ps that has it."
+  [& ps]
+  (let [ps (vec (remove nil? ps))
+        owner (reduce (fn [acc p] (reduce (fn [acc m] (if (contains? acc m) acc (assoc acc m p))) acc (modules p)))
+                      {} ps)]
+    {:id (str "composite:" (str/join "+" (map :id ps))) :kind :composite :parts ps
+     :modules (vec (sort (keys owner)))
+     :packages (fn [m] (if-let [p (owner m)] (packages p m) []))
+     :names (fn [m rel] (if-let [p (owner m)] (class-names p m rel) []))
+     :exists? (fn [m path] (when-let [p (owner m)] (exists? p m path)))
+     :bytes (fn [m path] (when-let [p (owner m)] (class-bytes p m path)))}))
+
+(defn default-platform
+  "The platform of a read: REPR_JAVA_PLATFORM's directory as before when it is set (javac's tool's runs:
+  the platform javac on Arbace attributes against); REPR_JAVA_PACK=1 then puts the java.base pack before it
+  (its java.base unread: JN10 part 2's check, attr-check and nojavac-check over the pack); with no
+  directory, the pack alone (the shipped program's read: java.base only, JFS131 (b))."
+  []
+  (let [dir (not-empty (System/getenv "REPR_JAVA_PLATFORM"))
+        pack? (= "1" (System/getenv "REPR_JAVA_PACK"))]
+    (cond
+      (and dir (not pack?)) (dir-platform dir)
+      dir (composite (or (resource-pack) (throw (ex-info (str "repr/java: no platform pack " pack-resource) {})))
+                     (dir-platform dir))
+      :else (or (resource-pack)
+                (throw (ex-info (str "repr/java: no platform: REPR_JAVA_PLATFORM unset and no pack " pack-resource) {}))))))
+
+(defn as-platform
+  "x as a platform: a platform as it is, a string as the directory's, nil the default."
+  [x]
+  (cond (map? x) x
+        (string? x) (dir-platform x)
+        (nil? x) (default-platform)
+        :else (throw (ex-info (str "platform: " (pr-str x)) {}))))
+
+;; ---------------------------------------------------------------------------------------
+;; the writer and the check
+
+(defn pack-classes
+  "The [path stripped-bytes] of every class file of module m in platform p, sorted by path."
+  [p m]
+  (vec (sort-by first
+                (for [rel (packages p m)
+                      n (class-names p m rel)
+                      :let [path (str (when (seq rel) (str rel "/")) n ".class")]]
+                  [(str m "/" path) (cf/strip (class-bytes p m path))]))))
+
+(defn pack-bytes
+  "The pack of entries es ([path bytes] sorted by path) as bytes."
+  ^bytes [es]
+  (let [out (ByteArrayOutputStream.)
+        d (DataOutputStream. out)]
+    (.write d (.getBytes ^String magic "UTF-8"))
+    (.writeInt d (count es))
+    (reduce (fn [^long off [^String path ^bytes bs]]
+              (let [pb (.getBytes path "UTF-8")]
+                (.writeShort d (alength pb))
+                (.write d pb)
+                (.writeInt d (int off))
+                (.writeInt d (alength bs))
+                (+ off (alength bs))))
+            0 es)
+    (doseq [[_ ^bytes bs] es] (.write d bs))
+    (.flush d)
+    (.toByteArray out)))
+
+(defn pack!
+  "Writes the pack of modules ms of the directory `dir` to `out`; returns {:classes n :bytes n :raw n} (raw:
+  the original class files' bytes)."
+  [dir ms out]
+  (let [p (dir-platform dir)
+        es (vec (sort-by first (mapcat #(pack-classes p %) ms)))
+        raw (reduce + 0 (for [m ms rel (packages p m) n (class-names p m rel)]
+                          (alength (class-bytes p m (str (when (seq rel) (str rel "/")) n ".class")))))
+        bs (pack-bytes es)]
+    (.mkdirs (.getParentFile (.getAbsoluteFile (File. (str out)))))
+    (with-open [o (java.io.FileOutputStream. (str out))] (.write o bs))
+    {:classes (count es) :bytes (alength bs) :raw raw}))
+
+(defn- norm
+  "parse's data with its floats and doubles as their bits (NaN equal to itself, -0.0 not to 0.0)."
+  [x]
+  (cond (instance? Float x) [::float (Float/floatToRawIntBits (float x))]
+        (instance? Double x) [::double (Double/doubleToRawLongBits (double x))]
+        (map? x) (into {} (map (fn [[k v]] [k (norm v)])) x)
+        (vector? x) (mapv norm x)
+        :else x))
+
+(defn same-parse?
+  "Is (parse (strip b)) equal to (parse b)?"
+  [^bytes b]
+  (= (norm (cf/parse b)) (norm (cf/parse (cf/strip b)))))
+
+(defn check
+  "platform-check's proof over directory `dir`'s modules ms (bin/repr-java platform-check): for every class
+  file, (parse (strip b)) equal to (parse b); with `pack` (a pack file of the same modules), its bytes equal
+  to a fresh pack's and, read as a platform, its modules, packages, class names and parsed classes equal to
+  the directory's. Prints a line per module and returns the failures ([what path] ...)."
+  [dir ms pack]
+  (let [p (dir-platform dir)
+        fails (java.util.ArrayList.)]
+    (doseq [m ms]
+      (let [t (System/nanoTime)
+            n (long-array 1)
+            f0 (.size fails)]
+        (doseq [rel (packages p m)
+                nm (class-names p m rel)
+                :let [path (str (when (seq rel) (str rel "/")) nm ".class")
+                      b (class-bytes p m path)]]
+          (aset n 0 (inc (aget n 0)))
+          (when-not (try (same-parse? b) (catch Throwable e (println "platform-check:" m path (str e)) false))
+            (.add fails [:parse (str m "/" path)])))
+        (println (format "platform-check: %s: %d classes, (parse (strip b)) = (parse b) %s (%.1f s)"
+                         m (aget n 0) (if (> (.size fails) f0) (str "FAILS for " (- (.size fails) f0)) "for each")
+                         (/ (- (System/nanoTime) t) 1e9)))))
+    (when pack
+      (let [fresh (pack-bytes (vec (sort-by first (mapcat #(pack-classes p %) ms))))
+            committed (java.nio.file.Files/readAllBytes (.toPath (File. (str pack))))
+            pk (pack-platform committed (str "check:" pack))]
+        (if (java.util.Arrays/equals fresh committed)
+          (println "platform-check: the pack" pack "equals a fresh pack, byte for byte (" (alength committed) "bytes)")
+          (do (println "platform-check: the pack" pack "differs from a fresh pack (" (alength committed) "against" (alength fresh) "bytes)")
+              (.add fails [:pack (str pack)])))
+        (when-not (= (vec ms) (modules pk)) (.add fails [:modules (pr-str (modules pk))]))
+        (doseq [m ms]
+          (when-not (= (vec (sort (packages p m))) (packages pk m)) (.add fails [:packages m]))
+          (doseq [rel (packages p m)]
+            (when-not (= (class-names p m rel) (class-names pk m rel)) (.add fails [:names (str m "/" rel)]))
+            (doseq [nm (class-names p m rel)
+                    :let [path (str (when (seq rel) (str rel "/")) nm ".class")]]
+              (when-not (= (norm (cf/parse (class-bytes p m path))) (norm (cf/parse (class-bytes pk m path))))
+                (.add fails [:pack-parse (str m "/" path)])))))
+        ;; the directory's index of the pack's modules (its "" package is every module's: module-info)
+        (when-not (= (into {} (for [[pkg mods] (index p)
+                                    :let [mods (filterv (set ms) mods)]
+                                    :when (seq mods)]
+                                [pkg mods]))
+                     (index pk))
+          (.add fails [:index (str pack)]))
+        (println "platform-check: the pack as a platform:" (if (some #(#{:modules :packages :names :pack-parse :index} (first %)) fails)
+                                                              "differs from the directory" "the directory's modules, packages, names and classes"))))
+    (doseq [f (take 20 fails)] (println "platform-check: FAIL" (pr-str f)))
+    (vec fails)))
+
+(defn -main
+  "pack DIR OUT MODULE...: the pack of the modules of directory DIR into OUT (prints its numbers);
+  check DIR PACK|- MODULE...: `check` (exit status 1 on a failure)."
+  [& [verb dir out & ms]]
+  (case verb
+    "pack" (let [t (System/nanoTime)
+                 r (pack! dir ms out)]
+             (println (format "platform-pack: %s: %d classes, %d bytes of %d (%.1f%%), %.1f s" out (:classes r) (:bytes r) (:raw r)
+                              (* 100.0 (/ (double (:bytes r)) (double (:raw r)))) (/ (- (System/nanoTime) t) 1e9))))
+    "check" (let [fails (check dir (vec ms) (if (= "-" out) nil out))]
+              (println "platform-check:" (if (seq fails) (str (count fails) " failures") "passed"))
+              (System/exit (if (seq fails) 1 0)))
+    (do (println "usage: arbace.repr.java.platform pack DIR OUT MODULE... | check DIR PACK|- MODULE...")
+        (System/exit 2))))

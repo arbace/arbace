@@ -1,0 +1,307 @@
+;; si's runtime: the control primitives (doc/scheme/SCHEME-SURVEY.md §5.2, §5.3): call/cc, dynamic-wind,
+;; values, apply, the exception handlers and raises, error, exit, eval-core, promises, and the
+;; higher-order procedures of (rnrs base) and (rnrs lists) written on the machine: each call of the
+;; procedure argument is a call of the machine with a Go frame waiting for its value, so continuations
+;; captured inside re-enter correctly (each step's state is immutable) and for-all's and exists's last
+;; calls are tail calls (R6RS 11.9). The sorts compare by nested runs (CallProc).
+(in-ns 'go.arbace.scm)
+
+(go/file "prim_control.go"
+  :imports [[os "os"]])
+
+(go/func carsCdrs
+  "carsCdrs is the cars and the cdrs of lists ls, ok false when one is not a pair (the end).\n"
+  [^{:tag (slice any)} ls] :results [(slice any) (slice any) bool]
+  (let [cars (make (slice any) (len ls))
+        cdrs (make (slice any) (len ls))]
+    (range [i l ls]
+      (let [(values p ok) (assert (* Pair) l)]
+        (when (not ok)
+          (return nil nil false))
+        (aset cars i (.-Car p))
+        (aset cdrs i (.-Cdr p))))
+    (return cars cdrs true)))
+
+(go/func checkLists "checkLists checks that every list of ls is proper and that they have one length.\n"
+  [^string who ^{:tag (slice any)} ls]
+  (let [n -1]
+    (range [_ l ls]
+      (let [xs (ArgList who l)]
+        (if (< n 0)
+          (set! n (len xs))
+          (when (!= n (len xs))
+            (AssertionViolation who "lists ~s and ~s differ in length" (aget ls 0) l)))))))
+
+(go/func reverseList ^any [^any l]
+  (let [^any r Null]
+    (while true
+      (watchdogTick)
+      (let [(values p ok) (assert (* Pair) l)]
+        (when (not ok)
+          (return r))
+        (set! r (Cons (.-Car p) r))
+        (set! l (.-Cdr p))))
+    r))
+
+(go/func mapStep [^{:tag (* M)} m ^any f ^{:tag (slice any)} ls ^any acc] :results [any bool]
+  (let [(values cars cdrs ok) (carsCdrs ls)]
+    (when (not ok)
+      (return (reverseList acc) true))
+    (.PushGo m (fn [^{:tag (* M)} m2 ^any v] :results [any bool] (return (mapStep m2 f cdrs (Cons v acc)))))
+    (return (.Apply m f cars))))
+
+(go/func forEachStep [^{:tag (* M)} m ^any f ^{:tag (slice any)} ls] :results [any bool]
+  (let [(values cars cdrs ok) (carsCdrs ls)]
+    (when (not ok)
+      (return Unspec true))
+    (.PushGo m (fn [^{:tag (* M)} m2 ^any _] :results [any bool] (return (forEachStep m2 f cdrs))))
+    (return (.Apply m f cars))))
+
+(go/func forAllStep "forAllStep is for-all (all true) or exists (all false), the last call in tail position.\n"
+  [^{:tag (* M)} m ^any f ^{:tag (slice any)} ls ^bool all] :results [any bool]
+  (let [(values cars cdrs ok) (carsCdrs ls)]
+    (when (not ok)
+      (return all true))
+    (let [(values _ _ more) (carsCdrs cdrs)]
+      (when (not more)
+        (return (.Apply m f cars))))
+    (.PushGo m (fn [^{:tag (* M)} m2 ^any v] :results [any bool]
+                 (when (== (Truthy v) (not all))
+                   (return v true))
+                 (return (forAllStep m2 f cdrs all))))
+    (return (.Apply m f cars))))
+
+(go/func filterStep
+  "filterStep is filter (keep true), remp (keep false) or partition (both: two values).\n"
+  [^{:tag (* M)} m ^string mode ^any f ^any l ^any yes ^any no] :results [any bool]
+  (let [(values p ok) (assert (* Pair) l)]
+    (when (not ok)
+      (switch mode
+        (case ["filter"] (return (reverseList yes) true))
+        (case ["remp"] (return (reverseList no) true)))
+      (return (addr (lit Values :V (lit (slice any) (reverseList yes) (reverseList no)))) true))
+    (let [x (.-Car p)]
+      (.PushGo m (fn [^{:tag (* M)} m2 ^any v] :results [any bool]
+                   (if (Truthy v)
+                     (return (filterStep m2 mode f (.-Cdr p) (Cons x yes) no))
+                     (return (filterStep m2 mode f (.-Cdr p) yes (Cons x no))))))
+      (return (.Apply m f (lit (slice any) x))))))
+
+(go/func findStep
+  "findStep is find (the element), memp (the tail) or assp (the pair whose car satisfies f).\n"
+  [^{:tag (* M)} m ^string mode ^any f ^any l] :results [any bool]
+  (let [(values p ok) (assert (* Pair) l)]
+    (when (not ok)
+      (return false true))
+    (let [x (.-Car p)
+          arg x]
+      (when (== mode "assp")
+        (set! arg (.-Car (ArgPair "assp" x))))
+      (.PushGo m (fn [^{:tag (* M)} m2 ^any v] :results [any bool]
+                   (when (Truthy v)
+                     (switch mode
+                       (case ["find"] (return x true))
+                       (case ["memp"] (return p true)))
+                     (return x true))
+                   (return (findStep m2 mode f (.-Cdr p)))))
+      (return (.Apply m f (lit (slice any) arg))))))
+
+(go/func foldLeftStep [^{:tag (* M)} m ^any f ^any acc ^{:tag (slice any)} ls] :results [any bool]
+  (let [(values cars cdrs ok) (carsCdrs ls)]
+    (when (not ok)
+      (return acc true))
+    (.PushGo m (fn [^{:tag (* M)} m2 ^any v] :results [any bool] (return (foldLeftStep m2 f v cdrs))))
+    (return (.Apply m f (append (lit (slice any) acc) (spread cars))))))
+
+(go/func foldRightStep "foldRightStep folds the rows (the lists' cars, last row first).\n"
+  [^{:tag (* M)} m ^any f ^any acc ^{:tag (slice (slice any))} rows ^int i] :results [any bool]
+  (when (< i 0)
+    (return acc true))
+  (.PushGo m (fn [^{:tag (* M)} m2 ^any v] :results [any bool] (return (foldRightStep m2 f v rows (- i 1)))))
+  (return (.Apply m f (append (append (lit (slice any)) (spread (aget rows i))) acc))))
+
+(go/func vectorMapStep [^{:tag (* M)} m ^any f ^{:tag (slice (* Vector))} vs ^int i ^any acc ^bool collect] :results [any bool]
+  (when (>= i (len (.-V (aget vs 0))))
+    (when (not collect)
+      (return Unspec true))
+    (let [(values xs _) (ListSlice (reverseList acc))]
+      (return (NewVector xs) true)))
+  (let [args (make (slice any) (len vs))]
+    (range [j v vs]
+      (aset args j (aget (.-V v) i)))
+    (.PushGo m (fn [^{:tag (* M)} m2 ^any v] :results [any bool]
+                 (if collect
+                   (return (vectorMapStep m2 f vs (+ i 1) (Cons v acc) collect))
+                   (return (vectorMapStep m2 f vs (+ i 1) acc collect)))))
+    (return (.Apply m f args))))
+
+(go/func stringForEachStep [^{:tag (* M)} m ^any f ^{:tag (slice (* String))} ss ^int i] :results [any bool]
+  (when (>= i (len (.-R (aget ss 0))))
+    (return Unspec true))
+  (let [args (make (slice any) (len ss))]
+    (range [j s ss]
+      (aset args j (conv Char (aget (.-R s) i))))
+    (.PushGo m (fn [^{:tag (* M)} m2 ^any _] :results [any bool] (return (stringForEachStep m2 f ss (+ i 1)))))
+    (return (.Apply m f args))))
+
+(go/func mergeSort "mergeSort sorts xs stably by less (a Scheme procedure, called by nested runs).\n"
+  ^{:tag (slice any)} [^any less ^{:tag (slice any)} xs]
+  (when (<= (len xs) 1)
+    (return xs))
+  (let [mid (/ (len xs) 2)
+        a (mergeSort less (append (lit (slice any)) (spread (subslice xs 0 mid))))
+        b (mergeSort less (append (lit (slice any)) (spread (subslice xs mid))))
+        out (make (slice any) 0 (len xs))
+        i 0
+        j 0]
+    (while (and (< i (len a)) (< j (len b)))
+      (watchdogTick)
+      (if (Truthy (CallProc less (aget b j) (aget a i)))
+        (do (set! out (append out (aget b j))) (inc! j))
+        (do (set! out (append out (aget a i))) (inc! i))))
+    (set! out (append out (spread (subslice a i))))
+    (append out (spread (subslice b j)))))
+
+(go/type Promise "Promise is a promise of delay or make-promise: a thunk until forced, then its value.\n"
+  (struct ^bool Done ^any V))
+
+(go/func forceStep [^{:tag (* M)} m ^{:tag (* Promise)} p] :results [any bool]
+  (when (.-Done p)
+    (return (.-V p) true))
+  (.PushGo m (fn [^{:tag (* M)} m2 ^any v] :results [any bool]
+               (when (not (.-Done p))
+                 (set! (.-Done p) true)
+                 (set! (.-V p) v))
+               (return (.-V p) true)))
+  (return (.Apply m (.-V p) nil)))
+
+(go/func errorCondition "errorCondition is the condition of (error who msg irritant ...) of kind.\n"
+  ^any [^{:tag (* RTD)} kind ^{:tag (slice any)} args]
+  (let [who (aget args 0)
+        cs (lit (slice (* Record)) (MakeSimple kind))]
+    (when (!= who (conv any false))
+      (set! cs (append cs (MakeSimple CondWho who))))
+    (set! cs (append cs (MakeSimple CondMessage (aget args 1)) (MakeSimple CondIrritants (ListTail (subslice args 2) Null))))
+    (addr (lit Compound :Parts cs))))
+
+(go/func init []
+  (DefCtl "call-with-current-continuation" 1 1 (fn [^{:tag (* M)} m ^{:tag (slice any)} a] :results [any bool]
+    (return (.CallCC m (ArgProc "call/cc" (aget a 0))))))
+  (Alias "call/cc" "call-with-current-continuation")
+  (DefCtl "dynamic-wind" 3 3 (fn [^{:tag (* M)} m ^{:tag (slice any)} a] :results [any bool]
+    (return (.DynamicWind m (ArgProc "dynamic-wind" (aget a 0)) (ArgProc "dynamic-wind" (aget a 1)) (ArgProc "dynamic-wind" (aget a 2))))))
+  (Def "values" 0 -1 (fn ^any [^{:tag (slice any)} a] (valuesOf a)))
+  (DefCtl "call-with-values" 2 2 (fn [^{:tag (* M)} m ^{:tag (slice any)} a] :results [any bool]
+    (let [consumer (ArgProc "call-with-values" (aget a 1))]
+      (.PushGo m (fn [^{:tag (* M)} m2 ^any v] :results [any bool] (return (.Apply m2 consumer (Unpack v)))))
+      (return (.Apply m (ArgProc "call-with-values" (aget a 0)) nil)))))
+  (DefCtl "apply" 2 -1 (fn [^{:tag (* M)} m ^{:tag (slice any)} a] :results [any bool]
+    (let [f (ArgProc "apply" (aget a 0))
+          last (aget a (- (len a) 1))
+          (values tail ok) (ListSlice last)]
+      (when (not ok)
+        (NotA "apply" "proper list" last))
+      (return (.Apply m f (append (append (lit (slice any)) (spread (subslice a 1 (- (len a) 1)))) (spread tail)))))))
+  (DefCtl "with-exception-handler" 2 2 (fn [^{:tag (* M)} m ^{:tag (slice any)} a] :results [any bool]
+    (return (.WithHandler m (ArgProc "with-exception-handler" (aget a 0)) (ArgProc "with-exception-handler" (aget a 1))))))
+  (DefCtl "raise" 1 1 (fn [^{:tag (* M)} m ^{:tag (slice any)} a] :results [any bool] (return (.Raise m (aget a 0) false))))
+  (DefCtl "raise-continuable" 1 1 (fn [^{:tag (* M)} m ^{:tag (slice any)} a] :results [any bool] (return (.Raise m (aget a 0) true))))
+  (DefCtl "error" 2 -1 (fn [^{:tag (* M)} m ^{:tag (slice any)} a] :results [any bool]
+    (return (.Raise m (errorCondition CondError a) false))))
+  (DefCtl "assertion-violation" 2 -1 (fn [^{:tag (* M)} m ^{:tag (slice any)} a] :results [any bool]
+    (return (.Raise m (errorCondition CondAssertion a) false))))
+  (Def "exit" 0 1 (fn ^any [^{:tag (slice any)} a]
+    (let [code 0]
+      (when (> (len a) 0)
+        (type-switch [v (aget a 0)]
+          (case [int64] (set! code (conv int v)))
+          (case [bool] (when (not v) (set! code 1)))
+          (default (set! code 255))))
+      (FlushAll)
+      (panic (addr (lit ExitPanic :Code code))))))
+  (Def1 "procedure?" (fn ^any [^any x] (IsProcedure x)))
+  (DefCtl "eval-core" 1 1 (fn [^{:tag (* M)} m ^{:tag (slice any)} a] :results [any bool]
+    (return (.Run (.Compile m (aget a 0)) m nil))))
+  (DefCtl "map" 2 -1 (fn [^{:tag (* M)} m ^{:tag (slice any)} a] :results [any bool]
+    (checkLists "map" (subslice a 1))
+    (return (mapStep m (ArgProc "map" (aget a 0)) (subslice a 1) Null))))
+  (DefCtl "for-each" 2 -1 (fn [^{:tag (* M)} m ^{:tag (slice any)} a] :results [any bool]
+    (checkLists "for-each" (subslice a 1))
+    (return (forEachStep m (ArgProc "for-each" (aget a 0)) (subslice a 1)))))
+  (DefCtl "for-all" 2 -1 (fn [^{:tag (* M)} m ^{:tag (slice any)} a] :results [any bool]
+    (checkLists "for-all" (subslice a 1))
+    (return (forAllStep m (ArgProc "for-all" (aget a 0)) (subslice a 1) true))))
+  (DefCtl "exists" 2 -1 (fn [^{:tag (* M)} m ^{:tag (slice any)} a] :results [any bool]
+    (checkLists "exists" (subslice a 1))
+    (return (forAllStep m (ArgProc "exists" (aget a 0)) (subslice a 1) false))))
+  (range [_ mode (lit (slice string) "filter" "remp" "partition")]
+    (let [md mode]
+      (DefCtl md 2 2 (fn [^{:tag (* M)} m ^{:tag (slice any)} a] :results [any bool]
+        (ArgList md (aget a 1))
+        (return (filterStep m md (ArgProc md (aget a 0)) (aget a 1) Null Null))))))
+  (range [_ mode (lit (slice string) "find" "memp" "assp")]
+    (let [md mode]
+      (DefCtl md 2 2 (fn [^{:tag (* M)} m ^{:tag (slice any)} a] :results [any bool]
+        (return (findStep m md (ArgProc md (aget a 0)) (aget a 1)))))))
+  (DefCtl "fold-left" 3 -1 (fn [^{:tag (* M)} m ^{:tag (slice any)} a] :results [any bool]
+    (checkLists "fold-left" (subslice a 2))
+    (return (foldLeftStep m (ArgProc "fold-left" (aget a 0)) (aget a 1) (subslice a 2)))))
+  (DefCtl "fold-right" 3 -1 (fn [^{:tag (* M)} m ^{:tag (slice any)} a] :results [any bool]
+    (checkLists "fold-right" (subslice a 2))
+    (let [^{:tag (slice (slice any))} rows nil
+          ls (subslice a 2)]
+      (while true
+        (watchdogTick)
+        (let [(values cars cdrs ok) (carsCdrs ls)]
+          (when (not ok)
+            (break))
+          (set! rows (append rows cars))
+          (set! ls cdrs)))
+      (return (foldRightStep m (ArgProc "fold-right" (aget a 0)) (aget a 1) rows (- (len rows) 1))))))
+  (DefCtl "vector-map" 2 -1 (fn [^{:tag (* M)} m ^{:tag (slice any)} a] :results [any bool]
+    (return (vectorMapStep m (ArgProc "vector-map" (aget a 0)) (vectorArgs "vector-map" (subslice a 1)) 0 Null true))))
+  (DefCtl "vector-for-each" 2 -1 (fn [^{:tag (* M)} m ^{:tag (slice any)} a] :results [any bool]
+    (return (vectorMapStep m (ArgProc "vector-for-each" (aget a 0)) (vectorArgs "vector-for-each" (subslice a 1)) 0 Null false))))
+  (DefCtl "string-for-each" 2 -1 (fn [^{:tag (* M)} m ^{:tag (slice any)} a] :results [any bool]
+    (let [ss (make (slice (* String)) (- (len a) 1))]
+      (range [i x (subslice a 1)]
+        (aset ss i (ArgString "string-for-each" x))
+        (when (!= (len (.-R (aget ss i))) (len (.-R (aget ss 0))))
+          (AssertionViolation "string-for-each" "lengths of input strings ~s and ~s differ" (aget a 1) x)))
+      (return (stringForEachStep m (ArgProc "string-for-each" (aget a 0)) ss 0)))))
+  (Def2 "list-sort" (fn ^any [^any less ^any l]
+    (ArgProc "list-sort" less)
+    (ListTail (mergeSort less (ArgList "list-sort" l)) Null)))
+  (Def2 "vector-sort" (fn ^any [^any less ^any v]
+    (ArgProc "vector-sort" less)
+    (NewVector (mergeSort less (append (lit (slice any)) (spread (.-V (ArgVector "vector-sort" v))))))))
+  (Def2 "vector-sort!" (fn ^any [^any less ^any v]
+    (ArgProc "vector-sort!" less)
+    (let [vec (ArgVector "vector-sort!" v)]
+      (copy (.-V vec) (mergeSort less (append (lit (slice any)) (spread (.-V vec)))))
+      Unspec)))
+  (Def1 "make-promise" (fn ^any [^any thunk] (addr (lit Promise :V thunk))))
+  (DefCtl "force" 1 1 (fn [^{:tag (* M)} m ^{:tag (slice any)} a] :results [any bool]
+    (let [(values p ok) (assert (* Promise) (aget a 0))]
+      (when (not ok)
+        (return (aget a 0) true))
+      (return (forceStep m p)))))
+  (Def "command-line" 0 0 (fn ^any [^{:tag (slice any)} a]
+    (let [^{:tag (slice any)} xs nil]
+      (range [_ s CommandLine]
+        (set! xs (append xs (Str s))))
+      (ListTail xs Null)))))
+
+(go/var ^{:tag (slice string) :doc "CommandLine is the program's command line as (command-line) gives it.\n"} CommandLine (lit (slice string) "si"))
+
+(go/func vectorArgs ^{:tag (slice (* Vector))} [^string who ^{:tag (slice any)} xs]
+  (let [vs (make (slice (* Vector)) (len xs))]
+    (range [i x xs]
+      (aset vs i (ArgVector who x))
+      (when (!= (len (.-V (aget vs i))) (len (.-V (aget vs 0))))
+        (AssertionViolation who "lengths of input vectors ~s and ~s differ" (aget xs 0) x)))
+    vs))
+
+(go/func Exit "Exit ends the program with status code, output flushed.\n" [^int code]
+  (FlushAll)
+  (os/Exit code))

@@ -1,0 +1,132 @@
+;; si's runtime: Unicode normalization (R6RS (rnrs unicode)'s string-normalize-nfd/nfc/nfkd/nfkc, SM6), the standard
+;; algorithm (UAX #15: decompose, order by canonical combining class, compose with the primary composites, the
+;; blocked-sequence rule, Hangul algorithmic) over the tables of normdata.ae, which are Chez Scheme 10.3.0's own
+;; (Unicode 16.0), parsed once at first use.
+(in-ns 'go.arbace.scm)
+
+(go/file "normalize.go"
+  :imports [[strconv "strconv"] [strings "strings"] [sync "sync"]])
+
+(go/const [nmSBase 0xAC00] [nmLBase 0x1100] [nmVBase 0x1161] [nmTBase 0x11A7]
+          [nmLCount 19] [nmVCount 21] [nmTCount 28] [nmNCount 588] [nmSCount 11172])
+
+(go/var ^sync/Once nmOnce)
+(go/var ^{:tag (map rune (slice rune))} nmCanon)
+(go/var ^{:tag (map rune (slice rune))} nmCompat)
+(go/var ^{:tag (map uint64 rune)} nmComp)
+(go/var ^{:tag (map rune uint8)} nmCCC)
+
+(go/func nmHex ^rune [^string s]
+  (let [(values v _) (strconv/ParseUint s 16 32)]
+    (conv rune v)))
+
+(go/func nmLoad []
+  (set! nmCanon (make (map rune (slice rune))))
+  (set! nmCompat (make (map rune (slice rune))))
+  (set! nmComp (make (map uint64 rune)))
+  (set! nmCCC (make (map rune uint8)))
+  (range [_ line (strings/Split normData "\n")]
+    (let [f (strings/Fields line)]
+      (when (> (len f) 2)
+        (switch (aget f 0)
+          (case ["D" "K"]
+            (let [^{:tag (slice rune)} d nil]
+              (for [i 2] (< i (len f)) (inc! i)
+                (set! d (append d (nmHex (aget f i)))))
+              (if (== (aget f 0) "D")
+                (aset nmCanon (nmHex (aget f 1)) d)
+                (aset nmCompat (nmHex (aget f 1)) d))))
+          (case ["C"]
+            (aset nmComp (bit-or (<< (conv uint64 (nmHex (aget f 2))) 32) (conv uint64 (nmHex (aget f 3)))) (nmHex (aget f 1))))
+          (case ["N"]
+            (let [(values cc _) (strconv/Atoi (aget f 1))]
+              (for [i 2] (< i (len f)) (inc! i)
+                (let [r (strings/Split (aget f i) "-")
+                      lo (nmHex (aget r 0))
+                      hi lo]
+                  (when (== (len r) 2)
+                    (set! hi (nmHex (aget r 1))))
+                  (for [c lo] (<= c hi) (inc! c)
+                    (aset nmCCC c (conv uint8 cc)))))))))))
+  )
+
+(go/func nmClass ^uint8 [^rune r]
+  (when (< r 0x300)
+    (return 0))
+  (aget nmCCC r))
+
+(go/func nmDecomposeInto ^{:tag (slice rune)} [^{:tag (slice rune)} out ^rune r ^bool compat]
+  (when (< r 0xA0)
+    (return (append out r)))
+  (when (and (>= r nmSBase) (< r (+ nmSBase nmSCount)))
+    (let [s (- r nmSBase)
+          t (% s nmTCount)]
+      (set! out (append out (+ nmLBase (/ s nmNCount)) (+ nmVBase (/ (% s nmNCount) nmTCount))))
+      (when (> t 0)
+        (set! out (append out (+ nmTBase t))))
+      (return out)))
+  (when compat
+    (let [(values d ok) (aget nmCompat r)]
+      (when ok
+        (return (append out (spread d))))))
+  (let [(values d ok) (aget nmCanon r)]
+    (when ok
+      (return (append out (spread d)))))
+  (append out r))
+
+(go/func nmDecompose ^{:tag (slice rune)} [^{:tag (slice rune)} in ^bool compat]
+  (let [out (make (slice rune) 0 (+ (len in) 8))]
+    (range [_ r in]
+      (set! out (nmDecomposeInto out r compat)))
+    ;; the canonical ordering: a stable sort of each run of non-starters by class
+    (for [i 1] (< i (len out)) (inc! i)
+      (let [c (nmClass (aget out i))]
+        (when (> c 0)
+          (let [j i]
+            (while (and (> j 0) (> (nmClass (aget out (- j 1))) c))
+              (let [t (aget out (- j 1))]
+                (aset out (- j 1) (aget out j))
+                (aset out j t))
+              (dec! j))))))
+    out))
+
+(go/func nmCompose2 [^rune a ^rune b] :results [rune bool]
+  (when (and (>= a nmLBase) (< a (+ nmLBase nmLCount)) (>= b nmVBase) (< b (+ nmVBase nmVCount)))
+    (return (+ nmSBase (* (+ (* (- a nmLBase) nmVCount) (- b nmVBase)) nmTCount)) true))
+  (when (and (>= a nmSBase) (< a (+ nmSBase nmSCount)) (== (% (- a nmSBase) nmTCount) 0)
+             (> b nmTBase) (< b (+ nmTBase nmTCount)))
+    (return (+ a (- b nmTBase)) true))
+  (let [(values c ok) (aget nmComp (bit-or (<< (conv uint64 a) 32) (conv uint64 b)))]
+    (return c ok)))
+
+(go/func nmCompose ^{:tag (slice rune)} [^{:tag (slice rune)} in]
+  (let [out (make (slice rune) 0 (len in))
+        st -1]
+    (range [_ ch in]
+      (let [cc (nmClass ch)]
+        (when (>= st 0)
+          (let [last (- (len out) 1)]
+            (when (or (== last st) (< (nmClass (aget out last)) cc))
+              (let [(values c ok) (nmCompose2 (aget out st) ch)]
+                (when ok
+                  (aset out st c)
+                  (continue))))))
+        (when (== cc 0)
+          (set! st (len out)))
+        (set! out (append out ch))))
+    out))
+
+(go/func nmNormalize ^{:tag (slice rune)} [^{:tag (slice rune)} in ^bool compat ^bool compose]
+  (.Do (addr nmOnce) nmLoad)
+  (let [d (nmDecompose in compat)]
+    (when compose
+      (set! d (nmCompose d)))
+    d))
+
+(go/func nmForm ^{:tag (func [any] [any])} [^string who ^bool compat ^bool compose]
+  (fn ^any [^any x]
+    (let [s (ArgString who x)]
+      (range [_ r (.-R s)]
+        (when (>= r 0xA0)
+          (return (dcMk (nmNormalize (.-R s) compat compose)))))
+      (dcMk (dcCopy (.-R s))))))

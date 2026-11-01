@@ -1,0 +1,43 @@
+;; si's runtime: the clock (SC105 (b), doc/scheme/SCHEME-SURVEY.md, "As built: SM8b"): Chez's real-time and cpu-time
+;; (milliseconds since the start, as exact integers) and current-microseconds (since the epoch), the names
+;; (psyntax system $all) lists since the boot of SM8b (tools/psyntax/boot.ss's si-primitives); (scheme time) is over them.
+;; The watchdog (SC111 (b)): (watchdog MS) arms a timer; when it fires, the machine's loop (eval.ae, every 4,096 steps)
+;; raises an &error (who watchdog) in the running program, so a looping test fails and its harness goes on;
+;; (watchdog 0) disarms it.
+(in-ns 'go.arbace.scm)
+
+(go/file "clock.go"
+  :imports [[atomic "sync/atomic"] [time "time"]])
+
+(go/var ^{:doc "start is when the runtime started: real-time's zero.\n"} start (time/Now))
+
+(go/var ^{:tag atomic/Bool :doc "watchdogFired is set by the watchdog's timer, cleared when the machine raises.\n"} watchdogFired)
+(go/var ^{:tag (* time/Timer)} watchdogTimer)
+(go/var ^int64 watchdogMs)
+(go/var ^{:tag int :doc "watchSteps counts the machine's steps between looks at watchdogFired.\n"} watchSteps)
+
+(go/func watchdogTick "watchdogTick is the machine's step hook: every 4,096 steps, a fired watchdog raises its &error.\n" []
+  (inc! watchSteps)
+  (when (and (== (bit-and watchSteps 4095) 0) (.Load (addr watchdogFired)))
+    (.Store (addr watchdogFired) false)
+    (Violation CondError "watchdog" "time limit of ~s ms exceeded" watchdogMs)))
+
+(go/func init []
+  (Def1 "watchdog" (fn ^any [^any x]
+    (let [(values ms ok) (assert int64 x)]
+      (when (or (not ok) (< ms 0))
+        (NotA "watchdog" "nonnegative fixnum" x))
+      (when (!= watchdogTimer nil)
+        (.Stop watchdogTimer)
+        (set! watchdogTimer nil))
+      (.Store (addr watchdogFired) false)
+      (set! watchdogMs ms)
+      (when (> ms 0)
+        (set! watchdogTimer (time/AfterFunc (* (conv time/Duration ms) time/Millisecond) (fn [] (.Store (addr watchdogFired) true)))))
+      Unspec)))
+  (Def "real-time" 0 0 (fn ^any [^{:tag (slice any)} a]
+    (conv int64 (.Milliseconds (time/Since start)))))
+  (Def "cpu-time" 0 0 (fn ^any [^{:tag (slice any)} a]
+    (/ (cpuNanos) 1000000)))
+  (Def "current-microseconds" 0 0 (fn ^any [^{:tag (slice any)} a]
+    (.UnixMicro (time/Now)))))

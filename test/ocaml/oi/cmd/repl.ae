@@ -1,0 +1,98 @@
+(in-ns 'go.arbace.oi.cmd.oi) (go/file "repl.go" :imports [
+
+
+    ^{:line 4} [bufio "bufio"]
+    ^{:line 5} [fmt "fmt"]
+    ^{:line 6} [os "os"]
+    ^{:line 7} [exec "os/exec"]
+    ^{:line 8} [filepath "path/filepath"]
+    ^{:line 9} [strconv "strconv"]
+    ^{:line 10} [strings "strings"]
+
+    ^{:line 12} [oi "arbace/oi"]])
+
+
+
+
+
+^{:go/end 49} (go/func repl "repl is the toplevel: phrases ending in \";;\" on stdin, each given to the oracle (ORACLE WORKDIR N,\nthe phrase on its stdin: it prints \"ok\" and leaves WORKDIR/top_N.ae and top_N.typed, or the\ncompiler's error), run in the session and printed as the ocaml toplevel prints them.\n" ^int [^{:tag (slice string)} args]
+  (when (!= (len args) 3)
+    (usage))
+
+  (let [(values lib err) (loadLibrary (aget args 0))]
+    (when (!= err nil)
+      (fmt/Fprintf os/Stderr "oi: library: %v\n" err)
+      (return oi/StatusInternal))
+
+    (let [(values work oracle) (values (aget args 1) (aget args 2))
+        ^{:line 28} tl (oi/NewToplevel lib)]
+      (defer (oi/Release))
+      (let [in (bufio/NewReader os/Stdin)
+          ^{:line 31} n 0
+          ^{:line 32 :tag strings/Builder} phrase (zero strings/Builder)]
+        (while true
+          (let [(values line err) (.ReadString in \newline)]
+            (.WriteString phrase line)
+            (let [text (strings/TrimSpace (.String phrase))]
+              (when (or (strings/HasSuffix text ";;") ^:go/paren (and (!= err nil) (!= text "")))
+                (.Reset phrase)
+                (set! text (strings/TrimSuffix text ";;"))
+                (when (!= (strings/TrimSpace text) "")
+                  (inc! n)
+                  (fmt/Print (step tl work oracle n text))))
+
+
+              (when (!= err nil)
+                ;; the ocaml toplevel ends its output with a newline at the end of its input
+                (fmt/Println)
+                (return 0)))))))))
+
+
+
+
+^{:go/end 77} (go/func step ^string [^{:tag (* oi/Toplevel)} tl ^string work ^string oracle ^int n ^string text]
+  (let [cmd (exec/Command oracle work (strconv/Itoa n))]
+    (set! (.-Stdin cmd) (strings/NewReader (+ text "\n")))
+    (let [^{:tag (slice byte)} out (zero (slice byte))
+        ^{:line 55 :tag error} err (zero error)]
+      (oi/Blocking ^{:go/end 56} (fn [] (set! (values out err) (.CombinedOutput cmd))))
+      (when (!= err nil)
+        (return (fmt/Sprintf "oi: oracle: %v\n%s" err out)))
+
+      (when (!= (strings/TrimSpace (conv string out)) "ok")
+        (return (conv string out)))
+
+      (let [base (filepath/Join work (fmt/Sprintf "top_%d" n))
+          (values u ^:assign err) (loadUnit (+ base ".ae"))]
+        (when (!= err nil)
+          (return (fmt/Sprintf "oi: %v\n" err)))
+
+        (let [(values sig ^:assign err) (readSignature (+ base ".typed"))]
+          (when (!= err nil)
+            (return (fmt/Sprintf "oi: %v\n" err)))
+
+          (let [(values res ^:assign err) (.Phrase tl u sig)]
+            (when (!= err nil)
+              (return (fmt/Sprintf "oi: %v\n" err)))
+
+            ^{:line 76} res))))))
+
+
+^{:go/end 97} (go/func readSignature [^string path] :results [string error]
+  (let [(values b err) (os/ReadFile path)]
+    (when (!= err nil)
+      (return "" err))
+
+    (let [(values forms ^:assign err) (oi/ReadForms b)]
+      (when (or (!= err nil) (!= (len forms) 1))
+        (return "" (fmt/Errorf "%s: not a typed dump" path)))
+
+      (let [(values l ok) (assert oi/SList (aget forms 0))]
+        (when (or (not ok) (< (len l) 2))
+          (return "" (fmt/Errorf "%s: not a typed dump" path)))
+
+        (let [(values s ^:assign ok) (assert string (aget l 1))]
+          (when (not ok)
+            (return "" (fmt/Errorf "%s: %v" path (subslice l 1))))
+
+          (return s nil))))))

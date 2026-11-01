@@ -1,0 +1,2477 @@
+(ns arbace.c.check
+  "The checker over C forms (doc/c/SPEC.md §11.2; doc/C23-SURVEY.md, C4, \"As built: C4\"): every
+  expression's type and constant value, the integer promotions and the usual arithmetic conversions
+  (6.3), lvalue, array and function conversions, null pointer constants, constant expressions and their
+  values (6.6: enumerators, sizeof, alignof, constexpr objects, case labels, array sizes), layout by the
+  SysV x86-64 psABI as gcc 15.2 lays out (sizes, alignments, members' offsets, bit-fields, packed,
+  aligned), linkage (6.2.2), arrays completed by their initializers, `auto`'s, `__auto_type`'s and
+  `typeof`'s types, `_Generic`'s selection, `_BitInt`. Arbace's own (CS8 (a)); cc's checker is its oracle
+  where it succeeds (bin/ci annotations, arbace.repr.c.annot).
+
+  `check-unit` checks a read's forms (arbace.repr.c/read-c's) and returns its errors (the reference's
+  errors the checker diagnoses: only those gcc 15.2 gives, as errors) and, when asked, the annotations
+  of every main-file item in tools/ccdump's types format. A header unit's forms are checked where their
+  c/include stands, without annotations. Moved from arbace/repr/c/ as arbace.c.check in C5 (CS90 (a)),
+  with ci's namespaces; `:results` gives ci's builder each form's result (CS95 (a)).
+
+  Types are maps: {:k KIND} for the base types (:void :bool :char :schar :uchar :short :ushort :int :uint
+  :long :ulong :llong :ullong :int128 :uint128 :float :double :ldouble and the other floating types),
+  {:k :bitint :n N :u bool}, {:k :complex :of T}, {:k :ptr :to T}, {:k :array :of T :n N-or-nil :vla bool},
+  {:k :fn :ret T :params [T] :variadic bool :proto bool}, {:k :struct|:union|:enum :rec R} (R a mutable
+  record of the tag: its members, layout, completeness), {:k :nullptr}, {:k :invalid}; qualifiers in :q."
+  (:require [arbace.string :as str])
+  (:import (java.util ArrayList HashMap HashSet IdentityHashMap)))
+
+(set! *warn-on-reflection* true)
+
+;; ---------------------------------------------------------------------------------------------
+;; The context
+
+(def ^:dynamic *cx* nil)
+(def ^:dynamic *line* 0)
+;; the included unit whose forms are being checked (its name, as the read keys it), nil for the main file's: its
+;; errors are FILE:LINE: (review 006, finding 7)
+(def ^:dynamic *unit* nil)
+(def ^:dynamic *unit-info*
+  "CS214 (R5): a delay of the unit being checked (*unit*) read from its file when it can be: {:ext the lines with `__extension__`
+  :pragma whether it has a `#pragma GCC system_header` line (review 031's finding F)}; read only when a pedwarn is judged. The
+  main file's ext lines are the cx's :ext-lines." (delay {:ext #{} :pragma false}))
+(def ^:dynamic *unit-line?*
+  "CS214 (R5): whether *line* is the line of a form in its own unit's file (a reread unit's forms carry :line); the forms
+  read from C carry none in a unit, and *line* is then the line of the `#include` in the main file." false)
+(def ^:dynamic *system-unit*
+  "CS214 (R5): whether the unit being checked is a system header (its file under a directory of the host's search list):
+  gcc gives no pedwarn there." false)
+(def ^:dynamic *switch* nil) ; the innermost switch's {:t promoted type :seen atom of [lo hi]}
+
+(defn- cx [k] (get *cx* k))
+
+(defn- ann!
+  "An annotation line of the item being checked (when annotating)."
+  [^String s]
+  (when-let [^ArrayList a (cx :annot)]
+    (when @(cx :annotating)
+      ;; GNU's vector types (cc's checker reads them as their elements)
+      (when (.contains s "vector(") (when-let [^java.util.Set fs (cx :feats)] (.add fs :vector-types)))
+      (.add a s))))
+
+(defn- feat!
+  "A feature of the item being checked that cc's checker is known not to handle as gcc does (the classes
+  of bin/ci annotations' differences, arbace.repr.c.annot)."
+  [k]
+  (when-let [^java.util.Set fs (cx :feats)] (.add fs k)))
+
+(defn- err!
+  "An error of the reference's that the checker diagnoses."
+  [^String msg]
+  (let [^ArrayList es (cx :errors)]
+    (when (< (.size es) 100)
+      (.add es (str (when *unit* (str *unit* ":")) *line* ": " msg)))))
+
+(defn- pedwarn!
+  "A pedwarn of gcc's, an error under -pedantic-errors (CS132): only when the file's options ask for that, and not
+  on a line with `__extension__`."
+  [^String msg]
+  (when (and (= :errors (cx :pedantic))
+             (not *system-unit*)
+             (not (and *unit* (:pragma @*unit-info*)))
+             (not (contains? (if (and *unit* *unit-line?*) (:ext @*unit-info*) (or (cx :ext-lines) #{})) *line*)))
+    (err! msg)))
+
+(defn- line-of [f] (or (:line (meta f)) *line*))
+
+(defn- record!
+  "CS95 (a): the result of the form `f` (an expression's {:t :v :lv :bits ...}, a declarator's entry) in
+  the identity map of a check-unit asked for :results (ci's builder, arbace.c.build)."
+  [f r]
+  (when-let [^IdentityHashMap m (cx :results)]
+    (when (or (seq? f) (symbol? f) (vector? f)) (.put m f r)))
+  r)
+
+(defmacro ^:private at-line [f & body]
+  `(binding [*line* (line-of ~f)] ~@body))
+
+(defn- std-num
+  "The file's standard as a year: 89, 99, 11, 17, 23 (and 94 as 89)."
+  ^long []
+  (case (cx :std) (:c89 :c94 :gnu89) 89 (:c99 :gnu99) 99 (:c11 :gnu11) 111 (:c17 :gnu17) 117 (:c2y :gnu2y) 124 123))
+
+(defn- c23? [] (>= (std-num) 123))
+(defn- c99? [] (>= (std-num) 99))
+
+(defn- pedwarn-c2y!
+  "A pedwarn about a C2y feature used in C23 (Wc23-c2y-compat; -Wno-c23-c2y-compat turns it off)."
+  [^String msg]
+  (when (and (< (long (std-num)) 124) (not (cx :no-c2y-compat))) (pedwarn! msg)))
+
+;; ---------------------------------------------------------------------------------------------
+;; Types
+
+(defn- bit-field?
+  "An expression's result that designates a bit-field: a member access (an lvalue) of one. An assignment's or an increment's
+  result keeps the width for its promotions but is no lvalue, so sizeof, typeof and _Alignof take it (review 027's finding 7)."
+  [r]
+  (boolean (and (:bits r) (:lv r))))
+
+(def t-void {:k :void})
+(def t-bool {:k :bool})
+(def t-char {:k :char})
+(def t-int {:k :int})
+(def t-uint {:k :uint})
+(def t-long {:k :long})
+(def t-ulong {:k :ulong})
+(def t-llong {:k :llong})
+(def t-double {:k :double})
+(def t-float {:k :float})
+(def t-invalid {:k :invalid})
+(def t-nullptr {:k :nullptr})
+
+(defn ptr [t] {:k :ptr :to t})
+(defn arr [t n] {:k :array :of t :n n})
+
+(def ^:private base-syms
+  '{void :void _Bool :bool char :char signed-char :schar unsigned-char :uchar short :short unsigned-short :ushort
+    int :int unsigned :uint long :long unsigned-long :ulong long-long :llong unsigned-long-long :ullong
+    __int128 :int128 unsigned-__int128 :uint128 float :float double :double long-double :ldouble
+    _Float16 :float16 _Float32 :float32 _Float64 :float64 _Float128 :float128 _Float32x :float32x
+    _Float64x :float64x _Float128x :float128x __bf16 :bf16 _Decimal32 :dec32 _Decimal64 :dec64 _Decimal128 :dec128
+    _Decimal64x :dec64x})
+
+(def ^:private int-info
+  ;; kind [bits signed rank]
+  {:bool [1 false 10] :char [8 true 85] :schar [8 true 85] :uchar [8 false 85] :short [16 true 165] :ushort [16 false 165]
+   :int [32 true 325] :uint [32 false 325] :long [64 true 645] :ulong [64 false 645] :llong [64 true 646] :ullong [64 false 646]
+   :int128 [128 true 1285] :uint128 [128 false 1285]})
+
+(def ^:private float-rank
+  {:float16 1 :bf16 1 :float 2 :float32 2 :double 3 :float64 3 :float32x 3 :ldouble 4 :float64x 4 :float128 5 :float128x 5
+   :dec32 1 :dec64 2 :dec128 3 :dec64x 3})
+
+(def ^:private float-tie
+  ;; the preference between floating kinds of one rank: _FloatN 3, float/double/long double 2 (the default), _FloatNx 1
+  (fn [k] (case k (:float32 :float64 :float128 :dec128) 3 (:float32x :float64x :float128x :dec64x) 1 2)))
+
+(defn unq [t] (if (:q t) (dissoc t :q) t))
+(defn qual [t q] (if (= :array (:k t)) (assoc t :of (qual (:of t) q)) (update t :q (fnil conj #{}) q)))
+(defn quals [t] (if (= :array (:k t)) (quals (:of t)) (or (:q t) #{})))
+
+(defn- char-signed? [] (not (cx :unsigned-char)))
+
+(defn enum-under
+  "An enumerated type's compatible integer type."
+  [t]
+  (let [^HashMap r (:rec t)] (or (.get r :under) t-uint)))
+
+(defn int-type? [t] (let [k (:k t)] (or (contains? int-info k) (= k :bitint) (= k :enum))))
+(defn float-type? [t] (contains? float-rank (:k t)))
+(defn complex-type? [t] (= :complex (:k t)))
+(defn arith-type? [t] (or (int-type? t) (float-type? t) (complex-type? t)))
+(defn ptr-type? [t] (= :ptr (:k t)))
+(defn scalar-type? [t] (or (arith-type? t) (ptr-type? t) (= :nullptr (:k t))))
+(defn record-type? [t] (#{:struct :union} (:k t)))
+(defn void-type? [t] (= :void (:k t)))
+
+(defn int-bits
+  "An integer type's width and signedness: [bits signed]."
+  [t]
+  (case (:k t)
+    :bitint [(long (:n t)) (not (:u t))]
+    :enum (int-bits (enum-under t))
+    :char [8 (char-signed?)]
+    (let [[b s] (int-info (:k t))] [(long (or b 32)) (if (nil? s) true s)])))
+
+(defn- rank ^long [t]
+  (case (:k t)
+    :bitint (* 10 (long (:n t)))
+    :enum (rank (enum-under t))
+    (long (or (nth (int-info (:k t)) 2 nil) 325))))
+
+(defn wrap
+  "An integer value converted to the integer type `t` (two's complement, modulo its width)."
+  [v t]
+  (when (some? v)
+    (if (= :bool (:k (unq t)))
+      (if (zero? v) 0 1)
+      (let [[bits signed] (int-bits t)
+            b (biginteger v)
+            m (.shiftLeft BigInteger/ONE (int bits))
+            r (.mod b m)
+            r (if (and signed (>= (.bitLength r) (int bits)) (.testBit r (int (dec bits)))) (.subtract r m) r)]
+        (if (< (.bitLength r) 63) (long r) (bigint r))))))
+
+(defn- ldouble-size ^long [] (long (or (cx :ldouble-size) 16)))
+
+(declare size-of align-of complete-record! vla?)
+
+(defn- bitint-size ^long [^long n] (cond (<= n 8) 1 (<= n 16) 2 (<= n 32) 4 (<= n 64) 8 :else (* 8 (quot (+ n 63) 64))))
+
+(defn size-of
+  "A type's size in bytes, or nil (incomplete, a VLA)."
+  [t]
+  (case (:k t)
+    (:bool :char :schar :uchar) 1
+    (:short :ushort :float16 :bf16) 2
+    (:int :uint :float :float32 :dec32) 4
+    (:long :ulong :llong :ullong :double :float64 :float32x :dec64 :ptr :nullptr) 8
+    (:int128 :uint128 :float128 :float64x :float128x :dec128 :dec64x) 16
+    :ldouble (ldouble-size)
+    :void 1
+    :fn 1
+    :vector (:n t)
+    :bitint (bitint-size (:n t))
+    :complex (when-let [s (size-of (:of t))] (* 2 (long s)))
+    :enum (size-of (enum-under t))
+    :array (when (and (:n t) (not (:vla t)))
+             (when-let [s (size-of (:of t))]
+               (let [n (*' s (:n t))] (when (< n Long/MAX_VALUE) (long n)))))
+    (:struct :union) (let [^HashMap r (:rec t)] (when (.get r :complete) (.get r :size)))
+    nil))
+
+(declare align-of*)
+
+(defn align-of
+  "A type's alignment (a typedef's aligned attribute's when it has one)."
+  ^long [t]
+  (if-let [a (:talign t)] (long a) (align-of* t)))
+
+(defn- align-of*
+  ^long [t]
+  (case (:k t)
+    (:array) (align-of (:of t))
+    :complex (align-of (:of t))
+    :ldouble (ldouble-size)
+    :bitint (min 8 (bitint-size (:n t)))
+    :enum (align-of (enum-under t))
+    (:struct :union) (let [^HashMap r (:rec t)] (long (or (.get r :align) 1)))
+    (:void :fn) 1
+    :vector (long (:n t))
+    (long (or (size-of t) 1))))
+
+(defn- rec-of [t] (:rec t))
+
+(defn tstr
+  "A type as tools/ccdump's types mode writes it (no qualifiers)."
+  ^String [t]
+  (let [b (StringBuilder.)]
+    (letfn [(w [t d]
+              (if (> d 32)
+                (.append b "?")
+                (case (:k t)
+                  :ptr (do (.append b "*") (w (:to t) (inc d)))
+                  :array (do (cond (:vla t) (.append b "[*]")
+                                   (nil? (:n t)) (.append b "[]")
+                                   :else (.append b (str "[" (:n t) "]")))
+                             (w (:of t) (inc d)))
+                  :fn (do (.append b "fn(")
+                          (let [ps (:params t)]
+                            (doseq [[i p] (map-indexed vector ps)]
+                              (when (pos? i) (.append b ","))
+                              (w p (inc d)))
+                            (when (:variadic t) (when (seq ps) (.append b ",")) (.append b "..."))
+                            (when (and (:proto t) (empty? ps) (not (:variadic t)) (not (:empty-list t))) (.append b "void")))
+                          (.append b ")")
+                          (w (:ret t) (inc d)))
+                  (:struct :union :enum) (let [^HashMap r (:rec t)]
+                                           (.append b (str (name (:k t)) " " (or (.get r :tag) "#anon"))))
+                  :complex (do (.append b "_Complex ") (w (:of t) (inc d)))
+                  :bitint (.append b (str (if (:u t) "unsigned _BitInt(" "_BitInt(") (:n t) ")"))
+                  :nullptr (.append b "nullptr_t")
+                  :vector (do (.append b (str "vector(" (:n t) ")")) (w (:of t) (inc d)))
+                  :invalid (.append b "?")
+                  (.append b (case (:k t)
+                               :void "void" :bool "_Bool" :char "char" :schar "signed char" :uchar "unsigned char"
+                               :short "short" :ushort "unsigned short" :int "int" :uint "unsigned" :long "long"
+                               :ulong "unsigned long" :llong "long long" :ullong "unsigned long long"
+                               :int128 "__int128" :uint128 "unsigned __int128" :float "float" :double "double"
+                               :ldouble "long double" :float16 "_Float16" :float32 "_Float32" :float64 "_Float64"
+                               :float128 "_Float128" :float32x "_Float32x" :float64x "_Float64x" :float128x "_Float128x"
+                               :bf16 "__bf16" :dec32 "_Decimal32" :dec64 "_Decimal64" :dec128 "_Decimal128" :dec64x "_Decimal64x"
+                               "?")))))]
+      (w t 0))
+    (str b)))
+
+(def ^:dynamic *compat-depth* 0)
+
+(declare compatible?)
+
+(defn- mcompat?
+  "Compatibility of two struct members' types (C23 6.2.7 with GNU's variable and zero-length arrays): tagless records by
+  their members, variable-length arrays by their elements, [] as [0]."
+  [a b]
+  (let [a (if (:q a) a a) ka (:k a) kb (:k b)]
+    (cond
+      (and (#{:struct :union} ka) (= ka kb) (nil? (.get ^HashMap (:rec a) :tag)) (nil? (.get ^HashMap (:rec b) :tag))
+           (.get ^HashMap (:rec a) :complete) (.get ^HashMap (:rec b) :complete))
+      (let [ma (.get ^HashMap (:rec a) :members) mb (.get ^HashMap (:rec b) :members)]
+        (and (= (count ma) (count mb))
+             (every? true? (map (fn [x y] (and (= (:name x) (:name y)) (= (:bits x) (:bits y)) (mcompat? (:t x) (:t y)))) ma mb))))
+      (and (= :ptr ka) (= :ptr kb)) (compatible? a b)
+      (and (= :array ka) (= :array kb))
+      (and (= (quals a) (quals b)) (mcompat? (:of a) (:of b))
+           (or (:vla a) (:vla b) (= (or (:n a) 0) (or (:n b) 0))))
+      :else (compatible? a b))))
+
+(defn compatible?
+  "Type compatibility (6.2.7), qualifiers compared."
+  [a b]
+  (let [ka (:k a) kb (:k b)]
+    (cond
+      (not= (quals a) (quals b)) false
+      (and (= ka :enum) (not= kb :enum)) (compatible? (enum-under a) (unq b))
+      (and (= kb :enum) (not= ka :enum)) (compatible? (unq a) (enum-under b))
+      (not= ka kb) (and (= #{ka kb} #{:char}) false)
+      :else
+      (case ka
+        :ptr (compatible? (:to a) (:to b))
+        :array (and (compatible? (:of a) (:of b)) (or (nil? (:n a)) (nil? (:n b)) (:vla a) (:vla b) (= (:n a) (:n b))))
+        :fn (and (compatible? (unq (:ret a)) (unq (:ret b)))
+                 (or (not (:proto a)) (not (:proto b))
+                     (and (= (count (:params a)) (count (:params b))) (= (boolean (:variadic a)) (boolean (:variadic b)))
+                          (every? true? (map #(compatible? (unq %1) (unq %2)) (:params a) (:params b))))))
+        (:struct :union :enum) (let [^HashMap ra (:rec a) ^HashMap rb (:rec b)]
+                                 (or (identical? ra rb)
+                                     (and (= (.get ra :tag) (.get rb :tag)) (some? (.get ra :tag))
+                                          (if (and (.get ra :complete) (.get rb :complete))
+                                            ;; C23 (6.2.7): the same members, of compatible types (self-references cut off);
+                                            ;; enumerations: the same constants and values, and a fixed underlying type the same (CS152)
+                                            (and (= (map :name (.get ra :members)) (map :name (.get rb :members)))
+                                                 (or (not= ka :enum)
+                                                     (and (= (.get ra :consts) (.get rb :consts))
+                                                          (= (boolean (.get ra :fixed)) (boolean (.get rb :fixed)))
+                                                          (or (not (.get ra :fixed)) (compatible? (unq (.get ra :under)) (unq (.get rb :under))))))
+                                                 (or (> (long *compat-depth*) 2)
+                                                     (binding [*compat-depth* (inc (long *compat-depth*))]
+                                                       (every? true? (map (fn [x y] (and (= (:bits x) (:bits y)) (= (boolean (:mpacked x)) (boolean (:mpacked y))) (= (:align x) (:align y))
+                                                                     (mcompat? (:t x) (:t y))))
+                                                                          (.get ra :members) (.get rb :members))))))
+                                            (identical? (.get ra :scope) (.get rb :scope))))))
+        :bitint (and (= (:n a) (:n b)) (= (boolean (:u a)) (boolean (:u b))))
+        :complex (compatible? (:of a) (:of b))
+        true))))
+
+;; conversions (6.3)
+
+(defn decay
+  "Lvalue conversion's array and function conversions."
+  [t]
+  (case (:k t)
+    :array (ptr (:of t))
+    :fn (ptr t)
+    t))
+
+(defn promote
+  "The integer promotions (6.3.1.1), of a bit-field of `bits` too."
+  ([t] (promote t nil))
+  ([t bits]
+   (let [t (unq t)]
+     (cond
+       (= :enum (:k t)) (do (feat! :cc-enum-type) (promote (enum-under t) bits))
+       (= :bitint (:k t)) t
+       (and bits (contains? int-info (:k t)))
+       (let [[tb signed] (int-bits t)]
+         (when (> (long tb) 32) (feat! :cc-bitfield-promotion))
+         (cond (< (long bits) 32) t-int
+               (= (long bits) 32) (if signed t-int t-uint)
+               :else t))
+       (and (contains? int-info (:k t)) (< (rank t) 325)) t-int
+       :else t))))
+
+(defn- unsigned-of [t]
+  (case (:k t)
+    :int t-uint :long t-ulong :llong {:k :ullong} :int128 {:k :uint128} :char {:k :uchar} :schar {:k :uchar} :short {:k :ushort}
+    :bitint (assoc t :u true)
+    t))
+
+(defn- float-of [t] (if (complex-type? t) (:of t) t))
+
+(defn usual
+  "The usual arithmetic conversions (6.3.1.8) of two operands' types (promoted, bit-fields' widths given)."
+  [a b]
+  (let [a (unq a) b (unq b)]
+    (cond
+      (and (or (complex-type? a) (complex-type? b)) (not (float-type? (float-of a))) (not (float-type? (float-of b))))
+      {:k :complex :of (usual (float-of a) (float-of b))}
+      (or (complex-type? a) (complex-type? b) (float-type? a) (float-type? b))
+      (let [fa (float-of a) fb (float-of b)
+            r (cond (not (float-type? fa)) fb
+                    (not (float-type? fb)) fa
+                    ;; _Float16 with __bf16 (neither's values contain the other's) is _Float16 in either order, as gcc gives
+                    (and (#{:float16 :bf16} (:k fa)) (#{:float16 :bf16} (:k fb)) (not= (:k fa) (:k fb))) (if (= :float16 (:k fa)) fa fb)
+                    ;; equal rank: an interchange _FloatN over the standard type over _FloatNx, as gcc's c_common_type (review 079's finding 6)
+                    (= (long (float-rank (:k fa))) (long (float-rank (:k fb)))) (if (>= (long (float-tie (:k fa))) (long (float-tie (:k fb)))) fa fb)
+                    (> (long (float-rank (:k fa))) (long (float-rank (:k fb)))) fa
+                    :else fb)]
+        (if (or (complex-type? a) (complex-type? b)) {:k :complex :of r} r))
+      :else
+      (let [a (promote a) b (promote b)]
+        (if (= a b)
+          a
+          (let [[ba sa] (int-bits a) [bb sb] (int-bits b)]
+            (cond
+              (= sa sb) (if (>= (rank a) (rank b)) a b)
+              :else (let [[u s] (if sa [b a] [a b])
+                          [bu _] (int-bits u) [bs _] (int-bits s)]
+                      (cond
+                        (>= (rank u) (rank s)) u
+                        (> (long bs) (long bu)) s
+                        :else (unsigned-of s))))))))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Scopes
+
+(defn- push-scope! [] (.add ^ArrayList (cx :scopes) {:ord (HashMap.) :tags (HashMap.)}))
+(defn- pop-scope! [] (let [^ArrayList s (cx :scopes)] (.remove s (dec (.size s)))))
+(defn- top-scope [] (let [^ArrayList s (cx :scopes)] (.get s (dec (.size s)))))
+(defn- file-scope? [] (<= (.size ^ArrayList (cx :scopes)) 2)) ; the builtins' scope, then the file's
+
+(defmacro ^:private with-scope [& body]
+  `(do (push-scope!) (try ~@body (finally (pop-scope!)))))
+
+(defn- lookup
+  "The innermost declaration of the ordinary identifier `n`."
+  [^String n]
+  (let [^ArrayList s (cx :scopes)]
+    (loop [i (dec (.size s))]
+      (when (>= i 0)
+        (or (.get ^HashMap (:ord (.get s i)) n) (recur (dec i)))))))
+
+(defn- lookup-tag [^String n]
+  (let [^ArrayList s (cx :scopes)]
+    (loop [i (dec (.size s))]
+      (when (>= i 0)
+        (or (.get ^HashMap (:tags (.get s i)) n) (recur (dec i)))))))
+
+(defn- declare! [^String n e] (.put ^HashMap (:ord (top-scope)) n e) e)
+
+(defn- file-declare! [^String n e]
+  (let [^ArrayList s (cx :scopes)] (.put ^HashMap (:ord (.get s 1)) n e) e))
+
+;; ---------------------------------------------------------------------------------------------
+;; Names in the forms
+
+(defn- ident
+  "The C identifier a form names: a symbol, or (c/id \"...\")."
+  [x]
+  (cond
+    (symbol? x) (name x)
+    (and (seq? x) (= 'c/id (first x))) (second x)
+    :else nil))
+
+(def ^:private decl-heads '#{c/var c/declare c/typedef c/struct c/union c/enum c/group c/static-assert c/defn
+                             c/local-labels c/declare-specs c/attr-decl})
+
+(def ^:private directive-heads '#{c/define c/undef c/directive c/pragma c/include c/asm c/expr-directive})
+
+;; ---------------------------------------------------------------------------------------------
+;; Attributes: GNU's packed and aligned, C23's gnu::
+
+(defn- attr-items
+  "The attributes of a metadata vector, each [name args parens ns gnu] (GNU's (__attribute__ a ...) spread): `parens`
+  when the attribute is written with an argument list (even an empty one), `ns` its prefix, `gnu` for the GNU spelling."
+  ([v] (attr-items v false))
+  ([v gnu]
+   (mapcat (fn [a]
+             (cond
+               (and (seq? a) (= '__attribute__ (first a))) (attr-items (rest a) true)
+               ;; another vendor's attribute's arguments are balanced tokens, not expressions
+               (vector? a) [[(let [n (first a)] (if (symbol? n) (str/replace (name n) #"^__|__$" "") (str n)))
+                             (let [n (first a)] (if (and (symbol? n) (namespace n) (not= "gnu" (namespace n))) [] (vec (rest a))))
+                             true (let [n (first a)] (when (symbol? n) (namespace n))) gnu (meta a)]]
+               (symbol? a) [[(str/replace (name a) #"^__|__$" "") [] false (namespace a) gnu nil]]
+               :else []))
+           v)))
+
+(defn- attrs-of [m & ks] (mapcat #(attr-items (get m %)) ks))
+
+(def ^:private all-attr-keys [:c/attrs :c/decl-attrs :c/after-attrs :c/list-attrs :c/decl-end-attrs :c/def-attrs :c/end-attrs :c/gnu-attrs])
+
+(declare ex const-int check-type parse-type)
+
+(def ^:private std-no-arg-attrs #{"maybe_unused" "noreturn" "_Noreturn" "reproducible" "unsequenced" "fallthrough"})
+(def ^:private std-string-attrs #{"deprecated" "nodiscard"})
+
+(defn- std-attr-check!
+  "C23 6.7.13.2's attribute argument rules for the standard attributes written as [[...]]: those that take no
+  argument given a (possibly empty) argument list, deprecated and nodiscard given an empty list or anything but one
+  plain string literal."
+  [m]
+  (doseq [[n args parens ns gnu am] (apply attrs-of m all-attr-keys)
+          :when (and parens (not gnu) (nil? ns))]
+    (cond
+      (contains? std-no-arg-attrs n) (err! (str "'" n "' attribute does not take any arguments"))
+      (contains? std-string-attrs n)
+      (cond (empty? args) (err! "parentheses must be omitted if attribute argument list is empty")
+            (not (and (= 1 (count args)) (or (string? (first args)) (and (seq? (first args)) (= 'byte-string (ffirst args))))
+                      (not (contains? (or (:c/aparen am) #{}) 1))))
+            (err! (str "expected string-literal in the '" n "' attribute"))))))
+
+;; CS140: where a standard attribute stood. The forms keep it (convert.ae): :c/type-attrs (after the type specifiers),
+;; :c/attrs on an array or function type (after its declarator), :c/after-at (:array or :function) for the declarator's
+;; trailing attributes, :c/attrs on a statement or label.
+(def ^:private std-position-attrs #{"deprecated" "fallthrough" "maybe_unused" "nodiscard" "noreturn" "_Noreturn" "reproducible" "unsequenced"})
+(def ^:private fn-type-attrs #{"reproducible" "unsequenced"})
+
+(defn- std-names
+  "The standard (unprefixed, not GNU) attributes of a vector that have a position rule."
+  [v]
+  (for [[n _ _ ns gnu] (attr-items v) :when (and (nil? ns) (not gnu) (std-position-attrs n))] n))
+
+(defn- ignored!
+  "gcc's -Wattributes error for an attribute it ignores, under -pedantic-errors; `__extension__` on the line does not
+  silence it (CS150: gcc errs on `[[__extension__ vector_size (4)]]`)."
+  [n]
+  (when (= :errors (cx :pedantic)) (err! (str "'" n "' attribute ignored"))))
+
+(defn- std-attr-misc!
+  "CS150, the standard-syntax attributes `[[...]]` of an attribute vector under -pedantic-errors: any of them before C23
+  is a pedwarn (not on a line with `__extension__`), and an unprefixed one that is no standard attribute is ignored."
+  [v]
+  (doseq [[n _ _ ns gnu] (attr-items v) :when (not gnu)]
+    (when (< (std-num) 123) (pedwarn! "ISO C does not support '[[]]' attributes before C23"))
+    (when (and (nil? ns) (not (std-position-attrs n))) (ignored! n))))
+
+(defn- tag-attrs!
+  "A struct, union or enum specifier's (or an enumerator's) attributes: noreturn applies to functions only; a
+  enumerator is no type, so nodiscard does not apply either."
+  [v enumerator?]
+  (std-attr-misc! v)
+  (doseq [n (std-names v)]
+    (cond
+      (contains? #{"noreturn" "_Noreturn"} n) (err! (str "'" n "' attribute can only be applied to functions"))
+      (and enumerator? (= n "nodiscard")) (err! "'nodiscard' attribute can only be applied to functions or to structure, union or enumeration types"))))
+
+(defn- type-pos-attrs!
+  "Standard attributes written after a type (specifiers, an array declarator, a function declarator): ignored, but a
+  function declarator's reproducible and unsequenced."
+  [v where]
+  (std-attr-misc! v)
+  (doseq [n (std-names v)
+          :when (not (and (= where :function) (contains? fn-type-attrs n)))]
+    (ignored! n)))
+
+(defn- base-fn-type?
+  "Whether the specifiers of a declaration whose type form is `f` give a function type: a typedef name of one, or a typeof."
+  [f]
+  (let [b (loop [f f] (if (and (seq? f) (contains? '#{* array fn const volatile restrict atomic _Nonnull} (first f))) (recur (last f)) f))]
+    (boolean
+      (or (and (symbol? b) (not (base-syms b)) (let [e (lookup (name b))] (and e (= :typedef (:kind e)) (= :fn (:k (unq (:t e)))))))
+          (and (seq? b) (contains? '#{typeof typeof-type typeof-unqual typeof-unqual-type} (first b)))))))
+
+(defn- decl-position-attrs!
+  "A declaration's attributes by where they stood, and the entity they stand with (`kind` :fn, :obj, :typedef, :member, ...)."
+  [m kind t]
+  (type-pos-attrs! (:c/type-attrs m)
+                   (if (base-fn-type? (:tag m)) :function :type))
+  (doseq [k [:c/attrs :c/decl-attrs :c/list-attrs :c/decl-end-attrs :c/end-attrs]] (std-attr-misc! (get m k)))
+  (when-let [w (:c/after-at m)] (type-pos-attrs! (:c/after-attrs m) w))
+  (when (:c/def-attrs m) (type-pos-attrs! (:c/def-attrs m) :function))
+  (let [fn-ent? (or (= kind :fn) (= :fn (:k (unq t))))
+        own (concat (std-names (:c/decl-attrs m)) (std-names (:c/attrs m)) (when-not (:c/after-at m) (std-names (:c/after-attrs m))))
+        typed (set (std-names (:c/type-attrs m)))]
+    (doseq [n own :when (not (and (contains? typed n) (not (contains? (set (std-names (:c/attrs m))) n))))]
+      (cond
+        (= n "fallthrough") (ignored! n)
+        (and (contains? #{"noreturn" "_Noreturn"} n) (not fn-ent?)) (err! (str "'" n "' attribute can only be applied to functions"))
+        (and (= n "nodiscard") (not fn-ent?)) (err! "'nodiscard' attribute can only be applied to functions or to structure, union or enumeration types")
+        (and (contains? fn-type-attrs n) fn-ent?) (err! (str "standard '" n "' attribute can only be applied to function declarators or type specifiers with function type"))))))
+
+(defn- attr-args!
+  "The arguments of the attributes in metadata `m` checked as expressions (cc's checker types them: an
+  identifier among them that names nothing, a parameter of the attribute's own, skipped)."
+  [m]
+  (when m
+    (std-attr-check! m)
+    (doseq [[_ args] (apply attrs-of m all-attr-keys)
+            a args]
+      (cond
+        ;; an identifier that names nothing (mode's QI, a parameter of the attribute's own): cc types it int
+        (symbol? a) (if (lookup (name a)) (ex a) (ann! "e int"))
+        (or (number? a) (string? a) (char? a) (seq? a)) (ex a)
+        :else nil))))
+
+(defn- assoc-in-mode
+  "A type made by GNU's mode attribute, marked (its uses are cc's gap :cc-attr-mode too)."
+  [t]
+  (assoc t :attr-mode true))
+
+(defn- vectorize
+  "A type whose attributes in `m` hold GNU's vector_size(N): the vector type of N bytes (read and checked,
+  out of eval and AOT by design, doc/c/SPEC.md §14)."
+  [t m]
+  (let [as (apply attrs-of m all-attr-keys)
+        t (if-let [[_ args] (first (filter #(= "mode" (first %)) as))]
+            ;; GNU's mode(QI|HI|SI|DI|TI|SF|DF): the integer or floating type of that width
+            (let [md (str/replace (str (first args)) #"^__|__$" "")
+                  [_ signed] (if (int-type? (unq t)) (int-bits (unq t)) [0 true])]
+              (feat! :cc-attr-mode)
+              (assoc-in-mode
+               (case md
+                ("QI" "byte") (if signed {:k :schar} {:k :uchar})
+                "HI" (if signed {:k :short} {:k :ushort})
+                ("SI" "word") (if signed t-int t-uint)
+                ("DI" "pointer") (if signed t-long t-ulong)
+                "TI" (if signed {:k :int128} {:k :uint128})
+                "SF" t-float "DF" t-double
+                t)))
+            t)]
+    (if-let [[_ args] (first (filter #(= "vector_size" (first %)) as))]
+      (let [n (const-int (first args))]
+        (feat! :vector-types)
+        (cond
+          ;; CS150: gcc has no vector of _BitInt
+          (= :bitint (:k (unq t))) (do (err! "invalid vector type for attribute 'vector_size'") t)
+          (integer? n) {:k :vector :of (unq t) :n (long n)}
+          :else t))
+      t)))
+
+(defn- aligned-value
+  "The alignment an `aligned` attribute's arguments give (none: the target's largest, 16)."
+  [args]
+  (if (empty? args)
+    16
+    (let [v (const-int (first args))] (if (and v (pos? v)) (long v) nil))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Constants
+
+(defn- big? [x] (instance? arbace.lang.BigInt x))
+
+(defn- num-val [v] (if (instance? java.math.BigInteger v) (bigint v) v))
+
+;; ---------------------------------------------------------------------------------------------
+;; Struct, union and enum layout
+
+(defn- new-rec [kind tag]
+  (let [r (HashMap.)]
+    (.put r :kind kind) (.put r :tag tag) (.put r :complete false) (.put r :scope (:tags (top-scope)))
+    r))
+
+(defn- align-up [n a] (if (<= a 1) n (*' a (quot (+' n (dec a)) a))))
+
+(defn- member-align
+  "A member's alignment: its type's (1 when packed), raised by its aligned attribute, capped by #pragma pack."
+  ^long [m packed max-align]
+  (let [ta (long (align-of (:t m)))
+        base (if (or packed (:mpacked m)) 1 ta)
+        base (if max-align (min base (long max-align)) base)]
+    (if (:align m) (max base (long (:align m))) base)))
+
+(defn- layout!
+  "Lays out the record `r`'s members [{:name :t :bits :align :packed}] as gcc 15.2 does on x86-64."
+  [^HashMap r members kind packed max-align]
+  (let [out (ArrayList.)]
+    (if (= kind :union)
+      (let [sz (atom 0) al (atom 1)]
+        (doseq [m members]
+          (let [t (:t m)
+                a (member-align m packed max-align)
+                s (long (or (size-of t) 0))
+                s (if (:bits m) (quot (+' (:bits m) 7) 8) s)]
+            (when-not (and (:bits m) (nil? (:name m))) (swap! al max a))
+            (swap! sz max s)
+            (.add out (assoc m :off 0 :bitoff (when (:bits m) 0)))))
+        (.put r :size (align-up @sz (long @al)))
+        (.put r :align @al))
+      (let [off (atom 0) al (atom 1)] ; off in bits
+        (doseq [m members]
+          (let [t (:t m)
+                ta (long (align-of t))
+                a (member-align m packed max-align)
+                packed (or packed (:mpacked m))]
+            (if-let [w (:bits m)]
+              (let [w w
+                    unit (*' 8 (long (or (size-of t) 4)))]
+                (cond
+                  (zero? w)
+                  (do (swap! off #(align-up % (*' 8 (if max-align (min ta (long max-align)) ta))))
+                      (.add out (assoc m :off (quot @off 8) :bitoff 0)))
+                  :else
+                  ;; gcc's rule: the field lies within a window of its type's size that begins at a boundary of
+                  ;; its type's alignment (for the integer types, whose size is their alignment, a unit of their
+                  ;; type; for _BitInt(N > 64) a window of N's size on a 64-bit boundary)
+                  (do (when (and (not packed)
+                                 (let [ab (*' 8 ta) o @off] (> (+' (- o (*' ab (quot o ab))) w) unit)))
+                        (swap! off #(align-up % (*' 8 ta))))
+                      (when (:align m) (swap! off #(align-up % (*' 8 a))))
+                      (when (:name m) (swap! al max a))
+                      (let [o @off
+                            byte (*' (quot o (*' 8 a)) a)
+                            byte (if packed (quot o 8) byte)]
+                        (.add out (assoc m :off byte :bitoff (- o (*' 8 byte))))
+                        (swap! off +' w)))))
+              (let [o (align-up (quot (+' @off 7) 8) a)
+                    s (size-of t)]
+                (swap! al max a)
+                (.add out (assoc m :off o))
+                (reset! off (*' 8 (+' o (or s 0))))))))
+        (let [al (long @al)
+              al (if-let [ra (.get r :min-align)] (max al (long ra)) al)]
+          (.put r :size (align-up (quot (+' @off 7) 8) al))
+          (.put r :align al))))
+    (.put r :members (vec out))
+    (.put r :complete true)))
+
+(defn- member
+  "The member `n` of the record type `t` (anonymous members' members too): {:t :off :bits ...} or nil."
+  [t ^String n]
+  (let [^HashMap r (:rec t)]
+    (some (fn [m]
+            (cond
+              (= (:name m) n) m
+              (and (nil? (:name m)) (record-type? (:t m)))
+              (when-let [x (member (:t m) n)] (update x :off + (long (:off m))))
+              :else nil))
+          (.get r :members))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Type forms (§5)
+
+(def ^:dynamic *base* nil) ; c/base: a c/group's shared type
+
+(def ^:dynamic *auto-init*
+  "Whether the initializer of a C23 `auto` object is being checked: a tag it declares is an error (CS152)."
+  false)
+
+(defn- tag-ref
+  "The tag `kind tag` referenced, declared in the current scope when not visible (or when `here`)."
+  [kind ^String tag here]
+  (let [found (if here (.get ^HashMap (:tags (top-scope)) tag) (lookup-tag tag))]
+    (if (and found (= kind (.get ^HashMap found :kind)))
+      found
+      (do (when *auto-init* (err! (str "'" (name kind) " " tag "' declared in underspecified object initializer")))
+          (let [r (new-rec kind tag)] (.put ^HashMap (:tags (top-scope)) tag r) r)))))
+
+(declare check-struct check-enum)
+
+(defn- spec-attrs-packed [m] (some #(= "packed" (first %)) (apply attrs-of m all-attr-keys)))
+
+(defn- bitint-width
+  "The width of _BitInt(a) (6.7.3.1): gcc's errors for a width that is not positive, below 2 for the signed type, or
+  above BITINT_MAXWIDTH (x86-64: 65535), and the pedwarn before C23."
+  ^long [a unsigned]
+  (let [v (:v (ex a))
+        v (when (integer? v) (long v))]
+    (when (and (< (std-num) 123) (not (cx :no-c23-compat))) (pedwarn! (str "ISO C does not support '" (when unsigned "unsigned ") "_BitInt(" v ")' before C23")))
+    (cond
+      (nil? v) (do (when (and (symbol? a) (let [e (lookup (name a))] (and e (= :obj (:kind e)) (nil? (:v e)))))
+                     (err! "'_BitInt' argument is not an integer constant expression"))
+                   32)
+      (<= v 0) (do (err! (str "'_BitInt' argument '" v "' is not a positive integer constant expression")) 32)
+      (and (not unsigned) (< v 2)) (do (err! "'signed _BitInt' argument must be at least 2") 32)
+      (> v 65535) (do (err! (str "'_BitInt' argument '" v "' is larger than 'BITINT_MAXWIDTH' '65535'")) 32)
+      :else v)))
+
+(defn parse-type
+  "A type form's type (§5.1); struct, union and enum definitions in it defined where they stand,
+  their annotations and their expressions' written."
+  [f]
+  (when-let [sp (and (instance? arbace.lang.IMeta f) (:c/spec (meta f)))] (type-pos-attrs! (:c/type-attrs sp) :type))
+  (cond
+    (nil? f) t-int
+    (symbol? f)
+    (if-let [k (base-syms f)]
+      (if (= k :char) t-char {:k k})
+      (if (= f 'c/base)
+        (or *base* t-invalid)
+        (let [e (lookup (name f))]
+          (if (and e (= :typedef (:kind e)))
+            (:t e)
+            (do (err! (str "unknown type name '" f "'")) t-invalid)))))
+    (and (seq? f) (= 'c/id (first f)))
+    (let [e (lookup (second f))] (if (and e (= :typedef (:kind e))) (:t e) t-invalid))
+    (seq? f)
+    (let [[h a b] f]
+      (case h
+        * (do (type-pos-attrs! (:c/attrs (meta f)) :type) (ptr (parse-type a))) ; CS160: `int *[[x]] p`
+        const (qual (parse-type a) :const)
+        volatile (qual (parse-type a) :volatile)
+        restrict (qual (parse-type a) :restrict)
+        (_Nonnull __seg_gs __seg_fs) (parse-type a)
+        atomic (qual (parse-type a) :atomic)
+        array (cond
+                (do (type-pos-attrs! (:c/attrs (meta f)) :array) false) nil
+                (= a '*) (assoc (arr (parse-type b) nil) :vla true)
+                (= 2 (count f)) (arr (parse-type a) nil)
+                :else (let [r (ex a) n (:v r) el (parse-type b)]
+                        (cond
+                          ;; an array of a variably modified element is itself a VLA (6.7.7.3)
+                          (and (integer? n) (not (:vla-expr r)) (not (vla? el))) (arr el (long n))
+                          :else (assoc (arr el nil) :vla true))))
+        fn (let [ps a _ (type-pos-attrs! (:c/attrs (meta f)) :function)
+                 ret (parse-type (if (> (count f) 2) b (or (:tag (meta ps)) 'int)))
+                 kr (:c/kr (meta ps))
+                 variadic (= '& (last ps))
+                 ps (if variadic (butlast ps) ps)
+                 _ (when (and variadic (empty? ps) (< (std-num) 123)) (pedwarn! "ISO C requires a named argument before '...'"))
+                 _ (push-scope!)
+                 pts (vec (keep (fn [p]
+                                  (let [pm (meta p)
+                                        nm (ident p)
+                                        t (cond (and nm (not (seq? p)) (or (:tag pm) (and kr (:c/implicit-int pm))))
+                                                (parse-type (or (:tag pm) 'int))
+                                                (and nm (seq? p) (= 'c/id (first p)))
+                                                (parse-type (:tag pm))
+                                                kr t-int
+                                                :else (do (when-let [sp (and (instance? arbace.lang.IMeta p) (:c/spec (meta p)))]
+                                                            (type-pos-attrs! (:c/decl-attrs sp) :type)) ; CS160: `int g ([[x]] int);`
+                                                          (parse-type p)))
+                                        _ (when (and nm pm) (binding [*line* (or (:line pm) *line*)] (decl-position-attrs! pm :param t)))
+                                        at (case (:k t) :array (ptr (:of t)) :fn (ptr t) t)]
+                                    (when (and nm (not kr) (or (:tag pm) (seq? p)))
+                                      ;; in scope for the later parameters' types (int a[n])
+                                      (declare! nm {:kind :obj :t at :linkage :n})
+                                      (ann! (str "d " nm " n " (tstr at))))
+                                    (when-not (and (= :void (:k t)) (= 1 (count ps))) at)))
+                                ps))
+                 _ (pop-scope!)]
+             {:k :fn :ret ret :params (if kr [] pts) :variadic variadic
+              :proto (and (not kr) (or (seq ps) variadic (c23?)))
+              :empty-list (and (not kr) (empty? ps) (not variadic))})
+        (struct union) (check-struct f (keyword (name h)))
+        enum (check-enum f)
+        complex {:k :complex :of (parse-type a)}
+        bit-int (do (feat! :cc-bitint) {:k :bitint :n (bitint-width a false)})
+        unsigned-bit-int (do (feat! :cc-bitint) {:k :bitint :n (bitint-width a true) :u true})
+        typeof (let [r (ex a)] (when (bit-field? r) (err! "'typeof' applied to a bit-field")) (or (:t r) t-invalid))
+        typeof-unqual (let [r (ex a)] (when (bit-field? r) (err! "'typeof_unqual' applied to a bit-field")) (unq (or (:t r) t-invalid)))
+        typeof-type (parse-type a)
+        typeof-unqual-type (unq (parse-type a))
+        c/id (parse-type (symbol a))
+        (do (err! (str "unknown type form " (pr-str h))) t-invalid)))
+    :else t-invalid))
+
+(defn- exi
+  "An expression that must be an integer constant expression's operand (a width, an alignment, an enumerator's value,
+  a case label, a designator): nullptr is not one."
+  [x]
+  (let [r (ex x)]
+    (when (= :nullptr (:k (unq (:t r)))) (err! "not an integer constant expression"))
+    r))
+
+(defn- member-forms
+  "A member list's members: [{:name :t :bits :align}] (anonymous members with :name nil)."
+  [ms]
+  (vec (mapcat
+         (fn [m]
+           (cond
+             (and (seq? m) (= 'c/static-assert (first m))) (do ((resolve 'arbace.c.check/check-decl) m) [])
+             (and (seq? m) (= 'c/bits (first m)))
+             (let [[_ t w] m tt (parse-type t) wv (:v (binding [*line* (or (:line (meta m)) *line*)] (exi w)))]
+               [{:name nil :t tt :bits (long (or wv 0))}])
+             (and (seq? m) (= 'c/group (first m)))
+             (let [bt (parse-type (second m))]
+               (binding [*base* bt] (member-forms (drop 2 m))))
+             (and (seq? m) ('#{struct union} (first m)))
+             (let [t (parse-type m)] [{:name nil :t t :align (some #(when (= "aligned" (first %)) (aligned-value (second %))) (attrs-of (meta m) :c/after-attrs))}])
+             (ident m)
+             (let [mm (meta m)
+                   _ (attr-args! mm)
+                   t (vectorize (parse-type (:tag mm)) mm)
+                   _ (binding [*line* (or (:line mm) *line*)] (decl-position-attrs! mm :member t))
+                   bits (when (contains? mm :c/bits) (:v (binding [*line* (or (:line mm) *line*)] (exi (:c/bits mm)))))
+                   as (attrs-of mm :c/attrs :c/after-attrs :c/decl-attrs)
+                   al (some #(when (= "aligned" (first %)) (aligned-value (second %))) as)
+                   al (if-let [x (:c/alignas mm)] (max (long (or al 1)) (long (or (:v (exi x)) 1))) al)
+                   al (if-let [x (:c/alignas-type mm)] (max (long (or al 1)) (align-of (parse-type x))) al)]
+               [(cond-> {:name (ident m) :t t}
+                  (some? bits) (assoc :bits (long bits))
+                  al (assoc :align al)
+                  (some #(= "packed" (first %)) as) (assoc :mpacked true))])
+             :else (let [t (parse-type m)] [{:name nil :t t}])))
+         ms)))
+
+(declare rec-same?)
+
+(defn- type-eq
+  "The same type (not just compatible): tagged types by identity."
+  [a b]
+  (and (= (:k a) (:k b)) (= (quals a) (quals b))
+       (case (:k a)
+         (:struct :union) (or (identical? (:rec a) (:rec b))
+                              ;; tagless types repeated in a repeated definition are the same
+                              (let [^HashMap ra (:rec a) ^HashMap rb (:rec b)]
+                                (and (nil? (.get ra :tag)) (nil? (.get rb :tag)) (.get ra :complete) (.get rb :complete)
+                                     (rec-same? ra rb))))
+         :ptr (type-eq (:to a) (:to b))
+         :array (and (type-eq (:of a) (:of b)) (= (or (:n a) 0) (or (:n b) 0)))
+         :fn (and (type-eq (:ret a) (:ret b)) (= (count (:params a)) (count (:params b))) (= (boolean (:variadic a)) (boolean (:variadic b)))
+                  (every? true? (map type-eq (:params a) (:params b))))
+         (compatible? a b))))
+
+(defn- vm-type?
+  "Whether a type is variably modified: a variable-length array, a pointer to or array of one (a struct with such a member
+  too, to a depth)."
+  ([t] (vm-type? t 0))
+  ([t depth]
+   (case (:k t)
+     :array (boolean (or (:vla t) (vm-type? (:of t) depth)))
+     :ptr (vm-type? (:to t) depth)
+     (:struct :union) (and (< (long depth) 3)
+                           (boolean (some #(vm-type? (:t %) (inc (long depth))) (.get ^HashMap (:rec t) :members))))
+     false)))
+
+;; CS152: a struct or union with a variable-length array member is itself of variable size (gcc: it may not be initialized
+;; but with an empty initializer)
+(defn- vla-struct?
+  ([t] (vla-struct? t 0))
+  ([t depth]
+   (let [t (unq t)]
+     (boolean (and (#{:struct :union} (:k t)) (< (long depth) 3)
+                   (some (fn [m] (let [mt (unq (:t m))]
+                                   (or (and (= :array (:k mt)) (:vla mt)) (vla-struct? mt (inc (long depth))))))
+                         (.get ^HashMap (:rec t) :members)))))))
+
+(defn- rec-same?
+  "Whether the new definition `b` of a tag repeats the definition `a` (C23 6.2.7): the same members in order, with the
+  same names, types, widths and alignments. A definition with a variably modified member is never the same (CS152:
+  gcc's \"redefinition\" for `struct f { int a[n]; }` twice)."
+  [^HashMap a ^HashMap b]
+  (let [ma (.get a :members) mb (.get b :members)]
+    (and (= (count ma) (count mb))
+         (not-any? #(vm-type? (:t %)) ma)
+         (not-any? #(vm-type? (:t %)) mb)
+         (every? true? (map (fn [x y] (and (= (:name x) (:name y)) (= (:bits x) (:bits y)) (= (:align x) (:align y))
+                                           (= (boolean (:mpacked x)) (boolean (:mpacked y)))
+                                           (type-eq (:t x) (:t y))))
+                            ma mb))
+         (= (.get a :min-align) (.get b :min-align)))))
+
+(defn- check-struct
+  "A struct or union type form: a reference or a definition."
+  [f kind]
+  (let [args (rest f)
+        tag (when-not (vector? (first args)) (ident (first args)))
+        body (first (filter vector? args))
+        fm (meta f)
+        _ (tag-attrs! (:c/attrs fm) false)]
+    (if (nil? body)
+      {:k kind :rec (if tag (tag-ref kind tag false) (new-rec kind nil))}
+      (let [^HashMap here (when tag (.get ^HashMap (:tags (top-scope)) tag))
+            ;; C23 (6.7.3.3): a complete tag defined again in its scope is the same type when the contents are the
+            ;; same; the body is then read against the existing type (its own tag names it), else gcc's error
+            nested (and here (= kind (.get here :kind)) (or (.get here :defining) (.get here :redefining)))
+            redef (when (and here (= kind (.get here :kind)) (.get here :complete) (not nested)) here)
+            _ (when nested (err! (str "nested redefinition of '" (name kind) " " tag "'")))
+            ^HashMap r (if tag
+                         (if (and here (= kind (.get here :kind)) (not (.get here :complete)) (not nested))
+                           here
+                           (let [r (new-rec kind tag)] (when-not redef (.put ^HashMap (:tags (top-scope)) tag r)) r))
+                         (new-rec kind nil))
+            _ (.put r :defining true)
+            _ (when redef (.put redef :redefining true))
+            ms (member-forms body)
+            _ (attr-args! fm)
+            _ (when (contains? fm :c/alignas) (exi (:c/alignas fm)))
+            as (apply attrs-of fm all-attr-keys)
+            packed (some #(= "packed" (first %)) as)
+            al (some #(when (= "aligned" (first %)) (aligned-value (second %))) as)]
+        (when al (.put r :min-align al))
+        (when (cx :pack) (feat! :cc-attr-layout))
+        (layout! r ms kind packed (cx :pack))
+        (.remove r :defining)
+        (when redef (.remove redef :redefining))
+        (let [t (if (and redef (rec-same? redef r))
+                  {:k kind :rec redef}
+                  (do (when redef
+                        (err! (str "redefinition of '" (name kind) " " tag "'"))
+                        (.put ^HashMap (:tags (top-scope)) tag r))
+                      {:k kind :rec r}))
+              ^HashMap r (:rec t)]
+          (when (seq as) (feat! :cc-attr-layout))
+          ;; cc's tree has no member list for {}: no s line
+          (when (seq body) (ann! (str "s " (tstr t) " " (.get r :size) " " (.get r :align))))
+          (when (some #(or (:align %) (:mpacked %)) ms) (feat! :cc-attr-layout))
+          (when (some #(and (:bits %) (or (nil? (:name %)) (zero? (long (:bits %))))) ms) (feat! :cc-bitfield-layout))
+          (doseq [m (.get r :members)]
+            (cond
+              (and (:bits m) (zero? (long (:bits m)))) nil ; no place of its own
+              (:bits m) (ann! (str "m " (tstr t) " " (or (:name m) "#anon") " @" (+ (* 8 (long (:off m))) (long (:bitoff m))) " " (:bits m) " " (tstr (:t m))))
+              :else (ann! (str "m " (tstr t) " " (or (:name m) "#anon") " " (:off m) " - " (tstr (:t m))))))
+          t)))))
+
+(defn- enum-type-of
+  "gcc's compatible type of an enumerated type from its values (§12.3)."
+  [vals]
+  (let [neg (some neg? vals)
+        fits (fn [lo hi] (every? #(and (<= (compare lo %) 0) (<= (compare % hi) 0)) vals))]
+    (cond
+      (and (not neg) (fits 0 4294967295)) t-uint
+      (fits -2147483648 2147483647) t-int
+      (not neg) t-ulong
+      :else t-long)))
+
+(defn- check-enum [f]
+  (let [line0 *line*
+        args (rest f)
+        tag (when-not (vector? (first args)) (ident (first args)))
+        body (first (filter vector? args))
+        pre0 (when tag (.get ^HashMap (:tags (top-scope)) tag))
+        under (when-let [u (:c/underlying (meta f))] (parse-type u))
+        ;; CS174 (a): the underlying type's own text defined this enumeration (`enum f : typeof (sizeof (enum f : T { B })) { B }`)
+        nested-under (boolean (and tag body under
+                                   (let [^HashMap now (.get ^HashMap (:tags (top-scope)) tag)]
+                                     (and now (not (identical? now pre0)) (= :enum (.get now :kind)) (.get now :complete)))))]
+    (tag-attrs! (:c/attrs (meta f)) false)
+    (when (and under (= :bitint (:k (unq under))))
+      (err! "invalid 'enum' underlying type"))
+    (if (nil? body)
+      (let [^HashMap pre (when (and tag under) (.get ^HashMap (:tags (top-scope)) tag))
+            _ (when (and pre (= :enum (.get pre :kind)) (not (.get pre :fixed)))
+                (err! "'enum' declared both with and without fixed underlying type"))
+            ^HashMap r (if tag (tag-ref :enum tag (some? under)) (new-rec :enum nil))]
+        (when under (.put r :under (unq under)) (.put r :fixed true))
+        {:k :enum :rec r})
+      (let [^HashMap here (when tag (.get ^HashMap (:tags (top-scope)) tag))
+            _ (when (and here under (= :enum (.get here :kind)) (not (.get here :fixed)) (not (.get here :complete)))
+                (err! "'enum' declared both with and without fixed underlying type"))
+            _ (when (and here (nil? under) (= :enum (.get here :kind)) (.get here :fixed) (not (.get here :complete)))
+                (err! "'enum' declared with but defined without fixed underlying type"))
+            nested (and here (= :enum (.get here :kind)) (or (.get here :defining) (.get here :redefining)))
+            redef (when (and here (= :enum (.get here :kind)) (.get here :complete) (not nested)) here)
+            _ (when (or nested nested-under) (err! (str "nested redefinition of 'enum " tag "'")))
+            _ (when nested (.put here :nested-seen true)) ; CS174 (a): the enumerators of the outer definition are new declarations
+            ^HashMap r (if tag
+                         (if (and here (= :enum (.get here :kind)) (not (.get here :complete)) (not nested))
+                           here
+                           (let [r (new-rec :enum tag)] (.put ^HashMap (:tags (top-scope)) tag r) r))
+                         (new-rec :enum nil))
+            _ (.put r :defining true)
+            _ (when redef (.put redef :redefining true))
+            t {:k :enum :rec r}
+            under (or under (when (.get r :fixed) (.get r :under)))]
+        (when under (.put r :under (unq under)) (.put r :fixed true))
+        (loop [es (seq body) nxt 0 pt t-int vals [] names []]
+          (if es
+            (let [e (first es)
+                  [nm vf] (if (vector? e) [(ident (first e)) (second e)] [(ident e) nil])
+                  has-vf (and (vector? e) (>= (count e) 2)) ; `X = nullptr` has the value nil in the forms
+                  _ (binding [*line* (or (:line (meta e)) *line*)] (tag-attrs! (:c/attrs (meta e)) true))
+                  rv (when has-vf (exi vf))
+                  v (if has-vf (when (integer? (:v rv)) (:v rv)) nxt)
+                  _ (when (and under (some? v) (integer? v) (not= :bitint (:k (unq under))) (not= (wrap v under) v))
+                      (err! (if vf "enumerator value outside the range of the underlying type" "overflow in enumeration values")))
+                  v (if (and under (some? v)) (wrap v under) v)
+                  _ (when under (feat! :cc-enum-type))
+                  ;; C23 (6.7.3.3): during the definition a constant that int cannot hold has its
+                  ;; expression's type, or for an implicit value its predecessor's widened as needed
+                  ct (cond under t ; the constants of a fixed type are of the enumerated type
+                           (or (nil? v) (<= -2147483648 v 2147483647)) t-int
+                           vf (let [et (unq (:t rv))] (if (int-type? et) (promote et) (enum-type-of [v])))
+                           :else (let [[bits signed] (int-bits pt)]
+                                   ;; the previous constant plus one overflowing a 64-bit (or wider) type (gcc: an error)
+                                   (when (and (>= (long bits) 64) (not= (wrap v pt) v)) (err! "overflow in enumeration values"))
+                                   (cond (= (wrap v pt) v) pt signed t-long :else t-ulong)))]
+              (ann! (str "n " nm " " (if (some? v) v "?")))
+              ;; a constant a repeated definition repeats is the same declaration (C23 6.7.3.3)
+              (when-not (and redef (not nested-under) (not (.get r :nested-seen)) (let [oc (.get redef :consts)] (and (contains? oc nm) (= (get oc nm) v))))
+                (when (= :enumconst (:kind (.get ^HashMap (:ord (top-scope)) nm)))
+                  (binding [*line* line0] (err! (str "redeclaration of enumerator '" nm "'"))))
+                (declare! nm {:kind :enumconst :t ct :v v}))
+              (recur (next es) (when (some? v) (+' v 1)) ct (if (some? v) (conj vals v) vals) (conj names nm)))
+            (do (when-not under (.put r :under (if (seq vals) (enum-type-of vals) t-uint)))
+                (.put r :complete true)
+                (.remove r :defining)
+                (when redef (.remove redef :redefining))
+                (.put r :consts (zipmap names vals))
+                ;; a repeated definition (C23 6.7.3.3): the same enumerators with the same values, the same underlying type
+                (when redef
+                  (if (and (= (.get redef :consts) (.get r :consts))
+                           (= (boolean (.get redef :fixed)) (boolean (.get r :fixed)))
+                           (or (not (.get r :fixed)) (type-eq (.get redef :under) (.get r :under))))
+                    (.put ^HashMap (:tags (top-scope)) tag redef)
+                    (err! (str "redefinition of 'enum " tag "'"))))
+                ;; no integer type holds a negative value and one above intmax_t (gcc: a pedwarn)
+                (when (and (not under) (some neg? vals) (some #(> % 9223372036854775807) vals))
+                  (pedwarn! "enumeration values exceed range of largest integer"))
+                ;; C23: once complete, when a constant is outside int's range every constant has the enumerated type
+                (when (and (not under) (c23?) (some #(not (<= -2147483648 % 2147483647)) vals)
+                           (not (and redef (identical? redef (.get ^HashMap (:tags (top-scope)) tag)))))
+                  (doseq [nm names] (when-let [e (lookup nm)] (declare! nm (assoc e :t t))))))))
+        t))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Expressions (§7.4-§7.9): {:t type :v value :lv lvalue :bits bit-field width}
+
+(defn- res [t & {:as m}] (merge {:t t} m))
+
+(defn- emit!
+  "The annotation of an expression node (its type decayed, its integer value when constant; a bit-field
+  its type promoted, as cc writes it)."
+  [r]
+  (let [t (if (:bits r) (promote (:t r) (:bits r)) (:t r)) v (:v r)]
+    (ann! (str "e " (tstr (decay (unq t)))
+               (let [v (if (some? v) v (:av r))]
+                 (if (and (integer? v) (or (int-type? (unq t)) (ptr-type? (unq t)))) (str " = " v) ""))))
+    r))
+
+(defn- round-sig
+  "The double `d` rounded (half to even) to a binary format of `p` significant bits whose smallest normal exponent is `emin`
+  and largest `emax`: subnormals keep emin's quantum, a value past the largest finite one is infinite."
+  [d p emin emax]
+  (if (or (Double/isNaN d) (Double/isInfinite d) (zero? d))
+    d
+    (let [e (max (Math/getExponent (double d)) emin)
+          q (- e (dec p))
+          r (Math/scalb (Math/rint (Math/scalb (double d) (- q))) q)]
+      (if (>= (Math/abs r) (Math/scalb 1.0 (inc emax)))
+        (if (neg? d) Double/NEGATIVE_INFINITY Double/POSITIVE_INFINITY)
+        r))))
+
+(defn- round-to-format
+  "The double `d` rounded to the format of the floating kind `k` (review 031's finding A): float and _Float32 to float,
+  _Float16 to IEEE binary16, __bf16 to bfloat16; any other kind keeps `d`."
+  [d k]
+  (case k
+    (:float :float32) (.doubleValue (Float/valueOf (.floatValue (Double/valueOf (double d)))))
+    :float16 (round-sig d 11 -14 15)
+    :bf16 (round-sig d 8 -126 127)
+    d))
+
+(defn- round-exact
+  "The BigDecimal `x` rounded (half to even) to a binary format of `p` significant bits whose smallest normal exponent is
+  `emin` (subnormals keep that quantum), as an exact BigDecimal; no overflow rule (see `fits-binary?`). The binary exponent is
+  found exactly, however far `x` is from the double range (review 053's finding 4)."
+  [^java.math.BigDecimal x p emin]
+  (if (or (zero? (.signum x)) (> (Math/abs (- (.precision x) (.scale x))) 6000))
+    ;; far past any format's range: a tiny value is 0 (review 079's finding 1b), a huge one stays itself (infinite by the caller's test)
+    (if (and (pos? (.signum (.abs x))) (neg? (- (.precision x) (.scale x)))) java.math.BigDecimal/ZERO x)
+    (let [ax (.abs x)
+          two (fn [n] (if (neg? n) (.divide java.math.BigDecimal/ONE (java.math.BigDecimal. (.pow (biginteger 2) (- n)))) (java.math.BigDecimal. (.pow (biginteger 2) n))))
+          e0 (long (Math/floor (* (double (- (.precision x) (.scale x) 1)) 3.3219280948873626)))
+          e (loop [e e0]
+              (cond (neg? (.compareTo ax (two e))) (recur (dec e))
+                    (>= (.compareTo ax (two (inc e))) 0) (recur (inc e))
+                    :else e))
+          e (max e emin)
+          sh (- (dec p) e)
+          m (.setScale (if (neg? sh) (.divide ax (two (- sh))) (.multiply ax (two sh))) 0 java.math.RoundingMode/HALF_EVEN)
+          r (if (neg? sh) (.multiply (java.math.BigDecimal. (.toBigInteger m)) (two (- sh))) (.divide (java.math.BigDecimal. (.toBigInteger m)) (two sh)))]
+      (if (neg? (.signum x)) (.negate r) r))))
+
+(defn- round-ldouble
+  "The BigDecimal `x` rounded to x87's 64-bit significand (exponents down to -16382), as a BigDecimal."
+  [^java.math.BigDecimal x]
+  (round-exact x 64 -16382))
+
+(defn- ld-of
+  "A long double constant's exact value (`round-ldouble`), or nil when it rounds past x87's range (an infinity: gcc and clang
+  accept it, with a warning; review 057's finding 2)."
+  [^java.math.BigDecimal x]
+  (let [r (round-ldouble x)]
+    (when (neg? (.compareTo (.abs r) (java.math.BigDecimal. (.pow (biginteger 2) 16384)))) r)))
+
+(def ^:private binary-formats
+  ;; [significand bits, smallest normal exponent, largest exponent] of the binary object kinds
+  {:float [24 -126 127] :float32 [24 -126 127] :double [53 -1022 1023] :float64 [53 -1022 1023] :float32x [53 -1022 1023]
+   :float16 [11 -14 15] :bf16 [8 -126 127]})
+
+(defn- fits-binary?
+  "Whether the exact decimal `x` is a value of the binary kind `k`: rounding it to the format changes nothing, and it is finite."
+  [^java.math.BigDecimal x k]
+  (if-let [[p emin emax] (binary-formats k)]
+    (and (zero? (.compareTo (round-exact x p emin) x))
+         (neg? (.compareTo (.abs x) (java.math.BigDecimal. (.pow (biginteger 2) (inc emax))))))
+    true))
+
+(defn- round-big
+  "The exact decimal `x` rounded once to the binary kind `k` (half to even; infinite past the format's range), as a double."
+  [^java.math.BigDecimal x k]
+  (let [[p emin emax] (binary-formats k)
+        r (round-exact x p emin)]
+    (if (>= (.compareTo (.abs r) (java.math.BigDecimal. (.pow (biginteger 2) (inc emax)))) 0)
+      (if (neg? (.signum x)) Double/NEGATIVE_INFINITY Double/POSITIVE_INFINITY)
+      (.doubleValue r))))
+
+(defn- float-of-exact
+  "The float nearest the exact decimal `x`, as a double (infinite past float's range): a _Float16 or __bf16 constant's value
+  where, as in gcc on x86-64 (FLT_EVAL_METHOD 0), they are evaluated in float (review 053's finding 1)."
+  [^java.math.BigDecimal x]
+  (let [r (round-exact x 24 -126)]
+    (if (>= (.compareTo (.abs r) (java.math.BigDecimal. (.pow (biginteger 2) 128))) 0)
+      (if (neg? (.signum x)) Double/NEGATIVE_INFINITY Double/POSITIVE_INFINITY)
+      (.doubleValue r))))
+
+(defn- eval-type
+  "The type an arithmetic operation on `t` is evaluated in: _Float16 and __bf16 operate in float (C23 Annex H, FLT_EVAL_METHOD 0),
+  the result keeping the type and the excess precision until a conversion rounds it."
+  [t]
+  (if (#{:float16 :bf16} (:k (unq t))) t-float t))
+
+(defn- conv-val
+  "A constant converted to type `t`."
+  [v t]
+  (let [t (unq t)]
+    (cond
+      (nil? v) nil
+      (int-type? t) (cond (integer? v) (wrap v t)
+                          (instance? Double v) (let [d (double v)]
+                                                 (feat! :cc-float-fold)
+                                                 (when-not (or (Double/isNaN d) (Double/isInfinite d))
+                                                   (wrap (bigint (.toBigInteger (java.math.BigDecimal. d))) t)))
+                          :else nil)
+      ;; review 057's finding 4: an integer is rounded once to float, not through a double (2^53 + 2^29 + 1)
+      (and (integer? v) (#{:float :float32 :float16 :bf16} (:k t))) (round-big (java.math.BigDecimal. (biginteger v)) (:k t))
+      (float-type? t) (let [d (cond (integer? v) (double v) (instance? Double v) v :else nil)]
+                        ;; a float constant is rounded to float (an integer too: 16777217 is 16777216.0f)
+                        (if d (round-to-format d (:k t)) d))
+      (ptr-type? t) (when (integer? v) (wrap v t-ulong))
+      :else nil)))
+
+(defn- lit-type
+  "A bare literal's type and value (§8)."
+  [x]
+  (cond
+    (instance? Long x) (let [v (long x)] {:t (cond (<= -2147483648 v 2147483647) t-int :else t-long) :v v})
+    (big? x) {:t (if (<= (compare x 18446744073709551615N) 0) t-ulong {:k :int128}) :v x}
+    (instance? Character x) {:t t-int :v (long (int (char x)))}
+    (instance? Double x) {:t t-double :v x}
+    (instance? java.math.BigDecimal x) {:t t-double :v (.doubleValue ^java.math.BigDecimal x)}
+    (ratio? x) {:t t-double :v (double x)}
+    (string? x) {:t (arr t-char (inc (alength (.getBytes ^String x "UTF-8")))) :str true}
+    (instance? Boolean x) (do (feat! :cc-c23-constants) {:t t-bool :v (if x 1 0)})
+    (nil? x) (do (feat! :cc-c23-constants) {:t t-nullptr :v 0})
+    :else {:t t-invalid}))
+
+(defn- byte-string-len ^long [parts]
+  (reduce + (map #(if (string? %) (alength (.getBytes ^String % "UTF-8")) 1) parts)))
+
+(defn- code-unit-count ^long [elt s]
+  (cond
+    (string? s) (case (:k elt)
+                  (:uchar :char :schar) (alength (.getBytes ^String s "UTF-8"))
+                  :ushort (.length ^String s)
+                  (.codePointCount ^String s 0 (.length ^String s)))
+    (and (seq? s) (= 'code-units (first s))) (reduce + (map #(if (string? %) (code-unit-count elt %) 1) (rest s)))
+    (and (seq? s) (= 'byte-string (first s))) (byte-string-len (rest s))
+    :else 1))
+
+(declare ex check-init call-builtin check-block-items binary-index-type vla?)
+
+(defn- arith-result [op ta tb]
+  (usual ta tb))
+
+(def ^:private cmp-ops '#{== != < <= > >=})
+
+(defn- int-op
+  "An integer operator's value."
+  [op a b t]
+  (when (and (integer? a) (integer? b))
+    (let [[bits signed] (int-bits t)
+          a (biginteger a) b (biginteger b)]
+      (case op
+        + (wrap (.add a b) t)
+        - (wrap (.subtract a b) t)
+        * (wrap (.multiply a b) t)
+        / (when-not (zero? (.signum b)) (wrap (.divide a b) t))
+        % (when-not (zero? (.signum b)) (wrap (.remainder a b) t))
+        bit-and (wrap (.and a b) t)
+        bit-or (wrap (.or a b) t)
+        bit-xor (wrap (.xor a b) t)
+        nil))))
+
+(defn- float-op [op a b]
+  (when (and (number? a) (number? b))
+    (let [a (double a) b (double b)]
+      (case op + (+ a b) - (- a b) * (* a b) / (/ a b) nil))))
+
+(defn- cmp-val [op a b]
+  (when (and (number? a) (number? b))
+    (when (or (instance? Double a) (instance? Double b)) (feat! :cc-float-fold))
+    (let [c (compare a b)]
+      (if (case op == (zero? c) != (not (zero? c)) < (neg? c) <= (<= c 0) > (pos? c) >= (>= c 0)) 1 0))))
+
+(defn- null-const? [r]
+  (and (some? (:v r)) (integer? (:v r)) (zero? (:v r))
+       (or (int-type? (unq (:t r)))
+           (and (ptr-type? (unq (:t r))) (void-type? (unq (:to (unq (:t r)))))))))
+
+(defn- null-const-npc?
+  "A null pointer constant for nullptr_t conversions: an integer constant expression of value 0 without a floating
+  conversion in it, or a (void *) 0."
+  [r]
+  (and (null-const? r) (not (:nfp r))))
+
+(defn- binary
+  "A binary operator's result from its operands' results."
+  [op ra rb]
+  (let [ta (decay (unq (:t ra))) tb (decay (unq (:t rb)))
+        pa (promote ta (:bits ra)) pb (promote tb (:bits rb))
+        np? (or (= :nullptr (:k ta)) (= :nullptr (:k tb)))]
+    (cond
+      ;; C23 6.5.9, 6.5.8, 6.5.6: nullptr_t compares equal-wise with pointers, nullptr_t and null pointer constants only; it
+      ;; is no operand of an ordered comparison with a pointer, nor of arithmetic
+      (and np? (contains? '#{== !=} op))
+      (do (when-not (or (= :invalid (:k ta)) (= :invalid (:k tb)))
+            (let [other (if (= :nullptr (:k ta)) tb ta) ro (if (= :nullptr (:k ta)) rb ra)]
+              (when-not (or (ptr-type? other) (= :nullptr (:k other)) (null-const-npc? ro))
+                (err! (str "invalid operands to binary " op)))))
+          (res t-int))
+      (and np? (contains? '#{< <= > >=} op))
+      (do (when-not (or (= :invalid (:k ta)) (= :invalid (:k tb)))
+            (err! (if (or (ptr-type? ta) (ptr-type? tb)) "ordered comparison of pointer with null pointer" (str "invalid operands to binary " op))))
+          (res t-int))
+      (and np? (contains? '#{+ - * / % << >> bit-and bit-or bit-xor} op)
+           (not (#{:invalid :vector} (:k ta))) (not (#{:invalid :vector} (:k tb))))
+      (do (err! (str "invalid operands to binary " op)) (res t-int))
+      (or (= :vector (:k ta)) (= :vector (:k tb))) (res (if (= :vector (:k ta)) ta tb))
+      (cmp-ops op)
+      (res t-int :v (when (and (arith-type? ta) (arith-type? tb))
+                      (let [t (eval-type (usual pa pb))
+                            ;; review 057's finding 4: a long double operand with an exact value is compared exactly
+                            ex (fn [r] (let [v (:v r)]
+                                         (cond (:ld r) (:ld r)
+                                               ;; a long double with no exact value (arithmetic, ?:, an identifier) is not exact (review 079's finding 1a)
+                                               (#{:ldouble :float64x :float128 :float128x} (:k (unq (:t r)))) nil
+                                               (and (instance? Double v) (not (Double/isNaN v)) (not (Double/isInfinite v))) (java.math.BigDecimal. (double v))
+                                               (integer? v) (java.math.BigDecimal. (biginteger v)))))
+                            ea (when (or (:ld ra) (:ld rb)) (ex ra)) eb (when ea (ex rb))]
+                        (if (and ea eb (= :ldouble (:k t)))
+                          (cmp-val op (.compareTo ^java.math.BigDecimal ea ^java.math.BigDecimal eb) 0)
+                          (cmp-val op (conv-val (:v ra) t) (conv-val (:v rb) t))))))
+      ('#{and or} op)
+      (res t-int
+           :av (let [a (or (:v ra) (:av ra)) b (or (:v rb) (:av rb))]
+                 (cond (and (number? a) (= op 'and) (zero? a)) 0
+                       (and (number? a) (= op 'or) (not (zero? a))) 1
+                       (and (number? a) (number? b)) (if (not (zero? b)) 1 0)
+                       :else nil))
+           :v (let [a (:v ra) b (:v rb)]
+                      (when (or (instance? Double a) (instance? Double b)) (feat! :cc-float-fold))
+                      (cond (and (number? a) (= op 'and) (zero? a)) 0
+                            (and (number? a) (= op 'or) (not (zero? a))) 1
+                            (and (number? a) (number? b)) (if (not (zero? b)) 1 0)
+                            :else nil)))
+      ('#{<< >>} op)
+      (if (and (int-type? ta) (int-type? tb))
+        (let [t (promote ta (:bits ra)) a (:v ra) b (:v rb)
+              [bits _] (int-bits t)]
+          (res t :v (when (and (integer? a) (integer? b) (<= 0 b) (< b bits))
+                      (if (= op '<<) (wrap (.shiftLeft (biginteger a) (int b)) t) (wrap (.shiftRight (biginteger a) (int b)) t)))))
+        (do (when (and (not (int-type? ta)) (scalar-type? ta) (scalar-type? tb)) (err! "invalid operands to binary shift"))
+            (res t-int)))
+      (and (= op '+) (ptr-type? ta) (int-type? tb)) (res ta)
+      (and (= op '+) (int-type? ta) (ptr-type? tb)) (res tb)
+      (and (= op '-) (ptr-type? ta) (int-type? tb)) (res ta)
+      (and (= op '-) (ptr-type? ta) (ptr-type? tb))
+      (res t-long :v (when (and (integer? (:v ra)) (integer? (:v rb)))
+                       (let [s (long (or (size-of (unq (:to ta))) 1))] (when (pos? s) (quot (- (:v ra) (:v rb)) s)))))
+      (and (arith-type? ta) (arith-type? tb))
+      (let [t (usual pa pb)
+            et (eval-type t)
+            a (conv-val (:v ra) et) b (conv-val (:v rb) et)]
+        (when (and (#{'% 'bit-and 'bit-or 'bit-xor} op) (not (int-type? t)))
+          (err! (str "invalid operands to binary " op)))
+        ;; C23 evaluates float op float in float (FLT_EVAL_METHOD 0): the double result rounded to float, as conv-val rounds
+        ;; a constant (review 027's finding 1: 0.1f + 0.2f is a float, constexpr's exactness rule compares against it)
+        (res t :v (if (int-type? t) (int-op op a b t)
+                    (when (float-type? t)
+                      (let [v (float-op op a b)]
+                        (if v (round-to-format v (:k et)) v))))))
+      :else
+      (do (when (and (#{:struct :union} (:k ta)) (not= :invalid (:k tb))) (err! (str "invalid operands to binary " op)))
+          (res (if (ptr-type? ta) ta (if (ptr-type? tb) tb t-int)))))))
+
+(defn- unq-elem
+  "A type without the qualifiers of its own or of an array's elements (a pointer's target, 6.7.4.3)."
+  [t]
+  (if (= :array (:k t)) (assoc t :of (unq-elem (:of t))) (unq t)))
+
+(declare int-class)
+
+(defn- compatible-ptr-targets?
+  "Pointer targets compatible but for the integer classes gcc only warns about (signedness), as `ptr-conv!` takes them."
+  [ua ub]
+  (let [ka (:k ua) kb (:k ub)]
+    (and (int-type? ua) (int-type? ub)
+         (let [ca (int-class (if (= :enum ka) (:k (enum-under ua)) ka))
+               cb (int-class (if (= :enum kb) (:k (enum-under ub)) kb))]
+           (and ca (= ca cb))))))
+
+(defn- cond-type
+  "The type of c ? a : b (6.5.15)."
+  [ra rb]
+  (let [ta (decay (unq (:t ra))) tb (decay (unq (:t rb)))]
+    (cond
+      ;; C23 6.5.15: a nullptr_t operand pairs with a pointer or another nullptr_t only (a null pointer constant does not help)
+      (and (not= :nullptr (:k ta)) (not= :nullptr (:k tb)) (arith-type? ta) (arith-type? tb))
+      (usual (promote ta (:bits ra)) (promote tb (:bits rb)))
+      (and (record-type? ta) (compatible? ta tb)) ta
+      (and (or (= :nullptr (:k ta)) (= :nullptr (:k tb))) (not (and (= :nullptr (:k ta)) (= :nullptr (:k tb))))
+           (not (ptr-type? ta)) (not (ptr-type? tb)) (not (#{:invalid :void} (:k ta))) (not (#{:invalid :void} (:k tb))))
+      (do (err! "type mismatch in conditional expression") ta)
+      (and (void-type? ta) (void-type? tb)) t-void
+      (or (void-type? ta) (void-type? tb)) t-void
+      (and (ptr-type? ta) (null-const? rb)) ta
+      (and (ptr-type? tb) (null-const? ra)) tb
+      (and (= :nullptr (:k ta)) (ptr-type? tb)) tb
+      (and (= :nullptr (:k tb)) (ptr-type? ta)) ta
+      (and (ptr-type? ta) (ptr-type? tb))
+      (let [ea (:to ta) eb (:to tb) q (disj (into (quals ea) (quals eb)) :atomic)
+            ua (unq-elem ea) ub (unq-elem eb)]
+        (cond
+          (or (= :invalid (:k ua)) (= :invalid (:k ub))) ta
+          (void-type? ua) (ptr (cond-> t-void (seq q) (assoc :q q)))
+          (void-type? ub) (ptr (cond-> t-void (seq q) (assoc :q q)))
+          ;; 6.5.15 p6: pointers to qualified or unqualified versions of compatible types give a pointer to the composite
+          ;; type with the qualifiers of both (CS141); else gcc's "pointer type mismatch"
+          (or (compatible? ua ub) (compatible-ptr-targets? ua ub)) (ptr (reduce qual ua q))
+          :else (do (when-not (cx :permissive) (err! "pointer type mismatch in conditional expression")) (ptr (reduce qual ua q)))))
+      (ptr-type? ta) ta
+      (ptr-type? tb) tb
+      :else ta)))
+
+(defn- callee-fn [t]
+  (let [t (unq t)]
+    (cond (= :fn (:k t)) t
+          (and (ptr-type? t) (= :fn (:k (unq (:to t))))) (unq (:to t))
+          :else nil)))
+
+(defn- implicit-fn! [^String n]
+  (let [t {:k :fn :ret t-int :params [] :variadic false :proto false}
+        e {:kind :fn :t t :linkage :x :implicit true :name n :id (Object.) :file-scope true}]
+    (file-declare! n e)
+    e))
+
+(defn- head-name [h] (when (symbol? h) (name h)))
+
+(defn- ident-expr [^String n]
+  (let [e (lookup n)]
+    (cond
+      (nil? e)
+      (cond
+        (= n "__func__") (res (arr t-char (inc (count (or (cx :fn-name) "")))) :lv true)
+        (or (str/starts-with? n "__builtin_") (str/starts-with? n "__sync_") (str/starts-with? n "__atomic_"))
+        (res {:k :fn :ret t-int :params [] :proto false} :builtin n)
+        :else (do (err! (str "'" n "' undeclared")) (res t-invalid)))
+      (= :enumconst (:kind e)) (do (when (= :enum (:k (:t e))) (feat! :cc-enum-type)) (res (:t e) :v (:v e)))
+      (= :typedef (:kind e)) (do (err! (str "unexpected type name '" n "'")) (res t-invalid))
+      :else (do (when (some? (:v e)) (feat! :cc-constexpr))
+                (when (:attr-mode (:t e)) (feat! :cc-attr-mode))
+                (when (and (= :fn (:kind e)) (lookup (str "__builtin_" n))) (feat! :cc-builtin-types))
+                (res (:t e) :lv (not= :fn (:kind e)) :v (:v e) :entry e)))))
+
+(defn- deref-type [t]
+  (let [t (decay (unq t))]
+    (cond (ptr-type? t) (:to t) :else (do (when-not (= :invalid (:k t)) (err! "invalid type argument of unary '*'")) t-invalid))))
+
+(defn- member-of [r ^String m arrow]
+  (let [t (unq (:t r))
+        t (if arrow (let [d (decay t)] (if (ptr-type? d) (unq (:to d)) t-invalid)) t)]
+    (if (record-type? t)
+      (let [^HashMap rec (:rec t)]
+        (if-not (.get rec :complete)
+          (do (err! (str "invalid use of incomplete type '" (tstr t) "'")) (res t-invalid))
+          (if-let [mm (member t m)]
+            (let [q (quals (if arrow (:to (decay (unq (:t r)))) (:t r)))
+                  mt (if (seq q) (reduce qual (:t mm) q) (:t mm))]
+              (do (when (:attr-mode (:t mm)) (feat! :cc-attr-mode))
+                  (res mt :lv true :bits (:bits mm) :malign (:align mm) :member mm)))
+            (do (err! (str "no member named '" m "' in '" (tstr t) "'")) (res t-invalid)))))
+      (do (when-not (= :invalid (:k t)) (err! (str "request for member '" m "' in something not a structure or union"))) (res t-invalid)))))
+
+(def ^:private builtin-types
+  ;; builtins gcc knows and cc's Builtin does not declare: their result types
+  {"__builtin_constant_p" t-int "__builtin_choose_expr" nil "__builtin_abort" t-void "__builtin_trap" t-void
+   "__builtin_unreachable" t-void "__builtin_memcpy" (ptr t-void) "__builtin_memset" (ptr t-void)
+   "__builtin_memmove" (ptr t-void) "__builtin_alloca" (ptr t-void) "__builtin_malloc" (ptr t-void)
+   "__builtin_exit" t-void "__builtin_return_address" (ptr t-void) "__builtin_frame_address" (ptr t-void)
+   "__builtin_popcount" t-int "__builtin_popcountl" t-int "__builtin_popcountll" t-int "__builtin_clzll" t-int
+   "__builtin_ctzll" t-int "__builtin_ffs" t-int "__builtin_ffsl" t-int "__builtin_ffsll" t-int "__builtin_parity" t-int
+   "__builtin_parityl" t-int "__builtin_parityll" t-int "__builtin_clrsb" t-int "__builtin_clrsbl" t-int "__builtin_clrsbll" t-int
+   "__builtin_classify_type" t-int "__builtin_isnan" t-int "__builtin_isinf" t-int "__builtin_isfinite" t-int
+   "__builtin_signbit" t-int "__builtin_isinf_sign" t-int "__builtin_isnormal" t-int "__builtin_fpclassify" t-int
+   "__builtin_isgreater" t-int "__builtin_isless" t-int "__builtin_isgreaterequal" t-int "__builtin_islessequal" t-int
+   "__builtin_islessgreater" t-int "__builtin_va_start" t-void "__builtin_va_end" t-void "__builtin_c23_va_start" t-void
+   "__builtin_prefetch" t-void "__builtin_assume_aligned" (ptr t-void) "__builtin_strlen" t-ulong "__builtin_huge_valf" t-float})
+
+(declare ptr-conv! constexpr-check! attr-decl-check! exi)
+
+(defn- call
+  "A call's result: the callee's result, its arguments checked."
+  [f args form]
+  (let [fname (ident f)
+        known (when fname (lookup fname))
+        bk (when (and fname (nil? known)) (lookup (str "__builtin_" fname)))
+        _ (when (and bk (c99?)) (err! (str "implicit declaration of function '" fname "'")))
+        rf (if (and fname (nil? known) (not= fname "__func__") (nil? bk))
+             (cond
+               (or (str/starts-with? fname "__builtin_") (str/starts-with? fname "__sync_") (str/starts-with? fname "__atomic_"))
+               (do (feat! :cc-undeclared-builtin)
+                   (res {:k :fn :ret (get builtin-types fname t-int) :params [] :proto false} :builtin fname))
+               :else (do (when (c99?) (err! (str "implicit declaration of function '" fname "'")))
+                         (res (:t (implicit-fn! fname)))))
+             (if bk (res (:t bk)) (ex f)))
+        rf (if (and fname (nil? known)) (emit! rf) rf)
+        _ (record! f rf)
+        ft (callee-fn (:t rf))
+        ras (if (= fname "__builtin_has_attribute") [(ex (first args))] (mapv ex args))]
+    (when (and (nil? ft) (not= :invalid (:k (unq (:t rf)))))
+      (err! "called object is not a function or function pointer"))
+    (when (and ft (:proto ft) (not (:variadic ft)) (not (:builtin rf))
+               (> (count ras) (count (:params ft))))
+      (err! "too many arguments to function"))
+    (when (and ft (:proto ft) (not (:builtin rf)) (< (count ras) (count (:params ft))))
+      (err! "too few arguments to function"))
+    (when (and ft (:proto ft) (not (:builtin rf)))
+      (doseq [[i pt] (map-indexed vector (:params ft))]
+        (when-let [ra (nth ras i nil)] (ptr-conv! pt ra (str "passing argument " (inc i))))))
+    (or (when-let [b (or (:builtin rf) (when (and known fname (str/starts-with? fname "__builtin_")) fname))]
+          (call-builtin b ras ft))
+        (res (if ft (:ret ft) t-int)))))
+
+(defn- call-builtin [^String b ras ft]
+  (when (#{"__builtin_constant_p" "__builtin_choose_expr" "__builtin_expect" "__builtin_inf" "__builtin_huge_val" "__builtin_inff"
+           "__builtin_huge_valf" "__builtin_infl" "__builtin_huge_vall"} b)
+    (feat! :cc-builtin-fold))
+  (case b
+    "__builtin_constant_p" (res t-int :v (if (some? (:v (first ras))) 1 0))
+    "__builtin_choose_expr" (let [c (:v (first ras))] (if (and (number? c) (not (zero? c))) (second ras) (nth ras 2 (res t-int))))
+    "__builtin_expect" (res t-long :v (:v (first ras)))
+    ;; CS174 (b): a signaling NaN of the call's type (its kind in :snan: a conversion to another type is not exact), and a
+    ;; complex number made of two real parts (kept in :parts)
+    ("__builtin_nans" "__builtin_nansf" "__builtin_nansl")
+    (let [k (case b "__builtin_nans" :double "__builtin_nansf" :float :ldouble)]
+      (res {:k k} :snan k))
+    "__builtin_complex" (when (= 2 (count ras))
+                          (res {:k :complex :of (unq (:t (first ras)))} :parts (vec ras)))
+    ("__builtin_inf" "__builtin_huge_val") (res t-double :v Double/POSITIVE_INFINITY)
+    ("__builtin_inff" "__builtin_huge_valf") (res t-float :v Double/POSITIVE_INFINITY)
+    ("__builtin_infl" "__builtin_huge_vall") (res {:k :ldouble} :v Double/POSITIVE_INFINITY)
+    ;; CS174 (b): decimal infinities and NaNs of the call's type (`__builtin_infd32 ()`, `__builtin_nansd64 ("")`)
+    (when-let [[_ w bits] (re-matches #"__builtin_(inf|nan|nans)d(32|64|128)" b)]
+      (let [k (case bits "32" :dec32 "64" :dec64 :dec128)]
+        (res {:k k} :snan (when (= w "nans") k))))))
+
+(def ^:private dec-kinds #{:dec32 :dec64 :dec128 :dec64x})
+
+(defn- lit-form
+  "(lit T v): a constant of type T."
+  [[_ tf v]]
+  (let [t (parse-type tf)]
+    ;; gcc's -pedantic: the bf16 suffix is not standard; judged on the constant the preprocessor delivers, at its use (review 079's finding 4)
+    (when (= :bf16 (:k (unq t))) (pedwarn! "non-standard suffix on floating constant"))
+    (cond
+      (or (string? v) (and (seq? v) ('#{code-units byte-string} (first v))))
+      (do (feat! :cc-prefixed-string) (res (arr t (inc (code-unit-count (unq t) v))) :str true))
+      (and (seq? v) (= 'imaginary (first v))) (res t)
+      (instance? Character v) (res t :v (wrap (long (int (char v))) t))
+      (integer? v) (res t :v (if (int-type? t) (wrap v t) v))
+      ;; CS174 (b): a decimal constant keeps its digits and exponent (the quantum), :v is its double
+      (and (instance? java.math.BigDecimal v) (dec-kinds (:k (unq t)))) (res t :v (.doubleValue ^java.math.BigDecimal v) :dec v)
+      ;; a long double constant also keeps its exact value (a 64-bit significand), which a double object may not hold
+      (and (instance? java.math.BigDecimal v) (= :ldouble (:k (unq t))))
+      (res t :v (.doubleValue ^java.math.BigDecimal v) :ld (ld-of v))
+      ;; the converter writes 0.1L as the double 0.1 when 0.1 is the constant's decimal: its value is that decimal rounded to 64 bits
+      (and (instance? Double v) (= :ldouble (:k (unq t))) (not (Double/isNaN v)) (not (Double/isInfinite v)))
+      (res t :v v :ld (ld-of (java.math.BigDecimal. (Double/toString v))))
+      ;; _Float16 and __bf16 constants hold the float nearest their decimal, rounded once (not through a double)
+      (and (#{:float16 :bf16} (:k (unq t))) (or (instance? java.math.BigDecimal v) (and (instance? Double v) (not (Double/isNaN v)) (not (Double/isInfinite v)))))
+      (res t :v (float-of-exact (if (instance? java.math.BigDecimal v) v (java.math.BigDecimal. (Double/toString v)))))
+      (number? v) (res t :v (round-to-format (double v) (:k (unq t))))
+      :else (res t))))
+
+(defn- incomplete-type?
+  "An array of unknown size (not variable-length) or a record not yet complete."
+  [t]
+  (let [t (unq t)]
+    (case (:k t)
+      :array (or (and (nil? (:n t)) (not (:vla t))) (incomplete-type? (:of t)))
+      (:struct :union) (not (.get ^HashMap (:rec t) :complete))
+      false)))
+
+(defn- sizeof-res [t]
+  (let [s (size-of (unq t))]
+    (res t-ulong :v (when (and s (not (:vla t))) s) :vla-expr (boolean (:vla t)))))
+
+(defn- vla? [t] (case (:k t) :array (or (:vla t) (vla? (:of t))) false))
+
+(defn- generic-select [f]
+  (let [[_ ctl & assocs] f
+        type-op (:c/type (meta f))
+        ;; a type operand keeps its qualifiers (C2y), an expression's lvalue conversion drops them (DR 481)
+        _ (when type-op (pedwarn-c2y! "ISO C does not support use of type name as the controlling operand of '_Generic' before C2Y"))
+        ct (if type-op (parse-type ctl) (let [r (ex ctl)] (unq (decay (unq (:t r))))))
+        chosen (atom nil)
+        default (atom nil)
+        rs (doall (for [a assocs]
+                    (let [[tf e] a
+                          t (when-not (= tf :default) (parse-type tf))
+                          ;; C23 6.5.2 p2: an association's type name is a complete object type; C2y allows an incomplete or a
+                          ;; function type, and gcc 15 pedwarns before C2y (review 027's finding 2; CS174 (a) made it an error)
+                          _ (when t
+                              (cond (= :fn (:k (unq t)))
+                                    (pedwarn-c2y! "ISO C does not support '_Generic' association with function type before C2Y")
+                                    (or (incomplete-type? t) (= :void (:k (unq t))))
+                                    (pedwarn-c2y! "ISO C does not support '_Generic' association with incomplete type before C2Y")))
+                          r (ex e)]
+                      (cond
+                        (= tf :default) (reset! default [r a])
+                        (and (nil? @chosen) (compatible? ct t)) (reset! chosen [r a]))
+                      r)))
+        [r a] (or @chosen @default [(res t-invalid) nil])]
+    ;; the chosen association, for ci's builder (CS95 (a))
+    (when a (record! a :chosen))
+    r))
+
+(defn- init-count
+  "The number of elements an initializer gives an array of element type `et` (6.7.11)."
+  [et init]
+  (cond
+    (string? init) (inc (alength (.getBytes ^String init "UTF-8")))
+    (and (seq? init) (= 'byte-string (first init))) (inc (byte-string-len (rest init)))
+    ;; { "abc" } for a character array: the string's
+    (and (seq? init) (= 'init (first init)) (= 2 (count init)) (#{:char :schar :uchar :int :uint :ushort} (:k (unq et)))
+         (let [x (second init)] (or (string? x) (and (seq? x) (= 'byte-string (first x)))
+                                    ;; a prefixed string literal, not (lit T 42)
+                                    (and (seq? x) (= 'lit (first x)) (let [v (nth x 2 nil)] (or (string? v) (seq? v)))))))
+    (init-count et (second init))
+    (and (seq? init) (= 'init (first init)))
+    (let [els (rest init)
+          per (fn per [t] (case (:k t)
+                            :array (* (long (or (:n t) 1)) (long (per (:of t))))
+                            :struct (let [^HashMap r (:rec t)] (max 1 (reduce + (map #(if (and (:bits %) (nil? (:name %))) 0 (per (:t %))) (.get r :members)))))
+                            :union 1
+                            1))
+          ps (long (per (unq et)))]
+      (loop [els (seq els) idx 0 sub 0 mx 0]
+        (if-not els
+          (max mx (if (pos? sub) (inc idx) idx))
+          (let [e (first els)]
+            (cond
+              (and (seq? e) (= 'at (first e)))
+              (let [d (second e)
+                    i (cond (integer? d) d
+                            (vector? d) (const-int (second d))
+                            (keyword? d) nil
+                            :else (const-int d))
+                    lo (if (vector? d) (const-int (first d)) i)]
+                (if (integer? i)
+                  (recur (nnext els) (inc (long i)) 0 (max mx (inc (long i))))
+                  (recur (nnext els) (inc idx) 0 (max mx (inc idx)))))
+              (keyword? e) (recur (nnext els) (inc idx) 0 (max mx (inc idx)))
+              (or (and (seq? e) (= 'init (first e)))
+                  (= 1 ps)
+                  (and (string? e) (= :array (:k (unq et))))
+                  (and (seq? e) ('#{compound-lit} (first e))))
+              (let [i (if (pos? sub) (inc idx) idx)] (recur (next els) (inc i) 0 (max mx (inc i))))
+              :else
+              (let [s (inc sub)]
+                (if (>= s ps) (recur (next els) (inc idx) 0 (max mx (inc idx))) (recur (next els) idx s mx))))))))
+    (and (seq? init) (= 'lit (first init)) (or (string? (nth init 2)) (seq? (nth init 2))))
+    (inc (code-unit-count (unq (parse-type (second init))) (nth init 2)))
+    :else nil))
+
+(declare ptr-conv!)
+
+(defn- check-init
+  "An initializer's expressions checked (its values' types are the object's, converted). `et`, the element type of a
+  one-dimensional array of scalars, has the plain elements converted as an initialization (nullptr_t's rules, CS141)."
+  ([init] (check-init init nil))
+  ([init et]
+  (cond
+    (and (seq? init) (= 'init (first init)))
+    (doseq [e (rest init)]
+      (cond
+        (keyword? e) nil
+        (and (seq? e) (= 'at (first e))) (doseq [d (rest e)]
+                                            (cond (keyword? d) nil
+                                                  (vector? d) (doseq [x d] (exi x))
+                                                  :else (exi d)))
+        (and et (not (seq? e))) (let [r (ex e)] (ptr-conv! et r "initialization") r)
+        :else (check-init e)))
+    (and (seq? init) (= 'c/embed (first init))) nil
+    :else (ex init))))
+
+(defn- unq*
+  "A type without the qualifiers at its top (and, for an array, on its elements)."
+  [t]
+  (if (= :array (:k t)) (update (unq t) :of unq*) (unq t)))
+
+(def ^:private int-class
+  {:bool :bool :char :char :schar :char :uchar :char :short :short :ushort :short :int :int :uint :int
+   :long :long :ulong :long :llong :llong :ullong :llong :int128 :i128 :uint128 :i128})
+
+(defn- ptr-conv!
+  "6.5.17.2 / 6.5.2.2 / 6.8.7.4: the pointer result `rs` converted to the pointer type `dst` in `ctx` (assignment,
+  initialization, argument or return): gcc 14+ gives an error for pointee types that are not compatible (types of
+  one integer class differing in signedness are only a warning), and a pedwarn for a discarded qualifier."
+  [dst rs ctx]
+  (let [dt (unq dst) st (decay (unq (:t rs)))]
+    ;; C23 6.3.2.4 (nullptr_t): to a pointer or bool from nullptr_t, to nullptr_t from nullptr_t or a null pointer constant only
+    (cond
+      (and (= :nullptr (:k st)) (not (#{:ptr :nullptr :bool :invalid :vector} (if (= :enum (:k dt)) (:k (enum-under dt)) (:k dt)))))
+      (err! (str "incompatible types when converting nullptr_t to " (tstr dt) " in " ctx))
+      (and (= :nullptr (:k dt)) (not (#{:nullptr :invalid} (:k st))) (not (null-const-npc? rs)))
+      (err! (str "incompatible types when converting " (tstr st) " to nullptr_t in " ctx)))
+    (when (and (ptr-type? dt) (ptr-type? st) (not (null-const? rs)))
+      (let [a (:to dt) b (:to st)
+            ua (unq* a) ub (unq* b)
+            ka (:k ua) kb (:k ub)]
+        (cond
+          (or (= :invalid ka) (= :invalid kb)) nil
+          (or (= :void ka) (= :void kb) (compatible? ua ub)
+              (and (int-type? ua) (int-type? ub)
+                   ;; two enumerations that are not compatible (another content, another fixed type) are incompatible (CS152)
+                   (not (and (= :enum ka) (= :enum kb)))
+                   (let [ca (int-class (if (= :enum ka) (:k (enum-under ua)) ka))
+                         cb (int-class (if (= :enum kb) (:k (enum-under ub)) kb))]
+                     (and ca (= ca cb)))))
+          (let [qa (quals a) qb (quals b)]
+            (when-not (every? qa qb)
+              (pedwarn! (str ctx " discards qualifier from pointer target type"))))
+          ;; pointers to tagged types of one tag with other contents: gcc's pedwarn of C23's tag compatibility
+          (cx :permissive) nil
+          :else (err! (str ctx ": incompatible pointer type " (tstr st) " to " (tstr dt))))))))
+
+(defn- assign-check [rl rr]
+  (when (and (:lv rl) (contains? (quals (:t rl)) :const) (not (:init rl)))
+    (err! "assignment of read-only location")))
+
+(defn- nested-arrow [p ms]
+  (loop [r (ex p) ms (seq ms)]
+    (if ms (recur (emit! (member-of r (name (first ms)) true)) (next ms)) r)))
+
+(declare ex*)
+
+(defn ex
+  "An expression form's result, its annotations written (and recorded, CS95 (a))."
+  [f]
+  (record! f (ex* f)))
+
+(defn- ex*
+  [f]
+  (at-line f
+    (cond
+      (symbol? f)
+      (let [n (name f)]
+        (emit! (if (= n "_") (res t-void) (ident-expr n))))
+      (seq? f)
+      (let [h (first f) args (rest f) n (count args)]
+        (if-not (symbol? h)
+          (emit! (call h args f))
+          (case h
+            c/id (emit! (ident-expr (second f)))
+            (+ - * / bit-and bit-or bit-xor and or)
+            (if (= 1 n)
+              (let [r (ex (first args)) t (decay (unq (:t r)))
+                    pt (promote t (:bits r))]
+                (when-not (or (arith-type? t) (#{:invalid :vector} (:k t)) (and (= h '+) (ptr-type? t)))
+                  (err! (str "wrong type argument to unary " h)))
+                (emit! (case h
+                         ;; a signaling NaN stays one under + and - (the sign alone changes; review 027's finding 8)
+                         + (res pt :v (:v r) :dec (:dec r) :snan (:snan r) :ld (:ld r))
+                         - (res pt :v (when (some? (:v r)) (if (int-type? pt) (wrap (-' (:v r)) pt) (- (double (:v r)))))
+                                :dec (when-let [d (:dec r)] (.negate ^java.math.BigDecimal d)) :snan (:snan r)
+                                :ld (when-let [l (:ld r)] (.negate ^java.math.BigDecimal l)))
+                         (res pt))))
+              (loop [acc (ex (first args)) xs (next args)]
+                (if xs
+                  (recur (emit! (binary h acc (ex (first xs)))) (next xs))
+                  acc)))
+            (% << >> == != < <= > >=) (emit! (binary h (ex (first args)) (ex (second args))))
+            not (let [r (ex (first args))]
+                  (when (instance? Double (:v r)) (feat! :cc-float-fold))
+                  (emit! (res t-int :v (when (number? (:v r)) (if (zero? (:v r)) 1 0)))))
+            bit-not (let [r (ex (first args)) t (promote (decay (unq (:t r))) (:bits r))]
+                      (when-not (or (int-type? t) (complex-type? t) (#{:invalid :vector} (:k t))) (err! "wrong type argument to bit-complement"))
+                      (emit! (res t :v (when (and (integer? (:v r)) (int-type? t)) (wrap (.not (biginteger (:v r))) t)))))
+            addr (let [r (ex (first args))]
+                   (when (:bits r) (err! "cannot take address of bit-field"))
+                   (emit! (res (ptr (:t r)) :addr true)))
+            arbace.core/deref (let [r (ex (first args))] (emit! (res (deref-type (:t r)) :lv true)))
+            ? (if (= 3 n)
+                (let [c (ex (first args)) a (ex (second args)) b (ex (nth args 2)) cv (:v c)
+                      t (cond-type a b)]
+                  (emit! (res t :v (when (number? cv) (conv-val (:v (if (zero? cv) b a)) (eval-type t))))))
+                (let [a (ex (first args)) b (ex (second args))]
+                  (emit! (res (cond-type a b) :v (when (number? (:v a)) (if (zero? (:v a)) (:v b) (:v a)))))))
+            comma (let [rs (mapv ex args) l (peek rs)]
+                    ;; cc gives a comma the value of its last operand when that is constant (:av)
+                    (emit! (res (decay (unq (:t l))) :v (when (every? #(some? (:v %)) rs) (:v l)) :av (or (:v l) (:av l)))))
+            set! (if (= 2 n)
+                   (let [l (ex (first args)) r (ex (second args))]
+                     (assign-check l r)
+                     (ptr-conv! (:t l) r "assignment")
+                     ;; cc gives an assignment the value it stores when that is an integer constant (:av: written, never folded)
+                     (emit! (res (unq (:t l)) :bits (:bits l) :av (let [v (or (:v r) (:av r))] (when (integer? v) (conv-val v (:t l)))))))
+                   (let [l (ex (first args)) r (ex (nth args 2))]
+                     (assign-check l r)
+                     (emit! (res (unq (:t l)) :bits (:bits l)))))
+            aset (let [[a i v] args
+                       ra (ex a) ri (ex i)
+                       e (emit! (res (deref-type (binary-index-type ra ri)) :lv true))
+                       rv (ex v)
+                       _ (assign-check e rv)]
+                   (emit! (res (unq (:t e)) :av (let [v (or (:v rv) (:av rv))] (when (integer? v) (conv-val v (:t e)))))))
+            (inc! dec! pre-inc! pre-dec!) (let [r (ex (first args))]
+                                            (when (complex-type? (unq (:t r))) (pedwarn-c2y! "ISO C does not support '++' and '--' on complex types before C2Y"))
+                                            (assign-check r nil) (emit! (res (unq (:t r)) :bits (:bits r))))
+            aget (let [[a i] args
+                       ra (ex a) ri (ex i)]
+                   (emit! (res (deref-type (binary-index-type ra ri)) :lv true)))
+            -> (let [[p & ms] args] (nested-arrow p ms))
+            conv (let [[tf e] args t (parse-type tf) r (ex e)
+                       _ (when (and (= :nullptr (:k (unq t))) (not (#{:nullptr :invalid} (:k (decay (unq (:t r))))))
+                                    (not (null-const-npc? r)))
+                           (err! (str "conversion of " (tstr (decay (unq (:t r)))) " to nullptr_t")))
+                       _ (when (and (= :nullptr (:k (decay (unq (:t r))))) (not (#{:ptr :nullptr :bool :invalid :void} (if (= :enum (:k (unq t))) (:k (enum-under (unq t))) (:k (unq t))))))
+                           (err! (str "conversion of nullptr_t to " (tstr (unq t)))))]
+                   (emit! (res (unq t) :v (conv-val (:v r) t) :vla-expr (:vla-expr r)
+                               ;; CS235 (a): a long double keeps its exact value through a cast to long double (a double's or an integer's is exact)
+                               :ld (when (= :ldouble (:k (unq t)))
+                                     (let [v (:v r)]
+                                       (cond (:ld r) (:ld r)
+                                             (and (instance? Double v) (not (Double/isNaN v)) (not (Double/isInfinite v))) (java.math.BigDecimal. (double v))
+                                             (integer? v) (round-ldouble (java.math.BigDecimal. (biginteger v)))
+                                             :else nil)))
+                               :nfp (or (:nfp r) (float-type? (unq (:t r)))))))
+            sizeof (let [r (ex (first args))]
+                     (when (bit-field? r) (err! "'sizeof' applied to a bit-field"))
+                     (emit! (if (vla? (:t r)) (res t-ulong) (sizeof-res (:t r)))))
+            sizeof-type (let [t (parse-type (first args))] (emit! (if (vla? t) (res t-ulong) (sizeof-res t))))
+            alignof (let [r (ex (first args))] (when (bit-field? r) (err! "'_Alignof' applied to a bit-field")) (emit! (res t-ulong :v (or (:malign r) (align-of (unq (:t r)))))))
+            alignof-type (let [t (parse-type (first args))]
+                           (when (incomplete-type? t) (err! "invalid application of 'alignof' to incomplete type"))
+                           (emit! (res t-ulong :v (align-of (unq t)))))
+            generic (emit! (generic-select f))
+            compound-lit (let [[tf & els] args
+                               t (parse-type tf)
+                               _ (when (and (empty? els) (= :array (:k t)) (nil? (:n t)) (not (:vla t)))
+                                   (err! "array of unknown size with empty initializer"))
+                               t (if (and (= :array (:k t)) (nil? (:n t)))
+                                   (assoc t :n (init-count (:of t) (apply list 'init els))) t)
+                               ;; CS174 (b): a single plain element's result, for the constexpr check
+                               one (when (and (= 1 (count els)) (not (keyword? (first els)))
+                                              (not (and (seq? (first els)) ('#{init at c/embed} (first (first els))))))
+                                     (first els))
+                               r1 (if one (check-init one) (do (check-init (apply list 'init els)) nil))]
+                           (when (vla? t) (err! "compound literal has variable size"))
+                           (when (:constexpr (meta f)) (constexpr-check! t (first els) r1))
+                           (emit! (res t :lv true :av (when (and (scalar-type? (unq t)) (= 1 (count els)))
+                                                        (let [e (first els)] (cond (integer? e) e (instance? Character e) (long (int (char e))) :else nil))))))
+            stmt-expr (let [r (with-scope (check-block-items args))]
+                        (emit! (res (if r (decay (unq (:t r))) t-void))))
+            lit (emit! (lit-form f))
+            byte-string (emit! (res (arr t-char (inc (byte-string-len args))) :str true))
+            imaginary (do (when (< (std-num) 124) (pedwarn-c2y! "imaginary constants are a C2Y feature or GCC extension"))
+                          (emit! (res {:k :complex :of t-double})))
+            va-arg (let [[ap tf] args
+                         t (unq (parse-type tf))]
+                     ;; cc's Builtin: (*(T*)__builtin_va_arg_impl(ap))
+                     (ann! (str "e " (tstr (decay t)))) (ann! (str "e " (tstr (ptr t)))) (ann! "e int") (ann! "e *fn()int")
+                     (ex ap) (res t))
+            offsetof (let [[tf & path] args
+                           t (parse-type tf)]
+                       (feat! :cc-builtin-macro)
+                       (doseq [p path] (when-not (keyword? p) (ex p)))
+                       (res t-ulong :v (loop [t (unq t) off 0 ps (seq path)]
+                                         (if-not ps
+                                           off
+                                           (let [p (first ps)]
+                                             (cond
+                                               (and (keyword? p) (record-type? t))
+                                               (if-let [m (member t (name p))] (recur (unq (:t m)) (+ off (long (:off m))) (next ps)) nil)
+                                               (and (= :array (:k t)) (not (keyword? p)))
+                                               (when-let [i (const-int p)] (recur (unq (:of t)) (+ off (* (long i) (long (or (size-of (unq (:of t))) 0)))) (next ps)))
+                                               :else nil))))))
+            types-compatible? (let [[a b] args ta (unq (parse-type a)) tb (unq (parse-type b))]
+                                ;; cc's Builtin: __ccgo__types_compatible_p((t1){}, (t2){})
+                                (feat! :cc-builtin-fold)
+                                (ann! "e int") (ann! "e *fn()int") (ann! (str "e " (tstr (decay ta)))) (ann! (str "e " (tstr (decay tb))))
+                                (res t-int :v (if (compatible? ta tb) 1 0)))
+            classify-type (do (parse-type (first args)) (res t-int))
+            has-attribute? (res t-int)
+            bit-cast (let [[tf e] args t (parse-type tf)] (ex e) (emit! (res t)))
+            convertvector (let [[v tf] args] (ex v) (res (parse-type tf)))
+            label-addr (emit! (res (ptr t-void) :addr true))
+            (real imag) (let [r (ex (first args)) t (unq (:t r))] (emit! (res (if (complex-type? t) (:of t) t))))
+            c/call (let [[f2 & as] args] (emit! (call f2 as f)))
+            c/expr (ex (first args))
+            init (do (check-init f) (res t-invalid))
+            ;; a member access .-f
+            (if (str/starts-with? (name h) ".-")
+              (let [r (ex (first args))] (emit! (member-of r (subs (name h) 2) false)))
+              (emit! (call h args f))))))
+      (and (number? f) (or (and (integer? f) (neg? f)) (and (instance? Double f) (neg? (Math/copySign 1.0 (double f))))))
+      (let [m (emit! (lit-type (if (instance? Double f) (- (double f)) (- f))))
+            pt (promote (:t m))]
+        (emit! (res pt :v (if (int-type? pt) (wrap (-' (:v m)) pt) (- (double (:v m)))))))
+      :else (emit! (lit-type f)))))
+
+(defn- binary-index-type [ra ri]
+  (let [ta (decay (unq (:t ra)))]
+    (cond (ptr-type? ta) ta
+          (= :vector (:k ta)) (ptr (:of ta))
+          :else (decay (unq (:t ri))))))
+
+(defn const-int
+  "An integer constant expression's value (its annotations not written), or nil."
+  [f]
+  (cond
+    (integer? f) f
+    (instance? Character f) (long (int (char f)))
+    :else (let [r (binding [*cx* (assoc *cx* :annotating (atom false))] (ex f))]
+            (when (integer? (:v r)) (:v r)))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Declarations (§6)
+
+(defn- storage [m]
+  (cond (:static m) :static (:extern m) :extern (:typedef m) :typedef :else nil))
+
+(defn- linkage-of
+  "An identifier's linkage (6.2.2): :x, :i or :n."
+  [^String n m fn? param]
+  (cond
+    param :n
+    (and (:static m) (file-scope?)) :i
+    (:extern m) (let [e (lookup n)] (if (and e (#{:x :i} (:linkage e))) (do (when (= :i (:linkage e)) (feat! :cc-linkage)) (:linkage e)) :x))
+    (file-scope?) (if fn? (let [e (lookup n)] (if (and e (#{:x :i} (:linkage e))) (do (when (= :i (:linkage e)) (feat! :cc-linkage)) (:linkage e)) :x)) :x)
+    (and fn? (not (:static m))) (let [e (lookup n)] (if (and e (#{:x :i} (:linkage e))) (:linkage e) :x))
+    (and fn? (:static m)) :i
+    :else :n))
+
+(defn- lname [l] (name l))
+
+(defn- complete-array [t init]
+  (if (and (= :array (:k (unq t))) (nil? (:n t)) (not (:vla t)) (some? init))
+    (if-let [n (init-count (:of t) init)] (assoc t :n (long n)) t)
+    t))
+
+(defn- composite
+  "The composite of a redeclaration's type with the earlier one's (6.2.7): arrays' sizes, prototypes."
+  [old new]
+  (cond
+    (and (= :array (:k old)) (= :array (:k new))) (if (and (nil? (:n new)) (:n old)) (assoc new :n (:n old)) new)
+    (and (= :fn (:k old)) (= :fn (:k new)) (not (:proto new)) (:proto old)) old
+    :else new))
+
+(defn- declare-object!
+  "A declared object or function: entered in its scope, its d annotation written."
+  [^String n t m kind init param]
+  (when (or (= n "_Bool") (and (= n "bool") (c23?))) (err! (str "'" n "' cannot be used here")))
+  (when (:c/bad-specs m) (err! "two or more data types in declaration specifiers"))
+  (let [t (if param (case (:k (unq t)) :array (ptr (:of (unq t))) :fn (ptr t) t) t) ; a parameter's adjusted type (6.7.7.4)
+        fn? (= :fn (:k (unq t)))
+        lk (linkage-of n m fn? param)
+        prev (.get ^HashMap (:ord (top-scope)) n)
+        _ (when (and prev (#{:obj :fn} (:kind prev)) (not= (tstr (:t prev)) (tstr t)))
+            ;; cc gives every declaration of a redeclared identifier one type
+            (feat! :cc-redeclared)
+            (when-let [^java.util.Set fs (:feats prev)] (.add fs :cc-redeclared)))
+        ;; a block-scope extern redeclares the file scope's identifier (6.2.2)
+        prev* (or (when (and prev (#{:obj :fn} (:kind prev))) prev)
+                  (when (and (:extern m) (not (file-scope?)))
+                    (let [^ArrayList sc (cx :scopes) p (.get ^HashMap (:ord (.get sc 1)) n)]
+                      (when (and p (#{:obj :fn} (:kind p))) p))))
+        tyof? (fn [mm] (or (:c/auto-type mm) (:auto mm)
+                           (some #{'typeof 'typeof-type 'typeof-unqual 'typeof-unqual-type} (tree-seq coll? seq (:tag mm)))))
+        _ (when (and prev* (not param) (not (tyof? m)) (not (tyof? (:m prev*)))
+                     (not (compatible? (if (:constexpr (:m prev*)) (qual (:t prev*) :const) (:t prev*)) (if (:constexpr m) (qual t :const) t)))
+                     (not= :invalid (:k (:t prev*))) (not= :invalid (:k t)))
+            (err! (str "conflicting types for '" n "'")))
+        t (if (and prev (#{:obj :fn} (:kind prev))) (composite (:t prev) t) t)
+        e {:kind kind :t t :linkage lk :v (when (and (:constexpr m) (some? init)) (:v init)) :m m :feats (cx :feats)
+           :id (Object.) :file-scope (file-scope?) :name n}]
+    (attr-args! m)
+    (binding [*line* (or (:line m) *line*)] (decl-position-attrs! m kind t))
+    ;; cc types a library function gcc knows as a builtin by its __builtin_ declaration
+    (when (and fn? (not param) (lookup (str "__builtin_" n))) (feat! :cc-builtin-types))
+    (ann! (str "d " n " " (lname lk) " " (tstr (if param (case (:k (unq t)) :array (ptr (:of (unq t))) :fn (ptr t) t) t))))
+    (declare! n e)
+    (when (and (:extern m) (not (file-scope?)))
+      ;; a block-scope extern: the file scope's identifier too
+      (let [^ArrayList s (cx :scopes)]
+        (when-not (.get ^HashMap (:ord (.get s 1)) n) (file-declare! n e))))
+    e))
+
+(defn- auto-type? [m]
+  (or (:c/auto-type m) (and (:auto m) (:c/implicit-int m) (c23?))))
+
+(defn- string-bytes
+  "The bytes of a string form's value and whether it is a u8 literal: [bytes u8?], or nil for another form."
+  [init]
+  (let [bs (fn [parts] (vec (mapcat (fn [p] (cond (string? p) (map #(bit-and (long %) 255) (.getBytes ^String p "UTF-8"))
+                                                  (integer? p) [(bit-and (long p) 255)]))
+                                    parts)))]
+    (cond
+      (and (seq? init) (= 'byte-string (first init))) [(bs (rest init)) false]
+      (and (seq? init) (= 'lit (first init)) (= 'unsigned-char (second init))
+           (seq? (nth init 2 nil)) (= 'byte-string (first (nth init 2)))) [(bs (rest (nth init 2))) true]
+      (and (seq? init) (= 'lit (first init)) (= 'unsigned-char (second init)) (string? (nth init 2 nil))) [(bs [(nth init 2)]) true]
+      (string? init) [(bs [init]) false]
+      :else nil)))
+
+(def ^:private dec-limits
+  ;; [digits of the coefficient, least and greatest exponent of the quantum] of the interchange formats
+  {:dec32 [7 -101 90] :dec64 [16 -398 369] :dec128 [34 -6176 6111] :dec64x [34 -6176 6111]})
+
+(defn- round-dec
+  "The decimal `x` rounded (half to even) to the digits of the decimal format `k`; `x` itself for a kind the table lacks."
+  [^java.math.BigDecimal x k]
+  (if-let [[p] (dec-limits k)]
+    (.round x (java.math.MathContext. (int p) java.math.RoundingMode/HALF_EVEN))
+    x))
+
+(defn- dec-fits?
+  "Whether the decimal `x` is a value of the format `k`. A constant of a decimal type (`strict`) must keep its coefficient and
+  quantum; a value of another kind may be written with the trailing zeros stripped and its exponent raised to the format's."
+  [^java.math.BigDecimal x k strict]
+  (let [[p qmin qmax] (dec-limits k)
+        zero (zero? (.signum x))
+        x (if (or strict zero) x (.stripTrailingZeros x))
+        digits (if zero 1 (count (str (.abs (.unscaledValue x)))))
+        q (if (and zero (not strict)) 0 (- (.scale x)))
+        [digits q] (if (and (not strict) (not zero) (> q qmax)) [(+ digits (- q qmax)) qmax] [digits q])]
+    (and (<= digits p) (<= qmin q qmax))))
+
+(defn- constexpr-float-bad
+  "CS174 (b), C23 6.7.2: the message when the constexpr floating (or decimal) object of element kind `ek` cannot hold the
+  initializer's part `pr` exactly, else nil: a binary object given a decimal value, a signaling NaN of another type, a value
+  float cannot hold, an integer beyond the significand, a decimal beyond the format's digits and quantum range."
+  [pr ek dec-obj]
+  (let [v (:v pr) pt (unq (:t pr)) src-dec (dec-kinds (:k pt))
+        nr "'constexpr' initializer not representable in type of object"]
+    (cond
+      (and src-dec (not dec-obj)) "'constexpr' initializer for a binary floating-point type is of decimal type"
+      (:snan pr) (when (not= (:snan pr) ek) nr)
+      ;; CS215: a constant of the object's own type is the value rounded to the format (gcc: 1.000000000DF, 1.0000001DF, 1e-102DF
+      ;; for _Decimal32 are accepted); another decimal type's is judged by its coefficient and quantum
+      (and dec-obj (:dec pr) (= (:k pt) ek)) nil
+      ;; review 031's finding D: the constant's value is first rounded to its own type's digits (1.00000000000000000DF is
+      ;; 1.000000 as a _Decimal32, which a _Decimal64 holds)
+      (and dec-obj (:dec pr)) (when-not (dec-fits? (round-dec (:dec pr) (:k pt)) ek true) nr)
+      (nil? v) nil
+      (and dec-obj (integer? v) (int-type? pt)) (when-not (dec-fits? (java.math.BigDecimal. (biginteger v)) ek false) nr)
+      (and dec-obj (instance? Double v) (float-type? pt) (not src-dec))
+      (let [d (double v)] (when (and (not (Double/isNaN d)) (not (Double/isInfinite d)) (not (dec-fits? (java.math.BigDecimal. d) ek false))) nr))
+      dec-obj nil
+      (and (integer? v) (int-type? pt))
+      (when (case ek
+              (:float :float32) (not= 0 (.compareTo (java.math.BigDecimal. (double (.floatValue ^Number v))) (java.math.BigDecimal. (biginteger v))))
+              (:double :float64) (not= 0 (.compareTo (java.math.BigDecimal. (.doubleValue ^Number v)) (java.math.BigDecimal. (biginteger v))))
+              (:float16 :bf16) (let [r (round-to-format (.doubleValue ^Number v) ek)]
+                                 (or (Double/isInfinite r) (not= 0 (.compareTo (java.math.BigDecimal. r) (java.math.BigDecimal. (biginteger v))))))
+              ;; x87's 64-bit significand: the bits from the highest to the lowest set one (review 027's finding 8: 1 << 100 fits)
+              :ldouble (let [b (.abs (biginteger v))] (and (pos? (.signum b)) (> (- (.bitLength b) (.getLowestSetBit b)) 64)))
+              false)
+        nr)
+      (and (:ld pr) (binary-formats ek)) (when-not (fits-binary? (:ld pr) ek) nr)
+      (and (instance? Double v) (float-type? pt))
+      (let [d (double v)]
+        (when (and (not (Double/isNaN d)) (not (Double/isInfinite d))
+                   (case ek
+                     (:float :float32 :float16 :bf16) (not= d (round-to-format d ek))
+                     false))
+          nr))
+      :else nil)))
+
+(defn- constexpr-check!
+  "C23 6.7.2's constraints on a constexpr object's initializer that gcc diagnoses: a floating or complex value for an
+  integer object, and a string whose elements the element type cannot represent (a plain literal's are `char`s)."
+  [t init r]
+  (let [ut (unq t)]
+    (cond
+      ;; CS174 (b), C23 6.7.2: a floating or complex object's initializer is exactly representable in its type: a signaling NaN
+      ;; of another type, a value float cannot hold, an integer beyond the significand
+      (and r (or (float-type? ut) (complex-type? ut)))
+      (let [ek (:k (unq (if (complex-type? ut) (:of ut) ut)))
+            dec-obj (dec-kinds ek)
+            msg (some (fn [pr] (constexpr-float-bad pr ek dec-obj)) (or (:parts r) [r]))]
+        (when msg (err! msg)))
+      (and (= :array (:k ut)) (int-type? (unq (:of ut))))
+      (when-let [[bs u8] (string-bytes (if (and (seq? init) (= 'init (first init)) (= 2 (count init))) (second init) init))]
+        (let [et (:k (unq (:of ut)))
+              char-signed (char-signed?)
+              [lo hi] (case et :uchar [0 255] :schar [-128 127] :char (if char-signed [-128 127] [0 255]) nil)]
+          (when lo
+            (when (some (fn [b] (let [v (if (and (not u8) char-signed (> b 127)) (- b 256) b)] (or (< v lo) (> v hi)))) bs)
+              (err! "'constexpr' initializer not representable in type of object")))))
+      (and r (int-type? ut) (not= :bool (:k ut)))
+      (let [it (unq (:t r))]
+        (when (or (float-type? it) (complex-type? it))
+          (err! "'constexpr' integer initializer is not an integer constant expression"))))))
+
+(defn- check-var
+  "(c/var name init?)."
+  [f]
+  (let [[_ nm & more] f
+        m (meta nm)
+        n (ident nm)
+        has-init (seq more)
+        init (first more)]
+    (if (auto-type? m)
+      (let [r (binding [*auto-init* true] (ex init)) t (decay (unq (:t r)))]
+        (feat! :cc-auto)
+        (record! nm (declare-object! n t m :obj nil false)))
+      (let [t (vectorize (parse-type (or (:tag m) 'int)) m)
+            t (if (contains? m :c/alignas) (do (exi (:c/alignas m)) t) t)
+            _ (when-let [at (:c/alignas-type m)] (parse-type at))
+            empty-init (and (seq? init) (= '(init) init))
+            ;; C23: `{}` gives an array of unknown size none (gcc: the zero-size diagnostic), a variable-length array only `{}`
+            _ (when (and has-init (not (cx :permissive)) (= :array (:k (unq t))) (nil? (:n (unq t))) (not (:vla (unq t))) empty-init)
+                (err! "zero or negative size array"))
+            _ (when (and has-init (or (vla? t)
+                                       ;; not through typeof: the composite type of two structs may not be of variable size
+                                       (and (vla-struct? t)
+                                            (not (some #{'typeof 'typeof-type 'typeof-unqual 'typeof-unqual-type} (tree-seq coll? seq (:tag m))))))
+                                   (not empty-init))
+                (err! "variable-sized object may not be initialized except with an empty initializer"))
+            ;; an array of wide characters is not initialized by a narrow (or u8) string literal
+            _ (when (and has-init (= :array (:k (unq t))) (int-type? (unq (:of (unq t)))) (> (long (size-of (unq (:of (unq t))))) 1))
+                (when (string-bytes (if (and (seq? init) (= 'init (first init)) (= 2 (count init))) (second init) init))
+                  (err! "array initialized from a string literal with type array of unsigned char")))
+            ;; CS152: an initializer defines the object, and so does a file-scope thread-local one without `extern` (C23 6.9.3: a
+            ;; thread-local declaration is no tentative definition); a second definition in the scope is a redefinition, a
+            ;; thread-local array of unknown size has no storage
+            defines (and (not= :fn (:k (unq t))) (or has-init (and (file-scope?) (:thread_local m) (not (:extern m)))))
+            ^HashSet defd (let [^IdentityHashMap d (cx :defs) ord (:ord (top-scope))]
+                            (or (.get d ord) (let [s (HashSet.)] (.put d ord s) s)))
+            _ (when (and defines (.contains defd n)) (err! (str "redefinition of '" n "'")))
+            _ (when defines (.add defd n))
+            _ (when (and (not has-init) defines (:thread_local m) (= :array (:k (unq t))) (nil? (:n (unq t))) (not (:vla (unq t))))
+                (err! (if (:static m) (str "array size missing in '" n "'") (str "storage size of '" n "' isn't known"))))
+            t (complete-array t (when has-init init))
+            ;; the object is in scope in its own initializer (6.2.1)
+            e (record! nm (declare-object! n t m (if (= :fn (:k (unq t))) :fn :obj) nil false))]
+        (when has-init
+          (let [r (if (and (seq? init) (= 'init (first init))) (do (check-init init (let [ut (unq t)]
+                                                                                        (when (and (= :array (:k ut)) (let [k (:k (unq (:of ut)))] (or (int-type? (unq (:of ut))) (#{:float :double :ptr :nullptr} k))))
+                                                                                          (unq (:of ut))))) nil) (ex init))
+                _ (when r (binding [*line* (or (and (seq? init) (:line (meta init))) *line*)] (ptr-conv! t r "initialization")))
+                _ (when (:constexpr m) (constexpr-check! t init r))]
+            (when (and (:constexpr m) r (some? (:v r)))
+              (record! nm (declare! n (assoc e :v (conv-val (:v r) t)))))
+            (when (and (= :array (:k (unq t))) (vla? t)) nil)))
+        e))))
+
+(defn- params-of
+  "A definition's parameter vector: [[name type meta] ...] and the function type."
+  [ps ret]
+  (let [kr (:c/kr (meta ps))
+        variadic (= '& (last ps))
+        ps (if variadic (butlast ps) ps)
+        named (vec (keep (fn [p]
+                           (let [pm (meta p) nm (ident p)]
+                             (if (and nm (or (:tag pm) (:c/implicit-int pm) (seq? p) kr))
+                               (let [t (parse-type (or (:tag pm) 'int))]
+                                 (declare! nm {:kind :obj :t (case (:k (unq t)) :array (ptr (:of (unq t))) :fn (ptr t) t) :linkage :n})
+                                 [nm t pm p])
+                               (let [t (parse-type p)]
+                                 (when-not (and (= :void (:k t)) (= 1 (count ps))) [nil t pm])))))
+                         ps))
+        adj (fn [t] (case (:k (unq t)) :array (ptr (:of (unq t))) :fn (ptr t) t))]
+    [named {:k :fn :ret ret :params (mapv (comp adj second) named) :variadic variadic
+            :proto (and (not kr) (or (seq ps) variadic (c23?)))
+            :empty-list (and (not kr) (empty? ps) (not variadic))}]))
+
+(declare check-stmt)
+
+(defn- asm-operands!
+  "CS160: an asm operand with a register constraint (`\"r\"`, `\"+r\"`, ...) that is an object of a _BitInt wider than a
+  register pair (128 bits) has no register to live in: gcc's \"impossible constraint\". The statement is kept as text."
+  [text]
+  (when (string? text)
+    (doseq [[_ c id] (re-seq #"\"([=+&%]*[a-zA-Z]*r[a-zA-Z]*)\"\s*\(\s*([A-Za-z_]\w*)\s*\)" text)]
+      (let [e (lookup id)
+            t (when (and e (#{:obj} (:kind e))) (unq (:t e)))]
+        (when (and t (= :bitint (:k t)) (> (long (:n t)) 128) (not (re-find #"[mogVX0-9]" c))) ; "rm" may live in memory
+          (err! "impossible constraint in 'asm'"))))))
+
+(defn- check-defn [f]
+  (let [[_ nm ps & body] f
+        m (meta nm)
+        n (ident nm)
+        kr (:c/kr (meta ps))
+        _ (when (and kr (seq ps) (>= (std-num) 123))
+            (binding [*line* (or (:line (meta ps)) *line*)] (pedwarn! "old-style function definition")))
+        ;; the result type first: a struct it defines is the enclosing scope's
+        ret (parse-type (or (:tag (meta ps)) 'int))]
+    (with-scope ;; the parameters' scope (the body's block shares it)
+      (let [[named ft] (params-of ps ret)]
+        (pop-scope!) ;; the function itself is declared in the enclosing scope
+        (record! nm (declare-object! n ft m :fn nil false))
+        (push-scope!)
+        (doseq [[pn pt pm psym] named]
+          (when pn
+            (record! psym
+                     (if (and kr (:c/implicit-int pm))
+                       ;; an identifier list's undeclared parameter: no declarator of cc's tree
+                       (binding [*cx* (assoc *cx* :annotating (atom false))] (declare-object! pn pt pm :obj nil true))
+                       (declare-object! pn pt pm :obj nil true)))))
+        (record! ps ft)
+        (binding [*cx* (assoc *cx* :fn-name n :fn-ret (:ret ft))]
+          (check-block-items body))))))
+
+(defn- check-declare [f]
+  (let [[_ nm ps] f
+        m (meta nm)
+        n (ident nm)]
+    (if (vector? ps)
+      (let [t (parse-type (list 'fn ps (or (:tag (meta ps)) 'int)))]
+        (when (:thread_local m) (err! "storage class specifier '_Thread_local' in a function declaration"))
+        (record! nm (declare-object! n t m :fn nil false)))
+      (let [t (parse-type (:tag m))]
+        (record! nm (declare-object! n t m :fn nil false))))))
+
+(defn- check-typedef [f]
+  (let [[_ nm tf] f
+        n (ident nm)
+        m (meta nm)
+        t (vectorize (parse-type tf) m)
+        t (if-let [al (some #(when (= "aligned" (first %)) (aligned-value (second %))) (attrs-of m :c/attrs :c/after-attrs :c/decl-attrs))]
+            (assoc t :talign al) t)]
+    (attr-args! m)
+    (decl-position-attrs! (assoc m :tag tf) :typedef t)
+    (when (:c/bad-specs m) (err! "two or more data types in declaration specifiers"))
+    (when (or (= n "_Bool") (and (= n "bool") (c23?))) (err! (str "'" n "' cannot be defined via 'typedef'")))
+    (let [prev (.get ^HashMap (:ord (top-scope)) n)]
+      (when (and prev (= :typedef (:kind prev)) (not (type-eq (:t prev) t)))
+        (err! (str "conflicting types for '" n "'"))))
+    (ann! (str "d " n " n " (tstr t)))
+    (record! nm (declare! n {:kind :typedef :t t}))))
+
+(defn check-decl
+  "A declaration form (§6)."
+  [f]
+  (at-line f
+    (case (first f)
+      c/var (check-var f)
+      c/declare (check-declare f)
+      c/defn (check-defn f)
+      c/typedef (check-typedef f)
+      (c/struct c/union) (let [[h & args] f] (check-struct (vary-meta (apply list (symbol (name h)) args) merge (meta f)) (keyword (name h))))
+      c/enum (let [[_ & args] f] (check-enum (with-meta (apply list 'enum args) (meta f))))
+      c/group (let [[_ tf & ds] f
+                    bt (parse-type tf)]
+                (binding [*base* bt] (doseq [d ds] (check-decl d))))
+      c/static-assert (let [[_ e] f r (exi e)]
+                        (if (and (integer? (:v r)) (zero? (:v r)) (not= :nullptr (:k (unq (:t r)))) (not (cx :exec-charset))) (err! "static assertion failed")))
+      c/declare-specs (do (when (:c/bad-specs (meta f)) (err! "two or more data types in declaration specifiers"))
+                          (when (and (:c/implicit-int (meta f)) (seq (:c/decl-attrs (meta f))))
+                            ;; `[[...]];` at file scope reads as attribute-only specifiers
+                            (attr-decl-check! (cons 'c/attr-decl (:c/decl-attrs (meta f))) nil :top))
+                          (parse-type (second f)))
+      c/attr-decl (attr-decl-check! f nil :top)
+      c/local-labels nil
+      nil)))
+
+;; ---------------------------------------------------------------------------------------------
+;; Statements (§7.2, §7.3)
+
+(defn- decl-form? [x] (and (seq? x) (contains? decl-heads (first x))))
+
+(defn- let-bindings
+  "A let's binding vector checked into the current scope."
+  [bv]
+  (loop [xs (seq bv)]
+    (when xs
+      (let [x (first xs)]
+        (if (decl-form? x)
+          (do (check-decl x) (recur (next xs)))
+          (do (check-decl (with-meta (list 'c/var x (second xs)) (meta x))) (recur (nnext xs))))))))
+
+(def ^:dynamic *in-switch* false)
+
+(defn- attr-decl-check!
+  "An attribute declaration `[[...]];` (C23 6.7.13.1): the standard attributes in it are ignored (a pedwarn), except
+  fallthrough, which is an error at top level, outside a switch and where no case or default label follows."
+  [f next where]
+  (std-attr-check! {:c/attrs (vec (rest f))})
+  (std-attr-misc! (vec (rest f)))
+  (doseq [[n _ _ ns gnu] (attr-items (rest f)) :when (and (nil? ns) (not gnu))]
+    (cond
+      (= n "fallthrough")
+      (case where
+        :top (err! "'fallthrough' attribute at top level")
+        :block (cond (not *in-switch*) (err! "invalid use of attribute 'fallthrough'")
+                     (not (and (seq? next) (#{'case 'default} (first next))))
+                     (err! "attribute 'fallthrough' not preceding a case label or default label")))
+      (or (contains? std-no-arg-attrs n) (contains? std-string-attrs n))
+      (ignored! n))))
+
+(defn- stmt-attrs!
+  "The standard attributes a statement or label stood with (CS140): ignored on a statement, and on a label for
+  deprecated and fallthrough; nodiscard and noreturn apply to no label."
+  [s]
+  (when-let [v (and (seq? s) (not (decl-form? s)) (not= 'c/attr-decl (first s)) (:c/attrs (meta s)))]
+    (let [lbl (contains? '#{label case default} (first s))]
+      (at-line s
+        (std-attr-misc! v)
+        (doseq [n (std-names v)]
+          (cond
+            (or (not lbl) (contains? #{"deprecated" "fallthrough"} n)) (ignored! n)
+            (contains? #{"nodiscard" "noreturn" "_Noreturn"} n) (err! (str "'" n "' attribute can only be applied to declarations other than labels"))))))))
+
+(defn- check-block-items
+  "A statement list; the result of its last expression statement (a statement expression's value)."
+  [items]
+  (let [last-r (atom nil)]
+    (doseq [[s nxt] (map vector items (concat (rest items) [nil]))]
+      (when (and (seq? s) (= 'c/attr-decl (first s))) (at-line s (attr-decl-check! s nxt :block)))
+      (stmt-attrs! s)
+      (reset! last-r (check-stmt s)))
+    @last-r))
+
+(defn- cond-expr [e] (when-not (= e '_) (ex e)))
+
+(defn check-stmt
+  "A statement form; an expression statement's result."
+  [s]
+  (at-line s
+    (cond
+      (seq? s)
+      (let [h (first s) args (rest s)]
+        (case h
+          do (with-scope (check-block-items args))
+          let (let [[bv & body] args]
+                ;; CS194 (a): the block a selection statement's declaration made (the converter's :c/sel-decl)
+                (when (:c/sel-decl (meta s)) (pedwarn-c2y! "ISO C does not support if declarations before C2Y"))
+                (with-scope (let-bindings bv) (check-block-items body)))
+          when (do (ex (first args)) (with-scope (check-block-items (rest args))) nil)
+          if (let [[c a b] args] (ex c) (with-scope (check-stmt a)) (with-scope (check-stmt b)) nil)
+          cond (do (loop [xs (seq args)]
+                     (when xs
+                       (when-not (= :else (first xs)) (ex (first xs)))
+                       (with-scope (check-stmt (second xs)))
+                       (recur (nnext xs))))
+                   nil)
+          switch (let [rc (ex (first args))
+                       ct (promote (unq (:t rc)))
+                       _ (when (or (= :nullptr (:k ct)) (float-type? ct) (ptr-type? ct) (record-type? ct)) (err! "switch quantity not an integer"))]
+                   (binding [*switch* (when (and (int-type? ct) (not= :bool (:k ct))) {:t ct :seen (atom [])})
+                             *in-switch* true]
+                     (with-scope (check-block-items (rest args))))
+                   nil)
+          (while do-while) (do (ex (first args)) (with-scope (check-block-items (rest args))) nil)
+          for (let [[init c step & body] args]
+                (with-scope
+                  (if (and (= 1 (count init)) (not (decl-form? (first init))))
+                    (ex (first init))
+                    (let-bindings init))
+                  (cond-expr c) (cond-expr step)
+                  (with-scope (check-block-items body)))
+                nil)
+          case (let [[a b] args
+                     has-b (> (count args) 1) ; `nullptr` is nil in the forms
+                     ra (exi a) rb (when has-b (exi b))]
+                 ;; a duplicate case value, ranges overlapping (gcc converts the labels to the controlling type)
+                 (when-let [{:keys [t seen]} *switch*]
+                   (let [iv (fn [r] (let [v (:v r)] (when (integer? v) (wrap v t))))
+                         lo (iv ra)
+                         hi (if has-b (iv rb) lo)]
+                     (when (and (some? lo) (some? hi) (<= lo hi))
+                       (when (some (fn [[l h]] (and (<= lo h) (<= l hi))) @seen)
+                         (err! "duplicate case value"))
+                       (swap! seen conj [lo hi]))))
+                 (when has-b (pedwarn-c2y! "ISO C does not support range expressions in switch statements before C2Y"))
+                 nil)
+          c/asm (do (feat! :asm) (asm-operands! (first args)) nil)
+          (continue break) (do (when (seq args)
+                                 (pedwarn-c2y! (str "ISO C does not support '" (name h) "' statement with an identifier operand before C2Y")))
+                               nil)
+          (default label goto c/local-labels c/attr-decl) nil
+          goto* (do (ex (first args)) nil)
+          return (when (seq args)
+                   (let [r (ex (first args))]
+                     (when-let [rt (cx :fn-ret)] (ptr-conv! rt r "return")))
+                   nil)
+          (c/define c/undef c/directive c/pragma c/include) nil
+          (if (decl-form? s)
+            (do (check-decl s) nil)
+            (ex s))))
+      :else (ex s))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Units
+
+(defn- pragma-pack!
+  "#pragma pack's state from a c/pragma form's text."
+  [f]
+  (let [t (str/join " " (map str (rest f)))]
+    (when (re-find #"\bpack\b" t)
+      (let [n (some-> (re-find #"pack\s*\(\s*(?:push\s*,\s*)?(\d+)" t) second Long/parseLong)]
+        (cond
+          (re-find #"pack\s*\(\s*\)" t) (swap! (cx :pack-state) assoc :pack nil)
+          (re-find #"pop" t) (swap! (cx :pack-state) (fn [s] (let [st (:stack s)] (assoc s :pack (peek st) :stack (if (seq st) (pop st) st)))))
+          n (swap! (cx :pack-state) (fn [s] (assoc (if (re-find #"push" t) (update s :stack (fnil conj []) (:pack s)) s) :pack n)))
+          :else nil)))))
+
+(declare check-top)
+
+(defn- check-forms [forms]
+  (doseq [f forms] (check-top f)))
+
+(defn check-top
+  "A top-level form of a unit."
+  [f]
+  (when (seq? f)
+    (binding [*cx* (let [p (:pack @(cx :pack-state))] (assoc *cx* :pack p :pack1 (= p 1)))]
+      (case (first f)
+        c/include (let [u (second (drop-while #(not= % :unit) f))
+                        ^HashSet done (cx :done-units)]
+                    (when (and u (not (.contains done u)))
+                      (.add done u)
+                      (when-let [uf (get (cx :units) (str u))]
+                        (binding [*cx* (assoc *cx* :annotating (atom false))
+                                  *unit* (str (or (:path uf) u))
+                                  *system-unit* (if (contains? uf :system)
+                                                  ;; the directory the header was found through (review 079's finding 3)
+                                                  (boolean (:system uf))
+                                                  (let [p (str (:path uf))
+                                                        norm (fn [^String x] (str (.normalize (java.nio.file.Paths/get x (make-array String 0)))))
+                                                        np (norm p)]
+                                                    (boolean (some #(str/starts-with? np (str (norm (str %)) "/")) (cx :sys-dirs)))))
+                                  *unit-info* (delay
+                                                (let [p (str (:path uf))
+                                                      f (java.io.File. ^String (if (and (cx :base) (not (.startsWith p "/"))) (str (cx :base) "/" p) p))]
+                                                  (if (.isFile f)
+                                                    (let [ls (str/split-lines (String. (java.nio.file.Files/readAllBytes (.toPath f)) "ISO-8859-1"))]
+                                                      {:ext (set (keep-indexed (fn [i ^String l] (when (.contains l "__extension__") (inc i))) ls))
+                                                       ;; gcc takes a header with this pragma for a system header (no pedwarn in it)
+                                                       :pragma (boolean (some #(re-find #"^\s*#\s*pragma\s+GCC\s+system_header\b" %) ls))})
+                                                    {:ext #{} :pragma false})))]
+                          ;; each of the unit's forms at its own line, as the main file's are
+                          (doseq [g (:forms uf)]
+                            (binding [*line* (or (and (seq? g) (:line (meta g))) *line*)
+                                      *unit-line?* (boolean (and (seq? g) (:line (meta g))))]
+                              (check-top g)))))))
+        c/pragma (pragma-pack! f)
+        c/asm (feat! :asm)
+        (c/define c/undef c/directive c/file c/header) nil
+        (if (decl-form? f) (check-decl f) nil)))))
+
+(defn- new-cx [std opts]
+  {:std std :scopes (ArrayList.) :errors (ArrayList.) :annot nil :annotating (atom false)
+   :done-units (HashSet.) :defs (IdentityHashMap.) :units {} :pack-state (atom {}) :ldouble-size (:ldouble-size opts 16)
+   :unsigned-char (:unsigned-char opts) :pedantic (:pedantic opts) :ext-lines (:ext-lines opts) :sys-dirs (:sys-dirs opts) :base (:base opts)
+   :permissive (:permissive opts) :no-c2y-compat (:no-c2y-compat opts) :no-c23-compat (:no-c23-compat opts) :exec-charset (:exec-charset opts)})
+
+(defn check-unit
+  "Checks a read (arbace.repr.c/read-c's {:forms :units}) at the standard `std` (a keyword), the
+  builtins' forms `builtins` declared first: {:errors [...] :items [[line [annotation...]] ...]} (the
+  items when `annotate`)."
+  [rd std builtins & {:keys [annotate ldouble-size unsigned-char results pedantic ext-lines sys-dirs base notes no-c2y-compat no-c23-compat exec-charset permissive]}]
+  (let [c (assoc (new-cx std {:ldouble-size (or ldouble-size 16) :unsigned-char unsigned-char :pedantic pedantic :ext-lines ext-lines :sys-dirs sys-dirs :base base
+                                      :permissive permissive :no-c2y-compat no-c2y-compat :no-c23-compat no-c23-compat :exec-charset exec-charset})
+                 :units (into {} (for [[k u] (:units rd)] [(str k) u]))
+                 :results (when results (IdentityHashMap.)))
+        items (ArrayList.)]
+    (binding [*cx* c]
+      (push-scope!)
+      (binding [*cx* (assoc *cx* :annotating (atom false))]
+        (doseq [f builtins] (try (check-top f) (catch Exception _ nil))))
+      (push-scope!)
+      (.clear ^ArrayList (cx :errors))
+      (doseq [f (:forms rd)]
+        (let [a (ArrayList.) fs (java.util.TreeSet.)]
+          (binding [*cx* (assoc *cx* :annot a :feats fs :annotating (atom (boolean annotate)))
+                    *line* (or (:line (meta f)) 0)]
+            (check-top f))
+          (when (and annotate (seq? f) (:line (meta f)) (not (#{'c/include 'c/define 'c/undef 'c/directive 'c/pragma} (first f))))
+            (.add items [(:line (meta f)) (vec a) fs]))))
+      ;; the lexical pedantic notes (arbace.repr.c.pedantic), errors under -pedantic-errors
+      (doseq [[ln msg always] notes]
+        (when (or always (not (contains? (or ext-lines #{}) ln))) (.add ^ArrayList (cx :errors) (str ln ": " msg))))
+      (cond-> {:errors (vec (cx :errors)) :items (vec items)}
+        results (assoc :results (cx :results))))))

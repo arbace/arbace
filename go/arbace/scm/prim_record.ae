@@ -1,0 +1,207 @@
+;; si's runtime: the primitives of (rnrs records procedural), (rnrs records inspection) and (rnrs conditions),
+;; and the standard condition types' makers, predicates, accessors and descriptors (the &NAME-rtd and
+;; &NAME-rcd values psyntax's condition-type keywords name).
+(in-ns 'go.arbace.scm)
+
+(go/file "prim_record.go"
+  :imports [[strings "strings"]])
+
+(go/var ^{:tag (map any (* RTD)) :doc "nongenerative is the record types made with a uid, by uid.\n"} nongenerative (make (map any (* RTD))))
+
+(go/func ArgRTD ^{:tag (* RTD)} [^string who ^any x]
+  (let [(values r ok) (assert (* RTD) x)]
+    (when (not ok)
+      (NotA who "record-type descriptor" x))
+    r))
+
+(go/func fieldsOf "fieldsOf is the fields of an R6RS field vector #((mutable a) (immutable b) ...).\n"
+  ^{:tag (slice Field)} [^any x]
+  (let [v (ArgVector "make-record-type-descriptor" x)
+        fs (make (slice Field) (len (.-V v)))]
+    (range [i f (.-V v)]
+      (let [spec (ArgList "make-record-type-descriptor" f)]
+        (when (!= (len spec) 2)
+          (AssertionViolation "make-record-type-descriptor" "invalid field specifier ~s" f))
+        (aset fs i (lit Field :Name (ArgSymbol "make-record-type-descriptor" (aget spec 1))
+                              :Mutable (== (aget spec 0) (conv any (Intern "mutable")))))))
+    fs))
+
+(go/func recordOf "recordOf is x as a record of type rtd (or a descendant), else Chez's error.\n"
+  ^{:tag (* Record)} [^string who ^any x ^{:tag (* RTD)} rtd]
+  (let [(values r ok) (assert (* Record) x)]
+    (when (or (not ok) (not (.Is (.-RTD r) rtd)))
+      (Violation CondAssertion who "~s is not of type ~s" x rtd))
+    r))
+
+(go/func fieldIndex "fieldIndex is the index in a record of rtd's own field k.\n" ^int [^string who ^{:tag (* RTD)} rtd ^any k]
+  (let [i (ArgIndex who k nil)]
+    (when (>= i (len (.-Fields rtd)))
+      (Violation CondAssertion who "invalid field index ~s for ~s" k rtd))
+    (+ i (- (.-N rtd) (len (.-Fields rtd))))))
+
+(go/func IsRecord "IsRecord is record?: a record whose type is not opaque.\n" ^bool [^any x]
+  (let [(values r ok) (assert (* Record) x)]
+    (and ok (not (.-Opaque (.-RTD r))))))
+
+(go/func condProc "condProc is a predicate or accessor procedure on conditions.\n" ^{:tag (* Prim)} [^string name ^{:tag (func [any] [any])} f]
+  (addr (lit Prim :Name name :Min 1 :Max 1 :F1 f)))
+
+(go/func defCondition
+  "defCondition defines the maker, predicate, accessors and descriptors of a standard condition type.\n"
+  [^{:tag (* RTD)} t ^string maker ^string pred & ^{:tag (slice string)} accessors]
+  (let [tt t
+        n (.-N tt)]
+    (Def maker n n (fn ^any [^{:tag (slice any)} a] (MakeSimple tt (spread a))))
+    (Def1 pred (fn ^any [^any c] (!= (CondPart c tt) nil)))
+    (range [i acc accessors]
+      (let [j i name acc]
+        (Def1 name (fn ^any [^any c]
+          (let [(values v ok) (CondField c tt j)]
+            (when (not ok)
+              (Violation CondAssertion name "~s is not a condition of type ~s" c tt))
+            v)))))
+    (DefValue (+ (.-Name (.-Name tt)) "-rtd") tt)
+    (DefValue (+ (.-Name (.-Name tt)) "-rcd") (addr (lit RCD :RTD tt :Protocol false)))))
+
+(go/func init []
+  (Def "make-record-type-descriptor" 6 6 (fn ^any [^{:tag (slice any)} a]
+    (let [name (ArgSymbol "make-record-type-descriptor" (aget a 0))
+          ^{:tag (* RTD)} parent nil
+          uid (aget a 2)]
+      (when (!= (aget a 1) (conv any false))
+        (set! parent (ArgRTD "make-record-type-descriptor" (aget a 1)))
+        (when (.-Sealed parent)
+          (AssertionViolation "make-record-type-descriptor" "cannot extend sealed record type ~s" parent)))
+      (when (!= uid (conv any false))
+        (let [old (aget nongenerative uid)]
+          (when (!= old nil)
+            (return old))))
+      (let [r (NewRTD name parent uid (Truthy (aget a 3)) (Truthy (aget a 4)) (fieldsOf (aget a 5)))]
+        (when (!= uid (conv any false))
+          (aset nongenerative uid r))
+        r))))
+  (Def1 "record-type-descriptor?" (fn ^any [^any x] (let [(values _ ok) (assert (* RTD) x)] ok)))
+  (Def3 "make-record-constructor-descriptor" (fn ^any [^any rtd ^any parent ^any protocol]
+    (let [r (ArgRTD "make-record-constructor-descriptor" rtd)
+          ^{:tag (* RCD)} p nil]
+      (when (!= parent (conv any false))
+        (let [(values pc ok) (assert (* RCD) parent)]
+          (when (not ok)
+            (NotA "make-record-constructor-descriptor" "record-constructor descriptor" parent))
+          (set! p pc)))
+      (when (!= protocol (conv any false))
+        (ArgProc "make-record-constructor-descriptor" protocol))
+      (addr (lit RCD :RTD r :Parent p :Protocol protocol)))))
+  (DefCtl "record-constructor" 1 1 (fn [^{:tag (* M)} m ^{:tag (slice any)} a] :results [any bool]
+    (let [(values rcd ok) (assert (* RCD) (aget a 0))]
+      (when (not ok)
+        (NotA "record-constructor" "record-constructor descriptor" (aget a 0)))
+      (return (RecordConstructor m rcd) true))))
+  (Def1 "record-predicate" (fn ^any [^any x]
+    (let [rtd (ArgRTD "record-predicate" x)]
+      (condProc "record-predicate" (fn ^any [^any v]
+        (let [(values r ok) (assert (* Record) v)]
+          (and ok (.Is (.-RTD r) rtd))))))))
+  (Def2 "record-accessor" (fn ^any [^any x ^any k]
+    (let [rtd (ArgRTD "record-accessor" x)
+          i (fieldIndex "record-accessor" rtd k)
+          name (.-Name (.-Name (aget (.-Fields rtd) (- i (- (.-N rtd) (len (.-Fields rtd)))))))]
+      (condProc name (fn ^any [^any v] (aget (.-F (recordOf name v rtd)) i))))))
+  (Def2 "record-mutator" (fn ^any [^any x ^any k]
+    (let [rtd (ArgRTD "record-mutator" x)
+          i (fieldIndex "record-mutator" rtd k)
+          f (aget (.-Fields rtd) (- i (- (.-N rtd) (len (.-Fields rtd)))))
+          name (.-Name (.-Name f))]
+      (when (not (.-Mutable f))
+        (AssertionViolation "record-mutator" "field ~s of ~s is immutable" k rtd))
+      (addr (lit Prim :Name name :Min 2 :Max 2 :F2 (fn ^any [^any v ^any val]
+        (aset (.-F (recordOf name v rtd)) i val)
+        Unspec))))))
+  (Def1 "record?" (fn ^any [^any x] (IsRecord x)))
+  (Def1 "record-rtd" (fn ^any [^any x]
+    (when (not (IsRecord x))
+      (NotA "record-rtd" "non-opaque record instance" x))
+    (.-RTD ((inst As (* Record)) x))))
+  (Def1 "record-type-name" (fn ^any [^any x] (.-Name (ArgRTD "record-type-name" x))))
+  (Def1 "record-type-parent" (fn ^any [^any x]
+    (let [p (.-Parent (ArgRTD "record-type-parent" x))]
+      (when (== p nil)
+        (return false))
+      p)))
+  (Def1 "record-type-uid" (fn ^any [^any x]
+    (let [r (ArgRTD "record-type-uid" x)]
+      (when (== (.-Uid r) (conv any false))
+        (return (Gensym (.-Name (.-Name r)))))
+      (.-Uid r))))
+  (Def1 "record-type-generative?" (fn ^any [^any x] (== (.-Uid (ArgRTD "record-type-generative?" x)) (conv any false))))
+  (Def1 "record-type-sealed?" (fn ^any [^any x] (.-Sealed (ArgRTD "record-type-sealed?" x))))
+  (Def1 "record-type-opaque?" (fn ^any [^any x] (.-Opaque (ArgRTD "record-type-opaque?" x))))
+  (Def1 "record-type-field-names" (fn ^any [^any x]
+    (let [r (ArgRTD "record-type-field-names" x)
+          v (make (slice any) (len (.-Fields r)))]
+      (range [i f (.-Fields r)]
+        (aset v i (.-Name f)))
+      (NewVector v))))
+  (Def2 "record-field-mutable?" (fn ^any [^any x ^any k]
+    (let [r (ArgRTD "record-field-mutable?" x)
+          i (fieldIndex "record-field-mutable?" r k)]
+      (.-Mutable (aget (.-Fields r) (- i (- (.-N r) (len (.-Fields r)))))))))
+  ;; conditions
+  (Def "condition" 0 -1 (fn ^any [^{:tag (slice any)} a]
+    (let [^{:tag (slice (* Record))} parts nil]
+      (range [_ c a]
+        (when (not (IsCondition c))
+          (NotA "condition" "condition" c))
+        (set! parts (append parts (spread (SimpleConditions c)))))
+      (addr (lit Compound :Parts parts)))))
+  (Def1 "simple-conditions" (fn ^any [^any c]
+    (when (not (IsCondition c))
+      (NotA "simple-conditions" "condition" c))
+    (let [^{:tag (slice any)} xs nil]
+      (range [_ r (SimpleConditions c)]
+        (set! xs (append xs r)))
+      (ListTail xs Null))))
+  (Def1 "condition?" (fn ^any [^any c] (IsCondition c)))
+  (Def1 "condition-predicate" (fn ^any [^any x]
+    (let [rtd (ArgRTD "condition-predicate" x)]
+      (condProc "condition-predicate" (fn ^any [^any c] (!= (CondPart c rtd) nil))))))
+  (Def2 "condition-accessor" (fn ^any [^any x ^any proc]
+    (let [rtd (ArgRTD "condition-accessor" x)]
+      (ArgProc "condition-accessor" proc)
+      (addr (lit Prim :Name "condition-accessor" :Min 1 :Max 1
+                 :Ctl (fn [^{:tag (* M)} m ^{:tag (slice any)} a] :results [any bool]
+                        (let [r (CondPart (aget a 0) rtd)]
+                          (when (== r nil)
+                            (Violation CondAssertion "condition-accessor" "~s is not a condition of type ~s" (aget a 0) rtd))
+                          (return (.Apply m proc (lit (slice any) r))))))))))
+  (defCondition CondCondition "make-condition-object" "condition-object?")
+  (defCondition CondMessage "make-message-condition" "message-condition?" "condition-message")
+  (defCondition CondWarning "make-warning" "warning?")
+  (defCondition CondSerious "make-serious-condition" "serious-condition?")
+  (defCondition CondError "make-error" "error?")
+  (defCondition CondViolation "make-violation" "violation?")
+  (defCondition CondAssertion "make-assertion-violation" "assertion-violation?")
+  (defCondition CondIrritants "make-irritants-condition" "irritants-condition?" "condition-irritants")
+  (defCondition CondWho "make-who-condition" "who-condition?" "condition-who")
+  (defCondition CondNonContinuable "make-non-continuable-violation" "non-continuable-violation?")
+  (defCondition CondImplRestriction "make-implementation-restriction-violation" "implementation-restriction-violation?")
+  (defCondition CondLexical "make-lexical-violation" "lexical-violation?")
+  (defCondition CondSyntax "make-syntax-violation" "syntax-violation?" "syntax-violation-form" "syntax-violation-subform")
+  (defCondition CondUndefined "make-undefined-violation" "undefined-violation?")
+  (defCondition CondIO "make-i/o-error" "i/o-error?")
+  (defCondition CondIORead "make-i/o-read-error" "i/o-read-error?")
+  (defCondition CondIOWrite "make-i/o-write-error" "i/o-write-error?")
+  (defCondition CondIOInvalidPosition "make-i/o-invalid-position-error" "i/o-invalid-position-error?" "i/o-error-position")
+  (defCondition CondIOFilename "make-i/o-filename-error" "i/o-filename-error?" "i/o-error-filename")
+  (defCondition CondIOFileProtection "make-i/o-file-protection-error" "i/o-file-protection-error?")
+  (defCondition CondIOFileIsReadOnly "make-i/o-file-is-read-only-error" "i/o-file-is-read-only-error?")
+  (defCondition CondIOFileAlreadyExists "make-i/o-file-already-exists-error" "i/o-file-already-exists-error?")
+  (defCondition CondIOFileDoesNotExist "make-i/o-file-does-not-exist-error" "i/o-file-does-not-exist-error?")
+  (defCondition CondIOPort "make-i/o-port-error" "i/o-port-error?" "i/o-error-port")
+  (defCondition CondIODecoding "make-i/o-decoding-error" "i/o-decoding-error?")
+  (defCondition CondIOEncoding "make-i/o-encoding-error" "i/o-encoding-error?" "i/o-encoding-error-char")
+  (defCondition CondNoInfinities "make-no-infinities-violation" "no-infinities-violation?")
+  (defCondition CondNoNans "make-no-nans-violation" "no-nans-violation?"))
+
+(go/func condName "condName is the &NAME of a condition type without its ampersand.\n" ^string [^{:tag (* RTD)} t]
+  (strings/TrimPrefix (.-Name (.-Name t)) "&"))

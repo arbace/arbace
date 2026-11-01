@@ -1,0 +1,310 @@
+(ns arbace.repr.c.annot
+  "The checker's check (doc/C23-SURVEY.md, \"As built: C4\"; bin/ci annotations, its driver bin/ci): each
+  file of the corpora read into C forms (arbace.repr.c/read-c) and checked (arbace.c.check), its
+  annotations (every main-file item's declarators, expressions' types and values, struct layouts,
+  enumerators) compared with cc's checker's (tools/ccdump's types mode, cc.Translate, the oracle), item by
+  item as sets of lines, and the checker's errors judged by the reference's acceptance (gcc 15.2
+  -fsyntax-only's status, test/repr/c/parse-gcc.tsv, CS61 (a)): a file gcc accepts must give no error. A
+  file whose annotations differ from cc's passes when test/repr/c/annot-known.edn lists it with its class
+  (cc's gaps, the checker's); one cc does not translate is not compared. Also bin/ci check (a file's
+  errors) and bin/ci annot (its annotations)."
+  (:require [arbace.repr.c :as rc]
+            [arbace.c.check :as chk]
+            [arbace.repr.c.host :as host]
+            [arbace.repr.c.parse :as parse]
+            [arbace.string :as str])
+  (:import [java.util.concurrent Executors Callable]))
+
+(set! *warn-on-reflection* true)
+
+(def known-file "test/repr/c/annot-known.edn")
+(def gcc-file "test/repr/c/parse-gcc.tsv")
+
+;; ---------------------------------------------------------------------------------------------
+;; cc's Builtin as forms: the declarations every read sees (arbace.repr.c.parse/builtin)
+
+(def ^:private builtin-cache (atom {}))
+
+(defn builtin-forms
+  "cc's Builtin's declarations as C forms, read at the standard of `fc` (cached by standard)."
+  [h fc]
+  (let [std (:std fc)]
+    (or (get @builtin-cache std)
+        (let [dir (str (or (System/getenv "TMPDIR") ".tmp/tmp") "/ci-builtin")
+              f (java.io.File. (str dir "/builtin-" std ".c"))]
+          (.mkdirs (java.io.File. dir))
+          ;; its typedef of __builtin_va_list is guarded by the macro the <builtin> source has defined
+          (spit f (str/replace parse/builtin "#ifndef __builtin_va_list" "#if 1"))
+          (let [fc2 (assoc fc :pre "" :inc [] :args [])
+                rd (rc/read-c (host/config h fc2 dir) fc2 (.getAbsolutePath f) false)
+                forms (if (:forms rd) (:forms rd) [])]
+            (swap! builtin-cache assoc std forms)
+            forms)))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Dumps
+
+(defn port-dump
+  "A read's annotations in tools/ccdump's types format (the items in order, one @LINE a line), and its
+  errors: [text errors]."
+  [h fc rd]
+  (let [r (chk/check-unit rd (keyword (:std fc)) (builtin-forms h fc) :annotate true
+                          :unsigned-char (some #{"-funsigned-char"} (:args fc))
+                          :pedantic (:pedantic fc) :ext-lines (:ext-lines rd) :sys-dirs (host/sys-dirs h fc) :base (:base rd) :notes (:notes rd)
+                          :no-c2y-compat (:no-c2y-compat fc) :permissive (:permissive fc) :no-c23-compat (:no-c23-compat fc) :exec-charset (:exec-charset fc))
+        b (StringBuilder.)
+        last-line (atom -1)]
+    (doseq [[ln as fs] (:items r)]
+      (when (or (seq as) (seq fs))
+        (when (not= ln @last-line) (.append b (str "@" ln "\n")) (reset! last-line ln))
+        (doseq [a as] (.append b ^String a) (.append b "\n"))
+        (doseq [f fs] (.append b (str "#f " (name f) "\n")))))
+    [(str b) (:errors r)]))
+
+(defn items
+  "A dump's items: {line sorted-lines}, the items of no line dropped, the errors and marks apart; and
+  the port's features of each item: {line #{feature}} (its #f lines)."
+  [^String text]
+  (loop [ls (str/split-lines text) cur nil out {} fs {}]
+    (if-let [^String l (first ls)]
+      (cond
+        (.startsWith l "@") (recur (rest ls) (Long/parseLong (subs l 1)) out fs)
+        (.startsWith l "#f ") (recur (rest ls) cur out (update fs cur (fnil conj #{}) (keyword (subs l 3))))
+        (.startsWith l "#") (recur (rest ls) cur out fs)
+        (str/blank? l) (recur (rest ls) cur out fs)
+        :else (recur (rest ls) cur (update out cur (fnil conj []) l) fs))
+      [(into (sorted-map) (for [[k v] out] [k (vec (sort v))])) fs])))
+
+(def gap-classes
+  "The features of an item whose difference from cc's is cc's (doc/C23-SURVEY.md, \"As built: C4\"), in
+  the order a differing item is classed by; and :cc-invalid, an item where cc's checker wrote an invalid
+  type (?) that the port did not."
+  [:cc-invalid :cc-folds :cc-int128-fold :cc-addr-array :cc-bitint :cc-c23-constants :cc-undeclared-builtin :cc-builtin-fold :cc-builtin-macro
+   :cc-bitfield-promotion :cc-float-fold :cc-redeclared :cc-attr-layout :vector-types :cc-bitfield-layout
+   :cc-auto :cc-constexpr :cc-enum-type :cc-linkage :cc-prefixed-string :cc-attr-mode :asm :cc-builtin-types])
+
+(defn item-class
+  "A differing item's class: the first of gap-classes its difference or features show, or nil."
+  [cc-lines port-lines feats]
+  (let [fa (frequencies cc-lines) fb (frequencies port-lines)
+        cc-more (for [[l n] fa :when (> n (get fb l 0))] l)]
+    (cond
+      (some #(or (re-find #"(^| |\*|\]|\()\?( |$|,|\))" %) (re-find #"^s .* -1 [0-9]+$" %)) cc-more) :cc-invalid
+      ;; cc folds a value the standard does not make constant (an address's arithmetic, a string's element):
+      ;; the same lines but cc's values
+      (let [strip #(str/replace % #" = -?[0-9]+$" "")]
+        (and (seq cc-more) (= (frequencies (map strip cc-lines)) (frequencies (map strip port-lines)))
+             (some #(re-find #" = -?[0-9]+$" %) cc-more)))
+      :cc-folds
+      ;; cc does not fold __int128's constants
+      (let [strip #(str/replace % #" = -?[0-9]+$" "")
+            pb-more (for [[l n] fb :when (> n (get fa l 0))] l)]
+        (and (seq pb-more) (every? #(re-find #"__int128 = " %) pb-more)
+             (= (frequencies (map strip cc-lines)) (frequencies (map strip port-lines)))))
+      :cc-int128-fold
+      ;; cc decays an array under & (&a is *[N]T, not **T)
+      (some #(re-find #"^e \*\*" %) cc-more) :cc-addr-array
+      :else (first (filter (set feats) (rest gap-classes))))))
+
+(defn compare-items
+  "The first difference of two dumps' items, or nil: a string, the lines each side has more of (with
+  their counts when more than one)."
+  [cc port & [only]]
+  (first (for [k (sort (into (set (keys cc)) (keys port)))
+               :let [a (get cc k []) b (get port k [])]
+               :when (and (not= a b) (or (nil? only) (only k)))]
+           (let [fa (frequencies a) fb (frequencies b)
+                 more (fn [x y] (vec (take 4 (for [[l n] (sort x) :let [m (get y l 0)] :when (> n m)]
+                                               (if (= 1 (- n m)) l (str l " x" (- n m)))))))]
+             (str "@" k " cc " (pr-str (more fa fb)) " port " (pr-str (more fb fa)))))))
+
+;; ---------------------------------------------------------------------------------------------
+;; The check
+
+(defn- one-line ^String [x] (str/replace (str x) #"[\t\n]" " "))
+
+(defn- spit-mk [^String p ^String s] (.mkdirs (.getParentFile (java.io.File. p))) (spit p s))
+
+(defn check-file
+  "One file: [name annot errors detail], the port's dump written under WORK/ID/port/."
+  [^String work ^String id h ^String base e]
+  (let [nm (:name e)
+        d (str work "/" id)
+        fc (:fc e)
+        cfg (host/config h fc base)
+        budget (* 1000000000 (Long/parseLong (or (System/getenv "REPR_C_READ_BUDGET") "120")))
+        rn (or (:read e) nm)
+        rd (binding [parse/*deadline* (+ (System/nanoTime) budget)]
+             (try (rc/read-c cfg fc rn false)
+                  (catch Throwable x (if (:deadline (ex-data x)) {:timeout true} {:crash (str x)}))))]
+    (cond
+      (:timeout rd) [nm "timeout" "-" "the evaluated read's budget spent"]
+      (:crash rd) [nm "read-crash" "-" (one-line (:crash rd))]
+      (:error rd) [nm "read-error" "-" (one-line (first (:error rd)))]
+      (:refused rd) [nm "refused" "-" (one-line (:message rd))]
+      :else
+      (let [[text errs] (try (port-dump h fc rd) (catch StackOverflowError _ [nil ["stack overflow"] :crash])
+                             (catch Throwable x [nil [(str x)] :crash]))]
+        (if (nil? text)
+          [nm "check-crash" "-" (one-line (first errs))]
+          (let [_ (spit-mk (str d "/port/" (:out e)) text)
+                f (java.io.File. (str d "/cc/" (:out e)))
+                cc (when (.exists f) (slurp f))
+                st (cond
+                     (nil? cc) "no-cc"
+                     (re-find #"(?m)^#(notree|panic)" cc) "cc-fails"
+                     :else (let [[ci _] (items cc) [pi pf] (items text)]
+                             (if-let [df (compare-items ci pi)]
+                               (let [ks (filter #(not= (get ci % []) (get pi % [])) (sort (into (set (keys ci)) (keys pi))))
+                                     cls (map #(item-class (get ci % []) (get pi % []) (get pf % #{})) ks)]
+                                 (if (every? some? cls)
+                                   (str "classed:" (str/join "," (map name (distinct cls))) "\u0000" df)
+                                   ;; the first item no class explains
+                                   (str "differ\u0000" (compare-items ci pi (set (keep (fn [[k c]] (when (nil? c) k)) (map vector ks cls)))))))
+                               "equal")))
+                [st df] (str/split st #"\u0000")]
+            [nm st (str (count errs)) (one-line (or df (first errs) ""))]))))))
+
+(defn run-corpus
+  "The port's side of the corpus `id` under WORK (its lists made by arbace.repr.c.ppcheck/lists, cc's
+  dumps under cc/): WORK/ID/port.tsv."
+  [^String work ^String id]
+  (let [d (str work "/" id)
+        base (str/trim (slurp (str d "/base.txt")))
+        entries (read-string (slurp (str d "/files.edn")))
+        h (host/load-host "test/c/host")
+        threads (Integer/parseInt (or (System/getenv "REPR_C_THREADS") "6"))
+        pool (Executors/newFixedThreadPool threads)
+        t0 (System/nanoTime)
+        futs (mapv (fn [e] (.submit pool ^Callable (fn [] (try (check-file work id h base e)
+                                                               (catch Throwable x [(:name e) "crash" "-" (one-line x)])))))
+                   entries)
+        rs (mapv #(.get ^java.util.concurrent.Future %) futs)
+        _ (.shutdown pool)
+        secs (/ (- (System/nanoTime) t0) 1e9)]
+    (spit (str d "/port.tsv") (str/join (map #(str (str/join "\t" %) "\n") rs)))
+    (println (str id ": " (count rs) " files " (pr-str (frequencies (map second rs))) ", " (Math/round (double secs)) " s"))))
+
+(defn load-gcc
+  "The reference's acceptance of every file: {[corpus name] status}."
+  []
+  (into {} (for [l (str/split-lines (slurp gcc-file)) :when (not (str/blank? l)) :when (not (.startsWith ^String l "#"))
+                 :let [[st cn] (str/split l #"\t")
+                       i (.indexOf ^String cn "/")]]
+             [[(subs cn 0 i) (subs cn (inc i))] st])))
+
+(defn judge
+  "The corpus `id` judged: WORK/ID/files.tsv (name, status, annotations, the checker's errors against
+  the reference's acceptance, class, detail) and report.edn; 1 when a file fails or a known entry is stale."
+  [^String work ^String id]
+  (let [d (str work "/" id)
+        rows (map #(str/split % #"\t" -1) (remove str/blank? (str/split-lines (slurp (str d "/port.tsv")))))
+        gcc (load-gcc)
+        known-all (read-string (slurp known-file))
+        known (get-in known-all [:annot (keyword id)] {})
+        ;; a file whose preprocessed stream the token check knows to differ from cc's (cc's preprocessor's gaps)
+        pp-known (get-in (read-string (slurp "test/repr/c/pp-check-known.edn")) [:pp (keyword id)] {})
+        js (mapv (fn [[nm st nerr detail]]
+                   (let [g (get gcc [id nm])
+                         errs (if (= nerr "-") 0 (Long/parseLong nerr))
+                         errj (cond (#{"read-error" "refused" "timeout" "read-crash"} st) "-"
+                                    (nil? g) "unrecorded"
+                                    (and (= g "0") (pos? errs)) "false-error"
+                                    (and (= g "0") (zero? errs)) "agree"
+                                    (pos? errs) "both-reject"
+                                    :else "gcc-only-rejects")
+                         k (or (get known nm)
+                               (when (= st "differ")
+                                 (cond (contains? pp-known nm) {:class :pp-known}
+                                       ;; the reference rejects the file: no annotation of it is the reference's
+                                       (= g "1") {:class :gcc-rejects})))
+                         bad (or (#{"differ" "check-crash" "crash"} st) (= errj "false-error"))]
+                     {:name nm :annot (if (.startsWith ^String st "classed:") "classed" st) :errors errj :detail detail
+                      :gaps (when (.startsWith ^String st "classed:") (str/split (subs st 8) #","))
+                      :status (cond (not bad) "pass" k "known" :else "fail") :class (:class k)}))
+                 rows)
+        failing (filter #(= "fail" (:status %)) js)
+        stale (for [[nm _] known :when (not (some #(and (= (:name %) nm) (= (:status %) "known")) js))] nm)
+        unclassed (for [[nm k] known :when (not (contains? (:classes known-all) (:class k)))] nm)
+        known-all (update known-all :classes assoc :pp-known "the file's preprocessed stream differs from cc's by design (test/repr/c/pp-check-known.edn's :pp, cc's preprocessor's gaps)")
+        known-all (update known-all :classes assoc :gcc-rejects "gcc 15.2 rejects the file (test/repr/c/parse-gcc.tsv): an error test, whose annotations no reference makes")
+        fr (fn [k] (into (sorted-map) (frequencies (map k js))))
+        report {:corpus id :files (count js) :status (fr :status) :annot (fr :annot) :errors (fr :errors)
+                :gaps (into (sorted-map) (frequencies (mapcat :gaps js)))
+                :failing (count failing) :stale-known (vec stale) :known-classes (fr :class)}]
+    (spit (str d "/files.tsv") (str/join (map #(str (str/join "\t" [(:name %) (:status %) (:annot %) (:errors %) (or (some-> (:class %) name) (some->> (:gaps %) (str/join ","))) (:detail %)]) "\n") js)))
+    (spit (str d "/report.edn") (pr-str report))
+    (println (str id ": " (count js) " files " (pr-str (:status report)) "; annotations " (pr-str (:annot report))
+                  "; errors " (pr-str (:errors report)) "; cc's gaps " (pr-str (:gaps report))
+                  (when (seq failing) (str "; " (count failing) " failing"))
+                  (when (seq stale) (str "; " (count stale) " known entries stale"))
+                  (when (seq unclassed) (str "; " (count unclassed) " of no class"))))
+    (if (or (seq failing) (seq stale) (seq unclassed)) 1 0)))
+
+(defn record
+  "Rewrites test/repr/c/annot-known.edn's entries of the corpora `ids` from WORK: every file that does
+  not pass, its class kept or guessed from its detail (`classify`), else :unclassified."
+  [^String work ids classify]
+  (let [known (read-string (slurp known-file))
+        known (reduce (fn [known id]
+                        (let [old (get-in known [:annot (keyword id)] {})
+                              rows (map #(str/split % #"\t" -1) (str/split-lines (slurp (str work "/" id "/files.tsv"))))
+                              es (into (sorted-map) (for [[nm st an er _ detail] rows :when (#{"fail" "known"} st)]
+                                                      [nm (or (get old nm) {:class (or (classify an er detail) :unclassified)})]))]
+                          (if (seq es) (assoc-in known [:annot (keyword id)] es) (update known :annot dissoc (keyword id)))))
+                      known ids)]
+    (spit known-file
+          (str ";; The files of the checker's check (bin/ci annotations; doc/C23-SURVEY.md, \"As built: C4\") that do not\n"
+               ";; pass, by corpus, each with its class (the classes below): annotations that differ from cc's checker's, or an\n"
+               ";; error of the checker on a file gcc 15.2 accepts. Written by bin/ci annotations --record, the classes kept.\n"
+               ";; Read with the Clojure reader.\n"
+               "{:classes\n {" (str/join "\n  " (for [[k v] (sort-by key (:classes known))] (str k " " (pr-str v)))) "}\n"
+               " :annot\n {"
+               (str/join "\n  " (for [[c es] (sort (:annot known))]
+                                  (str c "\n  {" (str/join "\n   " (for [[f e] es] (str (pr-str f) " " (pr-str e)))) "}")))
+               "}}\n"))
+    (println "recorded" known-file)))
+
+(defn guess-class
+  "A differing file's class from its detail (the first difference), or nil."
+  [an er ^String detail]
+  (cond
+    (= er "false-error") nil
+    (re-find #"_BitInt" detail) :cc-bitint
+    :else nil))
+
+;; ---------------------------------------------------------------------------------------------
+;; The commands
+
+(defn- opts-and-files [args]
+  (let [args (loop [as (seq args) out []]
+               (if as
+                 (if (= (first as) "--std") (recur (nnext as) (conj out (str "-std=" (second as)))) (recur (next as) (conj out (first as))))
+                 out))
+        [opts files] (split-with #(.startsWith ^String % "-") args)]
+    [(vec opts) (vec files)]))
+
+(defn -main [cmd & args]
+  (case cmd
+    ;; bin/ci check [--std S] [OPTION...] FILE...: each file's checker errors
+    ("check" "annot")
+    (let [h (host/load-host (first args))
+          [opts files] (opts-and-files (rest args))
+          fc (host/file-config opts "gnu23")
+          st (atom 0)]
+      (doseq [f files]
+        (let [rd (rc/read-c (host/config h fc ".") fc f false)]
+          (cond
+            (:error rd) (do (doseq [e (:error rd)] (println e)) (reset! st 1))
+            (:refused rd) (do (println (str f ": refused: " (:message rd))) (reset! st 1))
+            :else (let [[text errs] (port-dump h fc rd)]
+                    (when (= cmd "annot") (print text))
+                    (doseq [e errs] (println (str f ":" e)))
+                    (when (seq errs) (reset! st 1))))))
+      (flush)
+      (shutdown-agents)
+      (System/exit @st))
+    "run" (let [[work & ids] args] (doseq [id ids] (run-corpus work id)) (shutdown-agents))
+    "judge" (let [[work & ids] args st (reduce max 0 (map #(judge work %) ids))] (shutdown-agents) (System/exit st))
+    "record" (let [[work & ids] args] (record work ids guess-class))
+    (do (println "annot: check, annot, run, judge or record") (System/exit 2))))

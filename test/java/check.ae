@@ -29,8 +29,12 @@
         now is a regression (unless its result is flaky: bin/java-check ran it again and the
         second run passed, JCS71 (a); a test recorded flaky counts as passing); every test not passing in a class of DIVERGENCES (its result and
         reason matched, as test/goi/divergences.edn's), each class's count and the numbers by
-        area; --record writes the results as CHECKDIR/check-LEVEL.edn. Exit 1 on a regression,
-        an unclassified test or an essential test not passing."
+        area; --record writes the results as CHECKDIR/check-LEVEL.edn. Every test REF passes on the
+        JDK must have a row at each level of LEVELS (the diagnostics level's the golden-diagnostics
+        tests, the other levels' the rest), unless --partial: a test without one is missing (a run
+        that lost rows, or judged nothing, fails; its recorded line is kept by --record); with
+        --essential every test of FILE must have one. Exit 1 on a regression, an unclassified test,
+        a missing test or an essential test not passing or missing."
   (:require [arbace.string :as str]
             [arbace.java.io :as io])
   (:import (java.io File PushbackReader)))
@@ -462,6 +466,37 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; plan: the check's per-test plan, from the reference
 
+;; GTS81 (a): the negative controls, test/java/controls.edn beside the reference
+(defn- controls-of [ref]
+  (let [f (io/file (.getParent (io/file ref)) "controls.edn")]
+    (if (.isFile f) (read-edn (.getPath f)) [])))
+
+(defn- controls-judged!
+  "GTS81 (a): the controls' results of RESULTS at the level LV (rows [id lv result reason]) against
+  their subjects' (the run without them): a control that passes is a problem (the judge passes a run
+  against another test's reference), and so is one missing or not judged (load-failed, timeout, ...)
+  while its subject ran at that level and reached the judge (its result pass, fail or differ); printed"
+  [controls lv results problems]
+  (doseq [c controls :when (some #{lv} (:levels c))
+          :let [sub (first (filter #(and (= (:subject c) (first %)) (= lv (second %))) results))
+                row (first (filter #(and (= (:id c) (first %)) (= lv (second %))) results))
+                what (str "control " (:id c) " (" (:subject c) "'s run judged against " (:reference c) "'s reference)")]
+          :when (or sub row)]
+    (cond
+      ;; GTS84 (a): a control whose crossed material was not made in this run (the print level's reference not
+      ;; printed: a selection), said and left as a subject not run is
+      (and row (= :left (nth row 2)))
+      (println (str "   " what ": left at " (name lv) ", " (nth row 3)))
+      (and row (#{:fail :differ} (nth row 2)))
+      (println (str "   " what ": " (name (nth row 2)) ", as a control must (GTS81 (a))"))
+      (and row (#{:pass :flaky} (nth row 2)))
+      (swap! problems conj (str "control passed: " what " at " (name lv) ": the level's judge passes what differs"))
+      (and sub (#{:pass :fail :differ} (nth sub 2)))
+      (swap! problems conj (str "control not judged: " what " at " (name lv) ": "
+                                (if row (str (name (nth row 2)) " " (nth row 3)) "no result")))
+      :else
+      (println (str "   " what ": not judged, its subject " (if sub (name (nth sub 2)) "not run") " at " (name lv))))))
+
 (defn plan [ref work & opts]
   (let [o (apply hash-map opts)
         only (some-> (o "--only") re-pattern)
@@ -473,7 +508,12 @@
                  :when (or (nil? corp) (corp (:corpus t)))
                  :when (or (nil? only) (re-find only (str (:id t) " " (:test t))))]
              t)]
-    (doseq [t ts]
+    (doseq [[controls by-id] [(let [cs (controls-of ref)] [cs (if (seq cs) (into {} (for [t (ref-tests ref)] [(:id t) t])) {})])]
+            t ts
+            :let [cs (for [c controls :when (= (:subject c) (:id t))
+                           :let [r (by-id (:reference c)) r0 (first (:runs r))]
+                           :when r0]
+                       [c r r0])]]
       (write-lines (str work "/run/" (:id t) "/plan.tsv")
                    (concat [(str "test\t" (:test t)) (str "dir\t" (:dir t)) (str "root\t" (name (:root t :jdk26u))) (str "classes\t" (:classes t))]
                            (for [x (:javac t)] (str "javac\t" x))
@@ -482,20 +522,44 @@
                            (for [[i r] (map-indexed vector (:runs t))]
                              (str/join "\t" (concat ["run" i (:exit r) (:out r) (:out-len r) (if (:det r) "1" "0")
                                                       (or (:out-masked r) "-") (if (:det-masked r) "1" "0") (:main r)]
-                                                     (:args r)))))))
+                                                     (:args r))))
+                           ;; GTS81 (a): the controls whose subject the test is: their reference's first
+                           ;; action's expected status and stdout, its class files' digest
+                           (for [[c r r0] cs]
+                             (str/join "\t" ["control" (:id c) (:exit r0) (:out r0) (:out-len r0) (if (:det r0) "1" "0")
+                                             (or (:out-masked r0) "-") (if (:det-masked r0) "1" "0")]))
+                           (for [[c r] cs] (str "control-classes\t" (:id c) "\t" (:classes r)))
+                           ;; GTS84 (a): the print level's controls: the subject's print judged against its
+                           ;; reference's printed run (control-print CID REF); the reference keeps its printed
+                           ;; class files for them (control-reference CID)
+                           (for [[c] cs :when (some #{:print} (:levels c))] (str "control-print\t" (:id c) "\t" (:reference c)))
+                           (for [c controls :when (and (= (:reference c) (:id t)) (some #{:print} (:levels c)))]
+                             (str "control-reference\t" (:id c))))))
     (write-lines (str work "/run.list") (map :id ts))
     (println (str "java-check plan: " (count ts) " tests"))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; report
 
+(defn- at-level?
+  "Whether the class C of DIVERGENCES applies at LEVEL: its :level, else one of its :levels (a class of
+  several levels, report 003's findings 5 and 7: the world's classes are the run levels'), else any."
+  [c level]
+  (cond (:level c) (= level (:level c))
+        (:levels c) (boolean (some #{level} (:levels c)))
+        :else true))
+
 (defn- classify
-  "A non-passing test's class: the first of its level (or of none) that names the test in :tests
-  or one of whose :match regexps finds \"RESULT REASON\"."
+  "A non-passing test's class: the first of its level (at-level?) that names the test in :tests
+  or one of whose :match regexps finds \"RESULT REASON\". A flaky result (JCS71 (a): a would-be
+  regression whose second run passed) only by a class that names it, in :tests or by a :match
+  anchored to it (^flaky): the other patterns (the world's classes, unanchored) do not take it, so
+  that a test flaky and named by no class fails the check (report 003's finding 4)."
   [classes level id result reason]
-  (let [s (str (name result) " " reason)]
-    (or (some (fn [c] (when (and (or (nil? (:level c)) (= level (:level c)))
-                                 (or (some #{id} (:tests c)) (some #(re-find % s) (:match c))))
+  (let [s (str (name result) " " reason)
+        takes? (fn [re] (or (not= :flaky result) (str/starts-with? (str re) "^flaky")))]
+    (or (some (fn [c] (when (and (at-level? c level)
+                                 (or (some #{id} (:tests c)) (some #(and (takes? %) (re-find % s)) (:match c))))
                         (:id c)))
               classes)
         :unclassified)))
@@ -562,17 +626,41 @@
         partial? (or (flags "--partial") (some? (o "--essential")))
         essential (some->> (o "--essential") lines (remove #(str/starts-with? % "#")) (map #(first (str/split % #"\s+"))) set)
         tests (into {} (for [t (ref-tests ref)] [(:id t) t]))
+        ;; the tests a whole run has at a level (plan's and plan-diag's): those the JDK passes, the
+        ;; golden-diagnostics tests at the level diagnostics, the others at the other levels
+        expected (fn [lv] (set (for [t (vals tests) :when (= :pass (:jdk t))
+                                     :when (= (= :diagnostics lv) (= :compile-fail-ref (:category t)))]
+                                 (:id t))))
         classes (read-edn divergences)
-        results (for [[id lv r reason] (tsv (str work "/results.tsv"))] [id (keyword lv) (keyword r) (or reason "")])
+        all-results (for [[id lv r reason] (tsv (str work "/results.tsv"))] [id (keyword lv) (keyword r) (or reason "")])
+        ;; GTS81 (a): the controls' rows judged apart, no test of the records, classes or lists
+        controls (controls-of ref)
+        control-ids (set (map :id controls))
+        results (remove #(control-ids (first %)) all-results)
         ;; the levels whose runs were under the clean run's audit (--save's audited marker, GT7 rerun 8):
-        ;; a class with :audited holds, at its level, every timeout of a test whose compiled result
-        ;; passes, as :unstable holds its :tests (strace's system time, not the test)
+        ;; a class with :audited at a level switches the hold on there (any such class: it classifies
+        ;; nothing, :speed takes the timeouts): every timeout at the level, in a run --save marked, of a test
+        ;; whose compiled result in this judgment passes (strace's system time, not the test). Interp only: a
+        ;; compiled timeout has no passing compiled result, so an :audited class at :compiled holds nothing;
+        ;; and inert in a judgment without compiled results (the essential pair, java-check and
+        ;; java-check-judge), where an audited interp timeout stays a regression (report 088, finding 6)
         audited (set (some->> (o "--audited") (#(str/split % #",")) (remove str/blank?) (map keyword)))
         compiled-pass (set (for [[id lv r] results :when (and (= lv :compiled) (#{:pass :flaky} r))] id))
         audit-held? (fn [lv id r]
                       (and (audited lv) (= r :timeout) (compiled-pass id)
                            (some #(and (:audited %) (= lv (:level %))) classes)))
-        problems (atom [])]
+        problems (atom [])
+        ;; the tests a hold made a difference to (the "held" lines): --held FILE lists them, one id a line
+        ;; (java-judge's output, which the gate's java-held runs again unaudited, GTS170)
+        held-ids (atom #{})
+        held! (fn [lv id r] (when (audit-held? lv id r) (swap! held-ids conj id) true))]
+    ;; a record of an audited judgment would write the held timeouts as the recorded results (and the
+    ;; levels disagreement as known): a later real timeout would then be no regression (review 070)
+    (when (and record? (seq audited))
+      (binding [*out* *err*]
+        (println (str "java-check: --record with --audited (" (str/join "," (map name (sort audited))) "): an audited run's timeouts may be strace's; recording them would make a real timeout no regression. Record from an unaudited run.")))
+      (shutdown-agents)
+      (System/exit 2))
     (doseq [lv (map keyword (str/split levels #","))
             :let [rs (sort-by first (filter #(= lv (second %)) results))
                   f (str checkdir "/check-" (name lv) ".edn")
@@ -587,24 +675,37 @@
                   pass-like? #(#{:pass :flaky} %)
                   ;; a test a class marked :unstable names by :tests (flaky, or path-dependent: its
                   ;; stdout pads to a width by the length of the checkout's path) can differ on
-                  ;; both runs of a would-be regression: no regression, its class holds it
-                  unstable (set (for [c classes :when (and (:unstable c) (or (nil? (:level c)) (= lv (:level c))))
+                  ;; both runs of a would-be regression: no regression, its class holds it (at its
+                  ;; levels alone, report 003's finding 7)
+                  unstable (set (for [c classes :when (and (:unstable c) (at-level? c lv))
                                       id (:tests c)] id))
                   regress (filter #(and (pass-like? (first (rec (first %)))) (not (pass-like? (nth % 2)))
                                         (not (unstable (first %))) (not (audit-held? lv (first %) (nth % 2)))) rs)
                   flaky (filter #(= :flaky (nth % 2)) rs)
                   now-pass (filter #(and (rec (first %)) (not (pass-like? (first (rec (first %))))) (pass? %)) rs)
                   fresh (filter #(and (not (pass? %)) (not= :pass (first (rec (first %))))
-                                      (not= [(nth % 2) (nth % 3)] (rec (first %)))) rs)]
-            :when (seq rs)]
+                                      (not= [(nth % 2) (nth % 3)] (rec (first %)))) rs)
+                  ;; a test with no row: a whole run's (not partial) expected test, or an essential one
+                  have (set (map first rs))
+                  missing (when-not partial? (sort (remove have (expected lv))))
+                  ess-missing (when essential (sort (remove have essential)))]
+            ;; a level with no rows is judged too (its tests all missing), but in a partial run
+            :when (or (seq rs) (not partial?) essential)]
       (println (str "java-check " (name lv) ": " (count rs) " tests: "
                     (str/join ", " (for [[r xs] (sort-by (comp - count val) by)] (str (count xs) " " (name r))))))
       (println (str "   against " (.getName (io/file f)) ": "
                     (count (filter #(= [(nth % 2) (nth % 3)] (rec (first %))) rs)) " as recorded, "
                     (count fresh) " new or changed, " (count now-pass) " now passing, " (count regress) " regressions"
                     (when (seq flaky) (str ", " (count flaky) " flaky (run again, JCS71 (a))"))))
-      (doseq [x rs :when (and (pass-like? (first (rec (first x)))) (audit-held? lv (first x) (nth x 2)))]
+      (doseq [x rs :when (and (pass-like? (first (rec (first x)))) (held! lv (first x) (nth x 2)))]
         (println (str "   held (an :audited class, the run under the audit): " (first x) " " (:test (tests (first x))) ": " (name (nth x 2)) " " (nth x 3))))
+      (when (seq missing)
+        (println (format "   %5d missing (no result in this run)" (count missing)))
+        (doseq [id missing]
+          (swap! problems conj (str "missing: " id " " (:test (tests id)) ": no result at the level " (name lv)
+                                    (when-let [[r reason] (rec id)] (str " (recorded " (name r) " " reason ")"))))))
+      (doseq [id ess-missing]
+        (swap! problems conj (str "essential: " id " " (:test (tests id)) " has no result at the level " (name lv))))
       (doseq [x regress] (swap! problems conj (str "regression: " (first x) " " (:test (tests (first x))) ": " (name (nth x 2)) " " (nth x 3))))
       (doseq [x (take 20 now-pass)] (println (str "   now passing: " (first x) " " (:test (tests (first x))))))
       (doseq [x flaky] (println (str "   flaky: " (first x) " " (:test (tests (first x))) ": " (nth x 3))))
@@ -629,14 +730,22 @@
                                 ";; per test of test/java/ref-jdk26.edn the JDK passes, its jtreg name, its result and reason."
                                 ";; A test passing here and not in a run is a regression. bin/java-check --record writes it."
                                 "["]
-                               ;; a partial run (--only, --corpus, --essential) updates its tests' lines
+                               ;; a partial run (--only, --corpus, --essential) updates its tests' lines;
+                               ;; a whole run's missing tests keep theirs (the run fails on them)
                                (let [now (into {} (for [[id _ r reason] rs] [id [r reason]]))
-                                     all (if partial? (merge rec now) now)]
+                                     all (if partial? (merge rec now) (merge (select-keys rec missing) now))]
                                  (for [[id [r reason]] (sort-by key all)]
                                    (str " [" (q id) " " (q (:test (tests id))) " " r " " (q reason) "]")))
                                ["]"]))
         (println (str "   recorded " f))))
-    (levels-against! checkdir tests results (set (map keyword (str/split levels #","))) record? partial? problems audit-held?)
+    (doseq [lv (map keyword (str/split levels #","))] (controls-judged! controls lv all-results problems))
+    (levels-against! checkdir tests results (set (map keyword (str/split levels #","))) record? partial? problems
+                     ;; a levels disagreement is held only for a test recorded passing at interp: a timeout recorded
+                     ;; as it is now was not made by strace (review 077)
+                     (let [rec-i (recorded (str checkdir "/check-interp.edn"))]
+                       (fn [lv id r] (and (#{:pass :flaky} (first (rec-i id))) (held! lv id r)))))
+    (when-let [hf (o "--held")]
+      (write-lines hf (sort @held-ids)))
     (doseq [p @problems] (println (str "   " p)))
     (shutdown-agents)
     (System/exit (if (seq @problems) 1 0))))
@@ -745,7 +854,16 @@
                            (for [[i a] (map-indexed vector (:actions t))]
                              (str/join "\t" (concat ["act" i (:kind a) (if (str/blank? (:modes a)) "-" (:modes a))] (:toks a))))
                            (for [[i a] (map-indexed vector (:actions t))]
-                             (str "exp\t" i "\t" (:exit a) "\t" (if (:golden a) "1" "-"))))))
+                             (str "exp\t" i "\t" (:exit a) "\t" (if (:golden a) "1" "-")))
+                           ;; GTS84 (a): the diagnostics controls whose subject the test is: their reference's first
+                           ;; golden action's expected status and golden file (control-diag CID EXIT DIR/FILE)
+                           (for [c (controls-of ref)
+                                 :when (and (= (:subject c) id) (some #{:diagnostics} (:levels c)))
+                                 :let [r (tests (:reference c))
+                                       a (first (filter :golden (:actions r)))
+                                       g (some->> (:modes a) (re-find #"(?:^|/)ref=([^/]+)") second)]
+                                 :when g]
+                             (str "control-diag\t" (:id c) "\t" (:exit a) "\t" (:dir r) "/" g)))))
     (write-lines (str work "/run.list") kept)
     (println (str "java-check plan-diag: " (count kept) " tests at the levels " levels
                   " (" (count (filter tests kept)) " golden-diagnostics tests)"))))

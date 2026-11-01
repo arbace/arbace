@@ -1,0 +1,164 @@
+(ns arbace.repr.scheme.layout
+  "The layout printer of repr/scheme's :lines (doc/scheme/SPEC.md, 11): Scheme forms as Scheme text the way a
+  person lays it out, the forms read back equal. A datum that fits in the line (80 columns) is on one line,
+  quote forms abbreviated ('x `x ,x ,@x #'x); one that does not is broken by the convention of the head:
+  the special forms of `body-forms` keep their first arguments on the line and indent the rest by two, any
+  other call aligns its arguments under its first one, a list headed by a non-symbol aligns its items. Top-level
+  data are separated by a newline, and by a blank line when either one takes more than one line.
+
+    (layout-file '[(define (f x) (+ x 1))])  =>  \"(define (f x) (+ x 1))\\n\""
+  (:require [arbace.string :as str]
+            [arbace.repr.scheme.forms :as fm]
+            [arbace.repr.scheme.print :as pr]))
+
+(def width 80)
+
+(def body-forms
+  "The heads whose first N arguments stay on the head's line, the rest indented by two."
+  {"define" 1 "lambda" 1 "let" 1 "let*" 1 "letrec" 1 "letrec*" 1 "let-values" 1 "let*-values" 1
+   "define-syntax" 1 "define-record-type" 1 "define-values" 1 "define-structure" 1 "when" 1 "unless" 1
+   "do" 2 "case" 1 "guard" 1 "parameterize" 1 "fluid-let" 1 "syntax-rules" 1 "library" 1 "module" 1
+   "with-syntax" 1 "syntax-case" 2 "let-syntax" 1 "letrec-syntax" 1 "case-lambda" 0 "begin" 0
+   "dynamic-wind" 0 "define-enumeration" 1})
+
+(def ^:private abbrevs
+  {'quote "'" 'quasiquote "`" 'unquote "," 'unquote-splicing ",@" 'syntax "#'" 'quasisyntax "#`"
+   'unsyntax "#," 'unsyntax-splicing "#,@"})
+
+(defn- abbrev [f]
+  (when (and (seq? f) (== (count f) 2) (symbol? (first f))) (abbrevs (first f))))
+
+(defn- tagged? [f] (and (seq? f) (symbol? (first f)) (contains? #{fm/sym-tag fm/char-tag fm/flonum-tag fm/complex-tag} (first f))))
+
+(defn- indent [n] (apply str (repeat n \space)))
+
+(defn- flat!
+  "Append the one-line text of the form `f` to `sb`; false when `sb` grows past `limit` (what is appended
+  then is partial)."
+  [^StringBuilder sb f ^long limit]
+  (let [items! (fn [xs]
+                 (loop [xs (seq xs) lead true]
+                   (if (nil? xs)
+                     true
+                     (do (when-not lead (.append sb " "))
+                         (if (flat! sb (first xs) limit) (recur (next xs) false) false)))))]
+    (cond
+      (> (.length sb) limit) false
+      (vector? f) (do (.append sb "#(") (and (items! f) (do (.append sb ")") (<= (.length sb) limit))))
+      (and (seq? f) (not (tagged? f)))
+      (let [h (first f)]
+        (cond
+          (= h fm/dot-tag)
+          (do (.append sb "(")
+              (and (items! (second f)) (do (.append sb " . ") (flat! sb (nth f 2) limit))
+                   (do (.append sb ")") (<= (.length sb) limit))))
+          (= h fm/bytevector-tag) (do (.append sb (pr/write-form f)) (<= (.length sb) limit))
+          (abbrev f) (do (.append sb ^String (abbrev f)) (flat! sb (second f) limit))
+          :else (do (.append sb "(") (and (items! f) (do (.append sb ")") (<= (.length sb) limit))))))
+      :else (do (.append sb ^String (pr/write-form f)) (<= (.length sb) limit)))))
+
+(defn flat
+  "The one-line text of `f`, abbreviations and all."
+  [f]
+  (let [sb (StringBuilder.)] (flat! sb f Integer/MAX_VALUE) (.toString sb)))
+
+(declare lay)
+
+(defn- atomic? [x] (not (or (vector? x) (and (seq? x) (not (tagged? x))))))
+
+(defn- fill-items
+  "Atoms packed on lines at column `ind` (the first after the caller's text), up to the width; the closer."
+  [^StringBuilder sb items ind]
+  (loop [xs (seq items) cur nil]
+    (when xs
+      (let [t (flat (first xs))]
+        (cond (nil? cur) (do (.append sb t) (recur (next xs) (+ ind (count t))))
+              (<= (+ cur 1 (count t)) width) (do (.append sb " ") (.append sb t) (recur (next xs) (+ cur 1 (count t))))
+              :else (do (.append sb "\n") (.append sb (indent ind)) (.append sb t) (recur (next xs) (+ ind (count t))))))))
+  (.append sb ")"))
+
+(defn- last-line-width [^String s col]
+  (let [k (.lastIndexOf s "\n")] (if (neg? k) (+ col (count s)) (- (count s) k 1))))
+
+(defn- bare-head [f] (when (and (symbol? f) (nil? (namespace f))) (str f)))
+
+(defn- items-aligned
+  "Items on lines of their own at column `ind`, the first after what the caller put on its line; then the dotted
+  tail (or nil) on a line of its own; the closing parenthesis."
+  [^StringBuilder sb items ind tail first-on-line]
+  (loop [xs (seq items) lead first-on-line]
+    (when xs
+      (when-not lead (.append sb "\n") (.append sb (indent ind)))
+      (.append sb ^String (lay (first xs) ind))
+      (recur (next xs) false)))
+  (when (some? tail)
+    (.append sb "\n") (.append sb (indent ind)) (.append sb ". ") (.append sb ^String (lay tail (+ ind 2))))
+  (.append sb ")"))
+
+(defn- break-list [items tail col]
+  (let [h (first items) args (rest items)
+        hs (bare-head h)
+        sb (StringBuilder. "(")]
+    (cond
+      ;; special forms: distinguished arguments on the line, the body indented by two
+      (and hs (contains? body-forms hs))
+      (let [n (if (and (= hs "let") (symbol? (first args))) 2 (body-forms hs))
+            dist (take n args) body (drop n args)]
+        (.append sb ^String hs)
+        (loop [ds (seq dist) cur (+ col 1 (count hs))]
+          (when ds
+            (let [s (lay (first ds) (+ cur 1))]
+              (.append sb " ") (.append sb ^String s)
+              (recur (next ds) (last-line-width s (+ cur 1))))))
+        (.append sb "") ;; the body
+        (items-aligned sb body (+ col 2) tail false)
+        (.toString sb))
+      ;; a call with a short symbol head: arguments aligned under the first
+      (and hs (seq args) (<= (+ (count hs) 2) 20))
+      (do (.append sb ^String hs) (.append sb " ")
+          (items-aligned sb args (+ col 2 (count hs)) tail true)
+          (.toString sb))
+      hs
+      (do (.append sb ^String hs)
+          (items-aligned sb args (+ col 2) tail false)
+          (.toString sb))
+      :else
+      (do (items-aligned sb items (+ col 1) tail true)
+          (.toString sb)))))
+
+(defn- lay
+  "The text of `f` starting at column `col`: lines after the first carry their indentation."
+  [f col]
+  (let [sb (StringBuilder.)]
+    (if (flat! sb f (- width col))
+      (.toString sb)
+      (cond
+        (vector? f)
+        (let [sb (StringBuilder. "#(")] (if (every? atomic? f) (fill-items sb f (+ col 2)) (items-aligned sb f (+ col 2) nil true)) (.toString sb))
+        (and (seq? f) (not (tagged? f)))
+        (let [h (first f)]
+          (cond
+            (= h fm/dot-tag) (break-list (second f) (nth f 2) col)
+            (= h fm/bytevector-tag) (let [sb (StringBuilder. "#vu8(")] (fill-items sb (rest f) (+ col 5)) (.toString sb))
+            (abbrev f) (str (abbrev f) (lay (second f) (+ col (count (abbrev f)))))
+            :else (break-list f nil col)))
+        :else (flat f)))))
+
+(defn layout-datum
+  "The text of one datum, laid out from column 0."
+  [f]
+  (lay f 0))
+
+(defn layout-file
+  "The text of the forms, one top-level datum after the other; \"\" for none."
+  [forms]
+  (let [sb (StringBuilder.)]
+    (loop [xs (seq forms) prev nil]
+      (when xs
+        (let [s (layout-datum (first xs))
+              multi (>= (.indexOf ^String s "\n") 0)]
+          (when prev (.append sb (if (or multi (>= (.indexOf ^String prev "\n") 0)) "\n\n" "\n")))
+          (.append sb ^String s)
+          (recur (next xs) s))))
+    (when (pos? (.length sb)) (.append sb "\n"))
+    (.toString sb)))

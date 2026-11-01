@@ -1,0 +1,551 @@
+;; si's AOT, the runtime's half (doc/scheme/SCHEME-SURVEY.md §6, SC9 (a), SC6 (a); "As built: SM7 (write-ahead)"):
+;; the dumper, which turns an expanded program's core forms into the AOT's input (a unit's forms resolved as
+;; Compile resolves them: lexical references by depth and index, letrec's checked ones, globals, primitives
+;; as psyntax's locations, values, plain or control primitives), written as data the Clojure reader reads;
+;; and the helpers the compiled code calls (arbace.scheme.aot prints Go forms over them). Compiled code runs
+;; on the same machine as the evaluator: a lambda's clause body is a Node, a non-tail call pushes a Go
+;; continuation frame (PushGo) and transfers by Apply, so call/cc, dynamic-wind and the handlers are the
+;; evaluator's own.
+(in-ns 'go.arbace.scm)
+
+(go/file "aot.go"
+  :imports [[strconv "strconv"] [strings "strings"]])
+
+;; ---------------------------------------------------------------------------------------
+;; The helpers of compiled code
+
+(go/func Single "Single raises Chez's error when v, delivered to a single-value context, is not one value.\n" [^any v]
+  (single v))
+
+(go/func SingleV "SingleV is v after Single's check.\n" ^any [^any v]
+  (single v)
+  v)
+
+(go/func GlobalRef "GlobalRef is the value of location l, an error when it is unbound.\n" ^any [^{:tag (* Loc)} l]
+  (let [v (.-V l)]
+    (when (== v (conv any Unbound))
+      (Undefined (.-Name l)))
+    v))
+
+(go/func RefChecked "RefChecked is v, the value of letrec variable name, an error before its init.\n" ^any [^any v ^any name]
+  (when (== v (conv any Unbound))
+    (RaiseObj (addr (lit Compound :Parts (lit (slice (* Record)) (MakeSimple CondAssertion)
+                                          (MakeSimple CondMessage (Str "attempt to reference undefined variable ~s"))
+                                          (MakeSimple CondIrritants (List name)))))))
+  v)
+
+(go/func NewEnv "NewEnv is a letrec's frame of n variables, each before its init, below up.\n" ^{:tag (* Env)} [^int n ^{:tag (* Env)} up]
+  (let [v (make (slice any) n)]
+    (range [i _ v]
+      (aset v i Unbound))
+    (addr (lit Env :V v :Up up))))
+
+(go/func NewLoc "NewLoc is a location of the compiled program's own (a library's global), not in the store.\n"
+  ^{:tag (* Loc)} [^string name]
+  (addr (lit Loc :Name (Gensym name) :V Unbound)))
+
+(go/func PrimValue "PrimValue is the primitive that is a value named name (&message-rtd ...).\n" ^any [^string name]
+  (let [(values v ok) (aget primValues name)]
+    (when (not ok)
+      (panic (+ "scm: no primitive value " name)))
+    v))
+
+(go/func PrimProc "PrimProc is the primitive procedure named name.\n" ^{:tag (* Prim)} [^string name]
+  (let [p (aget prims name)]
+    (when (== p nil)
+      (panic (+ "scm: no primitive " name)))
+    p))
+
+(go/func MissingPrim "MissingPrim raises the error of a primitive si does not have.\n" ^any [^string name]
+  (Unimplemented name "a primitive si does not have yet")
+  nil)
+
+(go/func ApplyPrim "ApplyPrim applies plain primitive p to args, its arity checked (a primitive value in an operator position).\n"
+  ^any [^{:tag (* Prim)} p ^{:tag (slice any)} args]
+  (when (not (.arityOK p (len args)))
+    (ArityError p (len args)))
+  (.call p args))
+
+(go/var ^{:tag (map string (* Symbol)) :doc "aotGensyms is the gensyms ReadAOT has read, by uid: one object for each.\n"} aotGensyms (make (map string (* Symbol))))
+
+(go/func ReadAOT
+  "ReadAOT is every datum of text s, a compiled unit's constants as WriteValue wrote them: also a gensym
+#{NAME UID}, one object for each UID however often read.\n"
+  ^{:tag (slice any)} [^string s]
+  (let [src (NewStringSource s)
+        ^{:tag (slice any)} out nil]
+    (while true
+      (let [r (addr (lit reader :src src :gensyms true))]
+        (.skipAtmosphere r)
+        (let [(values _ more) (.peek r)]
+          (when (not more)
+            (break)))
+        (set! out (append out (.datum r "datum")))))
+    out))
+
+(go/method readGensym "readGensym reads #{NAME UID} after its #.\n" ^any [^{:tag (* reader)} r]
+  (.next r)
+  (.skipAtmosphere r)
+  (let [name (conv string (.token r false))
+        ^{:tag (slice rune)} uid nil]
+    (.skipAtmosphere r)
+    (while true
+      (let [(values c ok) (.peek r)]
+        (when (not ok)
+          (return (.readEof r "gensym")))
+        (.next r)
+        (when (== c \})
+          (break))
+        (set! uid (append uid c))))
+    (let [u (conv string uid)
+          s (aget aotGensyms u)]
+      (when (== s nil)
+        (set! s (addr (lit Symbol :Name name :Gensym true :Uid u)))
+        (aset aotGensyms u s))
+      s)))
+
+;; ---------------------------------------------------------------------------------------
+;; The speed pass (SC69 (b) for compiled code): applications of fixed arity whose closure's one clause takes
+;; them allocate the environment and its values at once; fixnum fast paths of the arithmetic and the pairs'
+;; primitives, falling back to the primitive's own function (its errors, its tower)
+
+(go/method Apply0 "Apply0 is Apply of f to 0 arguments.\n" [^{:tag (* M)} m ^any f ] :results [any bool]
+  (let [(values p ok) (assert (* Closure) f)]
+    (when (and ok (== (len (.-Clauses (.-L p))) 1))
+      (let [c (aget (.-Clauses (.-L p)) 0)]
+        (when (and (not (.-Rest c)) (== (.-Req c) 0))
+          (do (set! (.-n m) (.-Body c))
+              (set! (.-e m) (addr (lit Env :Up (.-E p))))
+              (return nil false))))))
+  (return (.Apply m f (lit (slice any) ))))
+
+(go/type env1 (struct ^Env Env ^{:tag (array 1 any)} a))
+
+(go/method Apply1 "Apply1 is Apply of f to 1 arguments.\n" [^{:tag (* M)} m ^any f ^any a0] :results [any bool]
+  (let [(values p ok) (assert (* Closure) f)]
+    (when (and ok (== (len (.-Clauses (.-L p))) 1))
+      (let [c (aget (.-Clauses (.-L p)) 0)]
+        (when (and (not (.-Rest c)) (== (.-Req c) 1))
+          (let [ev (addr (lit env1))]
+            (aset (.-a ev) 0 a0)
+            (set! (.-V (.-Env ev)) (subslice (.-a ev) 0))
+            (set! (.-Up (.-Env ev)) (.-E p))
+            (set! (.-n m) (.-Body c))
+            (set! (.-e m) (addr (.-Env ev)))
+            (return nil false))))))
+  (return (.Apply m f (lit (slice any) a0))))
+
+(go/type env2 (struct ^Env Env ^{:tag (array 2 any)} a))
+
+(go/method Apply2 "Apply2 is Apply of f to 2 arguments.\n" [^{:tag (* M)} m ^any f ^any a0 ^any a1] :results [any bool]
+  (let [(values p ok) (assert (* Closure) f)]
+    (when (and ok (== (len (.-Clauses (.-L p))) 1))
+      (let [c (aget (.-Clauses (.-L p)) 0)]
+        (when (and (not (.-Rest c)) (== (.-Req c) 2))
+          (let [ev (addr (lit env2))]
+            (aset (.-a ev) 0 a0) (aset (.-a ev) 1 a1)
+            (set! (.-V (.-Env ev)) (subslice (.-a ev) 0))
+            (set! (.-Up (.-Env ev)) (.-E p))
+            (set! (.-n m) (.-Body c))
+            (set! (.-e m) (addr (.-Env ev)))
+            (return nil false))))))
+  (return (.Apply m f (lit (slice any) a0 a1))))
+
+(go/type env3 (struct ^Env Env ^{:tag (array 3 any)} a))
+
+(go/method Apply3 "Apply3 is Apply of f to 3 arguments.\n" [^{:tag (* M)} m ^any f ^any a0 ^any a1 ^any a2] :results [any bool]
+  (let [(values p ok) (assert (* Closure) f)]
+    (when (and ok (== (len (.-Clauses (.-L p))) 1))
+      (let [c (aget (.-Clauses (.-L p)) 0)]
+        (when (and (not (.-Rest c)) (== (.-Req c) 3))
+          (let [ev (addr (lit env3))]
+            (aset (.-a ev) 0 a0) (aset (.-a ev) 1 a1) (aset (.-a ev) 2 a2)
+            (set! (.-V (.-Env ev)) (subslice (.-a ev) 0))
+            (set! (.-Up (.-Env ev)) (.-E p))
+            (set! (.-n m) (.-Body c))
+            (set! (.-e m) (addr (.-Env ev)))
+            (return nil false))))))
+  (return (.Apply m f (lit (slice any) a0 a1 a2))))
+
+(go/type env4 (struct ^Env Env ^{:tag (array 4 any)} a))
+
+(go/method Apply4 "Apply4 is Apply of f to 4 arguments.\n" [^{:tag (* M)} m ^any f ^any a0 ^any a1 ^any a2 ^any a3] :results [any bool]
+  (let [(values p ok) (assert (* Closure) f)]
+    (when (and ok (== (len (.-Clauses (.-L p))) 1))
+      (let [c (aget (.-Clauses (.-L p)) 0)]
+        (when (and (not (.-Rest c)) (== (.-Req c) 4))
+          (let [ev (addr (lit env4))]
+            (aset (.-a ev) 0 a0) (aset (.-a ev) 1 a1) (aset (.-a ev) 2 a2) (aset (.-a ev) 3 a3)
+            (set! (.-V (.-Env ev)) (subslice (.-a ev) 0))
+            (set! (.-Up (.-Env ev)) (.-E p))
+            (set! (.-n m) (.-Body c))
+            (set! (.-e m) (addr (.-Env ev)))
+            (return nil false))))))
+  (return (.Apply m f (lit (slice any) a0 a1 a2 a3))))
+
+(go/func FxAdd "FxAdd is (+ a b), p the primitive +.\n" ^any [^any a ^any b ^{:tag (* Prim)} p]
+  (let [(values x ok) (assert int64 a)
+        (values y ok2) (assert int64 b)]
+    (when (and ok ok2)
+      (let [s (+ x y)]
+        (when (== (< s x) (< y 0))
+          (return s)))))
+  ((.-F2 p) a b))
+
+(go/func FxSub "FxSub is (- a b), p the primitive -.\n" ^any [^any a ^any b ^{:tag (* Prim)} p]
+  (let [(values x ok) (assert int64 a)
+        (values y ok2) (assert int64 b)]
+    (when (and ok ok2)
+      (let [s (- x y)]
+        (when (== (< s x) (> y 0))
+          (return s)))))
+  ((.-F2 p) a b))
+
+(go/func FxLt "FxLt is the comparison < of a and b, p its primitive.\n" ^any [^any a ^any b ^{:tag (* Prim)} p]
+  (let [(values x ok) (assert int64 a)
+        (values y ok2) (assert int64 b)]
+    (when (and ok ok2)
+      (return (< x y))))
+  ((.-F2 p) a b))
+
+(go/func FxLe "FxLe is the comparison <= of a and b, p its primitive.\n" ^any [^any a ^any b ^{:tag (* Prim)} p]
+  (let [(values x ok) (assert int64 a)
+        (values y ok2) (assert int64 b)]
+    (when (and ok ok2)
+      (return (<= x y))))
+  ((.-F2 p) a b))
+
+(go/func FxGt "FxGt is the comparison > of a and b, p its primitive.\n" ^any [^any a ^any b ^{:tag (* Prim)} p]
+  (let [(values x ok) (assert int64 a)
+        (values y ok2) (assert int64 b)]
+    (when (and ok ok2)
+      (return (> x y))))
+  ((.-F2 p) a b))
+
+(go/func FxGe "FxGe is the comparison >= of a and b, p its primitive.\n" ^any [^any a ^any b ^{:tag (* Prim)} p]
+  (let [(values x ok) (assert int64 a)
+        (values y ok2) (assert int64 b)]
+    (when (and ok ok2)
+      (return (>= x y))))
+  ((.-F2 p) a b))
+
+(go/func FxEq "FxEq is the comparison == of a and b, p its primitive.\n" ^any [^any a ^any b ^{:tag (* Prim)} p]
+  (let [(values x ok) (assert int64 a)
+        (values y ok2) (assert int64 b)]
+    (when (and ok ok2)
+      (return (== x y))))
+  ((.-F2 p) a b))
+
+(go/func FastCar "FastCar is (car a), p the primitive car.\n" ^any [^any a ^{:tag (* Prim)} p]
+  (let [(values x ok) (assert (* Pair) a)]
+    (when ok
+      (return (.-Car x))))
+  ((.-F1 p) a))
+
+(go/func FastCdr "FastCdr is (cdr a), p the primitive cdr.\n" ^any [^any a ^{:tag (* Prim)} p]
+  (let [(values x ok) (assert (* Pair) a)]
+    (when ok
+      (return (.-Cdr x))))
+  ((.-F1 p) a))
+
+(go/func FastCons "FastCons is (cons a b).\n" ^any [^any a ^any b] (addr (lit Pair :Car a :Cdr b)))
+
+(go/func FastNull "FastNull is (null? a).\n" ^any [^any a] (== a (conv any Null)))
+
+(go/func FastNot "FastNot is (not a).\n" ^any [^any a] (== a (conv any false)))
+
+(go/func FastPair "FastPair is (pair? a).\n" ^any [^any a]
+  (let [(values _ ok) (assert (* Pair) a)]
+    ok))
+
+(go/func FastEq "FastEq is (eq? a b).\n" ^any [^any a ^any b] (Eq a b))
+
+;; ---------------------------------------------------------------------------------------
+;; The dumper
+
+(go/type aotUnit "aotUnit is a unit being dumped: its text, its constants (by identity for objects), why it is refused.\n"
+  (struct ^{:tag (* M)} m ^{:tag strings/Builder} b ^{:tag (slice string)} consts ^{:tag (map any int)} ix ^string refused))
+
+(go/func cljQuote "cljQuote is s as a Clojure string literal.\n" ^string [^string s]
+  (let [^strings/Builder b (zero strings/Builder)]
+    (.WriteByte (addr b) \")
+    (range [_ c s]
+      (cond
+        (== c \\) (.WriteString (addr b) "\\\\")
+        (== c \") (.WriteString (addr b) "\\\"")
+        (== c \newline) (.WriteString (addr b) "\\n")
+        (== c \tab) (.WriteString (addr b) "\\t")
+        (== c \return) (.WriteString (addr b) "\\r")
+        (or (< c 32) (== c 127) (and (>= c 0x80) (< c 0xa0)) (== c 0x2028) (== c 0x2029))
+        (let [h (strconv/FormatInt (conv int64 c) 16)]
+          (.WriteString (addr b) "\\u")
+          (.WriteString (addr b) (strings/Repeat "0" (- 4 (len h))))
+          (.WriteString (addr b) h))
+        :else (.WriteRune (addr b) c)))
+    (.WriteByte (addr b) \")
+    (.String b)))
+
+(go/func aotSame
+  "aotSame is whether datum b, read back from a constant's text, is the constant a: the same structure,
+a gensym by its name and uid; budget bounds the walk (a cyclic constant is refused).\n"
+  ^bool [^any a ^any b ^{:tag (* int)} budget]
+  (dec! @budget)
+  (when (< @budget 0)
+    (return false))
+  (type-switch [x a]
+    (case [(* Pair)]
+      (let [(values y ok) (assert (* Pair) b)]
+        (return (and ok (aotSame (.-Car x) (.-Car y) budget) (aotSame (.-Cdr x) (.-Cdr y) budget)))))
+    (case [(* Vector)]
+      (let [(values y ok) (assert (* Vector) b)]
+        (when (or (not ok) (!= (len (.-V x)) (len (.-V y))))
+          (return false))
+        (range [i v (.-V x)]
+          (when (not (aotSame v (aget (.-V y) i) budget))
+            (return false)))
+        (return true)))
+    (case [(* Symbol)]
+      (let [(values y ok) (assert (* Symbol) b)]
+        (return (and ok (== (.-Name x) (.-Name y)) (== (.-Gensym x) (.-Gensym y)) (== (.-Uid x) (.-Uid y))))))
+    (case [(* String)]
+      (let [(values y ok) (assert (* String) b)]
+        (return (and ok (== (.String x) (.String y))))))
+    (case [(* Bytevector)]
+      (let [(values y ok) (assert (* Bytevector) b)]
+        (return (and ok (== (conv string (.-B x)) (conv string (.-B y))))))))
+  (Eqv a b))
+
+(go/method konst "konst is the index of constant x in the unit's table.\n" ^int [^{:tag (* aotUnit)} u ^any x]
+  (let [byId false]
+    (type-switch x
+      (case [(* Pair) (* String) (* Vector) (* Bytevector) (* Symbol) (* Record) (* Special)] (set! byId true)))
+    (when byId
+      (let [(values i ok) (aget (.-ix u) x)]
+        (when ok
+          (return i))))
+    (let [text (WriteValue x false)
+          i (len (.-consts u))]
+      (when (== (.-refused u) "")
+        (let [ok false]
+          ((fn []
+             (defer ((fn [] (recover))))
+             (let [back (ReadAOT text)
+                   budget 100000]
+               (set! ok (and (== (len back) 1) (aotSame x (aget back 0) (addr budget)))))))
+          (when (not ok)
+            (set! (.-refused u) (+ "a constant that does not read back: " (TruncText text 60))))))
+      (set! (.-consts u) (append (.-consts u) text))
+      (when byId
+        (aset (.-ix u) x i))
+      i)))
+
+(go/func TruncText "TruncText is s cut to n characters.\n" ^string [^string s ^int n]
+  (let [rs (conv (slice rune) s)]
+    (when (> (len rs) n)
+      (return (+ (conv string (subslice rs 0 n)) "...")))
+    s))
+
+(go/method w [^{:tag (* aotUnit)} u ^string s] (.WriteString (addr (.-b u)) s))
+
+(go/method wi [^{:tag (* aotUnit)} u ^int i] (.WriteString (addr (.-b u)) (strconv/Itoa i)))
+
+(go/method global "global writes a reference to the location of free symbol s.\n" [^{:tag (* aotUnit)} u ^{:tag (* Symbol)} s]
+  (if (.-Gensym s)
+    (do (.w u "(gp ") (.w u (cljQuote (.-Name s))) (.w u " ") (.w u (cljQuote (.-Uid s))) (.w u ")"))
+    (do (.w u "(g ") (.w u (cljQuote (.-Name s))) (.w u ")"))))
+
+(go/method form "form writes core form x in scope sc as Compile (comp) reads it.\n" [^{:tag (* aotUnit)} u ^any x ^{:tag (* scope)} sc]
+  (type-switch [v x]
+    (case [(* Symbol)]
+      (let [(values d i chk ok) (lookup sc v)]
+        (when ok
+          (if chk
+            (do (.w u "(lc ") (.wi u d) (.w u " ") (.wi u i) (.w u " ") (.wi u (.konst u v)) (.w u ")"))
+            (do (.w u "(l ") (.wi u d) (.w u " ") (.wi u i) (.w u ")")))
+          (return))
+        (.global u v)
+        (return)))
+    (case [(* Pair)]
+      (let [(values h isSym) (assert (* Symbol) (.-Car v))]
+        (when isSym
+          (let [(values _ _ _ bound) (lookup sc h)]
+            (when (not bound)
+              (switch h
+                (case [symQuote] (.w u "(k ") (.wi u (.konst u (nth v 1))) (.w u ")") (return))
+                (case [symPrimitive] (.prim u (nth v 1) x) (return))
+                (case [symIf]
+                  (.w u "(if ")
+                  (.form u (nth v 1) sc) (.w u " ")
+                  (.form u (nth v 2) sc) (.w u " ")
+                  (if (!= (nth (.-Cdr v) 2) nil)
+                    (.form u (nth v 3) sc)
+                    (.w u "(u)"))
+                  (.w u ")")
+                  (return))
+                (case [symBegin] (.body u (.-Cdr v) sc) (return))
+                (case [symSet symDefine]
+                  (let [(values s ok) (assert (* Symbol) (nth v 1))]
+                    (when (not ok)
+                      (CompileError v "set! of a non-symbol"))
+                    (let [(values d i _ found) (lookup sc s)]
+                      (if (and found (== (.-Car v) (conv any symSet)))
+                        (do (.w u "(setl ") (.wi u d) (.w u " ") (.wi u i) (.w u " "))
+                        (do (.w u "(setg ") (.global u s) (.w u " ")))
+                      (.form u (nth v 2) sc)
+                      (.w u ")")
+                      (return))))
+                (case [symLambda] (.lambda u (lit (slice any) (.-Cdr v)) sc) (return))
+                (case [symCaseLambda] (.lambda u (ArgList "compile" (.-Cdr v)) sc) (return)))
+              (when (or (== h symLetrec) (== h symLetrecStar))
+                (.letrec u v sc)
+                (return)))))
+        (.w u "(app ")
+        (.form u (.-Car v) sc)
+        (range [_ a (ArgList "compile" (.-Cdr v))]
+          (.w u " ")
+          (.form u a sc))
+        (.w u ")")
+        (return))))
+  (.w u "(k ") (.wi u (.konst u x)) (.w u ")"))
+
+(go/method prim "prim writes (primitive name) as compPrim resolves it now.\n" [^{:tag (* aotUnit)} u ^any name ^any form]
+  (let [(values s ok) (assert (* Symbol) name)
+        m (.-m u)]
+    (when (not ok)
+      (CompileError form "primitive of a non-symbol"))
+    (when (!= (.-primLocs m) nil)
+      (let [(values loc seen) (aget (.-primLocCache m) s)]
+        (when (not seen)
+          (set! loc (.Call m (.-primLocs m) s))
+          (aset (.-primLocCache m) s loc))
+        (let [(values ls isLoc) (assert (* Symbol) loc)]
+          (when isLoc
+            (when (.-Gensym ls)
+              (set! (.-refused u) (+ "psyntax's location of primitive " (.-Name s) " is a gensym")))
+            (.w u "(pl ") (.w u (cljQuote (.-Name ls))) (.w u ")")
+            (return)))))
+    (let [(values _ isValue) (aget primValues (.-Name s))]
+      (when isValue
+        (.w u "(pv ") (.w u (cljQuote (.-Name s))) (.w u ")")
+        (return)))
+    (let [p (aget prims (.-Name s))]
+      (when (== p nil)
+        (.w u "(pm ") (.w u (cljQuote (.-Name s))) (.w u ")")
+        (return))
+      (when (!= (.-Ctl p) nil)
+        (.w u "(pc ") (.w u (cljQuote (.-Name s))) (.w u ")")
+        (return))
+      (let [impl ""]
+        (when (!= (.-F1 p) nil) (set! impl (+ impl "1")))
+        (when (!= (.-F2 p) nil) (set! impl (+ impl "2")))
+        (when (!= (.-F3 p) nil) (set! impl (+ impl "3")))
+        (when (!= (.-Fn p) nil) (set! impl (+ impl "n")))
+        (.w u "(pp ") (.w u (cljQuote (.-Name s))) (.w u " ") (.wi u (.-Min p)) (.w u " ") (.wi u (.-Max p))
+        (.w u " ") (.w u (cljQuote impl)) (.w u ")")))))
+
+(go/method body [^{:tag (* aotUnit)} u ^any body ^{:tag (* scope)} sc]
+  (let [xs (ArgList "compile" body)]
+    (when (== (len xs) 0)
+      (.w u "(u)")
+      (return))
+    (when (== (len xs) 1)
+      (.form u (aget xs 0) sc)
+      (return))
+    (.w u "(seq")
+    (range [_ x xs]
+      (.w u " ")
+      (.form u x sc))
+    (.w u ")")))
+
+(go/method lambda [^{:tag (* aotUnit)} u ^{:tag (slice any)} cs ^{:tag (* scope)} sc]
+  (.w u "(lam")
+  (range [_ c cs]
+    (let [p (ArgPair "compile" c)
+          (values req rest) (formals (.-Car p))
+          vars (append (lit (slice (* Symbol))) (spread req))]
+      (when (!= rest nil)
+        (set! vars (append vars rest)))
+      (.w u " (") (.wi u (len req))
+      (if (!= rest nil) (.w u " true ") (.w u " false "))
+      (.body u (.-Cdr p) (addr (lit scope :vars vars :up sc)))
+      (.w u ")")))
+  (.w u ")"))
+
+(go/method letrec [^{:tag (* aotUnit)} u ^{:tag (* Pair)} v ^{:tag (* scope)} sc]
+  (let [bs (ArgList "compile" (nth v 1))
+        ^{:tag (slice (* Symbol))} vars nil]
+    (range [_ b bs]
+      (set! vars (append vars ((inst As (* Symbol)) (nth b 0)))))
+    (let [inner (addr (lit scope :vars vars :up sc :checked true))]
+      (.w u "(letrec ") (.wi u (len vars)) (.w u " (")
+      (range [i b bs]
+        (when (> i 0) (.w u " "))
+        (.form u (nth b 1) inner))
+      (.w u ") ")
+      (.body u (.-Cdr ((inst As (* Pair)) (.-Cdr v))) (addr (lit scope :vars vars :up sc)))
+      (.w u ")"))))
+
+(go/method unitText "unitText is the dumped unit as a map the Clojure reader reads.\n"
+  ^string [^{:tag (* aotUnit)} u ^string kind ^string name ^{:tag (slice string)} forms]
+  (let [^strings/Builder b (zero strings/Builder)]
+    (.WriteString (addr b) (+ "{:kind :" kind " :name " (cljQuote name)))
+    (when (!= (.-refused u) "")
+      (.WriteString (addr b) (+ " :refused " (cljQuote (.-refused u)))))
+    (.WriteString (addr b) "\n :consts [")
+    (range [_ c (.-consts u)]
+      (.WriteString (addr b) (+ (cljQuote c) "\n")))
+    (.WriteString (addr b) "]\n :forms [")
+    (range [_ f forms]
+      (.WriteString (addr b) (+ f "\n")))
+    (.WriteString (addr b) "]}\n")
+    (.String b)))
+
+(go/func newAotUnit ^{:tag (* aotUnit)} [^{:tag (* M)} m]
+  (addr (lit aotUnit :m m :ix (make (map any int)))))
+
+(go/method dumpForm "dumpForm is core form x of unit u as the AOT's input.\n" ^string [^{:tag (* aotUnit)} u ^any x]
+  (.Reset (addr (.-b u)))
+  (.form u x nil)
+  (.String (addr (.-b u))))
+
+(go/method DumpBoot
+  "DumpBoot boots psyntax from its core forms as Boot does, dumping each form before it runs (its
+primitives resolved as the evaluator resolves them then): the unit :psyntax.\n"
+  ^string [^{:tag (* M)} m ^{:tag (slice any)} forms]
+  (let [u (newAotUnit m)
+        ^{:tag (slice string)} out nil]
+    (range [_ f forms]
+      (set! out (append out (.dumpForm u f)))
+      (.Eval m f))
+    (.unitText u "psyntax" "psyntax" out)))
+
+(go/method DumpProgram
+  "DumpProgram expands the top-level program forms by psyntax as RunProgram does and dumps, instead of
+running them, the invoke code of each library it needs from a source file (in invoke order: each
+library after those it invokes) and the program's core form: one unit each.\n"
+  ^string [^{:tag (* M)} m ^{:tag (slice any)} forms]
+  (let [r (Unpack (.Call m (.Psyntax m "program-expander") (ListTail forms Null)))
+        (values libs _) (ListSlice (aget r 0))
+        seen (make (map any bool))
+        ^strings/Builder b (zero strings/Builder)
+        ^{:tag (func [any])} walk nil]
+    (.WriteString (addr b) "{:units [\n")
+    (set! walk (fn [^any l]
+                 (when (aget seen l)
+                   (return))
+                 (aset seen l true)
+                 (let [rec ((inst As (* Record)) l)
+                       (values inv _) (ListSlice (aget (.-F rec) 5))]
+                   (range [_ d inv]
+                     (walk d))
+                   (when (!= (aget (.-F rec) 15) (conv any false))
+                     (let [u (newAotUnit m)
+                           f (.dumpForm u (aget (.-F rec) 11))]
+                       (.WriteString (addr b) (.unitText u "library" (WriteValue (aget (.-F rec) 1) false) (lit (slice string) f))))))))
+    (range [_ l libs]
+      (walk l))
+    (let [u (newAotUnit m)
+          f (.dumpForm u (aget r 1))]
+      (.WriteString (addr b) (.unitText u "program" "" (lit (slice string) f))))
+    (.WriteString (addr b) "]}\n")
+    (.String b)))

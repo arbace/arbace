@@ -1,0 +1,327 @@
+;; si's runtime: hashtables (rnrs hashtables) and Chez's make-eq-hashtable and friends. A table keeps its
+;; entries in insertion order (Chez's order differs: a recorded class). eq and eqv tables index entries by a
+;; canonical Go map key (flonums by bits, bignums and ratnums by value); equal and custom tables by the hash
+;; function's value, the bucket compared with the equivalence function.
+(in-ns 'go.arbace.scm)
+
+(go/file "prim_hash.go"
+  :imports [[big "math/big"] [math "math"] [strings "strings"]])
+
+(go/type htEntry "htEntry is an entry of a table; a deleted one is not Live.\n"
+  (struct ^any K ^any V ^int64 H ^bool Live))
+
+(go/type Hashtable "Hashtable is a hashtable: kind 0 eq, 1 eqv, 2 general (Hash and Equiv); Fast says Hash and Equiv are a primitive pair evaluated in Go.\n"
+  (struct ^uint8 Kind ^bool Mutable ^any Hash ^any Equiv ^uint8 Fast
+          ^{:tag (slice htEntry)} ents ^{:tag (map any int)} idx ^{:tag (map int64 (slice int))} buckets
+          ^int live ^int dead))
+
+(go/method String ^string [^{:tag (* Hashtable)} h]
+  (switch (.-Kind h)
+    (case [0] (return "#<eq hashtable>"))
+    (case [1] (return "#<eqv hashtable>")))
+  "#<hashtable>")
+
+(go/type floKey uint64)
+(go/type bigKey string)
+(go/type ratKey string)
+(go/type emptyKey int)
+
+(go/func canon "canon is the Go map key of an eqv key.\n" ^any [^any k]
+  (type-switch [x k]
+    (case [float64] (return (conv floKey (math/Float64bits x))))
+    (case [(* big/Int)] (return (conv bigKey (.String x))))
+    (case [(* big/Rat)] (return (conv ratKey (.String x))))
+    (case [(* Complex)] (return (conv ratKey (+ "c" (.String x)))))
+    (case [(* String)] (when (== (len (.-R x)) 0) (return (conv emptyKey 1))))
+    (case [(* Bytevector)] (when (== (len (.-B x)) 0) (return (conv emptyKey 2)))))
+  k)
+
+(go/func mix ^int64 [^int64 h ^int64 x]
+  (bit-and (+ (* h 1000003) x) 0x3fffffffffffffff))
+
+(go/func hashString ^int64 [^string s]
+  (let [^int64 h 5381]
+    (range [_ c s]
+      (set! h (mix h (conv int64 c))))
+    h))
+
+(go/func EqualHash "EqualHash is equal-hash of v: equal values hash alike.\n" ^int64 [^any v]
+  (return (equalHash v 8)))
+
+(go/func equalHash ^int64 [^any v ^int depth]
+  (type-switch [x v]
+    (case [int64] (return (bit-and x 0x3fffffffffffffff)))
+    (case [bool] (when x (return 1)) (return 2))
+    (case [Char] (return (+ 17 (conv int64 x))))
+    (case [float64] (return (bit-and (conv int64 (math/Float64bits x)) 0x3fffffffffffffff)))
+    (case [(* big/Int)] (return (hashString (.String x))))
+    (case [(* big/Rat)] (return (hashString (.String x))))
+    (case [(* Complex)] (return (hashString (.String x))))
+    (case [(* String)] (return (hashString (conv string (.-R x)))))
+    (case [(* Symbol)] (return (+ (hashString (.-Name x)) 3)))
+    (case [(* Bytevector)] (return (hashString (conv string (.-B x)))))
+    (case [(* Pair)]
+      (let [^int64 h 31
+            cur v
+            n 0]
+        (while (< n 64)
+          (watchdogTick)
+          (let [(values p ok) (assert (* Pair) cur)]
+            (when (not ok)
+              (break))
+            (when (> depth 0)
+              (set! h (mix h (equalHash (.-Car p) (- depth 1)))))
+            (set! cur (.-Cdr p))
+            (inc! n)))
+        (when (< n 64)
+          (let [(values _ ok) (assert (* Pair) cur)]
+            (when (not ok)
+              (set! h (mix h (equalHash cur (- depth 1)))))))
+        (return h)))
+    (case [(* Vector)]
+      (let [^int64 h 37]
+        (when (> depth 0)
+          (range [i e (.-V x)]
+            (when (>= i 64) (break))
+            (set! h (mix h (equalHash e (- depth 1))))))
+        (return (mix h (conv int64 (len (.-V x))))))))
+  (return 7))
+
+(go/func foldChar ^rune [^rune r]
+  (let [s (strings/ToLower (strings/ToUpper (conv string (lit (slice rune) r))))]
+    (return (aget (conv (slice rune) s) 0))))
+
+(go/func foldString ^string [^{:tag (* String)} s]
+  (strings/ToLower (strings/ToUpper (conv string (.-R s)))))
+
+(go/func StringHash ^int64 [^string who ^any x]
+  (hashString (conv string (.-R (ArgString who x)))))
+
+(go/func hashOfInt "hashOfInt is the value of a user hash function's result as a Go int64.\n" ^int64 [^any v]
+  (type-switch [x v]
+    (case [int64] (return (bit-and x 0x3fffffffffffffff)))
+    (case [(* big/Int)] (return (bit-and (.Int64 (.And (new big/Int) x (big/NewInt 0x3fffffffffffffff))) 0x3fffffffffffffff))))
+  (NotAn "hashtable-ref" "exact integer" v)
+  (return 0))
+
+;; fast kinds: 1 equal-hash/equal?, 2 string-hash/string=?, 3 string-ci-hash/string-ci=?, 4 symbol-hash/eq?
+
+(go/method hashOf ^int64 [^{:tag (* Hashtable)} h ^any k]
+  (switch (.-Fast h)
+    (case [1] (return (EqualHash k)))
+    (case [2] (return (StringHash "string-hash" k)))
+    (case [3] (return (hashString (foldString (ArgString "string-ci-hash" k)))))
+    (case [4] (return (hashString (.-Name (ArgSymbol "symbol-hash" k))))))
+  (hashOfInt (CallProc (.-Hash h) k)))
+
+(go/method same ^bool [^{:tag (* Hashtable)} h ^any a ^any b]
+  (switch (.-Fast h)
+    (case [1] (return (Equal a b)))
+    (case [2] (return (== (conv string (.-R (ArgString "string=?" a))) (conv string (.-R (ArgString "string=?" b))))))
+    (case [3] (return (== (foldString (ArgString "string-ci=?" a)) (foldString (ArgString "string-ci=?" b)))))
+    (case [4] (return (Eqv a b))))
+  (Truthy (CallProc (.-Equiv h) a b)))
+
+(go/func newTable ^{:tag (* Hashtable)} [^uint8 kind]
+  (addr (lit Hashtable :Kind kind :Mutable true :idx (make (map any int)) :buckets (make (map int64 (slice int))))))
+
+(go/method find ^int [^{:tag (* Hashtable)} h ^any k]
+  (when (!= (.-Kind h) 2)
+    (let [(values i ok) (aget (.-idx h) (canon k))]
+      (when ok
+        (return i))
+      (return -1)))
+  (let [hv (.hashOf h k)]
+    (range [_ i (aget (.-buckets h) hv)]
+      (let [e (aget (.-ents h) i)]
+        (when (and (.-Live e) (.same h (.-K e) k))
+          (return i)))))
+  -1)
+
+(go/method put [^{:tag (* Hashtable)} h ^any k ^any v]
+  (let [i (.find h k)]
+    (when (>= i 0)
+      (set! (.-V (aget (.-ents h) i)) v)
+      (return))
+    (let [^int64 hv 0
+          n (len (.-ents h))]
+      (if (== (.-Kind h) 2)
+        (do (set! hv (.hashOf h k))
+            (aset (.-buckets h) hv (append (aget (.-buckets h) hv) n)))
+        (aset (.-idx h) (canon k) n))
+      (set! (.-ents h) (append (.-ents h) (lit htEntry :K k :V v :H hv :Live true)))
+      (inc! (.-live h)))))
+
+(go/method remove [^{:tag (* Hashtable)} h ^any k]
+  (let [i (.find h k)]
+    (when (< i 0)
+      (return))
+    (let [e (aget (.-ents h) i)]
+      (set! (.-Live (aget (.-ents h) i)) false)
+      (set! (.-V (aget (.-ents h) i)) nil)
+      (if (== (.-Kind h) 2)
+        (let [b (aget (.-buckets h) (.-H e))
+              nb (make (slice int) 0 (len b))]
+          (range [_ j b]
+            (when (!= j i)
+              (set! nb (append nb j))))
+          (if (== (len nb) 0)
+            (delete (.-buckets h) (.-H e))
+            (aset (.-buckets h) (.-H e) nb)))
+        (delete (.-idx h) (canon (.-K e))))
+      (dec! (.-live h))
+      (inc! (.-dead h))
+      (when (and (> (.-dead h) 32) (> (.-dead h) (.-live h)))
+        (.compact h)))))
+
+(go/method compact [^{:tag (* Hashtable)} h]
+  (let [old (.-ents h)]
+    (set! (.-ents h) nil)
+    (set! (.-idx h) (make (map any int)))
+    (set! (.-buckets h) (make (map int64 (slice int))))
+    (set! (.-live h) 0)
+    (set! (.-dead h) 0)
+    (range [_ e old]
+      (when (.-Live e)
+        (let [n (len (.-ents h))]
+          (if (== (.-Kind h) 2)
+            (aset (.-buckets h) (.-H e) (append (aget (.-buckets h) (.-H e)) n))
+            (aset (.-idx h) (canon (.-K e)) n))
+          (set! (.-ents h) (append (.-ents h) e))
+          (inc! (.-live h)))))))
+
+(go/func ArgHashtable ^{:tag (* Hashtable)} [^string who ^any x]
+  (let [(values h ok) (assert (* Hashtable) x)]
+    (when (not ok)
+      (NotA who "hashtable" x))
+    h))
+
+(go/func ArgMutTable ^{:tag (* Hashtable)} [^string who ^any x]
+  (let [h (ArgHashtable who x)]
+    (when (not (.-Mutable h))
+      (AssertionViolation who "~s is not mutable" x))
+    h))
+
+(go/func sizeArg [^string who ^{:tag (slice any)} a ^int i]
+  (when (> (len a) i)
+    (let [(values n ok) (assert int64 (aget a i))]
+      (when (or (not ok) (< n 0))
+        (AssertionViolation who "invalid size argument ~s" (aget a i))))))
+
+(go/func primName ^string [^any x]
+  (let [(values p ok) (assert (* Prim) x)]
+    (when ok
+      (return (.-Name p))))
+  "")
+
+(go/func fastKind ^uint8 [^any hash ^any equiv]
+  (let [hn (primName hash)
+        en (primName equiv)]
+    (cond
+      (and (== hn "equal-hash") (== en "equal?")) (return 1)
+      (and (== hn "string-hash") (== en "string=?")) (return 2)
+      (and (== hn "string-ci-hash") (== en "string-ci=?")) (return 3)
+      (and (== hn "symbol-hash") (or (== en "eq?") (== en "eqv?") (== en "symbol=?"))) (return 4)))
+  0)
+
+(go/func tableKeys ^{:tag (slice any)} [^{:tag (* Hashtable)} h]
+  (let [out (make (slice any) 0 (.-live h))]
+    (range [_ e (.-ents h)]
+      (when (.-Live e)
+        (set! out (append out (.-K e)))))
+    out))
+
+(go/func init []
+  (Def "make-eq-hashtable" 0 1 (fn ^any [^{:tag (slice any)} a] (sizeArg "make-eq-hashtable" a 0) (newTable 0)))
+  (Def "make-eqv-hashtable" 0 1 (fn ^any [^{:tag (slice any)} a] (sizeArg "make-eqv-hashtable" a 0) (newTable 1)))
+  (Alias "make-weak-eq-hashtable" "make-eq-hashtable")
+  (Alias "make-weak-eqv-hashtable" "make-eqv-hashtable")
+  (Def "make-hashtable" 2 3 (fn ^any [^{:tag (slice any)} a]
+    (ArgProc "make-hashtable" (aget a 0))
+    (ArgProc "make-hashtable" (aget a 1))
+    (sizeArg "make-hashtable" a 2)
+    (let [h (newTable 2)]
+      (set! (.-Hash h) (aget a 0))
+      (set! (.-Equiv h) (aget a 1))
+      (set! (.-Fast h) (fastKind (aget a 0) (aget a 1)))
+      h)))
+  (Def1 "hashtable?" (fn ^any [^any x] (let [(values _ ok) (assert (* Hashtable) x)] ok)))
+  (Def1 "hashtable-size" (fn ^any [^any x] (conv int64 (.-live (ArgHashtable "hashtable-size" x)))))
+  (Def3 "hashtable-ref" (fn ^any [^any x ^any k ^any d]
+    (let [h (ArgHashtable "hashtable-ref" x)
+          i (.find h k)]
+      (when (>= i 0)
+        (return (.-V (aget (.-ents h) i))))
+      d)))
+  (Def3 "hashtable-set!" (fn ^any [^any x ^any k ^any v]
+    (.put (ArgMutTable "hashtable-set!" x) k v)
+    Unspec))
+  (Def2 "hashtable-delete!" (fn ^any [^any x ^any k]
+    (.remove (ArgMutTable "hashtable-delete!" x) k)
+    Unspec))
+  (Def2 "hashtable-contains?" (fn ^any [^any x ^any k]
+    (>= (.find (ArgHashtable "hashtable-contains?" x) k) 0)))
+  (DefCtl "hashtable-update!" 4 4 (fn [^{:tag (* M)} m ^{:tag (slice any)} a] :results [any bool]
+    (let [h (ArgMutTable "hashtable-update!" (aget a 0))
+          k (aget a 1)
+          proc (ArgProc "hashtable-update!" (aget a 2))
+          i (.find h k)
+          cur (aget a 3)]
+      (when (>= i 0)
+        (set! cur (.-V (aget (.-ents h) i))))
+      (.PushGo m (fn [^{:tag (* M)} m2 ^any v] :results [any bool]
+                   (.put h k v)
+                   (return Unspec true)))
+      (return (.Apply m proc (lit (slice any) cur))))))
+  (Def "hashtable-copy" 1 2 (fn ^any [^{:tag (slice any)} a]
+    (let [h (ArgHashtable "hashtable-copy" (aget a 0))
+          c (newTable (.-Kind h))]
+      (set! (.-Hash c) (.-Hash h))
+      (set! (.-Equiv c) (.-Equiv h))
+      (set! (.-Fast c) (.-Fast h))
+      (range [_ e (.-ents h)]
+        (when (.-Live e)
+          (.put c (.-K e) (.-V e))))
+      (set! (.-Mutable c) (and (> (len a) 1) (Truthy (aget a 1))))
+      c)))
+  (Def "hashtable-clear!" 1 2 (fn ^any [^{:tag (slice any)} a]
+    (let [h (ArgMutTable "hashtable-clear!" (aget a 0))]
+      (sizeArg "hashtable-clear!" a 1)
+      (set! (.-ents h) nil)
+      (set! (.-idx h) (make (map any int)))
+      (set! (.-buckets h) (make (map int64 (slice int))))
+      (set! (.-live h) 0)
+      (set! (.-dead h) 0)
+      Unspec)))
+  (Def1 "hashtable-keys" (fn ^any [^any x]
+    (NewVector (tableKeys (ArgHashtable "hashtable-keys" x)))))
+  (Def1 "hashtable-entries" (fn ^any [^any x]
+    (let [h (ArgHashtable "hashtable-entries" x)
+          vs (make (slice any) 0 (.-live h))]
+      (range [_ e (.-ents h)]
+        (when (.-Live e)
+          (set! vs (append vs (.-V e)))))
+      (addr (lit Values :V (lit (slice any) (NewVector (tableKeys h)) (NewVector vs)))))))
+  (Def1 "hashtable-equivalence-function" (fn ^any [^any x]
+    (let [h (ArgHashtable "hashtable-equivalence-function" x)]
+      (when (== (.-Kind h) 2)
+        (return (.-Equiv h)))
+      (let [p (LookupPrim (Pick (== (.-Kind h) 0) "eq?" "eqv?"))]
+        (when (== p nil)
+          (return false))
+        p))))
+  (Def1 "hashtable-hash-function" (fn ^any [^any x]
+    (let [h (ArgHashtable "hashtable-hash-function" x)]
+      (when (== (.-Kind h) 2)
+        (return (.-Hash h)))
+      false)))
+  (Def1 "hashtable-mutable?" (fn ^any [^any x] (.-Mutable (ArgHashtable "hashtable-mutable?" x))))
+  (Def1 "equal-hash" (fn ^any [^any x] (EqualHash x)))
+  (Def1 "string-hash" (fn ^any [^any x] (StringHash "string-hash" x)))
+  (Def1 "string-ci-hash" (fn ^any [^any x] (hashString (foldString (ArgString "string-ci-hash" x)))))
+  (Def1 "symbol-hash" (fn ^any [^any x] (hashString (.-Name (ArgSymbol "symbol-hash" x))))))
+
+(go/func Pick "Pick is a if c, else b (both already evaluated).\n" ^string [^bool c ^string a ^string b]
+  (when c
+    (return a))
+  b)

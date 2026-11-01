@@ -1,0 +1,2 @@
+(import (rnrs))
+(cond (else 1) (#t 2))

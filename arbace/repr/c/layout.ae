@@ -1,0 +1,108 @@
+(ns arbace.repr.c.layout
+  "C forms as .ae text (doc/c/SPEC.md §10.1; doc/C23-SURVEY.md, \"As built: C3b\"): `form-str`, a form
+  on one line with its metadata (sorted, :line left out: the comparisons' and the header units'
+  digests' text), and `unit-text`, a unit's forms laid out on their C lines (a form on the line of its
+  first C token, a later one that would take an earlier line on the next)."
+  (:require [arbace.string :as str]))
+
+(set! *warn-on-reflection* true)
+
+(declare form-str)
+
+(defn- str-lit ^String [^String s]
+  (let [b (StringBuilder. "\"")]
+    (doseq [c s]
+      (let [i (int c)]
+        (cond
+          (= c \") (.append b "\\\"")
+          (= c \\) (.append b "\\\\")
+          (= c \newline) (.append b "\\n")
+          (= c \tab) (.append b "\\t")
+          (= c \return) (.append b "\\r")
+          (or (< i 0x20) (<= 0x7f i 0x9f) (<= 0xD800 i 0xDFFF)) (.append b (format "\\u%04x" i))
+          :else (.append b c))))
+    (.append b "\"")
+    (str b)))
+
+(defn- char-lit ^String [c]
+  (let [i (int c)]
+    (case c
+      \newline "\\newline" \space "\\space" \tab "\\tab" \return "\\return" \backspace "\\backspace" \formfeed "\\formfeed"
+      (if (or (< i 0x21) (<= 0x7f i 0xa0) (<= 0xD800 i 0xDFFF))
+        (format "\\u%04X" i)
+        (str "\\" c)))))
+
+(defn- meta-str ^String [m]
+  (let [m (dissoc m :line :column)]
+    (if (empty? m)
+      ""
+      (let [flags (sort (map str (filter #(true? (get m %)) (keys m))))
+            m (into {} (remove #(true? (val %)) m))
+            tag (:tag m)
+            simple-tag (and (symbol? tag) (empty? (dissoc (meta tag) :line)))
+            m (if simple-tag (dissoc m :tag) m)]
+        (str (apply str (map #(str "^" % " ") flags))
+             (when simple-tag (str "^" (form-str tag) " "))
+             (when (seq m)
+               (str "^{" (str/join ", " (map (fn [[k v]] (str (form-str k) " " (form-str v))) (sort-by #(str (key %)) m))) "} ")))))))
+
+(defn form-str
+  "A form's text on one line, its metadata (but :line) written."
+  ^String [x]
+  (let [mt (when (instance? arbace.lang.IMeta x) (meta x))
+        body (cond
+               (nil? x) "nil"
+               (string? x) (str-lit x)
+               (char? x) (char-lit x)
+               (instance? arbace.lang.BigInt x) (str x "N")
+               (instance? BigInteger x) (str x "N")
+               (instance? java.math.BigDecimal x) (str (.toString ^java.math.BigDecimal x) "M")
+               (instance? Double x) (let [d (double x)]
+                                      (cond (Double/isNaN d) "##NaN" (Double/isInfinite d) (if (pos? d) "##Inf" "##-Inf") :else (str d)))
+               (number? x) (str x)
+               (keyword? x) (str x)
+               (symbol? x) (str x)
+               (vector? x) (str "[" (str/join " " (map form-str x)) "]")
+               (map? x) (str "{" (str/join ", " (map (fn [[k v]] (str (form-str k) " " (form-str v))) (sort-by #(str (key %)) x))) "}")
+               (set? x) (str "#{" (str/join " " (sort (map form-str x))) "}")
+               (seq? x) (str "(" (str/join " " (map form-str x)) ")")
+               :else (pr-str x))]
+    (if (seq mt) (str (meta-str mt) body) body)))
+
+(defn- line-of [x] (when (instance? arbace.lang.IMeta x) (:line (meta x))))
+
+(defn- lay
+  "Writes `x` into `b`, its nested lists and vectors that begin a later C line on that line (when the
+  output has not passed it), returning the output's line."
+  ^long [^StringBuilder b x ^long cur ^long indent]
+  (let [mt (when (instance? arbace.lang.IMeta x) (meta x))]
+    (if (and (or (seq? x) (vector? x)) (seq x))
+      (let [[open close] (if (vector? x) ["[" "]"] ["(" ")"])]
+        (when (seq mt) (.append b (meta-str mt)))
+        (.append b open)
+        (loop [xs (seq x) cur cur first? true]
+          (if-not xs
+            (do (.append b close) cur)
+            (let [c (first xs)
+                  l (line-of c)
+                  cur (if (and (not first?) l (> (long l) cur))
+                        (do (dotimes [_ (- (long l) cur)] (.append b "\n"))
+                            (dotimes [_ (inc indent)] (.append b "  "))
+                            (long l))
+                        (do (when-not first? (.append b " ")) cur))]
+              (recur (next xs) (lay b c cur (inc indent)) false)))))
+      (do (.append b (form-str x)) cur))))
+
+(defn unit-text
+  "A unit's .ae text: `head` (its in-ns and c/file forms) on the first line, each form on its C line."
+  ^String [^String head forms]
+  (let [b (StringBuilder. head)]
+    (loop [fs (seq forms) cur 1]
+      (if-not fs
+        (do (.append b "\n") (str b))
+        (let [f (first fs)
+              l (line-of f)
+              cur (if (and l (> (long l) cur))
+                    (do (dotimes [_ (- (long l) cur)] (.append b "\n")) (long l))
+                    (do (.append b "\n") (inc cur)))]
+          (recur (next fs) (lay b f cur 0)))))))

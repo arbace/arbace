@@ -1,0 +1,63 @@
+// Command cirun runs a C program's node program (arbace.c.build's output, as text) on ci's back
+// end, outside Arbace's executable: the light path of bin/ci run (doc/C23-SURVEY.md, "As built:
+// C5 (write-ahead)"). Usage: cirun PROGRAM.nodes [ARG...]; the program's status is cirun's; a fault
+// is reported on the standard error as "cirun: fault: ...". cirun's own failures (no node program, a parse
+// error, no entry, a panic of the interpreter's) are "cirun: internal: ..." with status 70, which bin/ci check's
+// judge tells from a program's own status (doc/C23-SURVEY.md, "As built: review 006's fixes", finding 4).
+package main
+
+import (
+	"bufio"
+	"fmt"
+	"os"
+	"runtime/debug"
+
+	"arbace/ci"
+	"arbace/crt"
+)
+
+// internal reports a failure of cirun's own, the program's output flushed first.
+func internal(out *bufio.Writer, format string, a ...any) {
+	if out != nil {
+		out.Flush()
+	}
+	fmt.Fprintf(os.Stderr, "cirun: internal: "+format+"\n", a...)
+	os.Exit(70)
+}
+
+func main() {
+	if len(os.Args) < 2 {
+		internal(nil, "usage: cirun PROGRAM.nodes [ARG...]")
+	}
+	text, err := os.ReadFile(os.Args[1])
+	if err != nil {
+		internal(nil, "%v", err)
+	}
+	tops, err := ci.Parse(string(text))
+	if err != nil {
+		internal(nil, "%v", err)
+	}
+	out := bufio.NewWriterSize(os.Stdout, 1<<16)
+	defer func() {
+		if r := recover(); r != nil {
+			internal(out, "%v\n%s", r, debug.Stack())
+		}
+	}()
+	m := crt.NewMem()
+	sys := crt.NewSys(m, os.Stdin, out, os.Stderr)
+	p := ci.NewProg(sys)
+	l := ci.NewLoader(p)
+	for _, t := range tops {
+		l.Top(t)
+	}
+	if l.Entry == nil {
+		internal(out, "no entry")
+	}
+	argv := append([]string{"a.out"}, os.Args[2:]...)
+	status, fault := p.RunMain(l.Start, l.Entry, argv)
+	out.Flush()
+	if fault != nil {
+		fmt.Fprintln(os.Stderr, "cirun: fault:", fault)
+	}
+	os.Exit(status)
+}

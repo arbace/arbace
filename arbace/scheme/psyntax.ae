@@ -1,0 +1,84 @@
+(ns arbace.scheme.psyntax
+  "The vendored psyntax's files (doc/scheme/SCHEME-SURVEY.md, \"As built: SM4\"): scheme/psyntax/ holds Ikarus's
+  psyntax (scheme/provenance.edn) and Arbace's compat and internal libraries as Scheme forms in mode :full;
+  this namespace converts the originals, verifies them, prints the sources the bootstrap reads (the patches of
+  scheme/psyntax/patches.edn applied) and turns the bootstrap's output into scheme/psyntax/psyntax.pp.ae."
+  (:require [arbace.string :as str]
+            [arbace.repr.scheme.full :as fu]
+            [arbace.repr.scheme.read :as rd]))
+
+(defn- root [] (or (System/getenv "ARBACE_ROOT") "."))
+(defn- dir [] (str (root) "/scheme/psyntax"))
+(defn- provenance [] (read-string (slurp (str (root) "/scheme/provenance.edn"))))
+
+(defn- digest [^String text]
+  (let [d (.digest (java.security.MessageDigest/getInstance "SHA-256") (.getBytes text "UTF-8"))]
+    (apply str (map #(format "%02x" (bit-and % 0xff)) d))))
+
+(defn- forms-text
+  "A Scheme text as a forms file of mode :full."
+  [^String text]
+  (let [{:keys [data error layer]} (fu/read-full text)]
+    (when error (throw (ex-info (str "read: " (:message error)) {:error error})))
+    (fu/ae-text (mapv :form data) layer)))
+
+(defn- text-of [name]
+  (let [[forms layer] (fu/parse-ae (slurp (str (dir) "/" name ".ae")))] (fu/print-full forms layer)))
+
+(defn- vendored [] (:files (:psyntax (provenance))))
+
+(defn convert
+  "The originals fetched into `from` (their upstream paths) written as forms."
+  [from]
+  (doseq [{:keys [name path sha256] :as f} (vendored)]
+    (let [text (slurp (str from "/" path))]
+      (when-not (= (digest text) sha256) (throw (ex-info (str path ": SHA-256 differs from the pin") f)))
+      (spit (str (dir) "/" name ".ae") (forms-text text))
+      (println "converted" path "->" (str "scheme/psyntax/" name ".ae")))))
+
+(defn verify
+  "Each vendored forms file printed back is its pinned original, byte for byte."
+  []
+  (let [bad (remove (fn [{:keys [name sha256]}] (= (digest (text-of name)) sha256)) (vendored))]
+    (doseq [{:keys [path]} (vendored)] (println (if (some #(= path (:path %)) bad) "DIFFERS" "same") path))
+    (if (seq bad) 1 0)))
+
+(defn- patched [name]
+  (reduce (fn [^String text {:keys [from to]}]
+            (let [i (.indexOf text ^String from)]
+              (when (or (neg? i) (not= i (.lastIndexOf text ^String from)))
+                (throw (ex-info (str name ": a patch's :from is not in the file exactly once") {:from from})))
+              (str (subs text 0 i) to (subs text (+ i (count from))))))
+          (text-of name)
+          (filter #(= (:file %) name) (read-string (slurp (str (dir) "/patches.edn"))))))
+
+(defn sources
+  "The bootstrap's inputs: OUT/stage/psyntax/NAME.ss (the vendored files, patched, that run on Chez beside
+  tools/psyntax/chez/psyntax/) and OUT/src/NAME.ss (the same with Arbace's compat and internal: what is expanded)."
+  [out]
+  (doseq [{:keys [name]} (vendored)]
+    (let [t (patched name)]
+      (doseq [d ["stage/psyntax" "src"]]
+        (.mkdirs (java.io.File. (str out "/" d)))
+        (spit (str out "/" d "/" name ".ss") t))))
+  (doseq [name ["compat" "internal"]]
+    (spit (str out "/src/" name ".ss") (text-of name))))
+
+(defn pp-forms
+  "The bootstrap's output (Scheme text, a core form a line) as forms, a form a line."
+  [in out]
+  (let [{:keys [data error]} (rd/read-all (slurp in) {})]
+    (when error (throw (ex-info (str "read: " (:message error)) {:error error})))
+    (spit out (str ";; psyntax expanded for Arbace by tools/psyntax/boot.ss on Chez Scheme 10.3.0 (bin/si boot); generated, do not edit\n"
+                   ";; psyntax: Copyright (c) 2006, 2007 Abdulaziz Ghuloum and Kent Dybvig, under the MIT License (LICENSE.md, \"psyntax\")\n"
+                   (str/join "\n" (map (comp pr-str :form) data)) "\n"))
+    (println (count data) "core forms ->" out)))
+
+(defn -main [& [cmd & args]]
+  (let [rc (case cmd
+             "convert" (do (convert (first args)) 0)
+             "verify" (verify)
+             "sources" (do (sources (first args)) 0)
+             "pp-forms" (do (pp-forms (first args) (second args)) 0)
+             (do (println "usage: arbace.scheme.psyntax convert DIR | verify | sources OUT | pp-forms IN OUT") 2))]
+    (System/exit rc)))

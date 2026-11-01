@@ -1,0 +1,69 @@
+#!/bin/bash
+# The gate's own scripts' tests (GTS114 (a), audit 041): every test/gate/*-test.bash, each on a
+# fabricated tree and fake executables under .tmp/ (seconds, no build, no JVM). The ones that need an
+# Arbace executable (edge-verdict, edge-mark, frozen-env) take the tools' host (bin/lib/host.bash, stage 0).
+#
+# A test that exits 77 says it cannot run here (gate-reads-test inside bin/gate --audit's strace: a traced
+# process cannot be traced again); it is listed as "not run", never as passed, and does not fail the run: the
+# audit holds the step to its inputs there, which it says by GATE_AUDITED=1 in the step's environment
+# (bin/lib/gate-run.bash), or gate-reads-test's strace does (--nested); a 77 without either, under some other
+# tracer, fails. --nested: this run is gate-reads-test's own, under its strace, which
+# it is not run again in (the variable GATE_TESTS_NESTED of the caller's environment is dropped).
+# Usage: bin/gate-tests [--nested] [--no-exe] [DIR]    DIR: another directory of *-test.bash (the tests' own test)
+# A test marked "# needs: exe" takes the executable ARBACE_HOST_EXE names, else stage 0 when target/seed has it;
+# with neither (no build is started: seconds) those tests are "not run (no stage 0)" and the status is 1,
+# or 0 under --no-exe, which runs the others alone.
+# Exit status: 0 when every test passes (and none was skipped without --no-exe).
+set -uo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+. "$root/bin/lib/tmpdir.bash" # TMPDIR: .tmp/tmp when unset
+. "$root/bin/lib/host.bash"
+cd "$root" || exit 1
+nested=
+[ "${1:-}" = --nested ] && { nested=1; shift; }
+noexe=
+[ "${1:-}" = --no-exe ] && { noexe=1; shift; }
+dir=${1:-$root/test/gate}
+if [ -z "$noexe" ]; then
+  if [ -n "${ARBACE_HOST_EXE:-}" ] || [ -x "$root/target/seed/$(arbace_host_arch)/arbace" ]; then
+    ARBACE_HOST_EXE=$(arbace_host_exe) || exit 1
+    export ARBACE_HOST_EXE
+  else
+    noexe=missing
+  fi
+fi
+unset GATE_TESTS_NESTED GATE_TESTS_IN_NESTED
+[ -n "$nested" ] && export GATE_TESTS_IN_NESTED=1   # (gate-tests-test then does not run gate-reads-test again)
+n=0 failed= skipped= unrun=
+for t in "$dir"/*-test.bash; do
+  [ -f "$t" ] || continue
+  n=$((n + 1))
+  # gate-reads-test runs this script under strace: not again inside itself
+  if [ -n "$nested" ] && [ "$(basename "$t")" = gate-reads-test.bash ]; then
+    echo "gate-tests: gate-reads-test.bash not run (nested in its own run)"; unrun="$unrun gate-reads-test.bash"; continue
+  fi
+  if [ -n "$noexe" ] && grep -q '^# needs: exe' "$t"; then
+    echo "gate-tests: $(basename "$t") not run (no stage 0)"; skipped="$skipped $(basename "$t")"; continue
+  fi
+  "$t" > "$TMPDIR/gate-tests.$(basename "$t").log" 2>&1; rc=$?
+  # (--nested: gate-reads-test's own strace, which holds the reads; the outer run runs the test untraced)
+  if [ "$rc" = 77 ] && [ "${GATE_AUDITED:-}" != 1 ] && [ -z "$nested" ]; then
+    # not run for being traced, but no audit holds this run (GATE_AUDITED, bin/lib/gate-run.bash): a pass would be vacuous
+    echo "gate-tests: $(basename "$t") FAILED (not run, already traced, and no audit holds this run: GATE_AUDITED is not set)"
+    failed="$failed $(basename "$t")"
+  elif [ "$rc" = 77 ]; then
+    echo "gate-tests: $(basename "$t") not run ($(tail -1 "$TMPDIR/gate-tests.$(basename "$t").log"))"; unrun="$unrun $(basename "$t")"
+  elif [ "$rc" = 0 ]; then
+    echo "gate-tests: $(basename "$t") passed"
+  else
+    echo "gate-tests: $(basename "$t") FAILED (log $TMPDIR/gate-tests.$(basename "$t").log)"
+    tail -20 "$TMPDIR/gate-tests.$(basename "$t").log"
+    failed="$failed $(basename "$t")"
+  fi
+done
+if [ "$n" = 0 ]; then echo "gate-tests: no test in $dir"; exit 1; fi
+if [ -n "$failed" ]; then echo "gate-tests: $n tests, failed:$failed"; exit 1; fi
+if [ -n "$skipped" ] && [ "$noexe" = missing ]; then echo "gate-tests: $n tests, not run for want of stage 0:$skipped"; exit 1; fi
+if [ -n "$skipped" ]; then echo "gate-tests: $n tests, not run (--no-exe):$skipped$unrun; the rest passed"
+elif [ -n "$unrun" ]; then echo "gate-tests: $n tests, not run:$unrun; the rest passed"
+else echo "gate-tests: $n tests passed"; fi

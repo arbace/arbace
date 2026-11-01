@@ -21,7 +21,7 @@ apk add alex alpine-base alpine-sdk alsa-lib-dev atop autoconf automake bat bubb
   cargo chez-scheme chrony clang clojure cloud-init coreutils cpio cups-dev dhcpcd diffutils \
   doas dosfstools e2fsprogs-extra fastfetch findutils fontconfig-dev gcc-cross-embedded gdb \
   github-cli go grep grub-efi happy hdparm htop hyperfine joker linux-virt maven mosh mount \
-  newlib nvme-cli ocaml5 openjdk25-src openssh openssh-server-pam perf pigz procps proot py3-pip \
+  newlib nvme-cli ocaml5-compiler-libs openjdk25-src openssh openssh-server-pam perf pigz procps proot py3-pip \
   qemu-aarch64 qemu-guest-agent qemu-system-aarch64 reptyr rsync sed strace tmux tree ugrep vim \
   wget zellij zip
 ```
@@ -41,7 +41,12 @@ ffmpeg), and 636 packages are installed; `check` confirms that line.
 
 - `world` prints the line, computed from `/etc/apk/world` and `/lib/apk/db/installed`.
 - `check` confirms, offline, that the line's closure with `install_if` is exactly the installed
-  set.
+  set. A dependency name that has several providers (installed, or offered by the repositories' index cache: `/bin/sh` by
+  busybox-binsh and bash-binsh, `java-jdk` by every openjdk `-jdk`) is apk's choice, not an edge: it counts as met only by
+  an installed provider the line's closure holds, so the line must name one (`apk add` it on the host, which puts it in
+  world); an installed package of the exact name wins and is the edge alone (`coreutils`, even with
+  uutils-coreutils installed), one only offered makes the name apk's choice (it would take it over an installed provider), and `so:`, `cmd:` and `pc:` names count installed providers
+  only (audit 065, GTS134).
 - `simulate` runs `apk add --simulate` of the line into an empty root under `.tmp/alpine-env/`,
   against the repositories, and compares the result with the host.
 
@@ -64,33 +69,54 @@ scripts and has not yet been tried on a fresh host.
 
 | Need | Packages |
 |---|---|
-| The scripts | `bash coreutils findutils grep sed diffutils tar xz cpio unzip` (flock, setsid and awk from busybox) |
-| Helpers in some scripts (`box-suite`, `box-smoke`, `tamago-vendor`, `arbace-go`'s REPL check, `box-vendor`, `box-arm64-vm`, `net-check`, `alpine-env`) | `python3` |
+| The scripts | `bash coreutils findutils grep sed diffutils tar xz unzip` (flock, setsid, awk, bc, timeout and `time -v` from busybox; `unzip -Z1` needs Info-ZIP's `unzip`, the package) |
+| The gate's audit (`bin/gate --audit`, and `--clean`, whose every step runs under it; GT4, GT7: `strace -f --seccomp-bpf`, `bin/lib/gate-run.bash`) | `strace` |
+| Helpers in some scripts (`alpine-env`, `arbace-go`'s REPL check, `box-arm64-vm`, `box-smoke`, `box-suite`, `goi`, `net-check`, `tamago-vendor`, `toolchain-vendor`) | `python3` |
 | Sources, Clojure's suite's jars from Maven Central, the arm64 VM's netboot | `git curl ca-certificates` |
 | The REPL's line editing (the executable runs its interactive REPL under it, doc/go/EXEC-NOTES.md; checked by `bin/arbace-go --smoke` and `bin/box-smoke`; optional) | `rlwrap` |
-| arm64 executables run on amd64 (`bin/arbace-go`, `bin/jrt`, `bin/j2g-evalproof`) | `qemu-aarch64` |
+| arm64 executables run on amd64 (`bin/arbace-go`, `bin/jrt`, `bin/j2g-evalproof`, `bin/j2g-check`, `bin/clojure-tests`, `bin/net-check`, `bin/build-go test`, `bin/repr-go check`); amd64 hosts only | `qemu-aarch64` |
 | The arm64 box's checks (`bin/box-arm64-vm`) | `qemu-system-aarch64 openssh-client` |
-| jrt-convert's generator JDK, and the boot JDK for jdk26u | `openjdk25-jdk` (on this host by `openjdk25-src`) |
+| jrt-convert's generator JDK, and the boot JDK for jdk26u | `openjdk25-jdk` (on this host by `clojure` and `maven`, which depend on the virtual `java-jdk`: apk takes the provider of highest priority, openjdk25 today, so a newer JDK package would be taken instead; name `openjdk25-jdk`, as the line below does; `openjdk25-src` depends on the JRE only) |
 | Building jdk26u (headless) | `alpine-sdk autoconf zip alsa-lib-dev cups-dev fontconfig-dev` |
+| repr/c's oracle (`bin/repr-c host record` and `check --tokens --record` run `gcc -E`, `gcc -print-file-name=include`: gcc 15.2's answers recorded under `test/c/host` and `test/repr/c/pp-gcc.sha256`) | `gcc` (comes with `alpine-sdk`) |
 | Bootstrapping TamaGo's Go from source | `go` (Alpine's Go, used for nothing else) |
 | repr/haskell's helper `tools/hsdump` and its checks (`bin/repr-haskell`, since 2026-10-17): GHC's parser through its `ghc` library, CPP through GHC's driver; the interface level (`roundtrip --iface`, since R2): `ghc --make`, `ghc --show-iface`, `hsc2hs`; R6 (2026-10-18): `hsc2hs` run by the helper, GHC's `unlit` through its driver | `ghc` (9.14.1, pinned by `tools/hsdump/GHC_VERSION` and checked; on this host by `cabal`; its CPP and `hsc2hs` run `cc` from `gcc`, a dependency of `ghc`; `hsc2hs` and `unlit` ship in `ghc`) |
 | repr/rust's helper `tools/rsdump` and its checks (`bin/repr-rust`, since 2026-10-17): rustc's parser through its `rustc_private` crates (the helper is built against `rustc-dev`'s metadata and links the host's `librustc_driver`), std's sources as the corpus | `rust` (1.99.1, pinned by `tools/rsdump/RUSTC_VERSION` and checked; on this host by `cargo`); `rustc-dev` and `rust-src` of the same build are fetched by `apk fetch` into `.tmp/repr-rust/apks/`, pinned by `tools/rsdump/apks.sha256`, and only extracted there, never installed; the behaviour level (RR5, 2026-10-18) links the UI suite's programs with `cc` from `gcc` (a dependency of `rust`), builds compiletest's C helper `rust_test_helpers.c` with it, and builds std by `cargo`'s `-Zbuild-std` (offline, `rust-src`'s vendored crates); `rustc-1.99.1-src.tar.xz` is downloaded into `.tmp/repr-rust/src/`, pinned by its SHA-256 in `test/rust/corpus-rustc-1.99.1-ui.edn` |
+| repr/ocaml's helper `tools/ocdump` and its checks (`bin/repr-ocaml`, O1, 2026-10-30): OCaml's own parser, typer and Lambda through `compiler-libs` (`ocamlopt -I +compiler-libs ocamlcommon.cmxa`; no ocamlfind, no dune, no opam) | `ocaml5-compiler-libs` (5.5.0-r0, installed by the user 2026-10-30, 70 MiB; pinned with the compiler by `tools/ocdump/OCAML_VERSION` and `test/ocaml/corpora.edn`'s `:host`, checked by `bin/repr-ocaml corpus check`; it depends on `ocaml5` and `ocaml5-runtime`, so the line names it alone); the corpus, OCaml's release tarball `ocaml-5.5.0.tar.xz`, is downloaded into `.tmp/repr-ocaml/src/` and pinned by its SHA-256 |
 
 Since 2026-10-16 nothing Arbace builds needs a C toolchain: go-whim's tests and their C guests
 (which needed `clang` and a linker), jrt's `--race` and `bin/j2g-race` (Go's race detector needs
 cgo) are gone, every Go build runs with `CGO_ENABLED=0`, and `bin/build-go test` checks its
 executables with Go's `debug/elf` (`tools/elfstatic`) instead of binutils' `readelf` and
 `file` (doc/go/BOX-NOTES.md, "go-whim vendored whole"). The row `gcc musl-dev linux-headers
-binutils` left the table and the line; gcc, musl-dev and binutils still come with `alpine-sdk`,
-for building jdk26u alone.
+binutils` left the table and the line.
+
+The bridges' checks are another matter: they run the host's compilers as their oracles, their answers
+recorded as data. On main, repr/c records gcc 15.2's preprocessor (the row above). On the crops'
+branches (until they merge): ci (c23) runs `gcc` and builds musl with `make`; repr/cpp, cppi and
+repr/llvm (cpp-cx7) run `clang`, `clang++` and `g++` against libstdc++ (`libstdc++-dev`, from `g++`);
+repr/ocaml and oi (ocaml-o1) run `ocamlopt` and `ocamlc` with `compiler-libs`; repr/scheme and si
+(scheme-sm1) run Chez Scheme (`chez`) and Chibi (`chibi-scheme`). gcc, g++, make and binutils come
+with `alpine-sdk`; the others are in the second line below.
 
 As one line:
 
 ```sh
-apk add bash coreutils findutils grep sed diffutils tar xz cpio unzip python3 git curl \
-  ca-certificates rlwrap qemu-aarch64 qemu-system-aarch64 openssh-client openjdk25-jdk \
+apk add bash coreutils findutils grep sed diffutils tar xz unzip python3 git curl \
+  ca-certificates strace rlwrap qemu-aarch64 qemu-system-aarch64 openssh-client openjdk25-jdk \
   alpine-sdk autoconf zip alsa-lib-dev cups-dev fontconfig-dev go
 ```
+
+The crops' checks, until their branches merge, add:
+
+```sh
+apk add clang ocaml5-compiler-libs chez-scheme chibi-scheme
+```
+
+The lines are amd64's. On an arm64 host `qemu-aarch64` is not needed (nothing runs amd64 executables
+under emulation, and `bin/arbace-go --fixpoint` runs on amd64 only), and the host's line above loses
+`reptyr`, which edge builds for x86_64 alone (checked 2026-11-01); Arbace's line resolves on both
+architectures.
 
 ## What apk does not provide
 

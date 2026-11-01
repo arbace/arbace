@@ -61,13 +61,15 @@ mod_dir() {
 
 # renamed DIR: the package bundle in DIR/x509roots/fallback/bundle of a module arbace, its
 # import path rewritten (the package imports none of the module's: only its own tests name it)
+# (called as `renamed ... || return 1`, so set -e is off inside: each step returns on its own failure, or a copy
+# that failed half way would pass for the original)
 renamed() {
   local d=$1 m
   m=$(mod_dir) || return 1
-  rm -rf "$d"; mkdir -p "$d/x509roots/fallback"
-  printf 'module arbace\n\ngo 1.27\n' > "$d/go.mod"
-  cp -r "$m/bundle" "$d/x509roots/fallback/bundle"
-  chmod -R u+w "$d"
+  rm -rf "$d" && mkdir -p "$d/x509roots/fallback" || return 1
+  printf 'module arbace\n\ngo 1.27\n' > "$d/go.mod" || return 1
+  cp -r "$m/bundle" "$d/x509roots/fallback/bundle" || return 1
+  chmod -R u+w "$d" || return 1
   find "$d" -name '*.go' -print0 | xargs -0 sed -i "s#\"$mod/bundle\"#\"$pkg\"#; s#\"$mod\"#\"arbace/x509roots/fallback\"#"
 }
 
@@ -105,9 +107,31 @@ convert() {
   echo "x509roots-vendor: $(find "$dst/go" -type f | wc -l) files into ${dst#$root/}/go" >&2
 }
 
+# days_of YYYYMMDD: the day number (days from civil, no date(1) needed)
+days_of() {
+  local y=${1:0:4} m=$((10#${1:4:2})) d=$((10#${1:6:2})) era yoe doy doe
+  [ "$m" -le 2 ] && y=$((y - 1))
+  era=$((y / 400)); yoe=$((y - era * 400))
+  doy=$(( (153 * (m > 2 ? m - 3 : m + 9) + 2) / 5 + d - 1 ))
+  doe=$((yoe * 365 + yoe / 4 - yoe / 100 + doy))
+  echo $((era * 146097 + doe))
+}
+
+# age_note: the snapshot's age (a note, never a failure: nothing else relates the pin to time;
+# a root Mozilla distrusts later stays in the bundle until the pin is moved, x509roots/README.md)
+age_note() {
+  local snap today
+  snap=$(echo "$mod_ver" | sed -n 's/^v[0-9.]*-\([0-9]\{8\}\)[0-9]*-.*/\1/p')
+  today=${X509ROOTS_TODAY:-$(date -u +%Y%m%d)}
+  [ -n "$snap" ] || { echo "x509roots-vendor: note: no snapshot date in $mod_ver" >&2; return 0; }
+  echo "x509roots-vendor: note: the bundle is the snapshot of $snap, $(( $(days_of "$today") - $(days_of "$snap") )) days old at $today (a root distrusted since stays in it until the pin moves)" >&2
+}
+
 check() {
   local status=0 gocmp=$work/gocmp p=$work/print
-  [ -d "$work/renamed" ] || renamed "$work/renamed"
+  age_note
+  # always made afresh from the pinned module: a leftover tree (an older version, an interrupted copy) is no original
+  renamed "$work/renamed" || return 1
   rm -rf "$p"
   "$root/bin/build-go" --print-only --tests --module arbace --layout lines --work "$p" "$out" >&2
   (cd "$root/tools/gocmp" && env -u GOOS -u GOARCH GOROOT="$tg" GOPROXY=off "$tg/bin/go" build -o "$gocmp" .)
@@ -130,6 +154,7 @@ mkdir -p "$work"
 case $cmd in
   convert) convert "$out" ;;
   verify)
+    age_note
     convert "$work/fresh"
     if diff -r -x README.md "$out" "$work/fresh" > "$work/verify.diff"; then
       echo "verify: ${out#$root/} is the conversion, byte for byte"

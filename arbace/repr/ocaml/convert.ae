@@ -1,0 +1,212 @@
+(ns arbace.repr.ocaml.convert
+  "The converter of repr/ocaml (doc/ocaml/SPEC.md §1, §10, O2): the helper's dump (tools/ocdump, forms
+  in the vocabulary of the Parsetree, OC8 (a)) as OCaml forms in mode :lines, and their .ae text.
+
+  convert: reads the dump with Arbace's reader, removes the positions when the dump has them (SPEC §10:
+  :loc, :ghost, :stack, :content-loc, and (at NAME LOC) as NAME; the two are one function of each other,
+  S16), checks every form's head against the spec's closed set (S5: an unknown head is an error), and
+  checks the shape of the names (S3).  write-forms: the forms as .ae text, one item to a line when it
+  fits in 100 columns, (var x) written as (var x) (S29: Arbace's printer would write #'x); the text is read
+  back and compared with the forms by the caller (read-check)."
+  (:require [arbace.string :as str]))
+
+(def known-heads
+  (set '[any var arrow tuple constr object class alias variant poly package open extension functor rtag rinherit
+         tag inherit pkg constant interval construct record array or constraint type lazy unpack exception
+         effect ident let function apply match try field setfield ifthenelse sequence while for coerce send
+         new setinstvar override struct-item assert newtype pack letop unreachable case bop param body cases
+         value primitive decl external ldecl cdecl econstr rebind typext class-infos structure fun cstruct
+         csig val method initializer attribute virtual concrete named signature with typeof
+         apply-unit module modsubst recmodule modbind moddecl modtype modtypesubst include class-type
+         typesubst attr ext str sig typ pat eval binding def directive bool int char string float name
+         ldot lapply at binding coercion
+         ocaml/impl ocaml/intf ocaml/toplevel ocaml/error comment doc]))
+
+(def position-keys #{:loc :ghost :stack :content-loc})
+
+(defn strip-positions
+  "The forms without positions (SPEC §10)"
+  [x]
+  (cond
+    (and (seq? x) (= 'at (first x))) (strip-positions (second x))
+    (seq? x) (let [y (map strip-positions x)]
+               (apply list (if (and (seq y) (= {} (last y))) (butlast y) y)))
+    (vector? x) (mapv strip-positions x)
+    (map? x) (into {} (comp (remove (fn [[k _]] (position-keys k))) (map (fn [[k v]] [k (strip-positions v)]))) x)
+    :else x))
+
+(defn- check-heads
+  "Throws on an unknown head"
+  [x]
+  (cond
+    (seq? x)
+    (do (when (and (symbol? (first x)) (not (known-heads (first x))))
+          (throw (ex-info (str "unknown head " (first x)) {:form (take 3 x)})))
+        (when (= 'name (first x))
+          (when-not (and (= 2 (count x)) (string? (second x)))
+            (throw (ex-info "bad name form" {:form x}))))
+        (doseq [c x] (check-heads c)))
+    (vector? x) (doseq [c x] (check-heads c))
+    (map? x) (doseq [[_ v] x] (check-heads v))))
+
+(defn convert
+  "A dump's text as forms in mode :lines; an error file ((ocaml/error ...)) is returned as it is"
+  [text]
+  (let [x (strip-positions (read-string text))]
+    (when-not (seq? x) (throw (ex-info "the dump is not a form" {})))
+    (when-not (= 'ocaml/error (first x)) (check-heads x))
+    x))
+
+;; ---- mode :full (O3) ----
+
+(declare error-form?)
+
+(defn- layout-items
+  "The layout dump's vector, checked: gap item gap ... item gap, a gap a string, an item a string or
+  (comment TEXT) or (doc TEXT)"
+  [x]
+  (when-not (and (seq? x) (= 'ocaml/layout (first x)) (vector? (second x)))
+    (throw (ex-info "the layout dump is not (ocaml/layout [...])" {})))
+  (let [v (second x)]
+    (when-not (odd? (count v)) (throw (ex-info "the layout has an even number of entries" {})))
+    (doseq [[i e] (map-indexed vector v)]
+      (when-not (if (even? i)
+                  (string? e)
+                  (or (string? e) (and (seq? e) (#{'comment 'doc} (first e)) (= 2 (count e)) (string? (second e)))))
+        (throw (ex-info (str "bad layout entry " i) {:entry (pr-str e)}))))
+    v))
+
+(defn convert-full
+  "The forms in mode :full: the parse dump converted (as convert) and the layout dump (the file's text as gaps
+  and tokens, comments and docstrings as (comment TEXT) and (doc TEXT), in the source's order, OC22 (a)) in the
+  metadata map's :layout, with :mode :full.  An error dump of either is returned as it is."
+  [parse-text layout-text]
+  (let [t (convert parse-text)
+        l (read-string layout-text)]
+    (cond
+      (error-form? t) t
+      (error-form? l) l
+      :else (let [v (layout-items l)
+                  m (last t)
+                  base (if (map? m) m {})
+                  body (if (map? m) (butlast t) t)]
+              (apply list (concat body [(assoc base :mode :full :layout v)]))))))
+
+(defn full-text
+  "The file's text of forms in mode :full: the layout's entries, concatenated"
+  [x]
+  (let [m (last x)]
+    (when-not (and (map? m) (= :full (:mode m)) (vector? (:layout m)))
+      (throw (ex-info "not forms in mode :full (no :layout)" {})))
+    (let [sb (StringBuilder.)]
+      (doseq [e (layout-items (list 'ocaml/layout (:layout m)))]
+        (.append sb ^String (if (string? e) e (second e))))
+      (str sb))))
+
+(defn error-form? [x] (and (seq? x) (= 'ocaml/error (first x))))
+
+(defn without-file
+  "The top-level form without its metadata (the file name and version)"
+  [x]
+  (if (and (seq? x) (map? (last x))) (apply list (butlast x)) x))
+
+;; ---- the writer ----
+
+(defn- atom-text [x]
+  (cond
+    (nil? x) "nil"
+    (string? x) (pr-str x)
+    :else (str x)))
+
+(defn- flat
+  "The form on one line when it fits in limit characters, else nil"
+  [x limit]
+  (cond
+    (neg? limit) nil
+    (or (seq? x) (vector? x))
+    (let [[open close] (if (seq? x) ["(" ")"] ["[" "]"])]
+      (loop [xs (seq x) acc [open] left (- limit 2)]
+        (if (nil? xs)
+          (apply str (conj acc close))
+          (let [s (flat (first xs) left)]
+            (if (nil? s)
+              nil
+              (recur (next xs) (conj acc (if (= acc [open]) "" " ") s) (- left (count s) 1)))))))
+    (map? x)
+    (loop [kvs (seq x) acc ["{"] left (- limit 2)]
+      (if (nil? kvs)
+        (apply str (conj acc "}"))
+        (let [[k v] (first kvs)
+              ks (flat k left)
+              vs (when ks (flat v (- left (count ks) 1)))]
+          (if (or (nil? ks) (nil? vs))
+            nil
+            (recur (next kvs) (conj acc (if (= acc ["{"]) "" " ") ks " " vs) (- left (count ks) (count vs) 2))))))
+    :else (let [s (atom-text x)] (when (<= (count s) limit) s))))
+
+(defn- write-fill
+  "A vector of atoms and small forms, as many to a line as fit"
+  [^StringBuilder sb v indent width]
+  (let [pad (apply str (repeat (inc indent) \space))]
+    (.append sb "[")
+    (loop [xs (seq v) col (inc indent) first? true]
+      (when xs
+        (let [s (or (flat (first xs) 1000000000) "")
+              n (count s)]
+          (cond
+            first? (do (.append sb ^String s) (recur (next xs) (+ col n) false))
+            (> (+ col 1 n) width) (do (.append sb "\n") (.append sb pad) (.append sb ^String s)
+                                      (recur (next xs) (+ indent 1 n) false))
+            :else (do (.append sb " ") (.append sb ^String s) (recur (next xs) (+ col 1 n) false))))))
+    (.append sb "]")))
+
+(declare write-to)
+(defn- write-to [^StringBuilder sb x indent width]
+  (if-let [s (flat x (- width indent))]
+    (.append sb ^String s)
+    (let [pad (apply str (repeat (inc indent) \space))]
+      (cond
+        (seq? x)
+        (do (.append sb "(")
+            (let [[h & more] x]
+              (write-to sb h (inc indent) width)
+              (doseq [c more]
+                (.append sb "\n") (.append sb pad) (write-to sb c (inc indent) width)))
+            (.append sb ")"))
+        (vector? x)
+        (do (.append sb "[")
+            (loop [xs (seq x) first? true]
+              (when xs
+                (when-not first? (.append sb "\n") (.append sb pad))
+                (write-to sb (first xs) (inc indent) width)
+                (recur (next xs) false)))
+            (.append sb "]"))
+        (map? x)
+        (do (.append sb "{")
+            (loop [kvs (seq x) first? true]
+              (when kvs
+                (let [[k v] (first kvs)]
+                  (when-not first? (.append sb "\n") (.append sb pad))
+                  (write-to sb k (inc indent) width)
+                  (.append sb " ")
+                  (if (and (= k :layout) (vector? v))
+                    (write-fill sb v (+ indent 2) width)
+                    (write-to sb v (+ indent 2) width)))
+                (recur (next kvs) false)))
+            (.append sb "}"))
+        :else (.append sb ^String (atom-text x))))))
+
+(defn write-forms
+  "The forms as .ae text"
+  [x]
+  (let [sb (StringBuilder.)]
+    (write-to sb x 0 100)
+    (.append sb "\n")
+    (str sb)))
+
+(defn read-check
+  "The text read back is the forms (throws, else the text)"
+  [text x]
+  (when-not (= (read-string text) x)
+    (throw (ex-info "the written forms do not read back equal" {})))
+  text)

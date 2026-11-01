@@ -1,0 +1,143 @@
+#!/bin/bash
+# repr/cpp's token check (doc/cpp/CPP-SURVEY.md, "As built: CX2"): every file of the corpora (test/cpp/corpora.edn) read in place,
+# lexed and preprocessed by the shared lexer and preprocessor (arbace.repr.c.lex, arbace.repr.c.pp) in C++ mode
+# (arbace.repr.cpp.host, on the tools' host), judged by the compilers' recorded answers (arbace.repr.cpp.ppcheck):
+#   - the preprocessed stream: its tokens' digest g++ -E -P's (test/repr/cpp/pp-gxx.sha256), or both reject the file, or
+#     the known file's :pp lists it with its class;
+#   - the raw tokens (position and text) clang's `-Xclang -dump-raw-tokens` (test/repr/cpp/lex-clang.sha256), or the
+#     known file's :lex lists it.
+# Run through bin/repr-cpp pp-check (from the repository root); writes only under .tmp/repr-cpp-check/ (REPR_CPP_CHECK_WORK).
+#
+# Usage: bin/repr-cpp pp-check [--corpus C,...] [--sample N] [--level lex,pp] [--record] [--record-known]
+#   --corpus   test/cpp/corpora.edn's ids (default cpp-lexical,gxx-dg,libstdcxx-headers; `all`: every corpus that is read in place from gcc's tarball)
+#   --sample   every Nth file of each corpus (default 1: all)
+#   --level    lex (the raw tokens against clang's), pp (the stream against g++'s); default both
+#   --record   g++ -E -P and clang's raw-token dump run on every file (4 at a time, nice), the digests of the
+#              corpora rewritten (the other corpora's lines kept), then the check again
+#   --redigest as --record, but g++ and clang are not run again: the digests are taken afresh from their outputs in WORK
+#              (a change of the judge's lexer; the work directory of the last --record, same --sample)
+#   --add-missing   the __has_* names the check found missing (WORK/CORPUS/missing.tsv) asked of g++ and clang and appended to
+#              test/cpp/host/has-extra.tsv (bin/repr-cpp has-add), then the check again
+#   --record-known  the known file's entries of the corpora rewritten from the check's result (classes kept)
+# gcc 15.2.0's tarball is extracted by `bin/repr-cpp pp-check` into .tmp/cpp-gcc/ (the corpora's directories), after its SHA-256 is checked
+# against the pin (REPR_CPP_GCC_TARBALL names another copy). REPR_CPP_THREADS (default 4) the port's threads; the light tier:
+# GOMAXPROCS=4 and GOMEMLIMIT=1500MiB are set when unset.
+set -uo pipefail
+root=$(cd "$(dirname "$0")/../../.." && pwd)
+. "$root/bin/lib/tmpdir.bash"
+. "$root/bin/lib/tools.bash"
+cd "$root"
+
+corpora=cpp-lexical,gxx-dg,libstdcxx-headers levels=lex,pp record= recknown= sample=1 addmissing= redigest=
+while [ $# -gt 0 ]; do
+  case $1 in
+    --corpus) corpora=$2; shift 2 ;;
+    --sample) sample=$2; shift 2 ;;
+    --level) levels=$2; shift 2 ;;
+    --record) record=1; shift ;;
+    --record-known) recknown=1; shift ;;
+    --redigest) redigest=1; record=1; shift ;;
+    --add-missing) addmissing=1; shift ;;
+    *) sed -n '14,24p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+  esac
+done
+[ "$corpora" = all ] && corpora=cpp-lexical,gxx-dg,gxx-old-deja,c-c++-common,libstdcxx-testsuite,libstdcxx-headers
+export GOMAXPROCS=${GOMAXPROCS:-4} GOMEMLIMIT=${GOMEMLIMIT:-1500MiB}
+export REPR_CPP_THREADS=${REPR_CPP_THREADS:-4}
+work=${REPR_CPP_CHECK_WORK:-$root/.tmp/repr-cpp-check}
+mkdir -p "$work"
+epoch=$(sed -n 's/^ *:epoch \([0-9]*\).*/\1/p' test/cpp/host/host.edn)
+
+# gcc's tarball, checked against the pin, its corpora's directories extracted
+gccdir=$root/.tmp/cpp-gcc
+main=$root
+case $root in */.tmp/worktrees/*) main=${root%%/.tmp/worktrees/*} ;; esac
+tb=${REPR_CPP_GCC_TARBALL:-$main/.tmp/c1/gcc/gcc-15.2.0.tar.xz}
+if [ ! -f "$gccdir/.extracted" ]; then
+  want=$(sed -n '/:gcc-15.2.0/,/:sha256/p' test/cpp/corpora.edn | sed -n 's/.*:sha256 "\([0-9a-f]*\)".*/\1/p' | head -1)
+  have=$(sha256sum "$tb" | cut -d' ' -f1)
+  [ "$want" = "$have" ] || { echo "pp-check: $tb is not the pinned gcc 15.2.0 ($have, want $want)" >&2; exit 1; }
+  mkdir -p "$gccdir"
+  # marked extracted only when tar succeeds (review 007's finding 10: a partial tree was marked done and never re-extracted)
+  if nice tar -xJf "$tb" -C "$gccdir" gcc-15.2.0/gcc/testsuite/g++.dg gcc-15.2.0/gcc/testsuite/g++.old-deja gcc-15.2.0/gcc/testsuite/c-c++-common \
+       gcc-15.2.0/libstdc++-v3/include gcc-15.2.0/libstdc++-v3/testsuite 2>"$work/tar.err"; then
+    touch "$gccdir/.extracted"
+  else
+    echo "pp-check: the extraction of $tb failed ($work/tar.err); run again" >&2; head -5 "$work/tar.err" >&2; exit 1
+  fi
+fi
+roots="{:gcc-15.2.0 \"$gccdir\" :checkout \"$root\" :jdk26u \"${JDK:-/root/jdk26u}\"}"
+
+IFS=, read -r -a ids <<< "$corpora"
+for id in "${ids[@]}"; do
+  if [ -n "$redigest" ]; then :; elif [ -n "$record" ]; then rm -rf "${work:?}/$id"; else rm -rf "${work:?}/$id/port" "${work:?}/$id/files.tsv"; fi
+done
+arbace_tool -m arbace.repr.cpp.ppcheck lists "$work" "$roots" "$sample" "${ids[@]}" || exit 1
+
+# gxx_run DIR NAME STD ARGS READ: g++ -E -P of one file, its status beside; clang's raw tokens likewise
+gxx_run() {
+  local d=$1 f=$2 std=$3 args=$4 rd=$5 cargs=$6 base
+  base=$(cat "$d/base.txt")
+  mkdir -p "$(dirname "$d/gxx/$f.i")" "$(dirname "$d/clang/$f.raw")"
+  # shellcheck disable=SC2086
+  (cd "$base" && SOURCE_DATE_EPOCH=$epoch LC_ALL=C timeout 120 g++ -x c++ -std=$std $args -E -P "$rd") > "$d/gxx/$f.i" 2> "$d/gxx/$f.err"
+  echo $? > "$d/gxx/$f.status"
+  cargs=${cargs//-fmodules-ts/}; cargs=${cargs//-fmodules/}
+  # shellcheck disable=SC2086
+  (cd "$base" && LC_ALL=C timeout 60 clang++ -x c++ -std=$std $cargs -fsyntax-only -Xclang -dump-raw-tokens "$rd") > "$d/clang/$f.raw.out" 2> "$d/clang/$f.raw"
+  echo $? > "$d/clang/$f.status"
+}
+export -f gxx_run
+export epoch
+
+# opt_delta DIR STD ARGS: g++'s predefined macros under the options against the standard's recorded ones, as lines to add
+opt_delta() {
+  local d=$1 std=$2 args=$3 h key base opt
+  key="$std $args"
+  h=$(printf '%s' "$key" | cksum | cut -d' ' -f1)
+  mkdir -p "$d/opts"
+  : > "$d/opts/empty.cpp"
+  base=$d/opts/$h.base; opt=$d/opts/$h.opt
+  grep -v '^#define __\(DATE\|TIME\)__ ' "$host_dir/predefined/gxx/$std.h" | LC_ALL=C sort -u > "$base"
+  # shellcheck disable=SC2086
+  if (cd "$d/opts" && LC_ALL=C g++ -std=$std $args -dM -E empty.cpp) 2>"$d/opts/$h.err" | LC_ALL=C sort -u > "$opt" && [ -s "$opt" ]; then
+    { comm -23 "$base" "$opt" | awk '{print $2}' | sed 's/(.*//' | sort -u > "$d/opts/$h.gone"
+      awk '{print $2}' "$opt" | sed 's/(.*//' | sort -u > "$d/opts/$h.now"
+      comm -23 "$d/opts/$h.gone" "$d/opts/$h.now" | sed 's/^/#undef /'
+      comm -13 "$base" "$opt"
+    } > "$d/opts/$h.delta"
+    printf '%s\n' "$key" > "$d/opts/$h.key"
+  fi
+  rm -f "$base" "$opt" "$d/opts/$h.gone" "$d/opts/$h.now"
+}
+
+status=0
+host_dir=$root/test/cpp/host
+if [ -n "$record" ]; then
+  for id in "${ids[@]}"; do
+    [ -n "$redigest" ] && continue
+    d=$work/$id
+    awk -F'\t' '$3 != "" {print $2 "\t" $3}' "$d/gxx.list" | sort -u | while IFS=$'\t' read -r std args; do opt_delta "$d" "$std" "$args"; done
+    awk -F'\t' -v d="$d" '{print d "\037" $1 "\037" $2 "\037" $3 "\037" $4 "\037" $5}' "$d/gxx.list" | tr '\n' '\0' \
+      | xargs -0 -P "$REPR_CPP_THREADS" -I{} nice bash -c 'IFS=$'"'"'\037'"'"' read -r d f std args rd cargs <<< "$1"; gxx_run "$d" "$f" "$std" "$args" "$rd" "$cargs"' _ {}
+  done
+  arbace_tool -m arbace.repr.cpp.ppcheck record "$work" "${ids[@]}" || exit 1
+fi
+# one process a corpus: the preprocessor keeps the headers it has read, which the next corpus need not carry
+check_all() { local id; for id in "${ids[@]}"; do arbace_tool -m arbace.repr.cpp.ppcheck check "$work" "$levels" "$id" || status=1; done; }
+check_all
+if [ -n "$addmissing" ]; then
+  miss=$(for id in "${ids[@]}"; do awk -F'\t' '{print $1 ":" $2}' "$work/$id/missing.tsv" 2>"$TMPDIR/repr-cpp-miss.err"; done | sort -u)
+  if [ -n "$miss" ]; then
+    # shellcheck disable=SC2086
+    "$root/bin/repr-cpp" has-add $miss
+    status=0
+    check_all
+  fi
+fi
+if [ -n "$recknown" ]; then
+  arbace_tool -m arbace.repr.cpp.ppcheck record-known "$work" "${ids[@]}" || exit 1
+  status=0
+  check_all
+fi
+exit $status

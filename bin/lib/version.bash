@@ -30,13 +30,16 @@
 # not the program's, doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: JN2"), Go's runtime
 # patches, the roots and Go's pin; nor jdk/provenance.edn (since GT2: what repr/java wrote the forms
 # with, its sources' hash and the tool, not the runtime; gate_key leaves it out likewise, so that
-# a provenance rewritten keeps the gate's executables and their runtime the checkout's). Two programs of one runtime key
+# a provenance rewritten keeps the gate's executables and their runtime the checkout's); nor jdk/platform/ (JN10
+# part 2, the java.base pack of repr/java's shipped reader: no program embeds it until the read closure is
+# embedded, doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: JN10 (write-ahead)", JFS147). Two programs of one runtime key
 # analyze a checkout's namespaces alike, so a build's host of that key compiles them (one j2g
 # run).
 arbace_runtime_key() {
   local discard=${TMPDIR:-$1/.tmp/tmp}/version.discard
   mkdir -p "${discard%/*}"
   (cd "$1" && find arbace/lang go overlay/jdk jdk -type f ! -path jdk/edge.edn ! -path 'jdk/javac/*' ! -path jdk/provenance.edn \
+       ! -path 'jdk/platform/*' \
        ! -path 'overlay/jdk/javac/*' 2>"$discard" \
      | LC_ALL=C sort | xargs -d '\n' sha256sum | sha256sum | cut -c1-64)
 }
@@ -62,12 +65,18 @@ arbace_version() {
 
 # arbace_embedded_sources ROOT: Arbace's sources a shipped build reads, one path a line, sorted
 # (doc/GATE-SURVEY.md, GTS5 (a), "As built: GT1-GT3"): arbace/ less the namespaces no executable
-# embeds and nothing of the build reads, repr/java, repr/haskell, repr/rust and repr/c (arbace/j2g/embed.ae's
-# excluded; javac's tool embeds repr/java itself: bin/arbace-go's reader_key names it)
+# embeds and nothing of the build reads, repr/java, repr/haskell, repr/rust, repr/c, ci's arbace/c, repr/ocaml,
+# repr/scheme and scheme, repr/cpp, repr/llvm and arbace/cpp (arbace/j2g/embed.ae's excluded; javac's tool embeds
+# repr/java itself: bin/arbace-go's reader_key names it)
 arbace_embedded_sources() {
   (cd "$1" && find arbace -type f ! -path arbace/repr/java.ae ! -path 'arbace/repr/java/*' \
        ! -path arbace/repr/haskell.ae ! -path 'arbace/repr/haskell/*' ! -path arbace/repr/rust.ae \
-       ! -path 'arbace/repr/rust/*' ! -path arbace/repr/c.ae ! -path 'arbace/repr/c/*' | LC_ALL=C sort)
+       ! -path 'arbace/repr/rust/*' ! -path arbace/repr/c.ae ! -path 'arbace/repr/c/*' \
+       ! -path arbace/c.ae ! -path 'arbace/c/*' \
+       ! -path arbace/repr/ocaml.ae ! -path 'arbace/repr/ocaml/*' \
+       ! -path arbace/repr/scheme.ae ! -path 'arbace/repr/scheme/*' ! -path 'arbace/scheme/*' \
+       ! -path arbace/repr/cpp.ae ! -path 'arbace/repr/cpp/*' ! -path arbace/repr/llvm.ae ! -path 'arbace/repr/llvm/*' \
+       ! -path 'arbace/cpp/*' | LC_ALL=C sort)
 }
 
 # arbace_aot_key ROOT: the key of a build's compiled namespaces (bin/arbace-go's aot_key, the

@@ -1,0 +1,386 @@
+;; Package ci is the back end of ci, Arbace's interpreter of C forms (doc/C23-SURVEY.md §6, CS17 (a);
+;; doc/c/SPEC.md §12, §13): nodes as typed Go closures over frames, as goi's (doc/go/GOI-SPEC.md §4),
+;; over crt's flat address space. The builder (arbace.c.build) makes the nodes through the registry's
+;; factories (Node): from Arbace through the natives of arbace.lang.CInterp, or from a node program's
+;; text (Load, the light path's: tools/cirun). It imports crt and std, never arbace/lang.
+(in-ns 'go.arbace.ci) (go/file "prog.go" :doc "Package ci is the back end of ci, Arbace's interpreter of C forms (doc/C23-SURVEY.md §6, CS17 (a);\ndoc/c/SPEC.md §12, §13): nodes as typed Go closures over frames, as goi's (doc/go/GOI-SPEC.md §4),\nover crt's flat address space. The builder (arbace.c.build) makes the nodes through the registry's\nfactories (Node): from Arbace through the natives of arbace.lang.CInterp, or from a node program's\ntext (Load, the light path's: tools/cirun). It imports crt and std, never arbace/lang.\n" :imports [
+
+
+    ^{:line 9} [fmt "fmt"]
+    ^{:line 10} [os "os"]
+
+    ^{:line 12} [crt "arbace/crt"]])
+
+
+
+(go/var ^{:doc "CallTrace, set by CI_CALLTRACE, traces the interpreted calls on the standard error.\n"} CallTrace (!= (os/Getenv "CI_CALLTRACE") ""))
+
+
+
+
+(go/type I "I is a node of an integer kind of at most 64 bits, a pointer or bool: its value normalized\n(signed values sign-extended from their width, unsigned ones zero-extended; a pointer its\naddress's bits).\n" (func [(* Frame)] [int64]))
+
+
+
+(go/type F "F is a node of a floating kind: float (rounded to float32 after every operation), double and\nlong double (CS35: double's).\n" (func [(* Frame)] [float64]))
+
+
+(go/type W "W is a node of a wide integer kind (__int128, _BitInt beyond 64 bits): crt's limbs.\n" (func [(* Frame)] [crt/Wide]))
+
+
+(go/type E "E is a node evaluated for its effects only.\n" (func [(* Frame)]))
+
+
+
+(go/type Ctl "Ctl is what a statement returns: CNext to go on, CReturn, CBreak, CContinue, or a label's code\n(CLabel and above) for a goto.\n" int32)
+
+(go/const
+  ^{:line 38} [^{:tag Ctl :val 0} CNext 0]
+  ^{:line 39} [^{:tag Ctl :val 1} CReturn 1]
+  ^{:line 40} [^{:tag Ctl :val 2} CBreak 2]
+  ^{:line 41} [^{:tag Ctl :val 3} CContinue 3]
+  ^{:line 42} [^{:tag Ctl :val 16} CLabel 16])
+
+
+
+
+(go/type Stmt "Stmt is a statement node. Run runs it; Enter runs it from the label lab inside it (a goto into\nthe statement, or a switch's case); Has tells whether the label lab is inside it.\n" (interface
+    (Run ^Ctl [^{:tag (* Frame)} fr])
+    (Enter ^Ctl [^{:tag (* Frame)} fr ^Ctl lab])
+    (Has ^bool [^Ctl lab])))
+
+
+
+
+(go/type Arg "Arg is a value passed to a function or returned: I for the integer kinds and pointers, F for the\nfloating ones, W for the wide ones, and for an aggregate the address and size of its bytes.\n" (struct
+    ^{:line 56 :tag byte} K ; 'i', 'f', 'w', 'm' (memory: an aggregate), 0 for none
+    ^{:line 57 :tag int64} I
+    ^{:line 58 :tag float64} F
+    ^{:line 59 :tag crt/Wide} W
+    ^{:line 60 :tag uint64} Addr
+    ^{:line 61 :tag uint64} Size))
+
+
+
+
+(go/type Param "Param is where a parameter goes at entry: an I slot, an F slot, or the frame's memory at Off\n(a store of type T, or Size bytes copied for an aggregate, or a wide value of WT).\n" (struct
+    ^{:line 67 :tag byte} K ; 'i', 'f': a slot; 'm': memory
+    ^{:line 68 :tag int} Slot
+    ^{:line 69 :tag uint64} Off
+    ^{:line 70 :tag string} T ; the store's type in memory (i8 ... u64, f32, f64), "" for an aggregate
+    ^{:line 71 :tag uint64} Size
+    ^{:line 72 :tag crt/WType} WT
+    ^{:line 73 :tag bool} Wide
+    ^{:line 74 :tag bool} F32)) ; an F slot of a float parameter: rounded
+
+
+
+
+(go/type Code "Code is a function's body and frame layout: NI and NF slots, FrameSize bytes of the C stack\n(its locals in memory, temporaries), its parameters, whether it is variadic.\n" (struct
+    ^{:line 80 :tag int} NI ^int NF
+    ^{:line 81 :tag uint64} FrameSize
+    ^{:line 82 :tag (slice Param)} Params
+    ^{:line 83 :tag bool} Variadic
+    ^{:line 84 :tag Stmt} Body
+    ^{:line 85 :tag bool} RetF32))
+
+
+
+
+(go/type Func "Func is a function: a cell whose Code the REPL replaces on redefinition, or a native. Its\naddress is crt.Text + 16 * ID.\n" (struct
+    ^{:line 91 :tag int} ID
+    ^{:line 92 :tag string} Name
+    ^{:line 93 :tag (* Code)} Code
+    ^{:line 94 :tag (func [^{:tag (* Thread)} t ^{:tag (slice Arg)} args] [Arg])} Native))
+
+
+
+
+(go/type Frame "Frame is one call's state: its slots, its memory's base in the C stack, its varargs area, its\nresult.\n" (struct
+    ^{:line 100 :tag (slice int64)} I
+    ^{:line 101 :tag (slice float64)} F
+    ^{:line 102 :tag uint64} Base
+    ^{:line 103 :tag uint64} VA
+    ^{:line 104 :tag (* Func)} Fn
+    ^{:line 105 :tag (* Thread)} T
+    ^{:line 106 :tag Arg} Ret
+    ^{:line 107 :tag (* Frame)} Caller
+
+    ^{:line 109 :tag Ctl :doc "the setjmp state (natives.go)\n"} sjCode
+    ^{:line 110 :tag bool} sjResume
+    ^{:line 111 :tag int64} sjVal
+    ^{:tag bool :doc "pinned: a setjmp recorded the frame (its jmp_buf names it), so it is never reused\n"} pinned))
+
+
+
+(go/type Thread "Thread is one C thread: its stack pointer, its innermost frame, its depth.\n" (struct
+    ^{:line 116 :tag (* Prog)} P
+    ^{:line 117 :tag (* crt/Mem)} M
+    ^{:line 118 :tag uint64} SP
+    ^{:line 119 :tag (* Frame)} Top
+    ^{:line 120 :tag int} Depth
+    ^{:tag (slice (* Frame)) :doc "free holds the compiled functions' frames for reuse (Enter, Leave).\n"} free))
+
+
+
+(go/type Init "Init is a static initializer: its statement and its frame's slots.\n" (struct
+    ^{:line 125 :tag int} NI ^int NF
+    ^{:line 126 :tag Stmt} S))
+
+
+
+(go/type Prog "Prog is a C program: its memory, its system calls, its functions by index, the natives by name.\n" (struct
+    ^{:line 131 :tag (* crt/Mem)} M
+    ^{:line 132 :tag (* crt/Sys)} Sys
+    ^{:line 133 :tag (slice (* Func))} Funcs
+    ^{:line 134 :tag (map string (* Func))} ByName
+    ^{:line 135 :tag (slice uint64)} Statics ; the static objects' addresses, by the builder's index
+    ^{:line 136 :tag (slice Init)} Inits ; the static initializers, run before the entry
+    ^{:line 137 :tag (* Thread)} Main
+    ^{:line 138 :tag int} MaxDepth
+    ^{:line 139 :tag (map uint64 (* jmpTarget))} jmps
+    ^{:line 140 :tag uint64} nextJmp))
+
+
+
+^{:go/end 152} (go/func NewProg "NewProg is an empty program over a fresh address space and system call layer.\n" ^{:tag (* Prog)} [^{:tag (* crt/Sys)} sys]
+  (let [p (addr (lit Prog :M (.-M sys) :Sys sys :ByName (lit (map string (* Func))) :MaxDepth (<< 1 20) :jmps (lit (map uint64 (* jmpTarget)))))]
+    (set! (.-Main p) (addr (lit Thread :P p :M (.-M p) :SP crt/StackTop)))
+    (set! (.-Handler sys) ^{:go/breaks [3] :go/end 150} (fn ^bool [^int sig ^uint64 h]
+        (.CallAddr p (.-Main p) h (lit (slice Arg) (lit _ :K \i :I (conv int64 sig))))
+        true))
+
+    ^{:line 151} p))
+
+
+
+^{:go/end 168} (go/method Fn "Fn is the function of index id, made when absent.\n" ^{:tag (* Func)} [^{:tag (* Prog)} p ^int id ^string name]
+  (while (<= (len (.-Funcs p)) id)
+    (set! (.-Funcs p) (append (.-Funcs p) nil)))
+
+  (let [f (aget (.-Funcs p) id)]
+    (when (== f nil)
+      (set! f (addr (lit Func :ID id :Name name)))
+      (aset (.-Funcs p) id f)
+      (when (!= name "")
+        (aset (.-ByName p) name f)))
+
+
+    ^{:line 167} f))
+
+
+
+^{:go/end 171} (go/method Addr "Addr is a function's address.\n" ^uint64 [^{:tag (* Func)} f] (+ crt/Text (* 16 (conv uint64 (.-ID f)))))
+
+
+^{:go/end 182} (go/method FuncAt "FuncAt is the function at address a, or a SIGSEGV.\n" ^{:tag (* Func)} [^{:tag (* Prog)} p ^uint64 a]
+  (when (and (>= a crt/Text) (< a crt/LabelBase) (== (% (- a crt/Text) 16) 0))
+    (let [i (/ (- a crt/Text) 16)]
+      (when (and (< i (conv uint64 (len (.-Funcs p)))) (!= (aget (.-Funcs p) i) nil))
+        (return (aget (.-Funcs p) i)))))
+
+
+  (panic (addr (lit crt/Fault :Sig crt/SIGSEGV :Addr a :Msg (fmt/Sprintf "call of a non-function at %#x" a)))))
+
+
+
+^{:go/end 187} (go/method CallAddr "CallAddr calls the function at address a.\n" ^Arg [^{:tag (* Prog)} p ^{:tag (* Thread)} t ^uint64 a ^{:tag (slice Arg)} args]
+  (.Call p t (.FuncAt p a) args))
+
+
+
+
+^{:go/end 274} (go/method Call "Call calls f with args: a native directly; an interpreted function in a new frame of the C\nstack (its locals in memory, then its varargs area).\n" ^Arg [^{:tag (* Prog)} p ^{:tag (* Thread)} t ^{:tag (* Func)} f ^{:tag (slice Arg)} args]
+  (when (!= (.-Native f) nil)
+    (return ((.-Native f) t args)))
+
+  (let [c (.-Code f)]
+    (when (== c nil)
+      (when [n (aget Natives (.-Name f))] (!= n nil)
+        (set! (.-Native f) n)
+        (return (n t args)))
+
+      (panic (addr (lit crt/Fault :Sig crt/SIGSEGV :Msg (+ "undefined function " (.-Name f))))))
+
+    (inc! (.-Depth t))
+    (when CallTrace
+      (fmt/Fprintf os/Stderr "ci: %*s%s\n" (.-Depth t) "" (.-Name f)))
+
+    (when (> (.-Depth t) (.-MaxDepth p))
+      (panic (addr (lit crt/Fault :Sig crt/SIGSEGV :Msg "stack overflow"))))
+
+    (let [fr (addr (lit Frame :Fn f :T t))]
+      (when (> (.-NI c) 0)
+        (set! (.-I fr) (make (slice int64) (.-NI c))))
+
+      (when (> (.-NF c) 0)
+        (set! (.-F fr) (make (slice float64) (.-NF c))))
+
+      (let [sp (.-SP t)
+          ^{:line 218} np (len (.-Params c))
+          ^{:line 219 :tag uint64} va (zero uint64)]
+        (when (.-Variadic c)
+          (range [_ a (subslice args (min np (len args)))]
+            (set! va + (argSize a))))
+
+
+        (let [nsp (bit-and-not (- sp (.-FrameSize c) va 16) 15)]
+          (when (or (< nsp (- crt/StackTop crt/StackSize)) (> nsp sp))
+            (panic (addr (lit crt/Fault :Sig crt/SIGSEGV :Addr nsp :Msg "stack overflow"))))
+
+          (set! (.-Base fr) nsp)
+          (set! (.-VA fr) (+ nsp (bit-and-not (+ (.-FrameSize c) 15) 15)))
+          (set! (.-SP t) nsp)
+          (let [m (.-M p)]
+            (for [i 0] (and (< i np) (< i (len args))) (inc! i)
+              (let [pa (addr (aget (.-Params c) i))
+                  ^{:line 235} a (addr (aget args i))]
+                (switch (.-K pa)
+                  (case [\i]
+                    (aset (.-I fr) (.-Slot pa) (.-I a)))
+                  (case [\f]
+                    (if (.-F32 pa)
+                      (aset (.-F fr) (.-Slot pa) (conv float64 (conv float32 (.-F a))))
+
+                      (aset (.-F fr) (.-Slot pa) (.-F a))))
+
+                  (default
+                    (let [at (+ (.-Base fr) (.-Off pa))]
+                      (switch
+                        (case [(.-Wide pa)]
+                          (.StoreWide m at (.-WT pa) (.-W a)))
+                        (case [(== (.-T pa) "")]
+                          (.Move m at (.-Addr a) (.-Size pa)))
+                        (default
+                          (storeArg m (.-T pa) at a))))))))
+
+
+
+            (when (.-Variadic c)
+              (let [at (.-VA fr)]
+                (range [_ a (subslice args (min np (len args)))]
+                  (set! at (writeVarArg m at a)))))
+
+
+            (let [saved (.-Top t)]
+              (set! (.-Caller fr) saved)
+              (set! (.-Top t) fr)
+              (.Run (.-Body c) fr)
+              (set! (.-Top t) saved)
+              (set! (.-SP t) sp)
+              (dec! (.-Depth t))
+              (when (.-RetF32 c)
+                (set! (.-F (.-Ret fr)) (conv float64 (conv float32 (.-F (.-Ret fr))))))
+
+              (.-Ret fr))))))))
+
+
+^{:go/breaks [[4 283]] :go/end 284} (go/func argSize ^uint64 [^Arg a]
+  (switch (.-K a)
+    (case [\w]
+      (return (conv uint64 (* 8 (len (.-W a))))))
+    (case [\m]
+      (return (bit-and-not (+ (.-Size a) 7) 7))))
+
+  8)
+
+
+^{:go/end 300} (go/func writeVarArg ^uint64 [^{:tag (* crt/Mem)} m ^uint64 at ^Arg a]
+  (switch (.-K a)
+    (case [\f]
+      (.StoreF64 m at (.-F a)))
+    (case [\w]
+      (range [i l (.-W a)]
+        (.Store64 m (+ at (conv uint64 (* 8 i))) l)))
+
+    (case [\m]
+      (.Move m at (.-Addr a) (.-Size a)))
+    (default
+      (.Store64 m at (conv uint64 (.-I a)))))
+
+  (+ at (argSize a)))
+
+
+^{:go/end 311} (go/func storeArg [^{:tag (* crt/Mem)} m ^string t ^uint64 at ^{:tag (* Arg)} a]
+  (switch t
+    (case ["f32"]
+      (.StoreF32 m at (conv float32 (.-F a))))
+    (case ["f64"]
+      (.StoreF64 m at (.-F a)))
+    (default
+      (Store m t at (.-I a)))))
+
+
+
+
+
+
+^{:go/end 343} (go/method Run "Run runs the program: its static initializers, the read-only data sealed, then the entry\nfunction with args; it returns the exit status (an exit's, 128 + a signal's, or the entry's\nresult when it returns) and the panic that ended it, when it was not an exit.\n" [^{:tag (* Prog)} p ^{:tag (* Func)} entry ^{:tag (slice Arg)} args] :results [^int status ^error fault]
+  (defer (^{:go/end 334} (fn []
+        (when [r (recover)] (!= r nil)
+          (type-switch [x r]
+            (case [(* crt/Exit)]
+              (if (!= (.-Signal x) 0)
+                (set! status (+ 128 (.-Signal x)))
+
+                (set! status (.-Code x))))
+
+            (case [(* crt/Fault)]
+              (set! (values status fault) (values (+ 128 (.-Sig x)) (fmt/Errorf "%s at %#x in %s" (.-Msg x) (.-Addr x) (.Trace p)))))
+            (case [(* longjmpPanic)]
+              (set! (values status fault) (values (+ 128 crt/SIGSEGV) (fmt/Errorf "longjmp to a frame that returned"))))
+            (default
+              (panic r)))))))
+
+
+
+  (let [t (.-Main p)]
+    (range [_ in (.-Inits p)]
+      (let [fr (addr (lit Frame :T t :Base (- (.-SP t) 4096) :I (make (slice int64) (.-NI in)) :F (make (slice float64) (.-NF in))))]
+        (.Run (.-S in) fr)))
+
+    (.Seal (.-M p))
+    (let [r (.Call p t entry args)]
+      (return (conv int (bit-and (.-I r) 0xff)) nil))))
+
+
+
+
+
+
+^{:go/end 371} (go/method RunMain "RunMain runs the program with the command line argv: through musl's __libc_start_main (start)\nwhen given, which initializes the libc and calls exit(main(argc, argv, envp)), else main\ndirectly. The initial stack holds argv's strings and pointers, an empty environment and the\nauxiliary vector (AT_PAGESZ, AT_RANDOM), as Linux's.\n" [^{:tag (* Prog)} p ^{:tag (* Func)} start ^{:tag (* Func)} main ^{:tag (slice string)} argv] :results [int error]
+  (let [m (.-M p)
+      ^{:line 351 :tag (slice uint64)} ptrs (zero (slice uint64))]
+    (range [_ a argv]
+      (let [b (append (conv (slice byte) a) 0)
+          ^{:line 354} at (.Static m (conv uint64 (len b)) 1)]
+        (copy (.W m at (conv uint64 (len b))) b)
+        (set! ptrs (append ptrs at))))
+
+    (let [rnd (.Static m 16 16)
+        ^{:line 359} vec (append (append (lit (slice uint64)) (spread ptrs)) 0 0 6 crt/PageSize 25 rnd 0 0)
+        ^{:line 360} av (.Static m (conv uint64 (* 8 (len vec))) 16)]
+      (range [i v vec]
+        (.Store64 m (+ av (conv uint64 (* 8 i))) v))
+
+      (let [argc (lit Arg :K \i :I (conv int64 (len argv)))
+          ^{:line 365} argvA (lit Arg :K \i :I (conv int64 av))]
+        (when (!= start nil)
+          (return (.Run p start (lit (slice Arg) (lit _ :K \i :I (conv int64 (.Addr main))) argc argvA (lit _ :K \i) (lit _ :K \i) (lit _ :K \i)))))
+
+        (let [envp (lit Arg :K \i :I (conv int64 (+ av (conv uint64 (* 8 (+ (len argv) 1))))))]
+          (.Run p main (lit (slice Arg) argc argvA envp)))))))
+
+
+
+^{:go/end 385} (go/method Trace "Trace is the main thread's interpreted frames at a fault, innermost first.\n" ^string [^{:tag (* Prog)} p]
+  (let [s ""
+      ^{:line 376} n 0]
+    (for [fr (.-Top (.-Main p))] (and (!= fr nil) (< n 12)) (set! fr (.-Caller fr))
+      (when (!= s "")
+        (set! s + " < "))
+
+      (set! s + (.-Name (.-Fn fr)))
+      (inc! n))
+
+    ^{:line 384} s))

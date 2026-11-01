@@ -1,0 +1,193 @@
+(ns arbace.repr.scheme
+  "Command line of repr/scheme (doc/scheme/SPEC.md), run by bin/repr-scheme as -m arbace.repr.scheme VERB ...:
+
+    read [--full] [-o DIR] FILE...
+        each Scheme file (R6RS lexical syntax) to its Scheme forms: one datum a line, SPEC 3's spellings,
+        to DIR/FILE.ae (default: standard output); an error is reported with its class and offset. --full (SPEC 11):
+        the forms and the layer that prints the text back, a last line `#_(scm/layer {...})`.
+    print [--full|--layout] FILE.ae...
+        each forms file (data the Clojure reader reads) to Scheme text, Chez's `write` of each datum, one
+        a line (:lines, SPEC 7); --layout: laid out as a person writes it (80 columns, SPEC 11); --full: the
+        original text, from the forms and the layer `read --full` wrote.
+    roundtrip DIR
+        the corpora's files (DIR/files-ID.txt, made by prepare) and the probes (DIR/probes/*.ss): text to forms
+        and layer to text byte for byte (:full), forms to the layout printer's text to forms equal and the
+        layout idempotent (:lines).
+    prepare DIR
+        the check's inputs: the corpora's file lists and the probes' files under DIR.
+    check-dumps [--record] DIR
+        Arbace's reading and writing of every file against Chez's dumps in DIR; judged by
+        test/scheme/check-known.edn."
+  (:require [arbace.string :as str]
+            [arbace.repr.scheme.forms :as fm]
+            [arbace.repr.scheme.read :as rd]
+            [arbace.repr.scheme.print :as pr]
+            [arbace.repr.scheme.full :as fu]
+            [arbace.repr.scheme.layout :as lo]
+            [arbace.repr.scheme.check :as ck]))
+
+(defn- root [] (or (System/getenv "ARBACE_ROOT") "."))
+
+(defn- read-file [f]
+  (let [{:keys [data error]} (rd/read-all (slurp f) {})]
+    {:forms (mapv :form data) :error error}))
+
+(defn- cmd-read [args0]
+  (let [full (some #{"--full"} args0)
+        args (remove #{"--full"} args0)
+        out (when (= (first args) "-o") (second args))
+        files (if out (drop 2 args) args)
+        status (atom 0)]
+    (doseq [f files]
+      (let [{:keys [forms error layer]} (if full
+                                          (let [{:keys [data error layer]} (fu/read-full (slurp f))]
+                                            {:forms (mapv :form data) :error error :layer layer})
+                                          (read-file f))
+            text (if full
+                   (fu/ae-text forms layer)
+                   (str ";; " f "\n" (str/join "\n" (map pr-str forms)) "\n"))]
+        (if out
+          (let [o (java.io.File. (str out "/" f ".ae"))]
+            (.mkdirs (.getParentFile o))
+            (spit o text))
+          (print text))
+        (when error
+          (reset! status 1)
+          (binding [*out* *err*]
+            (println (str f ": " (name (:class error)) " at " (:at error) ": " (:message error)))))))
+    @status))
+
+(defn- read-forms [^String text]
+  (let [rdr (java.io.PushbackReader. (java.io.StringReader. text))]
+    (loop [acc []]
+      (let [x (read {:eof ::eof} rdr)] (if (= x ::eof) acc (recur (conj acc x)))))))
+
+(defn- cmd-print [args0]
+  (let [mode (cond (some #{"--full"} args0) :full (some #{"--layout"} args0) :layout :else :lines)
+        args (remove #{"--full" "--layout"} args0)]
+    (doseq [f args]
+      (let [text (slurp f)]
+        (case mode
+          :full (let [[forms layer] (fu/parse-ae text)] (print (fu/print-full forms layer)))
+          :layout (print (lo/layout-file (read-forms text)))
+          (doseq [x (read-forms text)] (println (pr/write-form x)))))))
+  0)
+
+(defn- roundtrip-file
+  "Both roundtrips of a text: nil when they hold, else a map of what failed."
+  [^String text]
+  (let [{:keys [data layer]} (fu/read-full text)
+        forms (mapv :form data)
+        ae (fu/ae-text forms layer)
+        [forms2 layer2] (fu/parse-ae ae)
+        back (fu/print-full forms2 layer2)
+        full-ok (= back text)
+        forms-ok (and (== (count forms) (count forms2)) (every? true? (map fm/tree= forms forms2)))
+        lay (lo/layout-file forms)
+        again (:data (rd/read-all lay {}))
+        lines-ok (and (== (count forms) (count again)) (every? true? (map fm/tree= forms (map :form again))))
+        idem (= lay (lo/layout-file (mapv :form again)))]
+    (when-not (and full-ok forms-ok lines-ok idem)
+      (cond-> {}
+        (not full-ok) (assoc :full (let [k (count (take-while true? (map = back text)))] {:at k :want (subs text k (min (count text) (+ k 30))) :got (subs back k (min (count back) (+ k 30)))}))
+        (not forms-ok) (assoc :forms true)
+        (not lines-ok) (assoc :lines (some (fn [[i a b]] (when-not (fm/tree= a b) [i (pr-str a) (pr-str b)])) (map vector (range) forms (map :form again))))
+        (not idem) (assoc :idempotent true)))))
+
+(defn- cmd-roundtrip [[dir]]
+  (let [files (concat (mapcat (fn [f] (str/split (slurp (str dir "/" f)) #"\n"))
+                              (sort (filter #(.startsWith ^String % "files-") (.list (java.io.File. ^String dir)))))
+                      (sort (map #(str dir "/probes/" %) (.list (java.io.File. (str dir "/probes"))))))
+        files (remove empty? files)
+        t0 (System/currentTimeMillis)
+        bad (atom 0) bytes (atom 0)]
+    (doseq [f files]
+      (let [text (slurp f)
+            t (System/currentTimeMillis)
+            r (roundtrip-file text)
+            ms (- (System/currentTimeMillis) t)]
+        (swap! bytes + (count (.getBytes ^String text "UTF-8")))
+        (when (> ms 5000) (println (str "slow " f " " ms " ms")))
+        (when r (swap! bad inc) (println "FAIL" f (pr-str r)))))
+    (println (str "roundtrip: " (count files) " files, " @bytes " bytes, failing " @bad ", " (quot (- (System/currentTimeMillis) t0) 1000) " s"))
+    (if (zero? @bad) 0 1)))
+
+(defn- cmd-prepare [[dir]]
+  (let [r (ck/prepare (root) dir)]
+    (println (pr-str r))
+    0))
+
+(def ^:private rule-bad (atom false))
+
+(defn- cmd-check-dumps [args]
+  (let [record (some #{"--record"} args)
+        dir (first (remove #{"--record"} args))
+        {:keys [results scans]} (ck/check-dumps (root) dir)
+        known-file (str (root) "/test/scheme/check-known.edn")
+        known (if (.exists (java.io.File. known-file)) (read-string (slurp known-file)) {})
+        n (count results)
+        diffs (filter (comp some? val) results)
+        {:keys [unlisted gone]} (ck/judge results known)
+        scan-bad (filter #(or (pos? (:n-only-mine %)) (pos? (:n-only-chez %))) scans)]
+    (println (str "files and probes: " n ", equal to Chez: " (- n (count diffs))
+                  ", differing: " (count diffs) " (listed " (- (count diffs) (count unlisted)) ")"))
+    (let [r (ck/symbol-rule)]
+      (println (str "symbol rule: " (:names r) " names, " (:bare r) " bare, bad " (pr-str (:bad r))))
+      (when (seq (:bad r)) (reset! rule-bad true)))
+    (doseq [s scans] (println (str "scan " (name (:scan s)) ": " (:ranges s) " ranges, only mine " (:n-only-mine s) ", only Chez " (:n-only-chez s))))
+    (doseq [[k d] unlisted] (println (str "UNLISTED " (ck/diff-line k d))))
+    (doseq [[k kn] gone] (println (str "GONE " k " " (pr-str kn))))
+    (doseq [s scan-bad] (println (str "SCAN " (pr-str s))))
+    (when record
+      (spit (str (root) "/test/scheme/check-known.edn")
+            (str ";; Known differences between repr/scheme and Chez (bin/repr-scheme check --record): key -> {:kind ...}\n"
+                 (pr-str (into (sorted-map) (map (fn [[k d]] [k (select-keys d [:kind :chez :mine])]) diffs)))
+                 "\n")))
+    (if (or (and (not record) (or (seq unlisted) (seq gone))) (seq scan-bad) @rule-bad) 1 0)))
+
+(defn- spec-blocks
+  "The fenced blocks of a markdown file: [[lang text] ...]."
+  [text]
+  (let [lines (str/split text #"\n")]
+    (loop [ls lines in nil lang nil buf [] acc []]
+      (if (empty? ls)
+        acc
+        (let [l (first ls)]
+          (cond
+            (and (nil? in) (.startsWith ^String l "```") (> (count l) 3)) (recur (rest ls) true (subs l 3) [] acc)
+            (and in (= l "```")) (recur (rest ls) nil nil [] (conj acc [lang (str/join "\n" buf)]))
+            in (recur (rest ls) in lang (conj buf l) acc)
+            :else (recur (rest ls) nil nil [] acc)))))))
+
+(defn- cmd-spec-check [[file]]
+  (let [blocks (spec-blocks (slurp (or file "doc/scheme/SPEC.md")))
+        pairs (loop [bs blocks acc []]
+                (cond (empty? bs) acc
+                      (and (= (ffirst bs) "scheme") (seq (rest bs)) (= (first (second bs)) "forms")) (recur (drop 2 bs) (conj acc [(second (first bs)) (second (second bs))]))
+                      :else (recur (rest bs) acc)))
+        forms-blocks (filter #(= (first %) "forms") blocks)
+        bad (atom 0)]
+    (doseq [[text forms] pairs]
+      (let [{:keys [data error]} (rd/read-all text {})
+            mine (mapv :form data)
+            rdr (java.io.PushbackReader. (java.io.StringReader. forms))
+            theirs (loop [acc []] (let [x (read {:eof ::eof} rdr)] (if (= x ::eof) acc (recur (conj acc x)))))
+            ok (and (nil? error) (fm/tree= (apply list mine) (apply list theirs)))]
+        (when-not ok
+          (swap! bad inc)
+          (println "SPEC MISMATCH" (pr-str text) "\n  reader:" (pr-str mine) (pr-str error) "\n  forms: " (pr-str theirs)))))
+    (println (str "spec examples: " (count pairs) " scheme/forms pairs, " (count forms-blocks) " forms blocks all read, mismatches " @bad))
+    (if (and (zero? @bad) (== (count pairs) (count forms-blocks))) 0 1)))
+
+(defn -main [& args]
+  (let [[verb & more] args
+        status (case verb
+                 "read" (cmd-read more)
+                 "print" (cmd-print more)
+                 "roundtrip" (cmd-roundtrip more)
+                 "prepare" (cmd-prepare more)
+                 "check-dumps" (cmd-check-dumps more)
+                 "spec-check" (cmd-spec-check more)
+                 (do (println "usage: -m arbace.repr.scheme read|print|prepare|check-dumps ...") 2))]
+    (flush)
+    (System/exit status)))

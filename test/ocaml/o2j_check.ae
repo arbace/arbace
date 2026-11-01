@@ -1,0 +1,191 @@
+;; The judgment of bin/oi check --aot (doc/ocaml/OCAML-SURVEY.md, "As built: O6 (write-ahead)"), on stage 0:
+;;
+;;   judge|record|judge-only|record-only CHECK-AOT.tsv CORPUS.tsv REFS.edn OI-CHECK.tsv RESULTS.edn CLASSES.edn
+;;       the translated programs' runs against ocamlopt's recorded runs (OC66: the AOT level's reference),
+;;       each program a result, pass or a non-pass with its reason ("RESULT REASON" is what a class's
+;;       :match regexes see), every non-pass in a class of CLASSES.edn (else failing); and against oi's runs
+;;       (OI-CHECK.tsv, bin/oi check's last): the same output and status as oi, or not (oi and the compiled
+;;       level compared, O6's exit). judge compares with RESULTS.edn and fails on a change, record rewrites it.
+;;   the negative controls (GTS81 (a)): test/ocaml/controls.txt's judge lines of RESULTS.edn (controls-ok)
+(require '[arbace.string :as str])
+
+(defn tsv [path]
+  (->> (str/split-lines (slurp path)) (remove str/blank?) (map #(str/split % #"\t" -1))))
+
+(defn corpus [path]
+  (into (sorted-map)
+        (for [[id kind & more] (tsv path)]
+          [id (if (= kind "run") {:kind :run} {:kind :class :reason (first more)})])))
+
+(defn refs [path] (into {} (for [r (read-string (slurp path))] [(:test r) r])))
+
+(defn result-of [id c refs runs]
+  (if (= (:kind c) :class)
+    ["class" (:reason c)]
+    (let [r (get refs id) run (get runs id)]
+      (cond
+        (nil? r) ["no-ref" "not in the references"]
+        (nil? run) ["not-run" "no run"]
+        (= (get-in r [:ocamlopt :status]) "compile-error") ["ref" "ocamlopt does not compile it"]
+        :else
+        (let [[_ st sha bytes secs note] run
+              want (:ocamlopt r)]
+          (cond
+            (str/starts-with? (or note "") "dump: ") ["dump" (subs note 6)]
+            (str/starts-with? (or note "") "refused: ") ["refused" (subs note 9)]
+            (and (= st (:status want)) (= sha (:sha256 want))) ["pass" ""]
+            (= st "124") ["fail" note]
+            (seq note) ["fail" note]
+            (not= st (:status want)) ["fail" (str "status " st ", ocamlopt " (:status want))]
+            :else ["fail" (str "output differs (" bytes " bytes, ocamlopt " (:bytes want) ")")]))))))
+
+(defn known-of
+  "ID -> [TEXT KINDS SHAS]: an entry is [ID TEXT], [ID TEXT KINDS] or [ID TEXT KINDS SHAS]: KINDS a prefix of the run's reason or a vector of
+  them, SHAS a prefix of the run's output digest or a vector of them (re-review 030's finding 4: a status reason names no output, so
+  a program that fails otherwise with the same status is told by its digest; an entry without SHAS pins nothing)."
+  [path]
+  (if (.exists (java.io.File. ^String path))
+    (into {} (for [[id text kinds shas] (read-string (slurp path))]
+                [id [text (when kinds (if (string? kinds) [kinds] (vec kinds))) (when shas (if (string? shas) [shas] (vec shas)))]]))
+    {}))
+
+(defn slow-of
+  "The programs a speed class names (test/ocaml/aot-slow.edn: [ID ...]): those whose timeout is the speed, not a hang."
+  [path]
+  (if (.exists (java.io.File. ^String path)) (set (read-string (slurp path))) #{}))
+
+(def ^:dynamic *known* {})
+(def ^:dynamic *slow* #{})
+
+(defn with-known
+  "A failing program test/ocaml/aot-known.edn lists: its text there (\"known TEXT (the run's reason)\"), when the run's reason is
+  of the kind the entry was made for (a listed program that now crashes, prints wrong output or loops is not that known thing);
+  a listed program whose timeout is its speed (aot-slow.edn): \"slow\"."
+  [id [res reason :as r] run]
+  (let [[text kinds shas] (get *known* id)
+        sha (nth run 2 nil)]
+    (cond
+      (and text (#{"fail" "refused"} res) (or (nil? kinds) (some #(str/starts-with? reason %) kinds))
+           (or (nil? shas) (some #(str/starts-with? (or sha "") %) shas))) [res (str "known " text " (" reason ")")]
+      (and (contains? *slow* id) (= res "fail") (str/starts-with? reason "timeout ")) ["slow" reason]
+      :else r)))
+
+(defn vs-oi
+  "Whether the run's status and output are oi's: same, differs, or - (one of them did not run, or both timed out: their outputs are two
+  partial ones, which depend on the timing; re-review 030's finding 5)."
+  [id runs ois]
+  (let [[_ st sha] (get runs id) [_ ost osha] (get ois id)
+        timeout? #{"124" "137" "152" "timeout"}]
+    (cond (or (nil? st) (= st "-") (nil? ost) (= ost "-")) "-"
+          (and (timeout? st) (timeout? ost)) "-"
+          (and (= st ost) (= sha osha)) "same"
+          :else "differs")))
+
+(defn classes [path] (read-string (slurp path)))
+
+(defn class-of [cls [result reason]]
+  (when (not= result "pass")
+    (let [line (str result " " reason)]
+      (first (for [c cls :when (some #(re-find % line) (:match c))] (:id c))))))
+
+(defn results-text [rows]
+  (str ";; The AOT level's results over the run corpus (bin/oi check --aot --record; doc/ocaml/OCAML-SURVEY.md,\n"
+       ";; \"As built: O6 (write-ahead)\"): [PROGRAM RESULT REASON OI], RESULT pass, fail (judged by\n"
+       ";; test/ocaml/divergences-aot.edn's classes), refused (o2j does not translate it), class (its header puts it\n"
+       ";; outside the run corpus), dump (the oracle refuses it), ref (ocamlopt does not compile it); OI whether the\n"
+       ";; status and output are oi's (same, differs, -: one did not run, or both timed out). Until the compiled level runs (the heavy list) the level is\n"
+       ";; the light one: the Java forms interpreted on stage 0 (OC87). Read with the Clojure reader.\n"
+       "[\n"
+       (apply str (for [row rows] (str " " (pr-str (vec row)) "\n")))
+       "]\n"))
+
+(defn summary [rows cls]
+  (let [by (frequencies (map second rows))
+        classed (for [[id res reason] rows :when (not= res "pass")] [id (class-of cls [res reason])])
+        unclassed (filter (comp nil? second) classed)]
+    (println (str "o2j: " (count rows) " programs: " (pr-str (into (sorted-map) by))))
+    (println (str "o2j: against oi: " (pr-str (into (sorted-map) (frequencies (map #(nth % 3 "-") rows))))))
+    (println (str "o2j: classes: " (pr-str (into (sorted-map) (frequencies (keep second classed))))))
+    (doseq [[id _] unclassed]
+      (let [[_ res reason] (first (filter #(= (first %) id) rows))]
+        (println (str "FAILING " id ": " res " " reason))))
+    (println (str "o2j: " (count (filter #(= "pass" (second %)) rows)) " pass, " (count unclassed) " failing (not in a class)"))
+    (empty? unclassed)))
+
+;; GTS81 (a), queue 064: the negative controls of this results file (test/ocaml/controls.txt beside it, its lines
+;; "judge RESULTS-FILE ID SUBJECT REFERENCE"): the subject's run judged by result-of against the reference's reference run;
+;; it must fail. One that passes (the judge passes what differs) or whose reference has no reference run fails the judgment
+;; (before anything is recorded); one whose subject has no run (a selection) or no judgment of its own (a class, a dump, a
+;; refusal) is left. No control is a row of the results, the record or the counts.
+(defn controls-ok [^String results-edn corp rf runs]
+  (let [f (java.io.File. (str (.getParent (java.io.File. results-edn)) "/controls.txt"))
+        base (.getName (java.io.File. results-edn))
+        cs (when (.exists f)
+             (for [l (str/split-lines (slurp f))
+                   :let [w (str/split (str/trim l) #"\s+")]
+                   :when (and (= 5 (count w)) (= "judge" (first w)) (= base (second w)))]
+               (drop 2 w)))
+        vs (for [[id subject reference] cs]
+             (let [v (cond
+                       (not (contains? runs subject)) :left
+                       (nil? (get rf reference)) :not-judged
+                       :else (case (first (result-of subject (corp subject) (assoc rf subject (get rf reference)) runs))
+                               "pass" :passes
+                               "fail" :differs
+                               :left))]
+               (println (case v
+                          :differs (str "control " id " (" subject " against " reference "'s reference run): differs, as a control must (GTS81 (a))")
+                          :passes (str "control passed: " id " (" subject " against " reference "'s reference run): the judge passes what differs")
+                          :not-judged (str "control not judged: " id ": " reference " has no reference run")
+                          :left (str "control " id ": left (" subject " not run, or no judgment of its own)")))
+               v))]
+    (not-any? #{:passes :not-judged} (doall vs))))
+
+(defn judge [mode check-tsv corpus-tsv refs-edn oi-tsv results-edn classes-edn]
+  (let [corp (corpus corpus-tsv)
+        rf (refs refs-edn)
+        runs (into {} (for [row (tsv check-tsv)] [(first row) row]))
+        _ (when-not (.exists (java.io.File. ^String oi-tsv))
+            (println (str "o2j: no oi rows " oi-tsv " (bin/oi makes them for the same programs)")) (System/exit 2))
+        ois (into {} (for [row (tsv oi-tsv)] [(first row) row]))
+        only? (str/ends-with? mode "-only")
+        ids (if only? (keys runs) (keys corp))
+        known (known-of (str (.getParent (java.io.File. ^String results-edn)) "/aot-known.edn"))
+        slow (slow-of (str (.getParent (java.io.File. ^String results-edn)) "/aot-slow.edn"))
+        rows (binding [*known* known *slow* slow]
+               (vec (for [id ids] (conj (into [id] (with-known id (result-of id (corp id) rf runs) (get runs id))) (vs-oi id runs ois)))))
+        _ (doseq [[id res] rows :when (and (= res "pass") (contains? known id))]
+            (println (str "STALE " id ": passes, but test/ocaml/aot-known.edn lists it")))
+        _ (doseq [[id res] rows :when (and (= res "pass") (contains? slow id))]
+            (println (str "STALE " id ": passes, but test/ocaml/aot-slow.edn lists it")))
+        old (when (.exists (java.io.File. ^String results-edn)) (read-string (slurp results-edn)))
+        merged (if only?
+                 (let [m (into (sorted-map) (for [[id & r] old] [id (vec r)]))]
+                   (vec (for [[id r] (reduce (fn [m [id & r]] (assoc m id (vec r))) m rows)] (into [id] r))))
+                 rows)
+        ;; the recorded programs with no row in this run (a full run: the corpus no longer holds them)
+        gone (if only? [] (let [have (set (map first rows))] (vec (remove have (map first old)))))
+        cls (if (.exists (java.io.File. ^String classes-edn)) (classes classes-edn) [])
+        ok (summary rows cls)
+        _ (when-not (controls-ok results-edn corp rf runs) (System/exit 1))]
+    (if (str/starts-with? mode "record")
+      (do (doseq [id gone] (println (str "DROPPED " id ": no row in this run, was " (pr-str (vec (rest (first (filter #(= (first %) id) old))))))))
+          (spit results-edn (results-text merged))
+          (println (str "o2j: recorded " results-edn (when (seq gone) (str "; " (count gone) " recorded programs dropped (no row in this run)")))))
+      (let [oldm (into {} (for [[id & r] old] [id (vec r)]))
+            ;; a listed slow program recorded as slow that finishes under the limit this time (the boundary: its CPU time moves a little with
+            ;; the load) is not a change; the row stays as recorded
+            near-limit? (fn [id was now] (and (contains? slow id) (= "slow" (first was)) (= ["pass" ""] (vec (take 2 now)))))
+            changes (for [[id & r] rows :when (and (not= (vec r) (get oldm id)) (not (near-limit? id (get oldm id) (vec r))))] [id (get oldm id) (vec r)])]
+        (doseq [[id was now] changes] (println (str "CHANGED " id ": " (pr-str was) " -> " (pr-str now))))
+        (doseq [id gone] (println (str "GONE " id ": recorded, with no row in this run")))
+        (when (or (seq changes) (seq gone))
+          (println (str "o2j: " (count changes) " results differ from " results-edn ", " (count gone) " recorded programs gone"))
+          (System/exit 1))))
+    (when-not ok (System/exit 1))))
+
+(let [[mode & args] *command-line-args*]
+  (case mode
+    "divergences" (let [[results-edn classes-edn] args]
+                    (when-not (summary (read-string (slurp results-edn)) (classes classes-edn)) (System/exit 1)))
+    (apply judge mode args)))

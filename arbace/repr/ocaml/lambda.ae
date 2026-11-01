@@ -1,0 +1,148 @@
+(ns arbace.repr.ocaml.lambda
+  "The typed and Lambda dumps of repr/ocaml (doc/ocaml/SPEC.md §11, §11.2, O4): ocdump's `types` and `lambda`
+  modes as Arbace forms.  The helper writes the forms directly (OC8 (a)); this namespace is their reader's
+  side: check-typed and check-lambda validate a dump's shape against the spec (every node's head and arity,
+  positions, the constants) and return the node counts, which the check sums and records (size, speed).
+  O5's interpreter reads Lambda through the same shapes (the table `lambda-arity`)."
+  (:require [arbace.string :as str]))
+
+(defn- meta-map? [x] (map? x))
+
+(defn- body
+  "A node's fields: the form less its head and its trailing metadata map"
+  [x]
+  (let [t (rest x)]
+    (if (and (seq t) (meta-map? (last t))) (butlast t) t)))
+
+(defn- id-str? [x] (string? x))
+
+(def ^:private kinds {'function #{:curried :tupled}
+                      'let #{:strict :alias :strictopt}
+                      'send #{:self :public :cached}})
+
+(declare lam const)
+
+(defn- fail [msg x] (throw (ex-info msg {:form (take 3 x)})))
+
+(defn- expect [pred msg x] (when-not (pred x) (throw (ex-info msg {:form (if (seq? x) (take 3 x) x)}))))
+
+(defn- vec-of [f x what]
+  (expect vector? (str what " is not a vector") x)
+  (doseq [e x] (f e)))
+
+(defn- pair-of [f g x what]
+  (expect #(and (vector? %) (= 2 (count %))) (str what " is not a pair") x)
+  (f (first x)) (g (second x)))
+
+(defn- opt-lam [x] (when-not (nil? x) (lam x)))
+
+(defn- loc? [m]
+  (let [l (:loc m)] (or (nil? l) (and (vector? l) (= 6 (count l)) (every? integer? l)))))
+
+(defn const
+  "A structured constant (SPEC §11): returns the node count"
+  [c]
+  (expect seq? "constant is not a form" c)
+  (let [[h & r] c]
+    (case h
+      int (expect #(and (= 1 (count %)) (integer? (first %))) "bad int" r)
+      char (expect #(and (= 1 (count %)) (integer? (first %))) "bad char" r)
+      (float int32 int64 nativeint) (expect #(and (= 1 (count %)) (string? (first %))) (str "bad " h) r)
+      immstring (expect #(and (= 1 (count %)) (or (string? (first %)) (vector? (first %)))) "bad immstring" r)
+      float-array (expect #(and (= 1 (count %)) (vector? (first %)) (every? string? (first %))) "bad float-array" r)
+      block (do (expect #(and (= 2 (count %)) (integer? (first %)) (vector? (second %))) "bad block" r)
+                (doseq [e (second r)] (const e)))
+      (fail (str "unknown constant " h) c))))
+
+(def ^:dynamic *counts* nil)
+
+(defn lam
+  "A Lambda node (SPEC §11.2): throws on a malformed one; counts the heads in *counts*"
+  [x]
+  (expect seq? "Lambda node is not a form" x)
+  (let [h (first x) b (vec (body x))
+        n (fn [k] (expect #(= k (count %)) (str "arity of " h) b))]
+    (when *counts* (swap! *counts* update h (fnil inc 0)))
+    (when (and (meta-map? (last x)) (not (loc? (last x)))) (fail "bad :loc" x))
+    (case h
+      (var mutvar) (do (n 1) (expect id-str? "bad identifier" (b 0)))
+      const (do (n 1) (const (b 0)))
+      apply (do (n 2) (lam (b 0)) (vec-of lam (b 1) "apply's arguments"))
+      function (do (n 4)
+                   (expect (kinds 'function) "bad function kind" (b 0))
+                   (vec-of #(pair-of id-str? string? % "parameter") (b 1) "parameters")
+                   (expect string? "bad return kind" (b 2))
+                   (lam (b 3)))
+      let (do (n 5)
+              (expect (kinds 'let) "bad let kind" (b 0))
+              (expect string? "bad value kind" (b 1)) (expect id-str? "bad identifier" (b 2))
+              (lam (b 3)) (lam (b 4)))
+      mutlet (do (n 4) (expect string? "bad value kind" (b 0)) (expect id-str? "bad identifier" (b 1))
+                 (lam (b 2)) (lam (b 3)))
+      letrec (do (n 2)
+                 (vec-of #(pair-of id-str? lam % "binding") (b 0) "letrec's bindings")
+                 (lam (b 1)))
+      prim (do (n 2) (expect string? "bad primitive" (b 0)) (vec-of lam (b 1) "prim's arguments"))
+      switch (do (n 6)
+                 (lam (b 0)) (expect integer? "bad numconsts" (b 1))
+                 (vec-of #(pair-of integer? lam % "case") (b 2) "consts")
+                 (expect integer? "bad numblocks" (b 3))
+                 (vec-of #(pair-of integer? lam % "case") (b 4) "blocks")
+                 (opt-lam (b 5)))
+      stringswitch (do (n 3) (lam (b 0))
+                       (vec-of #(pair-of (fn [s] (expect (some-fn string? vector?) "bad string" s)) lam % "case") (b 1) "cases")
+                       (opt-lam (b 2)))
+      staticraise (do (n 2) (expect integer? "bad exit" (b 0)) (vec-of lam (b 1) "arguments"))
+      staticcatch (do (n 3) (lam (b 0))
+                      (expect #(and (vector? %) (= 2 (count %)) (integer? (first %))) "bad catch head" (b 1))
+                      (vec-of #(pair-of id-str? string? % "variable") (second (b 1)) "catch variables")
+                      (lam (b 2)))
+      trywith (do (n 3) (lam (b 0)) (expect id-str? "bad identifier" (b 1)) (lam (b 2)))
+      ifthenelse (do (n 3) (run! lam b))
+      sequence (do (n 2) (run! lam b))
+      while (do (n 2) (run! lam b))
+      for (do (n 5) (expect id-str? "bad identifier" (b 0)) (lam (b 1)) (lam (b 2))
+              (expect #{:to :downto} "bad direction" (b 3)) (lam (b 4)))
+      assign (do (n 2) (expect id-str? "bad identifier" (b 0)) (lam (b 1)))
+      send (do (n 4) (expect (kinds 'send) "bad send kind" (b 0)) (lam (b 1)) (lam (b 2)) (vec-of lam (b 3) "arguments"))
+      event (do (n 1) (lam (b 0)))
+      ifused (do (n 2) (expect id-str? "bad identifier" (b 0)) (lam (b 1)))
+      (fail (str "unknown Lambda head " h) x))))
+
+(defn check-lambda
+  "A lambda dump ((ocaml/lambda (lambda-program MODULE SIZE [REQUIRED...] CODE) {...})): returns the counts of
+  Lambda heads; throws on a malformed one"
+  [d]
+  (expect #(and (seq? %) (= 'ocaml/lambda (first %))) "not an ocaml/lambda form" d)
+  (let [p (second d)]
+    (expect #(and (seq? %) (= 'lambda-program (first %)) (= 5 (count %))) "not a lambda-program" p)
+    (let [[_ m size req code] p]
+      (expect string? "bad module" m) (expect integer? "bad size" size)
+      (expect #(and (vector? %) (every? string? %)) "bad required globals" req)
+      (binding [*counts* (atom {})]
+        (lam code)
+        @*counts*))))
+
+(defn check-typed
+  "A typed dump ((ocaml/typed SIGNATURE [(expr TYPE {:loc ..}) | (pat TYPE {:loc ..})...] {...})): returns
+  {:expr n :pat n}; throws on a malformed one"
+  [d]
+  (expect #(and (seq? %) (= 'ocaml/typed (first %)) (>= (count %) 3)) "not an ocaml/typed form" d)
+  (let [[_ sg anns] d]
+    (expect string? "bad signature text" sg)
+    (expect vector? "annotations are not a vector" anns)
+    (reduce (fn [acc a]
+              (expect #(and (seq? %) (#{'expr 'pat} (first %)) (= 3 (count %)) (string? (second %))
+                            (map? (nth % 2)) (let [l (:loc (nth % 2))] (and (vector? l) (= 6 (count l)) (every? integer? l))))
+                      "bad annotation" a)
+              (update acc (first a) (fnil inc 0)))
+            {} anns)))
+
+(defn check-dump
+  "Reads a dump's text and checks it for MODE (\"types\" or \"lambda\"); returns {:error s} for the compiler's
+  error form (a file the compiler rejects), else {:counts m}"
+  [mode text]
+  (let [d (read-string text)]
+    (if (and (seq? d) (= 'ocaml/error (first d)))
+      {:error (str (nth d 2 ""))}
+      {:counts (case mode "types" (check-typed d) "lambda" (check-lambda d))})))

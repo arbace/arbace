@@ -65,14 +65,15 @@
         (for [l (str/split-lines (slurp f)) :when (> (count l) 66)]
           [(subs l 66) (subs l 0 64)])))
 
-(defn- glob-re [^String g]
-  (re-pattern (str "^"
-                   (-> g
-                       (str/replace "." "\\.")
-                       (str/replace "**" "\u0000")
-                       (str/replace "*" "[^/]*")
-                       (str/replace "\u0000" ".*"))
-                   "$")))
+(defn- glob-re
+  "a glob's regular expression: ** any path, * within a name, every other character itself (queue 023,
+  report 022 finding 9: each of the regex's special characters quoted, not only .)"
+  [^String g]
+  (let [special (set "\\.[]{}()+?^$|")
+        lit (fn [^String t] (apply str (map (fn [c] (if (contains? special c) (str "\\" c) (str c))) t)))]
+    (re-pattern (str "^"
+                     (apply str (map (fn [t] (case t "**" ".*" "*" "[^/]*" (lit t))) (re-seq #"\*\*|\*|[^*]+" g)))
+                     "$"))))
 
 (defn- rule-matcher [^String r]
   (cond
@@ -196,7 +197,7 @@
   pending gives the line host NAME pending"
   [step rules files hosts cache]
   (let [decl (into (sorted-map) (apply dissoc step unkeyed))
-        logic ["bin/lib/gate-run.bash" "test/gate/plan.ae"]
+        logic ["bin/lib/gate-run.bash" "bin/lib/gate-cache.bash" "test/gate/plan.ae"]
         sel (sort (matching cache (keys files) (into (vec rules) (never-rules (:never-loads step)))))]
     (concat
      [(str "step " (:name step))
@@ -219,8 +220,16 @@
   (let [d (File. (str store "/" nm))
         fs (when (.isDirectory d) (.listFiles d))]
     (->> fs
-         (filter #(str/ends-with? (.getName ^File %) ".edn"))
+         ;; a pass is KEY.edn; a dotfile is a temporary of record_pass or publish_passes (review 001, finding 3)
+         (filter #(let [n (.getName ^File %)] (and (str/ends-with? n ".edn") (not (str/starts-with? n ".")))))
          (keep #(try (assoc (read-file (.getPath ^File %)) :file (.getPath ^File %)) (catch Throwable _ nil)))
+         ;; queue 023, report 022 finding 8: a record kept under its own key's name (one copied under another is no pass)
+         (filter #(= (.getName (File. ^String (:file %))) (str (:key %) ".edn")))
+         ;; GTS95 (b): a record whose log (KEY.log beside it, when there is one) has another digest than its
+         ;; :log-sha256 is no pass, as bin/lib/gate-run.bash's pass_reads decides
+         (filter #(let [^String f (:file %)
+                        lg (File. (str (subs f 0 (- (count f) 4)) ".log"))]
+                    (or (not (.isFile lg)) (= (str (:log-sha256 %)) (file-sha256 lg)))))
          (sort-by #(str (:date %)))
          reverse)))
 
@@ -290,6 +299,9 @@
             (for [h (:hosts s) :when (not (or (contains? hosts h) (and (prog-hosts h) (contains? hosts (second (prog-hosts h))))))]
               (str nm ": host " h " is not in hosts.edn"))
             (when-not (contains? #{nil true :inner} (:heavy s)) [(str nm ": :heavy is true or :inner, not " (:heavy s))])
+            ;; queue 023, report 022 finding 3: the frozen jar runs on the system JVM, whose identity is :jdk's
+            (when (and (some #{:frozen} (:hosts s)) (not (some #{:jdk} (:hosts s))))
+              [(str nm ": host :frozen without :jdk (the jar runs on the system JVM)")])
             ;; GT5: a step's :uses names an earlier step with :outputs
             (for [u (:uses s)
                   :let [pn (first (str/split (str u) #"/" 2)) pi (.indexOf ^java.util.List (vec names) pn)]

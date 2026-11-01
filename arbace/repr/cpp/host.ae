@@ -1,0 +1,152 @@
+(ns arbace.repr.cpp.host
+  "The C++ host as repr/cpp's preprocessor reads with it (doc/cpp/SPEC.md §10, §14; doc/cpp/CPP-SURVEY.md,
+  \"As built: CX1\", \"As built: CX2\"): the answers of g++ 15.2 (the judge) and clang 23.1.4 (the oracle)
+  recorded by `bin/repr-cpp host record` under test/cpp/host/ -- their predefined macros per standard with
+  the date macros of the fixed epoch, their search lists (the compiler's own directory last), their
+  __has_cpp_attribute and __has_attribute answers -- and a file's own options (a corpus file's dg-options:
+  -std, -D, -U, -I, -O, -ansi, -trigraphs, -fmodules-ts) as the reference applies them. The lexer's features
+  are those libcpp's lang_defaults give the standard (arbace.repr.c.lex, `F-CXX` and its bits)."
+  (:require [arbace.string :as str]
+            [arbace.repr.c.lex :as lex]
+            [arbace.repr.c.host :as ch]))
+
+(set! *warn-on-reflection* true)
+
+(def stds
+  "The standards whose predefined macros are recorded."
+  ["c++98" "c++03" "c++11" "c++14" "c++17" "c++20" "c++23" "c++26"
+   "gnu++98" "gnu++03" "gnu++11" "gnu++14" "gnu++17" "gnu++20" "gnu++23" "gnu++26"])
+
+(def std-aliases
+  {"c++0x" "c++11" "c++1y" "c++14" "c++1z" "c++17" "c++2a" "c++20" "c++2b" "c++23" "c++2c" "c++26"
+   "gnu++0x" "gnu++11" "gnu++1y" "gnu++14" "gnu++1z" "gnu++17" "gnu++2a" "gnu++20" "gnu++2b" "gnu++23" "gnu++2c" "gnu++26"})
+
+(defn canonical-std
+  "A -std= value as one of `stds`, nil when g++ has no such C++ standard."
+  [^String s]
+  (let [s (get std-aliases s s)] (when (some #{s} stds) s)))
+
+(def default-std "g++'s default, and the corpus' for files that name none." "gnu++17")
+
+(defn std-year
+  "The standard's year (1998 for c++98 and c++03, 2011 ... 2026)."
+  ^long [^String std]
+  (let [y (Long/parseLong (subs std (+ 2 (.indexOf std "++"))))] (cond (= y 3) 1998 (< y 50) (+ 2000 y) :else (+ 1900 y))))
+
+(defn- slurp-lines [^String f] (remove str/blank? (str/split-lines (slurp f))))
+
+(defn- parse-has
+  "A recorded answer (\"201803\", \"201803L\", \"0\") as a number."
+  [^String v] (Long/parseLong (str/replace v "L" "")))
+
+(defn load-host
+  "The recorded host under `dir` (test/cpp/host) of the compiler `who` (\"gxx\" or \"clang\"): {:search
+  [...] :predefined {std text} :has {[op name] value} :epoch n}. The has answers of has.tsv and of
+  has-extra.tsv (the names the checks asked beyond the first table, `bin/repr-cpp has-add`)."
+  [^String dir ^String who]
+  (let [edn (read-string (slurp (str dir "/host.edn")))
+        col (if (= who "gxx") 2 3)
+        rows (fn [f] (let [^java.io.File file (java.io.File. ^String f)]
+                       (when (.exists file)
+                         (for [l (slurp-lines f)
+                               :let [cols (str/split l #"\t")]
+                               :when (not= (first cols) "__has_include")]
+                           [[(first cols) (second cols)] (parse-has (nth cols col))]))))]
+    {:search (vec (slurp-lines (str dir "/search-" who ".txt")))
+     :predefined (into {} (for [s stds :let [f (java.io.File. (str dir "/predefined/" who "/" s ".h"))] :when (.exists f)]
+                            [s (slurp f)]))
+     :has (into {} (concat (rows (str dir "/has.tsv")) (rows (str dir "/has-extra.tsv"))))
+     :epoch (:epoch edn)
+     :deltas (let [^java.io.File f (java.io.File. (str dir "/opt-deltas-" who ".edn"))] (if (.exists f) (read-string (slurp f)) {}))
+     :edn edn}))
+
+(defn dg-options
+  "The options of a g++ testsuite file's dg-options and dg-additional-options lines that carry no
+  selector, in order (the ones with a target or xfail selector are not modelled; the reference gets what
+  the port is given, so the check is consistent), ${srcdir} as the testsuite's root (\".\")."
+  [^String text]
+  (vec (mapcat (fn [[_ _ opts sel]]
+                 (when-not sel
+                   (->> (str/split (str/trim (str/replace opts "${srcdir}" ".")) #"\s+")
+                        (remove str/blank?)
+                        (map #(str/replace % "\\\"" "\"")))))
+               (re-seq #"\{\s*dg-(additional-)?options\s+\"((?:[^\"\\]|\\.)*)\"\s*(\{[^}]*\})?" text))))
+
+(def ^:private not-passed
+  "Options the reference is not given: they write files, stop the compiler before or after the preprocessor, or print."
+  #"^(-o.*|-S|-c|-E|-fdump.*|-fcompare-debug.*|-save-temps.*|-fsyntax-only|-d[A-Za-z]+|-M.*|-pass-exit-codes|-v|-###|-print.*|-fplugin.*|-x|-time|-pipe)$")
+
+(def ^:private two-word #{"--param" "-include" "-isystem" "-iquote" "-idirafter" "-imacros" "-isysroot" "-iprefix" "-B"})
+
+(defn file-config
+  "A file's configuration from `opts` and `default-std`: {:std :pre :inc :args :trigraphs :modules :all-args}, :pre
+  the lines its -D, -U and -O add to the predefined macros, :args the modelled options and :all-args the
+  options the reference is given (all but the ones that are not passed): the other options' effect on the
+  predefined macros is the host's (opt-deltas.edn, recorded for each standard and option list)."
+  [opts ^String default-std]
+  (loop [os (seq opts) std default-std pre [] incs [] args [] tri false modules false]
+    (if-let [^String o (first os)]
+      (let [more (next os)
+            arg (fn [^String flag] (if (= o flag) [(first more) (next more)] [(subs o (count flag)) more]))]
+        (cond
+          (.startsWith o "-std=")
+          (if-let [s (canonical-std (subs o 5))] (recur more s pre incs (conj args o) tri modules) (recur more std pre incs args tri modules))
+          (= o "-ansi") (recur more "c++98" pre incs (conj args o) tri modules)
+          (= o "-trigraphs") (recur more std pre incs (conj args o) true modules)
+          (#{"-fmodules-ts" "-fmodules"} o) (recur more std pre incs (conj args o) tri true)
+          (.startsWith o "-D")
+          (let [[v more] (arg "-D")
+                [n d] (let [i (.indexOf ^String v "=")] (if (neg? i) [v "1"] [(subs v 0 i) (subs v (inc i))]))]
+            (recur more std (conj pre (str "#define " n " " d)) incs (conj args (str "-D" v)) tri modules))
+          (.startsWith o "-U")
+          (let [[v more] (arg "-U")] (recur more std (conj pre (str "#undef " v)) incs (conj args (str "-U" v)) tri modules))
+          (.startsWith o "-I")
+          (let [[v more] (arg "-I")] (recur more std pre (conj incs v) (conj args (str "-I" v)) tri modules))
+          (re-matches #"-O([1-3sgz]|fast)?" o)
+          (recur more std (conj pre "#undef __NO_INLINE__" "#define __OPTIMIZE__ 1") incs (conj args o) tri modules)
+          (= o "-O0") (recur more std pre incs (conj args o) tri modules)
+          :else (recur more std pre incs args tri modules)))
+      {:std std :pre (str/join (map #(str % "\n") pre)) :inc incs :args args :trigraphs tri :modules modules
+       :all-args (loop [os (seq opts) out []]
+                   (if-let [^String o (first os)]
+                     (cond
+                       (re-matches not-passed o) (recur (next os) out)
+                       (contains? two-word o) (recur (nnext os) (into out (if (second os) [o (second os)] [o])))
+                       :else (recur (next os) (conj out o)))
+                     out))})))
+
+(defn feature-mask
+  "The lexer's feature mask (arbace.repr.c.lex, `F-CXX`) of the standard `std`, as libcpp's lang_defaults give
+  it: raw strings, user-defined literals, u\"\" literals and the <:: rule from C++11, digit separators from
+  C++14, u8'a' from C++17, <=> from C++20; trigraphs in the ISO modes up to C++14 and with -trigraphs; the
+  module directives' header names with -fmodules-ts."
+  ^long [^String std tri? modules?]
+  (let [y (std-year std)
+        iso? (.startsWith std "c++")]
+    (long (bit-or lex/F-CXX
+                  (if (>= y 2011) (bit-or lex/F-ULIT lex/F-RAW lex/F-UDL lex/F-LTCOLON) 0)
+                  (if (>= y 2014) lex/F-DIGSEP 0)
+                  (if (>= y 2017) lex/F-U8CHAR 0)
+                  (if (>= y 2020) lex/F-SPACESHIP 0)
+                  (if modules? lex/F-MODULES 0)
+                  (if (or tri? (and iso? (<= y 2014))) 1 0)))))
+
+(defn delta-key
+  "The key of the option list in the host's recorded deltas: the standard and the options the reference is given."
+  [fc] (str (:std fc) " " (str/join " " (:all-args fc))))
+
+(defn config
+  "The preprocessor's configuration (arbace.repr.c.pp) for a file of configuration `fc` (file-config's)
+  read from `base`."
+  [host fc ^String base]
+  {:predefined (str (get (:predefined host) (:std fc))
+                    ;; the options' effect as the host recorded it (opt-deltas), else the modelled -D, -U and -O
+                    (if-let [d (get (:deltas host) (delta-key fc))] d (:pre fc)))
+   :include (:inc fc)
+   :sys (:search host)
+   :std (keyword (:std fc))
+   :cxx true
+   :has (:has host)
+   :embed-dirs []
+   :trigraphs (feature-mask (:std fc) (:trigraphs fc) (:modules fc))
+   :base base})

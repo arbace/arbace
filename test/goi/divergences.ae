@@ -10,7 +10,13 @@
   --nethttp (NH1, doc/go/NET-HTTP-SURVEY.md \"As built: NH1\"): the net/http corpus's reference
   (test/nethttp/check-linux-amd64.edn) in the classes of test/nethttp/divergences.edn; a baseline before
   net/http is listed, so a class may take a fail or an error (the result and reason matched), and a
-  program no class takes is the problem."
+  program no class takes is the problem.
+  --nethttp-arbace (NH12 (a)): NH12's set (test/nethttp/arbace/check-linux-amd64.edn) in the classes of
+  test/nethttp/arbace/divergences.edn, the same rule.
+  --results FILE (report 002, finding 4): the first reference (linux/amd64's, the AOT level's, the
+  net/http corpus's or NH12's set's) is a run's results, FILE (bin/goi check's results.tsv: PROGRAM, RESULT,
+  REASON tab-separated), not the record: bin/goi check judges its own run, so a program recorded as not
+  passing that now fails or errs is a problem at once, not at the next --record."
   (:require [arbace.string :as str]
             [arbace.java.io :as io])
   (:import (java.io PushbackReader)))
@@ -19,31 +25,56 @@
   (with-open [r (PushbackReader. (io/reader f))]
     (read r)))
 
-(defn- classify [classes [p result reason]]
+(defn- read-results
+  "A run's results, FILE (PROGRAM, RESULT, REASON tab-separated, a row a line), as a reference's entries."
+  [f]
+  (vec (for [l (str/split-lines (slurp f)) :when (not (str/blank? l))
+             :let [[p r reason] (str/split l #"\t" 3)]]
+         [p (keyword r) (or reason "")])))
+
+(defn- classify
+  "The first class whose :match finds \"RESULT REASON\" and, when it lists :programs (report 002,
+  finding 7: a pattern that takes any wrong output or any timeout), names the program."
+  [classes [p result reason]]
   (let [s (str (name result) " " reason)]
-    (or (some (fn [c] (when (some #(re-find % s) (:match c)) (:id c))) classes)
+    ;; a class with :programs takes only those programs (NH11 (b): a reason as generic as a nil
+    ;; dereference, its cause known for that program)
+    (or (some (fn [c] (when (and (some #(re-find % s) (:match c))
+                                 (or (nil? (:programs c)) (some #{p} (:programs c))))
+                        (:id c)))
+              classes)
         :unclassified)))
 
 (defn -main [& args]
   (let [root (or (System/getenv "GOI_ROOT") ".")
         aot? (some #{"--aot"} args)
-        nh? (some #{"--nethttp"} args)
-        classes (read-file (str root (cond nh? "/test/nethttp/divergences.edn"
+        nha? (some #{"--nethttp-arbace"} args)
+        nh? (or nha? (some #{"--nethttp"} args))
+        results (second (drop-while #(not= "--results" %) args))
+        classes (read-file (str root (cond nha? "/test/nethttp/arbace/divergences.edn"
+                                           nh? "/test/nethttp/divergences.edn"
                                            aot? "/test/goi/divergences-aot.edn"
                                            :else "/test/goi/divergences.edn")))
         refs (cond
+               nha? [["net/http Arbace set" (str root "/test/nethttp/arbace/check-linux-amd64.edn")]]
                nh? [["net/http corpus" (str root "/test/nethttp/check-linux-amd64.edn")]]
                aot? [["linux/amd64 AOT" (str root "/test/goi/check-aot-linux-amd64.edn")]]
                :else [["linux/amd64" (str root "/test/goi/check-linux-amd64.edn")]
                       ["box amd64" (str root "/test/goi/check-box-amd64.edn")]
                       ["box arm64" (str root "/test/goi/check-box-arm64.edn")]])
-        ;; the essential programs pass at goi's level (GS12); the AOT level's subset is REAP8's
-        essential (if (or aot? nh?)
+        ;; the essential programs pass at goi's level (GS12); the AOT level's subset (REAP8) in the AOT
+        ;; level's record, test/goi/essential-aot.txt (report 060, finding 5: nothing checked it, so an
+        ;; entry recorded as known or skip ran on and its failure was no regression)
+        essential (if nh?
                     #{}
                     (set (remove #(or (str/blank? %) (str/starts-with? % "#"))
-                                 (str/split-lines (slurp (str root "/test/goi/essential.txt"))))))
-        res (for [[nm f] refs]
-              (let [es (read-file f)
+                                 (str/split-lines (slurp (str root (if aot?
+                                                                     "/test/goi/essential-aot.txt"
+                                                                     "/test/goi/essential.txt")))))))
+        res (for [[i [nm f]] (map-indexed vector refs)]
+              (let [run? (and results (zero? i))
+                    nm (if run? (str nm " (this run)") nm)
+                    es (if run? (read-results results) (read-file f))
                     bad (if nh? [] (filter #(#{:fail :error} (second %)) es))
                     np (remove #(= :pass (second %)) es)
                     by (group-by #(classify classes %) np)]
@@ -51,9 +82,11 @@
                  :bad bad :by by :entries es}))
         lin (first res)
         ess-np (filter #(and (essential (first %)) (not= :pass (second %))) (:entries lin))
+        ess-missing (when aot? (sort (remove (set (map first (:entries lin))) essential)))
         problems (concat (for [r res e (:bad r)] (str (:name r) ": " (first e) " " (name (second e)) ": " (nth e 2)))
                          (for [r res e (get (:by r) :unclassified)] (str (:name r) ": " (first e) " in no class: " (name (second e)) " " (nth e 2)))
-                         (for [e ess-np] (str "essential: " (first e) " does not pass in the reference: " (name (second e)))))]
+                         (for [e ess-np] (str "essential: " (first e) " does not pass in the reference: " (name (second e))))
+                         (for [p ess-missing] (str "essential: " p " is not in the reference")))]
     (cond
       (some #{"--table"} args)
       (do (println (str "| class | kind | " (str/join " | " (map :name res)) " | why | decided |"))
@@ -73,9 +106,9 @@
                       (count (filter #(seq (get (:by r) (:id %))) classes)) " classes"))
         (doseq [c classes :let [n (count (get (:by r) (:id c)))] :when (pos? n)]
           (println (format "   %4d %s (%s)" n (:title c) (name (:kind c)))))))
-    (when-not (or aot? nh?)
-      (println (str "goi divergences: essential (test/goi/essential.txt): " (count essential) " programs, "
-                    (count ess-np) " not passing in the linux/amd64 reference")))
+    (when-not nh?
+      (println (str "goi divergences: essential (test/goi/essential" (when aot? "-aot") ".txt): " (count essential) " programs, "
+                    (+ (count ess-np) (count ess-missing)) " not passing in the " (if aot? "AOT" "linux/amd64") " reference")))
     (doseq [p problems] (println (str "   " p)))
     (shutdown-agents)
     (System/exit (if (seq problems) 1 0))))

@@ -9,23 +9,30 @@
 #   pair              (test/j2g/fixtures, their cases), interpreted (arbace.classes.interp)
 #                     against translated by j2g into the program, the same Clojure cases calling
 #                     them
-# result by result, case by case, against the known disagreements test/diffcheck/known.edn.
+# result by result, case by case, against the known disagreements test/diffcheck/known.edn
+# (each known case's pair as recorded, :got, when it records one: oracle.runner/check-known).
+# A case without a record in both runs disagrees; the Java forms' pair's lines count its cases
+# whose classes ran compiled (the others' classes stay interpreted in both runs: gen.ae).
 #
 # Usage: bin/diffcheck [-j JOBS] [--timeout S] [--write-expected] [SEL...]
-#   SEL      parts of corpus paths (forms/numbers, harvest/, fixtures); default all
+#   SEL      parts of corpus paths (forms/numbers, harvest/, fixtures); default all (a SEL that
+#            selects no corpus, or a selection of nothing, fails the check)
 #   --write-expected  rewrite test/diffcheck/known.edn from this run (the reasons of the cases
 #            still disagreeing kept, new ones given a placeholder)
 # Steps (doc/FUTAMURA-SURVEY.md, "F2 as built"):
-#   1. the gate's executable (bin/arbace-go --gate-build: cached, a hit after bin/gate), whose
-#      runtime is the checkout's: it runs the steps below
+#   1. the gate's executable (bin/arbace-go --gate-build: cached in ARBACE_GATE_EXES/KEY20, a hit
+#      after a bin/gate run of the checkout's key; ARBACE_GATE_CACHE overrides the directory, bin/lib/
+#      gate-cache.bash; a miss is two Go-hosted builds), whose runtime is the checkout's: it runs the
+#      steps below
 #   2. test/diffcheck/gen.ae writes the corpora's namespaces and Java forms (.tmp/diffcheck/gen)
 #   3. the executable prepares the runtime's namespaces and the corpora's (ARBACE_COMPILE, as
 #      bin/arbace-go's host compile) and arbace.c2j compiles them all (.tmp/diffcheck/aot)
 #   4. j2g translates the program with that tree and the Java forms (.tmp/diffcheck/j2g), and
 #      bin/build-go builds it: .tmp/diffcheck/arbace-diff (not shipped, not the test build)
 #   5. test/diffcheck/main.ae runs each corpus twice on it and compares (.tmp/diffcheck/check.txt)
-# Steps 2-4 are cached in .tmp/diffcheck, keyed by the executable and the check's sources
-# (test/diffcheck, the corpora); the build uses Go's build cache and repr/go's print cache.
+# Steps 2-4 are cached in .tmp/diffcheck, keyed by the executable, the check's sources
+# (test/diffcheck, the corpora) and gate_key (bin/arbace-go --gate-key: what the build's steps read
+# beside the executable); the build uses Go's build cache and repr/go's print cache.
 # Environment: ARBACE_GOROOT (TamaGo's Go, default /root/tamago-go). Logs in .tmp/diffcheck/.
 set -uo pipefail
 export CGO_ENABLED=0 # Go's builds never use cgo (doc/go/BOX-NOTES.md, "... cgo dropped", 2026-10-16)
@@ -34,6 +41,7 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 . "$root/bin/lib/renamed-env.bash" # stops on a stale G2A_*, J2A_*, A2G_* or C2A_*
 cd "$root"
 work=$root/.tmp/diffcheck
+. "$root/bin/lib/gate-cache.bash" # arbace_gate_cache: the gate's builds, ARBACE_GATE_EXES/KEY20
 known=$root/test/diffcheck/known.edn
 args=() write=
 while [ $# -gt 0 ]; do
@@ -51,12 +59,16 @@ mkdir -p "$work"
 # 1. the gate's executable
 bin/arbace-go --gate-build > "$work/gate-build.log" 2>&1 \
   || { tail -20 "$work/gate-build.log"; echo "diffcheck: bin/arbace-go --gate-build failed" >&2; exit 1; }
-exe=${ARBACE_GATE_CACHE:-$root/.tmp/arbace-go-gate}/amd64/arbace
+exe=$(arbace_gate_cache "$root")/amd64/arbace
 
 key=$( { sha256sum < "$exe"
          find test/diffcheck/driver.ae test/diffcheck/gen.ae test/diffcheck/excluded.edn test/diffcheck/jforms-excluded.edn test/oracle/forms test/oracle/driver.ae test/oracle/runner.ae test/j2g/fixtures \
               test/j2g/fixtures.edn -type f | LC_ALL=C sort | xargs -d '\n' sha256sum
-         sha256sum bin/diffcheck; } | sha256sum | cut -c1-64)
+         sha256sum bin/diffcheck
+         # what the executable is built from, which j2g's and the build's steps read too (gate_key:
+         # bin/j2g, bin/build-go, bin/jrt, overlay/, go/, jdk/, x509roots, Go's version), whether or
+         # not it changed the executable's bytes
+         bin/arbace-go --gate-key; } | sha256sum | cut -c1-64)
 if [ -x "$work/arbace-diff" ] && [ "$(cat "$work/key" 2> "$work/cat.err")" = "$key" ]; then
   echo "diffcheck: the cached diff build (key ${key:0:12})"
 else

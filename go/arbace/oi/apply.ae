@@ -1,0 +1,230 @@
+(in-ns 'go.arbace.oi) (go/file "apply.go" :imports [])
+
+;; Closures, threads, frames and application (survey §6.2.5): a function's Lambda body is a node
+;; tree over a frame of slots; an application in tail position returns tailMark with the callee
+;; and its arguments in the frame, and Apply's loop makes the call, so that tail calls take no Go
+;; stack; curried application by arity as the bytecode interpreter's APPLY and RESTART do.
+
+
+(go/type Node "Node is a compiled Lambda expression.\n" (func [^{:tag (* Frame)} fr] [Value]))
+
+
+(go/type Code "Code is a compiled function: its arity, the slots its frame needs, its body, and its name.\n" (struct
+    ^{:line 13 :tag int} Arity
+    ^{:line 14 :tag int} NSlots
+    ^{:line 15 :tag Node} Body
+    ^{:line 16 :tag string} Name))
+
+
+
+
+(go/type Closure "Closure is a function value: interpreted (Code and Env, the captured values), native (Native,\na Go function of Arity arguments), or a partial application of Base to Args.\n" (struct
+    ^{:line 22 :tag int} Arity
+    ^{:line 23 :tag (* Code)} Code
+    ^{:line 24 :tag (slice Value)} Env
+    ^{:line 25 :tag (func [^{:tag (* Thread)} th ^{:tag (slice Value)} args] [Value])} Native
+    ^{:line 26 :tag (* Closure)} Base
+    ^{:line 27 :tag (slice Value)} Args))
+;; Infix: the closures of one letrec, shared (Obj's view only)
+
+
+
+^{:go/breaks [[5 39]] :go/end 40} (go/method Name "Name is the closure's function name, for traces.\n" ^string [^{:tag (* Closure)} c]
+  (switch
+    (case [(!= (.-Code c) nil)]
+      (return (.-Name (.-Code c))))
+    (case [(!= (.-Base c) nil)]
+      (return (+ (.Name (.-Base c)) "(partial)"))))
+
+  "native")
+
+
+
+^{:go/end 45} (go/func NativeFn "NativeFn is a native closure of arity n.\n" ^{:tag (* Closure)} [^int n ^{:tag (func [^{:tag (* Thread)} th ^{:tag (slice Value)} args] [Value])} f]
+  (addr (lit Closure :Arity n :Native f)))
+
+
+
+
+
+
+(go/type Frame "Frame is one call's state: its slots, its closure's environment, its thread, and the\nregisters of the tail call and the static exit in flight. A frame of a few slots holds them\ninline (one allocation a call), and a tail call to a function whose slots fit reuses the frame\n(nothing outlives a call in its frame: closures copy what they capture).\n" (struct
+    ^{:line 52 :tag (slice Value)} S
+    ^{:line 53 :tag (slice Value)} Env
+    ^{:line 54 :tag (* Thread)} Th
+    ^{:line 55 :tag Value} tcF
+    ^{:line 56 :tag (slice Value)} tcA
+    ^{:line 57 :tag int} exN
+    ^{:line 58 :tag (array 8 Value)} buf
+    ^{:line 59 :tag (array 4 Value)} tbuf))
+
+
+^{:go/end 70} (go/func newFrame ^{:tag (* Frame)} [^{:tag (* Code)} code ^{:tag (slice Value)} env ^{:tag (* Thread)} th]
+  (let [fr (addr (lit Frame :Env env :Th th))]
+    (if (<= (.-NSlots code) (len (.-buf fr)))
+      (set! (.-S fr) (subslice (.-buf fr) _ (.-NSlots code)))
+
+      (set! (.-S fr) (make (slice Value) (.-NSlots code))))
+
+    ^{:line 69} fr))
+
+
+(go/type mark (struct ^string name))
+
+(go/var
+  ^{:line 75} [^Value tailMark (addr (lit mark "tail"))]
+  ^{:line 76} [^Value exitMark (addr (lit mark "exit"))])
+
+
+
+
+(go/var ^{:doc "DepthLimit is the interpreted call depth at which a call raises Stack_overflow (OCaml's own\nlimit is its stack's size, 1 GiB by default: a class of divergences, OC11).\n"} DepthLimit 200000)
+
+
+^{:go/end 86} (go/method Apply "Apply applies f to args (one or more), with OCaml's curried semantics.\n" ^Value [^{:tag (* Thread)} th ^Value f & ^{:tag (slice Value)} args]
+  (.ApplyN th f args))
+
+
+
+^{:go/end 99} (go/method ApplyN "ApplyN is Apply with the arguments as a slice (which it may keep).\n" ^Value [^{:tag (* Thread)} th ^Value f ^{:tag (slice Value)} args]
+  (inc! (.-depth th))
+  (when (> (.-depth th) DepthLimit)
+    (set! (.-depth th) 0)
+    (.overflow th))
+
+  (.tick th)
+  (let [v (.applyLoop th f args nil)]
+    (dec! (.-depth th))
+    ^{:line 98} v))
+
+
+
+
+^{:go/end 122} (go/method call "call is a call of f to exactly the arguments a (a slice the caller will not use again), the\napplication node's fast path: an interpreted closure of that arity gets its frame directly.\n" ^Value [^{:tag (* Thread)} th ^Value f ^{:tag (slice Value)} a]
+  (when [(values c ok) (assert (* Closure) f)] (and ok (!= (.-Code c) nil) (== (.-Arity c) (len a)))
+    (inc! (.-depth th))
+    (when (> (.-depth th) DepthLimit)
+      (set! (.-depth th) 0)
+      (.overflow th))
+
+    (.tick th)
+    (let [fr (newFrame (.-Code c) (.-Env c) th)]
+      (copy (.-S fr) a)
+      (set! (.-cur th) (.-Code c))
+      (let [v ((.-Body (.-Code c)) fr)]
+        (when (== v tailMark)
+          (set! v (.applyLoop th (.-tcF fr) (.-tcA fr) fr)))
+
+        (dec! (.-depth th))
+        (return v))))
+
+  (.ApplyN th f a))
+
+
+
+
+^{:go/end 215} (go/method applyLoop "applyLoop applies f to args, the tail calls of the callee made in its loop; from is the frame\nwhose tbuf args may borrow (it is free to reuse: its call is over).\n" ^Value [^{:tag (* Thread)} th ^Value f ^{:tag (slice Value)} args ^{:tag (* Frame)} from]
+  (let [^{:tag (slice Value)} pending (zero (slice Value))
+      ^{:line 128} d (.-depth th)
+      ^{:line 129} borrowed (!= from nil)]
+    (while true
+      (let [(values c ok) (assert (* Closure) f)]
+        (when (not ok)
+          ;; a recursive value's dummy updated with a closure (caml_update_dummy)
+          (when [(values b isb) (assert (* Block) f)] (and isb (== (.-Tag b) TagClosure) (== (len (.-F b)) 1))
+            (set! f (aget (.-F b) 0))
+            (continue))
+
+          (Internalf "apply of a value that is not a function: %s" (Describe f)))
+
+        (when (and (!= (.-Code c) nil) (== (.-Arity c) (len args)))
+          ;; the common case: an exact call of an interpreted function
+          (let [code (.-Code c)]
+            (set! (.-cur th) code)
+            (let [^{:tag (* Frame)} fr (zero (* Frame))]
+              (if (and (!= from nil) (<= (.-NSlots code) (cap (.-S from)))) (do
+                  (set! fr from)
+                  (set! (.-S fr) (subslice (.-S fr) _ (.-NSlots code)))
+                  (set! (.-Env fr) (.-Env c))
+                  (copy (.-S fr) args))
+                (do
+                  (set! fr (newFrame code (.-Env c) th))
+                  (copy (.-S fr) args)))
+
+              (let [v ((.-Body code) fr)]
+                (set! (.-depth th) d)
+                (when (== v tailMark)
+                  (set! (values f args from borrowed) (values (.-tcF fr) (.-tcA fr) fr true))
+                  (.tick th)
+                  (continue))
+
+                (when (== (len pending) 0)
+                  (return v))
+
+                (set! (values f args pending from borrowed) (values v pending nil nil false))
+                (continue)))))
+
+        (when borrowed
+          (set! args (append (conv (slice Value) nil) (spread args)))
+          (set! borrowed false))
+
+        (set! from nil)
+        (while (!= (.-Base c) nil)
+          (set! args (append (append (make (slice Value) 0 (+ (len (.-Args c)) (len args))) (spread (.-Args c))) (spread args)))
+          (set! c (.-Base c)))
+
+        (let [n (.-Arity c)
+            ^{:line 177 :tag Value} v (zero Value)]
+          (if (< (len args) n)
+            (set! v (addr (lit Closure :Arity (- n (len args)) :Base c :Args args)))
+
+            (let [extra (subslice args n)]
+              (set! args (subslice args _ n n))
+              (when (> (len extra) 0)
+                (if (> (len pending) 0)
+                  (set! pending (append (append (lit (slice Value)) (spread extra)) (spread pending)))
+
+                  (set! pending extra)))
+
+
+              (if (!= (.-Native c) nil) (do
+                  (set! v ((.-Native c) th args))
+                  (set! (.-depth th) d)
+                  (when (== v tailMark)
+                    (set! (values f args) (values (.-tcF th) (.-tcA th)))
+                    (continue)))
+
+
+                (let [code (.-Code c)]
+                  (set! (.-cur th) code)
+                  (let [fr (newFrame code (.-Env c) th)]
+                    (copy (.-S fr) args)
+                    (set! v ((.-Body code) fr))
+                    (set! (.-depth th) d)
+                    (when (== v tailMark)
+                      (set! (values f args from borrowed) (values (.-tcF fr) (.-tcA fr) fr true))
+                      (continue)))))))
+
+
+
+          (when (== (len pending) 0)
+            (return v))
+
+          (set! (values f args pending) (values v pending nil)))))))
+
+
+
+^{:go/end 219} (go/method overflow [^{:tag (* Thread)} th]
+  (RaiseStackOverflow))
+
+
+
+^{:go/end 222} (go/func Callback "Callback applies a closure to its arguments from Go (caml_callbackN).\n" ^Value [^{:tag (* Thread)} th ^Value f & ^{:tag (slice Value)} args] (.ApplyN th f args))
+
+
+
+^{:go/end 232} (go/method tick "tick counts a call or a loop's turn; every few thousand (a few hundred while other domains\nrun) the thread lets the others run.\n" [^{:tag (* Thread)} th]
+  (inc! (.-ticks th))
+  (when (or (> (.-ticks th) 4096) ^:go/paren (and (> (.-ticks th) 128) (> (.Load domainsRun) 0)))
+    (set! (.-ticks th) 0)
+    (.poll th)))

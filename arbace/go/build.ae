@@ -735,6 +735,11 @@ GR9a)."
       [:R (op "SliceToArrayPtr" (exk x :R) (desc T))]
       ;; between function types: the frame's value (a closure or a Go func) unchanged; between
       ;; channel types too (a channel's frame value is its channel, of any direction: §8.2)
+      ;; NH19 (a): a func to another func type (T named or not) of another descriptor: the value
+      ;; as Go memory holds it (an interpreted closure a real Go func of F, a Go func, such as an
+      ;; Arbace fn's adapter, itself), converted by reflect to T; unchanged for a nil operand
+      (and (vector? uF) (= :func (nth uF 0)) (not (nil-node? x)) (not (identical? (desc F) (desc T))))
+      [:R (op "ConvR" (iface-content (ex x) F) (desc T))]
       (and (vector? uF) (#{:func :chan} (nth uF 0))) [:R (exk x :R)]
       (= fk :R) [:R (op "ConvR" (exk x :R) (desc T))]
       :else (unsupported! (str "the conversion " (tstr F) " to " (tstr T)) "GR3"))))
@@ -1421,6 +1426,26 @@ GR9a)."
       (interpreted-named? b)
       (let [u (t/under b)] (and (vector? u) (= :struct (nth u 0)) (some :embedded (nth u 1)))))))
 
+;; NH18 (c), doc/go/NET-HTTP-SURVEY.md: the keys of the method sets given to each descriptor. Every
+;; build context gives the types it describes their sets again; a set that lacks a key given before is a
+;; bug (NH11's: a context that found no method's cell gave the set empty over the right one) and ends the
+;; build loudly. Descriptors are interned, one per type and generation (held for the process, as the registry holds them), so a redefinition is a new one.
+(defonce ^:private methods-given (java.util.IdentityHashMap.))
+
+(defn- check-methods-kept!
+  "Fails when the keys of the set about to be given to descriptor d of type ty lack one it already has."
+  [ty d keys]
+  (let [ks (set keys)]
+    (locking methods-given
+      (let [old (.get ^java.util.IdentityHashMap methods-given d)]
+        (when-let [lost (seq (remove ks old))]
+          (throw (ex-info (str "goi: internal error: the method set of type " (tstr ty) " would shrink from "
+                               (count old) " to " (count ks) " methods (lost " (str/join ", " (sort lost))
+                               "): a build context found no cell for methods another one gave (NH18)")
+                          {:goi/internal true :type (tstr ty)})))
+        (.put ^java.util.IdentityHashMap methods-given d (into (set old) ks))
+        nil))))
+
 (defn ensure-methods!
   "Gives the descriptor d of concrete type ty its method set (once per build context, §5.3):
   each method of ty's method set the method itself (its receiver is ty) or a thunk."
@@ -1471,6 +1496,7 @@ GR9a)."
             es (vec (keep (fn [e] (try (when e (desc (nth e 4)) e)
                                         (catch Exception ex (when-not (:goi/unsupported (ex-data ex)) (throw ex)))))
                           entries))]
+        (check-methods-kept! ty d (map first es))
         (op "TSetMethods" d (oa (map first es)) (oa (map second es))
             (oa (map #(long (int (first (name (first (nth % 2)))))) es))
             (oa (map #(long (second (nth % 2))) es))

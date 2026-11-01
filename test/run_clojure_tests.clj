@@ -16,7 +16,9 @@
 ;;       to OUT:
 ;;         {:ns NS :test n :pass n :fail n :error n
 ;;          :failing {test-name {:fail n :error n}}  ; per top-level deftest
-;;          :load-error "message"}                   ; only if NS itself failed to load
+;;          :load-error "message"                    ; only if NS itself failed to load
+;;          :evaluated #{path}}                      ; CLOJURE_TESTS_AOT: the sources loaded
+;;                                                   ; from source, without a compiled loader
 ;;       Unlike run_test.clj, a namespace that fails to load is reported instead of aborting.
 ;;   generative DIR OUT [NSLIST [EXPECTED]]
 ;;       What src/script/run_test_generative.clj does (clojure.test.generative.runner/-main on
@@ -32,24 +34,30 @@
 ;;       suite source recorded as the program records an embedded one (CLOJURE_TESTS_AOT's hook,
 ;;       test/suite_aot_hook.ae), then every recorded unit (the runtime's and the suite's) compiled
 ;;       by arbace.c2j into the directory OUT. With CLOJURE_TESTS_AOT set, run and generative load
-;;       the suite's sources through their compiled loaders (the same hook).
+;;       the suite's sources through their compiled loaders (the same hook); a source loaded from
+;;       source instead (no compiled loader: never recorded, or not in the program) is listed in
+;;       the result's :evaluated, and report counts it a regression unless the reference names it
+;;       in :not-compiled (c2j does not compile it) or :evaluated {path reason} (optional: known to
+;;       load from source, e.g. loaded only at run time).
 ;;   levels A B UPSTREAM
 ;;       The two levels' results compared (RPS16: a finding, not a class): the namespaces, tests and
 ;;       specs of the results file A (the AOT level's) that pass at one level and not the other, or
 ;;       run at one only, against the results file B (the eval level's), and the totals of both and
 ;;       of UPSTREAM (test/baseline-results.edn, the frozen JVM baseline's run: upstream's suite on the
 ;;       JDK passes every one of its assertions).
-;;   report OUT EXPECTED RESULTS NSS
+;;   report OUT EXPECTED RESULTS NSS [whole]
 ;;       Read the OUT/<ns>.edn results of the namespaces NSS (a space-separated string) and
 ;;       OUT/generative.edn, print per-namespace counts and totals, write all results to RESULTS
-;;       (shaped like EXPECTED) and compare them with EXPECTED. Exits 1 on any regression.
+;;       (shaped like EXPECTED) and compare them with EXPECTED. With whole (NSS is the whole list,
+;;       no NAMESPACE arguments), a namespace EXPECTED records that NSS lacks and EXPECTED does not
+;;       skip is a regression too (the listing no longer finds it). Exits 1 on any regression.
 ;;
 ;; Like run_test.clj it sets java.awt.headless. The run and generative modes also run on the Go
 ;; build (bin/clojure-tests with CLOJURE_TESTS_GO), which has no java.io.File: they read and
 ;; write files through FileInputStream and FileOutputStream only.
 
 (System/setProperty "java.awt.headless" "true")
-(require '[clojure.test :as t])
+(require '[clojure.test :as t] '[clojure.string :as str])
 
 (defn- read-edn [f]
   (let [f (java.io.File. ^String f)]
@@ -112,6 +120,13 @@
     (load-file f)
     ((resolve 'suite-aot.hook/install!) mode)))
 
+(defn- aot-evaluated
+  "With CLOJURE_TESTS_AOT, the paths of the suite's sources the hook loaded from source so far
+  for want of a compiled loader, or nil."
+  []
+  (when (System/getenv "CLOJURE_TESTS_AOT")
+    (some->> (resolve 'suite-aot.hook/evaluated) deref deref seq (into (sorted-set)))))
+
 (defn- run-ns [ns-sym out nslist expected]
   (skip-at-load! expected)
   (aot-hook! :compiled)
@@ -133,7 +148,8 @@
                                                     (:type m) inc))
                                            (report m))]
                         (select-keys (t/run-tests ns-sym) [:test :pass :fail :error]))))]
-    (spit-file out (pr-str (assoc result :ns ns-sym :failing @failing)))
+    (spit-file out (pr-str (cond-> (assoc result :ns ns-sym :failing @failing)
+                             (aot-evaluated) (assoc :evaluated (aot-evaluated)))))
     (shutdown-agents)
     (System/exit 0)))
 
@@ -165,7 +181,8 @@
                    :failing (into (sorted-set) (map :test failed))
                    :load-errors (into (sorted-set) load-errs)
                    :iters (reduce + (keep :iter results))
-                   :config cfg}]
+                   :config cfg}
+          summary (cond-> summary (aot-evaluated) (assoc :evaluated (aot-evaluated)))]
       (prn summary)
       (spit-file out (pr-str summary)))
     (shutdown-agents)
@@ -184,7 +201,8 @@
     (when-let [err (try-require 'clojure.test.generative.runner)]
       (println "aot: not loaded: clojure.test.generative.runner" err))
     ;; a source c2j does not compile loads from source at the AOT level (bin/clojure-tests
-    ;; compares them with the reference's :not-compiled)
+    ;; compares them with the reference's :not-compiled, and the namespaces not loaded above with
+    ;; its :not-loaded)
     ((resolve 'suite-aot.hook/compile!) out)
     (real-shutdown-agents)
     (System/exit 0)))
@@ -223,13 +241,22 @@
       (println (format "  %-70s AOT %-10s eval %s" (str (if (= :generative n) "spec " "") (or t n)) (name x) (name y))))
     (shutdown-agents)))
 
+(defn- load-error-text
+  "A load error's message without what varies from run to run: generated names' numbers, identity
+  hashes."
+  [s]
+  (-> (str s) (str/replace #"__\d+" "__N") (str/replace #"\beval\d+" "evalN") (str/replace #"@[0-9a-f]{4,}\b" "@N")))
+
 (defn- regressions
-  "Why the actual result r of a namespace is worse than the expected one e, or nil."
+  "Why the actual result r of a namespace is worse than the expected one e, or nil. A recorded
+  load error passes only as itself (its message, load-error-text)."
   [e r]
   (let [e (or e {:test 0 :pass 0 :fail 0 :error 0})]
     (cond
       (nil? r) ["no result (crashed or timed out)"]
       (and (:load-error r) (not (:load-error e))) [(str "load error: " (:load-error r))]
+      (and (:load-error r) (not= (load-error-text (:load-error r)) (load-error-text (:load-error e))))
+      [(str "load error: " (:load-error r) ", expected " (:load-error e))]
       :else
       (concat
         (when (not= (:test r) (:test e)) [(str "ran " (:test r) " tests, expected " (:test e))])
@@ -249,14 +276,35 @@
                 (str n " failed to load"))
               (when (not= (:tests r) (:tests e)) [(str (:tests r) " specs, expected " (:tests e))])))))
 
-(defn- report [out expected-file results-file nss]
+(defn- unexpected-evaluated
+  "The sources of the result r (a namespace's or test.generative's) loaded from source at the AOT
+  level (:evaluated) that the reference expected does not name in :not-compiled (c2j does not
+  compile them) nor in :evaluated (known to load from source)."
+  [expected r]
+  (let [known (set (map str (concat (keys (:not-compiled expected)) (keys (:evaluated expected)))))]
+    (seq (remove #(known (str %)) (:evaluated r)))))
+
+(defn- strip-evaluated
+  "r with only its unexpected :evaluated sources, or none."
+  [expected r]
+  (if-let [ev (unexpected-evaluated expected r)]
+    (assoc r :evaluated (vec ev))
+    (some-> r (dissoc :evaluated))))
+
+;; with the whole list run (report's whole), the reference's namespaces that did not run: neither
+;; listed nor skipped (a file the listing no longer finds: its ns form unreadable, or gone)
+(defn- unlisted [expected nss]
+  (let [ran (set nss) skipped (set (keys (:skipped expected)))]
+    (sort-by str (remove #(or (ran %) (skipped %)) (keys (:namespaces expected))))))
+
+(defn- report [out expected-file results-file nss whole]
   (let [expected (or (read-edn expected-file) {})
         nss      (map symbol (re-seq #"\S+" nss))
         results  (into (sorted-map)
-                       (for [n nss] [n (some-> (read-edn (str out "/" n ".edn")) (dissoc :ns))]))
+                       (for [n nss] [n (some->> (read-edn (str out "/" n ".edn")) (strip-evaluated expected) (#(dissoc % :ns)))]))
         gen-file (str out "/generative.edn")
         gen-ran  (.exists (java.io.File. (str out "/generative.log")))
-        gen      (some-> (read-edn gen-file) (select-keys [:tests :failures :failing :load-errors]))
+        gen      (some->> (read-edn gen-file) (strip-evaluated expected) (#(select-keys % [:tests :failures :failing :load-errors :evaluated])))
         bad      (atom [])
         line     (fn [n t a p f e s]
                    (println (format "%-62s %5s %6s %6s %5s %5s  %s" n t a p f e s)))]
@@ -273,12 +321,38 @@
                     (seq (:failing r)) "expected failures"
                     :else ""))
         (line n "-" "-" "-" "-" "-" "REGRESSION")))
+    (when (seq whole)
+      (doseq [n (unlisted expected nss)]
+        (swap! bad conj [n ["expected namespace not run: not listed (its file not found as a namespace)"]])
+        (line n "-" "-" "-" "-" "-" "REGRESSION (not listed)")))
+    ;; the AOT level: a source loaded from source, not through a compiled loader, runs at the eval
+    ;; level (each process loads every namespace, so a load's fallback is in every result)
+    (doseq [[src n] (sort-by key (frequencies (mapcat :evaluated (cons gen (vals results)))))]
+      (swap! bad conj ['aot-level [(str src " loaded from source, not through a compiled loader (in " n " runs)")]]))
     (let [rs (keep val results)
           sum (fn [k] (reduce + (keep k rs)))]
       (line (format "TOTAL: %d namespaces (%d failed to load), %d skipped"
                     (count results) (count (filter :load-error rs)) (count (:skipped expected)))
             (sum :test) (+ (sum :pass) (sum :fail) (sum :error))
             (sum :pass) (sum :fail) (sum :error) ""))
+    ;; GTS81 (a): the negative controls (CLOJURE_TESTS_CONTROLS, test/clojure/controls.edn: [{:id :subject NS
+    ;; :reference NS}]): the subject's result judged by regressions against the reference's expected one,
+    ;; which must find it worse (another count of tests); none found, the judge passes what differs
+    (doseq [{:keys [id subject reference]} (some-> (System/getenv "CLOJURE_TESTS_CONTROLS") read-edn)
+            :let [r (get results subject) e (get-in expected [:namespaces reference])
+                  what (str "control " id " (" subject "'s result against " reference "'s expected)")]]
+      (cond
+        ;; a run of the whole list or the essential subset (CLOJURE_TESTS_CONTROLS_STRICT, bin/clojure-tests
+        ;; --essential) must judge its controls: a subject missing from it (a list that lost it) is a
+        ;; failure, as a control that passes is (report 060, finding 5); a run of chosen namespaces need not
+        (not (contains? results subject))
+        (if (or (seq whole) (System/getenv "CLOJURE_TESTS_CONTROLS_STRICT"))
+          (swap! bad conj [(symbol (str "control-" id)) [(str what ": not judged, " subject " not run (the run must judge its controls)")]])
+          (println (str what ": not judged, " subject " not run")))
+        (nil? r) (println (str what ": not judged, " subject " has no result"))
+        (nil? e) (swap! bad conj [(symbol (str "control-" id)) [(str what ": not judged, no expected result of " reference)]])
+        (seq (regressions e r)) (println (str what ": " (first (regressions e r)) ", as a control must (GTS81 (a))"))
+        :else (swap! bad conj [(symbol (str "control-" id)) [(str "control passed: " what ": the judge passes what differs")]])))
     (when gen-ran
       (println "test.generative:" (or gen "no result (crashed?)"))
       (when-let [why (seq (generative-regressions (:generative expected) gen))]
@@ -301,7 +375,7 @@
       (do (println "\nno regressions against" expected-file)
           (System/exit 0)))))
 
-(let [[mode a b c d] *command-line-args*]
+(let [[mode a b c d e] *command-line-args*]
   (case mode
     "list"       (let [expected (read-edn b)
                        skipped (set (keys (:skipped expected)))]
@@ -315,4 +389,4 @@
     "generative" (run-generative a b c d)
     "compile"    (compile-suite a b c)
     "levels"     (levels a b c)
-    "report"     (report a b c d)))
+    "report"     (report a b c d e)))

@@ -1,0 +1,205 @@
+;; si's runtime: Scheme's values (doc/scheme/SCHEME-SURVEY.md §5.1, "As built: SM5"). Exact integers are
+;; int64 or *big.Int (normalized: a *big.Int never fits int64), exact rationals *big.Rat (never an
+;; integer), flonums float64; booleans Go's bool; characters Char (a Unicode scalar value); strings
+;; *String (runes, mutable: SC8 (a)); symbols *Symbol (interned; gensyms are not); pairs *Pair; the
+;; empty list, the unspecified value and the end of file singletons; vectors *Vector; bytevectors
+;; *Bytevector; procedures *Prim, *Closure and *Cont; several values *Values.
+(in-ns 'go.arbace.scm)
+
+(go/file "value.go"
+  :doc "Package scm is si's runtime (doc/scheme/SCHEME-SURVEY.md, \"As built: SM5\"): Scheme's values, the
+numeric tower, the evaluator of core forms on an explicit continuation (heap frames: call/cc
+re-entrant, proper tail calls), dynamic-wind, exception handlers, conditions, records,
+hashtables, ports, and the primitives psyntax's libraries name. It imports std only.\n"
+  :imports [[math "math"] [big "math/big"] [strconv "strconv"] [sync "sync"] [atomic "sync/atomic"]])
+
+(go/type Pair "Pair is a cons cell (mutable).\n" (struct ^any Car ^any Cdr))
+
+(go/type Special "Special is a singleton: the empty list, the unspecified value, the end of file, ...\n"
+  (struct ^string Name))
+
+(go/var ^{:tag (* Special) :doc "Null is the empty list.\n"} Null (addr (lit Special :Name "()")))
+(go/var ^{:tag (* Special) :doc "Unspec is the unspecified value (Chez's void).\n"} Unspec (addr (lit Special :Name "#<void>")))
+(go/var ^{:tag (* Special) :doc "Eof is the end-of-file object.\n"} Eof (addr (lit Special :Name "#!eof")))
+(go/var ^{:tag (* Special) :doc "Unbound is the content of an unbound location or a letrec variable before its init.\n"} Unbound (addr (lit Special :Name "#<unbound>")))
+(go/var ^{:tag (* Special) :doc "BwpObj is a default object (an optional argument not given).\n"} DefaultObj (addr (lit Special :Name "#!default")))
+
+(go/type Char "Char is a Scheme character: a Unicode scalar value.\n" rune)
+
+(go/type String "String is a Scheme string: its scalar values, mutable unless RO.\n"
+  (struct ^{:tag (slice rune)} R ^bool RO))
+
+(go/type Symbol "Symbol is a symbol; interned unless Gensym (then Uid tells it apart when written).\n"
+  (struct ^string Name ^bool Gensym ^string Uid ^any Value))
+
+(go/type Vector "Vector is a Scheme vector.\n" (struct ^{:tag (slice any)} V ^bool RO))
+
+(go/type Bytevector "Bytevector is a Scheme bytevector.\n" (struct ^{:tag (slice byte)} B))
+
+(go/type Values "Values is several values (zero or more than one) delivered to one continuation.\n"
+  (struct ^{:tag (slice any)} V))
+
+(go/type Loc "Loc is a location of the store: a top-level variable (a free symbol of a core form).\n"
+  (struct ^{:tag (* Symbol)} Name ^any V))
+
+;; ---------------------------------------------------------------------------------------
+;; Symbols
+
+(go/var ^{:tag sync/Mutex} symMu)
+(go/var ^{:tag (map string (* Symbol))} symtab (make (map string (* Symbol))))
+(go/var ^{:tag atomic/Int64} gensymN)
+
+(go/func Intern "Intern is the symbol named name.\n" ^{:tag (* Symbol)} [^string name]
+  (.Lock symMu)
+  (let [s (aget symtab name)]
+    (when (== s nil)
+      (set! s (addr (lit Symbol :Name name)))
+      (aset symtab name s))
+    (.Unlock symMu)
+    s))
+
+(go/func Gensym "Gensym is a new uninterned symbol whose name is name.\n" ^{:tag (* Symbol)} [^string name]
+  (let [n (.Add gensymN 1)]
+    (addr (lit Symbol :Name name :Gensym true :Uid (+ "g" (strconv/FormatInt n 10))))))
+
+;; ---------------------------------------------------------------------------------------
+;; Constructors and accessors
+
+(go/func Cons ^{:tag (* Pair)} [^any a ^any d] (addr (lit Pair :Car a :Cdr d)))
+
+(go/func List "List is the proper list of xs.\n" ^any [& ^{:tag (slice any)} xs]
+  (ListTail xs Null))
+
+(go/func ListTail "ListTail is the list of xs ending in tail.\n" ^any [^{:tag (slice any)} xs ^any tail]
+  (let [l tail]
+    (for [i (- (len xs) 1)] (>= i 0) (dec! i)
+      (set! l (Cons (aget xs i) l)))
+    l))
+
+(go/func ListSlice "ListSlice is the elements of the proper list l, ok false when l is not a proper list (improper, or cyclic: a slow pointer at half the pace meets it; SM8b).\n"
+  [^any l] :results [(slice any) bool]
+  (let [^{:tag (slice any)} out nil
+        ^any slow l]
+    (while true
+      (type-switch [p l]
+        (case [(* Pair)]
+          (set! out (append out (.-Car p)))
+          (set! l (.-Cdr p))
+          (when (== (bit-and (len out) 1) 0)
+            (set! slow (.-Cdr (assert (* Pair) slow)))
+            (when (== slow l)
+              (return out false))))
+        (default (return out (== l (conv any Null))))))
+    (return out true)))
+
+(go/func NewString "NewString is a mutable Scheme string of Go string s.\n" ^{:tag (* String)} [^string s]
+  (addr (lit String :R (conv (slice rune) s))))
+
+(go/func Str "Str is the immutable Scheme string of Go string s (a literal).\n" ^{:tag (* String)} [^string s]
+  (addr (lit String :R (conv (slice rune) s) :RO true)))
+
+(go/method String "String is the Go string of s.\n" ^string [^{:tag (* String)} s] (conv string (.-R s)))
+
+(go/func NewVector ^{:tag (* Vector)} [^{:tag (slice any)} v] (addr (lit Vector :V v)))
+
+(go/func Truthy "Truthy is whether v counts as true (every value but #f).\n" ^bool [^any v]
+  (let [(values b ok) (assert bool v)]
+    (or (not ok) b)))
+
+(go/func Bool "Bool is b as a Scheme boolean.\n" ^any [^bool b] b)
+
+;; ---------------------------------------------------------------------------------------
+;; Equivalence
+
+(go/func Eq "Eq is eq?: identity, and Chez's eq? on fixnums, characters, booleans and the singletons.\n"
+  ^bool [^any a ^any b]
+  (type-switch [x a]
+    (case [int64] (let [(values y ok) (assert int64 b)] (return (and ok (== x y)))))
+    (case [Char] (let [(values y ok) (assert Char b)] (return (and ok (== x y)))))
+    (case [bool] (let [(values y ok) (assert bool b)] (return (and ok (== x y)))))
+    (case [float64] (let [(values y ok) (assert float64 b)] (return (and ok (== (math/Float64bits x) (math/Float64bits y))))))
+        (default (return (== a b)))))
+
+(go/func Eqv "Eqv is eqv?: eq?, and numbers of one exactness equal (flonums by bits), strings of length 0.\n"
+  ^bool [^any a ^any b]
+  (type-switch [x a]
+    (case [float64]
+      (let [(values y ok) (assert float64 b)]
+        (return (and ok (== (math/Float64bits x) (math/Float64bits y))))))
+    (case [(* big/Int)]
+      (let [(values y ok) (assert (* big/Int) b)]
+        (return (and ok (== (.Cmp x y) 0)))))
+    (case [(* big/Rat)]
+      (let [(values y ok) (assert (* big/Rat) b)]
+        (return (and ok (== (.Cmp x y) 0)))))
+    (case [(* Complex)]
+      (let [(values y ok) (assert (* Complex) b)]
+        (return (and ok (Eqv (.-Re x) (.-Re y)) (Eqv (.-Im x) (.-Im y))))))
+    (case [(* String)]
+      (let [(values y ok) (assert (* String) b)]
+        (return (and ok (or (== x y) (and (== (len (.-R x)) 0) (== (len (.-R y)) 0)))))))
+    (case [(* Bytevector)]
+      (let [(values y ok) (assert (* Bytevector) b)]
+        (return (and ok (or (== x y) (and (== (len (.-B x)) 0) (== (len (.-B y)) 0)))))))
+    (default (return (Eq a b)))))
+
+(go/func Equal
+  "Equal is equal?: eqv?, and pairs, vectors, strings and bytevectors of equal parts; it ends on cyclic
+data (R6RS 11.5): after a bound on the parts compared, it compares again remembering the pairs of
+pairs and vectors already compared, which are then taken as equal (a bisimulation).\n"
+  ^bool [^any a ^any b]
+  (let [budget 100000
+        (values r ok) (equalStep a b (addr budget) nil)]
+    (when ok
+      (return r))
+    (let [(values r2 _) (equalStep a b nil (make (map (array 2 any) bool)))]
+      r2)))
+
+(go/func equalStep
+  "equalStep compares a and b; with budget, ok is false when the budget ran out; with seen, pairs of
+compound values already met are equal.\n"
+  [^any a ^any b ^{:tag (* int)} budget ^{:tag (map (array 2 any) bool)} seen] :results [bool bool]
+  (while true
+    (when (Eqv a b)
+      (return true true))
+    (when (!= budget nil)
+      (set! @budget (- @budget 1))
+      (when (< @budget 0)
+        (return false false)))
+    (type-switch [x a]
+      (case [(* Pair)]
+        (let [(values y ok) (assert (* Pair) b)]
+          (when (not ok)
+            (return false true))
+          (when (!= seen nil)
+            (let [k (lit (array 2 any) a b)]
+              (when (aget seen k)
+                (return true true))
+              (aset seen k true)))
+          (let [(values r ok2) (equalStep (.-Car x) (.-Car y) budget seen)]
+            (when (or (not ok2) (not r))
+              (return r ok2)))
+          (set! a (.-Cdr x))
+          (set! b (.-Cdr y))))
+      (case [(* Vector)]
+        (let [(values y ok) (assert (* Vector) b)]
+          (when (or (not ok) (!= (len (.-V x)) (len (.-V y))))
+            (return false true))
+          (when (!= seen nil)
+            (let [k (lit (array 2 any) a b)]
+              (when (aget seen k)
+                (return true true))
+              (aset seen k true)))
+          (range [i e (.-V x)]
+            (let [(values r ok2) (equalStep e (aget (.-V y) i) budget seen)]
+              (when (or (not ok2) (not r))
+                (return r ok2))))
+          (return true true)))
+      (case [(* String)]
+        (let [(values y ok) (assert (* String) b)]
+          (return (and ok (== (conv string (.-R x)) (conv string (.-R y)))) true)))
+      (case [(* Bytevector)]
+        (let [(values y ok) (assert (* Bytevector) b)]
+          (return (and ok (== (conv string (.-B x)) (conv string (.-B y)))) true)))
+      (default (return false true))))
+  (return false true))

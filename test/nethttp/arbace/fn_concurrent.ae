@@ -1,0 +1,39 @@
+;; NH3 (doc/go/NET-HTTP-SURVEY.md, "As built: NH2 (write-ahead)"): one Arbace fn as an http.HandlerFunc
+;; called by the server's goroutines for 200 concurrent requests on their own connections, each goroutine
+;; entering Arbace (a jrt Thread adopted per goroutine), an atom shared; then 300 sequential requests on
+;; one kept-alive connection. Only counts and sums are printed. Expected output: fn_concurrent.out.
+(ns go.nh.fnconc (:require [arbace.go :as go] [go.io]))
+(go/import [http "net/http"] [httptest "net/http/httptest"] [io "io"] [fmt "fmt"] [strconv "strconv"]
+           [sync "sync"] [atomic "sync/atomic"])
+(go/func Load ^string [^{:tag http/HandlerFunc} f ^int concurrent ^int sequential]
+  (let [srv (httptest/NewServer f)
+        ^{:tag atomic/Int64} bad (zero atomic/Int64)
+        ^{:tag sync/WaitGroup} wg (zero sync/WaitGroup)
+        tr (addr (lit http/Transport :DisableKeepAlives true))
+        c (addr (lit http/Client :Transport tr))
+        fetch (fn ^string [^{:tag (* http/Client)} c ^int i]
+              (let [(values resp err) (.Get c (fmt/Sprintf "%s/?n=%d" (.-URL srv) i))]
+                (when (!= err nil) (return (.Error err)))
+                (let [(values b _) (io/ReadAll (.-Body resp))]
+                  (.Close (.-Body resp))
+                  (return (conv string b)))))]
+    (defer (.Close srv))
+    (for [i 0] (< i concurrent) (inc! i)
+      (.Add wg 1)
+      (go ((fn [^int i]
+             (defer (.Done wg))
+             (when (!= (fetch c i) (strconv/Itoa i)) (.Add bad 1)))
+           i)))
+    (.Wait wg)
+    (for [i 0] (< i sequential) (inc! i)
+      (when (!= (fetch (.Client srv) i) (strconv/Itoa i)) (.Add bad 1)))
+    (return (fmt/Sprintf "requests %d bad %d" (+ concurrent sequential) (.Load bad)))))
+(def served (atom 0))
+(def total (atom 0))
+(println (Load (fn [w r]
+                 (let [n (Long/parseLong (.Get (.Query (.-URL r)) "n"))]
+                   (swap! served inc)
+                   (swap! total + n)
+                   (go.io/WriteString w (str n))))
+               200 300))
+(println "served" @served "sum" @total)

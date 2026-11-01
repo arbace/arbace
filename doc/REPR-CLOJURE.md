@@ -267,7 +267,7 @@ trip from Clojure.
 `bin/repr-clojure check --roundtrip` (in `bin/gate --full`) runs `bin/repr-clojure roundtrip`
 over each corpus, in memory: every file `read` translates must come back from `print` under
 its name, byte for byte, except the known differences, `test/repr/clojure/roundtrip-known.edn`
-(none; a new difference, or a known one that comes back equal, fails). On 2026-10-18:
+(none; a new difference, a known one that comes back equal or differently, or a corpus whose size is not the one recorded in its `:counts`, fails; the frozen tree is the one pinned by `test/frozen-clojure.sha256`). On 2026-10-18, `arbace/` on 2026-11-01:
 
 | corpus | way | files | equal | apart |
 |---|---|---|---|---|
@@ -278,7 +278,7 @@ its name, byte for byte, except the known differences, `test/repr/clojure/roundt
 | the libraries into `.ae` files | Clojure → Arbace → Clojure | 33 | 21 | 12 `.cljc` (test.check, tools.reader) back as their `:clj` readings |
 | the suite into `.ae` files, `--full` | Clojure → Arbace → Clojure | 103 | 103 | |
 | the libraries into `.ae` files, `--full` | Clojure → Arbace → Clojure | 33 | 33 | |
-| `arbace/` | Arbace → Clojure → Arbace | 284 | 134 | 150 outside `read`'s image (they name `clojure.*` themselves: the Java forms' provenance lines, "Converted from clojure/lang/Var.java", spec's "Vendored from" lines, code and docstrings naming both dialects, as repr/clojure's own; `core.ae` defines `return` without excluding it), each printed text making the round trip from Clojure |
+| `arbace/` | Arbace → Clojure → Arbace | 325 | 175 | 150 outside `read`'s image (they name `clojure.*` themselves: the Java forms' provenance lines, "Converted from clojure/lang/Var.java", spec's "Vendored from" lines, code and docstrings naming both dialects, as repr/clojure's own; `core.ae` defines `return` without excluding it), each printed text making the round trip from Clojure and reading back as exactly what `read` makes of the original |
 
 0 differences in all. With `--full` the 13 `.cljc` files (the suite's `reader.cljc`, the
 libraries' 12; the frozen `clojure/` has none) come back whole, 94 conditionals recorded, and

@@ -3665,3 +3665,58 @@ builds; and one `cp ... /dev/null` while looking at the key file, against the ru
 - t07728 (`hotspot/jtreg/runtime/reflect/ReflectOutOfMemoryError.java`, compiled: "TEST_BUG: failed to provoke
   OutOfMemoryError"; interp: timeout) joins `memory-limit`, under that class's own decision, JCS99 (a): Go's collector
   has no heap ceiling.
+
+## As built: the negative controls (GTS81 (a), 2026-10-31, write-ahead)
+
+doc/GATE-SURVEY.md's GTS81 (a) (the 2026-10-31 finding: a second `judge` in `bin/java-check` made every interp and
+compiled run pass) gives each level a case that must not pass. `test/java/controls.edn` names each control: an id
+(`c00001`), a subject test, a reference test and the levels. `java.check/plan` writes the reference's expected results
+into the subject's plan (`control CID EXIT OUT LEN DET MASKED DET-MASKED`, its first action; `control-classes CID
+DIGEST`); `bin/java-check` judges the subject's own run a second time against them, by the level's judge
+(`run_actions`' `judge` for interp and compiled, `classes_verdict` for classes), and prints the row under the
+control's id. No test, no build and no run of its own: c00001 is t03208 EnumsRecords' run judged against t03209
+EvalOrder's reference (both exit 0, another stdout: `differ`; another class file set: `differ`), at interp
+(`--essential` too: both are essential), compiled (`--essential-compiled` too) and classes. `java.check/report` (the
+run's, `--judge`'s) takes the controls' rows apart from the tests (no record, class, essential or levels entry) and
+fails the run on a control that passes (`control passed: ...`) or that has no judged result (`fail` or `differ`)
+while its subject reached the judge (`control not judged: ...`); `--essential-compiled` the same in its own tail.
+The levels read, diagnostics and print had no control then: their verdicts are a tool's status and log (read), a
+golden file compared inside `diag_actions` (diagnostics) and the five steps of `java.print/judge` (print), with no
+reference of another test to judge against without a run of its own (doc/GATE-SURVEY.md, "As built: GTS72,
+GTS79-GTS82 (write-ahead)", GTS84).
+
+**GTS84 (a): diagnostics and print** (doc/GATE-SURVEY.md, "As built: GTS83-GTS87 (write-ahead)"). Two of the three
+now have one; read is left (its verdict is the reader's own status and summary line, nothing of another test to
+cross). The golden comparison came out of `diag_actions` as `diag_golden OUT GOLDEN PREFIX` and the judgment of
+`check_diag` as `diag_judge P SUF EXP` (each action's status against EXP's, each golden action's `dI.golden`, a
+control's `dI.CID.golden`), both used by the tests and the controls alike. **c00002** is t06443 T5017953's javac
+output judged against t06444 T6304921's golden file (`java.check/plan-diag` writes `control-diag CID EXIT
+DIR/FILE`, the reference's first golden action): the subject's actions up to its first golden one, that action's
+status against the reference's (both 1) and its output against `T6304921.out` (`differ`, line 1). At print,
+**c00001** gains the level (`control-print CID REF` in the subject's plan, `control-reference CID` in the
+reference's): `print_check_one` writes `print/classes.res.CID` (the printed class files' digest against the
+reference's JDK digest, by `classes_verdict`) and keeps `print/c2` for both; `java.print/judge` prints the control's
+row from the steps' own comparisons crossed (`control-steps`): forms (`forms-result`, the subject's F2 against the
+reference's F1), text (`text-result`, the full print against the reference's renamed source), classes (the digest,
+then `classes-result` against the reference's printed class files, its original's as it passes). Unlike a test's
+(the first step that does not pass), a control's row is `differ` only when every crossed step differs: one
+comparison that passes what differs makes it `pass` (`crossed steps passed: ...`), so each of the three is covered.
+A control whose reference was not printed in the run (a selection: `--only`) is `left`, which the report prints and
+leaves; `unjudged` (no step taken) while its subject passed is `control not judged`.
+
+**GTS91 (a): read** (doc/GATE-SURVEY.md, "As built: GTS91 (write-ahead)"). The read level's one recorded output is the
+essential tests' committed forms, compared at `bin/java-check --forms verify`: `forms_same` (`diff -r`, the provenance
+apart) is that comparison and `forms_controls` its control. c00001 gains `:forms` in `:levels` (no level of the run,
+so `java.check/report` does not look for it): t03208's fresh forms against t03209's committed ones in
+`test/java/forms/` must differ; the verify prints `control c00001 (forms): ... differ ..., as they must`, and fails
+with `control passed: c00001 (forms): ...` when they are equal. A control whose subject was not read in the run or whose
+reference is not committed is `left`. No read, no record and no step of its own: the verify's fresh forms judged twice.
+
+**What the controls catch** (review 001, finding 7; doc/GATE-SURVEY.md, "As built: review 001's fixes"). Each catches
+a judge that passes everything, or one skipped, which is what GTS81 asks; none catches every partial one. At interp and
+compiled the subject and the reference both exit 0 and their stdout differ: a `judge` that ignores stdout passes c00001
+and is caught, one that ignores the status alone is not. At classes, print's classes step and `:forms` (the read level)
+the two trees differ by their file names (each test's own classes, its `package tNNNNN` prefix) as well as their
+contents: a comparison that ignored the files' contents would still fail them. At diagnostics c00002's output and the
+golden file differ by the file names in the messages (`T5017953.java:...` against `T6304921.java:...`) as well as the
+messages' keys: not a judge that ignores the messages' text.

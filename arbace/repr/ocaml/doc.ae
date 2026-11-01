@@ -1,0 +1,98 @@
+(ns arbace.repr.ocaml.doc
+  "The layout engine of repr/ocaml's printer (doc/ocaml/OCAML-SURVEY.md, \"As built: O2\"): a document
+  algebra after Wadler and Oppen, the idea of crefactor/togo/ml_doc.go, rendered to a width.
+
+  A document is
+    a string                text, printed as is (no newline in it; see :raw)
+    :line                   a space, or a newline in the enclosing group's break mode
+    :soft                   nothing, or a newline in break mode
+    :hard                   a newline, always (the enclosing groups break)
+    [:c d...]               concatenation
+    [:g d...]               a group: laid out flat when it fits in the line, else broken
+    [:n k d...]             the documents with the indentation increased by k after a newline
+    [:raw s]                text with newlines in it (a quoted string), printed as is
+  Indentation is written lazily, so that a blank line has no trailing spaces."
+  (:refer-clojure :exclude [cat])
+  (:import [java.lang StringBuilder]))
+
+(defn cat [& ds] (into [:c] ds))
+(defn grp [& ds] (into [:g] ds))
+(defn nest [k & ds] (into [:n k] ds))
+(defn raw [s] [:raw s])
+
+(defn join
+  "The documents with sep between them (a document)"
+  [sep ds]
+  (loop [ds (seq ds) acc [:c]]
+    (if ds
+      (recur (next ds) (if (= acc [:c]) (conj acc (first ds)) (conj acc sep (first ds))))
+      acc)))
+
+(defn- last-line-length [^String s]
+  (let [i (.lastIndexOf s "\n")]
+    (if (neg? i) (count s) (- (count s) i 1))))
+
+(defn- fits?
+  "Whether the items (and the rest of the stack) fit in w columns up to the first line break"
+  [w items]
+  (loop [w w items items]
+    (cond
+      (neg? w) false
+      (nil? items) true
+      :else
+      (let [[i m d] (first items) more (next items)]
+        (cond
+          (string? d) (recur (- w (count d)) more)
+          (nil? d) (recur w more)
+          (seq? d) (recur w (reduce (fn [acc x] (cons [i m x] acc)) more (reverse d)))
+          (= d :line) (if (= m :flat) (recur (dec w) more) true)
+          (= d :soft) (if (= m :flat) (recur w more) true)
+          (= d :hard) (if (= m :flat) false true)
+          :else
+          (case (first d)
+            :raw (if (= m :flat) false (recur (- w (count (second d))) more))
+            :c (recur w (reduce (fn [acc x] (cons [i m x] acc)) more (reverse (rest d))))
+            :n (recur w (reduce (fn [acc x] (cons [(+ i (second d)) m x] acc)) more (reverse (nnext d))))
+            :g (recur w (reduce (fn [acc x] (cons [i m x] acc)) more (reverse (rest d))))))))))
+
+(defn render
+  "The document as text laid out in width columns"
+  [doc width]
+  (let [sb (StringBuilder.)
+        pending (atom -1)]
+    (letfn [(emit [^String s]
+              (when (>= @pending 0)
+                (dotimes [_ @pending] (.append sb \space))
+                (reset! pending -1))
+              (.append sb s))
+            (newline! [i]
+              (.append sb "\n")
+              (reset! pending i))]
+      (loop [items (list [0 :break doc]) col 0]
+        (if (nil? items)
+          (str sb)
+          (let [[i m d] (first items) more (next items)]
+            (cond
+              (string? d) (do (emit d) (recur more (+ col (count d))))
+              (nil? d) (recur more col)
+              (seq? d) (recur (reduce (fn [acc x] (cons [i m x] acc)) more (reverse d)) col)
+              (= d :line) (if (= m :flat)
+                            (do (emit " ") (recur more (inc col)))
+                            (do (newline! i) (recur more i)))
+              (= d :soft) (if (= m :flat)
+                            (recur more col)
+                            (do (newline! i) (recur more i)))
+              (= d :hard) (do (newline! i) (recur more i))
+              :else
+              (case (first d)
+                :raw (let [s (second d)]
+                       (emit s)
+                       (recur more (if (>= (.indexOf ^String s "\n") 0) (last-line-length s) (+ col (count s)))))
+                :c (recur (reduce (fn [acc x] (cons [i m x] acc)) more (reverse (rest d))) col)
+                :n (recur (reduce (fn [acc x] (cons [(+ i (second d)) m x] acc)) more (reverse (nnext d))) col)
+                :g (let [flat (reduce (fn [acc x] (cons [i :flat x] acc)) nil (reverse (rest d)))]
+                     (if (and (= m :flat) true)
+                       (recur (reduce (fn [acc x] (cons [i :flat x] acc)) more (reverse (rest d))) col)
+                       (if (fits? (- width col) (reduce (fn [acc x] (cons [i :flat x] acc)) more (reverse (rest d))))
+                         (recur (reduce (fn [acc x] (cons [i :flat x] acc)) more (reverse (rest d))) col)
+                         (recur (reduce (fn [acc x] (cons [i :break x] acc)) more (reverse (rest d))) col))))))))))))

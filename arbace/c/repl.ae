@@ -1,0 +1,123 @@
+(ns arbace.c.repl
+  "ci's REPL state (doc/C23-SURVEY.md §6.6, \"As built: C5 (write-ahead)\"; doc/c/SPEC.md §4): a translation
+  unit is a namespace, its C forms the declarations typed or loaded into it (arbace.c's macros c/file,
+  c/include, c/defn, c/var, c/declare, c/typedef, c/struct, c/union, c/enum, c/group, c/static-assert); a
+  declaration of a name already declared replaces it (a redefinition: the next run calls the new
+  definition, every call going through the function's cell); (c/include \"<stdio.h>\") reads the header in
+  the unit's context with repr/c and enters musl's declarations; (c/run-main 'c.letters) checks the REPL's
+  units, links them with musl, builds and runs main in the program mode: exit and abort end the run, not
+  the REPL, whose result is the status.
+
+  The back end is *run-nodes*: on the executable built with ci, arbace.lang.CInterp's natives (the program
+  loaded into ci's back end in the process, the heavy list's); on the light path (stage 0), tools/cirun run
+  as a process over the node program's text, its output the REPL's."
+  (:require [arbace.repr.c :as rc]
+            [arbace.repr.c.host :as host]
+            [arbace.c.run :as run]
+            [arbace.c.musl :as musl]
+            [arbace.string :as str]))
+
+(set! *warn-on-reflection* true)
+
+(defonce ^{:doc "The REPL's units: {ns {:std :forms [form ...] :units {header-unit read}}}."} units (atom {}))
+
+(defn- root ^String [] (or (System/getenv "ARBACE_ROOT") (System/getProperty "user.dir")))
+
+(def ^:private host* (delay (host/load-host (str (root) "/test/c/host"))))
+(def ^:private lib* (delay (musl/library @host* (root))))
+
+(defn- decl-name
+  "The name a top-level C form declares (for redefinition), or nil."
+  [f]
+  (when (seq? f)
+    (case (first f)
+      (c/defn c/var c/declare c/typedef) (let [n (second f)] (if (symbol? n) (name n) (when (seq? n) (second n))))
+      (c/struct c/union c/enum) (let [n (second f)] (when (symbol? n) (str (first f) " " n)))
+      nil)))
+
+(defn declare!
+  "A declaration form entered into the unit `ns` (replacing an earlier one of the same name and kind); the
+  unit's name."
+  [f ns]
+  (let [n (decl-name f)]
+    (swap! units update ns
+           (fn [u]
+             (let [u (or u {:std :c23 :forms [] :units {}})
+                   fs (:forms u)
+                   i (when n (first (keep-indexed (fn [i g] (when (and (= n (decl-name g)) (= (first g) (first f))) i)) fs)))]
+               (assoc u :forms (if i (assoc fs i f) (conj fs f))))))
+    (symbol (str ns) (or n (str (first f))))))
+
+(defn file!
+  "c/file at the REPL: the unit's standard."
+  [f ns]
+  (let [std (second (drop-while #(not= % :std) f))]
+    (swap! units update ns #(assoc (or % {:forms [] :units {}}) :std (or std :c23)))
+    ns))
+
+(defn include!
+  "(c/include \"<stdio.h>\") at the REPL: the header read by repr/c in the unit's standard, its header units
+  and a c/include form of each entered into the unit."
+  [^String spec ns]
+  (let [u (get @units ns)
+        std (name (or (:std u) :c23))
+        dir (java.io.File. (str (or (System/getenv "TMPDIR") (str (root) "/.tmp/tmp")) "/ci-repl"))
+        _ (.mkdirs dir)
+        f (java.io.File. dir (str "include-" (Math/abs (hash spec)) ".c"))
+        _ (spit f (str "#include " spec "\n"))
+        fc (host/file-config [(str "-std=" std)] std)
+        rd (rc/read-c (host/config @host* fc (.getPath dir)) fc (.getAbsolutePath f) false)]
+    (when (:error rd) (throw (ex-info (str "c/include: " (str/join "; " (:error rd))) {:c/include spec})))
+    (swap! units update ns
+           (fn [u]
+             (let [u (or u {:std :c23 :forms [] :units {}})]
+               (-> u
+                   (update :units merge (:units rd))
+                   (update :forms into (filter #(and (seq? %) (= 'c/include (first %))) (:forms rd)))))))
+    spec))
+
+(defn- unit-read
+  "A REPL unit as a read: {:forms :units}."
+  [u]
+  {:forms (:forms u) :units (:units u)})
+
+(defn light-run-nodes
+  "The light path's back end: tools/cirun over the node program's text, the REPL's output its output."
+  [^String text argv]
+  (let [f (java.io.File/createTempFile "ci-repl" ".nodes")
+        cirun (or (System/getenv "CIRUN") (str (root) "/.tmp/ci/cirun"))]
+    (try
+      (spit f text)
+      (let [pb (ProcessBuilder. ^java.util.List (into [cirun (.getPath f)] argv))
+            _ (.redirectErrorStream pb true)
+            p (.start pb)
+            out (slurp (.getInputStream p))
+            st (.waitFor p)]
+        (print out) (flush)
+        st)
+      (finally (.delete f)))))
+
+(def ^:dynamic *run-nodes*
+  "The back end: (fn [node-program-text argv] status)."
+  light-run-nodes)
+
+(defn run-main
+  "(c/run-main 'c.letters & args): the REPL's units checked, linked with musl, built, main run in the program
+  mode (exit and abort end the run): its status."
+  [ns & args]
+  (let [us (vec (for [[n u] (sort-by key @units)]
+                  (let [fc (host/file-config [(str "-std=" (name (or (:std u) :c23)))] (name (or (:std u) :c23)))
+                        cu (run/check-read @host* fc (unit-read u))]
+                    (when (seq (:errors cu))
+                      (throw (ex-info (str "c/run-main: " n ": " (str/join "; " (take 3 (:errors cu)))) {:c/unit n})))
+                    cu)))
+        r (binding [run/*musl* @lib*] (run/nodes us))]
+    (if (= :ok (:status r))
+      (*run-nodes* (:text r) (vec (map str (cons (str ns) args))))
+      (throw (ex-info (str "c/run-main: refused (" (name (:class r)) "): " (:message r)) {:c/refused (:class r)})))))
+
+(defn reset-unit!
+  "Forgets the unit `ns`."
+  [ns]
+  (swap! units dissoc ns)
+  nil)

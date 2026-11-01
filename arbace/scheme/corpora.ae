@@ -1,0 +1,800 @@
+(ns arbace.scheme.corpora
+  "The corpora of SM8 (doc/scheme/SCHEME-SURVEY.md, \"As built: SM8\") judged: Chibi's R7RS suite, ecraven's
+  r7rs-benchmarks and Chez's mats, run by bin/si (r7rs, ecraven, mats) into a directory of outputs; this namespace
+  reads them, makes the items, classes them (test/scheme/divergences-corpora.edn, goi's format: the first class whose
+  :match finds the item) and writes the results. Every file of the three corpora (test/scheme/corpora.edn) is
+  in a result or a class: `files` checks it.
+
+    r7rs-rewrite IN OUT      Chibi's r7rs-tests.scm as Chez reads it (SM8c, SC117 (b))
+    r7rs-own DIR [--record]  DIR/out, DIR/rc: the suite run with Chibi's own (chibi test); test/scheme/check-r7rs-chibi-test-linux-amd64.edn
+    r7rs-chez DIR [--record] DIR/out, DIR/rc: the rewritten suite run by Chez; test/scheme/ref-r7rs-chez.edn
+    chibi-tests DIR [--record] DIR/NAME.{si,chibi}.{out,rc}: Chibi's own tests of the vendored libraries, on si and on Chibi (SC142 (b));
+                             test/scheme/check-chibi-tests-linux-amd64.edn
+    r7rs-chibi DIR [--record] DIR/out, DIR/rc: the suite run by Chibi-Scheme 0.12.0 (test/scheme/chibi/driver.scm), SC143 (c);
+                             test/scheme/ref-r7rs-chibi.edn
+    r7rs DIR [--record]      DIR/out, DIR/rc: Chibi's r7rs-tests.scm run on si: one result a test;
+                             --record writes test/scheme/check-r7rs-linux-amd64.edn
+    ecraven DIR [--record]   DIR/NAME.{out,err,rc}: one result a benchmark; test/scheme/check-ecraven-linux-amd64.edn
+                             (with si's seconds and, from test/scheme/ref-ecraven-chez.edn, Chez's verdict and seconds)
+    ecraven-chibi DIR [--record]  the same benchmarks run by Chibi-Scheme 0.12.0 (SC151); test/scheme/ref-ecraven-chibi.edn
+    ecraven-chez DIR [--record]  the same benchmarks run by Chez through the libraries' Chez variants (SM8b, SC113 (b));
+                             test/scheme/ref-ecraven-chez.edn
+    mats DIR [--record]      DIR/FILE.{out,err,rc}: one result a mat; test/scheme/check-mats-linux-amd64.edn
+    srfi DIR [--record]      DIR/NAME.{out,err,rc}: one result an SRFI's program, its checks counted; test/scheme/check-srfi-linux-amd64.edn
+    files                    the files of the corpora against the recorded results and classes
+
+  Every judge but `files` and `divergences` compares its results with the recorded ones (`arbace.scheme.regress`, SC171 (b), SC181 (b)): a recorded pass
+  that fails, a new item, an item in another class, a recorded item or result the run lacks, another count, is a line \"regress ...\",
+  and the run fails (exit 1) unless it records: the record is the reviewed state.
+    divergences              the recorded items by class"
+  (:require [arbace.string :as str] [arbace.scheme.regress :as rg]))
+
+(defn- root [] (or (System/getenv "ARBACE_ROOT") "."))
+(defn- path [& xs] (apply str (root) "/" xs))
+(defn- slurp-or [f] (let [x (java.io.File. ^String f)] (when (.exists x) (slurp x))))
+(defn- classes [] (vec (read-string (slurp (path "test/scheme/divergences-corpora.edn")))))
+(defn- class-of [cs item] (:id (first (filter (fn [c] (some #(re-find % item) (:match c))) cs))))
+(defn- first-line [s] (first (str/split-lines (or s ""))))
+(defn- clip [s n] (if (> (count s) n) (str (subs s 0 n) "...") s))
+
+(defn- write-results [file header results]
+  (spit (path file) (str header "\n[\n" (str/join "" (map #(str (pr-str %) "\n") results)) "]\n"))
+  (println "wrote" (path file)))
+
+(defn- summary [results]
+  (let [items (mapcat :items results) bad (remove :class items)]
+    (println (count (filter #(= :pass (:verdict %)) results)) "of" (count results) "results pass;"
+             (count items) "non-pass items," (count bad) "failing (in no class)")
+    (doseq [[c n] (sort-by str (frequencies (keep :class items)))] (println " " n (name c)))
+    (doseq [i (take 40 bad)] (println "  FAILING" (:item i)))
+    (if (seq bad) 1 0)))
+
+(defn- recorded-results [file]
+  (when-let [t (slurp-or (path file))] (vec (read-string t))))
+
+(defn- regress-code [rec results recording?] (rg/regress-code rec results recording? (classes)))
+
+;; ------------------------------------------------------------------------------------------ R7RS (Chibi's suite)
+
+(defn- parse-r7rs [out]
+  (loop [ls (str/split-lines out) tests [] sections [] cur nil]
+    (if-let [l (first ls)]
+      (if-let [[_ n st what] (re-find #"^TEST (\d+) (PASS|FAIL) (.*)$" l)]
+        (let [detail (take-while #(str/starts-with? % "  ") (rest ls))]
+          (recur (drop (inc (count detail)) ls)
+                 (conj tests {:n (Long/parseLong n) :status (if (= st "PASS") :pass :fail) :what what
+                              :detail (mapv str/trim detail)})
+                 sections cur))
+        (if-let [[_ name p f] (re-find #"^END (.*) (\d+) (\d+)$" l)]
+          (recur (rest ls) tests (conj sections {:section name :pass (Long/parseLong p) :fail (Long/parseLong f)}) cur)
+          (recur (rest ls) tests sections cur)))
+      {:tests tests :sections sections})))
+
+(declare rewrite-for-chez)
+
+(defn- chez-r7rs-ref [] (when-let [t (slurp-or (path "test/scheme/ref-r7rs-chez.edn"))] (first (read-string t))))
+
+;; SC143 (c): Chibi-Scheme 0.12.0 as a second reference. Its tests are not the same sequence as si's (a test under a cond-expand,
+;; the numeric syntax tests' loops), so a test of Chibi is paired with a test of si by an alignment of the two sequences of
+;; sources (the longest common subsequence of equal sources; between two common ones, the same number on each side pair in order).
+(defn- chibi-r7rs-ref [] (when-let [t (slurp-or (path "test/scheme/ref-r7rs-chibi.edn"))] (first (read-string t))))
+
+;; Review 009, finding 5, and re-review 025's finding A: the number of tests a run of the suite gives (test/scheme/corpora.edn's chibi-r7rs
+;; :tests); a run that stops early with status 0 would lose its last tests silently. The number is not a constant of the run: the
+;; suite's test-precision runs a second test only when its first one passed, so a run gives :outside tests (all the others) plus
+;; :sites first tests plus one second test for each first test that passed; the count is judged from the run's own passes, so a
+;; fixed float print (one more passing site) is not refused and a cut run still is.
+(defn- expected-tests []
+  (get (first (filter #(= :chibi-r7rs (:id %)) (:corpora (read-string (slurp (path "test/scheme/corpora.edn")))))) :tests))
+
+(defn- count-item [impl tests]
+  (let [{:keys [outside sites]} (expected-tests)
+        total (count tests)
+        passing (count (filter #(and (= "(pair? ls)" (:what %)) (= :pass (:status %))) tests))
+        e (+ outside sites passing)]
+    (when (not= e total)
+      (str "count r7rs/chibi " (name impl) " " total " tests, expected " e " (" outside " outside test-precision, " sites " sites, "
+           passing " of them passing)"))))
+
+(defn- reference-check
+  "A reference's run of the suite (Chez's, Chibi's) is recorded only when it ended (status 0), gave the expected number of tests and
+  no form of the file raised outside a test (the driver's FORMERROR lines): the reasons, empty when it may be recorded."
+  [impl rc out tests]
+  (concat (when-not (= rc "0") [(str "status " rc)])
+          (when-let [c (count-item impl tests)] [c])
+          (for [l (str/split-lines out) :when (str/starts-with? l "FORMERROR ")] (str "a form raised: " (clip (subs l 10) 120)))))
+
+(defn- parse-chibi [out]
+  (loop [ls (str/split-lines out) tests []]
+    (if-let [l (first ls)]
+      (if-let [[_ n st what] (re-find #"^TEST (\d+) (PASS|FAIL) (.*)$" l)]
+        (let [detail (take-while #(re-find #"^  (expected|got|error): " %) (rest ls))]
+          (recur (drop (inc (count detail)) ls)
+                 (conj tests {:n (Long/parseLong n) :status (if (= st "PASS") :pass :fail) :what what
+                              :detail (mapv str/trim detail)})))
+        (recur (rest ls) tests))
+      tests)))
+
+(defn- lcs-pairs
+  "The pairs [i j same?] of an alignment of the vectors a and b: their longest common subsequence (same? true), and between two
+  common elements the elements of the two gaps in order when the gaps are of the same size (same? false: paired by position,
+  not by source, so not evidence that the two tests are the same; review 009, finding 11)."
+  [a b]
+  (let [n (count a) m (count b) w (inc m) t (int-array (* (inc n) w))]
+    (loop [i (dec n)]
+      (when (>= i 0)
+        (loop [j (dec m)]
+          (when (>= j 0)
+            (aset t (+ (* i w) j)
+                  (if (= (nth a i) (nth b j))
+                    (inc (aget t (+ (* (inc i) w) (inc j))))
+                    (max (aget t (+ (* (inc i) w) j)) (aget t (+ (* i w) (inc j))))))
+            (recur (dec j))))
+        (recur (dec i))))
+    (let [common (loop [i 0 j 0 acc []]
+                   (cond (or (= i n) (= j m)) acc
+                         (= (nth a i) (nth b j)) (recur (inc i) (inc j) (conj acc [i j true]))
+                         (>= (aget t (+ (* (inc i) w) j)) (aget t (+ (* i w) (inc j)))) (recur (inc i) j acc)
+                         :else (recur i (inc j) acc)))
+          bounds (concat [[-1 -1]] common [[n m]])]
+      (vec (mapcat (fn [[[i0 j0] [i1 j1]]]
+                     (let [gi (- i1 i0 1) gj (- j1 j0 1)]
+                       (concat (when (and (pos? gi) (= gi gj)) (map (fn [k] [(+ i0 1 k) (+ j0 1 k) false]) (range gi)))
+                               (when (< i1 n) [[i1 j1 true]]))))
+                   (map vector bounds (rest bounds)))))))
+
+(defn- cmd-r7rs-rewrite
+  "r7rs-rewrite IN OUT: Chibi's r7rs-tests.scm as Chez reads it (rewrite-for-chez)."
+  [[in out]]
+  (spit out (rewrite-for-chez (slurp in)))
+  0)
+
+(defn- cmd-r7rs-chez
+  "SM8c (SC117 (b)): the rewritten suite run by Chez 10.3.0 through the same R7RS libraries (DIR/out, DIR/err, DIR/rc);
+  one answer a test; --record: test/scheme/ref-r7rs-chez.edn. A test Chez does not pass is classed (r7rs-chez-*)."
+  [[dir & opts]]
+  (let [out (or (slurp-or (str dir "/out")) "") rc (str/trim (or (slurp-or (str dir "/rc")) "?"))
+        rec (recorded-results "test/scheme/ref-r7rs-chez.edn")
+        {:keys [tests]} (parse-r7rs out) cs (classes)
+        items (vec (for [t tests :when (= :fail (:status t))
+                         :let [item (str "chez-fails r7rs/chibi " (:what t) " => " (str/join " " (:detail t)))]]
+                     {:item item :class (class-of cs item)}))
+        total (count tests) pass (count (filter #(= :pass (:status %)) tests))
+        result {:id "r7rs/chibi/chez" :corpus :chibi-r7rs :rc rc :tests total :pass pass :fail (- total pass)
+                :items items :per-test (mapv (fn [t] [(:n t) (:status t) (clip (:what t) 70)]) tests)}]
+    (println "r7rs on Chez: status" rc "-" total "tests," pass "pass," (- total pass) "fail,"
+             (count (remove :class items)) "in no class")
+    (doseq [[c n] (sort-by str (frequencies (keep :class items)))] (println " " n (name c)))
+    (doseq [b (reference-check :chez rc out tests)] (println "  BAD RUN" b))
+    (when (and (some #{"--record"} opts) (empty? (reference-check :chez rc out tests)))
+      (write-results "test/scheme/ref-r7rs-chez.edn"
+                     ";; Chibi's r7rs-tests.scm, rewritten for Chez (arbace.scheme.corpora/rewrite-for-chez), run by Chez Scheme 10.3.0 through\n;; Arbace's R7RS libraries' Chez variants (bin/si r7rs --chez --record): Chez's answer to each test, SM8c, SC117 (b); generated."
+                     [result]))
+    (max (if (and (every? :class items) (empty? (reference-check :chez rc out tests))) 0 1)
+         (regress-code rec [result] (boolean (and (some #{"--record"} opts) (empty? (reference-check :chez rc out tests))))))))
+
+(defn- cmd-r7rs-chibi
+  "SC143 (c): the suite run by Chibi-Scheme 0.12.0 through test/scheme/chibi/driver.scm (DIR/out, DIR/err, DIR/rc); one answer a
+  test, in Chibi's own order; --record: test/scheme/ref-r7rs-chibi.edn. A test Chibi does not pass is classed (r7rs-chibi-*)."
+  [[dir & opts]]
+  (let [out (or (slurp-or (str dir "/out")) "") rc (str/trim (or (slurp-or (str dir "/rc")) "?"))
+        rec (recorded-results "test/scheme/ref-r7rs-chibi.edn")
+        tests (parse-chibi out) cs (classes)
+        items (vec (for [t tests :when (= :fail (:status t))
+                         :let [item (str "chibi-fails r7rs/chibi " (:what t) " => " (str/join " " (:detail t)))]]
+                     {:item item :class (class-of cs item)}))
+        total (count tests) pass (count (filter #(= :pass (:status %)) tests))
+        result {:id "r7rs/chibi/chibi" :corpus :chibi-r7rs :rc rc :tests total :pass pass :fail (- total pass)
+                :items items :per-test (mapv (fn [t] [(:n t) (:status t) (clip (:what t) 70)]) tests)}]
+    (println "r7rs on Chibi 0.12.0: status" rc "-" total "tests," pass "pass," (- total pass) "fail,"
+             (count (remove :class items)) "in no class")
+    (doseq [[c n] (sort-by str (frequencies (keep :class items)))] (println " " n (name c)))
+    (doseq [b (reference-check :chibi rc out tests)] (println "  BAD RUN" b))
+    (when (and (some #{"--record"} opts) (empty? (reference-check :chibi rc out tests)))
+      (write-results "test/scheme/ref-r7rs-chibi.edn"
+                     ";; Chibi's r7rs-tests.scm run by Chibi-Scheme 0.12.0 (the host's chibi-scheme) through test/scheme/chibi/driver.scm\n;; (bin/si r7rs --chibi --record): Chibi's answer to each test in its own order, SC143 (c); generated."
+                     [result]))
+    (max (if (and (every? :class items) (empty? (reference-check :chibi rc out tests))) 0 1)
+         (regress-code rec [result] (boolean (and (some #{"--record"} opts) (empty? (reference-check :chibi rc out tests))))))))
+
+(defn- cmd-r7rs [[dir & opts]]
+  (let [out (or (slurp-or (str dir "/out")) "") rc (str/trim (or (slurp-or (str dir "/rc")) "?"))
+        {:keys [tests sections]} (parse-r7rs out)
+        cs (classes)
+        ref (chez-r7rs-ref)
+        ;; re-review 025, finding A: Chez's tests are paired as Chibi's, by the alignment of the sources, not by number: the numbers
+        ;; shift once a run gives another count of tests (a site's second test)
+        rper (:per-test ref)
+        ;; (the rewritten suite writes a vector as (quote #(...)) and escapes its strings, so the sources are compared by their
+        ;; letters and digits alone, the first 25)
+        norm (fn [w] (let [a (str/replace (str/replace w "(quote " "") #"[^A-Za-z0-9]" "")] (subs a 0 (min 25 (count a)))))
+        cpairs (when ref (lcs-pairs (mapv #(norm (:what %)) tests) (mapv #(norm (nth % 2)) rper)))
+        chez (into {} (map (fn [[i j]] [(:n (nth tests i)) (second (nth rper j))]) cpairs))
+        chez-src (into {} (keep (fn [[i j same?]] (when same? [(:n (nth tests i)) (second (nth rper j))])) cpairs))
+        ;; SC143 (c): Chibi's answers, paired with si's tests by the alignment of the sources
+        cref (chibi-r7rs-ref)
+        cper (:per-test cref)
+        pairs (when cref (lcs-pairs (mapv #(clip (:what %) 70) tests) (mapv #(nth % 2) cper)))
+        chibi (into {} (map (fn [[i j]] [(:n (nth tests i)) (second (nth cper j))]) pairs))
+        chibi-src (into {} (keep (fn [[i j same?]] (when same? [(:n (nth tests i)) (second (nth cper j))])) pairs))
+        ;; finding 11: the pairs made by position in a gap of the alignment, counted apart (55 today: the same tests whose
+        ;; sources si and Chibi write differently, 9.007199254740991e15 for 9007199254740991.0, #vu8( for #u8()
+        by-position (count (remove #(nth % 2) pairs))
+        items (vec (concat
+                     (for [t tests :when (= :fail (:status t))
+                           :let [item (str "fails r7rs/chibi " (:what t) " => " (str/join " " (:detail t)))]]
+                       {:item item :class (class-of cs item)})
+                     (when-not (= rc "0") [(let [i (str "crash r7rs/chibi status " rc ": " (first-line (slurp-or (str dir "/err"))))]
+                                             {:item i :class (class-of cs i)})])
+                     ;; finding 5: the expected number of tests, and a test whose status differs from both references' (each
+                     ;; paired) is an item that needs a class (si passing where Chez and Chibi fail is a sign of a lax judge)
+                     (when-let [c (count-item :si tests)] [{:item c :class nil}])
+                     (when (and ref cref)
+                       (for [t tests :let [c (get chez-src (:n t)) ch (get chibi-src (:n t))]
+                             :when (and c ch (not= (:status t) c) (not= (:status t) ch))
+                             :let [i (str "against-references r7rs/chibi " (:what t) ": si " (name (:status t)) ", Chez " (name c) ", Chibi " (name ch))]]
+                         {:item i :class (class-of cs i)}))))
+        total (count tests) pass (count (filter #(= :pass (:status %)) tests))
+        ;; si against Chez, test by test (the same file, so the same numbers)
+        vs (frequencies (for [t tests] [(:status t) (get chez (:n t) :none)]))
+        vs-chez {:both-pass (get vs [:pass :pass] 0) :si-only-pass (get vs [:pass :fail] 0)
+                 :chez-only-pass (get vs [:fail :pass] 0) :both-fail (get vs [:fail :fail] 0)
+                 :si-tests-unpaired (+ (get vs [:pass :none] 0) (get vs [:fail :none] 0))}
+        vsc (frequencies (for [t tests] [(:status t) (get chibi (:n t) :none)]))
+        vs-chibi {:both-pass (get vsc [:pass :pass] 0) :si-only-pass (get vsc [:pass :fail] 0)
+                  :chibi-only-pass (get vsc [:fail :pass] 0) :both-fail (get vsc [:fail :fail] 0)
+                  :si-tests-unpaired (+ (get vsc [:pass :none] 0) (get vsc [:fail :none] 0))
+                  :chibi-tests-unpaired (- (count cper) (count pairs)) :paired-by-position by-position}
+        result {:id "r7rs/chibi" :corpus :chibi-r7rs :verdict (if (empty? items) :pass :non-pass)
+                :tests total :pass pass :fail (- total pass)
+                :sections (vec (butlast sections)) :items items
+                :vs-chez (when ref vs-chez)
+                :vs-chibi (when cref vs-chibi)
+                :per-test (mapv (fn [t] (let [c (get chez (:n t)) ch (get chibi (:n t))]
+                                          (cond-> [(:n t) (:status t) (clip (:what t) 70)] (or c ch) (conj c) ch (conj ch))))
+                                tests)}]
+    (println "r7rs: status" rc "-" total "tests," pass "pass," (- total pass) "fail")
+    (when ref
+      (println "against Chez (the same tests):" vs-chez))
+    (when cref
+      (println "against Chibi 0.12.0 (paired by source):" vs-chibi))
+    (let [rec (recorded-results "test/scheme/check-r7rs-linux-amd64.edn") recording? (boolean (some #{"--record"} opts))]
+      (when recording?
+        (write-results "test/scheme/check-r7rs-linux-amd64.edn"
+                       ";; Chibi's r7rs-tests.scm on si (bin/si r7rs --record): the result of each test (number, status, the expression, Chez's status\n;; from test/scheme/ref-r7rs-chez.edn), the sections' counts and the failing tests' items with their classes\n;; (test/scheme/divergences-corpora.edn); generated."
+                       [result]))
+      (max (summary [result]) (regress-code rec [result] recording?)))))
+
+;; SC130 (a): the suite on Chibi's own (chibi test) (vendored in scheme/vendor/chibi), which prints a mark a test (a dot for a pass,
+;; another character for a failure, ERROR and SKIP); the marks in order are compared with SM8's library's per-test results.
+(defn- own-marks [out]
+  (let [plain (str/replace out #"\u001b\[[0-9;]*m" "")]
+    (vec (mapcat (fn [l] (when (re-find #"^\s+[.xX!*?-]+$" l) (seq (str/trim l)))) (str/split-lines plain)))))
+
+(defn- cmd-r7rs-own
+  "r7rs-own DIR [--record]: DIR/out, DIR/rc: the suite run with Chibi's own (chibi test); one answer a test (the marks of its
+  output, in order), judged against the tests of test/scheme/check-r7rs-linux-amd64.edn (SM8's library): the same tests in
+  the same order; --record: test/scheme/check-r7rs-chibi-test-linux-amd64.edn."
+  [[dir & opts]]
+  (let [out (or (slurp-or (str dir "/out")) "") rc (str/trim (or (slurp-or (str dir "/rc")) "?"))
+        marks (own-marks out)
+        sm8 (first (read-string (slurp (path "test/scheme/check-r7rs-linux-amd64.edn"))))
+        per (:per-test sm8)
+        same-count (= (count marks) (count per))
+        cs (classes)
+        tests (vec (map-indexed (fn [i m] (let [[n st what] (nth per i [(inc i) nil "?"])]
+                                            {:n (inc i) :status (if (= m \.) :pass :fail) :what what :sm8 st})) marks))
+        items (vec (concat (for [t tests :when (= :fail (:status t))
+                                 :let [item (str "fails r7rs/chibi " (:what t) " => Chibi's (chibi test): " (nth marks (dec (:n t))))]]
+                             {:item item :class (class-of cs item)})
+                           (when-not (= rc "0") [(let [i (str "crash r7rs/chibi status " rc)] {:item i :class (class-of cs i)})])
+                           (when-not same-count [{:item (str "marks r7rs/chibi " (count marks) " marks, " (count per) " tests") :class nil}])
+                           ;; finding 4: the two libraries disagree on a test: an item in no class
+                           (for [t tests :when (not= (:status t) (:sm8 t))]
+                             {:item (str "disagrees r7rs/chibi test " (:n t) ": Chibi's (chibi test) " (some-> (:status t) name) ", SM8's " (some-> (:sm8 t) name) ": " (:what t)) :class nil})
+                           (when-let [c (count-item :si tests)] [{:item c :class nil}])))
+        vs (frequencies (for [t tests] [(:status t) (:sm8 t)]))
+        vs-sm8 {:both-pass (get vs [:pass :pass] 0) :own-only-pass (get vs [:pass :fail] 0)
+                :sm8-only-pass (get vs [:fail :pass] 0) :both-fail (get vs [:fail :fail] 0)}
+        total (count tests) pass (count (filter #(= :pass (:status %)) tests))
+        result {:id "r7rs/chibi-own" :corpus :chibi-r7rs :verdict (if (empty? items) :pass :non-pass)
+                :tests total :pass pass :fail (- total pass) :items items :vs-sm8 vs-sm8
+                :summary (last (filter #(re-find #"out of \d+ \([0-9.]+%\) tests passed" %) (str/split-lines (str/replace out #"\u001b\[[0-9;]*m" ""))))
+                :disagree (vec (for [t tests :when (not= (:status t) (:sm8 t))] [(:n t) (:status t) (:sm8 t) (:what t)]))}]
+    (println "r7rs on Chibi's (chibi test): status" rc "-" total "tests," pass "pass," (- total pass) "fail")
+    (println "against SM8's (chibi test), test by test:" vs-sm8)
+    (let [rec (recorded-results "test/scheme/check-r7rs-chibi-test-linux-amd64.edn") recording? (boolean (some #{"--record"} opts))]
+      (when recording?
+        (write-results "test/scheme/check-r7rs-chibi-test-linux-amd64.edn"
+                       ";; Chibi's r7rs-tests.scm on si with Chibi's own (chibi test) (scheme/vendor/chibi; bin/si r7rs --chibi-test --record, SC130 (a)):\n;; the result of each test from the marks of its output, compared with SM8's library's (check-r7rs-linux-amd64.edn); generated."
+                       [result]))
+      (max (summary [result]) (regress-code rec [result] recording?)))))
+
+(defn rewrite-for-chez
+  "SM8c (SC117 (b)): Chibi's r7rs-tests.scm for Chez, lexically (no test is changed): `#!chezscheme` first (Chez's own
+  lexical syntax), `#u8(` as `#vu8(`, a vector outside a quotation quoted (R7RS 4.1.2 evaluates it to itself,
+  Chez's --program does not), and the escapes of a bar symbol (R7RS's backslash-bar, backslash-quote, \\n ...) as
+  hex escapes (Chez reads a backslash there literally). Strings, comments, characters and quotations are kept as they are."
+  [^String s]
+  (let [n (count s) sb (StringBuilder. "#!chezscheme\n")
+        ws? (fn [c] (or (= c \space) (= c \tab) (= c \return) (= c \newline)))
+        delim? (fn [c] (or (ws? c) (= c \() (= c \)) (= c \") (= c \;) (= c \')))
+        esc {\a "7" \b "8" \t "9" \n "A" \r "D" \| "7C" \\ "5C" \" "22"}
+        atom-end (fn [j] (loop [j j] (if (and (< j n) (not (delim? (.charAt s j)))) (recur (inc j)) j)))]
+    ;; stack: a vector of booleans (is the open list/vector a quotation); pending: nil, :q (after ' or `), :c (after ,)
+    (loop [i 0 stack [] pending nil]
+      (if (>= i n)
+        (str sb)
+        (let [c (.charAt s i)
+              quoted? (case pending :q true :c false (boolean (peek stack)))]
+          (cond
+            (= c \") (let [j (loop [j (inc i)] (if (= (.charAt s j) \") j (recur (+ j (if (= (.charAt s j) \\) 2 1)))))]
+                       (.append sb (subs s i (inc j))) (recur (inc j) stack nil))
+            (= c \;) (let [j (let [k (.indexOf s "\n" i)] (if (neg? k) n k))]
+                       (.append sb (subs s i j)) (recur j stack pending))
+            (.startsWith s "#|" i) (let [j (loop [d 1 j (+ i 2)]
+                                             (cond (zero? d) j
+                                                   (.startsWith s "|#" j) (recur (dec d) (+ j 2))
+                                                   (.startsWith s "#|" j) (recur (inc d) (+ j 2))
+                                                   :else (recur d (inc j))))]
+                                     (.append sb (subs s i j)) (recur j stack pending))
+            (.startsWith s "#;" i) (do (.append sb "#;") (recur (+ i 2) stack pending))
+            (.startsWith s "#\\" i) (let [j (loop [j (+ i 3)] (if (and (< j n) (not (delim? (.charAt s j)))) (recur (inc j)) j))]
+                                      (.append sb (subs s i j)) (recur j stack nil))
+            (.startsWith s "#u8(" i) (do (.append sb "#vu8(") (recur (+ i 4) (conj stack true) nil))
+            (.startsWith s "#(" i) (do (.append sb (if quoted? "#(" "'#(")) (recur (+ i 2) (conj stack true) nil))
+            (= c \() (let [j (loop [j (inc i)] (if (and (< j n) (ws? (.charAt s j))) (recur (inc j)) j))
+                           head (subs s j (atom-end j))]
+                       (.append sb "(")
+                       (recur (inc i) (conj stack (or quoted? (= head "quote") (= head "quasiquote"))) nil))
+            (= c \)) (do (.append sb ")") (recur (inc i) (pop stack) nil))
+            (or (= c \') (= c \`)) (do (.append sb c) (recur (inc i) stack :q))
+            (= c \,) (let [j (if (and (< (inc i) n) (= (.charAt s (inc i)) \@)) (+ i 2) (inc i))]
+                       (.append sb (subs s i j)) (recur j stack :c))
+            (= c \|) (let [_ (.append sb "|")
+                           j (loop [j (inc i)]
+                               (cond (= (.charAt s j) \|) j
+                                     (and (= (.charAt s j) \\) (contains? esc (.charAt s (inc j))))
+                                     (do (.append sb (str "\\x" (esc (.charAt s (inc j))) ";")) (recur (+ j 2)))
+                                     (= (.charAt s j) \\) (do (.append sb (subs s j (+ j 2))) (recur (+ j 2)))
+                                     :else (do (.append sb (.charAt s j)) (recur (inc j)))))]
+                       (.append sb "|") (recur (inc j) stack nil))
+            (ws? c) (do (.append sb c) (recur (inc i) stack pending))
+            :else (let [j (atom-end i)] (.append sb (subs s i j)) (recur j stack nil))))))))
+
+;; ------------------------------------------------------------------------------------------ ecraven's benchmarks
+
+(defn- bench-item [name out err rc]
+  (cond
+    (re-find #"INCORRECT" out) (str "fails ecraven/" name " returned an incorrect result")
+    (re-find #"CSVLINE!\+si,[^,]*,[0-9.]+" out) nil
+    (= rc "124") (str "crash ecraven/" name " timeout")
+    :else (str "crash ecraven/" name " status " rc ": " (clip (or (first-line err) "") 160))))
+
+(defn- csv-seconds "The time of a benchmark's CSVLINE (impl's), nil if none." [impl out]
+  (when-let [[_ t] (re-find (re-pattern (str "CSVLINE!\\+" impl ",[^,]*,([0-9.]+)")) out)] (Double/parseDouble t)))
+
+(defn- run-names [dir]
+  (sort (map #(second (re-find #"^(.*)\.rc$" (.getName ^java.io.File %))) (filter #(str/ends-with? (.getName ^java.io.File %) ".rc") (.listFiles (java.io.File. ^String dir))))))
+
+(defn- only-of
+  "SC182 (b): the names of OPTS' `--only NAME` pairs (a partial run: bin/si mats FILE...), a set; empty for a whole run."
+  [opts]
+  (set (map second (filter #(= "--only" (first %)) (partition 2 1 opts)))))
+
+(defn- run-stamps
+  "Review 009, finding 6: the stamps bin/si writes beside each output of DIR (NAME.stamp: the key of what made the run, its time
+  limit, the repetition count of a benchmark run); {:names :timeouts {NAME seconds} :key K :count C}, or {:refused WHY} for a directory
+  with no outputs, an output without a stamp (an older bin/si's), outputs of more than one key (a partial run by another si, harness
+  or library) or of more than one count. Re-review 025, finding E: OPTS' `--key K` (bin/si passes the key of what it would run now)
+  refuses a directory made by another key, consistent as it is: outputs of a si, library or harness that changed since.
+  SC182 (b): OPTS' `--only NAME` limits all of this to the outputs of those names (a partial run leaves the others' old outputs in the
+  directory, of another key perhaps; they are neither judged nor recorded)."
+  [dir opts]
+  (let [only (only-of opts)
+        names (when (.isDirectory (java.io.File. ^String dir)) (cond->> (run-names dir) (seq only) (filter only)))
+        st (into {} (for [n names :let [t (slurp-or (str dir "/" n ".stamp"))]]
+                      [n (when t (let [[_ k to c] (re-find #"key=(\S+) timeout=(\S+)(?: count=(\S+))?" t)] {:key k :timeout (parse-long to) :count c}))]))
+        keys (set (keep :key (vals st)))
+        counts (set (map :count (vals st)))
+        now (second (drop-while #(not= % "--key") opts))]
+    (cond (empty? names) {:refused (str "no outputs in " dir)}
+          (some nil? (vals st)) {:refused (str "outputs without a stamp (an older run): " (str/join " " (take 8 (keep (fn [[n v]] (when-not v n)) st))))}
+          (> (count keys) 1) {:refused (str "outputs of " (count keys) " different runs (keys " (str/join ", " (sort keys)) "): run them all again")}
+          (> (count counts) 1) {:refused (str "outputs of different repetition counts (" (str/join ", " (sort (map str counts))) "): run them all again")}
+          (and now (not= now (first keys))) {:refused (str "outputs of a run that is not the current one (key " (first keys) ", now " now "): run them all again")}
+          :else {:names names :key (first keys) :count (first counts) :timeouts (into {} (map (fn [[n v]] [n (:timeout v)]) st))})))
+
+(defn- refuse [why] (println "refused:" why) 2)
+
+(defn- ref-of [file] (when-let [t (slurp-or (path file))] (into {} (map (juxt :id identity) (read-string t)))))
+(defn- chez-ref [] (ref-of "test/scheme/ref-ecraven-chez.edn"))
+(defn- chibi-ref [] (ref-of "test/scheme/ref-ecraven-chibi.edn"))
+
+(defn- cmd-ecraven-ref
+  "A reference's run of ecraven's benchmarks, the answers and times of its CSVLINEs; --record writes FILE. SM8b (SC113 (b)): Chez Scheme
+  10.3.0 through the same R7RS libraries (their Chez variants); SC151: Chibi-Scheme 0.12.0 on the benchmark programs as they are."
+  [impl label file header [dir & opts]]
+  (if-let [why (:refused (run-stamps dir opts))] (refuse why)
+  (let [stamps (run-stamps dir opts) {:keys [timeouts]} stamps
+        results (vec (for [n (run-names dir)
+                           :let [out (or (slurp-or (str dir "/" n ".out")) "") err (or (slurp-or (str dir "/" n ".err")) "")
+                                 rc (str/trim (slurp (str dir "/" n ".rc")))
+                                 t (csv-seconds impl out)]]
+                       {:id (str "ecraven/" n)
+                        :verdict (cond (re-find #"INCORRECT" out) :incorrect t :correct (= rc "124") :timeout :else :error)
+                        :seconds t :rc rc :timeout (timeouts n) :key (:key stamps) :count (:count stamps)
+                        :detail (when-not t (clip (or (first-line err) (first-line out) "") 160))}))
+        fr (frequencies (map :verdict results))]
+    (println (str "ecraven on " label ":") (count results) "benchmarks:" (get fr :correct 0) "correct," (get fr :incorrect 0) "incorrect,"
+             (get fr :timeout 0) "timeouts," (get fr :error 0) "errors")
+    (let [rec (recorded-results file) wants? (boolean (some #{"--record"} opts))
+          ;; re-review 025, finding D: a run that broke (a benchmark that errors where the record's did not, another number of
+          ;; benchmarks) is BAD RUN: exit 1, and --record refuses it, as the suite's references do (reference-check)
+          was-error (set (map :id (filter #(= :error (:verdict %)) rec)))
+          problems (concat (for [r results :when (and (= :error (:verdict r)) rec (not (contains? was-error (:id r))))]
+                             (str "new error " (:id r) ": " (:detail r)))
+                           (when (and rec (not= (count rec) (count results)))
+                             [(str (count results) " benchmarks, the record's " (count rec))]))
+          recording? (and wants? (empty? problems))]
+      (doseq [b (take 10 problems)] (println "  BAD RUN" b))
+      (when (> (count problems) 10) (println "  BAD RUN ..." (- (count problems) 10) "more"))
+      (when recording? (write-results file header results))
+      (max (if (seq problems) 1 0) (regress-code rec results recording?))))))
+
+(defn- cmd-ecraven-chez [args]
+  (cmd-ecraven-ref "chez" "Chez" "test/scheme/ref-ecraven-chez.edn"
+                   ";; ecraven's r7rs-benchmarks on Chez Scheme 10.3.0 through Arbace's R7RS libraries' Chez variants (bin/si ecraven --chez\n;; --record, repetition count 1): the reference's verdict and seconds (the CSVLINE's), SM8b, SC113 (b); generated."
+                   args))
+
+(defn- cmd-ecraven-chibi [args]
+  (cmd-ecraven-ref "chibi" "Chibi" "test/scheme/ref-ecraven-chibi.edn"
+                   ";; ecraven's r7rs-benchmarks on Chibi-Scheme 0.12.0 (bin/si ecraven --chibi --record, repetition count 1): the reference's verdict and seconds\n;; (the CSVLINE's), SC151; generated."
+                   args))
+
+(defn- cmd-ecraven [[dir & opts]]
+  (if-let [why (:refused (run-stamps dir opts))] (refuse why)
+  (let [cs (classes) ref (chez-ref) cref (chibi-ref)
+        stamps (run-stamps dir opts) {:keys [names timeouts]} stamps
+        results (vec (for [n names
+                           :let [out (or (slurp-or (str dir "/" n ".out")) "") err (or (slurp-or (str dir "/" n ".err")) "")
+                                 rc (str/trim (slurp (str dir "/" n ".rc")))
+                                 it (bench-item n out err rc)]]
+                       {:id (str "ecraven/" n) :corpus :ecraven-r7rs
+                        :verdict (if it :non-pass :pass)
+                        :seconds (csv-seconds "si" out) :timeout (timeouts n) :key (:key stamps) :count (:count stamps)
+                        :chez (some-> (get ref (str "ecraven/" n)) (select-keys [:verdict :seconds]))
+                        :chibi (some-> (get cref (str "ecraven/" n)) (select-keys [:verdict :seconds]))
+                        :items (if it [{:item it :class (class-of cs it)}] [])}))]
+    (let [rec (recorded-results "test/scheme/check-ecraven-linux-amd64.edn") recording? (boolean (some #{"--record"} opts))]
+      (when recording?
+        (write-results "test/scheme/check-ecraven-linux-amd64.edn"
+                       ";; ecraven's r7rs-benchmarks on si (bin/si ecraven --record, repetition count 1): each benchmark's verdict (its own\n;; check of its result) and non-pass items with their classes (test/scheme/divergences-corpora.edn); generated."
+                       results))
+      (max (summary results) (regress-code rec results recording?))))))
+
+;; ------------------------------------------------------------------------------------------ Chez's mats
+
+(defn- parse-mats
+  "The mats of a run's output in order, each {:name :status :rest :clauses}, :clauses the \"K: why\" of each failing
+  clause the harness printed (CLAUSE lines) since the previous mat's line (review 009, finding 2)."
+  [out]
+  (loop [ls (str/split-lines out) pending [] acc []]
+    (if-let [l (first ls)]
+      (if-let [[_ name st detail] (re-find #"^MAT (.*?) (PASS|FAIL|NOTRUN|SKIP)(?: (.*))?$" l)]
+        (recur (rest ls) [] (conj acc {:name name :status (keyword (str/lower-case st)) :rest (or detail "") :clauses pending}))
+        (if-let [[_ _ kd] (re-find #"^CLAUSE (.*?) (\d+: .*)$" l)]
+          (recur (rest ls) (conj pending kd) acc)
+          ;; re-review 025, finding C: the harness's own count of the failing clauses (its CLAUSES line, after the NOTRUN mat's line)
+          (if-let [[_ _ f] (re-find #"^CLAUSES (.*) \d+ (\d+) \d+$" l)]
+            (recur (rest ls) pending (if (seq acc) (conj (pop acc) (assoc (peek acc) :clauses-f (parse-long f))) acc))
+            (recur (rest ls) pending acc))))
+      acc)))
+
+(defn- mat-file-items [file out err rc]
+  (let [mats (parse-mats out)
+        lines (str/split-lines out)
+        reads (for [l lines :when (str/starts-with? l "READ ")] (str "notrun mats/" file " read: " (clip (subs l 5) 160)))
+        defs (for [l lines :when (str/starts-with? l "DEF ")] (str "notrun mats/" file " definition " (clip (subs l 4) 160)))
+        ;; every failing clause is an item, \"fails mats/F mat NAME: K K: why\" (the FAIL line's own format), of a FAIL mat
+        ;; and of a NOTRUN one; a FAIL mat without CLAUSE lines (an output of the harness before them) keeps its line's item
+        clause-items (fn [name cl] (for [kd cl] (str "fails mats/" file " mat " name ": " (second (re-find #"^(\d+):" kd)) " " (clip kd 160))))
+        ms (for [{:keys [name status rest clauses]} mats :when (not= status :pass)
+                 i (case status
+                     :fail (if (seq clauses) (clause-items name clauses) [(str "fails mats/" file " mat " name ": " (clip rest 160))])
+                     :notrun (cons (str "notrun mats/" file " mat " name ": " (clip rest 160)) (clause-items name clauses))
+                     :skip [(str "skip mats/" file " mat " name ": " (clip rest 160))])]
+             i)
+        ;; finding C: the CLAUSE lines read against the harness's own counts. A failing clause that wrote to stdout without a newline
+        ;; glues its CLAUSE line to that text and loses it: for a NOTRUN mat its CLAUSES line (F failing) says so; for a FAIL mat its
+        ;; line's K is the first failing clause, which the first CLAUSE line must be. A NOTRUN mat whose prelude met the watchdog
+        ;; ran no clause and has no CLAUSES line: none counted, none read, no item (re-review 071, N1)
+        cross (for [{:keys [name status rest clauses clauses-f]} mats
+                    :let [k1 (some-> (re-find #"^(\d+) " rest) second)
+                          c1 (some-> (first clauses) (->> (re-find #"^(\d+):")) second)]
+                    :when (case status
+                            :notrun (not= (or clauses-f 0) (count clauses))
+                            :fail (and (seq clauses) (not= k1 c1))
+                            false)]
+                (str "count mats/" file " mat " name ": "
+                     (if (= status :notrun)
+                       (str (if clauses-f (str "the harness counted " clauses-f " failing clauses") "no CLAUSES line") ", " (count clauses) " CLAUSE lines read")
+                       (str "the FAIL line's first failing clause is " k1 ", the first CLAUSE line's is " c1))))
+        done (set (map :name mats))
+        hung (last (remove done (keep #(when (str/starts-with? % "BEGIN ") (subs % 6)) lines)))
+        crash (when (and (not= rc "0")) [(str "crash mats/" file " status " rc (when hung (str " in mat " hung)) ": " (clip (or (first-line err) "") 120))])
+        ;; finding 10: the harness's own count of the mats it ran (its FILE line) against the MAT lines read
+        [_ fdata fmats] (some #(re-find #"^FILE (\d+) (\d+)$" %) lines)
+        counted (when (and (= rc "0") (or (nil? fmats) (not= (parse-long fmats) (count mats))))
+                  [(str "count mats/" file " " (if fmats (str fmats " mats run, " (count mats) " results read") "no FILE line"))])]
+    {:mats mats :items (vec (concat reads defs ms crash counted cross))
+     ;; SM8b (SC110 (c)): the clauses of the mats that do not expand, run alone
+     :clauses (reduce (fn [acc l]
+                        (if-let [[_ p f n] (re-find #"^CLAUSES .* (\d+) (\d+) (\d+)$" l)]
+                          (merge-with + acc {:pass (parse-long p) :fail (parse-long f) :notrun (parse-long n)})
+                          acc))
+                      {:pass 0 :fail 0 :notrun 0} lines)}))
+
+(defn- requested-record
+  "Re-review 033, N8: the recorded mats results of the files a partial run was asked for (`--only io`: \"mats/io.ms\"), so a requested file
+  that produced no output is a result-absent line and not dropped."
+  [rec only]
+  (let [ids (set (map #(str "mats/" % ".ms") only))]
+    (filterv #(contains? ids (:id %)) rec)))
+
+(defn- cmd-mats [[dir & opts]]
+  (if-let [why (:refused (run-stamps dir opts))] (refuse why)
+  (let [cs (classes)
+        stamps (run-stamps dir opts) {files :names timeouts :timeouts} stamps
+        results (vec (for [b files
+                           :let [file (str b ".ms")
+                                 out (or (slurp-or (str dir "/" b ".out")) "") err (or (slurp-or (str dir "/" b ".err")) "")
+                                 rc (str/trim (slurp (str dir "/" b ".rc")))
+                                 {:keys [mats items clauses]} (mat-file-items file out err rc)
+                                 fr (frequencies (map :status mats))]]
+                       {:id (str "mats/" file) :corpus :chez-mats :timeout (timeouts b) :key (:key stamps)
+                        :verdict (if (empty? items) :pass :non-pass)
+                        :mats (count mats) :pass (get fr :pass 0) :fail (get fr :fail 0) :notrun (get fr :notrun 0) :skip (get fr :skip 0)
+                        :clauses-alone clauses
+                        :items (mapv (fn [i] {:item i :class (class-of cs i)}) items)}))]
+    (let [t (fn [k] (reduce + (map k results)))]
+      (println "mats:" (count results) "files," (t :mats) "mats:" (t :pass) "pass," (t :fail) "fail," (t :notrun) "not run," (t :skip) "skipped")
+      (let [c (fn [k] (reduce + (map #(get-in % [:clauses-alone k] 0) results)))]
+        (println "  the clauses of the mats not run, run alone:" (c :pass) "pass," (c :fail) "fail," (c :notrun) "do not run")))
+    (let [rec (recorded-results "test/scheme/check-mats-linux-amd64.edn") recording? (boolean (some #{"--record"} opts))
+          partial? (seq (only-of opts))
+          ids (set (map :id results))
+          ;; SC182 (b): a partial run is judged against, and recorded over, the results of the files it ran only
+          rec-judged (if (and rec partial?) (requested-record rec (only-of opts)) rec)]
+      (when recording?
+        (write-results "test/scheme/check-mats-linux-amd64.edn"
+                       ";; Chez's mats on si (bin/si mats --record): per .ms file the mats' counts (pass, fail, not run, skipped) and the items\n;; of every mat that does not pass, with their classes (test/scheme/divergences-corpora.edn); generated."
+                       (if (and rec partial?)
+                         (let [by (into {} (map (juxt :id identity) results))]
+                           (vec (concat (map #(get by (:id %) %) rec) (remove #(contains? (set (map :id rec)) (:id %)) results))))
+                         results)))
+      (max (summary results) (regress-code rec-judged results recording?))))))
+
+;; ------------------------------------------------------------------------------------------ every file
+
+(defn- corpus [id] (first (filter #(= id (:id %)) (:corpora (read-string (slurp (path "test/scheme/corpora.edn")))))))
+
+(defn- ecraven-role [f inputs]
+  (let [n (second (re-find #"^src/(.*)\.scm$" f))]
+    (cond
+      (and n (contains? inputs n)) [:benchmark n]
+      (#{"src/common.scm" "src/common-postlude.scm"} f) [:part nil]
+      (and n (re-find #"-(prelude|postlude)$" n)) [:other-implementation nil]
+      (str/starts-with? f "inputs/") [:input nil]
+      :else [:build nil])))
+
+(defn- cmd-files []
+  (let [res (fn [f] (let [x (slurp-or (path f))] (when x (read-string x))))
+        r7 (res "test/scheme/check-r7rs-linux-amd64.edn")
+        ec (into {} (map (juxt :id identity) (res "test/scheme/check-ecraven-linux-amd64.edn")))
+        mt (into {} (map (juxt :id identity) (res "test/scheme/check-mats-linux-amd64.edn")))
+        cs (classes)
+        cc (corpus :ecraven-r7rs) cm (corpus :chez-mats)
+        inputs (set (keep #(second (re-find #"^inputs/(.*)\.input$" %)) (keys (:files cc))))
+        rows (concat
+              (for [f (sort (keys (:files cc)))
+                    :let [[role n] (ecraven-role f inputs)]]
+                [:ecraven-r7rs f role
+                 (case role
+                   :benchmark (let [r (ec (str "ecraven/" n))]
+                                (cond (nil? r) nil
+                                      (= :pass (:verdict r)) :result
+                                      (every? :class (:items r)) :class
+                                      :else nil))
+                   :part :result :input :result :other-implementation :class :build :class)])
+              (for [f (sort (keys (:files cm)))
+                    :let [b (second (re-find #"^mats/(.*)\.ms$" f))]]
+                [:chez-mats f (if b :mats :support)
+                 (if b
+                   (let [r (mt (str "mats/" b ".ms"))]
+                     (cond (nil? r) nil (every? #(or (= :pass (:verdict r)) (:class %)) (:items r)) :result :else nil))
+                   :class)])
+              [[:chibi-r7rs "r7rs-tests.scm" :suite
+                (let [r (first r7)] (cond (nil? r) nil (every? :class (:items r)) :result :else nil))]])
+        missing (filter #(nil? (nth % 3)) rows)
+        by (frequencies (map (fn [[c _ role how]] [c role how]) rows))]
+    (doseq [[k n] (sort-by str by)] (println " " n (pr-str k)))
+    (println (count rows) "files;" (count missing) "in neither a result nor a class")
+    (doseq [m (take 30 missing)] (println "  MISSING" (pr-str (take 3 m))))
+    (if (seq missing) 1 0)))
+
+(defn- unmatched-anchors
+  "Re-review 033, N7: the anchored alternatives of the classes' mats patterns, \"fails mats/F mat (?:NAME: (?:K|K)|NAME: (?:K))\", that
+  match no recorded item of ITEMS: a clause that starts to fail at such a position would be accepted without a decision. Each as
+  \"F NAME: K\"."
+  [cs items]
+  (let [have (set (keep (fn [i] (when-let [[_ f n k] (re-find #"^fails mats/(\S+) mat (.+?): (\d+) " i)] [f n k])) items))]
+    (vec (for [c cs p (:match c)
+               :let [src (str/replace (str p) #"\\([^d])" "$1")
+                     [_ f body] (re-find #"^\^fails mats/(\S+) mat \(\?:(.*)\) \\d\+:" src)]
+               :when f
+               [_ n ks] (re-seq #"([^|()]+?): \(\?:([\d|]+)\)" body)
+               k (str/split ks #"\|")
+               :when (not (contains? have [f n k]))]
+           (str f " " n ": " k)))))
+
+(defn- cmd-divergences []
+  (let [cs (classes)
+        all (concat (read-string (slurp (path "test/scheme/check-r7rs-linux-amd64.edn")))
+                    (read-string (slurp (path "test/scheme/check-ecraven-linux-amd64.edn")))
+                    (read-string (slurp (path "test/scheme/check-mats-linux-amd64.edn"))))
+        items (for [r all i (:items r)] (assoc i :class (class-of cs (:item i))))
+        unmatched (unmatched-anchors cs (map :item items))]
+    (doseq [u unmatched] (println "unmatched anchor:" u))
+    (doseq [c cs :let [is (filter #(= (:id c) (:class %)) items)] :when (seq is)]
+      (println (str (name (:id c)) " (" (name (:kind c)) ", " (count is) "): " (:title c)))
+      (doseq [i (take 6 is)] (println "   " (clip (:item i) 150)))
+      (when (> (count is) 6) (println "    ...")))
+    (max (summary (map (fn [r] (assoc r :items (map #(assoc % :class (class-of cs (:item %))) (:items r)))) all))
+         (if (seq unmatched) (do (println (count unmatched) "anchored alternatives match no recorded item") 1) 0))))
+
+;; ------------------------------------------------------------------------------ Chibi's own tests of the vendored libraries
+
+;; SC142 (b): (chibi diff-test), (chibi optional-test) and (chibi term ansi-test) of Chibi 0.12.0, each run test by test
+;; (test/scheme/chibi/split-run.sps) on si and (run-tests) on Chibi; a test prints a mark (a dot for a pass, x, !), the marks in order are
+;; the answers; the FAIL:/ERROR: lines after a mark tell why on si.
+(def chibi-test-libs [["diff" "chibi/diff-test.sld"] ["optional" "chibi/optional-test.sld"] ["term-ansi" "chibi/term/ansi-test.sld"]])
+
+(defn- test-marks
+  "The marks of an output, with the detail of each non-pass mark: [{:mark c :detail s-or-nil}]."
+  [out]
+  (let [plain (str/replace out #"\u001b\[[0-9;]*m" "")]
+    (reduce (fn [marks l]
+              (if-let [[_ ms] (re-find #"^\s*(?:term\.ansi|diff|optional)?([.xX!]+)\s*$" l)]
+                (into marks (map (fn [c] {:mark c}) ms))
+                (if-let [[_ d] (re-find #"^\s*(?:FAIL|ERROR): (.*)$" l)]
+                  (let [n (count marks) c (when (pos? n) (:mark (nth marks (dec n))))
+                        start (loop [i n] (if (and (pos? i) (= c (:mark (nth marks (dec i)))) (not (:detail (nth marks (dec i))))) (recur (dec i)) i))]
+                    (if (and c (not= c \.))
+                      (into (subvec marks 0 start) (map (fn [m] (assoc m :detail d)) (subvec marks start)))
+                      marks))
+                  marks)))
+            [] (str/split-lines plain))))
+
+(defn- cmd-chibi-tests
+  "chibi-tests DIR [--record]: DIR/NAME.si.out and NAME.chibi.out (and .rc) of each library; one result a library, the marks of si
+  against Chibi's, test by test; --record: test/scheme/check-chibi-tests-linux-amd64.edn."
+  [[dir & opts]]
+  (let [cs (classes)
+        results
+        (vec (for [[n f] chibi-test-libs
+                   :let [si-out (or (slurp-or (str dir "/" n ".si.out")) "") si-rc (str/trim (or (slurp-or (str dir "/" n ".si.rc")) "?"))
+                         ch-out (or (slurp-or (str dir "/" n ".chibi.out")) "") ch-rc (str/trim (or (slurp-or (str dir "/" n ".chibi.rc")) "?"))
+                         sm (test-marks si-out) cm (test-marks ch-out)
+                         same (= (count sm) (count cm))
+                         pass? (fn [m] (= \. (:mark m)))
+                         items (vec (concat
+                                      (for [[i m] (map-indexed vector sm) :when (not (pass? m))
+                                            :let [item (str "fails chibi-tests/" n " test " (inc i) ": " (or (:detail m) (str "mark " (:mark m))))]]
+                                        {:item item :class (class-of cs item)})
+                                      (when-not (= si-rc "0") [(let [i (str "crash chibi-tests/" n " status " si-rc)] {:item i :class (class-of cs i)})])
+                                      (when-not same [(let [i (str "marks chibi-tests/" n " " (count sm) " marks on si, " (count cm) " on Chibi")] {:item i :class (class-of cs i)})])))
+                         vs (frequencies (for [[a b] (map vector sm cm)] [(pass? a) (pass? b)]))]]
+               {:id (str "chibi-tests/" n) :corpus :chibi-tests :library f :verdict (if (empty? items) :pass :non-pass)
+                :si {:rc si-rc :tests (count sm) :pass (count (filter pass? sm)) :fail (count (remove pass? sm))}
+                :chibi {:rc ch-rc :tests (count cm) :pass (count (filter pass? cm)) :fail (count (remove pass? cm))}
+                :vs-chibi (when same {:both-pass (get vs [true true] 0) :si-only-pass (get vs [true false] 0)
+                                      :chibi-only-pass (get vs [false true] 0) :both-fail (get vs [false false] 0)})
+                :items items
+                :per-test (when same (mapv (fn [a b] [(str (:mark a)) (str (:mark b))]) sm cm))}))]
+    (doseq [r results]
+      (println (:id r) "- si" (:si r) "- Chibi" (:chibi r) (or (:vs-chibi r) "marks differ in number")))
+    (let [rec (recorded-results "test/scheme/check-chibi-tests-linux-amd64.edn") recording? (boolean (some #{"--record"} opts))]
+      (when recording?
+        (write-results "test/scheme/check-chibi-tests-linux-amd64.edn"
+                       ";; Chibi-Scheme 0.12.0's own tests of the libraries vendored in scheme/vendor/chibi (diff-test, optional-test, term/ansi-test) on si\n;; (test by test, test/scheme/chibi/split-run.sps) and on Chibi (bin/si chibi-tests --record, SC142 (b)): the marks of both, per library; generated."
+                       results))
+      (max (summary results) (regress-code rec results recording?)))))
+
+;; ------------------------------------------------------------------------------------------ the SRFIs' programs (SC173 (b))
+
+(defn- srfi-result
+  "One SRFI program's run: DIR/NAME.{out,rc}. The program passes when its status is 0, it prints no FAIL line and its last line is
+  its report \"srfi-N: P passed, F failed\" with F zero (a program that prints nothing, or stops early, does not pass); its
+  counts are the result's."
+  [dir n]
+  (let [out (or (slurp-or (str dir "/" n ".out")) "") rc (str/trim (or (slurp-or (str dir "/" n ".rc")) "?"))
+        ls (str/split-lines out)
+        [_ p f] (re-find #"^srfi-\S+: (\d+) passed, (\d+) failed$" (or (last ls) ""))
+        fails (filter #(str/starts-with? % "FAIL") ls)
+        items (vec (concat (when-not (= rc "0") [(str "crash srfi/" n " status " rc)])
+                           (when-not p [(str "report srfi/" n " no report line (last line " (pr-str (clip (or (last ls) "") 60)) ")")])
+                           (when (and f (not= f "0")) [(str "fails srfi/" n " " f " failed")])
+                           (for [l (take 5 fails)] (str "fails srfi/" n " " (clip l 120)))))]
+    (cond-> {:id (str "srfi/" n) :corpus :srfi :verdict (if (empty? items) :pass :non-pass)
+             :items (mapv (fn [i] {:item i :class nil}) items)}
+      p (assoc :tests (+ (parse-long p) (parse-long f)) :pass (parse-long p) :fail (parse-long f)))))
+
+(defn- cmd-srfi
+  "srfi DIR [--record]: DIR/NAME.{out,err,rc} of each test/scheme/srfi/NAME.sps run on si (bin/si srfi); one result a program,
+  its passing checks counted, judged against the recorded counts (test/scheme/check-srfi-linux-amd64.edn): an SRFI program that
+  prints nothing or fewer checks fails. Only the programs in DIR are judged; one the record holds with no output is absent."
+  [[dir & opts]]
+  (if-let [why (:refused (run-stamps dir opts))] (refuse why)
+  (let [{:keys [names]} (run-stamps dir opts)
+        results (vec (for [n names] (srfi-result dir n)))
+        file "test/scheme/check-srfi-linux-amd64.edn"
+        rec (recorded-results file) recording? (boolean (some #{"--record"} opts))]
+    (println "srfi:" (count results) "programs," (reduce + (map #(get % :pass 0) results)) "checks pass,"
+             (reduce + (map #(get % :fail 0) results)) "fail")
+    (when recording?
+      (write-results file
+                     ";; the SRFIs' programs on si (bin/si srfi --record): per program its passing and failing checks (the report line it prints) and the\n;; items of one that does not pass (SC173 (b)); generated."
+                     results))
+    (let [c (let [items (mapcat :items results)]
+              (doseq [i (take 40 items)] (println "  FAILING" (:item i)))
+              (if (seq items) 1 0))]
+      (max c (regress-code rec results recording?))))))
+
+(defn- cmd-regress-test
+  "Re-review 033's checks of the regression step (N5, N8) on small data: 0, or 1 with the failing cases printed."
+  []
+  (let [cls [{:id :slow :volatile true :match [#"timeout$"]}]
+        timeout-item [{:item "crash ecraven/x timeout" :class :slow}]
+        run (fn [rec res] (rg/regressions [rec] [res] cls))
+        has (fn [lines kind] (boolean (some #(str/includes? % (str "regress " kind " ")) lines)))
+        cases
+        [["fast benchmark that hangs: volatile-hang"
+          (has (run {:id "e/x" :verdict :pass :seconds 10 :timeout 60 :items []}
+                    {:id "e/x" :verdict :non-pass :timeout 60 :items timeout-item}) "volatile-hang")]
+         ["benchmark near the limit that times out: no line"
+          (empty? (run {:id "e/x" :verdict :pass :seconds 51.9 :timeout 60 :items []}
+                       {:id "e/x" :verdict :non-pass :timeout 60 :items timeout-item}))]
+         ["recorded timeout that finishes: no line"
+          (empty? (run {:id "e/x" :verdict :non-pass :timeout 60 :items timeout-item}
+                       {:id "e/x" :verdict :pass :seconds 70 :timeout 300 :items []}))]
+         ["the count line lists a timed-out benchmark"
+          (boolean (re-find #"1 of 1 results.*e/x" (or (rg/volatile-note [{:id "e/x" :items timeout-item}] cls) "")))]
+         ["no count line without one"
+          (nil? (rg/volatile-note [{:id "e/x" :items []}] cls))]
+         ["a requested mats file with no output stays in the judged record"
+          (= ["mats/io.ms" "mats/hash.ms"]
+             (map :id (requested-record [{:id "mats/io.ms"} {:id "mats/3.ms"} {:id "mats/hash.ms"}] #{"io" "hash"})))]]
+        bad (remove second cases)]
+    (doseq [[n ok] cases] (println (if ok "ok  " "FAIL") n))
+    (if (seq bad) 1 0)))
+
+(defn -main [& [cmd & args]]
+  (let [rc (case cmd
+             "r7rs" (cmd-r7rs args)
+             "r7rs-chez" (cmd-r7rs-chez args)
+             "r7rs-own" (cmd-r7rs-own args)
+             "r7rs-chibi" (cmd-r7rs-chibi args)
+             "chibi-tests" (cmd-chibi-tests args)
+             "r7rs-rewrite" (cmd-r7rs-rewrite args)
+             "ecraven" (cmd-ecraven args)
+             "mats" (cmd-mats args)
+             "srfi" (cmd-srfi args)
+             "ecraven-chez" (cmd-ecraven-chez args)
+             "ecraven-chibi" (cmd-ecraven-chibi args)
+             "files" (cmd-files)
+             "divergences" (cmd-divergences)
+             "regress-test" (cmd-regress-test)
+             (do (println "usage: arbace.scheme.corpora r7rs DIR | ecraven DIR | ecraven-chez DIR | mats DIR [--record] | srfi DIR [--record] | files | divergences") 2))]
+    (shutdown-agents)
+    (System/exit rc)))

@@ -805,6 +805,12 @@ against the recommendation ("leave recorded"): fixed too (Clojure constants in J
 classes outside the runtime; the back end's limits: one-segment namespaces, reifys and deftypes
 using code forms, proxies made at run time before their analysis).
 
+**The negative controls** (doc/GATE-SURVEY.md, GTS81 (a), 2026-10-31): `test/diffcheck/controls.edn`'s
+pairs of cases, the subject's first run's record (evaluated, or interpreted) compared by `diffcheck.main`'s
+own comparison with the reference's second run's (compiled, or j2g's); `oracle.runner/controls-ok?` fails
+the check when they do not differ, or when either has no record while its corpus ran. control-1:
+collections.ae:6's `[]` evaluated against :7's `[1 2 3]` compiled. No case or build of its own.
+
 ## F3 and the back end's limits as built (2026-10-17)
 
 F3 (a) and the rest of F2.6 as decided, in `arbace.c2j` (`arbace/c2j/emit.ae`, `main.ae`) and

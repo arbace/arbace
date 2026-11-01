@@ -1,0 +1,5 @@
+(import (rnrs))
+(write (let* ((x 1) (y (+ x 1))) (* x y)))
+(write (letrec ((even? (lambda (n) (if (zero? n) #t (odd? (- n 1))))) (odd? (lambda (n) (if (zero? n) #f (even? (- n 1)))))) (even? 88)))
+(write (letrec* ((p (lambda (x) (+ 1 (q (- x 1))))) (q (lambda (y) (if (zero? y) 0 (+ 1 (p (- y 1)))))) (x (p 5)) (y x)) y))
+(newline)

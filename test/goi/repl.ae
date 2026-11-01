@@ -433,6 +433,61 @@
     (.String b)))
 (goi.repl-test/is "hi cy cy" (Exec))
 
+;; NH11 (b), doc/go/NET-HTTP-SURVEY.md: a listed package's generic instance, its code built in that
+;; package's context on its first call, describes the interpreted types its type arguments reach
+;; (atomic.Pointer[Req] reaching *Conn through Req's field). That context found no interpreted
+;; method's cell, so their method sets were given again, empty, over the right ones: a value in a
+;; compiled interface panicked "has no method String", and a type it described first had an
+;; empty method table (net/http's *http.response, *http.connReader, *http.body). It also took
+;; every interpreted type for generation 1 (at the REPL, a type whose methods were added since).
+(in-ns 'goi.repl-test)
+(require '[go.rt.atomicm :as atomicm])
+(is "conn a; conn a; conn a; 2; 1" (atomicm/Serve))
+(is "1; late 2" (atomicm/ServeLate))
+(is "conn a; conn a; conn a; 2; 1" (atomicm/Serve))
+(ns go.rt.atomicg (:require [arbace.go :as go]))
+(go/import [fmt "fmt"] [reflect "reflect"] [atomic "sync/atomic"])
+(go/type G (struct ^int n))
+(go/method String ^string [^{:tag (* G)} g] (fmt/Sprint "g" (.-n g)))
+(go/func Gen ^string []
+  (let [^{:tag (atomic/Pointer G)} p (lit (atomic/Pointer G))]
+    (.Store p (addr (lit G 7)))
+    (let [^any v (.Load p)]
+      (fmt/Sprintf "%T %d %v" v (.NumMethod (reflect/TypeOf v)) v))))
+(in-ns 'goi.repl-test)
+(is "*atomicg.G 1 g7" (go.rt.atomicg/Gen))
+
+;; NH18 (c): giving a descriptor a method set that lacks a method it was given before is an error
+;; naming the type (the shape of NH11's bug), not a silent empty set. The same set again, a larger
+;; one, and another descriptor's smaller one are fine.
+(in-ns 'goi.repl-test)
+(let [check! @#'arbace.go.build/check-methods-kept!
+      d (Object.) d2 (Object.)]
+  (is nil (check! :int d ["String" "Error"]))
+  (is nil (check! :int d ["Error" "String"]))
+  (is nil (check! :int d ["Error" "String" "Close"]))
+  (is nil (check! :int d2 []))
+  (is [:threw "arbace.lang.ExceptionInfo"
+       "goi: internal error: the method set of type int would shrink from 3 to 0 methods (lost Close, Error, String): a build context found no cell for methods another one gave (NH18)"]
+      (try (check! :int d []) nil (catch Throwable e [:threw (.getName (class e)) (ex-message e)]))))
+
+;; NH19 (a): a conversion to a named func type of an Arbace fn given to a parameter of the unnamed func
+;; type is of the named type, with its methods; a Go closure, a nil func and a closure kept as before.
+(in-ns 'goi.repl-test)
+(ns go.rt.fnconv (:require [arbace.go :as go]))
+(go/import [fmt "fmt"])
+(go/type HF (func [int] [int]))
+(go/method Twice ^int [^HF f ^int x] (f (f x)))
+(go/func FromFn ^string [^{:tag (func [int] [int])} f] (let [^any h (conv HF f)] (fmt/Sprintf "%T" h)))
+(go/func Call ^int [^{:tag (func [int] [int])} f ^int x] (.Twice (conv HF f) x))
+(go/func Lit ^int [^int x] (.Twice (conv HF (fn ^int [^int y] (+ y 1))) x))
+(go/func Nil ^bool [] (let [^{:tag (func [int] [int])} f nil g (conv HF f)] (== g nil)))
+(in-ns 'goi.repl-test)
+(is "fnconv.HF" (go.rt.fnconv/FromFn (fn [x] (+ x 2))))
+(is 14 (go.rt.fnconv/Call (fn [x] (+ x 2)) 10))
+(is 12 (go.rt.fnconv/Lit 10))
+(is true (go.rt.fnconv/Nil))
+
 ;; ---------------------------------------------------------------------------------------
 
 (in-ns 'goi.repl-test)

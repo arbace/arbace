@@ -1,0 +1,175 @@
+;; OCaml's polymorphic comparison (runtime/compare.c: do_compare_val), ported from oi's compare.go:
+;; caml_compare, caml_equal, caml_notequal, caml_lessthan, caml_lessequal, caml_greaterthan,
+;; caml_greaterequal. The traversal is iterative (a stack of field arrays), as the C one is.
+;; Custom blocks: java.lang.Integer ("_i"), I64 ("_j"), NInt ("_n"), Custom (its id).
+
+(in-ns 'ocaml.rt)
+
+(import '(java.util Arrays))
+
+(defclass ^:public ^:final Compare
+
+  (field ^:public ^:static ^:final ^long UNORDERED Long/MIN_VALUE)
+
+  (method ^:static cmpLong ^long [^long a ^long b]
+    (if (< a b) -1 (if (> a b) 1 0)))
+
+  ;; the identifier of a custom block's operations
+  (method ^:static customId ^String [v]
+    (cond (instance? Integer v) "_i"
+          (instance? I64 v) "_j"
+          (instance? NInt v) "_n"
+          (instance? Custom v) (.-id (cast Custom v))
+          :else ""))
+
+  ;; the compare function of two custom blocks of the same kind
+  (method ^:static customCmp ^long [v1 v2]
+    (cond (instance? Integer v1)
+          (Compare/cmpLong (long (.intValue (cast Integer v1))) (long (.intValue (cast Integer v2))))
+          (instance? I64 v1) (Compare/cmpLong (.-v (cast I64 v1)) (.-v (cast I64 v2)))
+          (instance? NInt v1) (Compare/cmpLong (.-v (cast NInt v1)) (.-v (cast NInt v2)))
+          (instance? Custom v1)
+          (let [c1 (cast Custom v1) c2 (cast Custom v2)]
+            (cond (identical? c1 c2) 0
+                  (or (= (.-id c1) "_chan") (= (.-id c1) "_mutex"))
+                  (Compare/cmpLong (long (System/identityHashCode c1)) (long (System/identityHashCode c2)))
+                  :else (throw (Rt/invalidArg "compare: abstract value"))))
+          :else (throw (Rt/invalidArg "compare: abstract value"))))
+
+  ;; compare.c's float ordering: 0 when the comparison goes on (equal, or two NaNs in total mode)
+  (method ^:static cmpF ^long [^double d1 ^double d2 ^boolean total]
+    (cond (< d1 d2) -1
+          (> d1 d2) 1
+          (not (== d1 d2))
+          (if (not total)
+            Long/MIN_VALUE
+            (if (== d1 d1) 1 (if (== d2 d2) -1 0)))
+          :else 0))
+
+  (method ^:static cmpBytes ^long [^byte/1 a ^byte/1 b]
+    (let [n (Math/min (alength a) (alength b))]
+      (loop [^int i 0]
+        (if (< i n)
+          (let [x (bit-and (long (aget a i)) 255) y (bit-and (long (aget b i)) 255)]
+            (if (== x y)
+              (recur (unchecked-inc-int i))
+              (unchecked-subtract x y)))
+          (unchecked-subtract (long (alength a)) (long (alength b)))))))
+
+  (method ^:static isForward ^boolean [v]
+    (and (instance? Block v) (== (.-tag (cast Block v)) 250)))
+
+  ;; do_compare_val: > 0, 0, < 0, or UNORDERED
+  (method ^:public ^:static compareVal ^long [a0 b0 ^boolean total]
+    (let [^:mutable ^Object v1 a0
+          ^:mutable ^Object v2 b0
+          ^:mutable ^Object/1 sa (new Object/1 16)
+          ^:mutable ^Object/1 sb (new Object/1 16)
+          ^:mutable ^int/1 so (new int/1 16)
+          ^:mutable ^int sp 0
+          ^:mutable ^long r 0]
+      (while true
+        (set! r 0)
+        (label :item
+          (while true
+            (when (and total (identical? v1 v2)) (break :item))
+            (let [l1 (instance? Long v1) l2 (instance? Long v2)]
+              (when (and l1 l2)
+                (set! r (unchecked-subtract (.longValue (cast Long v1)) (.longValue (cast Long v2))))
+                (break :item))
+              (when (and l1 (Compare/isForward v2))
+                (set! v2 (aget (.-f (cast Block v2)) 0))
+                (continue))
+              (when l1 (set! r -1) (break :item))
+              (when (and l2 (Compare/isForward v1))
+                (set! v1 (aget (.-f (cast Block v1)) 0))
+                (continue))
+              (when l2 (set! r 1) (break :item)))
+            (let [t1 (Rt/tag v1) t2 (Rt/tag v2)]
+              (when (not (== t1 t2))
+                (when (== t1 250)
+                  (set! v1 (aget (.-f (cast Block v1)) 0))
+                  (continue))
+                (when (== t2 250)
+                  (set! v2 (aget (.-f (cast Block v2)) 0))
+                  (continue))
+                (set! r (long (unchecked-subtract-int t1 t2)))
+                (break :item))
+              (when (== t1 250)
+                (set! v1 (aget (.-f (cast Block v1)) 0))
+                (set! v2 (aget (.-f (cast Block v2)) 0))
+                (continue))
+              (when (== t1 252)
+                (set! r (Compare/cmpBytes (cast byte/1 v1) (cast byte/1 v2)))
+                (break :item))
+              (when (== t1 253)
+                (set! r (Compare/cmpF (.doubleValue (cast Double v1)) (.doubleValue (cast Double v2)) total))
+                (break :item))
+              (when (== t1 254)
+                (let [x (cast double/1 v1) y (cast double/1 v2)]
+                  (when (not (== (alength x) (alength y)))
+                    (set! r (long (unchecked-subtract-int (alength x) (alength y))))
+                    (break :item))
+                  (loop [^int i 0]
+                    (when (< i (alength x))
+                      (let [c (Compare/cmpF (aget x i) (aget y i) total)]
+                        (when (not (== c 0)) (set! r c) (break :item)))
+                      (recur (unchecked-inc-int i))))
+                  (break :item)))
+              (when (== t1 251) (throw (Rt/invalidArg "compare: abstract value")))
+              (when (or (== t1 247) (== t1 249)) (throw (Rt/invalidArg "compare: functional value")))
+              (when (== t1 245) (throw (Rt/invalidArg "compare: continuation value")))
+              (when (== t1 248)
+                (let [o1 (.longValue (cast Long (aget (.-f (cast Block v1)) 1)))
+                      o2 (.longValue (cast Long (aget (.-f (cast Block v2)) 1)))]
+                  (when (not (== o1 o2)) (set! r (unchecked-subtract o1 o2)))
+                  (break :item)))
+              (when (== t1 255)
+                (let [id1 (Compare/customId v1) id2 (Compare/customId v2)]
+                  (when (not (.equals id1 id2))
+                    (set! r (if (< (.compareTo id1 id2) 0) -1 1))
+                    (break :item))
+                  (set! r (Compare/customCmp v1 v2))
+                  (break :item)))
+              (when (not (instance? Block v1)) (throw (Rt/invalidArg "compare: abstract value")))
+              (let [f1 (.-f (cast Block v1)) f2 (.-f (cast Block v2))]
+                (when (not (== (alength f1) (alength f2)))
+                  (set! r (long (unchecked-subtract-int (alength f1) (alength f2))))
+                  (break :item))
+                (when (== (alength f1) 0) (break :item))
+                (when (> (alength f1) 1)
+                  (when (== sp (alength sa))
+                    (set! sa (Arrays/copyOf sa (unchecked-multiply-int sp 2)))
+                    (set! sb (Arrays/copyOf sb (unchecked-multiply-int sp 2)))
+                    (set! so (Arrays/copyOf so (unchecked-multiply-int sp 2))))
+                  (aset sa sp f1)
+                  (aset sb sp f2)
+                  (aset so sp 1)
+                  (set! sp (unchecked-inc-int sp)))
+                (set! v1 (aget f1 0))
+                (set! v2 (aget f2 0))
+                (continue)))))
+        (when (not (== r 0)) (return r))
+        (when (== sp 0) (return 0))
+        (let [k (unchecked-dec-int sp)
+              a (cast Object/1 (aget sa k))
+              b (cast Object/1 (aget sb k))
+              o (aget so k)]
+          (set! v1 (aget a o))
+          (set! v2 (aget b o))
+          (if (== (unchecked-add-int o 1) (alength a))
+            (set! sp k)
+            (aset so k (unchecked-add-int o 1)))))
+      0))
+
+  (method ^:public ^:static caml_compare [a b]
+    (let [res (Compare/compareVal a b true)]
+      (if (== res Long/MIN_VALUE) (Long/valueOf res) (Long/valueOf (if (< res 0) -1 (if (> res 0) 1 0))))))
+  (method ^:public ^:static caml_equal [a b] (Rt/b (== (Compare/compareVal a b false) 0)))
+  (method ^:public ^:static caml_notequal [a b] (Rt/b (not (== (Compare/compareVal a b false) 0))))
+  (method ^:public ^:static caml_lessthan [a b]
+    (let [res (Compare/compareVal a b false)] (Rt/b (and (< res 0) (not (== res Long/MIN_VALUE))))))
+  (method ^:public ^:static caml_lessequal [a b]
+    (let [res (Compare/compareVal a b false)] (Rt/b (and (<= res 0) (not (== res Long/MIN_VALUE))))))
+  (method ^:public ^:static caml_greaterthan [a b] (Rt/b (> (Compare/compareVal a b false) 0)))
+  (method ^:public ^:static caml_greaterequal [a b] (Rt/b (>= (Compare/compareVal a b false) 0))))

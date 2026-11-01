@@ -1,0 +1,227 @@
+(ns arbace.repr.scheme.number
+  "R6RS's numbers (report 4.2.8, the lexical grammar of its appendix) as Chez Scheme 10.3.0 reads them in R6RS
+  mode (doc/scheme/SPEC.md, 3.4, 5): the token of a number, prefixes included, to its value.
+
+    (parse \"#e1.5\")  =>  3/2          exact: a long, a BigInt or a Ratio
+    (parse \"1e3\")    =>  1000.0       inexact: a double, an infinity and a NaN too
+    (parse \"1+2i\")   =>  [:complex 1 2]   both parts exact, or both doubles
+    (parse \"+a\")     =>  nil          not a number (the caller reads an identifier)
+
+  An exception (ex-info with :class :bad-number) when the token is a number by its prefix (`#x#x10`) or has
+  no representation (`1/0`, `#e+inf.0`): Chez refuses these, it does not read a symbol."
+  (:require [arbace.string :as str])
+  (:import [java.math BigInteger BigDecimal MathContext]))
+
+(set! *warn-on-reflection* true)
+
+(defn- bad [^String t why]
+  (throw (ex-info (str "number " t ": " why) {:class :bad-number})))
+
+(defn- norm
+  "An exact integer as a long when it fits, else a BigInt."
+  [x]
+  (if (instance? arbace.lang.BigInt x)
+    (if (< (.bitLength (biginteger x)) 64) (long x) x)
+    x))
+
+(defn- exact-ratio [^BigInteger n ^BigInteger d]
+  (when (zero? (.signum d)) (throw (ex-info "division by zero" {:class :bad-number})))
+  (let [r (/ (bigint n) (bigint d))]
+    (norm r)))
+
+(defn ratio->double
+  "The double nearest the exact rational `n`/`d` (d > 0), ties to even: the quotient to 64 bits beyond the
+  double's, rounded by BigDecimal's correctly rounded double value."
+  ^double [^BigInteger n ^BigInteger d]
+  (if (zero? (.signum ^BigInteger n))
+    0.0
+    (let [neg (neg? (.signum ^BigInteger n))
+          n (.abs n)
+          ;; scale so that the quotient has at least 66 bits, keep a sticky bit for the remainder
+          shift (max 0 (- 66 (- (.bitLength n) (.bitLength d))))
+          qr (.divideAndRemainder (.shiftLeft n (int shift)) d)
+          q ^BigInteger (aget qr 0)
+          sticky (not (zero? (.signum ^BigInteger (aget qr 1))))
+          q (if sticky (.or (.shiftLeft q 1) BigInteger/ONE) (.shiftLeft q 1))
+          ;; value = q * 2^-(shift+1); BigDecimal of q * 2^-(shift+1) is exact: q / 2^(shift+1)
+          bd (.divide (BigDecimal. q) (BigDecimal. (.shiftLeft BigInteger/ONE (int (inc shift)))) (MathContext. 400))
+          x (.doubleValue bd)]
+      (if neg (- x) x))))
+
+(defn- ->double ^double [x]
+  (cond (instance? Double x) x
+        (instance? arbace.lang.Ratio x) (ratio->double (.numerator ^arbace.lang.Ratio x) (.denominator ^arbace.lang.Ratio x))
+        :else (.doubleValue (biginteger x))))
+
+;; ---- the real parts
+
+(def ^:private digit-class {2 "[01]" 8 "[0-7]" 10 "[0-9]" 16 "[0-9a-fA-F]"})
+
+(defn- real-patterns [radix]
+  (let [d (digit-class radix)]
+    {:int (re-pattern (str "(" d "+)"))
+     :rat (re-pattern (str "(" d "+)/(" d "+)"))
+     :dec (re-pattern "((?:[0-9]+\\.?[0-9]*|\\.[0-9]+))(?:[esfdlESFDL]([+-]?[0-9]+))?")}))
+
+(def ^:private patterns (into {} (map (fn [r] [r (real-patterns r)]) [2 8 10 16])))
+
+(defn- parse-ureal-core
+  "An unsigned real of `radix` as [kind data]: [:int BigInteger], [:rat n d], [:dec mantissa-string exponent],
+  or nil."
+  [^String s radix]
+  (let [p (patterns radix)]
+    (cond
+      (empty? s) nil
+      (re-matches (:int p) s) [:int (BigInteger. s (int radix))]
+      (re-matches (:rat p) s) (let [[_ a b] (re-matches (:rat p) s)] [:rat (BigInteger. ^String a (int radix)) (BigInteger. ^String b (int radix))])
+      (and (== radix 10) (re-matches (:dec p) s))
+      (let [[_ m e] (re-matches (:dec p) s)] [:dec m (or e "0")])
+      :else nil)))
+
+(defn- parse-ureal
+  "As parse-ureal-core, with the mantissa width `|53` of the report accepted after an integer or a decimal (in any
+  radix, as Chez does): the real is then inexact unless `#e` is given, a fourth element true."
+  [^String s radix]
+  (if-let [[_ inner] (re-matches #"(.*)\|[0-9]+" s)]
+    (let [r (parse-ureal-core inner radix)]
+      (when (and r (not= (first r) :rat)) (conj (if (= (count r) 3) r (conj r nil)) true)))
+    (parse-ureal-core s radix)))
+
+(defn- naninf [^String s]
+  (let [l (.toLowerCase s)]
+    (cond (= l "nan.0") ##NaN (= l "inf.0") ##Inf :else nil)))
+
+(defn- real-value
+  "The value of the unsigned real [kind ...] with sign `neg`, under exactness `ex` (:e, :i or nil)."
+  [parsed neg ex ^String t]
+  (let [[kind a b w] parsed
+        ex (if (and w (not= ex :e)) :i ex)]
+    (case kind
+      :int (let [n (if neg (.negate ^BigInteger a) a)]
+             (if (= ex :i) (->double (norm (bigint n))) (norm (bigint n))))
+      :rat (let [n (if neg (.negate ^BigInteger a) a)]
+             (if (zero? (.signum ^BigInteger b))
+               (if (= ex :i) (let [g (.signum ^BigInteger n)] (cond (pos? g) ##Inf (neg? g) ##-Inf :else ##NaN)) (bad t "cannot represent"))
+               (if (= ex :i) (ratio->double n b) (exact-ratio n b))))
+      :dec (let [text (str a "e" b)]
+             (if (= ex :e)
+               (let [bd (BigDecimal. ^String text)
+                     bd (if neg (.negate bd) bd)
+                     u (.unscaledValue bd) sc (.scale bd)]
+                 (if (<= sc 0)
+                   (norm (bigint (.multiply u (.pow BigInteger/TEN (int (- sc))))))
+                   (exact-ratio u (.pow BigInteger/TEN (int sc)))))
+               (let [x (Double/parseDouble text)] (if neg (- x) x)))))))
+
+(defn- parse-real
+  "A signed real (sign optional when `need-sign` is false) of `radix`: a number, nil, or throws."
+  [^String s radix ex ^String t need-sign]
+  (when (seq s)
+    (let [c (.charAt s 0)
+          signed (or (= c \+) (= c \-))
+          neg (= c \-)
+          body (if signed (subs s 1) s)]
+      (when (or signed (not need-sign))
+        (if-let [x (and signed (naninf body))]
+          (do (when (= ex :e) (bad t "cannot represent")) (if (Double/isNaN x) x (if neg (- x) x)))
+          (when-let [u (parse-ureal body radix)]
+            (real-value u neg ex t)))))))
+
+;; ---- the complex forms
+
+(defn- exp-sign?
+  "Is the sign at index i of `s` a decimal exponent's (1e+5), not a part's?"
+  [^String s i radix]
+  (and (== radix 10) (> i 1)
+       (let [p (.charAt s (dec i))]
+         (and (contains? #{\e \s \f \d \l \E \S \F \D \L} p)
+              (let [q (.charAt s (- i 2))] (or (Character/isDigit q) (= q \.)))))))
+
+(defn- make-complex [re im]
+  (cond (and (not (instance? Double im)) (zero? im)) re
+        (or (instance? Double re) (instance? Double im)) [:complex (->double re) (->double im)]
+        :else [:complex re im]))
+
+(defn- parse-body [^String s radix ex ^String t]
+  (let [n (count s)]
+    (cond
+      (zero? n) nil
+      ;; rectangular: ends with i, the last sign not an exponent's splits real and imaginary parts
+      (and (= (.charAt s (dec n)) \i) (> n 1)
+           (not (and (>= n 6) (.endsWith s "inf.0") false)))
+      (let [i (loop [i (dec n)]
+                (cond (< i 0) -1
+                      (and (contains? #{\+ \-} (.charAt s i)) (not (exp-sign? s i radix))) i
+                      :else (recur (dec i))))]
+        (when (>= i 0)
+          (let [re-s (subs s 0 i)
+                im-s (subs s i (dec n))
+                im (if (#{"+" "-"} im-s)
+                     (if (= ex :i) (if (= im-s "+") 1.0 -1.0) (if (= im-s "+") 1 -1))
+                     (parse-real im-s radix ex t true))
+                re (if (empty? re-s) (if (instance? Double im) 0.0 0) (parse-real re-s radix ex t false))]
+            (when (and re im (number? re) (number? im))
+              (make-complex re im)))))
+      ;; polar
+      (str/includes? s "@")
+      (let [i (.indexOf s "@")
+            m (parse-real (subs s 0 i) radix ex t false)
+            a (parse-real (subs s (inc i)) radix ex t false)]
+        (when (and m a)
+          (cond
+            (and (not (instance? Double a)) (zero? (double a))) m
+            (and (not (instance? Double m)) (zero? m)) 0
+            (= ex :e) (bad t "cannot represent")
+            :else
+            (let [mm (->double m) aa (->double a)]
+              [:complex (* mm (Math/cos aa)) (* mm (Math/sin aa))]))))
+      :else (parse-real s radix ex t false))))
+
+(defn parse
+  "The number the token `t` reads as, or nil when it is no number (see the namespace)."
+  [^String t]
+  (let [n (count t)]
+    (loop [i 0 radix nil ex nil]
+      (if (and (< (inc i) n) (= (.charAt t i) \#))
+        (let [c (Character/toLowerCase (.charAt t (inc i)))]
+          (case c
+            (\x \b \o \d) (if radix (bad t "two radix prefixes") (recur (+ i 2) ({\x 16 \b 2 \o 8 \d 10} c) ex))
+            (\e \i) (if ex (bad t "two exactness prefixes") (recur (+ i 2) radix ({\e :e \i :i} c)))
+            (bad t "bad prefix")))
+        (let [body (subs t i)
+              r (or radix 10)]
+          (if (and (zero? i) (not (let [c (.charAt t 0)] (or (Character/isDigit c) (= c \+) (= c \-) (= c \.)))))
+            nil
+            (let [v (parse-body body r ex t)]
+              (cond (some? v) v
+                    (pos? i) (bad t "invalid number syntax")
+                    :else nil))))))))
+
+(defn- lenient-real?
+  "Chez's default reader accepts what R6RS mode refuses in a real: a decimal point or an exponent in a radix
+  other than ten, a ratio with an exponent (1/2e3), the hash placeholders (1#)."
+  [^String body radix]
+  (let [b (if (re-find #"^[+-]" body) (subs body 1) body)
+        d (digit-class radix)]
+    (boolean
+     (or (and (re-find (re-pattern d) b)
+              (re-matches (re-pattern (str d "*\\.?" d "*" (if (== radix 16) "" "(?:[esfdlESFDL][+-]?[0-9]+)?") "(?:\\|[0-9]+)?")) b))
+         (re-matches (re-pattern (str d "+/" d "+(?:[esfdlESFDL][+-]?[0-9]+)?")) b)
+         (re-matches (re-pattern (str d "+#*\\.?#*")) b)))))
+
+(defn classify-failure
+  "Why the token `t` (a number by its first characters) is not a number of R6RS: :not-allowed when Chez's
+  default reader reads it, :incomplete when more characters could make it one, else :invalid."
+  [^String t]
+  (let [body (loop [i 0] (if (and (< (inc i) (count t)) (= (.charAt t i) \#) (contains? #{\x \b \o \d \e \i} (Character/toLowerCase (.charAt t (inc i))))) (recur (+ i 2)) (subs t i)))
+        prefix (subs t 0 (- (count t) (count body)))
+        radix (cond (re-find #"(?i)#x" prefix) 16 (re-find #"(?i)#o" prefix) 8 (re-find #"(?i)#b" prefix) 2 :else 10)
+        two (fn [re] (> (count (re-seq re prefix)) 1))
+        fine-prefix (and (not (two #"(?i)#[xobd]")) (not (two #"(?i)#[ei]")))
+        ok? (fn [x] (and fine-prefix (or (some? (try (parse (str prefix x)) (catch arbace.lang.ExceptionInfo e (when (.contains ^String (ex-message e) "cannot represent") :cannot))))
+                                         (lenient-real? x radix))))]
+    (cond (and fine-prefix (lenient-real? body radix) (not (try (parse t) (catch arbace.lang.ExceptionInfo _ nil)))) :not-allowed
+          (and fine-prefix (or (empty? body)
+                               (some #(ok? (str body %)) ["0" "1" "i" "0i" "f0" "nan.0" "inf.0" ".0" "inf.0i" "1i" "/1" "@1" "|1" "x1" "e1" "i1"])))
+          :incomplete
+          :else :invalid)))

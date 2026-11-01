@@ -20,8 +20,9 @@
 #                                 frozen_clojure) and the suite, with --keep-ext (bin/clojure-tests'
 #                                 mode), into .ae files and into .ae files with --full (a .cljc's
 #                                 conditionals recorded, back as the .cljc byte for byte), and the
-#                                 suite's test libraries (the jars of --libs, when
-#                                 bin/clojure-tests has downloaded them) the three ways too;
+#                                 suite's test libraries (the jars of --libs, downloaded by
+#                                 bin/clojure-tests' pins when missing; skipped, said so, when
+#                                 they cannot be, but in the gate, GATE_OUT set) the three ways too;
 #                                 Arbace -> Clojure -> Arbace over arbace/ (about 1 minute
 #                                 together)
 #        bin/repr-clojure check --libs [GO-EXE]
@@ -47,7 +48,8 @@ root=$(cd "$(dirname "$0")/../../.." && pwd)
 work=$root/.tmp/repr-clojure-check
 mkdir -p "$work"
 rev=98d735fab02f337cee654cb0629bddc09883a75a   # bin/clojure-tests' revision of Clojure
-lib_jars="test.check-1.1.3 test.generative-1.1.1 tools.namespace-1.5.1 data.generators-1.1.1 tools.reader-1.6.0 java.classpath-1.1.1"
+. "$root/bin/lib/repr-clojure/libs.bash"
+lib_jars=$(lib_jars_of "$root/bin/clojure-tests") # bin/clojure-tests' deps, with their SHA-1 pins
 
 # suite_tree DIR: Clojure's suite as bin/clojure-tests takes it (test/, src/script/ and the
 # top-level files at the pinned revision), fetched once into $work/clojure, copied afresh to DIR
@@ -64,6 +66,31 @@ suite_tree() {
   rm -rf "$t"; mkdir -p "$t/src"
   cp -r "$src/test" "$t/"; cp -r "$src/src/script" "$t/src/"
   find "$src" -maxdepth 1 -type f -exec cp {} "$t/" \;
+}
+
+# lib_fetch LIBS: the suite's test libraries' jars (lib_jars) in LIBS, each checked against its
+# SHA-1 in bin/clojure-tests' deps (its pins, in the gate step's inputs) and downloaded from Maven
+# Central when missing or different, as bin/clojure-tests does (its lock: one maker at a time)
+lib_fetch() {
+  local libs=$1 coord sha jar
+  mkdir -p "$libs"
+  (
+    flock 9
+    sed -n '/^deps="$/,/^"$/p' "$root/bin/clojure-tests" | grep -v '"' | while read -r coord sha; do
+      [ -n "$coord" ] || continue
+      jar=$(basename "$(dirname "$coord")")-$(basename "$coord")
+      # lib_jars is one name a line (lib_jars_of, audit 076): matched as words
+      case " $(echo $lib_jars) " in *" $jar "*) ;; *) continue ;; esac
+      echo "$sha  $libs/$jar.jar" | sha1sum -c --status 2> /dev/null && continue
+      echo "== libs: download $coord"
+      curl -sfL -o "$libs/$jar.jar.tmp" "https://repo1.maven.org/maven2/$coord/$jar.jar" \
+        && echo "$sha  $libs/$jar.jar.tmp" | sha1sum -c --quiet \
+        && mv -f "$libs/$jar.jar.tmp" "$libs/$jar.jar" \
+        || { rm -f "$libs/$jar.jar.tmp"; echo "== libs: $coord not downloaded, or not its pinned SHA-1 $sha" >&2; exit 1; }
+    done
+  ) 9> "$(dirname "$libs")/lib.lock" || return 1
+  local j
+  for j in $lib_jars; do [ -f "$libs/$j.jar" ] || { echo "== libs: no $j in bin/clojure-tests' deps" >&2; return 1; }; done
 }
 
 digest() { (cd "$1" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -c1-64); }
@@ -103,17 +130,28 @@ case ${1:-} in
   rt suite-keep-ext --keep-ext "$work/suite"
   rt suite-ae "$work/suite"
   rt suite-full --full "$work/suite"
-  # the suite's test libraries, the jars bin/clojure-tests downloads, each tree apart
+  # the suite's test libraries, the jars bin/clojure-tests downloads (fetched here when missing,
+  # by its pins), each tree apart; without them (no network) skipped, said so, but in the gate
+  # (GATE_OUT set: bin/lib/gate-run.bash), where a pass must have judged them
   libs=$root/.tmp/clojure-tests/lib
-  have=1; for j in $lib_jars; do [ -f "$libs/$j.jar" ] || have=; done
+  # fetched when missing (lib_fetch, by bin/clojure-tests' pins), then every jar of its deps checked against its
+  # SHA-1 pin (lib_verify, audit 076 finding 5): some missing or wrong fails; none there (no network) is lv 2
+  have=; lv=0; lib_fetch "$libs" || true
+  lib_verify "$root/bin/clojure-tests" "$libs" || lv=$?
+  [ $lv = 1 ] && status=1
+  [ $lv = 0 ] && have=1
   if [ -n "$have" ]; then
     rm -rf "$work/rt-jars"; mkdir -p "$work/rt-jars"
     for j in $lib_jars; do mkdir -p "$work/rt-jars/$j"; unzip -q "$libs/$j.jar" -d "$work/rt-jars/$j"; done
     rt libs-keep-ext --keep-ext "$work/rt-jars"/*
     rt libs-ae "$work/rt-jars"/*
     rt libs-full --full "$work/rt-jars"/*
+  elif [ $lv = 1 ]; then
+    echo "== libs: FAILED: a jar of bin/clojure-tests' deps is missing in $libs or not its pinned SHA-1 (above)"
+  elif [ -n "${GATE_OUT:-}" ]; then
+    echo "== libs: FAILED: the jars are not in $libs and could not be downloaded (the gate judges them)"; status=1
   else
-    echo "== libs: no jars in $libs, skipped (bin/clojure-tests downloads them)"
+    echo "== libs: SKIPPED: the jars are not in $libs and could not be downloaded (bin/clojure-tests downloads them)"
   fi
   rt arbace --from-arbace "$root/arbace"
   exit $status ;;
@@ -121,9 +159,7 @@ case ${1:-} in
   go=${2:-$root/target/arbace-go/$(arbace_host_arch)/arbace}
   libs=$root/.tmp/clojure-tests/lib
   jars=$lib_jars
-  for j in $jars; do
-    [ -f "$libs/$j.jar" ] || { echo "no $libs/$j.jar: run bin/clojure-tests once (it downloads the jars)" >&2; exit 2; }
-  done
+  lib_verify "$root/bin/clojure-tests" "$libs" || { echo "run bin/clojure-tests once (it downloads the jars)" >&2; exit 2; }
   rm -rf "$work/jars" "$work/ae"; mkdir -p "$work/jars"
   for j in $jars; do mkdir -p "$work/jars/$j"; unzip -q "$libs/$j.jar" -d "$work/jars/$j"; done
   # a library with a data_readers.cljc (none of the jars has one): it must become a

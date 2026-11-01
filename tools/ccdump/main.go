@@ -3,7 +3,7 @@
 // (or, with the build tag upstream, modernc.org/cc/v4 v4.29.7) and copies none of it; bin/repr-c
 // ccdump-build builds it.
 //
-//	ccdump -mode lex|pp|tree -host DIR -list FILE -o DIR [-base DIR] [-skip-done] [-current FILE]
+//	ccdump -mode lex|pp|tree|types -host DIR -list FILE -o DIR [-base DIR] [-skip-done] [-current FILE]
 //
 // The list holds one JSON object a line: {"name": NAME, "std": STD, "pre": TEXT, "inc": [DIR...],
 // "out": PATH}: NAME the file (relative to -base, which is the working directory while it runs), STD
@@ -73,7 +73,7 @@ func esc(b []byte) string {
 }
 
 func main() {
-	mode := flag.String("mode", "pp", "lex, pp or tree")
+	mode := flag.String("mode", "pp", "lex, pp, tree or types")
 	hostDir := flag.String("host", "", "the recorded host data (test/c/host)")
 	list := flag.String("list", "", "the files, JSON lines")
 	out := flag.String("o", "", "the output directory")
@@ -82,7 +82,7 @@ func main() {
 	current := flag.String("current", "", "the file each output path is written to before its file (default DIR/.current)")
 	flag.Parse()
 	if *list == "" || *out == "" || (*mode != "lex" && *hostDir == "") {
-		fmt.Fprintln(os.Stderr, "usage: ccdump -mode lex|pp|tree -host DIR -list FILE -o DIR [-base DIR]")
+		fmt.Fprintln(os.Stderr, "usage: ccdump -mode lex|pp|tree|types -host DIR -list FILE -o DIR [-base DIR]")
 		os.Exit(2)
 	}
 	abs := func(p string) string { a, err := filepath.Abs(p); check(err); return a }
@@ -129,7 +129,7 @@ func main() {
 		switch *mode {
 		case "lex":
 			dumpLex(w, e)
-		case "pp", "tree":
+		case "pp", "tree", "types":
 			p, ok := predef[e.Std]
 			if !ok {
 				b, err := os.ReadFile(filepath.Join(*hostDir, "predefined", e.Std+".h"))
@@ -140,11 +140,13 @@ func main() {
 			h := &host{predefined: p + e.Pre, include: e.Inc, sysInclude: sys}
 			if *mode == "tree" {
 				dumpTree(w, e, h)
+			} else if *mode == "types" {
+				dumpTypes(w, e, h)
 			} else {
 				dumpPP(w, e, h)
 			}
 		default:
-			fmt.Fprintf(os.Stderr, "ccdump: mode lex, pp or tree, not %s\n", *mode)
+			fmt.Fprintf(os.Stderr, "ccdump: mode lex, pp, tree or types, not %s\n", *mode)
 			os.Exit(2)
 		}
 		check(w.Flush())

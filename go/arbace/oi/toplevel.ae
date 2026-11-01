@@ -1,0 +1,508 @@
+(in-ns 'go.arbace.oi) (go/file "toplevel.go" :imports [
+
+
+    ^{:line 4} [fmt "fmt"]
+    ^{:line 5} [math "math"]
+    ^{:line 6} [regexp "regexp"]
+    ^{:line 7} [strconv "strconv"]
+    ^{:line 8} [strings "strings"]])
+
+
+;; The toplevel (survey §6.5, OC12 (a)): each phrase is a unit the oracle typed and lowered (its
+;; Lambda dump and its signature as the compiler prints it); oi runs it in the session's program
+;; and prints each item of the signature as the ocaml toplevel does, a value by its type: oi's own
+;; Genprintval over the value's representation and the type's text, the session's type
+;; declarations giving the constructors' and fields' names.
+
+
+(go/type Toplevel "Toplevel is a session.\n" (struct
+    ^{:line 19 :tag (* Program)} P
+    ^{:line 20 :tag (* Thread)} Th
+    ^{:line 21 :tag (map string (* CompUnit))} lib
+    ^{:line 22 :tag (map string int)} order
+    ^{:line 23 :tag (map string bool)} done
+    ^{:line 24 :tag (map string string)} decls)) ; type name -> its declaration's right-hand side
+
+
+
+^{:go/end 36} (go/func NewToplevel "NewToplevel is a session over the library lib (in link order).\n" ^{:tag (* Toplevel)} [^{:tag (slice (* CompUnit))} lib]
+  (let [t (addr (lit Toplevel :P (NewProgram (lit (slice string) "ocaml")) :lib (lit (map string (* CompUnit))) :order (lit (map string int)) :done (lit (map string bool)) :decls (lit (map string string))))]
+    (range [i u lib]
+      (aset (.-lib t) (.-Name u) u)
+      (aset (.-order t) (.-Name u) i))
+
+    (set! (.-Th t) (NewThread))
+    ^{:line 35} t))
+
+
+
+
+^{:go/end 85} (go/method Phrase "Phrase runs one phrase's unit and returns the toplevel's text for its signature (sig, as the\ncompiler prints it). The phrase named it__ prints as \"- : T = V\".\n" [^{:tag (* Toplevel)} t ^{:tag (* CompUnit)} u ^string sig] :results [^string out ^error err]
+  ;; the library units this phrase needs, not yet initialised
+  (let [^{:tag (slice (* CompUnit))} need (zero (slice (* CompUnit)))
+      ^{:line 43} seen (lit (map string bool))
+      ^{:line 44 :tag (func [string])} visit (zero (func [string]))]
+    (set! visit ^{:go/end 58} (fn [^string n]
+        (when (or (aget seen n) (aget (.-done t) n))
+          (return))
+
+        (aset seen n true)
+        (let [(values lu ok) (aget (.-lib t) n)]
+          (when (not ok)
+            (return))
+
+          (range [_ r (append (append (lit (slice string)) (spread (.-Required lu))) (spread (.-Refs lu)))]
+            (visit r))
+
+          (set! need (append need lu)))))
+
+    (range [_ r (append (append (lit (slice string)) (spread (.-Required u))) (spread (.-Refs u)))]
+      (visit r))
+
+    (sortUnits need (.-order t))
+    (let [^int status (zero int)
+        ^{:line 64 :tag strings/Builder} buf (zero strings/Builder)]
+      (range [_ lu (append need u)]
+        (let [(values code cerr) (.Compile (.-P t) lu)]
+          (when (!= cerr nil)
+            (return "" cerr))
+
+          (let [ok (protect (.-Th t) (addr buf) (addr status) ^{:go/end 70} (fn [] (.RunInit (.-P t) (.-Th t) code)))]
+            (aset (.-done t) (.-Name lu) true)
+            (when (not ok)
+              (when [(flushStdQuiet)] true)
+
+              (let [msg (.String buf)]
+                (when (strings/HasPrefix msg "Fatal error: exception ")
+                  (set! msg (+ "Exception: " (strings/TrimSuffix (strings/TrimPrefix msg "Fatal error: exception ") "\n") ".\n")))
+
+                (return msg nil))))))
+
+
+      (flushStdQuiet)
+      (let [(values block _) (.Global (.-P t) (.-Name u))]
+        (return (.printSig t block sig) nil)))))
+
+
+^{:go/end 93} (go/func sortUnits [^{:tag (slice (* CompUnit))} us ^{:tag (map string int)} order]
+  (for [i 1] (< i (len us)) (inc! i)
+    (for [j i] (and (> j 0) (< (aget order (.-Name (aget us j))) (aget order (.-Name (aget us (- j 1)))))) (dec! j)
+      (set! (values (aget us j) (aget us (- j 1))) (values (aget us (- j 1)) (aget us j))))))
+
+
+
+
+
+
+^{:go/end 110} (go/func sigItems "sigItems splits the compiler's signature text into its items (an item's continuation lines are\nindented).\n" ^{:tag (slice string)} [^string sig]
+  (let [^{:tag (slice string)} items (zero (slice string))]
+    (range [_ line (strings/Split sig "\n")]
+      (when (== line "")
+        (continue))
+
+      (when (and ^:go/paren (or (== (aget line 0) \space) (== (aget line 0) \tab) (strings/HasPrefix line "end") (strings/HasPrefix line "|")) (> (len items) 0))
+        (set! (aget items (- (len items) 1)) + (+ "\n" line))
+        (continue))
+
+      (set! items (append items line)))
+
+    ^{:line 109} items))
+
+
+^{:go/end 150} (go/method printSig ^string [^{:tag (* Toplevel)} t ^Value block ^string sig]
+  (let [^strings/Builder out (zero strings/Builder)
+      ^{:line 114} fieldIdx 0
+      ^{:line 115} fieldOf ^{:go/end 124} (fn ^Value []
+        (let [(values b ok) (assert (* Block) block)]
+          (when (or (not ok) (>= fieldIdx (len (.-F b))))
+            (inc! fieldIdx)
+            (return nil))
+
+          (let [v (aget (.-F b) fieldIdx)]
+            (inc! fieldIdx)
+            ^{:line 123} v)))]
+
+    (set! sig (.ReplaceAllString topPrefix sig ""))
+    (range [_ item (sigItems sig)]
+      (let [(values kw rest _) (strings/Cut item " ")]
+        (switch kw
+          (case ["val"]
+            (let [(values name ty _) (strings/Cut rest " : ")
+                ^{:line 131} v (fieldOf)
+                ^{:line 132} flat (strings/Join (strings/Fields ty) " ")
+                ^{:line 133} shown (.Show t v flat)]
+              (if (== name "it__")
+                (fmt/Fprintf (addr out) "- : %s = %s\n" flat shown)
+
+                (fmt/Fprintf (addr out) "val %s : %s = %s\n" name flat shown))))
+
+          (case ["type"]
+            (.declare t rest)
+            (fmt/Fprintf (addr out) "%s\n" item))
+          (case ["exception" "module" "class"]
+            (fieldOf)
+            (fmt/Fprintf (addr out) "%s\n" item))
+          (default
+            (fmt/Fprintf (addr out) "%s\n" item)))))
+
+
+    (.String out)))
+
+
+
+^{:go/end 161} (go/method declare "declare records \"t = A | B of int\" or \"'a t = { x : 'a }\" (the parameters dropped).\n" [^{:tag (* Toplevel)} t ^string decl]
+  (let [(values lhs rhs ok) (strings/Cut decl " = ")]
+    (when (not ok)
+      (return))
+
+    (let [f (strings/Fields lhs)
+        ^{:line 159} name (aget f (- (len f) 1))]
+      (aset (.-decls t) name (strings/Join (strings/Fields rhs) " ")))))
+
+
+;; ---- types: a small parser of the printer's text ----
+
+(go/type ty (struct
+    ^{:line 166 :tag string} name ; constructor name ("int", "list", "*" for tuples, "->", "'" for variables)
+    ^{:line 167 :tag (slice (* ty))} args))
+
+
+(go/type tyParser (struct
+    ^{:line 171 :tag (slice string)} toks
+    ^{:line 172 :tag int} i))
+
+
+^{:go/end 198} (go/func tokenize ^{:tag (slice string)} [^string s]
+  (let [^{:tag (slice string)} toks (zero (slice string))]
+    (for [i 0] (< i (len s)) _
+      (let [c (aget s i)]
+        (switch
+          (case [(== c \space)]
+            (inc! i))
+          (case [(or (== c \() (== c \)) (== c \,) (== c \*))]
+            (set! toks (append toks (conv string c)))
+            (inc! i))
+          (case [(and (== c \-) (< (+ i 1) (len s)) (== (aget s (+ i 1)) \>))]
+            (set! toks (append toks "->"))
+            (set! i + 2))
+          (default
+            (let [j i]
+              (while (and (< j (len s)) (not (strings/ContainsRune " (),*" (conv rune (aget s j)))) (not (and (== (aget s j) \-) (< (+ j 1) (len s)) (== (aget s (+ j 1)) \>))))
+                (inc! j))
+
+              (set! toks (append toks (subslice s i j)))
+              (set! i j))))))
+
+
+    ^{:line 197} toks))
+
+
+^{:go/end 204} (go/func parseType ^{:tag (* ty)} [^string s]
+  (let [p (addr (lit tyParser :toks (tokenize s)))]
+    (defer (^{:go/end 202} (fn [] (recover))))
+    (.arrow p)))
+
+
+^{:go/breaks [[4 210]] :go/end 211} (go/method peek ^string [^{:tag (* tyParser)} p]
+  (when (< (.-i p) (len (.-toks p)))
+    (return (aget (.-toks p) (.-i p))))
+
+  "")
+
+
+^{:go/end 221} (go/method arrow ^{:tag (* ty)} [^{:tag (* tyParser)} p]
+  (let [a (.tuple p)]
+    (when (== (.peek p) "->")
+      (inc! (.-i p))
+      (let [b (.arrow p)]
+        (return (addr (lit ty :name "->" :args (lit (slice (* ty)) a b))))))
+
+    ^{:line 220} a))
+
+
+^{:go/end 234} (go/method tuple ^{:tag (* ty)} [^{:tag (* tyParser)} p]
+  (let [a (.app p)]
+    (when (!= (.peek p) "*")
+      (return a))
+
+    (let [elems (lit (slice (* ty)) a)]
+      (while (== (.peek p) "*")
+        (inc! (.-i p))
+        (set! elems (append elems (.app p))))
+
+      (addr (lit ty :name "*" :args elems)))))
+
+
+^{:go/end 266} (go/method app ^{:tag (* ty)} [^{:tag (* tyParser)} p]
+  (let [^{:tag (slice (* ty))} args (zero (slice (* ty)))]
+    (if (== (.peek p) "(") (do
+        (inc! (.-i p))
+        (set! args (append args (.arrow p)))
+        (while (== (.peek p) ",")
+          (inc! (.-i p))
+          (set! args (append args (.arrow p))))
+
+        (inc! (.-i p)) ; )
+        (when (and (== (len args) 1) (not (.isName p)))
+          (return (aget args 0))))
+
+
+      (let [tok (.peek p)]
+        (inc! (.-i p))
+        (when (or (strings/HasPrefix tok "?") ^:go/paren (and (strings/HasSuffix tok ":") (> (len tok) 1)))
+          ;; a labelled argument
+          (return (.app p)))
+
+        (set! args (lit (slice (* ty)) (lit _ :name tok)))
+        (when (strings/HasPrefix tok "'")
+          (set! args (lit (slice (* ty)) (lit _ :name "'"))))))
+
+
+    (while (.isName p)
+      (set! args (lit (slice (* ty)) (lit _ :name (.peek p) :args args)))
+      (inc! (.-i p)))
+
+    (aget args 0)))
+
+
+^{:go/end 271} (go/method isName ^bool [^{:tag (* tyParser)} p]
+  (let [t (.peek p)]
+    (and (!= t "") (!= t "(") (!= t ")") (!= t ",") (!= t "*") (!= t "->"))))
+
+
+
+^{:go/end 279} (go/method Show "Show is the toplevel's text of v at the type text tyText.\n" ^string [^{:tag (* Toplevel)} t ^Value v ^string tyText]
+  (when (== v nil)
+    (return "<abstr>"))
+
+  (.show t v (parseType tyText) 0))
+
+
+^{:go/end 376} (go/method show ^string [^{:tag (* Toplevel)} t ^Value v ^{:tag (* ty)} tp ^int depth]
+  (when (or (== tp nil) (> depth 100))
+    (return "<abstr>"))
+
+  ^{:go/breaks [[5 375]]} (let [name (.-name tp)]
+    (when [i (strings/LastIndexByte name \.)] (and (>= i 0) (!= name "."))
+      (set! name (subslice name (+ i 1))))
+
+    (switch name
+      (case ["->"]
+        (return "<fun>"))
+      (case ["'"]
+        (return "<poly>"))
+      (case ["int"]
+        (when [(values i ok) (assert int v)] ok
+          (return (strconv/Itoa i))))
+
+      (case ["char"]
+        (when [(values i ok) (assert int v)] ok
+          (return (+ "'" (escapeChar (conv byte i)) "'"))))
+
+      (case ["bool"]
+        (when [(values i ok) (assert int v)] ok
+          (when (!= i 0)
+            (return "true"))
+
+          (return "false")))
+
+      (case ["unit"]
+        (return "()"))
+      (case ["float"]
+        (when [(values f ok) (assert float64 v)] ok
+          (return (ShowFloat f))))
+
+      (case ["string" "bytes"]
+        (when [(values b ok) (assert (* Bytes) v)] ok
+          (return (+ "\"" (escapeString (.-B b)) "\""))))
+
+      (case ["int32"]
+        (return (fmt/Sprintf "%dl" (bintVal v))))
+      (case ["int64"]
+        (return (fmt/Sprintf "%dL" (bintVal v))))
+      (case ["nativeint"]
+        (return (fmt/Sprintf "%dn" (bintVal v))))
+      (case ["*"]
+        (let [(values b ok) (assert (* Block) v)]
+          (when (or (not ok) (!= (len (.-F b)) (len (.-args tp))))
+            (return "<abstr>"))
+
+          (let [parts (make (slice string) (len (.-F b)))]
+            (range [i x (.-F b)]
+              (aset parts i (.show t x (aget (.-args tp) i) (+ depth 1))))
+
+            (return (+ "(" (strings/Join parts ", ") ")")))))
+      (case ["list"]
+        (let [^{:tag (slice string)} parts (zero (slice string))]
+          (while true
+            (let [(values b ok) (assert (* Block) v)]
+              (when (not ok)
+                (break))
+
+              (set! parts (append parts (.show t (aget (.-F b) 0) (aget (.-args tp) 0) (+ depth 1))))
+              (set! v (aget (.-F b) 1))))
+
+          (return (+ "[" (strings/Join parts "; ") "]"))))
+      (case ["array"]
+        (let [n (ArrayLength v)
+            ^{:line 348} parts (make (slice string) n)]
+          (for [i 0] (< i n) (inc! i)
+            (aset parts i (.show t (ArrayGet v i) (aget (.-args tp) 0) (+ depth 1))))
+
+          (return (+ "[|" (strings/Join parts "; ") "|]"))))
+      (case ["option"]
+        (when [(values b ok) (assert (* Block) v)] ok
+          (return (+ "Some " (.arg t (aget (.-F b) 0) (aget (.-args tp) 0) depth))))
+
+        (return "None"))
+      (case ["ref"]
+        (when [(values b ok) (assert (* Block) v)] ok
+          (return (+ "{contents = " (.show t (aget (.-F b) 0) (aget (.-args tp) 0) (+ depth 1)) "}"))))
+
+      (case ["result"]
+        (when [(values b ok) (assert (* Block) v)] ok
+          (when (== (.-Tag b) 0)
+            (return (+ "Ok " (.arg t (aget (.-F b) 0) (aget (.-args tp) 0) depth))))
+
+          (return (+ "Error " (.arg t (aget (.-F b) 0) (aget (.-args tp) 1) depth)))))
+
+      (case ["exn"]
+        (return (FormatException v))))
+
+    (when [(values d ok) (aget (.-decls t) name)] ok
+      (return (.showDecl t v d depth)))
+
+    "<abstr>"))
+
+
+
+^{:go/end 385} (go/method arg "arg is a constructor's argument: in parentheses unless atomic.\n" ^string [^{:tag (* Toplevel)} t ^Value v ^{:tag (* ty)} tp ^int depth]
+  (let [s (.show t v tp (+ depth 1))]
+    (when (or (and (strings/ContainsAny s " ") (not (strings/HasPrefix s "[")) (not (strings/HasPrefix s "(")) (not (strings/HasPrefix s "{")) (not (strings/HasPrefix s "\""))) (strings/HasPrefix s "-"))
+      (return (+ "(" s ")")))
+
+    ^{:line 384} s))
+
+
+^{:go/end 440} (go/method showDecl ^string [^{:tag (* Toplevel)} t ^Value v ^string d ^int depth]
+  (set! d (strings/TrimPrefix d "private "))
+  (when (strings/HasPrefix d "{")
+    (let [fields (strings/Split (strings/Trim d "{} ") ";")
+        ^{:line 391 :tag (slice string)} parts (zero (slice string))]
+      (range [i f fields]
+        (set! f (strings/TrimSpace f))
+        (when (== f "")
+          (continue))
+
+        (set! f (strings/TrimPrefix f "mutable "))
+        (let [(values fname fty _) (strings/Cut f ":")
+            ^{:line 399 :tag Value} x (zero Value)]
+          (type-switch [b v]
+            (case [(* Block)]
+              (set! x (aget (.-F b) i)))
+            (case [(* FloatArray)]
+              (set! x (aget (.-F b) i))))
+
+          (set! parts (append parts (+ (strings/TrimSpace fname) " = " (.show t x (parseType (strings/TrimSpace fty)) (+ depth 1)))))))
+
+      (return (+ "{" (strings/Join parts "; ") "}"))))
+
+  (when (and (not (strings/Contains d "|")) (not (and (> (len d) 0) (>= (aget d 0) \A) (<= (aget d 0) \Z))))
+    ;; an abbreviation
+    (return (.show t v (parseType d) (+ depth 1))))
+
+  ^{:go/breaks [[3 439]]} (let [cases (strings/Split (strings/TrimPrefix d "| ") " | ")
+      (values nconst nblock) (values 0 0)]
+    (range [_ c cases]
+      (set! c (strings/TrimSpace c))
+      (let [(values cname args hasArgs) (strings/Cut c " of ")]
+        (when (not hasArgs)
+          (when [(values i ok) (assert int v)] (and ok (== i nconst))
+            (return cname))
+
+          (inc! nconst)
+          (continue))
+
+        (when [(values b ok) (assert (* Block) v)] (and ok (== (.-Tag b) nblock))
+          (let [at (parseType args)]
+            (when (and (!= at nil) (== (.-name at) "*") (== (len (.-F b)) (len (.-args at))))
+              (let [parts (make (slice string) (len (.-F b)))]
+                (range [i x (.-F b)]
+                  (aset parts i (.show t x (aget (.-args at) i) (+ depth 1))))
+
+                (return (+ cname " (" (strings/Join parts ", ") ")"))))
+
+            (return (+ cname " " (.arg t (aget (.-F b) 0) at depth)))))
+
+        (inc! nblock)))
+
+    "<abstr>"))
+
+
+
+
+^{:go/end 468} (go/func ShowFloat "ShowFloat is the toplevel's float: \"%.12g\" and a dot when it would read as an integer\n(Stdlib.string_of_float's valid_float_lexem).\n" ^string [^float64 f]
+  (switch
+    (case [(math/IsInf f 1)]
+      (return "infinity"))
+    (case [(math/IsInf f -1)]
+      (return "neg_infinity"))
+    (case [(math/IsNaN f)]
+      (return "nan")))
+
+  (let [s (strconv/FormatFloat f \g 12 64)]
+    (when (strings/Contains s "e")
+      ;; C's %g writes the exponent with at least two digits
+      (let [(values m e _) (strings/Cut s "e")
+          ^{:line 457} sign (aget e 0)
+          ^{:line 458} digits (subslice e 1)]
+        (when (< (len digits) 2)
+          (set! digits (+ "0" digits)))
+
+        (set! s (+ m "e" (conv string sign) digits))))
+
+    (when (not (strings/ContainsAny s ".e"))
+      (set! s + "."))
+
+    ^{:line 467} s))
+
+
+^{:go/end 489} (go/func escapeChar ^string [^byte c]
+  (switch c
+    (case [\']
+      (return "\\'"))
+    (case [\\]
+      (return "\\\\"))
+    (case [\newline]
+      (return "\\n"))
+    (case [\tab]
+      (return "\\t"))
+    (case [\return]
+      (return "\\r"))
+    (case [\backspace]
+      (return "\\b")))
+
+  (when (or (< c 32) (>= c 127))
+    (return (fmt/Sprintf "\\%03d" c)))
+
+  (conv string c))
+
+
+^{:go/end 505} (go/func escapeString ^string [^{:tag (slice byte)} b]
+  (let [^strings/Builder s (zero strings/Builder)]
+    (range [_ c b]
+      (when (== c \')
+        (.WriteByte s c)
+        (continue))
+
+      (when (== c \")
+        (.WriteString s "\\\"")
+        (continue))
+
+      (.WriteString s (escapeChar c)))
+
+    (.String s)))
+
+
+
+(go/var ^{:doc "topPrefix is the session's earlier units' names, which the toplevel does not print.\n"} topPrefix (regexp/MustCompile "\\bTop_[0-9]+\\."))

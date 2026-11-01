@@ -1,0 +1,208 @@
+(in-ns 'go.arbace.oi) (go/file "sexp.go" :imports [
+
+
+    ^{:line 4} [fmt "fmt"]
+    ^{:line 5} [strconv "strconv"]
+    ^{:line 6} [utf8 "unicode/utf8"]])
+
+
+
+
+
+(go/type "The forms of a dump as Go data (a reader for the subset of the Clojure reader's syntax that\ntools/ocdump writes, doc/ocaml/SPEC.md §11.2): a list is an SList, a vector an SVec, a map an\nSMap, a keyword a Kw, a symbol a Sym, a string a Go string, an integer an int, nil nil.\n"
+  ^{:line 13} [SList (slice any)]
+  ^{:line 14} [SVec (slice any)]
+  ^{:line 15} [SMap (map string any)]
+  ^{:line 16} [Kw string]
+  ^{:line 17} [Sym string])
+
+
+(go/type reader (struct
+    ^{:line 21 :tag (slice byte)} s
+    ^{:line 22 :tag int} pos))
+
+
+
+^{:go/end 40} (go/func ReadForms "ReadForms reads every form of src.\n" [^{:tag (slice byte)} src] :results [(slice any) error]
+  (let [r (addr (lit reader :s src))
+      ^{:line 28 :tag (slice any)} out (zero (slice any))]
+    (while true
+      (.skip r)
+      (when (>= (.-pos r) (len (.-s r)))
+        (return out nil))
+
+      (let [(values f err) (.form r)]
+        (when (!= err nil)
+          (return nil err))
+
+        (set! out (append out f))))))
+
+
+
+^{:go/end 57} (go/method skip [^{:tag (* reader)} r]
+  (while (< (.-pos r) (len (.-s r)))
+    (let [c (aget (.-s r) (.-pos r))]
+      (when (== c \;)
+        (while (and (< (.-pos r) (len (.-s r))) (!= (aget (.-s r) (.-pos r)) \newline))
+          (inc! (.-pos r)))
+
+        (continue))
+
+      (when (or (== c \space) (== c \newline) (== c \tab) (== c \return) (== c \,))
+        (inc! (.-pos r))
+        (continue))
+
+      (return))))
+
+
+
+^{:go/end 61} (go/method errf ^error [^{:tag (* reader)} r ^string format & ^{:tag (slice any)} args]
+  (fmt/Errorf "forms: offset %d: %s" (.-pos r) (fmt/Sprintf format (spread args))))
+
+
+^{:go/end 141} (go/method form [^{:tag (* reader)} r] :results [any error]
+  (.skip r)
+  (when (>= (.-pos r) (len (.-s r)))
+    (return nil (.errf r "unexpected end")))
+
+  (let [c (aget (.-s r) (.-pos r))]
+    (switch c
+      (case [\( \[ \{]
+        (let [end (aget (lit (map byte byte) [\( \)] [\[ \]] [\{ \}]) c)]
+          (inc! (.-pos r))
+          (let [^{:tag (slice any)} items (zero (slice any))]
+            (while true
+              (.skip r)
+              (when (>= (.-pos r) (len (.-s r)))
+                (return nil (.errf r "unclosed %c" c)))
+
+              (when (== (aget (.-s r) (.-pos r)) end)
+                (inc! (.-pos r))
+                (break))
+
+              (let [(values f err) (.form r)]
+                (when (!= err nil)
+                  (return nil err))
+
+                (set! items (append items f))))
+
+            (switch c
+              (case [\(]
+                (return (conv SList items) nil))
+              (case [\[]
+                (return (conv SVec items) nil)))
+
+            (let [m (lit SMap)]
+              (for [i 0] (< (+ i 1) (len items)) (set! i + 2)
+                (when [(values k ok) (assert Kw (aget items i))] ok
+                  (aset m (conv string k) (aget items (+ i 1)))))
+
+
+              (return m nil)))))
+      (case [\"]
+        (return (.str r)))
+      (case [\^]
+        ;; metadata: read and drop it, then the form
+        (inc! (.-pos r))
+        (when [(values _ err) (.form r)] (!= err nil)
+          (return nil err))
+
+        (return (.form r))))
+
+    (let [start (.-pos r)]
+      (while (< (.-pos r) (len (.-s r)))
+        (let [c (aget (.-s r) (.-pos r))]
+          (when (or (== c \space) (== c \newline) (== c \tab) (== c \return) (== c \,) (== c \() (== c \)) (== c \[) (== c \]) (== c \{) (== c \}) (== c \"))
+            (break))
+
+          (inc! (.-pos r))))
+
+      (let [tok (conv string (subslice (.-s r) start (.-pos r)))]
+        (when (== tok "")
+          (return nil (.errf r "unexpected %q" c)))
+
+        (when (== tok "nil")
+          (return nil nil))
+
+        (when (or (== tok "true") (== tok "false"))
+          (return (== tok "true") nil))
+
+        (when (== (aget tok 0) \:)
+          (return (conv Kw (subslice tok 1)) nil))
+
+        (when (or ^:go/paren (and (>= (aget tok 0) \0) (<= (aget tok 0) \9)) ^:go/paren (and (> (len tok) 1) ^:go/paren (or (== (aget tok 0) \-) (== (aget tok 0) \+)) (>= (aget tok 1) \0) (<= (aget tok 1) \9)))
+          (let [(values n err) (strconv/ParseInt tok 10 64)]
+            (when (!= err nil)
+              (return nil (.errf r "bad number %q" tok)))
+
+            (return (conv int n) nil)))
+
+        (return (conv Sym tok) nil)))))
+
+
+^{:go/end 193} (go/method str [^{:tag (* reader)} r] :results [any error]
+  (inc! (.-pos r))
+  (let [^{:tag (slice byte)} b (zero (slice byte))]
+    (while true
+      (when (>= (.-pos r) (len (.-s r)))
+        (return nil (.errf r "unclosed string")))
+
+      (let [c (aget (.-s r) (.-pos r))]
+        (when (== c \")
+          (inc! (.-pos r))
+          (return (conv string b) nil))
+
+        (when (!= c \\)
+          (set! b (append b c))
+          (inc! (.-pos r))
+          (continue))
+
+        (inc! (.-pos r))
+        (when (>= (.-pos r) (len (.-s r)))
+          (return nil (.errf r "bad escape")))
+
+        (let [e (aget (.-s r) (.-pos r))]
+          (inc! (.-pos r))
+          (switch e
+            (case [\n]
+              (set! b (append b \newline)))
+            (case [\t]
+              (set! b (append b \tab)))
+            (case [\r]
+              (set! b (append b \return)))
+            (case [\b]
+              (set! b (append b \backspace)))
+            (case [\f]
+              (set! b (append b \formfeed)))
+            (case [\" \\ \']
+              (set! b (append b e)))
+            (case [\u]
+              (when (> (+ (.-pos r) 4) (len (.-s r)))
+                (return nil (.errf r "bad \\u")))
+
+              (let [(values n err) (strconv/ParseUint (conv string (subslice (.-s r) (.-pos r) (+ (.-pos r) 4))) 16 32)]
+                (when (!= err nil)
+                  (return nil (.errf r "bad \\u")))
+
+                (set! (.-pos r) + 4)
+                (set! b (utf8/AppendRune b (conv rune n)))))
+            (default
+              (return nil (.errf r "bad escape \\%c" e)))))))))
+
+
+
+
+
+^{:go/breaks [6] :go/end 209} (go/func bytesOf "bytesOf is a dump's string or byte vector (S: a string that is not UTF-8 is a vector of bytes).\n" ^{:tag (slice byte)} [^any f]
+  (type-switch [x f]
+    (case [string]
+      (return (conv (slice byte) x)))
+    (case [SVec]
+      (let [b (make (slice byte) (len x))]
+        (range [i v x]
+          (aset b i (conv byte (assert int v))))
+
+        (return b))))
+
+  (Internalf "not a string form: %v" f)
+  nil)

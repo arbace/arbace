@@ -1,0 +1,156 @@
+(ns arbace.repr.scheme.print
+  "Scheme forms to Scheme text in :lines (doc/scheme/SPEC.md, 7): `write` of the datum, as Chez Scheme 10.3.0
+  writes it (not Arbace's Clojure printer): strings and symbols with \\xHEX; escapes where Chez has them,
+  characters by name, flonums by shortest digits in Chez's positional or exponent layout, a quote form not
+  abbreviated.
+
+    (write-form '(scm/dot (a) b))   =>  \"(a . b)\"
+    (write-form (list 'scm/sym \"a b\"))  =>  \"a\\\\x20;b\""
+  (:require [arbace.string :as str]
+            [arbace.repr.scheme.forms :as fm]
+            [arbace.repr.scheme.read :as rd]))
+
+(defn- hex [n] (.toUpperCase (Integer/toHexString (int n))))
+
+(defn write-string
+  "Chez's `write` of the string `s`."
+  [^String s]
+  (let [sb (StringBuilder. "\"")]
+    (doseq [^long cp (.toArray (.codePoints s))]
+      (cond (== cp 34) (.append sb "\\\"")
+            (== cp 92) (.append sb "\\\\")
+            (== cp 7) (.append sb "\\a")
+            (== cp 8) (.append sb "\\b")
+            (== cp 9) (.append sb "\\t")
+            (== cp 10) (.append sb "\\n")
+            (== cp 11) (.append sb "\\v")
+            (== cp 12) (.append sb "\\f")
+            (== cp 13) (.append sb "\\r")
+            (or (< cp 32) (== cp 127) (== cp 0x85) (== cp 0x2028)) (.append sb (str "\\x" (hex cp) ";"))
+            :else (.appendCodePoint sb (int cp))))
+    (.append sb "\"")
+    (.toString sb)))
+
+(def ^:private char-write-names {0 "nul" 7 "alarm" 8 "backspace" 9 "tab" 10 "newline" 11 "vtab" 12 "page" 13 "return" 27 "esc" 32 "space" 127 "delete"})
+
+(defn write-char
+  "Chez's `write` of the character with scalar value `cp`."
+  [cp]
+  (cond (contains? char-write-names cp) (str "#\\" (char-write-names cp))
+        (or (<= 1 cp 6) (<= 14 cp 26) (<= 28 cp 31) (== cp 0x85) (== cp 0x2028)) (str "#\\x" (hex cp))
+        :else (str "#\\" (String. (Character/toChars (int cp))))))
+
+(defn write-symbol
+  "Chez's `write` of the symbol named `name`."
+  [^String name]
+  (cond
+    (empty? name) "||"
+    (or (= name "+") (= name "-") (= name "...")) name
+    :else
+    (let [sb (StringBuilder.)
+          arrow (.startsWith name "->")]
+      (loop [i 0 first true]
+        (when (< i (.length name))
+          (let [cp (.codePointAt name i)
+                ok (if (and first (not arrow)) (rd/initial-cp? cp) (if arrow (rd/subsequent-cp? cp) (rd/subsequent-cp? cp)))]
+            (if ok (.appendCodePoint sb cp) (.append sb (str "\\x" (hex cp) ";")))
+            (recur (+ i (Character/charCount cp)) false))))
+      (.toString sb))))
+
+(declare flonum-string*)
+
+(defn- round-tie-up [x digits pp]
+  (if (empty? digits) [digits pp]
+  (let [nd (count digits)
+        v (java.math.BigDecimal. (double x))
+        c1 (java.math.BigDecimal. (java.math.BigInteger. ^String digits) (int (- nd pp)))
+        c2 (.add c1 (java.math.BigDecimal/valueOf 1 (int (- nd pp))))]
+    (if (and (== 0 (.compareTo (.subtract c2 v) (.subtract v c1)))
+             (== (Double/parseDouble (.toString c2)) x))
+      (let [c (.stripTrailingZeros c2)]
+        [(.toString (.unscaledValue c)) (- (.precision c) (.scale c))])
+      [digits pp]))))
+
+(defn flonum-string
+  "Chez's `number->string` of the double `x`: a subnormal ends in | and the bits of its precision."
+  [^double x]
+  (str (flonum-string* x)
+       (when (and (not (zero? x)) (< (Math/abs x) 2.2250738585072014E-308))
+         (str "|" (- 64 (Long/numberOfLeadingZeros (bit-and (Double/doubleToLongBits x) 0xFFFFFFFFFFFFF)))))))
+
+(defn- flonum-string*
+  [^double x]
+  (cond
+    (Double/isNaN x) "+nan.0"
+    (Double/isInfinite x) (if (pos? x) "+inf.0" "-inf.0")
+    :else
+    (let [neg (or (neg? x) (and (zero? x) (neg? (Math/copySign 1.0 x))))
+          j (Double/toString (Math/abs x))
+          [m e] (let [k (.indexOf j "E")] (if (neg? k) [j 0] [(subs j 0 k) (Long/parseLong (subs j (inc k)))]))
+          dot (.indexOf ^String m ".")
+          ip (subs m 0 dot) fp (subs m (inc dot))
+          all (str ip fp)
+          lead (count (take-while #(= % \0) all))
+          all' (subs all lead)
+          digits0 (let [t (count (take-while #(= % \0) (reverse all')))] (subs all' 0 (- (count all') t)))
+          pp0 (- (+ (count ip) e) lead)
+          ;; Java gives two digits at least (4.9E-324): Chez's shortest may be one
+          [digits1 pp1*] (if (== (count digits0) 2)
+                        (let [r (+ (* 10 (- (int (.charAt digits0 0)) 48)) (- (int (.charAt digits0 1)) 48))
+                              d1 (quot (+ r 5) 10)
+                              [d1 pp1] (if (== d1 10) [1 (inc pp0)] [d1 pp0])
+                              back (Double/parseDouble (str d1 "e" (- pp1 1)))]
+                          (if (== back (Math/abs x)) [(str d1) pp1] [digits0 pp0]))
+                        [digits0 pp0])
+          ;; Chez rounds a tie between two shortest candidates up (Java: to even)
+          [digits pp] (round-tie-up (Math/abs x) digits1 pp1*)
+          sign (if neg "-" "")]
+      (if (empty? digits)
+        (str sign "0.0")
+        (let [e10 (dec pp) nd (count digits)]
+          (str sign
+               (if (and (>= e10 -3) (< e10 10))
+                 (cond (<= pp 0) (str "0." (apply str (repeat (- pp) \0)) digits)
+                       (>= pp nd) (str digits (apply str (repeat (- pp nd) \0)) ".0")
+                       :else (str (subs digits 0 pp) "." (subs digits pp)))
+                 (str (subs digits 0 1) (when (> nd 1) (str "." (subs digits 1))) "e" e10))))))))
+
+(defn- write-real [x]
+  (cond (instance? Double x) (flonum-string x)
+        (instance? arbace.lang.Ratio x) (str (.numerator ^arbace.lang.Ratio x) "/" (.denominator ^arbace.lang.Ratio x))
+        :else (str x)))
+
+(defn- real-of
+  "The real number of a form of a real: a number or (scm/flonum \"..\")."
+  [f]
+  (if (seq? f)
+    (case (second f) "+inf.0" ##Inf "-inf.0" ##-Inf "+nan.0" ##NaN)
+    f))
+
+(defn write-form
+  "Chez's `write` of the datum the form `f` stands for."
+  [f]
+  (cond
+    (nil? f) (throw (ex-info "nil is no Scheme datum" {}))
+    (true? f) "#t"
+    (false? f) "#f"
+    (char? f) (write-char (int f))
+    (string? f) (write-string f)
+    (symbol? f) (write-symbol (str f))
+    (number? f) (write-real f)
+    (vector? f) (str "#(" (str/join " " (map write-form f)) ")")
+    (seq? f)
+    (let [h (first f)]
+      (cond
+        (= h fm/dot-tag) (let [pre (second f)]
+                           (str "(" (str/join " " (map write-form pre)) " . " (write-form (nth f 2)) ")"))
+        (= h fm/sym-tag) (write-symbol (second f))
+        (= h fm/char-tag) (write-char (second f))
+        (= h fm/flonum-tag) (second f)
+        (= h fm/complex-tag)
+        (let [re (real-of (nth f 1)) im (real-of (nth f 2))
+              is (write-real im)]
+          (str (write-real re) (if (or (.startsWith ^String is "-") (.startsWith ^String is "+")) "" "+") is "i"))
+        (= h fm/bytevector-tag) (str "#vu8(" (str/join " " (rest f)) ")")
+        :else (str "(" (str/join " " (map write-form f)) ")")))
+    :else (throw (ex-info (str "not a Scheme form: " (pr-str f)) {}))))

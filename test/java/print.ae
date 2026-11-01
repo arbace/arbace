@@ -26,7 +26,10 @@
                    reading, after jrt.classfile) and the differences named as bin/repr-java
                    roundtrip names them (arbace.repr.java.roundtrip/class-differences): a value's
                    control flow, an increment's place, a local's initializer, a switch's arms
-        prints ID<TAB>print<TAB>RESULT<TAB>REASON per test, and the steps' counts on stderr"
+        prints ID<TAB>print<TAB>RESULT<TAB>REASON per test, and the steps' counts on stderr; and for each
+        negative control whose subject a test is (its plan's control-print CID REF; GTS84 (a),
+        test/java/controls.edn) the control's row: forms, text and classes crossed against REF's
+        original, differ only when each differs (control-steps, control-row)"
   (:require [arbace.string :as str]
             [arbace.java.io :as io]
             [arbace.repr.java.print :as pr]
@@ -255,10 +258,10 @@
 ;; judge
 
 (defn- text-result
-  "pass, or differ and the first file whose full layout's print is not the renamed source."
-  [p]
-  (let [src (str p "/src") out (str p "/print/full")
-        orig (files-under src ".java") printed (set (files-under out ".java"))
+  "pass, or differ and the first file whose full layout's print (under out) is not the renamed source (under
+  src)."
+  [src out]
+  (let [orig (files-under src ".java") printed (set (files-under out ".java"))
         missing (remove printed orig)
         bad (filter #(and (printed %) (not (java.util.Arrays/equals (bytes-of (io/file src %)) (bytes-of (io/file out %))))) orig)]
     (cond
@@ -301,13 +304,52 @@
       jx (assoc :javac (if (= jx "0") ["pass" ""] ["fail" (str "javac rejects the printed Java: " (or (slurp1 (str pp "/javac.err1")) (str "status " jx)))]))
       f2 (assoc :forms (split (forms-result (slurp1 (str p "/forms.dir")) f2)))
       (and (nil? f2) f2-err) (assoc :forms ["fail" (str "forms: the printed Java not read: " f2-err)])
-      (and (= "pass" (first prt)) (nil? full-err) (.isDirectory (io/file pp "full"))) (assoc :text (split (text-result p)))
+      (and (= "pass" (first prt)) (nil? full-err) (.isDirectory (io/file pp "full"))) (assoc :text (split (text-result (str p "/src") (str pp "/full"))))
       cls (assoc :classes (if (= cls "pass") ["pass" ""] (split (classes-result (str pp "/c1") (str pp "/c2"))))))))
+
+(defn- control-steps
+  "GTS84 (a), test/java/controls.edn: a control's crossed steps, the subject id's print judged by the steps'
+  own comparisons against its reference ref's original: forms (the subject's F2 against the reference's F1),
+  text (the subject's full print against the reference's renamed source), classes (the subject's printed class
+  files' digest against the reference's JDK digest, print/classes.res.CID; when it differs, the trees against
+  the reference's printed class files, its original's as the reference passes); {step [RESULT REASON]}, a step
+  whose subject's part is missing left out; :left when the reference's printed run is not there (not in the
+  run: a selection)."
+  [work id cid ref]
+  (let [split (fn [s] (let [[r why] (str/split s #"\t" 2)] [r (or why "")]))
+        p (str work "/run/" id) pp (str p "/print")
+        rp (str work "/run/" ref) rpp (str rp "/print")
+        f1 (slurp1 (str rp "/forms.dir")) f2 (slurp1 (str pp "/f2.dir"))
+        cls (slurp1 (str pp "/classes.res." cid))]
+    (if-not (and f1 (.isDirectory (io/file rp "src")) (.isDirectory (io/file rpp "c2")))
+      :left
+      (cond-> {}
+        f2 (assoc :forms (split (forms-result f1 f2)))
+        (.isDirectory (io/file pp "full")) (assoc :text (split (text-result (str rp "/src") (str pp "/full"))))
+        cls (assoc :classes (if (= cls "pass") ["pass" ""] (split (classes-result (str rpp "/c2") (str pp "/c2")))))))))
+
+(defn- control-row
+  "A control's line ID print RESULT REASON from its crossed steps: differ when every step taken differs (each
+  comparison told the two tests apart), pass naming the steps that passed (a judge that passes what differs),
+  left (control-steps' :left), unjudged when no step was taken."
+  [cid ref st]
+  (cond
+    (= :left st) (str cid "\tprint\tleft\tthe reference " ref "'s print is not in this run")
+    (empty? st) (str cid "\tprint\tunjudged\tno crossed step taken")
+    :else (let [ok (filter #(= "pass" (first (get st %))) (filter st steps))]
+            (if (seq ok)
+              (str cid "\tprint\tpass\tcrossed steps passed: " (str/join " " (map name ok)))
+              (str cid "\tprint\tdiffer\t" (one-line (str/join "; " (for [s steps :when (st s)] (second (st s)))) 600))))))
 
 (defn judge [work list]
   (let [ids (lines list)
         all (doall (pmap (fn [id] [id (test-steps work id)]) ids))
         counts (atom {})]
+    ;; GTS84 (a): the controls whose subject a test of the list is (its plan's control-print CID REF lines)
+    (doseq [id ids
+            [k cid ref] (map #(str/split % #"\t") (lines (str work "/run/" id "/plan.tsv")))
+            :when (= k "control-print")]
+      (println (control-row cid ref (control-steps work id cid ref))))
     (doseq [[id st] all]
       (doseq [s steps :let [[r] (get st s)] :when r] (swap! counts update-in [s r] (fnil inc 0)))
       (let [bad (filter #(and (get st %) (not= "pass" (first (get st %)))) steps)

@@ -1,0 +1,815 @@
+(in-ns 'go.arbace.oi) (go/file "compile.go" :imports [
+
+
+    ^{:line 4} [fmt "fmt"]
+    ^{:line 5} [strconv "strconv"]
+    ^{:line 6} [strings "strings"]])
+
+
+;; The compiler of Lambda's forms (doc/ocaml/SPEC.md §11.2) into nodes. A function's variables
+;; are slots of its frame; the variables of enclosing functions it uses are captured by value
+;; into its closure's environment when the closure is made (a mutable variable is a Cell, so the
+;; capture shares it). Arguments are evaluated right to left, then the function, as bytegen's
+;; comp_args does: Lambda leaves the order of an application's and a primitive's arguments to
+;; the back end, and the reference runs are ocamlc's.
+
+(go/type locKind int)
+
+(go/const
+  ^{:line 19} [^{:tag locKind :val 0} locSlot iota]
+  ^{:line 20} [^{:val 1} locEnv])
+
+
+(go/type varLoc (struct
+    ^{:line 24 :tag locKind} kind
+    ^{:line 25 :tag int} i
+    ^{:line 26 :tag bool} mut))
+
+
+(go/type exitInfo (struct
+    ^{:line 30 :tag (slice int)} slots
+    ^{:line 31 :tag int} level
+    ^{:line 32 :tag bool} panics
+    ^{:line 33 :tag (* int)} id))
+
+
+(go/type scope (struct
+    ^{:line 37 :tag (* scope)} parent
+    ^{:line 38 :tag (map string varLoc)} vars
+    ^{:line 39 :tag (map string int)} freeIdx
+    ^{:line 40 :tag (slice varLoc)} free ; where each captured variable is in the parent
+    ^{:line 41 :tag int} nslots
+    ^{:line 42 :tag (map int (* exitInfo))} exits
+    ^{:line 43 :tag int} level
+    ^{:line 44 :tag (* Compiler)} unit
+    ^{:line 45 :tag string} name))
+
+
+
+(go/type Compiler "Compiler compiles one unit's Lambda against a program's globals.\n" (struct
+    ^{:line 50 :tag (* Program)} P
+    ^{:line 51 :tag string} Unit
+    ^{:line 52 :tag (map string int)} Missing)) ; externals not implemented, by name: their calls fail at run time
+
+
+^{:go/end 57} (go/method newScope ^{:tag (* scope)} [^{:tag (* Compiler)} c ^{:tag (* scope)} parent ^string name]
+  (addr (lit scope :parent parent :vars (lit (map string varLoc)) :freeIdx (lit (map string int)) :exits (lit (map int (* exitInfo))) :unit c :name name)))
+
+
+^{:go/end 74} (go/method lookup ^varLoc [^{:tag (* scope)} s ^string name]
+  (when [(values l ok) (aget (.-vars s) name)] ok
+    (return l))
+
+  (when [(values i ok) (aget (.-freeIdx s) name)] ok
+    (return (lit varLoc :kind locEnv :i i :mut (.-mut (aget (.-free s) i)))))
+
+  (when (== (.-parent s) nil)
+    (Internalf "unbound variable %s" name))
+
+  (let [pl (.lookup (.-parent s) name)
+      ^{:line 70} i (len (.-free s))]
+    (set! (.-free s) (append (.-free s) pl))
+    (aset (.-freeIdx s) name i)
+    (lit varLoc :kind locEnv :i i :mut (.-mut pl))))
+
+
+^{:go/end 79} (go/method newSlot ^int [^{:tag (* scope)} s]
+  (inc! (.-nslots s))
+  (- (.-nslots s) 1))
+
+
+
+^{:go/end 93} (go/method bind "bind binds name to a new slot for the duration of body (the caller restores).\n" [^{:tag (* scope)} s ^string name ^bool mut] :results [varLoc (func [])]
+  (let [(values old had) (aget (.-vars s) name)
+      ^{:line 84} l (lit varLoc :kind locSlot :i (.newSlot s) :mut mut)]
+    (aset (.-vars s) name l)
+    (return l ^{:go/end 92} (fn []
+        (if had
+          (aset (.-vars s) name old)
+
+          (delete (.-vars s) name))))))
+
+
+
+
+^{:go/end 106} (go/func varReader ^Node [^varLoc l]
+  (let [i (.-i l)]
+    (switch
+      (case [(and (== (.-kind l) locSlot) (not (.-mut l)))]
+        (return ^{:go/end 99} (fn ^Value [^{:tag (* Frame)} fr] (aget (.-S fr) i))))
+      (case [(== (.-kind l) locSlot)]
+        (return ^{:go/end 101} (fn ^Value [^{:tag (* Frame)} fr] (.-V (assert (* Cell) (aget (.-S fr) i))))))
+      (case [(not (.-mut l))]
+        (return ^{:go/end 103} (fn ^Value [^{:tag (* Frame)} fr] (aget (.-Env fr) i)))))
+
+    ^{:go/end 105} (fn ^Value [^{:tag (* Frame)} fr] (.-V (assert (* Cell) (aget (.-Env fr) i))))))
+
+
+
+^{:go/end 115} (go/func rawReader "raw reads the slot or environment entry itself (the Cell of a mutable variable).\n" ^{:tag (func [^{:tag (* Frame)} fr] [Value])} [^varLoc l]
+  (let [i (.-i l)]
+    (when (== (.-kind l) locSlot)
+      (return ^{:go/end 112} (fn ^Value [^{:tag (* Frame)} fr] (aget (.-S fr) i))))
+
+    ^{:go/end 114} (fn ^Value [^{:tag (* Frame)} fr] (aget (.-Env fr) i))))
+
+
+^{:go/end 134} (go/func head [^any f] :results [string SList]
+  (let [(values l ok) (assert SList f)]
+    (when (or (not ok) (== (len l) 0))
+      (Internalf "not a Lambda form: %v" f))
+
+    (let [(values h ^:assign ok) (assert Sym (aget l 0))]
+      (when (not ok)
+        (Internalf "not a Lambda head: %v" (aget l 0)))
+
+      (set! l (subslice l 1))
+      ;; a trailing metadata map ({:loc ...})
+      (when (> (len l) 0)
+        (when [(values _ ok) (assert SMap (aget l (- (len l) 1)))] ok
+          (set! l (subslice l _ (- (len l) 1)))))
+
+
+      (return (conv string h) l))))
+
+
+
+^{:go/end 142} (go/method inner "inner compiles f in a position that is not a tail position of the enclosing static catches.\n" ^Node [^{:tag (* scope)} s ^any f]
+  (inc! (.-level s))
+  (let [n (.expr s f false)]
+    (dec! (.-level s))
+    ^{:line 141} n))
+
+
+(go/type staticExit (struct
+    ^{:line 145 :tag int} n
+    ^{:line 146 :tag (* int)} id))
+
+
+
+^{:go/end 312} (go/method expr "expr compiles a Lambda node; tail tells whether it is in the tail position of its function.\n" ^Node [^{:tag (* scope)} s ^any f ^bool tail]
+  ^{:go/breaks [4]} (let [(values h a) (head f)]
+    (switch h
+      (case ["var"]
+        (return (varReader (.lookup s (assert string (aget a 0))))))
+      (case ["mutvar"]
+        (return (varReader (.lookup s (assert string (aget a 0))))))
+      (case ["const"]
+        (let [v (.constant (.-unit s) (aget a 0))]
+          (return ^{:go/end 159} (fn ^Value [(* Frame)] v))))
+      (case ["apply"]
+        (return (.apply s (aget a 0) (assert SVec (aget a 1)) tail)))
+      (case ["function"]
+        (return (.function s a "")))
+      (case ["let"]
+        (let [def (.inner s (aget a (- 4 1)))
+            (values l restore) (.bind s (assert string (aget a 2)) false)
+            ^{:line 167} body (.expr s (aget a 4) tail)]
+          (restore)
+          (let [i (.-i l)]
+            (return ^{:go/end 177} (fn ^Value [^{:tag (* Frame)} fr]
+                (let [v (def fr)]
+                  (when (== v exitMark)
+                    (return v))
+
+                  (aset (.-S fr) i v)
+                  (body fr)))))))
+
+      (case ["mutlet"]
+        (let [def (.inner s (aget a 2))
+            (values l restore) (.bind s (assert string (aget a 1)) true)
+            ^{:line 181} body (.expr s (aget a 3) tail)]
+          (restore)
+          (let [i (.-i l)]
+            (return ^{:go/end 191} (fn ^Value [^{:tag (* Frame)} fr]
+                (let [v (def fr)]
+                  (when (== v exitMark)
+                    (return v))
+
+                  (aset (.-S fr) i (addr (lit Cell :V v)))
+                  (body fr)))))))
+
+      (case ["letrec"]
+        (return (.letrec s (assert SVec (aget a 0)) (aget a 1) tail)))
+      (case ["prim"]
+        (switch (assert string (aget a 0))
+          (case ["runstack"]
+            (return (.applyFn s runstackFn (assert SVec (aget a 1)) tail)))
+          (case ["resume"]
+            (return (.applyFn s resumeFn (assert SVec (aget a 1)) tail)))
+          (case ["reperform"]
+            (return (.applyFn s reperformFn (assert SVec (aget a 1)) tail))))
+
+        (return (.prim s (assert string (aget a 0)) (assert SVec (aget a 1)) f)))
+      (case ["switch"]
+        (return (.switchNode s a tail)))
+      (case ["stringswitch"]
+        (return (.stringswitch s a tail)))
+      (case ["staticraise"]
+        (return (.staticraise s (assert int (aget a 0)) (assert SVec (aget a 1)))))
+      (case ["staticcatch"]
+        (return (.staticcatch s (aget a 0) (assert SVec (aget a 1)) (aget a 2) tail)))
+      (case ["trywith"]
+        (return (.trywith s (aget a 0) (assert string (aget a 1)) (aget a 2) tail)))
+      (case ["ifthenelse"]
+        (let [c (.inner s (aget a 0))
+            ^{:line 216} t (.expr s (aget a 1) tail)
+            ^{:line 217} e (.expr s (aget a 2) tail)]
+          (return ^{:go/end 227} (fn ^Value [^{:tag (* Frame)} fr]
+              (let [v (c fr)]
+                (when [(values i ok) (assert int v)] (and ok (== i 0))
+                  (return (e fr)))
+
+                (when (== v exitMark)
+                  (return v))
+
+                (t fr))))))
+
+      (case ["sequence"]
+        (let [x (.inner s (aget a 0))
+            ^{:line 230} y (.expr s (aget a 1) tail)]
+          (return ^{:go/end 236} (fn ^Value [^{:tag (* Frame)} fr]
+              (when (== (x fr) exitMark)
+                (return exitMark))
+
+              (y fr)))))
+
+      (case ["while"]
+        (let [c (.inner s (aget a 0))
+            ^{:line 239} b (.inner s (aget a 1))]
+          (return ^{:go/end 254} (fn ^Value [^{:tag (* Frame)} fr]
+              (while true
+                (let [v (c fr)]
+                  (when (== v exitMark)
+                    (return v))
+
+                  (when (not (Truth v))
+                    (return Unit))
+
+                  (when (== (b fr) exitMark)
+                    (return exitMark))
+
+                  (.tick (.-Th fr))))))))
+
+
+      (case ["for"]
+        (let [lo (.inner s (aget a 1))
+            ^{:line 257} hi (.inner s (aget a 2))
+            ^{:line 258} up (== (assert Kw (aget a 3)) "to")
+            (values l restore) (.bind s (assert string (aget a 0)) false)
+            ^{:line 260} b (.inner s (aget a 4))]
+          (restore)
+          (let [i (.-i l)]
+            (return ^{:go/end 291} (fn ^Value [^{:tag (* Frame)} fr]
+                (let [lv (lo fr)
+                    ^{:line 265} hv (hi fr)
+                    (values x y) (values (AsInt lv) (AsInt hv))]
+                  (if up
+                    (for [k x] (<= k y) (inc! k)
+                      (aset (.-S fr) i (BoxInt k))
+                      (when (== (b fr) exitMark)
+                        (return exitMark))
+
+                      (.tick (.-Th fr))
+                      (when (== k MaxInt)
+                        (break)))
+
+
+
+                    (for [k x] (>= k y) (dec! k)
+                      (aset (.-S fr) i (BoxInt k))
+                      (when (== (b fr) exitMark)
+                        (return exitMark))
+
+                      (.tick (.-Th fr))
+                      (when (== k MinInt)
+                        (break))))
+
+
+
+                  ^{:line 290} Unit))))))
+
+      (case ["assign"]
+        (let [raw (rawReader (.lookup s (assert string (aget a 0))))
+            ^{:line 294} e (.inner s (aget a 1))]
+          (return ^{:go/end 302} (fn ^Value [^{:tag (* Frame)} fr]
+              (let [v (e fr)]
+                (when (== v exitMark)
+                  (return v))
+
+                (set! (.-V (assert (* Cell) (raw fr))) v)
+                ^{:line 301} Unit)))))
+
+      (case ["send"]
+        (return (.send s (assert Kw (aget a 0)) (aget a 1) (aget a 2) (assert SVec (aget a 3)) tail)))
+      (case ["event"]
+        (return (.expr s (aget a 0) tail)))
+      (case ["ifused"]
+        (return (.expr s (aget a 1) tail))))
+
+    (Internalf "Lambda node %s not known" h)
+    nil))
+
+
+
+^{:go/end 321} (go/method args "args compiles a vector of arguments (evaluated right to left by evalArgs).\n" ^{:tag (slice Node)} [^{:tag (* scope)} s ^SVec v]
+  (let [ns (make (slice Node) (len v))]
+    (for [i (- (len v) 1)] (>= i 0) (dec! i)
+      (aset ns i (.inner s (aget v i))))
+
+    ^{:line 320} ns))
+
+
+
+^{:go/end 334} (go/func evalArgs "evalArgs evaluates ns right to left; ok is false when one of them left by a static exit.\n" [^{:tag (slice Node)} ns ^{:tag (* Frame)} fr] :results [(slice Value) bool]
+  (let [vs (make (slice Value) (len ns))]
+    (for [i (- (len ns) 1)] (>= i 0) (dec! i)
+      (let [v ((aget ns i) fr)]
+        (when (== v exitMark)
+          (return nil false))
+
+        (aset vs i v)))
+
+    (return vs true)))
+
+
+
+
+^{:go/end 340} (go/method applyFn "applyFn is an application of the native closure fn (the effects' primitives, so that a\nhandler's resume in tail position is a tail call).\n" ^Node [^{:tag (* scope)} s ^{:tag (* Closure)} fn ^SVec argv ^bool tail]
+  (.applyNode s ^{:go/end 339} (fn ^Value [(* Frame)] fn) (.args s argv) tail))
+
+
+^{:go/end 346} (go/method apply ^Node [^{:tag (* scope)} s ^any fn ^SVec argv ^bool tail]
+  (let [args (.args s argv)
+      ^{:line 344} f (.inner s fn)]
+    (.applyNode s f args tail)))
+
+
+^{:go/end 416} (go/method applyNode ^Node [^{:tag (* scope)} s ^Node f ^{:tag (slice Node)} args ^bool tail]
+  (let [n (len args)]
+    (when tail
+      (return ^{:go/end 371} (fn ^Value [^{:tag (* Frame)} fr]
+          (let [^{:tag (slice Value)} vs (zero (slice Value))]
+            (if (<= n (len (.-tbuf fr)))
+              (set! vs (subslice (.-tbuf fr) _ n))
+
+              (set! vs (make (slice Value) n)))
+
+            (for [i (- n 1)] (>= i 0) (dec! i)
+              (let [v ((aget args i) fr)]
+                (when (== v exitMark)
+                  (return v))
+
+                (aset vs i v)))
+
+            (let [fv (f fr)]
+              (when (== fv exitMark)
+                (return fv))
+
+              (set! (values (.-tcF fr) (.-tcA fr)) (values fv vs))
+              ^{:line 370} tailMark)))))
+
+
+    (switch n
+      (case [1]
+        (let [a0 (aget args 0)]
+          (return ^{:go/end 386} (fn ^Value [^{:tag (* Frame)} fr]
+              (let [v0 (a0 fr)]
+                (when (== v0 exitMark)
+                  (return v0))
+
+                (let [fv (f fr)]
+                  (when (== fv exitMark)
+                    (return fv))
+
+                  (.call (.-Th fr) fv (lit (slice Value) v0))))))))
+
+      (case [2]
+        (let [(values a0 a1) (values (aget args 0) (aget args 1))]
+          (return ^{:go/end 403} (fn ^Value [^{:tag (* Frame)} fr]
+              (let [v1 (a1 fr)]
+                (when (== v1 exitMark)
+                  (return v1))
+
+                (let [v0 (a0 fr)]
+                  (when (== v0 exitMark)
+                    (return v0))
+
+                  (let [fv (f fr)]
+                    (when (== fv exitMark)
+                      (return fv))
+
+                    (.call (.-Th fr) fv (lit (slice Value) v0 v1))))))))))
+
+
+    ^{:go/end 415} (fn ^Value [^{:tag (* Frame)} fr]
+      (let [(values vs ok) (evalArgs args fr)]
+        (when (not ok)
+          (return exitMark))
+
+        (let [fv (f fr)]
+          (when (== fv exitMark)
+            (return fv))
+
+          (.call (.-Th fr) fv vs))))))
+
+
+
+
+^{:go/end 431} (go/method function "function compiles (function KIND [[ID VK]...] VK BODY) into a node making its closure.\n" ^Node [^{:tag (* scope)} s ^SList a ^string name]
+  (let [(values code captures) (.functionCode s a name)]
+    (when (== (len captures) 0)
+      (return ^{:go/end 422} (fn ^Value [^{:tag (* Frame)} fr] (addr (lit Closure :Arity (.-Arity code) :Code code)))))
+
+    ^{:go/end 430} (fn ^Value [^{:tag (* Frame)} fr]
+      (let [env (make (slice Value) (len captures))]
+        (range [i r captures]
+          (aset env i (r fr)))
+
+        (addr (lit Closure :Arity (.-Arity code) :Code code :Env env))))))
+
+
+
+^{:go/end 454} (go/method functionCode [^{:tag (* scope)} s ^SList a ^string name] :results [(* Code) (slice (func [(* Frame)] [Value]))]
+  (when [k (assert Kw (aget a 0))] (!= k "curried")
+    ;; tupled functions are the native translation's only (survey, As built: O4)
+    (Internalf "function kind %s" k))
+
+  (let [params (assert SVec (aget a 1))]
+    (when (== name "")
+      (set! name (.-name s)))
+
+    (let [cs (.newScope (.-unit s) s name)]
+      (range [_ p params]
+        (let [pv (assert SVec p)]
+          (aset (.-vars cs) (assert string (aget pv 0)) (lit varLoc :kind locSlot :i (.newSlot cs)))))
+
+      (let [body (.expr cs (aget a 3) true)
+          ^{:line 448} code (addr (lit Code :Arity (len params) :NSlots (.-nslots cs) :Body body :Name (+ (.-Unit (.-unit s)) "." name)))
+          ^{:line 449} captures (make (slice (func [(* Frame)] [Value])) (len (.-free cs)))]
+        (range [i l (.-free cs)]
+          (aset captures i (rawReader l)))
+
+        (return code captures)))))
+
+
+^{:go/end 496} (go/method letrec ^Node [^{:tag (* scope)} s ^SVec binds ^any body ^bool tail]
+  (let-type [rb (struct
+        ^{:line 458 :tag int} slot
+        ^{:line 459 :tag (* Code)} code
+        ^{:line 460 :tag (slice (func [(* Frame)] [Value]))} captures)]
+
+    (let [^{:tag (slice (func []))} restores (zero (slice (func [])))
+        ^{:line 463} rbs (make (slice rb) (len binds))]
+      (range [i b binds]
+        (let [bv (assert SVec b)
+            (values l restore) (.bind s (assert string (aget bv 0)) false)]
+          (set! restores (append restores restore))
+          (set! (.-slot (aget rbs i)) (.-i l))))
+
+      (range [i b binds]
+        (let [bv (assert SVec b)
+            (values _ fa) (head (aget bv 1))]
+          (set! (values (.-code (aget rbs i)) (.-captures (aget rbs i))) (.functionCode s fa (aget (strings/SplitN (assert string (aget bv 0)) "_" 2) 0)))))
+
+      (let [bn (.expr s body tail)]
+        (for [i (- (len restores) 1)] (>= i 0) (dec! i)
+          ((aget restores i)))
+
+        ^{:go/end 495} (fn ^Value [^{:tag (* Frame)} fr]
+          (let [cls (make (slice (* Closure)) (len rbs))]
+            (range [i r rbs]
+              (aset cls i (addr (lit Closure :Arity (.-Arity (.-code r)) :Code (.-code r))))
+              (aset (.-S fr) (.-slot r) (aget cls i)))
+
+            (range [i r rbs]
+              (when (> (len (.-captures r)) 0)
+                (let [env (make (slice Value) (len (.-captures r)))]
+                  (range [j c (.-captures r)]
+                    (aset env j (c fr)))
+
+                  (set! (.-Env (aget cls i)) env))))
+
+
+            (bn fr)))))))
+
+
+
+^{:go/end 550} (go/method switchNode ^Node [^{:tag (* scope)} s ^SList a ^bool tail]
+  (let [e (.inner s (aget a 0))
+      ^{:line 500} nc (assert int (aget a 1))
+      ^{:line 501} nb (assert int (aget a 3))
+      ^{:line 502 :tag Node} fail (zero Node)]
+    (when (!= (aget a 5) nil)
+      (set! fail (.expr s (aget a 5) tail)))
+
+    (let [consts (make (slice Node) nc)
+        ^{:line 507} blocks (make (slice Node) nb)]
+      (range [_ c (assert SVec (aget a 2))]
+        (let [cv (assert SVec c)]
+          (aset consts (assert int (aget cv 0)) (.expr s (aget cv 1) tail))))
+
+      (range [_ c (assert SVec (aget a 4))]
+        (let [cv (assert SVec c)]
+          (aset blocks (assert int (aget cv 0)) (.expr s (aget cv 1) tail))))
+
+      (range [i consts]
+        (when (== (aget consts i) nil)
+          (aset consts i fail)))
+
+
+      (range [i blocks]
+        (when (== (aget blocks i) nil)
+          (aset blocks i fail)))
+
+
+      ^{:go/end 549} (fn ^Value [^{:tag (* Frame)} fr]
+        (let [v (e fr)
+            ^{:line 528 :tag Node} n (zero Node)]
+          (if [(values i ok) (assert int v)] ok
+            (when (and (>= i 0) (< i (len consts)))
+              (set! n (aget consts i)))
+
+            (do
+              (when (== v exitMark)
+                (return v))
+
+              (let [t (Tag v)]
+                (when (and (>= t 0) (< t (len blocks)))
+                  (set! n (aget blocks t))))))
+
+
+          (when (== n nil)
+            (set! n fail))
+
+          (when (== n nil)
+            (Internalf "switch: no case for %s" (Describe v)))
+
+          (n fr))))))
+
+
+
+^{:go/end 576} (go/method stringswitch ^Node [^{:tag (* scope)} s ^SList a ^bool tail]
+  (let [e (.inner s (aget a 0))
+      ^{:line 554} cases (lit (map string Node))]
+    (range [_ c (assert SVec (aget a 1))]
+      (let [cv (assert SVec c)]
+        (aset cases (conv string (bytesOf (aget cv 0))) (.expr s (aget cv 1) tail))))
+
+    (let [^Node def (zero Node)]
+      (when (!= (aget a 2) nil)
+        (set! def (.expr s (aget a 2) tail)))
+
+      ^{:go/end 575} (fn ^Value [^{:tag (* Frame)} fr]
+        (let [v (e fr)]
+          (when (== v exitMark)
+            (return v))
+
+          (when [(values n ok) (aget cases (conv string (.-B (AsBytes v))))] ok
+            (return (n fr)))
+
+          (when (== def nil)
+            (Internalf "stringswitch: no case"))
+
+          (def fr))))))
+
+
+
+^{:go/end 611} (go/method staticraise ^Node [^{:tag (* scope)} s ^int n ^SVec argv]
+  (let [(values ex ok) (aget (.-exits s) n)]
+    (when (not ok)
+      (Internalf "staticraise %d outside its catch" n))
+
+    (let [args (.args s argv)
+        ^{:line 584} slots (.-slots ex)]
+      (when (== (.-level s) (.-level ex))
+        (return ^{:go/end 596} (fn ^Value [^{:tag (* Frame)} fr]
+            (let [(values vs ok) (evalArgs args fr)]
+              (when (not ok)
+                (return exitMark))
+
+              (range [i sl slots]
+                (aset (.-S fr) sl (aget vs i)))
+
+              (set! (.-exN fr) n)
+              ^{:line 595} exitMark))))
+
+
+      ;; not in a tail position of its catch: the exit unwinds by a panic (its catch recovers it)
+      (set! (.-panics ex) true)
+      (let [id (.-id ex)]
+        ^{:go/end 610} (fn ^Value [^{:tag (* Frame)} fr]
+          (let [(values vs ok) (evalArgs args fr)]
+            (when (not ok)
+              (return exitMark))
+
+            (range [i sl slots]
+              (aset (.-S fr) sl (aget vs i)))
+
+            (panic (addr (lit staticExit :n n :id id)))))))))
+
+
+
+^{:go/end 665} (go/method staticcatch ^Node [^{:tag (* scope)} s ^any body ^SVec spec ^any handler ^bool tail]
+  (let [n (assert int (aget spec 0))
+      ^{:line 615} vars (assert SVec (aget spec 1))
+      ^{:line 616} ex (addr (lit exitInfo :level (.-level s) :id (new int)))
+      (values old had) (aget (.-exits s) n)
+      ^{:line 618 :tag (slice (func []))} restores (zero (slice (func [])))]
+    (range [_ v vars]
+      (let [(values l r) (.bind s (assert string (aget (assert SVec v) 0)) false)]
+        (set! (.-slots ex) (append (.-slots ex) (.-i l)))
+        (set! restores (append restores r))))
+
+    ;; the handler's variables are bound in the handler only, but their slots are fixed now
+    (for [i (- (len restores) 1)] (>= i 0) (dec! i)
+      ((aget restores i)))
+
+    (aset (.-exits s) n ex)
+    (let [b (.expr s body tail)]
+      (if had
+        (aset (.-exits s) n old)
+
+        (delete (.-exits s) n))
+
+      (range [i v vars]
+        (let [name (assert string (aget (assert SVec v) 0))
+            (values o h) (aget (.-vars s) name)]
+          (aset (.-vars s) name (lit varLoc :kind locSlot :i (aget (.-slots ex) i)))
+          (defer (^{:go/end 645} (fn [^string name ^varLoc o ^bool h]
+                (if h
+                  (aset (.-vars s) name o)
+
+                  (delete (.-vars s) name)))
+
+              ^{:line 645} name o h))))
+
+      (let [hn (.expr s handler tail)]
+        (when (not (.-panics ex))
+          (return ^{:go/end 655} (fn ^Value [^{:tag (* Frame)} fr]
+              (let [v (b fr)]
+                (when (and (== v exitMark) (== (.-exN fr) n))
+                  (return (hn fr)))
+
+                ^{:line 654} v))))
+
+
+        (let [id (.-id ex)]
+          ^{:go/end 664} (fn ^Value [^{:tag (* Frame)} fr]
+            (let [(values v exited) (runCatch b fr id)]
+              (when (or exited ^:go/paren (and (== v exitMark) (== (.-exN fr) n)))
+                (return (hn fr)))
+
+              ^{:line 663} v)))))))
+
+
+
+^{:go/end 680} (go/func runCatch [^Node b ^{:tag (* Frame)} fr ^{:tag (* int)} id] :results [^Value v ^bool exited]
+  (let [depth (.-depth (.-Th fr))]
+    (defer (^{:go/end 678} (fn []
+          (when [r (recover)] (!= r nil)
+            (when [(values se ok) (assert (* staticExit) r)] (and ok (== (.-id se) id))
+              (set! (.-depth (.-Th fr)) depth)
+              (set! exited true)
+              (return))
+
+            (panic r)))))
+
+
+    (return (b fr) false)))
+
+
+^{:go/end 698} (go/method trywith ^Node [^{:tag (* scope)} s ^any body ^string id ^any handler ^bool tail]
+  (inc! (.-level s))
+  (let [b (.expr s body false)]
+    (dec! (.-level s))
+    (let [(values l restore) (.bind s id false)
+        ^{:line 687} h (.expr s handler tail)]
+      (restore)
+      (let [i (.-i l)]
+        ^{:go/end 697} (fn ^Value [^{:tag (* Frame)} fr]
+          (let [(values v ex) (runTry b fr)]
+            (when (!= ex nil)
+              (aset (.-S fr) i (.-V ex))
+              (return (h fr)))
+
+            ^{:line 696} v))))))
+
+
+
+^{:go/end 714} (go/func runTry [^Node b ^{:tag (* Frame)} fr] :results [^Value v ^{:tag (* Exn)} ex]
+  (let [th (.-Th fr)
+      ^{:line 702} depth (.-depth th)]
+    (defer (^{:go/end 712} (fn []
+          (when [r (recover)] (!= r nil)
+            (when [(values e ok) (assert (* Exn) r)] ok
+              (set! (.-depth th) depth)
+              (set! ex e)
+              (return))
+
+            (panic r)))))
+
+
+    (return (b fr) nil)))
+
+
+
+^{:go/end 741} (go/method send "send compiles a method call: (send KIND MET OBJ [ARG...]) (bytegen's GETPUBMET/GETMETHOD).\n" ^Node [^{:tag (* scope)} s ^Kw kind ^any met ^any obj ^SVec argv ^bool tail]
+  (let [args (.args s argv)
+      ^{:line 719} o (.inner s obj)
+      ^{:line 720} m (.inner s met)]
+    ^{:go/end 740} (fn ^Value [^{:tag (* Frame)} fr]
+      (let [(values vs ok) (evalArgs args fr)]
+        (when (not ok)
+          (return exitMark))
+
+        (let [ov (o fr)
+            ^{:line 727} mv (m fr)
+            ^{:line 728 :tag Value} meth (zero Value)]
+          (if (== kind "self")
+            (set! meth (aget (.-F (AsBlock (aget (.-F (AsBlock ov)) 0))) (AsInt mv)))
+
+            (set! meth (GetPublicMethod ov (AsInt mv))))
+
+          (let [all (append (lit (slice Value) ov) (spread vs))]
+            (when tail
+              (set! (values (.-tcF fr) (.-tcA fr)) (values meth all))
+              (return tailMark))
+
+            (.ApplyN (.-Th fr) meth all)))))))
+
+
+
+
+
+^{:go/end 760} (go/func GetPublicMethod "GetPublicMethod is runtime/obj.c's caml_get_public_method: a binary search of the object's\nmethod table (field 0), its methods at odd indexes after their labels.\n" ^Value [^Value obj ^int tag]
+  ^{:go/breaks [[4 759]]} (let [meths (AsBlock (aget (.-F (AsBlock obj)) 0))
+      (values li hi) (values 3 (+ (* (AsInt (aget (.-F meths) 0)) 2) 1))]
+    (while (< li hi)
+      (let [mi (bit-or (>> (+ li hi) 1) 1)]
+        (if (< tag (AsInt (aget (.-F meths) mi)))
+          (set! hi (- mi 2))
+
+          (set! li mi))))
+
+
+    (when (and (< li (len (.-F meths))) (== (AsInt (aget (.-F meths) li)) tag))
+      (return (aget (.-F meths) (- li 1))))
+
+    0))
+
+
+
+^{:go/end 809} (go/method constant "constant is a structured constant (SPEC §11.2's constants).\n" ^Value [^{:tag (* Compiler)} c ^any f]
+  ^{:go/breaks [4]} (let [(values h a) (head f)]
+    (switch h
+      (case ["int"]
+        (return (assert int (aget a 0))))
+      (case ["char"]
+        (return (assert int (aget a 0))))
+      (case ["float"]
+        (return (ParseFloatLit (assert string (aget a 0)))))
+      (case ["int32"]
+        (let [(values n err) (strconv/ParseInt (assert string (aget a 0)) 10 32)]
+          (when (!= err nil)
+            (Internalf "int32 %v" (aget a 0)))
+
+          (return (conv int32 n))))
+      (case ["int64"]
+        (let [(values n err) (strconv/ParseInt (assert string (aget a 0)) 10 64)]
+          (when (!= err nil)
+            (Internalf "int64 %v" (aget a 0)))
+
+          (return n)))
+      (case ["nativeint"]
+        (let [(values n err) (strconv/ParseInt (assert string (aget a 0)) 10 64)]
+          (when (!= err nil)
+            (Internalf "nativeint %v" (aget a 0)))
+
+          (return (conv Nativeint n))))
+      (case ["block"]
+        (let [items (assert SVec (aget a 1))
+            ^{:line 792} vs (make (slice Value) (len items))]
+          (range [i x items]
+            (aset vs i (.constant c x)))
+
+          (return (addr (lit Block :Tag (assert int (aget a 0)) :F vs)))))
+      (case ["float-array"]
+        (let [items (assert SVec (aget a 0))
+            ^{:line 799} fs (make (slice float64) (len items))]
+          (range [i x items]
+            (aset fs i (ParseFloatLit (assert string x))))
+
+          (return (addr (lit FloatArray :F fs)))))
+      (case ["immstring"]
+        (return (addr (lit Bytes :B (bytesOf (aget a 0)))))))
+
+    (Internalf "constant %s" h)
+    nil))
+
+
+
+
+^{:go/end 813} (go/func ParseFloatLit "ParseFloatLit is the value of an OCaml float literal as Lambda prints it (underscores\nallowed, hexadecimal, inf, nan).\n" ^float64 [^string t] (floatOfString t))
+
+(go/var _ fmt/Sprint)

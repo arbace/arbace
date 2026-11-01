@@ -1,0 +1,170 @@
+;; The file descriptor table of the OCaml runtime on the JVM: OCaml's file descriptors are ints
+;; (the index in `table`); 0, 1 and 2 are System.in, System.out and System.err, the files that
+;; caml_sys_open opens are RandomAccessFiles. Every operation returns a result >= 0 or a negative
+;; errno (as the C system calls the oi port was written against), `strerror` is C's text.
+;; Written for o2j, ported from the system calls of oi's ext_io.go and ext_sys.go.
+
+(in-ns 'ocaml.rt)
+
+(import '(java.io RandomAccessFile File InputStream PrintStream OutputStream IOException))
+
+(defclass ^:public ^:final Fd
+  (field ^:public ^RandomAccessFile raf)
+  ;; 0 a file, 1 standard input, 2 standard output, 3 standard error (System/in, out and err are
+  ;; looked up at each use: the runner swaps them between programs)
+  (field ^:public ^int std)
+  (field ^:public ^boolean readable)
+  (field ^:public ^boolean writable)
+  (field ^:public ^boolean append)
+  (field ^:public ^boolean dir)
+
+  (field ^:public ^:static ^:final ^java.util.ArrayList table (java.util.ArrayList.))
+
+  (static-initializer (Fd/reset))
+
+  ;; forgets every descriptor of the previous program: the table is 0, 1, 2 again
+  (method ^:public ^:static reset ^void []
+    (.clear table)
+    (loop [^int i 1]
+      (when (<= i 3)
+        (let [d (Fd.)]
+          (set! (.-std d) i)
+          (set! (.-readable d) (== i 1))
+          (set! (.-writable d) (not (== i 1)))
+          (.add table d))
+        (recur (unchecked-inc-int i)))))
+
+  (method ^:static stream ^OutputStream [^Fd d]
+    (if (== (.-std d) 2) System/out System/err))
+
+  ;; C's strerror for the errnos the runtime meets
+  (method ^:public ^:static strerror ^String [^long e]
+    (switch (unchecked-int e)
+      1 "Operation not permitted"
+      2 "No such file or directory"
+      5 "Input/output error"
+      9 "Bad file descriptor"
+      11 "Resource temporarily unavailable"
+      13 "Permission denied"
+      17 "File exists"
+      20 "Not a directory"
+      21 "Is a directory"
+      22 "Invalid argument"
+      24 "Too many open files"
+      28 "No space left on device"
+      29 "Illegal seek"
+      30 "Read-only file system"
+      32 "Broken pipe"
+      104 "Connection reset by peer"
+      (java-str "Unknown error " e)))
+
+  ;; the errno of a Java I/O failure, from its message
+  (method ^:public ^:static errnoOf ^long [^Throwable t]
+    (let [m (.getMessage t)]
+      (cond (nil? m) 5
+            (.contains m "No such file") 2
+            (.contains m "Permission denied") 13
+            (.contains m "Is a directory") 21
+            (.contains m "Not a directory") 20
+            (.contains m "File exists") 17
+            (.contains m "No space left") 28
+            (.contains m "Too many open") 24
+            (.contains m "Read-only file") 30
+            (.contains m "Broken pipe") 32
+            (.contains m "Illegal seek") 29
+            :else 5)))
+
+  ;; caml_sys_error: Sys_error "arg: strerror", or "strerror" without an arg
+  (method ^:public ^:static sysError ^RuntimeException [^long e ^String arg]
+    (if (nil? arg)
+      (Rt/sysError (Fd/strerror e))
+      (Rt/sysError (java-str arg ": " (Fd/strerror e)))))
+
+  (method ^:public ^:static get ^Fd [^long fd]
+    (if (or (< fd 0) (>= fd (.size table)))
+      nil
+      (cast Fd (.get table (unchecked-int fd)))))
+
+  ;; open(2): flags as 1 write, 2 append, 4 creat, 8 trunc, 16 excl; the file descriptor or -errno
+  (method ^:public ^:static open ^long [^String path ^long flags]
+    (let [f (File. path)
+          wr (not (== 0 (bit-and flags 1)))
+          creat (not (== 0 (bit-and flags 4)))
+          excl (not (== 0 (bit-and flags 16)))
+          trunc (not (== 0 (bit-and flags 8)))
+          exists (.exists f)
+          nd (Fd.)]
+      (label :out
+        (when (and exists creat excl) (break :out (long -17)))
+        (when (and (not exists) (not creat)) (break :out (long -2)))
+        (when (and exists (.isDirectory f))
+          (when wr (break :out (long -21)))
+          (set! (.-dir nd) true)
+          (set! (.-readable nd) true))
+        (when (not (.-dir nd))
+          (try
+            (set! (.-raf nd) (RandomAccessFile. f (if wr "rw" "r")))
+            (when (and wr trunc) (.setLength (.-raf nd) 0))
+            (catch IOException e (break :out (long (unchecked-negate (Fd/errnoOf e)))))
+            (catch SecurityException e (break :out (long -13))))
+          (set! (.-readable nd) true)
+          (set! (.-writable nd) wr)
+          (set! (.-append nd) (not (== 0 (bit-and flags 2)))))
+        (let [^:mutable ^int i 0]
+          (while (and (< i (.size table)) (not (nil? (.get table i)))) (set! i (unchecked-add-int i 1)))
+          (if (== i (.size table)) (.add table nd) (.set table i nd))
+          (long i)))))
+
+  ;; read(2): the count (0 at the end of file) or -errno
+  (method ^:public ^:static read ^long [^long fd ^byte/1 buf ^int off ^int len]
+    (let [d (Fd/get fd)]
+      (cond (or (nil? d) (not (.-readable d))) (long -9)
+            (.-dir d) (long -21)
+            :else
+            (try
+              (let [n (if (nil? (.-raf d)) (.read System/in buf off len) (.read (.-raf d) buf off len))]
+                (if (< n 0) (long 0) (long n)))
+              (catch IOException e (long (unchecked-negate (Fd/errnoOf e))))))))
+
+  ;; write(2): the count or -errno; a write to standard output or error is flushed
+  (method ^:public ^:static write ^long [^long fd ^byte/1 buf ^int off ^int len]
+    (let [d (Fd/get fd)]
+      (cond (or (nil? d) (not (.-writable d))) (long -9)
+            :else
+            (try
+              (if (nil? (.-raf d))
+                (let [o (Fd/stream d)] (.write o buf off len) (.flush o))
+                (do (when (.-append d) (.seek (.-raf d) (.length (.-raf d))))
+                    (.write (.-raf d) buf off len)))
+              (long len)
+              (catch IOException e (long (unchecked-negate (Fd/errnoOf e))))))))
+
+  ;; lseek(2): the new offset or -errno
+  (method ^:public ^:static seek ^long [^long fd ^long off ^int whence]
+    (let [d (Fd/get fd)]
+      (cond (nil? d) (long -9)
+            (.-dir d) (long 0)
+            (nil? (.-raf d)) (long -29)
+            :else
+            (try
+              (let [base (switch whence
+                           0 (long 0)
+                           1 (.getFilePointer (.-raf d))
+                           (.length (.-raf d)))
+                    pos (unchecked-add base off)]
+                (if (< pos 0)
+                  (long -22)
+                  (do (.seek (.-raf d) pos) pos)))
+              (catch IOException e (long (unchecked-negate (Fd/errnoOf e))))))))
+
+  ;; close(2): 0 or -errno
+  (method ^:public ^:static close ^long [^long fd]
+    (let [d (Fd/get fd)]
+      (if (nil? d)
+        (long -9)
+        (do
+          (.set table (unchecked-int fd) nil)
+          (if (nil? (.-raf d))
+            (do (when (> (.-std d) 1) (try (.flush (Fd/stream d)) (catch IOException e nil))) (long 0))
+            (try (.close (.-raf d)) (long 0)
+              (catch IOException e (long (unchecked-negate (Fd/errnoOf e)))))))))))
