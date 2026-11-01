@@ -5,23 +5,47 @@
 # C with the runtime of exceptions (arbace/cpp/rt/eh.c.ae, C forms) and the program runs as the original. All of it on the
 # tools' host (stage 0, evaluated from the checkout); the light tier by default (CPPI_JOBS 4, GOMEMLIMIT 1500MiB). The
 # testsuite's programs link its util/ library (libtestc++, compiled by g++ once a run) and libstdc++exp, natively, as
-# libstdc++ itself (CX7 lowers the runtime).
+# libstdc++ itself for the original. Since CX7 the lowered program links the lowered runtime instead: libsupc++ and
+# libstdc++-v3/src compiled by the oracle and lowered (runtime-build), the testsuite's util/ library lowered with it.
 #
 #   bin/cppi lower FILE.ll [-o OUT.c] [--forms OUT.ae]
 #                               FILE's IR lowered to C forms (OUT.ae) and printed as C (OUT.c, default FILE.c)
 #   bin/cppi runtime OUT.c      the runtime of exceptions printed as C
 #   bin/cppi testsuite          libstdc++-v3/testsuite extracted from the pinned gcc 15.2.0 tarball into .tmp/cppi/gcc/
 #                               (REPR_CPP_GCC_TARBALL, default the main checkout's .tmp/c1/gcc/gcc-15.2.0.tar.xz)
-#   bin/cppi list samples|libstdcxx [--sample N]
-#                               a check list on the standard output (NAME, STD, ARGS, PATH, tab-separated): test/cpp/samples, or
+#   bin/cppi list samples|runtime|samples+runtime|libstdcxx [--sample N]
+#                               a check list on the standard output (NAME, STD, ARGS, PATH, tab-separated; a first line `#list KEY` names the recorded list
+#                               it is, `#part NAME` a part of one; `samples+runtime`: the recorded `samples`): test/cpp/samples,
+#                               test/cpp/runtime/samples (CX7), or
 #                               the testsuite's run tests (no compile/link/preprocess/error directive, no threads, no shared
 #                               libraries, named locales, file I/O or debug mode requirements, no xfail), every Nth (default 15)
-#   bin/cppi lower-check LIST WORK [--jobs N]
+#   bin/cppi runtime-build [OUT] [--update] [--jobs N]
+#                               the lowered runtime (CX7; test/cpp/runtime/units.edn): libsupc++ and libstdc++-v3/src of the
+#                               pinned tarball compiled to IR by the oracle (clang++ -O0, the build's flags) against the host's
+#                               configured headers at their digests (test/cpp/host/headers.sha256, CP101 (c)), the IR's digests
+#                               against test/cpp/runtime/ir.sha256 (--update rewrites them), each unit's round trip through LLVM
+#                               forms (the objects equal), lowered, compiled by gcc -O0, archived: OUT/liblstdc++.a,
+#                               OUT/liblstdc++exp.a and the pending-flag layer OUT/rt.o (arbace/cpp/rt/eh.c.ae); the units'
+#                               levels in OUT/results.tsv and OUT/summary.edn (default OUT .tmp/cppi/runtime); OUT/key.txt the
+#                               digests of what it was built from (runtime-key), OUT/key their digest, written once it passes
+#   bin/cppi runtime-key [OUT|--print]
+#                               OUT's key against the checkout's (the lowering, repr/llvm, repr/c, eh.c.ae, units.edn and the
+#                               shims, the IR's pin, runtime-build's own steps, gcc's flags, gcc, clang and the tools' host):
+#                               "current", or "stale" and the inputs that differ (exit 1); --print: the checkout's key lines
+#   bin/cppi selftest [--accept-skips] [NAME...] the checks' own tests (test/cpp/selftest/NAME.sh: the review 007 cases; ARBACE_HOST_EXE=/bin/true: the dry mode, which skips the tests that need the tools and exits 3, 0 with --accept-skips)
+# The judges are arbace.cpp.check's (apart from the lowering, so they are not in the runtime's key).
+#   bin/cppi lower-check LIST WORK [--jobs N] [--runtime OUT] [--recorded KEY|none|auto]
 #                               each file of LIST: the IR (clang++ -O0 -S -emit-llvm), the original (the IR linked by clang++)
 #                               run, g++'s build run (the reference's opinion, recorded), the IR's round trip through LLVM
 #                               forms (read, print, clang -c: the object equal to the original IR's), the lowering, gcc -O0
-#                               on the lowered C and its run: the status and stdout equal to the original's; judged against
-#                               test/cpp/lower-known.edn into WORK/results.tsv and WORK/summary.edn
+#                               on the lowered C linked with the lowered runtime (no native libstdc++; runtime-build first when
+#                               OUT has none or its key is not the checkout's, CPPI_RUNTIME_STALE=refuse: refused instead, exit
+#                               4) and its run: the status, stdout and stderr equal to the original's; judged against
+#                               test/cpp/lower-known.edn and the recorded test/cpp/lower-results.edn (a recorded pass that does
+#                               not pass fails; an IR clang did not reject with its own diagnostics fails) into
+#                               WORK/results.tsv and WORK/summary.edn; an empty LIST is refused. A run of a recorded list (KEY:
+#                               samples, libstdcxx-every-15th; auto: the one more than half of whose names the run holds)
+#                               fails on a recorded name missing from it or a count other than the record's (review 018, R4)
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 . "$root/bin/lib/tmpdir.bash"
@@ -33,22 +57,31 @@ ts_root=$root/.tmp/cppi/gcc/gcc-15.2.0/libstdc++-v3/testsuite
 GCC_FLAGS="-std=gnu23 -O0 -w -fno-builtin -fno-strict-aliasing -ffp-contract=off"
 
 testsuite() {
-  local t=${REPR_CPP_GCC_TARBALL:-$main_checkout/.tmp/c1/gcc/gcc-15.2.0.tar.xz} want
-  want=$(GOMEMLIMIT=1GiB arbace_tool -e "(print (get-in (read-string (slurp \"$root/test/cpp/corpora.edn\")) [:pins :gcc-15.2.0 :sha256]))")
-  [ "$(sha256sum "$t" | cut -d' ' -f1)" = "$want" ] || { echo "testsuite: $t is not the pinned tarball" >&2; exit 1; }
+  local t; t=$(tarball_check)
   mkdir -p "$root/.tmp/cppi/gcc"
   tar -xJf "$t" -C "$root/.tmp/cppi/gcc" gcc-15.2.0/libstdc++-v3/testsuite
   echo "testsuite: $ts_root"
 }
 
+# A list may begin with a header line `#list KEY` (review 018's CP132 (b)): the recorded list of test/cpp/lower-results.edn it is
+# (samples, libstdcxx-every-15th), which lower-check holds the run to. No header: no recorded list. `#part NAME` marks a part of
+# one, never held.
 list_samples() {
   local f
+  [ "${1:-}" = body ] || echo "#part samples"
   for f in "$root"/test/cpp/samples/*.cpp; do printf '%s\t%s\t%s\t%s\n' "samples/$(basename "$f")" c++23 "" "$f"; done
+}
+
+list_runtime() { # CX7's samples of the runtime (test/cpp/runtime/samples)
+  local f
+  [ "${1:-}" = body ] || echo "#part runtime"
+  for f in "$root"/test/cpp/runtime/samples/*.cpp; do printf '%s\t%s\t%s\t%s\n' "runtime/$(basename "$f")" c++23 "" "$f"; done
 }
 
 list_libstdcxx() { # the run tests: no directive but run, no threads, shared libraries, named locales or file I/O
   local n=${1:-15} f std opts
   [ -d "$ts_root" ] || { echo "list: no testsuite (bin/cppi testsuite)" >&2; exit 1; }
+  if [ "$n" = 15 ]; then echo "#list libstdcxx-every-15th"; else echo "#part libstdcxx-every-$n"; fi
   ( cd "$ts_root" && find . -name '*.cc' -path './[0-9][0-9]_*' | LC_ALL=C sort ) | sed 's|^\./||' > "$TMPDIR/cppi-all.list"
   ( cd "$ts_root" && grep -L -E "dg-do (compile|link|preprocess)|dg-error|dg-additional-sources|dg-require-(thread|effective-target pthread)|-pthread|dg-require-sharedlib|dg-require-namedlocale|dg-require-fileio|dg-require-gthreads|dg-require-debug-mode|xfail" $(cat "$TMPDIR/cppi-all.list") ) \
     | grep -v '^30_threads' | awk -v n="$n" 'NR % n == 1' > "$TMPDIR/cppi-run.list"
@@ -65,13 +98,25 @@ list_libstdcxx() { # the run tests: no directive but run, no threads, shared lib
   done < "$TMPDIR/cppi-run.list"
 }
 
-cap() { # cap FILE: standard input into FILE, at most 1 MB (a compiler's errors over a binary can be gigabytes)
+gcc_root=$root/.tmp/cppi/gcc/gcc-15.2.0
+export root gcc_root
+
+tarball_check() { # the pinned gcc 15.2.0 tarball's path, its digest checked
+  local t=${REPR_CPP_GCC_TARBALL:-$main_checkout/.tmp/c1/gcc/gcc-15.2.0.tar.xz} want
+  want=$(GOMEMLIMIT=1GiB arbace_tool -e "(print (get-in (read-string (slurp \"$root/test/cpp/corpora.edn\")) [:pins :gcc-15.2.0 :sha256]))")
+  [ "$(sha256sum "$t" | cut -d' ' -f1)" = "$want" ] || { echo "cppi: $t is not the pinned tarball" >&2; exit 1; }
+  echo "$t"
+}
+
+cap() { # cap FILE: standard input into FILE, at most 1 MB (a compiler's errors over a binary can be gigabytes); a run's stderr is
+  # held to the same by ulimit -f 1024 (1 MiB; a program writing past it dies of SIGXFSZ, status 153: not comparable), review 018's R7
   head -c 1048576 > "$1"
 }
 
-one() { # one NAME STD ARGS PATH: the native steps of one file into $work/files/NAME/
+one() { # one NAME STD ARGS PATH: the native steps of one file into $work/files/NAME/ (emptied first: no level file of an earlier
+  # run in a reused WORK stands for this one's, review 007's finding 5)
   local n=$1 std=$2 args=$3 p=$4 d=$work/files/$1
-  mkdir -p "$d"
+  rm -rf "$d"; mkdir -p "$d"
   # shellcheck disable=SC2086
   ( cd "$d" && timeout 300 clang++ -x c++ -std=$std $args -O0 -S -emit-llvm "$p" -o x.ll; echo $? > ir.status ) 2>&1 | cap "$d/ir.log"
   [ "$(cat "$d/ir.status")" = 0 ] || return 0
@@ -79,12 +124,12 @@ one() { # one NAME STD ARGS PATH: the native steps of one file into $work/files/
   ( cd "$d" && timeout 300 clang -c x.ll -o x.o ) 2>&1 | cap "$d/obj.log"
   grep -q "undefined reference to \`main'" "$d/orig-link.log" && echo 1 > "$d/no-main"
   if [ "$(cat "$d/orig-link.status")" = 0 ]; then
-    ( cd "$d" && timeout "${CPPI_RUN_TIMEOUT:-120}" ./orig 2> orig.err | cap orig.out; echo "${PIPESTATUS[0]}" > orig.status; truncate -s '<1M' orig.err )
+    ( cd "$d" && ulimit -f 1024 && timeout "${CPPI_RUN_TIMEOUT:-120}" ./orig 2> orig.err | cap orig.out; echo "${PIPESTATUS[0]}" > orig.status )
   fi
   # shellcheck disable=SC2086
   ( cd "$d" && timeout 300 g++ -x c++ -std=$std $args -O0 "$p" -x none -o gxx $LIBS; echo $? > gxx-link.status ) 2>&1 | cap "$d/gxx-link.log"
   if [ "$(cat "$d/gxx-link.status")" = 0 ]; then
-    ( cd "$d" && timeout "${CPPI_RUN_TIMEOUT:-120}" ./gxx 2> gxx.err | cap gxx.out; echo "${PIPESTATUS[0]}" > gxx.status; truncate -s '<1M' gxx.err )
+    ( cd "$d" && ulimit -f 1024 && timeout "${CPPI_RUN_TIMEOUT:-120}" ./gxx 2> gxx.err | cap gxx.out; echo "${PIPESTATUS[0]}" > gxx.status )
   fi
   rm -f "$d/gxx" "$d/x.o.tmp"; return 0
 }
@@ -103,14 +148,142 @@ two() { # two NAME: the print's object, gcc on the lowered C and its run
       ( cd "$d" && timeout 300 gcc $GCC_FLAGS -c lowered.c -o lowered.o; echo $? > gcc.status ) 2>&1 | cap "$d/gcc.log"
       return 0
     fi
-    ( cd "$d" && timeout 300 gcc $GCC_FLAGS lowered.c "$work/rt.o" -o low $LIBS; echo $? > gcc.status ) 2>&1 | cap "$d/gcc.log"
+    ( cd "$d" && timeout 300 gcc $GCC_FLAGS lowered.c -o low $LOW_LIBS; echo $? > gcc.status ) 2>&1 | cap "$d/gcc.log"
     if [ "$(cat "$d/gcc.status")" = 0 ]; then
-      ( cd "$d" && timeout "${CPPI_RUN_TIMEOUT:-120}" ./low 2> low.err | cap low.out; echo "${PIPESTATUS[0]}" > low.status; truncate -s '<1M' low.err )
+      ( cd "$d" && ulimit -f 1024 && timeout "${CPPI_RUN_TIMEOUT:-120}" ./low 2> low.err | cap low.out; echo "${PIPESTATUS[0]}" > low.status )
     fi
   fi
   rm -f "$d/low" "$d/orig"; return 0
 }
-export -f cap one two; export GCC_FLAGS LIBS
+export -f cap one two; export GCC_FLAGS LIBS LOW_LIBS
+
+rt_ir() { # rt_ir UNIT SOURCE STD FLAGS: one runtime unit's IR (cwd the tarball's root, so the IR names the sources by their path in it)
+  local u=$1 src=$2 std=$3 fl=$4 d=$rt/units/$1 shim
+  rm -rf "$d"; mkdir -p "$d" # no level file of an earlier build stands for this one's
+  shim=$(grep -F -x -A1 "$src" "$rt/shims.txt" | sed -n 2p || true)
+  [ -n "$shim" ] && src=$root/test/cpp/runtime/shims/$shim
+  local maps="-ffile-prefix-map=$gcc_root/= -ffile-prefix-map=$rt/gen/=gen/ -ffile-prefix-map=$root/test/cpp/runtime/=test/cpp/runtime/"
+  # shellcheck disable=SC2086
+  if [ "$std" = c ]; then
+    ( cd "$gcc_root" && timeout 600 clang -x c -O0 -S -emit-llvm $maps -DHAVE_STDLIB_H -DHAVE_STRING_H -DIN_GLIBCPP_V3 -Iinclude $fl "$src" -o "$d/x.ll"; echo $? > "$d/ir.status" ) 2>&1 | cap "$d/ir.log"
+  else
+    ( cd "$gcc_root" && timeout 600 clang++ -x c++ -std=$std -O0 -S -emit-llvm $maps -D_GNU_SOURCE -Wno-init-priority-reserved \
+        -nostdinc++ -isystem /usr/include/c++/15.2.0 -isystem /usr/include/c++/15.2.0/x86_64-alpine-linux-musl \
+        -isystem /usr/include/c++/15.2.0/backward -I"$rt/gen" -Ilibgcc -Ilibstdc++-v3/libsupc++ -I"$(dirname "$2")" $fl "$src" -o "$d/x.ll"
+      echo $? > "$d/ir.status" ) 2>&1 | cap "$d/ir.log"
+  fi
+  [ "$(cat "$d/ir.status")" = 0 ] && ( cd "$d" && timeout 600 clang -c x.ll -o x.o ) 2>&1 | cap "$d/obj.log"
+  return 0
+}
+
+rt_two() { # rt_two UNIT: the print's object against the IR's, gcc -O0 on the lowered C; the texts dropped once judged
+  local d=$rt/units/$1
+  [ -f "$d/print.ll" ] && { ( cd "$d" && timeout 600 clang -c print.ll -o print.o; echo $? > print-obj.status ) 2>&1 | cap "$d/print-obj.log"; }
+  if [ -f "$d/x.o" ] && [ -f "$d/print.o" ]; then
+    if cmp -s "$d/x.o" "$d/print.o"; then echo same > "$d/object"; else echo differs > "$d/object"; fi
+  fi
+  rm -f "$d/x.o" "$d/print.o" "$d/forms.ae" "$d/print.ll" "$d/lowered.c.ae"
+  if [ -f "$d/lowered.c" ]; then
+    # shellcheck disable=SC2086
+    ( cd "$d" && timeout 900 gcc $GCC_FLAGS -c lowered.c -o lowered.o; echo $? > gcc.status ) 2>&1 | cap "$d/gcc.log"
+    [ -n "${CPPI_KEEP:-}" ] || rm -f "$d/lowered.c"
+  fi
+  return 0
+}
+export -f rt_ir rt_two
+
+runtime_key() { # what the lowered runtime is built from, a digest a line (review 007's finding 1): the namespaces the lowering
+  # loads, the pending-flag layer, the units and their shims, the IR's pin, runtime-build's own steps, gcc's flags, the
+  # toolchain and the tools' host
+  local exe
+  ( cd "$root" && sha256sum arbace/cpp/lower.ae arbace/cpp/rt/eh.c.ae arbace/repr/llvm.ae arbace/repr/llvm/*.ae arbace/repr/c.ae \
+      arbace/repr/c/*.ae test/cpp/runtime/units.edn test/cpp/runtime/shims/* test/cpp/runtime/ir.sha256 )
+  # the pin runtime-build checks the headers against (the one CPPI_HEADERS_PIN names, else the default; review 018's R5), and the
+  # musl headers the units compile against beyond c++/15.2.0: the package, and the top-level headers' digests
+  printf '%s  headers pin %s\n' "$(sha256sum < "${CPPI_HEADERS_PIN:-$root/test/cpp/host/headers.sha256}" | cut -d' ' -f1)" "${CPPI_HEADERS_PIN:+(CPPI_HEADERS_PIN)}"
+  printf '%s  musl-dev package\n' "$( (apk list -I musl-dev musl 2>&1 || true) | sha256sum | cut -d' ' -f1)"
+  printf '%s  /usr/include/*.h\n' "$(sha256sum /usr/include/*.h | sha256sum | cut -d' ' -f1)"
+  printf '%s  bin/cppi:rt_ir,rt_two,runtime_build\n' "$(declare -f rt_ir rt_two runtime_build | sha256sum | cut -d' ' -f1)"
+  printf '%s  GCC_FLAGS\n' "$(printf '%s' "$GCC_FLAGS" | sha256sum | cut -d' ' -f1)"
+  printf '%s  gcc --version\n' "$(gcc --version | head -1 | sha256sum | cut -d' ' -f1)"
+  printf '%s  clang --version\n' "$(clang --version | head -1 | sha256sum | cut -d' ' -f1)"
+  . "$root/bin/lib/host.bash"
+  exe=$(arbace_host_exe)
+  printf '%s  the tools'"'"' host\n' "$(sha256sum < "$exe" | cut -d' ' -f1)"
+}
+
+runtime_key_check() { # runtime_key_check OUT: 0 when OUT's key is the checkout's, else 1 and the inputs that differ on stderr
+  local out=$1 want
+  runtime_key > "$TMPDIR/cppi-key.$$"
+  want=$(sha256sum < "$TMPDIR/cppi-key.$$" | cut -d' ' -f1)
+  if [ -f "$out/liblstdc++.a" ] && [ -f "$out/key" ] && [ "$(cat "$out/key")" = "$want" ]; then rm -f "$TMPDIR/cppi-key.$$"; return 0; fi
+  if [ ! -f "$out/key.txt" ]; then echo "  no key (built before keys, or not built): $out" >&2
+  else diff "$out/key.txt" "$TMPDIR/cppi-key.$$" | sed -n 's/^> [0-9a-f]*  /  differs: /p' >&2 || true; fi
+  rm -f "$TMPDIR/cppi-key.$$"; return 1
+}
+
+runtime_build() {
+  rt=$root/.tmp/cppi/runtime; local update="" jobs=${CPPI_JOBS:-4} t
+  while [ $# -gt 0 ]; do case $1 in --update) update=1; shift ;; --jobs) jobs=$2; shift 2 ;; -*) echo "runtime-build: unknown option $1" >&2; exit 2 ;; *) rt=$1; shift ;; esac; done
+  mkdir -p "$rt"; rt=$(cd "$rt" && pwd); export rt
+  rm -f "$rt/key" "$rt/key.txt" "$rt/key.start"
+  # the key of what the build starts from (review 018's R5): an edit during the build's minutes gives a runtime that is stale at
+  # the end, not one keyed to the edit and built from the old file
+  runtime_key > "$rt/key.start"
+  disk_ok
+  # CP101 (c): the configured headers the IR is compiled against (the host's libstdc++ 15.2.0) at their pinned digests, so a
+  # changed IR is named by its cause first (the pin is bin/repr-cpp host record's; CPPI_HEADERS_PIN names another)
+  local pin=${CPPI_HEADERS_PIN:-$root/test/cpp/host/headers.sha256}
+  if ! ( cd / && sha256sum --quiet -c "$pin" ) > "$rt/headers.check" 2>&1; then
+    echo "runtime-build: the configured headers differ from $pin (bin/repr-cpp host record after a look):" >&2
+    head -20 "$rt/headers.check" >&2; exit 1
+  fi
+  t=$(tarball_check)
+  mkdir -p "$root/.tmp/cppi/gcc"
+  tar -xJf "$t" -C "$root/.tmp/cppi/gcc" gcc-15.2.0/libstdc++-v3/src gcc-15.2.0/libstdc++-v3/libsupc++ gcc-15.2.0/libstdc++-v3/config \
+    gcc-15.2.0/libiberty/cp-demangle.c gcc-15.2.0/libiberty/cp-demangle.h gcc-15.2.0/include/demangle.h gcc-15.2.0/include/libiberty.h \
+    gcc-15.2.0/include/ansidecl.h gcc-15.2.0/libgcc/unwind-pe.h
+  # the build's generated files (test/cpp/runtime/units.edn, :generated)
+  mkdir -p "$rt/gen/bits"
+  : > "$rt/gen/bits/largefile-config.h"
+  { echo 'static const char tzdata_chars[] = R"__libstdcxx__('; cat "$gcc_root/libstdc++-v3/src/c++20/tzdata.zi"; echo ')__libstdcxx__";'; } > "$rt/gen/tzdata.zi.h"
+  GOMEMLIMIT=1GiB arbace_tool -e "(let [u (read-string (slurp \"$root/test/cpp/runtime/units.edn\"))]
+    (spit \"$rt/units.tsv\" (apply str (for [r (:units u)] (str (apply str (interpose \"\t\" r)) \"\n\"))))
+    (spit \"$rt/shims.txt\" (apply str (for [[k v] (:shims u)] (str k \"\n\" v \"\n\")))))"
+  local t0 t1 t2 t3
+  t0=$(date +%s)
+  tr '\t\n' '\037\0' < "$rt/units.tsv" | xargs -0 -P "$jobs" -I{} nice bash -c 'IFS=$'"'"'\037'"'"' read -r u s a f <<< "$1"; rt_ir "$u" "$s" "$a" "$f"' _ {}
+  cut -f1 "$rt/units.tsv" | while read -r u; do
+    if [ -f "$rt/units/$u/x.ll" ]; then printf '%s  %s\n' "$(sha256sum < "$rt/units/$u/x.ll" | cut -d' ' -f1)" "$u"; fi
+  done > "$rt/ir.sha256"
+  if [ -n "$update" ]; then
+    cp "$rt/ir.sha256" "$root/test/cpp/runtime/ir.sha256"
+  elif ! cmp -s "$rt/ir.sha256" "$root/test/cpp/runtime/ir.sha256"; then
+    echo "runtime-build: the IR differs from test/cpp/runtime/ir.sha256 (the oracle or the headers changed: --update after a look)" >&2
+    diff "$root/test/cpp/runtime/ir.sha256" "$rt/ir.sha256" | head -20 >&2; exit 1
+  fi
+  t1=$(date +%s)
+  disk_ok
+  cut -f1 "$rt/units.tsv" | while read -r u; do
+    if [ -f "$rt/units/$u/x.ll" ]; then printf '%s\t%s\t%s\n' "$u" "$rt/units/$u/x.ll" "$rt/units/$u"; fi
+  done > "$rt/lower.tsv"
+  CPPI_THREADS=$jobs arbace_tool -m arbace.cpp.lower lower-list "$rt/lower.tsv"
+  t2=$(date +%s)
+  disk_ok
+  cut -f1 "$rt/units.tsv" | tr '\n' '\0' | xargs -0 -P "$jobs" -I{} nice bash -c 'rt_two "$1"' _ {}
+  arbace_tool -m arbace.cpp.lower lower-rt "$root/arbace/cpp/rt/eh.c.ae" "$rt/rt.c"
+  # shellcheck disable=SC2086
+  gcc $GCC_FLAGS -c "$rt/rt.c" -o "$rt/rt.o"
+  rm -f "$rt/liblstdc++.a" "$rt/liblstdc++exp.a"
+  cut -f1 "$rt/units.tsv" | grep -v '^exp/' | while read -r u; do if [ -f "$rt/units/$u/lowered.o" ]; then echo "$rt/units/$u/lowered.o"; fi; done | xargs ar rcs "$rt/liblstdc++.a"
+  cut -f1 "$rt/units.tsv" | grep '^exp/' | while read -r u; do if [ -f "$rt/units/$u/lowered.o" ]; then echo "$rt/units/$u/lowered.o"; fi; done | xargs ar rcs "$rt/liblstdc++exp.a"
+  t3=$(date +%s)
+  echo "runtime-build: IR $((t1-t0)) s, read, print and lower $((t2-t1)) s, gcc $((t3-t2)) s" | tee "$rt/times.txt"
+  arbace_tool -m arbace.cpp.check runtime-judge "$rt"
+  # every unit passed (runtime-judge exits 1 otherwise): the key of what it was built from
+  mv "$rt/key.start" "$rt/key.txt"
+  sha256sum < "$rt/key.txt" | cut -d' ' -f1 > "$rt/key"
+}
 
 disk_ok() { # the light tier's disk rule: stop past 80% (CPPI_DISK_MAX)
   local u; u=$(df --output=pcent "$root" | tail -1 | tr -dc 0-9)
@@ -119,50 +292,85 @@ disk_ok() { # the light tier's disk rule: stop past 80% (CPPI_DISK_MAX)
 
 lower_check() {
   local list=$1; work=$2; shift 2
-  local jobs=${CPPI_JOBS:-4}
-  while [ $# -gt 0 ]; do case $1 in --jobs) jobs=$2; shift 2 ;; *) echo "lower-check: unknown option $1" >&2; exit 2 ;; esac; done
+  local jobs=${CPPI_JOBS:-4} rtdir=$root/.tmp/cppi/runtime recorded=auto
+  while [ $# -gt 0 ]; do case $1 in --jobs) jobs=$2; shift 2 ;; --runtime) rtdir=$2; shift 2 ;; --recorded) recorded=$2; shift 2 ;; *) echo "lower-check: unknown option $1" >&2; exit 2 ;; esac; done
+  # an empty list is a list maker's failure (bin/cppi list libstdcxx > L without the testsuite), not a check that passes
+  # one grep: `grep -v | grep -q` under pipefail failed when grep -q's early exit killed the first grep (SIGPIPE), refusing a long list
+  grep -q -v -e '^#' -e '^$' "$list" || { echo "lower-check: $list has no file" >&2; exit 2; }
+  # the runtime is used only at the checkout's key (review 007's finding 1): rebuilt, or refused (CPPI_RUNTIME_STALE=refuse)
+  if ! runtime_key_check "$rtdir"; then
+    if [ "${CPPI_RUNTIME_STALE:-rebuild}" = refuse ]; then
+      echo "lower-check: the runtime in $rtdir is not at the checkout's key (bin/cppi runtime-build $rtdir)" >&2; exit 4
+    fi
+    echo "lower-check: the runtime in $rtdir is not at the checkout's key: runtime-build" >&2
+    ( runtime_build "$rtdir" --jobs "$jobs" )
+    runtime_key_check "$rtdir" || { echo "lower-check: the runtime in $rtdir is still not at the checkout's key" >&2; exit 4; }
+  fi
+  rtdir=$(cd "$rtdir" && pwd)
   mkdir -p "$work"; work=$(cd "$work" && pwd); export work
-  cp "$list" "$work/list.tsv"
+  grep -v '^#' "$list" > "$work/list.tsv" || true
+  rm -f "$work/list.key"; sed -n 's/^#list //p' "$list" | head -1 > "$work/list.key"
   disk_ok
   # the testsuite's own library (testsuite_hooks.cc and the others of util/), native as libstdc++ is: compiled by g++ once
-  LIBS="-lstdc++ -lm"
+  # the lowered programs link the lowered runtime (runtime-build) and, for the testsuite, util/ lowered with them: no native
+  # libstdc++
+  LIBS="-lstdc++ -lm -latomic"
+  LOW_LIBS="$rtdir/rt.o -Wl,--start-group $rtdir/liblstdc++.a -Wl,--end-group -lm -latomic"
+  local util=""
   if [ -d "$ts_root/util" ] && grep -q "$ts_root" "$work/list.tsv"; then
-    mkdir -p "$work/libtestc++"
-    for f in testsuite_abi testsuite_allocator testsuite_character testsuite_hooks; do
+    util="testsuite_abi testsuite_allocator testsuite_character testsuite_hooks"
+    rm -rf "$work/libtestc++" "$work/util"; mkdir -p "$work/libtestc++"
+    for f in $util; do
       g++ -std=gnu++17 -O0 -I"$ts_root/util" -c "$ts_root/util/$f.cc" -o "$work/libtestc++/$f.o"
+      mkdir -p "$work/util/$f"
+      clang++ -std=gnu++17 -O0 -S -emit-llvm -I"$ts_root/util" "$ts_root/util/$f.cc" -o "$work/util/$f/x.ll"
     done
     ar rcs "$work/libtestc++.a" "$work"/libtestc++/*.o
-    LIBS="$work/libtestc++.a -lstdc++exp -lstdc++ -lm"
+    LIBS="$work/libtestc++.a -lstdc++exp -lstdc++ -lm -latomic"
+    LOW_LIBS="$rtdir/rt.o -Wl,--start-group $work/libltestc++.a $rtdir/liblstdc++exp.a $rtdir/liblstdc++.a -Wl,--end-group -lm -latomic"
   fi
-  export LIBS
+  export LIBS LOW_LIBS
   local t0 t1 t2 t3
   t0=$(date +%s)
   tr '\t\n' '\037\0' < "$work/list.tsv" | xargs -0 -P "$jobs" -I{} nice bash -c 'IFS=$'"'"'\037'"'"' read -r n s a p <<< "$1"; one "$n" "$s" "$a" "$p"' _ {}
   t1=$(date +%s)
   disk_ok
-  arbace_tool -m arbace.cpp.lower lower-rt "$root/arbace/cpp/rt/eh.c.ae" "$work/rt.c"
-  # shellcheck disable=SC2086
-  gcc $GCC_FLAGS -c "$work/rt.c" -o "$work/rt.o"
   cut -f1 "$work/list.tsv" | while read -r n; do
-    [ -f "$work/files/$n/x.ll" ] && printf '%s\t%s\t%s\n' "$n" "$work/files/$n/x.ll" "$work/files/$n"
+    if [ -f "$work/files/$n/x.ll" ]; then printf '%s\t%s\t%s\n' "$n" "$work/files/$n/x.ll" "$work/files/$n"; fi
   done > "$work/lower.tsv"
+  for f in $util; do printf '%s\t%s\t%s\n' "util/$f.cc" "$work/util/$f/x.ll" "$work/util/$f"; done >> "$work/lower.tsv"
   CPPI_THREADS=$jobs arbace_tool -m arbace.cpp.lower lower-list "$work/lower.tsv"
+  if [ -n "$util" ]; then
+    for f in $util; do
+      # shellcheck disable=SC2086
+      ( cd "$work/util/$f" && gcc $GCC_FLAGS -c lowered.c -o lowered.o ) 2>&1 | cap "$work/util/$f/gcc.log"
+      rm -f "$work/util/$f/forms.ae" "$work/util/$f/print.ll" "$work/util/$f/lowered.c.ae"
+    done
+    rm -f "$work/libltestc++.a"
+    ar rcs "$work/libltestc++.a" "$work"/util/*/lowered.o
+  fi
   t2=$(date +%s)
   disk_ok
   cut -f1 "$work/list.tsv" | tr '\n' '\0' | xargs -0 -P "$jobs" -I{} nice bash -c 'two "$1"' _ {}
   t3=$(date +%s)
   echo "lower-check: native $((t1-t0)) s, read, print and lower $((t2-t1)) s, gcc and runs $((t3-t2)) s" | tee "$work/times.txt"
-  arbace_tool -m arbace.cpp.lower judge "$work" "$root/test/cpp/lower-known.edn"
+  arbace_tool -m arbace.cpp.check judge "$work" "$root/test/cpp/lower-known.edn" "$root/test/cpp/lower-results.edn" "$recorded"
 }
 
 case ${1:-} in
   lower) shift; arbace_tool -m arbace.cpp.lower lower "$@" ;;
   runtime) arbace_tool -m arbace.cpp.lower lower-rt "$root/arbace/cpp/rt/eh.c.ae" "$2" ;;
+  runtime-build) shift; runtime_build "$@" ;;
+  runtime-key) if [ "${2:-}" = --print ]; then runtime_key; exit 0; fi
+               out=${2:-$root/.tmp/cppi/runtime}; if runtime_key_check "$out"; then echo current; else echo stale; exit 1; fi ;;
+  selftest) shift; exec "$root/test/cpp/selftest/run" "$@" ;;
   testsuite) testsuite ;;
   list) case ${2:-} in
           samples) list_samples ;;
+          runtime) list_runtime ;;
+          samples+runtime) echo "#list samples"; list_samples body; list_runtime body ;;
           libstdcxx) n=15; [ "${3:-}" = --sample ] && n=$4; list_libstdcxx "$n" ;;
-          *) echo "list: samples or libstdcxx" >&2; exit 2 ;;
+          *) echo "list: samples, runtime or libstdcxx" >&2; exit 2 ;;
         esac ;;
   lower-check) shift; lower_check "$@" ;;
   *) sed -n '2,/^set -e/p' "$0" | sed '$d;s/^# \{0,1\}//' >&2; exit 2 ;;

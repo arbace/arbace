@@ -58,7 +58,10 @@
   "The C identifier of an LLVM global: the name itself when C takes it, else g$ and its escape (with an asm label for
   the linker's name)."
   [^String s]
-  (if (and (re-matches #"[A-Za-z_][A-Za-z0-9_]*" s) (not (c-keywords s)) (not (str/starts-with? s "cx")))
+  (if (and (re-matches #"[A-Za-z_][A-Za-z0-9_]*" s) (not (c-keywords s)) (not (str/starts-with? s "cx"))
+       ;; report 043's F1: gcc reads these names as its own builtins and checks the calls against them (libatomic's generic
+       ;; entry points take other arguments): they get the escape and the asm label
+       (not (str/starts-with? s "__atomic_")) (not (str/starts-with? s "__sync_")) (not (str/starts-with? s "__builtin_")))
     [(symbol s) nil]
     [(symbol (str "g$" (esc s))) s]))
 
@@ -72,19 +75,14 @@
 (defn- label-kw [x] (keyword (str "b$" (if x (esc (lname-str x)) "entry"))))
 
 (def ^:private runtime-renames
-  {"__cxa_allocate_exception" "cx$allocate_exception" "__cxa_free_exception" "cx$free_exception" "__cxa_throw" "cx$throw"
-   "__cxa_begin_catch" "cx$begin_catch" "__cxa_end_catch" "cx$end_catch" "__cxa_rethrow" "cx$rethrow"
-   "__cxa_get_exception_ptr" "cx$get_exception_ptr" "__cxa_bad_cast" "cx$bad_cast" "__cxa_bad_typeid" "cx$bad_typeid"
-   "__cxa_throw_bad_array_new_length" "cx$throw_bad_array_new_length" "_ZSt19uncaught_exceptionsv" "cx$uncaught_exceptions"
-   "_ZSt18uncaught_exceptionv" "cx$uncaught_exception" "__cxa_uncaught_exceptions" "cx$uncaught_exceptions"
-   "__cxa_current_exception_type" "cx$current_exception_type" "main" "cx$main"})
+  "The names the lowering gives its own: main (called by a C main that checks for an uncaught exception, §8). Since CX7 the
+  Itanium ABI's entry points are libsupc++'s own, lowered with libstdc++ (bin/cppi runtime-build); only the unwinder and the
+  personality routine are the hand-written pending-flag layer, arbace/cpp/rt/eh.c.ae (CP86 (c)). Since CP120 (b) pthread_create
+  is the layer's cx$pthread_create, whose trampoline calls cx$uncaught when a thread's routine returns with the flag set; since
+  CP160 (b) so are atexit, at_quick_exit and __cxa_atexit (cx$atexit, cx$at_quick_exit, cx$cxa_atexit), as to exit-time handlers."
+  {"main" "cx$main" "pthread_create" "cx$pthread_create" "atexit" "cx$atexit" "at_quick_exit" "cx$at_quick_exit" "__cxa_atexit" "cx$cxa_atexit"})
 
-(def ^:private refused-externals
-  {"__cxa_init_primary_exception" :exception-ptr "_ZSt17current_exceptionv" :exception-ptr
-   "_ZSt17rethrow_exceptionNSt15__exception_ptr13exception_ptrE" :exception-ptr "__cxa_call_unexpected" :filter
-   "_ZNSt15__exception_ptr13exception_ptr9_M_addrefEv" :exception-ptr "_ZNSt15__exception_ptr13exception_ptr10_M_releaseEv" :exception-ptr
-   "__cxa_current_primary_exception" :exception-ptr "__cxa_rethrow_primary_exception" :exception-ptr
-   "_ZSt17__throw_bad_allocv" nil})
+(def ^:private refused-externals {})
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Types and layout (the IR's data layout: e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128)
@@ -264,12 +262,16 @@
             ct ({"float" 'float "double" 'double "x86_fp80" 'long-double} tn)
             _ (when-not ct (refuse :float-type "the type " tn))
             body (cond
-                   (Double/isNaN d) (list 'bit-cast 'double (list 'lit 'unsigned-long (bigint (BigInteger. (Long/toUnsignedString (Double/doubleToRawLongBits d))))))
+                   ;; a NaN by its payload (a constant expression, also in static initializers)
+                   (Double/isNaN d) (let [bits (Double/doubleToRawLongBits d)
+                                          payload (bit-and bits 0x7ffffffffffff)
+                                          quiet (bit-test bits 51)]
+                                      (list (if quiet '__builtin_nan '__builtin_nans) (str "0x" (Long/toHexString payload))))
                    (Double/isInfinite ad) '(__builtin_inf)
                    (= ct 'double) ad
                    :else (list 'lit ct ad))
             body (if (and (Double/isNaN d) (not= ct 'double)) (list 'conv ct body) body)]
-        (if (and neg (not (Double/isNaN d))) (list '- body) body)))))
+        (if (or (and neg (not (Double/isNaN d))) (and (Double/isNaN d) (neg? (Double/doubleToRawLongBits d)))) (list '- body) body)))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Values
@@ -294,8 +296,14 @@
 (defn- mask [e ^long w]
   (cond
     (#{8 16 32 64 128} w) e
-    (> w 64) (refuse :wide-int "i" w)
-    :else (list 'bit-and e (int-lit (.subtract (.shiftLeft BigInteger/ONE (int w)) BigInteger/ONE) (if (<= w 32) 32 64)))))
+    (> w 128) (refuse :wide-int "i" w)
+    :else (list 'bit-and e (int-lit (.subtract (.shiftLeft BigInteger/ONE (int w)) BigInteger/ONE) (cond (<= w 32) 32 (<= w 64) 64 :else 128)))))
+
+(defn- store-bytes
+  "An integer type's store size in bytes when it is smaller than its container's (i24: 3 of 4, i40: 5 of 8), else nil:
+  LLVM's load and store of the type read and write those bytes only (review 007's finding 4)."
+  [^long w]
+  (let [ss (quot (+ w 7) 8)] (when (< ss (quot (container-bits w) 8)) ss)))
 
 (declare value gep-expr const-expr)
 
@@ -423,7 +431,11 @@
       bitcast (cond
                 (and (ptr-type? t1) (ptr-type? t2)) e
                 (= t1 t2) e
-                :else (list 'bit-cast c2 e))
+                ;; gcc's C has no __builtin_bit_cast: the bytes copied through a compound literal of the source type
+                :else (list 'stmt-expr (list 'let [(list 'c/var (with-meta 'cx$u {:tag c2}))]
+                                             (list '__builtin_memcpy (list 'addr 'cx$u) (list 'addr (list 'compound-lit (ctype t1) e))
+                                                   (first (size-align t2)))
+                                             'cx$u)))
       (refuse :op "the cast " op))))
 
 (defn const-expr
@@ -547,7 +559,7 @@
       (re-matches #"llvm\.memcpy(\.inline)?\..*" nm) [(list '__builtin_memcpy (a 0) (a 1) (uval (a 2) (w 2)))]
       (re-matches #"llvm\.memmove\..*" nm) [(list '__builtin_memmove (a 0) (a 1) (uval (a 2) (w 2)))]
       (re-matches #"llvm\.memset(\.inline)?\..*" nm) [(list '__builtin_memset (a 0) (list 'conv 'int (a 1)) (uval (a 2) (w 2)))]
-      (re-matches #"llvm\.(lifetime|dbg|assume|experimental\.noalias|sideeffect|donothing|prefetch|var\.annotation|invariant\.end|codeview)\b.*" nm) []
+      (re-matches #"llvm\.(lifetime|dbg|assume|experimental\.noalias|sideeffect|donothing|prefetch|var\.annotation|invariant\.end|codeview|x86\.sse2\.pause)\b.*" nm) []
       (re-matches #"llvm\.(expect|expect\.with\.probability)\..*" nm) (set-res (a 0))
       (re-matches #"llvm\.(threadlocal\.address|launder\.invariant\.group|strip\.invariant\.group|invariant\.start)\..*" nm) (set-res (a (if (str/includes? nm "invariant.start") 1 0)))
       (re-matches #"llvm\.is\.constant\..*" nm) (set-res (int-lit 0 1))
@@ -570,6 +582,17 @@
             v #(if sgn (sval (a %) wd) (uval (a %) wd))]
         (set-res (list '? (list (if (= op "max") '> '<) (v 0) (v 1)) (a 0) (a 1))))
       (re-matches #"llvm\.abs\..*" nm) (let [wd (w 0)] (set-res (mask (list '? (list '< (sval (a 0) wd) 0) (list '- (uval (a 0) wd)) (uval (a 0) wd)) wd)))
+      (re-matches #"llvm\.(ctpop|ctlz|cttz)\.i128" nm)
+      (let [x (uval (a 0) 128)
+            hi (list 'conv 'unsigned-long-long (list '>> x 64)) lo (list 'conv 'unsigned-long-long x)
+            e (case (nth parts 1)
+                "ctpop" (list '+ (list '__builtin_popcountll hi) (list '__builtin_popcountll lo))
+                "ctlz" (list '? (list '!= hi 0) (list '__builtin_clzll hi) (list '? (list '!= lo 0) (list '+ 64 (list '__builtin_clzll lo)) 128))
+                "cttz" (list '? (list '!= lo 0) (list '__builtin_ctzll lo) (list '? (list '!= hi 0) (list '+ 64 (list '__builtin_ctzll hi)) 128)))]
+        (set-res (list 'conv 'unsigned-__int128 e)))
+      (re-matches #"llvm\.frexp\.(f32|f64|f80)\.i32" nm)
+      (let [sfx ({"f32" "f" "f64" "" "f80" "l"} (nth parts 2))]
+        [(list 'set! (list '.-f0 res) (list (symbol (str "__builtin_frexp" sfx)) (a 0) (list 'conv '(* int) (list 'addr (list '.-f1 res)))))])
       (re-matches #"llvm\.ctpop\..*" nm) (let [wd (w 0)] (when (> wd 64) (refuse :intrinsic nm)) (set-res (list '__builtin_popcountll (list 'conv 'unsigned-long-long (a 0)))))
       (re-matches #"llvm\.ctlz\..*" nm) (let [wd (w 0)] (when (> wd 64) (refuse :intrinsic nm))
                                           (set-res (list '? (list '== (a 0) 0) wd (list '- (list '__builtin_clzll (list 'conv 'unsigned-long-long (a 0))) (- 64 wd)))))
@@ -614,11 +637,16 @@
         rt (if (and (seq? ty) (= (first ty) 'fn)) (second ty) ty)
         variadic (and (seq? ty) (= (first ty) 'fn) (some #{'&} (nth ty 2)))
         gname (when (or (and (symbol? callee) (= (namespace callee) "g")) (and (seq? callee) (= (first callee) 'g))) (gname-str callee))
-        _ (when (and (seq? callee) (= (first callee) 'asm)) (refuse :inline-asm "inline assembly"))
+        empty-asm (and (seq? callee) (= (first callee) 'asm) (= "" (second callee)) (= rt 'void))
+        ;; an empty template with no outputs is a compiler barrier (`asm volatile("" : : "rm"(x))`): nothing at -O0
+        _ (when (and (seq? callee) (= (first callee) 'asm) (not empty-asm)) (refuse :inline-asm "inline assembly"))
         _ (when-let [c (and gname (get refused-externals gname))] (refuse c "calls " gname))
         cres (when (and res (not= rt 'void)) res)]
-    (if (and gname (str/starts-with? gname "llvm."))
+    (cond
+      empty-asm []
+      (and gname (str/starts-with? gname "llvm."))
       (intrinsic gname args cres rt)
+      :else
       (let [info (when gname (get *globals* gname))
             arg-exprs (vec (for [a args]
                              (let [bt (param-attr a :byval) v (typed-value [(first a) (peek a)])]
@@ -657,13 +685,42 @@
                       (case (first c)
                         catch (let [[_ ct cv] c]
                                 (list '? (list 'cx$catches (if (= cv 'null) '(conv (* void) 0) (value cv ct))) (int-lit (typeid cv) 32) acc))
-                        filter (refuse :filter "a filter clause")))
+                        ;; a filter (a dynamic exception specification): the exception is rejected (selector -1, the
+                        ;; IR's ehspec.unexpected path) unless one of the listed types catches it
+                        filter (let [[_ ft fv] c
+                                     tis (when (and (seq? fv) (= (first fv) 'array)) (map (fn [[et ev]] (value ev et)) (rest fv)))]
+                                 (if (empty? tis)
+                                   (int-lit -1 32)
+                                   (list '? (apply list 'or (map #(list 'cx$catches %) tis)) acc (int-lit -1 32))))))
                     (int-lit (if cleanup 0 nomatch) 32)
                     (reverse clauses))]
     [(list 'set! (list '.-f0 res) '(cx$exception))
      (list 'set! (list '.-f1 res) sel)
      (list 'when (list '== (list '.-f1 res) (int-lit nomatch 32)) (dummy-return))
      '(set! cx$pending 0)]))
+
+;; atomics (CP121 (c)): gcc's __atomic_* builtins with the IR's orderings (__ATOMIC_RELAXED 0, ACQUIRE 2, RELEASE 3, ACQ_REL 4,
+;; SEQ_CST 5; LLVM's unordered and monotonic are relaxed); a syncscope("singlethread") fence is a signal fence, a
+;; singlethread operation stays a thread-wide atomic (stronger, the same result)
+(defn- atomic-order [k]
+  (case k (:unordered :monotonic) 0 :acquire 2 :release 3 :acq_rel 4 :seq_cst 5 (refuse :atomic "the ordering " k)))
+
+(defn- order-join
+  "The weakest __ATOMIC_ order at least as strong as both a and b (report 043's F3): gcc's documentation says a compare-exchange's
+  failure order cannot be stronger than its success order, which LLVM allows; the success order becomes the join."
+  [a b]
+  (cond (= a b) a (zero? a) b (zero? b) a (or (= a 5) (= b 5)) 5 :else 4))
+
+(defn- atomic-n?
+  "Whether the _n builtins take a value of LLVM type t (an integer of 1, 2, 4, 8 or 16 bytes or a pointer); else the generic
+  builtins, through memory (floats)."
+  [t]
+  (or (ptr-type? t) (#{8 16 32 64 128} (int-bits t))))
+
+(defn- atomic-place
+  "The pointer operand cast to the C type's pointer, volatile when the instruction is."
+  [pv ct o]
+  (list 'conv (list '* (if (:volatile o) (list 'volatile ct) ct)) (typed-value pv)))
 
 (defn- inst-stmts
   "An instruction's C statements."
@@ -703,10 +760,32 @@
                    (swap! *fn* update :allocas conj (with-meta m {:tag (list 'array (max n 1) 'unsigned-char) :c/alignas al}))
                    (set (list 'conv '(* void) m)))
                  (set (list '__builtin_alloca_with_align (if cnt (list '* (uval (typed-value cnt) (int-bits (first cnt))) s) s) (* 8 al)))))
-      load (let [[t pv] [(second x) (nth x 2)] ct (ctype t) ct (if (:volatile o) (list 'volatile ct) ct)]
-             (set (list 'deref (list 'conv (list '* ct) (typed-value pv)))))
-      store (let [[v pv] [(second x) (nth x 2)] ct (ctype (first v)) ct (if (:volatile o) (list 'volatile ct) ct)]
-              [(list 'set! (list 'deref (list 'conv (list '* ct) (typed-value pv))) (typed-value v))])
+      ;; an integer of an odd width: loaded masked to it, and when its store size is smaller than its container's (i24, i40,
+      ;; i48, i56: bit-field access units clang does not widen over the next field) loaded and stored by those bytes only
+      load (let [[t pv] [(second x) (nth x 2)] ct0 (ctype t) ct (if (:volatile o) (list 'volatile ct0) ct0) w (int-bits t)
+                 ss (when w (store-bytes w))]
+             (cond
+               (:atomic o) (cond
+                             (atomic-n? t) (set (list '__atomic_load_n (atomic-place pv ct0 o) (atomic-order (:atomic o))))
+                             (float-type? t) [(list '__atomic_load (atomic-place pv ct0 o) (list 'addr res) (atomic-order (:atomic o)))]
+                             :else (refuse :atomic "an atomic load of " (pr-str t)))
+               ss (set (mask (list 'stmt-expr (list 'let [(list 'c/var (with-meta 'cx$u {:tag ct0}) (int-lit 0 w))]
+                                                    (list '__builtin_memcpy (list 'addr 'cx$u) (typed-value pv) ss)
+                                                    'cx$u))
+                             w))
+               w (set (mask (list 'deref (list 'conv (list '* ct) (typed-value pv))) w))
+               :else (set (list 'deref (list 'conv (list '* ct) (typed-value pv))))))
+      store (let [[v pv] [(second x) (nth x 2)] ct0 (ctype (first v)) ct (if (:volatile o) (list 'volatile ct0) ct0) w (int-bits (first v))
+                  ss (when w (store-bytes w))]
+              (cond
+                (:atomic o) (cond
+                              (atomic-n? (first v)) [(list '__atomic_store_n (atomic-place pv ct0 o) (typed-value v) (atomic-order (:atomic o)))]
+                              (float-type? (first v)) [(list '__atomic_store (atomic-place pv ct0 o) (list 'addr (list 'compound-lit ct0 (typed-value v))) (atomic-order (:atomic o)))]
+                              :else (refuse :atomic "an atomic store of " (pr-str (first v))))
+                ss
+                [(list '__builtin_memcpy (typed-value pv) (list 'addr (list 'compound-lit ct0 (typed-value v))) ss)]
+                :else
+                [(list 'set! (list 'deref (list 'conv (list '* ct) (typed-value pv))) (typed-value v))]))
       getelementptr (let [[st base & idxs] args] (set (gep-expr st (typed-value base) (take-while vector? idxs))))
       phi []
       select (let [[c a b] args]
@@ -735,21 +814,33 @@
       extractelement (let [[[t v] i] (rest x)] (set (list 'aget (list '.-e (value v t)) (typed-value i))))
       insertelement (let [[[t v] e i] (rest x)] [(list 'set! res (value v t)) (list 'set! (list 'aget (list '.-e res) (typed-value i)) (typed-value e))])
       freeze (set (value (nth x 2) (second x)))
-      atomicrmw (let [[op pv [vt v]] (rest x) ct (ctype vt) place (list 'deref (list 'conv (list '* ct) (typed-value pv))) w (int-bits vt)
-                      nv (case op
-                           :xchg (value v vt)
-                           (:add :sub :and :or :xor) (binop ({:add 'add :sub 'sub :and 'and :or 'or :xor 'xor} op) vt res (value v vt))
-                           :nand (mask (list 'bit-not (binop 'and vt res (value v vt))) w)
-                           (:max :min :umax :umin) (let [sg (#{:max :min} op) f #(if sg (sval % w) (uval % w))]
-                                                     (list '? (list (if (#{:max :umax} op) '> '<) (f res) (f (value v vt))) res (value v vt)))
-                           (:fadd :fsub) (list (if (= op :fadd) '+ '-) res (value v vt))
-                           (refuse :atomic "atomicrmw " op))]
-                  [(list 'set! res place) (list 'set! place nv)])
-      cmpxchg (let [[pv [ct c] [_ n]] (rest x) cty (ctype ct) place (list 'deref (list 'conv (list '* cty) (typed-value pv)))]
-                [(list 'set! (list '.-f0 res) place)
-                 (list 'set! (list '.-f1 res) (list '== (list '.-f0 res) (value c ct)))
-                 (list 'when (list '.-f1 res) (list 'set! place (value n ct)))])
-      fence []
+      ;; atomicrmw: the fetch-and-op builtins where gcc has one, else a compare-and-exchange loop of the generic builtins (the
+      ;; value computed from the old one in res, which a failed exchange refreshes)
+      atomicrmw (let [[op pv [vt v]] (rest x) ord (atomic-order (nth x 4)) ct (ctype vt) w (int-bits vt) val (value v vt)
+                      place (atomic-place pv ct o)
+                      fetch ({:add '__atomic_fetch_add :sub '__atomic_fetch_sub :and '__atomic_fetch_and :or '__atomic_fetch_or
+                              :xor '__atomic_fetch_xor :nand '__atomic_fetch_nand} op)]
+                  (cond
+                    (and (= op :xchg) (atomic-n? vt)) (set (list '__atomic_exchange_n place val ord))
+                    (= op :xchg) [(list '__atomic_exchange (atomic-place pv ct o) (list 'addr (list 'compound-lit ct val)) (list 'addr res) ord)]
+                    (and fetch w (atomic-n? vt)) (set (list fetch place val ord))
+                    :else
+                    (let [nv (case op
+                               :nand (mask (list 'bit-not (binop 'and vt res val)) w)
+                               (:max :min :umax :umin) (let [sg (#{:max :min} op) f #(if sg (sval % w) (uval % w))]
+                                                         (list '? (list (if (#{:max :umax} op) '> '<) (f res) (f val)) res val))
+                               (:fadd :fsub) (list (if (= op :fadd) '+ '-) res val)
+                               (refuse :atomic "atomicrmw " op))
+                          gplace (atomic-place pv ct o)]
+                      [(list '__atomic_load gplace (list 'addr res) 0)
+                       (list 'do-while (list 'not (list '__atomic_compare_exchange gplace (list 'addr res) (list 'addr (list 'compound-lit ct nv)) 0 ord 0)))])))
+      cmpxchg (let [[pv [ct c] [_ n]] (rest x) cty (ctype ct)]
+                (when-not (atomic-n? ct) (refuse :atomic "cmpxchg of " (pr-str ct)))
+                [(list 'set! (list '.-f0 res) (value c ct))
+                 (list 'set! (list '.-f1 res) (list '__atomic_compare_exchange_n (atomic-place pv cty o) (list 'addr (list '.-f0 res)) (value n ct)
+                                                    (if (:weak o) 1 0)
+                                                    (order-join (atomic-order (nth x 4)) (atomic-order (nth x 5))) (atomic-order (nth x 5))))])
+      fence [(list (if (= (:syncscope o) "singlethread") '__atomic_signal_fence '__atomic_thread_fence) (atomic-order (second x)))]
       ret (if (= (second x) 'void) ['(return)] [(list 'return (value (nth x 2) (second x)))])
       br (if (= 2 (count x))
            (edge (second x))
@@ -837,7 +928,7 @@
         dl (some #(when (= (first %) 'llvm/datalayout) (second %)) forms)
         _ (when (and dl (not= dl expected-layout)) (refuse :datalayout "the data layout " dl))
         ctors (some #(when (and (= (first %) 'llvm/global) (= (gname-str (second %)) "llvm.global_ctors")) %) forms)
-        ctor-fns (when ctors (into {} (for [[_ [_ [_ prio] [_ fv]]] (rest (nth ctors 3))] [(gname-str fv) prio])))
+        ctor-list (when ctors (vec (for [[_ [_ [_ prio] [_ fv]]] (rest (nth ctors 3))] [(gname-str fv) prio])))
         _ (when (some #(and (= (first %) 'llvm/global) (= (gname-str (second %)) "llvm.global_dtors")) forms) (refuse :dtors "llvm.global_dtors"))
         special #{"llvm.global_ctors" "llvm.used" "llvm.compiler.used" "llvm.global.annotations"}
         globals (into {} (for [f forms
@@ -864,9 +955,8 @@
             protos (vec (for [[f info] fns]
                           (let [[_ _ rt ps & more] f o (apply hash-map more)
                                 cps (c-params ps)
-                                pvec (cond-> (if (empty? cps) (if (some #{'&} ps) [] ['void]) cps) (some #{'&} ps) (conj '&))
-                                prio (get ctor-fns (gname-str (second f)))]
-                            (list 'c/declare (with-meta (:c info) (linkage-meta o (:asm info) (when prio [(if (= prio 65535) 'constructor ['constructor prio])])))
+                                pvec (cond-> (if (empty? cps) (if (some #{'&} ps) [] ['void]) cps) (some #{'&} ps) (conj '&))]
+                            (list 'c/declare (with-meta (:c info) (linkage-meta o (:asm info)))
                                   (with-meta pvec {:tag (ctype rt)})))))
             aliases (vec (for [[_ info] *globals* :when (:target info)]
                            (let [o (apply hash-map (drop 4 (:form info)))
@@ -892,17 +982,27 @@
                       [(list 'c/var (with-meta (:c info) (if (nil? init) (assoc (dissoc m :static) :extern true) (dissoc m :c/decl-attrs))))
                        (when (some? init) (list 'c/var (with-meta (:c info) m) (cinit init t)))]))
             gvars (vec (for [[d df] gvars]
-                         (if (and df (not (:static (meta (second d)))))
+                         (cond
+                           (and df (not (:static (meta (second d)))))
                            [(list 'c/var (vary-meta (second d) assoc :extern true)) df]
-                           [d df])))
+                           ;; a static thread-local has no tentative definition in C: its definition alone
+                           (and df (:thread_local (meta (second d)))) [nil df]
+                           :else [d df])))
             defs (vec (for [[f info] fns :when (and (= (first f) 'llvm/define) (not= :available_externally (:linkage (apply hash-map (drop 4 f)))))]
                         (let [o (apply hash-map (drop 4 f))
-                              prio (get ctor-fns (gname-str (second f)))
                               ;; aligned: Itanium's member function pointers take the low bit of a function's address
                               ;; for the virtual flag (clang aligns every function at 16; gcc -O0 does not)
-                              m (linkage-meta o (:asm info) (concat [['aligned (max 2 (long (or (:align o) 2)))]]
-                                                                    (when prio [(if (= prio 65535) 'constructor ['constructor prio])])))]
+                              m (linkage-meta o (:asm info) [['aligned (max 2 (long (or (:align o) 2)))]])]
                           (lower-define f (assoc info :c-decl (with-meta (:c info) m))))))
+            ;; llvm.global_ctors: each a C constructor that calls the function and then, as a throw that leaves a dynamic
+            ;; initializer terminates, calls cx$uncaught when the pending flag is set (review 007's finding 9): no later
+            ;; constructor and no main runs with an exception in flight
+            ctor-defs (vec (for [[i [s prio]] (map-indexed vector ctor-list) :let [info (get globals s)] :when info]
+                             (list 'c/defn (with-meta (symbol (str "cx$ctor$" i))
+                                             {:static true :c/decl-attrs [(list '__attribute__ (if (= prio 65535) 'constructor ['constructor prio]))]})
+                                   (with-meta ['void] {:tag 'void})
+                                   (list (:c info))
+                                   '(when cx$pending (cx$uncaught)))))
             main (get globals "main")
             wrapper (when (and main (= (:kind main) :fn) (= (first (:form main)) 'llvm/define))
                       (let [[_ ps] (:sig main) n (count ps)
@@ -911,76 +1011,13 @@
                               (list 'let [(with-meta 'r {:tag 'int}) (list 'conv 'int (apply list 'cx$main args))]
                                     '(when cx$pending (cx$uncaught))
                                     '(return r)))))
-            head [(list 'c/var (with-meta 'cx$pending {:extern true :tag 'int}))
+            head [(list 'c/var (with-meta 'cx$pending {:extern true :thread_local true :tag 'int}))
                   (list 'c/declare 'cx$exception (with-meta ['void] {:tag '(* void)}))
                   (list 'c/declare 'cx$catches (with-meta [(with-meta 'ti {:tag '(* void)})] {:tag 'int}))
                   (list 'c/declare 'cx$resume (with-meta [(with-meta 'o {:tag '(* void)})] {:tag 'void}))
                   (list 'c/declare 'cx$uncaught (with-meta ['void] {:tag 'void}))]]
         [(list 'c/file c-name :std :gnu23)
-         (vec (concat (:defs @*structs*) head protos aliases (keep first gvars) (keep second gvars) defs (when wrapper [wrapper])))]))))
-
-;; ---------------------------------------------------------------------------------------------
-;; The judgment of bin/cppi lower-check
-
-(defn- slurp? [^String p] (let [f (java.io.File. p)] (when (.exists f) (str/trim (slurp f)))))
-(defn- same-bytes? [^String a ^String b]
-  (let [fa (java.io.File. a) fb (java.io.File. b)]
-    (and (.exists fa) (.exists fb)
-         (java.util.Arrays/equals (java.nio.file.Files/readAllBytes (.toPath fa)) (java.nio.file.Files/readAllBytes (.toPath fb))))))
-
-(defn file-result
-  "One file's levels and outcome: {:name :outcome :ir :rt :obj :lower :gcc :run :gxx}; outcome :pass, :oracle-rejected
-  (clang rejects the file: not a lowering's case), or the first level that did not hold."
-  [^String work ^String n]
-  (let [d (str work "/files/" n "/")
-        st #(slurp? (str d %))
-        ir (st "ir.status")
-        rt (some-> (st "rt.status") (str/split #"\t") first)
-        obj (or (st "object") "none")
-        refused (st "lower.refused")
-        gcc (st "gcc.status")
-        orig (st "orig.status") low (st "low.status")
-        run (cond (nil? orig) "no-original" (nil? low) "none"
-                  (and (= orig low) (same-bytes? (str d "orig.out") (str d "low.out"))) "same" :else "differs")
-        gxx (cond (nil? (st "gxx.status")) "none"
-                  (and (= orig (st "gxx.status")) (same-bytes? (str d "orig.out") (str d "gxx.out"))) "agrees" :else "differs")
-        no-main (= "1" (st "no-main"))
-        run (if (and no-main (= gcc "0")) "no-main" run)
-        outcome (cond
-                  (not= ir "0") :oracle-rejected
-                  (and (not no-main) (not= (st "orig-link.status") "0")) :original-link
-                  (not= rt "ok") :forms
-                  (not= obj "same") :object
-                  refused :lowering
-                  (not= gcc "0") :gcc
-                  (not (#{"same" "no-main"} run)) :run
-                  :else :pass)]
-    {:name n :outcome outcome :ir ir :rt rt :obj obj :lower (if refused (first (str/split refused #"\t")) "ok") :gcc (or gcc "-")
-     :run run :gxx gxx :orig-status orig :low-status low}))
-
-(defn judge
-  "WORK/results.tsv and WORK/summary.edn from the files' levels against the known file (NAME -> class): a non-pass is known
-  when its name is listed, else failing."
-  [^String work ^String known-path]
-  (let [known (if (.exists (java.io.File. known-path)) (read-string (slurp known-path)) {})
-        names (for [l (str/split-lines (slurp (str work "/list.tsv"))) :when (seq l)] (first (str/split l #"\t")))
-        rs (mapv #(file-result work %) names)
-        status (fn [r] (cond (= :pass (:outcome r)) :pass (= :oracle-rejected (:outcome r)) :oracle-rejected
-                             (contains? known (:name r)) :known :else :failing))
-        lines (for [r rs] (str/join "\t" [(:name r) (name (status r)) (name (:outcome r)) (:rt r) (:obj r) (:lower r) (:gcc r) (:run r) (:gxx r)
-                                         (or (:orig-status r) "-") (or (:low-status r) "-") (if-let [c (get known (:name r))] (name c) "-")]))
-        cnt (fn [k] (count (filter #(= k (status %)) rs)))
-        by (fn [f] (into (sorted-map) (frequencies (map f rs))))
-        summary {:files (count rs) :pass (cnt :pass) :known (cnt :known) :failing (cnt :failing) :oracle-rejected (cnt :oracle-rejected)
-                 :outcomes (by (comp name :outcome)) :forms (by #(or (:rt %) "-")) :objects (by :obj) :lowering (by :lower)
-                 :gxx (by :gxx)
-                 :known-classes (into (sorted-map) (frequencies (keep #(when (= :known (status %)) (name (get known (:name %)))) rs)))}]
-    (spit (str work "/results.tsv") (str "name\tstatus\toutcome\tforms\tobject\tlowering\tgcc\trun\tgxx\torig\tlow\tclass\n" (str/join "\n" lines) "\n"))
-    (spit (str work "/summary.edn") (str (pr-str summary) "\n"))
-    (println (str "lower-check: " (count rs) " files, " (:pass summary) " pass, " (:known summary) " known, " (:failing summary) " failing, "
-                  (:oracle-rejected summary) " rejected by the oracle"))
-    (doseq [r rs :when (= :failing (status r))] (println "  failing:" (:name r) (name (:outcome r)) (:lower r)))
-    (when (pos? (:failing summary)) (System/exit 1))))
+         (vec (concat (:defs @*structs*) head protos aliases (keep first gvars) (keep second gvars) defs ctor-defs (when wrapper [wrapper])))]))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; bin/cppi lower
@@ -1040,5 +1077,4 @@
                    (doseq [f futs] (.get ^java.util.concurrent.Future f))
                    (.shutdown pool)
                    (println (count futs) "lowered or refused"))
-    "judge" (let [[work known] args] (judge work known))
-    (do (println "cppi: lower, lower-rt, lower-list or judge") (System/exit 2))))
+    (do (println "cppi: lower, lower-rt or lower-list (the judges: arbace.cpp.check)") (System/exit 2))))

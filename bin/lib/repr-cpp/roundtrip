@@ -7,31 +7,58 @@
 #   level 1: the print dumped and converted again, WORK/forms2/NAME.ae, equal to the first forms (cmp);
 #   level 3: the print's AST equal to the original's (cxxdump -norm of both, cmp);
 #   level 4: the print compiled by g++ (-O0 -c with the file's options) and by clang (-c with the modelled options)
-#            gives each compiler's object of the original (cmp);
+#            gives each compiler's object of the original (cmp); required unless --no-objects, and a compiler may fail
+#            on the original only where the known file's :orig-fails records it;
 # then judged against the known file (test/repr/cpp/roundtrip-known.edn: NAME -> class) into WORK/results.tsv and a summary.
-# Usage: bin/repr-cpp roundtrip LIST WORK [--jobs N] [--no-objects]
+# The corpus (CP130 (c)): a first line `#list KEY` of the list, or --corpus KEY, names the corpus; WORK/list.key keeps it, and the judge
+# holds the oracle's rejections and failures of that corpus to the record test/repr/cpp/roundtrip-oracle.edn (REPR_CPP_ROUNDTRIP_ORACLE):
+# a rejection by clang or a dump that failed (:timeout, :crash) must be recorded by name, else the file fails. --record-oracle writes
+# this run's rejections and failures as the corpus' entry (the record is data of the whole-corpus runs). No key: no record is read.
+# Names (CP127 (b)): the known file and WORK/results.tsv name a file CORPUS/NAME, CORPUS the key without its sampling (`gxx-dg-every-10`
+# -> gxx-dg/); a list's name already under its corpus is kept (bin/cppi list samples writes samples/NAME), a list without a key is named as written.
+# The results (CP124 (b)): the list's key names its recorded results, test/repr/cpp/roundtrip-results/KEY.edn (REPR_CPP_ROUNDTRIP_RESULTS
+# names another directory): a recorded pass that does not pass fails (a file moving from pass to known is caught), and a run of the
+# list is held to the record's names (one missing or one not recorded fails); --record-results writes the file from a run with no
+# failure; --replace-results when the names differ from the existing record's. No key: not held (said on stderr); a key whose oracle record exists but no KEY.edn
+# (and not in roundtrip-results/pending.edn): fails (report 043 F6).
+# A first --record-oracle run of a corpus without KEY.edn (or a pending.edn entry) exits 1: the judge finds an oracle record without
+# recorded results; give --record-results too (or list the key in pending.edn).
+# Usage: bin/repr-cpp roundtrip LIST WORK [--jobs N] [--no-objects] [--corpus KEY] [--record-oracle [--replace-oracle]] [--record-results [--replace-results]]
 # The light tier: REPR_CPP_THREADS (default 4), GOMAXPROCS=4 and GOMEMLIMIT=1500MiB unless set.
 set -uo pipefail
 root=$(cd "$(dirname "$0")/../../.." && pwd)
 . "$root/bin/lib/tmpdir.bash"
 . "$root/bin/lib/tools.bash"
 list=$1 work=$2; shift 2
-jobs=${REPR_CPP_THREADS:-4} objects=1
+jobs=${REPR_CPP_THREADS:-4} objects=1 corpus="" record= replace= results_mode=check replace_results= record_results=
 while [ $# -gt 0 ]; do
   case $1 in
     --jobs) jobs=$2; shift 2 ;;
     --no-objects) objects=; shift ;;
+    --corpus) corpus=$2; shift 2 ;;
+    --record-oracle) record=1; shift ;;
+    --replace-oracle) replace=replace; shift ;;
+    --record-results) record_results=1; [ "$results_mode" = record-replace ] || results_mode=record; shift ;;
+    --replace-results) results_mode=record-replace; replace_results=1; shift ;;
     *) echo "roundtrip: unknown option $1" >&2; exit 2 ;;
   esac
 done
+# --replace-results modifies --record-results, as --replace-oracle does --record-oracle (report 052's N5)
+[ -z "$replace_results" ] || [ -n "$record_results" ] || { echo "roundtrip: --replace-results needs --record-results" >&2; exit 2; }
 export GOMAXPROCS=${GOMAXPROCS:-4} GOMEMLIMIT=${GOMEMLIMIT:-1500MiB} REPR_CPP_THREADS=$jobs
-exe=$root/.tmp/repr-cpp/cxxdump
+exe=${REPR_CPP_CXXDUMP_EXE:-$root/.tmp/repr-cpp/cxxdump}
 [ -x "$exe" ] || "$root/bin/repr-cpp" cxxdump-build >&2
 cache=${REPR_CPP_CXXDUMP_CACHE:-$root/.tmp/repr-cpp/cxxdump-cache}
 mkdir -p "$work" "$cache"; work=$(cd "$work" && pwd)
+# a reused WORK keeps nothing of an earlier run (review 018's R1, as review 007's finding 5 for bin/cppi): a stale level file
+# would be read as this run's
+for d in orig print forms forms2 dump2 obj; do rm -rf "${work:?}/$d"; done
+rm -f "$work/read.tsv" "$work/read2.tsv" "$work/results.tsv" "$work/summary.edn"
 mkdir -p "$work/orig" "$work/print" "$work/forms" "$work/forms2" "$work/dump2" "$work/obj"
-cp "$list" "$work/list.tsv"
-srcroot=$(head -1 "$list" | awk -F'\t' '{p=$4; n=$1; print substr(p, 1, length(p)-length(n)-1)}')
+[ -n "$corpus" ] || corpus=$(sed -n 's/^#list //p' "$list" | head -1)
+rm -f "$work/list.key"; [ -z "$corpus" ] || echo "$corpus" > "$work/list.key"
+grep -v '^#' "$list" > "$work/list.tsv" || true
+srcroot=$(head -1 "$work/list.tsv" | awk -F'\t' '{p=$4; n=$1; print substr(p, 1, length(p)-length(n)-1)}')
 echo "$srcroot" > "$work/srcroot.txt"
 
 dump() { # dump OUTDIR ROOT NAME STD CARGS ORIGDIR: the file's dump and normalized dump
@@ -42,7 +69,13 @@ dump() { # dump OUTDIR ROOT NAME STD CARGS ORIGDIR: the file's dump and normaliz
   (cd "$r" && timeout 300 "$exe" -implicit=false -cache "$cache" -stats "$o/$n.stats" -o "$o/$n.edn" -- -x c++ -std=$std $cargs -iquote "$od" "$n") 2> "$o/$n.err"
   echo $? > "$o/$n.status"
   # shellcheck disable=SC2086
-  [ "$(cat "$o/$n.status")" = 0 ] && (cd "$r" && timeout 300 "$exe" -implicit=false -norm -cache "$cache" -o "$o/$n.norm" -- -x c++ -std=$std $cargs -iquote "$od" "$n") 2> "$TMPDIR/rt-norm.$$.err"
+  if [ "$(cat "$o/$n.status")" = 0 ]; then
+    # the normalized dump's status is kept (review 018's R1): the judge fails a file whose -norm dump failed
+    # shellcheck disable=SC2086
+    (cd "$r" && timeout 300 "$exe" -implicit=false -norm -cache "$cache" -o "$o/$n.norm" -- -x c++ -std=$std $cargs -iquote "$od" "$n") 2> "$o/$n.norm.err"
+    echo $? > "$o/$n.norm.status"
+  fi
+  return 0
 }
 objs() { # objs OUTDIR ROOT NAME STD GARGS CARGS ORIGDIR: the objects of g++ and clang
   local o=$1 r=$2 n=$3 std=$4 gargs=$5 cargs=$6 od=$7 c
@@ -73,4 +106,10 @@ if [ -n "$objects" ]; then
 fi
 t4=$(date +%s)
 echo "roundtrip: dumps $((t1-t0)) s, forms and prints $((t2-t1)) s, again $((t3-t2)) s, objects $((t4-t3)) s" | tee "$work/times.txt"
-arbace_tool -m arbace.repr.cpp.rtcheck judge "$work" "$root/test/repr/cpp/roundtrip-known.edn"
+oracle=${REPR_CPP_ROUNDTRIP_ORACLE:-$root/test/repr/cpp/roundtrip-oracle.edn}
+if [ -n "$record" ]; then
+  [ -n "$corpus" ] || { echo "roundtrip: --record-oracle needs the corpus (--corpus KEY or a #list header)" >&2; exit 2; }
+  arbace_tool -m arbace.repr.cpp.rtcheck record "$work" "$oracle" $replace || exit 1
+fi
+arbace_tool -m arbace.repr.cpp.rtcheck judge "$work" "${REPR_CPP_ROUNDTRIP_KNOWN:-$root/test/repr/cpp/roundtrip-known.edn}" "$([ -n "$objects" ] && echo objects || echo no-objects)" "$oracle" \
+  "${REPR_CPP_ROUNDTRIP_RESULTS:-$root/test/repr/cpp/roundtrip-results}" "$results_mode"

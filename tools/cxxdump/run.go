@@ -20,8 +20,9 @@ import (
 	"time"
 )
 
-// version is part of every cache key: a change of the filter's output changes it.
-const version = "cxxdump-7"
+// version is part of every cache key: a change of the filter's output, or of the statuses a run is cached with, changes it
+// (cxxdump-8: review 007's fixes cached a clang that was killed as "rejected" before; those entries are not served any more).
+const version = "cxxdump-8"
 
 // normVersion is the normal form's own part of the key of a -norm run: a change of norm.go (CP77 (b): no FullComment) changes it and
 // only the .norm entries, not the dumps', are rebuilt.
@@ -104,7 +105,8 @@ func (j job) do(out io.Writer, depfile string, errw io.Writer) (stats, error) {
 		full = append([]string{"-MD", "-MF", depfile}, full...)
 	}
 	cmd := exec.Command(j.clang, full...)
-	cmd.Stderr = errw
+	var tail tailBuffer // clang's last words, to tell a rejection from a crash
+	cmd.Stderr = io.MultiWriter(errw, &tail)
 	p, err := cmd.StdoutPipe()
 	if err != nil {
 		return st, err
@@ -126,10 +128,15 @@ func (j job) do(out io.Writer, depfile string, errw io.Writer) (stats, error) {
 		}
 	}
 	if werr != nil {
-		st.status = "rejected"
 		bw.Flush()
 		st.out = cw.n
-		return st, fmt.Errorf("clang rejected the unit: %v", werr)
+		if rejected(werr, tail.String()) {
+			st.status = "rejected"
+			return st, fmt.Errorf("clang rejected the unit: %v", werr)
+		}
+		// killed by a signal, crashed or another status: not the oracle's verdict on the source, never cached
+		st.status = "clang-failed"
+		return st, fmt.Errorf("clang failed (not a rejection): %v", werr)
 	}
 	if ferr != nil {
 		st.status = "filter-error"
@@ -269,7 +276,8 @@ func (j job) layoutPass(w io.Writer, errw io.Writer) (int, error) {
 	defer os.RemoveAll(tmp)
 	full := append([]string{"-S", "-emit-llvm", "-o", filepath.Join(tmp, "unit.ll"), "-Xclang", "-fdump-record-layouts"}, j.args...)
 	cmd := exec.Command(j.clang, full...)
-	cmd.Stderr = errw
+	var tail tailBuffer // clang's last words, to tell a rejection from a crash
+	cmd.Stderr = io.MultiWriter(errw, &tail)
 	outp, err := cmd.Output()
 	if err != nil {
 		return 0, fmt.Errorf("the layouts pass: %v", err)
@@ -546,7 +554,7 @@ func cached(dir string, j job, outName string) (stats, bool, error) {
 	st.key, st.cache = k, "miss"
 	fh.Close()
 	defer os.Remove(tmp + ".d")
-	if st.status == "" || st.status == "filter-error" {
+	if st.status == "" || st.status == "filter-error" || st.status == "clang-failed" {
 		os.Remove(tmp)
 		return st, false, runErr
 	}
@@ -587,3 +595,26 @@ func cached(dir string, j job, outName string) (stats, bool, error) {
 	os.WriteFile(base+".status", []byte(st.status+"\n"), 0o644)
 	return st, false, nil
 }
+
+// rejected: whether clang's failure is its rejection of the unit: it exited (not by a signal) with status 1, and its
+// driver did not report a crash of the front end.
+func rejected(werr error, stderr string) bool {
+	ee, ok := werr.(*exec.ExitError)
+	if !ok || ee.ExitCode() != 1 {
+		return false
+	}
+	return !strings.Contains(stderr, "PLEASE submit a bug report") && !strings.Contains(stderr, "frontend command failed")
+}
+
+// tailBuffer keeps the last 64 KiB written to it.
+type tailBuffer struct{ b []byte }
+
+func (t *tailBuffer) Write(p []byte) (int, error) {
+	t.b = append(t.b, p...)
+	if len(t.b) > 1<<16 {
+		t.b = t.b[len(t.b)-1<<16:]
+	}
+	return len(p), nil
+}
+
+func (t *tailBuffer) String() string { return string(t.b) }

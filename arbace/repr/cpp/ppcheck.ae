@@ -61,7 +61,13 @@
                        (throw (ex-info (str "no corpus " id) {})))
             dir (str (get roots (:root (:where corpus))) "/" (:path (:where corpus)))
             dir (str/replace dir #"/$" "")
-            files (shard-of (cpc/corpus-files corpus dir) sample)
+            all (cpc/corpus-files corpus dir)
+            ;; review 007's finding 10: a tree with another number of files than the manifest's (a partial extraction, another
+            ;; tree) is refused, sampled or not
+            _ (when (and (:count corpus) (not= (long (:count corpus)) (count all)))
+                (throw (ex-info (str id ": the tree " dir " has " (count all) " files, the manifest counts " (:count corpus)
+                                     " (a partial extraction?)") {})))
+            files (shard-of all sample)
             corpus (assoc corpus :absolute (or (:absolute corpus) (= (:root (:where corpus)) :gcc-15.2.0)))
             subst (fn [as] (mapv (fn [^String a] (reduce-kv (fn [a k v] (str/replace a (str "{" (name k) "}") (str v))) a roots)) as))
             corpus (update (update corpus :cxx-args subst) :cxx-args-for (fn [fs] (mapv #(update % :args subst) fs)))
@@ -75,9 +81,11 @@
         (spit (str d "/gxx.list")
               (str/join (for [e entries]
                           (str (:name e) "\t" (:std (:fc e)) "\t" (str/join " " (:all-args (:fc e))) "\t" (:read e) "\t" (str/join " " (:args (:fc e))) "\n"))))
-        (println (str id ": " (count files) " files"
-                      (when (and (:count corpus) (not= (:count corpus) (count files)) (not sample))
-                        (str " (the manifest counts " (:count corpus) ")"))))))))
+        ;; re-review 032's F4: the same list under a header naming its corpus for the round trip's oracle record (the key of
+        ;; test/repr/cpp/roundtrip-oracle.edn: the id, every Nth file or all)
+        (spit (str d "/roundtrip.list")
+              (str "#list " id (if (and sample (> (long sample) 1)) (str "-every-" sample) "-all") "\n" (slurp (str d "/gxx.list"))))
+        (println (str id ": " (count files) " files" (when (> (count all) (count files)) (str " of " (count all)))))))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; The judges' texts
@@ -276,6 +284,13 @@
         bad #{"differ" "unrecorded" "crash"}
         lex-fail (filter #(bad (nth % 1)) rs)
         pp-fail (filter #(bad (nth % 2)) rs)
+        ;; review 007's finding 10: a recorded digest whose file is not in the tree (a shrunken corpus) fails
+        vanished (sort (for [db [gxx-db clang-db] [k _] db
+                             :when (str/starts-with? k (str id "/"))
+                             :let [nm (subs k (inc (count id)))]
+                             :when (not (.exists (java.io.File. (str base "/" nm))))]
+                         nm))
+        vanished (vec (distinct vanished))
         stale (concat (for [[nm _] known-pp :when (not (some (fn [r] (and (= (first r) nm) (= (nth r 2) "known"))) rs))] [:pp nm])
                       (for [[nm _] known-lex :when (not (some (fn [r] (and (= (first r) nm) (= (nth r 1) "known"))) rs))] [:lex nm]))
         bytes (reduce + (map #(.length (java.io.File. (str base "/" (:name %)))) entries))]
@@ -284,14 +299,15 @@
     (spit (str d "/missing.tsv") (str/join (map #(str (first %) "\t" (second %) "\n") (sort missing))))
     (let [report {:corpus id :files (count rs) :bytes bytes :seconds (Math/round (double secs)) :threads threads
                   :lex (by 1) :pp (by 2) :lex-failing (count lex-fail) :pp-failing (count pp-fail)
-                  :stale-known (vec stale) :missing-has (count missing)}]
+                  :stale-known (vec stale) :missing-has (count missing) :vanished (count vanished)}]
       (spit (str d "/report.edn") (pr-str report))
       (println (str id ": " (count rs) " files, lex " (pr-str (by 1)) ", pp " (pr-str (by 2)) ", " (Math/round (double secs)) " s"
                     (when (seq lex-fail) (str "; " (count lex-fail) " lex files failing: " (str/join " " (map first (take 5 lex-fail)))))
                     (when (seq pp-fail) (str "; " (count pp-fail) " pp files failing: " (str/join " " (map first (take 5 pp-fail)))))
                     (when (seq stale) (str "; " (count stale) " known entries stale"))
+                    (when (seq vanished) (str "; " (count vanished) " recorded files not in the tree: " (str/join " " (take 5 vanished))))
                     (when (seq missing) (str "; " (count missing) " __has answers not recorded"))))
-      (if (or (seq lex-fail) (seq pp-fail) (seq stale)) 1 0))))
+      (if (or (seq lex-fail) (seq pp-fail) (seq stale) (seq vanished)) 1 0))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Recording

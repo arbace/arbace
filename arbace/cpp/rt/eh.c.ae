@@ -1,129 +1,212 @@
 (in-ns 'c.cpp.rt.eh) (c/file "eh.c" :std :gnu23)
-;; The exceptions of the lowered C++ (doc/cpp/CPP-SURVEY.md §5.4, "As built: CX6"), as C forms: a pending flag instead
-;; of unwinding. The lowering renames the Itanium ABI's __cxa_* entry points to these cx$ ones; a thrown object has a
-;; header in front of it; a landing pad asks cx$catches for each catch clause, whose matching is the type_info's own
-;; __do_catch (its virtual slot 4, as libsupc++ defines it; __is_pointer_p is slot 2). Single-threaded (CP1).
+;; The pending-flag layer of the lowered C++'s exceptions (doc/cpp/CPP-SURVEY.md §5.4, "As built: CX6", "As built: CX7";
+;; doc/cpp/LLVM.md §8), as C forms written by hand: CP86 (c)'s split. Everything else of the Itanium runtime is libsupc++'s
+;; own code, compiled to IR by the oracle and lowered with libstdc++ (bin/cppi runtime-build): __cxa_throw, __cxa_begin_catch,
+;; __cxa_end_catch, __cxa_rethrow, std::exception_ptr, the type_info classes and their __do_catch, std::terminate. What this
+;; layer replaces is the unwinder (libgcc's _Unwind_*) and the personality routine (eh_personality.cc, which reads the DWARF
+;; tables a lowered program does not have): _Unwind_RaiseException and its kin set the pending flag and record the in-flight
+;; _Unwind_Exception instead of unwinding, and a landing pad asks cx$catches for each catch clause, which does what
+;; __gxx_personality_v0's search phase does for one clause (get_adjusted_ptr: the thrown pointer dereferenced when the thrown
+;; type is a pointer, then the clause's type_info's own __do_catch, virtual slot 4; __is_pointer_p is slot 2) and records the
+;; adjusted pointer in the exception's header, where __cxa_begin_catch reads it. Per thread since CP103 (b): the pending flag and the in-flight exception are _Thread_local, as libsupc++'s exception globals are;
+;; since CP120 (b) a thread's start is a trampoline of this layer's (cx$pthread_create).
+;;
+;; The header (libsupc++/unwind-cxx.h, x86-64, not ARM EABI): __cxa_exception and __cxa_dependent_exception are 112 bytes,
+;; their _Unwind_Exception (32 bytes, 16-aligned) at offset 80, adjustedPtr at 72 (so 8 bytes before the _Unwind_Exception),
+;; exceptionType (a primary's) or primaryException (a dependent's) at 0 (80 bytes before it); a primary's thrown object
+;; follows its _Unwind_Exception. The exception classes are "GNUCC++\0" (primary) and "GNUCC++\1" (dependent).
 
-(c/declare calloc ^{:tag (* void)} [unsigned-long unsigned-long])
-(c/declare free ^void [(* void)])
 (c/declare abort ^void [void])
-(c/declare write ^long [int (* (const void)) unsigned-long])
+(c/declare __cxa_begin_catch ^{:tag (* void)} [(* void)])
 (c/declare _ZSt9terminatev ^void [void])
-(c/var ^:extern ^{:tag (array char)} _ZTVSt8bad_cast)
-(c/var ^:extern ^char _ZTISt8bad_cast)
-(c/declare _ZNSt8bad_castD1Ev ^void [(* void)])
-(c/var ^:extern ^{:tag (array char)} _ZTVSt10bad_typeid)
-(c/var ^:extern ^char _ZTISt10bad_typeid)
-(c/declare _ZNSt10bad_typeidD1Ev ^void [(* void)])
-(c/var ^:extern ^{:tag (array char)} _ZTVSt20bad_array_new_length)
-(c/var ^:extern ^char _ZTISt20bad_array_new_length)
-(c/declare _ZNSt20bad_array_new_lengthD1Ev ^void [(* void)])
+(c/declare _ZSt10unexpectedv ^void [void])
 
-(c/struct cx$hdr [^{:tag (* void)} ti ^{:tag (* (fn [(* void)] void))} dtor ^{:tag (* void)} adjusted ^int handlers
-                  ^{:tag (* (struct cx$hdr))} next ^long pad])
-(c/static-assert (== (sizeof-type (struct cx$hdr)) 48))
+(c/struct cx$ue [^unsigned-long cls ^{:tag (* (fn [int (* void)] void))} cleanup ^unsigned-long p1 ^unsigned-long p2])
+(c/static-assert (== (sizeof-type (struct cx$ue)) 32))
 
-(c/var ^int cx$pending 0)
-(c/var ^:static ^{:tag (* (struct cx$hdr))} cx$cur)
-(c/var ^:static ^{:tag (* (struct cx$hdr))} cx$caught)
-(c/var ^:static ^int cx$uncaught_n)
+(c/var ^:thread_local ^int cx$pending 0)
+(c/var ^:static ^:thread_local ^{:tag (* (struct cx$ue))} cx$cur)
 
-(c/defn ^:static cx$hdr_of ^{:tag (* (struct cx$hdr))} [^{:tag (* void)} o]
-  (return (- (conv (* (struct cx$hdr)) o) 1)))
+(c/defn ^:static cx$raise ^int [^{:tag (* (struct cx$ue))} ue]
+  (set! cx$cur ue)
+  (set! cx$pending 1)
+  (return 5))
 
-(c/defn cx$allocate_exception ^{:tag (* void)} [^unsigned-long n]
-  (let [^{:tag (* (struct cx$hdr))} h (calloc 1 (+ (sizeof-type (struct cx$hdr)) n))]
-    (when (== h 0) (abort))
-    (return (+ h 1))))
+;; the unwinder's entry points libsupc++ calls (unwind.h's): each one only raises the flag (_URC_END_OF_STACK is never
+;; reached: the lowered frames return while the flag is set, to a landing pad or out of main)
+(c/defn _Unwind_RaiseException ^int [^{:tag (* (struct cx$ue))} ue] (return (cx$raise ue)))
+(c/defn _Unwind_Resume_or_Rethrow ^int [^{:tag (* (struct cx$ue))} ue] (return (cx$raise ue)))
+(c/defn _Unwind_Resume ^void [^{:tag (* (struct cx$ue))} ue] (cx$raise ue))
+(c/defn _Unwind_DeleteException ^void [^{:tag (* (struct cx$ue))} ue]
+  (when (-> ue cleanup) ((-> ue cleanup) 1 ue)))
 
-(c/defn cx$free_exception ^void [^{:tag (* void)} o]
-  (free (cx$hdr_of o)))
+;; the lowering's: a resume instruction, a landing pad's in-flight exception and its catch clauses
+(c/defn cx$resume ^void [^{:tag (* void)} o] (cx$raise o))
 
-(c/defn cx$throw ^void [^{:tag (* void)} o ^{:tag (* void)} ti ^{:tag (* void)} dtor]
-  (let [^{:tag (* (struct cx$hdr))} h (cx$hdr_of o)]
-    (set! (-> h ti) ti)
-    (set! (-> h dtor) (conv (* (fn [(* void)] void)) dtor))
-    (set! (-> h adjusted) o)
-    (set! cx$cur h)
-    (set! cx$pending 1)
-    (inc! cx$uncaught_n)))
+(c/defn cx$exception ^{:tag (* void)} [void] (return cx$cur))
 
-(c/defn cx$exception ^{:tag (* void)} [void]
-  (return (+ cx$cur 1)))
+(c/defn ^:static cx$gxx ^int [^unsigned-long c]
+  (return (== (>> c 8) (lit unsigned-long 0x474E5543432B2B))))
+
+;; the matching runs lowered code (the type_info classes' __do_catch and __do_upcast), whose calls return at once while the
+;; flag is set: it is lowered while they run and raised again after
+(c/defn ^:static cx$match ^int [^{:tag (* void)} ti]
+  (let [^{:tag (* char)} ue (conv (* char) cx$cur)
+        ^unsigned-long c (-> cx$cur cls)]
+    (when (not (cx$gxx c))
+      ;; a foreign exception: only catch (...) takes it
+      (return (== ti 0)))
+    (let [^{:tag (* void)} p (? (== (bit-and c 255) 1) @(conv (* (* void)) (- ue 80)) (conv (* void) (+ ue 32)))
+          ^{:tag (* void)} tt @(conv (* (* void)) (- (conv (* char) p) 112))
+          ^{:tag (* (* void))} adj (conv (* (* void)) (- ue 8))]
+      (when (== ti 0)
+        (set! @adj p)
+        (return 1))
+      (let [^{:tag (* (* void))} tvt @(conv (* (* (* void))) tt)
+            ^{:tag (* (* void))} cvt @(conv (* (* (* void))) ti)]
+        (when ((conv (* (fn [(* void)] _Bool)) (aget tvt 2)) tt)
+          (set! p @(conv (* (* void)) p)))
+        (when ((conv (* (fn [(* void) (* void) (* (* void)) unsigned] _Bool)) (aget cvt 4)) ti tt (addr p) 1)
+          (set! @adj p)
+          (return 1))
+        (return 0)))))
 
 (c/defn cx$catches ^int [^{:tag (* void)} ti]
-  (let [^{:tag (* (struct cx$hdr))} h cx$cur
-        ^{:tag (* void)} p (+ h 1)]
-    (when (== ti 0)
-      (set! (-> h adjusted) p)
-      (return 1))
-    (let [^{:tag (* (* void))} tvt @(conv (* (* (* void))) (-> h ti))
-          ^{:tag (* (* void))} cvt @(conv (* (* (* void))) ti)]
-      (when ((conv (* (fn [(* void)] _Bool)) (aget tvt 2)) (-> h ti))
-        (set! p @(conv (* (* void)) p)))
-      (when ((conv (* (fn [(* void) (* void) (* (* void)) unsigned] _Bool)) (aget cvt 4)) ti (-> h ti) (addr p) 1)
-        (set! (-> h adjusted) p)
-        (return 1))
-      (return 0))))
+  (set! cx$pending 0)
+  (let [^int r (cx$match ti)]
+    (set! cx$pending 1)
+    (return r)))
 
-(c/defn cx$begin_catch ^{:tag (* void)} [^{:tag (* void)} o]
-  (let [^{:tag (* (struct cx$hdr))} h (cx$hdr_of o)]
-    (set! (-> h handlers) (? (< (-> h handlers) 0) (+ (- (-> h handlers)) 1) (+ (-> h handlers) 1)))
-    (when (!= h cx$caught)
-      (set! (-> h next) cx$caught)
-      (set! cx$caught h))
-    (dec! cx$uncaught_n)
-    (return (-> h adjusted))))
-
-(c/defn cx$get_exception_ptr ^{:tag (* void)} [^{:tag (* void)} o]
-  (return (-> (cx$hdr_of o) adjusted)))
-
-(c/defn cx$end_catch ^void [void]
-  (let [^{:tag (* (struct cx$hdr))} h cx$caught]
-    (when (== h 0) (return))
-    (if (< (-> h handlers) 0)
-      (when (== (pre-inc! (-> h handlers)) 0)
-        (set! cx$caught (-> h next)))
-      (when (== (pre-dec! (-> h handlers)) 0)
-        (set! cx$caught (-> h next))
-        (when (-> h dtor) ((-> h dtor) (+ h 1)))
-        (free h)))))
-
-(c/defn cx$rethrow ^void [void]
-  (let [^{:tag (* (struct cx$hdr))} h cx$caught]
-    (when (== h 0) (_ZSt9terminatev))
-    (set! (-> h handlers) (- (-> h handlers)))
-    (inc! cx$uncaught_n)
-    (set! cx$cur h)
-    (set! cx$pending 1)))
-
-(c/defn cx$resume ^void [^{:tag (* void)} o]
-  (set! cx$cur (cx$hdr_of o))
-  (set! cx$pending 1))
-
-(c/defn cx$uncaught_exceptions ^int [void]
-  (return cx$uncaught_n))
-
-(c/defn cx$uncaught_exception ^_Bool [void]
-  (return (> cx$uncaught_n 0)))
-
-(c/defn cx$current_exception_type ^{:tag (* void)} [void]
-  (return (? cx$caught (-> cx$caught ti) (conv (* void) 0))))
-
+;; an exception that leaves main: what __cxa_throw does when _Unwind_RaiseException finds no handler (eh_throw.cc)
 (c/defn cx$uncaught ^void [void]
-  (write 2 "terminate called after throwing an exception\n" 45)
+  (set! cx$pending 0)
+  (__cxa_begin_catch cx$cur)
+  (_ZSt9terminatev)
   (abort))
 
-(c/defn ^:static cx$throw_std ^void [^{:tag (* char)} vt ^{:tag (* void)} ti ^{:tag (* void)} dtor]
-  (let [^{:tag (* void)} o (cx$allocate_exception 8)]
-    (set! @(conv (* (* void)) o) (+ vt 16))
-    (cx$throw o ti dtor)))
+;; the thread start (CP120 (b), review 007's finding 9): musl's pthread_create is native, so a routine that returns with the
+;; pending flag set (an exception that left a std::thread's callable, which g++'s build terminates at) returned into it
+;; unnoticed and the thread ended silently. The lowering renames the lowered code's pthread_create to cx$pthread_create,
+;; whose trampoline calls the routine and then cx$uncaught when the flag is set, as the C main and the constructors do
+(c/declare malloc ^{:tag (* void)} [unsigned-long])
+(c/declare free ^void [(* void)])
+(c/declare pthread_create ^int [(* void) (* void) (* (fn [(* void)] (* void))) (* void)])
 
-(c/defn cx$bad_cast ^void [void]
-  (cx$throw_std _ZTVSt8bad_cast (addr _ZTISt8bad_cast) (conv (* void) _ZNSt8bad_castD1Ev)))
+(c/struct cx$start [^{:tag (* (fn [(* void)] (* void)))} f ^{:tag (* void)} a])
 
-(c/defn cx$bad_typeid ^void [void]
-  (cx$throw_std _ZTVSt10bad_typeid (addr _ZTISt10bad_typeid) (conv (* void) _ZNSt10bad_typeidD1Ev)))
+(c/defn ^:static cx$thread_start ^{:tag (* void)} [^{:tag (* void)} p]
+  (let [^{:tag (* (struct cx$start))} s (conv (* (struct cx$start)) p)
+        ^{:tag (* (fn [(* void)] (* void)))} f (-> s f)
+        ^{:tag (* void)} a (-> s a)]
+    (free p)
+    (let [^{:tag (* void)} r (f a)]
+      (when cx$pending (cx$uncaught))
+      (return r))))
 
-(c/defn cx$throw_bad_array_new_length ^void [void]
-  (cx$throw_std _ZTVSt20bad_array_new_length (addr _ZTISt20bad_array_new_length) (conv (* void) _ZNSt20bad_array_new_lengthD1Ev)))
+(c/defn cx$pthread_create ^int [^{:tag (* void)} th ^{:tag (* void)} attr ^{:tag (* (fn [(* void)] (* void)))} f ^{:tag (* void)} a]
+  (let [^{:tag (* (struct cx$start))} s (conv (* (struct cx$start)) (malloc (sizeof-type (struct cx$start))))]
+    (when (== s 0) (return 11))
+    (set! (-> s f) f)
+    (set! (-> s a) a)
+    (let [^int r (pthread_create th attr cx$thread_start s)]
+      (when r (free s))
+      (return r))))
+
+;; the exit-time handlers (CP160 (b)): atexit, at_quick_exit and __cxa_atexit (the destructors of static objects) are native too, and a
+;; function registered with them that returns with the flag set returned into musl's exit unnoticed, where g++'s build terminates
+;; (an exception does not unwind through libc's frames). The lowering renames the lowered code's three to cx$atexit,
+;; cx$at_quick_exit and cx$cxa_atexit; the handlers run through a trampoline that calls cx$uncaught when the flag is set. atexit
+;; goes through musl's __cxa_atexit (the same order); at_quick_exit keeps its own list, run by one native at_quick_exit, last first
+(c/declare __cxa_atexit ^int [(* (fn [(* void)] void)) (* void) (* void)])
+(c/declare at_quick_exit ^int [(* (fn [void] void))])
+
+(c/struct cx$exit [^{:tag (* (fn [(* void)] void))} f ^{:tag (* (fn [void] void))} f0 ^{:tag (* void)} a ^{:tag (* (struct cx$exit))} next])
+
+(c/defn ^:static cx$exit_run ^void [^{:tag (* void)} p]
+  (let [^{:tag (* (struct cx$exit))} s (conv (* (struct cx$exit)) p)
+        ^{:tag (* (fn [(* void)] void))} f (-> s f)
+        ^{:tag (* (fn [void] void))} f0 (-> s f0)
+        ^{:tag (* void)} a (-> s a)]
+    (free p)
+    (if f (f a) (f0))
+    (when cx$pending (cx$uncaught))))
+
+(c/defn ^:static cx$exit_new ^{:tag (* (struct cx$exit))} [^{:tag (* (fn [(* void)] void))} f ^{:tag (* (fn [void] void))} f0 ^{:tag (* void)} a]
+  (let [^{:tag (* (struct cx$exit))} s (conv (* (struct cx$exit)) (malloc (sizeof-type (struct cx$exit))))]
+    (when (== s 0) (return s))
+    (set! (-> s f) f)
+    (set! (-> s f0) f0)
+    (set! (-> s a) a)
+    (set! (-> s next) 0)
+    (return s)))
+
+(c/defn cx$cxa_atexit ^int [^{:tag (* (fn [(* void)] void))} f ^{:tag (* void)} a ^{:tag (* void)} dso]
+  (let [^{:tag (* (struct cx$exit))} s (cx$exit_new f 0 a)]
+    (when (== s 0) (return -1))
+    (let [^int r (__cxa_atexit cx$exit_run s dso)]
+      (when r (free s))
+      (return r))))
+
+(c/defn cx$atexit ^int [^{:tag (* (fn [void] void))} f]
+  (let [^{:tag (* (struct cx$exit))} s (cx$exit_new 0 f 0)]
+    (when (== s 0) (return -1))
+    (let [^int r (__cxa_atexit cx$exit_run s 0)]
+      (when r (free s))
+      (return r))))
+
+;; at_quick_exit keeps musl's behaviour (report 066's R1-R3): at most 32 handlers (a registration past them returns -1), run one at a time,
+;; last registered first, the list re-read after each call so a handler registered by a handler runs next; the list, its count and the
+;; one native registration are under a spin lock, so a registration cannot race a quick_exit
+(c/declare sched_yield ^int [void])
+(c/var ^:static ^{:tag (* (struct cx$exit))} cx$quick)
+(c/var ^:static ^int cx$qn 0)
+(c/var ^:static ^int cx$qreg 0)
+(c/var ^:static ^int cx$qlock 0)
+
+(c/defn ^:static cx$qtake ^void [void]
+  (while (!= (__atomic_exchange_n (addr cx$qlock) 1 2) 0) (sched_yield)))
+
+(c/defn ^:static cx$qgive ^void [void]
+  (__atomic_store_n (addr cx$qlock) 0 3))
+
+(c/defn ^:static cx$quick_run ^void [void]
+  (cx$qtake)
+  (while (!= cx$quick 0)
+    (let [^{:tag (* (struct cx$exit))} s cx$quick
+          ^{:tag (* (fn [void] void))} f0 (-> s f0)]
+      (set! cx$quick (-> s next))
+      (set! cx$qn (- cx$qn 1))
+      (free s)
+      (cx$qgive)
+      (f0)
+      (when cx$pending (cx$uncaught))
+      (cx$qtake)))
+  (cx$qgive))
+
+(c/defn cx$at_quick_exit ^int [^{:tag (* (fn [void] void))} f]
+  (let [^{:tag (* (struct cx$exit))} s (cx$exit_new 0 f 0)]
+    (when (== s 0) (return -1))
+    (cx$qtake)
+    (when (>= cx$qn 32)
+      (cx$qgive)
+      (free s)
+      (return -1))
+    (when (== cx$qreg 0)
+      (let [^int r (at_quick_exit cx$quick_run)]
+        (when r
+          (cx$qgive)
+          (free s)
+          (return r))
+        (set! cx$qreg 1)))
+    (set! (-> s next) cx$quick)
+    (set! cx$quick s)
+    (set! cx$qn (+ cx$qn 1))
+    (cx$qgive)
+    (return 0)))
+
+;; a filter clause that rejects the exception (C++98's dynamic exception specifications): eh_personality.cc's
+;; __cxa_call_unexpected, without its bad_exception translation
+(c/defn __cxa_call_unexpected ^void [^{:tag (* void)} ue]
+  (__cxa_begin_catch ue)
+  (_ZSt10unexpectedv)
+  (_ZSt9terminatev))

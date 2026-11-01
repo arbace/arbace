@@ -1,0 +1,176 @@
+(ns arbace.cpp.check
+  "The judges of bin/cppi (doc/cpp/LLVM.md §9, §10; doc/cpp/CPP-SURVEY.md, \"As built: CX6 (write-ahead)\", \"As built: CX7
+  (write-ahead)\", \"As built: review 007's fixes\"): `judge`, lower-check's verdict on each file of a list from the levels its
+  steps left in WORK, against the known file and the recorded results; `runtime-judge`, runtime-build's on each unit. Apart
+  from arbace.cpp.lower since review 007, so that a change of a judge does not change the lowered runtime's key."
+  (:require [arbace.string :as str]))
+
+(set! *warn-on-reflection* true)
+
+(defn- slurp? [^String p] (let [f (java.io.File. p)] (when (.exists f) (str/trim (slurp f)))))
+(defn- same-bytes? [^String a ^String b]
+  (let [fa (java.io.File. a) fb (java.io.File. b)]
+    (and (.exists fa) (.exists fb)
+         (java.util.Arrays/equals (java.nio.file.Files/readAllBytes (.toPath fa)) (java.nio.file.Files/readAllBytes (.toPath fb))))))
+
+(defn oracle-rejection?
+  "Whether a compile's status and log are clang rejecting the source (review 007's finding 2): status 1 and one of clang's
+  own diagnostics (`FILE:LINE:COL: error:` or `fatal error:`) in the log. Any other failure (a timeout of ours, 124; a tool
+  missing, 126 or 127; a signal, 128 and up; a missing file or another driver error, `clang++: error: ...`) is not the
+  oracle's verdict on the source."
+  [status ^String log]
+  (boolean (and (= status "1") log (re-find #"(?m)^[^\s:][^:\n]*:[0-9]+:[0-9]+: (fatal )?error: " log))))
+
+(defn file-result
+  "One file's levels and outcome: {:name :outcome :ir :rt :obj :lower :gcc :run :gxx}; outcome :pass, :oracle-rejected
+  (clang rejects the file with its own diagnostics: not a lowering's case), :ir (the IR was not made for another reason:
+  a failure of the check's), or the first level that did not hold."
+  [^String work ^String n]
+  (let [d (str work "/files/" n "/")
+        st #(slurp? (str d %))
+        ir (st "ir.status")
+        rt (some-> (st "rt.status") (str/split #"\t") first)
+        obj (or (st "object") "none")
+        refused (st "lower.refused")
+        gcc (st "gcc.status")
+        orig (st "orig.status") low (st "low.status")
+        ;; the run: the status, stdout and stderr the original's (review 007's finding 6: uncaught.cpp's terminate message, the
+        ;; testsuite's assertion messages are on stderr)
+        ;; a run is comparable only when it ended by itself (review 007's finding 12): not our timeout (124), not a signal
+        ;; (128 and up) but the program's own abort (134), its output not cut at bin/cppi's cap (1 MB, the program then dies
+        ;; of SIGPIPE)
+        ;; stderr is capped likewise (review 018's R7: bin/cppi's runs are limited to a 1 MiB file, SIGXFSZ past it): a stderr at the
+        ;; cap was cut, and two cut streams agree on their first MiB only
+        comparable? (fn [status out err]
+                      (and (re-matches #"[0-9]+" status)
+                           (let [n (Long/parseLong status)] (and (not= n 124) (or (< n 128) (= n 134))))
+                           (< (.length (java.io.File. ^String (str d out))) 1048576)
+                           (< (.length (java.io.File. ^String (str d err))) 1048576)))
+        run (cond (nil? orig) "no-original" (nil? low) "none"
+                  (not (and (comparable? orig "orig.out" "orig.err") (comparable? low "low.out" "low.err"))) "not-comparable"
+                  (not (and (= orig low) (same-bytes? (str d "orig.out") (str d "low.out")))) "differs"
+                  (not (same-bytes? (str d "orig.err") (str d "low.err"))) "stderr-differs"
+                  :else "same")
+        gxx (cond (nil? (st "gxx.status")) "none"
+                  (and (= orig (st "gxx.status")) (same-bytes? (str d "orig.out") (str d "gxx.out"))) "agrees" :else "differs")
+        no-main (= "1" (st "no-main"))
+        run (if (and no-main (= gcc "0")) "no-main" run)
+        outcome (cond
+                  (and (not= ir "0") (oracle-rejection? ir (st "ir.log"))) :oracle-rejected
+                  (not= ir "0") :ir
+                  (and (not no-main) (not= (st "orig-link.status") "0")) :original-link
+                  (not= rt "ok") :forms
+                  (not= obj "same") :object
+                  refused :lowering
+                  (not= gcc "0") :gcc
+                  (not (#{"same" "no-main"} run)) :run
+                  :else :pass)]
+    {:name n :outcome outcome :ir ir :rt rt :obj obj :lower (if refused (first (str/split refused #"\t")) "ok") :gcc (or gcc "-")
+     :run run :gxx gxx :orig-status orig :low-status low}))
+
+(defn judge
+  "WORK/results.tsv and WORK/summary.edn from the files' levels against the known file (NAME -> class): a non-pass is known
+  when its name is listed, else failing; and against the recorded results (test/cpp/lower-results.edn's :files, NAME ->
+  [status outcome]; review 007's finding 2): a file recorded :pass that does not pass is a regression, failing whatever
+  else holds (an oracle rejection or a known class included). A list with no file is refused.
+
+  A run of a recorded list is held to the whole list (review 018's R4): the record's summaries (:samples, :libstdcxx-every-15th:
+  top-level keys whose map has :files) each own the names of :files that start with one of its `:prefixes` (`{:samples
+  [\"samples/\" \"runtime/\"]}`; the one summary without prefixes owns the rest). RECORDED is a summary's key (\"samples\"): the run
+  is that list; \"none\": no list; else (nil, \"auto\") the list the header line `#list KEY` of the run's list names (WORK/list.key, which
+  bin/cppi lower-check writes from it; no header: no recorded list; a header key without a summary: refused, exit 2 (re-review 032's F6); review 018's CP132 (b), the heuristic
+  of more than half the names gone). A run of a recorded list
+  fails when a name recorded for it is missing from the run, or when the run's count is not the summary's :files."
+  ([^String work ^String known-path] (judge work known-path nil nil))
+  ([^String work ^String known-path ^String results-path] (judge work known-path results-path nil))
+  ([^String work ^String known-path ^String results-path ^String recorded-mode]
+  (let [known (if (.exists (java.io.File. known-path)) (read-string (slurp known-path)) {})
+        rec-all (if (and results-path (.exists (java.io.File. results-path))) (read-string (slurp results-path)) {})
+        recorded (:files rec-all {})
+        prefixes (:prefixes rec-all {})
+        summaries (into {} (filter (fn [[k v]] (and (map? v) (number? (:files v)) (not= k :cx6))) rec-all))
+        claimed? (fn [nm] (some (fn [[_ ps]] (some #(str/starts-with? nm %) ps)) prefixes))
+        group-of (fn [k] (set (for [nm (keys recorded)
+                                    :when (if-let [ps (get prefixes k)] (some #(str/starts-with? nm %) ps) (not (claimed? nm)))]
+                                nm)))
+        names (for [l (str/split-lines (slurp (str work "/list.tsv"))) :when (and (seq l) (not (str/starts-with? l "#")))] (first (str/split l #"\t")))
+        _ (when (empty? names) (println "lower-check: the list has no file") (System/exit 2))
+        rs (mapv #(file-result work %) names)
+        run-names (set names)
+        ;; CP132 (b): the list's header line, written to WORK/list.key; a key that is no summary is refused (exit 2, re-review 032's F6), as an unknown RECORDED is
+        header-key (let [f (java.io.File. (str work "/list.key"))]
+                     (when (.exists f) (let [k (str/trim (slurp f))] (when (seq k) (keyword k)))))
+        listed (cond (= recorded-mode "none") nil
+                     (and recorded-mode (not= recorded-mode "auto")) (keyword recorded-mode)
+                     :else header-key)
+        _ (when (and listed (not (contains? summaries listed)))
+            (println (str "lower-check: no recorded list " listed)) (System/exit 2))
+        rec-missing (when listed (vec (sort (remove run-names (group-of listed)))))
+        rec-count-bad (when listed (not= (count run-names) (:files (get summaries listed))))
+        recorded-bad (boolean (when listed (or (seq rec-missing) rec-count-bad)))
+        regression? (fn [r] (and (= :pass (first (get recorded (:name r)))) (not= :pass (:outcome r))))
+        ;; a known file is known only at the level its class names (review 007's finding 8): a refusal's class at the lowering
+        ;; with that refusal, the run classes at the run
+        fits? (fn [r] (let [c (get known (:name r))]
+                        (case c
+                          nil false
+                          ;; the run classes: the lowered run differs from the original's (review 018's R6: not a timeout or a
+                          ;; run that cannot be compared)
+                          (:uncaught-cleanups :native-callback-throw) (and (= :run (:outcome r)) (contains? #{"differs" "stderr-differs"} (:run r)))
+                          (and (= :lowering (:outcome r)) (= (name c) (:lower r))))))
+        status (fn [r] (cond (= :pass (:outcome r)) :pass (regression? r) :failing (= :oracle-rejected (:outcome r)) :oracle-rejected
+                             (fits? r) :known :else :failing))
+        lines (for [r rs] (str/join "\t" [(:name r) (name (status r)) (name (:outcome r)) (:rt r) (:obj r) (:lower r) (:gcc r) (:run r) (:gxx r)
+                                         (or (:orig-status r) "-") (or (:low-status r) "-") (if-let [c (get known (:name r))] (name c) "-")]))
+        cnt (fn [k] (count (filter #(= k (status %)) rs)))
+        by (fn [f] (into (sorted-map) (frequencies (map f rs))))
+        summary {:files (count rs) :pass (cnt :pass) :known (cnt :known) :failing (cnt :failing) :oracle-rejected (cnt :oracle-rejected)
+                 :outcomes (by (comp name :outcome)) :forms (by #(or (:rt %) "-")) :objects (by :obj) :lowering (by :lower)
+                 :gxx (by :gxx) :regressions (count (filter regression? rs))
+                 :recorded-list (when listed (name listed)) :recorded-missing (count rec-missing)
+                 :known-classes (into (sorted-map) (frequencies (keep #(when (= :known (status %)) (name (get known (:name %)))) rs)))}]
+    (spit (str work "/results.tsv") (str "name\tstatus\toutcome\tforms\tobject\tlowering\tgcc\trun\tgxx\torig\tlow\tclass\n" (str/join "\n" lines) "\n"))
+    (spit (str work "/summary.edn") (str (pr-str summary) "\n"))
+    (println (str "lower-check: " (count rs) " files, " (:pass summary) " pass, " (:known summary) " known, " (:failing summary) " failing, "
+                  (:oracle-rejected summary) " rejected by the oracle"))
+    (doseq [r rs :when (= :failing (status r))]
+      (println "  failing:" (:name r) (name (:outcome r)) (:lower r) (if (regression? r) "(recorded :pass)" "")
+               (if-let [c (get known (:name r))] (str "(known as " (name c) ")") "")))
+    (when recorded-bad
+      (println (str "lower-check: the run of the recorded list " (name listed) " has " (count run-names) " files, the record " (:files (get summaries listed))
+                    "; " (count rec-missing) " recorded names missing" (when (seq rec-missing) (str ": " (str/join " " (take 8 rec-missing)))))))
+    (when (or recorded-bad (pos? (:failing summary))) (System/exit 1)))))
+
+(defn runtime-judge
+  "OUT/results.tsv and OUT/summary.edn of bin/cppi runtime-build: each unit's levels (the oracle's IR, the forms' round trip, the
+  objects, the lowering, gcc); every unit of test/cpp/runtime/units.edn is to pass them all."
+  [^String out]
+  (let [units (for [l (str/split-lines (slurp (str out "/units.tsv"))) :when (seq l)] (first (str/split l #"\t")))
+        rs (vec (for [u units]
+                  (let [d (str out "/units/" u "/") st #(slurp? (str d %))
+                        ir (st "ir.status") rt (some-> (st "rt.status") (str/split #"\t") first)
+                        obj (or (st "object") "none") refused (st "lower.refused") gcc (st "gcc.status")
+                        outcome (cond (not= ir "0") :ir (not= rt "ok") :forms (not= obj "same") :object refused :lowering
+                                      (not= gcc "0") :gcc :else :pass)]
+                    {:unit u :outcome outcome :ir (or ir "-") :forms (or rt "-") :object obj
+                     :lower (if refused (first (str/split refused #"\t")) "ok") :gcc (or gcc "-")})))
+        by (fn [f] (into (sorted-map) (frequencies (map f rs))))
+        summary {:units (count rs) :pass (count (filter #(= :pass (:outcome %)) rs)) :outcomes (by (comp name :outcome))
+                 :objects (by :object) :lowering (by :lower)
+                 :libsupc++ (count (filter #(str/starts-with? (:unit %) "libsupc++/") rs))
+                 :libstdc++exp (count (filter #(str/starts-with? (:unit %) "exp/") rs))}]
+    (spit (str out "/results.tsv") (str "unit\toutcome\tir\tforms\tobject\tlowering\tgcc\n"
+                                        (str/join "\n" (for [r rs] (str/join "\t" [(:unit r) (name (:outcome r)) (:ir r) (:forms r) (:object r) (:lower r) (:gcc r)])))
+                                        "\n"))
+    (spit (str out "/summary.edn") (str (pr-str summary) "\n"))
+    (println (str "runtime-build: " (count rs) " units, " (:pass summary) " pass"))
+    (doseq [r rs :when (not= :pass (:outcome r))] (println "  failing:" (:unit r) (name (:outcome r)) (:lower r)))
+    (when (not= (:pass summary) (count rs)) (System/exit 1))))
+
+(defn -main
+  "bin/cppi's judges: judge WORK KNOWN [RESULTS], runtime-judge OUT."
+  [verb & args]
+  (case verb
+    "judge" (let [[work known results recorded] args] (judge work known results recorded))
+    "runtime-judge" (runtime-judge (first args))
+    (do (println "cppi check: judge or runtime-judge") (System/exit 2))))
