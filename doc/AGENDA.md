@@ -1,7 +1,9 @@
 # Agenda
 
 The current state of the work. This file is rewritten as things change. For the history, see
-[JOURNAL.md](JOURNAL.md) (since 2026-10-27), the journals at the tags
+[JOURNAL.md](JOURNAL.md) (since 2026-11-01), the journals at the tags
+[`arbace-reaps-3-crops-v2`](https://github.com/arbace/arbace/blob/arbace-reaps-3-crops-v2/doc/JOURNAL.md)
+(2026-10-27 to 2026-11-01),
 [`arbace-reaps-3-crops-v1`](https://github.com/arbace/arbace/blob/arbace-reaps-3-crops-v1/doc/JOURNAL.md)
 (2026-10-20 to 2026-10-27),
 [`arbace-interprets-go1.27.1-v1`](https://github.com/arbace/arbace/blob/arbace-interprets-go1.27.1-v1/doc/JOURNAL.md)
@@ -11,7 +13,7 @@ The current state of the work. This file is rewritten as things change. For the 
 
 ## State
 
-- The bootstrap starts from the Go-source seed `seed/arbace-seed-go.tar.xz` (`b4ac198d…`, 2026-10-26: the milestone's final re-seed), the
+- The bootstrap starts from the Go-source seed `seed/arbace-seed-go.tar.xz` (`73b0d637…`, 2026-10-29: v2's second re-seed), the
   program printed by the Go-hosted fixpoint, its toolchain (TamaGo's go1.27.1) pinned by
   `seed/goroot.sha256`. `bin/seed --check`, `--build` (stage 0), `--make`, `--verify`.
 - Stage 0 hosts every Arbace tool (j2g, repr/go, build/go, c2a, the suite's runner), compiled into it;
@@ -27,6 +29,7 @@ The current state of the work. This file is rewritten as things change. For the 
   the reference of javac on Arbace's class files.
 - `LICENSE.md` holds all licenses and which files each covers.
 - The host: Alpine edge on amd64 with /dev/kvm ([ALPINE.md](ALPINE.md); `bin/alpine-env`).
+
 
 ## Done (brief; the history is in the journals)
 
@@ -97,6 +100,7 @@ The current state of the work. This file is rewritten as things change. For the 
 - Done (2026-10-17): g2a's printer mode `:full` (Go forms converted with `--full` printed back to
   the original text byte for byte; the text round trip in `bin/gate --full`; G2F1-G2F8).
 
+
 ## Next
 
 - **Done: the milestone `arbace-reaps-3-crops-v1`** (2026-10-27, an annotated tag on main; the user's goal
@@ -107,44 +111,150 @@ The current state of the work. This file is rewritten as things change. For the 
   1,618/219/0, 1,685/149/3, 2,584+/141/0 (read, eval, AOT, print: pass/by design/deferred).
   `GATE_FULL_SERIAL=1 bin/gate --full` passed at `5cfb1f4a`; the seed `b4ac198d` verified. Its history: the
   journal at the tag.
-- **Now: the milestone `arbace-reaps-3-crops-v2`** (an annotated tag, then the journal starts over).
-  - Done:
-    - the scripts' sweep;
-    - the keyed gate's GT1-GT6 (doc/GATE-SURVEY.md): the audit, the canary, the gate's own heavy lock per step, the FIFO
-      lock `bin/heavy-lock`, CPU limits, inner keys, Java's check per level, the program hosts by unit;
-    - the small leftovers A and B;
-    - JC4b and JC4c;
-    - Clojure's last deferred cases (only `seq-and-transducer`, speed, left);
-    - JN9e and JN9f; JFS133 (a);
-    - RPS150 with JCS123 (b); RPS97 (b) with RPS161 (b);
-    - the provenance files rewritten;
-    - two re-seeds, both verified: the second, `73b0d637`, for GT5's RT.ae.
-  - Running:
-    - GT7's tooling, `bin/gate --clean`;
-    - the draft record's refresh.
-  - Then:
-    - GT7's run, `bin/gate --full --clean`, every step audited on a quiet host (`.tmp/gt7.quiet`), with GTS37's
-      concurrent `--full` and GTS42's demonstrations;
-    - its record `test/gate/clean-arbace-reaps-3-crops-v2.edn`;
-    - the divergences' record (doc/FULL-SUPPORT-SURVEY.md, "REAP v2's divergences");
-    - the tag.
-  - The matrix now (pass/by design/deferred):
+- **Done: the milestone `arbace-reaps-3-crops-v2`** (2026-11-01, an annotated tag on main at `c4f85ace`; the user's
+  decision of 2026-10-26): the same rule over the same matrix, with the gate made efficient and run clean in a fresh
+  clone. Its history: the journal at the tag.
+  - The clean record `test/gate/clean-arbace-reaps-3-crops-v2.edn`: a first run at `68b2bba6` and its reruns of the
+    steps that failed or changed (`--clean --only`), merged, `:status :passed`, with GTS42's demonstrations
+    (`bin/gate-demos --record`); the Java steps' timeouts held by the audited rule (`:audit-timeout`'s 13 tests; t03686 passed in rerun 9)
+    were run again untraced before the tag and passed, each at the interp level's second chance.
+  - The seed `73b0d637…` (2026-10-29: the second re-seed), verified.
+  - "REAP v2's divergences" (doc/FULL-SUPPORT-SURVEY.md): 12 of 12 cells checked, none failing, every non-pass in a
+    recorded class; the caveat: Java's timeouts are by design only through the catch-all `speed` class, curated
+    after the tag. The prose brought to 07194e71 by queue 091 (`audit-timeout`, `thread-order` unstable, runs 5 and 6).
+  - The matrix at the tag (pass/by design/deferred; `doc/v2-record/refresh.sh` at the tag's head):
 
     | | read | eval | AOT | print |
     |---|---|---|---|---|
     | Clojure | 908/2/0 | 21,052/81/1 | 809/29/0 | 1,031+/0/0 |
-    | Java | 7,740/3/93 | 1,807/330/1,185 | 1,915/181/1,226 | 2,598/687/36 |
+    | Java | 7,742/3/93 | 1,848/285/1,189 | 1,921/172/1,229 | 2,598/687/37 |
     | Go | 12,158/204/0 | 1,618/219/0 | 1,688/149/0 | 2,584+/141/0 |
+
+- **Next: the merge window** (the VM's rehearsals 038, 054, 084, 6 and 7: the final line is `mac/112-merge-cp` `56fbb8cf`, report 112, which adds 105, 107, the six 108s, 111 and c23-c7 to `635e2d05` on the line below).
+  Every branch below waits for the tag and merges `--no-ff` unless said "pick"; no branch is merged as 062, 063, 064
+  or 074 (they carry `mac/054-merge` `a69c1dfc`, which holds `java-jn10`: a merge brings it in early and
+  `bin/provenance-check` is red from there). The order is the tested line of `mac/100-merge-cp` (`447348ee`: 32
+  commits past `mac/084-merge-cp` `75f8da57`, no merge commit, one conflict; report 100's 29 steps, here grouped; 1-20
+  are 084's order, 21-28 the fixes and the prose, each tested on top of the steps before it; step 29 of the report is
+  step 9 here). A fix may instead sit beside its branch (report 100's "Interleaving"; those states untested).
+  Main-host-only checks beside each step.
+  1. **The gate branches** (report steps 1-3): merge `mac/029-gts103` (`de5ceeb3`; queue 011-014, 023, 024,
+     GTS80-GTS103), then pick (`git cherry-pick -x`) `mac/062-gts80`'s `89997818` and `mac/063-gts82`'s `ef44c5ad`
+     (84-cp's `1f80bae0`, `01ea0bdc`). Main host: java-check's judgment on real saved runs with both the audited marker
+     and 029's levels and partial files.
+  2. **The gate's audits** (4-12): `audit-040` (`b90a1228`; then 054's `43128659`, `aa3e1f0a`), `audit-041` (`cfacb9b0`),
+     `audit-060` (`340c2341`), `audit-075` (`3574ed37`), `audit-070` (`d687bcd8`; then `ac32bd1e`, `--nested` and a 77),
+     074's three (`2f467bfb`, `9b445743`, `2104befe`; pick), `audit-061` (`4eec9796`; then `7054a4b9`), `audit-065`
+     (`091ea876`), `audit-076` (`1939c6b9`; then `774fd3a4`). Main host, per branch: audit-040's real `--gate-build` and
+     `--audit`; audit-041's edge-mark, edge-verdict, frozen-env, gate-reads and gate-tests-test, `bin/j2g-edge verify`
+     on the JVM; audit-060's first real `--aot` runs, goi's AOT record and `dictionaryCapture-noinline` into
+     `essential-aot.txt`; audit-070's `test/java/audited-test.bash` and `test/gate/audited-test.bash` on stage 0;
+     audit-061's first `parse-check --record` (the diagnostics counts, the mutants' digest, `jdk26u-fallbacks.edn`);
+     audit-065's `alpine-env check`; audit-076's repr-clojure judge cases that need stage 0.
+     **VM 075's `audit_trace` fix** (in `audit-075`, GTS180): `rt_sigprocmask` joins `audit_trace`
+     (`bin/lib/gate-run.bash`, `audit_trace_set` for an override) so that a new thread or child is no longer traced on
+     every syscall until its first traced one, which charged Go's runtime threads against `ulimit -t`. That file is in
+     every step's key: **it rekeys the whole gate**. Main host: build `tools/gateaudit` (queue 081 could not, no Go on
+     the VM) and check it and `test/gate/audit.awk` agree on a real trace; re-measure gcgort, issue13160 and one of the
+     13 under `--audit`; then revisit `test/goi/timeouts.txt`'s audit-only bumps and the `:audited` rule (GTS180 (a)).
+  3. **The essential gate once**, here (`8ea6d798` on 084's line; the same point on this one): failures belong to the
+     gate branches (the crops are not in yet; provenance is still green). Main host: every gate step, `bin/gate --audit
+     gate-tests`. Low, VM 100: `test/gate/limit-test.bash` `wallcap-log: no orphan left` (line 28) flaked once under load
+     (it checks `/proc/$p` right after `limited_cpu` returns 137; poll up to about 1 s, or take a zombie as gone): a
+     red there alone is the flake, rerun it.
+  4. **The crops** (13-18): `c23-c7` merged at `fd1ff91a` (084's; queue 086's review of the newer commits is the only
+     look at them), `nethttp-nh2` (`da90a61c`; then 054's `b069244d`), `ocaml-o1` (`aa67cc08`; then `1816787b`),
+     `scheme-sm1` (`d583b34d`), `cpp-cx6` (`76e9a50b`), `cpp-cx7` (`a603e926`; then `bee83162`). Main host: every crop's
+     checks on real runs; `bin/repr-cpp` pp-check after c23's angled-include change in `pp.ae`.
+  5. `mac/064-gts81`'s eight commits (19; pick; `d16e28b5`; the crops' negative controls, they edit the crops' files).
+  6. `java-jn10` (20; `13db2e60`; then `a69c1dfc`, then 75f8da57's last commit: a comment and key order).
+  7. **The branches' fixes, picked on the tip in this order** (21-27; each fixes the merge above it; the order is the
+     tested one):
+     - 085's three (`847ecaa4`, `7501be78`, `f753948d` = `mac/085-merge-cp`: `git merge --ff-only` or pick; they are
+       cherry-picks of `0f59b47a` `bin/si`'s usage, `3f471fd3` `split-top` once in `arbace/repr/cpp/convert.ae`, `35f71342`
+       `mac/085-frozen-env`: the scrub keeps the steps' declared `:env`, `test/gate/declared-env-test.bash`). Main host:
+       the rekeys (gate-tests by its new input; the frozen steps' keys with the variable set; frozen-env-test);
+       repr/cpp's checks after the move.
+     - Queue 088/093: `git cherry-pick 46b397d2^..56d4401b` (`mac/093-audit-070` `56d4401b`; its first commit is
+       `mac/088-audited-test`'s `8b027465` as `46b397d2`, `test/java/audited-marker-test.bash`: do not pick `8b027465` as
+       well. audit-070's gaps against 088: java-judge's `:uses` markers, `:unstable` on the 13, `--record` with
+       `--audited`, the summary's `held`, the `:rule` text). Main host: the marker test on audit-070's merged rule; the
+       rekeys from java-judge's `:summary`/`:uses`.
+     - `c23-c7`'s newer commits: `git cherry-pick fd1ff91a..8e790afa` (`c23-c7` `8e790afa`, eight commits).
+       **Conflict in `arbace/repr/c/pp.ae` `include-next-paths`** (049e6736): take c23's chain code, keep CX2's
+       comment on the cleaned comparison (the resolution is in report 100, step 3; the rest of `pp.ae` and `dg.ae` merge
+       alone). Main host: `bin/ci judge-test` (c23's 59 cases, include-search-is-gccs among them), `bin/repr-cpp`
+       pp-check (c23's chain also reaches C++'s preprocessor).
+     - `mac/087-nh2`: `git cherry-pick da90a61c..587bbf31` (`4dbf2a74` A3, `49590baa` A4, `587bbf31` A5). Main host: A4
+       and A5's `-e` expressions on a real executable and `bin/goi check --corpus nethttp [--arbace] --record` (NH3); A3
+       on a whole run.
+     - `mac/089-o1`: `aa67cc08..09175fba` (`e76437f3`, `09175fba`), and `mac/089-sm1`: `d583b34d..9010e203` (`393d1436`,
+       `8fa01b46`, `9010e203`), then **`mac/105-sm1` `1ce36d56`** (SC203: the larceny inputs pinned, `:inputs` in
+       `test/scheme/corpora.edn`, `bin/repr-scheme`; one commit on `d583b34d`, cherry-picks cleanly onto 084-cp and
+       085-cp; **not in rehearsal 6**, place after the sm1 pick). Main host: `bin/si check --ref-test` and `check`, a real
+       `--record-ref` (it writes `chez.version`); `bin/oi pins` notes the stale `oi-program` keys until a run of the
+       current key and `--attest`.
+     - `mac/087-jn10`: `13db2e60..5318318c` (`2618543f` A2, `5318318c` A1 `field-order-check` against javac's enum; the
+       survey conflicts if picked out of branch order). Main host: javac's tool rebuilt (A1: `javac_tree.ae` is in its
+       key).
+     - Pending, from queue 107 (C++ re-review) and 108 (unreviewed audit commits): `mac/107-cx7`, `mac/108-audit-*`;
+       not rehearsed, no heads yet. Place `mac/107-cx7` after `cpp-cx7` (step 4) and each `mac/108-audit-*` after the
+       branch it fixes (step 2) once their reports say where they go and how they merge.
+  8. **The v2 prose** (28): `git cherry-pick d2b579f2 2b1c776c fe82f83f 684d5f58` (`mac/026-v2-record` `fe82f83f`'s
+     three, then `mac/091-v2-record` `684d5f58`; doc/FULL-SUPPORT-SURVEY.md only: it commutes with everything here and
+     may go first, or into the tag commit). Low, VM 100: the prose's "The audited timeouts" item says the rule is "as
+     `:unstable` holds its `:tests`", which 093's `459afc81` dropped from `check.ae` as misleading and `165259c0` made
+     per file; it describes 07194e71, so true of the tag, but if it lands after 093 add a sentence that the rule was
+     narrowed after the tag.
+  9. **The four provenance writers in one commit** (29), on javac's tool built from the merged tree, then
+     `bin/provenance-check`: `bin/jrt-convert update`, `bin/javac-vendor convert`, `bin/clojure-tests --java-fixtures
+     update`, `bin/java-check --forms update`. Provenance is red from jn10 (as at 75f8da57); the reader hash they must
+     write is now **`806dce33…`** (aff13645 moved it from `a3cc7643…`; d7b79ff9's `:java.base` line already passes).
+     Then `mac/039-jcs127` (`d6870d37`, after a test on the main host).
+  10. `bin/gate --full`; the batched re-seed (queue 037's fixes first: a verify is host-bound by `git describe`'s tags,
+      Go's env files and a setgid `.tmp`); the essential gate; the journal's entries of every branch as new entries.
+  - Light sets at each step of the rehearsal: no failures but the stage-0 ones (java audited-test, repr/clojure judge-test
+    5, goi's `essential-aot-held-to-the-record`, clojure judge-test), the same 7 `gate-tests` not run; main-host-only
+    beside them: nh2's records on a real executable, sm1's record-ref with Chez, 27 ocaml judge cases, gate-reads-test,
+    gate-tests-test, frozen-env-test, edge-mark-test, edge-verdict-test.
+  - Left to the main host from 085 and 089 beyond the checks above: 085's finding-5 rekey (a `bin/gate --plan` on stage 0
+    with `FROZEN_TAG` set, to see the value in the key and the step rerun); 089's `Q4` (item text `(5000)`/`(20000)`:
+    8 recorded items, a `bin/si mats --record`) and `aot_key` leaving out `bin/lib/oi/*` (re-keys every AOT run, then
+    `--attest`); the CPU-clock skew ratio of 072's oi 137 rule; 084's open points (crop files under `gate_key`'s `bin/lib`,
+    `jdk/` and `go/`; CLAUDE.md's `gate_key` sentence; GTS82 (a)'s linked-worktree test on the VM).
+  - Fixes to write on `c23-c7` after queue 086's re-review of `8e790afa` (low, none made): a quoted sibling of a system
+    header marked non-system (`arbace/repr/c/pp.ae:1372-1381`); `_Float64x`/`_Float128` compared through double; `-iquote`
+    of a system directory; `_Decimal64x` against `_Decimal128` in `float-tie`.
+- **Open decisions** (waiting for the user; each branch built what is stated, none decided; the surveys say "none
+  decided"):
+  - GTS102 (decided (2026-11-01) on the gate branches, 6a26a628, not on main; built as `mac/034-gts102`, `4bd65bc9`):
+    test/java/timeouts.txt, a 60 s floor each; conflicts with main's `:audited` rule and audit-070: merge, redo after
+    audit-075 and audit-070, or drop (raised in queue 034, 083; corrected in queue 097's commit).
+  - GTS130-GTS133 (audit-061; GTS132 (b) built) and GTS137 (`check --jdk` in no gate step: (a) a `--full` step
+    `repr-java-jdk`, (b) by hand, (c) folded into `repr-java-nojavac`; queue 067).
+  - GTS134-GTS136 and GTS138 (audit-065, alpine-env: providers, the host's line, the other findings; queue 065, 068).
+  - GTS140-GTS143 (audit-060; GTS141 (b): 44 of 63 `check-known` entries take any non-pass; queue 060, 069).
+  - GTS150 (`mac/074-clean-judge`: a judgment-only clean rerun, (a) built write-ahead; keep or drop; queue 074).
+  - GTS170-GTS173 (audit-070: java-held under the clean run's strace (b), both signals mark an audit (a), `--record`
+    refused (a), the two test scripts; built as recommended; queue 070, 077).
+  - GTS180 (a)-(e) (audit-075: timeouts.txt's bumps and the `:audited` rule after the fix, nethttp's limits, the JDK
+    reference's timeouts, the doubled Java retry, a 137 told from an OOM kill; queue 075, 080, 081).
+  - CS236-CS238 (c23-c7: every directive of a line, `_Atomic` among `:c/bad-specs`' qualifiers, wrong-reason entries;
+    queue 057, 086) and CS235 (b) (`:ld` through arithmetic, `?:` and constexpr; F79's open points).
+  - OC160 (a light oi-divergences essential step at the merge; queue 072, 089).
+  - JCS127 (`mac/039-jcs127`: volatile fields under Rt's striped locks; merge after jn10 once tested).
+  - The earlier proposals GTS110-GTS126, SC210-SC224, OC140-OC153, CP160-CP174 and CS220-CS235 were decided as
+    recommended (the user, 2026-11-01).
 - **Next: C23 at parity with the three crops** (doc/C23-SURVEY.md; CS1-CS51 decided).
   - Done: C1, the spec (doc/c/SPEC.md, test/c/corpora.edn); C2, repr/c's lexer and preprocessor, ports of cc's, token
     for token against `tools/ccdump`.
-  - Running beside v2, light, merged after the tag: C3, the parser, with CS50 (a) (gcc's trigraphs and UCNs) and CS51
-    (a) (gcc -E's digests as data).
+  - Beside v2, light: C3, the parser, with CS50 (a) (gcc's trigraphs and UCNs) and CS51 (a) (gcc -E's digests as data);
+    `c23-c7` merges in the merge window above (steps 4 and 7).
   - Then C3b-C9: cc ported to Arbace (CS4 (b)); musl 1.2.6 as C forms (`long double` as `double`, CS35); gcc 15.2 as
     the reference; the tag `arbace-reaps-4-crops-v1`.
   - Also after v2:
-    - JN10 (JFS130-JFS132), its plan being written now;
-    - JCS120 (b), its plan being written now;
+    - JN10 (JFS130-JFS132), merged in the merge window (steps 6 and 7); its writers last;
+    - JCS120 (b), its plan being written;
     - later: the deferred JDK areas (JCS90-JCS96), JC7.
 - **Working rules added during REAP:** subagents on Sonnet for as much as possible, Opus for the hard parts
   (the user, 2026-10-25/26); one 20 GiB job at a time on the host; Go's build cache trimmed when the disk

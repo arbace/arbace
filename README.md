@@ -118,12 +118,16 @@ ARBACE_BOX_ARCHES=amd64,arm64 bin/arbace-go --build --box && bin/box-arm64-vm ch
 
 ## Three crops: read, eval, AOT and print
 
-The tag `arbace-reaps-3-crops-v1` (2026-10-27, on main) marks REAP for Clojure, Java 26 and Go 1.27.1:
-each language read into Arbace's forms, evaluated at the REPL, compiled ahead of time into the static
-executable, and printed back to its source, checked against the language's own reference (Clojure's suite,
-jdk26u's jtreg tests and the JDK's runs, `$GOROOT/test` against gc). `bin/reap` prints the matrix; none of
-its 12 cells fails, and every case that does not pass is in a recorded class
-([doc/FULL-SUPPORT-SURVEY.md](doc/FULL-SUPPORT-SURVEY.md), "REAP v1's divergences").
+The tag `arbace-reaps-3-crops-v2` (2026-11-01, on main) marks REAP for Clojure, Java 26 and Go 1.27.1 as
+v1 did, and its second round: the same four levels, each language read into Arbace's forms, evaluated at the
+REPL, compiled ahead of time into the static executable, and printed back to its source, checked against the
+language's own reference (Clojure's suite, jdk26u's jtreg tests and the JDK's runs, `$GOROOT/test` against
+gc), now with the efficient gate (GT1-GT7) run clean at the tag. `bin/reap` prints the matrix; none of its 12
+cells fails, and every case that does not pass is in a recorded class ([doc/FULL-SUPPORT-SURVEY.md](doc/FULL-SUPPORT-SURVEY.md),
+"REAP v2's divergences", v1's beside it). Java's cases passing, v1 to v2: eval 1,683 to 1,848, AOT
+1,869 to 1,921, print 2,584 to 2,598; Clojure's deferred 11 to 1.
+
+The tag `arbace-reaps-3-crops-v1` (2026-10-27, on main) marks the first round, "REAP v1's divergences".
 
 ## Go forms at the REPL
 
@@ -203,8 +207,8 @@ seed was printed from (the seed's `SEED.edn`).
 - [doc/AGENDA.md](doc/AGENDA.md): where the work stands and what comes next
 - [doc/go/FREEZE.md](https://github.com/arbace/arbace/blob/arbace-for-golang/doc/go/FREEZE.md)
   (on `arbace-for-golang`): Arbace for Golang: build, run, verify, the frozen branch
-- [doc/JOURNAL.md](doc/JOURNAL.md): every decision and action, append-only (since 2026-10-27;
-  the earlier history at the tags `arbace-reaps-3-crops-v1`, `arbace-interprets-go1.27.1-v1` and
+- [doc/JOURNAL.md](doc/JOURNAL.md): every decision and action, append-only (since 2026-11-01;
+  the earlier history at the tags `arbace-reaps-3-crops-v2`, `arbace-reaps-3-crops-v1`, `arbace-interprets-go1.27.1-v1` and
   `arbace-inside-itself-v1` and on the frozen branches)
 - [doc/classes/SPEC.md](doc/classes/SPEC.md): the Java forms
 - [doc/go/B1-PLAN.md](doc/go/B1-PLAN.md): the Go executable's plan; [doc/go/J2G-SPEC.md](doc/go/J2G-SPEC.md),
