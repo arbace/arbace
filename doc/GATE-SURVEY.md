@@ -2613,6 +2613,12 @@ finding 1 and the choices made on the way are proposed here, none decided.
   environment of `FROZEN_*` and `ARBACE_*` (the branch `mac/029-gts103`'s `gate_scrub_env`) drops these variables
   unless it keeps the names a step declares in `:env`: until then the declarations key the empty value (safe: the tools
   run on the pinned jar) and only document the variables. To settle at that merge together with the scrub's list.
+  Settled (queue 085, report 084 finding 5): `gate_keep_env` keeps every name a step of the table declares in `:env`
+  (`gate_declared_env_of`, the table's `:env` vectors read in awk before stage 0, outside strings and comments), so a
+  caller's `FROZEN_CP`, `FROZEN_TAG`, `ARBACE_ORACLE_*`, `J2G_FIXTURES` and `J2G_EDGE_WORK` reach the steps and their keys
+  hold the values; an undeclared `FROZEN_JAR` is still dropped. `test/gate/declared-env-test.bash` (no executable);
+  `gate-tests` takes `bin/gate` among its inputs. A kept name is visible to every step: one that reads it without
+  declaring it would run unkeyed, which `test/gate/frozen-env-test.bash` rules out for the frozen JVM's variables.
 - GTS113 (b): `arbace.j2g.model/*run*` (bound in `arbace.j2g.main/run`), `run-fn` and the marker frame `on-run-thread`;
   the trace counts an event whose stack holds `arbace.j2g.main$run` or `arbace.j2g.model$on_run_thread`
   (`test/j2g/edge_verdict.ae`'s `in-run?`). Every future of j2g goes through `run-fn` (par-mapv, the runtime's analysis,
