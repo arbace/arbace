@@ -19,7 +19,7 @@ has CLAUDE.md 'ARBACE_HEAVY_CMD="$PWD/bin/heavy-lock"'
 # 10. the survey names the queue task, not a scratch path; GTS121 says what the refusal covers; GTS126
 lacks doc/GATE-SURVEY.md '.tmp/mac-queue/reports/040'
 has doc/GATE-SURVEY.md 'GTS126 how a miss fills the directory'
-has doc/GATE-SURVEY.md 'or like javac'"'"'s tool'"'"'s'
+has doc/GATE-SURVEY.md 'replaces only a directory it'
 # 048: the miss's text
 has CLAUDE.md 'a miss replaces only a directory of its own making'
 lacks CLAUDE.md 'a miss never removes the directory of another key'
