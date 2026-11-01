@@ -1,0 +1,37 @@
+#!/bin/bash
+# ci's and repr/c's namespaces compiled by c2j (doc/C23-SURVEY.md, "As built: C9 (preparation)"; C5.7 item 1): the re-seed embeds
+# arbace/c.ae, arbace/c/, arbace/repr/c.ae and arbace/repr/c/ and compiles them with the program (c2j's first compile of them), so
+# a construct c2j has no back end for would stop the build after hours. This compiles them alone, on the tools' host, as bin/arbace-go
+# --build-program compiles a program's namespaces (the units recorded with ARBACE_COMPILE, arbace.c2j.main/run over these sources, no
+# j2g and no Go build: about a minute, 2 GB): every source must compile. arbace.c.cinterp, which needs arbace.lang.CInterp, a class only an
+# executable built with ci has, is not loaded here (the build's second pass has it: bin/lib/program.bash's host_compiles).
+# Usage: bin/ci c2j-check          Exit status 0 when every loaded source compiled (the report: .tmp/c2j/compile.log)
+set -uo pipefail
+root=$(cd "$(dirname "$0")/../../.." && pwd)
+. "$root/bin/lib/tmpdir.bash"
+. "$root/bin/lib/tools.bash"
+. "$root/bin/lib/host.bash"
+cd "$root"
+w=$root/.tmp/c2j
+rm -rf "$w"; mkdir -p "$w"
+nss=$(find arbace/c arbace/repr/c -name '*.ae' | sort | sed 's/\.ae$//; s|/|.|g; s/_/-/g' | tr '\n' ' ')
+cat > "$w/compile.ae" <<A
+(doseq [n (quote [arbace.repr.c arbace.c $nss])]
+  (try (require n) (catch Throwable e (println "aot: not loaded:" n (.getMessage e)))))
+(require (quote arbace.c2j.main))
+(let [ours? (fn [s] (or (.startsWith ^String s "arbace/c/") (.startsWith ^String s "arbace/repr/c/") (= s "arbace/c.ae") (= s "arbace/repr/c.ae")))
+      srcs (vec (distinct (filter ours? (map #(aget ^objects % 0) (arbace.lang.Compiler\$AST/units)))))
+      r (arbace.c2j.main/run "$w/out" srcs)]
+  (println "aot:" (count (:compiled r)) "sources compiled," (:classes r) "classes;" (count (:failed r)) "failed")
+  (doseq [[s m] (:failed r)] (println "aot: not compiled:" s m))
+  (shutdown-agents)
+  (System/exit 0))
+A
+host=$(arbace_host_exe) || exit 1
+GOMEMLIMIT=${GOMEMLIMIT:-3GiB} GOGC=200 ARBACE_COMPILE=1 ARBACE_NO_IMAGE=1 ARBACE_PATH_FIRST=1 ARBACE_PATH=$root ARBACE_AOT_ROOT=$root \
+  ARBACE_PREPARE=$w/compile.image "$host" "$w/compile.ae" > "$w/compile.log" 2>&1 || { tail -20 "$w/compile.log" >&2; echo "c2j-check: the host failed" >&2; exit 1; }
+grep '^aot:' "$w/compile.log" | grep -v 'not loaded: arbace.c.cinterp'
+n=$(sed -n 's/^aot: \([0-9]*\) sources compiled.* \([0-9]*\) failed$/\1 \2/p' "$w/compile.log")
+set -- $n
+[ -n "${1:-}" ] && [ "${2:-1}" = 0 ] && [ "$1" -ge 20 ] && { echo "c2j-check: ok ($1 sources)"; exit 0; }
+echo "c2j-check: FAILED ($n)" >&2; exit 1
