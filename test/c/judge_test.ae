@@ -223,10 +223,17 @@
     (.redirectOutput pb log)
     (let [st (.waitFor (.start pb))] (.delete log) st)))
 
+(declare sh-out-env)
+
 (defn- sh-out
   "{:out} the standard output of `cmd` run in the checkout."
   [& cmd]
+  (sh-out-env {} cmd))
+
+(defn- sh-out-env
+  [env cmd]
   (let [pb (ProcessBuilder. ^java.util.List (vec cmd))]
+    (doseq [[k v] env] (.put (.environment pb) k v))
     (.directory pb (java.io.File. ^String (System/getProperty "user.dir")))
     (let [p (.start pb) out (slurp (.getInputStream p))] (.waitFor p) {:out out})))
 
@@ -371,6 +378,27 @@
         ;; a passes now: improved; b's reason changed: regression; c passed and fails: regression
         (is (= ["ci-run/a.c"] (:improved c)))
         (is (= ["ci-run/b.c" "ci-run/c.c"] (mapv first (:regressions c)))))
+      (finally (doseq [f (reverse (file-seq work))] (.delete ^java.io.File f))))))
+
+(deftest aot-interpreted-side-needs-its-run
+  ;; CS214 (R3): without CI_AOT_NODES and CI_INTERP the compiled runs are not compared with scratch of another state
+  (let [root (System/getProperty "user.dir")
+        work (doto (java.io.File. (str root "/.tmp/judge-test-interp")) (.mkdirs))
+        d (doto (java.io.File. work "ci-run") (.mkdirs))
+        id "ci-run/ptr-sub-unsigned.c"
+        empty-sum "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"]
+    (try
+      (spit (java.io.File. d "list.tsv") (str id "\t.\tc23\t\tptr-sub-unsigned.c\n"))
+      (spit (java.io.File. d "nodes.tsv") (str id "\tok\t\t\t\n"))
+      (spit (java.io.File. d "run.tsv") (str id "\t3\t" empty-sum "\t0\t\n"))
+      (let [o (:out (sh-out-env {"CI_AOT_WORK" (.getPath work) "CI_SUBSET" "1"}
+                                ["bin/ci" "check" "--aot" "--judge" "--corpus" "ci-run"]))]
+        (is (str/includes? o "not compared"))
+        (is (not (str/includes? o "with no interpreted run"))))
+      ;; a named directory is read
+      (let [o (:out (sh-out-env {"CI_AOT_WORK" (.getPath work) "CI_SUBSET" "1" "CI_INTERP" (.getPath work)}
+                                ["bin/ci" "check" "--aot" "--judge" "--corpus" "ci-run"]))]
+        (is (str/includes? o "the same")))
       (finally (doseq [f (reverse (file-seq work))] (.delete ^java.io.File f))))))
 
 (deftest main-file-is-the-whole-path
