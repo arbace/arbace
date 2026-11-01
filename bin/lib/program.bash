@@ -101,8 +101,9 @@ host_arch() { case $(uname -m) in aarch64) echo arm64 ;; *) echo amd64 ;; esac; 
 
 # program_base: the shipped build whose compiled namespaces the program reuses (sets base_exe,
 # base_aot): ARBACE_PROGRAM_BASE (a --build's directory, or a directory holding arbace, aot/ and
-# aot.key, as the gate's cache), else target/arbace-go, else the gate's cache .tmp/arbace-go-gate/
-# amd64, then stage 0, target/seed (bin/seed --build keeps its compiled namespaces, RPS95 (b)), the
+# aot.key, as the gate's cache), else target/arbace-go, else the gate's build at the checkout's key,
+# ARBACE_GATE_EXES/KEY20/amd64 (arbace_gate_cache, bin/lib/gate-cache.bash; ARBACE_GATE_CACHE overrides),
+# then stage 0, target/seed (bin/seed --build keeps its compiled namespaces, RPS95 (b)), the
 # first whose compiled namespaces' key is the checkout's (aot_key: the runtime and Arbace's
 # sources) and whose executable's runtime is the checkout's; else stage 0's compiled again when its
 # runtime is the checkout's (seed_aot), else a --build for the host's architecture first

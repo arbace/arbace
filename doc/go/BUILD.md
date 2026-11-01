@@ -351,7 +351,7 @@ DIR/
   (`--check` and the essential gate build it and require the message in `expected-error`).
   A Go program (no entry) is built by `arbace.build.go` alone: no Arbace runtime, a few MB.
 - **The base.** The shipped build whose compiled namespaces (`aot/`) the program reuses:
-  `ARBACE_PROGRAM_BASE`, else `target/arbace-go`, else the gate's cache `.tmp/arbace-go-gate/amd64`,
+  `ARBACE_PROGRAM_BASE`, else `target/arbace-go`, else the gate's build at the checkout's key `ARBACE_GATE_EXES/KEY20/amd64` (`bin/lib/gate-cache.bash`; `ARBACE_GATE_CACHE` overrides),
   then stage 0, `target/seed` (`bin/seed --build` compiles the checkout's namespaces with it into `aot/`,
   `aot.key` and `aot.runtime` when its runtime is the checkout's; `--no-aot` skips; a program build
   compiles them again when the sources moved and the runtime did not, RPS95 (b)), the first whose
