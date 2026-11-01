@@ -2992,7 +2992,8 @@ findings, N1-N9; the commits `0ded8bcd` to `81a25361` and the one that records t
 - `bin/si check --record-ref --record`: **47 of 48** (the 48th is `si/ports-pushback`, which passes: same output as Chez); the one non-pass
   is `larceny/exceptions` (`chez-conditions`), as recorded; regressions: the new program only.
 - `bin/si r7rs`: 1,225 tests, **1,216 pass**, 9 fail (`r7rs-float-printing`); against Chez 1,205 both pass and 11 si only; regressions none.
-- `bin/si corpora divergences` rc 0, `bin/si corpora regress-test` ok (three cases). `bin/si unit` not rerun in this pass.
+- `bin/si corpora divergences` rc 0, `bin/si corpora regress-test` ok (six cases, not three: corrected in re-review 044, M4). `bin/si unit` was not rerun in this pass;
+  re-review 044 ran it: the four new tests (`TestSomePushedBack`, `TestPositionDropsPushback`, `TestConsoleUnget`, `TestPortDetails`) compile and pass.
 
 ### Proposals (SC210 onward)
 
