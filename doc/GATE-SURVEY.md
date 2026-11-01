@@ -2651,6 +2651,10 @@ All decided by the user, 2026-11-01, as recommended; what the branch built is na
   `rm -rf`: move a stale directory aside as `NAME.old`; (c) as before. *Recommended: (a)* now, (b) if a stale `.tmp/arbace-go-gate`
   style directory should also survive. `bin/gate`'s steps never hit it (they pass the checkout's own key).
   - **Decided (the user, 2026-11-01): (a).**
+  - As built since review 051 (A, B): "one holding a `key` file" is narrowed to a gate build's shape (`bin/arbace-go`'s
+    `gate_made`: a `key` file holding a 64-hex key, `version.edn` and `amd64/`), since bin/diffcheck's work directory and
+    the box VM's (an ssh key) keep a file named `key`; an `ARBACE_GATE_CACHE` with trailing slashes is the same directory,
+    one ending in `.` or `..` is refused.
 - **GTS122 the `--g1` default** (finding 4). Options: (a) comments and docs say `--g1 "$GATE_CACHE"`, behaviour unchanged (a
   directory not at the checkout's key builds G1 with a note; built); (b) `--g1` without a directory takes `arbace_gate_cache`;
   (c) a `--g1` directory at another key is an error rather than a note. *Recommended: (a)*, then (b) for hand runs.
