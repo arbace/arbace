@@ -40,8 +40,16 @@ arbace_host_exe() {
      && [ "$(basename "$common")" = .git ] && main=$(dirname "$common") \
      && [ "$(cd "$main" && pwd -P)" != "$(cd "$root" && pwd -P)" ]; then
     sv=(env ARBACE_SEED_GO="$seed") log=$root/.tmp/host-seed.$BASHPID.log
-    if "${sv[@]}" "$root/bin/seed" --kept "$root/target/seed" --arch "$a" > "$log" 2>&1 \
-       || "${sv[@]}" "$root/bin/seed" --link "$main/target/seed" --arch "$a" > "$log" 2>&1; then
+    if "${sv[@]}" "$root/bin/seed" --kept "$root/target/seed" --arch "$a" > "$log" 2>&1; then
+      rm -f "$log"; echo "$exe"; return
+    fi
+    # queue 063: --link waits for a stage 0 build in the main checkout (re-review 020, finding 2: up to
+    # ARBACE_SEED_LINK_WAIT s, default 1200), its "waiting" line in the log read only after; said here as it
+    # begins, as bin/gate's stage0_choose does (GTS101 (b)), so that a tool call does not sit silent
+    if [ -f "$main/.tmp/seed-build.lock" ] && ! flock -n -s "$main/.tmp/seed-build.lock" true 2> "$root/.tmp/host-flock.err"; then
+      echo "arbace_host_exe: waiting for $main's stage 0 build to link it (at most ${ARBACE_SEED_LINK_WAIT:-1200} s)" >&2
+    fi
+    if "${sv[@]}" "$root/bin/seed" --link "$main/target/seed" --arch "$a" > "$log" 2>&1; then
       rm -f "$log"; echo "$exe"; return
     fi
     why=$(sed 's/^bin\/seed: //; s/^not linked: //' "$log" | tail -1); rm -f "$log"
