@@ -61,19 +61,24 @@ Prior art:
   `seed/arbace-seed-go.tar.xz.sha256`; the Go toolchain that builds it (TamaGo's go1.27.1) pinned
   by `seed/goroot.sha256` (doc/STANDALONE-NOTES.md, "S4: the Go-source seed", "S4: the JVM
   removed"). `bin/seed --check` checks the hash; `--build` builds stage 0 from it with Go's
-  toolchain alone (`target/seed/<arch>/arbace`, and when its runtime is the checkout's the checkout's namespaces compiled by it into `target/seed/aot`, `--no-aot` not); `--make` packs a build (the fixpoint's G3, for a
-  seed to commit, rarely: a re-seed); `--verify` prints it again from its commit (the fixpoint from
+  toolchain alone (`target/seed/<arch>/arbace`, and when its runtime is the checkout's the checkout's namespaces compiled by it into `target/seed/aot`, `--no-aot` not); `--make` packs a build into the seed and its pin (the last `bin/arbace-go --build` by default; a seed to commit
+  is the fixpoint's G3, `ARBACE_SEED_GO_BUILD=target/arbace-go/fixpoint/g3`, rarely: a re-seed); `--verify` prints it again from its commit (the fixpoint from
   the seed's own stage 0) and requires the same tar and stage 0 = G1 = G2 = G3. Until S4 the seed
   was a jar (`arbace-for-java-26-v1`'s), and before that the frozen reference tree `clojure/`
   (upstream Clojure and ASM): both on the branch `arbace-for-java-26`. The tools take what they
   need of that tree as data (repr/java's corpus, the baseline of Clojure's suite) from the tag,
   extracted into `.tmp/frozen/` by `bin/lib/tools.bash`.
 - Stage 0 hosts Arbace's tools (`bin/lib/host.bash`'s `arbace_host_exe`: `ARBACE_HOST_EXE`, else
-  stage 0, built when missing or when the seed changed; in a linked worktree its own when `bin/seed --kept` keeps it,
+  the checkout's own stage 0, `target/seed/<arch>/arbace`, built when missing or when the
+  seed changed by `bin/seed --build`, which also compiles the checkout's namespaces into `target/seed/aot` (RPS95 (b),
+  about 3 minutes beyond the Go build, under no heavy lock (a per-checkout `.tmp/seed-build.lock` only keeps two tools from building at once); in a linked worktree its own when `bin/seed --kept` keeps it,
   else the main checkout's hard-linked into it when its pins line is the worktree's (`bin/seed --link`), else a refusal:
-  `ARBACE_SEED_BUILD=1` builds, GTS82 (a), review 001's fixes): c2j, j2g, repr/go, repr/clojure, the suite's runner,
-  compiled into it (S6, SA133), a tool's namespace whose source in the checkout differs from the
-  embedded copy loaded from the checkout instead, evaluated (`bin/lib/tools.bash`'s
+  `ARBACE_SEED_BUILD=1` builds, GTS82 (a), review 001's fixes; in a worktree set `ARBACE_HOST_EXE` to the main checkout's stage 0
+  to skip all of it; `bin/gate` unsets it and uses the checkout's stage 0, built `--no-aot`, and `gate_key` hashes the
+  bytes of `ARBACE_HOST_EXE` when set, so a `bin/arbace-go --gate-build` by hand under it misses the gate's builds;
+  `ARBACE_SEED_GO` names another seed for the host as for `bin/seed`): c2j, j2g, repr/go, repr/clojure, the suite's runner,
+  compiled into it (S6, SA133), a namespace of a tool or of goi (`arbace/go/`;
+  RT.toolSource) whose source in the checkout differs from the embedded copy loaded from the checkout instead, evaluated (`bin/lib/tools.bash`'s
   `arbace_tool`, `ARBACE_PATH`). The JVM runs only the frozen jar of `arbace-for-java-26-v4` (built from its tag,
   pinned by `test/oracle/frozen-jar.sha256`; `bin/lib/frozen.bash`, its tools' namespaces from the
   checkout as `.clj` links before the jar, repr/java's not among them since JN6): the oracle's
@@ -111,7 +116,7 @@ Prior art:
   stated nowhere else, apart from the notices source files came with, which stay. Extend it when
   vendoring from a new source.
 - `arbace/` holds Arbace's own Clojure code, namespaces `arbace.*`, all `.ae` (Arbace's source
-  extension: Clojure plus forms Clojure cannot evaluate; the loaders take `.ae`, then `.clj`):
+  extension: Clojure plus forms Clojure cannot evaluate; the loaders take `.ae`, then `.clj`, then `.cljc`):
   - the vendored Clojure, renamed from `clojure.*` (`arbace.core`, `arbace.lang` and the rest;
     the Java parts are Java forms). It is hand-maintained source; its derivation is recorded in
     `doc/VENDOR-NOTES.md` (replayable on `arbace-for-java-26`). Since S4 it has no bytecode back
@@ -173,7 +178,7 @@ Prior art:
     (`--update` rewrites them, JFS72 (b)), and Java forms → Java (`print`, `arbace.repr.java.print`; the
     `.ae` writer is `arbace.repr.java.layout`) on the tools' host, with its round trip Java →
     forms → Java → forms at the levels forms, ae (the converted text) and classes (javac's, byte
-    for byte; `bin/repr-java roundtrip`, corpora baseline, samples and jdk/forms, references in
+    for byte; `bin/repr-java roundtrip`, corpora baseline, samples and jdk, references in
     `test/repr/java/roundtrip/`; doc/classes/PRINTER-NOTES.md; mode `:full`, `read --full`,
     keeps the Java text, printed back byte for byte: `roundtrip --text`); `arbace.repr.go`
     (`arbace/repr/go{.ae,/}`), Go as Go forms and back (spec `doc/go/SPEC.md`; mode `:full` keeps
@@ -203,7 +208,11 @@ Prior art:
     lowered and code levels, the HIR, MIR and objects of the library corpora's crates and of the UI
     suite's programs built by the helper as rustc from the originals and from the printed files;
     `include!`'s expression files as `(rs/expr e)` forms), evaluated from the checkout,
-    not embedded.
+    not embedded; `arbace/repr/c/` (`arbace.repr.c.*`: `lex`, `pp`, `host`, `parse`, `tree` and the checks), C's bridge
+    (doc/C23-SURVEY.md, CS1-CS63; spec doc/c/SPEC.md): ports of cc's lexer, preprocessor and parser, checked
+    token for token against cc run by the helper `tools/ccdump` over `test/c/corpora.edn` and against gcc
+    (`bin/repr-c check`, `parse-check`; the parse level's reference is gcc's acceptance, CS61; the Makefile's
+    `repr-c-*`), evaluated from the checkout, not embedded, in no gate step and out of `gate_key`.
   - `arbace/repr/clojure{.ae,/}`: `arbace.repr.clojure`, Clojure's bridge (`doc/REPR-CLOJURE.md`;
     `bin/repr-clojure read`, `print`, `roundtrip`, `check`): Clojure source into Arbace's, the
     names of the vendored Clojure, `.clj`/`.cljc` into `.ae`, a table of rules for the dialects'
@@ -225,17 +234,21 @@ Prior art:
     `go/arbace/goi` (hand-written Go forms; the operators' nodes and the factories' registry
     generated by `test/goi/gen_nodes.ae`); Go forms' API to Arbace is the package `arbace`
     (`go/arbace.ae`, listed in the table, GR5); repr/go's native reader's packages are go/'s too (`go/arbace/repr/`, listed, GP7); goi's cross-dialect oracle cases
-    (`test/oracle/forms/go.ae`) are recorded by goi (`bin/oracle record --goi IMPL`).
+    (`test/oracle/forms/go.ae`) are recorded by goi (`bin/oracle record --goi IMPL`); `bin/goi check --corpus nethttp`
+    runs `test/nethttp/`'s programs (a module, a package main each) the same way.
   - `arbace/j2g/`: the Java forms → Go forms translator (spec `doc/go/J2G-SPEC.md`; `bin/j2g`),
     on the tools' host (`J2G_GO_EXE`), its classes translated in parallel (`J2G_JOBS`, default at
     most 16) with the sequential output byte for byte; the resources compressed by
-    `arbace/j2g/zlib.ae` (SA21).
+    `arbace/j2g/zlib.ae` (SA21); `bin/j2g-check` (the oracle's class scripts translated, built for amd64 and arm64
+    and compared with the JVM's recorded steps), `bin/j2g-evalproof` (the evaluator boundary's proof, doc/go/EVAL-PLAN.md) and
+    `bin/net-check` (the socket server against the JVM's) are its older differential harnesses, in no gate step.
 - The Go build (B1a, `doc/go/B1-PLAN.md`): Arbace as a static Go executable. j2g translates
   the runtime (with the generated Go-build variants in `arbace/lang/go/`), and jrt, the Java runtime on Go (`go/arbace/jrt`, hand-written Go forms;
   `overlay/jdk/`, its own Java and variants of JDK classes; `jdk/`, the JDK's Java forms and
   resource data committed (repr/java's output from jdk26u and `overlay/jdk/java.base`, provenance in
-  `jdk/provenance.edn`; `bin/jrt-convert update` regenerates them, `verify` checks them; standalone
-  S1); `jdk/edge.edn`, the JVM's answers j2g needs, so j2g uses no JVM reflection or ASM
+  `jdk/provenance.edn`; `bin/jrt-convert update` regenerates them, `verify` checks them, the vendoring tools reading
+  without javac by default since JN9f (`bin/lib/repr-java/host.bash`'s `repr_java_vendor_read`; `REPR_JAVA_VENDOR_READ=javac`
+  the old read; `bin/repr-java read --no-javac`); standalone S1); `jdk/edge.edn`, the JVM's answers j2g needs, so j2g uses no JVM reflection or ASM
   (`bin/j2g-edge update`, `verify`, `trace`; S2, doc/STANDALONE-NOTES.md); `bin/jrt`); `overlay/go/` patches Go's runtime.
   `jdk/javac/`: javac's Java forms (jdk26u's jdk.compiler with its generated sources,
   java.compiler, `CommandLine` and the java.base classes javac's world needs, unpatched; jrt's
@@ -251,7 +264,7 @@ Prior art:
   one, against the platform), its source list, provenance
   and edge (`jdk/javac/edge.edn`: what javac's world asks beyond `jdk/edge.edn`), made by
   `bin/javac-vendor convert`: since JN5 read by javac on Arbace (the fixpoint: javac's tool reads
-  javac's own sources into these forms), the edge recorded on the frozen JVM (`verify` byte for
+  javac's own sources into these forms; javac's read left to the cases `--no-javac` falls back on, JN9f), the edge recorded on the frozen JVM (`verify` byte for
   byte, `check`: j2g translates javac's world; doc/classes/JAVA-FRONTEND-SURVEY.md, JN2, JN5); the input of javac's tool build,
   `bin/arbace-go --build-java` (`target/arbace-go/<arch>/arbace-javac`, not shipped). javac runs on
   it (JN3) through its command line on Arbace, `jdk.internal.jrt.javac.Main` with an Arbace file
@@ -272,7 +285,7 @@ Prior art:
   `-main`; `:main-class CLASS`, its `main`; neither: `go/` a Go program, `arbace.build.go` alone),
   `src/`'s namespaces compiled by c2j and embedded (its `.clj` and `.cljc` translated into `.ae` by
   repr/clojure first, REAP7b), `java/`'s Java forms and the compiled namespaces translated by j2g with
-  the shipped build's compiled namespaces (the shared library `bin/lib/program.bash`, RPS97 (b); its `program_base` takes the first of `ARBACE_PROGRAM_BASE`, `target/arbace-go`, the gate's cache and stage 0's `target/seed`, which `bin/seed --build` makes, whose `aot.key` is the checkout's: `aot.runtime` beside it names their runtime; else stage 0's compiled again, else a
+  the shipped build's compiled namespaces (the shared library `bin/lib/program.bash`, RPS97 (b); its `program_base` takes the first of `ARBACE_PROGRAM_BASE`, `target/arbace-go`, the gate's build at the checkout's key (`ARBACE_GATE_EXES/KEY20/amd64`, computed as the gate does by `bin/lib/gate-cache.bash`'s `arbace_gate_cache`; `ARBACE_GATE_CACHE` overrides) and stage 0's `target/seed`, which `bin/seed --build` makes, whose `aot.key` is the checkout's: `aot.runtime` beside it names their runtime; else stage 0's compiled again, else a
   `--build` first; j2g's `--entry`, `--entry-arg`, `--resources`, `--java-namespaces`: the packages'
   namespaces no-op loaders), `go/`'s Go packages compiled (a package goi's checker refuses is a build error, RPS102 (b); REAP7b: listed in a goi table of the
   program's own, `bin/goi table --program-list FILE --program-root DIR`, and printed into the module by
@@ -280,10 +293,10 @@ Prior art:
   `_modules/`), into
   `target/arbace-go/programs/NAME/ARCH/NAME`, cached by key; `--build-program --check` (`make
   programs-check`) builds and runs the samples of `test/programs/` (Clojure, Java forms, Go forms,
-  mixed) against their runs (`bin/gate` the `mixed` sample, `make programs-essential`; `--full` all). Its namespaces are compiled to Go (`ARBACE_AOT=1`, the
+  mixed) against their runs (`bin/gate` the `mixed` sample and `bad-go`, the one that must not build, `make programs-essential`; `--full` all). Its namespaces are compiled to Go (`ARBACE_AOT=1`, the
   default since S6; `ARBACE_AOT=0`: evaluated from the image of prepared namespaces, as before):
   by the host when its runtime (`bin/lib/version.bash`'s `arbace_runtime_key`: `arbace/lang`,
-  `go`, `overlay/jdk`, `jdk` but j2g's edge) is the checkout's, one j2g run, started as the host
+  `go`, `overlay/jdk`, `jdk` but j2g's edge, `jdk/javac/`, `jdk/provenance.edn` and `overlay/jdk/javac/`) is the checkout's, one j2g run, started as the host
   compiles them (SA160), about 2.5 to 3 minutes; else by a first build of the program, two runs, about
   5.5 minutes (after a change to the runtime). The test build reuses the shipped build's compiled namespaces when made from the same sources and
   runtime (`target/arbace-go/aot.key`); `bin/build-go` keeps a cache of printed packages
@@ -328,7 +341,7 @@ Prior art:
   `langtools/tools/javac`, `hotspot/jtreg/compiler`'s plain, `@compile` and JIT-option runs) and Arbace's
   own JLS programs (`test/java/jls/`), each test's files put in a package of their own (`package tNNNNN; `
   before the first line), the JDK's runs recorded as data (`test/java/ref-jdk26.edn`, `--record-ref` with
-  the system's JDK, `--only` keeping and checking every other line; the check needs no JVM), the levels `read` (repr/java on javac's tool executable),
+  the system's JDK, `--only` keeping and checking every other line; the check needs no JVM), the levels `read` (repr/java on javac's tool executable), `nread` (JFS123 (b), outside the gate: the read without javac, `bin/repr-java read --no-javac`, its forms against `read`'s byte for byte, `test/java/check-nread.edn`, `make java-check-nread`),
   `interp` (each package required file by file as the REPL loads it, `--load do` the one-`do` mode, and
   `main` run on the executable, `test/java/run.ae`; status and stdout's digest, also with identity hash
   codes masked, against the JDK's), `compiled` (JC2, "As built: JC2": the tests translated by j2g in
@@ -363,7 +376,7 @@ Prior art:
   `bin/gate --audit [STEP...]` runs a check under strace and fails on a file of the checkout it reads
   that its declared inputs do not cover (the declarations are the audit's; `make gate-audit`), one skipped
   light check (the oldest pass) reruns each gate as the canary (`GATE_CANARY=0` not), `--prune` trims the
-  store (the last 5 passes and 30 days per step), the planner fails on a table that names no file, step or
+  store (the last 5 passes and 30 days per step) and the executables' directories but the newest 3, when older than a day, the planner fails on a table that names no file, step or
   host, a step over three times its latest passes is flagged, the `:heavy true` steps (measured peaks above
   8 GiB, `:mem-gib`) run each under `GATE_HEAVY_CMD` (default `bin/heavy-lock`: the host's big-job lock
   `ARBACE_HEAVY_LOCK`, by default the main checkout's `.tmp/big.lock`, taken in turn, a FIFO of tickets in
@@ -371,7 +384,8 @@ Prior art:
   gate itself does not (a caller that holds the lock sets `GATE_HEAVY_CMD=env`, else the gate waits for it),
   the `:heavy :inner` ones not: their tools take the lock around their heavy process alone (since GT5,
   GTS31 (b), `bin/lib/heavy.bash`: `bin/j2g`, repr/go's native reader and converter, repr/java's corpus
-  reads, under `ARBACE_HEAVY_CMD` unless `ARBACE_HEAVY_HELD`), their light work beside the other steps;
+  reads, under `ARBACE_HEAVY_CMD` unless `ARBACE_HEAVY_HELD`; outside the gate `ARBACE_HEAVY_CMD` is unset and the tools take
+  no lock: run a heavy command by hand as `bin/heavy-lock CMD`, or with `ARBACE_HEAVY_CMD="$PWD/bin/heavy-lock"`, an absolute path, as the tools run it from their own directory), their light work beside the other steps;
   since GT5 (doc/GATE-SURVEY.md, "As built: GT5") the inner keys: a step's `:parts` are one check each
   (native-check and repr/java's tree checks per corpus, `NAME.CORPUS`; the parked sub-projects' corpora
   `:clean-only`, run with `GATE_ALL_PARTS=1`), a step's `:outputs` (`GATE_OUT`) are kept with its pass and put
@@ -384,8 +398,8 @@ Prior art:
   builds all run before the checks and the plan is made again after them, `bin/gate --audit` records the
   namespaces a step loads (`ARBACE_LOADED_LOG`, RT.load) and fails on one of its `:never-loads`, its reducer
   `tools/gateaudit` (Go, GTS30 (a)), and every `--full` ends with `--prune` (GTS34 (a)); since GT7
-  (doc/GATE-SURVEY.md, "As built: GT7 (tooling)") `bin/gate [--full] --clean [--tag TAG]` (`make
-  gate-full-clean`) is the clean run at a tag: a fresh `git clone --shared` of HEAD's commit in
+  (doc/GATE-SURVEY.md, "As built: GT7 (tooling)") `bin/gate [--full] --clean [--tag TAG] [--only STEP,...|failed|changed]` (`make
+  gate-full-clean`, `make gate-full-clean-only`: a selection of steps rerun and merged into the tag's record) is the clean run at a tag: a fresh `git clone --shared` of HEAD's commit in
   `.tmp/gate-clean/SHA` with its own empty `.tmp/`, `target/` and `GOCACHE`, stage 0, the executables and
   javac's tool built fresh, no pass read, serial, every step run under the audit, every part, Java's levels
   on the read's cache forced (`JAVA_CHECK_FORMS_ONLY=1`), the externals checked by their pins first (`bin/gate
@@ -409,17 +423,21 @@ Prior art:
   (`bin/provenance-check`) compares the provenance files' reader hash with repr/java's; each step's wall and CPU seconds and peak RSS
   (busybox `time -v`) in `.tmp/gate/NAME.mem`, a 5 s memory sampler's `.tmp/gate/mem.tsv`. The
   steps: the Makefile's scripts (`make check-makefile`), the seed's hash, stage 0 built from
-  it (`bin/seed --build`, kept by the seed's and Go's pins; in a linked worktree without a current one of its own the main
-  checkout's when its pins are the worktree's, `bin/seed --kept`, hard-linked into the worktree's `target/seed`, `bin/seed --link`, GTS83 (a)), the executable and the test build by stage 0 (`bin/arbace-go
-  --gate-build`, cached by key in `ARBACE_GATE_CACHE`, for the gate `ARBACE_GATE_EXES/KEY`, and keyed by a hash of what they are built from,
-  `gate_key`: `arbace/` less repr/java, repr/haskell and repr/rust, `go/`, `overlay/` and `jdk/` less
-  javac's world and the provenance files, `x509roots/`, the fixtures' forms, the build's scripts, the
-  seed's and Go's pins; seconds when unchanged, else two Go-hosted builds, about 8 minutes: the
+  it (`bin/seed --build --no-aot`, kept by the seed's and Go's pins and its scripts' digest, GTS53 (a); in a linked worktree
+  without a current one of its own the main checkout's when its pins are the worktree's, `bin/seed --kept`, hard-linked into
+  the worktree's `target/seed`, `bin/seed --link`, GTS83 (a)), the executable and the test build by stage 0 (`bin/arbace-go
+  --gate-build`, cached by key in `ARBACE_GATE_EXES/KEY20` (`KEY20` the first 20 characters of `bin/arbace-go --gate-key`; the one function `bin/lib/gate-cache.bash`'s `arbace_gate_cache` computes it for the gate and for the scripts run by hand; `ARBACE_GATE_CACHE` overrides, and a miss replaces only a directory of its own making, built beside it and swapped in under a lock, so a second run waits and then hits), and keyed by a hash of what they are built from,
+  `gate_key`: `arbace/` less repr/java, repr/haskell, repr/rust and repr/c, `go/`, `overlay/` and `jdk/` less
+  javac's world and the provenance files, `x509roots/`, the fixtures' forms, `bin/lib` (less the repr checks' and
+  `gate-run.bash`), since GT7 `tamago/goroot` and `tools/godump` (goi's table), the build's scripts, the
+  seed's and Go's pins, Go's `VERSION` and `ARBACE_HOST_EXE`'s bytes when set; seconds when unchanged, else two Go-hosted builds, about 8 minutes: the
   test build reuses the executable's compiled namespaces), then
   concurrently the smoke test, the per-form differential check (`bin/diffcheck`, Futamura F2, since
   2026-10-17 in the essential gate: the oracle's forms evaluated against compiled by c2j, the Java
   forms interpreted against translated by j2g, against `test/diffcheck/known.edn`; about 5
-  minutes, 40 s cached), Clojure's suite on the test build (`test/arbace-go-results.edn`),
+  minutes, 40 s cached; run by hand, `bin/diffcheck`, `bin/generated-check` without EXE and `bin/clojure-tests --aot` without
+  `CLOJURE_TESTS_AOT_EXES` call `bin/arbace-go --gate-build` themselves and take its executables from that same
+  `ARBACE_GATE_EXES/KEY20`, a hit after a gate run of the checkout's key, else two Go-hosted builds), Clojure's suite on the test build (`test/arbace-go-results.edn`),
   the oracle against the frozen reference, and goi's essential check (`bin/goi check
   --essential`: `$GOROOT/test`'s programs of `test/goi/essential.txt` interpreted against gc), Java's
   essential check (`bin/java-check --essential`: the jtreg tests of `test/java/essential.txt`
@@ -434,7 +452,7 @@ Prior art:
   check --from`: the tool build's own j2g run, javac's world translated once; `verify`:
   javac's forms read afresh by javac on Arbace, `classes baseline samples jdk java.base`), then
   repr/java's checks on the tool (JN5, JFS9): `bin/repr-java
-  check --suite`, `bin/repr-java roundtrip --corpus baseline,samples,jdk --text` (then mode `:full`
+  check --suite`, `bin/repr-java roundtrip --corpus {part} --text` per corpus part (then mode `:full`
   printed back to the original Java, byte for byte; the classes level by javac on Arbace),
   `bin/jrt-convert verify` (`jdk/` converted afresh, byte for byte), `bin/clojure-tests
   --java-fixtures verify` (the verifies compare the provenance but its host, which names the tool
@@ -445,11 +463,11 @@ Prior art:
   the forms equal to javac's; these four by corpus since GT5), `bin/java-check --levels L --save` for each of
   read, interp, classes, diagnostics, compiled and print (Java's conformance check, every corpus, a step a level
   since GT5), then `--forms verify` (the essential tests' forms read afresh) and `bin/java-check --judge` (the
-  levels' results against the classes); then
-  `bin/arbace-go --fixpoint --g1 .tmp/arbace-go-gate` (G1 the gate's build, G2 and G3 built), then `bin/clojure-tests --aot` (Clojure's suite compiled, REAP3), then `bin/arbace-go --build-program --check` (every sample, REAP7b); repr/go's round trips (`bin/repr-go roundtrip amd64`, `linux/amd64`, and
-  `--text amd64`: mode `:full` printed back to the original text, byte for byte; then `bin/repr-go native-check --fresh`: the native reader's headers and trees equal to the helper's over every corpus, its raw forms resolved by the final ones, and the final forms of its dumps annotated by goi's checker equal to the helper's, as data and as `.ae` text in both modes), repr/clojure's
-  (`bin/repr-clojure check`, `--suite`, `--roundtrip`), `bin/x509roots-vendor verify`, `check`; goi (`bin/goi
-  annotations`, `test --gc`, `check --jobs 8`, then `check --aot --jobs 8`, after repr/go's round trips). Parked by the user, 2026-10-26, and out
+  levels' results against the classes; its essential step `java-check-judge` too); then
+  `bin/arbace-go --fixpoint --g1 "$GATE_CACHE"` (G1 the gate's build, `ARBACE_GATE_EXES/KEY20`, G2 and G3 built; `GATE_FRESH_G1=1`: G1 built afresh; a `--g1` directory not at the checkout's `gate_key` builds G1 too, three Go-hosted builds), then `bin/clojure-tests --aot` (Clojure's suite compiled, REAP3), then `bin/arbace-go --build-program --check` (every sample, REAP7b); repr/go's round trips (`bin/repr-go roundtrip amd64`, `linux/amd64`, and
+  `--text amd64`, each again with `--dirs`: mode `:full` printed back to the original text, byte for byte; then `bin/repr-go native-check --fresh`: the native reader's headers and trees equal to the helper's over every corpus, its raw forms resolved by the final ones, and the final forms of its dumps annotated by goi's checker equal to the helper's, as data and as `.ae` text in both modes), `bin/x509roots-vendor verify`, `check` (in the `repr-go` step); goi (`bin/goi
+  annotations`, `test --gc`, `check --jobs 8`, then `check --aot --jobs 8`, after repr/go's round trips); and last repr/clojure's
+  (`bin/repr-clojure check`, `--suite`, `--roundtrip`). Parked by the user, 2026-10-26, and out
   of `--full` (kept as they are, run by hand with their scripts and Makefile targets, revisited later
   piece by piece): the box (`bin/arbace-go --build --box` with `bin/tamago-vendor check`, the box's smoke test, oracle
   subset, `bin/box-suite`, `bin/goi check --box`, `bin/box-vendor roundtrip`, `kvm-tests`, `purego-check`),

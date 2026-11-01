@@ -35,9 +35,9 @@
 # here once they ran (the decision "after", an early cutoff).
 
 gate_env() {
-  local common main
-  common=$(git rev-parse --path-format=absolute --git-common-dir 2>"$TMPDIR/gate-git.err") && [ -d "$common" ] \
-    && [ "$(basename "$common")" = .git ] && main=$(dirname "$common") || main=$root
+  local main
+  . "$root/bin/lib/gate-cache.bash" # the main checkout and the executables' directory, shared with the tools run by hand (GTS120)
+  main=$(arbace_main_checkout "$root")
   store=${ARBACE_GATE_STORE:-$main/.tmp/gate-pass}
   export ARBACE_HEAVY_LOCK=${ARBACE_HEAVY_LOCK:-$main/.tmp/big.lock}
   GATE_HEAVY_CMD=${GATE_HEAVY_CMD:-$root/bin/heavy-lock}
@@ -48,7 +48,7 @@ gate_env() {
   # GTS52 (a): TamaGo's bin/ first on every step's PATH (and the tools'), so that a program or script
   # that runs `go` runs the pinned toolchain, never the host's (no build may use the host's go)
   PATH=${ARBACE_GOROOT:-/root/tamago-go}/bin:$PATH; export PATH
-  exes=${ARBACE_GATE_EXES:-$main/.tmp/gate-exe}
+  exes=$(arbace_gate_exes "$root")
   mkdir -p "$(dirname "$ARBACE_HEAVY_LOCK")" "$exes" || return 1
   # the executables and javac's tool by the key of what they are built from, one directory each,
   # shared by the worktrees (GTS24 (a)): a worktree whose check runs finds main's build at the same key
@@ -58,7 +58,10 @@ gate_env() {
   # GTS71 (c), GTS87 (a): javac's tool key handed to the steps, for bin/lib/javac-key.bash's arbace_javac_fresh
   # (repr_java_host, bin/javac-vendor check --from): the tool's .key compared with it, none of its sources hashed
   export GATE_JAVAC_KEY=$jkey GATE_JAVAC_KEY_ROOT=$(cd "$root" && pwd -P)
-  export ARBACE_GATE_CACHE=$exes/${gkey:0:20} GATE_CACHE=$exes/${gkey:0:20} GATE_JAVAC_DIR=$exes/javac-${jkey:0:20}
+  # the gate computes the directory whatever ARBACE_GATE_CACHE the caller has (an override is for the tools run by hand)
+  ARBACE_GATE_CACHE=$(unset ARBACE_GATE_CACHE; arbace_gate_cache "$root" "$gkey") || return 1
+  GATE_CACHE=$ARBACE_GATE_CACHE GATE_JAVAC_DIR=$exes/javac-${jkey:0:20}
+  export ARBACE_GATE_CACHE GATE_CACHE GATE_JAVAC_DIR
   export GATE_EXE=$GATE_CACHE/amd64/arbace GATE_TESTS=$GATE_CACHE/amd64/arbace-tests
   export GATE_JAVAC=$GATE_JAVAC_DIR/arbace-javac GATE_JOBS=${GATE_TEST_JOBS:-12}
   # Java's check's cache of read forms, shared by the worktrees (GT5: keyed by the sources, the options,
@@ -460,6 +463,14 @@ gate_prune() {  # gate_prune [--dry-run]
     while IFS= read -r f; do
       [ -n "$f" ] || continue
       b=$(basename "$f")
+      # a miss's copy (KEY20.tmp.PID) or old directory (KEY20.old.PID, bin/arbace-go's gate_miss): never one of the
+      # newest 3, removed when an hour old (younger: a build under way). The hidden .KEY20.lock files beside the
+      # directories stay: unlinking a lock file someone has open lets two runs lock different inodes
+      case $b in *.tmp.*|*.old.*)
+        [ "$pat" = gate ] || continue # once, not in the javac pass too
+        [ $(( now - $(stat -c %Y "$f") )) -ge 3600 ] || continue
+        echo "gate --prune: ${dry:+would remove }executables $f (a miss's leftover)"
+        [ -n "$dry" ] || rm -rf "${f:?}"; continue ;; esac
       case $pat in javac) case $b in javac-*) ;; *) continue ;; esac ;; gate) case $b in javac-*) continue ;; esac ;; esac
       i=$((i + 1)); [ $i -gt 3 ] || continue
       [ $(( now - $(stat -c %Y "$f") )) -ge 86400 ] || continue
