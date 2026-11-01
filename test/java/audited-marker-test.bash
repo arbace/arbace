@@ -14,6 +14,7 @@
 #      "held (an :audited class, ...)" lines (both of check.ae's forms, the literal taken from check.ae).
 #   D. audit-070's answers to 088's findings 1-3 as data: java-judge's :uses, :audit-timeout's keys,
 #      levels-known.edn, check.ae's refusal of --record with --audited (queue 093).
+#   E. check()'s head (its options) run alone: --record refused under a tracer unless --save (queue 093).
 # Usage: bash test/java/audited-marker-test.bash   (AUDITED_TEST_REV=REV: the files at a git revision of
 # this checkout instead of its working tree, e.g. 07194e71 to see it fail before audit-070). Needs
 # bash, awk, strace (A1-A3 skipped without it, or when this shell is traced already), joker (C skipped
@@ -180,6 +181,26 @@ inlk=""
 for id in $(grep -oE '"t[0-9]+"' "$t/at.edn" | tr -d '"'); do grep -q "\[\"$id\"" "$t/lk.edn" && inlk="$inlk $id"; done
 if [ -z "$inlk" ]; then ok "D3 levels-known.edn names none of the class's examples (088 finding 2)"; else no "D3 levels-known.edn still names:$inlk"; fi
 if awk '/\(when \(and record\? \(seq audited\)\)/ { g = 1 } g && /System\/exit 2/ { e = 1 } /\(doseq \[lv \(map keyword/ { exit !(g && e) }' "$t/check.ae"; then ok "D4 the report refuses --record with --audited before the levels (088 finding 3)"; else no "D4 no refusal of --record with --audited in check.ae's report"; fi
+
+# ---- E: the run's own --record under a tracer (088 finding 3, the part audit-070 left: no marker reaches it)
+# check()'s head (its options, up to the executable's choice) run alone, then "proceed"
+awk '/^check\(\) \{/ { on = 1 } on && /# the executable interprets/ { exit } on { print }' "$t/java-check" > "$t/check.body"
+if [ ! -s "$t/check.body" ]; then no "E: no check() in bin/java-check"
+else
+  { echo 'set -euo pipefail'; cat "$t/check.body"; echo '  echo proceed'; echo '}'; echo 'check "$@"'; } > "$t/checkhead.bash"
+  ehead() { "$@" > "$t/e.out" 2>&1; est=$?; eout=$(tail -1 "$t/e.out"); }
+  ehead bash "$t/checkhead.bash" --levels interp --record
+  if [ $est = 0 ] && [ "$eout" = proceed ]; then ok "E1 untraced --record: runs"; else no "E1 untraced --record (status $est: $eout)"; fi
+  if ! command -v strace > /dev/null || [ "${traced_now:-0}" != 0 ]; then skip "E2-E4: no strace, or traced already"
+  else
+    ehead strace "${strace_args[@]}" bash "$t/checkhead.bash" --levels interp --record
+    if [ $est = 2 ] && grep -q 'record under a tracer' "$t/e.out"; then ok "E2 traced --record (no --save): refused, status 2"; else no "E2 traced --record ran (status $est: $eout)"; fi
+    ehead strace "${strace_args[@]}" bash "$t/checkhead.bash" --levels interp --record --save "$t/esave"
+    if [ $est = 0 ] && [ "$eout" = proceed ]; then ok "E3 traced --record --save: runs (--save never records)"; else no "E3 traced --save (status $est: $eout)"; fi
+    ehead strace "${strace_args[@]}" bash "$t/checkhead.bash" --levels interp
+    if [ $est = 0 ] && [ "$eout" = proceed ]; then ok "E4 traced, no --record: runs"; else no "E4 traced (status $est: $eout)"; fi
+  fi
+fi
 
 echo "audited-marker-test: $((n - bad)) of $n"
 if [ "$bad" = 0 ] && [ "$n" -gt 0 ]; then echo PASS; exit 0; else echo FAIL; exit 1; fi
