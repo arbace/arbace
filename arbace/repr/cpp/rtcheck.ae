@@ -85,11 +85,43 @@
   [st ^String err]
   (boolean (and (= st "1") err (re-find #"(?m)^[^\s:][^:\n]*:[0-9]+:[0-9]+: (fatal )?error: " err))))
 
+(defn- failure-kind
+  "The kind of a cxxdump status that is not a rejection (CP130 (c)): 124, our timeout; else the oracle's crash or kill."
+  [st] (when (and st (not= st "0") (re-matches #"[0-9]+" st)) (if (= st "124") :timeout :crash)))
+
+(defn record
+  "WORK's oracle rejections and failures as the entry of its corpus (WORK/list.key) in ORACLE-FILE (CP130 (c)): the names rejected by clang's
+  own diagnostics and the names whose dump failed, by kind; the other corpora's entries kept."
+  [^String work ^String oracle-file]
+  (let [key (let [f (java.io.File. (str work "/list.key"))] (when (.exists f) (str/trim (slurp f))))
+        _ (when-not (seq key) (println "record: WORK has no list.key (the list's header line or --corpus)") (System/exit 2))
+        names (for [l (str/split-lines (slurp (str work "/list.tsv"))) :when (seq l)] (first (str/split l #"\t")))
+        sts (into {} (for [nm names] [nm [(status (str work "/orig/" nm ".status"))
+                                          (some-> (bytes-of (str work "/orig/" nm ".err")) (String. "UTF-8"))]]))
+        rej (vec (sort (for [[nm [st err]] sts :when (oracle-rejects? st err)] nm)))
+        fails (into (sorted-map) (for [[nm [st err]] sts :when (and (failure-kind st) (not (oracle-rejects? st err)))] [nm (failure-kind st)]))
+        all (if (.exists (java.io.File. oracle-file)) (read-string (slurp oracle-file)) {})
+        all (assoc-in all [:corpora key] {:rejected rej :fails fails})
+        out (str ";; The oracle's rejections (clang's own diagnostics) and failures (a dump that failed: :timeout, :crash) of the round trip's corpora, by name\n"
+                 ";; (review 018's CP130 (c); bin/repr-cpp roundtrip --record-oracle): a rejection or failure not listed fails the round trip. Read with the Clojure reader.\n"
+                 "{:corpora {\n"
+                 (str/join (for [[k v] (sort-by key (:corpora all))]
+                             (str " " (pr-str k) "\n {:fails " (pr-str (:fails v)) "\n  :rejected [" (str/join "\n   " (map pr-str (:rejected v))) "]}\n")))
+                 "}}\n")]
+    (spit oracle-file out)
+    (println (str "record: " key ": " (count rej) " rejected, " (count fails) " failing, in " oracle-file))))
+
 (defn judge
   "The levels of each file of WORK's list, against the known file: WORK/results.tsv (name, verdict, class, read, l1,
   l3, l4 g++, l4 clang, text forms) and WORK/summary.edn; prints the table's line. Exit status 1 when a file fails."
-  [^String work ^String known-file & [objects]]
+  [^String work ^String known-file & [objects oracle-file]]
   (let [known (if (.exists (java.io.File. known-file)) (read-string (slurp known-file)) {})
+        ;; CP130 (c): the oracle's rejections and failures of the corpus WORK/list.key names, recorded by name (and kind) in
+        ;; ORACLE-FILE: a rejection or failure not recorded fails; no key or no entry: unrecorded (any rejection stands)
+        okey (let [f (java.io.File. (str work "/list.key"))] (when (.exists f) (let [k (str/trim (slurp f))] (when (seq k) k))))
+        orec (when (and okey oracle-file (.exists (java.io.File. ^String oracle-file)))
+               (get-in (read-string (slurp oracle-file)) [:corpora okey]))
+        rejected-rec (set (:rejected orec)) fails-rec (:fails orec {})
         kfiles (:files known {})
         ;; level 4 (review 007's finding 7): the objects are required unless the run had --no-objects; a compiler may fail on
         ;; the original only where the known file's :orig-fails records it (NAME -> the compilers, #{:gxx :clang})
@@ -106,6 +138,11 @@
                                 (oracle-rejects? o (some-> (bytes-of (str work "/orig/" nm ".err")) (String. "UTF-8"))) "oracle-rejects"
                                 (nil? o) "no-dump"
                                 :else (str "dump-error-" o))
+                     ;; CP130 (c): against the record of this corpus' oracle failures
+                     read (cond (nil? orec) read
+                                (and (= read "oracle-rejects") (not (contains? rejected-rec nm))) "oracle-rejects-new"
+                                (and (re-matches #"dump-error-[0-9]+" read) (= (get fails-rec nm) (failure-kind o))) "oracle-fails"
+                                :else read)
                      ;; the dumps' own failures (review 018's R1): the original's -norm dump, and the print's dump and -norm dump
                      ;; failing for another reason than clang's rejection of the print are the check's failure, never known
                      err-of (fn [side nm] (some-> (bytes-of (str work "/" side "/" nm ".err")) (String. "UTF-8")))
@@ -146,7 +183,8 @@
                      fits (get {:print-rejected #{:l1-rejected} :forms-differ #{:l1-differs} :ast-differs #{:l3}
                                 :objects-differ #{:l4 :l4-gxx} :gxx-objects-location #{:l4-gxx} :read-crash #{:read}} k #{})
                      ;; a dump that failed for another reason than clang's rejection is the check's failure, never known
-                     verdict (cond (= read "oracle-rejects") "oracle-rejects" pass "pass"
+                     verdict (cond (= read "oracle-rejects") "oracle-rejects" (= read "oracle-fails") "oracle-fails" pass "pass"
+                                   (= read "oracle-rejects-new") "fail"
                                    (or (= read "no-dump") (str/starts-with? read "dump-error")) "fail"
                                    (and k (contains? fits first)) "known" :else "fail")]
                  [nm verdict (if k (name k) "-") read (str l1) (str l3) (str g) (str c) (or texts "-") (or full "-") (if first (name first) "-")]))
@@ -158,6 +196,10 @@
                  :refused (cnt #(= (nth % 3) "refused"))
                  :crash (cnt #(= (nth % 3) "crash"))
                  :oracle-rejects (cnt #(= (nth % 3) "oracle-rejects"))
+                 :oracle-fails (cnt #(= (nth % 3) "oracle-fails")) :oracle-rejects-new (cnt #(= (nth % 3) "oracle-rejects-new"))
+                 :oracle-corpus (when orec okey)
+                 :oracle-stale (when orec (count (filter (fn [nm] (let [r (some #(when (= (first %) nm) (nth % 3)) rows)] (and r (not (#{"oracle-rejects" "oracle-fails"} r)))))
+                                                         (concat rejected-rec (keys fails-rec)))))
                  :dump-errors (cnt #(or (= (nth % 3) "no-dump") (str/starts-with? (nth % 3) "dump-error")))
                  :l1 (cnt #(= (nth % 4) "true")) :l3 (cnt #(= (nth % 5) "true"))
                  :l4-gxx (cnt #(= (nth % 6) "true")) :l4-gxx-orig-fails (cnt #(= (nth % 6) ":orig-fails"))
@@ -181,4 +223,5 @@
   (case cmd
     "run" (apply run args)
     "judge" (apply judge args)
+    "record" (apply record args)
     (do (println "rtcheck: run LIST DUMPS SRC-ROOT FORMS PRINT OUT") (System/exit 2))))
