@@ -1800,3 +1800,12 @@ Re-review 072 (at `04a91749`) closed 056's findings 1 (the 0.8 margin, probed un
 **Proposals** (OC160; options, recommendation first, none decided)
 
 - **OC160 A gate step for oi's records.** `bin/oi divergences` (which now runs `bin/oi pins` first), `bin/oi divergences --aot`, `suite divergences [--aot]` judge the committed records with no run, in seconds; no gate step runs them, and the crops have no gate steps before the merge (OC120 (b)). (a) at the merge, add one light essential step `oi-divergences` to `test/gate/steps.edn` (command: the four judgments, inputs: `test/ocaml/*.edn`, `pins-attested.tsv`, `bin/oi`, `bin/lib/oi/*`; host: stage 0), so a pin edited without re-attesting, or a record out of its classes, fails the merge's gate; (b) also a step for the three test scripts (`judges_test`, `floors_test`, `oi_key_test`), `oi_key_test` and the stage-0 cases needing the tree, so `:heavy`/full only; (c) none (as built: by hand). *Recommended: (a)*, the merge's essential gate adds the light `oi-divergences` step; (b) with OC120 (b)'s window.
+
+## Decided (2026-11-01, the user): OC130, OC131, OC160
+
+From main's doc/JOURNAL.md, "2026-11-01: the user's decisions after the tag" (VM report 103's sheet 3, the survey's
+picks).
+- **OC130 (b) with OC120 (b):** `dumps_determinism_test.bash` in the gate step of OC120 (b), beside `judges_test`.
+- **OC131 (a):** the dependency-order build not now; the streams stay sequential.
+- **OC160 (a):** a light `oi-divergences` step in the merge's essential gate (the four judgments of the committed
+  records, stage 0).
