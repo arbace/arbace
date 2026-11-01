@@ -17,6 +17,14 @@ chk "OI_GOMEMLIMIT is in the key" differ "$(OI_GOMEMLIMIT=300MiB bin/oi key)"
 chk "OI_GOMAXPROCS is in the key" differ "$(OI_GOMAXPROCS=2 bin/oi key)"
 chk "the suite corpus has a key of its own" differ "$(bin/oi suite key)"
 
+# re-review 042's finding 4: the opam pins are in the key; a part of the key that cannot be had fails the key, it does not shorten it
+sed 's/0\.17\.0/0.17.1/' "$root/.tmp/repr-ocaml/opam-pins.txt" > "$root/.tmp/w/opam-pins.changed"
+chk "the opam pins are in the key" differ "$(OI_OPAM_PINS=$root/.tmp/w/opam-pins.changed bin/oi key)"
+for v in OI_OPAM_PINS OI_OCDUMP_KEY; do
+  OI_TIMEOUT=30 env "$v=$root/.tmp/w/missing" bin/oi key > "$root/.tmp/w/key.out" 2> "$root/.tmp/w/key.err"; st=$?
+  if [ "$st" != 0 ] && [ ! -s "$root/.tmp/w/key.out" ]; then echo "ok   a missing part ($v) fails the key"; else echo "FAIL a missing part ($v): exit $st, key $(cat "$root/.tmp/w/key.out")"; bad=1; fi
+done
+
 # re-review 042's finding 5: a checkout without .tmp/oi and .tmp/o7 (a clean run): the verbs find their directories (a copy of bin/ in a scratch root)
 R=$root/.tmp/w/oi-key-root; rm -rf "$R"; mkdir -p "$R"; cp -r "$root/bin" "$R/bin"
 (cd "$R" && bin/oi oi-limits > "$R.log" 2>&1)

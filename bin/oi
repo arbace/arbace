@@ -67,6 +67,9 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 
 OI_DIR=$root/.tmp/oi
 OCD=$root/.tmp/ocdump/ocdump
+OCDUMP_KEY=${OI_OCDUMP_KEY:-$root/.tmp/ocdump/key}
+# the opam packages' pins (version, URL, hashes) as `bin/repr-ocaml corpus fetch` wrote them: the content of the suite's opam rows
+OPAM_PINS=${OI_OPAM_PINS:-$root/.tmp/repr-ocaml/opam-pins.txt}
 TOP=$root/.tmp/repr-ocaml/ocaml-5.5.0
 LIB=$OI_DIR/lib
 TESTLIB=$OI_DIR/testlib
@@ -125,8 +128,13 @@ stdlib_flags() {
   esac
 }
 
+# a part of a key that cannot be had fails the key (re-review 042's finding 4: a failing part ended the group early and the key was the hash of
+# what came before, so a different limit or corpus gave the same key)
 stdlib_key() {
-  { cat "$OI_DIR/../ocdump/key" 2>&1; sha256sum "$TOP/stdlib/"*.ml "$TOP/stdlib/"*.mli "$TOP/testsuite/lib/testing.ml" "$TOP/testsuite/lib/testing.mli"; cat "$0"; } | sha256sum | cut -d' ' -f1
+  local k s
+  k=$(cat "$OCDUMP_KEY") || { echo "oi: key: cannot read ocdump's key $OCDUMP_KEY" >&2; return 1; }
+  s=$(sha256sum "$TOP/stdlib/"*.ml "$TOP/stdlib/"*.mli "$TOP/testsuite/lib/testing.ml" "$TOP/testsuite/lib/testing.mli") || { echo "oi: key: the stdlib's sources cannot be read" >&2; return 1; }
+  { echo "$k"; echo "$s"; cat "$0"; } | sha256sum | cut -d' ' -f1
 }
 
 cmd_stdlib() {
@@ -360,8 +368,16 @@ oi_one() {
 # the key of an oi run: the driver's forms and the stdlib's (which holds ocdump's and this script's), so a check.tsv written
 # by another oi is not read as the current one's (the AOT levels' OI column, review 008's finding 1)
 # plus every other input of a row (re-review 030's finding 3): the limits (OI_TIMEOUT, OI_GOMEMLIMIT, OI_GOMAXPROCS), the library bin/lib/oi/
-# (suite.bash runs the suite's rows) and the corpus file CORPUS (each program's flags, arguments and environment)
-oi_key() { { forms_key; stdlib_key; echo "timeout=$TIMEOUT gomemlimit=$GOMEMLIMIT gomaxprocs=$GOMAXPROCS"; sha256sum "$root"/bin/lib/oi/*; sha256sum < "$1"; } | sha256sum | cut -d' ' -f1; }
+# (suite.bash runs the suite's rows), bin/lib/limit.bash, the opam pins (re-review 042's finding 4) and the corpus file CORPUS (each program's flags, arguments and environment)
+oi_key() {
+  local f s p l c
+  f=$(forms_key) || { echo "oi: key: the driver's forms cannot be hashed" >&2; return 1; }
+  s=$(stdlib_key) || return 1
+  p=$(cat "$OPAM_PINS") || { echo "oi: key: the opam pins $OPAM_PINS cannot be read (bin/repr-ocaml corpus fetch)" >&2; return 1; }
+  l=$(sha256sum "$root"/bin/lib/oi/* "$root/bin/lib/limit.bash") || { echo "oi: key: bin/lib cannot be hashed" >&2; return 1; }
+  c=$(sha256sum < "$1") || { echo "oi: key: the corpus $1 cannot be read" >&2; return 1; }
+  printf '%s\n' "$f" "$s" "timeout=$TIMEOUT gomemlimit=$GOMEMLIMIT gomaxprocs=$GOMAXPROCS" "$p" "$l" "$c" | sha256sum | cut -d' ' -f1
+}
 
 # oi_rows_for CHECK OUT SELECTED ONE-FN NFIELDS CORPUS: oi's rows of the selected run programs (SELECTED: a corpus file) into OUT: CHECK's
 # (bin/oi check's, or the suite's) rows when its key file is the current oi_key, and a run of the programs it does not hold
