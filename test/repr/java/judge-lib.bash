@@ -17,9 +17,9 @@ make_fake_root() {
   local d=$1 m
   mkdir -p "$d/bin/lib" "$d/test/repr/java/expected" "$d/jdk/src"
   cp -r "$root/bin/lib/repr-java" "$d/bin/lib/repr-java"
-  cp "$root/test/repr/java/"*.bash "$d/test/repr/java/" 2> /dev/null
-  cp "$root"/test/repr/java/*-known.edn "$d/test/repr/java/" 2> /dev/null
-  for f in "$root"/test/repr/java/*.edn; do cp "$f" "$d/test/repr/java/" 2> /dev/null; done
+  cp "$root/test/repr/java/"*.bash "$d/test/repr/java/" 2>> "$d/.cp.err"
+  cp "$root"/test/repr/java/*-known.edn "$d/test/repr/java/" 2>> "$d/.cp.err"
+  for f in "$root"/test/repr/java/*.edn; do cp "$f" "$d/test/repr/java/" 2>> "$d/.cp.err"; done
   for m in m1 m2; do
     mkdir -p "$d/jdk/src/$m/share/classes/a"
     echo "class A$m {}" > "$d/jdk/src/$m/share/classes/a/A.java"

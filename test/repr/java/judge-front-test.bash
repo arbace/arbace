@@ -26,10 +26,10 @@ printf ';; comment :bridges #{x}\n{:bridges #{}}\n' > "$t/k0.edn"
 printf '{:bridges #{:model/type}}\n' > "$t/k1.edn"
 printf '{:bridges #{ :a\n :b }\n :m {}}\n' > "$t/k2.edn"
 printf '{}\n' > "$t/k3.edn"
-judge_bridges_empty "$t/k0.edn" 2> /dev/null; expect_rc "bridges empty (a comment names one)" 0 $?
-judge_bridges_empty "$t/k1.edn" 2> /dev/null; expect_rc "one bridged read listed: refused" 1 $?
-judge_bridges_empty "$t/k2.edn" 2> /dev/null; expect_rc "several, over lines: refused" 1 $?
-judge_bridges_empty "$t/k3.edn" 2> /dev/null; expect_rc "no :bridges key" 0 $?
-judge_bridges_empty "$root/test/repr/java/attr-check-known.edn" 2> /dev/null; expect_rc "the committed attr-check known file" 0 $?
+judge_bridges_empty "$t/k0.edn" 2> "$t/stderr"; expect_rc "bridges empty (a comment names one)" 0 $?
+judge_bridges_empty "$t/k1.edn" 2> "$t/stderr"; expect_rc "one bridged read listed: refused" 1 $?
+judge_bridges_empty "$t/k2.edn" 2> "$t/stderr"; expect_rc "several, over lines: refused" 1 $?
+judge_bridges_empty "$t/k3.edn" 2> "$t/stderr"; expect_rc "no :bridges key" 0 $?
+judge_bridges_empty "$root/test/repr/java/attr-check-known.edn" 2> "$t/stderr"; expect_rc "the committed attr-check known file" 0 $?
 grep -q 'judge_bridges_empty "\$known"' "$root/bin/lib/repr-java/front-check" && ok "front-check's attr mode calls it" || bad "front-check's attr mode calls it"
 finish
