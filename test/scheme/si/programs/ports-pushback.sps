@@ -15,3 +15,13 @@
   (show 'n2 a d))
 (let* ([p (open-string-input-port "abcde")] [a (read-char p)] [b (try (unget-char p #\a))] [c (set-port-position! p 2)] [d (read-char p)])
   (show 'n2t a d))
+;; N4: fresh-line after an extraction, the length of string ports, nonblocking mode of file ports
+(let-values ([(p ex) (open-string-output-port)])
+  (put-string p "a") (ex) (fresh-line p) (put-string p "z") (show 'fl (ex)))
+(show 'len (port-has-port-length? (open-string-input-port "ab")) (port-length (open-string-input-port "abc")))
+(let ([name "ports-pushback.tmp"])
+  (let ([o (open-output-file name 'replace)]) (put-string o "x") (close-port o))
+  (let ([p (open-input-file name)])
+    (show 'nb (port-has-port-nonblocking?? p) (port-nonblocking? p))
+    (close-port p))
+  (delete-file name))
