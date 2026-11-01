@@ -6769,3 +6769,11 @@ The helper's re-review (report 019) left two of the four partly closed; each fix
   with `jdk/platform/provenance.edn`'s pin, `jdk/javac/platform.sha256`'s `java.base` line, so a pack written with
   `REPR_JAVA_PACK_ANY=1` (which records the foreign directory's hash) fails it, not only `--full`'s `platform-check`. Tested on a
   `git archive` copy: the committed pack's line passes (`:java.base 5327f4cbdc9b`); with `:java.base` rewritten it fails.
+- **A1, `field-order-check` against javac's enum.** Finding 4's check compared two checkout tables (`tr/field-order` and
+  `tag-classes`); a tag the next JCTree.java adds is in neither. It now also compares `tag-classes` with `JCTree.Tag`'s values
+  (`tag-kws`, reflected on javac's tool) less `NO_TAG`, `NULLCHK` and `LETEXPR` (no parser's tree has them), as
+  `[tag :javac-only nil]` and `[tag :not-javac nil]`; the load-time assertion throws on either. jdk26u's enum, read from the
+  committed forms `jdk/javac/forms/com/sun/tools/javac/tree/JCTree.ae`: 108 tags, the 105 of `tag-classes` and those three.
+  Tested on a copy of the functions under joker with the enum stubbed from those forms: no difference as committed, and a tag
+  added to the enum is reported. Its run on javac's tool (the assertion at the first read) is JN10p.5's, with the rest of the
+  half; `javac_tree.ae` is in the reader hash and the tool's key, so this edit joins the batched rewrite.
