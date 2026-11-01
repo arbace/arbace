@@ -1664,3 +1664,48 @@ The cost: the stdlib's compile passes take 6 s, not 2; compiler-sources 39 s (7 
 
 **Shipped:** `bin/repr-ocaml`, `test/ocaml/floors.tsv`, `test/ocaml/dumps_determinism_test.bash`, this section. **Rule slips:** none beyond a stray 25-minute waiting monitor started while another was running (stopped at once).
 
+
+## As built: re-review 030's fixes (2026-11-01)
+
+Re-review 030 (the helper VM's, at `3b2bce6b`, before OC122; light only) made seven findings. Each was checked against the code at `00034776`; all hold except where noted. Each fix is its own
+commit on `ocaml-o1` with a test that fails before and passes after, run in the light tier (`ARBACE_HOST_EXE` the seed's stage 0, 4 jobs, no gate, no lock).
+
+| # | holds | the fix | the test |
+|---|---|---|---|
+| 1 | yes (the record's header said "bin/oi suite expect;", the generated one "... --record;") | a whole `bin/oi suite expect` compares the rows (`^ \[`) of the run with the record's, as `--only` does, so a header edit cannot fail the check; and the record's first line re-recorded (both, as the review offered) | `judges_test.bash`: a whole run passes against the committed record (370 tests: 366 pass, 4 skip); a record with another header passes (before: `diff` `1c1`, exit 1) |
+| 2 | partly. A corpus with no row failed (opam, `--cmi testsuite|whiml|opam-*`): yes. `RECORD=0` recorded: yes. The stdlib's flapping floor: **no longer after OC122** | `floor` fails a missing row only for the corpora the default invocations name (the four `cmi-*` corpora, the six dump corpora, the spec); for any other it prints "no count recorded (not checked; --record)" and passes; `RECORD` records only as `1`; `REPR_OCAML_FLOORS` names another floors file (for the test) | `floors_test.bash` (7 cases: an opam and a testsuite-cmi corpus without a row pass, a default corpus without a row fails, at/below the row, `RECORD=0` leaves the file, `RECORD=1` writes); `dumps_determinism_test.bash 8`: 116 in 8 of 8 runs, one list of files; `types --jobs 8` and `--jobs 16`: 116 |
+| 3 | yes | `oi_key` covers `OI_TIMEOUT`, `OI_GOMEMLIMIT`, `OI_GOMAXPROCS`, `bin/lib/oi/*` and the hash of the corpus file the rows are of (`$OI_DIR/corpus.tsv`, or the suite's `$S/corpus.tsv`: each program's flags, arguments, environment); new verbs `bin/oi key` and `bin/oi suite key` print it | `oi_key_test.bash` (5 cases; before: no verb); `aot_oi_column_test.bash` still absent/partial/stale: ok (86 s) |
+| 4 | yes (`status ` 43 of 88 entries; the row of a program that fails otherwise with the same status is byte-identical) | a known entry may carry a fourth element: a prefix (or vector) of the run's output sha256; a listed program with that status and other output is failing in both judges. `oi-known.edn`: the 22 `status ` entries pinned (oi's digests, two runs equal); `aot-known.edn`: the 17 whose AOT output is oi's (OI column `same`) pinned with oi's digest; **4 stay unpinned** (`effect-syntax/coroutines`, `misc/sieve`, `parallel/test_issue_11094`, `statmemprof/start_stop`: their AOT output differs from oi's, and the AOT level was not rerun whole). The 10 `timeout ` kinds still take any hang (a timeout names no output; the judges class a timeout `slow` only for the listed programs) | `judges_test.bash`: a known status with its digest stays known, with another digest is `FAILING` (oi and AOT); the old judges ignore the fourth element |
+| 5 | yes, both halves | the rerun's CPU limit is `OI_TIMEOUT` plus `O2J_LOAD_ALLOWANCE` (default 20 s, the library's load) and the wall cap four times that (`bin/oi aot-cpu`: 140 560); the reason text stays "timeout 120s of CPU"; `vs-oi` returns `-` when both levels timed out (status 124, 137, 152): the 4 rows named (`callback/test_finaliser_gc`, `weak-ephe-final/weaktest`, program corpus; `callback/test_gc_alarm`, `opam/uutf/test_uutf`, suite) re-recorded from `differs` to `-` (the judged rerun reproduces them) | `judges_test.bash`: a double timeout with different partial digests is not a change; `aot-cpu` prints `140 560`, and `65 260` with `OI_TIMEOUT=60 O2J_LOAD_ALLOWANCE=5`. The finding-6 test of the earlier review (`OI_TIMEOUT=1`) sets the allowance to 0 |
+| 6 | yes, both | an unreadable record is an error (grep's status 2 is checked, and the record is tested first); an `--only` that selects nothing says "no test selected" (`xargs -r`, and the list tested) | `judges_test.bash`: a missing `OI_EXPECT_RECORD` exits 2 with "cannot be read" (before: exit 0); an empty selection exits 2 with "no test selected" (before: a bogus `bash` row) |
+| 7 | (a) yes; (b) yes | (a) oi's own level, program and suite corpus, runs a program under `limited_cpu` (`OI_TIMEOUT` seconds of CPU, wall cap twice that; 137 and 152 are `timeout 120s` rows, as 124), so the flap class of finding 2 of review 008 is closed at oi's level too; (b) the rollup needing the tree is documented here (a gate step has it; no change) | `judges_test.bash`: `OI_TIMEOUT=1 ARBACE_CPU_LOG=... bin/oi check --only misc/taku` is a `timeout 1s` row with a line in the CPU log (status 137); before: no log line |
+
+**The numbers** (judged against the records; "before" is the run at the previous head where one was made)
+
+| | before | after |
+|---|---|---|
+| `bin/oi suite expect`, whole | exit 1 on the header line alone (370 tests: 366 pass, 4 skip, rows equal) | exit 0, 54 s |
+| `bin/oi check` (program corpus, 309) | 273 pass, 0 failing (6 min 37 s, last section) | 273 pass, 0 failing, 0 CHANGED, with the pins (6 min 38 s) and again with `limited_cpu` (6 min 38 s) |
+| `bin/oi suite check` (108) | 87 pass | 87 pass, 0 failing, 0 CHANGED (2 min 53 s, with `limited_cpu`) |
+| `bin/oi check --aot`, 8 programs (the two double timeouts, three pinned `status ` programs, `basic/arrays`, `misc/sorts`) | | exit 0, 0 CHANGED: 1 pass, 6 fail (known), 1 slow; OI column: 5 same, 1 differs, 2 `-` (the double timeouts); the three timeouts stopped at 141 s of wall time (140 s of CPU) (9 min 50 s) |
+| `bin/repr-ocaml dumps` (six corpora), judged | exit 0 | exit 0, 3 min 7 s; compile alone 1, 116, 136, 20, 7, 1,057; `dumps opam-fmt` exit 0 (before: exit 1, "no count recorded") |
+| `bin/repr-ocaml roundtrip --text --cmi-lines` (stdlib, compiler-sources, compiler-backend, samples) | exit 0 | exit 0, 4 min 11 s, floors met (the `.cmi` level of the stdlib compiles 115 alone, a serial loop: deterministic, its floor 115) |
+| `spec-check`, `embed-check`, `floors_test`, `oi_key_test`, `aot_oi_column_test`, `judges_test` | | 218 of 218 / exit 0 / 7 ok / 5 ok / 3 ok / all ok |
+
+Every non-pass is in a recorded class (`oi: 273 pass, 0 failing (not in a class)`, `87 pass, 0 failing`, `o2j: 1 pass, 0 failing`). The whole AOT corpora (251 pass, 21 slow; 86 pass, 5 slow) were not rerun (two hours): the
+only records that changed are the 4 OI cells above, and the pins (`aot-known.edn`) are checked by the 8-program rerun and the judge cases.
+
+**Not done / limits**: the 4 unpinned AOT `status ` entries; the floors have no rows for the opam packages and the testsuite's and whiml's `.cmi` level (a run prints the count, `--record` writes the row, but
+recording needs the opam fetch, which was not at hand to run for each package); the near-limit band between the rerun's 140 s and the batch is narrower still but exists (the record keeps no seconds). The scripts' tests
+are run by hand (OC120).
+
+**Proposals** (OC140 onward; each with options and the recommended one first)
+
+- **OC140 Pinning the AOT `status ` entries that differ from oi's output.** 4 entries cannot be pinned with oi's digest. (a) as built (unpinned); (b) pin each to the AOT level's own digest at the next whole AOT run (`bin/oi check --aot --record` prints
+  it; a known entry's digest is then the level's, not oi's, so the entry holds at one level); (c) a separate digest per level (`:oi` and `:aot` in the fourth element). *Recommended: (b)* at the next whole AOT run.
+- **OC141 The floors of the other corpora.** (a) as built (a corpus without a row is not checked); (b) record the opam packages' and the testsuite's and whiml's `.cmi` rows once (`roundtrip --cmi ... --record`, `dumps opam-* --record`); (c) a row for every corpus, a missing one a failure again. *Recommended: (b)*
+  when the opam set is fetched for OC120 (b)'s gate step.
+- **OC142 Timeouts in the known lists.** The 10 `timeout ` kinds of the known entries take any hang; a hang that was a busy loop is the same row. (a) as built; (b) the speed classes take the CPU seconds from the record (the record keeps the rerun's CPU seconds in a
+  column), so a program near 140 s is flagged; (c) pin each known timeout to the partial output's first line. *Recommended: (a)*: a timeout names no output, and (b) is the cost of a fifth column for the 10 programs.
+- **OC143 The rerun's allowance.** 20 s is the library's load as measured on the quiet host. (a) as built, `O2J_LOAD_ALLOWANCE`; (b) measure the load (a no-op program) at the start of a run and add that; (c) run every timed-out program with no allowance
+  (as before). *Recommended: (a)*: (b) adds a run to every level for a band of a few seconds.
