@@ -5,7 +5,7 @@
 #   test/gate/generated-check-test.bash [SCRATCH])
 set -uo pipefail
 src=$(cd "$(dirname "$0")/../.." && pwd)
-scratch=${1:-$src/.tmp/generated-check-test}
+scratch=${1:-$src/.tmp/generated-check-test.$$}
 rm -rf "$scratch"; mkdir -p "$scratch"
 fails=0
 export TMPDIR=$scratch/tmp; mkdir -p "$TMPDIR"

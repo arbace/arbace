@@ -9,7 +9,7 @@ src=$(cd "$(dirname "$0")/../.." && pwd)
 export ARBACE_HOST_EXE=${ARBACE_HOST_EXE:-$src/target/seed/amd64/arbace}
 [ -x "$ARBACE_HOST_EXE" ] || { echo "gate-tests-test: no executable $ARBACE_HOST_EXE" >&2; exit 2; }
 export TMPDIR=${TMPDIR:-$src/.tmp/tmp}; mkdir -p "$TMPDIR"
-scratch=$TMPDIR/gate-tests-test; rm -rf "$scratch"; mkdir -p "$scratch/pass" "$scratch/fail" "$scratch/none" "$scratch/logs" "$scratch/store"
+scratch=$TMPDIR/gate-tests-test.$$; rm -rf "$scratch"; mkdir -p "$scratch/pass" "$scratch/fail" "$scratch/none" "$scratch/logs" "$scratch/store"
 fails=0
 ok() { echo "ok:   $1"; }
 bad() { echo "FAIL: $1"; fails=$((fails + 1)); }
@@ -22,6 +22,9 @@ printf '#!/bin/bash\necho broken\nexit 1\n' > "$scratch/fail/b-test.bash"; chmod
 "$src/bin/gate-tests" "$scratch/fail" > "$scratch/o2" 2>&1 && bad "a failing test passed" || { grep -q "b-test.bash FAILED" "$scratch/o2" && ok "a failing test fails the run, named" || bad "failing: $(cat "$scratch/o2")"; }
 "$src/bin/gate-tests" "$scratch/none" > "$scratch/o3" 2>&1 && bad "no test passed" || ok "an empty directory fails"
 
+# report 055, finding 6: no test defaults its scratch directory to a fixed path (two runs at once would remove each other's)
+fixed=$(grep -l '^scratch=.*-test[};]' "$src"/test/gate/*-test.bash)
+[ -z "$fixed" ] && ok "the tests' default scratch directories are per process" || bad "fixed scratch default in: $fixed"
 # report 055, finding 5: without an executable the tests that need none run, the others are named, status 1 (0: --no-exe)
 r=$scratch/noexe-root; mkdir -p "$r/bin/lib" "$r/d"
 cp "$src/bin/gate-tests" "$r/bin/"; cp "$src/bin/lib/"*.bash "$r/bin/lib/"

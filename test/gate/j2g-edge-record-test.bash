@@ -4,7 +4,7 @@
 # work directory exclude each other. No JVM. By hand: test/gate/j2g-edge-record-test.bash [SCRATCH]
 set -uo pipefail
 src=$(cd "$(dirname "$0")/../.." && pwd)
-scratch=${1:-$src/.tmp/j2g-edge-record-test}
+scratch=${1:-$src/.tmp/j2g-edge-record-test.$$}
 rm -rf "$scratch"; mkdir -p "$scratch"
 export TMPDIR=$scratch/tmp; mkdir -p "$TMPDIR"
 fails=0

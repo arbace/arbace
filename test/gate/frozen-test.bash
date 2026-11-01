@@ -3,7 +3,7 @@
 # finding 3): no JVM, no jar of the build. By hand: test/gate/frozen-test.bash [SCRATCH]
 set -uo pipefail
 src=$(cd "$(dirname "$0")/../.." && pwd)
-scratch=${1:-$src/.tmp/frozen-test}
+scratch=${1:-$src/.tmp/frozen-test.$$}
 rm -rf "$scratch"; mkdir -p "$scratch"
 export TMPDIR=$scratch/tmp; mkdir -p "$TMPDIR"
 fails=0
