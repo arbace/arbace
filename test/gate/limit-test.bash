@@ -105,4 +105,23 @@ if sel program-tmo; then
   n=$(grep -c 'tmo=$(program_tmo "$p" "$tmo")' "$root/bin/goi")
   [ "$n" = 4 ] && ck "program-tmo: action_parse, check_dir, check_err and check_err_aot use it" ok || ck "program-tmo: callers" "$n of 4"
 fi
+if sel log-reset; then
+  # review 080 finding 3: the default log is emptied at a run's start, a caller's own is kept
+  unset ARBACE_TIMEOUT_LOG; echo old > "$w/def.tsv"
+  reset_timeout_log "$w/def.tsv"
+  [ ! -s "$w/def.tsv" ] && [ "$ARBACE_TIMEOUT_LOG" = "$w/def.tsv" ] && ck "log-reset: the default log starts empty" ok || ck "log-reset: default" "$(cat "$w/def.tsv")"
+  echo mine > "$w/mine.tsv"; ARBACE_TIMEOUT_LOG=$w/mine.tsv; reset_timeout_log "$w/def.tsv"
+  [ "$(cat "$w/mine.tsv")" = mine ] && ck "log-reset: a caller's log is kept" ok || ck "log-reset: caller's" "$(cat "$w/mine.tsv")"
+  unset ARBACE_TIMEOUT_LOG
+  # the quiet retry's own pass (JAVA_CHECK_ONCE, attempt 1) is logged and said
+  export ARBACE_TIMEOUT_LOG=$w/q.tsv; : > "$w/q.tsv"
+  JAVA_CHECK_ONCE=1 note_attempt java-check t9 1 40 0 "pass" 2> "$w/q.err"
+  [ "$(awk -F'\t' '$2 == "t9" && $7 == "pass" { n++ } END { print n+0 }' "$w/q.tsv")" = 1 ] && grep -q t9 "$w/q.err" && ck "log-reset: the quiet retry's pass is logged" ok || ck "log-reset: retry pass" "$(cat "$w/q.tsv" "$w/q.err")"
+  : > "$w/q.tsv"; note_attempt java-check t8 1 20 0 pass 2> "$w/q.err"
+  [ ! -s "$w/q.tsv" ] && ck "log-reset: a first-attempt pass is not logged" ok || ck "log-reset: first pass" "$(cat "$w/q.tsv")"
+  unset ARBACE_TIMEOUT_LOG
+  # goi empties first-timeouts.tsv before the retry decision
+  l1=$(grep -n ': > "$cwork/first-timeouts.tsv"' "$root/bin/goi" | head -1 | cut -d: -f1); l2=$(grep -n 'if \[ -s "$cwork/timeouts.txt" \]' "$root/bin/goi" | head -1 | cut -d: -f1)
+  [ -n "$l1" ] && [ -n "$l2" ] && [ "$l1" -lt "$l2" ] && ck "log-reset: goi empties first-timeouts.tsv at every run" ok || ck "log-reset: goi" "lines '$l1' '$l2'"
+fi
 exit $fail

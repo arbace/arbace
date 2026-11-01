@@ -156,7 +156,7 @@ step() {  # step NAME HEAVY COMMAND...: one step, logged, timed, measured (GT1);
     rm -f "${logs:?}/$name.fifo" "${logs:?}/$name.paths" "${logs:?}/$name.loaded"; mkfifo "$logs/$name.fifo"
     audit_reduce "$logs/$name.fifo" > "$logs/$name.paths" 2> "$logs/$name.reduce.err" &
     ap=$!
-    tr=(strace -f -qq -y -s 4096 --seccomp-bpf -e "trace=${GATE_AUDIT_TRACE:-$audit_trace}" -o "$logs/$name.fifo")
+    tr=(strace -f -qq -y -s 4096 --seccomp-bpf -e "trace=$(audit_trace_set)" -o "$logs/$name.fifo")
     ae=(ARBACE_LOADED_LOG="$logs/$name.loaded")
   fi
   [ -n "${GATE_CPU_LOG:-}" ] && { rm -f "${logs:?}/$name.cpu.tsv"; ae+=(ARBACE_CPU_LOG="$logs/$name.cpu.tsv"); }
@@ -479,6 +479,14 @@ red=()
 # musl's thread start and fork): traced, they leave the fully traced state. gateaudit ignores the lines (no
 # case for the call).
 audit_trace=open,openat,openat2,execve,execveat,readlink,readlinkat,chdir,clone,clone3,fork,vfork,rt_sigprocmask
+# audit_trace_set: the trace set strace gets: GATE_AUDIT_TRACE (e.g. %file) when set, else audit_trace; rt_sigprocmask
+# is appended to an override that lacks it (review 080, point 4: an override without it brings the system-time
+# slowdown of new threads back)
+audit_trace_set() {
+  local t=${GATE_AUDIT_TRACE:-$audit_trace}
+  case ",$t," in *,rt_sigprocmask,*) ;; *) t=$t,rt_sigprocmask ;; esac
+  echo "$t"
+}
 audit_reducer() {
   local d=$1 tg=${ARBACE_GOROOT:-/root/tamago-go} rk
   red=(); mkdir -p "$d"
@@ -558,7 +566,7 @@ gate_audit() {  # gate_audit [STEP...]: the checks named, else every check
       hv=(); [ "${heavy[$n]}" = yes ] && read -r -a hv <<< "$GATE_HEAVY_CMD"
       t0=$(date +%s); rm -f "${d:?}/$n.start"
       # the clock starts once the step holds the lock (the start file, as step() does)
-      "${hv[@]}" strace -f $([ -n "${GATE_AUDIT_SIGNALS:-}" ] && echo -q || echo -qq) -y -s 4096 --seccomp-bpf -e "trace=${GATE_AUDIT_TRACE:-$audit_trace}" -o "$fifo" \
+      "${hv[@]}" strace -f $([ -n "${GATE_AUDIT_SIGNALS:-}" ] && echo -q || echo -qq) -y -s 4096 --seccomp-bpf -e "trace=$(audit_trace_set)" -o "$fifo" \
         env $([ "${heavy[$n]}" = yes ] && echo ARBACE_HEAVY_HELD=1) ARBACE_LOADED_LOG="$d/$n.loaded" GATE_OUT="$logs/out/$n" GATE_OUTS="$logs/out" \
         bash -c 'date +%s > "$1"; exec bash -c "$2"' gate-audit "$d/$n.start" "$acmd_run" > "$d/$n.log" 2>&1
       echo $? > "$d/$n.status"; [ -f "$d/$n.start" ] && t0=$(cat "$d/$n.start"); echo $(( $(date +%s) - t0 )) > "$d/$n.secs"

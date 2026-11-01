@@ -78,7 +78,8 @@ timeout_kind() {
 note_attempt() {
   local who=$1 id=$2 n=$3 lim=$4 st=$5 res=$6 kind
   kind=$(timeout_kind "$st")
-  case $res in timeout*) ;; *) [ "$n" -gt 1 ] || return 0
+  # (JAVA_CHECK_ONCE: the quiet retry's one attempt follows a timeout too, review 080, finding 3)
+  case $res in timeout*) ;; *) [ "$n" -gt 1 ] || [ -n "${JAVA_CHECK_ONCE:-}" ] || return 0
     echo "$who: $id: the first attempt timed out; attempt $n (limit $lim) ended $res" >&2 ;; esac
   [ -z "${ARBACE_TIMEOUT_LOG:-}" ] || printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$who" "$id" "$n" "$lim" "$st" "${kind:--}" "${res%%$'\t'*}" >> "$ARBACE_TIMEOUT_LOG"
 }
@@ -119,4 +120,13 @@ jdk_run_limit() {
 # only check_one did; a directory test or an errorcheck program could not be given more time)
 program_tmo() {
   awk -v p="$1" -v t="$2" '$1 == p { t = $2 } END { print t }' "${3:-$root/test/goi/timeouts.txt}"
+}
+
+# reset_timeout_log DEFAULT: ARBACE_TIMEOUT_LOG for this run: the caller's when it is set (not touched), else DEFAULT,
+# exported and emptied (review 080, finding 3: the default file grew with every run, rows of runs long past)
+reset_timeout_log() {
+  if [ -z "${ARBACE_TIMEOUT_LOG:-}" ]; then
+    export ARBACE_TIMEOUT_LOG=$1
+    : > "$ARBACE_TIMEOUT_LOG"
+  fi
 }
