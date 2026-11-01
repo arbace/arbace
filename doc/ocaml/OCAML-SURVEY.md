@@ -1709,3 +1709,42 @@ are run by hand (OC120).
   column), so a program near 140 s is flagged; (c) pin each known timeout to the partial output's first line. *Recommended: (a)*: a timeout names no output, and (b) is the cost of a fifth column for the 10 programs.
 - **OC143 The rerun's allowance.** 20 s is the library's load as measured on the quiet host. (a) as built, `O2J_LOAD_ALLOWANCE`; (b) measure the load (a no-op program) at the start of a run and add that; (c) run every timed-out program with no allowance
   (as before). *Recommended: (a)*: (b) adds a run to every level for a band of a few seconds.
+
+## As built: re-review 042's fixes (2026-11-01)
+
+Re-review 042 (the helper VM's, at `6b051277`; light only, no stage 0) made six findings on the fixes of 030's. Each was checked against the code; all hold. Each fix is its own commit on `ocaml-o1` with a test
+that fails before and passes after, run in the light tier (`ARBACE_HOST_EXE` the seed's stage 0, no gate, no lock).
+
+| # | the fix | the test |
+|---|---|---|
+| 1 | oi's wall cap is four times its CPU limit (`oi_wall`, as `o2j_cpu`); `oi_status` reads 152 as a timeout and 137 only when the run lasted `OI_TIMEOUT` seconds (an OOM kill earlier stays `fail status 137`); new verbs `bin/oi oi-limits`, `oi-status`; both functions exported (a first commit forgot that: the rows run in `bash -c` through xargs, and `judges_test`'s CPU-limit case caught it, so a second commit follows) | `judges_test.bash`: `120 480`; 137 after 5 s stays 137; 137 after 121.5 s, 152 are 124 (before: no verb) |
+| 2 | the 17 AOT `status ` pins verified against AOT runs: all 11 of the program corpus (`bin/oi check --aot --only ...`, 2 min 54 s) and all 6 of the suite corpus (`bin/oi suite check --aot --only ...`, 46 s): the AOT output's digest equals each pin (`.tmp/o6/check-aot.tsv`), 17 known, 0 failing, OI column `same` for all 17. None corrected or unpinned. The empty-output pin is noted in `oi-known.edn`'s comment | the runs; no new script test (the pins' judge cases are 030's) |
+| 3 | `floor` fails a count of 0 for every corpus; the corpora that must have a row are `DEFAULT_DUMPS_CORPORA` and `DEFAULT_RT_CORPORA`, the arrays `dumps` and `roundtrip` use as defaults (no hand copy) | `floors_test.bash`: opam and `.cmi` corpora with 0 fail; the default corpora's rows required (before: 0 passed for a corpus without a row) |
+| 4 | `oi_key` covers the opam pins (`.tmp/repr-ocaml/opam-pins.txt`, `OI_OPAM_PINS`) and `bin/lib/limit.bash`; each part is had into a variable and a part that cannot be had fails the key (`stdlib_key` too, ocdump's key `OI_OCDUMP_KEY`) instead of hashing what came before | `oi_key_test.bash`: a changed pin changes the key; a missing pins file or ocdump key makes `bin/oi key` fail with no key (before: the key printed) |
+| 5 | `mkdir -p "$OI_DIR" "$S"` after bin/oi's functions, before the verbs | `oi_key_test.bash`: a copy of `bin/` in a root without `.tmp/` makes `.tmp/oi` and `.tmp/o7` on any verb (before: neither) |
+| 6 | the whole `suite expect` reads its record first, as `--only` (one message "cannot be read", exit 2); `judges_test` pins `OI_TIMEOUT`/`O2J_LOAD_ALLOWANCE` for its `aot-cpu` cases; `floors_test` refuses a `bin/repr-ocaml` without `REPR_OCAML_FLOORS`; ty_pass's comment says what the sort does | `judges_test.bash`: a whole run on a missing record exits 2 with "cannot be read" (before: exit 1, a diff) |
+
+**The numbers** (judged against the records; no record changed: `git status` clean after every run)
+
+| | before (re-review 030's section) | after |
+|---|---|---|
+| `bin/oi check` (309) | 273 pass, 0 failing, 6 min 38 s | 273 pass, 0 failing, 0 CHANGED, 6 min 50 s (wall cap 480 s) |
+| `bin/oi suite check` (108) | 87 pass, 2 min 53 s | 87 pass, 0 failing, 2 min 58 s |
+| `bin/oi suite expect`, whole | exit 0, 54 s | exit 0, 55 s (370 tests: 366 pass, 4 skip) |
+| `check --aot` on the 11 pinned programs; `suite check --aot` on the 6 | 8 programs, 3 pinned | 11 + 6: 17 known, 0 failing |
+| `bin/oi divergences [--aot]`, `suite divergences [--aot]` | | 273 / 251 / 87 / 86 pass, 0 failing |
+| `judges_test` / `floors_test` / `oi_key_test` | all ok / 7 ok / 5 ok | 27 ok, exit 0 / 11 ok / 9 ok |
+
+**Not run**: the whole AOT corpora (the pins and the OI column are judged from the 17 programs' runs and the records), `aot_oi_column_test`, the `repr-ocaml` dumps and roundtrip levels (the floors are tested through the
+function alone), the opam corpora. `oi_key_test` does not vary `bin/lib/oi/` or a corpus row (the key's parts are in the code; a test would edit tracked files). The key changed with the fixes, so a `check.tsv.key` written before them is stale (the
+next AOT run reruns oi's rows).
+
+**Proposals** (OC150 onward; each with options and the recommended one first)
+
+- **OC150 oi's retry at its own level.** A program over the CPU limit is one `timeout` row; oi's level has no quiet retry as the gate's limits have. (a) as built (CPU limit, wall cap 4x); (b) a quiet retry (run alone at the end) of each timed-out row before it
+  counts; (c) the rows keep the CPU seconds. *Recommended: (a)*: every recorded oi timeout is a CPU-bound loop; (b) when a timeout flaps.
+- **OC151 The AOT digests in the record.** The pins were checked once by hand (17 of 17). (a) as built; (b) keep each known program's output digest in `check-aot.edn`/`check-oi.edn` rows so a pin is checked against a record and `bin/oi divergences` can say a pin is stale without a run;
+  (c) pins per level (OC140 (c)). *Recommended: (b)*, with OC140 (b) at the next whole AOT run.
+- **OC152 The key's remaining inputs.** The key does not cover stage 0, the Go toolchain or the extracted opam trees' content (only the pins). (a) as built; (b) add the stage 0's hash and the `.extracted` markers; (c) a key of the binary oi (`target`'s hash). *Recommended: (a)*: cmd_build's own key has
+  the same gap, and a pin bump re-extracts.
+- **OC153 The floors' rows for the other corpora** (OC141 again). (a) as built (not checked, 0 fails); (b) record the opam and `.cmi` rows when the opam set is fetched. *Recommended: (b)*.
