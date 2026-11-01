@@ -3773,35 +3773,43 @@ Each with options, the recommended one first; none decided.
     the checkers out; (b) keep the whole directory (safe, slow after a printer edit); (c) key by the forms' own digest (read one file, compare
     with the cache's: seconds, catches what the key list misses).
   - *Recommended: (a)*, with (c) as the check `bin/ci musl fresh` could add later.
+  **Decided (the user, 2026-11-01): (a); not built yet.**
 - **CS221 `:c/bad-specs` on the other forms.** Only `declare-specs` prints the words; `long _Bool z;` and `typedef long _Bool T;` still print one type.
   - Options: (a) the same words for `c/var`, `c/declare` and `c/typedef` (the printer's `var-str` takes the type from the words); (b) leave:
     no corpus file has them (the gcc-bitint group's `both 'long' and '_BitInt'` lines are checker errors, not round trip files).
   - *Recommended: (b)* until a corpus file needs it.
+  **Decided (the user, 2026-11-01): (b).**
 - **CS222 Lines on the forms of a unit read from C.** The forms of `read-c`'s units carry no `:line`, so a pedwarn in a header stands on the
   `#include`'s line (the file shown in the message is right, the line is not) and R5's keying only works for reread units.
   - Options: (a) the reader gives a unit's forms their own lines (`convert` already knows the token positions; the `.ae` text of a unit would
     carry them as the main file's does); (b) leave: the message names the header and the include line is where the main file's author looks.
   - *Recommended: (a)* with the next converter work: a header's diagnostics and `__extension__` then are exact.
+  **Decided (the user, 2026-11-01): (a); later work, with the next converter work.**
 - **CS223 The dg selector name `int32`** (CS210 (b)'s count: one name, one file).
   - Options: (a) probe it and list it in `test/c/dg-targets.edn` (the table then covers every name the corpora use); (b) leave.
   - *Recommended: (a)*, then CS210 (a) is a three-valued rule with no unknown name left to report.
+  **Decided (the user, 2026-11-01): (a); not built yet.**
 - **CS224 The wording table versus the checker's wording** (CS200 (b), not taken: the oracle and annotations checks compare messages with cc's).
   - Options: (a) keep the table and the two-sided check; (b) change the checker's messages to gcc's for the families where cc's wording does not
     matter (`discards 'const' qualifier`, `redefinition of struct or union`, `both 'long' and '_BitInt'`), table entries removed as they go;
     (c) leave.
   - *Recommended: (a)* until the oracle's message comparison is itself decided.
+  **Decided (the user, 2026-11-01): (a).**
 - **CS225 The judge-test's duration.** 43 tests take about 4 minutes (the run-level stand-in cirun tests alone about a minute; a musl reread
     after a repr/c edit, CS220, adds six).
   - Options: (a) a `--quick` selection (the pure tests, seconds) beside the full run, the full run kept for commits; (b) leave.
   - *Recommended: (a)*: the light tier runs it after every change.
+  **Decided (the user, 2026-11-01): (a); not built yet.**
 - **CS226 The embed-10 parse gap** (`const char *p = #embed <f> limit (42);`: the parser stops at the integers after the first, gcc recovers).
   - Options: (a) recovery in the declarator list so the checker runs and gives "makes pointer from integer" (a parser change: its own review); (b)
     leave it `parse-gap`.
   - *Recommended: (b)*: one file and the parser is a port.
+  **Decided (the user, 2026-11-01): (b), nothing to build (embed-10 stays `parse-gap`).**
 - **CS227 `bin/ci check --aot` without CI_AOT_NODES** now compares nothing with the interpreter.
   - Options: (a) as built (the interpreted side is named or run beside); (b) make `CI_AOT_NODES=1` the default of `--record`, so a recorded compiled level always has been
     compared with a run of its own interpreter; (c) leave.
   - *Recommended: (a)*, (b) with the next compiled-level run, whose cost it doubles.
+  **Decided (the user, 2026-11-01): (a).**
 
 ### Shipped files, scratch and rule slips
 
@@ -3885,29 +3893,35 @@ Each with options, the recommended one first; none decided.
   - Options: (a) the preprocessor marks a unit when it processes the pragma and `*system-unit*` takes the mark (exact; a `pp.ae` change and a
     field in the unit's read); (b) keep the scan; (c) scan only before the first non-directive line.
   - *Recommended: (a)* with CS222 (the unit's lines), since both need the preprocessor to say more about a unit.
+  **Decided (the user, 2026-11-01): (a); later work, with CS222 (the preprocessor says more about a unit).**
 - **CS231 `-isystem` in `host/file-config`.** It is ignored, so a header found through `-isystem` gets pedwarns gcc does not give (gcc and clang
   treat the directory as a system one).
   - Options: (a) model it as an include directory that is also a system directory (`:sys-dirs`); (b) leave: no corpus file uses it.
   - *Recommended: (a)*, a few lines beside F.
+  **Decided (the user, 2026-11-01): (a); built (`-isystem DIR` and `-isystem=DIR`, a system directory searched after `-I`; judge-test `extension-lines-by-unit`).**
 - **CS232 `:c/bad-specs` with `_BitInt` and the other non-token words** (G's residue; with CS221).
   - Options: (a) keep the specifier source text, not the tokens, so any declare-specs prints as written; (b) leave.
   - *Recommended: (b)* until a corpus file needs it; (a) if CS221 (a) is taken, the one change serving both.
+  **Decided (the user, 2026-11-01): (b).**
 - **CS233 The reference's options** (027 #5, second half).
   - Options: (a) `record-ref` writes each row's `:std` and `:args` and a check compares them with the lists' on the next `check` (it needs one full re-record
     with gcc, a run of hours, to be explained row by row); (b) a cheap check: hash of the lists' options file kept beside the record
     (no gcc run; catches a drift of how options are read, not a change of gcc's runs); (c) leave.
   - *Recommended: (b)*, then (a) at the next full re-record.
+  **Decided (the user, 2026-11-01): (b); later work (the hash of the lists' options file beside the record).**
 - **CS234 (corrected by report 053) gcc's refusal of `constexpr _Float16 f = 0.1f16;` is not a bug.** gcc 15.2 on x86-64 defines
   `__FLT_EVAL_METHOD_TS_18661_3__ 0`: `_Float16` and `__bf16` are evaluated in float (C23 Annex H), so `0.1f16` is `(float)0.1` and only a
   conversion rounds to binary16; the first version of this section called it a gcc quirk and left the checker on the type's own format.
   Built in "F53" below. Left open: the evaluation method as a target fact (a `+fp16` or AVX512-FP16 target evaluates in the format,
   `-fexcess-precision=16`): options (a) a `:flt-eval-method` beside `:ldouble-size` in the host's options (recommended, with the next target work);
   (b) leave x86-64's model only.
+  **Decided (the user, 2026-11-01): (a), as corrected by report 053: gcc's refusal of `constexpr _Float16 f = 0.1f16;` is FLT_EVAL_METHOD 0's float evaluation, built in F53; the `:flt-eval-method` target fact is later work.**
 - **CS235 `-0.1L` and long double arithmetic keep no exact value.** A's `:ld` is carried by a literal only, so `constexpr double d = -0.1L;`
   (also refused by gcc) stays accepted.
   - Options: (a) carry `:ld` through unary minus and plus, and through a cast to long double; (b) represent long double values as BigDecimal
     pairs throughout (the full fix, CS35's "long double as double" undone); (c) leave.
   - *Recommended: (a)*, cheap; (b) only with the compiled level's long double work.
+  **Decided (the user, 2026-11-01): (a); built (`:ld` through unary + and - and a cast to long double; judge-test `constexpr-long-double-through-operators`).**
 
 ### F31.4 Shipped files, scratch and rule slips
 
