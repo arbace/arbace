@@ -31,7 +31,21 @@ if [ $planned = 1 ]; then ok "the table validates and plans"; else no "the table
 # finding 1: java-judge keeps its output (held.txt) and java-held runs the held tests again, keyed by it
 if decl java-judge | grep -q ':outputs true' && decl java-judge | grep -q 'held.txt'; then ok "java-judge writes held.txt as an output"; else no "java-judge writes held.txt as an output"; fi
 if decl java-held | grep -q ':uses \["java-judge/held.txt"\]'; then ok "java-held uses java-judge's held.txt"; else no "java-held uses java-judge's held.txt"; fi
-if decl java-held | grep -q -- '--levels interp' && ! decl java-held | grep -q -- '--save'; then ok "java-held runs the interp level and judges it itself, unaudited"; else no "java-held runs interp, unsaved"; fi
+if decl java-held | grep -q -- '--levels interp' && ! decl java-held | grep -q -- '--save'; then ok "java-held runs the interp level, unsaved (its own judgment)"; else no "java-held runs interp, unsaved"; fi
+# review 077: the clean run (GATE_CLEAN_INNER) keys java-held apart, so its traced pass is not the keyed gate's
+if decl java-held | grep -q ':env \["GATE_CLEAN_INNER"\]'; then ok "java-held's key holds GATE_CLEAN_INNER"; else no "java-held's key holds GATE_CLEAN_INNER"; fi
+# its command, as the planner lists it (plan.tsv's last column), run in a scratch tree with a stub bin/java-check
+hcmd=$(awk -F'\t' '$1 == "java-held" { print $NF }' "$t/plan.tsv")
+mkdir -p "$t/h/bin" "$t/h/outs/java-judge"
+printf '#!/bin/bash\necho "STUB $*" >> "$STUBLOG"\n' > "$t/h/bin/java-check"; chmod +x "$t/h/bin/java-check"
+printf 't1\nt2\n' > "$t/h/outs/java-judge/held.txt"
+hrun() { : > "$t/h/stub.log"; (cd "$t/h" && env -u GATE_AUDITED "$@" STUBLOG="$t/h/stub.log" GATE_OUTS="$t/h/outs" GATE_EXE=x GATE_JAVAC=y GATE_JAVA_FORMS=z bash -c "$hcmd") > "$t/h/out" 2>&1; }
+hrun env
+if grep -q 'STUB --levels interp --only \^(t1|t2) ' "$t/h/stub.log" && ! grep -q -- '--timeout' "$t/h/stub.log"; then ok "java-held untraced: the held ids run at the default limit"; else no "java-held untraced: $(cat "$t/h/stub.log")"; fi
+hrun env GATE_AUDITED=1
+if [ ! -s "$t/h/stub.log" ] && grep -q 'DEFERRED' "$t/h/out" && grep -q 't1 t2' "$t/h/out"; then ok "java-held under the audit: defers loudly, runs nothing"; else no "java-held under the audit: $(cat "$t/h/stub.log" "$t/h/out")"; fi
+: > "$t/h/outs/java-judge/held.txt"; hrun env
+if [ ! -s "$t/h/stub.log" ] && grep -q 'no test held' "$t/h/out"; then ok "java-held with nothing held: runs nothing"; else no "java-held, nothing held"; fi
 
 # finding 2: the audited marker of every producer is in java-judge's key (a results file alone is not: an
 # unaudited rerun with the same rows would find the audited pass). java-check-judge uses the whole directory

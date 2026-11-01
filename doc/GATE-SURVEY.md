@@ -1894,13 +1894,15 @@ From the VM's review of main's `07194e71` (`.tmp/mac-queue/reports/070-review-ma
 `audit-070`, one commit per finding, none of the choices below decided. This branch rekeys Java steps (java-judge's
 `:uses`, java-judge's `:outputs`, the new step java-held), so it merges after the tag.
 
-- **GTS170 java-held under the clean run's own strace** (finding 1). The step runs the held tests again unaudited, but the
-  clean run traces every step, so there it runs under strace too. Options: (a) as built: under the audit
-  (`GATE_AUDITED`) `--timeout 100` (a retry at 200 s), a guess to measure on rerun 10; (b) the step skips itself under the
-  audit and the tag procedure runs it by hand from the clean record's `held.txt` (`bin/java-check --levels interp --only`
-  of its ids), the keyed `--full` after the clean run running it untraced; (c) the clean run runs it twice, the second
-  outside the audit (the audit's undeclared-read check loses nothing for a step whose command another step already
-  traced). *Recommended: (b)*: an unaudited confirmation is what the finding asks for, and (a)'s limit is unmeasured.
+- **GTS170 java-held under the clean run's own strace** (finding 1; review 077 found (a) and the first reading of
+  (b) both leave no untraced run: the clean run's pass is published at a key the keyed `--full` shares). Options:
+  (a) the first build: traced, `--timeout 100`; its traced pass is the keyed gate's too, a slowdown of one to five
+  times the budget goes unseen; (b) the step defers loudly under the audit (`GATE_AUDITED`) *and* its key holds
+  `GATE_CLEAN_INNER` (`:env`), so the clean pass is not the keyed gate's and the keyed `--full` after the clean run
+  runs the held tests untraced at the default limit; (c) the clean run runs it twice, the second outside the audit.
+  *Recommended: (b)*; built (the user's coordinator, review 077). The clean record alone then carries no untraced
+  confirmation: a keyed `--full` must pass between the clean run and the tag, or the tag procedure runs
+  `bin/java-check --levels interp --only "^($(paste -sd'|' held.txt)) "` by hand.
 - **GTS171 which signal marks a run audited** (finding 5). Built: both must agree (`GATE_AUDITED=1` from the runner and
   TracerPid), else a message and no mark, so the judgment is stricter. Options: (a) as built; (b) `GATE_AUDITED` alone
   (a person's strace is no mark, but an audited step whose tracer was SIGKILLed mid-run still marks); (c) TracerPid alone
