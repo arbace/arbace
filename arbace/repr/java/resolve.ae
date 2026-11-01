@@ -3,17 +3,17 @@
   converter to decide where a call needs param-tags. The compiler's front end (arbace.classes.analyze
   and what it requires; no back end) resolves over class infos made from javac's symbols, so the
   classes being converted need not be loadable, and arguments are stubs with the types the
-  converted forms will have."
+  converted forms will have. Since JN10 (JFS130 (a)) javac's symbols' class infos are javac's half's
+  (arbace.repr.java.javac-model), reached through arbace.repr.java.javac-hook; this namespace names no
+  javac class."
   (:require [arbace.classes.analyze :as a]
             [arbace.classes.env :as env]
-            [arbace.repr.java.jtypes :as jt]
             [arbace.repr.java.model :as md]
             [arbace.repr.java.decls :as d]
             [arbace.repr.java.attr :as attr]
             [arbace.repr.java.nattr :as na]
-            [arbace.string :as str])
-  (:import [com.sun.tools.javac.code Type Type$ArrayType Symbol Symbol$ClassSymbol
-            Symbol$MethodSymbol Flags]))
+            [arbace.repr.java.javac-hook :as hook]
+            [arbace.string :as str]))
 
 ;;; ------------------------------------------------------------------------------------------
 ;;; javac symbols as the compiler's class infos (arbace.classes.env)
@@ -22,8 +22,8 @@
   "The internal name of class symbol `c` (not renamed: resolution is on the source's names), of
   either model (arbace.repr.java.model)."
   [c]
-  (if (instance? Symbol c)
-    (str/replace (str (.flatName ^Symbol$ClassSymbol c)) "." "/")
+  (if (hook/jsym? c)
+    (hook/call-fixed! :resolve/internal c)
     (str/replace (md/flat-name c) "." "/")))
 
 (defn desc
@@ -34,17 +34,9 @@
       "BOOLEAN" "Z" "BYTE" "B" "SHORT" "S" "CHAR" "C" "INT" "I" "LONG" "J" "FLOAT" "F"
       "DOUBLE" "D" "VOID" "V"
       "ARRAY" (str "[" (desc (md/elemtype t)))
-      "CLASS" (str "L" (internal (if (instance? Type t) (.-tsym ^Type t) (md/tsym t))) ";")
+      "CLASS" (str "L" (internal (if (hook/jtype? t) (hook/call-fixed! :resolve/tsym t) (md/tsym t))) ";")
       "BOT" :null
       (throw (ex-info (str "No descriptor for type " t) {:type (str t)})))))
-
-(defn- method-flags
-  "Class file access flags of method symbol `m` (javac keeps varargs and bridge elsewhere)."
-  [^Symbol m]
-  (let [f (.flags m)]
-    (bit-or (bit-and f 0x1D3F)
-            (if (zero? (bit-and f Flags/VARARGS)) 0 0x80)
-            (if (zero? (bit-and f Flags/BRIDGE)) 0 0x40))))
 
 ;; The symbols resolution works on are javac's own, whatever the run met before (doc/classes/
 ;; JAVA-FRONTEND-SURVEY.md, "As built: JFS70"). javac's Symtab keeps a class symbol per flat name and
@@ -59,102 +51,15 @@
 ;; converted before and on the run. Now every symbol is taken as javac's own (`canonical`), a name
 ;; is resolved among javac's own symbols alone (`find-class`), and a class info is made only from a
 ;; symbol that completes (`class-info`): each answer is a function of the name and the platform.
-
-(defn- module-of
-  "The module of class `c`'s package (javac's module symbol; a native class's by its module's name in
-  javac's Symtab)."
-  [c]
-  (if (instance? Symbol c)
-    (.modle (.packge ^Symbol c))
-    (let [m (if (:src c) (:module (:reg c)) (:module c))]
-      (if m (.getModule jt/*syms* (jt/jname m)) (.-unnamedModule jt/*syms*)))))
-
-(defn- canonical
-  "javac's own symbol for class symbol `c`: c itself when it is a class of the run's sources (Check's
-  compiled class of its name) or a local or anonymous class, else the one Symtab keeps for c's flat
-  name under the module of c's package (c itself when there is none)."
-  ^Symbol$ClassSymbol [^Symbol$ClassSymbol c]
-  (when c
-    (when-let [m (module-of c)]
-      (let [n (.flatName c)]
-        (if (or (identical? c (.getCompiled jt/*check* m n)) (.isDirectlyOrIndirectlyLocal c))
-          c
-          (or (.getClass jt/*syms* m n) c))))))
+;;
+;; Since JN10 (JFS130 (a)) that part is javac's half's (arbace.repr.java.javac-model, the section
+;; arbace.repr.java.resolve's javac branches): `lookup` asks it for a class info by internal name
+;; (:resolve/class-info: find-class, then class-info), and `choice` for the module of `from`
+;; (:resolve/module-of) when javac answers the unit.
 
 ;; The module of the class whose call is resolved (choice's `from`): the one whose symbol a name
 ;; that several modules define resolves to first.
-(def ^:dynamic ^:private *module* nil)
-
-(defn- find-class
-  "javac's own symbol of the class of internal name `n`: the class of the run's sources Check
-  compiles under the name in *module*, else among the symbols Symtab holds for the name the ones
-  that are their module's own; when several modules define it, *module*'s, else the first by module
-  name. nil when javac knows no such class."
-  ^Symbol$ClassSymbol [n]
-  (let [fname (jt/jname (str/replace n "/" "."))]
-    (or (when *module* (.getCompiled jt/*check* ^com.sun.tools.javac.code.Symbol$ModuleSymbol *module* fname))
-        (let [cs (filter #(identical? % (canonical %)) (.getClassesForName jt/*syms* fname))]
-          (when (seq cs)
-            (or (first (filter #(identical? *module* (module-of %)) cs))
-                (first (sort-by #(str (module-of %)) cs))))))))
-
-;; Per javac run (Symtab): javac's own class symbol -> its class info (nil: it does not complete).
-(def ^:private registries (java.util.WeakHashMap.))
-
-(defn- registry []
-  (locking registries
-    (or (.get registries jt/*syms*)
-        (let [r {:infos (atom {})}]
-          (.put registries jt/*syms* r)
-          r))))
-
-(defn- class-of-type [^Type t]
-  (when (and t (= "CLASS" (jt/tag-name t))) (canonical (.tsym (jt/erasure t)))))
-
-(defn- outer-class [^Symbol$ClassSymbol c]
-  (let [o (.owner c)]
-    (when-not (instance? com.sun.tools.javac.code.Symbol$PackageSymbol o)
-      (canonical (.enclClass o)))))
-
-(defn- completed?
-  "Did class symbol `c` complete (completing it now if it has not)? A symbol whose completion
-  failed, now or before, is javac's erroneous class: no members, no supertypes."
-  [^Symbol$ClassSymbol c]
-  (try
-    (.complete c)
-    (not (or (= "ERR" (str (.kind c))) (.isErroneous (.type c))))
-    (catch com.sun.tools.javac.code.Symbol$CompletionFailure _ false)))
-
-(defn class-info
-  "The compiler's class info of class symbol `c` (only what resolution and access need), made from
-  javac's own symbol for it once it completed; nil when it does not."
-  [^Symbol$ClassSymbol c]
-  (when-let [c (canonical c)]
-    (let [infos (:infos (registry))
-          e (find @infos c)]
-      (if e
-        (val e)
-        (let [n (internal c)
-              info (when (completed? c)
-                     (let [iface? (.isInterface c)
-                           sup (when-not iface? (class-of-type (.getSuperclass c)))]
-                       {:name n
-                        :flags (bit-and (.flags c) 0x761F)
-                        :interface? iface?
-                        :super (some-> sup internal)
-                        :interfaces (vec (keep #(some-> (class-of-type %) internal) (.getInterfaces c)))
-                        :nest-host (internal (.outermostClass c))
-                        :outer (some-> (outer-class c) internal)
-                        :fields []
-                        :methods (vec (for [^Symbol s (.getSymbols (.members c))
-                                            :when (instance? Symbol$MethodSymbol s)
-                                            :let [ps (.getParameterTypes (.erasure s jt/*types*))
-                                                  r (.getReturnType (.erasure s jt/*types*))]]
-                                        {:name (str (.name s))
-                                         :desc (str "(" (apply str (map desc ps)) ")" (desc r))
-                                         :flags (method-flags s) :owner n}))}))]
-          (swap! infos assoc c info)
-          info)))))
+(def ^:dynamic *module* nil)
 
 (def ^:private nregistries (java.util.WeakHashMap.))
 
@@ -211,7 +116,7 @@
       (or (when (string? k)
             (if attr/*provider*
               (some-> (nfind-class k) nclass-info)
-              (some-> (find-class k) class-info)))
+              (hook/call-fixed! :resolve/class-info k)))
           nf))))
 
 (def ^:private compile-set (reify arbace.lang.IDeref (deref [_] lookup)))
@@ -250,11 +155,11 @@
   [kind from site mname args]
   (when (every? some? args)
     (binding [env/*compile-set* compile-set
-              *module* (when-not attr/*provider* (module-of from))]
+              *module* (when-not attr/*provider* (hook/call-fixed! :resolve/module-of from))]
       (let [fname (internal from)
             sname (cond
-                    (instance? Type site)
-                    (if (= "ARRAY" (jt/tag-name site)) "java/lang/Object" (internal (.tsym (jt/erasure site))))
+                    (hook/jtype? site)
+                    (hook/call-fixed! :resolve/site-name site)
                     (md/type? site)
                     (if (md/array? site) "java/lang/Object" (internal (md/tsym (md/erasure site))))
                     :else (internal site))]

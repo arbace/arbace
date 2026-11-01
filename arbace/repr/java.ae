@@ -43,9 +43,9 @@
     The same for a module of the JDK itself (java.base: jdk/, bin/jrt-convert), attributed with
     --patch-module against the platform; --origins FILE names the files' origins (the paths
     relative to SRC)."
-  (:require [arbace.repr.java.javac :as javac]
-            [arbace.repr.java.convert :as cv]
-            [arbace.repr.java.jtypes :as jt]
+  (:require [arbace.repr.java.convert :as cv]
+            [arbace.repr.java.forms :as f]
+            [arbace.repr.java.javac-hook :as hook]
             [arbace.repr.java.names :as names]
             [arbace.repr.java.layout :as pr]
             [arbace.repr.java.full :as full]
@@ -53,6 +53,7 @@
             [arbace.repr.java.attr :as attr]
             [arbace.repr.java.decls :as decls]
             [arbace.repr.java.nattr :as nattr]
+            [arbace.repr.java.platform :as pf]
             [arbace.edn :as edn]
             [arbace.java.io :as io]
             [arbace.pprint :as pp]
@@ -106,53 +107,7 @@
 
 (def ^:dynamic *full* "Mode :full (--full)." false)
 
-(defn- convert-one
-  "Convert javac's attributed unit `cu`, its own tree or (native?) the native parser's tree of its
-  text with attribution by position (`nunit` its native unit, entered, when the native provider
-  answers: `check` and `diffs` its outcomes' atoms); measured with `split?`. A unit, or a failure."
-  [^com.sun.tools.javac.tree.JCTree$JCCompilationUnit cu full native? split? stats & [nunit check diffs]]
-  (let [src (.getName (.getSourceFile cu))]
-    (try
-      (let [t0 (System/nanoTime)
-            opts (if native?
-                   (let [n (if nunit (:tree nunit) (parse/parse (javac/source-text cu) src))
-                         idx (attr/index n cu)]
-                     (swap! stats #(-> % (update :index/nodes (fnil + 0) (:nodes idx))
-                                       (update :index/misses (fnil + 0) (count (:misses idx)))
-                                       (update :index/synthetic (fnil + 0) (:synthetic idx))
-                                       (update :index/flags-completed (fnil + 0) (:flags idx))
-                                       (update :index/dropped (fnil + 0) (count (:dropped idx)))))
-                     (when (seq (:misses idx))
-                       (throw (ex-info (str "native tree: " (count (:misses idx)) " nodes without a javac node, the first "
-                                            (first (:misses idx)))
-                                       {})))
-                     {:full full :tree n :index idx})
-                   {:full full})
-            prov (when nunit
-                   (try (nattr/provider nunit (:index opts) check diffs)
-                        (catch Throwable e
-                          ;; the walk failed: javac answers this unit
-                          (swap! check update-in [:nattr/walk :differ] (fnil inc 0))
-                          (swap! diffs conj {:fact :nattr/walk :file src
-                                             :native (str (.getName (class e)) ": " (.getMessage e))
-                                             :trace (vec (take 8 (filter #(re-find #"arbace" %) (map str (.getStackTrace e)))))})
-                          nil)))
-            u (binding [attr/*measure* split?
-                        attr/*counts* (when split? stats)
-                        attr/*provider* prov]
-                (let [u (cv/convert-unit cu opts)]
-                  ;; the platform classes the unit's provider read, checked (JFS106 (b))
-                  (when prov (nattr/check-platform-members! prov))
-                  u))]
-        ;; the model's reads (arbace.repr.java.model), by read and how answered
-        (when prov (swap! check #(merge-with (partial merge-with +) % (nattr/reads prov))))
-        (assoc u :source src :ms (quot (- (System/nanoTime) t0) 1000000)))
-      (catch Throwable e
-        {:failure true :source src
-         :error (str (.getName (class e)) ": " (.getMessage e))
-         :trace (vec (take 12 (filter #(re-find #"arbace" %) (map str (.getStackTrace e)))))}))))
-
-(defn- registry-units
+(defn registry-units
   "The native trees `trees` ([tree source] pairs) entered in a registry of the run (javac options
   `opts`: the source path or the patched module's directories, the module, and the class path's
   directories, are the registry's)."
@@ -171,54 +126,27 @@
         module (or module (some (fn [[t _]] (some #(when (= :MODULEDEF (:tag %)) (decls/tree-name-of (:qualId %))) (:defs t))) trees))
         split-path (fn [x] (str/split x (re-pattern (java.util.regex.Pattern/quote File/pathSeparator))))
         cdirs (when cp (filter #(.isDirectory (io/file %)) (split-path cp)))
-        reg (decls/registry {:platform (System/getenv "REPR_JAVA_PLATFORM") :module module :source-dirs dirs
+        platform (pf/default-platform)
+        ;; JFS131: a patched module the platform lacks (the shipped program's pack holds java.base alone)
+        _ (when (and patch module (not (pf/has-module? platform module)))
+            (decls/javac-needed! (str "platform module " module)))
+        reg (decls/registry {:platform platform :module module :source-dirs dirs
                              :class-dirs cdirs})]
     (mapv (fn [[t src]] (when t (decls/enter-unit! reg {:tree t :file src}))) trees)))
-
-(defn- native-units
-  "The native units of javac's `units`, parsed and entered in a registry of the run (registry-units)."
-  [units opts]
-  (registry-units (mapv (fn [^com.sun.tools.javac.tree.JCTree$JCCompilationUnit cu]
-                          (let [src (.getName (.getSourceFile cu))]
-                            [(parse/parse (javac/source-text cu) src) src]))
-                        units)
-                  opts))
 
 (defn convert-units
   "Analyze the Java `files` with javac options `opts` and convert every compilation unit (in mode
   :full with `full`; `front` :javac, :native or :both, the trees the converter reads; measured with
   `split`; `attr-native`, the native provider answering the native trees' scope and declarations).
   Returns {:units [...] :failures [...] :errors [...] :stats {...}}, with :both also :native, the
-  same of the native trees (and with `attr-native` its :attr-check and :attr-diffs)."
+  same of the native trees (and with `attr-native` its :attr-check and :attr-diffs). javac's half's
+  (arbace.repr.java.javac-read, JN10's JFS130 (a)): on a program without javac's classes (the shipped
+  program) the error \"javac needed: javac's half: read/convert-units\"."
   [files opts rename & [full front split attr-native]]
-  (let [front (or front :javac)
-        {:keys [units context errors]} (javac/analyze files opts)
-        stats (atom {})
-        nstats (atom {})
-        check (atom {})
-        diffs (atom [])]
-    (binding [jt/*types* (javac/types context)
-              jt/*syms* (javac/symtab context)
-              jt/*check* (com.sun.tools.javac.comp.Check/instance context)
-              jt/*names* (com.sun.tools.javac.util.Names/instance context)
-              jt/*rename* (rename-fn rename)]
-      (let [nunits (when (and attr-native (not= front :javac)) (native-units units opts))
-            run (fn [native? split? st]
-                  (binding [cv/*stats* st]
-                    (let [results (doall (map-indexed (fn [i cu]
-                                                        (convert-one cu full native? split? st
-                                                                     (when native? (get nunits i)) check diffs))
-                                                      units))]
-                      (cond-> {:units (vec (remove :failure results))
-                               :failures (vec (filter :failure results))
-                               :errors errors
-                               :stats @st}
-                        (and native? nunits) (assoc :attr-check @check :attr-diffs @diffs)))))]
-        (case front
-          :javac (run false split stats)
-          :native (run true split stats)
-          :both (assoc (run false false stats) :native (run true split nstats)))))))
-
+  (when-not (hook/try-load-javac-half!)
+    (throw (ex-info "repr/java: read needs javac's tool (use --no-javac, or javac's tool executable)"
+                    {:arbace.repr.java.decls/javac-needed "read/convert-units"})))
+  (hook/call! :read/convert-units files opts rename full front split attr-native))
 (defn- peak-rss
   "The process's peak resident memory in bytes (VmHWM), or nil."
   []
@@ -245,7 +173,7 @@
         check (atom {})
         diffs (atom [])
         results
-        (binding [jt/*rename* (rename-fn rename)
+        (binding [f/*rename* (rename-fn rename)
                   cv/*stats* stats]
           (vec (map (fn [[t src perr] text nunit]
                       (if perr
@@ -270,7 +198,14 @@
         fallbacks (filterv :fallback results)
         native-ms (quot (- (System/nanoTime) t0) 1000000)
         fb (when (seq fallbacks)
-             (convert-units (mapv :source fallbacks) opts rename full :javac split))]
+             (if (hook/try-load-javac-half!)
+               (convert-units (mapv :source fallbacks) opts rename full :javac split)
+               ;; no javac's tool (the shipped program, JN10 part 3, JFS132 (a)): each fallback a failure
+               ;; with its reason; the files read natively are still written
+               {:failures (mapv (fn [{:keys [source fallback]}]
+                                  {:failure true :source source :javac-needed fallback
+                                   :error (str "javac's tool needed: " fallback)})
+                                fallbacks)}))]
     {:units (into (vec (remove :fallback results)) (:units fb))
      :failures (vec (:failures fb))
      :errors (vec (:errors fb))
@@ -581,10 +516,22 @@
           "--no-javac" (recur (rest args) (assoc opts :no-javac true) pos)
           (recur (rest args) opts (conj pos a)))))))
 
+(defn- javac-needed-exit
+  "Without javac's tool (the shipped program, JN10 part 3, JFS132 (a)): the files that needed javac
+  listed with their reasons, and exit status 1 when any did (the files read natively are written)."
+  [res]
+  (when-let [fs (seq (filter :javac-needed (:failures res)))]
+    (println (format "repr/java: %d files need javac's tool (read on javac's tool executable)" (count fs)))
+    (shutdown-agents)
+    (System/exit 1)))
+
 (defn -main [cmd & args]
-  (case cmd
-    "read" (let [[opts [out root & paths]] (parse-opts args)]
-             (binding [*full* (boolean (:full opts))] (convert out root paths opts)))
-    "read-jdk" (let [[opts [out module src & paths]] (parse-opts args)]
-                 (binding [*full* (boolean (:full opts))] (jdk out module src paths opts))))
+  ;; javac's half (JN10, JFS130 (a)) where javac's classes are: loaded once, before any thread reads
+  (hook/try-load-javac-half!)
+  (javac-needed-exit
+   (case cmd
+     "read" (let [[opts [out root & paths]] (parse-opts args)]
+              (binding [*full* (boolean (:full opts))] (convert out root paths opts)))
+     "read-jdk" (let [[opts [out module src & paths]] (parse-opts args)]
+                  (binding [*full* (boolean (:full opts))] (jdk out module src paths opts)))))
   (shutdown-agents))

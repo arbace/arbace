@@ -50,7 +50,8 @@
 
   A registry (`registry`) holds a run's classes: those of its units, the sources javac would find
   on the source path or in a patched module's other directories, and the platform's classes (the
-  exploded modules REPR_JAVA_PLATFORM names), each a class symbol made on first use. The symbols are
+  exploded modules REPR_JAVA_PLATFORM names, or the java.base pack: arbace.repr.java.platform, JN10
+  part 2), each a class symbol made on first use. The symbols are
   maps (compared by identity) with memoized parts: a class's flags, header (type parameters,
   superclass, interfaces) and members; a type is data:
 
@@ -67,6 +68,7 @@
   (:refer-clojure :exclude [find-var])
   (:require [arbace.repr.java.parse :as parse]
             [arbace.repr.java.classfile :as cf]
+            [arbace.repr.java.platform :as pf]
             [arbace.repr.java.sym :as sym]
             [arbace.string :as str]
             [arbace.java.io :as io])
@@ -147,55 +149,47 @@
 ;;; ------------------------------------------------------------------------------------------
 ;;; The platform: its packages, by module
 
-(def ^:private ^ConcurrentHashMap platform-indexes (ConcurrentHashMap.))
-
 (defn platform-index
-  "The platform at `dir` (exploded modules: DIR/MODULE/pkg/path/C.class): {package [module ...]}."
-  [^String dir]
-  (or (.get platform-indexes dir)
-      (let [idx (java.util.HashMap.)]
-        (doseq [^File m (sort-by #(.getName ^File %) (.listFiles (File. dir)))
-                :when (.isDirectory m)
-                :let [mn (.getName m)
-                      base (count (.getPath m))]]
-          (letfn [(walk [^File d]
-                    (let [fs (.listFiles d)]
-                      (when (some #(str/ends-with? (.getName ^File %) ".class") fs)
-                        (let [rel (subs (.getPath d) (min (count (.getPath d)) (inc base)))
-                              pkg (str/replace rel "/" ".")]
-                          (.put idx pkg (conj (or (.get idx pkg) []) mn))))
-                      (doseq [^File f fs :when (.isDirectory f)] (walk f))))]
-            (walk m)))
-        (.putIfAbsent platform-indexes dir (into {} idx))
-        (.get platform-indexes dir))))
+  "The platform `p`'s packages, by module: {package [module ...]} (arbace.repr.java.platform's index; `p`
+  a platform, the directory of exploded modules DIR/MODULE/pkg/path/C.class, or nil the default)."
+  [p]
+  (pf/index (pf/as-platform p)))
 
 (def ^:private ^ConcurrentHashMap class-files (ConcurrentHashMap.))
 
-(defn- read-class-file [^String path]
-  (or (.get class-files path)
-      (let [c (cf/read-file path)]
-        (.putIfAbsent class-files path c)
-        (.get class-files path))))
+(defn- read-class-file
+  "The class file `src` as declarations: a class path's file (a path), or the platform's
+  [platform module path]."
+  [src]
+  (let [k (if (string? src) src (let [[p m path] src] (str (:id p) "!" m "/" path)))]
+    (or (.get class-files k)
+        (let [c (if (string? src)
+                  (cf/read-file src)
+                  (let [[p m path] src] (cf/parse (pf/class-bytes p m path))))]
+          (.putIfAbsent class-files k c)
+          (.get class-files k)))))
 
 ;;; ------------------------------------------------------------------------------------------
 ;;; The registry of a run
 
 (defn registry
-  "A run's registry: `platform` the platform's directory, `module` the module of the run's sources
+  "A run's registry: `platform` the platform (arbace.repr.java.platform's; a string: the directory of
+  exploded modules; nil: pf/default-platform), `module` the module of the run's sources
   (nil: the unnamed module), `source-dirs` the directories javac finds more sources of it in (the
   source path, a patched module's directories), searched in order; `class-dirs` the class path's
   directories (DIR/pkg/path/C.class, the unnamed module's classes after the platform's: javac's -cp,
   JN9f)."
   [{:keys [platform module source-dirs class-dirs]}]
+  (let [platform (pf/as-platform platform)]
   (sym
-  {:platform platform :index (platform-index platform) :module module
+  {:platform platform :index (pf/index platform) :module module
    :source-dirs (vec source-dirs)
    :class-dirs (vec class-dirs)
    :classes (ConcurrentHashMap.)       ; flat name -> csym (or ::none)
    :units (atom [])                    ; the units entered
    :unit-classes (ConcurrentHashMap.)  ; package -> {simple csym}, the units' top-level classes
    :source-files (ConcurrentHashMap.)  ; path -> unit (the sources parsed beside the run's)
-   :memo (new-memo)}))
+   :memo (new-memo)})))
 
 (declare enter-unit! class-file-csym source-class)
 
@@ -237,7 +231,8 @@
            (mapcat #(names-in (File. (str % (when (seq rel) "/") rel)) ".java") (:source-dirs reg))
            (when-let [m (:module reg)]
              (when (some #{m} (get (:index reg) pkg))
-               (names-in (File. (str (:platform reg) "/" m (when (seq rel) "/") rel)) ".class")))
+               (remove #(or (#{"package-info" "module-info"} %) (str/includes? % "$"))
+                       (pf/class-names (:platform reg) m rel))))
            ;; the unnamed module's: the class path's
            (when-not (:module reg)
              (mapcat #(names-in (File. (str % (when (seq rel) "/") rel)) ".class") (:class-dirs reg)))))))
@@ -269,9 +264,10 @@
         pkg (if (neg? i) "" (subs flat 0 i))
         simple (subs flat (inc i))]
     (or (when-let [m (module-of-package reg pkg)]
-          (let [path (str (:platform reg) "/" m "/" (str/replace pkg "." "/") (when (seq pkg) "/") simple ".class")]
-            (when (.isFile (File. path))
-              (class-file-csym reg flat m path))))
+          (let [path (str (str/replace pkg "." "/") (when (seq pkg) "/") simple ".class")
+                p (:platform reg)]
+            (when (pf/exists? p m path)
+              (class-file-csym reg flat m [p m path]))))
         ;; the class path's, the unnamed module's (JN9f)
         (some (fn [d]
                 (let [path (str d "/" (str/replace pkg "." "/") (when (seq pkg) "/") simple ".class")]
@@ -352,7 +348,8 @@
       (seq (:permitted cfd)) (bit-or SEALED))))
 
 (defn class-file-csym
-  "The class symbol of the platform's class file at `path` (a local or anonymous class's as ClassReader
+  "The class symbol of the class file `path` (a class path's file, or the platform's [platform module
+  path]: read-class-file; a local or anonymous class's as ClassReader
   enters a class a signature names: by its flat name, its owner the package, :cf-local)."
   [reg ^String flat module path]
   (let [cfd (read-class-file path)
