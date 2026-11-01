@@ -11,6 +11,17 @@ trap cleanup EXIT
 . "$root/bin/lib/limit.bash"
 fail=0; ck() { if [ "$2" = ok ]; then echo "ok   $1"; else echo "FAIL $1: $2"; fail=1; fi; }
 want() { [ $# -eq 0 ] && return 0; local c; for c in "${WANT[@]}"; do [ "$c" = "$1" ] && return 0; done; return 1; }
+# gone PID: the process has ended, polled up to about 1 s (-k's kill is asynchronous under load); a zombie (state Z in
+# /proc/PID/stat, ended and not yet reaped) and a missing /proc entry count as gone
+gone() {
+  local i st
+  for i in $(seq 20); do
+    st=; [ -r "/proc/$1/stat" ] && st=$(sed 's/^.*) //' "/proc/$1/stat" 2> "$w/stat.err")
+    case $st in ""|Z*) return 0 ;; esac
+    sleep 0.05
+  done
+  return 1
+}
 WANT=("$@"); sel() { [ ${#WANT[@]} -eq 0 ] || want "$1"; }
 
 if sel wallcap-log; then
@@ -23,7 +34,7 @@ S
   export ARBACE_CPU_LOG=$w/cpu.tsv; : > "$ARBACE_CPU_LOG"
   s0=$(date +%s); limited_cpu 30 1 bash "$w/ign.sh" "$w/pid"; st=$?; s1=$(date +%s)
   p=$(cat "$w/pid" 2> "$w/pid.err"); [ -n "$p" ] && orphans+=("$p")
-  alive=; [ -n "$p" ] && [ -d "/proc/$p" ] && alive=yes
+  alive=; [ -n "$p" ] && { gone "$p" || alive=yes; }
   [ "$st" = 137 ] && ck "wallcap-log: a SIGTERM-ignorer is killed by -k (137)" ok || ck "wallcap-log: status" "$st, expected 137"
   [ -z "$alive" ] && ck "wallcap-log: no orphan left" ok || ck "wallcap-log: no orphan left" "pid $p still runs"
   nf=$(awk -F'\t' 'END { print NF }' "$ARBACE_CPU_LOG")
