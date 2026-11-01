@@ -16,7 +16,12 @@
       running it; a consumer of a rerun producer is keyed by what it makes again). MODE builds: a line
       per build, run (a selected check needs it) or none; MODE checks: a line per check, run or skip
       with the base pass it stands on, and exit 1 when a check not selected has changed material (its
-      key is not the one it passed clean at: it must be rerun). Prints DECISION<TAB>NAME<TAB>WHY.
+      key is not the one it passed clean at: it must be rerun). Prints DECISION<TAB>NAME<TAB>WHY. GTS103:
+      when a check whose material is compared (every check with changed, else the checks not selected) passed
+      at a run whose logs are gone (LOGS-ROOT/:logs, or its gate/plan, not a directory), both modes refuse,
+      an error line per such run naming its index, commit, date and the missing directory, exit 2: its steps
+      are not counted changed. A step's own plan/NAME.inputs missing in a run whose logs are there still
+      counts as changed.
 
   merge BASE-RECORD NEW-RECORD ONLY LOGS OUT [ROOT]
       the record of every run: the base's steps with the rerun's in their place (the steps it ran: not
@@ -104,6 +109,27 @@
         _ (when (seq bad)
             (println (str "error\t-\tgate --only: no step " (str/join ", " bad)))
             (System/exit 2))
+        ;; GTS103: a run the record cites (a check compared here names it by :run) whose logs are gone, the
+        ;; directory LOGS-ROOT/:logs or its gate/plan, refuses the selection: its steps' material is not there to
+        ;; compare, and counting them changed reran steps whose keys had not moved (GT7's rerun 8). The checks
+        ;; compared: every check with changed, else those the selection leaves out (MODE checks' stale test; MODE
+        ;; builds refuses the same, before a build is made). A step's own plan/NAME.inputs missing in a run whose
+        ;; logs are there stays changed (a real gap in that run's record)
+        run-of (fn [n] (when-let [e (entries n)] (or (:run e) 0)))
+        refuse-gone (fn [compared-names]
+                      (let [gone (for [i (sort (distinct (keep run-of compared-names)))
+                                       :let [r (nth runs i) d (str logs-root "/" (:logs r))
+                                             miss (first (remove #(.isDirectory (File. ^String %)) [d (str d "/gate/plan")]))]
+                                       :when miss]
+                                   [i r miss (filter #(= i (run-of %)) compared-names)])]
+                        (when (seq gone)
+                          (doseq [[i r miss ss] gone]
+                            (println (str "error\t-\tgate --only: run " i " of the record (" (:commit r) ", " (:date r)
+                                          ", --only " (:only r) ") has no logs, " miss " is missing: the clean keys of its "
+                                          (count ss) " steps cannot be compared (restore the directory, or select those"
+                                          " steps by name: " (str/join "," (sort ss)) "; GTS103)")))
+                          (System/exit 2))))
+        _ (when (some #{"changed"} toks) (refuse-gone names))
         why (atom {})
         pick (fn [ns w] (doseq [n ns] (swap! why update n #(or % w))))
         _ (doseq [t toks]
@@ -119,7 +145,8 @@
                         s2 (into s (concat up down))]
                     (if (= s s2) s (do (pick (remove s up) "a producer of a step rerun")
                                        (pick (remove s down) "a consumer of a step rerun")
-                                       (recur s2)))))]
+                                       (recur s2)))))
+        _ (refuse-gone (remove closure names))]
     (case mode
       "builds" (doseq [r rows :when (= "build" (:kind r))]
                  (println (str (if (some #(some #{(:name r)} (:needs (by-name %))) closure) "run" "none")

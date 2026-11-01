@@ -2511,3 +2511,36 @@ From GT7's reruns 7 and 8 (doc/JOURNAL.md, 2026-11-01). Decided by the user:
   limits. At the merge window's rekey (`bin/java-check` is in every Java step's key).
 - **GTS103** `bin/gate --clean --only` refuses when a run the record cites has no logs, instead of counting its steps
   as changed (rerun 8's first attempt selected 53 unchanged steps after its logs were deleted).
+
+## As built: GTS103 (write-ahead)
+
+GTS103, decided 2026-11-01 (a VM's branch `mac/029-gts103`, light: nothing built or run). `test/gate/clean.ae`'s
+`select` (lines 112-132 and 149) no longer counts the steps of a run whose logs are gone as changed. Before,
+`base-material` read `LOGS-ROOT/:logs/gate/plan/NAME.inputs` of the run each step passed at (its `:run`) and gave nil for
+a missing file, so `changed?` was true for every step of a deleted logs directory: rerun 8's first attempt selected 53
+unchanged steps after five such directories were deleted. Now `refuse-gone` looks, for the checks whose material is
+compared, at each run they cite: when `LOGS-ROOT/:logs`, or its `gate/plan`, is not a directory, it prints one line per
+such run, `error<TAB>-<TAB>gate --only: run I of the record (COMMIT, DATE, --only ONLY) has no logs, DIR is missing: the
+clean keys of its N steps cannot be compared (restore the directory, or select those steps by name: S,...; GTS103)`, and
+exits 2. `bin/gate`'s `only_apply` already prints a failed selection's `error` lines and stops the run (`== gate FAILED:
+--only's selection`), so `bin/gate` is unchanged. Which checks are compared:
+- with `changed` among ONLY's tokens, every check, before the selection is made (line 132);
+- else the checks the selection leaves out (line 149), which MODE checks' stale test compares. MODE builds refuses on
+  the same set, so the run stops before a build is made. A run whose steps are all named (`--only c,d`) is not compared
+  and not refused: naming them is the way out when the logs cannot be restored.
+
+A step whose own `plan/NAME.inputs` is missing in a run whose logs directory and `gate/plan` are there still counts as
+changed: that is a real gap in the run's record, not a deleted run. `select`'s docstring says both.
+
+Tested (`.tmp/fix-tests/029/gts103-test.sh`, not committed): `select` extracted from `clean.ae` and run under joker
+(v1.5.8; no Java interop, so `File`'s `.isFile`/`.isDirectory`, `read-file` and `System/exit` are shimmed textually), on a
+synthetic record of two runs (run 0 cites checks a, b; run 1 cites c, d) and a logs tree. On the merge commit (`8053e906`,
+before GTS103), with run 1's logs deleted, `--only changed` printed `run c`/`run d ... its material changed` and exited 0,
+and `--only a` (checks) failed with "2 steps not selected have changed": 5 of 10 cases fail. On GTS103's commit, all 10
+pass: both modes refuse with the line above, for `changed` and for `--only a`, and for a logs directory without
+`gate/plan`; `--only c,d` is not refused; and with only `d.inputs` missing in run 1's logs, `d` runs as changed and `c`
+is skipped.
+
+What the main host's run must check: `bin/gate --clean --tag TAG --only changed` with one cited run's logs directory
+moved aside prints the refusal and `== gate FAILED: --only's selection` before any build is made; put back, the same
+command selects as before. `clean.ae` is in no key, so nothing is rekeyed.
