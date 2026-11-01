@@ -148,9 +148,14 @@
           (cons 'warning (lambda () (eval (cadr c) env2)))
           (cons 'true (lambda () (eval c env2))))))
 
+(define (watchdog-error? e)
+  (and (condition? e) (who-condition? e) (eq? (condition-who e) 'watchdog)))
+
 (define (make-mat-env)
   (let ((env2 (new-interaction-environment env)))
-    (for-each (lambda (d) (guard (e (#t #f)) (eval d env2))) (reverse prelude))
+    ;; a definition that does not evaluate is left out (the clauses that use it are not run), but not the watchdog's error: a prelude that
+    ;; runs past the limit must not pass for a missing identifier (re-review 058, Q3)
+    (for-each (lambda (d) (guard (e ((watchdog-error? e) (raise e)) (#t #f)) (eval d env2))) (reverse prelude))
     env2))
 
 (define (run-one name clauses)
@@ -161,7 +166,10 @@
     ((and (pair? clauses) (pair? (car clauses)) (eq? (caar clauses) 'parameters))
      (newline) (display "MAT ") (write name) (display " SKIP parameters") (newline))
     (else
-     (let ((env2 (timed (lambda () (make-mat-env)))))
+     (let ((env2 (guard (e ((watchdog-error? e) e)) (timed (lambda () (make-mat-env))))))
+      (if (condition? env2)
+       (begin (newline) (display "MAT ") (write name) (display " NOTRUN ") (display (message-of env2)) (newline))
+      (let ()
        (set-evaluator! (lambda (expr) (eval expr env2)))
        (interaction-environment env2)   ; SC170 (b): (eval x) of a clause evaluates in the mat's environment, as in Chez
        (let loop ((cs clauses) (k 1) (p 0) (f 0) (n 0) (fail #f) (notrun #f))
@@ -186,7 +194,7 @@
                   (let* ((d (caddr r))   ; "1: why" -> "K: why"
                          (kd (string-append (number->string k) (substring d 1 (string-length d)))))
                     (newline) (display "CLAUSE ") (write name) (display " ") (display kd) (newline) (line)
-                    (loop (cdr cs) (+ k 1) p (+ f 1) n (or fail (cons k kd)) notrun))))))))))
+                    (loop (cdr cs) (+ k 1) p (+ f 1) n (or fail (cons k kd)) notrun))))))))))))
   (line))
 
 ;; the watchdog around a thunk
