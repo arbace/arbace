@@ -1,5 +1,5 @@
 #!/bin/bash
-# bin/generated-check on a fabricated checkout and a fake executable (audit 041, finding 2):
+# bin/generated-check on a fabricated checkout and a fake executable (audit 041, findings 2 and 6):
 # each misbehaviour of a generator, or a stale committed file, must fail the check; a faithful
 # one passes. Seconds, no executable of the build: bin/gate-independent (run by hand:
 #   test/gate/generated-check-test.bash [SCRATCH])
@@ -55,9 +55,24 @@ expect() {
 
 expect faithful 0
 expect goi-stale 1 MODE=goi-stale          # finding 2: goi's pair compared
-expect goi-nothing 1 MODE=goi-empty        # finding 2: a generator that writes nothing
+expect goi-nothing 1 MODE=goi-empty        # finding 2 and 6: a generator that writes nothing
 expect modules-stale 1 JRT_STALE=1         # finding 2: bin/jrt modules --check run
+expect outside-go 1 MODE=outside-go        # finding 6: the whole tree of repr/go compared
 expect nothing 1 MODE=nothing              # a generator that writes nothing
+
+# finding 6: the c2j generators run with ARBACE_PATH=$root, whatever the caller's
+expect arbace-path 0 ARBACE_PATH=/elsewhere
+if grep -qx '/elsewhere' "$scratch/arbace-path.log"; then
+  echo "FAIL: arbace-path: a generator ran with the caller's ARBACE_PATH"; fails=$((fails + 1))
+else echo "ok:   arbace-path (generators ran with ARBACE_PATH=checkout)"; fi
+
+# finding 6: --update with a generator that writes nothing keeps the committed trees, and fails
+d=$scratch/update-nothing; mk "$d"
+MODE=nothing FAKE_LOG=$scratch/un.log "$d/bin/generated-check" --update "$scratch/fake" > "$scratch/un.out" 2>&1
+st=$?
+if [ "$st" != 0 ] && [ -f "$d/go/arbace/repr/go/godump.ae" ] && [ -f "$d/go/arbace/repr/go/internal/syntax/a.ae" ]; then
+  echo "ok:   update-nothing (status $st, trees kept)"
+else echo "FAIL: update-nothing: status $st, trees $(ls "$d/go/arbace/repr/go" 2>&1 | tr '\n' ' ')"; fails=$((fails + 1)); fi
 
 # --update writes a stale goi file
 d=$scratch/update-goi; mk "$d"; echo old > "$d/go/arbace/goi/ops.ae"
