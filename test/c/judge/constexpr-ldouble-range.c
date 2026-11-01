@@ -11,3 +11,9 @@ constexpr float f = 0.5L;
 constexpr _Float16 g = 0.1L;			/* { dg-error "not representable" } */
 constexpr float h = 1e39L;			/* { dg-error "not representable" } */
 constexpr double i = 0.5L;
+/* review 057's finding 2: past long double's own range the constant is an infinity, which gcc and clang accept */
+constexpr double j = 1e5000L;
+constexpr double k = -1e5000L;
+constexpr double l = 1.2e4932L;
+constexpr double m = 1e7000L;
+constexpr double n = 1e-5000L;
