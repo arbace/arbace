@@ -4060,3 +4060,14 @@ Report 086 (the VM) found F79 mergeable with one correction. Each fix is a commi
 
 Proposal **CS239 `-I-`.** Options: (a) refuse it as unsupported so such files land in a class instead of a wrong verdict (recommended); (b) model the quote/bracket split;
 (c) leave. None decided.
+
+## Decided (2026-11-01, the user): CS236-CS239
+
+From main's doc/JOURNAL.md, "2026-11-01: the user's decisions after the tag" (VM report 103's sheet 2 for CS236-CS238;
+CS239 asked after it). None built yet.
+- **CS236 (a):** the 8 files the strict rule makes unexplained classified (families or `:wrong-reason` lines), then
+  every directive of a line needs its own message.
+- **CS237 (a):** a meta mark from the converter (`:c/atomic-qual`) that `leading-quals` reads, so `_Atomic` is among
+  `:c/bad-specs`' qualifiers.
+- **CS238 (a):** an optional `:checker` regex per wrong-reason entry and `:files` on every family.
+- **CS239 (a):** `-I-` refused as unsupported, a class of its own, instead of a wrong verdict.
