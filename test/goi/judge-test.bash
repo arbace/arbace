@@ -44,4 +44,29 @@ test_forms_rel() {
 }
 t forms-rel test_forms_rel
 
+# finding 2: a known program is known only for the kind of result its reason stands for
+test_known_kinds() {
+  load apply_known || return 1
+  local T=$'\t' k=$tmp/k.tsv r=$tmp/r.tsv
+  { printf 'a.go\tpositions: a call split over lines\n'
+    printf 'b.go\truns the go command: the log differs\n'
+    printf 'c.go\tgo build'"'"'s -complete: no body\n'
+    printf 'd.go\terrorcheck: the forms say another program\n'
+    printf 'e.go\tspeed: slow\n'
+    printf 'f.go\tgoi'"'"'s own thing\n'
+    printf 'g.go\tpositions: a call split over lines\n'; } > "$k"
+  { printf 'a.go\tfail\tstatus 2 (gc 2), stderr differs: x\n'
+    printf 'b.go\terror\ttimeout\n'
+    printf 'c.go\terror\tthe AOT build failed: no body\n'
+    printf 'd.go\terror\tprinting the forms failed: NullPointerException\n'
+    printf 'e.go\terror\ttimeout 10 s\n'
+    printf 'f.go\tskip\tx\n'
+    printf 'g.go\terror\tthe AOT build failed: printer crashed\n'; } > "$r"
+  local want got
+  want=$(printf 'a.go\tknown\tpositions: a call split over lines\nb.go\terror\ttimeout\nc.go\tknown\tgo build'"'"'s -complete: no body\nd.go\terror\tprinting the forms failed: NullPointerException\ne.go\tknown\tspeed: slow\nf.go\tknown\tgoi'"'"'s own thing\ng.go\terror\tthe AOT build failed: printer crashed')
+  got=$(apply_known "$k" "$r")
+  [ "$got" = "$want" ] || { printf '%s\n' "$got" > "$tmp/got"; printf '%s\n' "$want" > "$tmp/want"; diff "$tmp/got" "$tmp/want" >&2; return 1; }
+}
+t known-only-its-kind test_known_kinds
+
 exit $failed
