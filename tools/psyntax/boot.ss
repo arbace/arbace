@@ -84,7 +84,10 @@
 (define si-primitives
   '(real-time cpu-time current-microseconds watchdog r7rs-write r7rs-display r7rs-write-shared r7rs-write-simple
     ;; psyntax's own keywords beyond R6RS's, for (chezscheme) (SC110 (b)): Chez's internal modules
-    module import))
+    module import
+    ;; Chez's port procedures of (chezscheme) (SC180 (b)), go/arbace/scm/prim_io.ae
+    unget-u8 unget-char port-has-port-length? port-has-set-port-length!? port-has-port-nonblocking??
+    port-has-set-port-nonblocking!? fresh-line port-length set-port-length! port-nonblocking? set-port-nonblocking!))
 
 (define (sort-symbols ls) (list-sort (lambda (a b) (string<? (symbol->string a) (symbol->string b))) ls))
 

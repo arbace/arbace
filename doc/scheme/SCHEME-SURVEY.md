@@ -2833,3 +2833,119 @@ None. Not shipped: `arbace/scheme/corpora.ae`, `bin/si`, `test/scheme/{corpora.e
 
 All as recommended: SC180 (b) for the ports, (a) for compiled libraries and fasl; SC181 (b); SC182 (b); SC183 (a);
 SC184 (a); SC190 (b); SC191 (a); SC192 (a); SC193 (b).
+
+## As built: SC180-SC182, SC190 (2026-11-01)
+
+Branch `scheme-sm1`, light tier (stage 0 as the tools' host, the light driver; no gate, no build of Arbace's executables or javac's tool, no
+lock). The worktree's scratch of the day before was restored from its archive (`.tmp/scratch-2026-10-31.tar.xz`); the corpora were fetched
+again by `bin/repr-scheme corpus fetch`.
+
+### SC180 (b): Chez's port procedures behind io.ms's custom ports
+
+R6RS's custom ports (`make-custom-*-port`) were already in si's runtime (`go/arbace/scm/prim_io.ae`, `port.ae`). The 39 failing clauses of
+io.ms's `custom-binary-ports` (19) and `custom-textual-ports` (20) failed for what Chez's version of the mats uses around them, found by
+running the file with `SI_MAT_VERBOSE=1` after each change:
+- `unget-u8`, `unget-char` (missing: the mat stopped at the clause that pushes the end of file back, and the clauses after it, which read
+  the state it makes, failed). A pushed-back item, the end of file too, is read before the port's own input (`Port.ug`, in `nextByte` and
+  `nextRune`); a byte or character can be pushed back only after the port has read something (Chez: room in the buffer), the end of file
+  always; a non-binary or non-input port raises.
+- `port-has-port-length?` and relatives, `port-length`, `set-port-length!`, `port-nonblocking?`, `set-port-nonblocking!`: a length for
+  bytevector and file ports, `set-port-length!` for file output ports (truncates or zero-extends), no nonblocking mode (the clauses expect
+  "not supported" errors).
+- `fresh-line` (`Port.lastc`, the last character written to a textual port; io.ms's custom textual output port and 6.ms's mat use it).
+- A custom textual output port's `port-position` writes out the characters its `write!` has not seen (Chez does: "write 13\npos = 30"); an
+  input/output custom port flushes its pending output before it fills its input (the binary and textual mats read what a write moved).
+- The harness' environment (`test/scheme/mats/run.sps`) adds `(prefix (rnrs) r6rs:)`: io.ms, fx.ms and 5_3.ms name R6RS's own procedures that way.
+- Each new name is in `(chezscheme)` and in `tools/psyntax/boot.ss`'s `si-primitives` (the list of `(psyntax system $all)`); psyntax was
+  rebooted (`bin/si boot`, `scheme/psyntax/psyntax.pp.ae`: 14 lines; `bin/si boot --check` and `bin/si fixpoint` pass).
+- Go unit tests: `TestUnget`, `TestFreshLine` (`bin/si unit` ok).
+
+*Numbers* (before: SC170-SC173 and re-review 025's rerun; after: this one, `bin/si mats` whole, 10 m, no skip):
+
+| | before | after |
+|---|---|---|
+| mats pass / fail / not run / skipped | 282 / 87 / 531 / 11 | 300 / 89 / 511 / 11 |
+| clauses of the mats not run, alone: pass / fail / do not run | 4,389 / 332 / 9,271 | 4,335 / 283 / 8,266 |
+| non-pass items | 1,534 | 1,468 |
+| in no class | 0 | 0 |
+| io.ms mats pass / not run | 2 / 14 | 4 / 12 |
+
+So **66 items moved** (`mats-returned-false` 142 to 94: the 39 clauses of the two custom-port mats and the rest in `port-operations` and `current-transcoder`;
+`mats-chez-identifier` 526 to 506; `mats-clause-errors` 13 to 12; `mats-numeric` 183 to 186), and **18 more mats pass**: the two custom-port
+mats pass whole (112 and 111 clauses), and the `r6rs:` prefix made mats of 4.ms, 5_3.ms, 5_4.ms, 5_5.ms and fx.ms run that stopped on
+an unbound `r6rs:...` name. The mats that now run exposed 3 clauses that fail, all numeric (Chez's extended `r6rs:number->string` precision
+argument: `0.0 10 0` does not raise, `100.5 10 53` is "100.5|53"; `r6rs:string->number "#e1@1"` is `#f`); they are in `mats-numeric`
+(named, 186 now). The classes `mats-returned-false` and `mats-clause-errors` were pruned of the clauses that now pass.
+Not done (left in `mats-chez-identifier`): `file-port?`, `mkdir`, `textual-port-input-index` and the port-buffer family, `make-codec-buffer`,
+`current-transcoder`, `console-input-port`, `set-port-bol!` (SC200 (a)); compiled libraries and fasl stay as decided.
+
+### SC181 (b): the regression step for `bin/si check` and the AOT judges
+
+`regressions` and `regress-code` moved from `arbace.scheme.corpora` to their own namespace `arbace.scheme.regress` (taking the judge's
+classes, for the `:volatile` ones); `arbace.scheme.corpora` and `arbace.scheme.check` require it. `check.ae`'s `judge` (interpreted and
+`--aot`) reads its record (`check-linux-amd64.edn`, `check-aot-linux-amd64.edn`) before writing, prints the regression lines and exits 1
+unless it records; a partial run (`--only`) is compared with the recorded programs it ran. *Test* (a copy of the last runs with a line added
+to `larceny/hello`'s output and an exit status changed in `si/data`): 0 lines before (no step), 4 after (`pass-fails` and `new-item` for both),
+rc 1; the same with `--only larceny/hello`: 2 lines; `--only larceny/cmdline`: none, rc 0. The AOT judge on the interpreted runs against
+the AOT record: the differences as `verdict` and `item-absent` lines. *Found by it at once*: the first `bin/si check` after the change
+reported three larceny programs (earley, fib, nboyer) as crashed: their `.input` files are not in the corpus' pins (`test/scheme/corpora.edn`
+lists the `.sch` files), they had been fetched by hand and were lost with the scratch (SC203). Fetched again, **46 of 47 pass** (1
+`chez-conditions`), regressions none.
+
+### SC182 (b): a partial `bin/si mats FILE...` judges and records only the files it ran
+
+`bin/si mats io.ms` passes `--only io` to the judge; `run-stamps` then looks at those outputs only (the other files' old outputs, of another key
+perhaps, are neither refused nor judged), the results and the regression step are of those files, and `--record` replaces those files'
+records in place and keeps the others. *Test*: `bin/si mats io.ms` (no record) against the old record: regression lines for io.ms only (the
+items that went), no `result-absent` for the other files; before, the others' stale outputs were refused or judged.
+
+### SC190 (b): Chez's ecraven rerun under the new key
+
+`bin/si ecraven --chez --record` (43 s, native Chez): 58 benchmarks, 57 correct, 0 incorrect, 0 timeouts, 1 error (`read0`, status 255,
+as recorded); no verdict changed ("regressions: none"), the record now carries the key `81b101c0...`'s successor (the key changed with
+`scheme/lib` and psyntax) and Chez's new seconds. si's own ecraven outputs stay stale (the judge exits 2) until the heavy window.
+
+### The checks rerun
+
+`bin/si mats` (above), `check` 46 of 47, `r7rs` 1,216 of 1,225 (`--chez` 1,205, `--chibi-test` 1,216), `srfi` 1,231 checks, `unit` ok, `boot --check`
+and `fixpoint` ok, `corpora files` 220 files / 0 in neither, `corpora divergences` rc 0, `make check-makefile` rc 0; none against its record.
+Not run: `check --aot` and `srfi --aot` (they build Go programs), si's ecraven, the gate.
+
+### Proposals (SC200 onward)
+
+- **SC200 The rest of io.ms (and relatives) that does not run.** 12 mats of io.ms still name an identifier of Chez's own (`file-port?`, `mkdir`,
+  `textual-port-input-index` and the buffer-size parameters, `make-codec-buffer`, `current-transcoder`, `console-input-port`, `set-port-bol!`,
+  `find-source`); their clauses are counted "do not run". Options: (a) leave them in `mats-chez-identifier`; (b) the small ones
+  (`file-port?`, `mkdir`, `console-input-port`, `set-port-bol!`, `current-transcoder`), leaving the buffer internals; (c) all, buffers
+  included (the codec buffers need the transcoder written over a buffer, a change of `port.ae`'s design). *Recommended: (b)*; (c) buys
+  little portable behaviour.
+- **SC201 The semantics of `unget-u8` and `unget-char`.** As built: a stack of pushed-back items beside the port, refused before anything was
+  read, `port-position` not moved by a pushed-back byte or character. Options: (a) as built; (b) move the position (and re-read from the
+  buffer, as Chez does) for ports that hold their input (bytevector, string, file); (c) (b) and a bound of one item as Chez's buffer has room
+  for. *Recommended: (a)* until a program needs the position (nothing in the mats does); (b) then.
+- **SC202 `set-port-length!` and the nonblocking procedures.** As built: file output ports only; the nonblocking procedures raise "not
+  supported". Options: (a) as built; (b) `set-port-length!` for bytevector output ports too, with Chez's rules for the position; (c) nonblocking
+  mode for the console. *Recommended: (a)*; no mat or program asks.
+- **SC203 The larceny `.input` files.** `test/scheme/si/programs.edn` names `larceny-r6rs/{earley,fib,nboyer}.input`, not pinned by
+  `test/scheme/corpora.edn`, so a fresh checkout's `bin/si check` crashes three programs. Options: (a) leave (the files are in the
+  repository of the pinned commit); (b) pin them (three files, SHA-256, `bin/repr-scheme corpus fetch`); (c) commit them under `test/scheme/si/`.
+  *Recommended: (b)*; they are the corpus' own, and the pins are how every other input is kept.
+- **SC204 Each new Chez primitive needs a psyntax reboot.** `(psyntax system $all)` is a fixed list (`tools/psyntax/boot.ss`'s `si-primitives`),
+  so a Go primitive for `(chezscheme)` costs a `bin/si boot` and a 14-line change to `psyntax.pp.ae`. Options: (a) as built; (b) a library
+  `(psyntax system si-chez)` exporting every primitive `Def`ed in Go and not in R6RS, generated, so a new one needs no reboot; (c) a
+  `(chezscheme)`-only foreign import form. *Recommended: (a)* for the few names a quarter; (b) when SC200 (c) or SC183 (b) adds dozens.
+- **SC205 The shipped files changed.** `go/arbace/scm/{port,prim_io}.ae` and `scheme/lib/chezscheme.sls` and `scheme/psyntax/psyntax.pp.ae` are
+  in the executable's and si's keys: the next gate builds and the stale si ecraven outputs are one more reason for the heavy window. Options:
+  (a) accept (as SC184); (b) hold the commit until the window. *Recommended: (a)*.
+
+### Rule slips
+
+- Two background wrappers (`cmd &` inside a backgrounded Bash) reported "completed" at once while their command ran on; watched by the
+  log's `real` line, one loop at a time after the first mistake. Several foreground waiting loops were moved to the background by the tool at 180 s.
+- `source bin/lib/tools.bash` in a scratch shell without `ARBACE_ROOT`/`root` set failed once (a harmless error, nothing written); `.tmp/an/jt.sh` after.
+
+### Shipped files changed
+
+`go/arbace/scm/port.ae`, `go/arbace/scm/prim_io.ae` (and `ports_test.ae`), `scheme/lib/chezscheme.sls`, `scheme/psyntax/psyntax.pp.ae`. Not shipped:
+`tools/psyntax/boot.ss`, `arbace/scheme/{regress,check,corpora}.ae`, `bin/si`, `test/scheme/**` (`mats/run.sps`, `divergences-corpora.edn`,
+`check-mats-*.edn`, `ref-ecraven-chez.edn`).

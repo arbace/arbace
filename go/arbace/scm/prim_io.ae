@@ -200,6 +200,9 @@
     (case [pCustom]
       (when (== (.-Gp (.-cu p)) (conv any false))
         (AssertionViolation who "~s does not support port-position" p))
+      ;; a textual port's position counts characters the custom port's write! has not seen yet: Chez writes them out first
+      (when (and (not (.-Binary p)) (.-Out p) (> (len (.-orunes (.-cu p))) 0))
+        (flushCustom p))
       (let [r (CallProc (.-Gp (.-cu p)))
             (values n ok) (assert int64 r)]
         (when (not ok)
@@ -574,6 +577,75 @@
       (portPosition "port-position" p))))
   (Def2 "set-port-position!" (fn ^any [^any x ^any pos]
     (setPortPosition (ArgPort "set-port-position!" x) pos)
+    Unspec))
+
+  ;; ----- Chez's unget-u8 and unget-char (SC180 (b)): a pushed-back item (the end of file too) is read before the port's own input;
+  ;; a character or byte can be pushed back only when the port has read something (Chez: room in the buffer), the end of file always
+  (Def2 "unget-u8" (fn ^any [^any x ^any v]
+    (let [p (ArgBinIn "unget-u8" x)
+          ^int b -1]
+      (when (!= v (conv any Eof))
+        (let [(values n ok) (assert int64 v)]
+          (when (or (not ok) (< n 0) (> n 255))
+            (NotA "unget-u8" "octet or eof object" v))
+          (set! b (conv int n))
+          (when (<= (.-pos p) 0)
+            (AssertionViolation "unget-u8" "cannot unget ~s on ~s" v p))))
+      (set! (.-ug p) (append (.-ug p) b))
+      Unspec)))
+  (Def2 "unget-char" (fn ^any [^any x ^any v]
+    (let [p (ArgTextIn "unget-char" x)
+          ^int b -1]
+      (when (!= v (conv any Eof))
+        (let [(values c ok) (assert Char v)]
+          (when (not ok)
+            (NotA "unget-char" "character or eof object" v))
+          (set! b (conv int c))
+          (when (and (<= (.-pos p) 0) (<= (.-rpos p) 0))
+            (AssertionViolation "unget-char" "cannot unget ~s on ~s" v p))))
+      (set! (.-ug p) (append (.-ug p) b))
+      Unspec)))
+
+  (Def "fresh-line" 0 1 (fn ^any [^{:tag (slice any)} a]
+    (let [p (optOut "fresh-line" a 0)]
+      (when (and (!= (.-lastc p) 0) (!= (.-lastc p) \newline))
+        (.putGo p "fresh-line" "\n"))
+      Unspec)))
+
+  ;; ----- port length and nonblocking mode (Chez's): a length for bytevector and file ports, no nonblocking mode
+  (Def1 "port-has-port-length?" (fn ^any [^any x] (== (.-Kind (ArgPort "port-has-port-length?" x)) pMem)))
+  (Def1 "port-has-set-port-length!?" (fn ^any [^any x]
+    (let [p (ArgPort "port-has-set-port-length!?" x)]
+      (and (== (.-Kind p) pMem) (!= (.-f p) nil) (.-Out p)))))
+  (Def1 "port-has-port-nonblocking??" (fn ^any [^any x] (ArgPort "port-has-port-nonblocking??" x) false))
+  (Def1 "port-has-set-port-nonblocking!?" (fn ^any [^any x] (ArgPort "port-has-set-port-nonblocking!?" x) false))
+  (Def1 "port-length" (fn ^any [^any x]
+    (let [p (ArgPort "port-length" x)]
+      (checkOpen "port-length" p)
+      (when (!= (.-Kind p) pMem)
+        (AssertionViolation "port-length" "not supported for ~s" p))
+      (conv int64 (len (.-data p))))))
+  (Def2 "set-port-length!" (fn ^any [^any x ^any n]
+    (let [p (ArgPort "set-port-length!" x)
+          k (countArg "set-port-length!" n)]
+      (checkOpen "set-port-length!" p)
+      (when (not (and (== (.-Kind p) pMem) (!= (.-f p) nil) (.-Out p)))
+        (AssertionViolation "set-port-length!" "not supported for ~s" x))
+      (flushFile p)
+      (if (< k (len (.-data p)))
+        (do (set! (.-data p) (subslice (.-data p) _ k))
+            (when (> (.-low p) k) (set! (.-low p) k))
+            (.Truncate (.-f p) (conv int64 k)))
+        (do (set! (.-data p) (append (.-data p) (spread (make (slice byte) (- k (len (.-data p)))))))
+            (set! (.-dirty p) true)))
+      Unspec)))
+  (Def1 "port-nonblocking?" (fn ^any [^any x]
+    (checkOpen "port-nonblocking?" (ArgPort "port-nonblocking?" x))
+    (AssertionViolation "port-nonblocking?" "not supported for ~s" x)
+    Unspec))
+  (Def2 "set-port-nonblocking!" (fn ^any [^any x ^any b]
+    (checkOpen "set-port-nonblocking!" (ArgPort "set-port-nonblocking!" x))
+    (AssertionViolation "set-port-nonblocking!" "not supported for ~s" x)
     Unspec))
 
   ;; ----- transcoders and codecs

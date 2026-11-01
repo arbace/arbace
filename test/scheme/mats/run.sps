@@ -99,7 +99,8 @@
         ((char=? (string-ref s j) #\|) (+ j 1))
         (else (bar-end s (+ j 1) n))))
 
-(define env (environment '(chezscheme) '(si mats)))
+;; SC180 (b): R6RS's own names with the prefix r6rs: (Chez's tests of its extended procedures, io.ms's r6rs:flush-output-port, name R6RS's)
+(define env (environment '(chezscheme) '(si mats) '(prefix (rnrs) r6rs:)))
 (define mat-ms
   (let ((v (get-environment-variable "SI_MAT_MS"))) (or (and v (string->number v)) 20000)))
 (set-clause-ms! mat-ms)

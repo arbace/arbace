@@ -23,11 +23,11 @@
     srfi DIR [--record]      DIR/NAME.{out,err,rc}: one result an SRFI's program, its checks counted; test/scheme/check-srfi-linux-amd64.edn
     files                    the files of the corpora against the recorded results and classes
 
-  Every judge but `files` and `divergences` compares its results with the recorded ones (`regressions`, SC171 (b)): a recorded pass
+  Every judge but `files` and `divergences` compares its results with the recorded ones (`arbace.scheme.regress`, SC171 (b), SC181 (b)): a recorded pass
   that fails, a new item, an item in another class, a recorded item or result the run lacks, another count, is a line \"regress ...\",
   and the run fails (exit 1) unless it records: the record is the reviewed state.
     divergences              the recorded items by class"
-  (:require [arbace.string :as str]))
+  (:require [arbace.string :as str] [arbace.scheme.regress :as rg]))
 
 (defn- root [] (or (System/getenv "ARBACE_ROOT") "."))
 (defn- path [& xs] (apply str (root) "/" xs))
@@ -49,74 +49,10 @@
     (doseq [i (take 40 bad)] (println "  FAILING" (:item i)))
     (if (seq bad) 1 0)))
 
-;; ------------------------------------------------------------------------------------------ the regression step (SC171 (b))
-
-(def ^:private count-keys [:tests :pass :fail :mats :notrun :skip])
-
-(defn regressions
-  "SC171 (b), review 009's anchors catch a clause that fails anew, not a known item that fails for another reason: the run's
-  results (each {:id :verdict :items [{:item :class}] ...}) compared with the recorded ones, the reviewed state. Lines, each
-  \"regress KIND ID: DETAIL\":
-    pass-fails       a recorded pass that does not pass now
-    verdict          another verdict (a reference's, an ecraven benchmark's)
-    new-item         an item the record does not hold (a clause that fails anew; a known one that fails for another reason is
-                     a new text beside an absent one)
-    class-changed    a recorded item now in another class
-                     (an item of a :volatile class, a time limit, comes and goes without a line)
-    item-absent      a recorded item the run does not make (fixed, or not run: re-record to accept)
-    counts           another count of tests, passes, fails, mats, not run, skipped
-    result-absent    a recorded result with no output in the run
-    result-new       a result the record does not hold"
-  [recorded results]
-  (let [rec (into {} (map (juxt :id identity) recorded))
-        ids (set (map :id results))
-        freq (fn [r] (frequencies (map :item (:items r))))
-        cls (fn [r] (into {} (map (juxt :item :class) (:items r))))
-        ;; re-review 025, finding A2: an item of a class marked :volatile (a time limit: ecraven-too-slow) may come and go between
-        ;; runs of the same si without a regression, as its seconds do; it is judged by its class, not by the record
-        vol (set (map :id (filter :volatile (classes))))
-        vol? (fn [r i] (contains? vol (get (cls r) i)))]
-    (vec (concat
-           (for [r results
-                 :let [p (get rec (:id r))]
-                 line (if (nil? p)
-                        [(str "regress result-new " (:id r) ": not in the record")]
-                        (let [fp (freq p) fr (freq r)
-                              added (for [[i n] (sort-by key fr) :when (> n (get fp i 0)) :when (not (vol? r i))] i)
-                              gone (for [[i n] (sort-by key fp) :when (> n (get fr i 0)) :when (not (vol? p i))] i)
-                              delta (concat (for [[i n] fr :when (> n (get fp i 0))] [r i])
-                                            (for [[i n] fp :when (> n (get fr i 0))] [p i]))
-                              vol-only? (and (seq delta) (every? (fn [[x i]] (vol? x i)) delta))]
-                          (concat
-                            (when (and (= :pass (:verdict p)) (not= :pass (:verdict r)) (not vol-only?))
-                              [(str "regress pass-fails " (:id r) ": recorded pass, now " (some-> (:verdict r) name) ", " (count (:items r)) " items")])
-                            (when (and (not= (:verdict p) (:verdict r)) (not= :pass (:verdict p)) (not vol-only?))
-                              [(str "regress verdict " (:id r) ": " (some-> (:verdict p) name) " -> " (some-> (:verdict r) name))])
-                            (for [k count-keys :when (and (contains? p k) (not= (get p k) (get r k)))]
-                              (str "regress counts " (:id r) ": " (name k) " " (get p k) " -> " (get r k)))
-                            (for [i added] (str "regress new-item " (:id r) ": " i))
-                            (for [i gone] (str "regress item-absent " (:id r) ": " i))
-                            (let [cp (cls p) cr (cls r)]
-                              (for [[i c] (sort-by key cr) :when (and (contains? cp i) (not= c (get cp i)))]
-                                (str "regress class-changed " (:id r) ": " i " (" (some-> (get cp i) name) " -> " (some-> c name) ")"))))))]
-             line)
-           (for [[id _] (sort-by key rec) :when (not (contains? ids id))]
-             (str "regress result-absent " id ": recorded, no output in the run"))))))
-
 (defn- recorded-results [file]
   (when-let [t (slurp-or (path file))] (vec (read-string t))))
 
-(defn- regress-code
-  "Prints REC's regressions of results (the recorded results before this run wrote anything) and returns the exit code: 1 when
-  there are some and the run does not record (--record accepts them: the record is the reviewed state)."
-  [rec results recording?]
-  (let [rg (if rec (regressions rec results) [])]
-    (cond (nil? rec) (println "regressions: no record to compare with")
-          (empty? rg) (println "regressions: none against the record")
-          :else (do (println (str "regressions: " (count rg) (if recording? " (recorded now)" " against the record (--record accepts them)")))
-                    (doseq [l (take 60 rg)] (println " " (clip l 260)))
-                    (when (> (count rg) 60) (println "  ..." (- (count rg) 60) "more"))))
-    (if (and (seq rg) (not recording?)) 1 0)))
+(defn- regress-code [rec results recording?] (rg/regress-code rec results recording? (classes)))
 
 ;; ------------------------------------------------------------------------------------------ R7RS (Chibi's suite)
 
@@ -441,14 +377,22 @@
 (defn- run-names [dir]
   (sort (map #(second (re-find #"^(.*)\.rc$" (.getName ^java.io.File %))) (filter #(str/ends-with? (.getName ^java.io.File %) ".rc") (.listFiles (java.io.File. ^String dir))))))
 
+(defn- only-of
+  "SC182 (b): the names of OPTS' `--only NAME` pairs (a partial run: bin/si mats FILE...), a set; empty for a whole run."
+  [opts]
+  (set (map second (filter #(= "--only" (first %)) (partition 2 1 opts)))))
+
 (defn- run-stamps
   "Review 009, finding 6: the stamps bin/si writes beside each output of DIR (NAME.stamp: the key of what made the run, its time
   limit, the repetition count of a benchmark run); {:names :timeouts {NAME seconds} :key K :count C}, or {:refused WHY} for a directory
   with no outputs, an output without a stamp (an older bin/si's), outputs of more than one key (a partial run by another si, harness
   or library) or of more than one count. Re-review 025, finding E: OPTS' `--key K` (bin/si passes the key of what it would run now)
-  refuses a directory made by another key, consistent as it is: outputs of a si, library or harness that changed since."
+  refuses a directory made by another key, consistent as it is: outputs of a si, library or harness that changed since.
+  SC182 (b): OPTS' `--only NAME` limits all of this to the outputs of those names (a partial run leaves the others' old outputs in the
+  directory, of another key perhaps; they are neither judged nor recorded)."
   [dir opts]
-  (let [names (when (.isDirectory (java.io.File. ^String dir)) (run-names dir))
+  (let [only (only-of opts)
+        names (when (.isDirectory (java.io.File. ^String dir)) (cond->> (run-names dir) (seq only) (filter only)))
         st (into {} (for [n names :let [t (slurp-or (str dir "/" n ".stamp"))]]
                       [n (when t (let [[_ k to c] (re-find #"key=(\S+) timeout=(\S+)(?: count=(\S+))?" t)] {:key k :timeout (parse-long to) :count c}))]))
         keys (set (keep :key (vals st)))
@@ -609,12 +553,19 @@
       (println "mats:" (count results) "files," (t :mats) "mats:" (t :pass) "pass," (t :fail) "fail," (t :notrun) "not run," (t :skip) "skipped")
       (let [c (fn [k] (reduce + (map #(get-in % [:clauses-alone k] 0) results)))]
         (println "  the clauses of the mats not run, run alone:" (c :pass) "pass," (c :fail) "fail," (c :notrun) "do not run")))
-    (let [rec (recorded-results "test/scheme/check-mats-linux-amd64.edn") recording? (boolean (some #{"--record"} opts))]
+    (let [rec (recorded-results "test/scheme/check-mats-linux-amd64.edn") recording? (boolean (some #{"--record"} opts))
+          partial? (seq (only-of opts))
+          ids (set (map :id results))
+          ;; SC182 (b): a partial run is judged against, and recorded over, the results of the files it ran only
+          rec-judged (if (and rec partial?) (filterv #(contains? ids (:id %)) rec) rec)]
       (when recording?
         (write-results "test/scheme/check-mats-linux-amd64.edn"
                        ";; Chez's mats on si (bin/si mats --record): per .ms file the mats' counts (pass, fail, not run, skipped) and the items\n;; of every mat that does not pass, with their classes (test/scheme/divergences-corpora.edn); generated."
-                       results))
-      (max (summary results) (regress-code rec results recording?))))))
+                       (if (and rec partial?)
+                         (let [by (into {} (map (juxt :id identity) results))]
+                           (vec (concat (map #(get by (:id %) %) rec) (remove #(contains? (set (map :id rec)) (:id %)) results))))
+                         results)))
+      (max (summary results) (regress-code rec-judged results recording?))))))
 
 ;; ------------------------------------------------------------------------------------------ every file
 

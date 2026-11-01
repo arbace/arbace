@@ -1,0 +1,73 @@
+(ns arbace.scheme.regress
+  "The regression step of si's judges (SC171 (b); SC181 (b): its own namespace, both arbace.scheme.corpora and arbace.scheme.check
+  require it): a judge compares its results with the recorded ones before it writes them, and the run fails (exit 1) unless it records
+  (the record is the reviewed state). A result is {:id :verdict :items [{:item :class}] ...}; CLASSES are the judge's classes
+  (goi's format), whose :volatile ones (a time limit) come and go without a regression line."
+  (:require [arbace.string :as str]))
+
+(defn- clip [s n] (if (> (count s) n) (str (subs s 0 n) "...") s))
+
+(def ^:private count-keys [:tests :pass :fail :mats :notrun :skip])
+
+(defn regressions
+  "SC171 (b), review 009's anchors catch a clause that fails anew, not a known item that fails for another reason: the run's
+  results (each {:id :verdict :items [{:item :class}] ...}) compared with the recorded ones, the reviewed state. Lines, each
+  \"regress KIND ID: DETAIL\":
+    pass-fails       a recorded pass that does not pass now
+    verdict          another verdict (a reference's, an ecraven benchmark's)
+    new-item         an item the record does not hold (a clause that fails anew; a known one that fails for another reason is
+                     a new text beside an absent one)
+    class-changed    a recorded item now in another class
+                     (an item of a :volatile class, a time limit, comes and goes without a line)
+    item-absent      a recorded item the run does not make (fixed, or not run: re-record to accept)
+    counts           another count of tests, passes, fails, mats, not run, skipped
+    result-absent    a recorded result with no output in the run
+    result-new       a result the record does not hold"
+  [recorded results classes]
+  (let [rec (into {} (map (juxt :id identity) recorded))
+        ids (set (map :id results))
+        freq (fn [r] (frequencies (map :item (:items r))))
+        cls (fn [r] (into {} (map (juxt :item :class) (:items r))))
+        ;; re-review 025, finding A2: an item of a class marked :volatile (a time limit: ecraven-too-slow) may come and go between
+        ;; runs of the same si without a regression, as its seconds do; it is judged by its class, not by the record
+        vol (set (map :id (filter :volatile classes)))
+        vol? (fn [r i] (contains? vol (get (cls r) i)))]
+    (vec (concat
+           (for [r results
+                 :let [p (get rec (:id r))]
+                 line (if (nil? p)
+                        [(str "regress result-new " (:id r) ": not in the record")]
+                        (let [fp (freq p) fr (freq r)
+                              added (for [[i n] (sort-by key fr) :when (> n (get fp i 0)) :when (not (vol? r i))] i)
+                              gone (for [[i n] (sort-by key fp) :when (> n (get fr i 0)) :when (not (vol? p i))] i)
+                              delta (concat (for [[i n] fr :when (> n (get fp i 0))] [r i])
+                                            (for [[i n] fp :when (> n (get fr i 0))] [p i]))
+                              vol-only? (and (seq delta) (every? (fn [[x i]] (vol? x i)) delta))]
+                          (concat
+                            (when (and (= :pass (:verdict p)) (not= :pass (:verdict r)) (not vol-only?))
+                              [(str "regress pass-fails " (:id r) ": recorded pass, now " (some-> (:verdict r) name) ", " (count (:items r)) " items")])
+                            (when (and (not= (:verdict p) (:verdict r)) (not= :pass (:verdict p)) (not vol-only?))
+                              [(str "regress verdict " (:id r) ": " (some-> (:verdict p) name) " -> " (some-> (:verdict r) name))])
+                            (for [k count-keys :when (and (contains? p k) (not= (get p k) (get r k)))]
+                              (str "regress counts " (:id r) ": " (name k) " " (get p k) " -> " (get r k)))
+                            (for [i added] (str "regress new-item " (:id r) ": " i))
+                            (for [i gone] (str "regress item-absent " (:id r) ": " i))
+                            (let [cp (cls p) cr (cls r)]
+                              (for [[i c] (sort-by key cr) :when (and (contains? cp i) (not= c (get cp i)))]
+                                (str "regress class-changed " (:id r) ": " i " (" (some-> (get cp i) name) " -> " (some-> c name) ")"))))))]
+             line)
+           (for [[id _] (sort-by key rec) :when (not (contains? ids id))]
+             (str "regress result-absent " id ": recorded, no output in the run"))))))
+
+
+(defn regress-code
+  "Prints REC's regressions of results (the recorded results before this run wrote anything) and returns the exit code: 1 when
+  there are some and the run does not record (--record accepts them: the record is the reviewed state)."
+  [rec results recording? classes]
+  (let [rg (if rec (regressions rec results classes) [])]
+    (cond (nil? rec) (println "regressions: no record to compare with")
+          (empty? rg) (println "regressions: none against the record")
+          :else (do (println (str "regressions: " (count rg) (if recording? " (recorded now)" " against the record (--record accepts them)")))
+                    (doseq [l (take 60 rg)] (println " " (clip l 260)))
+                    (when (> (count rg) 60) (println "  ..." (- (count rg) 60) "more"))))
+    (if (and (seq rg) (not recording?)) 1 0)))

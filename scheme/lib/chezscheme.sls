@@ -114,7 +114,10 @@
     unbox set-box! box? append! reverse! list-copy fluid-let module import real-time cpu-time make-parameter parameterize
     atom? exact-nonnegative-integer? char- string-truncate! enumerate
     fxnonnegative? fxnonpositive? subst substq substv subst! substq! substv! remq! remv! remove! call/1cc
-    exclusive-cond define-values interaction-environment transcoder?)
+    exclusive-cond define-values interaction-environment transcoder?
+    ;; SC180 (b): Chez's port procedures (go/arbace/scm/prim_io.ae)
+    unget-u8 unget-char port-has-port-length? port-has-set-port-length!? port-has-port-nonblocking??
+    port-has-set-port-nonblocking!? fresh-line port-length set-port-length! port-nonblocking? set-port-nonblocking!)
   ;; SC170 (b): Chez's wider forms of eval (the environment optional), dynamic-wind (a leading critical flag), fx+ fx* fx-
   ;; (any number of arguments) and the file procedures' options ('replace, 'truncate) replace (rnrs)'s
   (import (except (rnrs) file-options fx+ fx* fx- for-each dynamic-wind open-output-file call-with-output-file with-output-to-file)
@@ -124,7 +127,9 @@
           (except (rnrs eval) eval) (rename (only (rnrs eval) eval) (eval r6-eval))
           (rnrs mutable-pairs) (rnrs mutable-strings) (rnrs r5rs)
           (srfi :39 parameters)
-          (only (psyntax system $all) gensym module import real-time cpu-time make-file-options)
+          (only (psyntax system $all) gensym module import real-time cpu-time make-file-options
+                unget-u8 unget-char port-has-port-length? port-has-set-port-length!? port-has-port-nonblocking??
+                port-has-set-port-nonblocking!? fresh-line port-length set-port-length! port-nonblocking? set-port-nonblocking!)
           (si format))
 
 ;; SC170 (b): Chez's file-options names more than R6RS's three (replace, append, compressed, exclusive, ...): the universe is si's
