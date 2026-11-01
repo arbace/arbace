@@ -63,6 +63,9 @@
 (let ([p (open-string-input-port "a")])
   (set-port-nonblocking! p #t) (let* ([a (port-nonblocking? p)]) (show 'nb3 a))
   (set-port-nonblocking! p #f) (let* ([a (port-nonblocking? p)]) (show 'nb4 a)))
+;; re-review 058, C1: port-nonblocking? answers the value given
+(let ([p (open-string-input-port "a")])
+  (set-port-nonblocking! p 'yes) (let* ([a (port-nonblocking? p)]) (show 'nb5 a)))
 (let ([name "ports-pushback.tmp"])
   ;; the scratch file is deleted even when a line raises (re-review 044, M5; 047, P1: guard, not dynamic-wind, which si does not unwind on an uncaught raise)
   (define (cleanup) (if (file-exists? name) (delete-file name)))
