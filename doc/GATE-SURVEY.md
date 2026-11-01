@@ -2711,3 +2711,45 @@ From report 060 (the AOT levels of the suite and goi). The fixes are in `audit-0
 executable (report 069 A: the interp and AOT steps run on different hosts over one corpora tree, so a host in the key
 made each re-read them in turn). The AOT essential subset runs `goi.divergences --aot` on the record (069 D). The
 suite's subset check is one way (069 E): a stale reference entry for a source of the subset is caught by the whole run.
+
+## Proposals (2026-11-01): GTS180 (review 075's findings; none decided)
+
+From the VM's audit of `bin/lib/limit.bash` and its callers (`.tmp/mac-queue/reports/075-audit-limit-bash.md`), built on
+branch `audit-075`. Done there without a decision (code fixes): `rt_sigprocmask` in `audit_trace` (finding 1), `time` outside
+`timeout` (2), the retries' evidence and the single essential-compiled retry (3, 4), every timeout row retried (5), the
+comments on 137/152 and load (6, 10), nethttp's gc level naming a timeout (7), the JDK reference run at the test's jtreg
+timeout (8), `timeouts.txt` for directory and errorcheck programs (9). Their tests: `test/gate/limit-test.bash`,
+`test/gate/audit-trace-test.bash`. Choices left open:
+
+- **GTS180 (a) Revisiting `timeouts.txt`'s audit-only bumps and the `:audited` rule once finding 1 is in.**
+  Options: (a) after the next clean run with `rt_sigprocmask` traced, read `NAME.cpu.tsv` for the programs bumped for the
+  audit (gcgort, issue13160, issue13169, gc2, heapsampling, issue16037_run, the 13 interp tests of rerun 7, t03686) and
+  lower each bump to its quiet CPU time times the usual margin, keeping `:audited` as it is for that one run; remove the
+  `:audited` rule only when a clean run passes with no audited timeout. (b) Remove the bumps and the rule at once and let a clean
+  run show what is left. (c) Keep both. Recommendation: (a): one run's evidence per step, the rule stays until a run shows
+  it unused; (b) risks a clean run lost to the 8-minute-per-step reruns; (c) leaves tests hidden by `:audited`.
+  Measured here (amd64 host, stage 0 at 7 s of allocation, `GOMAXPROCS=2`, the audit's strace line): system time 0.54 and 0.24
+  s without `rt_sigprocmask`, 0.19 and 0.35 with, 0.17 plain (noisy: small effect for this program); a C thread making 100,000
+  `sched_yield` calls: 3.3 s without, 0.07 s with. The effect that matters is Go programs with many idle Ms (64 CPUs); the
+  main host's clean run is the measurement.
+- **GTS180 (b) nethttp's limits (`limited_cpu 120 90`, wall below CPU).** (a) `limited_cpu 120 480` (wall four times the CPU,
+  as `limited`), a blocked loopback program waits 8 minutes; (b) keep 90 and document it as a wall bound for loopback
+  programs; (c) CPU 20, wall 90. Recommendation: (c) if the corpus's programs are measured under 5 s of CPU (read
+  `cpu.tsv` of the next clean run), else (a).
+- **GTS180 (c) The JDK reference's timeouts.** Record a JDK run that hit its timeout as `:jdk :timeout`, not `:jdk :fail "status
+  124"`, so that the test leaves the plan visibly, not as a failed reference. (a) do it (check.ae and a re-record of the
+  twelve rows); (b) leave the rows as they are, now that the limit is the test's own (a re-record needs the JDK). Recommendation:
+  (a) at the next `--record-ref`.
+- **GTS180 (d) The doubled Java retry (JCS47 (a)).** A test needing between 100 and 200 s of CPU passes at the second attempt
+  with a line on stderr and a row in `timeout-attempts.tsv` now. (a) keep, and make `--save` copy `timeout-attempts.tsv` beside
+  `results.tsv` so the judgment can list the tests that needed it; (b) mark such a pass `flaky` as JCS71 does (changes
+  `check-*.edn`); (c) drop the in-run doubling and keep only the quiet retry. Recommendation: (a), then (b) if the list is not
+  short.
+- **GTS180 (e) 137 told from an OOM kill.** (a) adopt oi's CPU test (a 137 with user+system seconds under 0.8 of the limit is
+  not a CPU kill) in `limited_cpu` when `ARBACE_CPU_LOG` is set, and print `killed` as the reason; (b) leave 137 as a timeout.
+  Recommendation: (b) until an OOM kill is seen to be read as a timeout in a gate record.
+
+What the main host must check: `test/gate/audit-trace-test.bash` and `test/gate/limit-test.bash` (seconds); a clean run's
+`NAME.cpu.tsv` system times of the bumped programs against rerun 8's; the amd64 strace's line count with `rt_sigprocmask`
+traced (bash-heavy steps make many such calls; here the trace of a 7 s stage 0 run grew by 0 lines, a gate step with many forks
+needs a look at its FIFO's size and the reducer's rate).

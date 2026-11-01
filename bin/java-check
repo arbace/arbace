@@ -260,7 +260,7 @@ record_runs() {
     i=${x[0]}; cls=${x[2]}
     for k in "" 2; do
       rm -rf "$w" "$tmp"; mkdir -p "$w" "$tmp"
-      st=0; (cd "$w" && TMPDIR=$tmp timeout -k 5 60 java -Xmx2g -cp "$cls_dir" -Dtest.src="$dir" -Dtest.classes="$cls_dir" \
+      st=0; (cd "$w" && TMPDIR=$tmp timeout -k 5 "$(jdk_run_limit "${x[1]}")" java -Xmx2g -cp "$cls_dir" -Dtest.src="$dir" -Dtest.classes="$cls_dir" \
                -Djava.io.tmpdir="$tmp" "$cls" "${x[@]:3}" < "$work/empty" > "$d/out" 2> "$d/err") || st=$?
       echo $st > "$d/run$i.exit$k"
       # the run's directories masked (JCS70 (a)); a mark when they were in stdout
@@ -297,7 +297,7 @@ record_ref() {
     grep -Fx -f "$list.only" "$list" > "$list.o" || true; mv "$list.o" "$list"
   fi
   echo "== java-check: the source sets of $(wc -l < "$list") tests (javac -verbose -sourcepath), $jobs at a time" >&2
-  export -f record_sources record_runs classes_sha first_line mask_hashes mask_dirs run_dirs
+  export -f record_sources record_runs jdk_run_limit classes_sha first_line mask_hashes mask_dirs run_dirs
   export root work classes_opts_s="${classes_opts[*]}"
   xargs -a "$list" -P "$jobs" -I{} bash -c 'record_sources "$1"' _ {}
   jc rename "$work" > "$work/rename.txt"
@@ -531,7 +531,7 @@ judge() {
 # none: the program's own, compiled), in the run's directories (run_dirs, JCS19 (b)), judged;
 # prints ID<TAB>LEVEL<TAB>RESULT<TAB>REASON, the first action not passing its result
 run_actions() {
-  local level=$1 exe=$2 mode=$3 fdir=$4 res="" i st w tmp lim st0="" res0="" cres
+  local level=$1 exe=$2 mode=$3 fdir=$4 res="" i st w tmp lim st0="" res0="" cres n
   local -a x c
   read -r w tmp <<< "$(run_dirs "$id")"
   while [ -z "$res" ] && IFS=$'\t' read -r -a x; do
@@ -539,7 +539,9 @@ run_actions() {
     i=${x[1]}
     # a timeout is run again once at twice the limit before it counts (JCS47 (a): the host's load
     # moved the tests near the limit between runs)
-    for lim in "$timeout" "$((timeout * 2))"; do
+    n=0
+    for lim in $(attempt_limits "$timeout" "${JAVA_CHECK_ONCE:-}"); do
+      n=$((n + 1))
       rm -rf "$w" "$tmp"; mkdir -p "$w" "$tmp"
       st=0; (cd "$w" && export TMPDIR="$tmp" && { [ -z "$fdir" ] || export ARBACE_PATH=$fdir; } && limited "$lim" "$exe" "$root/test/java/run.ae" --load "$mode" "${fdir:--}" "${x[8]}" \
                -Dtest.src="$dir" -Dtest.classes="$work/classes/$id" -Djava.io.tmpdir="$tmp" -- "${x[@]:9}" \
@@ -549,9 +551,11 @@ run_actions() {
       else
         res=$(judge "$st" "$p/out$i" "$p/err$i")
       fi
+      note_attempt java-check "$id" "$n" "$lim" "$st" "$res"
       case $res in timeout*) ;; *) break ;; esac
     done
-    case $res in timeout*) res="timeout	$timeout s, then $((timeout * 2)) s" ;; esac
+    if [ -n "${JAVA_CHECK_ONCE:-}" ]; then case $res in timeout*) res="timeout	$timeout s" ;; esac
+    else case $res in timeout*) res="timeout	$timeout s, then $((timeout * 2)) s" ;; esac; fi
     [ "$i" = 0 ] && { st0=$st; res0=$res; }
     [ -n "$res" ] && [ "$i" != 0 ] && res="${res%%	*}	action $i: ${res#*	}"
   done < "$p/plan.tsv"
@@ -990,7 +994,8 @@ check() {
   jc plan "$ref" "$work" ${pargs[@]+"${pargs[@]}"} >&2
   jc plan-diag "$ref" "$work" "$levels" >&2
   echo "== java-check: $(wc -l < "$work/run.list") tests at the levels $levels, $jobs at a time (the executable $rexe)" >&2
-  export -f limited limited_cpu check_one nread_one read_opts read_finished first_line root_cause classes_sha classes_verdict judge run_actions run_dirs mask_hashes mask_dirs test_dir check_diag diag_actions diag_root diag_norm diag_first_diff diag_golden diag_judge
+  export -f limited limited_cpu attempt_limits timeout_kind note_attempt check_one nread_one read_opts read_finished first_line root_cause classes_sha classes_verdict judge run_actions run_dirs mask_hashes mask_dirs test_dir check_diag diag_actions diag_root diag_norm diag_first_diff diag_golden diag_judge
+  reset_timeout_log "$work/timeout-attempts.tsv"
   export root work formsc forms_only save jdktest levels timeout from_committed load rexe reader_key="${reader_key:-}" classes_opts_s="${classes_opts[*]}"
   xargs -a "$work/run.list" -P "$jobs" -I{} bash -c 'classes_opts=($classes_opts_s); check_one "$1"' _ {} | LC_ALL=C sort > "$work/results.tsv"
   case ",$levels," in *,interp,*) export -f again interp_one; export jobs; again interp "$work/results.tsv" interp_one ;; esac
@@ -1310,7 +1315,8 @@ essential_compiled() {
     echo "$key" > "$s/key"
   fi
   echo "== java-check --essential-compiled: the runs of $(wc -l < "$work/run.list") tests, $jobs at a time ($(since_t0))" >&2
-  export -f limited limited_cpu compiled_one run_actions judge first_line root_cause mask_hashes mask_dirs run_dirs test_dir
+  export -f limited limited_cpu attempt_limits timeout_kind note_attempt compiled_one run_actions judge first_line root_cause mask_hashes mask_dirs run_dirs test_dir
+  reset_timeout_log "$work/timeout-attempts.tsv"
   export root work jdktest timeout
   xargs -a "$work/run.list" -P "$jobs" -I{} bash -c 'compiled_one "$1" "$2"' _ {} "$s/arbace-ec" | LC_ALL=C sort > "$work/results.tsv"
   # a timeout runs again once, alone, with twice the limit (JCS47 (a)): beside the gate's other
@@ -1328,7 +1334,7 @@ essential_compiled() {
   awk -F'\t' 'FILENAME == ARGV[1] { c[$1] = 1; next } $3 == "timeout" && !($1 in c) { print $1 }' "$work/controls.ids" "$work/results.tsv" > "$work/timeouts.ids"
   if [ -s "$work/timeouts.ids" ]; then
     echo "== java-check --essential-compiled: $(wc -l < "$work/timeouts.ids") timed out, run again one at a time at $((timeout * 2)) s" >&2
-    timeout=$((timeout * 2)) xargs -a "$work/timeouts.ids" -P 1 -I{} bash -c 'compiled_one "$1" "$2"' _ {} "$s/arbace-ec" > "$work/retried.tsv"
+    JAVA_CHECK_ONCE=1 timeout=$((timeout * 2)) xargs -a "$work/timeouts.ids" -P 1 -I{} bash -c 'compiled_one "$1" "$2"' _ {} "$s/arbace-ec" > "$work/retried.tsv"
     # (FILENAME, not NR == FNR: an empty retry file must not take the results for its own, report 003's
     # finding 3; a subject's retry brings its controls' fresh rows, review 001's finding 2: those added)
     awk -F'\t' 'FILENAME == ARGV[1] { r[$1] = $0; next } ($1 in r) { print r[$1]; delete r[$1]; next } { print }

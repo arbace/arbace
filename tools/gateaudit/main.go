@@ -88,13 +88,16 @@ func heartbeat(file string, fd *atomic.Int64, period time.Duration) {
 }
 
 var (
-	cwd   = map[int]string{}
-	exe   = map[int]string{}
-	alive = map[int]bool{}
-	seen  = map[string]bool{}
-	out   *bufio.Writer
-	gitRe = regexp.MustCompile(`/git(-[a-z-]+)?$`)
-	sumRe = regexp.MustCompile(`/sha256sum$`)
+	cwd     = map[int]string{}
+	exe     = map[int]string{}
+	alive   = map[int]bool{}
+	cdAt    = map[int]int64{} // the line of a process's last chdir
+	exAt    = map[int]int64{} // the line of its last execve
+	cloneAt = map[int]int64{} // the line of its last clone call
+	seen    = map[string]bool{}
+	out     *bufio.Writer
+	gitRe   = regexp.MustCompile(`/git(-[a-z-]+)?$`)
+	sumRe   = regexp.MustCompile(`/sha256sum$`)
 )
 
 func norm(p string) string {
@@ -235,15 +238,24 @@ var (
 	resumedRe = regexp.MustCompile(`^<\.\.\. ([a-z_0-9]+) resumed>`)
 	retRe     = regexp.MustCompile(`\) += ([0-9]+)`)
 	callRe    = regexp.MustCompile(`^([a-z_0-9]+)\(`)
+	sigmaskRe = regexp.MustCompile(`^(<\.\.\. )?rt_sigprocmask[( ]`)
 	sigRe     = regexp.MustCompile(`^[0-9]+ +(\+\+\+|---)`)
 )
 
 func child(pid int, s string) {
 	if m := retRe.FindStringSubmatch(s); m != nil {
 		c, _ := strconv.Atoi(m[1])
-		if c > 0 && !alive[c] {
-			cwd[c] = cwd[pid]
-			exe[c] = exe[pid]
+		// the child takes its parent's directory and executable unless it set its own after the parent's clone
+		// call began (a line of its own printed ahead of the result: a new thread's first call, a vfork child's
+		// execve); lines of an earlier life of a reused PID are older than the clone call and give way (strace -qq
+		// hides the exits and PIDs wrap: review 081, N1)
+		if c > 0 {
+			if !(cdAt[c] > cloneAt[pid]) {
+				cwd[c] = cwd[pid]
+			}
+			if !(exAt[c] > cloneAt[pid]) {
+				exe[c] = exe[pid]
+			}
 		}
 	}
 }
@@ -331,6 +343,11 @@ func main() {
 		}
 		pid, _ := strconv.Atoi(strings.TrimRight(m, " "))
 		line = line[len(m):]
+		// rt_sigprocmask, a new thread's first call (the audit traces it, review 075): no path, and no sign of
+		// the process; it can be printed before the parent's clone result (review 080, finding 1)
+		if sigmaskRe.MatchString(line) {
+			continue
+		}
 		if _, ok := cwd[pid]; !ok {
 			cwd[pid] = *root
 		}
@@ -349,14 +366,17 @@ func main() {
 		call, args := c[1], line[len(c[0]):]
 		switch {
 		case forks[call]:
+			cloneAt[pid] = nlines.Load()
 			child(pid, args)
 		case call == "chdir":
 			if p := target(args, pid, true); p != "" && !strings.Contains(args, "= -1 ") {
 				cwd[pid] = p
+				cdAt[pid] = nlines.Load()
 			}
 		case call == "execve":
 			if p := target(args, pid, true); p != "" {
 				exe[pid] = p
+				exAt[pid] = nlines.Load()
 				emit("X", p, pid)
 			}
 		case call == "execveat":
