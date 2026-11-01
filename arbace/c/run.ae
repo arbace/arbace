@@ -137,6 +137,43 @@
   (when (or (System/getenv "CI_SUBSET") (some #(.exists (java.io.File. (str work "/" % "/subset"))) corpora))
     "--record records whole corpora: the run judged was a subset (--only or --sample)"))
 
+(defn controls
+  "GTS81 (a): the negative controls of a level (test/c/controls.edn, :run or :dg); the file must read."
+  [level]
+  (filterv #(= level (:level %)) (read-string (slurp "test/c/controls.edn"))))
+
+(defn control-result
+  "A :run control judged by result: :differs (it fails: a control must), :passes (the judge passes what differs),
+  :not-judged (the reference has no gcc run), :left (the subject's corpus not judged, the subject not in its list, not
+  built or not run: its own row says so)."
+  [work refs corpora {:keys [subject reference]}]
+  (let [c (first (str/split subject #"/"))]
+    (if-not (some #{c} corpora)
+      :left
+      (let [listed (set (map first (tsv (str work "/" c "/list.tsv"))))
+            node (first (filter #(= subject (first %)) (tsv (str work "/" c "/nodes.tsv"))))
+            run (first (filter #(= subject (first %)) (tsv (str work "/" c "/run.tsv"))))
+            ref (get refs reference)]
+        (cond
+          (not (listed subject)) :left
+          (nil? ref) :not-judged
+          (or (nil? node) (not= "ok" (second node)) (nil? run)) :left
+          (= :pass (second (result subject ref node run))) :passes
+          :else :differs)))))
+
+(defn controls-failing
+  "Each :run control's result printed (who: the judge's name); the failing ones as rows [ID :fail WHY]."
+  [who work refs corpora]
+  (vec (for [{:keys [id subject reference] :as c} (controls :run)
+             :let [v (control-result work refs corpora c)
+                   _ (println (case v
+                                :differs (str who ": control " id " (" subject " against " reference "'s gcc run): differs, as a control must (GTS81 (a))")
+                                :passes (str who ": control passed: " id " (" subject " against " reference "'s gcc run): the judge passes what differs")
+                                :not-judged (str who ": control not judged: " id ": " reference " has no gcc run")
+                                :left (str who ": control " id ": left (" subject " not in the run, not built or not run)")))]
+             :when (#{:passes :not-judged} v)]
+         [id :fail (str "control " (name v) " (test/c/controls.edn)")])))
+
 (defn- judge
   "judge WORK REF DIVERGENCES [--record] CORPUS...: each program's result against gcc's run and the classes, and against
   the committed record (compare-record)."
@@ -179,7 +216,9 @@
                      (str/join "\n" (map pr-str all)) "\n]\n"))
         (println "recorded" f)))
     (let [fids (set (map first failing))
-          failing (concat failing (remove #(fids (first %)) (report-record cmp)))]
+          failing (concat failing (remove #(fids (first %)) (report-record cmp))
+                          ;; GTS81 (a): the negative controls (test/c/controls.edn, :run), no row of the results or the record
+                          (controls-failing "ci judge" work refs corpora))]
       (doseq [r (take 40 failing)] (println "FAIL" (first r) (nth r 2)))
       (System/exit (if (seq failing) 1 0)))))
 

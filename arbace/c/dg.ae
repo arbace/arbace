@@ -549,6 +549,41 @@
                   (count (filter #(= :yes (:agrees (val %))) rows)) ", differ "
                   (count (remove #(= :yes (:agrees (val %))) rows))))))
 
+;; GTS81 (a): the negative controls of the dg level (test/c/controls.edn, :level :dg): the subject's read judged against the
+;; reference's directives as a row is (verdict, then message-verdict), which must not pass
+
+(defn control-result
+  "A :dg control judged: :differs, :passes (the judge passes what differs), :not-judged (a file of a group the run judged
+  is not in it: no directives or no read row of the reference), :left (the subject's or the reference's group not judged,
+  or the subject not read: its own row says so). dgs and rds: GROUP -> its dg.edn and read.edn maps."
+  [wording dgs rds {:keys [subject reference]}]
+  (let [split (fn [^String fid] (let [i (.indexOf fid "/")] [(subs fid 0 i) (subs fid (inc i))]))
+        [sg sn] (split subject) [rg rn] (split reference)]
+    (if-not (and (contains? dgs sg) (contains? dgs rg))
+      :left
+      (let [d (get-in dgs [rg rn]) sd (get-in dgs [sg sn]) r (get-in rds [sg sn])]
+        (cond
+          (or (nil? d) (nil? sd)) :not-judged
+          (nil? r) :left
+          :else (let [v (verdict d r)
+                      v (if-let [mv (and (= [:pass] v) (seq (:msgs d)) (message-verdict wording reference d r))] [:fail (first mv)] v)]
+                  (if (= [:pass] v) :passes :differs)))))))
+
+(defn- control-rows
+  "Each :dg control's result printed; the failing ones as rows [ID :fail WHY]."
+  [work ids wording]
+  (let [dgs (into {} (for [id ids] [id (into {} (read-string (slurp (str work "/" id "/dg.edn"))))]))
+        rds (into {} (for [id ids] [id (into {} (read-string (slurp (str work "/" id "/read.edn"))))]))]
+    (vec (for [{:keys [id subject reference] :as c} (filter #(= :dg (:level %)) (read-string (slurp "test/c/controls.edn")))
+               :let [v (control-result wording dgs rds c)
+                     _ (println (case v
+                                  :differs (str "control " id " (" subject "'s read against " reference "'s directives): differs, as a control must (GTS81 (a))")
+                                  :passes (str "control passed: " id " (" subject "'s read against " reference "'s directives): the judge passes what differs")
+                                  :not-judged (str "control not judged: " id ": " subject " or " reference " not in its group's run")
+                                  :left (str "control " id ": left (" subject "'s or " reference "'s group not judged, or " subject " not read)")))]
+               :when (#{:passes :not-judged} v)]
+           [id :fail (str "control " (name v) " (test/c/controls.edn)")]))))
+
 (defn- classify [classes row]
   (let [s (str (name (nth row 1)) " " (nth row 2))]
     (some (fn [c] (when (some #(re-find (re-pattern (str %)) s) (:match c)) (:id c))) classes)))
@@ -673,7 +708,9 @@
                                   rows)
                           regress
                           (when-not subset (map (fn [fid] [fid :fail "absent from the run"]) absent))
-                          (map (fn [fid] [fid :fail "listed, not found in its group"]) missing))]
+                          (map (fn [fid] [fid :fail "listed, not found in its group"]) missing)
+                          ;; GTS81 (a): the negative controls, no row of the results, the record or the counts
+                          (control-rows work ids wording))]
       (when listed
         (println (count (filter #(= :pass (second (get now %))) listed)) "of" (count listed) "listed files pass"))
       (when (and (seq absent) (not subset)) (println (count absent) "recorded files absent from the run" (pr-str (vec (take 10 absent)))))
