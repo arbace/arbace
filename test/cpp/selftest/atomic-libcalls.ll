@@ -5,8 +5,10 @@ target datalayout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:
 declare void @__atomic_load(i64, ptr, ptr, i32)
 declare void @__atomic_store(i64, ptr, ptr, i32)
 declare i8 @__sync_val_compare_and_swap_1(ptr, i8, i8)
+declare i32 @__builtin_zz(i32)
 define void @f(ptr %o, ptr %v) {
   call void @__atomic_load(i64 noundef 3, ptr noundef nonnull @s3, ptr noundef nonnull %o, i32 noundef 5)
   call void @__atomic_store(i64 noundef 3, ptr noundef nonnull @s3, ptr noundef nonnull %v, i32 noundef 5)
+  %z = call i32 @__builtin_zz(i32 1)
   ret void
 }
