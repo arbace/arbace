@@ -1629,3 +1629,7 @@ records of this branch, so they say "the failure each known program has now", no
 - **OC123 `bin/oi`'s whole run as one step.** The OI column now costs the AOT level an oi run when the key is stale (6 minutes for the program corpus). (a) as built;
   (b) the AOT level always runs oi's rows first and `check` shares them (one oi run for both levels); (c) read oi's recorded results (`check-oi.edn`, a status and digest-less record) as the
   review proposed. *Recommended: (b)* when the gate steps `oi` and `oi-aot` exist; (c) loses the column's meaning (same output and status).
+
+### Decided (OC120-OC123; the user, 2026-11-01)
+
+All as recommended: OC120 (b) at the next gate window; OC121 (a); OC122 (b); OC123 (b) when the gate steps exist.
