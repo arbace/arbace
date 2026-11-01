@@ -3660,3 +3660,8 @@ Shipped files changed: none (nothing under `go/`, `overlay/` or `jdk/`; the `arb
 `pre133/`, the tree of `e575f69b^` the c23-bool-errors check ran on), `ci-dg/`, `ci-dg-essential/`, `ci-check/`.
 Rule slips: for about three minutes two waiting loops ran at once (a `Monitor` on the dg run's log and a backgrounded `until` loop; the
 second was stopped). Nothing else known.
+
+### Decided (CS200-CS203, CS210-CS216; the user, 2026-11-01)
+
+All as recommended: CS200 (a); CS201 (a); CS202 (b), (a) with the next printer work; CS203 (c), then (a); CS210 (b),
+then (a); CS211 (a); CS212 (a); CS213 (a); CS214 (a); CS215 (a); CS216 (a).
