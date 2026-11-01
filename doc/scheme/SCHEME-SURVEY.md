@@ -3098,3 +3098,16 @@ The user decided SC210-SC224 as recommended; the options that are work were buil
 | SC222 (b) | probe `gos` in `si/ports-pushback`: `("ab" "c" 0)` | a new line; si equals Chez |
 
 The others (SC210, SC211, SC212, SC223: (a); SC224's (c) is SC213 (b)) are as built. The mats' peak was 8.ms's as well, so SC213's "5_2.ms" is corrected here; the 2 GB limit of the light tier now holds for the whole run.
+
+## As built: re-review 058's fixes (2026-11-01)
+
+| # | Finding | Fixed | Test (before / after) |
+|---|---|---|---|
+| Q1 | an empty write (`put-string p ""`, `display ""`, count 0) past a string output port's end padded NULs | the string case of `putRunes` does nothing for an empty write | `beyond4`: `(5 "ab\0\0\0")` / `(2 "ab")` |
+| Q2 | `lastc` 0 meant both "nothing written" and "a NUL written", so `fresh-line` skipped its newline after a NUL | a written NUL is kept as `lcNul` (`lastMark`, also past the end instead of the earlier 1) | `nul1`, `nul2`: `"ab\0ZZ"` / `"ab\0\nZ"` |
+| Q3 | with a short limit the mat prelude's watchdog error was swallowed by `make-mat-env`'s guard, the definition dropped, its mats classed as "unbound identifier" | the watchdog's error is re-raised and `run-one` reports `MAT NAME NOTRUN time limit ...` (in no class, loud) | `SI_MAT_MS=50 bin/si mats 5_2.ms`: 4 hidden unbound-identifier notruns, 4 failing / 10 failing in no class; at the real limits 5_2, 8, io unchanged |
+| Q4 | the classes' `:why` said 20 s | name the 5 s limit of 5_2.ms and 8.ms | text |
+| Q5 | a program without a reference entry went unnoticed | `--record-ref` prints the ids with no entry (`missing-ids`) | `bin/si check --ref-test` |
+| C1 | `port-nonblocking?` answered `#t` for any true value | the value given is kept and answered | `nb5`: `#t` / `yes` |
+
+Numbers: `bin/si unit` ok; `bin/si check` 47 of 48 as before; `bin/si mats --record` whole (harness changed, so all 37 re-keyed): 300 / 89 / 511 / 11, clauses 4,335 / 283 / 8,266, 1,468 items, none in no class, regressions none, peak 1.11 GB. Not done: Q5's mixed-Chez-version header (a partial `--record-ref` under another Chez still reads "10.3.0"), the time-limit number in the item text (Q4's other half); `bin/si r7rs`, `corpora *`, `check --aot`, the gate.
