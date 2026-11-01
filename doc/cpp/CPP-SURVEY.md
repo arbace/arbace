@@ -2312,11 +2312,15 @@ has its teeth.
   `qsort`/`bsearch`/`pthread_once`, a trampoline that stops calling the user's function once the flag is set and re-raises after the native call returns (the
   exception reaches the caller, as with g++'s unwinding through libc frames built with unwind tables). *Recommended: (b)* now (cheap, the terminate path is
   g++'s), (c) when the heavy list's whole testsuite shows a `call_once` or comparator case.
-- **CP161 16-byte atomics.** `__atomic_load_n` and the others on `unsigned __int128` are calls to libatomic's `__atomic_*_16` at gcc `-O0` without `-mcx16`; the
-  lowered program links no libatomic, so a program with a `std::atomic` of 16 bytes would not link (no unit of the runtime and no file of the lists has one;
-  `libatomic.a` is on the host). Options: (a) as built (a link failure names it); (b) `-latomic` in lower-check's and the runtime's link lines (native, as musl is);
-  (c) `-mcx16` in `GCC_FLAGS` (inline `cmpxchg16b`, as clang's IR assumes for x86-64-v2 only). *Recommended: (b)*: it matches what clang's original links
-  (libatomic through libstdc++'s dependencies), and ci's C5 takes the builtins as C forms either way.
+- **CP161 16-byte atomics.** (Corrected by report 043's F2, checked on the amd64 host, gcc 15.2.0: the first version of this entry said the original links libatomic
+  through libstdc++'s dependencies and offered `-mcx16` as inline `cmpxchg16b`; neither holds. `readelf -d /usr/lib/libstdc++.so.6` lists only musl and `libgcc_s`, and
+  gcc `-O0 -mcx16 -S` of `__atomic_load_n` on `unsigned __int128` still calls `__atomic_load_16@PLT`, as without the flag. Clang's original calls
+  `__atomic_load_16` too without `-mcx16`.) `__atomic_load_n` and the others on `unsigned __int128` are calls to libatomic's `__atomic_*_16`; no link line has
+  `-latomic`, so a 16-byte `std::atomic` (a `long double` one, an `i128` in the IR, or a 16-byte struct) fails to link in the original, in g++'s build and in the lowered
+  program alike (no unit of the runtime and no file of the lists has one; `libatomic.a` is on the host). Options: (a) as built (every build fails to link, so the
+  test is "original fails"); (b) `-latomic` in **both** link lines of `bin/cppi` (`LIBS` for the original's and g++'s build, `LOW_LIBS` for the lowered program), with
+  the rename of F1 (built); (c) (b) for the lowered program only (the test then "passes" lowered and fails in the original: the judge would call it a mismatch).
+  *Recommended: (b)*. `-mcx16` is dropped: it changes nothing for gcc's `__atomic_*`.
 - **CP162 The atomics' own negative check.** The `atomics` selftest's "before" run showed the race (a short counter); a run of plain atomics could pass by luck on
   an idle host. Options: (a) as built (the structural half, `atomics.ll`'s lowering, fails deterministically without the builtins; the sample is the behaviour);
   (b) a scratch check like CP110 (b)'s with the atomics plain, N runs required to fail. *Recommended: (a)*: the structural test cannot pass by luck.
