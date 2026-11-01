@@ -14,3 +14,8 @@ _Static_assert(0.1L == (1 ? 0.1L : 0));
 constexpr long double x = 0.1L;
 _Static_assert(x == 0.1L);
 _Static_assert(1e-7000L == 0);
+/* review 086's finding 2: the other types wider than double have no exact value either */
+_Static_assert(0.1L == (_Float128)0.1L);
+_Static_assert((_Float128)0.1L == 0.1L);
+_Static_assert(0.1L == (_Float64x)0.1L);
+_Static_assert(0.1L == 0.1f64x);
