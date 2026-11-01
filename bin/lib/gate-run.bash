@@ -362,8 +362,10 @@ gate_prune() {  # gate_prune [--dry-run]
       [ -n "$f" ] || continue
       b=$(basename "$f")
       # a miss's copy (KEY20.tmp.PID) or old directory (KEY20.old.PID, bin/arbace-go's gate_miss): never one of the
-      # newest 3, removed when an hour old (younger: a build under way)
+      # newest 3, removed when an hour old (younger: a build under way). The hidden .KEY20.lock files beside the
+      # directories stay: unlinking a lock file someone has open lets two runs lock different inodes
       case $b in *.tmp.*|*.old.*)
+        [ "$pat" = gate ] || continue # once, not in the javac pass too
         [ $(( now - $(stat -c %Y "$f") )) -ge 3600 ] || continue
         echo "gate --prune: ${dry:+would remove }executables $f (a miss's leftover)"
         [ -n "$dry" ] || rm -rf "${f:?}"; continue ;; esac

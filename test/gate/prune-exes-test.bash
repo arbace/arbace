@@ -25,4 +25,10 @@ done
 [ ! -d "$T/exes/dddddddddddddddddddd" ] && ok "the fourth real directory pruned" || bad "the fourth real directory kept; left: $left"
 [ ! -e "$T/exes/aaaaaaaaaaaaaaaaaaaa.tmp.111" ] && [ ! -e "$T/exes/bbbbbbbbbbbbbbbbbbbb.old.222" ] && ok "two-hour-old leftovers removed" || bad "leftovers kept; left: $left"
 [ -d "$T/exes/cccccccccccccccccccc.tmp.333" ] && ok "a minute-old copy kept (a build under way)" || bad "a build under way removed"
+
+# --dry-run: each leftover listed once, nothing removed (review 051, D)
+mk eeeeeeeeeeeeeeeeeeee.tmp.444 7200
+( . "$here/bin/lib/gate-run.bash"; gate_prune --dry-run ) > "$T/dry" 2>&1
+n=$(grep -c 'eeeeeeeeeeeeeeeeeeee.tmp.444' "$T/dry")
+[ "$n" = 1 ] && [ -d "$T/exes/eeeeeeeeeeeeeeeeeeee.tmp.444" ] && ok "a dry run lists a leftover once and keeps it" || bad "a dry run listed it $n times ($(ls "$T/exes" | tr '\n' ' '))"
 exit $fail
