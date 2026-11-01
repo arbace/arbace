@@ -50,6 +50,14 @@ cat > "$w/early.trace" <<'T'
 101 <... rt_sigprocmask resumed>NULL, 8) = 0
 101 execve("./nx", ["nx"], 0x7ffd /* 3 vars */) = -1 ENOENT (No such file or directory)
 T
+# a reused PID (strace -qq hides exits, PIDs wrap): pid 300 chdir'd in an earlier life; the new process with that
+# PID, cloned by a parent in /work/sub, must take the parent's directory (review 081, N1)
+cat > "$w/reuse.trace" <<'T'
+300 chdir("/work/old") = 0
+100 chdir("/work/sub") = 0
+100 clone(child_stack=NULL, flags=CLONE_VM|SIGCHLD) = 300
+300 execve("./nx", ["nx"], 0x7ffd /* 3 vars */) = -1 ENOENT (No such file or directory)
+T
 for r in "${reducers[@]}"; do
   reduce "$r" "$w/plain.trace" > "$w/plain.out" 2> "$w/plain.err"
   reduce "$r" "$w/sig.trace" > "$w/sig.out" 2> "$w/sig.err"
@@ -57,6 +65,9 @@ for r in "${reducers[@]}"; do
   if cmp -s "$w/plain.out" "$w/sig.out" && [ ! -s "$w/sig.err" ]; then ck "$r ignores rt_sigprocmask lines" ok
   else ck "$r ignores rt_sigprocmask lines" "$(diff "$w/plain.out" "$w/sig.out"; cat "$w/sig.err")"; fi
   grep -q 'W	/work/rel.txt' "$w/sig.out" && ck "$r: paths still reduced (W /work/rel.txt)" ok || ck "$r: paths still reduced" "$(cat "$w/sig.out")"
+  reduce "$r" "$w/reuse.trace" > "$w/reuse.out" 2> "$w/reuse.err"
+  if [ "$(cat "$w/reuse.out")" = "X	/work/sub/nx" ]; then ck "$r: a reused PID's new process takes its parent's directory" ok
+  else ck "$r: reused PID" "got '$(cat "$w/reuse.out")', expected 'X /work/sub/nx'"; fi
   reduce "$r" "$w/early.trace" > "$w/early.out" 2> "$w/early.err"
   if [ "$(cat "$w/early.out")" = "X	/work/sub/nx" ]; then ck "$r: a thread's first line before its clone result keeps the parent's directory" ok
   else ck "$r: early thread line" "got '$(cat "$w/early.out")', expected 'X /work/sub/nx'"; fi

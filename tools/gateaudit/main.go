@@ -88,14 +88,16 @@ func heartbeat(file string, fd *atomic.Int64, period time.Duration) {
 }
 
 var (
-	cwd   = map[int]string{}
-	exe   = map[int]string{}
-	alive = map[int]bool{}
-	own   = map[int]bool{} // a process that has chdir'd or exec'd itself
-	seen  = map[string]bool{}
-	out   *bufio.Writer
-	gitRe = regexp.MustCompile(`/git(-[a-z-]+)?$`)
-	sumRe = regexp.MustCompile(`/sha256sum$`)
+	cwd     = map[int]string{}
+	exe     = map[int]string{}
+	alive   = map[int]bool{}
+	cdAt    = map[int]int64{} // the line of a process's last chdir
+	exAt    = map[int]int64{} // the line of its last execve
+	cloneAt = map[int]int64{} // the line of its last clone call
+	seen    = map[string]bool{}
+	out     *bufio.Writer
+	gitRe   = regexp.MustCompile(`/git(-[a-z-]+)?$`)
+	sumRe   = regexp.MustCompile(`/sha256sum$`)
 )
 
 func norm(p string) string {
@@ -243,12 +245,17 @@ var (
 func child(pid int, s string) {
 	if m := retRe.FindStringSubmatch(s); m != nil {
 		c, _ := strconv.Atoi(m[1])
-		// a child that has not chdir'd or exec'd yet takes its parent's directory and executable, even when a
-		// line of its own came first (strace can print a new thread's first call before its parent's clone
-		// result: review 080, finding 1)
-		if c > 0 && !own[c] {
-			cwd[c] = cwd[pid]
-			exe[c] = exe[pid]
+		// the child takes its parent's directory and executable unless it set its own after the parent's clone
+		// call began (a line of its own printed ahead of the result: a new thread's first call, a vfork child's
+		// execve); lines of an earlier life of a reused PID are older than the clone call and give way (strace -qq
+		// hides the exits and PIDs wrap: review 081, N1)
+		if c > 0 {
+			if !(cdAt[c] > cloneAt[pid]) {
+				cwd[c] = cwd[pid]
+			}
+			if !(exAt[c] > cloneAt[pid]) {
+				exe[c] = exe[pid]
+			}
 		}
 	}
 }
@@ -359,16 +366,17 @@ func main() {
 		call, args := c[1], line[len(c[0]):]
 		switch {
 		case forks[call]:
+			cloneAt[pid] = nlines.Load()
 			child(pid, args)
 		case call == "chdir":
 			if p := target(args, pid, true); p != "" && !strings.Contains(args, "= -1 ") {
 				cwd[pid] = p
-				own[pid] = true
+				cdAt[pid] = nlines.Load()
 			}
 		case call == "execve":
 			if p := target(args, pid, true); p != "" {
 				exe[pid] = p
-				own[pid] = true
+				exAt[pid] = nlines.Load()
 				emit("X", p, pid)
 			}
 		case call == "execveat":

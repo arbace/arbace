@@ -64,6 +64,14 @@ function opfor(call, args, flags) {
   if (call ~ /^execve/) return "X"
   return "S"
 }
+# birth(CHILD, PARENT): a clone result names CHILD: it takes its parent's directory and executable unless it set its
+# own after the parent's clone call began (a line of its own printed before the result: strace prints a new
+# thread's first call, or a vfork child's execve, ahead of it). Lines of an earlier life of a reused PID (strace -qq
+# hides the exits, and PIDs wrap) are older than the clone call and give way (review 081, N1)
+function birth(child, parent) {
+  if (!(cdAt[child] > cloneAt[parent])) cwd[child] = cwd[parent]
+  if (!(exAt[child] > cloneAt[parent])) exe[child] = exe[parent]
+}
 BEGIN { cwd[0] = root }
 {
   line = $0
@@ -81,25 +89,26 @@ BEGIN { cwd[0] = root }
     call = substr(line, 6, RLENGTH - 14)
     if (call ~ /^(clone|clone3|fork|vfork)$/ && match(line, /\) += [0-9]+/)) {
       child = substr(line, RSTART, RLENGTH); sub(/^[^=]*= */, "", child); child += 0
-      if (child > 0 && !(child in own)) { cwd[child] = cwd[pid]; exe[child] = exe[pid] }
+      if (child > 0) birth(child, pid)
     }
     next
   }
   if (!match(line, /^[a-z_0-9]+\(/)) next
   call = substr(line, 1, RLENGTH - 1); args = substr(line, RLENGTH + 1)
   if (call ~ /^(clone|clone3|fork|vfork)$/) {
+    cloneAt[pid] = NR
     if (match(args, /\) += [0-9]+/)) {
       child = substr(args, RSTART, RLENGTH); sub(/^[^=]*= */, "", child); child += 0
-      if (child > 0 && !(child in own)) { cwd[child] = cwd[pid]; exe[child] = exe[pid] }
+      if (child > 0) birth(child, pid)
     }
     next
   }
   if (call == "chdir") {
     p = target(args, pid, 1)
-    if (p != "" && args !~ /= -1 /) { cwd[pid] = p; own[pid] = 1 }
+    if (p != "" && args !~ /= -1 /) { cwd[pid] = p; cdAt[pid] = NR }
     next
   }
-  if (call == "execve") { p = target(args, pid, 1); if (p != "") { exe[pid] = p; own[pid] = 1; emit("X", p, pid) }; next }
+  if (call == "execve") { p = target(args, pid, 1); if (p != "") { exe[pid] = p; exAt[pid] = NR; emit("X", p, pid) }; next }
   if (call == "execveat") { p = target(args, pid, 0); if (p != "") emit("X", p, pid); next }
   # the calls whose first argument is the path
   if (call ~ /^(open|creat|stat|lstat|access|readlink|unlink|rmdir|mkdir|chmod|chown|lchown|truncate|utimes|rename|link|symlink|mknod|setxattr|lsetxattr|removexattr|lremovexattr|getxattr|lgetxattr|listxattr|llistxattr|statfs|utime)$/) {
