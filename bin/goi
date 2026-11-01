@@ -1564,6 +1564,15 @@ nethttp_one() {
     124|137|152) printf '%s\terror\ttimeout (%s s wall, %s s CPU)\n' "$p" "${NETHTTP_WALL:-90}" "${NETHTTP_CPU:-120}"; return ;;
   esac
   stderr_head "$r.err.raw" > "$r.err"
+  # GTS81 (a), queue 064: the negative controls whose subject this program is (test/goi/controls.txt, LEVEL nethttp): this
+  # run judged by the same comparison against the REFERENCE's gc run (no run of its own); a row _control/ID, pass or fail
+  local cid cref
+  while read -r cid cref; do
+    if [ ! -f "$nwork/gc/$cref.exit" ]; then printf '%s\terror\tno gc run of %s\n' "$cid" "$cref"
+    elif [ "$st" = "$(cat "$nwork/gc/$cref.exit")" ] && cmp -s "$r.out" "$nwork/gc/$cref.out" && cmp -s "$r.err" "$nwork/gc/$cref.err"; then
+      printf '%s\tpass\t%s against %s\n' "$cid" "$p" "$cref"
+    else printf '%s\tfail\t%s against %s\n' "$cid" "$p" "$cref"; fi
+  done < <(awk -v s="$p" '!/^#/ && NF == 4 && $1 == "nethttp" && $3 == s { print $2, $4 }' "$root/test/goi/controls.txt")
   if [ "$st" = "$(cat "$nwork/gc/$p.exit")" ] && cmp -s "$r.out" "$nwork/gc/$p.out" && cmp -s "$r.err" "$nwork/gc/$p.err"; then
     printf '%s\tpass\t\n' "$p"
   else
@@ -1577,6 +1586,26 @@ nethttp_one() {
   fi
 }
 
+# nethttp_controls_judged RESULTS: GTS81 (a), queue 064: each nethttp control of test/goi/controls.txt against RESULTS (the
+# subjects' rows and the _control/ID rows nethttp_one prints): fail, as a control must; pass (the comparison passes what
+# differs), an error (no gc run of the reference) or no row while its subject has a row fail (status 1); a subject with no
+# row (--only) is left
+nethttp_controls_judged() {
+  awk -F'\t' 'FNR == NR { if (!/^#/) { split($0, w, /[ \t]+/); if (w[1] == "nethttp" && w[4] != "") { sub_[w[2]] = w[3]; ref[w[2]] = w[4] } } ; next }
+    { row[$1] = $2; note[$1] = $3 }
+    END { bad = 0
+      for (c in sub_) {
+        # (an element tested with "in" before it is read: reading one makes it)
+        d = sub_[c] " against " ref[c] "'"'"'s gc run"; has = (c in row); ran = (sub_[c] in row)
+        if (!ran) print "goi check --corpus nethttp: control " c ": left (" sub_[c] " not run)"
+        else if (has && row[c] == "fail") print "goi check --corpus nethttp: control " c " (" d "): differs, as a control must (GTS81 (a))"
+        else if (has && row[c] == "pass") { print "goi check --corpus nethttp: control passed: " c " (" d "): the comparison passes what differs"; bad = 1 }
+        else if (has) { print "goi check --corpus nethttp: control not judged: " c " (" d "): " row[c] " " note[c]; bad = 1 }
+        else if (row[sub_[c]] == "pass") { print "goi check --corpus nethttp: control not judged: " c " (" d "): no row though " sub_[c] " passes"; bad = 1 }
+        else print "goi check --corpus nethttp: control " c ": left (" sub_[c] " " row[sub_[c]] ": no judgment of its run)" }
+      exit bad }' "$root/test/goi/controls.txt" "$1"
+}
+
 # check_nethttp [--record] [--jobs N] [--only REGEX] [--gc-only] [--update-want]: the net/http corpus
 # (bin/goi check --corpus nethttp; NH1, doc/go/NET-HTTP-SURVEY.md, "As built: NH1"): test/nethttp's
 # programs (a module, one package main per directory, listed in manifest.edn), each
@@ -1587,7 +1616,8 @@ nethttp_one() {
 #     process of the executable (GOI_RUN_EXE), against gc's run; results against
 #     test/nethttp/check-linux-amd64.edn (a program passing there and not now fails the check; --record
 #     writes it), the non-passes in the classes of test/nethttp/divergences.edn (bin/goi divergences
-#     --nethttp, run after a whole check that passes).
+#     --nethttp, run after a whole check that passes); its negative control (GTS81 (a), test/goi/controls.txt, LEVEL
+#     nethttp): a program's run judged against another's gc run must fail (nethttp_controls_judged), before the record.
 # Offline: loopback only. The work in .tmp/goi-check/nethttp.
 check_nethttp() {
   local record="" jobs=${NETHTTP_JOBS:-4} only="" gconly="" updwant="" nd=$root/test/nethttp t0=$SECONDS p
@@ -1656,6 +1686,11 @@ check_nethttp() {
   echo "== goi check --corpus nethttp: $(wc -l < "$list") programs, $jobs at a time" >&2
   export root rexe nwork nforms empty
   xargs -a "$list" -P "$jobs" -I{} bash -c 'nethttp_one "$1"' _ {} | LC_ALL=C sort > "$nwork/results.tsv"
+  # GTS81 (a): the negative controls judged, then taken out of the results (no program of the records or the classes)
+  local cst=0
+  nethttp_controls_judged "$nwork/results.tsv" || cst=$?
+  grep -v '^_control/' "$nwork/results.tsv" > "$nwork/results.c" || true; mv "$nwork/results.c" "$nwork/results.tsv"
+  [ "$cst" = 0 ] || { echo "goi check --corpus nethttp: FAILED: a negative control (test/goi/controls.txt, nethttp)" >&2; return 1; }
   nethttp_report goi "$nwork/results.tsv" "$nd/check-linux-amd64.edn" "$record" "goi's check of test/nethttp (interpreted, net/http listed)" "bin/goi check --corpus nethttp --record" "As built: NH1" "$(nethttp_exe_desc "$rexe")" || return 1
   if [ -z "$only" ] && [ -z "$record" ]; then
     GOI_ROOT=$root arbace_tool -p "$root/test" -m goi.divergences --nethttp --results "$nwork/results.tsv"
