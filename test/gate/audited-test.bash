@@ -75,5 +75,9 @@ unset GATE_AUDITED
 audit_step=1 step traced no bash -c 'echo "GATE_AUDITED=${GATE_AUDITED:-unset}"; awk "\$1 == \"TracerPid:\" { print \"tracer \" \$2 }" /proc/self/status'
 if grep -qx 'GATE_AUDITED=1' "$logs/traced.log" && grep -q '^tracer [1-9]' "$logs/traced.log"; then ok "an audited step sees GATE_AUDITED=1 under a tracer"; else no "audited step: $(cat "$logs/traced.log")"; fi
 
+# review 077, finding 4: bin/gate --audit (gate_audit's strace line) says GATE_AUDITED=1 too, as step() does for the clean run
+lib=${GATE_RUN_LIB:-$root/bin/lib/gate-run.bash}
+if grep 'ARBACE_LOADED_LOG="$d/$n.loaded"' "$lib" | grep -q 'GATE_AUDITED=1'; then ok "gate_audit's traced run has GATE_AUDITED=1"; else no "gate_audit's traced run lacks GATE_AUDITED=1"; fi
+
 echo "gate audited-test: $((n - bad)) of $n passed"
 [ $bad = 0 ]

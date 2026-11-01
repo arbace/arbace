@@ -453,7 +453,7 @@ gate_audit() {  # gate_audit [STEP...]: the checks named, else every check
       t0=$(date +%s); rm -f "${d:?}/$n.start"
       # the clock starts once the step holds the lock (the start file, as step() does)
       "${hv[@]}" strace -f $([ -n "${GATE_AUDIT_SIGNALS:-}" ] && echo -q || echo -qq) -y -s 4096 --seccomp-bpf -e "trace=${GATE_AUDIT_TRACE:-$audit_trace}" -o "$fifo" \
-        env $([ "${heavy[$n]}" = yes ] && echo ARBACE_HEAVY_HELD=1) ARBACE_LOADED_LOG="$d/$n.loaded" GATE_OUT="$logs/out/$n" GATE_OUTS="$logs/out" \
+        env $([ "${heavy[$n]}" = yes ] && echo ARBACE_HEAVY_HELD=1) ARBACE_LOADED_LOG="$d/$n.loaded" GATE_AUDITED=1 GATE_OUT="$logs/out/$n" GATE_OUTS="$logs/out" \
         bash -c 'date +%s > "$1"; exec bash -c "$2"' gate-audit "$d/$n.start" "$acmd_run" > "$d/$n.log" 2>&1
       echo $? > "$d/$n.status"; [ -f "$d/$n.start" ] && t0=$(cat "$d/$n.start"); echo $(( $(date +%s) - t0 )) > "$d/$n.secs"
       wait "$ap"; rm -f "${fifo:?}"
