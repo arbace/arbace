@@ -96,7 +96,7 @@
 (defn record
   "WORK's oracle rejections and failures as the entry of its corpus (WORK/list.key) in ORACLE-FILE (CP130 (c)): the names rejected by clang's
   own diagnostics and the names whose dump failed, by kind; the other corpora's entries kept."
-  [^String work ^String oracle-file]
+  [^String work ^String oracle-file & [mode]]
   (let [ck (let [f (java.io.File. (str work "/list.key"))] (when (.exists f) (str/trim (slurp f))))
         _ (when-not (seq ck) (println "record: WORK has no list.key (the list's header line or --corpus)") (System/exit 2))
         names (for [l (str/split-lines (slurp (str work "/list.tsv"))) :when (seq l)] (first (str/split l #"\t")))
@@ -105,15 +105,24 @@
         rej (vec (sort (for [[nm [st err]] sts :when (oracle-rejects? st err)] nm)))
         fails (into (sorted-map) (for [[nm [st err]] sts :when (and (failure-kind st err) (not (oracle-rejects? st err)))] [nm (failure-kind st err)]))
         all (if (.exists (java.io.File. oracle-file)) (read-string (slurp oracle-file)) {})
+        ;; re-review 032's F5: a run of part of the list updates the names it has and keeps the others; "replace" writes the run alone
+        prev (get-in all [:corpora ck])
+        have (set names)
+        kept-rej (if (= mode "replace") [] (remove have (:rejected prev)))
+        kept-fails (if (= mode "replace") {} (into {} (remove (fn [[nm _]] (have nm)) (:fails prev))))
+        rej (vec (sort (distinct (concat kept-rej rej))))
+        fails (into (sorted-map) (merge kept-fails fails))
+        kept (+ (count kept-rej) (count kept-fails))
         all (assoc-in all [:corpora ck] {:rejected rej :fails fails})
         out (str ";; The oracle's rejections (clang's own diagnostics) and failures (a dump that failed: :timeout, :crash) of the round trip's corpora, by name\n"
                  ";; (review 018's CP130 (c); bin/repr-cpp roundtrip --record-oracle): a rejection or failure not listed fails the round trip. Read with the Clojure reader.\n"
                  "{:corpora {\n"
                  (str/join (for [[k v] (sort-by key (:corpora all))]
-                             (str " " (pr-str k) "\n {:fails " (pr-str (:fails v)) "\n  :rejected [" (str/join "\n   " (map pr-str (:rejected v))) "]}\n")))
+                             (str " " (pr-str k) "\n {:fails " (pr-str (into (sorted-map) (:fails v))) "\n  :rejected [" (str/join "\n   " (map pr-str (:rejected v))) "]}\n")))
                  "}}\n")]
     (spit oracle-file out)
-    (println (str "record: " ck ": " (count rej) " rejected, " (count fails) " failing, in " oracle-file))))
+    (println (str "record: " ck ": " (count rej) " rejected, " (count fails) " failing, in " oracle-file
+                 (when (pos? kept) (str "; " kept " recorded names the run does not have kept (--replace-oracle drops them)"))))))
 
 (defn judge
   "The levels of each file of WORK's list, against the known file: WORK/results.tsv (name, verdict, class, read, l1,
@@ -125,6 +134,8 @@
         okey (let [f (java.io.File. (str work "/list.key"))] (when (.exists f) (let [k (str/trim (slurp f))] (when (seq k) k))))
         orec (when (and okey oracle-file (.exists (java.io.File. ^String oracle-file)))
                (get-in (read-string (slurp oracle-file)) [:corpora okey]))
+        _ (cond (nil? okey) (.println System/err "rtcheck: no corpus key (a #list header or --corpus): the oracle's rejections and failures are taken on trust, no record is read")
+                (nil? orec) (.println System/err (str "rtcheck: no record for the corpus " okey " in " oracle-file ": its rejections and failures are taken on trust")))
         rejected-rec (set (:rejected orec)) fails-rec (:fails orec {})
         kfiles (:files known {})
         ;; level 4 (review 007's finding 7): the objects are required unless the run had --no-objects; a compiler may fail on
@@ -203,6 +214,7 @@
                  :oracle-rejects (cnt #(= (nth % 3) "oracle-rejects"))
                  :oracle-fails (cnt #(= (nth % 3) "oracle-fails")) :oracle-rejects-new (cnt #(= (nth % 3) "oracle-rejects-new"))
                  :oracle-corpus (when orec okey)
+                 :oracle-record (cond orec okey okey (str "none for " okey) :else "none (no corpus key)")
                  ;; recorded names that no longer reject or fail (their file reads ok) and those the run does not have (re-review 032's F2)
                  :oracle-stale-ok (when orec (count (filter (fn [nm] (let [r (some #(when (= (first %) nm) (nth % 3)) rows)] (and r (not (#{"oracle-rejects" "oracle-fails"} r)))))
                                                             (concat rejected-rec (keys fails-rec)))))

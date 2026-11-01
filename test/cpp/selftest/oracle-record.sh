@@ -26,9 +26,9 @@ chmod +x "$t/cx"
 for n in min rej slow crash; do printf '%s.cpp\tc++23\t-std=c++23\t%s\t-std=c++23\n' "$n" "$t/src/$n.cpp" >> "$t/list.tsv"; done
 echo '{:files {}}' > "$t/known.edn"
 rt() { # rt WORKNAME ORACLE-FILE [options]: the exit status; the verdicts in one line
-  local w=$t/$1 o=$2; shift 2
+  local n=$1 w=$t/$1 o=$2; shift 2
   REPR_CPP_CXXDUMP_EXE=$t/cx REPR_CPP_CXXDUMP_CACHE=$t/cache REPR_CPP_ROUNDTRIP_KNOWN=$t/known.edn REPR_CPP_ROUNDTRIP_ORACLE=$o \
-    "$root/bin/repr-cpp" roundtrip "$t/list.tsv" "$w" --no-objects "$@" > "$t/$1.log" 2>&1
+    "$root/bin/repr-cpp" roundtrip "$t/list.tsv" "$w" --no-objects "$@" > "$t/$n.log" 2>&1
 }
 vs() { awk -F'\t' '{printf "%s=%s ", $1, $2}' "$t/$1/results.tsv"; }
 good='{:corpora {"tc" {:rejected ["rej.cpp"] :fails {"slow.cpp" :timeout "crash.cpp" :crash}}}}'
@@ -76,4 +76,18 @@ echo '{:corpora {"tc" {:rejected ["rej.cpp" "gone.cpp" "min.cpp"] :fails {"slow.
 rt w12 "$t/stale.edn" --corpus tc; st=$?
 sm=$(cat "$t/w12/summary.edn")
 [ $st = 0 ] && echo "$sm" | grep -q ':oracle-stale 3' && echo "$sm" | grep -q ':oracle-stale-ok 1' && echo "$sm" | grep -q ':oracle-stale-missing 2' && ok "stale: one reads ok, two are missing from the run" || bad "stale: exit $st, $(echo "$sm" | grep -o ':oracle-stale[a-z-]* [0-9nil]*' | tr '\n' ' ')"
+# re-review 032 F5: a partial run updates the names it has and keeps the others; --replace-oracle writes the run alone
+printf '%s.cpp\tc++23\t-std=c++23\t%s\t-std=c++23\n' min "$t/src/min.cpp" > "$t/part.tsv"
+printf '%s.cpp\tc++23\t-std=c++23\t%s\t-std=c++23\n' rej "$t/src/rej.cpp" >> "$t/part.tsv"
+cp "$t/good.edn" "$t/part.edn"
+REPR_CPP_CXXDUMP_EXE=$t/cx REPR_CPP_CXXDUMP_CACHE=$t/cache REPR_CPP_ROUNDTRIP_KNOWN=$t/known.edn REPR_CPP_ROUNDTRIP_ORACLE=$t/part.edn \
+  "$root/bin/repr-cpp" roundtrip "$t/part.tsv" "$t/w13" --no-objects --corpus tc --record-oracle > "$t/w13.log" 2>&1; st=$?
+[ $st = 0 ] && grep -q '"slow.cpp" :timeout' "$t/part.edn" && grep -q '"crash.cpp" :crash' "$t/part.edn" && grep -q '"rej.cpp"' "$t/part.edn" \
+  && ok "a partial --record-oracle keeps the names the run does not have" || bad "partial record: exit $st, $(cat "$t/part.edn")"
+REPR_CPP_CXXDUMP_EXE=$t/cx REPR_CPP_CXXDUMP_CACHE=$t/cache REPR_CPP_ROUNDTRIP_KNOWN=$t/known.edn REPR_CPP_ROUNDTRIP_ORACLE=$t/part.edn \
+  "$root/bin/repr-cpp" roundtrip "$t/part.tsv" "$t/w14" --no-objects --corpus tc --record-oracle --replace-oracle > "$t/w14.log" 2>&1; st=$?
+[ $st = 0 ] && ! grep -q 'slow.cpp' "$t/part.edn" && grep -q '"rej.cpp"' "$t/part.edn" && ok "--replace-oracle writes the run alone" || bad "replace: exit $st, $(cat "$t/part.edn")"
+# re-review 032 F4: no corpus key, or a key with no record, is said on stderr and in the summary
+rt w15 "$t/good.edn"; grep -q 'no corpus key' "$t/w15.log" && grep -q ':oracle-record "none (no corpus key)"' "$t/w15/summary.edn" && ok "no corpus key: said" || bad "no key: $(head -3 "$t/w15.log")"
+rt w16 "$t/good.edn" --corpus nowhere; grep -q 'no record for the corpus nowhere' "$t/w16.log" && grep -q ':oracle-record "none for nowhere"' "$t/w16/summary.edn" && ok "a key with no record: said" || bad "no record: $(head -3 "$t/w16.log")"
 finish
