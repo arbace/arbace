@@ -2828,3 +2828,8 @@ None. Not shipped: `arbace/scheme/corpora.ae`, `bin/si`, `test/scheme/{corpora.e
 
 `.tmp/rf/` in this worktree: `tA.sh`-`tE.sh`, the synthetic directories `a-*`, `b-*`, `c-*`, `d-broken`, `e-count`, `old/` (the tree before each fix),
 `rk.bash` (the run key), the logs `r7rs*.log`, `ec*.log`, `mats-full.log`.
+
+### Decided (SC180-SC184, SC190-SC193; the user, 2026-11-01)
+
+All as recommended: SC180 (b) for the ports, (a) for compiled libraries and fasl; SC181 (b); SC182 (b); SC183 (a);
+SC184 (a); SC190 (b); SC191 (a); SC192 (a); SC193 (b).
