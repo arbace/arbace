@@ -2864,6 +2864,11 @@ second run that passed made a flaky test). The masks are unchanged.
 This language's cells of the REAP matrix at the tag `arbace-reaps-3-crops-v1`, with every class by name, are
 in doc/FULL-SUPPORT-SURVEY.md, "REAP v1's divergences".
 
+## REAP v2 (2026-11-01)
+
+This language's cells of the REAP matrix at the tag `arbace-reaps-3-crops-v2`, with every class by name and v1's
+count beside it, are in doc/FULL-SUPPORT-SURVEY.md, "REAP v2's divergences".
+
 ## REAP v2 (DRAFT, 2026-10-28)
 
 **DRAFT**, refreshed at the tag `arbace-reaps-3-crops-v2`. This language's cells of the REAP matrix on main `bf84a975`,

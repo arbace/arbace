@@ -1429,7 +1429,7 @@ session's, after the merge (the commands below). No shipped file changed.
   the record `.tmp/gate/clean-record.edn`.
 - *Afterwards*: the record copied to `test/gate/clean-TAG.edn` (TAG `--tag`, `GATE_CLEAN_TAG`, else HEAD's short SHA), the logs to
   `.tmp/gate-clean/SHA.logs/` (`gate/`: every step's log, `.mem`, `.audit`, `.paths`, `.loaded`, `.cpu.tsv`; `summary.txt`), the
-  passes (each marked `:clean true`) copied into the invoking checkout's store beside its own (none replaced) and, when the run
+  passes (each marked `:clean true`) copied into the invoking checkout's store beside its own (none replaced: `cp -an`, so an empty or unreadable pass left there stays, and the planner ignores it) and, when the run
   passed, the executables' and javac's tool's directories moved into the shared `ARBACE_GATE_EXES` where that key is absent
   (`GATE_CLEAN_PUBLISH=0`: neither), so that the everyday gate and the demonstrations find the clean run's passes and builds; the
   clone removed (on a failure kept without its Go cache; `GATE_CLEAN_KEEP=1` keeps it).
@@ -1463,7 +1463,9 @@ of `hosts.edn`) and `:steps`, one map a step in the run's order: `:step`, `:kind
 `:not-run`), `:key`, `:wall-s`, `:cpu-s`, `:maxrss-kib`, `:tree-peak-kib`, `:wait-s`, `:inner-wait-s`, `:audit` (`:ok`,
 `:step-failed`, `:none` for the pre steps, or the failure's text), and for a step whose programs run under `limited`
 `:programs`, `:programs-cpu-s`, `:programs-timeouts` (each program's line in its `.cpu.tsv`). `bin/gate-demos --record` adds
-`:demonstrations`.
+`:demonstrations`. A rerun's merge (below) writes the record afresh from `:tag`, `:commit`, `:date`, `:mode`, `:status`, `:host`,
+`:env`, `:runs` and `:steps`: `:pins`, `:hosts` and `:wall-s` are then each run's, in `:runs`, and `:demonstrations` are dropped,
+so `bin/gate-demos --record` follows the last rerun.
 
 **GTS41 (c), `JAVA_CHECK_FORMS_ONLY=1`** (`bin/java-check`): a run without the read level (interp, compiled, print) takes each
 test's forms from the read's cache alone; a miss is not read but recorded (`WORK/forms-misses`, the test's result `fail the
@@ -1720,7 +1722,7 @@ other steps' passes), and so are `gate_key`, `arbace_javac_key` and the program 
 | javac-tool: `bin/javac-vendor`, `jdk/javac/provenance.edn` | `jdk/javac/provenance.edn`: hashed by `bin/arbace-go`'s `reader_key` (the compiled reader's cache, `find jdk/javac ... \| xargs sha256sum`); `bin/javac-vendor`: the build's own command, which `arbace_javac_key` does not hash: a real gap (a change to `tool` keeps a stale tool) | the hashed read covered as a build's inner cache key; `bin/javac-vendor` a known gap: the step's `:audit-known` (new; the audit reports it as `KNOWN GAPS`, not failing) until GTS72 decides: adding it to the key rekeys every step |
 | repr-java failed: the baseline's `clojure/lang/Range.ae` | RPS151 (a) (JN9f, `2a2925fc`: a constant's widening and boxing written) changed it; `test/repr/java/expected/baseline.sha256` was not updated (no `--full` since GT5). Deterministic: two conversions here on the clone's tool gave the same new hash | the manifest line (`bin/repr-java check --update`'s line, from the conversion) |
 | repr-java-roundtrip.jdk failed: `java/time/format/Parsed.ae` forms and ae, `{:tag Long} \| nil` | RPS151 again: the converter writes `^Long (Long/valueOf (if ...))` for a primitive conditional passed as a Long, the printer `Long.valueOf(...)`, which reads back untagged (an explicit `Long.valueOf` needs no tag) | a known difference with its reason (`test/repr/java/roundtrip/jdk-known.edn`); the converter's fix changes `jdk/forms` (shipped): GTS75. Re-judged here on the clone's F1 and F2: exit 0. The text level's "anew 39 fail" (javac rejecting printed files, compiled again with their originals) is as its references record it and failed nothing: not clean-only |
-| java-judge failed: 272 new levels disagreements, 1 print test in no class | the six levels' records predate GT6's CPU limits and JC6b: 437 compiled and 253 interp tests recorded as timeouts or failures now pass (272 of them compiled only: `levels-known.edn`); `t03447` TestFloatVect's print differs by a constant's shape, `0 \| (float 0.0)` (RPS151's widening) | the records written from the run's saved results (`bin/java-check --judge --record`: `check-{interp,compiled,classes,print}.edn`, `levels-known.edn`); `t03447` in `:print-shapes` (its title names a constant's shape); the judgment again: 0 problems. The interp level's load failures (`ClassNotFoundException: javax.crypto.Cipher`, `No accessible method newDecoder`, ...) are as `check-interp.edn` recorded them (0 regressions, 0 changed): not `JAVA_CHECK_FORMS_ONLY` nor GT5's split, they list as disagreements because the same tests now pass compiled. Not recorded: diagnostics' `t07536`, whose message depends on the checkout's path length (GTS76), a non-failing "changed" |
+| java-judge failed: 272 new levels disagreements, 1 print test in no class | the six levels' records predate GT6's CPU limits and JC6b: 437 compiled and 253 interp tests recorded as timeouts or failures now pass (272 of them compiled only: `levels-known.edn`; wrong: the bug of "As built: GT7's reruns"); `t03447` TestFloatVect's print differs by a constant's shape, `0 \| (float 0.0)` (RPS151's widening) | the records written from the run's saved results (`bin/java-check --judge --record`: `check-{interp,compiled,classes,print}.edn`, `levels-known.edn`); `t03447` in `:print-shapes` (its title names a constant's shape); the judgment again: 0 problems. The interp level's load failures (`ClassNotFoundException: javax.crypto.Cipher`, `No accessible method newDecoder`, ...) are as `check-interp.edn` recorded them (0 regressions, 0 changed): not `JAVA_CHECK_FORMS_ONLY` nor GT5's split, they list as disagreements because the same tests now pass compiled. Not recorded: diagnostics' `t07536`, whose message depends on the checkout's path length (GTS76), a non-failing "changed" |
 
 **The reducer's watchdog** (`tools/gateaudit/watch.go`). A reducer whose input is a FIFO writes a heartbeat beside it,
 `NAME.fifo.progress` ("UNIX-TIME BYTES-READ LINES PENDING", every 5 s from a goroutine of its own; PENDING by
@@ -1731,7 +1733,8 @@ or when the reducer is gone while strace still holds the FIFO (twice in a row). 
 `NAME.reduce.stalled` and appended to `NAME.log`, strace's process tree (the step's traced processes first, then
 strace) and the reducer SIGKILLed by PID; the step ends with 137, `bin/gate`'s summary says `AUDIT STALLED NAME:
 reason` and fails, the clean record's `:audit` is `"reducer stalled: ..."`; `bin/gate --audit` the same. The watchdog
-never opens the FIFO (it finds strace by `/proc/PID/fd` links) and exits with the reducer. It lives in the reducer
+never opens the FIFO (it finds strace by `/proc/PID/fd` links) and exits with the reducer, or when the path names another file
+(rerun 3, below: the FIFO's device, inode and change time as it started). It lives in the reducer
 and `bin/gate`, not in `bin/lib/gate-run.bash`, whose change would rekey every step (the rule below); the runner
 starts the reducer as before (`GATE_AUDIT_WATCH=0`: no watchdog). Tested (`.tmp/gt7fix/reducer-test.sh`, a traced
 loop of `cat` and `ls` through a FIFO as `step()` runs it): a normal run, no watchdog left; a reader that stops reading
@@ -1818,7 +1821,7 @@ their passes.
 - **GTS74 The Java levels' records from the clean run.**
   - Options: (a) as built: `check-{interp,compiled,classes,print}.edn` and `levels-known.edn` written from the clean
     run's saved results (437 compiled and 253 interp tests recorded as timeouts or failures before GT6's CPU limits and
-    JC6b now pass; 272 tests pass compiled only); (b) recorded from an everyday `--full` after the tag.
+    JC6b now pass; 272 tests pass compiled only: wrong, they were `bin/java-check`'s judge bug's passes, "As built: GT7's reruns"); (b) recorded from an everyday `--full` after the tag.
   - *Recommended: (a)*: the clean run is the quiet, audited run the records should come from, and the judgment of its
     own results is the check that fails without them.
 - **GTS75 The converter's `^Long` over its own `Long/valueOf` (RPS151).**
@@ -1887,3 +1890,50 @@ as built. Test t03447's class `:print-shapes` (a constant printed as `0` against
   step's key names; (b) a pending program host compared by its build's key (`arbace_javac_key`, `gate_key`) rather than as
   changed; (c) the workaround (select one cheap step that needs the host). *Recommended: (a)*.
   - **Decided (the user, 2026-10-31): (b).** After the tag, at the next change that rekeys every step.
+
+## Decided (2026-10-31): GTS80-GTS82
+
+- **GTS80 Passes written on a full disk** (GT7's rerun 4). `bin/gate --clean` publishes with `cp -an` (none replaced), so
+  rerun 4's empty pass files, written at 01:35 with the disk full, kept rerun 5's passes out of the store; the planner
+  ignored them, and the demonstrations' base plan ran 4 steps until they were rebuilt from rerun 5's logs. Options:
+  (a) `record_pass` writes its `.edn`, `.log` and `.inputs` through temporary names renamed into place, and the
+  publication replaces a pass that is empty or does not read; (b) the planner's check alone, `--prune` removing empty
+  files; (c) nothing. *Recommended: (a)*, at the next change that rekeys every step (it edits `bin/lib/gate-run.bash`).
+  - **Decided (the user, 2026-10-31): (a).**
+- **GTS81 A negative control per check family** (2026-10-31: `bin/java-check`'s two judges, GT5 to the tag's eve, every
+  interp and compiled run passing). Options: (a) one deliberately failing case per check family (Java's levels, goi, the
+  suite, the oracle, diffcheck, the crops' checks), recorded as expected to fail; a run where it passes fails the step;
+  (b) Java's levels only; (c) none. *Recommended: (a)*, after the tag, with the next change that rekeys every step.
+  - **Decided (the user, 2026-10-31): (a).**
+- **GTS82 Stage 0 built in a worktree by mistake** (2026-10-31: twice an agent ran a tool in a linked worktree without
+  `ARBACE_HOST_EXE`, and `bin/lib/host.bash`'s `arbace_host_exe` started `bin/seed --build` there, a 10-minute, 8 GB
+  build). Options: (a) in a linked worktree with no `ARBACE_HOST_EXE` and no stage 0 of its own, use the main
+  checkout's stage 0 when its seed and Go pins match, else refuse with a message; `ARBACE_SEED_BUILD=1` builds anyway;
+  (b) fall back to the main checkout's whenever it matches, building only when nothing matches; (c) no change.
+  *Recommended: (a)*, after the tag (`bin/lib/host.bash` is in many keys).
+  - **Decided (the user, 2026-10-31): (a).**
+
+## As built: GT7's reruns (2026-11-01)
+
+The reruns of `bin/gate --full --clean --tag arbace-reaps-3-crops-v2 --only ...` (the journal's run 2 and reruns 3 and 5 to 9; reruns 2 and 4 left no record):
+the record's `:runs` 1 to 7 after the first run, `:status :passed` since rerun 9 at 07194e71. Nothing of them is a step's check but what is said below.
+
+- *The base's material is read from each step's own run's logs*: `gate.clean select` (`test/gate/clean.ae`) compares a step's `plan/NAME.inputs` with
+  the file in the `:logs` of the run its `:run` names (`SHA.logs`, `SHA.logs.1`, ...), under `.tmp/gate-clean/`. A rerun keeps those directories; one that is
+  gone leaves the step's base material nil, which counts as changed (`changed` selects it, else the run stops).
+- *A host not built is a change*: `--only` builds only what a selected check needs, so with no selected Java step javac's tool is not built, the
+  unselected Java steps' material holds `host javac-prog pending` and the run stops on them (rerun 2); a selected step that needs the host serves
+  (rerun 3). Decided: GTS79 (b).
+- *The merge* of a rerun that has a failing step is written and copied as `:status :failed`, the step's entry in the new run's place; the passes (`:clean`) are
+  published all the same, the executables only when the run passed.
+- *The audited run's timeouts* (rerun 8, the user's decision: a rule, not a list). `bin/java-check --save` writes `DIR/audited`, the levels, when the run is
+  traced (`TracerPid` of `/proc/self/status` non-zero: the clean run's `strace -f`); `--judge` (`judge_saved`, named so since the judge bug: a function
+  `judge` defined twice made every interp and compiled run a pass) gives `--audited LEVELS` from the markers beside its results, a union by level.
+  `test/java/check.ae`'s report holds, for a class with `:audited true` (`:audit-timeout`, with its 13 `:tests`, `:unstable`) at that level, every
+  timeout of a test whose compiled result passes or is flaky: no regression, no levels problem, a `held (an :audited class ...)` line each. The
+  markers are not in java-judge's `:uses`, so its key does not hold them.
+- *Other findings*: goi-aot's `fixedbugs/issue16037_run.go` runs `go build` inside the limit (`test/goi/timeouts.txt`: 30, as the others); a trace strace
+  aborted and `run_one` ran again at the FIFO's path was killed by the first attempt's watchdog (above); `bin/javac-vendor` is undeclared in the first step that
+  makes the checkout's platform: `:audit-known` on repr-java-parse and java-read as on javac-tool, until GTS72's rekey.
+- *The Java levels' records of GT7's fix round were the judge bug's*: since GT5 every interp and compiled run counted as a pass; re-recorded with the fixed judge
+  (interp 1,848 pass, compiled 1,921), of the fix round's 437 and 253 only 38 and 7 timeouts were GT6's.

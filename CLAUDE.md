@@ -34,7 +34,11 @@ Direction:
   (doc/go/GOI-SPEC.md, "v1's divergences"); the same in the box on amd64 and in the emulated arm64
   VM. Then REAP, read, eval, AOT and print for Clojure, Java and Go, a milestone on main (tag
   `arbace-reaps-3-crops-v1`, 2026-10-27): the matrix of `bin/reap`, 12 of 12 cells checked, none failing,
-  every non-pass in a recorded class (doc/FULL-SUPPORT-SURVEY.md, "REAP v1's divergences"). Parked (the user,
+  every non-pass in a recorded class (doc/FULL-SUPPORT-SURVEY.md, "REAP v1's divergences"). Then its second round, a
+  milestone on main (tag `arbace-reaps-3-crops-v2`, 2026-11-01): the same matrix, 12 of 12 cells checked, none failing,
+  every non-pass in a recorded class (doc/FULL-SUPPORT-SURVEY.md, "REAP v2's divergences"), with the efficient gate
+  (doc/GATE-SURVEY.md, GT1-GT7), its clean run in a fresh clone recorded in
+  `test/gate/clean-arbace-reaps-3-crops-v2.edn`. Parked (the user,
   2026-10-26): the box, repr/haskell, repr/rust, the macOS UI, the iOS app. Now: doc/AGENDA.md.
 - Long term: Arbace is a standalone ecosystem, not binary compatible with Java. Java stays
   usable at the source level through repr/java. The language is Clojure extended with an idiomatic

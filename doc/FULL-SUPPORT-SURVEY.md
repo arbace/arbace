@@ -10,6 +10,14 @@ vendored revision (`clojure/clojure` `98d735fab02f`, 1.13.0-master-SNAPSHOT), Ja
 code under `arbace/`, `go/`, `bin/` or `test/` changed, and the decisions are the user's, as
 proposals RPS1-RPS17 (§8). The milestones are REAP1-REAP9 (§7).
 
+Reading this file after the tags. The sections from the Executive summary to Appendix A are the survey as of
+2026-10-24, kept as written: their "today", "now", "running", "to come" and "not run" (the numbers of §1 to §5, the
+plan's days and its running milestones, the risks) count from that date, and the "As built" and "Decided" sections are
+dated as their headings say. The matrix's present is `bin/reap`'s and the two records: "REAP v1's divergences" (the tag
+`arbace-reaps-3-crops-v1`, 2026-10-27) and "REAP v2's divergences" (the refreshed record at the tag
+`arbace-reaps-3-crops-v2`, 2026-11-01: Java eval, AOT and print passing 1,848, 1,921 and
+2,598 against v1's 1,683, 1,869 and 2,584; Clojure's deferred cases 1 against v1's 11).
+
 Names. `RP1` is taken (the reproducibility amendments of 2026-10-11, doc/go/J2G-SPEC.md,
 "Reproducibility"; BOX-NOTES.md, `test/jrt/tables.ae`), so the milestones are **REAP1..REAPn**; **RPS** is
 unused and names the proposals. FS (the files' amendments FS1-FS7, JRT-NOTES.md), FL and FU were
@@ -38,7 +46,7 @@ Contents: Executive summary · 1 The REAP matrix · 2 Clojure · 3 Java · 4 Go 
 6 The gaps by class · 7 Plan (REAP1-REAP9) · 8 Proposals (RPS1-RPS17) · 9 Risks · 10 Sources ·
 Appendix A: the scratch.
 
-## Executive summary
+## Executive summary (2026-10-24)
 
 - **Where the matrix stands (§1).** Of the twelve cells, **six are at the v1 rule in substance
   today** — Clojure read and print, Go read, eval and print, Java read — with nothing failing; what
@@ -83,7 +91,7 @@ Appendix A: the scratch.
 
 ## 1. The REAP matrix
 
-What each cell is in Arbace, its corpus, its reference, today's check and number, and the gap to
+What each cell is in Arbace, its corpus, its reference, the check and number of 2026-10-24 ("today"), and the gap to
 the v1 rule. "Record" says whether the non-passing cases are already data with a reason per class
 (as `test/goi/divergences.edn`) or only scattered (a reference's comments, a known file's reasons
 without by design/deferred).
@@ -489,7 +497,7 @@ test.generative 1.1.1 into the worktree's `.tmp/`, as it does on a fresh tree.)
 
 Per cell, the non-passing cases by class, their size, and what closes each: **fix** (code), **design**
 (recorded by design, already decided or to decide), **defer** (recorded deferred and named), or
-**tool** (a check or a record to build). Sizes are today's (or §5's).
+**tool** (a check or a record to build). Sizes are those of 2026-10-24 (or §5's).
 
 | cell | class | size | closes it |
 |---|---|---:|---|
@@ -2984,21 +2992,21 @@ alone (the shard's world held the class); t05445 (HugeToString) timed out twice 
 Thread-2 in the message) is the same failure. A rerun of t05445, t05565, t07649 and t04602 alone (`again.log`): 0 regressions.
 The parse.ae change produced no regression.
 
-## REAP v2's divergences (2026-10-31, the tag `arbace-reaps-3-crops-v2`)
+## REAP v2's divergences (2026-11-01, the tag `arbace-reaps-3-crops-v2`)
 
-The milestone's record at `TAG-COMMIT`: read, eval, AOT and print for Clojure, Java 26 (jdk26u `baf63fbe`, the clean
+The milestone's record at the tag: read, eval, AOT and print for Clojure, Java 26 (jdk26u `baf63fbe`, the clean
 run's pin) and Go 1.27.1, on the host (linux/amd64), forms only, modelled on "REAP v1's divergences". The rule is v1's:
 none fails, every non-pass in a recorded class, by design or deferred and named, each citing where it was decided.
 `bin/reap` judges the matrix from the checks' recorded results (`test/reap/cells.edn`, `test/reap/main.ae`); its output
 at the tag is below, with v1's beside it: 12 of 12 cells checked, 0 problems, no class pending.
 
-The tables between the markers are generated: `refresh.sh` (plain shell and awk, seconds, no builds; kept with its
-hand-kept notes `changes.tsv` on the branch `queue`, `assets/v2-record/`, and copied into the checkout's `.tmp/v2-record/`)
+The tables between the markers are generated: `doc/v2-record/refresh.sh` (plain shell and awk, seconds, no builds; with its
+hand-kept notes `doc/v2-record/changes.tsv`; VM report 095 hardened it: it fails rather than write on a bad input)
 reads `bin/reap`'s output (`REAP_OUT=FILE` uses a saved one), the classes files it names and v1's section from the tag,
 and rewrites everything between `<!-- v2-record:begin -->` and `<!-- v2-record:end -->`:
 
 ```
-ARBACE_HOST_EXE=/path/to/stage0/arbace .tmp/v2-record/refresh.sh
+ARBACE_HOST_EXE=/path/to/stage0/arbace doc/v2-record/refresh.sh
 ```
 
 Counts are cases, as in v1 (a case counted once per source naming it). "v1" is the count in v1's section (by design
@@ -3016,7 +3024,7 @@ The audited timeouts are not in the 51: `audit-timeout` (harness, `:audited true
 case of the matrix, and holds in the clean run's judgment the interp timeouts of tests that pass compiled, which strace's
 system time causes (a per-test limit for java-check is proposed after the tag).
 
-<!-- v2-record:begin (generated by .tmp/v2-record/refresh.sh from bin/reap's output of 2026-10-31; do not edit between the markers) -->
+<!-- v2-record:begin (generated by doc/v2-record/refresh.sh from bin/reap's output of 2026-11-01; do not edit between the markers) -->
 
 Now (`bin/reap`; pass / by design / deferred), with v1's beside it:
 
@@ -3146,7 +3154,7 @@ No class: nothing to record at this cell.
 | `jrt-streams`: jrt's own streams otherwise than the JDK's: a closed DataInputStream over a F... | deferred | 2 | 1 | grew by 1: t04243 (DataOutputStream/CounterOverflow), load-failed in v1 (`interp-protected`: the protected field written), runs since JC4b and differs on this class's member, not a re-recording | JCS101: jrt flushing its streams at exit by design (a); the other behaviours deferred with JCS96 (b) |
 | `thread-order`: the order of two threads' output lines: a thread started and the starting thr... | deferred | 2 | - | new at the interp level: t04319 (PipedInputStream/Constructors) and t04327 (PipedReader/Constructors), load-failed in v1 (Thread not extendable), run since JC4b; t04319 differs by the same line order as compiled, t04327 passed on its second run in 1f0cd7b1's (flaky, the known pair); the class has no :level now (JC4b) | JCS104 (b): the two threads' output order recorded status-only |
 | `url-headers`: URLConnection's headers jrt answers otherwise: no MIME type (getFileNameMap h... | deferred | 2 | 2 | unchanged | JCS105 (b): deferred with JCS96 |
-| `interp-world-limits`: the interpreter's known limits: a run-time class extending java.io.StringRead... | deferred | 2 | 2 | unchanged | - |
+| `interp-world-limits`: the interpreter's known limits: a run-time class extending java.io.StringRead... | deferred | 2 | 2 | unchanged | RPS21 (a), deferred, decided with JC6's ranking |
 | `clock`: stdout names the run's clock (a file's last-modified time made by the run) | deferred | 1 | 1 | unchanged | JCS99 (a): as built, these tests' digests recorded as "-" (c) |
 | `environment`: the run's environment: temporary directory, canonical paths | deferred | 1 | - | new: t04272 (File/UserDirChangedTest) passed in v1 and at the draft (6ad08d82) and differs at both levels in 1f0cd7b1's (a canonical path); the class (As built: JC1, JC2) is :unstable and names it in :tests | As built: JC1, JC2 |
 | `identity-sum`: stdout prints sums of identity hash codes (Test6909839's ((c) ? a : b).hashCo... | deferred | 1 | 1 | unchanged | As built: JC1 (:identity, JCS17 (b): hash codes after an @ masked); the sums cannot be masked; JCS99 (a), (c) |
@@ -3175,7 +3183,7 @@ No class: nothing to record at this cell.
 | `serialization`: serialization (ObjectInputStream, ObjectOutputStream, Externalizable) | by design | 117 | - | unchanged | J2G-SPEC §12 (2026-10-10) |
 | `classloading`: class loading (ClassLoader's members, defineClass, ServiceLoader, modules, Cl... | by design | 18 | - | unchanged | J2G-SPEC §12 |
 | `speed`: speed: beyond the check's limit (20 s an action, the definition included) | by design | 14 | - | unchanged class (by design in v1, named only): 23 timeouts in v1's record and at the draft, 14 at 1f0cd7b1: 7 pass under GT6's CPU-time limits (GTS16 (a)), t07649 and t07728 went to `memory-limit`; taken by the catch-all `^timeout `, not judged one by one (curated after the tag) | survey §6.1, JCS10 (a) |
-| `jforms-corpus-own`: diffcheck's exclusions: the Java forms compiler's corpus's own classes that f... | by design | 12 | - | unchanged | - |
+| `jforms-corpus-own`: diffcheck's exclusions: the Java forms compiler's corpus's own classes that f... | by design (beside) | 12 | - | unchanged | RPS27 (a): the corpus's own classes failing in both halves by design |
 | `classfile`: java.lang.classfile, java.lang.constant | by design | 10 | - | unchanged | JCS9 (b), JC6; JCS95 (a): by design |
 | `foreign`: the foreign function and memory API (java.lang.foreign: Arena, MemorySegment;... | by design | 6 | - | unchanged | JCS95 (a): by design, FFM |
 | `xml`: XML (javax.xml, the XML signature API, Properties in XML) | by design | 4 | - | unchanged | J2G-SPEC §12 (2026-10-10) |
@@ -3203,7 +3211,7 @@ No class: nothing to record at this cell.
 | `random`: java.util.random (RandomGeneratorFactory and the algorithms by name) | deferred | 6 | 6 | unchanged | JCS96 (b): deferred (the small members batch not built before the milestone) |
 | `system-properties`: the JVM's identifying system properties (java.version, java.vm.specification.... | deferred | 6 | 6 | unchanged | JCS96 (b): deferred (the small members batch not built before the milestone) |
 | `util-classes`: java.util and java.lang members jrt lacks: Scanner, Calendar.Builder, Propert... | deferred | 4 | 4 | unchanged | JCS96 (b): deferred (the small members batch not built before the milestone) |
-| `jforms-namespace-body`: diffcheck's exclusions: Clojure in a class body naming the namespace's vars o... | deferred | 4 | 4 | unchanged | - |
+| `jforms-namespace-body`: diffcheck's exclusions: Clojure in a class body naming the namespace's vars o... | deferred (beside) | 4 | 4 | unchanged | RPS27 (a): F2.4's kin deferred to REAP3 |
 | `flaky`: flaky: the result depends on the threads' timing or a Random's draw; passed w... | deferred | 3 | 1 | grew by 2: re-recording noise of unstable tests, not a move: t04819 (EnqueuePollRace, the collector's count) and t05565 (LockStep, its Random) passed in v1 and passed on their second run in 1f0cd7b1's (JCS71 (a)); both named by the class' :tests (at the draft: t04602 and t05565) | JCS71 (a) |
 | `identity`: stdout prints identity hash codes or traces (Object.toString, a stack trace t... | deferred | 3 | 3 | unchanged | As built: JC1 |
 | `jrt-strings`: jrt's StringBuffer: its capacity, its synchronized methods and an append's bo... | deferred | 3 | 3 | unchanged | JCS96 (b): deferred (the small members batch not built before the milestone) |
@@ -3370,16 +3378,16 @@ The draft stood on main `6ad08d82` (2026-10-29). Since:
   | run | commit | ended | seconds | selection | status | steps kept |
   |---|---|---|---:|---|---|---:|
   | 0 | `68b2bba6` | 2026-10-30 06:31 | 48,724 (812 min) | all | failed | 13 |
-  | 1 | `cb01f62c` | 2026-10-30 20:07 | 38,416 (640 min) | failed,changed | failed | 33 |
+  | 1 | `cb01f62c` | 2026-10-30 20:07 | 38,416 (640 min) | failed,changed | failed | 22 |
   | 2 | `02c384e6` | 2026-10-30 23:41 | 9,805 (163 min) | failed,repr-java-parse.samples | failed | 0 |
   | 3 | `f2f168c5` | 2026-10-31 04:38 | 10,842 (181 min) | failed,changed | failed | 7 |
-  | 4 | `814483c4` | 2026-10-31 07:34 | 10,459 (174 min) | failed,changed | passed | 33 |
-  | 5 | `1f0cd7b1` | 2026-11-01 00:10 | 20,819 (347 min) | failed,changed | failed | 1 |
-  | 6 | `b8872a52` | 2026-11-01 11:38 | 24,831 (414 min) | failed,changed | failed | 17 |
-  | 7 | `LAST-RUN-COMMIT` | LAST-RUN-DATE | LAST-RUN-SECONDS | changed | LAST-RUN-STATUS | LAST-RUN-STEPS |
+  | 4 | `814483c4` | 2026-10-31 07:34 | 10,459 (174 min) | failed,changed | passed | 26 |
+  | 5 | `1f0cd7b1` | 2026-11-01 00:10 | 20,819 (347 min) | failed,changed | failed | 0 |
+  | 6 | `b8872a52` | 2026-11-01 11:38 | 24,831 (414 min) | failed,changed | failed | 0 |
+  | 7 | `07194e71` | 2026-11-01 19:09 | 26,725 (445 min) | failed,changed | passed | 18 |
 
-  Runs 0 to 6 (the journal's run 1, run 2, rerun 3, rerun 5, rerun 6, rerun 7 and rerun 8; rerun 2 stopped at its
-  selection and rerun 4 died with the disk full, neither recorded): 163,896 s in all, 86 steps (1 pre, 3 always, 2 builds, 80 checks), each
+  Runs 0 to 7 (the journal's run 1, run 2, rerun 3, rerun 5, rerun 6, rerun 7, rerun 8 and rerun 9; rerun 2 stopped at its
+  selection and rerun 4 died with the disk full, neither recorded): 190,621 s in all, 86 steps (1 pre, 3 always, 2 builds, 80 checks), each
   passed clean, 83 audited without a finding (the three others, `pins`, `makefile` and `seed`, are not audited), on the
   gate's executables `d24c0b71` and javac's tool `63071998`. Between run 0 and run 1, GT7's fix round (4836664f): goi's
   per-program limits under ptrace, the audit's reducer and its watchdog, hashed-only reads, the undeclared reads declared,
@@ -3392,8 +3400,11 @@ The draft stood on main `6ad08d82` (2026-10-29). Since:
   skip); a comment line in `arbace/j2g/out.ae`, 33 run (40 skip).
   Runs 5 and 6 are the Java steps' reruns after the judge's fix (the next items), each failing in `java-judge` on timeouts
   under the audit (the item on the audited timeouts); the steps column counts, as the record's `:run` does, the steps
-  whose clean pass is from that run, so the earlier rows shrink as a rerun replaces their steps. Run 7, the rerun after
-  the audited timeouts' rule, is the main host's: it fills its row after the run ends.
+  whose clean pass is from that run, so the earlier rows shrink as a rerun replaces their steps. Run 7 (rerun 9,
+  `07194e71`), the rerun after the audited timeouts' rule, passed: the Java steps again under the audit, `java-judge`
+  with 0 regressions at every level and 13 timeouts held (the 13 of `audit-timeout`; t03686 passed). Before the tag the
+  13 ran once outside the trace and passed, each at the interp level's second chance (twice the limit, JCS47 (a)), the
+  largest at 193.6 s of CPU of the 200 s (journal 2026-11-01, "before the tag, the held tests untraced").
 - **The judge bug, found and fixed** (journal 2026-10-31, "bin/java-check's two judges"; ba772ee5). GT5 (903b053e,
   2026-10-28) defined `bin/java-check --judge` as a function named `judge`, after the run's own `judge` (the status and
   stdout against the JDK's); bash keeps the last definition, so every interp and compiled run that loaded passed, whatever
@@ -3429,12 +3440,6 @@ The draft stood on main `6ad08d82` (2026-10-29). Since:
   printed as held. No recorded result changed: `bin/reap` takes the first class that fits and `speed`, whose catch-all
   `^timeout ` comes first, takes an interp timeout, so `audit-timeout` and `thread-order`'s `:unstable` are the
   judgment's (`java-judge`), not the matrix's: no case moves, and the matrix above and the numbers are as before.
-
-<!-- GT7: run 7 (the main host, after the run ends): fill the table's last row from
-     test/gate/clean-arbace-reaps-3-crops-v2.edn's last :runs entry (commit, :date, :wall-s, :status, and the count of
-     :steps whose :run is 7; the rows above recount from the record too), then the totals above (the runs' seconds, the steps), refresh the tables by refresh.sh on
-     the tag's records, and replace TAG-COMMIT. Expected unless the run moves a class: Java eval 1,848 / 285 / 1,189,
-     Java AOT 1,921 / 172 / 1,229, the rest as above. -->
 
 ## As built: RPS97 (b) (2026-10-28)
 

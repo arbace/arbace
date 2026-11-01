@@ -837,3 +837,35 @@ git history:
   line in `arbace/j2g/out.ae`, `--plan --builds`): 33 run, 40 skip. The same as 2026-10-31's. The j2g change's builds
   were removed afterwards. The stage 0 of its scratch worktree took most of its 26 minutes.
 - **Next:** the keyed concurrent `--full`, the v2 record's refresh, the tag.
+
+## 2026-11-01: the milestone `arbace-reaps-3-crops-v2`
+
+- **Corrections to the two entries above** (5e42b446):
+  - The record's 8 `:runs` are the journal's run 1, run 2 and reruns 3, 5, 6, 7, 8 and 9 (rerun 2 stopped at its
+    selection and rerun 4 died with the disk full; neither is recorded), not "reruns 3 to 9".
+  - Their wall time is 190,621 s (53 h), the `:runs`' `:wall-s` summed; 236,323 s also summed the steps' own.
+  - The interp level's second chance, a timeout run again once at twice the limit before it counts, is JCS47 (a), not
+    "since JC1".
+  - The demonstrations' 26 minutes were mostly the j2g plan's builds (1,342 s), not the scratch worktree's stage 0.
+- **The concurrent `--full`** (GTS37 (a)), keyed, at 5e42b446: `bin/gate --full --concurrent`, 5 steps run, 73 skipped
+  at unchanged keys, passed in 14 s. Not `--rerun`: the held tests' untraced run (the entry above) is the confirmation
+  `--rerun` would have given.
+- **The record** doc/FULL-SUPPORT-SURVEY.md, "REAP v2's divergences": the prose of `mac/026-v2-record` and
+  `mac/091-v2-record` (VM queue tasks 026 and 091; d2b579f2, 2b1c776c, fe82f83f, 684d5f58 picked), its tables refreshed
+  by `doc/v2-record/refresh.sh` (VM report 095's hardened copy, kept in the repository with its notes
+  `doc/v2-record/changes.tsv`; it moved 4 lines: the date, a decision, two beside classes), GT7's runs table completed
+  (run 7, rerun 9; the steps recounted from the record: 13, 22, 0, 7, 26, 0, 0, 18), the header dated. The matrix:
+  Clojure 908/2/0, 21,052/81/1, 809/29/0, 1,031+/0/0; Java 7,742/3/93, 1,848/285/1,189, 1,921/172/1,229,
+  2,598/687/37; Go 12,158/204/0, 1,618/219/0, 1,688/149/0, 2,584+/141/0. Its caveat stands: Java's 51 interpreted and 14
+  compiled timeouts are by design only by the catch-all `speed` (VM report 021, finding 2), curated after the tag.
+- **Pointers** to "REAP v2's divergences" beside v1's in doc/go/GOI-SPEC.md, doc/classes/JAVA-CONFORMANCE-SURVEY.md and
+  doc/go/EVAL-NOTES.md; FULL-SUPPORT-SURVEY's reading note and dates (VM report 104); GATE-SURVEY's "As built: GT7's
+  reruns" (VM report 101, its first sentence brought to rerun 9) and the decided GTS80-GTS82; CLAUDE.md's direction
+  names the milestone; `/.ref/` in .gitignore (the VM's reference trees, queue task 017).
+- **Lessons** (the post-tag list): the clean record's runs' logs are `--only`'s base material (rerun 8's restart,
+  GTS103 (a) on `mac/029-gts103`); a `cp -an` publication keeps an empty pass (GTS80); the held tests sit at the interp
+  limit's second chance untraced, so the audited judgment rests on a 3% margin for t03314 (a per-test limit for
+  java-check is proposed after the tag).
+- The tag `arbace-reaps-3-crops-v2`, annotated, on this entry's commit: Clojure `98d735fab02f` (1.13.0-master-SNAPSHOT),
+  Java 26 (jdk26u `baf63fbe`), Go 1.27.1; the seed `73b0d637`. Then this journal starts over (the user's decision of
+  2026-10-26).
