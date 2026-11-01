@@ -775,3 +775,18 @@ git history:
 - **Rerun 9:** the change is in java-judge's key and in every Java level's (`bin/java-check`), so the clean run's
   selection reruns the Java producers again (about 5 hours under the audit). Then the keyed concurrent `--full` and the
   tag.
+
+## 2026-11-01: GTS81 (a) for the crops' checks (write-ahead, queue 064)
+
+- On `mac/064-gts81` (from `mac/054-merge`, `a69c1dfc`), in the light tier: negative controls, GTS81's crossed pairs, for the
+  crops' checks gate-post-v2 left: `bin/si check` (`test/scheme/si/controls.edn`), `bin/ci check` and `check --aot`, `bin/ci
+  dg` (`test/c/controls.edn`, `:run` and `:dg`), `bin/oi check`, `check --aot`, `suite check`, `suite expect`
+  (`test/ocaml/controls.txt`), `bin/cppi lower-check` (`test/cpp/controls.edn`), `bin/goi check --corpus nethttp`
+  (`test/goi/controls.txt`, LEVEL nethttp). Each judge's control code tested on copies (joker for the `.ae` judges, the shell
+  functions extracted and run alone) over the real data files; no check run (no Arbace executable on the VM). The pairs from
+  the records; the C dg pair's directives read in gcc 15.2's testsuite (gcc-mirror/gcc, `releases/gcc-15.2.0`,
+  `gcc/testsuite/gcc.dg/bitint-75.c`, `c23-attr-syntax-3.c`), the C++ pair's outputs by g++ 15.2 on the VM.
+- The design table, the families still without a control and their proposals: doc/GATE-SURVEY.md, "As built: GTS81 (a), the
+  crops' controls". Alternatives considered: a deliberately failing case of its own per family (a file or program added to
+  each corpus) instead of a crossed pair: rejected as GTS81 did (a case of its own needs its own run, reference and
+  upkeep, and goes through a code path of its own).
