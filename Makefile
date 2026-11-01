@@ -332,7 +332,7 @@ goi-check-aot: ## Go's AOT level: goi's corpora built by arbace.build.go and run
 	bin/goi check --aot --jobs 8
 goi-check-aot-essential: ## its essential subset, as bin/gate runs it: test/goi/essential-aot.txt's programs (bin/goi check --aot --essential --jobs 8)
 	bin/goi check --aot --essential --jobs 8
-goi-check-nethttp: ## the net/http corpus (NH1): test/nethttp's 60 loopback programs at the gc level and interpreted by goi against gc's runs, test/nethttp/check-linux-amd64.edn, the non-passes in test/nethttp/divergences.edn (bin/goi check --corpus nethttp)
+goi-check-nethttp: ## the net/http corpus (NH1): test/nethttp's 66 loopback programs at the gc level and interpreted by goi against gc's runs, test/nethttp/check-linux-amd64.edn, the non-passes in test/nethttp/divergences.edn (bin/goi check --corpus nethttp)
 	bin/goi check --corpus nethttp
 goi-check-nethttp-arbace: ## NH12 (a)'s set: test/nethttp/arbace's Arbace programs (fns as handlers and RoundTrippers, reify, a handler at the REPL, the refused import) against their hand-written outputs (bin/goi check --corpus nethttp --arbace)
 	bin/goi check --corpus nethttp --arbace

@@ -1178,3 +1178,7 @@ function reads what it needs of its callers' scope: `only`, `rexe`, `record`.
   the reference by `NR==FNR`, so a reference with no rows passed every result; it keys by `FILENAME` now. Today's
   records name no program missing from the corpus (the gc and arbace records equal the directories and the manifest;
   the goi record lacks the six `cb_*`, "new, unrecorded" until NH3's `--record`).
+- A4, the listing: the headers' "net/http listed" was written by hand, true of the checkout and not of the arbace
+  record's own executable. When a goi level records, `nethttp_listing` asks the executable (`GoInterp`'s paths, what
+  `arbace.go.repl/listed?` asks) and the header says "net/http listed", "unlisted", or "net/http's listing unknown"
+  when it does not answer. The Makefile's count is 66.
