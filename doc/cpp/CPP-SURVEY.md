@@ -2178,3 +2178,7 @@ The lists are CX5d's (1,807 / 323 / 326 / 244: the same counts). Under the stric
 
 All as recommended: CP120 (b); CP121 (c); CP122 (a); CP123 (b), with the whole-corpus runs; CP124 (b); CP125 (b), the
 coordinator's gate step at the merge; CP126 (a); CP127 (b).
+
+### Decided (CP130-CP134; the user, 2026-11-01)
+
+All as recommended: CP130 (c); CP131 (b); CP132 (b); CP133 (a); CP134 (b).
