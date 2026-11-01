@@ -21,7 +21,8 @@ cp "$scratch/good.jar" "$root/.tmp/oracle-frozen/my-tag.jar"   # a built jar of 
 run() { # run NAME WANT_STATUS VAR=VALUE...: frozen_jar with the variables, its status
   local name=$1 want=$2; shift 2
   local out st
-  out=$(root=$root env "$@" bash -c '. "$0/bin/lib/frozen.bash"; frozen_jar' "$src" 2>&1); st=$?
+  # the gate exports GATE_EXE to every step: a case sets it only as its variables say
+  out=$(root=$root env -u GATE_EXE "$@" bash -c '. "$0/bin/lib/frozen.bash"; frozen_jar' "$src" 2>&1); st=$?
   if [ "$st" = "$want" ]; then ok "$name (status $st)"; else bad "$name: status $st, wanted $want: $out"; fi
 }
 

@@ -37,9 +37,10 @@ reduce() {  # reduce NAME TRACE: the OP<TAB>PATH lines of TRACE by reducer NAME
   esac
 }
 # skipped only without TamaGo's go; a build that fails where go exists is a failure (review 081, N4), and (3) still runs
+# (-buildvcs=false: go build's VCS stamp runs git status, which reads every file of the checkout, outside the step's inputs)
 if [ ! -x "$tg/bin/go" ]; then echo "skip gateaudit: no $tg/bin/go here; audit.awk is tested"
 elif (cd "$root/tools/gateaudit" && env -u GOOS -u GOARCH GOROOT="$tg" GOFLAGS= GOTOOLCHAIN=local CGO_ENABLED=0 \
-     "$tg/bin/go" build -trimpath -o "$w/gateaudit" .) > "$w/build.log" 2>&1; then reducers+=(gateaudit)
+     "$tg/bin/go" build -trimpath -buildvcs=false -o "$w/gateaudit" .) > "$w/build.log" 2>&1; then reducers+=(gateaudit)
 else ck "gateaudit builds" "$(tail -1 "$w/build.log")"; fi
 cat > "$w/plain.trace" <<'T'
 100 execve("/bin/sh", ["sh", "-c", "x"], 0x7ffd /* 3 vars */) = 0
@@ -105,8 +106,11 @@ for r in "${reducers[@]}"; do
   else ck "$r: early thread line" "got '$(cat "$w/early.out")', expected 'X /work/sub/nx'"; fi
 done
 
-# (3) the system time of a thread that never opens or clones, under the audit's strace line
-if command -v strace > "$w/which" 2>&1 && command -v gcc > "$w/which" 2>&1; then
+# (3) the system time of a thread that never opens or clones, under the audit's strace line; skipped under a tracer
+# (gate-reads-test's strace, bin/gate --audit's): a traced process cannot run strace
+tracer=$(sed -n 's/^TracerPid:[[:space:]]*//p' /proc/self/status)
+if [ "${tracer:-0}" != 0 ]; then echo "skip (3): already traced by pid $tracer"
+elif command -v strace > "$w/which" 2>&1 && command -v gcc > "$w/which" 2>&1; then
   cat > "$w/thr.c" <<'C'
 #include <pthread.h>
 #include <sched.h>
