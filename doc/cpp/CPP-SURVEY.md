@@ -2396,7 +2396,7 @@ results file; their `bin/repr-cpp roundtrip` runs now stop on F6's rule unless p
   compare-exchange loop when a test needs them; (c) (b) and `uinc_wrap`, `udec_wrap`, `usub_cond`, `usub_sat` as loops. *Recommended: (a)*: libstdc++ 15 has no
   user of them and clang writes them only for C's `__atomic_fetch_max` on floats.
 - **CP174 A statement of the orderings' lattice.** `order-join` is small and tested with six pairs; the other nine pairs of the 15 clang writes into every `compare_exchange_*`
-  are not in the selftest. Options: (a) as built; (b) all 15 pairs (the legal ones, failure not `release` or `acq_rel`: 12) in `atomic-failure-order.ll`. *Recommended: (b)*, cheap.
+  are not in the selftest. Options: (a) as built; (b) all 15 pairs (every one legal: failure is `monotonic`, `acquire` or `seq_cst`) in `atomic-failure-order.ll`. *Recommended: (b)*, cheap.
 
 ### Rule slips, shipped files, scratch
 
