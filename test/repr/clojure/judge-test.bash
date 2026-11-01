@@ -1,9 +1,9 @@
 #!/bin/bash
 # Tests of repr/clojure's judge (bin/repr-clojure check, GTS160, audit 076), over fabricated trees
-# and stubbed tools; run: test/repr/clojure/judge-test.bash [frozen|counts|notread]...
+# and stubbed tools; run: test/repr/clojure/judge-test.bash [frozen|notread]...
 # (default: all). Exit status 0 when every case holds. TOOLS_BASH names another bin/lib/tools.bash
-# (the tests of a fix are run with the file from before it to show they fail), REPR_BIN another
-# bin/repr-clojure, REPR_AE another arbace/repr/clojure.ae (stage 0 is ARBACE_HOST_EXE).
+# (the tests of a fix are run with the file from before it to show they fail). The checks that
+# need Arbace run on stage 0 (ARBACE_HOST_EXE) with arbace/repr/clojure.ae from the checkout.
 set -uo pipefail
 here=$(cd "$(dirname "$0")/../../.." && pwd)
 . "$here/bin/lib/tmpdir.bash"
@@ -57,7 +57,32 @@ t_frozen() {
   [ "$s" != 0 ] && ok "frozen: no pin refused" || bad "frozen: no pin accepted"
 }
 
-tests=("$@"); [ ${#tests[@]} = 0 ] && tests=(frozen)
+# bin/repr-clojure roundtrip over a fabricated tree, a known file; prints its output, returns its status
+rt() { "$here/bin/repr-clojure" roundtrip "$@" 2>&1; }
+
+# Arbace -> Clojure -> Arbace with a stubbed print that loses "(LOST) " (a fault of print)
+lost_rt() { # DIR [lose]
+  ( cd "$here"; root=$here; . "$here/bin/lib/tools.bash"
+    local fault='(fn [s p skip] (orig s p skip))'
+    [ "${2:-}" = lose ] && fault='(fn [s p skip] (.replace ^String (orig s p skip) "(LOST) " ""))'
+    arbace_tool "${repr_clojure_sources[@]}" -e "(require 'arbace.repr.clojure)
+      (let [orig arbace.repr.clojure.rules/print-text]
+        (with-redefs [arbace.repr.clojure.rules/print-text $fault]
+          (arbace.repr.clojure/-main \"roundtrip\" \"--from-arbace\" \"-v\" \"$1\")))" 2>&1 )
+}
+
+t_notread() {
+  local d=$scratch/n out
+  mkdir -p "$d/named" "$d/plain"
+  printf '(ns x)\n;; see clojure.core/map\n(defn f [] (LOST) 1)\n' > "$d/named/x.ae"
+  printf '(ns y)\n(defn f [] (LOST) 1)\n' > "$d/plain/y.ae"
+  out=$(lost_rt "$d/named"); expect "notread: no fault, a text naming clojure.* is outside read's image" 0 $?
+  echo "$out" | grep -q "1 outside" && ok "notread: counted outside" || bad "notread: not counted outside: $out"
+  out=$(lost_rt "$d/plain" lose); expect "notread: a print fault in a plain file fails" 1 $?
+  out=$(lost_rt "$d/named" lose); expect "notread: the same fault in a file naming clojure.* fails" 1 $?
+}
+
+tests=("$@"); [ ${#tests[@]} = 0 ] && tests=(frozen notread)
 for t in "${tests[@]}"; do "t_$t"; done
 [ $fails = 0 ] && echo "judge-test: all hold" || echo "judge-test: $fails FAILED"
 [ $fails = 0 ]
