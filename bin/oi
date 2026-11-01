@@ -90,17 +90,23 @@ die() { echo "oi: $*" >&2; exit 2; }
 # oi's own level runs a program under limited_cpu: TIMEOUT seconds of CPU and a wall cap of four times that, as o2j_cpu (re-review 042's finding 1:
 # twice was a load band: a program needing more than half the cap in CPU timed out on a host slowed twofold)
 oi_wall() { echo $((TIMEOUT * 4)); }
-# oi_status STATUS SECONDS: the status of a run read as a timeout (124): the wall cap's 124, SIGXCPU's 152 (the CPU limit), and 137 (SIGKILL) only
-# when the run lasted TIMEOUT seconds or more: the CPU limit kills with SIGKILL after SIGXCPU; an OOM kill comes earlier and stays a failure
+# oi_status STATUS CPU: the status of a run read as a timeout (124): the wall cap's 124, SIGXCPU's 152, and 137 (SIGKILL: `ulimit -t` kills with
+# SIGKILL when the soft and the hard limit are equal) only when the run's own CPU seconds (user + system of the children, oi_cpu_secs) reach
+# TIMEOUT less half a second; an OOM kill or any other SIGKILL below the limit stays a failure, whatever the host's load made of the wall time
+# (re-review 049's finding 2: the wall time was a stand-in for CPU time that holds only when CPU is about wall)
 oi_status() {
   case $1 in
     152) echo 124 ;;
-    137) if [ "$(echo "$2 >= $TIMEOUT" | bc)" = 1 ]; then echo 124; else echo 137; fi ;;
+    137) if [ "$(echo "$2 >= $TIMEOUT - 0.5" | bc)" = 1 ]; then echo 124; else echo 137; fi ;;
     *) echo "$1" ;;
   esac
 }
-# the rows are made by bash -c through xargs: the functions are exported
-export -f oi_wall oi_status
+# oi_cpu_secs T0 T1: the CPU seconds the children of this shell used between two `times > FILE` (user + system of the children, line 2)
+oi_cpu_secs() {
+  awk 'function s(t,  a) { split(t, a, "m"); sub(/s$/, "", a[2]); return a[1] * 60 + a[2] }
+       FNR == 2 { n++; t[n] = s($1) + s($2) } END { printf "%.2f\n", t[2] - t[1] }' "$1" "$2"
+}
+export -f oi_wall oi_status oi_cpu_secs
 
 arbace_exe() {
   if [ -n "${ARBACE_HOST_EXE:-}" ]; then echo "$ARBACE_HOST_EXE"; return; fi
@@ -355,12 +361,12 @@ oi_one() {
     printf '%s\t-\t-\t0\t0\tdump: %s\n' "$id" "$(head -c 200 "$d/$u.ae" | tr '\n\t' '  ')"; return
   fi
   local st=0 t0 t1
-  t0=$(date +%s.%N)
+  t0=$(date +%s.%N); times > "$d/cpu0"
   (cd "$d" && limited_cpu "$TIMEOUT" "$(oi_wall)" env $env "$EXE" run "$LIB" $units "$u.ae" -- $args > "$d/oi.out" 2>&1) || st=$?
-  t1=$(date +%s.%N)
+  t1=$(date +%s.%N); times > "$d/cpu1"
   local note=""
   note=$(grep -a -m1 -o 'oi: .*' "$d/oi.out" | head -c 300 | tr '\t' ' ' || true)
-  st=$(oi_status "$st" "$(echo "$t1 - $t0" | bc)")
+  st=$(oi_status "$st" "$(oi_cpu_secs "$d/cpu0" "$d/cpu1")")
   [ "$st" = 124 ] && note="timeout ${TIMEOUT}s"
   printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$st" "$(sha256sum < "$d/oi.out" | cut -d' ' -f1)" "$(wc -c < "$d/oi.out")" "$(echo "$t1 - $t0" | bc)" "$note"
   # keep the outputs that differ, drop the dump (large)
@@ -618,6 +624,7 @@ case $cmd in
   aot-cpu) o2j_cpu ;;
   oi-limits) echo "$TIMEOUT $(oi_wall)" ;;
   oi-status) oi_status "$@" ;;
+  oi-cpu) oi_cpu_secs "$@" ;;
   aot-lib) cmd_aot_lib ;;
   aot-run) cmd_aot_run "$@" ;;
   suite) cmd_suite "$@" ;;

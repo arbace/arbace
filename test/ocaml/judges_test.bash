@@ -9,7 +9,7 @@ W=$root/.tmp/w/judges; rm -rf "$W"; mkdir -p "$W"
 bad=0
 # re-review 049's finding 1: every case must run. Cases once sat after an `exit` in the middle of the file and never ran. `expect` counts the cases
 # run, and the EXIT trap fails the file when the count is not CASES (raise it with each case added), wherever the file ended.
-cases=0; CASES=33
+cases=0; CASES=36
 finish() { local st=$?; if [ "$cases" != "$CASES" ]; then echo "FAIL $cases cases ran, want $CASES (a case unreachable, or CASES not raised)"; exit 1; fi; echo "$cases cases run"; exit $((bad || st)); }
 trap finish EXIT
 t=$(printf '\t')
@@ -132,11 +132,15 @@ printf '[\n ["a" "fail" "known gc: a finaliser (output differs (1 bytes, ocamlop
 printf 'a\t0\tx\t1\t1.0\t\nb\t0\th\t1\t1.0\t\nc\t0\th\t1\t1.0\t\n' > "$k/check.tsv"
 out=$(judge_aot judge "$k/check.tsv" "$k/corpus.tsv" "$k/refs.edn" "$k/oi.tsv" "$k/aot-results.edn" "$k/classes.edn"); expect "aot: a slow program that passes at the boundary is not a change" 0 'STALE b' "$out" $?
 
-# re-review 042's finding 1: oi's wall cap is four times its CPU limit (as o2j_cpu), and 137 (SIGKILL) is a timeout only when the run lasted
-# OI_TIMEOUT seconds: an OOM kill earlier stays a failure
+# re-review 042's finding 1: oi's wall cap is four times its CPU limit (as o2j_cpu), and 137 (SIGKILL) is a timeout only when the run's CPU
+# seconds (not its wall seconds: re-review 049's finding 2) reach OI_TIMEOUT less half a second: an OOM kill earlier stays a failure
 out=$(cd "$root" && OI_TIMEOUT=120 bin/oi oi-limits 2>&1); expect "oi: the wall cap is four times the CPU limit" 0 '^120 480$' "$out" $?
 out=$(cd "$root" && OI_TIMEOUT=120 bin/oi oi-status 137 5 2>&1); expect "oi: 137 after 5 s is an OOM kill, not a timeout" 0 '^137$' "$out" $?
 out=$(cd "$root" && OI_TIMEOUT=120 bin/oi oi-status 137 121.5 2>&1); expect "oi: 137 after the CPU limit is a timeout" 0 '^124$' "$out" $?
+out=$(cd "$root" && OI_TIMEOUT=120 bin/oi oi-status 137 119.6 2>&1); expect "oi: 137 at the CPU limit less a rounding is a timeout" 0 '^124$' "$out" $?
+out=$(cd "$root" && OI_TIMEOUT=120 bin/oi oi-status 137 119.4 2>&1); expect "oi: 137 below the CPU limit (a kill under load, wall time long) stays 137" 0 '^137$' "$out" $?
+printf '0m0.1s 0m0.2s\n0m1.5s 0m2.0s\n' > "$W/c0"; printf '0m0.1s 0m0.2s\n2m1.5s 0m3.25s\n' > "$W/c1"
+out=$(cd "$root" && bin/oi oi-cpu "$W/c0" "$W/c1" 2>&1); expect "oi: the CPU seconds of the children between two times are the difference" 0 '^121.25$' "$out" $?
 out=$(cd "$root" && OI_TIMEOUT=120 bin/oi oi-status 152 3 2>&1); expect "oi: 152 (SIGXCPU) is a timeout" 0 '^124$' "$out" $?
 out=$(cd "$root" && OI_TIMEOUT=120 bin/oi oi-status 2 3 2>&1); expect "oi: another status is kept" 0 '^2$' "$out" $?
 
