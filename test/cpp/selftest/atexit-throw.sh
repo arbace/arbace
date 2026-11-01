@@ -19,4 +19,14 @@ printf 'selftest/quick-exit-throw.cpp\tc++23\t\t%s\n' "$root/test/cpp/selftest/q
 d=$t/w2/files/selftest/quick-exit-throw.cpp
 [ "$(cat "$d/low.status" 2>&1)" = 134 ] && ok "at_quick_exit: the lowered program terminates (134)" || bad "at_quick_exit status: $(cat "$d/low.status" 2>&1)"
 [ $st = 0 ] && cmp -s "$d/low.err" "$d/gxx.err" && ok "at_quick_exit: stderr is g++'s build's" || bad "at_quick_exit: lower-check exits $st: $(head -4 "$d/low.err" 2>&1)"
+# report 066's R1 and R2: at_quick_exit's order (a handler registered by a handler runs next) and musl's 32 handlers, the lowered
+# program's stderr and status the original's and g++'s build's
+for n in quick-exit-order quick-exit-many; do
+  printf 'selftest/%s.cpp\tc++23\t\t%s\n' "$n" "$root/test/cpp/selftest/$n.cpp" > "$t/l-$n.tsv"
+  "$root/bin/cppi" lower-check "$t/l-$n.tsv" "$t/w-$n" > "$t/w-$n.log" 2>&1; st=$?
+  d=$t/w-$n/files/selftest/$n.cpp
+  [ $st = 0 ] && cmp -s "$d/low.err" "$d/orig.err" && cmp -s "$d/low.err" "$d/gxx.err" && ok "$n: lowered stderr is the original's and g++'s" || bad "$n: lower-check exits $st: $(tr '\n' ';' < "$d/low.err" 2>&1) wanted $(tr '\n' ';' < "$d/orig.err" 2>&1)"
+done
+[ "$(tr '\n' ' ' < "$t/w-quick-exit-order/files/selftest/quick-exit-order.cpp/orig.err" 2>&1)" = "q4 q2 q3 q1 " ] && ok "the original runs q4 q2 q3 q1" || bad "the original's order"
+grep -q '^failed 8 ran 32$' "$t/w-quick-exit-many/files/selftest/quick-exit-many.cpp/orig.err" 2>&1 && ok "the original refuses 8 of 40" || bad "the original's count: $(cat "$t/w-quick-exit-many/files/selftest/quick-exit-many.cpp/orig.err" 2>&1)"
 finish

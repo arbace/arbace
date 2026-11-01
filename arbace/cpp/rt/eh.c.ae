@@ -154,25 +154,55 @@
       (when r (free s))
       (return r))))
 
+;; at_quick_exit keeps musl's behaviour (report 066's R1-R3): at most 32 handlers (a registration past them returns -1), run one at a time,
+;; last registered first, the list re-read after each call so a handler registered by a handler runs next; the list, its count and the
+;; one native registration are under a spin lock, so a registration cannot race a quick_exit
+(c/declare sched_yield ^int [void])
 (c/var ^:static ^{:tag (* (struct cx$exit))} cx$quick)
+(c/var ^:static ^int cx$qn 0)
+(c/var ^:static ^int cx$qreg 0)
+(c/var ^:static ^int cx$qlock 0)
+
+(c/defn ^:static cx$qtake ^void [void]
+  (while (!= (__atomic_exchange_n (addr cx$qlock) 1 2) 0) (sched_yield)))
+
+(c/defn ^:static cx$qgive ^void [void]
+  (__atomic_store_n (addr cx$qlock) 0 3))
 
 (c/defn ^:static cx$quick_run ^void [void]
-  (let [^{:tag (* (struct cx$exit))} s (__atomic_exchange_n (addr cx$quick) 0 5)]
-    (while (!= s 0)
-      (let [^{:tag (* (struct cx$exit))} n (-> s next)
-            ^{:tag (* (fn [void] void))} f0 (-> s f0)]
-        (free s)
-        (f0)
-        (when cx$pending (cx$uncaught))
-        (set! s n)))))
+  (cx$qtake)
+  (while (!= cx$quick 0)
+    (let [^{:tag (* (struct cx$exit))} s cx$quick
+          ^{:tag (* (fn [void] void))} f0 (-> s f0)]
+      (set! cx$quick (-> s next))
+      (set! cx$qn (- cx$qn 1))
+      (free s)
+      (cx$qgive)
+      (f0)
+      (when cx$pending (cx$uncaught))
+      (cx$qtake)))
+  (cx$qgive))
 
 (c/defn cx$at_quick_exit ^int [^{:tag (* (fn [void] void))} f]
   (let [^{:tag (* (struct cx$exit))} s (cx$exit_new 0 f 0)]
     (when (== s 0) (return -1))
-    (let [^{:tag (* (struct cx$exit))} old (__atomic_exchange_n (addr cx$quick) s 5)]
-      (set! (-> s next) old)
-      (when (== old 0) (return (at_quick_exit cx$quick_run)))
-      (return 0))))
+    (cx$qtake)
+    (when (>= cx$qn 32)
+      (cx$qgive)
+      (free s)
+      (return -1))
+    (when (== cx$qreg 0)
+      (let [^int r (at_quick_exit cx$quick_run)]
+        (when r
+          (cx$qgive)
+          (free s)
+          (return r))
+        (set! cx$qreg 1)))
+    (set! (-> s next) cx$quick)
+    (set! cx$quick s)
+    (set! cx$qn (+ cx$qn 1))
+    (cx$qgive)
+    (return 0)))
 
 ;; a filter clause that rejects the exception (C++98's dynamic exception specifications): eh_personality.cc's
 ;; __cxa_call_unexpected, without its bad_exception translation
