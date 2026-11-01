@@ -19,7 +19,8 @@ arbace_host_exe() {
   local a seed want have exe
   a=$(arbace_host_arch)
   exe=$root/target/seed/$a/arbace
-  seed=${ARBACE_SEED:-$root/seed/arbace-seed-go.tar.xz}
+  seed=${ARBACE_SEED_GO:-seed/arbace-seed-go.tar.xz} # bin/seed's variable and default
+  case $seed in /*) ;; *) seed=$root/$seed ;; esac
   want=$([ -f "$seed.sha256" ] && cut -d' ' -f1 "$seed.sha256")
   have=$([ -f "$root/target/seed/seed.sha256" ] && cat "$root/target/seed/seed.sha256")
   if [ ! -x "$exe" ] || [ -z "$want" ] || [ "$want" != "$have" ]; then
