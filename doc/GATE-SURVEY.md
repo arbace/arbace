@@ -2676,3 +2676,38 @@ All decided by the user, 2026-11-01, as recommended; what the branch built is na
 - The new tests (`test/gate/gate-cache-test.bash`, `stale-comments-test.bash`, `host-seed-test.bash`) are bash over fabricated
   trees under `.tmp/`, run by hand, in no gate step: a step (light, inputs `bin/` and `test/gate/`) would run them with the
   essential gate; *recommended*, left for the user.
+
+## Proposals (GTS140-GTS143) (2026-11-01, branch `audit-060`, none decided)
+
+From report 060 (the AOT levels of the suite and goi). The fixes are in `audit-060`; these are the choices they leave.
+
+- **GTS140 Where the judges' tests run.** `test/goi/judge-test.bash` and `test/clojure/judge-test.bash` cut functions out of
+  `bin/goi` and `bin/clojure-tests` and run them on fabricated inputs (seconds, the tools' host only).
+  - Options: (a) a light gate step each (`:inputs` the script, the file it cuts from, the runner, the hook), so a change
+    to a judge reruns its test; (b) one step for both; (c) by hand, `make` targets only.
+  - *Recommended: (a)*: a judge that is only tested by hand is the kind of check report 060 found drifting; the step is
+    seconds and keyed by the files it cuts from, so it reruns exactly when a judge changes.
+- **GTS141 How a known AOT difference names the kind of result it stands for** (finding 2).
+  - Options: (a) as built: a table in `apply_known` by the reason's prefix (positions, go command, runtime.GOROOT: a
+    fail; -complete: an AOT build error; errorcheck: a fail that is not the printing of the forms); (b) the kind as a third
+    element of each entry of `check-aot-known.edn`, `bin/goi` reading it; (c) the whole raw row recorded and compared.
+  - *Recommended: (b)* once a second kind of file needs it: the data then says what a reason stands for, and a new
+    entry cannot be added without it; (a) is the smaller change and keeps the file's format, as `speed:` did.
+- **GTS142 Programs whose forms are missing** (finding 1).
+  - Options: (a) as built: the forms path spelled as repr/go does (`forms_rel`); a run program with no forms is still
+    left out of the list; (b) list the run programs from the corpus's own list (`gocmp tests`, the reader's `.tsv`) and
+    print `error no forms` for any listed program without forms, so a dropped program is a row.
+  - *Recommended: (b)*: (a) fixes the one name that was lost, (b) makes the next one loud; it costs a read of the `.tsv`.
+- **GTS143 Checking the AOT essential lists against their rule** (finding 5).
+  - Options: (a) as built: each entry must pass in the record (`bin/goi divergences --aot`; the suite's controls fail
+    when their subject is missing under `--essential`); (b) also `bin/goi essential-aot --check` re-deriving the list by
+    its stated rule from the two records and `$GOROOT/test` (a list that shrinks is then a failure); (c) the same for the
+    suite's `essential-aot.txt`, which has no stated rule yet.
+  - *Recommended: (a) now, (b) at the next re-record*: the rule's parts hold today (126 of 126 directory tests, 13 of 13
+    flagged programs, 11 of 11 known ones), so (b) is a guard against a future shrink, worth building with the next record.
+
+**Not fixed.** Finding 3 and 4 hold on main only (fixed on `mac/054-merge`); the AOT record was not recorded again after
+`:gc-run` (report 011), so nothing here re-records it. Finding 6's key hashes the reader's sources (goi's REPL and builder, go/parser's forms, box.ae, REPR_GO_READER), not the host
+executable (report 069 A: the interp and AOT steps run on different hosts over one corpora tree, so a host in the key
+made each re-read them in turn). The AOT essential subset runs `goi.divergences --aot` on the record (069 D). The
+suite's subset check is one way (069 E): a stale reference entry for a source of the subset is caught by the whole run.
