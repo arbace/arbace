@@ -1,0 +1,78 @@
+#!/bin/bash
+# The Go side of arbace.lang.CInterp checked without the executable (doc/C23-SURVEY.md, "As built: C9 (preparation)"): the Go forms of
+# go/arbace/crt, ci and cinterp printed by repr/go (lines layout) into the module .tmp/cinterp/go (module arbace), with a stand-in
+# for jrt (arbace/jrt, the two types cinterp takes: String and RefArray) and a main calling CInterp_RunNodes_String_String1__I_native,
+# built by TamaGo's go (CGO_ENABLED=0, a private GOCACHE); the fixtures of test/c/cinterp/ (a node program each, run with the
+# argument arg1) run by it and by tools/cirun (bin/ci cirun-build) against NAME.expect: the status, the standard output, and the
+# standard error's first line. It tells that the natives compile against the types j2g gives them and that the back end reached
+# through CInterp behaves as the light path's; the executable's own run is the heavy list's (C9).
+# Usage: bin/ci cinterp-check [--regen]     --regen: the .nodes rewritten first (bin/ci nodes; musl's forms are read when stale)
+set -uo pipefail
+root=$(cd "$(dirname "$0")/../../.." && pwd)
+. "$root/bin/lib/tmpdir.bash"
+cd "$root"
+go=${ARBACE_GOROOT:-/root/tamago-go}/bin/go
+w=$root/.tmp/cinterp
+fx=$root/test/c/cinterp
+if [ "${1:-}" = --regen ]; then
+  for c in "$fx"/*.c; do "$root/bin/ci" nodes -o "${c%.c}.nodes" "$c" || exit 1; done
+fi
+rm -rf "$w/go"; mkdir -p "$w/go/jrt" "$w/go/cmain"
+printf 'module arbace\n\ngo 1.27\n' > "$w/go/go.mod"
+for p in crt ci cinterp; do
+  mkdir -p "$w/go/$p"
+  "$root/bin/repr-go" print --layout lines --no-line-directives "$root/go/arbace/$p.ae" "$w/go/$p" > "$w/print-$p.log" 2>&1 \
+    || { cat "$w/print-$p.log" >&2; echo "cinterp-check: $p did not print" >&2; exit 1; }
+done
+cat > "$w/go/jrt/jrt.go" <<'G'
+// A stand-in for arbace/jrt: the two types ci's natives take (String and RefArray), for bin/ci cinterp-check.
+package jrt
+
+type String struct{ s string }
+
+func NewString(s string) *String { return &String{s} }
+
+func (s *String) String() string { return s.s }
+
+type RefArray struct{ A []any }
+G
+cat > "$w/go/cmain/main.go" <<'G'
+package main
+
+import (
+	"os"
+
+	"arbace/cinterp"
+	"arbace/jrt"
+)
+
+func main() {
+	text, err := os.ReadFile(os.Args[1])
+	if err != nil {
+		panic(err)
+	}
+	argv := []any{jrt.NewString("a.out")}
+	for _, a := range os.Args[2:] {
+		argv = append(argv, jrt.NewString(a))
+	}
+	os.Exit(int(cinterp.CInterp_RunNodes_String_String1__I_native(jrt.NewString(string(text)), &jrt.RefArray{A: argv})))
+}
+G
+(cd "$w/go" && CGO_ENABLED=0 GOFLAGS=-mod=mod GOCACHE=$w/gocache GOMAXPROCS=2 "$go" build -p 2 -o "$w/cinterp-run" ./cmain) \
+  || { echo "cinterp-check: the natives did not build" >&2; exit 1; }
+cirun=${CIRUN:-$root/.tmp/ci/cirun}
+[ -x "$cirun" ] || "$root/bin/ci" cirun-build || exit 1
+fails=0
+for n in "$fx"/*.nodes; do
+  b=$(basename "$n" .nodes)
+  for runner in cinterp-run:"$w/cinterp-run" cirun:"$cirun"; do
+    name=${runner%%:*} exe=${runner#*:}
+    out=$("$exe" "$n" arg1 2>"$w/err.txt"); st=$?
+    got=$(printf 'status %s\n%s\nstderr\n%s' "$st" "$out" "$(head -n 1 "$w/err.txt")")
+    want=$(cat "$fx/$b.expect")
+    # the fault line carries a trace after the expected words: the expected text is a prefix
+    if [ "${got:0:${#want}}" = "$want" ]; then echo "ok   $b on $name"
+    else echo "FAIL $b on $name:"; printf '%s\n' "$got" | sed 's/^/     got:  /'; printf '%s\n' "$want" | sed 's/^/     want: /'; fails=$((fails + 1)); fi
+  done
+done
+if [ $fails = 0 ]; then echo "cinterp-check: ok"; else echo "cinterp-check: $fails failures"; exit 1; fi
