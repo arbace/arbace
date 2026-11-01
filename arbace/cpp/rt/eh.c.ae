@@ -116,7 +116,7 @@
 ;; function registered with them that returns with the flag set returned into musl's exit unnoticed, where g++'s build terminates
 ;; (an exception does not unwind through libc's frames). The lowering renames the lowered code's three to cx$atexit,
 ;; cx$at_quick_exit and cx$cxa_atexit; the handlers run through a trampoline that calls cx$uncaught when the flag is set. atexit
-;; goes through musl's __cxa_atexit (the same order); at_quick_exit keeps its own list, run by one native at_quick_exit, last first
+;; goes through musl's __cxa_atexit (the same order); at_quick_exit keeps its own list, run by native at_quick_exit one handler a call, last first
 (c/declare __cxa_atexit ^int [(* (fn [(* void)] void)) (* void) (* void)])
 (c/declare at_quick_exit ^int [(* (fn [void] void))])
 
@@ -157,6 +157,9 @@
 ;; at_quick_exit keeps musl's behaviour (report 066's R1-R3): at most 32 handlers (a registration past them returns -1), run one at a time,
 ;; last registered first, the list re-read after each call so a handler registered by a handler runs next; the list, its count and the
 ;; one native registration are under a spin lock, so a registration cannot race a quick_exit
+;; (queue 107): each native call of cx$quick_run runs one handler and, while the list is not empty, registers itself again before
+;; calling it (musl's at_quick_exit, called from its own handler, takes the slot back); so a quick_exit called by a handler, whose
+;; native loop finds that registration, still runs the remaining handlers, as musl's __funcs_on_quick_exit does
 (c/declare sched_yield ^int [void])
 (c/var ^:static ^{:tag (* (struct cx$exit))} cx$quick)
 (c/var ^:static ^int cx$qn 0)
@@ -171,17 +174,19 @@
 
 (c/defn ^:static cx$quick_run ^void [void]
   (cx$qtake)
-  (while (!= cx$quick 0)
-    (let [^{:tag (* (struct cx$exit))} s cx$quick
-          ^{:tag (* (fn [void] void))} f0 (-> s f0)]
+  (let [^{:tag (* (struct cx$exit))} s cx$quick]
+    (when (== s 0)
+      (set! cx$qreg 0)
+      (cx$qgive)
+      (return))
+    (let [^{:tag (* (fn [void] void))} f0 (-> s f0)]
       (set! cx$quick (-> s next))
       (set! cx$qn (- cx$qn 1))
       (free s)
+      (if (!= cx$quick 0) (at_quick_exit cx$quick_run) (set! cx$qreg 0))
       (cx$qgive)
       (f0)
-      (when cx$pending (cx$uncaught))
-      (cx$qtake)))
-  (cx$qgive))
+      (when cx$pending (cx$uncaught)))))
 
 (c/defn cx$at_quick_exit ^int [^{:tag (* (fn [void] void))} f]
   (let [^{:tag (* (struct cx$exit))} s (cx$exit_new 0 f 0)]
