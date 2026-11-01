@@ -427,9 +427,12 @@ Prior art:
   without a current one of its own the main checkout's when its pins are the worktree's, `bin/seed --kept`, hard-linked into
   the worktree's `target/seed`, `bin/seed --link`, GTS83 (a)), the executable and the test build by stage 0 (`bin/arbace-go
   --gate-build`, cached by key in `ARBACE_GATE_EXES/KEY20` (`KEY20` the first 20 characters of `bin/arbace-go --gate-key`; the one function `bin/lib/gate-cache.bash`'s `arbace_gate_cache` computes it for the gate and for the scripts run by hand; `ARBACE_GATE_CACHE` overrides, and a miss replaces only a directory of its own making, built beside it and swapped in under a lock, so a second run waits and then hits), and keyed by a hash of what they are built from,
-  `gate_key`: `arbace/` less repr/java, repr/haskell, repr/rust and repr/c, `go/`, `overlay/` and `jdk/` less
-  javac's world and the provenance files, `x509roots/`, the fixtures' forms, `bin/lib` (less the repr checks' and
-  `gate-run.bash`), since GT7 `tamago/goroot` and `tools/godump` (goi's table), the build's scripts, the
+  `gate_key`: `arbace/` less the namespaces no executable embeds (`bin/lib/version.bash`'s `arbace_embedded_sources`:
+  repr/java, repr/haskell, repr/rust, repr/c, `arbace/c`, repr/ocaml, repr/scheme, `arbace/scheme`, repr/cpp, repr/llvm,
+  `arbace/cpp`), `go/` less the crops' Go forms (`go/arbace/{ci,cinterp,crt,oi,scm}`), `overlay/` and `jdk/` less
+  javac's world, `jdk/platform/`, OCaml's `jdk/ocaml/` and the provenance files, `x509roots/`, the fixtures' forms,
+  `bin/lib` (less the repr checks', the crops' `ci/`, `oi/`, `repr-cpp/` and `gate-run.bash`; queue 111: no build
+  reads them), since GT7 `tamago/goroot` and `tools/godump` (goi's table), the build's scripts, the
   seed's and Go's pins, Go's `VERSION` and `ARBACE_HOST_EXE`'s bytes when set; seconds when unchanged, else two Go-hosted builds, about 8 minutes: the
   test build reuses the executable's compiled namespaces), then
   concurrently the smoke test, the per-form differential check (`bin/diffcheck`, Futamura F2, since
