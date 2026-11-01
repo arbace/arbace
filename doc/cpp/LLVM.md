@@ -158,8 +158,17 @@ The C forms are those of doc/c/SPEC.md, printed by repr/c's printer at `:gnu23` 
   unordered predicates by C's comparisons; casts by C's conversions, a `bitcast` between non-pointer types by
   `__builtin_memcpy` from a compound literal of the source type in a statement expression (gcc's C has no
   `__builtin_bit_cast`); an inline `asm` whose template is empty and which has no result (a compiler barrier, `asm
-  volatile("" : : "rm"(x))`) as nothing, other inline assembly refused (`:inline-asm`); atomics as plain
-  operations (single-threaded, CP1); `unreachable` as `__builtin_trap()`.
+  volatile("" : : "rm"(x))`) as nothing, other inline assembly refused (`:inline-asm`); atomics (CP121 (c), since
+  `std::thread` runs on musl's pthreads: until then plain operations, CP1) as gcc's `__atomic_*` builtins with the IR's
+  orderings (`unordered` and `monotonic` `__ATOMIC_RELAXED` 0, `acquire` 2, `release` 3, `acq_rel` 4, `seq_cst` 5, written as
+  numbers): `load atomic`/`store atomic` `__atomic_load_n`/`__atomic_store_n` on an integer of 1 to 16 bytes or a pointer
+  (`volatile` kept in the pointer's type), the generic `__atomic_load`/`__atomic_store` through memory on a float;
+  `atomicrmw` `__atomic_exchange_n` (`xchg`; the generic `__atomic_exchange` on a float) and `__atomic_fetch_add`, `_sub`,
+  `_and`, `_or`, `_xor`, `_nand`, the others (`max`, `min`, `umax`, `umin`, `fadd`, `fsub`) a loop of the generic
+  `__atomic_compare_exchange` on the old value (refreshed by a failed exchange), the rest refused (`:atomic`); `cmpxchg`
+  `__atomic_compare_exchange_n` into the result's two fields (`weak` kept, both orderings); `fence`
+  `__atomic_thread_fence`, `syncscope("singlethread")` `__atomic_signal_fence` (an operation of that scope stays a
+  thread-wide atomic: stronger, the same result); `unreachable` as `__builtin_trap()`.
 - **Intrinsics** by a table: `memcpy`/`memmove`/`memset`, `lifetime.*` and the other hints (nothing), `expect`,
   `threadlocal.address`, `objectsize`, `is.constant`, `trap`, `va_start`/`va_end`/`va_copy` (`__builtin_va_*` on the
   `va_list` the IR allocated), `stacksave`/`stackrestore`, the `*.with.overflow` family (`__builtin_*_overflow`),
@@ -262,5 +271,8 @@ builds the runtime a lowered program links in place of libstdc++.so, from `test/
 
 A lowered program links `rt.o -Wl,--start-group [libltestc++.a liblstdc++exp.a] liblstdc++.a -Wl,--end-group -lm` by gcc:
 the C library (musl) and libgcc are native (C5 lowers musl), no libstdc++.so. What the lowered runtime does not have, by
-the configuration or by CP1: threads beyond the C library's (`std::thread` runs on musl's pthreads, natively, but the
-pending flag and the atomics are single-threaded), `std::random_device`'s rdrand and rdseed, `std::stacktrace`.
+the configuration: `std::random_device`'s rdrand and rdseed, `std::stacktrace`. Threads are musl's pthreads, natively: the
+pending flag and the in-flight exception are per thread (CP103 (b)), a thread's start is the layer's trampoline (CP120 (b),
+§8), and the atomics of the lowered library and programs are gcc's `__atomic_*` builtins (CP121 (c), §7): the refcounts of
+`std::shared_ptr` and `std::exception_ptr`, the guards of function-local statics (`__cxa_guard_acquire`, libsupc++'s,
+lowered) and `std::atomic` are shared state that works across threads (the runtime sample `atomics.cpp`).
