@@ -7,7 +7,8 @@
 set -u
 src=${AUDITED_TEST_SRC:-$(cd "$(dirname "$0")/../.." && pwd)}
 : "${ARBACE_HOST_EXE:?set ARBACE_HOST_EXE to stage 0 (a tool must not build one here)}"
-t=$(mktemp -d "${TMPDIR:-/root/arbace/.tmp/tmp}/audited-test.XXXXXX") || exit 2
+mkdir -p "${TMPDIR:-$src/.tmp/tmp}"
+t=$(mktemp -d "${TMPDIR:-$src/.tmp/tmp}/audited-test.XXXXXX") || exit 2
 trap 'rm -rf "$t"' EXIT
 root=$t/root; mkdir -p "$root/test"
 cp -r "$src/bin" "$root/bin"; cp -r "$src/test/java" "$root/test/java"
@@ -97,6 +98,12 @@ results i interp t03220 timeout "$TO"; audited i interp; results c compiled t032
 rm -f "$t/held.txt"
 judge --held "$t/held.txt" "$t/i/results.tsv" "$t/c/results.tsv"
 if [ $st = 1 ] && grep -q 'levels: t03220' "$t/out" && [ ! -s "$t/held.txt" ]; then ok "audited: a recorded timeout's levels disagreement is no hold"; else no "audited recorded-timeout levels disagreement (status $st; held: $(cat "$t/held.txt" 2>&1))"; fi
+
+# 7 (review 077, finding 5): :audit-timeout has no :match (it never matched: :speed, first, takes every timeout)
+if sed -n '/:id :audit-timeout/,/:id :thread-order/p' "$root/test/java/divergences.edn" | grep -q '^  :match'; then no ":audit-timeout has a :match that never matches"; else ok ":audit-timeout has no dead :match"; fi
+
+# 8 (review 077, finding 6): no checkout's absolute path in this script (its scratch default is the checkout's own .tmp/tmp)
+if grep -v '^# \|grep -v' "$src/test/java/audited-test.bash" | grep -q '/root/arbace'; then no "a hard-coded /root/arbace path"; else ok "no hard-coded checkout path"; fi
 
 echo "audited-test: $((n - bad)) of $n passed"
 [ $bad = 0 ]
