@@ -1094,6 +1094,45 @@
                  (if (and (integer? v) (or (int-type? (unq t)) (ptr-type? (unq t)))) (str " = " v) ""))))
     r))
 
+(defn- round-sig
+  "The double `d` rounded (half to even) to a binary format of `p` significant bits whose smallest normal exponent is `emin`
+  and largest `emax`: subnormals keep emin's quantum, a value past the largest finite one is infinite."
+  [d p emin emax]
+  (if (or (Double/isNaN d) (Double/isInfinite d) (zero? d))
+    d
+    (let [e (max (Math/getExponent (double d)) emin)
+          q (- e (dec p))
+          r (Math/scalb (Math/rint (Math/scalb (double d) (- q))) q)]
+      (if (>= (Math/abs r) (Math/scalb 1.0 (inc emax)))
+        (if (neg? d) Double/NEGATIVE_INFINITY Double/POSITIVE_INFINITY)
+        r))))
+
+(defn- round-to-format
+  "The double `d` rounded to the format of the floating kind `k` (review 031's finding A): float and _Float32 to float,
+  _Float16 to IEEE binary16, __bf16 to bfloat16; any other kind keeps `d`."
+  [d k]
+  (case k
+    (:float :float32) (.doubleValue (Float/valueOf (.floatValue (Double/valueOf (double d)))))
+    :float16 (round-sig d 11 -14 15)
+    :bf16 (round-sig d 8 -126 127)
+    d))
+
+(defn- round-ldouble
+  "The BigDecimal `x` rounded (half to even) to x87's 64-bit significand, as a BigDecimal (exact), for a value in the
+  normal range; `x` itself when it is zero or its exponent is out of the range."
+  [^java.math.BigDecimal x]
+  (if (or (zero? (.signum x)) (> (Math/abs (- (.precision x) (.scale x))) 4000))
+    x
+    (let [ax (.abs x)
+          ;; e: 2^e <= ax < 2^(e+1), from the double estimate then corrected exactly
+          e0 (Math/getExponent (.doubleValue ax))
+          two (fn [n] (if (neg? n) (.divide java.math.BigDecimal/ONE (java.math.BigDecimal. (.pow (biginteger 2) (- n)))) (java.math.BigDecimal. (.pow (biginteger 2) n))))
+          e (cond (neg? (.compareTo ax (two e0))) (dec e0) (>= (.compareTo ax (two (inc e0))) 0) (inc e0) :else e0)
+          sh (- 63 e)
+          m (.setScale (if (neg? sh) (.divide ax (two (- sh))) (.multiply ax (two sh))) 0 java.math.RoundingMode/HALF_EVEN)
+          r (if (neg? sh) (.multiply (java.math.BigDecimal. (.toBigInteger m)) (two (- sh))) (.divide (java.math.BigDecimal. (.toBigInteger m)) (two sh)))]
+      (if (neg? (.signum x)) (.negate r) r))))
+
 (defn- conv-val
   "A constant converted to type `t`."
   [v t]
@@ -1108,7 +1147,7 @@
                           :else nil)
       (float-type? t) (let [d (cond (integer? v) (double v) (instance? Double v) v :else nil)]
                         ;; a float constant is rounded to float (an integer too: 16777217 is 16777216.0f)
-                        (if (and d (#{:float :float32} (:k t))) (.doubleValue (Float/valueOf (.floatValue (Double/valueOf (double d))))) d))
+                        (if d (round-to-format d (:k t)) d))
       (ptr-type? t) (when (integer? v) (wrap v t-ulong))
       :else nil)))
 
@@ -1249,7 +1288,7 @@
         (res t :v (if (int-type? t) (int-op op a b t)
                     (when (float-type? t)
                       (let [v (float-op op a b)]
-                        (if (and v (#{:float :float32} (:k t))) (.doubleValue (Float/valueOf (.floatValue (Double/valueOf (double v))))) v))))))
+                        (if v (round-to-format v (:k t)) v))))))
       :else
       (do (when (and (#{:struct :union} (:k ta)) (not= :invalid (:k tb))) (err! (str "invalid operands to binary " op)))
           (res (if (ptr-type? ta) ta (if (ptr-type? tb) tb t-int)))))))
@@ -1439,7 +1478,13 @@
       (integer? v) (res t :v (if (int-type? t) (wrap v t) v))
       ;; CS174 (b): a decimal constant keeps its digits and exponent (the quantum), :v is its double
       (and (instance? java.math.BigDecimal v) (dec-kinds (:k (unq t)))) (res t :v (.doubleValue ^java.math.BigDecimal v) :dec v)
-      (number? v) (res t :v (if (#{:float :float32} (:k (unq t))) (.doubleValue (Float/valueOf (.floatValue (Double/valueOf (double v))))) (double v)))
+      ;; a long double constant also keeps its exact value (a 64-bit significand), which a double object may not hold
+      (and (instance? java.math.BigDecimal v) (= :ldouble (:k (unq t))))
+      (res t :v (.doubleValue ^java.math.BigDecimal v) :ld (round-ldouble v))
+      ;; the converter writes 0.1L as the double 0.1 when 0.1 is the constant's decimal: its value is that decimal rounded to 64 bits
+      (and (instance? Double v) (= :ldouble (:k (unq t))) (not (Double/isNaN v)) (not (Double/isInfinite v)))
+      (res t :v v :ld (round-ldouble (java.math.BigDecimal. (Double/toString v))))
+      (number? v) (res t :v (round-to-format (double v) (:k (unq t))))
       :else (res t))))
 
 (defn- incomplete-type?
@@ -1905,6 +1950,8 @@
       (when (case ek
               (:float :float32) (not= 0 (.compareTo (java.math.BigDecimal. (double (.floatValue ^Number v))) (java.math.BigDecimal. (biginteger v))))
               (:double :float64) (not= 0 (.compareTo (java.math.BigDecimal. (.doubleValue ^Number v)) (java.math.BigDecimal. (biginteger v))))
+              (:float16 :bf16) (let [r (round-to-format (.doubleValue ^Number v) ek)]
+                                 (or (Double/isInfinite r) (not= 0 (.compareTo (java.math.BigDecimal. r) (java.math.BigDecimal. (biginteger v))))))
               ;; x87's 64-bit significand: the bits from the highest to the lowest set one (review 027's finding 8: 1 << 100 fits)
               :ldouble (let [b (.abs (biginteger v))] (and (pos? (.signum b)) (> (- (.bitLength b) (.getLowestSetBit b)) 64)))
               false)
@@ -1912,7 +1959,11 @@
       (and (instance? Double v) (float-type? pt))
       (let [d (double v)]
         (when (and (not (Double/isNaN d)) (not (Double/isInfinite d))
-                   (case ek (:float :float32) (not= d (double (.floatValue (Double/valueOf d)))) false))
+                   (case ek
+                     (:float :float32 :float16 :bf16) (not= d (round-to-format d ek))
+                     ;; a long double constant (lit-form's :ld, its exact value) a double does not hold
+                     (:double :float64) (boolean (when-let [ld (:ld pr)] (not= 0 (.compareTo (java.math.BigDecimal. d) ^java.math.BigDecimal ld))))
+                     false))
           nr))
       :else nil)))
 
