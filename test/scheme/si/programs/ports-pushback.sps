@@ -46,6 +46,10 @@
             (list (open-string-input-port "a") sp (open-bytevector-input-port #vu8(1)) bp (open-bytevector-input-port #vu8(1) (native-transcoder))
                   (standard-input-port) (standard-output-port) (current-input-port) (current-output-port)
                   (make-custom-binary-input-port "x" (lambda (bv s n) 0) #f #f #f))))
+;; re-review 047, P4: the nonblocking mode is kept
+(let ([p (open-string-input-port "a")])
+  (set-port-nonblocking! p #t) (let* ([a (port-nonblocking? p)]) (show 'nb3 a))
+  (set-port-nonblocking! p #f) (let* ([a (port-nonblocking? p)]) (show 'nb4 a)))
 (let ([name "ports-pushback.tmp"])
   ;; the scratch file is deleted even when a line raises (re-review 044, M5; 047, P1: guard, not dynamic-wind, which si does not unwind on an uncaught raise)
   (define (cleanup) (if (file-exists? name) (delete-file name)))
