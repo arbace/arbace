@@ -7,9 +7,13 @@
 #                        without spending CPU.
 #   limited TMO CMD...   limited_cpu 5xTMO 20xTMO: TMO is the limit the check had as a wall time on a
 #                        quiet host (goi's 10 s, Java's 20 s); the CPU limit is five times it, the wall
-#                        cap four times that. CPU time barely moves with the host's load (REAP9's
-#                        slowdowns of 1.3 to 2.3 times were waiting for a CPU), so a correct program
-#                        does not time out because the host is busy; but a Go program's GC threads
+#                        cap four times that. CPU time barely moves with the host's load for a program
+#                        that computes (REAP9's slowdowns of 1.3 to 2.3 times were waiting for a CPU), so a
+#                        correct program does not time out because the host is busy; it does move for a
+#                        program that makes many traced syscalls under the audit (strace into a FIFO: an
+#                        open-heavy probe went from 0.31 to 1.15 s of system time on a loaded host, review 075
+#                        finding 10), and the wall cap, four times the CPU limit, can fire first on a host
+#                        slowed past that factor (a program at 95 % of its CPU limit, 4.4 times slower); but a Go program's GC threads
 #                        spend CPU in parallel: gcgort.go runs 2.5 s of wall time and 32 s of CPU on the
 #                        64-CPU host, 3.2 times its 10 s, so a CPU limit of twice the wall limit was too
 #                        tight (the first audit of goi-check) and five times holds the programs measured.
@@ -18,8 +22,13 @@
 #                        appended to it, tab-separated (GTS33 (a): bin/gate --clean measures the quiet
 #                        CPU times its limits are to be recorded from)
 #
-# Callers read 124, 137 and 152 (SIGXCPU) as "timeout" and, where the check has one, take the quiet
-# retry (run alone, at the step's end) before they count it. Exported for the subshells and xargs that
+# Callers read 124, 137 and 152 as "timeout" and, where the check has one, take the quiet retry (run alone,
+# at the step's end) before they count it. Of the three, 152 (SIGXCPU) never comes from ulimit -t, which sets
+# the soft and the hard limit equal, so the kernel sends SIGKILL (test/gate/limit-test.bash cpu-kill); it is
+# read for a program's own exit 152. 137 is ambiguous: the CPU limit, the wall cap's -k after a SIGTERM
+# survivor, a self-kill, or the OOM killer (a memory kill is read as a timeout and run again alone). Where the
+# distinction matters, ARBACE_CPU_LOG's user and system seconds tell a CPU kill (about the limit) from the rest
+# (review 075, finding 6). Exported for the subshells and xargs that
 # run actions: `export -f limited limited_cpu` where they are set up.
 
 limited_cpu() {
@@ -89,3 +98,9 @@ keep_first_timeouts() {
 # only the retry's second timeout may decide
 timeout_row_awk='($2 == "error" && ($3 ~ /^timeout/ || $3 ~ /^gc reference: the (original|compile) timed out$/)) || ($2 == "unsupported" && $3 ~ /goi.s check over [0-9]+ s\)$/)'
 timeout_row_ids() { awk -F'\t' "$timeout_row_awk { print \$1 }" "$1"; }
+
+# gc_status_reason STATUS LIMIT: the reason of a gc-level run that did not end 0 (nethttp's gc level, limited
+# LIMIT; review 075, finding 7: a timeout read "gc status 124", a fail like any other)
+gc_status_reason() {
+  case $1 in 124|137|152) echo "gc timed out (limit $2 s)" ;; *) echo "gc status $1" ;; esac
+}

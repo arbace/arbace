@@ -78,4 +78,17 @@ if sel retry-rows; then
   got=$(timeout_row_ids "$w/rows.tsv" 2> "$w/rows.err" | tr '\n' ' ')
   [ "$got" = "a.go c.go d.go e.go " ] && ck "retry-rows: the timeout rows of every path are retried" ok || ck "retry-rows" "got '$got', expected 'a.go c.go d.go e.go '"
 fi
+if sel gc-reason; then
+  # finding 7: nethttp's gc level names a timeout
+  [ "$(gc_status_reason 124 30)" = "gc timed out (limit 30 s)" ] && [ "$(gc_status_reason 137 30)" = "gc timed out (limit 30 s)" ] \
+    && [ "$(gc_status_reason 3 30)" = "gc status 3" ] && ck "gc-reason: a gc timeout is named, another status is its number" ok \
+    || ck "gc-reason" "$(gc_status_reason 124 30) / $(gc_status_reason 3 30)"
+fi
+if sel cpu-kill; then
+  # findings 6 and 10: a CPU-limit kill is 137 (SIGKILL: ulimit -t sets the soft and the hard limit equal, so
+  # the kernel sends no SIGXCPU and 152 never arises), with and without the log; a program's own exit 152 is read alike
+  limited_cpu 1 20 bash -c 'while :; do :; done'; a=$?
+  export ARBACE_CPU_LOG=$w/cpu2.tsv; limited_cpu 1 20 bash -c 'while :; do :; done'; b=$?; unset ARBACE_CPU_LOG
+  [ "$a $b" = "137 137" ] && ck "cpu-kill: the CPU limit kills with 137, never 152" ok || ck "cpu-kill" "$a $b"
+fi
 exit $fail
