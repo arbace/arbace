@@ -105,8 +105,11 @@ for r in "${reducers[@]}"; do
   else ck "$r: early thread line" "got '$(cat "$w/early.out")', expected 'X /work/sub/nx'"; fi
 done
 
-# (3) the system time of a thread that never opens or clones, under the audit's strace line
-if command -v strace > "$w/which" 2>&1 && command -v gcc > "$w/which" 2>&1; then
+# (3) the system time of a thread that never opens or clones, under the audit's strace line; skipped under a tracer
+# (gate-reads-test's strace, bin/gate --audit's): a traced process cannot run strace
+tracer=$(sed -n 's/^TracerPid:[[:space:]]*//p' /proc/self/status)
+if [ "${tracer:-0}" != 0 ]; then echo "skip (3): already traced by pid $tracer"
+elif command -v strace > "$w/which" 2>&1 && command -v gcc > "$w/which" 2>&1; then
   cat > "$w/thr.c" <<'C'
 #include <pthread.h>
 #include <sched.h>
