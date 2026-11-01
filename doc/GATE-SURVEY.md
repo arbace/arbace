@@ -2712,7 +2712,7 @@ executable (report 069 A: the interp and AOT steps run on different hosts over o
 made each re-read them in turn). The AOT essential subset runs `goi.divergences --aot` on the record (069 D). The
 suite's subset check is one way (069 E): a stale reference entry for a source of the subset is caught by the whole run.
 
-## Proposed (2026-11-01, queue 074): GTS130, a judgment-only clean rerun
+## Proposed (2026-11-01, queue 074): GTS150, a judgment-only clean rerun
 
 From the VM's queue task 074. Not decided.
 
@@ -2743,7 +2743,7 @@ base's, has `LOGS-ROOT/<run J's :logs>/gate/out/NAME`, and the consumer's base `
 output's digest (`gate.plan/out-digest`, `out_sha`). Today `run J` is always the consumer's own run (a consumer is rerun
 whenever its producer is), so the two are in the same directory.
 
-- **GTS130 a consumer rerun alone on its producers' clean outputs.** Options:
+- **GTS150 a consumer rerun alone on its producers' clean outputs.** Options:
   - (a) **reuse from the base run's logs, digests checked.** In `select`, the upward step takes a producer P of a selected
     consumer C only when P's output cannot be reused for each of C's `:uses` U of it; it can when P is not selected itself,
     is one step (no parts), passed clean with its audit ok at the base, its material is the base's, C's base material has a
@@ -2783,7 +2783,7 @@ whenever its producer is), so the two are in the same directory.
   reused and from where, and its fallback is today's behaviour. (d) if the user wants "made in this run's clone" to stay the
   default. (c) only if the logs were to be pruned, which GTS103 already rules out for a cited run.
 
-## As built: GTS130 (a) (write-ahead)
+## As built: GTS150 (a) (write-ahead)
 
 Proposed above, not decided; built on the VM's branch `mac/074-clean-judge` (queue 074, light: nothing built or run), to be
 kept or dropped with the decision. `clean.ae` and `bin/gate`'s `--only` code are in no key: nothing is rekeyed.
@@ -2792,7 +2792,7 @@ kept or dropped with the decision. `clean.ae` and `bin/gate`'s `--only` code are
   `plan/C.inputs` has no `uses U` line; `LOGS-ROOT/<P's run's :logs>/gate/out/U` is missing or its digest,
   `gate.plan/out-digest`, is not the line's). The reason is in P's line: `run P a producer of a step rerun, its output not
   reused: REASON`. A producer left out whose outputs selected consumers read is printed in MODE checks as `reuse NAME WHY
-  SRC` (WHY the skip's, then `; its output reused from LOGS/gate/out/NAME, the digests of U,... the base's (GTS130 (a))`;
+  SRC` (WHY the skip's, then `; its output reused from LOGS/gate/out/NAME, the digests of U,... the base's (GTS150 (a))`;
   SRC the directory to copy). The downward step, GTS79 (b), GTS103 and the stale test are unchanged; a reused producer is
   compared as any check left out (its run's logs gone: GTS103's refusal).
 - `bin/gate`'s `only_apply`: a `reuse` line copies SRC whole into the clone's `.tmp/gate/out/NAME` (`cp -a`, then `diff
