@@ -71,3 +71,16 @@ judge_count_javac_forms() {
   local r
   for r in "$1/$2"/*/javac; do [ -d "$r" ] && find "$r" -name '*.ae'; done | grep -c .
 }
+
+# judge_bridges_empty FILE: attr-check's known file admits no bridged read. split.ae admits a read bridged to
+# javac's symbol by name alone, in every corpus and any number of times (:bridges #{read ...}); until it counts them
+# per corpus, as the :facts are, one listed read would hide any number of bridges, so the set must stay empty
+# (GT7's audit 061 #7). Status 1 and a message when it is not.
+judge_bridges_empty() {
+  local b
+  b=$(sed 's/;.*//' "$1" | tr '\n' ' ' | grep -o ':bridges *#{[^}]*}' | head -1)
+  case $b in
+    ''|':bridges #{}'|':bridges #{ }') return 0 ;;
+    *) echo "$1: :bridges is not empty ($b): a listed read admits any number of bridges in every corpus (split.ae counts none); count them per corpus first" >&2; return 1 ;;
+  esac
+}
