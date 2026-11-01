@@ -7,7 +7,7 @@
 "$root/bin/repr-cpp" cxxdump-build > "$t/build.log" 2>&1 || die "cxxdump-build"
 real=$root/.tmp/repr-cpp/cxxdump
 mkdir -p "$t/src"
-for n in min rej slow crash; do cp "$root/test/cpp/selftest/min.cpp" "$t/src/$n.cpp"; done
+for n in min rej slow crash filt st1; do cp "$root/test/cpp/selftest/min.cpp" "$t/src/$n.cpp"; done
 # a cxxdump that rejects rej.cpp as clang does (status 1, a diagnostic), times out on slow.cpp (124) and crashes on crash.cpp (3)
 cat > "$t/cx" <<X
 #!/bin/sh
@@ -16,6 +16,8 @@ case "\$f" in
   rej.cpp) echo "rej.cpp:1:1: error: rejected" >&2; exit 1 ;;
   slow.cpp) exit 124 ;;
   crash.cpp) echo "clang failed (not a rejection)" >&2; exit 3 ;;
+  filt.cpp) echo "cxxdump: filter: bad node" >&2; exit 3 ;;
+  st1.cpp) echo "driver trouble" >&2; exit 1 ;;
 esac
 exec $real "\$@"
 X
@@ -58,4 +60,15 @@ rt w8 "$t/rec.edn" --corpus tc; st=$?
 # a second corpus recorded into the same file keeps the first (g++.dg's record aborted on sorting two entries)
 rt w9 "$t/rec.edn" --corpus tc2 --record-oracle; st=$?
 [ $st = 0 ] && grep -q '"tc"' "$t/rec.edn" && grep -q '"tc2"' "$t/rec.edn" && ok "a second corpus is recorded beside the first" || bad "second corpus: exit $st, $(tail -3 "$t/w9.log")"
+# re-review 032 F3: cxxdump's own filter error (status 3) and a status 1 without clang's diagnostic are not clang's crash: never a kind,
+# so a record naming them as :crash does not hold, and a record of the run leaves them out
+: > "$t/list3.tsv"
+for n in min filt st1; do printf '%s.cpp\tc++23\t-std=c++23\t%s\t-std=c++23\n' "$n" "$t/src/$n.cpp" >> "$t/list3.tsv"; done
+echo '{:corpora {"tc" {:rejected [] :fails {"filt.cpp" :crash "st1.cpp" :crash}}}}' > "$t/own.edn"
+REPR_CPP_CXXDUMP_EXE=$t/cx REPR_CPP_CXXDUMP_CACHE=$t/cache REPR_CPP_ROUNDTRIP_KNOWN=$t/known.edn REPR_CPP_ROUNDTRIP_ORACLE=$t/own.edn \
+  "$root/bin/repr-cpp" roundtrip "$t/list3.tsv" "$t/w10" --no-objects --corpus tc > "$t/w10.log" 2>&1; st=$?
+[ $st = 1 ] && grep -q 'filt.cpp	fail' "$t/w10/results.tsv" && grep -q 'st1.cpp	fail' "$t/w10/results.tsv" && ok "a filter error and a status 1 without a diagnostic fail, though recorded as :crash" || bad "own errors: exit $st, $(vs w10)"
+REPR_CPP_CXXDUMP_EXE=$t/cx REPR_CPP_CXXDUMP_CACHE=$t/cache REPR_CPP_ROUNDTRIP_KNOWN=$t/known.edn REPR_CPP_ROUNDTRIP_ORACLE=$t/own2.edn \
+  "$root/bin/repr-cpp" roundtrip "$t/list3.tsv" "$t/w11" --no-objects --corpus tc --record-oracle > "$t/w11.log" 2>&1
+! grep -q 'filt.cpp\|st1.cpp' "$t/own2.edn" && ok "--record-oracle does not record them" || bad "recorded: $(cat "$t/own2.edn")"
 finish

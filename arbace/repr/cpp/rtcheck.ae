@@ -86,8 +86,12 @@
   (boolean (and (= st "1") err (re-find #"(?m)^[^\s:][^:\n]*:[0-9]+:[0-9]+: (fatal )?error: " err))))
 
 (defn- failure-kind
-  "The kind of a cxxdump status that is not a rejection (CP130 (c)): 124, our timeout; else the oracle's crash or kill."
-  [st] (when (and st (not= st "0") (re-matches #"[0-9]+" st)) (if (= st "124") :timeout :crash)))
+  "The kind of a dump that failed and is not a rejection (CP130 (c); re-review 032's F3): 124, our timeout (:timeout); status 3 with
+  cxxdump saying that clang failed (not a rejection), a crash or a kill of clang (:crash). Nothing else is a kind: cxxdump's own
+  filter errors (also status 3), a status 1 without clang's diagnostic, a kill of cxxdump itself are the check's failures, never recorded."
+  [st ^String err]
+  (cond (= st "124") :timeout
+        (and (= st "3") err (re-find #"clang failed (\(not a rejection\)|on the unit \(clang-failed\))" err)) :crash))
 
 (defn record
   "WORK's oracle rejections and failures as the entry of its corpus (WORK/list.key) in ORACLE-FILE (CP130 (c)): the names rejected by clang's
@@ -99,7 +103,7 @@
         sts (into {} (for [nm names] [nm [(status (str work "/orig/" nm ".status"))
                                           (some-> (bytes-of (str work "/orig/" nm ".err")) (String. "UTF-8"))]]))
         rej (vec (sort (for [[nm [st err]] sts :when (oracle-rejects? st err)] nm)))
-        fails (into (sorted-map) (for [[nm [st err]] sts :when (and (failure-kind st) (not (oracle-rejects? st err)))] [nm (failure-kind st)]))
+        fails (into (sorted-map) (for [[nm [st err]] sts :when (and (failure-kind st err) (not (oracle-rejects? st err)))] [nm (failure-kind st err)]))
         all (if (.exists (java.io.File. oracle-file)) (read-string (slurp oracle-file)) {})
         all (assoc-in all [:corpora ck] {:rejected rej :fails fails})
         out (str ";; The oracle's rejections (clang's own diagnostics) and failures (a dump that failed: :timeout, :crash) of the round trip's corpora, by name\n"
@@ -139,9 +143,10 @@
                                 (nil? o) "no-dump"
                                 :else (str "dump-error-" o))
                      ;; CP130 (c): against the record of this corpus' oracle failures
+                     oerr (some-> (bytes-of (str work "/orig/" nm ".err")) (String. "UTF-8"))
                      read (cond (nil? orec) read
                                 (and (= read "oracle-rejects") (not (contains? rejected-rec nm))) "oracle-rejects-new"
-                                (and (re-matches #"dump-error-[0-9]+" read) (= (get fails-rec nm) (failure-kind o))) "oracle-fails"
+                                (and (re-matches #"dump-error-[0-9]+" read) (some? (failure-kind o oerr)) (= (get fails-rec nm) (failure-kind o oerr))) "oracle-fails"
                                 :else read)
                      ;; the dumps' own failures (review 018's R1): the original's -norm dump, and the print's dump and -norm dump
                      ;; failing for another reason than clang's rejection of the print are the check's failure, never known
