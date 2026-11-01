@@ -398,6 +398,40 @@
                :when (not-any? hit? res)]
            [l (vec res) (vec texts)]))))
 
+;; CS200 (a): the message count as a verdict. test/c/dg-wording.edn lists the families of wordings the checker and gcc spell
+;; differently; a line whose regexes match none of the checker's messages is accepted only when a family explains it.
+
+(defn load-wording
+  "test/c/dg-wording.edn (or `path`): {:families [...] :wrong-reason {FID reason}}; empty when absent."
+  ([] (load-wording "test/c/dg-wording.edn"))
+  ([^String path]
+   (let [f (java.io.File. path)]
+     (if (.exists f) (read-string (slurp f)) {:families [] :wrong-reason {}}))))
+
+(defn- family-explains?
+  "Whether family `fam` explains a line: one of its regexes `res` matches the family's :gcc, one of the messages `texts`
+  its :checker."
+  [fam res texts]
+  (let [g (re-pattern (:gcc fam)) c (re-pattern (:checker fam))]
+    (boolean (and (some #(re-find g (str %)) res) (some #(re-find c (str %)) texts)))))
+
+(defn unexplained-messages
+  "msg-mismatch's lines that no family of `wording` explains: [[line [regex...] [message...]] ...]."
+  [wording dg r]
+  (vec (remove (fn [[_ res texts]] (some #(family-explains? % res texts) (:families wording))) (msg-mismatch dg r))))
+
+(defn message-verdict
+  "For a file whose lines the checker has right: nil when its dg-error regexes match the checker's messages (or a family of
+  `wording` explains the difference), else [:wrong-reason reason] for a file the table lists as wrong-reason (the right line,
+  another reason than gcc's), else [:message detail]."
+  [wording fid dg r]
+  (when-let [u (seq (unexplained-messages wording dg r))]
+    (if-let [why (get (:wrong-reason wording) fid)]
+      [:wrong-reason why]
+      (let [[l res texts] (first u)]
+        [:message (str (count u) " line" (when (> (count u) 1) "s") " whose dg-error regex matches no message of the checker's, e.g. "
+                       l ": expecting " (pr-str (first res)) ", got " (pr-str (first texts)))]))))
+
 ;; ---------------------------------------------------------------------------------------------
 ;; The commands
 
@@ -514,6 +548,7 @@
         ;; the committed record, read before --record rewrites it
         committed (let [f (java.io.File. "test/c/check-dg-linux-amd64.edn")] (if (.exists f) (read-string (slurp f)) []))
         known (let [f (java.io.File. "test/c/dg-known.edn")] (if (.exists f) (read-string (slurp f)) {}))
+        wording (load-wording)
         rows
         (vec
          (for [id ids
@@ -524,6 +559,10 @@
            (let [r (get rd nm)
                  g (get gc nm)
                  v (if (:unsupported d) [:unsupported] (verdict d r))
+                 ;; CS200 (a): a pass whose expected messages the checker's do not match is no pass
+                 v (if-let [mv (and (= [:pass] v) (seq (:msgs d)) r (message-verdict wording (str id "/" nm) d r))]
+                     [:fail (first mv) (second mv)]
+                     v)
                  ;; the directives' own check: gcc's errors on the file against what they expect
                  ga (:agrees g)
                  ;; unsupported on the host (a dg-do target selector that does not hold): its own result, not a pass
@@ -571,8 +610,12 @@
           with-msgs (count (filter (fn [[fid r]] (and (= :pass r) (seq (:msgs (get dgm fid))))) rows))
           fam (fn [re] (let [w (str/split (str/replace (str re) #"[^A-Za-z0-9_ '#-]+" " ") #"\s+")] (str/join " " (take 3 (remove str/blank? w)))))
           fams (frequencies (for [[_ m] mm [_ res _] m r res] (fam r)))]
-      (println (format "dg-error messages: %d of %d passes with expected errors have %d lines whose regex matches none of the checker's messages"
+      ;; CS200 (a): the passes left here are the ones whose differing wordings the table explains; the others fail (message, wrong-reason)
+      (println (format "dg-error messages: %d of %d passes with expected errors have %d lines whose regex matches none of the checker's messages, all explained by test/c/dg-wording.edn's families"
                        (count mm) with-msgs (reduce + (map (comp count val) mm))))
+      (let [wr (filter #(and (= :fail (second %)) (str/starts-with? (str (nth % 2)) "wrong-reason")) rows)
+            mf (filter #(and (= :fail (second %)) (str/starts-with? (str (nth % 2)) "message")) rows)]
+        (println (format "  wrong-reason files %d, unexplained message files %d" (count wr) (count mf))))
       (doseq [id ids :let [n (count (filter #(.startsWith ^String % (str id "/")) (keys mm)))] :when (pos? n)]
         (println (format "  %-16s %3d files" id n)))
       (doseq [[f n] (take 12 (sort-by (comp - val) fams))] (println (format "  family %-40s %3d lines" (str "\"" f "\"") n)))
