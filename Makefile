@@ -136,7 +136,7 @@ oracle: ## the executable against the frozen JVM's results (bin/oracle check)
 
 diffcheck: ## each language's two halves on the same forms: evaluated against compiled, interpreted against j2g (bin/diffcheck)
 	bin/diffcheck
-generated-check: ## the generated files as their generators write them: arbace/lang/go's variants (CompilerNodes.ae, CompilerAOTFn.ae) and repr/go's Go forms in go/arbace/repr/go (the dumper, gc's syntax renamed) (bin/generated-check; --update rewrites them)
+generated-check: ## the generated files as their generators write them: arbace/lang/go's variants (CompilerNodes.ae, CompilerAOTFn.ae) and repr/go's Go forms in go/arbace/repr/go (the dumper, gc's syntax renamed) and goi's node factories (go/arbace/goi/ops.ae, registry.ae) and jrt's module table (bin/generated-check; --update rewrites them)
 	bin/generated-check
 
 ## Vendored trees and recorded data, converted or recorded afresh and compared byte for byte
