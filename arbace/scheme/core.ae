@@ -1,0 +1,159 @@
+(ns arbace.scheme.core
+  "The bootstrap host's evaluator of core forms (doc/scheme/SPEC.md, 5; doc/scheme/SCHEME-SURVEY.md, \"As built:
+  SM4\"): a core form, as a Scheme value (arbace.scheme.rt's pairs), translated into a Clojure form and
+  evaluated by Arbace. This is psyntax's eval-core while it expands; si (SM5) is the evaluator of programs.
+  The core forms: (quote d), a symbol (a lexical variable, else a location of the store), (primitive x),
+  (if t c [a]), (begin e ...), (set! x e), (define x e), (lambda F e ...), (case-lambda (F e ...) ...),
+  (letrec ((x e) ...) e ...), (letrec* ...), and applications."
+  (:require [arbace.scheme.rt :as rt]))
+
+(def ^:private max-fixed 19)
+
+(defn- formals [f]
+  "[fixed-symbols rest-symbol-or-nil] of a formals value."
+  (loop [acc [] f f]
+    (cond (rt/pair? f) (recur (conj acc (rt/car f)) (rt/cdr f))
+          (rt/null? f) [acc nil]
+          :else [acc f])))
+
+(defn- assigned
+  "The symbols a core form assigns with set!."
+  [x]
+  (let [acc (java.util.HashSet.)]
+    (letfn [(walk [x]
+              (when (rt/pair? x)
+                (let [h (rt/car x)]
+                  (cond
+                    (= h 'quote) nil
+                    (= h 'set!) (do (.add acc (rt/car (rt/cdr x))) (walk (rt/car (rt/cdr (rt/cdr x)))))
+                    :else (loop [l x] (when (rt/pair? l) (walk (rt/car l)) (recur (rt/cdr l))))))))]
+      (walk x))
+    acc))
+
+(def ^:private counter (atom 0))
+(defn- local [] (symbol (str "s" (swap! counter inc))))
+
+(defn unknown-primitive [x] (throw (ex-info (str "no primitive " x " in the bootstrap host") {:primitive x})))
+
+(declare tr)
+(def primitives (atom rt/primitives))
+
+(defn- tr-body [body env asg]
+  (let [es (map #(tr % env asg) (rt/list->vec body))]
+    (if (= 1 (count es)) (first es) (cons 'do es))))
+
+(defn- clause
+  "[arity-spec clojure-params body] of one case-lambda clause."
+  [f body env asg]
+  (let [[fixed rest] (formals f)
+        params (mapv (fn [_] (local)) fixed)
+        rl (when rest (local))
+        boxes (java.util.ArrayList.)
+        env (reduce (fn [env [s l]]
+                      (if (.contains ^java.util.HashSet asg s)
+                        (let [b (local)] (.add boxes [b (list `rt/box l)]) (assoc env s {:sym b :box true}))
+                        (assoc env s {:sym l})))
+                    env (map vector (concat fixed (when rest [rest])) (concat params (when rest [rl]))))
+        e (tr-body body env asg)
+        e (if (seq boxes) (list 'let (vec (mapcat identity boxes)) e) e)]
+    {:n (count fixed) :rest (boolean rest) :params params :rl rl :body e}))
+
+(defn- clojure-fn [cs]
+  (let [ok (and (every? #(<= (:n %) max-fixed) cs)
+                (<= (count (filter :rest cs)) 1)
+                (apply distinct? (map :n cs))
+                (let [r (first (filter :rest cs))]
+                  (or (nil? r) (every? #(< (:n %) (:n r)) (remove :rest cs))))
+                ;; first match wins in Scheme: a fixed clause after the rest clause that the rest clause accepts
+                (let [i (first (keep-indexed (fn [i c] (when (:rest c) i)) cs))]
+                  (or (nil? i) (every? #(< (:n %) (:n (nth cs i))) (drop (inc i) cs)))))]
+    (if ok
+      (cons 'fn (for [{:keys [n rest params rl body]} cs]
+                  (if rest
+                    (list (conj params '& rl) (list 'let [rl (list `rt/seq->list rl)] body))
+                    (list params body))))
+      (let [args (local) n* (local)]
+        (list 'fn ['& args]
+              (list 'let [n* (list 'count args)]
+                    (concat
+                      (list 'cond)
+                      (mapcat (fn [{:keys [n rest params rl body] :as c}]
+                                (do
+                                  [(if rest (list '>= n* (:n c)) (list '== n* (:n c)))
+                                   (list 'let (vec (concat (mapcat (fn [p i] [p (list 'nth args i)]) params (range))
+                                                           (when rest [rl (list `rt/seq->list (list 'drop (:n c) args))])))
+                                         body)]))
+                              cs)
+                      [:else (list `rt/error* ''&assertion false "incorrect argument count" [])])))))))
+
+(defn- tr-lambda [clauses env asg]
+  (let [cs (mapv (fn [c] (clause (rt/car c) (rt/cdr c) env asg)) clauses)
+        f (clojure-fn cs)]
+    f))
+
+(defn- tagged [form tag]
+  (let [l (local)] (list 'let [(with-meta l {:tag tag}) form] l)))
+
+(def ^:private inline
+  "Primitives the translator writes in place, by arity."
+  {'car {1 (fn [a] (list '.car (tagged a 'arbace.scheme.rt.IPair)))}
+   'cdr {1 (fn [a] (list '.cdr (tagged a 'arbace.scheme.rt.IPair)))}
+   'cons {2 (fn [a b] (list 'arbace.scheme.rt.Pair. a b))}
+   'pair? {1 (fn [a] (list 'instance? 'arbace.scheme.rt.Pair a))}
+   'null? {1 (fn [a] (list 'identical? a `rt/NULL))}
+   'not {1 (fn [a] (list 'identical? a false))}
+   'eq? {2 (fn [a b] (list `rt/eq? a b))}
+   'symbol? {1 (fn [a] (list 'symbol? a))}
+   'void {0 (fn [] `rt/VOID)}
+   'vector? {1 (fn [a] (list 'instance? 'java.util.ArrayList a))}
+   'vector-ref {2 (fn [v k] (list '.get (tagged v 'java.util.ArrayList) (list 'int k)))}
+   'procedure? {1 (fn [a] (list 'fn? a))}})
+
+(defn tr [x env asg]
+  (cond
+    (symbol? x) (if-let [{:keys [sym box]} (env x)]
+                  (if box (list `rt/unbox sym) sym)
+                  (list `rt/gref (list 'quote (rt/global-box x)) (list 'quote x)))
+    (rt/pair? x)
+    (let [h (rt/car x) args (rt/list->vec (rt/cdr x))]
+      (cond
+        (= h 'quote) (let [v (first args)] (if (or (number? v) (string? v) (instance? Boolean v) (char? v)) v (list 'quote v)))
+        (= h 'primitive) (let [p (first args) loc (@rt/primitive-locations p)]
+                           (if (rt/truthy? loc)
+                             (list `rt/gref (list 'quote (rt/global-box loc)) (list 'quote loc))
+                             (if-let [f (@primitives p)] (list 'quote f) (list `unknown-primitive (list 'quote p)))))
+        (= h 'if) (list 'if (list `rt/truthy? (tr (nth args 0) env asg)) (tr (nth args 1) env asg)
+                        (if (> (count args) 2) (tr (nth args 2) env asg) `rt/VOID))
+        (= h 'begin) (cons 'do (map #(tr % env asg) args))
+        (or (= h 'set!) (= h 'define))
+        (let [s (nth args 0) v (tr (nth args 1) env asg)]
+          (if-let [{:keys [sym box]} (and (= h 'set!) (env s))]
+            (if box (list `rt/box-set! sym v) (throw (ex-info "set! of an unboxed local" {:sym s})))
+            (list `rt/gset! (list 'quote (rt/global-box s)) v)))
+        (= h 'lambda) (tr-lambda [(rt/cdr x)] env asg)
+        (= h 'case-lambda) (tr-lambda args env asg)
+        (or (= h 'letrec) (= h 'letrec*))
+        (let [bs (rt/list->vec (first args))
+              syms (map rt/car bs)
+              ls (map (fn [_] (local)) syms)
+              env (reduce (fn [env [s l]] (assoc env s {:sym l :box true})) env (map vector syms ls))]
+          (list 'let (vec (mapcat (fn [l] [l (list `rt/box `rt/UNBOUND)]) ls))
+                (concat (list 'do)
+                        (map (fn [l b] (list `rt/box-set! l (tr (rt/car (rt/cdr b)) env asg))) ls bs)
+                        [(tr-body (rt/cdr (rt/cdr x)) env asg)])))
+        :else (let [as (map #(tr % env asg) args)
+                    p (when (and (rt/pair? h) (= (rt/car h) 'primitive)) (rt/car (rt/cdr h)))
+                    f (when (and p (not (rt/truthy? (@rt/primitive-locations p)))) (get-in inline [p (count as)]))]
+                (if f (apply f as) (cons (tr h env asg) as)))))
+    (or (number? x) (string? x) (instance? Boolean x) (char? x)) x
+    :else (list 'quote x)))
+
+(defn translate [x] (tr x {} (assigned x)))
+
+(defn eval-core
+  "Evaluates the core form `x` (a value)."
+  [x]
+  (let [f (translate x)]
+    ((eval (list 'fn [] f)))))
+
+(swap! primitives assoc 'eval-core eval-core)

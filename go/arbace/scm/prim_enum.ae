@@ -1,0 +1,182 @@
+;; si's runtime: primitives (prim_enum): (rnrs enums), and the file-options universe (rnrs files) shares.
+;; An enum set is a set of symbols over an enumeration type (the universe, an ordered list of symbols);
+;; sets of one type share its *EnumType. Chez writes every enum set #<enum-set>.
+(in-ns 'go.arbace.scm)
+
+(go/file "prim_enum.go")
+
+(go/type EnumType "EnumType is an enumeration type: the universe's symbols in order.\n"
+  (struct ^{:tag (slice (* Symbol))} Syms))
+
+(go/type EnumSet "EnumSet is a set of symbols of the type T; M[i] says whether T.Syms[i] is a member.\n"
+  (struct ^{:tag (* EnumType)} T ^{:tag (slice bool)} M))
+
+(go/method String ^string [^{:tag (* EnumSet)} e] "#<enum-set>")
+
+(go/method Index "Index is the position of s in the universe, or -1.\n" ^int [^{:tag (* EnumType)} t ^{:tag (* Symbol)} s]
+  (range [i x (.-Syms t)]
+    (when (== x s)
+      (return i)))
+  -1)
+
+(go/method Has "Has says whether the symbol named name is a member.\n" ^bool [^{:tag (* EnumSet)} e ^string name]
+  (range [i x (.-Syms (.-T e))]
+    (when (and (== (.-Name x) name) (aget (.-M e) i))
+      (return true)))
+  false)
+
+(go/func newEnumSet ^{:tag (* EnumSet)} [^{:tag (* EnumType)} t]
+  (addr (lit EnumSet :T t :M (make (slice bool) (len (.-Syms t))))))
+
+(go/func makeEnumType "makeEnumType is the type over the symbols xs (duplicates dropped, first kept).\n"
+  ^{:tag (* EnumType)} [^{:tag (slice any)} xs]
+  (let [t (addr (lit EnumType))]
+    (range [_ x xs]
+      (let [s (assert (* Symbol) x)]
+        (when (< (.Index t s) 0)
+          (set! (.-Syms t) (append (.-Syms t) s)))))
+    t))
+
+(go/func makeFileOptionsType ^{:tag (* EnumType)} []
+  (let [names (lit (slice string) "no-create" "no-fail" "no-truncate" "compressed" "replace" "exclusive" "append"
+                   "perm-set-user-id" "perm-set-group-id" "perm-sticky" "perm-no-user-read" "perm-no-user-write"
+                   "perm-user-execute" "perm-no-group-read" "perm-no-group-write" "perm-group-execute"
+                   "perm-no-other-read" "perm-no-other-write" "perm-other-execute")
+        t (addr (lit EnumType))]
+    (range [_ n names]
+      (set! (.-Syms t) (append (.-Syms t) (Intern n))))
+    t))
+
+(go/var ^{:tag (* EnumType) :doc "fileOptionsType is Chez's file-options universe.\n"} fileOptionsType (makeFileOptionsType))
+
+(go/func ArgEnumSet ^{:tag (* EnumSet)} [^string who ^any x]
+  (let [(values e ok) (assert (* EnumSet) x)]
+    (when (not ok)
+      (AssertionViolation who "~s is not an enumeration" x))
+    e))
+
+(go/func symbolList "symbolList is the symbols of x, which must be a proper list of symbols.\n"
+  ^{:tag (slice any)} [^string who ^any x]
+  (let [(values xs ok) (ListSlice x)]
+    (when (not ok)
+      (AssertionViolation who "~s is not a list of symbols" x))
+    (range [_ y xs]
+      (let [(values _ ok2) (assert (* Symbol) y)]
+        (when (not ok2)
+          (AssertionViolation who "~s is not a list of symbols" x))))
+    xs))
+
+(go/func enumConstruct "enumConstruct is the set over t of the symbols of list l.\n"
+  ^{:tag (* EnumSet)} [^string who ^{:tag (* EnumType)} t ^any l]
+  (let [xs (symbolList who l)
+        e (newEnumSet t)]
+    (range [_ y xs]
+      (let [s (assert (* Symbol) y)
+            i (.Index t s)]
+        (when (< i 0)
+          (AssertionViolation who "universe does not include specified symbol ~s" s))
+        (aset (.-M e) i true)))
+    e))
+
+(go/func enumList ^any [^{:tag (* EnumSet)} e]
+  (let [^{:tag (slice any)} out nil]
+    (range [i s (.-Syms (.-T e))]
+      (when (aget (.-M e) i)
+        (set! out (append out s))))
+    (ListTail out Null)))
+
+(go/func sameType "sameType checks that a and b are of one enumeration type.\n"
+  [^string who ^{:tag (* EnumSet)} a ^{:tag (* EnumSet)} b]
+  (when (!= (.-T a) (.-T b))
+    (AssertionViolation who "~s and ~s have different enumeration types" a b)))
+
+;; subset: every member of a is in b (b's universe is searched by symbol).
+(go/func enumSubset ^bool [^{:tag (* EnumSet)} a ^{:tag (* EnumSet)} b]
+  (let [same (== (.-T a) (.-T b))]
+    ;; R6RS: a's universe must be a subset of b's universe
+    (when (not same)
+      (range [_ s (.-Syms (.-T a))]
+        (when (< (.Index (.-T b) s) 0)
+          (return false))))
+    (range [i s (.-Syms (.-T a))]
+      (when (aget (.-M a) i)
+        (let [j (.Index (.-T b) s)]
+          (when (or (< j 0) (not (aget (.-M b) j)))
+            (return false)))))
+    true))
+
+(go/func enumBinary ^any [^string who ^any x ^any y ^{:tag (func [bool bool] [bool])} f]
+  (let [a (ArgEnumSet who x)
+        b (ArgEnumSet who y)]
+    (sameType who a b)
+    (let [r (newEnumSet (.-T a))]
+      (range [i _ (.-M a)]
+        (aset (.-M r) i (f (aget (.-M a) i) (aget (.-M b) i))))
+      r)))
+
+(go/func init []
+  (Def1 "make-enumeration" (fn ^any [^any l]
+    (let [xs (symbolList "make-enumeration" l)
+          t (makeEnumType xs)
+          e (newEnumSet t)]
+      (range [i _ (.-M e)]
+        (aset (.-M e) i true))
+      e)))
+  (Def1 "enum-set-universe" (fn ^any [^any x]
+    (let [a (ArgEnumSet "enum-set-universe" x)
+          e (newEnumSet (.-T a))]
+      (range [i _ (.-M e)]
+        (aset (.-M e) i true))
+      e)))
+  (Def1 "enum-set-indexer" (fn ^any [^any x]
+    (let [a (ArgEnumSet "enum-set-indexer" x)
+          t (.-T a)]
+      (condProc "enum-set-indexer" (fn ^any [^any v]
+        (let [s (ArgSymbol "enum-set-indexer" v)
+              i (.Index t s)]
+          (when (< i 0)
+            (return false))
+          (conv int64 i)))))))
+  (Def1 "enum-set-constructor" (fn ^any [^any x]
+    (let [a (ArgEnumSet "enum-set-constructor" x)
+          t (.-T a)]
+      (condProc "enum-set-constructor" (fn ^any [^any l]
+        (enumConstruct "enum-set-constructor" t l))))))
+  (Def1 "enum-set->list" (fn ^any [^any x] (enumList (ArgEnumSet "enum-set->list" x))))
+  (Def2 "enum-set-member?" (fn ^any [^any x ^any y]
+    (let [e (ArgEnumSet "enum-set-member?" y)
+          s (ArgSymbol "enum-set-member?" x)
+          i (.Index (.-T e) s)]
+      (and (>= i 0) (aget (.-M e) i)))))
+  (Def2 "enum-set-subset?" (fn ^any [^any x ^any y]
+    (let [a (ArgEnumSet "enum-set-subset?" x)
+          b (ArgEnumSet "enum-set-subset?" y)]
+      (enumSubset a b))))
+  (Def2 "enum-set=?" (fn ^any [^any x ^any y]
+    (let [a (ArgEnumSet "enum-set=?" x)
+          b (ArgEnumSet "enum-set=?" y)]
+      (and (enumSubset a b) (enumSubset b a)))))
+  (Def2 "enum-set-union" (fn ^any [^any x ^any y]
+    (enumBinary "enum-set-union" x y (fn ^bool [^bool p ^bool q] (or p q)))))
+  (Def2 "enum-set-intersection" (fn ^any [^any x ^any y]
+    (enumBinary "enum-set-intersection" x y (fn ^bool [^bool p ^bool q] (and p q)))))
+  (Def2 "enum-set-difference" (fn ^any [^any x ^any y]
+    (enumBinary "enum-set-difference" x y (fn ^bool [^bool p ^bool q] (and p (not q))))))
+  (Def1 "enum-set-complement" (fn ^any [^any x]
+    (let [a (ArgEnumSet "enum-set-complement" x)
+          r (newEnumSet (.-T a))]
+      (range [i m (.-M a)]
+        (aset (.-M r) i (not m)))
+      r)))
+  (Def2 "enum-set-projection" (fn ^any [^any x ^any y]
+    (let [a (ArgEnumSet "enum-set-projection" x)
+          b (ArgEnumSet "enum-set-projection" y)
+          r (newEnumSet (.-T b))]
+      (range [i s (.-Syms (.-T a))]
+        (when (aget (.-M a) i)
+          (let [j (.Index (.-T b) s)]
+            (when (>= j 0)
+              (aset (.-M r) j true)))))
+      r)))
+  (Def1 "enum-set?" (fn ^any [^any x]
+    (let [(values _ ok) (assert (* EnumSet) x)] ok))))

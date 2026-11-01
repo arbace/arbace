@@ -1,0 +1,493 @@
+(ns arbace.scheme.rt
+  "The bootstrap host's Scheme values and primitives (doc/scheme/SCHEME-SURVEY.md, \"As built: SM4\"): what the
+  vendored psyntax (scheme/psyntax/) and the transformers it evaluates need at expansion time, on Arbace,
+  evaluated on the tools' host. Not si (SM5, go/arbace/scm): pairs are mutable cells, the empty list, the
+  unspecified value and the end of file are singletons, vectors are ArrayLists, strings Java strings (immutable),
+  symbols Clojure symbols without a namespace (a gensym has the namespace scm.gensym), procedures Clojure
+  functions, records and conditions R6RS's (the procedural layer), call/cc escapes only, and no call is a proper
+  tail call."
+  (:refer-clojure :exclude [cons gensym string? char? record? force])
+  (:require [arbace.string :as str]
+            [arbace.repr.scheme.forms :as sf]
+            [arbace.repr.scheme.print :as sp]))
+
+(definterface IPair (car []) (cdr []) (setCar [v]) (setCdr [v]))
+(deftype Pair [^:unsynchronized-mutable a ^:unsynchronized-mutable d]
+  IPair (car [_] a) (cdr [_] d) (setCar [_ v] (set! a v) v) (setCdr [_ v] (set! d v) v))
+
+(definterface IBox (get []) (put [v]))
+(deftype Box [^:unsynchronized-mutable v] IBox (get [_] v) (put [_ x] (set! v x) x))
+
+(deftype Singleton [^String nm] Object (toString [_] nm))
+(def NULL (Singleton. "()"))
+(def VOID (Singleton. "#<void>"))
+(def EOF (Singleton. "#!eof"))
+(def UNBOUND (Singleton. "#<unbound>"))
+
+(deftype MV [vals])
+(deftype Bytes [bs])
+(deftype SChar [cp])
+(deftype SComplex [re im])
+(deftype SString [^StringBuilder sb])
+
+(definterface IRtd (rname []) (rparent []) (ruid []) (rsealed []) (ropaque []) (rfields []) (rall []))
+(deftype Rtd [nm parent uid sealed opaque fields all]
+  IRtd (rname [_] nm) (rparent [_] parent) (ruid [_] uid) (rsealed [_] sealed) (ropaque [_] opaque)
+  (rfields [_] fields) (rall [_] all))
+(definterface IRec (rtd []) (fs []))
+(deftype Rec [rtd fs] IRec (rtd [_] rtd) (fs [_] fs))
+(deftype Rcd [rtd parent protocol])
+(deftype Compound [comps])
+(deftype OutPort [^StringBuilder sb])
+
+(deftype Promise [state])
+(defn make-promise [thunk] (Promise. (atom [false thunk])))
+(defn force [p]
+  (if (instance? Promise p)
+    (let [st (.-state ^Promise p) [done v] @st]
+      (if done v (let [r (v) [done2 v2] @st] (if done2 v2 (do (reset! st [true r]) r)))))
+    p))
+
+(defn pair? [x] (instance? Pair x))
+(defn null? [x] (identical? x NULL))
+(defn car [^IPair p] (if (instance? Pair p) (.car p) (throw (ex-info (str "car: not a pair") {}))))
+(defn cdr [^IPair p] (if (instance? Pair p) (.cdr p) (throw (ex-info (str "cdr: not a pair") {}))))
+(defn cons [a d] (Pair. a d))
+(defn box [v] (Box. v))
+(defn unbox [^IBox b] (.get b))
+(defn box-set! [^IBox b v] (.put b v) VOID)
+
+;;; Symbols are interned, so eq? on symbols is identical?.
+(def ^:private symbols (java.util.concurrent.ConcurrentHashMap.))
+(defn sym [^String n]
+  (or (.get ^java.util.concurrent.ConcurrentHashMap symbols n)
+      (let [s (symbol nil n)] (or (.putIfAbsent ^java.util.concurrent.ConcurrentHashMap symbols n s) s))))
+
+(defn gensym? [x] (and (symbol? x) (= (namespace x) "scm.gensym")))
+(def ^:private gensym-n (atom 0))
+(defn gensym
+  ([] (gensym "g"))
+  ([x] (symbol "scm.gensym" (str (if (symbol? x) (name x) (str x)) "%" (swap! gensym-n inc)))))
+
+(defn seq->list
+  ([s] (seq->list s NULL))
+  ([s tail] (reduce (fn [acc x] (Pair. x acc)) tail (reverse s))))
+(defn list->vec
+  "The elements of the proper list `l` as a Clojure vector."
+  [l]
+  (loop [acc (transient []) l l]
+    (if (instance? Pair l) (recur (conj! acc (car l)) (cdr l))
+        (if (identical? l NULL) (persistent! acc) (throw (ex-info "not a proper list" {}))))))
+(defn slist [& xs] (seq->list xs))
+
+(defn scheme-vector [xs] (java.util.ArrayList. ^java.util.Collection (vec xs)))
+(defn svector? [x] (instance? java.util.ArrayList x))
+(defn string? [x] (or (instance? String x) (instance? SString x)))
+(defn sstr ^String [x] (if (instance? SString x) (str (.-sb ^SString x)) x))
+(defn char? [x] (or (instance? Character x) (instance? SChar x)))
+(defn char-code [x] (if (instance? SChar x) (.-cp ^SChar x) (int (char x))))
+(defn code-char [n] (if (< n 0x10000) (char n) (SChar. n)))
+(defn procedure? [x] (fn? x))
+(defn truthy? [x] (not (identical? x false)))
+
+;;; Forms (doc/scheme/SPEC.md) to values and back.
+
+(defn form->value [f]
+  (cond
+    (seq? f) (let [h (first f)]
+               (cond
+                 (empty? f) NULL
+                 (= h sf/dot-tag) (seq->list (map form->value (second f)) (form->value (nth f 2)))
+                 (= h sf/sym-tag) (sym (second f))
+                 (= h sf/char-tag) (code-char (second f))
+                 (= h sf/flonum-tag) (case (second f) "+inf.0" Double/POSITIVE_INFINITY "-inf.0" Double/NEGATIVE_INFINITY Double/NaN)
+                 (= h sf/bytevector-tag) (Bytes. (vec (rest f)))
+                 (= h sf/complex-tag) (SComplex. (form->value (nth f 1)) (form->value (nth f 2)))
+                 :else (seq->list (map form->value f))))
+    (vector? f) (scheme-vector (map form->value f))
+    (symbol? f) (sym (name f))
+    :else f))
+
+(def ^:dynamic *gensym-name*
+  "How a gensym is spelled when a value becomes a form (arbace.scheme.expand renames them)."
+  (fn [g] (sf/sym (name g))))
+
+(defn value->form [v]
+  (cond
+    (instance? Pair v) (loop [acc [] x v]
+                         (cond (instance? Pair x) (recur (conj acc (value->form (car x))) (cdr x))
+                               (identical? x NULL) (apply list acc)
+                               :else (list sf/dot-tag (apply list acc) (value->form x))))
+    (identical? v NULL) ()
+    (svector? v) (mapv value->form v)
+    (gensym? v) (*gensym-name* v)
+    (symbol? v) (sf/sym (name v))
+    (instance? SChar v) (sf/char-form (.-cp ^SChar v))
+    (instance? SString v) (sstr v)
+    (instance? Bytes v) (apply list sf/bytevector-tag (.-bs ^Bytes v))
+    (instance? SComplex v) (list sf/complex-tag (value->form (.-re ^SComplex v)) (value->form (.-im ^SComplex v)))
+    (instance? Double v) (sf/real-form v)
+    (or (number? v) (string? v) (instance? Character v) (instance? Boolean v)) v
+    (identical? v VOID) (list 'scm/void)
+    (identical? v EOF) (list 'scm/directive "eof")
+    :else (list 'scm/opaque (str v))))
+
+;;; Equivalence.
+
+(defn- fixnum? [x] (or (instance? Long x) (instance? Integer x)))
+(defn eq? [a b]
+  (or (identical? a b)
+      (and (instance? Long a) (instance? Long b) (== (long a) (long b)))
+      (and (instance? Character a) (instance? Character b) (= a b))))
+(defn eqv? [a b]
+  (or (eq? a b)
+      (and (number? a) (number? b) (= (instance? Double a) (instance? Double b))
+           (if (instance? Double a) (= (Double/doubleToLongBits a) (Double/doubleToLongBits b)) (== a b)))
+      (and (instance? SChar a) (instance? SChar b) (== (.-cp ^SChar a) (.-cp ^SChar b)))))
+(defn equal? [a b]
+  (cond
+    (eqv? a b) true
+    (and (instance? Pair a) (instance? Pair b)) (and (equal? (car a) (car b)) (equal? (cdr a) (cdr b)))
+    (and (svector? a) (svector? b)) (and (= (count a) (count b)) (every? true? (map equal? a b)))
+    (and (string? a) (string? b)) (= (sstr a) (sstr b))
+    (and (instance? Bytes a) (instance? Bytes b)) (= (.-bs ^Bytes a) (.-bs ^Bytes b))
+    :else false))
+
+;;; Records (R6RS's procedural layer) and conditions.
+
+(defn rtd? [x] (instance? Rtd x))
+(defn record? [x] (instance? Rec x))
+
+(defn make-record-type-descriptor [nm parent uid sealed opaque fields]
+  (let [own (mapv (fn [f] (let [[m n] (list->vec f)] [(= m 'mutable) n])) fields)
+        all (into (if (rtd? parent) (.rall ^IRtd parent) []) own)]
+    (Rtd. nm (if (rtd? parent) parent false) uid (truthy? sealed) (truthy? opaque) own all)))
+
+(defn rtd-ancestor? [^IRtd rtd ^IRtd want]
+  (loop [r rtd] (cond (identical? r want) true (rtd? r) (recur (.rparent ^IRtd r)) :else false)))
+
+(defn make-record-constructor-descriptor [rtd parent protocol] (Rcd. rtd parent protocol))
+
+(defn- nfields [^IRtd rtd] (count (.rall rtd)))
+(defn- own-count [^IRtd rtd] (count (.rfields rtd)))
+
+(declare level-constructor)
+(defn- level-maker
+  "The procedure a protocol of the level `rcd` receives, for a record of type `leaf` whose fields below this
+  level are `below` (a vector, the subtypes' own fields)."
+  [leaf ^Rcd rcd below]
+  (let [rtd (.-rtd rcd) prcd (.-parent rcd)
+        parent-rtd (.rparent ^IRtd rtd)]
+    (if (rtd? parent-rtd)
+      (fn [& pargs]
+        (fn [& own] (apply (level-constructor leaf (or (when (instance? Rcd prcd) prcd) (Rcd. parent-rtd false false)) (into (vec own) below)) pargs)))
+      (fn [& own] (Rec. leaf (java.util.ArrayList. ^java.util.Collection (into (vec own) below)))))))
+
+(defn level-constructor [leaf ^Rcd rcd below]
+  (let [rtd (.-rtd rcd) proto (.-protocol rcd) p (level-maker leaf rcd below)]
+    (if (fn? proto)
+      (proto p)
+      (let [prtd (.rparent ^IRtd rtd)]
+        (if (rtd? prtd)
+          (let [np (nfields prtd)]
+            (fn [& args] (apply (apply p (take np args)) (drop np args))))
+          p)))))
+
+(defn record-constructor [^Rcd rcd] (level-constructor (.-rtd rcd) rcd []))
+(defn record-predicate [rtd] (fn [x] (and (record? x) (rtd-ancestor? (.rtd ^IRec x) rtd))))
+(defn- field-index [^IRtd rtd k] (+ (- (nfields rtd) (own-count rtd)) k))
+(defn record-accessor [rtd k]
+  (let [i (field-index rtd k)]
+    (fn [x] (if (and (record? x) (rtd-ancestor? (.rtd ^IRec x) rtd))
+              (.get ^java.util.ArrayList (.fs ^IRec x) (int i))
+              (throw (ex-info (str "not a record of type " (.rname ^IRtd rtd)) {}))))))
+(defn record-mutator [rtd k]
+  (let [i (field-index rtd k)]
+    (fn [x v] (.set ^java.util.ArrayList (.fs ^IRec x) (int i) v) VOID)))
+
+(defn- condition-type [nm parent & fields]
+  (make-record-type-descriptor nm parent false false false
+    (scheme-vector (map #(slist 'immutable %) fields))))
+
+(def condition-types
+  (let [c (condition-type '&condition false)
+        serious (condition-type '&serious c)
+        violation (condition-type '&violation serious)
+        err (condition-type '&error serious)
+        io (condition-type '&i/o err)]
+    {'&condition c '&message (condition-type '&message c 'message) '&warning (condition-type '&warning c)
+     '&serious serious '&error err '&violation violation
+     '&assertion (condition-type '&assertion violation) '&irritants (condition-type '&irritants c 'irritants)
+     '&who (condition-type '&who c 'who) '&non-continuable (condition-type '&non-continuable violation)
+     '&implementation-restriction (condition-type '&implementation-restriction violation)
+     '&lexical (condition-type '&lexical violation) '&syntax (condition-type '&syntax violation 'form 'subform)
+     '&undefined (condition-type '&undefined violation) '&i/o io}))
+
+(defn- ctor [t] (record-constructor (Rcd. (condition-types t) false false)))
+(defn- simple-conditions* [c]
+  (cond (instance? Compound c) (.-comps ^Compound c) (record? c) [c] :else []))
+(defn condition [& cs] (Compound. (vec (mapcat simple-conditions* cs))))
+(defn condition? [x] (or (instance? Compound x) (and (record? x) (rtd-ancestor? (.rtd ^IRec x) (condition-types '&condition)))))
+(defn condition-predicate [rtd]
+  (let [p (record-predicate rtd)] (fn [c] (boolean (some p (simple-conditions* c))))))
+(defn condition-accessor [rtd proc]
+  (let [p (record-predicate rtd)]
+    (fn [c] (proc (or (first (filter p (simple-conditions* c))) (throw (ex-info "condition-accessor: no such component" {})))))))
+(defn- cfield [t k] (condition-accessor (condition-types t) (record-accessor (condition-types t) k)))
+
+;;; Raising: a Scheme raise is an ExceptionInfo carrying the object; with-exception-handler's handlers run in
+;;; the dynamic context of the raise.
+
+(def ^:dynamic *handlers* ())
+(defn raise* [obj continuable]
+  (if-let [h (first *handlers*)]
+    (let [v (binding [*handlers* (rest *handlers*)] (h obj))]
+      (if continuable
+        v
+        (binding [*handlers* (rest *handlers*)]
+          (raise* (condition ((ctor '&non-continuable)) ((ctor '&message) "handler returned from a non-continuable raise")) false))))
+    (throw (ex-info "scheme raise" {::raise obj}))))
+(defn raise [obj] (raise* obj false))
+(defn raise-continuable [obj] (raise* obj true))
+(defn with-exception-handler [handler thunk] (binding [*handlers* (conj *handlers* handler)] (thunk)))
+
+(defn raised
+  "The Scheme object an exception carries, or nil."
+  [e]
+  (when (instance? arbace.lang.ExceptionInfo e) (::raise (ex-data e))))
+
+(defn error* [kind who msg irritants]
+  (raise (apply condition ((ctor kind)) (concat (when (truthy? who) [((ctor '&who) who)])
+                                                [((ctor '&message) msg) ((ctor '&irritants) (seq->list irritants))]))))
+
+(defn call-cc [f]
+  (let [tag (Object.)]
+    (try (f (fn [& vs] (throw (ex-info "scheme continuation" {::k tag ::vs vs}))))
+         (catch arbace.lang.ExceptionInfo e
+           (let [d (ex-data e)]
+             (if (identical? (::k d) tag)
+               (let [vs (::vs d)] (if (= 1 (count vs)) (first vs) (MV. (vec vs))))
+               (throw e)))))))
+
+(defn dynamic-wind [before thunk after]
+  (before) (try (thunk) (finally (after))))
+
+;;; Multiple values.
+
+(defn values [& vs] (if (= 1 (count vs)) (first vs) (MV. (vec vs))))
+(defn call-with-values [producer consumer]
+  (let [v (producer)] (if (instance? MV v) (apply consumer (.-vals ^MV v)) (consumer v))))
+
+;;; The printer of values (write and display), through the forms' printer.
+
+(declare write-value)
+(defn- write-string-value [v display]
+  (cond
+    (and display (string? v)) (sstr v)
+    (and display (char? v)) (str (if (instance? SChar v) (String. (Character/toChars (int (.-cp ^SChar v)))) v))
+    (record? v) (str "#<record " (.rname ^IRtd (.rtd ^IRec v)) ">")
+    (instance? Compound v) "#<condition>"
+    (fn? v) "#<procedure>"
+    (instance? Pair v) (str "(" (loop [acc [] x v]
+                                  (cond (instance? Pair x) (recur (conj acc (write-string-value (car x) display)) (cdr x))
+                                        (identical? x NULL) (str/join " " acc)
+                                        :else (str (str/join " " acc) " . " (write-string-value x display)))) ")")
+    (svector? v) (str "#(" (str/join " " (map #(write-string-value % display) v)) ")")
+    (identical? v VOID) "#<void>"
+    (gensym? v) (name v)
+    :else (sp/write-form (value->form v))))
+(defn write-value ^String [v] (write-string-value v false))
+(defn display-value ^String [v] (write-string-value v true))
+
+(defn- port-out [args] (if (seq args) (first args) (OutPort. (StringBuilder.))))
+(defn- emit [p ^String s]
+  (if (instance? OutPort p) (.append ^StringBuilder (.-sb ^OutPort p) s) (do (print s) (flush)))
+  VOID)
+
+(defn format* [fmt & args]
+  (let [fmt (sstr fmt) sb (StringBuilder.)]
+    (loop [i 0 args args]
+      (if (>= i (count fmt))
+        (str sb)
+        (let [c (.charAt fmt i)]
+          (if (and (= c \~) (< (inc i) (count fmt)))
+            (case (.charAt fmt (inc i))
+              (\s \S) (do (.append sb (write-value (first args))) (recur (+ i 2) (rest args)))
+              (\a \A) (do (.append sb (display-value (first args))) (recur (+ i 2) (rest args)))
+              \% (do (.append sb "\n") (recur (+ i 2) args))
+              \~ (do (.append sb "~") (recur (+ i 2) args))
+              (do (.append sb c) (recur (inc i) args)))
+            (do (.append sb c) (recur (inc i) args))))))))
+
+;;; Hashtables.
+
+(deftype Table [^java.util.HashMap m kind mutable])
+(defn- tkey [t k] (if (= (.-kind ^Table t) :equal) (value->form k) (if (instance? Double k) [:flo (Double/doubleToLongBits k)] k)))
+(defn hashtable-ref [^Table t k default] (let [m (.-m t) kk (tkey t k)] (if (.containsKey m kk) (second (.get m kk)) default)))
+(defn hashtable-set! [^Table t k v] (.put (.-m t) (tkey t k) [k v]) VOID)
+
+;;; The store of locations and labels, shared by psyntax (symbol-value, label-binding) and the core forms
+;;; (a free symbol is a location).
+
+(def store (java.util.HashMap.))
+(defn global-box [sym]
+  (or (.get ^java.util.HashMap store sym)
+      (let [b (Box. UNBOUND)] (.put ^java.util.HashMap store sym b) b)))
+(defn gref [^IBox b sym]
+  (let [v (.get b)] (if (identical? v UNBOUND) (error* '&undefined sym "unbound location" [sym]) v)))
+(defn gset! [^IBox b v] (.put b v) VOID)
+(defn symbol-value [sym] (gref (global-box sym) sym))
+(defn set-symbol-value! [sym v] (gset! (global-box sym) v))
+(defn label-binding [sym]
+  (let [^IBox b (.get ^java.util.HashMap store sym)] (if (and b (not (identical? (.get b) UNBOUND))) (.get b) false)))
+(defn remove-location [sym] (.remove ^java.util.HashMap store sym) VOID)
+
+(def primitive-locations (atom (fn [x] false)))
+
+;;; Arithmetic on Clojure's numbers (no complex numbers in the bootstrap host).
+
+(defn- num-fold [f init] (fn [& xs] (reduce f init xs)))
+(defn- cmp [f] (fn [& xs] (every? true? (map f xs (rest xs)))))
+(defn- to-int [x] (if (instance? Double x) x x))
+
+(defn- for-all* [f & ls]
+  (loop [ls (map list->vec ls) ok true]
+    (if (some empty? ls) ok
+        (let [v (apply f (map first ls))] (if (truthy? v) (recur (map rest ls) v) false)))))
+(defn- exists* [f & ls]
+  (loop [ls (map list->vec ls)]
+    (if (some empty? ls) false
+        (let [v (apply f (map first ls))] (if (truthy? v) v (recur (map rest ls)))))))
+(defn- smap [f & ls] (seq->list (apply map f (map list->vec ls))))
+(defn- sfor-each [f & ls] (dorun (apply map f (map list->vec ls))) VOID)
+(defn- sappend [& ls]
+  (if (empty? ls) NULL
+      (let [ls (vec ls)] (reduce (fn [tail l] (seq->list (list->vec l) tail)) (peek ls) (rseq (pop ls))))))
+(defn- smember [eqf] (fn [x l] (loop [l l] (cond (instance? Pair l) (if (eqf x (car l)) l (recur (cdr l))) :else false))))
+(defn- sassoc [eqf] (fn [x l] (loop [l l] (cond (instance? Pair l) (if (eqf x (car (car l))) (car l) (recur (cdr l))) :else false))))
+(defn- sapply [f & args] (apply f (concat (butlast args) (list->vec (last args)))))
+(defn- list?* [x] (loop [x x] (cond (identical? x NULL) true (instance? Pair x) (recur (cdr x)) :else false)))
+(defn- cons** [& xs] (seq->list (butlast xs) (last xs)))
+(defn- scheme-length [l] (count (list->vec l)))
+(defn- svec [x] (vec x))
+
+(defn- cxr [path] (fn [x] (reduce (fn [x c] (if (= c \a) (car x) (cdr x))) x (reverse path))))
+
+(def primitives
+  (merge
+    {'car car 'cdr cdr 'cons cons 'pair? pair? 'null? null? 'list slist 'cons* cons** 'list? list?*
+     'set-car! (fn [^IPair p v] (.setCar p v) VOID) 'set-cdr! (fn [^IPair p v] (.setCdr p v) VOID)
+     'length scheme-length 'append sappend 'reverse (fn [l] (seq->list (reverse (list->vec l))))
+     'list-tail (fn [l k] (nth (iterate cdr l) k)) 'list-ref (fn [l k] (car (nth (iterate cdr l) k)))
+     'map smap 'for-each sfor-each 'for-all for-all* 'exists exists* 'apply sapply
+     'filter (fn [f l] (seq->list (filter #(truthy? (f %)) (list->vec l))))
+     'remp (fn [f l] (seq->list (remove #(truthy? (f %)) (list->vec l))))
+     'remq (fn [x l] (seq->list (remove #(eq? x %) (list->vec l))))
+     'remv (fn [x l] (seq->list (remove #(eqv? x %) (list->vec l))))
+     'remove (fn [x l] (seq->list (remove #(equal? x %) (list->vec l))))
+     'find (fn [f l] (or (first (filter #(truthy? (f %)) (list->vec l))) false))
+     'partition (fn [f l] (let [v (list->vec l)] (values (seq->list (filter #(truthy? (f %)) v)) (seq->list (remove #(truthy? (f %)) v)))))
+     'fold-left (fn [f init & ls] (reduce (fn [acc xs] (apply f acc xs)) init (apply map list (map list->vec ls))))
+     'fold-right (fn [f init & ls] (reduce (fn [acc xs] (apply f (concat xs [acc]))) init (reverse (apply map list (map list->vec ls)))))
+     'memq (smember eq?) 'memv (smember eqv?) 'member (smember equal?)
+     'assq (sassoc eq?) 'assv (sassoc eqv?) 'assoc (sassoc equal?)
+     'memp (fn [f l] (loop [l l] (cond (instance? Pair l) (if (truthy? (f (car l))) l (recur (cdr l))) :else false)))
+     'assp (fn [f l] (loop [l l] (cond (instance? Pair l) (if (truthy? (f (car (car l)))) (car l) (recur (cdr l))) :else false)))
+     'list-sort (fn [f l] (seq->list (sort (fn [a b] (cond (truthy? (f a b)) -1 (truthy? (f b a)) 1 :else 0)) (list->vec l))))
+     'eq? eq? 'eqv? eqv? 'equal? equal? 'not (fn [x] (identical? x false))
+     'boolean? (fn [x] (instance? Boolean x)) 'symbol? symbol? 'string? string? 'char? char?
+     'procedure? procedure? 'vector? svector? 'number? (fn [x] (or (number? x) (instance? SComplex x))) 'integer? (fn [x] (and (number? x) (or (integer? x) (and (instance? Double x) (== x (Math/floor x)) (not (Double/isInfinite x))))))
+     'exact? (fn [x] (not (instance? Double x))) 'inexact? (fn [x] (instance? Double x))
+     'rational? (fn [x] (and (number? x) (not (and (instance? Double x) (or (Double/isNaN x) (Double/isInfinite x))))))
+     'real? number? 'complex? (fn [x] (or (number? x) (instance? SComplex x)))
+     'bytevector? (fn [x] (instance? Bytes x)) 'bytevector->u8-list (fn [^Bytes b] (seq->list (.-bs b)))
+     'string->utf8 (fn [s] (Bytes. (mapv #(bit-and % 0xff) (.getBytes (sstr s) "UTF-8"))))
+     'make-promise make-promise 'force force
+     'void (fn [& _] VOID) 'eof-object (fn [] EOF) 'eof-object? (fn [x] (identical? x EOF))
+     'gensym gensym
+     '+ (num-fold +' 0) '* (num-fold *' 1)
+     '- (fn ([x] (-' x)) ([x & ys] (reduce -' x ys)))
+     '/ (fn ([x] (/ 1 x)) ([x & ys] (reduce / x ys)))
+     '= (cmp ==) '< (cmp <) '> (cmp >) '<= (cmp <=) '>= (cmp >=)
+     'zero? zero? 'positive? pos? 'negative? neg? 'even? even? 'odd? odd?
+     'quotient quot 'remainder rem 'modulo mod 'abs (fn [x] (if (neg? x) (-' x) x)) 'min min 'max max
+     'exact (fn [x] (if (instance? Double x) (long x) x)) 'inexact double
+     'number->string (fn ([x] (sp/write-form (sf/real-form x))) ([x r] (if (== r 10) (sp/write-form (sf/real-form x)) (.toString (biginteger x) (int r)))))
+     'string->number (fn [s & _] (try (let [v (read-string (sstr s))] (if (number? v) v false)) (catch Exception _ false)))
+     'symbol->string (fn [s] (name s)) 'string->symbol (fn [s] (sym (sstr s)))
+     'string-append (fn [& ss] (apply str (map sstr ss))) 'string-length (fn [s] (.codePointCount (sstr s) 0 (count (sstr s))))
+     'substring (fn [s a b] (let [s (sstr s)] (subs s (.offsetByCodePoints s 0 (int a)) (.offsetByCodePoints s 0 (int b)))))
+     'string-ref (fn [s k] (let [s (sstr s)] (code-char (.codePointAt s (.offsetByCodePoints s 0 (int k))))))
+     'string=? (fn [& ss] (apply = (map sstr ss))) 'string<? (fn [a b] (neg? (compare (sstr a) (sstr b))))
+     'string->list (fn [s] (seq->list (map code-char (.toArray (.codePoints (sstr s))))))
+     'list->string (fn [l] (apply str (map #(if (instance? SChar %) (String. (Character/toChars (int (.-cp ^SChar %)))) %) (list->vec l))))
+     'string (fn [& cs] (apply str (map #(if (instance? SChar %) (String. (Character/toChars (int (.-cp ^SChar %)))) %) cs)))
+     'string-copy (fn [s] (sstr s))
+     'char->integer char-code 'integer->char code-char
+     'char=? (fn [& cs] (apply = (map char-code cs))) 'char<? (cmp #(< (char-code %1) (char-code %2)))
+     'char<=? (fn [& cs] (apply <= (map char-code cs))) 'char>=? (fn [& cs] (apply >= (map char-code cs)))
+     'char-alphabetic? (fn [c] (Character/isLetter (int (char-code c)))) 'char-numeric? (fn [c] (Character/isDigit (int (char-code c))))
+     'char-whitespace? (fn [c] (Character/isWhitespace (int (char-code c))))
+     'vector (fn [& xs] (scheme-vector xs)) 'make-vector (fn ([n] (scheme-vector (repeat n false))) ([n x] (scheme-vector (repeat n x))))
+     'vector-ref (fn [^java.util.ArrayList v k] (.get v (int k))) 'vector-set! (fn [^java.util.ArrayList v k x] (.set v (int k) x) VOID)
+     'vector-length (fn [^java.util.ArrayList v] (.size v))
+     'vector->list (fn [v] (seq->list (svec v))) 'list->vector (fn [l] (scheme-vector (list->vec l)))
+     'vector-map (fn [f & vs] (scheme-vector (apply map f (map svec vs))))
+     'vector-for-each (fn [f & vs] (dorun (apply map f (map svec vs))) VOID)
+     'vector-fill! (fn [^java.util.ArrayList v x] (dotimes [i (.size v)] (.set v (int i) x)) VOID)
+     'values values 'call-with-values call-with-values 'dynamic-wind dynamic-wind
+     (symbol nil "call/cc") call-cc 'call-with-current-continuation call-cc
+     'raise raise 'raise-continuable raise-continuable 'with-exception-handler with-exception-handler
+     'error (fn [who msg & irr] (error* '&error who msg irr))
+     'assertion-violation (fn [who msg & irr] (error* '&assertion who msg irr))
+     'condition condition 'condition? condition? 'condition-predicate condition-predicate
+     'condition-accessor condition-accessor 'simple-conditions (fn [c] (seq->list (simple-conditions* c)))
+     'make-record-type-descriptor make-record-type-descriptor
+     'make-record-constructor-descriptor make-record-constructor-descriptor
+     'record-constructor record-constructor 'record-predicate record-predicate
+     'record-accessor record-accessor 'record-mutator record-mutator 'record? record?
+     'record-type-descriptor? rtd? 'record-rtd (fn [^IRec r] (.rtd r))
+     'make-eq-hashtable (fn [& _] (Table. (java.util.HashMap.) :eq true))
+     'make-eqv-hashtable (fn [& _] (Table. (java.util.HashMap.) :eqv true))
+     'make-equal-hashtable (fn [& _] (Table. (java.util.HashMap.) :equal true))
+     'hashtable-ref hashtable-ref 'hashtable-set! hashtable-set!
+     'hashtable-contains? (fn [^Table t k] (.containsKey (.-m t) (tkey t k)))
+     'hashtable-delete! (fn [^Table t k] (.remove (.-m t) (tkey t k)) VOID)
+     'hashtable-size (fn [^Table t] (.size (.-m t)))
+     'hashtable-update! (fn [^Table t k f d] (hashtable-set! t k (f (hashtable-ref t k d))))
+     'hashtable-entries (fn [^Table t] (let [es (vec (vals (.-m t)))] (values (scheme-vector (map first es)) (scheme-vector (map second es)))))
+     'hashtable-keys (fn [^Table t] (scheme-vector (map first (vals (.-m t)))))
+     'hashtable? (fn [x] (instance? Table x))
+     'open-string-output-port (fn [] (let [p (OutPort. (StringBuilder.))]
+                                        (values p (fn [] (let [s (str (.-sb ^OutPort p))] (.setLength ^StringBuilder (.-sb ^OutPort p) 0) s)))))
+     'write (fn [x & p] (emit (first p) (write-value x))) 'display (fn [x & p] (emit (first p) (display-value x)))
+     'write-char (fn [c & p] (emit (first p) (display-value c))) 'newline (fn [& p] (emit (first p) "\n"))
+     'format format*
+     'file-exists? (fn [f] (.exists (java.io.File. ^String (sstr f))))
+     'symbol-value symbol-value 'set-symbol-value! set-symbol-value!
+     'label-binding label-binding 'set-label-binding! set-symbol-value! 'remove-location remove-location
+     'set-primitive-locations! (fn [p] (reset! primitive-locations p) VOID)
+     '&condition-rtd (condition-types '&condition) '&condition-rcd (Rcd. (condition-types '&condition) false false)}
+    (into {} (for [p ["aa" "ad" "da" "dd" "aaa" "aad" "ada" "add" "daa" "dad" "dda" "ddd" "addd" "dddd"]]
+               [(symbol (str "c" p "r")) (cxr p)]))
+    (into {} (for [[t ks] {'&message ['message] '&irritants ['irritants] '&who ['who] '&syntax ['form 'subform]
+                           '&error [] '&assertion [] '&violation [] '&serious [] '&warning [] '&undefined []
+                           '&non-continuable [] '&lexical [] '&implementation-restriction []}
+                   :let [n (subs (name t) 1)
+                         base (case n "assertion" "assertion-violation" "non-continuable" "non-continuable-violation"
+                                "lexical" "lexical-violation" "undefined" "undefined-violation"
+                                "implementation-restriction" "implementation-restriction-violation"
+                                "syntax" "syntax-violation" "message" "message-condition" "irritants" "irritants-condition"
+                                "who" "who-condition" "error" "error" "violation" "violation" "serious" "serious-condition"
+                                "warning" "warning")]
+                   kv (concat [[(symbol (str "make-" base)) (ctor t)]
+                               [(symbol (str base "?")) (condition-predicate (condition-types t))]
+                               [(symbol (str t "-rtd")) (condition-types t)]
+                               [(symbol (str t "-rcd")) (Rcd. (condition-types t) false false)]]
+                              (map-indexed (fn [i k] [(symbol (case [n (name k)] ["message" "message"] "condition-message"
+                                                                ["irritants" "irritants"] "condition-irritants"
+                                                                ["who" "who"] "condition-who"
+                                                                (str base "-" (name k))))
+                                                      (cfield t i)])
+                                           ks))]
+               kv))))

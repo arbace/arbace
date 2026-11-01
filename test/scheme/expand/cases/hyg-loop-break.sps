@@ -1,0 +1,11 @@
+(import (rnrs))
+(define-syntax loop
+  (lambda (x)
+    (syntax-case x ()
+      ((k e ...)
+       (with-syntax ((break (datum->syntax #'k 'break)))
+         #'(call-with-current-continuation (lambda (break) (let f () e ... (f)))))))))
+(let ((n 3) (ls '()))
+  (loop (if (= n 0) (break ls)) (set! ls (cons 'a ls)) (set! n (- n 1)))
+  (write ls))
+(newline)

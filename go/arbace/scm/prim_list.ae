@@ -1,0 +1,352 @@
+;; si's runtime: primitives on pairs, lists, booleans and symbols (R6RS (rnrs base) and (rnrs lists) as Chez
+;; 10.3.0 behaves: values, conditions and messages probed on Chez). The higher-order ones (map, filter,
+;; fold-left, member and assoc with a procedure ...) are the machine's, in prim_control.
+(in-ns 'go.arbace.scm)
+
+(go/file "prim_list.go"
+  :imports [[big "math/big"]])
+
+;; ---------------------------------------------------------------------------------------
+;; Helpers
+
+(go/func dlIs "dlIs is whether x is a T.\n" :type-params [T] ^any [^any x]
+  (let [(values _ ok) (assert T x)]
+    ok))
+
+(go/func dlNull ^any [^any x] (== x (conv any Null)))
+
+(go/func dlIsNull ^bool [^any x] (== x (conv any Null)))
+
+(go/func dlCdrOf "dlCdrOf is the cdr of x, a pair.\n" ^any [^any x]
+  (.-Cdr ((inst As (* Pair)) x)))
+
+(go/func dlWalk
+  "dlWalk walks list x: the number of pairs, and the status: 0 proper, 1 improper (ends in a non-null
+non-pair), 2 circular.\n"
+  [^any x] :results [int int]
+  (let [n 0 slow x fast x]
+    (while true
+      (watchdogTick)
+      (let [(values p ok) (assert (* Pair) fast)]
+        (when (not ok)
+          (if (dlIsNull fast)
+            (return n 0)
+            (return n 1)))
+        (set! fast (.-Cdr p))
+        (inc! n)
+        (if (== (% n 2) 0)
+          (set! slow (dlCdrOf slow)))
+        (when (== fast slow)
+          (return n 2))))
+    (return n 0)))
+
+(go/func dlElems "dlElems is the elements of proper list x, else Chez's \"~s is not a proper list\" of who.\n"
+  ^{:tag (slice any)} [^string who ^any x]
+  (let [(values n st) (dlWalk x)]
+    (when (!= st 0)
+      (NotA who "proper list" x))
+    (let [out (make (slice any) n)
+          l x]
+      (for [i 0] (< i n) (inc! i)
+        (watchdogTick)
+        (let [p ((inst As (* Pair)) l)]
+          (aset out i (.-Car p))
+          (set! l (.-Cdr p))))
+      out)))
+
+;; ---------------------------------------------------------------------------------------
+;; Pairs
+
+(go/func dlCar ^any [^any x]
+  (let [(values p ok) (assert (* Pair) x)]
+    (when (not ok)
+      (NotA "car" "pair" x))
+    (.-Car p)))
+
+(go/func dlCdr ^any [^any x]
+  (let [(values p ok) (assert (* Pair) x)]
+    (when (not ok)
+      (NotA "cdr" "pair" x))
+    (.-Cdr p)))
+
+(go/func dlSetCar ^any [^any x ^any v]
+  (set! (.-Car (ArgPair "set-car!" x)) v)
+  Unspec)
+
+(go/func dlSetCdr ^any [^any x ^any v]
+  (set! (.-Cdr (ArgPair "set-cdr!" x)) v)
+  Unspec)
+
+;; dlCxr applies path (the letters of c[ad]+r, read from the right) to x.
+(go/func dlCxr ^any [^string who ^string path ^any x]
+  (let [v x]
+    (for [i (- (len path) 1)] (>= i 0) (dec! i)
+      (let [(values p ok) (assert (* Pair) v)]
+        (when (not ok)
+          (Violation CondAssertion who "incorrect list structure ~s" x))
+        (if (== (aget path i) \a)
+          (set! v (.-Car p))
+          (set! v (.-Cdr p)))))
+    v))
+
+(go/func dlCxrPaths "dlCxrPaths is every path of two to four letters a and d.\n" ^{:tag (slice string)} []
+  (let [^{:tag (slice string)} out nil
+        ^{:tag (slice string)} cur (lit (slice string) "")]
+    (for [n 1] (<= n 4) (inc! n)
+      (let [^{:tag (slice string)} nxt nil]
+        (range [_ p cur]
+          (set! nxt (append nxt (+ p "a") (+ p "d"))))
+        (set! cur nxt)
+        (when (>= n 2)
+          (set! out (append out (spread cur))))))
+    out))
+
+(go/func dlDefCxr [^string path]
+  (let [who (+ "c" path "r")]
+    (Def1 who (fn ^any [^any x] (dlCxr who path x)))))
+
+;; ---------------------------------------------------------------------------------------
+;; Lists
+
+(go/func dlLength ^any [^any x]
+  (let [(values n st) (dlWalk x)]
+    (when (== st 1)
+      (NotA "length" "proper list" x))
+    (when (== st 2)
+      (Violation CondAssertion "length" "~s is circular" x))
+    (conv int64 n)))
+
+(go/func dlIsList ^any [^any x]
+  (let [(values _ st) (dlWalk x)]
+    (== st 0)))
+
+(go/func dlAppend ^any [^{:tag (slice any)} a]
+  (when (== (len a) 0)
+    (return Null))
+  (let [res (aget a (- (len a) 1))]
+    (for [i (- (len a) 2)] (>= i 0) (dec! i)
+      (set! res (ListTail (dlElems "append" (aget a i)) res)))
+    res))
+
+(go/func dlReverse ^any [^any x]
+  (let [xs (dlElems "reverse" x)
+        ^any res Null]
+    (range [_ e xs]
+      (set! res (Cons e res)))
+    res))
+
+(go/func dlConsStar ^any [^{:tag (slice any)} a]
+  (ListTail (subslice a 0 (- (len a) 1)) (aget a (- (len a) 1))))
+
+;; dlIndex is the index x of list-tail and list-ref as an int64 (a bignum: the greatest), else Chez's error.
+(go/func dlIndex ^int64 [^string who ^any x]
+  (type-switch [v x]
+    (case [int64]
+      (when (>= v 0)
+        (return v)))
+    (case [(* big/Int)]
+      (when (> (.Sign v) 0)
+        (return (conv int64 9223372036854775807)))))
+  (Violation CondAssertion who "index ~s is not an exact nonnegative integer" x)
+  0)
+
+;; dlTailErr raises the error of reaching, with k steps still to go, the object cur of lst.
+(go/func dlTailErr [^string who ^any idx ^any lst ^any cur]
+  (if (dlIsNull cur)
+    (Violation CondAssertion who "index ~s is out of range for list ~s" idx lst)
+    (Violation CondAssertion who "index ~s reaches a non-pair in ~s" idx lst)))
+
+(go/func dlCycleIndex
+  "dlCycleIndex is the index of list-ref and list-tail on lst: on a circular list (Chez's rule, SM8b) an index past
+the cycle's start is reduced modulo the cycle's length, so a bignum index ends; else dlIndex's.\n"
+  ^int64 [^string who ^any lst ^any idx]
+  (let [n (dlIndex who idx)
+        (values _ st) (dlWalk lst)]
+    (when (!= st 2)
+      (return n))
+    ;; Floyd: mu, the cycle's start; lambda, its length
+    (let [slow (dlCdrOf lst) fast (dlCdrOf (dlCdrOf lst))]
+      (while (!= slow fast)
+        (watchdogTick)
+        (set! slow (dlCdrOf slow))
+        (set! fast (dlCdrOf (dlCdrOf fast))))
+      (let [mu (conv int64 0) a lst]
+        (while (!= a slow)
+          (watchdogTick)
+          (set! a (dlCdrOf a))
+          (set! slow (dlCdrOf slow))
+          (inc! mu))
+        (let [lam (conv int64 1) b (dlCdrOf a)]
+          (while (!= b a)
+            (watchdogTick)
+            (set! b (dlCdrOf b))
+            (inc! lam))
+          (let [k (new big/Int)]
+            (type-switch [v idx]
+              (case [int64] (.SetInt64 k v))
+              (case [(* big/Int)] (.Set k v)))
+            (when (< (.Cmp k (big/NewInt mu)) 0)
+              (return (.Int64 k)))
+            (.Sub k k (big/NewInt mu))
+            (.Mod k k (big/NewInt lam))
+            (+ mu (.Int64 k))))))))
+
+(go/func dlListTail ^any [^any lst ^any idx]
+  (let [n (dlCycleIndex "list-tail" lst idx)
+        cur lst]
+    (for [i (conv int64 0)] (< i n) (inc! i)
+      (watchdogTick)
+      (let [(values p ok) (assert (* Pair) cur)]
+        (when (not ok)
+          (dlTailErr "list-tail" idx lst cur))
+        (set! cur (.-Cdr p))))
+    cur))
+
+(go/func dlListRef ^any [^any lst ^any idx]
+  (let [n (dlCycleIndex "list-ref" lst idx)
+        cur lst]
+    (for [i (conv int64 0)] (< i n) (inc! i)
+      (watchdogTick)
+      (let [(values p ok) (assert (* Pair) cur)]
+        (when (not ok)
+          (dlTailErr "list-ref" idx lst cur))
+        (set! cur (.-Cdr p))))
+    (let [(values p ok) (assert (* Pair) cur)]
+      (when (not ok)
+        (dlTailErr "list-ref" idx lst cur))
+      (.-Car p))))
+
+;; mode: 0 eq?, 1 eqv?, 2 equal?
+(go/func dlSame ^bool [^int mode ^any a ^any b]
+  (switch mode
+    (case [0] (return (Eq a b)))
+    (case [1] (return (Eqv a b))))
+  (Equal a b))
+
+(go/func dlMem ^any [^string who ^int mode ^any x ^any lst]
+  (let [l lst slow lst n 0]
+    (while true
+      (watchdogTick)
+      (let [(values p ok) (assert (* Pair) l)]
+        (when (not ok)
+          (when (dlIsNull l)
+            (return false))
+          (Violation CondAssertion who "improper list ~s" lst))
+        (when (dlSame mode x (.-Car p))
+          (return l))
+        (set! l (.-Cdr p))
+        ;; a circular list raises, as Chez's (SM8b)
+        (inc! n)
+        (when (== (% n 2) 0)
+          (set! slow (dlCdrOf slow))
+          (when (== slow l)
+            (Violation CondAssertion who "circular list ~s" lst)))))
+    false))
+
+(go/func dlAss ^any [^string who ^int mode ^any x ^any lst]
+  (let [l lst slow lst n 0]
+    (while true
+      (watchdogTick)
+      (let [(values p ok) (assert (* Pair) l)]
+        (when (not ok)
+          (when (dlIsNull l)
+            (return false))
+          (Violation CondAssertion who "improperly formed alist ~s" lst))
+        (let [(values e ok2) (assert (* Pair) (.-Car p))]
+          (when (not ok2)
+            (Violation CondAssertion who "improperly formed alist ~s" lst))
+          (when (dlSame mode x (.-Car e))
+            (return e)))
+        (set! l (.-Cdr p))
+        (inc! n)
+        (when (== (% n 2) 0)
+          (set! slow (dlCdrOf slow))
+          (when (== slow l)
+            (Violation CondAssertion who "circular list ~s" lst)))))
+    false))
+
+(go/func dlRemove ^any [^string who ^int mode ^any x ^any lst]
+  (let [xs (dlElems who lst)
+        ^{:tag (slice any)} keep nil]
+    (range [_ e xs]
+      (when (not (dlSame mode x e))
+        (set! keep (append keep e))))
+    (ListTail keep Null)))
+
+;; ---------------------------------------------------------------------------------------
+;; Booleans, symbols
+
+(go/func dlBoolEq ^any [^{:tag (slice any)} a]
+  (range [_ x a]
+    (let [(values _ ok) (assert bool x)]
+      (when (not ok)
+        (Violation CondAssertion "boolean=?" "~s is not a boolean" x))))
+  (let [r true]
+    (for [i 1] (< i (len a)) (inc! i)
+      (when (!= (aget a i) (aget a 0))
+        (set! r false)))
+    r))
+
+(go/func dlSymEq ^any [^{:tag (slice any)} a]
+  (range [_ x a]
+    (ArgSymbol "symbol=?" x))
+  (let [r true]
+    (for [i 1] (< i (len a)) (inc! i)
+      (when (!= (aget a i) (aget a 0))
+        (set! r false)))
+    r))
+
+(go/func dlSymToString ^any [^any x]
+  (Str (.-Name (ArgSymbol "symbol->string" x))))
+
+(go/func dlStringToSymbol ^any [^any x]
+  (Intern (.String (ArgString "string->symbol" x))))
+
+(go/func dlGensym ^any [^{:tag (slice any)} a]
+  (when (== (len a) 0)
+    (return (Gensym "g")))
+  (type-switch [v (aget a 0)]
+    (case [(* String)] (return (Gensym (.String v))))
+    (case [(* Symbol)] (return (Gensym (.-Name v)))))
+  (NotA "gensym" "string" (aget a 0))
+  nil)
+
+(go/func init []
+  (Def1 "pair?" (inst dlIs (* Pair)))
+  (Def2 "cons" (fn ^any [^any a ^any d] (Cons a d)))
+  (Def1 "car" dlCar)
+  (Def1 "cdr" dlCdr)
+  (Def2 "set-car!" dlSetCar)
+  (Def2 "set-cdr!" dlSetCdr)
+  (range [_ p (dlCxrPaths)]
+    (dlDefCxr p))
+  (Def1 "null?" dlNull)
+  (Def1 "list?" dlIsList)
+  (Def "list" 0 -1 (fn ^any [^{:tag (slice any)} a] (ListTail a Null)))
+  (Def1 "length" dlLength)
+  (Def "append" 0 -1 dlAppend)
+  (Def1 "reverse" dlReverse)
+  (Def2 "list-tail" dlListTail)
+  (Def2 "list-ref" dlListRef)
+  (Def2 "memq" (fn ^any [^any x ^any l] (dlMem "memq" 0 x l)))
+  (Def2 "memv" (fn ^any [^any x ^any l] (dlMem "memv" 1 x l)))
+  (Def2 "member" (fn ^any [^any x ^any l] (dlMem "member" 2 x l)))
+  (Def2 "assq" (fn ^any [^any x ^any l] (dlAss "assq" 0 x l)))
+  (Def2 "assv" (fn ^any [^any x ^any l] (dlAss "assv" 1 x l)))
+  (Def2 "assoc" (fn ^any [^any x ^any l] (dlAss "assoc" 2 x l)))
+  (Def "cons*" 1 -1 dlConsStar)
+  (Def2 "remq" (fn ^any [^any x ^any l] (dlRemove "remq" 0 x l)))
+  (Def2 "remv" (fn ^any [^any x ^any l] (dlRemove "remv" 1 x l)))
+  (Def2 "remove" (fn ^any [^any x ^any l] (dlRemove "remove" 2 x l)))
+  (Def1 "not" (fn ^any [^any x] (== x (conv any false))))
+  (Def1 "boolean?" (inst dlIs bool))
+  (Def "boolean=?" 2 -1 dlBoolEq)
+  (Def2 "eq?" (fn ^any [^any a ^any b] (Eq a b)))
+  (Def2 "eqv?" (fn ^any [^any a ^any b] (Eqv a b)))
+  (Def2 "equal?" (fn ^any [^any a ^any b] (Equal a b)))
+  (Def1 "symbol?" (inst dlIs (* Symbol)))
+  (Def1 "symbol->string" dlSymToString)
+  (Def1 "string->symbol" dlStringToSymbol)
+  (Def "symbol=?" 2 -1 dlSymEq)
+  (Def "gensym" 0 2 dlGensym)
+  (Def "void" 0 -1 (fn ^any [^{:tag (slice any)} a] Unspec)))

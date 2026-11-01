@@ -1,0 +1,354 @@
+(ns arbace.scheme.expand
+  "Scheme's expander (doc/scheme/SCHEME-SURVEY.md, \"As built: SM4\"): the vendored psyntax
+  (scheme/psyntax/, Ikarus's psyntax as Scheme forms) booted from its expanded form, scheme/psyntax/psyntax.pp.ae
+  (made by tools/psyntax/boot.ss on Chez), on the bootstrap host (arbace.scheme.rt, arbace.scheme.core);
+  programs and libraries expanded to core forms (doc/scheme/SPEC.md, 5), syntax errors as &syntax conditions."
+  (:require [arbace.string :as str]
+            [arbace.scheme.rt :as rt]
+            [arbace.scheme.core :as core]
+            [arbace.repr.scheme.read :as rd]
+            [arbace.repr.scheme.forms :as sf]
+            [arbace.scheme.psyntax :as ps]
+            [arbace.repr.scheme.print :as sp]))
+
+(defn read-forms
+  "The top-level forms of Scheme text (R6RS mode)."
+  [^String text]
+  (let [{:keys [data error]} (rd/read-all text {})]
+    (when error (throw (ex-info (str "read: " (:message error)) {:error error})))
+    (mapv :form data)))
+
+(defn read-ae-forms
+  "The forms of a forms file (.ae)."
+  [^String text]
+  (let [rdr (java.io.PushbackReader. (java.io.StringReader. text))]
+    (loop [acc []]
+      (let [x (read {:eof ::eof} rdr)] (if (= x ::eof) acc (recur (conj acc x)))))))
+
+(def ^:private booted (atom nil))
+
+(defn boot!
+  "Evaluates psyntax's expanded system (its forms) once."
+  [forms]
+  (or @booted
+      (do (doseq [f forms] (core/eval-core (rt/form->value f)))
+          (reset! booted true))))
+
+(defn prim
+  "psyntax's procedure exported as `name` (a primloc)."
+  [name]
+  (let [loc (@rt/primitive-locations (rt/sym (arbace.core/name name)))]
+    (when-not (rt/truthy? loc) (throw (ex-info (str "psyntax has no " name) {})))
+    (rt/symbol-value loc)))
+
+(defn- read-library-source-file [f]
+  (let [forms (read-forms (slurp (rt/sstr f)))]
+    (rt/form->value (first forms))))
+(swap! core/primitives assoc 'read-library-source-file read-library-source-file)
+
+(defn values-of [v] (if (instance? arbace.scheme.rt.MV v) (.-vals ^arbace.scheme.rt.MV v) [v]))
+
+(defn set-library-path!
+  "psyntax's library-path: the directories its file locator tries, in order."
+  [dirs]
+  ((prim 'library-path) (rt/seq->list (map #(str % "/") dirs))))
+
+(defn condition->data
+  "A raised Scheme object as data: a condition's simple conditions' types and fields (form and subform as
+  forms), else the object written."
+  [c]
+  (if (rt/condition? c)
+    (let [cs (if (instance? arbace.scheme.rt.Compound c) (.-comps ^arbace.scheme.rt.Compound c) [c])
+          field (fn [t k] (when-let [r (first (filter (rt/record-predicate (rt/condition-types t)) cs))]
+                            ((rt/record-accessor (rt/condition-types t) k) r)))]
+      (cond-> {:kinds (vec (distinct (map (fn [r] (.rname ^arbace.scheme.rt.IRtd (.rtd ^arbace.scheme.rt.IRec r))) cs)))}
+        (field '&who 0) (assoc :who (rt/value->form (field '&who 0)))
+        (field '&message 0) (assoc :message (rt/sstr (field '&message 0)))
+        (field '&irritants 0) (assoc :irritants (rt/value->form (field '&irritants 0)))
+        ((rt/condition-predicate (rt/condition-types '&syntax)) c)
+        (assoc :form (rt/value->form (field '&syntax 0)) :subform (rt/value->form (field '&syntax 1)))))
+    {:raised (rt/write-value c)}))
+
+(defmacro ^:private guarded [& body]
+  `(try {:ok (do ~@body)}
+        (catch Exception e#
+          (if-let [c# (rt/raised e#)] {:raised c# :condition (condition->data c#)} (throw e#)))))
+
+(defn expand-program
+  "A top-level program (its forms) expanded: {:ok [invoke-libraries core-value]} or {:raised c :condition d}."
+  [forms]
+  (guarded (values-of ((prim 'program-expander) (rt/seq->list (map rt/form->value forms))))))
+
+(defn expand-library
+  "A library form expanded and installed: {:ok [name invoke-code visit-code]} or a raise."
+  [form]
+  (guarded (let [vs (values-of ((prim 'library-expander) (rt/form->value form)))]
+             [(nth vs 1) (nth vs 6) (nth vs 7)])))
+
+(defn expand-expression
+  "An expression expanded in (environment SPEC...): {:ok core-value} or a raise."
+  [form env-specs]
+  (guarded (let [env (apply (prim 'environment) (map rt/form->value env-specs))]
+             (first (values-of ((prim 'core-expand) (rt/form->value form) env))))))
+
+(defn gensym-renamer
+  "A function from a gensym to its form: NAME.N (as Chez's print-gensym pretty/suffix), numbered in the order
+  met, never a name of `taken`."
+  [taken]
+  (let [seen (java.util.HashMap.) n (atom 0)]
+    (fn [g]
+      (or (.get seen g)
+          (let [base (let [s (name g) i (.indexOf s "%")] (if (pos? i) (subs s 0 i) s))
+                s (loop [] (let [s (sf/sym (str base "." (swap! n inc)))] (if (taken s) (recur) s)))]
+            (.put seen g s) s)))))
+
+(defn- symbols-in [v]
+  (let [acc (java.util.HashSet.)]
+    (letfn [(walk [v] (cond (rt/pair? v) (do (walk (rt/car v)) (walk (rt/cdr v)))
+                            (rt/svector? v) (run! walk v)
+                            (and (symbol? v) (not (rt/gensym? v))) (.add acc (rt/value->form v))))]
+      (walk v))
+    (set acc)))
+
+(defn core->form
+  "A core value as a form, its gensyms renamed NAME.N."
+  [v]
+  (binding [rt/*gensym-name* (gensym-renamer (symbols-in v))]
+    (rt/value->form v)))
+
+(defn run-core
+  "Evaluates a core value on the bootstrap host, invoking `libs` first; {:ok value :out text} or a raise."
+  [libs code]
+  (let [out (java.io.StringWriter.)]
+    (assoc (binding [*out* out]
+             (try
+               (guarded (doseq [l (rt/list->vec libs)] ((prim (quote invoke-library)) l))
+                        (core/eval-core code))
+               (catch Exception e {:host-limit (ex-message e)})))
+           :out (str out))))
+
+;;; The command line.
+
+(defn- root [] (or (System/getenv "ARBACE_ROOT") "."))
+
+(defn boot-default! []
+  (boot! (read-ae-forms (slurp (str (root) "/scheme/psyntax/psyntax.pp.ae")))))
+
+(defn- library-form? [f] (and (seq? f) (= (first f) 'library)))
+
+(defn expand-file
+  "A file's leading libraries and its program (if any) expanded: {:libraries [r ...] :program r}."
+  [forms]
+  (let [libs (filter library-form? forms) prog (remove library-form? forms)
+        lrs (reduce (fn [acc l] (if (some :raised acc) acc (conj acc (expand-library l)))) [] libs)]
+    (cond-> {:libraries lrs}
+      (and (seq prog) (not (some :raised lrs))) (assoc :program (expand-program prog)))))
+
+(defn- first-raise [{:keys [libraries program]}]
+  (or (first (filter :raised libraries)) (when (:raised program) program)))
+
+(defn run-case
+  "One test case: its expansion, and its run on the bootstrap host when it expands."
+  [file]
+  (let [r (expand-file (read-forms (slurp file)))]
+    (if-let [e (first-raise r)]
+      {:expanded false :condition (:condition e)}
+      (let [[libs code] (:ok (:program r))
+            x (run-core libs code)]
+        (cond-> {:expanded true :out (:out x)}
+          (:raised x) (assoc :run-condition (:condition x))
+          (:host-limit x) (assoc :host-limit (:host-limit x)))))))
+
+(defn- judge
+  "A case's verdict against Chez's run `ref`."
+  [ours ref]
+  (let [cref (:error ref)]
+    (cond
+      (and (nil? cref) (:expanded ours) (nil? (:run-condition ours)) (nil? (:host-limit ours)) (= (:out ours) (:out ref))) :pass
+      (and (nil? cref) (:host-limit ours)) :host-limit
+      (and (nil? cref) (:expanded ours)) :run-differs
+      (nil? cref) :expansion-raised
+      (:expanded ours) (if (some #{"&syntax"} (:kinds cref)) :syntax-not-raised :error-not-raised)
+      (some #{"&syntax"} (:kinds cref))
+      (let [c (:condition ours)]
+        (cond (not (some #{'&syntax} (:kinds c))) :not-syntax
+              (= (or (:form-text c) (sp/write-form (:form c))) (:form cref)) :pass
+              (= (or (:subform-text c) (sp/write-form (:subform c))) (:form cref)) :pass-subform
+              :else :form-differs))
+      :else :pass)))
+
+;;; Expansions compared with the reference's: both normalized (the core forms' spellings made one, variables
+;;; renamed in the order they are bound), then equal or not.
+
+(defn- strip-r6rs [s] (let [n (name s)] (if (.startsWith n "r6rs:") (symbol (subs n 5)) s)))
+
+(defn- lmap [f xs] (apply list (mapv f xs)))
+
+(defn normalize
+  "A core form (ours or Chez's expand output, as forms) in one spelling: lambda and let as case-lambda,
+  ($primitive n x) as (primitive x), self-evaluating quotes unquoted, singleton begins dropped, bound
+  variables numbered v1, v2, ... in binding order."
+  [x]
+  (let [n (atom 0)]
+    (letfn [(fresh [env syms] (reduce (fn [env s] (assoc env s (symbol (str "v" (swap! n inc))))) env syms))
+            (formal-syms [f] (cond (symbol? f) [f]
+                                   (and (seq? f) (= (first f) 'scm/dot)) (concat (second f) [(nth f 2)])
+                                   (seq? f) f :else []))
+            (rename-formals [f env] (cond (symbol? f) (env f)
+                                          (and (seq? f) (= (first f) 'scm/dot)) (list 'scm/dot (lmap env (second f)) (env (nth f 2)))
+                                          :else (lmap env f)))
+            (clause [f body env] (let [env (fresh env (formal-syms f))]
+                                   (cons (rename-formals f env) (seq-body body env))))
+            (seq-body [body env] (apply list (mapcat (fn [e] (let [e (nm e env)] (if (and (seq? e) (= (first e) 'begin)) (rest e) [e]))) body)))
+            (nm [x env]
+              (cond
+                (symbol? x) (or (env x) (strip-r6rs x))
+                (and (seq? x) (seq x))
+                (let [[h & as] x]
+                  (case h
+                    quote (let [d (first as)] (if (or (number? d) (string? d) (char? d) (instance? Boolean d)) d x))
+                    ($primitive primitive) (list 'primitive (strip-r6rs (last as)))
+                    lambda (list 'case-lambda (clause (first as) (rest as) env))
+                    case-lambda (cons 'case-lambda (lmap #(clause (first %) (rest %) env) as))
+                    let (let [bs (first as)]
+                          (if (symbol? bs)
+                            (nm (list (list 'letrec (list (list bs (list* 'lambda (lmap first (second as)) (drop 2 as)))) bs)
+                                      ) env)
+                            (cons (list 'case-lambda (clause (lmap first bs) (rest as) env))
+                                  (lmap #(nm (second %) env) bs))))
+                    (letrec letrec*) (let [env (fresh env (lmap first (first as)))]
+                                       (list* h (lmap (fn [[v e]] (list (env v) (nm e env))) (first as))
+                                              (seq-body (rest as) env)))
+                    begin (let [es (seq-body as env)] (if (= 1 (count es)) (first es) (cons 'begin es)))
+                    (lmap #(nm % env) x)))
+                :else x))]
+      (let [unsym (fn unsym [x] (cond (and (seq? x) (= (first x) 'scm/sym)) (symbol (second x))
+                                      (seq? x) (apply list (lmap unsym x))
+                                      (vector? x) (lmap unsym x)
+                                      :else x))
+            thunk-call (fn thunk-call [x]
+                         (cond (and (seq? x) (= 1 (count x)) (seq? (first x)) (= 'case-lambda (ffirst x))
+                                    (= 2 (count (first x))) (= () (first (second (first x)))))
+                               (let [body (lmap thunk-call (rest (second (first x))))]
+                                 (if (= 1 (count body)) (first body) (cons 'begin body)))
+                               (seq? x) (apply list (lmap thunk-call x))
+                               :else x))]
+        (thunk-call (nm (unsym x) {}))))))
+
+(defn- compare-with-chez [dir]
+  (let [refs (read-ae-forms (slurp (str dir "/expand-chez.edn")))]
+    (for [{:keys [file expand]} refs
+          :let [forms (read-forms (slurp (str dir "/cases/" file ".sps")))
+                specs (rest (first forms))
+                r (expand-expression (list* 'let () (rest forms)) specs)
+                ours (when (:ok r) (normalize (core->form (:ok r))))
+                theirs (try (normalize (first (read-forms expand))) (catch Exception _ ::unreadable))]
+          :when (not= theirs ::unreadable)]
+      {:case file :same (= ours theirs) :ours ours :theirs theirs})))
+
+(defn- si-case
+  "One test case as si ran it (bin/si test --si: the light driver's --case run in DIR, NAME.out, .err, .rc):
+  the shape run-case gives."
+  [dir n]
+  (let [f (fn [ext] (let [x (java.io.File. (str dir "/" n "." ext))] (if (.exists x) (slurp x) "")))
+        err (f "err") out (f "out")
+        ran (boolean (re-find #"(?m)^SI-RUN$" err))
+        raise (when-let [m (re-find #"(?m)^SI-RAISE (.*)$" err)] (read-string (second m)))
+        c (when raise (cond-> {:kinds (mapv symbol (:kinds raise))}
+                        (:form raise) (assoc :form-text (:form raise) :subform-text (:subform raise))))]
+    (cond
+      (and (not ran) raise) {:expanded false :condition c}
+      (not ran) {:expanded false :condition {:kinds [] :crash (str/trim err)}}
+      :else (cond-> {:expanded true :out out} raise (assoc :run-condition c)))))
+
+(defn- cmd-test [args]
+  (when (not= (first args) "--si") (boot-default!))
+  (let [dir (str (root) "/test/scheme/expand")
+        refs (into {} (map (juxt :file identity) (read-ae-forms (slurp (str dir "/ref-chez.edn")))))
+        known (read-string (slurp (str dir "/known.edn")))
+        files (sort (filter #(.endsWith ^String % ".sps") (map str (.list (java.io.File. (str dir "/cases"))))))
+        results (vec (for [f files
+                           :let [n (subs f 0 (- (count f) 4))
+                                 ours (if (= (first args) "--si") (si-case (second args) n) (run-case (str dir "/cases/" f)))
+                                 v (if-let [ref (refs n)] (judge ours ref) :no-reference)]]
+                       (do (println (name v) n
+                                    (if (#{:pass :pass-subform} v) "" (pr-str (dissoc ours :expanded))))
+                           {:case n :verdict v})))
+        pass? #(#{:pass :pass-subform} (:verdict %))
+        known? #(and (not (pass? %)) (= (:verdict %) (:verdict (get known (:case %)))))
+        bad (remove #(or (pass? %) (known? %)) results)]
+    (println (count (filter pass? results)) "of" (count results) "pass ("
+             (count (filter #(= :pass-subform (:verdict %)) results)) "with Chez's form our subform);"
+             (count (filter known? results)) "known;" (count bad) "failing")
+    (when-not (= (first args) "--si")
+     (let [cmp (vec (compare-with-chez dir))]
+      (println "against Chez's expand, normalized:" (count (filter :same cmp)) "of" (count cmp) "the same:"
+               (str/join " " (map :case (filter :same cmp))))))
+    (if (seq bad) 1 0)))
+
+(defn- cmd-check-suite [args]
+  (boot-default!)
+  (let [corpus (or (first args) (str (root) "/.tmp/scheme/corpora/racket-r6rs"))
+        lib (or (second args) (str (root) "/.tmp/si/suite-lib"))]
+    (set-library-path! [lib])
+    (let [before (count (rt/list->vec ((prim 'installed-libraries))))
+          t0 (System/currentTimeMillis)
+          r (expand-program (read-forms (slurp (str corpus "/r6rs/run.sps"))))
+          libs (map #(rt/value->form ((prim 'library-name) %)) (rt/list->vec ((prim 'installed-libraries))))
+          tests (filter #(= 'tests (first %)) libs)]
+      (println (count tests) "of the suite's libraries expanded and installed in" (- (System/currentTimeMillis) t0) "ms")
+      (doseq [l (sort-by str tests)] (println " " (sp/write-form l)))
+      (if (:raised r)
+        (do (println "run.sps raised" (pr-str (:condition r))) 1)
+        (do (println "run.sps expanded:" (count (sp/write-form (core->form (second (:ok r))))) "characters of core forms") 0)))))
+
+;;; The fixpoint: psyntax on Arbace expands psyntax's sources (the bootstrap's inputs) to the core forms
+;;; psyntax.pp.ae holds (psyntax on Chez's), up to the names of gensyms.
+
+(defn- gensyms-numbered
+  "A form with every symbol `gensym?` accepts renamed g1, g2, ... in the order met."
+  [x gensym?]
+  (let [m (java.util.HashMap.) n (atom 0)]
+    (letfn [(w [x] (cond (and (seq? x) (= (first x) 'scm/sym) (gensym? (second x))) (w (symbol nil (second x)))
+                         (and (symbol? x) (gensym? (name x)))
+                         (or (.get m x) (let [s (symbol (str "g" (swap! n inc)))] (.put m x s) s))
+                         (seq? x) (apply list (mapv w x)) (vector? x) (mapv w x) :else x))]
+      (w x))))
+
+(defn- cmd-fixpoint [args]
+  (boot-default!)
+  (let [out (str (root) "/.tmp/si/fixpoint")
+        pp (read-ae-forms (slurp (str (root) "/scheme/psyntax/psyntax.pp.ae")))
+        names ["compat" "internal" "config" "library-manager" "builders" "expander"]]
+    (ps/sources out)
+    (let [res (for [[i f] (map-indexed vector names)]
+                (let [t0 (System/currentTimeMillis)
+                      form (first (read-forms (slurp (str out "/src/" f ".ss"))))
+                      vs (values-of ((prim 'boot-library-expand) (rt/form->value form)))
+                      ours (binding [rt/*gensym-name* (fn [g] (symbol nil (str "G%" (name g))))] (rt/value->form (second vs)))
+                      same (= (gensyms-numbered ours #(.startsWith ^String % "G%"))
+                              (gensyms-numbered (nth pp i) #(and (.contains ^String % "$") (not (.startsWith ^String % "$")))))]
+                  (println (if same "same" "DIFFERS") f (- (System/currentTimeMillis) t0) "ms")
+                  same))
+          res (vec res)]
+      (println (count (filter true? res)) "of" (count res) "of psyntax's libraries expanded on Arbace as on Chez (the last form, the system's libraries, is boot.ss's own)")
+      (if (every? true? res) 0 1))))
+
+(defn -main [& [cmd & args]]
+  (let [rc (case cmd
+             "test" (cmd-test args)
+             "check-suite" (cmd-check-suite args)
+             "fixpoint" (cmd-fixpoint args)
+             "expand" (do (boot-default!)
+                          (doseq [f args]
+                            (let [r (expand-file (read-forms (slurp f)))]
+                              (doseq [l (:libraries r)]
+                                (if (:raised l) (println ";; raised" (pr-str (:condition l)))
+                                    (println (sp/write-form (cons 'library (map core->form (take 2 (:ok l))))))))
+                              (when-let [p (:program r)]
+                                (if (:raised p) (println ";; raised" (pr-str (:condition p)))
+                                    (println (sp/write-form (core->form (second (:ok p)))))))))
+                          0)
+             (do (println "usage: arbace.scheme.expand test | expand FILE...") 2))]
+    (shutdown-agents)
+    (System/exit rc)))

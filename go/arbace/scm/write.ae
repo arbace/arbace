@@ -1,0 +1,336 @@
+;; si's runtime: the printer, write and display of every value as Chez Scheme 10.3.0 prints it (in its
+;; R6RS mode, as the test suites run it: quote forms are not abbreviated, (quote x) stays so). Strings
+;; escape \a \b \t \n \v \f \r, " and \, and \xHEX; for the other controls, 127, U+85 and U+2028;
+;; characters are named (#\nul #\alarm ... #\space #\delete) or #\xHEX for those same controls, else
+;; themselves; symbols escape what is no identifier character as \xHEX; (peculiar ones: + - ... and
+;; ->x); a gensym is #{NAME UID}.
+(in-ns 'go.arbace.scm)
+
+(go/file "write.go"
+  :imports [[fmt "fmt"] [big "math/big"] [strconv "strconv"] [strings "strings"]])
+
+(go/func WriteTo "WriteTo writes v to b as write does (display: as display does).\n"
+  [^{:tag (* strings/Builder)} b ^any v ^bool display]
+  (type-switch [x v]
+    (case [nil] (.WriteString b "#<nil>"))
+    (case [bool]
+      (if x (.WriteString b "#t") (.WriteString b "#f")))
+    (case [int64 float64 (* big/Int) (* big/Rat)] (.WriteString b (NumberToString v 10)))
+    (case [Char]
+      (if display (.WriteRune b (conv rune x)) (writeChar b (conv rune x))))
+    (case [(* String)]
+      (if display (.WriteString b (conv string (.-R x))) (writeString b (.-R x))))
+    (case [(* Symbol)]
+      (cond display (.WriteString b (.-Name x))
+            (.-Gensym x) (do (.WriteString b "#{") (.WriteString b (.-Name x)) (.WriteString b " ") (.WriteString b (.-Uid x)) (.WriteString b "}"))
+            :else (writeSymbol b (.-Name x))))
+    (case [(* Special)] (.WriteString b (.-Name x)))
+    (case [(* Pair)]
+      (.WriteString b "(")
+      (WriteTo b (.-Car x) display)
+      (let [^any t (.-Cdr x)]
+        (while true
+          (watchdogTick)
+          (let [(values p ok) (assert (* Pair) t)]
+            (if ok
+              (do (.WriteString b " ")
+                  (WriteTo b (.-Car p) display)
+                  (set! t (.-Cdr p)))
+              (do (when (!= t (conv any Null))
+                    (.WriteString b " . ")
+                    (WriteTo b t display))
+                  (break))))))
+      (.WriteString b ")"))
+    (case [(* Vector)]
+      (.WriteString b "#(")
+      (range [i e (.-V x)]
+        (when (> i 0) (.WriteString b " "))
+        (WriteTo b e display))
+      (.WriteString b ")"))
+    (case [(* Bytevector)]
+      (.WriteString b "#vu8(")
+      (range [i e (.-B x)]
+        (when (> i 0) (.WriteString b " "))
+        (.WriteString b (strconv/Itoa (conv int e))))
+      (.WriteString b ")"))
+    (case [(* Values)]
+      (range [i e (.-V x)]
+        (when (> i 0) (.WriteString b " "))
+        (WriteTo b e display)))
+    (case [(* Prim)] (.WriteString b (+ "#<procedure " (.-Name x) ">")))
+    (case [(* Closure)]
+      (if (== (.-Name (.-L x)) "")
+        (.WriteString b "#<procedure>")
+        (.WriteString b (+ "#<procedure " (.-Name (.-L x)) ">"))))
+    (case [(* Cont)] (.WriteString b "#<continuation>"))
+    (case [(* RTD)]
+      (.WriteString b "#<record type ")
+      (let [(values u isSym) (assert (* Symbol) (.-Uid x))]
+        (if isSym
+          (.WriteString b (.-Name u))
+          (.WriteString b (.-Name (.-Name x)))))
+      (.WriteString b ">"))
+    (case [(* RCD)] (.WriteString b "#<record constructor descriptor>"))
+    (case [(* Compound)] (.WriteString b "#<compound condition>"))
+    (case [(* Record)]
+      (cond
+        (.Is (.-RTD x) CondCondition)
+        (do (.WriteString b "#<condition ") (.WriteString b (.-Name (.-Name (.-RTD x)))) (.WriteString b ">"))
+        (.-Opaque (.-RTD x))
+        (do (.WriteString b "#<") (.WriteString b (.-Name (.-Name (.-RTD x)))) (.WriteString b ">"))
+        :else
+        (do (.WriteString b "#[")
+            (.WriteString b (.-Name (.-Name (.-RTD x))))
+            (range [_ e (.-F x)]
+              (.WriteString b " ")
+              (WriteTo b e display))
+            (.WriteString b "]"))))
+    (case [fmt/Stringer] (.WriteString b (.String x)))
+    (default
+      (let [n (strings/ToLower (fmt/Sprintf "%T" v))]
+        (set! n (strings/TrimPrefix n "*"))
+        (set! n (strings/TrimPrefix n "scm."))
+        (.WriteString b (+ "#<" n ">"))))))
+
+(go/func WriteValue "WriteValue is v as write prints it (display: as display does).\n" ^string [^any v ^bool display]
+  (let [^strings/Builder b (zero strings/Builder)]
+    (WriteTo (addr b) v display)
+    (.String b)))
+
+(go/func hexUp ^string [^rune r]
+  (strings/ToUpper (strconv/FormatInt (conv int64 r) 16)))
+
+(go/func writeChar [^{:tag (* strings/Builder)} b ^rune r]
+  (.WriteString b "#\\")
+  (switch r
+    (case [0] (.WriteString b "nul") (return))
+    (case [7] (.WriteString b "alarm") (return))
+    (case [8] (.WriteString b "backspace") (return))
+    (case [9] (.WriteString b "tab") (return))
+    (case [10] (.WriteString b "newline") (return))
+    (case [11] (.WriteString b "vtab") (return))
+    (case [12] (.WriteString b "page") (return))
+    (case [13] (.WriteString b "return") (return))
+    (case [27] (.WriteString b "esc") (return))
+    (case [32] (.WriteString b "space") (return))
+    (case [127] (.WriteString b "delete") (return)))
+  (if (or (< r 32) (== r 133) (== r 8232))
+    (do (.WriteString b "x") (.WriteString b (hexUp r)))
+    (.WriteRune b r)))
+
+(go/func writeString [^{:tag (* strings/Builder)} b ^{:tag (slice rune)} s]
+  (.WriteByte b (conv byte 34))
+  (range [_ r s]
+    (switch r
+      (case [34] (.WriteString b "\\\""))
+      (case [92] (.WriteString b "\\\\"))
+      (case [7] (.WriteString b "\\a"))
+      (case [8] (.WriteString b "\\b"))
+      (case [9] (.WriteString b "\\t"))
+      (case [10] (.WriteString b "\\n"))
+      (case [11] (.WriteString b "\\v"))
+      (case [12] (.WriteString b "\\f"))
+      (case [13] (.WriteString b "\\r"))
+      (default
+        (if (or (< r 32) (== r 127) (== r 133) (== r 8232))
+          (do (.WriteString b "\\x") (.WriteString b (hexUp r)) (.WriteString b ";"))
+          (.WriteRune b r)))))
+  (.WriteByte b (conv byte 34)))
+
+(go/func writeSymbol "writeSymbol writes the symbol named name as write does.\n"
+  [^{:tag (* strings/Builder)} b ^string name]
+  (when (== name "")
+    (.WriteString b "||")
+    (return))
+  (when (or (== name "+") (== name "-") (== name "..."))
+    (.WriteString b name)
+    (return))
+  (let [arrow (strings/HasPrefix name "->")
+        ^bool first true]
+    (range [_ r name]
+      (let [^bool ok (IsIdentSubsequent r)]
+        (when (and first (not arrow))
+          (set! ok (IsIdentInitial r)))
+        (if ok
+          (.WriteRune b r)
+          (do (.WriteString b "\\x") (.WriteString b (hexUp r)) (.WriteString b ";"))))
+      (set! first false))))
+
+;; ---------------------------------------------------------------------------------------
+;; R7RS's printer (SC103 (b), doc/scheme/SCHEME-SURVEY.md, "As built: SM8b"): (scheme write)'s write, display,
+;; write-shared and write-simple. Datum labels #N= and #N# for the pairs and vectors met again while they are
+;; printed (a cycle; write and display) or for every one met twice (shared, write-shared); none with simple
+;; (write-simple). Symbols that do not read back as themselves are written between bars, with R7RS's escapes
+;; (empty, ".", a character outside R7RS's identifier characters, one that reads as a number or begins like
+;; one: +nan.0abc, 1+, .5a); strings with R7RS's escapes; bytevectors #u8(; the characters R7RS names
+;; (#\null, #\escape). Quote forms are not abbreviated, as si's R6RS printer does not.
+
+(go/type printer7 "printer7 is one R7RS print: the labels found (-1: not printed yet), the next label's number.\n"
+  (struct ^{:tag (* strings/Builder)} b ^bool display ^{:tag (map any int)} labels ^int next))
+
+(go/func compound7 ^bool [^any v]
+  (type-switch [x v]
+    (case [(* Pair)] (return true))
+    (case [(* Vector)] (return (> (len (.-V x)) 0)))
+    (default (return false))))
+
+(go/func findLabels7 "findLabels7 is the compound objects of v that need a label: met again while active (a cycle), or with shared met twice.\n"
+  ^{:tag (map any int)} [^any v ^bool shared]
+  (let [state (make (map any int))
+        labels (make (map any int))
+        ^{:tag (func [any])} visit nil]
+    (set! visit (fn [^any x]
+      (let [^{:tag (slice any)} spine nil]
+        (while (compound7 x)
+          (watchdogTick)
+          (let [s (aget state x)]
+            (when (== s 1)
+              (aset labels x -1)
+              (break))
+            (when (== s 2)
+              (when shared (aset labels x -1))
+              (break))
+            (aset state x 1)
+            (type-switch [y x]
+              (case [(* Pair)]
+                (set! spine (append spine x))
+                (visit (.-Car y))
+                (set! x (.-Cdr y)))
+              (case [(* Vector)]
+                (range [_ e (.-V y)]
+                  (visit e))
+                (aset state x 2)
+                (set! x nil)))))
+        (range [_ p spine]
+          (aset state p 2)))))
+    (visit v)
+    labels))
+
+(go/func WriteR7RS "WriteR7RS writes v to b as R7RS's write (display: display; shared: write-shared; simple: write-simple, no labels).\n"
+  [^{:tag (* strings/Builder)} b ^any v ^bool display ^bool shared ^bool simple]
+  (let [p (addr (lit printer7 :b b :display display))]
+    (if (and (not simple) (compound7 v))
+      (set! (.-labels p) (findLabels7 v shared))
+      (set! (.-labels p) (make (map any int))))
+    (.pr p v)))
+
+(go/method label "label writes x's label if it has one: #N= the first time (false), #N# after (true).\n"
+  ^bool [^{:tag (* printer7)} p ^any x]
+  (let [(values n ok) (aget (.-labels p) x)]
+    (when (not ok)
+      (return false))
+    (when (>= n 0)
+      (.WriteString (.-b p) (+ "#" (strconv/Itoa n) "#"))
+      (return true))
+    (aset (.-labels p) x (.-next p))
+    (.WriteString (.-b p) (+ "#" (strconv/Itoa (.-next p)) "="))
+    (inc! (.-next p))
+    (return false)))
+
+(go/method pr [^{:tag (* printer7)} p ^any v]
+  (let [b (.-b p)]
+    (type-switch [x v]
+      (case [(* Pair)]
+        (when (.label p v)
+          (return))
+        (.WriteString b "(")
+        (.pr p (.-Car x))
+        (let [^any t (.-Cdr x)]
+          (while true
+            (watchdogTick)
+            (let [(values q ok) (assert (* Pair) t)
+                  (values _ labelled) (aget (.-labels p) t)]
+              (if (and ok (not labelled))
+                (do (.WriteString b " ")
+                    (.pr p (.-Car q))
+                    (set! t (.-Cdr q)))
+                (do (when (!= t (conv any Null))
+                      (.WriteString b " . ")
+                      (.pr p t))
+                    (break))))))
+        (.WriteString b ")"))
+      (case [(* Vector)]
+        (when (.label p v)
+          (return))
+        (.WriteString b "#(")
+        (range [i e (.-V x)]
+          (when (> i 0) (.WriteString b " "))
+          (.pr p e))
+        (.WriteString b ")"))
+      (case [(* Bytevector)]
+        (.WriteString b "#u8(")
+        (range [i e (.-B x)]
+          (when (> i 0) (.WriteString b " "))
+          (.WriteString b (strconv/Itoa (conv int e))))
+        (.WriteString b ")"))
+      (case [(* Symbol)]
+        (if (or (.-display p) (.-Gensym x))
+          (WriteTo b v (.-display p))
+          (writeSymbol7 b (.-Name x))))
+      (case [(* String)]
+        (if (.-display p)
+          (WriteTo b v true)
+          (writeString7 b (.-R x))))
+      (case [Char]
+        (cond
+          (.-display p) (WriteTo b v true)
+          (== x 0) (.WriteString b "#\\null")
+          (== x 27) (.WriteString b "#\\escape")
+          (or (== x 11) (== x 12)) (.WriteString b (+ "#\\x" (hexUp (conv rune x))))
+          :else (WriteTo b v false)))
+      (default (WriteTo b v (.-display p))))))
+
+(go/func plain7 "plain7 is whether r is one of R7RS's identifier characters (as written without bars).\n" ^bool [^rune r]
+  (or (and (>= r \a) (<= r \z)) (and (>= r \A) (<= r \Z)) (and (>= r \0) (<= r \9))
+      (strings/ContainsRune "!$%&*/:<=>?^_~+-.@" r)
+      (and (> r 127) (IsIdentSubsequent r))))
+
+(go/func likeNumber7 "likeNumber7 is whether a symbol's name reads as a number or begins like one (Chibi's rule).\n" ^bool [^string s]
+  (when (!= (StringToNumber s 10) false)
+    (return true))
+  (let [l (strings/ToLower s)
+        t (strings/TrimLeft l "+-")]
+    (when (and (> (len l) 0) (or (== (aget l 0) \+) (== (aget l 0) \-))
+               (or (strings/HasPrefix t "inf.0") (strings/HasPrefix t "nan.0")))
+      (return true))
+    (when (and (> (len l) 1) (or (== (aget l 0) \+) (== (aget l 0) \-)))
+      (set! l (subslice l 1)))
+    (when (and (> (len l) 1) (== (aget l 0) \.))
+      (set! l (subslice l 1)))
+    (return (and (> (len l) 0) (>= (aget l 0) \0) (<= (aget l 0) \9)))))
+
+(go/func writeSymbol7 "writeSymbol7 writes the symbol named name as R7RS's write does: between bars when it would not read back.\n"
+  [^{:tag (* strings/Builder)} b ^string name]
+  (let [bars (or (== name "") (== name ".") (likeNumber7 name))]
+    (range [_ r name]
+      (when (not (plain7 r))
+        (set! bars true)))
+    (when (not bars)
+      (.WriteString b name)
+      (return))
+    (.WriteString b "|")
+    (range [_ r name]
+      (cond
+        (== r \|) (.WriteString b "\\|")
+        (== r \\) (.WriteString b "\\\\")
+        (or (< r 32) (== r 127)) (do (.WriteString b "\\x") (.WriteString b (hexUp r)) (.WriteString b ";"))
+        :else (.WriteRune b r)))
+    (.WriteString b "|")))
+
+(go/func writeString7 "writeString7 writes a string as R7RS's write does (\\a \\b \\t \\n \\r \\\" \\\\ \\| and \\xHH; for the other controls).\n"
+  [^{:tag (* strings/Builder)} b ^{:tag (slice rune)} s]
+  (.WriteByte b (conv byte 34))
+  (range [_ r s]
+    (switch r
+      (case [34] (.WriteString b "\\\""))
+      (case [92] (.WriteString b "\\\\"))
+      (case [7] (.WriteString b "\\a"))
+      (case [8] (.WriteString b "\\b"))
+      (case [9] (.WriteString b "\\t"))
+      (case [10] (.WriteString b "\\n"))
+      (case [13] (.WriteString b "\\r"))
+      (default
+        (if (or (< r 32) (== r 127) (== r 133) (== r 8232))
+          (do (.WriteString b "\\x") (.WriteString b (hexUp r)) (.WriteString b ";"))
+          (.WriteRune b r)))))
+  (.WriteByte b (conv byte 34)))

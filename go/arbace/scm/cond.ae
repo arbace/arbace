@@ -1,0 +1,166 @@
+;; si's runtime: records (R6RS's procedural and inspection layers) and conditions (records of the standard
+;; condition types, compound conditions), doc/scheme/SCHEME-SURVEY.md §5.3.
+(in-ns 'go.arbace.scm)
+
+(go/file "cond.go"
+  :imports [])
+
+(go/type Field "Field is a record type's field: its name and whether it is mutable.\n"
+  (struct ^{:tag (* Symbol)} Name ^bool Mutable))
+
+(go/type RTD
+  "RTD is a record-type descriptor: name, parent, uid (#f: generative), sealed, opaque, its own
+fields, and the number of fields of a record of this type (the parents' first).\n"
+  (struct ^{:tag (* Symbol)} Name ^{:tag (* RTD)} Parent ^any Uid ^bool Sealed ^bool Opaque
+          ^{:tag (slice Field)} Fields ^int N))
+
+(go/type Record "Record is a record: its type and its fields' values (the parents' first).\n"
+  (struct ^{:tag (* RTD)} RTD ^{:tag (slice any)} F))
+
+(go/type RCD "RCD is a record-constructor descriptor.\n"
+  (struct ^{:tag (* RTD)} RTD ^{:tag (* RCD)} Parent ^any Protocol))
+
+(go/type Compound "Compound is a compound condition: its simple conditions in order.\n"
+  (struct ^{:tag (slice (* Record))} Parts))
+
+(go/func NewRTD "NewRTD makes a record type.\n"
+  ^{:tag (* RTD)} [^{:tag (* Symbol)} name ^{:tag (* RTD)} parent ^any uid ^bool sealed ^bool opaque ^{:tag (slice Field)} fields]
+  (let [n (len fields)]
+    (when (!= parent nil)
+      (set! n (+ n (.-N parent)))
+      (when (.-Opaque parent)
+        (set! opaque true)))
+    (addr (lit RTD :Name name :Parent parent :Uid uid :Sealed sealed :Opaque opaque :Fields fields :N n))))
+
+(go/method Is "Is is whether rtd is t or one of its descendants.\n" ^bool [^{:tag (* RTD)} rtd ^{:tag (* RTD)} t]
+  (for [r rtd] (!= r nil) (set! r (.-Parent r))
+    (when (== r t)
+      (return true)))
+  false)
+
+(go/func condType ^{:tag (* RTD)} [^string name ^{:tag (* RTD)} parent & ^{:tag (slice string)} fields]
+  (let [^{:tag (slice Field)} fs nil]
+    (range [_ f fields]
+      (set! fs (append fs (lit Field :Name (Intern f)))))
+    (NewRTD (Intern name) parent false false false fs)))
+
+(go/var CondCondition (condType "&condition" nil))
+(go/var CondMessage (condType "&message" CondCondition "message"))
+(go/var CondWarning (condType "&warning" CondCondition))
+(go/var CondSerious (condType "&serious" CondCondition))
+(go/var CondError (condType "&error" CondSerious))
+(go/var CondViolation (condType "&violation" CondSerious))
+(go/var CondAssertion (condType "&assertion" CondViolation))
+(go/var CondIrritants (condType "&irritants" CondCondition "irritants"))
+(go/var CondWho (condType "&who" CondCondition "who"))
+(go/var CondNonContinuable (condType "&non-continuable" CondViolation))
+(go/var CondImplRestriction (condType "&implementation-restriction" CondViolation))
+(go/var CondLexical (condType "&lexical" CondViolation))
+(go/var CondSyntax (condType "&syntax" CondViolation "form" "subform"))
+(go/var CondUndefined (condType "&undefined" CondViolation))
+(go/var CondIO (condType "&i/o" CondError))
+(go/var CondIORead (condType "&i/o-read" CondIO))
+(go/var CondIOWrite (condType "&i/o-write" CondIO))
+(go/var CondIOInvalidPosition (condType "&i/o-invalid-position" CondIO "position"))
+(go/var CondIOFilename (condType "&i/o-filename" CondIO "filename"))
+(go/var CondIOFileProtection (condType "&i/o-file-protection" CondIOFilename))
+(go/var CondIOFileIsReadOnly (condType "&i/o-file-is-read-only" CondIOFileProtection))
+(go/var CondIOFileAlreadyExists (condType "&i/o-file-already-exists" CondIOFilename))
+(go/var CondIOFileDoesNotExist (condType "&i/o-file-does-not-exist" CondIOFilename))
+(go/var CondIOPort (condType "&i/o-port" CondIO "port"))
+(go/var CondIODecoding (condType "&i/o-decoding" CondIOPort))
+(go/var CondIOEncoding (condType "&i/o-encoding" CondIOPort "char"))
+(go/var CondNoInfinities (condType "&no-infinities" CondImplRestriction))
+(go/var CondNoNans (condType "&no-nans" CondImplRestriction))
+
+(go/func MakeSimple "MakeSimple is a simple condition of type t with field values fs.\n"
+  ^{:tag (* Record)} [^{:tag (* RTD)} t & ^{:tag (slice any)} fs]
+  (let [f (make (slice any) (.-N t))]
+    (copy f fs)
+    (addr (lit Record :RTD t :F f))))
+
+(go/func SimpleConditions "SimpleConditions is c's simple conditions (nil when c is no condition).\n"
+  ^{:tag (slice (* Record))} [^any c]
+  (type-switch [x c]
+    (case [(* Compound)] (return (.-Parts x)))
+    (case [(* Record)]
+      (when (.Is (.-RTD x) CondCondition)
+        (return (lit (slice (* Record)) x)))))
+  nil)
+
+(go/func IsCondition ^bool [^any c]
+  (type-switch [x c]
+    (case [(* Compound)] (return true))
+    (case [(* Record)] (return (.Is (.-RTD x) CondCondition))))
+  false)
+
+(go/func CondPart "CondPart is c's first simple condition of type t, or nil.\n" ^{:tag (* Record)} [^any c ^{:tag (* RTD)} t]
+  (range [_ r (SimpleConditions c)]
+    (when (.Is (.-RTD r) t)
+      (return r)))
+  nil)
+
+(go/func CondField "CondField is field i (counted from the type's first) of c's part of type t, ok false when none.\n"
+  [^any c ^{:tag (* RTD)} t ^int i] :results [any bool]
+  (let [r (CondPart c t)]
+    (when (== r nil)
+      (return nil false))
+    (return (aget (.-F r) (+ i (- (.-N t) (len (.-Fields t))))) true)))
+
+;; ---------------------------------------------------------------------------------------
+;; Record constructors (protocols): a record's constructor is its protocol applied to a maker, level
+;; by level up the parents (R6RS 6.3).
+
+(go/func procOf "procOf is a procedure value of Go function f (n arguments, -1 any).\n"
+  ^{:tag (* Prim)} [^string name ^int min ^int max ^{:tag (func [(* M) (slice any)] [any bool])} f]
+  (addr (lit Prim :Name name :Min min :Max max :Ctl f)))
+
+(go/func levelMaker
+  "levelMaker is the procedure a protocol of level rcd receives, for a record of type leaf whose fields
+below this level are below.\n"
+  ^any [^{:tag (* RTD)} leaf ^{:tag (* RCD)} rcd ^{:tag (slice any)} below]
+  (let [rtd (.-RTD rcd)
+        own (len (.-Fields rtd))
+        name (.-Name (.-Name leaf))]
+    (when (== (.-Parent rtd) nil)
+      (return (procOf name own own
+                (fn [^{:tag (* M)} m ^{:tag (slice any)} args] :results [any bool]
+                  (let [f (make (slice any) 0 (.-N leaf))]
+                    (set! f (append f (spread args)))
+                    (set! f (append f (spread below)))
+                    (return (addr (lit Record :RTD leaf :F f)) true))))))
+    (let [prcd (.-Parent rcd)]
+      (when (== prcd nil)
+        (set! prcd (addr (lit RCD :RTD (.-Parent rtd)))))
+      (procOf name 0 -1
+        (fn [^{:tag (* M)} m ^{:tag (slice any)} pargs] :results [any bool]
+          (let [pargs2 (append (lit (slice any)) (spread pargs))]
+            (return (procOf name own own
+                      (fn [^{:tag (* M)} m2 ^{:tag (slice any)} args] :results [any bool]
+                        (let [b (make (slice any) 0 (+ (len args) (len below)))]
+                          (set! b (append b (spread args)))
+                          (set! b (append b (spread below)))
+                          (return (.Apply m2 (levelConstructor m2 leaf prcd b) pargs2)))))
+                    true)))))))
+
+(go/func levelConstructor
+  "levelConstructor is the constructor of level rcd for a record of type leaf (its protocol applied to
+the level's maker, by a nested call).\n"
+  ^any [^{:tag (* M)} m ^{:tag (* RTD)} leaf ^{:tag (* RCD)} rcd ^{:tag (slice any)} below]
+  (let [p (levelMaker leaf rcd below)
+        rtd (.-RTD rcd)]
+    (when (!= (.-Protocol rcd) (conv any false))
+      (when (!= (.-Protocol rcd) nil)
+        (return (.Call m (.-Protocol rcd) p))))
+    (when (== (.-Parent rtd) nil)
+      (return p))
+    (let [np (.-N (.-Parent rtd))
+          name (.-Name (.-Name leaf))]
+      (procOf name (.-N rtd) (.-N rtd)
+        (fn [^{:tag (* M)} m2 ^{:tag (slice any)} args] :results [any bool]
+          (let [pa (append (lit (slice any)) (spread (subslice args 0 np)))
+                own (append (lit (slice any)) (spread (subslice args np)))]
+            (return (.Apply m2 (.Call m2 p (spread pa)) own))))))))
+
+(go/func RecordConstructor "RecordConstructor is the constructor of rcd.\n" ^any [^{:tag (* M)} m ^{:tag (* RCD)} rcd]
+  (levelConstructor m (.-RTD rcd) rcd nil))

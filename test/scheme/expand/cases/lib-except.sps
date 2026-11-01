@@ -1,0 +1,8 @@
+(library (lib ex)
+  (export a b)
+  (import (rnrs))
+  (define a 1) (define b 2))
+(import (rnrs) (except (lib ex) b))
+(define b 'mine)
+(write (list a b))
+(newline)

@@ -758,6 +758,22 @@ covers what.
   first line names its source), under the GNU General Public License version 2 (the text below,
   "OpenJDK (jdk26u)"), without the Classpath Exception, which jdk26u's `test/` does not carry.
   They are inputs of the check, in no executable.
+- `scheme/psyntax/` (Scheme's expander, doc/scheme/SCHEME-SURVEY.md, "As built: SM4"; origins in
+  `scheme/provenance.edn`): `expander.ae`, `library-manager.ae`, `builders.ae` and `config.ae` are
+  psyntax, the R6RS library and syntax-case system of Abdulaziz Ghuloum and R. Kent Dybvig, as Ikarus
+  Scheme carried it (https://github.com/lambdaconservatory/ikarus at
+  `1f2b250ed9e8cb1c2466c939a9a305461db71739`, `scheme/psyntax.*.ss`, each file's notice kept), as Scheme
+  forms; `psyntax.pp.ae` is generated from them (psyntax expanded by itself), and `tools/psyntax/boot.ss`
+  follows the structure of `psyntax-buildscript.ss` of the portable psyntax-r6rs (revision 4, 2007, by the
+  same authors): all under the MIT License below ("psyntax"). `compat.ae`, `internal.ae`, `patches.edn`,
+  `tools/psyntax/chez/`, `tools/psyntax/run.ss` and `tools/psyntax/expand.ss` are Arbace's own, under the
+  Eclipse Public License 1.0 (Ikarus's own `psyntax.compat.ss`, under the GPL version 3, is not vendored).
+- `scheme/lib/srfi/` (the SRFIs' reference implementations ported as R6RS libraries, their tests in
+  `test/scheme/srfi/`): each SRFI's section below, "SRFI 1" to "SRFI 133", names its repository, its
+  revision and its license.
+- `scheme/vendor/chibi/` (Chibi Scheme 0.12's `(chibi test)` and the libraries it imports, with three of
+  their tests; `scheme/vendor/chibi/provenance.edn`) and `scheme/lib/chibi/optional.sls`, derived from
+  it: under the BSD 3-Clause License below ("Chibi Scheme").
 - `seed/arbace-seed-go.tar.xz` (since S4, 2026-10-13; doc/STANDALONE-NOTES.md, "S4: the
   Go-source seed"): the seed of the bootstrap, Arbace's Go program as the Go-hosted fixpoint
   printed it, the source of the Go build's executables (above): the main package with its
@@ -972,6 +988,36 @@ DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
 THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+```
+
+## psyntax: MIT License
+
+From the head of each file of psyntax in https://github.com/lambdaconservatory/ikarus at
+`1f2b250ed9e8cb1c2466c939a9a305461db71739` (`scheme/psyntax.expander.ss`, `psyntax.library-manager.ss`,
+`psyntax.builders.ss`, `psyntax.config.ss`), the same as the `README.txt` of psyntax-r6rs revision 4; it covers
+`scheme/psyntax/expander.ae`, `library-manager.ae`, `builders.ae`, `config.ae`, `psyntax.pp.ae` and
+`tools/psyntax/boot.ss` (above):
+
+```
+Copyright (c) 2006, 2007 Abdulaziz Ghuloum and Kent Dybvig
+
+Permission is hereby granted, free of charge, to any person obtaining a
+copy of this software and associated documentation files (the "Software"),
+to deal in the Software without restriction, including without limitation
+the rights to use, copy, modify, merge, publish, distribute, sublicense,
+and/or sell copies of the Software, and to permit persons to whom the
+Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
 ```
 
 ## TamaGo's goos module: BSD 3-Clause License
@@ -2415,4 +2461,346 @@ Ty Coon, President of Vice
 That's all there is to it!
 
 --------------------------------------------------
+
+## SRFI 14 (char-sets): MIT Scheme license
+
+Covers `scheme/lib/srfi/%3a14/char-sets.sls` (the port of Olin Shivers' reference implementation `srfi-14.scm`, himself derived from
+MIT Scheme's runtime; srfi-14 repository at d6e98129d1e075c03bfe4dcb30e1b5847727e26e, `scheme/lib/srfi/provenance-14.edn`) and
+the tests `test/scheme/srfi/srfi-14.sps` derived from `srfi-14-tests.scm`. The license, as `srfi-14.scm` states it at its end:
+
+```
+Copyright (c) 1988-1995 Massachusetts Institute of Technology
+
+This material was developed by the Scheme project at the Massachusetts
+Institute of Technology, Department of Electrical Engineering and
+Computer Science.  Permission to copy and modify this software, to
+redistribute either the original software or a modified version, and
+to use this software for any purpose is granted, subject to the
+following restrictions and understandings.
+
+1. Any copy made of this software must include this copyright notice
+in full.
+
+2. Users of this software agree to make their best efforts (a) to
+return to the MIT Scheme project any improvements or extensions that
+they make, so that these may be included in future releases; and (b)
+to inform MIT of noteworthy uses of this software.
+
+3. All materials developed as a consequence of the use of this
+software shall duly acknowledge such use, in accordance with the usual
+standards of acknowledging credit in academic research.
+
+4. MIT has made no warrantee or representation that the operation of
+this software will be error-free, and MIT is under no obligation to
+provide any services, by way of maintenance, update, or otherwise.
+
+5. In conjunction with products arising from the use of this material,
+there shall be no use of the name of the Massachusetts Institute of
+Technology nor of any adaptation thereof in any advertising,
+promotional, or sales literature without prior written consent from
+MIT in each case.
+```
+
+## SRFI 128 (comparators): MIT license
+
+Covers `scheme/lib/srfi/%3a128/comparators.sls` and `scheme/lib/srfi/%3a128.sls` and `test/scheme/srfi/srfi-128.sps` (John Cowan's
+reference implementation and tests, github.com/scheme-requests-for-implementation/srfi-128).
+
+```
+Copyright (C) John Cowan (2015). All Rights Reserved.
+
+Permission is hereby granted, free of charge, to any person
+obtaining a copy of this software and associated documentation
+files (the "Software"), to deal in the Software without
+restriction, including without limitation the rights to use,
+copy, modify, merge, publish, distribute, sublicense, and/or
+sell copies of the Software, and to permit persons to whom the
+Software is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice shall be
+included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
+OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+OTHER DEALINGS IN THE SOFTWARE.
+```
+
+## SRFI 125 (intermediate hash tables): William D Clinger's notice
+
+Covers `scheme/lib/srfi/%3a125/hash-tables.sls`, `scheme/lib/srfi/%3a125.sls` and `test/scheme/srfi/srfi-125.sps` (William D
+Clinger's reference implementation and tests, github.com/scheme-requests-for-implementation/srfi-125).
+
+```
+Copyright 2015 William D Clinger.
+
+Permission to copy this software, in whole or in part, to use this
+software for any lawful purpose, and to redistribute this software
+is granted subject to the restriction that all copies made of this
+software must include this copyright and permission notice in full.
+
+I also request that you send me a copy of any improvements that you
+make to this software so that they may be incorporated within it to
+the benefit of the Scheme community.
+```
+
+## SRFI 158 (generators and accumulators): MIT license
+
+Covers `scheme/lib/srfi/%3a158/generators-and-accumulators.sls`, `scheme/lib/srfi/%3a158.sls` and `test/scheme/srfi/srfi-158.sps`
+(Shiro Kawai, John Cowan and Thomas Gilray's reference implementation and tests,
+github.com/scheme-requests-for-implementation/srfi-158; the notice is the SRFI document's).
+
+```
+Copyright (C) Shiro Kawai, John Cowan, Thomas Gilray (2015). All Rights Reserved.
+
+Permission is hereby granted, free of charge, to any person obtaining a
+copy of this software and associated documentation files (the "Software"),
+to deal in the Software without restriction, including without limitation
+the rights to use, copy, modify, merge, publish, distribute, sublicense,
+and/or sell copies of the Software, and to permit persons to whom the
+Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+```
+
+## SRFI 1 (lists): Olin Shivers' notice and the MIT license
+
+Covers `scheme/lib/srfi/%3a1/lists.sls` (the port of Olin Shivers' reference implementation `srfi-1-reference.scm`; srfi-1 repository at 72442d67896181afccd4519c36140ba65ccfd0ca, `scheme/lib/srfi/provenance-1.edn`), which keeps the notice below at its top, and the tests `test/scheme/srfi/srfi-1.sps`. The notice of the reference file, then the MIT license text of the repository's `LICENSES/MIT.txt`:
+
+```
+Copyright (c) 1998, 1999 by Olin Shivers. You may do as you please with
+this code as long as you do not remove this copyright notice or
+hold me liable for its use. Please send bug reports to shivers@ai.mit.edu.
+    -Olin
+
+MIT License
+
+Copyright (c) <year> <copyright holders>
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+```
+
+## SRFI 26 (cut): public domain and the MIT license
+
+Covers `scheme/lib/srfi/%3a26/cut.sls` (the port of `cut.scm`, which its authors Sebastian Egner and Al Petrofsky place in the public domain: "placed in the public domain"; srfi-26 repository at 2102d4d0db3ab74744a2765d9237027a55c5f58b, `scheme/lib/srfi/provenance-26.edn`) and the tests `test/scheme/srfi/srfi-26.sps` derived from `check.scm`. The SRFI document is under the MIT license, as its Copyright section states:
+
+```
+Copyright (C) Sebastian Egner (2002). All Rights Reserved.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+```
+
+## SRFI 39 (parameters): MIT license
+
+Covers `scheme/lib/srfi/%3a39/parameters.sls` (the reference implementation printed in the SRFI document; srfi-39 repository at 840e8d7e8b3bc4fbbc0cf8c78ce52dde42211702, `scheme/lib/srfi/provenance-39.edn`) and the tests `test/scheme/srfi/srfi-39.sps`. The license, as the SRFI document states it:
+
+```
+Copyright (C) Marc Feeley 2002. All Rights Reserved.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+```
+
+## SRFI 69 (basic hash tables): MIT license
+
+Covers `scheme/lib/srfi/%3a69/basic-hash-tables.sls` (the reference implementation printed in the SRFI document; srfi-69 repository at c9c3604c1818f3f27cf54b43e77c327a02a6c53f, `scheme/lib/srfi/provenance-69.edn`) and the tests `test/scheme/srfi/srfi-69.sps`. The license, as the SRFI document states it:
+
+```
+Copyright (C) Panu Kalliokoski (2005). All Rights Reserved.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+```
+
+## SRFI 98 (OS environment variables): MIT license
+
+Covers `scheme/lib/srfi/%3a98/os-environment-variables.sls` (written for the SRFI's specification; srfi-98 repository at 8f28224c77be945bf5fd4d5e750831979f23adc4, `scheme/lib/srfi/provenance-98.edn`) and the tests `test/scheme/srfi/srfi-98.sps`. The specification's license, as the SRFI document states it:
+
+```
+Copyright (C) Taro Minowa (Higepon) (2008). All Rights Reserved.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+```
+
+## SRFI 13 (strings): MIT Scheme and Scsh licenses
+
+Covers `scheme/lib/srfi/%3a13/strings.sls` (the port of Olin Shivers' reference implementation `srfi-13.scm`, srfi-13 repository at
+e608d1280b73944cfc96a05d8da6003cf296f09f, `scheme/lib/srfi/provenance-13.edn`) and `test/scheme/srfi/srfi-13.sps`. The prefix, suffix and
+comparison routines are under the MIT Scheme license (the text is in the section "SRFI 14 (char-sets): MIT Scheme license"
+above), the remainder under the Scsh license. `srfi-13.scm` states them at its end:
+
+```
+Copyright details
+
+The prefix/suffix and comparison routines in this code had (extremely
+distant) origins in MIT Scheme's string lib, and was substantially
+reworked by Olin Shivers (shivers@ai.mit.edu) 9/98. As such, it is
+covered by MIT Scheme's open source copyright. See below for details.
+
+The KMP string-search code was influenced by implementations written
+by Stephen Bevan, Brian Dehneyer and Will Fitzgerald. However, this
+version was written from scratch by myself.
+
+The remainder of this code was written from scratch by myself for scsh.
+The scsh copyright is a BSD-style open source copyright. See below for
+details.
+    -Olin Shivers
+
+MIT Scheme copyright terms
+
+This material was developed by the Scheme project at the Massachusetts
+Institute of Technology, Department of Electrical Engineering and
+Computer Science.  Permission to copy and modify this software, to
+redistribute either the original software or a modified version, and
+to use this software for any purpose is granted, subject to the
+following restrictions and understandings.
+
+1. Any copy made of this software must include this copyright notice
+in full.
+
+2. Users of this software agree to make their best efforts (a) to
+return to the MIT Scheme project any improvements or extensions that
+they make, so that these may be included in future releases; and (b)
+to inform MIT of noteworthy uses of this software.
+
+3. All materials developed as a consequence of the use of this
+software shall duly acknowledge such use, in accordance with the usual
+standards of acknowledging credit in academic research.
+
+4. MIT has made no warrantee or representation that the operation of
+this software will be error-free, and MIT is under no obligation to
+provide any services, by way of maintenance, update, or otherwise.
+
+5. In conjunction with products arising from the use of this material,
+there shall be no use of the name of the Massachusetts Institute of
+Technology nor of any adaptation thereof in any advertising,
+promotional, or sales literature without prior written consent from
+MIT in each case.
+
+Scsh copyright terms
+
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions
+are met:
+1. Redistributions of source code must retain the above copyright
+   notice, this list of conditions and the following disclaimer.
+2. Redistributions in binary form must reproduce the above copyright
+   notice, this list of conditions and the following disclaimer in the
+   documentation and/or other materials provided with the distribution.
+3. The name of the authors may not be used to endorse or promote products
+   derived from this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE AUTHORS ``AS IS'' AND ANY EXPRESS OR
+IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
+OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
+IN NO EVENT SHALL THE AUTHORS BE LIABLE FOR ANY DIRECT, INDIRECT,
+INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
+NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
+THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+```
+
+## SRFI 133 (vectors): MIT License
+
+Covers `scheme/lib/srfi/%3a133/vectors.sls` (the port of John Cowan's `vectors/vectors-impl.scm`, srfi-133 repository at
+12923135eeebedcff84972a4b5140b0f97306160, `scheme/lib/srfi/provenance-133.edn`; the code is Taylor Campbell's SRFI 43 code, placed in the
+public domain, with corrections by Will Clinger and changes by John Cowan, public domain or under this license) and
+`test/scheme/srfi/srfi-133.sps` (derived from `vectors/vectors-test.scm`). The license, as the repository's `LICENSE` states it:
+
+```
+Copyright (C) John Cowan (2016). All Rights Reserved.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+## Chibi Scheme: BSD 3-Clause License
+
+Covers `scheme/vendor/chibi/` (Chibi-Scheme 0.12's `(chibi test)`, `(chibi diff)`, `(chibi optional)` and `(chibi term ansi)`, their `.sld` files and the
+`.scm` files they include, and the three libraries' own tests `diff-test.sld`, `optional-test.sld` and `term/ansi-test.sld` (SC142), unchanged:
+byte for byte the files of `lib/chibi/` in https://github.com/ashinn/chibi-scheme at the tag `0.12`, commit
+`08e23be118e7de8cf29d606bc4793371c0ace680`, as the host's chibi-scheme package installs them; `scheme/vendor/chibi/provenance.edn`). The license is
+the repository's `COPYING` at that tag, quoted below verbatim (SHA-256 `86805fe7af1bd20d5f5050d86c61d6fe038452cb08c6106a08761e010d37da43`, the same
+file test/scheme/corpora.edn pins for the chibi-r7rs corpus; the package does not install it). The files keep their own notices: `test.scm`'s
+"Copyright (c) 2010-2025 Alex Shinn. All rights reserved. BSD-style license: http://synthcode.com/license.txt" (that page gives the same text with
+2000-2015), `ansi.scm`'s 2010-2014. `scheme/lib/chibi/optional.sls` (SC150) is `optional.scm`'s definitions (Alex Shinn, the same license) with
+`let-optionals*` written afresh for si. `scheme/lib/chibi/test.sls` is Arbace's own, written from the description in `r7rs-tests.scm`'s header (SM8),
+under the Eclipse Public License 1.0.
+
+```
+Copyright (c) 2009-2021 Alex Shinn
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions
+are met:
+1. Redistributions of source code must retain the above copyright
+   notice, this list of conditions and the following disclaimer.
+2. Redistributions in binary form must reproduce the above copyright
+   notice, this list of conditions and the following disclaimer in the
+   documentation and/or other materials provided with the distribution.
+3. The name of the author may not be used to endorse or promote products
+   derived from this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR
+IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
+OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
+IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT,
+INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
+NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
+THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```

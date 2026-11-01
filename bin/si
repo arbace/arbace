@@ -1,0 +1,597 @@
+#!/bin/bash
+# si, Scheme's evaluator (doc/scheme/SCHEME-SURVEY.md), so far its expander (SM4, "As built: SM4"): the vendored
+# psyntax (scheme/psyntax/, Ikarus's psyntax as Scheme forms, scheme/provenance.edn) booted from its expanded
+# form (scheme/psyntax/psyntax.pp.ae) on the bootstrap host, Arbace (arbace.scheme.rt, .core, .expand),
+# evaluated on the tools' host. Chez Scheme 10.3.0 (/usr/bin/chez; CHEZ names another) is needed only to
+# bootstrap (boot) and to record the reference (record).
+#
+#   bin/si vendor fetch|convert|verify   psyntax's originals fetched at their pins into .tmp/si/vendor, converted
+#                                        to scheme/psyntax/*.ae (mode :full), or the forms printed back and
+#                                        compared with the pins byte for byte
+#   bin/si boot [--check]                the bootstrap: the sources printed from the forms with the patches
+#                                        (scheme/psyntax/patches.edn), psyntax on Chez (tools/psyntax/) expands
+#                                        them into scheme/psyntax/psyntax.pp.ae; --check: into .tmp and compared
+#   bin/si expand [--lib DIR]... FILE... each file's programs and libraries expanded to core forms (SPEC 5)
+#   bin/si test --si                     the same cases run on si (the light driver), judged the same way
+#   bin/si test [--record]               the expander's own tests (test/scheme/expand/): each case expanded
+#                                        and run on the bootstrap host, against Chez's runs recorded in
+#                                        test/scheme/expand/ref-chez.edn (--record: run Chez, rewrite it)
+#   bin/si fixpoint                      psyntax on Arbace expands psyntax's sources (as boot prints them): the
+#                                        core forms of psyntax.pp.ae, up to gensyms' names (no Chez)
+#   bin/si unit [GO-TEST-FLAGS...]      si's runtime's unit tests: go/arbace/scm printed by repr/go and go test (TamaGo's go)
+#   bin/si light                         the light driver (test/scheme/si-driver: arbace/scm alone, no Arbace build)
+#                                        built into .tmp/si/si-light, psyntax.pp printed as Scheme text beside it
+#   bin/si run [--lib DIR]... FILE [ARG]...  a top-level program run on si (the light driver): psyntax on si
+#                                        expands it, si evaluates it; the status and output are the program's
+#   bin/si check [--ref-test] [--record-ref] [--record] [--only ID]...
+#                                        si's check: test/scheme/si/programs.edn's programs (Racket's R6RS suite's
+#                                        run programs, Larceny's, si's own) run on si and judged against Chez's
+#                                        recorded runs (test/scheme/si/ref-chez.edn; --record-ref: run Chez first and
+#                                        merge its runs into it, the entries not run stay; --ref-test: its pure parts), every non-pass in a class of test/scheme/divergences.edn
+#                                        (--record: write test/scheme/check-linux-amd64.edn)
+#   bin/si aot [--lib DIR]... FILE [ARG]...  a top-level program compiled (SM7: core forms to Go forms by
+#                                        arbace.scheme.aot, printed by repr/go, built by TamaGo's go over
+#                                        arbace/scm, psyntax's package linked when it uses eval) and run
+#   bin/si check --aot [--record] [--only ID]...
+#                                        the check's programs compiled and run (.tmp/si/aot/runs), judged
+#                                        as si's (refused: an item with the reason, test/scheme/divergences-aot.edn;
+#                                        --record: test/scheme/check-aot-linux-amd64.edn), then compared with
+#                                        si's interpreted runs (.tmp/si/runs, bin/si check's)
+#   bin/si srfi [--record] [N...]       the SRFIs' programs (test/scheme/srfi/srfi-N*.sps) run on si with the libraries of scheme/lib, judged by their counted checks (SC173)
+#   bin/si srfi --aot [N...]            the same programs compiled (aot_compile) and run, judged the same way, their
+#                                        stdout compared with si's interpreted run of each ("same"/"differs")
+#   bin/si bench [--n N]                 timings for the speed report: larceny's fib (stdin N, default 40) and the R6RS
+#                                        suite's programs, wall seconds on si, compiled (compile time apart) and on Chez,
+#                                        one after another: a TSV (program, si_s, aot_s, chez_s, compile_s) and a total
+#                                        line, also in .tmp/si/aot/bench.tsv
+#   bin/si r7rs [--chez|--chibi|--chibi-test] [--record]               SM8: Chibi's R7RS suite (corpus chibi-r7rs) on si in R7RS mode (--r7rs), with the R7RS-small
+#                                        libraries of scheme/lib/scheme and (chibi test): one result a test, the failing ones in classes
+#                                        (test/scheme/divergences-corpora.edn), --record: test/scheme/check-r7rs-linux-amd64.edn;
+#                                        --chez (SM8c, SC117 (b)): the suite rewritten for Chez and run by Chez 10.3.0, its answer to
+#                                        each test (test/scheme/ref-r7rs-chez.edn); si's run is judged against both;
+#                                        --chibi (SC143 (c)): Chibi-Scheme 0.12.0 (the host's chibi-scheme, CHIBI names another) runs the suite
+#                                        through test/scheme/chibi/driver.scm, its answer to each test (test/scheme/ref-r7rs-chibi.edn);
+#                                        si's run is paired with it by source and judged against it as against Chez;
+#                                        --chibi-test (SC130 (a)): the suite with Chibi's own (chibi test) (scheme/vendor/chibi),
+#                                        its tests compared with SM8's library's (test/scheme/check-r7rs-chibi-test-linux-amd64.edn)
+#   bin/si chibi-tests [--record]        SC142 (b): Chibi 0.12.0's own tests of the vendored libraries (diff, optional, term ansi) on si and on Chibi,
+#                                        test by test (test/scheme/check-chibi-tests-linux-amd64.edn)
+#   bin/si ecraven [--count N] [--record] [NAME...]  ecraven's r7rs-benchmarks on si, repetition count N (default 1), SI_TIMEOUT s each
+#                                        (default 60); each output stamped with what made it and its limit, a judge refuses a mix
+#   bin/si ecraven --chez [--count N] [--record] [NAME...]  the same on Chez through the R7RS libraries' Chez variants
+#                                        (scheme/lib/**/NAME.chezscheme.sls, SM8b): the reference's answers and times,
+#                                        test/scheme/ref-ecraven-chez.edn
+#   bin/si ecraven --chibi [--count N] [--record] [NAME...]  the same on Chibi-Scheme 0.12.0 (SC151; CHIBI names another),
+#                                        test/scheme/ref-ecraven-chibi.edn
+#   bin/si ecraven [--chez|--chibi] --judge [--record]  no run: the last run's outputs judged (and recorded) again
+#   bin/si mats [--record] [FILE.ms...]  (FILE.ms...: a partial run judges and records only those files, SC182 (b)) Chez's mats on si: each mat's clauses top-level forms of an interaction environment of
+#                                        (chezscheme), si's subset, and (si mats) (test/scheme/mats/run.sps); SI_TIMEOUT s a
+#                                        file, default 400 (SC133 (b)); every failing clause an item
+#   bin/si corpora files|divergences     every file of the three corpora in a result or a class; the recorded items by class
+#   bin/si divergences [RESULTS]         the recorded check's non-pass items by class
+#   bin/si check-suite                   Racket's R6RS suite's libraries and programs expanded (the corpus of
+#                                        test/scheme/corpora.edn), its &syntax cases (test/scheme/expand/suite-syntax.edn)
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+. "$root/bin/lib/tmpdir.bash"
+. "$root/bin/lib/tools.bash"
+export ARBACE_ROOT=$root
+CHEZ=${CHEZ:-chez}
+vendor=$root/.tmp/si/vendor
+
+prov() { arbace_tool -e "(let [p (:psyntax (read-string (slurp \"$root/scheme/provenance.edn\")))] (doseq [f (:files p)] (println (str (:url-prefix p) (:path f) \"\t\" (:path f) \"\t\" (:sha256 f)))))"; }
+
+boot() {
+  local check=0 out=$root/.tmp/si/boot pp=$root/scheme/psyntax/psyntax.pp.ae
+  [ "${1:-}" = --check ] && check=1
+  rm -rf "$out"; mkdir -p "$out"
+  arbace_tool -m arbace.scheme.psyntax sources "$out"
+  cp "$root"/tools/psyntax/chez/psyntax/compat.ss "$root"/tools/psyntax/chez/psyntax/internal.ss "$out/stage/psyntax/"
+  (cd "$out" && "$CHEZ" --libdirs stage --script "$root/tools/psyntax/boot.ss" src psyntax.pp)
+  if [ $check = 1 ]; then
+    arbace_tool -m arbace.scheme.psyntax pp-forms "$out/psyntax.pp" "$out/psyntax.pp.ae"
+    cmp "$out/psyntax.pp.ae" "$pp" && echo "psyntax.pp.ae: the bootstrap gives the committed file"
+  else
+    arbace_tool -m arbace.scheme.psyntax pp-forms "$out/psyntax.pp" "$pp"
+  fi
+}
+
+light_dir=$root/.tmp/si
+si_light=$light_dir/si-light
+light() {
+  mkdir -p "$light_dir"
+  "$root/bin/repr-scheme" print "$root/scheme/psyntax/psyntax.pp.ae" > "$light_dir/psyntax.pp.ss"
+  si_print_build build
+}
+# si_print_build test|build ARGS: go/arbace/scm (and the driver) printed by repr/go, then go test or go build
+si_print_build() {
+  local what=$1; shift
+  local out=$light_dir/print src=$light_dir/print-root
+  rm -rf "$out" "$src"; mkdir -p "$src/go/arbace"
+  ln -s "$root/go/arbace/scm.ae" "$root/go/arbace/scm" "$root/test/scheme/si-driver/go/arbace/sidriver.ae" \
+    "$root/test/scheme/si-driver/go/arbace/sidriver" "$src/go/arbace/"
+  "$root/bin/build-go" --print-only --tests --module arbace --work "$out" "$src" >&2
+  local goroot=${ARBACE_GOROOT:-/root/tamago-go}
+  (cd "$out/mod" && export GOROOT="$goroot" GOTOOLCHAIN=local GOFLAGS= GOWORK=off GO111MODULE=on GOPROXY=off CGO_ENABLED=0 \
+     GOCACHE="${SI_GOCACHE:-$light_dir/gocache}" GOMAXPROCS=${GOMAXPROCS:-4} SI_TEST_ROOT="$root" &&
+     case $what in
+       test) "$goroot/bin/go" test -p 2 "$@" ./scm/ ;;
+       build) "$goroot/bin/go" build -p 2 -trimpath -o "$si_light" ./sidriver/ ;;
+     esac)
+}
+# si_exec [--lib DIR]... FILE ARGS: the light driver, under the light tier's memory and threads
+si_exec() { GOMEMLIMIT=${SI_GOMEMLIMIT:-1500MiB} GOMAXPROCS=${GOMAXPROCS:-4} "$si_light" --pp "$light_dir/psyntax.pp.ss" --lib "$root/scheme/lib" "$@"; }
+
+# chez_libdir: scheme/lib as Chez finds it (SM8b, SC113 (b)): Chez names (srfi :N ...)'s files srfi/:N/..., si
+# srfi/%3aN/... (psyntax's encoding), so .tmp/si/chez-lib links each; Chez takes NAME.chezscheme.sls before NAME.sls
+chez_lib=$light_dir/chez-lib
+chez_libdir() {
+  rm -rf "$chez_lib"; mkdir -p "$chez_lib/srfi"
+  local x
+  for x in "$root"/scheme/lib/scheme "$root"/scheme/lib/chibi; do ln -s "$x" "$chez_lib/"; done
+  for x in "$root"/scheme/lib/srfi/%3a*; do b=$(basename "$x"); ln -s "$x" "$chez_lib/srfi/:${b#%3a}"; done
+}
+
+# need_gnu_timeout: the judges read status 124 as a time limit, coreutils' timeout's (doc/ALPINE.md); busybox's returns 143
+need_gnu_timeout() {
+  timeout --version 2>&1 | grep -qs 'GNU coreutils' || { echo "bin/si: needs coreutils' timeout (status 124 on a time limit; doc/ALPINE.md)" >&2; exit 2; }
+}
+# run_key IMPL [FILE...]: the key of what makes a corpus run (review 009, finding 6): for si the light driver, psyntax's
+# boot text and the libraries (scheme/lib, scheme/vendor), for chez and chibi the executable (and scheme/lib for Chez's
+# variants), then the FILEs (a harness); stamp DIR/NAME.stamp: the key and the time limit beside each output, so that a
+# judge refuses a directory that mixes runs of another si (or holds none)
+run_key() {
+  local impl=$1; shift
+  { case $impl in
+      si) sha256sum < "$si_light"; sha256sum < "$light_dir/psyntax.pp.ss"; (cd "$root" && find scheme/lib scheme/vendor -type f | LC_ALL=C sort | xargs sha256sum) ;;
+      chez) sha256sum < "$(command -v "$CHEZ")"; (cd "$root" && find scheme/lib -type f | LC_ALL=C sort | xargs sha256sum) ;;
+      chibi) sha256sum < "$(command -v "${CHIBI:-chibi-scheme}")" ;;
+    esac
+    local f; for f in "$@"; do sha256sum < "$f"; done; } | sha256sum | cut -c1-16
+}
+stamp() { printf 'key=%s timeout=%s%s\n' "$run_key_v" "$2" "${3:+ count=$3}" > "$1.stamp"; }
+
+# check_runs IMPL DIR [IDS...]: each program of programs.edn run by IMPL (si or chez) in its file's directory,
+# its stdin the :input file, into DIR/ID.out, .err, .rc
+check_runs() {
+  local impl=$1 dir=$2; shift 2
+  local corpora=${ARBACE_SCHEME_CORPORA:-$root/.tmp/scheme/corpora}
+  mkdir -p "$dir" "$root/.tmp/si/suite-lib"; ln -sfn "$corpora/racket-r6rs" "$root/.tmp/si/suite-lib/tests"
+  arbace_tool -e '(doseq [p (:programs (read-string (slurp "'"$root"'/test/scheme/si/programs.edn")))] (println (str (:id p) "\t" (if (:corpus p) "c" "r") "\t" (:file p) "\t" (or (:input p) ""))))' > "$dir/list.tsv"
+  local id kind file input base d f
+  while IFS=$'\t' read -r id kind file input; do
+    if [ $# -gt 0 ]; then case " $* " in *" $id "*) ;; *) continue ;; esac; fi
+    base=$root; [ "$kind" = c ] && base=$corpora
+    f=$base/$file; d=$(dirname "$f")
+    local o=$dir/${id//\//__} in=$dir/empty.in
+    : > "$in"; [ -n "$input" ] && in=$corpora/$input
+    case $impl in
+      chez) (cd "$d" && timeout "${SI_TIMEOUT:-600}" "$CHEZ" --libdirs "$root/.tmp/si/suite-lib" --program "$(basename "$f")" < "$in" > "$o.out" 2> "$o.err"; echo $? > "$o.rc") || true ;;
+      si) (cd "$d" && timeout "${SI_TIMEOUT:-600}" env GOMEMLIMIT=${SI_GOMEMLIMIT:-1500MiB} GOMAXPROCS=${GOMAXPROCS:-4} "$si_light" --pp "$light_dir/psyntax.pp.ss" --lib "$root/.tmp/si/suite-lib" --lib "$root/scheme/lib" "$(basename "$f")" < "$in" > "$o.out" 2> "$o.err"; echo $? > "$o.rc") || true ;;
+    esac
+    echo "$impl $id: status $(cat "$o.rc")" >&2
+  done < "$dir/list.tsv"
+}
+
+# si's AOT (SM7, doc/scheme/SCHEME-SURVEY.md, "As built: SM7 (write-ahead)"): core forms to Go forms by
+# arbace.scheme.aot (on the tools' host), printed by repr/go (bin/build-go --print-only), built with TamaGo's go
+# over arbace/scm into one small executable per program (the light tier: not Arbace's executable).
+aot_dir=$root/.tmp/si/aot
+aot_mod=$aot_dir/mod
+aot_go() {
+  local goroot=${ARBACE_GOROOT:-/root/tamago-go}
+  (cd "$aot_mod" && env GOROOT="$goroot" GOTOOLCHAIN=local GOFLAGS= GOWORK=off GO111MODULE=on GOPROXY=off CGO_ENABLED=0 \
+     GOCACHE="${SI_AOT_GOCACHE:-$aot_dir/gocache}" GOMAXPROCS=${GOMAXPROCS:-4} "$goroot/bin/go" "$@")
+}
+# aot_module: the module the compiled programs build in: arbace/scm as printed for the light driver, psyntax's
+# package compiled (cached by its input's and the compiler's hash)
+aot_module() {
+  [ -x "$si_light" ] || light
+  mkdir -p "$aot_mod/scm" "$aot_mod/scmaot" "$aot_dir/bin"
+  printf 'module arbace\n\ngo 1.27\n' > "$aot_mod/go.mod"
+  rm -f "$aot_mod"/scm/*.go
+  for f in "$light_dir"/print/mod/scm/*.go; do case $f in *_test.go) ;; *) cp "$f" "$aot_mod/scm/" ;; esac; done
+  si_exec --aot-boot "$aot_dir/psyntax.ir"
+  local key; key=$(cat "$aot_dir/psyntax.ir" "$root/arbace/scheme/aot.ae" | sha256sum | cut -c1-16)
+  local cached=$aot_dir/psyntax-$key
+  if [ ! -d "$cached" ]; then
+    local src=$aot_dir/src-psyntax w=$aot_dir/print-psyntax
+    rm -rf "$src" "$w" "$aot_dir"/psyntax-*
+    echo "si aot: compiling psyntax ($(wc -c < "$aot_dir/psyntax.ir") bytes of core forms)" >&2
+    arbace_tool -m arbace.scheme.aot psyntax "$aot_dir/psyntax.ir" "$src"
+    "$root/bin/build-go" --print-only --module arbace --layout lines --work "$w" "$src" >&2
+    mkdir -p "$cached"; cp "$w"/mod/scmaot/psyntax/*.go "$cached/"
+    rm -rf "$src" "$w"
+  fi
+  rm -rf "$aot_mod/scmaot/psyntax"; mkdir -p "$aot_mod/scmaot/psyntax"; cp "$cached"/*.go "$aot_mod/scmaot/psyntax/"
+}
+# aot_compile PKG DIR FILE OUT [LIB...]: program FILE (in directory DIR) expanded by psyntax on si, its units
+# compiled to Go forms, printed into the module's arbace/scmaot/PKG and built into OUT; on a refusal, OUT.refused
+# holds the reason
+aot_compile() {
+  local pkg=$1 d=$2 file=$3 out=$4; shift 4
+  local ir=$aot_dir/ir/$pkg.ir src=$aot_dir/src/$pkg w=$aot_dir/print/$pkg log=$aot_dir/log/$pkg
+  mkdir -p "$aot_dir/ir" "$aot_dir/log"; rm -rf "$src" "$w" "$aot_mod/scmaot/$pkg" "$out" "$out".{refused,cout,cerr,crc}
+  local largs=(); for l in "$@"; do largs+=(--lib "$l"); done
+  local st=0
+  (cd "$d" && timeout "${SI_TIMEOUT:-600}" env GOMEMLIMIT=${SI_GOMEMLIMIT:-1500MiB} GOMAXPROCS=${GOMAXPROCS:-4} \
+     "$si_light" --pp "$light_dir/psyntax.pp.ss" ${largs[@]+"${largs[@]}"} --aot-dump "$ir" "$file" < "$light_dir/empty.in" > "$log.dump" 2> "$log.dump-err") || st=$?
+  if [ $st != 0 ]; then
+    # rejected when compiled, as by si and by Chez when run: the compile-time error is the compiled run's outcome
+    if [ $st = 255 ]; then cp "$log.dump" "$out.cout"; cp "$log.dump-err" "$out.cerr"; echo 255 > "$out.crc"; return 0; fi
+    echo "the expansion fails: status $st: $(grep -m1 . "$log.dump-err")" > "$out.refused"; return 0
+  fi
+  if ! arbace_tool -m arbace.scheme.aot program "$ir" "$src" "$pkg" "$file" "$@" > "$log.compile" 2>&1; then
+    echo "the compiler refuses it: $(grep -m1 'refused\|Exception\|rror' "$log.compile" || tail -1 "$log.compile")" > "$out.refused"; return 0
+  fi
+  if ! "$root/bin/build-go" --print-only --module arbace --layout lines --work "$w" "$src" > "$log.print" 2>&1; then
+    echo "repr/go does not print it: $(tail -1 "$log.print")" > "$out.refused"; return 0
+  fi
+  mkdir -p "$aot_mod/scmaot"; cp -r "$w/mod/scmaot/$pkg" "$aot_mod/scmaot/$pkg"; rm -rf "$src" "$w"
+  if ! aot_go build -p 2 -trimpath -o "$out" "./scmaot/$pkg/prog" > "$log.build" 2>&1; then
+    echo "go build fails: $(grep -m1 . "$log.build")" > "$out.refused"; return 0
+  fi
+}
+# aot_cache_trim: Go's cache of the compiled programs kept under 500 MB
+aot_cache_trim() {
+  local c=${SI_AOT_GOCACHE:-$aot_dir/gocache}
+  [ -d "$c" ] || return 0
+  if [ "$(du -sm "$c" | cut -f1)" -gt "${SI_AOT_GOCACHE_MB:-500}" ]; then aot_go clean -cache; fi
+}
+# check_runs_aot DIR [IDS...]: each program of programs.edn compiled (aot_compile) and run as check_runs runs it
+# on si, into DIR/ID.out, .err, .rc (or DIR/ID.refused), DIR/ID.time the seconds compiling and running; the
+# executable and its packages deleted after its run
+check_runs_aot() {
+  local dir=$1; shift
+  local corpora=${ARBACE_SCHEME_CORPORA:-$root/.tmp/scheme/corpora}
+  mkdir -p "$dir" "$root/.tmp/si/suite-lib"; ln -sfn "$corpora/racket-r6rs" "$root/.tmp/si/suite-lib/tests"
+  aot_module
+  arbace_tool -e '(doseq [p (:programs (read-string (slurp "'"$root"'/test/scheme/si/programs.edn")))] (println (str (:id p) "\t" (if (:corpus p) "c" "r") "\t" (:file p) "\t" (or (:input p) ""))))' > "$dir/list.tsv"
+  local id kind file input base d f n=0
+  while IFS=$'\t' read -r id kind file input; do
+    if [ $# -gt 0 ]; then case " $* " in *" $id "*) ;; *) continue ;; esac; fi
+    base=$root; [ "$kind" = c ] && base=$corpora
+    f=$base/$file; d=$(dirname "$f")
+    local o=$dir/${id//\//__} in=$dir/empty.in pkg=p_$(echo "$id" | tr -c 'A-Za-z0-9\n' '_')
+    : > "$in"; [ -n "$input" ] && in=$corpora/$input
+    rm -f "$o.out" "$o.err" "$o.rc" "$o.refused" "$o.time" "$o.compile-error"
+    local t0 t1 t2; t0=$(date +%s.%N)
+    aot_compile "$pkg" "$d" "$(basename "$f")" "$aot_dir/bin/$pkg" "$root/.tmp/si/suite-lib" "$root/scheme/lib"
+    t1=$(date +%s.%N)
+    if [ -f "$aot_dir/bin/$pkg.refused" ]; then
+      mv "$aot_dir/bin/$pkg.refused" "$o.refused"; echo "aot $id: refused: $(cat "$o.refused")" >&2
+    elif [ -f "$aot_dir/bin/$pkg.crc" ]; then
+      mv "$aot_dir/bin/$pkg.cout" "$o.out"; mv "$aot_dir/bin/$pkg.cerr" "$o.err"; mv "$aot_dir/bin/$pkg.crc" "$o.rc"; : > "$o.compile-error"
+      echo "aot $id: rejected at compile time (status 255): $(grep -m1 . "$o.err")" >&2
+    else
+      (cd "$d" && timeout "${SI_TIMEOUT:-600}" env GOMEMLIMIT=${SI_GOMEMLIMIT:-1500MiB} GOMAXPROCS=${GOMAXPROCS:-4} \
+         "$aot_dir/bin/$pkg" ${SI_AOT_ARGS:-} < "$in" > "$o.out" 2> "$o.err"; echo $? > "$o.rc") || true
+      echo "aot $id: status $(cat "$o.rc")" >&2
+    fi
+    t2=$(date +%s.%N)
+    echo "$t0 $t1 $t2" | awk '{printf "compile %.2f run %.2f\n", $2-$1, $3-$2}' > "$o.time"
+    rm -rf "$aot_dir/bin/$pkg" "$aot_mod/scmaot/$pkg"
+    n=$((n+1)); [ $((n % 8)) = 0 ] && aot_cache_trim
+  done < "$dir/list.tsv"
+  aot_cache_trim
+}
+
+# bench_time OUT CMD...: CMD's wall seconds on stdout (its stdout/stderr discarded into OUT.out/.err, stdin from $bench_in)
+bench_time() {
+  local o=$1; shift
+  local t0 t1; t0=$(date +%s.%N)
+  timeout "${SI_TIMEOUT:-600}" "$@" < "$bench_in" > "$o.out" 2> "$o.err" || true
+  t1=$(date +%s.%N); echo "$t0 $t1" | awk '{printf "%.2f", $2-$1}'
+}
+# bench_one ID DIR FILE IN: one row of the bench table (si, compiled, Chez; the compile time apart)
+bench_one() {
+  local id=$1 d=$2 f=$3 in=$4 pkg=p_bench_$(echo "$1" | tr -c 'A-Za-z0-9\n' '_')
+  local o=$aot_dir/bench/$(echo "$id" | tr -c 'A-Za-z0-9\n' '_') si_s aot_s chez_s ct t0 t1
+  bench_in=$in
+  si_s=$(cd "$d" && bench_time "$o.si" env GOMEMLIMIT=${SI_GOMEMLIMIT:-1500MiB} GOMAXPROCS=${GOMAXPROCS:-4} "$si_light" --pp "$light_dir/psyntax.pp.ss" --lib "$root/.tmp/si/suite-lib" --lib "$root/scheme/lib" "$(basename "$f")")
+  t0=$(date +%s.%N)
+  aot_compile "$pkg" "$d" "$(basename "$f")" "$aot_dir/bin/$pkg" "$root/.tmp/si/suite-lib" "$root/scheme/lib"
+  t1=$(date +%s.%N); ct=$(echo "$t0 $t1" | awk '{printf "%.2f", $2-$1}')
+  if [ -f "$aot_dir/bin/$pkg.refused" ]; then aot_s=refused; echo "bench $id: refused: $(cat "$aot_dir/bin/$pkg.refused")" >&2
+  elif [ -f "$aot_dir/bin/$pkg.crc" ]; then aot_s=rejected
+  else aot_s=$(cd "$d" && bench_time "$o.aot" env GOMEMLIMIT=${SI_GOMEMLIMIT:-1500MiB} GOMAXPROCS=${GOMAXPROCS:-4} "$aot_dir/bin/$pkg"); fi
+  rm -rf "$aot_dir/bin/$pkg" "$aot_dir/bin/$pkg".{refused,cout,cerr,crc} "$aot_mod/scmaot/$pkg"
+  chez_s=$(cd "$d" && bench_time "$o.chez" "$CHEZ" --libdirs "$root/.tmp/si/suite-lib" --program "$(basename "$f")")
+  printf '%s\t%s\t%s\t%s\t%s\n' "$id" "$si_s" "$aot_s" "$chez_s" "$ct"
+}
+
+cmd=${1:-}; [ $# -eq 0 ] || shift
+case $cmd in
+  vendor)
+    sub=${1:-}; [ $# -eq 0 ] || shift
+    case $sub in
+      fetch)
+        while IFS=$'\t' read -r url path sha; do
+          mkdir -p "$(dirname "$vendor/$path")"
+          curl -sfL --max-time 120 -o "$vendor/$path" "$url"
+          [ "$(sha256sum < "$vendor/$path" | cut -c1-64)" = "$sha" ] || { echo "SHA-256 of $url differs from the pin" >&2; exit 1; }
+          echo "fetched $path"
+        done < <(prov) ;;
+      convert) arbace_tool -m arbace.scheme.psyntax convert "$vendor" ;;
+      verify) arbace_tool -m arbace.scheme.psyntax verify ;;
+      *) echo "usage: bin/si vendor fetch|convert|verify" >&2; exit 2 ;;
+    esac ;;
+  boot) boot "$@" ;;
+  check-suite)
+    "$root/bin/repr-scheme" corpus fetch racket-r6rs >/dev/null
+    corpus=${ARBACE_SCHEME_CORPORA:-$root/.tmp/scheme/corpora}/racket-r6rs
+    mkdir -p "$root/.tmp/si/suite-lib"; ln -sfn "$corpus" "$root/.tmp/si/suite-lib/tests"
+    arbace_tool -m arbace.scheme.expand check-suite "$corpus" "$root/.tmp/si/suite-lib" ;;
+  test)
+    if [ "${1:-}" = --si ]; then
+      light; d=$light_dir/test-si; rm -rf "$d"; mkdir -p "$d"; : > "$d/empty.in"
+      for c in "$root"/test/scheme/expand/cases/*.sps; do
+        n=$(basename "$c" .sps)
+        (cd "$(dirname "$c")" && timeout "${SI_TIMEOUT:-120}" env GOMEMLIMIT=${SI_GOMEMLIMIT:-1500MiB} GOMAXPROCS=${GOMAXPROCS:-4} \
+           "$si_light" --pp "$light_dir/psyntax.pp.ss" --case "$n.sps" < "$d/empty.in" > "$d/$n.out" 2> "$d/$n.err"; echo $? > "$d/$n.rc") || true
+      done
+      arbace_tool -m arbace.scheme.expand test --si "$d"; exit $?
+    fi
+    if [ "${1:-}" = --record ]; then
+      "$CHEZ" --script "$root/tools/psyntax/run.ss" "$root"/test/scheme/expand/cases/*.sps > "$root/test/scheme/expand/ref-chez.edn"
+      echo "recorded $(wc -l < "$root/test/scheme/expand/ref-chez.edn") runs of Chez into test/scheme/expand/ref-chez.edn"
+    fi
+    arbace_tool -m arbace.scheme.expand test ;;
+  unit) si_print_build test "$@" ;;
+  light) light ;;
+  aot)
+    aot_module; : > "$light_dir/empty.in"
+    libs=(); while [ "${1:-}" = --lib ]; do libs+=("$(cd "$2" && pwd)"); shift 2; done
+    [ $# -ge 1 ] || { echo "usage: bin/si aot [--lib DIR]... FILE [ARG]..." >&2; exit 2; }
+    f=$(cd "$(dirname "$1")" && pwd)/$(basename "$1"); shift
+    aot_compile p_run "$(dirname "$f")" "$(basename "$f")" "$aot_dir/bin/p_run" ${libs[@]+"${libs[@]}"} "$root/scheme/lib"
+    if [ -f "$aot_dir/bin/p_run.refused" ]; then echo "si aot: refused: $(cat "$aot_dir/bin/p_run.refused")" >&2; exit 3; fi
+    if [ -f "$aot_dir/bin/p_run.crc" ]; then cat "$aot_dir/bin/p_run.cout"; cat "$aot_dir/bin/p_run.cerr" >&2; exit 255; fi
+    rc=0; (cd "$(dirname "$f")" && GOMEMLIMIT=${SI_GOMEMLIMIT:-1500MiB} GOMAXPROCS=${GOMAXPROCS:-4} "$aot_dir/bin/p_run" "$@") || rc=$?
+    rm -rf "$aot_dir/bin/p_run" "$aot_mod/scmaot/p_run"; exit $rc ;;
+  run) [ -x "$si_light" ] || light; si_exec "$@" ;;
+  check)
+    rec_ref=0 rec=() only=() aot=0
+    while [ $# -gt 0 ]; do
+      case $1 in --ref-test) arbace_tool -m arbace.scheme.check ref-test; exit $? ;; --record-ref) rec_ref=1; shift ;; --record) rec=(--record); shift ;; --only) only+=("$2"); shift 2 ;; --aot) aot=1; shift ;; *) echo "check: $1?" >&2; exit 2 ;; esac
+    done
+    if [ $aot = 1 ]; then
+      mkdir -p "$light_dir"; "$root/bin/repr-scheme" corpus fetch racket-r6rs larceny-r6rs > "$light_dir/fetch.log"
+      light; : > "$light_dir/empty.in"
+      rm -rf "$aot_dir/runs"; check_runs_aot "$aot_dir/runs" ${only[@]+"${only[@]}"}
+      oargs=(); for i in ${only[@]+"${only[@]}"}; do oargs+=(--only "$i"); done
+      rc=0; arbace_tool -m arbace.scheme.check judge "$aot_dir/runs" --aot ${rec[@]+"${rec[@]}"} ${oargs[@]+"${oargs[@]}"} || rc=$?
+      if [ -d "$root/.tmp/si/runs" ]; then arbace_tool -m arbace.scheme.check compare "$root/.tmp/si/runs" "$aot_dir/runs" ${oargs[@]+"${oargs[@]}"} || rc=1
+      else echo "si aot: no interpreted runs to compare with (bin/si check first)"; fi
+      exit $rc
+    fi
+    mkdir -p "$light_dir"; "$root/bin/repr-scheme" corpus fetch racket-r6rs larceny-r6rs > "$light_dir/fetch.log"
+    if [ $rec_ref = 1 ]; then
+      rm -rf "$root/.tmp/si/ref"; check_runs chez "$root/.tmp/si/ref" ${only[@]+"${only[@]}"}
+      arbace_tool -m arbace.scheme.check record-ref "$root/.tmp/si/ref"
+    fi
+    light
+    rm -rf "$root/.tmp/si/runs"; check_runs si "$root/.tmp/si/runs" ${only[@]+"${only[@]}"}
+    oargs=(); for i in ${only[@]+"${only[@]}"}; do oargs+=(--only "$i"); done
+    arbace_tool -m arbace.scheme.check judge "$root/.tmp/si/runs" ${rec[@]+"${rec[@]}"} ${oargs[@]+"${oargs[@]}"} ;;
+  bench)
+    n=40
+    while [ $# -gt 0 ]; do case $1 in --n) n=$2; shift 2 ;; *) echo "bench: $1?" >&2; exit 2 ;; esac; done
+    mkdir -p "$light_dir" "$aot_dir/bench"; "$root/bin/repr-scheme" corpus fetch racket-r6rs larceny-r6rs > "$light_dir/fetch.log"
+    corpora=${ARBACE_SCHEME_CORPORA:-$root/.tmp/scheme/corpora}
+    mkdir -p "$root/.tmp/si/suite-lib"; ln -sfn "$corpora/racket-r6rs" "$root/.tmp/si/suite-lib/tests"
+    light; aot_module
+    echo "$n" > "$aot_dir/bench/fib.in"; : > "$aot_dir/bench/empty.in"
+    arbace_tool -e '(doseq [p (:programs (read-string (slurp "'"$root"'/test/scheme/si/programs.edn")))] (when (:suite p) (println (str (:id p) "\t" (:file p)))))' > "$aot_dir/bench/list.tsv"
+    tsv=$aot_dir/bench.tsv; : > "$tsv.new"
+    printf 'program\tsi_s\taot_s\tchez_s\tcompile_s\n' | tee -a "$tsv.new"
+    bench_one "larceny/fib (n=$n)" "$corpora/larceny-r6rs" "$corpora/larceny-r6rs/fib.sch" "$aot_dir/bench/fib.in" | tee -a "$tsv.new"
+    while IFS=$'\t' read -r id file; do
+      bench_one "$id" "$(dirname "$corpora/$file")" "$corpora/$file" "$aot_dir/bench/empty.in" | tee -a "$tsv.new"
+      aot_cache_trim
+    done < "$aot_dir/bench/list.tsv"
+    aot_cache_trim
+    awk -F'\t' 'NR>2 && $1 !~ /^larceny/ { si+=$2; if ($3 ~ /^[0-9.]+$/) aot+=$3; chez+=$4; c+=$5 }
+      END { printf "total (suite)\t%.2f\t%.2f\t%.2f\t%.2f\n", si, aot, chez, c }' "$tsv.new" | tee -a "$tsv.new"
+    mv "$tsv.new" "$tsv" ;;
+  srfi)
+    aot=0; if [ "${1:-}" = --aot ]; then aot=1; shift; fi
+    if [ $aot = 1 ]; then
+      [ -x "$si_light" ] || light
+      aot_module; : > "$light_dir/empty.in"
+      rc=0; ran=0; mkdir -p "$aot_dir/srfi"
+      for f in "$root"/test/scheme/srfi/srfi-*.sps; do
+        b=$(basename "$f" .sps); n=${b#srfi-}; n=${n%%-*}
+        if [ $# -gt 0 ]; then case " $* " in *" $n "*) ;; *) continue ;; esac; fi
+        pkg=p_srfi_$(echo "$b" | tr -c 'A-Za-z0-9\n' '_'); o=$aot_dir/srfi/$b
+        ran=$((ran+1))
+        aot_compile "$pkg" "$(dirname "$f")" "$(basename "$f")" "$aot_dir/bin/$pkg" "$root/scheme/lib"
+        if [ -f "$aot_dir/bin/$pkg.refused" ]; then
+          echo "FAIL $b: refused: $(cat "$aot_dir/bin/$pkg.refused")"; rc=1; rm -f "$aot_dir/bin/$pkg.refused"; rm -rf "$aot_mod/scmaot/$pkg"; continue
+        elif [ -f "$aot_dir/bin/$pkg.crc" ]; then
+          mv "$aot_dir/bin/$pkg.cout" "$o.out"; mv "$aot_dir/bin/$pkg.cerr" "$o.err"; mv "$aot_dir/bin/$pkg.crc" "$o.rc"
+        else
+          (cd "$(dirname "$f")" && timeout "${SI_TIMEOUT:-300}" env GOMEMLIMIT=${SI_GOMEMLIMIT:-1500MiB} GOMAXPROCS=${GOMAXPROCS:-4} \
+             "$aot_dir/bin/$pkg" < "$light_dir/empty.in" > "$o.out" 2> "$o.err"; echo $? > "$o.rc") || true
+        fi
+        rm -rf "$aot_dir/bin/$pkg" "$aot_mod/scmaot/$pkg"
+        # si's interpreted run of the same program
+        ii=$light_dir/srfi-$b; : > "$ii.in"
+        (cd "$(dirname "$f")" && timeout "${SI_TIMEOUT:-300}" env GOMEMLIMIT=${SI_GOMEMLIMIT:-1500MiB} GOMAXPROCS=${GOMAXPROCS:-4} \
+           "$si_light" --pp "$light_dir/psyntax.pp.ss" --lib "$root/scheme/lib" "$(basename "$f")" < "$ii.in" > "$ii.out" 2> "$ii.err"; echo $? > "$ii.rc") || true
+        st=$(cat "$o.rc"); fails=$(grep -c '^FAIL' "$o.out" || true)
+        if cmp -s "$o.out" "$ii.out"; then same=same; else same=differs; fi
+        if [ "$st" = 0 ] && [ "$fails" = 0 ]; then echo "pass $b: $(tail -1 "$o.out") ($same as si)"; else echo "FAIL $b: status $st, $fails FAIL lines ($o.out, $o.err) ($same as si)"; rc=1; fi
+      done
+      aot_cache_trim
+      echo "srfi --aot: $ran programs"; exit $rc
+    fi
+    # bin/si srfi [--record] [N...]: test/scheme/srfi/srfi-N*.sps (SM6: the SRFIs as libraries under scheme/lib/srfi/) run on si
+    # (the light driver) into .tmp/si/srfi; judged by the checks counted (SC173 (b)): status 0, no FAIL line, the report line
+    # "srfi-N: P passed, F failed" last with F zero, and P, F as recorded (test/scheme/check-srfi-linux-amd64.edn, --record)
+    need_gnu_timeout
+    rec=(); sel=()
+    while [ $# -gt 0 ]; do case $1 in --record) rec=(--record); shift ;; *) sel+=("$1"); shift ;; esac; done
+    [ -x "$si_light" ] || light
+    d=$light_dir/srfi; run_key_v=$(run_key si)
+    mkdir -p "$d"
+    if [ ${#sel[@]} -eq 0 ]; then find "$d" -maxdepth 1 -type f -delete; fi
+    for f in "$root"/test/scheme/srfi/srfi-*.sps; do
+      b=$(basename "$f" .sps); n=${b#srfi-}; n=${n%%-*}
+      if [ ${#sel[@]} -gt 0 ]; then case " ${sel[*]} " in *" $n "*) ;; *) continue ;; esac; fi
+      o=$d/$b; : > "$d/empty.in"
+      (cd "$(dirname "$f")" && timeout "${SI_TIMEOUT:-300}" env GOMEMLIMIT=${SI_GOMEMLIMIT:-1500MiB} GOMAXPROCS=${GOMAXPROCS:-4} \
+         "$si_light" --pp "$light_dir/psyntax.pp.ss" --lib "$root/scheme/lib" "$(basename "$f")" < "$d/empty.in" > "$o.out" 2> "$o.err"; echo $? > "$o.rc") || true
+      stamp "$o" "${SI_TIMEOUT:-300}"
+      echo "$b: rc $(cat "$o.rc") $(tail -1 "$o.out")"
+    done
+    arbace_tool -m arbace.scheme.corpora srfi "$d" --key "$run_key_v" ${rec[@]+"${rec[@]}"} ;;
+  r7rs)
+    # bin/si r7rs [--record]: Chibi's r7rs-tests.scm (the corpus chibi-r7rs) run on si in R7RS mode (its own, SM8b) with the
+    # R7RS libraries of scheme/lib/scheme and (chibi test): one result a test (SM8), judged by the file's own pass/fail,
+    # every failing test in a class of test/scheme/divergences-corpora.edn; --record: test/scheme/check-r7rs-linux-amd64.edn
+    rec=(); impl=si
+    while [ $# -gt 0 ]; do case $1 in --record) rec=(--record); shift ;; --chez) impl=chez; shift ;; --chibi-test) impl=own; shift ;; --chibi) impl=chibi; shift ;; *) echo "bin/si r7rs: unknown argument $1" >&2; exit 2 ;; esac; done
+    mkdir -p "$light_dir"; : > "$light_dir/empty.in"
+    "$root/bin/repr-scheme" corpus fetch chibi-r7rs > "$light_dir/fetch.log"
+    corpora=${ARBACE_SCHEME_CORPORA:-$root/.tmp/scheme/corpora}
+    if [ $impl = chez ]; then
+      # SM8c (SC117 (b)): the suite rewritten lexically for Chez (arbace.scheme.corpora/rewrite-for-chez), run by Chez 10.3.0
+      # through the libraries' Chez variants; one answer a test, test/scheme/ref-r7rs-chez.edn
+      d=$light_dir/r7rs-chez; rm -rf "$d"; mkdir -p "$d"; chez_libdir
+      arbace_tool -m arbace.scheme.corpora r7rs-rewrite "$corpora/chibi-r7rs/r7rs-tests.scm" "$d/r7rs-tests.scm"
+      (cd "$d" && timeout "${SI_TIMEOUT:-600}" "$CHEZ" --libdirs "$chez_lib" --program r7rs-tests.scm < "$light_dir/empty.in" > "$d/out" 2> "$d/err"; echo $? > "$d/rc") || true
+      arbace_tool -m arbace.scheme.corpora r7rs-chez "$d" ${rec[@]+"${rec[@]}"}
+      exit $?
+    fi
+    if [ $impl = chibi ]; then
+      # SC143 (c): Chibi-Scheme 0.12.0 (the host's chibi-scheme) as the reference beside Chez: the suite through test/scheme/chibi/driver.scm
+      # (Chibi's reader refuses some literals, so the file is read form by form), one answer a test, test/scheme/ref-r7rs-chibi.edn
+      d=$light_dir/r7rs-chibi; rm -rf "$d"; mkdir -p "$d"
+      (cd "$corpora/chibi-r7rs" && timeout "${SI_TIMEOUT:-600}" env ANSI_ESCAPES_ENABLED=0 "${CHIBI:-chibi-scheme}" "$root/test/scheme/chibi/driver.scm" r7rs-tests.scm < "$light_dir/empty.in" > "$d/out" 2> "$d/err"; echo $? > "$d/rc") || true
+      arbace_tool -m arbace.scheme.corpora r7rs-chibi "$d" ${rec[@]+"${rec[@]}"}
+      exit $?
+    fi
+    [ -x "$si_light" ] || light
+    if [ $impl = own ]; then
+      # SC130 (a): the suite with Chibi's own (chibi test), vendored in scheme/vendor/chibi (its library path before scheme/lib's,
+      # whose (chibi test) is SM8's); ANSI_ESCAPES_ENABLED=0: no colors; one answer a test, from the marks of its output
+      d=$light_dir/r7rs-own; rm -rf "$d"; mkdir -p "$d"
+      (cd "$corpora/chibi-r7rs" && timeout "${SI_TIMEOUT:-600}" env ANSI_ESCAPES_ENABLED=0 GOMEMLIMIT=${SI_GOMEMLIMIT:-1500MiB} GOMAXPROCS=${GOMAXPROCS:-4} \
+         "$si_light" --pp "$light_dir/psyntax.pp.ss" --lib "$root/scheme/vendor/chibi" --lib "$root/scheme/lib" r7rs-tests.scm < "$light_dir/empty.in" > "$d/out" 2> "$d/err"; echo $? > "$d/rc") || true
+      arbace_tool -m arbace.scheme.corpora r7rs-own "$d" ${rec[@]+"${rec[@]}"}
+      exit $?
+    fi
+    d=$light_dir/r7rs; rm -rf "$d"; mkdir -p "$d"
+    (cd "$corpora/chibi-r7rs" && timeout "${SI_TIMEOUT:-600}" env GOMEMLIMIT=${SI_GOMEMLIMIT:-1500MiB} GOMAXPROCS=${GOMAXPROCS:-4} \
+       "$si_light" --pp "$light_dir/psyntax.pp.ss" --lib "$root/scheme/lib" r7rs-tests.scm < "$light_dir/empty.in" > "$d/out" 2> "$d/err"; echo $? > "$d/rc") || true
+    arbace_tool -m arbace.scheme.corpora r7rs "$d" ${rec[@]+"${rec[@]}"} ;;
+  chibi-tests)
+    # bin/si chibi-tests [--record] (SC142 (b)): Chibi-Scheme 0.12.0's own tests of the libraries vendored in scheme/vendor/chibi,
+    # (chibi diff-test), (chibi optional-test) and (chibi term ansi-test) (their .sld files, vendored beside the libraries): each library's
+    # tests run one form at a time on si (test/scheme/chibi/split-run.sps) and by (run-tests) on Chibi (the host's chibi-scheme, CHIBI),
+    # ANSI_ESCAPES_ENABLED=1 for both (the tests expect escapes); the marks compared test by test, every si non-pass in a class of
+    # test/scheme/divergences-corpora.edn; --record: test/scheme/check-chibi-tests-linux-amd64.edn
+    rec=(); [ "${1:-}" = --record ] && rec=(--record)
+    mkdir -p "$light_dir"; : > "$light_dir/empty.in"
+    [ -x "$si_light" ] || light
+    d=$light_dir/chibi-tests; rm -rf "$d"; mkdir -p "$d"
+    # SC150: si's own (chibi optional) (scheme/lib/chibi/optional.sls: the vendored one's else branch rejects a bare variable beside
+    # the (var default) pairs) goes first on the library path, alone in its directory so that the vendored (chibi test) etc. still come before scheme/lib's
+    mkdir -p "$d/lib/chibi"; cp "$root/scheme/lib/chibi/optional.sls" "$d/lib/chibi/optional.sls"
+    for lib in "diff:chibi diff-test:chibi/diff-test.sld" "optional:chibi optional-test:chibi/optional-test.sld" "term-ansi:chibi term ansi-test:chibi/term/ansi-test.sld"; do
+      n=${lib%%:*}; rest=${lib#*:}; name=${rest%%:*}; sld=${rest#*:}
+      printf '(import (scheme base) (%s)) (run-tests)\n' "$name" > "$d/$n.scm"
+      (cd "$d" && timeout "${SI_TIMEOUT:-300}" env ANSI_ESCAPES_ENABLED=1 "${CHIBI:-chibi-scheme}" "$n.scm" < "$light_dir/empty.in" > "$n.chibi.out" 2> "$n.chibi.err"; echo $? > "$n.chibi.rc") || true
+      (cd "$d" && timeout "${SI_TIMEOUT:-300}" env ANSI_ESCAPES_ENABLED=1 GOMEMLIMIT=${SI_GOMEMLIMIT:-1000MiB} GOMAXPROCS=${GOMAXPROCS:-2} \
+         "$si_light" --pp "$light_dir/psyntax.pp.ss" --lib "$d/lib" --lib "$root/scheme/vendor/chibi" --lib "$root/scheme/lib" --r7rs "$root/test/scheme/chibi/split-run.sps" "$root/scheme/vendor/chibi/$sld" < "$light_dir/empty.in" > "$n.si.out" 2> "$n.si.err"; echo $? > "$n.si.rc") || true
+    done
+    arbace_tool -m arbace.scheme.corpora chibi-tests "$d" ${rec[@]+"${rec[@]}"} ;;
+  ecraven)
+    # bin/si ecraven [--count N] [--chez|--chibi] [--judge] [--record] [NAME...]: ecraven's r7rs-benchmarks run on si in R7RS mode (their own): each benchmark's
+    # source with common.scm appended (as ecraven's Makefile does) and its inputs/NAME.input on stdin with the repetition
+    # count replaced by N (default 1); a benchmark checks its own result (the CSVLINE with a time, or INCORRECT);
+    # SI_TIMEOUT seconds a benchmark (default 60). Judged by test/scheme/divergences-corpora.edn;
+    # --record: test/scheme/check-ecraven-linux-amd64.edn; --chez, --chibi (SC151): the reference run instead (Chez 10.3.0 through the libraries' Chez variants,
+    # Chibi 0.12.0's chibi-scheme), --record: test/scheme/ref-ecraven-{chez,chibi}.edn;
+    # --judge: no run, the last run's outputs judged again (against a reference recorded since)
+    mkdir -p "$light_dir"; : > "$light_dir/empty.in"; need_gnu_timeout
+    count=1; rec=(); names=(); impl=si; judge=
+    while [ $# -gt 0 ]; do case $1 in --count) count=$2; shift 2 ;; --record) rec=(--record); shift ;; --chez) impl=chez; shift ;; --chibi) impl=chibi; shift ;; --judge) judge=1; shift ;; *) names+=("$1"); shift ;; esac; done
+    "$root/bin/repr-scheme" corpus fetch ecraven-r7rs > "$light_dir/fetch.log"
+    corpora=${ARBACE_SCHEME_CORPORA:-$root/.tmp/scheme/corpora}; ec=$corpora/ecraven-r7rs
+    if [ $impl = chez ]; then d=$light_dir/ecraven-chez; chez_libdir; elif [ $impl = chibi ]; then d=$light_dir/ecraven-chibi; else [ -x "$si_light" ] || light; d=$light_dir/ecraven; fi
+    mkdir -p "$d" "$ec/outputs"   # slatex writes outputs/z0.scm
+    if [ -n "$judge" ]; then names=(); elif [ ${#names[@]} -eq 0 ]; then rm -rf "$d"; mkdir -p "$d"; for f in "$ec"/inputs/*.input; do names+=("$(basename "$f" .input)"); done; fi
+    for n in ${names[@]+"${names[@]}"}; do [ -f "$ec/src/$n.scm" ] || { echo "bin/si ecraven: no benchmark $n" >&2; exit 2; }; done
+    run_key_v=$(run_key $impl)
+    for n in ${names[@]+"${names[@]}"}; do
+      # Chez reads a program in R6RS's mode: #!chezscheme takes its own lexical syntax, --program the R7RS program's scope
+      { [ $impl = chez ] && echo '#!chezscheme'; cat "$ec/src/$n.scm"; echo; cat "$ec/src/common.scm"; echo "(define (this-scheme-implementation-name) \"$impl\")"; cat "$ec/src/common-postlude.scm"; } > "$d/$n.sps"
+      # the input: the file with its first number (the count) replaced
+      awk -v c="$count" 'BEGIN{done=0} { if (!done && match($0, /^[ \t]*[0-9]+/)) { sub(/^[ \t]*[0-9]+/, c); done=1 } print }' "$ec/inputs/$n.input" > "$d/$n.in"
+      s=$(date +%s)
+      if [ $impl = chibi ]; then
+        # SC151: Chibi 0.12.0 (CHIBI, the host's chibi-scheme) runs the same program file; the program's own imports are (scheme ...) libraries
+        (cd "$ec" && timeout "${SI_TIMEOUT:-60}" "${CHIBI:-chibi-scheme}" "$d/$n.sps" < "$d/$n.in" > "$d/$n.out" 2> "$d/$n.err"; echo $? > "$d/$n.rc") || true
+      elif [ $impl = chez ]; then
+        (cd "$ec" && timeout "${SI_TIMEOUT:-60}" "$CHEZ" --libdirs "$chez_lib" --program "$d/$n.sps" < "$d/$n.in" > "$d/$n.out" 2> "$d/$n.err"; echo $? > "$d/$n.rc") || true
+      else
+        (cd "$ec" && timeout "${SI_TIMEOUT:-60}" env GOMEMLIMIT=${SI_GOMEMLIMIT:-1500MiB} GOMAXPROCS=${GOMAXPROCS:-2} \
+           "$si_light" --pp "$light_dir/psyntax.pp.ss" --lib "$root/scheme/lib" "$d/$n.sps" < "$d/$n.in" > "$d/$n.out" 2> "$d/$n.err"; echo $? > "$d/$n.rc") || true
+      fi
+      stamp "$d/$n" "${SI_TIMEOUT:-60}" "$count"
+      echo "$n: rc $(cat "$d/$n.rc") $(( $(date +%s) - s )) s: $(grep -h 'CSVLINE' "$d/$n.out" | head -1)"
+    done
+    if [ $impl = chez ]; then arbace_tool -m arbace.scheme.corpora ecraven-chez "$d" --key "$run_key_v" ${rec[@]+"${rec[@]}"}
+    elif [ $impl = chibi ]; then arbace_tool -m arbace.scheme.corpora ecraven-chibi "$d" --key "$run_key_v" ${rec[@]+"${rec[@]}"}
+    elif [ -z "${ARBACE_ECRAVEN_NOJUDGE:-}" ]; then arbace_tool -m arbace.scheme.corpora ecraven "$d" --key "$run_key_v" ${rec[@]+"${rec[@]}"}; fi ;;
+  mats)
+    # bin/si mats [--record] [FILE...]: Chez's mats (the corpus chez-mats) on si: each (mat NAME e ...) of a .ms file, its
+    # clauses top-level forms of an interaction environment of (chezscheme) (si's subset) and the harness (scheme/lib/si/mats.sls),
+    # one result a mat and an item a failing clause; a mat that does not run (an identifier of Chez's own, a syntax si's reader
+    # does not read) is classed by its error; judged by test/scheme/divergences-corpora.edn;
+    # --record: test/scheme/check-mats-linux-amd64.edn; SI_MAT_VERBOSE=1 (not "" or 0) prints each failing clause (CLAUSEFAIL, with write's cycle labels)
+    mkdir -p "$light_dir"; : > "$light_dir/empty.in"; need_gnu_timeout
+    rec=(); files=()
+    while [ $# -gt 0 ]; do case $1 in --record) rec=(--record); shift ;; *) files+=("$1"); shift ;; esac; done
+    "$root/bin/repr-scheme" corpus fetch chez-mats > "$light_dir/fetch.log"
+    [ -x "$si_light" ] || light
+    corpora=${ARBACE_SCHEME_CORPORA:-$root/.tmp/scheme/corpora}; mt=$corpora/chez-mats/mats
+    d=$light_dir/mats; mkdir -p "$d"
+    only=()
+    if [ ${#files[@]} -eq 0 ]; then rm -rf "$d"; mkdir -p "$d"; for f in "$mt"/*.ms; do files+=("$(basename "$f")"); done
+    else for f in "${files[@]}"; do only+=(--only "${f%.ms}"); done; fi   # SC182 (b): a partial run judges and records only the files it ran
+    for f in "${files[@]}"; do [ -f "$mt/$f" ] || { echo "bin/si mats: no file $f in $mt" >&2; exit 2; }; done
+    run_key_v=$(run_key si "$root/test/scheme/mats/run.sps")
+    for f in "${files[@]}"; do
+      b=${f%.ms}
+      # a mat that hangs (a cyclic list, a thread, a wait) is skipped on the next run of the file: its name goes in
+      # $d/$b.skip, up to six times, and the rc of the last run stands (a hung mat is an item "crash ... in mat NAME")
+      # SC213 (b): 5_2.ms's cyclic-list sorts (2.75 GB at the 20 s clause limit, 1.2 GB at 5 s) and 8.ms's define-integrable loops (2.5 GB, 1.1 GB)
+      # fill memory until the limit: a smaller limit for those files (SI_MAT_MS overrides; the six mats that hit it are time-limit items either way)
+      case $b in 5_2|8) mat_ms=5000 ;; *) mat_ms=20000 ;; esac
+      : > "$d/$b.skip"; tries=0
+      while :; do
+        # SC170 (b): each run in a work directory of its own, the corpus' files linked in: the files a mat writes (testfile*) stay
+        # out of the corpus, where the next run would find them ("File already exists")
+        w=$d/work-$b; rm -rf "$w"; mkdir -p "$w"; (cd "$mt" && for x in *; do [ -d "$x" ] || ln -s "$mt/$x" "$w/$x"; done)
+        (cd "$w" && timeout "${SI_TIMEOUT:-400}" env SI_MAT_MS=${SI_MAT_MS:-$mat_ms} env GOMEMLIMIT=${SI_GOMEMLIMIT:-1000MiB} GOMAXPROCS=${GOMAXPROCS:-2} \
+           "$si_light" --pp "$light_dir/psyntax.pp.ss" --lib "$root/scheme/lib" --r7rs "$root/test/scheme/mats/run.sps" "$mt/$f" "$d/$b.skip" < "$light_dir/empty.in" > "$d/$b.out" 2> "$d/$b.err"; echo $? > "$d/$b.rc") || true
+        [ "$(cat "$d/$b.rc")" = 124 ] && [ $tries -lt 6 ] || break
+        tries=$((tries+1))
+        # the mat it hung in; none (the time limit came before any BEGIN, or between mats): the next run would be the same
+        hung=$(awk '/^BEGIN /{b=substr($0,7)} /^MAT /{b=""} END{if (b!="") print b}' "$d/$b.out")
+        [ -n "$hung" ] || { echo "  $f: timeout outside a mat, not run again"; break; }
+        echo "$hung" >> "$d/$b.skip"
+        echo "  $f: timeout, skipping mat $hung and running again"
+      done
+      stamp "$d/$b" "${SI_TIMEOUT:-400}"
+      echo "$f: rc $(cat "$d/$b.rc") $(grep -c '^MAT ' "$d/$b.out") mats"
+    done
+    find "$d" -maxdepth 1 -name 'work-*' -type d -exec rm -rf {} + ; arbace_tool -m arbace.scheme.corpora mats "$d" --key "$run_key_v" ${only[@]+"${only[@]}"} ${rec[@]+"${rec[@]}"} ;;
+  corpora) arbace_tool -m arbace.scheme.corpora "$@" ;;
+  divergences) arbace_tool -m arbace.scheme.check divergences "$@" ;;
+  expand|fixpoint) arbace_tool -m arbace.scheme.expand "$cmd" "$@" ;;
+  *) sed -n '2,/^set -e/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+esac

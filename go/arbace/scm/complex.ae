@@ -1,0 +1,201 @@
+;; si's runtime: complex numbers (doc/scheme/SCHEME-SURVEY.md §5.4, SC66 (a): built first in SM6, lifting SC7 (a)'s
+;; class). A *Complex is a non-real number: its parts Re and Im are real numbers, both exact (Im not exact zero) or
+;; both flonums (Chez's inexact complex numbers are two flonums: (make-rectangular 1 2.5) is 1.0+2.5i). MkRect
+;; keeps that invariant; arithmetic runs on the parts with the real operations (Chez's exact zero rules carry
+;; over: (* 0 1.5+2.0i) is 0), division by Smith's method for flonums (Chez does not overflow on
+;; (/ 1e200+1e200i 1e200+1e200i)); the transcendental functions of flonum complex numbers are math/cmplx's, the
+;; logarithm over si's own correctly rounded one.
+(in-ns 'go.arbace.scm)
+
+(go/file "complex.go"
+  :imports [[math "math"] [cmplx "math/cmplx"] [big "math/big"]])
+
+(go/func IsReal "IsReal is whether x is a real number: not a *Complex.\n" ^bool [^any x]
+  (type-switch x
+    (case [int64 float64 (* big/Int) (* big/Rat)] (return true)))
+  false)
+
+(go/func isComplex ^bool [^any x]
+  (let [(values _ ok) (assert (* Complex) x)]
+    ok))
+
+(go/func MkRect "MkRect is re+im i as Chez normalizes it: an exact zero imaginary part leaves the real part; a flonum part makes both parts flonums.\n" ^any [^any re ^any im]
+  (when (IsExactZero im)
+    (return re))
+  (let [(values _ rf) (assert float64 re)
+        (values _ imf) (assert float64 im)]
+    (when (or rf imf)
+      (set! re (ToFloat re))
+      (set! im (ToFloat im)))
+    (return (addr (lit Complex :Re re :Im im)))))
+
+(go/func cxParts "cxParts is the real and imaginary parts of number x.\n" [^any x] :results [any any]
+  (let [(values z ok) (assert (* Complex) x)]
+    (when ok
+      (return (.-Re z) (.-Im z))))
+  (return x (conv int64 0)))
+
+(go/func cxC "cxC is number x as a complex128.\n" ^complex128 [^any x]
+  (let [(values re im) (cxParts x)]
+    (return (complex (ToFloat re) (ToFloat im)))))
+
+(go/func cxF "cxF is complex128 c as a number (flonum parts).\n" ^any [^complex128 c]
+  (MkRect (real c) (imag c)))
+
+(go/func cxEq "cxEq is = of numbers a and b, one of them complex.\n" ^bool [^any a ^any b]
+  (let [(values ar ai) (cxParts a)
+        (values br bi) (cxParts b)]
+    (and (== (Cmp "=" ar br) 0) (== (Cmp "=" ai bi) 0))))
+
+(go/func cxRealValued "cxRealValued is whether complex x has an imaginary part that is a flonum zero (real-valued?).\n" ^bool [^any x]
+  (let [(values z ok) (assert (* Complex) x)]
+    (when ok
+      (let [(values f isF) (assert float64 (.-Im z))]
+        (return (and isF (== f 0)))))
+    false))
+
+(go/func complexArith "complexArith is a op b where one of them is complex.\n" ^any [^string who ^rune op ^any a ^any b]
+  (when (not (IsNumber a))
+    (NotA who "number" a))
+  (when (not (IsNumber b))
+    (NotA who "number" b))
+  (let [(values ar ai) (cxParts a)
+        (values br bi) (cxParts b)]
+    (switch op
+      (case [\+] (return (MkRect (Add ar br) (Add ai bi))))
+      (case [\-] (return (MkRect (Sub ar br) (Sub ai bi))))
+      (case [\*] (return (MkRect (Sub (Mul ar br) (Mul ai bi)) (Add (Mul ar bi) (Mul ai br))))))
+    (return (cxDiv ar ai br bi))))
+
+(go/func cxDiv "cxDiv is (a+bi)/(c+di).\n" ^any [^any a ^any b ^any c ^any d]
+  (when (and (IsExactZero c) (IsExactZero d))
+    (Violation CondAssertion "/" "undefined for ~s" (conv int64 0)))
+  (when (IsExactZero d)
+    (return (MkRect (Div a c) (Div b c))))
+  (let [(values _ fl) (assert float64 c)]
+    (when fl
+      (if (>= (math/Abs (ToFloat c)) (math/Abs (ToFloat d)))
+        (let [r (Div d c)
+              den (Add c (Mul d r))]
+          (return (MkRect (Div (Add a (Mul b r)) den) (Div (Sub b (Mul a r)) den))))
+        (let [r (Div c d)
+              den (Add (Mul c r) d)]
+          (return (MkRect (Div (Add (Mul a r) b) den) (Div (Sub (Mul b r) a) den)))))))
+  (let [den (Add (Mul c c) (Mul d d))]
+    (return (MkRect (Div (Add (Mul a c) (Mul b d)) den) (Div (Sub (Mul b c) (Mul a d)) den)))))
+
+(go/func MakePolar "MakePolar is magnitude m at angle a (real numbers).\n" ^any [^any m ^any a]
+  (when (or (IsExactZero a) (IsExactZero m))
+    (return m))
+  (let [fm (ToFloat m)
+        fa (ToFloat a)]
+    (return (MkRect (* fm (pnCos fa)) (* fm (pnSin fa))))))
+
+(go/func cxMagnitude "cxMagnitude is the magnitude of complex x.\n" ^any [^any x]
+  (let [(values re im) (cxParts x)]
+    (when (IsExact x)
+      (return (pnSqrt (Add (Mul re re) (Mul im im)))))
+    (return (math/Hypot (ToFloat re) (ToFloat im)))))
+
+(go/func cxAngle "cxAngle is the angle of complex x.\n" ^float64 [^any x]
+  (let [(values re im) (cxParts x)]
+    (return (math/Atan2 (ToFloat im) (ToFloat re)))))
+
+(go/func cxSqrtNeg "cxSqrtNeg is the square root of a negative real: +s i, exact when s is.\n" ^any [^any x]
+  (MkRect (conv int64 0) (pnSqrt (Neg x))))
+
+(go/func cxSqrt "cxSqrt is the principal square root of complex x (exact when the magnitude and both parts are).\n" ^any [^any x]
+  (let [(values a b) (cxParts x)]
+    (when (IsExact x)
+      (let [m (pnSqrt (Add (Mul a a) (Mul b b)))]
+        (when (IsExact m)
+          (let [r (pnSqrt (Div (Add m a) (conv int64 2)))
+                ^any i (pnSqrt (Div (Sub m a) (conv int64 2)))]
+            (when (and (IsExact r) (IsExact i))
+              (when (< (Sign "sqrt" b) 0)
+                (set! i (Neg i)))
+              (return (MkRect r i)))))))
+    (return (cxF (cmplx/Sqrt (cxC x))))))
+
+(go/func cxLogF "cxLogF is the logarithm of re+im i (flonums).\n" ^any [^float64 re ^float64 im]
+  (let [m2 (+ (* re re) (* im im))]
+    (when (and (> m2 1e-290) (< m2 1e290))
+      (return (MkRect (/ (pnLn m2) 2) (math/Atan2 im re))))
+    (return (MkRect (pnLn (math/Hypot re im)) (math/Atan2 im re)))))
+
+(go/func cxLog "cxLog is the principal logarithm of complex x.\n" ^any [^any x]
+  (let [(values re im) (cxParts x)]
+    (return (cxLogF (ToFloat re) (ToFloat im)))))
+
+(go/func cxLogReal "cxLogReal is the logarithm of a negative real: ln |x| + pi i.\n" ^any [^any x]
+  (cxLogF (ToFloat x) 0.0))
+
+(go/func cxExp ^any [^any x]
+  (cxF (cmplx/Exp (cxC x))))
+
+;; cxExpt is x^y where one of them is complex or x is a negative real and y not an integer.
+(go/func cxExpt ^any [^any x ^any y]
+  (let [(values yn small) (assert int64 y)]
+    (when (and small (< yn 1000000) (> yn -1000000) (isComplex x))
+      (let [n yn
+            ^any res (conv int64 1)
+            ^any base x]
+        (when (< n 0)
+          (set! n (- n)))
+        (while (> n 0)
+          (watchdogTick)
+          (when (== (bit-and n 1) 1)
+            (set! res (Mul res base)))
+          (set! n (>> n 1))
+          (when (> n 0)
+            (set! base (Mul base base))))
+        (when (< yn 0)
+          (return (Div (conv int64 1) res)))
+        (return res))))
+  (when (pnExZero x)
+    (let [(values yr _) (cxParts y)]
+      (when (> (Sign "expt" yr) 0)
+        (return (conv int64 0)))
+      (Violation CondImplRestriction "expt" "undefined for values ~s and ~s" x y)))
+  (let [(values xr xi) (cxParts x)]
+    (when (and (IsExact y) (not (isComplex y)))
+      (let [(values r ok) (assert (* big/Rat) y)]
+        (when (and ok (.IsInt64 (.Num r)) (== (.Int64 (.Num r)) 1) (.IsInt64 (.Denom r)) (== (.Int64 (.Denom r)) 2))
+          (return (pnSqrt x)))))
+    (let [l (cxLogF (ToFloat xr) (ToFloat xi))
+          c (* (cxC y) (cxC l))]
+      (return (cxF (cmplx/Exp c))))))
+
+(go/func cxTrig "cxTrig is sin (0), cos (1), tan (2), asin (3), acos (4) or atan (5) of complex x.\n" ^any [^string who ^int which ^any x]
+  (let [z (cxC x)]
+    (switch which
+      (case [0] (return (cxF (cmplx/Sin z))))
+      (case [1] (return (cxF (cmplx/Cos z))))
+      (case [2] (return (cxF (cmplx/Tan z))))
+      (case [3] (return (cxF (cmplx/Asin z))))
+      (case [4] (return (cxF (cmplx/Acos z)))))
+    (when (and (IsExactZero (.-Re (assert (* Complex) x))) (== (math/Abs (ToFloat (.-Im (assert (* Complex) x)))) 1.0))
+      (AssertionViolation who "undefined for ~s" x))
+    (let [^float64 y (imag z)]
+      (when (and (== (real z) 0) (> (math/Abs y) 1))
+        (return (MkRect (math/Copysign (/ math/Pi 2) y) (math/Atanh (/ 1 y))))))
+    (return (cxF (cmplx/Atan z)))))
+
+(go/func cxAsinReal "cxAsinReal is asin of a real |x| > 1: +-pi/2 - sign(x) acosh|x| i.\n" ^any [^float64 x]
+  (let [h (math/Acosh (math/Abs x))]
+    (when (> x 0)
+      (return (MkRect (/ math/Pi 2) (- h))))
+    (return (MkRect (/ (- math/Pi) 2) h))))
+
+(go/func cxAcosReal "cxAcosReal is acos of a real |x| > 1.\n" ^any [^float64 x]
+  (let [h (math/Acosh (math/Abs x))]
+    (when (> x 0)
+      (return (MkRect 0.0 h)))
+    (return (MkRect math/Pi (- h)))))
+
+(go/func cxToString "cxToString is complex z in radix.\n" ^string [^{:tag (* Complex)} z ^int radix]
+  (let [re (NumberToString (.-Re z) radix)
+        im (NumberToString (.-Im z) radix)]
+    (when (and (!= (aget im 0) \-) (!= (aget im 0) \+))
+      (set! im (+ "+" im)))
+    (+ re im "i")))

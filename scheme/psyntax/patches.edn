@@ -1,0 +1,279 @@
+;; Arbace's patches to the vendored psyntax (doc/scheme/SCHEME-SURVEY.md, "As built: SM4"), applied to the text the
+;; forms print (bin/si psyntax-sources) before the bootstrap; each :from occurs once in its file.
+[
+ {:file "expander"
+  :why "R6RS's (rnrs) does not export environment, environment?, eval, syntax-error, null-environment or scheme-report-environment (they are (rnrs eval)'s and (rnrs r5rs)'s, or Ikarus's); Chez, the bootstrap host, refuses to except what a library does not export"
+  :from "    (except (rnrs)
+      environment environment? identifier?
+      eval generate-temporaries free-identifier=?
+      bound-identifier=? datum->syntax syntax-error
+      syntax-violation syntax->datum make-variable-transformer
+      null-environment scheme-report-environment)"
+  :to "    (except (rnrs)
+      identifier?
+      generate-temporaries free-identifier=?
+      bound-identifier=? datum->syntax
+      syntax-violation syntax->datum make-variable-transformer)"}
+ {:file "expander"
+  :why "Arbace's driver expands programs and libraries to their core forms, which compile-r6rs-top-level and eval keep inside"
+  :from "new-interaction-environment syntax-transpose)"
+  :to "new-interaction-environment syntax-transpose
+          ;; Arbace: the drivers' entry points (arbace.scheme.expand)
+          top-level-expander library-expander program-expander)"}
+ {:file "expander"
+  :why "the program's expansion for the driver, without the interaction environment"
+  :from "  (define compile-r6rs-top-level
+"
+  :to "  ;; Arbace: a program expanded without exporting its top-level bindings (top-level-expander exports them all,
+  ;; for compile-r6rs-top-level's interaction environment: quadratic in the bindings of the imports)
+  (define (program-expander e*)
+    (let-values (((imp* b*) (parse-top-level-program e*)))
+      (let-values (((imp* invoke-req* visit-req* invoke-code macro* export-subst export-env)
+                    (library-body-expander '() imp* b* #t)))
+        (values invoke-req* invoke-code))))
+
+  (define compile-r6rs-top-level
+"}
+ {:file "builders"
+  :why "the core language has no annotated-call (doc/scheme/SPEC.md, 5); Ikarus's compiler reads the source datum from it"
+  :from "    (lambda (ae fun-exp arg-exps)
+      (if ae"
+  :to "    (lambda (ae fun-exp arg-exps)
+      (if #f ;; Arbace: no annotations in the core forms (ae is the source datum)"}
+ {:file "builders"
+  :why "the core language has no annotated-case-lambda"
+  :from "      (lambda (ae vars* exp*)
+        (if ae"
+  :to "      (lambda (ae vars* exp*)
+        (if #f ;; Arbace: no annotations in the core forms (ae is the source datum)"}
+ {:file "config"
+  :why "the interaction environment's base is (rnrs), not Ikarus's library"
+  :from "(define (base-of-interaction-library) '(ikarus))"
+  :to "(define (base-of-interaction-library) '(rnrs)) ; Arbace"}
+ {:file "config"
+  :why "define-record is Ikarus's extension"
+  :from "(define-option if-wants-define-record  #t)"
+  :to "(define-option if-wants-define-record  #f) ; Arbace"}
+ {:file "config"
+  :why "define-struct is Ikarus's extension"
+  :from "(define-option if-wants-define-struct  #t)"
+  :to "(define-option if-wants-define-struct  #f) ; Arbace"}
+ {:file "config"
+  :why "library-letrec* is Ikarus's core form; the core language has letrec* and set! of locations"
+  :from "(define-option if-wants-library-letrec* #t)"
+  :to "(define-option if-wants-library-letrec* #f) ; Arbace"}
+ {:file "expander"
+  :why "R6RS 11.17 (and Chez): assert returns the value of its expression when it is true; psyntax's returned the unspecified value"
+  :from "`(unless ,expr (assertion-error ',expr ',pos))"
+  :to "`(let ((t ,expr)) (if t t (assertion-error ',expr ',pos)))"}
+ {:file "expander"
+  :why "R7RS's syntax-rules beside R6RS's (SC100 (b), doc/scheme/SCHEME-SURVEY.md, \"As built: SM8b\"): an optional custom ellipsis identifier, nested macros each with their own; _ and ... among the literals match literally (an ellipsis that is a literal, or a custom one, leaves ... an ordinary identifier in the templates); the R6RS form is unchanged"
+  :from "  (define syntax-rules-macro
+    (lambda (e)
+      (syntax-match e ()
+        ((_ (lits ...)
+            (pat* tmp*) ...)
+         (begin
+           (verify-literals lits e)
+           (bless `(lambda (x)
+                     (syntax-case x ,lits
+                       ,@(map (lambda (pat tmp)
+                                (syntax-match pat ()
+                                  ((_ . rest) 
+                                   `((g . ,rest) (syntax ,tmp)))
+                                  (_ 
+                                   (syntax-violation #f
+                                      \"invalid syntax-rules pattern\" 
+                                      e pat))))
+                              pat* tmp*)))))))))"
+  :to "  ;; Arbace (SC100 (b)): R7RS's syntax-rules (R7RS 4.3.2). (syntax-rules ELL (LIT ...) CLAUSE ...) names a custom
+  ;; ellipsis: rewritten to ..., and a ... of the templates escaped as (... ...); _ and ... may be literals, which
+  ;; the syntax-case it expands into accepts from syntax-rules alone (r7rs-literals-mark, R6RS's syntax-case
+  ;; refuses them), and an ellipsis that is a literal leaves ... ordinary in the templates.
+  (define r7rs-literals-mark (string-copy \"r7rs syntax-rules literals\"))
+  (define syntax-rules-macro
+    (lambda (e)
+      (define (rewrite x ell tmpl?)
+        (let f ((x x))
+          (syntax-match x ()
+            (id (id? id)
+             (cond
+               ((and ell (bound-id=? id ell)) '...)
+               ((and tmpl? (ellipsis? id)) (list '... '...))
+               (else id)))
+            ((a . d) (cons (f a) (f d)))
+            (#(v* ...) (list->vector (map f v*)))
+            (_ x))))
+      (define (expand lits clause* ell escape?)
+        (for-each
+          (lambda (x) (unless (id? x) (syntax-violation #f \"invalid literal\" e x)))
+          lits)
+        (bless `(lambda (x)
+                  (syntax-case x (,r7rs-literals-mark . ,lits)
+                    ,@(map (lambda (cl)
+                             (syntax-match cl ()
+                               ((pat tmp)
+                                (let ((pat (if escape? (rewrite pat ell #f) pat))
+                                      (tmp (if escape? (rewrite tmp ell #t) tmp)))
+                                  (syntax-match pat ()
+                                    ((_ . rest)
+                                     `((g . ,rest) (syntax ,tmp)))
+                                    (_
+                                     (syntax-violation #f
+                                        \"invalid syntax-rules pattern\"
+                                        e pat)))))
+                               (_ (syntax-violation #f \"invalid syntax-rules clause\" e cl))))
+                           clause*)))))
+      (syntax-match e ()
+        ((_ (lits ...) clause* ...)
+         (expand lits clause* #f (exists ellipsis? lits)))
+        ((_ ell (lits ...) clause* ...)
+         (id? ell)
+         (expand lits clause*
+                 (if (exists (lambda (l) (bound-id=? l ell)) lits) #f ell)
+                 #t)))))"}
+ {:file "expander"
+  :why "syntax-rules's R7RS literals (_ and ...) pass through the syntax-case it expands into (SC100 (b)); R6RS's syntax-case still refuses them"
+  :from "          ((_ expr (keys ...) clauses ...)
+           (begin
+             (verify-literals keys e)
+             (let ((x (gen-lexical 'tmp)))"
+  :to "          ((_ expr (keys ...) clauses ...)
+           (let ((keys (if (and (pair? keys) (eq? (stx->datum (car keys)) r7rs-literals-mark))
+                           (cdr keys) ;; Arbace: syntax-rules's R7RS literals (SC100 (b))
+                           (begin (verify-literals keys e) keys))))
+             (let ((x (gen-lexical 'tmp)))"}
+ {:file "expander"
+  :why "R7RS 4.3.2: an ellipsis among the literals matches literally (SC100 (b))"
+  :from "            ((p dots) (ellipsis? dots)"
+  :to "            ((p dots) (and (ellipsis? dots) (not (bound-id-member? dots keys))) ;; Arbace: ... as a literal (SC100 (b))"}
+ {:file "expander"
+  :why "R7RS 4.3.2: an ellipsis among the literals matches literally, also before the tail of a pattern (SC100 (b))"
+  :from "            ((x dots ys ... . z) (ellipsis? dots)"
+  :to "            ((x dots ys ... . z) (and (ellipsis? dots) (not (bound-id-member? dots keys))) ;; Arbace (SC100 (b))"}
+ {:file "expander"
+  :why "R7RS 4.1.2 (and Chez): a vector literal evaluates to itself; psyntax already took bytevectors (SC106 (c))"
+  :from "      (or (number? x) (string? x) (char? x) (boolean? x)
+          (bytevector? x))))"
+  :to "      (or (number? x) (string? x) (char? x) (boolean? x)
+          (bytevector? x)
+          (vector? x)))) ;; Arbace: R7RS 4.1.2, a vector evaluates to itself (SC106 (c)), as Chez's"}
+ {:file "expander"
+  :why "R7RS's library names may hold exact nonnegative integers: (srfi 1) names SRFI 97's (srfi :1), in a library's own name (SC107 (b))"
+  :from "        (() (values '() '()))
+        (_ (stx-error spec \"invalid library name\"))))"
+  :to "        (() (values '() '()))
+        ;; Arbace (SC107 (b)): R7RS's numbers in library names, (srfi 1) as SRFI 97's (srfi :1)
+        ((x . rest) (let ((d (syntax->datum x))) (and (integer? d) (exact? d) (>= d 0)))
+         (let-values (((x* v*) (parse rest)))
+           (values (cons (r7rs-number-component (syntax->datum x)) x*) v*)))
+        (_ (stx-error spec \"invalid library name\"))))"}
+ {:file "expander"
+  :why "R7RS's library names in imports: (srfi 1) is SRFI 97's (srfi :1) (SC107 (b)); an R6RS version is still a list at the end"
+  :from "          (() (values '() (lambda (x) #t)))
+          (_ (stx-error spec \"invalid import spec\")))))"
+  :to "          (() (values '() (lambda (x) #t)))
+          ;; Arbace (SC107 (b)): (srfi 1) imports SRFI 97's (srfi :1)
+          ((x . x*) (subversion? x)
+           (let-values (((name pred) (f x*)))
+             (values (cons (r7rs-number-component (syntax->datum x)) name) pred)))
+          (_ (stx-error spec \"invalid import spec\")))))"}
+ {:file "expander"
+  :why "R7RS's define-library (export, import, begin, cond-expand; include by the host's reader) as a library (SC107 (b))"
+  :from "         (values name* exp* imp* b*))
+        (_ (stx-error e \"malformed library\")))))"
+  :to "         (values name* exp* imp* b*))
+        ;; Arbace (SC107 (b)): R7RS's define-library (R7RS 5.6.1) as a library: its export, import and begin
+        ;; declarations gathered in order, cond-expand's chosen declarations spliced; the host's reader
+        ;; (read-library-source-file) has replaced include, include-ci and include-library-declarations by the
+        ;; files' data (begin and the declarations)
+        ((define-library (name* ...) decl* ...)
+         (eq? (syntax->datum define-library) 'define-library)
+         (let f ((d* decl*) (exp* '()) (imp* '()) (b* '()))
+           (define (rev x* acc) (if (null? x*) acc (rev (cdr x*) (cons (car x*) acc))))
+           (define (export-spec x)
+             (syntax-match x ()
+               ((kw a b) (and (eq? (syntax->datum kw) 'rename) (symbol? (syntax->datum a)) (symbol? (syntax->datum b)))
+                (list kw (list a b)))
+               (_ x)))
+           (if (null? d*)
+               (values name* (reverse exp*) (reverse imp*) (reverse b*))
+               (syntax-match (car d*) ()
+                 ((kw x* ...) (eq? (syntax->datum kw) 'export)
+                  (f (cdr d*) (rev (map export-spec x*) exp*) imp* b*))
+                 ((kw x* ...) (eq? (syntax->datum kw) 'import)
+                  (f (cdr d*) exp* (rev x* imp*) b*))
+                 ((kw x* ...) (eq? (syntax->datum kw) 'begin)
+                  (f (cdr d*) exp* imp* (rev x* b*)))
+                 ((kw clause* ...) (eq? (syntax->datum kw) 'cond-expand)
+                  (f (append (r7rs-cond-expand clause* e) (cdr d*)) exp* imp* b*))
+                 ;; Arbace (SC130): Chibi takes a definition directly as a library declaration (in a cond-expand clause:
+                 ;; (chibi test)'s string-contains), R7RS's grammar does not; it is a body form
+                 ((kw x* ...) (memq (syntax->datum kw) '(define define-syntax define-record-type define-values))
+                  (f (cdr d*) exp* imp* (cons (car d*) b*)))
+                 (_ (stx-error (car d*) \"invalid library declaration\"))))))
+        (_ (stx-error e \"malformed library\")))))
+
+  ;; Arbace (SC107 (b)): cond-expand's requirements (R7RS 4.2.1) in library declarations; the features are
+  ;; (scheme base)'s (features), a (library NAME) requirement is met when the library is found
+  (define r7rs-features
+    '(r7rs exact-closed exact-complex ieee-float full-unicode ratios si arbace scheme-si
+      srfi-0 srfi-1 srfi-6 srfi-9 srfi-13 srfi-14 srfi-23 srfi-26 srfi-39 srfi-69 srfi-98
+      srfi-125 srfi-128 srfi-133 srfi-158))
+  (define (r7rs-library-name x)
+    (map (lambda (p) (if (and (integer? p) (exact? p)) (r7rs-number-component p) p)) x))
+  ;; Arbace (SC116 (c)): a number in a library name is SRFI 97's :N, unless the library path holds an R7RS library
+  ;; srfi/N.sld (or .sls): then it is the symbol N, a library of its own ((srfi 1) re-exports (srfi :1) with
+  ;; (scheme base)'s map, member, assoc, make-list and list-copy, so both can be imported)
+  (define (r7rs-number-component n)
+    (let ((s (number->string n)))
+      (if (let f ((ls (library-path)))
+            (and (pair? ls)
+                 (or (exists (lambda (ext) (file-exists? (string-append (car ls) \"/srfi/\" s ext))) '(\".sld\" \".sls\"))
+                     (f (cdr ls)))))
+          (string->symbol s)
+          (string->symbol (string-append \":\" s)))))
+  (define (r7rs-cond-expand clause* e)
+    (define (test req)
+      (syntax-match req ()
+        (id (symbol? (syntax->datum id)) (and (memq (syntax->datum id) r7rs-features) #t))
+        ((kw r* ...) (eq? (syntax->datum kw) 'and) (for-all test r*))
+        ((kw r* ...) (eq? (syntax->datum kw) 'or) (exists test r*))
+        ((kw r) (eq? (syntax->datum kw) 'not) (not (test r)))
+        ((kw l) (eq? (syntax->datum kw) 'library)
+         (guard (c (#t #f)) (and (find-library-by-name (r7rs-library-name (syntax->datum l))) #t)))
+        (_ (stx-error req \"invalid cond-expand requirement\"))))
+    (let f ((c* clause*))
+      (if (null? c*)
+          '()
+          (syntax-match (car c*) ()
+            ((kw d* ...) (eq? (syntax->datum kw) 'else) d*)
+            ((req d* ...) (if (test req) d* (f (cdr c*))))
+            (_ (stx-error e \"invalid cond-expand clause\"))))))"}
+ {:file "library-manager"
+  :why "R7RS's library files are .sld (Chibi's convention) (SC107 (b))"
+  :from "'(\".sls\" \".ss\" \".scm\")"
+  :to "'(\".sls\" \".sld\" \".ss\" \".scm\") ;; Arbace: .sld, R7RS's define-library files (SC107 (b))"}
+ {:file "expander"
+  :why "a new interaction environment with the bindings of an environment (SC121 (c)): Chez evaluates a mat's clauses at the top level, where a definition of one is seen by the next; the harness evaluates them in (new-interaction-environment (environment '(chezscheme) ...))"
+  :from "  (define (new-interaction-environment)
+    (let ((lib (find-library-by-name
+                 (base-of-interaction-library))))
+      (let ((rib (subst->rib (library-subst lib))))
+        (make-interaction-env rib '() '()))))"
+  :to "  (define new-interaction-environment
+    (case-lambda
+      (()
+       (let ((lib (find-library-by-name
+                    (base-of-interaction-library))))
+         (let ((rib (subst->rib (library-subst lib))))
+           (make-interaction-env rib '() '()))))
+      ;; Arbace (SC121 (c)): the bindings of an environment, in a new interaction environment
+      ((e)
+       (cond
+         ((env? e) (make-interaction-env (make-top-rib (env-names e) (env-labels e)) '() '()))
+         ((interaction-env? e)
+          (let ((rib (subst->rib (map cons (rib-sym* (interaction-env-rib e)) (rib-label* (interaction-env-rib e))))))
+            (make-interaction-env rib '() '())))
+         (else (assertion-violation 'new-interaction-environment \"not an environment\" e))))))"}
+]

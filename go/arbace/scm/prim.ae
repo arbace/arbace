@@ -1,0 +1,220 @@
+;; si's runtime: primitives (doc/scheme/SCHEME-SURVEY.md, "As built: SM5"). A primitive is a Go function a
+;; core form names by (primitive NAME); the table is filled by each file's init. Plain primitives take
+;; their arguments and give one value (F1, F2, F3 or Fn); control primitives (Ctl) take the machine and
+;; may call procedures in tail position or push frames (call/cc, apply, dynamic-wind, map, ...). A
+;; primitive signals an error by raising a condition as Chez does (the helpers below): a Go panic of
+;; *Raise, which the machine turns into a Scheme raise in the primitive's dynamic context.
+(in-ns 'go.arbace.scm)
+
+(go/file "prim.go"
+  :imports [[fmt "fmt"] [big "math/big"]])
+
+(go/type Prim
+  "Prim is a primitive procedure: its name, its arity (Max -1: any number above Min), and one of its
+implementations (the first non-nil of Ctl, F1, F2, F3, Fn, chosen by the call's argument count).\n"
+  (struct ^string Name ^int Min ^int Max
+          ^{:tag (func [any] [any])} F1
+          ^{:tag (func [any any] [any])} F2
+          ^{:tag (func [any any any] [any])} F3
+          ^{:tag (func [(slice any)] [any])} Fn
+          ^{:tag (func [(* M) (slice any)] [any bool])} Ctl))
+
+(go/var ^{:tag (map string (* Prim)) :doc "prims is the table of primitives by name.\n"} prims (make (map string (* Prim))))
+
+(go/var ^{:tag (map string any) :doc "primValues is the table of primitives that are values, not procedures (&message-rtd ...).\n"} primValues (make (map string any)))
+
+(go/func DefValue "DefValue defines primitive name as the value v (not a procedure).\n" [^string name ^any v]
+  (aset primValues name v))
+
+(go/func LookupPrim "LookupPrim is the primitive named name, or nil.\n" ^{:tag (* Prim)} [^string name]
+  (aget prims name))
+
+(go/func PrimNames "PrimNames is the names of the table's primitives.\n" ^{:tag (slice string)} []
+  (let [^{:tag (slice string)} out nil]
+    (range [k prims]
+      (set! out (append out k)))
+    out))
+
+(go/func reg ^{:tag (* Prim)} [^{:tag (* Prim)} p]
+  (aset prims (.-Name p) p)
+  p)
+
+(go/func Def "Def defines primitive name of arity min..max (max -1: any) by fn.\n"
+  ^{:tag (* Prim)} [^string name ^int min ^int max ^{:tag (func [(slice any)] [any])} fn]
+  (reg (addr (lit Prim :Name name :Min min :Max max :Fn fn))))
+
+(go/func Def1 "Def1 defines primitive name of one argument.\n"
+  ^{:tag (* Prim)} [^string name ^{:tag (func [any] [any])} f]
+  (reg (addr (lit Prim :Name name :Min 1 :Max 1 :F1 f))))
+
+(go/func Def2 "Def2 defines primitive name of two arguments.\n"
+  ^{:tag (* Prim)} [^string name ^{:tag (func [any any] [any])} f]
+  (reg (addr (lit Prim :Name name :Min 2 :Max 2 :F2 f))))
+
+(go/func Def3 "Def3 defines primitive name of three arguments.\n"
+  ^{:tag (* Prim)} [^string name ^{:tag (func [any any any] [any])} f]
+  (reg (addr (lit Prim :Name name :Min 3 :Max 3 :F3 f))))
+
+(go/func DefCtl "DefCtl defines control primitive name of arity min..max.\n"
+  ^{:tag (* Prim)} [^string name ^int min ^int max ^{:tag (func [(* M) (slice any)] [any bool])} f]
+  (reg (addr (lit Prim :Name name :Min min :Max max :Ctl f))))
+
+(go/func Alias "Alias makes name another name of primitive old.\n" [^string name ^string old]
+  (let [p (aget prims old)]
+    (when (== p nil)
+      (panic (+ "scm: no primitive " old)))
+    (let [q @p]
+      (set! (.-Name q) name)
+      (aset prims name (addr q)))))
+
+(go/method call "call applies plain primitive p to args (their count checked by the caller).\n"
+  ^any [^{:tag (* Prim)} p ^{:tag (slice any)} args]
+  (switch (len args)
+    (case [1] (when (!= (.-F1 p) nil) (return ((.-F1 p) (aget args 0)))))
+    (case [2] (when (!= (.-F2 p) nil) (return ((.-F2 p) (aget args 0) (aget args 1)))))
+    (case [3] (when (!= (.-F3 p) nil) (return ((.-F3 p) (aget args 0) (aget args 1) (aget args 2))))))
+  (when (== (.-Fn p) nil)
+    (ArityError p (len args)))
+  ((.-Fn p) args))
+
+(go/method arityOK ^bool [^{:tag (* Prim)} p ^int n]
+  (and (>= n (.-Min p)) (or (< (.-Max p) 0) (<= n (.-Max p)))))
+
+;; ---------------------------------------------------------------------------------------
+;; Raising errors from Go (Chez's conditions and messages)
+
+(go/type Raise
+  "Raise is a Go panic carrying a Scheme raise from Go code: the object, and whether it is
+continuable (raise-continuable).\n"
+  (struct ^any Obj ^bool Continuable))
+
+(go/func RaiseObj "RaiseObj raises obj (non-continuable) from Go code.\n" [^any obj]
+  (panic (addr (lit Raise :Obj obj))))
+
+(go/func Violation
+  "Violation raises a compound condition of kind (an RTD: CondAssertion, CondError, ...) with &who
+who (\"\" for none), &message msg and &irritants irritants, as Chez's primitives do.\n"
+  [^{:tag (* RTD)} kind ^string who ^string msg & ^{:tag (slice any)} irritants]
+  (RaiseObj (MakeViolation kind who msg irritants)))
+
+(go/func MakeViolation
+  "MakeViolation is the condition Violation raises.\n"
+  ^any [^{:tag (* RTD)} kind ^any who ^string msg ^{:tag (slice any)} irritants]
+  (let [^{:tag (slice (* Record))} cs (lit (slice (* Record)) (MakeSimple kind))]
+    (type-switch [w who]
+      (case [string] (when (!= w "") (set! cs (append cs (MakeSimple CondWho (Intern w))))))
+      (default (when (!= w (conv any false)) (set! cs (append cs (MakeSimple CondWho w))))))
+    (set! cs (append cs (MakeSimple CondMessage (Str msg)) (MakeSimple CondIrritants (ListTail irritants Null))))
+    (addr (lit Compound :Parts cs))))
+
+(go/func AssertionViolation "AssertionViolation raises an &assertion of who, msg and irritants.\n"
+  [^string who ^string msg & ^{:tag (slice any)} irritants]
+  (Violation CondAssertion who msg (spread irritants)))
+
+(go/func NotA
+  "NotA raises Chez's \"~s is not a WHAT\" &assertion of who for x (what: \"pair\", \"string\", ...).\n"
+  [^string who ^string what ^any x]
+  (Violation CondAssertion who (+ "~s is not a " what) x))
+
+(go/func NotAn "NotAn is NotA with \"an\" (\"~s is not an exact integer\").\n" [^string who ^string what ^any x]
+  (Violation CondAssertion who (+ "~s is not an " what) x))
+
+(go/func BadIndex "BadIndex raises Chez's \"~s is not a valid index for ~s\".\n" [^string who ^any i ^any x]
+  (Violation CondAssertion who "~s is not a valid index for ~s" i x))
+
+(go/func ArityError "ArityError raises Chez's error for a call of p with n arguments.\n" [^{:tag (* Prim)} p ^int n]
+  (Violation CondAssertion "" "incorrect number of arguments ~s to ~s" (conv int64 n) p))
+
+(go/func Unimplemented
+  "Unimplemented raises an &implementation-restriction: who is not implemented in si yet (a recorded class).\n"
+  [^string who ^string why]
+  (Violation CondImplRestriction who (+ "not implemented in si: " why)))
+
+;; ---------------------------------------------------------------------------------------
+;; Argument checks
+
+(go/func ArgPair ^{:tag (* Pair)} [^string who ^any x]
+  (let [(values p ok) (assert (* Pair) x)]
+    (when (not ok)
+      (NotA who "pair" x))
+    p))
+
+(go/func ArgString ^{:tag (* String)} [^string who ^any x]
+  (let [(values s ok) (assert (* String) x)]
+    (when (not ok)
+      (NotA who "string" x))
+    s))
+
+(go/func ArgMutString ^{:tag (* String)} [^string who ^any x]
+  (let [s (ArgString who x)]
+    (when (.-RO s)
+      (NotA who "mutable string" x))
+    s))
+
+(go/func ArgSymbol ^{:tag (* Symbol)} [^string who ^any x]
+  (let [(values s ok) (assert (* Symbol) x)]
+    (when (not ok)
+      (NotA who "symbol" x))
+    s))
+
+(go/func ArgChar ^Char [^string who ^any x]
+  (let [(values c ok) (assert Char x)]
+    (when (not ok)
+      (NotA who "character" x))
+    c))
+
+(go/func ArgVector ^{:tag (* Vector)} [^string who ^any x]
+  (let [(values v ok) (assert (* Vector) x)]
+    (when (not ok)
+      (NotA who "vector" x))
+    v))
+
+(go/func ArgBytevector ^{:tag (* Bytevector)} [^string who ^any x]
+  (let [(values v ok) (assert (* Bytevector) x)]
+    (when (not ok)
+      (NotA who "bytevector" x))
+    v))
+
+(go/func ArgList "ArgList is the elements of proper list x, else Chez's \"~s is not a proper list\".\n"
+  ^{:tag (slice any)} [^string who ^any x]
+  (let [(values xs ok) (ListSlice x)]
+    (when (not ok)
+      (NotA who "proper list" x))
+    xs))
+
+(go/func ArgProc "ArgProc checks x is a procedure.\n" ^any [^string who ^any x]
+  (when (not (IsProcedure x))
+    (NotA who "procedure" x))
+  x)
+
+(go/func ArgIndex
+  "ArgIndex is x as a non-negative fixnum (an index or a length), else Chez's \"~s is not a valid
+index for ~s\" against obj (or \"~s is not a nonnegative fixnum\" when obj is nil).\n"
+  ^int [^string who ^any x ^any obj]
+  (let [(values n ok) (assert int64 x)]
+    (when (or (not ok) (< n 0))
+      (if (== obj nil)
+        (NotA who "nonnegative fixnum" x)
+        (BadIndex who x obj)))
+    (conv int n)))
+
+(go/func ArgFixnum ^int64 [^string who ^any x]
+  (let [(values n ok) (assert int64 x)]
+    (when (or (not ok) (not (IsFixnum n)))
+      (NotA who "fixnum" x))
+    n))
+
+(go/func ArgInteger "ArgInteger is exact integer x as a *big.Int.\n" ^{:tag (* big/Int)} [^string who ^any x]
+  (type-switch [v x]
+    (case [int64] (return (big/NewInt v)))
+    (case [(* big/Int)] (return v)))
+  (NotAn who "exact integer" x)
+  nil)
+
+(go/func IsProcedure ^bool [^any x]
+  (type-switch x
+    (case [(* Prim) (* Closure) (* Cont)] (return true)))
+  false)
+
+(go/func Sprint "Sprint is a Go rendering of v for internal messages.\n" ^string [^any v]
+  (fmt/Sprint v))

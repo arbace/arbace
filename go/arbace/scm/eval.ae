@@ -1,0 +1,755 @@
+;; si's evaluator (doc/scheme/SCHEME-SURVEY.md §5.2, SC4 (a), SC6 (a); "As built: SM5"): core forms (SPEC 5)
+;; compiled to a tree of nodes over lexical environments (heap frames of values), run by a machine with an
+;; explicit continuation: a linked list of heap frames (K). A tail call replaces the machine's next node
+;; and pushes nothing, so tail calls are proper and recursion is bounded by memory, not Go's stack;
+;; call/cc captures the frame list (O(1), re-entrant, multi-shot) with the dynamic state (the wind list
+;; and the handler stack); invoking a continuation runs the after and before thunks between the two wind
+;; lists, as R6RS's reference does. Nodes without control effects (constants, variables, lambda, the
+;; applications of plain primitives to such nodes) are evaluated directly in Go (Simple), so only calls
+;; of procedures and control primitives go through the machine. A Go primitive that must call a Scheme
+;; procedure (a sort's comparison, a protocol) does so by a nested run (Call) behind a barrier frame;
+;; escapes out of it unwind the Go stack by a panic (escape) to the run that owns the target.
+(in-ns 'go.arbace.scm)
+
+(go/file "eval.go"
+  :imports [[strconv "strconv"]])
+
+(go/type Env "Env is a lexical frame: the values of a lambda's parameters or of a letrec's variables.\n"
+  (struct ^{:tag (slice any)} V ^{:tag (* Env)} Up))
+
+(go/type Node
+  "Node is compiled code. Run evaluates it in e: it gives (v, true) when the value is ready for the
+machine's continuation, or (nil, false) after setting the machine's next node and environment (a
+tail transfer), having pushed the frames that wait for it.\n"
+  (interface (Run [^{:tag (* M)} m ^{:tag (* Env)} e] :results [any bool])))
+
+(go/type Simple "Simple is a node without control effects, evaluated directly.\n"
+  (interface Node (Ev ^any [^{:tag (* Env)} e])))
+
+(go/type Clause "Clause is one clause of a lambda: required parameters, a rest parameter, its body.\n"
+  (struct ^int Req ^bool Rest ^Node Body))
+
+(go/type Lambda "Lambda is a procedure's code: its clauses (one for lambda) and a name for printing.\n"
+  (struct ^{:tag (slice (* Clause))} Clauses ^string Name))
+
+(go/type Closure "Closure is a Scheme procedure: its code and the environment it closes over.\n"
+  (struct ^{:tag (* Lambda)} L ^{:tag (* Env)} E))
+
+(go/type Wind "Wind is an entry of the wind list (dynamic-wind's before and after thunks).\n"
+  (struct ^any Before ^any After ^{:tag (* Wind)} Up ^int Depth))
+
+(go/type Hs "Hs is an entry of the handler stack (with-exception-handler).\n"
+  (struct ^any H ^{:tag (* Hs)} Up))
+
+(go/type Cont "Cont is a continuation as a procedure: the frames, the wind list and the handler stack.\n"
+  (struct ^{:tag (* K)} K ^{:tag (* Wind)} W ^{:tag (* Hs)} H))
+
+(go/type K
+  "K is a continuation frame: what to do with a value. Kind says which; N, E, I, V, X its data. A frame
+is never changed once pushed, but for Used, which tells a frame resumed a second time (a re-entered
+continuation) to copy what it shares.\n"
+  (struct ^{:tag (* K)} Next ^uint8 Kind ^bool Used ^int I ^Node N ^{:tag (* Env)} E ^{:tag (slice any)} V ^any X ^any A))
+
+(go/const [^{:tag uint8} kSeq iota] [kIf] [kArg] [kSetL] [kSetG] [kLetrec] [kGo] [kRestoreH] [kBarrier] [kCode])
+
+(go/type KFn "KFn is a compiled continuation's code (SM7's AOT): it receives the value and its frame, whose E, A and V hold the values live in it.\n"
+  (func [(* M) any (* K)] [any bool]))
+
+(go/type GoK "GoK is a frame's Go continuation: it receives the value delivered to the frame.\n"
+  (func [(* M) any] [any bool]))
+
+(go/type M
+  "M is the machine: the continuation, the next node and its environment, the dynamic state, the store
+of locations, psyntax's primitive locations, and the barriers of nested runs (innermost last).\n"
+  (struct ^{:tag (* K)} k ^Node n ^{:tag (* Env)} e
+          ^{:tag (* Wind)} W ^{:tag (* Hs)} H
+          ^{:tag (map (* Symbol) (* Loc))} Store
+          ^any primLocs ^{:tag (map (* Symbol) any)} primLocCache
+          ^{:tag (slice (* K))} barriers
+          ^int pendKind ^any pendObj ^bool pendCont ^{:tag (* Cont)} pendC ^{:tag (slice any)} pendArgs))
+
+(go/var ^{:tag (* M) :doc "Cur is the machine Go primitives call back into (CallProc).\n"} Cur)
+
+(go/func NewM "NewM is a new machine with an empty store; it becomes Cur.\n" ^{:tag (* M)} []
+  (let [m (addr (lit M :Store (make (map (* Symbol) (* Loc))) :primLocCache (make (map (* Symbol) any))))]
+    (set! Cur m)
+    m))
+
+(go/func CallProc "CallProc applies procedure f to args by a nested run of Cur and gives its value.\n"
+  ^any [^any f & ^{:tag (slice any)} args]
+  (.Call Cur f (spread args)))
+
+;; ---------------------------------------------------------------------------------------
+;; Frames
+
+(go/method push [^{:tag (* M)} m ^uint8 kind ^Node n ^{:tag (* Env)} e ^int i]
+  (set! (.-k m) (addr (lit K :Next (.-k m) :Kind kind :N n :E e :I i))))
+
+(go/method PushGo "PushGo pushes a frame whose Go continuation f receives the next value delivered.\n"
+  [^{:tag (* M)} m ^GoK f]
+  (set! (.-k m) (addr (lit K :Next (.-k m) :Kind kGo :X f))))
+
+(go/method PushK "PushK pushes a compiled continuation f with the values live in it: an environment, a value, the rest.\n"
+  [^{:tag (* M)} m ^KFn f ^{:tag (* Env)} e ^any a ^{:tag (slice any)} v]
+  (set! (.-k m) (addr (lit K :Next (.-k m) :Kind kCode :X f :E e :A a :V v))))
+
+(go/method pushRestoreH [^{:tag (* M)} m ^{:tag (* Hs)} h]
+  (set! (.-k m) (addr (lit K :Next (.-k m) :Kind kRestoreH :X h))))
+
+(go/func single "single raises Chez's error when v, delivered to a single-value context, is not one value.\n" [^any v]
+  (let [(values vs ok) (assert (* Values) v)]
+    (when (and ok (!= (len (.-V vs)) 1))
+      (Violation CondAssertion "" (+ "returned " (strconv/Itoa (len (.-V vs))) " values to single value return context")))))
+
+(go/method resume "resume delivers v to frame k (already popped).\n" [^{:tag (* M)} m ^{:tag (* K)} k ^any v] :results [any bool]
+  (when (!= (.-Kind k) kSeq)
+    (when (!= (.-Kind k) kGo)
+      (when (!= (.-Kind k) kRestoreH)
+        (when (!= (.-Kind k) kCode)
+          (single v)))))
+  (switch (.-Kind k)
+    (case [kSeq] (return (seqFrom m (assert (* Seq) (.-N k)) (.-E k) (.-I k))))
+    (case [kIf]
+      (let [n (assert (* If) (.-N k))]
+        (if (Truthy v)
+          (return (.Run (.-C n) m (.-E k)))
+          (return (.Run (.-A n) m (.-E k))))))
+    (case [kArg]
+      (let [vals (.-V k)]
+        (if (.-Used k)
+          (let [c (make (slice any) (len vals))]
+            (copy c (subslice vals 0 (.-I k)))
+            (set! vals c))
+          (set! (.-Used k) true))
+        (aset vals (.-I k) v)
+        (return (appFrom m (assert (* App) (.-N k)) (.-E k) vals (+ (.-I k) 1)))))
+    (case [kSetL]
+      (let [n (assert (* SetLocal) (.-N k))]
+        (aset (.-V (up (.-E k) (.-D n))) (.-I n) v)
+        (return Unspec true)))
+    (case [kSetG]
+      (set! (.-V (.-L (assert (* SetGlobal) (.-N k)))) v)
+      (return Unspec true))
+    (case [kLetrec]
+      (aset (.-V (.-E k)) (.-I k) v)
+      (return (letrecFrom m (assert (* Letrec) (.-N k)) (.-E k) (+ (.-I k) 1))))
+    (case [kGo] (return ((assert GoK (.-X k)) m v)))
+    (case [kCode] (return ((assert KFn (.-X k)) m v k)))
+    (case [kRestoreH]
+      (set! (.-H m) (assert (* Hs) (.-X k)))
+      (return v true)))
+  (panic "scm: bad frame"))
+
+;; ---------------------------------------------------------------------------------------
+;; Running: the loop, nested runs, raises and escapes
+
+(go/type Uncaught "Uncaught is the panic of a raise no handler takes: the program ends (Chez's status 255).\n"
+  (struct ^any Obj))
+
+(go/type ExitPanic "ExitPanic is the panic of (exit n).\n" (struct ^int Code))
+
+(go/type escape "escape carries a continuation's invocation out of a nested run that does not own it.\n"
+  (struct ^{:tag (* Cont)} c ^{:tag (slice any)} args))
+
+(go/const [^int pendNone iota] [pendRaise] [pendReinstate])
+
+(go/method loop
+  "loop runs until a value reaches barrier b (done) or a raise from Go code, or an escape this run
+owns, is pending (not done). start begins the run.\n"
+  [^{:tag (* M)} m ^{:tag (* K)} b ^{:tag (func [] [any bool])} start] :results [^any res ^bool done]
+  (defer ((fn []
+           (let [r (recover)]
+             (when (!= r nil)
+               (type-switch [x r]
+                 (case [(* Raise)]
+                   (set! (.-pendKind m) pendRaise)
+                   (set! (.-pendObj m) (.-Obj x))
+                   (set! (.-pendCont m) (.-Continuable x))
+                   (set! res nil)
+                   (set! done false))
+                 (case [(* escape)]
+                   (when (and (not (chainHas (.-K (.-c x)) b)) (> (len (.-barriers m)) 1))
+                     (panic r))
+                   (set! (.-pendKind m) pendReinstate)
+                   (set! (.-pendC m) (.-c x))
+                   (set! (.-pendArgs m) (.-args x))
+                   (set! res nil)
+                   (set! done false))
+                 (default (panic r))))))))
+  (let [(values v ok) (start)]
+    (while true
+      (while (not ok)
+        (set! (values v ok) (.Run (.-n m) m (.-e m)))
+        (watchdogTick))
+      (let [k (.-k m)]
+        (when (== k b)
+          (set! (.-k m) (.-Next b))
+          (return v true))
+        (when (== k nil)
+          (return v true))
+        (set! (.-k m) (.-Next k))
+        (when (== (.-Kind k) kBarrier)
+          (when (> (len (.-barriers m)) 1)
+            (Unimplemented "call/cc" "re-entry into a continuation captured inside a Go primitive's callback"))
+          (set! ok true)
+          (continue))
+        (set! (values v ok) (.resume m k v)))))
+  (return nil true))
+
+(go/func chainHas "chainHas is whether frame b is on the frame list k.\n" ^bool [^{:tag (* K)} k ^{:tag (* K)} b]
+  (for [x k] (!= x nil) (set! x (.-Next x))
+    (when (== x b)
+      (return true)))
+  false)
+
+(go/method drive "drive runs start behind barrier b until a value reaches b.\n"
+  ^any [^{:tag (* M)} m ^{:tag (* K)} b ^{:tag (func [] [any bool])} start]
+  (set! (.-barriers m) (append (.-barriers m) b))
+  (defer ((fn [] (set! (.-barriers m) (subslice (.-barriers m) 0 (- (len (.-barriers m)) 1))))))
+  (while true
+    (let [(values r done) (.loop m b start)]
+      (when done
+        (return r))
+      (let [kind (.-pendKind m)]
+        (set! (.-pendKind m) pendNone)
+        (switch kind
+          (case [pendRaise]
+            (let [obj (.-pendObj m) c (.-pendCont m)]
+              (set! start (fn [] :results [any bool] (return (.Raise m obj c))))))
+          (case [pendReinstate]
+            (let [c (.-pendC m) args (.-pendArgs m)]
+              (set! start (fn [] :results [any bool] (return (.reinstate m c args))))))))))
+  nil)
+
+(go/method Call "Call applies f to args by a nested run and gives its value.\n"
+  ^any [^{:tag (* M)} m ^any f & ^{:tag (slice any)} args]
+  (let [sn (.-n m) se (.-e m)
+        b (addr (lit K :Next (.-k m) :Kind kBarrier))]
+    (set! (.-k m) b)
+    (let [r (.drive m b (fn [] :results [any bool] (return (.Apply m f args))))]
+      (set! (.-n m) sn)
+      (set! (.-e m) se)
+      r)))
+
+(go/method Exec "Exec runs node n in environment e by a nested run and gives its value.\n"
+  ^any [^{:tag (* M)} m ^Node n ^{:tag (* Env)} e]
+  (let [sn (.-n m) se (.-e m)
+        b (addr (lit K :Next (.-k m) :Kind kBarrier))]
+    (set! (.-k m) b)
+    (let [r (.drive m b (fn [] :results [any bool] (return (.Run n m e))))]
+      (set! (.-n m) sn)
+      (set! (.-e m) se)
+      r)))
+
+(go/method Eval "Eval compiles core form x and runs it.\n" ^any [^{:tag (* M)} m ^any x]
+  (.Exec m (.Compile m x) nil))
+
+(go/method Apply
+  "Apply applies f to args in tail position: a closure's body becomes the next node; a primitive runs;
+a continuation is reinstated. Apply owns args.\n"
+  [^{:tag (* M)} m ^any f ^{:tag (slice any)} args] :results [any bool]
+  (type-switch [p f]
+    (case [(* Closure)]
+      (let [n (len args)]
+        (range [_ c (.-Clauses (.-L p))]
+          (cond
+            (and (not (.-Rest c)) (== n (.-Req c)))
+            (do (set! (.-n m) (.-Body c))
+                (set! (.-e m) (addr (lit Env :V args :Up (.-E p))))
+                (return nil false))
+            (and (.-Rest c) (>= n (.-Req c)))
+            (let [v (make (slice any) (+ (.-Req c) 1))]
+              (copy v (subslice args 0 (.-Req c)))
+              (aset v (.-Req c) (ListTail (subslice args (.-Req c)) Null))
+              (set! (.-n m) (.-Body c))
+              (set! (.-e m) (addr (lit Env :V v :Up (.-E p))))
+              (return nil false))))
+        (Violation CondAssertion "" "incorrect number of arguments ~s to ~s" (conv int64 n) p)))
+    (case [(* Prim)]
+      (when (not (.arityOK p (len args)))
+        (ArityError p (len args)))
+      (when (!= (.-Ctl p) nil)
+        (return ((.-Ctl p) m args)))
+      (return (.call p args) true))
+    (case [(* Cont)] (return (.reinstate m p args))))
+  (Violation CondAssertion "" "attempt to apply non-procedure ~s" f)
+  (return nil true))
+
+(go/func valuesOf "valuesOf is args delivered as one value: the one, or a *Values.\n" ^any [^{:tag (slice any)} args]
+  (when (== (len args) 1)
+    (return (aget args 0)))
+  (addr (lit Values :V args)))
+
+(go/func Unpack "Unpack is the values v delivers: a *Values' parts, or v alone.\n" ^{:tag (slice any)} [^any v]
+  (let [(values vs ok) (assert (* Values) v)]
+    (when ok
+      (return (append (lit (slice any)) (spread (.-V vs)))))
+    (lit (slice any) v)))
+
+(go/method reinstate "reinstate invokes continuation c with args: winding, then the value to c's frames.\n"
+  [^{:tag (* M)} m ^{:tag (* Cont)} c ^{:tag (slice any)} args] :results [any bool]
+  (when (and (> (len (.-barriers m)) 1)
+             (not (chainHas (.-K c) (aget (.-barriers m) (- (len (.-barriers m)) 1)))))
+    (panic (addr (lit escape :c c :args args))))
+  (let [v (valuesOf args)]
+    (set! (.-k m) (.-K c))
+    (set! (.-H m) (.-H c))
+    (when (== (.-W c) (.-W m))
+      (return v true))
+    (return (.windTo m (.-W c) (fn [^{:tag (* M)} m2] :results [any bool] (return v true))))))
+
+(go/func commonWind ^{:tag (* Wind)} [^{:tag (* Wind)} a ^{:tag (* Wind)} b]
+  (while (and (!= a nil) (!= b nil) (!= (.-Depth a) (.-Depth b)))
+    (if (> (.-Depth a) (.-Depth b))
+      (set! a (.-Up a))
+      (set! b (.-Up b))))
+  (while (and (!= a nil) (!= b nil) (!= a b))
+    (set! a (.-Up a))
+    (set! b (.-Up b)))
+  (when (and (!= a nil) (== a b))
+    (return a))
+  nil)
+
+(go/method windTo
+  "windTo runs the after thunks from the current wind list up to the common one, then the before thunks
+down to target, then then.\n"
+  [^{:tag (* M)} m ^{:tag (* Wind)} target ^{:tag (func [(* M)] [any bool])} then] :results [any bool]
+  (let [c (commonWind (.-W m) target)
+        ^{:tag (slice (* Wind))} outs nil
+        ^{:tag (slice (* Wind))} ins nil]
+    (for [w (.-W m)] (!= w c) (set! w (.-Up w))
+      (set! outs (append outs w)))
+    (for [w target] (!= w c) (set! w (.-Up w))
+      (set! ins (append ins w)))
+    (return (.windSteps m outs ins then))))
+
+(go/method windSteps [^{:tag (* M)} m ^{:tag (slice (* Wind))} outs ^{:tag (slice (* Wind))} ins ^{:tag (func [(* M)] [any bool])} then] :results [any bool]
+  (when (> (len outs) 0)
+    (let [w (aget outs 0)]
+      (set! (.-W m) (.-Up w))
+      (.PushGo m (fn [^{:tag (* M)} m2 ^any _] :results [any bool] (return (.windSteps m2 (subslice outs 1) ins then))))
+      (return (.Apply m (.-After w) nil))))
+  (when (> (len ins) 0)
+    (let [w (aget ins (- (len ins) 1))]
+      (set! (.-W m) (.-Up w))
+      (.PushGo m (fn [^{:tag (* M)} m2 ^any _] :results [any bool]
+                   (set! (.-W m2) w)
+                   (return (.windSteps m2 nil (subslice ins 0 (- (len ins) 1)) then))))
+      (return (.Apply m (.-Before w) nil))))
+  (return (then m)))
+
+(go/method DynamicWind "DynamicWind is (dynamic-wind before thunk after).\n" [^{:tag (* M)} m ^any before ^any thunk ^any after] :results [any bool]
+  (.PushGo m (fn [^{:tag (* M)} m2 ^any _] :results [any bool]
+               (let [d 1]
+                 (when (!= (.-W m2) nil)
+                   (set! d (+ (.-Depth (.-W m2)) 1)))
+                 (let [w (addr (lit Wind :Before before :After after :Up (.-W m2) :Depth d))]
+                   (set! (.-W m2) w)
+                   (.PushGo m2 (fn [^{:tag (* M)} m3 ^any v] :results [any bool]
+                                 (set! (.-W m3) (.-Up w))
+                                 (.PushGo m3 (fn [^{:tag (* M)} m4 ^any _] :results [any bool] (return v true)))
+                                 (return (.Apply m3 after nil))))
+                   (return (.Apply m2 thunk nil))))))
+  (return (.Apply m before nil)))
+
+(go/method CallCC "CallCC is (call/cc f).\n" [^{:tag (* M)} m ^any f] :results [any bool]
+  (return (.Apply m f (lit (slice any) (addr (lit Cont :K (.-k m) :W (.-W m) :H (.-H m)))))))
+
+(go/method WithHandler "WithHandler is (with-exception-handler h thunk).\n" [^{:tag (* M)} m ^any h ^any thunk] :results [any bool]
+  (.pushRestoreH m (.-H m))
+  (set! (.-H m) (addr (lit Hs :H h :Up (.-H m))))
+  (return (.Apply m thunk nil)))
+
+(go/method Raise
+  "Raise raises obj: the current handler is called with obj in the dynamic environment of the raise
+minus itself; for a non-continuable raise, its return raises a &non-continuable in turn; for a
+continuable one, its value is the raise's.\n"
+  [^{:tag (* M)} m ^any obj ^bool continuable] :results [any bool]
+  (let [h (.-H m)]
+    (when (== h nil)
+      (panic (addr (lit Uncaught :Obj obj))))
+    (if continuable
+      (.pushRestoreH m h)
+      (.PushGo m (fn [^{:tag (* M)} m2 ^any _] :results [any bool]
+                   (return (.Raise m2 (MakeViolation CondNonContinuable "raise" "handler returned from non-continuable" (lit (slice any))) false)))))
+    (set! (.-H m) (.-Up h))
+    (return (.Apply m (.-H h) (lit (slice any) obj)))))
+
+;; ---------------------------------------------------------------------------------------
+;; The store
+
+(go/method LocOf "LocOf is the location of symbol s, made unbound when it has none.\n"
+  ^{:tag (* Loc)} [^{:tag (* M)} m ^{:tag (* Symbol)} s]
+  (let [l (aget (.-Store m) s)]
+    (when (== l nil)
+      (set! l (addr (lit Loc :Name s :V Unbound)))
+      (aset (.-Store m) s l))
+    l))
+
+(go/method SetPrimLocs "SetPrimLocs installs psyntax's primitive-locations procedure p.\n" [^{:tag (* M)} m ^any p]
+  (set! (.-primLocs m) p)
+  (set! (.-primLocCache m) (make (map (* Symbol) any))))
+
+(go/func Undefined "Undefined raises Chez's error for a reference to unbound variable s.\n" [^any s]
+  (RaiseObj (addr (lit Compound :Parts (lit (slice (* Record)) (MakeSimple CondUndefined) (MakeSimple CondWho s)
+                                        (MakeSimple CondMessage (Str "variable ~s is not bound")) (MakeSimple CondIrritants (List s)))))))
+
+;; ---------------------------------------------------------------------------------------
+;; Nodes
+
+(go/type Const (struct ^any V))
+(go/method Run [^{:tag (* Const)} n ^{:tag (* M)} m ^{:tag (* Env)} e] :results [any bool] (return (.-V n) true))
+(go/method Ev ^any [^{:tag (* Const)} n ^{:tag (* Env)} e] (.-V n))
+
+(go/func up ^{:tag (* Env)} [^{:tag (* Env)} e ^int d]
+  (for [i 0] (< i d) (inc! i)
+    (set! e (.-Up e)))
+  e)
+
+(go/type Ref0 (struct ^int I))
+(go/method Run [^{:tag (* Ref0)} n ^{:tag (* M)} m ^{:tag (* Env)} e] :results [any bool] (return (aget (.-V e) (.-I n)) true))
+(go/method Ev ^any [^{:tag (* Ref0)} n ^{:tag (* Env)} e] (aget (.-V e) (.-I n)))
+
+(go/type Ref1 (struct ^int I))
+(go/method Run [^{:tag (* Ref1)} n ^{:tag (* M)} m ^{:tag (* Env)} e] :results [any bool] (return (aget (.-V (.-Up e)) (.-I n)) true))
+(go/method Ev ^any [^{:tag (* Ref1)} n ^{:tag (* Env)} e] (aget (.-V (.-Up e)) (.-I n)))
+
+(go/type RefN (struct ^int D ^int I))
+(go/method Run [^{:tag (* RefN)} n ^{:tag (* M)} m ^{:tag (* Env)} e] :results [any bool] (return (.Ev n e) true))
+(go/method Ev ^any [^{:tag (* RefN)} n ^{:tag (* Env)} e] (aget (.-V (up e (.-D n))) (.-I n)))
+
+(go/type RefChk "RefChk is a reference to a letrec variable, checked against use before its init.\n"
+  (struct ^int D ^int I ^{:tag (* Symbol)} Name))
+(go/method Run [^{:tag (* RefChk)} n ^{:tag (* M)} m ^{:tag (* Env)} e] :results [any bool] (return (.Ev n e) true))
+(go/method Ev ^any [^{:tag (* RefChk)} n ^{:tag (* Env)} e]
+  (let [v (aget (.-V (up e (.-D n))) (.-I n))]
+    (when (== v (conv any Unbound))
+      (RaiseObj (addr (lit Compound :Parts (lit (slice (* Record)) (MakeSimple CondAssertion)
+                                            (MakeSimple CondMessage (Str "attempt to reference undefined variable ~s"))
+                                            (MakeSimple CondIrritants (List (.-Name n))))))))
+    v))
+
+(go/type Global (struct ^{:tag (* Loc)} L))
+(go/method Run [^{:tag (* Global)} n ^{:tag (* M)} m ^{:tag (* Env)} e] :results [any bool] (return (.Ev n e) true))
+(go/method Ev ^any [^{:tag (* Global)} n ^{:tag (* Env)} e]
+  (let [v (.-V (.-L n))]
+    (when (== v (conv any Unbound))
+      (Undefined (.-Name (.-L n))))
+    v))
+
+(go/type Lam (struct ^{:tag (* Lambda)} L))
+(go/method Run [^{:tag (* Lam)} n ^{:tag (* M)} m ^{:tag (* Env)} e] :results [any bool]
+  (return (addr (lit Closure :L (.-L n) :E e)) true))
+(go/method Ev ^any [^{:tag (* Lam)} n ^{:tag (* Env)} e] (addr (lit Closure :L (.-L n) :E e)))
+
+(go/type If (struct ^Node T ^Node C ^Node A ^Simple ts))
+(go/method Run [^{:tag (* If)} n ^{:tag (* M)} m ^{:tag (* Env)} e] :results [any bool]
+  (when (!= (.-ts n) nil)
+    (if (Truthy (.Ev (.-ts n) e))
+      (return (.Run (.-C n) m e))
+      (return (.Run (.-A n) m e))))
+  (.push m kIf n e 0)
+  (return (.Run (.-T n) m e)))
+
+(go/type IfS "IfS is an if whose three parts are simple.\n" (struct ^Simple T ^Simple C ^Simple A))
+(go/method Run [^{:tag (* IfS)} n ^{:tag (* M)} m ^{:tag (* Env)} e] :results [any bool]
+  (when (Truthy (.Ev (.-T n) e))
+    (return (.Run (.-C n) m e)))
+  (return (.Run (.-A n) m e)))
+(go/method Ev ^any [^{:tag (* IfS)} n ^{:tag (* Env)} e]
+  (when (Truthy (.Ev (.-T n) e))
+    (return (.Ev (.-C n) e)))
+  (.Ev (.-A n) e))
+
+(go/type Seq (struct ^{:tag (slice Node)} Es ^{:tag (slice Simple)} ss))
+(go/method Run [^{:tag (* Seq)} n ^{:tag (* M)} m ^{:tag (* Env)} e] :results [any bool] (return (seqFrom m n e 0)))
+
+(go/func seqFrom [^{:tag (* M)} m ^{:tag (* Seq)} n ^{:tag (* Env)} e ^int i] :results [any bool]
+  (let [last (- (len (.-Es n)) 1)]
+    (for [] (< i last) (inc! i)
+      (let [s (aget (.-ss n) i)]
+        (if (!= s nil)
+          (.Run s m e)
+          (do (.push m kSeq n e (+ i 1))
+              (return (.Run (aget (.-Es n) i) m e))))))
+    (return (.Run (aget (.-Es n) last) m e))))
+
+(go/type SetLocal (struct ^int D ^int I ^Node X ^Simple xs))
+(go/method Run [^{:tag (* SetLocal)} n ^{:tag (* M)} m ^{:tag (* Env)} e] :results [any bool]
+  (when (!= (.-xs n) nil)
+    (aset (.-V (up e (.-D n))) (.-I n) (.Ev (.-xs n) e))
+    (return Unspec true))
+  (.push m kSetL n e 0)
+  (return (.Run (.-X n) m e)))
+
+(go/type SetGlobal (struct ^{:tag (* Loc)} L ^Node X ^Simple xs))
+(go/method Run [^{:tag (* SetGlobal)} n ^{:tag (* M)} m ^{:tag (* Env)} e] :results [any bool]
+  (when (!= (.-xs n) nil)
+    (set! (.-V (.-L n)) (.Ev (.-xs n) e))
+    (return Unspec true))
+  (.push m kSetG n e 0)
+  (return (.Run (.-X n) m e)))
+
+(go/type Letrec (struct ^int N ^{:tag (slice Node)} Inits ^{:tag (slice Simple)} ss ^Node Body))
+(go/method Run [^{:tag (* Letrec)} n ^{:tag (* M)} m ^{:tag (* Env)} e] :results [any bool]
+  (let [v (make (slice any) (.-N n))]
+    (range [i _ v]
+      (aset v i Unbound))
+    (return (letrecFrom m n (addr (lit Env :V v :Up e)) 0))))
+
+(go/func letrecFrom [^{:tag (* M)} m ^{:tag (* Letrec)} n ^{:tag (* Env)} ne ^int i] :results [any bool]
+  (for [] (< i (len (.-Inits n))) (inc! i)
+    (let [s (aget (.-ss n) i)]
+      (if (!= s nil)
+        (aset (.-V ne) i (.Ev s ne))
+        (do (.push m kLetrec n ne i)
+            (return (.Run (aget (.-Inits n) i) m ne))))))
+  (return (.Run (.-Body n) m ne)))
+
+(go/type App "App is an application: the operator and the operands, simple or not (as when all are).\n"
+  (struct ^Node F ^{:tag (slice Node)} Args ^Simple fs ^{:tag (slice Simple)} as))
+(go/method Run [^{:tag (* App)} n ^{:tag (* M)} m ^{:tag (* Env)} e] :results [any bool]
+  (when (!= (.-as n) nil)
+    (let [f (.Ev (.-fs n) e)
+          args (make (slice any) (len (.-as n)))]
+      (range [i a (.-as n)]
+        (aset args i (.Ev a e)))
+      (return (.Apply m f args))))
+  (return (appFrom m n e (make (slice any) (+ 1 (len (.-Args n)))) 0)))
+
+(go/func appFrom
+  "appFrom evaluates n's operator (position 0) and operands from position i into vals, then applies.\n"
+  [^{:tag (* M)} m ^{:tag (* App)} n ^{:tag (* Env)} e ^{:tag (slice any)} vals ^int i] :results [any bool]
+  (for [] (< i (len vals)) (inc! i)
+    (let [x (.-F n)]
+      (when (> i 0)
+        (set! x (aget (.-Args n) (- i 1))))
+      (let [(values s ok) (assert Simple x)]
+        (if ok
+          (aset vals i (.Ev s e))
+          (do (set! (.-k m) (addr (lit K :Next (.-k m) :Kind kArg :N n :E e :I i :V vals)))
+              (return (.Run x m e)))))))
+  (return (.Apply m (aget vals 0) (subslice vals 1))))
+
+(go/type PrimApp "PrimApp is a plain primitive applied to simple operands.\n"
+  (struct ^{:tag (* Prim)} P ^{:tag (slice Simple)} Args))
+(go/method Run [^{:tag (* PrimApp)} n ^{:tag (* M)} m ^{:tag (* Env)} e] :results [any bool] (return (.evU n e) true))
+(go/method Ev ^any [^{:tag (* PrimApp)} n ^{:tag (* Env)} e]
+  (let [v (.evU n e)]
+    (single v)
+    v))
+(go/method evU ^any [^{:tag (* PrimApp)} n ^{:tag (* Env)} e]
+  (let [p (.-P n) a (.-Args n)]
+    (switch (len a)
+      (case [1] (when (!= (.-F1 p) nil) (return ((.-F1 p) (.Ev (aget a 0) e)))))
+      (case [2] (when (!= (.-F2 p) nil) (return ((.-F2 p) (.Ev (aget a 0) e) (.Ev (aget a 1) e)))))
+      (case [3] (when (!= (.-F3 p) nil) (return ((.-F3 p) (.Ev (aget a 0) e) (.Ev (aget a 1) e) (.Ev (aget a 2) e))))))
+    (let [args (make (slice any) (len a))]
+      (range [i x a]
+        (aset args i (.Ev x e)))
+      (.call p args))))
+
+(go/type Missing "Missing is a reference to a primitive si does not have: an error when evaluated.\n"
+  (struct ^{:tag (* Symbol)} Name))
+(go/method Run [^{:tag (* Missing)} n ^{:tag (* M)} m ^{:tag (* Env)} e] :results [any bool] (return (.Ev n e) true))
+(go/method Ev ^any [^{:tag (* Missing)} n ^{:tag (* Env)} e]
+  (Unimplemented (.-Name (.-Name n)) "a primitive si does not have yet")
+  nil)
+
+;; ---------------------------------------------------------------------------------------
+;; Compiling core forms
+
+(go/type scope "scope is a compile-time lexical frame: its variables; checked for letrec's.\n"
+  (struct ^{:tag (slice (* Symbol))} vars ^{:tag (* scope)} up ^bool checked))
+
+(go/var symQuote (Intern "quote"))
+(go/var symPrimitive (Intern "primitive"))
+(go/var symIf (Intern "if"))
+(go/var symBegin (Intern "begin"))
+(go/var symSet (Intern "set!"))
+(go/var symDefine (Intern "define"))
+(go/var symLambda (Intern "lambda"))
+(go/var symCaseLambda (Intern "case-lambda"))
+(go/var symLetrec (Intern "letrec"))
+(go/var symLetrecStar (Intern "letrec*"))
+
+(go/func lookup "lookup finds s in scope sc: depth, index, checked, found.\n"
+  [^{:tag (* scope)} sc ^{:tag (* Symbol)} s] :results [int int bool bool]
+  (let [d 0]
+    (for [x sc] (!= x nil) (set! x (.-up x))
+      (for [i (- (len (.-vars x)) 1)] (>= i 0) (dec! i)
+        (when (== (aget (.-vars x) i) s)
+          (return d i (.-checked x) true)))
+      (inc! d))
+    (return 0 0 false false)))
+
+(go/func CompileError "CompileError raises a &syntax for a malformed core form x.\n" [^any x ^string why]
+  (RaiseObj (addr (lit Compound :Parts (lit (slice (* Record)) (MakeSimple CondSyntax x false) (MakeSimple CondWho (Intern "compile"))
+                                        (MakeSimple CondMessage (Str (+ "invalid core form: " why))) (MakeSimple CondIrritants (List x)))))))
+
+(go/method Compile "Compile compiles core form x (a Scheme value) at top level.\n" ^Node [^{:tag (* M)} m ^any x]
+  (.comp m x nil))
+
+(go/func asSimple ^Simple [^Node n]
+  (let [(values s ok) (assert Simple n)]
+    (when ok
+      (return s))
+    nil))
+
+(go/func nth "nth is element i of list l, else nil.\n" ^any [^any l ^int i]
+  (for [] (> i 0) (dec! i)
+    (let [(values p ok) (assert (* Pair) l)]
+      (when (not ok)
+        (return nil))
+      (set! l (.-Cdr p))))
+  (let [(values p ok) (assert (* Pair) l)]
+    (when (not ok)
+      (return nil))
+    (.-Car p)))
+
+(go/method comp ^Node [^{:tag (* M)} m ^any x ^{:tag (* scope)} sc]
+  (type-switch [v x]
+    (case [(* Symbol)]
+      (let [(values d i chk ok) (lookup sc v)]
+        (when ok
+          (cond chk (return (addr (lit RefChk :D d :I i :Name v)))
+                (== d 0) (return (addr (lit Ref0 :I i)))
+                (== d 1) (return (addr (lit Ref1 :I i)))
+                :else (return (addr (lit RefN :D d :I i)))))
+        (return (addr (lit Global :L (.LocOf m v))))))
+    (case [(* Pair)]
+      (let [(values h isSym) (assert (* Symbol) (.-Car v))]
+        (when isSym
+          (let [(values _ _ _ bound) (lookup sc h)]
+            (when (not bound)
+              (switch h
+                (case [symQuote] (return (addr (lit Const :V (nth v 1)))))
+                (case [symPrimitive] (return (.compPrim m (nth v 1) x)))
+                (case [symIf] (return (.compIf m v sc)))
+                (case [symBegin] (return (.compBody m (.-Cdr v) sc)))
+                (case [symSet symDefine] (return (.compSet m v sc)))
+                (case [symLambda] (return (addr (lit Lam :L (.compLambda m (lit (slice any) (.-Cdr v)) sc)))))
+                (case [symCaseLambda]
+                  (let [cs (ArgList "compile" (.-Cdr v))]
+                    (return (addr (lit Lam :L (.compLambda m cs sc)))))))
+              (when (or (== h symLetrec) (== h symLetrecStar))
+                (return (.compLetrec m v sc))))))
+        (return (.compApp m v sc)))))
+  (addr (lit Const :V x)))
+
+(go/method compPrim ^Node [^{:tag (* M)} m ^any name ^any form]
+  (let [(values s ok) (assert (* Symbol) name)]
+    (when (not ok)
+      (CompileError form "primitive of a non-symbol"))
+    (when (!= (.-primLocs m) nil)
+      (let [(values loc seen) (aget (.-primLocCache m) s)]
+        (when (not seen)
+          (set! loc (.Call m (.-primLocs m) s))
+          (aset (.-primLocCache m) s loc))
+        (let [(values ls isLoc) (assert (* Symbol) loc)]
+          (when isLoc
+            (return (addr (lit Global :L (.LocOf m ls))))))))
+    (let [(values pv isValue) (aget primValues (.-Name s))]
+      (when isValue
+        (return (addr (lit Const :V pv)))))
+    (let [p (aget prims (.-Name s))]
+      (when (== p nil)
+        (return (addr (lit Missing :Name s))))
+      (addr (lit Const :V p)))))
+
+(go/method compIf ^Node [^{:tag (* M)} m ^{:tag (* Pair)} v ^{:tag (* scope)} sc]
+  (let [t (.comp m (nth v 1) sc)
+        c (.comp m (nth v 2) sc)
+        ^Node a (addr (lit Const :V Unspec))]
+    (when (!= (nth (.-Cdr v) 2) nil)
+      (set! a (.comp m (nth v 3) sc)))
+    (let [ts (asSimple t) cs (asSimple c) as (asSimple a)]
+      (when (and (!= ts nil) (!= cs nil) (!= as nil))
+        (return (addr (lit IfS :T ts :C cs :A as))))
+      (addr (lit If :T t :C c :A a :ts ts)))))
+
+(go/method compBody ^Node [^{:tag (* M)} m ^any body ^{:tag (* scope)} sc]
+  (let [xs (ArgList "compile" body)]
+    (when (== (len xs) 0)
+      (return (addr (lit Const :V Unspec))))
+    (when (== (len xs) 1)
+      (return (.comp m (aget xs 0) sc)))
+    (let [es (make (slice Node) (len xs))
+          ss (make (slice Simple) (len xs))]
+      (range [i x xs]
+        (aset es i (.comp m x sc))
+        (aset ss i (asSimple (aget es i))))
+      (addr (lit Seq :Es es :ss ss)))))
+
+(go/method compSet ^Node [^{:tag (* M)} m ^{:tag (* Pair)} v ^{:tag (* scope)} sc]
+  (let [(values s ok) (assert (* Symbol) (nth v 1))]
+    (when (not ok)
+      (CompileError v "set! of a non-symbol"))
+    (let [x (.comp m (nth v 2) sc)
+          xs (asSimple x)
+          (values d i _ found) (lookup sc s)]
+      (when (and found (== (.-Car v) (conv any symSet)))
+        (return (addr (lit SetLocal :D d :I i :X x :xs xs))))
+      (addr (lit SetGlobal :L (.LocOf m s) :X x :xs xs)))))
+
+(go/func formals "formals is the parameters of formals f: the required ones and the rest one (nil if none).\n"
+  [^any f] :results [(slice (* Symbol)) (* Symbol)]
+  (let [^{:tag (slice (* Symbol))} req nil]
+    (while true
+      (type-switch [p f]
+        (case [(* Pair)]
+          (set! req (append req ((inst As (* Symbol)) (.-Car p))))
+          (set! f (.-Cdr p)))
+        (case [(* Symbol)] (return req p))
+        (default (return req nil)))))
+  (return nil nil))
+
+(go/method compLambda
+  "compLambda compiles the clauses cs, each (formals body ...).\n"
+  ^{:tag (* Lambda)} [^{:tag (* M)} m ^{:tag (slice any)} cs ^{:tag (* scope)} sc]
+  (let [l (addr (lit Lambda))]
+    (range [_ c cs]
+      (let [p (ArgPair "compile" c)
+            (values req rest) (formals (.-Car p))
+            vars (append (lit (slice (* Symbol))) (spread req))]
+        (when (!= rest nil)
+          (set! vars (append vars rest)))
+        (let [inner (addr (lit scope :vars vars :up sc))]
+          (set! (.-Clauses l) (append (.-Clauses l) (addr (lit Clause :Req (len req) :Rest (!= rest nil) :Body (.compBody m (.-Cdr p) inner))))))))
+    l))
+
+(go/method compLetrec ^Node [^{:tag (* M)} m ^{:tag (* Pair)} v ^{:tag (* scope)} sc]
+  (let [bs (ArgList "compile" (nth v 1))
+        ^{:tag (slice (* Symbol))} vars nil]
+    (range [_ b bs]
+      (set! vars (append vars ((inst As (* Symbol)) (nth b 0)))))
+    (let [inner (addr (lit scope :vars vars :up sc :checked true))
+          inits (make (slice Node) (len bs))
+          ss (make (slice Simple) (len bs))]
+      (range [i b bs]
+        (aset inits i (.comp m (nth b 1) inner))
+        (aset ss i (asSimple (aget inits i))))
+      ;; the body sees the variables unchecked: every init has run
+      (let [body (.compBody m (.-Cdr ((inst As (* Pair)) (.-Cdr v))) (addr (lit scope :vars vars :up sc)))]
+        (addr (lit Letrec :N (len vars) :Inits inits :ss ss :Body body))))))
+
+(go/method compApp ^Node [^{:tag (* M)} m ^{:tag (* Pair)} v ^{:tag (* scope)} sc]
+  (let [f (.comp m (.-Car v) sc)
+        xs (ArgList "compile" (.-Cdr v))
+        args (make (slice Node) (len xs))
+        as (make (slice Simple) (len xs))
+        all true]
+    (range [i x xs]
+      (aset args i (.comp m x sc))
+      (aset as i (asSimple (aget args i)))
+      (when (== (aget as i) nil)
+        (set! all false)))
+    (let [(values c isConst) (assert (* Const) f)]
+      (when (and all isConst)
+        (let [(values p isPrim) (assert (* Prim) (.-V c))]
+          (when (and isPrim (== (.-Ctl p) nil) (.arityOK p (len xs)))
+            (return (addr (lit PrimApp :P p :Args as)))))))
+    (let [fs (asSimple f)]
+      (when (or (not all) (== fs nil))
+        (set! as nil))
+      (addr (lit App :F f :Args args :fs fs :as as)))))

@@ -1,0 +1,2088 @@
+(in-ns 'go.arbace.scm)
+
+(go/file "prim_number.go" :imports [
+
+    [math "math"]
+    [big "math/big"]
+    [bits "math/bits"]
+    [sync "sync"]])
+
+;; ---------------------------------------------------------------------------------------
+;; Helpers (all prefixed pn: the package's namespace is shared)
+
+(go/func pnI ^any [^int64 n] n)
+
+(go/func pnExZero ^bool [^any x]
+  (let [(values n ok) (assert int64 x)]
+    (and ok (== n 0))))
+
+(go/func pnIsReal ^bool [^any x] (IsReal x))
+
+(go/func pnReal ^any [^string who ^any x]
+  (when (not (IsReal x))
+    (NotA who "real number" x))
+
+  x)
+
+(go/func pnNum ^any [^string who ^any x]
+  (when (not (IsNumber x))
+    (NotA who "number" x))
+
+  x)
+
+(go/func pnFl ^float64 [^string who ^any x]
+  (let [(values v ok) (assert float64 x)]
+    (when (not ok)
+      (NotA who "flonum" x))
+
+    v))
+
+(go/func pnFx ^int64 [^string who ^any x]
+  (let [(values n ok) (assert int64 x)]
+    (when (or (not ok) (not (IsFixnum n)))
+      (NotA who "fixnum" x)
+      (return 0))
+
+    n))
+
+^{:go/breaks [6] :go/end 63} (go/func pnExInt "pnExInt is exact integer x as a *big.Int (NotAn \"exact integer\" otherwise).\n" ^{:tag (* big/Int)} [^string who ^any x]
+  (type-switch [v x]
+    (case [int64]
+      (return (big/NewInt v)))
+    (case [(* big/Int)]
+      (return v)))
+
+  (NotAn who "exact integer" x)
+  nil)
+
+(go/func pnFloatBig ^{:tag (* big/Int)} [^float64 f]
+  (when (< (math/Abs f) 9.0E18)
+    (return (big/NewInt (conv int64 f))))
+
+  (let [(values b _) (.Int (.SetFloat64 (new big/Float) f) nil)]
+    b))
+
+(go/func pnBigFloat ^float64 [^{:tag (* big/Int)} b]
+  (let [(values f _) (.Float64 (.SetInt (new big/Float) b))]
+    f))
+
+(go/func pnFixOverflow [^string who ^any a ^any b]
+  (Violation CondImplRestriction who "fixnum overflow with arguments ~s and ~s" a b))
+
+^{:go/breaks [5] :go/end 98} (go/func pnAbs ^any [^string who ^any x]
+  (type-switch [v x]
+    (case [int64]
+      (when (>= v 0)
+        (return x))
+
+      (return (Sub (pnI 0) x)))
+    (case [float64]
+      (return (math/Abs v)))
+    (case [(* big/Int)]
+      (return (NormInt (.Abs (new big/Int) v))))
+    (case [(* big/Rat)]
+      (return (.Abs (new big/Rat) v))))
+
+  (NotA who "real number" x)
+  nil)
+
+;; ---------------------------------------------------------------------------------------
+;; + - * / with Chez's exact zero rules
+
+(go/func pnAdd ^any [^any a ^any b]
+  (when [(values _ ok) (assert int64 a)] ok
+    (when [(values _ ok) (assert int64 b)] ok
+      (return (Add a b))))
+
+  (pnNum "+" a)
+  (pnNum "+" b)
+  (when (pnExZero a)
+    (return b))
+
+  (when (pnExZero b)
+    (return a))
+
+  (Add a b))
+
+(go/func pnSub ^any [^any a ^any b]
+  (when [(values _ ok) (assert int64 a)] ok
+    (when [(values _ ok) (assert int64 b)] ok
+      (return (Sub a b))))
+
+  (pnNum "-" a)
+  (pnNum "-" b)
+  (when (pnExZero b)
+    (return a))
+
+  (when (pnExZero a)
+    (when [(values f ok) (assert float64 b)] ok
+      (return (- f))))
+
+  (Sub a b))
+
+(go/func pnMul ^any [^any a ^any b]
+  (when [(values _ ok) (assert int64 a)] ok
+    (when [(values _ ok) (assert int64 b)] ok
+      (return (Mul a b))))
+
+  (pnNum "*" a)
+  (pnNum "*" b)
+  (when (or (pnExZero a) (pnExZero b))
+    (return (pnI 0)))
+
+  (Mul a b))
+
+(go/func pnDiv ^any [^any a ^any b]
+  (pnNum "/" a)
+  (pnNum "/" b)
+  (when (pnExZero b)
+    (AssertionViolation "/" "undefined for ~s" b))
+
+  (when (pnExZero a)
+    (return a))
+
+  (Div a b))
+
+(go/func pnSum ^any [^{:tag (slice any)} args]
+  (let [^any acc (pnI 0)]
+    (range [_ x args]
+      (set! acc (pnAdd acc x)))
+
+    (when (== (len args) 1)
+      (pnNum "+" (aget args 0))
+      (return (aget args 0)))
+
+    acc))
+
+(go/func pnProd ^any [^{:tag (slice any)} args]
+  (let [^any acc (pnI 1)]
+    (range [_ x args]
+      (set! acc (pnMul acc x)))
+
+    (when (== (len args) 1)
+      (pnNum "*" (aget args 0)))
+
+    acc))
+
+(go/func pnDiff ^any [^{:tag (slice any)} args]
+  (when (== (len args) 1)
+    (return (pnSub (pnI 0) (aget args 0))))
+
+  (let [acc (aget args 0)]
+    (range [_ x (subslice args 1)]
+      (set! acc (pnSub acc x)))
+
+    acc))
+
+(go/func pnQuot ^any [^{:tag (slice any)} args]
+  (when (== (len args) 1)
+    (return (pnDiv (pnI 1) (aget args 0))))
+
+  (let [acc (aget args 0)]
+    (range [_ x (subslice args 1)]
+      (set! acc (pnDiv acc x)))
+
+    acc))
+
+;; ---------------------------------------------------------------------------------------
+;; Comparison. kind: 0 =, 1 <, 2 >, 3 <=, 4 >=
+
+(go/func pnTest ^bool [^int kind ^int c]
+  (switch kind
+    (case [0]
+      (return (== c 0)))
+    (case [1]
+      (return (== c -1)))
+    (case [2]
+      (return (== c 1)))
+    (case [3]
+      (return (or (== c -1) (== c 0)))))
+
+  (or (== c 0) (== c 1)))
+
+^{:go/breaks [[5 240]] :go/end 241} (go/func pnCompare ^any [^string who ^int kind ^{:tag (slice any)} args]
+  (range [_ x args]
+    (if (== kind 0)
+      (pnNum who x)
+
+      (pnReal who x)))
+
+  (for [i 0] (< (+ i 1) (len args)) (inc! i)
+    (watchdogTick)
+    (if (and (== kind 0) (or (isComplex (aget args i)) (isComplex (aget args (+ i 1)))))
+      (when (not (cxEq (aget args i) (aget args (+ i 1))))
+        (return false))
+      (when (not (pnTest kind (Cmp who (aget args i) (aget args (+ i 1)))))
+        (return false))))
+
+  true)
+
+(go/func pnDefCmp [^string name ^int kind]
+  (reg (addr ^{:go/breaks [8 [10 263]]} (lit Prim :Name name :Min 2 :Max -1
+        :F2 (fn ^any [^any a ^any b]
+          (when [(values x ok) (assert int64 a)] ok
+            (when [(values y ok) (assert int64 b)] ok
+              (switch kind
+                (case [0]
+                  (return (== x y)))
+                (case [1]
+                  (return (< x y)))
+                (case [2]
+                  (return (> x y)))
+                (case [3]
+                  (return (<= x y))))
+
+              (return (>= x y))))
+
+          (pnCompare name kind (lit (slice any) a b)))
+
+        :Fn (fn ^any [^{:tag (slice any)} args] (pnCompare name kind args))))))
+
+(go/func pnMaxMin "pnMaxMin: max (isMax) or min of reals, inexact when any is, a NaN sticks.\n" ^any [^string who ^bool isMax ^{:tag (slice any)} args]
+  (range [_ x args]
+    (pnReal who x))
+
+  (let [acc (aget args 0)
+      inexact false]
+    (when [(values _ ok) (assert float64 acc)] ok
+      (set! inexact true))
+
+    (range [_ x (subslice args 1)]
+      (when [(values _ ok) (assert float64 x)] ok
+        (set! inexact true))
+
+      (let [c (Cmp who acc x)]
+        (switch
+          (case [(== c 2)]
+            (set! acc (math/NaN)))
+          (case [(and isMax (> c 0)) (and (not isMax) (< c 0))])
+          (default
+            (set! acc x)))))
+
+    (when inexact
+      (return (ToFloat acc)))
+
+    acc))
+
+;; ---------------------------------------------------------------------------------------
+;; Predicates
+
+^{:go/breaks [5] :go/end 309} (go/func pnZeroP ^bool [^any x]
+  (type-switch [v x]
+    (case [int64]
+      (return (== v 0)))
+    (case [float64]
+      (return (== v 0)))
+    (case [(* big/Int) (* big/Rat)]
+      (return false))
+    (case [(* Complex)]
+      (return (and (== (Cmp "zero?" (.-Re v) (pnI 0)) 0) (== (Cmp "zero?" (.-Im v) (pnI 0)) 0)))))
+
+  (NotA "zero?" "number" x)
+  false)
+
+^{:go/breaks [5] :go/end 324} (go/func pnIsEven ^bool [^string who ^any x]
+  (type-switch [v x]
+    (case [int64]
+      (return (== (bit-and v 1) 0)))
+    (case [(* big/Int)]
+      (return (== (.Bit v 0) 0)))
+    (case [float64]
+      (when (IsInteger x)
+        (return (== (math/Mod v 2) 0)))))
+
+  (NotAn who "integer" x)
+  false)
+
+;; ---------------------------------------------------------------------------------------
+;; Exactness
+
+(go/func pnExact ^any [^string who ^any x]
+  (type-switch [v x]
+    (case [(* Complex)]
+      (return (MkRect (pnExact who (.-Re v)) (pnExact who (.-Im v)))))
+    (case [float64]
+      (when (or (math/IsInf v 0) (math/IsNaN v))
+        (AssertionViolation who "no exact representation for ~s" x))
+
+      (return (Exact x))))
+
+  (pnNum who x)
+  x)
+
+(go/func pnInexact ^any [^string who ^any x]
+  (pnNum who x)
+  (when [(values z ok) (assert (* Complex) x)] ok
+    (return (MkRect (ToFloat (.-Re z)) (ToFloat (.-Im z)))))
+  (ToFloat x))
+
+;; ---------------------------------------------------------------------------------------
+;; Division
+
+(go/func pnRatFloor ^{:tag (* big/Int)} [^{:tag (* big/Rat)} q]
+  (.Div (new big/Int) (.Num q) (.Denom q)))
+
+(go/func pnDivMod "pnDivMod is R6RS's div and mod (centered: div0 and mod0) of reals x and y.\n" [^string who ^bool centered ^any x ^any y] :results [any any]
+  (when (not (IsReal x))
+    (AssertionViolation who "undefined for ~s" x))
+
+  (when (not (IsReal y))
+    (AssertionViolation who "undefined for ~s" y))
+
+  (let [(values _ xf) (assert float64 x)
+      (values _ yf) (assert float64 y)]
+    (when (and (pnExZero y) (not xf))
+      (AssertionViolation who "undefined for ~s" y))
+
+    (when (and (not xf) (not yf))
+      (let [(values ^any d ^any m) (zero any)]
+        (if (and (IsExactInteger x) (IsExactInteger y))
+          (set! (values d m) (IntDivMod x y))
+
+          (let [(values rx ry) (values (toRat x) (toRat y))
+              q (.Quo (new big/Rat) rx ry)
+              f (pnRatFloor q)]
+            (when (and (< (.Sign ry) 0) (not (.IsInt q)))
+              (set! f (.Add (new big/Int) f (big/NewInt 1))))
+
+            (set! d (NormInt f))
+            (set! m (Sub x (Mul d y)))))
+
+        (when centered
+          (let [ay (pnAbs who y)]
+            (when (>= (Cmp who (Add m m) ay) 0)
+              (if (> (Sign who y) 0)
+                (set! d (Add d (pnI 1)))
+
+                (set! d (Sub d (pnI 1))))
+
+              (set! m (Sub m ay)))))
+
+        (return d m)))
+
+    (let [(values fx fy) (values (ToFloat x) (ToFloat y))
+        ^{:line 394 :tag float64} d (zero float64)]
+      (if (> fy 0)
+        (set! d (math/Floor (/ fx fy)))
+
+        (set! d (math/Ceil (/ fx fy))))
+
+      (let [m (- fx (* d fy))]
+        (when (and centered (math/IsInf fy 0) (not (math/IsInf fx 0)) (not (math/IsNaN fx)))
+          (when (> fy 0)
+            (return 1.0 (math/NaN)))
+
+          (return -1.0 (math/NaN)))
+
+        (when centered
+          (let [ay (math/Abs fy)]
+            (when (>= m (/ ay 2))
+              (if (> fy 0)
+                (set! d (+ d 1))
+
+                (set! d (- d 1)))
+
+              (set! m (- m ay)))))
+
+        (return d m)))))
+
+(go/func pnDefDiv [^string name ^bool centered ^int which]
+  (Def2 name (fn ^any [^any x ^any y]
+      (let [(values d m) (pnDivMod name centered x y)]
+        (switch which
+          (case [0]
+            (return d))
+          (case [1]
+            (return m)))
+
+        (addr (lit Values :V (lit (slice any) d m)))))))
+
+(go/func pnIntDiv "pnIntDiv: kind 0 quotient, 1 remainder, 2 modulo\n" ^any [^string who ^int kind ^any a ^any b]
+  (when (not (IsInteger a))
+    (NotAn who "integer" a))
+
+  (when (not (IsInteger b))
+    (NotAn who "integer" b))
+
+  (let [(values _ af) (assert float64 a)
+      (values _ bf) (assert float64 b)]
+    (when (and (not af) (not bf))
+      (when (pnExZero b)
+        (AssertionViolation who "undefined for ~s" b))
+
+      (let [(values q r) (IntQuoRem a b)]
+        (switch kind
+          (case [0]
+            (return q))
+          (case [1]
+            (return r)))
+
+        (when (and (!= (Sign who r) 0) (!= (Sign who r) (Sign who b)))
+          (set! r (Add r b)))
+
+        (return r)))
+
+    (let [(values x y) (values (ToFloat a) (ToFloat b))]
+      (when (== y 0)
+        (AssertionViolation who "undefined for ~s" b))
+
+      (switch kind
+        (case [0]
+          (return (math/Trunc (/ x y))))
+        (case [1]
+          (return (math/Mod x y))))
+
+      (let [m (math/Mod x y)]
+        (when (and (!= m 0) (!= (< m 0) (< y 0)))
+          (set! m + y))
+
+        m))))
+
+(go/func pnIntBig [^string who ^any x] :results [(* big/Int) bool]
+  (type-switch [v x]
+    (case [int64]
+      (return (big/NewInt v) false))
+    (case [(* big/Int)]
+      (return v false))
+    (case [float64]
+      (when (IsInteger x)
+        (return (pnFloatBig v) true))))
+
+  (NotAn who "integer" x)
+  (return nil false))
+
+(go/func pnGcd ^any [^{:tag (slice any)} args]
+  (let [acc (new big/Int)
+      fl false]
+    (range [_ x args]
+      (let [(values b f) (pnIntBig "gcd" x)]
+        (set! fl (or fl f))
+        (.GCD acc nil nil acc (.Abs (new big/Int) b))))
+
+    (when fl
+      (return (pnBigFloat acc)))
+
+    (NormInt acc)))
+
+(go/func pnLcm ^any [^{:tag (slice any)} args]
+  (let [acc (big/NewInt 1)
+      fl false
+      zero false]
+    (range [_ x args]
+      (let [(values b f) (pnIntBig "lcm" x)]
+        (set! fl (or fl f))
+        (when (== (.Sign b) 0)
+          (set! zero true)
+          (continue))
+
+        (set! b (.Abs (new big/Int) b))
+        (let [g (.GCD (new big/Int) nil nil acc b)]
+          (set! acc (.Mul (new big/Int) acc (.Quo (new big/Int) b g))))))
+
+    (when zero
+      (set! acc (new big/Int)))
+
+    (when fl
+      (return (pnBigFloat acc)))
+
+    (NormInt acc)))
+
+^{:go/breaks [5] :go/end 569} (go/func pnNumerator ^any [^string who ^any x ^bool den ^bool generic]
+  (type-switch [v x]
+    (case [int64 (* big/Int)]
+      (when den
+        (return (pnI 1)))
+
+      (return x))
+    (case [(* big/Rat)]
+      (when den
+        (return (NormInt (.Set (new big/Int) (.Denom v)))))
+
+      (return (NormInt (.Set (new big/Int) (.Num v)))))
+    (case [float64]
+      (when (and generic ^:go/paren (or (math/IsNaN v) (math/IsInf v 0)))
+        (NotA who "rational number" x))
+
+      (when (math/IsNaN v)
+        (return v))
+
+      (when (math/IsInf v 0)
+        (when den
+          (return 1.0))
+
+        (return v))
+
+      (when (== v 0)
+        (when den
+          (return 1.0))
+
+        (return v))
+
+      (let [r (.SetFloat64 (new big/Rat) v)]
+        (when den
+          (return (pnBigFloat (.Denom r))))
+
+        (return (pnBigFloat (.Num r))))))
+
+  (NotA who "rational number" x)
+  nil)
+
+;; ---------------------------------------------------------------------------------------
+;; floor, ceiling, truncate, round
+
+^{:go/breaks [5] :go/end 607} (go/func pnRound ^any [^string who ^int mode ^any x]
+  (type-switch [v x]
+    (case [int64 (* big/Int)]
+      (return x))
+    (case [float64]
+      (switch mode
+        (case [0]
+          (return (math/Floor v)))
+        (case [1]
+          (return (math/Ceil v)))
+        (case [2]
+          (return (math/Trunc v))))
+
+      (return (math/RoundToEven v)))
+    (case [(* big/Rat)]
+      (let [f (pnRatFloor v)]
+        (switch mode
+          (case [0]
+            (return (NormInt f)))
+          (case [1]
+            (return (NormInt (.Add f f (big/NewInt 1)))))
+          (case [2]
+            (return (NormInt (.Quo (new big/Int) (.Num v) (.Denom v))))))
+
+        (let [diff (.Sub (new big/Rat) v (.SetInt (new big/Rat) f))
+            c (.Cmp diff (big/NewRat 1 2))]
+          (when (or (> c 0) ^:go/paren (and (== c 0) (== (.Bit f 0) 1)))
+            (.Add f f (big/NewInt 1)))
+
+          (return (NormInt f))))))
+
+  (NotA who "real number" x)
+  nil)
+
+;; ---------------------------------------------------------------------------------------
+;; rationalize
+
+(go/func pnSimplest ^{:tag (* big/Rat)} [^{:tag (* big/Rat)} lo ^{:tag (* big/Rat)} hi]
+  (when (> (.Sign lo) 0)
+    (return (pnSimplestPos lo hi)))
+
+  (when (< (.Sign hi) 0)
+    (let [r (pnSimplestPos (.Neg (new big/Rat) hi) (.Neg (new big/Rat) lo))]
+      (return (.Neg r r))))
+
+  (new big/Rat))
+
+(go/func pnSimplestPos ^{:tag (* big/Rat)} [^{:tag (* big/Rat)} lo ^{:tag (* big/Rat)} hi]
+  (let [fl (pnRatFloor lo)
+      flr (.SetInt (new big/Rat) fl)]
+    (when (== (.Cmp flr lo) 0)
+      (return flr))
+
+    (when (< (.Cmp fl (pnRatFloor hi)) 0)
+      (return (.Add flr flr (big/NewRat 1 1))))
+
+    (let [a (.Sub (new big/Rat) hi flr)
+        b (.Sub (new big/Rat) lo flr)
+        r (pnSimplestPos (.Inv (new big/Rat) a) (.Inv (new big/Rat) b))]
+      (.Add flr flr (.Inv r r)))))
+
+(go/func pnRationalize ^any [^any x ^any e]
+  (pnReal "rationalize" x)
+  (pnReal "rationalize" e)
+  (let [(values _ xf) (assert float64 x)
+      (values _ ef) (assert float64 e)]
+    (when (or xf ef)
+      (let [(values fx fe) (values (ToFloat x) (ToFloat e))]
+        (when (or (math/IsNaN fx) (math/IsNaN fe))
+          (return (math/NaN)))
+
+        (when (math/IsInf fx 0)
+          (when (math/IsInf fe 0)
+            (return (math/NaN)))
+
+          (return fx))
+
+        (when (math/IsInf fe 0)
+          (return 0.0))))
+
+    (let [(values rx re) (values (toRat (pnExact "rationalize" x)) (toRat (pnExact "rationalize" e)))]
+      (set! re (.Abs (new big/Rat) re))
+      (let [r (pnSimplest (.Sub (new big/Rat) rx re) (.Add (new big/Rat) rx re))
+          res (NormRat r)]
+        (when (or xf ef)
+          (return (ToFloat res)))
+
+        res))))
+
+;; ---------------------------------------------------------------------------------------
+;; exp, log, trig, sqrt
+
+(go/func pnLogBig ^float64 [^any x]
+  (type-switch [v x]
+    (case [(* big/Int)]
+      (return (pnToF (pnHPLn (.SetInt (pnNewF (+ (conv uint (.BitLen v)) pnHP)) v) pnHP))))
+    (case [(* big/Rat)]
+      (let [p (+ (conv uint (+ (.BitLen (.Num v)) (.BitLen (.Denom v)))) pnHP)
+          n (.SetInt (pnNewF p) (.Num v))
+          d (.SetInt (pnNewF p) (.Denom v))]
+        (return (pnToF (pnHPLn (.Quo (pnNewF p) n d) pnHP))))))
+
+  (pnLn (ToFloat x)))
+
+(go/func pnLog ^any [^any x]
+  (pnNum "log" x)
+  (when [(values n ok) (assert int64 x)] ok
+    (when (== n 1)
+      (return (pnI 0)))
+
+    (when (== n 0)
+      (AssertionViolation "log" "undefined for ~s" x)))
+
+  (when (isComplex x)
+    (return (cxLog x)))
+
+  (when (< (Sign "log" x) 0)
+    (return (cxLogReal x)))
+
+  (when [(values f ok) (assert float64 x)] ok
+    (when (and (math/Signbit f) (!= f 0))
+      (return (cxLogReal x)))
+
+    (return (pnLn f)))
+
+  (pnLogBig x))
+
+(go/func pnSqrtBig ^any [^{:tag (* big/Int)} v]
+  (when (< (.Sign v) 0)
+    (return (cxSqrtNeg v)))
+
+  (let [s (.Sqrt (new big/Int) v)]
+    (when (== (.Cmp (.Mul (new big/Int) s s) v) 0)
+      (return (NormInt s)))
+
+    (let [f (pnBigFloat v)]
+      (when (math/IsInf f 0)
+        (let [(values bf _) (.Float64 (.Sqrt (.SetInt (.SetPrec (new big/Float) 100) v) (.SetInt (.SetPrec (new big/Float) 100) v)))]
+          (return bf)))
+
+      (math/Sqrt f))))
+
+^{:go/breaks [5] :go/end 766} (go/func pnSqrt ^any [^any x]
+  (type-switch [v x]
+    (case [int64]
+      (when (< v 0)
+        (return (cxSqrtNeg x)))
+
+      (when (< v (<< 1 52))
+        (let [r (conv int64 (math/Sqrt (conv float64 v)))]
+          (while (> (* r r) v)
+            (watchdogTick)
+            (dec! r))
+
+          (while (<= (* (+ r 1) (+ r 1)) v)
+            (watchdogTick)
+            (inc! r))
+
+          (when (== (* r r) v)
+            (return r))
+
+          (return (math/Sqrt (conv float64 v)))))
+
+      (return (pnSqrtBig (big/NewInt v))))
+    (case [(* big/Int)]
+      (return (pnSqrtBig v)))
+    (case [(* big/Rat)]
+      (when (< (.Sign v) 0)
+        (return (cxSqrtNeg x)))
+
+      (let [n (.Sqrt (new big/Int) (.Num v))
+          d (.Sqrt (new big/Int) (.Denom v))]
+        (when (and (== (.Cmp (.Mul (new big/Int) n n) (.Num v)) 0) (== (.Cmp (.Mul (new big/Int) d d) (.Denom v)) 0))
+          (return (NormRat (.SetFrac (new big/Rat) n d))))
+
+        (let [f (ToFloat x)]
+          (when (or (== f 0) (math/IsInf f 0))
+            (return (pnExp (/ (pnLogBig x) 2))))
+
+          (return (math/Sqrt f)))))
+    (case [float64]
+      (when (< v 0)
+        (return (cxSqrtNeg x)))
+
+      (return (math/Sqrt v)))
+    (case [(* Complex)]
+      (return (cxSqrt x))))
+
+  (NotA "sqrt" "number" x)
+  nil)
+
+(go/func pnDefTrig "pnTrig: exact argument exactArg gives exact result exactRes; domain (when > 0) is |x| <= 1.\n" [^string name ^int which ^{:tag (func [float64] [float64])} f ^int64 exactArg ^int64 exactRes ^bool unit]
+  (Def1 name (fn ^any [^any x]
+      (pnNum name x)
+      (when (isComplex x)
+        (return (cxTrig name which x)))
+
+      (when [(values n ok) (assert int64 x)] (and ok (== n exactArg))
+        (return exactRes))
+
+      (let [v (ToFloat x)]
+        (when (and unit ^:go/paren (or (> v 1) (< v -1)))
+          (if (== which 3)
+            (return (cxAsinReal v))
+            (return (cxAcosReal v))))
+
+        (f v)))))
+
+(go/func pnAtan2Num ^any [^any y ^any x]
+  (pnReal "atan" y)
+  (pnReal "atan" x)
+  (when (pnExZero y)
+    (when (pnExZero x)
+      (Violation CondAssertion "atan2" "undefined for values ~s and ~s" y x))
+
+    (when [(values f ok) (assert float64 x)] (and ok (math/IsNaN f))
+      (return f))
+
+    (when (< (Sign "atan" x) 0)
+      (return math/Pi))
+
+    (when [(values f ok) (assert float64 x)] (and ok (math/Signbit f))
+      (return math/Pi))
+
+    (return (pnI 0)))
+
+  (pnAtan2 (ToFloat y) (ToFloat x)))
+
+;; ---------------------------------------------------------------------------------------
+;; expt
+
+(go/func pnOOM [^string who]
+  (AssertionViolation who "out of memory"))
+
+(go/func pnExptExact ^any [^any x ^any y]
+  (let [(values yn small) (assert int64 y)]
+    (when (not small)
+      (let [yb (assert (* big/Int) y)]
+        (switch
+          (case [(pnExZero x)]
+            (when (> (.Sign yb) 0)
+              (return (pnI 0)))
+
+            (Violation CondImplRestriction "expt" "undefined for values ~s and ~s" x y))
+          (case [(== (Cmp "expt" x (pnI 1)) 0)]
+            (return (pnI 1)))
+          (case [(== (Cmp "expt" x (pnI -1)) 0)]
+            (when (== (.Bit yb 0) 0)
+              (return (pnI 1)))
+
+            (return (pnI -1))))
+
+        (pnOOM "ash")))
+
+    (when (== yn 0)
+      (return (pnI 1)))
+
+    (when (pnExZero x)
+      (when (> yn 0)
+        (return (pnI 0)))
+
+      (Violation CondImplRestriction "expt" "undefined for values ~s and ~s" x y))
+
+    (let [n yn]
+      (when (< n 0)
+        (set! n (- n)))
+
+      (let [r (toRat x)]
+        (when (and (> (conv int64 (.BitLen (.Num r))) 1) (> (* (conv int64 (.BitLen (.Num r))) n) (<< 1 31)))
+          (pnOOM "ash"))
+
+        (when (and (> (conv int64 (.BitLen (.Denom r))) 1) (> (* (conv int64 (.BitLen (.Denom r))) n) (<< 1 31)))
+          (pnOOM "ash"))
+
+        (let [num (.Exp (new big/Int) (.Num r) (big/NewInt n) nil)
+            den (.Exp (new big/Int) (.Denom r) (big/NewInt n) nil)]
+          (when (< yn 0)
+            (set! (values num den) (values den num)))
+
+          (NormRat (.SetFrac (new big/Rat) num den)))))))
+
+(go/func pnExptFloat ^any [^float64 x ^any y]
+  (when [(values n ok) (assert int64 y)] ok
+    (let [m n]
+      (when (< m 0)
+        (set! m (- m)))
+
+      (let [(values res base) (values 1.0 x)]
+        (while (> m 0)
+          (watchdogTick)
+          (when (== (bit-and m 1) 1)
+            (set! res * base))
+
+          (set! base * base)
+          (set! m >> 1))
+
+        (when (< n 0)
+          (return (/ 1 res)))
+
+        (return res))))
+
+  (pnPow x (ToFloat y)))
+
+(go/func pnExpt ^any [^any x ^any y]
+  (pnNum "expt" x)
+  (pnNum "expt" y)
+  (when (or (isComplex x) (isComplex y))
+    (return (cxExpt x y)))
+
+  (type-switch y
+    (case [int64 (* big/Int)]
+      (when (pnExZero y)
+        (return (pnI 1)))
+
+      (when [(values _ ok) (assert float64 x)] ok
+        (return (pnExptFloat (assert float64 x) y)))
+
+      (return (pnExptExact x y))))
+
+  ;; y is a ratio or a flonum
+  (when (IsExact x)
+    (when [(values n ok) (assert int64 x)] ok
+      (when (== n 1)
+        (return (pnI 1)))
+
+      (when (== n 0)
+        (let [s (Sign "expt" y)]
+          (when (> s 0)
+            (return (pnI 0)))
+
+          (when (== s 0)
+            (when [(values f ok) (assert float64 y)] (and ok (math/IsNaN f))
+              (return f))
+
+            (return 1.0))
+
+          (Violation CondImplRestriction "expt" "undefined for values ~s and ~s" x y))))
+
+    (when [(values r ok) (assert (* big/Rat) y)] (and ok (.IsInt64 (.Num r)) (== (.Int64 (.Num r)) 1) (.IsInt64 (.Denom r)) (== (.Int64 (.Denom r)) 2))
+      (return (pnSqrt x))))
+
+  (let [(values fx fy) (values (ToFloat x) (ToFloat y))]
+    (when (and (< fx 0) (not (math/IsInf fy 0)) (not (math/IsNaN fy)) (!= fy (math/Trunc fy)))
+      (return (cxExpt x y)))
+
+    (pnPow fx fy)))
+
+;; ---------------------------------------------------------------------------------------
+;; Fixnums
+
+(go/func pnFxCmp [^string name ^int kind]
+  (let [test (fn ^bool [^int64 a ^int64 b]
+        (switch kind
+          (case [0]
+            (return (== a b)))
+          (case [1]
+            (return (< a b)))
+          (case [2]
+            (return (> a b)))
+          (case [3]
+            (return (<= a b))))
+
+        (>= a b))]
+
+    (reg (addr ^{:go/breaks [8 10]} (lit Prim :Name name :Min 2 :Max -1
+          :F2 (fn ^any [^any a ^any b] (test (pnFx name a) (pnFx name b)))
+          :Fn ^{:go/breaks [[4 953]] :go/end 954} (fn ^any [^{:tag (slice any)} args]
+            (range [_ x args]
+              (pnFx name x))
+
+            (for [i 0] (< (+ i 1) (len args)) (inc! i)
+              (watchdogTick)
+              (when (not (test (assert int64 (aget args i)) (assert int64 (aget args (+ i 1)))))
+                (return false)))
+
+            true))))))
+
+(go/func pnFxResult ^any [^string who ^{:tag (* big/Int)} b ^any x ^any y]
+  (when (or (not (.IsInt64 b)) (not (IsFixnum (.Int64 b))))
+    (pnFixOverflow who x y))
+
+  (.Int64 b))
+
+(go/func pnFxDivMod [^string who ^bool centered ^any a ^any b] :results [int64 int64]
+  (let [(values x y) (values (pnFx who a) (pnFx who b))]
+    (when (== y 0)
+      (AssertionViolation who "undefined for ~s" b))
+
+    (let [(values d m) (IntDivMod x y)]
+      (when centered
+        (let [ay y]
+          (when (< ay 0)
+            (set! ay (- ay)))
+
+          (when (>= (* 2 (assert int64 m)) ay)
+            (if (> y 0)
+              (set! d (Add d (pnI 1)))
+
+              (set! d (Sub d (pnI 1))))
+
+            (set! m (Sub m ay)))))
+
+      (when [(values n ok) (assert int64 d)] (or (not ok) (not (IsFixnum n)))
+        (pnFixOverflow who a b))
+
+      (return (assert int64 d) (assert int64 m)))))
+
+(go/func pnDefFxDiv [^string name ^bool centered ^int which]
+  (Def2 name (fn ^any [^any a ^any b]
+      (let [(values d m) (pnFxDivMod name centered a b)]
+        (switch which
+          (case [0]
+            (return d))
+          (case [1]
+            (return m)))
+
+        (addr (lit Values :V (lit (slice any) d m)))))))
+
+(go/var pnTwo61 (.Lsh (new big/Int) (big/NewInt 1) 61))
+(go/var pnTwo60 (.Lsh (new big/Int) (big/NewInt 1) 60))
+
+(go/func pnCarry "pnCarry gives s0 and s1 of s: s = s1 * 2^61 + s0, s0 in the fixnum range.\n" ^any [^{:tag (* big/Int)} s]
+  (let [t (.Add (new big/Int) s pnTwo60)
+      m (.Mod (new big/Int) t pnTwo61)
+      s0 (.Sub (new big/Int) m pnTwo60)
+      s1 (.Div (new big/Int) (.Sub (new big/Int) s s0) pnTwo61)]
+    (addr (lit Values :V (lit (slice any) (NormInt s0) (NormInt s1))))))
+
+(go/func pnFxMaskBits ^{:tag (* big/Int)} [^int64 start ^int64 end]
+  (let [m (.Lsh (new big/Int) (big/NewInt 1) (conv uint (- end start)))]
+    (.Sub m m (big/NewInt 1))))
+
+(go/func pnBitField "field helpers on big integers\n" ^{:tag (* big/Int)} [^{:tag (* big/Int)} a ^int64 start ^int64 end]
+  (let [r (.Rsh (new big/Int) a (conv uint start))]
+    (.And r r (pnFxMaskBits start end))))
+
+(go/func pnCopyField ^{:tag (* big/Int)} [^{:tag (* big/Int)} a ^int64 start ^int64 end ^{:tag (* big/Int)} from]
+  (let [mask (.Lsh (new big/Int) (pnFxMaskBits start end) (conv uint start))
+      keep (.AndNot (new big/Int) a mask)
+      ins (.Lsh (new big/Int) from (conv uint start))]
+    (.And ins ins mask)
+    (.Or keep keep ins)))
+
+(go/func pnRotateField ^{:tag (* big/Int)} [^{:tag (* big/Int)} a ^int64 start ^int64 end ^int64 count]
+  (let [w (- end start)]
+    (when (== w 0)
+      (return a))
+
+    (set! count % w)
+    (let [f (pnBitField a start end)
+        r (.Lsh (new big/Int) f (conv uint count))]
+      (.Or r r (.Rsh (new big/Int) f (conv uint (- w count))))
+      (.And r r (pnFxMaskBits 0 w))
+      (pnCopyField a start end r))))
+
+(go/func pnReverseField ^{:tag (* big/Int)} [^{:tag (* big/Int)} a ^int64 start ^int64 end]
+  (let [w (- end start)
+      f (pnBitField a start end)
+      r (new big/Int)]
+    (for [i (conv int64 0)] (< i w) (inc! i)
+      (watchdogTick)
+      (when (== (.Bit f (conv int i)) 1)
+        (.SetBit r r (conv int (- w 1 i)) 1)))
+
+    (pnCopyField a start end r)))
+
+(go/func pnFxIdx [^string who ^int64 i ^string what]
+  (when (or (< i 0) (> i 60))
+    (AssertionViolation who (+ "~s is not a valid " what " index") i)))
+
+(go/func pnFxRange [^string who ^int64 s ^int64 e]
+  (pnFxIdx who s "start")
+  (pnFxIdx who e "end")
+  (when (> s e)
+    (AssertionViolation who "start index ~s is greater than end index ~s" s e)))
+
+(go/func pnFxRange2 [^string who ^int64 s ^int64 e]
+  (when (or (< e 0) (> e 60))
+    (AssertionViolation who "invalid end index ~s" e))
+
+  (when (or (< s 0) (> s 60))
+    (AssertionViolation who "invalid start index ~s" s))
+
+  (when (> s e)
+    (AssertionViolation who "start index ~s is greater than end index ~s" s e)))
+
+(go/func pnFxShift ^any [^string who ^int64 x ^int64 n ^bool left ^bool right]
+  (let [(values lo hi) (values (conv int64 -60) (conv int64 60))]
+    (when left
+      (set! lo 0))
+
+    (when right
+      (set! (values lo hi) (values 0 60)))
+
+    (when (or (< n lo) (> n hi))
+      (AssertionViolation who "invalid shift count ~s" n))
+
+    (when right
+      (set! n (- n)))
+
+    (when (>= n 0)
+      (let [r (.Lsh (new big/Int) (big/NewInt x) (conv uint n))]
+        (return (pnFxResult who r x n))))
+
+    (>> x (conv uint (- n)))))
+
+;; ---------------------------------------------------------------------------------------
+;; Bitwise
+
+(go/func pnBitFold ^any [^string who ^{:tag (slice any)} args ^int64 id ^{:tag (func [^{:tag (* big/Int)} z ^{:tag (* big/Int)} a ^{:tag (* big/Int)} b] [(* big/Int)])} op ^{:tag (func [^int64 a ^int64 b] [int64])} fast]
+  (range [_ x args]
+    (pnExInt who x))
+
+  (let [^any acc id]
+    (range [_ x args]
+      (let [(values a ok1) (assert int64 acc)
+          (values b ok2) (assert int64 x)]
+        (when (and ok1 ok2)
+          (set! acc (fast a b))
+          (continue))
+
+        (set! acc (NormInt (op (new big/Int) (pnExInt who acc) (pnExInt who x))))))
+
+    acc))
+
+(go/func pnBitIdx ^int64 [^string who ^any x ^string msg]
+  (let [(values n ok) (assert int64 x)]
+    (when (or (not ok) (< n 0))
+      (AssertionViolation who msg x))
+
+    n))
+
+(go/func pnBitCount ^int64 [^{:tag (* big/Int)} b]
+  (when (>= (.Sign b) 0)
+    (return (conv int64 (pnPop b))))
+
+  (- (- (conv int64 (pnPop (.Not (new big/Int) b)))) 1))
+
+(go/func pnPop ^int [^{:tag (* big/Int)} b]
+  (let [n 0]
+    (range [_ w (.Bits b)]
+      (set! n + (bits/OnesCount (conv uint w))))
+
+    n))
+
+(go/func pnBitLength ^int64 [^{:tag (* big/Int)} b]
+  (when (>= (.Sign b) 0)
+    (return (conv int64 (.BitLen b))))
+
+  (conv int64 (.BitLen (.Not (new big/Int) b))))
+
+(go/func pnFirstBit ^int64 [^{:tag (* big/Int)} b]
+  (when (== (.Sign b) 0)
+    (return -1))
+
+  (conv int64 (.TrailingZeroBits b)))
+
+^{:go/breaks [5] :go/end 1193} (go/func pnShift ^any [^string who ^{:tag (* big/Int)} a ^any n]
+  (type-switch [v n]
+    (case [int64]
+      (when (>= v 0)
+        (when (and (!= (.Sign a) 0) ^:go/paren (> v (<< 1 31)))
+          (pnOOM who))
+
+        (return (NormInt (.Lsh (new big/Int) a (conv uint v)))))
+
+      (when (> (- v) (<< 1 31))
+        (when (< (.Sign a) 0)
+          (return (pnI -1)))
+
+        (return (pnI 0)))
+
+      (return (NormInt (.Rsh (new big/Int) a (conv uint (- v))))))
+    (case [(* big/Int)]
+      (when (>= (.Sign v) 0)
+        (when (== (.Sign a) 0)
+          (return (pnI 0)))
+
+        (pnOOM who))
+
+      (when (< (.Sign a) 0)
+        (return (pnI -1)))
+
+      (return (pnI 0))))
+
+  (NotAn who "exact integer" n)
+  nil)
+
+(go/func init []
+  ;; numeric tower predicates
+  (Def1 "number?" (fn ^any [^any x] (IsNumber x)))
+  (Def1 "complex?" (fn ^any [^any x] (IsNumber x)))
+  (Def1 "real?" (fn ^any [^any x] (IsReal x)))
+  (Def1 "rational?" (fn ^any [^any x] (IsRational x)))
+  (Def1 "integer?" (fn ^any [^any x] (IsInteger x)))
+  (Def1 "real-valued?" (fn ^any [^any x] (or (IsReal x) (cxRealValued x))))
+  (Def1 "rational-valued?" (fn ^any [^any x] (or (IsRational x) (and (cxRealValued x) (IsRational (.-Re (assert (* Complex) x)))))))
+  (Def1 "integer-valued?" (fn ^any [^any x] (or (IsInteger x) (and (cxRealValued x) (IsInteger (.-Re (assert (* Complex) x)))))))
+  (Def1 "exact?" (fn ^any [^any x] (pnNum "exact?" x) (IsExact x)))
+  (Def1 "inexact?" (fn ^any [^any x] (pnNum "inexact?" x) (not (IsExact x))))
+  (Def1 "exact-integer?" (fn ^any [^any x] (IsExactInteger x)))
+  (Def1 "exact-nonnegative-integer?" (fn ^any [^any x] (and (IsExactInteger x) (>= (Sign "" x) 0))))
+  (Def1 "exact" (fn ^any [^any x] (pnExact "exact" x)))
+  (Def1 "inexact" (fn ^any [^any x] (pnInexact "inexact" x)))
+  (Def1 "exact->inexact" (fn ^any [^any x] (pnInexact "exact->inexact" x)))
+  (Def1 "inexact->exact" (fn ^any [^any x] (pnExact "inexact->exact" x)))
+
+  (pnDefCmp "=" 0)
+  (pnDefCmp "<" 1)
+  (pnDefCmp ">" 2)
+  (pnDefCmp "<=" 3)
+  (pnDefCmp ">=" 4)
+
+  (Def1 "zero?" (fn ^any [^any x] (pnZeroP x)))
+  (Def1 "positive?" (fn ^any [^any x] (> (Sign "positive?" x) 0)))
+  (Def1 "negative?" (fn ^any [^any x]
+      (when [(values f ok) (assert float64 x)] ok
+        (return (< f 0)))
+
+      (< (Sign "negative?" x) 0)))
+
+  (Def1 "odd?" (fn ^any [^any x] (not (pnIsEven "odd?" x))))
+  (Def1 "even?" (fn ^any [^any x] (pnIsEven "even?" x)))
+  (Def1 "finite?" (fn ^any [^any x]
+      (pnReal "finite?" x)
+      (let [(values f ok) (assert float64 x)]
+        (or (not ok) (not (or (math/IsInf f 0) (math/IsNaN f)))))))
+
+  (Def1 "infinite?" (fn ^any [^any x]
+      (pnReal "infinite?" x)
+      (let [(values f ok) (assert float64 x)]
+        (and ok (math/IsInf f 0)))))
+
+  (Def1 "nan?" (fn ^any [^any x]
+      (pnReal "nan?" x)
+      (let [(values f ok) (assert float64 x)]
+        (and ok (math/IsNaN f)))))
+
+  (Def "max" 1 -1 (fn ^any [^{:tag (slice any)} args] (pnMaxMin "max" true args)))
+  (Def "min" 1 -1 (fn ^any [^{:tag (slice any)} args] (pnMaxMin "min" false args)))
+
+  (reg (addr (lit Prim :Name "+" :Min 0 :Max -1 :F2 pnAdd :Fn pnSum)))
+  (reg (addr (lit Prim :Name "*" :Min 0 :Max -1 :F2 pnMul :Fn pnProd)))
+  (reg (addr (lit Prim :Name "-" :Min 1 :Max -1 :F2 pnSub :Fn pnDiff)))
+  (reg (addr (lit Prim :Name "/" :Min 1 :Max -1 :F2 pnDiv :Fn pnQuot)))
+  (Def1 "1+" (fn ^any [^any x] (pnAdd x (pnI 1))))
+  (Def1 "1-" (fn ^any [^any x] (pnSub x (pnI 1))))
+  (Def1 "abs" (fn ^any [^any x] (pnAbs "abs" x)))
+
+  (pnDefDiv "div" false 0)
+  (pnDefDiv "mod" false 1)
+  (pnDefDiv "div-and-mod" false 2)
+  (pnDefDiv "div0" true 0)
+  (pnDefDiv "mod0" true 1)
+  (pnDefDiv "div0-and-mod0" true 2)
+
+  (Def2 "quotient" (fn ^any [^any a ^any b] (pnIntDiv "quotient" 0 a b)))
+  (Def2 "remainder" (fn ^any [^any a ^any b] (pnIntDiv "remainder" 1 a b)))
+  (Def2 "modulo" (fn ^any [^any a ^any b] (pnIntDiv "modulo" 2 a b)))
+  (Def "gcd" 0 -1 pnGcd)
+  (Def "lcm" 0 -1 pnLcm)
+  (Def1 "numerator" (fn ^any [^any x] (pnNumerator "numerator" x false true)))
+  (Def1 "denominator" (fn ^any [^any x] (pnNumerator "denominator" x true true)))
+
+  (Def1 "floor" (fn ^any [^any x] (pnRound "floor" 0 x)))
+  (Def1 "ceiling" (fn ^any [^any x] (pnRound "ceiling" 1 x)))
+  (Def1 "truncate" (fn ^any [^any x] (pnRound "truncate" 2 x)))
+  (Def1 "round" (fn ^any [^any x] (pnRound "round" 3 x)))
+  (Def2 "rationalize" pnRationalize)
+
+  (Def1 "exp" (fn ^any [^any x]
+      (pnNum "exp" x)
+      (when (isComplex x)
+        (return (cxExp x)))
+
+      (when (pnExZero x)
+        (return (pnI 1)))
+
+      (pnExp (ToFloat x))))
+
+  (Def "log" 1 2 (fn ^any [^{:tag (slice any)} args]
+      (when (== (len args) 1)
+        (return (pnLog (aget args 0))))
+
+      (pnNum "log" (aget args 0))
+      (pnNum "log" (aget args 1))
+      (pnDiv (pnLog (aget args 0)) (pnLog (aget args 1)))))
+
+  (pnDefTrig "sin" 0 pnSin 0 0 false)
+  (pnDefTrig "cos" 1 pnCos 0 1 false)
+  (pnDefTrig "tan" 2 pnTan 0 0 false)
+  (pnDefTrig "asin" 3 pnAsin 0 0 true)
+  (pnDefTrig "acos" 4 pnAcos 1 0 true)
+  (Def "atan" 1 2 (fn ^any [^{:tag (slice any)} args]
+      (when (== (len args) 2)
+        (return (pnAtan2Num (aget args 0) (aget args 1))))
+
+      (pnNum "atan" (aget args 0))
+      (when (isComplex (aget args 0))
+        (return (cxTrig "atan" 5 (aget args 0))))
+
+      (when (pnExZero (aget args 0))
+        (return (pnI 0)))
+
+      (pnAtan (ToFloat (aget args 0)))))
+
+  (Def1 "sqrt" pnSqrt)
+  (Def1 "exact-integer-sqrt" (fn ^any [^any x]
+      (let [(values b ok) (assert (* big/Int) x)]
+        (when [(values n isInt) (assert int64 x)] isInt
+          (set! (values b ok) (values (big/NewInt n) true)))
+
+        (when (or (not ok) (< (.Sign b) 0))
+          (NotA "exact-integer-sqrt" "nonnegative exact integer" x))
+
+        (let [s (.Sqrt (new big/Int) b)
+            r (.Sub (new big/Int) b (.Mul (new big/Int) s s))]
+          (addr (lit Values :V (lit (slice any) (NormInt s) (NormInt r))))))))
+
+  (Def2 "expt" pnExpt)
+
+  (Def "number->string" 1 3 (fn ^any [^{:tag (slice any)} args]
+      (let [x (pnNum "number->string" (aget args 0))
+          radix 10]
+        (when (> (len args) 1)
+          (let [(values r ok) (assert int64 (aget args 1))]
+            (when (or (not ok) (not (or (== r 2) (== r 8) (== r 10) (== r 16))))
+              (AssertionViolation "number->string" "~s is not a valid radix" (aget args 1)))
+
+            (set! radix (conv int r))))
+
+        (when (> (len args) 2)
+          (let [(values p ok) (assert int64 (aget args 2))]
+            (when (or (not ok) (< p 0))
+              (AssertionViolation "number->string" "~s is not a valid precision" (aget args 2)))
+
+            (when (!= radix 10)
+              (AssertionViolation "number->string" "a precision is specified and radix ~s is not 10" (conv int64 radix)))
+
+            (when (IsExact x)
+              (AssertionViolation "number->string" "a precision is specified and ~s is not inexact" x))))
+
+        (NewString (NumberToString x radix)))))
+
+  (Def "string->number" 1 2 (fn ^any [^{:tag (slice any)} args]
+      (let [s (ArgString "string->number" (aget args 0))
+          radix 10]
+        (when (> (len args) 1)
+          (let [(values r ok) (assert int64 (aget args 1))]
+            (when (or (not ok) (not (or (== r 2) (== r 8) (== r 10) (== r 16))))
+              (AssertionViolation "string->number" "~s is not a valid radix" (aget args 1)))
+
+            (set! radix (conv int r))))
+
+        (StringToNumber (.String s) radix))))
+
+  (Def2 "make-rectangular" (fn ^any [^any a ^any b]
+      (pnReal "make-rectangular" a)
+      (pnReal "make-rectangular" b)
+      (MkRect a b)))
+
+  (Def2 "make-polar" (fn ^any [^any a ^any b]
+      (pnReal "make-polar" a)
+      (pnReal "make-polar" b)
+      (MakePolar a b)))
+
+  (Def1 "real-part" (fn ^any [^any x]
+      (when (not (IsNumber x))
+        (NotA "real-part" "complex number" x))
+
+      (let [(values re _) (cxParts x)]
+        re)))
+
+  (Def1 "imag-part" (fn ^any [^any x]
+      (when (not (IsNumber x))
+        (NotA "imag-part" "complex number" x))
+
+      (let [(values _ im) (cxParts x)]
+        im)))
+
+  (Def1 "magnitude" (fn ^any [^any x]
+      (when (not (IsNumber x))
+        (NotA "magnitude" "complex number" x))
+
+      (when (isComplex x)
+        (return (cxMagnitude x)))
+
+      (pnAbs "magnitude" x)))
+
+  (Def1 "angle" (fn ^any [^any x]
+      (when (not (IsNumber x))
+        (NotA "angle" "complex number" x))
+
+      (when (isComplex x)
+        (return (cxAngle x)))
+
+      (when (pnExZero x)
+        (AssertionViolation "angle" "undefined for ~s" x))
+
+      (when [(values f ok) (assert float64 x)] ok
+        (when (math/IsNaN f)
+          (return f))
+
+        (when (math/Signbit f)
+          (return math/Pi))
+
+        (return (pnI 0)))
+
+      (when (< (Sign "angle" x) 0)
+        (return math/Pi))
+
+      (pnI 0)))
+
+  (pnInitFixnum)
+  (pnInitFlonum)
+  (pnInitBitwise))
+
+(go/func pnInitFixnum []
+  (Def1 "fixnum?" (fn ^any [^any x]
+      (let [(values n ok) (assert int64 x)]
+        (and ok (IsFixnum n)))))
+
+  (Def "fixnum-width" 0 0 (fn ^any [^{:tag (slice any)} args] (pnI 61)))
+  (Def "least-fixnum" 0 0 (fn ^any [^{:tag (slice any)} args] FixMin))
+  (Def "greatest-fixnum" 0 0 (fn ^any [^{:tag (slice any)} args] FixMax))
+  (pnFxCmp "fx=?" 0)
+  (pnFxCmp "fx<?" 1)
+  (pnFxCmp "fx>?" 2)
+  (pnFxCmp "fx<=?" 3)
+  (pnFxCmp "fx>=?" 4)
+  (Def1 "fxzero?" (fn ^any [^any x] (== (pnFx "fxzero?" x) 0)))
+  (Def1 "fxpositive?" (fn ^any [^any x] (> (pnFx "fxpositive?" x) 0)))
+  (Def1 "fxnegative?" (fn ^any [^any x] (< (pnFx "fxnegative?" x) 0)))
+  (Def1 "fxodd?" (fn ^any [^any x] (== (bit-and (pnFx "fxodd?" x) 1) 1)))
+  (Def1 "fxeven?" (fn ^any [^any x] (== (bit-and (pnFx "fxeven?" x) 1) 0)))
+  (Def "fxmax" 1 -1 (fn ^any [^{:tag (slice any)} args]
+      (let [m (pnFx "fxmax" (aget args 0))]
+        (range [_ x (subslice args 1)]
+          (when [v (pnFx "fxmax" x)] (> v m)
+            (set! m v)))
+
+        m)))
+
+  (Def "fxmin" 1 -1 (fn ^any [^{:tag (slice any)} args]
+      (let [m (pnFx "fxmin" (aget args 0))]
+        (range [_ x (subslice args 1)]
+          (when [v (pnFx "fxmin" x)] (< v m)
+            (set! m v)))
+
+        m)))
+
+  (Def2 "fx+" (fn ^any [^any a ^any b]
+      (let [(values x y) (values (pnFx "fx+" a) (pnFx "fx+" b))
+          s (+ x y)]
+        (when (not (IsFixnum s))
+          (pnFixOverflow "fx+" a b))
+
+        s)))
+
+  (Def2 "fx*" (fn ^any [^any a ^any b]
+      (let [(values x y) (values (pnFx "fx*" a) (pnFx "fx*" b))
+          p (.Mul (new big/Int) (big/NewInt x) (big/NewInt y))]
+        (pnFxResult "fx*" p a b))))
+
+  (Def "fx-" 1 2 (fn ^any [^{:tag (slice any)} args]
+      (when (== (len args) 1)
+        (let [x (pnFx "fx-" (aget args 0))]
+          (when (not (IsFixnum (- x)))
+            (pnFixOverflow "fx-" (pnI 0) (aget args 0)))
+
+          (return (- x))))
+
+      (let [(values x y) (values (pnFx "fx-" (aget args 0)) (pnFx "fx-" (aget args 1)))
+          s (- x y)]
+        (when (not (IsFixnum s))
+          (pnFixOverflow "fx-" (aget args 0) (aget args 1)))
+
+        s)))
+
+  (pnDefFxDiv "fxdiv" false 0)
+  (pnDefFxDiv "fxmod" false 1)
+  (pnDefFxDiv "fxdiv-and-mod" false 2)
+  (pnDefFxDiv "fxdiv0" true 0)
+  (pnDefFxDiv "fxmod0" true 1)
+  (pnDefFxDiv "fxdiv0-and-mod0" true 2)
+  (Def3 "fx+/carry" (fn ^any [^any a ^any b ^any c]
+      (let [(values x y z) (values (pnFx "fx+/carry" a) (pnFx "fx+/carry" b) (pnFx "fx+/carry" c))]
+        (pnCarry (big/NewInt (+ x y z))))))
+
+  (Def3 "fx-/carry" (fn ^any [^any a ^any b ^any c]
+      (let [(values x y z) (values (pnFx "fx-/carry" a) (pnFx "fx-/carry" b) (pnFx "fx-/carry" c))]
+        (pnCarry (big/NewInt (- x y z))))))
+
+  (Def3 "fx*/carry" (fn ^any [^any a ^any b ^any c]
+      (let [(values x y z) (values (pnFx "fx*/carry" a) (pnFx "fx*/carry" b) (pnFx "fx*/carry" c))
+          s (.Mul (new big/Int) (big/NewInt x) (big/NewInt y))]
+        (pnCarry (.Add s s (big/NewInt z))))))
+
+  (Def1 "fxnot" (fn ^any [^any x] (bit-not (pnFx "fxnot" x))))
+  (Def "fxand" 0 -1 (fn ^any [^{:tag (slice any)} args]
+      (let [r (conv int64 -1)]
+        (for [i (- (len args) 1)] (>= i 0) (dec! i)
+          (watchdogTick)
+          (set! r bit-and (pnFx "fxand" (aget args i))))
+
+        r)))
+
+  (Def "fxior" 0 -1 (fn ^any [^{:tag (slice any)} args]
+      (let [r (conv int64 0)]
+        (for [i (- (len args) 1)] (>= i 0) (dec! i)
+          (watchdogTick)
+          (set! r bit-or (pnFx "fxior" (aget args i))))
+
+        r)))
+
+  (Def "fxxor" 0 -1 (fn ^any [^{:tag (slice any)} args]
+      (let [r (conv int64 0)]
+        (for [i (- (len args) 1)] (>= i 0) (dec! i)
+          (watchdogTick)
+          (set! r bit-xor (pnFx "fxxor" (aget args i))))
+
+        r)))
+
+  (Def3 "fxif" (fn ^any [^any a ^any b ^any c]
+      (let [(values x y z) (values (pnFx "fxif" a) (pnFx "fxif" b) (pnFx "fxif" c))]
+        (bit-or (bit-and x y) (bit-and (bit-not x) z)))))
+
+  (Def1 "fxbit-count" (fn ^any [^any x] (pnBitCount (big/NewInt (pnFx "fxbit-count" x)))))
+  (Def1 "fxlength" (fn ^any [^any x] (pnBitLength (big/NewInt (pnFx "fxlength" x)))))
+  (Def1 "fxfirst-bit-set" (fn ^any [^any x] (pnFirstBit (big/NewInt (pnFx "fxfirst-bit-set" x)))))
+  (Def2 "fxbit-set?" (fn ^any [^any a ^any b]
+      (let [(values x i) (values (pnFx "fxbit-set?" a) (pnFx "fxbit-set?" b))]
+        (when (< i 0)
+          (AssertionViolation "fxbit-set?" "invalid bit index ~s" b))
+
+        (when (>= i 61)
+          (return (< x 0)))
+
+        (== (bit-and (>> x (conv uint i)) 1) 1))))
+
+  (Def3 "fxcopy-bit" (fn ^any [^any a ^any b ^any c]
+      (let [(values x i v) (values (pnFx "fxcopy-bit" a) (pnFx "fxcopy-bit" b) c)]
+        (when (or (< i 0) (> i 59))
+          (AssertionViolation "fxcopy-bit" "invalid bit index ~s" b))
+
+        (let [(values bv ok) (assert int64 v)]
+          (when (or (not ok) ^:go/paren (and (!= bv 0) (!= bv 1)))
+            (AssertionViolation "fxcopy-bit" "invalid bit value ~s" v))
+
+          (when (== bv 1)
+            (return (bit-or x ^int64 (<< 1 (conv uint i)))))
+
+          (bit-and-not x ^int64 (<< 1 (conv uint i)))))))
+
+  (Def3 "fxbit-field" (fn ^any [^any a ^any b ^any c]
+      (let [(values x s e) (values (pnFx "fxbit-field" a) (pnFx "fxbit-field" b) (pnFx "fxbit-field" c))]
+        (pnFxRange "fxbit-field" s e)
+        (.Int64 (pnBitField (big/NewInt x) s e)))))
+
+  (Def "fxcopy-bit-field" 4 4 (fn ^any [^{:tag (slice any)} args]
+      (let [(values x s e f) (values (pnFx "fxcopy-bit-field" (aget args 0)) (pnFx "fxcopy-bit-field" (aget args 1)) (pnFx "fxcopy-bit-field" (aget args 2)) (pnFx "fxcopy-bit-field" (aget args 3)))]
+        (pnFxRange "fxcopy-bit-field" s e)
+        (.Int64 (pnCopyField (big/NewInt x) s e (big/NewInt f))))))
+
+  (Def "fxrotate-bit-field" 4 4 (fn ^any [^{:tag (slice any)} args]
+      (let [(values x s e c) (values (pnFx "fxrotate-bit-field" (aget args 0)) (pnFx "fxrotate-bit-field" (aget args 1)) (pnFx "fxrotate-bit-field" (aget args 2)) (pnFx "fxrotate-bit-field" (aget args 3)))]
+        (pnFxRange2 "fxrotate-bit-field" s e)
+        (when (< c 0)
+          (AssertionViolation "fxrotate-bit-field" "invalid count ~s" c))
+
+        (when (> c (- e s))
+          (AssertionViolation "fxrotate-bit-field" "count ~s is greater than difference between end index ~s and start index ~s" c e s))
+
+        (.Int64 (pnRotateField (big/NewInt x) s e c)))))
+
+  (Def "fxreverse-bit-field" 3 3 (fn ^any [^{:tag (slice any)} args]
+      (let [(values x s e) (values (pnFx "fxreverse-bit-field" (aget args 0)) (pnFx "fxreverse-bit-field" (aget args 1)) (pnFx "fxreverse-bit-field" (aget args 2)))]
+        (pnFxRange2 "fxreverse-bit-field" s e)
+        (.Int64 (pnReverseField (big/NewInt x) s e)))))
+
+  (Def2 "fxarithmetic-shift" (fn ^any [^any a ^any b]
+      (let [(values x n) (values (pnFx "fxarithmetic-shift" a) (pnFx "fxarithmetic-shift" b))]
+        (pnFxShift "fxarithmetic-shift" x n false false))))
+
+  (Def2 "fxarithmetic-shift-left" (fn ^any [^any a ^any b]
+      (let [(values x n) (values (pnFx "fxarithmetic-shift-left" a) (pnFx "fxarithmetic-shift-left" b))]
+        (pnFxShift "fxarithmetic-shift-left" x n true false))))
+
+  (Def2 "fxarithmetic-shift-right" (fn ^any [^any a ^any b]
+      (let [(values x n) (values (pnFx "fxarithmetic-shift-right" a) (pnFx "fxarithmetic-shift-right" b))]
+        (pnFxShift "fxarithmetic-shift-right" x n false true))))
+
+  (Def1 "fixnum->flonum" (fn ^any [^any x] (conv float64 (pnFx "fixnum->flonum" x)))))
+
+(go/func pnDefFl1 [^string name ^{:tag (func [float64] [float64])} f]
+  (Def1 name (fn ^any [^any x] (f (pnFl name x)))))
+
+(go/func pnDefFlCmp [^string name ^int kind]
+  (let [test (fn ^bool [^float64 a ^float64 b]
+        (switch kind
+          (case [0]
+            (return (== a b)))
+          (case [1]
+            (return (< a b)))
+          (case [2]
+            (return (> a b)))
+          (case [3]
+            (return (<= a b))))
+
+        (>= a b))]
+
+    (reg (addr ^{:go/breaks [8 10]} (lit Prim :Name name :Min 2 :Max -1
+          :F2 (fn ^any [^any a ^any b] (test (pnFl name a) (pnFl name b)))
+          :Fn ^{:go/breaks [[4 1629]] :go/end 1630} (fn ^any [^{:tag (slice any)} args]
+            (range [_ x args]
+              (pnFl name x))
+
+            (for [i 0] (< (+ i 1) (len args)) (inc! i)
+              (watchdogTick)
+              (when (not (test (assert float64 (aget args i)) (assert float64 (aget args (+ i 1)))))
+                (return false)))
+
+            true))))))
+
+(go/func pnDefFlDiv [^string name ^bool centered ^int which]
+  (Def2 name (fn ^any [^any a ^any b]
+      (let [(values x y) (values (pnFl name a) (pnFl name b))
+          (values d m) (pnDivMod name centered x y)]
+        (switch which
+          (case [0]
+            (return d))
+          (case [1]
+            (return m)))
+
+        (addr (lit Values :V (lit (slice any) d m)))))))
+
+(go/func pnInitFlonum []
+  (Def1 "flonum?" (fn ^any [^any x] (let [(values _ ok) (assert float64 x)] ok)))
+  (Def1 "real->flonum" (fn ^any [^any x] (pnReal "real->flonum" x) (ToFloat x)))
+  (pnDefFlCmp "fl=?" 0)
+  (pnDefFlCmp "fl<?" 1)
+  (pnDefFlCmp "fl>?" 2)
+  (pnDefFlCmp "fl<=?" 3)
+  (pnDefFlCmp "fl>=?" 4)
+  (Def1 "flinteger?" (fn ^any [^any x] (IsInteger (pnFl "flinteger?" x))))
+  (Def1 "flzero?" (fn ^any [^any x] (== (pnFl "flzero?" x) 0)))
+  (Def1 "flpositive?" (fn ^any [^any x] (> (pnFl "flpositive?" x) 0)))
+  (Def1 "flnegative?" (fn ^any [^any x] (< (pnFl "flnegative?" x) 0)))
+  (Def1 "flodd?" (fn ^any [^any x] (pnFl "flodd?" x) (not (pnIsEven "flodd?" x))))
+  (Def1 "fleven?" (fn ^any [^any x] (pnFl "fleven?" x) (pnIsEven "fleven?" x)))
+  (Def1 "flfinite?" (fn ^any [^any x] (let [f (pnFl "flfinite?" x)] (and (not (math/IsInf f 0)) (not (math/IsNaN f))))))
+  (Def1 "flinfinite?" (fn ^any [^any x] (math/IsInf (pnFl "flinfinite?" x) 0)))
+  (Def1 "flnan?" (fn ^any [^any x] (math/IsNaN (pnFl "flnan?" x))))
+  (Def "flmax" 1 -1 (fn ^any [^{:tag (slice any)} args]
+      (let [m (pnFl "flmax" (aget args 0))]
+        (range [_ x (subslice args 1)]
+          (let [v (pnFl "flmax" x)]
+            (cond (or (math/IsNaN m) (math/IsNaN v))
+              (set! m (math/NaN))
+              (not (> m v))
+              (set! m v))))
+
+        m)))
+
+  (Def "flmin" 1 -1 (fn ^any [^{:tag (slice any)} args]
+      (let [m (pnFl "flmin" (aget args 0))]
+        (range [_ x (subslice args 1)]
+          (let [v (pnFl "flmin" x)]
+            (cond (or (math/IsNaN m) (math/IsNaN v))
+              (set! m (math/NaN))
+              (not (< m v))
+              (set! m v))))
+
+        m)))
+
+  (Def "fl+" 0 -1 (fn ^any [^{:tag (slice any)} args]
+      (let [r 0.0]
+        (range [_ x args]
+          (set! r + (pnFl "fl+" x)))
+
+        r)))
+
+  (Def "fl*" 0 -1 (fn ^any [^{:tag (slice any)} args]
+      (let [r 1.0]
+        (range [_ x args]
+          (set! r * (pnFl "fl*" x)))
+
+        r)))
+
+  (Def "fl-" 1 -1 (fn ^any [^{:tag (slice any)} args]
+      (let [r (pnFl "fl-" (aget args 0))]
+        (when (== (len args) 1)
+          (return (- r)))
+
+        (range [_ x (subslice args 1)]
+          (set! r - (pnFl "fl-" x)))
+
+        r)))
+
+  (Def "fl/" 1 -1 (fn ^any [^{:tag (slice any)} args]
+      (let [r (pnFl "fl/" (aget args 0))]
+        (when (== (len args) 1)
+          (return (/ 1 r)))
+
+        (range [_ x (subslice args 1)]
+          (set! r / (pnFl "fl/" x)))
+
+        r)))
+
+  (pnDefFl1 "flabs" math/Abs)
+  (pnDefFlDiv "fldiv" false 0)
+  (pnDefFlDiv "flmod" false 1)
+  (pnDefFlDiv "fldiv-and-mod" false 2)
+  (pnDefFlDiv "fldiv0" true 0)
+  (pnDefFlDiv "flmod0" true 1)
+  (pnDefFlDiv "fldiv0-and-mod0" true 2)
+  (Def1 "flnumerator" (fn ^any [^any x] (pnNumerator "flnumerator" (pnFlArg "flnumerator" x) false false)))
+  (Def1 "fldenominator" (fn ^any [^any x] (pnNumerator "fldenominator" (pnFlArg "fldenominator" x) true false)))
+  (pnDefFl1 "flfloor" math/Floor)
+  (pnDefFl1 "flceiling" math/Ceil)
+  (pnDefFl1 "fltruncate" math/Trunc)
+  (pnDefFl1 "flround" math/RoundToEven)
+  (pnDefFl1 "flexp" math/Exp)
+  (Def "fllog" 1 2 (fn ^any [^{:tag (slice any)} args]
+      (let [x (pnFl "fllog" (aget args 0))]
+        (when (== (len args) 1)
+          (return (pnLn x)))
+
+        (/ (pnLn x) (pnLn (pnFl "fllog" (aget args 1)))))))
+
+  (pnDefFl1 "flsin" pnSin)
+  (pnDefFl1 "flcos" pnCos)
+  (pnDefFl1 "fltan" pnTan)
+  (pnDefFl1 "flasin" pnAsin)
+  (pnDefFl1 "flacos" pnAcos)
+  (Def "flatan" 1 2 (fn ^any [^{:tag (slice any)} args]
+      (let [y (pnFl "flatan" (aget args 0))]
+        (when (== (len args) 1)
+          (return (pnAtan y)))
+
+        (pnAtan2 y (pnFl "flatan" (aget args 1))))))
+
+  (pnDefFl1 "flsqrt" math/Sqrt)
+  (Def2 "flexpt" (fn ^any [^any a ^any b] (pnPow (pnFl "flexpt" a) (pnFl "flexpt" b)))))
+
+(go/func pnFlArg ^any [^string who ^any x]
+  (pnFl who x)
+  x)
+
+(go/func pnInitBitwise []
+  (Def1 "bitwise-not" (fn ^any [^any x]
+      (when [(values n ok) (assert int64 x)] ok
+        (return (bit-not n)))
+
+      (NormInt (.Not (new big/Int) (pnExInt "bitwise-not" x)))))
+
+  (Def "bitwise-and" 0 -1 (fn ^any [^{:tag (slice any)} args]
+      (pnBitFold "bitwise-and" args -1 (fn ^{:tag (* big/Int)} [^{:tag (* big/Int)} z ^{:tag (* big/Int)} a ^{:tag (* big/Int)} b] (.And z a b)) (fn ^int64 [^int64 a ^int64 b] (bit-and a b)))))
+
+  (Def "bitwise-ior" 0 -1 (fn ^any [^{:tag (slice any)} args]
+      (pnBitFold "bitwise-ior" args 0 (fn ^{:tag (* big/Int)} [^{:tag (* big/Int)} z ^{:tag (* big/Int)} a ^{:tag (* big/Int)} b] (.Or z a b)) (fn ^int64 [^int64 a ^int64 b] (bit-or a b)))))
+
+  (Def "bitwise-xor" 0 -1 (fn ^any [^{:tag (slice any)} args]
+      (pnBitFold "bitwise-xor" args 0 (fn ^{:tag (* big/Int)} [^{:tag (* big/Int)} z ^{:tag (* big/Int)} a ^{:tag (* big/Int)} b] (.Xor z a b)) (fn ^int64 [^int64 a ^int64 b] (bit-xor a b)))))
+
+  (Def3 "bitwise-if" (fn ^any [^any a ^any b ^any c]
+      (let [(values x y z) (values (pnExInt "bitwise-if" a) (pnExInt "bitwise-if" b) (pnExInt "bitwise-if" c))
+          l (.And (new big/Int) x y)
+          r (.AndNot (new big/Int) z x)]
+        (NormInt (.Or l l r)))))
+
+  (Def1 "bitwise-bit-count" (fn ^any [^any x] (pnBitCount (pnExInt "bitwise-bit-count" x))))
+  (Def1 "bitwise-length" (fn ^any [^any x] (pnBitLength (pnExInt "bitwise-length" x))))
+  (Def1 "bitwise-first-bit-set" (fn ^any [^any x] (pnFirstBit (pnExInt "bitwise-first-bit-set" x))))
+  (Def2 "bitwise-bit-set?" (fn ^any [^any a ^any b]
+      ^{:go/breaks [4]} (let [x (pnExInt "bitwise-bit-set?" a)]
+        (type-switch [i b]
+          (case [int64]
+            (when (>= i 0)
+              (return (or (== (.Bit x (conv int i)) 1) ^:go/paren (and (> i (<< 1 40)) (< (.Sign x) 0))))))
+
+          (case [(* big/Int)]
+            (when (> (.Sign i) 0)
+              (return (< (.Sign x) 0)))))
+
+        (AssertionViolation "bitwise-bit-set?" "invalid bit index ~s" b)
+        nil)))
+
+  (Def3 "bitwise-copy-bit" (fn ^any [^any a ^any b ^any c]
+      (let [x (pnExInt "bitwise-copy-bit" a)
+          i (pnBitIdx "bitwise-copy-bit" b "invalid bit index ~s")
+          (values v ok) (assert int64 c)]
+        (when (or (not ok) ^:go/paren (and (!= v 0) (!= v 1)))
+          (AssertionViolation "bitwise-copy-bit" "bit argument ~s is not 0 or 1" c))
+
+        (NormInt (.SetBit (new big/Int) x (conv int i) (conv uint v))))))
+
+  (Def3 "bitwise-bit-field" (fn ^any [^any a ^any b ^any c]
+      (let [x (pnExInt "bitwise-bit-field" a)
+          s (pnBitIdx "bitwise-bit-field" b "invalid start index ~s")
+          e (pnBitIdx "bitwise-bit-field" c "invalid end index ~s")]
+        (when (< e s)
+          (AssertionViolation "bitwise-bit-field" "invalid end index ~s" c))
+
+        (NormInt (pnBitField x s e)))))
+
+  (Def "bitwise-copy-bit-field" 4 4 (fn ^any [^{:tag (slice any)} args]
+      (let [x (pnExInt "bitwise-copy-bit-field" (aget args 0))
+          s (pnBitIdx "bitwise-copy-bit-field" (aget args 1) "invalid start index ~s")
+          e (pnBitIdx "bitwise-copy-bit-field" (aget args 2) "invalid end index ~s")]
+        (when (< e s)
+          (AssertionViolation "bitwise-copy-bit-field" "invalid end index ~s" (aget args 2)))
+
+        (let [f (pnExInt "bitwise-copy-bit-field" (aget args 3))]
+          (NormInt (pnCopyField x s e f))))))
+
+  (Def2 "bitwise-arithmetic-shift" (fn ^any [^any a ^any b]
+      (let [x (pnExInt "bitwise-arithmetic-shift" a)]
+        (pnShift "bitwise-arithmetic-shift" x b))))
+
+  (Def2 "bitwise-arithmetic-shift-left" (fn ^any [^any a ^any b]
+      (pnExInt "bitwise-arithmetic-shift-left" b)
+      (when (< (Sign "" b) 0)
+        (NotA "bitwise-arithmetic-shift-left" "nonnegative exact integer" b))
+
+      (let [x (pnExInt "bitwise-arithmetic-shift-left" a)]
+        (pnShift "bitwise-arithmetic-shift-left" x b))))
+
+  (Def2 "bitwise-arithmetic-shift-right" (fn ^any [^any a ^any b]
+      (pnExInt "bitwise-arithmetic-shift-right" b)
+      (when (< (Sign "" b) 0)
+        (NotA "bitwise-arithmetic-shift-right" "nonnegative exact integer" b))
+
+      (let [x (pnExInt "bitwise-arithmetic-shift-right" a)]
+        (pnShift "bitwise-arithmetic-shift-right" x (Sub (pnI 0) b)))))
+
+  (Def "bitwise-rotate-bit-field" 4 4 (fn ^any [^{:tag (slice any)} args]
+      (let [x (pnExInt "bitwise-rotate-bit-field" (aget args 0))
+          s (pnBitIdx "bitwise-rotate-bit-field" (aget args 1) "invalid start index ~s")
+          e (pnBitIdx "bitwise-rotate-bit-field" (aget args 2) "invalid end index ~s")]
+        (when (< e s)
+          (AssertionViolation "bitwise-rotate-bit-field" "invalid end index ~s" (aget args 2)))
+
+        (let [c (pnBitIdx "bitwise-rotate-bit-field" (aget args 3) "invalid count ~s")]
+          (NormInt (pnRotateField x s e c))))))
+
+  (Def "bitwise-reverse-bit-field" 3 3 (fn ^any [^{:tag (slice any)} args]
+      (let [x (pnExInt "bitwise-reverse-bit-field" (aget args 0))
+          s (pnBitIdx "bitwise-reverse-bit-field" (aget args 1) "invalid start index ~s")
+          e (pnBitIdx "bitwise-reverse-bit-field" (aget args 2) "invalid end index ~s")]
+        (when (> s e)
+          (AssertionViolation "bitwise-reverse-bit-field" "start index ~s is greater than end index ~s" (aget args 1) (aget args 2)))
+
+        (NormInt (pnReverseField x s e))))))
+
+;; ---------------------------------------------------------------------------------------
+;; Correctly rounded transcendental functions (Chez calls the C library's, which round correctly
+;; in nearly all cases; Go's math package is within an ulp or two): evaluated in 200-bit big.Floats.
+
+(go/const ^{:val 200} pnHP 200)
+
+(go/var ^sync/Mutex pnConstMu)
+(go/var pnPiCache (lit (map uint (* big/Float))))
+(go/var pnLn2Cache (lit (map uint (* big/Float))))
+
+(go/func pnNewF ^{:tag (* big/Float)} [^uint prec] (.SetPrec (new big/Float) prec))
+
+(go/func pnFromInt ^{:tag (* big/Float)} [^int64 n ^uint prec] (.SetInt64 (pnNewF prec) n))
+
+(go/func pnTiny ^bool [^{:tag (* big/Float)} x ^uint prec]
+  (or (== (.Sign x) 0) (< (.MantExp x nil) (- (- (conv int prec)) 8))))
+
+(go/func pnSeriesInv "pnSeriesInv is sum over k of sgn^k / ((2k+1) n^(2k+1)): atan(1/n) (alt) or atanh(1/n).\n" ^{:tag (* big/Float)} [^int64 n ^uint prec ^bool alt]
+  (let [sum (pnNewF prec)
+      n2 (pnFromInt (* n n) prec)
+      pow (.Quo (pnNewF prec) (pnFromInt 1 prec) (pnFromInt n prec))]
+    (for [k (conv int64 0)] (not (pnTiny pow prec)) (inc! k)
+      (watchdogTick)
+      (let [term (.Quo (pnNewF prec) pow (pnFromInt (+ (* 2 k) 1) prec))]
+        (if (and alt (== (% k 2) 1))
+          (.Sub sum sum term)
+
+          (.Add sum sum term))
+
+        (.Quo pow pow n2)))
+
+    sum))
+
+(go/func pnPi ^{:tag (* big/Float)} [^uint prec]
+  (.Lock pnConstMu)
+  (defer (.Unlock pnConstMu))
+  (when [(values p ok) (aget pnPiCache prec)] ok
+    (return p))
+
+  (let [a (pnSeriesInv 5 (+ prec 8) true)
+      b (pnSeriesInv 239 (+ prec 8) true)]
+    (.Mul a a (pnFromInt 4 (+ prec 8)))
+    (.Sub a a b)
+    (.Mul a a (pnFromInt 4 (+ prec 8)))
+    (let [p (.Set (pnNewF prec) a)]
+      (aset pnPiCache prec p)
+      p)))
+
+(go/func pnLn2 ^{:tag (* big/Float)} [^uint prec]
+  (.Lock pnConstMu)
+  (defer (.Unlock pnConstMu))
+  (when [(values p ok) (aget pnLn2Cache prec)] ok
+    (return p))
+
+  (let [a (pnSeriesInv 3 (+ prec 8) false)]
+    (.Mul a a (pnFromInt 2 (+ prec 8)))
+    (let [p (.Set (pnNewF prec) a)]
+      (aset pnLn2Cache prec p)
+      p)))
+
+(go/func pnToF ^float64 [^{:tag (* big/Float)} x]
+  (let [(values f _) (.Float64 x)]
+    f))
+
+(go/func pnHPExp ^{:tag (* big/Float)} [^{:tag (* big/Float)} x ^uint prec]
+  (let [ln2 (pnLn2 prec)
+      q (.Quo (pnNewF prec) x ln2)
+      (values qf _) (.Float64 q)
+      k (conv int (math/Round qf))
+      r (.Sub (pnNewF prec) x (.Mul (pnNewF prec) (pnFromInt (conv int64 k) prec) ln2))]
+    (.SetMantExp r r -10)
+    (let [sum (pnFromInt 1 prec)
+        term (pnFromInt 1 prec)]
+      (for [i (conv int64 1)] (not (pnTiny term prec)) (inc! i)
+        (watchdogTick)
+        (.Mul term term r)
+        (.Quo term term (pnFromInt i prec))
+        (.Add sum sum term))
+
+      (for [i 0] (< i 10) (inc! i)
+        (watchdogTick)
+        (.Mul sum sum sum))
+
+      (.SetMantExp sum sum k))))
+
+(go/func pnHPLn "pnHPLn is the natural logarithm of x > 0.\n" ^{:tag (* big/Float)} [^{:tag (* big/Float)} x ^uint prec]
+  (let [m (pnNewF prec)
+      e (.MantExp x m)]
+    (when (< (.Cmp m (.SetFloat64 (pnNewF prec) 0.7071067811865476)) 0)
+      (.SetMantExp m m 1)
+      (dec! e))
+
+    (let [one (pnFromInt 1 prec)
+        z (.Quo (pnNewF prec) (.Sub (pnNewF prec) m one) (.Add (pnNewF prec) m one))
+        z2 (.Mul (pnNewF prec) z z)
+        sum (pnNewF prec)
+        pow (.Set (pnNewF prec) z)]
+      (for [k (conv int64 0)] (not (pnTiny pow prec)) (inc! k)
+        (watchdogTick)
+        (.Add sum sum (.Quo (pnNewF prec) pow (pnFromInt (+ (* 2 k) 1) prec)))
+        (.Mul pow pow z2))
+
+      (.Mul sum sum (pnFromInt 2 prec))
+      (.Add sum sum (.Mul (pnNewF prec) (pnFromInt (conv int64 e) prec) (pnLn2 prec))))))
+
+(go/func pnHPAtan ^{:tag (* big/Float)} [^{:tag (* big/Float)} x ^uint prec]
+  (let [neg (< (.Sign x) 0)
+      a (.Abs (pnNewF prec) x)
+      one (pnFromInt 1 prec)
+      inv (> (.Cmp a one) 0)]
+    (when inv
+      (.Quo a one a))
+
+    (for [i 0] (< i 4) (inc! i)
+      (watchdogTick)
+      (let [t (.Mul (pnNewF prec) a a)]
+        (.Add t t one)
+        (.Sqrt t t)
+        (.Add t t one)
+        (.Quo a a t)))
+
+    (let [a2 (.Mul (pnNewF prec) a a)
+        sum (pnNewF prec)
+        pow (.Set (pnNewF prec) a)]
+      (for [k (conv int64 0)] (not (pnTiny pow prec)) (inc! k)
+        (watchdogTick)
+        (let [term (.Quo (pnNewF prec) pow (pnFromInt (+ (* 2 k) 1) prec))]
+          (if (== (% k 2) 1)
+            (.Sub sum sum term)
+
+            (.Add sum sum term))
+
+          (.Mul pow pow a2)))
+
+      (.Mul sum sum (pnFromInt 16 prec))
+      (when inv
+        (let [h (.Set (pnNewF prec) (pnPi prec))]
+          (.SetMantExp h h -1)
+          (.Sub sum h sum)))
+
+      (when neg
+        (.Neg sum sum))
+
+      sum)))
+
+(go/func pnHPSinCos [^float64 x] :results [(* big/Float) (* big/Float) int]
+  (let [(values _ ex) (math/Frexp x)]
+    (when (< ex 0)
+      (set! ex 0))
+
+    (let [wp (* (/ (+ pnHP (conv uint ex) 20 63) 64) 64)
+        half (.Set (pnNewF wp) (pnPi wp))]
+      (.SetMantExp half half -1)
+      (let [xf (.SetFloat64 (pnNewF wp) x)
+          q (.Quo (pnNewF wp) xf half)]
+        (.Add q q (.SetFloat64 (pnNewF wp) 0.5))
+        (let [(values k acc) (.Int q nil)]
+          (when (and (< (.Sign q) 0) (!= acc big/Exact))
+            (.Sub k k (big/NewInt 1)))
+
+          (let [r (.Sub (pnNewF wp) xf (.Mul (pnNewF wp) (.SetInt (pnNewF wp) k) half))
+              r2 (.Mul (pnNewF wp) r r)
+              s (.Set (pnNewF wp) r)
+              st (.Set (pnNewF wp) r)
+              c (pnFromInt 1 wp)
+              ct (pnFromInt 1 wp)]
+            (for [i (conv int64 1)] (or (not (pnTiny st wp)) (not (pnTiny ct wp))) (inc! i)
+              (watchdogTick)
+              (.Mul ct ct r2)
+              (.Quo ct ct (pnFromInt (* (- (* 2 i) 1) (* 2 i)) wp))
+              (.Neg ct ct)
+              (.Add c c ct)
+              (.Mul st st r2)
+              (.Quo st st (pnFromInt (* 2 i (+ (* 2 i) 1)) wp))
+              (.Neg st st)
+              (.Add s s st))
+
+            (return s c (conv int (.Int64 (.Mod (new big/Int) k (big/NewInt 4)))))))))))
+
+(go/func pnSpecial ^bool [^float64 x] (or (math/IsNaN x) (math/IsInf x 0) (== x 0)))
+
+(go/func pnExp ^float64 [^float64 x]
+  (when (or (pnSpecial x) (> (math/Abs x) 746))
+    (return (math/Exp x)))
+
+  (pnToF (pnHPExp (.SetFloat64 (pnNewF pnHP) x) pnHP)))
+
+(go/func pnLn ^float64 [^float64 x]
+  (when (or (pnSpecial x) (< x 0) (== x 1))
+    (return (math/Log x)))
+
+  (pnToF (pnHPLn (.SetFloat64 (pnNewF pnHP) x) pnHP)))
+
+(go/func pnSin ^float64 [^float64 x]
+  (when (pnSpecial x)
+    (return (math/Sin x)))
+
+  (let [(values s c k) (pnHPSinCos x)]
+    (switch k
+      (case [0]
+        (return (pnToF s)))
+      (case [1]
+        (return (pnToF c)))
+      (case [2]
+        (return (- (pnToF s)))))
+
+    (- (pnToF c))))
+
+(go/func pnCos ^float64 [^float64 x]
+  (when (pnSpecial x)
+    (return (math/Cos x)))
+
+  (let [(values s c k) (pnHPSinCos x)]
+    (switch k
+      (case [0]
+        (return (pnToF c)))
+      (case [1]
+        (return (- (pnToF s))))
+      (case [2]
+        (return (- (pnToF c)))))
+
+    (pnToF s)))
+
+(go/func pnTan ^float64 [^float64 x]
+  (when (pnSpecial x)
+    (return (math/Tan x)))
+
+  (let [(values s c k) (pnHPSinCos x)]
+    (when (== (% k 2) 0)
+      (return (pnToF (.Quo (pnNewF (.Prec s)) s c))))
+
+    (let [r (.Quo (pnNewF (.Prec s)) c s)]
+      (- (pnToF r)))))
+
+(go/func pnAtan ^float64 [^float64 x]
+  (when (pnSpecial x)
+    (return (math/Atan x)))
+
+  (pnToF (pnHPAtan (.SetFloat64 (pnNewF pnHP) x) pnHP)))
+
+(go/func pnAsin ^float64 [^float64 x]
+  (when (or (pnSpecial x) (>= (math/Abs x) 1))
+    (return (math/Asin x)))
+
+  (let [xf (.SetFloat64 (pnNewF pnHP) x)
+      d (.Mul (pnNewF pnHP) xf xf)]
+    (.Sub d (pnFromInt 1 pnHP) d)
+    (.Sqrt d d)
+    (pnToF (pnHPAtan (.Quo (pnNewF pnHP) xf d) pnHP))))
+
+(go/func pnAcos ^float64 [^float64 x]
+  (when (or (pnSpecial x) (>= (math/Abs x) 1))
+    (return (math/Acos x)))
+
+  (let [xf (.SetFloat64 (pnNewF pnHP) x)
+      one (pnFromInt 1 pnHP)
+      q (.Quo (pnNewF pnHP) (.Sub (pnNewF pnHP) one xf) (.Add (pnNewF pnHP) one xf))]
+    (.Sqrt q q)
+    (let [r (pnHPAtan q pnHP)]
+      (pnToF (.Mul r r (pnFromInt 2 pnHP))))))
+
+(go/func pnAtan2 ^float64 [^float64 y ^float64 x]
+  (when (or (pnSpecial x) (pnSpecial y))
+    (return (math/Atan2 y x)))
+
+  (let [q (.SetFloat64 (pnNewF pnHP) (/ y x))
+      a (pnHPAtan q pnHP)]
+    (when (< x 0)
+      (if (> y 0)
+        (.Add a a (pnPi pnHP))
+
+        (.Sub a a (pnPi pnHP))))
+
+    (pnToF a)))
+
+(go/func pnPow ^float64 [^float64 x ^float64 y]
+  (when (or (pnSpecial x) (pnSpecial y) (== x 1) (== y 1) (== y -1))
+    (return (math/Pow x y)))
+
+  (let [neg false]
+    (when (< x 0)
+      (when (!= y (math/Trunc y))
+        (return (math/NaN)))
+
+      (set! neg (and (< (math/Abs y) 9007199254740992) (!= (math/Mod y 2) 0)))
+      (set! x (- x)))
+
+    (let [t (.Mul (pnNewF pnHP) (pnHPLn (.SetFloat64 (pnNewF pnHP) x) pnHP) (.SetFloat64 (pnNewF pnHP) y))
+        tf (pnToF t)
+        ^{:line 2176 :tag float64} r (zero float64)]
+      (cond (> tf 750)
+        (set! r (math/Inf 1))
+        (< tf -760)
+        (set! r 0) :else
+
+        (set! r (pnToF (pnHPExp t pnHP))))
+
+      (when neg
+        (return (- r)))
+
+      r)))

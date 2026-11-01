@@ -62,14 +62,16 @@ arbace_version() {
 
 # arbace_embedded_sources ROOT: Arbace's sources a shipped build reads, one path a line, sorted
 # (doc/GATE-SURVEY.md, GTS5 (a), "As built: GT1-GT3"): arbace/ less the namespaces no executable
-# embeds and nothing of the build reads, repr/java, repr/haskell, repr/rust, repr/c, ci's arbace/c and repr/ocaml
-# (arbace/j2g/embed.ae's excluded; javac's tool embeds repr/java itself: bin/arbace-go's reader_key names it)
+# embeds and nothing of the build reads, repr/java, repr/haskell, repr/rust, repr/c, ci's arbace/c, repr/ocaml,
+# repr/scheme and scheme (arbace/j2g/embed.ae's excluded; javac's tool embeds repr/java itself: bin/arbace-go's
+# reader_key names it)
 arbace_embedded_sources() {
   (cd "$1" && find arbace -type f ! -path arbace/repr/java.ae ! -path 'arbace/repr/java/*' \
        ! -path arbace/repr/haskell.ae ! -path 'arbace/repr/haskell/*' ! -path arbace/repr/rust.ae \
        ! -path 'arbace/repr/rust/*' ! -path arbace/repr/c.ae ! -path 'arbace/repr/c/*' \
        ! -path arbace/c.ae ! -path 'arbace/c/*' \
-       ! -path arbace/repr/ocaml.ae ! -path 'arbace/repr/ocaml/*' | LC_ALL=C sort)
+       ! -path arbace/repr/ocaml.ae ! -path 'arbace/repr/ocaml/*' \
+       ! -path arbace/repr/scheme.ae ! -path 'arbace/repr/scheme/*' ! -path 'arbace/scheme/*' | LC_ALL=C sort)
 }
 
 # arbace_aot_key ROOT: the key of a build's compiled namespaces (bin/arbace-go's aot_key, the

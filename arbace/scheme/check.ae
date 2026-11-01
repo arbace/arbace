@@ -1,0 +1,271 @@
+(ns arbace.scheme.check
+  "si's check (doc/scheme/SCHEME-SURVEY.md, \"As built: SM5 (write-ahead)\"): the run programs of
+  test/scheme/si/programs.edn run on si and judged against Chez Scheme 10.3.0's runs recorded in
+  test/scheme/si/ref-chez.edn (status and stdout byte for byte; for the R6RS suites' programs, test by
+  test, the totals equal; a reference that is an error, the same kind of error, error-of: review 009, finding 1). Every non-pass is an item \"KIND PROGRAM DETAIL\" and must fall in a class of
+  test/scheme/divergences.edn (goi's format: the first class whose :match finds the item). bin/si runs
+  the programs (si and Chez) into a directory of ID.out, ID.err, ID.rc; this namespace records and judges.
+
+    record-ref DIR             Chez's runs in DIR merged into test/scheme/si/ref-chez.edn (the entries not run stay; the
+                               record types' gensyms written `gensym`); ref-test: its pure parts checked
+    judge DIR [--record] [--aot]
+                               si's runs in DIR judged; --record writes test/scheme/check-linux-amd64.edn;
+                               --aot: the compiled runs (bin/si check --aot, SM7), a program the AOT refuses
+                               an item \"refused ID: WHY\", the classes of test/scheme/divergences-aot.edn
+                               first, the results test/scheme/check-aot-linux-amd64.edn
+    compare SI-DIR AOT-DIR     the interpreted and the compiled runs of each program compared (status and
+                               stdout): the same, differing, or refused
+    divergences [RESULTS]      the recorded results' items by class (none unclassified)"
+  (:require [arbace.string :as str] [arbace.scheme.regress :as rg]))
+
+(defn- root [] (or (System/getenv "ARBACE_ROOT") "."))
+(defn- path [& xs] (apply str (root) "/" xs))
+
+(defn programs [] (:programs (read-string (slurp (path "test/scheme/si/programs.edn")))))
+
+(defn- fid [id] (str/replace (str id) "/" "__"))
+
+(defn- run-of [dir id]
+  (let [f (fn [ext] (let [x (java.io.File. (str dir "/" (fid id) "." ext))] (when (.exists x) (slurp x))))]
+    (if-let [why (f "refused")]
+      {:refused (str/trim why)}
+      (when-let [rc (f "rc")]
+        {:status (Long/parseLong (str/trim rc)) :out (or (f "out") "") :err (or (f "err") "")}))))
+
+(defn- first-line [s] (first (str/split-lines (or s ""))))
+
+(defn normalise-gensym
+  "Chez's output with a record type's gensym, #{err kixdzb...-2}, written #{err gensym}: Chez names it afresh on every run,
+  so the reference is byte-stable (SC221 (b)); the known difference below rewrites both sides alike."
+  [s]
+  (str/replace s #"#\{(\S+) [^}\s]+\}" "#{$1 gensym}"))
+
+(defn merge-runs
+  "The reference's entries old with the runs new in the order of the programs ids: a run replaces its entry (SC220 (b)), an entry
+  not run stays."
+  [ids old new]
+  (let [by (merge (into {} (map (juxt :id identity) old)) (into {} (map (juxt :id identity) new)))]
+    (vec (for [id ids :when (by id)] (by id)))))
+
+(defn missing-ids
+  "The ids of programs ids that have no entry in the reference all (a program added or renamed and not run yet)."
+  [ids all]
+  (let [have (set (map :id all))] (vec (remove have ids))))
+
+(defn- ref-file [] (path "test/scheme/si/ref-chez.edn"))
+
+(defn- cmd-record-ref [[dir]]
+  (let [runs (vec (for [{:keys [id]} (programs) :let [r (run-of dir id)] :when r]
+                    {:id id :status (:status r) :out (normalise-gensym (:out r)) :err (first-line (:err r))}))
+        old (when (.exists (java.io.File. (ref-file))) (read-string (slurp (ref-file))))
+        all (merge-runs (map :id (programs)) old runs)]
+    (spit (ref-file)
+          (str ";; Chez Scheme 10.3.0's runs of si's check programs (bin/si check --record-ref); generated.\n"
+               "[\n" (str/join "" (map #(str (pr-str %) "\n") all)) "]\n"))
+    (println "recorded" (count runs) "runs of Chez into test/scheme/si/ref-chez.edn," (count all) "entries")
+    (when-let [m (seq (missing-ids (map :id (programs)) all))]
+      (println "no reference entry for:" (str/join ", " m) "(run them: bin/si check --record-ref --only ID)"))
+    0))
+
+(defn- cmd-ref-test
+  "The pure parts of record-ref: the merge keeps entries not run and replaces the ones run, the gensym is normalised."
+  []
+  (let [e (fn [id o] {:id id :status 0 :out o :err ""})
+        m (merge-runs ["a" "b" "c"] [(e "a" "1") (e "b" "2") (e "c" "3")] [(e "b" "X")])
+        g (normalise-gensym "R #[#{err kixdzb-2} #<c>] #{err jpjtb3-2}")
+        ok (and (= ["1" "X" "3"] (map :out m)) (= ["d"] (missing-ids ["a" "d"] m)) (empty? (missing-ids ["a"] m))
+                (= "R #[#{err gensym} #<c>] #{err gensym}" g)
+                (= g (normalise-gensym g)))]
+    (println (if ok "ref-test: ok" (str "ref-test: FAILED " (pr-str m) (pr-str g))))
+    (if ok 0 1)))
+
+;; SC172 (b): byte equality of stdout is the rule for a suite program too; the known differences between Chez's output and si's
+;; are named here, each one a rewrite of Chez's output, and a program whose output differs in any other way is an item
+(def known-differences
+  [{:name :chez-record-gensym
+    :why "Chez writes a record type's name as its gensym, #{err kixdzb...-2}; si writes the name"
+    :rewrite (fn [s] (str/replace s #"#\{(\S+) [^}\s]+\}" "$1"))}])
+
+(defn applied-differences
+  "The names of the known differences Chez's output out shows (a rewrite that changes it)."
+  [out]
+  (vec (for [{:keys [name rewrite]} known-differences :when (not= out (rewrite out))] name)))
+
+(defn expected-out
+  "Chez's output with the known differences rewritten: what si's must equal byte for byte."
+  [out]
+  (reduce (fn [s {:keys [rewrite]}] (rewrite s)) out known-differences))
+
+(defn- differs-item [id ours theirs]
+  (let [ol (str/split-lines ours) tl (str/split-lines theirs)
+        i (count (take-while true? (map = ol tl)))]
+    (str "differs " id " line " (inc i) ": " (pr-str (nth ol i nil)) " for " (pr-str (nth tl i nil)))))
+
+;;; The suites' output: a header, then "N tests passed" or the failures, each "Expression:\n EXPR\nResult:...".
+
+(defn suite-report
+  "A Racket R6RS suite run's report: {:tests N :failures [[EXPR RESULT] ...]} (every failing test in order, duplicates
+  kept), nil when the output has no test report. N is the total its last report line gives (\"N tests passed\" or
+  \"M of N tests failed.\")."
+  [^String out]
+  (when-let [ls (seq (re-seq #"(?m)^(?:(\d+) tests passed|\d+ of (\d+) tests failed\.)$" out))]
+    {:tests (reduce + (map (fn [[_ a b]] (Long/parseLong (or a b))) ls))
+     :failures (vec (for [[_ e res] (re-seq #"(?s)Expression:\n (.*?)\nResult:(.*?)\nExpected:" out)]
+                      ;; Chez writes a record type's name as its gensym, #{err kixdzb...-2}; si writes the name
+                      [e (expected-out (str/trim res))]))}))
+
+;; Review 009, finding 1: a run whose reference is an error is judged on the error's kind, not on the status alone (si exits
+;; 255 on every uncaught error). The kinds both sides spell differently are named; any other error is its first line.
+(def error-kinds
+  [[:library-not-found #"library (\(.*\)) not found"]                                  ; Chez
+   [:library-not-found #"cannot locate library in library-path with irritants \((\(.*\))\)"] ; si's psyntax
+   [:unbound-identifier #"unbound identifier (\S+?)(?: at line .*)?$"]                   ; Chez
+   [:unbound-identifier #"^Exception in (\S+): unbound identifier$"]                     ; si
+   [:program-without-import #"invalid top-level program import subform()"]               ; Chez: a form before the import
+   [:program-without-import #"top-level program is missing an \(import ---\) clause()"]])  ; si
+
+(defn error-of
+  "The kind of error a run's first stderr line says: [KIND SUBJECT], or [:text LINE] when no kind is named; nil for no line."
+  [line]
+  (when (seq line)
+    (or (some (fn [[k re]] (when-let [m (re-find re line)] [k (when (vector? m) (not-empty (second m)))])) error-kinds)
+        [:text (str/trim line)])))
+
+(defn- items-of
+  "The non-pass items of program id: ours r against the reference ref."
+  [{:keys [id suite]} r ref]
+  (cond
+    (nil? ref) [(str "no-reference " id)]
+    (nil? r) [(str "not-run " id)]
+    (:refused r) [(str "refused " id ": " (:refused r))]
+    :else
+    (let [same-status (= (:status r) (:status ref))
+          ;; an error on both sides: the same kind of error (finding 1)
+          err-items (when (and same-status (not= 0 (:status ref)))
+                      (let [a (error-of (first-line (:err r))) b (error-of (:err ref))]
+                        (when (not= a b)
+                          [(str "error-differs " id ": " (pr-str a) " for Chez's " (pr-str b))])))]
+      (if (and same-status (= (:out r) (:out ref)))
+        (vec err-items)
+        (let [ours (suite-report (:out r)) theirs (suite-report (:out ref))
+              crash (fn [] (str "crash " id " status " (:status r) ": " (first-line (:err r))))]
+          (if (and suite ours theirs same-status)
+            ;; the failures as multisets of [expression result]: a test both fail with other results is an item, and the
+            ;; totals must agree (a run that stops early prints a smaller "N tests passed")
+            (let [fo (frequencies (:failures ours)) ft (frequencies (:failures theirs))
+                  exprs-o (set (map first (:failures ours)))
+                  extra (fn [a b] (mapcat (fn [[k n]] (repeat (- n (get b k 0)) k)) (sort-by str a)))]
+              (let [report (concat
+                             (when (not= (:tests ours) (:tests theirs))
+                               [(str "count " id ": " (:tests ours) " tests for Chez's " (:tests theirs))])
+                             (for [[e b] (extra fo ft)]
+                               (str "fails " id " " e " => " (str/replace b "\n" " ")))
+                             (for [[e _] (extra ft fo) :when (not (contains? exprs-o e))]
+                               (str "passes " id " " e)))]
+                ;; the report agrees: the rest of stdout must too (SC172 (b)), but for the known differences
+                (concat report
+                        (when (and (empty? report) (not= (:out r) (expected-out (:out ref))))
+                          [(differs-item id (:out r) (expected-out (:out ref)))])
+                        err-items)))
+            (if (not same-status)
+              [(crash)]
+              (let [ol (str/split-lines (:out r)) tl (str/split-lines (:out ref))
+                    i (count (take-while true? (map = ol tl)))]
+                (concat
+                  [(str "differs " id " line " (inc i) ": " (pr-str (nth ol i nil)) " for " (pr-str (nth tl i nil)))]
+                  err-items)))))))))
+
+(def ^:dynamic *aot* false)
+
+(defn load-classes []
+  (vec (concat (when *aot* (read-string (slurp (path "test/scheme/divergences-aot.edn"))))
+               (read-string (slurp (path "test/scheme/divergences.edn"))))))
+
+(defn- results-file [] (path (if *aot* "test/scheme/check-aot-linux-amd64.edn" "test/scheme/check-linux-amd64.edn")))
+
+(defn class-of [classes item]
+  (:id (first (filter (fn [c] (some #(re-find % item) (:match c))) classes))))
+
+(defn- judge [dir only]
+  (let [refs (into {} (map (juxt :id identity) (read-string (slurp (path "test/scheme/si/ref-chez.edn")))))
+        classes (load-classes)]
+    (vec (for [p (programs)
+               :when (or (empty? only) (contains? only (:id p)))
+               :let [r (run-of dir (:id p))
+                     items (vec (items-of p r (refs (:id p))))]]
+           {:id (:id p) :verdict (if (empty? items) :pass :non-pass)
+            :known-differences (when (and r (:suite p) (refs (:id p))) (not-empty (applied-differences (:out (refs (:id p))))))
+            :items (mapv (fn [i] {:item i :class (class-of classes i)}) items)}))))
+
+(defn- summary [results]
+  (let [items (mapcat :items results)
+        bad (remove :class items)]
+    (println (count (filter #(= :pass (:verdict %)) results)) "of" (count results) "programs pass;"
+             (count items) "non-pass items," (count bad) "failing (in no class)")
+    (doseq [[c n] (sort-by str (frequencies (keep :class items)))] (println " " n (name c)))
+    (doseq [i bad] (println "  FAILING" (:item i)))
+    (if (seq bad) 1 0)))
+
+(defn- write-results [results]
+  (spit (results-file)
+        (str (if *aot*
+               ";; si's AOT check (bin/si check --aot --record): each compiled program's verdict and non-pass items with their\n;; classes (test/scheme/divergences-aot.edn, then test/scheme/divergences.edn); generated.\n[\n"
+               ";; si's check (bin/si check --record): each program's verdict and non-pass items with their classes\n;; (test/scheme/divergences.edn); generated.\n[\n")
+             (str/join "" (map #(str (pr-str %) "\n") results)) "]\n")))
+
+(defn- recorded-results []
+  (let [f (java.io.File. ^String (results-file))] (when (.exists f) (vec (read-string (slurp f))))))
+
+(defn- cmd-judge [[dir & opts]]
+  (let [only (set (map second (filter #(= "--only" (first %)) (partition 2 1 opts))))
+        results (judge dir only)
+        ;; SC181 (b): the regression step (arbace.scheme.regress) before anything is written; a partial run (--only) against the
+        ;; recorded results of the programs it ran
+        rec0 (recorded-results)
+        rec (if (and rec0 (seq only)) (filterv #(contains? only (:id %)) rec0) rec0)
+        recording? (boolean (and (some #{"--record"} opts) (empty? only)))]
+    (doseq [{:keys [id verdict items]} results]
+      (println (name verdict) id (if (seq items) (str "(" (count items) " items)") "")))
+    (when recording? (write-results results) (println "wrote" (results-file)))
+    (max (summary results) (rg/regress-code rec results recording? (load-classes)))))
+
+(defn- cmd-compare
+  "The interpreted runs in si-dir and the compiled runs in aot-dir, program by program."
+  [[si-dir aot-dir & opts]]
+  (let [only (set (map second (filter #(= "--only" (first %)) (partition 2 1 opts))))
+        rows (for [{:keys [id]} (programs)
+                   :when (or (empty? only) (contains? only id))
+                   :let [a (run-of si-dir id) b (run-of aot-dir id)]]
+               [id (cond
+                     (or (nil? a) (nil? b)) :not-run
+                     (:refused b) :refused
+                     (and (= (:status a) (:status b)) (= (:out a) (:out b))
+                          (or (= 0 (:status a)) (= (error-of (first-line (:err a))) (error-of (first-line (:err b)))))) :same
+                     :else :differs)
+                b])]
+    (doseq [[id v b] rows :when (not= v :same)]
+      (println (name v) id (if (:refused b) (str ": " (:refused b)) "")))
+    (let [fr (frequencies (map second rows))]
+      (println (get fr :same 0) "of" (count rows) "programs: the compiled run the same as the interpreted one (status, stdout and an error's kind);"
+               (get fr :refused 0) "refused," (get fr :differs 0) "differing," (get fr :not-run 0) "not run")
+      (if (pos? (+ (get fr :differs 0) (get fr :not-run 0))) 1 0))))
+
+(defn- cmd-divergences [[file]]
+  (let [results (read-string (slurp (or file (results-file))))
+        classes (load-classes)
+        items (for [r results i (:items r)] (assoc i :class (class-of classes (:item i))))]
+    (doseq [c classes :let [is (filter #(= (:id c) (:class %)) items)] :when (seq is)]
+      (println (str (name (:id c)) " (" (name (:kind c)) ", " (count is) "): " (:title c)))
+      (doseq [i is] (println "   " (:item i))))
+    (summary (map (fn [r] (assoc r :items (filter #(= (:item %) (:item %)) (map (fn [i] (assoc i :class (class-of classes (:item i)))) (:items r))))) results))))
+
+(defn -main [& [cmd & args]]
+  (let [rc (case cmd
+             "record-ref" (cmd-record-ref args)
+             "judge" (binding [*aot* (boolean (some #{"--aot"} args))] (cmd-judge (remove #{"--aot"} args)))
+             "compare" (cmd-compare args)
+             "ref-test" (cmd-ref-test)
+             "divergences" (binding [*aot* (boolean (some #{"--aot"} args))] (cmd-divergences (remove #{"--aot"} args)))
+             (do (println "usage: arbace.scheme.check record-ref DIR | judge DIR [--record] [--aot] | compare SI-DIR AOT-DIR | divergences [--aot] [RESULTS] | ref-test") 2))]
+    (shutdown-agents)
+    (System/exit rc)))

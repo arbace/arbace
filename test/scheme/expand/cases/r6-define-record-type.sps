@@ -1,0 +1,7 @@
+(import (rnrs))
+(define-record-type point (fields x (mutable y)))
+(define-record-type (cpoint make-cpoint cpoint?) (parent point) (fields color))
+(let ((p (make-point 1 2)) (c (make-cpoint 3 4 'red)))
+  (point-y-set! p 5)
+  (write (list (point-x p) (point-y p) (point? p) (point? c) (cpoint? p) (point-x c) (cpoint-color c))))
+(newline)

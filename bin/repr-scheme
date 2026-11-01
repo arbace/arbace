@@ -1,0 +1,120 @@
+#!/bin/bash
+# repr/scheme, Scheme's bridge (doc/scheme/SPEC.md, doc/scheme/SCHEME-SURVEY.md "As built: SM1, SM2"): Scheme
+# text (R6RS's lexical syntax) as Scheme forms (read) and Scheme forms as Scheme text (print, :lines: Chez's
+# `write`). The reader and the printer are Arbace (arbace.repr.scheme and its parts), evaluated from the
+# checkout on the tools' host: repr/scheme is not one of the tools the executable embeds. The oracle is
+# Chez Scheme 10.3.0 (/usr/bin/chez, apk chez-scheme-10.3.0-r2; CHEZ names another) running
+# tools/schemedump/dump.ss.
+#
+#   bin/repr-scheme corpus fetch [ID...]  fetch the corpora of test/scheme/corpora.edn into
+#                                         .tmp/scheme/corpora/ID (ARBACE_SCHEME_CORPORA), each file checked
+#                                         against its SHA-256 (the license text too); whimsical is read in
+#                                         place from go-whim (GOWHIM, default ../go-whim), checked at its
+#                                         tree hash
+#   bin/repr-scheme corpus list           the corpora, their files and bytes
+#   bin/repr-scheme dump [--mode M] FILE...   Chez's reading of the files (tools/schemedump/dump.ss)
+#   bin/repr-scheme read [--full] [-o DIR] FILE...   the files as Scheme forms, one datum a line; --full: with the
+#                                         layer (comments, spellings, layout) that prints the text back
+#   bin/repr-scheme print [--full|--layout] FILE.ae...   forms files as Scheme text (Chez's `write`, one datum a line;
+#                                         --layout: laid out by the layout printer; --full: the original text)
+#   bin/repr-scheme roundtrip             every corpus file and probe: text to forms and layer to text byte for
+#                                         byte (:full), forms to layout to forms equal and the layout idempotent
+#                                         (:lines); needs no Chez (the corpora fetched)
+#   bin/repr-scheme spec-check            doc/scheme/SPEC.md's examples: each Scheme block read by the reader equal to the forms block after it
+#   bin/repr-scheme check [--quick] [--record]      every corpus file, the probes (test/scheme/probes.edn) and the scans
+#                                         of the lexical classes over all Unicode scalar values, read and
+#                                         written by Arbace and by Chez, equal; judged by
+#                                         test/scheme/check-known.edn (--record rewrites it; --quick: no scans)
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+. "$root/bin/lib/tmpdir.bash"
+. "$root/bin/lib/tools.bash"
+export ARBACE_ROOT=$root
+CHEZ=${CHEZ:-chez}
+corpora=${ARBACE_SCHEME_CORPORA:-$root/.tmp/scheme/corpora}
+gowhim=${GOWHIM:-$(cd "$root/.." && pwd)/go-whim}
+case $root in */.tmp/worktrees/*) [ -n "${GOWHIM:-}" ] || gowhim=$(cd "${root%%/.tmp/worktrees/*}/.." && pwd)/go-whim ;; esac
+export GOWHIM=$gowhim
+
+corpus_ids() { arbace_tool -e "(doseq [c (:corpora (read-string (slurp \"$root/test/scheme/corpora.edn\")))] (println (name (:id c))))"; }
+# the corpora of the read comparison: all but those marked :check false (SM8: chez-mats, ecraven-r7rs)
+check_ids() { arbace_tool -e "(doseq [c (:corpora (read-string (slurp \"$root/test/scheme/corpora.edn\"))) :when (not (false? (:check c)))] (println (name (:id c))))"; }
+
+# corpus_files ID: "path<TAB>sha256" lines, then the license file's as "LICENSE<TAB>path<TAB>sha256<TAB>url"
+corpus_pins() {
+  arbace_tool -e "(let [c (first (filter #(= (name (:id %)) \"$1\") (:corpora (read-string (slurp \"$root/test/scheme/corpora.edn\")))))]
+    (println (str \"PREFIX\t\" (:url-prefix c) \"\t\" (get-in c [:license-file :path]) \"\t\" (get-in c [:license-file :sha256])))
+    (doseq [[p h] (sort (:files c))] (println (str p \"\t\" h))))"
+}
+
+fetch_one() { # fetch_one URL DEST SHA
+  local url=$1 dest=$2 sha=$3
+  if [ -f "$dest" ] && [ "$(sha256sum < "$dest" | cut -c1-64)" = "$sha" ]; then return 0; fi
+  mkdir -p "$(dirname "$dest")"
+  curl -sfL --max-time 120 -o "$dest.part" "$url" || { echo "fetch failed: $url" >&2; return 1; }
+  [ "$(sha256sum < "$dest.part" | cut -c1-64)" = "$sha" ] || { echo "SHA-256 of $url differs from the pin" >&2; rm -f "$dest.part"; return 1; }
+  mv "$dest.part" "$dest"
+}
+
+corpus_fetch() {
+  local ids=("$@") id prefix lic licsha p h
+  [ ${#ids[@]} -gt 0 ] || mapfile -t ids < <(corpus_ids)
+  for id in "${ids[@]}"; do
+    if [ "$id" = whimsical ]; then
+      local want have
+      want=$(arbace_tool -e "(println (:tree (first (filter #(= (:id %) :whimsical) (:corpora (read-string (slurp \"$root/test/scheme/corpora.edn\")))))))")
+      have=$(git -C "$gowhim" rev-parse HEAD:whimsical)
+      [ "$want" = "$have" ] || { echo "go-whim's whimsical is at tree $have, the pin is $want" >&2; return 1; }
+      echo "whimsical: tree $have, in place at $gowhim/whimsical"
+      continue
+    fi
+    { read -r _ prefix lic licsha
+      while IFS=$'\t' read -r p h; do
+        fetch_one "$prefix/$p" "$corpora/$id/$p" "$h"
+      done
+      # a corpus whose repository states no license (ecraven-r7rs) has no license file to fetch
+      [ -z "$lic" ] || [ -z "$licsha" ] || fetch_one "$(echo "$prefix" | sed -E 's|^(https://raw.githubusercontent.com/[^/]+/[^/]+/[^/]+)/.*|\1|')/$lic" "$corpora/$id.license" "$licsha"
+    } < <(corpus_pins "$id")
+    echo "$id: fetched and checked"
+  done
+}
+
+dump_cmd() { "$CHEZ" --script "$root/tools/schemedump/dump.ss" "$@"; }
+
+check() {
+  local out=$root/.tmp/repr-scheme/check kind id quick=0 args=()
+  for a in "$@"; do if [ "$a" = --quick ]; then quick=1; else args+=("$a"); fi; done
+  rm -rf "$out"; mkdir -p "$out"
+  corpus_fetch >/dev/null
+  arbace_tool -m arbace.repr.scheme prepare "$out"
+  for id in $(check_ids); do
+    xargs -a "$out/files-$id.txt" -d '\n' "$CHEZ" --script "$root/tools/schemedump/dump.ss" > "$out/dump-$id.edn"
+  done
+  "$CHEZ" --script "$root/tools/schemedump/dump.ss" "$out"/probes/*.ss > "$out/dump-probes.edn"
+  [ $quick = 1 ] || for kind in whitespace ident-initial ident-subsequent string-escaped char-hex symbol-escaped-first symbol-escaped-rest; do
+    dump_cmd --scan $kind > "$out/scan-$kind.edn"
+  done
+  arbace_tool -m arbace.repr.scheme check-dumps ${args[@]+"${args[@]}"} "$out"
+}
+
+cmd=${1:-}; [ $# -eq 0 ] || shift
+case $cmd in
+  corpus)
+    sub=${1:-}; [ $# -eq 0 ] || shift
+    case $sub in
+      fetch) corpus_fetch "$@" ;;
+      list) arbace_tool -e "(doseq [c (:corpora (read-string (slurp \"$root/test/scheme/corpora.edn\")))] (println (name (:id c)) (:count c) \"files\" (:bytes c) \"bytes\" (:license c)))" ;;
+      *) echo "usage: bin/repr-scheme corpus fetch|list" >&2; exit 2 ;;
+    esac ;;
+  dump) dump_cmd "$@" ;;
+  spec-check) arbace_tool -m arbace.repr.scheme spec-check "$root/doc/scheme/SPEC.md" ;;
+  read|print) arbace_tool -m arbace.repr.scheme "$cmd" "$@" ;;
+  check) check "$@" ;;
+  roundtrip)
+    out=$root/.tmp/repr-scheme/roundtrip
+    rm -rf "$out"; mkdir -p "$out"
+    corpus_fetch >/dev/null
+    arbace_tool -m arbace.repr.scheme prepare "$out" >/dev/null
+    arbace_tool -m arbace.repr.scheme roundtrip "$out" ;;
+  *) sed -n '2,/^set -e/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+esac

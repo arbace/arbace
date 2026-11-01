@@ -16,7 +16,7 @@ CLOJURE_TESTS_GO ?= target/arbace-go/amd64/arbace-tests
   toolchain-verify box-vendor-verify x509roots-verify repr-go-roundtrip repr-go-roundtrip-text repr-go-native-check \
   repr-java-check repr-java-roundtrip repr-java-text repr-java-jdk repr-java-parse-check repr-java-front-check repr-java-attr-check repr-java-nojavac-check repr-clojure-check repr-clojure-roundtrip repr-haskell-roundtrip repr-haskell-iface repr-haskell-text repr-haskell-layout repr-haskell-test repr-rust-roundtrip repr-rust-iface repr-rust-text repr-rust-pretty repr-rust-behaviour repr-rust-code repr-rust-all repr-rust-test repr-c-host-record repr-c-host-check repr-c-ccdump repr-c-check repr-c-record repr-c-parse-check repr-c-read repr-c-print repr-c-roundtrip repr-c-record-gcc repr-c-c23 ci-diagnose ci-run ci-check ci-check-aot ci-dg ci-dg-essential ci-judge-test ci-aot-translate ci-repl-session ci-divergences ci-musl ci-cirun-build ci-annot ci-annotations ci-annotations-record ci-record-ref goi-annotations goi-test goi-check goi-check-aot goi-check-aot-essential goi-check-nethttp goi-check-nethttp-arbace goi-divergences goi-divergences-aot java-check java-check-compiled java-check-compiled-essential java-check-print java-check-nread java-check-diagnostics java-check-essential java-check-ref alpine-check alpine-test clean \
   suite-aot suite-aot-essential suite-divergences java-forms-verify java-forms-update reap-record-native-check \
-  repr-c-gcc-tests repr-ocaml-ocdump repr-ocaml-spec-check repr-ocaml-samples repr-ocaml-corpus repr-ocaml-corpus-count repr-ocaml-roundtrip repr-ocaml-roundtrip-all repr-ocaml-check repr-ocaml-text repr-ocaml-cmi repr-ocaml-dumps oi-stdlib oi-build oi-check oi-divergences oi-record-ref oi-repl oi-aot-lib oi-check-aot oi-divergences-aot oi-suite-check oi-suite-check-aot oi-suite-divergences oi-suite-expect oi-suite-rollup oi-suite-record-ref repr-ocaml-opam check-makefile
+  repr-c-gcc-tests repr-scheme-fetch repr-scheme-check repr-scheme-check-quick repr-scheme-record repr-scheme-spec repr-scheme-roundtrip si-vendor-verify si-boot si-boot-check si-test si-test-record si-check-suite si-fixpoint si-unit si-light si-test-si si-check si-check-record-ref si-srfi si-srfi-record si-srfi-aot si-aot-check si-aot-check-record si-bench si-divergences si-r7rs si-r7rs-record si-r7rs-chez si-r7rs-chez-record si-r7rs-chibi si-r7rs-chibi-record si-r7rs-chibi-test si-r7rs-chibi-test-record si-chibi-tests si-chibi-tests-record si-ecraven si-ecraven-record si-ecraven-chez si-ecraven-chez-record si-ecraven-chibi si-ecraven-chibi-record si-mats si-mats-record si-corpora-files si-corpora-divergences repr-ocaml-ocdump repr-ocaml-spec-check repr-ocaml-samples repr-ocaml-corpus repr-ocaml-corpus-count repr-ocaml-roundtrip repr-ocaml-roundtrip-all repr-ocaml-check repr-ocaml-text repr-ocaml-cmi repr-ocaml-dumps oi-stdlib oi-build oi-check oi-divergences oi-record-ref oi-repl oi-aot-lib oi-check-aot oi-divergences-aot oi-suite-check oi-suite-check-aot oi-suite-divergences oi-suite-expect oi-suite-rollup oi-suite-record-ref repr-ocaml-opam check-makefile
 
 help: ## list the targets
 	@awk 'BEGIN {FS = ":.*## "} /^## / {printf "\n%s\n", substr($$0, 4)} \
@@ -392,6 +392,117 @@ alpine-test: ## bin/alpine-env's offline verbs over fabricated apk databases (te
 	bash test/alpine-env/test.bash
 clean: ## remove target/ (rebuilt by the next build; .tmp/ and the gate's cache kept)
 	rm -rf target
+repr-scheme-fetch: ## fetch and pin repr/scheme's corpora (Racket's and Larceny's R6RS tests, Chibi's R7RS tests; whimsical checked in place) into .tmp/scheme/corpora/ (bin/repr-scheme corpus fetch)
+	bin/repr-scheme corpus fetch
+repr-scheme-check: ## repr/scheme against Chez 10.3.0: every corpus file and probe read and written equal, the lexical classes scanned over all Unicode scalar values (bin/repr-scheme check)
+	bin/repr-scheme check
+repr-scheme-check-quick: ## the same without the scans (bin/repr-scheme check --quick)
+	bin/repr-scheme check --quick
+repr-scheme-record: ## the same, rewriting test/scheme/check-known.edn (bin/repr-scheme check --record)
+	bin/repr-scheme check --record
+repr-scheme-spec: ## doc/scheme/SPEC.md's examples: the Scheme text read, equal to the forms beside it (bin/repr-scheme spec-check)
+	bin/repr-scheme spec-check
+repr-scheme-roundtrip: ## repr/scheme's :full and layout printer: every corpus file and probe printed back byte for byte, the layout read back equal (bin/repr-scheme roundtrip)
+	bin/repr-scheme roundtrip
+si-vendor-verify: ## Scheme's expander: the vendored psyntax's forms (scheme/psyntax/) printed back to their pinned originals, byte for byte (bin/si vendor verify)
+	bin/si vendor verify
+si-boot: ## psyntax's bootstrap on Chez 10.3.0: scheme/psyntax/psyntax.pp.ae made again from the forms and the patches (bin/si boot)
+	bin/si boot
+si-boot-check: ## the same into .tmp/si/boot, compared with the committed psyntax.pp.ae (bin/si boot --check)
+	bin/si boot --check
+si-test: ## the expander's own tests (test/scheme/expand/): expanded and run on the bootstrap host against Chez's recorded runs, and against Chez's expand (bin/si test)
+	bin/si test
+si-test-record: ## the same, recording Chez's runs first (bin/si test --record)
+	bin/si test --record
+si-fixpoint: ## psyntax on Arbace expands psyntax's own sources to the core forms of scheme/psyntax/psyntax.pp.ae, up to gensyms' names (bin/si fixpoint)
+	bin/si fixpoint
+si-unit: ## si's runtime's unit tests: go/arbace/scm printed by repr/go and tested by TamaGo's go (bin/si unit)
+	bin/si unit
+si-light: ## si's light driver (arbace/scm alone, no Arbace build) into .tmp/si/si-light (bin/si light)
+	bin/si light
+si-test-si: ## the expander's own tests run on si, judged against Chez's recorded runs (bin/si test --si)
+	bin/si test --si
+si-check: ## si's check: the R6RS suites' run programs and si's own on si against Chez's recorded runs, every non-pass in a class (bin/si check)
+	bin/si check
+si-check-record-ref: ## the same, recording Chez's runs first (bin/si check --record-ref)
+	bin/si check --record-ref
+si-srfi: ## the SRFIs 1, 13, 14, 26, 39, 69, 98, 125, 128, 133, 158 as libraries (scheme/lib/srfi/): their test programs run on si (bin/si srfi)
+	bin/si srfi
+
+si-srfi-record: ## the SRFIs' programs run and their counted checks recorded (bin/si srfi --record, test/scheme/check-srfi-linux-amd64.edn)
+	bin/si srfi --record
+si-aot-check: ## si's AOT check: the check's programs compiled (SM7) and run, judged as si's, compared with the interpreted runs (bin/si check --aot)
+	bin/si check --aot
+si-aot-check-record: ## the same, recording test/scheme/check-aot-linux-amd64.edn (bin/si check --aot --record)
+	bin/si check --aot --record
+si-srfi-aot: ## the SRFIs' test programs compiled and run, their output compared with si's interpreted run (bin/si srfi --aot)
+	bin/si srfi --aot
+si-bench: ## timings for the speed report: larceny's fib and the R6RS suite's programs on si, compiled, and on Chez (bin/si bench)
+	bin/si bench
+si-divergences: ## the recorded check's non-pass items by class (bin/si divergences)
+	bin/si divergences
+si-r7rs: ## Chibi's R7RS suite (r7rs-tests.scm) on si in R7RS mode with scheme/lib/scheme: one result a test, every failing test in a class (bin/si r7rs)
+	bin/si r7rs
+
+si-r7rs-record: ## the same, recording test/scheme/check-r7rs-linux-amd64.edn (bin/si r7rs --record)
+	bin/si r7rs --record
+
+si-ecraven: ## ecraven's r7rs-benchmarks on si, repetition count 1, each benchmark's own check (bin/si ecraven)
+	bin/si ecraven
+
+si-ecraven-record: ## the same, recording test/scheme/check-ecraven-linux-amd64.edn (bin/si ecraven --record)
+	bin/si ecraven --record
+
+si-r7rs-chez: ## Chibi's R7RS suite rewritten for Chez and run by Chez: its answer to each test (bin/si r7rs --chez)
+	bin/si r7rs --chez
+
+si-r7rs-chez-record: ## the same, recording test/scheme/ref-r7rs-chez.edn (bin/si r7rs --chez --record)
+	bin/si r7rs --chez --record
+
+si-r7rs-chibi: ## Chibi's R7RS suite run by Chibi-Scheme 0.12.0 (the host's chibi-scheme, test/scheme/chibi/driver.scm): its answer to each test (bin/si r7rs --chibi)
+	bin/si r7rs --chibi
+
+si-r7rs-chibi-record: ## the same, recording test/scheme/ref-r7rs-chibi.edn (bin/si r7rs --chibi --record)
+	bin/si r7rs --chibi --record
+
+si-r7rs-chibi-test: ## Chibi's R7RS suite with Chibi's own (chibi test) (scheme/vendor/chibi), its tests compared with SM8's library's (bin/si r7rs --chibi-test)
+	bin/si r7rs --chibi-test
+
+si-r7rs-chibi-test-record: ## the same, recording test/scheme/check-r7rs-chibi-test-linux-amd64.edn (bin/si r7rs --chibi-test --record)
+	bin/si r7rs --chibi-test --record
+
+si-chibi-tests: ## Chibi's own tests of the vendored libraries (diff, optional, term ansi) on si and on Chibi, test by test (bin/si chibi-tests)
+	bin/si chibi-tests
+
+si-chibi-tests-record: ## the same, recording test/scheme/check-chibi-tests-linux-amd64.edn (bin/si chibi-tests --record)
+	bin/si chibi-tests --record
+
+si-ecraven-chez: ## ecraven's r7rs-benchmarks on Chez through the R7RS libraries' Chez variants: the reference's answers and times (bin/si ecraven --chez)
+	bin/si ecraven --chez
+
+si-ecraven-chez-record: ## the same, recording test/scheme/ref-ecraven-chez.edn (bin/si ecraven --chez --record)
+	bin/si ecraven --chez --record
+
+si-ecraven-chibi: ## ecraven's r7rs-benchmarks on Chibi-Scheme 0.12.0 (the host's chibi-scheme): the second reference's answers and times (bin/si ecraven --chibi)
+	bin/si ecraven --chibi
+
+si-ecraven-chibi-record: ## the same, recording test/scheme/ref-ecraven-chibi.edn (bin/si ecraven --chibi --record)
+	bin/si ecraven --chibi --record
+
+si-mats: ## Chez's mats on si: each mat run in an environment of (chezscheme) (si's subset) and the harness, under the watchdog; a mat that does not expand has its clauses run alone (bin/si mats)
+	bin/si mats
+
+si-mats-record: ## the same, recording test/scheme/check-mats-linux-amd64.edn (bin/si mats --record)
+	bin/si mats --record
+
+si-corpora-files: ## every file of Chez's mats, ecraven's benchmarks and Chibi's suite in a result or a class (arbace.scheme.corpora files)
+	bin/si corpora files
+
+si-corpora-divergences: ## the SM8 corpora's recorded non-pass items by class (arbace.scheme.corpora divergences)
+	bin/si corpora divergences
+
+si-check-suite: ## Racket's R6RS suite: every library and run.sps expanded by psyntax on Arbace (bin/si check-suite)
+	bin/si check-suite
 check-makefile: ## every bin/ script this Makefile's recipes run exists and is executable
 	@missing=0; for s in $$(grep -E '^[[:space:]]' $(firstword $(MAKEFILE_LIST)) | grep -oE '(^|[[:space:]=])bin/[a-z0-9-]+' \
 	    | grep -oE 'bin/[a-z0-9-]+' | sort -u); do \

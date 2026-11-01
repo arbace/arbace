@@ -1,0 +1,76 @@
+;; normalization's tests (SM6): string-normalize-nfd/nfc/nfkd/nfkc against Chez Scheme 10.3.0's recorded results
+;; (test/scheme/si/norm-chez.tsv, made by tools/scheme/normtests.ss; the format is in its header): every scalar value
+;; as a one-character string in blocks of 1024 (the hash of the four forms), and 3500 random strings.
+(in-ns 'go.arbace.scm)
+
+(go/file "norm_test.go" :imports [[testing "testing"] [os "os"] [strings "strings"] [strconv "strconv"]])
+
+(go/func nmtHash ^uint32 [^uint32 h ^{:tag (slice rune)} rs]
+  (range [_ r rs]
+    (set! h (+ (* h 31) (conv uint32 r))))
+  h)
+
+(go/func nmtHex ^string [^uint32 h]
+  (let [s (strings/ToUpper (strconv/FormatUint (conv uint64 h) 16))]
+    (+ (strings/Repeat "0" (- 8 (len s))) s)))
+
+(go/func nmtSurrogate ^bool [^int n] (and (>= n 0xD800) (<= n 0xDFFF)))
+
+(go/func TestNormalizeChez [^{:tag (* testing/T)} t]
+  (let [root (os/Getenv "SI_TEST_ROOT")
+        (values data err) (os/ReadFile (+ root "/test/scheme/si/norm-chez.tsv"))]
+    (when (or (== root "") (!= err nil))
+      (.Skip t "SI_TEST_ROOT unset or no recorded cases: the test needs the checkout")
+      (return))
+    (let [lines (strings/Split (strings/TrimSpace (conv string data)) "\n")
+          bad 0
+          blocks 0
+          strs 0]
+      (range [_ line lines]
+        (let [f (strings/Split line "\t")
+              ^{:tag (slice rune)} in nil]
+          (cond
+            (== (aget f 0) "B")
+            (let [(values start _) (strconv/ParseInt (aget f 1) 16 32)
+                  (values count _) (strconv/Atoi (aget f 2))
+                  hs (make (slice uint32) 4)]
+              (for [n (conv int start)] (< n (+ (conv int start) count)) (inc! n)
+                (when (not (nmtSurrogate n))
+                  (let [one (lit (slice rune) (conv rune n))]
+                    (for [k 0] (< k 4) (inc! k)
+                      (aset hs k (nmtHash (aget hs k) (nmNormalize one (>= k 2) (== (% k 2) 1))))))))
+              (inc! blocks)
+              (for [k 0] (< k 4) (inc! k)
+                (when (!= (nmtHex (aget hs k)) (aget f (+ 3 k)))
+                  (inc! bad)
+                  (.Errorf t "block %s form %d: got %s want %s" (aget f 1) k (nmtHex (aget hs k)) (aget f (+ 3 k))))))
+            (== (aget f 0) "S")
+            (do
+              (range [_ h (strings/Split (aget f 1) ".")]
+                (let [(values v _) (strconv/ParseInt h 16 32)]
+                  (set! in (append in (conv rune v)))))
+              (inc! strs)
+              (for [k 0] (< k 4) (inc! k)
+                (let [got (nmtHex (nmtHash 0 (nmNormalize in (>= k 2) (== (% k 2) 1))))]
+                  (when (!= got (aget f (+ 2 k)))
+                    (inc! bad)
+                    (when (< bad 30)
+                      (.Errorf t "string %s form %d: got %s want %s" (aget f 1) k got (aget f (+ 2 k)))))))))))
+      (.Logf t "%d blocks, %d strings, %d bad" blocks strs bad)
+      (when (or (< blocks 1000) (< strs 3000))
+        (.Errorf t "too few cases: %d blocks, %d strings" blocks strs)))))
+
+;; a few cases by hand: the standard's examples
+(go/func nmtStr ^string [^string s ^bool compat ^bool compose]
+  (conv string (nmNormalize (conv (slice rune) s) compat compose)))
+
+(go/func TestNormalizeExamples [^{:tag (* testing/T)} t]
+  (do
+    ;; nfd(U+1E9B U+0323) = U+017F U+0323 U+0307; nfc = U+1E9B U+0323; nfkd = s U+0323 U+0307; nfkc = U+1E69
+    (let [in "ẛ̣"]
+      (when (!= (nmtStr in false false) "ẛ̣") (.Errorf t "nfd"))
+      (when (!= (nmtStr in false true) "ẛ̣") (.Errorf t "nfc"))
+      (when (!= (nmtStr in true false) "ṩ") (.Errorf t "nfkd"))
+      (when (!= (nmtStr in true true) "ṩ") (.Errorf t "nfkc")))
+    (when (!= (nmtStr "각" false true) "각") (.Errorf t "hangul compose"))
+    (when (!= (nmtStr "각" false false) "각") (.Errorf t "hangul decompose"))))
