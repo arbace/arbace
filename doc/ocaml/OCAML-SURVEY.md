@@ -1633,3 +1633,34 @@ records of this branch, so they say "the failure each known program has now", no
 ### Decided (OC120-OC123; the user, 2026-11-01)
 
 All as recommended: OC120 (b) at the next gate window; OC121 (a); OC122 (b); OC123 (b) when the gate steps exist.
+
+## As built: OC122 (2026-11-01)
+
+On the branch `ocaml-o1` (light tier: `ARBACE_HOST_EXE` the seed's stage 0, 4 jobs, `GOMEMLIMIT=1500MiB`, no gate, no lock). OC122 (b), decided: the passes of `bin/repr-ocaml dumps` are
+deterministic, so the stdlib's floor returns to 116.
+
+**The cause.** A pass compiled its pending files four at a time into one directory (`.tmp/repr-ocaml/ty/CORPUS/cmi`). `ocamlc -c set.ml` looks for `set.cmi` beside its output; whether `set.mli`'s
+had been written by the sibling process decided whether `set.ml` compiled in pass 1 or not at all (the same race for the other files that need an .mli's .cmi or another file's of the pass). Before the fix, eight runs of
+`types stdlib` gave 115 compile alone five times (list digest `0b638ae5a5c3`) and 116 three times (`5b528f8b7437`).
+
+**The fix** (`bin/repr-ocaml`, `ty_pass`, `ty_dir`). The files that see one another's outputs are compiled one at a time in the order of the list (the `.mli` first): the corpora whose files see each other (stdlib,
+compiler-sources, compiler-backend, the opam packages: `ALL`) as one stream; the others (testsuite, samples, whiml: a file sees only its own directory) one directory at a time, the directories four at a time. The
+alternative of the proposal, a private copy of the previous pass's directory per file merged after the pass, was tried first: it is deterministic too but a file then never sees an `.mli` or a sibling compiled in its own pass, and
+the stdlib dropped to 108 (3 failures in the dumps); the sequential order is the one the 116 runs had. `test/ocaml/floors.tsv`: `dumps-compilable stdlib` 115 to 116.
+
+| check | before | after |
+|---|---|---|
+| `bash test/ocaml/dumps_determinism_test.bash N` (`types stdlib` N times, one count and one list of files) | 8 runs: 115 x5, 116 x3, two file lists: FAIL | 6 runs: 116 x6, one list: ok |
+| `bin/repr-ocaml dumps --jobs 4`, all six corpora, twice | | both exit 0, floors met, every line of both runs equal (compile alone 1, 116, 136, 20, 7, 1,057; types and lambda dumps, bytes and nodes the same): 3 min 24 s and 3 min 11 s |
+
+The cost: the stdlib's compile passes take 6 s, not 2; compiler-sources 39 s (7 passes); testsuite 28 s; the whole `dumps` about 3 min 20 s.
+
+**Proposals** (OC130 onward)
+
+- **OC130 The test in the checks.** `dumps_determinism_test.bash` (about 80 s for six runs) is run by hand. (a) as built; (b) in the gate step of OC120 (b) beside `judges_test`; (c) two runs only, folded into `bin/repr-ocaml dumps`
+  (it compares the two counts it already has: the second pass of every run). *Recommended: (b)* with OC120.
+- **OC131 The dependency-order build (OC51 (b)).** The streams are sequential because the list order stands in for the dependencies. Compiling by the dependency graph (`ocamldep`) would let the stdlib and the compiler
+  run in parallel again, deterministically. (a) not now; (b) with the next change to the passes. *Recommended: (a)*: the whole `dumps` is 3.5 minutes.
+
+**Shipped:** `bin/repr-ocaml`, `test/ocaml/floors.tsv`, `test/ocaml/dumps_determinism_test.bash`, this section. **Rule slips:** none beyond a stray 25-minute waiting monitor started while another was running (stopped at once).
+
