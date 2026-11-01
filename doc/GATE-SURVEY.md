@@ -1887,3 +1887,38 @@ as built. Test t03447's class `:print-shapes` (a constant printed as `0` against
   step's key names; (b) a pending program host compared by its build's key (`arbace_javac_key`, `gate_key`) rather than as
   changed; (c) the workaround (select one cheap step that needs the host). *Recommended: (a)*.
   - **Decided (the user, 2026-10-31): (b).** After the tag, at the next change that rekeys every step.
+
+## Proposed (2026-11-01, audit 040): GTS120-GTS125
+
+Proposals from the branch `audit-040` (the VM's audit of CLAUDE.md against the code, `.tmp/mac-queue/reports/040-audit-claude-md.md`).
+None is decided; what the branch built is named in each, to be kept or changed.
+
+- **GTS120 where the gate's executables directory is computed for the tools run by hand** (finding 3, 5). Options: (a) one
+  library, `bin/lib/gate-cache.bash` (`arbace_main_checkout`, `arbace_gate_exes`, `arbace_gate_cache`), used by `gate_env`,
+  `bin/arbace-go`, `bin/diffcheck`, `bin/generated-check`, `bin/clojure-tests`, `bin/java-check` and `bin/lib/program.bash`,
+  `ARBACE_GATE_CACHE` an override (built); (b) the function in `bin/lib/version.bash`; (c) only document that a caller sets
+  `ARBACE_GATE_CACHE` to `ARBACE_GATE_EXES/KEY20`. *Recommended: (a)*: (b) mixes the version map with the gate's layout, (c)
+  keeps the trap. Cost of (a): `bin/lib` is in `gate_key`, so this change rekeys both builds once; a hand run computes
+  `bin/arbace-go --gate-key` (a few seconds of hashing) per call.
+- **GTS121 a miss of the gate's build and another key's directory** (finding 3). Options: (a) `gate_build` refuses to remove a
+  directory named like a key (20 hex) that is not the checkout's, any other directory it still removes (built); (b) never
+  `rm -rf`: move a stale directory aside as `NAME.old`; (c) as before. *Recommended: (a)* now, (b) if a stale `.tmp/arbace-go-gate`
+  style directory should also survive. `bin/gate`'s steps never hit it (they pass the checkout's own key).
+- **GTS122 the `--g1` default** (finding 4). Options: (a) comments and docs say `--g1 "$GATE_CACHE"`, behaviour unchanged (a
+  directory not at the checkout's key builds G1 with a note; built); (b) `--g1` without a directory takes `arbace_gate_cache`;
+  (c) a `--g1` directory at another key is an error rather than a note. *Recommended: (a)*, then (b) for hand runs.
+- **GTS123 `ARBACE_SEED` and `ARBACE_SEED_GO`** (`bin/lib/host.bash`). Options: (a) the host reads `ARBACE_SEED_GO` as `bin/seed`
+  does, root-relative like it, `ARBACE_SEED` dropped (built; nothing else read it); (b) accept both, `ARBACE_SEED` as an alias;
+  (c) `bin/seed` follows the host. *Recommended: (a)*.
+- **GTS124 the first tool run in a fresh worktree** (finding 1). Options: (a) document (`ARBACE_HOST_EXE` at main's stage 0;
+  built, in CLAUDE.md); (b) `arbace_host_exe` builds stage 0 with `--no-aot` (the gate's own mode; the tools need no compiled
+  namespaces, `program_base` makes them when a program wants them), saving about 3 minutes per worktree; (c) a worktree
+  without a stage 0 uses the main checkout's when the seed pins are equal. *Recommended: (a) now, then (b)*; (c) shares a binary
+  between checkouts whose `ARBACE_PATH` loads differ, which the key of `--gate-build` would then have to know.
+- **GTS125 the heavy lock for a tool run by hand** (finding 2). Options: (a) document `bin/heavy-lock CMD` (built); (b) when
+  `ARBACE_HEAVY_CMD` is unset, the tools default to `bin/heavy-lock` (a hand run then queues; `ARBACE_HEAVY_CMD=env` opts out);
+  (c) only the whole-program j2g runs default to it. *Recommended: (a)*, then (c): (b) would make every `bin/j2g` of a light
+  experiment wait behind a gate's heavy step.
+- The new tests (`test/gate/gate-cache-test.bash`, `stale-comments-test.bash`, `host-seed-test.bash`) are bash over fabricated
+  trees under `.tmp/`, run by hand, in no gate step: a step (light, inputs `bin/` and `test/gate/`) would run them with the
+  essential gate; *recommended*, left for the user.
