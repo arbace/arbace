@@ -71,4 +71,9 @@ REPR_CPP_CXXDUMP_EXE=$t/cx REPR_CPP_CXXDUMP_CACHE=$t/cache REPR_CPP_ROUNDTRIP_KN
 REPR_CPP_CXXDUMP_EXE=$t/cx REPR_CPP_CXXDUMP_CACHE=$t/cache REPR_CPP_ROUNDTRIP_KNOWN=$t/known.edn REPR_CPP_ROUNDTRIP_ORACLE=$t/own2.edn \
   "$root/bin/repr-cpp" roundtrip "$t/list3.tsv" "$t/w11" --no-objects --corpus tc --record-oracle > "$t/w11.log" 2>&1
 ! grep -q 'filt.cpp\|st1.cpp' "$t/own2.edn" && ok "--record-oracle does not record them" || bad "recorded: $(cat "$t/own2.edn")"
+# re-review 032 F2: recorded names missing from the run are stale as those that now read ok (a count, not a failure)
+echo '{:corpora {"tc" {:rejected ["rej.cpp" "gone.cpp" "min.cpp"] :fails {"slow.cpp" :timeout "crash.cpp" :crash "gone2.cpp" :crash}}}}' > "$t/stale.edn"
+rt w12 "$t/stale.edn" --corpus tc; st=$?
+sm=$(cat "$t/w12/summary.edn")
+[ $st = 0 ] && echo "$sm" | grep -q ':oracle-stale 3' && echo "$sm" | grep -q ':oracle-stale-ok 1' && echo "$sm" | grep -q ':oracle-stale-missing 2' && ok "stale: one reads ok, two are missing from the run" || bad "stale: exit $st, $(echo "$sm" | grep -o ':oracle-stale[a-z-]* [0-9nil]*' | tr '\n' ' ')"
 finish
