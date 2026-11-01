@@ -75,8 +75,8 @@ Prior art:
   to skip both; `bin/gate` unsets it and uses the checkout's stage 0, built `--no-aot`, and `gate_key` hashes the
   bytes of `ARBACE_HOST_EXE` when set, so a `bin/arbace-go --gate-build` by hand under it misses the gate's builds;
   `ARBACE_SEED_GO` names another seed for the host as for `bin/seed`): c2j, j2g, repr/go, repr/clojure, the suite's runner,
-  compiled into it (S6, SA133), a tool's namespace whose source in the checkout differs from the
-  embedded copy (and every namespace of `arbace/go/`, goi's, RT.toolSource) loaded from the checkout instead, evaluated (`bin/lib/tools.bash`'s
+  compiled into it (S6, SA133), a namespace of a tool or of goi (`arbace/go/`;
+  RT.toolSource) whose source in the checkout differs from the embedded copy loaded from the checkout instead, evaluated (`bin/lib/tools.bash`'s
   `arbace_tool`, `ARBACE_PATH`). The JVM runs only the frozen jar of `arbace-for-java-26-v4` (built from its tag,
   pinned by `test/oracle/frozen-jar.sha256`; `bin/lib/frozen.bash`, its tools' namespaces from the
   checkout as `.clj` links before the jar, repr/java's not among them since JN6): the oracle's

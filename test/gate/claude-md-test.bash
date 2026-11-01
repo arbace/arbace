@@ -9,4 +9,7 @@ has CLAUDE.md '`arbace/repr/c/` (`arbace.repr.c.*`'
 lacks CLAUDE.md 'arbace/repr/c{.ae,/}'
 lacks CLAUDE.md 'CS1-CS51'
 has CLAUDE.md "against gcc"
+# 8. toolSource
+has CLAUDE.md 'a namespace of a tool or of goi (`arbace/go/`;'
+lacks CLAUDE.md '(and every namespace of `arbace/go/`'
 exit $fail
