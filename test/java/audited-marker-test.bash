@@ -34,6 +34,10 @@ skip() { echo "skip $*"; }
 file() { if [ -n "$rev" ]; then git -C "$src" show "$rev:$1"; else cat "$src/$1"; fi; }
 file bin/java-check > "$t/java-check" && file test/java/check.ae > "$t/check.ae" || { echo "FAIL: no sources"; exit 1; }
 
+# strace as the gate's audit runs it (A and E), and whether this shell is traced already
+traced_now=$(awk '$1 == "TracerPid:" { print $2 }' /proc/self/status)
+strace_args=(-f -qq -y -s 4096 --seccomp-bpf -e trace=open,openat,openat2,execve,execveat,readlink,readlinkat,chdir,clone,clone3,fork,vfork -o /dev/null)
+
 # ---- A: the marker (mark_audited, audit-070: GATE_AUDITED=1 and a tracer, both) ---------------------
 awk '/^mark_audited\(\) \{/ { on = 1 } on { print } on && /^\}$/ { exit }' "$t/java-check" > "$t/marker.body"
 if [ ! -s "$t/marker.body" ]; then
@@ -43,8 +47,6 @@ else
   # from the caller's environment (env GATE_AUDITED=1 or env -u GATE_AUDITED)
   { echo 'set -euo pipefail'; cat "$t/marker.body"; echo 'mark_audited "$1" "$2" "${3:-}"'; echo 'echo done'; } > "$t/mark.bash"
   sed 's|/proc/self/status|"$3"|' "$t/mark.bash" > "$t/mark-stub.bash"
-  traced_now=$(awk '$1 == "TracerPid:" { print $2 }' /proc/self/status)
-  strace_args=(-f -qq -y -s 4096 --seccomp-bpf -e trace=open,openat,openat2,execve,execveat,readlink,readlinkat,chdir,clone,clone3,fork,vfork -o /dev/null)
   ga=(env GATE_AUDITED=1) gu=(env -u GATE_AUDITED)
   if ! command -v strace > /dev/null; then skip "A1-A4: no strace"
   elif [ "${traced_now:-0}" != 0 ]; then skip "A1-A4: this shell is traced already (TracerPid $traced_now)"
