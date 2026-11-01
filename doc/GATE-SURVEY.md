@@ -1887,3 +1887,28 @@ as built. Test t03447's class `:print-shapes` (a constant printed as `0` against
   step's key names; (b) a pending program host compared by its build's key (`arbace_javac_key`, `gate_key`) rather than as
   changed; (c) the workaround (select one cheap step that needs the host). *Recommended: (a)*.
   - **Decided (the user, 2026-10-31): (b).** After the tag, at the next change that rekeys every step.
+
+## Proposals (GTS170-GTS173): the audited rule's review (070)
+
+From the VM's review of main's `07194e71` (`.tmp/mac-queue/reports/070-review-main-audited.md`); built on the branch
+`audit-070`, one commit per finding, none of the choices below decided. This branch rekeys Java steps (java-judge's
+`:uses`, java-judge's `:outputs`, the new step java-held), so it merges after the tag.
+
+- **GTS170 java-held under the clean run's own strace** (finding 1). The step runs the held tests again unaudited, but the
+  clean run traces every step, so there it runs under strace too. Options: (a) as built: under the audit
+  (`GATE_AUDITED`) `--timeout 100` (a retry at 200 s), a guess to measure on rerun 10; (b) the step skips itself under the
+  audit and the tag procedure runs it by hand from the clean record's `held.txt` (`bin/java-check --levels interp --only`
+  of its ids), the keyed `--full` after the clean run running it untraced; (c) the clean run runs it twice, the second
+  outside the audit (the audit's undeclared-read check loses nothing for a step whose command another step already
+  traced). *Recommended: (b)*: an unaudited confirmation is what the finding asks for, and (a)'s limit is unmeasured.
+- **GTS171 which signal marks a run audited** (finding 5). Built: both must agree (`GATE_AUDITED=1` from the runner and
+  TracerPid), else a message and no mark, so the judgment is stricter. Options: (a) as built; (b) `GATE_AUDITED` alone
+  (a person's strace is no mark, but an audited step whose tracer was SIGKILLed mid-run still marks); (c) TracerPid alone
+  (main's rule). *Recommended: (a)*: (b) trusts a variable no tracer backs, (c) marks a person's strace.
+- **GTS172 what `--record` does with an audited judgment** (finding 4). Built: refused, exit 2. Options: (a) as built;
+  (b) record, keeping the recorded row for a held result; (c) record the held tests as `:timeout` (main's behaviour).
+  *Recommended: (a)*: the gate never records, and (b) needs `report` to know what the file held before.
+- **GTS173 the two test scripts** (`test/java/audited-test.bash`, `test/gate/audited-test.bash`). Neither is a gate step
+  (no `*-test.bash` exists yet to follow). Options: (a) as built, run by hand, seconds; (b) steps of the essential gate
+  (`:never-loads [arbace.j2g]`, stage 0 only); (c) a Makefile target (`make audited-test`) beside `check-makefile`.
+  *Recommended: (b)*, once the branch has merged, as every rule of the judgment should be tested where it can regress.
