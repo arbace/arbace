@@ -3016,6 +3016,15 @@ here).
 
 ## Proposals (GTS170-GTS173): the audited rule's review (070)
 
+**Decided (2026-11-01, the user): GTS170-GTS173** (on main's doc/JOURNAL.md, "2026-11-01: the user's decisions after the
+tag"; VM report 103's sheet 1): ratified as built.
+- **GTS170 (b):** java-held defers loudly under the audit and its key holds `GATE_CLEAN_INNER`, as built; the untraced
+  confirmation is a keyed `--full` between the clean run and the tag (or the by-hand run GTS170 names).
+- **GTS171 (a):** both signals (`GATE_AUDITED=1` and TracerPid) must agree to mark a run audited, as built.
+- **GTS172 (a):** `--record` with an audited judgment is refused (exit 2), as built.
+- **GTS173 (b) after the merge with audit-041:** `test/java/audited-test.bash` a step of the essential gate (not built);
+  the gate's two scripts run in gate-tests.
+
 From the VM's review of main's `07194e71` (`.tmp/mac-queue/reports/070-review-main-audited.md`); built on the branch
 `audit-070`, one commit per finding, none of the choices below decided. This branch rekeys Java steps (java-judge's
 `:uses`, java-judge's `:outputs`, the new step java-held), so it merges after the tag.
