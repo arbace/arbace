@@ -3665,3 +3665,152 @@ second was stopped). Nothing else known.
 
 All as recommended: CS200 (a); CS201 (a); CS202 (b), (a) with the next printer work; CS203 (c), then (a); CS210 (b),
 then (a); CS211 (a); CS212 (a); CS213 (a); CS214 (a); CS215 (a); CS216 (a).
+
+## As built: CS200-CS216 (2026-11-01)
+
+On the branch `c23-c7`, in the light tier, from the user's decision of 2026-11-01 (all as recommended; CS202 waits). One change a commit,
+each with a `bin/ci judge-test` test run against the code before it (it failed there) and after (it passes); the tests are 43, 139
+assertions (from 30, 90). Commits, in order: `1f49fb5a` (CS215), `cf190c73` and `a45d7703` (CS213), `5e31b1e4` (CS211), `9919bf82` (CS212),
+`e070b104` (CS214 R3), `f3e372fd` (CS214 R5), `c76b64aa` (CS216), `8ff1f8d8` (CS201), `983cf190` (CS203 (c)), `5b0ab70a` (CS210 (b)),
+`ae50a8e5` (CS203 (a)), `afbec044` and `da6440d8` (CS200), `2a800d7c` (the dg record).
+
+### The changes, one by one
+
+- **CS215 (a), constexpr decimal constants of the object's own type.** `constexpr _Decimal32 d = 1.000000000DF;` was refused ("not
+  representable"): the written digits were judged `strict`. gcc 15.2, probed: a constant of the object's own type is accepted whatever its
+  digits (`1.000000000DF`, `1.0000001DF`, `1.2345678DF`, `1e-102DF` and `1e97DF` for `_Decimal32`, the last two with an `-Woverflow`
+  warning); another decimal type's is judged by coefficient and quantum (`1.0000001DD` and `1.000000000DL` for `_Decimal32` refused, `1.0DD`
+  accepted since it fits). `constexpr-float-bad` takes a decimal part whose type is the object's own as representable, the others as
+  before. Test `constexpr-decimal-of-the-objects-type` on `test/c/judge/constexpr-decimal.c` (before: lines 4, 5, 6 and 11 refused, the
+  verdict a failure; after: lines 8 and 10 only, as gcc).
+- **CS213 (a), Go's fatal errors in cirun and the shards (R1).** The run's fault line of stderr now also keeps `^runtime: ` and `^fatal
+  error: ` (`bin/lib/ci/check`, `check-aot`: the compiled run, the interpreted run, the retries), and `arbace.c.run/result` judges it
+  `internal: ...` whatever the exit status. Test `go-fatal-error-is-internal`: `result` on a run row with a fatal line and gcc's status (before: a pass),
+  and `bin/ci check --corpus ci-run --only` on a stand-in cirun (`test/c/judge/cirun-fatal`: the two lines of a stack overflow, exit 3, the
+  status of `ptr-sub-unsigned.c`): exit 1 (before: 0).
+- **CS211 (a), the musl forms cache's key.** `.tmp/ci-musl/forms/key` holds the SHA-256 of the sorted file digests of `arbace/repr/c.ae`,
+  `arbace/repr/c/`, `arbace/c/musl.ae` and `test/c/host/`; `bin/ci musl key` prints the checkout's, `fresh` exits 0 when they agree,
+  `read` rereads the whole cache when they do not (and writes the key), `ensure` is prepare, then read when stale; `bin/ci check`, `check
+  --aot`, `nodes` and `repl-session` call `ensure`. A cache from before the key reads as stale: the first run after this commit rereads the
+  1,968 sources (about 6 minutes with 4 threads), and so does every later edit to repr/c (the key covers the whole directory, CS220).
+  Test `musl-forms-cache-key` (a made-up `CI_MUSL_FORMS`: no key and a wrong key are not fresh, the checkout's is; before: no `key`).
+- **CS212 (a), three judge residues.** R2: `compare-record` no longer flags a recorded `known ...` row that now passes (an `:improved`
+  list, printed as "recorded failures now pass (an improvement, not a failure; re-record)"). R4: `read-file` takes the main file as the unit's
+  whole name (or the path it was read as), gcc's lines by the exact name, no longer any name ending with the base name; test file
+  `suffix.c` includes `xsuffix.c`, whose error was the main file's (`:lines {1 1}`, now `:unlocated`/stray, the verdict `:stopped`). R7: a read whose error
+  is the parser's `panic: ...` is `:crash`, never the one error of a line-0 directive (`parser-panic.c`: 30,000 nested parentheses, a stack
+  exhaustion with `dg-error` at line 0: a pass before, `:crash` now). Tests `known-row-now-passing-is-no-regression`,
+  `main-file-is-the-whole-path`, `parser-panic-is-a-crash` (seven assertions fail before).
+- **CS214 (a), R3 and R5; R6 and R8 noted.** R3: `bin/ci check --aot` compares the compiled runs with the interpreter's only with
+  `CI_AOT_NODES` (this run's) or a named `CI_INTERP`; otherwise `cf2g`'s judge prints "compiled against interpreted (runs): not
+  compared" and reads no scratch (test `aot-interpreted-side-needs-its-run`, a made-up work directory: before, the line was "0 the same,
+  0 differ, 1 with no interpreted run" from `.tmp/ci-check`). R5: `pedwarn!` consults the `__extension__` lines of the file the line belongs to:
+  the main file's `ext-lines`, or, for a unit whose forms carry their lines (a reread unit's), the unit's own, read from its file against the read's base
+  (`read-c` keeps `:base`); and none in a system header (a unit under a directory of the host's search list, `check-unit`'s `:sys-dirs`: gcc
+  gives no pedwarn there). The forms read from C carry no `:line` in a unit (the pedwarn then stands on the `#include`'s line in the main
+  file, where the main's lines are right), so the unit-keyed part is exercised on forms given lines, as a reread's: test
+  `extension-lines-by-unit` (three assertions fail before: the header's own `__extension__` did not silence it, the main file's silenced the header's, a
+  system header was pedwarned). R6 (`syntax-expectation?`'s regex) is taken up by CS200's table (the messages are now compared, so a read
+  error cannot stand for a semantic message unnoticed); R8 (`${srcdir}` is the corpus base for the run corpora) is right for the dg groups,
+  the only users today, and stays noted.
+- **CS216 (a), a per-program budget.** `test/c/check-budget.edn` (`{"compcert/perlin.c" 30}`), read by `bin/lib/ci/budget.bash`
+  (`ci_budget ID`, 10 unless listed; `CI_BUDGETS` names another file) in `bin/ci check` and `check --aot` for the run, the interpreted run and the
+  quiet retry. Test `run-budget-per-program`: the lookups, and a stand-in cirun (`cirun-slow`, 12 s a run) on `ptr-sub-unsigned.c`: exit 1 at
+  the default (before and without the file), 0 with a budget of 30.
+- **CS201 (a), the four files gcc does not agree with.** `embed-7` and `embed-8` (c-c++-common): the directive is a fatal error (`#embed
+  "non-existent-file"`) on the line its `dg-error` expects; `gcc-agrees` called any fatal error a disagreement, now the lines decide (a
+  fatal error on another line is still one). `c23-ucn-2`: gcc's output was cut at 20,000 bytes (`head -c`) and the file's 10 errors come after
+  186 warnings; the capture is now a filter to the diagnostic lines (`bin/lib/ci/gcc-diag.bash`, up to 1 MB), so gcc's errors at 972..996 are
+  there and the directives agree. `embed-10` (c-c++-common) stays a `parse-gap` (the parser stops at the `#embed`'s integers after
+  `const char *p =`, where gcc recovers: "makes pointer from integer" then "expected identifier"). The passes gcc disagrees with: 3 to
+  **0**. Tests `fatal-error-at-an-expected-line`, `gcc-output-kept-whole` (8,000 warnings then an error; before: the error was lost).
+- **CS203 (c) then (a), `c23-bool-errors-1/2`.** (c): the two files recorded as `converter-gap` in `test/repr/c/roundtrip-known.edn` (commit
+  `983cf190`). (a), small, so done: the converter keeps `:c/bad-specs` as the specifier words written when all are plain words
+  (`["int" "bool"]`; `true` otherwise) and the printer writes a `declare-specs` form's specifiers from them, so `typedef int bool;` and
+  `int bool;` print as they were and read again with the same flag; the two known entries are removed again. Only the `declare-specs` form
+  (all that the two files have) is printed from the words; a `c/var` with bad specs (`long _Bool z;`) still prints one type (CS221). The test is the round trip's
+  level 1 over `gcc-c23` (below).
+- **CS210 (b), the unlisted selector names.** `bin/ci dg` prints per group the names of the dg-do, dg-error and xfail selectors that
+  `test/c/dg-targets.edn` does not list (taken to hold, CS142's rule kept) and the number of files: **one name in one file**, `int32` in the
+  gcc-bitint group; the other six groups none. So CS210 (a) (three values there) would change at most one file. Test
+  `unlisted-selector-names-counted`.
+- **CS200 (a), the message count as a verdict.** `test/c/dg-wording.edn`: 24 families (a pattern over the `dg-error` regex's text and one
+  over the checker's message: "discards .const. qualifier" / "discards qualifier", "redefinition of struct or union" / "redefinition of
+  'struct T'", "both 'long' and '_BitInt'" / "two or more data types", the `#embed` and `#elifdef` families, ...) and `:wrong-reason`, five files.
+  A pass with an expected-error line whose regexes match no message of the checker's passes only when a family explains the line (the 139
+  lines of 25 files are, all of them), else it fails `message: ...` (a new mismatch is a regression, unclassed); the five whose message
+  is another reason than gcc's are the new class `wrong-reason` of `test/c/divergences-dg.edn`: `c23-bool-errors-1/2` ('bool' cannot be defined via
+  'typedef' / cannot be used here, against "two or more data types"), `c23-tag-enum-6` ("outside the range", against "redeclaration of
+  enumerator"), `embed-9` ("no include path", against "No such file or directory") and `c23-nullptr-6` ("not of integer type", against "not an
+  integer constant expression"). The four of them in `test/c/essential-dg.txt` leave it (102 files to 98). Test `message-as-verdict` (the verdicts on made-up lines; the committed table has the keys and five wrong-reason files).
+
+### The numbers, before and after
+
+| | before | after |
+|---|---|---|
+| dg (`bin/ci dg --record`, a full run with gcc 15.2) | 588 of 619 supported pass, 8 unsupported, 31 in a class, 0 unclassed | **583** of 619, 8 unsupported, **36** in a class (the new `wrong-reason`: 5), 0 unclassed; the record moved in those five rows only |
+| passes whose directives gcc disagrees with | 3 (`embed-7`, `embed-8`, `c23-ucn-2`) | **0** |
+| passes with `dg-error` lines the checker's messages do not match | 30 files, 146 lines, a report | 25 files, 139 lines, all explained by a family; 5 files `wrong-reason`; any other is a failure |
+| unlisted selector names (dg-do, dg-error, xfail) | not counted | 1 name (`int32`), 1 file (gcc-bitint) |
+| `bin/ci dg --essential` | 102 of 102 | 98 of 98 (the four wrong-reason files left the list) |
+| run level (`bin/ci check --record`, fifteen corpora) | 3,761 programs, 3,457 pass; `perlin.c` timed out at 10.2 s | 3,761, **3,457 pass**, the record unchanged byte for byte, `compcert/perlin.c` passes (30 s budget); exit 0 |
+| `bin/ci judge-test` | 30 tests, 90 assertions | **43 tests, 139 assertions**, all pass |
+| `bin/repr-c check --c23` | 62 files, 59 pass, 3 expected failures, 0 failing | the same |
+| round trip `--no-run` (c23conf, c23, tcc-tests2, gcc-c23) | c23conf 49 of 49, c23 62 of 62, tcc-tests2 85 pass, 3 known; gcc-c23 253 pass, 15 known, **2 failing** | the same but gcc-c23 **255 pass**, 15 known, **0 failing** (`c23-bool-errors-1/2` equal at level 1); "30 known entries stale", the other corpora's, as before |
+
+The compiled level (`bin/ci check --aot`) was not run, nor `bin/ci annotations`, `bin/repr-c parse-check`, `check --tokens`, `bin/gate`, `bin/ci
+repl-session`. The run level's record was rewritten and came out identical, so `check --record` changed no row; the `perlin.c` row is the pass it
+was. A load timeout did not occur in this run.
+
+### Proposals (CS220-)
+
+Each with options, the recommended one first; none decided.
+
+- **CS220 The musl forms cache's key is the whole of repr/c.** Every edit to `arbace/repr/c/` (the printer's, the pedantic notes') rereads
+  the 1,968 sources, about 6 minutes, in the next `bin/ci check` or `judge-test`, though only the reader (`c.ae`, `parse`, `pp`, `lex`, `convert`,
+  `host`) shapes the forms.
+  - Options: (a) key the reader's files alone (`c.ae`, `lex`, `pp`, `parse`, `convert`, `tree`, `host`, `musl.ae`, `test/c/host`), the printer and
+    the checkers out; (b) keep the whole directory (safe, slow after a printer edit); (c) key by the forms' own digest (read one file, compare
+    with the cache's: seconds, catches what the key list misses).
+  - *Recommended: (a)*, with (c) as the check `bin/ci musl fresh` could add later.
+- **CS221 `:c/bad-specs` on the other forms.** Only `declare-specs` prints the words; `long _Bool z;` and `typedef long _Bool T;` still print one type.
+  - Options: (a) the same words for `c/var`, `c/declare` and `c/typedef` (the printer's `var-str` takes the type from the words); (b) leave:
+    no corpus file has them (the gcc-bitint group's `both 'long' and '_BitInt'` lines are checker errors, not round trip files).
+  - *Recommended: (b)* until a corpus file needs it.
+- **CS222 Lines on the forms of a unit read from C.** The forms of `read-c`'s units carry no `:line`, so a pedwarn in a header stands on the
+  `#include`'s line (the file shown in the message is right, the line is not) and R5's keying only works for reread units.
+  - Options: (a) the reader gives a unit's forms their own lines (`convert` already knows the token positions; the `.ae` text of a unit would
+    carry them as the main file's does); (b) leave: the message names the header and the include line is where the main file's author looks.
+  - *Recommended: (a)* with the next converter work: a header's diagnostics and `__extension__` then are exact.
+- **CS223 The dg selector name `int32`** (CS210 (b)'s count: one name, one file).
+  - Options: (a) probe it and list it in `test/c/dg-targets.edn` (the table then covers every name the corpora use); (b) leave.
+  - *Recommended: (a)*, then CS210 (a) is a three-valued rule with no unknown name left to report.
+- **CS224 The wording table versus the checker's wording** (CS200 (b), not taken: the oracle and annotations checks compare messages with cc's).
+  - Options: (a) keep the table and the two-sided check; (b) change the checker's messages to gcc's for the families where cc's wording does not
+    matter (`discards 'const' qualifier`, `redefinition of struct or union`, `both 'long' and '_BitInt'`), table entries removed as they go;
+    (c) leave.
+  - *Recommended: (a)* until the oracle's message comparison is itself decided.
+- **CS225 The judge-test's duration.** 43 tests take about 4 minutes (the run-level stand-in cirun tests alone about a minute; a musl reread
+    after a repr/c edit, CS220, adds six).
+  - Options: (a) a `--quick` selection (the pure tests, seconds) beside the full run, the full run kept for commits; (b) leave.
+  - *Recommended: (a)*: the light tier runs it after every change.
+- **CS226 The embed-10 parse gap** (`const char *p = #embed <f> limit (42);`: the parser stops at the integers after the first, gcc recovers).
+  - Options: (a) recovery in the declarator list so the checker runs and gives "makes pointer from integer" (a parser change: its own review); (b)
+    leave it `parse-gap`.
+  - *Recommended: (b)*: one file and the parser is a port.
+- **CS227 `bin/ci check --aot` without CI_AOT_NODES** now compares nothing with the interpreter.
+  - Options: (a) as built (the interpreted side is named or run beside); (b) make `CI_AOT_NODES=1` the default of `--record`, so a recorded compiled level always has been
+    compared with a run of its own interpreter; (c) leave.
+  - *Recommended: (a)*, (b) with the next compiled-level run, whose cost it doubles.
+
+### Shipped files, scratch and rule slips
+
+Shipped files changed: none (nothing under `go/`, `overlay/` or `jdk/`). Not shipped: `arbace/c/{check,dg,run,cf2g}.ae`,
+`arbace/repr/c.ae`, `arbace/repr/c/{annot,convert,print}.ae`, `bin/ci`, `bin/lib/ci/{check,check-aot,dg,musl,budget.bash,gcc-diag.bash}`,
+`test/c/` (`judge_test.ae`, `judge/`'s new files, `dg-wording.edn`, `check-budget.edn`, `divergences-dg.edn`, the records), `test/repr/c/roundtrip-known.edn`.
+`gate_key` covers `arbace/`, so a gate run keys the checker's edits. Scratch in the worktree's `.tmp/`: `cs215/`, `pan/`, `bs/`, `ci-dg/`, `ci-check/`,
+`ci-musl/` (the reread cache), `repr-c-roundtrip/`, the logs `dg-rec2.log`, `check-rec2.log`, `rt.log`, `c23chk.log`, `jt.log`.
+Rule slips: the CS210 (b) commit lacks the `Co-Authored-By` and `Claude-Session` lines (not amended: no rewriting of history); a `bin/repr-c
+roundtrip` with no arguments was started by mistake (it would have read every corpus) and ended at its first write into a closed pipe; a
+`judge-test` run was moved to the background by the tool's time limit while a command after it swapped files for a before-run, which
+briefly left old files in place (restored and re-verified). Nothing else known.
