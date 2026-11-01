@@ -2182,3 +2182,43 @@ coordinator's gate step at the merge; CP126 (a); CP127 (b).
 ### Decided (CP130-CP134; the user, 2026-11-01)
 
 All as recommended: CP130 (c); CP131 (b); CP132 (b); CP133 (a); CP134 (b).
+
+## As built: CP130-CP134 (2026-11-01)
+
+On the branch `cpp-cx7` (light tier: stage 0 by `ARBACE_HOST_EXE`, 4 jobs, `GOMEMLIMIT=1500MiB`, no gate, no lock). CP133 (a) is as built (300 s stays). The others, each with a selftest that fails on
+`61a5d21c` (the tests copied into a snapshot of it) and passes now; `bin/cppi selftest`: 17 to **20 tests, 20 pass** (new: `dry-mode`, `new-implicit`, `oracle-record`; `recorded-list` rewritten).
+
+| # | the fix | the test (before, after) |
+|---|---|---|
+| CP134 (b) | `ARBACE_HOST_EXE=/bin/true` is the dry mode of `bin/cppi selftest` (`test/cpp/selftest/run`): a test whose first line is `# needs-host` (14 of the 17 old ones; the three host-free ones are `cxxdump-version`, `headers-pin`, `runtime-key`) is skipped with a `skip  NAME` line, the summary names them (`14 skipped (dry mode): ...`), the exit is 0 | `dry-mode`: before, the host test ran and failed, no skip line; after, 5 checks ok. In dry mode the run prints 3 pass (`dry-mode` included), 14 skipped |
+| CP132 (b) | a list may begin with `#list KEY` (the recorded list it is) or `#part NAME`; `bin/cppi list` writes them (`samples+runtime` is the recorded `samples`, 14 files; `libstdcxx --sample 15` is `libstdcxx-every-15th`; other samples and the two halves are parts); `lower-check` cuts the header from `list.tsv` and keeps the key as `list.key`; the judge holds a run to the list the key names (`--recorded KEY|none|auto`, auto = the header, no header or a key without a summary = not held); the more-than-half heuristic is gone | `recorded-list`: before, 13 of 14 with no header failed as a run of the list; after, not held, with the header held, a header-only list refused (exit 2), `list samples+runtime` gives the header and 14 files |
+| CP131 (b) | `new A` with `typedef int A[10]`: the array size is clang's implicit `IntegerLiteral` whose range is the type name's token; the converter reads its source text, finds no number, and takes the allocated type from the text after `new` (and the placement arguments) up to the initializer (`new-implicit-size?`, `new-type-text` in `convert.ae`), printing `new A`; no `(lit __size_t N)` | `new-implicit`: before, the read threw `a literal: (lit __size_t 10)`; after, the round trip of `new A` / `new C` (a struct array typedef) passes, the print has `new A;` and `new C;`. `g++.law/cvt22.C` leaves the known file (the class `:read-crash` has no file) and **passes** in g++.old-deja's tenth |
+| CP130 (c) | `test/repr/cpp/roundtrip-oracle.edn` (`REPR_CPP_ROUNDTRIP_ORACLE`): per corpus (`--corpus KEY` or the list's `#list KEY` line, kept as `WORK/list.key`) the names clang rejects with its own diagnostics (`:rejected`) and the names whose dump fails by kind (`:fails`, `:timeout` for status 124, `:crash` for the rest); the judge makes a rejection not recorded `oracle-rejects-new` (fail, known or not), a failure not recorded or of another kind a `dump-error-N` (fail), a recorded one `oracle-fails`; `--record-oracle` writes the run's entry (others kept); the summary counts `:oracle-fails`, `:oracle-rejects-new`, `:oracle-stale` (recorded names that no longer reject or fail: a count, not a failure); no key, or none recorded for it: as before | `oracle-record`: before, no such option; after, 9 checks: recorded rejection and failures pass, a new rejection, a failure of another kind and a new failure fail, the header names the corpus, an unrecorded corpus fails its dump failures, `--record-oracle` then a run against it passes, a second corpus is recorded beside the first (the record command failed on g++.dg's second entry before that case: a local `key` shadowed `clojure.core/key`) |
+
+### The round trips (objects on, cxxdump-8; the lists are the pp-check lists of CX5d, same counts; keys `gxx-dg-every-10`, `gxx-old-deja-every-10`, `c-c++-common-every-10`, `libstdcxx-testsuite-every-40`)
+
+| corpus | files | rejected (recorded) | oracle fails (recorded) | pass | known | failing | exit |
+|---|---:|---:|---:|---:|---:|---:|---|
+| g++.dg every 10th | 1,807 | 745 | 2 (`cpp0x/pr104668.C` `:timeout`, `modules/target-aarch64-1_b.C` `:crash`) | 977 | 83 | 0 | **0** (was 1), 7 min 38 s with the dumps cached; the judge run again on its work directory against the committed record: the same |
+| g++.old-deja every 10th | 323 | 88 | 0 | 226 | 9 | 0 | 0 (225 pass, 10 known before: `cvt22.C` passes) |
+| c-c++-common every 10th | 326 | 79 | 0 | 211 | 36 | 0 | 0 |
+| libstdc++ testsuite every 40th | 244 | 32 | 0 | 199 | 13 | 0 | 0 |
+
+R2's numbers are met: 977 / 83 for g++.dg (976 / 84 and 747 rejections before: the two dump errors were counted among the 747), `:oracle-stale` 0 and `:oracle-rejects-new` 0 in all four. The record file holds the four corpora's 944 rejected names (956 lines).
+The samples (9 files) and HotSpot's tenth were not run: HotSpot needs jdk26u, which this task did not touch; they have no record (a run without a key is as before).
+
+- `bin/cppi lower-check` on `bin/cppi list samples+runtime` (the header `#list samples` holds it to the record): after `runtime-build` (198 of 198 units), **14 of 14 pass**, 0 known, 0 failing (native 7 s, read, print and lower 23 s, gcc and runs 2 s).
+- Warnings of the converter's compile (primitive loop arguments, reflection) are the checkout's own and unchanged.
+
+### Proposals (CP140 onward)
+
+- **CP140 The records of the other corpora.** Samples and HotSpot's tenth have no entry in `roundtrip-oracle.edn`; every other corpus of CX5d is recorded. Options: (a) as built; (b) record them with the next runs that have jdk26u (`--record-oracle`). *Recommended: (b)*.
+- **CP141 A stale record.** `:oracle-stale` counts recorded names that now read ok or are missing from the run; a rejection that stopped happening is probably a converter or oracle change worth a look. Options: (a) a count (as built); (b) a failure in a whole-corpus run (the run holds every recorded name), a count in a sample run; (c) (b) and `--record-oracle` shown as a diff. *Recommended: (b)*.
+- **CP142 The implicit size beyond the plain name.** `new-type-text` reads the text after `new` up to the first `(`, `[` or `{` outside `<>`: right for `A`, `ns::A`, `A<int>`; a parenthesized type (`new (A)`) is refused as a gap, and only `cvt22.C` of the corpora has the case. Options: (a) as built; (b) a sample file with qualified, templated and parenthesized typedef names, `new (A)` handled by stripping the parentheses. *Recommended: (b)*, small.
+- **CP143 The dry mode in the reviewer's run.** The marker is a first line `# needs-host`; a new test that forgets it fails in the dry mode, which is the signal. Options: (a) as built; (b) `bin/cppi selftest --dry` checks the marker against the tests' use of `arbace_tool`/`bin/repr-*`/`bin/cppi` and fails on a mismatch. *Recommended: (a)*.
+
+### Rule slips, shipped files, scratch
+
+- Slips: one waiting monitor command contained `/dev/null` (`cat /dev/null`; stopped at once, nothing depended on it); a 25-minute spacer monitor ran for a moment beside another waiting loop (stopped); one `git checkout 61a5d21c -- test/cpp/selftest/run` in the worktree while building the "before" snapshot (restored at once with `git checkout HEAD --`, nothing committed from it). The disk stayed at 59%.
+- Shipped: `bin/cppi`, `bin/lib/repr-cpp/roundtrip`, `bin/repr-cpp` (usage), `arbace/cpp/check.ae`, `arbace/repr/cpp/convert.ae`, `arbace/repr/cpp/rtcheck.ae`, `test/repr/cpp/roundtrip-oracle.edn` (new), `test/repr/cpp/roundtrip-known.edn` (`cvt22.C` out), `test/cpp/lower-results.edn` (a comment), `test/cpp/selftest/` (new `dry-mode`, `new-implicit` with its `.cpp`, `oracle-record`; `recorded-list` and 14 tests' first line), this section.
+- Scratch: `.tmp/rt/*` (results.tsv and summary.edn of the four corpora), `.tmp/lists/`, `.tmp/rt-*.log`; the extracted gcc tree and the work directories' big parts deleted.
