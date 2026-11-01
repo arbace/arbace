@@ -129,12 +129,13 @@ step() {  # step NAME HEAVY COMMAND...: one step, logged, timed, measured (GT1);
     audit_reduce "$logs/$name.fifo" > "$logs/$name.paths" 2> "$logs/$name.reduce.err" &
     ap=$!
     tr=(strace -f -qq -y -s 4096 --seccomp-bpf -e "trace=${GATE_AUDIT_TRACE:-$audit_trace}" -o "$logs/$name.fifo")
-    ae=(ARBACE_LOADED_LOG="$logs/$name.loaded")
+    # GTS171: the step says so itself (bin/java-check --save marks its results from it, TracerPid as the cross-check)
+    ae=(ARBACE_LOADED_LOG="$logs/$name.loaded" GATE_AUDITED=1)
   fi
   [ -n "${GATE_CPU_LOG:-}" ] && { rm -f "${logs:?}/$name.cpu.tsv"; ae+=(ARBACE_CPU_LOG="$logs/$name.cpu.tsv"); }
   # the lock first, then the clock: the start file is written once the step holds the lock
   "${pre[@]}" bash -c 'date +%s > "$1"; shift; exec "$@"' gate-step "$logs/$name.start" \
-    env ${hv:+ARBACE_HEAVY_HELD=1} HEAVY_LOCK_WAITS="$logs/$name.waits" ${ae[@]+"${ae[@]}"} ${tr[@]+"${tr[@]}"} \
+    env -u GATE_AUDITED ${hv:+ARBACE_HEAVY_HELD=1} HEAVY_LOCK_WAITS="$logs/$name.waits" ${ae[@]+"${ae[@]}"} ${tr[@]+"${tr[@]}"} \
     /usr/bin/time -v -o "$logs/$name.time" "$@" > "$logs/$name.log" 2>&1 &
   pid=$!
   echo "$pid" > "$logs/$name.pid"

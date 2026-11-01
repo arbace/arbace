@@ -41,5 +41,16 @@ for p in java-read java-interp java-classes java-diagnostics java-compiled-full 
 done
 if decl java-check-judge | grep -q ':uses \["java-check"\]'; then ok "java-check-judge uses java-check's whole output (its marker too)"; else no "java-check-judge uses java-check's whole output"; fi
 
+# finding 5: the runner says a step is audited (GATE_AUDITED=1 in the step's environment, in the traced
+# run only; an inherited value is removed in an unaudited step)
+logs=$t/logs; store=$t/store; mkdir -p "$logs"; : > "$logs/mem.tsv"
+. "${GATE_RUN_LIB:-$root/bin/lib/gate-run.bash}"  # GATE_RUN_LIB: another runner, to see a case fail before its fix
+red=(); audit_trace=${audit_trace:-execve,openat}
+GATE_AUDITED=1 audit_step= step plain no bash -c 'echo "GATE_AUDITED=${GATE_AUDITED:-unset}"'
+if grep -qx 'GATE_AUDITED=unset' "$logs/plain.log"; then ok "an unaudited step does not see GATE_AUDITED (even exported outside)"; else no "unaudited step's GATE_AUDITED: $(cat "$logs/plain.log")"; fi
+unset GATE_AUDITED
+audit_step=1 step traced no bash -c 'echo "GATE_AUDITED=${GATE_AUDITED:-unset}"; awk "\$1 == \"TracerPid:\" { print \"tracer \" \$2 }" /proc/self/status'
+if grep -qx 'GATE_AUDITED=1' "$logs/traced.log" && grep -q '^tracer [1-9]' "$logs/traced.log"; then ok "an audited step sees GATE_AUDITED=1 under a tracer"; else no "audited step: $(cat "$logs/traced.log")"; fi
+
 echo "gate audited-test: $((n - bad)) of $n passed"
 [ $bad = 0 ]

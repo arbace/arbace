@@ -70,5 +70,26 @@ results i interp t03686 pass; rm -f "$t/i/audited"
 judge --record --partial "$t/i/results.tsv" "$t/c/results.tsv"
 if [ $st = 0 ] && grep -q 'recorded' "$t/out"; then ok "--record unaudited still records"; else no "--record unaudited (status $st)"; fi
 
+# 5 (finding 5): --save's marker (mark_audited, extracted from bin/java-check) needs GATE_AUDITED=1 and a
+# tracer; one without the other is said and not marked
+if sed -n '/^mark_audited() {/,/^}/p' "$root/bin/java-check" | grep -q mark_audited; then
+  sed -n '/^mark_audited() {/,/^}/p' "$root/bin/java-check" > "$t/mark.bash"
+else
+  # before the function existed: the marker's lines inline, as --save had them
+  { echo 'mark_audited() { local save=$1 levels=$2; rm -f "$save/audited"'
+    echo "  if awk '\$1 == \"TracerPid:\" && \$2 != 0 { t = 1 } END { exit !t }' /proc/self/status; then printf '%s\\n' \"\$levels\" > \"\$save/audited\"; fi; }"; } > "$t/mark.bash"
+fi
+# mark GATEVAR TRACE: the marker after mark_audited under (strace -f | nothing) with GATE_AUDITED GATEVAR
+mark() {
+  local d=$t/mk; rm -rf "$d"; mkdir -p "$d"
+  local pre=(); [ "$2" = trace ] && pre=(strace -f -qq -o "$t/mk.strace" -e trace=none)
+  env -u GATE_AUDITED ${1:+GATE_AUDITED=$1} "${pre[@]}" bash -c '. "$1"; mark_audited "$2" interp' mark "$t/mark.bash" "$d" 2> "$t/mark.err"
+  if [ -f "$d/audited" ]; then echo "marked"; else echo "unmarked"; fi
+}
+r=$(mark 1 trace);   if [ "$r" = marked ]; then ok "GATE_AUDITED=1 under a tracer: marked"; else no "GATE_AUDITED=1 traced: $r"; fi
+r=$(mark 1 plain);   if [ "$r" = unmarked ] && grep -q 'GATE_AUDITED=1 but no tracer' "$t/mark.err"; then ok "GATE_AUDITED=1 and no tracer: not marked, said"; else no "GATE_AUDITED=1 untraced: $r $(cat "$t/mark.err")"; fi
+r=$(mark "" trace);  if [ "$r" = unmarked ] && grep -q 'a tracer is attached' "$t/mark.err"; then ok "a tracer without GATE_AUDITED: not marked, said"; else no "traced without GATE_AUDITED: $r $(cat "$t/mark.err")"; fi
+r=$(mark "" plain);  if [ "$r" = unmarked ] && [ ! -s "$t/mark.err" ]; then ok "neither: not marked, silent"; else no "neither: $r $(cat "$t/mark.err")"; fi
+
 echo "audited-test: $((n - bad)) of $n passed"
 [ $bad = 0 ]
