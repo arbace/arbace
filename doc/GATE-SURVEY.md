@@ -1904,6 +1904,7 @@ finding 1 and the choices made on the way are proposed here, none decided.
     five names, a blind spot only if one of them joins the read path (a new file is in by default). The writers then rewrite the provenance after a change to `analyze.ae` or `env.ae`: that is the price and
     the point (it is the "a day later" slip the step was made to close). To be done in the commit that rewrites the four
     files' hash, after the merges.
+  - **Decided (the user, 2026-11-01): (a).**
 - **GTS111 jrt's JVM-generated files stay outside generated-check** (finding 2, third item): `standin_{lang,character,
   reflect}.ae`, `manifest.edn`, `manifest_test.ae`, `reflect_tables.ae` (`bin/jrt standins|manifest`), which the frozen
   JVM's reflection generates.
@@ -1913,6 +1914,7 @@ finding 1 and the choices made on the way are proposed here, none decided.
     "inputs changed, not regenerated", not "generator changed").
   - *Recommended: (a)*; (c) if one of them goes stale in practice. `bin/jrt modules --check` and goi's pair, which need
     no JVM, are in the check.
+  - **Decided (the user, 2026-11-01): (a).**
 - **GTS112 The frozen jar's selection** (finding 3). As built: `frozen_pin` checks `FROZEN_JAR`/`ARBACE_ORACLE_JAR` and a
   built tag's jar against the pin line of the file name, a name with no line is an error, `FROZEN_ALLOW_UNPINNED=1` only
   warns (for the paths that make a pin); j2g-edge declares `:env J2G_FIXTURES J2G_EDGE_WORK`, javac-verify and j2g-edge
@@ -1923,6 +1925,7 @@ finding 1 and the choices made on the way are proposed here, none decided.
   - *Recommended: (b)*: cheap, and a pass then records which jar and class path it ran on. Whether the `:frozen` host
     should hash the jar that ran rather than the pin file is the same question; the pin check makes the two equal.
     Not decided on the branch: the `:env` change rekeys j2g-edge, javac-verify.
+  - **Decided (the user, 2026-11-01): (b).**
 - **GTS113 What `bin/j2g-edge trace` sees** (finding 4). As built: it fails on a recording with no traced event, and runs
   with `J2G_JOBS=1` (par-mapv is then `mapv` on j2g's own thread). The runtime's analysis `future`
   (`arbace/j2g/world.ae`, on a host with id spaces) still runs off the main thread.
@@ -1931,13 +1934,16 @@ finding 1 and the choices made on the way are proposed here, none decided.
     floor for the allowed categories instead of zero.
   - *Recommended: (b)*: it covers every future, now and later, at the price of one binding in `run`; the floor needs a
     first real recording on the main host to choose it from. Not run on a JVM here (the gate needs the host).
+  - **Decided (the user, 2026-11-01): (b).**
 - **GTS114 The tests of the scripts** (`test/gate/{generated-check,frozen,j2g-edge-record,edge-verdict}-test.bash`,
   fabricated trees and fake executables under `.tmp/`, seconds). Not in any step yet.
   - Options: (a) one light essential step `script-tests` running them, inputs the scripts and the tests; (b) run from
     `make check-makefile`'s step; (c) by hand.
   - *Recommended: (a)*: a gate script is changed rarely and silently; a step keyed on the script and its test costs
     seconds when unchanged.
+  - **Decided (the user, 2026-11-01): (a).**
 - **GTS115 j2g-edge's lock** (finding 5): `record` removes its three intermediate files and takes a lock on
   `$work/.lock`, polled once a second up to `J2G_EDGE_LOCK_WAIT` seconds (3600: busybox's `flock` has no `-w`).
   - Options: (a) as built; (b) a distinct work directory per run (`$work.$$`), no lock; (c) fail at once when locked.
   - *Recommended: (a)*: the gate's step and a hand-run `update` should queue, not race; (b) loses the kept logs.
+  - **Decided (the user, 2026-11-01): (a).**
