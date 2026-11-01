@@ -3,7 +3,8 @@
 # (tools/gateaudit): (1) the set holds rt_sigprocmask, so a new thread leaves the fully traced state at
 # once; (2) gateaudit reduces a trace holding rt_sigprocmask lines to the same OP<TAB>PATH lines as one
 # without. Run: test/gate/audit-trace-test.bash (builds gateaudit with TamaGo's go, CGO_ENABLED=0, into
-# .tmp/; needs strace and gcc for (1)'s timing, which is skipped without them). Exits 1 on a failure.
+# .tmp/, skipped without it, a failure when it does not build; needs strace and gcc for (1)'s timing, which is
+# skipped without them). Exits 1 on a failure.
 root=$(cd "$(dirname "$0")/../.." && pwd)
 export TMPDIR=${TMPDIR:-$root/.tmp/tmp}; mkdir -p "$TMPDIR"
 w=$(mktemp -d "$TMPDIR/audit-trace-test.XXXXXX"); trap 'rm -rf "$w"' EXIT
@@ -29,9 +30,11 @@ reduce() {  # reduce NAME TRACE: the OP<TAB>PATH lines of TRACE by reducer NAME
     gateaudit) "$w/gateaudit" -root /work "$2" ;;
   esac
 }
-if (cd "$root/tools/gateaudit" && env -u GOOS -u GOARCH GOROOT="$tg" GOFLAGS= GOTOOLCHAIN=local CGO_ENABLED=0 \
+# skipped only without TamaGo's go; a build that fails where go exists is a failure (review 081, N4), and (3) still runs
+if [ ! -x "$tg/bin/go" ]; then echo "skip gateaudit: no $tg/bin/go here; audit.awk is tested"
+elif (cd "$root/tools/gateaudit" && env -u GOOS -u GOARCH GOROOT="$tg" GOFLAGS= GOTOOLCHAIN=local CGO_ENABLED=0 \
      "$tg/bin/go" build -trimpath -o "$w/gateaudit" .) > "$w/build.log" 2>&1; then reducers+=(gateaudit)
-else echo "skip gateaudit: it does not build here ($(tail -1 "$w/build.log")); audit.awk is tested"; fi
+else ck "gateaudit builds" "$(tail -1 "$w/build.log")"; fi
 cat > "$w/plain.trace" <<'T'
 100 execve("/bin/sh", ["sh", "-c", "x"], 0x7ffd /* 3 vars */) = 0
 100 openat(AT_FDCWD</etc>, "/etc/ld.so.cache", O_RDONLY|O_CLOEXEC) = 3</etc/ld.so.cache>
