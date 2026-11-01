@@ -7,6 +7,7 @@
   (:require [arbace.test :refer :all]
             [arbace.c.dg :as dg]
             [arbace.c.run :as run]
+            [arbace.c.repl :as repl]
             [arbace.repr.c :as rc]
             [arbace.repr.c.annot :as annot]
             [arbace.repr.c.parse :as cparse]
@@ -401,6 +402,35 @@
 
 ;; CS213: Go's fatal errors in cirun (stack exhaustion, out of memory, a concurrent map write) are internal failures, whatever
 ;; the exit status (here the program's own, 3)
+
+(deftest check-runs-nodes-on-ci-exe
+  ;; C9 (CS103): with CI_EXE the run level runs each node program by `CI_EXE -m arbace.c.repl run-nodes FILE`, with no cirun
+  ;; built; ci-run's ptr-sub-unsigned.c (a recorded pass) on a stand-in executable that logs its arguments and runs the real cirun
+  (let [root (System/getProperty "user.dir")
+        work (doto (java.io.File. (str root "/.tmp/judge-test-ciexe")) (.mkdirs))
+        ids (java.io.File. work "ids.txt")
+        real (or (System/getenv "CIRUN") (str root "/.tmp/ci/cirun"))
+        lg (java.io.File. work "log")]
+    (when-not (.exists (java.io.File. ^String real)) (sh-status {} "bin/ci" "cirun-build"))
+    (try
+      (spit ids "ci-run/ptr-sub-unsigned.c\n")
+      (is (= 0 (sh-status {"CI_CHECK_WORK" (.getPath work) "CIRUN" "/nonexistent/cirun" "CI_EXE" (str root "/test/c/judge/ciexe-standin")
+                           "CIRUN_REAL" real "CIEXE_LOG" (.getPath lg)}
+                          "bin/ci" "check" "--corpus" "ci-run" "--only" (.getPath ids))))
+      (is (.exists lg))
+      (when (.exists lg) (is (re-find #"-m arbace.c.repl run-nodes " (slurp lg))))
+      (finally
+        (doseq [f (reverse (file-seq work))] (.delete ^java.io.File f))))))
+
+(deftest repl-backend-default
+  ;; C9 (CS103): arbace.c.repl's default back end is the in-process one only where arbace.lang.CInterp exists (an executable built
+  ;; with ci); stage 0 keeps tools/cirun, and arbace.c.cinterp does not load there
+  (let [b (repl/backend)]
+    (is (#{:cinterp :cirun} b))
+    (if (= :cirun b)
+      (is (thrown? Throwable (require 'arbace.c.cinterp)))
+      (is (fn? @(resolve 'arbace.c.cinterp/run-nodes))))
+    (is (= (if (= :cirun b) repl/light-run-nodes @(resolve 'arbace.c.cinterp/run-nodes)) repl/*run-nodes*))))
 
 (deftest go-fatal-error-is-internal
   (let [ref {:status 3 :stdout "x"}]
