@@ -3,9 +3,19 @@
 # the planner (test/gate/plan.ae, which validates it) on a scratch plan, and the runner's step
 # (bin/lib/gate-run.bash). Seconds, no build, no gate run. GATE_STEPS names another table to test (to
 # see a case fail before its fix); ARBACE_HOST_EXE is stage 0. Usage: test/gate/audited-test.bash
+# A process already traced cannot run the audited step's case (a tracer cannot be traced again, PTRACE_TRACEME):
+# "not run", status 77 (bin/gate-tests lists it so under the audit; AUDITED_TEST_ASSUME_UNTRACED=1 only for
+# audited-test-test, which reads its trace). It reads the checkout's file names (git ls-files, zero digests) and
+# the scripts and namespaces the step gate-tests declares, not the tree's contents (review 077).
+# needs: exe (the planner and stage 0 tools host)
 set -u
 root=$(cd "$(dirname "$0")/../.." && pwd)
+tracer=$(sed -n 's/^TracerPid:[[:space:]]*//p' /proc/self/status)
+if [ "${tracer:-0}" != 0 ] && [ -z "${AUDITED_TEST_ASSUME_UNTRACED:-}" ]; then
+  echo "already traced by pid $tracer: a tracer cannot be traced again"; exit 77
+fi
 : "${ARBACE_HOST_EXE:?set ARBACE_HOST_EXE to stage 0 (a tool must not build one here)}"
+mkdir -p "${TMPDIR:-$root/.tmp/tmp}"
 t=$(mktemp -d "${TMPDIR:-$root/.tmp/tmp}/gate-audited-test.XXXXXX") || exit 2
 trap 'rm -rf "$t"' EXIT
 n=0 bad=0
@@ -14,8 +24,7 @@ no() { n=$((n + 1)); bad=$((bad + 1)); echo "FAIL $*"; }
 
 # the plan of the table (as bin/lib/gate-run.bash's plan_inputs makes its inputs, the hosts' identities
 # zeros), its material per step in $t/plan/NAME.inputs
-(cd "$root" && find . \( -path ./.git -o -path ./.tmp -o -path ./target -o -path ./.claude \) -prune -o -type f -printf '%P\n' \
-   | LC_ALL=C sort | xargs -d '\n' sha256sum) > "$t/files.sha256"
+git -C "$root" ls-files | LC_ALL=C sort | sed 's|^|0000000000000000000000000000000000000000000000000000000000000000  |' > "$t/files.sha256"
 z=$(printf '0%.0s' $(seq 64))
 printf '{:gate "%s" :javac "%s" :prog-units "none" :prog-rest "%s" :javac-prog-units "none" :javac-prog-rest "%s" :stage0 "%s" :frozen "%s" :jdk "%s" :go "%s"}\n' \
   $z $z $z $z $z $z $z $z > "$t/hosts.edn"

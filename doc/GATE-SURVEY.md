@@ -1910,7 +1910,10 @@ From the VM's review of main's `07194e71` (`.tmp/mac-queue/reports/070-review-ma
 - **GTS172 what `--record` does with an audited judgment** (finding 4). Built: refused, exit 2. Options: (a) as built;
   (b) record, keeping the recorded row for a held result; (c) record the held tests as `:timeout` (main's behaviour).
   *Recommended: (a)*: the gate never records, and (b) needs `report` to know what the file held before.
-- **GTS173 the two test scripts** (`test/java/audited-test.bash`, `test/gate/audited-test.bash`). Neither is a gate step
-  (no `*-test.bash` exists yet to follow). Options: (a) as built, run by hand, seconds; (b) steps of the essential gate
-  (`:never-loads [arbace.j2g]`, stage 0 only); (c) a Makefile target (`make audited-test`) beside `check-makefile`.
-  *Recommended: (b)*, once the branch has merged, as every rule of the judgment should be tested where it can regress.
+- **GTS173 the two test scripts** (`test/java/audited-test.bash`, `test/gate/audited-test.bash`, and
+  `test/gate/audited-test-test.bash`, review 077). On `audit-041` (GTS114 (a), decided) `bin/gate-tests` runs every
+  `test/gate/*-test.bash` in the essential step gate-tests, so the gate ones are run there: they follow its
+  conventions (`# needs: exe`, status 77 when already traced, file names from `git ls-files`, only declared inputs);
+  `audited-test-test.bash` checks the first two by trace. `test/java/audited-test.bash` is outside `test/gate/` and is
+  run by hand. Options for the Java one: (a) by hand, seconds; (b) a step of the essential gate (`:never-loads
+  [arbace.j2g]`, stage 0 only); (c) a Makefile target. *Recommended: (b)*, after the merge with audit-041.
