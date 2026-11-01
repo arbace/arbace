@@ -2312,6 +2312,7 @@ has its teeth.
   `qsort`/`bsearch`/`pthread_once`, a trampoline that stops calling the user's function once the flag is set and re-raises after the native call returns (the
   exception reaches the caller, as with g++'s unwinding through libc frames built with unwind tables). *Recommended: (b)* now (cheap, the terminate path is
   g++'s), (c) when the heavy list's whole testsuite shows a `call_once` or comparator case.
+  **Decided (the user, 2026-11-01): (b).**
 - **CP161 16-byte atomics.** (Corrected by report 043's F2, checked on the amd64 host, gcc 15.2.0: the first version of this entry said the original links libatomic
   through libstdc++'s dependencies and offered `-mcx16` as inline `cmpxchg16b`; neither holds. `readelf -d /usr/lib/libstdc++.so.6` lists only musl and `libgcc_s`, and
   gcc `-O0 -mcx16 -S` of `__atomic_load_n` on `unsigned __int128` still calls `__atomic_load_16@PLT`, as without the flag. Clang's original calls
@@ -2321,19 +2322,24 @@ has its teeth.
   test is "original fails"); (b) `-latomic` in **both** link lines of `bin/cppi` (`LIBS` for the original's and g++'s build, `LOW_LIBS` for the lowered program), with
   the rename of F1 (built); (c) (b) for the lowered program only (the test then "passes" lowered and fails in the original: the judge would call it a mismatch).
   *Recommended: (b)*. `-mcx16` is dropped: it changes nothing for gcc's `__atomic_*`.
+  **Decided (the user, 2026-11-01): (b).**
 - **CP162 The atomics' own negative check.** The `atomics` selftest's "before" run showed the race (a short counter); a run of plain atomics could pass by luck on
   an idle host. Options: (a) as built (the structural half, `atomics.ll`'s lowering, fails deterministically without the builtins; the sample is the behaviour);
   (b) a scratch check like CP110 (b)'s with the atomics plain, N runs required to fail. *Recommended: (a)*: the structural test cannot pass by luck.
+  **Decided (the user, 2026-11-01): (a).**
 - **CP163 Records of the other round-trip corpora.** `c-c++-common-every-10`, `libstdcxx-testsuite-every-40`, `hotspot-x86-linux` and the samples have no results file
   (not held; said on stderr), and the samples' list has no key (`#part samples`). Options: (a) as built; (b) record c-c++-common and libstdc++ every 40th with their
   next runs, the samples under a key of their own (`bin/repr-cpp roundtrip` given `--corpus samples`, or `bin/cppi list samples` writing `#list samples-all` for the
   round trip), HotSpot with the next run that has jdk26u (CP140 (b)). *Recommended: (b)*.
+  **Decided (the user, 2026-11-01): (b).** It waits for those corpora's next runs (the records are made then).
 - **CP164 Improvements in the record.** A recorded `:known` or `:oracle-rejects` that now passes is a count (`:improvements`), so the record can go stale in the good
   direction. Options: (a) a count (as built); (b) a failure until the record is written again (the record stays exact, as `--record-oracle`'s stale names would
   under CP152 (b)); (c) (a) in a sample run, (b) in a whole-corpus run. *Recommended: (c)*, with CP152 (b)'s whole-run key.
+  **Decided (the user, 2026-11-01): (c).**
 - **CP165 The record's verdicts and the known classes.** The results file keeps the verdict, not the class: a known file moving from one class to another (the
   first failing level changing) is not seen by the record, only by the known file's fit. Options: (a) as built; (b) record `:known CLASS` (`[:known :ast-differs]`),
   a change of class failing. *Recommended: (b)*, small, with CP164.
+  **Decided (the user, 2026-11-01): (b).**
 
 ### Rule slips, shipped files, scratch
 
@@ -2386,17 +2392,22 @@ results file; their `bin/repr-cpp roundtrip` runs now stop on F6's rule unless p
 - **CP170 The pending set.** F6's `pending.edn` names the corpora whose results are to be made. Options: (a) as built (an explicit, reviewable list); (b) record
   `c-c++-common-every-10` and `libstdcxx-testsuite-every-40` at their next whole runs and empty the set (CP163 (b)); (c) drop the set and fail until recorded.
   *Recommended: (b)* with the next runs of those two corpora, then the set stays as the place for a new corpus' first run.
+  **Decided (the user, 2026-11-01): (b).** It waits for the next whole runs of those two corpora.
 - **CP171 Other names gcc owns.** F1 escapes `__atomic_*` and `__sync_*`. gcc treats every `__builtin_*` name and, with `-fno-builtin` off, the C library's names
   (`memcpy`, `printf`, `abs`) as builtins too; the lowering compiles with `-fno-builtin`, but an external named `__builtin_*` would still be read as a builtin.
   Options: (a) as built (no such external exists in the lists); (b) escape any external starting `__builtin_`; (c) an audit in `lower-check` that compiles the declarations of
   the runtime and the lists alone with `-Werror=builtin-declaration-mismatch` and names the first. *Recommended: (b)*, one line with F1's.
+  **Decided (the user, 2026-11-01): (b).**
 - **CP172 The class in the record.** F5 holds the verdict; a `:known` moving from one class to another is still seen only by the known file's fit (CP165). Options:
   (a) as built; (b) CP165 (b) (`[:known CLASS]`). *Recommended: (b)*, now that the verdict is held, the class is the remaining hole.
+  **Decided (the user, 2026-11-01): (b).**
 - **CP173 `fmax`/`fmin` and the other refused atomics (F7).** Options: (a) as built (refused, classed); (b) build `fmax`/`fmin` with `__builtin_fmaxf`/`fminf` in the
   compare-exchange loop when a test needs them; (c) (b) and `uinc_wrap`, `udec_wrap`, `usub_cond`, `usub_sat` as loops. *Recommended: (a)*: libstdc++ 15 has no
   user of them and clang writes them only for C's `__atomic_fetch_max` on floats.
+  **Decided (the user, 2026-11-01): (a).**
 - **CP174 A statement of the orderings' lattice.** `order-join` is small and tested with six pairs; the other nine pairs of the 15 clang writes into every `compare_exchange_*`
   are not in the selftest. Options: (a) as built; (b) all 15 pairs (every one legal: failure is `monotonic`, `acquire` or `seq_cst`) in `atomic-failure-order.ll`. *Recommended: (b)*, cheap.
+  **Decided (the user, 2026-11-01): (b).**
 
 ### Rule slips, shipped files, scratch
 
