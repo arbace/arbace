@@ -4,7 +4,11 @@
 #   bin/alpine-env world       the line: /etc/apk/world less every entry another entry's
 #                              dependencies already install (from /lib/apk/db/installed)
 #   bin/alpine-env check       the line's closure, with install_if, equals the installed set
-#                              (offline, from the database)
+#                              (offline, from the database); a dependency with several installed
+#                              providers (cmd:awk, java-jdk) counts as met only by one the line's
+#                              closure holds, so a line that misses it fails
+#                              (ALPINE_ENV_DB, ALPINE_ENV_WORLD: other files than /lib/apk/db/installed
+#                              and /etc/apk/world, for test/alpine-env/test.bash)
 #   bin/alpine-env simulate    `apk add --simulate` of the line into an empty root in .tmp/
 #                              (the repositories of /etc/apk/repositories, network): the
 #                              packages it would install against the installed ones, by name
@@ -20,7 +24,8 @@ min_world() {
 import re, sys
 mode = sys.argv[1]
 pk, cur = {}, {}
-for line in open('/lib/apk/db/installed'):
+import os
+for line in open(os.environ.get('ALPINE_ENV_DB', '/lib/apk/db/installed')):
     line = line.rstrip('\n')
     if not line:
         if cur: pk[cur['P']] = cur
@@ -35,15 +40,27 @@ for p, c in pk.items():
     prov.setdefault(p, set()).add(p)
     for t in c.get('p', '').split(): prov.setdefault(nm(t), set()).add(p)
 def deps(p):
-    return set().union(*[prov.get(nm(t), set()) for t in pk[p].get('D', '').split() if not t.startswith('!')])
+    # the dependencies apk resolves to one package: a name with several installed providers (cmd:awk by busybox
+    # and gawk, java-jdk by several JDKs) is apk's choice, not an edge; see ambiguous()
+    return set().union(*[prov.get(nm(t), set()) for t in pk[p].get('D', '').split()
+                         if not t.startswith('!') and len(prov.get(nm(t), ())) == 1])
 def closure(roots):
     seen, st = set(), list(roots)
     while st:
         x = st.pop()
         if x not in seen: seen.add(x); st.extend(deps(x))
     return seen
+def ambiguous(seen):
+    # the dependency names of SEEN with several installed providers and none of them in SEEN: apk would pick one
+    # (a provider already present satisfies the name), so a line that names none of them misses a package
+    out = {}
+    for x in seen:
+        for t in pk[x].get('D', '').split():
+            ps = prov.get(nm(t), set())
+            if not t.startswith('!') and len(ps) > 1 and not ps & seen: out[nm(t)] = sorted(ps)
+    return out
 def provs(names): return set().union(*[prov[nm(w)] for w in names])
-world = open('/etc/apk/world').read().split()
+world = open(os.environ.get('ALPINE_ENV_WORLD', '/etc/apk/world')).read().split()
 missing = [w for w in world if not prov.get(nm(w))]
 if missing: sys.exit('alpine-env: world entries not installed: ' + ' '.join(missing))
 keep = [w for w in world if not prov[nm(w)] <= closure(provs([o for o in world if o != w]))]
@@ -60,9 +77,11 @@ while True:  # install_if, to a fixpoint
 print(f'world {len(world)} entries, the line {len(keep)}; its closure {len(closure(provs(keep)))}'
       f' packages, with install_if {len(have)}; installed {len(pk)}')
 extra, short = sorted(have - set(pk)), sorted(set(pk) - have)
+amb = ambiguous(have)
 if extra: print('  not installed: ' + ' '.join(extra))
 if short: print('  not reached: ' + ' '.join(short))
-sys.exit(0 if ok and not extra and not short else 1)
+for n, ps in sorted(amb.items()): print(f'  {n} has several providers and the line names none: ' + ' '.join(ps))
+sys.exit(0 if ok and not extra and not short and not amb else 1)
 EOF
 }
 
