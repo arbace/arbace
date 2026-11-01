@@ -1917,3 +1917,14 @@ stubbed `bin/repr-java` (`test/repr/java/judge-*-test.bash`), the records below 
   Also not built: finding 8's `rm -rf "$work/$c"` at the start of each front-check corpus (stale module trees summed and
   judged) and per-corpus attr/split/nojavac tables; and `REPR_JAVA_VENDOR_READ` as a step's `:env` (jdk.bash is no step,
   GTS-035 #4).
+
+## Proposed (2026-11-01): GTS137 and a note on GTS132 (review 067 of audit-061; none decided)
+
+- **GTS132 as now built:** its option (b) is built: a corpus with no recorded diagnostics count fails (tests and mutants
+  until `parse-check --corpus tests,mutants --record` runs on the main host with the javac tool; not recorded here).
+- **GTS137 `check --jdk` in no gate step** (035 #4; the fallbacks ceiling of audit 061 #1 only runs by hand). Options:
+  (a) a `--full` step `repr-java-jdk`, `:heavy true`, `:env ["JDK_SRC" "JDK" "REPR_JAVA_VENDOR_READ"]`
+  (`REPR_*` is dropped by 029's scrub, so `gate_keep_env` would need the last), after measuring its peak memory and
+  time on the main host; (b) leave it by hand (`make repr-java-jdk`); (c) fold it into `repr-java-nojavac`'s jdk
+  corpus. *Recommended: (a), after the first real run records `jdk26u-fallbacks.edn`.* Not added: the step's `:mem-gib`
+  and `:summary` cannot be measured here.
