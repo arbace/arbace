@@ -2429,3 +2429,20 @@ results file; their `bin/repr-cpp roundtrip` runs now stop on F6's rule unless p
 - Shipped: `arbace/cpp/lower.ae`, `arbace/repr/cpp/rtcheck.ae`, `bin/repr-cpp` and `bin/lib/repr-cpp/roundtrip` (`--replace-results`, usage), `test/cpp/selftest/{atomic-libcalls,atomic-failure-order,atomic-volatile-generic,results-nonpass,results-hold}.{sh,ll}`,
   `test/cpp/selftest/oracle-record.sh`, `test/repr/cpp/roundtrip-results/{pending.edn (new),gxx-dg-every-10.edn,gxx-old-deja-every-10.edn (header)}`, `doc/cpp/LLVM.md`, `doc/cpp/CPP-SURVEY.md` (CP161 and this section).
 - Scratch: `.tmp/rt43/` (the round trips' work directories), `.tmp/lc-sr`, `.tmp/lc-lt`, `.tmp/cppi/runtime` (at the key), `.tmp/cpp-selftest/`.
+
+## Decided (2026-11-01, the user): CP140-CP143, CP150-CP154
+
+From main's doc/JOURNAL.md, "2026-11-01: the user's decisions after the tag" (VM report 103's sheet 3, the survey's
+picks).
+- **CP140 (b):** Samples and HotSpot's tenth recorded in `roundtrip-oracle.edn` with the next runs that have jdk26u
+  (`--record-oracle`).
+- **CP141 (b):** a stale record a failure in a whole-corpus run, a count in a sample run.
+- **CP142 (b):** a sample file with qualified, templated and parenthesized typedef names, `new (A)` handled by stripping
+  the parentheses.
+- **CP143 (a):** the dry mode's `# needs-host` marker as built.
+- **CP150 (a):** the shapes of `new` the text cannot give stay a gap, as built.
+- **CP151 (b):** grep the gcc tree for `new T[]` and the macro sizes and add the files to `new-implicit.cpp`.
+- **CP152 (b):** a recorded name missing from a whole-corpus run a failure (the `-all` key), a count in a sample run.
+- **CP153 (a):** the dry mode's exit 3 as built.
+- **CP154 (b), once CP140 is recorded:** a missing list key in `bin/repr-cpp roundtrip` an error unless
+  `--record-oracle` or `--no-oracle` is given.
