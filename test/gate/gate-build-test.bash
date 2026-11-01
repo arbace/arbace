@@ -52,4 +52,25 @@ for c in "$ARBACE_GATE_EXES/$OTHER" "$ARBACE_GATE_EXES/javac-$OTHER" "$ARBACE_GA
   else bad "a miss removed or accepted $c (status $(status))"; fi
 done
 
+# a failed build leaves the directory it was to replace (the key file is stale), no half-made one beside it
+echo stale > "$ARBACE_GATE_EXES/$K20/key"
+run
+if [ "$(status)" != 0 ] && grep -q "building the executables" "$T/out" && [ -x "$ARBACE_GATE_EXES/$K20/amd64/arbace" ] && ! ls "$ARBACE_GATE_EXES" | grep -q '\.tmp\.'; then ok "a failed build kept the old directory"
+else bad "a failed build: status $(status), $(ls "$ARBACE_GATE_EXES" | tr '\n' ' ')"; fi
+
+# a successful miss puts the new directory in place whole (GTS126): while it is made, the directory still
+# holds the old one. The builds are stubbed in the tree's copy of the script (functions defined before its
+# dispatch); gate_build is the real one. arbace_version is called after the copying and before the swap.
+sed -i '/^case \${1:-} in$/i\
+build() { mkdir -p "$dir/amd64/x" "$dir/aot" "$dir/j2g" "$dir/j2g-tests"; echo new > "$dir/amd64/arbace"; echo new > "$dir/amd64/arbace-tests"; : > "$dir/aot.key"; : > "$dir/aot.runtime"; }\
+build_tests() { :; }\
+arbace_version() { ls "$cache/amd64" > "'"$T"'/during.ls" 2>&1; ls "$cache" >> "'"$T"'/during.ls" 2>&1; echo version; }' "$r/bin/arbace-go"
+KEY=$("$r/bin/arbace-go" --gate-key 2>"$T/key.err"); K20=${KEY:0:20} # the script is another file now
+mkdir_exe "$ARBACE_GATE_EXES/$K20" stale
+echo old > "$ARBACE_GATE_EXES/$K20/amd64/old-marker"; echo stale > "$ARBACE_GATE_EXES/$K20/key"
+run
+if [ "$(status)" = 0 ] && grep -q old-marker "$T/during.ls" && ! grep -q version.edn "$T/during.ls" \
+   && [ "$(cat "$ARBACE_GATE_EXES/$K20/key")" = "$KEY" ] && [ ! -e "$ARBACE_GATE_EXES/$K20/amd64/old-marker" ] \
+   && ! ls "$ARBACE_GATE_EXES" | grep -q '\.\(tmp\|old\)\.'; then ok "a miss swapped the whole directory in"
+else bad "a miss: status $(status); during: $(tr '\n' ' ' < "$T/during.ls"); $(tail -3 "$T/out")"; fi
 exit $fail
