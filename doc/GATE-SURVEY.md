@@ -2539,6 +2539,36 @@ From GT7's reruns 7 and 8 (doc/JOURNAL.md, 2026-11-01). Decided by the user:
   limits. At the merge window's rekey (`bin/java-check` is in every Java step's key).
   Redo after the audits (the user, 2026-11-01, main's journal of that day): `mac/034-gts102` is redone on the merged
   audit-075 and audit-070, the decision kept.
+  **GTS102 kept, redone after the audits** (a VM's branch `mac/115-gts102`, from main-merge; light: nothing run). The
+  limits of `mac/034-gts102` (4bd65bc9), rebuilt on the merged rules; how each composes:
+  - *The limit.* `test/java/timeouts.txt` (`JTREG-NAME SECONDS`, `#` comments), read by `limit.bash`'s `program_tmo` as
+    goi's file is. `bin/java-check`'s `test_limit` takes the larger of the line and the check's limit (20, or
+    `--timeout`): a line raises, never lowers (goi's line replaces `-t`; `bin/gate` passes no `--timeout`, so the two
+    rules agree on every gate run). `run_actions`, the one `limited` call, runs each action at it, so every level
+    that runs a program has it: interp, compiled, `--essential`, `--essential-compiled`, `again`'s second run. The
+    caps are `limited TMO`'s: 5xTMO s of CPU, 20xTMO s of wall (at 60: 300 s and 1200 s).
+  - *The second chance.* `attempt_limits` takes the test's limit: the in-run second attempt at twice it (60 then 120;
+    kept, GTS180 (d), its attempts in `timeout-attempts.tsv` with the test's limit); the reason "timeout TMO s, then
+    2xTMO s", an unlisted test's unchanged byte for byte. `--essential-compiled`'s quiet retry (one attempt,
+    `JAVA_CHECK_ONCE`, review 075 finding 4) runs at twice the test's limit (`tmo_scale=2`), not at twice the
+    global 20 (which would have given a listed test 40 < 60).
+  - *The audited hold.* `:audit-timeout` and its `:audited` rule stay (GTS180 (a): removed only when a clean run
+    passes with no audited timeout); only its `:why` names the file. A listed test that still times out under the
+    audit at its own limit is held as any other (an interp timeout, compiled passing, in a marked run), its reason
+    "timeout 60 s, then 120 s"; the rule needs no list, so nothing in it names the file.
+  - *java-held.* It reruns the held ids with `bin/java-check --levels interp --only ...`, untraced, through the same
+    `run_actions`: a listed held test reruns at its line, as the everyday gate runs it (its limit is the test's
+    everywhere, not an audit-only allowance).
+  - *GTS180 (a)'s bumps.* The 14 lines (the 13 of rerun 7 and t03686, rerun 8's 14th) are audit-only bumps at the
+    floor, 60: no CPU time of theirs is recorded. After the next clean run each is lowered so that its CPU limit
+    (5 times the line) is its quiet CPU time times the usual margin; a line at or below 20 is removed (it would
+    change nothing).
+  - *GTS180 (b).* nethttp's CPU 20 s and wall 90 s (or 120 and 480) are goi's check's, not java-check's: no interaction.
+  - *GTS180 (c), (e).* The JDK reference's limit (`jdk_run_limit`, the test's jtreg timeout) and 137 read as a timeout
+    are untouched.
+  - *Keys.* `:java-run` leaves the file out and the steps that run programs name it (java-check, java-compiled,
+    java-interp, java-compiled-full, java-held), so a lowered line reruns no read, classes, print or diagnostics level.
+  The tests near the limit lose nothing else: levels-known.edn holds none of the 14 since audit-070.
 - **GTS103** `bin/gate --clean --only` refuses when a run the record cites has no logs, instead of counting its steps
   as changed (rerun 8's first attempt selected 53 unchanged steps after its logs were deleted).
 
