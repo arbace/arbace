@@ -78,15 +78,21 @@ cmd_suite_expect_build() {
 
 # suite_expect_one FILE (relative to testsuite/): ocamltest's expect action: the tool on the file, then with -principal
 # on its correction; pass when both succeed and the final correction equals the file. "FILE<TAB>pass|diff|error<TAB>NOTE"
+# GTS81 (a): a negative control's line carries @CTL=ID=REFERENCE in its flags: the subject run as above, its final correction
+# compared with REFERENCE's text (relative to testsuite/) instead of its own, the row's first field the control's ID.
 suite_expect_one() {
-  local f=$1 flags=$2
-  local d=$EXPECT_DIR/run/$f n; n=$(basename "$f")
+  local f=$1 flags=$2 ctl= cref= lab
+  case $flags in
+    *@CTL=*) ctl=${flags##*@CTL=}; ctl=${ctl%% *}; flags=${flags//@CTL=$ctl/}; cref=${ctl#*=}; ctl=${ctl%%=*} ;;
+  esac
+  lab=${ctl:-$f}
+  local d=$EXPECT_DIR/run/${ctl:-$f} n; n=$(basename "$f")
   rm -rf "$d"; mkdir -p "$d"
   find "$T_ROOT/$(dirname "$f")" -maxdepth 1 -type f ! -name '*.reference' -exec cp {} "$d/" \;
   local st=0
   case $flags in
     *@SKIP=*) local why=${flags##*@SKIP=}; why=${why%% *}
-      printf '%s\tskip\t%s\n' "$f" "$why"; rm -rf "$d"; return ;;
+      printf '%s\tskip\t%s\n' "$lab" "$why"; rm -rf "$d"; return ;;
   esac
   case $flags in
     *@ORP=*) local orp=${flags##*@ORP=}; orp=${orp%% *}; export OCAMLRUNPARAM=$orp; flags=${flags//@ORP=$orp/} ;;
@@ -96,11 +102,35 @@ suite_expect_one() {
   local root_flag="-repo-root $EXPECT_DIR/repo"
   case $flags in *+compiler-libs*) root_flag="" ;; esac
   (cd "$d" && timeout 120 ocamlrun "$EXPECT_DIR/expect.byte" $root_flag $flags "$n" > "$d/e1.out" 2>&1) || st=$?
-  if [ $st != 0 ]; then printf '%s\terror\texpect exit %s: %s\n' "$f" "$st" "$(head -c 160 "$d/e1.out" | tr '\n\t' '  ')"; rm -rf "$d"; return; fi
+  if [ $st != 0 ]; then printf '%s\terror\texpect exit %s: %s\n' "$lab" "$st" "$(head -c 160 "$d/e1.out" | tr '\n\t' '  ')"; rm -rf "$d"; return; fi
   (cd "$d" && timeout 120 ocamlrun "$EXPECT_DIR/expect.byte" $root_flag $flags -principal "$n.corrected" > "$d/e2.out" 2>&1) || st=$?
-  if [ $st != 0 ]; then printf '%s\terror\texpect -principal exit %s: %s\n' "$f" "$st" "$(head -c 160 "$d/e2.out" | tr '\n\t' '  ')"; rm -rf "$d"; return; fi
-  if cmp -s "$d/$n" "$d/$n.corrected.corrected"; then printf '%s\tpass\t\n' "$f"; else printf '%s\tdiff\t%s\n' "$f" "$(diff "$d/$n" "$d/$n.corrected.corrected" | head -4 | tr '\n\t' '  ' | head -c 200)"; fi
+  if [ $st != 0 ]; then printf '%s\terror\texpect -principal exit %s: %s\n' "$lab" "$st" "$(head -c 160 "$d/e2.out" | tr '\n\t' '  ')"; rm -rf "$d"; return; fi
+  local want=$d/$n; [ -n "$ctl" ] && want=$T_ROOT/$cref
+  if cmp -s "$want" "$d/$n.corrected.corrected"; then printf '%s\tpass\t\n' "$lab"; else printf '%s\tdiff\t%s\n' "$lab" "$(diff "$want" "$d/$n.corrected.corrected" | head -4 | tr '\n\t' '  ' | head -c 200)"; fi
   rm -rf "$d"
+}
+
+# expect_controls LIST: GTS81 (a): the expect controls of test/ocaml/controls.txt whose subject LIST holds, each a line of
+# LIST's shape with the subject's flags and @CTL=ID=REFERENCE (suite_expect_one); the others printed as left (stderr)
+expect_controls() {
+  awk -F'\t' 'FNR == NR { fl[$1] = $2; next }
+    /^#/ || NF == 0 { next }
+    { split($0, w, /[ \t]+/); if (w[1] != "expect") next
+      if (w[3] in fl) print w[3] "\t" fl[w[3]] " @CTL=" w[2] "=" w[4]
+      else print "oi: expect: control " w[2] ": left (" w[3] " not selected)" > "/dev/stderr" }' "$1" "$root/test/ocaml/controls.txt"
+}
+
+# expect_controls_judged LIST ROWS: each selected control (LIST's @CTL= lines) against its row of ROWS (FILE RESULT NOTE):
+# diff, as a control must; pass, error, skip or no row fail (status 1)
+expect_controls_judged() {
+  awk -F'\t' 'FNR == NR { if (match($2, /@CTL=[^ ]*/)) { c = substr($2, RSTART + 5, RLENGTH - 5); id = c; sub(/=.*/, "", id); want[id] = $1 " against " substr(c, length(id) + 2); n++ } ; next }
+    ($1 in want) { got[$1] = $2; note[$1] = $3 }
+    END { bad = 0
+      for (id in want) {
+        if (got[id] == "diff") print "oi: expect: control " id " (" want[id] "): differs, as a control must (GTS81 (a))"
+        else if (got[id] == "pass") { print "oi: expect: control passed: " id " (" want[id] "): the comparison passes what differs"; bad = 1 }
+        else { print "oi: expect: control not judged: " id " (" want[id] "): " (id in got ? got[id] " " note[id] : "no row"); bad = 1 } }
+      exit bad }' "$1" "$2"
 }
 
 cmd_suite_expect() {
@@ -136,8 +166,14 @@ cmd_suite_expect() {
   [ -s "$S/expect.list" ] || die "expect: no test selected${ONLY:+ by --only $ONLY}"
   # the record is read by a run that is not recording, whole or not, before the run (re-review 042's finding 6)
   [ "${RECORD:-0}" = 1 ] || [ -r "$EXPECT_RESULTS" ] || die "expect: the record $EXPECT_RESULTS cannot be read"
-  tr '\n' '\0' < "$S/expect.list" | xargs -r -0 -n 1 -P "${JOBS:-3}" bash -c 't=$(printf "\t"); suite_expect_one "${0%%"$t"*}" "${0#*"$t"}"' > "$out.new"
-  LC_ALL=C sort "$out.new" > "$out"; rm -f "$out.new"
+  # GTS81 (a): the controls of the selected subjects run beside the tests, their rows split off before anything is written
+  expect_controls "$S/expect.list" > "$S/expect.controls"
+  cat "$S/expect.list" "$S/expect.controls" | tr '\n' '\0' | xargs -r -0 -n 1 -P "${JOBS:-3}" bash -c 't=$(printf "\t"); suite_expect_one "${0%%"$t"*}" "${0#*"$t"}"' > "$out.new"
+  LC_ALL=C sort "$out.new" > "$out.all"; rm -f "$out.new"
+  grep -v '^_control/' "$out.all" > "$out" || true
+  local cst=0; expect_controls_judged "$S/expect.controls" "$out.all" || cst=$?
+  rm -f "$out.all"
+  [ "$cst" = 0 ] || die "expect: a negative control failed (test/ocaml/controls.txt; GTS81 (a)): nothing recorded"
   { echo ";; The expect action's host runs (bin/oi suite expect --record; doc/ocaml/OCAML-SURVEY.md, \"As built: OC102, OC104, OC105 (b), OC106 (b)\"): testsuite/tools/expect.ml"
     echo ";; built against the host's compiler-libs, linked whole, and run as ocamltest runs it (-repo-root the tree's stdlib), on the file, then with -principal on the correction:"
     echo ";; [FILE RESULT NOTE], RESULT pass (the final correction equals the file), diff, error, skip (the header's constraint or build sequence). Read with the Clojure reader."
