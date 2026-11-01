@@ -209,7 +209,6 @@
         cfg (host/config h fc base)
         budget (* 1000000000 (Long/parseLong (or (System/getenv "REPR_C_READ_BUDGET") "120")))
         rn (or (:read e) (:name e))
-        base-name (let [n (:name e)] (subs n (inc (.lastIndexOf ^String n "/"))))
         rd (binding [parse/*deadline* (+ (System/nanoTime) budget)
                      parse/*recover* (if (= :errors (:pedantic fc)) :pedantic true)]
              (try (if (= action :preprocess)
@@ -231,28 +230,36 @@
                   (catch Throwable x (if (:deadline (ex-data x)) {:timeout true} {:crash (str x)}))))
         ;; the testsuite's root dropped from the messages, so a record made in any checkout is the same (review 006, finding 11)
         root (str base "/")
+        ;; CS212 (R4): the main file is the whole relative path (the unit's name, or the path it was read as, root dropped), not
+        ;; a file whose name ends with the main's base name (x-embed-1.c against embed-1.c)
+        main-names (hash-set (:name e) (str/replace (str rn) root ""))
+        main-file? (fn [f] (or (nil? f) (contains? main-names f)))
         tally (fn [status errs msg]
                 (let [errs (map #(str/replace (str %) root "") errs)
                       ls (keep error-line errs)
-                      mine (filter (fn [[f _]] (or (nil? f) (.endsWith ^String f base-name))) ls)]
+                      mine (filter (fn [[f _]] (main-file? f)) ls)]
                   {:status status
                    :lines (into (sorted-map) (frequencies (map second mine)))
                    ;; each main-file line's first error, for the verdict's message (review 006, finding 11)
                    ;; CS193 (a): every main-file error's text by line (at most 8 a line), for the message count
                    :all-texts (into (sorted-map) (for [[l es] (group-by (comp second error-line)
-                                                                        (filter #(when-let [[f _] (error-line %)] (or (nil? f) (.endsWith ^String f base-name))) errs))]
+                                                                        (filter #(when-let [[f _] (error-line %)] (main-file? f)) errs))]
                                                    [l (vec (for [e (take 8 es)] (let [t (one-line e)] (subs t 0 (min 160 (count t))))))]))
                    :texts (into (sorted-map) (for [[l es] (group-by (comp second error-line)
-                                                                    (filter #(when-let [[f _] (error-line %)] (or (nil? f) (.endsWith ^String f base-name))) errs))]
+                                                                    (filter #(when-let [[f _] (error-line %)] (main-file? f)) errs))]
                                                [l (let [t (one-line (first es))] (subs t 0 (min 160 (count t))))]))
                    :other (- (count ls) (count mine))
                    :unlocated (- (count errs) (count ls))
                    ;; the first error not located in the main file (another file's, or one with no line)
-                   :stray (one-line (or (first (remove (fn [e] (when-let [[f _] (error-line e)] (or (nil? f) (.endsWith ^String f base-name)))) errs)) ""))
+                   :stray (one-line (or (first (remove (fn [e] (when-let [[f _] (error-line e)] (main-file? f))) errs)) ""))
                    :message (one-line (or (first errs) msg ""))}))]
     (cond
       (:timeout rd) {:status :timeout :lines {} :message "the evaluated read's budget spent"}
       (:crash rd) {:status :crash :lines {} :message (str/replace (one-line (:crash rd)) root "")}
+      ;; CS212 (R7): the parser's panic (read-c's :class :panic, "panic: ...") is unlocated; with a line-0 directive it would count
+      ;; as the one error somewhere, so a crashed read could pass: it is a crash, never an expected error
+      (some #(str/starts-with? (str %) "panic:") (:error rd))
+      {:status :crash :lines {} :message (str/replace (one-line (first (filter #(str/starts-with? (str %) "panic:") (:error rd)))) root "")}
       (:error rd) (tally :read-error (:error rd) "")
       (:refused rd) {:status :refused :lines {} :message (str/replace (one-line (:message rd)) root "")}
       (:pp-only rd) {:status :ok :lines {} :other 0 :unlocated 0 :message ""}
@@ -275,7 +282,7 @@
    (fn [a l]
      (if-let [[_ f ln kind] (re-find #"^(.*?):(\d+):(?:\d+:)? (fatal error|error|warning|note): " l)]
        (let [k (case kind "fatal error" :error "error" :error "warning" :warning "note" :note)
-             k (if (and (= k :error) (not (.endsWith ^String f base-name))) :other k)]
+             k (if (and (= k :error) (not= f base-name)) :other k)]
          (cond-> (if (= k :other)
                    (update a :other (fnil inc 0))
                    (update-in a [k (Long/parseLong ln)] (fnil inc 0)))
