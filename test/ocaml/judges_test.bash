@@ -89,6 +89,13 @@ out=$(judge_aot judge "$q/check.tsv" "$q/corpus.tsv" "$q/refs.edn" "$q/oi.tsv" "
 out=$(cd "$root" && bin/oi aot-cpu); expect "aot: the rerun's CPU limit is the program's and the library's load" 0 '^140 560$' "$out" $?
 out=$(cd "$root" && OI_TIMEOUT=60 O2J_LOAD_ALLOWANCE=5 bin/oi aot-cpu); expect "aot: the load allowance is a variable" 0 '^65 260$' "$out" $?
 
+# re-review 030's finding 7 (a): oi's own level runs a program under the CPU limit (limited_cpu), as the AOT level's rerun: a program that needs
+# more than OI_TIMEOUT seconds of CPU is a "timeout 1s" row, and the limit is the project's (ARBACE_CPU_LOG records the run)
+rm -f "$W/cpu.log"
+out=$(cd "$root" && OI_TIMEOUT=1 ARBACE_CPU_LOG=$W/cpu.log bin/oi check --only 'misc/taku' 2>&1; cut -f2,6 .tmp/oi/check.tsv; cut -f1 "$W/cpu.log")
+expect "oi: a program over the CPU limit is a timeout row" 0 '124.timeout 1s' "$out" $?
+echo "$out" | grep -Eq '^(137|152)$' || { echo "FAIL oi: the program did not run under limited_cpu (no line in ARBACE_CPU_LOG)"; bad=1; }
+
 # finding 9: bin/oi suite expect is a check: the run against the record, the committed record untouched without --record
 only='basic/patmatch_for_multiple'
 before=$(sha256sum "$root/test/ocaml/ref-expect.edn")
