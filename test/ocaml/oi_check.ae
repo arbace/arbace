@@ -9,6 +9,7 @@
 ;;       RESULTS.edn and fails on a change, record rewrites it (-only: a subset, merged)
 ;;   divergences RESULTS.edn CLASSES.edn
 ;;       the recorded results against the classes alone
+;;   the negative controls (GTS81 (a)): test/ocaml/controls.txt's judge lines of RESULTS.edn (controls-ok)
 (require '[arbace.string :as str])
 
 (defn tsv [path]
@@ -122,6 +123,35 @@
     (println (str "oi: " (count (filter #(= "pass" (second %)) rows)) " pass, " (count unclassed) " failing (not in a class)"))
     (empty? unclassed)))
 
+;; GTS81 (a), queue 064: the negative controls of this results file (test/ocaml/controls.txt beside it, its lines
+;; "judge RESULTS-FILE ID SUBJECT REFERENCE"): the subject's run judged by result-of against the reference's reference run;
+;; it must fail. One that passes (the judge passes what differs) or whose reference has no reference run fails the judgment
+;; (before anything is recorded); one whose subject has no run (a selection) or no judgment of its own (a class, a dump, a
+;; refusal) is left. No control is a row of the results, the record or the counts.
+(defn controls-ok [^String results-edn corp rf runs]
+  (let [f (java.io.File. (str (.getParent (java.io.File. results-edn)) "/controls.txt"))
+        base (.getName (java.io.File. results-edn))
+        cs (when (.exists f)
+             (for [l (str/split-lines (slurp f))
+                   :let [w (str/split (str/trim l) #"\s+")]
+                   :when (and (= 5 (count w)) (= "judge" (first w)) (= base (second w)))]
+               (drop 2 w)))
+        vs (for [[id subject reference] cs]
+             (let [v (cond
+                       (not (contains? runs subject)) :left
+                       (nil? (get rf reference)) :not-judged
+                       :else (case (first (result-of subject (corp subject) (assoc rf subject (get rf reference)) runs))
+                               "pass" :passes
+                               "fail" :differs
+                               :left))]
+               (println (case v
+                          :differs (str "control " id " (" subject " against " reference "'s reference run): differs, as a control must (GTS81 (a))")
+                          :passes (str "control passed: " id " (" subject " against " reference "'s reference run): the judge passes what differs")
+                          :not-judged (str "control not judged: " id ": " reference " has no reference run")
+                          :left (str "control " id ": left (" subject " not run, or no judgment of its own)")))
+               v))]
+    (not-any? #{:passes :not-judged} (doall vs))))
+
 (defn judge [mode check-tsv corpus-tsv refs-edn results-edn classes-edn]
   (let [corp (corpus corpus-tsv)
         rf (refs refs-edn)
@@ -145,7 +175,8 @@
         ;; the recorded programs with no row in this run (a full run: the corpus no longer holds them)
         gone (if only? [] (let [have (set (map first rows))] (vec (remove have (map first old)))))
         cls (classes classes-edn)
-        ok (summary rows cls)]
+        ok (summary rows cls)
+        _ (when-not (controls-ok results-edn corp rf runs) (System/exit 1))]
     (doseq [[id r t s] rows]
       (when (= r "fail") nil))
     (if (str/starts-with? mode "record")
