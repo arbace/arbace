@@ -3814,3 +3814,104 @@ Rule slips: the CS210 (b) commit lacks the `Co-Authored-By` and `Claude-Session`
 roundtrip` with no arguments was started by mistake (it would have read every corpus) and ended at its first write into a closed pipe; a
 `judge-test` run was moved to the background by the tool's time limit while a command after it swapped files for a before-run, which
 briefly left old files in place (restored and re-verified). Nothing else known.
+
+## As built: re-review 031's fixes (2026-11-01)
+
+On the branch `c23-c7` (after `dd1402ec`), in the light tier. Report 031 (the VM's re-review of CS200-CS216 and 027's fixes, reasoned from
+the code, nothing run there) gave findings A to G. Each fix is a commit with a `bin/ci judge-test` test run against the code before it (it
+failed there) and after (it passes). The probes ran on this host: gcc 15.2.0 (Alpine, x86-64, **with** decimal floating point) and clang
+(x86-64), scratch in `.tmp/p/`.
+
+### F31.1 Per finding
+
+- **A, `_Float16` and `__bf16` rounded to their formats** (`f32079b3`). One helper, `round-to-format` (with `round-sig`), used by `conv-val` (a cast),
+  `lit-form` (a suffixed constant) and `binary`: `:float`/`:float32` to float as before, `:float16` to binary16 (11 bits, exponent -14..15,
+  subnormals, overflow to infinity), `:bf16` to bfloat16 (8 bits, float's exponent range). `constexpr-float-bad` judges a `_Float16` or
+  `__bf16` object like a float one (a value, or an integer beyond the significand, or beyond the range, is refused: probe, gcc and clang agree
+  on `2049`, `65520`, `257` for a bf16, `1e-8`, `0.1f` for `_Float16`). The probe `constexpr float a = 0.1f16;` (and the cast, `(__bf16)0.1`, `0.1f16 * 3`)
+  is accepted by gcc and clang, and now by the checker. **The missed error of 027 #8** (`constexpr double d = 0.1L;`, refused by gcc and clang) is
+  closed in the same commit: `lit-form` keeps a long double constant's exact value (`:ld`, its decimal rounded to x87's 64-bit significand,
+  `round-ldouble`) and a `double` object refuses it when it differs. Only a literal carries it (`-0.1L` and `0.1L + 0.2L` do not; they stay
+  unjudged). Test `constexpr-float16-and-long-double-fraction` (`test/c/judge/constexpr-float16.c`, 7 expected errors); before: the checker
+  refused lines 5, 6, 8, 9 (valid) and missed 21. A gcc quirk is *not* mirrored: gcc 15.2 refuses `constexpr _Float16 f = 0.1f16;` and
+  `constexpr __bf16 i = 0.1bf16;` ("not representable") though the value is the type's own; clang accepts the first. The checker accepts them.
+- **B, a read-error file's message verdict** (`ca64a6c6`, and `88349a27` for CS193's old assertion). `msg-mismatch` no longer skips the lines of
+  a `:read-error` file: the lines its read errors stand for are compared with the read error's text, a family of the table allowed. On the
+  recorded corpus nothing moves (no read-error pass has an unexplained line; the 139 lines are the same), so the survey's CS214 sentence about
+  R6 is now true. Test `read-error-cannot-stand-for-a-semantic-message` (the report's made-up case); before: nil, a pass.
+- **C, `gcc-agrees` and fatal errors** (`cef604ef`). `gcc-lines` counts the fatal errors that are not at a line of the main file (another
+  file's, or `cc1: fatal error:` with no line) in `:fatal-other`; `gcc-agrees` answers `[:differ ...]` for them unless a line-0 directive or
+  `dg-excess-errors` takes errors anywhere. Test: `fatal-error-at-an-expected-line` extended (a header's fatal, an unlocated one, and the
+  line-0 case); before: `:yes`. The corpus's disagreements are the same five files as before (the `no-dfp` tests, none a pass).
+- **D, a decimal constant of another type** (`de1db5a6`). The constant is rounded to its own type's digits (`round-dec`, half to even)
+  before `dec-fits?` judges it against the object's format: `constexpr _Decimal64 a = 1.00000000000000000DF;` (and a `_Decimal128` one, and
+  `1.2345678901234567890DF`) is accepted; `1.00000000000000000000DL` for a `_Decimal64` and `1.000000000DD` for a `_Decimal32` are still
+  refused. **Probed on gcc 15.2 x86-64**, which has DFP: the ten lines of `.tmp/p/d2.c` agree with the checker. Test: `constexpr-decimal-of-the-objects-type`
+  extended (`constexpr-decimal.c`, lines 16 and 17 added); before: the two valid lines were refused.
+- **E, the wording table** (`40992f3c`). A family may name `:files` and then applies to those files alone; `tag-conflict` (two files),
+  `incompatible-pointer` (five) and `static-assert-message` (one) are anchored (`^redefinition$`, `^message$`, the checker's pattern from its
+  line number to the end) and pinned. A `:wrong-reason` entry is `{:lines [...] :why "..."}` and an unexplained line outside its lines fails
+  as in any file (`message-verdict`). Test `wording-families-pinned`, and `message-as-verdict` checks the five entries have lines; before: the
+  families explained any file. The recorded corpus does not move (583 passes, 0 unexplained).
+- **F, `#pragma GCC system_header`** (`7ccbcf6c`). A unit's file is read when a pedwarn is judged (a `delay`, `*unit-info*`, no longer on
+  every check) and a header with that pragma is a system header. Test: `extension-lines-by-unit` extended (`ext-main-d.c`: no error with the
+  pragma; `ext-main-e.c`: the same header without it, one error; gcc agrees: 0 and 1). The text is scanned, so a pragma in an inactive `#if` counts
+  too (CS230). `-isystem` is not modelled (older, CS231).
+- **G, `declare-specs` qualifiers** (`dcf9caed`). The printer writes the qualifiers of `(second f)` before the words of `:c/bad-specs`. Test
+  `bad-specs-keep-qualifiers` (`const int bool;`, `volatile const char bool;` read and printed back); before: `int bool;`. A `_BitInt(8)` among the
+  words makes the words `true` (not plain tokens), so that form still prints one normalized type (CS232).
+- **027 #5, the reference options** (not taken). `ref-gcc15.edn` records no row's options; recording them needs `bin/ci record-ref` over
+  thousands of files with gcc (hours, and the lists' options are the lists', not the record's), so it is a proposal (CS233).
+
+### F31.2 The numbers, before and after
+
+| | before | after |
+|---|---|---|
+| `bin/ci judge-test` | 43 tests, 139 assertions | **47 tests, 160 assertions**, all pass (2.5 min with the musl cache fresh; 14 min on the first run after the printer edit) |
+| `bin/ci dg --record` (full, gcc 15.2) | 583 of 619 supported, 8 unsupported, 36 in a class, 0 unclassed | the same; the record unchanged byte for byte; gcc disagrees with 5 files (the `no-dfp` tests), none of them a pass |
+| `dg-error` lines the messages do not match | 25 files, 139 lines, all explained | the same, 0 unexplained, 5 wrong-reason files with lines |
+| `bin/ci check` (run level, against its record) | 3,761 programs, 3,457 pass | 3,761 programs (the default seven corpora 3,582, then the eight `-run` ones 179, two runs): 3,458 pass, the record unchanged; one recorded `speed` row (`compcert/aes.c`) passed this time (load, not a change of ours), so no re-record |
+| `bin/repr-c check --c23` | 62 files, 59 pass, 3 expected failures | 62 files, 62 pass (59 agree with gcc, 3 gcc-only-rejects), the same |
+
+Not run: `bin/ci check --aot`, `bin/ci annotations`, `bin/repr-c parse-check`, the round trip corpora, `bin/gate`, `bin/ci dg --essential`
+(its list was not touched).
+
+### F31.3 Proposals (CS230-)
+
+Each with options, the recommended one first; none decided.
+
+- **CS230 `#pragma GCC system_header` by text.** F's scan sees the pragma in an inactive branch and after the header's first declarations (gcc
+  honours it from where it is *processed*).
+  - Options: (a) the preprocessor marks a unit when it processes the pragma and `*system-unit*` takes the mark (exact; a `pp.ae` change and a
+    field in the unit's read); (b) keep the scan; (c) scan only before the first non-directive line.
+  - *Recommended: (a)* with CS222 (the unit's lines), since both need the preprocessor to say more about a unit.
+- **CS231 `-isystem` in `host/file-config`.** It is ignored, so a header found through `-isystem` gets pedwarns gcc does not give (gcc and clang
+  treat the directory as a system one).
+  - Options: (a) model it as an include directory that is also a system directory (`:sys-dirs`); (b) leave: no corpus file uses it.
+  - *Recommended: (a)*, a few lines beside F.
+- **CS232 `:c/bad-specs` with `_BitInt` and the other non-token words** (G's residue; with CS221).
+  - Options: (a) keep the specifier source text, not the tokens, so any declare-specs prints as written; (b) leave.
+  - *Recommended: (b)* until a corpus file needs it; (a) if CS221 (a) is taken, the one change serving both.
+- **CS233 The reference's options** (027 #5, second half).
+  - Options: (a) `record-ref` writes each row's `:std` and `:args` and a check compares them with the lists' on the next `check` (it needs one full re-record
+    with gcc, a run of hours, to be explained row by row); (b) a cheap check: hash of the lists' options file kept beside the record
+    (no gcc run; catches a drift of how options are read, not a change of gcc's runs); (c) leave.
+  - *Recommended: (b)*, then (a) at the next full re-record.
+- **CS234 gcc's `constexpr _Float16 f = 0.1f16;` refusal** (A's quirk). gcc 15.2 refuses a `_Float16` or `__bf16` constant of the object's own type;
+  clang accepts the first. The checker follows the standard.
+  - Options: (a) leave (the checker is the more permissive; no corpus file has it); (b) mirror gcc for the two types (the diagnostic would be
+    gcc's bug made a rule); (c) report it to gcc.
+  - *Recommended: (a)*.
+- **CS235 `-0.1L` and long double arithmetic keep no exact value.** A's `:ld` is carried by a literal only, so `constexpr double d = -0.1L;`
+  (also refused by gcc) stays accepted.
+  - Options: (a) carry `:ld` through unary minus and plus, and through a cast to long double; (b) represent long double values as BigDecimal
+    pairs throughout (the full fix, CS35's "long double as double" undone); (c) leave.
+  - *Recommended: (a)*, cheap; (b) only with the compiled level's long double work.
+
+### F31.4 Shipped files, scratch and rule slips
+
+Shipped files changed: none. Not shipped: `arbace/c/{check,dg}.ae`, `arbace/repr/c/print.ae`, `test/c/` (`judge_test.ae`, `judge/`'s new files
+`constexpr-float16.c`, `ext-hdr-p.h`, `ext-hdr-q.h`, `ext-main-d.c`, `ext-main-e.c`, `bad-specs-quals.c`, `dg-wording.edn`), this section. Scratch in the
+worktree's `.tmp/`: `p/` (probes), `ci-dg.before-031/` (the dg work directory before), the logs `jt1.log`, `dg-rec3.log`, `check3.log`, `one.bash`
+(runs single judge-test tests). Rule slips: a `git show ... > /dev/null` was written once (B's before-run; no harm); the baseline `judge-test` was
+moved to the background by the tool's time limit while the first edit was made (it had loaded its sources). Nothing else known.
