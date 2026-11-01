@@ -43,6 +43,13 @@ for w in jdk "$t/jdk" "$t/jdk/sub/.." "$t" .; do
   out=$(cd "$t" && J2G_EDGE_WORK=$w FAKE_LOG=$scratch/fake.log bin/j2g-edge verify 2>&1); st=$?
   if [ "$st" = 2 ] && [ "$(cat "$t/jdk/edge.edn")" = edge ]; then ok "work $w refused"; else bad "work $w: status $st: $out"; fi
 done
+# report 046, finding 1: the checkout reached through a symlinked path, and an untracked directory in a tracked tree
+ln -s "$t" "$scratch/link"
+for w in jdk jdk/newdir; do
+  out=$(cd "$scratch/link" && J2G_EDGE_WORK=$w FAKE_LOG=$scratch/fake.log "$scratch/link/bin/j2g-edge" verify 2>&1); st=$?
+  if [ "$st" = 2 ] && [ "$(cat "$t/jdk/edge.edn" 2>&1)" = edge ] && [ ! -e "$t/jdk/newdir" ]; then ok "work $w refused through a symlinked checkout"
+  else bad "symlinked checkout, work $w: status $st: $out"; fi
+done
 out=$(cd "$t" && J2G_EDGE_WORK=.tmp/w FAKE_LOG=$scratch/fake.log bin/j2g-edge verify 2>&1); st=$?
 if [ "$st" = 1 ] && ! echo "$out" | grep -q 'tracked'; then ok "work under .tmp accepted"; else bad "work .tmp/w: status $st: $out"; fi
 
