@@ -58,5 +58,17 @@ results i interp t03235 fail "differ: stdout"
 judge "$t/i/results.tsv" "$t/c/results.tsv"
 if [ $st = 1 ] && grep -q 'regression: t03235' "$t/out"; then ok "audited wrong stdout: regression (only timeouts are held)"; else no "audited wrong stdout of t03235 (status $st)"; fi
 
+# 4 (finding 4): --record of an audited judgment is refused, nothing written; unaudited it records
+results i interp t03686 timeout "$TO"; audited i interp; results c compiled t03686 pass
+cp "$root/test/java/check-interp.edn" "$t/interp.before"; cp "$root/test/java/levels-known.edn" "$t/known.before"
+judge --record "$t/i/results.tsv" "$t/c/results.tsv"
+if [ $st != 0 ] && grep -q -- '--record with --audited' "$t/out" && cmp -s "$t/interp.before" "$root/test/java/check-interp.edn" \
+   && cmp -s "$t/known.before" "$root/test/java/levels-known.edn"; then ok "--record with an audited judgment refused, nothing written"
+else no "--record with an audited judgment (status $st; files changed: $(cmp -s "$t/interp.before" "$root/test/java/check-interp.edn" || echo interp) $(cmp -s "$t/known.before" "$root/test/java/levels-known.edn" || echo known))"; fi
+cp "$t/interp.before" "$root/test/java/check-interp.edn"; cp "$t/known.before" "$root/test/java/levels-known.edn"
+results i interp t03686 pass; rm -f "$t/i/audited"
+judge --record --partial "$t/i/results.tsv" "$t/c/results.tsv"
+if [ $st = 0 ] && grep -q 'recorded' "$t/out"; then ok "--record unaudited still records"; else no "--record unaudited (status $st)"; fi
+
 echo "audited-test: $((n - bad)) of $n passed"
 [ $bad = 0 ]
