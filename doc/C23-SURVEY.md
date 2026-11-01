@@ -3963,3 +3963,29 @@ Proposals:
   Options: (a) a meta mark from the converter (`:c/atomic-qual`) that `leading-quals` reads (recommended); (b) with CS232 (a), keep the source text.
 - **CS238 Wrong-reason entries and unpinned families.** Options: (a) an optional `:checker` regex per wrong-reason entry and `:files` on every
   family (recommended; one pass over the 24 families with the msg-mismatch report); (b) leave.
+
+### F57 Re-review 057's fixes (2026-11-01)
+
+Report 057 (the VM, no stage 0; gcc 15.2 and clang on aarch64, clang x86-64) confirmed 053's fixes and raised the points below. Each is a commit
+with a judge-test test that failed on `81006344` and passes; probes on this host (gcc 15.2 x86-64, clang) agree with the test files line by line.
+
+- **1, `?:` and `_Float16`/`__bf16`** (false errors): the three-operand `?:` converts in float like the other operators (`constexpr-float16-evaluated-in-float`,
+  four more lines).
+- **2, past long double's range** (false errors): `ld-of` drops the exact value when it rounds to 2^16384 or more; the constant is an infinity, accepted like
+  gcc and clang (`constexpr-long-double-range`: `1e5000L`, `-1e5000L`, `1.2e4932L`, `1e7000L`, `1e-5000L`).
+- **3, CS231**: an angled `#include` searches the `-I` directories before the system ones (it searched only the system list: the pre-existing divergence;
+  forms of a file with `-I` and an angled include can change); `-isystemDIR` is read; `-isystem=DIR` is not (a sysroot's, gcc ignores it here); the
+  checker cleans the system directories before the prefix test (`./sys`, `sys/`). The `-I` assertion now asserts the header's pedwarn (`[:ok 1]`).
+- **4, pre-existing false errors**: an integer converted to float/`_Float16`/`__bf16` is rounded once (`integer-to-float-rounds-once`); a comparison with a
+  long double constant compares exact values (`long-double-compared-exactly`, `0.1L != 0.1`); `_Float16` with `__bf16` is `_Float16` in either order
+  (`float16-with-bf16-is-float16`); the `bf16` suffix is gcc's `-pedantic` "non-standard suffix on floating constant" (`bf16-suffix-pedwarn`).
+- **5, judges**: `bin/ci dg --judge` reads the kept gcc outputs afresh; a differ from errors outside the main file carries `{:other :fatal-other}`
+  (`fatal-error-at-an-expected-line`).
+
+A slip of mine, caught by the full `bin/ci dg` and not by `judge-test`: the `_Float16`/`__bf16` rule first built a set `#{(:k fa) (:k fb)}`, which throws
+"Duplicate key" when the kinds are equal, so every `float + float` crashed (26 dg files). Fixed in its own commit with the missing cases in the test.
+The unit tests alone were not enough: they only mixed `_Float16` with `__bf16`.
+
+Left open: report 057's CS236-CS238 as before; the `:flt-eval-method` target fact (aarch64 `+fp16`, `-fexcess-precision=16` evaluate `_Float16` in the format,
+and `__bf16` follows it there); whether the gcc testsuite has `-I` with an angled include, `-isystem` or `-mavx512fp16` (the corpus rerun shows no
+change of the dg record).
