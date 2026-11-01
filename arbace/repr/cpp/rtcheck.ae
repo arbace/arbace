@@ -145,7 +145,8 @@
         ;; CP124 (b): the recorded results of the list the key names (RESULTS-DIR/KEY.edn, NAME -> verdict): a recorded :pass that
         ;; does not pass fails (a regression, whatever else holds), and a run of the list is held to the record's names; with
         ;; RESULTS-MODE "record" the record is not read but written from this run, when no file fails
-        record? (= results-mode "record")
+        record? (contains? #{"record" "record-replace"} results-mode)
+        mode-replace (= results-mode "record-replace")
         rfile (when (and okey (seq results-dir)) (str results-dir "/" okey ".edn"))
         rrec (when (and rfile (not record?) (.exists (java.io.File. ^String rfile))) (read-string (slurp rfile)))
         rec-files (:files rrec {})
@@ -265,7 +266,14 @@
     (spit (str work "/summary.edn") (pr-str summary))
     (println (pr-str summary))
     (let [fails (filter #(= (second %) "fail") rows)
-          held-bad (or (seq rec-missing) (seq rec-new))]
+          held-bad (or (seq rec-missing) (seq rec-new))
+          ;; report 043's F6: a corpus the oracle record has is a recorded corpus, so its results must be recorded too, unless
+          ;; RESULTS-DIR/pending.edn (a set of keys) says the record is still to be made; --record-results from a run whose names
+          ;; are not the existing record's is refused unless "record-replace" (--replace-results)
+          pending (let [f (java.io.File. (str results-dir "/pending.edn"))] (if (and (seq results-dir) (.exists f)) (set (read-string (slurp f))) #{}))
+          unheld (and orec okey (not record?) (seq results-dir) (nil? rrec) (not (contains? pending okey)))
+          rec-names (when (and record? rfile (.exists (java.io.File. ^String rfile))) (set (keys (:files (read-string (slurp rfile))))))
+          shrinks (and rec-names (not= mode-replace true) (not= rec-names (set (map first rows))))]
       (when (seq fails)
         (println (str (count fails) " failing: " (str/join " " (map #(str (first %) (when (= "regression" (nth % 11)) " (recorded :pass)")
                                                                           (when (str/starts-with? (nth % 11) "changed:") (let [[a b] (str/split (subs (nth % 11) 8) #">")] (str " (recorded :" a ", now " b ")")))
@@ -274,11 +282,15 @@
         (println (str "rtcheck: the run of the recorded list " okey " (" rfile ") has " (count rows) " files, the record " (count rec-files) "; "
                       (count rec-missing) " recorded names missing" (when (seq rec-missing) (str ": " (str/join " " (take 8 rec-missing))))
                       ", " (count rec-new) " names not recorded" (when (seq rec-new) (str ": " (str/join " " (take 8 rec-new)))))))
+      (when unheld
+        (println (str "rtcheck: the corpus " okey " has an oracle record but no recorded results in " results-dir " (list it in pending.edn while they are to be made, or record them with --record-results): the run is not held")))
       (when (and (nil? rrec) okey (not record?) (seq results-dir))
         (.println System/err (str "rtcheck: no recorded results for " okey " in " results-dir ": a pass is not held to a record")))
       (when record?
         (cond (nil? okey) (do (println "rtcheck: --record-results needs the corpus key (a #list header or --corpus)") (System/exit 2))
               (seq fails) (println (str "rtcheck: not recorded: " (count fails) " failing"))
+              shrinks (println (str "rtcheck: not recorded: the run's " (count rows) " names are not the existing record's " (count rec-names) " in " rfile
+                                    " (" (count (remove qs rec-names)) " recorded names missing, " (count (remove rec-names qs)) " new; --replace-results rewrites the record)"))
               :else (do (spit rfile (str ";; bin/repr-cpp roundtrip's recorded results of the list " okey " (CP124 (b); doc/cpp/CPP-SURVEY.md, \"As built: CP120, CP121, CP124,\n"
                                          ";; CP127\"): NAME -> verdict (:pass, :known, :oracle-rejects, :oracle-fails), the names qualified by the corpus (CP127 (b)). A run of\n"
                                          ";; the list fails on a recorded verdict that is not the run's (a :pass that does not pass, another non-pass verdict than the recorded one; a move to :pass is an\n"
@@ -288,7 +300,7 @@
                                          (str/join (for [r (sort-by first rows)] (str "  " (pr-str (first r)) " " (keyword (second r)) "\n")))
                                          " }}\n"))
                         (println (str "rtcheck: recorded " (count rows) " results of " okey " in " rfile)))))
-      (System/exit (if (or (seq fails) held-bad (and record? (seq fails))) 1 0)))))
+      (System/exit (if (or (seq fails) held-bad unheld shrinks) 1 0)))))
 
 (defn -main [cmd & args]
   (case cmd
