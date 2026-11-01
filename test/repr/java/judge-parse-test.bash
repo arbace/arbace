@@ -15,8 +15,9 @@ STUB_DIAG=0 pc; expect_rc "samples, 0 diagnostics, recorded 0" 0 $?
 STUB_DIAG=1 pc; rc=$?; expect_rc "samples, 1 diagnostic, recorded 0, fails" 1 $rc
 grep -q 'recorded 0' "$t/out.log" && ok "the verdict names the recorded count" || bad "the verdict names the recorded count"
 CORPUS=jdk26u STUB_DIAG=3 pc; expect_rc "jdk26u, 3 diagnostics, recorded 0, fails" 1 $?
-CORPUS=tests STUB_DIAG=500 pc; expect_rc "tests, count not recorded: reported, not judged" 0 $?
+CORPUS=tests STUB_DIAG=500 pc; expect_rc "tests, count not recorded: fails (an unlisted corpus is not passed)" 1 $?
 grep -q 'no recorded count' "$t/out.log" && ok "the unrecorded count is said" || bad "the unrecorded count is said"
+CORPUS=tests STUB_DIAG=0 pc; expect_rc "tests, 0 diagnostics but not recorded: fails" 1 $?
 CORPUS=tests STUB_DIAG=500 PCARGS=--record pc; expect_rc "tests, --record" 0 $?
 CORPUS=tests STUB_DIAG=500 pc; expect_rc "tests, 500 recorded 500" 0 $?
 CORPUS=tests STUB_DIAG=499 pc; expect_rc "tests, 499 recorded 500, fails" 1 $?
