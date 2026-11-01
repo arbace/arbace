@@ -86,7 +86,7 @@ printf '[\n ["a" "slow" "timeout 120s of CPU" "-"]\n ["b" "pass" "" "same"]\n ["
 printf 'a\t124\tx1\t5\t120\ttimeout 120s of CPU\nb\t0\th\t1\t1.0\t\nc\t0\th\t1\t1.0\t\n' > "$q/check.tsv"
 printf 'a\t124\ty2\t7\t120\ttimeout 120s\nb\t0\th\t1\t1.0\t\nc\t0\th\t1\t1.0\t\n' > "$q/oi.tsv"
 out=$(judge_aot judge "$q/check.tsv" "$q/corpus.tsv" "$q/refs.edn" "$q/oi.tsv" "$q/aot-results.edn" "$q/classes.edn"); expect "aot: a double timeout is not compared with oi's partial output" 0 'o2j: 2 pass' "$out" $?
-out=$(cd "$root" && bin/oi aot-cpu); expect "aot: the rerun's CPU limit is the program's and the library's load" 0 '^140 560$' "$out" $?
+out=$(cd "$root" && OI_TIMEOUT=120 O2J_LOAD_ALLOWANCE=20 bin/oi aot-cpu); expect "aot: the rerun's CPU limit is the program's and the library's load" 0 '^140 560$' "$out" $?
 out=$(cd "$root" && OI_TIMEOUT=60 O2J_LOAD_ALLOWANCE=5 bin/oi aot-cpu); expect "aot: the load allowance is a variable" 0 '^65 260$' "$out" $?
 
 # re-review 030's finding 7 (a): oi's own level runs a program under the CPU limit (limited_cpu), as the AOT level's rerun: a program that needs
@@ -134,3 +134,7 @@ out=$(cd "$root" && OI_TIMEOUT=120 bin/oi oi-status 137 5 2>&1); expect "oi: 137
 out=$(cd "$root" && OI_TIMEOUT=120 bin/oi oi-status 137 121.5 2>&1); expect "oi: 137 after the CPU limit is a timeout" 0 '^124$' "$out" $?
 out=$(cd "$root" && OI_TIMEOUT=120 bin/oi oi-status 152 3 2>&1); expect "oi: 152 (SIGXCPU) is a timeout" 0 '^124$' "$out" $?
 out=$(cd "$root" && OI_TIMEOUT=120 bin/oi oi-status 2 3 2>&1); expect "oi: another status is kept" 0 '^2$' "$out" $?
+
+# re-review 042's finding 6: a whole run against an unreadable record says so, as --only does (and before the run)
+out=$(cd "$root" && OI_EXPECT_RECORD=$W/no-such-record bin/oi suite expect 2>&1); st=$?
+expect "expect: a whole run against an unreadable record says it cannot be read" 2 'cannot be read' "$out" $st

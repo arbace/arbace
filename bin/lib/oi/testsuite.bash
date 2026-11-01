@@ -134,6 +134,8 @@ cmd_suite_expect() {
   local out=$S/expect.tsv gen=$S/expect-run.edn
   [ -n "${ONLY:-}" ] && { out=$S/expect-only.tsv; gen=$S/expect-only.edn; }
   [ -s "$S/expect.list" ] || die "expect: no test selected${ONLY:+ by --only $ONLY}"
+  # the record is read by a run that is not recording, whole or not, before the run (re-review 042's finding 6)
+  [ "${RECORD:-0}" = 1 ] || [ -r "$EXPECT_RESULTS" ] || die "expect: the record $EXPECT_RESULTS cannot be read"
   tr '\n' '\0' < "$S/expect.list" | xargs -r -0 -n 1 -P "${JOBS:-3}" bash -c 't=$(printf "\t"); suite_expect_one "${0%%"$t"*}" "${0#*"$t"}"' > "$out.new"
   LC_ALL=C sort "$out.new" > "$out"; rm -f "$out.new"
   { echo ";; The expect action's host runs (bin/oi suite expect --record; doc/ocaml/OCAML-SURVEY.md, \"As built: OC102, OC104, OC105 (b), OC106 (b)\"): testsuite/tools/expect.ml"

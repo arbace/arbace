@@ -5,6 +5,7 @@
 # Run: bash test/ocaml/floors_test.bash
 set -uo pipefail
 root=$(cd "$(dirname "$0")/../.." && pwd)
+grep -q REPR_OCAML_FLOORS "$root/bin/repr-ocaml" || { echo "FAIL bin/repr-ocaml takes no REPR_OCAML_FLOORS: this test would rewrite the real floors"; exit 1; }
 W=$root/.tmp/w/floors; rm -rf "$W"; mkdir -p "$W"
 sed -n '/^FLOORS=/,/^}/p' "$root/bin/repr-ocaml" > "$W/floor.bash"
 printf 'dumps-compilable\tstdlib\t116\ncmi-compiled\tstdlib\t115\n' > "$W/floors.tsv"
