@@ -32,6 +32,15 @@
 ;; the included unit whose forms are being checked (its name, as the read keys it), nil for the main file's: its
 ;; errors are FILE:LINE: (review 006, finding 7)
 (def ^:dynamic *unit* nil)
+(def ^:dynamic *unit-ext-lines*
+  "CS214 (R5): the lines with `__extension__` of the unit being checked (*unit*), read from its file when it can be; the main
+  file's are the cx's :ext-lines." #{})
+(def ^:dynamic *unit-line?*
+  "CS214 (R5): whether *line* is the line of a form in its own unit's file (a reread unit's forms carry :line); the forms
+  read from C carry none in a unit, and *line* is then the line of the `#include` in the main file." false)
+(def ^:dynamic *system-unit*
+  "CS214 (R5): whether the unit being checked is a system header (its file under a directory of the host's search list):
+  gcc gives no pedwarn there." false)
 (def ^:dynamic *switch* nil) ; the innermost switch's {:t promoted type :seen atom of [lo hi]}
 
 (defn- cx [k] (get *cx* k))
@@ -62,7 +71,9 @@
   "A pedwarn of gcc's, an error under -pedantic-errors (CS132): only when the file's options ask for that, and not
   on a line with `__extension__`."
   [^String msg]
-  (when (and (= :errors (cx :pedantic)) (not (contains? (or (cx :ext-lines) #{}) *line*)))
+  (when (and (= :errors (cx :pedantic))
+             (not *system-unit*)
+             (not (contains? (if (and *unit* *unit-line?*) *unit-ext-lines* (or (cx :ext-lines) #{})) *line*)))
     (err! msg)))
 
 (defn- line-of [f] (or (:line (meta f)) *line*))
@@ -2253,10 +2264,19 @@
                       (.add done u)
                       (when-let [uf (get (cx :units) (str u))]
                         (binding [*cx* (assoc *cx* :annotating (atom false))
-                                  *unit* (str (or (:path uf) u))]
+                                  *unit* (str (or (:path uf) u))
+                                  *system-unit* (let [p (str (:path uf))]
+                                                  (boolean (some #(str/starts-with? p (str % "/")) (cx :sys-dirs))))
+                                  *unit-ext-lines* (let [p (str (:path uf))
+                                                         f (java.io.File. ^String (if (and (cx :base) (not (.startsWith p "/"))) (str (cx :base) "/" p) p))]
+                                                     (if (.isFile f)
+                                                       (set (keep-indexed (fn [i ^String l] (when (.contains l "__extension__") (inc i)))
+                                                                          (str/split-lines (String. (java.nio.file.Files/readAllBytes (.toPath f)) "ISO-8859-1"))))
+                                                       #{}))]
                           ;; each of the unit's forms at its own line, as the main file's are
                           (doseq [g (:forms uf)]
-                            (binding [*line* (or (and (seq? g) (:line (meta g))) *line*)]
+                            (binding [*line* (or (and (seq? g) (:line (meta g))) *line*)
+                                      *unit-line?* (boolean (and (seq? g) (:line (meta g))))]
                               (check-top g)))))))
         c/pragma (pragma-pack! f)
         c/asm (feat! :asm)
@@ -2266,15 +2286,15 @@
 (defn- new-cx [std opts]
   {:std std :scopes (ArrayList.) :errors (ArrayList.) :annot nil :annotating (atom false)
    :done-units (HashSet.) :defs (IdentityHashMap.) :units {} :pack-state (atom {}) :ldouble-size (:ldouble-size opts 16)
-   :unsigned-char (:unsigned-char opts) :pedantic (:pedantic opts) :ext-lines (:ext-lines opts)
+   :unsigned-char (:unsigned-char opts) :pedantic (:pedantic opts) :ext-lines (:ext-lines opts) :sys-dirs (:sys-dirs opts) :base (:base opts)
    :permissive (:permissive opts) :no-c2y-compat (:no-c2y-compat opts) :no-c23-compat (:no-c23-compat opts) :exec-charset (:exec-charset opts)})
 
 (defn check-unit
   "Checks a read (arbace.repr.c/read-c's {:forms :units}) at the standard `std` (a keyword), the
   builtins' forms `builtins` declared first: {:errors [...] :items [[line [annotation...]] ...]} (the
   items when `annotate`)."
-  [rd std builtins & {:keys [annotate ldouble-size unsigned-char results pedantic ext-lines notes no-c2y-compat no-c23-compat exec-charset permissive]}]
-  (let [c (assoc (new-cx std {:ldouble-size (or ldouble-size 16) :unsigned-char unsigned-char :pedantic pedantic :ext-lines ext-lines
+  [rd std builtins & {:keys [annotate ldouble-size unsigned-char results pedantic ext-lines sys-dirs base notes no-c2y-compat no-c23-compat exec-charset permissive]}]
+  (let [c (assoc (new-cx std {:ldouble-size (or ldouble-size 16) :unsigned-char unsigned-char :pedantic pedantic :ext-lines ext-lines :sys-dirs sys-dirs :base base
                                       :permissive permissive :no-c2y-compat no-c2y-compat :no-c23-compat no-c23-compat :exec-charset exec-charset})
                  :units (into {} (for [[k u] (:units rd)] [(str k) u]))
                  :results (when results (IdentityHashMap.)))

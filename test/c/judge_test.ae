@@ -7,6 +7,9 @@
   (:require [arbace.test :refer :all]
             [arbace.c.dg :as dg]
             [arbace.c.run :as run]
+            [arbace.repr.c :as rc]
+            [arbace.repr.c.annot :as annot]
+            [arbace.c.check :as chk]
             [arbace.repr.c.host :as host]
             [arbace.string :as str]))
 
@@ -400,6 +403,31 @@
                                 ["bin/ci" "check" "--aot" "--judge" "--corpus" "ci-run"]))]
         (is (str/includes? o "the same")))
       (finally (doseq [f (reverse (file-seq work))] (.delete ^java.io.File f))))))
+
+(deftest extension-lines-by-unit
+  ;; CS214 (R5): __extension__ silences a pedwarn on its own file's line, not another file's line of the same number. The forms
+  ;; read from C carry no line in a unit (the pedwarn stands on the #include's line), so the lines are given to a unit's forms
+  ;; as a reread unit's are
+  (let [h (host/load-host "test/c/host")
+        opts ["-std=c23" "-pedantic-errors"]
+        fc (host/file-config opts "gnu23")
+        builtins (annot/builtin-forms h fc)
+        errors (fn [main]
+                 (let [rd (rc/read-c (host/config h fc judge-dir) fc main false)
+                       rd (update rd :units (fn [us] (into {} (for [[k u] us]
+                                                                [k (update u :forms (fn [fs] (vec (map-indexed (fn [i g] (vary-meta g assoc :line (inc i))) fs))))]))))]
+                   (:errors (chk/check-unit rd :c23 builtins :pedantic :errors :ext-lines (:ext-lines rd) :base judge-dir :sys-dirs (:search h)))))]
+    ;; the header's own line 3 has __extension__: silenced (before: the main file's lines decided, and it has none)
+    (is (= [] (errors "ext-main-a.c")))
+    ;; the main file's line 3 has it, the header's line 3 does not: reported (before: silenced)
+    (is (= 1 (count (errors "ext-main-b.c")))))
+  ;; a system header: the same header found through the search list has no pedwarn (the host's list gains the directory)
+  (let [h (host/load-host "test/c/host")
+        h (assoc h :search (conj (vec (:search h)) judge-dir))
+        fc (host/file-config ["-std=c23" "-pedantic-errors"] "gnu23")
+        r (dg/read-file h judge-dir {:name "ext-main-c.c" :read (str judge-dir "/ext-main-c.c") :fc fc} :compile)]
+    (is (= :ok (:status r)))
+    (is (= 0 (:other r)))))
 
 (deftest main-file-is-the-whole-path
   ;; suffix.c includes xsuffix.c, whose name ends with the main's: its error is another file's
