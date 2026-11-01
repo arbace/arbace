@@ -128,4 +128,19 @@ mkdir_exe "$T/legacy" "$(printf f%.0s $(seq 64))"; echo v > "$T/legacy/version.e
 if [ "$(status)" = 0 ] && [ ! -e "$T/legacy/amd64/old-marker" ] && [ "$(cat "$T/legacy/key")" = "$KEY" ]; then ok "a build's directory under another name replaced"
 else bad "a legacy build directory: status $(status): $(tail -2 "$T/out")"; fi
 
+# a trailing slash, or a . or .. as the last name, in ARBACE_GATE_CACHE (review 051, B)
+mkdir_exe "$ARBACE_GATE_EXES/$K20" stale; echo v > "$ARBACE_GATE_EXES/$K20/version.edn"
+for sfx in / //; do
+  mkdir_exe "$ARBACE_GATE_EXES/$K20" stale
+  ( export ARBACE_GATE_CACHE=$ARBACE_GATE_EXES/$K20$sfx; run )
+  if [ "$(status)" = 0 ] && [ "$(cat "$ARBACE_GATE_EXES/$K20/key")" = "$KEY" ] && [ -z "$(leftovers)" ]; then ok "ARBACE_GATE_CACHE with trailing '$sfx' built"
+  else bad "trailing '$sfx': status $(status): $(tail -2 "$T/out" | cut -c1-200)"; fi
+done
+rm -rf "$ARBACE_GATE_EXES/$K20"
+( export ARBACE_GATE_CACHE=$ARBACE_GATE_EXES/$K20/; run )   # absent
+if [ "$(status)" = 0 ] && [ "$(cat "$ARBACE_GATE_EXES/$K20/key")" = "$KEY" ]; then ok "a trailing slash on an absent directory built"
+else bad "trailing slash, absent: status $(status): $(tail -2 "$T/out" | cut -c1-200)"; fi
+( export ARBACE_GATE_CACHE=$ARBACE_GATE_EXES/$OTHER/.; run )
+if [ "$(status)" != 0 ] && grep -q "not removed" "$T/out" && [ ! -e "$ARBACE_GATE_EXES/$OTHER/..lock" ] && [ -x "$ARBACE_GATE_EXES/$OTHER/amd64/arbace" ]; then ok "OTHER/. refused before anything is built or made"
+else bad "OTHER/.: status $(status): $(tail -2 "$T/out" | cut -c1-200)"; fi
 exit $fail
