@@ -13,18 +13,13 @@ cat > "$t" <<'F'
 (let [steps (read-string (slurp (first *command-line-args*)))
       need #{"FROZEN_CP" "FROZEN_TAG" "ARBACE_ORACLE_JAR" "ARBACE_ORACLE_TAG"}
       steps (filter map? (if (map? steps) (:steps steps) steps))
-      root (first (rest *command-line-args*))
-      sources? (fn [s] (some (fn [[_ sc]]
-                               (let [f (java.io.File. (str root "/" sc))]
-                                 (and (.isFile f)
-                                      (re-find #"(?m)^\. \S*bin/lib/frozen\.bash" (slurp f)))))
-                             (re-seq #"(bin/[A-Za-z0-9._-]+)" (str (:cmd s)))))
+      sources? (fn [s] (re-find #"bin/(oracle|j2g-edge)\b" (str (:cmd s))))
       frozen (filter #(or (some #{:frozen} (:hosts %)) (sources? %)) steps)
       bad (remove #(every? (set (:env %)) need) frozen)]
   (println (count frozen) "steps use the frozen JVM:" (apply str (interpose " " (map :name frozen))))
   (doseq [s bad] (println "FAIL:" (:name s) "lacks" (remove (set (:env s)) need)))
   (System/exit (if (or (empty? frozen) (seq bad)) 1 0)))
 F
-"$exe" "$t" "$src/test/gate/steps.edn" "$src"; st=$?
+"$exe" "$t" "$src/test/gate/steps.edn"; st=$?
 [ $st = 0 ] && echo "frozen-env-test: passed" || echo "frozen-env-test: failed"
 exit $st

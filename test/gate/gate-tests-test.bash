@@ -1,7 +1,7 @@
 #!/bin/bash
 # GTS114 (a) (audit 041): bin/gate-tests runs every *-test.bash of a directory and fails when one does; the
 # step gate-tests is in test/gate/steps.edn, essential, and the planner accepts the table (read by gate.plan
-# on stage 0 over a fabricated hosts.edn: its checks of rules matching no file, hosts, steps and scripts).
+# on stage 0 over git's file list and a fabricated hosts.edn: its checks of rules matching no file, hosts, steps and scripts).
 # Needs an Arbace executable: ARBACE_HOST_EXE=EXE test/gate/gate-tests-test.bash
 set -uo pipefail
 src=$(cd "$(dirname "$0")/../.." && pwd)
@@ -23,8 +23,9 @@ printf '#!/bin/bash\necho broken\nexit 1\n' > "$scratch/fail/b-test.bash"; chmod
 
 # the step and the planner
 cd "$src" || exit 1
-find . \( -path ./.git -o -path ./.tmp -o -path ./target -o -path ./.claude \) -prune -o -type f -printf '%P\n' \
-  | LC_ALL=C sort | xargs -d '\n' sha256sum > "$scratch/logs/files.sha256"
+# the file list from git's index (tracked files; fake hashes): nothing of the checkout is read, so the step's
+# declared inputs stay true (bin/gate --audit); the planner only checks that its rules match names
+git -C "$src" ls-files | LC_ALL=C sort | sed 's|^|0000000000000000000000000000000000000000000000000000000000000000  |' > "$scratch/logs/files.sha256"
 echo '{:gate "a" :javac "b" :prog-units "pending" :prog-rest "c" :javac-prog-units "pending" :javac-prog-rest "d" :stage0 "e" :frozen "f" :jdk "g" :go "h"}' > "$scratch/logs/hosts.edn"
 . "$src/bin/lib/tools.bash"
 root=$src
