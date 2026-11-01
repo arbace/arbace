@@ -2718,6 +2718,33 @@ stubbed `bin/repr-java` (`test/repr/java/judge-*-test.bash`), the records below 
   corpus. *Recommended: (a), after the first real run records `jdk26u-fallbacks.edn`.* Not added: the step's `:mem-gib`
   and `:summary` cannot be measured here.
 
+## Proposed (2026-11-01): GTS134-GTS136 (GT7's audit 065, doc/ALPINE.md and bin/alpine-env; none decided)
+
+- **GTS134 A dependency with several installed providers.** Options: (a) it is no edge, and `check` counts it met only
+  by a provider the line's closure holds, naming it otherwise (as built); (b) resolve like apk: an exact name first, then
+  the highest `k:` provider priority; (c) follow every provider (the old closure; passes a line that misses one).
+  *Recommended: (a)* (conservative; the line must name one provider, as it now names `openjdk25-jdk`). Not run against
+  the amd64 host's real database: `check` may now ask for a provider to be named there; run it on that host first.
+- **GTS135 The host's own line.** Not edited: its counts (560, 84, 67, 636), its date (2026-10-12) and its names are the
+  amd64 host's and were not regenerated. The audit proposes `ocaml5` to `ocaml5-compiler-libs` (ocaml-o1's diff),
+  `chibi-scheme` and `openjdk25-jdk` added. Options: (a) regenerate the section on the host with `bin/alpine-env world`
+  and `check` once the crops merge; (b) edit it now by the report's text. *Recommended: (a).*
+- **GTS136 `alpine-env`'s other findings (#6, #9), not built.** A verb `doc` comparing the doc's first `apk add` block with
+  `world`; `simulate --line doc|arbace --arch A --keys-dir /usr/share/apk/keys/ARCH`; `@tag` and `!name` world entries;
+  `LC_ALL=C` and a second sort in `simulate`; dropping `check`'s dead `extra` branch; whether the line keeps version pins
+  (`linux-virt=...`). Options: (a) all in one change after GTS134; (b) only `doc` and `--arch`; (c) none. *Recommended: (b).*
+
+- **GTS138 (review 068 of audit-065) providers offered by the repositories.** A name counts as apk's choice when the
+  index cache offers several packages for it, not only when several are installed (one installed JDK would otherwise
+  drift to a newer `-jdk` and `world` would drop it). Options: (a) as built: the index cache read offline
+  (`/var/cache/apk/APKINDEX.*.tar.gz`), an exact-name package wins, `so:`/`cmd:`/`pc:` names count installed providers
+  only; (b) every name, `so:` too (11 more names to put in the line on the amd64 host); (c) a short always-named list
+  (`openjdk25-jdk`). *Recommended: (a).* Run on the amd64 host (this worktree shares its database), `check` now fails
+  naming five providers the host's world does not: busybox-binsh (`/bin/sh`), ifupdown-ng, mkinitfs,
+  openjdk25-jdk and openssh-client-default (with the packages only they pull: bridge, kmod, lddtree, ...);
+  `apk add` them on the host (puts them in world) or accept them as the host's, then regenerate the doc's host line
+  (GTS135).
+
 ## Proposals (GTS140-GTS143) (2026-11-01, branch `audit-060`, none decided)
 
 From report 060 (the AOT levels of the suite and goi). The fixes are in `audit-060`; these are the choices they leave.
