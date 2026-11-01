@@ -14,11 +14,17 @@ fail=0; ck() { if [ "$2" = ok ]; then echo "ok   $1"; else echo "FAIL $1: $2"; f
 src=$(sed -n 's/^audit_trace=//p' "$root/bin/lib/gate-run.bash")
 case ",$src," in *,rt_sigprocmask,*) ck "audit_trace holds rt_sigprocmask" ok ;; *) ck "audit_trace holds rt_sigprocmask" "audit_trace=$src" ;; esac
 
-# (1b) an override of the set (GATE_AUDIT_TRACE=%file) gets rt_sigprocmask appended when it lacks it
+# (1b) an override of the set (GATE_AUDIT_TRACE=%file) gets the reducer's bookkeeping calls and rt_sigprocmask
+# appended when it lacks them, once each; a negated override is left alone (review 081, N5)
 eval "$(sed -n '/^audit_trace_set() {/,/^}/p' "$root/bin/lib/gate-run.bash")"
 audit_trace=$src
-o=$(GATE_AUDIT_TRACE=%file,execve audit_trace_set); d=$(audit_trace_set); k=$(GATE_AUDIT_TRACE=%file,rt_sigprocmask audit_trace_set)
-{ [ "$o" = "%file,execve,rt_sigprocmask" ] && [ "$d" = "$src" ] && [ "$k" = "%file,rt_sigprocmask" ]; } && ck "an override gets rt_sigprocmask appended once" ok || ck "override" "'$o' '$d' '$k'"
+o=$(GATE_AUDIT_TRACE=%file,execve audit_trace_set); d=$(audit_trace_set)
+k=$(GATE_AUDIT_TRACE=%file,clone,clone3,fork,vfork,chdir,execve,rt_sigprocmask audit_trace_set)
+x=$(GATE_AUDIT_TRACE='!write' audit_trace_set)
+{ [ "$o" = "%file,execve,clone,clone3,fork,vfork,chdir,rt_sigprocmask" ] && [ "$d" = "$src" ] \
+  && [ "$k" = "%file,clone,clone3,fork,vfork,chdir,execve,rt_sigprocmask" ] && [ "$x" = '!write' ]; } \
+  && ck "an override gets the bookkeeping calls and rt_sigprocmask appended once, a negated one is left" ok \
+  || ck "override" "'$o' '$d' '$k' '$x'"
 
 # (2) the reducers on traces with the new lines: tools/gateaudit (built with TamaGo's go; skipped with a message
 # when that is missing) and test/gate/audit.awk (GATE_AUDIT_AWK=1's reducer, run by awk -v root=...)
