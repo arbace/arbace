@@ -30,6 +30,7 @@ run bogus-jar-fails 1 FROZEN_JAR="$scratch/bogus.jar"
 run bogus-oracle-jar-fails 1 ARBACE_ORACLE_JAR="$scratch/bogus.jar"
 run unpinned-tag-fails 1 FROZEN_TAG=my-tag
 run unpinned-tag-allowed 0 FROZEN_TAG=my-tag FROZEN_ALLOW_UNPINNED=1
+run unpinned-refused-in-gate 1 FROZEN_TAG=my-tag FROZEN_ALLOW_UNPINNED=1 GATE_EXE=/x
 cp "$scratch/good.jar" "$scratch/unpinned.jar"
 run unpinned-name-fails 1 FROZEN_JAR="$scratch/unpinned.jar"
 

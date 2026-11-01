@@ -52,7 +52,10 @@ frozen_pin() {
     want=$(sed -n "s/^\([0-9a-f]\{64\}\)  $name\$/\1/p" "$root/test/oracle/frozen-jar.sha256")
   got=$(sha256sum "$jar" | cut -d' ' -f1)
   if [ -z "$want" ]; then
-    if [ "${FROZEN_ALLOW_UNPINNED:-}" = 1 ]; then
+    if [ "${FROZEN_ALLOW_UNPINNED:-}" = 1 ] && [ -n "${GATE_EXE:-}" ]; then
+      echo "frozen_jar: FROZEN_ALLOW_UNPINNED is refused inside the gate (a pass would be recorded at the pinned key on $name)" >&2
+      return 1
+    elif [ "${FROZEN_ALLOW_UNPINNED:-}" = 1 ]; then
       echo "frozen_jar: warning: no pinned hash for $name in test/oracle/frozen-jar.sha256 (it is $got)" >&2
     else
       echo "frozen_jar: no pinned hash for $name in test/oracle/frozen-jar.sha256 (it is $got; FROZEN_ALLOW_UNPINNED=1 to use it)" >&2
