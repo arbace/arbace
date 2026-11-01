@@ -7,6 +7,9 @@ export TMPDIR=${TMPDIR:-$here/.tmp/tmp}
 mkdir -p "$TMPDIR"
 T=$here/.tmp/host-seed-test
 rm -rf "$T"; mkdir -p "$T"
+# the fake root a repository of its own: under the checkout's .tmp/, git's common dir would be the checkout's,
+# and GTS82 (a) (arbace_host_exe in a linked worktree) would take it for a linked worktree and refuse
+git init -q "$T" || { echo "FAIL git init $T"; exit 1; }
 fail=0
 ok() { echo "ok   $*"; }
 bad() { echo "FAIL $*"; fail=1; }
