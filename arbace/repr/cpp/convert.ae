@@ -350,6 +350,39 @@
   (let [v (big (:value n)) t (qt n)]
     (if (= t "int") v (list 'lit (type-of t) v))))
 
+;; CP131 (b): the implicit array size of `new A` (A a typedef of an array type)
+(defn- new-implicit-size?
+  "Whether the first child of an array new is clang's implicit size, an IntegerLiteral written nowhere: its source text is not a number."
+  [x]
+  (and x (= (kind x) "IntegerLiteral")
+       (let [tx (ntext x)] (not (and tx (re-matches #"[0-9][0-9a-zA-Z_'.]*" tx))))))
+
+(defn- new-type-text
+  "The allocated type of a new expression as written: the source text after `new` (and the placement arguments) up to the initializer."
+  [n]
+  (let [^String tx (ntext n)
+        m (when tx (re-find #"^(::\s*)?new\b\s*" tx))
+        _ (when-not m (gap :new "the text of a new expression"))
+        i0 (count (first m))
+        i1 (if (and (:isPlacement n) (< i0 (count tx)) (= \( (.charAt tx (int i0))))
+             (loop [k (inc i0) d 1]
+               (cond (>= k (count tx)) (gap :new "the placement arguments' text")
+                     (= \( (.charAt tx (int k))) (recur (inc k) (inc d))
+                     (= \) (.charAt tx (int k))) (if (= d 1) (loop [j (inc k)] (if (and (< j (count tx)) (Character/isWhitespace (.charAt tx (int j)))) (recur (inc j)) j))
+                                                  (recur (inc k) (dec d)))
+                     :else (recur (inc k) d)))
+             i0)
+        i2 (loop [k i1 a 0]
+             (if (>= k (count tx)) k
+                 (let [c (.charAt tx (int k))]
+                   (cond (= c \<) (recur (inc k) (inc a))
+                         (= c \>) (recur (inc k) (max 0 (dec a)))
+                         (and (zero? a) (#{\( \{ \[} c)) k
+                         :else (recur (inc k) a)))))
+        ty (str/trim (subs tx (int i1) (int i2)))]
+    (when (or (empty? ty) (str/starts-with? ty "(")) (gap :new "the allocated type's text"))
+    (type-of ty)))
+
 (defn- char-lit [n]
   (let [v (long (:value n)) t (qt n)]
     (cond
@@ -760,9 +793,13 @@
           "CXXNewExpr"
           (let [pt (type-of (qt n))
                 _ (when-not (and (seq? pt) (= (first pt) '*)) (gap :new "the allocated type"))
-                t (second pt)
                 ks (vec (kids n))
-                [size ks] (if (:isArray n) [(ex (first ks)) (subvec ks 1)] [nil ks])
+                ;; CP131 (b): `new A` with `typedef int A[10]` has an implicit array size, an IntegerLiteral whose range is the
+                ;; type name's token (its text is not a number): not an array new as written, the type is the source text's
+                implicit (and (:isArray n) (new-implicit-size? (first ks)))
+                t (if implicit (new-type-text n) (second pt))
+                [size ks] (if (and (:isArray n) (not implicit)) [(ex (first ks)) (subvec ks 1)]
+                              [nil (if implicit (subvec ks 1) ks)])
                 ;; the children are the array size, the initializer, then the placement arguments
                 has-init (boolean (#{"call" "list"} (:initStyle n)))
                 ;; the placement arguments are the last children, as many as operator new takes after the size
@@ -783,7 +820,7 @@
                        "list" (let [x (strip (first ks))]
                                 (apply mk 'cpp/brace (if (= (kind x) "InitListExpr") (init-list x) (construct-args x))))
                        nil)
-                f (if (:isArray n)
+                f (if (and (:isArray n) (not implicit))
                     (if init (mk 'cpp/new-array t size init) (mk 'cpp/new-array t size))
                     (if init (mk 'cpp/new t init) (mk 'cpp/new t)))
                 f (if place (with-meta (apply list (concat f [:place place])) (meta f)) f)]
