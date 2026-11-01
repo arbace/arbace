@@ -15,3 +15,6 @@ T(1.0L,(_Float64x)1,long double);
 T((_Float64x)1,1.0L,long double);
 T((_Float128)1,(_Float64x)1,_Float128);
 T(1.0f,(_Float32x)1,_Float32x);
+/* review 086's finding 4: _Decimal128 over _Decimal64x, in either order */
+T((_Decimal64x)1,(_Decimal128)1,_Decimal128);
+T((_Decimal128)1,(_Decimal64x)1,_Decimal128);
