@@ -55,4 +55,7 @@ rt w7 "$t/rec.edn" --corpus tc --record-oracle; st=$?
 [ $st = 0 ] && grep -q '"rej.cpp"' "$t/rec.edn" && grep -q ':timeout' "$t/rec.edn" && ok "--record-oracle records this run" || bad "record: exit $st, $(cat "$t/rec.edn" 2>&1 | head -5)"
 rt w8 "$t/rec.edn" --corpus tc; st=$?
 [ $st = 0 ] && ok "a run against its own record passes" || bad "against the record: exit $st, $(vs w8)"
+# a second corpus recorded into the same file keeps the first (g++.dg's record aborted on sorting two entries)
+rt w9 "$t/rec.edn" --corpus tc2 --record-oracle; st=$?
+[ $st = 0 ] && grep -q '"tc"' "$t/rec.edn" && grep -q '"tc2"' "$t/rec.edn" && ok "a second corpus is recorded beside the first" || bad "second corpus: exit $st, $(tail -3 "$t/w9.log")"
 finish
