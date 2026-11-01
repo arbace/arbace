@@ -82,28 +82,32 @@ test_no_forms() {
 }
 t no-forms-only-for-invalid-programs test_no_forms
 
-# finding 6: the corpora's key covers goi's REPL, the forms of go/parser and the tools' host
+# finding 6: the corpora's key covers goi's REPL, the forms of go/parser, box.ae and the reader chosen, not the host's bytes (069 A)
 test_corpus_key() {
   load corpus_key || return 1
+  unset REPR_GO_READER
   local root=$tmp/ck goroot=$tmp/ck/goroot hexe=$tmp/ck/host k0 k1 d
   mkdir -p "$root/seed" "$goroot" "$root/arbace/repr/go" "$root/arbace/go/check" "$root/arbace/box" "$root/bin/lib/repr-go" \
     "$root/tools/godump" "$root/tools/gocmp" "$root/go/arbace/repr" "$root/tamago/goroot/go/go/parser" "$root/tamago/goroot/go/go/scanner" \
     "$root/tamago/goroot/go/go/ast" "$root/tamago/goroot/go/go/token"
   echo go1 > "$goroot/VERSION"; echo pin > "$root/seed/goroot-test.sha256"; echo host0 > "$hexe"
   : > "$root/arbace/repr/go.ae"; : > "$root/arbace/go/check.ae"; : > "$root/arbace/box/plan.ae"; : > "$root/bin/repr-go"
-  : > "$root/bin/lib/repr-go-host.bash"
+  : > "$root/bin/lib/repr-go-host.bash"; : > "$root/arbace/box.ae"
   for d in go.ae go/repl.ae go/run.ae go/build.ae go/generic.ae go/table.ae go/embed.ae; do : > "$root/arbace/$d"; done
   : > "$root/tamago/goroot/go/go/parser/parser.ae"
   k0=$(corpus_key)
-  for d in arbace/go/repl.ae arbace/go/table.ae arbace/go.ae tamago/goroot/go/go/parser/parser.ae; do
+  for d in arbace/go/repl.ae arbace/go/table.ae arbace/go.ae arbace/box.ae tamago/goroot/go/go/parser/parser.ae; do
     echo "changed $d" >> "$root/$d"; k1=$(corpus_key)
     [ "$k0" != "$k1" ] || { echo "the key ignores $d" >&2; return 1; }
     k0=$k1
   done
+  # the host's bytes are no part of the key: the interp and the AOT steps run on different hosts over one corpora tree
   echo host1 > "$hexe"; k1=$(corpus_key)
-  [ "$k0" != "$k1" ] || { echo "the key ignores the host" >&2; return 1; }
+  [ "$k0" = "$k1" ] || { echo "the key follows the host executable" >&2; return 1; }
+  REPR_GO_READER=helper k1=$(corpus_key)
+  [ "$k0" != "$k1" ] || { echo "the key ignores REPR_GO_READER" >&2; return 1; }
 }
-t corpus-key-covers-repl-parser-and-host test_corpus_key
+t corpus-key-covers-reader-sources-not-host test_corpus_key
 
 # 069 B: the two go-command programs are skipped by gc's own run failing here, so no known entry stands for them
 test_no_dead_known() {
