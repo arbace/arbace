@@ -26,9 +26,12 @@ limited_cpu() {
   local cpu=$1 wall=$2; shift 2
   if [ -n "${ARBACE_CPU_LOG:-}" ]; then
     # GTS33 (a)'s measurement (bin/gate --clean): each program's status, wall, user and system seconds
-    # and command appended to ARBACE_CPU_LOG, one line each (a time killed by the wall cap writes none)
+    # and command appended to ARBACE_CPU_LOG, one line each. time runs timeout, not the reverse (review 075,
+    # finding 2): the program stays timeout's direct child, so its -k SIGKILL reaches a program that ignores
+    # SIGTERM (137, as without the log; time inside timeout died at the SIGTERM, timeout returned 124 without
+    # -k and left the program orphaned, a hang under strace -f) and a wall-cap row has its times
     local tf=$ARBACE_CPU_LOG.$BASHPID st
-    timeout -k 5 "$wall" /usr/bin/time -f '%e %U %S' -o "$tf" bash -c 'ulimit -t "$1"; shift; exec "$@"' limited "$cpu" "$@"; st=$?
+    /usr/bin/time -f '%e %U %S' -o "$tf" timeout -k 5 "$wall" bash -c 'ulimit -t "$1"; shift; exec "$@"' limited "$cpu" "$@"; st=$?
     # time exits with the signal's number when the program was killed: the status a shell gives
     local sig; sig=$(sed -n 's/^Command terminated by signal \([0-9]*\)$/\1/p' "$tf" 2>"$tf.err")
     [ -n "$sig" ] && [ "$st" = "$sig" ] && st=$((128 + sig))
