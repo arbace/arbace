@@ -4010,7 +4010,8 @@ the include cases.
 ### F79.2 Second round (findings 3 to 6)
 
 - **3, a system header is the directory it was found through.** pp records `:system` on the `enter` record (the directory is one of the system list; a quoted
-  include found in the including file's directory is not, even when it is `.`), the unit keeps it, and the checker reads it instead of a path prefix. Fixes `-isystem .`
+  include found in the including file's directory takes the *including* file's status, so it is non-system when the includer is the main file, even in `.`, and
+  system beside a system header: corrected by F86, finding 1), the unit keeps it, and the checker reads it instead of a path prefix. Fixes `-isystem .`
   (a false error) and nested `-I sy -isystem sy/sub` / `-isystem sy -I sy/sub` (missed errors). Test `system-header-by-the-directory-found-through` (six cases; four failed before).
 - **4, the `bf16` pedwarn** moved from the raw tokens (`pedantic.ae`) to `lit-form`: it is judged on the constants the preprocessor delivers, so none in `#if 0` or in an
   unused macro, the use's line for a macro's, `.5bf16` and `BF16` included. Test `bf16-suffix-pedwarn` extended (5 7 8 9 15, as gcc).
@@ -4034,6 +4035,28 @@ made-up work directories of `judge-record-after-subset` and `pass-to-unsupported
 
 ### F79.4 Open and rule slips
 
-Open: CS235 (b) (`:ld` through arithmetic); `-I-` and the dialects of `-iquote` beyond the first pick; `bf16` in `#if` conditions of the main file's own tokens
-is not special (it is a constant like any); the `f16` pedwarn before C23 (`-std=c17`: "non-standard suffix before C23"); the gcc corpus's use of the include flags
-(not checkable here: the dg record is unchanged). Rule slips: none in these two rounds.
+Open: CS235 (b) (`:ld` through arithmetic, `?:` and constexpr entries; `0.1L * 1 != 0.1`, `x != 0.1` for a constexpr long double `x`, `1e400L < 1e5000L` stay false errors,
+and the kinds of F86's finding 2 belong with them); `-I-` (silently ignored, see F86); `bf16` in `#if` conditions is not special (gcc says "floating constant in preprocessor
+expression" anyway); the `-std=c17` pedwarns, see F86; the gcc corpus's use of the include flags (not checkable here: the dg record is unchanged). Rule slips: none in these
+two rounds.
+
+### F86 Re-review 086's fixes (2026-11-02)
+
+Report 086 (the VM) found F79 mergeable with one correction. Each fix is a commit with a judge-test test that failed before and passes; probes with gcc 15.2 here (x86-64).
+
+- **1, the including file's own directory.** In libcpp the current-directory entry takes the *includer's* system status, so `-isystem sy`, `sy/a.h` with `#include "b.h"`
+  makes `sy/b.h` a system header (gcc 0 errors; `-I sy`: 1). pp keeps the status on the `Included` slot and gives the `""` entry the including unit's. For the checker a nested
+  header is one unit with its includer, so the effect shows on the preprocessor's `enter` records, which the test (`system-header-by-the-directory-found-through`, a seventh case)
+  asserts beside the read's errors; the error count alone was 0 before and after, so the checker-level false error the report predicted did not occur (the unit takes `a.h`'s status).
+- **2, the exact comparison and the kinds wider than double.** `_Float64x`, `_Float128` and `_Float128x` operands are skipped like long double ones (`0.1L == (_Float128)0.1L`);
+  test `long-double-compared-exactly`, four lines.
+- **3, `-iquote` of a system directory** is dropped from the quote chain (gcc's `remove_duplicates`): `-isystem s -iquote s -I i` finds `i/zzh.h`. Three cases added to
+  `include-search-is-gccs`. (F79's "dialects of `-iquote` beyond the first pick" was too weak: the first pick differed.)
+- **4, `_Decimal128` over `_Decimal64x`** in either order (`equal-rank-float-types`, two lines).
+- **5, the `-std=c17` pedwarns, stated right:** gcc 15 gives, for every `_FloatN`/`_FloatNx` suffix (`f16 f32 f64 f128 f32x f64x`), "non-standard suffix on floating constant before
+  C23" and, for every such type, "ISO C does not support the '_FloatN' type before C23" (with `-pedantic-errors` in `c11`, `c17`, `gnu17`). The checker has neither: missed errors only.
+- **6, `-I-`** is ignored, not refused: a file using it is judged with a wrong search order (079's table). Refusing it (a class of its own) is the cheap option and is proposal CS239;
+  not done.
+
+Proposal **CS239 `-I-`.** Options: (a) refuse it as unsupported so such files land in a class instead of a wrong verdict (recommended); (b) model the quote/bracket split;
+(c) leave. None decided.
