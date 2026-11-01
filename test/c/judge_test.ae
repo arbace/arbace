@@ -449,6 +449,29 @@
       (finally
         (doseq [f (reverse (file-seq work))] (.delete ^java.io.File f))))))
 
+(deftest gcc-output-kept-whole
+  ;; CS201: gcc's output of a file with many warnings (c23-ucn-2: 186 lines, errors at its end) was cut at 20,000 bytes; the
+  ;; diagnostics are filtered now, not truncated, so the late errors are there. 8,000 warnings (0.7 MB, far over the old 20,000 bytes) and then an error:
+  (let [script (str "root=$PWD; . bin/lib/ci/gcc-diag.bash; "
+                    "{ i=0; while [ $i -lt 8000 ]; do echo \"t.c:$i:5: warning: a long warning line of the output $i, to make it big enough ok\"; "
+                    "echo \"  $i | #if U'x'\"; i=$((i+1)); done; echo \"t.c:972:5: error: late\"; echo \"t.c:973:1: fatal error: x: No such file or directory\"; "
+                    "echo 'compilation terminated.'; } | gcc_diag")
+        out (:out (sh-out-env {} ["bash" "-c" script]))
+        ls (str/split-lines out)]
+    (is (some #{"t.c:972:5: error: late"} ls))
+    (is (some #{"t.c:973:1: fatal error: x: No such file or directory"} ls))
+    (is (not-any? #(str/starts-with? % " ") ls))
+    (is (not-any? #{"compilation terminated."} ls))))
+
+(deftest fatal-error-at-an-expected-line
+  ;; CS201: `#embed "no-such-file"` is a fatal error on the line its dg-error expects: gcc agrees with the directives
+  (let [d (dg/analyze "/* { dg-do preprocess } */\n/* { dg-options \"\" } */\n\n#embed \"no-such-file\" /* { dg-error \"no-such-file: No such file or directory\" } */\n")
+        g (dg/gcc-lines "embed-7.c:4:8: fatal error: no-such-file: No such file or directory\n" "embed-7.c")]
+    (is (:fatal g))
+    (is (= :yes (dg/gcc-agrees d g)))
+    ;; a fatal error on another line than the directive's is still a difference
+    (is (not= :yes (dg/gcc-agrees d (dg/gcc-lines "embed-7.c:5:8: fatal error: x: No such file or directory\n" "embed-7.c"))))))
+
 (deftest main-file-is-the-whole-path
   ;; suffix.c includes xsuffix.c, whose name ends with the main's: its error is another file's
   (let [r (read-one "suffix.c" :compile)]
