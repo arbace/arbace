@@ -50,4 +50,17 @@ cat > "$res/tc-all.edn" <<'EOR'
 EOR
 mk "$t/w5" a.C:p b.C:p; echo tc-all > "$t/w5/list.key"; judge "$t/w5"; st=$?
 [ $st = 1 ] && grep -q 'now pass: write the record again' "$t/w5.log" && ok "an improvement fails in a whole-corpus run" || bad "whole-corpus improvement: exit $st, $(tail -2 "$t/w5.log")"
+# report 066's R4, R5: a recorded known that now fails is a failure, not a "change" (the count means what it says); the message for an improvement asks for --record-results alone
+mk "$t/w6" a.C:p b.C:p; echo tc-all > "$t/w6/list.key"; judge "$t/w6"; st=$?
+grep -q -- '(--record-results)' "$t/w6.log" && ! grep -q -- 'replace-results' "$t/w6.log" && ok "the improvement message asks for --record-results alone" || bad "message: $(tail -2 "$t/w6.log")"
+cat > "$res/tc-fail.edn" <<'EOR'
+{:key "tc-fail"
+ :files {
+  "tc/a.C" :pass
+  "tc/b.C" [:known :forms-differ]
+ }}
+EOR
+echo '{:files {}}' > "$t/known-none.edn"
+mk "$t/w7" a.C:p b.C:d; echo tc-fail > "$t/w7/list.key"; arbace_tool -m arbace.repr.cpp.rtcheck judge "$t/w7" "$t/known-none.edn" no-objects - "$res" check > "$t/w7.log" 2>&1; st=$?
+[ $st = 1 ] && grep -q ':changed 0' "$t/w7/summary.edn" && ok "a recorded known that now fails is not counted as changed" || bad "known to fail: exit $st, $(grep -o ':changed [0-9]*' "$t/w7/summary.edn")"
 finish
