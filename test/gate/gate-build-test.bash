@@ -62,7 +62,7 @@ else bad "a failed build: status $(status), $(ls "$ARBACE_GATE_EXES" | tr '\n' '
 # holds the old one. The builds are stubbed in the tree's copy of the script (functions defined before its
 # dispatch); gate_build is the real one. arbace_version is called after the copying and before the swap.
 sed -i '/^case \${1:-} in$/i\
-build() { mkdir -p "$dir/amd64/x" "$dir/aot" "$dir/j2g" "$dir/j2g-tests"; echo new > "$dir/amd64/arbace"; echo new > "$dir/amd64/arbace-tests"; : > "$dir/aot.key"; : > "$dir/aot.runtime"; }\
+build() { [ -z "${BUILD_LOG:-}" ] || echo b >> "$BUILD_LOG"; sleep "${BUILD_SLEEP:-0}"; mkdir -p "$dir/amd64/x" "$dir/aot" "$dir/j2g" "$dir/j2g-tests"; [ -z "${STUB_NO_AOT:-}" ] || rm -rf "$dir/aot"; echo new > "$dir/amd64/arbace"; echo new > "$dir/amd64/arbace-tests"; chmod +x "$dir/amd64/arbace" "$dir/amd64/arbace-tests"; : > "$dir/aot.key"; : > "$dir/aot.runtime"; }\
 build_tests() { :; }\
 arbace_version() { ls "$cache/amd64" > "'"$T"'/during.ls" 2>&1; ls "$cache" >> "'"$T"'/during.ls" 2>&1; echo version; }' "$r/bin/arbace-go"
 KEY=$("$r/bin/arbace-go" --gate-key 2>"$T/key.err"); K20=${KEY:0:20} # the script is another file now
@@ -86,4 +86,18 @@ for c in "$T/precious" "$T/exes-parent" "$T/precious/" "$T/exes-parent/exes/..";
   if [ "$(status)" != 0 ] && grep -q "not removed" "$T/out" && [ -f "$T/precious/file" ] && [ -f "$T/exes-parent/other" ]; then ok "an override refused and kept: $c"
   else bad "an override accepted: $c (status $(status))"; fi
 done
+
+# two concurrent misses of one key: both succeed, one build, nothing left behind (review 048, N2)
+mkdir_exe "$ARBACE_GATE_EXES/$K20" stale
+rm -f "$T/builds"; leftovers() { ls -A "$ARBACE_GATE_EXES" | grep '\.\(tmp\|old\)\.' | tr '\n' ' '; }
+for n in 1 2 3; do
+  mkdir_exe "$ARBACE_GATE_EXES/$K20" stale; rm -f "$T/builds"
+  ( cd "$r" && BUILD_LOG=$T/builds BUILD_SLEEP=0.4 "$r/bin/arbace-go" --gate-build > "$T/c1.out" 2>&1; echo $? > "$T/c1.status" ) &
+  ( cd "$r" && BUILD_LOG=$T/builds BUILD_SLEEP=0.4 "$r/bin/arbace-go" --gate-build > "$T/c2.out" 2>&1; echo $? > "$T/c2.status" ) &
+  wait
+  if [ "$(cat "$T/c1.status") $(cat "$T/c2.status")" = "0 0" ] && [ "$(wc -l < "$T/builds")" = 1 ] && [ -z "$(leftovers)" ] \
+     && [ "$(cat "$ARBACE_GATE_EXES/$K20/key")" = "$KEY" ]; then ok "two concurrent misses, round $n: both 0, one build, no leftovers"
+  else bad "two concurrent misses, round $n: $(cat "$T/c1.status") $(cat "$T/c2.status"), builds $(wc -l < "$T/builds"), left: $(leftovers)"; fi
+done
+
 exit $fail
