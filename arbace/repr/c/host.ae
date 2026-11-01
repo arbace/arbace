@@ -144,6 +144,14 @@
   ([^String text] (dg-options text "."))
   ([^String text ^String srcdir] (:opts (dg-options-info text srcdir))))
 
+(defn- dir-opts
+  "The directories `flag` (-isystem, -iquote, -idirafter) names in `opts`, in order: `flag DIR` or `flagDIR` (`flag=DIR` is a
+  sysroot's, which gcc without one ignores)."
+  [opts ^String flag]
+  (vec (keep-indexed (fn [i ^String o] (cond (= o flag) (nth opts (inc i) nil)
+                                             (and (.startsWith o flag) (not (.startsWith o (str flag "=")))) (subs o (count flag))))
+                     opts)))
+
 (defn file-config
   "A file's configuration from `opts` (a compiler's options) and `default-std`: {:std :pre :inc
   :embed-dirs :args}, :pre the lines its -D, -U and -O add to the predefined macros, :args the
@@ -166,7 +174,7 @@
           (.startsWith o "-U")
           (let [[v more] (arg "-U")] (recur more std (conj pre (str "#undef " v)) incs embed (conj args (str "-U" v))))
           (.startsWith o "-I")
-          (let [[v more] (arg "-I")] (recur more std pre (conj incs v) embed (conj args (str "-I" v))))
+          (let [[v more] (arg "-I")] (recur more std pre (if (= v "-") incs (conj incs v)) embed (conj args (str "-I" v))))
           (re-matches #"--?embed-dir(ectory)?(=.*)?" o)
           (let [[v more] (if-let [[_ _ eq] (re-matches #"--?embed-dir(ectory)?(=.*)" o)]
                            [(subs eq 1) more]
@@ -183,10 +191,11 @@
           :else (recur more std pre incs embed args)))
       {:std std :pre (str/join (map #(str % "\n") (remove #{::trigraphs} pre))) :inc incs :embed-dirs embed :args args
        ;; CS231: -isystem DIR (or -isystemDIR): searched after -I, and a system directory (gcc ignores -isystem=DIR, a sysroot's)
-       :isystem (vec (keep-indexed (fn [i ^String o] (cond (= o "-isystem") (nth opts (inc i) nil)
-                                                            (and (.startsWith o "-isystem") (not (.startsWith o "-isystem=")))
-                                                            (subs o 8)))
-                                   opts))
+       :isystem (dir-opts opts "-isystem")
+       ;; review 079's finding 2: -iquote DIR (quoted includes only, after the including file's directory) and -idirafter DIR
+       ;; (a system directory searched after the others)
+       :iquote (dir-opts opts "-iquote")
+       :idirafter (dir-opts opts "-idirafter")
        :trigraphs (boolean (some #{::trigraphs} pre))
        ;; Arbace (CS132): the checker's pedantic mode, only what the file's options ask (-pedantic-errors: errors)
        :pedantic (cond (some #{"-pedantic-errors"} opts) :errors (some #{"-pedantic"} opts) :warn)
@@ -201,13 +210,27 @@
   "The standards at which gcc reads trigraphs in phase 1 (the ISO ones before C23)."
   #{"c89" "c94" "c99" "c11" "c17"})
 
+(defn- norm-dir
+  "A directory name cleaned for comparison (./sys, sys/ and sys are one)."
+  [^String d]
+  (let [n (str (.normalize (java.nio.file.Paths/get d (make-array String 0))))] (if (= n "") "." n)))
+
+(defn sys-dirs
+  "The system directories of a file read with `fc`, in gcc's order: -isystem, the host's list, -idirafter."
+  [host fc]
+  (vec (concat (:isystem fc) (:search host) (:idirafter fc))))
+
 (defn config
   "The preprocessor's configuration (arbace.repr.c.pp) for a file of configuration `fc` (file-config's)
   read from `base`."
   [host fc ^String base]
   {:predefined (str (get (:predefined host) (:std fc)) (:pre fc))
-   :include (:inc fc)
-   :sys (vec (concat (:isystem fc) (:search host)))
+   ;; gcc's chains (review 079's finding 2): a -I directory that names a system directory (the -isystem ones, the host's list,
+   ;; -idirafter) is dropped, a duplicate keeps its first place; -iquote's directories come after the including file's own
+   :include (let [sys (set (map norm-dir (sys-dirs host fc)))]
+              (vec (distinct (remove #(contains? sys (norm-dir %)) (:inc fc)))))
+   :iquote (vec (distinct (:iquote fc)))
+   :sys (vec (distinct (sys-dirs host fc)))
    :std (keyword (:std fc))
    :has (:has host)
    :embed-dirs (:embed-dirs fc)

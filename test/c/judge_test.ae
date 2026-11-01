@@ -500,6 +500,44 @@
     ;; an angled include searches -I too (gcc), and the header there is not a system header: its pedwarn is an error
     (is (= [:ok 1] ((juxt :status :other) (rd (str "-I" dir)))))))
 
+(defn- found-headers
+  "The paths (relative to test/c/judge/inc) of the header units the preprocessor finds for the main file `main` of
+  test/c/judge/inc/ with the directories of test/c/judge/inc given as `-iquote d`-style options (each option's directory name
+  is a name below inc/)."
+  [main & opts]
+  (let [inc (str judge-dir "/inc")
+        h (host/load-host "test/c/host")
+        opts (mapv (fn [o] (if (re-matches #"[a-z0-9]+" o) (str inc "/" o) o)) opts)
+        fc (host/file-config (vec (concat ["-std=c23"] opts)) "gnu23")
+        rd (rc/read-c (host/config h fc inc) fc main false)]
+    (vec (sort (map (fn [u] (str/replace (str (:path u)) (str inc "/") "")) (vals (:units rd)))))))
+
+(defn- found-vars
+  "The names of the variables the header units of `found-headers`' read declare, sorted."
+  [main & opts]
+  (let [inc (str judge-dir "/inc")
+        h (host/load-host "test/c/host")
+        opts (mapv (fn [o] (if (re-matches #"[a-z0-9]+" o) (str inc "/" o) o)) opts)
+        fc (host/file-config (vec (concat ["-std=c23"] opts)) "gnu23")
+        rd (rc/read-c (host/config h fc inc) fc main false)]
+    (vec (sort (map str (for [u (vals (:units rd)) f (:forms u) :when (and (seq? f) (= 'c/var (first f)))] (second f)))))))
+
+(deftest include-search-is-gccs
+  ;; review 079's finding 2, each case run with gcc 15.2 (-M): -iquote after the including file's directory and for quoted includes only,
+  ;; -idirafter last, a -I that names a system directory dropped, #include_next continuing in -I
+  (is (= ["q/zzh.h"] (found-headers "main-q.c" "-iquote" "q" "-I" "i" "-isystem" "s" "-idirafter" "a")))
+  (is (= ["i/zzh.h"] (found-headers "main-a.c" "-iquote" "q" "-I" "i" "-isystem" "s" "-idirafter" "a")))
+  (is (= ["a/zzh.h"] (found-headers "main-a.c" "-idirafter" "a")))
+  (is (= ["a/zzh.h"] (found-headers "main-q.c" "-idirafter" "a")))
+  (is (= ["i2/zzh.h"] (found-headers "main-a.c" "-I" "i" "-I" "i2" "-isystem" "i")))
+  (is (= ["i/zzh.h"] (found-headers "main-a.c" "-I" "i" "-isystem" "s" "-I" "s")))
+  (is (= ["a/zzh.h"] (found-headers "main-a.c" "-idirafter" "a" "-I" "a")))
+  (is (= ["i/zzh.h"] (found-headers "main-a.c" "-I" "i" "-I" "i" "-I" "i2")))
+  ;; the unit of n1/nx.h holds n2's variable too: its #include_next found n2/nx.h (gcc: n1/nx.h n2/nx.h)
+  (is (= ["n1" "n2"] (found-vars "main-n.c" "-I" "n1" "-I" "n2")))
+  (is (= ["n1" "n2"] (found-vars "main-nq.c" "-I" "n1" "-I" "n2")))
+  (is (= ["q/zzh.h"] (found-headers "main-q.c" "-iquote" "q" "-I" "i"))))
+
 (deftest run-budget-per-program
   ;; CS216: a program listed in test/c/check-budget.edn (CI_BUDGETS) has more than the default 10 s; a stand-in cirun takes 12 s
   (let [root (System/getProperty "user.dir")
