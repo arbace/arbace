@@ -44,7 +44,7 @@ out=$(cd "$root" && bin/oi suite rollup 2>&1); st=$?
 expect "rollup: a stale roles.tsv is regenerated, not judged" 0 'testsuite: 0 files without a result or a class' "$out" $st
 
 # finding 6: a program with an environment runs under OI_TIMEOUT (1 s: the stdlib's load alone takes longer), as a row "timeout"
-out=$(cd "$root" && OI_TIMEOUT=1 bin/oi check --aot --only 'tool-ocamltest-var-expansion/subst1' 2>&1 | grep -a 'subst1'); st=$?
+out=$(cd "$root" && OI_TIMEOUT=1 O2J_LOAD_ALLOWANCE=0 bin/oi check --aot --only 'tool-ocamltest-var-expansion/subst1' 2>&1 | grep -a 'subst1'); st=$?
 expect "aot: a program with an environment is under the time limit" 1 'timeout 1s' "$out" $st
 
 # finding 7 (and 2): a known entry is kept only for the kind of failure it was made for; a timeout is a speed class only for the listed programs
@@ -77,6 +77,17 @@ out=$(judge_aot judge "$p/check.tsv" "$p/corpus.tsv" "$p/refs.edn" "$p/oi.tsv" "
 printf 'a\t2\tdef456\t1\t1.0\t\nb\t0\th\t1\t1.0\t\nc\t0\th\t1\t1.0\t\n' > "$p/check.tsv"; cp "$p/check.tsv" "$p/oi.tsv"
 out=$(judge_oi judge "$p/check.tsv" "$p/corpus.tsv" "$p/refs.edn" "$p/oi-results.edn" "$p/classes.edn"); expect "oi: a known status with other output is failing" 1 'FAILING a: fail status 2' "$out" $?
 out=$(judge_aot judge "$p/check.tsv" "$p/corpus.tsv" "$p/refs.edn" "$p/oi.tsv" "$p/aot-results.edn" "$p/classes.edn"); expect "aot: a known status with other output is failing" 1 'FAILING a: fail status 2' "$out" $?
+
+# re-review 030's finding 5: both levels timed out: the OI column is "-" (two partial outputs are not compared); the rerun's CPU limit has
+# the library's load on top of the program's (bin/oi aot-cpu: the CPU seconds and the wall cap)
+q=$W/dbl; mk "$q"
+printf '[{:id :speed :match [#"^slow timeout "]}]\n' > "$q/classes.edn"; printf '[]\n' > "$q/aot-known.edn"; printf '["a"]\n' > "$q/aot-slow.edn"
+printf '[\n ["a" "slow" "timeout 120s of CPU" "-"]\n ["b" "pass" "" "same"]\n ["c" "pass" "" "same"]\n]\n' > "$q/aot-results.edn"
+printf 'a\t124\tx1\t5\t120\ttimeout 120s of CPU\nb\t0\th\t1\t1.0\t\nc\t0\th\t1\t1.0\t\n' > "$q/check.tsv"
+printf 'a\t124\ty2\t7\t120\ttimeout 120s\nb\t0\th\t1\t1.0\t\nc\t0\th\t1\t1.0\t\n' > "$q/oi.tsv"
+out=$(judge_aot judge "$q/check.tsv" "$q/corpus.tsv" "$q/refs.edn" "$q/oi.tsv" "$q/aot-results.edn" "$q/classes.edn"); expect "aot: a double timeout is not compared with oi's partial output" 0 'o2j: 2 pass' "$out" $?
+out=$(cd "$root" && bin/oi aot-cpu); expect "aot: the rerun's CPU limit is the program's and the library's load" 0 '^140 560$' "$out" $?
+out=$(cd "$root" && OI_TIMEOUT=60 O2J_LOAD_ALLOWANCE=5 bin/oi aot-cpu); expect "aot: the load allowance is a variable" 0 '^65 260$' "$out" $?
 
 # finding 9: bin/oi suite expect is a check: the run against the record, the committed record untouched without --record
 only='basic/patmatch_for_multiple'
