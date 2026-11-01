@@ -162,11 +162,11 @@ The C forms are those of doc/c/SPEC.md, printed by repr/c's printer at `:gnu23` 
   `std::thread` runs on musl's pthreads: until then plain operations, CP1) as gcc's `__atomic_*` builtins with the IR's
   orderings (`unordered` and `monotonic` `__ATOMIC_RELAXED` 0, `acquire` 2, `release` 3, `acq_rel` 4, `seq_cst` 5, written as
   numbers): `load atomic`/`store atomic` `__atomic_load_n`/`__atomic_store_n` on an integer of 1 to 16 bytes or a pointer
-  (`volatile` kept in the pointer's type), the generic `__atomic_load`/`__atomic_store` through memory on a float;
+  (`volatile` kept in the pointer's type), the generic `__atomic_load`/`__atomic_store` through memory on a float (`volatile` kept there too, and on the generic exchange and the compare-exchange loop, F4);
   `atomicrmw` `__atomic_exchange_n` (`xchg`; the generic `__atomic_exchange` on a float) and `__atomic_fetch_add`, `_sub`,
   `_and`, `_or`, `_xor`, `_nand`, the others (`max`, `min`, `umax`, `umin`, `fadd`, `fsub`) a loop of the generic
   `__atomic_compare_exchange` on the old value (refreshed by a failed exchange), the rest refused (`:atomic`); `cmpxchg`
-  `__atomic_compare_exchange_n` into the result's two fields (`weak` kept, both orderings); `fence`
+  `__atomic_compare_exchange_n` into the result's two fields (`weak` kept; the failure ordering as written, the success ordering the join of the two, because LLVM allows a failure ordering stronger than the success one and gcc's documentation does not, report 043's F3); the libatomic entry points clang calls for an atomic of another size (`__atomic_load`, `__atomic_store`, ..., `__sync_*`) keep their linker names as `g$` identifiers with an asm label, because gcc reads the plain names as its builtins (F1); `fence`
   `__atomic_thread_fence`, `syncscope("singlethread")` `__atomic_signal_fence` (an operation of that scope stays a
   thread-wide atomic: stronger, the same result); `unreachable` as `__builtin_trap()`.
 - **Intrinsics** by a table: `memcpy`/`memmove`/`memset`, `lifetime.*` and the other hints (nothing), `expect`,

@@ -2348,3 +2348,61 @@ has its teeth.
   `test/gate/steps.edn` not touched (CP125 (b) is the coordinator's).
 - Scratch: `.tmp/cp12x/` (the round trips' work directories `rt-*` and logs, lower-check's `w-s2`, `w-lt`, the negative run's `neg-*`, the lists), `.tmp/cpp-gcc/`
   (g++.dg and g++.old-deja extracted), `.tmp/cppi/runtime` (at the key), `.tmp/cpp-selftest/`.
+
+## As built: report 043's fixes (2026-11-01)
+
+Report 043 (`/root/arbace/.tmp/mac-queue/reports/043-review-cpp-cp120.md`, the VM's review of CP120, CP121, CP124 and CP127 at `48e37de6`) found no wrong code for
+what clang writes for `std::atomic` on x86-64 and no fault in the trampoline or the migration; its six findings and one note:
+
+| # | finding | change | selftest (before → after) | commit |
+|---|---|---|---|---|
+| F1 | clang's size-generic atomic calls (`__atomic_load(3, p, o, 5)` for a 3-byte `std::atomic`) lowered to calls gcc rejects as misuses of its builtins | `c-global-name` gives every external named `__atomic_*` or `__sync_*` the `g$` identifier with the linker's name as an asm label, as it does for names C cannot take (`g$__atomic_load` ... `__asm__("__atomic_load")`); the other route, the sized builtins, would have turned a call that needs libatomic into an inline operation of a different shape | `atomic-libcalls` (new, lowers a unit with the calls and compiles it): 4 bad (gcc: `incorrect number of arguments to function '__atomic_load'`) → ok; the object calls `__atomic_load` | `fd2b61cf` |
+| F2 | CP161's reasoning was wrong | CP161 restated in place (it says what the entry used to say). On the amd64 host: `readelf -d` of libstdc++.so.6 lists only musl and libgcc_s; gcc 15.2.0 `-O0 -mcx16 -S` of `__atomic_load_n` on `unsigned __int128` still calls `__atomic_load_16@PLT`, as without the flag. So `-latomic` belongs in both link lines (the original's and g++'s `LIBS`, and `LOW_LIBS`) and `-mcx16` is dropped. Not built: CP161 stays a proposal | none (documentation) | `824625f9` |
+| F3 | `cmpxchg` with a failure ordering stronger than the success ordering relied on gcc's recovery | the success ordering passed is the join of the two (`order-join`: equal: itself; relaxed with x: x; seq_cst with x: seq_cst; else acq_rel), the failure ordering as written. The task asked for the failure order clamped to the success order; the report's reading is followed instead, because clamping the failure order down weakens what the program asked for (a `seq_cst` failure load becomes relaxed), while strengthening the success order is sound | `atomic-failure-order` (new: six pairs `monotonic seq_cst`, `monotonic acquire`, `acquire seq_cst`, `release acquire`, `acq_rel seq_cst`, `release monotonic`; gcc with `-Winvalid-memory-model -Werror`): 2 bad (pairs `0 5;0 2;2 5;3 2;4 5;3 0`, gcc: `failure memory model 'memory_order_seq_cst' cannot be stronger than success memory model 'memory_order_relaxed'`) → ok (`5 5;2 2;5 5;4 2;5 5;3 0`) | `65947fb5` |
+| F4 | `volatile` dropped on the generic builtins | the float load, store and exchange and the compare-exchange loop's place take `o` (the instruction's options) | `atomic-volatile-generic` (new): 5 bad → ok | `0b4d77fd` |
+| F5 | the results record held only `:pass` | a recorded `:known`, `:oracle-rejects` or `:oracle-fails` that is now another non-pass verdict fails (the 12th column `changed:REC>NOW`, the summary's `:changed`, the message names both); a move to `:pass` stays a counted improvement; the files' header says it | `results-nonpass` (new): 1 bad (`:oracle-rejects` to known exited 0) → ok; an improvement still exits 0 | `4b26364d` |
+| F6 | the record could go unheld or shrink without a failure | (1) a list whose key has an oracle record and no `roundtrip-results/KEY.edn` fails, unless the key is in the new `roundtrip-results/pending.edn` (`c-c++-common-every-10`, `libstdcxx-testsuite-every-40`: CP163 still to do), (2) `--record-results` from a run whose names are not the existing record's is refused unless `--replace-results`, (3) the redundant `(and record? (seq fails))` is gone. `oracle-record` follows (its corpora are pending in a results directory of its own) | `results-hold` (new): 2 bad of 5 checks (no failure without the file; a trimmed run overwrote the record) → ok | `3851b46d`, `1906df5a` |
+| F7 | info: `atomicrmw fmax`/`fmin`, `uinc_wrap`, `udec_wrap`, `usub_cond`, `usub_sat` are refused (`:atomic`), correctly | noted; a later build of `fmax`/`fmin` must use `__builtin_fmaxf`/`fminf` (maxnum semantics: a NaN operand is ignored), not `?:` | none | none |
+
+`LLVM.md` §7 says the F1, F3 and F4 behaviour.
+
+### Numbers (before → after)
+
+| check | before | after |
+|---|---|---|
+| `bin/cppi selftest` | 25 tests, 25 pass (the branch's state before) | 30 tests (new: `atomic-libcalls`, `atomic-failure-order`, `atomic-volatile-generic`, `results-nonpass`, `results-hold`), 29 pass at the first run, `oracle-record` failing from F6 (its corpus had an oracle record and no results: the new rule working); fixed, 30 pass |
+| `bin/cppi runtime-build` | 198 of 198 | 198 of 198 (IR 25 s, read, print and lower 151 s, gcc 17 s); `runtime-key`: current |
+| `lower-check` `samples+runtime` | 16 of 16 | **16 of 16** (native 11 s, Arbace's steps 22 s, gcc and runs 2 s) |
+| `lower-check` libstdc++ every 15th | 234 of 234 | **234 of 234**, 0 known, 0 failing (native 111 s, Arbace's steps 793 s, gcc and runs 52 s) |
+| round trip g++.dg every 10th | 1,807: 977 pass, 83 known, 745 rejected, 2 oracle fails | the same; against the record: 0 regressions, 0 changed, 0 missing, 0 new, 0 improvements (dumps 307 s, forms and prints 34 s, again 46 s, objects 58 s) |
+| round trip g++.old-deja every 10th | 323: 226 pass, 9 known, 88 rejected | the same, 0, 0, 0, 0, 0 (33 s) |
+| round trip of the samples | 8 pass, 1 known | the same (no key: no record) |
+
+No record was written again: every number equals its record. Not run: c-c++-common, the libstdc++ testsuite round trip, HotSpot (not touched by the changes and with no
+results file; their `bin/repr-cpp roundtrip` runs now stop on F6's rule unless pending), `bin/cppi lower-check` of the whole libstdc++ list, the gate.
+
+### Proposals (CP170 onward)
+
+- **CP170 The pending set.** F6's `pending.edn` names the corpora whose results are to be made. Options: (a) as built (an explicit, reviewable list); (b) record
+  `c-c++-common-every-10` and `libstdcxx-testsuite-every-40` at their next whole runs and empty the set (CP163 (b)); (c) drop the set and fail until recorded.
+  *Recommended: (b)* with the next runs of those two corpora, then the set stays as the place for a new corpus' first run.
+- **CP171 Other names gcc owns.** F1 escapes `__atomic_*` and `__sync_*`. gcc treats every `__builtin_*` name and, with `-fno-builtin` off, the C library's names
+  (`memcpy`, `printf`, `abs`) as builtins too; the lowering compiles with `-fno-builtin`, but an external named `__builtin_*` would still be read as a builtin.
+  Options: (a) as built (no such external exists in the lists); (b) escape any external starting `__builtin_`; (c) an audit in `lower-check` that compiles the declarations of
+  the runtime and the lists alone with `-Werror=builtin-declaration-mismatch` and names the first. *Recommended: (b)*, one line with F1's.
+- **CP172 The class in the record.** F5 holds the verdict; a `:known` moving from one class to another is still seen only by the known file's fit (CP165). Options:
+  (a) as built; (b) CP165 (b) (`[:known CLASS]`). *Recommended: (b)*, now that the verdict is held, the class is the remaining hole.
+- **CP173 `fmax`/`fmin` and the other refused atomics (F7).** Options: (a) as built (refused, classed); (b) build `fmax`/`fmin` with `__builtin_fmaxf`/`fminf` in the
+  compare-exchange loop when a test needs them; (c) (b) and `uinc_wrap`, `udec_wrap`, `usub_cond`, `usub_sat` as loops. *Recommended: (a)*: libstdc++ 15 has no
+  user of them and clang writes them only for C's `__atomic_fetch_max` on floats.
+- **CP174 A statement of the orderings' lattice.** `order-join` is small and tested with six pairs; the other nine pairs of the 15 clang writes into every `compare_exchange_*`
+  are not in the selftest. Options: (a) as built; (b) all 15 pairs (the legal ones, failure not `release` or `acq_rel`: 12) in `atomic-failure-order.ll`. *Recommended: (b)*, cheap.
+
+### Rule slips, shipped files, scratch
+
+- Slips: a background command that ran the round trips redirected its own outer output to `/dev/null` (the scripts' logs were files); a first draft of
+  `results-nonpass.sh` held a `<(echo)` process substitution and the first draft of `atomic-failure-order.sh` a `> /dev/null` that never ran (both removed before any run). `python3` was used
+  for multi-line edits. The F6 commit message says "failed before: 4 of its 5 checks"; the count is 2 of 5 (the message stays, no rewrite). The disk and memory limits were kept.
+- Shipped: `arbace/cpp/lower.ae`, `arbace/repr/cpp/rtcheck.ae`, `bin/repr-cpp` and `bin/lib/repr-cpp/roundtrip` (`--replace-results`, usage), `test/cpp/selftest/{atomic-libcalls,atomic-failure-order,atomic-volatile-generic,results-nonpass,results-hold}.{sh,ll}`,
+  `test/cpp/selftest/oracle-record.sh`, `test/repr/cpp/roundtrip-results/{pending.edn (new),gxx-dg-every-10.edn,gxx-old-deja-every-10.edn (header)}`, `doc/cpp/LLVM.md`, `doc/cpp/CPP-SURVEY.md` (CP161 and this section).
+- Scratch: `.tmp/rt43/` (the round trips' work directories), `.tmp/lc-sr`, `.tmp/lc-lt`, `.tmp/cppi/runtime` (at the key), `.tmp/cpp-selftest/`.
