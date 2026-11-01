@@ -19,6 +19,10 @@ t() { # NAME WANT-STATUS ENV... -- KIND CORPUS N
 t "an opam corpus without a row passes" 0 X=1 -- dumps-compilable opam-fmt 12
 t "the testsuite's .cmi level without a row passes" 0 X=1 -- cmi-compiled testsuite 900
 t "a default corpus without a row fails" 1 X=1 -- cmi-compiled samples 1
+t "an opam corpus that compiles nothing fails" 1 X=1 -- dumps-compilable opam-fmt 0
+t "the testsuite's .cmi level that compiles nothing fails" 1 X=1 -- cmi-compiled whiml 0
+t "a default dumps corpus is named by the default list (whiml)" 1 X=1 -- dumps-compilable whiml 7
+t "a default roundtrip corpus is named by the default list (compiler-backend)" 1 X=1 -- cmi-lines compiler-backend 20
 t "a count at its row passes" 0 X=1 -- dumps-compilable stdlib 116
 t "a count below its row fails" 1 X=1 -- dumps-compilable stdlib 115
 t "RECORD=0 does not record" 1 RECORD=0 -- dumps-compilable stdlib 3
