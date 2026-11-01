@@ -1900,9 +1900,10 @@ None is decided; what the branch built is named in each, to be kept or changed.
   `ARBACE_GATE_CACHE` to `ARBACE_GATE_EXES/KEY20`. *Recommended: (a)*: (b) mixes the version map with the gate's layout, (c)
   keeps the trap. Cost of (a): `bin/lib` is in `gate_key`, so this change rekeys both builds once; a hand run computes
   `bin/arbace-go --gate-key` (a few seconds of hashing) per call.
-- **GTS121 a miss of the gate's build and another key's directory** (finding 3). Options: (a) `gate_build` refuses, before it builds or
-  removes anything, a directory named like a key (20 hex) or like javac's tool's (`javac-` and 20 hex) that is not the
-  checkout's, and `ARBACE_GATE_EXES` itself; any other directory it replaces (built, review 045); (b) never
+- **GTS121 a miss of the gate's build and another key's directory** (finding 3). Options: (a) `gate_build` replaces only a directory it
+  made, an allow-list checked before it builds or removes anything: none yet, this key's, or one holding a `key` file whose
+  name is neither `javac-...` nor another key's; anything else (the executables' root and its parents, javac's tool's
+  directory, another key's, any directory without a `key` file) is refused (built, review 045 and 048 N3); (b) never
   `rm -rf`: move a stale directory aside as `NAME.old`; (c) as before. *Recommended: (a)* now, (b) if a stale `.tmp/arbace-go-gate`
   style directory should also survive. `bin/gate`'s steps never hit it (they pass the checkout's own key).
 - **GTS122 the `--g1` default** (finding 4). Options: (a) comments and docs say `--g1 "$GATE_CACHE"`, behaviour unchanged (a
@@ -1920,11 +1921,14 @@ None is decided; what the branch built is named in each, to be kept or changed.
   `ARBACE_HEAVY_CMD` is unset, the tools default to `bin/heavy-lock` (a hand run then queues; `ARBACE_HEAVY_CMD=env` opts out);
   (c) only the whole-program j2g runs default to it. *Recommended: (a)*, then (c): (b) would make every `bin/j2g` of a light
   experiment wait behind a gate's heavy step.
-- **GTS126 how a miss fills the directory** (review 045, 4). Options: (a) the build is copied into `KEY20.tmp.PID` and put in
-  place with `mv -T` at the end, the old directory renamed aside, then removed: a reader sees the old directory or the whole
-  new one, a failed build leaves the old (built); (b) a `flock KEY20.lock` around the miss, readers unlocked; (c) the scripts
-  run by hand call `--gate-build` under `bin/heavy-lock` when `ARBACE_HEAVY_HELD` is unset (the gate's `go-build` is `:heavy`).
-  *Recommended: (a)*, then (c): (a) does not stop two concurrent misses from building twice, the last swap wins.
+- **GTS126 how a miss fills the directory** (review 045, 4, review 048, N2). Options: (a) the build is copied into `KEY20.tmp.PID`
+  and put in place with `mv -T` at the end, the old directory renamed aside, then removed: a reader sees the old directory or
+  the whole new one but for the instant between the two renames, a failed build or copy leaves the old; (b) a `flock` around
+  the whole miss, a run that waited checking the key again and taking the first's build; (c) the scripts run by hand call
+  `--gate-build` under `bin/heavy-lock` when `ARBACE_HEAVY_HELD` is unset (the gate's `go-build` is `:heavy`).
+  **Built: (a) with (b)** (`gate_miss` under `flock` on `EXES/.KEY20.lock`; (a) alone raced: two misses failed or left a copy);
+  readers stay unlocked, so a `--check-cached` landing between the renames sees a miss. *Recommended: (a) with (b), then (c)*:
+  (c) would make a hand run wait behind the gate's heavy steps instead of only behind a build of its own key.
 - The new tests (`test/gate/gate-cache-test.bash`, `stale-comments-test.bash`, `host-seed-test.bash`) are bash over fabricated
   trees under `.tmp/`, run by hand, in no gate step: a step (light, inputs `bin/` and `test/gate/`) would run them with the
   essential gate; *recommended*, left for the user.

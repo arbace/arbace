@@ -414,7 +414,7 @@ Prior art:
   (busybox `time -v`) in `.tmp/gate/NAME.mem`, a 5 s memory sampler's `.tmp/gate/mem.tsv`. The
   steps: the Makefile's scripts (`make check-makefile`), the seed's hash, stage 0 built from
   it (`bin/seed --build --no-aot`, kept by the seed's and Go's pins and its scripts' digest, GTS53 (a)), the executable and the test build by stage 0 (`bin/arbace-go
-  --gate-build`, cached by key in `ARBACE_GATE_EXES/KEY20` (`KEY20` the first 20 characters of `bin/arbace-go --gate-key`; the one function `bin/lib/gate-cache.bash`'s `arbace_gate_cache` computes it for the gate and for the scripts run by hand; `ARBACE_GATE_CACHE` overrides, and a miss never removes the directory of another key), and keyed by a hash of what they are built from,
+  --gate-build`, cached by key in `ARBACE_GATE_EXES/KEY20` (`KEY20` the first 20 characters of `bin/arbace-go --gate-key`; the one function `bin/lib/gate-cache.bash`'s `arbace_gate_cache` computes it for the gate and for the scripts run by hand; `ARBACE_GATE_CACHE` overrides, and a miss replaces only a directory of its own making, built beside it and swapped in under a lock, so a second run waits and then hits), and keyed by a hash of what they are built from,
   `gate_key`: `arbace/` less repr/java, repr/haskell, repr/rust and repr/c, `go/`, `overlay/` and `jdk/` less
   javac's world and the provenance files, `x509roots/`, the fixtures' forms, `bin/lib` (less the repr checks' and
   `gate-run.bash`), since GT7 `tamago/goroot` and `tools/godump` (goi's table), the build's scripts, the
