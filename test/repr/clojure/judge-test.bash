@@ -1,6 +1,6 @@
 #!/bin/bash
 # Tests of repr/clojure's judge (bin/repr-clojure check, GTS160, audit 076), over fabricated trees
-# and stubbed tools; run: test/repr/clojure/judge-test.bash [frozen|counts|notread]...
+# and stubbed tools; run: test/repr/clojure/judge-test.bash [frozen|counts|notread|x509]...
 # (default: all). Exit status 0 when every case holds. TOOLS_BASH names another bin/lib/tools.bash
 # (the tests of a fix are run with the file from before it to show they fail). The checks that
 # need Arbace run on stage 0 (ARBACE_HOST_EXE) with arbace/repr/clojure.ae from the checkout.
@@ -101,7 +101,22 @@ t_notread() {
   out=$(lost_rt "$d/named" lose); expect "notread: the same fault in a file naming clojure.* fails" 1 $?
 }
 
-tests=("$@"); [ ${#tests[@]} = 0 ] && tests=(frozen counts notread)
+# bin/x509roots-vendor check against a stubbed go (go env GOMODCACHE only) and a fabricated module cache
+t_x509() {
+  local x=$scratch/x g=$scratch/x/goroot c=$scratch/x/cache w=$scratch/x/work ver zip m out
+  ver=$(sed -n 's/^mod_ver=//p' "$here/bin/x509roots-vendor"); zip=$(sed -n 's/^mod_zip=//p' "$here/bin/x509roots-vendor")
+  mkdir -p "$g/bin" "$c/cache/download/golang.org/x/crypto/x509roots/fallback/@v" "$w/renamed"
+  printf '#!/bin/sh\n[ "$1 $2" = "env GOMODCACHE" ] && { echo %s; exit 0; }\nexit 1\n' "$c" > "$g/bin/go"; chmod +x "$g/bin/go"
+  echo "$zip" > "$c/cache/download/golang.org/x/crypto/x509roots/fallback/@v/$ver.ziphash"
+  m=$c/golang.org/x/crypto/x509roots/fallback@$ver/bundle; mkdir -p "$m"; echo "package bundle" > "$m/bundle.go"
+  echo stale > "$w/renamed/stale.txt"
+  out=$(ARBACE_GOROOT=$g X509ROOTS_TODAY=20261111 "$here/bin/x509roots-vendor" --work "$w" check 2>&1)
+  [ ! -e "$w/renamed/stale.txt" ] && ok "x509: check remakes renamed (a stale tree is no original)" || bad "x509: a stale renamed tree was reused"
+  [ -f "$w/renamed/x509roots/fallback/bundle/bundle.go" ] && ok "x509: renamed holds the module's package" || bad "x509: renamed lacks the package"
+  echo "$out" | grep -q "snapshot of 20261011, 31 days old at 20261111" && ok "x509: the snapshot's age is noted" || bad "x509: no age note: $out"
+}
+
+tests=("$@"); [ ${#tests[@]} = 0 ] && tests=(frozen counts notread x509)
 for t in "${tests[@]}"; do "t_$t"; done
 [ $fails = 0 ] && echo "judge-test: all hold" || echo "judge-test: $fails FAILED"
 [ $fails = 0 ]
