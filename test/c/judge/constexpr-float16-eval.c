@@ -16,3 +16,8 @@ constexpr float h = 0.1f16;
 constexpr float i = 0.1f16 * 3;
 constexpr float j = (_Float16)0.1;
 constexpr float k = (_Float16)0.1 + 0.1f16;
+/* review 057's finding 1: ?: keeps the float value too */
+constexpr __bf16 l = (1 ? 2049.0f16 : 0) - 1;
+constexpr __bf16 m = (1 ? 2049.0f16 : 0.0f16) - 1;
+constexpr _Float16 n = 1 ? 2049.0f16 : 0;	/* { dg-error "not representable" } */
+constexpr _Float16 o = 1 ? 0.1f16 : 0;		/* { dg-error "not representable" } */
