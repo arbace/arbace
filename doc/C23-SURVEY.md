@@ -3561,3 +3561,102 @@ Each with options, the recommended one first; none decided.
   - Options: (a) record both as `converter-gap` in `roundtrip-known.edn` (their print is a different program than gcc rejects); (b) have the
     converter keep `:c/bad-specs` through the print; (c) first check them against the commit before CS133's follow-ups.
   - *Recommended: (c) then (a)*: the failure is old and the files are error tests whose print gcc rejects anyway.
+
+## As built: re-review 027's fixes (2026-10-31)
+
+On the branch `c23-c7`, in the light tier, after re-review 027 (the helper VM's, at `a21e3f28`, before CS193-CS195; its report in the
+worktree's `.tmp/review-027.md`, findings 1-9 and residues R1-R8). Each finding was checked against the code at `0f9964c8` (CS193-CS195
+landed after the review and touch none of the nine): all nine hold, the checker's four (1, 2, 7, 8) confirmed by `bin/ci diagnose` on the
+review's probes and by gcc 15.2 on this amd64 host. Commits `ca5b705f` (1), `54d66ab6` (2), `f932c695` (7), `06192093` (8), `b20134a4` (3),
+`543cc4a7` (4), `fdd714b8` (5), `888d5d5f` (6), `6191eb47` (9), then this section. `bin/ci judge-test`: 30 tests, 90 assertions (from 21 and
+50); every new test was run against the code before its fix and failed there, except finding 9's, which pins a layout kept.
+
+### R27.1 Per finding
+
+| # | holds | the fix | the test |
+|---|---|---|---|
+| 1 (medium-high) | yes: `0.1f + 0.2f`, `1.0f / 3.0f`, `0.1f * 3`, `(float)1 / 3`, `__builtin_complex (1.0f / 3, 0.0f)`, `0.1f - 0.3f` all refused ("not representable"); gcc 15 accepts them | `binary` rounds a float-typed result of `float-op` to float (`Float/valueOf`, as `conv-val` does a constant): C23 evaluates float op float in float (FLT_EVAL_METHOD 0) | `constexpr-float-in-float` on `test/c/judge/constexpr-float.c` (the six accepted, `0.1f + 0.2` and `1.0f / 3.0` refused as gcc does: before, eight lines refused) |
+| 2 (medium) | yes: a hard error; gcc 15 pedwarns before C2y ("ISO C does not support '_Generic' association with incomplete type before C2Y", also for `void` and, "with function type", for a function type) | `pedwarn-c2y!` with gcc's two wordings (an error only under `-pedantic-errors`, none in C2y or with `-Wno-c23-c2y-compat`); `void` counted as incomplete, a function type's pedwarn added | `generic-incomplete-association` on `generic-incomplete.c` (`-std=c23 -pedantic-errors`: lines 6-8, the messages gcc's; `-std=c23` and `-std=c2y -pedantic-errors`: none; before, line 6 only, an error in all three). `c23-tag-6` and `c23-generic-1` still pass |
+| 3 (medium) | yes, in the three judges | a run with `--only` (`--aot`'s `--sample` too) or `CI_DG_ONLY` leaves `CORPUS/subset` (removed by a whole run); `--judge` reads it, sets `CI_SUBSET` and refuses `--record` (status 2), in `bin/lib/ci/check`, `check-aot` and in the judges themselves (`arbace.c.run/subset-record-refusal`, cf2g's judge, dg's `judge-cmd`); dg's absent files do not fail a subset's judge either | `judge-record-after-subset`: the three `--judge --record` on a made-up work directory with the marker exit 2 and leave the three records as they were (before: 1, 1 and 0, and each record rewritten; the test restores them) |
+| 4 (medium) | yes | dg's record comparison: a recorded pass now unsupported, or a recorded unsupported file now supported, is a regression; `--essential` fails on any listed file that does not pass | `pass-to-unsupported`: c23-tag-6 (a recorded pass) made unsupported fails the judge and the essential judge (before: both exit 0); as a pass both exit 0 |
+| 5 (medium-low) | yes: `{ target { ! ia32 } }` lines dropped, `{ target ia32 }`, `newlib_nano_io` and `arm*-*-*` lines applied | `host/target-atom` (moved from `arbace.c.dg`'s `sel-atom`): the C++ names false, triples by glob (`?` too), an effective target the table's value, an unlisted name `:unknown`; `host/eval-selector` is three-valued (Kleene's `!`, `&&`, `||`); `dg-options` skips a false line, keeps an unknown one and lists it (`dg-options-info`'s `:uncertain`, `:opts-uncertain` in `files.edn` and `dg.edn`, a line in `ppcheck lists` and `dg directives`); the dg-do, dg-error and xfail selectors keep their rule (an unlisted name holds). A scan of the 4,678 files of the dg groups and the run corpora found ten names in option selectors; `test/c/dg-targets.edn` gains the four effective targets among them, probed: `ia32` false (no `__i386__`), `fpic` true (`-fpic` compiles), `signal` true (Linux), `newlib_nano_io` false (musl) | `option-selectors-on-the-host` (before: `! ia32` gave `[]`, `ia32 && ...` and `arm*-*-*` applied; an unknown name made a line `!` dropped). No file's options moved: the four files whose lines change (`20010129-1`'s `-mtune=i686`, `920501-8`'s and `930513-1`'s `-Wl,-u,_printf_float`, `pr71626-2`'s `-fpic`) carry options `file-config` does not model; no line is left uncertain |
+| 6 (medium-low) | yes | the quiet retry: a program the level's record passes that timed out is run again alone, once, and that run is judged (`bin/ci check` per corpus after its runs; `--aot` per shard, the compiled run on the shard's executable and the interpreted one on its node program, before the executable is deleted; the dg read, `dg/retry-timeouts`, for a recorded pass whose read spent its budget, marked `:retried`); each retry prints a line | `quiet-retry-of-a-timeout`: the retry function on made-up reads, and `bin/ci check --corpus ci-run --only` (`ptr-sub-unsigned.c`) on a stand-in cirun (`test/c/judge/cirun-slow-once`) whose first run sleeps past the 10 s: exit 0 (before: 1, "REGRESSION ... now fail differ status timeout") |
+| 7 (low-medium) | yes: `sizeof (s.bf = 1)`, `sizeof (s.bf++)`, `++s.bf`, `s.bf += 2`, `p->u--`, `_Alignof (s.bf = 1)`, `typeof (s.bf = 1)`, `typeof (s.bf++)`, `typeof_unqual (--s.bf)` refused | `bit-field?` (`:bits` and an lvalue) in `sizeof`, `_Alignof`, `typeof`, `typeof_unqual` | `bit-field-results` on `bitfield-ops.c` (the nine accepted, `sizeof (s.bf)`, `sizeof ((p->u))`, `typeof (s.bf)`, `_Alignof (p->bf)` refused, as gcc; before, all thirteen refused) |
+| 8 (low) | yes, both: `(unsigned __int128)1 << 100`, `((__int128)3) << 80` and its negation refused; `-__builtin_nansf ("")` and `+__builtin_nansf ("")` for a double accepted (gcc refuses both: the review named `-`, `+` is the same) | long double's test is the span of the set bits (`bitLength - getLowestSetBit` > 64); unary `+` and `-` keep `:snan` | `constexpr-long-double-and-snan` on `constexpr-ldouble.c` (x86_64 and int128 only): lines 8-10 refused, as gcc (before: 5-8) |
+| 9 (low) | yes: since CS172 a GNU-style definition's `.ae` has `(c/defn` on the first C line and the name on the declarator's line | kept, documented here: the round trip needs neither layout (level 1 compares forms by `form-str`, which drops `:line`; a reread `.ae`'s name symbol carries no `:line` in either layout, so the declarator line lives only in the forms read from C), and the new layout follows the `.ae`'s rule, every nested form on its C line. The musl forms cache (`.tmp/ci-musl/forms`, no key) may hold the old layout and older forms in general: CS211 | `definition-name-layout` on `gnu-defn.c` pins it (it passes before too: nothing changed) |
+
+The residues R1-R8 were not fixed (CS212-CS214). The review's "not covered" decimal case was probed here: gcc 15.2 accepts `constexpr _Decimal32 d =
+1.000000000DF;` and the checker refuses it (the written digits judged `strict` though the constant already has the object's type): CS215.
+
+### R27.2 The numbers
+
+The dg check (`bin/ci dg --record`, a full run with gcc): **588 of 619 supported pass, 8 unsupported, 31 in a class, 0 unclassed**, as before;
+the record unchanged byte for byte. The message count unchanged (30 of 126 passes, 146 lines). The checker's four fixes move no corpus file:
+the dg groups have no float constexpr arithmetic needing it, no incomplete association outside the error tests (which still err under
+`-pedantic-errors`), no bit-field assignment under `sizeof`, no wide long double constexpr; the judges' fixes change no verdict of a whole
+run (no timeout, no subset, no unsupported change, no option line moved). `bin/ci dg --essential`: 102 of 102.
+
+The run level (`bin/ci check --record` over the fifteen corpora): 3,761 programs, **3,457 pass**, as before, the record unchanged but one row:
+`compcert/perlin.c` timed out, and timed out again in the quiet retry alone (it runs 10.2 s alone on this host at a load of about 8, at the
+10 s limit, C7J.2's "timed out again"); recorded as a failure it was the run's only regression, and its row was restored with `git checkout`
+(load, not the code: the node program and its run are unchanged by these commits). The judge listed it as the one REGRESSION, as finding 3's
+comparison should. CS216 below. Per corpus as in R6.2. The compiled level was not run (CS190's window).
+
+### R27.3 Checks run at the end
+
+`bin/ci judge-test`: 30 tests, 90 assertions, all pass. `bin/ci dg --essential`: 102 of 102. `bin/repr-c check --c23`: 62 files, 59 pass, 3
+expected failures, 0 failing (the controls refuse). The round trip, `--no-run`: c23conf 49 of 49, c23 62 of 62, tcc-tests2 85 pass and 3 known,
+gcc-c23 253 pass, 15 known, **2 failing** (`c23-bool-errors-1` and `-2`, level 1: the reread's forms lose `:c/bad-specs`), "30 known entries
+stale" (the other corpora's). CS203 (c), done here: the same group's round trip on the tree of `e575f69b^`, the commit before CS133's
+follow-ups (extracted by `git archive` into `.tmp/r27/pre133/`, run with stage 0), passes both files (level 1 equal); `:c/bad-specs` comes
+from `62f48f16` (CS133's second commit), so the failure is CS133's, not this round's: CS203 (a) or (b) remains to decide. Not run:
+`bin/ci check --aot`, `bin/ci annotations`, `bin/repr-c parse-check`, `check --tokens`, `bin/gate`, `bin/ci repl-session`.
+
+### R27.4 Proposals (CS210-CS216)
+
+Each with options, the recommended one first; none decided.
+
+- **CS210 The dg-do and dg-error selectors' unknown names** (finding 5 made option lines three-valued; the dg-do, dg-error and xfail
+  selectors still take an unlisted name to hold, CS142's rule).
+  - Options: (a) the same three values there: an unknown dg-do selector makes the file `:unsupported` with the selector named (reported, not
+    judged), an unknown dg-error selector keeps the line and reports it; then list the names the corpora use in `test/c/dg-targets.edn`, each
+    probed; (b) only report them (a count in `bin/ci dg`'s summary), the rule kept; (c) leave.
+  - *Recommended: (b) then (a)*: the count shows how many names are unlisted before the verdicts depend on them.
+- **CS211 The musl forms cache's key** (finding 9's residue: `.tmp/ci-musl/forms` is never invalidated by a change to repr/c's reader or
+  converter).
+  - Options: (a) a key file beside the cache, the digest of `arbace/repr/c{.ae,/}` and the host's files, a mismatch rereading the cache
+    (`bin/ci musl read`, a light run); (b) a mismatch only warns; (c) leave it, noted here.
+  - *Recommended: (a)*: the cache feeds every run of ci, and a stale form is a silent wrong answer.
+- **CS212 The judges' residues R2, R4, R7** (a known program that starts passing is a REGRESSION; the main file decided by a suffix; a
+  parser panic counted as a line-0 error).
+  - Options: (a) fix the three in the judges, each with a judge-test (R2: "improved: re-record", not a failure; R4: the whole relative path;
+    R7: a `panic:` error never expected, the file `:crash`); (b) R7 alone (the only one that can pass a crash); (c) leave.
+  - *Recommended: (a)*: three small changes in code the judge-test covers.
+- **CS213 Go's fatal errors in cirun and the shards (R1)** (stack exhaustion, out of memory, a concurrent map write exit 2 with no line).
+  - Options: (a) `run1` also keeps a `^fatal error:` or `^runtime:` line of stderr, and `result` fails it as internal; (b) leave.
+  - *Recommended: (a)*: one grep alternative in both scripts, and a crash then cannot pass as an exit 2.
+- **CS214 The other residues R3, R5, R6, R8** (`--aot`'s interpreted side read from unkeyed scratch; `ext-lines` by line alone and no
+  system-header exemption; `syntax-expectation?`'s broad regex; `${srcdir}` for the run corpora).
+  - Options: (a) R3 (use the diff only with `CI_AOT_NODES`, else say it is not compared) and R5 (key `ext-lines` by unit and line, skip
+    pedwarns in system units) now, R6 with CS200's table, R8 noted (right for the dg groups, the only users of `${srcdir}` today); (b) all
+    four now; (c) leave.
+  - *Recommended: (a)*: R3 and R5 can give wrong answers, R6 and R8 do not today.
+- **CS215 constexpr decimal constants of the object's type** (the review's unprobed case, probed: gcc accepts `constexpr _Decimal32 d =
+  1.000000000DF;`, the checker refuses it).
+  - Options: (a) a decimal constant of the object's own type is judged by its value rounded to the format (`dec-fits?` not `strict` for it),
+    another type's strictly as now, with a judge-test and gcc's probes of the neighbouring cases (`_Decimal64` to `_Decimal32`, quantum
+    limits); (b) leave until the dg corpus's dfp files need it.
+  - *Recommended: (a)*: a false error on a valid program, found by a probe of minutes.
+- **CS216 A program at the run level's 10 s limit** (`compcert/perlin.c`: 10.2 s alone, a timeout with or without the retry).
+  - Options: (a) a per-program budget in `test/c/check-known.edn`'s style (`perlin.c` 30 s, as goi's per-test limits), the record a pass;
+    (b) record it in `speed`; (c) raise the level's budget to 20 s for all.
+  - *Recommended: (a)*: one program, and the retry then decides load from slowness.
+
+### R27.5 Shipped files, scratch and rule slips
+
+Shipped files changed: none (nothing under `go/`, `overlay/` or `jdk/`; the `arbace/` files are evaluated from the checkout, though `gate_key`'s `arbace/` covers them). Not shipped: `arbace/c/{check,dg,run,cf2g}.ae`,
+`arbace/repr/c/{host,ppcheck}.ae`, `bin/ci`, `bin/lib/ci/{check,check-aot}`, `test/c/` (`judge_test.ae`, `judge/`'s seven new files,
+`dg-targets.edn`). Scratch in the worktree's `.tmp/`: `r27/` (the probes, the logs `dg-rec.log`, `check-rec.log`, the round trips',
+`pre133/`, the tree of `e575f69b^` the c23-bool-errors check ran on), `ci-dg/`, `ci-dg-essential/`, `ci-check/`.
+Rule slips: for about three minutes two waiting loops ran at once (a `Monitor` on the dg run's log and a backgrounded `until` loop; the
+second was stopped). Nothing else known.
