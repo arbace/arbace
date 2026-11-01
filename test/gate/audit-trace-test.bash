@@ -67,7 +67,30 @@ cat > "$w/reuse.trace" <<'T'
 100 clone(child_stack=NULL, flags=CLONE_VM|SIGCHLD) = 300
 300 execve("./nx", ["nx"], 0x7ffd /* 3 vars */) = -1 ENOENT (No such file or directory)
 T
+# the exe half of the birth (review 081, N1): pid 300 ran git in an earlier life; the new process with that PID,
+# cloned by a non-git parent, must not keep git's executable, which hides its reads
+cat > "$w/reusex.trace" <<'T'
+300 execve("/usr/bin/git", ["git", "status"], 0x7ffd /* 3 vars */) = 0
+100 clone(child_stack=NULL, flags=CLONE_VM|SIGCHLD) = 300
+300 openat(AT_FDCWD</work>, "f.txt", O_RDONLY) = 3</work/f.txt>
+T
+# a child's early line that is a path call, neither chdir nor execve (review 081, N3): it is reduced, and the
+# child still takes its parent's directory at the clone result
+cat > "$w/earlyopen.trace" <<'T'
+100 chdir("/work/sub") = 0
+100 clone(child_stack=0x7f00, flags=CLONE_VM|CLONE_THREAD|CLONE_SIGHAND <unfinished ...>
+101 openat(AT_FDCWD</work/sub>, "x", O_RDONLY) = 3</work/sub/x>
+100 <... clone resumed>) = 101
+101 execve("./nx", ["nx"], 0x7ffd /* 3 vars */) = -1 ENOENT (No such file or directory)
+T
+printf 'R\t/work/sub/x\nX\t/work/sub/nx\n' > "$w/earlyopen.want"
 for r in "${reducers[@]}"; do
+  reduce "$r" "$w/reusex.trace" > "$w/reusex.out" 2> "$w/reusex.err"
+  if [ "$(cat "$w/reusex.out")" = "R	/work/f.txt" ]; then ck "$r: a reused PID's new process does not keep the dead one's executable" ok
+  else ck "$r: reused PID's executable" "got '$(cat "$w/reusex.out")', expected 'R /work/f.txt'"; fi
+  reduce "$r" "$w/earlyopen.trace" > "$w/earlyopen.out" 2> "$w/earlyopen.err"
+  if cmp -s "$w/earlyopen.out" "$w/earlyopen.want"; then ck "$r: a child's early path line does not stop it taking its parent's directory" ok
+  else ck "$r: early path line" "got '$(tr '\n\t' '; ' < "$w/earlyopen.out")'"; fi
   reduce "$r" "$w/plain.trace" > "$w/plain.out" 2> "$w/plain.err"
   reduce "$r" "$w/sig.trace" > "$w/sig.out" 2> "$w/sig.err"
   [ -s "$w/plain.out" ] || ck "$r: fixture" "no paths in the plain trace"
