@@ -188,10 +188,13 @@
 #                                 (stdout against NAME/want.out, status 0, stderr empty;
 #                                 test/nethttp/check-gc-linux-amd64.edn), at goi's level their forms
 #                                 (bin/repr-go read ./..., cached by key) run by arbace.go.run against gc's
-#                                 run (test/nethttp/check-linux-amd64.edn, --record writes it); the
-#                                 non-passes in the classes of test/nethttp/divergences.edn
-#                                 (bin/goi divergences --nethttp); --gc-only: the gc level alone,
-#                                 --update-want: rewrites the want.out files from gc's runs
+#                                 run (test/nethttp/check-linux-amd64.edn, --record writes it; a
+#                                 program passing there and not now, one not recorded, or, without
+#                                 --only, one recorded and not run fails the check, at every level;
+#                                 --record takes no --only); the non-passes in the classes of
+#                                 test/nethttp/divergences.edn (bin/goi divergences --nethttp);
+#                                 --gc-only: the gc level alone, --update-want: rewrites the want.out
+#                                 files from gc's runs
 #   bin/goi check --corpus nethttp --arbace [--record] [--only REGEX]
 #                                 NH12 (a)'s set (As built: NH12 (a), NH18 (c)): test/nethttp/arbace/NAME.ae,
 #                                 programs gc cannot run (Arbace fns as handlers and RoundTrippers, reify, a
@@ -1631,6 +1634,8 @@ check_nethttp() {
       *) echo "bin/goi check --corpus nethttp: unknown option $1" >&2; return 2 ;;
     esac
   done
+  # report 019, A3: a record of the selected programs alone would drop the others from the reference
+  if [ -n "$record" ] && [ -n "$only" ]; then echo "bin/goi check --corpus nethttp: --record writes the whole record: no --only" >&2; return 2; fi
   nwork=$root/.tmp/goi-check/nethttp empty=$root/.tmp/goi-check/empty
   mkdir -p "$nwork/gc" "$(dirname "$empty")"
   : > "$empty"
@@ -1725,8 +1730,9 @@ nethttp_arbace_one() {
 
 # check_nethttp_arbace [--record] [--only REGEX]: NH12 (a)'s set (bin/goi check --corpus nethttp --arbace), the
 # programs of test/nethttp/arbace/manifest.edn run one after another (loopback only), results against
-# test/nethttp/arbace/check-linux-amd64.edn (a program passing there and not now fails the check; --record
-# writes it), the non-passes in the classes of test/nethttp/arbace/divergences.edn (bin/goi divergences
+# test/nethttp/arbace/check-linux-amd64.edn (a program passing there and not now fails the check, and so does
+# one with no entry there and, on a whole run, one recorded and not run; --record writes it, from a whole run
+# only), the non-passes in the classes of test/nethttp/arbace/divergences.edn (bin/goi divergences
 # --nethttp-arbace). GOI_RUN_EXE is the executable.
 check_nethttp_arbace() {
   local record="" only="" nd=$root/test/nethttp/arbace t0=$SECONDS p
@@ -1737,6 +1743,7 @@ check_nethttp_arbace() {
       *) echo "bin/goi check --corpus nethttp --arbace: unknown option $1" >&2; return 2 ;;
     esac
   done
+  if [ -n "$record" ] && [ -n "$only" ]; then echo "bin/goi check --corpus nethttp --arbace: --record writes the whole record: no --only" >&2; return 2; fi
   nwork=$root/.tmp/goi-check/nethttp empty=$root/.tmp/goi-check/empty
   mkdir -p "$nwork" "$(dirname "$empty")"
   : > "$empty"
@@ -1774,10 +1781,12 @@ nethttp_exe_desc() {
 
 # nethttp_report LEVEL TSV REF RECORD WHAT CMD SECTION EXE: the counts of a level's results, and either writes the
 # reference REF (RECORD; CMD the command that writes it, SECTION the survey's section, EXE what it was recorded
-# on, empty for gc's) or fails on a regression (a program passing in REF and not now) or on a program with no
-# entry in REF ("new, unrecorded", judged by --record alone)
+# on, empty for gc's) or fails on a regression (a program passing in REF and not now), on a program with no
+# entry in REF ("new, unrecorded", judged by --record alone) or, on a whole run (the caller's `only` empty), on a
+# program of REF with no result ("recorded, not run": removed from the corpus, or a runner that printed no row;
+# report 019, A3)
 nethttp_report() {
-  local level=$1 tsv=$2 ref=$3 record=$4 what=$5 cmdline=$6 section=$7 exe=${8:-} total regress unrec
+  local level=$1 tsv=$2 ref=$3 record=$4 what=$5 cmdline=$6 section=$7 exe=${8:-} total regress unrec gone
   total=$(wc -l < "$tsv")
   echo "goi check --corpus nethttp ($level): $total programs: $(for r in pass fail error unsupported; do printf '%s %s, ' "$(awk -F'\t' -v r=$r '$2==r' "$tsv" | wc -l)" $r; done | sed 's/, $//')"
   awk -F'\t' '$2=="fail" || $2=="error"' "$tsv" | head -8 | sed 's/^/   /' | cut -c1-240
@@ -1795,10 +1804,16 @@ nethttp_report() {
   sed -n 's/^ *\["\([^"]*\)" :[a-z]*.*/\1/p' "$ref" > "$nwork/ref-all.$level"
   sed -n 's/^ *\["\([^"]*\)" :pass.*/\1/p' "$ref" > "$nwork/ref-pass.$level"
   regress=$(awk -F'\t' 'NR==FNR { p[$1] = 1; next } ($1 in p) && $2 != "pass" { print "   regression: " $1 ": " $2 " " $3 }' "$nwork/ref-pass.$level" "$tsv")
-  unrec=$(awk -F'\t' 'NR==FNR { p[$1] = 1; next } !($1 in p) { n++; names = names (n > 1 ? ", " : "") $1 } END { if (n) print n ", " names }' "$nwork/ref-all.$level" "$tsv")
+  # FILENAME, not NR==FNR: a reference with no rows must not swallow the results' file
+  unrec=$(awk -F'\t' 'FILENAME == ARGV[1] { p[$1] = 1; next } !($1 in p) { n++; names = names (n > 1 ? ", " : "") $1 } END { if (n) print n ", " names }' "$nwork/ref-all.$level" "$tsv")
   if [ -n "$regress" ]; then echo "$regress"; fi
   if [ -n "$unrec" ]; then echo "   new, unrecorded: $unrec ($cmdline judges them)"; fi
-  if [ -n "$regress" ] || [ -n "$unrec" ]; then return 1; fi
+  # the callers' --only (check_nethttp's, check_nethttp_arbace's local `only`, in scope here): a partial run is not
+  # judged on the programs it did not select
+  gone=""
+  [ -n "${only:-}" ] || gone=$(awk -F'\t' 'FILENAME == ARGV[1] { r[$1] = 1; next } { delete r[$1] } END { for (p in r) print p }' "$nwork/ref-all.$level" "$tsv" | LC_ALL=C sort | awk '{ n++; names = names (n > 1 ? ", " : "") $0 } END { if (n) print n ", " names }')
+  if [ -n "$gone" ]; then echo "   recorded, not run: $gone (a program removed from the corpus: $cmdline; else the runner lost its row)"; fi
+  if [ -n "$regress" ] || [ -n "$unrec" ] || [ -n "$gone" ]; then return 1; fi
   echo "   no regression against $(basename "$ref")"
 }
 

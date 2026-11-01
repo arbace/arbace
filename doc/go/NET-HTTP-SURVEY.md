@@ -1163,3 +1163,18 @@ What the next build's run must check:
 - `--only` with no match prints the message at both levels.
 
 Proposals (NH30): none.
+
+## As built: report 019's residues (2026-11-01)
+
+The helper's re-review (report 019) left three of the fixes above partly closed; each fix in its own commit, tested on
+the functions extracted from `bin/goi` with fabricated results and stub executables (bash scripts answering `-e`). The
+call lines of `nethttp_report` are left as they are (the merge branch changes the lines around them), so the report
+function reads what it needs of its callers' scope: `only`, `rexe`, `record`.
+
+- A3, a recorded program not run: `nethttp_report` compared the run's rows with the record one way only. On a whole
+  run it now also fails on a program of the record with no row ("recorded, not run: N, names": a program removed from
+  the corpus, or a runner that lost its row); an `--only` run is not judged on the programs it did not select.
+  `--record` with `--only` (a record of the selected rows alone) is refused at both levels. The unrecorded check keyed
+  the reference by `NR==FNR`, so a reference with no rows passed every result; it keys by `FILENAME` now. Today's
+  records name no program missing from the corpus (the gc and arbace records equal the directories and the manifest;
+  the goi record lacks the six `cb_*`, "new, unrecorded" until NH3's `--record`).
