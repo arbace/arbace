@@ -8,7 +8,7 @@
 # Run through bin/repr-java parse-check (from the repository root); writes only under
 # .tmp/repr-java-parse-check/ (REPR_JAVA_PARSE_WORK).
 #
-# Usage: bin/repr-java parse-check [--corpus C,...]
+# Usage: bin/repr-java parse-check [--corpus C,...] [--record]
 # Corpora (default all of them, `all`: samples,baseline,jdk,javac,jdk26u,mutants,tests):
 #   samples   test/repr/java/java and test/repr/java/module (14 files)
 #   baseline  the frozen clojure/ (183 files; bin/lib/tools.bash's frozen_clojure)
@@ -31,27 +31,33 @@
 #   REPR_JAVA_THREADS (default 12), REPR_JAVA_CHUNK (files per javac task, default 50)
 # REPR_JAVA_EXE (bin/repr-java) names javac's tool executable.
 # A corpus with no file (jdk26u absent at JDK_SRC, an empty tree) fails.
-# Exit status: 0 when every corpus's differing files are the known ones.
+# Exit status: 0 when every corpus's differing files are the known ones and its javac diagnostics (syntax
+# errors) the recorded count (test/repr/java/parse-check-diagnostics.edn; --record writes the counts) and the mutants the recorded
+# set (test/repr/java/parse-check-mutants.edn: a digest of the 8,000 mutants' files, GT7's audit 061 #4).
 set -uo pipefail
 root=$(cd "$(dirname "$0")/../../.." && pwd)
 . "$root/bin/lib/renamed-env.bash" # stops on a stale G2A_*, J2A_*, A2G_* or C2A_*
 cd "$root"
 . bin/lib/tools.bash
 . bin/lib/repr-java/originals.bash
+. bin/lib/repr-java/judge.bash
 
 corpora=samples,baseline,jdk,javac,jdk26u,mutants,tests
+record=
 while [ $# -gt 0 ]; do
   case $1 in
     --corpus) corpora=$2; shift 2 ;;
+    --record) record=1; shift ;;
     *) sed -n '11,12p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
   esac
 done
 [ "$corpora" = all ] && corpora=samples,baseline,jdk,javac,jdk26u,mutants,tests
 work=${REPR_JAVA_PARSE_WORK:-$root/.tmp/repr-java-parse-check}
 case $work in /*) ;; *) work=$root/$work ;; esac
-jdk_src=${JDK_SRC:-/root/jdk26u/src}
-jdk=$(dirname "$jdk_src")
+judge_jdk_paths || exit 2 # jdk_src, jdk: one tree (GT7's audit 061 #5)
 known=test/repr/java/parse-check-known.edn
+diagnostics=test/repr/java/parse-check-diagnostics.edn
+mutants_known=test/repr/java/parse-check-mutants.edn
 export REPR_JAVA_THREADS=${REPR_JAVA_THREADS:-12}
 mkdir -p "$work"
 status=0
@@ -73,6 +79,23 @@ check() {
   if ! cmp -s "$work/$corpus.differ" "$work/$corpus.known"; then
     echo "$corpus: the differing files are not the known ones ($known):"
     diff "$work/$corpus.known" "$work/$corpus.differ" | grep '^[<>]' | head -20
+    return 1
+  fi
+  # javac's syntax errors against the recorded count (GT7's audit 061 #3): both parsers recover alike, so a
+  # truncated or emptied file passes the comparison above
+  local n rec
+  n=$(sed -n 's/.*:javac-diagnostics *\([0-9][0-9]*\).*/\1/p' "$work/$corpus/report.edn" 2>&1 | head -1)
+  case $n in ''|*[!0-9]*) echo "$corpus: no :javac-diagnostics in $work/$corpus/report.edn"; return 1 ;; esac
+  if [ -n "$record" ]; then
+    judge_flat_set "$diagnostics" ":$corpus" "$n"; echo "$corpus: $n javac diagnostics recorded ($diagnostics)"; return 0
+  fi
+  rec=$(judge_flat_get "$diagnostics" ":$corpus")
+  if [ -z "$rec" ]; then
+    echo "$corpus: $n javac diagnostics, no recorded count ($diagnostics; parse-check --corpus $corpus --record): an unrecorded corpus is not judged, so it fails"
+    return 1
+  elif [ "$n" != "$rec" ]; then
+    echo "$corpus: $n javac diagnostics, recorded $rec ($diagnostics; javac-errors.txt in $work/$corpus lists them)"
+    head -10 "$work/$corpus/javac-errors.txt" 2>&1
     return 1
   fi
 }
@@ -126,9 +149,23 @@ for c in ${corpora//,/ }; do
             [ ! -f "$work/jdk26u/files.tsv" ] || echo "jdk26u: $(echo "$mods" | wc -l) modules, $(awk -F'\t' '$2 != "equal"' "$work/jdk26u/files.tsv" | cut -d/ -f1 | LC_ALL=C sort -u | wc -l) with a file whose trees differ" ;;
     mutants) jdk26u_src mutants || { status=1; continue; }
              rm -rf "$work/mutants-src"
-             bin/repr-java main -m arbace.repr.java.jtree mutate "$work/mutants-src" "$jdk_src" 4000 2 4 26 \
-               $(cd "$jdk_src" && ls -d */share/classes) > "$work/mutate.log" 2>&1 \
-               && check mutants "$work/mutants-src" || { tail -5 "$work/mutate.log"; status=1; } ;;
+             if bin/repr-java main -m arbace.repr.java.jtree mutate "$work/mutants-src" "$jdk_src" 4000 2 4 26 \
+                  $(cd "$jdk_src" && ls -d */share/classes) > "$work/mutate.log" 2>&1; then
+               # the set by content (GT7's audit 061 #4): it depends on jdk26u's listing, the native lexer's
+               # tokens and jrt's Random, so a change to any reshuffles it; a change fails until recorded
+               read -r md mn < <(judge_tree_digest "$work/mutants-src")
+               mrec=$(judge_flat_get "$mutants_known" :digest)
+               if [ -n "$record" ]; then
+                 judge_flat_set "$mutants_known" :digest "\"$md\""; judge_flat_set "$mutants_known" :files "$mn"
+                 echo "mutants: the set of $mn files recorded, $md ($mutants_known)"
+               elif [ "$md" = "$mrec" ]; then
+                 echo "mutants: the set of $mn files is the recorded one ($md)"
+               else
+                 echo "mutants: the set of $mn files is $md, the recorded one ${mrec:-none} ($mutants_known): the mutants changed (jdk26u's listing, the lexer or Random); parse-check --corpus mutants --record if intended, and commit it"
+                 status=1
+               fi
+               check mutants "$work/mutants-src" || status=1
+             else tail -5 "$work/mutate.log"; status=1; fi ;;
     tests) [ -d "$jdk/test" ] || { echo "tests: FAILED: no jdk26u tests at $jdk/test (JDK_SRC's parent)"; status=1; continue; }
            check tests "$jdk/test" || status=1 ;;
     *) echo "parse-check: no corpus $c (samples, baseline, jdk, javac, jdk26u, mutants, tests)" >&2; exit 2 ;;
