@@ -775,3 +775,65 @@ git history:
 - **Rerun 9:** the change is in java-judge's key and in every Java level's (`bin/java-check`), so the clean run's
   selection reruns the Java producers again (about 5 hours under the audit). Then the keyed concurrent `--full` and the
   tag.
+
+## 2026-11-01: GT7's rerun 9, the audited rule judged
+
+- **Rerun 9** (07194e71, 11:43 to 19:09 UTC, 446 minutes): `bin/gate --full --clean --tag arbace-reaps-3-crops-v2
+  --only failed,changed`; 17 steps run, 68 skipped, none failed: `== gate --clean passed`.
+  - **The selection:** `failed` was java-judge, the one step rerun 8's merge held as not passed clean. `changed`
+    was every step whose key material moved with 07194e71's change, `bin/java-check` (in every Java level's key),
+    `test/java/check.ae` and `test/java/divergences.edn` (java-judge's), closed over `:uses`: java-check,
+    java-check-judge, java-compiled, java-read, java-interp, java-classes, java-diagnostics, java-compiled-full,
+    java-print, java-forms-verify and java-judge, and reap. The builds ran because those steps need them.
+  - **The builds:** stage 0 from the seed (2,556 s), the executables at key d24c0b71ce32 (850 s) and javac's tool at
+    63071998db8e (902 s), all fresh in the clone.
+  - **Under the audit:** every step's audit ok. java-interp took 74 minutes (rerun 8: 80), java-compiled-full 206
+    (rerun 8: 171; its shards 4 and 5 took about 30 and 105 minutes); the gate's processes peaked at 49.7 GiB, the
+    host's MemAvailable stayed above 9.8 GiB.
+- **java-judge** (ok): the audited results judged under rerun 8's rule.
+  - read 3,322: 3,321 pass, 1 fail; interp 3,322: 1,832 pass, 1,256 load-failed, 142 fail, 64 timeout, 23 differ,
+    4 flaky, 1 unread; classes 3,322: 3,320 pass, 2 fail; diagnostics 1,194: 1,101 pass, 59 fail, 34 differ;
+    compiled 3,322: 1,922 pass, 968 refused, 393 fail, 23 differ, 14 timeout, 1 flaky, 1 unread; print 3,322: 2,598
+    pass, 688 differ, 35 fail, 1 unread.
+  - 0 regressions at every level (rerun 8: 1, t03686). interp: 9 new or changed, 1 now passing, 4 flaky after a
+    rerun (JCS71 (a)); compiled: 9 new or changed, 1 now passing, 1 flaky; diagnostics 1 new or changed.
+  - **Held under the `:audited` rule:** 13 interpreted timeouts of tests passing compiled, each printed "held (an
+    :audited class, the run under the audit)": t03235 t03314 t03513 t03515 t03527 t03627 t03628 t03720 t03744
+    t03796 t03797 t03798 t03836, the 13 `:tests` of `:audit-timeout`. t03686, rerun 8's regression, passed this time
+    and needed no holding.
+- **The record** `test/gate/clean-arbace-reaps-3-crops-v2.edn`: "the record merged: 18 steps of this run, 68 of
+  earlier runs; every step passed clean", `:status :passed`. Its `:runs` are 8: the first run at 68b2bba6 and 7
+  reruns (the journal's reruns 3 to 9; rerun 2's logs were not kept), 236,323 s of wall in all. The merge rewrote
+  the file without `:demonstrations` (rerun 8's had none either); the next entry records them again.
+- **Published:** 12 passes (`:clean`) into the shared store, none an empty file (the hazard of 2026-10-31); the
+  executables and javac's tool were there already at their keys. The published java-interp and java-classes passes
+  keep their outputs' `audited` marker.
+
+## 2026-11-01: before the tag, the held tests untraced, and the demonstrations again
+
+- **Why:** the `:audited` rule (rerun 8, the user's decision) holds a timeout under the clean run's strace when the
+  test passes compiled. The judgment is only as good as the claim that the held tests pass outside the trace; this
+  tests it once before the tag (VM report 083's PRE-TAG step 1).
+- **How:** `.tmp/tag-v2/held-check.sh 07194e71... .tmp/gate-clean/07194e71....logs` (VM reports 096 and 099's script),
+  in the main checkout at 07194e71, no `bin/gate --audit`, no strace. It takes the held lines of rerun 9's
+  java-judge log (13 ids, the 13 of `:audit-timeout`, each recorded `:pass` at interp), finds the executables by the
+  checkout's keys (d24c0b71ce32 and javac-63071998db8e, in the shared `.tmp/gate-exe`), refuses a stale stage 0 or a
+  checkout that differs from the run's commit in java-check's inputs, and runs `bin/java-check --levels interp --only
+  "^(ids) "` with `JAVA_CHECK_EXE` and `REPR_JAVA_EXE` absolute, a scratch of its own and `ARBACE_CPU_LOG`. The proof is
+  the results file (each id `interp pass`), the plan and report lines and no rerun line, not java-check's status,
+  which is 0 whatever these 13 do (`:audit-timeout` is `:unstable`, VM 096's finding 1).
+  - The script's first run stopped before any test: `bin/java-check` writes `$work/empty` without making `$work`,
+    which the script had just removed. Fixed in the script (`mkdir -p`), run again.
+- **Result:** "PROVEN: 13 held ids pass untraced", `java-check interp: 13 tests: 13 pass`, 0 regressions, 408 s.
+  But each passed only at the second chance: all 13 first runs were killed at the 100 s CPU limit (status 137), and
+  their reruns at twice the limit passed, the largest at 193.6 s of the 200 s (t03314), the longest wall 166 s.
+  - So these are tests near the interp level's limit untraced; the trace's overhead takes them past the second
+    chance too. That is what their recorded `:pass` at interp means as well (a pass after the second chance counts as
+    pass, `bin/java-check`'s rule since JC1), so the audited judgment stands as the rule states it. The margin is
+    small: t03314 has 3% left.
+- **The demonstrations (GTS42), recorded again** (`bin/gate-demos --record test/gate/clean-arbace-reaps-3-crops-v2.edn`
+  at 07194e71, after the record's last merge): base, nothing changed: nothing runs, 74 skip; classes (a comment line in
+  `test/java/divergences.edn`): java-check-judge, java-forms-verify, java-judge and reap run, 70 skip; j2g (a comment
+  line in `arbace/j2g/out.ae`, `--plan --builds`): 33 run, 40 skip. The same as 2026-10-31's. The j2g change's builds
+  were removed afterwards. The stage 0 of its scratch worktree took most of its 26 minutes.
+- **Next:** the keyed concurrent `--full`, the v2 record's refresh, the tag.
