@@ -3056,3 +3056,23 @@ M1's residual in 033's list was misdiagnosed (its cause was M3); the survey's re
 ### Rule slips
 
 - I used `/dev/null` in three commands (twice as stdin of `chez`, once in a pointless `cp`), against the rule; nothing depended on them. Later runs used an empty file under `.tmp/tmp/`.
+
+## As built: re-review 047's fixes (2026-11-01)
+
+Report 047 (the VM's re-review of 044's fixes) closed M1 to M4 and found P1 to P4; each is fixed, one commit each, tested by a line of `si/ports-pushback` that failed on the previous head.
+
+| # | Finding | Fixed | Test (before / after) |
+|---|---|---|---|
+| P1 | M5's `dynamic-wind` after thunk does not run on si's uncaught raise (a Go panic unwinds Go frames, not `M.W`), the scratch file stayed | `guard` with cleanup and re-raise (also on Chez, which unwinds winders itself) | a variant with `(car 5)` in the block run on si: `ports-pushback.tmp` left before, none after (nor on Chez) |
+| P2 | `set-port-position!` past the end of a string output port raised; Chez pads | an output port may go past its end; the gap is NUL runes appended with the next write (until then the extraction and `port-length` are unchanged); `lastc` is non-newline there, so `fresh-line` writes one, as Chez | `beyond`, `beyond1-3`: crash before |
+| P3 | `ov` and `ov1` depended on argument order (Chez `--script` and `--program` disagreed) | bound in `let*` order; the expected text is unchanged | `chez --script` against `--program`: 2 lines differed before, none after |
+| P4 | `set-port-nonblocking! p #t` ignored | a `nb` field kept and answered | `nb3`: `#f` for `#t` before |
+
+- Numbers: `bin/si check --record`: 47 of 48, regressions none (record unchanged). `bin/si unit` ok. `bin/si mats --record io.ms` (the one file the changes touch, per file as asked): 18 mats, 4 pass / 0 fail / 12 not run / 2 skipped, clauses alone 180 / 4 / 274, 29 non-pass items, none in no class, regressions none, peak 252 MB; only its `:key` changed in the record, so the record now holds two keys (the other 36 files were not rerun: whole-mats runs peak above 2 GB).
+- Not run: the other mats files, `bin/si r7rs`, `corpora *`, `check --aot`, the gate. The cosmetic items of 047 (dead `when (.-In p)` in `portPosition`, the strong hashtable of `open-output-string` ports) are left.
+- Seen, not fixed: the message of an invalid position prints a literal `~(out of range~)` (the format string of the `ioCondition` call).
+
+### Proposals (SC223 onward; none decided)
+
+- **SC223 Unwinding on an uncaught raise.** Chez runs the `dynamic-wind` after thunks when the default handler reports an uncaught raise; si's `Report` recovers the panic with `M.W` not unwound (Chibi does not unwind either). Options: (a) as built, tests use `guard`; (b) `Report` runs the wind list's after thunks before printing, as Chez; (c) (b) only for the program driver. *Recommended: (a)* until a program relies on it; then (b), small.
+- **SC224 A record with one key.** A per-file `mats --record` leaves mixed keys in `check-mats-linux-amd64.edn`. Options: (a) as built, the next whole run (on a host with the memory) unifies; (b) `--record` of a partial run keeps the old key for untouched files and the judge reports the keys it finds; (c) a lower-memory whole run (SC213 (b)) so the whole record is routine. *Recommended: (c)*, which also settles SC213.
