@@ -2,17 +2,20 @@
 # A light test of the audited rule's plumbing (GT7 rerun 8, 07194e71; queue 088): no Arbace executable,
 # no stage 0, seconds. It runs copies of the code, extracted from the files at test time (so the test
 # follows them):
-#   A. bin/java-check --save's marker block (rm -f DIR/audited, then TracerPid of /proc/self/status):
-#      A1-A3 the block as is, untraced and under strace -f (the gate's audit flags: --seccomp-bpf and its
-#      trace set), a stale marker removed; A4-A6 the block with /proc/self/status replaced by a fabricated
-#      status file (TracerPid non-zero, zero, a missing file), under set -euo pipefail as bin/java-check is.
+#   A. bin/java-check --save's marker, mark_audited (audit-070: GATE_AUDITED=1 and TracerPid, both): A1-A4
+#      the function as is, untraced and under strace -f (the gate's audit flags: --seccomp-bpf and its
+#      trace set), with and without GATE_AUDITED, a stale marker removed; A5-A8 with /proc/self/status
+#      replaced by a fabricated status file (TracerPid non-zero, zero, a missing file), under set -euo
+#      pipefail as bin/java-check is.
 #   B. judge_saved's union of the markers beside its results files into --audited (jc stubbed: its
 #      arguments recorded).
 #   C. test/java/check.ae's audit-held? (its three bindings, run by joker with joker.string for
 #      clojure.string) on fabricated results and classes, and the PRE-TAG step's grep of the printed
 #      "held (an :audited class, ...)" lines (both of check.ae's forms, the literal taken from check.ae).
+#   D. audit-070's answers to 088's findings 1-3 as data: java-judge's :uses, :audit-timeout's keys,
+#      levels-known.edn, check.ae's refusal of --record with --audited (queue 093).
 # Usage: bash test/java/audited-marker-test.bash   (AUDITED_TEST_REV=REV: the files at a git revision of
-# this checkout instead of its working tree, e.g. b8872a52 to see it fail before the change). Needs
+# this checkout instead of its working tree, e.g. 07194e71 to see it fail before audit-070). Needs
 # bash, awk, strace (A1-A3 skipped without it, or when this shell is traced already), joker (C skipped
 # without it). PASS/FAIL, exit 0/1.
 set -u
@@ -28,39 +31,47 @@ skip() { echo "skip $*"; }
 file() { if [ -n "$rev" ]; then git -C "$src" show "$rev:$1"; else cat "$src/$1"; fi; }
 file bin/java-check > "$t/java-check" && file test/java/check.ae > "$t/check.ae" || { echo "FAIL: no sources"; exit 1; }
 
-# ---- A: the marker -------------------------------------------------------------------------------
-awk '/rm -f "\$save\/audited"/ { on = 1 } on { print } on && /^ *fi$/ { exit }' "$t/java-check" > "$t/marker.body"
+# ---- A: the marker (mark_audited, audit-070: GATE_AUDITED=1 and a tracer, both) ---------------------
+awk '/^mark_audited\(\) \{/ { on = 1 } on { print } on && /^\}$/ { exit }' "$t/java-check" > "$t/marker.body"
 if [ ! -s "$t/marker.body" ]; then
-  no "A: no marker block in bin/java-check (rm -f \"\$save/audited\" ... fi)"
+  no "A: no mark_audited() in bin/java-check"
 else
-  # mark DIR LEVELS [STATUS-FILE]: the block run alone, set -euo pipefail as bin/java-check
-  { echo 'set -euo pipefail'; echo 'save=$1 levels=$2'; cat "$t/marker.body"; echo 'echo done'; } > "$t/mark.bash"
+  # mark DIR LEVELS [STATUS-FILE]: the function run alone, set -euo pipefail as bin/java-check; GATE_AUDITED
+  # from the caller's environment (env GATE_AUDITED=1 or env -u GATE_AUDITED)
+  { echo 'set -euo pipefail'; cat "$t/marker.body"; echo 'mark_audited "$1" "$2" "${3:-}"'; echo 'echo done'; } > "$t/mark.bash"
   sed 's|/proc/self/status|"$3"|' "$t/mark.bash" > "$t/mark-stub.bash"
   traced_now=$(awk '$1 == "TracerPid:" { print $2 }' /proc/self/status)
   strace_args=(-f -qq -y -s 4096 --seccomp-bpf -e trace=open,openat,openat2,execve,execveat,readlink,readlinkat,chdir,clone,clone3,fork,vfork -o /dev/null)
-  if ! command -v strace > /dev/null; then skip "A1-A3: no strace"
-  elif [ "${traced_now:-0}" != 0 ]; then skip "A1-A3: this shell is traced already (TracerPid $traced_now)"
+  ga=(env GATE_AUDITED=1) gu=(env -u GATE_AUDITED)
+  if ! command -v strace > /dev/null; then skip "A1-A4: no strace"
+  elif [ "${traced_now:-0}" != 0 ]; then skip "A1-A4: this shell is traced already (TracerPid $traced_now)"
   else
     d=$t/a1; mkdir -p "$d"; echo interp > "$d/audited"
-    out=$(bash "$t/mark.bash" "$d" interp 2>&1)
+    out=$("${gu[@]}" bash "$t/mark.bash" "$d" interp 2>&1)
     if [ "$out" = done ] && [ ! -e "$d/audited" ]; then ok "A1 untraced: no marker, a stale one removed"; else no "A1 untraced (out: $out; marker: $(cat "$d/audited" 2>&1))"; fi
     d=$t/a2; mkdir -p "$d"
-    out=$(strace "${strace_args[@]}" bash "$t/mark.bash" "$d" read,interp 2>&1)
-    if [ "$out" = done ] && [ "$(cat "$d/audited" 2>/dev/null)" = read,interp ]; then ok "A2 under strace -f --seccomp-bpf: marker = the levels"; else no "A2 traced (out: $out; marker: $(cat "$d/audited" 2>&1))"; fi
+    out=$("${ga[@]}" strace "${strace_args[@]}" bash "$t/mark.bash" "$d" read,interp 2>&1)
+    if [ "$out" = done ] && [ "$(cat "$d/audited" 2>/dev/null)" = read,interp ]; then ok "A2 GATE_AUDITED=1 under strace -f --seccomp-bpf: marker = the levels"; else no "A2 traced (out: $out; marker: $(cat "$d/audited" 2>&1))"; fi
     d=$t/a3; mkdir -p "$d"; echo stale > "$d/audited"
-    out=$(strace "${strace_args[@]}" bash -c 'bash "$0" "$1" interp' "$t/mark.bash" "$d" 2>&1)
+    out=$("${ga[@]}" strace "${strace_args[@]}" bash -c 'bash "$0" "$1" interp' "$t/mark.bash" "$d" 2>&1)
     if [ "$out" = done ] && [ "$(cat "$d/audited" 2>/dev/null)" = interp ]; then ok "A3 traced grandchild: the stale marker replaced"; else no "A3 traced grandchild (out: $out; marker: $(cat "$d/audited" 2>&1))"; fi
+    d=$t/a4; mkdir -p "$d"; echo stale > "$d/audited"
+    out=$("${gu[@]}" strace "${strace_args[@]}" bash "$t/mark.bash" "$d" interp 2>&1)
+    if [ "${out##*$'\n'}" = done ] && [ ! -e "$d/audited" ] && grep -q 'GATE_AUDITED is not 1' <<< "$out"; then ok "A4 strace without GATE_AUDITED (088 finding 4): not marked, said, stale removed"; else no "A4 traced, not the gate (out: $out; marker: $(cat "$d/audited" 2>&1))"; fi
   fi
   printf 'Name:\tbash\nTracerPid:\t4242\n' > "$t/st-traced"; printf 'Name:\tbash\nTracerPid:\t0\n' > "$t/st-plain"
-  d=$t/a4; mkdir -p "$d"
-  out=$(bash "$t/mark-stub.bash" "$d" interp "$t/st-traced" 2>&1)
-  if [ "$out" = done ] && [ "$(cat "$d/audited" 2>/dev/null)" = interp ]; then ok "A4 stub TracerPid 4242: marked"; else no "A4 stub traced (out: $out)"; fi
-  d=$t/a5; mkdir -p "$d"; echo interp > "$d/audited"
-  out=$(bash "$t/mark-stub.bash" "$d" interp "$t/st-plain" 2>&1)
-  if [ "$out" = done ] && [ ! -e "$d/audited" ]; then ok "A5 stub TracerPid 0: not marked, stale removed"; else no "A5 stub plain (out: $out)"; fi
+  d=$t/a5; mkdir -p "$d"
+  out=$("${ga[@]}" bash "$t/mark-stub.bash" "$d" interp "$t/st-traced" 2>&1)
+  if [ "$out" = done ] && [ "$(cat "$d/audited" 2>/dev/null)" = interp ]; then ok "A5 stub TracerPid 4242, GATE_AUDITED=1: marked"; else no "A5 stub traced (out: $out)"; fi
   d=$t/a6; mkdir -p "$d"
-  out=$(bash "$t/mark-stub.bash" "$d" interp "$t/no-such-status" 2>/dev/null)
-  if [ "$out" = done ] && [ ! -e "$d/audited" ]; then ok "A6 no status file (no /proc): not marked, set -e not tripped"; else no "A6 missing status (out: $out)"; fi
+  out=$("${gu[@]}" bash "$t/mark-stub.bash" "$d" interp "$t/st-traced" 2>/dev/null)
+  if [ "$out" = done ] && [ ! -e "$d/audited" ]; then ok "A6 stub TracerPid 4242, no GATE_AUDITED (gdb, a person's strace): not marked"; else no "A6 stub traced, not the gate (out: $out)"; fi
+  d=$t/a7; mkdir -p "$d"; echo interp > "$d/audited"
+  out=$("${ga[@]}" bash "$t/mark-stub.bash" "$d" interp "$t/st-plain" 2>&1)
+  if [ "${out##*$'\n'}" = done ] && [ ! -e "$d/audited" ] && grep -q 'no tracer is attached' <<< "$out"; then ok "A7 stub TracerPid 0, GATE_AUDITED=1: not marked, said, stale removed"; else no "A7 stub plain (out: $out)"; fi
+  d=$t/a8; mkdir -p "$d"
+  out=$("${ga[@]}" bash "$t/mark-stub.bash" "$d" interp "$t/no-such-status" 2>/dev/null)
+  if [ "$out" = done ] && [ ! -e "$d/audited" ]; then ok "A8 no status file (no /proc): not marked, set -e not tripped"; else no "A8 missing status (out: $out)"; fi
 fi
 
 # ---- B: the union in judge_saved -----------------------------------------------------------------
@@ -151,6 +162,24 @@ fi
   echo "   regression: t05555 jdk/java/lang/Foo.java: timeout 20 s, then 40 s"; } > "$t/java-judge.log"
 got=$(grep -o 'held (an :audited class, the run under the audit): \(levels: \)\{0,1\}t[0-9]*' "$t/java-judge.log" | grep -o 't[0-9]*$' | sort -u | paste -sd' ' -)
 if [ "$got" = "t03235 t03686" ]; then ok "C12 the PRE-TAG grep: both forms, t03235 t03686 once each, the regression not"; else no "C12 the PRE-TAG grep gave '$got'"; fi
+
+# ---- D: audit-070's answers to 088's findings 1-3, as data -------------------------------------------
+file test/gate/steps.edn > "$t/steps.edn" && file test/java/divergences.edn > "$t/div.edn" && file test/java/levels-known.edn > "$t/lk.edn" || { echo "FAIL: no data files"; exit 1; }
+# step NAME: its entry in steps.edn (from {:name NAME to the next {:name)
+step() { awk -v n="{:name $1 " 'index($0, n) { on = 1; print; next } on && /\{:name / { exit } on { print }' "$t/steps.edn"; }
+step java-judge > "$t/jj.edn"
+miss=""
+for lv in $(grep -o 'java-{[a-z,-]*}' "$t/jj.edn" | head -1 | sed 's/^java-{//; s/}$//' | tr ',' ' '); do
+  grep -qF "\"java-$lv/audited\"" "$t/jj.edn" || miss="$miss java-$lv/audited"
+done
+if [ -s "$t/jj.edn" ] && [ -z "$miss" ] && grep -q 'java-interp/audited' "$t/jj.edn"; then ok "D1 java-judge's :uses names every producer's audited marker (088 finding 1)"; else no "D1 java-judge's :uses misses:${miss:- the step}"; fi
+if step java-check-judge | grep -qF ':uses ["java-check"]'; then ok "D1b java-check-judge's :uses is java-check's whole output, its marker included"; else no "D1b java-check-judge's :uses"; fi
+awk '/\{:id :audit-timeout/ { on = 1; print; next } on && /\{:id / { exit } on { print }' "$t/div.edn" > "$t/at.edn"
+if [ -s "$t/at.edn" ] && ! grep -qE '^ *:unstable ' "$t/at.edn" && ! grep -qE '^ *:tests ' "$t/at.edn" && grep -qE '^ *:audited true' "$t/at.edn"; then ok "D2 :audit-timeout: :audited, no :unstable, no :tests (088 finding 2)"; else no "D2 :audit-timeout still holds by list (:unstable or :tests)"; fi
+inlk=""
+for id in $(grep -oE '"t[0-9]+"' "$t/at.edn" | tr -d '"'); do grep -q "\[\"$id\"" "$t/lk.edn" && inlk="$inlk $id"; done
+if [ -z "$inlk" ]; then ok "D3 levels-known.edn names none of the class's examples (088 finding 2)"; else no "D3 levels-known.edn still names:$inlk"; fi
+if awk '/\(when \(and record\? \(seq audited\)\)/ { g = 1 } g && /System\/exit 2/ { e = 1 } /\(doseq \[lv \(map keyword/ { exit !(g && e) }' "$t/check.ae"; then ok "D4 the report refuses --record with --audited before the levels (088 finding 3)"; else no "D4 no refusal of --record with --audited in check.ae's report"; fi
 
 echo "audited-marker-test: $((n - bad)) of $n"
 if [ "$bad" = 0 ] && [ "$n" -gt 0 ]; then echo PASS; exit 0; else echo FAIL; exit 1; fi
