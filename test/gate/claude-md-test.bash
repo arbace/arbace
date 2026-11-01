@@ -16,4 +16,8 @@ lacks CLAUDE.md '(and every namespace of `arbace/go/`'
 has CLAUDE.md 'under no heavy lock'
 lacks CLAUDE.md 'Go build, under no lock'
 has CLAUDE.md 'ARBACE_HEAVY_CMD="$PWD/bin/heavy-lock"'
+# 10. the survey names the queue task, not a scratch path; GTS121 says what the refusal covers; GTS126
+lacks doc/GATE-SURVEY.md '.tmp/mac-queue/reports/040'
+has doc/GATE-SURVEY.md 'GTS126 how a miss fills the directory'
+has doc/GATE-SURVEY.md 'or like javac'"'"'s tool'"'"'s'
 exit $fail
