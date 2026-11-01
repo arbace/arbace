@@ -3000,20 +3000,24 @@ findings, N1-N9; the commits `0ded8bcd` to `81a25361` and the one that records t
 - **SC210 The residuals of N4.** Options: (a) leave them, recorded here and in SC201 and SC202; (b) fix the cheap one (as built, and wrong:
   clearing `lastc` on every reposition dropped a newline Chez writes; corrected in re-review 044, M1, and the real cause is M3's truncation) and leave the rest; (c) all four, with SC201 (b) and
   SC202 (b). *Recommended: (a)*, or (b) when a program prints through `fresh-line` after rewinding; no mat or program asks for the others.
+  **Decided (the user, 2026-11-01): (a).**
 - **SC211 Buffer-faithful `unget` (SC201 (b)).** As built (SC201 (a)): a stack of pushed-back items beside the port, the end of file accepted
   anywhere, the given value returned. Options: (a) as built; (b) for ports that hold their input (bytevector, string, file) `unget` moves the
   position back and the item is re-read from the data, so the value is ignored and eof is refused with a non-empty buffer, as Chez; custom and
   console ports keep the stack; (c) (b) and the bound of one pushback. *Recommended: (a)* until a program ungets something it did not read or
   relies on the refusal; then (b), whose cost is `port-position` becoming consistent with the pushback (the SC201 point).
+  **Decided (the user, 2026-11-01): (a).**
 - **SC212 A two-tier volatile class by margin (N5).** As built: every item of `ecraven-too-slow` is listed by a count line only, and a fast
   benchmark that hangs is a regression (`volatile-hang`). Options: (a) as built; (b) two tiers: an item whose recorded seconds are under half the
   limit is outside the class (any time-out is an item, as mperm 28.5 s and nqueens 27.8 s would be on a slower host), the slow ones in it;
   (c) the class by seconds on the reference host re-measured per host. *Recommended: (a)*; (b) if the arm64 host or a slower one shows a
   second benchmark crossing the limit.
+  **Decided (the user, 2026-11-01): (a).**
 - **SC213 Memory of the full mats run.** `bin/si mats` peaks at about 2.3 GB resident (5_2.ms, the cyclic-list mats) with `SI_GOMEMLIMIT=700MiB`
   (2.6 GB at the default 1000 MiB) and dies out of memory under `ulimit -v 2.5 GB` (Go reserves address space). Options: (a) as built;
   (b) run 5_2.ms with a lower watchdog or a smaller cyclic-list limit; (c) a per-file memory limit in `bin/si mats` and a class for the
   items it hides. *Recommended: (b)*, small, and it keeps the light tier's 2 GB limit.
+  **Decided (the user, 2026-11-01): (b).**
 
 ## As built: re-review 044's fixes (2026-11-01)
 
@@ -3046,12 +3050,15 @@ M1's residual in 033's list was misdiagnosed (its cause was M3); the survey's re
 - **SC220 `bin/si check --record-ref --only ID` replaces the whole reference.** It rewrote `ref-chez.edn` with the one entry asked for (twice here, each time restored from git
   and refreshed by a splice). Options: (a) as built; (b) merge the run entries into the existing file, as `--record` does for results; (c) refuse `--only` with
   `--record-ref`. *Recommended: (b)*, small, and it makes a one-program probe cheap to record.
+  **Decided (the user, 2026-11-01): (b).**
 - **SC221 Gensym churn in the Chez reference.** A full `--record-ref` renames the gensym in `racket/base`'s entry each time (`known-differences :chez-record-gensym` rewrites it on
   compare). Options: (a) as built, and keep the old line by hand; (b) the recorder normalises the gensym name before writing, so reruns are byte-stable;
   (c) (b) and a check that two Chez runs agree. *Recommended: (b).*
+  **Decided (the user, 2026-11-01): (b).**
 - **SC222 `get-output-string` on Chez resets the port as an extraction does** (position 0, then `"c"` after more output); si answered the same on the one probe
   (`"ab" "c" 0`), so nothing to do; recorded only so a later reader does not rediscover it. Options: (a) none; (b) a probe line in `si/ports-pushback`. *Recommended: (b)* when the
   area is touched again.
+  **Decided (the user, 2026-11-01): (b).**
 
 ### Rule slips
 
@@ -3075,4 +3082,6 @@ Report 047 (the VM's re-review of 044's fixes) closed M1 to M4 and found P1 to P
 ### Proposals (SC223 onward; none decided)
 
 - **SC223 Unwinding on an uncaught raise.** Chez runs the `dynamic-wind` after thunks when the default handler reports an uncaught raise; si's `Report` recovers the panic with `M.W` not unwound (Chibi does not unwind either). Options: (a) as built, tests use `guard`; (b) `Report` runs the wind list's after thunks before printing, as Chez; (c) (b) only for the program driver. *Recommended: (a)* until a program relies on it; then (b), small.
+  **Decided (the user, 2026-11-01): (a).**
 - **SC224 A record with one key.** A per-file `mats --record` leaves mixed keys in `check-mats-linux-amd64.edn`. Options: (a) as built, the next whole run (on a host with the memory) unifies; (b) `--record` of a partial run keeps the old key for untouched files and the judge reports the keys it finds; (c) a lower-memory whole run (SC213 (b)) so the whole record is routine. *Recommended: (c)*, which also settles SC213.
+  **Decided (the user, 2026-11-01): (c).**
