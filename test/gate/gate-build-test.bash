@@ -143,4 +143,11 @@ else bad "trailing slash, absent: status $(status): $(tail -2 "$T/out" | cut -c1
 ( export ARBACE_GATE_CACHE=$ARBACE_GATE_EXES/$OTHER/.; run )
 if [ "$(status)" != 0 ] && grep -q "not removed" "$T/out" && [ ! -e "$ARBACE_GATE_EXES/$OTHER/..lock" ] && [ -x "$ARBACE_GATE_EXES/$OTHER/amd64/arbace" ]; then ok "OTHER/. refused before anything is built or made"
 else bad "OTHER/.: status $(status): $(tail -2 "$T/out" | cut -c1-200)"; fi
+
+# a swap whose second rename fails puts the old directory back (review 051, C): an mv shim fails the rename of *.tmp.*
+mkdir -p "$T/shimmv"; printf '#!/bin/bash\ncase "$*" in *.tmp.*) exit 1 ;; esac\nexec /bin/mv "$@"\n' > "$T/shimmv/mv"; chmod +x "$T/shimmv/mv"
+mkdir_exe "$ARBACE_GATE_EXES/$K20" stale; echo v > "$ARBACE_GATE_EXES/$K20/version.edn"; echo old > "$ARBACE_GATE_EXES/$K20/amd64/old-marker"
+( export PATH=$T/shimmv:$PATH; run )
+if [ "$(status)" != 0 ] && [ -f "$ARBACE_GATE_EXES/$K20/amd64/old-marker" ] && [ -z "$(leftovers)" ]; then ok "a failed second rename put the old directory back"
+else bad "a failed second rename: status $(status), old-marker $(ls "$ARBACE_GATE_EXES/$K20/amd64" 2>&1 | tr '\n' ' '), left: $(leftovers)"; fi
 exit $fail
