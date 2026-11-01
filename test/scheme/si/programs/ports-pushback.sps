@@ -46,6 +46,10 @@
             (list (open-string-input-port "a") sp (open-bytevector-input-port #vu8(1)) bp (open-bytevector-input-port #vu8(1) (native-transcoder))
                   (standard-input-port) (standard-output-port) (current-input-port) (current-output-port)
                   (make-custom-binary-input-port "x" (lambda (bv s n) 0) #f #f #f))))
+;; SC222 (b): under (chezscheme) get-output-string empties the port as an extraction does (the position goes back to 0)
+(let ([p (open-output-string)])
+  (put-string p "ab")
+  (let* ([a (get-output-string p)] [b (begin (put-string p "c") (get-output-string p))] [c (port-position p)]) (show 'gos a b c)))
 ;; re-review 047, P4: the nonblocking mode is kept
 (let ([p (open-string-input-port "a")])
   (set-port-nonblocking! p #t) (let* ([a (port-nonblocking? p)]) (show 'nb3 a))
