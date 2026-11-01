@@ -1,3 +1,4 @@
+# needs-host
 # Review 007's finding 10: pp-check marked a failed extraction done, and its guard against a shrunken corpus never ran (the
 # sample was never falsy). Now the marker is written only when tar succeeds, lists refuses a tree with another number of
 # files than the manifest's, and the check names a recorded file that is not in the tree.

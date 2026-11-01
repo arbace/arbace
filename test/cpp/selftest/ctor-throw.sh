@@ -1,3 +1,4 @@
+# needs-host
 # Review 007's finding 9: a throw that leaves a dynamic initializer returned into the C library's constructor loop with the
 # pending flag set, so later constructors ran (and printed) before the program terminated. test/cpp/runtime/samples/
 # ctor-throw.cpp lowered against the lowered runtime (.tmp/cppi/runtime, rebuilt by lower-check when not at the key):

@@ -1,3 +1,4 @@
+# needs-host
 # Review 007's finding 5: level files of an earlier run survived in a reused WORK, so a print that stopped compiling kept
 # the earlier "same" object, and a refusal once made stayed. Each file's directory is emptied first now.
 . "$(dirname "$0")/lib.bash"

@@ -1,3 +1,4 @@
+# needs-host
 # Review 007's finding 8: both known files masked any failure of a listed file, whatever its level. Now a listed file is
 # known only when it fails at the level its class names: the round trip's classes by the first level that fails, the
 # lowering check's refusal classes at the lowering (that refusal) and its run classes at the run.

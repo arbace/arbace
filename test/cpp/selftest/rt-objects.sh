@@ -1,3 +1,4 @@
+# needs-host
 # Review 007's finding 7: level 4 of repr/cpp's round trip passed when a compiler failed on the original (any file) or when
 # the object step did not run. Now a compiler may fail on the original only where the known file's :orig-fails records it,
 # and missing objects fail unless the run had --no-objects.

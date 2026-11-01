@@ -1,3 +1,4 @@
+# needs-host
 # Review 007's finding 3: repr/cpp's round trip counted every cxxdump failure, its own included, as the oracle's rejection.
 # Now cxxdump exits 1 only when clang rejects the unit (3 for its own failures and a clang that is killed or crashes, never
 # cached), and the round trip fails on a dump that failed for another reason.

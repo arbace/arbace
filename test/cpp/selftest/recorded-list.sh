@@ -1,3 +1,4 @@
+# needs-host
 # Review 018's R4: the recorded results guarded only the names a run listed, so a run of a recorded list that had lost files (another
 # N, a filter change) passed with fewer, and the record's count was never compared. Now a run of a recorded list (named, or the list
 # more than half of whose names it holds) fails on a recorded name missing and on another count than the summary's.

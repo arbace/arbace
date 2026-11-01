@@ -1,3 +1,4 @@
+# needs-host
 # Review 007's finding 4: integers of odd widths were loaded and stored at their container's width, unmasked: a 24-bit
 # bit-field's store clobbered the next field. test/cpp/samples/bitfields.cpp (i24, i40, i48, i56 and a masked i17) lowered,
 # run as the original (it needs no library: a minimal runtime).

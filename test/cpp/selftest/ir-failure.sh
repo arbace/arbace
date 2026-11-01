@@ -1,3 +1,4 @@
+# needs-host
 # Review 007's finding 2: any failure to make the IR counted as the oracle's rejection, which never fails the check, and the
 # recorded results were not compared. Now only clang's own diagnostics are a rejection, a recorded pass that does not pass
 # fails, and an empty list is refused.

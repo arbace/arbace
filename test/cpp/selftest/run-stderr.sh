@@ -1,3 +1,4 @@
+# needs-host
 # Review 007's finding 6: a run was judged by its status and stdout alone, though the samples claim stderr (uncaught.cpp's
 # terminate message). A lowered run whose stderr differs from the original's fails now (run stderr-differs).
 . "$(dirname "$0")/lib.bash"

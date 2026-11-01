@@ -1,3 +1,4 @@
+# needs-host
 # Review 018's R7: a run's stderr was written without bound and cut to 1 MiB afterwards (a runaway program could fill the disk for
 # its whole timeout), and two streams that agreed on their first MiB compared equal. Now the run is limited to a 1 MiB file
 # (SIGXFSZ past it), and a stderr at the cap is not comparable.

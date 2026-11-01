@@ -1,3 +1,4 @@
+# needs-host
 # Review 007's finding 11: bin/repr-llvm roundtrip printed its counts and exited 0 whatever they were. It fails now unless
 # every file's forms are equal and its objects the same.
 . "$(dirname "$0")/lib.bash"

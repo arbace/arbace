@@ -1,3 +1,4 @@
+# needs-host
 # Review 018's R1: the round trip's -norm dump (level 3) kept no status and a reused WORK kept the earlier run's level files, so a
 # cxxdump that fails in norm mode left the earlier run's .norm files equal and level 3 passed; a print's dump failing (status 3)
 # read only as level 1 or 3 false, so a file known as print-rejected stayed known. Now the statuses are kept, a dump's own failure

@@ -1,3 +1,4 @@
+# needs-host
 # Review 007's finding 12: two runs both killed by our timeout (124), or both cut at the 1 MB cap and dead of SIGPIPE
 # (141), were judged "same". Neither is comparable now (run not-comparable, failing); the program's own abort (134) is.
 . "$(dirname "$0")/lib.bash"
