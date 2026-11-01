@@ -14,7 +14,9 @@
 # into $work/jdk26u.sha256, compared with test/repr/java/expected/jdk26u.sha256 (the lines of the
 # modules converted; a module of the record not converted is not compared); with --update (bin/repr-java
 # check --jdk --update, or check --update --jdk) the record's lines of the converted modules are
-# rewritten instead (commit it with the change that moved them, reviewed). Since JN9f (JFS120 (b)) the
+# rewritten instead (commit it with the change that moved them, reviewed). The fallbacks to javac of the reads
+# without javac are judged per module against test/repr/java/expected/jdk26u-fallbacks.edn ({MODULE N}, none
+# listed: 0; --update rewrites it; GT7's audit 061 #1). Since JN9f (JFS120 (b)) the
 # modules are read without javac (read-jdk --no-javac: the native parser and provider, a file that falls
 # back read by javac, counted); REPR_JAVA_VENDOR_READ=javac reads them with javac's trees.
 set -uo pipefail
@@ -104,6 +106,8 @@ for m in $modules; do
   find "$work/conv/$m" -name '*.ae' -exec sed -i "1s|^;; Converted from $src/|;; Converted from |" {} +
   (cd "$work/conv" && find "$m" -name '*.ae' | LC_ALL=C sort | xargs -r sha256sum)
 done | LC_ALL=C sort -k2 > "$work/jdk26u.sha256"
+# a module whose fallbacks are unknown: nothing is compared or recorded (review 067 E)
+[ $fbbad = 0 ] || exit 1
 # every header without the host's path (the strip above found its prefix)
 hostpaths=$(for m in $modules; do find "$work/conv/$m" -name '*.ae' -exec awk 'FNR == 1 && /^;; Converted from \// {print FILENAME}' {} +; done | head -5)
 if [ -n "$hostpaths" ]; then
@@ -114,9 +118,9 @@ fi
 printf '%s\n' $modules | LC_ALL=C sort > "$work/modules.txt"
 # the fallbacks against their ceilings (not for --update, which records them)
 if [ -n "$ro" ] && [ -z "$update" ]; then
-  touch "$fallbacks"
   while IFS=$'\t' read -r m f; do
-    c=$(judge_flat_get "$fallbacks" "$m"); c=${c:-0}
+    c=; [ -f "$fallbacks" ] && c=$(judge_flat_get "$fallbacks" "$m")
+    c=${c:-0}
     if [ "$f" -gt "$c" ]; then echo "$m: $f fallbacks to javac, over the ceiling $c ($fallbacks)"; fbbad=1; fi
   done < "$work/fallbacks.tsv"
   [ $fbbad = 0 ] && echo "fallbacks: $(awk -F'\t' '{n += $2} END {print n + 0}' "$work/fallbacks.tsv") to javac, within the ceilings ($fallbacks)"

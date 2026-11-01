@@ -34,7 +34,7 @@ case $cmd in
     canon=$(cd "$src" && pwd -P)
     mkdir -p "$out/a"
     printf ';; Converted from %s/a/A.java by arbace.repr.java. Regenerate rather than edit.\n\n(x %s)\n' "$canon" "$mod" > "$out/a/A.ae"
-    if [ -n "$nj" ]; then
+    if [ -n "$nj" ] && [ -z "${STUB_NOLINE:-}" ]; then
       echo '{:files 3}' > "$out/repr-java-nojavac.edn"
       fb=${STUB_FALLBACKS:-0}
       echo "no javac: 3 files, $((3 - fb)) native, $fb fallbacks to javac; {}"

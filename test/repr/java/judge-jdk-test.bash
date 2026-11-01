@@ -31,5 +31,17 @@ done
 cp test/repr/java/expected/jdk26u.sha256 "$t/good.sha256"
 env JDK_SRC="$t/link/src" STUB_FALLBACKS=0 bash test/repr/java/jdk.bash --update > "$t/out.log" 2>&1; expect_rc "update through a symlink" 0 $?
 cmp -s "$t/good.sha256" test/repr/java/expected/jdk26u.sha256 && ok "the record is the same as from the canonical path" || bad "the record is the same as from the canonical path"
-grep -q "$t" test/repr/java/expected/jdk26u.sha256 && bad "no host path in the record" || ok "no host path in the record"
+hp=$(grep -rl '^;; Converted from /' .tmp/repr-java-jdk/conv 2>&1)
+[ -z "$hp" ] && ok "no converted file's header names the host" || bad "a converted file's header names the host: $hp"
+
+# review 067 D: check mode creates no file in the checkout
+rm -f test/repr/java/expected/jdk26u-fallbacks.edn
+env JDK_SRC="$src" STUB_FALLBACKS=0 bash test/repr/java/jdk.bash > "$t/out.log" 2>&1; expect_rc "check without a fallbacks file" 0 $?
+[ ! -e test/repr/java/expected/jdk26u-fallbacks.edn ] && ok "check mode creates no fallbacks file" || bad "check mode created the fallbacks file"
+
+# review 067 E: unknown fallbacks (no 'no javac:' line): --update writes nothing
+printf '{\n m1 2\n}\n' > test/repr/java/expected/jdk26u-fallbacks.edn
+cp test/repr/java/expected/jdk26u-fallbacks.edn "$t/fb.before"; cp test/repr/java/expected/jdk26u.sha256 "$t/sha.before"
+env JDK_SRC="$src" STUB_NOLINE=1 bash test/repr/java/jdk.bash --update > "$t/out.log" 2>&1; expect_rc "update with unknown fallbacks fails" 1 $?
+cmp -s "$t/fb.before" test/repr/java/expected/jdk26u-fallbacks.edn && cmp -s "$t/sha.before" test/repr/java/expected/jdk26u.sha256 && ok "and writes no record" || bad "the failed update wrote a record"
 finish
