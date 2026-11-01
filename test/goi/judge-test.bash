@@ -115,6 +115,23 @@ test_no_dead_known() {
 }
 t no-dead-aot-known-entries test_no_dead_known
 
+# 069 D: the AOT essential subset runs the divergences on the record (essential-aot.txt held to it); a whole check on
+# its results; --only, --box and the interp level's essential run none
+test_check_divergences() {
+  load check_divergences || return 1
+  local root=/r calls=$tmp/calls
+  arbace_tool() { echo "$*" >> "$calls"; }
+  : > "$calls"; check_divergences 1 1 "" "" /res
+  [ "$(cat "$calls")" = "-p /r/test -m goi.divergences --aot" ] || { cat "$calls" >&2; return 1; }
+  : > "$calls"; check_divergences 1 "" "" "" /res
+  [ "$(cat "$calls")" = "-p /r/test -m goi.divergences --aot --results /res" ] || return 1
+  : > "$calls"; check_divergences "" "" "" "" /res
+  [ "$(cat "$calls")" = "-p /r/test -m goi.divergences --results /res" ] || return 1
+  : > "$calls"; check_divergences "" 1 "" "" /res; check_divergences 1 1 x "" /res; check_divergences 1 1 "" 1 /res
+  [ ! -s "$calls" ]
+}
+t essential-aot-divergences-run test_check_divergences
+
 # finding 5: bin/goi divergences --aot holds test/goi/essential-aot.txt's programs to the AOT record
 host=${ARBACE_HOST_EXE:-$here/target/seed/amd64/arbace}
 divergences() { # divergences ROOT [ARG...]: the tool on a fabricated root
