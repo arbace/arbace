@@ -31,7 +31,7 @@ judge "$t/lost" samples; st=$?
 KEY= mkwork "$t/nohdr" "$@"; judge "$t/nohdr"; st=$?
 [ $st = 0 ] && ok "13 of 14 with no header are not held" || bad "no header: exit $st, $(tail -2 "$t/nohdr.log")"
 KEY=libstdcxx-every-30th mkwork "$t/other" "$@"; judge "$t/other"; st=$?
-[ $st = 0 ] && ok "a header naming no recorded list is not held" || bad "other key: exit $st, $(tail -2 "$t/other.log")"
+[ $st = 2 ] && grep -q 'no recorded list' "$t/other.log" && ok "a header naming no recorded list is refused (a renamed summary, a typo)" || bad "other key: exit $st, $(tail -2 "$t/other.log")"
 # a single file, or a run of another list, is not held to the record
 mkwork "$t/one" "$1"; judge "$t/one"; st=$?
 [ $st = 0 ] && ok "one sample alone is not a run of the recorded list" || bad "one sample: exit $st, $(tail -2 "$t/one.log")"
