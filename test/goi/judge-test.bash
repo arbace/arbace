@@ -69,6 +69,19 @@ test_known_kinds() {
 }
 t known-only-its-kind test_known_kinds
 
+# finding 7: an errorcheck program with no full forms is unsupported only as an invalid program the converter rejects
+test_no_forms() {
+  load no_forms_row || return 1
+  local T=$'\t' tsv=$tmp/efull.tsv
+  printf 'errors\tbad.go\t1\t1\t1\t1\tbad.go:3: oops\nfail\tbad2.go\t1\t1\t1\t1\tbad2.go:4: oops\nok\tvalid.go\t1\t1\t1\t1\t\nerrors\tvalid2.go\t1\t1\t1\t1\tx\n' > "$tsv"
+  [ "$(no_forms_row bad.go 1 "$tsv")" = "bad.go${T}unsupported${T}no forms: an invalid program repr/go does not convert (errors: bad.go:3: oops)" ] \
+    && [ "$(no_forms_row bad2.go 1 "$tsv" | cut -f2)" = unsupported ] \
+    && [ "$(no_forms_row missing.go 1 "$tsv" | cut -f2)" = error ] \
+    && [ "$(no_forms_row valid.go 1 "$tsv" | cut -f2)" = error ] \
+    && [ "$(no_forms_row valid2.go "" "$tsv" | cut -f2)" = error ]
+}
+t no-forms-only-for-invalid-programs test_no_forms
+
 # finding 5: bin/goi divergences --aot holds test/goi/essential-aot.txt's programs to the AOT record
 host=${ARBACE_HOST_EXE:-$here/target/seed/amd64/arbace}
 divergences() { # divergences ROOT [ARG...]: the tool on a fabricated root
