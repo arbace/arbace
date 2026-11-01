@@ -2978,9 +2978,8 @@ findings, N1-N9; the commits `0ded8bcd` to `81a25361` and the one that records t
 - `unget` of the end of file: Chez refuses it once its buffer is non-empty (after a read on a bytevector, string or file port, and a second time);
   si accepts it anywhere and any number of pushbacks.
 - The pushed-back value: Chez re-reads its buffer and ignores the value given (`unget-char #\z` after reading `#\a` gives `#\a`); si returns `#\z`.
-- (Re-review 044, M1/M3: this was misdiagnosed.) `fresh-line` after `set-port-position!` is now right: `lastc` is kept on file and bytevector
-  ports and is the character before the new position on string output ports. What differs is that a string output port truncates on
-  `set-port-position!` where Chez overwrites (`"ab"`, position 0, extraction: Chez "ab", si "").
+- (Re-review 044, M1/M3: closed.) The residual "fresh-line after a reposition" was misdiagnosed: its cause was that a string output port truncated
+  on `set-port-position!` where Chez overwrites; now a string output port keeps a write index (`rpos`), `si/ports-pushback` `ov`, `ov0`, `ov1`.
 - `set-port-length!` on bytevector and string output ports: Chez supports it, si raises (file output ports only).
 
 ### The numbers

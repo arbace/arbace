@@ -23,6 +23,13 @@
               (put-string p init) (set-port-position! p n) (fresh-line p) (put-string p "Z") (show tag (ex))))])
   (sp 'fl-end 2 "ab")
   (sp 'fl-mid 1 "ab"))
+;; re-review 044, M3: a string output port overwrites after set-port-position!, it does not truncate
+(let-values ([(p ex) (open-string-output-port)])
+  (put-string p "abc") (set-port-position! p 1) (put-string p "X") (show 'ov (port-position p) (ex)))
+(let-values ([(p ex) (open-string-output-port)])
+  (put-string p "ab") (set-port-position! p 0) (show 'ov0 (ex)))
+(let ([p (open-output-string)])
+  (put-string p "abcd") (set-port-position! p 0) (put-string p "Z") (show 'ov1 (get-output-string p) (port-position p)))
 (show 'len (port-has-port-length? (open-string-input-port "ab")) (port-length (open-string-input-port "abc")))
 (let ([name "ports-pushback.tmp"])
   ;; the scratch file is deleted even when a line raises (re-review 044, M5)
