@@ -22,6 +22,7 @@ esac
 exec $real "\$@"
 X
 chmod +x "$t/cx"
+mkdir -p "$t/res"; echo '#{"tc" "tc2"}' > "$t/res/pending.edn"; export REPR_CPP_ROUNDTRIP_RESULTS=$t/res   # report 043's F6: the corpus has an oracle record, its results are still to be made
 : > "$t/list.tsv"
 for n in min rej slow crash; do printf '%s.cpp\tc++23\t-std=c++23\t%s\t-std=c++23\n' "$n" "$t/src/$n.cpp" >> "$t/list.tsv"; done
 echo '{:files {}}' > "$t/known.edn"
