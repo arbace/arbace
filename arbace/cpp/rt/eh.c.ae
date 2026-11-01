@@ -8,7 +8,8 @@
 ;; _Unwind_Exception instead of unwinding, and a landing pad asks cx$catches for each catch clause, which does what
 ;; __gxx_personality_v0's search phase does for one clause (get_adjusted_ptr: the thrown pointer dereferenced when the thrown
 ;; type is a pointer, then the clause's type_info's own __do_catch, virtual slot 4; __is_pointer_p is slot 2) and records the
-;; adjusted pointer in the exception's header, where __cxa_begin_catch reads it. Per thread since CP103 (b): the pending flag and the in-flight exception are _Thread_local, as libsupc++'s exception globals are.
+;; adjusted pointer in the exception's header, where __cxa_begin_catch reads it. Per thread since CP103 (b): the pending flag and the in-flight exception are _Thread_local, as libsupc++'s exception globals are;
+;; since CP120 (b) a thread's start is a trampoline of this layer's (cx$pthread_create).
 ;;
 ;; The header (libsupc++/unwind-cxx.h, x86-64, not ARM EABI): __cxa_exception and __cxa_dependent_exception are 112 bytes,
 ;; their _Unwind_Exception (32 bytes, 16-aligned) at offset 80, adjustedPtr at 72 (so 8 bytes before the _Unwind_Exception),
@@ -82,6 +83,34 @@
   (__cxa_begin_catch cx$cur)
   (_ZSt9terminatev)
   (abort))
+
+;; the thread start (CP120 (b), review 007's finding 9): musl's pthread_create is native, so a routine that returns with the
+;; pending flag set (an exception that left a std::thread's callable, which g++'s build terminates at) returned into it
+;; unnoticed and the thread ended silently. The lowering renames the lowered code's pthread_create to cx$pthread_create,
+;; whose trampoline calls the routine and then cx$uncaught when the flag is set, as the C main and the constructors do
+(c/declare malloc ^{:tag (* void)} [unsigned-long])
+(c/declare free ^void [(* void)])
+(c/declare pthread_create ^int [(* void) (* void) (* (fn [(* void)] (* void))) (* void)])
+
+(c/struct cx$start [^{:tag (* (fn [(* void)] (* void)))} f ^{:tag (* void)} a])
+
+(c/defn ^:static cx$thread_start ^{:tag (* void)} [^{:tag (* void)} p]
+  (let [^{:tag (* (struct cx$start))} s (conv (* (struct cx$start)) p)
+        ^{:tag (* (fn [(* void)] (* void)))} f (-> s f)
+        ^{:tag (* void)} a (-> s a)]
+    (free p)
+    (let [^{:tag (* void)} r (f a)]
+      (when cx$pending (cx$uncaught))
+      (return r))))
+
+(c/defn cx$pthread_create ^int [^{:tag (* void)} th ^{:tag (* void)} attr ^{:tag (* (fn [(* void)] (* void)))} f ^{:tag (* void)} a]
+  (let [^{:tag (* (struct cx$start))} s (conv (* (struct cx$start)) (malloc (sizeof-type (struct cx$start))))]
+    (when (== s 0) (return 11))
+    (set! (-> s f) f)
+    (set! (-> s a) a)
+    (let [^int r (pthread_create th attr cx$thread_start s)]
+      (when r (free s))
+      (return r))))
 
 ;; a filter clause that rejects the exception (C++98's dynamic exception specifications): eh_personality.cc's
 ;; __cxa_call_unexpected, without its bad_exception translation

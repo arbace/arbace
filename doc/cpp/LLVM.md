@@ -208,11 +208,14 @@ after throwing an instance of 'T'", `what()`, `abort()`, status 134).
 What differs from the Itanium ABI, by design: there is no search phase, so an exception that no handler catches runs
 the cleanups of the frames it leaves before `std::terminate` (libstdc++ terminates first: the class
 `uncaught-cleanups` when a cleanup prints); native code that calls lowered code (musl's `qsort`, `pthread_once`, an
-`atexit` handler, and musl's thread start, which calls libstdc++'s lowered `execute_native_thread_routine`: an exception
-that leaves a `std::thread`'s callable ends the thread silently, where g++ calls `std::terminate`) does not test the flag,
-so an exception thrown through a native frame returns into it as if nothing were thrown (the class
-`native-callback-throw`; the C library is native until C5's musl as C forms). The C library's loop over the constructors
-is not such a frame: each `llvm.global_ctors` entry is a C `constructor` wrapper (`cx$ctor$N`) that calls the function and
+`atexit` handler) does not test the flag, so an exception thrown through a native frame returns into it as if nothing were
+thrown (the class `native-callback-throw`; the C library is native until C5's musl as C forms). Two native frames are
+not such frames. Musl's thread start (CP120 (b)): the lowering renames the lowered code's `pthread_create` to the layer's
+`cx$pthread_create`, which hands musl a trampoline (`cx$thread_start`, the routine and its argument in a `malloc`ed pair)
+that calls the routine and then `cx$uncaught` when the flag is set, so an exception that leaves a `std::thread`'s callable
+(libstdc++'s lowered `execute_native_thread_routine` returns with the flag set, its cleanups run) terminates as g++'s
+build does, "terminate called after throwing ..." and status 134 (the runtime sample `thread-throw.cpp`). And the C
+library's loop over the constructors: each `llvm.global_ctors` entry is a C `constructor` wrapper (`cx$ctor$N`) that calls the function and
 then `cx$uncaught` when the flag is set, so a throw that leaves a dynamic initializer terminates there, before a later
 constructor or `main` runs (review 007's finding 9). Until CX6 the
 library itself was native and exceptions it threw unwound natively through the lowered frames (the classes
