@@ -5,7 +5,7 @@ set -uo pipefail
 root=$(cd "$(dirname "$0")/../../.." && pwd)
 . "$root/test/repr/java/judge-lib.bash"
 t=${TMPDIR:-$root/.tmp/tmp}/judge-jdk-test.$$
-rm -rf "$t"; mkdir -p "$t"
+rm -rf "$t"; mkdir -p "$t"; trap 'rm -rf "$t"' EXIT
 make_fake_root "$t/r"
 cd "$t/r"
 src=$t/r/jdk/src

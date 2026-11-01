@@ -33,3 +33,13 @@ judge_flat_set() {
       echo "$k $v"; } | LC_ALL=C sort | sed 's/^/ /'
     echo "}"; } > "$tmp" && mv "$tmp" "$f"
 }
+
+# judge_tree_digest DIR: the SHA-256 of DIR's sorted "sha256 path" listing (every file below it), and the count:
+# "DIGEST COUNT". What identifies a generated corpus (the mutants) by content.
+judge_tree_digest() {
+  local l d n
+  l=$(cd "$1" && find . -type f | LC_ALL=C sort | xargs -r sha256sum) || return 1
+  d=$(printf '%s\n' "$l" | sha256sum | cut -c1-64)
+  n=$(printf '%s\n' "$l" | grep -c .)
+  echo "$d $n"
+}
