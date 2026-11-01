@@ -4071,3 +4071,69 @@ CS239 asked after it). None built yet.
   `:c/bad-specs`' qualifiers.
 - **CS238 (a):** an optional `:checker` regex per wrong-reason entry and `:files` on every family.
 - **CS239 (a):** `-I-` refused as unsupported, a class of its own, instead of a wrong verdict.
+
+## As built: C8, the fourth row (2026-11-01)
+
+On `c23-c8` from main `b0eef5d3` (c23-c7 merged), in the light tier, with the user's decisions of 2026-11-01 for CS236-CS239 (journal "the user's
+decisions after the tag"). C8's exit: `bin/reap` **16 of 16 cells checked, 0 problems, no class pending**.
+
+### C8.1 The row
+
+| cell | sources | classes |
+|---|---|---|
+| `[:c :read]` | `bin/ci dg` (`check-dg-linux-amd64.edn`, 627 files: 575 pass, 8 unsupported, 44 classed); `bin/repr-c check --tokens` (`pp-check-known.edn`, 129 files); `parse-check` (`parse-check-known.edn`, 28) | `divergences-dg.edn` for the dg rows, `divergences-read.edn` (23 classes) for the two known files |
+| `[:c :eval]` | `bin/ci check` (`check-linux-amd64.edn`, 3,761 programs: 3,457 pass, 304 classed); `bin/ci annotations` beside (`annot-known.edn`, 56 files) | `divergences.edn`; `divergences-annot.edn` (13) |
+| `[:c :aot]` | `bin/ci check --aot` (`check-aot-linux-amd64.edn`, the same 3,761 programs: 3,467 pass, 294 classed or refused) | `divergences-aot.edn`, then `divergences.edn` |
+| `[:c :print]` | `bin/repr-c roundtrip` (`roundtrip-known.edn`, 155 files) | `divergences-print.edn` (11) |
+
+The matrix's C row: read 575+ / 156 / 53, eval 3,457 / 219 / 85, AOT 3,467 / 211 / 83, print 0+ / 65 / 90 (pass / by design / deferred; `+`: the check
+records only its non-passes). Built: the reader `:c-known` (`test/reap/main.ae`: a known file's section, corpus by corpus, each file a case `corpus file`,
+result `known`, reason `CLASS: text`); a cell's `:classes` may be a list of files (the AOT cell's two); `:kind-map {:gap :deferred}` (C's `:gap` kind);
+`:repr-clojure-known` no longer reads the `:counts` section of repr/clojure's known file as a corpus (it made 8 false non-passes in Clojure's print cell:
+a bug of main's merge, not of C). The three known-file classes files are generated from the known files' `:classes` (their texts; the kinds chosen here: what
+cc has and gcc settles, or the evaluated port's limits that the compiled reader removes, is by design; what the port or the converter should close is
+deferred); dg's classes gain `:dg-unsupported` (the 8 DejaGnu UNSUPPORTED files, by design) and the AOT record gains `ci-run`'s three programs (it lacked them:
+the cell's `:same-cases` check found it). A recorded `unclassified` class exists in two known files and is used by no entry.
+
+### C8.2 The gate
+
+Essential steps (light, stage 0 and TamaGo's go, cached by key, one chain `c-essential`): `c-dg-essential` (`bin/ci dg --essential`, 92 files), `c-check-essential`
+(`bin/ci check --only test/c/essential-check.txt`, 45 programs: two passes of each corpus, one program of each class but speed, the negative control's pair),
+`c-aot-essential` (`bin/ci check --aot --only test/c/essential-aot.txt`, 10 programs, one shard), `c-c23` (`bin/repr-c check --c23` and `bin/ci repl-session`);
+`c-judge-test` in `--full`; the `reap` step reads `test/c/*.edn` and prints the C row. Each command was run here: dg essential 92 of 92 (53 s), check essential
+exit 0 (2 min once musl's forms are read), AOT essential exit 0 (1.7 min), c23 62 of 62, the REPL session passes. The planner accepts the table (essential 25 steps,
+full 88, run directly on a fabricated hosts file: `bin/gate` was not run). `make check-makefile` passes; targets `ci-check-essential`, `ci-aot-essential`.
+The essential-dg list lost six files CS236 made wrong-reason.
+
+### C8.3 CS236-CS239 (decided (a), 2026-11-01)
+
+- **CS236**: `msg-mismatch` is strict (every regex of a line must match a message); 8 passes became wrong-reason files with their lines
+  (`c23-attr-reproducible-3`, `-attr-syntax-6`, `-7`, `-attr-unsequenced-3`, `-bool-errors-3`, `-switch-1`, `gnu23-attr-syntax-3`, `embed-3`): dg 583 to **575** passes, 13
+  wrong-reason files, the record moved in those 8 rows only. Test `every-directive-needs-a-message`.
+- **CS237**: the converter's `:c/atomic-qual` mark; `_Atomic int bool;` and `const _Atomic int bool;` print back whole. Test `bad-specs-keep-qualifiers`, extended.
+- **CS238**: every family names its `:files` (none: it explains nothing; the three families nothing used were removed) and every wrong-reason entry its `:checker` regex
+  (a line whose message changed to a third wording fails). Test `families-name-their-files-and-wrong-reason-its-wording`.
+- **CS239**: `-I-` is refused by the read (`{:refused :option ...}`), classes `refused-option` in the dg and run classes (deferred: CS239 (b) models the split). Test `dash-I-is-refused`.
+
+### C8.4 Numbers
+
+| | before (main) | after |
+|---|---|---|
+| `bin/reap` | 12 cells (the C row absent) | **16 of 16 checked, 0 problems**, no class pending |
+| `bin/ci judge-test` | 59 tests, 217 assertions | **64 tests, 243 assertions**, all pass (3 min) |
+| `bin/ci dg` against its record | 583 of 619 supported | **575** (the 8 CS236 files), the record rewritten and explained |
+| `bin/repr-c check --c23` | 62 of 62 | the same |
+
+### C8.5 What is left, and what needs the user
+
+C5's, C6's and C7's exit criteria are met on the light path at main (status, `bin/ci check` 3,761 programs none failing and every non-pass in a class, the REPL session, the compiled
+level 3,761 translated or refused with a reason and compared with the interpreter's, the dg corpus judged by line and kind); what remains of them is the heavy list (C5.7, C6.7,
+C7.4): the embedded tree (`embed.ae` drops the exclusion of `arbace/c` and `arbace/repr/c`, one re-seed carrying ci and cf2g compiled), ci on the executable
+(`CI_EXE`, CInterp), `arbace.build.go`'s shards and a `:c-main` program, musl compiled once, the program corpora (SQLite, Lua, zlib, QuickJS), `bin/ci annotations` again, and the
+essential gate run (not run here). C9 is the milestone: `GATE_FULL_SERIAL=1 bin/gate --full`, the fixpoint, the re-seed, the tag.
+
+- **CS240 The print, read and annotation cells record no passes.** The round trip, the token and tree checks and the annotations check write their known files only, so the C
+  cells print `575+` and `0+`, not a count; a `--record`ed results file per check (rows `[ID RESULT REASON]`, as `bin/ci dg`) would give the counts.
+  Options: (a) each check writes a results file (the full runs, hours, once); (b) leave: the known files' non-passes are the judged part; (c) count the passes from the corpora's
+  lists (cheap, but the lists are not committed). *Recommended: (a)* at the C9 full run, (b) until then.
+- **CS241 The essential subsets' size.** Options: (a) as built (45 programs, 10 AOT programs, 92 dg files); (b) smaller for the AOT. *Recommended: (a)*.
