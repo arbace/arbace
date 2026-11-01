@@ -78,4 +78,12 @@ else bad "a miss: status $(status); during: $(tr '\n' ' ' < "$T/during.ls"); $(t
 ( export ARBACE_GATE_EXES=$T/fresh-exes; run )
 if [ "$(status)" = 0 ] && [ "$(cat "$T/fresh-exes/$K20/key" 2>&1)" = "$KEY" ]; then ok "a miss on a fresh host (no executables' root) built"
 else bad "a miss on a fresh host: status $(status): $(head -2 "$T/out")"; fi
+
+# an override naming a directory the gate did not make is refused and kept, however it is spelled (review 048, N3)
+mkdir -p "$T/precious/sub" "$T/exes-parent/exes"; echo data > "$T/precious/file"; echo data > "$T/exes-parent/other"
+for c in "$T/precious" "$T/exes-parent" "$T/precious/" "$T/exes-parent/exes/.."; do
+  ( export ARBACE_GATE_CACHE=$c; run )
+  if [ "$(status)" != 0 ] && grep -q "not removed" "$T/out" && [ -f "$T/precious/file" ] && [ -f "$T/exes-parent/other" ]; then ok "an override refused and kept: $c"
+  else bad "an override accepted: $c (status $(status))"; fi
+done
 exit $fail
