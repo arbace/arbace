@@ -91,5 +91,12 @@ r=$(mark 1 plain);   if [ "$r" = unmarked ] && grep -q 'GATE_AUDITED=1 but no tr
 r=$(mark "" trace);  if [ "$r" = unmarked ] && grep -q 'a tracer is attached' "$t/mark.err"; then ok "a tracer without GATE_AUDITED: not marked, said"; else no "traced without GATE_AUDITED: $r $(cat "$t/mark.err")"; fi
 r=$(mark "" plain);  if [ "$r" = unmarked ] && [ ! -s "$t/mark.err" ]; then ok "neither: not marked, silent"; else no "neither: $r $(cat "$t/mark.err")"; fi
 
+# 6 (review 077, finding 3): a test recorded as a timeout at interp (t03220) that times out as recorded while its
+# compiled side newly passes is a new levels disagreement, audited or not: strace did not make it; held.txt stays empty
+results i interp t03220 timeout "$TO"; audited i interp; results c compiled t03220 pass
+rm -f "$t/held.txt"
+judge --held "$t/held.txt" "$t/i/results.tsv" "$t/c/results.tsv"
+if [ $st = 1 ] && grep -q 'levels: t03220' "$t/out" && [ ! -s "$t/held.txt" ]; then ok "audited: a recorded timeout's levels disagreement is no hold"; else no "audited recorded-timeout levels disagreement (status $st; held: $(cat "$t/held.txt" 2>&1))"; fi
+
 echo "audited-test: $((n - bad)) of $n passed"
 [ $bad = 0 ]
