@@ -2545,6 +2545,86 @@ What the main host's run must check: `bin/gate --clean --tag TAG --only changed`
 moved aside prints the refusal and `== gate FAILED: --only's selection` before any build is made; put back, the same
 command selects as before. `clean.ae` is in no key, so nothing is rekeyed.
 
+## Proposals (GTS110-GTS115): the judge audit of j2g-edge, generated-check and provenance-check (VM report 041, 2026-11-01)
+
+Findings 2 to 6 of the report are fixed on the branch `audit-041` (one commit each; tests `test/gate/*-test.bash`);
+finding 1 and the choices made on the way are proposed here, none decided.
+
+- **GTS110 The reader hash covers less than the reader** (report 041, finding 1; not fixed on the branch: it rewrites
+  all four provenance files and waits for a merge with the other branches).
+  - Options: (a) hash `arbace/repr/java/*.ae` less a named exclusion list (print, roundtrip, coverage, split, jtree), so a
+    new file on the read path is in by default, and add the front end the read reaches through `resolve.ae`
+    (`arbace/classes/{analyze,env,types,lower,parse,opcodes,interp,go,emit}.ae`); the `provenance` step's `:inputs` gain
+    `arbace/classes/`; (b) derive the list from the requires closure of `arbace.repr.java` (an awk over the `ns` forms),
+    plus the same front end; (c) as built (a hand-kept list of 24 files).
+  - *Recommended: (a)*: a list one cannot forget to extend, no parser of `ns` forms to keep right; the exclusion list is
+    five names, a blind spot only if one of them joins the read path (a new file is in by default). The writers then rewrite the provenance after a change to `analyze.ae` or `env.ae`: that is the price and
+    the point (it is the "a day later" slip the step was made to close). To be done in the commit that rewrites the four
+    files' hash, after the merges.
+  - **Decided (the user, 2026-11-01): (a).**
+- **GTS111 jrt's JVM-generated files stay outside generated-check** (finding 2, third item): `standin_{lang,character,
+  reflect}.ae`, `manifest.edn`, `manifest_test.ae`, `reflect_tables.ae` (`bin/jrt standins|manifest`), which the frozen
+  JVM's reflection generates.
+  - Options: (a) exempt, written in `bin/generated-check`'s header (as built); (b) a `--check` for them beside j2g-edge
+    on the `:frozen` host (a second heavy JVM step, the same JVM answers j2g-edge already pins in `jdk/edge.edn`);
+    (c) a cheap proxy: the hash of their inputs recorded in the file's header and compared (seconds, no JVM; it catches
+    "inputs changed, not regenerated", not "generator changed").
+  - *Recommended: (a)*; (c) if one of them goes stale in practice. `bin/jrt modules --check` and goi's pair, which need
+    no JVM, are in the check.
+  - **Decided (the user, 2026-11-01): (a).**
+- **GTS112 The frozen jar's selection** (finding 3). As built: `frozen_pin` checks `FROZEN_JAR`/`ARBACE_ORACLE_JAR` and a
+  built tag's jar against the pin line of the file name, a name with no line is an error, `FROZEN_ALLOW_UNPINNED=1` only
+  warns (for the paths that make a pin); j2g-edge declares `:env J2G_FIXTURES J2G_EDGE_WORK`, javac-verify and j2g-edge
+  the `:jdk` host; a `J2G_EDGE_WORK` that holds or lies in a tracked file is refused (status 2).
+  - Options for what remains: (a) as built, and `FROZEN_CP` (adds to the class path, unchecked) left; (b) also
+    `FROZEN_CP`, `FROZEN_TAG` and `ARBACE_ORACLE_*` in the steps' `:env` (`FROZEN_ALLOW_UNPINNED` is refused by `frozen_pin` when `GATE_EXE` is set, as built); (c) `frozen_java` refuses `FROZEN_CP` when
+    `GATE_*` is set (inside the gate).
+  - *Recommended: (b)*: cheap, and a pass then records which jar and class path it ran on. Whether the `:frozen` host
+    should hash the jar that ran rather than the pin file is the same question; the pin check makes the two equal.
+    Not decided on the branch: the `:env` change rekeys j2g-edge, javac-verify.
+  - **Decided (the user, 2026-11-01): (b).**
+- **GTS113 What `bin/j2g-edge trace` sees** (finding 4). As built: it fails on a recording with no traced event, and runs
+  with `J2G_JOBS=1` (par-mapv is then `mapv` on j2g's own thread). The runtime's analysis `future`
+  (`arbace/j2g/world.ae`, on a host with id spaces) still runs off the main thread.
+  - Options: (a) as built; (b) bind a dynamic var in j2g's `run` that the futures convey, and count a call when it is
+    bound, whatever the stack; (c) a switch (`J2G_ANALYZE_SYNC`) that analyzes on the caller's thread under trace; also a
+    floor for the allowed categories instead of zero.
+  - *Recommended: (b)*: it covers every future, now and later, at the price of one binding in `run`; the floor needs a
+    first real recording on the main host to choose it from. Not run on a JVM here (the gate needs the host).
+  - **Decided (the user, 2026-11-01): (b).**
+- **GTS114 The tests of the scripts** (`test/gate/{generated-check,frozen,j2g-edge-record,edge-verdict}-test.bash`,
+  fabricated trees and fake executables under `.tmp/`, seconds). Not in any step yet.
+  - Options: (a) one light essential step `script-tests` running them, inputs the scripts and the tests; (b) run from
+    `make check-makefile`'s step; (c) by hand.
+  - *Recommended: (a)*: a gate script is changed rarely and silently; a step keyed on the script and its test costs
+    seconds when unchanged.
+  - **Decided (the user, 2026-11-01): (a).**
+- **GTS115 j2g-edge's lock** (finding 5): `record` removes its three intermediate files and takes a lock on
+  `$work/.lock`, polled once a second up to `J2G_EDGE_LOCK_WAIT` seconds (3600: busybox's `flock` has no `-w`).
+  - Options: (a) as built; (b) a distinct work directory per run (`$work.$$`), no lock; (c) fail at once when locked.
+  - *Recommended: (a)*: the gate's step and a hand-run `update` should queue, not race; (b) loses the kept logs.
+  - **Decided (the user, 2026-11-01): (a).**
+
+## As built: GTS111-GTS115 on the branch `audit-041` (2026-11-01)
+
+- GTS112 (b): `FROZEN_CP`, `FROZEN_TAG`, `ARBACE_ORACLE_JAR` and `ARBACE_ORACLE_TAG` are in the `:env` of the five steps that
+  run the frozen JVM (`j2g-edge`, `oracle-go`, `javac-verify`, `repr-java`, `jrt-convert`; `oracle-go` also has the
+  `:frozen` host and `ARBACE_ORACLE_EXPECTED`), checked by `test/gate/frozen-env-test.bash`. A gate that scrubs the
+  environment of `FROZEN_*` and `ARBACE_*` (the branch `mac/029-gts103`'s `gate_scrub_env`) drops these variables
+  unless it keeps the names a step declares in `:env`: until then the declarations key the empty value (safe: the tools
+  run on the pinned jar) and only document the variables. To settle at that merge together with the scrub's list.
+- GTS113 (b): `arbace.j2g.model/*run*` (bound in `arbace.j2g.main/run`), `run-fn` and the marker frame `on-run-thread`;
+  the trace counts an event whose stack holds `arbace.j2g.main$run` or `arbace.j2g.model$on_run_thread`
+  (`test/j2g/edge_verdict.ae`'s `in-run?`). Every future of j2g goes through `run-fn` (par-mapv, the runtime's analysis,
+  the report). Not run on a JVM.
+- GTS114 (a): the step is `gate-tests` (not `script-tests`), `bin/gate-tests` (`make gate-tests`), the tests
+  `test/gate/*-test.bash`. A test marked `# needs: exe` takes `ARBACE_HOST_EXE` or stage 0; with neither it is named as
+  not run and the status is 1 (`--no-exe`: 0). `test/gate/gate-reads-test.bash` holds the step to its `:inputs` by
+  strace, as `bin/gate --audit` will.
+- `bin/j2g-edge`: the work directory must lie under the tree's own `.tmp/`, or outside every checkout; a tree that is
+  not its repository's root (an archive under another checkout) accepts only its own `.tmp/`. A work directory in
+  another checkout's ignored `.tmp/` is refused (too strict, safe: `git check-ignore` could admit it).
+
 ## Decided (2026-11-01, audit 040): GTS120-GTS126
 
 Proposals from the branch `audit-040` (the VM's audit of CLAUDE.md against the code, queue task 040, and its review, queue task 045).
