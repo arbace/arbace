@@ -361,6 +361,12 @@ gate_prune() {  # gate_prune [--dry-run]
     while IFS= read -r f; do
       [ -n "$f" ] || continue
       b=$(basename "$f")
+      # a miss's copy (KEY20.tmp.PID) or old directory (KEY20.old.PID, bin/arbace-go's gate_miss): never one of the
+      # newest 3, removed when an hour old (younger: a build under way)
+      case $b in *.tmp.*|*.old.*)
+        [ $(( now - $(stat -c %Y "$f") )) -ge 3600 ] || continue
+        echo "gate --prune: ${dry:+would remove }executables $f (a miss's leftover)"
+        [ -n "$dry" ] || rm -rf "${f:?}"; continue ;; esac
       case $pat in javac) case $b in javac-*) ;; *) continue ;; esac ;; gate) case $b in javac-*) continue ;; esac ;; esac
       i=$((i + 1)); [ $i -gt 3 ] || continue
       [ $(( now - $(stat -c %Y "$f") )) -ge 86400 ] || continue
