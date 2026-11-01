@@ -3660,3 +3660,72 @@ builds; and one `cp ... /dev/null` while looking at the key file, against the ru
 - t07728 (`hotspot/jtreg/runtime/reflect/ReflectOutOfMemoryError.java`, compiled: "TEST_BUG: failed to provoke
   OutOfMemoryError"; interp: timeout) joins `memory-limit`, under that class's own decision, JCS99 (a): Go's collector
   has no heap ceiling.
+
+## As built: JCS127 (write-ahead) (2026-11-01, queue 039)
+
+Written on the VM without stage 0 or TamaGo's go: nothing below was compiled or run. The main host builds, runs and
+records it, and then decides the class `interp-volatile`.
+
+- **Where the interpreter's fields go.** An interpreted class's instance fields are slots of its objects (`Dyn`'s
+  `F []any` in Go, `arbace.j2g.dyn`; a Clojure fn class's `CF$FnObj.f`), reached by `CF$Host.field`/`setField`
+  (`GoHost`: `Compiler$Dyn/getField`/`setField`, plain `aget`/`aset` of the slice); its statics are `Klass.statics`, an
+  `Object[]`. The nodes `CF$GetField`, `CF$SetField`, `CF$GetStatic`, `CF$SetStatic` (arbace/lang/Compiler.ae:7986 on)
+  load and store them plainly, whatever the field's flags; the analysis keeps `ACC_VOLATILE` in the field's `:flags`
+  (arbace/classes/parse.ae's `modifier-flags`, analyze's `field-mods`) but `arbace.classes.interp`'s builders did not
+  look at it. A plain Go store followed by a plain load of another slot may be reordered (amd64's store buffer, arm64
+  more so): Dekker's exclusion over volatiles fails, t03832's "Got 10 failed ITERATIONS".
+- **What j2g does** (J2G-SPEC §8.2): a translated volatile field has an atomic Go type
+  (arbace/j2g/decls.ae:190 `field-go-type`: `atomic.Bool`, `Int32` for `int`, `byte`, `short`, `char`, `Int64`,
+  `Uint32`/`Uint64` for `float`/`double` by their bits, `atomic.Pointer` or `jrt.Volatile` for references) and every
+  access is a `Load`/`Store` (arbace/j2g/code.ae:665 `volatile-read`, `volatile-write`), sequentially consistent by Go's
+  memory model; reflection's accessors of the world's fields (arbace/j2g/out.ae:959) and `Host.superField`'s
+  (arbace/j2g/dyncf.ae:119) use the same, so `CF$FieldR` and `CF$SuperField` were right already.
+- **The change.** The interpreter's slots hold boxed values: an interface's two words in Go, which `sync/atomic` cannot
+  load or store as one (and a per-kind atomic slot would change the representation that `alloc`'s defaults, `cloneOf`,
+  reflection's `addField`/`addStatic` and `Dyn`'s natives share). So the equivalent is a lock:
+  - `CF$Rt` (arbace/lang/Compiler.ae:6217 on): `VLOCKS`, 64 lock objects; `vfield`, `vsetField`, `vstatic`,
+    `vsetStatic` load or store one slot holding `VLOCKS[i & 63]`'s monitor (`locking`: jrt's `MonitorEnter`/
+    `MonitorExit`, CASes on the lock object's header, sync/atomic). Every access to a field takes the same lock (the
+    lock depends on the field's index alone); a lock's acquisitions are totally ordered and each release happens
+    before the next acquisition, so the volatile accesses form one order consistent with each thread's program order
+    (sequential consistency: in Dekker's cycle each thread's two critical sections would have to precede the other's),
+    their happens-before edges order the plain accesses around them as the JMM's synchronizes-with does, and no
+    volatile read tears (a reference's two words, a `long` or `double`, are read under the lock that wrote them). The
+    lock is held over the slot's load or store alone: the value is evaluated and the class initialized before, no other
+    lock is taken inside, so no deadlock and no reentrance.
+  - `CF$VolField` (arbace/lang/Compiler.ae:8081): the node of a volatile field, read or written, an object's
+    (target, index) or a static (Klass, index), with GetField's, SetField's, GetStatic's and SetStatic's order of
+    evaluation, null check and class initialization.
+  - `arbace.classes.interp` (arbace/classes/interp.ae:533 `volatile-field?`; the builders `:get-static` 678,
+    `:set-static` 696, `:get-field` 720, `:set-field` 735): a field with `ACC_VOLATILE` builds a `VolField`, every other
+    one the node it built before. The fast path is untouched: no flag test at run time, the plain nodes unchanged. Every
+    kind is covered alike (the slot is boxed): `int`, `long`, `float`, `double`, `boolean`, `byte`, `short`, `char`,
+    references. Compound assignments and `++` are `:set-field` over `:get-field` (two volatile accesses, not atomic, as
+    in Java).
+- **Risks.**
+  - *Contention*: one lock per index for every object and class; a spinning reader (Dekker's, a `while (!done)` over a
+    volatile) contends with the writer, and jrt's monitors inflate under contention through the global `monMu`. If
+    t03832 or another test slows past its limit, the next step is a native `sync.Mutex` array (a native of
+    `Compiler$Dyn` in `arbace.j2g.dyn`, no monitor, no `currentThreadID`), or more stripes hashed with the object's
+    identity.
+  - *Paths that bypass it*: reflection's `Field.get`/`set` on an interpreted class's volatile field (dyncf.ae's
+    `addField`/`addStatic` closures: plain slot accesses), `Rt/cloneOf`'s copy, `VarHandle`s or field updaters
+    (`AtomicIntegerFieldUpdater`) on an interpreted class's field, `Unsafe`. They stay as before: values right,
+    unordered against the locked accesses.
+  - *64-bit atomics' alignment*: not touched; no new atomic word (the monitors' header CAS is jrt's as before). Every
+    target is 64-bit (linux/amd64, the box's tamago/amd64 and tamago/arm64, darwin/arm64).
+  - *The interpreter's own caches* (the method trees built on first call, `registry`): unchanged; the nodes are built
+    once and immutable, `VLOCKS` is a static final array.
+- **What the main host must run.** The change is in `arbace/lang` (the runtime key) and `arbace/classes`: the gate's
+  executables, javac's tool and every Java step rekey (a runtime build, the compiled namespaces again).
+  - The interp level of t03832 (`bin/java-check --levels interp --only REGEX`, the regex naming t03832 or `membars/DekkerTest.java` as `--only` matches, and a few times: its failure was
+    probabilistic), expecting `:pass`; then `interp-volatile`'s test leaves the class, the class removed or kept empty
+    as the judge wants, and `test/java/check-interp.edn` and `levels-known.edn` re-recorded.
+  - The interp level of every test whose class has a volatile field: those whose forms have a `^:volatile` field,
+    `grep -rl ':volatile' .tmp/java-check/forms | sed 's|.*/forms/\([^/]*\)/.*|\1|' | sort -u` over the read's cache
+    (24 of the essential tests' committed forms, `test/java/forms/`, all passing interpreted now: t03245, t03249,
+    t03297, t03338, t03549, t03671, t03755, t03762, t03814, t03826, t03827, t03867, t03883, t03892, t04556, t04573,
+    t04579, t05438, t05572, t05581, t05608, t05660, t05682, t05689), expecting no pass lost and no new timeout; the
+    whole interp level is simplest (about 72 minutes).
+  - `bin/diffcheck` (the Java forms interpreted against translated), `bin/java-check --essential`, the suite and the
+    oracle as the essential gate runs them.
