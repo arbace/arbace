@@ -42,5 +42,21 @@ rm -f "$t/held.txt"
 judge --held "$t/held.txt" "$t/i/results.tsv" "$t/c/results.tsv"
 if [ $st = 1 ] && [ ! -s "$t/held.txt" ]; then ok "unaudited timeout: regression, nothing held"; else no "unaudited timeout (status $st)"; fi
 
+# 3 (finding 3): one of rerun 7's 13 is held only as the rule holds any test: audited, a timeout; a wrong
+# stdout, or a timeout in an unaudited run, is a regression and a new levels disagreement
+rm -f "$t/i/audited"; results c compiled t03235 pass
+results i interp t03235 fail "differ: stdout"
+judge "$t/i/results.tsv" "$t/c/results.tsv"
+if [ $st = 1 ] && grep -q 'regression: t03235' "$t/out" && grep -q 'levels: t03235' "$t/out"; then ok "unaudited wrong stdout of a former :unstable test: regression"; else no "unaudited wrong stdout of t03235 (status $st)"; fi
+results i interp t03235 timeout "$TO"
+judge "$t/i/results.tsv" "$t/c/results.tsv"
+if [ $st = 1 ] && grep -q 'regression: t03235' "$t/out"; then ok "unaudited timeout of a former :unstable test: regression"; else no "unaudited timeout of t03235 (status $st)"; fi
+audited i interp
+judge "$t/i/results.tsv" "$t/c/results.tsv"
+if [ $st = 0 ] && grep -q 'held (an :audited class' "$t/out"; then ok "audited timeout of it: held by the rule"; else no "audited timeout of t03235 (status $st)"; fi
+results i interp t03235 fail "differ: stdout"
+judge "$t/i/results.tsv" "$t/c/results.tsv"
+if [ $st = 1 ] && grep -q 'regression: t03235' "$t/out"; then ok "audited wrong stdout: regression (only timeouts are held)"; else no "audited wrong stdout of t03235 (status $st)"; fi
+
 echo "audited-test: $((n - bad)) of $n passed"
 [ $bad = 0 ]
