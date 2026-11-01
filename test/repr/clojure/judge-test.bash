@@ -1,6 +1,6 @@
 #!/bin/bash
 # Tests of repr/clojure's judge (bin/repr-clojure check, GTS160, audit 076), over fabricated trees
-# and stubbed tools; run: test/repr/clojure/judge-test.bash [frozen|notread]...
+# and stubbed tools; run: test/repr/clojure/judge-test.bash [frozen|counts|notread]...
 # (default: all). Exit status 0 when every case holds. TOOLS_BASH names another bin/lib/tools.bash
 # (the tests of a fix are run with the file from before it to show they fail). The checks that
 # need Arbace run on stage 0 (ARBACE_HOST_EXE) with arbace/repr/clojure.ae from the checkout.
@@ -60,6 +60,25 @@ t_frozen() {
 # bin/repr-clojure roundtrip over a fabricated tree, a known file; prints its output, returns its status
 rt() { "$here/bin/repr-clojure" roundtrip "$@" 2>&1; }
 
+t_counts() {
+  local d=$scratch/c k=$scratch/c-known.edn s out
+  mkdir -p "$d/two" "$d/empty"
+  echo "(ns a.one) (def x 1)" > "$d/two/one.clj"; echo "(ns a.two) (def y 2)" > "$d/two/two.clj"
+  echo "{:c {} :counts {:c {:files 2 :one-way 0 :outside 0}}}" > "$k"
+  out=$(rt --known "$k" --corpus c "$d/two"); expect "counts: the recorded size holds" 0 $?
+  echo "{:c {} :counts {:c {:files 3 :one-way 0 :outside 0}}}" > "$k"
+  out=$(rt --known "$k" --corpus c "$d/two"); expect "counts: a shrunken corpus fails" 1 $?
+  echo "{:c {} :counts {:c {:files 2 :one-way 0 :outside 0}}}" > "$k"
+  out=$(rt --known "$k" --corpus c "$d/empty"); expect "counts: an empty corpus fails" 1 $?
+  out=$(rt --known "$k" --corpus c "$d/missing"); expect "counts: a missing directory fails" 1 $?
+  echo "{:c {} :counts {:other {:files 2 :one-way 0 :outside 0}}}" > "$k"
+  out=$(rt --known "$k" --corpus c "$d/two"); expect "counts: no counts recorded fails" 1 $?
+  echo "{:c {} :counts {:c {:files-min 2 :one-way 0 :outside-max 0}}}" > "$k"
+  out=$(rt --known "$k" --corpus c "$d/two"); expect "counts: a floor held" 0 $?
+  echo "{:c {} :counts {:c {:files-min 3 :one-way 0 :outside-max 0}}}" > "$k"
+  out=$(rt --known "$k" --corpus c "$d/two"); expect "counts: a floor not held fails" 1 $?
+}
+
 # Arbace -> Clojure -> Arbace with a stubbed print that loses "(LOST) " (a fault of print)
 lost_rt() { # DIR [lose]
   ( cd "$here"; root=$here; . "$here/bin/lib/tools.bash"
@@ -82,7 +101,7 @@ t_notread() {
   out=$(lost_rt "$d/named" lose); expect "notread: the same fault in a file naming clojure.* fails" 1 $?
 }
 
-tests=("$@"); [ ${#tests[@]} = 0 ] && tests=(frozen notread)
+tests=("$@"); [ ${#tests[@]} = 0 ] && tests=(frozen counts notread)
 for t in "${tests[@]}"; do "t_$t"; done
 [ $fails = 0 ] && echo "judge-test: all hold" || echo "judge-test: $fails FAILED"
 [ $fails = 0 ]
