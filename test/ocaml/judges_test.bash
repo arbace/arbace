@@ -9,7 +9,7 @@ W=$root/.tmp/w/judges; rm -rf "$W"; mkdir -p "$W"
 bad=0
 # re-review 049's finding 1: every case must run. Cases once sat after an `exit` in the middle of the file and never ran. `expect` counts the cases
 # run, and the EXIT trap fails the file when the count is not CASES (raise it with each case added), wherever the file ended.
-cases=0; CASES=36
+cases=0; CASES=39
 finish() { local st=$?; if [ "$cases" != "$CASES" ]; then echo "FAIL $cases cases ran, want $CASES (a case unreachable, or CASES not raised)"; exit 1; fi; echo "$cases cases run"; exit $((bad || st)); }
 trap finish EXIT
 t=$(printf '\t')
@@ -147,3 +147,11 @@ out=$(cd "$root" && OI_TIMEOUT=120 bin/oi oi-status 2 3 2>&1); expect "oi: anoth
 # re-review 042's finding 6: a whole run against an unreadable record says so, as --only does (and before the run)
 out=$(cd "$root" && OI_EXPECT_RECORD=$W/no-such-record bin/oi suite expect 2>&1); st=$?
 expect "expect: a whole run against an unreadable record says it cannot be read" 2 'cannot be read' "$out" $st
+
+# re-review 049's finding 5: the "status " pins are attested by the digests of the runs they were made for, test/ocaml/pins-attested.tsv (bin/oi pins:
+# no run); a pin with no attested digest, or an attested row with no pin, fails
+out=$(cd "$root" && bin/oi pins 2>&1); expect "pins: every pin of the known files is attested by a recorded digest" 0 'each attested by a recorded digest' "$out" $?
+awk -F'\t' 'BEGIN { OFS = "\t" } NR == 1 { $4 = "ffffffffffff" substr($4, 13) } { print }' "$root/test/ocaml/pins-attested.tsv" > "$W/pins.tampered"
+out=$(cd "$root" && OI_PINS_ATTESTED=$W/pins.tampered bin/oi pins 2>&1); expect "pins: a pin whose attested digest differs fails" 1 '^PIN ' "$out" $?
+{ cat "$root/test/ocaml/pins-attested.tsv"; printf 'aot\tgone/program\t2\tabcdef012345\n'; } > "$W/pins.stale"
+out=$(cd "$root" && OI_PINS_ATTESTED=$W/pins.stale bin/oi pins 2>&1); expect "pins: an attested row with no pin is stale" 1 '^STALE aot gone/program' "$out" $?

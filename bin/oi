@@ -32,6 +32,8 @@
 #                                  pass, or fail with a reason; judged against test/ocaml/check-oi.edn
 #                                  (--record rewrites it) and test/ocaml/divergences.edn (every non-pass
 #                                  in a class) by test/ocaml/oi_check.ae on stage 0
+#   bin/oi pins [--attest]         the pins of the known files (kind "status ") against test/ocaml/pins-attested.tsv, the digests of the runs they were
+#                                  made for (no run); --attest writes it from the last runs' rows
 #   bin/oi divergences [--aot]     the recorded results judged against the classes alone (no runs)
 #   bin/oi aot-lib                 AOT (O6, OC7 (a)): the stdlib's Lambda (bin/oi stdlib's) translated by
 #                                  arbace.o2j into Java forms over the runtime jdk/ocaml/, into .tmp/o6/lib/
@@ -605,6 +607,46 @@ cmd_check_aot() {
     "$root/test/ocaml/check-aot.edn" "$root/test/ocaml/divergences-aot.edn"
 }
 
+
+# ---- the pins' evidence (re-review 049's finding 5): a known entry of kind "status " carries a prefix of the output's sha256; the digests of the
+# runs the pins were checked against are committed in test/ocaml/pins-attested.tsv (LEVEL ID STATUS SHA256, level oi or aot), written by
+# `bin/oi pins --attest` from the last runs' rows (oi: .tmp/oi/check.tsv, .tmp/o7/check.tsv; aot: .tmp/o6/check-aot.tsv, .tmp/o7/aot/check.tsv) and
+# checked, no run, by `bin/oi pins`: every pin has an attested row whose digest starts with it, and no attested row lacks a pin
+PINS_ATTESTED=${OI_PINS_ATTESTED:-$root/test/ocaml/pins-attested.tsv}
+pins_of() { # LEVEL KNOWN.edn: LEVEL, ID and SHA prefix of each pin
+  awk -F'"' -v lv="$1" '/^ \[/ && $6 == "status " && $8 != "" { printf "%s\t%s\t%s\n", lv, $2, $8 }' "$2"
+}
+pins_all() { pins_of oi "${OI_KNOWN_DIR:-$root/test/ocaml}/oi-known.edn"; pins_of aot "${OI_KNOWN_DIR:-$root/test/ocaml}/aot-known.edn"; }
+cmd_pins() {
+  local pl=$OI_DIR/pins.list; pins_all | LC_ALL=C sort > "$pl"
+  [ -s "$pl" ] || die "pins: no pin found in the known files"
+  if [ "${1:-}" = --attest ]; then
+    local f lv id sha st row bad=0
+    : > "$PINS_ATTESTED.new"
+    while IFS=$'\t' read -r lv id sha; do
+      if [ "$lv" = oi ]; then f="$OI_DIR/check.tsv $S/check.tsv"; else f="$O2J/check-aot.tsv $S/aot/check.tsv"; fi
+      row=$(awk -F'\t' -v id="$id" '$1 == id { print $2 "\t" $3; exit }' $f 2>/dev/null) || true
+      [ -n "$row" ] || { echo "pins: $lv $id: no row in the last run ($f)" >&2; bad=1; continue; }
+      st=${row%%$'\t'*}; row=${row#*$'\t'}
+      case $row in "$sha"*) printf '%s\t%s\t%s\t%s\n' "$lv" "$id" "$st" "$row" >> "$PINS_ATTESTED.new" ;; *) echo "pins: $lv $id: the run's digest $row does not start with the pin $sha" >&2; bad=1 ;; esac
+    done < "$pl"
+    [ "$bad" = 0 ] || { rm -f "$PINS_ATTESTED.new"; die "pins: not attested"; }
+    LC_ALL=C sort "$PINS_ATTESTED.new" > "$PINS_ATTESTED"; rm -f "$PINS_ATTESTED.new"
+    echo "oi: pins: $(wc -l < "$PINS_ATTESTED") attested in $PINS_ATTESTED"; return 0
+  fi
+  [ -r "$PINS_ATTESTED" ] || die "pins: $PINS_ATTESTED cannot be read (bin/oi pins --attest)"
+  local n=0 lv id sha rest bad=0
+  while IFS=$'\t' read -r lv id sha; do
+    n=$((n + 1))
+    awk -F'\t' -v lv="$lv" -v id="$id" -v sha="$sha" '$1 == lv && $2 == id && index($4, sha) == 1 { f = 1 } END { exit !f }' "$PINS_ATTESTED" || { echo "PIN $lv $id: no attested digest starts with $sha" >&2; bad=1; }
+  done < "$pl"
+  while IFS=$'\t' read -r lv id rest; do
+    awk -F'\t' -v lv="$lv" -v id="$id" '$1 == lv && $2 == id { f = 1 } END { exit !f }' "$pl" || { echo "STALE $lv $id: attested, but no longer pinned" >&2; bad=1; }
+  done < "$PINS_ATTESTED"
+  [ "$bad" = 0 ] || { echo "oi: pins: not attested" >&2; return 1; }
+  echo "oi: pins: $n pins, each attested by a recorded digest"
+}
+
 # ---- the suite (O7)
 . "$root/bin/lib/oi/suite.bash"
 # the directories the verbs redirect into before they run (re-review 042 and 049: `bin/oi key` and `suite key` open .tmp/oi/corpus.log and
@@ -627,6 +669,7 @@ case $cmd in
   check) cmd_check "$@" ;;
   divergences) cmd_divergences "$@" ;;
   aot-cpu) o2j_cpu ;;
+  pins) cmd_pins "$@" ;;
   oi-limits) echo "$TIMEOUT $(oi_wall)" ;;
   oi-status) oi_status "$@" ;;
   oi-cpu) oi_cpu_secs "$@" ;;
