@@ -24,7 +24,7 @@ work=.tmp/repr-java-jdk
 . bin/lib/repr-java/judge.bash
 # the source directory as read-jdk names it in a converted file's header (its canonical path: a symlink, a
 # trailing slash or a '..' in JDK_SRC would leave the header's host path in the forms, GT7's audit 061 #2)
-src=${JDK_SRC:-/root/jdk26u/src}
+src=$(judge_canon "${JDK_SRC:-/root/jdk26u/src}") || exit 1
 steps=${JDK_STEPS:-convert}   # JDK_JOBS: parallel conversions (default 1); JDK_THREADS: read-jdk's chunks
 # in parallel within one (default 4: on javac's tool executable each chunk's javac lives with its
 # converted units, about 6 GB each at the peak)
@@ -103,6 +103,13 @@ for m in $modules; do
   find "$work/conv/$m" -name '*.ae' -exec sed -i "1s|^;; Converted from $src/|;; Converted from |" {} +
   (cd "$work/conv" && find "$m" -name '*.ae' | LC_ALL=C sort | xargs -r sha256sum)
 done | LC_ALL=C sort -k2 > "$work/jdk26u.sha256"
+# every header without the host's path (the strip above found its prefix)
+hostpaths=$(for m in $modules; do find "$work/conv/$m" -name '*.ae' -exec awk 'FNR == 1 && /^;; Converted from \// {print FILENAME}' {} +; done | head -5)
+if [ -n "$hostpaths" ]; then
+  echo "forms: a converted file's first line still names a host path (JDK_SRC=$src), nothing recorded or compared:"
+  echo "$hostpaths"
+  exit 1
+fi
 printf '%s\n' $modules | LC_ALL=C sort > "$work/modules.txt"
 # the fallbacks against their ceilings (not for --update, which records them)
 if [ -n "$ro" ] && [ -z "$update" ]; then
