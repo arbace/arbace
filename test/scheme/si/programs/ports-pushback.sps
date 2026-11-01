@@ -50,6 +50,10 @@
 (let ([p (open-output-string)])
   (put-string p "ab")
   (let* ([a (get-output-string p)] [b (begin (put-string p "c") (get-output-string p))] [c (port-position p)]) (show 'gos a b c)))
+;; re-review 058, Q1: an empty write past the end of a string output port pads nothing
+(let-values ([(p ex) (open-string-output-port)])
+  (put-string p "ab") (set-port-position! p 5) (put-string p "") (display "" p) (put-string p "XYZ" 1 0)
+  (let* ([a (port-length p)] [b (ex)]) (show 'beyond4 a b)))
 ;; re-review 047, P4: the nonblocking mode is kept
 (let ([p (open-string-input-port "a")])
   (set-port-nonblocking! p #t) (let* ([a (port-nonblocking? p)]) (show 'nb3 a))
