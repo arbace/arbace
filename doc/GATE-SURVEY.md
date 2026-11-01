@@ -2844,6 +2844,15 @@ stubbed `bin/repr-java` (`test/repr/java/judge-*-test.bash`), the records below 
 
 ## Proposed (2026-11-01): GTS134-GTS136 (GT7's audit 065, doc/ALPINE.md and bin/alpine-env; none decided)
 
+**Decided (2026-11-01, the user): GTS134-GTS136, GTS138** (on main's doc/JOURNAL.md, "2026-11-01: the user's decisions
+after the tag"; VM report 103's sheet 2, the source's picks):
+- **GTS134 (a):** a dependency with several installed providers is no edge, met only by a provider the line's closure
+  holds, as built.
+- **GTS135 (a):** the host's line regenerated on the host (`bin/alpine-env world` and `check`) after the crops merge.
+- **GTS136 (b):** of the other findings only the verb `doc` and `simulate --arch` (not built).
+- **GTS138 (a):** providers offered by the repositories read from the index cache, an installed exact-name package the
+  edge alone, as built (review 108).
+
 - **GTS134 A dependency with several installed providers.** Options: (a) it is no edge, and `check` counts it met only
   by a provider the line's closure holds, naming it otherwise (as built); (b) resolve like apk: an exact name first, then
   the highest `k:` provider priority; (c) follow every provider (the old closure; passes a line that misses one).
