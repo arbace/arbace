@@ -69,4 +69,24 @@ test_known_kinds() {
 }
 t known-only-its-kind test_known_kinds
 
+# finding 5: bin/goi divergences --aot holds test/goi/essential-aot.txt's programs to the AOT record
+host=${ARBACE_HOST_EXE:-$here/target/seed/amd64/arbace}
+divergences() { # divergences ROOT [ARG...]: the tool on a fabricated root
+  local root=$1; shift
+  GOI_ROOT=$root ARBACE_PATH=$here:$here/test "$host" -m goi.divergences "$@"
+}
+test_essential_aot() {
+  local r=$tmp/e out st
+  mkdir -p "$r/test/goi"
+  printf '[{:id :k :title "known" :kind :design :why "w" :decided "d" :match [#"^known "]}]\n' > "$r/test/goi/divergences-aot.edn"
+  printf '[["a.go" :pass ""] ["b.go" :known "known x"] ["d.go" :pass ""]]\n' > "$r/test/goi/check-aot-linux-amd64.edn"
+  printf '# the list\na.go\nb.go\nc.go\n' > "$r/test/goi/essential-aot.txt"
+  out=$(divergences "$r" --aot) && st=0 || st=$?
+  [ "$st" = 1 ] && printf '%s' "$out" | grep -q 'essential: b.go does not pass' \
+    && printf '%s' "$out" | grep -q 'essential: c.go is not in the reference' || { echo "$out" >&2; return 1; }
+  printf '# the list\na.go\nd.go\n' > "$r/test/goi/essential-aot.txt"
+  divergences "$r" --aot > "$tmp/e.out" || { cat "$tmp/e.out" >&2; return 1; }
+}
+t essential-aot-held-to-the-record test_essential_aot
+
 exit $failed
