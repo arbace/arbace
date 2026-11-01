@@ -37,7 +37,15 @@ out=$(cd "$r" && env -u ARBACE_HOST_EXE bin/gate-tests --no-exe d 2>&1); st=$?
 
 # report 059: a test that exits 77 is "not run", not passed, and does not fail the run
 mkdir -p "$scratch/u77"; printf '#!/bin/bash\necho already traced\nexit 77\n' > "$scratch/u77/a-test.bash"; cp "$scratch/pass/a-test.bash" "$scratch/u77/b-test.bash"; chmod +x "$scratch/u77/"*
-out=$("$src/bin/gate-tests" "$scratch/u77" 2>&1); st=$?
+out=$(env -u GATE_AUDITED "$src/bin/gate-tests" "$scratch/u77" 2>&1); st=$?
+if [ "$st" = 1 ] && echo "$out" | grep -q "a-test.bash FAILED (not run, already traced, and no audit"; then ok "exit 77 without the audit's marker fails"
+else bad "exit 77 unaudited: status $st: $out"; fi
+# the marker is set in both of the gate's audited runs (bin/lib/gate-run.bash)
+[ "$(grep -c 'GATE_AUDITED=1' "$src/bin/lib/gate-run.bash")" -ge 2 ] && ok "gate-run.bash sets GATE_AUDITED in both audited runs" || bad "GATE_AUDITED missing in gate-run.bash"
+# an inherited GATE_TESTS_IN_NESTED is dropped like GATE_TESTS_NESTED
+mkdir -p "$scratch/inh"; printf '#!/bin/bash\n[ -z "${GATE_TESTS_IN_NESTED:-}" ]\n' > "$scratch/inh/a-test.bash"; chmod +x "$scratch/inh/a-test.bash"
+out=$(GATE_TESTS_IN_NESTED=1 "$src/bin/gate-tests" "$scratch/inh" 2>&1) && ok "an inherited GATE_TESTS_IN_NESTED is dropped" || bad "inherited in-nested: $out"
+out=$(GATE_AUDITED=1 "$src/bin/gate-tests" "$scratch/u77" 2>&1); st=$?
 if [ "$st" = 0 ] && echo "$out" | grep -q "a-test.bash not run (already traced)" && ! echo "$out" | grep -q "a-test.bash passed" && echo "$out" | grep -q "not run: a-test.bash"; then ok "exit 77 is listed as not run, not passed"
 else bad "exit 77: status $st: $out"; fi
 # report 059: GATE_TESTS_NESTED in the caller's environment skips nothing; only --nested skips gate-reads-test

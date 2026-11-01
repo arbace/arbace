@@ -129,7 +129,7 @@ step() {  # step NAME HEAVY COMMAND...: one step, logged, timed, measured (GT1);
     audit_reduce "$logs/$name.fifo" > "$logs/$name.paths" 2> "$logs/$name.reduce.err" &
     ap=$!
     tr=(strace -f -qq -y -s 4096 --seccomp-bpf -e "trace=${GATE_AUDIT_TRACE:-$audit_trace}" -o "$logs/$name.fifo")
-    ae=(ARBACE_LOADED_LOG="$logs/$name.loaded")
+    ae=(ARBACE_LOADED_LOG="$logs/$name.loaded" GATE_AUDITED=1)   # GATE_AUDITED: bin/gate-tests accepts a test not run for being traced only here
   fi
   [ -n "${GATE_CPU_LOG:-}" ] && { rm -f "${logs:?}/$name.cpu.tsv"; ae+=(ARBACE_CPU_LOG="$logs/$name.cpu.tsv"); }
   # the lock first, then the clock: the start file is written once the step holds the lock
@@ -452,7 +452,7 @@ gate_audit() {  # gate_audit [STEP...]: the checks named, else every check
       t0=$(date +%s); rm -f "${d:?}/$n.start"
       # the clock starts once the step holds the lock (the start file, as step() does)
       "${hv[@]}" strace -f $([ -n "${GATE_AUDIT_SIGNALS:-}" ] && echo -q || echo -qq) -y -s 4096 --seccomp-bpf -e "trace=${GATE_AUDIT_TRACE:-$audit_trace}" -o "$fifo" \
-        env $([ "${heavy[$n]}" = yes ] && echo ARBACE_HEAVY_HELD=1) ARBACE_LOADED_LOG="$d/$n.loaded" GATE_OUT="$logs/out/$n" GATE_OUTS="$logs/out" \
+        env $([ "${heavy[$n]}" = yes ] && echo ARBACE_HEAVY_HELD=1) ARBACE_LOADED_LOG="$d/$n.loaded" GATE_AUDITED=1 GATE_OUT="$logs/out/$n" GATE_OUTS="$logs/out" \
         bash -c 'date +%s > "$1"; exec bash -c "$2"' gate-audit "$d/$n.start" "$acmd_run" > "$d/$n.log" 2>&1
       echo $? > "$d/$n.status"; [ -f "$d/$n.start" ] && t0=$(cat "$d/$n.start"); echo $(( $(date +%s) - t0 )) > "$d/$n.secs"
       wait "$ap"; rm -f "${fifo:?}"
