@@ -3037,7 +3037,7 @@ M1's residual in 033's list was misdiagnosed (its cause was M3); the survey's re
   `si/ports-pushback` entry alone (the gensym in `racket/base`'s entry, which a fresh Chez run renames, left as recorded).
 - `bin/si unit`: ok (the four 033 tests pass with `-v`).
 - `bin/si mats` whole: 37 files, 911 mats, **300 pass / 89 fail / 511 not run / 11 skipped**, clauses alone 4,335 / 283 / 8,266, 1,468 non-pass items, 0 in no class,
-  regressions none (the same as before); peak **2.67 GB** resident at `SI_GOMEMLIMIT=700MiB`, 10 m (SC213 stands; this is above its 2.3 GB).
+  regressions none (the same as before); peak **2.68 GB** resident at `SI_GOMEMLIMIT=700MiB`, 10 m (SC213 stands; this is above its 2.3 GB).
   Recorded again under the new key.
 - Not run: `bin/si r7rs`, `corpora divergences`, `corpora regress-test`, `check --aot`, `bin/gate`.
 
