@@ -2858,6 +2858,17 @@ stubbed `bin/repr-java` (`test/repr/java/judge-*-test.bash`), the records below 
 
 ## Proposals (GTS140-GTS143) (2026-11-01, branch `audit-060`, none decided)
 
+**Decided (2026-11-01, the user): GTS140-GTS143** (on main's doc/JOURNAL.md, "2026-11-01: the user's decisions after the
+tag"; VM report 103's sheet 1, the source's picks):
+- **GTS140 (a):** a light gate step each for `test/goi/judge-test.bash` and `test/clojure/judge-test.bash`, keyed by the
+  script and the files it cuts from (not built).
+- **GTS141 (b):** the kind as a third element of each entry of `check-aot-known.edn`, `bin/goi` reading it (not built;
+  `apply_known`'s prefix table is (a)).
+- **GTS142 (b):** the run programs listed from the corpus's own list (the reader's `.tsv`), `error no forms` for a
+  listed program without forms (not built).
+- **GTS143 (a) now and (b) at the next record:** each entry must pass in the record, as built; `bin/goi essential-aot
+  --check` re-deriving the list by its rule with the next re-record.
+
 From report 060 (the AOT levels of the suite and goi). The fixes are in `audit-060`; these are the choices they leave.
 
 - **GTS140 Where the judges' tests run.** `test/goi/judge-test.bash` and `test/clojure/judge-test.bash` cut functions out of
