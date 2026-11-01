@@ -37,9 +37,10 @@ reduce() {  # reduce NAME TRACE: the OP<TAB>PATH lines of TRACE by reducer NAME
   esac
 }
 # skipped only without TamaGo's go; a build that fails where go exists is a failure (review 081, N4), and (3) still runs
+# (-buildvcs=false: go build's VCS stamp runs git status, which reads every file of the checkout, outside the step's inputs)
 if [ ! -x "$tg/bin/go" ]; then echo "skip gateaudit: no $tg/bin/go here; audit.awk is tested"
 elif (cd "$root/tools/gateaudit" && env -u GOOS -u GOARCH GOROOT="$tg" GOFLAGS= GOTOOLCHAIN=local CGO_ENABLED=0 \
-     "$tg/bin/go" build -trimpath -o "$w/gateaudit" .) > "$w/build.log" 2>&1; then reducers+=(gateaudit)
+     "$tg/bin/go" build -trimpath -buildvcs=false -o "$w/gateaudit" .) > "$w/build.log" 2>&1; then reducers+=(gateaudit)
 else ck "gateaudit builds" "$(tail -1 "$w/build.log")"; fi
 cat > "$w/plain.trace" <<'T'
 100 execve("/bin/sh", ["sh", "-c", "x"], 0x7ffd /* 3 vars */) = 0
