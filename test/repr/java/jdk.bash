@@ -21,12 +21,18 @@ set -uo pipefail
 root=$(cd "$(dirname "$0")/../../.." && pwd)
 cd "$root"
 work=.tmp/repr-java-jdk
+. bin/lib/repr-java/judge.bash
+# the source directory as read-jdk names it in a converted file's header (its canonical path: a symlink, a
+# trailing slash or a '..' in JDK_SRC would leave the header's host path in the forms, GT7's audit 061 #2)
 src=${JDK_SRC:-/root/jdk26u/src}
 steps=${JDK_STEPS:-convert}   # JDK_JOBS: parallel conversions (default 1); JDK_THREADS: read-jdk's chunks
 # in parallel within one (default 4: on javac's tool executable each chunk's javac lives with its
 # converted units, about 6 GB each at the peak)
 mkdir -p "$work"
 expected=test/repr/java/expected/jdk26u.sha256
+# the reads without javac's fallbacks to javac, a ceiling by module ({MODULE N ...}, none listed: 0; a file
+# that falls back is read by javac, so its forms are javac's and the hashes cannot tell, GT7's audit 061 #1)
+fallbacks=test/repr/java/expected/jdk26u-fallbacks.edn
 update=
 if [ "${1:-}" = --update ]; then update=1; shift; fi
 
@@ -78,6 +84,19 @@ if [ -n "$ro" ]; then
 fi
 [ $bad = 0 ] || exit 1
 
+# the fallbacks by module, from the modules' logs ("no javac: N files, N native, N fallbacks to javac; ...")
+: > "$work/fallbacks.tsv"
+fbbad=0
+if [ -n "$ro" ]; then
+  for m in $modules; do
+    f=$(grep '^no javac: ' "$work/log/convert-$m.log" | awk '{print $7}')
+    case $f in
+      ''|*[!0-9]*) echo "$m: no 'no javac:' line in $work/log/convert-$m.log: the fallbacks are unknown"; fbbad=1; continue ;;
+    esac
+    printf '%s\t%s\n' "$m" "$f" >> "$work/fallbacks.tsv"
+  done
+fi
+
 # the forms' hashes (JFS72 (b)): each module's files, their first line without $JDK_SRC
 echo "== forms"
 for m in $modules; do
@@ -85,6 +104,15 @@ for m in $modules; do
   (cd "$work/conv" && find "$m" -name '*.ae' | LC_ALL=C sort | xargs -r sha256sum)
 done | LC_ALL=C sort -k2 > "$work/jdk26u.sha256"
 printf '%s\n' $modules | LC_ALL=C sort > "$work/modules.txt"
+# the fallbacks against their ceilings (not for --update, which records them)
+if [ -n "$ro" ] && [ -z "$update" ]; then
+  touch "$fallbacks"
+  while IFS=$'\t' read -r m f; do
+    c=$(judge_flat_get "$fallbacks" "$m"); c=${c:-0}
+    if [ "$f" -gt "$c" ]; then echo "$m: $f fallbacks to javac, over the ceiling $c ($fallbacks)"; fbbad=1; fi
+  done < "$work/fallbacks.tsv"
+  [ $fbbad = 0 ] && echo "fallbacks: $(awk -F'\t' '{n += $2} END {print n + 0}' "$work/fallbacks.tsv") to javac, within the ceilings ($fallbacks)"
+fi
 # the record's lines of the modules converted
 touch "$expected"
 awk 'NR==FNR {m[$1]=1; next} {split($2, p, "/"); if (p[1] in m) print}' "$work/modules.txt" "$expected" > "$work/expected.sha256"
@@ -92,6 +120,17 @@ if [ -n "$update" ]; then
   { awk 'NR==FNR {m[$1]=1; next} {split($2, p, "/"); if (!(p[1] in m)) print}' "$work/modules.txt" "$expected"
     cat "$work/jdk26u.sha256"; } | LC_ALL=C sort -k2 > "$work/record.sha256"
   cp "$work/record.sha256" "$expected"
+  if [ -n "$ro" ]; then
+    # the fallbacks of the modules converted rewritten (nonzero ones only), the other modules' kept
+    { echo ";; bin/repr-java check --jdk (test/repr/java/jdk.bash): by module, the most files of the read without javac that may"
+      echo ";; fall back to javac (JFS120 (b); GT7's audit 061 #1). None listed: 0. Rewritten by check --jdk --update."
+      echo "{"
+      { [ -f "$fallbacks" ] && awk 'NR==FNR {m[$1]=1; next} {sub(/;.*/, ""); gsub(/[{}]/, " "); n = split($0, t, /[ \t,]+/); for (i = 1; i < n; i += 2) if (t[i] != "" && !(t[i] in m)) print t[i], t[i + 1]}' "$work/modules.txt" "$fallbacks"
+        awk -F'\t' '$2 > 0 {print $1, $2}' "$work/fallbacks.tsv"; } | LC_ALL=C sort | sed 's/^/ /'
+      echo "}"; } > "$work/fallbacks.new"
+    cp "$work/fallbacks.new" "$fallbacks"
+    echo "update: $fallbacks written ($(awk -F'\t' '$2 > 0' "$work/fallbacks.tsv" | wc -l) modules with fallbacks)"
+  fi
   echo "update: $expected written ($(wc -l < "$work/jdk26u.sha256") files of $n modules; $(wc -l < "$expected") in all): commit it"
 elif diff "$work/expected.sha256" "$work/jdk26u.sha256" > "$work/jdk26u.diff"; then
   echo "forms: $(wc -l < "$work/jdk26u.sha256") files of $n modules, as expected ($expected)"
@@ -101,3 +140,4 @@ else
   echo "$(grep -c '^[<>]' "$work/jdk26u.diff") lines differ"
   exit 1
 fi
+[ $fbbad = 0 ] || exit 1
