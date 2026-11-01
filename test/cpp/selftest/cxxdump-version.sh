@@ -1,3 +1,4 @@
+# needs-host
 # Review 018's R3 (a): review 007's fix changed the statuses cxxdump caches (a clang that is killed or crashes is no longer
 # cached as "rejected"), but the cache key's version stayed, so an entry made before was still served as a rejection. The key
 # now has a version newer than the fix's (cxxdump-8 or later), and a rejection's cache entry is still served as one.
