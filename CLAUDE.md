@@ -206,10 +206,11 @@ Prior art:
     lowered and code levels, the HIR, MIR and objects of the library corpora's crates and of the UI
     suite's programs built by the helper as rustc from the originals and from the printed files;
     `include!`'s expression files as `(rs/expr e)` forms), evaluated from the checkout,
-    not embedded; `arbace.repr.c` (`arbace/repr/c{.ae,/}`), C's bridge (doc/C23-SURVEY.md, CS1-CS51; spec
-    doc/c/SPEC.md): ports of cc's lexer, preprocessor and parser, checked token for token against cc run by
-    the helper `tools/ccdump` over `test/c/corpora.edn` (`bin/repr-c`; the Makefile's `repr-c-*`), evaluated
-    from the checkout, not embedded, in no gate step and out of `gate_key`.
+    not embedded; `arbace/repr/c/` (`arbace.repr.c.*`: `lex`, `pp`, `host`, `parse`, `tree` and the checks), C's bridge
+    (doc/C23-SURVEY.md, CS1-CS63; spec doc/c/SPEC.md): ports of cc's lexer, preprocessor and parser, checked
+    token for token against cc run by the helper `tools/ccdump` over `test/c/corpora.edn` and against gcc
+    (`bin/repr-c check`, `parse-check`; the parse level's reference is gcc's acceptance, CS61; the Makefile's
+    `repr-c-*`), evaluated from the checkout, not embedded, in no gate step and out of `gate_key`.
   - `arbace/repr/clojure{.ae,/}`: `arbace.repr.clojure`, Clojure's bridge (`doc/REPR-CLOJURE.md`;
     `bin/repr-clojure read`, `print`, `roundtrip`, `check`): Clojure source into Arbace's, the
     names of the vendored Clojure, `.clj`/`.cljc` into `.ae`, a table of rules for the dialects'
