@@ -94,13 +94,6 @@ got=$(root=$r work=$r/w ARBACE_GATE_EXES=$r/exes CLOJURE_TESTS_AOT_EXES= bash -c
   aot_build" 2>&1)
 echo "$got" | grep -q "aot-dir=$r/exes/$K20/amd64/aot" && ok "clojure-tests --aot: EXES/KEY20" || bad "aot_build gave: $got"
 
-# 7. a miss never removes a directory of another key
-r=$T/gb; mk_tree "$r"
-mkdir -p "$r/exes/$OTHER/amd64"; touch "$r/exes/$OTHER/amd64/arbace" "$r/exes/$OTHER/amd64/arbace-tests"; echo "$OTHER" > "$r/exes/$OTHER/key"
-got=$(root=$r discard=$r/discard ARBACE_GATE_CACHE=$r/exes/$OTHER bash -c "
-  gate_key() { echo $KEY; }; build() { return 1; }; since() { echo 0; }
-  $(fn "$here/bin/arbace-go" gate_build)
-  gate_build" 2>&1)
-[ -f "$r/exes/$OTHER/amd64/arbace" ] && ok "gate_build: another key's directory kept" || bad "gate_build removed another key's directory"
+# 7. (gate_build itself: test/gate/gate-build-test.bash, the real script under set -u)
 
 exit $fail
