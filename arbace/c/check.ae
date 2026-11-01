@@ -32,9 +32,10 @@
 ;; the included unit whose forms are being checked (its name, as the read keys it), nil for the main file's: its
 ;; errors are FILE:LINE: (review 006, finding 7)
 (def ^:dynamic *unit* nil)
-(def ^:dynamic *unit-ext-lines*
-  "CS214 (R5): the lines with `__extension__` of the unit being checked (*unit*), read from its file when it can be; the main
-  file's are the cx's :ext-lines." #{})
+(def ^:dynamic *unit-info*
+  "CS214 (R5): a delay of the unit being checked (*unit*) read from its file when it can be: {:ext the lines with `__extension__`
+  :pragma whether it has a `#pragma GCC system_header` line (review 031's finding F)}; read only when a pedwarn is judged. The
+  main file's ext lines are the cx's :ext-lines." (delay {:ext #{} :pragma false}))
 (def ^:dynamic *unit-line?*
   "CS214 (R5): whether *line* is the line of a form in its own unit's file (a reread unit's forms carry :line); the forms
   read from C carry none in a unit, and *line* is then the line of the `#include` in the main file." false)
@@ -73,7 +74,8 @@
   [^String msg]
   (when (and (= :errors (cx :pedantic))
              (not *system-unit*)
-             (not (contains? (if (and *unit* *unit-line?*) *unit-ext-lines* (or (cx :ext-lines) #{})) *line*)))
+             (not (and *unit* (:pragma @*unit-info*)))
+             (not (contains? (if (and *unit* *unit-line?*) (:ext @*unit-info*) (or (cx :ext-lines) #{})) *line*)))
     (err! msg)))
 
 (defn- line-of [f] (or (:line (meta f)) *line*))
@@ -2327,12 +2329,15 @@
                                   *unit* (str (or (:path uf) u))
                                   *system-unit* (let [p (str (:path uf))]
                                                   (boolean (some #(str/starts-with? p (str % "/")) (cx :sys-dirs))))
-                                  *unit-ext-lines* (let [p (str (:path uf))
-                                                         f (java.io.File. ^String (if (and (cx :base) (not (.startsWith p "/"))) (str (cx :base) "/" p) p))]
-                                                     (if (.isFile f)
-                                                       (set (keep-indexed (fn [i ^String l] (when (.contains l "__extension__") (inc i)))
-                                                                          (str/split-lines (String. (java.nio.file.Files/readAllBytes (.toPath f)) "ISO-8859-1"))))
-                                                       #{}))]
+                                  *unit-info* (delay
+                                                (let [p (str (:path uf))
+                                                      f (java.io.File. ^String (if (and (cx :base) (not (.startsWith p "/"))) (str (cx :base) "/" p) p))]
+                                                  (if (.isFile f)
+                                                    (let [ls (str/split-lines (String. (java.nio.file.Files/readAllBytes (.toPath f)) "ISO-8859-1"))]
+                                                      {:ext (set (keep-indexed (fn [i ^String l] (when (.contains l "__extension__") (inc i))) ls))
+                                                       ;; gcc takes a header with this pragma for a system header (no pedwarn in it)
+                                                       :pragma (boolean (some #(re-find #"^\s*#\s*pragma\s+GCC\s+system_header\b" %) ls))})
+                                                    {:ext #{} :pragma false})))]
                           ;; each of the unit's forms at its own line, as the main file's are
                           (doseq [g (:forms uf)]
                             (binding [*line* (or (and (seq? g) (:line (meta g))) *line*)
