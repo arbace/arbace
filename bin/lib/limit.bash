@@ -45,3 +45,39 @@ limited() {
   local t=$1; shift
   limited_cpu $((t * 5)) $((t * 20)) "$@"
 }
+
+# attempt_limits TMO ONCE: the limits (limited's TMO) a check's action is tried at, one a line: TMO, then twice
+# TMO (JCS47 (a): a timeout is run again once before it counts), or TMO alone when ONCE is set, the quiet retry
+# that already runs at twice the first limit (review 075, finding 4: it doubled again, four attempts at 20, 40,
+# 40 and 80 s in all, an hour of the essential gate for a blocked hang)
+attempt_limits() {
+  echo "$1"
+  [ -n "${2:-}" ] || echo "$(($1 * 2))"
+}
+
+# timeout_kind STATUS: what a timeout status says it was: 124 the wall cap, 137 and 152 the CPU limit or a kill
+# (an OOM kill, a -k after the wall cap, a self-kill read alike: review 075, finding 6), else empty
+timeout_kind() {
+  case $1 in 124) echo wall ;; 137|152) echo cpu-or-kill ;; *) echo ;; esac
+}
+
+# note_attempt WHO ID ATTEMPT LIMIT STATUS RESULT: review 075, finding 3: a retry keeps no record of the attempt
+# that timed out. Appends WHO, ID, ATTEMPT, LIMIT, STATUS, the kind and RESULT, tab-separated, to
+# ARBACE_TIMEOUT_LOG (nothing when it is unset) for an attempt that timed out and for the attempt after one, and
+# prints a line to stderr when an attempt after a timeout did not time out (a pass that needed the retry).
+# STATUS "-": the attempt's status is not known to the caller
+note_attempt() {
+  local who=$1 id=$2 n=$3 lim=$4 st=$5 res=$6 kind
+  kind=$(timeout_kind "$st")
+  case $res in timeout*) ;; *) [ "$n" -gt 1 ] || return 0
+    echo "$who: $id: the first attempt timed out; attempt $n (limit $lim) ended $res" >&2 ;; esac
+  [ -z "${ARBACE_TIMEOUT_LOG:-}" ] || printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$who" "$id" "$n" "$lim" "$st" "${kind:--}" "${res%%$'\t'*}" >> "$ARBACE_TIMEOUT_LOG"
+}
+
+# keep_first_timeouts RESULTS OUT: the rows of RESULTS (ID, result, reason...) that are timeouts, kept in OUT
+# before a retry replaces them, and their ids printed to stderr with the reason (review 075, finding 3: goi's
+# retry printed only the count, and the row replaced was gone)
+keep_first_timeouts() {
+  awk -F'\t' '$2 == "error" && $3 ~ /^timeout/' "$1" > "$2"
+  awk -F'\t' '{ print "   first attempt: " $1 ": " $3 }' "$2" >&2
+}
