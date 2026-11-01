@@ -56,8 +56,8 @@ grep -q -- '(--record-results)' "$t/w6.log" && ! grep -q -- 'replace-results' "$
 cat > "$res/tc-fail.edn" <<'EOR'
 {:key "tc-fail"
  :files {
-  "tc/a.C" :pass
-  "tc/b.C" [:known :forms-differ]
+  "tc-fail/a.C" :pass
+  "tc-fail/b.C" [:known :forms-differ]
  }}
 EOR
 echo '{:files {}}' > "$t/known-none.edn"
