@@ -3,6 +3,7 @@
 # (the gate's audit, bin/gate --audit, does the same), and every file of the checkout it opens must lie in the
 # step's :inputs of test/gate/steps.edn (the group :lib-tools expanded here) or in .tmp/, .git/, target/.
 # Needs strace. By hand: test/gate/gate-reads-test.bash
+# needs: exe (bin/gate-tests runs bin/gate-tests under strace)
 set -uo pipefail
 src=$(cd "$(dirname "$0")/../.." && pwd)
 [ -n "${GATE_TESTS_NESTED:-}" ] && { echo "gate-reads-test: nested, skipped"; exit 0; }

@@ -1,6 +1,7 @@
 #!/bin/bash
 # bin/j2g-edge trace's verdict (test/j2g/edge_verdict.ae) on an Arbace executable (audit 041, finding 4):
 # a recording with no traced event fails. By hand: ARBACE_HOST_EXE=EXE test/gate/edge-verdict-test.bash
+# needs: exe (an Arbace executable: bin/gate-tests passes it as ARBACE_HOST_EXE)
 set -uo pipefail
 src=$(cd "$(dirname "$0")/../.." && pwd)
 exe=${ARBACE_HOST_EXE:-$src/target/seed/amd64/arbace}

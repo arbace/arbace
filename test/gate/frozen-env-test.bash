@@ -3,6 +3,7 @@
 # bin/lib/frozen.bash at its top level: bin/oracle) declares the variables that choose
 # its jar and class path in :env, so that a pass records them (audit 041). Needs an Arbace executable:
 # ARBACE_HOST_EXE=EXE test/gate/frozen-env-test.bash
+# needs: exe (an Arbace executable: bin/gate-tests passes it as ARBACE_HOST_EXE)
 set -uo pipefail
 src=$(cd "$(dirname "$0")/../.." && pwd)
 exe=${ARBACE_HOST_EXE:-$src/target/seed/amd64/arbace}

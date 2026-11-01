@@ -2,6 +2,7 @@
 # GTS113 (b): the run's mark that bin/j2g-edge trace counts by (audit 041): the classifier counts an
 # event on a future's thread (the marker frame) and arbace.j2g.model's *run* is conveyed to futures and
 # wraps only where it is bound. Needs an Arbace executable: ARBACE_HOST_EXE=EXE test/gate/edge-mark-test.bash
+# needs: exe (an Arbace executable: bin/gate-tests passes it as ARBACE_HOST_EXE)
 set -uo pipefail
 src=$(cd "$(dirname "$0")/../.." && pwd)
 exe=${ARBACE_HOST_EXE:-$src/target/seed/amd64/arbace}
