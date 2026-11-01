@@ -3989,3 +3989,51 @@ The unit tests alone were not enough: they only mixed `_Float16` with `__bf16`.
 Left open: report 057's CS236-CS238 as before; the `:flt-eval-method` target fact (aarch64 `+fp16`, `-fexcess-precision=16` evaluate `_Float16` in the format,
 and `__bf16` follows it there); whether the gcc testsuite has `-I` with an angled include, `-isystem` or `-mavx512fp16` (the corpus rerun shows no
 change of the dg record).
+
+## As built: F79, re-reviews 079's fixes (2026-11-01)
+
+Two rounds on `c23-c7` after report 079 (the VM's re-review of F57: gcc 15.2 aarch64 and clang x86-64, no stage 0). Each fix is a commit with a
+`bin/ci judge-test` test that failed on the head before it and passes; the expectations are gcc 15.2 (x86-64, this host) line by line, by `gcc -M` for
+the include cases.
+
+### F79.1 First round (findings 1 and 2)
+
+- **1, the exact long double comparison (false errors).** `b12c7031` compared exactly as soon as one operand had an exact value (`:ld`), so `0.1L == 0.1L * 1`
+  compared 0.1L with the double 0.1. Now the exact path runs only when every long double operand is exact; arithmetic, `?:` and identifiers fall back to the
+  doubles (test `long-double-compared-exactly`, extended). `round-exact` gives 0 below a decimal exponent of -6000 (`1e-7000L == 0`). Carrying `:ld` through arithmetic,
+  `?:` and constexpr entries is CS235 (b), not done.
+- **2, the include search.** `host/config` builds gcc's chains: `-iquote` (quoted includes, after the including file's directory), the `-I` directories less
+  those that name a system directory, the system ones (`-isystem`, the host's list, `-idirafter` last), duplicates keeping their first place; `-I-` is not a directory
+  (its quote/bracket split is not modelled); `#include_next` continues through `-I` then the system directories. Test `include-search-is-gccs`
+  (eleven cases; seven failed before). The run corpora (fifteen, 3,761 programs) were rerun after it: the record is unchanged.
+
+### F79.2 Second round (findings 3 to 6)
+
+- **3, a system header is the directory it was found through.** pp records `:system` on the `enter` record (the directory is one of the system list; a quoted
+  include found in the including file's directory is not, even when it is `.`), the unit keeps it, and the checker reads it instead of a path prefix. Fixes `-isystem .`
+  (a false error) and nested `-I sy -isystem sy/sub` / `-isystem sy -I sy/sub` (missed errors). Test `system-header-by-the-directory-found-through` (six cases; four failed before).
+- **4, the `bf16` pedwarn** moved from the raw tokens (`pedantic.ae`) to `lit-form`: it is judged on the constants the preprocessor delivers, so none in `#if 0` or in an
+  unused macro, the use's line for a macro's, `.5bf16` and `BF16` included. Test `bf16-suffix-pedwarn` extended (5 7 8 9 15, as gcc).
+- **5, the `--judge` residues.** A kept gcc output without its status is a difference, not an exception (`gcc-cmd`; test `gcc-reread-without-status`); `--judge` stops when
+  reading the outputs fails and skips it for `--essential`; the usage says the directives and the read are the last run's (a change to `analyze` reaches a judge-only run
+  only after a full run, as before).
+- **6, equal-rank floating types.** `_Float32 + float` is `_Float32`, `double + _Float32x` is double, `long double + _Float64x` is long double, `_Float128 + _Float64x`
+  is `_Float128`: an interchange `_FloatN` over the standard type over `_FloatNx` (test `equal-rank-float-types`, thirteen `_Generic` assertions, all gcc's).
+
+### F79.3 Numbers
+
+| | before F79 (`fd1ff91a`) | after |
+|---|---|---|
+| `bin/ci judge-test` | 51 tests, 174 assertions (at `81006344`: 55, 188) | **59 tests, 210 assertions**, all pass (3 min with the musl cache fresh, 13 min after a `pp.ae` edit) |
+| `bin/ci dg --record` (full, gcc 15.2) | 583 of 619 supported, 8 unsupported, 0 unexplained | the same, the record unchanged byte for byte |
+| `bin/repr-c check --c23` | 62 files, 62 pass (59 agree, 3 gcc-only-rejects) | the same |
+| `bin/ci check`, eight `-run` corpora (179) and the seven big ones (3,582), `CI_JOBS` 4 | the record | the record: 3,457 pass counted by the record (the seven big ones 3,353 plus the small 104), no row moved; 31 minutes for the big ones |
+
+A slip of mine, caught by the full `judge-test` and not by the single tests: the finding 5 commit made `--judge` reread gcc's outputs for every group, which threw for the
+made-up work directories of `judge-record-after-subset` and `pass-to-unsupported` (3 failures); `gcc-cmd` now reads nothing for a group with no `gcc/` directory.
+
+### F79.4 Open and rule slips
+
+Open: CS235 (b) (`:ld` through arithmetic); `-I-` and the dialects of `-iquote` beyond the first pick; `bf16` in `#if` conditions of the main file's own tokens
+is not special (it is a constant like any); the `f16` pedwarn before C23 (`-std=c17`: "non-standard suffix before C23"); the gcc corpus's use of the include flags
+(not checkable here: the dg record is unchanged). Rule slips: none in these two rounds.
