@@ -45,3 +45,38 @@ esac
 STUB
   chmod +x "$d/bin/repr-java"
 }
+
+# make_fake_parse_root DIR: make_fake_root, plus what parse-check needs: a stub bin/lib/tools.bash (arbace_tool
+# prints nothing: the known files are empty) and a stub jtree: `main -m arbace.repr.java.jtree check OUT ROOT
+# PATH...` writes OUT/files.tsv (one equal file), OUT/report.edn with :javac-diagnostics $STUB_DIAG (default 0)
+# and a log line; `mutate OUT SRC N K E SEED MODULE...` writes OUT/m1/share/classes/a/A.java holding $STUB_MUT.
+make_fake_parse_root() {
+  local d=$1
+  make_fake_root "$d"
+  cp "$root/bin/lib/renamed-env.bash" "$d/bin/lib/"
+  printf 'arbace_tool() { :; }\nfrozen_clojure() { echo "$root/test/repr/java"; }\n' > "$d/bin/lib/tools.bash"
+  cat > "$d/bin/repr-java" <<'STUB'
+#!/bin/bash
+cmd=$1; shift
+case $cmd in
+  main)
+    [ "$1" = -m ] && [ "$2" = arbace.repr.java.jtree ] || exit 2
+    verb=$3; shift 3
+    case $verb in
+      check)
+        out=$1; mkdir -p "$out"
+        printf 'x/A.java\tequal\n' > "$out/files.tsv"
+        printf '{:files 1,\n :equal 1,\n :javac-diagnostics %s,\n :nodes 1}\n' "${STUB_DIAG:-0}" > "$out/report.edn"
+        echo "1 files, 1 equal, 0 differ, 0 native errors, 0 javac errors" ;;
+      mutate)
+        out=$1; mkdir -p "$out/m1/share/classes/a"
+        printf '%s\n' "${STUB_MUT:-class A {}}" > "$out/m1/share/classes/a/A.java"
+        echo "8000 mutants" ;;
+      *) exit 2 ;;
+    esac ;;
+  *) echo "stub: $cmd" >&2; exit 2 ;;
+esac
+STUB
+  chmod +x "$d/bin/repr-java"
+  mkdir -p "$d/test/repr/java/java" "$d/test/repr/java/module"
+}

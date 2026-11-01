@@ -8,7 +8,7 @@
 # Run through bin/repr-java parse-check (from the repository root); writes only under
 # .tmp/repr-java-parse-check/ (REPR_JAVA_PARSE_WORK).
 #
-# Usage: bin/repr-java parse-check [--corpus C,...]
+# Usage: bin/repr-java parse-check [--corpus C,...] [--record]
 # Corpora (default all of them, `all`: samples,baseline,jdk,javac,jdk26u,mutants,tests):
 #   samples   test/repr/java/java and test/repr/java/module (14 files)
 #   baseline  the frozen clojure/ (183 files; bin/lib/tools.bash's frozen_clojure)
@@ -30,18 +30,22 @@
 #   JDK_SRC   jdk26u's src directory (default /root/jdk26u/src)
 #   REPR_JAVA_THREADS (default 12), REPR_JAVA_CHUNK (files per javac task, default 50)
 # REPR_JAVA_EXE (bin/repr-java) names javac's tool executable.
-# Exit status: 0 when every corpus's differing files are the known ones.
+# Exit status: 0 when every corpus's differing files are the known ones and its javac diagnostics (syntax
+# errors) the recorded count (test/repr/java/parse-check-diagnostics.edn; --record writes the counts).
 set -uo pipefail
 root=$(cd "$(dirname "$0")/../../.." && pwd)
 . "$root/bin/lib/renamed-env.bash" # stops on a stale G2A_*, J2A_*, A2G_* or C2A_*
 cd "$root"
 . bin/lib/tools.bash
 . bin/lib/repr-java/originals.bash
+. bin/lib/repr-java/judge.bash
 
 corpora=samples,baseline,jdk,javac,jdk26u,mutants,tests
+record=
 while [ $# -gt 0 ]; do
   case $1 in
     --corpus) corpora=$2; shift 2 ;;
+    --record) record=1; shift ;;
     *) sed -n '11,12p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
   esac
 done
@@ -51,6 +55,7 @@ case $work in /*) ;; *) work=$root/$work ;; esac
 jdk_src=${JDK_SRC:-/root/jdk26u/src}
 jdk=$(dirname "$jdk_src")
 known=test/repr/java/parse-check-known.edn
+diagnostics=test/repr/java/parse-check-diagnostics.edn
 export REPR_JAVA_THREADS=${REPR_JAVA_THREADS:-12}
 mkdir -p "$work"
 status=0
@@ -70,6 +75,22 @@ check() {
   if ! cmp -s "$work/$corpus.differ" "$work/$corpus.known"; then
     echo "$corpus: the differing files are not the known ones ($known):"
     diff "$work/$corpus.known" "$work/$corpus.differ" | grep '^[<>]' | head -20
+    return 1
+  fi
+  # javac's syntax errors against the recorded count (GT7's audit 061 #3): both parsers recover alike, so a
+  # truncated or emptied file passes the comparison above
+  local n rec
+  n=$(sed -n 's/.*:javac-diagnostics *\([0-9][0-9]*\).*/\1/p' "$work/$corpus/report.edn" 2>&1 | head -1)
+  case $n in ''|*[!0-9]*) echo "$corpus: no :javac-diagnostics in $work/$corpus/report.edn"; return 1 ;; esac
+  if [ -n "$record" ]; then
+    judge_flat_set "$diagnostics" ":$corpus" "$n"; echo "$corpus: $n javac diagnostics recorded ($diagnostics)"; return 0
+  fi
+  rec=$(judge_flat_get "$diagnostics" ":$corpus")
+  if [ -z "$rec" ]; then
+    echo "$corpus: $n javac diagnostics, no recorded count ($diagnostics; parse-check --record)"
+  elif [ "$n" != "$rec" ]; then
+    echo "$corpus: $n javac diagnostics, recorded $rec ($diagnostics; javac-errors.txt in $work/$corpus lists them)"
+    head -10 "$work/$corpus/javac-errors.txt" 2>&1
     return 1
   fi
 }
