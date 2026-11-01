@@ -2575,5 +2575,7 @@ From report 060 (the AOT levels of the suite and goi). The fixes are in `audit-0
     flagged programs, 11 of 11 known ones), so (b) is a guard against a future shrink, worth building with the next record.
 
 **Not fixed.** Finding 3 and 4 hold on main only (fixed on `mac/054-merge`); the AOT record was not recorded again after
-`:gc-run` (report 011), so nothing here re-records it. Finding 6's key now also hashes the tools' host: a new host re-reads
-the corpora once.
+`:gc-run` (report 011), so nothing here re-records it. Finding 6's key hashes the reader's sources (goi's REPL and builder, go/parser's forms, box.ae, REPR_GO_READER), not the host
+executable (report 069 A: the interp and AOT steps run on different hosts over one corpora tree, so a host in the key
+made each re-read them in turn). The AOT essential subset runs `goi.divergences --aot` on the record (069 D). The
+suite's subset check is one way (069 E): a stale reference entry for a source of the subset is caught by the whole run.
