@@ -16,7 +16,7 @@ cat > "$scratch/fake" <<'F'
 echo "${ARBACE_PATH-unset}" >> "$FAKE_LOG"
 M=${MODE:-}
 case $1 in
-  test/c2j/gen_nodes.ae) echo N ;;
+  test/c2j/gen_nodes.ae) [ "$M" = c2j-empty ] || echo N ;;
   test/c2j/gen_fns.ae) echo F ;;
   test/goi/gen_nodes.ae)
     [ "$M" = goi-empty ] && exit 0
@@ -74,6 +74,17 @@ if [ "$st" != 0 ] && [ -f "$d/go/arbace/repr/go/godump.ae" ] && [ -f "$d/go/arba
   echo "ok:   update-nothing (status $st, trees kept)"
 else echo "FAIL: update-nothing: status $st, trees $(ls "$d/go/arbace/repr/go" 2>&1 | tr '\n' ' ')"; fails=$((fails + 1)); fi
 
+# report 046, finding 2: --update refuses a file outside the four roots, copying nothing
+d=$scratch/update-outside; mk "$d"; echo old > "$d/go/arbace/repr/go/godump.ae"
+MODE=outside-go FAKE_LOG=$scratch/uo.log "$d/bin/generated-check" --update "$scratch/fake" > "$scratch/uo.out" 2>&1
+st=$?
+if [ "$st" != 0 ] && [ ! -e "$d/arbace/new.ae" ] && [ "$(cat "$d/go/arbace/repr/go/godump.ae")" = old ]; then echo "ok:   update-outside (status $st, nothing copied)"
+else echo "FAIL: update-outside: status $st, $(cat "$scratch/uo.out")"; fails=$((fails + 1)); fi
+# and a c2j generator that prints nothing is not copied over the committed file
+d=$scratch/update-c2j-empty; mk "$d"
+MODE=c2j-empty FAKE_LOG=$scratch/ce.log "$d/bin/generated-check" --update "$scratch/fake" > "$scratch/ce.out" 2>&1
+if [ -s "$d/arbace/lang/go/CompilerNodes.ae" ]; then echo "ok:   update-c2j-empty (committed file kept)"
+else echo "FAIL: update-c2j-empty: CompilerNodes.ae emptied"; fails=$((fails + 1)); fi
 # --update writes a stale goi file
 d=$scratch/update-goi; mk "$d"; echo old > "$d/go/arbace/goi/ops.ae"
 FAKE_LOG=$scratch/ug.log "$d/bin/generated-check" --update "$scratch/fake" > "$scratch/ug.out" 2>&1
