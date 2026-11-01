@@ -1757,3 +1757,18 @@ next AOT run reruns oi's rows).
 - **OC153 The floors' rows for the other corpora** (OC141 again). (a) as built (not checked, 0 fails); (b) record the opam and `.cmi` rows when the opam set is fetched. *Recommended: (b)*.
 
   **Decided (the user, 2026-11-01): (b).** Waits for the opam fetch, with OC141 (b); not run now.
+## As built: re-review 049's fixes (2026-11-01)
+
+Re-review 049 (the helper VM's, at `6fc559da`) closed all six of 042's findings and made five points; each fix is its own commit on `ocaml-o1` (findings 3 and 4 share one), light tier.
+
+| # | the fix | the test (before: fails on `6fc559da`) |
+|---|---|---|
+| 1 | `judges_test.bash`: the six cases of 042 sat after its `exit $bad` and never ran (27 ran, not 33); `exit` moved off the middle, `expect` counts the cases, an EXIT trap fails a count other than `CASES` (now 39) | the file itself: a short count fails; on `6fc559da`'s file the 6 cases did not run |
+| 2 | `oi_status` reads 137 by the row's CPU seconds (user + system of the children between two `times`, `oi_cpu_secs`; `bin/oi oi-cpu`) against `OI_TIMEOUT - 0.5`, not by wall seconds (a kill below the limit on a loaded host stays a failure) | `judges_test`: 137 at 119.6 CPU s is 124, at 119.4 is 137; `oi-cpu` over two synthetic `times` files; a real `limited_cpu` loop measured 2.00 s for a limit of 2 |
+| 3 | `oi_key_test.bash` made `.tmp/w` first (a fresh checkout made its "fails the key" cases pass without `bin/oi` running), checks its steps, and wants bin/oi's own `oi: key:` message from a failing key | run after `rm -rf .tmp/w`: ok; on `6fc559da` the same fresh run printed ok for a stub that never failed (049's demonstration) |
+| 4 | `bin/oi` makes `.tmp/o6` too (`check --aot`, `aot-run`, `suite check --aot` redirect into it) | `oi_key_test`: a root with only `bin/` gets `.tmp/oi`, `.tmp/o7`, `.tmp/o6` (before: no `.tmp/o6`) |
+| 5 | the pins' evidence: `test/ocaml/pins-attested.tsv` (39 rows: the 22 oi and 17 AOT `status ` pins, with the status and full sha256 of the fresh runs they were made for); `bin/oi pins` checks every pin against it with no run, and an attested row with no pin is stale; `bin/oi pins --attest` writes it from the last runs | `judges_test`: the committed files pass; a changed digest fails (`PIN`); an extra row is `STALE` (before: no verb) |
+| 6 | the opam pins are in the suite corpus's key only (a pin bump reruns no program row); `oi_rows_for` fails at once on a part of the key it cannot have; `floor` refuses a count of 0 before `RECORD=1` records it; `floors_test`'s default-array cases now discriminate (a corpus added to an array becomes required: a hand copy would not follow) and the whiml case is named for what it tests | `oi_key_test` (program key same, suite key differs on a pin change), `floors_test` (13 cases) |
+
+**The numbers**: `bin/oi check` 273 pass, 0 failing; `suite check` 87 pass, 0 failing; the 11 + 6 pinned programs' AOT runs: 17 known, 0 failing, OI column same; `bin/oi pins` 39 of 39 attested. Tests: `judges_test` 39 cases run, exit 0 (was 27 of 33); `floors_test` 13 ok; `oi_key_test` 10 ok.
+**Not run**: the whole AOT corpora, `aot_oi_column_test`, `suite expect` (unchanged by these fixes; judges_test ran its cases), repr-ocaml dumps and roundtrip. oi's CPU-to-wall ratio under load is not measured.
