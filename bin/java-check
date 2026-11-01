@@ -103,11 +103,13 @@
 #                      cutoff: a reader change that reads the same forms keeps them); DIR/levels the levels
 #                      run, and DIR/partial for a partial run (--only, --corpus, --essential), which
 #                      --judge reads. Status 0 when the levels ran, whatever their results
-#   bin/java-check --judge [--essential] [--record] [--partial] [--levels L,...] RESULTS...
+#   bin/java-check --judge [--essential] [--record] [--partial] [--levels L,...] [--held FILE] RESULTS...
 #                      the judgment alone (GT5): the RESULTS files (--save's results.tsv) judged as a run
 #                      of their levels is, against test/java/check-LEVEL.edn, test/java/divergences.edn and
 #                      test/java/levels-known.edn (seconds: a classes file's change runs nothing again);
-#                      --essential as --essential's run is judged. The levels judged: --levels, else
+#                      --essential as --essential's run is judged; --held FILE: the ids of the tests an
+#                      :audited class held (a run --save marked as audited), one a line (java-judge's
+#                      held.txt, which the gate's java-held runs again unaudited). The levels judged: --levels, else
 #                      those the files' --save named (the levels file beside each) and those their rows
 #                      hold; none known fails. A level judged needs a row for every test it runs (a run
 #                      that lost rows fails, java.check/report), but in a partial judgment (--partial,
@@ -950,6 +952,26 @@ nread_one() {
   printf '%s\tnread\t%s\n' "$id" "$(cat "$nf.result")" | sed -e "s|$p|RUN|g" -e "s|$root|.|g"
 }
 
+# mark_audited SAVE LEVELS: --save's marker SAVE/audited when the run was under the gate's audit
+# (bin/gate --clean: strace -f), so that the judgment knows its timeouts may be strace's
+# (test/java/divergences.edn's :audited class, GT7 rerun 8). The gate says so (GATE_AUDITED=1, set by
+# bin/lib/gate-run.bash's step for an audited step) and the tracer is the cross-check (TracerPid of this
+# process): the mark needs both, GATE_AUDITED naming what the run is and TracerPid that strace is really
+# on it. One without the other (a person's strace or gdb on an unaudited run; an audited step whose tracer
+# is not attached) is said on stderr and not marked: the judgment is then the stricter (review 070).
+mark_audited() {
+  local save=$1 levels=$2 traced=0
+  rm -f "$save/audited"
+  awk '$1 == "TracerPid:" && $2 != 0 { t = 1 } END { exit !t }' /proc/self/status && traced=1
+  if [ "${GATE_AUDITED:-}" = 1 ] && [ $traced = 1 ]; then
+    printf '%s\n' "$levels" > "$save/audited"
+  elif [ "${GATE_AUDITED:-}" = 1 ]; then
+    echo "java-check: --save: GATE_AUDITED=1 but no tracer is attached (TracerPid 0): not marked audited, its timeouts are judged as they are" >&2
+  elif [ $traced = 1 ]; then
+    echo "java-check: --save: a tracer is attached (TracerPid) but GATE_AUDITED is not 1, not the gate's audit: not marked audited, its timeouts are judged as they are" >&2
+  fi
+}
+
 check() {
   local only="" corpus="" record="" essential=""
   save=""
@@ -1016,12 +1038,7 @@ check() {
   if [ -n "$save" ]; then
     mkdir -p "$save"
     cp "$work/results.tsv" "$save/results.tsv"
-    # the run under a tracer (bin/gate --clean's audit, strace -f): marked, so the judgment knows its
-    # timeouts may be strace's (test/java/divergences.edn's :audited class, GT7 rerun 8)
-    rm -f "$save/audited"
-    if awk '$1 == "TracerPid:" && $2 != 0 { t = 1 } END { exit !t }' /proc/self/status; then
-      printf '%s\n' "$levels" > "$save/audited"
-    fi
+    mark_audited "$save" "$levels"
     # the levels run and whether the run was partial, for --judge (a level without rows judged too)
     echo "$levels" > "$save/levels"
     if [ -n "$only" ] || [ -n "$corpus" ] || [ -n "$essential" ]; then : > "$save/partial"; else rm -f "$save/partial"; fi
@@ -1366,7 +1383,7 @@ essential_compiled() {
 
 usage() { sed -n '2,/^set -euo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; }
 
-# judge_saved [--essential] [--record] [--partial] [--levels L,...] RESULTS...: the judgment of saved
+# judge_saved [--essential] [--record] [--partial] [--levels L,...] [--held FILE] RESULTS...: the judgment of saved
 # runs (GT5); not named judge, the run's judgment above (a second definition replaced it: every run of
 # interp and compiled passed whatever its status and output, 2026-10-28 to 2026-10-31). The levels:
 # --levels, else the levels files --save wrote beside the results and the rows' own (report 003's
@@ -1379,6 +1396,7 @@ judge_saved() {
       --record) rargs+=(--record); shift ;;
       --partial) partial=1; shift ;;
       --levels) levels=$2; shift 2 ;;
+      --held) rargs+=(--held "$2"); shift 2 ;;
       *) break ;;
     esac
   done

@@ -645,7 +645,18 @@
         audit-held? (fn [lv id r]
                       (and (audited lv) (= r :timeout) (compiled-pass id)
                            (some #(and (:audited %) (= lv (:level %))) classes)))
-        problems (atom [])]
+        problems (atom [])
+        ;; the tests a hold made a difference to (the "held" lines): --held FILE lists them, one id a line
+        ;; (java-judge's output, which the gate's java-held runs again unaudited, GTS170)
+        held-ids (atom #{})
+        held! (fn [lv id r] (when (audit-held? lv id r) (swap! held-ids conj id) true))]
+    ;; a record of an audited judgment would write the held timeouts as the recorded results (and the
+    ;; levels disagreement as known): a later real timeout would then be no regression (review 070)
+    (when (and record? (seq audited))
+      (binding [*out* *err*]
+        (println (str "java-check: --record with --audited (" (str/join "," (map name (sort audited))) "): an audited run's timeouts may be strace's; recording them would make a real timeout no regression. Record from an unaudited run.")))
+      (shutdown-agents)
+      (System/exit 2))
     (doseq [lv (map keyword (str/split levels #","))
             :let [rs (sort-by first (filter #(= lv (second %)) results))
                   f (str checkdir "/check-" (name lv) ".edn")
@@ -682,7 +693,7 @@
                     (count (filter #(= [(nth % 2) (nth % 3)] (rec (first %))) rs)) " as recorded, "
                     (count fresh) " new or changed, " (count now-pass) " now passing, " (count regress) " regressions"
                     (when (seq flaky) (str ", " (count flaky) " flaky (run again, JCS71 (a))"))))
-      (doseq [x rs :when (and (pass-like? (first (rec (first x)))) (audit-held? lv (first x) (nth x 2)))]
+      (doseq [x rs :when (and (pass-like? (first (rec (first x)))) (held! lv (first x) (nth x 2)))]
         (println (str "   held (an :audited class, the run under the audit): " (first x) " " (:test (tests (first x))) ": " (name (nth x 2)) " " (nth x 3))))
       (when (seq missing)
         (println (format "   %5d missing (no result in this run)" (count missing)))
@@ -724,7 +735,13 @@
                                ["]"]))
         (println (str "   recorded " f))))
     (doseq [lv (map keyword (str/split levels #","))] (controls-judged! controls lv all-results problems))
-    (levels-against! checkdir tests results (set (map keyword (str/split levels #","))) record? partial? problems audit-held?)
+    (levels-against! checkdir tests results (set (map keyword (str/split levels #","))) record? partial? problems
+                     ;; a levels disagreement is held only for a test recorded passing at interp: a timeout recorded
+                     ;; as it is now was not made by strace (review 077)
+                     (let [rec-i (recorded (str checkdir "/check-interp.edn"))]
+                       (fn [lv id r] (and (#{:pass :flaky} (first (rec-i id))) (held! lv id r)))))
+    (when-let [hf (o "--held")]
+      (write-lines hf (sort @held-ids)))
     (doseq [p @problems] (println (str "   " p)))
     (shutdown-agents)
     (System/exit (if (seq @problems) 1 0))))
