@@ -20,6 +20,8 @@ cat > "$t" <<'F'
    ["bound: wrapped" (let [f (fn [] 1)] (binding [m/*run* true] (not (identical? f (m/run-fn f))))) true]
    ["bound: wrapped value" (binding [m/*run* true] ((m/run-fn (fn [] 7)))) 7]
    ["conveyed to a future" (binding [m/*run* true] @(future ((m/run-fn (fn [] m/*run*))))) true]
+   ["par-mapv's bodies carry the binding" (binding [m/*run* true] (m/par-mapv 3 (fn [_] m/*run*) (range 4))) [true true true true]]
+   ["par-mapv outside the binding" (m/par-mapv 3 (fn [_] m/*run*) (range 4)) [false false false false]]
    ["par-mapv under the binding" (binding [m/*run* true] (m/par-mapv 3 inc [1 2 3 4])) [2 3 4 5]]])
 (def bad (remove (fn [[_ got want]] (= got want)) results))
 (doseq [[what got want] results] (println (if (= got want) "ok:  " "FAIL:") what))
