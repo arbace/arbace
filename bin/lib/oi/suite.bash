@@ -157,7 +157,7 @@ cmd_suite_check() {
   export -f suite_oi_one suite_dump suite_stage suite_names; export S OI_DIR TESTS TESTLIB TIMEOUT EXE LIB OCD GOMEMLIMIT root
   local out=$S/check.tsv
   suite_selected | awk -F'\t' '$2 == "run" { printf "%s%c%s%c%s%c%s%c%s%c%s%c%s%c", $1, 0, $3, 0, $4, 0, $5, 0, $6, 0, $7, 0, $8, 0 }' | xargs -0 -n 7 -P "$JOBS" bash -c 'suite_oi_one "$@"' _ > "$out.new"
-  LC_ALL=C sort "$out.new" > "$out"; rm -f "$out.new"; oi_key > "$out.key"
+  LC_ALL=C sort "$out.new" > "$out"; rm -f "$out.new"; oi_key "$S/corpus.tsv" > "$out.key"
   local mode=judge; [ "$RECORD" = 1 ] && mode=record
   [ -n "$ONLY" ] && mode=$mode-only
   "$(arbace_exe)" "$root/test/ocaml/oi_check.ae" "$mode" "$out" "$S/corpus.tsv" "$SUITE_REFS" "$SUITE_OI" "$SUITE_OI_CLASSES" || return $?
@@ -176,7 +176,7 @@ cmd_suite_check_aot() {
   # oi's rows for the same programs, from this oi build (review 008's finding 1)
   export -f suite_oi_one suite_dump suite_stage suite_names; export S OI_DIR TESTS TESTLIB TIMEOUT EXE LIB OCD GOMEMLIMIT root
   suite_selected > "$S/selected.tsv"
-  oi_rows_for "$S/check.tsv" "$S/oi.tsv" "$S/selected.tsv" suite_oi_one 6
+  oi_rows_for "$S/check.tsv" "$S/oi.tsv" "$S/selected.tsv" suite_oi_one 6 "$S/corpus.tsv"
   local A=$S/aot; rm -rf "$A"; mkdir -p "$A"
   # dump (many at once), translate (one process), run (shards)
   suite_selected | awk -F'\t' '$2 == "run" { printf "%s%c%s%c%s%c%s%c%s%c", $1, 0, $3, 0, $4, 0, $7, 0, $8, 0 }' | xargs -0 -n 5 -P 4 bash -c 'suite_dump "$@"' _
@@ -235,6 +235,7 @@ cmd_suite() {
   shift
   case $verb in
     corpus) cmd_suite_corpus ;;
+    key) cmd_suite_corpus > "$S/corpus.log"; oi_key "$S/corpus.tsv" ;;
     record-ref) cmd_suite_record_ref "$@" ;;
     check) cmd_suite_check "$@" ;;
     divergences) cmd_suite_divergences "$@" ;;
