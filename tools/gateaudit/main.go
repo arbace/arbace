@@ -91,6 +91,7 @@ var (
 	cwd   = map[int]string{}
 	exe   = map[int]string{}
 	alive = map[int]bool{}
+	own   = map[int]bool{} // a process that has chdir'd or exec'd itself
 	seen  = map[string]bool{}
 	out   *bufio.Writer
 	gitRe = regexp.MustCompile(`/git(-[a-z-]+)?$`)
@@ -235,13 +236,17 @@ var (
 	resumedRe = regexp.MustCompile(`^<\.\.\. ([a-z_0-9]+) resumed>`)
 	retRe     = regexp.MustCompile(`\) += ([0-9]+)`)
 	callRe    = regexp.MustCompile(`^([a-z_0-9]+)\(`)
+	sigmaskRe = regexp.MustCompile(`^(<\.\.\. )?rt_sigprocmask[( ]`)
 	sigRe     = regexp.MustCompile(`^[0-9]+ +(\+\+\+|---)`)
 )
 
 func child(pid int, s string) {
 	if m := retRe.FindStringSubmatch(s); m != nil {
 		c, _ := strconv.Atoi(m[1])
-		if c > 0 && !alive[c] {
+		// a child that has not chdir'd or exec'd yet takes its parent's directory and executable, even when a
+		// line of its own came first (strace can print a new thread's first call before its parent's clone
+		// result: review 080, finding 1)
+		if c > 0 && !own[c] {
 			cwd[c] = cwd[pid]
 			exe[c] = exe[pid]
 		}
@@ -331,6 +336,11 @@ func main() {
 		}
 		pid, _ := strconv.Atoi(strings.TrimRight(m, " "))
 		line = line[len(m):]
+		// rt_sigprocmask, a new thread's first call (the audit traces it, review 075): no path, and no sign of
+		// the process; it can be printed before the parent's clone result (review 080, finding 1)
+		if sigmaskRe.MatchString(line) {
+			continue
+		}
 		if _, ok := cwd[pid]; !ok {
 			cwd[pid] = *root
 		}
@@ -353,10 +363,12 @@ func main() {
 		case call == "chdir":
 			if p := target(args, pid, true); p != "" && !strings.Contains(args, "= -1 ") {
 				cwd[pid] = p
+				own[pid] = true
 			}
 		case call == "execve":
 			if p := target(args, pid, true); p != "" {
 				exe[pid] = p
+				own[pid] = true
 				emit("X", p, pid)
 			}
 		case call == "execveat":

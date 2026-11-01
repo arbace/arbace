@@ -13,10 +13,19 @@ fail=0; ck() { if [ "$2" = ok ]; then echo "ok   $1"; else echo "FAIL $1: $2"; f
 src=$(sed -n 's/^audit_trace=//p' "$root/bin/lib/gate-run.bash")
 case ",$src," in *,rt_sigprocmask,*) ck "audit_trace holds rt_sigprocmask" ok ;; *) ck "audit_trace holds rt_sigprocmask" "audit_trace=$src" ;; esac
 
-# (2) the reducer on a trace with the new lines
+# (2) the reducers on traces with the new lines: tools/gateaudit (built with TamaGo's go; skipped with a message
+# when that is missing) and test/gate/audit.awk (GATE_AUDIT_AWK=1's reducer, run by awk -v root=...)
 tg=${ARBACE_GOROOT:-/root/tamago-go}
-(cd "$root/tools/gateaudit" && env -u GOOS -u GOARCH GOROOT="$tg" GOFLAGS= GOTOOLCHAIN=local CGO_ENABLED=0 \
-   "$tg/bin/go" build -trimpath -o "$w/gateaudit" .) > "$w/build.log" 2>&1 || { cat "$w/build.log"; ck "gateaudit builds" "build failed"; exit 1; }
+reducers=(awk)
+reduce() {  # reduce NAME TRACE: the OP<TAB>PATH lines of TRACE by reducer NAME
+  case $1 in
+    awk) awk -v root=/work -f "$root/test/gate/audit.awk" "$2" ;;
+    gateaudit) "$w/gateaudit" -root /work "$2" ;;
+  esac
+}
+if (cd "$root/tools/gateaudit" && env -u GOOS -u GOARCH GOROOT="$tg" GOFLAGS= GOTOOLCHAIN=local CGO_ENABLED=0 \
+     "$tg/bin/go" build -trimpath -o "$w/gateaudit" .) > "$w/build.log" 2>&1; then reducers+=(gateaudit)
+else echo "skip gateaudit: it does not build here ($(tail -1 "$w/build.log")); audit.awk is tested"; fi
 cat > "$w/plain.trace" <<'T'
 100 execve("/bin/sh", ["sh", "-c", "x"], 0x7ffd /* 3 vars */) = 0
 100 openat(AT_FDCWD</etc>, "/etc/ld.so.cache", O_RDONLY|O_CLOEXEC) = 3</etc/ld.so.cache>
@@ -25,13 +34,27 @@ cat > "$w/plain.trace" <<'T'
 T
 awk '{print} NR == 1 || NR == 3 { print "100 rt_sigprocmask(SIG_SETMASK, [], NULL, 8) = 0";
   print "102 rt_sigprocmask(SIG_BLOCK, ~[RTMIN RT_1], [], 8) = 0"; print "102 rt_sigprocmask(SIG_SETMASK, [], NULL, 8) = 0" }' "$w/plain.trace" > "$w/sig.trace"
-grep -c rt_sigprocmask "$w/sig.trace" > "$w/n"
-"$w/gateaudit" -root /work "$w/plain.trace" > "$w/plain.out" 2> "$w/plain.err"
-"$w/gateaudit" -root /work "$w/sig.trace" > "$w/sig.out" 2> "$w/sig.err"
-[ "$(cat "$w/n")" -ge 6 ] && [ -s "$w/plain.out" ] || ck "reducer fixture" "no paths in the plain trace"
-if cmp -s "$w/plain.out" "$w/sig.out" && [ ! -s "$w/sig.err" ]; then ck "gateaudit ignores rt_sigprocmask lines" ok
-else ck "gateaudit ignores rt_sigprocmask lines" "$(diff "$w/plain.out" "$w/sig.out"; cat "$w/sig.err")"; fi
-grep -q 'W	/work/rel.txt' "$w/sig.out" && ck "paths still reduced (W /work/rel.txt)" ok || ck "paths still reduced" "$(cat "$w/sig.out")"
+# a new thread's first line (its rt_sigprocmask) printed before its parent's clone result (review 080, finding 1):
+# its later relative execve must resolve against the parent's directory, and the parent's executable applies
+cat > "$w/early.trace" <<'T'
+100 chdir("/work/sub") = 0
+100 clone(child_stack=0x7f00, flags=CLONE_VM|CLONE_THREAD|CLONE_SIGHAND <unfinished ...>
+101 rt_sigprocmask(SIG_SETMASK, [] <unfinished ...>
+100 <... clone resumed>, parent_tid=[101]) = 101
+101 <... rt_sigprocmask resumed>NULL, 8) = 0
+101 execve("./nx", ["nx"], 0x7ffd /* 3 vars */) = -1 ENOENT (No such file or directory)
+T
+for r in "${reducers[@]}"; do
+  reduce "$r" "$w/plain.trace" > "$w/plain.out" 2> "$w/plain.err"
+  reduce "$r" "$w/sig.trace" > "$w/sig.out" 2> "$w/sig.err"
+  [ -s "$w/plain.out" ] || ck "$r: fixture" "no paths in the plain trace"
+  if cmp -s "$w/plain.out" "$w/sig.out" && [ ! -s "$w/sig.err" ]; then ck "$r ignores rt_sigprocmask lines" ok
+  else ck "$r ignores rt_sigprocmask lines" "$(diff "$w/plain.out" "$w/sig.out"; cat "$w/sig.err")"; fi
+  grep -q 'W	/work/rel.txt' "$w/sig.out" && ck "$r: paths still reduced (W /work/rel.txt)" ok || ck "$r: paths still reduced" "$(cat "$w/sig.out")"
+  reduce "$r" "$w/early.trace" > "$w/early.out" 2> "$w/early.err"
+  if [ "$(cat "$w/early.out")" = "X	/work/sub/nx" ]; then ck "$r: a thread's first line before its clone result keeps the parent's directory" ok
+  else ck "$r: early thread line" "got '$(cat "$w/early.out")', expected 'X /work/sub/nx'"; fi
+done
 
 # (3) the system time of a thread that never opens or clones, under the audit's strace line
 if command -v strace > "$w/which" 2>&1 && command -v gcc > "$w/which" 2>&1; then
