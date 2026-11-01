@@ -3085,3 +3085,16 @@ Report 047 (the VM's re-review of 044's fixes) closed M1 to M4 and found P1 to P
   **Decided (the user, 2026-11-01): (a).**
 - **SC224 A record with one key.** A per-file `mats --record` leaves mixed keys in `check-mats-linux-amd64.edn`. Options: (a) as built, the next whole run (on a host with the memory) unifies; (b) `--record` of a partial run keeps the old key for untouched files and the judge reports the keys it finds; (c) a lower-memory whole run (SC213 (b)) so the whole record is routine. *Recommended: (c)*, which also settles SC213.
   **Decided (the user, 2026-11-01): (c).**
+
+## As built: the decided proposals SC210-SC224 (2026-11-01)
+
+The user decided SC210-SC224 as recommended; the options that are work were built, one commit each:
+
+| Proposal | Built | Test (before / after) |
+|---|---|---|
+| SC213 (b), SC224 (c) | `bin/si mats` runs `5_2.ms` and `8.ms` with `SI_MAT_MS=5000` (default 20000; `SI_MAT_MS` overrides). The memory was two files, not one: 8.ms's `define-integrable` loops (2.48 GB) as well as 5_2.ms's cyclic-list sorts (2.75 GB) | per-file peaks (`/usr/bin/time -v`): 5_2 2.75 GB -> 1.14 GB, 8 2.48 GB -> 1.08 GB; the whole run 2.79 GB -> **1.18 GB** (6 m 36 s, was 7 m 20 s); totals unchanged (300 / 89 / 511 / 11, 1,468 items, none unclassified); six time-limit items now read `(5000)`; the record has one key again |
+| SC220 (b) | `--record-ref` merges the run entries into `ref-chez.edn` (`merge-runs`); `bin/si check --ref-test` checks it | `--record-ref --only ID`: 1 entry before, 48 after |
+| SC221 (b) | the recorder writes a record type's gensym as `gensym` (`normalise-gensym`); `known-differences :chez-record-gensym` rewrites both sides alike | two full Chez runs: `racket/base`'s entry differed before, the file is byte-identical after |
+| SC222 (b) | probe `gos` in `si/ports-pushback`: `("ab" "c" 0)` | a new line; si equals Chez |
+
+The others (SC210, SC211, SC212, SC223: (a); SC224's (c) is SC213 (b)) are as built. The mats' peak was 8.ms's as well, so SC213's "5_2.ms" is corrected here; the 2 GB limit of the light tier now holds for the whole run.
