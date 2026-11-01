@@ -1887,3 +1887,33 @@ as built. Test t03447's class `:print-shapes` (a constant printed as `0` against
   step's key names; (b) a pending program host compared by its build's key (`arbace_javac_key`, `gate_key`) rather than as
   changed; (c) the workaround (select one cheap step that needs the host). *Recommended: (a)*.
   - **Decided (the user, 2026-10-31): (b).** After the tag, at the next change that rekeys every step.
+
+## Proposed (2026-11-01): GTS130-GTS133 (GT7's audit 061, repr/java's tree checks; none decided)
+
+Made on branch audit-061 where neither javac's tool nor jdk26u exist: the judges are tested over fabricated trees and a
+stubbed `bin/repr-java` (`test/repr/java/judge-*-test.bash`), the records below are not measured.
+
+- **GTS130 Where the new records live.** Options: (a) flat maps read by awk (`judge_flat_get`, `judge_flat_set`:
+  `test/repr/java/expected/jdk26u-fallbacks.edn`, `parse-check-diagnostics.edn`, `parse-check-mutants.edn`), so the
+  judges need no tool and the tests need none; (b) keys inside the existing known files (`parse-check-known.edn`
+  `{:CORPUS {:forms #{...} :diagnostics n}}` as front-check's already allows), read by `arbace_tool`. *Recommended: (a)*
+  (as built; (b) makes a corpus's known set a map and every reader of the file learn it).
+- **GTS131 The mutants' record, as committed.** The mutants' digest is not recorded (`parse-check-mutants.edn` is `{}`),
+  so the first real `parse-check --corpus mutants` fails naming the digest. Options: (a) fail until recorded (as built:
+  nothing is silently unchecked); (b) pass with a notice until recorded (the gate stays green, the hole stays open until
+  someone records); (c) record it by hand from a run before merging. *Recommended: (c), then (a) stays as the rule.*
+  The finding's other suggestions are not built: a Random per file seeded by its path (changes `jtree.ae`, the reader's
+  namespace), sites drawn from javac's tokens, the 4,000 files chosen from `git ls-files` at the pinned commit.
+  Recommended after the next change to the reader's namespaces.
+- **GTS132 The diagnostics counts.** Samples, baseline, jdk, javac and jdk26u are recorded 0 (the report's expectation,
+  not measured; if a corpus has a legitimate syntax error, the first run fails with the count and `--record` fixes it);
+  mutants and tests are not recorded and are said so. Options: (a) as built; (b) record them before merging and fail on
+  an unrecorded corpus; (c) have `jtree`'s `-main` fail on diagnostics (a change to the reader's namespace).
+  *Recommended: (b) at the first real run, (c) never (the mutants hold errors on purpose).*
+- **GTS133 attr-check's `:bridges`.** Options: (a) the judge refuses a non-empty `:bridges` set (as built; a future
+  admitted bridge needs a deliberate change to the judge); (b) `split.ae` counts bridges per corpus
+  (`{:CORPUS {:bridges {read n}}}`), a change to the reader's namespace that rewrites the provenance; (c) leave it.
+  *Recommended: (b) at the next change to the reader, (a) until then.*
+  Also not built: finding 8's `rm -rf "$work/$c"` at the start of each front-check corpus (stale module trees summed and
+  judged) and per-corpus attr/split/nojavac tables; and `REPR_JAVA_VENDOR_READ` as a step's `:env` (jdk.bash is no step,
+  GTS-035 #4).
