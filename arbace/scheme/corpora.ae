@@ -534,6 +534,13 @@
                           acc))
                       {:pass 0 :fail 0 :notrun 0} lines)}))
 
+(defn- requested-record
+  "Re-review 033, N8: the recorded mats results of the files a partial run was asked for (`--only io`: \"mats/io.ms\"), so a requested file
+  that produced no output is a result-absent line and not dropped."
+  [rec only]
+  (let [ids (set (map #(str "mats/" % ".ms") only))]
+    (filterv #(contains? ids (:id %)) rec)))
+
 (defn- cmd-mats [[dir & opts]]
   (if-let [why (:refused (run-stamps dir opts))] (refuse why)
   (let [cs (classes)
@@ -557,7 +564,7 @@
           partial? (seq (only-of opts))
           ids (set (map :id results))
           ;; SC182 (b): a partial run is judged against, and recorded over, the results of the files it ran only
-          rec-judged (if (and rec partial?) (filterv #(contains? ids (:id %)) rec) rec)]
+          rec-judged (if (and rec partial?) (requested-record rec (only-of opts)) rec)]
       (when recording?
         (write-results "test/scheme/check-mats-linux-amd64.edn"
                        ";; Chez's mats on si (bin/si mats --record): per .ms file the mats' counts (pass, fail, not run, skipped) and the items\n;; of every mat that does not pass, with their classes (test/scheme/divergences-corpora.edn); generated."
@@ -743,6 +750,34 @@
               (if (seq items) 1 0))]
       (max c (regress-code rec results recording?))))))
 
+(defn- cmd-regress-test
+  "Re-review 033's checks of the regression step (N5, N8) on small data: 0, or 1 with the failing cases printed."
+  []
+  (let [cls [{:id :slow :volatile true :match [#"timeout$"]}]
+        timeout-item [{:item "crash ecraven/x timeout" :class :slow}]
+        run (fn [rec res] (rg/regressions [rec] [res] cls))
+        has (fn [lines kind] (boolean (some #(str/includes? % (str "regress " kind " ")) lines)))
+        cases
+        [["fast benchmark that hangs: volatile-hang"
+          (has (run {:id "e/x" :verdict :pass :seconds 10 :timeout 60 :items []}
+                    {:id "e/x" :verdict :non-pass :timeout 60 :items timeout-item}) "volatile-hang")]
+         ["benchmark near the limit that times out: no line"
+          (empty? (run {:id "e/x" :verdict :pass :seconds 51.9 :timeout 60 :items []}
+                       {:id "e/x" :verdict :non-pass :timeout 60 :items timeout-item}))]
+         ["recorded timeout that finishes: no line"
+          (empty? (run {:id "e/x" :verdict :non-pass :timeout 60 :items timeout-item}
+                       {:id "e/x" :verdict :pass :seconds 70 :timeout 300 :items []}))]
+         ["the count line lists a timed-out benchmark"
+          (boolean (re-find #"1 of 1 results.*e/x" (or (rg/volatile-note [{:id "e/x" :items timeout-item}] cls) "")))]
+         ["no count line without one"
+          (nil? (rg/volatile-note [{:id "e/x" :items []}] cls))]
+         ["a requested mats file with no output stays in the judged record"
+          (= ["mats/io.ms" "mats/hash.ms"]
+             (map :id (requested-record [{:id "mats/io.ms"} {:id "mats/3.ms"} {:id "mats/hash.ms"}] #{"io" "hash"})))]]
+        bad (remove second cases)]
+    (doseq [[n ok] cases] (println (if ok "ok  " "FAIL") n))
+    (if (seq bad) 1 0)))
+
 (defn -main [& [cmd & args]]
   (let [rc (case cmd
              "r7rs" (cmd-r7rs args)
@@ -758,6 +793,7 @@
              "ecraven-chibi" (cmd-ecraven-chibi args)
              "files" (cmd-files)
              "divergences" (cmd-divergences)
+             "regress-test" (cmd-regress-test)
              (do (println "usage: arbace.scheme.corpora r7rs DIR | ecraven DIR | ecraven-chez DIR | mats DIR [--record] | srfi DIR [--record] | files | divergences") 2))]
     (shutdown-agents)
     (System/exit rc)))
