@@ -76,15 +76,35 @@
 
 (defn- ref-file [] (path "test/scheme/si/ref-chez.edn"))
 
+(defn header-version
+  "The Chez version a reference's text names in its header line, nil when it names none."
+  [text]
+  (second (re-find #"^;; Chez Scheme (\S+)'s runs" (or text ""))))
+
+(defn version-plan
+  "Re-review 058, Q5's mixed versions: the version old-v the reference's header names, the version new-v of the Chez that made the
+  runs (DIR/chez.version, bin/si writes it), partial? when a program was not run: {:version V}, the header's, or {:refuse LINE}
+  (nothing written): a partial record by another Chez would keep the other version's entries under one header."
+  [old-v new-v partial?]
+  (cond
+    (nil? new-v) {:refuse "no chez.version beside the runs: the Chez that made them is not known (bin/si check --record-ref writes it)"}
+    (or (nil? old-v) (= old-v new-v) (not partial?)) {:version new-v}
+    :else {:refuse (str "the reference holds Chez " old-v "'s runs and these are Chez " new-v "'s: a partial record would mix them; "
+                        "record every program (bin/si check --record-ref, no --only), nothing recorded")}))
+
 (defn- cmd-record-ref [[dir]]
   (let [runs (vec (for [{:keys [id]} (programs) :let [r (run-of dir id)] :when r]
                     {:id id :status (:status r) :out (normalise-gensym (:out r)) :err (first-line (:err r))}))
-        old (when (.exists (java.io.File. (ref-file))) (read-string (slurp (ref-file))))
-        {:keys [refuse all notes]} (record-plan (map :id (programs)) old runs)]
+        old-text (when (.exists (java.io.File. (ref-file))) (slurp (ref-file)))
+        old (when old-text (read-string old-text))
+        vf (java.io.File. (str dir "/chez.version"))
+        vp (version-plan (header-version old-text) (when (.exists vf) (not-empty (str/trim (slurp vf))))
+                         (< (count runs) (count (programs))))
+        {:keys [refuse all notes]} (if (:refuse vp) {:refuse [(:refuse vp)]} (record-plan (map :id (programs)) old runs))]
     (if refuse
       (do (doseq [l refuse] (println l)) 1)
       (do (spit (ref-file)
-                (str ";; Chez Scheme 10.3.0's runs of si's check programs (bin/si check --record-ref); generated.\n"
+                (str ";; Chez Scheme " (:version vp) "'s runs of si's check programs (bin/si check --record-ref); generated.\n"
                      "[\n" (str/join "" (map #(str (pr-str %) "\n") all)) "]\n"))
           (println "recorded" (count runs) "runs of Chez into test/scheme/si/ref-chez.edn," (count all) "entries")
           (doseq [l notes] (println l))
@@ -99,7 +119,8 @@
     (if (seq ls) 1 0)))
 
 (defn- cmd-ref-test
-  "The pure parts of record-ref: the merge keeps entries not run and replaces the ones run, the gensym is normalised."
+  "The pure parts of record-ref: the merge keeps entries not run and replaces the ones run, the gensym is normalised, duplicate ids,
+  the header's Chez version."
   []
   (let [e (fn [id o] {:id id :status 0 :out o :err ""})
         m (merge-runs ["a" "b" "c"] [(e "a" "1") (e "b" "2") (e "c" "3")] [(e "b" "X")])
@@ -108,6 +129,9 @@
         ok (and (= ["1" "X" "3"] (map :out m)) (= ["d"] (missing-ids ["a" "d"] m)) (empty? (missing-ids ["a"] m))
                 (= ["a" "c"] (duplicate-ids ["a" "b" "a" "c" "c" "a"])) (empty? (duplicate-ids ["a" "b"]))
                 (:refuse (record-plan ["a" "b" "a"] [] [])) (= ["3" "X"] (map :out (:all p))) (= 1 (count (:notes p)))
+                (= "10.3.0" (header-version ";; Chez Scheme 10.3.0's runs of si's check programs\n[]")) (nil? (header-version nil))
+                (= {:version "10.3.0"} (version-plan "10.3.0" "10.3.0" true)) (= {:version "10.4.0"} (version-plan "10.3.0" "10.4.0" false))
+                (:refuse (version-plan "10.3.0" "10.4.0" true)) (:refuse (version-plan "10.3.0" nil false))
                 (= "R #[#{err gensym} #<c>] #{err gensym}" g)
                 (= g (normalise-gensym g)))]
     (println (if ok "ref-test: ok" (str "ref-test: FAILED " (pr-str m) (pr-str g))))
