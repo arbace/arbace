@@ -1703,12 +1703,16 @@ are run by hand (OC120).
 
 - **OC140 Pinning the AOT `status ` entries that differ from oi's output.** 4 entries cannot be pinned with oi's digest. (a) as built (unpinned); (b) pin each to the AOT level's own digest at the next whole AOT run (`bin/oi check --aot --record` prints
   it; a known entry's digest is then the level's, not oi's, so the entry holds at one level); (c) a separate digest per level (`:oi` and `:aot` in the fourth element). *Recommended: (b)* at the next whole AOT run.
+  **Decided (the user, 2026-11-01): (b).** Waits for the next whole AOT run (`bin/oi check --aot --record`); not run now.
 - **OC141 The floors of the other corpora.** (a) as built (a corpus without a row is not checked); (b) record the opam packages' and the testsuite's and whiml's `.cmi` rows once (`roundtrip --cmi ... --record`, `dumps opam-* --record`); (c) a row for every corpus, a missing one a failure again. *Recommended: (b)*
   when the opam set is fetched for OC120 (b)'s gate step.
+  **Decided (the user, 2026-11-01): (b).** Waits for the opam fetch (the rows are recorded once the set is fetched); not run now.
 - **OC142 Timeouts in the known lists.** The 10 `timeout ` kinds of the known entries take any hang; a hang that was a busy loop is the same row. (a) as built; (b) the speed classes take the CPU seconds from the record (the record keeps the rerun's CPU seconds in a
   column), so a program near 140 s is flagged; (c) pin each known timeout to the partial output's first line. *Recommended: (a)*: a timeout names no output, and (b) is the cost of a fifth column for the 10 programs.
+  **Decided (the user, 2026-11-01): (a).**
 - **OC143 The rerun's allowance.** 20 s is the library's load as measured on the quiet host. (a) as built, `O2J_LOAD_ALLOWANCE`; (b) measure the load (a no-op program) at the start of a run and add that; (c) run every timed-out program with no allowance
   (as before). *Recommended: (a)*: (b) adds a run to every level for a band of a few seconds.
+  **Decided (the user, 2026-11-01): (a).**
 
 ## As built: re-review 042's fixes (2026-11-01)
 
@@ -1743,8 +1747,13 @@ next AOT run reruns oi's rows).
 
 - **OC150 oi's retry at its own level.** A program over the CPU limit is one `timeout` row; oi's level has no quiet retry as the gate's limits have. (a) as built (CPU limit, wall cap 4x); (b) a quiet retry (run alone at the end) of each timed-out row before it
   counts; (c) the rows keep the CPU seconds. *Recommended: (a)*: every recorded oi timeout is a CPU-bound loop; (b) when a timeout flaps.
+  **Decided (the user, 2026-11-01): (a).**
 - **OC151 The AOT digests in the record.** The pins were checked once by hand (17 of 17). (a) as built; (b) keep each known program's output digest in `check-aot.edn`/`check-oi.edn` rows so a pin is checked against a record and `bin/oi divergences` can say a pin is stale without a run;
   (c) pins per level (OC140 (c)). *Recommended: (b)*, with OC140 (b) at the next whole AOT run.
+  **Decided (the user, 2026-11-01): (b).** Waits for the next whole AOT run, with OC140 (b); `bin/oi pins` and `test/ocaml/pins-attested.tsv` (re-review 049) already keep the pins' digests; not run now.
 - **OC152 The key's remaining inputs.** The key does not cover stage 0, the Go toolchain or the extracted opam trees' content (only the pins). (a) as built; (b) add the stage 0's hash and the `.extracted` markers; (c) a key of the binary oi (`target`'s hash). *Recommended: (a)*: cmd_build's own key has
   the same gap, and a pin bump re-extracts.
+  **Decided (the user, 2026-11-01): (a).**
 - **OC153 The floors' rows for the other corpora** (OC141 again). (a) as built (not checked, 0 fails); (b) record the opam and `.cmi` rows when the opam set is fetched. *Recommended: (b)*.
+
+  **Decided (the user, 2026-11-01): (b).** Waits for the opam fetch, with OC141 (b); not run now.
