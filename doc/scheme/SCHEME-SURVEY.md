@@ -3111,3 +3111,66 @@ The others (SC210, SC211, SC212, SC223: (a); SC224's (c) is SC213 (b)) are as bu
 | C1 | `port-nonblocking?` answered `#t` for any true value | the value given is kept and answered | `nb5`: `#t` / `yes` |
 
 Numbers: `bin/si unit` ok; `bin/si check` 47 of 48 as before; `bin/si mats --record` whole (harness changed, so all 37 re-keyed): 300 / 89 / 511 / 11, clauses 4,335 / 283 / 8,266, 1,468 items, none in no class, regressions none, peak 1.11 GB. Not done: Q5's mixed-Chez-version header (a partial `--record-ref` under another Chez still reads "10.3.0"), the time-limit number in the item text (Q4's other half); `bin/si r7rs`, `corpora *`, `check --aot`, the gate.
+
+## Decided (2026-11-01, the user): SC20-SC99, SC200-SC205
+
+From main's doc/JOURNAL.md, "2026-11-01: the user's decisions after the tag" (VM reports 102 and 103: sheet 3's bulk
+confirmation, sheets 4 and 5). These are the ids of the proposals of SM2-SM7 (SC20-SC99) and of "As built: SC180-SC182,
+SC190" (SC200-SC205) that were never decided. SC87 has no options.
+
+**Confirmed as built** (the 36 ids report 102 found decided by what was built):
+- **SC20 (a):** R6RS reader by default, R7RS mode per source (SC106); no `:chez` layer.
+- **SC21 (a):** Chez's Unicode identifier tables as data.
+- **SC22 (a):** flonums printed with Java's shortest digits and Chez's fixups.
+- **SC23 (a):** a read error judged by the class of the refusal plus the data read before it.
+- **SC24 (a):** repr/scheme and `arbace/scheme/` left out of the executable (`embed.ae`'s exclusion line).
+- **SC25 (a):** the corpora fetched by pin into `.tmp/scheme/corpora`.
+- **SC30 (a):** the layer a trailing `#_(scm/layer ...)` in the forms file.
+- **SC31 (a):** spellings kept only where the text is not Chez's `write`.
+- **SC32 (a):** the layout as built (`body-forms`, 80 columns).
+- **SC40 (a):** psyntax runs on si, compiled by SM7.
+- **SC42 (a):** Ikarus's psyntax at `1f2b250e`.
+- **SC43 (a):** gensyms in core forms plain symbols (`NAME.N`).
+- **SC44 (a):** vendored code patched by textual patches with reasons (`scheme/psyntax/patches.edn`).
+- **SC45 (a):** implicit phasing.
+- **SC46 (a):** `&syntax` judged by the form or a subform equal, else a class.
+- **SC50 (a):** Chez's mats fetched at SM8, their `(error? E)` clauses judged as cases.
+- **SC60 (a):** core forms compiled by Go's `Compile` (`go/arbace/scm/eval.ae`).
+- **SC62 (a):** the light driver kept (also the AOT front end).
+- **SC63 (a):** R5RS environments fabricated in `tools/psyntax/boot.ss`.
+- **SC64 (a):** higher-order procedures as Go primitives on the machine.
+- **SC65 (a):** Go callbacks as nested runs, re-entry an `&implementation-restriction`.
+- **SC66 (b):** the complex tower built (`go/arbace/scm/complex.ae`), as built, not the earlier (a) of SM6's text.
+- **SC67 (a):** hashtables in insertion order.
+- **SC68 (a):** runs judged by status and stdout, stderr not judged.
+- **SC69 (b):** the bounded speed pass (`Apply0`..`Apply4`, fixnum fast paths).
+- **SC70 (a):** `prim_number.ae` kept as converted.
+- **SC80 (a):** the SRFIs vendored under `scheme/lib/srfi/`; embedded with the shipped path by SC114 (b).
+- **SC81 (a):** psyntax's `%3a` names, with a view of links for Chez.
+- **SC83 (a):** character classification from Go's tables.
+- **SC84 (a):** multiple values in single-value contexts checked, also in compiled code.
+- **SC85 (a):** complex transcendentals by `math/cmplx`.
+- **SC91 (a):** the dumper in Go, the AOT compiler `arbace.scheme.aot`.
+- **SC92 (a):** compiled constants as text (`ReadAOT`).
+- **SC97 (a):** compile-time rejections judged as runs.
+- **SC99 (a):** psyntax linked into a compiled program only when it needs it.
+- **SC204 (a):** a psyntax reboot for each new Chez primitive.
+
+**Moot** (superseded by SC112, SC211, SC210 and SM5): SC26 and SC48 (folded into SC112), SC47 (si exists since SM5),
+SC201 (SC211), SC202 (SC210), SC205 (accepted: the SC180 batch's commit landed as it was).
+
+**Decided:**
+- **SC61 (a), SC86 (a), SC93 (b), SC33 and SC49 following, at the heavy window:** si shipped through
+  `arbace.lang.SchemeInterp`, `scm/eval`/`scm/run` over forms, psyntax embedded (SC61); `getenv`/`environ` in
+  `prim_control.ae` (SC86); library packages keyed by IR hash and shared (SC93); repr/scheme's reader and
+  `arbace/scheme/` then embedded and compiled (SC33, SC49).
+- **SC90 (b) with SC94 (b):** syntax objects among compiled constants written as recipes; compiled libraries installed
+  in psyntax at start, so eval sees a program's own libraries.
+- **SC95 (d) then (b):** self tail calls as loops and unboxed fixnums, then direct entry under a depth counter.
+- **SC41 (b), with the next boot batch:** the library table as data (`scheme/psyntax/libraries.edn`) and boot.ss's last
+  steps ported, so psyntax's boot no longer needs Chez's `library-exports`.
+- **SC82 (b):** other implementations' SRFI suites fetched and pinned, Chibi's `srfi/1` suite first.
+- **SC96 (b) and SC98 (b):** one stage-0 process for the whole `check --aot`; a flag per primitive (`Prim.Multi`) in
+  place of the `single-prims` list.
+- **SC200 (b):** the small identifiers of io.ms's rest added; the buffers stay out.
+- **SC203** was not asked: VM task 105 built its recommended (b), the larceny `.input` files pinned (`mac/105-sm1`).
