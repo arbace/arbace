@@ -127,7 +127,7 @@
 (defn judge
   "The levels of each file of WORK's list, against the known file: WORK/results.tsv (name, verdict, class, read, l1,
   l3, l4 g++, l4 clang, text forms) and WORK/summary.edn; prints the table's line. Exit status 1 when a file fails."
-  [^String work ^String known-file & [objects oracle-file]]
+  [^String work ^String known-file & [objects oracle-file results-dir results-mode]]
   (let [known (if (.exists (java.io.File. known-file)) (read-string (slurp known-file)) {})
         ;; CP130 (c): the oracle's rejections and failures of the corpus WORK/list.key names, recorded by name (and kind) in
         ;; ORACLE-FILE: a rejection or failure not recorded fails; no key or no entry: unrecorded (any rejection stands)
@@ -142,6 +142,13 @@
         ;; whose names are qualified) is kept, and a list without a key names its files as they are written
         corpus (when okey (str/replace okey #"-(every-[0-9]+|all)$" ""))
         qual (fn [^String nm] (if (and corpus (not (str/starts-with? nm (str corpus "/")))) (str corpus "/" nm) nm))
+        ;; CP124 (b): the recorded results of the list the key names (RESULTS-DIR/KEY.edn, NAME -> verdict): a recorded :pass that
+        ;; does not pass fails (a regression, whatever else holds), and a run of the list is held to the record's names; with
+        ;; RESULTS-MODE "record" the record is not read but written from this run, when no file fails
+        record? (= results-mode "record")
+        rfile (when (and okey (seq results-dir)) (str results-dir "/" okey ".edn"))
+        rrec (when (and rfile (not record?) (.exists (java.io.File. ^String rfile))) (read-string (slurp rfile)))
+        rec-files (:files rrec {})
         kfiles (:files known {})
         ;; level 4 (review 007's finding 7): the objects are required unless the run had --no-objects; a compiler may fail on
         ;; the original only where the known file's :orig-fails records it (NAME -> the compilers, #{:gxx :clang})
@@ -208,10 +215,16 @@
                      verdict (cond (= read "oracle-rejects") "oracle-rejects" (= read "oracle-fails") "oracle-fails" pass "pass"
                                    (= read "oracle-rejects-new") "fail"
                                    (or (= read "no-dump") (str/starts-with? read "dump-error")) "fail"
-                                   (and k (contains? fits first)) "known" :else "fail")]
-                 [q verdict (if k (name k) "-") read (str l1) (str l3) (str g) (str c) (or texts "-") (or full "-") (if first (name first) "-")]))
+                                   (and k (contains? fits first)) "known" :else "fail")
+                     regression (and (= :pass (get rec-files q)) (not= verdict "pass"))
+                     verdict (if regression "fail" verdict)]
+                 [q verdict (if k (name k) "-") read (str l1) (str l3) (str g) (str c) (or texts "-") (or full "-") (if first (name first) "-")
+                  (if regression "regression" "-")]))
         rows (vec rows)
         cnt (fn [pred] (count (filter pred rows)))
+        qs (set (map first rows))
+        rec-missing (when rrec (sort (remove qs (keys rec-files))))
+        rec-new (when rrec (sort (remove #(contains? rec-files %) (map first rows))))
         summary {:files (count rows)
                  :verdicts (frequencies (map second rows))
                  :read-ok (cnt #(= (nth % 3) "ok"))
@@ -237,14 +250,37 @@
                  :l5-crash (cnt #(str/starts-with? (nth % 9) "crash"))
                  :l4-clang (cnt #(= (nth % 7) "true")) :l4-clang-orig-fails (cnt #(= (nth % 7) ":orig-fails"))
                  :no-text-form (cnt #(and (= (nth % 3) "ok") (= (nth % 8) "0")))
-                 :known (frequencies (keep #(when (= (second %) "known") (nth % 2)) rows))}]
+                 :known (frequencies (keep #(when (= (second %) "known") (nth % 2)) rows))
+                 :results-record (cond record? (str "recording " okey) rrec okey okey (str "none for " okey) :else "none (no corpus key)")
+                 :regressions (cnt #(= (nth % 11) "regression"))
+                 :improvements (when rrec (cnt #(and (= (second %) "pass") (contains? rec-files (first %)) (not= :pass (get rec-files (first %))))))
+                 :results-missing (when rrec (count rec-missing)) :results-new (when rrec (count rec-new))}]
     (spit (str work "/results.tsv") (str/join (map #(str (str/join "\t" %) "\n") rows)))
     (spit (str work "/summary.edn") (pr-str summary))
     (println (pr-str summary))
-    (let [fails (filter #(= (second %) "fail") rows)]
+    (let [fails (filter #(= (second %) "fail") rows)
+          held-bad (or (seq rec-missing) (seq rec-new))]
       (when (seq fails)
-        (println (str (count fails) " failing: " (str/join " " (map #(str (first %) (when (not= "-" (nth % 2)) (str " (known as " (nth % 2) ", fails at " (nth % 10) ")"))) (take 12 fails))))))
-      (System/exit (if (seq fails) 1 0)))))
+        (println (str (count fails) " failing: " (str/join " " (map #(str (first %) (when (= "regression" (nth % 11)) " (recorded :pass)")
+                                                                          (when (not= "-" (nth % 2)) (str " (known as " (nth % 2) ", fails at " (nth % 10) ")"))) (take 12 fails))))))
+      (when held-bad
+        (println (str "rtcheck: the run of the recorded list " okey " (" rfile ") has " (count rows) " files, the record " (count rec-files) "; "
+                      (count rec-missing) " recorded names missing" (when (seq rec-missing) (str ": " (str/join " " (take 8 rec-missing))))
+                      ", " (count rec-new) " names not recorded" (when (seq rec-new) (str ": " (str/join " " (take 8 rec-new)))))))
+      (when (and (nil? rrec) okey (not record?) (seq results-dir))
+        (.println System/err (str "rtcheck: no recorded results for " okey " in " results-dir ": a pass is not held to a record")))
+      (when record?
+        (cond (nil? okey) (do (println "rtcheck: --record-results needs the corpus key (a #list header or --corpus)") (System/exit 2))
+              (seq fails) (println (str "rtcheck: not recorded: " (count fails) " failing"))
+              :else (do (spit rfile (str ";; bin/repr-cpp roundtrip's recorded results of the list " okey " (CP124 (b); doc/cpp/CPP-SURVEY.md, \"As built: CP120, CP121, CP124,\n"
+                                         ";; CP127\"): NAME -> verdict (:pass, :known, :oracle-rejects, :oracle-fails), the names qualified by the corpus (CP127 (b)). A run of\n"
+                                         ";; the list fails on a recorded :pass that does not pass, a recorded name it does not have, or a name not recorded;\n"
+                                         ";; --record-results writes the file again from a run with no failure. Read with the Clojure reader.\n"
+                                         "{:key " (pr-str okey) "\n :summary " (pr-str (dissoc summary :results-record :regressions :improvements :results-missing :results-new)) "\n :files {\n"
+                                         (str/join (for [r (sort-by first rows)] (str "  " (pr-str (first r)) " " (keyword (second r)) "\n")))
+                                         " }}\n"))
+                        (println (str "rtcheck: recorded " (count rows) " results of " okey " in " rfile)))))
+      (System/exit (if (or (seq fails) held-bad (and record? (seq fails))) 1 0)))))
 
 (defn -main [cmd & args]
   (case cmd
