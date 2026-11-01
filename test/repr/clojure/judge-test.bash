@@ -1,6 +1,6 @@
 #!/bin/bash
 # Tests of repr/clojure's judge (bin/repr-clojure check, GTS160, audit 076), over fabricated trees
-# and stubbed tools; run: test/repr/clojure/judge-test.bash [frozen|counts|notread|x509|libs]...
+# and stubbed tools; run: test/repr/clojure/judge-test.bash [frozen|counts|notread|x509|libs|known]...
 # (default: all). Exit status 0 when every case holds. TOOLS_BASH names another bin/lib/tools.bash
 # (the tests of a fix are run with the file from before it to show they fail). The checks that
 # need Arbace run on stage 0 (ARBACE_HOST_EXE) with arbace/repr/clojure.ae from the checkout.
@@ -23,7 +23,7 @@ frozen_repo() { # DIR
   mkdir -p "$r/clojure" "$r/test" "$r/.tmp"
   git -C "$r" init -q
   for i in 1 2 3; do echo "(def a$i $i)" > "$r/clojure/a$i.clj"; done
-  git -C "$r" add -A >/dev/null
+  git -C "$r" add -A >"$scratch/out"
   git -C "$r" -c user.name=t -c user.email=t@t commit -q -m c
   git -C "$r" tag arbace-for-java-26-v1
   (cd "$r/clojure" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -c1-64) | sed 's/$/  clojure/' > "$r/test/frozen-clojure.sha256"
@@ -49,7 +49,7 @@ t_frozen() {
   # a tag re-pointed at another tree is refused
   echo "(def a1 2)" > "$r/clojure/a1.clj"
   git -C "$r" -c user.name=t -c user.email=t@t commit -q -a -m d
-  git -C "$r" tag -f arbace-for-java-26-v1 >/dev/null
+  git -C "$r" tag -f arbace-for-java-26-v1 >"$scratch/out"
   frozen_call "$r" > "$scratch/out" 2>"$scratch/err"; local s=$?
   [ "$s" != 0 ] && ok "frozen: a re-pointed tag refused" || bad "frozen: a re-pointed tag accepted"
   rm -f "$r/test/frozen-clojure.sha256"
@@ -80,14 +80,16 @@ t_counts() {
 }
 
 # Arbace -> Clojure -> Arbace with a stubbed print that loses "(LOST) " (a fault of print)
-lost_rt() { # DIR [lose]
+lost_rt() { # DIR [lose [ARG...]]
   ( cd "$here"; root=$here; . "$here/bin/lib/tools.bash"
-    local fault='(fn [s p skip] (orig s p skip))'
+    local fault='(fn [s p skip] (orig s p skip))' extra="" a
     [ "${2:-}" = lose ] && fault='(fn [s p skip] (.replace ^String (orig s p skip) "(LOST) " ""))'
+    local dir=$1; if [ $# -ge 2 ]; then shift 2; else shift $#; fi
+    for a in "$@"; do extra="$extra \"$a\""; done
     arbace_tool "${repr_clojure_sources[@]}" -e "(require 'arbace.repr.clojure)
       (let [orig arbace.repr.clojure.rules/print-text]
         (with-redefs [arbace.repr.clojure.rules/print-text $fault]
-          (arbace.repr.clojure/-main \"roundtrip\" \"--from-arbace\" \"-v\" \"$1\")))" 2>&1 )
+          (arbace.repr.clojure/-main \"roundtrip\" \"--from-arbace\" \"-v\" $extra \"$dir\")))" 2>&1 )
 }
 
 t_notread() {
@@ -119,27 +121,43 @@ t_x509() {
 t_libs() {
   local d=$scratch/l ct=$scratch/l/clojure-tests s1 s2
   mkdir -p "$d/lib"
-  . "$here/bin/lib/repr-clojure/libs.bash" 2>/dev/null || { bad "libs: no bin/lib/repr-clojure/libs.bash"; return; }
+  . "$here/bin/lib/repr-clojure/libs.bash" 2>"$scratch/err" || { bad "libs: no bin/lib/repr-clojure/libs.bash"; return; }
   printf 'jar one\n' > "$d/stage-one"; printf 'jar two\n' > "$d/stage-two"
   s1=$(sha1sum < "$d/stage-one" | cut -c1-40); s2=$(sha1sum < "$d/stage-two" | cut -c1-40)
   printf 'x=1\ndeps="\norg/clojure/alpha/1.0 %s\norg/clojure/beta/2.1 %s\n"\nmore=2\n' "$s1" "$s2" > "$ct"
   [ "$(lib_jars_of "$ct" | tr '\n' ' ')" = "alpha-1.0 beta-2.1 " ] && ok "libs: jars derived from the deps block" || bad "libs: jars $(lib_jars_of "$ct")"
-  lib_verify "$ct" "$d/lib" 2>/dev/null; expect "libs: none downloaded is a skip (2)" 2 $?
+  lib_verify "$ct" "$d/lib" 2>"$scratch/err"; expect "libs: none downloaded is a skip (2)" 2 $?
   cp "$d/stage-one" "$d/lib/alpha-1.0.jar"; cp "$d/stage-two" "$d/lib/beta-2.1.jar"
-  lib_verify "$ct" "$d/lib" 2>/dev/null; expect "libs: both verified" 0 $?
+  lib_verify "$ct" "$d/lib" 2>"$scratch/err"; expect "libs: both verified" 0 $?
   rm "$d/lib/beta-2.1.jar"
-  lib_verify "$ct" "$d/lib" 2>/dev/null; expect "libs: one missing fails (1)" 1 $?
+  lib_verify "$ct" "$d/lib" 2>"$scratch/err"; expect "libs: one missing fails (1)" 1 $?
   # a bump in the deps with an old jar left in the directory: the old jar is not taken by presence
   cp "$d/stage-two" "$d/lib/beta-2.1.jar"
   sed 's|alpha/1.0|alpha/1.1|' "$ct" > "$ct.bump"; cp "$d/stage-one" "$d/lib/alpha-1.1.jar"
-  lib_verify "$ct.bump" "$d/lib" 2>/dev/null; expect "libs: a bumped version verified" 0 $?
+  lib_verify "$ct.bump" "$d/lib" 2>"$scratch/err"; expect "libs: a bumped version verified" 0 $?
   rm "$d/lib/alpha-1.1.jar"; sed 's|alpha/1.0|alpha/1.1|' "$ct" > "$ct.bump"
-  lib_verify "$ct.bump" "$d/lib" 2>/dev/null; expect "libs: the old jar does not stand for the bumped version" 1 $?
+  lib_verify "$ct.bump" "$d/lib" 2>"$scratch/err"; expect "libs: the old jar does not stand for the bumped version" 1 $?
   echo tampered > "$d/lib/alpha-1.0.jar"
-  lib_verify "$ct" "$d/lib" 2>/dev/null; expect "libs: a jar with another SHA-1 fails" 1 $?
+  lib_verify "$ct" "$d/lib" 2>"$scratch/err"; expect "libs: a jar with another SHA-1 fails" 1 $?
 }
 
-tests=("$@"); [ ${#tests[@]} = 0 ] && tests=(frozen counts notread x509 libs)
+# a known entry excuses the difference it describes, not another of its file
+t_known() {
+  local d=$scratch/k/plain k=$scratch/k/known.edn out
+  mkdir -p "$d"; printf '(ns y)\n(defn f [] (LOST) 1)\n' > "$d/y.ae"
+  local at='line 2: \"(defn f [] (LOST) 1)\" / \"(defn f [] 1)\"'
+  kn() { echo "{:c {\"y.ae\" $1} :counts {:c {:files 1 :one-way 0 :outside 0}}}" > "$k"; }
+  kn "{:why :text :at \"$at\" :reason \"print loses it\"}"
+  out=$(lost_rt "$d" lose --known "$k" --corpus c); expect "known: an entry describing the difference excuses it" 0 $?
+  kn "{:why :text :at \"line 9: \\\"x\\\" / \\\"y\\\"\"}"
+  out=$(lost_rt "$d" lose --known "$k" --corpus c); expect "known: another first differing line is new" 1 $?
+  kn "{:why :name :at \"$at\"}"
+  out=$(lost_rt "$d" lose --known "$k" --corpus c); expect "known: another kind of difference is new" 1 $?
+  kn '"print loses it"'
+  out=$(lost_rt "$d" lose --known "$k" --corpus c); expect "known: a bare reason excuses nothing" 1 $?
+}
+
+tests=("$@"); [ ${#tests[@]} = 0 ] && tests=(frozen counts notread x509 libs known)
 for t in "${tests[@]}"; do "t_$t"; done
 [ $fails = 0 ] && echo "judge-test: all hold" || echo "judge-test: $fails FAILED"
 [ $fails = 0 ]
