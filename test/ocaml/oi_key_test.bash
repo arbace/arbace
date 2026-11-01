@@ -16,4 +16,9 @@ chk "OI_TIMEOUT is in the key" differ "$(OI_TIMEOUT=30 bin/oi key)"
 chk "OI_GOMEMLIMIT is in the key" differ "$(OI_GOMEMLIMIT=300MiB bin/oi key)"
 chk "OI_GOMAXPROCS is in the key" differ "$(OI_GOMAXPROCS=2 bin/oi key)"
 chk "the suite corpus has a key of its own" differ "$(bin/oi suite key)"
+
+# re-review 042's finding 5: a checkout without .tmp/oi and .tmp/o7 (a clean run): the verbs find their directories (a copy of bin/ in a scratch root)
+R=$root/.tmp/w/oi-key-root; rm -rf "$R"; mkdir -p "$R"; cp -r "$root/bin" "$R/bin"
+(cd "$R" && bin/oi oi-limits > "$R.log" 2>&1)
+[ -d "$R/.tmp/oi" ] && [ -d "$R/.tmp/o7" ] && echo "ok   bin/oi makes .tmp/oi and .tmp/o7" || { echo "FAIL bin/oi left .tmp/oi or .tmp/o7 unmade"; bad=1; }
 exit $bad
