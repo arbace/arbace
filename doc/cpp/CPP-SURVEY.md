@@ -2222,3 +2222,49 @@ The samples (9 files) and HotSpot's tenth were not run: HotSpot needs jdk26u, wh
 - Slips: one waiting monitor command contained `/dev/null` (`cat /dev/null`; stopped at once, nothing depended on it); a 25-minute spacer monitor ran for a moment beside another waiting loop (stopped); one `git checkout 61a5d21c -- test/cpp/selftest/run` in the worktree while building the "before" snapshot (restored at once with `git checkout HEAD --`, nothing committed from it). The disk stayed at 59%.
 - Shipped: `bin/cppi`, `bin/lib/repr-cpp/roundtrip`, `bin/repr-cpp` (usage), `arbace/cpp/check.ae`, `arbace/repr/cpp/convert.ae`, `arbace/repr/cpp/rtcheck.ae`, `test/repr/cpp/roundtrip-oracle.edn` (new), `test/repr/cpp/roundtrip-known.edn` (`cvt22.C` out), `test/cpp/lower-results.edn` (a comment), `test/cpp/selftest/` (new `dry-mode`, `new-implicit` with its `.cpp`, `oracle-record`; `recorded-list` and 14 tests' first line), this section.
 - Scratch: `.tmp/rt/*` (results.tsv and summary.edn of the four corpora), `.tmp/lists/`, `.tmp/rt-*.log`; the extracted gcc tree and the work directories' big parts deleted.
+
+## As built: re-review 032's fixes (2026-11-01)
+
+On the branch `cpp-cx7` (light tier: stage 0 by `ARBACE_HOST_EXE`, 4 jobs, `GOMEMLIMIT=1500MiB`, no gate, no lock). Report 032 (the helper VM's re-review at `11a5f1bd`) found F1-F9; every finding was checked against the code and holds. Each fix has a commit and a selftest that fails before it (the old file put back in the tree) and passes after.
+
+| # | holds? | the fix | the test (before, after) |
+|---|---|---|---|
+| F1 (medium) | yes: `new int[]{5}` printed `new int{5}` (a scalar), `new int[]{1,2,3}` a rejected print, and `new int[N]` with `#define N 3UL` printed `new int` | `new-size-kind` (`convert.ae`) decides by the new expression's source text, not the literal's: no bound after the type is the typedef's implicit size (CP131's case), an empty bound `T[]` keeps the array with no size (`(cpp/new-array T nil init)`, and `T[][2]` its outer bound), anything else is explicit, a macro size included; `new-scan` is the shared scan of the text; `decltype`, `typeof` and `auto` types are a gap (the text cannot give them); the printer writes `[]` for a nil size | `new-implicit`: before, 7 bad (`new int{1, 2, 3}`, `new int{5}`, `new int`, `new S{{1}, {2}}`, `new char{"abc"}`, `new int{{1, 2}, {3, 4}}`); after, 8 ok, the print has `new int[]{1, 2, 3}`, `new int[]{5}`, `new int[N]`, `new S[]{{1}, {2}}`, `new char[]{"abc"}`, `new int[][2]{{1, 2}, {3, 4}}` |
+| F2 | yes: `:oracle-stale` ignored a recorded name with no row | `:oracle-stale-ok` (reads ok now) and `:oracle-stale-missing` (not in the run), `:oracle-stale` their sum; still a count, not a failure (CP141 stands) | `oracle-record`: a record naming one name that reads ok and two absent gives 3, 1, 2 |
+| F3 | yes: `failure-kind` made every status but 0 and 124 a `:crash` | `failure-kind` reads the stderr too: `:timeout` for 124, `:crash` only for status 3 with "clang failed (not a rejection)" or "clang failed on the unit (clang-failed)"; a cxxdump filter error (also 3), a status 1 without clang's diagnostic or a kill of cxxdump itself is no kind: a `dump-error-N`, never recorded | `oracle-record`: a filter error and a status 1 without a diagnostic, recorded as `:crash`, fail; `--record-oracle` leaves them out (before: 2 bad) |
+| F4 | yes: nothing wrote the `#list` key for the corpora of pp-check | `arbace.repr.cpp.ppcheck/lists` writes `WORK/ID/roundtrip.list`, `gxx.list` under `#list ID-every-N` (or `ID-all`), the key of the record (`gxx.list` itself is unchanged: `cxxdump-check` and `hotspot-flags` read it without a header); the judge says on stderr when the run has no key or the key has no record, and the summary has `:oracle-record` | `oracle-key` (new): the header for a whole and a sampled corpus, the rest equal to `gxx.list`; `oracle-record`: the two warnings and `:oracle-record` |
+| F5 | yes: `--record-oracle` replaced the corpus' whole entry | it keeps the recorded names the run does not have and replaces those it has (and says how many it kept); `--replace-oracle` writes the run alone; the `:fails` of every entry are sorted (F9's nit) | `oracle-record`: a partial record keeps `slow.cpp` and `crash.cpp`; `--replace-oracle` drops them |
+| F6 | yes | a `#list` header naming no summary of `lower-results.edn` is refused (exit 2) as an unknown `--recorded KEY` is | `recorded-list`: the case that locked the old behaviour requires the refusal |
+| F7 | yes: `cxxdump-version` needs TamaGo's Go and was not marked; a dry run with 16 skips exited 0 | `cxxdump-version` is `# needs-host` (the marker means: the tools' host or the Go toolchain that builds cxxdump); a run that skipped exits 3 (`skipped tests are not passes`), `--accept-skips` exits 0, a failure is exit 1; `bin/cppi`'s usage says so | `dry-mode`: exit 3 with skips, 0 with `--accept-skips`, 0 with none, `cxxdump-version` skipped; `ARBACE_HOST_EXE=/bin/true bin/cppi selftest` here: 3 pass, 0 fail, 18 skipped, exit 3 |
+| F8 | yes | listed below | none |
+| F9 | yes (nits) | `lower-results.edn`'s comment (14 files: 9 and 5), `bin/cppi list runtime` writes `#part runtime`, the fails sorted (F5). Not done: cd3e5aa4's message (history), `no-dump-print` for a print whose dump never ran (barely reachable) | none |
+| R3 (b) | yes, closed | `tar -t` of the pinned tarball: **9,725** `.cc` under `libstdc++-v3/testsuite/`, the manifest's `:count` | none (the listing guard of `lists` is `pp-shrink`'s) |
+
+### Decisions taken and not built (F8)
+
+| decision | what it is | built? | where it will be built |
+|---|---|---|---|
+| CP124 (b) | a results file per corpus for the round trip, a recorded pass that does not pass failing (a file moving from pass to known is caught); the oracle record covers rejections and failures only | no | with CP152 (b): the same record file and judge, in the next round trip task |
+| CP127 (b) | names qualified by the corpus in `roundtrip-known.edn` and the lists (the known file still keys bare names across corpora) | no | with CP124 (b): the same file's format change |
+| CP125 (b) | the selftests as a light gate step | no | the merge into main: a `test/gate/steps.edn` entry (the coordinator's); it runs on a host that has the tools, so it needs no `--accept-skips` |
+| CP120 (b) | the pending-flag layer wraps `pthread_create`'s routine (`cx$uncaught` when the flag is set), with a runtime sample | not found in `arbace/cpp/` (`grep cx$uncaught` finds only the selftest's fake runtime; the class `native-callback-throw` stands) | the next lowering task (CX7's); to be confirmed from the task list |
+| CP121 (c) | `atomicrmw`/`cmpxchg` as `__atomic_*` builtins with the IR's orderings, and a runtime sample sharing state across threads | partly: `lower.ae` lowers `atomicrmw` and `cmpxchg` (as plain operations, CP1); no ordering, no sample | the same task |
+
+CP122 (a), CP123 (b) (built as CP130 (c), with the whole-corpus runs still to do: CP140) and CP126 (a) need nothing.
+
+### The numbers (objects on, cxxdump-8; the lists of CX5d)
+
+| corpus | files | rejected | oracle fails | pass | known | failing | stale (ok, missing) | exit |
+|---|---:|---:|---:|---:|---:|---:|---|---|
+| g++.dg every 10th | 1,807 | 745 | 2 | 977 | 83 | 0 | 0 (0, 0) | 0 |
+| g++.old-deja every 10th | 323 | 88 | 0 | 226 | 9 | 0 | 0 (0, 0) | 0 |
+
+Both as before the fixes (977 / 83 and 226 / 9): the recorded `:crash` of `target-aarch64-1_b.C` still matches by stderr. `bin/cppi lower-check` on `samples+runtime`: **14 of 14 pass**. `bin/cppi selftest`: 20 to **21 tests** (new: `oracle-key`), **21 pass**. c-c++-common and libstdc++ were not rerun (the changes do not touch their reading: no file of them has `new T[]`, not measured).
+
+### Proposals (CP150 onward)
+
+- **CP150 The shapes of `new` the text cannot give.** `decltype(arr)` and `auto`-like allocated types are a gap when the size is implicit. Options: (a) as built (a gap); (b) read the type from clang's `type` field of the new expression's `qualType` when it spells an array. *Recommended: (a)*; none of the corpora has it.
+- **CP151 A real count of `new T[]` in the corpora.** F1's effect on the corpora was not measured in report 032. Options: (a) not measured; (b) grep the gcc tree for `new [A-Za-z_:<>]+ *\[\]` and the macro sizes and add the files to `new-implicit.cpp`. *Recommended: (b)*, with the whole-corpus runs of CP123 (b).
+- **CP152 The stale record as a failure.** `:oracle-stale-missing` is now countable, so CP141 (b) can be built. Options: (a) a count (as built); (b) a failure in a whole-corpus run when a recorded name is missing, a count in a sample run (needs the run to know it is whole: the `-all` key); (c) (b) and `--record-oracle` printed as a diff. *Recommended: (b)*.
+- **CP153 The dry mode's status.** Exit 3 is the code for "skipped"; a caller must pass `--accept-skips`. Options: (a) as built; (b) a gate step that treats 3 as a pass only on a host that cannot run the tools. *Recommended: (a)*; (b) belongs to CP125 (b).
+- **CP154 The list's key in `bin/repr-cpp roundtrip`.** The key is now written by `lists` into `roundtrip.list`, but a hand-made list still has none. Options: (a) as built (a warning); (b) a missing key is an error unless `--record-oracle` or `--no-oracle` is given. *Recommended: (b)* once CP140's other corpora are recorded.
