@@ -2677,6 +2677,78 @@ All decided by the user, 2026-11-01, as recommended; what the branch built is na
   trees under `.tmp/`, run by hand, in no gate step: a step (light, inputs `bin/` and `test/gate/`) would run them with the
   essential gate; *recommended*, left for the user.
 
+## As built: GTS81 (a), the crops' controls (write-ahead, queue 064, 2026-11-01)
+
+Branch `mac/064-gts81` from `mac/054-merge` (`a69c1dfc`), in the light tier (no Arbace executable, no build, no gate run):
+GTS81 (a)'s negative controls for the families gate-post-v2 left out, the crops' checks. The design is GTS81's: a *crossed
+pair*, the run (or read) of one case of the corpus judged by the family's own comparison against the expected result of
+another case, both passing in the records; it runs inside the check's own run (no case, build or run of its own, but the
+expect action's one run), a control that passes (`control passed:`) or does not reach the judge while its subject did
+(`control not judged:`) fails the check, and one whose subject (or reference) a selection left out is printed as left. No
+control is a row of the results, the records, the classes or the counts. Every judge below is tested by a joker copy of its
+functions or by its shell functions extracted and run alone (the report of queue 064 holds the tests): the controls differ
+on the real data files; a judge that passes everything, and the control made to pass (its reference its subject), fail the
+check; a missing reference is not judged and fails; a selection leaves the control. None of these checks is a gate step;
+`test/goi/controls.txt` is a gate input (goi-check, goi-aot, goi), the new line of LEVEL nethttp rekeys them.
+
+**Every check family** (P: a control on this branch; M: missing, the proposal below it; cost per run: what the control adds):
+
+| family | control (file:line) | how the judge knows it | out of the counts | cost |
+|---|---|---|---|---|
+| Java interp, compiled, classes, print, diagnostics, read (`--forms verify`) | P: c00001, c00002, `test/java/controls.edn:28,30` | plan lines `control`, `control-diag`, `control-print`; `java.check/report`, `--essential-compiled`'s tail; `forms_controls` (`bin/java-check:1160`) | the ids apart from tests, `check-LEVEL.edn` and classes | none (the subjects' runs) |
+| goi interp, aot, errorcheck, directory | P: `test/goi/controls.txt` (interp, aot lines) | `controls_of` / `controls_judged` (`bin/goi:657,662`), `run_verdict` (`:643`) and the errorcheck/dir verdicts | `_control/` rows taken out of `results.tsv` | none |
+| goi's net/http corpus (`bin/goi check --corpus nethttp`) | P (new): `test/goi/controls.txt`, LEVEL nethttp `_control/client_get-vs-mux_patterns` | `nethttp_one` prints the row from the subject's run against the reference's gc run; `nethttp_controls_judged`, before `nethttp_report` records | `_control/` rows taken out of `results.tsv` | none |
+| the suite (eval, `--aot`, `--aot --essential`) | P: `test/clojure/controls.edn` | the report's `regressions` (`test/run_clojure_tests.clj:338`) | no namespace of the results | none |
+| the oracle | P: control-1, `test/oracle/controls.edn` | `oracle.runner/controls-ok?` | no case of the record | none |
+| diffcheck | P: control-1, `test/diffcheck/controls.edn` | `controls-ok?` (`test/diffcheck/main.ae:201`) | no case of known.edn | none |
+| repr/c `check --c23` | P (before this branch): `arbace/repr/c/c23check.ae:113` `control-judge` (wrong prints refused) | its own verb | its own | its own |
+| C run level (`bin/ci check`, `check --aot`) | P (new): `test/c/controls.edn` `:level :run` `_control/fannkuchredux-vs-fasta` | `arbace.c.run/control-result`, `controls-failing` in ci's judge and cf2g's (the same `result` rule) | not in `results.edn` or the record; a failing row of its own id | none |
+| C dg level (`bin/ci dg`, `--essential`) | P (new): `test/c/controls.edn` `:level :dg` `_control/bitint-75-vs-attr-syntax-3` | `arbace.c.dg/control-result` (`verdict`, then `message-verdict`, as a row), `control-rows` among the failing rows | not in the rows, the record or `judge-rows.edn` | none |
+| OCaml `bin/oi check`, `check --aot`, `suite check [--aot]` | P (new): `test/ocaml/controls.txt` judge lines (`check-oi.edn`, `check-aot.edn`, `check-suite-oi.edn`, `check-suite-aot.edn`) | `controls-ok` in `test/ocaml/oi_check.ae` and `o2j_check.ae` (`result-of` against the reference's ocamlc/ocamlopt run), before recording | not in the rows | none |
+| OCaml `bin/oi suite expect` | P (new): `test/ocaml/controls.txt` expect line | `suite_expect_one`'s `@CTL=ID=REF` (the final correction against REF's text by the action's `cmp`), `expect_controls_judged`, before recording | `_control/` rows split off before the record is written | one expect run (two tool runs, about a second) |
+| Scheme `bin/si check`, `check --aot` | P (new): `test/scheme/si/controls.edn` (the suite branch and the byte comparison) | `arbace.scheme.check/control-result`, `controls-code` in the judgment's exit | not in the results or the counts | none |
+| C++ `bin/cppi lower-check` | P (new): `test/cpp/controls.edn` `_control/bitfields-vs-io` | `arbace.cpp.check/control-result` (`run-verdict`, factored out of `file-result`), the judge's exit; `test/cpp/selftest/controls.sh` | not in `results.tsv` or `summary.edn` | none |
+| Scheme `bin/si r7rs`, `srfi`, `mats`, `ecraven`, `chibi-tests`, `test` (expand) | M | | | |
+| OCaml `bin/oi repl-check`; `bin/repr-ocaml roundtrip` | M | | | |
+| C `bin/ci annotations`, `bin/repr-c roundtrip`, `parse-check`, `check --tokens` | M | | | |
+| C++ `bin/cppi runtime-build`, `bin/repr-cpp roundtrip`, `pp-check`; `bin/repr-llvm roundtrip` | M | | | |
+| repr/java `parse-check`, `front-check`, `attr-check`, `nojavac-check`, `roundtrip`, `check --jdk`, `check --suite` | M | | | |
+| repr/go `native-check`, `roundtrip`; repr/clojure `check` | M | | | |
+| `bin/generated-check`, `bin/j2g-edge verify`, `bin/provenance-check`, `bin/reap` | M (VM report 041's GTS110-GTS115 cover them) | | | |
+
+**The pairs**, each checked against the records here: C run, fannkuchredux.c and fasta.c (status 0 both, other stdout
+digests; both pass in `test/c/check-linux-amd64.edn`); C dg, bitint-75.c (one dg-error, line 10) and c23-attr-syntax-3.c
+(dg-errors on lines 7, 9, 14, ...: gcc 15.2's files read at gcc-mirror/gcc `releases/gcc-15.2.0`, `gcc/testsuite/gcc.dg/`),
+both in `test/c/essential-dg.txt` so `--essential` judges it; OCaml, asmcomp/compare and asmcomp/evaluation_order (oi and
+AOT), basic-modules/main and basic-multdef/usemultdef (the suite), tests/basic/patmatch_for_multiple.ml and
+patmatch_incoherence.ml (expect); Scheme, racket/enums and racket/lists (26 tests against 72), si/amb and si/data; C++,
+samples/bitfields.cpp and samples/io.cpp (status 0, 43 bytes against 6, built by g++ here); net/http, client_get and
+mux_patterns (other want.out).
+
+**Proposals for the missing families** (for the user; numbers at the merge):
+- *Scheme r7rs*: a crossed pair through the `against-references` predicate: a test si passes judged against the Chez and
+  Chibi answers of a test both references fail (a both-fail entry of `ref-r7rs-chez.edn`/`ref-r7rs-chibi.edn`, paired by
+  source); it must give an item. *srfi*: one program's output judged by `srfi-result` with another's expected report line
+  (`srfi-N: P passed`); *mats*, *ecraven*: a benchmark's CSVLINE judged against another's expected result; *chibi-tests*:
+  one library's si marks against another's Chibi marks (`test-marks`); *expand* (`bin/si test`): a case's run against another
+  case's Chez `:out` (`expand.ae`'s `judge`). Each in `arbace/scheme/corpora.ae` beside the existing judge, a few lines;
+  none needs a run.
+- *OCaml repl-check*: the session's output compared with another recorded session (none exists: a second, two-line
+  `session-b.ref` would be the reference), `cmp` must fail; *repr-ocaml roundtrip*: one file's printed dump compared with
+  another's original (`do-compare`).
+- *C annotations, repr-c roundtrip, parse-check, tokens*; *C++ runtime-build, repr-cpp roundtrip and pp-check, repr-llvm's
+  objects*: a file's level (annotations, printed text, tokens, object) compared with another file's by the check's own
+  comparison (`judge-row`, `rtcheck/judge`, ppcheck's `judge`; repr-llvm's object `cmp`, bash), the pair from the corpus's
+  passing files.
+- *repr/java's tree checks* (parse, front, attr, nojavac): one file's native tree (or facts, forms) compared with another
+  file's javac tree by the check's comparison, inside its per-corpus job; *roundtrip* and *check --jdk*: one file's forms
+  against another's recorded hash; *repr/go native-check*: a dump's tree against another dump's helper tree inside
+  `check-job` (GTS81's note: cheap to run, the pairing needs the job's indices); *repr/clojure*: one file's round trip
+  against another's text. These need javac's tool or the tools' host: the main host.
+- Every control here is in its family's own data file; the main host's first run of each check confirms each control
+  differs on real runs (the pairs were chosen from the records and, for C and C++, the sources; nothing here ran the
+  checks themselves).
+
 ## Proposed (2026-11-01): GTS130-GTS133 (GT7's audit 061, repr/java's tree checks; none decided)
 
 Made on branch audit-061 where neither javac's tool nor jdk26u exist: the judges are tested over fabricated trees and a
