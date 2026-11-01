@@ -65,6 +65,19 @@ printf '["b"]\n' > "$k/aot-slow.edn"
 printf '[\n ["a" "fail" "known gc: a finaliser (output differs (1 bytes, ocamlopt 1))" "differs"]\n ["b" "slow" "timeout 120s" "differs"]\n ["c" "pass" "" "same"]\n]\n' > "$k/aot-results.edn"
 out=$(judge_aot judge "$k/check.tsv" "$k/corpus.tsv" "$k/refs.edn" "$k/oi.tsv" "$k/aot-results.edn" "$k/classes.edn"); expect "aot: a timeout of a listed slow program is the speed class" 0 'classes: .*:speed 1' "$out" $?
 
+# re-review 030's finding 4: a known entry of kind "status " pins the output's digest: the same status with other output is not the known failure
+p=$W/pin; mk "$p"
+printf '[{:id :gc :match [#"^fail known gc: "]}]\n' > "$p/classes.edn"
+printf '[\n ["a" "fail" "known gc: x (status 2, ocamlc 0)"]\n ["b" "pass" ""]\n ["c" "pass" ""]\n]\n' > "$p/oi-results.edn"
+printf '[\n ["a" "fail" "known gc: x (status 2, ocamlopt 0)" "same"]\n ["b" "pass" "" "same"]\n ["c" "pass" "" "same"]\n]\n' > "$p/aot-results.edn"
+printf '[["a" "gc: x" "status " "abc"]]\n' > "$p/oi-known.edn"; cp "$p/oi-known.edn" "$p/aot-known.edn"
+printf 'a\t2\tabc123\t1\t1.0\t\nb\t0\th\t1\t1.0\t\nc\t0\th\t1\t1.0\t\n' > "$p/check.tsv"; cp "$p/check.tsv" "$p/oi.tsv"
+out=$(judge_oi judge "$p/check.tsv" "$p/corpus.tsv" "$p/refs.edn" "$p/oi-results.edn" "$p/classes.edn"); expect "oi: a known status with its digest stays known" 0 'oi: 2 pass, 0 failing' "$out" $?
+out=$(judge_aot judge "$p/check.tsv" "$p/corpus.tsv" "$p/refs.edn" "$p/oi.tsv" "$p/aot-results.edn" "$p/classes.edn"); expect "aot: a known status with its digest stays known" 0 'o2j: 2 pass, 0 failing' "$out" $?
+printf 'a\t2\tdef456\t1\t1.0\t\nb\t0\th\t1\t1.0\t\nc\t0\th\t1\t1.0\t\n' > "$p/check.tsv"; cp "$p/check.tsv" "$p/oi.tsv"
+out=$(judge_oi judge "$p/check.tsv" "$p/corpus.tsv" "$p/refs.edn" "$p/oi-results.edn" "$p/classes.edn"); expect "oi: a known status with other output is failing" 1 'FAILING a: fail status 2' "$out" $?
+out=$(judge_aot judge "$p/check.tsv" "$p/corpus.tsv" "$p/refs.edn" "$p/oi.tsv" "$p/aot-results.edn" "$p/classes.edn"); expect "aot: a known status with other output is failing" 1 'FAILING a: fail status 2' "$out" $?
+
 # finding 9: bin/oi suite expect is a check: the run against the record, the committed record untouched without --record
 only='basic/patmatch_for_multiple'
 before=$(sha256sum "$root/test/ocaml/ref-expect.edn")
