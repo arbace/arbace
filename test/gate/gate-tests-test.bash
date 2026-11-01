@@ -27,13 +27,67 @@ fixed=$(grep -l '^scratch=.*-test[};]' "$src"/test/gate/*-test.bash)
 [ -z "$fixed" ] && ok "the tests' default scratch directories are per process" || bad "fixed scratch default in: $fixed"
 # report 055, finding 5: without an executable the tests that need none run, the others are named, status 1 (0: --no-exe)
 r=$scratch/noexe-root; mkdir -p "$r/bin/lib" "$r/d"
-cp "$src/bin/gate-tests" "$r/bin/"; cp "$src/bin/lib/"*.bash "$r/bin/lib/"
+cp "$src/bin/gate-tests" "$r/bin/"; cp "$src/bin/lib/tmpdir.bash" "$src/bin/lib/host.bash" "$r/bin/lib/"
 printf '#!/bin/bash\nexit 0\n' > "$r/d/plain-test.bash"; printf '#!/bin/bash\n# needs: exe\nexit 1\n' > "$r/d/exe-test.bash"; chmod +x "$r/d/"*
 out=$(cd "$r" && env -u ARBACE_HOST_EXE bin/gate-tests d 2>&1); st=$?
 if [ "$st" = 1 ] && echo "$out" | grep -q "exe-test.bash not run" && echo "$out" | grep -q "plain-test.bash passed"; then ok "no stage 0: the tests that need it are named, status 1"
 else bad "no exe: status $st: $out"; fi
 out=$(cd "$r" && env -u ARBACE_HOST_EXE bin/gate-tests --no-exe d 2>&1); st=$?
 [ "$st" = 0 ] && ok "--no-exe: the others alone, status 0" || bad "--no-exe: status $st: $out"
+
+# report 059: a test that exits 77 is "not run", not passed, and does not fail the run
+mkdir -p "$scratch/u77"; printf '#!/bin/bash\necho already traced\nexit 77\n' > "$scratch/u77/a-test.bash"; cp "$scratch/pass/a-test.bash" "$scratch/u77/b-test.bash"; chmod +x "$scratch/u77/"*
+out=$("$src/bin/gate-tests" "$scratch/u77" 2>&1); st=$?
+if [ "$st" = 0 ] && echo "$out" | grep -q "a-test.bash not run (already traced)" && ! echo "$out" | grep -q "a-test.bash passed" && echo "$out" | grep -q "not run: a-test.bash"; then ok "exit 77 is listed as not run, not passed"
+else bad "exit 77: status $st: $out"; fi
+# report 059: GATE_TESTS_NESTED in the caller's environment skips nothing; only --nested skips gate-reads-test
+mkdir -p "$scratch/nest"; printf '#!/bin/bash\nexit 1\n' > "$scratch/nest/gate-reads-test.bash"; chmod +x "$scratch/nest/gate-reads-test.bash"
+out=$(GATE_TESTS_NESTED=1 "$src/bin/gate-tests" "$scratch/nest" 2>&1); st=$?
+[ "$st" = 1 ] && ok "an inherited GATE_TESTS_NESTED skips nothing" || bad "inherited nested: status $st: $out"
+out=$("$src/bin/gate-tests" --nested "$scratch/nest" 2>&1); st=$?
+[ "$st" = 0 ] && echo "$out" | grep -q "gate-reads-test.bash not run (nested" && ok "--nested skips gate-reads-test, loudly" || bad "--nested: status $st: $out"
+
+# report 059: gate-reads-test must not pass without having looked. Cases with a fake strace (a mode: no trace
+# file, an empty one, one without -f) and through a symlinked checkout; skipped inside gate-reads-test's own run
+# (it would run itself) and, for the real strace, when this process is already traced
+traced=$(sed -n 's/^TracerPid:[[:space:]]*//p' /proc/self/status)
+if [ -n "${GATE_TESTS_IN_NESTED:-}" ]; then echo "skip: gate-reads-test cases (in gate-reads-test's own run)"
+else
+  real=$(command -v strace || true)
+  mkdir -p "$scratch/fakebin"
+  cat > "$scratch/fakebin/strace" <<'F'
+#!/bin/bash
+# a fake strace: FAKE_STRACE_MODE none (writes no trace), empty (an empty one), nof (the real one without -f)
+out= args=()
+while [ $# -gt 0 ]; do
+  case $1 in
+    -o) out=$2; shift 2 ;;
+    -s|-e) args+=("$1" "$2"); shift 2 ;;
+    -f) [ "$FAKE_STRACE_MODE" = nof ] || args+=(-f); shift ;;
+    -*) args+=("$1"); shift ;;
+    *) break ;;
+  esac
+done
+case $FAKE_STRACE_MODE in
+  none) exec "$@" ;;
+  empty) : > "$out"; exec "$@" ;;
+  nof) exec "$FAKE_REAL_STRACE" "${args[@]}" -o "$out" "$@" ;;
+esac
+F
+  chmod +x "$scratch/fakebin/strace"
+  for mode in none empty nof; do
+    [ "$mode" = nof ] && { [ -n "$real" ] && [ "${traced:-0}" = 0 ] || continue; }
+    out=$(PATH="$scratch/fakebin:$PATH" FAKE_STRACE_MODE=$mode FAKE_REAL_STRACE=$real GATE_READS_ASSUME_UNTRACED=1 "$src/test/gate/gate-reads-test.bash" 2>&1); st=$?
+    [ "$st" != 0 ] && ok "gate-reads-test fails on a trace that is $mode" || bad "gate-reads-test passed on a trace that is $mode: $out"
+  done
+  if [ -n "$real" ] && [ "${traced:-0}" = 0 ]; then
+    ln -s "$src" "$scratch/lnk"
+    out=$("$scratch/lnk/test/gate/gate-reads-test.bash" 2>&1); st=$?
+    [ "$st" = 0 ] && echo "$out" | grep -q "canary seen" && ok "gate-reads-test through a symlinked checkout sees its canary" || bad "symlinked checkout: status $st: $out"
+    out=$("$real" -f -o "$scratch/outer.strace" "$src/test/gate/gate-reads-test.bash" 2>&1); st=$?
+    [ "$st" = 77 ] && echo "$out" | grep -q "already traced" && ok "gate-reads-test under a tracer: not run (77)" || bad "traced: status $st: $out"
+  else echo "skip: gate-reads-test real-strace cases (no strace, or this process is traced)"; fi
+fi
 
 # the step and the planner
 cd "$src" || exit 1
