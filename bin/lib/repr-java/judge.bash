@@ -62,3 +62,12 @@ judge_jdk_paths() {
   jdk_src=$s jdk=$j
   export JDK_SRC=$s JDK=$j
 }
+
+# judge_count_javac_forms WORK CORPUS: the forms files of javac's side of a front-check corpus: the .ae files
+# below WORK/CORPUS/*/javac (read_both and read_jdk write DIR/javac and DIR/native one level under the corpus), not
+# every path with a javac component (the javac corpus and jdk.compiler's com/sun/tools/javac hold native files
+# on such paths too, GT7's audit 061 #6)
+judge_count_javac_forms() {
+  local r
+  for r in "$1/$2"/*/javac; do [ -d "$r" ] && find "$r" -name '*.ae'; done | grep -c .
+}
