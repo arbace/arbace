@@ -21,6 +21,46 @@
   [status ^String log]
   (boolean (and (= status "1") log (re-find #"(?m)^[^\s:][^:\n]*:[0-9]+:[0-9]+: (fatal )?error: " log))))
 
+(defn run-verdict
+  "The lowered run (LD's low.status, low.out, low.err) against the original's (OD's orig.*): no-original, none, not-comparable,
+  differs, stderr-differs or same. OD and LD are a file's directory (with its trailing /), the same one but for the negative
+  controls (GTS81 (a))."
+  [^String od ^String ld]
+  (let [orig (slurp? (str od "orig.status")) low (slurp? (str ld "low.status"))
+        ;; the run: the status, stdout and stderr the original's (review 007's finding 6: uncaught.cpp's terminate message, the
+        ;; testsuite's assertion messages are on stderr)
+        ;; a run is comparable only when it ended by itself (review 007's finding 12): not our timeout (124), not a signal
+        ;; (128 and up) but the program's own abort (134), its output not cut at bin/cppi's cap (1 MB, the program then dies
+        ;; of SIGPIPE)
+        ;; stderr is capped likewise (review 018's R7: bin/cppi's runs are limited to a 1 MiB file, SIGXFSZ past it): a stderr at the
+        ;; cap was cut, and two cut streams agree on their first MiB only
+        comparable? (fn [status ^String d out err]
+                      (and (re-matches #"[0-9]+" status)
+                           (let [n (Long/parseLong status)] (and (not= n 124) (or (< n 128) (= n 134))))
+                           (< (.length (java.io.File. ^String (str d out))) 1048576)
+                           (< (.length (java.io.File. ^String (str d err))) 1048576)))]
+    (cond (nil? orig) "no-original" (nil? low) "none"
+          (not (and (comparable? orig od "orig.out" "orig.err") (comparable? low ld "low.out" "low.err"))) "not-comparable"
+          (not (and (= orig low) (same-bytes? (str od "orig.out") (str ld "low.out")))) "differs"
+          (not (same-bytes? (str od "orig.err") (str ld "low.err"))) "stderr-differs"
+          :else "same")))
+
+;; GTS81 (a), queue 064: the negative controls (test/cpp/controls.edn beside the known file: [{:id :subject NAME :reference NAME
+;; :why}...]): the subject's lowered run judged by run-verdict against the reference's original run; it must differ
+
+(defn control-result
+  "A control judged: :differs, :passes (the run's comparison passes what differs), :not-judged (the reference in the run with
+  no original run), :left (the subject or the reference not in the run, the subject not run or its run not comparable)."
+  [^String work names {:keys [subject reference]}]
+  (let [in (set names)]
+    (if-not (and (in subject) (in reference))
+      :left
+      (case (run-verdict (str work "/files/" reference "/") (str work "/files/" subject "/"))
+        ("differs" "stderr-differs") :differs
+        "same" :passes
+        "no-original" :not-judged
+        :left))))
+
 (defn file-result
   "One file's levels and outcome: {:name :outcome :ir :rt :obj :lower :gcc :run :gxx}; outcome :pass, :oracle-rejected
   (clang rejects the file with its own diagnostics: not a lowering's case), :ir (the IR was not made for another reason:
@@ -41,16 +81,7 @@
         ;; of SIGPIPE)
         ;; stderr is capped likewise (review 018's R7: bin/cppi's runs are limited to a 1 MiB file, SIGXFSZ past it): a stderr at the
         ;; cap was cut, and two cut streams agree on their first MiB only
-        comparable? (fn [status out err]
-                      (and (re-matches #"[0-9]+" status)
-                           (let [n (Long/parseLong status)] (and (not= n 124) (or (< n 128) (= n 134))))
-                           (< (.length (java.io.File. ^String (str d out))) 1048576)
-                           (< (.length (java.io.File. ^String (str d err))) 1048576)))
-        run (cond (nil? orig) "no-original" (nil? low) "none"
-                  (not (and (comparable? orig "orig.out" "orig.err") (comparable? low "low.out" "low.err"))) "not-comparable"
-                  (not (and (= orig low) (same-bytes? (str d "orig.out") (str d "low.out")))) "differs"
-                  (not (same-bytes? (str d "orig.err") (str d "low.err"))) "stderr-differs"
-                  :else "same")
+        run (run-verdict d d)
         gxx (cond (nil? (st "gxx.status")) "none"
                   (and (= orig (st "gxx.status")) (same-bytes? (str d "orig.out") (str d "gxx.out"))) "agrees" :else "differs")
         no-main (= "1" (st "no-main"))
@@ -139,7 +170,16 @@
     (when recorded-bad
       (println (str "lower-check: the run of the recorded list " (name listed) " has " (count run-names) " files, the record " (:files (get summaries listed))
                     "; " (count rec-missing) " recorded names missing" (when (seq rec-missing) (str ": " (str/join " " (take 8 rec-missing)))))))
-    (when (or recorded-bad (pos? (:failing summary))) (System/exit 1)))))
+    (let [cf (java.io.File. (str (.getParent (.getAbsoluteFile (java.io.File. known-path))) "/controls.edn"))
+          cbad (some true? (doall (for [{:keys [id subject reference] :as c} (if (.exists cf) (read-string (slurp cf)) [])
+                                        :let [v (control-result work names c)]]
+                                    (do (println (case v
+                                                   :differs (str "lower-check: control " id " (" subject "'s lowered run against " reference "'s original): differs, as a control must (GTS81 (a))")
+                                                   :passes (str "lower-check: control passed: " id " (" subject "'s lowered run against " reference "'s original): the comparison passes what differs")
+                                                   :not-judged (str "lower-check: control not judged: " id ": " reference " has no original run")
+                                                   :left (str "lower-check: control " id ": left (" subject " or " reference " not in the run, or not comparable)")))
+                                        (contains? #{:passes :not-judged} v)))))]
+      (when (or recorded-bad (pos? (:failing summary)) cbad) (System/exit 1))))))
 
 (defn runtime-judge
   "OUT/results.tsv and OUT/summary.edn of bin/cppi runtime-build: each unit's levels (the oracle's IR, the forms' round trip, the
