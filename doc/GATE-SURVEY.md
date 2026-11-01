@@ -2537,6 +2537,8 @@ From GT7's reruns 7 and 8 (doc/JOURNAL.md, 2026-11-01). Decided by the user:
 - **GTS102** `bin/java-check` takes per-test time limits (`test/java/timeouts.txt`, as goi's `test/goi/timeouts.txt`),
   replacing the `audit-timeout` class: the 13 interp tests near the limit under the audit's ptrace get their own
   limits. At the merge window's rekey (`bin/java-check` is in every Java step's key).
+  Redo after the audits (the user, 2026-11-01, main's journal of that day): `mac/034-gts102` is redone on the merged
+  audit-075 and audit-070, the decision kept.
 - **GTS103** `bin/gate --clean --only` refuses when a run the record cites has no logs, instead of counting its steps
   as changed (rerun 8's first attempt selected 53 unchanged steps after its logs were deleted).
 
@@ -3043,6 +3045,18 @@ From the VM's review of main's `07194e71` (`.tmp/mac-queue/reports/070-review-ma
   [arbace.j2g]`, stage 0 only); (c) a Makefile target. *Recommended: (b)*, after the merge with audit-041.
 
 ## Proposals (2026-11-01): GTS180 (review 075's findings; none decided)
+
+**Decided (2026-11-01, the user): GTS180 (a)-(e)** (on main's doc/JOURNAL.md, "2026-11-01: the user's decisions after
+the tag"; VM report 103's sheet 1, the source's picks):
+- **GTS180 (a), option (a):** the audit-only bumps lowered after the next clean run (with `rt_sigprocmask` traced), each
+  to its quiet CPU time times the usual margin; the `:audited` rule removed only when a clean run passes with no audited
+  timeout.
+- **GTS180 (b), option (c) or (a):** nethttp at CPU 20 s and wall 90 s if its programs are measured under 5 s of CPU,
+  else 120 and 480.
+- **GTS180 (c), option (a):** a JDK reference run that hit its timeout recorded as `:jdk :timeout` (check.ae and a
+  re-record of the twelve rows).
+- **GTS180 (d), option (a):** the doubled retry kept, `--save` copying `timeout-attempts.tsv` beside `results.tsv`.
+- **GTS180 (e), option (b):** 137 left as a timeout.
 
 From the VM's audit of `bin/lib/limit.bash` and its callers (`.tmp/mac-queue/reports/075-audit-limit-bash.md`), built on
 branch `audit-075`. Done there without a decision (code fixes): `rt_sigprocmask` in `audit_trace` (finding 1), `time` outside
