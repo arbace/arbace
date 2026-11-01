@@ -44,7 +44,8 @@ ffmpeg), and 636 packages are installed; `check` confirms that line.
   set. A dependency name that has several providers (installed, or offered by the repositories' index cache: `/bin/sh` by
   busybox-binsh and bash-binsh, `java-jdk` by every openjdk `-jdk`) is apk's choice, not an edge: it counts as met only by
   an installed provider the line's closure holds, so the line must name one (`apk add` it on the host, which puts it in
-  world); a package of the exact name wins (`coreutils`), and `so:`, `cmd:` and `pc:` names count installed providers
+  world); an installed package of the exact name wins and is the edge alone (`coreutils`, even with
+  uutils-coreutils installed), one only offered makes the name apk's choice (it would take it over an installed provider), and `so:`, `cmd:` and `pc:` names count installed providers
   only (audit 065, GTS134).
 - `simulate` runs `apk add --simulate` of the line into an empty root under `.tmp/alpine-env/`,
   against the repositories, and compares the result with the host.

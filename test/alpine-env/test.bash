@@ -55,6 +55,17 @@ printf 'P:coreutils\nV:1-r0\n\nP:A\nV:1-r0\nD:coreutils\n\n' > "$t/c.db"
 printf 'P:coreutils\nV:1-r0\n\nP:uutils-coreutils\nV:1-r0\np:coreutils=1\n\n' > "$t/c.idx"
 echo 'A coreutils' > "$t/c.world"
 IDX=$t/c.idx run world "$t/c.world" "$t/c.db"; [ "$out" = A ] && ok "an exact-name package is the edge" || bad "exact name (got: $out)"
+# the exact name installed beside another provider: the edge is the exact-name package alone (review 108 F1)
+printf 'P:coreutils\nV:1-r0\n\nP:uutils-coreutils\nV:1-r0\np:coreutils=1\n\nP:A\nV:1-r0\nD:coreutils\n\n' > "$t/c2.db"
+echo 'A uutils-coreutils' > "$t/c2.world"; echo 'A' > "$t/c2a.world"
+run world "$t/c2.world" "$t/c2.db"; [ "$out" = "A uutils-coreutils" ] && ok "world keeps the other provider beside the exact name" || bad "exact name beside a provider (got: $out)"
+run check "$t/c2a.world" "$t/c2.db"; [ $rc != 0 ] && echo "$out" | grep -q 'not reached: uutils-coreutils' && ok "check fails a line that misses the other provider" || bad "check, other provider missed (rc $rc: $out)"
+# the exact name only offered, another provider installed: apk would take the exact name (review 108 F2)
+printf 'P:uutils-coreutils\nV:1-r0\np:coreutils=1\n\nP:A\nV:1-r0\nD:coreutils\n\n' > "$t/c3.db"
+run world "$t/c2.world" "$t/c3.db"; [ "$out" = A ] && ok "without an index an installed sole provider is the edge" || bad "c3 no index (got: $out)"
+IDX=$t/c.idx run world "$t/c2.world" "$t/c3.db"; [ "$out" = "A uutils-coreutils" ] && ok "world keeps the provider when the exact name is offered" || bad "exact name offered (got: $out)"
+IDX=$t/c.idx run check "$t/c2a.world" "$t/c3.db"; [ $rc != 0 ] && echo "$out" | grep -q 'coreutils has several providers' && ok "check fails a line that leaves coreutils to apk" || bad "check, exact offered (rc $rc: $out)"
+IDX=$t/c.idx run check "$t/c2.world" "$t/c3.db"; [ $rc = 0 ] && ok "check passes the line naming the provider" || bad "check, provider named (rc $rc: $out)"
 # so: names count installed providers only
 printf 'P:lib1\nV:1-r0\np:so:libx.so.1=1\n\nP:A\nV:1-r0\nD:so:libx.so.1\n\n' > "$t/l.db"
 printf 'P:lib1\nV:1-r0\np:so:libx.so.1=1\n\nP:lib2\nV:2-r0\np:so:libx.so.1=2\n\n' > "$t/l.idx"

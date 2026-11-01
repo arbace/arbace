@@ -2819,7 +2819,8 @@ stubbed `bin/repr-java` (`test/repr/java/judge-*-test.bash`), the records below 
 - **GTS138 (review 068 of audit-065) providers offered by the repositories.** A name counts as apk's choice when the
   index cache offers several packages for it, not only when several are installed (one installed JDK would otherwise
   drift to a newer `-jdk` and `world` would drop it). Options: (a) as built: the index cache read offline
-  (`/var/cache/apk/APKINDEX.*.tar.gz`), an exact-name package wins, `so:`/`cmd:`/`pc:` names count installed providers
+  (`/var/cache/apk/APKINDEX.*.tar.gz`), an installed exact-name package wins and is the edge alone, one only offered
+  makes the name apk's choice (review 108), `so:`/`cmd:`/`pc:` names count installed providers
   only; (b) every name, `so:` too (11 more names to put in the line on the amd64 host); (c) a short always-named list
   (`openjdk25-jdk`). *Recommended: (a).* Run on the amd64 host (this worktree shares its database), `check` now fails
   naming five providers the host's world does not: busybox-binsh (`/bin/sh`), ifupdown-ng, mkinitfs,
