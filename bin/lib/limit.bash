@@ -104,3 +104,19 @@ timeout_row_ids() { awk -F'\t' "$timeout_row_awk { print \$1 }" "$1"; }
 gc_status_reason() {
   case $1 in 124|137|152) echo "gc timed out (limit $2 s)" ;; *) echo "gc status $1" ;; esac
 }
+
+# jdk_run_limit TMO: the wall limit (seconds) of the JDK's reference run of a jtreg test whose own timeout is
+# TMO (review 075, finding 8: a flat 60 s recorded the tests jtreg gives 120 or 400 s as JDK failures, status
+# 124, which took them out of every level): the test's own, at least 60
+jdk_run_limit() {
+  local t=${1:-0}
+  case $t in ''|*[!0-9]*) t=0 ;; esac
+  [ "$t" -ge 60 ] && echo "$t" || echo 60
+}
+
+# program_tmo PROGRAM TMO [FILE]: PROGRAM's time limit in seconds: its line in test/goi/timeouts.txt (FILE), else
+# TMO (the action's -t or the default). goi's check reads it for every kind of program (review 075, finding 9:
+# only check_one did; a directory test or an errorcheck program could not be given more time)
+program_tmo() {
+  awk -v p="$1" -v t="$2" '$1 == p { t = $2 } END { print t }' "${3:-$root/test/goi/timeouts.txt}"
+}

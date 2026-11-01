@@ -91,4 +91,18 @@ if sel cpu-kill; then
   export ARBACE_CPU_LOG=$w/cpu2.tsv; limited_cpu 1 20 bash -c 'while :; do :; done'; b=$?; unset ARBACE_CPU_LOG
   [ "$a $b" = "137 137" ] && ck "cpu-kill: the CPU limit kills with 137, never 152" ok || ck "cpu-kill" "$a $b"
 fi
+if sel jdk-limit; then
+  # finding 8: the JDK's reference run gets the test's own jtreg timeout (at least 60 s), and record_runs uses it
+  [ "$(jdk_run_limit 400)" = 400 ] && [ "$(jdk_run_limit 120)" = 120 ] && [ "$(jdk_run_limit 30)" = 60 ] && [ "$(jdk_run_limit x)" = 60 ] \
+    && ck "jdk-limit: max(60, the test's timeout)" ok || ck "jdk-limit" "$(jdk_run_limit 400) $(jdk_run_limit 30)"
+  grep -q 'timeout -k 5 "\$(jdk_run_limit "\${x\[1\]}")" java' "$root/bin/java-check" && ck "jdk-limit: record_runs uses it" ok || ck "jdk-limit: record_runs" "still a flat limit"
+fi
+if sel program-tmo; then
+  # finding 9: timeouts.txt applies to every kind of program of goi's check
+  printf '# c\nnosplit.go 60\n' > "$w/timeouts.txt"
+  [ "$(program_tmo nosplit.go 10 "$w/timeouts.txt")" = 60 ] && [ "$(program_tmo other.go 10 "$w/timeouts.txt")" = 10 ] \
+    && ck "program-tmo: the file's line, else the default" ok || ck "program-tmo" "$(program_tmo nosplit.go 10 "$w/timeouts.txt")"
+  n=$(grep -c 'tmo=$(program_tmo "$p" "$tmo")' "$root/bin/goi")
+  [ "$n" = 4 ] && ck "program-tmo: action_parse, check_dir, check_err and check_err_aot use it" ok || ck "program-tmo: callers" "$n of 4"
+fi
 exit $fail
