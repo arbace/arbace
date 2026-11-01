@@ -133,7 +133,8 @@ cmd_suite_expect() {
   export -f suite_expect_one; export EXPECT_DIR T_ROOT
   local out=$S/expect.tsv gen=$S/expect-run.edn
   [ -n "${ONLY:-}" ] && { out=$S/expect-only.tsv; gen=$S/expect-only.edn; }
-  tr '\n' '\0' < "$S/expect.list" | xargs -0 -n 1 -P "${JOBS:-3}" bash -c 't=$(printf "\t"); suite_expect_one "${0%%"$t"*}" "${0#*"$t"}"' > "$out.new"
+  [ -s "$S/expect.list" ] || die "expect: no test selected${ONLY:+ by --only $ONLY}"
+  tr '\n' '\0' < "$S/expect.list" | xargs -r -0 -n 1 -P "${JOBS:-3}" bash -c 't=$(printf "\t"); suite_expect_one "${0%%"$t"*}" "${0#*"$t"}"' > "$out.new"
   LC_ALL=C sort "$out.new" > "$out"; rm -f "$out.new"
   { echo ";; The expect action's host runs (bin/oi suite expect --record; doc/ocaml/OCAML-SURVEY.md, \"As built: OC102, OC104, OC105 (b), OC106 (b)\"): testsuite/tools/expect.ml"
     echo ";; built against the host's compiler-libs, linked whole, and run as ocamltest runs it (-repo-root the tree's stdlib), on the file, then with -principal on the correction:"
@@ -155,7 +156,10 @@ cmd_suite_expect() {
   else
     # the rows of this run (a subset) all in the record
     grep '^ \[' "$gen" > "$S/expect-rows.txt" || true
-    if grep -v -x -F -f "$EXPECT_RESULTS" "$S/expect-rows.txt" > "$S/expect-notrec.txt"; then
+    [ -r "$EXPECT_RESULTS" ] || die "expect: the record $EXPECT_RESULTS cannot be read"
+    local gst=0; grep -v -x -F -f "$EXPECT_RESULTS" "$S/expect-rows.txt" > "$S/expect-notrec.txt" || gst=$?
+    [ "$gst" -le 1 ] || die "expect: grep failed ($gst) against $EXPECT_RESULTS"
+    if [ "$gst" = 0 ]; then
       sed 's/^/oi: expect: not in the record: /' "$S/expect-notrec.txt" >&2
       echo "oi: expect: the rows differ from $EXPECT_RESULTS" >&2; return 1
     fi

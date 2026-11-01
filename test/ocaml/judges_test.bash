@@ -83,6 +83,12 @@ expect "expect: a whole run passes against the committed record" 0 'equals the r
 out=$(cd "$root" && OI_EXPECT_RECORD=$W/ref-expect.header bin/oi suite expect 2>&1); st=$?
 expect "expect: a header edit alone is not a difference" 0 'equals the record' "$out" $st
 
+# re-review 030's finding 6: a missing record is an error, an --only that matches nothing says so
+out=$(cd "$root" && OI_EXPECT_RECORD=$W/no-such-record bin/oi suite expect --only "$only" 2>&1); st=$?
+expect "expect: a missing record is an error" 2 'cannot be read' "$out" $st
+out=$(cd "$root" && bin/oi suite expect --only 'no-such-directory/zzz' 2>&1); st=$?
+expect "expect: an --only that matches nothing says so" 2 'no test selected' "$out" $st
+
 # finding 2: a listed slow program recorded as slow that passes this time (the CPU limit's boundary) is not a change
 printf 'a\t0\th\t1\t1.0\t\nb\t0\th\t1\t1.0\t\nc\t0\th\t1\t1.0\t\n' > "$k/check.tsv"
 printf '[\n ["a" "fail" "known gc: a finaliser (output differs (1 bytes, ocamlopt 1))" "differs"]\n ["b" "slow" "timeout 120s" "same"]\n ["c" "pass" "" "same"]\n]\n' > "$k/aot-results.edn"
