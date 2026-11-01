@@ -1,5 +1,6 @@
 #!/bin/bash
-# GTS112 (b): every step that uses the frozen JVM (the :frozen host) declares the variables that choose
+# GTS112 (b): every step that uses the frozen JVM (the :frozen host, or a :cmd whose bin/ script sources
+# bin/lib/frozen.bash at its top level: bin/oracle) declares the variables that choose
 # its jar and class path in :env, so that a pass records them (audit 041). Needs an Arbace executable:
 # ARBACE_HOST_EXE=EXE test/gate/frozen-env-test.bash
 set -uo pipefail
@@ -12,12 +13,18 @@ cat > "$t" <<'F'
 (let [steps (read-string (slurp (first *command-line-args*)))
       need #{"FROZEN_CP" "FROZEN_TAG" "ARBACE_ORACLE_JAR" "ARBACE_ORACLE_TAG"}
       steps (filter map? (if (map? steps) (:steps steps) steps))
-      frozen (filter #(some #{:frozen} (:hosts %)) steps)
+      root (first (rest *command-line-args*))
+      sources? (fn [s] (some (fn [[_ sc]]
+                               (let [f (java.io.File. (str root "/" sc))]
+                                 (and (.isFile f)
+                                      (re-find #"(?m)^\. \S*bin/lib/frozen\.bash" (slurp f)))))
+                             (re-seq #"(bin/[A-Za-z0-9._-]+)" (str (:cmd s)))))
+      frozen (filter #(or (some #{:frozen} (:hosts %)) (sources? %)) steps)
       bad (remove #(every? (set (:env %)) need) frozen)]
   (println (count frozen) "steps use the frozen JVM:" (apply str (interpose " " (map :name frozen))))
   (doseq [s bad] (println "FAIL:" (:name s) "lacks" (remove (set (:env s)) need)))
   (System/exit (if (or (empty? frozen) (seq bad)) 1 0)))
 F
-"$exe" "$t" "$src/test/gate/steps.edn"; st=$?
+"$exe" "$t" "$src/test/gate/steps.edn" "$src"; st=$?
 [ $st = 0 ] && echo "frozen-env-test: passed" || echo "frozen-env-test: failed"
 exit $st
