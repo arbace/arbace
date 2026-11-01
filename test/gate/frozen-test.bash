@@ -66,5 +66,16 @@ done
 out=$(cd "$t" && J2G_EDGE_WORK=.tmp/worktrees/plain FAKE_LOG=$scratch/fake.log bin/j2g-edge verify 2>&1); st=$?
 if [ "$st" = 1 ]; then ok "work under .tmp/worktrees (no repo of its own) accepted"; else bad "work .tmp/worktrees/plain: status $st: $out"; fi
 
+# report 055, finding 4: a tree without .git under another checkout, work among the outer's tracked files
+o=$scratch/outer; mkdir -p "$o/jdk" "$o/.tmp/arch/bin/lib"
+echo edge > "$o/jdk/edge.edn"; echo '.tmp/' > "$o/.gitignore"
+(cd "$o" && git init -q . && git add -A && git -c user.name=t -c user.email=t@t commit -q -m t) || bad "git init outer"
+cp "$t/bin/j2g-edge" "$o/.tmp/arch/bin/"; cp "$t/bin/lib/"*.bash "$o/.tmp/arch/bin/lib/"
+out=$(cd "$o/.tmp/arch" && J2G_EDGE_WORK=$o/jdk FAKE_LOG=$scratch/fake.log bin/j2g-edge verify 2>&1); st=$?
+if [ "$st" = 2 ] && [ "$(cat "$o/jdk/edge.edn")" = edge ] && [ -z "$(cd "$o" && git status --porcelain)" ]; then ok "an archive under another checkout: its tracked files refused"
+else bad "outer checkout: status $st: $out"; fi
+out=$(cd "$o/.tmp/arch" && J2G_EDGE_WORK=$o/.tmp/arch/.tmp/w FAKE_LOG=$scratch/fake.log bin/j2g-edge verify 2>&1); st=$?
+if [ "$st" = 1 ] && ! echo "$out" | grep -q "not its root"; then ok "an archive under another checkout: its own .tmp accepted"; else bad "archive .tmp: status $st: $out"; fi
+
 [ "$fails" = 0 ] && echo "frozen-test: passed" || echo "frozen-test: $fails failed"
 exit $((fails > 0))
