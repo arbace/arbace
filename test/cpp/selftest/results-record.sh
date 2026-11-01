@@ -42,4 +42,7 @@ rtrip r1 --record-results; st=$?
 sed -i 's|"tr/min.cpp" :pass|"tr/min.cpp" :pass\n  "tr/gone.cpp" :pass|' "$res/tr.edn"
 rtrip r2; st=$?
 [ $st = 1 ] && grep -q 'recorded names missing: tr/gone.cpp' "$t/r2.log" && ok "bin/repr-cpp roundtrip holds the run to the record" || bad "script check: exit $st, $(tail -3 "$t/r2.log")"
+cp "$res/tr.edn" "$t/before-tr.edn"
+rtrip r3 --replace-results; st=$?
+[ $st = 2 ] && grep -q -- '--replace-results needs --record-results' "$t/r3.log" && cmp -s "$res/tr.edn" "$t/before-tr.edn" && ok "--replace-results alone is refused, nothing recorded" || bad "replace alone: exit $st, $(tail -2 "$t/r3.log")"
 finish
