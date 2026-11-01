@@ -78,6 +78,14 @@ note_attempt() {
 # before a retry replaces them, and their ids printed to stderr with the reason (review 075, finding 3: goi's
 # retry printed only the count, and the row replaced was gone)
 keep_first_timeouts() {
-  awk -F'\t' '$2 == "error" && $3 ~ /^timeout/' "$1" > "$2"
+  awk -F'\t' "$timeout_row_awk" "$1" > "$2"
   awk -F'\t' '{ print "   first attempt: " $1 ": " $3 }' "$2" >&2
 }
+
+# timeout_row_ids RESULTS: the ids of the rows (ID, result, reason...) a goi check takes to the quiet retry
+# (review 075, finding 5: the rows of a timeout that were not worded "timeout" never were): "error timeout (N s)",
+# "error gc reference: the original timed out" and "...: the compile timed out" (gc's reference at three times the
+# limit), and check_err's "unsupported ... goi's check over N s)", a timeout read as gc's later phases, which
+# only the retry's second timeout may decide
+timeout_row_awk='($2 == "error" && ($3 ~ /^timeout/ || $3 ~ /^gc reference: the (original|compile) timed out$/)) || ($2 == "unsupported" && $3 ~ /goi.s check over [0-9]+ s\)$/)'
+timeout_row_ids() { awk -F'\t' "$timeout_row_awk { print \$1 }" "$1"; }

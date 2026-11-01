@@ -70,4 +70,12 @@ if sel first-timeouts; then
   [ "$(cut -f1 "$w/first.tsv")" = a.go ] && grep -q 'a.go' "$w/first.err" && ck "first-timeouts: the first timeout rows are kept and named" ok \
     || ck "first-timeouts" "$(cat "$w/first.tsv" "$w/first.err" 2>&1)"
 fi
+if sel retry-rows; then
+  # finding 5: every timeout row goi's check prints is taken to the quiet retry
+  printf '%s\n' $'a.go\terror\ttimeout (10 s)' $'b.go\tpass\t' $'c.go\terror\tgc reference: the original timed out' \
+    $'d.go\terror\tgc reference: the compile timed out' $'e.go\tunsupported\terrors of gc\'s phases after type checking (go/types reports none; goi\'s check over 10 s)' \
+    $'f.go\tunsupported\terrors of gc\'s phases after type checking (go/types reports none)' $'g.go\terror\tstatus 3: x' > "$w/rows.tsv"
+  got=$(timeout_row_ids "$w/rows.tsv" 2> "$w/rows.err" | tr '\n' ' ')
+  [ "$got" = "a.go c.go d.go e.go " ] && ck "retry-rows: the timeout rows of every path are retried" ok || ck "retry-rows" "got '$got', expected 'a.go c.go d.go e.go '"
+fi
 exit $fail
