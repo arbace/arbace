@@ -106,4 +106,11 @@ mkdir_exe "$ARBACE_GATE_EXES/$K20" stale; echo old > "$ARBACE_GATE_EXES/$K20/amd
 if [ "$(status)" != 0 ] && [ -f "$ARBACE_GATE_EXES/$K20/amd64/old-marker" ] && [ "$(cat "$ARBACE_GATE_EXES/$K20/key")" = stale ] && [ -z "$(leftovers)" ]; then ok "a failed copy kept the old directory"
 else bad "a failed copy: status $(status), key $(cat "$ARBACE_GATE_EXES/$K20/key"), left: $(leftovers)"; fi
 
+# the old directory that cannot be removed does not fail a swap that was made (review 048, N6)
+mkdir -p "$T/shim"; printf '#!/bin/bash\ncase "$*" in *.old.*) exit 1 ;; esac\nexec /bin/rm "$@"\n' > "$T/shim/rm"; chmod +x "$T/shim/rm"
+mkdir_exe "$ARBACE_GATE_EXES/$K20" stale
+( export PATH=$T/shim:$PATH; run )
+if [ "$(status)" = 0 ] && [ "$(cat "$ARBACE_GATE_EXES/$K20/key")" = "$KEY" ] && grep -q "could not remove" "$T/out"; then ok "an old directory that stays does not fail the swap"
+else bad "an unremovable old directory: status $(status): $(tail -3 "$T/out")"; fi
+rm -rf "$ARBACE_GATE_EXES"/*.old.*
 exit $fail
