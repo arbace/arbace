@@ -2712,6 +2712,77 @@ executable (report 069 A: the interp and AOT steps run on different hosts over o
 made each re-read them in turn). The AOT essential subset runs `goi.divergences --aot` on the record (069 D). The
 suite's subset check is one way (069 E): a stale reference entry for a source of the subset is caught by the whole run.
 
+## Proposed (2026-11-01, queue 074): GTS130, a judgment-only clean rerun
+
+From the VM's queue task 074. Not decided.
+
+The case. A change to `java-judge`'s own key (`test/java/divergences.edn`, `bin/java-check`'s judgment, the `:java-judge`
+group) makes `bin/gate --clean --tag TAG --only failed,changed` rerun every Java producer: `test/gate/clean.ae`'s `select`
+closes the selection over `:uses` both ways, and its upward step ("a producer of a step rerun") takes `java-read`,
+`java-interp`, `java-classes`, `java-diagnostics`, `java-compiled-full` and `java-print`, then `javac-tool` and `go-build`
+for them. In `test/gate/clean-arbace-reaps-3-crops-v2.edn` those six producers took 290 + 1,814 + 162 + 74 + 11,481 + 936 =
+14,757 s (4.1 h) under the audit, `javac-tool` 782 s; `java-judge` itself 9 s. The upward step's reason is in the docstring:
+"a producer's output is made in the fresh clone only by running it". Yet the producers' keys did not change, and their
+outputs from the run they passed at are on disk.
+
+What a clean run keeps (bin/gate's `clean_launch`, `bin/lib/gate-run.bash`'s `run_one`, `record_pass`): the clone's
+`.tmp/gate` is copied whole to `.tmp/gate-clean/SHA.logs[.N]/gate/` at the end, so each run's logs hold
+- `plan/NAME.inputs`, the material of each step's key, and for a consumer (decision `after`) its `uses U DIGEST` lines,
+  appended by `run_one` from `out/U` just before it ran (also when it then failed; not when it was not run);
+- `out/NAME`, the `GATE_OUT` of each step with `:outputs` that ran in that run, whole (for the Java levels `results.tsv`,
+  `forms.sha256` and the rest of `bin/java-check --save`). A step `--only` skipped has none: `only_apply` marks it done and
+  `run_one` returns before `restore_out` (and its pass is not in the clone's empty store anyway);
+- `NAME.log`, `.status`, `.audit`, `.audit-status`, `.mem`, `.inputs` digests and the plan.
+The clone's own store (`NAME/KEY.{edn,log,inputs,out}`, `:clean true`) is published into the shared store by
+`publish_passes`, beside the everyday gate's passes (a pass already at the key is kept, not replaced), and trimmed there by
+`--prune` (the last 5 passes and 30 days per step).
+
+So what a consumer read at the base, and the digest it was keyed with, are both in the logs of the run its producer passed
+at: a producer that passed clean (audit ok) at run J, whose material (its `uses` lines aside, as `changed` compares) is the
+base's, has `LOGS-ROOT/<run J's :logs>/gate/out/NAME`, and the consumer's base `plan/C.inputs` has `uses U D` with D that
+output's digest (`gate.plan/out-digest`, `out_sha`). Today `run J` is always the consumer's own run (a consumer is rerun
+whenever its producer is), so the two are in the same directory.
+
+- **GTS130 a consumer rerun alone on its producers' clean outputs.** Options:
+  - (a) **reuse from the base run's logs, digests checked.** In `select`, the upward step takes a producer P of a selected
+    consumer C only when P's output cannot be reused for each of C's `:uses` U of it; it can when P is not selected itself,
+    is one step (no parts), passed clean with its audit ok at the base, its material is the base's, C's base material has a
+    `uses U D` line, and `LOGS-ROOT/<P's run's :logs>/gate/out/U` has the digest D. Such a P is printed `reuse` (not `skip`)
+    with its source; `bin/gate`'s `only_apply` copies the source into the clone's `.tmp/gate/out/P` (checked whole by
+    `diff -r`) and marks P skipped, so that `run_one` keys C over the copied output (its `uses` lines the base's digests)
+    and runs it. The downward step is unchanged: a producer rerun for its own reasons still reruns its consumers.
+    *The record*: P's entry is untouched (`:run J`: passed clean at run J at the key it has here, which the selection
+    checked); C's entry is this run's (`:run I`, its key over the same digests); run I's map in `:runs` gets `:reused
+    [{:step P :from "SHA.logs/gate/out/P"}]`, the output each reused producer gave and where it came from, so the record
+    still reads as "every step passed clean at its key", and now also "C's inputs are P's clean output of run J".
+    *Trust*: the clean run's promise for a step skipped by `--only` is already "passed clean in a fresh clone at its key,
+    audited, at the run its `:run` names"; (a) extends it to the bytes a consumer reads: "made in a fresh clone (run J's),
+    audited there", not "made in this run's clone". The new reliance is on the logs directory as the carrier between runs:
+    plain files under `.tmp/gate-clean/`, unsigned. The digest check (against the value C was keyed with at the base, read
+    from the base's own logs) catches a partial copy, a deletion or an accidental edit, not a deliberate one, which could
+    equally edit the record or the logs' plan files the selection already trusts. A nondeterministic producer (Java's
+    interp level with timeouts, thread order) keeps the outcome of run J instead of drawing again: what a skip already does.
+    *Logs gone*: GTS103 stands: a run whose logs directory or `gate/plan` is gone is refused when its steps are compared,
+    which includes a producer left out of the selection. A producer whose run's logs are there but whose `out/U` is missing
+    or has another digest, or whose consumer's base line is missing (the consumer did not run then, or is new), is not
+    reused: it is rerun as today, the reason in its `why` line. Not a refusal: rerunning is what the clean run would do
+    anyway, correct and only slower, and refusing would block a run that can proceed; the operator sees the reason in
+    `only-checks.tsv`. *Time*: for the case above, 4.1 h of producers and the `javac-tool` build (when no other selected
+    step needs it) become a few seconds of copying; the essential pair `java-check` / `java-check-judge` saves 43 s.
+  - (b) **rerun the producers** (today). The guarantee stays "every output this run's consumers read was made in this
+    run's clone"; the cost is the 4+ h above for any judgment-only change, which in GT7's reruns came with each
+    `divergences.edn` class added.
+  - (c) **reuse from the shared store's pass** (`STORE/P/KEY.out` at P's key, a pass marked `:clean true`). Independent of
+    the logs' directories, but: `--prune` removes passes after 5 newer ones or 30 days, while the record's runs (and GTS103)
+    keep their logs; a non-clean pass at the same key already in the store is kept by `publish_passes` and holds the
+    everyday gate's output, so the check needs `:clean` and the key and still cannot say which run made it; the record would
+    cite a store path that the next prune removes. The clone's own store is deleted with the clone when the run passes.
+  - (d) **(a) behind an opt-in** (`--only java-judge --reuse-outputs`, or a token `reuse`), (b) the default. Keeps today's
+    guarantee unless asked; the operator must know to ask, and `failed,changed` (the usual call) would still take 4 h.
+  *Recommended: (a)*, the default for every `--only` run: it changes no step's outcome and no key, the record says what was
+  reused and from where, and its fallback is today's behaviour. (d) if the user wants "made in this run's clone" to stay the
+  default. (c) only if the logs were to be pruned, which GTS103 already rules out for a cited run.
+
 ## Proposals (GTS170-GTS173): the audited rule's review (070)
 
 From the VM's review of main's `07194e71` (`.tmp/mac-queue/reports/070-review-main-audited.md`); built on the branch
