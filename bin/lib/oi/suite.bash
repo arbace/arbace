@@ -213,7 +213,7 @@ cmd_suite_check_aot() {
     case $st in timeout) note="timeout ${TIMEOUT}s of CPU"; st=124 ;; crash*) note="$st"; st=125 ;; "") note="no result"; st=125 ;; esac
     printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$st" "$(sha256sum < "$d/o2j.out" | cut -d' ' -f1)" "$(wc -c < "$d/o2j.out")" "$secs" "$note" >> "$out.new"
   done
-  LC_ALL=C sort "$out.new" > "$out"; rm -f "$out.new"
+  LC_ALL=C sort "$out.new" > "$out"; rm -f "$out.new"; aot_key "$S/corpus.tsv" > "$out.key"
   local mode=judge; [ "$RECORD" = 1 ] && mode=record
   [ -n "$ONLY" ] && mode=$mode-only
   "$(arbace_exe)" "$root/test/ocaml/o2j_check.ae" "$mode" "$out" "$S/corpus.tsv" "$SUITE_REFS" "$S/oi.tsv" "$SUITE_AOT" "$SUITE_AOT_CLASSES" || return $?
@@ -225,6 +225,7 @@ cmd_suite_check_aot() {
 }
 
 cmd_suite_divergences() {
+  cmd_pins || return 1
   if [ "${1:-}" = --aot ]; then
     "$(arbace_exe)" "$root/test/ocaml/o2j_check.ae" divergences "$SUITE_AOT" "$SUITE_AOT_CLASSES"; return
   fi

@@ -1772,3 +1772,20 @@ Re-review 049 (the helper VM's, at `6fc559da`) closed all six of 042's findings 
 
 **The numbers**: `bin/oi check` 273 pass, 0 failing; `suite check` 87 pass, 0 failing; the 11 + 6 pinned programs' AOT runs: 17 known, 0 failing, OI column same; `bin/oi pins` 39 of 39 attested. Tests: `judges_test` 39 cases run, exit 0 (was 27 of 33); `floors_test` 13 ok; `oi_key_test` 10 ok.
 **Not run**: the whole AOT corpora, `aot_oi_column_test`, `suite expect` (unchanged by these fixes; judges_test ran its cases), repr-ocaml dumps and roundtrip. oi's CPU-to-wall ratio under load is not measured.
+
+## As built: re-review 056's fixes (2026-11-01)
+
+Re-review 056 (at `1d9d5283`) closed 049's findings 1, 3, 4 and 6, and made five points. No proposal is new; OC150 (a) (no quiet retry at oi's level) stays decided, so the margin below is what keeps a misread kill from failing a row.
+
+| # | the fix | the test |
+|---|---|---|
+| 1 | `oi_status` reads 137 as a timeout from four fifths of `OI_TIMEOUT` in CPU seconds (was TIMEOUT - 0.5): under load the kernel's RLIMIT_CPU clock ran ahead of `times`' and the kill landed at 86-89 % of the limit (056's probes). Reading the signal itself does not work for oi: `limited_cpu` sets equal soft and hard limits (SIGKILL, 137, no SIGXCPU), and a Go program would ignore a SIGXCPU before it, so a soft limit below the hard one would not name the kill either; `bin/lib/limit.bash` is the gate's and unchanged. The cost: an OOM kill between 0.8 T and T of CPU reads as a timeout (a listed slow program: `slow`) | `judges_test`: 137 at 103.2 CPU s (0.86 T) is 124, at 95 stays 137 (before: 103.2 gave 137) |
+| 1b | `oi_cpu_secs` reads a comma decimal point (glibc with a comma locale; musl always prints `.`) | `judges_test`: `0m1,5s` files give 121.25 (before: 120.00) |
+| 2 | `bin/oi pins --attest` takes rows only from runs whose key file is the current key: `oi_key` for oi's two runs, the new `aot_key` (o2j_key, the level's limits, the corpus file; written beside `check-aot.tsv` and the suite's `aot/check.tsv` by `check --aot` and `suite check --aot`) for the AOT ones; a missing or stale run file is skipped and said, the others are used; the file's first line records the commit and the four keys; `bin/oi divergences` and `suite divergences` run `bin/oi pins` first, so a pin edit without re-attesting fails where the records are judged | `judges_test`: both divergences fail with `PIN` on a tampered file (before: they judged on); the file's header; `--attest` with a stale key on the suite's AOT run says "aot suite run skipped" and refuses (before: attested from it) |
+| 3 | not changed: forked helpers (`times` sums the tree, `ulimit -t` is per process) and `timeout -k` after a blocked SIGTERM-ignoring process: oi has no fork and its default SIGTERM exits | the table of 056's finding 3 |
+| 4 | `judges_test`: `CASES` is the number of `expect "` calls counted from the file | the file itself (a case added after an early `exit` raises it) |
+| 5 | `oi-known.edn`'s comment on the empty-output pin: any run that prints nothing, whatever its status (these two exit 0 where ocamlc exits 2) | none (comment) |
+
+Not done: `pins_of` reads one prefix of a pin vector (no entry has one); an id in both corpora is attested from the program corpus's row (none pinned); the STATUS column of the attested file is not compared. The 17 `aot` rows equal the 17 `oi` rows because the OI column is `same`: the keys now say which run each came from.
+
+**Numbers**: fresh runs after the fixes: `bin/oi check` 273 pass, 0 failing; `suite check` 87 pass; the 11 + 6 pinned AOT programs 17 known, OI column same; `bin/oi pins --attest` 39 attested from the four runs' keys. Tests: `judges_test` 43 cases run, exit 0; `floors_test` 13 ok; `oi_key_test` 10 ok. Not run: the whole AOT corpora, `aot_oi_column_test`, the clock-skew probe (`clk2.c`) on the main host.

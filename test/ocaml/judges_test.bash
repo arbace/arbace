@@ -8,9 +8,10 @@ exe=${ARBACE_HOST_EXE:?ARBACE_HOST_EXE}
 W=$root/.tmp/w/judges; rm -rf "$W"; mkdir -p "$W"
 bad=0
 # re-review 049's finding 1: every case must run. Cases once sat after an `exit` in the middle of the file and never ran. `expect` counts the cases
-# run, and the EXIT trap fails the file when the count is not CASES (raise it with each case added), wherever the file ended.
-cases=0; CASES=39
-finish() { local st=$?; if [ "$cases" != "$CASES" ]; then echo "FAIL $cases cases ran, want $CASES (a case unreachable, or CASES not raised)"; exit 1; fi; echo "$cases cases run"; exit $((bad || st)); }
+# run, and the EXIT trap fails the file when the count is not CASES, the number of `expect "` calls this file has (counted from the file, re-review 056's
+# finding 4: a case added after an early `exit` raises it by itself), wherever the file ended.
+cases=0; q=$'\x22'; CASES=$(grep -v '^[[:space:]]*#' "$0" | grep -o "expect $q" | wc -l)
+finish() { local st=$?; if [ "$cases" != "$CASES" ]; then echo "FAIL $cases cases ran, want $CASES (a case unreachable)"; exit 1; fi; echo "$cases cases run"; exit $((bad || st)); }
 trap finish EXIT
 t=$(printf '\t')
 
@@ -137,10 +138,12 @@ out=$(judge_aot judge "$k/check.tsv" "$k/corpus.tsv" "$k/refs.edn" "$k/oi.tsv" "
 out=$(cd "$root" && OI_TIMEOUT=120 bin/oi oi-limits 2>&1); expect "oi: the wall cap is four times the CPU limit" 0 '^120 480$' "$out" $?
 out=$(cd "$root" && OI_TIMEOUT=120 bin/oi oi-status 137 5 2>&1); expect "oi: 137 after 5 s is an OOM kill, not a timeout" 0 '^137$' "$out" $?
 out=$(cd "$root" && OI_TIMEOUT=120 bin/oi oi-status 137 121.5 2>&1); expect "oi: 137 after the CPU limit is a timeout" 0 '^124$' "$out" $?
-out=$(cd "$root" && OI_TIMEOUT=120 bin/oi oi-status 137 119.6 2>&1); expect "oi: 137 at the CPU limit less a rounding is a timeout" 0 '^124$' "$out" $?
-out=$(cd "$root" && OI_TIMEOUT=120 bin/oi oi-status 137 119.4 2>&1); expect "oi: 137 below the CPU limit (a kill under load, wall time long) stays 137" 0 '^137$' "$out" $?
+out=$(cd "$root" && OI_TIMEOUT=120 bin/oi oi-status 137 103.2 2>&1); expect "oi: 137 at 0.86 of the CPU limit (the kernel's clock runs ahead under load) is a timeout" 0 '^124$' "$out" $?
+out=$(cd "$root" && OI_TIMEOUT=120 bin/oi oi-status 137 95 2>&1); expect "oi: 137 below four fifths of the CPU limit (a kill under load, wall time long) stays 137" 0 '^137$' "$out" $?
 printf '0m0.1s 0m0.2s\n0m1.5s 0m2.0s\n' > "$W/c0"; printf '0m0.1s 0m0.2s\n2m1.5s 0m3.25s\n' > "$W/c1"
 out=$(cd "$root" && bin/oi oi-cpu "$W/c0" "$W/c1" 2>&1); expect "oi: the CPU seconds of the children between two times are the difference" 0 '^121.25$' "$out" $?
+printf '0m0,1s 0m0,2s\n0m1,5s 0m2,0s\n' > "$W/c2"; printf '0m0,1s 0m0,2s\n2m1,5s 0m3,25s\n' > "$W/c3"
+out=$(cd "$root" && bin/oi oi-cpu "$W/c2" "$W/c3" 2>&1); expect "oi: a comma locale's times parse" 0 '^121.25$' "$out" $?
 out=$(cd "$root" && OI_TIMEOUT=120 bin/oi oi-status 152 3 2>&1); expect "oi: 152 (SIGXCPU) is a timeout" 0 '^124$' "$out" $?
 out=$(cd "$root" && OI_TIMEOUT=120 bin/oi oi-status 2 3 2>&1); expect "oi: another status is kept" 0 '^2$' "$out" $?
 
@@ -151,7 +154,19 @@ expect "expect: a whole run against an unreadable record says it cannot be read"
 # re-review 049's finding 5: the "status " pins are attested by the digests of the runs they were made for, test/ocaml/pins-attested.tsv (bin/oi pins:
 # no run); a pin with no attested digest, or an attested row with no pin, fails
 out=$(cd "$root" && bin/oi pins 2>&1); expect "pins: every pin of the known files is attested by a recorded digest" 0 'each attested by a recorded digest' "$out" $?
-awk -F'\t' 'BEGIN { OFS = "\t" } NR == 1 { $4 = "ffffffffffff" substr($4, 13) } { print }' "$root/test/ocaml/pins-attested.tsv" > "$W/pins.tampered"
+awk -F'\t' 'BEGIN { OFS = "\t" } /^#/ { print; next } !d { $4 = "ffffffffffff" substr($4, 13); d = 1 } { print }' "$root/test/ocaml/pins-attested.tsv" > "$W/pins.tampered"
 out=$(cd "$root" && OI_PINS_ATTESTED=$W/pins.tampered bin/oi pins 2>&1); expect "pins: a pin whose attested digest differs fails" 1 '^PIN ' "$out" $?
 { cat "$root/test/ocaml/pins-attested.tsv"; printf 'aot\tgone/program\t2\tabcdef012345\n'; } > "$W/pins.stale"
 out=$(cd "$root" && OI_PINS_ATTESTED=$W/pins.stale bin/oi pins 2>&1); expect "pins: an attested row with no pin is stale" 1 '^STALE aot gone/program' "$out" $?
+out=$(cd "$root" && OI_PINS_ATTESTED=$W/pins.tampered bin/oi divergences 2>&1); expect "pins: bin/oi divergences runs the pins' check" 1 '^PIN ' "$out" $?
+out=$(cd "$root" && OI_PINS_ATTESTED=$W/pins.tampered bin/oi suite divergences 2>&1); expect "pins: bin/oi suite divergences runs it too" 1 '^PIN ' "$out" $?
+head -1 "$root/test/ocaml/pins-attested.tsv" | grep -q '^# attested .*oi-program=[0-9a-f]\{12\}.*aot-suite=[0-9a-f]\{12\}' || { echo "FAIL pins-attested.tsv has no header with the commit and the runs' keys"; bad=1; }
+# --attest takes only rows of a run whose key file is the current key: a stale key on the AOT suite run is skipped and said, and the pins of its
+# corpus are then not attested
+k=$root/.tmp/o7/aot/check.tsv.key
+if [ -f "$k" ]; then
+  cp "$k" "$W/aot-key.keep"; echo stale > "$k"
+  out=$(cd "$root" && OI_PINS_ATTESTED=$W/pins.attest bin/oi pins --attest 2>&1); st=$?
+  cp "$W/aot-key.keep" "$k"
+  expect "pins: --attest skips a run made by another key" 2 'aot suite run skipped: .* was made by another key' "$out" $st
+else echo "FAIL pins: $k is missing (run bin/oi suite check --aot first)"; bad=1; fi

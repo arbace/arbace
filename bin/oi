@@ -93,19 +93,20 @@ die() { echo "oi: $*" >&2; exit 2; }
 # twice was a load band: a program needing more than half the cap in CPU timed out on a host slowed twofold)
 oi_wall() { echo $((TIMEOUT * 4)); }
 # oi_status STATUS CPU: the status of a run read as a timeout (124): the wall cap's 124, SIGXCPU's 152, and 137 (SIGKILL: `ulimit -t` kills with
-# SIGKILL when the soft and the hard limit are equal) only when the run's own CPU seconds (user + system of the children, oi_cpu_secs) reach
-# TIMEOUT less half a second; an OOM kill or any other SIGKILL below the limit stays a failure, whatever the host's load made of the wall time
-# (re-review 049's finding 2: the wall time was a stand-in for CPU time that holds only when CPU is about wall)
+# SIGKILL when the soft and the hard limit are equal, and a Go program would ignore a SIGXCPU before it) only when the run's own CPU seconds
+# (user + system of the children, oi_cpu_secs) reach four fifths of TIMEOUT. The kernel's RLIMIT_CPU clock runs ahead of the one `times` reports
+# under load (re-review 056's finding 1: the kill landed at 86 to 89 % of the limit on an overcommitted host), so the margin is proportional; an OOM
+# kill or any other SIGKILL below four fifths of the limit stays a failure, whatever the host's load made of the wall time
 oi_status() {
   case $1 in
     152) echo 124 ;;
-    137) if [ "$(echo "$2 >= $TIMEOUT - 0.5" | bc)" = 1 ]; then echo 124; else echo 137; fi ;;
+    137) if [ "$(echo "$2 >= $TIMEOUT * 0.8" | bc)" = 1 ]; then echo 124; else echo 137; fi ;;
     *) echo "$1" ;;
   esac
 }
 # oi_cpu_secs T0 T1: the CPU seconds the children of this shell used between two `times > FILE` (user + system of the children, line 2)
 oi_cpu_secs() {
-  awk 'function s(t,  a) { split(t, a, "m"); sub(/s$/, "", a[2]); return a[1] * 60 + a[2] }
+  awk 'function s(t,  a) { gsub(/,/, ".", t); split(t, a, "m"); sub(/s$/, "", a[2]); return a[1] * 60 + a[2] }
        FNR == 2 { n++; t[n] = s($1) + s($2) } END { printf "%.2f\n", t[2] - t[1] }' "$1" "$2"
 }
 export -f oi_wall oi_status oi_cpu_secs
@@ -418,6 +419,7 @@ cmd_check() {
 }
 
 cmd_divergences() {
+  cmd_pins || return 1
   if [ "${1:-}" = --aot ]; then
     "$(arbace_exe)" "$root/test/ocaml/o2j_check.ae" divergences "$root/test/ocaml/check-aot.edn" "$root/test/ocaml/divergences-aot.edn"; return
   fi
@@ -434,6 +436,10 @@ O2J_RT=$root/jdk/ocaml/ocaml/rt
 o2j_key() {
   { cat "$LIB/key"; cat "$root/arbace/o2j.ae" "$root/jdk/ocaml/ocaml/rt.ae" "$O2J_RT"/*.ae | sha256sum; } | sha256sum | cut -d' ' -f1
 }
+
+# the key of an AOT run's rows (re-review 056's finding 2): the translator, the runtime and the stdlib (o2j_key), the limits of the level and the
+# corpus file; written beside check-aot.tsv (bin/oi check --aot) and the suite's, read by `bin/oi pins --attest`
+aot_key() { printf '%s\n' "$(o2j_key)" "timeout=$TIMEOUT load=${O2J_LOAD_ALLOWANCE:-20}" "$(sha256sum < "$1")" | sha256sum | cut -d' ' -f1; }
 
 o2j() {
   ARBACE_PATH=$root O2J_RT=$O2J_RT GOMEMLIMIT=${O2J_GOMEMLIMIT:-900MiB} GOMAXPROCS=1 "$(arbace_exe)" -m arbace.o2j "$@"
@@ -600,7 +606,7 @@ cmd_check_aot() {
     printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$st" "$(sha256sum < "$d/o2j.out" | cut -d' ' -f1)" "$(wc -c < "$d/o2j.out")" "$secs" "$note" >> "$out.new"
     rm -f "$d/$u.ae"
   done
-  LC_ALL=C sort "$out.new" > "$out"; rm -f "$out.new"
+  LC_ALL=C sort "$out.new" > "$out"; rm -f "$out.new"; aot_key "$OI_DIR/corpus.tsv" > "$out.key"
   local mode=judge; [ "$RECORD" = 1 ] && mode=record
   [ -n "$ONLY" ] && mode=$mode-only
   "$(arbace_exe)" "$root/test/ocaml/o2j_check.ae" "$mode" "$out" "$OI_DIR/corpus.tsv" "$REFS" "$O2J/oi.tsv" \
@@ -608,39 +614,63 @@ cmd_check_aot() {
 }
 
 
-# ---- the pins' evidence (re-review 049's finding 5): a known entry of kind "status " carries a prefix of the output's sha256; the digests of the
-# runs the pins were checked against are committed in test/ocaml/pins-attested.tsv (LEVEL ID STATUS SHA256, level oi or aot), written by
-# `bin/oi pins --attest` from the last runs' rows (oi: .tmp/oi/check.tsv, .tmp/o7/check.tsv; aot: .tmp/o6/check-aot.tsv, .tmp/o7/aot/check.tsv) and
-# checked, no run, by `bin/oi pins`: every pin has an attested row whose digest starts with it, and no attested row lacks a pin
+# ---- the pins' evidence (re-review 049's finding 5, 056's finding 2): a known entry of kind "status " carries a prefix of the output's sha256; the
+# digests of the runs the pins were checked against are committed in test/ocaml/pins-attested.tsv (LEVEL ID STATUS SHA256, level oi or aot; lines
+# starting with # say which commit and which keys of runs they come from), written by `bin/oi pins --attest` from the rows of runs whose key file
+# is the current key (oi: .tmp/oi/check.tsv, .tmp/o7/check.tsv with oi_key; aot: .tmp/o6/check-aot.tsv, .tmp/o7/aot/check.tsv with aot_key; a
+# missing or stale file is skipped and said) and checked, no run, by `bin/oi pins`, which `bin/oi divergences` and `suite divergences` run: every
+# pin has an attested row whose digest starts with it, and no attested row lacks a pin
 PINS_ATTESTED=${OI_PINS_ATTESTED:-$root/test/ocaml/pins-attested.tsv}
 pins_of() { # LEVEL KNOWN.edn: LEVEL, ID and SHA prefix of each pin
   awk -F'"' -v lv="$1" '/^ \[/ && $6 == "status " && $8 != "" { printf "%s\t%s\t%s\n", lv, $2, $8 }' "$2"
 }
 pins_all() { pins_of oi "${OI_KNOWN_DIR:-$root/test/ocaml}/oi-known.edn"; pins_of aot "${OI_KNOWN_DIR:-$root/test/ocaml}/aot-known.edn"; }
+# pins_runs LEVEL: "FILE TAG" for each rows file of the level whose key file is the current key (TAG: level, corpus and the key's first 12 digits)
+pins_runs() {
+  local lv=$1 spec f c k want
+  if [ "$lv" = oi ]; then set -- "$OI_DIR/check.tsv:$OI_DIR/corpus.tsv:program" "$S/check.tsv:$S/corpus.tsv:suite"
+  else set -- "$O2J/check-aot.tsv:$OI_DIR/corpus.tsv:program" "$S/aot/check.tsv:$S/corpus.tsv:suite"; fi
+  for spec in "$@"; do
+    f=${spec%%:*}; c=${spec#*:}; c=${c%%:*}; k=${spec##*:}
+    if [ ! -f "$f" ] || [ ! -f "$f.key" ] || [ ! -f "$c" ]; then echo "oi: pins: $lv $k run skipped: $f or its key is missing" >&2; continue; fi
+    if [ "$lv" = oi ]; then want=$(oi_key "$c"); else want=$(aot_key "$c"); fi
+    if [ "$(cat "$f.key")" != "$want" ]; then echo "oi: pins: $lv $k run skipped: $f was made by another key" >&2; continue; fi
+    echo "$f $lv-$k=${want:0:12}"
+  done
+}
 cmd_pins() {
   local pl=$OI_DIR/pins.list; pins_all | LC_ALL=C sort > "$pl"
   [ -s "$pl" ] || die "pins: no pin found in the known files"
   if [ "${1:-}" = --attest ]; then
-    local f lv id sha st row bad=0
+    local lv id sha st row bad=0 files tags="" f t files_oi files_aot
     : > "$PINS_ATTESTED.new"
+    files_oi=$(pins_runs oi) || true; files_aot=$(pins_runs aot) || true
+    tags=$(printf '%s\n%s\n' "$files_oi" "$files_aot" | awk 'NF { printf " %s", $2 }')
     while IFS=$'\t' read -r lv id sha; do
-      if [ "$lv" = oi ]; then f="$OI_DIR/check.tsv $S/check.tsv"; else f="$O2J/check-aot.tsv $S/aot/check.tsv"; fi
-      row=$(awk -F'\t' -v id="$id" '$1 == id { print $2 "\t" $3; exit }' $f 2>/dev/null) || true
-      [ -n "$row" ] || { echo "pins: $lv $id: no row in the last run ($f)" >&2; bad=1; continue; }
+      if [ "$lv" = oi ]; then files=$files_oi; else files=$files_aot; fi
+      row=""
+      while read -r f t; do
+        [ -n "$f" ] || continue
+        row=$(awk -F'\t' -v id="$id" '$1 == id { print $2 "\t" $3; exit }' "$f") || true
+        [ -n "$row" ] && break
+      done <<< "$files"
+      [ -n "$row" ] || { echo "pins: $lv $id: no row in a run of the current key" >&2; bad=1; continue; }
       st=${row%%$'\t'*}; row=${row#*$'\t'}
       case $row in "$sha"*) printf '%s\t%s\t%s\t%s\n' "$lv" "$id" "$st" "$row" >> "$PINS_ATTESTED.new" ;; *) echo "pins: $lv $id: the run's digest $row does not start with the pin $sha" >&2; bad=1 ;; esac
     done < "$pl"
     [ "$bad" = 0 ] || { rm -f "$PINS_ATTESTED.new"; die "pins: not attested"; }
-    LC_ALL=C sort "$PINS_ATTESTED.new" > "$PINS_ATTESTED"; rm -f "$PINS_ATTESTED.new"
-    echo "oi: pins: $(wc -l < "$PINS_ATTESTED") attested in $PINS_ATTESTED"; return 0
+    { echo "# attested $(git -C "$root" describe --always --dirty 2>/dev/null || echo unknown), keys of the runs:$tags"
+      LC_ALL=C sort "$PINS_ATTESTED.new"; } > "$PINS_ATTESTED"; rm -f "$PINS_ATTESTED.new"
+    echo "oi: pins: $(grep -vc '^#' "$PINS_ATTESTED") attested in $PINS_ATTESTED"; return 0
   fi
   [ -r "$PINS_ATTESTED" ] || die "pins: $PINS_ATTESTED cannot be read (bin/oi pins --attest)"
   local n=0 lv id sha rest bad=0
   while IFS=$'\t' read -r lv id sha; do
     n=$((n + 1))
-    awk -F'\t' -v lv="$lv" -v id="$id" -v sha="$sha" '$1 == lv && $2 == id && index($4, sha) == 1 { f = 1 } END { exit !f }' "$PINS_ATTESTED" || { echo "PIN $lv $id: no attested digest starts with $sha" >&2; bad=1; }
+    awk -F'\t' -v lv="$lv" -v id="$id" -v sha="$sha" '$0 !~ /^#/ && $1 == lv && $2 == id && index($4, sha) == 1 { f = 1 } END { exit !f }' "$PINS_ATTESTED" || { echo "PIN $lv $id: no attested digest starts with $sha" >&2; bad=1; }
   done < "$pl"
   while IFS=$'\t' read -r lv id rest; do
+    case $lv in '#'*) continue ;; esac
     awk -F'\t' -v lv="$lv" -v id="$id" '$1 == lv && $2 == id { f = 1 } END { exit !f }' "$pl" || { echo "STALE $lv $id: attested, but no longer pinned" >&2; bad=1; }
   done < "$PINS_ATTESTED"
   [ "$bad" = 0 ] || { echo "oi: pins: not attested" >&2; return 1; }
