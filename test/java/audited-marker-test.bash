@@ -15,6 +15,7 @@
 #   D. audit-070's answers to 088's findings 1-3 as data: java-judge's :uses, :audit-timeout's keys,
 #      levels-known.edn, check.ae's refusal of --record with --audited (queue 093).
 #   E. check()'s head (its options) run alone: --record refused under a tracer unless --save (queue 093).
+#   F. the rule's documentation: :audit-timeout's :rule and check.ae's comment, interp only (queue 093).
 # Usage: bash test/java/audited-marker-test.bash   (AUDITED_TEST_REV=REV: the files at a git revision of
 # this checkout instead of its working tree, e.g. 07194e71 to see it fail before audit-070). Needs
 # bash, awk, strace (A1-A3 skipped without it, or when this shell is traced already), joker (C skipped
@@ -209,6 +210,12 @@ else
     if [ $est = 0 ] && [ "$eout" = proceed ]; then ok "E4 traced, no --record: runs"; else no "E4 traced (status $est: $eout)"; fi
   fi
 fi
+
+# ---- F: the rule documented interp-only and inert without compiled results (088 finding 6, queue 093)
+rule=$(grep -E '^ *:rule ' "$t/at.edn")
+if grep -q 'Interp only' <<< "$rule" && grep -q 'java-check-judge' <<< "$rule" && grep -q ':compiled would hold nothing' <<< "$rule"; then ok "F1 :audit-timeout's :rule: interp only, :compiled holds nothing, the essential pair never holds"; else no "F1 :audit-timeout's :rule does not document the rule as interp-only and inert without compiled results"; fi
+awk '/^ *;;/ { b = b $0 "\n"; next } /^ *audited \(set / { printf "%s", b; exit } { b = "" }' "$t/check.ae" > "$t/held.doc"
+if grep -q 'Interp only' "$t/held.doc" && grep -q 'java-check-judge' "$t/held.doc" && ! grep -q ':unstable holds' "$t/held.doc"; then ok "F2 check.ae's comment on audited: interp only, the essential pair, no stale ':unstable holds'"; else no "F2 check.ae's comment on audited: $(tr '\n' ' ' < "$t/held.doc")"; fi
 
 echo "audited-marker-test: $((n - bad)) of $n"
 if [ "$bad" = 0 ] && [ "$n" -gt 0 ]; then echo PASS; exit 0; else echo FAIL; exit 1; fi
