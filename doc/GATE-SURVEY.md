@@ -2783,6 +2783,45 @@ whenever its producer is), so the two are in the same directory.
   reused and from where, and its fallback is today's behaviour. (d) if the user wants "made in this run's clone" to stay the
   default. (c) only if the logs were to be pruned, which GTS103 already rules out for a cited run.
 
+## As built: GTS130 (a) (write-ahead)
+
+Proposed above, not decided; built on the VM's branch `mac/074-clean-judge` (queue 074, light: nothing built or run), to be
+kept or dropped with the decision. `clean.ae` and `bin/gate`'s `--only` code are in no key: nothing is rekeyed.
+- `test/gate/clean.ae`'s `select`: the upward step of the closure takes a producer P of a selected consumer C only when
+  `reuse-no` gives a reason (P has parts; did not pass clean with its audit ok; its material changed; C's base
+  `plan/C.inputs` has no `uses U` line; `LOGS-ROOT/<P's run's :logs>/gate/out/U` is missing or its digest,
+  `gate.plan/out-digest`, is not the line's). The reason is in P's line: `run P a producer of a step rerun, its output not
+  reused: REASON`. A producer left out whose outputs selected consumers read is printed in MODE checks as `reuse NAME WHY
+  SRC` (WHY the skip's, then `; its output reused from LOGS/gate/out/NAME, the digests of U,... the base's (GTS130 (a))`;
+  SRC the directory to copy). The downward step, GTS79 (b), GTS103 and the stale test are unchanged; a reused producer is
+  compared as any check left out (its run's logs gone: GTS103's refusal).
+- `bin/gate`'s `only_apply`: a `reuse` line copies SRC whole into the clone's `.tmp/gate/out/NAME` (`cp -a`, then `diff
+  -rq`; a failed copy stops the run, `== gate FAILED: --only's reuse of NAME's output`), appends `NAME<TAB>SRC` (relative to
+  `GATE_CLEAN_LOGS_ROOT`) to `.tmp/gate/reused.tsv` and marks NAME skipped, so that `run_one` keys each consumer (decision
+  `after`) over the copied output. `clean_record` prints ` :reused [{:step NAME :from SRC} ...]` when there is one;
+  `merge` puts it in the run's map in `:runs`; the merged record's header says what it means.
+
+Tested (`.tmp/fix-tests/074/gts130-test.sh`, not committed): `select` and `merge` copied from `clean.ae` and run under joker
+(shims as GTS103's test, and `out-digest` as `out_sha`), `only_apply` and `clean_record`'s `:reused` line extracted from
+`bin/gate`, over a fabricated table (builds `go-build`, `javac-tool`; producers `r`, `i` (uses `r/forms.sha256`); the judge
+`j` (uses `r/results.tsv`, `i/results.tsv`); `x`) and a record whose run 0 passed everything. On the proposal's commit
+(`2f467bfb`), a change to `j`'s material alone selects `run r`, `run i` (`a producer of a step rerun`) and the build
+`javac-tool`: 15 of 16 cases fail (GTS103's refusal passes). On the change, all 16 pass: `j` alone runs, `r` and `i` are
+`reuse` lines with run 0's `out/` as source, no build is needed (also `--only j`); an edited `out/i` reruns `i` (digest) and
+still reuses `r`; a missing `out/r` reruns `r` and `i` (its consumer); `j`'s base line missing reruns both; `r`'s material
+changed reruns `r`, `i`, `j` as before; `r` failed at the base reruns it; with `j` passed at a later run 1, the outputs come
+from run 0's logs; run 0's logs gone is refused (GTS103); `only_apply` copies both outputs, marks them skipped and writes
+`reused.tsv`, and stops when a source is gone at the copy; the `:reused` line reads and `merge` puts it in the new run's map,
+`r` and `i` keeping `:run 0`, `j` at `:run 1`, `:status :passed`.
+
+What only the main host's run can show: `bin/gate --full --clean --tag TAG --only failed,changed` after a change to
+`test/java/divergences.edn` alone, on a record whose Java producers passed at a run with its logs kept: `only-checks.tsv`
+lists the six Java producers as `reuse`, `javac-tool` is not built (unless another selected step needs it), `java-judge`
+runs under the audit on the copied outputs (its audit ok: `.tmp/gate/out/` is read as before) and passes, its `uses` lines
+equal to the base's, and the merged record carries `:reused` with the producers keeping their `:run`. Also that the run's
+own logs (`SHA.logs.N/gate/out/`) then hold the copies (the size of the Java levels' `--save` directories, not measured
+here).
+
 ## Proposals (GTS170-GTS173): the audited rule's review (070)
 
 From the VM's review of main's `07194e71` (`.tmp/mac-queue/reports/070-review-main-audited.md`); built on the branch
