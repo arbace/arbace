@@ -2923,9 +2923,13 @@ Not run: `check --aot` and `srfi --aot` (they build Go programs), si's ecraven, 
   read, `port-position` not moved by a pushed-back byte or character. Options: (a) as built; (b) move the position (and re-read from the
   buffer, as Chez does) for ports that hold their input (bytevector, string, file); (c) (b) and a bound of one item as Chez's buffer has room
   for. *Recommended: (a)* until a program needs the position (nothing in the mats does); (b) then.
+  Re-review 033 (N4) adds, as built: the end of file is accepted anywhere and any number of pushbacks (Chez refuses eof once its buffer is
+  non-empty and a second item), and the given value is returned (Chez re-reads its buffer and ignores it); see SC211.
 - **SC202 `set-port-length!` and the nonblocking procedures.** As built: file output ports only; the nonblocking procedures raise "not
   supported". Options: (a) as built; (b) `set-port-length!` for bytevector output ports too, with Chez's rules for the position; (c) nonblocking
   mode for the console. *Recommended: (a)*; no mat or program asks.
+  Re-review 033 (N4): `set-port-length!` on bytevector and string output ports (Chez supports it) is also not supported; after re-review 033's
+  fixes `port-length` works on string ports and the nonblocking predicates answer as Chez on file ports (see SC210).
 - **SC203 The larceny `.input` files.** `test/scheme/si/programs.edn` names `larceny-r6rs/{earley,fib,nboyer}.input`, not pinned by
   `test/scheme/corpora.edn`, so a fresh checkout's `bin/si check` crashes three programs. Options: (a) leave (the files are in the
   repository of the pinned commit); (b) pin them (three files, SHA-256, `bin/repr-scheme corpus fetch`); (c) commit them under `test/scheme/si/`.
@@ -2949,3 +2953,60 @@ Not run: `check --aot` and `srfi --aot` (they build Go programs), si's ecraven, 
 `go/arbace/scm/port.ae`, `go/arbace/scm/prim_io.ae` (and `ports_test.ae`), `scheme/lib/chezscheme.sls`, `scheme/psyntax/psyntax.pp.ae`. Not shipped:
 `tools/psyntax/boot.ss`, `arbace/scheme/{regress,check,corpora}.ae`, `bin/si`, `test/scheme/**` (`mats/run.sps`, `divergences-corpora.edn`,
 `check-mats-*.edn`, `ref-ecraven-chez.edn`).
+
+## As built: re-review 033's fixes (2026-11-01)
+
+Branch `scheme-sm1`, light tier (stage 0 as the tools' host, the light driver; no gate, no build of Arbace's executables or javac's tool, no
+lock). Report: `.tmp/review-033.md` (the helper VM's re-review of "As built: re-review 025's fixes" and of SC180-SC182, SC190). Its nine
+findings, N1-N9; the commits `0ded8bcd` to `81a25361` and the one that records them.
+
+### Per finding
+
+| # | holds? | fix | test |
+|---|---|---|---|
+| N1 | yes | `get-bytevector-some` returns pushed-back bytes first and stops at a pushed-back end of file (`prim_io.ae`) | `ports_test.ae`; `si/ports-pushback` `n1` |
+| N2 | yes | `set-port-position!` clears the pushed-back items | unit test; `si/ports-pushback` `n2`, `n2t` |
+| N3 | yes | the console counts as having read once it has read a byte or character (`port.ae`, `prim_io.ae`), so `unget-char`/`unget-u8` work after a read | unit test (`TestUnget`) |
+| N4 | in part | `fresh-line` after an extraction or a reposition, `port-length` and `port-has-port-length?` on string ports, nonblocking mode of file ports (`#t`, `#f`, as Chez); the residuals below stay | unit tests; `si/ports-pushback` `fl`, `len`, `nb` |
+| N5 | yes (decided SC191 (a)) | the volatile class lists a count line for the items it hides and a fast benchmark that hangs is a regression (`volatile-hang`; `regress.ae`); `corpora regress-test` | `bin/si corpora regress-test` |
+| N6 | yes | with N1: `get-bytevector-some` on a custom binary port calls `read!` | `si/ports-pushback` `n6` |
+| N7 | yes | 17 anchored alternatives that matched no recorded item dropped; `corpora divergences` now refuses one (`unmatched-anchors`) | `corpora divergences`: rc 0 |
+| N8 | yes | `rec-judged` filters by the requested files (`requested-record`), a requested file with no output is `result-absent` | `corpora regress-test` |
+| N9 | yes (wording) | `mats-numeric`'s `:why`: R6RS's own `number->string` precision argument, a gap in si's `(rnrs)`, not a Chez extension; `mats-clause-errors`: 12 clauses now | none (text) |
+
+**N4's residuals** (differences from Chez left as they are; to be written into SC201 and SC202 below):
+- `unget` of the end of file: Chez refuses it once its buffer is non-empty (after a read on a bytevector, string or file port, and a second time);
+  si accepts it anywhere and any number of pushbacks.
+- The pushed-back value: Chez re-reads its buffer and ignores the value given (`unget-char #\z` after reading `#\a` gives `#\a`); si returns `#\z`.
+- After `set-port-position!` to 0 on a string output port, `fresh-line` and then the extraction give "a" on Chez, "" on si.
+- `set-port-length!` on bytevector and string output ports: Chez supports it, si raises (file output ports only).
+
+### The numbers
+
+- `bin/si mats` whole (10 m, `SI_GOMEMLIMIT=700MiB`): **300 pass / 89 fail / 511 not run / 11 skipped**, the clauses of the mats not run, alone: 4,335 /
+  283 / 8,266; 1,468 non-pass items, 0 in no class; regressions none, **nothing moved** (the same as SC180 (b)'s record). `--record` rewrote the
+  record under the new key (74 lines of `check-mats-linux-amd64.edn`: the key and the digests of the outputs, no item).
+- `bin/si check --record-ref --record`: **47 of 48** (the 48th is `si/ports-pushback`, which passes: same output as Chez); the one non-pass
+  is `larceny/exceptions` (`chez-conditions`), as recorded; regressions: the new program only.
+- `bin/si r7rs`: 1,225 tests, **1,216 pass**, 9 fail (`r7rs-float-printing`); against Chez 1,205 both pass and 11 si only; regressions none.
+- `bin/si corpora divergences` rc 0, `bin/si corpora regress-test` ok (three cases). `bin/si unit` not rerun in this pass.
+
+### Proposals (SC210 onward)
+
+- **SC210 The residuals of N4.** Options: (a) leave them, recorded here and in SC201 and SC202; (b) fix the cheap one (`fresh-line` after
+  `set-port-position!` to 0 on a string output port: clear `lastc` when the position is 0) and leave the rest; (c) all four, with SC201 (b) and
+  SC202 (b). *Recommended: (a)*, or (b) when a program prints through `fresh-line` after rewinding; no mat or program asks for the others.
+- **SC211 Buffer-faithful `unget` (SC201 (b)).** As built (SC201 (a)): a stack of pushed-back items beside the port, the end of file accepted
+  anywhere, the given value returned. Options: (a) as built; (b) for ports that hold their input (bytevector, string, file) `unget` moves the
+  position back and the item is re-read from the data, so the value is ignored and eof is refused with a non-empty buffer, as Chez; custom and
+  console ports keep the stack; (c) (b) and the bound of one pushback. *Recommended: (a)* until a program ungets something it did not read or
+  relies on the refusal; then (b), whose cost is `port-position` becoming consistent with the pushback (the SC201 point).
+- **SC212 A two-tier volatile class by margin (N5).** As built: every item of `ecraven-too-slow` is listed by a count line only, and a fast
+  benchmark that hangs is a regression (`volatile-hang`). Options: (a) as built; (b) two tiers: an item whose recorded seconds are under half the
+  limit is outside the class (any time-out is an item, as mperm 28.5 s and nqueens 27.8 s would be on a slower host), the slow ones in it;
+  (c) the class by seconds on the reference host re-measured per host. *Recommended: (a)*; (b) if the arm64 host or a slower one shows a
+  second benchmark crossing the limit.
+- **SC213 Memory of the full mats run.** `bin/si mats` peaks at about 2.3 GB resident (5_2.ms, the cyclic-list mats) with `SI_GOMEMLIMIT=700MiB`
+  (2.6 GB at the default 1000 MiB) and dies out of memory under `ulimit -v 2.5 GB` (Go reserves address space). Options: (a) as built;
+  (b) run 5_2.ms with a lower watchdog or a smaller cyclic-list limit; (c) a per-file memory limit in `bin/si mats` and a class for the
+  items it hides. *Recommended: (b)*, small, and it keeps the light tier's 2 GB limit.
