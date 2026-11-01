@@ -53,6 +53,18 @@ for w in jdk jdk/newdir; do
 done
 out=$(cd "$t" && J2G_EDGE_WORK=.tmp/w FAKE_LOG=$scratch/fake.log bin/j2g-edge verify 2>&1); st=$?
 if [ "$st" = 1 ] && ! echo "$out" | grep -q 'tracked'; then ok "work under .tmp accepted"; else bad "work .tmp/w: status $st: $out"; fi
+# report 050: another checkout nested under .tmp/ (a worktree, the clean run's clone), and one outside
+n=$t/.tmp/worktrees/other; mkdir -p "$n/jdk"; echo OTHER > "$n/jdk/edge.edn"
+(cd "$n" && git init -q . && git add -A && git -c user.name=t -c user.email=t@t commit -q -m t) || bad "git init nested"
+o=$scratch/outside; mkdir -p "$o/jdk"; echo OTHER > "$o/jdk/edge.edn"
+(cd "$o" && git init -q . && git add -A && git -c user.name=t -c user.email=t@t commit -q -m t) || bad "git init outside"
+for w in .tmp/worktrees/other/jdk "$n/jdk/newdir" "$o/jdk"; do
+  out=$(cd "$t" && J2G_EDGE_WORK=$w FAKE_LOG=$scratch/fake.log bin/j2g-edge verify 2>&1); st=$?
+  if [ "$st" = 2 ] && [ "$(cat "$n/jdk/edge.edn")" = OTHER ] && [ "$(cat "$o/jdk/edge.edn")" = OTHER ] && [ ! -e "$n/jdk/newdir" ] && [ ! -e "$n/jdk/.lock" ] && [ ! -e "$o/jdk/.lock" ]; then ok "work $w in another checkout refused"
+  else bad "another checkout, work $w: status $st: $out"; fi
+done
+out=$(cd "$t" && J2G_EDGE_WORK=.tmp/worktrees/plain FAKE_LOG=$scratch/fake.log bin/j2g-edge verify 2>&1); st=$?
+if [ "$st" = 1 ]; then ok "work under .tmp/worktrees (no repo of its own) accepted"; else bad "work .tmp/worktrees/plain: status $st: $out"; fi
 
 [ "$fails" = 0 ] && echo "frozen-test: passed" || echo "frozen-test: $fails failed"
 exit $((fails > 0))
