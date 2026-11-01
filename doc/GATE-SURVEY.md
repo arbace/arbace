@@ -2975,6 +2975,12 @@ whenever its producer is), so the two are in the same directory.
   reused and from where, and its fallback is today's behaviour. (d) if the user wants "made in this run's clone" to stay the
   default. (c) only if the logs were to be pruned, which GTS103 already rules out for a cited run.
 
+## Decided (2026-11-01, the user): GTS150
+
+From main's doc/JOURNAL.md, "2026-11-01: the user's decisions after the tag" (VM report 103's sheet 2).
+- **GTS150 (a), kept:** a consumer rerun alone reuses its producers' clean outputs from the base run's logs, digests
+  checked, the default for every `--only` run; built on `mac/074-clean-judge` (below).
+
 ## As built: GTS150 (a) (write-ahead)
 
 Proposed above, not decided; built on the VM's branch `mac/074-clean-judge` (queue 074, light: nothing built or run), to be
