@@ -50,6 +50,7 @@ STUB
 # prints nothing: the known files are empty) and a stub jtree: `main -m arbace.repr.java.jtree check OUT ROOT
 # PATH...` writes OUT/files.tsv (one equal file), OUT/report.edn with :javac-diagnostics $STUB_DIAG (default 0)
 # and a log line; `mutate OUT SRC N K E SEED MODULE...` writes OUT/m1/share/classes/a/A.java holding $STUB_MUT.
+# An empty jdk/test too (the corpus tests).
 make_fake_parse_root() {
   local d=$1
   make_fake_root "$d"
@@ -79,4 +80,6 @@ esac
 STUB
   chmod +x "$d/bin/repr-java"
   mkdir -p "$d/test/repr/java/java" "$d/test/repr/java/module"
+  # jdk26u's tests beside its sources: parse-check's corpus tests fails without the directory (029's guard)
+  mkdir -p "$d/jdk/test"
 }
