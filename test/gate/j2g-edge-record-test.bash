@@ -55,5 +55,15 @@ wait $holder
 if [ "$st" != 0 ] && [ ! -s "$scratch/fake.log" ] && grep -q locked "$scratch/out"; then ok "a locked work directory is waited for, not shared"
 else bad "lock: status $st, log $(cat "$scratch/fake.log"), out $(cat "$scratch/out")"; fi
 
+# report 046, finding 6: a bad wait is named, an unwritable work directory fails at once
+: > "$scratch/fake.log"
+env J2G_EDGE_LOCK_WAIT=abc J2G_EDGE_WORK=$w J2G_FIXTURES=$scratch/fx FAKE_LOG=$scratch/fake.log "$t/bin/j2g-edge" verify > "$scratch/out" 2>&1
+st=$?
+if [ "$st" = 1 ] && grep -q "not a number" "$scratch/out"; then ok "a bad J2G_EDGE_LOCK_WAIT is named"; else bad "wait=abc: status $st: $(cat "$scratch/out")"; fi
+mkdir -p "$scratch/w2/.lock"   # a directory where the lock file goes: the open fails, even as root
+start=$SECONDS
+env J2G_EDGE_WORK=$scratch/w2 J2G_FIXTURES=$scratch/fx FAKE_LOG=$scratch/fake.log J2G_EDGE_LOCK_WAIT=5 "$t/bin/j2g-edge" verify > "$scratch/out" 2>&1
+if [ $((SECONDS - start)) -lt 3 ] && grep -q "cannot open" "$scratch/out"; then ok "an unopenable lock file fails at once"; else bad "lock open: $(cat "$scratch/out")"; fi
+
 [ "$fails" = 0 ] && echo "j2g-edge-record-test: passed" || echo "j2g-edge-record-test: $fails failed"
 exit $((fails > 0))
