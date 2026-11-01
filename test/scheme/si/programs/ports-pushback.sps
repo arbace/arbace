@@ -31,6 +31,12 @@
 (let ([p (open-output-string)])
   (put-string p "abcd") (set-port-position! p 0) (put-string p "Z") (show 'ov1 (get-output-string p) (port-position p)))
 (show 'len (port-has-port-length? (open-string-input-port "ab")) (port-length (open-string-input-port "abc")))
+;; re-review 044, M2: nonblocking mode on string, bytevector and binary console ports (#t, #f, settable); the textual console and custom ports have none
+(let-values ([(bp bex) (open-bytevector-output-port)] [(sp sex) (open-string-output-port)])
+  (for-each (lambda (p) (show 'nb2 (port-has-port-nonblocking?? p) (port-has-set-port-nonblocking!? p) (try (port-nonblocking? p)) (try (begin (set-port-nonblocking! p #f) 'ok))))
+            (list (open-string-input-port "a") sp (open-bytevector-input-port #vu8(1)) bp (open-bytevector-input-port #vu8(1) (native-transcoder))
+                  (standard-input-port) (standard-output-port) (current-input-port) (current-output-port)
+                  (make-custom-binary-input-port "x" (lambda (bv s n) 0) #f #f #f))))
 (let ([name "ports-pushback.tmp"])
   ;; the scratch file is deleted even when a line raises (re-review 044, M5)
   (dynamic-wind

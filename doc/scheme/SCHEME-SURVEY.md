@@ -2929,7 +2929,9 @@ Not run: `check --aot` and `srfi --aot` (they build Go programs), si's ecraven, 
   supported". Options: (a) as built; (b) `set-port-length!` for bytevector output ports too, with Chez's rules for the position; (c) nonblocking
   mode for the console. *Recommended: (a)*; no mat or program asks.
   Re-review 033 (N4): `set-port-length!` on bytevector and string output ports (Chez supports it) is also not supported; after re-review 033's
-  fixes `port-length` works on string ports and the nonblocking predicates answer as Chez on file ports (see SC210).
+  fixes `port-length` works on string ports and the nonblocking predicates answer as Chez on file ports (see SC210)
+  and, since re-review 044 (M2), on string, bytevector and binary console ports too (`hasNonblocking`, no name heuristic; the textual console and
+  custom ports have none, as Chez).
 - **SC203 The larceny `.input` files.** `test/scheme/si/programs.edn` names `larceny-r6rs/{earley,fib,nboyer}.input`, not pinned by
   `test/scheme/corpora.edn`, so a fresh checkout's `bin/si check` crashes three programs. Options: (a) leave (the files are in the
   repository of the pinned commit); (b) pin them (three files, SHA-256, `bin/repr-scheme corpus fetch`); (c) commit them under `test/scheme/si/`.
