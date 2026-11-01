@@ -18,12 +18,14 @@ mkwork() { # mkwork DIR NAME...: a judged work directory whose files all pass; l
 judge() { arbace_tool -m arbace.cpp.check judge "$1" "$root/test/cpp/lower-known.edn" "$rec" ${2:+"$2"} > "$1.log" 2>&1; }
 all=$(grep -o '^  "\(samples\|runtime\)/[^"]*"' "$rec" | tr -d '" ' | sort -u)
 set -- $all
-[ $# = 14 ] || die "the record's samples: $#"
+# the record's count (14 at CP132 (b), 16 since CP120 (b) and CP121 (c)): the summary's :files, which the names must match
+n=$(grep -A1 '^{:samples' "$rec" | sed -n 's/^{:files \([0-9]*\),.*/\1/p'); first=$1
+[ -n "$n" ] && [ $# = "$n" ] || die "the record's samples: $# names, its summary ${n:-none}"
 KEY=samples mkwork "$t/full" "$@"; judge "$t/full"; st=$?
 [ $st = 0 ] && ok "the whole samples list passes" || bad "the whole list: exit $st, $(tail -2 "$t/full.log")"
 # a file lost from the list (13 of 14)
 shift; KEY=samples mkwork "$t/lost" "$@"; judge "$t/lost"; st=$?
-[ $st = 1 ] && grep -q 'recorded names missing: runtime/ctor-throw.cpp' "$t/lost.log" && ok "a run of the samples that lost a file fails, naming it" || bad "13 of 14: exit $st, $(tail -2 "$t/lost.log")"
+[ $st = 1 ] && grep -q "recorded names missing: $first" "$t/lost.log" && ok "a run of the samples that lost a file fails, naming it" || bad "13 of 14: exit $st, $(tail -2 "$t/lost.log")"
 # the same, the list named
 judge "$t/lost" samples; st=$?
 [ $st = 1 ] && ok "named: fails too" || bad "named: exit $st"
@@ -39,10 +41,10 @@ judge "$t/lost" none; st=$?
 [ $st = 0 ] && ok "none: not held" || bad "none: exit $st"
 # an extra file: the count is not the record's
 KEY=samples mkwork "$t/extra" $all "samples/new.cpp"; judge "$t/extra"; st=$?
-[ $st = 1 ] && grep -q '15 files, the record 14' "$t/extra.log" && ok "a count other than the record's fails" || bad "extra: exit $st, $(tail -2 "$t/extra.log")"
+[ $st = 1 ] && grep -q "$((n+1)) files, the record $n" "$t/extra.log" && ok "a count other than the record's fails" || bad "extra: exit $st, $(tail -2 "$t/extra.log")"
 # the list maker writes the header, and the 14 files of the record
 "$root/bin/cppi" list samples+runtime > "$t/made.list"
-[ "$(head -1 "$t/made.list")" = "#list samples" ] && [ "$(grep -vc '^#' "$t/made.list")" = 14 ] && ok "bin/cppi list samples+runtime: the header and 14 files" || bad "list samples+runtime: $(head -1 "$t/made.list"), $(grep -vc '^#' "$t/made.list") files"
+[ "$(head -1 "$t/made.list")" = "#list samples" ] && [ "$(grep -vc '^#' "$t/made.list")" = "$n" ] && ok "bin/cppi list samples+runtime: the header and the record's $n files" || bad "list samples+runtime: $(head -1 "$t/made.list"), $(grep -vc '^#' "$t/made.list") files"
 # lower-check's side: the header is cut from list.tsv and kept as list.key (an empty list is still refused)
 printf '#list samples\n' > "$t/empty.list"
 "$root/bin/cppi" lower-check "$t/empty.list" "$t/we" > "$t/empty.log" 2>&1; [ $? = 2 ] && ok "a list of only a header is refused" || bad "header-only list: $(tail -1 "$t/empty.log")"
