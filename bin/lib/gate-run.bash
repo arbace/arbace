@@ -54,7 +54,10 @@ gate_env() {
   gkey=$("$root/bin/arbace-go" --gate-key) || return 1
   . "$root/bin/lib/javac-key.bash"
   jkey=$(arbace_javac_key "$root") || return 1
-  export ARBACE_GATE_CACHE=$exes/${gkey:0:20} GATE_CACHE=$exes/${gkey:0:20} GATE_JAVAC_DIR=$exes/javac-${jkey:0:20}
+  # the gate computes the directory whatever ARBACE_GATE_CACHE the caller has (an override is for the tools run by hand)
+  ARBACE_GATE_CACHE=$(unset ARBACE_GATE_CACHE; arbace_gate_cache "$root" "$gkey") || return 1
+  GATE_CACHE=$ARBACE_GATE_CACHE GATE_JAVAC_DIR=$exes/javac-${jkey:0:20}
+  export ARBACE_GATE_CACHE GATE_CACHE GATE_JAVAC_DIR
   export GATE_EXE=$GATE_CACHE/amd64/arbace GATE_TESTS=$GATE_CACHE/amd64/arbace-tests
   export GATE_JAVAC=$GATE_JAVAC_DIR/arbace-javac GATE_JOBS=${GATE_TEST_JOBS:-12}
   # Java's check's cache of read forms, shared by the worktrees (GT5: keyed by the sources, the options,
