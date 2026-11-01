@@ -42,10 +42,10 @@ S
   unset ARBACE_CPU_LOG
 fi
 
-# java-check's run_actions and judge, extracted, with limited stubbed: LIMS gets each attempt's limit, the
+# java-check's run_actions, judge and test_limit, extracted, with limited stubbed: LIMS gets each attempt's limit, the
 # statuses of the attempts come from SEQ (a space-separated list, 0 after its end)
 if sel retry-limits || sel attempt-log; then
-  eval "$(sed -n '/^run_actions() {/,/^}/p;/^judge() {/,/^}/p' "$root/bin/java-check")"
+  eval "$(sed -n '/^run_actions() {/,/^}/p;/^judge() {/,/^}/p;/^test_limit() {/,/^}/p' "$root/bin/java-check")"
   run_dirs() { echo "$work/w $work/tmp"; }
   limited() {
     local n; echo "$1" >> "$work/lims"; n=$(wc -l < "$work/lims"); local -a q=($SEQ); return "${q[n-1]:-0}"
@@ -63,6 +63,12 @@ if sel retry-limits; then
   [ "$lims" = "40 " ] && ck "retry-limits: the retry is one attempt at 40" ok || ck "retry-limits: attempts" "limits '$lims', expected '40 '"
   runcase 20 "124 124" > "$w/res"; lims=$(tr '\n' ' ' < "$work/lims")
   [ "$lims" = "20 40 " ] && ck "retry-limits: a first run is 20, then 40" ok || ck "retry-limits: first run" "limits '$lims'"
+fi
+if sel retry-limits; then
+  # GTS102 redone: a test's line in test/java/timeouts.txt raises its limit (never lowers it), times tmo_scale
+  mkdir -p "$w/troot/test/java"; printf '# c\nslow 60\nquick 5\n' > "$w/troot/test/java/timeouts.txt"
+  got=$(root=$w/troot timeout=20; echo "$(test_limit slow) $(test_limit quick) $(test_limit other) $(tmo_scale=2 test_limit slow)")
+  [ "$got" = "60 20 20 120" ] && ck "retry-limits: test_limit raises a test's limit from timeouts.txt" ok || ck "retry-limits: test_limit" "got '$got', expected '60 20 20 120'"
 fi
 if sel attempt-log; then
   # finding 3: an attempt that timed out and the one after it are logged; a pass after a timeout is said on stderr
