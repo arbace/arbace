@@ -109,11 +109,13 @@ Prior art:
   `test/arbace-go-aot-results.edn` (classes `test/clojure/divergences-aot.edn`), the two levels'
   disagreements listed (`bin/gate --full`'s `suite-aot`).
 - `bin/reap` (and `make reap`; REAP1, doc/FULL-SUPPORT-SURVEY.md, RPS3, RPS13): the REAP matrix,
-  read, eval, AOT and print for Clojure, Java and Go, judged from the checks' recorded results
-  alone (no runs): the cells and their sources in `test/reap/cells.edn`, the judging in
+  read, eval, AOT and print for Clojure, Java, Go and C (four rows, 16 cells since C8, doc/C23-SURVEY.md §10), judged from the
+  checks' recorded results alone (no runs): the cells and their sources in `test/reap/cells.edn`, the judging in
   `test/reap/main.ae`, each level's classes in `test/goi/divergences.edn`'s format
   (`test/clojure/divergences{,-read,-aot,-print}.edn`, `test/repr/go/divergences-{read,print}.edn`,
-  goi's, `test/java/divergences-diffcheck.edn`; Go's read numbers `test/repr/go/native-check-results.edn`,
+  goi's, `test/java/divergences-diffcheck.edn`; C's: `test/c/divergences{,-aot,-dg,-read,-annot,-print}.edn`, over the
+  records `test/c/check{-linux-amd64,-aot-linux-amd64,-dg-linux-amd64}.edn` and the known files of `test/repr/c/`, the reader
+  `:c-known`; Go's read numbers `test/repr/go/native-check-results.edn`,
   `bin/reap record-native-check`); a cell whose check is not recorded yet prints "no check yet".
   `bin/clojure-tests --divergences [RESULTS]` judges a suite run per test against the Clojure classes.
 - `LICENSE.md` holds all licenses: their full texts and which files each covers. Licenses are
@@ -216,7 +218,9 @@ Prior art:
     (doc/C23-SURVEY.md, CS1-CS63; spec doc/c/SPEC.md): ports of cc's lexer, preprocessor and parser, checked
     token for token against cc run by the helper `tools/ccdump` over `test/c/corpora.edn` and against gcc
     (`bin/repr-c check`, `parse-check`; the parse level's reference is gcc's acceptance, CS61; the Makefile's
-    `repr-c-*`), evaluated from the checkout, not embedded, in no gate step and out of `gate_key`.
+    `repr-c-*`), evaluated from the checkout, not embedded, out of `gate_key`; C's essential subsets are gate steps (C8, CS19:
+    `c-dg-essential`, `c-check-essential`, `c-aot-essential`, `c-c23` in the essential gate, `c-judge-test` in `--full`; the
+    subsets `test/c/essential-{dg,check,aot}.txt`) and its row of `bin/reap` is judged by the `reap` step.
   - `arbace/repr/clojure{.ae,/}`: `arbace.repr.clojure`, Clojure's bridge (`doc/REPR-CLOJURE.md`;
     `bin/repr-clojure read`, `print`, `roundtrip`, `check`): Clojure source into Arbace's, the
     names of the vendored Clojure, `.clj`/`.cljc` into `.ae`, a table of rules for the dialects'

@@ -118,7 +118,7 @@ gate-queue: ## the host's big-job lock's queue: the tickets of bin/heavy-lock wa
 	bin/heavy-lock --queue
 provenance-check: ## the provenance files' repr/java hash equals the reader's (bin/provenance-check; the gate's essential step, seconds)
 	bin/provenance-check
-reap: ## the REAP matrix: read, eval, AOT, print for Clojure, Java, Go from the checks' recorded results; every non-pass in a class, by design or deferred (bin/reap; no runs, seconds)
+reap: ## the REAP matrix: read, eval, AOT, print for Clojure, Java, Go, C from the checks' recorded results; every non-pass in a class, by design or deferred (bin/reap; no runs, seconds)
 	bin/reap
 reap-record-native-check: ## Go's read level's numbers, test/repr/go/native-check-results.edn, from bin/repr-go native-check's report (bin/reap record-native-check [REPORT=...])
 	bin/reap record-native-check $(REPORT)
@@ -296,6 +296,10 @@ ci-check: ## ci's check: every program of the C run corpora run by ci against gc
 	bin/ci check
 ci-check-aot: ## ci's AOT check: every program of the C run corpora translated by cf2g into Go, built in shards and run against gcc 15.2's run and the interpreted run (bin/ci check --aot)
 	bin/ci check --aot
+ci-check-essential: ## the essential subset of ci's run-level check (test/c/essential-check.txt: two passes of each corpus and one of each class), judged against the record (bin/ci check --only)
+	bin/ci check --only test/c/essential-check.txt
+ci-aot-essential: ## the essential subset of ci's AOT check (test/c/essential-aot.txt: six passes, a refused program, the threads class), judged against the record (bin/ci check --aot --only)
+	bin/ci check --aot --only test/c/essential-aot.txt
 ci-dg: ## the C23 corpus by its dg directives: gcc 15.2's c23 tests, the checker's errors judged by line and kind (bin/ci dg)
 	bin/ci dg
 ci-dg-essential: ## the essential subset of the C23 dg check: one file of each diagnostic family, all must pass (bin/ci dg --essential)
