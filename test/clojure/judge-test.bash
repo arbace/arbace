@@ -37,4 +37,30 @@ test_control_strict() {
 }
 t control-subject-missing-essential-fails test_control_strict
 
+# finding 8: the essential subset's compile log may lack reference entries of sources it never loads, but not name
+# one the reference does not have; the whole run's must equal
+test_sources_check() {
+  local ab=$tmp/ab fn
+  mkdir -p "$ab"
+  fn=$(awk '/^aot_sources_check\(\) \{/ { p = 1 } p { print } p && $0 == "}" { exit }' "${CT:-$here/bin/clojure-tests}")
+  [ -n "$fn" ] || return 1
+  eval "$fn"
+  host_run() { # the reference's :not-compiled and :not-loaded keys (the call's -e argument names which)
+    case $2 in *":not-compiled"*) printf 'a/one.clj\nb/two.clj\n' ;; *) printf 'ns.late\n' ;; esac
+  }
+  expected=$tmp/exp.edn
+  # the subset compiled one of the two sources the reference names: good under --essential, bad whole
+  printf 'aot: not compiled: a/one.clj\n' > "$ab/compile.log"
+  ess_list=x
+  aot_sources_check "$ab" > "$tmp/c1.out" 2>&1 || { cat "$tmp/c1.out" >&2; return 1; }
+  ess_list=
+  aot_sources_check "$ab" > "$tmp/c2.out" 2>&1 && return 1
+  # a source the reference does not name fails both
+  printf 'aot: not compiled: a/one.clj\naot: not compiled: c/three.clj\n' > "$ab/compile.log"
+  ess_list=x
+  aot_sources_check "$ab" > "$tmp/c3.out" 2>&1 && return 1
+  grep -q 'c/three.clj' "$tmp/c3.out"
+}
+t sources-check-essential-subset test_sources_check
+
 exit $failed
