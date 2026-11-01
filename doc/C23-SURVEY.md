@@ -3897,11 +3897,12 @@ Each with options, the recommended one first; none decided.
     with gcc, a run of hours, to be explained row by row); (b) a cheap check: hash of the lists' options file kept beside the record
     (no gcc run; catches a drift of how options are read, not a change of gcc's runs); (c) leave.
   - *Recommended: (b)*, then (a) at the next full re-record.
-- **CS234 gcc's `constexpr _Float16 f = 0.1f16;` refusal** (A's quirk). gcc 15.2 refuses a `_Float16` or `__bf16` constant of the object's own type;
-  clang accepts the first. The checker follows the standard.
-  - Options: (a) leave (the checker is the more permissive; no corpus file has it); (b) mirror gcc for the two types (the diagnostic would be
-    gcc's bug made a rule); (c) report it to gcc.
-  - *Recommended: (a)*.
+- **CS234 (corrected by report 053) gcc's refusal of `constexpr _Float16 f = 0.1f16;` is not a bug.** gcc 15.2 on x86-64 defines
+  `__FLT_EVAL_METHOD_TS_18661_3__ 0`: `_Float16` and `__bf16` are evaluated in float (C23 Annex H), so `0.1f16` is `(float)0.1` and only a
+  conversion rounds to binary16; the first version of this section called it a gcc quirk and left the checker on the type's own format.
+  Built in "F53" below. Left open: the evaluation method as a target fact (a `+fp16` or AVX512-FP16 target evaluates in the format,
+  `-fexcess-precision=16`): options (a) a `:flt-eval-method` beside `:ldouble-size` in the host's options (recommended, with the next target work);
+  (b) leave x86-64's model only.
 - **CS235 `-0.1L` and long double arithmetic keep no exact value.** A's `:ld` is carried by a literal only, so `constexpr double d = -0.1L;`
   (also refused by gcc) stays accepted.
   - Options: (a) carry `:ld` through unary minus and plus, and through a cast to long double; (b) represent long double values as BigDecimal
@@ -3915,3 +3916,36 @@ Shipped files changed: none. Not shipped: `arbace/c/{check,dg}.ae`, `arbace/repr
 worktree's `.tmp/`: `p/` (probes), `ci-dg.before-031/` (the dg work directory before), the logs `jt1.log`, `dg-rec3.log`, `check3.log`, `one.bash`
 (runs single judge-test tests). Rule slips: a `git show ... > /dev/null` was written once (B's before-run; no harm); the baseline `judge-test` was
 moved to the background by the tool's time limit while the first edit was made (it had loaded its sources). Nothing else known.
+
+### F53 Re-review 053's fixes (2026-11-01)
+
+Report 053 (the VM, reasoned from the code, nothing of Arbace run) found the conversion `round-to-format` bit-exact (49 edge cases, 14,995
+near-ties) but the *evaluation* wrong for `_Float16` and `__bf16`. Probed on this host first (gcc 15.2.0 and clang, x86-64):
+`__FLT_EVAL_METHOD__ 0`; `.tmp/p/e1.c` gives gcc errors on `constexpr _Float16 f = 0.1f16;`, `1.0f16/3`, `1.0f16 + 0.0001f16`,
+`2049.0f16` for a `_Float16`, none on `constexpr __bf16 j = 2049.0f16 - 1;`, `_Static_assert((int)2049.0f16 == 2049);` and the others, as the report predicted.
+
+- **Findings 1, 2 and 4, one commit** (they share the helper: the commit after `bbb7db91` touching `check.ae`: `constexpr-float16-evaluated-in-float`,
+  `constexpr-long-double-range`). A `_Float16`/`__bf16` literal holds the float nearest its exact decimal (`float-of-exact`, via `round-exact`, once,
+  not through a double); `binary` and the comparisons convert both operands to float (`eval-type`) and round the result to float; the type
+  stays `_Float16`/`__bf16`; `conv-val` (a cast, an initialization) rounds to the format. `round-exact` finds the binary exponent exactly (no
+  double estimate), so a long double constant past double's range (`1e400L`, `1e-400L`, `4.94e-324L`) is judged, and every binary object kind
+  (`float`, `double`, `_Float16`, `__bf16`, ...) takes `:ld` through `fits-binary?`. Tests failed before (4 assertions) and pass; gcc x86-64 agrees on every
+  line of the two files; the old `constexpr-float16.c` still agrees.
+- **Finding 3** (`read-error-prefix-is-not-the-message`): a regex is matched without the read error's `FILE:LINE:COL: ` prefix. The report's
+  second half (every directive of a line needs a message) was tried and **not kept**: it moves 8 passing files to unexplained (575 passes), so it
+  is CS236.
+- **Finding 6** (`fatal-error-at-an-expected-line`, extended): a non-fatal error in a header or with no line differs in `gcc-agrees`; gcc disagrees
+  with 7 files now (was 5), none a pass.
+- **Finding 7**: probed (`.tmp/p/d4.c`, gcc x86-64 DFP): gcc refuses `1.5e-399DD` and `1.5e-399DL` for a `_Decimal32`, accepts it for a
+  `_Decimal64` and `1.5e-102DF` for a `_Decimal64`; the checker gives the same five verdicts, so no change and no test (the report's example is
+  right in outcome).
+- **Finding 5** (`_Atomic int bool;` loses `_Atomic`) and **8** (`:why` unchecked, unpinned families) not taken: CS237, CS238.
+
+Proposals:
+- **CS236 Every directive of a line needs its own message.** gcc's dg matches each directive; `msg-mismatch` accepts a line when one regex hits.
+  Tried: 8 files become unexplained. Options: (a) classify the 8 (most are probably the checker saying one thing where gcc says two) and add
+  families or `:wrong-reason` lines, then make the rule strict (recommended); (b) leave.
+- **CS237 `_Atomic` among the qualifiers of `:c/bad-specs`.** The qualifier and the `_Atomic(T)` specifier have the same form `(atomic T)`.
+  Options: (a) a meta mark from the converter (`:c/atomic-qual`) that `leading-quals` reads (recommended); (b) with CS232 (a), keep the source text.
+- **CS238 Wrong-reason entries and unpinned families.** Options: (a) an optional `:checker` regex per wrong-reason entry and `:files` on every
+  family (recommended; one pass over the 24 families with the msg-mismatch report); (b) leave.
