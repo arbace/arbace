@@ -112,6 +112,68 @@
       (when r (free s))
       (return r))))
 
+;; the exit-time handlers (CP160 (b)): atexit, at_quick_exit and __cxa_atexit (the destructors of static objects) are native too, and a
+;; function registered with them that returns with the flag set returned into musl's exit unnoticed, where g++'s build terminates
+;; (an exception does not unwind through libc's frames). The lowering renames the lowered code's three to cx$atexit,
+;; cx$at_quick_exit and cx$cxa_atexit; the handlers run through a trampoline that calls cx$uncaught when the flag is set. atexit
+;; goes through musl's __cxa_atexit (the same order); at_quick_exit keeps its own list, run by one native at_quick_exit, last first
+(c/declare __cxa_atexit ^int [(* (fn [(* void)] void)) (* void) (* void)])
+(c/declare at_quick_exit ^int [(* (fn [void] void))])
+
+(c/struct cx$exit [^{:tag (* (fn [(* void)] void))} f ^{:tag (* (fn [void] void))} f0 ^{:tag (* void)} a ^{:tag (* (struct cx$exit))} next])
+
+(c/defn ^:static cx$exit_run ^void [^{:tag (* void)} p]
+  (let [^{:tag (* (struct cx$exit))} s (conv (* (struct cx$exit)) p)
+        ^{:tag (* (fn [(* void)] void))} f (-> s f)
+        ^{:tag (* (fn [void] void))} f0 (-> s f0)
+        ^{:tag (* void)} a (-> s a)]
+    (free p)
+    (if f (f a) (f0))
+    (when cx$pending (cx$uncaught))))
+
+(c/defn ^:static cx$exit_new ^{:tag (* (struct cx$exit))} [^{:tag (* (fn [(* void)] void))} f ^{:tag (* (fn [void] void))} f0 ^{:tag (* void)} a]
+  (let [^{:tag (* (struct cx$exit))} s (conv (* (struct cx$exit)) (malloc (sizeof-type (struct cx$exit))))]
+    (when (== s 0) (return s))
+    (set! (-> s f) f)
+    (set! (-> s f0) f0)
+    (set! (-> s a) a)
+    (set! (-> s next) 0)
+    (return s)))
+
+(c/defn cx$cxa_atexit ^int [^{:tag (* (fn [(* void)] void))} f ^{:tag (* void)} a ^{:tag (* void)} dso]
+  (let [^{:tag (* (struct cx$exit))} s (cx$exit_new f 0 a)]
+    (when (== s 0) (return -1))
+    (let [^int r (__cxa_atexit cx$exit_run s dso)]
+      (when r (free s))
+      (return r))))
+
+(c/defn cx$atexit ^int [^{:tag (* (fn [void] void))} f]
+  (let [^{:tag (* (struct cx$exit))} s (cx$exit_new 0 f 0)]
+    (when (== s 0) (return -1))
+    (let [^int r (__cxa_atexit cx$exit_run s 0)]
+      (when r (free s))
+      (return r))))
+
+(c/var ^:static ^{:tag (* (struct cx$exit))} cx$quick)
+
+(c/defn ^:static cx$quick_run ^void [void]
+  (let [^{:tag (* (struct cx$exit))} s (__atomic_exchange_n (addr cx$quick) 0 5)]
+    (while (!= s 0)
+      (let [^{:tag (* (struct cx$exit))} n (-> s next)
+            ^{:tag (* (fn [void] void))} f0 (-> s f0)]
+        (free s)
+        (f0)
+        (when cx$pending (cx$uncaught))
+        (set! s n)))))
+
+(c/defn cx$at_quick_exit ^int [^{:tag (* (fn [void] void))} f]
+  (let [^{:tag (* (struct cx$exit))} s (cx$exit_new 0 f 0)]
+    (when (== s 0) (return -1))
+    (let [^{:tag (* (struct cx$exit))} old (__atomic_exchange_n (addr cx$quick) s 5)]
+      (set! (-> s next) old)
+      (when (== old 0) (return (at_quick_exit cx$quick_run)))
+      (return 0))))
+
 ;; a filter clause that rejects the exception (C++98's dynamic exception specifications): eh_personality.cc's
 ;; __cxa_call_unexpected, without its bad_exception translation
 (c/defn __cxa_call_unexpected ^void [^{:tag (* void)} ue]
