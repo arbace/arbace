@@ -84,3 +84,7 @@ judge_bridges_empty() {
     *) echo "$1: :bridges is not empty ($b): a listed read admits any number of bridges in every corpus (split.ae counts none); count them per corpus first" >&2; return 1 ;;
   esac
 }
+
+# judge_jdk_root: the jdk26u checkout the judges read (judge_jdk_paths' $jdk), for bin/gate --pins, so that the
+# pinned commit is the one of the tree the checks read (review 067 C); status 1 and the refusal on a split
+judge_jdk_root() { (judge_jdk_paths && echo "$jdk"); }

@@ -31,4 +31,12 @@ for s in repr-java-parse repr-java-front repr-java-attr repr-java-nojavac; do
                  on && /:env \["JDK_SRC" "JDK"\]/ {f = 1} END {exit f ? 0 : 1}' "$root/test/gate/steps.edn"
   expect_rc "step $s keys JDK_SRC and JDK" 0 $?
 done
+
+# review 067 C: bin/gate --pins pins the commit of the tree the judges read
+r=$(unset JDK; JDK_SRC=$t/a/src; judge_jdk_root); [ "$r" = "$t/a" ] && ok "judge_jdk_root from JDK_SRC alone" || bad "judge_jdk_root from JDK_SRC alone ($r)"
+(JDK_SRC=$t/a/src JDK=$t/b judge_jdk_root > "$t/o" 2> /dev/null); expect_rc "judge_jdk_root refuses a split" 1 $?
+grep -q 'judge_jdk_root' "$root/bin/gate" && ok "bin/gate --pins uses it" || bad "bin/gate --pins uses it"
+# review 067 G: the gate's summary shows the new parse-check verdicts
+awk '/^  \{:name repr-java-parse /{on=1} on && /:summary/ {f = ($0 ~ /javac diagnostics/ && $0 ~ /mutants: the set/); exit} END {exit f ? 0 : 1}' "$root/test/gate/steps.edn"
+expect_rc "repr-java-parse's summary matches the diagnostics and mutants verdicts" 0 $?
 finish
