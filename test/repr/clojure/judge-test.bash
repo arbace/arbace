@@ -1,6 +1,6 @@
 #!/bin/bash
 # Tests of repr/clojure's judge (bin/repr-clojure check, GTS160, audit 076), over fabricated trees
-# and stubbed tools; run: test/repr/clojure/judge-test.bash [frozen|counts|notread|x509]...
+# and stubbed tools; run: test/repr/clojure/judge-test.bash [frozen|counts|notread|x509|libs]...
 # (default: all). Exit status 0 when every case holds. TOOLS_BASH names another bin/lib/tools.bash
 # (the tests of a fix are run with the file from before it to show they fail). The checks that
 # need Arbace run on stage 0 (ARBACE_HOST_EXE) with arbace/repr/clojure.ae from the checkout.
@@ -116,7 +116,30 @@ t_x509() {
   echo "$out" | grep -q "snapshot of 20261011, 31 days old at 20261111" && ok "x509: the snapshot's age is noted" || bad "x509: no age note: $out"
 }
 
-tests=("$@"); [ ${#tests[@]} = 0 ] && tests=(frozen counts notread x509)
+t_libs() {
+  local d=$scratch/l ct=$scratch/l/clojure-tests s1 s2
+  mkdir -p "$d/lib"
+  . "$here/bin/lib/repr-clojure/libs.bash" 2>/dev/null || { bad "libs: no bin/lib/repr-clojure/libs.bash"; return; }
+  printf 'jar one\n' > "$d/stage-one"; printf 'jar two\n' > "$d/stage-two"
+  s1=$(sha1sum < "$d/stage-one" | cut -c1-40); s2=$(sha1sum < "$d/stage-two" | cut -c1-40)
+  printf 'x=1\ndeps="\norg/clojure/alpha/1.0 %s\norg/clojure/beta/2.1 %s\n"\nmore=2\n' "$s1" "$s2" > "$ct"
+  [ "$(lib_jars_of "$ct" | tr '\n' ' ')" = "alpha-1.0 beta-2.1 " ] && ok "libs: jars derived from the deps block" || bad "libs: jars $(lib_jars_of "$ct")"
+  lib_verify "$ct" "$d/lib" 2>/dev/null; expect "libs: none downloaded is a skip (2)" 2 $?
+  cp "$d/stage-one" "$d/lib/alpha-1.0.jar"; cp "$d/stage-two" "$d/lib/beta-2.1.jar"
+  lib_verify "$ct" "$d/lib" 2>/dev/null; expect "libs: both verified" 0 $?
+  rm "$d/lib/beta-2.1.jar"
+  lib_verify "$ct" "$d/lib" 2>/dev/null; expect "libs: one missing fails (1)" 1 $?
+  # a bump in the deps with an old jar left in the directory: the old jar is not taken by presence
+  cp "$d/stage-two" "$d/lib/beta-2.1.jar"
+  sed 's|alpha/1.0|alpha/1.1|' "$ct" > "$ct.bump"; cp "$d/stage-one" "$d/lib/alpha-1.1.jar"
+  lib_verify "$ct.bump" "$d/lib" 2>/dev/null; expect "libs: a bumped version verified" 0 $?
+  rm "$d/lib/alpha-1.1.jar"; sed 's|alpha/1.0|alpha/1.1|' "$ct" > "$ct.bump"
+  lib_verify "$ct.bump" "$d/lib" 2>/dev/null; expect "libs: the old jar does not stand for the bumped version" 1 $?
+  echo tampered > "$d/lib/alpha-1.0.jar"
+  lib_verify "$ct" "$d/lib" 2>/dev/null; expect "libs: a jar with another SHA-1 fails" 1 $?
+}
+
+tests=("$@"); [ ${#tests[@]} = 0 ] && tests=(frozen counts notread x509 libs)
 for t in "${tests[@]}"; do "t_$t"; done
 [ $fails = 0 ] && echo "judge-test: all hold" || echo "judge-test: $fails FAILED"
 [ $fails = 0 ]
