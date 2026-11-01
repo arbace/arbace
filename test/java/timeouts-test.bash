@@ -80,7 +80,7 @@ check "the 14 held tests' names, as check-interp.edn" "$(grep -v '^#' "$tt" 2>/d
 check ":audit-timeout kept, :audited (GTS180 (a))" "$(awk '/:id :audit-timeout/ { f = 1 } f && /:audited true/ { print "yes"; exit }' "$R/test/java/divergences.edn")" "yes"
 check ":audit-timeout's :why names the file" "$(awk '/:id :audit-timeout/ { f = 1 } f && /:why / { print (index($0, "test/java/timeouts.txt") ? "yes" : "no"); exit }' "$R/test/java/divergences.edn")" "yes"
 # the planner's rules (test/gate/plan.ae's expand and matching: groups in order, the last matching rule decides)
-keys=$(python3 - "$R/test/gate/steps.edn" <<'EOF'
+py=$(cat <<'EOF'
 import re, sys
 s = open(sys.argv[1]).read()
 s = re.sub(r';[^\n]*', '', s)
@@ -118,10 +118,13 @@ for m in re.finditer(r'\{:name ([\w.-]+)', s):
     print(name, 'yes' if inc else 'no')
 EOF
 )
+keys=$(python3 -c "$py" "$R/test/gate/steps.edn")
 for st in java-check java-compiled java-interp java-compiled-full java-held; do
   check "steps.edn: $st keys timeouts.txt" "$(awk -v s=$st '$1 == s { print $2 }' <<< "$keys")" "yes"; done
 for st in java-read java-classes java-diagnostics java-print java-forms-verify; do
   check "steps.edn: $st does not key timeouts.txt" "$(awk -v s=$st '$1 == s { print $2 }' <<< "$keys")" "no"; done
+# this test is gate-tests' input alone: no Java step keys it (an edit of its pins reruns no Java level)
+check "steps.edn: no Java step keys this test" "$(python3 -c "$(sed "s|'test/java/timeouts.txt'|'test/java/timeouts-test.bash'|" <<< "$py")" "$R/test/gate/steps.edn" | awk '$2 == "yes"' | wc -l)" "0"
 
 echo "$((n - fails)) of $n"
 if [ "$fails" = 0 ]; then echo PASS; exit 0; else echo FAIL; exit 1; fi
