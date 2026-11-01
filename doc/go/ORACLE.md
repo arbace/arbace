@@ -237,7 +237,9 @@ the oracle's reference", "S4: the JVM removed"): the jar of the frozen branch's 
 `.tmp/oracle-frozen/` and checked against `test/oracle/frozen-jar.sha256`, run by `java` alone
 (`bin/lib/frozen.bash`, shared with the other tools that stay on a JVM), with the runner's
 namespaces given to it as `.clj` links (`frozen_view test`, `.tmp/frozen-view/test`).
-`ARBACE_ORACLE_JAR` (or `FROZEN_JAR`) takes an already built jar, unchecked;
+`ARBACE_ORACLE_JAR` (or `FROZEN_JAR`) takes an already built jar, checked against the pin line of its file
+name (a name with no line, or another hash, fails; another tag needs `FROZEN_ALLOW_UNPINNED=1`, which the gate
+refuses: GTS112);
 `ARBACE_ORACLE_EXPECTED` names the expected files' directory (default `test/oracle/expected`).
 Until S4 `ARBACE_ORACLE_REF` chose between `main`, `target/arbace.jar` through `bin/arbace-j`
 (the default), and `frozen`; `main` went with main's JVM build.

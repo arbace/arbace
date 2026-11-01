@@ -1901,8 +1901,7 @@ finding 1 and the choices made on the way are proposed here, none decided.
     `arbace/classes/`; (b) derive the list from the requires closure of `arbace.repr.java` (an awk over the `ns` forms),
     plus the same front end; (c) as built (a hand-kept list of 24 files).
   - *Recommended: (a)*: a list one cannot forget to extend, no parser of `ns` forms to keep right; the exclusion list is
-    five names that fail safe (an excluded file that joins the read path changes nothing, but a listed-in file costs one
-    rewrite). The writers then rewrite the provenance after a change to `analyze.ae` or `env.ae`: that is the price and
+    five names, a blind spot only if one of them joins the read path (a new file is in by default). The writers then rewrite the provenance after a change to `analyze.ae` or `env.ae`: that is the price and
     the point (it is the "a day later" slip the step was made to close). To be done in the commit that rewrites the four
     files' hash, after the merges.
 - **GTS111 jrt's JVM-generated files stay outside generated-check** (finding 2, third item): `standin_{lang,character,
@@ -1919,7 +1918,7 @@ finding 1 and the choices made on the way are proposed here, none decided.
   warns (for the paths that make a pin); j2g-edge declares `:env J2G_FIXTURES J2G_EDGE_WORK`, javac-verify and j2g-edge
   the `:jdk` host; a `J2G_EDGE_WORK` that holds or lies in a tracked file is refused (status 2).
   - Options for what remains: (a) as built, and `FROZEN_CP` (adds to the class path, unchecked) left; (b) also
-    `FROZEN_CP`, `FROZEN_TAG` and `ARBACE_ORACLE_*` in the steps' `:env`; (c) `frozen_java` refuses `FROZEN_CP` when
+    `FROZEN_CP`, `FROZEN_TAG` and `ARBACE_ORACLE_*` in the steps' `:env` (`FROZEN_ALLOW_UNPINNED` is refused by `frozen_pin` when `GATE_EXE` is set, as built); (c) `frozen_java` refuses `FROZEN_CP` when
     `GATE_*` is set (inside the gate).
   - *Recommended: (b)*: cheap, and a pass then records which jar and class path it ran on. Whether the `:frozen` host
     should hash the jar that ran rather than the pin file is the same question; the pin check makes the two equal.
