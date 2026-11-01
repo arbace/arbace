@@ -2268,3 +2268,79 @@ Both as before the fixes (977 / 83 and 226 / 9): the recorded `:crash` of `targe
 - **CP152 The stale record as a failure.** `:oracle-stale-missing` is now countable, so CP141 (b) can be built. Options: (a) a count (as built); (b) a failure in a whole-corpus run when a recorded name is missing, a count in a sample run (needs the run to know it is whole: the `-all` key); (c) (b) and `--record-oracle` printed as a diff. *Recommended: (b)*.
 - **CP153 The dry mode's status.** Exit 3 is the code for "skipped"; a caller must pass `--accept-skips`. Options: (a) as built; (b) a gate step that treats 3 as a pass only on a host that cannot run the tools. *Recommended: (a)*; (b) belongs to CP125 (b).
 - **CP154 The list's key in `bin/repr-cpp roundtrip`.** The key is now written by `lists` into `roundtrip.list`, but a hand-made list still has none. Options: (a) as built (a warning); (b) a missing key is an error unless `--record-oracle` or `--no-oracle` is given. *Recommended: (b)* once CP140's other corpora are recorded.
+
+## As built: CP120, CP121, CP124, CP127 (2026-11-01)
+
+On the branch `cpp-cx7` (light tier: stage 0 by `ARBACE_HOST_EXE`, 4 jobs, `GOMEMLIMIT=1500MiB`, no gate, no build of Arbace's executables or javac's tool, no lock).
+Four of the decisions F8 listed as taken and not built (re-review 032's table), each a commit with a selftest that fails on the commit before it (the test, and its
+sample, copied into a snapshot of that commit; the runtime pieces against the lowered runtime at that commit's key) and passes after. `bin/cppi selftest`: 21 to
+**25 tests, 25 pass** (new: `thread-throw`, `atomics`, `known-names`, `results-record`).
+
+| # | what was built | the test (before, after) |
+|---|---|---|
+| CP120 (b) | the thread start (review 007's finding 9): the lowering renames the lowered code's `pthread_create` to the pending-flag layer's `cx$pthread_create` (`arbace/cpp/rt/eh.c.ae`), which hands musl a trampoline, `cx$thread_start` (the routine and its argument in a `malloc`ed pair, freed at the start; a failed create frees it), calling the routine and then `cx$uncaught` when the flag is set, as the C `main` and the constructor wrappers do. Libstdc++'s lowered `execute_native_thread_routine` returns with the flag set (its cleanups run, the class `uncaught-cleanups`' kind of difference, no output here), and the thread terminates with g++'s message. LLVM.md §8, the known file's comment: the thread start is no longer a `native-callback-throw` frame (d7e88f19) | `thread-throw`, runtime sample `test/cpp/runtime/samples/thread-throw.cpp` (a `std::thread` whose lambda throws a `runtime_error`): before, 5 bad (the lowered run went on, printed `joined`, status 0); after, the status 134 and stderr equal to g++'s build's (`terminate called after throwing an instance of 'std::runtime_error'`, `what():  from a thread`), lower-check passes |
+| CP121 (c) | the atomics as gcc's `__atomic_*` builtins with the IR's orderings (LLVM.md §7; until now plain operations, CP1): atomic loads and stores `__atomic_load_n`/`__atomic_store_n` (integers of 1 to 16 bytes, pointers; `volatile` in the pointer's type), the generic `__atomic_load`/`__atomic_store` on floats; `atomicrmw` `__atomic_exchange_n` and the fetch-and-op builtins (`add`, `sub`, `and`, `or`, `xor`, `nand`), `max`/`min`/`umax`/`umin`/`fadd`/`fsub` a loop of the generic `__atomic_compare_exchange`, others refused (`:atomic`); `cmpxchg` `__atomic_compare_exchange_n` (weak kept, both orderings); `fence` `__atomic_thread_fence`, a singlethread one `__atomic_signal_fence`. The orderings as numbers (relaxed 0 for `unordered` and `monotonic`, acquire 2, release 3, acq_rel 4, seq_cst 5). The runtime's 198 units lower and compile with them (no 16-byte atomic among them) (70e28151) | `atomics` (with `test/cpp/selftest/atomics.ll`, every atomic form clang writes, lowered alone and compiled by gcc), runtime sample `test/cpp/runtime/samples/atomics.cpp` (a `std::atomic<int>` counter and a compare-exchange maximum under 4 threads, 100,000 iterations each, a `std::shared_ptr` copied in every iteration, a `weak_ptr`, a function-local static whose constructor yields, initialized by the 4 threads at once, fences of each ordering): before, 15 bad (none of the builtins; the lowered sample printed `counter 261178` for `399994` and `flags 11` for `15`, and segfaulted in another run); after, the output of g++'s build and the original, 10 of 10 runs of the lowered sample |
+| CP127 (b) | the round trip's names qualified by their corpus: the judge (`arbace.repr.cpp.rtcheck`) names a file `CORPUS/NAME`, CORPUS the list's key without its sampling (`#list gxx-dg-every-10` -> `gxx-dg/`), keeping a name the list already writes under its corpus (`bin/cppi list samples` writes `samples/NAME`) and a keyless list's names as written; the known file's `:files` and `:orig-fails` looked up so, results.tsv's first column so. `test/repr/cpp/roundtrip-known.edn` migrated: its 205 names, each found in exactly one of CX5d's lists (`gxx-dg` 120, `c-c++-common` 49, `libstdcxx-testsuite` 19, `gxx-old-deja` 10), HotSpot's 6 under `hotspot-x86-linux/` and `samples/coroutine.cpp`. The oracle record (`roundtrip-oracle.edn`) stays keyed by the bare names inside each corpus' entry (7713d07f) | `known-names`: before, 6 bad (a keyed run's file not found under `tc/`, a bare known name covering it, a qualified `:orig-fails` not applied, the known file unqualified); after, 8 ok (a bare or another corpus' name does not cover `tc/x.C`; `samples/coroutine.cpp` from a keyless list and under the key `samples` alike) |
+| CP124 (b) | the round trip's results recorded per list: `test/repr/cpp/roundtrip-results/KEY.edn` (KEY the list's key; `REPR_CPP_ROUNDTRIP_RESULTS` names another directory), the run's summary and NAME (qualified) -> verdict (`:pass`, `:known`, `:oracle-rejects`, `:oracle-fails`). The judge fails a recorded `:pass` that does not pass (results.tsv's new 12th column `regression`; the failing line says `(recorded :pass)`), a recorded name missing from the run and a name not recorded (the run of a keyed list is the whole list, as lower-check's R4); a recorded non-pass that passes is `:improvements`, a count; no key or no file: not held, said on stderr. `bin/repr-cpp roundtrip --record-results` writes the file from a run with no failure (a run with one is not recorded). Recorded: g++.dg's tenth and g++.old-deja's (c327b5da) | `results-record`: before, 9 bad (no option, nothing held); after, 10 ok: record, the same run passes, pass to known fails, a missing and a new name fail, an improvement counts, a failing run is not recorded, and through `bin/repr-cpp roundtrip` both ways |
+
+Two small fixes on the way: `test/cpp/selftest/recorded-list.sh` wrote the samples' count in (14); it reads it from the record's summary now (666cba6b, the record has 16).
+And `bin/cppi lower-check`'s empty-list guard, `grep -v '^#' LIST | grep -q .` under `pipefail`, refused the 234-file list of libstdc++ ("has no file", exit 2) when
+`grep -q`'s early exit killed the first grep by SIGPIPE (timing-dependent: CX7's runs of the same list passed it); one `grep -q -v -e '^#' -e '^$'` now (its own commit).
+
+### Numbers (before → after)
+
+| check | before | after |
+|---|---|---|
+| `bin/cppi runtime-build` (the lowering changed twice) | 198 of 198 (re-review 032) | 198 of 198 after CP120 (IR 26 s, read, print and lower 156 s, gcc 18 s) and after CP121 (26, 154, 18 s); `runtime-key`: current |
+| `lower-check` `samples+runtime` (recorded `samples`) | 14 of 14 | **16 of 16** (`thread-throw.cpp`, `atomics.cpp` added; 14 agree with g++'s build, 2 compile-only; native 11 s, Arbace's steps 22 s, gcc and runs 3 s); the record 16 |
+| `lower-check` libstdc++ every 15th (recorded) | 234 of 234 | **234 of 234**, 0 known, 0 regressions, the record held (234, none missing); g++'s build agrees on 233 (the same `2523-2_xin.cc`); native 103 s, Arbace's steps 808 s, gcc and runs 53 s |
+| round trip g++.dg every 10th (objects on, cxxdump-8) | 1,807: 977 pass, 83 known, 745 rejected, 2 oracle fails, 0 failing | the same, now under qualified names and **recorded** (`gxx-dg-every-10.edn`); judged again against the record: 0 regressions, 0 missing, 0 new, 0 improvements (dumps 307 s, forms and prints 35 s, again 45 s, objects 56 s) |
+| round trip g++.old-deja every 10th | 323: 226 pass, 9 known, 88 rejected, 0 failing | the same, recorded (`gxx-old-deja-every-10.edn`), judged again: 0, 0, 0, 0 (33 s) |
+| round trip of the samples, `bin/cppi list samples` (`samples/NAME`, no key) | 8 pass, 1 failing (`samples/coroutine.cpp`: the known file had `coroutine.cpp`) | 8 pass, 1 known (`samples/coroutine.cpp`, `gxx-objects-location` at g++'s l4), 0 failing |
+
+The scratch non-TLS check of CP110 (c), repeated with the atomics lowered: a copy of the tree with `cx$pending` not thread-local (in `eh.c.ae` and the lowering's
+`extern`), its runtime built (198 of 198), `threads.cpp` lowered against it and run 10 times: **10 of 10 runs failed** (5 `terminate called after throwing` a
+`runtime_error` or an `int`, 3 `terminate called without an active exception`, 1 `terminate called recursively`, 1 segmentation fault); the unchanged build passes. The sample still
+has its teeth.
+
+### Proposals (CP160 onward)
+
+- **CP160 The other native frames that call lowered code.** CP120 (b) covers `pthread_create`; `qsort`, `bsearch`, `atexit`, `at_quick_exit`, `__cxa_atexit`'s
+  destructors (a destructor is `noexcept` unless declared otherwise, so g++ terminates there) and `pthread_once` (under `std::call_once`, whose callable's exception
+  must reach the caller, not terminate) still return into the native frame with the flag set (`native-callback-throw`). Options: (a) as built (a class, no case in the
+  lists); (b) the same rename-and-trampoline for `atexit`, `at_quick_exit` and `__cxa_atexit` (terminate when the flag is set, as g++); (c) (b) and, for
+  `qsort`/`bsearch`/`pthread_once`, a trampoline that stops calling the user's function once the flag is set and re-raises after the native call returns (the
+  exception reaches the caller, as with g++'s unwinding through libc frames built with unwind tables). *Recommended: (b)* now (cheap, the terminate path is
+  g++'s), (c) when the heavy list's whole testsuite shows a `call_once` or comparator case.
+- **CP161 16-byte atomics.** `__atomic_load_n` and the others on `unsigned __int128` are calls to libatomic's `__atomic_*_16` at gcc `-O0` without `-mcx16`; the
+  lowered program links no libatomic, so a program with a `std::atomic` of 16 bytes would not link (no unit of the runtime and no file of the lists has one;
+  `libatomic.a` is on the host). Options: (a) as built (a link failure names it); (b) `-latomic` in lower-check's and the runtime's link lines (native, as musl is);
+  (c) `-mcx16` in `GCC_FLAGS` (inline `cmpxchg16b`, as clang's IR assumes for x86-64-v2 only). *Recommended: (b)*: it matches what clang's original links
+  (libatomic through libstdc++'s dependencies), and ci's C5 takes the builtins as C forms either way.
+- **CP162 The atomics' own negative check.** The `atomics` selftest's "before" run showed the race (a short counter); a run of plain atomics could pass by luck on
+  an idle host. Options: (a) as built (the structural half, `atomics.ll`'s lowering, fails deterministically without the builtins; the sample is the behaviour);
+  (b) a scratch check like CP110 (b)'s with the atomics plain, N runs required to fail. *Recommended: (a)*: the structural test cannot pass by luck.
+- **CP163 Records of the other round-trip corpora.** `c-c++-common-every-10`, `libstdcxx-testsuite-every-40`, `hotspot-x86-linux` and the samples have no results file
+  (not held; said on stderr), and the samples' list has no key (`#part samples`). Options: (a) as built; (b) record c-c++-common and libstdc++ every 40th with their
+  next runs, the samples under a key of their own (`bin/repr-cpp roundtrip` given `--corpus samples`, or `bin/cppi list samples` writing `#list samples-all` for the
+  round trip), HotSpot with the next run that has jdk26u (CP140 (b)). *Recommended: (b)*.
+- **CP164 Improvements in the record.** A recorded `:known` or `:oracle-rejects` that now passes is a count (`:improvements`), so the record can go stale in the good
+  direction. Options: (a) a count (as built); (b) a failure until the record is written again (the record stays exact, as `--record-oracle`'s stale names would
+  under CP152 (b)); (c) (a) in a sample run, (b) in a whole-corpus run. *Recommended: (c)*, with CP152 (b)'s whole-run key.
+- **CP165 The record's verdicts and the known classes.** The results file keeps the verdict, not the class: a known file moving from one class to another (the
+  first failing level changing) is not seen by the record, only by the known file's fit. Options: (a) as built; (b) record `:known CLASS` (`[:known :ast-differs]`),
+  a change of class failing. *Recommended: (b)*, small, with CP164.
+
+### Rule slips, shipped files, scratch
+
+- Slips: two probes used process substitutions and one a `/dev/null` (a stray `cmp <(true) <(true) >/dev/null` loop typed into the command that made the lists, and a
+  `diff ... <(true)` while reading the scratch runtime's key; neither did anything the work depended on). Ad-hoc `g++`/`gcc`/`clang++` compiles of the samples in my
+  own shell ran without `TMPDIR` set, so their temporary objects went to /tmp (the bin/ scripts set it; nothing left there). Two waiting loops ran at once for a few
+  minutes twice (one stopped each time). `python3` was used for multi-line edits. The disk stayed at 67%, the worktree's `.tmp` under 1 GB.
+- Shipped: `arbace/cpp/lower.ae`, `arbace/cpp/rt/eh.c.ae`, `arbace/repr/cpp/rtcheck.ae`, `bin/cppi`, `bin/repr-cpp` (usage), `bin/lib/repr-cpp/roundtrip`,
+  `test/cpp/runtime/samples/{thread-throw,atomics}.cpp`, `test/cpp/selftest/{thread-throw,atomics,known-names,results-record}.sh`, `test/cpp/selftest/atomics.ll`,
+  `test/cpp/selftest/recorded-list.sh`, `test/cpp/{lower-results,lower-known}.edn`, `test/repr/cpp/roundtrip-known.edn` (migrated),
+  `test/repr/cpp/roundtrip-results/{gxx-dg,gxx-old-deja}-every-10.edn` (new), `doc/cpp/LLVM.md` (§7 atomics, §8 the thread start, §10), this section.
+  `test/gate/steps.edn` not touched (CP125 (b) is the coordinator's).
+- Scratch: `.tmp/cp12x/` (the round trips' work directories `rt-*` and logs, lower-check's `w-s2`, `w-lt`, the negative run's `neg-*`, the lists), `.tmp/cpp-gcc/`
+  (g++.dg and g++.old-deja extracted), `.tmp/cppi/runtime` (at the key), `.tmp/cpp-selftest/`.
