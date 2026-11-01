@@ -71,7 +71,7 @@ Prior art:
 - Stage 0 hosts Arbace's tools (`bin/lib/host.bash`'s `arbace_host_exe`: `ARBACE_HOST_EXE`, else
   the checkout's own stage 0, `target/seed/<arch>/arbace` (every worktree has its own), built when missing or when the
   seed changed by `bin/seed --build`, which also compiles the checkout's namespaces into `target/seed/aot` (RPS95 (b),
-  about 3 minutes beyond the Go build, under no lock: in a worktree set `ARBACE_HOST_EXE` to the main checkout's stage 0
+  about 3 minutes beyond the Go build, under no heavy lock (a per-checkout `.tmp/seed-build.lock` only keeps two tools from building at once): in a worktree set `ARBACE_HOST_EXE` to the main checkout's stage 0
   to skip both; `bin/gate` unsets it and uses the checkout's stage 0, built `--no-aot`, and `gate_key` hashes the
   bytes of `ARBACE_HOST_EXE` when set, so a `bin/arbace-go --gate-build` by hand under it misses the gate's builds;
   `ARBACE_SEED_GO` names another seed for the host as for `bin/seed`): c2j, j2g, repr/go, repr/clojure, the suite's runner,
@@ -383,7 +383,7 @@ Prior art:
   the `:heavy :inner` ones not: their tools take the lock around their heavy process alone (since GT5,
   GTS31 (b), `bin/lib/heavy.bash`: `bin/j2g`, repr/go's native reader and converter, repr/java's corpus
   reads, under `ARBACE_HEAVY_CMD` unless `ARBACE_HEAVY_HELD`; outside the gate `ARBACE_HEAVY_CMD` is unset and the tools take
-  no lock: run a heavy command by hand as `bin/heavy-lock CMD`, or with `ARBACE_HEAVY_CMD=bin/heavy-lock`), their light work beside the other steps;
+  no lock: run a heavy command by hand as `bin/heavy-lock CMD`, or with `ARBACE_HEAVY_CMD="$PWD/bin/heavy-lock"`, an absolute path, as the tools run it from their own directory), their light work beside the other steps;
   since GT5 (doc/GATE-SURVEY.md, "As built: GT5") the inner keys: a step's `:parts` are one check each
   (native-check and repr/java's tree checks per corpus, `NAME.CORPUS`; the parked sub-projects' corpora
   `:clean-only`, run with `GATE_ALL_PARTS=1`), a step's `:outputs` (`GATE_OUT`) are kept with its pass and put

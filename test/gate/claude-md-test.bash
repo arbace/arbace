@@ -12,4 +12,8 @@ has CLAUDE.md "against gcc"
 # 8. toolSource
 has CLAUDE.md 'a namespace of a tool or of goi (`arbace/go/`;'
 lacks CLAUDE.md '(and every namespace of `arbace/go/`'
+# 9. no heavy lock; heavy-lock by absolute path
+has CLAUDE.md 'under no heavy lock'
+lacks CLAUDE.md 'Go build, under no lock'
+has CLAUDE.md 'ARBACE_HEAVY_CMD="$PWD/bin/heavy-lock"'
 exit $fail
