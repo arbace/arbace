@@ -2502,3 +2502,12 @@ the fake repository only.
 
 The user decided all five as recommended: GTS95 (b), at the next rekey; GTS96 (a); GTS97 (a); GTS100 (a), (c) when the
 box comes back; GTS101 (b), at the next change to `bin/gate`.
+
+## Decided (2026-11-01): GTS102, GTS103
+
+From GT7's reruns 7 and 8 (doc/JOURNAL.md, 2026-11-01). Decided by the user:
+- **GTS102** `bin/java-check` takes per-test time limits (`test/java/timeouts.txt`, as goi's `test/goi/timeouts.txt`),
+  replacing the `audit-timeout` class: the 13 interp tests near the limit under the audit's ptrace get their own
+  limits. At the merge window's rekey (`bin/java-check` is in every Java step's key).
+- **GTS103** `bin/gate --clean --only` refuses when a run the record cites has no logs, instead of counting its steps
+  as changed (rerun 8's first attempt selected 53 unchanged steps after its logs were deleted).
