@@ -148,7 +148,10 @@ cmd_suite_expect() {
     cp "$gen" "$EXPECT_RESULTS"; echo "oi: expect: recorded $EXPECT_RESULTS"; return 0
   fi
   if [ -z "${ONLY:-}" ]; then
-    cmp -s "$gen" "$EXPECT_RESULTS" || { diff "$EXPECT_RESULTS" "$gen" | head -20 >&2; echo "oi: expect: the run differs from $EXPECT_RESULTS" >&2; return 1; }
+    # the rows, not the header comment (re-review 030's finding 1: an edit of the header must not fail the check)
+    grep '^ \[' "$gen" > "$S/expect-rows.txt" || true
+    grep '^ \[' "$EXPECT_RESULTS" > "$S/expect-rec-rows.txt" || true
+    cmp -s "$S/expect-rows.txt" "$S/expect-rec-rows.txt" || { diff "$S/expect-rec-rows.txt" "$S/expect-rows.txt" | head -20 >&2; echo "oi: expect: the run differs from $EXPECT_RESULTS" >&2; return 1; }
   else
     # the rows of this run (a subset) all in the record
     grep '^ \[' "$gen" > "$S/expect-rows.txt" || true

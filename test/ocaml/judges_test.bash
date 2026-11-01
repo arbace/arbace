@@ -76,6 +76,13 @@ cmp -s "$W/ref-expect.tampered" "$root/test/ocaml/ref-expect.edn" && { echo "FAI
 out=$(cd "$root" && OI_EXPECT_RECORD=$W/ref-expect.tampered bin/oi suite expect --only "$only" 2>&1); st=$?
 expect "expect: a run that differs from the record fails" 1 'not in the record' "$out" $st
 
+# re-review 030's finding 1: a whole run equals the committed record (rows), and a header edit alone is not a difference
+out=$(cd "$root" && bin/oi suite expect 2>&1); st=$?
+expect "expect: a whole run passes against the committed record" 0 'equals the record' "$out" $st
+{ echo ';; another header'; grep -v '^;;' "$root/test/ocaml/ref-expect.edn"; } > "$W/ref-expect.header"
+out=$(cd "$root" && OI_EXPECT_RECORD=$W/ref-expect.header bin/oi suite expect 2>&1); st=$?
+expect "expect: a header edit alone is not a difference" 0 'equals the record' "$out" $st
+
 # finding 2: a listed slow program recorded as slow that passes this time (the CPU limit's boundary) is not a change
 printf 'a\t0\th\t1\t1.0\t\nb\t0\th\t1\t1.0\t\nc\t0\th\t1\t1.0\t\n' > "$k/check.tsv"
 printf '[\n ["a" "fail" "known gc: a finaliser (output differs (1 bytes, ocamlopt 1))" "differs"]\n ["b" "slow" "timeout 120s" "same"]\n ["c" "pass" "" "same"]\n]\n' > "$k/aot-results.edn"
