@@ -105,6 +105,12 @@ test_corpus_key() {
 }
 t corpus-key-covers-repl-parser-and-host test_corpus_key
 
+# 069 B: the two go-command programs are skipped by gc's own run failing here, so no known entry stands for them
+test_no_dead_known() {
+  ! grep -qE '"(fixedbugs/issue21317|linkobj)\.go"' "${KNOWN:-$here/test/goi/check-aot-known.edn}"
+}
+t no-dead-aot-known-entries test_no_dead_known
+
 # finding 5: bin/goi divergences --aot holds test/goi/essential-aot.txt's programs to the AOT record
 host=${ARBACE_HOST_EXE:-$here/target/seed/amd64/arbace}
 divergences() { # divergences ROOT [ARG...]: the tool on a fabricated root
