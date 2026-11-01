@@ -24,7 +24,8 @@ work=.tmp/repr-java-jdk
 . bin/lib/repr-java/judge.bash
 # the source directory as read-jdk names it in a converted file's header (its canonical path: a symlink, a
 # trailing slash or a '..' in JDK_SRC would leave the header's host path in the forms, GT7's audit 061 #2)
-src=$(judge_canon "${JDK_SRC:-/root/jdk26u/src}") || exit 1
+judge_jdk_paths || exit 2 # jdk_src, jdk: one tree (GT7's audit 061 #5)
+src=$(judge_canon "$jdk_src") || exit 1
 steps=${JDK_STEPS:-convert}   # JDK_JOBS: parallel conversions (default 1); JDK_THREADS: read-jdk's chunks
 # in parallel within one (default 4: on javac's tool executable each chunk's javac lives with its
 # converted units, about 6 GB each at the peak)

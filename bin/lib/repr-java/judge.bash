@@ -43,3 +43,22 @@ judge_tree_digest() {
   n=$(printf '%s\n' "$l" | grep -c .)
   echo "$d $n"
 }
+
+# judge_jdk_paths: jdk26u's checkout as the judges and the originals see it, one tree (GT7's audit 061 #5).
+# JDK_SRC (the src directory) and JDK (the checkout: the originals, the build tree) are each defaulted from the
+# other (JDK_SRC = JDK/src, JDK = dirname JDK_SRC; else /root/jdk26u), and refused when both are set and not one
+# tree. Sets and exports jdk_src, jdk, JDK_SRC and JDK (the originals' functions read JDK); status 1 on a split.
+judge_jdk_paths() {
+  local s=${JDK_SRC:-} j=${JDK:-} cs cj c0
+  [ -n "$s" ] || { if [ -n "$j" ]; then s=$j/src; else s=/root/jdk26u/src; fi; }
+  c0=$(cd "$s" 2>&1 && pwd -P) || c0=$s
+  [ -n "$j" ] || j=$(dirname "$c0")
+  cs=$(dirname "$c0")
+  cj=$(cd "$j" 2>&1 && pwd -P) || cj=$j
+  if [ "$cs" != "$cj" ]; then
+    echo "JDK_SRC ($s) is not JDK/src (JDK=$j): the corpora would come from two trees" >&2
+    return 1
+  fi
+  jdk_src=$s jdk=$j
+  export JDK_SRC=$s JDK=$j
+}
