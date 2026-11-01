@@ -750,3 +750,28 @@ git history:
     makes the checkout's platform in the first step that needs it; this time java-read). `:audit-known
     ["bin/javac-vendor"]` on java-read, as on repr-java-parse (GTS72 (a)); it rekeys java-read alone (5 minutes).
 - **Rerun 8:** `--only failed,changed`: java-read and java-judge, with the judgments and reap the classes rekey.
+
+## 2026-11-01: GT7's rerun 8, and the audited timeouts as a rule
+
+- **Rerun 8** (b8872a52, 04:44 to 11:38 UTC, 414 minutes): 16 of its 17 steps passed clean: java-check, java-check-judge,
+  reap, java-read, java-interp (80 min under the audit), java-classes, java-diagnostics, java-compiled-full (171 min),
+  java-print, java-forms-verify. java-judge failed on one regression: t03686
+  (hotspot/jtreg/compiler/loopopts/TestCountedLoopPhiValue.java) timed out at the interp level (20 s, then 40 s on the
+  retry) and passed compiled; it passed interp in the recorded runs. The cause is :audit-timeout's (strace's system
+  time): the 14th test of that kind, not one of rerun 7's 13. Its logs: `.tmp/gate-clean/b8872a52...logs/`.
+- **The user's decision** (2026-11-01, asked with the three options): the class becomes a rule, not a list (the other
+  options: append t03686 and rerun, at the risk of a 15th; or raise interp's limit under the audit, which changes what
+  the audited run measures). As built:
+  - `bin/java-check --save` writes `DIR/audited` (the levels) when the run is traced (`TracerPid` of
+    `/proc/self/status` non-zero: bin/gate --clean's `strace -f`); `--judge` passes `--audited LEVELS` from the markers
+    beside its results files.
+  - `test/java/check.ae`'s report: a class with `:audited true` at its level holds, in an audited run, every timeout of
+    a test whose compiled result passes or is flaky, as `:unstable` holds its `:tests`: no regression, and its levels
+    disagreement printed as held, not a problem. Each held result is printed.
+  - `:audit-timeout` gets `:audited true` and a `:rule` naming this entry; its 13 `:tests` stay.
+  - Checked on rerun 8's saved results (`.tmp/audited-test/`): unmarked the judgment fails as rerun 8's did (t03686, a
+    regression and a new levels disagreement); marked it passes, 14 tests held; with t03686's compiled result made a
+    failure it fails again (a regression). `strace -f` sets the marker's test, an untraced run does not.
+- **Rerun 9:** the change is in java-judge's key and in every Java level's (`bin/java-check`), so the clean run's
+  selection reruns the Java producers again (about 5 hours under the audit). Then the keyed concurrent `--full` and the
+  tag.
