@@ -342,7 +342,13 @@
             :let [r (get results subject) e (get-in expected [:namespaces reference])
                   what (str "control " id " (" subject "'s result against " reference "'s expected)")]]
       (cond
-        (not (contains? results subject)) (println (str what ": not judged, " subject " not run"))
+        ;; a run of the whole list or the essential subset (CLOJURE_TESTS_CONTROLS_STRICT, bin/clojure-tests
+        ;; --essential) must judge its controls: a subject missing from it (a list that lost it) is a
+        ;; failure, as a control that passes is (report 060, finding 5); a run of chosen namespaces need not
+        (not (contains? results subject))
+        (if (or (seq whole) (System/getenv "CLOJURE_TESTS_CONTROLS_STRICT"))
+          (swap! bad conj [(symbol (str "control-" id)) [(str what ": not judged, " subject " not run (the run must judge its controls)")]])
+          (println (str what ": not judged, " subject " not run")))
         (nil? r) (println (str what ": not judged, " subject " has no result"))
         (nil? e) (swap! bad conj [(symbol (str "control-" id)) [(str what ": not judged, no expected result of " reference)]])
         (seq (regressions e r)) (println (str what ": " (first (regressions e r)) ", as a control must (GTS81 (a))"))
