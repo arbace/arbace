@@ -63,4 +63,18 @@ test_sources_check() {
 }
 t sources-check-essential-subset test_sources_check
 
+# finding 9: the compiled mode counts an embedded source without a compiled loader as evaluated (the hook's decision
+# on stub lookups; the embedded lookup on the host's own runtime)
+test_hook_embedded() {
+  local out
+  out=$(ARBACE_PATH="$here" "$host" -e '(load-file "'"${HOOK:-$here/test/suite_aot_hook.ae}"'")
+    (let [f @#'"'"'suite-aot.hook/embedded-without-loader g @#'"'"'suite-aot.hook/embedded-source]
+      (println (f (fn [b] (when (= b "x") "x.ae")) (constantly nil) "x")
+               (f (fn [b] nil) (constantly nil) "y")
+               (f (fn [b] "z.ae") (constantly :loader) "z")
+               (g "arbace/core") (g "no/such/ns")))' 2>&1 | tail -1)
+  [ "$out" = "x.ae nil nil arbace/core.ae nil" ] || { echo "$out" >&2; return 1; }
+}
+t hook-counts-embedded-without-loader test_hook_embedded
+
 exit $failed
