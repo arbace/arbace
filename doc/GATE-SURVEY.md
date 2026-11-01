@@ -1947,3 +1947,23 @@ finding 1 and the choices made on the way are proposed here, none decided.
   - Options: (a) as built; (b) a distinct work directory per run (`$work.$$`), no lock; (c) fail at once when locked.
   - *Recommended: (a)*: the gate's step and a hand-run `update` should queue, not race; (b) loses the kept logs.
   - **Decided (the user, 2026-11-01): (a).**
+
+## As built: GTS111-GTS115 on the branch `audit-041` (2026-11-01)
+
+- GTS112 (b): `FROZEN_CP`, `FROZEN_TAG`, `ARBACE_ORACLE_JAR` and `ARBACE_ORACLE_TAG` are in the `:env` of the five steps that
+  run the frozen JVM (`j2g-edge`, `oracle-go`, `javac-verify`, `repr-java`, `jrt-convert`; `oracle-go` also has the
+  `:frozen` host and `ARBACE_ORACLE_EXPECTED`), checked by `test/gate/frozen-env-test.bash`. A gate that scrubs the
+  environment of `FROZEN_*` and `ARBACE_*` (the branch `mac/029-gts103`'s `gate_scrub_env`) drops these variables
+  unless it keeps the names a step declares in `:env`: until then the declarations key the empty value (safe: the tools
+  run on the pinned jar) and only document the variables. To settle at that merge together with the scrub's list.
+- GTS113 (b): `arbace.j2g.model/*run*` (bound in `arbace.j2g.main/run`), `run-fn` and the marker frame `on-run-thread`;
+  the trace counts an event whose stack holds `arbace.j2g.main$run` or `arbace.j2g.model$on_run_thread`
+  (`test/j2g/edge_verdict.ae`'s `in-run?`). Every future of j2g goes through `run-fn` (par-mapv, the runtime's analysis,
+  the report). Not run on a JVM.
+- GTS114 (a): the step is `gate-tests` (not `script-tests`), `bin/gate-tests` (`make gate-tests`), the tests
+  `test/gate/*-test.bash`. A test marked `# needs: exe` takes `ARBACE_HOST_EXE` or stage 0; with neither it is named as
+  not run and the status is 1 (`--no-exe`: 0). `test/gate/gate-reads-test.bash` holds the step to its `:inputs` by
+  strace, as `bin/gate --audit` will.
+- `bin/j2g-edge`: the work directory must lie under the tree's own `.tmp/`, or outside every checkout; a tree that is
+  not its repository's root (an archive under another checkout) accepts only its own `.tmp/`. A work directory in
+  another checkout's ignored `.tmp/` is refused (too strict, safe: `git check-ignore` could admit it).
