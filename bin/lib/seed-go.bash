@@ -35,6 +35,14 @@ seed_go_format=1
 # the Go toolchain: TamaGo's Go distribution, the one bin/arbace-go builds with (ARBACE_GOROOT)
 seed_go_goroot() { echo "${ARBACE_GOROOT:-/root/tamago-go}"; }
 
+# seed_go_pins ARCHIVE ARCHS: the identity of a stage 0 built from ARCHIVE for ARCHS (A[,B]), the line
+# bin/seed --build writes into DIR/pins and keeps DIR by (GT3, GTS12 (a), GTS53 (a)): the seed's SHA-256 (its
+# .sha256), seed/goroot.sha256's, the digest of the scripts that build it (bin/seed, this file), the
+# toolchain's root, the architectures
+seed_go_pins() {
+  echo "$(cut -d' ' -f1 "$1.sha256") $(sha256sum < "$root/seed/goroot.sha256" | cut -c1-64) $(cat "$root/bin/seed" "$root/bin/lib/seed-go.bash" | sha256sum | cut -c1-64) $(seed_go_goroot) $2"
+}
+
 # the toolchain's pin (SA4): seed/goroot.sha256 names Go's version and the SHA-256 of GOROOT's
 # sources, defined as sha256sum's lines (SHA-256, two spaces, the path relative to GOROOT) of
 # VERSION and every file under src/, in the C locale's byte order of their paths, hashed again

@@ -8,6 +8,7 @@
 #   plan_inputs DIR      DIR/files.sha256 and DIR/hosts.edn, run_plan DIR [--rerun]: the plan
 #   step NAME HEAVY CMD  one step, logged, timed, measured (GT1); a heavy one under GATE_HEAVY_CMD
 #   record_pass, load_plan, run_one, report, pre_step, run_chain, chains_of, names_of
+#   inputs_unchanged NAME  the plan's file, pin and logic lines hashed again before a pass is recorded
 #   gate_prune [--dry-run]  the store and the executables trimmed (GTS27 (a))
 #   gate_audit [STEP...] the strace audit of the declared inputs (GT4)
 #   audit_reducer DIR, audit_reduce FIFO, audit_compare NAME STATUS
@@ -54,6 +55,9 @@ gate_env() {
   gkey=$("$root/bin/arbace-go" --gate-key) || return 1
   . "$root/bin/lib/javac-key.bash"
   jkey=$(arbace_javac_key "$root") || return 1
+  # GTS71 (c), GTS87 (a): javac's tool key handed to the steps, for bin/lib/javac-key.bash's arbace_javac_fresh
+  # (repr_java_host, bin/javac-vendor check --from): the tool's .key compared with it, none of its sources hashed
+  export GATE_JAVAC_KEY=$jkey GATE_JAVAC_KEY_ROOT=$(cd "$root" && pwd -P)
   export ARBACE_GATE_CACHE=$exes/${gkey:0:20} GATE_CACHE=$exes/${gkey:0:20} GATE_JAVAC_DIR=$exes/javac-${jkey:0:20}
   export GATE_EXE=$GATE_CACHE/amd64/arbace GATE_TESTS=$GATE_CACHE/amd64/arbace-tests
   export GATE_JAVAC=$GATE_JAVAC_DIR/arbace-javac GATE_JOBS=${GATE_TEST_JOBS:-12}
@@ -67,9 +71,33 @@ plan_inputs() {  # plan_inputs DIR: DIR/files.sha256 and DIR/hosts.edn
   mkdir -p "$d"
   find . \( -path ./.git -o -path ./.tmp -o -path ./target -o -path ./.claude \) -prune -o -type f -printf '%P\n' \
     | LC_ALL=C sort | xargs -d '\n' sha256sum > "$d/files.sha256" || return 1
+  # queue 023, report 022 finding 9: a symbolic link is keyed by its target's text (the SHA-256 of
+  # readlink's output: find -type f skipped it, so no key held it); a name sha256sum escapes (a backslash or
+  # a newline in it: its line starts with \ and gate.plan's fixed columns would misread it) refuses the plan
+  local l
+  find . \( -path ./.git -o -path ./.tmp -o -path ./target -o -path ./.claude \) -prune -o -type l -printf '%P\n' \
+    | LC_ALL=C sort | while IFS= read -r l; do
+        printf '%s  %s\n' "$(readlink -- "$l" | tr -d '\n' | sha256sum | cut -c1-64)" "$l"
+      done >> "$d/files.sha256" || return 1
+  if grep -q '^\\' "$d/files.sha256"; then
+    echo "gate: file names the plan cannot key (a backslash or a newline in them): $(grep '^\\' "$d/files.sha256" | head -3 | cut -c67- | tr '\n' ' ')" >&2
+    return 1
+  fi
+  # :jdk (queue 023, report 022 finding 3): the release files of the JDK the steps run, java's (the frozen
+  # jar's JVM, bin/lib/frozen.bash) and javac's (the reference javac), each resolved from PATH through its
+  # links; none when neither is there
+  local b r h=
+  for b in java javac; do
+    r=none
+    jdk=$(command -v "$b") && jdk=$(readlink -f "$jdk") && [ -f "${jdk%/bin/$b}/release" ] \
+      && r=$(sha256sum < "${jdk%/bin/$b}/release" | cut -c1-64)
+    h="$h$b $r
+"
+  done
   rel=none
-  jdk=$(command -v javac) && jdk=$(readlink -f "$jdk") && [ -f "${jdk%/bin/javac}/release" ] \
-    && rel=$(sha256sum < "${jdk%/bin/javac}/release" | cut -c1-64)
+  [ "$h" = "java none
+javac none
+" ] || rel=$(printf '%s' "$h" | sha256sum | cut -c1-64)
   # the program hosts (GT5, GTS4 (b), (c)): the units of the build at this key (units.tsv), pending
   # when there is no build yet, none for a build made before the units were recorded
   local pu=pending ju=pending
@@ -160,22 +188,78 @@ step() {  # step NAME HEAVY COMMAND...: one step, logged, timed, measured (GT1);
 mem_of() {  # mem_of NAME FIELD: a number of NAME.mem
   sed -n "s/.*:$2 \([0-9.]*\).*/\1/p" "$logs/$1.mem" 2>"$logs/mem-of.err"
 }
+# pass_reads FILE [NAME]: a pass record that reads (GTS80 (a)): not empty, record_pass's shape, its step
+# NAME, closed; an empty or cut one (a full disk's, GT7's rerun 4) is no pass. The planner reads it with
+# the Clojure reader and skips one that does not read. Review 001, finding 5: a key with no value (a
+# keyword followed by another or by the closing brace: an odd-length map, which the reader rejects) is
+# no pass either (record_pass's values are never keywords). KEY (queue 023, report 022 finding 8): the record's
+# :key is KEY, the name it is kept under (a record copied or written by hand under another key is not its pass).
+# LOG (GTS95 (b)): the record's :log-sha256 is the digest of its log, when there is one: LOG, by default FILE's
+# KEY.log beside it (a record and a log that do not belong together, e.g. a log replaced or cut, are no pass)
+pass_reads() {  # pass_reads FILE [NAME [KEY [LOG]]]
+  [ -s "$1" ] || return 1
+  head -c 9 "$1" | grep -q '^{:step "' || return 1
+  [ -z "${2:-}" ] || head -1 "$1" | grep -qF "{:step \"$2\" :key \"${3:-}" || return 1
+  [ -z "${3:-}" ] || head -1 "$1" | grep -qF "{:step \"$2\" :key \"$3\"" || return 1
+  grep -q ':log-sha256 "[0-9a-f]\{64\}"' "$1" && [ "$(tail -c 2 "$1")" = "}" ] || return 1
+  ! tr '\n' ' ' < "$1" | grep -qE '(^|[ {]):[a-z0-9-]+[[:space:]]*(}|[[:space:]]:[a-z])' || return 1
+  local log=${4:-}
+  [ -n "$log" ] || case $1 in *.edn) log=${1%.edn}.log ;; esac
+  [ -n "$log" ] && [ -e "$log" ] || return 0
+  [ "$(sha256sum < "$log" | cut -c1-64)" = "$(sed -n 's/.*:log-sha256 "\([0-9a-f]\{64\}\)".*/\1/p' "$1" | head -1)" ]
+}
+# inputs_unchanged NAME (queue 023, report 022 finding 2): the plan's file, pin and logic lines of NAME
+# (plan/NAME.inputs, hashed when the plan was made) hashed again: a file edited while the step ran (in this
+# worktree, by another agent or step) means the run tested other content than its key's, NAME.recheck
+# names the files. The hosts' identities and the :uses digests are not hashed again
+inputs_unchanged() {
+  awk '($1 == "file" || $1 == "pin" || $1 == "logic") && $2 != "missing" { p = $0; sub(/^[a-z]+ [0-9a-f]+ /, "", p); print $2 "  " p }' \
+    "$logs/plan/$1.inputs" > "$logs/$1.recheck.sha256" || return 1
+  [ -s "$logs/$1.recheck.sha256" ] || return 0
+  (cd "$root" && sha256sum -c "$logs/$1.recheck.sha256") > "$logs/$1.recheck" 2>&1
+}
 record_pass() {  # record_pass NAME: its pass in the store at its key (GTS7 (a)), with its outputs (GT5)
-  local name=$1 k=${key[$1]} d=$store/$1 tmp
-  mkdir -p "$d" || return 1
-  tmp=$d/.$k.$$
-  cp "$logs/$name.log" "$d/$k.log" && cp "$logs/plan/$name.inputs" "$d/$k.inputs" || return 1
-  if [ "${outputs[$name]}" = yes ]; then
-    rm -rf "${d:?}/.$k.out.$$"
-    cp -a "$logs/out/$name" "$d/.$k.out.$$" && rm -rf "${d:?}/$k.out" && mv -T "$d/.$k.out.$$" "$d/$k.out" || return 1
+  # queue 023, report 022 finding 2: not recorded when an input changed while the step ran (its key is the
+  # plan's snapshot's)
+  if ! inputs_unchanged "$1"; then
+    echo "gate: the pass of $1 not recorded: its inputs changed while it ran: $(grep -v ': OK$' "$logs/$1.recheck" | head -5 | tr '\n' ' ')($logs/$1.recheck)" >&2
+    return 1
   fi
-  printf '{:step "%s" :key "%s" :commit "%s" :dirty %s :worktree "%s" :date "%s"\n :secs %s :cpu-s %s :maxrss-kib %s :tree-peak-kib %s\n :log-sha256 "%s"}\n' \
-    "$name" "$k" "$commit" "$dirty" "$root" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(cat "$logs/$name.secs")" \
-    "$(mem_of "$name" cpu-s)" "$(mem_of "$name" maxrss-kib)" "$(mem_of "$name" tree-peak-kib)" \
-    "$(sha256sum < "$logs/$name.log" | cut -c1-64)" > "$tmp" || return 1
-  # GT7: a pass of the clean run (bin/gate --clean) says so
-  [ -n "${GATE_CLEAN_INNER:-}" ] && sed -i '$ s/}$/ :clean true}/' "$tmp"
-  mv "$tmp" "$d/$k.edn"
+  # GTS80 (a): every file through a temporary name renamed into place, the record last (a pass is its
+  # .edn), each checked whole first: a full disk leaves temporary files (removed), never a cut pass. The
+  # temporaries are dotfiles ending in .tmp, never .edn (review 001, finding 3: gate.plan's passes reads
+  # *.edn, a killed gate's leftover would count as a pass). Review 001, finding 6: every file written and
+  # checked under its temporary name before any is renamed, so that a failure to write (at a key that has a
+  # pass already: --rerun, the canary) leaves the old record with its own log; then the old record removed,
+  # the companions renamed, the record last (a failure there leaves no pass, never one with another's log)
+  local name=$1 k=${key[$1]} d=$store/$1 t f secs cpu rss tree
+  mkdir -p "$d" || return 1
+  t=$d/.$k.$$
+  rm -rf "${t:?}".*
+  cp "$logs/$name.log" "$t.log.tmp" && cmp -s "$logs/$name.log" "$t.log.tmp" \
+    && cp "$logs/plan/$name.inputs" "$t.inputs.tmp" && cmp -s "$logs/plan/$name.inputs" "$t.inputs.tmp" \
+    || { rm -rf "${t:?}".*; return 1; }
+  if [ "${outputs[$name]}" = yes ]; then
+    cp -a "$logs/out/$name" "$t.out.tmp" && diff -rq "$logs/out/$name" "$t.out.tmp" > "$t.diff.tmp" \
+      && rm -f "$t.diff.tmp" || { rm -rf "${t:?}".*; return 1; }
+  fi
+  # review 001, finding 5: a number not measured is nil, so that the record is a whole map (an empty value
+  # made it odd-length, which the Clojure reader rejects)
+  secs=$(cat "$logs/$name.secs" 2>"$logs/mem-of.err") cpu=$(mem_of "$name" cpu-s) rss=$(mem_of "$name" maxrss-kib) \
+    tree=$(mem_of "$name" tree-peak-kib)
+  printf '{:step "%s" :key "%s" :commit "%s" :dirty %s :worktree "%s" :date "%s"\n :secs %s :cpu-s %s :maxrss-kib %s :tree-peak-kib %s\n :log-sha256 "%s"%s}\n' \
+    "$name" "$k" "$commit" "$dirty" "$root" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${secs:-nil}" \
+    "${cpu:-nil}" "${rss:-nil}" "${tree:-nil}" \
+    "$(sha256sum < "$logs/$name.log" | cut -c1-64)" \
+    "$([ -n "${GATE_CLEAN_INNER:-}" ] && echo ' :clean true')" > "$t.edn.tmp" \
+    && pass_reads "$t.edn.tmp" "$name" "$k" "$t.log.tmp" || { rm -rf "${t:?}".*; return 1; }
+  rm -f "$d/$k.edn" || { rm -rf "${t:?}".*; return 1; }
+  for f in log inputs out; do
+    [ -e "$t.$f.tmp" ] || continue
+    if [ "$f" = out ]; then rm -rf "${d:?}/$k.out" && mv -T "$t.out.tmp" "$d/$k.out"
+    else mv -f "$t.$f.tmp" "$d/$k.$f"; fi || { rm -rf "${t:?}".*; return 1; }
+  done
+  mv -f "$t.edn.tmp" "$d/$k.edn" || { rm -rf "${t:?}".*; return 1; }
 }
 
 # the plan's steps, from plan.tsv: NAME DECISION KEY PHASE CHAIN NEEDS START-AFTER HEAVY MEM BUDGET
@@ -233,7 +317,9 @@ run_one() {  # run_one NAME: a step of the plan, as decided (once: a build of th
     # GT5: the key once the producers ran, their outputs' digests appended to the plan's material
     for u in ${uses[$n]}; do echo "uses $u $(out_sha "$logs/out/$u")" >> "$logs/plan/$n.inputs"; done
     key[$n]=$(sha256sum < "$logs/plan/$n.inputs" | cut -c1-64)
-    if [ -f "$store/$n/${key[$n]}.edn" ] && [ -z "${rerun:-}" ]; then
+    # (re-review 020, finding 4: a record that reads, pass_reads, as the planner's and publish_passes'
+    # decisions: an empty, cut or odd-length one at the key is no pass, and the step runs)
+    if [ -z "${rerun:-}" ] && pass_reads "$store/$n/${key[$n]}.edn" "$n" "${key[$n]}"; then
       why[$n]="cut off: its producers' outputs as at its pass; $(pass_desc "$store/$n/${key[$n]}.edn")"
       dec[$n]=skip; echo "${why[$n]}" > "$logs/$n.why"
       restore_out "$n" || { echo "notrun its outputs" > "$logs/$n.status"; touch "$logs/$n.done"; return 1; }
@@ -333,9 +419,11 @@ names_of() { local n; for n in "${order[@]}"; do [ "${phase[$n]}" = "$1" ] && ec
 
 # GTS27 (a): per step the last ARBACE_GATE_KEEP (5) passes and every pass younger than
 # ARBACE_GATE_KEEP_DAYS (30) kept, the rest removed (a pass is KEY.edn, KEY.log, KEY.inputs); the
-# executables' directories (the gate's, javac's) older than a day but the newest 3 of each removed
+# executables' directories (the gate's, javac's) older than a day but the newest 3 of each removed; a
+# KEY.log, KEY.inputs or KEY.out with no KEY.edn, and a temporary, removed once older than a day
 gate_prune() {  # gate_prune [--dry-run]
   local dry= keep=${ARBACE_GATE_KEEP:-5} days=${ARBACE_GATE_KEEP_DAYS:-30} d n f k i pat npass=0 nkeep=0 freed=0 sz b now
+  local norphan=0 old
   now=$(date +%s)
   [ "${1:-}" = --dry-run ] && dry=1
   [ -d "$store" ] || { echo "gate --prune: no store $store"; return 0; }
@@ -350,9 +438,23 @@ gate_prune() {  # gate_prune [--dry-run]
       echo "gate --prune: ${dry:+would remove }$n/$(basename "$k" | cut -c1-12) ($(stat -c %y "$f" | cut -c1-10), $sz bytes)"
       [ -n "$dry" ] || rm -rf "${k:?}.edn" "${k:?}.log" "${k:?}.inputs" "${k:?}.out"
     done <<< "$(ls -t "$d" | sed -n "s|^\([0-9a-f]*\.edn\)$|$d\1|p")"
+    # re-review 020, finding 7: a pass's companions left with no record (a record_pass or publish_passes
+    # interrupted after the old record's removal or the companions' rename) removed once older than a day,
+    # as the temporaries below; a younger one may be a publication in progress
+    while IFS= read -r k; do
+      [ -n "$k" ] && [ ! -e "$d$k.edn" ] || continue
+      old=()
+      for f in "$d$k.log" "$d$k.inputs" "$d$k.out"; do
+        [ -e "$f" ] && [ $(( now - $(stat -c %Y "$f") )) -ge 86400 ] && old+=("$f")
+      done
+      [ ${#old[@]} -gt 0 ] || continue
+      norphan=$((norphan + 1))
+      echo "gate --prune: ${dry:+would remove }$n/${k:0:12} (no record: its$(for f in "${old[@]}"; do printf ' .%s' "${f##*.}"; done))"
+      [ -n "$dry" ] || rm -rf "${old[@]}"
+    done <<< "$(ls "$d" | sed -nE 's/^([0-9a-f]+)\.(log|inputs|out)$/\1/p' | sort -u)"
     [ -n "$dry" ] || find "$d" -maxdepth 1 -name '.*' -mmin +1440 -exec rm -rf {} + 2>"$store/.prune.err"
   done
-  echo "gate --prune: $npass passes, $nkeep kept, $((npass - nkeep)) ${dry:+would be }removed ($freed bytes) in $store"
+  echo "gate --prune: $npass passes, $nkeep kept, $((npass - nkeep)) ${dry:+would be }removed ($freed bytes), $norphan left without a record ${dry:+would be }removed in $store"
   for pat in gate javac; do
     i=0
     while IFS= read -r f; do

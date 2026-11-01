@@ -1887,3 +1887,660 @@ as built. Test t03447's class `:print-shapes` (a constant printed as `0` against
   step's key names; (b) a pending program host compared by its build's key (`arbace_javac_key`, `gate_key`) rather than as
   changed; (c) the workaround (select one cheap step that needs the host). *Recommended: (a)*.
   - **Decided (the user, 2026-10-31): (b).** After the tag, at the next change that rekeys every step.
+
+## Decided (2026-10-31): GTS80-GTS82
+
+The user decided the three as recommended, after the tag, at the next change that rekeys every step (GTS79 (b) with
+them; built ahead on branch `gate-post-v2`, "As built: GTS72, GTS79-GTS82 (write-ahead)" below).
+
+- **GTS80 Passes written on a full disk** (GT7's rerun 4). `bin/gate --clean` publishes with `cp -an` (none replaced), so
+  rerun 4's empty pass files, written at 01:35 with the disk full, kept rerun 5's passes out of the store; the planner
+  ignored them, and the demonstrations' base plan ran 4 steps until they were rebuilt from rerun 5's logs. Options:
+  (a) `record_pass` writes its `.edn`, `.log` and `.inputs` through temporary names renamed into place, and the
+  publication replaces a pass that is empty or does not read; (b) the planner's check alone, `--prune` removing empty
+  files; (c) nothing. *Recommended: (a)*, at the next change that rekeys every step (it edits `bin/lib/gate-run.bash`).
+  - **Decided (the user, 2026-10-31): (a).**
+- **GTS81 A negative control per check family** (2026-10-31: `bin/java-check`'s two judges, GT5 to the tag's eve, every
+  interp and compiled run passing). Options: (a) one deliberately failing case per check family (Java's levels, goi, the
+  suite, the oracle, diffcheck, the crops' checks), recorded as expected to fail; a run where it passes fails the step;
+  (b) Java's levels only; (c) none. *Recommended: (a)*, after the tag, with the next change that rekeys every step.
+  - **Decided (the user, 2026-10-31): (a).**
+- **GTS82 Stage 0 built in a worktree by mistake** (2026-10-31: twice an agent ran a tool in a linked worktree without
+  `ARBACE_HOST_EXE`, and `bin/lib/host.bash`'s `arbace_host_exe` started `bin/seed --build` there, a 10-minute, 8 GB
+  build). Options: (a) in a linked worktree with no `ARBACE_HOST_EXE` and no stage 0 of its own, use the main
+  checkout's stage 0 when its seed and Go pins match, else refuse with a message; `ARBACE_SEED_BUILD=1` builds anyway;
+  (b) fall back to the main checkout's whenever it matches, building only when nothing matches; (c) no change.
+  *Recommended: (a)*, after the tag (`bin/lib/host.bash` is in many keys).
+  - **Decided (the user, 2026-10-31): (a).**
+
+## As built: GTS72, GTS79-GTS82 (write-ahead) (2026-10-31)
+
+Branch `gate-post-v2`, from main `ba772ee5`, built in the light tier ahead of the merge after the tag
+`arbace-reaps-3-crops-v2`: the merge is the change that rekeys every step anyway (`bin/lib/gate-run.bash` is in every
+key, `bin/lib/host.bash` and `bin/lib/javac-key.bash` in most). No `bin/gate` run, no build of the executables or of
+javac's tool, no store touched; each part tested on synthetic material (the scripts named below, in the worktree's
+`.tmp/`). No shipped file changed (nothing under `arbace/`, `go/`, `overlay/`, `jdk/`, `tamago/`, `seed/`).
+
+**GTS72 (a).** `bin/javac-vendor` is in `arbace_javac_key` and `arbace_javac_rest_key` (`bin/lib/javac-key.bash`), and in
+`gate.audit`'s files of the `:javac` and `:javac-prog` hosts (`test/gate/audit.ae`); the `:audit-known ["bin/javac-vendor"]`
+of javac-tool and repr-java-parse are gone (the mechanism stays, unused). Tested (`.tmp/gts72/`): a comment line added to
+`bin/javac-vendor` moves both keys, its removal restores them; `gate.audit` on a trace that reads and executes
+`bin/javac-vendor`: javac-tool and repr-java-parse.samples `audit ok` here, `1 undeclared` with main's audit.ae.
+
+**GTS79 (b)** (`test/gate/clean.ae`). `select` compares a program host that is pending in the rerun's plan (`host
+javac-prog pending`: its build not made) by its build: when the rerun's `hosts.edn` has the base run's build key and
+rest (`:javac` and `:javac-prog-rest`; for `:prog`, `:gate` and `:prog-rest`; the base run's from the record's `:runs`
+`:hosts`, a first record's own `:hosts`), the pending line counts as the base's (`host-pending`); the identity of a
+program host is a function of those two (its units are the build's, the build is its key's). A skipped step says so
+(`...; host javac-prog not built, its build's key 63071998db8e the one it passed at (GTS79 (b))`). Tested on GT7's
+rerun 2 made synthetic (`.tmp/gts79/test.sh`: 29 Java steps on `:javac-prog` pending, goi-aot failed; 9 cases): main's
+`select` refuses (29 changed), this branch's builds `none javac-tool`, runs goi-aot and skips the 29 (exit 0), the same
+with `failed,changed`; a moved `:javac` or `:javac-prog-rest` refuses the 29 and `failed,changed` builds the tool; a
+pending step whose files changed is still changed; a base pass at a pending host is compared as before.
+
+**GTS80 (a).** `record_pass` (`bin/lib/gate-run.bash`) writes the `.log`, `.inputs`, `.out` and the record through
+temporary names (`.KEY.PID.*`), each compared with its source (`cmp`, `diff -r`) before its rename, the record last and
+only when it reads (`pass_reads`: not empty, `{:step "NAME" :key "`, a 64-digit `:log-sha256`, closed by `}`); a failure
+removes the temporaries and leaves no file of that key. The `:clean true` mark is written by the `printf`, not a `sed -i`
+after it: the record is byte for byte the old one. `bin/gate --clean`'s publication is `publish_passes` (in `bin/gate`,
+no key): a pass the store holds and that reads is kept; one absent, empty or cut is replaced (its files through
+temporaries, the record last); a clone's pass that does not read is not published; the count says how many replaced one
+that did not read. The planner still skips a record it cannot read. Tested (`.tmp/gts80/test.sh`, 21 cases): writes
+past a file size limit (`ulimit -f`: a real EFBIG, the full disk's failure) leave no file and no temporary, the earlier
+pass intact; the record and log byte for byte main's `record_pass`'s (the date masked), plain and clean;
+`publish_passes` over rerun 4's case (an empty pass and log, a cut pass with an output, a good one, an absent one, a
+source pass that does not read), then again (nothing published).
+
+**GTS82 (a)** (`bin/lib/host.bash`). In a linked worktree (git's common directory not the checkout's own `.git`) with no
+`ARBACE_HOST_EXE` and no current stage 0 of its own (a stale one counts as none), `arbace_host_exe` takes the main
+checkout's `target/seed/ARCH/arbace` when its `target/seed/pins` names the worktree's seed and Go's pin (the first two
+fields) and its `seed.sha256` the seed; else it refuses, naming `ARBACE_HOST_EXE` and `ARBACE_SEED_BUILD=1`, the main
+checkout's state and the cost; `ARBACE_SEED_BUILD=1` builds the worktree's own as before. The main checkout, a clone of
+its own (the clean run's) and `bin/gate`'s stage0 step (`bin/seed --build` itself) are unchanged. Tested
+(`.tmp/gts82/test.sh`, a scratch worktree and a scratch clone under the worktree's `.tmp/`, a stub `bin/seed` that
+reports a build instead of building; 11 cases): `ARBACE_HOST_EXE` wins; main's stage 0 taken; another seed
+(`ARBACE_SEED`) or Go pin refused, status 1, no build; `ARBACE_SEED_BUILD=1` builds; a current own stage 0 taken, a stale
+one replaced by main's; the clone builds as before.
+
+**GTS81 (a): the negative controls.** One design for every family: a control is a *crossed pair*, the run (or record)
+of one case of the corpus judged by the family's own comparison against the expected result of another case, which it
+must fail. It runs inside the step's own run, needs no case, build or reference of its own (the two cases are the
+corpus's, both passing), and goes through the very code path a shadowed or broken judge would take: a judge that passes
+everything passes the control, and the step fails (`control passed: ...`); a control that did not reach the judge while
+its subject did also fails (`control not judged: ...`); a control whose subject was not run (a selection) is printed and
+left. The controls are no case of the records, classes, known lists or counts. Each is documented with its check:
+
+| family | control (file) | crossed pair | judged by | documented |
+|---|---|---|---|---|
+| Java interp, compiled, classes | c00001 (`test/java/controls.edn`) | t03208 EnumsRecords' run against t03209 EvalOrder's reference (exit 0, other stdout; other class files) | `run_actions`' `judge`; `classes_verdict` (the inline comparison made a function); `java.check/report` and `--essential-compiled`'s tail | `bin/java-check`'s header; doc/classes/JAVA-CONFORMANCE-SURVEY.md, "As built: the negative controls" |
+| goi, goi-aot | `_control/helloworld-vs-printbig`, `_control/issue21879-vs-fibish` (`test/goi/controls.txt`) | the subject's run (interpreted; at `--aot` built and run) against the reference's gc run (`gc_ref`'s cache, shared) | `check_one`'s comparison; `controls_judged` | `bin/goi`'s header; doc/go/GOI-SPEC.md §11.3 |
+| the suite, its AOT level | 1 (`test/clojure/controls.edn`) | clojure.test-clojure.macros' result against vars' expected (10 tests against 9) | `regressions` in the report (`CLOJURE_TESTS_CONTROLS`) | `bin/clojure-tests`' header, step 7 |
+| the oracle | control-1 (`test/oracle/controls.edn`) | collections.ae:6's actual `[]` against :7's expected `[1 2 3]` | `oracle.runner/check`'s `differs` (canon, V11); `controls-ok?` | doc/go/ORACLE.md, "The negative controls" |
+| diffcheck | control-1 (`test/diffcheck/controls.edn`) | collections.ae:6's evaluated run against :7's compiled run | `diffcheck.main/check`'s comparison; `controls-ok?` | doc/FUTAMURA-SURVEY.md, "F2 as built" |
+
+Not covered (no cheap control; GTS84, GTS85): Java's read (its verdict is the reader's status and log, nothing of
+another test to judge against), diagnostics (the golden comparison sits inside `diag_actions`, per action) and print (the
+five steps of `java.print/judge`); goi's errorcheck and directory tests (`check_err`'s `gocmp`, `check_dir`'s golden
+output); repr/go's native-check (whole-corpus dumps, 28 GiB a part; a crossed pair inside `check-job` is cheap to run but
+not to build without a run). Tested (`.tmp/gts81/`): Java (`java/test.sh`, 12 cases; `java/ec.sh`, 3): the plan's
+control lines from the real reference; `run_actions` with a fake executable (the control differs, another status
+fails, the shadowed `judge` of 2026-10-31 passes subject and control alike); `--judge` on synthetic results (the
+controls hold, a passing one exits 1, a missing one exits 1, a load-failed pair is left); the essential-compiled tail.
+goi (`goi/test.sh`, 7): `check_one` on the real controls with gc's references built by TamaGo's go and goi faked by `go
+run` (subject and reference pass, the control fails on stderr, two references for three programs), `controls_judged`'s
+cases. The oracle (`oracle/run.sh`): `oracle.runner check` of collections.ae on stage 0, `--expected` the frozen record:
+exit 0 with the control differing; the control against itself: exit 1, `control passed`; collections.ae not selected:
+left; a case that does not exist: `control not judged`, exit 1. diffcheck (`diffcheck/run.sh`, a hand-made corpus of the
+two cases on stage 0): differs; against itself, passed, exit 1; runs incomplete, left. The suite (`suite/test.sh`, 4):
+the runner renamed as `bin/clojure-tests` renames it, on synthetic results: holds, passes against itself (exit 1), its
+subject not run (left), no expected reference (exit 1). Not run: any check on the gate's executables, goi's AOT control
+(`aot_build`), the controls through `check()`'s and the steps' wiring end to end.
+
+**GTS75's and GTS78's second halves** (decided for the next change that rekeys everything): not built here. GTS75 (the
+converter drops its `^Long` over its own `Long/valueOf`) changes `jdk/forms` (shipped), a conversion on javac's tool and
+a re-seed's business; GTS78 (c), GTS51 (a) (`--record-cpu` for goi and Java, `limited` at three times the recorded CPU
+time) needs the clean run's `NAME.cpu.tsv` logs, which are the main checkout's: GTS88. GTS71 (c) (the gate hands the steps
+the tool's key instead of `arbace_javac_fresh` hashing) was recommended for the same change but is not in the decision's
+list: GTS87.
+
+**What the merge must check.**
+
+- The essential gate (every step rekeys); its first run's logs show the controls: java-check `control c00001 ...: differ,
+  as a control must`, goi-check `_control/helloworld-vs-printbig ...: fail`, goi-aot-essential `_control/issue21879-vs-fibish
+  ...: fail` (the AOT path, not run here), oracle-go and diffcheck `control control-1 ...: differs`, suite-go and
+  suite-aot-essential `control 1 ...: ran 10 tests, expected 9`. Rebuilt once by their keys: the essential-compiled program
+  (its key holds `test/java/check.ae`), diffcheck's diff build (`test/oracle/runner.ae`), the suite's AOT builds if their
+  keys hold the runner; javac's tool (`arbace_javac_key` moved).
+- `bin/gate --full --plan`: 85 steps, every check `run` (here: `gate.plan` on this branch's table and files, 85 steps, 77
+  run; essential 19).
+- The next clean run's selection: a `--clean --only` where javac's tool is not built skips the `:javac-prog` steps with
+  `(GTS79 (b))` in their reason instead of stopping; `publish_passes`' line in the summary.
+- In a linked worktree without `ARBACE_HOST_EXE`, a tool takes the main checkout's stage 0 (no `bin/seed --build`).
+- The Java levels' records, re-recorded after the two judges' fix (the journal's next step), hold no `c00001` line.
+
+## Proposals (GTS83-GTS89)
+
+- **GTS83 The gate's stage 0 in a linked worktree.** GTS82 (a) covers the tools; `bin/gate`'s stage0 step runs `bin/seed
+  --build` itself, so an everyday gate in a worktree still builds its own stage 0 (about 10 minutes, 8 GB) once.
+  - Options: (a) the stage0 step in a linked worktree takes the main checkout's stage 0 when its `pins` file equals what
+    `bin/seed --build` would write (the seed, Go's pin, the scripts' digest, the root, the arches: GTS53's identity),
+    a link or `ARBACE_HOST_EXE` for the run; (b) as now.
+  - *Recommended: (a)*: the identity is already exact (`:stage0` in hosts.edn); the clean run, a clone of its own, keeps
+    building its own.
+- **GTS84 Java's read, diagnostics and print without a control.**
+  - Options: (a) crossed controls there too: diagnostics, a subject's javac output against another test's golden file
+    (`diag_actions` given the reference's golden path); print, the subject's printed class files against another test's
+    original ones (the `:classes` step); read left (its verdict is the reader's own status and summary line, which a
+    control cannot cross); (b) leave the three.
+  - *Recommended: (a)*: the diagnostics and print judges are the next most complex code paths; read's is one `grep`.
+- **GTS85 goi's errorcheck and directory tests, native-check.**
+  - Options: (a) crossed controls: `check_err` judging a subject's errors against another program's `// ERROR` comments,
+    `check_dir` a directory test's run against another's golden output, native-check one dump's native tree against
+    another dump's helper tree inside `check-job` (one diff per part); (b) goi's two, native-check left; (c) none.
+  - *Recommended: (b)*: native-check's comparison is a structural diff whose failure mode is "no difference found", which
+    its E-forms level (`.ae` text byte for byte) already cross-checks.
+- **GTS86 A control's own run.** Java's and the suite's, the oracle's and diffcheck's controls judge records their
+  subjects already made (no run of their own: a control fails only with its judge); goi's run their subject again (the
+  control's id, its own run, at `--aot` its own `aot_build`), so a control can time out alone; goi's quiet retry reruns
+  it (the dispatcher knows `_control/` ids), and a control left in error while its subject passes fails the check.
+  - Options: (a) as built; (b) goi's control judges the subject's own run (`check_one` writing the subject's outputs
+    once, judged twice, as Java's `run_actions` does), no second run or build.
+  - *Recommended: (b)*: the same code path, half the cost at `--aot`, and no failure of a control alone.
+- **GTS87 GTS71 (c) at this rekey.** GTS71 recommended (c) (the gate hands the steps javac's tool key, `arbace_javac_fresh`
+  compares it instead of hashing) for the next change that rekeys every step, but the decision of 2026-10-30 lists only
+  GTS72, GTS75 and GTS78 for it.
+  - Options: (a) built on this branch before the merge; (b) left as built (a): the H rule.
+  - *Recommended: (a)*: it removes the audit's one rule about which process read a file, at no extra rekey.
+- **GTS88 GTS51 (a)'s recorded CPU times.** The second half of GTS78 needs the clean run's `NAME.cpu.tsv`, under the main
+  checkout's `.tmp/gate-clean/`.
+  - Options: (a) built by the main session after the merge, from the v2 record's logs (`--record-cpu` for `bin/goi check`
+    and `bin/java-check`, `limited` at three times the recorded time, the default's floor); (b) at the next clean run.
+  - *Recommended: (a)*: the logs exist now, and the limits are in `bin/lib/limit.bash`, in `gate_key`: the same rekey.
+- **GTS89 What "does not read" means to the publication.** `pass_reads` is a shape check in bash (start, step, key, log
+  digest, closing brace); the planner's test is the Clojure reader.
+  - Options: (a) as built; (b) `publish_passes` asks the planner (`gate.plan` reading each pass on stage 0).
+  - *Recommended: (a)*: the shape is `record_pass`'s own, which now writes it whole or not at all; (b) costs a stage 0 run
+    per publication for the case a cut file already fails.
+
+**Slips.** The GTS82 test ran `git worktree prune` once (shared git metadata: it removes only entries whose directories
+are gone; dropped from the script after); the tests read the main checkout's `target/seed/pins` and `seed.sha256` (read
+only, as GTS82's fallback does) and ran its stage 0 (as `ARBACE_HOST_EXE`).
+
+## Decided (2026-10-31): GTS83-GTS89
+
+The user decided all seven as recommended: GTS83 (a); GTS84 (a); GTS85 (b); GTS86 (b); GTS87 (a), built on this
+branch before the merge; GTS88 (a), built after the merge from the v2 record's logs; GTS89 (a), as built.
+
+## As built: GTS83-GTS87 (write-ahead) (2026-10-31)
+
+Branch `gate-post-v2`, after "As built: GTS72, GTS79-GTS82 (write-ahead)", in the light tier: no `bin/gate` run (not even
+`--plan`), no build of the executables or of javac's tool, no store touched. Each part tested on synthetic material and
+scratch copies (the scripts named below, in the worktree's `.tmp/`). No shipped file changed.
+
+**GTS83 (a): the gate's stage 0 in a linked worktree** (`bin/gate`, `bin/seed`, `bin/lib/seed-go.bash`). The pins line
+`bin/seed --build` writes and keeps a stage 0 by is now one function, `seed_go_pins ARCHIVE ARCHS` (the seed's SHA-256,
+`seed/goroot.sha256`'s, the digest of `bin/seed` and `bin/lib/seed-go.bash`, the toolchain's root, the architectures:
+GTS53's identity, the `:stage0` host's), byte for byte the inline formula it replaces. `bin/seed --kept DIR [--arch A]`
+says whether DIR is a stage 0 `--build` would keep here (its executables, its `seed.sha256` this seed's, its `pins` this
+line): exit 0 with `stage 0 kept: ...`, else the reason, building nothing. `bin/gate`'s `stage0_choose`: in a linked
+worktree (git's common directory another checkout's `.git`) whose own stage 0 `--kept` refuses, the main checkout's when
+`--kept` accepts it; the stage0 step is then `bin/seed --kept MAIN/target/seed` (its summary line the same regex) and
+`ARBACE_HOST_EXE` is the main checkout's executable for the gate and every step; else `bin/seed --build --no-aot` as
+before. The main checkout, the clean run (`GATE_CLEAN_INNER`, a clone of its own) and a worktree with a current stage 0
+of its own are unchanged; `bin/gate --audit` chooses the same way. The identity is the whole line, stricter than GTS82's
+fallback in `bin/lib/host.bash` (the seed's and Go's pins only): a pass claims the `:stage0` identity, which holds the
+scripts' digest. Tested (`.tmp/gts83/test.sh`, 22 cases, a scratch repository of its own: a fake main checkout with a
+fake seed archive, its linked worktree, a clone; fake executables, no build): `seed_go_pins` equal to the old formula;
+`--kept` on none, its own, the worktree's view of main's, another toolchain root, another architecture set, another
+`seed.sha256`; `stage0_choose` (extracted from `bin/gate`) in the main checkout, the linked worktree (main's taken, the
+host set), the clean mode, the clone, a worktree whose `bin/seed` or Go pin differs (builds), one with a current stage 0
+of its own (kept by `--build`), a stale one (main's); the step's summary regex on `--kept`'s line.
+
+**GTS84 (a): Java's diagnostics and print controls** (`bin/java-check`, `test/java/check.ae`, `test/java/print.ae`,
+`test/java/controls.edn`; doc/classes/JAVA-CONFORMANCE-SURVEY.md, "As built: the negative controls"). The golden
+comparison is `diag_golden` (out of `diag_actions`) and `check_diag`'s judgment `diag_judge P SUF EXP`, both the tests'
+and the controls'. **c00002**: t06443 T5017953's javac output against t06444 T6304921's golden file (`plan-diag`'s
+`control-diag CID EXIT DIR/FILE`): the subject's actions up to its first golden one, that action's status against the
+reference's and its output against `T6304921.out`. **c00001 at print**: `control-print CID REF` in the subject's plan,
+`control-reference CID` in the reference's; `print_check_one` writes `print/classes.res.CID` by `classes_verdict` and
+keeps `print/c2` of both; `java.print/judge` prints the control's row from the steps' own comparisons crossed
+(`control-steps`: `forms-result` of the subject's F2 against the reference's F1, `text-result` of its full print against
+the reference's source, the classes' digest then `classes-result` against the reference's printed class files), `differ`
+only when every crossed step differs, `pass` naming a step that passed what differs, `left` when the reference was not
+printed in the run (a selection), `unjudged` when no step was taken. `controls-judged!` prints `left` and leaves it. Read
+is left. Tested (`.tmp/gts84/test.sh`, 27 cases): the plans from the real reference (t03208's `control-print`, t03209's
+`control-reference`, GTS81's lines unchanged, t06443's `control-diag` naming T6304921.out, t06444 none); `check_diag` on
+the real jdk26u tests read in place with the system JDK's javac as the javac (as `record_diag` runs it): t06443 and
+t06444 pass, c00002 differs at line 1, the subject's own golden file as the reference passes it, another status fails
+it, a `diag_judge` that passes everything passes the control too; `diag_judge` bounded to the first golden action;
+`print_check_one` on synthetic trees (javac faked): the control's digest, the trees kept for the pair and removed for a
+test of no control; `java.print/judge` on synthetic print runs on stage 0: differ at forms, text and classes, the
+subject against itself passes naming the three, one step passing what differs (classes) passes naming it, the reference
+absent is left; the report (`bin/java-check --judge`) on synthetic results: c00002 and c00001 at print differ (exit 0),
+c00002 passing, missing, c00001 left (exit 0), unjudged, passing (exit 1). Not run: either level on javac on Arbace.
+
+**GTS85 (b), GTS86 (b): goi's errorcheck and directory controls, judged from the subject's own run** (`bin/goi`,
+`test/goi/controls.txt`; doc/go/GOI-SPEC.md §11.3). A control is no entry of the program list any more: each checker,
+once its subject reached its comparison, judges the same run again under the control's id (`controls_of SUBJECT`, the
+level's lines whose subject it is; none in the box's runs). The comparisons are functions both use: `run_verdict`
+(`check_one`), `dir_verdict` (`check_dir`), `syn_verdict` and `err_verdict` (`check_err`'s two paths), `err_aot_verdict`
+(`check_err_aot`). New controls: `_control/append1-vs-assign1` and `_control/dedup-vs-issue11053` (typeparam/dedup's
+output against fixedbugs/issue11053.out) at interp, `_control/const6-vs-bug046` and `_control/issue48337a-vs-dedup` at
+aot, beside GTS81's two; every subject is in its level's essential list and passes in the records. A subject that ends
+before the comparison prints no control row (the control "not judged", no failure); a subject not in the run fails the
+check, but a selection (`--only`) leaves it; the quiet retry's merge adds the rows a retried subject brings. At `--aot` a
+control costs no `aot_build`. Tested (`.tmp/gts85/test.sh`, 13 cases, the real programs of `$GOROOT/test`, gc's
+references real, `tools/gocmp` built here with TamaGo's go, goi faked: `go run` of the program, the subject's golden
+output, gc's own compile for the errors): `check_one` one goi run for subject and control, the control fails on
+stderr, two gc references; `check_dir` one run, the control fails against issue11053.out; `check_err` one run, the
+control fails on assign1's missing errors, and on its syntax path; comparisons that pass everything make the three
+controls pass (status 1); a subject absent fails, with `--only` is left; a subject timing out leaves the control not
+judged; `err_aot_verdict` on gc's errors of const6 (its own pass, against bug046's comments fail); the retry's merge.
+Not run: `check_one`'s and `check_dir`'s AOT paths (`aot_build`), `check_err_aot` end to end, goi itself.
+
+**GTS87 (a): GTS71 (c)** (`bin/lib/gate-run.bash`, `bin/lib/javac-key.bash`, `test/gate/audit.ae`). `gate_env` exports
+`GATE_JAVAC_KEY` (its `jkey`, `arbace_javac_key` of the checkout) and `GATE_JAVAC_KEY_ROOT` (the checkout's physical
+path); `arbace_javac_fresh` (`repr_java_host`, `bin/javac-vendor check --from`) compares the tool's `.key` with it when
+the root is this checkout, else hashes as before (by hand, another checkout). The H rule's `identity-host` keeps `:prog`
+(gate_key's files: its steps' tools compute the executables' keys, `arbace_runtime_key` and `arbace_aot_key` through
+`program_base` and `bin/java-check`) and `:gate` (a no-op: a step on `:gate` or `:javac` declares its host's files
+anyway); `:javac-prog`'s went (it served only `arbace_javac_fresh`: GT7's fix round counted exactly the 2,601 files of
+`arbace_javac_key` hashed in java-fixtures and java-classes), and so did `:javac`'s no-op. The builds' rule stays
+(javac-tool's `reader_key`, `bin/javac-vendor tool`'s and `--build-java`'s own `arbace_javac_key`, go-build's
+`gate_key`). Tested (`.tmp/gts87/test.sh`, 10 cases): `arbace_javac_fresh` under strace: the handed key, no
+`sha256sum` run; a stale tool refused without hashing; a key for another root, or none, hashed (the same key);
+`gate_env` (scratch executables, store and lock) exports both; `gate.audit` on synthetic traces: java-classes hashing
+three of the tool's sources undeclared here and covered with main's `audit.ae`, java-check hashing the runtime's still
+covered by `:gate`'s identity, javac-tool's declared by its host.
+
+**What the merge must check** (with "As built: GTS72, GTS79-GTS82"'s list).
+
+- The first gate in the main checkout rebuilds stage 0 once (`bin/seed` and `bin/lib/seed-go.bash` changed, so its pins
+  line did); then a gate in a linked worktree says `stage 0 kept: /root/arbace/target/seed (amd64), its pins this
+  checkout's (GTS83 (a) ...)` in its stage0 line and builds none; before that rebuild it builds its own, as now.
+- goi-check's and goi-aot-essential's logs: three controls each `fail, as a control must`; goi-aot-essential faster by
+  one `aot_build` (GTS81's control built its subject again); the full `goi-check` and `goi-aot` the same.
+- java-diagnostics: `control c00002 ...: differ, as a control must`; java-print: c00001 at print `differ` (both judged
+  again by java-check-judge from the saved results); java-classes, interp and compiled as before.
+- The clean run's audit of the `:javac-prog` steps (java-fixtures, java-classes, java-forms-verify, the repr-java tree
+  checks): no `hashed only` line and audit ok; an undeclared read of a tool source there is a route the H rule hid,
+  to be declared (or handed the key the same way).
+- GTS81's test scripts are superseded where they assumed the old shapes (`.tmp/gts81/java/test.sh`'s "t03209 has none":
+  it now has `control-reference`; `.tmp/gts81/goi/test.sh` dispatches `_control/` ids, which no checker takes now).
+
+## Proposals (GTS90-GTS94)
+
+- **GTS90 Which pins let a worktree's gate take main's stage 0.**
+  - Options: (a) as built: the whole pins line (the scripts' digest and the toolchain's root too: the `:stage0` claim);
+    (b) GTS82's two fields (seed and Go), so a worktree that changed `bin/seed` still takes main's (its stage0 pass then
+    names scripts that did not build it).
+  - *Recommended: (a)*: a pass at the `:stage0` identity must be about the stage 0 it ran on; a change to the seed's
+    scripts is rare and is exactly when a fresh build is the check.
+- **GTS91 Java's read level's control** (left by GTS84 (a)).
+  - Options: (a) a crossed control at `--forms verify` (java-forms-verify): t03208's fresh forms compared, by
+    `forms_cmd`'s comparison, with t03209's committed forms in `test/java/forms/`; (b) one in the read level itself,
+    the subject's `forms.sha` against another test's recorded digest (none is recorded: a new record); (c) none.
+  - *Recommended: (a)*: the committed forms are the one recorded output of the read, and their comparison is the only
+    judge there besides the reader's status; it needs no record of its own.
+- **GTS92 goi's controls in the box.**
+  - Options: (a) as built: none in the box's runs (`controls_of` returns nothing there); (b) the box's console
+    comparison crossed too, when the box is unparked.
+  - *Recommended: (a) now, (b) with the box's return*: the box is parked (2026-10-26) and its comparison is a third one
+    (the console as one stream), worth a control when it runs again.
+- **GTS93 A print control's reference outside a selection.**
+  - Options: (a) as built: `left` (`--only` without t03209); (b) `print_level` adds a control's reference to its list
+    when its subject is there (one more test printed).
+  - *Recommended: (a)*: the gate's java-print step runs every test; a selection is a person's diagnosis, where the
+    control saying it was left is enough.
+- **GTS94 The handed key for the tool build too.**
+  - Options: (a) as built: `bin/javac-vendor tool` and `bin/arbace-go --build-java` hash `arbace_javac_key` themselves
+    (the javac-tool step is on `:javac`, its files declared); (b) both take `GATE_JAVAC_KEY` as `arbace_javac_fresh`
+    does.
+  - *Recommended: (a)*: no audit rule depends on it, and a build that computes its own key cannot record another
+    checkout's by a stale environment.
+
+**Slips.** None of the rules': the tests created a scratch git repository with a linked worktree of its own under the
+worktree's `.tmp/` (its metadata its own, removed with `git worktree remove`), read the main checkout's
+`target/seed/pins` and ran its stage 0 as `ARBACE_HOST_EXE`, ran the system JDK's javac on two jdk26u tests in place
+(`-J-Xmx512m`, output in the worktree's `.tmp/`), and built `tools/gocmp` with TamaGo's go into the worktree's `.tmp/`.
+
+## Decided (2026-10-31): GTS90-GTS94
+
+The user decided all five as recommended: GTS90 (a), the whole pins line, as built; GTS91 (a), built on this branch
+before the merge; GTS92 (a), (b) when the box is unparked; GTS93 (a), as built; GTS94 (a).
+
+## As built: GTS91 (write-ahead)
+
+GTS91 (a), decided 2026-10-31. `bin/java-check --forms verify` (the step `java-forms-verify`) gains Java's read level's
+negative control. `forms_same` is the verify's comparison (`diff -r -x provenance.edn`, now a function), and
+`forms_controls` runs it crossed: the controls of `test/java/controls.edn` with `:forms` in their `:levels` (c00001,
+beside its other levels; `:forms` is no level of `check`, so `java.check/report` ignores it) compare the subject's fresh
+forms (t03208, `WORK/forms-new`) with the reference's committed ones (t03209, `test/java/forms/`), which must differ.
+Equal forms print `control passed: c00001 (forms): ...` and fail the verify even when the forms verify; a subject or
+reference not in the run (the essential list without it, a forms tree without it) is `left`, as GTS93 (a) has it for
+print (`forms_cmd` has no `--only`: it always reads the whole essential list). The step's inputs gained
+`test/java/controls.edn`. Documented in `bin/java-check`'s header, doc/classes/JAVA-CONFORMANCE-SURVEY.md beside GTS81's
+and GTS84's controls, and CLAUDE.md's line on the controls.
+
+Tested (`.tmp/gts91/test.sh`, the real committed forms as the "fresh" ones, no read): the real comparison differs (rc 0);
+`forms_same` replaced by one that always says equal makes the control pass (rc 1, the verify fails); t03208's forms
+replaced by t03209's pass the control (rc 1); no t03208 in the run is `left` (rc 0). A real read was not run (javac's tool
+and the gate's builds were off limits): the merge should see `bin/gate --full`'s java-forms-verify print the control's
+line.
+
+Proposals (GTS95): none.
+
+## As built: review 001's fixes (write-ahead) (2026-10-31)
+
+Review 001 (a helper VM's, of branch `gate-post-v2` at `ef97d7d6`, light: nothing built or run; findings 1-4 checked
+against the code by the main session) found nine things; each fix is a commit of its own on this branch, in the light
+tier as the earlier rounds (no `bin/gate` run, no build of the executables or of javac's tool, no store touched), tested on
+scratch copies and synthetic material (the scripts named below, in the worktree's `.tmp/`). No shipped file changed.
+
+**Findings 1 and 4: a linked worktree's stage 0 is its own** (`bin/seed`, `bin/lib/host.bash`, `bin/gate`,
+`bin/gate-demos`). GTS82 (a) and GTS83 (a) ran a linked worktree's tools and gate on the main checkout's
+`target/seed/ARCH/arbace` by its path, checked once: main's rebuild (`bin/seed --build` begins with `rm -rf` of its
+directory, about 10 minutes) made every later tool call fail, and after it the same path held a stage 0 of other
+pins, on which the worktree's steps went on recording passes at the `:stage0` identity of their own files. Now
+`bin/seed --link FROM [-o OUT] [--arch A]` (under OUT's checkout's stage 0 lock) does nothing when `--kept OUT` holds;
+else, when `--kept FROM` holds, it removes OUT's `pins` and `seed.sha256`, hard-links FROM's executables into OUT (a
+copy when the link fails, e.g. across filesystems) and copies `seed.sha256` and `pins` (a few bytes: no write in the
+worktree reaches main's through a shared inode), each through a temporary renamed into place, `pins` last; then checks
+that each placed file is still FROM's (the same inode, or for a copy the same bytes) and that FROM and OUT are both still
+kept, else removes what it placed (exit 1: a rebuild in FROM meanwhile, which removes its `pins` first and writes them
+last). The worktree's `target/seed` is then a stage 0 of its own: main's `rm -rf` cannot pull it away, and its own
+`bin/seed --build` and `--kept` keep it by its pins. `seed_kept` is `--kept`'s check made a function, shared by both.
+`arbace_host_exe` in a linked worktree: its own when `bin/seed --kept` keeps it, else main's linked (`--link`), else
+the refusal (naming `--link`'s reason, `ARBACE_HOST_EXE` and `ARBACE_SEED_BUILD=1`); `ARBACE_SEED` passed on as
+`ARBACE_SEED_GO`. So the tools, `bin/gate --plan` and the gate's stage0 step decide by the one identity, the whole pins
+line (finding 4: host.bash compared the seed's and Go's pins alone); about 70 ms a tool call in a linked worktree (the
+seed's hash, `--kept`'s `go_check`). `bin/gate`'s `stage0_choose` runs `bin/seed --link MAIN/target/seed` and prints its
+line when it linked or did not (nothing when the worktree's own was kept); the stage0 step stays `bin/seed --build
+--no-aot`, which keeps the linked stage 0 or, when nothing was linked, builds as in the main checkout (GTS83 (a)'s
+"else"); no `ARBACE_HOST_EXE` is exported. `bin/gate-demos` links the invoking checkout's stage 0 into its scratch
+worktree (the same commit, so the same pins line), so a stale main stage 0 no longer stops it (finding 4's second
+case); without one, its tools take main's the same way or refuse. Tested (`.tmp/review001/fix1.sh`, 59 cases, a
+scratch repository of its own: a fake main checkout with a fake seed, its linked worktrees, a clone; fake
+executables; `ln` and `cp` shims on `PATH` for a failing link and for main's rebuild in the middle of the linking):
+`--link` with no stage 0 in main (refused), main's kept (the executable main's inode, `seed.sha256` and `pins` equal
+copies, a write into the worktree's `pins` leaves main's kept), again (nothing linked), main's `rm -rf` then a rebuild
+of other pins (the worktree's still kept, runs the old executable, its `bin/seed --build` keeps it), a stale own one
+replaced, another toolchain root refused, a failing `ln` (copies), main's rebuild starting after the executable's link
+(refused, nothing left), main's executable replaced while linking (refused), main's pins rewritten after their copy
+(refused, the links dropped); `arbace_host_exe`: main's linked, still there after main's `rm -rf`, the worktree's
+`bin/seed` changed (refused: the gate's identity), another seed refused, `ARBACE_SEED_BUILD=1` builds, a current own
+one kept (its own inode), an own one stale by its pins line alone replaced by main's, no log left, a clone builds, the
+main checkout unchanged; `stage0_choose` with the step's command run after it (linked, then kept by `bin/seed --build
+--no-aot`; silent the second time; not linked when the worktree's `bin/seed` differs, then the build; nothing in the
+clean mode, a clone or the main checkout); `gate-demos`' line (a second worktree linking the first's own while main's is
+stale). `.tmp/gts83/test.sh`'s `stage0_choose` cases rewritten to the new behaviour (23 cases); `.tmp/gts82/test.sh`
+retired (it read and would now link the real main's `target/seed`).
+
+**Finding 2: `--essential-compiled`'s retry** (`bin/java-check`). The controls' rows were split off before the timeout
+retry, so a subject that timed out at both of `run_actions`' limits and passed when run again left its control's row
+`timeout` and the step failed (`control not judged`). Now the retry comes first: the timed-out tests are those that are
+no control (a control id is no test to run), the merge replaces each retried row and adds the rows the retry brings
+(its control's), and the controls are split off after it. Tested (`.tmp/gts81/java/ec.sh`, 7 cases, the tail extracted
+from the script, `compiled_one` faked): GTS81's three; a subject timing out then passing (exit 0, the control judged,
+only the subject run again, at twice the limit); the retried control passing (exit 1, `control passed`); timing out
+again (exit 1). On `ef97d7d6`'s file the first two of the new cases fail (`ec.sh ef97d7d6`): the finding.
+
+**Finding 3: the passes' temporaries** (`bin/lib/gate-run.bash`, `bin/gate`, `test/gate/plan.ae`). GTS80's temporary
+names ended in `.edn` (`.KEY.PID.edn`, `.KEY.pub.PID.edn`), and gate.plan's `passes` read every `*.edn`, dotfiles too: a
+gate killed between the record's `printf` and its `mv` left a pass the planner counted. Both: every temporary of
+`record_pass` and `publish_passes` ends in `.tmp` (`.KEY.PID.edn.tmp`, `.log.tmp`, ...), and `passes` skips dotfiles.
+Tested (`.tmp/gts80/test.sh`, now 39 cases): every name `record_pass` and `publish_passes` rename from ends in `.tmp`,
+none in `.edn`; gate.plan's `passes` on stage 0 over a step directory of three leftovers (both old styles and the new
+one) counts none, and a real pass one; with `ef97d7d6`'s `plan.ae` the two old-style leftovers count (the finding).
+
+**Finding 5: a record always reads** (`bin/lib/gate-run.bash`). An empty number (no `NAME.mem`, or one without a field)
+went into the record unquoted, an odd-length map the reader rejects, which `pass_reads` accepted. `record_pass` prints
+`nil` for a number not measured (`${v:-nil}`, `:secs` too), and `pass_reads` rejects a key with no value (a keyword
+followed by another keyword or by the closing brace; the record's values are never keywords). Tested (in
+`.tmp/gts80/test.sh`): no `.mem` gives `:cpu-s nil :maxrss-kib nil :tree-peak-kib nil`, one field gives that one;
+gate.plan's `passes` on stage 0 reads both (`[3 nil]`, `[nil nil]`); `pass_reads` rejects one, three empty numbers and a
+key before the brace, accepts the whole ones (nil, numbers, `:clean true`), and `ef97d7d6`'s accepted the odd one. The
+record is byte for byte main's when the numbers are there (GTS80's cases).
+
+**Finding 6: a rerun at a key that has a pass** (`bin/lib/gate-run.bash`). `record_pass` moved the new log and inputs
+into place before writing the record, so a failure after them (a full disk at the output or the record) left the old
+record beside the new log. Now every file is written and checked under its temporary name first (a write failure
+leaves the old pass whole, its record with its own log and output); then the old record is removed, the companions
+renamed and the record last (a failure to rename leaves no pass, never one with another's log). Tested (in
+`.tmp/gts80/test.sh`): a pass of a step with an output, a rerun at its key with another log and a 20 KB output under
+a file size limit of 8 KiB (`ulimit -f`, EFBIG): the old record reads, its `:log-sha256` its log's, its output and no
+temporary left; with `ef97d7d6`'s `record_pass` the old record had the rerun's log (the finding); the record's rename
+failing (a shimmed `mv`): `record_pass` fails, no record, no temporary; a rerun that succeeds: the new record with
+its log.
+
+**Finding 8: a control's reference by its own action** (`bin/goi`). `gc_ref` reads `bflags` and `args` by bash's
+dynamic scope, so in `check_one`'s controls' loop the reference was built and run with the subject's flags and
+arguments (and limit). `action_parse PROGRAM` is `check_one`'s parsing of the action line made a function (it sets the
+caller's `tmo`, `bflags` and `args` from their defaults, or `why` and returns 1; the subject's rows are as before); the
+loop calls it for each reference before `gc_ref`. The comment says why the loop's assignments (these and `gc_ref`'s
+`ref`) stay in the pipeline's subshell and why `run_verdict` there reads the reference's `ref`. Tested
+(`.tmp/review001/fix8.sh`, 8 cases, a scratch `$GOROOT/test` of four programs and a scratch `controls.txt`, `gc_ref`
+and `aot_build` stubbed to print what they are given): at `--aot` the subject's reference with its own `-t 30`, flags
+and arguments, its build with its flags and its run with its arguments, control 1's reference with no flags, no
+arguments and the default limit, control 2's with its reference's `-t 7`, one build and one run; at interp the
+reference without the subject's arguments; with `ef97d7d6`'s `bin/goi` three fail (the finding). `.tmp/gts85/test.sh`
+(13 cases, gc's references real) passes unchanged.
+
+**Findings 7 and 9: what the controls catch** (doc/go/GOI-SPEC.md §11.3, doc/classes/JAVA-CONFORMANCE-SURVEY.md,
+`test/java/controls.edn`, `bin/clojure-tests`' header). Each control catches a comparison that passes everything (or is
+skipped), GTS81's case, and each document now says which partial judge it does not catch: goi's run and directory
+controls and Java's interp and compiled ones exit 0 on both sides (not a judge that ignores the status); goi's
+errorcheck controls differ by the file name, which `gocmp errorcheck` matches by (not a judge that ignores message text
+or lines); Java's classes, print and `:forms` trees and c00002's output differ by their file names too (not a judge that
+ignores the contents or the messages' text); the suite's by its test count (not a report that ignores failures and
+errors). `test/java/controls.edn`'s header: GTS91's paragraph moved out of the sentence it was spliced into.
+
+**The golden files.** `$GOROOT/test/fixedbugs/issue11053.out` (49 bytes) and `typeparam/dedup.out` (20 bytes) exist
+under `/root/tamago-go/test` (and `.tmp/gts85/test.sh`'s `check_dir` case read both: dedup passes against its own,
+its control fails against issue11053's). Without one, `dir_verdict` would expect empty output, as the review says.
+
+**What the merge must check now** (with the two earlier lists; the stage 0 items replace GTS83's).
+
+- In a linked worktree, before the main checkout's stage 0 is rebuilt with this branch's `bin/seed` (its pins line
+  names the scripts' digest), the gate builds its own (as GTS83's list says). After it: the gate's output shows
+  `bin/seed: stage 0 kept: WT/target/seed (amd64), linked from /root/arbace/target/seed (hard links), ...` before the
+  stage0 step, whose line is `stage 0 kept: WT/target/seed`; `stat -c %i` of both executables is the same; a tool run
+  in the worktree without `ARBACE_HOST_EXE` links the same way; and after a later rebuild in main the worktree's
+  stage 0 still runs (its own inode).
+- The first gate's passes in the store: no dotfile left, every record with numbers or `nil` (`:cpu-s nil` only for a
+  step with no `.mem`); old-style leftovers (`.KEY.PID.edn`) in the shared store are ignored now and go with `--prune`
+  after 24 h; an odd-length record already there is replaced by the next clean run's publication.
+- `--essential-compiled`: its control's line `control c00001: differ, as a control must` also on a run that retried a
+  timeout (`timed out, run again one at a time`).
+- goi-check's and goi-aot-essential's controls as before (`fail, as a control must`); none of today's six references
+  has flags or arguments, so their `gc_ref` cache entries are the same keys as before.
+
+**Proposals (GTS95-GTS97).**
+
+- **GTS95 The log's digest checked.** `:log-sha256` is written but read by nothing (finding 6), so a record and a log
+  that do not belong together go unnoticed. Options: (a) as now; (b) `pass_reads` (so `record_pass` and
+  `publish_passes`) also checks the digest against its `KEY.log` when there is one, and gate.plan's `passes` drops a
+  record whose log's digest differs. *Recommended: (b)*, at the next rekey (both are in every key): one `sha256sum` of
+  the log a pass read, the cost of the reads the planner makes already.
+- **GTS96 The cost of the linked worktree's check.** `arbace_host_exe` runs `bin/seed --kept` at every tool call in a
+  linked worktree (about 70 ms: the 19 MB seed hashed by `go_check`). Options: (a) as built; (b) `--kept --quick`
+  for host.bash, the pins line compared with the archive's `.sha256` taken as it is (the gate's stage0 step keeps the
+  full check). *Recommended: (a)*: the gate's tool calls are a few hundred (seconds in all), and one check everywhere is
+  what finding 4 asked for.
+- **GTS97 Controls that differ by one thing.** Finding 7's partial judges (the status ignored, message text ignored,
+  contents ignored) are not caught. Options: (a) as documented; (b) per family a second control crossed on one
+  dimension (an errorcheck reference copied under the subject's base name into a scratch directory; a run pair of the
+  same stdout and another status; a class file tree renamed to the subject's names). *Recommended: (a)*: GTS81's
+  question was the judge that passes everything; (b) is a check of each comparison's parts, worth it only where one of
+  them is ever shadowed.
+
+**Slips.** None of the rules': the tests made scratch repositories with linked worktrees of their own under the
+worktree's `.tmp/` (removed with `git worktree remove`), ran the main checkout's stage 0 as `ARBACE_HOST_EXE` (gate.plan's
+`passes` on synthetic stores), and `.tmp/gts85/test.sh` ran TamaGo's go (gc's references, `go run` of four programs,
+GOMAXPROCS=4).
+
+## As built: re-review 020's fixes (write-ahead) (2026-10-31)
+
+Re-review 020 (the helper VM's, of `gate-post-v2` at `9a362397`: review 001's fixes, light) found seven things; each
+was checked against branch `gate-merge` at `bf6a281d` (`gate-post-v2` with mac/011-014 merged, report 015's
+rehearsal), and each fix is a commit of its own there, in the light tier as the earlier rounds: no `bin/gate` run, no
+build of the executables, of javac's tool or of a real stage 0, no store touched. The tests are scratch scripts in the
+worktree's `.tmp/rv020/` (`lib.sh`: a scratch repository with a fake main checkout, a fake seed and a linked worktree,
+the scripts copied from the branch or, with `REV=COMMIT`, from that commit, so that each test is run before its fix
+too); each fails at the commit before its fix and passes after. Review 001's own tests, rerun from copies
+(`.tmp/rv020/fix1-001.sh` 59 cases, `gts80.sh` 39, `gts83.sh` 23), pass unchanged. No shipped file changed.
+
+**Finding 1 (medium): an interrupted `--link` broke the next one. Holds.** A link killed after an executable's rename
+and before `pins` left OUT holding FROM's executable (the same inode) and no `pins`; the next link's `mv` of a second
+link of that inode over it is refused by coreutils ("are the same file"; busybox's rename does nothing and leaves the
+temporary), so the second call failed, removed the executable, and only a third linked (through `bin/gate`, the stage0
+step built one of its own). Fix (`bin/seed`): an executable already FROM's (`-ef`) is left in place (the post-check
+verifies it); the dead runs' temporaries (`OUT/*.link.*`, `OUT/ARCH/arbace.link.*`) are removed under the lock, which no
+other link of OUT holds; a run stopped by INT or TERM removes its own. Test `.tmp/rv020/f1.sh` (13 cases): a link killed
+by `kill -9` while it copies `seed.sha256` (a `cp` shim), plus a dead run's executable temporary; the next link links
+(no "same file"), kept, no temporary left; a link stopped by TERM leaves no temporary and the next links. At `bf6a281d`
+8 fail.
+
+**Finding 2 (low-medium): `--link` did not wait for main's rebuild. Holds.** Fix (`bin/seed`): when FROM is
+`CHECKOUT/target/seed` and `CHECKOUT/.tmp/seed-build.lock` exists and is not this checkout's own (a `-o` link from the
+checkout's own stage 0, as `bin/gate-demos` does from a worktree, would wait on itself), `--link` takes that lock shared
+(links run beside each other; `bin/seed --build` and `bin/lib/host.bash` there take it exclusive) after its own and
+before deciding, printing `bin/seed: waiting for CHECKOUT's stage 0 build ...` on stderr; at most
+`ARBACE_SEED_LINK_WAIT` seconds (default 1200: a build with its compiled namespaces; polled each second, busybox's
+`flock` has no `-w`), then the refusal `not linked: CHECKOUT is building its stage 0 (its lock ... held after N s)`. The
+order is always the worktree's lock, then main's: nothing takes a worktree's lock while holding main's, so no cycle.
+Test `.tmp/rv020/f2.sh` (13 cases): main's lock held while its directory is removed and a stage 0 written 2 s later:
+the link waits, then links the rebuilt one; a build longer than `ARBACE_SEED_LINK_WAIT=1`: refused within the wait,
+naming the build, not "has no amd64/arbace"; no build or no lock file in main: no wait; FROM of the checkout itself: no
+deadlock; main's lock free afterwards. At `972f7fa7` 6 fail.
+
+**Finding 3 (low): `bin/gate-demos` from a stale main checkout refused. Holds.** Fix (`bin/gate-demos`,
+`stage0_link`): the invoking checkout's stage 0 is made current before it is linked into the scratch worktree, as its
+own tools would: in the main checkout `bin/seed --build --no-aot` (kept when its pins are the checkout's, in about
+70 ms; else built, about 10 minutes and 8 GB, with a line `the main checkout's stage 0 is not current (...): bin/seed
+--build --no-aot` first), in a linked worktree `bin/seed --link MAIN/target/seed` (its own kept, else main's linked);
+when none is current, what to run (`bin/seed --build --no-aot` in the main checkout) and no plan (exit 1). Test
+`.tmp/rv020/f3.sh` (14 cases, the whole `bin/gate-demos --keep` on a fake checkout whose `seed_go_build` writes a
+fake stage 0; the plans fail there, there being no `bin/gate`, which is not what is checked): from main with other
+pins, built and the scratch worktree running the new one; from main current, nothing built, the scratch worktree
+main's inode; from a worktree, main's linked into it and the scratch worktree; from a worktree with main stale, what
+to run and no plan. At `e3cb0478` 11 fail.
+
+**Finding 4 (low): the `:uses` cut-off decided on a record's existence. Holds.** Fix (`bin/lib/gate-run.bash`,
+`run_one`): `pass_reads FILE NAME` in place of `[ -f ]`, as `publish_passes` and the planner decide; a record that does
+not read lets the step run, and its pass replaces it. Test `.tmp/rv020/f4.sh` (7 cases, `run_one` sourced with `step`
+faked, a step decided `after` with a record at its cut-off key): a record that reads cut off; no record, an empty one, a
+cut one, an odd-length one and another step's record run; the run's pass replaces the bad one. At `5df57cce` 5 fail.
+
+**Finding 5 (low): `--link` left the rest of a stale stage 0. Holds.** Fix (`bin/seed`): once FROM is kept and before
+linking, what `bin/seed --build` writes into a stage 0 directory is removed from OUT: `src/` (the seed unpacked),
+`prepare/`, `prepare.ae`, `prepare.log`, `build-*.log`, `aot/`, `aot.key`, `aot.runtime`, and another architecture's
+`ARCH/arbace` (its directory too when that leaves it empty); any other file of OUT stays (`-o` may name any directory),
+and nothing is removed when OUT is kept already or the link is refused. A linked stage 0 so has no `src/`:
+`bin/lib/repr-go/plan-check` (the box's, parked) refuses in a linked worktree with its own message ("no
+target/seed/src/mod (bin/seed --build)") rather than reading another seed's module (GTS100). Test `.tmp/rv020/f5.sh`
+(8 cases): a stale own stage 0 with all of them and a `notes.txt`: after the link only `amd64/arbace`, `pins`,
+`seed.sha256` and `notes.txt`; kept already: its `aot/` stays; refused: OUT untouched. At `251bec79` 1 fails.
+
+**Finding 6 (low): `--essential-compiled`'s split by `NR == FNR`. Fixed before this round** by the rehearsal's
+follow-up `5549f17b` (`FILENAME == ARGV[1]` in the three awk calls; an empty `controls.ids` no longer takes
+`results.tsv` for the ids). What remained: with no id read (`test/java/controls.edn` emptied, or its controls not one
+`{:id "..." ...}` a line, the `sed`'s shape), no control is split off and the control's row from its subject's run is
+judged as a test's: a `differ` printed a "not passing" line while the count of passes stayed whole, so the step exited
+0 with its control unjudged. Fix (`bin/java-check`): an empty `controls.ids` fails the step (`no control id in
+.../test/java/controls.edn`). Test `.tmp/rv020/f6.sh` (10 cases: GTS81's and review 001's seven, on the tail extracted
+from the script, and three new: no id with a timed-out subject, no id, the file on one line): at `e443577e` the three
+new fail (exit 0); at `5549f17b^` (the `NR == FNR` split) the step failed with `2 tests: 0 pass`, the finding.
+
+**Finding 7 (low): companions with no record never pruned. Holds.** Fix (`bin/lib/gate-run.bash`, `gate_prune`): per
+step directory, each `KEY.log`, `KEY.inputs` or `KEY.out` with no `KEY.edn` and older than a day (as the temporaries'
+rule: a younger one may be a publication in progress, `publish_passes` moving the companions before the record) is
+removed, named on a line of its own (`gate --prune: STEP/KEY12 (no record: its .log .inputs .out)`), counted in the
+summary (`..., N left without a record removed in STORE`); `--dry-run` names them. Test `.tmp/rv020/f7.sh` (6 cases):
+a pass two days old with its record kept whole (one of the last 5), orphans two days old removed (named by
+`--dry-run`, which removes nothing), fresh orphans kept. At `64f9dd12` 3 fail.
+
+**Commits** (on `gate-merge`, after `bf6a281d`): `251bec79` (1), `972f7fa7` (5), `e3cb0478` (2), `5df57cce` (3),
+`64f9dd12` (4), `e443577e` (7), `1fbe580c` (6).
+
+**What the merge must check** (with the earlier lists).
+
+- In a linked worktree, once main's stage 0 is rebuilt with this branch's `bin/seed`: a link with a stale stage 0 of
+  the worktree's own leaves `target/seed` holding `ARCH/arbace`, `seed.sha256` and `pins` alone; a link run while main
+  rebuilds (`bin/seed --build` in main) prints `waiting for /root/arbace's stage 0 build` and then links the new one
+  (through `bin/gate`, the stage0 step's line comes after the wait: `stage0_choose` writes `bin/seed`'s output to a file,
+  GTS101); a link killed partway (Ctrl-C) is repaired by the next tool call.
+- `bin/gate-demos` from the main checkout right after the merge's rebuild: no "not current" line (main's own stage 0
+  current), the scratch worktree's executable main's inode.
+- The first `bin/gate --full`'s `--prune`: its summary line names the orphans removed; any it lists should be keys
+  of interrupted runs (GT7's reruns), never one with a record.
+- `--essential-compiled` with today's `test/java/controls.edn`: its control line as before (the ids c00001 and c00002
+  read).
+- `after` steps (`:uses`): their "cut off" skips as before; a record that does not read at a cut-off key now runs the
+  step (none is expected in the store after GTS80's publication).
+
+**Proposals (GTS100-GTS101).**
+
+- **GTS100 A linked stage 0's `src/`.** `--link` now removes a stale `src/` and links none, so
+  `bin/lib/repr-go/plan-check` (the box's plan check, parked) refuses in a linked worktree. Options: (a) as built (its
+  message names `bin/seed --build`); (b) `--link` hard-links FROM's `src/` too (`cp -al`, checked by `diff -rq`);
+  (c) plan-check unpacks the seed's `mod/` into its own work directory (the seed archive is the checkout's). *Recommended:
+  (a) now, (c) with the box's return*: plan-check is the only reader, and its input is the seed, not stage 0's copy.
+- **GTS101 The gate's stage0 line during a wait.** `stage0_choose` sends `bin/seed --link`'s output to a file and
+  prints it after, so a gate in a worktree waiting up to 20 minutes for main's rebuild shows nothing meanwhile.
+  Options: (a) as built; (b) `stage0_choose` prints the `waiting for` line as it comes (`bin/seed`'s stderr to the
+  terminal, its stdout to the file). *Recommended: (b)*, at the next change to `bin/gate` (in every key with the
+  planner): one line, the difference between a gate that waits and one that hangs.
+
+**Slips.** None of the rules': the tests made scratch repositories with linked worktrees of their own under the
+worktree's `.tmp/rv020/` (removed with `git worktree remove`), read the review 001 tests from `gate-post-v2`'s `.tmp/`
+by path (copied, never run there), and ran the main checkout's stage 0 as `ARBACE_HOST_EXE` (`gts80.sh`'s gate.plan
+`passes` on synthetic stores, `GOMAXPROCS=4`). The scratch `bin/gate-demos` runs made and removed scratch worktrees of
+the fake repository only.
+
+## Decided (2026-10-31): GTS95-GTS97, GTS100, GTS101
+
+The user decided all five as recommended: GTS95 (b), at the next rekey; GTS96 (a); GTS97 (a); GTS100 (a), (c) when the
+box comes back; GTS101 (b), at the next change to `bin/gate`.
+
+## Decided (2026-11-01): GTS102, GTS103
+
+From GT7's reruns 7 and 8 (doc/JOURNAL.md, 2026-11-01). Decided by the user:
+- **GTS102** `bin/java-check` takes per-test time limits (`test/java/timeouts.txt`, as goi's `test/goi/timeouts.txt`),
+  replacing the `audit-timeout` class: the 13 interp tests near the limit under the audit's ptrace get their own
+  limits. At the merge window's rekey (`bin/java-check` is in every Java step's key).
+- **GTS103** `bin/gate --clean --only` refuses when a run the record cites has no logs, instead of counting its steps
+  as changed (rerun 8's first attempt selected 53 unchanged steps after its logs were deleted).
+
+## As built: GTS103 (write-ahead)
+
+GTS103, decided 2026-11-01 (a VM's branch `mac/029-gts103`, light: nothing built or run). `test/gate/clean.ae`'s
+`select` (lines 112-132 and 149) no longer counts the steps of a run whose logs are gone as changed. Before,
+`base-material` read `LOGS-ROOT/:logs/gate/plan/NAME.inputs` of the run each step passed at (its `:run`) and gave nil for
+a missing file, so `changed?` was true for every step of a deleted logs directory: rerun 8's first attempt selected 53
+unchanged steps after five such directories were deleted. Now `refuse-gone` looks, for the checks whose material is
+compared, at each run they cite: when `LOGS-ROOT/:logs`, or its `gate/plan`, is not a directory, it prints one line per
+such run, `error<TAB>-<TAB>gate --only: run I of the record (COMMIT, DATE, --only ONLY) has no logs, DIR is missing: the
+clean keys of its N steps cannot be compared (restore the directory, or select those steps by name: S,...; GTS103)`, and
+exits 2. `bin/gate`'s `only_apply` already prints a failed selection's `error` lines and stops the run (`== gate FAILED:
+--only's selection`), so `bin/gate` is unchanged. Which checks are compared:
+- with `changed` among ONLY's tokens, every check, before the selection is made (line 132);
+- else the checks the selection leaves out (line 149), which MODE checks' stale test compares. MODE builds refuses on
+  the same set, so the run stops before a build is made. A run whose steps are all named (`--only c,d`) is not compared
+  and not refused: naming them is the way out when the logs cannot be restored.
+
+A step whose own `plan/NAME.inputs` is missing in a run whose logs directory and `gate/plan` are there still counts as
+changed: that is a real gap in the run's record, not a deleted run. `select`'s docstring says both.
+
+Tested (`.tmp/fix-tests/029/gts103-test.sh`, not committed): `select` extracted from `clean.ae` and run under joker
+(v1.5.8; no Java interop, so `File`'s `.isFile`/`.isDirectory`, `read-file` and `System/exit` are shimmed textually), on a
+synthetic record of two runs (run 0 cites checks a, b; run 1 cites c, d) and a logs tree. On the merge commit (`8053e906`,
+before GTS103), with run 1's logs deleted, `--only changed` printed `run c`/`run d ... its material changed` and exited 0,
+and `--only a` (checks) failed with "2 steps not selected have changed": 5 of 10 cases fail. On GTS103's commit, all 10
+pass: both modes refuse with the line above, for `changed` and for `--only a`, and for a logs directory without
+`gate/plan`; `--only c,d` is not refused; and with only `d.inputs` missing in run 1's logs, `d` runs as changed and `c`
+is skipped.
+
+What the main host's run must check: `bin/gate --clean --tag TAG --only changed` with one cited run's logs directory
+moved aside prints the refusal and `== gate FAILED: --only's selection` before any build is made; put back, the same
+command selects as before. `clean.ae` is in no key, so nothing is rekeyed.

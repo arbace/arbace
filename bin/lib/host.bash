@@ -6,7 +6,14 @@
 #   arbace_host_exe   prints the path of the host executable: ARBACE_HOST_EXE when set, else
 #                     stage 0, the executable built from the Go-source seed (bin/seed --build,
 #                     target/seed/<host arch>/arbace), built first when missing or when the seed
-#                     changed (target/seed/seed.sha256 names the seed it was built from)
+#                     changed (target/seed/seed.sha256 names the seed it was built from); in a
+#                     linked worktree (git's common dir not the checkout's own .git), its own
+#                     target/seed when bin/seed --kept keeps it (the whole pins line, as
+#                     bin/gate's stage0 step), else the main checkout's linked into it (bin/seed
+#                     --link: hard links of its executable, seed.sha256 and pins, when --kept
+#                     accepts it), else a refusal naming ARBACE_HOST_EXE and ARBACE_SEED_BUILD=1
+#                     (GTS82 (a), review 001's fixes, doc/GATE-SURVEY.md); ARBACE_SEED_BUILD=1
+#                     builds the worktree's own as in the main checkout
 #   arbace_host_arch  amd64 or arm64, the host's architecture
 
 arbace_host_arch() { case $(uname -m) in aarch64) echo arm64 ;; *) echo amd64 ;; esac; }
@@ -22,6 +29,28 @@ arbace_host_exe() {
   seed=${ARBACE_SEED:-$root/seed/arbace-seed-go.tar.xz}
   want=$([ -f "$seed.sha256" ] && cut -d' ' -f1 "$seed.sha256")
   have=$([ -f "$root/target/seed/seed.sha256" ] && cat "$root/target/seed/seed.sha256")
+  # GTS82 (a), review 001's fixes: in a linked worktree (git's common dir another checkout's .git) the
+  # stage 0 is the one bin/seed --kept accepts (the gate's identity: the whole pins line), its own, else the
+  # main checkout's linked into its own target/seed (bin/seed --link: hard links, checked again after
+  # linking), rather than a build of its own (10 minutes, 8 GB); else a refusal
+  local common main why sv log
+  mkdir -p "$root/.tmp"
+  if [ "${ARBACE_SEED_BUILD:-}" != 1 ] \
+     && common=$(git -C "$root" rev-parse --path-format=absolute --git-common-dir 2>"$root/.tmp/host-git.err") \
+     && [ "$(basename "$common")" = .git ] && main=$(dirname "$common") \
+     && [ "$(cd "$main" && pwd -P)" != "$(cd "$root" && pwd -P)" ]; then
+    sv=(env ARBACE_SEED_GO="$seed") log=$root/.tmp/host-seed.$BASHPID.log
+    if "${sv[@]}" "$root/bin/seed" --kept "$root/target/seed" --arch "$a" > "$log" 2>&1 \
+       || "${sv[@]}" "$root/bin/seed" --link "$main/target/seed" --arch "$a" > "$log" 2>&1; then
+      rm -f "$log"; echo "$exe"; return
+    fi
+    why=$(sed 's/^bin\/seed: //; s/^not linked: //' "$log" | tail -1); rm -f "$log"
+    echo "arbace_host_exe: $root is a linked worktree with no stage 0 of its own that bin/seed --kept keeps, and the" >&2
+    echo "arbace_host_exe: main checkout's ($main/target/seed) is not linked: ${why:-bin/seed failed}; not building one here." >&2
+    echo "arbace_host_exe: set ARBACE_HOST_EXE=/path/to/arbace (a stage 0 of this seed), or ARBACE_SEED_BUILD=1 to build" >&2
+    echo "arbace_host_exe: this worktree's own (bin/seed --build: about 10 minutes, 8 GB)" >&2
+    return 1
+  fi
   if [ ! -x "$exe" ] || [ -z "$want" ] || [ "$want" != "$have" ]; then
     mkdir -p "$root/.tmp"
     (

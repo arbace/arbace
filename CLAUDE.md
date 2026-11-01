@@ -69,7 +69,9 @@ Prior art:
   need of that tree as data (repr/java's corpus, the baseline of Clojure's suite) from the tag,
   extracted into `.tmp/frozen/` by `bin/lib/tools.bash`.
 - Stage 0 hosts Arbace's tools (`bin/lib/host.bash`'s `arbace_host_exe`: `ARBACE_HOST_EXE`, else
-  stage 0, built when missing or when the seed changed): c2j, j2g, repr/go, repr/clojure, the suite's runner,
+  stage 0, built when missing or when the seed changed; in a linked worktree its own when `bin/seed --kept` keeps it,
+  else the main checkout's hard-linked into it when its pins line is the worktree's (`bin/seed --link`), else a refusal:
+  `ARBACE_SEED_BUILD=1` builds, GTS82 (a), review 001's fixes): c2j, j2g, repr/go, repr/clojure, the suite's runner,
   compiled into it (S6, SA133), a tool's namespace whose source in the checkout differs from the
   embedded copy loaded from the checkout instead, evaluated (`bin/lib/tools.bash`'s
   `arbace_tool`, `ARBACE_PATH`). The JVM runs only the frozen jar of `arbace-for-java-26-v4` (built from its tag,
@@ -388,7 +390,15 @@ Prior art:
   javac's tool built fresh, no pass read, serial, every step run under the audit, every part, Java's levels
   on the read's cache forced (`JAVA_CHECK_FORMS_ONLY=1`), the externals checked by their pins first (`bin/gate
   --pins`), the record `test/gate/clean-TAG.edn` written into the invoking checkout and the passes (marked
-  `:clean`) and the builds published into the shared store and executables' directory; `--full
+  `:clean`) and the builds published into the shared store and executables' directory (a pass there that is empty or
+  does not read replaced, GTS80 (a); `record_pass` writes each file through a temporary name); `--clean --only
+  STEP,...|failed|changed` reruns some steps into the record, a program host not built compared by its build's key
+  (GTS79 (b)); since GTS81 (a) each check family has a negative control, a case's run judged against another case's
+  reference by the family's own judge, that must fail (`test/java/controls.edn`, `test/goi/controls.txt`,
+  `test/clojure/controls.edn`, `test/oracle/controls.edn`, `test/diffcheck/controls.edn`): one that passes fails the
+  step (doc/GATE-SURVEY.md, "As built: GTS72, GTS79-GTS82 (write-ahead)"; since GTS84-GTS86 also Java's diagnostics and
+  print levels and goi's errorcheck and directory tests, every control judged from its subject's own run: "As built:
+  GTS83-GTS87 (write-ahead)"; since GTS91 (a) also the read level's forms at `bin/java-check --forms verify`); `--full
   --concurrent` runs the chains at once under the big lock held once, the heavy steps on a lock of the
   gate's own (GTS37 (a)); `bin/gate-demos` repeats GTS42 (a)'s two demonstrations as plans (`bin/gate
   --full --plan --builds`); the executables and javac's tool are kept by key in
@@ -399,7 +409,8 @@ Prior art:
   (`bin/provenance-check`) compares the provenance files' reader hash with repr/java's; each step's wall and CPU seconds and peak RSS
   (busybox `time -v`) in `.tmp/gate/NAME.mem`, a 5 s memory sampler's `.tmp/gate/mem.tsv`. The
   steps: the Makefile's scripts (`make check-makefile`), the seed's hash, stage 0 built from
-  it (`bin/seed --build`, kept by the seed's and Go's pins), the executable and the test build by stage 0 (`bin/arbace-go
+  it (`bin/seed --build`, kept by the seed's and Go's pins; in a linked worktree without a current one of its own the main
+  checkout's when its pins are the worktree's, `bin/seed --kept`, hard-linked into the worktree's `target/seed`, `bin/seed --link`, GTS83 (a)), the executable and the test build by stage 0 (`bin/arbace-go
   --gate-build`, cached by key in `ARBACE_GATE_CACHE`, for the gate `ARBACE_GATE_EXES/KEY`, and keyed by a hash of what they are built from,
   `gate_key`: `arbace/` less repr/java, repr/haskell and repr/rust, `go/`, `overlay/` and `jdk/` less
   javac's world and the provenance files, `x509roots/`, the fixtures' forms, the build's scripts, the

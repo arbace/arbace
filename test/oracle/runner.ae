@@ -384,6 +384,14 @@
   "The parts of file paths --exclude leaves out (the box's subset: doc/go/BOX-NOTES.md, S1)."
   (atom []))
 
+(defn sel-misses
+  "The selectors of sel (parts, or parts of file paths) that select none of the files part-paths
+  ([part path] pairs): a typo selects nothing, and a check of nothing passes."
+  [sel part-paths]
+  (vec (for [^String s sel
+             :when (not-any? (fn [[part p]] (if (some #{s} parts) (= s part) (str/includes? p s))) part-paths)]
+         s)))
+
 (defn- selected [sel part ^File f]
   (and (or (empty? sel)
            (some (fn [^String s] (if (some #{s} parts) (= s part) (.contains ^String (rel f) s))) sel))
@@ -430,28 +438,127 @@
   (let [s (if (string? x) x (pr-str x))]
     (if (> (count s) n) (str (subs s 0 n) "...") s)))
 
+(defn canon
+  "x as check compares it: printed (emit), its maps' keys sorted, so that -0.0 differs from 0.0
+  and ##NaN equals itself."
+  [x]
+  (emit (walk/postwalk #(if (map? %) (into (sorted-map) %) %) x)))
+
+(defn result-kind
+  "A record's kind: value, missing, or the key of its exception chain with the chain's outermost
+  class (ex java.lang.NullPointerException)."
+  [r]
+  (let [k (first (filter #(some? (get r %)) [:missing :ex :print-ex :throws :error]))
+        c (let [c (get r k)] (if (sequential? c) (first c) c))
+        c (if (sequential? c) (first c) c)]
+    (cond
+      (nil? k) "value"
+      (= k :missing) "missing"
+      (string? c) (str (name k) " " c)
+      :else (name k))))
+
+(defn digest
+  "Eight hex digits of the text s (its String hash)."
+  [^String s]
+  (format "%08x" (bit-and (long (.hashCode s)) 0xffffffff)))
+
+(defn result-sig
+  "What a known mismatch remembers of the actual record r (its :got): its kind and a digest of its
+  result keys ks as compared (canon), KIND DIGEST."
+  [ks r]
+  (str (result-kind r) " " (digest (canon (select-keys r ks)))))
+
+;; GTS81 (a): the negative controls (doc/GATE-SURVEY.md, "As built: GTS72, GTS79-GTS82 (write-ahead)";
+;; doc/go/ORACLE.md, "The negative controls"): [{:id :subject CASE :reference CASE :why}...], a case's
+;; record (the oracle: its actual; diffcheck: its first run's) compared by the check's own comparison with
+;; another case's (the oracle: its expected; diffcheck: its second run's); they differ, or the comparison
+;; passes what differs and the check fails (controls-ok?)
+
+(defn read-controls [^File f]
+  (if (.isFile f)
+    (with-open [r (java.io.PushbackReader. (io/reader f :encoding "UTF-8"))]
+      (binding [*read-eval* false] (read r)))
+    []))
+
+(defn controls-ok?
+  "The check's controls (its result's :controls, each with :result :differ, :pass or :missing: a
+  case not run): true when each that ran differs; one that passes, or whose cases did not both run
+  while every run completed, is printed and makes it false"
+  [{:keys [controls incomplete files]}]
+  (let [ok (atom true)
+        ran? (fn [id] (contains? files (subs id 0 (.lastIndexOf ^String id ":"))))]
+    (doseq [{:keys [id subject reference result]} controls]
+      (case result
+        :differ (println (str "   control " id " (" subject " against " reference "): differs, as a control must (GTS81 (a))"))
+        :pass (do (reset! ok false)
+                  (println (str "   control passed: " id " (" subject " against " reference "): the comparison passes what differs")))
+        :missing (if (or (and incomplete (pos? incomplete)) (not (and (ran? subject) (ran? reference))))
+                   (println (str "   control " id ": not judged (" subject " or " reference " not selected, or runs incomplete)"))
+                   (do (reset! ok false)
+                       (println (str "   control not judged: " id ": " subject " or " reference " has no record though its file ran"))))))
+    @ok))
+
 (defn case-id
   "A case's name in reports and in a reference of known mismatches: its corpus file and its line
   (forms) or index (classes, regex), as test/oracle/forms/numbers.ae:42."
   [^File src e]
   (str (rel src) ":" (or (:line e) (:i e))))
 
+(def ^:private drift-keys
+  "The keys of a case that come from its source (source-cases), by part."
+  {"forms" [:id :line :form] "classes" [:i :src] "regex" [:i :pattern :flags :inputs :replace]})
+
+(defn case-drift
+  "How the cases of a corpus file's source (source-cases) differ from those of its expected file,
+  compared by the keys ks: nil when they agree."
+  [ks src-cases exp-cases]
+  (let [a (mapv #(select-keys % ks) src-cases)
+        b (mapv #(select-keys % ks) exp-cases)]
+    (if (not= (count a) (count b))
+      (str (count a) " cases in the source, " (count b) " recorded")
+      (when-let [[x y] (first (remove (fn [[x y]] (= x y)) (map vector a b)))]
+        (str "the source's case " (pr-str x) " recorded as " (pr-str y))))))
+
 (defn check
   "Runs the expected files of the selected parts (or files) against the implementation cmd;
   prints the mismatches (all of them to .tmp/oracle/check.txt) and a summary. Returns
   {:ok (every case matches) :mismatches [{:case id :form text}...] :incomplete runs
-   :files #{the corpus files checked}}."
+   :files #{the corpus files checked} :errors [why the check itself is wrong]}: an error when a
+  selector selects no file or nothing is selected (a typo, an --exclude of everything, an
+  ARBACE_ORACLE_EXPECTED without expected files), and when the expected files are not the
+  selected corpus files' (drift: a source without an expected file, an expected file without its
+  source, a source edited and not recorded again: its cases' texts and lines, case-drift)."
   [cmd jobs timeout sel]
-  (let [work (for [part parts
-                   ^File f (->> (file-seq (io/file expected-dir part))
-                                (filter #(.endsWith (.getName ^File %) ".edn"))
-                                (sort-by #(.getPath ^File %)))
-                   :let [e (read-expected f)
-                         src (io/file root (:source e))]
+  (let [controls-wanted (into #{} (mapcat (juxt :subject :reference)) (read-controls (io/file root "test/oracle/controls.edn")))
+        all (for [part parts
+                  ^File f (->> (file-seq (io/file expected-dir part))
+                               (filter #(.endsWith (.getName ^File %) ".edn"))
+                               (sort-by #(.getPath ^File %)))
+                  :let [e (read-expected f)
+                        src (io/file root (:source e))]]
+              [part src e])
+        drift (vec (concat
+                     (for [[part ^File src] all :when (and (selected sel part src) (not (.exists src)))]
+                       (str (rel src) ": an expected file of no source"))
+                     (let [by-src (into {} (map (fn [[_ ^File src e]] [(.getPath src) e])) all)]
+                       (for [part parts ^File f (source-files part) :when (selected sel part f)
+                             :let [e (by-src (.getPath f))
+                                   why (if e
+                                         (case-drift (drift-keys part) (source-cases part f) (:cases e))
+                                         "no expected file")]
+                             :when why]
+                         (str (rel f) ": " why " (bin/oracle record " (rel f) ")")))))
+        work (for [[part ^File src e :as w] all
+                   :when (.exists src)
                    :when (selected sel part src)
                    ;; the reference has no Go forms: goi's cases are the Go build's (S54)
                    :when (not (and (= cmd default-impl) (goi-source? src)))]
-               [part src e])
+               w)
+        errors (vec (concat (for [s (sel-misses sel (map (fn [[part src]] [part (rel src)]) all))]
+                              (str "the selector " s " selects no corpus file"))
+                            (when (empty? work)
+                              [(str "no corpus file selected (the expected files under " expected-dir ")")])
+                            drift))
         run-one (fn [[part src e]]
                   (let [ks (result-keys part)
                         cases (mapv #(apply dissoc % :missing (remove #{:class :sig} ks)) (:cases e))
@@ -469,17 +576,25 @@
                      r))
                  work rs)
         report (StringBuilder.)
-        total (atom 0) bad (atom 0) incomplete (atom 0) v11 (atom 0) ids (atom []) cut (atom (sorted-set))]
+        total (atom 0) bad (atom 0) incomplete (atom 0) v11 (atom 0) ids (atom []) cut (atom (sorted-set))
+        ;; GTS81 (a): each case's expected and actual records by id, for the negative controls
+        by-id (atom {})
+        ;; the comparison: [differs? accepted-by-V11]; compared as printed (canon, mac/013's, the one
+        ;; result-sig's :got digests), so that -0.0 differs from 0.0 and ##NaN equals itself
+        differs (fn [ks e a]
+                  (let [[a n] (accept-helpful-npes e a)]
+                    [(not= (canon (select-keys e ks)) (canon (select-keys a ks))) n]))]
     (doseq [{:keys [src part cases expected done noise err exit ms]} rs]
       (let [ks (conj (result-keys part) :missing)
-            ;; compared as printed, so that -0.0 differs from 0.0 and ##NaN equals itself
-            canon (fn [x] (emit (walk/postwalk #(if (map? %) (into (sorted-map) %) %) x)))
             accepted (atom 0)
+            _ (when (seq controls-wanted)
+                (doseq [[e a] (map vector expected cases) :let [id (case-id src e)] :when (controls-wanted id)]
+                  (swap! by-id assoc id {:e e :a a :ks ks})))
             mism (doall
                    (keep (fn [[e a]]
-                           (let [[a n] (accept-helpful-npes e a)]
-                             (if (not= (canon (select-keys e ks)) (canon (select-keys a ks)))
-                               [e a]
+                           (let [[d n] (differs ks e a)]
+                             (if d
+                               [e (first (accept-helpful-npes e a))]
                                (do (when (pos? n) (swap! accepted inc)) nil))))
                          (map vector expected cases)))
             line (format "%-40s %5d/%5d ok %6d ms%s" (rel src) (- (count expected) (count mism)) (count expected) ms
@@ -493,7 +608,8 @@
         (when (and (not done) (not (str/blank? err)))
           (.append report (str "stderr: " (short-str err 4000) "\n")))
         (doseq [[[e a] i] (map vector mism (range))]
-          (swap! ids conj {:case (case-id src e) :form (short-str (or (:form e) (:src e) (:pattern e)) 100)})
+          (swap! ids conj {:case (case-id src e) :form (short-str (or (:form e) (:src e) (:pattern e)) 100)
+                           :got (result-sig ks a)})
           (let [what (str "  " (case-id src e) " " (short-str (or (:form e) (:src e) (:pattern e)) 200) "\n"
                           (str/join (for [k ks :when (not= (get e k) (get a k))]
                                       (str "    " k "\n      expected " (short-str (get e k) 600)
@@ -505,17 +621,31 @@
     (println (format "== %d of %d cases match (%d by V11: helpful NullPointerException messages compared by class only), %d mismatches (all in .tmp/oracle/check.txt)%s"
                      (- @total @bad) @total @v11 @bad
                      (if (pos? @incomplete) (str "; " @incomplete " runs incomplete") "")))
-    {:ok (and (zero? @bad) (zero? @incomplete))
+    (doseq [x errors] (println "== error:" x))
+    {:ok (and (zero? @bad) (zero? @incomplete) (empty? errors))
+     :errors errors
      :mismatches @ids
      :incomplete @incomplete
      :incomplete-files @cut
-     :files (into #{} (map (fn [[_ src]] (rel src))) work)}))
+     :files (into #{} (map (fn [[_ src]] (rel src))) work)
+     ;; GTS81 (a): the subject's actual record against the reference's expected one, by the comparison
+     :controls (doall (for [c (read-controls (io/file root "test/oracle/controls.edn"))
+                     :let [sub (@by-id (:subject c)) ref (@by-id (:reference c))]]
+                 ;; a case the run did not reach (merge-results' :missing) is no record: not judged
+                 (assoc c :result (cond (or (not (and sub ref)) (:missing (:a sub))) :missing
+                                        (first (differs (:ks sub) (:e ref) (:a sub))) :differ
+                                        :else :pass))))}))
 
 ;; ----- known mismatches: check --expected FILE, check --write-expected FILE
 ;; A reference lists an implementation's known mismatches in groups, each with its reason:
 ;; {:impl "..." :about "..." :mismatches [{:reason "..." :cases [{:case id :form text}...]}...]
 ;;  :incomplete [file ...]}
-;; Only the cases' ids (case-id) are compared; their forms are there for the reader. :incomplete
+;; The cases' ids (case-id) are compared, and each case's :got (optional: what the mismatching
+;; record was, result-sig's KIND DIGEST; written by --write-expected) with the actual one's as its
+;; group's :match says (optional: :result, the default, the whole; :kind, the kind alone, for a
+;; result not reproducible from run to run, an identity hash; :any, not compared). A case recorded
+;; without :got is accepted, and counted (rewrite the reference to record it). Their forms are
+;; there for the reader. :incomplete
 ;; (optional) names the corpus files whose run is known not to complete (the box's memory: a
 ;; run's cases after the end are mismatches, recorded as the others).
 
@@ -527,11 +657,34 @@
       (binding [*read-eval* false] (read r)))
     {}))
 
+(defn- got-part
+  "The part of a :got (KIND DIGEST) that match compares."
+  [match got]
+  (case match
+    :any nil
+    :kind (or (second (re-matches #"(?s)(.*) [0-9a-f]{8}" got)) got)
+    got))
+
+(defn known-changes
+  "Over the files a check ran, the known cases of the reference k whose recorded :got differs from
+  the actual mismatch's (as their group's :match says): {:changed [[id recorded actual]...]
+  :unrecorded n}, n the known cases recorded without a :got."
+  [k files mismatches]
+  (let [now (into {} (map (juxt :case :got)) mismatches)
+        cs (for [g (:mismatches k) c (:cases g) :when (contains? files (id-file (:case c)))] [(:match g :result) c])]
+    {:changed (vec (for [[m c] cs
+                         :let [a (now (:case c))]
+                         :when (and (:got c) a (not= m :any) (not= (got-part m (:got c)) (got-part m a)))]
+                     [(:case c) (:got c) a]))
+     :unrecorded (count (for [[m c] cs :when (and (nil? (:got c)) (not= m :any))] c))}))
+
 (defn check-known
   "Compares a check's mismatches with the reference f, over the files the check ran: true when
-  they are the same set of cases. Prints the new mismatches and the newly passing cases."
+  they are the same set of cases and no known case's result changed (known-changes). Prints the
+  new mismatches, the newly passing cases and the changed ones."
   [^File f {:keys [mismatches incomplete-files files]}]
-  (let [known-cut (into (sorted-set) (filter #(contains? files %)) (:incomplete (read-known f)))
+  (let [{:keys [changed unrecorded]} (known-changes (read-known f) files mismatches)
+        known-cut (into (sorted-set) (filter #(contains? files %)) (:incomplete (read-known f)))
         known (into (sorted-set)
                     (for [g (:mismatches (read-known f)) c (:cases g)
                           :when (contains? files (id-file (:case c)))]
@@ -541,25 +694,30 @@
         fixed (remove actual known)]
     (doseq [id new] (println "   new mismatch:" id))
     (doseq [id fixed] (println "   now passing: " id))
+    (doseq [[id was now] changed] (println "   result changed:" id "recorded" was "now" now))
+    (when (pos? unrecorded)
+      (println "   " unrecorded "known cases recorded without their result (:got): rewrite the reference with --write-expected to record them"))
     (when (not= known-cut (set incomplete-files))
       (println "   incomplete runs:" (vec incomplete-files) "recorded:" (vec known-cut)))
-    (println (format "== known mismatches (%s): %d recorded, %d new, %d now passing%s"
-                     (.getPath f) (count known) (count new) (count fixed)
-                     (if (and (empty? new) (empty? fixed))
+    (println (format "== known mismatches (%s): %d recorded, %d new, %d now passing, %d changed%s"
+                     (.getPath f) (count known) (count new) (count fixed) (count changed)
+                     (if (and (empty? new) (empty? fixed) (empty? changed))
                        ", as recorded"
                        "; fix them, or rewrite the reference with --write-expected and give the reasons")))
-    (and (empty? new) (empty? fixed) (= known-cut (set incomplete-files)))))
+    (and (empty? new) (empty? fixed) (empty? changed) (= known-cut (set incomplete-files)))))
 
 (defn write-known
   "Rewrites the reference f from a check's mismatches: a recorded case of a file the check ran
-  stays (with its group's reason) while it still mismatches; a new one goes into a group of
-  its own, to be given a reason by hand. True when every run completed."
+  stays (with its group's reason and :match) while it still mismatches, its :got this run's; a
+  new one goes into a group of its own, to be given a reason by hand. True when every run
+  completed."
   [^File f impl {:keys [mismatches incomplete incomplete-files files]}]
   (let [old (read-known f)
-        now (into #{} (map :case) mismatches)
-        keep? (fn [c] (or (not (contains? files (id-file (:case c)))) (now (:case c))))
+        now (into {} (map (juxt :case :got)) mismatches)
+        keep? (fn [c] (or (not (contains? files (id-file (:case c)))) (contains? now (:case c))))
+        got (fn [c] (if-let [a (now (:case c))] (assoc c :got a) c))
         groups (vec (for [g (:mismatches old)
-                          :let [cs (filterv keep? (:cases g))]
+                          :let [cs (mapv got (filterv keep? (:cases g)))]
                           :when (seq cs)]
                       (assoc g :cases cs)))
         recorded (into #{} (comp (mapcat :cases) (map :case)) groups)
@@ -570,6 +728,8 @@
                   ";; bin/oracle check IMPL --expected FILE passes when the mismatching cases are\n"
                   ";; exactly these. Rewritten by bin/oracle check IMPL --write-expected FILE, which\n"
                   ";; keeps the reasons of the cases still mismatching; edit the reasons by hand.\n"
+                  ";; :got is what the case's record was (KIND DIGEST), compared as its group's\n"
+                  ";; :match says (:result, the default; :kind; :any).\n"
                   "{:impl " (pr-str (or (:impl old) impl)) "\n"
                   (when (:about old) (str " :about " (pr-str (:about old)) "\n"))
                   (when-let [cut (seq (into (sorted-set) (concat (remove #(contains? files %) (:incomplete old)) incomplete-files)))]
@@ -577,8 +737,11 @@
                   " :mismatches\n ["
                   (str/join "\n\n  "
                             (for [g groups]
-                              (str "{:reason " (pr-str (:reason g)) "\n   :cases\n   ["
-                                   (str/join "\n    " (map #(str "{:case " (pr-str (:case %)) " :form " (pr-str (:form %)) "}")
+                              (str "{:reason " (pr-str (:reason g))
+                                   (when (:match g) (str "\n   :match " (pr-str (:match g))))
+                                   "\n   :cases\n   ["
+                                   (str/join "\n    " (map #(str "{:case " (pr-str (:case %)) " :form " (pr-str (:form %))
+                                                                (when (:got %) (str " :got " (pr-str (:got %)))) "}")
                                                           (:cases g)))
                                    "]}")))
                   "]}\n")]
@@ -604,9 +767,14 @@
              "check" (let [[impl & sel] (:sel opts)
                            impl (if (= impl "jvm") default-impl impl)]
                        (let [r (check impl (:jobs opts) (:timeout opts) (vec sel))]
-                         (cond
-                           (:write-expected opts) (write-known (io/file (:write-expected opts)) impl r)
-                           (:expected opts) (check-known (io/file (:expected opts)) r)
-                           :else (:ok r)))))]
+                         ;; a check of nothing (or of a selector that selects nothing) fails whatever
+                         ;; the reference (mac/013); GTS81 (a): the controls judged in every mode, and printed
+                         (let [k (and (empty? (:errors r))
+                                      (cond
+                                        (:write-expected opts) (write-known (io/file (:write-expected opts)) impl r)
+                                        (:expected opts) (check-known (io/file (:expected opts)) r)
+                                        :else (:ok r)))
+                               c (controls-ok? r)]
+                           (and k c)))))]
     (shutdown-agents)
     (System/exit (if ok 0 1))))

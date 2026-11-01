@@ -22,6 +22,22 @@
 #                            into DIR/aot with DIR/aot.key and DIR/aot.runtime (RPS95 (b): the
 #                            base of bin/arbace-go --build-program on a fresh clone; kept while
 #                            aot.key is the checkout's; --no-aot: not)
+#        bin/seed --kept DIR [--arch A[,B]]
+#                            DIR (a stage 0 built elsewhere) is one --build would keep here: its
+#                            executables of the architectures, its seed.sha256 and pins this
+#                            checkout's (exit 0, "stage 0 kept"); else why (exit 1); builds
+#                            nothing (GTS83 (a))
+#        bin/seed --link FROM [-o OUT] [--arch A[,B]]
+#                            FROM (a stage 0 --kept accepts: the main checkout's target/seed, from
+#                            a linked worktree) taken into OUT (default target/seed) by hard links
+#                            of its executables (copies where a link fails) and copies of its
+#                            seed.sha256 and pins, the rest of a stale stage 0 in OUT removed
+#                            (src/, aot/, the logs: re-review 020), checked again after linking (a
+#                            rebuild in FROM meanwhile: the links dropped, exit 1); OUT kept
+#                            already: nothing linked; builds nothing; waits for a build in FROM's
+#                            checkout (its stage 0 lock, at most ARBACE_SEED_LINK_WAIT s)
+#                            (review 001's fixes: bin/gate's stage0 step and bin/lib/host.bash in a
+#                            linked worktree; FROM's rebuild, rm -rf, cannot pull OUT away)
 #        bin/seed --make [ARCHIVE]
 #                            pack a build's printed module into ARCHIVE (default the seed) and pin
 #                            its hash in ARCHIVE.sha256: the last bin/arbace-go --build, or
@@ -40,6 +56,8 @@
 #   ARBACE_GOROOT     Go's toolchain (default /root/tamago-go, TamaGo's go1.27.1): its VERSION
 #                     and the SHA-256 of its sources (VERSION and src/) must be those pinned in
 #                     seed/goroot.sha256 and named by SEED.edn (SA4)
+#   ARBACE_SEED_LINK_WAIT  --link's longest wait for FROM's checkout's stage 0 build, in seconds
+#                     (default 1200), then the refusal
 # Exit status: 0 when the hash matches (and, for --build, the executables are built; for
 # --verify, the seed printed again is identical and its executable rebuilds itself).
 set -uo pipefail
@@ -61,6 +79,19 @@ go_check() {
   else
     echo "$goseed: SHA-256 $got, pinned $want" >&2; return 1
   fi
+}
+
+# seed_kept DIR: DIR is a stage 0 bin/seed --build would keep here ($archs' executables, seed.sha256 this
+# seed's, pins the line $pins); else prints why and returns 1 (--kept, --link)
+seed_kept() {
+  local d=$1 a have
+  for a in ${archs//,/ }; do
+    [ -x "$d/$a/arbace" ] || { echo "$d has no $a/arbace"; return 1; }
+  done
+  [ "$(cat "$d/seed.sha256" 2>"$TMPDIR/seed-kept.err")" = "$(cut -d' ' -f1 "$goseed.sha256")" ] \
+    || { echo "$d's seed.sha256 is not this seed's"; return 1; }
+  have=$(cat "$d/pins" 2>"$TMPDIR/seed-kept.err")
+  [ "$have" = "$pins" ] || { echo "$d is built from other pins (${have:-none}; here: $pins)"; return 1; }
 }
 
 case ${1:-} in
@@ -94,7 +125,7 @@ case ${1:-} in
     # executables of these architectures recorded with the seed's and Go's pins; --force, or
     # ARBACE_SEED_FORCE=1, builds it (the clean run's)
     # GTS53 (a): and by the scripts that build it (this one and bin/lib/seed-go.bash: bin/gate's :stage0 host holds the same digest)
-    pins="$(cut -d' ' -f1 "$goseed.sha256") $(sha256sum < "$root/seed/goroot.sha256" | cut -c1-64) $(cat "$root/bin/seed" "$root/bin/lib/seed-go.bash" | sha256sum | cut -c1-64) ${ARBACE_GOROOT:-/root/tamago-go} $archs"
+    pins=$(seed_go_pins "$goseed" "$archs")
     kept=1
     for a in ${archs//,/ }; do [ -x "$out/$a/arbace" ] || kept=; done
     if [ -n "$kept" ] && [ -z "$force" ] && [ "${ARBACE_SEED_FORCE:-}" != 1 ] && [ -f "$out/pins" ] \
@@ -124,6 +155,121 @@ case ${1:-} in
           || echo "bin/seed: stage 0 keeps no compiled namespaces (its runtime is not the checkout's, or the compiling failed; bin/arbace-go --build-program then builds first)" >&2
       fi
     fi ;;
+  --kept)
+    # GTS83 (a): DIR (a stage 0 built elsewhere) is the one bin/seed --build would keep here: its executables
+    # of these architectures, its seed.sha256 this seed's, its pins this checkout's line (seed_go_pins);
+    # prints so and exits 0, else prints why and exits 1. Builds nothing.
+    shift
+    out=${1:-} archs=$(seed_go_host_arch)
+    [ "${2:-}" = --arch ] && archs=${3:-$archs}
+    [ -n "$out" ] || { echo "usage: bin/seed --kept DIR [--arch A[,B]]" >&2; exit 2; }
+    go_check > "$TMPDIR/seed-kept.log" || exit 1
+    pins=$(seed_go_pins "$goseed" "$archs")
+    why=$(seed_kept "$out") || { echo "bin/seed: $why"; exit 1; }
+    echo "bin/seed: stage 0 kept: $out ($archs), its pins this checkout's (GTS83 (a): built nothing)" ;;
+  --link)
+    # review 001's fixes (doc/GATE-SURVEY.md): FROM (the main checkout's target/seed, from a linked
+    # worktree) taken into OUT (default this checkout's target/seed), when --kept FROM holds: its
+    # executables by hard links (a copy where a link fails, e.g. across filesystems), its seed.sha256 and
+    # pins copied. OUT is then this checkout's own stage 0, which FROM's rm -rf (its rebuild) cannot pull
+    # away and --build or --kept OUT keeps by itself. OUT kept already: nothing linked. Checked after
+    # linking: FROM still kept and each file FROM's (a rebuild there meanwhile), else OUT's are dropped
+    # (exit 1). Under the stage 0 build's lock of this checkout (SEED_BUILD_LOCKED=1: the caller holds it).
+    shift
+    from= out=$root/target/seed archs=$(seed_go_host_arch)
+    while [ $# -gt 0 ]; do
+      case $1 in
+        -o) out=$2; shift 2 ;;
+        --arch) archs=$2; shift 2 ;;
+        -*) echo "usage: bin/seed --link FROM [-o OUT] [--arch A[,B]]" >&2; exit 2 ;;
+        *) from=$1; shift ;;
+      esac
+    done
+    [ -n "$from" ] || { echo "usage: bin/seed --link FROM [-o OUT] [--arch A[,B]]" >&2; exit 2; }
+    case $out in /*) ;; *) out=$PWD/$out ;; esac
+    go_check > "$TMPDIR/seed-kept.log" || exit 1
+    mkdir -p "$root/.tmp"
+    if [ "${SEED_BUILD_LOCKED:-}" != 1 ]; then exec 9> "$root/.tmp/seed-build.lock"; flock 9; fi
+    # re-review 020, finding 2: FROM's checkout's stage 0 build lock too (FROM is CHECKOUT/target/seed and
+    # CHECKOUT/.tmp/seed-build.lock exists: bin/seed --build's and bin/lib/host.bash's there), shared (links
+    # run beside each other, a build there excludes them), so that a link during the main checkout's rebuild
+    # waits for it and links the new stage 0, rather than refusing for a reason that is not the real one
+    # (FROM has no executable or pins yet) or letting bin/gate's stage0 step start a second build at once;
+    # at most ARBACE_SEED_LINK_WAIT seconds (default 1200: a build and its compiled namespaces), then the
+    # refusal names the build. Not when that lock is this checkout's own (held above)
+    fromdir=$from; while [ "$fromdir" != / ] && [ "${fromdir%/}" != "$fromdir" ]; do fromdir=${fromdir%/}; done
+    case $fromdir in
+      */target/seed)
+        fromlock=${fromdir%/target/seed}/.tmp/seed-build.lock
+        if [ -f "$fromlock" ] && ! [ "$fromlock" -ef "$root/.tmp/seed-build.lock" ]; then
+          linkwait=${ARBACE_SEED_LINK_WAIT:-1200}
+          exec 8< "$fromlock"
+          if ! flock -n -s 8; then
+            echo "bin/seed: waiting for ${fromdir%/target/seed}'s stage 0 build (its lock $fromlock; at most $linkwait s)" >&2
+            # (busybox's flock has no -w: polled each second)
+            waited=0
+            until flock -n -s 8; do
+              [ "$waited" -lt "$linkwait" ] || { echo "bin/seed: not linked: ${fromdir%/target/seed} is building its stage 0 (its lock $fromlock held after $linkwait s)"; exit 1; }
+              sleep 1; waited=$((waited + 1))
+            done
+          fi
+        fi ;;
+    esac
+    pins=$(seed_go_pins "$goseed" "$archs")
+    if seed_kept "$out" > "$TMPDIR/seed-link.why"; then
+      echo "bin/seed: stage 0 kept: $out ($archs), its pins this checkout's (nothing linked)"; exit 0
+    fi
+    why=$(seed_kept "$from") || { echo "bin/seed: not linked: $why"; exit 1; }
+    mkdir -p "$out"
+    [ "$(cd "$from" && pwd -P)" != "$(cd "$out" && pwd -P)" ] || { echo "bin/seed: not linked: $from is $out"; exit 1; }
+    files= how=
+    for a in ${archs//,/ }; do files="$files $a/arbace"; done
+    files="$files seed.sha256 pins" # pins last: OUT reads as kept only once every file is in
+    # unlink: OUT holds no stage 0 of these pins (each placed file removed: a stale own one is gone too)
+    unlink_out() { local f; for f in $files; do rm -f "$out/$f" "$out/$f.link.$$"; done; }
+    rm -f "$out/pins" "$out/seed.sha256"
+    # re-review 020, finding 1: an interrupted link (killed after an executable's rename, before pins) left
+    # OUT with FROM's executable and no pins, and the next link's mv of a second link of the same inode
+    # over it refused ("are the same file"; busybox's rename did nothing and left the temporary): an
+    # executable already FROM's is left in place (the check below verifies it), and the dead runs'
+    # temporaries are removed (under the lock: no other link of OUT runs); stopped by INT or TERM, this
+    # run removes its own
+    rm -f "$out"/*.link.* "$out"/*/arbace.link.*
+    # re-review 020, finding 5: the rest of a stage 0 OUT held, stale (built here earlier, another seed or
+    # pins), removed with it, so that nothing reads the old one's files beside the linked executable: what
+    # bin/seed --build writes into a stage 0 directory, src/ (the seed unpacked), prepare/, prepare.ae,
+    # prepare.log, build-*.log, aot/, aot.key, aot.runtime, and another architecture's ARCH/arbace (its
+    # directory too when that leaves it empty); any other file of OUT stays
+    rm -rf "$out/src" "$out/prepare" "$out/aot"
+    rm -f "$out/prepare.ae" "$out/prepare.log" "$out"/build-*.log "$out/aot.key" "$out/aot.runtime"
+    for f in "$out"/*/arbace; do
+      [ -e "$f" ] || continue
+      case " $files " in *" ${f#"$out"/} "*) continue ;; esac
+      rm -f "$f"; rmdir "$(dirname "$f")" 2> "$TMPDIR/seed-link.err" || true
+    done
+    trap 'rm -f "$out"/*.link.$$ "$out"/*/arbace.link.$$; exit 130' INT TERM
+    for f in $files; do
+      mkdir -p "$(dirname "$out/$f")"
+      rm -f "$out/$f.link.$$"
+      case $f in */arbace) [ "$out/$f" -ef "$from/$f" ] && { how=${how:-hard links}; continue; } ;; esac
+      # the executables hard-linked; seed.sha256 and pins copied (a few bytes: no write here reaches FROM's)
+      if case $f in */arbace) ;; *) false ;; esac && ln "$from/$f" "$out/$f.link.$$" 2> "$TMPDIR/seed-link.err"; then
+        how=${how:-hard links}
+      elif cp -p "$from/$f" "$out/$f.link.$$" 2> "$TMPDIR/seed-link.err"; then
+        case $f in */arbace) how=copies ;; esac
+      else unlink_out; echo "bin/seed: not linked: $from/$f: $(head -1 "$TMPDIR/seed-link.err")"; exit 1; fi
+      mv -f "$out/$f.link.$$" "$out/$f" || { unlink_out; echo "bin/seed: not linked: $out/$f not renamed"; exit 1; }
+    done
+    # a rebuild in FROM meanwhile (its --build removes pins first, rm -rf, writes pins last): each linked
+    # file still FROM's (the same inode, or for a copy the same bytes), then FROM and OUT both kept
+    for f in $files; do
+      [ "$out/$f" -ef "$from/$f" ] || cmp -s "$out/$f" "$from/$f" \
+        || { unlink_out; echo "bin/seed: not linked: $from/$f changed while linking (a rebuild there?)"; exit 1; }
+    done
+    why=$(seed_kept "$from") || { unlink_out; echo "bin/seed: not linked: after linking, $why"; exit 1; }
+    why=$(seed_kept "$out") || { unlink_out; echo "bin/seed: not linked: after linking, $why"; exit 1; }
+    trap - INT TERM
+    echo "bin/seed: stage 0 kept: $out ($archs), linked from $from ($how), its pins this checkout's (review 001: built nothing)" ;;
   --verify)
     go_check || exit 1
     # the pinned toolchain, the one the seed names (SA4)
@@ -174,5 +320,5 @@ case ${1:-} in
     echo "   in $(( $(date +%s) - t0 )) s"
     git worktree remove --force "$wt"
     exit $st ;;
-  *) echo "usage: bin/seed --check | --make [ARCHIVE] | --build [-o DIR] [--arch A,B] [--force] | --verify [REV]" >&2; exit 2 ;;
+  *) echo "usage: bin/seed --check | --make [ARCHIVE] | --build [-o DIR] [--arch A,B] [--force] | --kept DIR [--arch A,B] | --verify [REV]" >&2; exit 2 ;;
 esac
