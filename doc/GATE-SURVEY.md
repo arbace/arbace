@@ -2791,6 +2791,18 @@ mux_patterns (other want.out).
 
 ## Proposed (2026-11-01): GTS130-GTS133 (GT7's audit 061, repr/java's tree checks; none decided)
 
+**Decided (2026-11-01, the user): GTS130-GTS133, GTS137** (on main's doc/JOURNAL.md, "2026-11-01: the user's decisions
+after the tag"; VM report 103's sheet 2, the source's picks; GTS137 is proposed in the next section):
+- **GTS130 (a):** the new records are flat maps read by awk (`judge_flat_get`, `judge_flat_set`), as built.
+- **GTS131 (c) then (a):** the mutants' digest recorded by hand from a run before merging; failing until recorded stays
+  the rule.
+- **GTS132 (b):** a corpus with no recorded diagnostics count fails (built, review 067); tests and mutants are recorded
+  by `parse-check --corpus tests,mutants --record` on the main host.
+- **GTS133 (b) at the next reader change:** `split.ae` counts bridges per corpus with the next change to the reader's
+  namespaces; until then the judge refuses a non-empty `:bridges`, as built.
+- **GTS137 (a) after the first record:** a `--full` step `repr-java-jdk`, `:heavy true`, once the first real run records
+  `jdk26u-fallbacks.edn` (its `:mem-gib` and `:summary` measured then).
+
 Made on branch audit-061 where neither javac's tool nor jdk26u exist: the judges are tested over fabricated trees and a
 stubbed `bin/repr-java` (`test/repr/java/judge-*-test.bash`), the records below are not measured.
 
