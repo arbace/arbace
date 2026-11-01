@@ -1,0 +1,135 @@
+(ns arbace.repr.c.c23check
+  "C23's conformance judges of repr/c (doc/C23-SURVEY.md, C1.4 and CS38 (a), \"As built: C3b\"; bin/repr-c
+  check --c23, its driver bin/lib/repr-c/c23check): go-whim's c23conf re-made over C forms. Each file of
+  test/c/c23/ answers the first judge it fails: (1) the reference accepts it (gcc -std=c23 -fsyntax-only),
+  (2) repr/c reads it, (3) the reference accepts the :lines print, (4) the print is a fixpoint (read and
+  printed again, the same text), (5) the same program: the :full print the original byte for byte (so the
+  same preprocessing tokens one for one) and the :lines print's object file the original's
+  (-O0 -fno-stack-protector -c), (6) forms → C → forms the same forms. A failure is expected only with its
+  reason (test/c/c23/expected.edn); an expected failure that passes fails. The control: four wrong prints
+  (c23conf's TestControl's, re-made as changes to forms or to the :full text) that the judges must refuse."
+  (:require [arbace.repr.c :as rc]
+            [arbace.repr.c.host :as host]
+            [arbace.repr.c.layout :as layout]
+            [arbace.repr.c.rtcheck :as rt]
+            [arbace.string :as str]))
+
+(set! *warn-on-reflection* true)
+
+(def expected-file "test/c/c23/expected.edn")
+
+(defn- read-tsv [^String p]
+  (let [f (java.io.File. p)]
+    (if (.exists f)
+      (into {} (map (fn [l] (let [xs (str/split l #"\t" -1)] [(first xs) (vec (rest xs))])) (remove str/blank? (str/split-lines (slurp p)))))
+      {})))
+
+(defn judge
+  "The judges over WORK/c23 (the round trip's forms.tsv, obj.tsv, and the driver's syn.tsv and
+  syn-print.tsv): WORK/c23/judges.tsv, the table printed; 1 when a file fails."
+  [^String work]
+  (let [d (str work "/c23")
+        forms (read-tsv (str d "/forms.tsv"))
+        obj (read-tsv (str d "/obj.tsv"))
+        syn (read-tsv (str d "/syn.tsv"))
+        synp (read-tsv (str d "/syn-print.tsv"))
+        expected (read-string (slurp expected-file))
+        rows (for [nm (sort (keys forms))
+                   :let [[read l1 l2 _ fix] (get forms nm)
+                         [_ _ cmp] (get obj nm)
+                         answer (cond
+                                  (not= "0" (first (get syn nm))) "1 the reference rejects it"
+                                  (not= read "ok") (str "2 repr/c does not read it (" read ")")
+                                  (not= "0" (first (get synp nm))) "3 the reference rejects the print"
+                                  (not= fix "equal") "4 the print is not a fixpoint"
+                                  (not= l2 "equal") "5 the :full print is not the original"
+                                  (not= cmp "equal") "5 the objects differ"
+                                  (not= l1 "equal") "6 the forms differ"
+                                  :else "pass")
+                         e (get expected nm)
+                         st (cond (and (= answer "pass") e) "fail (expected to fail, passes)"
+                                  (= answer "pass") "pass"
+                                  e "expected"
+                                  :else "fail")]]
+               [nm st answer (or e "")])
+        failing (filter #(.startsWith ^String (second %) "fail") rows)]
+    (spit (str d "/judges.tsv") (str/join (map #(str (str/join "\t" %) "\n") rows)))
+    (doseq [[nm st answer e] rows]
+      (println (format "%-26s %-9s %s%s" nm st answer (if (seq e) (str " -- " e) ""))))
+    (println (str "c23: " (count rows) " files, " (count (filter #(= "pass" (second %)) rows)) " pass, "
+                  (count (filter #(= "expected" (second %)) rows)) " expected failures, " (count failing) " failing"))
+    (if (seq failing) 1 0)))
+
+;; ---------------------------------------------------------------------------------------------
+;; The control
+
+(def control
+  "c23conf's TestControl: [name source change objects-alike]."
+  [["fallthrough dropped" "int f(int x) { switch (x) { case 1: x++; [[fallthrough]]; default: break; } return x; }\n" :drop-attr-decl true]
+   ["separators dropped" "int x = 1'000'000;\n" :respell-full true]
+   ["value changed" "int x = 4;\nint y = 0b1010;\n" :value-10-to-11 false]
+   ["tokens glued" "int f(int a) { return - -a; }\n" :minus-minus false]])
+
+(defn- change [kind forms]
+  (let [walk (fn walk [f x]
+               (let [y (f x)]
+                 (cond
+                   (seq? y) (with-meta (apply list (remove #(= % ::gone) (map #(walk f %) y))) (meta y))
+                   (vector? y) (with-meta (vec (remove #(= % ::gone) (map #(walk f %) y))) (meta y))
+                   :else y)))]
+    (mapv (fn [form]
+            (walk (case kind
+                    :drop-attr-decl #(if (and (seq? %) (= (first %) 'c/attr-decl)) ::gone %)
+                    :value-10-to-11 #(if (= % 10) 11 %)
+                    :minus-minus #(if (and (seq? %) (= (first %) '-) (= 2 (count %)) (seq? (second %)) (= (first (second %)) '-))
+                                    (list 'pre-dec! (second (second %))) %)
+                    identity)
+                  form))
+          forms)))
+
+(defn control-write
+  "Writes each control case under WORK/control/N/: a/x.c (the source), b/x.c (the wrong print: the
+  changed forms printed in mode :lines, or the changed :full text), and the judges' answers on them that
+  need no compiler: forms.edn {:forms-differ :text-differs :alike}."
+  [^String work]
+  (let [h (host/load-host "test/c/host")
+        fc (host/file-config ["-std=c23"] "c23")]
+    (doseq [[i [nm src kind alike]] (map-indexed vector control)]
+      (let [d (str work "/control/" i)
+            _ (.mkdirs (java.io.File. (str d "/a"))) _ (.mkdirs (java.io.File. (str d "/b")))
+            _ (spit (str d "/a/x.c") src)
+            rd (rc/read-c (host/config h fc (str d "/a")) fc "x.c" false)
+            full (rc/read-c (host/config h fc (str d "/a")) fc "x.c" true)
+            wrong (if (= kind :respell-full)
+                    (str/replace (rc/print-c (:file-form full) (:forms full)) "1'000'000" "1000000")
+                    (rc/print-c (:file-form rd) (change kind (:forms rd))))
+            _ (spit (str d "/b/x.c") wrong)
+            rd2 (rc/read-c (host/config h fc (str d "/b")) fc "x.c" false)
+            forms-differ (not= (map #(layout/form-str (rt/strip %)) (:forms rd)) (map #(layout/form-str (rt/strip %)) (:forms rd2)))
+            text-differs (not= src wrong)]
+        (spit (str d "/case.edn") (pr-str {:name nm :kind kind :alike alike :forms-differ forms-differ :text-differs text-differs
+                                           :lines-print (rc/print-c (:file-form rd) (:forms rd))}))))))
+
+(defn control-judge
+  "The control's answers (WORK/control/N/case.edn and the driver's obj, 'equal' or 'differ'): each wrong
+  print refused by the judges (the forms differ, or for a respelling the :full text), its objects alike
+  or not as c23conf expects. 1 when a judge takes a wrong print."
+  [^String work]
+  (let [bad (atom 0)]
+    (doseq [i (range (count control))]
+      (let [d (str work "/control/" i)
+            c (read-string (slurp (str d "/case.edn")))
+            obj (str/trim (slurp (str d "/obj")))
+            refused (if (= (:kind c) :respell-full) (:text-differs c) (:forms-differ c))
+            alike-ok (= (:alike c) (= obj "equal"))]
+        (when-not (and refused alike-ok) (swap! bad inc))
+        (println (format "control %-20s %s, objects %s%s" (:name c) (if refused "refused" "TAKEN") obj
+                         (if alike-ok "" " (not as expected)")))))
+    (if (pos? @bad) 1 0)))
+
+(defn -main [cmd & args]
+  (case cmd
+    "judge" (System/exit (judge (first args)))
+    "control-write" (control-write (first args))
+    "control-judge" (System/exit (control-judge (first args)))
+    (do (println "c23check: judge, control-write or control-judge") (System/exit 2))))

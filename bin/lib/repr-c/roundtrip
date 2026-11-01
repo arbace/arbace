@@ -1,0 +1,143 @@
+#!/bin/bash
+# repr/c's round trip (doc/c/SPEC.md §3.1; doc/C23-SURVEY.md, "As built: C3b"): every file of the corpora read
+# in place by repr/c (arbace.repr.c, evaluated on the tools' host) into C forms, and
+#   level 1  the :lines print read again, the forms equal (N3's grouping and the lines aside);
+#   level 2  the file read in mode :full and printed, the original byte for byte;
+#   level 3  the :lines print and the original compiled by the reference (gcc -std=STD OPTIONS -O0
+#            -fno-stack-protector -fpermissive -w -c, gcc's include directory first, the fixed epoch; each from
+#            its own directory under the same relative name, the print with the original's directory as -iquote),
+#            the object files byte for byte;
+#   level 4  for the run corpora (test/c/corpora.edn's :action :run), both linked (-lm) and run (10 s, an empty
+#            standard input, in a scratch directory), the status and the standard output equal (E2's measure);
+# and the reader's acceptance against the reference's (CS61 (a): gcc -fsyntax-only's status of every file,
+# recorded in test/repr/c/parse-gcc.tsv by --record-gcc). A file passes when every level it reaches passes and
+# the reader rejects no file the reference accepts; else test/repr/c/roundtrip-known.edn lists it with its class,
+# or it fails (arbace.repr.c.rtcheck). Run through bin/repr-c roundtrip (from the repository root); writes only
+# under .tmp/repr-c-roundtrip/ (REPR_C_RT_WORK).
+#
+# Usage: bin/repr-c roundtrip [--corpus C,...] [--record] [--record-gcc] [--no-run]
+#   --corpus      test/c/corpora.edn's ids (default every corpus read in place, `all`; lua's tarball not)
+#   --record      the known file's entries of the corpora rewritten from the files that do not pass
+#   --record-gcc  gcc -fsyntax-only run on every file of the corpora, test/repr/c/parse-gcc.tsv rewritten
+#                 for them (the other corpora's lines kept)
+#   --no-run      levels 1-3 only
+#   --resume      a corpus whose forms.tsv a run left keeps it (its lists, prints and levels 1-2); the rest again
+# Each corpus: WORK/CORPUS/forms.tsv (name, read, level 1, level 2, detail, fixpoint), print/NAME.d/NAME (the :lines prints),
+# obj.tsv (name, the original's compile status, the print's, the objects equal or differ), run.tsv (name, the
+# original's run status, the print's, same or differ), files.tsv (name, status: pass, known, fail; read, levels
+# 1-4, acceptance, class, detail), report.edn.
+#   REPR_C_THREADS (default 8): the reader's threads and gcc's jobs.
+# Exit status: 0 when every corpus passes.
+set -uo pipefail
+root=$(cd "$(dirname "$0")/../../.." && pwd)
+. "$root/bin/lib/tmpdir.bash"
+. "$root/bin/lib/tools.bash"
+cd "$root"
+
+all=c23conf,torture-execute,torture-execute-mirror,torture-compile,tcc-tests2,tcc-pp,compcert,mir,cxgo,benchmarksgame,sqlite,zlib,quickjs,gcc-c23,gcc-cpp-c23,gcc-c23-sub,gcc-gnu23,gcc-embed,gcc-va-opt,gcc-bitint
+corpora=$all record= record_gcc= run=1 resume=
+while [ $# -gt 0 ]; do
+  case $1 in
+    --corpus) corpora=$2; shift 2 ;;
+    --record) record=1; shift ;;
+    --record-gcc) record_gcc=1; shift ;;
+    --no-run) run=; shift ;;
+    --resume) resume=1; shift ;;
+    *) sed -n '22,28p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+  esac
+done
+[ "$corpora" = all ] && corpora=$all
+work=${REPR_C_RT_WORK:-$root/.tmp/repr-c-roundtrip}
+threads=${REPR_C_THREADS:-8}
+export REPR_C_THREADS=$threads
+mkdir -p "$work"
+gowhim=${GOWHIM:-$(cd "${root%%/.tmp/worktrees/*}/.." && pwd)/go-whim}
+modcache=$(GOFLAGS= "${ARBACE_GOROOT:-/root/tamago-go}/bin/go" env GOMODCACHE)
+gi=$(gcc -print-file-name=include)
+epoch=$(sed -n 's/^ *:epoch \([0-9]*\).*/\1/p' test/c/host/host.edn)
+gccroot=
+case ,$corpora, in *,gcc-*) gccroot=$(bin/repr-c gcc-tests) || exit 1 ;; esac
+roots="{:gomodcache \"$modcache\" :go-whim \"$gowhim\" :gcc-15.2.0 \"$gccroot\" :checkout \"$root\"}"
+: > "$TMPDIR/repr-c-empty-stdin"
+
+IFS=, read -r -a ids <<< "$corpora"
+todo=()
+for id in "${ids[@]}"; do
+  if [ -n "$resume" ] && [ -s "$work/$id/forms.tsv" ]; then continue; fi
+  rm -rf "${work:?}/$id"; todo+=("$id")
+done
+[ ${#todo[@]} = 0 ] || arbace_tool -m arbace.repr.c.ppcheck lists "$work" "$roots" "${todo[@]}" || exit 1
+
+# CS61 (a): the reference's acceptance of each file, at its standard and modelled options
+if [ -n "$record_gcc" ]; then
+  syn() { # DIR NAME STD ARGS READ
+    local base gstd; base=$(cat "$1/base.txt"); gstd=$3; [ "$3" = c94 ] && gstd=iso9899:199409
+    # shellcheck disable=SC2086
+    (cd "$base" && SOURCE_DATE_EPOCH=$epoch LC_ALL=C gcc -std=$gstd $4 -isystem "$gi" -fsyntax-only -w "$5") \
+      > "$1/syn/$2.out" 2>&1
+    echo "$?	$(basename "$1")/$2"
+  }
+  export -f syn; export epoch gi
+  for id in "${ids[@]}"; do
+    d=$work/$id; mkdir -p "$d/syn"
+    awk -F'\t' '{print $1}' "$d/gcc.list" | while read -r f; do mkdir -p "$(dirname "$d/syn/$f")"; done
+    awk -F'\t' -v d="$d" '{print d "\037" $1 "\037" $2 "\037" $3 "\037" $4}' "$d/gcc.list" | tr '\n' '\0' \
+      | xargs -0 -P "$threads" -I{} bash -c 'IFS=$'"'"'\037'"'"' read -r d f std args rd <<< "$1"; syn "$d" "$f" "$std" "$args" "$rd"' _ {} \
+      > "$d/syn.tsv"
+  done
+  { echo "# gcc 15.2 -fsyntax-only's status of every file of the corpora (CS61 (a); bin/repr-c roundtrip --record-gcc):"
+    echo "# STATUS<tab>CORPUS/NAME, each at its standard and modelled options, gcc's include directory first."
+    [ -f test/repr/c/parse-gcc.tsv ] && grep -v '^#' test/repr/c/parse-gcc.tsv | awk -F'\t' -v ids=",$corpora," '{split($2, a, "/"); if (index(ids, "," a[1] ",") == 0) print}'
+    for id in "${ids[@]}"; do cat "$work/$id/syn.tsv"; done
+  } | awk 'NR <= 2 {print; next} {print | "LC_ALL=C sort -t\"\t\" -k2"}' > "$TMPDIR/parse-gcc.tsv"
+  mv "$TMPDIR/parse-gcc.tsv" test/repr/c/parse-gcc.tsv
+  echo "recorded test/repr/c/parse-gcc.tsv"
+fi
+
+[ ${#todo[@]} = 0 ] || arbace_tool -m arbace.repr.c.rtcheck forms "$work" "${todo[@]}" || exit 1
+
+# level 3: both compiled, the objects compared; level 4: both linked and run
+cc_pair() { # DIR NAME STD ARGS BASE RUN READ
+  local d=$1 f=$2 std=$3 args=$4 base=$5 run=$6 rd=${7:-$2} gstd o p os ps cmp rdir ro rp same
+  gstd=$std; [ "$std" = c94 ] && gstd=iso9899:199409
+  o=$d/obj/orig/$f.o; p=$d/obj/print/$f.o
+  mkdir -p "$(dirname "$o")" "$(dirname "$p")"
+  # shellcheck disable=SC2086
+  (cd "$base" && SOURCE_DATE_EPOCH=$epoch LC_ALL=C timeout 120 gcc -std=$gstd $args -isystem "$gi" -O0 -fno-stack-protector -fpermissive -w -c "$rd" -o "$o") > "$o.err" 2>&1
+  os=$?
+  # shellcheck disable=SC2086
+  (cd "$d/print/$f.d" && SOURCE_DATE_EPOCH=$epoch LC_ALL=C timeout 120 gcc -std=$gstd $args -iquote "$base/$(dirname "$f")" --embed-dir="$base/$(dirname "$f")" -isystem "$gi" -O0 -fno-stack-protector -fpermissive -w -c "$f" -o "$p") > "$p.err" 2>&1
+  ps=$?
+  cmp=-
+  [ $os = 0 ] && [ $ps = 0 ] && { if cmp -s "$o" "$p"; then cmp=equal; else cmp=differ; fi; }
+  printf '%s\t%s\t%s\t%s\n' "$f" "$os" "$ps" "$cmp" >> "$d/obj.part.$$"
+  if [ "$run" = 1 ] && [ $os = 0 ] && [ $ps = 0 ]; then
+    rdir=$d/run/$f; mkdir -p "$rdir/o" "$rdir/p"
+    gcc "$o" -o "$rdir/o/a.out" -lm > "$rdir/o/link.err" 2>&1 && gcc "$p" -o "$rdir/p/a.out" -lm > "$rdir/p/link.err" 2>&1 || { printf '%s\tlink\tlink\t-\n' "$f" >> "$d/run.part.$$"; return; }
+    (cd "$rdir/o" && timeout 10 ./a.out < "$TMPDIR/repr-c-empty-stdin" > stdout 2> stderr); ro=$?
+    (cd "$rdir/p" && timeout 10 ./a.out < "$TMPDIR/repr-c-empty-stdin" > stdout 2> stderr); rp=$?
+    same=differ; [ $ro = $rp ] && cmp -s "$rdir/o/stdout" "$rdir/p/stdout" && same=same
+    printf '%s\t%s\t%s\t%s\n' "$f" "$ro" "$rp" "$same" >> "$d/run.part.$$"
+    rm -f "$rdir/o/a.out" "$rdir/p/a.out"
+  fi
+}
+export -f cc_pair; export epoch gi TMPDIR
+
+status=0
+for id in "${ids[@]}"; do
+  d=$work/$id
+  isrun=0
+  if [ -n "$run" ] && arbace_tool -e "(println (= :run (:action (first (filter #(= (:id %) :$id) (:corpora (read-string (slurp \"test/c/corpora.edn\"))))))))" | grep -q true; then isrun=1; fi
+  rm -f "$d"/obj.part.* "$d"/run.part.*
+  awk -F'\t' -v d="$d" -v r="$isrun" '{print d "\037" $1 "\037" $2 "\037" $3 "\037" $4 "\037" r "\037" $5}' "$d/gcc3.list" | tr '\n' '\0' \
+    | xargs -0 -P "$threads" -I{} bash -c 'IFS=$'"'"'\037'"'"' read -r d f std args base r rd <<< "$1"; cc_pair "$d" "$f" "$std" "$args" "$base" "$r" "$rd"' _ {}
+  cat "$d"/obj.part.* 2>"$TMPDIR/repr-c-rt.err" > "$d/obj.tsv"; cat "$d"/run.part.* 2>"$TMPDIR/repr-c-rt.err" > "$d/run.tsv"
+  rm -f "$d"/obj.part.* "$d"/run.part.*
+done
+arbace_tool -m arbace.repr.c.rtcheck judge "$work" "${ids[@]}" || status=1
+if [ -n "$record" ]; then
+  arbace_tool -m arbace.repr.c.rtcheck record "$work" "${ids[@]}" || exit 1
+  status=0
+  arbace_tool -m arbace.repr.c.rtcheck judge "$work" "${ids[@]}" || status=1
+fi
+exit $status

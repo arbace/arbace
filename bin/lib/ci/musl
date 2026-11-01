@@ -1,0 +1,50 @@
+#!/bin/bash
+# ci's libc (doc/C23-SURVEY.md §6.5, CS11 (a), CS12 (a); arbace.c.musl's header):
+#   prepare  musl 1.2.6's release tarball (test/c/corpora.edn's :musl-1.2.6: fetched into .tmp/ci-musl/ when absent,
+#            CI_MUSL_TARBALL another copy) checked by its SHA-256, extracted into .tmp/ci-musl/musl-1.2.6, configured
+#            (CC=gcc ./configure --disable-shared) and its generated headers made (obj/include/bits/alltypes.h,
+#            syscall.h, obj/src/internal/version.h); .tmp/ci-musl/ldbl53/bits/float.h is musl's arch/arm/bits/float.h
+#            (LDBL_MANT_DIG 53, CS35, SPEC §12.5). Nothing when done.
+#   read     its sources read by repr/c into the forms cache .tmp/ci-musl/forms and indexed (CI_THREADS, default 4); the
+#            cache is keyed (CS211): forms/key holds the digest of repr/c's files, the libc's reader (arbace/repr/c{.ae,/},
+#            arbace/c/musl.ae) and the host (test/c/host), and a read whose key differs rereads the whole cache
+#   fresh    exit 0 when the cache's key is the checkout's; `ensure`: prepare, then read when the key differs
+set -euo pipefail
+root=$(cd "$(dirname "$0")/../../.." && pwd)
+. "$root/bin/lib/tmpdir.bash"
+. "$root/bin/lib/tools.bash"
+d=$root/.tmp/ci-musl
+m=$d/musl-1.2.6
+forms=${CI_MUSL_FORMS:-$d/forms}
+key() { (cd "$root" && find arbace/repr/c.ae arbace/repr/c arbace/c/musl.ae test/c/host -type f | LC_ALL=C sort | xargs sha256sum | sha256sum | cut -d' ' -f1); }
+fresh() { [ -f "$forms/key" ] && [ "$(cat "$forms/key")" = "$(key)" ]; }
+case ${1:-} in
+  prepare)
+    [ -f "$m/obj/include/bits/alltypes.h" ] && [ -f "$d/ldbl53/bits/float.h" ] && exit 0
+    mkdir -p "$d"
+    url=$(sed -n '/:musl-1.2.6/,/:top/s/^ *:url "\(.*\)"/\1/p' "$root/test/c/corpora.edn")
+    sum=$(sed -n '/:musl-1.2.6/,/:top/s/^ *:sha256 "\(.*\)"/\1/p' "$root/test/c/corpora.edn")
+    tb=${CI_MUSL_TARBALL:-$d/musl-1.2.6.tar.gz}
+    c1=${root%%/.tmp/worktrees/*}/.tmp/c1/musl/musl-1.2.6.tar.gz  # C1's fetch (the survey's C1.5)
+    if [ ! -f "$tb" ] && [ -f "$c1" ]; then tb=$c1; fi
+    [ -f "$tb" ] || wget -q -O "$tb" "$url"
+    echo "$sum  $tb" | sha256sum -c --quiet || { echo "musl: $tb does not match the pin" >&2; exit 1; }
+    rm -rf "$m"; tar -xzf "$tb" -C "$d"
+    (cd "$m" && CC=gcc ./configure --disable-shared > "$d/configure.log" 2>&1 \
+       && make obj/include/bits/alltypes.h obj/include/bits/syscall.h obj/src/internal/version.h > "$d/make.log" 2>&1)
+    mkdir -p "$d/ldbl53/bits"; cp "$m/arch/arm/bits/float.h" "$d/ldbl53/bits/float.h"
+    echo "musl prepared in $m" ;;
+  key) key ;;
+  fresh) fresh ;;
+  ensure) "$0" prepare && { fresh || "$0" read; } ;;
+  read)
+    "$0" prepare
+    k=$(key)
+    if ! fresh; then
+      [ -d "$forms" ] && echo "musl: the forms cache's key is not the checkout's (repr/c or the host changed): reread" >&2
+      rm -rf "$forms"
+    fi
+    cd "$m" && arbace_tool -p "$root" -e "(require 'arbace.c.musl 'arbace.repr.c.host)" \
+      -e "(let [h (arbace.repr.c.host/load-host \"$root/test/c/host\") errs (arbace.c.musl/read-all h \"$root\" ${CI_THREADS:-4})] (doseq [[s e] (sort errs)] (println \"musl: not read:\" s e)) (arbace.c.musl/index \"$root\") (println \"musl: read, the index\" (count errs) \"not read\"))" && printf '%s\n' "$k" > "$forms/key" ;;
+  *) sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+esac

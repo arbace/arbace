@@ -1,0 +1,248 @@
+;; ci: the compiled programs' side (doc/C23-SURVEY.md §7, "As built: C6 (write-ahead)"): what the Go
+;; that cf2g (arbace.c.cf2g) translates a node program into calls. A compiled function is a Func's
+;; Native: Enter makes its frame in the C stack as Call does for an interpreted one (its memory
+;; parameters, its varargs area, the thread's innermost frame), its slots are Go locals, Leave pops
+;; it. The operators whose machine behaviour needs more than one Go operator (division's SIGFPE,
+;; cvttsd2si, bit-fields, va_arg, alloca, wide division) are functions here; setjmp's re-entry is
+;; SjRun over the function's body as a closure. A compiled program's data (its statics, natives and
+;; aliases) is node program text the Loader reads; AotMain runs it as tools/cirun runs a node program.
+(in-ns 'go.arbace.ci) (go/file "aot.go" :doc "ci: the compiled programs' side (doc/C23-SURVEY.md §7, \"As built: C6 (write-ahead)\"): what the Go\nthat cf2g (arbace.c.cf2g) translates a node program into calls. A compiled function is a Func's\nNative: Enter makes its frame in the C stack as Call does for an interpreted one (its memory\nparameters, its varargs area, the thread's innermost frame), its slots are Go locals, Leave pops\nit. The operators whose machine behaviour needs more than one Go operator (division's SIGFPE,\ncvttsd2si, bit-fields, va_arg, alloca, wide division) are functions here; setjmp's re-entry is\nSjRun over the function's body as a closure. A compiled program's data (its statics, natives and\naliases) is node program text the Loader reads; AotMain runs it as tools/cirun runs a node program.\n" :imports [
+    [bufio "bufio"]
+    [fmt "fmt"]
+    [os "os"]
+    [debug "runtime/debug"]
+    [pprof "runtime/pprof"]
+
+    [crt "arbace/crt"]])
+
+(go/func Enter "Enter is a compiled function's prologue: its frame (Base, VA) below the thread's stack pointer,\nits memory parameters stored and its varargs written as Call does; it gives the frame and the\nstack pointer Leave restores.\n" [^{:tag (* Thread)} t ^{:tag (* Func)} f ^{:tag (* Code)} c ^{:tag (slice Arg)} args] :results [(* Frame) uint64]
+  (inc! (.-Depth t))
+  (when (> (.-Depth t) (.-MaxDepth (.-P t)))
+    (panic (addr (lit crt/Fault :Sig crt/SIGSEGV :Msg "stack overflow"))))
+  (let [^{:tag (* Frame)} fr (zero (* Frame))
+        sp (.-SP t)
+        np (len (.-Params c))
+        ^uint64 va (zero uint64)]
+    (let [n (len (.-free t))]
+      (if (> n 0)
+        (do
+          (set! fr (aget (.-free t) (- n 1)))
+          (set! (.-free t) (subslice (.-free t) _ (- n 1)))
+          (set! @fr (lit Frame :Fn f :T t)))
+        (set! fr (addr (lit Frame :Fn f :T t)))))
+    (when (.-Variadic c)
+      (range [_ a (subslice args (min np (len args)))]
+        (set! va + (argSize a))))
+    (let [nsp (bit-and-not (- sp (.-FrameSize c) va 16) 15)]
+      (when (or (< nsp (- crt/StackTop crt/StackSize)) (> nsp sp))
+        (panic (addr (lit crt/Fault :Sig crt/SIGSEGV :Addr nsp :Msg "stack overflow"))))
+      (set! (.-Base fr) nsp)
+      (set! (.-VA fr) (+ nsp (bit-and-not (+ (.-FrameSize c) 15) 15)))
+      (set! (.-SP t) nsp)
+      (let [m (.-M (.-P t))]
+        (for [i 0] (and (< i np) (< i (len args))) (inc! i)
+          (let [pa (addr (aget (.-Params c) i))
+                a (addr (aget args i))]
+            (when (== (.-K pa) \m)
+              (let [at (+ (.-Base fr) (.-Off pa))]
+                (switch
+                  (case [(.-Wide pa)]
+                    (.StoreWide m at (.-WT pa) (.-W a)))
+                  (case [(== (.-T pa) "")]
+                    (.Move m at (.-Addr a) (.-Size pa)))
+                  (default
+                    (storeArg m (.-T pa) at a)))))))
+        (when (.-Variadic c)
+          (let [at (.-VA fr)]
+            (range [_ a (subslice args (min np (len args)))]
+              (set! at (writeVarArg m at a)))))
+        (set! (.-Caller fr) (.-Top t))
+        (set! (.-Top t) fr)
+        (return fr sp)))))
+
+(go/func Leave "Leave is a compiled function's epilogue: the caller's frame and stack pointer back, the frame\nkept for reuse unless a setjmp recorded it.\n" [^{:tag (* Thread)} t ^{:tag (* Frame)} fr ^uint64 sp]
+  (set! (.-Top t) (.-Caller fr))
+  (set! (.-SP t) sp)
+  (dec! (.-Depth t))
+  (when (not (.-pinned fr))
+    (set! (.-free t) (append (.-free t) fr))))
+
+(go/func B "B is a condition as C's int: 1 or 0.\n" ^int64 [^bool c]
+  (when c
+    (return 1))
+  0)
+
+(go/func K "K is a constant of the translated code as a value, so that Go folds it with the machine's wrapping\narithmetic instead of its exact constants' (an operation of constants that overflows is an error there).\n" ^int64 [^int64 v] v)
+
+(go/func Bool "Bool normalizes v to _Bool: 0 or 1.\n" ^int64 [^int64 v]
+  (when (!= v 0)
+    (return 1))
+  0)
+
+(go/func SDiv "SDiv is a signed division at a width whose minimum is min: SIGFPE on zero and on min / -1.\n" ^int64 [^int64 x ^int64 y ^int64 min]
+  (when (== y 0)
+    (fpe "integer division by zero"))
+  (when (and (== y -1) (== x min))
+    (fpe "integer overflow"))
+  (/ x y))
+
+(go/func SRem "SRem is SDiv's remainder.\n" ^int64 [^int64 x ^int64 y ^int64 min]
+  (when (== y 0)
+    (fpe "integer division by zero"))
+  (when (and (== y -1) (== x min))
+    (fpe "integer overflow"))
+  (% x y))
+
+(go/func UDiv "UDiv is an unsigned division of the operands' bits under mask (the width's).\n" ^int64 [^int64 x ^int64 y ^uint64 mask]
+  (when (== y 0)
+    (fpe "integer division by zero"))
+  (conv int64 (/ (bit-and (conv uint64 x) mask) (bit-and (conv uint64 y) mask))))
+
+(go/func URem "URem is UDiv's remainder.\n" ^int64 [^int64 x ^int64 y ^uint64 mask]
+  (when (== y 0)
+    (fpe "integer division by zero"))
+  (conv int64 (% (bit-and (conv uint64 x) mask) (bit-and (conv uint64 y) mask))))
+
+(go/func F2IConv "F2IConv converts a floating value to the integer type t as F2I's node does.\n" ^int64 [^string t ^float64 x]
+  (Norm t (f2i t x)))
+
+(go/func BitLoad "BitLoad reads a bit-field as IBitLoad's node does, the unit's address given.\n" ^int64 [^{:tag (* crt/Mem)} m ^string t ^uint64 a ^uint pos ^uint n ^bool signed]
+  (let [u (conv uint64 (Load m t a))
+        v (bit-and (>> u pos) (- ^uint64 (<< 1 n) 1))]
+    (when (== n 64)
+      (set! v (>> u pos)))
+    (when (and signed (< n 64) (!= (bit-and v ^uint64 (<< 1 (- n 1))) 0))
+      (return (- (conv int64 v) ^int64 (<< 1 n))))
+    (conv int64 v)))
+
+(go/func BitStore "BitStore writes v into a bit-field as IBitStore's node does and gives the value stored.\n" ^int64 [^{:tag (* crt/Mem)} m ^string t ^uint64 a ^int64 v ^uint pos ^uint n ^bool signed]
+  (let [x (conv uint64 v)
+        mask (<< (conv uint64 (- ^uint64 (<< 1 n) 1)) pos)]
+    (when (== n 64)
+      (set! mask (bit-not (conv uint64 0))))
+    (let [u (conv uint64 (Load m t a))]
+      (set! u (bit-or (bit-and-not u mask) (bit-and (<< x pos) mask)))
+      (Store m t a (conv int64 u))
+      (let [r (bit-and x (- ^uint64 (<< 1 n) 1))]
+        (when (and signed (< n 64) (!= (bit-and r ^uint64 (<< 1 (- n 1))) 0))
+          (return (- (conv int64 r) ^int64 (<< 1 n))))
+        (conv int64 r)))))
+
+(go/func VaArgAt "VaArgAt is VaArg's node with the va_list's address given.\n" ^int64 [^{:tag (* crt/Mem)} m ^int64 ap ^uint64 size]
+  (let [p (conv uint64 ap)
+        cur (.Load64 m p)]
+    (.Store64 m p (+ cur (bit-and-not (+ size 7) 7)))
+    (conv int64 cur)))
+
+(go/func AllocaT "AllocaT is Alloca's node: n bytes on the thread's C stack, 16-aligned.\n" ^int64 [^{:tag (* Thread)} t ^int64 n]
+  (let [sz (bit-and-not (+ (conv uint64 n) 15) 15)
+        nsp (- (.-SP t) sz)]
+    (when (< nsp (- crt/StackTop crt/StackSize))
+      (panic (addr (lit crt/Fault :Sig crt/SIGSEGV :Msg "stack overflow (alloca)"))))
+    (set! (.-SP t) nsp)
+    (conv int64 nsp)))
+
+(go/func Trap "Trap is the builder's trap node: SIGILL.\n" ^int64 [^string msg]
+  (panic (addr (lit crt/Fault :Sig crt/SIGILL :Msg msg))))
+
+(go/func WDiv "WDiv is a wide division: SIGFPE on zero.\n" ^crt/Wide [^crt/WType t ^crt/Wide a ^crt/Wide b]
+  (let [(values r ok) (.Div t a b)]
+    (when (not ok)
+      (fpe "integer division by zero"))
+    r))
+
+(go/func WRem "WRem is WDiv's remainder.\n" ^crt/Wide [^crt/WType t ^crt/Wide a ^crt/Wide b]
+  (let [(values r ok) (.Rem t a b)]
+    (when (not ok)
+      (fpe "integer division by zero"))
+    r))
+
+(go/func MustWide "MustWide is a wide constant of t from its text.\n" ^crt/Wide [^crt/WType t ^string s]
+  (let [(values v ok) (crt/WParse t s)]
+    (when (not ok)
+      (panic (+ "ci: bad wide constant " s)))
+    v))
+
+(go/method SjSet "SjSet makes code the frame's setjmp statement (setjmp's native records it) and gives the one before.\n" ^Ctl [^{:tag (* Frame)} fr ^Ctl code]
+  (let [old (.-sjCode fr)]
+    (set! (.-sjCode fr) code)
+    old))
+
+(go/func SjRun "SjRun runs a compiled function's body that calls setjmp, as SjBody does: a longjmp to a jmp_buf\nthis frame set runs body again from the setjmp statement's code, setjmp then returning its value.\n" [^{:tag (* Frame)} fr ^{:tag (func [Ctl])} body]
+  (let [enter (conv Ctl 0)]
+    (while true
+      (let [(values code v jumped) (sjTry fr body enter)]
+        (when (not jumped)
+          (return))
+        (set! (values (.-sjResume fr) (.-sjVal fr)) (values true v))
+        (set! enter code)))))
+
+(go/func sjTry [^{:tag (* Frame)} fr ^{:tag (func [Ctl])} body ^Ctl enter] :results [^Ctl code ^int64 v ^bool jumped]
+  (let [(values depth top) (values (.-Depth (.-T fr)) (.-Top (.-T fr)))]
+    (defer ((fn []
+          (when [r (recover)] (!= r nil)
+            (let [(values lp ok) (assert (* longjmpPanic) r)]
+              (when (not ok)
+                (panic r))
+              (let [j (aget (.-jmps (.-P (.-T fr))) (.-tok lp))]
+                (when (or (== j nil) (!= (.-fr j) fr))
+                  (panic r))
+                (set! (.-SP (.-T fr)) (.-sp j))
+                (set! (values (.-Depth (.-T fr)) (.-Top (.-T fr))) (values depth top))
+                (set! (values code v jumped) (values (.-code j) (.-val lp) true))))))))
+    (body enter)
+    (return 0 0 false)))
+
+(go/type GoStmt "GoStmt is a compiled static initializer as a statement of Prog.Inits.\n" (func [(* Frame)] [Ctl]))
+
+(go/method Run ^Ctl [^GoStmt s ^{:tag (* Frame)} fr] (s fr))
+(go/method Enter ^Ctl [^GoStmt s (* Frame) Ctl] CNext)
+(go/method Has ^bool [^GoStmt s Ctl] false)
+
+(go/method TopText "TopText loads the commands of a node program's text.\n" [^{:tag (* Loader)} l ^string s]
+  (let [(values tops err) (Parse s)]
+    (when (!= err nil)
+      (panic err))
+    (range [_ x tops]
+      (.Top l x))))
+
+(go/method SetCompiled "SetCompiled makes the function of index id the compiled f (a code command's place).\n" [^{:tag (* Loader)} l ^int id ^{:tag (func [(* Thread) (slice Arg)] [Arg])} f]
+  (let [g (aget (.-Funcs (.-P l)) id)]
+    (set! (.-Native g) f)
+    (set! (.-Code g) nil)
+    (aset (.-Defined l) id true)))
+
+(go/method StaticsI "StaticsI is the static objects' addresses as int64s (the compiled code's G).\n" ^{:tag (slice int64)} [^{:tag (* Prog)} p]
+  (let [g (make (slice int64) (len (.-Statics p)))]
+    (range [i a (.-Statics p)]
+      (aset g i (conv int64 a)))
+    g))
+
+(go/func AotMain "AotMain runs a compiled program as tools/cirun runs a node program: setup loads its data and\nsets its compiled functions, then the program runs with argv (argv[0] \"a.out\", then args) on the\nstandard streams; the process exits with its status, a fault reported as \"ciaot: fault: ...\".\n" [^{:tag (slice string)} args ^{:tag (func [(* Prog) (* Loader)])} setup]
+  (let [out (bufio/NewWriterSize os/Stdout (<< 1 16))
+        m (crt/NewMem)
+        sys (crt/NewSys m os/Stdin out os/Stderr)
+        p (NewProg sys)
+        l (NewLoader p)]
+    ;; a panic of ci's own (not the program's exit, fault or longjmp, which Run takes): the output flushed, the
+    ;; refusal line "ciaot: internal: ..." and status 70, which the judge tells from a program's own status
+    (defer ((fn []
+          (when [r (recover)] (!= r nil)
+            (.Flush out)
+            (fmt/Fprintf os/Stderr "ciaot: internal: %v\n%s" r (debug/Stack))
+            (os/Exit 70)))))
+    (setup p l)
+    ;; CIAOT_CPUPROFILE=FILE: the run's CPU profile (runtime/pprof), for cf2g's code
+    (when [f (os/Getenv "CIAOT_CPUPROFILE")] (!= f "")
+      (when [(values w err) (os/Create f)] (== err nil)
+        (pprof/StartCPUProfile w)))
+    (when (== (.-Entry l) nil)
+      (fmt/Fprintln os/Stderr "ciaot: internal: no entry")
+      (os/Exit 70))
+    (let [argv (append (lit (slice string) "a.out") (spread args))
+          (values status fault) (.RunMain p (.-Start l) (.-Entry l) argv)]
+      (.Flush out)
+      (pprof/StopCPUProfile)
+      (when (!= fault nil)
+        (fmt/Fprintln os/Stderr "ciaot: fault:" fault))
+      (os/Exit status))))

@@ -1,0 +1,298 @@
+;; ci: statements and control flow (doc/c/SPEC.md §7.2, §7.3, §7.8). A statement returns a Ctl.
+;; Labels are codes; a goto returns its label's code, which the statement list holding the label
+;; (at any depth: C allows jumps into blocks, loops and switches) resumes at through Enter; a
+;; switch enters its body at its case's label.
+(in-ns 'go.arbace.ci) (go/file "stmt.go" :doc "ci: statements and control flow (doc/c/SPEC.md §7.2, §7.3, §7.8). A statement returns a Ctl.\nLabels are codes; a goto returns its label's code, which the statement list holding the label\n(at any depth: C allows jumps into blocks, loops and switches) resumes at through Enter; a\nswitch enters its body at its case's label.\n" :imports [
+
+    ^{:line 7} [sort "sort"]])
+
+(go/type labelSet (map Ctl bool))
+
+^{:go/end 25} (go/func union ^labelSet [& ^{:tag (slice Stmt)} ss]
+  (let [m (lit labelSet)]
+    (range [_ s ss]
+      (type-switch [x s]
+        (case [nil])
+        (case [(* Label)]
+          (aset m (.-Code x) true))
+        (case [(interface (labels ^labelSet []))]
+          (range [k (.labels x)]
+            (aset m k true)))))
+
+
+
+    ^{:line 24} m))
+
+
+
+(go/type ExprStmt "ExprStmt evaluates an expression for its effects.\n" (struct ^E E))
+
+^{:go/end 30} (go/method Run ^Ctl [^{:tag (* ExprStmt)} s ^{:tag (* Frame)} fr] ((.-E s) fr) CNext)
+^{:go/end 31} (go/method Enter ^Ctl [^{:tag (* ExprStmt)} s ^{:tag (* Frame)} fr ^Ctl l] CNext)
+^{:go/end 32} (go/method Has ^bool [^{:tag (* ExprStmt)} s Ctl] false)
+
+
+(go/type Label "Label is a label: its code; running it does nothing.\n" (struct ^Ctl Code))
+
+^{:go/end 37} (go/method Run ^Ctl [^{:tag (* Label)} s (* Frame)] CNext)
+^{:go/end 38} (go/method Enter ^Ctl [^{:tag (* Label)} s (* Frame) Ctl] CNext)
+^{:go/end 39} (go/method Has ^bool [^{:tag (* Label)} s ^Ctl l] (== l (.-Code s)))
+
+
+(go/type Jump "Jump is break, continue, a goto (its label's code) or return without a value.\n" (struct ^Ctl C))
+
+^{:go/end 44} (go/method Run ^Ctl [^{:tag (* Jump)} s (* Frame)] (.-C s))
+^{:go/end 45} (go/method Enter ^Ctl [^{:tag (* Jump)} s (* Frame) Ctl] CNext)
+^{:go/end 46} (go/method Has ^bool [^{:tag (* Jump)} s Ctl] false)
+
+
+(go/type IGoto "IGoto is GNU's goto *e: e is a label's address (crt.LabelBase + its code).\n" (struct ^I E))
+
+^{:go/end 51} (go/method Run ^Ctl [^{:tag (* IGoto)} s ^{:tag (* Frame)} fr] (conv Ctl (- (conv uint64 ((.-E s) fr)) labelBase)))
+^{:go/end 52} (go/method Enter ^Ctl [^{:tag (* IGoto)} s (* Frame) Ctl] CNext)
+^{:go/end 53} (go/method Has ^bool [^{:tag (* IGoto)} s Ctl] false)
+
+
+(go/type Return "Return stores a result in the frame and returns.\n" (struct ^E Set))
+
+^{:go/end 63} (go/method Run ^Ctl [^{:tag (* Return)} s ^{:tag (* Frame)} fr]
+  (when (!= (.-Set s) nil)
+    ((.-Set s) fr))
+
+  ^{:line 62} CReturn)
+
+^{:go/end 64} (go/method Enter ^Ctl [^{:tag (* Return)} s (* Frame) Ctl] CNext)
+^{:go/end 65} (go/method Has ^bool [^{:tag (* Return)} s Ctl] false)
+
+
+^{:go/end 68} (go/func RetI "RetI, RetF, RetW, RetM are the effects of a return's value.\n" ^E [^I e] ^{:go/end 68} (fn [^{:tag (* Frame)} fr] (set! (.-Ret fr) (lit Arg :K \i :I (e fr)))))
+^{:go/end 69} (go/func RetF ^E [^F e] ^{:go/end 69} (fn [^{:tag (* Frame)} fr] (set! (.-Ret fr) (lit Arg :K \f :F (e fr)))))
+^{:go/end 70} (go/func RetW ^E [^W e] ^{:go/end 70} (fn [^{:tag (* Frame)} fr] (set! (.-Ret fr) (lit Arg :K \w :W (e fr)))))
+
+
+
+^{:go/end 81} (go/func RetM "RetM copies an aggregate result of size n to the caller's place (the hidden result address,\nI slot 0 by the builder's convention) and returns that address, as the psABI's rax.\n" ^E [^I e ^int slot ^uint64 n]
+  ^{:go/end 80} (fn [^{:tag (* Frame)} fr]
+    (let [src (conv uint64 (e fr))
+        ^{:line 77} dst (conv uint64 (aget (.-I fr) slot))]
+      (.Move (.-M (.-T fr)) dst src n)
+      (set! (.-Ret fr) (lit Arg :K \i :I (conv int64 dst))))))
+
+
+
+
+(go/type Seq "Seq is a statement list (a block).\n" (struct
+    ^{:line 85 :tag (slice Stmt)} L
+    ^{:line 86 :tag labelSet} labs))
+
+
+^{:go/end 89} (go/func NewSeq ^{:tag (* Seq)} [^{:tag (slice Stmt)} l] (addr (lit Seq :L l :labs (union (spread l)))))
+
+^{:go/end 91} (go/method labels ^labelSet [^{:tag (* Seq)} s] (.-labs s))
+^{:go/end 92} (go/method Has ^bool [^{:tag (* Seq)} s ^Ctl l] (aget (.-labs s) l))
+
+^{:go/end 107} (go/method from ^Ctl [^{:tag (* Seq)} s ^{:tag (* Frame)} fr ^int i]
+  (while (< i (len (.-L s)))
+    (let [c (.Run (aget (.-L s) i) fr)]
+      (inc! i)
+      (when (== c CNext)
+        (continue))
+
+      (when (and (>= c CLabel) (aget (.-labs s) c))
+        (return (.Enter s fr c)))
+
+      (return c)))
+
+  ^{:line 106} CNext)
+
+
+^{:go/end 109} (go/method Run ^Ctl [^{:tag (* Seq)} s ^{:tag (* Frame)} fr] (.from s fr 0))
+
+^{:go/end 132} (go/method Enter ^Ctl [^{:tag (* Seq)} s ^{:tag (* Frame)} fr ^Ctl l]
+  (while true
+    (let [i 0]
+      (for [] (< i (len (.-L s))) (inc! i)
+        (when (.Has (aget (.-L s) i) l)
+          (break)))
+
+
+      (when (== i (len (.-L s)))
+        (return l))
+
+      (let [c (.Enter (aget (.-L s) i) fr l)]
+        (when (== c CNext)
+          (return (.from s fr (+ i 1))))
+
+        (when (and (>= c CLabel) (aget (.-labs s) c))
+          (set! l c)
+          (continue))
+
+        (return c)))))
+
+
+
+
+(go/type If "If is if (c) a else b; B may be nil.\n" (struct
+    ^{:line 136 :tag I} C
+    ^{:line 137 :tag Stmt} A ^Stmt B
+    ^{:line 138 :tag labelSet} labs))
+
+
+^{:go/end 141} (go/func NewIf ^{:tag (* If)} [^I c ^Stmt a ^Stmt b] (addr (lit If :C c :A a :B b :labs (union a b))))
+
+^{:go/end 143} (go/method labels ^labelSet [^{:tag (* If)} s] (.-labs s))
+^{:go/end 144} (go/method Has ^bool [^{:tag (* If)} s ^Ctl l] (aget (.-labs s) l))
+^{:go/end 153} (go/method Run ^Ctl [^{:tag (* If)} s ^{:tag (* Frame)} fr]
+  (when (!= ((.-C s) fr) 0)
+    (return (.Run (.-A s) fr)))
+
+  (when (!= (.-B s) nil)
+    (return (.Run (.-B s) fr)))
+
+  ^{:line 152} CNext)
+
+^{:go/end 159} (go/method Enter ^Ctl [^{:tag (* If)} s ^{:tag (* Frame)} fr ^Ctl l]
+  (when (.Has (.-A s) l)
+    (return (.Enter (.-A s) fr l)))
+
+  (.Enter (.-B s) fr l))
+
+
+
+(go/type Loop "Loop is while (C) Body, do Body while (C) (Post), and for (; C; Step) Body; C nil is always true.\n" (struct
+    ^{:line 163 :tag I} C
+    ^{:line 164 :tag E} Step
+    ^{:line 165 :tag Stmt} Body
+    ^{:line 166 :tag bool} Do
+    ^{:line 167 :tag labelSet} labs))
+
+
+^{:go/end 172} (go/func NewLoop ^{:tag (* Loop)} [^I c ^E step ^Stmt body ^bool do]
+  (addr (lit Loop :C c :Step step :Body body :Do do :labs (union body))))
+
+
+^{:go/end 174} (go/method labels ^labelSet [^{:tag (* Loop)} s] (.-labs s))
+^{:go/end 175} (go/method Has ^bool [^{:tag (* Loop)} s ^Ctl l] (aget (.-labs s) l))
+
+
+^{:go/end 191} (go/method after "body runs the body (from a label when l is one) and says whether to stop, and with what.\n" [^{:tag (* Loop)} s ^{:tag (* Frame)} fr ^Ctl c] :results [Ctl bool]
+  (while true
+    (switch
+      (case [(or (== c CNext) (== c CContinue))]
+        (return CNext false))
+      (case [(== c CBreak)]
+        (return CNext true))
+      (case [(and (>= c CLabel) (aget (.-labs s) c))]
+        (set! c (.Enter (.-Body s) fr c))
+        (continue)))
+
+    (return c true)))
+
+
+
+^{:go/end 209} (go/method loop ^Ctl [^{:tag (* Loop)} s ^{:tag (* Frame)} fr ^bool first]
+  (while true
+    (when (not first)
+      (when (!= (.-Step s) nil)
+        ((.-Step s) fr))
+
+      (when (and (!= (.-C s) nil) (== ((.-C s) fr) 0))
+        (return CNext)))
+
+
+    (set! first false)
+    (let [(values c stop) (.after s fr (.Run (.-Body s) fr))]
+      (when stop
+        (return c)))))
+
+
+
+
+^{:go/end 216} (go/method Run ^Ctl [^{:tag (* Loop)} s ^{:tag (* Frame)} fr]
+  (when (and (not (.-Do s)) (!= (.-C s) nil) (== ((.-C s) fr) 0))
+    (return CNext))
+
+  (.loop s fr true))
+
+
+^{:go/end 224} (go/method Enter ^Ctl [^{:tag (* Loop)} s ^{:tag (* Frame)} fr ^Ctl l]
+  (let [(values c stop) (.after s fr (.Enter (.-Body s) fr l))]
+    (when stop
+      (return c))
+
+    (.loop s fr false)))
+
+
+
+(go/type Case "Case is a case of a switch: the values [Lo, Hi] (Hi = Lo but for GNU's ranges) and the label's code.\n" (struct
+    ^{:line 228 :tag int64} Lo ^int64 Hi
+    ^{:line 229 :tag Ctl} Code))
+
+
+
+(go/type Switch "Switch is switch (E) Body: the body entered at the matching case's label or the default's.\n" (struct
+    ^{:line 234 :tag I} E
+    ^{:line 235 :tag bool} Unsigned
+    ^{:line 236 :tag (slice Case)} Cases ; sorted by Lo
+    ^{:line 237 :tag Ctl} Default ; 0: none
+    ^{:line 238 :tag Stmt} Body
+    ^{:line 239 :tag labelSet} labs
+    ^{:line 240 :tag (map int64 Ctl)} byVal))
+
+
+^{:go/end 254} (go/func NewSwitch ^{:tag (* Switch)} [^I e ^bool unsigned ^{:tag (slice Case)} cases ^Ctl def ^Stmt body]
+  (let [s (addr (lit Switch :E e :Unsigned unsigned :Cases cases :Default def :Body body :labs (union body) :byVal (lit (map int64 Ctl))))]
+    (range [_ c cases]
+      (when (== (.-Lo c) (.-Hi c))
+        (when [(values _ dup) (aget (.-byVal s) (.-Lo c))] (not dup)
+          (aset (.-byVal s) (.-Lo c) (.-Code c)))))
+
+
+
+    (sort/SliceStable (.-Cases s) ^{:go/end 252} (fn ^bool [^int i ^int j] (< (.-Lo (aget (.-Cases s) i)) (.-Lo (aget (.-Cases s) j)))))
+    ^{:line 253} s))
+
+
+^{:go/end 256} (go/method labels ^labelSet [^{:tag (* Switch)} s] (.-labs s))
+^{:go/end 257} (go/method Has ^bool [^{:tag (* Switch)} s ^Ctl l] (aget (.-labs s) l))
+
+^{:go/end 275} (go/method target ^Ctl [^{:tag (* Switch)} s ^int64 v]
+  (when [(values c ok) (aget (.-byVal s) v)] ok
+    (return c))
+
+  (range [_ c (.-Cases s)]
+    (when (!= (.-Lo c) (.-Hi c))
+      (let [in (and (>= v (.-Lo c)) (<= v (.-Hi c)))]
+        (when (.-Unsigned s)
+          (set! in (and (>= (conv uint64 v) (conv uint64 (.-Lo c))) (<= (conv uint64 v) (conv uint64 (.-Hi c))))))
+
+        (when in
+          (return (.-Code c))))))
+
+
+
+  (.-Default s))
+
+
+^{:go/end 288} (go/method finish ^Ctl [^{:tag (* Switch)} s ^{:tag (* Frame)} fr ^Ctl c]
+  (while true
+    (switch
+      (case [(== c CBreak)]
+        (return CNext))
+      (case [(and (>= c CLabel) (aget (.-labs s) c))]
+        (set! c (.Enter (.-Body s) fr c))
+        (continue)))
+
+    (return c)))
+
+
+
+^{:go/end 296} (go/method Run ^Ctl [^{:tag (* Switch)} s ^{:tag (* Frame)} fr]
+  (let [t (.target s ((.-E s) fr))]
+    (when (== t 0)
+      (return CNext))
+
+    (.finish s fr (.Enter (.-Body s) fr t))))
+
+
+^{:go/end 298} (go/method Enter ^Ctl [^{:tag (* Switch)} s ^{:tag (* Frame)} fr ^Ctl l] (.finish s fr (.Enter (.-Body s) fr l)))

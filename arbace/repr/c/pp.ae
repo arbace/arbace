@@ -329,6 +329,16 @@
                           acc))
                 eg (when (and (= (p-rune p) \#) (= (p-verb p) "else"))
                      [(p-shift p) (p-group p true)])
+                ;; Arbace (CS143): gcc's "#elif after #else" (and #elifdef, #elifndef), with the #if it belongs to
+                _ (when eg
+                    (loop []
+                      (when (and (= (p-rune p) \#) (elif-verbs (p-verb p)))
+                        (let [l (aget ^objects (.-line p) 0)]
+                          ((.-eh p) (str (pos-str (first l)) ": #" (p-verb p) " after #else"))
+                          ((.-eh p) (str (pos-str (first (first ig))) ": the conditional began here"))
+                          (p-shift p)
+                          (p-group p true)
+                          (recur)))))
                 endif (if (or (not= (p-rune p) \#) (not= (p-verb p) "endif"))
                         (do ((.-eh p) (str (pos-str (first (aget ^objects (.-line p) 0))) ": expected #endif")) nil)
                         (p-shift p))]
@@ -486,7 +496,18 @@
         (when outer (.add w t))
         (let [s (.-src t)
               hs (.-hs t)
-              ret (fn [] (.add w t) (if outer nil ::more))]
+              ret (fn [] (.add w t) (if outer nil ::more))
+              ;; Arbace (CS143): gcc: \"'defined' in '#embed' parameter\", __has_embed's too
+              _ (when (and eval (= s "__has_embed"))
+                  (loop [i 0 level 0]
+                    (let [x (ts-peek ts i)]
+                      (cond
+                        (= (ch x) :eof) nil
+                        (and (= (ch x) :IDENTIFIER) (= (src x) "defined")) (eh c (str (pos-str x) ": 'defined' in '#embed' parameter"))
+                        (= (ch x) \() (recur (inc i) (inc level))
+                        (and (= (ch x) \)) (<= level 1)) nil
+                        (= (ch x) \)) (recur (inc i) (dec level))
+                        :else (recur (inc i) level)))))]
           (cond
             (and eval (= s "defined")) (recur (parse-defined c ts))
             (and eval (has-ops s)) (recur (parse-has c ts s))
@@ -583,13 +604,30 @@
     (if-not (= (ch p) \()
       (do (eh c (str (pos-str p) ": operator \"" op "\" requires a parenthesized identifier")) ts)
       (do (ts-shift ts)
-          (let [parts (loop [acc []]
-                        (let [t (ts-shift ts)]
-                          (cond
-                            (= (ch t) \)) acc
-                            (= (ch t) :eof) acc
-                            (= (ch t) \space) (recur acc)
-                            :else (recur (conj acc (src t))))))
+          (let [closed (volatile! false)
+                raw (loop [acc []]
+                      (let [t (ts-shift ts)]
+                        (cond
+                          (= (ch t) \)) (do (vreset! closed true) acc)
+                          (= (ch t) :eof) acc
+                          (= (ch t) \space) (recur acc)
+                          :else (recur (conj acc t)))))
+                ;; Arbace (CS143): the macros in an attribute name of __has_c_attribute are expanded (C23 6.10.1)
+                toks* (if (contains? #{"__has_c_attribute" "__has_cpp_attribute"} op)
+                        (let [w (ArrayList.)]
+                          (expand c false false (toks (conj raw lex/eof-tok)) w)
+                          (vec (remove #(or (= (ch %) :eof) (= (ch %) \space)) w)))
+                        raw)
+                ;; Arbace (CS160): gcc's syntax errors of __has_c_attribute's operand (the identifier, the scope, the closing parenthesis)
+                _ (when (contains? #{"__has_c_attribute" "__has_cpp_attribute"} op)
+                    (let [[a b] toks* colons? #(or (= (src %) "::") (= (ch %) \:))]
+                      (cond
+                        (not= (some-> a ch) :IDENTIFIER) (eh c (str (pos-str p) ": operator \"" op "\" requires an identifier"))
+                        (and b (colons? b) (let [rest* (if (= (src b) "::") (rest (rest toks*)) (drop 3 toks*))]
+                                             (not= (some-> (first rest*) ch) :IDENTIFIER)))
+                        (eh c (str (pos-str p) ": attribute identifier required after scope"))
+                        (not @closed) (eh c (str (pos-str p) ": missing ')' after \"" op "\"")))))
+                parts (mapv src toks*)
                 nm (str/join parts)
                 v (has-answer c op nm)]
             (ts-prepend ts [(Tok. :PPNUMBER (str v) "" (.-pf ^Tok p) (.-po ^Tok p) nil nil)])
@@ -672,7 +710,9 @@
                 (case (.-ch r0) :STRINGLITERAL :LONGSTRINGLITERAL :CHARCONST :LONGCHARCONST (.-ch t))
                 (.-ch t))
             text (str (.-src t) (.-src r0))]
-        (if (and (seq rs) (pos? (.length ^String (.-src r0))) (not (single-token? text)))
+        (if (and (seq rs) (pos? (.length ^String (.-src r0))) (not (single-token? text))
+                 ;; Arbace (CS143): `::` is a token in C23 (6.4.7)
+                 (not (and (= text "::") (#{:c23 :gnu23 :c2y :gnu2y} (:std (.-cfg c))))))
           (do (eh c (str (pos-str t) ": pasting \"" (.-src t) "\" and \"" (.-src r0)
                          "\" does not give a valid preprocessing token"))
               (-> ls (conj sp-tok) (into rs)))
@@ -932,6 +972,7 @@
   ^long [^Cpp c ^Tok t]
   (let [s (.-src t)
         long? (= (.-ch t) :LONGCHARCONST)
+        u8? (.startsWith ^String s "u8") ; Arbace (CS143): a u8 character constant is unsigned (char8_t, C23 6.4.4.5)
         s (cond long? (subs s 1) (.startsWith ^String s "u8") (subs s 2) :else s)
         s (subs s 1 (dec (count s)))
         byte? (not long?)
@@ -940,13 +981,21 @@
                      (if (= (count s) 1)
                        [(long (int (.charAt s 0))) 1]
                        (let [r (.charAt s 1)]
+                         (if (and (> (count s) 3) (= (.charAt s 2) \{) (contains? #{\x \u \o} r) (pos? (.indexOf ^String s "}" 3)))
+                           ;; Arbace (CS143): N3353's delimited escape sequences
+                           (let [close (.indexOf ^String s "}" 3)
+                                 v (try (Long/parseLong (subs s 3 close) (if (= r \o) 8 16)) (catch Exception _ 0))]
+                             (case r
+                               \u [v (inc close)]
+                               \x [(- (if long? v (bit-and v 0xff))) (inc close)]
+                               [(- v) (inc close)]))
                          (case r
                            (\' \" \? \\) [(long (int r)) 2]
                            \a [7 2] \b [8 2] \e [0x1b 2] \f [12 2] \n [10 2] \r [13 2] \t [9 2] \v [11 2]
                            \x (loop [i 2 v 0 n 2]
-                                (if (and (< i (count s)) (< i 4) (Character/digit (.charAt s i) 16) (>= (Character/digit (.charAt s i) 16) 0))
+                                (if (and (< i (count s)) (Character/digit (.charAt s i) 16) (>= (Character/digit (.charAt s i) 16) 0))
                                   (recur (inc i) (bit-or (bit-shift-left v 4) (Character/digit (.charAt s i) 16)) (inc n))
-                                  [(- (bit-and v 0xff)) n]))
+                                  [(- (if long? v (bit-and v 0xff))) n]))
                            (\u \U) (let [q (fn [^long k] (Long/parseLong (subs s k (min (count s) (+ k 4))) 16))]
                                      (try (if (= r \u) [(q 2) 6] [(bit-or (bit-shift-left (q 2) 16) (q 6)) 10])
                                           (catch Exception _ [0 (count s)])))
@@ -955,7 +1004,7 @@
                              (loop [i 1 v 0 n 1]
                                (if (and (< i (count s)) (< i 4) (<= 48 (int (.charAt s i)) 55))
                                  (recur (inc i) (bit-or (bit-shift-left v 3) (- (int (.charAt s i)) 48)) (inc n))
-                                 [(- v) n])))))))
+                                 [(- v) n]))))))))
         [r byte?] (cond
                     (= (count s) 1) [(long (int (.charAt s 0))) byte?]
                     (and (pos? (count s)) (= (.charAt s 0) \\))
@@ -969,7 +1018,7 @@
                           [r n] (lex/decode-rune bs 0 (alength bs))]
                       (when (not= (long n) (count s)) (eh c (str (pos-str t) ": invalid character constant")))
                       [(long r) false]))]
-    (if (and byte? (>= r 0x80) (<= r 0xff)) (long (unchecked-byte r)) r)))
+    (if (and byte? (not u8?) (>= r 0x80) (<= r 0xff)) (long (unchecked-byte r)) r)))
 
 (defn- int-const
   "cpp.intConst: a pp-number's value, Long or UVal; Arbace: C23's binary constants, digit
@@ -977,7 +1026,7 @@
   [^Cpp c ^Tok t]
   (let [s0 (src t)
         s1 (.replace s0 "'" "")                           ; Arbace: digit separators (C23 6.4.4.1)
-        s (str/replace s1 #"(?i)(wb|uwb|u?wb)$" "")        ; Arbace: _BitInt's suffixes
+        s (str/replace s1 #"(?i)(u?wb|wbu)$" "")        ; Arbace: _BitInt's suffixes
         wb (not= s s1)
         s (str/replace s #"[uUlL]+$" "")
         suffix (.toLowerCase ^String (subs s1 (count s)))
@@ -987,6 +1036,7 @@
         n (cond
             (or (.startsWith s "0x") (.startsWith s "0X")) (parse (subs s 2) 16)
             (or (.startsWith s "0b") (.startsWith s "0B")) (parse (subs s 2) 2) ; Arbace: C23 6.4.4.1
+            (or (.startsWith s "0o") (.startsWith s "0O")) (parse (subs s 2) 8) ; Arbace: C2y's 0o prefix
             (.startsWith s "0") (parse s 8)
             :else (parse s 10))]
     (cond
@@ -1011,14 +1061,18 @@
                                                              v)
                                                        nm)))
                             (:include-paths (.-cfg c))))
-      :else (boolean (some #(has-file? c (join % nm)) (:sys (.-cfg c)))))))
+      ;; an angled include searches the -I directories, then the system ones (review 057's finding 3)
+      :else (boolean (some #(has-file? c (join % nm)) (concat (:include (.-cfg c)) (:sys (.-cfg c))))))))
 
 (declare embed-resource)
 
 (defn- primary-expression [^Cpp c ^Toks s eval]
   (let [t (token s)]
     (case (ch t)
-      (:CHARCONST :LONGCHARCONST) (do (ts-shift s) (char-const-value c t))
+      (:CHARCONST :LONGCHARCONST) (do (ts-shift s)
+                                      (let [v (char-const-value c t)]
+                                        ;; Arbace (CS143): a u8 character constant is unsigned in #if (C23 6.4.4.5)
+                                        (if (and (= (ch t) :CHARCONST) (.startsWith ^String (src t) "u8")) (UVal. v) v)))
       :IDENTIFIER
       (do (ts-shift s)
           (let [nm (src t)]
@@ -1069,16 +1123,28 @@
       \# (do (eh c (str (pos-str t) ": assertions are a deprecated extension")) 0)
       (do (eh c (str (pos-str t) ": internal error")) 0))))
 
+(defn- no-right-operand?
+  "Arbace (CS143): the operator token `t` just shifted has nothing to its right in the expression (gcc: \"operator 'X' has no
+  right operand\"); the error is given and true returned."
+  [^Cpp c ^Toks s ^Tok t]
+  (when (contains? #{:eof \)} (ch (token s)))
+    (eh c (str (pos-str t) ": operator '" (src t) "' has no right operand"))
+    true))
+
 (defn- unary-expression [^Cpp c ^Toks s eval]
-  (case (ch (token s))
-    \+ (do (ts-shift s) (unary-expression c s eval))
-    \- (do (ts-shift s) (let [e (unary-expression c s eval)]
-                          (if (and eval (typed? e)) (if (u? e) (UVal. (- (uv e))) (unchecked-negate (long e))) e)))
-    \~ (do (ts-shift s) (let [e (unary-expression c s eval)]
-                          (if (and eval (typed? e)) (if (u? e) (UVal. (bit-not (uv e))) (bit-not (long e))) e)))
-    \! (do (ts-shift s) (let [e (unary-expression c s eval)]
-                          (if eval (if (and (typed? e) (zero? (uv e))) 1 0) e)))
-    (primary-expression c s eval)))
+  (let [t (token s)]
+    (case (ch t)
+      \+ (do (ts-shift s) (if (no-right-operand? c s t) 0 (unary-expression c s eval)))
+      \- (do (ts-shift s) (if (no-right-operand? c s t) 0
+                            (let [e (unary-expression c s eval)]
+                              (if (and eval (typed? e)) (if (u? e) (UVal. (- (uv e))) (unchecked-negate (long e))) e))))
+      \~ (do (ts-shift s) (if (no-right-operand? c s t) 0
+                            (let [e (unary-expression c s eval)]
+                              (if (and eval (typed? e)) (if (u? e) (UVal. (bit-not (uv e))) (bit-not (long e))) e))))
+      \! (do (ts-shift s) (if (no-right-operand? c s t) 0
+                            (let [e (unary-expression c s eval)]
+                              (if eval (if (and (typed? e) (zero? (uv e))) 1 0) e))))
+      (primary-expression c s eval))))
 
 (defn- left-assoc
   "A left-associative level: `ops` maps a kind to [fs fu] or to a fn of [lhs rhs eval t]."
@@ -1087,8 +1153,10 @@
     (let [t (token s)]
       (if-let [f (ops (ch t))]
         (do (ts-shift s)
-            (let [rhs (next c s eval)]
-              (recur (f lhs rhs eval t))))
+            (if (no-right-operand? c s t)
+              lhs
+              (let [rhs (next c s eval)]
+                (recur (f lhs rhs eval t)))))
         lhs))))
 
 (defn- arith2
@@ -1227,7 +1295,12 @@
       (#{"ifdef" "ifndef" "elifdef" "elifndef"} verb)
       (if (< (count ln) 3)
         (do (eh c (str (pos-str (ln 1)) ": expected identifier")) false)
-        (let [d (is-defined? c (ln 2) (src (ln 2)))]
+        (let [d (if (= (ch (ln 2)) :IDENTIFIER)
+                  (is-defined? c (ln 2) (src (ln 2)))
+                  (do (eh c (str (pos-str (ln 2)) ": macro names must be identifiers")) false))
+              ;; Arbace (CS143): a pedwarn gcc's -pedantic-errors makes an error
+              _ (when (and (> (count ln) 3) (= :errors (:pedantic (.-cfg c))))
+                  (eh c (str (pos-str (ln 3)) ": extra tokens at end of #" verb " directive")))]
           (if (#{"ifdef" "elifdef"} verb) d (not d))))
       :else
       (if (< (count ln) 3)
@@ -1302,7 +1375,7 @@
                                                           v)]
                                                   [d d]))
                                         (:include-paths (.-cfg c)))
-                            :else (map (fn [v] [v v]) (:sys (.-cfg c))))
+                            :else (map (fn [v] [v v]) (concat (:include (.-cfg c)) (:sys (.-cfg c)))))
                     found (some (fn [[dir using]]
                                   (let [pth (join dir nm)]
                                     (when-let [g (group c pth nil)] [g pth using])))
@@ -1310,7 +1383,10 @@
                 (if-let [[g pth using] found]
                   (if (.contains ^HashSet (.-once c) pth)
                     nil ; Arbace: #pragma once (gcc's), which cc ignores
-                    (enter! c g using))
+                    (do ;; Arbace (C3b): the inclusion recorded for the converter's header units
+                        (record! c {:directive "enter" :path pth :raw raw :off (.-po ^Tok (line 0))
+                                    :from (when-let [^CFile f (.-pf ^Tok (line 0))] (.-name f))})
+                        (enter! c g using)))
                   (do (eh c (str (pos-str s0) ": include file not found: " raw)) (slot! c CLOSED true)))))))))))
 
 (declare embed-params)
@@ -1318,8 +1394,10 @@
 (defn- param-value
   "Arbace: an #embed parameter's integer, its tokens expanded and evaluated as #if's are."
   ^long [^Cpp c body]
-  (let [w (ArrayList.)]
-    (expand c false true (toks body) w)
+  (let [w (ArrayList.)
+        defd (filter #(and (= (ch %) :IDENTIFIER) (= (src %) "defined")) body)]
+    (doseq [t (take 1 defd)] (eh c (str (pos-str t) ": 'defined' in '#embed' parameter")))
+    (when (empty? defd) (expand c false true (toks body) w))
     (let [p (toks w)]
       (skip-blank p)
       (let [v (if (zero? (.size ^ArrayList (.-a p))) 0 (or (expression c p true) 0))]
@@ -1327,6 +1405,13 @@
           (u? v) (if (neg? (uv v)) Long/MAX_VALUE (uv v)) ; beyond any resource's length
           (neg? (long v)) (do (eh c (str (pos-str (first body)) ": negative embed parameter operand")) 0)
           :else (long v))))))
+
+(defn- offset-value
+  "Arbace (CS143): the value of a gnu::offset parameter; one beyond a long is gcc's \"too large\" error."
+  ^long [^Cpp c body]
+  (let [v (param-value c body)]
+    (when (= v Long/MAX_VALUE) (eh c (str (pos-str (first body)) ": too large 'gnu::offset' argument")))
+    v))
 
 (defn- embed-resource
   "Arbace: C23's #embed resource (6.10.4) found: as `has?` (__has_embed) its answer (0 not found, 1
@@ -1342,7 +1427,7 @@
           dirs (if (.startsWith nm "/")
                  [""]
                  (concat (when quoted [(dir-of cur)]) (:embed-dirs (.-cfg c))))
-          ps (embed-params params)
+          ps (embed-params c params)
           known #{"limit" "prefix" "suffix" "if_empty" "gnu::offset" "gnu::base64"}
           ;; gcc: gnu::base64 only on "." and without limit or gnu::offset
           b64 (when (and quoted (= nm ".") (contains? ps "gnu::base64")
@@ -1355,7 +1440,7 @@
           f (when (and (every? known (keys ps)) (or b64 (not (contains? ps "gnu::base64"))))
               (if b64 :base64 (some (fn [d] (let [p (join d nm)] (when (has-file? c p) p))) dirs)))
           limit (when-let [b (get ps "limit")] (param-value c b))
-          offset (when-let [b (get ps "gnu::offset")] (param-value c b))
+          offset (when-let [b (get ps "gnu::offset")] (offset-value c b))
           bs (cond (= f :base64) b64 f (lex/read-bytes (.getPath (resolve-file c f))))
           bs (if (and bs offset (pos? (long offset)))
                (if (< (long offset) (alength ^bytes bs))
@@ -1367,25 +1452,40 @@
         (cond (nil? bs) 0 (zero? (alength ^bytes bs)) 2 :else 1)
         bs))))
 
+(def ^:private embed-known #{"limit" "prefix" "suffix" "if_empty" "gnu::offset" "gnu::base64"})
+
 (defn- embed-params
-  "Arbace: an #embed's parameters: {name tokens}, the tokens of prefix(...), suffix(...), if_empty(...)."
-  [toks]
+  "Arbace: an #embed's parameters: {name tokens}, the tokens of prefix(...), suffix(...), if_empty(...); the
+  diagnostics gcc gives (a name expected, a repeated parameter, a missing parenthesis) to `c`."
+  [^Cpp c toks]
   (loop [ts (vec (remove #(= (ch %) \space) toks)) acc {}]
     (if (empty? ts)
       acc
       (let [^Tok t (ts 0)
+            _ (when-not (= (ch t) :IDENTIFIER) (eh c (str (pos-str t) ": expected parameter name")))
             [nm ts] (if (and (= (ch t) :IDENTIFIER) (> (count ts) 3) (= (ch (ts 1)) \:) (= (ch (ts 2)) \:))
                       [(str (src t) "::" (src (ts 3))) (subvec ts 4)]
                       [(src t) (subvec ts 1)])
-            nm (str/join "::" (map #(str/replace % #"^__(.*)__$" "$1") (str/split nm #"::")))]
+            nm (str/join "::" (map #(str/replace % #"^__(.*)__$" "$1") (str/split nm #"::")))
+            _ (when (contains? acc nm) (eh c (str (pos-str t) ": duplicate embed parameter '" nm "'")))
+            _ (when (and (= (ch t) :IDENTIFIER) (contains? embed-known nm) (not (and (seq ts) (= (ch (ts 0)) \()))) (eh c (str (pos-str t) ": expected '('")))]
         (if (and (seq ts) (= (ch (ts 0)) \())
-          (let [[body rest] (loop [i 1 level 0]
-                              (cond
-                                (>= i (count ts)) [(subvec ts 1) []]
-                                (= (ch (ts i)) \() (recur (inc i) (inc level))
-                                (and (= (ch (ts i)) \)) (zero? level)) [(subvec ts 1 i) (subvec ts (inc i))]
-                                (= (ch (ts i)) \)) (recur (inc i) (dec level))
-                                :else (recur (inc i) level)))]
+          (let [closer {\( \) \[ \] \{ \}}
+                ;; CS143: the parameter's tokens balanced as gcc's stack does: a closer that does not close the innermost
+                ;; opener is an error and stays unmatched; an opener left open at the end is one too
+                [body rest] (loop [i 1 stack [\)]]
+                              (if (>= i (count ts))
+                                (do (eh c (str (pos-str t) ": unbalanced '(' in the embed parameter")) [(subvec ts 1) []])
+                                (let [k (ch (ts i))]
+                                  (cond
+                                    (contains? closer k) (recur (inc i) (conj stack (closer k)))
+                                    (contains? #{\) \] \}} k)
+                                    (cond (= k (peek stack))
+                                          (if (= 1 (count stack))
+                                            [(subvec ts 1 i) (subvec ts (inc i))]
+                                            (recur (inc i) (pop stack)))
+                                          :else (do (eh c (str (pos-str (ts i)) ": unbalanced '" (src (ts i)) "'")) (recur (inc i) stack)))
+                                    :else (recur (inc i) stack)))))]
             (recur rest (assoc acc nm body)))
           (recur ts (assoc acc nm [])))))))
 
@@ -1395,16 +1495,29 @@
   [^Cpp c line]
   (let [^Tok verb (line 1)
         w (ArrayList.)
+        _ (doseq [t (take 1 (filter #(and (= (ch %) :IDENTIFIER) (= (src %) "defined")) (subvec (pop line) 2)))]
+            (eh c (str (pos-str t) ": 'defined' in '#embed' parameter")))
         _ (expand c false true (toks (tokens->cpp (subvec (pop line) 2) true)) w)
         s (vec w)
         raw (if (seq s) (include-arg s) "")
         n-arg (if (and (seq s) (= (ch (s 0)) \<)) (inc (count (take-while #(not= (ch %) \>) s))) 1)
-        params (embed-params (drop n-arg s))
-        bs (when (seq raw) (embed-resource c (if (seq s) (s 0) verb) raw (drop n-arg s) false))
+        params (if (> (count raw) 1) (embed-params c (drop n-arg s)) {})
+        ;; CS143: a parameter gcc does not know is an error of its own (the directive is dropped, the file goes on), and the
+        ;; values of limit and gnu::offset are evaluated for their diagnostics
+        unknown (remove embed-known (keys params))
+        _ (doseq [nm unknown] (eh c (str (pos-str verb) ": unknown embed parameter '" nm "'")))
+        _ (when (and (> (count raw) 2) (empty? unknown))
+            (when-let [b (get params "limit")] (param-value c b))
+            (when-let [b (get params "gnu::offset")] (offset-value c b)))
+        bs (when (and (> (count raw) 2) (empty? unknown)) (embed-resource c (if (seq s) (s 0) verb) raw (drop n-arg s) false))
         nl (peek line)]
-    (record! c {:directive "embed" :pos (lex/tok-position (line 0)) :text (line-text line) :resource raw})
+    (record! c {:directive "embed" :pos (lex/tok-position (line 0)) :off (.-po ^Tok (line 0)) :file (some-> ^CFile (.-pf ^Tok (line 0)) .-name) :text (line-text line) :resource raw})
     (if (nil? bs)
-      (do (eh c (str (pos-str verb) ": " raw ": No such file or directory")) (slot! c CLOSED true))
+      (cond
+        (seq unknown) nil
+        (<= (count raw) 1) (eh c (str (pos-str verb) ": '#embed' expects \"FILENAME\" or <FILENAME>"))
+        (= 2 (count raw)) (eh c (str (pos-str verb) ": empty filename in #embed"))
+        :else (do (eh c (str (pos-str verb) ": " raw ": No such file or directory")) (slot! c CLOSED true)))
       (let [at (line 0)
             nums (if (zero? (alength ^bytes bs))
                    (get params "if_empty" [])
@@ -1452,6 +1565,34 @@
     (when (or (not (protected-macros s)) (= (nth (lex/tok-position nm) 0) "<predefined>"))
       (.put ^HashMap (.-macros c) s (new-macro nm params rl min-args var-arg fn-like)))))
 
+(defn- va-opt-check!
+  "Arbace (CS143): gcc's checks of __VA_OPT__ in the replacement list `rl` of a variadic macro: its parenthesis and the
+  closing one, none nested, no ## at either end of its tokens."
+  [^Cpp c rl]
+  (let [rl (vec (remove #(= (ch %) \space) rl))
+        n (count rl)]
+    (loop [i 0]
+      (when (< i n)
+        (let [^Tok t (rl i)]
+          (if (and (= (ch t) :IDENTIFIER) (= (src t) "__VA_OPT__"))
+            (if-not (and (< (inc i) n) (= (ch (rl (inc i))) \())
+              (do (eh c (str (pos-str t) ": unterminated '__VA_OPT__'")) (recur (inc i)))
+              (let [end (loop [j (+ i 2) level 0]
+                          (cond (>= j n) nil
+                                (= (ch (rl j)) \() (recur (inc j) (inc level))
+                                (and (= (ch (rl j)) \)) (zero? level)) j
+                                (= (ch (rl j)) \)) (recur (inc j) (dec level))
+                                :else (recur (inc j) level)))]
+                (if (nil? end)
+                  (do (eh c (str (pos-str t) ": unterminated '__VA_OPT__'")) (recur n))
+                  (let [body (subvec rl (+ i 2) end)]
+                    (when (some #(and (= (ch %) :IDENTIFIER) (= (src %) "__VA_OPT__")) body)
+                      (eh c (str (pos-str t) ": '__VA_OPT__' may not appear in a '__VA_OPT__'")))
+                    (when (and (seq body) (or (= (src (first body)) "##") (= (src (peek body)) "##")))
+                      (eh c (str (pos-str t) ": '##' cannot appear at either end of '__VA_OPT__'")))
+                    (recur (inc end))))))
+            (recur (inc i))))))))
+
 (defn- define! [^Cpp c line]
   (let [^Tok def (line 1)
         ln (subvec line 2)]
@@ -1461,6 +1602,7 @@
             ln (subvec ln 1)]
         (if (and (= (ch (ln 0)) \() (not (has-sep? (ln 0))))
           (let [[fp rl0 min-args va] (parse-macro-params c (pop ln))]
+            (when (and fp (>= (long va) 0)) (va-opt-check! c rl0))
             (define-macro! c nm fp (tokens->cpp (trim rl0) true) min-args va true))
           (define-macro! c nm nil (tokens->cpp (trim (pop ln)) true) -1 -1 false))))))
 
@@ -1497,7 +1639,7 @@
 (defn- record-directive! [^Cpp c line & kvs]
   (let [^Tok t (first line)]
     (when (main-file? c t)
-      (record! c (into {:directive (src (second line)) :pos (lex/tok-position t) :text (line-text line)} (apply hash-map kvs))))))
+      (record! c (into {:directive (src (second line)) :pos (lex/tok-position t) :off (.-po t) :file (slot c MAIN) :text (line-text line)} (apply hash-map kvs))))))
 
 (defn next-line
   "cpp.nextLine: the next text line, the directives before it executed."
@@ -1566,7 +1708,7 @@
                       "include" (include! c line false)
                       "include_next" (include! c line true)
                       "pragma" (do (when (= (count x) 3)
-                                     (record! c {:directive "_Pragma" :pos (lex/tok-position (line 0)) :text (line-text line)}))
+                                     (record! c {:directive "_Pragma" :pos (lex/tok-position (line 0)) :off (.-po ^Tok (line 0)) :file (some-> ^CFile (.-pf ^Tok (line 0)) .-name) :text (line-text line)}))
                                    (pragma! c line))
                       "line" nil
                       "error" (eh c (str (pos-str (line 1)) ": "
@@ -1671,6 +1813,7 @@
   (let [c (new-cpp cfg sources main)
         last (object-array 1)]
     {:errors (.-errs c)
+     :layer (.-layer c) ; Arbace (C3b): the directives the converter places
      :next (fn []
              (if (slot c CLOSED)
                (let [^Tok l (aget last 0)]

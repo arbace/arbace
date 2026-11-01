@@ -1,0 +1,106 @@
+#!/bin/bash
+# ci's reference runs (doc/C23-SURVEY.md §8.1, CS14 (a)): gcc 15.2's runs of the C run corpora recorded as data,
+# test/c/ref-gcc15.edn. Each single-file run corpus's files (the lists of bin/lib/repr-c/roundtrip's level 3,
+# arbace.repr.c.ppcheck's `lists`) are compiled in their own directory as the round trip compiles the original
+# (gcc -std=STD ARGS -isystem GI -O0 -fno-stack-protector -fpermissive -w READNAME -lm, the fixed epoch) and again
+# at -O2; each binary runs in a fresh scratch directory, an empty standard input, no arguments, 10 s. gcc at -O0
+# is the judge, -O2 the witness. One line of Clojure-reader data per file, sorted by :id:
+#   {:id "CORPUS/NAME" :status N :stdout "SHA256" :bytes N :first "first line, at most 80 chars" :o2 :same|:differ|:no-build}
+# :status is the -O0 run's exit status (128+signal), or :timeout; a compile failure is :status :no-build with
+# :error "first error line of gcc's (or the linker's)"; :o2 compares the -O2 run's status and stdout with -O0's.
+#
+# Usage: bin/ci record-ref [--corpus C,...] [--only]
+#   --corpus   test/c/corpora.edn's ids (default the single-file run corpora: torture-execute,
+#              torture-execute-mirror,tcc-tests2,compcert,mir,cxgo,benchmarksgame)
+#   --only     keep the other corpora's lines (re-record a subset); else the file holds the given corpora alone
+#   CI_REF_JOBS (default 4, at most 4): gcc's and the runs' parallel jobs.
+# Scratch under .tmp/ci-ref/ (the lists kept, the binaries deleted after each run).
+set -uo pipefail
+root=$(cd "$(dirname "$0")/../../.." && pwd)
+. "$root/bin/lib/tmpdir.bash"
+. "$root/bin/lib/tools.bash"
+cd "$root"
+
+corpora=torture-execute,torture-execute-mirror,tcc-tests2,compcert,mir,cxgo,benchmarksgame only=
+while [ $# -gt 0 ]; do
+  case $1 in
+    --corpus) corpora=$2; shift 2 ;;
+    --only) only=1; shift ;;
+    *) sed -n '14,18p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+  esac
+done
+jobs=${CI_REF_JOBS:-4}; [ "$jobs" -gt 4 ] && jobs=4
+work=${CI_REF_WORK:-$root/.tmp/ci-ref}
+mkdir -p "$work"
+gowhim=${GOWHIM:-$(cd "${root%%/.tmp/worktrees/*}/.." && pwd)/go-whim}
+modcache=$(GOFLAGS= "${ARBACE_GOROOT:-/root/tamago-go}/bin/go" env GOMODCACHE)
+gi=$(gcc -print-file-name=include)
+epoch=$(sed -n 's/^ *:epoch \([0-9]*\).*/\1/p' test/c/host/host.edn)
+gccroot=
+case ,$corpora, in *,gcc-*) gccroot=$(bin/repr-c gcc-tests) || exit 1 ;; esac
+roots="{:gomodcache \"$modcache\" :go-whim \"$gowhim\" :gcc-15.2.0 \"$gccroot\" :checkout \"$root\"}"
+: > "$work/empty-stdin"
+
+IFS=, read -r -a ids <<< "$corpora"
+for id in "${ids[@]}"; do rm -rf "${work:?}/$id"; done
+arbace_tool -m arbace.repr.c.ppcheck lists "$work" "$roots" "${ids[@]}" || exit 1
+
+esc() { LC_ALL=C tr -cd '\11\40-\176' | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+run1() { # DIR NAME STD ARGS BASE READ
+  local d=$1 f=$2 std=$3 args=$4 base=$5 rd=$6 gstd s o2s rs rs2 first err sum bytes id sc
+  gstd=$std; [ "$std" = c94 ] && gstd=iso9899:199409
+  id=$(basename "$d")/$f
+  s=$(mktemp -d "$d/s.XXXXXX")
+  # shellcheck disable=SC2086
+  (cd "$base" && SOURCE_DATE_EPOCH=$epoch LC_ALL=C timeout 120 gcc -std=$gstd $args -isystem "$gi" -O0 -fno-stack-protector -fpermissive -w "$rd" -o "$s/o0" -lm) > "$s/err0" 2>&1
+  if [ $? != 0 ]; then
+    err=$(grep -m1 -E 'error|undefined reference' "$s/err0" || grep -m1 . "$s/err0")
+    err=$(printf '%s\n' "$err" | cut -c1-200 | esc)
+    printf '{:id "%s" :status :no-build :error "%s"}\n' "$id" "$err" >> "$d/ref.part.$$"
+    rm -rf "$s"; return
+  fi
+  mkdir -p "$s/r0"
+  (cd "$s/r0" && timeout 10 ../o0 < "$work/empty-stdin" > ../out0 2> ../errout0); rs=$?
+  rm -f "$s/o0"
+  # shellcheck disable=SC2086
+  (cd "$base" && SOURCE_DATE_EPOCH=$epoch LC_ALL=C timeout 120 gcc -std=$gstd $args -isystem "$gi" -O2 -fno-stack-protector -fpermissive -w "$rd" -o "$s/o2" -lm) > "$s/err2" 2>&1
+  if [ $? != 0 ]; then o2s=:no-build; else
+    mkdir -p "$s/r2"
+    (cd "$s/r2" && timeout 10 ../o2 < "$work/empty-stdin" > ../out2 2> ../errout2); rs2=$?
+    if [ $rs = $rs2 ] && cmp -s "$s/out0" "$s/out2"; then o2s=:same; else o2s=:differ; fi
+  fi
+  sum=$(sha256sum "$s/out0" | cut -d' ' -f1); bytes=$(stat -c %s "$s/out0")
+  first=$(head -n1 "$s/out0" | cut -c1-80 | esc)
+  if [ $rs = 124 ]; then sc=:timeout; else sc=$rs; fi
+  printf '{:id "%s" :status %s :stdout "%s" :bytes %s :first "%s" :o2 %s}\n' "$id" "$sc" "$sum" "$bytes" "$first" "$o2s" >> "$d/ref.part.$$"
+  rm -rf "$s"
+}
+export -f run1 esc; export epoch gi work
+
+for id in "${ids[@]}"; do
+  d=$work/$id
+  rm -f "$d"/ref.part.*
+  base=$(cat "$d/base.txt")
+  awk -F'\t' -v d="$d" -v b="$base" '{print d "\037" $1 "\037" $2 "\037" $3 "\037" b "\037" $4}' "$d/gcc.list" | tr '\n' '\0' \
+    | xargs -0 -P "$jobs" -I{} bash -c 'IFS=$'"'"'\037'"'"' read -r d f std args base rd <<< "$1"; run1 "$d" "$f" "$std" "$args" "$base" "${rd:-$f}"' _ {}
+  cat "$d"/ref.part.* > "$d/ref.edn" 2>"$work/cat.err"
+  rm -f "$d"/ref.part.*
+  echo "$id: $(wc -l < "$d/ref.edn") files" >&2
+done
+
+out=test/c/ref-gcc15.edn
+{ echo ";; gcc 15.2's runs of the C run corpora, as data (doc/C23-SURVEY.md §8.1, CS14 (a)): one map per file, sorted by :id."
+  echo ";; :status the -O0 run's exit status (128+signal) or :timeout, :no-build with :error when gcc fails; :stdout the SHA-256"
+  echo ";; of the standard output, :bytes its size, :first its first line (80 chars); :o2 the -O2 run's status and stdout"
+  echo ";; against -O0's (:same, :differ, :no-build). gcc -std=STD OPTIONS -O0 the judge, -O2 the witness; each binary run in a"
+  echo ";; fresh directory, an empty standard input, no arguments, 10 s."
+  echo ";; Made by: bin/ci record-ref --corpus $corpora$([ -n "$only" ] && echo ' --only')"
+  echo ";; gcc: $(gcc --version | head -1)"
+  echo ";; date: $(date -u +%Y-%m-%d)"
+  { [ -n "$only" ] && [ -f "$out" ] && grep -v '^;;' "$out" | awk -F'"' -v ids=",$corpora," '{split($2, a, "/"); if (index(ids, "," a[1] ",") == 0) print}'
+    for id in "${ids[@]}"; do cat "$work/$id/ref.edn"; done
+  } | LC_ALL=C sort -t'"' -k2,2
+} > "$work/ref.out"
+mkdir -p test/c
+mv "$work/ref.out" "$out"
+echo "recorded $out"

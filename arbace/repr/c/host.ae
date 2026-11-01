@@ -48,14 +48,101 @@
   [^String s]
   (->> (str/split (str/trim s) #"\s+") (remove str/blank?) (map #(str/replace % "\\\"" "\""))))
 
+(defn- kleene-not [v] (if (= :unknown v) :unknown (not v)))
+(defn- kleene-and [a b] (cond (or (false? a) (false? b)) false (or (= :unknown a) (= :unknown b)) :unknown :else true))
+(defn- kleene-or [a b] (cond (or (true? a) (true? b)) true (or (= :unknown a) (= :unknown b)) :unknown :else false))
+
+(defn eval-selector
+  "A selector expression of DejaGnu's target lists (`! dfp`, `bitint && int128`, `{ x86_64-*-* i?86-*-* }`, `c || c++11`),
+  each atom's value `(atom-value word)`: `!`, `&&`, `||`, parentheses and braces, words side by side taken as alternatives.
+  An atom's value is true, false or :unknown (review 027, finding 5), the operators Kleene's: `! :unknown` is :unknown,
+  `false && :unknown` false, `true || :unknown` true."
+  [^String body atom-value]
+  (let [toks (vec (re-seq #"\|\||&&|!|\(|\)|\{|\}|[^\s(){}!&|]+" body))
+        pos (atom 0)
+        peek* #(get toks @pos)
+        next* #(let [t (get toks @pos)] (swap! pos inc) t)
+        open? #(contains? #{"(" "{"} %)
+        close? #(contains? #{")" "}"} %)
+        atom-start? #(let [t (peek*)] (and t (or (= t "!") (open? t) (not (or (close? t) (= t "&&") (= t "||"))))))]
+    (letfn [(un []
+              (let [t (next*)]
+                (cond (nil? t) true
+                      (= t "!") (kleene-not (un))
+                      (open? t) (let [v (alt)] (when (close? (peek*)) (next*)) v)
+                      :else (let [v (atom-value t)] (if (= :unknown v) :unknown (boolean v))))))
+            (conj* []
+              (loop [v (un)]
+                (if (= (peek*) "&&") (do (next*) (let [w (un)] (recur (kleene-and v w)))) v)))
+            (alt []
+              (loop [v (conj*)]
+                (cond (= (peek*) "||") (do (next*) (let [w (conj*)] (recur (kleene-or v w))))
+                      (atom-start?) (let [w (conj*)] (recur (kleene-or v w)))
+                      :else v)))]
+      (if (empty? toks) true (alt)))))
+
+(def ^:private host-targets
+  (delay (let [f (java.io.File. "test/c/dg-targets.edn")]
+           (if (.exists f) (read-string (slurp f)) {:triple "x86_64-linux-gnu" :effective {}}))))
+
+(defn- glob-match? [^String pat ^String s]
+  (boolean (re-matches (re-pattern (-> pat (str/replace "." "\\.") (str/replace "*" ".*") (str/replace "?" "."))) s)))
+
+(defn target-atom
+  "A selector's atom on the reference host (test/c/dg-targets.edn): every C++ name false for C (review 006, finding 8), a
+  target triple's pattern (`x86_64-*-*`, `i?86-*-*`) matched against the host's triple, an effective-target name the table's
+  value, a name the table does not list :unknown (review 027, finding 5)."
+  [^String w]
+  (cond
+    (.startsWith w "c++") false
+    (re-find #"[-*?]" w) (glob-match? w (:triple @host-targets))
+    :else (let [m (:effective @host-targets)] (if (contains? m w) (boolean (get m w)) :unknown))))
+
+(defn- braced-after
+  "The braced text starting at the first non-space character from index i of s when it is `{`, its braces matched: the
+  text inside, else nil."
+  [^String s i]
+  (let [n (count s)
+        i (loop [i (long i)] (if (and (< i n) (Character/isWhitespace (.charAt s i))) (recur (inc i)) i))]
+    (when (and (< i n) (= (.charAt s i) \{))
+      (loop [j (inc i) depth 1]
+        (when (< j n)
+          (let [c (.charAt s j)]
+            (cond (= c \{) (recur (inc j) (inc depth))
+                  (= c \}) (if (= depth 1) (subs s (inc i) j) (recur (inc j) (dec depth)))
+                  :else (recur (inc j) depth))))))))
+
+(defn for-c?
+  "Whether a dg selector (`target c++`, `target { ! c++ }`, `target { ! ia32 }`) holds for C on the reference host: true,
+  false or :unknown (target-atom's values; review 027, finding 5: an unlisted name is no longer true)."
+  [^String sel]
+  (let [t (str/trim (or sel ""))
+        body (cond (.startsWith t "target") (subs t 6) (.startsWith t "xfail") (subs t 5) :else t)]
+    (eval-selector body target-atom)))
+
+(defn dg-options-info
+  "The options of a gcc testsuite file's dg-options and dg-additional-options lines, in order: {:opts [...] :uncertain
+  [selector...]}. A line whose selector does not hold for C on the reference host is skipped (`for-c?`; the selector's
+  braces matched); one whose selector cannot be evaluated (a name test/c/dg-targets.edn does not list) is kept and its
+  selector listed in :uncertain (review 027, finding 5). ${srcdir} is the testsuite's root `srcdir` (CS192 (a): the
+  group's base; \".\" when not given)."
+  [^String text ^String srcdir]
+  (let [m (re-matcher #"\{\s*dg-(additional-)?options\s+\"((?:[^\"\\]|\\.)*)\"" text)]
+    (loop [out [] unc []]
+      (if (.find m)
+        (let [opts (.group m 2)
+              sel (braced-after text (.end m))
+              v (if sel (for-c? sel) true)]
+          (if (false? v)
+            (recur out unc)
+            (recur (into out (shell-words (str/replace opts "${srcdir}" srcdir)))
+                   (if (= :unknown v) (conj unc (str/trim sel)) unc))))
+        {:opts out :uncertain unc}))))
+
 (defn dg-options
-  "The options of a gcc testsuite file's dg-options and dg-additional-options lines, in order: those
-  for C (a line whose selector is `{ target c++ }` skipped), ${srcdir} as the testsuite's root (\".\")."
-  [^String text]
-  (vec (mapcat (fn [[_ _ opts sel]]
-                 (when-not (and sel (re-find #"c\+\+" sel))
-                   (shell-words (str/replace opts "${srcdir}" "."))))
-               (re-seq #"\{\s*dg-(additional-)?options\s+\"((?:[^\"\\]|\\.)*)\"\s*(\{[^}]*\})?" text))))
+  "dg-options-info's options alone."
+  ([^String text] (dg-options text "."))
+  ([^String text ^String srcdir] (:opts (dg-options-info text srcdir))))
 
 (defn file-config
   "A file's configuration from `opts` (a compiler's options) and `default-std`: {:std :pre :inc
@@ -90,9 +177,25 @@
           (re-matches #"-O([1-3sgz]|fast)?" o)
           (recur more std (conj pre "#undef __NO_INLINE__" "#define __OPTIMIZE__ 1") incs embed (conj args o))
           (= o "-O0") (recur more std pre incs embed (conj args o))
+          ;; Arbace (CS133): the signedness of plain char, for the preprocessor's macro and the checker
+          (= o "-funsigned-char") (recur more std (conj pre "#define __CHAR_UNSIGNED__ 1") incs embed (conj args o))
+          (= o "-fsigned-char") (recur more std (conj pre "#undef __CHAR_UNSIGNED__") incs embed (conj args o))
           :else (recur more std pre incs embed args)))
       {:std std :pre (str/join (map #(str % "\n") (remove #{::trigraphs} pre))) :inc incs :embed-dirs embed :args args
-       :trigraphs (boolean (some #{::trigraphs} pre))})))
+       ;; CS231: -isystem DIR (or -isystemDIR): searched after -I, and a system directory (gcc ignores -isystem=DIR, a sysroot's)
+       :isystem (vec (keep-indexed (fn [i ^String o] (cond (= o "-isystem") (nth opts (inc i) nil)
+                                                            (and (.startsWith o "-isystem") (not (.startsWith o "-isystem=")))
+                                                            (subs o 8)))
+                                   opts))
+       :trigraphs (boolean (some #{::trigraphs} pre))
+       ;; Arbace (CS132): the checker's pedantic mode, only what the file's options ask (-pedantic-errors: errors)
+       :pedantic (cond (some #{"-pedantic-errors"} opts) :errors (some #{"-pedantic"} opts) :warn)
+       ;; -Wno-c23-c2y-compat: the pedwarns of C2y features used in C23 mode are off
+       :no-c2y-compat (boolean (some #{"-Wno-c23-c2y-compat"} opts))
+       :permissive (boolean (some #{"-fpermissive"} opts))
+       :no-c23-compat (boolean (some #{"-Wno-c11-c23-compat"} opts))
+       ;; the execution character set is not modelled: constants of characters are not judged
+       :exec-charset (boolean (some #(.startsWith ^String % "-fexec-charset=") opts))})))
 
 (def trigraph-stds
   "The standards at which gcc reads trigraphs in phase 1 (the ISO ones before C23)."
@@ -104,9 +207,10 @@
   [host fc ^String base]
   {:predefined (str (get (:predefined host) (:std fc)) (:pre fc))
    :include (:inc fc)
-   :sys (:search host)
+   :sys (vec (concat (:isystem fc) (:search host)))
    :std (keyword (:std fc))
    :has (:has host)
    :embed-dirs (:embed-dirs fc)
+   :pedantic (:pedantic fc)
    :trigraphs (boolean (or (:trigraphs fc) (trigraph-stds (:std fc))))
    :base base})

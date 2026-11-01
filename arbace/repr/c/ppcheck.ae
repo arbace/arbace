@@ -55,17 +55,29 @@
 
 (defn- slurp-latin1 ^String [^String path] (String. (lex/read-bytes path) "ISO-8859-1"))
 
+(defn run-files
+  "The files of `names` (relative to `dir`) whose dg action is `run` (C7: a `dg-do run` whose selector is
+  not C++'s), those with a dg-additional-sources apart: one file a program."
+  [^String dir names]
+  (filterv (fn [n]
+             (let [t (slurp-latin1 (str dir "/" n))]
+               (and (re-find #"\{\s*dg-do\s+run\b(?!\s*\{\s*target\s+c\+\+)" t)
+                    (not (re-find #"dg-additional-sources" t)))))
+           names))
+
 (defn- name* ^String [k] (if (keyword? k) (name k) (str k)))
 
 (defn file-entry
   "A file's entry: {:name :out :fc}, its configuration from the corpus's :std and its dg-options."
   [corpus ^String base ^String name]
   (let [std (if (= (:std corpus) :from-file) "gnu23" (name* (:std corpus)))
-        opts (host/dg-options (slurp-latin1 (str base "/" name)))]
+        oi (host/dg-options-info (slurp-latin1 (str base "/" name)) (str/replace base #"/+$" ""))]
     ;; gcc's testsuite gives the compiler a file's absolute name (DejaGnu's $srcdir): __FILE__ and #embed
     ;; __FILE__ see it so
-    {:name name :read (if (:absolute corpus) (str base "/" name) name) :out (str name ".tsv")
-     :fc (host/file-config opts std)}))
+    (cond-> {:name name :read (if (:absolute corpus) (str base "/" name) name) :out (str name ".tsv")
+             :fc (host/file-config (:opts oi) std)}
+      ;; option lines kept whose selector the targets' table cannot decide (review 027, finding 5)
+      (seq (:uncertain oi)) (assoc :opts-uncertain (:uncertain oi)))))
 
 (defn- json-str ^String [^String s]
   (let [b (StringBuilder. "\"")]
@@ -92,9 +104,14 @@
     (doseq [id ids]
       (let [corpus (or (first (filter #(= (:id %) (keyword id)) (:corpora man)))
                        (throw (ex-info (str "no corpus " id) {})))
+            ;; :like ID inherits another corpus' keys (C7's run corpora over the gcc groups)
+            corpus (if-let [l (:like corpus)]
+                     (merge (first (filter #(= (:id %) l) (:corpora man))) corpus)
+                     corpus)
             dir (str (get roots (:root (:where corpus))) "/" (:path (:where corpus)))
             dir (str/replace dir #"/$" "")
             files (corpus-files corpus dir)
+            files (if (= (:dg-do corpus) :run) (run-files dir files) files)
             corpus (assoc corpus :absolute (= (:root (:where corpus)) :gcc-15.2.0))
             entries (mapv #(file-entry corpus dir %) files)
             d (str work "/" id)]
@@ -111,7 +128,10 @@
                           (str (:name e) "\t" (:std (:fc e)) "\t" (str/join " " (:args (:fc e))) "\t" (:read e) "\n"))))
         (println (str id ": " (count files) " files"
                       (when (and (:count corpus) (not= (:count corpus) (count files)))
-                        (str " (the manifest counts " (:count corpus) ")"))))))))
+                        (str " (the manifest counts " (:count corpus) ")"))))
+        (when-let [u (seq (filter :opts-uncertain entries))]
+          (println (str id ": " (count u) " files keep option lines whose selector test/c/dg-targets.edn cannot decide: "
+                        (pr-str (vec (take 10 (map (juxt :name :opts-uncertain) u)))))))))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; The judge: the reference's tokens

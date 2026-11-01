@@ -44,9 +44,9 @@
    "_Alignas" :ALIGNAS "_Alignof" :ALIGNOF "_Atomic" :ATOMIC "_Generic" :GENERIC "_Noreturn" :NORETURN
    "_Static_assert" :STATICASSERT "_Thread_local" :THREADLOCAL
    ;; GCC/clang/other extensions
-   "_Decimal128" :DECIMAL128 "_Decimal32" :DECIMAL32 "_Decimal64" :DECIMAL64 "_Float128" :FLOAT128
+   "_Decimal128" :DECIMAL128 "_Decimal32" :DECIMAL32 "_Decimal32x" :DECIMAL32X "_Decimal64" :DECIMAL64 "_Decimal64x" :DECIMAL64X "_Float128" :FLOAT128
    "_Float128x" :FLOAT128X "_Float16" :FLOAT16 "__fp16" :FLOAT16 "_Float32" :FLOAT32 "_Float32x" :FLOAT32X
-   "_Float64" :FLOAT64 "_Float64x" :FLOAT64X "_Nonnull" :NONNULL "__alignof" :ALIGNOF "__alignof__" :ALIGNOF
+   "_Float64" :FLOAT64 "_Float64x" :FLOAT64X "_Nonnull" :NONNULL "__seg_gs" :SEGGS "__seg_fs" :SEGFS "__alignof" :ALIGNOF "__alignof__" :ALIGNOF
    "__asm" :ASM "__asm__" :ASM "__attribute" :ATTRIBUTE "__attribute__" :ATTRIBUTE "__auto_type" :AUTOTYPE
    "__bf16" :BF16 "__complex" :COMPLEX "__complex__" :COMPLEX "__const" :CONST "__declspec" :DECLSPEC
    "__float128" :FLOAT128 "__imag" :IMAG "__imag__" :IMAG "__inline" :INLINE "__inline__" :INLINE
@@ -329,6 +329,7 @@ void __atomic_store();
 
 (def ^:const SCOPE 0) (def ^:const FNSCOPE 1) (def ^:const GOTOS 2) (def ^:const SWITCH 3)
 (def ^:const SEQ 4) (def ^:const LDOK 5) (def ^:const COMPLIT 6) (def ^:const ORDER 7) (def ^:const EOFERRS 8)
+(def ^:const SOFT 9) (def ^:const HARD 10)
 
 (deftype Parser [nx ^ArrayList errs ^ArrayList toks kw ^objects st])
 
@@ -362,7 +363,14 @@ void __atomic_store();
   cc then runs until tools/ccdump's timeout, whose dump is a panic too."
   100000)
 
+(defn- eh-soft!
+  "An error of the recovery (*recover*): counted apart, the parse goes on."
+  [^Parser p ^String msg]
+  (.add ^ArrayList (.-errs p) msg)
+  (aset ^objects (.-st p) SOFT (inc (long (or (aget ^objects (.-st p) SOFT) 0)))))
+
 (defn- eh [^Parser p ^String msg]
+  (aset ^objects (.-st p) HARD (inc (long (or (aget ^objects (.-st p) HARD) 0))))
   (.add ^ArrayList (.-errs p) msg)
   (let [^ArrayList ts (.-toks p)]
     (when (and (pos? (.size ts)) (= (.-ch ^PTok (.get ts 0)) :eof))
@@ -431,16 +439,24 @@ void __atomic_store();
             c)]
     (PTok. c s sep (.-pf t) (.-po t) (.-m t) seq)))
 
+(def ^:dynamic *recover*
+  "Arbace (CS150): gcc's recovery in a standard attribute (a token that is not `]` after the list: the rest of the
+  attribute skipped to its closing brackets, the parse going on), for the dg check, which judges every error line of a
+  file; off for the round trips and cc's comparisons, whose parser stops there as cc's does."
+  false)
+
 (defn- next! [^Parser p]
-  (loop [^StringBuilder b nil]
+  (loop [^StringBuilder b nil sp false]
     (let [^Tok t ((.-nx p))
           c (.-ch t)]
       (cond
-        (= c \space) (recur b)
-        (= c \newline) (let [b (or b (StringBuilder.))] (.append b (.-sep t)) (.append b "\n") (recur b))
-        :else (let [seq (inc (long (slot p SEQ)))]
+        (= c \space) (recur b true)
+        (= c \newline) (let [b (or b (StringBuilder.))] (.append b (.-sep t)) (.append b "\n") (recur b sp))
+        :else (let [seq (inc (long (slot p SEQ)))
+                    ;; CS150 (*recover*): a space token of the preprocessor (a comment of a macro's body) before the token
+                    sp-sep (if (and *recover* sp (= "" (.-sep t))) " " (.-sep t))]
                 (slot! p SEQ seq)
-                (.add ^ArrayList (.-toks p) (conv p t (if (and b (pos? (.length b))) (str b (.-sep t)) (.-sep t)) seq)))))))
+                (.add ^ArrayList (.-toks p) (conv p t (if (and b (pos? (.length b))) (str b sp-sep) sp-sep) seq)))))))
 
 (defn- typename-tok?
   "checkTypeName: whether t, an identifier, names a typedef in the current scope."
@@ -465,7 +481,13 @@ void __atomic_store();
   ([^Parser p] (when (.isEmpty ^ArrayList (.-toks p)) (next! p)) (.-ch ^PTok (tok0 p)))
   ([^Parser p ctn?] (if ctn? (do (rn p) (.-ch (ctn p (tok0 p)))) (rn p))))
 
+(def ^:dynamic *deadline*
+  "Arbace (C3b): a System/nanoTime past which a parse gives up (the round trip's budget per read; nil, none)."
+  nil)
+
 (defn- shift0 ^PTok [^Parser p]
+  (when-let [d *deadline*]
+    (when (> (System/nanoTime) (long d)) (throw (ex-info "the read's time budget is spent" {:deadline true}))))
   (let [r (tok0 p)]
     (when-not (= (.-ch r) :eof)
       (.remove ^ArrayList (.-toks p) 0)
@@ -500,6 +522,11 @@ void __atomic_store();
       (and (>= l 3) (= (at (- l 3)) \\) (octal? (at (- l 2))) (octal? (at (dec l)))) (.insert b (int (- l 2)) "0")
       :else nil)))
 
+(def strlit-pieces
+  "Arbace (C3b): the texts of the string literals a concatenated token was made of (the converter decodes
+  each, since cc's widened tail does not keep a hex escape's end), by token (weak keys, identity)."
+  (java.util.Collections/synchronizedMap (java.util.WeakHashMap.)))
+
 (defn- sh
   "p.shift: the lookahead consumed, adjacent string literals concatenated into it (in builders: a
   macro may expand to a million literals, torture's pr46534.c)."
@@ -507,7 +534,9 @@ void __atomic_store();
   (^PTok [^Parser p ctn?]
    (let [r (shift0 p)
          concat! (fn [kinds]
-                   (let [sep (StringBuilder. ^String (.-sep r)) b (StringBuilder. ^String (.-src r))]
+                   (let [sep (StringBuilder. ^String (.-sep r)) b (StringBuilder. ^String (.-src r))
+                         pieces (ArrayList.)]
+                     (.add pieces (.-src r))
                      (loop []
                        (let [c (rn p)]
                          (if-let [skip (kinds c)]
@@ -515,11 +544,18 @@ void __atomic_store();
                              (.append sep ^String (.-sep t))
                              (canonicalize-tail! b)
                              (.append b (subs (.-src t) skip))
+                             (.add pieces (.-src t))
                              (recur))
-                           (tree/with-texts r (.toString sep) (.toString b)))))))
+                           (let [t (tree/with-texts r (.toString sep) (.toString b))]
+                             ;; Arbace (C3b): the literals' own texts, for the converter's values
+                             (.put ^java.util.Map strlit-pieces t (vec pieces))
+                             t))))))
          r (cond
-             (and (= (ch r) :STRINGLITERAL) (= (rn p) :STRINGLITERAL)) (concat! {:STRINGLITERAL 1})
+             (and (= (ch r) :STRINGLITERAL) (= (rn p) :STRINGLITERAL)) (concat! {:STRINGLITERAL 1 :LONGSTRINGLITERAL 2})
              (and (= (ch r) :LONGSTRINGLITERAL) (or (= (rn p) :LONGSTRINGLITERAL) (= (rn p) :STRINGLITERAL)))
+             (concat! {:LONGSTRINGLITERAL 2 :STRINGLITERAL 1})
+             ;; Arbace (CS131): a narrow (or u8) literal before a prefixed one, gcc's non-standard concatenation
+             (and (= (ch r) :STRINGLITERAL) (= (rn p) :LONGSTRINGLITERAL))
              (concat! {:LONGSTRINGLITERAL 2 :STRINGLITERAL 1})
              :else r)]
      (if ctn? (ctn p r) r))))
@@ -560,13 +596,13 @@ void __atomic_store();
   (in? c \( \* \; \{ :ASM :BREAK :CASE :CONTINUE :DEC :DEFAULT :DO :FOR :GOTO :IDENTIFIER :IF :INC
        :LONGSTRINGLITERAL :RETURN :STRINGLITERAL :SWITCH :WHILE))
 
-(defn- type-qualifier? [c] (in? c :ATOMIC :CONST :NONNULL :RESTRICT :VOLATILE))
+(defn- type-qualifier? [c] (in? c :ATOMIC :CONST :NONNULL :RESTRICT :SEGFS :SEGGS :VOLATILE))
 
 (defn- storage-class-specifier? [c]
   (in? c :AUTO :CONSTEXPR :DECLSPEC :EXTERN :REGISTER :STATIC :THREADLOCAL :TYPEDEF)) ; go-whim: CONSTEXPR
 
 (def ^:private type-specifiers
-  #{:BF16 :BITINT :BOOL :CHAR :COMPLEX :DECIMAL128 :DECIMAL32 :DECIMAL64 :DOUBLE :ENUM :FLOAT :FLOAT128
+  #{:BF16 :BITINT :BOOL :CHAR :COMPLEX :DECIMAL128 :DECIMAL32 :DECIMAL32X :DECIMAL64 :DECIMAL64X :DOUBLE :ENUM :FLOAT :FLOAT128
     :FLOAT128X :FLOAT16 :FLOAT32 :FLOAT32X :FLOAT64 :FLOAT64X :IMAGINARY :INT :INT128 :LONG :SHORT :SIGNED
     :STRUCT :TYPEOF :UINT128 :UNION :UNSIGNED :VOID}) ; go-whim: BITINT
 
@@ -610,8 +646,12 @@ void __atomic_store();
 
 (defn- std-attr-at? [^Parser p i] (and (= (pkc p i) \[) (= (pkc p (inc (long i))) \[)))
 
-(defn- std-attrs-end ^long [^Parser p]
-  (loop [i 0 depth 0]
+(declare std-attrs-end-from)
+
+(defn- std-attrs-end ^long [^Parser p] (std-attrs-end-from p 0))
+
+(defn- std-attrs-end-from ^long [^Parser p ^long i0]
+  (loop [i i0 depth 0]
     (if (or (pos? depth) (std-attr-at? p i))
       (case (pkc p i)
         :eof i
@@ -637,8 +677,16 @@ void __atomic_store();
 ;; ---------------------------------------------------------------------------------------------
 ;; 6.9 External definitions
 
+(defn- drop-attrs-before! 
+  "CS160 (*recover*): C23 attributes before `_Static_assert` (not allowed there): gcc reports them and goes on without."
+  [^Parser p]
+  (when (and *recover* (std-attr-at? p 0) (= (pkc p (std-attrs-end p)) :STATICASSERT))
+    (eh-soft! p (str (tpos (tok0 p)) ": unexpected '[', expected declaration specifiers"))
+    (attribute-specifier-list-opt p)))
+
 (defn- external-declaration [^Parser p]
   (loop []
+    (drop-attrs-before! p)
     (let [c (rn p)]
       (cond
         (= c :eof) nil
@@ -687,7 +735,10 @@ void __atomic_store();
   (loop [r nil prev nil]
     (if (in? (rn p) \{ :eof)
       r
-      (let [dl (node "DeclarationList" :Declaration (declaration p nil nil false))]
+      (let [_ (when (and *recover* (std-attr-at? p 0)) ; CS160: gcc refuses attributes in a declaration list and goes on
+                (eh-soft! p (str (tpos (tok0 p)) ": unexpected '[', expected declaration specifiers"))
+                (attribute-specifier-list-opt p))
+            dl (node "DeclarationList" :Declaration (declaration p nil nil false))]
         (link! prev dl :DeclarationList)
         (recur (or r dl) dl)))))
 
@@ -696,6 +747,8 @@ void __atomic_store();
 
 (defn- skip-attribute-specifiers ^long [^Parser p ^long i]
   (loop [i i]
+    (if (std-attr-at? p i) ; CS144: and C23's [[...]], after a label before a declaration or `}`
+      (recur (std-attrs-end-from p i))
     (if (= (pkc p i) :ATTRIBUTE)
       (if-not (= (pkc p (inc i)) \()
         i
@@ -709,7 +762,7 @@ void __atomic_store();
                       (recur (inc i) depth))))]
           ;; cc returns i at eof before the loop's increment; the post statement runs first
           (if (= (first r) :eof) (dec (long (second r))) (recur (long (second r))))))
-      i)))
+      i))))
 
 (defn- synth-semi [^PTok colon] (tree/with-texts (tree/with-ch colon \;) "" ";"))
 
@@ -721,9 +774,16 @@ void __atomic_store();
         (and (= c :TYPENAME) (= (pkc p (inc i)) \:))
         (do (slot! p LDOK true) (statement p false))
         (or (declaration-specifier? c true) (= c :STATICASSERT) (= c :AUTOTYPE) (= c \}))
-        (node "Statement" :Case :StatementExpr :ExpressionStatement (node "ExpressionStatement" :Token (synth-semi colon)))
+        (node "Statement" :Case :StatementExpr :ExpressionStatement
+              (let [es (node "ExpressionStatement" :Token (synth-semi colon))]
+                (when (and (= c \}) (pos? i)) (s! es :LabelAttributeSpecifierList (attribute-specifier-list-opt p))) ; CS144: GNU attributes before `}` stand after the label
+                es))
         :else (do (slot! p LDOK true) (statement p false))))
-    (statement p false)))
+    (do
+      ;; CS160: an attribute declaration after a label where a statement is expected
+      (when (and *recover* (std-attr-at? p 0) (= (pkc p (std-attrs-end p)) \;))
+        (eh-soft! p (str (tpos (tok0 p)) ": unexpected '[', expected statement")))
+      (statement p false))))
 
 (defn- inject-func-tokens [^Parser p ^PTok lbrace ^String nm]
   (let [kinds [:STATIC :CONST :CHAR :IDENTIFIER \[ \] \= :STRINGLITERAL \;]
@@ -799,6 +859,7 @@ void __atomic_store();
 
 (defn block-item [^Parser p]
   (loop []
+    (drop-attrs-before! p)
     (let [c (rn p true)]
       (cond
         (or (statement? c) (expression? c) (and (= c :TYPENAME) (= (pkc p 1) \:)))
@@ -860,20 +921,45 @@ void __atomic_store();
       (when new-block (close-scope! p))
       r)))
 
+;; Arbace (CS194 (a)): C2y's selection statements with a declaration (N3356): `if (int i = 42)`, `if (int i, j; i = 42)`,
+;; `switch (int i = 42; i)`: an optional init declaration ending in `;`, then the condition, an expression or a declaration
+;; (without its `;`). The head is in the SelectionStatement's :Declaration (the init), :Token5 (its `;`), :Declaration2 (the
+;; condition's) or :ExpressionList.
+(declare cond-declaration)
+
+(defn- decl-start? [^Parser p]
+  (or (declaration-specifier? (pkct p 0) true)
+      (and (std-attr-at? p 0) (declaration-specifier? (pkct p (std-attrs-end-from p 0)) true))))
+
+(defn- selection-head! [^Parser p ^HashMap r]
+  (if (decl-start? p)
+    (let [d (cond-declaration p)]
+      (if (= (rn p) \;)
+        (do (s! r :Declaration d)
+            (s! r :Token5 (sh p))
+            (if (decl-start? p)
+              (s! r :Declaration2 (cond-declaration p))
+              (s! r :ExpressionList (expression p false))))
+        (s! r :Declaration2 d)))
+    (s! r :ExpressionList (expression p false))))
+
 (defn selection-statement [^Parser p]
   (new-scope! p)
   (let [r (case (rn p)
             :eof (unexpected-eof p)
-            :IF (let [r (node "SelectionStatement" :Case :SelectionStatementIf :Token (sh p) :Token2 (must p \()
-                              :ExpressionList (expression p false) :Token3 (must p \)) :Statement (statement p true))]
+            :IF (let [r (node "SelectionStatement" :Case :SelectionStatementIf :Token (sh p) :Token2 (must p \())
+                      _ (selection-head! p r)
+                      _ (s! r :Token3 (must p \)))
+                      _ (s! r :Statement (statement p true))]
                   (.put r :scope (slot p SCOPE))
                   (when (= (rn p) :ELSE)
                     (s! r :Case :SelectionStatementIfElse)
                     (s! r :Token4 (sh p))
                     (s! r :Statement2 (statement p true)))
                   r)
-            :SWITCH (let [r (node "SelectionStatement" :Case :SelectionStatementSwitch :Token (sh p) :Token2 (must p \()
-                                  :ExpressionList (expression p false) :Token3 (must p \)))
+            :SWITCH (let [r (node "SelectionStatement" :Case :SelectionStatementSwitch :Token (sh p) :Token2 (must p \())
+                          _ (selection-head! p r)
+                          _ (s! r :Token3 (must p \)))
                           ctx (slot p SWITCH)]
                       (.put r :scope (slot p SCOPE))
                       (slot! p SWITCH r)
@@ -887,8 +973,13 @@ void __atomic_store();
   (let [sc #(do (.put ^HashMap % :scope (slot p SCOPE)) %)]
     (case (rn p)
       :eof (unexpected-eof p)
-      :BREAK (sc (node "JumpStatement" :Case :JumpStatementBreak :Token (sh p) :Token2 (must p \;)))
-      :CONTINUE (sc (node "JumpStatement" :Case :JumpStatementContinue :Token (sh p) :Token2 (must p \;)))
+      ;; Arbace (CS131): C2y's named loops, `break L;` and `continue L;`
+      :BREAK (sc (if (= (pkc p 1) :IDENTIFIER)
+                   (node "JumpStatement" :Case :JumpStatementBreakLabel :Token (sh p) :Token2 (sh p) :Token3 (must p \;))
+                   (node "JumpStatement" :Case :JumpStatementBreak :Token (sh p) :Token2 (must p \;))))
+      :CONTINUE (sc (if (= (pkc p 1) :IDENTIFIER)
+                      (node "JumpStatement" :Case :JumpStatementContinueLabel :Token (sh p) :Token2 (sh p) :Token3 (must p \;))
+                      (node "JumpStatement" :Case :JumpStatementContinue :Token (sh p) :Token2 (must p \;))))
       :GOTO (let [r (if (= (pkc p 1) \*)
                       (node "JumpStatement" :Case :JumpStatementGotoExpr :Token (sh p) :Token2 (sh p) :ExpressionList (expression p false) :Token3 (must p \;))
                       (node "JumpStatement" :Case :JumpStatementGoto :Token (sh p) :Token2 (must p :IDENTIFIER) :Token3 (must p \;)))]
@@ -931,7 +1022,8 @@ void __atomic_store();
                          :Token3 (must p \)) :Statement (statement p true))
             :DO (node "IterationStatement" :Case :IterationStatementDo :Token (sh p) :Statement (statement p true) :Token2 (must p :WHILE)
                       :Token3 (must p \() :ExpressionList (expression p false) :Token4 (must p \)) :Token5 (must p \;))
-            :FOR (if (declaration-specifier? (pkct p 2) true)
+            :FOR (if (or (declaration-specifier? (pkct p 2) true)
+                         (and (std-attr-at? p 2) (declaration-specifier? (pkct p (std-attrs-end-from p 2)) true))) ; CS144
                    (node "IterationStatement" :Case :IterationStatementForDecl :Token (sh p) :Token2 (must p \() :Declaration (declaration p nil nil true)
                          :ExpressionList (expression p true) :Token3 (must p \;) :ExpressionList2 (expression p true) :Token4 (must p \))
                          :Statement (statement p true))
@@ -1056,7 +1148,7 @@ void __atomic_store();
                (recur s# nil))
              :else [r# u#]))))))
 
-(declare multiplicative-expression)
+(declare multiplicative-expression c23-va-start? c23-va-start-args)
 
 (binary-level additive-expression multiplicative-expression "AdditiveExpression" :AdditiveExpression :MultiplicativeExpression
               {\+ :AdditiveExpressionAdd \- :AdditiveExpressionSub})
@@ -1122,20 +1214,31 @@ void __atomic_store();
       \- (unary-op p :UnaryExpressionMinus ctn?)
       \~ (unary-op p :UnaryExpressionCpl ctn?)
       \! (unary-op p :UnaryExpressionNot ctn?)
-      :SIZEOF (if (and (= (pkc p 1) \() (specifier-qualifier? (pkct p 2) true))
+      :SIZEOF (if (and *recover* (= (pkc p 1) \() (std-attr-at? p 2) (specifier-qualifier? (pkct p (std-attrs-end-from p 2)) true))
+                ;; CS160: gcc refuses attributes before a type name and reads the type
+                (let [sz (sh p) lp (sh p)
+                      _ (do (eh-soft! p (str (tpos (tok0 p)) ": unexpected '[', expected type name")) (attribute-specifier-list-opt p))
+                      tn (type-name p) rp (must p \))]
+                  (node "UnaryExpression" :Case :UnaryExpressionSizeofType :Token sz :Token2 lp :TypeName tn :Token3 rp))
+              (if (and (= (pkc p 1) \() (storage-class-specifier? (pkct p 2)))
+                (node "UnaryExpression" :Case :UnaryExpressionSizeofExpr :Token (sh p) :UnaryExpression (compound-literal-storage p ctn?))
+                (if (and (= (pkc p 1) \() (specifier-qualifier? (pkct p 2) true))
                 (let [sz (sh p) lp (sh p) tn (type-name p) rp (must p \))]
                   (if (= (rn p) \{)
                     (node "UnaryExpression" :Case :UnaryExpressionSizeofExpr :Token sz :UnaryExpression (unary-expression p lp tn rp ctn?))
                     (node "UnaryExpression" :Case :UnaryExpressionSizeofType :Token sz :Token2 lp :TypeName tn :Token3 rp)))
-                (node "UnaryExpression" :Case :UnaryExpressionSizeofExpr :Token (sh p) :UnaryExpression (unary-expression p nil nil nil ctn?)))
+                (node "UnaryExpression" :Case :UnaryExpressionSizeofExpr :Token (sh p) :UnaryExpression (unary-expression p nil nil nil ctn?)))))
       (\( :CHARCONST :FLOATCONST :GENERIC :IDENTIFIER :INTCONST :LONGCHARCONST :LONGSTRINGLITERAL :STRINGLITERAL)
       (postfix-expression p nil nil nil ctn?)
       :INC (node "UnaryExpression" :Case :UnaryExpressionInc :Token (sh p) :UnaryExpression (unary-expression p nil nil nil ctn?))
       :DEC (node "UnaryExpression" :Case :UnaryExpressionDec :Token (sh p) :UnaryExpression (unary-expression p nil nil nil ctn?))
       :ALIGNOF (if (= (pkc p 1) \()
-                 (if (specifier-qualifier? (pkct p 2) true)
+                 (cond
+                   (storage-class-specifier? (pkct p 2))
+                   (node "UnaryExpression" :Case :UnaryExpressionAlignofExpr :Token (sh p) :UnaryExpression (compound-literal-storage p ctn?))
+                   (specifier-qualifier? (pkct p 2) true)
                    (node "UnaryExpression" :Case :UnaryExpressionAlignofType :Token (sh p) :Token2 (sh p) :TypeName (type-name p) :Token3 (must p \)))
-                   (node "UnaryExpression" :Case :UnaryExpressionAlignofExpr :Token (sh p) :UnaryExpression (unary-expression p nil nil nil ctn?)))
+                   :else (node "UnaryExpression" :Case :UnaryExpressionAlignofExpr :Token (sh p) :UnaryExpression (unary-expression p nil nil nil ctn?)))
                  (unexpected p "unary expression or (type name)"))
       :ANDAND (node "UnaryExpression" :Case :UnaryExpressionLabelAddr :Token (sh p) :Token2 (must p :IDENTIFIER))
       :REAL (node "UnaryExpression" :Case :UnaryExpressionReal :Token (sh p) :UnaryExpression (unary-expression p nil nil nil ctn?))
@@ -1182,13 +1285,38 @@ void __atomic_store();
             \( (let [c (pkct p 1)]
                  (if (or (expression? c) (= c \)))
                    (recur (node "PostfixExpression" :Case :PostfixExpressionCall :PostfixExpression r :Token (sh p)
-                                :ArgumentExpressionList (argument-expression-list-opt p true) :Token2 (must p \))))
+                                :ArgumentExpressionList (if (c23-va-start? r) (c23-va-start-args p) (argument-expression-list-opt p true))
+                                :Token2 (must p \))))
                    (do (unexpected p "postfix expression") (recur r))))
             \. (recur (node "PostfixExpression" :Case :PostfixExpressionSelect :PostfixExpression r :Token (sh p) :Token2 (must p :IDENTIFIER)))
             :ARROW (recur (node "PostfixExpression" :Case :PostfixExpressionPSelect :PostfixExpression r :Token (sh p) :Token2 (must p :IDENTIFIER)))
             :INC (recur (node "PostfixExpression" :Case :PostfixExpressionInc :PostfixExpression r :Token (sh p)))
             :DEC (recur (node "PostfixExpression" :Case :PostfixExpressionDec :PostfixExpression r :Token (sh p)))
             r))))))
+
+(defn- c23-va-start?
+  "r is the identifier __builtin_c23_va_start (<stdarg.h>'s va_start in C23)."
+  [r]
+  (and (instance? HashMap r) (= (.get ^HashMap r :Case) :PrimaryExpressionIdent)
+       (when-let [^PTok t (.get ^HashMap r :Token)] (= (.-src t) "__builtin_c23_va_start"))))
+
+(declare argument-expression-list-opt)
+
+(defn- c23-va-start-args
+  "The arguments of C23's va_start (gcc's c_parser_postfix_expression): the first, and the tokens after its comma
+  skipped to the closing parenthesis (gcc only warns of them)."
+  [^Parser p]
+  (if (= (rn p) \))
+    nil
+    (let [r (node "ArgumentExpressionList" :AssignmentExpression (assignment-expression p true))]
+      (when (= (rn p) \,)
+        (loop [depth 0]
+          (let [c (rn p)]
+            (cond
+              (= c :eof) (unexpected-eof p)
+              (and (= c \)) (zero? depth)) nil
+              :else (do (sh p) (recur (cond (= c \() (inc depth) (= c \)) (dec depth) :else depth)))))))
+      r)))
 
 (defn- argument-expression-list-opt [^Parser p ctn?]
   (rn p)
@@ -1205,7 +1333,7 @@ void __atomic_store();
       (rn p)
       r)))
 
-(declare generic-selection)
+(declare generic-selection compound-literal-storage)
 
 (defn- primary-expression [^Parser p ctn?]
   (case (rn p ctn?)
@@ -1238,7 +1366,10 @@ void __atomic_store();
     r))
 
 (defn- generic-selection [^Parser p]
-  (node "GenericSelection" :Token (must p :GENERIC) :Token2 (must p \() :AssignmentExpression (assignment-expression p true)
+  ;; C2y: the controlling operand may be a type name (gcc accepts it, pedantically warning)
+  (node "GenericSelection" :Token (must p :GENERIC) :Token2 (must p \()
+        (if (specifier-qualifier? (pkct p 0) true) :TypeName :AssignmentExpression)
+        (if (specifier-qualifier? (pkct p 0) true) (type-name p) (assignment-expression p true))
         :Token3 (must p \,) :GenericAssociationList (generic-association-list p) :Token4 (must p \))))
 
 (defn- constant-expression [^Parser p]
@@ -1251,13 +1382,54 @@ void __atomic_store();
 
 (declare static-assert-declaration init-declarator-list-opt)
 
+(defn- empty-declaration-attrs!
+  "CS160 (*recover* :pedantic, the file's -pedantic-errors): a declaration without declarators whose specifiers begin with
+  C23 attributes is an empty declaration, and a qualified tag with attributes after its keyword an invalid use of attributes."
+  [^Parser p ds ^HashMap r]
+  (when (and (= *recover* :pedantic) ds (nil? (.get r :InitDeclaratorList)) (.get r :Token))
+    (let [specs (loop [n ds acc []] (if n (recur (.get ^HashMap n :DeclarationSpecifiers) (conj acc n)) acc))
+          std? (fn [asl] (loop [a asl] (when a (or (= \[ (ch (.get ^HashMap (.get ^HashMap a :AttributeSpecifier) :Token))) (recur (.get ^HashMap a :AttributeSpecifierList))))))
+          prefix (and (some #(= (.get ^HashMap % :Case) :DeclarationSpecifiersTypeSpec) specs)
+                      (some #(and (= (.get ^HashMap % :Case) :DeclarationSpecifiersAttr) (std? (.get ^HashMap % :AttributeSpecifierList))) specs))
+          qual (some #(= (.get ^HashMap % :Case) :DeclarationSpecifiersTypeQual) specs)
+          tagattrs (some (fn [n] (when-let [ts (.get ^HashMap n :TypeSpecifier)]
+                                   (case (.get ^HashMap ts :Case)
+                                     :TypeSpecifierStructOrUnion (.get ^HashMap (.get ^HashMap ts :StructOrUnionSpecifier) :AttributeSpecifierList)
+                                     :TypeSpecifierEnum (.get ^HashMap (.get ^HashMap ts :EnumSpecifier) :AttributeSpecifierList)
+                                     nil)))
+                         specs)
+          at (tpos (.get r :Token))]
+      (cond
+        prefix (eh-soft! p (str at ": empty declaration"))
+        (and qual tagattrs (std? tagattrs)) (eh-soft! p (str at ": invalid use of attributes in empty declaration"))))))
+
+(defn- bool-after-tag!
+  "CS170 (*recover*): `typedef enum { ... } bool;` (C23's `bool` is a keyword, the type of the declaration complete after the
+  braces, nothing to declare): gcc reports the keyword where it expects `;`, an identifier or `(`."
+  [^Parser p ds ^HashMap r]
+  (when (and *recover* ds (nil? (.get r :InitDeclaratorList)))
+    (loop [n ds def? false]
+      (when n
+        (let [ts (.get ^HashMap n :TypeSpecifier)
+              cs (when ts (.get ^HashMap ts :Case))
+              def? (or def? (and (= cs :TypeSpecifierEnum) (= (.get ^HashMap (.get ^HashMap ts :EnumSpecifier) :Case) :EnumSpecifierDef)))]
+          (if (and def? (= cs :TypeSpecifierBool))
+            (eh-soft! p (str (tpos (.get ^HashMap ts :Token)) ": expected ';', identifier or '(' before '" (src (.get ^HashMap ts :Token)) "'"))
+            (recur (.get ^HashMap n :DeclarationSpecifiers) def?)))))))
+
 (defn- declaration [^Parser p ds d declare]
   (case (rn p)
     :STATICASSERT (node "Declaration" :Case :DeclarationAssert :StaticAssertDeclaration (static-assert-declaration p))
-    :AUTOTYPE (let [nm (pk p 1 true)]
+    :AUTOTYPE (let [;; CS160 (*recover*): gcc takes empty C23 attributes after `__auto_type` and refuses the others
+                    kw (when (and *recover* (std-attr-at? p 1)) (sh p))
+                    _ (when kw
+                        (let [t (tok0 p) emp (and (= (pkc p 2) \]) (= (pkc p 3) \]))]
+                          (attribute-specifier-list-opt p)
+                          (when-not emp (eh-soft! p (str (tpos t) ": '__auto_type' followed by a nonempty attribute")))))
+                    nm (pk p (if kw 0 1) true)]
                 (if-not (= (ch nm) :IDENTIFIER)
                   (do (eh p (str (tpos nm) ": unexpected " (rname (ch nm)) ", expected identifier")) (sh p) (sh p) nil)
-                  (let [r (node "Declaration" :Case :DeclarationAuto :Token (sh p) :Declarator (declarator p nil nil false))]
+                  (let [r (node "Declaration" :Case :DeclarationAuto :Token (or kw (sh p)) :Declarator (declarator p nil nil false))]
                     (s! r :Token2 (must p \=))
                     (s! r :Initializer (initializer p nil))
                     (s! r :Token3 (must p \;))
@@ -1266,8 +1438,21 @@ void __atomic_store();
                     r)))
     (let [[ds ok] (if ds [ds true] (declaration-specifiers p))]
       (when ok
-        (node "Declaration" :Case :DeclarationDecl :DeclarationSpecifiers ds :InitDeclaratorList (init-declarator-list-opt p ds d declare)
-              :AttributeSpecifierList (attribute-specifier-list-opt p) :Token (must p \;))))))
+        (let [r (node "Declaration" :Case :DeclarationDecl :DeclarationSpecifiers ds :InitDeclaratorList (init-declarator-list-opt p ds d declare)
+                      :AttributeSpecifierList (attribute-specifier-list-opt p) :Token (must p \;))]
+          (empty-declaration-attrs! p ds r)
+          (bool-after-tag! p ds r)
+          r)))))
+
+;; A declaration without its `;` (CS194 (a)): a selection statement's init or condition declaration.
+(defn- cond-declaration [^Parser p]
+  (let [[ds ok] (declaration-specifiers p)]
+    (when ok
+      (let [r (node "Declaration" :Case :DeclarationDecl :DeclarationSpecifiers ds :InitDeclaratorList (init-declarator-list-opt p ds nil true)
+                    :AttributeSpecifierList (attribute-specifier-list-opt p))]
+        (empty-declaration-attrs! p ds r)
+        (bool-after-tag! p ds r)
+        r))))
 
 (defn- static-assert-declaration [^Parser p] ; go-whim: C23 6.7.12, the message is optional
   (let [r (node "StaticAssertDeclaration" :Token (must p :STATICASSERT) :Token2 (must p \() :ConstantExpression (constant-expression p))]
@@ -1361,17 +1546,43 @@ void __atomic_store();
           (link! prev l :BalancedTokenSequence)
           (recur (or r l) l open))))))
 
+(defn- balanced-garbage?
+  "An attribute's argument tokens that are not expressions' (a `;`, a bracket closed by another kind): gcc ignores an unknown
+  attribute's arguments as balanced tokens (CS144)."
+  [^Parser p]
+  (loop [i 0 open []]
+    (let [c (pkc p i)]
+      (cond
+        (= c :eof) false
+        (= c \;) true
+        (in? c \( \[ \{) (recur (inc i) (conj open ({\( \) \[ \] \{ \}} c)))
+        (in? c \) \] \}) (cond (empty? open) false
+                              (not= (peek open) c) true
+                              :else (recur (inc i) (pop open)))
+        :else (recur (inc i) open)))))
+
 (defn- std-attribute [^Parser p]
   (let [r (node "AttributeValue" :Case :AttributeValueIdent)]
-    (when (and (= (pkc p 1) \:) (= (pkc p 2) \:))
-      (s! r :Prefix (attribute-name p))
-      (s! r :Colon (sh p))
-      (s! r :Colon2 (sh p)))
+    ;; CS150 (*recover*): gcc takes two colons as the scope only when nothing separates them (`gnu : : x` is an error)
+    (cond
+      (and (= (pkc p 1) \:) (= (pkc p 2) \:) (or (not *recover*) (= "" (.-sep (pk p 2)))))
+      (do (s! r :Prefix (attribute-name p))
+          (s! r :Colon (sh p))
+          (s! r :Colon2 (sh p)))
+      ;; C23's pasted `::` is one token
+      (and *recover* (= (pkc p 1) \:) (= "::" (src (pk p 1))))
+      (do (s! r :Prefix (attribute-name p))
+          (s! r :Colon (sh p))))
     (s! r :Token (attribute-name p))
     (when (= (rn p) \()
       (s! r :Case :AttributeValueExpr)
       (s! r :Token2 (sh p))
-      (if (#{"" "gnu" "__gnu__"} (src (.get r :Prefix)))
+      (if (and (#{"" "gnu" "__gnu__"} (src (.get r :Prefix))) (not (balanced-garbage? p))
+               ;; CS160 (*recover*): an unprefixed attribute that is no standard one is ignored, its arguments balanced tokens
+               (not (and *recover* (= "" (src (.get r :Prefix)))
+                         (not (#{"deprecated" "fallthrough" "maybe_unused" "nodiscard" "noreturn" "_Noreturn" "unsequenced" "reproducible"
+                                 "__deprecated__" "__fallthrough__" "__maybe_unused__" "__nodiscard__" "__noreturn__" "__unsequenced__" "__reproducible__"}
+                                (src (.get r :Token)))))))
         (s! r :ArgumentExpressionList (argument-expression-list-opt p false))
         (s! r :BalancedTokenSequence (balanced-token-sequence-opt p)))
       (s! r :Token3 (must p \))))
@@ -1388,11 +1599,28 @@ void __atomic_store();
           (recur (or r l) l))
         r))))
 
+;; CS150: gcc reports a stray token in `[[...]]` and goes on after the attribute (the dg check's recovery).
+(defn- recover-attribute! [^Parser p]
+  (let [t (tok0 p)]
+    (eh-soft! p (str (tpos t) ": unexpected " (rname (ch t)) ", expected " (rname \]))))
+  (loop [depth 0 closers 0]
+    (let [c (rn p)]
+      (cond
+        (or (= c :eof) (in? c \; \{ \})) nil
+        (= c \[) (do (sh p) (recur (inc depth) 0))
+        (= c \]) (do (sh p)
+                     (cond (pos? depth) (recur (dec depth) 0)
+                           (= closers 1) nil
+                           :else (recur 0 1)))
+        :else (do (sh p) (recur depth 0))))))
+
 (defn- std-attribute-specifier [^Parser p]
   (let [r (node "AttributeSpecifier" :Token (sh p) :Token2 (sh p))]
     (s! r :AttributeValueList (std-attribute-list-opt p))
-    (s! r :Token4 (must p \]))
-    (s! r :Token5 (must p \]))
+    (if (and *recover* (not (in? (rn p) \] :eof)))
+      (recover-attribute! p)
+      (do (s! r :Token4 (must p \]))
+          (s! r :Token5 (must p \]))))
     r))
 
 (defn- attributed-statement [^Parser p label-decl-ok]
@@ -1551,8 +1779,21 @@ void __atomic_store();
             (unexpected p "direct declarator"))]
     (direct-declarator2 p r declare)))
 
+(defn- std-attrs-then-suffix?
+  "C23 attributes followed by another array or function suffix: they stood after the suffix before them (CS140, CS144)."
+  [^Parser p]
+  (and (std-attr-at? p 0) (let [c (pkc p (std-attrs-end p))] (or (= c \[) (= c \()))))
+
+(defn- suffix-attrs!
+  "The attributes after a suffix `r`, kept on it (:AttributeSpecifierList)."
+  [^Parser p ^HashMap r]
+  (s! r :AttributeSpecifierList (attribute-specifier-list-opt p))
+  r)
+
 (defn- direct-declarator2 [^Parser p dd declare]
   (loop [r dd]
+    (if (std-attrs-then-suffix? p)
+      (recur (suffix-attrs! p r))
     (case (rn p)
       \( (let [r (do (new-scope! p)
                      (let [r (if (= (pkct p 1) :IDENTIFIER)
@@ -1565,9 +1806,16 @@ void __atomic_store();
                        r))]
            (recur r))
       \[ (if (std-attr-at? p 0) ; go-whim: C23 attributes after the declarator, not an array
-           r
+           (if (and *recover* (= (.get ^HashMap r :Case) :DirectDeclaratorFuncIdent) (= (pkc p (std-attrs-end p)) \)))
+             ;; CS160: gcc refuses attributes after an identifier list inside parentheses and goes on
+             (do (eh-soft! p (str (tpos (tok0 p)) ": unexpected '[', expected ')'"))
+                 (attribute-specifier-list-opt p)
+                 (recur r))
+             r)
            (let [c (pkct p 1)]
              (cond
+               (and (= c \*) (= (pkc p 2) \])) ; CS144: `[*]`
+               (recur (node "DirectDeclarator" :Case :DirectDeclaratorStar :DirectDeclarator r :Token (sh p) :Token2 (sh p) :Token3 (sh p)))
                (expression? c)
                (recur (node "DirectDeclarator" :Case :DirectDeclaratorArr :DirectDeclarator r :Token (sh p)
                             :AssignmentExpression (assignment-expression p true) :Token2 (must p \])))
@@ -1587,7 +1835,7 @@ void __atomic_store();
                                           :TypeQualifiers (type-qualifier-list p true false) :AssignmentExpression (assignment-expression p true)
                                           :Token3 (must p \])))
                :else (do (unexpected p "direct declarator") (recur r)))))
-      r)))
+      r))))
 
 (defn- param! [^Parser p ^HashMap il ^PTok t ^HashMap r0]
   (let [param (node "Parameter")]
@@ -1615,6 +1863,8 @@ void __atomic_store();
   (case (rn p)
     :eof (unexpected-eof p)
     \) nil
+    ;; C23: `...` with no named parameter
+    :DDD (node "ParameterTypeList" :Case :ParameterTypeListVar :Token2 (sh p))
     (let [pl (parameter-list p)]
       (case (rn p)
         :eof (unexpected-eof p)
@@ -1656,13 +1906,15 @@ void __atomic_store();
   (let [ptr0 (pointer p true)]
     (case (rn p)
       (\) \,) (if ptr0 (node "AbstractDeclarator" :Case :AbstractDeclaratorPtr :Pointer ptr0) (doad-unexpected p))
-      \( (let [lparen (sh p)]
-           (gnu-attribute-specifier-list-opt p) ; not stored yet (cc)
-           (if (specifier-qualifier? (rn p true) true)
+      \( (let [lparen (sh p)
+              dots (= (rn p) :DDD) ; C23 `(...)`: no attribute before the dots (gcc rejects `(__attribute__(()) ...)`)
+              _ (gnu-attribute-specifier-list-opt p)] ; not stored yet (cc)
+           (if (or (specifier-qualifier? (rn p true) true) dots)
              (let [dad (node "DirectAbstractDeclarator" :Case :DirectAbstractDeclaratorFunc :Token lparen
                              :ParameterTypeList (parameter-type-list-opt p) :Token2 (must p \)))]
-               (if (in? (rn p) \, \))
-                 (node "AbstractDeclarator" :Case :AbstractDeclaratorDecl :Pointer ptr0 :DirectAbstractDeclarator dad)
+               (if (or (in? (rn p) \, \)) (std-attr-at? p 0)) ; CS144: attributes after the function
+                 (node "AbstractDeclarator" :Case :AbstractDeclaratorDecl :Pointer ptr0
+                       :DirectAbstractDeclarator (if (std-attr-at? p 0) (direct-abstract-declarator2 p dad) dad))
                  (doad-unexpected p)))
              (case (rn p true)
                \) (let [dad (node "DirectAbstractDeclarator" :Case :DirectAbstractDeclaratorFunc :Token lparen :Token2 (sh p))]
@@ -1821,6 +2073,8 @@ void __atomic_store();
       :VOLATILE (node "TypeQualifier" :Case :TypeQualifierVolatile :Token (sh p))
       :ATOMIC (node "TypeQualifier" :Case :TypeQualifierAtomic :Token (sh p))
       :NONNULL (node "TypeQualifier" :Case :TypeQualifierNonnull :Token (sh p))
+      :SEGGS (node "TypeQualifier" :Case :TypeQualifierSegGs :Token (sh p))
+      :SEGFS (node "TypeQualifier" :Case :TypeQualifierSegFs :Token (sh p))
       :ATTRIBUTE (if accept-attributes
                    (node "TypeQualifier" :Case :TypeQualifierAttr :AttributeSpecifierList (attribute-specifier-list-opt p))
                    (unexpected p "type qualifier"))
@@ -1860,7 +2114,7 @@ void __atomic_store();
    :FLOAT16 :TypeSpecifierFloat16 :BF16 :TypeSpecifierBFloat16 :FLOAT32 :TypeSpecifierFloat32 :FLOAT32X :TypeSpecifierFloat32x
    :FLOAT64 :TypeSpecifierFloat64 :FLOAT64X :TypeSpecifierFloat64x :FLOAT128 :TypeSpecifierFloat128 :FLOAT128X :TypeSpecifierFloat128x
    :UINT128 :TypeSpecifierUint128 :INT128 :TypeSpecifierInt128 :DECIMAL32 :TypeSpecifierDecimal32 :DECIMAL64 :TypeSpecifierDecimal64
-   :DECIMAL128 :TypeSpecifierDecimal128})
+   :DECIMAL128 :TypeSpecifierDecimal128 :DECIMAL32X :TypeSpecifierDecimal32x :DECIMAL64X :TypeSpecifierDecimal64x})
 
 (defn- type-specifier [^Parser p]
   (let [c (rn p true)]
@@ -1898,6 +2152,9 @@ void __atomic_store();
     (.add ^ArrayList (.-toks p) 0 kw)
     (let [r (enum-specifier p)]
       (when r (s! r :AttributeSpecifierList attrs))
+      ;; CS160: as for a struct tag
+      (when (and *recover* r attrs (= (.get ^HashMap r :Case) :EnumSpecifierTag) (not= (rn p) \;))
+        (eh-soft! p (str (tpos (tok0 p)) ": unexpected " (rname (ch (tok0 p))) ", expected ';'")))
       r)))
 
 (defn- enum-specifier [^Parser p]
@@ -1910,15 +2167,18 @@ void __atomic_store();
                                  (.put r :scope (slot p SCOPE))
                                  (enum-visible! p r)
                                  r)
-                            \: (let [r (node "EnumSpecifier" :Token (sh p) :Token2 (sh p) :EnumTypeSpecifier (enum-type-specifier p))]
-                                 (.put r :scope (slot p SCOPE))
-                                 (enum-visible! p r)
-                                 (if (= (rn p) \{)
-                                   (do (s! r :Case :EnumSpecifierDef)
-                                       (s! r :Token3 (sh p))
-                                       (s! r :EnumeratorList (enumerator-list p))
-                                       r)
-                                   (do (s! r :Case :EnumSpecifierTag) [:return r])))
+                            \: (if-not (or (specifier-qualifier? (pkct p 3) true) (= (pkc p 3) :ATTRIBUTE) (std-attr-at? p 3))
+                                 ;; Arbace (CS131): `enum E : 2` in a _Generic association: the colon is the association's
+                                 [:return (node "EnumSpecifier" :Case :EnumSpecifierTag :Token (sh p) :Token2 (sh p))]
+                                 (let [r (node "EnumSpecifier" :Token (sh p) :Token2 (sh p) :EnumTypeSpecifier (enum-type-specifier p))]
+                                   (.put r :scope (slot p SCOPE))
+                                   (enum-visible! p r)
+                                   (if (= (rn p) \{)
+                                     (do (s! r :Case :EnumSpecifierDef)
+                                         (s! r :Token3 (sh p))
+                                         (s! r :EnumeratorList (enumerator-list p))
+                                         r)
+                                     (do (s! r :Case :EnumSpecifierTag) [:return r]))))
                             [:return (node "EnumSpecifier" :Case :EnumSpecifierTag :Token (sh p) :Token2 (sh p))])
               \{ (node "EnumSpecifier" :Case :EnumSpecifierDef :Token (sh p) :Token3 (sh p) :EnumeratorList (enumerator-list p))
               \: (let [r (node "EnumSpecifier" :Case :EnumSpecifierDef :Token (sh p) :EnumTypeSpecifier (enum-type-specifier p))]
@@ -1943,13 +2203,23 @@ void __atomic_store();
 
 (declare enumerator)
 
+(defn- keyword-enumerator!
+  "CS170 (*recover*): `true` and `false` are keywords of C23 (here macros of the prelude, so the lookahead i is the integer
+  constant 1 or 0 made of them) and gcc refuses them as enumeration constants: reported, the token read as the identifier."
+  [^Parser p ^long i]
+  (when *recover*
+    (let [^PTok t (pk p i) m (.-m t) nm (when (and (= (.-ch t) :INTCONST) (map? m)) (some-> ^Tok (:name m) .-src))]
+      (when (#{"true" "false"} nm)
+        (eh-soft! p (str (tpos t) ": cannot use keyword '" nm "' as enumeration constant"))
+        (.set ^ArrayList (.-toks p) (int i) (PTok. :IDENTIFIER nm (.-sep t) (.-pf t) (.-po t) (.-m t) (.-seq t)))))))
+
 (defn- enumerator-list [^Parser p]
   (let [r (node "EnumeratorList" :Enumerator (enumerator p))]
     (loop [prev r]
       (case (rn p)
         :eof (unexpected-eof p)
         \} r
-        \, (if (= (pkct p 1) :IDENTIFIER)
+        \, (if (do (keyword-enumerator! p 1) (= (pkct p 1) :IDENTIFIER))
              (let [e (node "EnumeratorList" :Token (sh p) :Enumerator (enumerator p))]
                (link! prev e :EnumeratorList)
                (recur e))
@@ -1957,7 +2227,8 @@ void __atomic_store();
         (do (unexpected p "enumerator") (recur prev))))))
 
 (defn- enumerator [^Parser p]
-  (let [r (case (pkc p 1)
+  (let [_ (keyword-enumerator! p 0)
+        r (case (pkc p 1)
             (\} \,) (node "Enumerator" :Case :EnumeratorIdent :Token (must p :IDENTIFIER))
             \= (node "Enumerator" :Case :EnumeratorExpr :Token (must p :IDENTIFIER) :Token2 (sh p) :ConstantExpression (constant-expression p))
             (:ATTRIBUTE \[) (let [t (must p :IDENTIFIER) ; go-whim: '[', C23's [[...]]
@@ -1996,7 +2267,11 @@ void __atomic_store();
                              (s! r :Token3 (must p \}))
                              (s! r :AttributeSpecifierList2 (attribute-specifier-list-opt p))
                              r)
-                      (do (s! r :Case :StructOrUnionSpecifierTag) r)))
+                      (do (s! r :Case :StructOrUnionSpecifierTag)
+                          ;; CS160: attributes after the keyword of a tag only where it is defined or the declaration is just `struct [[...]] s;`
+                          (when (and *recover* attrs (not= (rn p) \;))
+                            (eh-soft! p (str (tpos (tok0 p)) ": unexpected " (rname (ch (tok0 p))) ", expected ';'")))
+                          r)))
       (unexpected p "struct or union specifier"))))
 
 (declare struct-declaration)
@@ -2066,16 +2341,16 @@ void __atomic_store();
   (let [ptr (or ptr (do (gnu-attribute-specifier-list-opt p) (pointer p true)))]
     (if (nil? ptr)
       (case (rn p)
-        (\) \:) (if opt nil (unexpected p "abstract declarator"))
+        (\) \: \,) (if opt nil (unexpected p "abstract declarator"))
         \[ (node "AbstractDeclarator" :Case :AbstractDeclaratorDecl :DirectAbstractDeclarator (direct-abstract-declarator p))
-        \( (if (in? (pkct p 1) \* :ATTRIBUTE)
+        \( (if (let [c (pkct p 1)] (or (in? c \* :ATTRIBUTE \)) (declaration-specifier? c true)))
              (node "AbstractDeclarator" :Case :AbstractDeclaratorPtr :DirectAbstractDeclarator (direct-abstract-declarator p))
              (unexpected p "abstract declarator"))
         (if (= (rn p true) :IDENTIFIER)
           (let [t (sh p true)] (eh p (str (tpos t) ": unexpected " (rname (ch t)) ", expected ';'")) nil)
           (unexpected p "abstract declarator")))
       (case (rn p)
-        (\) \:) (node "AbstractDeclarator" :Case :AbstractDeclaratorPtr :Pointer ptr)
+        (\) \: \,) (node "AbstractDeclarator" :Case :AbstractDeclaratorPtr :Pointer ptr)
         \[ (node "AbstractDeclarator" :Case :AbstractDeclaratorDecl :Pointer ptr :DirectAbstractDeclarator (direct-abstract-declarator p))
         \( (let [c (pkct p 1)]
              (if (or (= c \*) (declaration-specifier? c true))
@@ -2106,7 +2381,7 @@ void __atomic_store();
                  (cond
                    (in? c \* :ATTRIBUTE)
                    (node "DirectAbstractDeclarator" :Case :DirectAbstractDeclaratorDecl :Token (sh p) :AbstractDeclarator (abstract-declarator p nil false) :Token2 (must p \)))
-                   (declaration-specifier? c true)
+                   (or (= c \)) (= c :DDD) (declaration-specifier? c true))
                    (do (new-scope! p)
                        (let [r (node "DirectAbstractDeclarator" :Case :DirectAbstractDeclaratorFunc :Token (sh p) :ParameterTypeList (parameter-type-list-opt p) :Token2 (must p \)))]
                          (.put r :params (slot p SCOPE))
@@ -2140,6 +2415,7 @@ void __atomic_store();
                       :ParameterTypeList (parameter-type-list-opt p) :Token2 (must p \))))
       \[ (let [c (pkct p 1)]
            (cond
+             (std-attr-at? p 0) (recur (suffix-attrs! p r)) ; CS144: attributes after a suffix of an abstract declarator
              (= c \]) (recur (node "DirectAbstractDeclarator" :Case :DirectAbstractDeclaratorArr :DirectAbstractDeclarator r :Token (sh p) :Token2 (must p \])))
              (expression? c) (recur (node "DirectAbstractDeclarator" :Case :DirectAbstractDeclaratorArr :DirectAbstractDeclarator r :Token (sh p)
                                           :AssignmentExpression (assignment-expression p true) :Token2 (must p \])))
@@ -2195,8 +2471,8 @@ void __atomic_store();
   `cfg` (arbace.repr.c.host/config's): {:tree TranslationUnit-or-nil :errors [...] :notree bool},
   or {:panic msg} where cc would panic."
   [cfg sources ^String main]
-  (let [{:keys [errors next]} (pp/stream cfg sources main)
-        st (object-array 9)
+  (let [{:keys [errors next layer]} (pp/stream cfg sources main)
+        st (object-array 11)
         _ (do (aset st SCOPE (new-scope* nil)) (aset st SEQ (Long/valueOf 0)) (aset st LDOK false))
         p (Parser. next errors (ArrayList.) (keywords (:predefined cfg)) st)]
     (try
@@ -2207,10 +2483,11 @@ void __atomic_store();
                      (let [x (first a)] (when (= (.get ^HashMap x :node) "Declarator") x)))
                 errs (dedupe-errors errors)
                 errs (if pd errs (conj errs "<bultin>: missing definition of '__predefined_declarator'"))]
-            {:tree tu :errors errs})
+            (cond-> {:tree tu :errors errs :layer layer}
+              (and (pos? (long (or (aget st SOFT) 0))) (zero? (long (or (aget st HARD) 0)))) (assoc :recovered true)))
           (let [t (sh p)]
             (eh p (str (tpos t) ": unexpected " (rname (ch t)) ", expected EOF"))
-            {:tree tu :errors (dedupe-errors errors) :notree true})))
+            {:tree tu :errors (dedupe-errors errors) :notree true :layer layer})))
       (catch StackOverflowError _ {:panic "stack overflow"})
       (catch Exception e
         (if (:panic (ex-data e)) {:panic (ex-message e)} (throw e))))))

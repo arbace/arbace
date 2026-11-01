@@ -1,0 +1,1211 @@
+(in-ns 'go.arbace.crt) (go/file "syscall.go" :imports [
+
+
+    ^{:line 4} [rand "crypto/rand"]
+    ^{:line 5} [binary "encoding/binary"]
+    ^{:line 6} [errors "errors"]
+    ^{:line 7} [io "io"]
+    ^{:line 8} [fs "io/fs"]
+    ^{:line 9} [os "os"]
+    ^{:line 10} [filepath "path/filepath"]
+    ^{:line 11} [syscall "syscall"]
+    ^{:line 12} [time "time"]])
+
+
+
+(go/const "Linux errno numbers (the kernel's results are -errno).\n"
+  ^{:line 17} [^{:val 1} ePERM 1]
+  ^{:line 18} [^{:val 2} eNOENT 2]
+  ^{:line 19} [^{:val 3} eSRCH 3]
+  ^{:line 20} [^{:val 9} eBADF 9]
+  ^{:line 21} [^{:val 11} eAGAIN 11]
+  ^{:line 22} [^{:val 12} eNOMEM 12]
+  ^{:line 23} [^{:val 14} eFAULT 14]
+  ^{:line 24} [^{:val 17} eEXIST 17]
+  ^{:line 25} [^{:val 19} eNODEV 19]
+  ^{:line 26} [^{:val 20} eNOTDIR 20]
+  ^{:line 27} [^{:val 21} eISDIR 21]
+  ^{:line 28} [^{:val 22} eINVAL 22]
+  ^{:line 29} [^{:val 25} eNOTTY 25]
+  ^{:line 30} [^{:val 29} eSPIPE 29]
+  ^{:line 31} [^{:val 32} ePIPE 32]
+  ^{:line 32} [^{:val 34} eRANGE 34]
+  ^{:line 33} [^{:val 38} eNOSYS 38])
+
+
+(go/const
+  ^{:line 37} [^{:val 1000} sysPid 1000] ; the process and thread id of the C program
+  ^{:line 38} [^{:val -100} sysAtFDCWD -100]
+  ^{:line 39} [^{:val 19} sigSTOP 19]
+  ^{:line 40} [^{:val 23} sigURG 23]
+  ^{:line 41} [^{:val 28} sigWINCH 28]
+  ^{:line 42} [^{:val 64} oCreat 0100]
+  ^{:line 43} [^{:val 128} oExcl 0200]
+  ^{:line 44} [^{:val 512} oTrunc 01000]
+  ^{:line 45} [^{:val 1024} oAppend 02000]
+  ^{:line 46} [^{:val 2048} oNonblock 04000]
+  ^{:line 47} [^{:val 65536} oDirectory 0200000]
+  ^{:line 48} [^{:val 524288} oCloexec 02000000])
+
+
+
+(go/type sysFile "sysFile is an open file description, shared by the descriptors dup made of it.\n" (struct
+    ^{:line 53 :tag (* os/File)} f
+    ^{:line 54 :tag io/Reader} rd ; a standard stream's reader
+    ^{:line 55 :tag io/Writer} wr ; a standard stream's writer
+    ^{:line 56 :tag bool} chr ; a standard stream: reported as a character device
+    ^{:line 57 :tag int} refs
+    ^{:line 58 :tag int} flags ; O_* status flags and the access mode
+    ^{:line 59 :tag bool} dir
+    ^{:line 60 :tag string} path
+    ^{:line 61 :tag (slice sysDirent)} ents
+    ^{:line 62 :tag bool} loaded
+    ^{:line 63 :tag int} pos))
+
+
+(go/type sysDirent (struct
+    ^{:line 67 :tag string} name
+    ^{:line 68 :tag byte} typ
+    ^{:line 69 :tag uint64} ino))
+
+
+(go/type sysFd (struct
+    ^{:line 73 :tag (* sysFile)} of
+    ^{:line 74 :tag bool} cloexec))
+
+
+
+
+(go/type Sys "Sys is a C program's view of the Linux kernel: the system calls musl makes, emulated over Go's\nos and syscall packages. It is for one single-threaded program; it is not safe for concurrent use.\n" (struct
+    ^{:line 80 :tag (* Mem)} M
+    ^{:line 81 :tag io/Reader} Stdin
+    ^{:line 82 :tag io/Writer} Stdout
+    ^{:line 83 :tag io/Writer} Stderr
+    ^{:line 84 :tag (slice string)} Args
+    ^{:line 85 :tag (slice string)} Env
+
+
+    ^{:line 88 :tag (func [^int sig ^uint64 handler] [bool]) :doc "Handler is called by kill, tkill and tgkill on the program itself when a handler (not SIG_DFL\nor SIG_IGN) is installed for the signal; it returns true if it ran the handler.\n"} Handler
+
+    ^{:line 90 :tag uint64 :doc "FS is the value arch_prctl(ARCH_SET_FS) stored (the thread pointer).\n"} FS
+
+    ^{:line 92 :tag (map int (* sysFd))} fds
+    ^{:line 93 :tag string} cwd
+    ^{:line 94 :tag (array 65 (array 4 uint64))} actions
+    ^{:line 95 :tag uint64} mask
+    ^{:line 96 :tag uint64} pending
+    ^{:line 97 :tag uint32} umask
+    ^{:line 98 :tag uint64} tidAddr
+    ^{:line 99 :tag time/Time} start))
+
+
+
+
+^{:go/end 124} (go/func NewSys "NewSys is a kernel for the program in m, with the standard streams as fds 0, 1 and 2 (a nil\nstdin reads end of file, a nil output discards).\n" ^{:tag (* Sys)} [^{:tag (* Mem)} m ^io/Reader stdin ^io/Writer stdout ^io/Writer stderr]
+  (when (== stdin nil)
+    (set! stdin (lit eofReader)))
+
+  (when (== stdout nil)
+    (set! stdout io/Discard))
+
+  (when (== stderr nil)
+    (set! stderr io/Discard))
+
+  (let [(values cwd err) (os/Getwd)]
+    (when (!= err nil)
+      (set! cwd "/"))
+
+    (let [s (addr ^{:go/breaks [14]} (lit Sys :M m :Stdin stdin :Stdout stdout :Stderr stderr :cwd cwd :umask 022
+            :fds (lit (map int (* sysFd))) :start (time/Now)))]
+      (aset (.-fds s) 0 (addr (lit sysFd :of (addr (lit sysFile :rd stdin :chr true :refs 1 :flags syscall/O_RDONLY)))))
+      (aset (.-fds s) 1 (addr (lit sysFd :of (addr (lit sysFile :wr stdout :chr true :refs 1 :flags syscall/O_WRONLY)))))
+      (aset (.-fds s) 2 (addr (lit sysFd :of (addr (lit sysFile :wr stderr :chr true :refs 1 :flags syscall/O_WRONLY)))))
+      ^{:line 123} s)))
+
+
+(go/type eofReader (struct))
+
+^{:go/end 128} (go/method Read [eofReader (slice byte)] :results [int error] (return 0 io/EOF))
+
+
+(go/type passthru "passthru carries a panic of the signal handler through Syscall's EFAULT recovery.\n" (struct ^any v))
+
+^{:go/end 148} (go/func errnoOf ^int [^error err]
+  ^{:go/breaks [[3 147]]} (let [^syscall/Errno en (zero syscall/Errno)]
+    (switch
+      (case [(errors/As err (addr en))]
+        (return (conv int en)))
+      (case [(errors/Is err fs/ErrNotExist)]
+        (return eNOENT))
+      (case [(errors/Is err fs/ErrExist)]
+        (return eEXIST))
+      (case [(errors/Is err fs/ErrPermission)]
+        (return 13))
+      (case [(errors/Is err fs/ErrClosed)]
+        (return eBADF)))
+
+    5)) ; EIO
+
+
+^{:go/end 150} (go/func eno ^int64 [^error err] (- (conv int64 (errnoOf err))))
+
+^{:go/end 152} (go/func fdArg ^int [^uint64 a] (conv int (conv int32 a)))
+
+^{:go/breaks [[4 158]] :go/end 159} (go/method get ^{:tag (* sysFile)} [^{:tag (* Sys)} s ^int fd]
+  (when [e (aget (.-fds s) fd)] (!= e nil)
+    (return (.-of e)))
+
+  nil)
+
+
+^{:go/end 169} (go/method alloc ^int64 [^{:tag (* Sys)} s ^{:tag (* sysFile)} of ^int min ^bool cloexec]
+  (let [fd min]
+    (while (!= (aget (.-fds s) fd) nil)
+      (inc! fd))
+
+    (inc! (.-refs of))
+    (aset (.-fds s) fd (addr (lit sysFd :of of :cloexec cloexec)))
+    (conv int64 fd)))
+
+
+^{:go/end 184} (go/method release ^int64 [^{:tag (* Sys)} s ^int fd]
+  ^{:go/breaks [[6 183]]} (let [e (aget (.-fds s) fd)]
+    (when (== e nil)
+      (return (- eBADF)))
+
+    (delete (.-fds s) fd)
+    (dec! (.-refs (.-of e)))
+    (when (and (== (.-refs (.-of e)) 0) (!= (.-f (.-of e)) nil))
+      (when [err (.Close (.-f (.-of e)))] (!= err nil)
+        (return (eno err))))
+
+
+    0))
+
+
+^{:go/end 196} (go/method read [^{:tag (* sysFile)} of ^{:tag (slice byte)} p] :results [int error]
+  (switch
+    (case [(.-dir of)]
+      (return 0 syscall/EISDIR))
+    (case [(!= (.-rd of) nil)]
+      (return (.Read (.-rd of) p)))
+    (case [(!= (.-f of) nil)]
+      (return (.Read (.-f of) p))))
+
+  (return 0 syscall/EBADF))
+
+
+^{:go/end 208} (go/method write [^{:tag (* sysFile)} of ^{:tag (slice byte)} p] :results [int error]
+  (switch
+    (case [(.-dir of)]
+      (return 0 syscall/EISDIR))
+    (case [(!= (.-wr of) nil)]
+      (return (.Write (.-wr of) p)))
+    (case [(!= (.-f of) nil)]
+      (return (.Write (.-f of) p))))
+
+  (return 0 syscall/EBADF))
+
+
+^{:go/end 215} (go/func clampCount ^uint64 [^uint64 n]
+  (when (> n 0x7ffff000)
+    (return 0x7ffff000))
+
+  ^{:line 214} n)
+
+
+
+^{:go/end 236} (go/method resolve "resolve is the host path of p relative to the directory descriptor dirfd (AT_FDCWD: the cwd).\n" [^{:tag (* Sys)} s ^int dirfd ^string p] :results [string int64]
+  (when (== p "")
+    (return "" (- eNOENT)))
+
+  (when (== (aget p 0) \/)
+    (return p 0))
+
+  (when (== dirfd sysAtFDCWD)
+    (return (+ (.-cwd s) "/" p) 0))
+
+  (let [of (.get s dirfd)]
+    (when (== of nil)
+      (return "" (- eBADF)))
+
+    (when (not (.-dir of))
+      (return "" (- eNOTDIR)))
+
+    (return (+ (.-path of) "/" p) 0)))
+
+
+^{:go/end 240} (go/method pathArg [^{:tag (* Sys)} s ^int dirfd ^uint64 a] :results [string int64]
+  (.resolve s dirfd (.CString (.-M s) a)))
+
+
+
+
+
+^{:go/end 259} (go/method Syscall "Syscall performs system call n with the six argument registers and returns the kernel's result:\na value >= 0, or -errno. A bad pointer argument gives -EFAULT. A call that ends the program\n(exit, exit_group, a fatal signal) panics with *Exit.\n" [^{:tag (* Sys)} s ^int64 n ^uint64 a1 ^uint64 a2 ^uint64 a3 ^uint64 a4 ^uint64 a5 ^uint64 a6] :results [^int64 ret]
+  (defer (^{:go/end 257} (fn []
+        (when [r (recover)] (!= r nil)
+          (type-switch [v r]
+            (case [(* Fault)]
+              (set! ret (- eFAULT)))
+            (case [passthru]
+              (panic (.-v v)))
+            (default
+              (panic r)))))))
+
+
+
+  (.dispatch s n a1 a2 a3 a4 a5 a6))
+
+
+^{:go/end 622} (go/method dispatch ^int64 [^{:tag (* Sys)} s ^int64 n ^uint64 a1 ^uint64 a2 ^uint64 a3 ^uint64 a4 ^uint64 a5 ^uint64 a6]
+  (let [m (.-M s)]
+    (switch n
+      (case [0] ; read
+        (let [of (.get s (fdArg a1))]
+          (when (== of nil)
+            (return (- eBADF)))
+
+          (return (.doRead s of (.W m a2 (clampCount a3))))))
+      (case [1] ; write
+        (let [of (.get s (fdArg a1))]
+          (when (== of nil)
+            (return (- eBADF)))
+
+          (return (.doWrite s of (.R m a2 (clampCount a3))))))
+      (case [2] ; open
+        (return (.open s sysAtFDCWD (.CString m a1) (conv int a2) (conv uint32 a3))))
+      (case [257] ; openat
+        (return (.open s (fdArg a1) (.CString m a2) (conv int a3) (conv uint32 a4))))
+      (case [3] ; close
+        (return (.release s (fdArg a1))))
+      (case [4] ; stat
+        (return (.statPath s sysAtFDCWD (.CString m a1) a2 true)))
+      (case [6] ; lstat
+        (return (.statPath s sysAtFDCWD (.CString m a1) a2 false)))
+      (case [5] ; fstat
+        (return (.fstat s (fdArg a1) a2)))
+      (case [262] ; newfstatat
+        (let [p (.CString m a2)]
+          (when (and (== p "") (!= (bit-and a4 0x1000) 0))
+            (when (== (fdArg a1) sysAtFDCWD)
+              (return (.statPath s sysAtFDCWD (.-cwd s) a3 true)))
+
+            (return (.fstat s (fdArg a1) a3)))
+
+          (return (.statPath s (fdArg a1) p a3 (== (bit-and a4 0x100) 0)))))
+      (case [332] ; statx: musl falls back to fstatat
+        (return (- eNOSYS)))
+      (case [7] ; poll
+        (return (.poll s a1 a2)))
+      (case [271] ; ppoll
+        (return (.poll s a1 a2)))
+      (case [270] ; pselect6
+        (return (.pselect s a1 a2 a3 a4)))
+      (case [8] ; lseek
+        (return (.lseek s (fdArg a1) (conv int64 a2) (conv int (conv int32 a3)))))
+      (case [9]
+        (return (.mmap s a1 a2 a4 (fdArg a5))))
+      (case [10] ; mprotect
+        (return 0))
+      (case [11] ; munmap
+        (when (or (!= (% a1 PageSize) 0) (== a2 0))
+          (return (- eINVAL)))
+
+        (.Unmap m a1 (pageUp a2))
+        (return 0))
+      (case [12] ; brk
+        (return (conv int64 (.Brk m a1))))
+      (case [13]
+        (return (.sigaction s (conv int a1) a2 a3)))
+      (case [14]
+        (return (.sigprocmask s (conv int (conv int32 a1)) a2 a3)))
+      (case [16] ; ioctl: nothing is a terminal
+        (return (- eNOTTY)))
+      (case [17] ; pread64
+        (let [of (.get s (fdArg a1))]
+          (when (== of nil)
+            (return (- eBADF)))
+
+          (when (or (== (.-f of) nil) (.-dir of))
+            (when (== (.-f of) nil)
+              (return (- eSPIPE)))
+
+            (return (- eISDIR)))
+
+          (let [(values k err) (.ReadAt (.-f of) (.W m a2 (clampCount a3)) (conv int64 a4))]
+            (when (and (!= err nil) (!= err io/EOF))
+              (return (eno err)))
+
+            (return (conv int64 k)))))
+      (case [18] ; pwrite64
+        (let [of (.get s (fdArg a1))]
+          (when (== of nil)
+            (return (- eBADF)))
+
+          (when (== (.-f of) nil)
+            (return (- eSPIPE)))
+
+          (let [(values k err) (.WriteAt (.-f of) (.R m a2 (clampCount a3)) (conv int64 a4))]
+            (when (and (!= err nil) (== k 0))
+              (return (eno err)))
+
+            (return (conv int64 k)))))
+      (case [19 20] ; readv, writev
+        (return (.vector s (== n 19) (fdArg a1) a2 a3)))
+      (case [21] ; access
+        (let [(values p e) (.resolve s sysAtFDCWD (.CString m a1))]
+          (when (!= e 0)
+            (return e))
+
+          (return (errOrZero (syscall/Access p (conv uint32 a2))))))
+      (case [269 439] ; faccessat, faccessat2
+        (let [(values p e) (.pathArg s (fdArg a1) a2)]
+          (when (!= e 0)
+            (return e))
+
+          (return (errOrZero (syscall/Access p (conv uint32 a3))))))
+      (case [22]
+        (return (.pipe s a1 0)))
+      (case [293]
+        (return (.pipe s a1 (conv int a2))))
+      (case [24] ; sched_yield
+        (return 0))
+      (case [25]
+        (return (.mremap s a1 a2 a3 (conv int a4))))
+      (case [28] ; madvise
+        (return 0))
+      (case [32] ; dup
+        (let [of (.get s (fdArg a1))]
+          (when (== of nil)
+            (return (- eBADF)))
+
+          (return (.alloc s of 0 false))))
+      (case [33 292] ; dup2, dup3
+        (let [of (.get s (fdArg a1))]
+          (when (== of nil)
+            (return (- eBADF)))
+
+          (let [nfd (fdArg a2)]
+            (when (< nfd 0)
+              (return (- eBADF)))
+
+            (when (== nfd (fdArg a1))
+              (when (== n 292)
+                (return (- eINVAL)))
+
+              (return (conv int64 nfd)))
+
+            (when (!= (aget (.-fds s) nfd) nil)
+              (.release s nfd))
+
+            (inc! (.-refs of))
+            (aset (.-fds s) nfd (addr (lit sysFd :of of :cloexec (and (== n 292) (!= (bit-and a3 oCloexec) 0)))))
+            (return (conv int64 nfd)))))
+      (case [35] ; nanosleep
+        (let [(values d e) (readTimespec m a1)]
+          (when (!= e 0)
+            (return e))
+
+          (time/Sleep d)
+          (when (!= a2 0)
+            (.Fill m a2 0 16))
+
+          (return 0)))
+      (case [39 186] ; getpid, gettid
+        (return sysPid))
+      (case [60 231] ; exit, exit_group
+        (panic (addr (lit Exit :Code (conv int (bit-and a1 0xff))))))
+      (case [62] ; kill
+        (when [p (conv int32 a1)] (and (!= p sysPid) (!= p 0))
+          (return (- eSRCH)))
+
+        (return (.raise s (conv int (conv int32 a2)))))
+      (case [200] ; tkill
+        (when (!= (conv int32 a1) sysPid)
+          (return (- eSRCH)))
+
+        (return (.raise s (conv int (conv int32 a2)))))
+      (case [234] ; tgkill
+        (when (or (!= (conv int32 a1) sysPid) (!= (conv int32 a2) sysPid))
+          (return (- eSRCH)))
+
+        (return (.raise s (conv int (conv int32 a3)))))
+      (case [63] ; uname
+        (let [b (.W m a1 390)]
+          (range [i b]
+            (aset b i 0))
+
+          (range [i f (lit (slice string) "Linux" "arbace" "6.18.0" "#1" "x86_64" "(none)")]
+            (copy (subslice b (* i 65) (+ (* i 65) 64)) f))
+
+          (return 0)))
+      (case [72]
+        (return (.fcntl s (fdArg a1) (conv int (conv int32 a2)) a3)))
+      (case [74 75] ; fsync, fdatasync
+        (let [of (.get s (fdArg a1))]
+          (when (== of nil)
+            (return (- eBADF)))
+
+          (when (!= (.-f of) nil)
+            (when [err (.Sync (.-f of))] (and (!= err nil) (!= (errnoOf err) eINVAL))
+              (return (eno err))))
+
+
+          (return 0)))
+      (case [77] ; ftruncate
+        (let [of (.get s (fdArg a1))]
+          (when (== of nil)
+            (return (- eBADF)))
+
+          (when (== (.-f of) nil)
+            (return (- eINVAL)))
+
+          (return (errOrZero (.Truncate (.-f of) (conv int64 a2))))))
+      (case [79] ; getcwd
+        (let [b (append (conv (slice byte) (.-cwd s)) 0)]
+          (when (> (conv uint64 (len b)) a2)
+            (return (- eRANGE)))
+
+          (copy (.W m a1 (conv uint64 (len b))) b)
+          (return (conv int64 (len b)))))
+      (case [80] ; chdir
+        (let [(values p e) (.resolve s sysAtFDCWD (.CString m a1))]
+          (when (!= e 0)
+            (return e))
+
+          (let [(values fi err) (os/Stat p)]
+            (when (!= err nil)
+              (return (eno err)))
+
+            (when (not (.IsDir fi))
+              (return (- eNOTDIR)))
+
+            (set! (.-cwd s) (filepath/Clean p))
+            (return 0))))
+      (case [82] ; rename
+        (return (.rename s sysAtFDCWD a1 sysAtFDCWD a2)))
+      (case [264 316] ; renameat, renameat2
+        (when (and (== n 316) (!= a5 0))
+          (return (- eINVAL)))
+
+        (return (.rename s (fdArg a1) a2 (fdArg a3) a4)))
+      (case [83] ; mkdir
+        (let [(values p e) (.resolve s sysAtFDCWD (.CString m a1))]
+          (when (!= e 0)
+            (return e))
+
+          (return (errOrZero (syscall/Mkdir p (bit-and (bit-and-not (conv uint32 a2) (.-umask s)) 0777))))))
+      (case [84] ; rmdir
+        (let [(values p e) (.resolve s sysAtFDCWD (.CString m a1))]
+          (when (!= e 0)
+            (return e))
+
+          (return (errOrZero (syscall/Rmdir p)))))
+      (case [87] ; unlink
+        (let [(values p e) (.resolve s sysAtFDCWD (.CString m a1))]
+          (when (!= e 0)
+            (return e))
+
+          (return (errOrZero (syscall/Unlink p)))))
+      (case [263] ; unlinkat
+        (let [(values p e) (.pathArg s (fdArg a1) a2)]
+          (when (!= e 0)
+            (return e))
+
+          (when (!= (bit-and a3 0x200) 0)
+            (return (errOrZero (syscall/Rmdir p))))
+
+          (return (errOrZero (syscall/Unlink p)))))
+      (case [89]
+        (return (.readlink s sysAtFDCWD a1 a2 a3)))
+      (case [267]
+        (return (.readlink s (fdArg a1) a2 a3 a4)))
+      (case [95] ; umask
+        (let [old (.-umask s)]
+          (set! (.-umask s) (bit-and (conv uint32 a1) 0777))
+          (return (conv int64 old))))
+      (case [96] ; gettimeofday
+        (let [now (time/Now)]
+          (.Store64 m a1 (conv uint64 (.Unix now)))
+          (.Store64 m (+ a1 8) (conv uint64 (/ (.Nanosecond now) 1000)))
+          (when (!= a2 0)
+            (.Fill m a2 0 8))
+
+          (return 0)))
+      (case [97] ; getrlimit
+        (return (.rlimit s a1 a2)))
+      (case [302] ; prlimit64
+        (when (== a4 0)
+          (return 0))
+
+        (return (.rlimit s a2 a4)))
+      (case [102 104 107 108] ; getuid, getgid, geteuid, getegid
+        (return 0))
+      (case [110] ; getppid
+        (return 1))
+      (case [131] ; sigaltstack
+        (return 0))
+      (case [158] ; arch_prctl
+        (switch a1
+          (case [0x1002]
+            (set! (.-FS s) a2)
+            (return 0))
+          (case [0x1003]
+            (.Store64 m a2 (.-FS s))
+            (return 0)))
+
+        (return (- eINVAL)))
+      (case [201] ; time
+        (let [t (.Unix (time/Now))]
+          (when (!= a1 0)
+            (.Store64 m a1 (conv uint64 t)))
+
+          (return t)))
+      (case [202] ; futex (single-threaded)
+        (switch (bit-and a2 127)
+          (case [0 9] ; WAIT, WAIT_BITSET
+            (when (!= (.Load32 m a1) (conv uint32 a3))
+              (return (- eAGAIN)))
+
+            (return 0))
+          (case [1 10 3 4 5] ; WAKE, WAKE_BITSET, REQUEUE, CMP_REQUEUE, WAKE_OP
+            (return 0)))
+
+        (return (- eNOSYS)))
+      (case [218] ; set_tid_address
+        (set! (.-tidAddr s) a1)
+        (return sysPid))
+      (case [217] ; getdents64
+        (return (.getdents s (fdArg a1) a2 a3)))
+      (case [228] ; clock_gettime
+        (let [(values sec nsec ok) (.clockNow s (fdArg a1))]
+          (when (not ok)
+            (return (- eINVAL)))
+
+          (.Store64 m a2 (conv uint64 sec))
+          (.Store64 m (+ a2 8) (conv uint64 nsec))
+          (return 0)))
+      (case [229] ; clock_getres
+        (when [(values _ _ ok) (.clockNow s (fdArg a1))] (not ok)
+          (return (- eINVAL)))
+
+        (when (!= a2 0)
+          (.Store64 m a2 0)
+          (.Store64 m (+ a2 8) 1))
+
+        (return 0))
+      (case [230] ; clock_nanosleep
+        (let [(values d e) (readTimespec m a3)]
+          (when (!= e 0)
+            (return e))
+
+          (let [(values sec nsec ok) (.clockNow s (fdArg a1))]
+            (when (not ok)
+              (return (- eINVAL)))
+
+            (when (!= (bit-and a2 1) 0) ; TIMER_ABSTIME
+              (set! d - (+ (* (conv time/Duration sec) time/Second) (conv time/Duration nsec))))
+
+            (when (> d 0)
+              (time/Sleep d))
+
+            (return 0))))
+      (case [318] ; getrandom
+        (let [b (.W m a1 (clampCount a2))]
+          (when [(values _ err) (rand/Read b)] (!= err nil)
+            (return (eno err)))
+
+          (return (conv int64 (len b))))))
+
+    (- eNOSYS)))
+
+
+^{:go/breaks [[4 628]] :go/end 629} (go/func errOrZero ^int64 [^error err]
+  (when (!= err nil)
+    (return (eno err)))
+
+  0)
+
+
+^{:go/end 640} (go/func readTimespec [^{:tag (* Mem)} m ^uint64 a] :results [time/Duration int64]
+  (let [(values sec nsec) (values (conv int64 (.Load64 m a)) (conv int64 (.Load64 m (+ a 8))))]
+    (when (or (< sec 0) (< nsec 0) (>= nsec 1.0E9))
+      (return 0 (- eINVAL)))
+
+    (when (> sec (<< 1 32))
+      (set! sec (<< 1 32)))
+
+    (return (+ (* (conv time/Duration sec) time/Second) (conv time/Duration nsec)) 0)))
+
+
+^{:go/end 652} (go/method clockNow [^{:tag (* Sys)} s ^int id] :results [^int64 sec ^int64 nsec ^bool ok]
+  (when (or (< id 0) (> id 11))
+    (return 0 0 false))
+
+  (when (or (== id 0) (== id 5)) ; REALTIME, REALTIME_COARSE
+    (let [t (time/Now)]
+      (return (.Unix t) (conv int64 (.Nanosecond t)) true)))
+
+  (let [d (+ (conv int64 (time/Since (.-start s))) (* 1000 1.0E9))]
+    (return (/ d 1.0E9) (% d 1.0E9) true)))
+
+
+^{:go/end 663} (go/method doRead ^int64 [^{:tag (* Sys)} s ^{:tag (* sysFile)} of ^{:tag (slice byte)} b]
+  ^{:go/breaks [[4 662]]} (let [(values k err) (.read of b)]
+    (when (> k 0)
+      (return (conv int64 k)))
+
+    (when (and (!= err nil) (!= err io/EOF))
+      (return (eno err)))
+
+    0))
+
+
+^{:go/end 671} (go/method doWrite ^int64 [^{:tag (* Sys)} s ^{:tag (* sysFile)} of ^{:tag (slice byte)} b]
+  (let [(values k err) (.write of b)]
+    (when (and (!= err nil) (== k 0))
+      (return (eno err)))
+
+    (conv int64 k)))
+
+
+
+^{:go/end 703} (go/method vector "vector is readv (read) or writev over the struct iovec array at iov.\n" ^int64 [^{:tag (* Sys)} s ^bool read ^int fd ^uint64 iov ^uint64 cnt]
+  (let [of (.get s fd)]
+    (when (== of nil)
+      (return (- eBADF)))
+
+    (when (> cnt 1024)
+      (return (- eINVAL)))
+
+    (let [^int64 total (zero int64)]
+      (for [i (conv uint64 0)] (< i cnt) (inc! i)
+        (let [(values base n) (values (.Load64 (.-M s) (+ iov (* 16 i))) (clampCount (.Load64 (.-M s) (+ iov (* 16 i) 8))))
+            ^{:line 685 :tag int64} r (zero int64)]
+          (if read
+            (set! r (.doRead s of (.W (.-M s) base n)))
+
+            (set! r (.doWrite s of (.R (.-M s) base n))))
+
+          (when (< r 0)
+            (when (> total 0)
+              (return total))
+
+            (return r))
+
+          (set! total + r)
+          (when (< (conv uint64 r) n)
+            (break))))
+
+
+      ^{:line 702} total)))
+
+
+^{:go/end 748} (go/method open ^int64 [^{:tag (* Sys)} s ^int dirfd ^string p ^int flags ^uint32 mode]
+  (let [(values path e) (.resolve s dirfd p)]
+    (when (!= e 0)
+      (return e))
+
+    (let [^int gf (zero int)]
+      (switch (bit-and flags 3)
+        (case [0]
+          (set! gf os/O_RDONLY))
+        (case [1]
+          (set! gf os/O_WRONLY))
+        (case [2]
+          (set! gf os/O_RDWR))
+        (default
+          (return (- eINVAL))))
+
+      (when (!= (bit-and flags oCreat) 0)
+        (set! gf bit-or os/O_CREATE))
+
+      (when (!= (bit-and flags oExcl) 0)
+        (set! gf bit-or os/O_EXCL))
+
+      (when (!= (bit-and flags oTrunc) 0)
+        (set! gf bit-or os/O_TRUNC))
+
+      (when (!= (bit-and flags oAppend) 0)
+        (set! gf bit-or os/O_APPEND))
+
+      (let [(values f err) (os/OpenFile path gf (conv os/FileMode (bit-and (bit-and-not mode (.-umask s)) 0777)))]
+        (when (!= err nil)
+          (return (eno err)))
+
+        (let [(values fi ^:assign err) (.Stat f)]
+          (when (!= err nil)
+            (.Close f)
+            (return (eno err)))
+
+          (when (and (!= (bit-and flags oDirectory) 0) (not (.IsDir fi)))
+            (.Close f)
+            (return (- eNOTDIR)))
+
+          (let [of (addr (lit sysFile :f f :flags (bit-and-not flags (bit-or oCreat oExcl oTrunc oDirectory oCloexec)) :dir (.IsDir fi) :path (filepath/Clean path)))]
+            (.alloc s of 0 (!= (bit-and flags oCloexec) 0))))))))
+
+
+^{:go/end 766} (go/method lseek ^int64 [^{:tag (* Sys)} s ^int fd ^int64 off ^int whence]
+  (let [of (.get s fd)]
+    (when (== of nil)
+      (return (- eBADF)))
+
+    (when (== (.-f of) nil)
+      (return (- eSPIPE)))
+
+    (when (.-dir of)
+      (set! (.-pos of) 0))
+
+    (let [(values pos err) (.Seek (.-f of) off whence)]
+      (when (!= err nil)
+        (return (eno err)))
+
+      ^{:line 765} pos)))
+
+
+^{:go/end 780} (go/method pipe ^int64 [^{:tag (* Sys)} s ^uint64 ptr ^int flags]
+  (let [(values r w err) (os/Pipe)]
+    (when (!= err nil)
+      (return (eno err)))
+
+    ^{:go/breaks [4]} (let [cx (!= (bit-and flags oCloexec) 0)
+        ^{:line 774} rfd (.alloc s (addr (lit sysFile :f r :flags syscall/O_RDONLY)) 0 cx)
+        ^{:line 775} wfd (.alloc s (addr (lit sysFile :f w :flags syscall/O_WRONLY)) 0 cx)
+        ^{:line 776} b (.W (.-M s) ptr 8)]
+      (.PutUint32 binary/LittleEndian b (conv uint32 rfd))
+      (.PutUint32 binary/LittleEndian (subslice b 4) (conv uint32 wfd))
+      0)))
+
+
+^{:go/end 811} (go/method fcntl ^int64 [^{:tag (* Sys)} s ^int fd ^int cmd ^uint64 arg]
+  (let [e (aget (.-fds s) fd)]
+    (when (== e nil)
+      (return (- eBADF)))
+
+    (switch cmd
+      (case [0 1030] ; F_DUPFD, F_DUPFD_CLOEXEC
+        (when (< (conv int32 arg) 0)
+          (return (- eINVAL)))
+
+        (return (.alloc s (.-of e) (conv int (conv int32 arg)) (== cmd 1030))))
+      (case [1] ; F_GETFD
+        (when (.-cloexec e)
+          (return 1))
+
+        (return 0))
+      (case [2] ; F_SETFD
+        (set! (.-cloexec e) (!= (bit-and arg 1) 0))
+        (return 0))
+      (case [3] ; F_GETFL
+        (return (conv int64 (.-flags (.-of e)))))
+      (case [4] ; F_SETFL
+        (let [^:const ^{:val 27648} settable (bit-or oAppend oNonblock 020000 040000)]
+          (set! (.-flags (.-of e)) (bit-or (bit-and-not (.-flags (.-of e)) settable) (bit-and (conv int arg) settable)))
+          (return 0)))
+      (case [5 6 7] ; record locks: nothing contends
+        (return 0)))
+
+    (- eINVAL)))
+
+
+^{:go/end 835} (go/method poll ^int64 [^{:tag (* Sys)} s ^uint64 ptr ^uint64 n]
+  (when (> n (<< 1 16))
+    (return (- eINVAL)))
+
+  (let [^int64 cnt (zero int64)]
+    (for [i (conv uint64 0)] (< i n) (inc! i)
+      (let [p (+ ptr (* 8 i))
+          (values fd ev) (values (conv int32 (.Load32 (.-M s) p)) (.Load16 (.-M s) (+ p 4)))
+          ^{:line 821 :tag uint16} rev (zero uint16)]
+        (when (>= fd 0)
+          (if (== (.get s (conv int fd)) nil)
+            (set! rev 0x20) ; POLLNVAL
+
+            (set! rev (bit-and ev 5)))) ; POLLIN|POLLOUT: always ready
+
+
+        (.Store16 (.-M s) (+ p 6) rev)
+        (when (!= rev 0)
+          (inc! cnt))))
+
+
+    ^{:line 834} cnt))
+
+
+^{:go/end 857} (go/method pselect ^int64 [^{:tag (* Sys)} s ^uint64 nfds ^uint64 rd ^uint64 wr ^uint64 ex]
+  (when (> nfds 1024)
+    (return (- eINVAL)))
+
+  (let [^int64 cnt (zero int64)]
+    (range [_ set (lit (slice uint64) rd wr)]
+      (when (== set 0)
+        (continue))
+
+      (let [b (.R (.-M s) set (/ (+ nfds 7) 8))]
+        (for [i 0] (< i (conv int nfds)) (inc! i)
+          (when (!= (bit-and (>> (aget b (/ i 8)) (% i 8)) 1) 0)
+            (when (== (.get s i) nil)
+              (return (- eBADF)))
+
+            (inc! cnt)))))
+
+
+
+    ^{:line 856} cnt))
+
+
+^{:go/end 876} (go/method mmap ^int64 [^{:tag (* Sys)} s ^uint64 addr ^uint64 length ^uint64 flags ^int fd]
+  (when (== length 0)
+    (return (- eINVAL)))
+
+  (when (== (bit-and flags 0x20) 0) ; not MAP_ANONYMOUS
+    (return (- eNODEV)))
+
+  (let [size (pageUp length)]
+    (when (!= (bit-and flags 0x10) 0) ; MAP_FIXED
+      (when (!= (% addr PageSize) 0)
+        (return (- eINVAL)))
+
+      (.Unmap (.-M s) addr size)
+      (.Map (.-M s) addr size false "mmap")
+      (return (conv int64 addr)))
+
+    (conv int64 (.Mmap (.-M s) addr size))))
+
+
+^{:go/end 897} (go/method mremap ^int64 [^{:tag (* Sys)} s ^uint64 old ^uint64 oldsz ^uint64 newsz ^int flags]
+  (when (or (!= (% old PageSize) 0) (== newsz 0) (!= (bit-and-not flags 1) 0))
+    (return (- eINVAL)))
+
+  (set! (values oldsz newsz) (values (pageUp oldsz) (pageUp newsz)))
+  (when (<= newsz oldsz)
+    (when (< newsz oldsz)
+      (.Unmap (.-M s) (+ old newsz) (- oldsz newsz)))
+
+    (return (conv int64 old)))
+
+  (when (== (bit-and flags 1) 0) ; no MREMAP_MAYMOVE: growing in place is not offered
+    (return (- eNOMEM)))
+
+  (.R (.-M s) old oldsz) ; faults (EFAULT) if the old range is not mapped
+  (let [a (.Mmap (.-M s) 0 newsz)]
+    (.Move (.-M s) a old oldsz)
+    (.Unmap (.-M s) old oldsz)
+    (conv int64 a)))
+
+
+^{:go/end 910} (go/method rlimit ^int64 [^{:tag (* Sys)} s ^uint64 res ^uint64 ptr]
+  (when (>= res 16)
+    (return (- eINVAL)))
+
+  ^{:go/breaks [5]} (let [cur (bit-not (conv uint64 0))]
+    (when (== res 3) ; RLIMIT_STACK
+      (set! cur StackSize))
+
+    (.Store64 (.-M s) ptr cur)
+    (.Store64 (.-M s) (+ ptr 8) (bit-not (conv uint64 0)))
+    0))
+
+
+^{:go/end 922} (go/method rename ^int64 [^{:tag (* Sys)} s ^int od ^uint64 op ^int nd ^uint64 np]
+  (let [(values o e) (.pathArg s od op)]
+    (when (!= e 0)
+      (return e))
+
+    (let [(values n ^:assign e) (.pathArg s nd np)]
+      (when (!= e 0)
+        (return e))
+
+      (errOrZero (syscall/Rename o n)))))
+
+
+^{:go/end 939} (go/method readlink ^int64 [^{:tag (* Sys)} s ^int dirfd ^uint64 p ^uint64 buf ^uint64 size]
+  (let [(values path e) (.pathArg s dirfd p)]
+    (when (!= e 0)
+      (return e))
+
+    (when (<= (conv int64 size) 0)
+      (return (- eINVAL)))
+
+    (let [tmp (make (slice byte) (min size (<< 1 16)))
+        (values k err) (syscall/Readlink path tmp)]
+      (when (!= err nil)
+        (return (eno err)))
+
+      (copy (.W (.-M s) buf (conv uint64 k)) (subslice tmp _ k))
+      (conv int64 k))))
+
+
+;; Signals.
+
+^{:go/breaks [[7 962]] :go/end 963} (go/method sigaction ^int64 [^{:tag (* Sys)} s ^int sig ^uint64 act ^uint64 old]
+  (when (or (< sig 1) (> sig 64))
+    (return (- eINVAL)))
+
+  (when (and (!= act 0) ^:go/paren (or (== sig SIGKILL) (== sig sigSTOP)))
+    (return (- eINVAL)))
+
+  (when (!= old 0)
+    (let [b (.W (.-M s) old 32)]
+      (range [i v (aget (.-actions s) sig)]
+        (.PutUint64 binary/LittleEndian (subslice b (* 8 i)) v))))
+
+
+  (when (!= act 0)
+    (let [b (.R (.-M s) act 32)]
+      (range [i (aget (.-actions s) sig)]
+        (aset (aget (.-actions s) sig) i (.Uint64 binary/LittleEndian (subslice b (* 8 i)))))))
+
+
+  0)
+
+
+^{:go/end 993} (go/method sigprocmask ^int64 [^{:tag (* Sys)} s ^int how ^uint64 set ^uint64 old]
+  (when (!= old 0)
+    (.Store64 (.-M s) old (.-mask s)))
+
+  (when (== set 0)
+    (return 0))
+
+  ^{:go/breaks [[5 992]]} (let [v (.Load64 (.-M s) set)]
+    (switch how
+      (case [0]
+        (set! (.-mask s) bit-or v))
+      (case [1]
+        (set! (.-mask s) bit-and-not v))
+      (case [2]
+        (set! (.-mask s) v))
+      (default
+        (return (- eINVAL))))
+
+    (set! (.-mask s) bit-and-not (bit-or (<< 1 (- SIGKILL 1)) (<< 1 (- sigSTOP 1))))
+    ;; signals that were pending and are no longer blocked are delivered now
+    (for [sig 1] (<= sig 64) (inc! sig)
+      (let [bit (<< (conv uint64 1) (- sig 1))]
+        (when (and (!= (bit-and (.-pending s) bit) 0) (== (bit-and (.-mask s) bit) 0))
+          (set! (.-pending s) bit-and-not bit)
+          (.deliver s sig))))
+
+
+    0))
+
+
+
+^{:go/end 1014} (go/method raise "raise generates sig for the program itself (kill, tkill, tgkill).\n" ^int64 [^{:tag (* Sys)} s ^int sig]
+  (when (or (< sig 0) (> sig 64))
+    (return (- eINVAL)))
+
+  (when (== sig 0)
+    (return 0))
+
+  ^{:go/breaks [5]} (let [bit (<< (conv uint64 1) (- sig 1))
+      ^{:line 1004} h (aget (aget (.-actions s) sig) 0)]
+    (when (or (== h 1) ^:go/paren (and (== h 0) (ignoredByDefault sig)))
+      (return 0)) ; discarded, blocked or not
+
+    (when (and (!= (bit-and (.-mask s) bit) 0) (!= sig SIGKILL) (!= sig sigSTOP))
+      (set! (.-pending s) bit-or bit)
+      (return 0))
+
+    (.deliver s sig)
+    0))
+
+
+^{:go/end 1016} (go/func ignoredByDefault ^bool [^int sig] (or (== sig SIGCHLD) (== sig sigURG) (== sig sigWINCH)))
+
+^{:go/end 1042} (go/method deliver [^{:tag (* Sys)} s ^int sig]
+  (let [h (aget (aget (.-actions s) sig) 0)]
+    (switch
+      (case [(== h 1)]
+        (return))
+      (case [(and (!= h 0) (!= sig SIGKILL) (!= sig sigSTOP))]
+        (when (!= (.-Handler s) nil)
+          (let [ran false]
+            (^{:go/end 1033} (fn []
+                (defer (^{:go/end 1031} (fn []
+                      (when [r (recover)] (!= r nil)
+                        (panic (lit passthru r))))))
+
+
+                (set! ran ((.-Handler s) sig h))))
+
+            (when ran
+              (return)))))
+
+
+      (case [(ignoredByDefault sig)]
+        (return)))
+
+    (panic (addr (lit Exit :Code (+ 128 sig) :Signal sig)))))
+
+
+;; Files.
+
+^{:go/end 1062} (go/method fstat ^int64 [^{:tag (* Sys)} s ^int fd ^uint64 buf]
+  (let [of (.get s fd)]
+    (when (== of nil)
+      (return (- eBADF)))
+
+    (let [b (.W (.-M s) buf 144)]
+      (when (.-chr of)
+        (sysPutStat b nil)
+        (return 0))
+
+      ^{:go/breaks [4]} (let [(values fi err) (.Stat (.-f of))]
+        (when (!= err nil)
+          (return (eno err)))
+
+        (sysPutStat b fi)
+        0))))
+
+
+^{:go/end 1081} (go/method statPath ^int64 [^{:tag (* Sys)} s ^int dirfd ^string p ^uint64 buf ^bool follow]
+  (let [(values path e) (.resolve s dirfd p)]
+    (when (!= e 0)
+      (return e))
+
+    ^{:go/breaks [5]} (let [^os/FileInfo fi (zero os/FileInfo)
+        ^{:line 1070 :tag error} err (zero error)]
+      (if follow
+        (set! (values fi err) (os/Stat path))
+
+        (set! (values fi err) (os/Lstat path)))
+
+      (when (!= err nil)
+        (return (eno err)))
+
+      (sysPutStat (.W (.-M s) buf 144) fi)
+      0)))
+
+
+
+^{:go/end 1148} (go/func sysPutStat "sysPutStat fills a 144-byte x86-64 struct stat; fi nil is a character device (a terminal).\n" [^{:tag (slice byte)} b ^os/FileInfo fi]
+  (range [i b]
+    (aset b i 0))
+
+  (let [le binary/LittleEndian
+      ^{:line 1089} put ^{:go/end 1089} (fn [^int o ^uint64 v] (.PutUint64 le (subslice b o) v))]
+    (when (== fi nil)
+      (put 16 1)
+      (.PutUint32 le (subslice b 24) 0020620)
+      (put 40 0x8800)
+      (put 56 1024)
+      (let [now (time/Now)]
+        (range [_ o (lit (slice int) 72 88 104)]
+          (put o (conv uint64 (.Unix now)))
+          (put (+ o 8) (conv uint64 (.Nanosecond now))))
+
+        (return)))
+
+    (when [(values st ok) (assert (* syscall/Stat_t) (.Sys fi))] ok
+      (put 0 (conv uint64 (.-Dev st)))
+      (put 8 (conv uint64 (.-Ino st)))
+      (put 16 (conv uint64 (.-Nlink st)))
+      (.PutUint32 le (subslice b 24) (conv uint32 (.-Mode st)))
+      (.PutUint32 le (subslice b 28) (.-Uid st))
+      (.PutUint32 le (subslice b 32) (.-Gid st))
+      (put 40 (conv uint64 (.-Rdev st)))
+      (put 48 (conv uint64 (.-Size st)))
+      (put 56 (conv uint64 (.-Blksize st)))
+      (put 64 (conv uint64 (.-Blocks st)))
+      (put 72 (conv uint64 (.-Sec (.-Atim st))))
+      (put 80 (conv uint64 (.-Nsec (.-Atim st))))
+      (put 88 (conv uint64 (.-Sec (.-Mtim st))))
+      (put 96 (conv uint64 (.-Nsec (.-Mtim st))))
+      (put 104 (conv uint64 (.-Sec (.-Ctim st))))
+      (put 112 (conv uint64 (.-Nsec (.-Ctim st))))
+      (return))
+
+    (let [mode (conv uint32 (.Perm (.Mode fi)))]
+      (switch [t (.Type (.Mode fi))]
+        (case [(.IsDir t)]
+          (set! mode bit-or 0040000))
+        (case [(!= (bit-and t fs/ModeSymlink) 0)]
+          (set! mode bit-or 0120000))
+        (case [(!= (bit-and t fs/ModeNamedPipe) 0)]
+          (set! mode bit-or 0010000))
+        (case [(!= (bit-and t fs/ModeSocket) 0)]
+          (set! mode bit-or 0140000))
+        (case [(!= (bit-and t fs/ModeCharDevice) 0)]
+          (set! mode bit-or 0020000))
+        (case [(!= (bit-and t fs/ModeDevice) 0)]
+          (set! mode bit-or 0060000))
+        (default
+          (set! mode bit-or 0100000)))
+
+      (put 16 1)
+      (.PutUint32 le (subslice b 24) mode)
+      (put 48 (conv uint64 (.Size fi)))
+      (put 56 4096)
+      (put 64 (conv uint64 (/ (+ (.Size fi) 511) 512)))
+      (let [mt (.ModTime fi)]
+        (range [_ o (lit (slice int) 72 88 104)]
+          (put o (conv uint64 (.Unix mt)))
+          (put (+ o 8) (conv uint64 (.Nanosecond mt))))))))
+
+
+
+^{:go/end 1212} (go/method getdents ^int64 [^{:tag (* Sys)} s ^int fd ^uint64 buf ^uint64 count]
+  (let [of (.get s fd)]
+    (when (== of nil)
+      (return (- eBADF)))
+
+    (when (not (.-dir of))
+      (return (- eNOTDIR)))
+
+    (when (not (.-loaded of))
+      (let [(values es _) (.ReadDir (.-f of) -1)]
+        (set! (.-ents of) (lit (slice sysDirent) (lit _ "." 4 1) (lit _ ".." 4 2)))
+        (range [i e es]
+          (let [d (lit sysDirent :name (.Name e) :ino (conv uint64 (+ i 3)))]
+            (switch [t (.Type e)]
+              (case [(.IsDir t)]
+                (set! (.-typ d) 4))
+              (case [(!= (bit-and t fs/ModeSymlink) 0)]
+                (set! (.-typ d) 10))
+              (case [(!= (bit-and t fs/ModeNamedPipe) 0)]
+                (set! (.-typ d) 1))
+              (case [(!= (bit-and t fs/ModeSocket) 0)]
+                (set! (.-typ d) 12))
+              (case [(!= (bit-and t fs/ModeCharDevice) 0)]
+                (set! (.-typ d) 2))
+              (case [(!= (bit-and t fs/ModeDevice) 0)]
+                (set! (.-typ d) 6))
+              (case [(== t 0)]
+                (set! (.-typ d) 8)))
+
+            (when [(values fi err) (.Info e)] (== err nil)
+              (when [(values st ok) (assert (* syscall/Stat_t) (.Sys fi))] ok
+                (set! (.-ino d) (conv uint64 (.-Ino st)))))
+
+
+            (set! (.-ents of) (append (.-ents of) d))))
+
+        (set! (.-loaded of) true)))
+
+    (let [b (.W (.-M s) buf count)
+        ^{:line 1189} off 0]
+      (while (< (.-pos of) (len (.-ents of)))
+        (let [e (aget (.-ents of) (.-pos of))
+            ^{:line 1192} reclen (bit-and-not (+ 19 (len (.-name e)) 1 7) 7)]
+          (when (> (+ off reclen) (len b))
+            (break))
+
+          (let [r (subslice b off (+ off reclen))]
+            (range [i r]
+              (aset r i 0))
+
+            (.PutUint64 binary/LittleEndian r (.-ino e))
+            (.PutUint64 binary/LittleEndian (subslice r 8) (conv uint64 (+ (.-pos of) 1)))
+            (.PutUint16 binary/LittleEndian (subslice r 16) (conv uint16 reclen))
+            (aset r 18 (.-typ e))
+            (copy (subslice r 19) (.-name e))
+            (set! off + reclen)
+            (inc! (.-pos of)))))
+
+      (when (and (== off 0) (< (.-pos of) (len (.-ents of))))
+        (return (- eINVAL)))
+
+      (conv int64 off))))

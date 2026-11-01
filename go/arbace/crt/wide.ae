@@ -1,0 +1,385 @@
+(in-ns 'go.arbace.crt) (go/file "wide.go" :imports [
+
+
+    ^{:line 4} [math "math"]
+    ^{:line 5} [big "math/big"]
+    ^{:line 6} [bits "math/bits"]
+    ^{:line 7} [strings "strings"]])
+
+
+
+
+(go/type Wide "Wide is a value of a wide integer type: limbs least significant first, len = (N+63)/64,\nalways normalized: the bits above N sign-extended (signed) or zero (unsigned) within the top limb.\n" (slice uint64))
+
+
+(go/type WType "WType is a wide integer type: __int128 (N=128) or _BitInt(N), with its signedness.\n" (struct
+    ^{:line 16 :tag int} N
+    ^{:line 17 :tag bool} Signed))
+
+
+
+^{:go/end 21} (go/method Limbs "Limbs is the number of 64-bit limbs of a value of t.\n" ^int [^WType t] (/ (+ (.-N t) 63) 64))
+
+
+^{:go/end 29} (go/method Size "Size is the bytes a value of t takes in memory: 16 for N<=128, else 8*ceil(N/64).\n" ^uint64 [^WType t]
+  (when (<= (.-N t) 128)
+    (return 16))
+
+  (* 8 (conv uint64 (.Limbs t))))
+
+
+
+
+^{:go/end 38} (go/method Norm "Norm truncates or extends raw limbs to t: zero-extends a short w, drops extra limbs,\nthen wraps modulo 2^N (two's complement) in the top limb. It returns a fresh slice.\n" ^Wide [^WType t ^Wide w]
+  (let [r (make Wide (.Limbs t))]
+    (copy r w)
+    (.fix t r)
+    ^{:line 37} r))
+
+
+^{:go/end 51} (go/method fix [^WType t ^Wide r]
+  (let [b (conv uint (% (.-N t) 64))]
+    (when (or (== b 0) (== (len r) 0))
+      (return))
+
+    (let [top (addr (aget r (- (len r) 1)))]
+      (if (.-Signed t)
+        (set! @top (conv uint64 (>> (conv int64 (<< @top (- 64 b))) (- 64 b))))
+
+        (set! @top bit-and (- (<< (conv uint64 1) b) 1))))))
+
+
+
+^{:go/end 55} (go/method negative ^bool [^WType t ^Wide a]
+  (and (.-Signed t) (< (conv int64 (aget a (- (len a) 1))) 0)))
+
+
+
+^{:go/end 66} (go/func WFromInt64 "WFromInt64 is v converted to t (sign-extended, then wrapped).\n" ^Wide [^WType t ^int64 v]
+  (let [r (make Wide (.Limbs t))]
+    (aset r 0 (conv uint64 v))
+    (for [i 1] (< i (len r)) (inc! i)
+      (aset r i (conv uint64 (>> v 63))))
+
+    (.fix t r)
+    ^{:line 65} r))
+
+
+
+^{:go/end 74} (go/func WFromUint64 "WFromUint64 is v converted to t (zero-extended, then wrapped).\n" ^Wide [^WType t ^uint64 v]
+  (let [r (make Wide (.Limbs t))]
+    (aset r 0 v)
+    (.fix t r)
+    ^{:line 73} r))
+
+
+
+^{:go/end 77} (go/method Int64 "Int64 is w truncated to 64 bits, as a signed value.\n" ^int64 [^WType t ^Wide w] (conv int64 (aget w 0)))
+
+
+^{:go/end 80} (go/method Uint64 "Uint64 is w truncated to 64 bits.\n" ^uint64 [^WType t ^Wide w] (aget w 0))
+
+^{:go/end 94} (go/method toBig ^{:tag (* big/Int)} [^WType t ^Wide w]
+  (let [buf (make (slice byte) (* 8 (len w)))]
+    (range [i l w]
+      (for [j 0] (< j 8) (inc! j)
+        (aset buf (- (len buf) 1 (+ (* 8 i) j)) (conv byte (>> l (* 8 j))))))
+
+
+    (let [b (.SetBytes (new big/Int) buf)]
+      (when (.negative t w)
+        (.Sub b b (.Lsh (new big/Int) (big/NewInt 1) (conv uint (* 64 (len w))))))
+
+      ^{:line 93} b)))
+
+
+^{:go/end 111} (go/method fromBig ^Wide [^WType t ^{:tag (* big/Int)} b]
+  (let [n (.Limbs t)
+      ^{:line 98} mask (.Lsh (new big/Int) (big/NewInt 1) (conv uint (* 64 n)))]
+    (.Sub mask mask (big/NewInt 1))
+    (let [u (.And (new big/Int) b mask)
+        ^{:line 101} buf (make (slice byte) (* 8 n))]
+      (.FillBytes u buf)
+      (let [r (make Wide n)]
+        (range [i r]
+          (for [j 0] (< j 8) (inc! j)
+            (set! (aget r i) bit-or (<< (conv uint64 (aget buf (- (len buf) 1 (+ (* 8 i) j)))) (* 8 j)))))
+
+
+        (.fix t r)
+        ^{:line 110} r))))
+
+
+
+^{:go/end 117} (go/method Float64 "Float64 converts w to float64, rounding to nearest even as gcc does.\n" ^float64 [^WType t ^Wide w]
+  (let [(values f _) (.Float64 (.SetInt (new big/Float) (.toBig t w)))]
+    ^{:line 116} f))
+
+
+^{:go/end 130} (go/method bounds [^WType t] :results [^{:tag (* big/Int)} lo ^{:tag (* big/Int)} hi]
+  (let [one (big/NewInt 1)]
+    (when (.-Signed t)
+      (set! hi (.Lsh (new big/Int) one (conv uint (- (.-N t) 1))))
+      (set! lo (.Neg (new big/Int) hi))
+      (.Sub hi hi one)
+      (return))
+
+    (set! hi (.Lsh (new big/Int) one (conv uint (.-N t))))
+    (.Sub hi hi one)
+    (return (big/NewInt 0) hi)))
+
+
+
+^{:go/end 153} (go/func WFromFloat64 "WFromFloat64 converts f to t, truncating toward zero. NaN gives 0; out of range saturates.\n" ^Wide [^WType t ^float64 f]
+  (when (math/IsNaN f)
+    (return (make Wide (.Limbs t))))
+
+  (let [(values lo hi) (.bounds t)
+      ^{:line 138 :tag (* big/Int)} b (zero (* big/Int))]
+    (switch
+      (case [(math/IsInf f 1)]
+        (set! b hi))
+      (case [(math/IsInf f -1)]
+        (set! b lo))
+      (default
+        (set! (values b _) (.Int (.SetFloat64 (new big/Float) f) nil))
+        (cond (< (.Cmp b lo) 0)
+          (set! b lo)
+          (> (.Cmp b hi) 0)
+          (set! b hi))))
+
+
+    (.fromBig t b)))
+
+
+
+^{:go/end 168} (go/method Conv "Conv converts w of type from to t: extension by from's signedness, then wrap to t.\n" ^Wide [^WType t ^Wide w ^WType from]
+  (let [r (make Wide (.Limbs t))]
+    (copy r w)
+    (let [^uint64 fill (zero uint64)]
+      (when (.negative from w)
+        (set! fill (bit-not (conv uint64 0))))
+
+      (for [i (len w)] (< i (len r)) (inc! i)
+        (aset r i fill))
+
+      (.fix t r)
+      ^{:line 167} r)))
+
+
+
+^{:go/end 179} (go/method Add "Add is a+b modulo 2^N.\n" ^Wide [^WType t ^Wide a ^Wide b]
+  (let [r (make Wide (len a))
+      ^{:line 173 :tag uint64} c (zero uint64)]
+    (range [i r]
+      (set! (values (aget r i) c) (bits/Add64 (aget a i) (aget b i) c)))
+
+    (.fix t r)
+    ^{:line 178} r))
+
+
+
+^{:go/end 190} (go/method Sub "Sub is a-b modulo 2^N.\n" ^Wide [^WType t ^Wide a ^Wide b]
+  (let [r (make Wide (len a))
+      ^{:line 184 :tag uint64} c (zero uint64)]
+    (range [i r]
+      (set! (values (aget r i) c) (bits/Sub64 (aget a i) (aget b i) c)))
+
+    (.fix t r)
+    ^{:line 189} r))
+
+
+
+^{:go/end 195} (go/method Mul "Mul is a*b modulo 2^N.\n" ^Wide [^WType t ^Wide a ^Wide b]
+  (.fromBig t (.Mul (new big/Int) (.toBig t a) (.toBig t b))))
+
+
+
+^{:go/end 198} (go/method Neg "Neg is -a modulo 2^N.\n" ^Wide [^WType t ^Wide a] (.Sub t (make Wide (len a)) a))
+
+
+^{:go/end 208} (go/method Not "Not is the bitwise complement of a within N bits.\n" ^Wide [^WType t ^Wide a]
+  (let [r (make Wide (len a))]
+    (range [i r]
+      (aset r i (bit-not (aget a i))))
+
+    (.fix t r)
+    ^{:line 207} r))
+
+
+
+^{:go/end 217} (go/method And "And is the bitwise and.\n" ^Wide [^WType t ^Wide a ^Wide b]
+  (let [r (make Wide (len a))]
+    (range [i r]
+      (aset r i (bit-and (aget a i) (aget b i))))
+
+    ^{:line 216} r))
+
+
+
+^{:go/end 226} (go/method Or "Or is the bitwise or.\n" ^Wide [^WType t ^Wide a ^Wide b]
+  (let [r (make Wide (len a))]
+    (range [i r]
+      (aset r i (bit-or (aget a i) (aget b i))))
+
+    ^{:line 225} r))
+
+
+
+^{:go/end 235} (go/method Xor "Xor is the bitwise exclusive or.\n" ^Wide [^WType t ^Wide a ^Wide b]
+  (let [r (make Wide (len a))]
+    (range [i r]
+      (aset r i (bit-xor (aget a i) (aget b i))))
+
+    ^{:line 234} r))
+
+
+
+^{:go/end 243} (go/method Div "Div is the truncating quotient a/b; ok is false on division by zero. Signed MIN/-1 wraps to MIN.\n" [^WType t ^Wide a ^Wide b] :results [Wide bool]
+  (when (.IsZero t b)
+    (return (make Wide (len a)) false))
+
+  (return (.fromBig t (.Quo (new big/Int) (.toBig t a) (.toBig t b))) true))
+
+
+
+^{:go/end 251} (go/method Rem "Rem is the remainder a%b (sign of the dividend); ok is false on division by zero.\n" [^WType t ^Wide a ^Wide b] :results [Wide bool]
+  (when (.IsZero t b)
+    (return (make Wide (len a)) false))
+
+  (return (.fromBig t (.Rem (new big/Int) (.toBig t a) (.toBig t b))) true))
+
+
+
+^{:go/end 269} (go/method Shl "Shl is a<<n; a count of N or more gives 0.\n" ^Wide [^WType t ^Wide a ^uint64 n]
+  (let [r (make Wide (len a))]
+    (when (>= n (conv uint64 (.-N t)))
+      (return r))
+
+    (let [(values ls bs) (values (conv int (/ n 64)) (conv uint (% n 64)))]
+      (for [i (- (len r) 1)] (>= i ls) (dec! i)
+        (let [v (<< (aget a (- i ls)) bs)]
+          (when (and (!= bs 0) (>= (- i ls 1) 0))
+            (set! v bit-or (>> (aget a (- i ls 1)) (- 64 bs))))
+
+          (aset r i v)))
+
+      (.fix t r)
+      ^{:line 268} r)))
+
+
+
+
+^{:go/end 298} (go/method Shr "Shr is a>>n: arithmetic for signed, logical for unsigned; a count of N or more\ngives 0 (or the sign fill for signed).\n" ^Wide [^WType t ^Wide a ^uint64 n]
+  (let [^uint64 fill (zero uint64)]
+    (when (.negative t a)
+      (set! fill (bit-not (conv uint64 0))))
+
+    (when (>= n (conv uint64 (.-N t)))
+      (set! n (conv uint64 (* 64 (len a)))))
+
+    (let [r (make Wide (len a))
+        (values ls bs) (values (conv int (/ n 64)) (conv uint (% n 64)))
+        ^{:line 283} at ^{:go/end 288} (fn ^uint64 [^int i]
+          (when (>= i (len a))
+            (return fill))
+
+          (aget a i))]
+
+      (range [i r]
+        (let [v (at (+ i ls))]
+          (when (!= bs 0)
+            (set! v (bit-or (>> v bs) (<< (at (+ i ls 1)) (- 64 bs)))))
+
+          (aset r i v)))
+
+      (.fix t r)
+      ^{:line 297} r)))
+
+
+
+^{:go/breaks [[6 319]] :go/end 320} (go/method Cmp "Cmp compares a and b as t: -1, 0 or 1.\n" ^int [^WType t ^Wide a ^Wide b]
+  (when (.-Signed t)
+    (let [(values na nb) (values (< (conv int64 (aget a (- (len a) 1))) 0) (< (conv int64 (aget b (- (len b) 1))) 0))]
+      (when (!= na nb)
+        (when na
+          (return -1))
+
+        (return 1))))
+
+
+  (for [i (- (len a) 1)] (>= i 0) (dec! i)
+    (when (!= (aget a i) (aget b i))
+      (when (< (aget a i) (aget b i))
+        (return -1))
+
+      (return 1)))
+
+
+  0)
+
+
+
+^{:go/breaks [[5 329]] :go/end 330} (go/method IsZero "IsZero reports whether a is zero.\n" ^bool [^WType t ^Wide a]
+  (range [_ l a]
+    (when (!= l 0)
+      (return false)))
+
+
+  true)
+
+
+
+^{:go/end 333} (go/method String "String is a in decimal.\n" ^string [^WType t ^Wide a] (.String (.toBig t a)))
+
+
+^{:go/end 358} (go/func WParse "WParse parses a decimal or 0x hex integer with an optional leading '-', wrapped to t.\n" [^WType t ^string s] :results [Wide bool]
+  (let [neg false]
+    (cond (strings/HasPrefix s "-")
+      (set! (values neg s) (values true (subslice s 1)))
+      (strings/HasPrefix s "+")
+      (set! s (subslice s 1)))
+
+    (let [base 10]
+      (when (or (strings/HasPrefix s "0x") (strings/HasPrefix s "0X"))
+        (set! (values base s) (values 16 (subslice s 2))))
+
+      (when (or (== s "") (strings/ContainsAny s "+-_ "))
+        (return nil false))
+
+      (let [(values b ok) (.SetString (new big/Int) s base)]
+        (when (not ok)
+          (return nil false))
+
+        (when neg
+          (.Neg b b))
+
+        (return (.fromBig t b) true)))))
+
+
+
+^{:go/end 371} (go/method LoadWide "LoadWide reads t.Size() bytes at a (little-endian) and normalizes.\n" ^Wide [^{:tag (* Mem)} m ^uint64 a ^WType t]
+  (let [buf (.R m a (.Size t))
+      ^{:line 363} r (make Wide (.Limbs t))]
+    (range [i r]
+      (for [j 0] (< j 8) (inc! j)
+        (set! (aget r i) bit-or (<< (conv uint64 (aget buf (+ (* 8 i) j))) (* 8 j)))))
+
+
+    (.fix t r)
+    ^{:line 370} r))
+
+
+
+^{:go/end 388} (go/method StoreWide "StoreWide writes t.Size() bytes at a; bytes above the limbs hold the normalized value's extension.\n" [^{:tag (* Mem)} m ^uint64 a ^WType t ^Wide w]
+  (set! w (.Norm t w))
+  (let [buf (.W m a (.Size t))
+      ^{:line 377 :tag byte} fill (zero byte)]
+    (when (.negative t w)
+      (set! fill 0xff))
+
+    (range [i buf]
+      (if (< (/ i 8) (len w))
+        (aset buf i (conv byte (>> (aget w (/ i 8)) (* 8 (% i 8)))))
+
+        (aset buf i fill)))))

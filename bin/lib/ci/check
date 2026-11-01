@@ -1,0 +1,120 @@
+#!/bin/bash
+# ci's check (doc/C23-SURVEY.md §6, "As built: C5 (write-ahead)"; CS14 (a)): every program of the run corpora
+# read by repr/c, checked (arbace.repr.c.check, long double as double, CS35), linked with musl 1.2.6's forms
+# (arbace.c.musl) and built into a node program (arbace.c.build), run by ci's back end with an empty standard
+# input, no arguments, 10 s (more for the programs of test/c/check-budget.edn, CS216), its status and standard output's SHA-256 against gcc 15.2's -O0 run recorded in
+# test/c/ref-gcc15.edn (a program whose -O0 and -O2 runs differ is compared on its status alone); every program
+# that does not pass in a class of test/c/divergences.edn (arbace.c.run's judge). The light path: ci's back end
+# is tools/cirun (bin/ci cirun-build), outside Arbace's executable; on an executable built with ci, CI_EXE runs
+# the node programs by `arbace -m arbace.c.repl run-nodes` instead (the heavy list's).
+#
+# Usage: bin/ci check [--corpus C,...] [--only LIST] [--record] [--judge] [--resume]
+#   --corpus   the run corpora (default those test/c/ref-gcc15.edn records)
+#   --only     a file of ids (CORPUS/NAME) to check alone
+#   --record   test/c/check-linux-amd64.edn rewritten from the run (the other corpora's lines kept; not with --only)
+#   --judge    the last run judged again (its results against the classes), nothing run
+#   --resume   the programs already run kept (their runs in run.tsv), the others built and run
+#   CI_THREADS (default 3): the builder's threads; CI_JOBS (default 4): the runs'; CI_KEEP_NODES: keep every
+#   node program (by default only those of a run that did not exit 0)
+# Writes under .tmp/ci-check/ (CI_CHECK_WORK): CORPUS/list.tsv, CORPUS/nodes/ID.nodes, nodes.tsv, run.tsv,
+# results.edn. Exit status 0 when nothing fails.
+set -uo pipefail
+root=$(cd "$(dirname "$0")/../../.." && pwd)
+. "$root/bin/lib/tmpdir.bash"
+. "$root/bin/lib/tools.bash"
+. "$root/bin/lib/ci/budget.bash"
+cd "$root"
+
+all=torture-execute,torture-execute-mirror,tcc-tests2,compcert,mir,cxgo,benchmarksgame
+corpora=$all only= record= judge= resume=
+while [ $# -gt 0 ]; do
+  case $1 in
+    --corpus) corpora=$2; shift 2 ;;
+    --only) only=$(cd "$(dirname "$2")" && pwd)/$(basename "$2"); shift 2 ;;
+    --record) record=1; shift ;;
+    --judge) judge=1; shift ;;
+    --resume) resume=1; shift ;;
+    *) sed -n '11,18p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+  esac
+done
+# a subset's run never rewrites the corpora's record (review 006, finding 5); its judge does not fail on the
+# record's rows it leaves out (CI_SUBSET)
+if [ -n "$only" ]; then
+  [ -n "$record" ] && { echo "bin/ci check: --record records whole corpora, not --only's subset" >&2; exit 2; }
+  export CI_SUBSET=1
+fi
+work=${CI_CHECK_WORK:-$root/.tmp/ci-check}
+threads=${CI_THREADS:-3}
+jobs=${CI_JOBS:-4}; [ "$jobs" -gt 4 ] && jobs=4
+cirun=${CIRUN:-$root/.tmp/ci/cirun}
+mkdir -p "$work"
+IFS=, read -r -a ids <<< "$corpora"
+# the last run's subset (review 027, finding 3): a run with --only leaves CORPUS/subset, which --judge reads, so
+# --judge --record never rewrites a corpus's record from a subset either
+if [ -n "$judge" ]; then
+  for id in "${ids[@]}"; do [ -f "$work/$id/subset" ] && export CI_SUBSET=1; done
+  if [ -n "${CI_SUBSET:-}" ] && [ -n "$record" ]; then
+    echo "bin/ci check: --judge --record: the last run was a subset (--only; CORPUS/subset), not whole corpora" >&2; exit 2
+  fi
+fi
+
+if [ -z "$judge" ]; then
+  [ -x "$cirun" ] || "$root/bin/ci" cirun-build || exit 1
+  "$root/bin/ci" musl ensure || exit 1
+  gowhim=${GOWHIM:-$(cd "${root%%/.tmp/worktrees/*}/.." && pwd)/go-whim}
+  modcache=$(GOFLAGS= "${ARBACE_GOROOT:-/root/tamago-go}/bin/go" env GOMODCACHE)
+  gccroot=; case ,$corpora, in *,gcc-*) gccroot=$("$root/bin/repr-c" gcc-tests) || exit 1 ;; esac
+  roots="{:gomodcache \"$modcache\" :go-whim \"$gowhim\" :gcc-15.2.0 \"$gccroot\" :checkout \"$root\"}"
+  : > "$work/empty-stdin"
+  for id in "${ids[@]}"; do
+    d=$work/$id
+    if [ -z "$resume" ]; then rm -rf "${d:?}"; fi
+    mkdir -p "$d/nodes"
+    if [ -n "$only" ]; then printf '%s\n' "$only" > "$d/subset"; else rm -f "$d/subset"; fi
+    if [ ! -s "$d/gcc.list" ]; then
+      arbace_tool -m arbace.repr.c.ppcheck lists "$work" "$roots" "$id" > "$d.lists.log" 2>&1 || { cat "$d.lists.log"; exit 1; }
+    fi
+    base=$(cat "$d/base.txt")
+    # ID BASE STD ARGS READNAME, the programs gcc built
+    grep -o '{:id "[^"]*" :status :no-build' test/c/ref-gcc15.edn | cut -d'"' -f2 > "$d/no-build.txt"
+    : > "$d/done.txt"
+    if [ -n "$resume" ] && [ -f "$d/run.tsv" ]; then cut -f1 "$d/run.tsv" > "$d/done.txt"; fi
+    # list.tsv: every program the judge judges (whole under --resume too); todo.tsv: those not run yet
+    awk -F'\t' -v c="$id" -v b="$base" -v only="${only:-}" -v nb="$d/no-build.txt" '
+      BEGIN { while ((getline l < nb) > 0) skip[l] = 1
+              if (only != "") { while ((getline l < only) > 0) want[l] = 1 } }
+      { i = c "/" $1; if (i in skip) next; if (only != "" && !(i in want)) next
+        print i "\t" b "\t" $2 "\t" $3 "\t" $4 }' "$d/gcc.list" > "$d/list.tsv"
+    awk -F'\t' 'BEGIN { while ((getline l < ARGV[2]) > 0) done[l] = 1; ARGV[2] = "" } !($1 in done)' "$d/list.tsv" "$d/done.txt" > "$d/todo.tsv"
+    if [ -s "$d/todo.tsv" ]; then
+      (cd "$root" && arbace_tool -m arbace.c.run test/c/host nodes-list "$work" "$d/todo.tsv" "$threads") > "$d/nodes.log" 2>&1
+      [ -f "$work/nodes.tsv" ] && cat "$work/nodes.tsv" >> "$d/nodes.tsv" && rm -f "$work/nodes.tsv"
+    fi
+    # each node program run
+    run1() { # ID
+      local i=$1 f=$work/$1.nodes rd st sum bytes
+      rd=$(mktemp -d "$work/run.XXXXXX")
+      (cd "$rd" && timeout "$(ci_budget "$i")" "$cirun" "$f" < "$work/empty-stdin" > out 2> err); st=$?
+      [ $st = 124 ] && st=timeout
+      sum=$(sha256sum < "$rd/out" | cut -d' ' -f1); bytes=$(wc -c < "$rd/out")
+      printf '%s\t%s\t%s\t%s\t%s\n' "$i" "$st" "$sum" "$bytes" "$(grep -m1 '^\(cirun: \(fault\|internal\)\|fatal error: \|runtime: \)' "$rd/err" | cut -c1-200 | tr '\t' ' ')"
+      rm -rf "$rd"
+      # the disk: a node program holds musl's linked part (about 0.4 MB); kept when it did not exit 0
+      [ -n "${CI_KEEP_NODES:-}" ] || [ "$st" != 0 ] || rm -f "$f"
+    }
+    export -f run1 ci_budget; export work cirun root
+    # the runs appended (--resume keeps the earlier ones), only those of todo.tsv
+    [ -n "$resume" ] || : > "$d/run.tsv"
+    awk -F'\t' 'BEGIN { while ((getline l < ARGV[2]) > 0) { split(l, f, "\t"); t[f[1]] = 1 }; ARGV[2] = "" } $2 == "ok" && ($1 in t) && !seen[$1]++ {print $1}' "$d/nodes.tsv" "$d/todo.tsv" \
+      | xargs -P "$jobs" -I{} bash -c 'run1 "$1"' _ {} >> "$d/run.tsv"
+    # the quiet retry (review 027, finding 6; goi's and java-check's): a program the record passes that timed out, the
+    # host loaded, is run again alone, once, and that run is the one judged
+    awk -F'\t' '$2 == "timeout" {print $1}' "$d/run.tsv" | while IFS= read -r i; do
+      grep -qF "[\"$i\" :pass " test/c/check-linux-amd64.edn || continue
+      r=$(run1 "$i")
+      echo "ci check: $i timed out; run again alone: $(printf '%s' "$r" | cut -f2)"
+      R=$r awk -F'\t' -v i="$i" '$1 == i { print ENVIRON["R"]; next } { print }' "$d/run.tsv" > "$d/run.tsv.new" && mv "$d/run.tsv.new" "$d/run.tsv"
+    done
+  done
+fi
+arbace_tool -m arbace.c.run test/c/host judge "$work" test/c/ref-gcc15.edn test/c/divergences.edn "${record:+--record}" "${ids[@]}"

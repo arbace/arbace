@@ -1,0 +1,249 @@
+(ns arbace.repr.c.rtcheck
+  "repr/c's round trip (doc/c/SPEC.md §3.1; doc/C23-SURVEY.md, \"As built: C3b\"; bin/repr-c roundtrip,
+  its driver bin/lib/repr-c/roundtrip): each file of the corpora read into C forms, printed in mode
+  :lines and read again, the forms equal (level 1, `forms`); read in mode :full and printed, the
+  original byte for byte (level 2); the :lines print compiled by the reference, its object file the
+  original's byte for byte (level 3, the driver's gcc runs) and, for the run corpora, its program run as
+  the original's (level 4, E2's measure); a file that does not pass is known with its class
+  (test/repr/c/roundtrip-known.edn), or fails. Also the reference's acceptance of every file (CS61 (a),
+  test/repr/c/parse-gcc.tsv) against the reader's."
+  (:require [arbace.repr.c :as rc]
+            [arbace.repr.c.host :as host]
+            [arbace.repr.c.layout :as layout]
+            [arbace.repr.c.lex :as lex]
+            [arbace.repr.c.parse :as parse]
+            [arbace.string :as str])
+  (:import [java.util.concurrent Executors Callable]))
+
+(set! *warn-on-reflection* true)
+
+(def known-file "test/repr/c/roundtrip-known.edn")
+(def gcc-file "test/repr/c/parse-gcc.tsv")
+
+(defn- spit-bytes [^String path ^bytes bs]
+  (when-let [p (.getParentFile (java.io.File. path))] (.mkdirs p))
+  (java.nio.file.Files/write (.toPath (java.io.File. path)) bs ^"[Ljava.nio.file.OpenOption;" (make-array java.nio.file.OpenOption 0)))
+
+(defn- dir-of ^String [^String p] (let [i (.lastIndexOf p "/")] (if (neg? i) "." (subs p 0 i))))
+
+(defn- abs-incs
+  "A file configuration whose relative -I paths are made absolute against `base`, with `extra` first."
+  [fc ^String base extra]
+  (let [abs (fn [^String p] (if (.startsWith p "/") p (str base "/" p)))]
+    (-> fc
+        (update :inc #(vec (concat extra (map abs %))))
+        (update :args #(vec (map (fn [^String a] (if (and (.startsWith a "-I") (not (.startsWith a "-I/"))) (str "-I" (abs (subs a 2))) a)) %))))))
+
+(def ^:private strip-keys #{:line :column :c/grouped})
+
+(defn strip
+  "A form without the metadata the :lines print does not keep (:line, N3's :c/grouped)."
+  [x]
+  (let [x (cond
+            (seq? x) (with-meta (apply list (map strip x)) (meta x))
+            (vector? x) (with-meta (mapv strip x) (meta x))
+            (map? x) (into {} (map (fn [[k v]] [k (strip v)]) x))
+            :else x)]
+    (if (and (instance? arbace.lang.IObj x) (meta x))
+      (with-meta x (into {} (map (fn [[k v]] [k (strip v)]) (apply dissoc (meta x) strip-keys))))
+      x)))
+
+(defn- forms-text [rd]
+  (str/join "\n" (map #(layout/form-str (strip %)) (:forms rd))))
+
+(defn- first-diff [^String a ^String b]
+  (let [as (str/split-lines a) bs (str/split-lines b)]
+    (first (for [i (range (max (count as) (count bs)))
+                 :when (not= (get as i) (get bs i))]
+             (let [^String x (str (get as i)) ^String y (str (get bs i))
+                   k (loop [k 0] (if (and (< k (count x)) (< k (count y)) (= (.charAt x k) (.charAt y k))) (recur (inc k)) k))
+                   from (max 0 (- k 60))]
+               (str "form " (inc i) " at " k ": " (subs x from (min (count x) (+ k 120))) " | " (subs y from (min (count y) (+ k 120)))))))))
+
+(defn- one-line ^String [x] (str/replace (str x) #"[\t\n]" " "))
+
+(defn check-file
+  "One file: [name read l1 l2 detail], the print written under WORK/ID/print/."
+  [^String work ^String id h ^String base e]
+  (let [nm (:name e)
+        d (str work "/" id)
+        fc (:fc e)
+        cfg (host/config h fc base)
+        orig (lex/read-bytes (str base "/" nm))
+        budget (* 1000000000 (Long/parseLong (or (System/getenv "REPR_C_READ_BUDGET") "120")))
+        ;; the original read as its corpus names it (gcc's testsuite: absolute, as DejaGnu does), the print
+        ;; under its relative name
+        rn (or (:read e) nm)
+        rd (binding [parse/*deadline* (+ (System/nanoTime) budget)]
+             (try (rc/read-c cfg fc rn false)
+                  (catch Throwable x (if (:deadline (ex-data x)) {:timeout true} {:crash (str x)}))))]
+    (cond
+      (:timeout rd) [nm "timeout" "-" "-" "the evaluated read's budget (REPR_C_READ_BUDGET s) spent"]
+      (:crash rd) [nm "crash" "-" "-" (one-line (:crash rd))]
+      (:error rd) [nm "error" "-" "-" (one-line (first (:error rd)))]
+      (:refused rd) [nm (str "refused:" (name (:refused rd))) "-" "-" (one-line (:message rd))]
+      :else
+      (binding [parse/*deadline* (+ (System/nanoTime) (* 2 budget))]
+      (let [pr (try (rc/print-c (:file-form rd) (:forms rd)) (catch Throwable x (str "\u0000print-crash " x)))]
+        (if (.startsWith ^String pr "\u0000")
+          [nm "ok" "print-crash" "-" (one-line (subs pr 1))]
+          (let [pdir (str d "/print/" nm ".d") ; a directory a file: another print is not the original
+                _ (spit-bytes (str pdir "/" nm) (.getBytes ^String pr "UTF-8"))
+                fc2 (update (abs-incs fc base [(dir-of (str base "/" nm))]) :embed-dirs #(vec (concat % [(dir-of (str base "/" nm))])))
+                rd2 (try (rc/read-c (host/config h fc2 pdir) fc2 nm false) (catch Throwable x {:crash (str x)}))
+                [l1 detail] (cond
+                              (:crash rd2) ["reread-crash" (:crash rd2)]
+                              (:error rd2) ["reread-error" (first (:error rd2))]
+                              (:refused rd2) ["reread-refused" (:message rd2)]
+                              :else (let [a (forms-text rd) b (forms-text rd2)]
+                                      (if (and (= a b) (= (set (keys (:units rd))) (set (keys (:units rd2)))))
+                                        ["equal" nil]
+                                        ["differ" (or (first-diff a b) "header units")])))
+                full (try (rc/read-c cfg fc rn true) (catch Throwable x {:crash (str x)}))
+                l2 (cond
+                     (:crash full) "crash"
+                     (:refused full) (str "refused:" (name (:refused full)))
+                     (:error full) "error"
+                     :else (let [t (rc/print-c (:file-form full) (:forms full))]
+                             (if (java.util.Arrays/equals ^bytes orig (.getBytes ^String t "ISO-8859-1")) "equal" "differ")))
+                fix (if (or (:crash rd2) (:error rd2) (:refused rd2))
+                      "-"
+                      (if (= pr (try (rc/print-c (:file-form rd2) (:forms rd2)) (catch Throwable _ nil))) "equal" "differ"))]
+            [nm "ok" l1 l2 (if detail (one-line detail) "") fix])))))))
+
+(defn forms
+  "Levels 1 and 2 of the corpus `id` under WORK (its lists made by arbace.repr.c.ppcheck/lists):
+  WORK/ID/forms.tsv, the prints under print/, gcc3.list (name, standard, options, the original's
+  directory) for the driver's level 3."
+  [^String work ^String id]
+  (let [d (str work "/" id)
+        base (str/trim (slurp (str d "/base.txt")))
+        entries (read-string (slurp (str d "/files.edn")))
+        h (host/load-host "test/c/host")
+        threads (Integer/parseInt (or (System/getenv "REPR_C_THREADS") "8"))
+        pool (Executors/newFixedThreadPool threads)
+        t0 (System/nanoTime)
+        futs (mapv (fn [e] (.submit pool ^Callable (fn [] (try (check-file work id h base e)
+                                                               (catch Throwable x [(:name e) "crash" "-" "-" (one-line x)])))))
+                   entries)
+        rs (mapv #(.get ^java.util.concurrent.Future %) futs)
+        _ (.shutdown pool)
+        secs (/ (- (System/nanoTime) t0) 1e9)
+        ok (filter #(= "ok" (nth % 1)) rs)
+        by (fn [i] (frequencies (map #(nth % i) rs)))]
+    (spit (str d "/forms.tsv") (str/join (map #(str (str/join "\t" %) "\n") rs)))
+    (spit (str d "/gcc3.list")
+          (str/join (for [r ok
+                          :let [e (first (filter #(= (:name %) (first r)) entries))
+                                fc (abs-incs (:fc e) base [])]]
+                      (str (first r) "\t" (:std fc) "\t" (str/join " " (:args fc)) "\t" base "\t" (or (:read e) (first r)) "\n"))))
+    (println (str id ": " (count rs) " files, read " (pr-str (by 1)) ", level 1 " (pr-str (by 2)) ", level 2 " (pr-str (by 3))
+                  ", " (Math/round (double secs)) " s"))))
+
+;; ---------------------------------------------------------------------------------------------
+;; The judgment
+
+(defn- read-tsv [^String p]
+  (let [f (java.io.File. p)]
+    (if (.exists f)
+      (into {} (map (fn [l] (let [xs (str/split l #"\t" -1)] [(first xs) (vec (rest xs))])) (remove str/blank? (str/split-lines (slurp p)))))
+      {})))
+
+(defn load-gcc
+  "The reference's acceptance of every file (CS61 (a)): {[corpus name] status}."
+  []
+  (let [f (java.io.File. ^String gcc-file)]
+    (if (.exists f)
+      (into {} (for [l (str/split-lines (slurp gcc-file)) :when (not (str/blank? l)) :when (not (.startsWith ^String l "#"))
+                     :let [[st cn] (str/split l #"\t")
+                           i (.indexOf ^String cn "/")]]
+                 [[(subs cn 0 i) (subs cn (inc i))] st]))
+      {})))
+
+(defn- judge-row
+  "A file's status at each level and overall: {:status pass|known|fail :levels {...} :class k}."
+  [[nm read l1 l2 detail] obj run gcc known run?]
+  (let [[os ps cmp] obj
+        [ro rp same] run
+        l3 (cond (not= read "ok") "-"
+                 (nil? cmp) "-"
+                 (not= os "0") "orig-fails"
+                 (not= ps "0") "print-rejected"
+                 :else cmp)
+        l4 (cond (not run?) "-" (not= read "ok") "-" (nil? same) "-" :else same)
+        accept (cond (= read "error") (if (= gcc "0") "port-only-rejects" "both-reject")
+                     (nil? gcc) "unrecorded"
+                     (= gcc "0") "agree"
+                     :else "gcc-only-rejects")
+        bad (cond-> []
+              (not (#{"ok" "error"} read)) (conj :read)
+              (and (= read "ok") (not= l1 "equal")) (conj :l1)
+              (and (= read "ok") (not= l2 "equal")) (conj :l2)
+              (#{"differ" "print-rejected"} l3) (conj :l3)
+              (= l4 "differ") (conj :l4)
+              (= accept "port-only-rejects") (conj :accept))]
+    {:name nm :read read :l1 l1 :l2 l2 :l3 l3 :l4 l4 :accept accept :detail detail
+     :status (cond (empty? bad) "pass" known "known" :else "fail") :bad bad :class (:class known)}))
+
+(defn judge
+  "The corpus `id`'s levels judged (WORK/ID/forms.tsv, obj.tsv and run.tsv, the driver's): WORK/ID/
+  files.tsv and report.edn, the summary printed; 1 when a file fails or a known entry is stale."
+  [^String work ^String id]
+  (let [d (str work "/" id)
+        man (read-string (slurp "test/c/corpora.edn"))
+        corpus (first (filter #(= (:id %) (keyword id)) (:corpora man)))
+        run? (= :run (:action corpus))
+        rows (map (fn [l] (str/split l #"\t" -1)) (remove str/blank? (str/split-lines (slurp (str d "/forms.tsv")))))
+        obj (read-tsv (str d "/obj.tsv"))
+        run (read-tsv (str d "/run.tsv"))
+        gcc (load-gcc)
+        known-all (read-string (slurp known-file))
+        known (get-in known-all [:roundtrip (keyword id)] {})
+        js (mapv (fn [r] (judge-row r (get obj (first r)) (get run (first r)) (get gcc [id (first r)]) (get known (first r)) run?)) rows)
+        failing (filter #(= "fail" (:status %)) js)
+        stale (for [[nm _] known :when (not (some #(and (= (:name %) nm) (= (:status %) "known")) js))] nm)
+        unclassed (for [[nm k] known :when (not (contains? (:classes known-all) (:class k)))] nm)
+        fr (fn [k] (into (sorted-map) (frequencies (map k js))))
+        report {:corpus id :files (count js) :status (fr :status) :read (fr :read) :level1 (fr :l1) :level2 (fr :l2)
+                :level3 (fr :l3) :level4 (fr :l4) :accept (fr :accept) :failing (count failing) :stale-known (vec stale)
+                :known-classes (fr :class)}]
+    (spit (str d "/files.tsv") (str/join (map #(str (str/join "\t" [(:name %) (:status %) (:read %) (:l1 %) (:l2 %) (:l3 %) (:l4 %) (:accept %)
+                                                                    (some-> (:class %) name) (:detail %)]) "\n") js)))
+    (spit (str d "/report.edn") (pr-str report))
+    (println (str id ": " (count js) " files " (pr-str (:status report)) "; read " (pr-str (:read report))
+                  "; l1 " (pr-str (:level1 report)) "; l2 " (pr-str (:level2 report)) "; l3 " (pr-str (:level3 report))
+                  (when run? (str "; l4 " (pr-str (:level4 report)))) "; gcc " (pr-str (:accept report))
+                  (when (seq failing) (str "; " (count failing) " failing"))
+                  (when (seq stale) (str "; " (count stale) " known entries stale"))
+                  (when (seq unclassed) (str "; " (count unclassed) " of no class"))))
+    (if (or (seq failing) (seq stale) (seq unclassed)) 1 0)))
+
+(defn record
+  "Rewrites test/repr/c/roundtrip-known.edn's entries of the corpora `ids` from WORK: every file that
+  does not pass, its class kept or `:unclassified`."
+  [^String work ids]
+  (let [known (read-string (slurp known-file))
+        known (reduce (fn [known id]
+                        (let [old (get-in known [:roundtrip (keyword id)] {})
+                              rows (map #(str/split % #"\t" -1) (str/split-lines (slurp (str work "/" id "/files.tsv"))))
+                              es (into (sorted-map) (for [[nm st] rows :when (#{"fail" "known"} st)]
+                                                      [nm (or (get old nm) {:class :unclassified})]))]
+                          (if (seq es) (assoc-in known [:roundtrip (keyword id)] es) (update known :roundtrip dissoc (keyword id)))))
+                      known ids)]
+    (spit known-file
+          (str ";; The files of the round trip (bin/repr-c roundtrip; doc/C23-SURVEY.md, \"As built: C3b\") that do not pass\n"
+               ";; every level, by corpus, each with its class (the classes below). Written by bin/repr-c roundtrip --record,\n"
+               ";; the classes kept. Read with the Clojure reader.\n"
+               "{:classes\n {" (str/join "\n  " (for [[k v] (sort-by key (:classes known))] (str k " " (pr-str v)))) "}\n"
+               " :roundtrip\n {"
+               (str/join "\n  " (for [[c es] (sort (:roundtrip known))]
+                                  (str c "\n  {" (str/join "\n   " (for [[f e] es] (str (pr-str f) " " (pr-str e)))) "}")))
+               "}}\n"))
+    (println "recorded" known-file)))
+
+(defn -main [cmd & args]
+  (case cmd
+    "forms" (let [[work & ids] args] (doseq [id ids] (forms work id)) (shutdown-agents))
+    "judge" (let [[work & ids] args st (reduce max 0 (map #(judge work %) ids))] (shutdown-agents) (System/exit st))
+    "record" (let [[work & ids] args] (record work ids))
+    (do (println "rtcheck: forms, judge or record") (System/exit 2))))

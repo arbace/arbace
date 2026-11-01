@@ -1,0 +1,176 @@
+;; ci: the natives (doc/C23-SURVEY.md §6.5): the functions musl 1.2.6 writes in assembly or in C
+;; whose body is inline assembly (the syscall entry, the thread pointer, setjmp and longjmp), and
+;; the builtins whose meaning is the machine's. A function of the program without a definition, or
+;; whose body is assembly, is the native of its name.
+(in-ns 'go.arbace.ci) (go/file "natives.go" :doc "ci: the natives (doc/C23-SURVEY.md §6.5): the functions musl 1.2.6 writes in assembly or in C\nwhose body is inline assembly (the syscall entry, the thread pointer, setjmp and longjmp), and\nthe builtins whose meaning is the machine's. A function of the program without a definition, or\nwhose body is assembly, is the native of its name.\n" :imports [
+
+
+    ^{:line 8} [fmt "fmt"]
+    ^{:line 9} [math "math"]
+    ^{:line 10} [os "os"]
+
+    ^{:line 12} [crt "arbace/crt"]])
+
+
+
+(go/var ^{:doc "Strace, set by CI_STRACE, traces the system calls on the standard error.\n"} Strace (!= (os/Getenv "CI_STRACE") ""))
+
+
+(go/var ^{:doc "Natives are the natives by name.\n"} Natives (lit (map string (func [^{:tag (* Thread)} t ^{:tag (slice Arg)} args] [Arg]))))
+
+^{:go/end 21} (go/func ai ^Arg [^int64 v] (lit Arg :K \i :I v))
+
+
+
+
+
+(go/type SjStmt "SjStmt is a statement that calls setjmp (7.13.1.1 allows it only as a whole controlling\nexpression or expression statement, or compared with a constant there), labelled by Code. A\nlongjmp to a jmp_buf it set is a Go panic that the function's SjBody recovers: the body is entered\nagain at the statement's label, setjmp then returning longjmp's value.\n" (struct
+    ^{:line 28 :tag Stmt} S
+    ^{:line 29 :tag Ctl} Code))
+
+
+(go/type jmpTarget (struct
+    ^{:line 33 :tag (* Frame)} fr
+    ^{:line 34 :tag Ctl} code
+    ^{:line 35 :tag uint64} sp))
+
+
+(go/type longjmpPanic (struct
+    ^{:line 39 :tag uint64} tok
+    ^{:line 40 :tag int64} val))
+
+
+^{:go/end 43} (go/method Has ^bool [^{:tag (* SjStmt)} s ^Ctl l] (or (== l (.-Code s)) (.Has (.-S s) l)))
+
+^{:go/end 49} (go/method labels ^labelSet [^{:tag (* SjStmt)} s]
+  (let [m (union (.-S s))]
+    (aset m (.-Code s) true)
+    ^{:line 48} m))
+
+
+^{:go/end 51} (go/method labels ^labelSet [^{:tag (* SjBody)} s] (union (.-S s)))
+
+^{:go/end 59} (go/method Run ^Ctl [^{:tag (* SjStmt)} s ^{:tag (* Frame)} fr]
+  (let [saved (.-sjCode fr)]
+    (set! (.-sjCode fr) (.-Code s))
+    (let [c (.Run (.-S s) fr)]
+      (set! (.-sjCode fr) saved)
+      ^{:line 58} c)))
+
+
+^{:go/end 70} (go/method Enter ^Ctl [^{:tag (* SjStmt)} s ^{:tag (* Frame)} fr ^Ctl l]
+  (when (== l (.-Code s))
+    (return (.Run s fr)))
+
+  (let [saved (.-sjCode fr)]
+    (set! (.-sjCode fr) (.-Code s))
+    (let [c (.Enter (.-S s) fr l)]
+      (set! (.-sjCode fr) saved)
+      ^{:line 69} c)))
+
+
+
+(go/type SjBody "SjBody is the body of a function that calls setjmp: it recovers the longjmps to its frame.\n" (struct ^Stmt S))
+
+^{:go/end 75} (go/method Has ^bool [^{:tag (* SjBody)} s ^Ctl l] (.Has (.-S s) l))
+^{:go/end 76} (go/method Enter ^Ctl [^{:tag (* SjBody)} s ^{:tag (* Frame)} fr ^Ctl l] (.Enter (.-S s) fr l))
+
+^{:go/end 88} (go/method Run ^Ctl [^{:tag (* SjBody)} s ^{:tag (* Frame)} fr]
+  (let [enter (conv Ctl 0)]
+    (while true
+      (let [(values c code v jumped) (.try s fr enter)]
+        (when (not jumped)
+          (return c))
+
+        (set! (values (.-sjResume fr) (.-sjVal fr)) (values true v))
+        (set! enter code)))))
+
+
+
+^{:go/end 111} (go/method try [^{:tag (* SjBody)} s ^{:tag (* Frame)} fr ^Ctl enter] :results [^Ctl c ^Ctl code ^int64 v ^bool jumped]
+  (let [(values depth top) (values (.-Depth (.-T fr)) (.-Top (.-T fr)))]
+    (defer (^{:go/end 106} (fn []
+          (when [r (recover)] (!= r nil)
+            (let [(values lp ok) (assert (* longjmpPanic) r)]
+              (when (not ok)
+                (panic r))
+
+              (let [j (aget (.-jmps (.-P (.-T fr))) (.-tok lp))]
+                (when (or (== j nil) (!= (.-fr j) fr))
+                  (panic r))
+
+                (set! (.-SP (.-T fr)) (.-sp j))
+                (set! (values (.-Depth (.-T fr)) (.-Top (.-T fr))) (values depth top))
+                (set! (values code v jumped) (values (.-code j) (.-val lp) true))))))))
+
+
+    (when (!= enter 0)
+      (return (.Enter (.-S s) fr enter) 0 0 false))
+
+    (return (.Run (.-S s) fr) 0 0 false)))
+
+
+^{:go/end 125} (go/func setjmp ^Arg [^{:tag (* Thread)} t ^{:tag (slice Arg)} args]
+  (let [fr (.-Top t)]
+    (when (.-sjResume fr)
+      (set! (.-sjResume fr) false)
+      (return (ai (.-sjVal fr))))
+
+    (let [p (.-P t)]
+      (inc! (.-nextJmp p))
+      (let [tok (.-nextJmp p)]
+        (aset (.-jmps p) tok (addr (lit jmpTarget :fr fr :code (.-sjCode fr) :sp (.-SP t))))
+        (set! (.-pinned fr) true)
+        (.Store64 (.-M t) (conv uint64 (.-I (aget args 0))) tok)
+        (ai 0)))))
+
+
+^{:go/end 135} (go/func longjmp ^Arg [^{:tag (* Thread)} t ^{:tag (slice Arg)} args]
+  (let [tok (.Load64 (.-M t) (conv uint64 (.-I (aget args 0))))
+      ^{:line 129} v (bit-and (.-I (aget args 1)) 0xffffffff)]
+    (set! v (conv int64 (conv int32 v)))
+    (when (== v 0)
+      (set! v 1))
+
+    (panic (addr (lit longjmpPanic :tok tok :val v)))))
+
+
+^{:go/end 139} (go/func f1 ^{:tag (func [(* Thread) (slice Arg)] [Arg])} [^{:tag (func [float64] [float64])} f]
+  ^{:go/end 138} (fn ^Arg [^{:tag (* Thread)} t ^{:tag (slice Arg)} a] (lit Arg :K \f :F (f (.-F (aget a 0))))))
+
+
+^{:go/end 176} (go/func init []
+  (range [_ n (lit (slice string) "setjmp" "_setjmp" "sigsetjmp" "__sigsetjmp" "__builtin_setjmp")]
+    (aset Natives n setjmp))
+
+  (range [_ n (lit (slice string) "longjmp" "_longjmp" "siglongjmp" "__builtin_longjmp")]
+    (aset Natives n longjmp))
+
+  (let [sys ^{:go/end 158} (fn ^Arg [^{:tag (* Thread)} t ^{:tag (slice Arg)} a]
+        (let [^{:tag (array 7 uint64)} x (zero (array 7 uint64))]
+          (for [i 0] (and (< i (len a)) (< i 7)) (inc! i)
+            (aset x i (conv uint64 (.-I (aget a i)))))
+
+          (let [r (.Syscall (.-Sys (.-P t)) (conv int64 (aget x 0)) (aget x 1) (aget x 2) (aget x 3) (aget x 4) (aget x 5) (aget x 6))]
+            (when Strace
+              (fmt/Fprintf os/Stderr "ci: syscall %d(%#x, %#x, %#x, %#x) = %d\n" (aget x 0) (aget x 1) (aget x 2) (aget x 3) (aget x 4) r))
+
+            (ai r))))]
+
+    (range [_ n (lit (slice string) "__syscall0" "__syscall1" "__syscall2" "__syscall3" "__syscall4" "__syscall5" "__syscall6" "syscall_cp_asm" "__syscall_cp_asm")]
+      (aset Natives n sys))
+
+    ;; __syscall_cp_asm(cancel_flag_ptr, n, a...): the cancellation point's entry
+    (aset Natives "__syscall_cp_asm" ^{:go/end 163} (fn ^Arg [^{:tag (* Thread)} t ^{:tag (slice Arg)} a] (sys t (subslice a 1))))
+    (aset Natives "__get_tp" ^{:go/end 164} (fn ^Arg [^{:tag (* Thread)} t ^{:tag (slice Arg)} a] (ai (conv int64 (.-FS (.-Sys (.-P t)))))))
+    (aset Natives "__set_thread_area" ^{:go/end 165} (fn ^Arg [^{:tag (* Thread)} t ^{:tag (slice Arg)} a] (set! (.-FS (.-Sys (.-P t))) (conv uint64 (.-I (aget a 0)))) (ai 0)))
+    (aset Natives "__restore_rt" ^{:go/end 166} (fn ^Arg [^{:tag (* Thread)} t ^{:tag (slice Arg)} a] (ai 0)))
+    (aset Natives "_init" ^{:go/end 167} (fn ^Arg [^{:tag (* Thread)} t ^{:tag (slice Arg)} a] (ai 0)))
+    (aset Natives "_fini" ^{:go/end 168} (fn ^Arg [^{:tag (* Thread)} t ^{:tag (slice Arg)} a] (ai 0)))
+    (aset Natives "sqrt" (f1 math/Sqrt))
+    (aset Natives "fabs" (f1 math/Abs))
+    (aset Natives "__builtin_trap" ^{:go/end 173} (fn ^Arg [^{:tag (* Thread)} t ^{:tag (slice Arg)} a]
+        (panic (addr (lit crt/Fault :Sig crt/SIGILL :Msg "__builtin_trap")))))
+
+    (aset Natives "__builtin_unreachable" (aget Natives "__builtin_trap"))
+    (aset Natives "abort_native" ^{:go/end 175} (fn ^Arg [^{:tag (* Thread)} t ^{:tag (slice Arg)} a] (panic (addr (lit crt/Exit :Code 134 :Signal crt/SIGABRT)))))))
