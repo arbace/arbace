@@ -107,11 +107,19 @@ EOF
   judge "$t/i/results.tsv" "$t/c/results.tsv"
   if [ $st = 0 ] && [ -z "$(aud)" ]; then ok "B5 a directory named audited: ignored, set -e not tripped"; else no "B5 (status $st, --audited '$(aud)')"; fi
   rmdir "$t/c/audited"
-  # the union is by level: one marked interp file makes every interp file of the judgment audited
-  # (finding 5: documents today's behaviour, not a wish)
+  # the union is by file (088 finding 5, queue 093): one unmarked interp file makes interp unaudited
   echo interp > "$t/i/audited"
   judge "$t/i/results.tsv" "$t/i2/results.tsv" "$t/c/results.tsv"
-  if [ $st = 0 ] && [ "$(aud)" = interp ]; then ok "B6 a marked and an unmarked interp file: interp audited for both (finding 5)"; else no "B6 (status $st, --audited '$(aud)')"; fi
+  if [ $st = 0 ] && [ -z "$(aud)" ] && grep -q 'the levels interp have marked and unmarked results files' "$t/judge.out"; then ok "B6 a marked and an unmarked interp file: interp not audited, said (finding 5)"; else no "B6 a marked and an unmarked interp file (status $st, --audited '$(aud)')"; fi
+  echo interp > "$t/i2/audited"
+  judge "$t/i/results.tsv" "$t/i2/results.tsv" "$t/c/results.tsv"
+  if [ $st = 0 ] && [ "$(aud)" = interp ]; then ok "B8 two marked interp files: interp audited"; else no "B8 (status $st, --audited '$(aud)')"; fi
+  rm -f "$t/i2/audited"
+  # a marker naming a level its file has no rows at does not make another file's rows audited
+  echo interp > "$t/c/audited"
+  judge "$t/c/results.tsv" "$t/i2/results.tsv"
+  if [ $st = 0 ] && [ -z "$(aud)" ]; then ok "B9 a marker for interp beside compiled rows only: the unmarked interp file not audited"; else no "B9 (status $st, --audited '$(aud)')"; fi
+  rm -f "$t/c/audited"
   judge "$t/i/results.tsv" "$t/missing/results.tsv"
   if [ $st = 1 ] && [ ! -f "$t/jc.args" ]; then ok "B7 a missing results file: status 1 before the union"; else no "B7 (status $st)"; fi
 fi
