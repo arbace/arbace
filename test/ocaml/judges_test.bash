@@ -7,6 +7,11 @@ root=$(cd "$(dirname "$0")/../.." && pwd)
 exe=${ARBACE_HOST_EXE:?ARBACE_HOST_EXE}
 W=$root/.tmp/w/judges; rm -rf "$W"; mkdir -p "$W"
 bad=0
+# re-review 049's finding 1: every case must run. Cases once sat after an `exit` in the middle of the file and never ran. `expect` counts the cases
+# run, and the EXIT trap fails the file when the count is not CASES (raise it with each case added), wherever the file ended.
+cases=0; CASES=33
+finish() { local st=$?; if [ "$cases" != "$CASES" ]; then echo "FAIL $cases cases ran, want $CASES (a case unreachable, or CASES not raised)"; exit 1; fi; echo "$cases cases run"; exit $((bad || st)); }
+trap finish EXIT
 t=$(printf '\t')
 
 mk() { # DIR: a corpus of a, b, c; references, runs and records in which all three pass
@@ -23,6 +28,7 @@ judge_oi() { "$exe" "$root/test/ocaml/oi_check.ae" "$@" 2>&1; }
 judge_aot() { "$exe" "$root/test/ocaml/o2j_check.ae" "$@" 2>&1; }
 expect() { # NAME WANT-STATUS WANT-LINE-REGEX OUTPUT STATUS
   local name=$1 ws=$2 re=$3 out=$4 st=$5
+  cases=$((cases + 1))
   if [ "$st" = "$ws" ] && echo "$out" | grep -Eq "$re"; then echo "ok   $name"; else echo "FAIL $name: exit $st (want $ws), want /$re/"; echo "$out" | head -5; bad=1; fi
 }
 
@@ -125,7 +131,6 @@ printf 'a\t0\th\t1\t1.0\t\nb\t0\th\t1\t1.0\t\nc\t0\th\t1\t1.0\t\n' > "$k/check.t
 printf '[\n ["a" "fail" "known gc: a finaliser (output differs (1 bytes, ocamlopt 1))" "differs"]\n ["b" "slow" "timeout 120s" "same"]\n ["c" "pass" "" "same"]\n]\n' > "$k/aot-results.edn"
 printf 'a\t0\tx\t1\t1.0\t\nb\t0\th\t1\t1.0\t\nc\t0\th\t1\t1.0\t\n' > "$k/check.tsv"
 out=$(judge_aot judge "$k/check.tsv" "$k/corpus.tsv" "$k/refs.edn" "$k/oi.tsv" "$k/aot-results.edn" "$k/classes.edn"); expect "aot: a slow program that passes at the boundary is not a change" 0 'STALE b' "$out" $?
-exit $bad
 
 # re-review 042's finding 1: oi's wall cap is four times its CPU limit (as o2j_cpu), and 137 (SIGKILL) is a timeout only when the run lasted
 # OI_TIMEOUT seconds: an OOM kill earlier stays a failure
