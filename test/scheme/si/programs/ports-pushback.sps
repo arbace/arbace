@@ -18,6 +18,11 @@
 ;; N4: fresh-line after an extraction, the length of string ports, nonblocking mode of file ports
 (let-values ([(p ex) (open-string-output-port)])
   (put-string p "a") (ex) (fresh-line p) (put-string p "z") (show 'fl (ex)))
+(let ([sp (lambda (tag n init)
+            (let-values ([(p ex) (open-string-output-port)])
+              (put-string p init) (set-port-position! p n) (fresh-line p) (put-string p "Z") (show tag (ex))))])
+  (sp 'fl-end 2 "ab")
+  (sp 'fl-mid 1 "ab"))
 (show 'len (port-has-port-length? (open-string-input-port "ab")) (port-length (open-string-input-port "abc")))
 (let ([name "ports-pushback.tmp"])
   ;; the scratch file is deleted even when a line raises (re-review 044, M5)

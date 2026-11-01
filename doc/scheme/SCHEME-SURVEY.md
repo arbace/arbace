@@ -2978,7 +2978,9 @@ findings, N1-N9; the commits `0ded8bcd` to `81a25361` and the one that records t
 - `unget` of the end of file: Chez refuses it once its buffer is non-empty (after a read on a bytevector, string or file port, and a second time);
   si accepts it anywhere and any number of pushbacks.
 - The pushed-back value: Chez re-reads its buffer and ignores the value given (`unget-char #\z` after reading `#\a` gives `#\a`); si returns `#\z`.
-- After `set-port-position!` to 0 on a string output port, `fresh-line` and then the extraction give "a" on Chez, "" on si.
+- (Re-review 044, M1/M3: this was misdiagnosed.) `fresh-line` after `set-port-position!` is now right: `lastc` is kept on file and bytevector
+  ports and is the character before the new position on string output ports. What differs is that a string output port truncates on
+  `set-port-position!` where Chez overwrites (`"ab"`, position 0, extraction: Chez "ab", si "").
 - `set-port-length!` on bytevector and string output ports: Chez supports it, si raises (file output ports only).
 
 ### The numbers
@@ -2993,8 +2995,8 @@ findings, N1-N9; the commits `0ded8bcd` to `81a25361` and the one that records t
 
 ### Proposals (SC210 onward)
 
-- **SC210 The residuals of N4.** Options: (a) leave them, recorded here and in SC201 and SC202; (b) fix the cheap one (`fresh-line` after
-  `set-port-position!` to 0 on a string output port: clear `lastc` when the position is 0) and leave the rest; (c) all four, with SC201 (b) and
+- **SC210 The residuals of N4.** Options: (a) leave them, recorded here and in SC201 and SC202; (b) fix the cheap one (as built, and wrong:
+  clearing `lastc` on every reposition dropped a newline Chez writes; corrected in re-review 044, M1, and the real cause is M3's truncation) and leave the rest; (c) all four, with SC201 (b) and
   SC202 (b). *Recommended: (a)*, or (b) when a program prints through `fresh-line` after rewinding; no mat or program asks for the others.
 - **SC211 Buffer-faithful `unget` (SC201 (b)).** As built (SC201 (a)): a stack of pushed-back items beside the port, the end of file accepted
   anywhere, the given value returned. Options: (a) as built; (b) for ports that hold their input (bytevector, string, file) `unget` moves the
