@@ -41,9 +41,11 @@ ffmpeg), and 636 packages are installed; `check` confirms that line.
 
 - `world` prints the line, computed from `/etc/apk/world` and `/lib/apk/db/installed`.
 - `check` confirms, offline, that the line's closure with `install_if` is exactly the installed
-  set. A dependency with several installed providers (`cmd:awk` by busybox and gawk, `java-jdk` by
-  several JDKs) is apk's choice, not an edge: it counts as met only by a provider the line's closure
-  holds, so the line must name one (audit 065, GTS134).
+  set. A dependency name that has several providers (installed, or offered by the repositories' index cache: `/bin/sh` by
+  busybox-binsh and bash-binsh, `java-jdk` by every openjdk `-jdk`) is apk's choice, not an edge: it counts as met only by
+  an installed provider the line's closure holds, so the line must name one (`apk add` it on the host, which puts it in
+  world); a package of the exact name wins (`coreutils`), and `so:`, `cmd:` and `pc:` names count installed providers
+  only (audit 065, GTS134).
 - `simulate` runs `apk add --simulate` of the line into an empty root under `.tmp/alpine-env/`,
   against the repositories, and compares the result with the host.
 

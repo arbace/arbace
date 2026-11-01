@@ -1903,3 +1903,14 @@ as built. Test t03447's class `:print-shapes` (a constant printed as `0` against
   `world`; `simulate --line doc|arbace --arch A --keys-dir /usr/share/apk/keys/ARCH`; `@tag` and `!name` world entries;
   `LC_ALL=C` and a second sort in `simulate`; dropping `check`'s dead `extra` branch; whether the line keeps version pins
   (`linux-virt=...`). Options: (a) all in one change after GTS134; (b) only `doc` and `--arch`; (c) none. *Recommended: (b).*
+
+- **GTS137 (review 068 of audit-065) providers offered by the repositories.** A name counts as apk's choice when the
+  index cache offers several packages for it, not only when several are installed (one installed JDK would otherwise
+  drift to a newer `-jdk` and `world` would drop it). Options: (a) as built: the index cache read offline
+  (`/var/cache/apk/APKINDEX.*.tar.gz`), an exact-name package wins, `so:`/`cmd:`/`pc:` names count installed providers
+  only; (b) every name, `so:` too (11 more names to put in the line on the amd64 host); (c) a short always-named list
+  (`openjdk25-jdk`). *Recommended: (a).* Run on the amd64 host (this worktree shares its database), `check` now fails
+  naming five providers the host's world does not: busybox-binsh (`/bin/sh`), ifupdown-ng, mkinitfs,
+  openjdk25-jdk and openssh-client-default (with the packages only they pull: bridge, kmod, lddtree, ...);
+  `apk add` them on the host (puts them in world) or accept them as the host's, then regenerate the doc's host line
+  (GTS135).

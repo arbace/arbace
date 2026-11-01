@@ -4,11 +4,13 @@
 #   bin/alpine-env world       the line: /etc/apk/world less every entry another entry's
 #                              dependencies already install (from /lib/apk/db/installed)
 #   bin/alpine-env check       the line's closure, with install_if, equals the installed set
-#                              (offline, from the database); a dependency with several installed
-#                              providers (cmd:awk, java-jdk) counts as met only by one the line's
-#                              closure holds, so a line that misses it fails
-#                              (ALPINE_ENV_DB, ALPINE_ENV_WORLD: other files than /lib/apk/db/installed
-#                              and /etc/apk/world, for test/alpine-env/test.bash)
+#                              (offline, from the database); a dependency that the repositories' index
+#                              cache (or the installed set) gives several providers (/bin/sh, java-jdk)
+#                              counts as met only by an installed one the line's closure holds, so a
+#                              line that misses it fails; a package of the exact name wins (coreutils)
+#                              (ALPINE_ENV_DB, ALPINE_ENV_WORLD, ALPINE_ENV_INDEX: other files than
+#                              /lib/apk/db/installed, /etc/apk/world and the index cache, for
+#                              test/alpine-env/test.bash)
 #   bin/alpine-env simulate    `apk add --simulate` of the line into an empty root in .tmp/
 #                              (the repositories of /etc/apk/repositories, network): the
 #                              packages it would install against the installed ones, by name
@@ -39,11 +41,35 @@ prov = {}
 for p, c in pk.items():
     prov.setdefault(p, set()).add(p)
     for t in c.get('p', '').split(): prov.setdefault(nm(t), set()).add(p)
+# the packages the repositories offer by name (their index cache, offline; ALPINE_ENV_INDEX: an APKINDEX text file
+# instead, for the tests): a name offered by several packages is apk's choice even when one is installed (java-jdk
+# with openjdk25-jdk alone installed would drift to a newer JDK)
+avail = {}
+def add_index(text):
+    for rec in text.split('\n\n'):
+        name, pv = None, []
+        for l in rec.split('\n'):
+            if l.startswith('P:'): name = l[2:]
+            elif l.startswith('p:'): pv = [nm(t) for t in l[2:].split()]
+        if name:
+            for n in [name] + pv: avail.setdefault(n, set()).add(name)
+if os.environ.get('ALPINE_ENV_INDEX'):
+    add_index(open(os.environ['ALPINE_ENV_INDEX']).read())
+else:
+    import glob, tarfile
+    for f in glob.glob('/var/cache/apk/APKINDEX.*.tar.gz'):
+        try: add_index(tarfile.open(f, 'r:gz').extractfile('APKINDEX').read().decode())
+        except (OSError, KeyError, tarfile.TarError): pass
+def multi(n):
+    # a name apk chooses a provider for: no package of that exact name, and several providers (installed or offered)
+    # (so:, cmd:, pc: names count installed providers only: a library's versions are offered side by side and the
+    # installed one stays)
+    offered = len(avail.get(n, ())) if ':' not in n else 0
+    return n not in pk and n not in avail.get(n, ()) and (len(prov.get(n, ())) > 1 or offered > 1)
 def deps(p):
-    # the dependencies apk resolves to one package: a name with several installed providers (cmd:awk by busybox
-    # and gawk, java-jdk by several JDKs) is apk's choice, not an edge; see ambiguous()
+    # the dependencies apk resolves to one package; a multi() name is apk's choice, not an edge (see ambiguous())
     return set().union(*[prov.get(nm(t), set()) for t in pk[p].get('D', '').split()
-                         if not t.startswith('!') and len(prov.get(nm(t), ())) == 1])
+                         if not t.startswith('!') and not multi(nm(t))])
 def closure(roots):
     seen, st = set(), list(roots)
     while st:
@@ -51,13 +77,13 @@ def closure(roots):
         if x not in seen: seen.add(x); st.extend(deps(x))
     return seen
 def ambiguous(seen):
-    # the dependency names of SEEN with several installed providers and none of them in SEEN: apk would pick one
-    # (a provider already present satisfies the name), so a line that names none of them misses a package
+    # the multi() dependency names of SEEN none of whose installed providers is in SEEN: apk would pick one (a
+    # provider already present satisfies the name), so a line that names none of them misses a package
     out = {}
     for x in seen:
         for t in pk[x].get('D', '').split():
             ps = prov.get(nm(t), set())
-            if not t.startswith('!') and len(ps) > 1 and not ps & seen: out[nm(t)] = sorted(ps)
+            if not t.startswith('!') and multi(nm(t)) and ps and not ps & seen: out[nm(t)] = sorted(ps)
     return out
 def provs(names): return set().union(*[prov[nm(w)] for w in names])
 world = open(os.environ.get('ALPINE_ENV_WORLD', '/etc/apk/world')).read().split()
