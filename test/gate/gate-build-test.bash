@@ -73,4 +73,9 @@ if [ "$(status)" = 0 ] && grep -q old-marker "$T/during.ls" && ! grep -q version
    && [ "$(cat "$ARBACE_GATE_EXES/$K20/key")" = "$KEY" ] && [ ! -e "$ARBACE_GATE_EXES/$K20/amd64/old-marker" ] \
    && ! ls "$ARBACE_GATE_EXES" | grep -q '\.\(tmp\|old\)\.'; then ok "a miss swapped the whole directory in"
 else bad "a miss: status $(status); during: $(tr '\n' ' ' < "$T/during.ls"); $(tail -3 "$T/out")"; fi
+
+# a fresh host: the executables' root does not exist yet (review 048, N1); the builds are the stubs above
+( export ARBACE_GATE_EXES=$T/fresh-exes; run )
+if [ "$(status)" = 0 ] && [ "$(cat "$T/fresh-exes/$K20/key" 2>&1)" = "$KEY" ]; then ok "a miss on a fresh host (no executables' root) built"
+else bad "a miss on a fresh host: status $(status): $(head -2 "$T/out")"; fi
 exit $fail
