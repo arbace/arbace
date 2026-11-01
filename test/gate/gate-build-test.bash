@@ -100,4 +100,10 @@ for n in 1 2 3; do
   else bad "two concurrent misses, round $n: $(cat "$T/c1.status") $(cat "$T/c2.status"), builds $(wc -l < "$T/builds"), left: $(leftovers)"; fi
 done
 
+# a copy that fails swaps nothing in and leaves nothing (review 048, N4): the build made no aot/
+mkdir_exe "$ARBACE_GATE_EXES/$K20" stale; echo old > "$ARBACE_GATE_EXES/$K20/amd64/old-marker"
+( export STUB_NO_AOT=1; run )
+if [ "$(status)" != 0 ] && [ -f "$ARBACE_GATE_EXES/$K20/amd64/old-marker" ] && [ "$(cat "$ARBACE_GATE_EXES/$K20/key")" = stale ] && [ -z "$(leftovers)" ]; then ok "a failed copy kept the old directory"
+else bad "a failed copy: status $(status), key $(cat "$ARBACE_GATE_EXES/$K20/key"), left: $(leftovers)"; fi
+
 exit $fail
