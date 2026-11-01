@@ -54,6 +54,11 @@
 (let-values ([(p ex) (open-string-output-port)])
   (put-string p "ab") (set-port-position! p 5) (put-string p "") (display "" p) (put-string p "XYZ" 1 0)
   (let* ([a (port-length p)] [b (ex)]) (show 'beyond4 a b)))
+;; re-review 058, Q2: a NUL written last is a character, fresh-line writes its newline after it
+(let-values ([(p ex) (open-string-output-port)])
+  (put-string p "ab") (set-port-position! p 4) (put-string p "Z") (set-port-position! p 3) (fresh-line p) (put-string p "Z") (show 'nul1 (ex)))
+(let-values ([(p ex) (open-string-output-port)])
+  (put-string p "a\x0;") (fresh-line p) (put-string p "Z") (show 'nul2 (ex)))
 ;; re-review 047, P4: the nonblocking mode is kept
 (let ([p (open-string-input-port "a")])
   (set-port-nonblocking! p #t) (let* ([a (port-nonblocking? p)]) (show 'nb3 a))
