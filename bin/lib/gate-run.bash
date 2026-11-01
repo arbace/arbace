@@ -34,9 +34,9 @@
 # here once they ran (the decision "after", an early cutoff).
 
 gate_env() {
-  local common main
-  common=$(git rev-parse --path-format=absolute --git-common-dir 2>"$TMPDIR/gate-git.err") && [ -d "$common" ] \
-    && [ "$(basename "$common")" = .git ] && main=$(dirname "$common") || main=$root
+  local main
+  . "$root/bin/lib/gate-cache.bash" # the main checkout and the executables' directory, shared with the tools run by hand (GTS120)
+  main=$(arbace_main_checkout "$root")
   store=${ARBACE_GATE_STORE:-$main/.tmp/gate-pass}
   export ARBACE_HEAVY_LOCK=${ARBACE_HEAVY_LOCK:-$main/.tmp/big.lock}
   GATE_HEAVY_CMD=${GATE_HEAVY_CMD:-$root/bin/heavy-lock}
@@ -47,7 +47,7 @@ gate_env() {
   # GTS52 (a): TamaGo's bin/ first on every step's PATH (and the tools'), so that a program or script
   # that runs `go` runs the pinned toolchain, never the host's (no build may use the host's go)
   PATH=${ARBACE_GOROOT:-/root/tamago-go}/bin:$PATH; export PATH
-  exes=${ARBACE_GATE_EXES:-$main/.tmp/gate-exe}
+  exes=$(arbace_gate_exes "$root")
   mkdir -p "$(dirname "$ARBACE_HEAVY_LOCK")" "$exes" || return 1
   # the executables and javac's tool by the key of what they are built from, one directory each,
   # shared by the worktrees (GTS24 (a)): a worktree whose check runs finds main's build at the same key

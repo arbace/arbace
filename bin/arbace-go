@@ -173,6 +173,7 @@ go_env() { # go_env ARCH [GOOS]
 . "$root/bin/lib/javac-key.bash"
 . "$root/bin/lib/box-overlay.bash"
 . "$root/bin/lib/program.bash" # the base, the linker's flags, j2g and build-go calls (RPS97 (b))
+. "$root/bin/lib/gate-cache.bash" # arbace_gate_cache: the gate's builds, ARBACE_GATE_EXES/KEY20
 
 # the seconds since $1 (date +%s)
 since() { echo "$(( $(date +%s) - $1 )) s"; }
@@ -1011,11 +1012,12 @@ gate_rest_key() {
 # changed; with the compiled namespaces (aot/, aot.key) and j2g's program (j2g/: the executable
 # is a G1 of the fixpoint, built by stage 0 from the sources gate_key hashes). A hit takes seconds; a miss two Go-hosted builds. Prints where they are
 gate_build() {
-  local cache=${ARBACE_GATE_CACHE:-$root/.tmp/arbace-go-gate} key t0 cached=
+  local cache key t0 cached= b
   t0=$(date +%s)
   key=$(gate_key)
   [ -x "$cache/amd64/arbace" ] && [ -x "$cache/amd64/arbace-tests" ] && [ "$(cat "$cache/key" 2>"$discard")" = "$key" ] && cached=1
   # --check-cached (GTS57 (a)): only whether the build is there at its key, so that bin/gate takes no lock for a hit
+  cache=$(arbace_gate_cache "$root" "$key") || return 1
   if [ "${1:-}" = --check-cached ]; then
     [ -n "$cached" ] && echo "arbace-go: the cached executables (their inputs unchanged, key ${key:0:12})" \
       || echo "arbace-go: no executables at the checkout's key (${key:0:12})"
@@ -1026,6 +1028,13 @@ gate_build() {
   else
     echo "arbace-go: building the executables (key ${key:0:12})"
     rm -rf "${cache:?}"
+    # a miss removes the half-made directory of this key, never the directory of another key
+    # (ARBACE_GATE_CACHE pointed at ARBACE_GATE_EXES/OTHERKEY: GTS120)
+    b=$(basename "$cache")
+    if [[ $b =~ ^[0-9a-f]{20}$ ]] && [ "$b" != "${key:0:20}" ]; then
+      echo "arbace-go: $cache is the directory of another key (this checkout's is ${key:0:20}): not removed; unset ARBACE_GATE_CACHE or name another directory" >&2
+      return 1
+    fi
     arches=amd64 build 2>&1 || return 1
     arches=amd64 build_tests 2>&1 || return 1
     mkdir -p "$cache/amd64"
@@ -1048,7 +1057,7 @@ gate_build() {
 # gate: gate_build, then the smoke test on the cached executable
 gate() {
   gate_build || return 1
-  dir=${ARBACE_GATE_CACHE:-$root/.tmp/arbace-go-gate} arches=amd64 smoke
+  dir=$(arbace_gate_cache "$root") arches=amd64 smoke
 }
 
 # fixpoint: the Go-hosted fixpoint (standalone S3, S4, doc/STANDALONE-NOTES.md): G1 built by the
