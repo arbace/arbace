@@ -113,4 +113,19 @@ mkdir_exe "$ARBACE_GATE_EXES/$K20" stale
 if [ "$(status)" = 0 ] && [ "$(cat "$ARBACE_GATE_EXES/$K20/key")" = "$KEY" ] && grep -q "could not remove" "$T/out"; then ok "an old directory that stays does not fail the swap"
 else bad "an unremovable old directory: status $(status): $(tail -3 "$T/out")"; fi
 rm -rf "$ARBACE_GATE_EXES"/*.old.*
+
+# a directory holding some other tool's file named key is not a gate build (review 051, A)
+mkdir -p "$T/work-a" "$T/work-b/amd64"; echo not-a-gate-key > "$T/work-a/key"; echo data > "$T/work-a/disk"
+echo "$KEY" > "$T/work-b/key"; echo data > "$T/work-b/disk"   # a key, but no version.edn nor amd64/ of a build
+for c in "$T/work-a" "$T/work-b"; do
+  ( export ARBACE_GATE_CACHE=$c; run )
+  if [ "$(status)" != 0 ] && grep -q "not removed" "$T/out" && [ -f "$c/disk" ]; then ok "a directory with a stray key file refused and kept: $c"
+  else bad "a directory with a stray key file accepted: $c (status $(status))"; fi
+done
+# ... while a directory of a build, under another name, is still replaced
+mkdir_exe "$T/legacy" "$(printf f%.0s $(seq 64))"; echo v > "$T/legacy/version.edn"; touch "$T/legacy/amd64/old-marker"
+( export ARBACE_GATE_CACHE=$T/legacy; run )
+if [ "$(status)" = 0 ] && [ ! -e "$T/legacy/amd64/old-marker" ] && [ "$(cat "$T/legacy/key")" = "$KEY" ]; then ok "a build's directory under another name replaced"
+else bad "a legacy build directory: status $(status): $(tail -2 "$T/out")"; fi
+
 exit $fail
