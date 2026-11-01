@@ -473,7 +473,12 @@ gate_prune() {  # gate_prune [--dry-run]
 # faster, the same lines), built by TamaGo's go into DIR when its sources changed; GATE_AUDIT_AWK=1:
 # busybox awk. audit_reducer DIR sets red; audit_reduce FIFO prints the OP<TAB>PATH lines
 red=()
-audit_trace=open,openat,openat2,execve,execveat,readlink,readlinkat,chdir,clone,clone3,fork,vfork
+# rt_sigprocmask (GTS180, review 075 finding 1): strace resumes a new thread or child with PTRACE_SYSCALL, so it
+# stops on every syscall until its first traced one; Go's runtime threads (sysmon, idle Ms) never open or clone,
+# and paid that in system time against ulimit -t. Every new thread makes an rt_sigprocmask at once (Go's minit,
+# musl's thread start and fork): traced, they leave the fully traced state. gateaudit ignores the lines (no
+# case for the call).
+audit_trace=open,openat,openat2,execve,execveat,readlink,readlinkat,chdir,clone,clone3,fork,vfork,rt_sigprocmask
 audit_reducer() {
   local d=$1 tg=${ARBACE_GOROOT:-/root/tamago-go} rk
   red=(); mkdir -p "$d"
