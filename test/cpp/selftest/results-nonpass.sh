@@ -40,4 +40,14 @@ mk "$t/w4" a.C:p b.C:d c.C:d d.C:d
 rm "$res/tc-every-10.edn"; echo '{:files {"tc/b.C" :forms-differ "tc/c.C" :forms-differ "tc/d.C" :forms-differ}}' > "$t/known.edn"
 arbace_tool -m arbace.repr.cpp.rtcheck judge "$t/w4" "$t/known.edn" no-objects - "$res" record > "$t/w4.log" 2>&1; st=$?
 [ $st = 0 ] && grep -q '"tc/b.C" \[:known :forms-differ\]' "$res/tc-every-10.edn" && grep -q '"tc/a.C" :pass' "$res/tc-every-10.edn" && ok "the record writes [:known CLASS]" || bad "record: exit $st, $(cat "$res/tc-every-10.edn" 2>&1 | tail -5)"
+# CP164 (c): an improvement fails in a whole-corpus run (the key ends in -all), and is a count in a sample run (w2 above)
+cat > "$res/tc-all.edn" <<'EOR'
+{:key "tc-all"
+ :files {
+  "tc/a.C" :pass
+  "tc/b.C" [:known :forms-differ]
+ }}
+EOR
+mk "$t/w5" a.C:p b.C:p; echo tc-all > "$t/w5/list.key"; judge "$t/w5"; st=$?
+[ $st = 1 ] && grep -q 'now pass: write the record again' "$t/w5.log" && ok "an improvement fails in a whole-corpus run" || bad "whole-corpus improvement: exit $st, $(tail -2 "$t/w5.log")"
 finish
