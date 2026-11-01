@@ -1,0 +1,236 @@
+;; An OCaml channel (struct channel of runtime/io.c, runtime/caml/io.h): a buffered file
+;; descriptor (see Fd) with the C runtime's exact buffering, so what reaches the descriptor, and
+;; when, is what OCaml's runtime does. The OCaml value of a channel is a Custom with id "_chan"
+;; whose v is this object. Ported from oi's ext_io.go (Channel and its methods).
+
+(in-ns 'ocaml.rt)
+
+(defclass ^:public ^:final Channel
+  (field ^:public ^int fd)
+  (field ^:public ^byte/1 buff)
+  (field ^:public ^int curr)
+  ;; for an input channel the end of the valid data (struct channel's max)
+  (field ^:public ^int lim)
+  (field ^:public ^boolean isOut)
+  (field ^:public ^int end)
+  (field ^:public ^long offset)
+  ;; the channel's name (caml_ml_set_channel_name), an OCaml string or nil
+  (field ^:public name)
+  (field ^:public ^int flags)
+  (field ^:public cust)
+
+  ;; IO_BUFFER_SIZE, CHANNEL_TEXT_MODE, CHANNEL_FLAG_UNBUFFERED
+  (field ^:public ^:static ^:final ^int BUFSIZE 65536)
+  (field ^:public ^:static ^:final ^int TEXT 2)
+  (field ^:public ^:static ^:final ^int UNBUFFERED 8)
+  (field ^:public ^:static ^:final ^byte/1 dummy (new byte/1 1))
+  ;; the opened channels, the newest first (caml_all_opened_channels)
+  (field ^:public ^:static ^:final ^java.util.ArrayList all (java.util.ArrayList.))
+
+  (constructor ^:public [this ^int fd ^boolean isOut]
+    (set! (.-fd this) fd)
+    (set! (.-buff this) (new byte/1 65536))
+    (set! (.-end this) 65536)
+    (set! (.-isOut this) isOut)
+    (let [o (Fd/seek fd 0 1)]
+      (set! (.-offset this) (if (< o 0) -1 o)))
+    (set! (.-cust this) (Custom. "_chan" this))
+    (.add all 0 this))
+
+  ;; caml_sys_io_error: Sys_blocked_io for EAGAIN, else Sys_error strerror
+  (method ^:public ^:static ioError ^RuntimeException [^long e]
+    (if (== e 11) (Exn. Rt/Sys_blocked_io) (Fd/sysError e nil)))
+
+  ;; io.c's flush_partial
+  (method ^:public flushPartial ^boolean [this ^boolean exc]
+    (if (== fd -1)
+      (do (when exc (throw (Channel/ioError 9))) true)
+      (do
+        (let [towrite curr]
+          (when (> towrite 0)
+            (let [w (Fd/write fd buff 0 towrite)]
+              (when (< w 0)
+                (let [e (unchecked-negate w)]
+                  (when (and (or (== e 9) (== e 32) (== e 104)) (not (== fd -1))) (set! curr 0))
+                  (throw (Channel/ioError e))))
+              (let [wi (unchecked-int w)]
+                (set! offset (unchecked-add offset w))
+                (when (< wi towrite) (System/arraycopy buff wi buff 0 (unchecked-subtract-int towrite wi)))
+                (set! curr (unchecked-subtract-int curr wi))))))
+        (== curr 0))))
+
+  ;; caml_flush: the buffer completely
+  (method ^:public flush ^void [this]
+    (while (not (.flushPartial this true))))
+
+  (method ^:public flushIfUnbuffered ^void [this]
+    (when (not (== 0 (bit-and flags 8))) (.flush this)))
+
+  (method ^:public putch ^void [this ^int b]
+    (when (>= curr end) (.flushPartial this true))
+    (aset buff curr (unchecked-byte b))
+    (set! curr (unchecked-inc-int curr)))
+
+  (method ^:public putword ^void [this ^int w]
+    (when (not (== 0 (bit-and flags 2))) (throw (Rt/failwith "output_binary_int: not a binary channel")))
+    (.putch this (unsigned-bit-shift-right-int w 24))
+    (.putch this (unsigned-bit-shift-right-int w 16))
+    (.putch this (unsigned-bit-shift-right-int w 8))
+    (.putch this w))
+
+  ;; caml_putblock: the number of bytes taken
+  (method ^:public putblock ^int [this ^byte/1 p ^int ofs ^int n]
+    (let [free (unchecked-subtract-int end curr)]
+      (if (< n free)
+        (do (System/arraycopy p ofs buff curr n)
+            (set! curr (unchecked-add-int curr n))
+            n)
+        (do (System/arraycopy p ofs buff curr free)
+            (set! curr end)
+            (.flushPartial this true)
+            free))))
+
+  ;; caml_really_putblock (buffered)
+  (method ^:public writeBytes ^void [this ^byte/1 p ^int ofs ^int n]
+    (let [^:mutable ^int o ofs ^:mutable ^int m n]
+      (while (> m 0)
+        (let [w (.putblock this p o m)]
+          (set! o (unchecked-add-int o w))
+          (set! m (unchecked-subtract-int m w))))))
+
+  ;; caml_refill: reads a new buffer and returns its first byte
+  (method ^:public refill ^int [this]
+    (let [n (Fd/read fd buff 0 end)]
+      (when (< n 0) (throw (Channel/ioError (unchecked-negate n))))
+      (when (== n 0) (throw (Rt/endOfFile)))
+      (set! offset (unchecked-add offset n))
+      (set! lim (unchecked-int n))
+      (set! curr 1)
+      (unchecked-int (bit-and (long (aget buff 0)) 255))))
+
+  (method ^:public getch ^int [this]
+    (if (>= curr lim)
+      (.refill this)
+      (let [b (bit-and (long (aget buff curr)) 255)]
+        (set! curr (unchecked-inc-int curr))
+        (unchecked-int b))))
+
+  ;; the four bytes of a binary int, as a signed 32 bit int
+  (method ^:public getword ^int [this]
+    (when (not (== 0 (bit-and flags 2))) (throw (Rt/failwith "input_binary_int: not a binary channel")))
+    (let [^:mutable ^int r 0]
+      (loop [^int i 0]
+        (when (< i 4)
+          (set! r (unchecked-add-int (bit-shift-left-int r 8) (.getch this)))
+          (recur (unchecked-inc-int i))))
+      r))
+
+  ;; caml_getblock: reads up to n bytes into p at ofs, 0 at the end of the file
+  (method ^:public getblock ^int [this ^byte/1 p ^int ofs ^int n]
+    (let [avail (unchecked-subtract-int lim curr)]
+      (cond
+        (<= n avail)
+        (do (System/arraycopy buff curr p ofs n)
+            (set! curr (unchecked-add-int curr n))
+            n)
+        (> avail 0)
+        (do (System/arraycopy buff curr p ofs avail)
+            (set! curr (unchecked-add-int curr avail))
+            avail)
+        :else
+        (let [nread (Fd/read fd buff 0 end)]
+          (when (< nread 0) (throw (Channel/ioError (unchecked-negate nread))))
+          (let [nr (unchecked-int nread)
+                m (if (> n nr) nr n)]
+            (set! offset (unchecked-add offset nread))
+            (set! lim nr)
+            (System/arraycopy buff 0 p ofs m)
+            (set! curr m)
+            m)))))
+
+  ;; exactly n bytes, End_of_file when the channel has fewer
+  (method ^:public readFull ^byte/1 [this ^int n]
+    (let [out (new byte/1 n) ^:mutable ^int got 0]
+      (while (< got n)
+        (let [r (.getblock this out got (unchecked-subtract-int n got))]
+          (when (== r 0) (throw (Rt/endOfFile)))
+          (set! got (unchecked-add-int got r))))
+      out))
+
+  (method ^:public seekOut ^void [this ^long dest]
+    (.flush this)
+    (let [res (Fd/seek fd dest 0)]
+      (when (< res 0) (throw (Fd/sysError (unchecked-negate res) nil)))
+      (when (not (== res dest)) (throw (Fd/sysError 22 nil)))
+      (set! offset dest)))
+
+  (method ^:public seekIn ^void [this ^long dest]
+    (if (and (>= dest (unchecked-subtract offset lim)) (<= dest offset) (== 0 (bit-and flags 2)))
+      (set! curr (unchecked-int (unchecked-subtract lim (unchecked-subtract offset dest))))
+      (let [res (Fd/seek fd dest 0)]
+        (when (< res 0) (throw (Fd/sysError (unchecked-negate res) nil)))
+        (when (not (== res dest)) (throw (Fd/sysError 22 nil)))
+        (set! offset dest)
+        (set! curr 0)
+        (set! lim 0))))
+
+  (method ^:public posOut ^long [this] (unchecked-add offset curr))
+  (method ^:public posIn ^long [this] (unchecked-subtract offset (unchecked-subtract-int lim curr)))
+
+  ;; caml_ml_channel_size
+  (method ^:public size ^long [this]
+    (let [^:mutable ^long here (if (== 0 (bit-and flags 2)) offset -1)]
+      (when (== here -1)
+        (let [h (Fd/seek fd 0 1)]
+          (when (< h 0) (throw (Fd/sysError (unchecked-negate h) nil)))
+          (set! here h)))
+      (let [e (Fd/seek fd 0 2)]
+        (when (< e 0) (throw (Fd/sysError (unchecked-negate e) nil)))
+        (let [r (Fd/seek fd here 0)]
+          (when (< r 0) (throw (Fd/sysError (unchecked-negate r) nil)))
+          (when (not (== r here)) (throw (Fd/sysError 22 nil)))
+          e))))
+
+  ;; caml_input_scan_line
+  (method ^:public scanLine ^int [this]
+    (let [^:mutable ^int p curr]
+      (while true
+        (when (>= p lim)
+          (when (> curr 0)
+            (let [n curr]
+              (System/arraycopy buff curr buff 0 (unchecked-subtract-int lim curr))
+              (set! curr 0)
+              (set! lim (unchecked-subtract-int lim n))
+              (set! p (unchecked-subtract-int p n))))
+          (when (>= lim end) (return (unchecked-negate-int (unchecked-subtract-int lim curr))))
+          (let [n (Fd/read fd buff lim (unchecked-subtract-int end lim))]
+            (when (< n 0) (throw (Channel/ioError (unchecked-negate n))))
+            (when (== n 0) (return (unchecked-negate-int (unchecked-subtract-int lim curr))))
+            (set! offset (unchecked-add offset n))
+            (set! lim (unchecked-add-int lim (unchecked-int n)))))
+        (let [ch (aget buff p)]
+          (set! p (unchecked-inc-int p))
+          (when (== ch 10) (return (unchecked-subtract-int p curr)))))))
+
+  (method ^:public close ^void [this]
+    (when (not (== fd -1))
+      (let [f fd]
+        (set! fd -1)
+        (set! buff dummy)
+        (set! end 1)
+        (if isOut
+          (do (set! curr end) (set! lim end))
+          (do (set! curr 0) (set! lim 0)))
+        (let [r (Fd/close f)]
+          (when (< r 0) (throw (Fd/sysError (unchecked-negate r) nil)))))))
+
+  ;; flushes every open output channel, ignoring errors (the fatal error path, at_exit)
+  (method ^:public ^:static flushStd ^void []
+    (loop [^int i 0]
+      (when (< i (.size all))
+        (let [c (cast Channel (.get all i))]
+          (when (and (.-isOut c) (not (== (.-fd c) -1)))
+            (try
+              (while (not (.flushPartial c false)))
+              (catch Exn e nil))))
+        (recur (unchecked-inc-int i))))))

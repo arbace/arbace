@@ -1,0 +1,208 @@
+(in-ns 'go.arbace.oi) (go/file "ext.go" :imports [
+
+    ^{:line 3} [sync "sync"]])
+
+
+
+(go/type Ext "Ext is an external's implementation (the runtime's C primitive of that name), over its\narguments as the call evaluated them.\n" (func [^{:tag (* Thread)} th ^{:tag (slice Value)} a] [Value]))
+
+
+
+(go/var ^{:doc "Externals are the implemented externals by C name (the runtime's primitives that the stdlib\nand the programs name in their external declarations).\n"} Externals (lit (map string Ext)))
+
+
+^{:go/end 19} (go/func RegisterExt "RegisterExt registers the external name; files register theirs in init.\n" [^string name ^Ext f]
+  (when [(values _ dup) (aget Externals name)] dup
+    (panic (+ "oi: external registered twice: " name)))
+
+  (aset Externals name f))
+
+
+;; The externals of the interpreter's core: the runtime's values (obj.c), lazy values, objects,
+;; recursive values' dummies, named values and exceptions, effects, domains and their locks.
+
+(go/var ^{:tag (struct sync/Mutex ^int n)} ooID)
+
+
+
+
+^{:go/end 203} (go/func init []
+  (let [r RegisterExt]
+    (r "caml_register_named_value" ^{:go/end 31} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (RegisterNamed (GoString (aget a 0)) (aget a 1)) Unit))
+    (r "caml_obj_tag" ^{:go/end 32} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (Tag (aget a 0))))
+    (r "caml_obj_size" ^{:go/end 33} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (Size (aget a 0))))
+    (r "caml_obj_set_tag" ^{:go/end 34} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (set! (.-Tag (AsBlock (aget a 0))) (AsInt (aget a 1))) Unit))
+    (r "caml_obj_block" ^{:go/end 53} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+        (let [(values tag n) (values (AsInt (aget a 0)) (AsInt (aget a 1)))]
+          (switch
+            (case [(== tag TagCustom) (and (== tag TagClosure) (< n 2)) (and (== tag TagString) (== n 0))]
+              (InvalidArg "Obj.new_block"))
+            (case [(== tag TagString)]
+              (return (addr (lit Bytes :B (make (slice byte) (- (* n 8) 1))))))
+            (case [(and (== tag TagDouble) (== n 1))]
+              (return (conv float64 0))))
+
+          (when (== tag TagDoubleArray)
+            (return (addr (lit FloatArray :F (make (slice float64) n)))))
+
+          (let [f (make (slice Value) n)]
+            (range [i f]
+              (aset f i 0))
+
+            (addr (lit Block :Tag tag :F f))))))
+
+    (r "caml_obj_with_tag" ^{:go/end 60} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+        (let [d (Dup (aget a 1))]
+          (when [(values b ok) (assert (* Block) d)] ok
+            (set! (.-Tag b) (AsInt (aget a 0))))
+
+          ^{:line 59} d)))
+
+    (r "caml_obj_dup" ^{:go/end 61} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (Dup (aget a 0))))
+    (r "caml_obj_raw_field" ^{:go/end 62} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (conv Nativeint (AsInt (field (aget a 0) (AsInt (aget a 1)))))))
+    (r "caml_obj_set_raw_field" ^{:go/end 66} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+        (setField (aget a 0) (AsInt (aget a 1)) (conv int (assert Nativeint (aget a 2))))
+        ^{:line 65} Unit))
+
+    (r "caml_obj_reachable_words" ^{:go/end 67} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (+ (Size (aget a 0)) 1)))
+    (r "caml_obj_add_offset" ^{:go/end 68} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (Internalf "Obj.add_offset") nil))
+    (r "caml_obj_is_shared" ^{:go/end 69} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] 1))
+    (r "caml_obj_compare_and_swap" ^{:go/end 78} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+        ^{:go/breaks [[3 77]]} (let [b (AsBlock (aget a 0))
+            ^{:line 72} i (AsInt (aget a 1))]
+          (when (PhysEqual (aget (.-F b) i) (aget a 2))
+            (aset (.-F b) i (aget a 3))
+            (return 1))
+
+          0)))
+
+    (r "caml_fresh_oo_id" ^{:go/end 84} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+        ^{:go/via [Mutex]} (.Lock ooID)
+        (defer ^{:go/via [Mutex]} (.Unlock ooID))
+        (inc! (.-n ooID))
+        (.-n ooID)))
+
+    (r "caml_set_oo_id" ^{:go/end 91} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+        ^{:go/via [Mutex]} (.Lock ooID)
+        (defer ^{:go/via [Mutex]} (.Unlock ooID))
+        (inc! (.-n ooID))
+        (aset (.-F (AsBlock (aget a 0))) 1 (.-n ooID))
+        (aget a 0)))
+
+    (r "caml_get_public_method" ^{:go/end 92} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (GetPublicMethod (aget a 0) (AsInt (aget a 1)))))
+
+    ;; lazy values (runtime/obj.c, lazy.c of 5.x)
+    (r "caml_lazy_make_forward" ^{:go/end 95} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (addr (lit Block :Tag TagForward :F (lit (slice Value) (aget a 0))))))
+    (r "caml_lazy_update_to_forcing" ^{:go/breaks [[3 101]] :go/end 102} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+        (when [(values b ok) (assert (* Block) (aget a 0))] (and ok (== (.-Tag b) TagLazy))
+          (set! (.-Tag b) TagForcing)
+          (return 0))
+
+        1))
+
+    (r "caml_lazy_update_to_forward" ^{:go/end 106} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+        (set! (.-Tag (AsBlock (aget a 0))) TagForward)
+        ^{:line 105} Unit))
+
+    (r "caml_lazy_reset_to_lazy" ^{:go/end 110} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+        (set! (.-Tag (AsBlock (aget a 0))) TagLazy)
+        ^{:line 109} Unit))
+
+
+    ;; recursive values (Value_rec_compiler's dummies)
+    (let [dummy ^{:go/end 120} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+          (let [n (AsInt (aget a 0))
+              ^{:line 115} f (make (slice Value) n)]
+            (range [i f]
+              (aset f i 0))
+
+            (addr (lit Block :Tag 0 :F f))))]
+
+      (r "caml_alloc_dummy" dummy)
+      (r "caml_alloc_dummy_function" ^{:go/end 122} (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a] (dummy th (subslice a _ 1))))
+      (r "caml_alloc_dummy_float" ^{:go/end 123} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (addr (lit FloatArray :F (make (slice float64) (AsInt (aget a 0)))))))
+      (r "caml_alloc_dummy_lazy" ^{:go/end 124} (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a] (dummy th (lit (slice Value) 1))))
+      (r "caml_update_dummy" ^{:go/end 142} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+          (type-switch [d (aget a 0)]
+            (case [(* Block)]
+              (type-switch [v (aget a 1)]
+                (case [(* Block)]
+                  (set! (.-Tag d) (.-Tag v))
+                  (set! (.-F d) (append (subslice (.-F d) _ 0 0) (spread (.-F v)))))
+                (case [(* Closure)]
+                  (set! (.-Tag d) TagClosure)
+                  (set! (.-F d) (lit (slice Value) v)))
+                (default
+                  (Internalf "caml_update_dummy with %s" (Describe v)))))
+
+            (case [(* FloatArray)]
+              ;; the empty array [||] is an atom (a Block with no fields), not a float array (OC104)
+              (type-switch [v (aget a 1)]
+                (case [(* FloatArray)]
+                  (copy (.-F d) (.-F v)))
+                (case [(* Block)]
+                  (when (!= (len (.-F v)) 0)
+                    (Internalf "caml_update_dummy with %s" (Describe v)))))))
+
+          ^{:line 141} Unit))
+
+
+      (r "caml_update_dummy_lazy" ^{:go/end 153} (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a]
+          (switch (Tag (aget a 1))
+            (case [TagLazy TagForcing TagForward]
+              (return ((aget Externals "caml_update_dummy") th a))))
+
+          (let [d (AsBlock (aget a 0))]
+            (set! (.-F d) (lit (slice Value) (aget a 1)))
+            (set! (.-Tag d) TagForward)
+            ^{:line 152} Unit)))
+
+
+      ;; effects
+      (r "caml_alloc_stack" ^{:go/end 156} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (AllocStack (aget a 0) (aget a 1) (aget a 2))))
+      (r "caml_continuation_use_noexc" ^{:go/end 157} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (ContinuationUse (aget a 0))))
+      (r "caml_continuation_use_and_update_handler_noexc" ^{:go/end 164} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+          (let [s (ContinuationUse (aget a 0))]
+            (when [(values fb ok) (assert (* Fiber) s)] ok
+              (.UpdateHandlers fb (aget a 1) (aget a 2) (aget a 3)))
+
+            ^{:line 163} s)))
+
+      (r "caml_get_continuation_callstack" ^{:go/end 165} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (addr (lit Block :Tag 0))))
+
+      ;; domains' storage
+      (r "caml_domain_dls_set" ^{:go/end 168} (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a] (.SetDLS th (aget a 0)) Unit))
+      (r "caml_domain_dls_get" ^{:go/end 169} (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a] (.DLS th)))
+      (r "caml_domain_dls_compare_and_set" ^{:go/breaks [[3 175]] :go/end 176} (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a]
+          (when (PhysEqual (.DLS th) (aget a 0))
+            (.SetDLS th (aget a 1))
+            (return 1))
+
+          0))
+
+      (r "caml_atomic_load_field" ^{:go/end 177} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (field (aget a 0) (AsInt (aget a 1)))))
+      (r "caml_atomic_exchange_field" ^{:go/end 184} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+          (let [b (AsBlock (aget a 0))
+              ^{:line 180} i (AsInt (aget a 1))
+              ^{:line 181} old (aget (.-F b) i)]
+            (aset (.-F b) i (aget a 2))
+            ^{:line 183} old)))
+
+      (r "caml_atomic_cas_field" ^{:go/end 193} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+          ^{:go/breaks [[3 192]]} (let [b (AsBlock (aget a 0))
+              ^{:line 187} i (AsInt (aget a 1))]
+            (when (PhysEqual (aget (.-F b) i) (aget a 2))
+              (aset (.-F b) i (aget a 3))
+              (return 1))
+
+            0)))
+
+      (r "caml_atomic_fetch_add_field" ^{:go/end 200} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+          (let [b (AsBlock (aget a 0))
+              ^{:line 196} i (AsInt (aget a 1))
+              ^{:line 197} old (AsInt (aget (.-F b) i))]
+            (aset (.-F b) i (Int (+ old (AsInt (aget a 2)))))
+            ^{:line 199} old)))
+
+      (r "caml_atomic_make_contended" ^{:go/end 201} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (addr (lit Block :Tag 0 :F (lit (slice Value) (aget a 0))))))
+      (r "caml_process_pending_actions_with_root" ^{:go/end 202} (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a] (.poll th) (aget a 0))))))

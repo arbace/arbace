@@ -1,0 +1,747 @@
+(in-ns 'go.arbace.oi) (go/file "marshal.go" :imports [
+
+
+    ^{:line 4} [binary "encoding/binary"]
+    ^{:line 5} [fmt "fmt"]
+    ^{:line 6} [math "math"]])
+
+
+;; runtime/extern.c and intern.c: Marshal's format (the small and big headers, no compression),
+;; byte for byte OCaml's on 64 bits.
+;;
+;; Divergence by design: a boxed float, int32, int64 or nativeint has no identity in oi, so two
+;; fields holding "the same" boxed number are written twice, where OCaml writes a shared
+;; reference the second time (the object counter still counts every one).
+
+(go/const
+  ^{:line 17} [^{:val 2224400062} magicSmall 0x8495A6BE]
+  ^{:line 18} [^{:val 2224400063} magicBig 0x8495A6BF]
+  ^{:line 19} [^{:val 2224400061} magicComp 0x8495A6BD]
+
+  ^{:line 21} [^{:val 128} prefixSmallBlock 0x80]
+  ^{:line 22} [^{:val 64} prefixSmallInt 0x40]
+  ^{:line 23} [^{:val 32} prefixSmallString 0x20]
+
+  ^{:line 25} [^{:val 0} codeInt8 0x0]
+  ^{:line 26} [^{:val 1} codeInt16 0x1]
+  ^{:line 27} [^{:val 2} codeInt32 0x2]
+  ^{:line 28} [^{:val 3} codeInt64 0x3]
+  ^{:line 29} [^{:val 4} codeShared8 0x4]
+  ^{:line 30} [^{:val 5} codeShared16 0x5]
+  ^{:line 31} [^{:val 6} codeShared32 0x6]
+  ^{:line 32} [^{:val 20} codeShared64 0x14]
+  ^{:line 33} [^{:val 8} codeBlock32 0x8]
+  ^{:line 34} [^{:val 19} codeBlock64 0x13]
+  ^{:line 35} [^{:val 9} codeString8 0x9]
+  ^{:line 36} [^{:val 10} codeString32 0xA]
+  ^{:line 37} [^{:val 21} codeString64 0x15]
+  ^{:line 38} [^{:val 11} codeDoubleBig 0xB]
+  ^{:line 39} [^{:val 12} codeDoubleLittle 0xC]
+  ^{:line 40} [^{:val 13} codeDoubleArray8Big 0xD]
+  ^{:line 41} [^{:val 14} codeDoubleArray8Little 0xE]
+  ^{:line 42} [^{:val 15} codeDoubleArray32Big 0xF]
+  ^{:line 43} [^{:val 7} codeDoubleArray32Little 0x7]
+  ^{:line 44} [^{:val 22} codeDoubleArray64Big 0x16]
+  ^{:line 45} [^{:val 23} codeDoubleArray64Little 0x17]
+  ^{:line 46} [^{:val 16} codeCodePointer 0x10]
+  ^{:line 47} [^{:val 17} codeInfixPointer 0x11]
+  ^{:line 48} [^{:val 18} oldCodeCustom 0x12]
+  ^{:line 49} [^{:val 24} codeCustomLen 0x18]
+  ^{:line 50} [^{:val 25} codeCustomFixed 0x19]
+
+  ^{:line 52} [^{:val 1} flagNoSharing 1]
+  ^{:line 53} [^{:val 2} flagClosures 2]
+  ^{:line 54} [^{:val 4} flagCompat32 4])
+
+
+(go/type externState (struct
+    ^{:line 58 :tag (slice byte)} buf
+    ^{:line 59 :tag int} flags
+    ^{:line 60 :tag int} count
+    ^{:line 61 :tag uint64} size32
+    ^{:line 62 :tag uint64} size64
+    ^{:line 63 :tag (map any int)} seen
+    ^{:line 64 :tag int} limit)) ; user-provided buffer: the room for the data (negative: none)
+
+
+^{:go/end 67} (go/method fail [^{:tag (* externState)} s ^string msg] (Failwith msg))
+^{:go/end 68} (go/method invalid [^{:tag (* externState)} s ^string msg] (InvalidArg msg))
+
+^{:go/end 70} (go/method byte1 [^{:tag (* externState)} s ^byte b] (set! (.-buf s) (append (.-buf s) b)))
+^{:go/end 73} (go/method code8 [^{:tag (* externState)} s ^int code ^int v]
+  (set! (.-buf s) (append (.-buf s) (conv byte code) (conv byte v))))
+
+^{:go/end 76} (go/method code16 [^{:tag (* externState)} s ^int code ^int v]
+  (set! (.-buf s) (append (.-buf s) (conv byte code) (conv byte (>> v 8)) (conv byte v))))
+
+^{:go/end 79} (go/method code32 [^{:tag (* externState)} s ^int code ^int64 v]
+  (set! (.-buf s) (append (.-buf s) (conv byte code) (conv byte (>> v 24)) (conv byte (>> v 16)) (conv byte (>> v 8)) (conv byte v))))
+
+^{:go/end 83} (go/method code64 [^{:tag (* externState)} s ^int code ^int64 v]
+  (set! (.-buf s) (append (.-buf s) (conv byte code)))
+  (set! (.-buf s) (.AppendUint64 binary/BigEndian (.-buf s) (conv uint64 v))))
+
+
+^{:go/end 101} (go/method externInt [^{:tag (* externState)} s ^int n]
+  (switch
+    (case [(and (>= n 0) (< n 0x40))]
+      (.byte1 s (conv byte (+ prefixSmallInt n))))
+    (case [(and (>= n (- (<< 1 7))) (< n (<< 1 7)))]
+      (.code8 s codeInt8 n))
+    (case [(and (>= n (- (<< 1 15))) (< n (<< 1 15)))]
+      (.code16 s codeInt16 n))
+    (case [(or (< n (- (<< 1 30))) (>= n (<< 1 30)))]
+      (when (!= (bit-and (.-flags s) flagCompat32) 0)
+        (.fail s "output_value: integer cannot be read back on 32-bit platform"))
+
+      (.code64 s codeInt64 (conv int64 n)))
+    (default
+      (.code32 s codeInt32 (conv int64 n)))))
+
+
+
+^{:go/end 114} (go/method shared [^{:tag (* externState)} s ^int d]
+  (switch
+    (case [(< d 0x100)]
+      (.code8 s codeShared8 d))
+    (case [(< d 0x10000)]
+      (.code16 s codeShared16 d))
+    (case [(>= d (<< 1 32))]
+      (.code64 s codeShared64 (conv int64 d)))
+    (default
+      (.code32 s codeShared32 (conv int64 d)))))
+
+
+
+^{:go/end 130} (go/method header [^{:tag (* externState)} s ^int sz ^int tag]
+  (when (and (< tag 16) (< sz 8))
+    (.byte1 s (conv byte (+ prefixSmallBlock tag (<< sz 4))))
+    (return))
+
+  (let [hd (+ (<< (conv uint64 sz) 10) (<< 3 8) (conv uint64 tag))]
+    (when (and (> sz 0x3FFFFF) (!= (bit-and (.-flags s) flagCompat32) 0))
+      (.fail s "output_value: array cannot be read back on 32-bit platform"))
+
+    (if (< hd (<< 1 32))
+      (.code32 s codeBlock32 (conv int64 hd))
+
+      (.code64 s codeBlock64 (conv int64 hd)))))
+
+
+
+^{:go/end 150} (go/method str [^{:tag (* externState)} s ^{:tag (slice byte)} b]
+  (let [n (len b)]
+    (switch
+      (case [(< n 0x20)]
+        (.byte1 s (conv byte (+ prefixSmallString n))))
+      (case [(< n 0x100)]
+        (.code8 s codeString8 n))
+      (default
+        (when (and (> n 0xFFFFFB) (!= (bit-and (.-flags s) flagCompat32) 0))
+          (.fail s "output_value: string cannot be read back on 32-bit platform"))
+
+        (if (< n (<< 1 32))
+          (.code32 s codeString32 (conv int64 n))
+
+          (.code64 s codeString64 (conv int64 n)))))
+
+
+    (set! (.-buf s) (append (.-buf s) (spread b)))))
+
+
+^{:go/end 154} (go/method float8 [^{:tag (* externState)} s ^float64 d]
+  (set! (.-buf s) (.AppendUint64 binary/LittleEndian (.-buf s) (math/Float64bits d))))
+
+
+
+^{:go/end 165} (go/method record "record is extern_record_location: the object gets the next number.\n" [^{:tag (* externState)} s ^any key]
+  (when (!= (bit-and (.-flags s) flagNoSharing) 0)
+    (return))
+
+  (when (!= key nil)
+    (aset (.-seen s) key (.-count s)))
+
+  (inc! (.-count s)))
+
+
+(go/type externFrame (struct
+    ^{:line 168 :tag (slice Value)} f
+    ^{:line 169 :tag int} i))
+
+
+^{:go/end 309} (go/method rec [^{:tag (* externState)} s ^Value root]
+  (when (== (bit-and (.-flags s) flagNoSharing) 0)
+    (set! (.-seen s) (lit (map any int))))
+
+  (let [^{:tag (slice externFrame)} stack (zero (slice externFrame))
+      ^{:line 177} v root]
+    (while true
+      (label :again
+        (type-switch [x v]
+          (case [int]
+            (.externInt s x))
+          (case [float64]
+            (set! (.-buf s) (append (.-buf s) codeDoubleLittle))
+            (.float8 s x)
+            (set! (.-size32 s) + 3)
+            (set! (.-size64 s) + 2)
+            (.record s nil))
+          (case [(* Bytes)]
+            (when (.shareLookup s x)
+              (break))
+
+            (.str s (.-B x))
+            (set! (.-size32 s) + (conv uint64 (+ 1 (/ (+ (len (.-B x)) 4) 4))))
+            (set! (.-size64 s) + (conv uint64 (+ 1 (/ (+ (len (.-B x)) 8) 8))))
+            (.record s x))
+          (case [(* FloatArray)]
+            (when (== (len (.-F x)) 0)
+              (.header s 0 TagDoubleArray)
+              (break))
+
+            (when (.shareLookup s x)
+              (break))
+
+            (let [n (len (.-F x))]
+              (if (< n 0x100)
+                (.code8 s codeDoubleArray8Little n)
+                (do
+                  (when (and (> n 0x1FFFFF) (!= (bit-and (.-flags s) flagCompat32) 0))
+                    (.fail s "output_value: float array cannot be read back on 32-bit platform"))
+
+                  (if (< n (<< 1 32))
+                    (.code32 s codeDoubleArray32Little (conv int64 n))
+
+                    (.code64 s codeDoubleArray64Little (conv int64 n)))))
+
+
+              (range [_ d (.-F x)]
+                (.float8 s d))
+
+              (set! (.-size32 s) + (conv uint64 (+ 1 (* n 2))))
+              (set! (.-size64 s) + (conv uint64 (+ 1 n)))
+              (.record s x)))
+          (case [int32]
+            (set! (.-buf s) (append (.-buf s) codeCustomFixed \_ \i 0))
+            (set! (.-buf s) (.AppendUint32 binary/BigEndian (.-buf s) (conv uint32 x)))
+            (set! (.-size32 s) + (+ 2 (>> (+ 4 3) 2)))
+            (set! (.-size64 s) + (+ 2 (>> (+ 4 7) 3)))
+            (.record s nil))
+          (case [int64]
+            (set! (.-buf s) (append (.-buf s) codeCustomFixed \_ \j 0))
+            (set! (.-buf s) (.AppendUint64 binary/BigEndian (.-buf s) (conv uint64 x)))
+            (set! (.-size32 s) + (+ 2 (>> (+ 8 3) 2)))
+            (set! (.-size64 s) + (+ 2 (>> (+ 8 7) 3)))
+            (.record s nil))
+          (case [Nativeint]
+            (set! (.-buf s) (append (.-buf s) codeCustomFixed \_ \n 0))
+            (if (and (>= x math/MinInt32) (<= x math/MaxInt32)) (do
+                (set! (.-buf s) (append (.-buf s) 1))
+                (set! (.-buf s) (.AppendUint32 binary/BigEndian (.-buf s) (conv uint32 x))))
+              (do
+                (set! (.-buf s) (append (.-buf s) 2))
+                (set! (.-buf s) (.AppendUint64 binary/BigEndian (.-buf s) (conv uint64 x)))))
+
+            (set! (.-size32 s) + (+ 2 (>> (+ 4 3) 2)))
+            (set! (.-size64 s) + (+ 2 (>> (+ 8 7) 3)))
+            (.record s nil))
+          (case [(* Custom)]
+            (.invalid s "output_value: abstract value (Custom)"))
+          (case [(* Closure)]
+            (.invalid s "output_value: functional value"))
+          (case [(* Fiber)]
+            (.invalid s "output_value: continuation value"))
+          (case [(* Block)]
+            (when (== (.-Tag x) TagForward)
+              (let [f (aget (.-F x) 0)]
+                (if [(values b ok) (assert (* Block) f)] (and ok ^:go/paren (or (== (.-Tag b) TagForward) (== (.-Tag b) TagLazy) (== (.-Tag b) TagForcing))) (do)
+                  ;; not short-circuited
+                  (if [(values _ isf) (assert float64 f)] isf (do)
+                    ;; not short-circuited (flat float arrays)
+                    (do
+                      (set! v f)
+                      (goto :again))))))
+
+
+            (when (== (len (.-F x)) 0)
+              (.header s 0 (.-Tag x))
+              (break))
+
+            (when (.shareLookup s x)
+              (break))
+
+            (switch (.-Tag x)
+              (case [TagAbstract]
+                (.invalid s "output_value: abstract value (Abstract)"))
+              (case [TagInfix]
+                (.invalid s "output_value: functional value"))
+              (case [TagCont]
+                (.invalid s "output_value: continuation value"))
+              (case [TagClosure]
+                (.invalid s "output_value: functional value")))
+
+            (.header s (len (.-F x)) (.-Tag x))
+            (set! (.-size32 s) + (conv uint64 (+ 1 (len (.-F x)))))
+            (set! (.-size64 s) + (conv uint64 (+ 1 (len (.-F x)))))
+            (.record s x)
+            (when (> (len (.-F x)) 1)
+              (set! stack (append stack (lit externFrame :f (.-F x) :i 1))))
+
+            (set! v (aget (.-F x) 0))
+            (goto :again))
+          (default
+            (Internalf "output_value: %s" (Describe v)))))
+
+      ;; next item
+      (while true
+        (when (== (len stack) 0)
+          (return))
+
+        (let [fr (addr (aget stack (- (len stack) 1)))]
+          (set! v (aget (.-f fr) (.-i fr)))
+          (inc! (.-i fr))
+          (when (== (.-i fr) (len (.-f fr)))
+            (set! stack (subslice stack _ (- (len stack) 1))))
+
+          (break))))))
+
+
+
+
+
+^{:go/end 322} (go/method shareLookup "shareLookup writes a shared reference and reports true when x was already written.\n" ^bool [^{:tag (* externState)} s ^any x]
+  (when (!= (bit-and (.-flags s) flagNoSharing) 0)
+    (return false))
+
+  ^{:go/breaks [4]} (let [(values pos ok) (aget (.-seen s) x)]
+    (when (not ok)
+      (return false))
+
+    (.shared s (- (.-count s) pos))
+    true))
+
+
+^{:go/end 330} (go/func convertFlags ^int [^Value flags]
+  (let [n 0]
+    (for [l flags] (!= l (conv Value 0)) (set! l (aget (.-F (assert (* Block) l)) 1))
+      (set! n bit-or ^int (<< 1 (conv uint (AsInt (aget (.-F (assert (* Block) l)) 0))))))
+
+    ^{:line 329} n))
+
+
+
+
+^{:go/end 356} (go/func MarshalValue "MarshalValue is caml_output_value_to_bytes v flags: the bytes of Marshal.to_string, flags the\nOCaml list of Marshal.extern_flags (No_sharing = 0, Closures = 1, Compat_32 = 2).\n" ^{:tag (slice byte)} [^Value v ^Value flags]
+  (let [s (addr (lit externState :flags (bit-and (convertFlags flags) 7)))]
+    (.rec s v)
+    (let [data (.-buf s)
+        ^{:line 338 :tag (slice byte)} hdr (zero (slice byte))]
+      (if (or (>= (conv uint64 (len data)) (<< 1 32)) (>= (.-size32 s) (<< 1 32)) (>= (.-size64 s) (<< 1 32))) (do
+          (when (!= (bit-and (.-flags s) flagCompat32) 0)
+            (Failwith "output_value: object too big to be read back on 32-bit platform"))
+
+          (set! hdr (.AppendUint32 binary/BigEndian nil magicBig))
+          (set! hdr (.AppendUint32 binary/BigEndian hdr 0))
+          (set! hdr (.AppendUint64 binary/BigEndian hdr (conv uint64 (len data))))
+          (set! hdr (.AppendUint64 binary/BigEndian hdr (conv uint64 (.-count s))))
+          (set! hdr (.AppendUint64 binary/BigEndian hdr (.-size64 s))))
+        (do
+          (set! hdr (.AppendUint32 binary/BigEndian nil magicSmall))
+          (set! hdr (.AppendUint32 binary/BigEndian hdr (conv uint32 (len data))))
+          (set! hdr (.AppendUint32 binary/BigEndian hdr (conv uint32 (.-count s))))
+          (set! hdr (.AppendUint32 binary/BigEndian hdr (conv uint32 (.-size32 s))))
+          (set! hdr (.AppendUint32 binary/BigEndian hdr (conv uint32 (.-size64 s))))))
+
+      (append hdr (spread data)))))
+
+
+;; ---- intern.c
+
+(go/type internState (struct
+    ^{:line 361 :tag (slice byte)} src
+    ^{:line 362 :tag int} pos
+    ^{:line 363 :tag string} fun
+    ^{:line 364 :tag (slice Value)} objs
+    ^{:line 365 :tag int} nobjs
+    ^{:line 366 :tag int} counter))
+
+
+^{:go/end 373} (go/method check [^{:tag (* internState)} s ^int n]
+  (when (or (< n 0) (> n (- (len (.-src s)) (.-pos s))))
+    (Failwith "input_value: invalid read")))
+
+
+^{:go/end 378} (go/method u8 ^int [^{:tag (* internState)} s]
+  (.check s 1)
+  (inc! (.-pos s))
+  (conv int (aget (.-src s) (- (.-pos s) 1))))
+
+^{:go/end 379} (go/method s8 ^int [^{:tag (* internState)} s] (conv int (conv int8 (.u8 s))))
+^{:go/end 384} (go/method u16 ^int [^{:tag (* internState)} s]
+  (.check s 2)
+  (set! (.-pos s) + 2)
+  (conv int (.Uint16 binary/BigEndian (subslice (.-src s) (- (.-pos s) 2)))))
+
+^{:go/end 385} (go/method s16 ^int [^{:tag (* internState)} s] (conv int (conv int16 (.u16 s))))
+^{:go/end 390} (go/method u32 ^uint32 [^{:tag (* internState)} s]
+  (.check s 4)
+  (set! (.-pos s) + 4)
+  (.Uint32 binary/BigEndian (subslice (.-src s) (- (.-pos s) 4))))
+
+^{:go/end 391} (go/method s32 ^int [^{:tag (* internState)} s] (conv int (conv int32 (.u32 s))))
+^{:go/end 396} (go/method u64 ^uint64 [^{:tag (* internState)} s]
+  (.check s 8)
+  (set! (.-pos s) + 8)
+  (.Uint64 binary/BigEndian (subslice (.-src s) (- (.-pos s) 8))))
+
+^{:go/end 410} (go/method vlq [^{:tag (* internState)} s] :results [uint64 bool]
+  (let [c (.u8 s)
+      ^{:line 399} n (conv uint64 (bit-and c 0x7F))
+      ^{:line 400} overflow false]
+    (while (!= (bit-and c 0x80) 0)
+      (set! c (.u8 s))
+      (let [n7 (<< n 7)]
+        (when (!= n (>> n7 7))
+          (set! overflow true))
+
+        (set! n (bit-or n7 (conv uint64 (bit-and c 0x7F))))))
+
+    (return n overflow)))
+
+^{:go/end 415} (go/method block ^{:tag (slice byte)} [^{:tag (* internState)} s ^int n]
+  (.check s n)
+  (set! (.-pos s) + n)
+  (subslice (.-src s) (- (.-pos s) n) (.-pos s)))
+
+^{:go/end 418} (go/method failf [^{:tag (* internState)} s ^string format & ^{:tag (slice any)} args]
+  (Failwith (+ (.-fun s) ": " (fmt/Sprintf format (spread args)))))
+
+
+^{:go/end 428} (go/method record [^{:tag (* internState)} s ^Value v]
+  (when (!= (.-objs s) nil)
+    (when (>= (.-counter s) (.-nobjs s))
+      (Failwith "input_value: too many objects"))
+
+    (aset (.-objs s) (.-counter s) v)
+    (inc! (.-counter s))))
+
+
+
+(go/type internHeader (struct
+    ^{:line 431 :tag int} headerLen ^int dataLen ^int numObjects
+    ^{:line 432 :tag bool} compressed))
+
+
+
+^{:go/end 472} (go/method parseHeader "parseHeader is caml_parse_header; s.src holds the data from the header on.\n" ^internHeader [^{:tag (* internState)} s]
+  (let [^internHeader h (zero internHeader)]
+    (switch [magic (.u32 s)] magic
+      (case [magicSmall]
+        (set! (.-headerLen h) 20)
+        (set! (.-dataLen h) (conv int (.u32 s)))
+        (set! (.-numObjects h) (conv int (.u32 s)))
+        (.u32 s)
+        (.u32 s))
+      (case [magicBig]
+        (set! (.-headerLen h) 32)
+        (.u32 s)
+        (set! (.-dataLen h) (conv int (.u64 s)))
+        (set! (.-numObjects h) (conv int (.u64 s)))
+        (.u64 s))
+      (case [magicComp]
+        (set! (.-headerLen h) (bit-and (.u8 s) 0x3F))
+        (set! (.-compressed h) true)
+        (let [(values ^bool ov ^bool o) (zero bool)
+            ^{:line 455 :tag uint64} n (zero uint64)]
+          (set! (values n o) (.vlq s))
+          (set! (values (.-dataLen h) ov) (values (conv int n) (or ov o)))
+          (set! (values _ o) (.vlq s))
+          (set! ov (or ov o))
+          (set! (values n o) (.vlq s))
+          (set! (values (.-numObjects h) ov) (values (conv int n) (or ov o)))
+          (.vlq s)
+          (set! (values _ o) (.vlq s))
+          (set! ov (or ov o))
+          (when ov
+            (.failf s "object too large to be read back on this platform"))))
+
+      (default
+        (.failf s "bad object")))
+
+    ^{:line 471} h))
+
+
+
+
+^{:go/end 496} (go/func UnmarshalValue "UnmarshalValue is caml_input_value_from_bytes b ofs: the value at ofs and the number of\nbytes it took (header and data).\n" [^{:tag (slice byte)} b ^int ofs] :results [Value int]
+  (let [s (addr (lit internState :src (subslice b ofs) :fun "input_val_from_string"))
+      ^{:line 478} h (.parseHeader s)]
+    (when (or (< (.-headerLen h) 0) (< (.-dataLen h) 0) (> (+ (.-headerLen h) (.-dataLen h)) (len (.-src s))))
+      (Failwith "input_val_from_string: bad length"))
+
+    (set! (.-src s) (subslice (.-src s) _ (+ (.-headerLen h) (.-dataLen h))))
+    (set! (.-pos s) (.-headerLen h))
+    (when (.-compressed h)
+      (.failf s "compressed object, cannot decompress"))
+
+    (when (> (.-numObjects h) 0)
+      (set! (.-nobjs s) (.-numObjects h))
+      (when (> (.-nobjs s) (.-dataLen h))
+        ;; every object takes a byte at least: a corrupt count
+        (set! (.-nobjs s) (.-dataLen h)))
+
+      (set! (.-objs s) (make (slice Value) (.-nobjs s))))
+
+    (return (.rec s) (+ (.-headerLen h) (.-dataLen h)))))
+
+
+(go/type internFrame (struct
+    ^{:line 499 :tag (slice Value)} f
+    ^{:line 500 :tag int} i
+    ^{:line 501 :tag bool} object))
+
+
+^{:go/end 696} (go/method rec ^Value [^{:tag (* internState)} s]
+  (let [root (make (slice Value) 1)
+      ^{:line 506} stack (lit (slice internFrame) (lit _ :f root))]
+    (while (> (len stack) 0)
+      (let [fr (addr (aget stack (- (len stack) 1)))]
+        (when (and (.-object fr) (== (.-i fr) 2))
+          ;; the oid is fresh once its first two fields are read (not for predefined slots)
+          (when [(values id ok) (assert int (aget (.-f fr) 1))] (and ok (>= id 0))
+            ^{:go/via [Mutex]} (.Lock ooID)
+            (inc! (.-n ooID))
+            (aset (.-f fr) 1 (.-n ooID))
+            ^{:go/via [Mutex]} (.Unlock ooID)))
+
+
+        (when (>= (.-i fr) (len (.-f fr)))
+          (set! stack (subslice stack _ (- (len stack) 1)))
+          (continue))
+
+        (let [dest (addr (aget (.-f fr) (.-i fr)))]
+          (inc! (.-i fr))
+          (let [code (.u8 s)
+              ^{:line 525 :tag Value} v (zero Value)
+              ^{:line 526} readBlock ^{:go/end 545} (fn [^int tag ^int size]
+                (when (== size 0)
+                  (set! v (addr (lit Block :Tag tag)))
+                  (return))
+
+                (when (> size (- (len (.-src s)) (.-pos s)))
+                  (Failwith "input_value: invalid read"))
+
+                (let [blk (addr (lit Block :Tag tag :F (make (slice Value) size)))]
+                  (.record s blk)
+                  (set! v blk)
+                  (if (== tag TagObject) (do
+                      (when (< size 2)
+                        (.failf s "bad object block"))
+
+                      (set! stack (append stack (lit internFrame :f (.-F blk) :object true))))
+
+                    (set! stack (append stack (lit internFrame :f (.-F blk)))))))
+
+
+              ^{:line 546} readString ^{:go/end 553} (fn [^int n]
+                (when (> n (<< 1 57))
+                  (.failf s "string too large"))
+
+                (let [bs (addr (lit Bytes :B (append (conv (slice byte) nil) (spread (.block s n)))))]
+                  (.record s bs)
+                  (set! v bs)))
+
+              ^{:line 554} shared ^{:go/end 560} (fn [^int ofs]
+                (set! ofs (- (.-counter s) ofs))
+                (when (or (< ofs 0) (>= ofs (.-counter s)))
+                  (.failf s "invalid shared reference"))
+
+                (set! v (aget (.-objs s) ofs)))
+
+              ^{:line 561} doubleArray ^{:go/end 580} (fn [^int n ^bool little]
+                (when (== n 0)
+                  (.failf s "invalid double_array"))
+
+                (when (> n (/ (- (len (.-src s)) (.-pos s)) 8))
+                  (Failwith "input_value: invalid read"))
+
+                (let [raw (.block s (* n 8))
+                    ^{:line 569} f (make (slice float64) n)]
+                  (range [i f]
+                    (if little
+                      (aset f i (math/Float64frombits (.Uint64 binary/LittleEndian (subslice raw (* i 8)))))
+
+                      (aset f i (math/Float64frombits (.Uint64 binary/BigEndian (subslice raw (* i 8)))))))
+
+
+                  (let [a (addr (lit FloatArray :F f))]
+                    (.record s a)
+                    (set! v a))))]
+
+            (switch
+              (case [(>= code prefixSmallBlock)]
+                (readBlock (bit-and code 0xF) (bit-and (>> code 4) 0x7)))
+              (case [(>= code prefixSmallInt)]
+                (set! v (bit-and code 0x3F)))
+              (case [(>= code prefixSmallString)]
+                (readString (bit-and code 0x1F)))
+              (default
+                (switch code
+                  (case [codeInt8]
+                    (set! v (.s8 s)))
+                  (case [codeInt16]
+                    (set! v (.s16 s)))
+                  (case [codeInt32]
+                    (set! v (.s32 s)))
+                  (case [codeInt64]
+                    (set! v (Int (conv int (.u64 s)))))
+                  (case [codeShared8]
+                    (shared (.u8 s)))
+                  (case [codeShared16]
+                    (shared (.u16 s)))
+                  (case [codeShared32]
+                    (shared (conv int (.u32 s))))
+                  (case [codeShared64]
+                    (shared (conv int (.u64 s))))
+                  (case [codeBlock32 codeBlock64]
+                    (let [^uint64 hd (zero uint64)
+                        ^{:line 608} name "block32"]
+                      (if (== code codeBlock32)
+                        (set! hd (conv uint64 (.u32 s)))
+                        (do
+                          (set! hd (.u64 s))
+                          (set! name "block64")))
+
+                      (let [tag (conv int (bit-and hd 0xFF))]
+                        (when (or (>= tag 251) (== tag TagInfix) (== tag TagCont))
+                          (.failf s "invalid %s" name))
+
+                        (let [size (>> hd 10)]
+                          (when (> size maxWosize)
+                            (Failwith "input_value: block size too large"))
+
+                          (readBlock tag (conv int size))))))
+                  (case [codeString8]
+                    (readString (.u8 s)))
+                  (case [codeString32]
+                    (readString (conv int (.u32 s))))
+                  (case [codeString64]
+                    (readString (conv int (.u64 s))))
+                  (case [codeDoubleLittle codeDoubleBig]
+                    (let [raw (.block s 8)
+                        ^{:line 632 :tag uint64} bits (zero uint64)]
+                      (if (== code codeDoubleLittle)
+                        (set! bits (.Uint64 binary/LittleEndian raw))
+
+                        (set! bits (.Uint64 binary/BigEndian raw)))
+
+                      (set! v (math/Float64frombits bits))
+                      (.record s v)))
+                  (case [codeDoubleArray8Little codeDoubleArray8Big]
+                    (doubleArray (.u8 s) (== code codeDoubleArray8Little)))
+                  (case [codeDoubleArray32Little codeDoubleArray32Big]
+                    (doubleArray (conv int (.u32 s)) (== code codeDoubleArray32Little)))
+                  (case [codeDoubleArray64Little codeDoubleArray64Big]
+                    (doubleArray (conv int (.u64 s)) (== code codeDoubleArray64Little)))
+                  (case [codeCodePointer]
+                    (.u32 s)
+                    (let [d (.block s 16)]
+                      (Failwith (fmt/Sprintf "input_value: unknown code module %X" d))))
+                  (case [codeInfixPointer]
+                    (.failf s "bad infix offset"))
+                  (case [oldCodeCustom]
+                    (.failf s "custom blocks serialized with OCaml 4.08.0 (or prior) are no longer supported"))
+                  (case [codeCustomLen codeCustomFixed]
+                    (let [end -1]
+                      (for [i (.-pos s)] (< i (len (.-src s))) (inc! i)
+                        (when (== (aget (.-src s) i) 0)
+                          (set! end i)
+                          (break)))
+
+
+                      (when (< end 0)
+                        (.failf s "unterminated custom block identifier"))
+
+                      (let [name (conv string (subslice (.-src s) (.-pos s) end))]
+                        (when (and (!= name "_i") (!= name "_j") (!= name "_n"))
+                          (.failf s "unknown custom block identifier %s" name))
+
+                        (when (!= code codeCustomFixed)
+                          (.failf s "wrong custom block kind %s" name))
+
+                        (set! (.-pos s) (+ end 1))
+                        (switch name
+                          (case ["_i"]
+                            (set! v (conv int32 (.u32 s))))
+                          (case ["_j"]
+                            (set! v (conv int64 (.u64 s))))
+                          (case ["_n"]
+                            (switch (.u8 s)
+                              (case [1]
+                                (set! v (conv Nativeint (conv int32 (.u32 s)))))
+                              (case [2]
+                                (set! v (conv Nativeint (conv int64 (.u64 s)))))
+                              (default
+                                (Failwith "input_value: ill-formed native integer")))))
+
+
+                        (.record s v))))
+                  (default
+                    (.failf s "ill-formed message")))))
+
+
+            (set! @dest v)))))
+
+    (aget root 0)))
+
+
+^{:go/end 749} (go/func init []
+  (let [r RegisterExt]
+    ;; extern.c
+    (r "caml_output_value_to_bytes" ^{:go/end 701} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (addr (lit Bytes :B (MarshalValue (aget a 0) (aget a 1))))))
+    (r "caml_output_value_to_string" ^{:go/end 702} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (addr (lit Bytes :B (MarshalValue (aget a 0) (aget a 1))))))
+    (r "caml_output_value_to_buffer" ^{:go/end 716} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+        (let [(values buf ofs n) (values (AsBytes (aget a 0)) (AsInt (aget a 1)) (AsInt (aget a 2)))
+            ^{:line 705} out (MarshalValue (aget a 3) (aget a 4))
+            ;; the data goes after a guessed 20-byte header: the room is the buffer less that
+            ^{:line 707} hl 20]
+          (when (and (> (len out) 0) (== (.Uint32 binary/BigEndian out) magicBig))
+            (set! hl 32))
+
+          (when (or (> (- (len out) hl) (- n 20)) (> (len out) n))
+            (Failwith "Marshal.to_buffer: buffer overflow"))
+
+          (copy (subslice (.-B buf) ofs) out)
+          (len out))))
+
+    ;; intern.c
+    (let [fromBytes ^{:go/end 721} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+          (let [(values v _) (UnmarshalValue (.-B (AsBytes (aget a 0))) (AsInt (aget a 1)))]
+            ^{:line 720} v))]
+
+      (r "caml_input_value_from_bytes" fromBytes)
+      (r "caml_input_value_from_string" fromBytes)
+      (r "caml_marshal_data_size" ^{:go/end 748} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+          (let [b (.-B (AsBytes (aget a 0)))
+              ^{:line 726} s (addr (lit internState :src (subslice b (AsInt (aget a 1)))))
+              ^{:line 727 :tag int} headerLen (zero int)
+              ^{:line 728 :tag uint64} dataLen (zero uint64)]
+            (switch (.u32 s)
+              (case [magicSmall]
+                (set! headerLen 20)
+                (set! dataLen (conv uint64 (.u32 s))))
+              (case [magicBig]
+                (set! headerLen 32)
+                (.u32 s)
+                (set! dataLen (.u64 s)))
+              (case [magicComp]
+                (set! headerLen (bit-and (.u8 s) 0x3F))
+                (let [(values n ov) (.vlq s)]
+                  (when ov
+                    (Failwith "Marshal.data_size: object too large to be read back on this platform"))
+
+                  (set! dataLen n)))
+              (default
+                (Failwith "Marshal.data_size: bad object")))
+
+            (+ (- headerLen 16) (conv int dataLen))))))))

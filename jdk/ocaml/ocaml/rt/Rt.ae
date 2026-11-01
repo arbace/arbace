@@ -1,0 +1,449 @@
+;; OCaml's runtime as Java forms: the values' representation and the primitives the translator
+;; (arbace.o2j) calls (doc/ocaml/OCAML-SURVEY.md, "As built: O6 (write-ahead)", OC82):
+;;
+;;   int, char, bool, unit   java.lang.Long (63 bits: arithmetic wraps at 63 bits)
+;;   float                   java.lang.Double
+;;   string, bytes           byte/1 (one type: strings are bytes never mutated)
+;;   float array, record     double/1 (Double_array_tag)
+;;   block                   Block (tag and fields; arrays of other values are blocks of tag 0)
+;;   function                Closure (Pap, Native)
+;;   int32                   java.lang.Integer; int64 I64; nativeint NInt
+;;   other custom blocks     Custom (an identifier and the runtime's object)
+;;   an effect's stack       Fiber
+;;
+;; The externals ("caml_..." C names) are static methods of the Ext* classes, of the same name.
+
+(in-ns 'ocaml.rt)
+
+(import '(java.util Arrays HashMap))
+
+(defclass ^:public ^:final Rt
+
+  (field ^:public ^:static ^:final UNIT (Long/valueOf 0))
+  (field ^:public ^:static ^:final TRUE (Long/valueOf 1))
+  (field ^:public ^:static ^:final FALSE (Long/valueOf 0))
+  (field ^:public ^:static ^:final ^long MAX_INT 4611686018427387903)
+  (field ^:public ^:static ^:final ^long MIN_INT -4611686018427387904)
+
+  ;; Sys.backend_type: 0 Native (the compiled program's, the default), 1 Bytecode
+  (field ^:public ^:static ^long backendType 0)
+
+  ;; the program's arguments (Sys.argv), the executable's name first
+  (field ^:public ^:static ^String/1 argv (new String/1 [""]))
+
+  ;; ---- the predefined exceptions (Predef's, in its order: their identifiers are -1 ... -12)
+
+  (field ^:public ^:static ^:final Out_of_memory (Rt/predef "Out_of_memory" 0))
+  (field ^:public ^:static ^:final Sys_error (Rt/predef "Sys_error" 1))
+  (field ^:public ^:static ^:final Failure (Rt/predef "Failure" 2))
+  (field ^:public ^:static ^:final Invalid_argument (Rt/predef "Invalid_argument" 3))
+  (field ^:public ^:static ^:final End_of_file (Rt/predef "End_of_file" 4))
+  (field ^:public ^:static ^:final Division_by_zero (Rt/predef "Division_by_zero" 5))
+  (field ^:public ^:static ^:final Not_found (Rt/predef "Not_found" 6))
+  (field ^:public ^:static ^:final Match_failure (Rt/predef "Match_failure" 7))
+  (field ^:public ^:static ^:final Stack_overflow (Rt/predef "Stack_overflow" 8))
+  (field ^:public ^:static ^:final Sys_blocked_io (Rt/predef "Sys_blocked_io" 9))
+  (field ^:public ^:static ^:final Assert_failure (Rt/predef "Assert_failure" 10))
+  (field ^:public ^:static ^:final Undefined_recursive_module (Rt/predef "Undefined_recursive_module" 11))
+
+  (method ^:static predef [^String name ^int i]
+    (Block. 248 (new Object/1 [(Rt/s name) (Long/valueOf (unchecked-subtract (unchecked-negate (long i)) 1))])))
+
+  ;; the values registered by name (caml_register_named_value)
+  (field ^:public ^:static ^:final ^HashMap named (HashMap.))
+
+  ;; ---- ints
+
+  (method ^:public ^:static box [^long x] (Long/valueOf x))
+  (method ^:public ^:static wrap [^long x] (Long/valueOf (bit-shift-right (bit-shift-left x 1) 1)))
+  (method ^:public ^:static l ^long [x]
+    (if (instance? Long x) (.longValue (cast Long x)) (throw (Rt/internal (java-str "not an int: " (Rt/describe x))))))
+  (method ^:public ^:static ii ^int [x] (unchecked-int (Rt/l x)))
+  ;; a test: an int is false when 0; any other value (a block: a list's cons, Some) true
+  (method ^:public ^:static t ^boolean [x] (if (instance? Long x) (not (== 0 (.longValue (cast Long x)))) true))
+  (method ^:public ^:static b [^boolean c] (if c TRUE FALSE))
+
+  (method ^:public ^:static neg [a] (Rt/wrap (unchecked-negate (Rt/l a))))
+  (method ^:public ^:static add [a b] (Rt/wrap (unchecked-add (Rt/l a) (Rt/l b))))
+  (method ^:public ^:static sub [a b] (Rt/wrap (unchecked-subtract (Rt/l a) (Rt/l b))))
+  (method ^:public ^:static mul [a b] (Rt/wrap (unchecked-multiply (Rt/l a) (Rt/l b))))
+  (method ^:public ^:static offset [a ^long n] (Rt/wrap (unchecked-add (Rt/l a) n)))
+  (method ^:public ^:static div [a b]
+    (let [y (Rt/l b)]
+      (when (== y 0) (throw (Exn. Division_by_zero)))
+      (Rt/wrap (unchecked-divide (Rt/l a) y))))
+  (method ^:public ^:static mod [a b]
+    (let [y (Rt/l b)]
+      (when (== y 0) (throw (Exn. Division_by_zero)))
+      (Rt/wrap (unchecked-remainder (Rt/l a) y))))
+  (method ^:public ^:static land [a b] (Long/valueOf (bit-and (Rt/l a) (Rt/l b))))
+  (method ^:public ^:static lor [a b] (Long/valueOf (bit-or (Rt/l a) (Rt/l b))))
+  (method ^:public ^:static lxor [a b] (Long/valueOf (bit-xor (Rt/l a) (Rt/l b))))
+  (method ^:public ^:static lsl [a b] (Rt/wrap (bit-shift-left (Rt/l a) (bit-and (Rt/l b) 63))))
+  (method ^:public ^:static lsr [a b]
+    (Rt/wrap (unsigned-bit-shift-right (bit-and (Rt/l a) 9223372036854775807) (bit-and (Rt/l b) 63))))
+  (method ^:public ^:static asr [a b]
+    (let [s (Rt/l b)] (Long/valueOf (bit-shift-right (Rt/l a) (if (or (< s 0) (> s 62)) 62 s)))))
+  (method ^:public ^:static lt ^boolean [a b] (< (Rt/l a) (Rt/l b)))
+  (method ^:public ^:static le ^boolean [a b] (<= (Rt/l a) (Rt/l b)))
+  (method ^:public ^:static gt ^boolean [a b] (> (Rt/l a) (Rt/l b)))
+  (method ^:public ^:static ge ^boolean [a b] (>= (Rt/l a) (Rt/l b)))
+  (method ^:public ^:static compareInts [a b]
+    (let [x (Rt/l a) y (Rt/l b)] (Long/valueOf (if (< x y) -1 (if (> x y) 1 0)))))
+  ;; isout: (unsigned) b > a
+  (method ^:public ^:static isout ^boolean [a b] (> (Long/compareUnsigned (Rt/l b) (Rt/l a)) 0))
+  (method ^:public ^:static bswap16 [a]
+    (let [x (Rt/l a)] (Long/valueOf (bit-or (bit-shift-left (bit-and x 255) 8) (bit-and (bit-shift-right x 8) 255)))))
+
+  ;; ---- physical equality: numbers by value (floats by their bits), the rest by identity
+
+  (method ^:public ^:static eq ^boolean [a b]
+    (cond (identical? a b) true
+          (instance? Long a) (and (instance? Long b) (== (.longValue (cast Long a)) (.longValue (cast Long b))))
+          (instance? Double a) (and (instance? Double b)
+                                    (== (Double/doubleToRawLongBits (.doubleValue (cast Double a)))
+                                        (Double/doubleToRawLongBits (.doubleValue (cast Double b)))))
+          (instance? Integer a) (and (instance? Integer b) (== (.intValue (cast Integer a)) (.intValue (cast Integer b))))
+          (instance? I64 a) (and (instance? I64 b) (== (.-v (cast I64 a)) (.-v (cast I64 b))))
+          (instance? NInt a) (and (instance? NInt b) (== (.-v (cast NInt a)) (.-v (cast NInt b))))
+          :else false))
+
+  ;; ---- floats
+
+  (method ^:public ^:static d ^double [x] (.doubleValue (cast Double x)))
+  (method ^:public ^:static fbox [^double x] (Double/valueOf x))
+  (method ^:public ^:static fneg [a] (Double/valueOf (unchecked-negate (Rt/d a))))
+  (method ^:public ^:static fabs [a] (Double/valueOf (Math/abs (Rt/d a))))
+  (method ^:public ^:static fadd [a b] (Double/valueOf (unchecked-add (Rt/d a) (Rt/d b))))
+  (method ^:public ^:static fsub [a b] (Double/valueOf (unchecked-subtract (Rt/d a) (Rt/d b))))
+  (method ^:public ^:static fmul [a b] (Double/valueOf (unchecked-multiply (Rt/d a) (Rt/d b))))
+  (method ^:public ^:static fdiv [a b] (Double/valueOf (unchecked-divide (Rt/d a) (Rt/d b))))
+  (method ^:public ^:static feq ^boolean [a b] (== (Rt/d a) (Rt/d b)))
+  (method ^:public ^:static flt ^boolean [a b] (< (Rt/d a) (Rt/d b)))
+  (method ^:public ^:static fle ^boolean [a b] (<= (Rt/d a) (Rt/d b)))
+  (method ^:public ^:static fgt ^boolean [a b] (> (Rt/d a) (Rt/d b)))
+  (method ^:public ^:static fge ^boolean [a b] (>= (Rt/d a) (Rt/d b)))
+  (method ^:public ^:static compareDoubles ^long [^double x ^double y]
+    (cond (< x y) -1
+          (> x y) 1
+          (== x y) 0
+          (Double/isNaN x) (if (Double/isNaN y) 0 -1)
+          :else 1))
+  (method ^:public ^:static compareFloats [a b] (Long/valueOf (Rt/compareDoubles (Rt/d a) (Rt/d b))))
+  (method ^:public ^:static floatToInt ^long [^double f]
+    (if (or (Double/isNaN f) (>= f 9.223372036854775807E18) (< f -9.223372036854775808E18))
+      0
+      (bit-shift-right (bit-shift-left (long f) 1) 1)))
+  (method ^:public ^:static intOfFloat [a] (Long/valueOf (Rt/floatToInt (Rt/d a))))
+  (method ^:public ^:static floatOfInt [a] (Double/valueOf (double (Rt/l a))))
+
+  ;; ---- the boxed integers
+
+  (method ^:public ^:static bv ^long [x]
+    (cond (instance? Integer x) (long (.intValue (cast Integer x)))
+          (instance? I64 x) (.-v (cast I64 x))
+          (instance? NInt x) (.-v (cast NInt x))
+          :else (throw (Rt/internal (java-str "not a boxed integer: " (Rt/describe x))))))
+  ;; kind: 0 int32, 1 int64, 2 nativeint
+  (method ^:public ^:static mkb [^int kind ^long x]
+    (switch kind
+      0 (Integer/valueOf (unchecked-int x))
+      1 (I64. x)
+      (NInt. x)))
+  (method ^:public ^:static bint [^int kind ^String op a b]
+    (let [x (Rt/bv a)
+          ^int w (if (== kind 0) 32 64)]
+      (switch op
+        "add" (Rt/mkb kind (unchecked-add x (Rt/bv b)))
+        "sub" (Rt/mkb kind (unchecked-subtract x (Rt/bv b)))
+        "mul" (Rt/mkb kind (unchecked-multiply x (Rt/bv b)))
+        ("div" "div_unsafe")
+        (let [y (Rt/bv b)]
+          (when (== y 0) (throw (Exn. Division_by_zero)))
+          (Rt/mkb kind (if (== y -1) (unchecked-negate x) (unchecked-divide x y))))
+        ("mod" "mod_unsafe")
+        (let [y (Rt/bv b)]
+          (when (== y 0) (throw (Exn. Division_by_zero)))
+          (Rt/mkb kind (if (== y -1) 0 (unchecked-remainder x y))))
+        "and" (Rt/mkb kind (bit-and x (Rt/bv b)))
+        "or" (Rt/mkb kind (bit-or x (Rt/bv b)))
+        "xor" (Rt/mkb kind (bit-xor x (Rt/bv b)))
+        "lsl" (Rt/mkb kind (bit-shift-left x (bit-and (Rt/l b) (long (unchecked-dec-int w)))))
+        "lsr" (let [s (bit-and (Rt/l b) (long (unchecked-dec-int w)))]
+                (if (== w 32)
+                  (Rt/mkb kind (unsigned-bit-shift-right (bit-and x 4294967295) s))
+                  (Rt/mkb kind (unsigned-bit-shift-right x s))))
+        "asr" (Rt/mkb kind (bit-shift-right x (bit-and (Rt/l b) (long (unchecked-dec-int w)))))
+        "==" (Rt/b (== x (Rt/bv b)))
+        "!=" (Rt/b (not (== x (Rt/bv b))))
+        "<" (Rt/b (< x (Rt/bv b)))
+        "<=" (Rt/b (<= x (Rt/bv b)))
+        ">" (Rt/b (> x (Rt/bv b)))
+        ">=" (Rt/b (>= x (Rt/bv b)))
+        "neg" (Rt/mkb kind (unchecked-negate x))
+        "to_int" (Rt/wrap x)
+        "bswap" (if (== w 32)
+                  (Rt/mkb kind (long (Integer/reverseBytes (unchecked-int x))))
+                  (Rt/mkb kind (Long/reverseBytes x)))
+        (throw (Rt/internal (java-str "boxed integer primitive " op))))))
+  (method ^:public ^:static bintOfInt [^int kind a] (Rt/mkb kind (Rt/l a)))
+  (method ^:public ^:static compareBints [a b]
+    (let [x (Rt/bv a) y (Rt/bv b)] (Long/valueOf (if (< x y) -1 (if (> x y) 1 0)))))
+
+  ;; ---- blocks
+
+  (method ^:public ^:static block [^int tag ^Object/1 fields]
+    (if (== tag 254)
+      (let [n (alength fields) a (new double/1 n)]
+        (loop [^int i 0] (when (< i n) (aset a i (Rt/d (aget fields i))) (recur (unchecked-inc-int i))))
+        a)
+      (Block. tag fields)))
+
+  (method ^:public ^:static field [x ^int n]
+    (cond (instance? Block x) (aget (.-f (cast Block x)) n)
+          (instance? double/1 x) (Double/valueOf (aget (cast double/1 x) n))
+          (and (instance? Closure x) (== n 0)) x
+          :else (throw (Rt/internal (java-str "field " n " of " (Rt/describe x))))))
+  (method ^:public ^:static setField [x ^int n v]
+    (cond (instance? Block x) (aset (.-f (cast Block x)) n v)
+          (instance? double/1 x) (aset (cast double/1 x) n (Rt/d v))
+          :else (throw (Rt/internal (java-str "setfield " n " of " (Rt/describe x)))))
+    UNIT)
+  (method ^:public ^:static floatField [x ^int n] (Double/valueOf (aget (cast double/1 x) n)))
+  (method ^:public ^:static setFloatField [x ^int n v] (aset (cast double/1 x) n (Rt/d v)) UNIT)
+  (method ^:public ^:static isint ^boolean [x] (instance? Long x))
+
+  (method ^:public ^:static dup [x]
+    (cond (instance? Block x) (let [b (cast Block x)] (Block. (.-tag b) (.clone (.-f b))))
+          (instance? double/1 x) (.clone (cast double/1 x))
+          (instance? byte/1 x) (.clone (cast byte/1 x))
+          :else x))
+
+  ;; Obj.tag's view of a value
+  (method ^:public ^:static tag ^int [x]
+    (cond (instance? Long x) 1000
+          (instance? Block x) (.-tag (cast Block x))
+          (instance? Double x) 253
+          (instance? byte/1 x) 252
+          (instance? double/1 x) 254
+          (instance? Closure x) 247
+          (or (instance? Integer x) (instance? I64 x) (instance? NInt x) (instance? Custom x)) 255
+          (instance? Fiber x) 245
+          :else 1001))
+  (method ^:public ^:static size ^int [x]
+    (cond (instance? Block x) (alength (.-f (cast Block x)))
+          (instance? double/1 x) (alength (cast double/1 x))
+          (instance? byte/1 x) (unchecked-divide-int (unchecked-add-int (alength (cast byte/1 x)) 8) 8)
+          (instance? Double x) 1
+          (or (instance? Integer x) (instance? I64 x) (instance? NInt x) (instance? Custom x)) 2
+          (instance? Closure x) 2
+          :else 0))
+
+  ;; ---- arrays (kind: the Lambda's "gen", "addr", "int", "float")
+
+  (method ^:public ^:static alen ^int [a]
+    (if (instance? double/1 a) (alength (cast double/1 a)) (alength (.-f (cast Block a)))))
+  (method ^:public ^:static aget [a i]
+    (if (instance? double/1 a)
+      (Double/valueOf (aget (cast double/1 a) (Rt/ii i)))
+      (aget (.-f (cast Block a)) (Rt/ii i))))
+  (method ^:public ^:static aset [a i v]
+    (if (instance? double/1 a)
+      (aset (cast double/1 a) (Rt/ii i) (Rt/d v))
+      (aset (.-f (cast Block a)) (Rt/ii i) v))
+    UNIT)
+  (method ^:public ^:static boundError []
+    (Exn. (Block. 0 (new Object/1 [Invalid_argument (Rt/s "index out of bounds")]))))
+  (method ^:public ^:static agetChecked [a i]
+    (let [k (Rt/l i)]
+      (when (or (< k 0) (>= k (Rt/alen a))) (throw (Rt/boundError)))
+      (Rt/aget a i)))
+  (method ^:public ^:static asetChecked [a i v]
+    (let [k (Rt/l i)]
+      (when (or (< k 0) (>= k (Rt/alen a))) (throw (Rt/boundError)))
+      (Rt/aset a i v)))
+  (method ^:public ^:static alenv [a] (Long/valueOf (long (Rt/alen a))))
+  (method ^:public ^:static makeArray [^String kind ^Object/1 xs]
+    (cond (== (alength xs) 0) (Block. 0 xs)
+          (or (= kind "float") (and (= kind "gen") (instance? Double (aget xs 0))))
+          (Rt/block 254 xs)
+          :else (Block. 0 xs)))
+
+  ;; ---- strings and bytes
+
+  ;; a Java string of chars 0-255 as OCaml's bytes (the translator's constants)
+  (method ^:public ^:static s [^String x]
+    (let [n (.length x) b (new byte/1 n)]
+      (loop [^int i 0] (when (< i n) (aset b i (unchecked-byte (.charAt x i))) (recur (unchecked-inc-int i))))
+      b))
+  ;; OCaml's bytes as a Java string of chars 0-255 (string switches)
+  (method ^:public ^:static js ^String [x]
+    (let [b (cast byte/1 x) n (alength b) c (new char/1 n)]
+      (loop [^int i 0] (when (< i n) (aset c i (unchecked-char (bit-and (long (aget b i)) 255))) (recur (unchecked-inc-int i))))
+      (String. c)))
+  ;; OCaml's bytes as Java text, UTF-8 (messages, file names)
+  (method ^:public ^:static utf8 ^String [x] (String. (cast byte/1 x) java.nio.charset.StandardCharsets/UTF_8))
+  (method ^:public ^:static ofUtf8 [^String x] (.getBytes x java.nio.charset.StandardCharsets/UTF_8))
+  (method ^:public ^:static slen [x] (Long/valueOf (long (alength (cast byte/1 x)))))
+  (method ^:public ^:static sget [x i] (Long/valueOf (bit-and (long (aget (cast byte/1 x) (Rt/ii i))) 255)))
+  (method ^:public ^:static sgetChecked [x i]
+    (let [k (Rt/l i) b (cast byte/1 x)]
+      (when (or (< k 0) (>= k (alength b))) (throw (Rt/boundError)))
+      (Long/valueOf (bit-and (long (aget b (unchecked-int k))) 255))))
+  (method ^:public ^:static sset [x i c] (aset (cast byte/1 x) (Rt/ii i) (unchecked-byte (Rt/l c))) UNIT)
+  (method ^:public ^:static ssetChecked [x i c]
+    (let [k (Rt/l i) b (cast byte/1 x)]
+      (when (or (< k 0) (>= k (alength b))) (throw (Rt/boundError)))
+      (aset b (unchecked-int k) (unchecked-byte (Rt/l c)))
+      UNIT))
+  ;; the little-endian loads and stores of 2, 4 and 8 bytes (string.get16 ...)
+  (method ^:public ^:static sload [x i ^int width]
+    (let [b (cast byte/1 x) k (Rt/l i)]
+      (when (or (< k 0) (> (unchecked-add k width) (alength b))) (throw (Rt/boundError)))
+      (let [^:mutable ^long v 0 ^int at (unchecked-int k)]
+        (loop [^int j (unchecked-dec-int width)]
+          (when (>= j 0)
+            (set! v (bit-or (bit-shift-left v 8) (bit-and (long (aget b (unchecked-add-int at j))) 255)))
+            (recur (unchecked-dec-int j))))
+        (switch width
+          2 (Long/valueOf v)
+          4 (Integer/valueOf (unchecked-int v))
+          (I64. v)))))
+  (method ^:public ^:static sstore [x i v ^int width]
+    (let [b (cast byte/1 x) k (Rt/l i)
+          w (cond (instance? Long v) (Rt/l v) :else (Rt/bv v))]
+      (when (or (< k 0) (> (unchecked-add k width) (alength b))) (throw (Rt/boundError)))
+      (loop [^int j 0]
+        (when (< j width)
+          (aset b (unchecked-add-int (unchecked-int k) j) (unchecked-byte (bit-shift-right w (unchecked-multiply-int 8 j))))
+          (recur (unchecked-inc-int j))))
+      UNIT))
+
+  ;; ---- options and lists
+
+  (field ^:public ^:static ^:final NONE (Long/valueOf 0))
+  (method ^:public ^:static some [v] (Block. 0 (new Object/1 [v])))
+  (method ^:public ^:static cons [h t] (Block. 0 (new Object/1 [h t])))
+  ;; the OCaml list of xs's elements
+  (method ^:public ^:static list [^Object/1 xs]
+    (let [^:mutable ^Object l (Long/valueOf 0)]
+      (loop [^int i (unchecked-dec-int (alength xs))]
+        (when (>= i 0) (set! l (Rt/cons (aget xs i) l)) (recur (unchecked-dec-int i))))
+      l))
+  (method ^:public ^:static tuple [^Object/1 xs] (Block. 0 xs))
+
+  ;; ---- functions
+
+  (method ^:public ^:static badArity [^Closure c ^int n]
+    (throw (Rt/internal (java-str "a closure of arity " (.-arity c) " called with " n " arguments"))))
+  (method ^:public ^:static cat ^Object/1 [^Object/1 a ^Object/1 b]
+    (let [r (Arrays/copyOf a (unchecked-add-int (alength a) (alength b)))]
+      (System/arraycopy b 0 r (alength a) (alength b))
+      r))
+  (method ^:public ^:static fn ^Closure [f]
+    (cond (instance? Closure f) (cast Closure f)
+          ;; a recursive value's dummy updated to a closure (caml_update_dummy)
+          (and (instance? Block f) (== (.-tag (cast Block f)) 247)) (Rt/fn (aget (.-f (cast Block f)) 0))
+          :else (throw (Rt/internal (java-str "apply of a value that is not a function: " (Rt/describe f))))))
+  ;; f applied to args: exact, partial or over-application
+  (method ^:public ^:static ap [f ^Object/1 args]
+    (let [c (Rt/fn f) n (alength args) ar (.-arity c)]
+      (cond (== n ar) (.exact c args)
+            (< n ar) (Pap. c args)
+            :else (Rt/ap (.exact c (Arrays/copyOfRange args 0 ar)) (Arrays/copyOfRange args ar n)))))
+  (method ^:public ^:static ap1 [f a] (Rt/ap f (new Object/1 [a])))
+  (method ^:public ^:static ap2 [f a b] (Rt/ap f (new Object/1 [a b])))
+  (method ^:public ^:static ap3 [f a b c] (Rt/ap f (new Object/1 [a b c])))
+  (method ^:public ^:static native [^int arity ^Code code] (Native. arity code))
+  ;; the method of a send: obj's own table's (self) or the public method looked up by its label
+  (method ^:public ^:static getMethod [^boolean self obj tag]
+    (if self
+      (aget (.-f (cast Block (aget (.-f (cast Block obj)) 0))) (Rt/ii tag))
+      (ExtCore/caml_get_public_method obj tag)))
+
+  ;; ---- exceptions
+
+  (method ^:public ^:static raise ^RuntimeException [v] (Exn. v))
+  (method ^:public ^:static failwith ^RuntimeException [msg]
+    (Exn. (Block. 0 (new Object/1 [Failure (Rt/ofUtf8 (.toString msg))]))))
+  (method ^:public ^:static invalidArg ^RuntimeException [msg]
+    (Exn. (Block. 0 (new Object/1 [Invalid_argument (Rt/ofUtf8 (.toString msg))]))))
+  (method ^:public ^:static sysError ^RuntimeException [msg]
+    (Exn. (Block. 0 (new Object/1 [Sys_error (Rt/ofUtf8 (.toString msg))]))))
+  (method ^:public ^:static notFound ^RuntimeException [] (Exn. Not_found))
+  (method ^:public ^:static endOfFile ^RuntimeException [] (Exn. End_of_file))
+  (method ^:public ^:static divByZero ^RuntimeException [] (Exn. Division_by_zero))
+  (method ^:public ^:static internal ^RuntimeException [msg] (Fatal. (.concat "o2j: " (.toString msg)) 125))
+  ;; the exception named by caml_register_named_value (Printexc, Scanf...), raised with arg (or none)
+  (method ^:public ^:static raiseNamed ^RuntimeException [^String name arg]
+    (let [v (.get named name)]
+      (cond (nil? v) (Fatal. (.concat "Fatal error: exception " name) 2)
+            (nil? arg) (Exn. v)
+            :else (let [ctor (if (and (instance? Block v) (== (.-tag (cast Block v)) 0)) (aget (.-f (cast Block v)) 0) v)]
+                    (Exn. (Block. 0 (new Object/1 [ctor arg])))))))
+  ;; the OCaml exception a Java throwable is in a handler (trywith): Stack_overflow for the Java
+  ;; stack's overflow; the runtime's own signals (exit, fatal errors) are thrown on
+  (method ^:public ^:static exnValue [^Throwable e]
+    (cond (instance? Exn e) (.-v (cast Exn e))
+          (instance? StackOverflowError e) Stack_overflow
+          (instance? OutOfMemoryError e) Out_of_memory
+          :else (throw e)))
+  (method ^:public ^:static exnName ^String [v]
+    (cond (and (instance? Block v) (== (.-tag (cast Block v)) 248)) (Rt/utf8 (aget (.-f (cast Block v)) 0))
+          (and (instance? Block v) (== (.-tag (cast Block v)) 0) (> (alength (.-f (cast Block v))) 0))
+          (Rt/exnName (aget (.-f (cast Block v)) 0))
+          :else "?"))
+  ;; caml_format_exception's text
+  (method ^:public ^:static formatException ^String [v]
+    (if (or (not (instance? Block v)) (not (== (.-tag (cast Block v)) 0)))
+      (Rt/exnName v)
+      (let [b (cast Block v)
+            fs (.-f b)
+            c (aget fs 0)
+            spread (and (== (alength fs) 2) (instance? Block (aget fs 1)) (== (.-tag (cast Block (aget fs 1))) 0)
+                        (or (identical? c Match_failure) (identical? c Assert_failure) (identical? c Undefined_recursive_module)))
+            args (if spread (.-f (cast Block (aget fs 1))) (Arrays/copyOfRange fs 1 (alength fs)))
+            sb (StringBuilder. (Rt/exnName v))]
+        (when (> (alength args) 0)
+          (.append sb "(")
+          (loop [^int i 0]
+            (when (< i (alength args))
+              (when (> i 0) (.append sb ", "))
+              (let [a (aget args i)]
+                (cond (instance? Long a) (.append sb (.longValue (cast Long a)))
+                      (instance? byte/1 a) (do (.append sb "\"") (.append sb (Rt/utf8 a)) (.append sb "\""))
+                      :else (.append sb "_")))
+              (recur (unchecked-inc-int i))))
+          (.append sb ")"))
+        (.toString sb))))
+
+  (method ^:public ^:static describe ^String [x]
+    (cond (nil? x) "<null>"
+          (instance? Long x) (java-str x)
+          (instance? Double x) (java-str x)
+          (instance? byte/1 x) (java-str "\"" (Rt/utf8 x) "\"")
+          (instance? Block x) (java-str "<block " (.-tag (cast Block x)) "/" (alength (.-f (cast Block x))) ">")
+          (instance? double/1 x) (java-str "<floatarray " (alength (cast double/1 x)) ">")
+          (instance? Closure x) (java-str "<closure " (.getName (.getClass x)) ">")
+          :else (java-str "<" (.getName (.getClass x)) ">")))
+
+  ;; ---- the system's constants (sys.constant_...)
+
+  (method ^:public ^:static sysConstant [^String name]
+    (switch name
+      "big_endian" FALSE
+      "word_size" (Long/valueOf 64)
+      "int_size" (Long/valueOf 63)
+      "max_wosize" (Long/valueOf 18014398509481983)
+      "ostype_unix" TRUE
+      "ostype_win32" FALSE
+      "ostype_cygwin" FALSE
+      "backend_type" (Long/valueOf backendType)
+      "standard_library_default" (Rt/s "/usr/lib/ocaml")
+      (throw (Rt/internal (java-str "sys.constant_" name)))))
+
+  ;; an external the runtime does not implement (the translator's table names those it does)
+  (method ^:public ^:static missing ^RuntimeException [^String name]
+    (Rt/internal (java-str "external " name " is not implemented")))
+  (method ^:public ^:static unsupported ^RuntimeException [^String what]
+    (Rt/internal (java-str "primitive " what " is not supported"))))

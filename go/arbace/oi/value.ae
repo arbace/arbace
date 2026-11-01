@@ -1,0 +1,274 @@
+;; Package oi is oi, Arbace's interpreter of OCaml's Lambda (doc/ocaml/OCAML-SURVEY.md, O5; OC5 (a)):
+;; the values of OCaml's runtime as Go values, the Lambda of a unit compiled into closures over
+;; frames, the primitives of Lambda and the runtime's externals (the C part of OCaml's runtime, in
+;; Go), exceptions as Go panics, proper tail calls by a trampoline in the call, effects as
+;; goroutines with a channel hand-off (OC6 (a)), and the toplevel's value printing (OC12 (a)).
+;; Its input is the Lambda dumps of tools/ocdump as forms (doc/ocaml/SPEC.md §11.2).
+(in-ns 'go.arbace.oi) (go/file "value.go" :doc "Package oi is oi, Arbace's interpreter of OCaml's Lambda (doc/ocaml/OCAML-SURVEY.md, O5; OC5 (a)):\nthe values of OCaml's runtime as Go values, the Lambda of a unit compiled into closures over\nframes, the primitives of Lambda and the runtime's externals (the C part of OCaml's runtime, in\nGo), exceptions as Go panics, proper tail calls by a trampoline in the call, effects as\ngoroutines with a channel hand-off (OC6 (a)), and the toplevel's value printing (OC12 (a)).\nIts input is the Lambda dumps of tools/ocdump as forms (doc/ocaml/SPEC.md §11.2).\n" :imports [
+
+
+    ^{:line 10} [math "math"]
+    ^{:line 11} [strconv "strconv"]])
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type ^:alias Value "Value is an OCaml value. Its dynamic type is one of:\n\n\tint          an immediate: int, char, bool, unit, a constant constructor (63-bit, Int)\n\tfloat64      a boxed float (Double_tag)\n\t*Bytes       a string or bytes (String_tag; strings are bytes never written)\n\t*Block       a block of fields with a tag (0-245, Lazy, Forward, Object, Infix ...)\n\t*FloatArray  a flat float array or a record of floats (Double_array_tag)\n\tint32, int64, Nativeint  the boxed integers (Custom_tag)\n\t*Closure     a function (Closure_tag)\n\t*Custom      another custom block (channels, mutexes, ...), compared by identity\n\t*Fiber       a stack of effects (Cont_tag's stack; OC6 (a))\n" any)
+
+
+(go/type Nativeint "Nativeint is OCaml's nativeint (64 bits on amd64), distinct from int64.\n" int64)
+
+
+(go/type Bytes "Bytes is an OCaml string or bytes value.\n" (struct ^{:tag (slice byte)} B))
+
+
+(go/type Block "Block is a block: a tag and its fields.\n" (struct
+    ^{:line 35 :tag int} Tag
+    ^{:line 36 :tag (slice Value)} F))
+
+
+
+(go/type FloatArray "FloatArray is a flat array of floats (tag 254).\n" (struct ^{:tag (slice float64)} F))
+
+
+
+(go/type Custom "Custom is a custom block that is neither a boxed integer nor a float: Name the custom\noperations' identifier (as caml_custom_ops' identifier: \"_chan\", \"_mutex\", ...), V its Go state.\n" (struct
+    ^{:line 45 :tag string} Name
+    ^{:line 46 :tag any} V))
+
+
+
+(go/const "The tags of the runtime (runtime/caml/mlvalues.h).\n"
+  ^{:line 51} [^{:val 244} TagForcing 244]
+  ^{:line 52} [^{:val 245} TagCont 245]
+  ^{:line 53} [^{:val 246} TagLazy 246]
+  ^{:line 54} [^{:val 247} TagClosure 247]
+  ^{:line 55} [^{:val 248} TagObject 248]
+  ^{:line 56} [^{:val 249} TagInfix 249]
+  ^{:line 57} [^{:val 250} TagForward 250]
+  ^{:line 58} [^{:val 251} TagAbstract 251]
+  ^{:line 59} [^{:val 252} TagString 252]
+  ^{:line 60} [^{:val 253} TagDouble 253]
+  ^{:line 61} [^{:val 254} TagDoubleArray 254]
+  ^{:line 62} [^{:val 255} TagCustom 255]
+  ^{:line 63} [^{:val 1000} TagInt 1000]
+  ^{:line 64} [^{:val 1001} TagOutOfHeap 1001])
+
+
+
+(go/const ^{:val 0 :doc "Unit is ().\n"} Unit 0)
+
+
+(go/const "MaxInt and MinInt bound OCaml's 63-bit int.\n"
+  ^{:line 72} [^{:val 4611686018427387903} MaxInt (- (<< 1 62) 1)]
+  ^{:line 73} [^{:val -4611686018427387904} MinInt (<< -1 62)])
+
+
+
+^{:go/end 77} (go/func Int "Int wraps a Go integer to OCaml's 63 bits.\n" ^int [^int x] (>> (<< x 1) 1))
+
+
+^{:go/breaks [[5 84]] :go/end 85} (go/func Bool "Bool is b as an OCaml bool.\n" ^Value [^bool b]
+  (when b
+    (return 1))
+
+  0)
+
+
+
+
+^{:go/breaks [[5 93]] :go/end 94} (go/func Truth "Truth is v as a condition: everything but the immediate 0 is true (a block is true, as\nLambda's ifthenelse on a list tests it).\n" ^bool [^Value v]
+  (when [(values i ok) (assert int v)] ok
+    (return (!= i 0)))
+
+  true)
+
+
+
+^{:go/end 97} (go/func Str "Str is s as a fresh OCaml string.\n" ^{:tag (* Bytes)} [^string s] (addr (lit Bytes :B (conv (slice byte) s))))
+
+
+^{:go/end 100} (go/func GoString "GoString is the bytes of an OCaml string or bytes value as a Go string.\n" ^string [^Value v] (conv string (.-B (assert (* Bytes) v))))
+
+
+^{:go/end 109} (go/func AsInt "AsInt is v as an immediate.\n" ^int [^Value v]
+  (type-switch [x v]
+    (case [int]
+      (return x)))
+
+  (panic (addr (lit InternalError :Msg (+ "not an int: " (Describe v))))))
+
+
+
+^{:go/end 118} (go/func AsFloat "AsFloat is v as a float.\n" ^float64 [^Value v]
+  (type-switch [x v]
+    (case [float64]
+      (return x)))
+
+  (panic (addr (lit InternalError :Msg (+ "not a float: " (Describe v))))))
+
+
+
+^{:go/end 127} (go/func AsBytes "AsBytes is v as a string or bytes.\n" ^{:tag (* Bytes)} [^Value v]
+  (type-switch [x v]
+    (case [(* Bytes)]
+      (return x)))
+
+  (panic (addr (lit InternalError :Msg (+ "not a string: " (Describe v))))))
+
+
+
+^{:go/end 136} (go/func AsBlock "AsBlock is v as a block.\n" ^{:tag (* Block)} [^Value v]
+  (type-switch [x v]
+    (case [(* Block)]
+      (return x)))
+
+  (panic (addr (lit InternalError :Msg (+ "not a block: " (Describe v))))))
+
+
+
+^{:go/end 139} (go/func NewBlock "NewBlock is a block of tag and fields.\n" ^{:tag (* Block)} [^int tag & ^{:tag (slice Value)} fields] (addr (lit Block :Tag tag :F fields)))
+
+
+^{:go/end 142} (go/func Some "Some is OCaml's Some v.\n" ^Value [^Value v] (addr (lit Block :Tag 0 :F (lit (slice Value) v))))
+
+
+(go/const ^{:val 0 :doc "None is OCaml's None.\n"} None 0)
+
+
+^{:go/end 148} (go/func Tuple "Tuple is a tuple of vs.\n" ^Value [& ^{:tag (slice Value)} vs] (addr (lit Block :Tag 0 :F vs)))
+
+
+^{:go/end 157} (go/func List "List is the OCaml list of vs.\n" ^Value [& ^{:tag (slice Value)} vs]
+  (let [^Value l 0]
+    (for [i (- (len vs) 1)] (>= i 0) (dec! i)
+      (set! l (addr (lit Block :Tag 0 :F (lit (slice Value) (aget vs i) l)))))
+
+    ^{:line 156} l))
+
+
+
+^{:go/end 180} (go/func Tag "Tag is the tag of v as Obj.tag gives it.\n" ^int [^Value v]
+  (type-switch [x v]
+    (case [int]
+      (return TagInt))
+    (case [float64]
+      (return TagDouble))
+    (case [(* Bytes)]
+      (return TagString))
+    (case [(* Block)]
+      (return (.-Tag x)))
+    (case [(* FloatArray)]
+      (return TagDoubleArray))
+    (case [(* Closure)]
+      (return TagClosure))
+    (case [int32 int64 Nativeint (* Custom)]
+      (return TagCustom))
+    (case [(* Fiber)]
+      (return TagCont)))
+
+  ^{:line 179} TagOutOfHeap)
+
+
+
+^{:go/breaks [[5 200]] :go/end 201} (go/func Size "Size is the number of fields (words) of a block as Obj.size gives it.\n" ^int [^Value v]
+  (type-switch [x v]
+    (case [(* Block)]
+      (return (len (.-F x))))
+    (case [(* FloatArray)]
+      (return (len (.-F x))))
+    (case [(* Bytes)]
+      (return (/ (+ (len (.-B x)) 8) 8)))
+    (case [float64]
+      (return 1))
+    (case [int32 int64 Nativeint]
+      (return 2))
+    (case [(* Closure)]
+      (return (+ 2 (len (.-Env x)))))
+    (case [(* Custom)]
+      (return 2)))
+
+  0)
+
+
+
+^{:go/breaks [[5 234]] :go/end 235} (go/func Describe "Describe is a short text of v for internal errors and traces.\n" ^string [^Value v]
+  (type-switch [x v]
+    (case [nil]
+      (return "<nil>"))
+    (case [int]
+      (return (strconv/Itoa x)))
+    (case [float64]
+      (return (strconv/FormatFloat x \g -1 64)))
+    (case [(* Bytes)]
+      (when (> (len (.-B x)) 40)
+        (return (+ (strconv/Quote (conv string (subslice (.-B x) _ 40))) "...")))
+
+      (return (strconv/Quote (conv string (.-B x)))))
+    (case [(* Block)]
+      (return (+ "<block " (strconv/Itoa (.-Tag x)) "/" (strconv/Itoa (len (.-F x))) ">")))
+    (case [(* FloatArray)]
+      (return (+ "<floatarray " (strconv/Itoa (len (.-F x))) ">")))
+    (case [(* Closure)]
+      (return (+ "<closure " (.Name x) ">")))
+    (case [int32]
+      (return (+ (strconv/Itoa (conv int x)) "l")))
+    (case [int64]
+      (return (+ (strconv/FormatInt x 10) "L")))
+    (case [Nativeint]
+      (return (+ (strconv/FormatInt (conv int64 x) 10) "n")))
+    (case [(* Custom)]
+      (return (+ "<custom " (.-Name x) ">")))
+    (case [(* Fiber)]
+      (return "<stack>")))
+
+  "<?>")
+
+
+
+
+
+^{:go/end 248} (go/func PhysEqual "PhysEqual is OCaml's == on two values: identity of blocks, equality of immediates; boxed\nnumbers are equal when their bits are (a divergence by design: OCaml compares their\naddresses, OC11).\n" ^bool [^Value a ^Value b]
+  (when [(values fa ok) (assert float64 a)] ok
+    (when [(values fb ok) (assert float64 b)] ok
+      (return (== (math/Float64bits fa) (math/Float64bits fb))))
+
+    (return false))
+
+  (== a b))
+
+
+
+
+(go/type Cell "Cell is the storage of a mutable variable (Lambda's mutlet), shared by the closures that\ncapture it.\n" (struct ^Value V))
+
+
+
+(go/const "The boxed small integers: an int in an interface allocates unless Go's own cache (0-255)\nhas it; oi keeps the interfaces of -1024 to 65535 ready.\n"
+  ^{:line 257} [^{:val -1024} smallMin -1024]
+  ^{:line 258} [^{:val 65536} smallMax (<< 1 16)])
+
+
+(go/var smallInts (^{:go/end 267} (fn ^{:tag (slice Value)} []
+      (let [t (make (slice Value) (- smallMax smallMin))]
+        (range [i t]
+          (aset t i (+ i smallMin)))
+
+        ^{:line 266} t))))
+
+
+
+^{:go/end 275} (go/func BoxInt "BoxInt is the OCaml int i as a Value.\n" ^Value [^int i]
+  (when (< (conv uint (- i smallMin)) (conv uint (- smallMax smallMin)))
+    (return (aget smallInts (- i smallMin))))
+
+  ^{:line 274} i)

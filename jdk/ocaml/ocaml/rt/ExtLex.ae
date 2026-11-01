@@ -1,0 +1,269 @@
+;; The automata of ocamllex and ocamlyacc (runtime/lexing.c, runtime/parsing.c) over the records of
+;; stdlib/lexing.ml and stdlib/parsing.ml, whose field order the indexes below follow. Ported from
+;; oi's ext_lex.go. ocamlyacc's engine is a state machine on the C labels: `pc` is the label
+;; (0 loop, 1 testshift, 2 recover, 3 shift, 4 shiftRecover, 5 push, 6 reduce, 7 semanticAction).
+;;
+;; Lexing.lexbuf: 1 buffer, 2 buffer_len, 3 abs_pos, 4 start_pos, 5 curr_pos, 6 last_pos,
+;; 7 last_action, 8 eof_reached, 9 mem. Lexing.lex_tables: 0 base, 1 backtrk, 2 default, 3 trans,
+;; 4 check, 5 base_code, 6 backtrk_code, 7 default_code, 8 trans_code, 9 check_code, 10 code.
+;; Parsing.parser_tables: 0 actions, 1 transl_const, 2 transl_block, 3 lhs, 4 len, 5 defred,
+;; 6 dgoto, 7 sindex, 8 rindex, 9 gindex, 10 tablesize, 11 table, 12 check, 13 error_function,
+;; 14 names_const, 15 names_block. Parsing.parser_env: 0 s_stack, 1 v_stack, 2 symb_start_stack,
+;; 3 symb_end_stack, 4 stacksize, 5 stackbase, 6 curr_char, 7 lval, 8 symb_start, 9 symb_end,
+;; 10 asp, 11 rule_len, 12 rule_number, 13 sp, 14 state, 15 errflag.
+
+(in-ns 'ocaml.rt)
+
+(defclass ^:public ^:final ExtLex
+  (field ^:private ^:static ^boolean parserTrace false)
+
+  ;; the signed and unsigned 16 bit entry n of a table string
+  (method ^:private ^:static sh ^int [t ^int n]
+    (let [b (cast byte/1 t)]
+      (unchecked-int (unchecked-short (bit-or (bit-and (long (aget b (unchecked-multiply-int 2 n))) 255)
+                                          (bit-shift-left (bit-and (long (aget b (unchecked-add-int (unchecked-multiply-int 2 n) 1))) 255) 8))))))
+  (method ^:private ^:static ush ^int [t ^int n]
+    (let [b (cast byte/1 t)]
+      (unchecked-int (bit-or (bit-and (long (aget b (unchecked-multiply-int 2 n))) 255)
+                             (bit-shift-left (bit-and (long (aget b (unchecked-add-int (unchecked-multiply-int 2 n) 1))) 255) 8)))))
+  (method ^:private ^:static ib ^int [^byte/1 code ^int i] (unchecked-int (bit-and (long (aget code i)) 255)))
+  (method ^:private ^:static box [^long x] (Long/valueOf x))
+
+  ;; lexing.c's run_mem
+  (method ^:private ^:static runMem ^void [^byte/1 code ^int pc0 ^Object/1 mem curr]
+    (let [^:mutable ^int pc pc0]
+      (while true
+        (let [dst (ExtLex/ib code pc)]
+          (set! pc (unchecked-inc-int pc))
+          (when (== dst 255) (return))
+          (let [src (ExtLex/ib code pc)]
+            (set! pc (unchecked-inc-int pc))
+            (if (== src 255) (aset mem dst curr) (aset mem dst (aget mem src))))))))
+  ;; lexing.c's run_tag
+  (method ^:private ^:static runTag ^void [^byte/1 code ^int pc0 ^Object/1 mem]
+    (let [^:mutable ^int pc pc0]
+      (while true
+        (let [dst (ExtLex/ib code pc)]
+          (set! pc (unchecked-inc-int pc))
+          (when (== dst 255) (return))
+          (let [src (ExtLex/ib code pc)]
+            (set! pc (unchecked-inc-int pc))
+            (if (== src 255) (aset mem dst (Long/valueOf -1)) (aset mem dst (aget mem src))))))))
+
+  (method ^:private ^:static lex ^long [tblv ^long start lbv ^boolean ne]
+    (let [tbl (.-f (cast Block tblv))
+          lb (.-f (cast Block lbv))
+          ^:mutable ^long st start
+          ^byte/1 code (if ne (cast byte/1 (aget tbl 10)) nil)
+          ^Object/1 mem (if ne (.-f (cast Block (aget lb 9))) nil)]
+      (if (>= st 0)
+        (do (aset lb 4 (aget lb 5))
+            (aset lb 6 (aget lb 5))
+            (aset lb 7 (Long/valueOf -1)))
+        (set! st (unchecked-subtract (unchecked-negate st) 1)))
+      (while true
+        (let [state (unchecked-int st)
+              base (ExtLex/sh (aget tbl 0) state)]
+          (when (< base 0)
+            (when ne (ExtLex/runTag code (ExtLex/ush (aget tbl 5) state) mem))
+            (return (unchecked-subtract (unchecked-negate (long base)) 1)))
+          (let [backtrk (ExtLex/sh (aget tbl 1) state)]
+            (when (>= backtrk 0)
+              (when ne (ExtLex/runTag code (ExtLex/ush (aget tbl 6) state) mem))
+              (aset lb 6 (aget lb 5))
+              (aset lb 7 (Long/valueOf (long backtrk)))))
+          (let [^:mutable ^int c 0]
+            (if (>= (Rt/l (aget lb 5)) (Rt/l (aget lb 2)))
+              (do
+                (when (not (Rt/t (aget lb 8)))
+                  (return (unchecked-subtract (unchecked-negate (long state)) 1)))
+                (set! c 256))
+              (let [pos (Rt/ii (aget lb 5))]
+                (set! c (ExtLex/ib (cast byte/1 (aget lb 1)) pos))
+                (aset lb 5 (Long/valueOf (long (unchecked-inc-int pos))))))
+            (let [pstate state
+                  nstate (if (== (ExtLex/sh (aget tbl 4) (unchecked-add-int base c)) state)
+                           (ExtLex/sh (aget tbl 3) (unchecked-add-int base c))
+                           (ExtLex/sh (aget tbl 2) state))]
+              (when (< nstate 0)
+                (aset lb 5 (aget lb 6))
+                (when (== (Rt/l (aget lb 7)) -1) (throw (Rt/failwith "lexing: empty token")))
+                (return (Rt/l (aget lb 7))))
+              (set! st (long nstate))
+              (when ne
+                (let [baseCode (ExtLex/ush (aget tbl 5) pstate)
+                      pcOff (if (== (ExtLex/sh (aget tbl 9) (unchecked-add-int baseCode c)) pstate)
+                              (ExtLex/ush (aget tbl 8) (unchecked-add-int baseCode c))
+                              (ExtLex/ush (aget tbl 7) pstate))]
+                  (when (> pcOff 0) (ExtLex/runMem code pcOff mem (aget lb 5)))))
+              (when (== c 256) (aset lb 8 (Long/valueOf 0)))))))))
+
+  (method ^:public ^:static caml_lex_engine [tbl start lb] (Long/valueOf (ExtLex/lex tbl (Rt/l start) lb false)))
+  (method ^:public ^:static caml_new_lex_engine [tbl start lb] (Long/valueOf (ExtLex/lex tbl (Rt/l start) lb true)))
+
+  ;; ---- ocamlyacc
+
+  (method ^:private ^:static tokenName ^String [names ^int number0]
+    (let [b (cast byte/1 names) ^:mutable ^int pos 0 ^:mutable ^int number number0]
+      (label :out
+        (while (> number 0)
+          (when (or (>= pos (alength b)) (== (aget b pos) 0)) (break :out "<unknown token>"))
+          (while (and (< pos (alength b)) (not (== (aget b pos) 0))) (set! pos (unchecked-inc-int pos)))
+          (set! pos (unchecked-inc-int pos))
+          (set! number (unchecked-dec-int number)))
+        (let [^:mutable ^int end pos]
+          (while (and (< end (alength b)) (not (== (aget b end) 0))) (set! end (unchecked-inc-int end)))
+          (String. b pos (unchecked-subtract-int end pos) "ISO-8859-1")))))
+
+  (method ^:private ^:static ptrace ^void [^String s]
+    (when parserTrace (.print System/err s)))
+
+  (method ^:private ^:static printToken ^void [^Object/1 tbl ^int state tok]
+    (if (instance? Block tok)
+      (let [b (cast Block tok)
+            v (aget (.-f b) 0)
+            vs (cond (instance? Long v) (java-str v)
+                     (instance? byte/1 v) (String. (cast byte/1 v) "ISO-8859-1")
+                     (instance? Double v) (java-str v)
+                     :else "_")]
+        (.print System/err (java-str "State " state ": read token " (ExtLex/tokenName (aget tbl 15) (.-tag b)) "(" vs ")\n")))
+      (.print System/err (java-str "State " state ": read token " (ExtLex/tokenName (aget tbl 14) (Rt/ii tok)) "\n"))))
+
+  (method ^:private ^:static parse ^long [tblv envv ^int cmd arg]
+    (let [tbl (.-f (cast Block tblv))
+          env (.-f (cast Block envv))
+          tsize (Rt/ii (aget tbl 10))
+          ^:mutable ^int state 0 ^:mutable ^int sp 0 ^:mutable ^int asp 0 ^:mutable ^int errflag 0
+          ^:mutable ^int n 0 ^:mutable ^int n1 0 ^:mutable ^int n2 0 ^:mutable ^int m 0 ^:mutable ^int state1 0
+          ^:mutable ^int pc 0]
+      (switch cmd
+        0 (do (set! state 0) (set! sp (Rt/ii (aget env 13))) (set! errflag 0) (set! pc 0))
+        1 (do
+            (set! sp (Rt/ii (aget env 13))) (set! state (Rt/ii (aget env 14))) (set! errflag (Rt/ii (aget env 15)))
+            (if (instance? Block arg)
+              (do (aset env 6 (aget (.-f (cast Block (aget tbl 2))) (.-tag (cast Block arg))))
+                  (aset env 7 (aget (.-f (cast Block arg)) 0)))
+              (do (aset env 6 (aget (.-f (cast Block (aget tbl 1))) (Rt/ii arg)))
+                  (aset env 7 (Long/valueOf 0))))
+            (when parserTrace (ExtLex/printToken tbl state arg))
+            (set! pc 1))
+        5 (do (set! sp (Rt/ii (aget env 13))) (set! state (Rt/ii (aget env 14))) (set! errflag (Rt/ii (aget env 15)))
+              (set! pc 2))
+        2 (do (set! sp (Rt/ii (aget env 13))) (set! state (Rt/ii (aget env 14))) (set! errflag (Rt/ii (aget env 15)))
+              (set! pc 5))
+        3 (do (set! sp (Rt/ii (aget env 13))) (set! state (Rt/ii (aget env 14))) (set! errflag (Rt/ii (aget env 15)))
+              (set! pc 7))
+        4 (do
+            (set! sp (Rt/ii (aget env 13))) (set! state (Rt/ii (aget env 14))) (set! errflag (Rt/ii (aget env 15)))
+            (aset (.-f (cast Block (aget env 0))) sp (Long/valueOf (long state)))
+            (aset (.-f (cast Block (aget env 1))) sp arg)
+            (set! asp (Rt/ii (aget env 10)))
+            (aset (.-f (cast Block (aget env 3))) sp (aget (.-f (cast Block (aget env 3))) asp))
+            (when (> sp asp)
+              (aset (.-f (cast Block (aget env 2))) sp (aget (.-f (cast Block (aget env 3))) asp)))
+            (set! pc 0))
+        (throw (Rt/internal (java-str "caml_parse_engine: bad command " cmd))))
+      (while true
+        (switch pc
+          ;; loop
+          0 (do
+              (set! n (ExtLex/sh (aget tbl 5) state))
+              (cond (not (== n 0)) (set! pc 6)
+                    (>= (Rt/l (aget env 6)) 0) (set! pc 1)
+                    :else
+                    (do (aset env 13 (Long/valueOf (long sp))) (aset env 14 (Long/valueOf (long state)))
+                        (aset env 15 (Long/valueOf (long errflag)))
+                        (return 0))))
+          ;; testshift
+          1 (do
+              (let [cc (Rt/ii (aget env 6))]
+                (set! n1 (ExtLex/sh (aget tbl 7) state))
+                (set! n2 (unchecked-add-int n1 cc))
+                (if (and (not (== n1 0)) (>= n2 0) (<= n2 tsize) (== (ExtLex/sh (aget tbl 12) n2) cc))
+                  (set! pc 3)
+                  (do
+                    (set! n1 (ExtLex/sh (aget tbl 8) state))
+                    (set! n2 (unchecked-add-int n1 cc))
+                    (if (and (not (== n1 0)) (>= n2 0) (<= n2 tsize) (== (ExtLex/sh (aget tbl 12) n2) cc))
+                      (do (set! n (ExtLex/sh (aget tbl 11) n2)) (set! pc 6))
+                      (if (> errflag 0)
+                        (set! pc 2)
+                        (do (aset env 13 (Long/valueOf (long sp))) (aset env 14 (Long/valueOf (long state)))
+                            (aset env 15 (Long/valueOf (long errflag)))
+                            (return 5))))))))
+          ;; recover
+          2 (if (< errflag 3)
+              (do
+                (set! errflag 3)
+                (while true
+                  (set! state1 (Rt/ii (aget (.-f (cast Block (aget env 0))) sp)))
+                  (set! n1 (ExtLex/sh (aget tbl 7) state1))
+                  (set! n2 (unchecked-add-int n1 256))
+                  (when (and (not (== n1 0)) (>= n2 0) (<= n2 tsize) (== (ExtLex/sh (aget tbl 12) n2) 256))
+                    (when parserTrace (ExtLex/ptrace (java-str "Recovering in state " state1 "\n")))
+                    (set! pc 4)
+                    (break))
+                  (when parserTrace (ExtLex/ptrace (java-str "Discarding state " state1 "\n")))
+                  (when (<= sp (Rt/ii (aget env 5)))
+                    (when parserTrace (ExtLex/ptrace "No more states to discard\n"))
+                    (return 1))
+                  (set! sp (unchecked-dec-int sp))))
+              (do
+                (when (== (Rt/l (aget env 6)) 0) (return 1))
+                (when parserTrace (ExtLex/ptrace "Discarding last token read\n"))
+                (aset env 6 (Long/valueOf -1))
+                (set! pc 0)))
+          ;; shift
+          3 (do
+              (aset env 6 (Long/valueOf -1))
+              (when (> errflag 0) (set! errflag (unchecked-dec-int errflag)))
+              (set! pc 4))
+          ;; shiftRecover
+          4 (do
+              (when parserTrace
+                (ExtLex/ptrace (java-str "State " state ": shift to state " (ExtLex/sh (aget tbl 11) n2) "\n")))
+              (set! state (ExtLex/sh (aget tbl 11) n2))
+              (set! sp (unchecked-inc-int sp))
+              (if (< sp (Rt/ii (aget env 4)))
+                (set! pc 5)
+                (do (aset env 13 (Long/valueOf (long sp))) (aset env 14 (Long/valueOf (long state)))
+                    (aset env 15 (Long/valueOf (long errflag)))
+                    (return 2))))
+          ;; push
+          5 (do
+              (aset (.-f (cast Block (aget env 0))) sp (Long/valueOf (long state)))
+              (aset (.-f (cast Block (aget env 1))) sp (aget env 7))
+              (aset (.-f (cast Block (aget env 2))) sp (aget env 8))
+              (aset (.-f (cast Block (aget env 3))) sp (aget env 9))
+              (set! pc 0))
+          ;; reduce
+          6 (do
+              (when parserTrace (ExtLex/ptrace (java-str "State " state ": reduce by rule " n "\n")))
+              (set! m (ExtLex/sh (aget tbl 4) n))
+              (aset env 10 (Long/valueOf (long sp)))
+              (aset env 12 (Long/valueOf (long n)))
+              (aset env 11 (Long/valueOf (long m)))
+              (set! sp (unchecked-add-int (unchecked-subtract-int sp m) 1))
+              (set! m (ExtLex/sh (aget tbl 3) n))
+              (set! state1 (Rt/ii (aget (.-f (cast Block (aget env 0))) (unchecked-dec-int sp))))
+              (set! n1 (ExtLex/sh (aget tbl 9) m))
+              (set! n2 (unchecked-add-int n1 state1))
+              (if (and (not (== n1 0)) (>= n2 0) (<= n2 tsize) (== (ExtLex/sh (aget tbl 12) n2) state1))
+                (set! state (ExtLex/sh (aget tbl 11) n2))
+                (set! state (ExtLex/sh (aget tbl 6) m)))
+              (if (< sp (Rt/ii (aget env 4)))
+                (set! pc 7)
+                (do (aset env 13 (Long/valueOf (long sp))) (aset env 14 (Long/valueOf (long state)))
+                    (aset env 15 (Long/valueOf (long errflag)))
+                    (return 3))))
+          ;; semanticAction
+          (do (aset env 13 (Long/valueOf (long sp))) (aset env 14 (Long/valueOf (long state)))
+              (aset env 15 (Long/valueOf (long errflag)))
+              (return 4))))))
+
+  (method ^:public ^:static caml_parse_engine [tbl env cmd arg]
+    (Long/valueOf (ExtLex/parse tbl env (Rt/ii cmd) arg)))
+  (method ^:public ^:static caml_set_parser_trace [b]
+    (let [old parserTrace]
+      (set! parserTrace (Rt/t b))
+      (Rt/b old))))

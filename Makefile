@@ -16,7 +16,7 @@ CLOJURE_TESTS_GO ?= target/arbace-go/amd64/arbace-tests
   toolchain-verify box-vendor-verify x509roots-verify repr-go-roundtrip repr-go-roundtrip-text repr-go-native-check \
   repr-java-check repr-java-roundtrip repr-java-text repr-java-jdk repr-java-parse-check repr-java-front-check repr-java-attr-check repr-java-nojavac-check repr-clojure-check repr-clojure-roundtrip repr-haskell-roundtrip repr-haskell-iface repr-haskell-text repr-haskell-layout repr-haskell-test repr-rust-roundtrip repr-rust-iface repr-rust-text repr-rust-pretty repr-rust-behaviour repr-rust-code repr-rust-all repr-rust-test repr-c-host-record repr-c-host-check repr-c-ccdump repr-c-check repr-c-record repr-c-parse-check repr-c-read repr-c-print repr-c-roundtrip repr-c-record-gcc repr-c-c23 ci-diagnose ci-run ci-check ci-check-aot ci-dg ci-dg-essential ci-judge-test ci-aot-translate ci-repl-session ci-divergences ci-musl ci-cirun-build ci-annot ci-annotations ci-annotations-record ci-record-ref goi-annotations goi-test goi-check goi-check-aot goi-check-aot-essential goi-check-nethttp goi-check-nethttp-arbace goi-divergences goi-divergences-aot java-check java-check-compiled java-check-compiled-essential java-check-print java-check-nread java-check-diagnostics java-check-essential java-check-ref alpine-check alpine-test clean \
   suite-aot suite-aot-essential suite-divergences java-forms-verify java-forms-update reap-record-native-check \
-  repr-c-gcc-tests check-makefile
+  repr-c-gcc-tests repr-ocaml-ocdump repr-ocaml-spec-check repr-ocaml-samples repr-ocaml-corpus repr-ocaml-corpus-count repr-ocaml-roundtrip repr-ocaml-roundtrip-all repr-ocaml-check repr-ocaml-text repr-ocaml-cmi repr-ocaml-dumps oi-stdlib oi-build oi-check oi-divergences oi-record-ref oi-repl oi-aot-lib oi-check-aot oi-divergences-aot oi-suite-check oi-suite-check-aot oi-suite-divergences oi-suite-expect oi-suite-rollup oi-suite-record-ref repr-ocaml-opam check-makefile
 
 help: ## list the targets
 	@awk 'BEGIN {FS = ":.*## "} /^## / {printf "\n%s\n", substr($$0, 4)} \
@@ -326,6 +326,64 @@ java-check-ref: ## Java's conformance check's reference recorded afresh with the
 	bin/java-check --record-ref
 goi-divergences-aot: ## the AOT level's divergences: every program not passing in a class of test/goi/divergences-aot.edn (bin/goi divergences --aot)
 	bin/goi divergences --aot
+
+## repr/ocaml, OCaml's bridge (doc/ocaml/SPEC.md; O1: the spec, the helper and the pins)
+repr-ocaml-ocdump: ## build the helper tools/ocdump into .tmp/ocdump/ with the host's ocamlopt on compiler-libs (bin/repr-ocaml ocdump-build)
+	bin/repr-ocaml ocdump-build
+repr-ocaml-spec-check: ## doc/ocaml/SPEC.md: every forms block reads, every example equals ocdump's output, every Parsetree constructor is in the checklist (bin/repr-ocaml spec-check)
+	bin/repr-ocaml spec-check
+repr-ocaml-samples: ## test/ocaml/samples/ read by ocdump and by Arbace's reader; the typed ones typed and lowered to Lambda (bin/repr-ocaml samples)
+	bin/repr-ocaml samples
+repr-ocaml-corpus: ## the corpora's counts and pins of test/ocaml/corpora.edn hold: OCaml 5.5.0's tarball (fetched once), go-whim's whiml, the host's compiler (bin/repr-ocaml corpus check)
+	bin/repr-ocaml corpus check
+repr-ocaml-corpus-count: ## the files and lines of every OCaml corpus (bin/repr-ocaml corpus count)
+	bin/repr-ocaml corpus count
+repr-ocaml-roundtrip: ## O2: OCaml -> forms -> OCaml over the stdlib, the compiler's sources and the samples: the helper's trees equal after the print, the print stable (bin/repr-ocaml roundtrip)
+	bin/repr-ocaml roundtrip
+repr-ocaml-roundtrip-all: ## the same over every corpus, go-whim's whiml and the testsuite too (bin/repr-ocaml roundtrip stdlib compiler-sources compiler-backend whiml testsuite samples)
+	bin/repr-ocaml roundtrip stdlib compiler-sources compiler-backend whiml testsuite samples
+repr-ocaml-text: ## O3: mode :full over the default corpora: the text printed from the forms equals the original byte for byte (bin/repr-ocaml roundtrip --text)
+	bin/repr-ocaml roundtrip --text
+repr-ocaml-cmi: ## O3: and the .cmi level: ocamlc -c on the original and on the print, the .cmi bytes equal; the :lines print's with -no-keep-locs too (bin/repr-ocaml roundtrip --cmi-lines)
+	bin/repr-ocaml roundtrip --cmi-lines
+repr-ocaml-dumps: ## O4: the typed and Lambda dumps of every file ocamlc compiles alone, read by Arbace's reader and shaped by SPEC 11.2, stable across two runs; sizes and seconds (bin/repr-ocaml dumps)
+	bin/repr-ocaml dumps
+oi-stdlib: ## O5: the stdlib built by ocamlc in dependency order and its Lambda dumped for oi, into .tmp/oi/lib/ (bin/oi stdlib)
+	bin/oi stdlib
+oi-build: ## O5: oi's light driver, go/arbace/oi's forms printed by repr/go and built by TamaGo's go (bin/oi build)
+	bin/oi build
+oi-check: ## O5: the testsuite's run programs on oi against ocamlc's recorded runs, every non-pass classed (bin/oi check)
+	bin/oi check
+oi-divergences: ## O5: oi's recorded results against test/ocaml/divergences.edn's classes (bin/oi divergences)
+	bin/oi divergences
+oi-record-ref: ## O5: ocamlc's and ocamlopt's runs of oi's run corpus recorded into test/ocaml/ref-ocaml55.edn (bin/oi record-ref)
+	bin/oi record-ref
+oi-repl: ## O5: the toplevel on oi: phrases typed and lowered by the oracle, values printed with their types (bin/oi repl)
+	bin/oi repl
+oi-aot-lib: ## O6: the stdlib's Lambda translated by o2j into Java forms over the runtime jdk/ocaml/, into .tmp/o6/lib/ (bin/oi aot-lib)
+	bin/oi aot-lib
+oi-check-aot: ## O6: the run programs translated by o2j and run at the light level (the Java forms interpreted), against ocamlopt's runs and oi's (bin/oi check --aot)
+	bin/oi check --aot
+oi-divergences-aot: ## O6: the AOT level's recorded results against test/ocaml/divergences-aot.edn's classes (bin/oi divergences --aot)
+	bin/oi divergences --aot
+oi-suite-record-ref: ## O7: ocamlc's and ocamlopt's runs of the suite corpus (the testsuite's run tests O5 does not hold, the opam set's programs) into test/ocaml/ref-suite.edn (bin/oi suite record-ref)
+	bin/oi suite record-ref
+oi-suite-check: ## O7: the suite corpus on oi against ocamlc's runs, every non-pass classed (bin/oi suite check)
+	bin/oi suite check
+oi-suite-check-aot: ## O7: the suite corpus at the light AOT level against ocamlopt's runs and oi's (bin/oi suite check --aot)
+	bin/oi suite check --aot
+oi-suite-divergences: ## O7: the suite corpus' recorded results against test/ocaml/divergences-suite{,-aot}.edn (bin/oi suite divergences; --aot)
+	bin/oi suite divergences
+	bin/oi suite divergences --aot
+oi-suite-expect: ## O7: the testsuite's expect tests on the host's expect tool (testsuite/tools/expect.ml on compiler-libs) into test/ocaml/ref-expect.edn (bin/oi suite expect)
+	bin/oi suite expect
+oi-suite-rollup: ## O7: every .ml and .mli of testsuite/ in a result or a class, from the levels' records, no runs (bin/oi suite rollup)
+	bin/oi suite rollup
+repr-ocaml-opam: ## O7: the opam set (fetched at pinned versions): read, round trip and :full text, dumps (bin/repr-ocaml roundtrip --text, dumps over the :opam-* corpora)
+	bin/repr-ocaml roundtrip --text opam-sexplib0 opam-fmt opam-astring opam-uutf opam-re opam-yojson opam-containers opam-pprint opam-cmdliner opam-base64
+	bin/repr-ocaml dumps opam-sexplib0 opam-fmt opam-astring opam-uutf opam-re opam-yojson opam-containers opam-pprint opam-cmdliner opam-base64
+repr-ocaml-check: ## O2's check: the round trip over the default corpora and over the spec's worked examples (bin/repr-ocaml check)
+	bin/repr-ocaml check
 
 ## The host and housekeeping
 alpine-check: ## one minimal apk add line reinstalls exactly the host's packages (bin/alpine-env check)

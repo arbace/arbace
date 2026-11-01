@@ -1,0 +1,155 @@
+;; Effects and domains (oi's thread.go, ext_domain.go; OC6 (a)): a fiber is a Java thread, perform
+;; hands the effect and its continuation to the thread that runs the fiber's handler and waits for
+;; a resumption, resume hands a function and its argument to the fiber and waits for its next
+;; message, reperform forwards an effect to the enclosing handler and resumes the original
+;; performer with its answer; continuations are one-shot (Continuation_already_resumed). A domain
+;; is a Java thread too; everything runs under the Gil, one thread at a time.
+
+(in-ns 'ocaml.rt)
+
+(import '(java.util.concurrent SynchronousQueue))
+
+(defclass ^:public ^:final Effects
+
+  (field ^:static ^:final ^ThreadLocal CUR (ThreadLocal.))
+  (field ^:static ^:final ^Dom MAIN (Dom. 0))
+  (field ^:static ^long domainSeq 0)
+  (field ^:public ^:static ^long domainsRunning 0)
+
+  (method ^:public ^:static st ^TState []
+    (let [s (.get CUR)]
+      (if (nil? s)
+        (let [n (TState. nil MAIN)] (.set CUR n) n)
+        (cast TState s))))
+
+  (method ^:public ^:static reset ^void []
+    (.set CUR nil)
+    (set! (.-dls MAIN) (Block. 0 (new Object/1 0)))
+    (set! domainSeq 0)
+    (set! domainsRunning 0))
+
+  (method ^:static msg ^Object/1 [^long kind v k] (new Object/1 [(Long/valueOf kind) v k]))
+
+  (method ^:static await ^Object/1 [^SynchronousQueue q]
+    (Gil/unlock)
+    (let [m (.take q)]
+      (Gil/lock)
+      (cast Object/1 m)))
+
+  (method ^:static send ^void [^SynchronousQueue q x]
+    (Gil/unlock)
+    (.put q x)
+    (Gil/lock))
+
+  ;; the fiber's thread: f applied to arg under the Gil, its outcome sent to the current resumer
+  (method ^:static start ^void [^Fiber fb f arg ^SynchronousQueue reply ^Dom dom]
+    (set! (.-started fb) true)
+    (set! (.-reply fb) reply)
+    (let [t (Thread. (lambda Runnable []
+                       (Gil/lock)
+                       (.set CUR (TState. fb dom))
+                       (let [^:mutable ^Object/1 m nil]
+                         (try
+                           (set! m (Effects/msg 0 (Rt/ap1 f arg) nil))
+                           (catch Exn e (set! m (Effects/msg 1 (.-v e) nil)))
+                           (catch StackOverflowError e (set! m (Effects/msg 1 Rt/Stack_overflow nil)))
+                           (catch Throwable e (set! m (Effects/msg 3 e nil))))
+                         (let [r (.-reply fb)]
+                           (Gil/unlock)
+                           (.put r m)))))]
+      (.setDaemon t true)
+      (.start t)))
+
+  (method ^:static dispatch [^Fiber fb ^Object/1 m]
+    (switch (Rt/ii (aget m 0))
+      0 (Rt/ap1 (.-hval fb) (aget m 1))
+      1 (Rt/ap1 (.-hexn fb) (aget m 1))
+      2 (Rt/ap3 (.-heff fb) (aget m 1) (aget m 2) fb)
+      (throw (cast Throwable (aget m 1)))))
+
+  ;; %runstack: run f arg on stack s, its handlers answering
+  (method ^:public ^:static runstack [s f arg]
+    (let [fb (cast Fiber s)
+          reply (SynchronousQueue.)]
+      (Effects/start fb f arg reply (.-dom (Effects/st)))
+      (Effects/dispatch fb (Effects/await reply))))
+
+  ;; %resume: continue stack s with f arg (lf the last fiber, unused)
+  (method ^:public ^:static resume [s f arg lf]
+    (when-not (instance? Fiber s)
+      (throw (Rt/raiseNamed "Effect.Continuation_already_resumed" nil)))
+    (let [fb (cast Fiber s)
+          reply (SynchronousQueue.)]
+      (Gil/unlock)
+      (.put (.-resumeQ fb) (new Object/1 [f arg reply]))
+      (let [m (cast Object/1 (.take reply))]
+        (Gil/lock)
+        (Effects/dispatch fb m))))
+
+  (method ^:static suspend [^Fiber fb eff k]
+    (let [r (.-reply fb)]
+      (Gil/unlock)
+      (.put r (Effects/msg 2 eff k))
+      (let [m (cast Object/1 (.take (.-resumeQ fb)))]
+        (Gil/lock)
+        (set! (.-reply fb) (cast SynchronousQueue (aget m 2)))
+        (Rt/ap1 (aget m 0) (aget m 1)))))
+
+  ;; %perform
+  (method ^:public ^:static perform [eff]
+    (let [fb (.-fiber (Effects/st))]
+      (when (nil? fb) (throw (Rt/raiseNamed "Effect.Unhandled" eff)))
+      (Effects/suspend fb eff (Block. 245 (new Object/1 [fb fb])))))
+
+  (method ^:public ^:static continuationUse [k]
+    (let [b (cast Block k)
+          s (aget (.-f b) 0)]
+      (aset (.-f b) 0 (Long/valueOf 0))
+      s))
+
+  ;; %reperform: an effect the handler does not handle, forwarded outwards
+  (method ^:public ^:static reperform [eff k lf]
+    (let [pf (.-fiber (Effects/st))]
+      (if (nil? pf)
+        (let [v (.get Rt/named "Effect.Unhandled")]
+          (when (nil? v) (throw (Fatal. "Fatal error: exception Effect.Unhandled" 2)))
+          (let [ctor (if (and (instance? Block v) (== (.-tag (cast Block v)) 0)) (aget (.-f (cast Block v)) 0) v)]
+            (Effects/resume (Effects/continuationUse k)
+                            (Rt/native 1 (lambda Code [^Object/1 a] (throw (Exn. (aget a 0)))))
+                            (Block. 0 (new Object/1 [ctor eff]))
+                            (Long/valueOf 0))))
+        (let [r (.-reply pf)]
+          (Gil/unlock)
+          (.put r (Effects/msg 2 eff (Block. 245 (new Object/1 [pf pf]))))
+          (let [m (cast Object/1 (.take (.-resumeQ pf)))]
+            (Gil/lock)
+            (set! (.-reply pf) (cast SynchronousQueue (aget m 2)))
+            (Effects/resume (Effects/continuationUse k) (aget m 0) (aget m 1) (Long/valueOf 0)))))))
+
+  ;; ---- domains
+
+  ;; caml_domain_spawn f term_sync: f () on a new domain; its result Ok v / Error (exn, bt) into
+  ;; term_sync's field 0 (as Some), the waiters of its condition (field 2) woken
+  (method ^:public ^:static spawn [f ts]
+    (set! domainSeq (unchecked-inc domainSeq))
+    (set! domainsRunning (unchecked-inc domainsRunning))
+    (let [id domainSeq
+          dom (Dom. id)
+          t (Thread. (lambda Runnable []
+                       (Gil/lock)
+                       (.set CUR (TState. nil dom))
+                       (let [^:mutable ^Object res nil]
+                         (try
+                           (set! res (Block. 0 (new Object/1 [(Rt/ap1 f Rt/UNIT)])))
+                           (catch Exn e
+                             (set! res (Block. 1 (new Object/1 [(Block. 0 (new Object/1 [(.-v e) (Block. 0 (new Object/1 0))]))]))))
+                           (catch Throwable e
+                             (set! res (Block. 1 (new Object/1 [(Block. 0 (new Object/1 [Rt/Out_of_memory (Block. 0 (new Object/1 0))]))])))))
+                         (set! domainsRunning (unchecked-dec domainsRunning))
+                         (aset (.-f (cast Block ts)) 0 (Block. 0 (new Object/1 [res])))
+                         (ExtCore/condWake (aget (.-f (cast Block ts)) 2) true)
+                         (Gil/broadcast)
+                         (Gil/unlock))))]
+      (.setDaemon t true)
+      (.start t)
+      (Long/valueOf id))))

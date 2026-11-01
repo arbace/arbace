@@ -1,0 +1,96 @@
+;; o2j's light level (doc/ocaml/OCAML-SURVEY.md, "As built: O6 (write-ahead)"): programs' Java
+;; forms, as arbace.o2j translated them, defined by the Java forms' interpreter and run, on an
+;; existing executable (stage 0). A script, run with the runtime's root on ARBACE_PATH
+;; (jdk/ocaml) as
+;;
+;;   EXE test/ocaml/o2j/run.ae FILE... -- [ARG...]
+;;   EXE test/ocaml/o2j/run.ae --batch LIST RESULTS TIMEOUT LIBDIR
+;;
+;; The first form defines the files (the units in link order, the main class last) and runs the
+;; program: its status is the program's; a definition that fails prints "o2j: load-failed: " and
+;; its last cause and exits 126. The environment variable O2J_ARGV0, when set, is the program's argv.(0) (else the last file).
+;;
+;; The second runs many programs in one process (OC88): LIST's lines are ID, OUT, FILES (a file
+;; listing the program's files as the first form takes them), ARGV0 and the arguments, by tabs; the
+;; library's units (the files under LIBDIR) are defined once, a program's own files each time; its stdout and stderr go to
+;; OUT as one stream (System/setOut, System/setErr), the runtime's state is reset (Main/reset,
+;; ExtIo/reset) and its units initialised afresh. Each result is a line of RESULTS: ID, the status
+;; (126 a load failure, its message in OUT), the seconds. A program still running after TIMEOUT
+;; seconds is written "timeout" and the process exits 3 (its threads cannot be stopped): the caller
+;; runs the rest again.
+(ns ocaml.o2j.run
+  (:require [arbace.string :as str])
+  (:import (java.io File FileOutputStream PrintStream BufferedOutputStream)))
+
+(defn- cause [^Throwable e]
+  (let [^Throwable c (last (take 16 (take-while some? (iterate #(.getCause ^Throwable %) e))))
+        m (.getMessage c)]
+    (if (instance? arbace.lang.ExceptionInfo c) (str m) (str (.getName (class c)) (when m (str ": " m))))))
+
+(defn- one-line [s] (str/replace (str s) #"\s*\n\s*" " "))
+
+(defn- single [argv]
+  (let [[files [_ & args]] (split-with #(not= "--" %) argv)]
+    (when-not
+      (try (require 'ocaml.rt)
+           (doseq [f files] (load-file f))
+           true
+           (catch Throwable e
+             (.println System/err (str "o2j: load-failed: " (one-line (cause e))))
+             (.flush System/err)
+             false))
+      (System/exit 126))
+    (eval (list 'ocaml.u.M__main/main (list 'into-array 'String (vec (cons (or (System/getenv "O2J_ARGV0") (.getAbsolutePath (File. ^String (last files)))) args)))))))
+
+(defn- batch [list-file results timeout libdir]
+  (require 'ocaml.rt)
+  (let [loaded (atom #{})
+        out0 System/out err0 System/err
+        ms (* 1000 (Long/parseLong timeout))
+        io-reset (try (eval '(fn [] (ocaml.rt.ExtIo/reset))) (catch Throwable _ (fn [] nil)))]
+    (with-open [res (java.io.FileWriter. ^String results true)]
+      (doseq [line (str/split-lines (slurp list-file))
+              :when (seq line)
+              :let [[id out files argv0 & args] (str/split line #"\t")
+                    fs (remove str/blank? (str/split-lines (slurp files)))
+                    lib (filter #(str/starts-with? % libdir) fs)
+                    own (remove #(str/starts-with? % libdir) fs)
+                    ps (PrintStream. (BufferedOutputStream. (FileOutputStream. ^String out)) false)
+                    t0 (System/nanoTime)
+                    status (atom nil)]]
+        (System/setOut ps)
+        (System/setErr ps)
+        (try
+          (doseq [f lib :when (not (@loaded f))] (load-file f) (swap! loaded conj f))
+          (doseq [f own] (load-file f))
+          (eval '(ocaml.rt.Main/reset))
+          (io-reset)
+          ;; the program runs in its OUT's directory (ExtSys keeps the working directory)
+          (eval (list 'set! 'ocaml.rt.ExtSys/cwd (.getParent (.getAbsoluteFile (File. ^String out)))))
+          (let [run (eval '(fn [args] (ocaml.rt.Main/run args (ocaml.u.M__main/inits))))
+                argv (into-array String (cons argv0 (remove str/blank? args)))
+                t (Thread. ^Runnable (fn [] (reset! status (try (run argv) (catch Throwable e (.println System/err (str "o2j: " e)) 125)))))]
+            (.setDaemon t true)
+            (.start t)
+            (.join t ms)
+            (when (.isAlive t)
+              (.flush ps)
+              (System/setOut out0) (System/setErr err0)
+              (.write res (str id "\ttimeout\t" timeout "\n"))
+              (.flush res)
+              (System/exit 3)))
+          (catch Throwable e
+            (.println ps (str "o2j: load-failed: " (one-line (cause e))))
+            (reset! status 126)))
+        (.flush ps)
+        (System/setOut out0)
+        (System/setErr err0)
+        (.close ps)
+        (.write res (str id "\t" @status "\t" (format "%.2f" (/ (- (System/nanoTime) t0) 1e9)) "\n"))
+        (.flush res)))
+    (System/exit 0)))
+
+(let [argv *command-line-args*]
+  (if (= "--batch" (first argv))
+    (apply batch (rest argv))
+    (single argv)))

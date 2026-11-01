@@ -1,0 +1,285 @@
+(in-ns 'go.arbace.oi) (go/file "thread.go" :imports [
+
+
+    ^{:line 4} [runtime "runtime"]
+    ^{:line 5} [sync "sync"]
+    ^{:line 6} [atomic "sync/atomic"]])
+
+
+;; Threads, domains and the interpreter's lock. A Thread is the state of one goroutine running
+;; OCaml code: the main program, a fiber of an effect handler (OC6 (a)) or a domain. Only one
+;; runs at a time: the goroutine running OCaml code holds gil, and gives it up when it blocks
+;; (a fiber's hand-off, a mutex, a condition, a join) and, when several domains run, every few
+;; thousand calls; so OCaml's data-race-free programs behave as on OCaml's runtime and a racy
+;; one cannot break Go's memory (a divergence by design for the races' outcomes, OC11).
+
+
+(go/type Thread "Thread is one goroutine's interpreter state.\n" (struct
+    ^{:line 18 :tag int} depth
+    ^{:line 19 :tag (* Fiber)} fiber
+    ^{:line 20 :tag (* Domain)} Dom
+    ^{:line 21 :tag Value} tcF
+    ^{:line 22 :tag (slice Value)} tcA
+    ^{:line 23 :tag int} ticks
+    ^{:line 24 :tag Value} result
+    ^{:line 25 :tag (* Code)} cur))
+
+
+
+(go/type Domain "Domain is an OCaml domain: its identifier and its domain-local storage.\n" (struct
+    ^{:line 30 :tag int} ID
+    ^{:line 31 :tag Value} dls))
+
+
+(go/var
+  ^{:line 35} [^sync/Mutex gil]
+  ^{:line 36} [^atomic/Int32 domainsRun]
+  ^{:line 37} [^atomic/Int32 domainSeq])
+
+
+
+^{:go/end 44} (go/func NewThread "NewThread is the main domain's thread (it takes the interpreter's lock).\n" ^{:tag (* Thread)} []
+  (.Lock gil)
+  (addr (lit Thread :Dom (addr (lit Domain :ID 0 :dls (addr (lit Block :Tag 0)))))))
+
+
+
+^{:go/end 47} (go/func Release "Release gives up the interpreter's lock around a blocking Go operation.\n" [] (.Unlock gil))
+
+
+^{:go/end 50} (go/func Acquire "Acquire takes the interpreter's lock back.\n" [] (.Lock gil))
+
+
+^{:go/end 57} (go/func Blocking "Blocking runs f (a blocking Go operation) without the interpreter's lock.\n" [^{:tag (func [])} f]
+  (.Unlock gil)
+  (defer (.Lock gil))
+  (f))
+
+
+^{:go/end 59} (go/method dlsGet ^Value [^{:tag (* Thread)} th] (.-dls (.-Dom th)))
+
+
+^{:go/end 62} (go/method SetDLS "SetDLS sets the domain-local storage's root (caml_domain_dls_set).\n" [^{:tag (* Thread)} th ^Value v] (set! (.-dls (.-Dom th)) v))
+
+
+^{:go/end 65} (go/method DLS "DLS is the domain-local storage's root.\n" ^Value [^{:tag (* Thread)} th] (.-dls (.-Dom th)))
+
+^{:go/end 73} (go/method poll [^{:tag (* Thread)} th]
+  (when (> (.Load domainsRun) 0)
+    (.Unlock gil)
+    (runtime/Gosched)
+    (.Lock gil)))
+
+
+
+
+^{:go/end 80} (go/method Yield "Yield lets the other domains run (Domain.cpu_relax, and every few thousand calls).\n" [^{:tag (* Thread)} th]
+  (.Unlock gil)
+  (runtime/Gosched)
+  (.Lock gil))
+
+
+
+
+^{:go/end 108} (go/func SpawnDomain "SpawnDomain runs f () as a new domain on its own goroutine; done is called (holding the\nlock) with the exception the domain ended with, or nil.\n" ^int [^Value f ^{:tag (func [^{:tag (* Thread)} th ^Value exn])} done]
+  (let [id (conv int (.Add domainSeq 1))]
+    (.Add domainsRun 1)
+    (go (^{:go/end 106} (fn []
+          (.Lock gil)
+          (let [th (addr (lit Thread :Dom (addr (lit Domain :ID id :dls (addr (lit Block :Tag 0))))))
+              ^{:line 90 :tag Value} exn (zero Value)]
+            (^{:go/end 102} (fn []
+                (defer (^{:go/end 100} (fn []
+                      (when [r (recover)] (!= r nil)
+                        (when [(values e ok) (assert (* Exn) r)] ok
+                          (set! exn (.-V e))
+                          (return))
+
+                        (panic r)))))
+
+
+                (set! (.-result th) (.Apply th f Unit))))
+
+            (.Add domainsRun -1)
+            (done th exn)
+            (.Unlock gil)))))
+
+    ^{:line 107} id))
+
+
+;; ---------------------------------------------------------------------------------------
+;; Effects (OC6 (a)): a stack (caml_alloc_stack) is a Fiber, run on its own goroutine; perform
+;; sends the effect and the continuation to the fiber's parent and waits to be resumed; resume
+;; sends the function and its argument to the fiber and waits for its next message, which the
+;; handlers of the stack receive in the resumer's thread. A continuation is a block of Cont_tag
+;; [stack; last fiber], one-shot: caml_continuation_use_noexc empties it.
+
+
+(go/type Fiber "Fiber is a stack of effect handlers' computation.\n" (struct
+    ^{:line 119 :tag Value} hval ^Value hexn ^Value heff
+    ^{:line 120 :tag (chan resumeMsg)} resumeCh
+    ^{:line 121 :tag (chan fiberMsg)} reply
+    ^{:line 122 :tag bool} started))
+
+
+(go/type resumeMsg (struct
+    ^{:line 126 :tag Value} f ^Value arg
+    ^{:line 127 :tag (chan fiberMsg)} reply))
+
+
+(go/const
+  ^{:line 131} [^{:val 0} msgDone iota]
+  ^{:line 132} [^{:val 1} msgExn]
+  ^{:line 133} [^{:val 2} msgEffect]
+  ^{:line 134} [^{:val 3} msgPanic])
+
+
+(go/type fiberMsg (struct
+    ^{:line 138 :tag int} kind
+    ^{:line 139 :tag Value} v
+    ^{:line 140 :tag Value} k
+    ^{:line 141 :tag any} goPanic))
+
+
+
+^{:go/end 147} (go/func AllocStack "AllocStack is caml_alloc_stack.\n" ^Value [^Value hval ^Value hexn ^Value heff]
+  (addr (lit Fiber :hval hval :hexn hexn :heff heff :resumeCh (make (chan resumeMsg)))))
+
+
+
+^{:go/end 150} (go/method UpdateHandlers "UpdateHandlers is caml_continuation_use_and_update_handler_noexc's update.\n" [^{:tag (* Fiber)} fb ^Value hval ^Value hexn ^Value heff] (set! (values (.-hval fb) (.-hexn fb) (.-heff fb)) (values hval hexn heff)))
+
+
+^{:go/end 158} (go/func ContinuationUse "ContinuationUse is caml_continuation_use_noexc: the stack of k, emptied.\n" ^Value [^Value k]
+  (let [b (AsBlock k)
+      ^{:line 155} s (aget (.-F b) 0)]
+    (aset (.-F b) 0 0)
+    ^{:line 157} s))
+
+
+^{:go/end 183} (go/method start [^{:tag (* Fiber)} fb ^Value f ^Value arg ^{:tag (chan fiberMsg)} reply ^{:tag (* Domain)} dom]
+  (set! (.-started fb) true)
+  (set! (.-reply fb) reply)
+  (go (^{:go/end 182} (fn []
+        (.Lock gil)
+        (let [th (addr (lit Thread :fiber fb :Dom dom))
+            ^{:line 166 :tag fiberMsg} msg (zero fiberMsg)]
+          (^{:go/end 178} (fn []
+              (defer (^{:go/end 176} (fn []
+                    (when [r (recover)] (!= r nil)
+                      (when [(values e ok) (assert (* Exn) r)] ok
+                        (set! msg (lit fiberMsg :kind msgExn :v (.-V e)))
+                        (return))
+
+                      (set! msg (lit fiberMsg :kind msgPanic :goPanic r))))))
+
+
+              (set! msg (lit fiberMsg :kind msgDone :v (.Apply th f arg)))))
+
+          (let [r (.-reply fb)]
+            (.Unlock gil)
+            (>! r msg)))))))
+
+
+
+^{:go/end 190} (go/func await ^fiberMsg [^{:tag (chan fiberMsg)} ch]
+  (.Unlock gil)
+  (let [m (<! ch)]
+    (.Lock gil)
+    ^{:line 189} m))
+
+
+
+^{:go/end 205} (go/method dispatch "dispatch hands a fiber's message to its handlers, as a tail call of the thread.\n" ^Value [^{:tag (* Thread)} th ^{:tag (* Fiber)} fb ^fiberMsg m]
+  (switch (.-kind m)
+    (case [msgDone]
+      (set! (values (.-tcF th) (.-tcA th)) (values (.-hval fb) (lit (slice Value) (.-v m)))))
+    (case [msgExn]
+      (set! (values (.-tcF th) (.-tcA th)) (values (.-hexn fb) (lit (slice Value) (.-v m)))))
+    (case [msgEffect]
+      (set! (values (.-tcF th) (.-tcA th)) (values (.-heff fb) (lit (slice Value) (.-v m) (.-k m) fb))))
+    (default
+      (panic (.-goPanic m))))
+
+  ^{:line 204} tailMark)
+
+
+(go/var
+  ^{:line 208} [runstackFn (NativeFn 3 ^{:go/end 208} (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a] (.runstackN th (aget a 0) (aget a 1) (aget a 2))))]
+  ^{:line 209} [resumeFn (NativeFn 4 ^{:go/end 209} (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a] (.resumeN th (aget a 0) (aget a 1) (aget a 2))))]
+  ^{:line 210} [reperformFn (NativeFn 3 ^{:go/end 210} (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a] (.reperformN th (aget a 0) (aget a 1))))])
+
+
+^{:go/end 213} (go/method runstack ^Value [^{:tag (* Thread)} th ^Value s ^Value f ^Value arg] (.Apply th runstackFn s f arg))
+^{:go/end 216} (go/method resume ^Value [^{:tag (* Thread)} th ^Value s ^Value f ^Value arg ^Value lf]
+  (.Apply th resumeFn s f arg lf))
+
+^{:go/end 217} (go/method reperform ^Value [^{:tag (* Thread)} th ^Value eff ^Value k ^Value lf] (.Apply th reperformFn eff k lf))
+
+^{:go/end 224} (go/method runstackN ^Value [^{:tag (* Thread)} th ^Value s ^Value f ^Value arg]
+  (let [fb (assert (* Fiber) s)
+      ^{:line 221} reply (make (chan fiberMsg))]
+    (.start fb f arg reply (.-Dom th))
+    (.dispatch th fb (await reply))))
+
+
+^{:go/end 237} (go/method resumeN ^Value [^{:tag (* Thread)} th ^Value s ^Value f ^Value arg]
+  (let [(values fb ok) (assert (* Fiber) s)]
+    (when (not ok)
+      (RaiseNamed "Effect.Continuation_already_resumed" nil))
+
+    (let [reply (make (chan fiberMsg))]
+      (.Unlock gil)
+      (>! (.-resumeCh fb) (lit resumeMsg :f f :arg arg :reply reply))
+      (let [m (<! reply)]
+        (.Lock gil)
+        (.dispatch th fb m)))))
+
+
+
+^{:go/end 247} (go/method perform "perform is %perform in the thread of the performer.\n" ^Value [^{:tag (* Thread)} th ^Value eff]
+  (let [fb (.-fiber th)]
+    (when (== fb nil)
+      (RaiseNamed "Effect.Unhandled" eff))
+
+    (let [k (addr (lit Block :Tag TagCont :F (lit (slice Value) fb fb)))]
+      (.suspend th fb eff k))))
+
+
+
+^{:go/end 258} (go/method suspend "suspend sends (eff, k) to fb's parent and waits to be resumed; then it runs f arg.\n" ^Value [^{:tag (* Thread)} th ^{:tag (* Fiber)} fb ^Value eff ^Value k]
+  (let [r (.-reply fb)]
+    (.Unlock gil)
+    (>! r (lit fiberMsg :kind msgEffect :v eff :k k))
+    (let [m (<! (.-resumeCh fb))]
+      (.Lock gil)
+      (set! (.-reply fb) (.-reply m))
+      (.Apply th (.-f m) (.-arg m)))))
+
+
+(go/var raiseFn (NativeFn 1 ^{:go/end 260} (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a] (panic (addr (lit Exn :V (aget a 0)))))))
+
+^{:go/end 286} (go/method reperformN ^Value [^{:tag (* Thread)} th ^Value eff ^Value k]
+  (let [pf (.-fiber th)]
+    (when (== pf nil)
+      ;; no handler left: the performer gets Unhandled
+      (let [(values v ok) (NamedValue "Effect.Unhandled")]
+        (when (not ok)
+          (panic (addr (lit FatalError :Msg "Fatal error: exception Effect.Unhandled" :Code 2))))
+
+        (let [ctor v]
+          (when [(values b ok) (assert (* Block) v)] (and ok (== (.-Tag b) 0))
+            (set! ctor (aget (.-F b) 0)))
+
+          (set! (values (.-tcF th) (.-tcA th)) (values resumeFn (lit (slice Value) (ContinuationUse k) raiseFn (addr (lit Block :Tag 0 :F (lit (slice Value) ctor eff))) 0)))
+          (return tailMark))))
+
+    (let [k2 (addr (lit Block :Tag TagCont :F (lit (slice Value) pf pf)))
+        ^{:line 278} r (.-reply pf)]
+      (.Unlock gil)
+      (>! r (lit fiberMsg :kind msgEffect :v eff :k k2))
+      (let [m (<! (.-resumeCh pf))]
+        (.Lock gil)
+        (set! (.-reply pf) (.-reply m))
+        (set! (values (.-tcF th) (.-tcA th)) (values resumeFn (lit (slice Value) (ContinuationUse k) (.-f m) (.-arg m) 0)))
+        ^{:line 285} tailMark))))

@@ -1,0 +1,190 @@
+(in-ns 'go.arbace.oi) (go/file "hash.go" :imports [
+
+    ^{:line 3} [math "math"]])
+
+;; runtime/hash.c: MurmurHash3-based structural hashing.
+
+^{:go/end 7} (go/func rotl32 ^uint32 [^uint32 x ^uint n] (bit-or (<< x n) (>> x (- 32 n))))
+
+^{:go/end 16} (go/func hashMix ^uint32 [^uint32 h ^uint32 d]
+  (set! d * 0xcc9e2d51)
+  (set! d (rotl32 d 15))
+  (set! d * 0x1b873593)
+  (set! h bit-xor d)
+  (set! h (rotl32 h 13))
+  (+ (* h 5) 0xe6546b64))
+
+
+^{:go/end 25} (go/func hashFinalMix ^uint32 [^uint32 h]
+  (set! h bit-xor (>> h 16))
+  (set! h * 0x85ebca6b)
+  (set! h bit-xor (>> h 13))
+  (set! h * 0xc2b2ae35)
+  (set! h bit-xor (>> h 16))
+  ^{:line 24} h)
+
+
+
+^{:go/end 28} (go/func HashMixUint32 "HashMixUint32 is caml_hash_mix_uint32.\n" ^uint32 [^uint32 h ^uint32 d] (hashMix h d))
+
+
+^{:go/end 34} (go/func HashMixIntnat "HashMixIntnat is caml_hash_mix_intnat (d is the machine word, for an OCaml int its tagged form).\n" ^uint32 [^uint32 h ^int64 d]
+  (let [n (conv uint32 (bit-xor (>> d 32) (>> d 63) d))]
+    (hashMix h n)))
+
+
+
+^{:go/end 40} (go/func HashMixInt64 "HashMixInt64 is caml_hash_mix_int64.\n" ^uint32 [^uint32 h ^int64 d]
+  (set! h (hashMix h (conv uint32 d)))
+  (hashMix h (conv uint32 (>> (conv uint64 d) 32))))
+
+
+
+^{:go/end 53} (go/func HashMixDouble "HashMixDouble is caml_hash_mix_double: NaNs and -0.0 are normalised.\n" ^uint32 [^uint32 h ^float64 d]
+  (let [bits (math/Float64bits d)
+      (values hi lo) (values (conv uint32 (>> bits 32)) (conv uint32 bits))]
+    (cond (and (== (bit-and hi 0x7FF00000) 0x7FF00000) (!= (bit-or lo (bit-and hi 0xFFFFF)) 0))
+      (set! (values hi lo) (values 0x7FF00000 1))
+      (and (== hi 0x80000000) (== lo 0))
+      (set! hi 0))
+
+    (set! h (hashMix h lo))
+    (hashMix h hi)))
+
+
+
+^{:go/end 75} (go/func HashMixString "HashMixString is caml_hash_mix_string.\n" ^uint32 [^uint32 h ^{:tag (slice byte)} s]
+  (let [n (len s)
+      ^{:line 58} i 0]
+    (for [] (<= (+ i 4) n) (set! i + 4)
+      (set! h (hashMix h (bit-or (conv uint32 (aget s i)) (<< (conv uint32 (aget s (+ i 1))) 8) (<< (conv uint32 (aget s (+ i 2))) 16) (<< (conv uint32 (aget s (+ i 3))) 24)))))
+
+    (let [^uint32 w (zero uint32)]
+      (switch (bit-and n 3)
+        (case [3]
+          (set! w (<< (conv uint32 (aget s (+ i 2))) 16))
+          (fallthrough))
+        (case [2]
+          (set! w bit-or (<< (conv uint32 (aget s (+ i 1))) 8))
+          (fallthrough))
+        (case [1]
+          (set! w bit-or (conv uint32 (aget s i)))
+          (set! h (hashMix h w))))
+
+      (bit-xor h (conv uint32 n)))))
+
+
+(go/const ^{:val 256} hashQueueSize 256)
+(go/const ^{:val 1000} maxForwardDereference 1000)
+
+
+^{:go/end 81} (go/func cleanHeader "cleanHeader is a block's header without its colour bits: size, tag.\n" ^uint32 [^int size ^int tag] (bit-or (<< (conv uint32 size) 10) (conv uint32 tag)))
+
+
+^{:go/end 176} (go/func Hash "Hash is caml_hash count limit seed obj: the value's hash in [0, 2^30).\n" ^int [^int count ^int limit ^int seed ^Value obj]
+  (let [^{:tag (array hashQueueSize Value)} queue (zero (array hashQueueSize Value))
+      ^{:line 86} sz limit]
+    (when (or (< sz 0) (> sz hashQueueSize))
+      (set! sz hashQueueSize))
+
+    (let [num count
+        ^{:line 91} h (conv uint32 seed)]
+      (aset queue 0 obj)
+      (let [(values rd wr) (values 0 1)]
+        (while (and (< rd wr) (> num 0))
+          (let [v (aget queue rd)]
+            (inc! rd)
+            (label :again
+              (type-switch [x v]
+                (case [int]
+                  (set! h (HashMixIntnat h (+ (* (conv int64 x) 2) 1)))
+                  (dec! num))
+                (case [(* Bytes)]
+                  (set! h (HashMixString h (.-B x)))
+                  (dec! num))
+                (case [float64]
+                  (set! h (HashMixDouble h x))
+                  (dec! num))
+                (case [(* FloatArray)]
+                  (range [_ d (.-F x)]
+                    (set! h (HashMixDouble h d))
+                    (dec! num)
+                    (when (<= num 0)
+                      (break))))
+
+
+                (case [int32]
+                  (set! h (hashMix h (conv uint32 x)))
+                  (dec! num))
+                (case [int64]
+                  (set! h (hashMix h (bit-xor (conv uint32 (>> (conv uint64 x) 32)) (conv uint32 x))))
+                  (dec! num))
+                (case [Nativeint]
+                  (let [n (conv int64 x)]
+                    (set! h (hashMix h (conv uint32 (bit-xor (>> n 32) (>> n 63) n))))
+                    (dec! num)))
+                (case [(* Custom)]
+                  ;; the operations' hash (a channel's or mutex's address): any fixed word
+                  (set! h (hashMix h 0))
+                  (dec! num))
+                (case [(* Fiber)])
+                ;; all continuations hash alike
+                (case [(* Closure)]
+                  ;; code pointers cannot be mixed: the header, then the environment
+                  (set! h (hashMix h (cleanHeader (Size x) TagClosure)))
+                  (range [_ e (.-Env x)]
+                    (when (>= wr sz)
+                      (break))
+
+                    (aset queue wr e)
+                    (inc! wr)))
+
+                (case [(* Block)]
+                  (switch (.-Tag x)
+                    (case [TagAbstract])
+                    (case [TagForward]
+                      (let [ok false]
+                        (for [i maxForwardDereference] (> i 0) (dec! i)
+                          (set! v (aget (.-F x) 0))
+                          (let [(values b isb) (assert (* Block) v)]
+                            (when (or (not isb) (!= (.-Tag b) TagForward))
+                              (set! ok true)
+                              (break))
+
+                            (set! x b)))
+
+                        (when ok
+                          (goto :again))))
+
+                    (case [TagObject]
+                      (set! h (HashMixIntnat h (conv int64 (assert int (aget (.-F x) 1)))))
+                      (dec! num))
+                    (case [TagInfix TagCont])
+                    (default
+                      (set! h (hashMix h (cleanHeader (len (.-F x)) (.-Tag x))))
+                      (range [_ f (.-F x)]
+                        (when (>= wr sz)
+                          (break))
+
+                        (aset queue wr f)
+                        (inc! wr)))))))))
+
+
+
+
+        (conv int (bit-and (hashFinalMix h) 0x3FFFFFFF))))))
+
+
+
+^{:go/end 182} (go/func StringHash "StringHash is caml_string_hash seed s.\n" ^int [^int seed ^{:tag (slice byte)} s]
+  (let [h (HashMixString (conv uint32 seed) s)]
+    (conv int (bit-and (hashFinalMix h) 0x3FFFFFFF))))
+
+
+^{:go/end 192} (go/func init []
+  ;; hash.c
+  (RegisterExt "caml_hash" ^{:go/end 188} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (Hash (AsInt (aget a 0)) (AsInt (aget a 1)) (AsInt (aget a 2)) (aget a 3))))
+
+  (RegisterExt "caml_string_hash" ^{:go/end 191} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (StringHash (AsInt (aget a 0)) (.-B (AsBytes (aget a 1)))))))

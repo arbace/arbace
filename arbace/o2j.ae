@@ -1,0 +1,698 @@
+(ns arbace.o2j
+  "o2j, OCaml's Lambda → Java forms (doc/ocaml/OCAML-SURVEY.md, O6 and OC7 (a); \"As built: O6
+  (write-ahead)\"): a unit's Lambda dump (tools/ocdump's, SPEC §11.2: the bytecode translation,
+  simplified, OC60) becomes one Java form, the class ocaml.u.M_<Unit>, against the runtime
+  ocaml.rt (jdk/ocaml/: values, primitives, externals); a program's units in link order get a
+  main class, ocaml.u.M__main. The Java forms are what j2g translates for the compiled level and
+  what the Java forms' interpreter runs at the light level (test/ocaml/o2j/run.ae).
+
+  The translation (OC82-OC86):
+  - a unit's module block is the static field G, its initialisation the static method init;
+    the constants are static fields; a global is the unit's G, a predefined exception Rt's field;
+  - a Lambda function is a member class of the unit's (F<n>, extends Closure), its free
+    variables as fields given to its constructor, its code the method a<arity> (an above six);
+    a letrec's closures are made first and their fields that name each other set after;
+  - an application calls a<n> when the closure's arity is the argument count, else Rt/ap;
+    the arguments (and then the function) are evaluated right to left, as ocamlc's code does;
+    a function's application of itself in tail position is a loop (continue), other tail
+    calls are calls (OC84);
+  - staticcatch is a label around the body, the exit a break to it, its variables mutable locals;
+    a switch is Java's switch on the int or the block's tag; trywith catches every Throwable
+    and asks Rt/exnValue for the OCaml exception (the Java stack's overflow is Stack_overflow);
+  - the primitives are Rt's methods; the externals (\"caml_...\") the Ext classes' static
+    methods of the same name and argument count, or a throw of Rt/missing when the runtime has none."
+  (:require [arbace.string :as str]
+            [arbace.java.io :as io])
+  (:import (java.io File PushbackReader Writer)))
+
+;; ---------------------------------------------------------------------------------------------
+;; the dump
+
+(defn read-dump
+  "A Lambda dump: {:module :name :size :required :code}."
+  [^File f]
+  (let [x (with-open [r (PushbackReader. (io/reader f))] (read r))]
+    (when-not (and (seq? x) (= 'ocaml/lambda (first x)))
+      (throw (ex-info (str "not a Lambda dump: " f) {:head (when (seq? x) (first x))})))
+    (let [[_ module size required code] (second x)
+          [h n] code
+          nm (when (and (= 'prim h) (str/starts-with? n "setglobal ")) (subs n 10))]
+      (when-not nm (throw (ex-info "the unit's code is not a setglobal" {:file (str f)})))
+      {:module module :size size :required required :code code
+       :name (str/replace (str/replace nm #"!$" "") #"/.*$" "")})))
+
+(defn- node-body
+  "A node's fields: the form less its head and a trailing metadata map."
+  [x]
+  (let [t (rest x)] (if (and (seq t) (map? (last t))) (butlast t) t)))
+
+(defn- realize
+  "x with every lazy sequence in it realized (they read *unit*), metadata kept."
+  [x]
+  (cond (seq? x) (with-meta (apply list (map realize x)) (meta x))
+        (vector? x) (with-meta (mapv realize x) (meta x))
+        :else x))
+
+(defn- hd [x] (when (seq? x) (first x)))
+
+;; ---------------------------------------------------------------------------------------------
+;; names
+
+(def predefs
+  #{"Out_of_memory" "Sys_error" "Failure" "Invalid_argument" "End_of_file" "Division_by_zero"
+    "Not_found" "Match_failure" "Stack_overflow" "Sys_blocked_io" "Assert_failure"
+    "Undefined_recursive_module"})
+
+(defn class-name "The Java class of unit M." [m] (str "M_" m))
+
+(defn- munge-id [^String id] (symbol (str/replace id #"[^A-Za-z0-9_]" "_")))
+
+(defn- global-name [^String s] (-> s (str/replace #"!$" "") (str/replace #"/.*$" "")))
+
+;; ---------------------------------------------------------------------------------------------
+;; the externals' table: name -> [class arity], read from the runtime's forms
+
+(defn- runtime-externals
+  "The externals the runtime's Java forms define: every public static method named caml_...
+  of a class of DIR (jdk/ocaml/ocaml/rt), with its parameter count."
+  [^File dir]
+  (into {}
+        (for [^File f (sort-by #(.getName ^File %) (.listFiles dir))
+              :when (str/ends-with? (.getName f) ".ae")
+              form (with-open [r (PushbackReader. (io/reader f))]
+                     (doall (take-while #(not= % ::eof) (repeatedly #(read {:eof ::eof} r)))))
+              :when (= 'defclass (hd form))
+              :let [cls (name (second form))]
+              m (rest form)
+              :when (and (= 'method (hd m)) (str/starts-with? (name (second m)) "caml_"))
+              :let [params (first (filter vector? (drop 2 m)))]]
+          [(name (second m)) [(symbol (str "ocaml.rt." cls)) (count params)]])))
+
+(def ^:dynamic *externals* {})
+
+(defn load-externals! [dir] (alter-var-root #'*externals* (constantly (runtime-externals (io/file dir)))))
+
+;; ---------------------------------------------------------------------------------------------
+;; the unit's state
+
+(def ^:dynamic *unit*
+  "{:class sym, :name the unit, :n counter atom, :classes atom (member classes), :consts atom
+  ([sym init]...), :missing atom {name count}}"
+  nil)
+
+(defn- fresh [prefix] (symbol (str prefix (swap! (:n *unit*) inc))))
+
+(defn- unit-class [] (:class *unit*))
+
+(defn- note-missing! [n] (swap! (:missing *unit*) update n (fnil inc 0)))
+
+;; ---------------------------------------------------------------------------------------------
+;; constants
+
+(def ^:private UNIT 'ocaml.rt.Rt/UNIT)
+
+(defn- latin1 "A Java string of chars 0-255 from an immstring's payload (a string or byte values)."
+  [s]
+  (if (string? s)
+    (let [b (.getBytes ^String s java.nio.charset.StandardCharsets/UTF_8)]
+      (String. ^bytes b java.nio.charset.StandardCharsets/ISO_8859_1))
+    (String. (char-array (map #(char (bit-and (long %) 255)) s)))))
+
+(defn- parse-float [^String t]
+  (let [t (str/replace t "_" "")
+        t (if (and (re-find #"^-?0[xX]" t) (not (re-find #"[pP]" t))) (str t "p0") t)]
+    (Double/parseDouble t)))
+
+(defn- double-form [^double d]
+  (if (or (Double/isNaN d) (Double/isInfinite d))
+    (list 'Double/longBitsToDouble (Double/doubleToRawLongBits d))
+    d))
+
+(defn- const-init
+  "The Java form that makes constant c (once: the unit's static field holds it)."
+  [c]
+  (let [[h a] c]
+    (case h
+      (int char) (list 'Long/valueOf a)
+      float (list 'Double/valueOf (double-form (parse-float a)))
+      int32 (list 'Integer/valueOf (list 'unchecked-int (Long/parseLong a)))
+      int64 (list 'ocaml.rt.I64. (Long/parseLong a))
+      nativeint (list 'ocaml.rt.NInt. (Long/parseLong a))
+      immstring (list 'ocaml.rt.Rt/s (latin1 a))
+      float-array (list 'new 'double/1 (mapv #(double-form (parse-float %)) a))
+      block (let [[_ tag fs] c]
+              (list 'ocaml.rt.Rt/block (list 'unchecked-int tag) (list 'new 'Object/1 (mapv const-init fs))))
+      (throw (ex-info (str "constant " h) {:const c})))))
+
+(defn- const-form
+  "A constant as an expression: small ints inline, the rest a static field of the unit."
+  [c]
+  (let [[h a] c]
+    (if (#{'int 'char} h)
+      (list 'Long/valueOf a)
+      (let [k (fresh "k")]
+        (swap! (:consts *unit*) conj [k (const-init c)])
+        (symbol (str (unit-class)) (name k))))))
+
+;; ---------------------------------------------------------------------------------------------
+;; free variables
+
+(declare free-ids)
+
+(defn- bound-and-refs
+  "[bound refs]: the ids a node binds and those it refers to, nested functions included."
+  [x]
+  (let [bound (volatile! #{}) refs (volatile! #{})]
+    (letfn [(walk [x]
+              (when (seq? x)
+                (let [h (first x) b (node-body x)]
+                  (case h
+                    (var mutvar) (vswap! refs conj (first b))
+                    const nil
+                    function (let [[_ ps _ body] b]
+                               (doseq [[p] ps] (vswap! bound conj p))
+                               (walk body))
+                    (let mutlet) (let [[id def body] (if (= h 'let) (drop 2 b) (drop 1 b))]
+                                   (vswap! bound conj id) (walk def) (walk body))
+                    letrec (let [[bs body] b]
+                             (doseq [[id f] bs] (vswap! bound conj id) (walk f))
+                             (walk body))
+                    for (let [[id lo hi _ body] b] (vswap! bound conj id) (walk lo) (walk hi) (walk body))
+                    trywith (let [[body id handler] b] (vswap! bound conj id) (walk body) (walk handler))
+                    staticcatch (let [[body [_ vs] handler] b]
+                                  (doseq [[v] vs] (vswap! bound conj v))
+                                  (walk body) (walk handler))
+                    assign (let [[id e] b] (vswap! refs conj id) (walk e))
+                    (doseq [y b] (walk-any y))))))
+            (walk-any [y] (cond (seq? y) (walk y) (vector? y) (doseq [z y] (walk-any z)) :else nil))]
+      (walk x))
+    [@bound @refs]))
+
+(defn- free-ids
+  "The ids function node f refers to and does not bind, sorted."
+  [f]
+  (let [[bound refs] (bound-and-refs f)]
+    (sort (remove bound refs))))
+
+;; ---------------------------------------------------------------------------------------------
+;; expressions
+
+(declare expr test-form)
+
+;; ctx: {:env {id form} :exits {n {:label kw :vars [sym]}} :self {:id id :label kw :used atom :arity n}}
+
+(defn- lookup [ctx id]
+  (or (get (:env ctx) id)
+      (throw (ex-info (str "unbound Lambda variable " id) {:id id}))))
+
+(defn- simple?
+  "A node whose evaluation has no effect and reads nothing mutable: it may be evaluated out of order."
+  [x]
+  (let [h (hd x)]
+    (or (= 'var h) (= 'const h)
+        (and (= 'prim h)
+             (let [[n args] (node-body x)]
+               (or (str/starts-with? n "global ")
+                   (and (str/starts-with? n "field_imm ") (simple? (first args)))))))))
+
+(defn- with-args
+  "Evaluates arg nodes right to left (as ocamlc's code does) and calls (k forms): every argument
+  that is not simple but the leftmost such one is bound to a temporary first, from the right."
+  [ctx nodes k]
+  (let [impure (keep-indexed (fn [i x] (when-not (simple? x) i)) nodes)
+        bind (set (rest impure))
+        temps (into {} (for [i bind] [i (fresh "t$")]))
+        forms (vec (map-indexed (fn [i x] (or (temps i) (expr ctx x false))) nodes))
+        bindings (vec (mapcat (fn [i] [(temps i) (expr ctx (nth nodes i) false)])
+                              (reverse (sort bind))))
+        body (k forms)]
+    (if (seq bindings) (list 'let bindings body) body)))
+
+(defn- call-form
+  "The application of function form f to argument forms (already evaluated, simple)."
+  [f args]
+  (let [n (count args)]
+    (if (<= 1 n 6)
+      (let [c (fresh "c$")]
+        (list 'let [c (list 'ocaml.rt.Rt/fn f)]
+              (list 'if (list '== (list '.-arity c) n)
+                    (apply list (symbol (str ".a" n)) c args)
+                    (list 'ocaml.rt.Rt/ap c (list 'new 'Object/1 (vec args))))))
+      (list 'ocaml.rt.Rt/ap f (list 'new 'Object/1 (vec args))))))
+
+(defn- apply-node [ctx [f args] tail?]
+  (let [self (:self ctx)]
+    (if (and tail? self (= 'var (hd f)) (= (second f) (:id self)) (= (count args) (:arity self)))
+      (do (reset! (:used self) true)
+          (with-args ctx args (fn [as] (apply list 'continue (:label self) as))))
+      ;; arguments right to left, then the function
+      (if (simple? f)
+        (with-args ctx args (fn [as] (call-form (expr ctx f false) as)))
+        (with-args ctx (into [f] args) (fn [as] (call-form (first as) (rest as))))))))
+
+;; ---- functions
+
+(defn- method-for [arity params body]
+  (if (<= arity 6)
+    (list 'method (with-meta (symbol (str "a" arity)) {:public true}) (into ['this] params) body)
+    (let [a (symbol "args$")]
+      (list 'method (with-meta 'an {:public true}) ['this (with-meta a {:tag 'Object/1})]
+            (list 'let (vec (mapcat (fn [i p] [p (list 'aget a i)]) (range) params)) body)))))
+
+(defn- closure-class!
+  "Defines the member class of function node f (its free variables fields, self-id's references
+  `this`); returns [class-sym free-ids]."
+  [ctx f self-id]
+  (let [[kind ps _ body] (node-body f)
+        cls (fresh "F")
+        free (remove #(= % self-id) (free-ids f))
+        params (mapv (comp munge-id first) ps)
+        arity (count ps)
+        fields (mapv munge-id free)
+        env (merge (into {} (map (fn [id s] [id s]) free fields))
+                   (into {} (map (fn [[p] s] [p s]) ps params))
+                   (when self-id {self-id 'this}))
+        used (atom false)
+        lbl (keyword (str "self" (swap! (:n *unit*) inc)))
+        ictx {:env env :exits {} :self (when self-id {:id self-id :label lbl :used used :arity arity})}
+        b (realize (expr ictx body true))
+        b (if @used (list 'label lbl (list 'loop (vec (mapcat (fn [p] [p p]) params)) b)) b)]
+    (when (= kind :tupled) (throw (ex-info "tupled function" {})))
+    (swap! (:classes *unit*) conj
+           (concat
+            (list 'defclass (with-meta cls {:public true :static true}) :extends 'ocaml.rt.Closure)
+            (for [fl fields] (list 'field (with-meta fl {:public true})))
+            [(concat (list 'constructor (with-meta (into ['this] fields) {:public true})
+                           (list 'super. arity))
+                     (for [fl fields] (list 'set! (list (symbol (str ".-" fl)) 'this) fl)))
+             (method-for arity params b)]))
+    [cls free]))
+
+(defn- function-node [ctx f]
+  (let [[cls free] (closure-class! ctx f nil)]
+    (apply list (symbol (str cls ".")) (map #(lookup ctx %) free))))
+
+(defn- letrec-node [ctx [bs body] tail?]
+  (let [ids (map first bs)
+        idset (set ids)
+        syms (into {} (for [id ids] [id (munge-id id)]))
+        ctx2 (update ctx :env merge syms)
+        made (for [[id f] bs] (let [[cls free] (closure-class! ctx2 f id)] [id cls free]))
+        made (doall made)]
+    (list 'let (vec (mapcat (fn [[id cls free]]
+                              [(syms id) (apply list (symbol (str cls "."))
+                                                (map #(if (idset %) nil (lookup ctx2 %)) free))])
+                            made))
+          (concat (list 'do)
+                  (for [[id _ free] made, fr free :when (idset fr)]
+                    (list 'set! (list (symbol (str ".-" (munge-id fr))) (syms id)) (syms fr)))
+                  [(expr ctx2 body tail?)]))))
+
+;; ---- lets
+
+(defn- let-chain
+  "Consecutive let and mutlet nodes as one let."
+  [ctx x tail?]
+  (loop [x x ctx ctx bindings []]
+    (case (hd x)
+      let (let [[_ _ id def body] (node-body x)
+                s (munge-id id)]
+            (recur body (assoc-in ctx [:env id] s) (conj bindings s (expr ctx def false))))
+      mutlet (let [[_ id def body] (node-body x)
+                   s (with-meta (munge-id id) {:mutable true :tag 'Object})]
+               (recur body (assoc-in ctx [:env id] (munge-id id)) (conj bindings s (expr ctx def false))))
+      (list 'let bindings (expr ctx x tail?)))))
+
+;; ---- primitives
+
+(defn- num-arg [^String n] (Long/parseLong (first (str/split (str/trim (subs n (inc (.indexOf n " ")))) #"\s+"))))
+
+(defn- rt [m & args] (apply list (symbol "ocaml.rt.Rt" (name m)) args))
+
+(def ^:private int-ops
+  {"~" 'neg "+" 'add "-" 'sub "*" 'mul "/" 'div "/u" 'div "mod" 'mod "mod_unsafe" 'mod "and" 'land
+   "or" 'lor "xor" 'lxor "lsl" 'lsl "lsr" 'lsr "asr" 'asr "compare_ints" 'compareInts
+   "int_of_float" 'intOfFloat "float_of_int" 'floatOfInt "bswap16" 'bswap16
+   "~." 'fneg "abs." 'fabs "+." 'fadd "-." 'fsub "*." 'fmul "/." 'fdiv "compare_floats" 'compareFloats
+   "compare_bints" 'compareBints "duprecord" 'dup "duparray" 'dup "duparray_imm" 'dup})
+
+(def ^:private test-ops
+  {"<" 'lt "<=" 'le ">" 'gt ">=" 'ge "==" 'eq "isout" 'isout "isint" 'isint
+   "==." 'feq "<." 'flt "<=." 'fle ">." 'fgt ">=." 'fge})
+
+(def ^:private negated-test-ops {"!=" "==" "!=." "==." "!<." "<." "!<=." "<=." "!>." ">." "!>=." ">=."})
+
+(def ^:private bint-kinds {"Int32" 0 "Int64" 1 "Nativeint" 2})
+(def ^:private bint-names {"int32" 0 "int64" 1 "nativeint" 2})
+
+(defn- array-kind [^String n]
+  (let [i (.indexOf n "[")] (if (neg? i) "gen" (subs n (inc i) (.indexOf n "]")))))
+
+(defn- bigarray-ext [^String n nargs]
+  (cond (str/starts-with? n "Bigarray.dim_") (str "caml_ba_dim_" (subs n 13))
+        (str/includes? n "get16") "caml_ba_uint8_get16"
+        (str/includes? n "get32") "caml_ba_uint8_get32"
+        (str/includes? n "get64") "caml_ba_uint8_get64"
+        (str/includes? n "set16") "caml_ba_uint8_set16"
+        (str/includes? n "set32") "caml_ba_uint8_set32"
+        (str/includes? n "set64") "caml_ba_uint8_set64"
+        ;; Bigarray.get and set with their indices: caml_ba_get_N, caml_ba_set_N (N the dimensions)
+        (str/includes? n "get") (str "caml_ba_get_" (dec nargs))
+        (str/includes? n "set") (str "caml_ba_set_" (- nargs 2))
+        :else n))
+
+(defn- external [name args]
+  (if-let [[cls arity] (get *externals* name)]
+    (if (= arity (count args))
+      (apply list (symbol (str cls) name) args)
+      (do (note-missing! (str name "/" (count args))) (list 'throw (rt 'missing (str name "/" (count args))))))
+    (do (note-missing! name) (list 'throw (rt 'missing name)))))
+
+(def ^:private effect-prims
+  {"perform" 'perform "runstack" 'runstack "resume" 'resume "reperform" 'reperform})
+
+(defn- prim-value
+  "The Java form of primitive n applied to argument forms as (already evaluated, in order)."
+  [^String n as]
+  (let [[a b c] as
+        word (first (str/split n #"[ \[]"))]
+    (cond
+      (int-ops n) (apply rt (int-ops n) as)
+      (test-ops n) (rt 'b (apply rt (test-ops n) as))
+      (negated-test-ops n) (rt 'b (list 'not (apply rt (test-ops (negated-test-ops n)) as)))
+      (re-matches #"-?\d+\+" n) (rt 'offset a (Long/parseLong (subs n 0 (dec (count n)))))
+      (str/starts-with? n "+:=") (list 'ocaml.rt.Rt/setField a 0 (rt 'offset (rt 'field a 0) (Long/parseLong (subs n 3))))
+      (= n "not") (rt 'b (list 'not (rt 't a)))
+      (#{"makeblock" "makemutable"} word)
+      (let [tag (num-arg n)] (rt 'block (list 'unchecked-int tag) (list 'new 'Object/1 (vec as))))
+      (= word "makefloatblock") (rt 'block 254 (list 'new 'Object/1 (vec as)))
+      (= word "makelazyblock") (list 'ocaml.rt.Block. 246 (list 'new 'Object/1 (vec as)))
+      (= word "makeforwardblock") (list 'ocaml.rt.Block. 250 (list 'new 'Object/1 (vec as)))
+      (#{"field_imm" "field_mut" "field_int"} word) (rt 'field a (list 'unchecked-int (num-arg n)))
+      (= n "field_computed") (rt 'field a (rt 'ii b))
+      (= n "setfield_computed") (rt 'setField a (rt 'ii b) c)
+      (str/starts-with? n "compare_bints") (rt 'compareBints a b)
+      (str/starts-with? n "duparray") (rt 'dup a)
+      (and (str/starts-with? n "setfield_") (not (str/starts-with? n "setfield_computed")))
+      (if (str/includes? n "computed")
+        (rt 'setField a (rt 'ii b) c)
+        (rt 'setField a (list 'unchecked-int (num-arg n)) b))
+      (= word "floatfield") (rt 'floatField a (list 'unchecked-int (num-arg n)))
+      (= word "setfloatfield") (if (str/includes? n "computed")
+                                 (rt 'setFloatField a (rt 'ii b) c)
+                                 (rt 'setFloatField a (list 'unchecked-int (num-arg n)) b))
+      ;; the boxed integers
+      (and (str/includes? n ".") (bint-kinds (first (str/split n #"\."))))
+      (let [k (bint-kinds (first (str/split n #"\."))) op (subs n (inc (.indexOf n ".")))]
+        (case op
+          "of_int" (rt 'bintOfInt k a)
+          (rt 'bint k op a (if (some? b) b nil))))
+      (re-matches #"(int32|int64|nativeint)_of_(int32|int64|nativeint)" n)
+      (rt 'mkb (bint-names (first (str/split n #"_of_"))) (rt 'bv a))
+      ;; arrays
+      (= word "array.length") (rt 'alenv a)
+      (#{"makearray" "makearray_imm"} word) (rt 'makeArray (array-kind n) (list 'new 'Object/1 (vec as)))
+      (= word "array.get") (rt 'agetChecked a b)
+      (= word "array.unsafe_get") (rt 'aget a b)
+      (= word "array.set") (rt 'asetChecked a b c)
+      (= word "array.unsafe_set") (rt 'aset a b c)
+      ;; strings and bytes
+      (#{"string.length" "bytes.length"} n) (rt 'slen a)
+      (#{"string.unsafe_get" "bytes.unsafe_get"} n) (rt 'sget a b)
+      (#{"string.get" "bytes.get"} n) (rt 'sgetChecked a b)
+      (= n "bytes.unsafe_set") (rt 'sset a b c)
+      (= n "bytes.set") (rt 'ssetChecked a b c)
+      (re-matches #"(string|bytes)\.(unsafe_)?get(16|32|64)" n)
+      (rt 'sload a b (quot (Long/parseLong (re-find #"\d+$" n)) 8))
+      (re-matches #"bytes\.(unsafe_)?set(16|32|64)" n)
+      (rt 'sstore a b c (quot (Long/parseLong (re-find #"\d+$" n)) 8))
+      (#{"bytes_to_string" "bytes_of_string" "opaque" "int_as_pointer" "obj_magic"} n) a
+      (= n "ignore") (list 'do a UNIT)
+      (#{"raise" "reraise" "raise_notrace"} n) (list 'throw (list 'ocaml.rt.Exn. a))
+      (str/starts-with? n "sys.constant_") (rt 'sysConstant (subs n 13))
+      (= n "atomic_load") (rt 'field a 0)
+      (= n "dls_get") (external "caml_domain_dls_get" [UNIT])
+      (= n "poll") a
+      (effect-prims n) (apply list (symbol "ocaml.rt.Effects" (name (effect-prims n))) as)
+      (or (str/starts-with? n "Bigarray.") (str/starts-with? n "bigarray.")) (external (bigarray-ext n (count as)) as)
+      (str/starts-with? n "caml_") (external n as)
+      :else (do (note-missing! (str "%" n)) (list 'throw (rt 'unsupported n))))))
+
+(defn- prim-node [ctx [^String n args] tail?]
+  (cond
+    (str/starts-with? n "global ")
+    (let [g (global-name (subs n 7))]
+      (cond (predefs g) (symbol "ocaml.rt.Rt" g)
+            :else (symbol (str "ocaml.u." (class-name g)) "G")))
+    (#{"&&" "||" "sequand" "sequor"} n) (rt 'b (test-form ctx (list 'prim n args)))
+    :else (with-args ctx args (fn [as] (prim-value n as)))))
+
+;; ---- tests
+
+(defn test-form
+  "Node x as a Java boolean: comparisons, not, && and || directly, anything else Rt/t."
+  [ctx x]
+  (let [h (hd x)]
+    (cond
+      (and (= 'prim h) (#{"&&" "sequand"} (first (node-body x))))
+      (let [[a b] (second (node-body x))] (list 'and (test-form ctx a) (test-form ctx b)))
+      (and (= 'prim h) (#{"||" "sequor"} (first (node-body x))))
+      (let [[a b] (second (node-body x))] (list 'or (test-form ctx a) (test-form ctx b)))
+      (and (= 'prim h) (= "not" (first (node-body x))))
+      (list 'not (test-form ctx (first (second (node-body x)))))
+      (and (= 'prim h) (test-ops (first (node-body x))))
+      (let [[n args] (node-body x)] (with-args ctx args (fn [as] (apply rt (test-ops n) as))))
+      (and (= 'prim h) (negated-test-ops (first (node-body x))))
+      (let [[n args] (node-body x)]
+        (with-args ctx args (fn [as] (list 'not (apply rt (test-ops (negated-test-ops n)) as)))))
+      (and (= 'const h) (#{'int 'char} (first (second x)))) (not (zero? (second (second x))))
+      :else (rt 't (expr ctx x false)))))
+
+;; ---- control
+
+(defn- switch-node [ctx [scrut nc consts nb blocks fail] tail?]
+  (let [s (fresh "s$")
+        fl (when (some? fail) (keyword (str "fail" (swap! (:n *unit*) inc))))
+        k (when fl (keyword (str "sw" (swap! (:n *unit*) inc))))
+        dflt (when fl [(list 'break fl)])
+        cases (fn [cs] (mapcat (fn [[n e]] [n (expr ctx e tail?)]) cs))
+        int-sw (concat (list 'switch (rt 'ii s)) (cases consts) dflt)
+        blk-sw (concat (list 'switch (list '.-tag (list 'cast 'ocaml.rt.Block s))) (cases blocks) dflt)
+        body (cond (zero? nb) int-sw
+                   (zero? nc) blk-sw
+                   :else (list 'if (list 'instance? 'Long s) int-sw blk-sw))
+        sw (list 'let [s (expr ctx scrut false)] body)]
+    (if fl
+      (list 'label k (list 'label fl (list 'break k sw)) (expr ctx fail tail?))
+      sw)))
+
+(defn- stringswitch-node [ctx [scrut cases dflt] tail?]
+  (let [s (fresh "s$")]
+    (list 'let [s (rt 'js (expr ctx scrut false))]
+          (concat (list 'switch s)
+                  (mapcat (fn [[k e]] [(latin1 k) (expr ctx e tail?)]) cases)
+                  (when (some? dflt) [(expr ctx dflt tail?)])))))
+
+(defn- staticcatch-node [ctx [body [n vars] handler] tail?]
+  (let [k (keyword (str "k" (swap! (:n *unit*) inc)))
+        e (keyword (str "exit" (swap! (:n *unit*) inc)))
+        ;; fresh names: an or-pattern's identifiers are bound again by lets in the body
+        syms (mapv (fn [_] (fresh "h$")) vars)
+        bctx (assoc-in ctx [:exits n] {:label e :vars syms})
+        hctx (update ctx :env merge (zipmap (map first vars) syms))]
+    (list 'label k
+          (list 'let (vec (mapcat (fn [s] [(with-meta s {:mutable true :tag 'Object}) nil]) syms))
+                (list 'label e (list 'break k (expr bctx body tail?)))
+                (expr hctx handler tail?)))))
+
+(defn- staticraise-node [ctx [n args]]
+  (let [{:keys [label vars]} (or (get-in ctx [:exits n]) (throw (ex-info (str "exit " n " not in scope") {})))]
+    (if (empty? args)
+      (list 'break label)
+      (let [ts (vec (repeatedly (count args) #(fresh "t$")))]
+        ;; right to left, then assigned
+        (list 'let (vec (mapcat (fn [t x] [t (expr ctx x false)]) (reverse ts) (reverse args)))
+              (concat (list 'do) (map (fn [v t] (list 'set! v t)) vars ts) [(list 'break label)]))))))
+
+(defn- trywith-node [ctx [body id handler] tail?]
+  (let [e (fresh "e$") s (munge-id id)]
+    (list 'try (expr ctx body false)
+          (list 'catch 'Throwable e
+                (list 'let [s (rt 'exnValue e)] (expr (assoc-in ctx [:env id] s) handler tail?))))))
+
+(defn- for-node [ctx [id lo hi dir body]]
+  (let [l (fresh "lo$") h (fresh "hi$") i (fresh "i$") s (munge-id id)
+        up (= dir :to)]
+    (list 'let [l (expr ctx lo false) h (expr ctx hi false)]
+          (list 'when (list (if up '<= '>=) (rt 'l l) (rt 'l h))
+                (list 'loop [(with-meta i {:tag 'long}) (rt 'l l)]
+                      (list 'let [s (list 'Long/valueOf i)] (expr (assoc-in ctx [:env id] s) body false))
+                      (list 'when (list 'not (list '== i (rt 'l h)))
+                            (list 'recur (list (if up 'unchecked-inc 'unchecked-dec) i)))))
+          UNIT)))
+
+(defn- flatten-seq [x]
+  (if (= 'sequence (hd x)) (mapcat flatten-seq (node-body x)) [x]))
+
+(defn expr
+  "Lambda node x as a Java form (an Object's value); tail? when x is in its function's tail."
+  [ctx x tail?]
+  (let [h (hd x) b (node-body x)]
+    (case h
+      (var mutvar) (lookup ctx (first b))
+      const (const-form (first b))
+      apply (apply-node ctx b tail?)
+      function (function-node ctx x)
+      (let mutlet) (let-chain ctx x tail?)
+      letrec (letrec-node ctx b tail?)
+      prim (prim-node ctx b tail?)
+      switch (switch-node ctx b tail?)
+      stringswitch (stringswitch-node ctx b tail?)
+      staticraise (staticraise-node ctx b)
+      staticcatch (staticcatch-node ctx b tail?)
+      trywith (trywith-node ctx b tail?)
+      ifthenelse (let [[c t f] b] (list 'if (test-form ctx c) (expr ctx t tail?) (expr ctx f tail?)))
+      sequence (let [xs (flatten-seq x)]
+                 (concat (list 'do) (map #(expr ctx % false) (butlast xs)) [(expr ctx (last xs) tail?)]))
+      while (let [[c body] b] (list 'do (list 'while (test-form ctx c) (expr ctx body false)) UNIT))
+      for (for-node ctx b)
+      assign (let [[id e] b] (list 'do (list 'set! (lookup ctx id) (expr ctx e false)) UNIT))
+      send (let [[kind m o args] b
+                 ts (vec (repeatedly (count args) #(fresh "t$")))
+                 ov (fresh "o$") mv (fresh "m$")]
+             ;; the arguments right to left, then the object, then the method (oi's order)
+             (list 'let (vec (concat (mapcat (fn [t x] [t (expr ctx x false)]) (reverse ts) (reverse args))
+                                     [ov (expr ctx o false) mv (expr ctx m false)]))
+                   (call-form (rt 'getMethod (= kind :self) ov mv) (into [ov] ts))))
+      event (expr ctx (first b) tail?)
+      ifused (expr ctx (second b) tail?)
+      (throw (ex-info (str "Lambda node " h " not known") {:head h})))))
+
+;; ---------------------------------------------------------------------------------------------
+;; units and programs
+
+(defn translate-unit
+  "The Java forms of a unit's dump: [forms missing], missing the externals and primitives the
+  runtime lacks with their counts."
+  [{:keys [name code]}]
+  (let [cls (symbol (class-name name))]
+    (binding [*unit* {:class (symbol (str "ocaml.u." cls)) :name name :n (atom 0)
+                      :classes (atom []) :consts (atom []) :missing (atom {})}]
+      (let [[_ [body]] (node-body code)
+            init (realize (expr {:env {} :exits {}} body false))
+            classes (mapv realize @(:classes *unit*))
+            klass (concat
+                   (list 'defclass (with-meta cls {:public true}))
+                   [(list 'field (with-meta 'G {:public true :static true}))]
+                   (for [[k init] @(:consts *unit*)] (list 'field (with-meta k {:public true :static true :final true}) init))
+                   classes
+                   [(list 'method (with-meta 'init {:public true :static true}) (with-meta [] {:tag 'void})
+                          (list 'set! 'G init))])]
+        [[(list 'ns 'ocaml.u (list :import (list 'ocaml.rt 'Rt 'Block 'Closure 'Exn)))
+          (realize klass)]
+         @(:missing *unit*)]))))
+
+(defn main-forms
+  "The program's main class: inits, the units' initialisation in link order as one Runnable, and
+  main, Main/run's ending and the status."
+  [units]
+  [(list 'ns 'ocaml.u)
+   (list 'defclass (with-meta 'M__main {:public true})
+         (list 'method (with-meta 'inits {:public true :static true}) (with-meta [] {:tag 'Runnable})
+               (concat (list 'lambda 'Runnable [])
+                       (for [u units] (list (symbol (str "ocaml.u." (class-name u)) "init")))
+                       [nil]))
+         (list 'method (with-meta 'main {:public true :static true}) (with-meta [(with-meta 'args {:tag 'String/1})] {:tag 'void})
+               (list 'System/exit (list 'ocaml.rt.Main/run 'args (list 'ocaml.u.M__main/inits)))))])
+
+(defn write-forms [^File f forms header]
+  (io/make-parents f)
+  (with-open [w (io/writer f)]
+    (binding [*out* w *print-meta* true *print-length* nil *print-level* nil]
+      (println (str ";; " header))
+      (doseq [x forms] (newline) (prn x)))))
+
+;; ---------------------------------------------------------------------------------------------
+;; linking (oi's Link, run.go): the library units a program needs, in the library's order
+
+(defn unit-refs
+  "The units unit u's code names (global X, the predefined exceptions left out) and those it requires."
+  [u]
+  (let [acc (volatile! #{})]
+    (letfn [(walk [x]
+              (cond (seq? x) (do (when (and (= 'prim (first x)) (string? (second x)) (str/starts-with? (second x) "global "))
+                                   (let [g (global-name (subs (second x) 7))]
+                                     (when-not (predefs g) (vswap! acc conj g))))
+                                 (run! walk x))
+                    (vector? x) (run! walk x)))]
+      (walk (:code u)))
+    (vec (sort (disj (into @acc (:required u)) (:name u))))))
+
+(defn link
+  "The library units programs' units need, in lib-order; deps: unit -> the units it needs."
+  [lib-order deps prog-units]
+  (let [progs (set (map :name prog-units))
+        need (volatile! #{})]
+    (letfn [(visit [n]
+              (when-not (or (@need n) (progs n))
+                (when-not (contains? deps n) (throw (ex-info (str "no unit " n " in the library") {:unit n})))
+                (vswap! need conj n)
+                (run! visit (deps n))))]
+      (doseq [u prog-units] (run! visit (unit-refs u))))
+    (filterv @need lib-order)))
+
+(defn translate-program
+  "A program's units (DUMPS, in order) translated into OD with its main class and OD/files.txt,
+  the files to define in order: the library's units it needs (LO's) first."
+  [lo od dumps]
+  (let [{:keys [order deps]} (read-string (slurp (io/file lo "deps.edn")))
+        us (mapv #(read-dump (io/file %)) dumps)
+        libs (link order deps us)]
+    (doseq [u us]
+      (let [[forms missing] (translate-unit u)]
+        (write-forms (io/file od (str (:name u) ".ae")) forms
+                     (str "Translated by arbace.o2j from the Lambda of " (:name u) "."))
+        (doseq [[m c] (sort missing)] (println (str "missing\t" od "\t" (:name u) "\t" m "\t" c)))))
+    (write-forms (io/file od "M__main.ae") (main-forms (concat libs (map :name us))) "The program's main class, by arbace.o2j.")
+    (spit (io/file od "files.txt")
+          (str (str/join "\n" (concat (for [n libs] (.getPath (io/file lo (str n ".ae"))))
+                                       (for [u us] (.getPath (io/file od (str (:name u) ".ae"))))
+                                       [(.getPath (io/file od "M__main.ae"))]))
+               "\n"))))
+
+;; ---------------------------------------------------------------------------------------------
+;; the command line: o2j unit DUMP OUT, o2j main OUT UNIT...
+
+(defn -main [& [cmd & args]]
+  (load-externals! (or (System/getenv "O2J_RT") "jdk/ocaml/ocaml/rt"))
+  (case cmd
+    "unit" (doseq [[d o] (partition 2 args)]
+             (let [u (read-dump (io/file d))
+                   [forms missing] (translate-unit u)]
+               (write-forms (io/file o) forms (str "Translated by arbace.o2j from the Lambda of " (:name u) ". Regenerate rather than edit."))
+               (doseq [[n c] (sort missing)] (println (str "missing\t" (:name u) "\t" n "\t" c)))))
+    ;; lib LAMBDA-DIR OUT-DIR: every unit of LAMBDA-DIR/order.txt translated, OUT-DIR/deps.edn
+    "lib" (let [[ld od] args
+                order (str/split-lines (slurp (io/file ld "order.txt")))
+                deps (into {} (for [n order]
+                                (let [u (read-dump (io/file ld (str n ".ae")))
+                                      [forms missing] (translate-unit u)]
+                                  (write-forms (io/file od (str n ".ae")) forms
+                                               (str "Translated by arbace.o2j from the Lambda of " n ". Regenerate rather than edit."))
+                                  (doseq [[m c] (sort missing)] (println (str "missing\t" n "\t" m "\t" c)))
+                                  [n (unit-refs u)])))]
+            (spit (io/file od "deps.edn") (pr-str {:order order :deps deps})))
+    ;; prog LIB-OUT OUT-DIR DUMP...: the program's units translated into OUT-DIR, its main class,
+    ;; OUT-DIR/files.txt the files to define in order
+    "prog" (let [[lo od & dumps] args] (translate-program lo od dumps))
+    ;; progs LIB-OUT LIST: LIST's lines OUT-DIR DUMP... (tabs), each a program as prog's; a program
+    ;; that does not translate is a line "refused\tOUT-DIR\tWHY"
+    "progs" (let [[lo lst] args]
+              (doseq [line (str/split-lines (slurp lst)) :when (seq line)
+                      :let [[od & dumps] (str/split line #"\t")]]
+                (try (translate-program lo od dumps)
+                     (catch Throwable e
+                       (println (str "refused\t" od "\t" (str/replace (str (.getMessage e)) #"\s+" " ")))))))
+    "main" (let [[o & units] args]
+             (write-forms (io/file o) (main-forms units) "The program's main class, by arbace.o2j."))
+    (do (println "usage: o2j lib LAMBDA-DIR OUT-DIR | prog LIB-OUT OUT-DIR DUMP... | unit DUMP OUT [DUMP OUT...] | main OUT UNIT...") (System/exit 2))))

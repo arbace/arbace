@@ -1,0 +1,579 @@
+(in-ns 'go.arbace.oi) (go/file "ext_io.go" :imports [
+
+
+    ^{:line 4} [errors "errors"]
+    ^{:line 5} [strings "strings"]
+    ^{:line 6} [syscall "syscall"]])
+
+
+;; The channels of OCaml's runtime (runtime/io.c, runtime/caml/io.h): a buffered file descriptor
+;; with the C runtime's exact buffering, so that what reaches the descriptor, and when, is what
+;; OCaml's runtime does. The interpreter's lock serialises the channels, so they need no mutex.
+
+
+(go/const ^{:val 65536 :doc "IOBufferSize is the size of a channel's buffer (IO_BUFFER_SIZE of io.h).\n"} IOBufferSize 65536)
+
+(go/const
+  ^{:line 17} [^{:val 2} chanTextMode 2] ; CHANNEL_TEXT_MODE
+  ^{:line 18} [^{:val 8} chanUnbuffered 8]) ; CHANNEL_FLAG_UNBUFFERED
+
+
+(go/var dummyBuff (lit (slice byte) 0))
+
+
+(go/type Channel "Channel is an OCaml channel (struct channel): an open or closed input or output channel.\n" (struct
+    ^{:line 25 :tag int} fd
+    ^{:line 26 :tag (slice byte)} buff
+    ^{:line 27 :tag int} curr
+    ^{:line 28 :tag int} max ; for an input channel the end of the valid data
+    ^{:line 29 :tag bool} isOut
+    ^{:line 30 :tag int} end
+    ^{:line 31 :tag int64} offset
+    ^{:line 32 :tag string} name
+    ^{:line 33 :tag int} flags
+    ^{:line 34 :tag (* Custom)} cust))
+
+
+
+(go/var ^{:tag (slice (* Channel)) :doc "allChannels are the opened channels, the newest first (caml_all_opened_channels).\n"} allChannels)
+
+
+^{:go/end 47} (go/func errnoOf "errnoOf is the errno of a Go error, or EIO.\n" ^syscall/Errno [^error err]
+  (let [^syscall/Errno e (zero syscall/Errno)]
+    (when (errors/As err (addr e))
+      (return e))
+
+    ^{:line 46} syscall/EIO))
+
+
+
+^{:go/end 59} (go/func errnoString "errnoString is strerror's text for e.\n" ^string [^syscall/Errno e]
+  (let [s (.Error e)]
+    (when (== s "")
+      (return "Unknown error"))
+
+    (when (strings/HasPrefix s "errno ")
+      (return (+ "Unknown error " (subslice s (len "errno ")))))
+
+    (+ (strings/ToUpper (subslice s _ 1)) (subslice s 1))))
+
+
+
+^{:go/end 67} (go/func raiseSysError "raiseSysError is caml_sys_error: Sys_error \"arg: strerror\", or \"strerror\" for an empty arg.\n" [^syscall/Errno e ^string arg ^bool hasArg]
+  (when hasArg
+    (RaiseSysError (+ arg ": " (errnoString e))))
+
+  (RaiseSysError (errnoString e)))
+
+
+
+^{:go/end 75} (go/func raiseIOError "raiseIOError is caml_sys_io_error.\n" [^syscall/Errno e]
+  (when (or (== e syscall/EAGAIN) (== e syscall/EWOULDBLOCK))
+    (Raise ExnSysBlockedIO))
+
+  (raiseSysError e "" false))
+
+
+^{:go/end 88} (go/func newChannel ^{:tag (* Channel)} [^int fd]
+  (let [c (addr (lit Channel :fd fd :buff (make (slice byte) IOBufferSize) :end IOBufferSize))
+      ^{:line 79 :tag int64} off -1]
+    (Blocking ^{:go/end 85} (fn []
+        (let [(values o err) (syscall/Seek fd 0 1)]
+          (when (== err nil)
+            (set! off o)))))
+
+
+    (set! (.-offset c) off)
+    ^{:line 87} c))
+
+
+^{:go/end 96} (go/func openChannel ^Value [^int fd ^bool out]
+  (let [c (newChannel fd)]
+    (set! (.-isOut c) out)
+    (set! (.-cust c) (addr (lit Custom :Name "_chan" :V c)))
+    (set! allChannels (append (lit (slice (* Channel)) c) (spread allChannels)))
+    (.-cust c)))
+
+
+
+^{:go/breaks [6] :go/end 107} (go/func ChannelOf "ChannelOf is the channel of an OCaml channel value.\n" ^{:tag (* Channel)} [^Value v]
+  (when [(values cu ok) (assert (* Custom) v)] ok
+    (when [(values c ok) (assert (* Channel) (.-V cu))] ok
+      (return c)))
+
+
+  (Internalf "not a channel: %s" (Describe v))
+  nil)
+
+
+
+^{:go/end 110} (go/method Value "Value is the OCaml channel value (custom block \"_chan\") of c.\n" ^Value [^{:tag (* Channel)} c] (.-cust c))
+
+^{:go/end 115} (go/method writeFd [^{:tag (* Channel)} c ^{:tag (slice byte)} p] :results [^int n ^error err]
+  (Blocking ^{:go/end 113} (fn [] (set! (values n err) (syscall/Write (.-fd c) p))))
+  (return))
+
+
+^{:go/end 120} (go/method readFd [^{:tag (* Channel)} c ^{:tag (slice byte)} p] :results [^int n ^error err]
+  (Blocking ^{:go/end 118} (fn [] (set! (values n err) (syscall/Read (.-fd c) p))))
+  (return))
+
+
+
+^{:go/end 154} (go/method flushPartial "flushPartial is io.c's flush_partial.\n" ^bool [^{:tag (* Channel)} c ^bool excIfClosed]
+  (while true
+    (when (== (.-fd c) -1)
+      (when excIfClosed
+        (raiseIOError syscall/EBADF))
+
+      (return true))
+
+    (let [towrite (.-curr c)]
+      (when (> towrite 0)
+        (let [(values w err) (.writeFd c (subslice (.-buff c) _ towrite))]
+          (when (!= err nil)
+            (let [e (errnoOf err)]
+              (when (== e syscall/EINTR)
+                (continue))
+
+              (when (or (== e syscall/EBADF) (== e syscall/EPIPE) (== e syscall/ECONNRESET))
+                (when (!= (.-fd c) -1)
+                  (set! (.-curr c) 0)))
+
+
+              (raiseIOError e)))
+
+          (set! (.-offset c) + (conv int64 w))
+          (when (< w towrite)
+            (copy (.-buff c) (subslice (.-buff c) w towrite)))
+
+          (set! (.-curr c) - w)))
+
+      (return (== (.-curr c) 0)))))
+
+
+
+
+^{:go/end 160} (go/method Flush "Flush flushes the buffer completely (caml_flush).\n" [^{:tag (* Channel)} c]
+  (while (not (.flushPartial c true))))
+
+
+
+^{:go/end 166} (go/method flushIfUnbuffered [^{:tag (* Channel)} c]
+  (when (!= (bit-and (.-flags c) chanUnbuffered) 0)
+    (.Flush c)))
+
+
+
+^{:go/end 174} (go/method putch [^{:tag (* Channel)} c ^byte b]
+  (when (>= (.-curr c) (.-end c))
+    (.flushPartial c true))
+
+  (aset (.-buff c) (.-curr c) b)
+  (inc! (.-curr c)))
+
+
+^{:go/end 184} (go/method putword [^{:tag (* Channel)} c ^uint32 w]
+  (when (!= (bit-and (.-flags c) chanTextMode) 0)
+    (Failwith "output_binary_int: not a binary channel"))
+
+  (.putch c (conv byte (>> w 24)))
+  (.putch c (conv byte (>> w 16)))
+  (.putch c (conv byte (>> w 8)))
+  (.putch c (conv byte w)))
+
+
+
+^{:go/end 199} (go/method putblock "putblock is caml_putblock: it returns the number of bytes taken.\n" ^int [^{:tag (* Channel)} c ^{:tag (slice byte)} p]
+  (let [n (len p)
+      ^{:line 189} free (- (.-end c) (.-curr c))]
+    (when (< n free)
+      (copy (subslice (.-buff c) (.-curr c)) p)
+      (set! (.-curr c) + n)
+      (return n))
+
+    (copy (subslice (.-buff c) (.-curr c) (+ (.-curr c) free)) p)
+    (set! (.-curr c) (.-end c))
+    (.flushPartial c true)
+    ^{:line 198} free))
+
+
+
+^{:go/end 207} (go/method WriteBytes "WriteBytes writes b to the channel as caml_really_putblock does (buffered).\n" [^{:tag (* Channel)} c ^{:tag (slice byte)} b]
+  (while (> (len b) 0)
+    (let [w (.putblock c b)]
+      (set! b (subslice b w)))))
+
+
+
+
+^{:go/end 227} (go/method refill "refill is caml_refill: it reads a new buffer and returns its first byte.\n" ^byte [^{:tag (* Channel)} c]
+  (while true
+    (let [(values n err) (.readFd c (subslice (.-buff c) _ (.-end c)))]
+      (cond (!= err nil)
+        (let [e (errnoOf err)]
+          (when (== e syscall/EINTR)
+            (continue))
+
+          (raiseIOError e))
+        (== n 0)
+        (RaiseEndOfFile))
+
+      (set! (.-offset c) + (conv int64 n))
+      (set! (.-max c) n)
+      (set! (.-curr c) 1)
+      (return (aget (.-buff c) 0)))))
+
+
+
+^{:go/end 236} (go/method getch ^byte [^{:tag (* Channel)} c]
+  (when (>= (.-curr c) (.-max c))
+    (return (.refill c)))
+
+  (let [b (aget (.-buff c) (.-curr c))]
+    (inc! (.-curr c))
+    ^{:line 235} b))
+
+
+^{:go/end 247} (go/method getword ^uint32 [^{:tag (* Channel)} c]
+  (when (!= (bit-and (.-flags c) chanTextMode) 0)
+    (Failwith "input_binary_int: not a binary channel"))
+
+  (let [^uint32 r (zero uint32)]
+    (for [i 0] (< i 4) (inc! i)
+      (set! r (+ (<< r 8) (conv uint32 (.getch c)))))
+
+    ^{:line 246} r))
+
+
+
+^{:go/end 280} (go/method getblock "getblock is caml_getblock: it reads up to len(p) bytes, 0 at end of file.\n" ^int [^{:tag (* Channel)} c ^{:tag (slice byte)} p]
+  (while true
+    (let [n (len p)
+        ^{:line 253} avail (- (.-max c) (.-curr c))]
+      (cond (<= n avail) (do
+          (copy p (subslice (.-buff c) (.-curr c) (+ (.-curr c) n)))
+          (set! (.-curr c) + n)
+          (return n))
+        (> avail 0) (do
+          (copy p (subslice (.-buff c) (.-curr c) (.-max c)))
+          (set! (.-curr c) + avail)
+          (return avail)))
+
+      (let [(values nread err) (.readFd c (subslice (.-buff c) _ (.-end c)))]
+        (when (!= err nil)
+          (let [e (errnoOf err)]
+            (when (== e syscall/EINTR)
+              (continue))
+
+            (raiseIOError e)))
+
+        (set! (.-offset c) + (conv int64 nread))
+        (set! (.-max c) nread)
+        (when (> n nread)
+          (set! n nread))
+
+        (copy p (subslice (.-buff c) _ n))
+        (set! (.-curr c) n)
+        (return n)))))
+
+
+
+
+^{:go/end 294} (go/method ReadFull "ReadFull reads exactly n bytes, raising End_of_file if the channel has fewer.\n" ^{:tag (slice byte)} [^{:tag (* Channel)} c ^int n]
+  (let [out (make (slice byte) n)
+      ^{:line 285} got 0]
+    (while (< got n)
+      (let [r (.getblock c (subslice out got))]
+        (when (== r 0)
+          (RaiseEndOfFile))
+
+        (set! got + r)))
+
+    ^{:line 293} out))
+
+
+^{:go/end 308} (go/method seekOut [^{:tag (* Channel)} c ^int64 dest]
+  (.Flush c)
+  (let [^int64 res (zero int64)
+      ^{:line 299 :tag error} err (zero error)]
+    (Blocking ^{:go/end 300} (fn [] (set! (values res err) (syscall/Seek (.-fd c) dest 0))))
+    (when (!= err nil)
+      (raiseSysError (errnoOf err) "" false))
+
+    (when (!= res dest)
+      (raiseSysError syscall/EINVAL "" false))
+
+    (set! (.-offset c) dest)))
+
+
+^{:go/end 326} (go/method seekIn [^{:tag (* Channel)} c ^int64 dest]
+  (when (and (>= dest (- (.-offset c) (conv int64 (.-max c)))) (<= dest (.-offset c)) (== (bit-and (.-flags c) chanTextMode) 0))
+    (set! (.-curr c) (- (.-max c) (conv int (- (.-offset c) dest))))
+    (return))
+
+  (let [^int64 res (zero int64)
+      ^{:line 316 :tag error} err (zero error)]
+    (Blocking ^{:go/end 317} (fn [] (set! (values res err) (syscall/Seek (.-fd c) dest 0))))
+    (when (!= err nil)
+      (raiseSysError (errnoOf err) "" false))
+
+    (when (!= res dest)
+      (raiseSysError syscall/EINVAL "" false))
+
+    (set! (.-offset c) dest)
+    (set! (values (.-curr c) (.-max c)) (values 0 0))))
+
+
+^{:go/end 328} (go/method posOut ^int64 [^{:tag (* Channel)} c] (+ (.-offset c) (conv int64 (.-curr c))))
+^{:go/end 329} (go/method posIn ^int64 [^{:tag (* Channel)} c] (- (.-offset c) (conv int64 (- (.-max c) (.-curr c)))))
+
+^{:go/end 365} (go/method size ^int64 [^{:tag (* Channel)} c]
+  (let [fd (.-fd c)
+      ^{:line 333} here (.-offset c)]
+    (when (!= (bit-and (.-flags c) chanTextMode) 0)
+      (set! here -1))
+
+    (let [^int64 end (zero int64)
+        ^{:line 338 :tag error} eno (zero error)]
+      (Blocking ^{:go/end 360} (fn []
+          (when (== here -1)
+            (let [(values h err) (syscall/Seek fd 0 1)]
+              (when (!= err nil)
+                (set! eno err)
+                (return))
+
+              (set! here h)))
+
+          (let [(values e err) (syscall/Seek fd 0 2)]
+            (when (!= err nil)
+              (set! eno err)
+              (return))
+
+            (set! end e)
+            (when [(values r err) (syscall/Seek fd here 0)] (or (!= err nil) (!= r here))
+              (when (== err nil)
+                (set! err syscall/EINVAL))
+
+              (set! eno err)))))
+
+
+      (when (!= eno nil)
+        (raiseSysError (errnoOf eno) "" false))
+
+      ^{:line 364} end)))
+
+
+
+^{:go/end 408} (go/method scanLine "scanLine is caml_input_scan_line.\n" ^int [^{:tag (* Channel)} c]
+  (while true
+    (let [p (.-curr c)
+        ^{:line 371} restart false]
+      (while true
+        (when (>= p (.-max c))
+          (when (> (.-curr c) 0)
+            (copy (.-buff c) (subslice (.-buff c) (.-curr c) (.-max c)))
+            (let [n (.-curr c)]
+              (set! (.-curr c) - n)
+              (set! (.-max c) - n)
+              (set! p - n)))
+
+          (when (>= (.-max c) (.-end c))
+            (return (- (- (.-max c) (.-curr c)))))
+
+          (let [(values n err) (.readFd c (subslice (.-buff c) (.-max c) (.-end c)))]
+            (cond (!= err nil)
+              (let [e (errnoOf err)]
+                (when (== e syscall/EINTR)
+                  (set! restart true)
+                  (break))
+
+                (raiseIOError e))
+              (== n 0)
+              (return (- (- (.-max c) (.-curr c)))))
+
+            (set! (.-offset c) + (conv int64 n))
+            (set! (.-max c) + n)))
+
+        (let [ch (aget (.-buff c) p)]
+          (inc! p)
+          (when (== ch \newline)
+            (return (- p (.-curr c))))))
+
+
+      (when restart
+        (continue)))))
+
+
+
+
+^{:go/end 428} (go/method close [^{:tag (* Channel)} c]
+  (when (== (.-fd c) -1)
+    (return))
+
+  (let [fd (.-fd c)]
+    (set! (.-fd c) -1)
+    (set! (.-buff c) dummyBuff)
+    (set! (.-end c) 1)
+    (if (.-isOut c)
+      (set! (values (.-curr c) (.-max c)) (values (.-end c) (.-end c)))
+
+      (set! (values (.-curr c) (.-max c)) (values 0 0)))
+
+    (let [^error err (zero error)]
+      (Blocking ^{:go/end 424} (fn [] (set! err (syscall/Close fd))))
+      (when (!= err nil)
+        (raiseSysError (errnoOf err) "" false)))))
+
+
+
+
+^{:go/end 441} (go/func FlushStd "FlushStd flushes every open output channel, ignoring errors (for the fatal error path).\n" []
+  (range [_ c allChannels]
+    (when (and (.-isOut c) (!= (.-fd c) -1))
+      (^{:go/end 438} (fn []
+          (defer (^{:go/end 435} (fn [] (set! _ (recover)))))
+          (while (not (.flushPartial c false))))))))
+
+
+
+
+
+
+^{:go/breaks [5] :go/end 454} (go/func int64Val ^int64 [^Value v]
+  (type-switch [x v]
+    (case [int64]
+      (return x))
+    (case [Nativeint]
+      (return (conv int64 x)))
+    (case [int]
+      (return (conv int64 x))))
+
+  (Internalf "not an int64: %s" (Describe v))
+  0)
+
+
+^{:go/end 462} (go/func bytesRange ^{:tag (slice byte)} [^Value v ^int ofs ^int n]
+  (let [b (.-B (AsBytes v))]
+    (when (or (< ofs 0) (< n 0) (> (+ ofs n) (len b)))
+      (InvalidArg "index out of bounds"))
+
+    (subslice b ofs (+ ofs n))))
+
+
+^{:go/end 580} (go/func init []
+  (let [r RegisterExt]
+    ;; io.c
+    (r "caml_ml_open_descriptor_in" ^{:go/end 467} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (openChannel (AsInt (aget a 0)) false)))
+    (r "caml_ml_open_descriptor_out" ^{:go/end 468} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (openChannel (AsInt (aget a 0)) true)))
+    (r "caml_ml_set_channel_name" ^{:go/end 472} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+        (set! (.-name (ChannelOf (aget a 0))) (GoString (aget a 1)))
+        ^{:line 471} Unit))
+
+    (r "caml_ml_out_channels_list" ^{:go/end 483} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+        (let [^Value res 0]
+          ;; the C list is built oldest first by consing, ending with the newest at the head
+          (for [i (- (len allChannels) 1)] (>= i 0) (dec! i)
+            (let [c (aget allChannels i)]
+              (when (and (.-isOut c) (!= (.-fd c) -1))
+                (set! res (addr (lit Block :Tag 0 :F (lit (slice Value) (.-cust c) res)))))))
+
+
+          ^{:line 482} res)))
+
+    (r "caml_channel_descriptor" ^{:go/end 490} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+        (let [c (ChannelOf (aget a 0))]
+          (when (== (.-fd c) -1)
+            (raiseSysError syscall/EBADF "" false))
+
+          (.-fd c))))
+
+    (r "caml_ml_close_channel" ^{:go/end 491} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (.close (ChannelOf (aget a 0))) Unit))
+    (r "caml_ml_channel_size" ^{:go/end 492} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (Int (conv int (.size (ChannelOf (aget a 0)))))))
+    (r "caml_ml_channel_size_64" ^{:go/end 493} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (.size (ChannelOf (aget a 0)))))
+    (r "caml_ml_set_binary_mode" ^{:go/end 494} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] Unit))
+    (r "caml_ml_is_binary_mode" ^{:go/end 495} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (Bool (== (bit-and (.-flags (ChannelOf (aget a 0))) chanTextMode) 0))))
+    (let [flush ^{:go/end 501} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+          (let [c (ChannelOf (aget a 0))]
+            (while (not (.flushPartial c false)))
+
+            ^{:line 500} Unit))]
+
+      (r "caml_ml_flush" flush)
+      (r "caml_ml_flush_partial" ^{:go/end 503} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (Bool (.flushPartial (ChannelOf (aget a 0)) false))))
+      (r "caml_ml_set_buffered" ^{:go/end 515} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+          (let [c (ChannelOf (aget a 0))]
+            (if (Truth (aget a 1))
+              (set! (.-flags c) bit-and-not chanUnbuffered)
+              (do
+                (set! (.-flags c) bit-or chanUnbuffered)
+                (when (!= (.-fd c) -1)
+                  (.Flush c))))
+
+
+            ^{:line 514} Unit)))
+
+      (r "caml_ml_is_buffered" ^{:go/end 516} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (Bool (== (bit-and (.-flags (ChannelOf (aget a 0))) chanUnbuffered) 0))))
+      (r "caml_ml_output_char" ^{:go/end 522} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+          (let [c (ChannelOf (aget a 0))]
+            (.putch c (conv byte (AsInt (aget a 1))))
+            (.flushIfUnbuffered c)
+            ^{:line 521} Unit)))
+
+      (r "caml_ml_output_int" ^{:go/end 528} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+          (let [c (ChannelOf (aget a 0))]
+            (.putword c (conv uint32 (AsInt (aget a 1))))
+            (.flushIfUnbuffered c)
+            ^{:line 527} Unit)))
+
+      (let [output ^{:go/end 537} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+            (let [c (ChannelOf (aget a 0))
+                ^{:line 531} p (bytesRange (aget a 1) (AsInt (aget a 2)) (AsInt (aget a 3)))]
+              (while (> (len p) 0)
+                (set! p (subslice p (.putblock c p))))
+
+              (.flushIfUnbuffered c)
+              ^{:line 536} Unit))]
+
+        (r "caml_ml_output_bytes" output)
+        (r "caml_ml_output" output)
+        (r "caml_ml_output_bigarray" ^{:go/end 550} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+            (let [c (ChannelOf (aget a 0))
+                ^{:line 542} ba (assert (* bigarray) (.-V (assert (* Custom) (aget a 1))))
+                (values pos n) (values (AsInt (aget a 2)) (AsInt (aget a 3)))
+                ^{:line 544} buf (make (slice byte) n)]
+              (range [i buf]
+                (aset buf i (conv byte (bigInt (aget (.-data ba) (+ pos i))))))
+
+              (.WriteBytes c buf)
+              ^{:line 549} Unit)))
+
+        (r "caml_ml_seek_out" ^{:go/end 551} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (.seekOut (ChannelOf (aget a 0)) (conv int64 (AsInt (aget a 1)))) Unit))
+        (r "caml_ml_seek_out_64" ^{:go/end 552} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (.seekOut (ChannelOf (aget a 0)) (int64Val (aget a 1))) Unit))
+        (r "caml_ml_pos_out" ^{:go/end 553} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (Int (conv int (.posOut (ChannelOf (aget a 0)))))))
+        (r "caml_ml_pos_out_64" ^{:go/end 554} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (.posOut (ChannelOf (aget a 0)))))
+        (r "caml_ml_input_char" ^{:go/end 555} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (conv int (.getch (ChannelOf (aget a 0))))))
+        (r "caml_ml_input_int" ^{:go/end 558} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+            (conv int (conv int32 (.getword (ChannelOf (aget a 0)))))))
+
+        (r "caml_ml_input" ^{:go/end 563} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+            (let [c (ChannelOf (aget a 0))
+                ^{:line 561} p (bytesRange (aget a 1) (AsInt (aget a 2)) (AsInt (aget a 3)))]
+              (.getblock c p))))
+
+        (r "caml_ml_input_bigarray" ^{:go/end 574} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+            (let [c (ChannelOf (aget a 0))
+                ^{:line 566} ba (assert (* bigarray) (.-V (assert (* Custom) (aget a 1))))
+                (values pos n) (values (AsInt (aget a 2)) (AsInt (aget a 3)))
+                ^{:line 568} buf (make (slice byte) n)
+                ^{:line 569} got (.getblock c buf)]
+              (for [i 0] (< i got) (inc! i)
+                (aset (.-data ba) (+ pos i) (conv int (aget buf i))))
+
+              ^{:line 573} got)))
+
+        (r "caml_ml_seek_in" ^{:go/end 575} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (.seekIn (ChannelOf (aget a 0)) (conv int64 (AsInt (aget a 1)))) Unit))
+        (r "caml_ml_seek_in_64" ^{:go/end 576} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (.seekIn (ChannelOf (aget a 0)) (int64Val (aget a 1))) Unit))
+        (r "caml_ml_pos_in" ^{:go/end 577} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (Int (conv int (.posIn (ChannelOf (aget a 0)))))))
+        (r "caml_ml_pos_in_64" ^{:go/end 578} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (.posIn (ChannelOf (aget a 0)))))
+        (r "caml_ml_input_scan_line" ^{:go/end 579} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (.scanLine (ChannelOf (aget a 0)))))))))

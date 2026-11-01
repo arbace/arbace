@@ -1,0 +1,152 @@
+;; OCaml's structural hash (runtime/hash.c: MurmurHash3-based), ported from oi's hash.go:
+;; caml_hash and caml_string_hash, bit-exact with OCaml's. The 32-bit arithmetic is done in longs
+;; kept in [0, 2^32).
+
+(in-ns 'ocaml.rt)
+
+(defclass ^:public ^:final Hash
+
+  (method ^:static m32 ^long [^long x] (bit-and x 4294967295))
+
+  (method ^:static rotl ^long [^long x ^long n]
+    (bit-and (bit-or (bit-shift-left x n) (unsigned-bit-shift-right x (unchecked-subtract 32 n))) 4294967295))
+
+  (method ^:public ^:static mix ^long [^long h ^long d0]
+    (let [d1 (bit-and (unchecked-multiply d0 3432918353) 4294967295)
+          d2 (Hash/rotl d1 15)
+          d3 (bit-and (unchecked-multiply d2 461845907) 4294967295)
+          h1 (bit-xor h d3)
+          h2 (Hash/rotl h1 13)]
+      (bit-and (unchecked-add (unchecked-multiply h2 5) 3864292196) 4294967295)))
+
+  (method ^:public ^:static finalMix ^long [^long h0]
+    (let [h1 (bit-xor h0 (unsigned-bit-shift-right h0 16))
+          h2 (bit-and (unchecked-multiply h1 2246822507) 4294967295)
+          h3 (bit-xor h2 (unsigned-bit-shift-right h2 13))
+          h4 (bit-and (unchecked-multiply h3 3266489909) 4294967295)]
+      (bit-xor h4 (unsigned-bit-shift-right h4 16))))
+
+  ;; caml_hash_mix_intnat: d is the machine word
+  (method ^:static mixIntnat ^long [^long h ^long d]
+    (Hash/mix h (bit-and (bit-xor (bit-xor (bit-shift-right d 32) (bit-shift-right d 63)) d) 4294967295)))
+
+  (method ^:static mixDouble ^long [^long h0 ^double d]
+    (let [bits (Double/doubleToRawLongBits d)
+          ^:mutable ^long hi (bit-and (unsigned-bit-shift-right bits 32) 4294967295)
+          ^:mutable ^long lo (bit-and bits 4294967295)]
+      (if (and (== (bit-and hi 2146435072) 2146435072)
+               (not (== (bit-or lo (bit-and hi 1048575)) 0)))
+        (do (set! hi 2146435072) (set! lo 1))
+        (when (and (== hi 2147483648) (== lo 0)) (set! hi 0)))
+      (Hash/mix (Hash/mix h0 lo) hi)))
+
+  (method ^:static mixString ^long [^long h0 ^byte/1 s]
+    (let [n (alength s)
+          ^:mutable ^long h h0
+          ^:mutable ^int i 0]
+      (while (<= (unchecked-add-int i 4) n)
+        (set! h (Hash/mix h (bit-or (bit-or (bit-and (long (aget s i)) 255)
+                                            (bit-shift-left (bit-and (long (aget s (unchecked-add-int i 1))) 255) 8))
+                                    (bit-or (bit-shift-left (bit-and (long (aget s (unchecked-add-int i 2))) 255) 16)
+                                            (bit-shift-left (bit-and (long (aget s (unchecked-add-int i 3))) 255) 24)))))
+        (set! i (unchecked-add-int i 4)))
+      (let [rem (bit-and n 3)]
+        (when (> rem 0)
+          (let [^:mutable ^long w (bit-and (long (aget s i)) 255)]
+            (when (>= rem 2) (set! w (bit-or w (bit-shift-left (bit-and (long (aget s (unchecked-add-int i 1))) 255) 8))))
+            (when (>= rem 3) (set! w (bit-or w (bit-shift-left (bit-and (long (aget s (unchecked-add-int i 2))) 255) 16))))
+            (set! h (Hash/mix h w)))))
+      (bit-xor h (bit-and (long n) 4294967295))))
+
+  ;; caml_hash count limit seed obj
+  (method ^:public ^:static hash ^long [^long count ^long limit ^long seed obj]
+    (let [queue (new Object/1 256)
+          ^:mutable ^long sz (if (or (< limit 0) (> limit 256)) 256 limit)
+          ^:mutable ^long num count
+          ^:mutable ^long h (bit-and seed 4294967295)
+          ^:mutable ^int rd 0
+          ^:mutable ^int wr 1]
+      (aset queue 0 obj)
+      (while (and (< rd wr) (> num 0))
+        (let [^:mutable ^Object v (aget queue rd)]
+          (set! rd (unchecked-inc-int rd))
+          (label :again
+            (while true
+              (cond
+                (instance? Long v)
+                (do (set! h (Hash/mixIntnat h (unchecked-add (unchecked-multiply (.longValue (cast Long v)) 2) 1)))
+                    (set! num (unchecked-dec num))
+                    (break :again))
+                (instance? byte/1 v)
+                (do (set! h (Hash/mixString h (cast byte/1 v)))
+                    (set! num (unchecked-dec num))
+                    (break :again))
+                (instance? Double v)
+                (do (set! h (Hash/mixDouble h (.doubleValue (cast Double v))))
+                    (set! num (unchecked-dec num))
+                    (break :again))
+                (instance? double/1 v)
+                (let [a (cast double/1 v)]
+                  (loop [^int i 0]
+                    (when (< i (alength a))
+                      (set! h (Hash/mixDouble h (aget a i)))
+                      (set! num (unchecked-dec num))
+                      (when (> num 0) (recur (unchecked-inc-int i)))))
+                  (break :again))
+                (instance? Integer v)
+                (do (set! h (Hash/mix h (bit-and (long (.intValue (cast Integer v))) 4294967295)))
+                    (set! num (unchecked-dec num))
+                    (break :again))
+                (instance? I64 v)
+                (let [x (.-v (cast I64 v))]
+                  (set! h (Hash/mix h (bit-and (bit-xor (unsigned-bit-shift-right x 32) x) 4294967295)))
+                  (set! num (unchecked-dec num))
+                  (break :again))
+                (instance? NInt v)
+                (do (set! h (Hash/mixIntnat h (.-v (cast NInt v))))
+                    (set! num (unchecked-dec num))
+                    (break :again))
+                (instance? Custom v)
+                ;; the operations' hash (a channel's or mutex's address): any fixed word
+                (do (set! h (Hash/mix h 0))
+                    (set! num (unchecked-dec num))
+                    (break :again))
+                (instance? Fiber v) (break :again)
+                (instance? Closure v)
+                (do (set! h (Hash/mix h (bit-or (bit-shift-left 2 10) 247)))
+                    (break :again))
+                (instance? Block v)
+                (let [^:mutable ^Block b (cast Block v) tag (.-tag b)]
+                  (cond
+                    (== tag 251) (break :again)
+                    (== tag 250)
+                    (do
+                      (loop [^int i 1000]
+                        (when (> i 0)
+                          (set! v (aget (.-f b) 0))
+                          (if (and (instance? Block v) (== (.-tag (cast Block v)) 250))
+                            (do (set! b (cast Block v)) (recur (unchecked-dec-int i)))
+                            (continue :again))))
+                      (break :again))
+                    (== tag 248)
+                    (do (set! h (Hash/mixIntnat h (.longValue (cast Long (aget (.-f b) 1)))))
+                        (set! num (unchecked-dec num))
+                        (break :again))
+                    (or (== tag 249) (== tag 245)) (break :again)
+                    :else
+                    (do
+                      (set! h (Hash/mix h (bit-and (bit-or (bit-shift-left (long (alength (.-f b))) 10) (long tag)) 4294967295)))
+                      (loop [^int i 0]
+                        (when (and (< i (alength (.-f b))) (< wr sz))
+                          (aset queue wr (aget (.-f b) i))
+                          (set! wr (unchecked-inc-int wr))
+                          (recur (unchecked-inc-int i))))
+                      (break :again))))
+                :else (break :again))))))
+      (bit-and (Hash/finalMix h) 1073741823)))
+
+  (method ^:public ^:static caml_hash [count limit seed obj]
+    (Long/valueOf (Hash/hash (Rt/l count) (Rt/l limit) (Rt/l seed) obj)))
+
+  (method ^:public ^:static caml_string_hash [seed s]
+    (Long/valueOf (bit-and (Hash/finalMix (Hash/mixString (bit-and (Rt/l seed) 4294967295) (cast byte/1 s))) 1073741823))))
