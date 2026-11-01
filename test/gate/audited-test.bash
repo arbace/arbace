@@ -33,5 +33,13 @@ if decl java-judge | grep -q ':outputs true' && decl java-judge | grep -q 'held.
 if decl java-held | grep -q ':uses \["java-judge/held.txt"\]'; then ok "java-held uses java-judge's held.txt"; else no "java-held uses java-judge's held.txt"; fi
 if decl java-held | grep -q -- '--levels interp' && ! decl java-held | grep -q -- '--save'; then ok "java-held runs the interp level and judges it itself, unaudited"; else no "java-held runs interp, unsaved"; fi
 
+# finding 2: the audited marker of every producer is in java-judge's key (a results file alone is not: an
+# unaudited rerun with the same rows would find the audited pass). java-check-judge uses the whole directory
+# of java-check, the marker included
+for p in java-read java-interp java-classes java-diagnostics java-compiled-full java-print; do
+  if decl java-judge | grep -q "\"$p/audited\""; then ok "java-judge's key has $p/audited"; else no "java-judge's key has $p/audited"; fi
+done
+if decl java-check-judge | grep -q ':uses \["java-check"\]'; then ok "java-check-judge uses java-check's whole output (its marker too)"; else no "java-check-judge uses java-check's whole output"; fi
+
 echo "gate audited-test: $((n - bad)) of $n passed"
 [ $bad = 0 ]
