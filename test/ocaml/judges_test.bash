@@ -161,12 +161,18 @@ out=$(cd "$root" && OI_PINS_ATTESTED=$W/pins.stale bin/oi pins 2>&1); expect "pi
 out=$(cd "$root" && OI_PINS_ATTESTED=$W/pins.tampered bin/oi divergences 2>&1); expect "pins: bin/oi divergences runs the pins' check" 1 '^PIN ' "$out" $?
 out=$(cd "$root" && OI_PINS_ATTESTED=$W/pins.tampered bin/oi suite divergences 2>&1); expect "pins: bin/oi suite divergences runs it too" 1 '^PIN ' "$out" $?
 head -1 "$root/test/ocaml/pins-attested.tsv" | grep -q '^# attested .*oi-program=[0-9a-f]\{12\}.*aot-suite=[0-9a-f]\{12\}' || { echo "FAIL pins-attested.tsv has no header with the commit and the runs' keys"; bad=1; }
-# --attest takes only rows of a run whose key file is the current key: a stale key on the AOT suite run is skipped and said, and the pins of its
-# corpus are then not attested
-k=$root/.tmp/o7/aot/check.tsv.key
-if [ -f "$k" ]; then
-  cp "$k" "$W/aot-key.keep"; echo stale > "$k"
-  out=$(cd "$root" && OI_PINS_ATTESTED=$W/pins.attest bin/oi pins --attest 2>&1); st=$?
-  cp "$W/aot-key.keep" "$k"
-  expect "pins: --attest skips a run made by another key" 2 'aot suite run skipped: .* was made by another key' "$out" $st
-else echo "FAIL pins: $k is missing (run bin/oi suite check --aot first)"; bad=1; fi
+# --attest takes only rows of a run whose key file is the current key (re-review 072's finding 1: the runs are fabricated here, in $W, with a fake current
+# key: the case reads nothing of .tmp, so a fresh checkout runs it): current runs are attested and equal the committed rows, a stale one is skipped,
+# said, and refused with no file written
+R=$W/runs; mkdir -p "$R/oi" "$R/o6"
+awk -F'\t' '$0 !~ /^#/ && $1 == "oi" { print $2 "\t" $3 "\t" $4 "\t1\t1.0\t" }' "$root/test/ocaml/pins-attested.tsv" > "$R/oi/check.tsv"
+awk -F'\t' '$0 !~ /^#/ && $1 == "aot" { print $2 "\t" $3 "\t" $4 "\t1\t1.0\t" }' "$root/test/ocaml/pins-attested.tsv" > "$R/o6/check-aot.tsv"
+echo corpus > "$R/oi/corpus.tsv"; echo fake1 > "$R/oi/check.tsv.key"; echo fake1 > "$R/o6/check-aot.tsv.key"
+out=$(cd "$root" && OI_PINS_RUNS=$R OI_PINS_FAKE_KEY=fake1 OI_PINS_ATTESTED=$W/pins.attest bin/oi pins --attest 2>&1); st=$?
+expect "pins: --attest from current runs attests every pin" 0 '39 attested' "$out" $st
+grep -v '^#' "$W/pins.attest" > "$W/pins.got"; grep -v '^#' "$root/test/ocaml/pins-attested.tsv" > "$W/pins.want"
+cmp -s "$W/pins.got" "$W/pins.want" || { echo "FAIL pins: the attested rows differ from the committed ones"; bad=1; }
+echo stale > "$R/o6/check-aot.tsv.key"; rm -f "$W/pins.attest2"
+out=$(cd "$root" && OI_PINS_RUNS=$R OI_PINS_FAKE_KEY=fake1 OI_PINS_ATTESTED=$W/pins.attest2 bin/oi pins --attest 2>&1); st=$?
+expect "pins: --attest skips a run made by another key and refuses" 2 'aot program run skipped: .* was made by another key' "$out" $st
+[ ! -e "$W/pins.attest2" ] || { echo "FAIL pins: a refused attest wrote a file"; bad=1; }
