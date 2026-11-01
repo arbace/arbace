@@ -6760,3 +6760,12 @@ known file `{}` after the half is compiled into the tool; javac's tool built fro
 run at its first read, `field-order-check` now with the tag sets).
 
 No proposals (JFS160 none).
+
+## As built: report 019's residues (2026-11-01)
+
+The helper's re-review (report 019) left two of the four partly closed; each fix in its own commit, tested without a build.
+
+- **A2, `bin/provenance-check` compares `:java.base`.** The essential `provenance` step also compares the pack's `:java.base`
+  with `jdk/platform/provenance.edn`'s pin, `jdk/javac/platform.sha256`'s `java.base` line, so a pack written with
+  `REPR_JAVA_PACK_ANY=1` (which records the foreign directory's hash) fails it, not only `--full`'s `platform-check`. Tested on a
+  `git archive` copy: the committed pack's line passes (`:java.base 5327f4cbdc9b`); with `:java.base` rewritten it fails.
