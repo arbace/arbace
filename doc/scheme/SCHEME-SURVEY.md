@@ -3014,3 +3014,45 @@ findings, N1-N9; the commits `0ded8bcd` to `81a25361` and the one that records t
   (2.6 GB at the default 1000 MiB) and dies out of memory under `ulimit -v 2.5 GB` (Go reserves address space). Options: (a) as built;
   (b) run 5_2.ms with a lower watchdog or a smaller cyclic-list limit; (c) a per-file memory limit in `bin/si mats` and a class for the
   items it hides. *Recommended: (b)*, small, and it keeps the light tier's 2 GB limit.
+
+## As built: re-review 044's fixes (2026-11-01)
+
+Report 044 (the VM's re-review of 033's fixes) found five items, M1 to M5; each is fixed with its own commit and a test that failed before.
+
+### Per finding
+
+| # | Finding | Fixed | Test (before / after) |
+|---|---|---|---|
+| M1 | `set-port-position!` cleared `lastc` on every port, so `fresh-line` after a reposition dropped a newline Chez writes | `lastc` is kept; on a string output port it is the rune before the new position (0 at 0); file and bytevector ports keep the last one written | `si/ports-pushback` `fl-end`, `fl-mid`: `"abZ"` for `"ab\nZ"` before, equal to Chez after |
+| M2 | nonblocking predicates answered `#f` and raised on bytevector, string and binary console ports (a name heuristic, `isFilePort`) | `hasNonblocking`: pMem, pString and the binary console have the mode (`#t #t #f`, settable); the textual console and custom ports have none, as Chez | `si/ports-pushback` `nb2` (10 ports): `(nb2 #f #f err err)` for `(nb2 #t #t #f ok)` before |
+| M3 | a string output port truncated on `set-port-position!`, Chez overwrites | a write index (`rpos`, as `pMem`'s `pos`); `port-position` answers it; the extraction resets it | `si/ports-pushback` `ov`, `ov0`, `ov1`: `"aX"` for `"aXc"` before |
+| M4 | the four 033 unit tests never run; `(string x)` where SPEC 7.7 has `(conv string x)`; "(three cases)" | `bin/si unit` run: all pass, before and after the spelling (it compiled either way, so the spelling is conformance, not a fix of a failure); the count is six | none failing before |
+| M5 | `si/ports-pushback` left its scratch file when a line raised | `dynamic-wind` around the block (checked with a raising variant on Chez: the old text left `ports-pushback.tmp`, the new did not) | the variant |
+
+M1's residual in 033's list was misdiagnosed (its cause was M3); the survey's residual and SC210 (b) are corrected where they stand.
+
+### The numbers
+
+- `bin/si check --record-ref --record`: 47 of 48 pass (the one non-pass `larceny/exceptions`, `chez-conditions`, as recorded), regressions none; `ref-chez.edn` changes in the
+  `si/ports-pushback` entry alone (the gensym in `racket/base`'s entry, which a fresh Chez run renames, left as recorded).
+- `bin/si unit`: ok (the four 033 tests pass with `-v`).
+- `bin/si mats` whole: 37 files, 911 mats, **300 pass / 89 fail / 511 not run / 11 skipped**, clauses alone 4,335 / 283 / 8,266, 1,468 non-pass items, 0 in no class,
+  regressions none (the same as before); peak **2.67 GB** resident at `SI_GOMEMLIMIT=700MiB`, 10 m (SC213 stands; this is above its 2.3 GB).
+  Recorded again under the new key.
+- Not run: `bin/si r7rs`, `corpora divergences`, `corpora regress-test`, `check --aot`, `bin/gate`.
+
+### Proposals (SC220 onward; none decided)
+
+- **SC220 `bin/si check --record-ref --only ID` replaces the whole reference.** It rewrote `ref-chez.edn` with the one entry asked for (twice here, each time restored from git
+  and refreshed by a splice). Options: (a) as built; (b) merge the run entries into the existing file, as `--record` does for results; (c) refuse `--only` with
+  `--record-ref`. *Recommended: (b)*, small, and it makes a one-program probe cheap to record.
+- **SC221 Gensym churn in the Chez reference.** A full `--record-ref` renames the gensym in `racket/base`'s entry each time (`known-differences :chez-record-gensym` rewrites it on
+  compare). Options: (a) as built, and keep the old line by hand; (b) the recorder normalises the gensym name before writing, so reruns are byte-stable;
+  (c) (b) and a check that two Chez runs agree. *Recommended: (b).*
+- **SC222 `get-output-string` on Chez resets the port as an extraction does** (position 0, then `"c"` after more output); si answered the same on the one probe
+  (`"ab" "c" 0`), so nothing to do; recorded only so a later reader does not rediscover it. Options: (a) none; (b) a probe line in `si/ports-pushback`. *Recommended: (b)* when the
+  area is touched again.
+
+### Rule slips
+
+- I used `/dev/null` in three commands (twice as stdin of `chez`, once in a pointless `cp`), against the rule; nothing depended on them. Later runs used an empty file under `.tmp/tmp/`.
