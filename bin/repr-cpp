@@ -1,0 +1,253 @@
+#!/bin/bash
+# repr/cpp, C++'s bridge (doc/cpp/CPP-SURVEY.md, doc/cpp/SPEC.md): the host data and the pins of the C++ crop (CX1), the shared
+# lexer and preprocessor's token check (CX2), the oracle's filter tools/cxxdump (CX1, CX3), and the reader and printer in mode
+# :lines with their round trip (CX4, "As built: CX3, CX4"; arbace.repr.cpp on the tools' host). Built with TamaGo's Go (no cgo).
+#
+#   bin/repr-cpp host record    record the compilers' answers under test/cpp/host/: g++ 15.2 and clang 23.1.4's predefined
+#                               macros per standard (predefined/{gxx,clang}/STD.h, sorted, the date macros at the fixed
+#                               epoch), their search lists, their __has_cpp_attribute/__has_attribute/__has_include answers,
+#                               the sizes and alignments both agree on (sizes.tsv), the digests of libstdc++'s headers
+#   bin/repr-cpp host check     the host's compilers still give the recorded answers and the headers their digests
+#   bin/repr-cpp pins check     the pins of test/cpp/corpora.edn: the gcc tarball (when .tmp/c1/gcc/ holds it), the
+#                               llvm-project tarball (when .tmp/llvm/ or REPR_CPP_LLVM_TARBALL holds it), the APKBUILD (.tmp/cpp-pins/), the SHA-512 in it, the compilers' versions
+#   bin/repr-cpp spec-check     every ```clojure block of doc/cpp/SPEC.md read by Arbace's reader (stage 0, the tools' host)
+#   bin/repr-cpp pp FILE...     the shared preprocessor's stream of each FILE in C++ mode (CX2): arbace.repr.cpp.ppcheck's pp
+#                               ([--std=S] [-D...] [-I...] [--text] [--clang]: g++'s host data, or clang's), on the tools' host
+#   bin/repr-cpp lex FILE...    the shared lexer's raw tokens of each FILE, one `LINE:COL<tab>TEXT` a token (clang's -dump-raw-tokens' shape)
+#   bin/repr-cpp pp-check [--corpus C,...] [--sample N] [--level lex,pp] [--record] [--record-known]
+#                               the token check (bin/lib/repr-cpp/pp-check, its header): the corpora's files lexed and preprocessed
+#                               in C++ mode, judged by g++ -E's recorded digests (test/repr/cpp/pp-gxx.sha256) and clang's raw
+#                               tokens' (test/repr/cpp/lex-clang.sha256), or both reject, or known (test/repr/cpp/pp-check-known.edn)
+#   bin/repr-cpp has-add NAMES  the __has_cpp_attribute and __has_attribute answers of g++ and clang for NAMES, appended to
+#                               test/cpp/host/has-extra.tsv (names a check found missing: WORK/CORPUS/missing.tsv)
+#   bin/repr-cpp cxxdump-build  build tools/cxxdump into .tmp/repr-cpp/cxxdump (TamaGo's go, CGO_ENABLED=0)
+#   bin/repr-cpp cxxdump-test   go test of tools/cxxdump (the filter on a dump with clang's delta-encoded locations)
+#   bin/repr-cpp cxxdump [-main NAME] [-implicit=false] [-norm] [-layouts] [-instances] [-cache DIR] [-stats FILE] [-o FILE] -- CLANG-ARGS... FILE
+#                               clang's -ast-dump=json of FILE filtered to the main file's declarations (Clojure-reader data, one
+#                               form a line; -norm: without ids and positions, the AST level's comparison; -layouts: the main file's
+#                               record layouts from a CodeGen pass; -cache: kept by key, checked against the digests of the files read)
+#   bin/repr-cpp cxxdump-check LIST OUT [--layouts] [--jobs N] [--cache DIR]
+#                               cxxdump over a list (pp-check's gxx.list format), the numbers in OUT/summary.tsv and OUT/totals.txt
+#   bin/repr-cpp read DUMP FILE [--main NAME] [--std S]
+#                               FILE's C++ forms (mode :lines) from its cxxdump output, as .ae text (arbace.repr.cpp)
+#   bin/repr-cpp print FILE.ae...
+#                               each unit's C++ text in mode :lines
+#   bin/repr-cpp hotspot-flags LIST
+#                               the HotSpot corpus' -D, -I and -std options against each file's own command line in the JDK build (CP76 (b))
+#   bin/repr-cpp roundtrip LIST WORK [--jobs N] [--no-objects]
+#                               the round trip (bin/lib/repr-cpp/roundtrip, its header): read, print, level 1 (forms again equal),
+#                               level 3 (the print's AST equal), level 4 (g++'s and clang's objects equal), against
+#                               test/repr/cpp/roundtrip-known.edn
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+. "$root/bin/lib/tmpdir.bash"
+
+EPOCH=1793145600 # 2026-10-28 00:00:00 UTC, as test/c/host (CS43 (a))
+host_dir=$root/test/cpp/host
+goroot=${ARBACE_GOROOT:-/root/tamago-go}
+STDS="c++98 c++03 c++11 c++14 c++17 c++20 c++23 c++26 gnu++98 gnu++03 gnu++11 gnu++14 gnu++17 gnu++20 gnu++23 gnu++26"
+main_checkout=$root
+case $root in */.tmp/worktrees/*) main_checkout=${root%%/.tmp/worktrees/*} ;; esac
+
+cxx_for() { case $1 in gxx) echo g++ ;; clang) echo clang++ ;; esac; }
+
+empty() { : > "$TMPDIR/repr-cpp-empty.cpp"; echo "$TMPDIR/repr-cpp-empty.cpp"; }
+
+date_macros() { # the date macros of the fixed epoch as the compiler gives them
+  local cxx=$1 d1 d2 d3 t
+  printf '__DATE__ __TIME__\n' > "$TMPDIR/repr-cpp-date.cpp"
+  read -r d1 d2 d3 t <<< "$(SOURCE_DATE_EPOCH=$EPOCH $cxx -std=c++23 -E -P "$TMPDIR/repr-cpp-date.cpp" | tr -d '"')"
+  { echo "#define __DATE__ \"$d1 $d2 $d3\""
+    echo "#define __TIME__ \"$t\""
+  } | sed 's/"\([A-Z][a-z]*\) \([0-9]\) /"\1  \2 /'
+}
+
+attr_names="carries_dependency deprecated fallthrough likely unlikely maybe_unused no_unique_address nodiscard noreturn assume indeterminate optimize_for_synchronized gnu::always_inline gnu::aligned gnu::cold gnu::const gnu::deprecated gnu::format gnu::hot gnu::noinline gnu::packed gnu::pure gnu::unused gnu::visibility clang::fallthrough clang::lifetimebound clang::musttail clang::no_destroy clang::annotate msvc::no_unique_address"
+gnu_attrs="aligned always_inline cold const constructor destructor format hot malloc noinline nonnull noreturn packed pure unused used visibility weak alloc_size nodiscard warn_unused_result"
+has_includes="vector iostream ranges print format coroutine expected flat_map stdatomic.h generator mdspan spanstream stacktrace string_view version bits/c++config.h cstddef nonexistent_header"
+
+host_record() {
+  mkdir -p "$host_dir/predefined/gxx" "$host_dir/predefined/clang"
+  local e s who cxx
+  e=$(empty)
+  for who in gxx clang; do
+    cxx=$(cxx_for $who)
+    for s in $STDS; do
+      { LC_ALL=C $cxx -std=$s -dM -E "$e" | LC_ALL=C sort; date_macros $cxx; } > "$host_dir/predefined/$who/$s.h" 2>"$TMPDIR/repr-cpp-err.txt" || { echo "host record: $cxx rejects -std=$s" >&2; rm -f "$host_dir/predefined/$who/$s.h"; }
+    done
+    echo | $cxx -std=c++23 -E -v -x c++ - 2>&1 >"$TMPDIR/repr-cpp-v.out" | sed -n '/#include <...> search starts here:/,/End of search list/p' | sed '1d;$d; s/^ //' > "$host_dir/search-$who.txt"
+  done
+  # __has_* answers of both compilers at -std=gnu++23, one line a question: OPERATOR NAME GXX CLANG
+  {
+    for n in $attr_names; do printf '__has_cpp_attribute\t%s\t%s\t%s\n' "$n" "$(has_q g++ __has_cpp_attribute "$n")" "$(has_q clang++ __has_cpp_attribute "$n")"; done
+    for n in $gnu_attrs; do printf '__has_attribute\t%s\t%s\t%s\n' "$n" "$(has_q g++ __has_attribute "$n")" "$(has_q clang++ __has_attribute "$n")"; done
+    for n in $has_includes; do printf '__has_include\t<%s>\t%s\t%s\n' "$n" "$(has_inc g++ "$n")" "$(has_inc clang++ "$n")"; done
+  } > "$host_dir/has.tsv"
+  sizes > "$host_dir/sizes.tsv"
+  # libstdc++'s headers (the two compilers' common library), the digests the token check will read
+  local inc=/usr/include/c++/15.2.0
+  ( cd / && find usr/include/c++/15.2.0 -type f | LC_ALL=C sort | xargs sha256sum ) | sed 's|  usr/|  /usr/|' > "$host_dir/headers.sha256"
+  cat > "$host_dir/host.edn" <<EOF
+;; The reference's and the oracle's answers repr/cpp's preprocessor reads with (doc/cpp/SPEC.md §10; doc/cpp/CPP-SURVEY.md,
+;; "As built: CX1"), recorded by bin/repr-cpp host record: predefined/{gxx,clang}/STD.h (CXX -std=STD -dM -E on an empty
+;; file, sorted, then the date macros of :epoch), search-{gxx,clang}.txt (-E -v's list, in the compilers' order: for C++
+;; the compiler's own include directory is LAST, unlike C's CS32 (a)), has.tsv (operator, name, g++'s answer, clang's, both
+;; at -std=c++23), sizes.tsv (type, size, align: the answers g++ and clang agree on), headers.sha256 (libstdc++ 15.2.0's
+;; headers). Read with the Clojure reader.
+{:gxx "$(g++ --version | head -1)"
+ :clang "$(clang++ --version | head -1)"
+ :libstdc++ "$inc"
+ :clang-include "$(clang++ -print-resource-dir)/include"
+ :gcc-include "$(g++ -print-file-name=include)"
+ :epoch $EPOCH
+ :source-date "2026-10-28 00:00:00 UTC"
+ :stds [$(for s in $STDS; do printf '"%s" ' $s; done)]
+ :has-std "c++23"}
+EOF
+  echo "host record: $(ls "$host_dir/predefined/gxx" | wc -l) + $(ls "$host_dir/predefined/clang" | wc -l) standards, $(wc -l < "$host_dir/has.tsv") __has answers, $(wc -l < "$host_dir/sizes.tsv") sizes, $(wc -l < "$host_dir/headers.sha256") headers"
+}
+
+has_q() { # has_q CXX OP NAME: the value of OP(NAME) in the compiler's preprocessor
+  printf '#if defined(%s)\n%s(%s)\n#else\n0\n#endif\n' "$2" "$2" "$3" > "$TMPDIR/repr-cpp-has.cpp"
+  $1 -std=c++23 -E -P "$TMPDIR/repr-cpp-has.cpp" 2>/dev/null | tr -d ' \n' || true
+}
+has_inc() {
+  printf '#if __has_include(<%s>)\n1\n#else\n0\n#endif\n' "$2" > "$TMPDIR/repr-cpp-has.cpp"
+  $1 -std=c++23 -E -P "$TMPDIR/repr-cpp-has.cpp" 2>/dev/null | tr -d ' \n' || true
+}
+
+sizes() { # sizeof and alignof of the fundamental types, compiled and run by both, required equal
+  local src=$TMPDIR/repr-cpp-sizes.cpp
+  cat > "$src" <<'EOS'
+#include <cstddef>
+#include <cstdint>
+#include <cstdio>
+#include <cwchar>
+#include <string>
+#include <vector>
+#include <memory>
+#include <string_view>
+#include <typeinfo>
+#include <exception>
+#include <initializer_list>
+#include <map>
+#include <optional>
+#include <variant>
+#include <functional>
+#define T(...) std::printf("%s\t%zu\t%zu\n", #__VA_ARGS__, sizeof(__VA_ARGS__), alignof(__VA_ARGS__))
+int main() {
+  T(bool); T(char); T(signed char); T(unsigned char); T(char8_t); T(char16_t); T(char32_t); T(wchar_t);
+  T(short); T(int); T(long); T(long long); T(__int128); T(float); T(double); T(long double);
+  T(void *); T(void (*)()); T(int S::*);
+  T(std::size_t); T(std::ptrdiff_t); T(std::max_align_t); T(std::nullptr_t); T(std::intmax_t);
+  T(std::string); T(std::wstring); T(std::u8string); T(std::string_view); T(std::vector<int>);
+  T(std::unique_ptr<int>); T(std::shared_ptr<int>); T(std::map<int, int>); T(std::optional<int>);
+  T(std::variant<int, double>); T(std::function<void()>); T(std::type_info); T(std::exception);
+  T(std::initializer_list<int>);
+  return 0;
+}
+EOS
+  sed -i 's/T(int S::\*);/T(int std::string::*);/' "$src"
+  g++ -std=c++23 -O0 -o "$TMPDIR/repr-cpp-sizes-gxx" "$src" && clang++ -std=c++23 -O0 -o "$TMPDIR/repr-cpp-sizes-clang" "$src" || return 1
+  "$TMPDIR/repr-cpp-sizes-gxx" > "$TMPDIR/repr-cpp-sizes-gxx.tsv"; "$TMPDIR/repr-cpp-sizes-clang" > "$TMPDIR/repr-cpp-sizes-clang.tsv"
+  diff "$TMPDIR/repr-cpp-sizes-gxx.tsv" "$TMPDIR/repr-cpp-sizes-clang.tsv" >&2 || { echo "sizes: g++ and clang disagree" >&2; return 1; }
+  cat "$TMPDIR/repr-cpp-sizes-gxx.tsv"
+}
+
+host_check() {
+  local bad=0 who s cxx e tmp
+  e=$(empty); tmp=$TMPDIR/repr-cpp-chk.h
+  for who in gxx clang; do
+    cxx=$(cxx_for $who)
+    for f in "$host_dir"/predefined/$who/*.h; do
+      s=$(basename "$f" .h)
+      { LC_ALL=C $cxx -std=$s -dM -E "$e" | LC_ALL=C sort; date_macros $cxx; } > "$tmp"
+      cmp -s "$tmp" "$f" || { echo "host check: $who -std=$s predefined macros differ"; bad=1; }
+    done
+    echo | $cxx -std=c++23 -E -v -x c++ - 2>&1 >"$TMPDIR/repr-cpp-v.out" | sed -n '/#include <...> search starts here:/,/End of search list/p' | sed '1d;$d; s/^ //' | cmp -s - "$host_dir/search-$who.txt" || { echo "host check: $who's search list differs"; bad=1; }
+  done
+  sizes | cmp -s - "$host_dir/sizes.tsv" || { echo "host check: sizes differ"; bad=1; }
+  ( cd / && sha256sum --quiet -c "$host_dir/headers.sha256" ) || bad=1
+  [ $bad = 0 ] && echo "host check: the recorded answers stand"
+  return $bad
+}
+
+pins_check() { # the pins of test/cpp/corpora.edn against the tarballs on the host, read with stage 0's reader
+  local bad=0 exe=${ARBACE_HOST_EXE:-$main_checkout/target/seed/amd64/arbace} corpora=$root/test/cpp/corpora.edn
+  [ -x "$exe" ] || { echo "pins: no Arbace executable ($exe; ARBACE_HOST_EXE)" >&2; return 2; }
+  pinval() { GOMEMLIMIT=1GiB "$exe" -e "(print (get-in (read-string (slurp \"$corpora\")) [:pins $1 $2]))"; }
+  local id file want got
+  for spec in "gcc-15.2.0:sha256:${REPR_CPP_GCC_TARBALL:-$main_checkout/.tmp/c1/gcc/gcc-15.2.0.tar.xz}" \
+              "llvmorg-23.1.4:sha256:${REPR_CPP_LLVM_TARBALL:-$root/.tmp/llvm/llvm-project-23.1.4.src.tar.xz}" \
+              "alpine-clang23:apkbuild-sha256:${REPR_CPP_APKBUILD:-$root/.tmp/cpp-pins/APKBUILD.clang23}"; do
+    id=${spec%%:*}; spec=${spec#*:}; field=${spec%%:*}; file=${spec#*:}
+    want=$(pinval ":$id" ":$field")
+    if [ -f "$file" ]; then
+      got=$(sha256sum "$file" | cut -d' ' -f1)
+      if [ "$got" = "$want" ]; then echo "pin $id: $file matches"; else echo "pin $id: $file is $got, the pin $want"; bad=1; fi
+    else echo "pin $id: $file not on the host (pin $want unchecked)"; fi
+  done
+  want=$(pinval :llvmorg-23.1.4 :sha512)
+  if [ -f "$root/.tmp/cpp-pins/APKBUILD.clang23" ] && ! grep -q "$want" "$root/.tmp/cpp-pins/APKBUILD.clang23"; then
+    echo "pin llvmorg-23.1.4: the APKBUILD does not list the pinned SHA-512"; bad=1
+  fi
+  [ "$(clang++ --version | sed -n 1p)" = "Alpine clang version 23.1.4" ] || { echo "pin: the host's clang is not 23.1.4"; bad=1; }
+  [ "$(g++ -dumpfullversion)" = "15.2.0" ] || { echo "pin: the host's g++ is not 15.2.0"; bad=1; }
+  # CP2: the packages a libTooling dumper would need, as the repositories name them (nothing is installed)
+  for p in clang23-dev llvm23-dev clang23-libs llvm23-libs clang23-libclang clang23-headers; do
+    apk search -e "$p" | grep -q . || { echo "pin: apk has no $p"; bad=1; }
+  done
+  return $bad
+}
+
+spec_check() { # the spec's forms blocks must read with Arbace's reader (the spec's rule)
+  local exe=${ARBACE_HOST_EXE:-$main_checkout/target/seed/amd64/arbace} spec=${1:-$root/doc/cpp/SPEC.md} blocks=$TMPDIR/repr-cpp-spec-blocks.txt
+  [ -x "$exe" ] || { echo "spec-check: no Arbace executable ($exe; ARBACE_HOST_EXE)" >&2; return 2; }
+  awk '/^```clojure$/ {on=1; next} /^```$/ {if (on) print ";;;BLOCK"; on=0; next} on {print}' "$spec" > "$blocks"
+  GOMEMLIMIT=1GiB "$exe" -e "(let [bs (arbace.string/split (slurp \"$blocks\") #\"\\n;;;BLOCK\\n?\") bad (atom 0)]
+    (doseq [[i b] (map-indexed vector bs) :when (not (arbace.string/blank? b))]
+      (try (read-string (str \"[\" b \"]\")) (catch Throwable e (swap! bad inc) (println \"block\" i \"does not read:\" (.getMessage e)))))
+    (println (count bs) \"blocks,\" @bad \"unreadable\")
+    (when (pos? @bad) (System/exit 1)))"
+}
+
+cxxdump_build() {
+  mkdir -p "$root/.tmp/repr-cpp"
+  ( cd "$root/tools/cxxdump" && PATH=$goroot/bin:$PATH CGO_ENABLED=0 GOFLAGS= GOCACHE=${GOCACHE:-$root/.tmp/gocache} go build -o "$root/.tmp/repr-cpp/cxxdump" . )
+  echo "built $root/.tmp/repr-cpp/cxxdump"
+}
+
+has_add() { # has-add OP:NAME...: the answers of both compilers appended to has-extra.tsv (once a name)
+  local f=$host_dir/has-extra.tsv a op n
+  touch "$f"
+  for a in "$@"; do
+    op=${a%%:*}; n=${a#*:}
+    grep -q "^$op	$n	" "$f" "$host_dir/has.tsv" 2>"$TMPDIR/repr-cpp-has.err" && continue
+    printf '%s\t%s\t%s\t%s\n' "$op" "$n" "$(has_q g++ "$op" "$n")" "$(has_q clang++ "$op" "$n")" >> "$f"
+  done
+  LC_ALL=C sort -o "$f" "$f"
+}
+
+case ${1:-} in
+  host) case ${2:-} in
+          record) host_record ;;
+          check) host_check ;;
+          *) echo "host: record or check" >&2; exit 2 ;;
+        esac ;;
+  pins) case ${2:-} in
+          check) pins_check ;;
+          *) echo "pins: check" >&2; exit 2 ;;
+        esac ;;
+  spec-check) spec_check "${2:-}" ;;
+  pp|lex) cmd=$1; shift; . "$root/bin/lib/tools.bash"; arbace_tool -m arbace.repr.cpp.ppcheck "$cmd" "$@" ;;
+  pp-check) shift; exec "$root/bin/lib/repr-cpp/pp-check" "$@" ;;
+  hotspot-flags) shift; exec "$root/bin/lib/repr-cpp/hotspot-flags" "$@" ;;
+  roundtrip) shift; exec "$root/bin/lib/repr-cpp/roundtrip" "$@" ;;
+  read|print) . "$root/bin/lib/tools.bash"; arbace_tool -m arbace.repr.cpp "$@" ;;
+  has-add) shift; has_add "$@" ;;
+  cxxdump-build) cxxdump_build ;;
+  cxxdump-check) shift; exec "$root/bin/lib/repr-cpp/cxxdump-check" "$@" ;;
+  cxxdump-test) ( cd "$root/tools/cxxdump" && PATH=$goroot/bin:$PATH CGO_ENABLED=0 GOFLAGS= GOCACHE=${GOCACHE:-$root/.tmp/gocache} go test ./... ) ;;
+  cxxdump) shift; [ -x "$root/.tmp/repr-cpp/cxxdump" ] || cxxdump_build >&2; exec "$root/.tmp/repr-cpp/cxxdump" "$@" ;;
+  *) sed -n '2,/^set -e/p' "$0" | sed '$d;s/^# \{0,1\}//' >&2; exit 2 ;;
+esac

@@ -1,0 +1,115 @@
+(ns arbace.repr.cpp
+  "repr/cpp, C++'s bridge (doc/cpp/SPEC.md; doc/cpp/CPP-SURVEY.md, \"As built: CX3, CX4\"): `read-cpp` reads the
+  oracle's filtered AST of a C++ file (tools/cxxdump's output) with the file's text into C++ forms
+  (arbace.repr.cpp.convert), `unit-text` writes them as .ae text (repr/c's layout), `print-cpp` prints forms back
+  to C++ (arbace.repr.cpp.print, mode :lines). `-main` is bin/repr-cpp read and print."
+  (:require [arbace.repr.cpp.convert :as convert]
+            [arbace.repr.cpp.print :as print]
+            [arbace.repr.c.layout :as layout]
+            [arbace.string :as str]))
+
+(set! *warn-on-reflection* true)
+
+(defn ns-name-of
+  "A translation unit's namespace (§4.1): cpp. and its path, / as ., the extension dropped, a . or - as _."
+  ^String [^String path]
+  (let [p (str/replace path #"^\./" "")
+        parts (str/split p #"/")
+        base (last parts)
+        base (let [i (.lastIndexOf ^String base ".")] (if (pos? i) (subs base 0 i) base))]
+    (str "cpp." (str/join "." (map #(str/replace % #"[.+\-]" "_") (concat (butlast parts) [base]))))))
+
+(defn read-dump
+  "tools/cxxdump's output: [header nodes]."
+  [^String path]
+  (let [r (arbace.lang.LineNumberingPushbackReader. (java.io.StringReader. (slurp path)))
+        eof (Object.)
+        xs (loop [out []] (let [x (read r false eof)] (if (identical? x eof) out (recur (conj out x)))))]
+    [(first xs) (vec (filter #(and (map? %) (:kind %)) (rest xs)))
+     (some #(when (and (map? %) (:executed %)) (set (:executed %))) (rest xs))]))
+
+(defn latin1 ^String [^String path]
+  (String. (java.nio.file.Files/readAllBytes (.toPath (java.io.File. path))) "ISO-8859-1"))
+
+(defn- with-full
+  "Mode :full (SPEC §11; repr/c's, item-granular): the unit's text cut at each item's first byte, the text before the
+  first as the file form's :c/head and each item's up to the next one's as its form's :c/text (\"\" on the forms of an
+  item after its first, and on one whose first byte is before an earlier item's: the clang declaration of a #pragma
+  weak alias, which stands at the pragma)."
+  [c ^String src file-form]
+  (let [forms (:forms c)
+        offs (loop [os (seq (:offsets c)) mx -1 out []]
+               (if-not os out
+                 (let [o (first os)]
+                   (if (and o (>= (long o) mx)) (recur (next os) (long o) (conj out o)) (recur (next os) mx (conj out nil))))))
+        starts (vec (keep identity offs))
+        n (count src)
+        ends (zipmap (keep-indexed (fn [i o] (when o i)) offs) (concat (rest starts) [n]))
+        forms (vec (map-indexed (fn [i f]
+                                  (let [t (if-let [o (nth offs i)] (subs src (int o) (int (get ends i))) "")]
+                                    (vary-meta f assoc :c/text t)))
+                                forms))]
+    (assoc c :forms forms
+           :file-form (with-meta (apply list (concat file-form [:positions :full])) {:c/head (subs src 0 (int (or (first starts) n)))}))))
+
+(defn read-cpp
+  "The forms of the C++ file whose text is at `src-path` and whose dump is at `dump-path` (`main`, its name as clang
+  was given it; `std`, its standard): {:ns :file-form :forms :texts} or {:refused class :message m}. `full`: mode :full."
+  ([dump-path src-path main std] (read-cpp dump-path src-path main std false))
+  ([^String dump-path ^String src-path ^String main ^String std full]
+  (try
+    (let [[_ nodes executed] (read-dump dump-path)
+          src (latin1 src-path)
+          c (convert/convert nodes src main executed)
+          ff (list 'cpp/file main :std (keyword std))
+          c (if full (with-full c src ff) (assoc c :file-form ff))]
+      (if (:refused c) c (assoc c :ns (ns-name-of main))))
+    (catch arbace.lang.ExceptionInfo e
+      (if-let [g (:cpp/gap (ex-data e))]
+        {:refused g :message (ex-message e)}
+        (throw e))))))
+
+(defn unit-text
+  "A read's .ae text."
+  ^String [rd]
+  (layout/unit-text (str "(in-ns '" (:ns rd) ") " (layout/form-str (:file-form rd))) (:forms rd)))
+
+(defn read-unit-text
+  "The forms of an .ae text: [file-form forms]."
+  [^String text]
+  (let [r (arbace.lang.LineNumberingPushbackReader. (java.io.StringReader. text))
+        eof (Object.)
+        forms (loop [out []] (let [x (read r false eof)] (if (identical? x eof) out (recur (conj out x)))))
+        forms (remove #(and (seq? %) (= (first %) 'in-ns)) forms)]
+    [(first forms) (vec (rest forms))]))
+
+(defn print-cpp
+  "A unit's C++ text: mode :full (the text kept) when its cpp/file form says :positions :full, else :lines."
+  ^String [file-form forms]
+  (if (some #{:full} file-form)
+    (let [b (StringBuilder. ^String (or (:c/head (meta file-form)) ""))]
+      (doseq [f forms]
+        (if-let [t (:c/text (meta f))] (.append b ^String t) (.append b (print/print-unit [f]))))
+      (str b))
+    (print/print-unit forms)))
+
+(defn -main
+  "bin/repr-cpp read DUMP FILE [--main NAME] [--std S] [--full]: FILE's forms (from its cxxdump output DUMP) as .ae text
+  (--full: mode :full, the text kept); bin/repr-cpp print FILE.ae...: each unit's C++ text (a :full unit's bytes as read)."
+  [verb & args]
+  (case verb
+    "read" (let [[dump src & opts] args
+                 full (boolean (some #{"--full"} opts))
+                 o (apply hash-map (remove #{"--full"} opts))
+                 rd (read-cpp dump src (get o "--main" src) (get o "--std" "gnu++17") full)]
+             (if (:refused rd)
+               (do (binding [*out* *err*] (println (str src ": refused (" (name (:refused rd)) "): " (:message rd)))) (flush) (System/exit 1))
+               (do (print (unit-text rd)) (flush))))
+    "print" (do (doseq [f args]
+                  (let [[ff forms] (read-unit-text (slurp f))]
+                    (let [t (print-cpp ff forms)]
+                      (if (some #{:full} ff)
+                        (do (flush) (.write System/out (.getBytes t "ISO-8859-1")) (.flush System/out))
+                        (.write ^java.io.Writer *out* t)))))
+                (flush))
+    (do (println "repr/cpp: read or print") (System/exit 2))))

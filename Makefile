@@ -14,7 +14,7 @@ CLOJURE_TESTS_GO ?= target/arbace-go/amd64/arbace-tests
   box box-smoke box-oracle box-suite box-goi box-tools box-rebuild box-convert mac-bundle mac-bundle-convert arm64-vm-check arm64-vm-goi \
   program programs-check programs-essential gate gate-full gate-full-parallel gate-plan gate-why gate-audit gate-prune gate-queue gate-clean gate-full-clean gate-full-clean-only gate-clean-plan gate-pins gate-full-concurrent gate-demos java-check-judge provenance-check reap suite oracle diffcheck generated-check gate-tests verify jdk-verify edge-verify javac-verify javac-classes fixtures-verify tamago-verify \
   toolchain-verify box-vendor-verify x509roots-verify repr-go-roundtrip repr-go-roundtrip-text repr-go-native-check \
-  repr-java-check repr-java-roundtrip repr-java-text repr-java-jdk repr-java-parse-check repr-java-front-check repr-java-attr-check repr-java-nojavac-check repr-clojure-check repr-clojure-roundtrip repr-haskell-roundtrip repr-haskell-iface repr-haskell-text repr-haskell-layout repr-haskell-test repr-rust-roundtrip repr-rust-iface repr-rust-text repr-rust-pretty repr-rust-behaviour repr-rust-code repr-rust-all repr-rust-test repr-c-host-record repr-c-host-check repr-c-ccdump repr-c-check repr-c-record repr-c-parse-check repr-c-read repr-c-print repr-c-roundtrip repr-c-record-gcc repr-c-c23 ci-diagnose ci-run ci-check ci-check-aot ci-dg ci-dg-essential ci-judge-test ci-aot-translate ci-repl-session ci-divergences ci-musl ci-cirun-build ci-annot ci-annotations ci-annotations-record ci-record-ref goi-annotations goi-test goi-check goi-check-aot goi-check-aot-essential goi-check-nethttp goi-check-nethttp-arbace goi-divergences goi-divergences-aot java-check java-check-compiled java-check-compiled-essential java-check-print java-check-nread java-check-diagnostics java-check-essential java-check-ref alpine-check alpine-test clean \
+  repr-java-check repr-java-roundtrip repr-java-text repr-java-jdk repr-java-parse-check repr-java-front-check repr-java-attr-check repr-java-nojavac-check repr-clojure-check repr-clojure-roundtrip repr-haskell-roundtrip repr-haskell-iface repr-haskell-text repr-haskell-layout repr-haskell-test repr-rust-roundtrip repr-rust-iface repr-rust-text repr-rust-pretty repr-rust-behaviour repr-rust-code repr-rust-all repr-rust-test repr-cpp-host-record repr-cpp-host-check repr-cpp-pins-check repr-cpp-cxxdump-build repr-cpp-cxxdump-test repr-cpp-spec-check repr-cpp-pp-check repr-cpp-pp-record repr-cpp-cxxdump-check repr-cpp-roundtrip repr-llvm-roundtrip cppi-lower-check cppi-testsuite repr-c-host-record repr-c-host-check repr-c-ccdump repr-c-check repr-c-record repr-c-parse-check repr-c-read repr-c-print repr-c-roundtrip repr-c-record-gcc repr-c-c23 ci-diagnose ci-run ci-check ci-check-aot ci-dg ci-dg-essential ci-judge-test ci-aot-translate ci-repl-session ci-divergences ci-musl ci-cirun-build ci-annot ci-annotations ci-annotations-record ci-record-ref goi-annotations goi-test goi-check goi-check-aot goi-check-aot-essential goi-check-nethttp goi-check-nethttp-arbace goi-divergences goi-divergences-aot java-check java-check-compiled java-check-compiled-essential java-check-print java-check-nread java-check-diagnostics java-check-essential java-check-ref alpine-check alpine-test clean \
   suite-aot suite-aot-essential suite-divergences java-forms-verify java-forms-update reap-record-native-check \
   repr-c-gcc-tests repr-scheme-fetch repr-scheme-check repr-scheme-check-quick repr-scheme-record repr-scheme-spec repr-scheme-roundtrip si-vendor-verify si-boot si-boot-check si-test si-test-record si-check-suite si-fixpoint si-unit si-light si-test-si si-check si-check-record-ref si-srfi si-srfi-record si-srfi-aot si-aot-check si-aot-check-record si-bench si-divergences si-r7rs si-r7rs-record si-r7rs-chez si-r7rs-chez-record si-r7rs-chibi si-r7rs-chibi-record si-r7rs-chibi-test si-r7rs-chibi-test-record si-chibi-tests si-chibi-tests-record si-ecraven si-ecraven-record si-ecraven-chez si-ecraven-chez-record si-ecraven-chibi si-ecraven-chibi-record si-mats si-mats-record si-corpora-files si-corpora-divergences repr-ocaml-ocdump repr-ocaml-spec-check repr-ocaml-samples repr-ocaml-corpus repr-ocaml-corpus-count repr-ocaml-roundtrip repr-ocaml-roundtrip-all repr-ocaml-check repr-ocaml-text repr-ocaml-cmi repr-ocaml-dumps oi-stdlib oi-build oi-check oi-divergences oi-record-ref oi-repl oi-aot-lib oi-check-aot oi-divergences-aot oi-suite-check oi-suite-check-aot oi-suite-divergences oi-suite-expect oi-suite-rollup oi-suite-record-ref repr-ocaml-opam check-makefile
 
@@ -230,6 +230,32 @@ repr-rust-all: ## every level over all five corpora: std, the rest of library/, 
 	bin/repr-rust roundtrip --iface --text --pretty --run --code --std all
 repr-rust-test: ## repr/rust's cases: the reader's samples, the spec's worked example and its round trip, the interface level's cases, mode :full's, the behaviour and code levels' (bin/repr-rust test)
 	bin/repr-rust test
+repr-cpp-host-record: ## record g++ 15.2's and clang 23.1.4's answers under test/cpp/host/: predefined macros per standard, search lists, __has_* answers, sizes, libstdc++'s header digests (bin/repr-cpp host record)
+	bin/repr-cpp host record
+repr-cpp-host-check: ## the host's compilers still give test/cpp/host/'s answers and libstdc++'s headers their digests (bin/repr-cpp host check)
+	bin/repr-cpp host check
+repr-cpp-pins-check: ## test/cpp/corpora.edn's pins against the tarballs and compilers on the host (bin/repr-cpp pins check)
+	bin/repr-cpp pins check
+repr-cpp-cxxdump-build: ## build the oracle's filter tools/cxxdump into .tmp/repr-cpp/cxxdump (bin/repr-cpp cxxdump-build)
+	bin/repr-cpp cxxdump-build
+repr-cpp-cxxdump-test: ## go test of tools/cxxdump (bin/repr-cpp cxxdump-test)
+	bin/repr-cpp cxxdump-test
+repr-cpp-spec-check: ## every forms block of doc/cpp/SPEC.md reads with Arbace's reader (bin/repr-cpp spec-check)
+	bin/repr-cpp spec-check
+repr-cpp-pp-check: ## repr/cpp's token check: the corpora's files lexed and preprocessed in C++ mode, judged by g++ -E's and clang's recorded answers (bin/repr-cpp pp-check; CORPUS=a,b SAMPLE=N)
+	bin/repr-cpp pp-check $(if $(CORPUS),--corpus $(CORPUS)) $(if $(SAMPLE),--sample $(SAMPLE))
+repr-cpp-pp-record: ## g++ -E and clang's raw tokens run on the corpora's files, their digests and the host's option deltas rewritten (bin/repr-cpp pp-check --record --add-missing; CORPUS=a,b SAMPLE=N)
+	bin/repr-cpp pp-check --record --add-missing $(if $(CORPUS),--corpus $(CORPUS)) $(if $(SAMPLE),--sample $(SAMPLE))
+repr-cpp-cxxdump-check: ## the oracle's filter over a list of files, its numbers (bin/repr-cpp cxxdump-check LIST OUT; LIST=... OUT=...)
+	bin/repr-cpp cxxdump-check $(LIST) $(OUT) --layouts
+repr-cpp-roundtrip: ## repr/cpp's round trip in mode :lines over a list: forms, print, forms again, the print's AST, g++'s and clang's objects (bin/repr-cpp roundtrip LIST WORK; LIST=... WORK=...)
+	bin/repr-cpp roundtrip $(LIST) $(WORK)
+repr-llvm-roundtrip: ## repr/llvm's round trip over a list of IR files: forms, .ae text, print, forms again, clang -c's objects equal (bin/repr-llvm roundtrip LIST WORK; LIST=... WORK=...)
+	bin/repr-llvm roundtrip $(LIST) $(WORK)
+cppi-lower-check: ## C++'s lowering over a list: the IR, its LLVM forms' round trip, the lowered C compiled by gcc -O0 and run as the original, against test/cpp/lower-known.edn (bin/cppi lower-check LIST WORK; LIST=... WORK=...)
+	bin/cppi lower-check $(LIST) $(WORK)
+cppi-testsuite: ## libstdc++'s testsuite extracted from the pinned gcc tarball into .tmp/cppi/gcc (bin/cppi testsuite)
+	bin/cppi testsuite
 repr-c-host-record: ## record the reference's answers repr/c's preprocessor reads with under test/c/host/: gcc 15.2's predefined macros per standard, search list, __has_* answers, the headers' digests (bin/repr-c host record)
 	bin/repr-c host record
 repr-c-host-check: ## the host's gcc still gives test/c/host/'s answers and its headers their digests (bin/repr-c host check)

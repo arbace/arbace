@@ -1,0 +1,76 @@
+#!/bin/bash
+# repr/cpp's round trip in mode :lines (doc/cpp/CPP-SURVEY.md, "As built: CX3, CX4"; doc/cpp/SPEC.md §3): each file of a
+# list (pp-check's gxx.list format: NAME, STD, G++'S ARGS, PATH, THE MODELLED ARGS, tab-separated) is
+#   read:    dumped by the oracle (tools/cxxdump, in the file's directory under its relative name, -iquote the
+#            directory) and converted into forms (arbace.repr.cpp, on the tools' host): WORK/forms/NAME.ae;
+#   printed: WORK/print/NAME (the same relative name under another root);
+#   level 1: the print dumped and converted again, WORK/forms2/NAME.ae, equal to the first forms (cmp);
+#   level 3: the print's AST equal to the original's (cxxdump -norm of both, cmp);
+#   level 4: the print compiled by g++ (-O0 -c with the file's options) and by clang (-c with the modelled options)
+#            gives each compiler's object of the original (cmp);
+# then judged against the known file (test/repr/cpp/roundtrip-known.edn: NAME -> class) into WORK/results.tsv and a summary.
+# Usage: bin/repr-cpp roundtrip LIST WORK [--jobs N] [--no-objects]
+# The light tier: REPR_CPP_THREADS (default 4), GOMAXPROCS=4 and GOMEMLIMIT=1500MiB unless set.
+set -uo pipefail
+root=$(cd "$(dirname "$0")/../../.." && pwd)
+. "$root/bin/lib/tmpdir.bash"
+. "$root/bin/lib/tools.bash"
+list=$1 work=$2; shift 2
+jobs=${REPR_CPP_THREADS:-4} objects=1
+while [ $# -gt 0 ]; do
+  case $1 in
+    --jobs) jobs=$2; shift 2 ;;
+    --no-objects) objects=; shift ;;
+    *) echo "roundtrip: unknown option $1" >&2; exit 2 ;;
+  esac
+done
+export GOMAXPROCS=${GOMAXPROCS:-4} GOMEMLIMIT=${GOMEMLIMIT:-1500MiB} REPR_CPP_THREADS=$jobs
+exe=$root/.tmp/repr-cpp/cxxdump
+[ -x "$exe" ] || "$root/bin/repr-cpp" cxxdump-build >&2
+cache=${REPR_CPP_CXXDUMP_CACHE:-$root/.tmp/repr-cpp/cxxdump-cache}
+mkdir -p "$work" "$cache"; work=$(cd "$work" && pwd)
+mkdir -p "$work/orig" "$work/print" "$work/forms" "$work/forms2" "$work/dump2" "$work/obj"
+cp "$list" "$work/list.tsv"
+srcroot=$(head -1 "$list" | awk -F'\t' '{p=$4; n=$1; print substr(p, 1, length(p)-length(n)-1)}')
+echo "$srcroot" > "$work/srcroot.txt"
+
+dump() { # dump OUTDIR ROOT NAME STD CARGS ORIGDIR: the file's dump and normalized dump
+  local o=$1 r=$2 n=$3 std=$4 cargs=$5 od=$6
+  cargs=${cargs//-fmodules-ts/}; cargs=${cargs//-fmodules/}
+  mkdir -p "$(dirname "$o/$n")"
+  # shellcheck disable=SC2086
+  (cd "$r" && timeout 300 "$exe" -implicit=false -cache "$cache" -stats "$o/$n.stats" -o "$o/$n.edn" -- -x c++ -std=$std $cargs -iquote "$od" "$n") 2> "$o/$n.err"
+  echo $? > "$o/$n.status"
+  # shellcheck disable=SC2086
+  [ "$(cat "$o/$n.status")" = 0 ] && (cd "$r" && timeout 300 "$exe" -implicit=false -norm -cache "$cache" -o "$o/$n.norm" -- -x c++ -std=$std $cargs -iquote "$od" "$n") 2> "$TMPDIR/rt-norm.$$.err"
+}
+objs() { # objs OUTDIR ROOT NAME STD GARGS CARGS ORIGDIR: the objects of g++ and clang
+  local o=$1 r=$2 n=$3 std=$4 gargs=$5 cargs=$6 od=$7 c
+  cargs=${cargs//-fmodules-ts/}; cargs=${cargs//-fmodules/}
+  mkdir -p "$(dirname "$o/gxx/$n")" "$(dirname "$o/clang/$n")"
+  # shellcheck disable=SC2086
+  (cd "$r" && SOURCE_DATE_EPOCH=1793145600 timeout 300 g++ -x c++ -std=$std $gargs -O0 -fno-stack-protector -iquote "$od" -fdebug-prefix-map="$r"=. -c "$n" -o "$o/gxx/$n.o") > "$o/gxx/$n.log" 2>&1
+  echo $? > "$o/gxx/$n.status"
+  # shellcheck disable=SC2086
+  (cd "$r" && SOURCE_DATE_EPOCH=1793145600 timeout 300 clang++ -x c++ -std=$std $cargs -O0 -iquote "$od" -fdebug-prefix-map="$r"=. -c "$n" -o "$o/clang/$n.o") > "$o/clang/$n.log" 2>&1
+  echo $? > "$o/clang/$n.status"
+}
+export -f dump objs; export exe cache work TMPDIR
+
+each() { # each FUNCTION-AND-ARGS: run over the list in parallel, the fields NAME STD GARGS PATH CARGS as $1..$5
+  tr '\t\n' '\037\0' < "$work/list.tsv" | xargs -0 -P "$jobs" -I{} nice bash -c 'IFS=$'"'"'\037'"'"' read -r n s g p c <<< "$1"; d=${p%"/$n"}; od=$(dirname "$p"); '"$1" _ {}
+}
+t0=$(date +%s)
+each 'dump "$work/orig" "$d" "$n" "$s" "$c" "$od"'
+t1=$(date +%s)
+arbace_tool -m arbace.repr.cpp.rtcheck run "$work/list.tsv" "$work/orig" "$srcroot" "$work/forms" "$work/print" "$work/read.tsv" || exit 1
+t2=$(date +%s)
+each '[ -f "$work/print/$n" ] && dump "$work/dump2" "$work/print" "$n" "$s" "$c" "$od"'
+arbace_tool -m arbace.repr.cpp.rtcheck run "$work/list.tsv" "$work/dump2" "$work/print" "$work/forms2" - "$work/read2.tsv" || exit 1
+t3=$(date +%s)
+if [ -n "$objects" ]; then
+  each '[ -f "$work/print/$n" ] && objs "$work/obj/orig" "$d" "$n" "$s" "$g" "$c" "$od" && objs "$work/obj/print" "$work/print" "$n" "$s" "$g" "$c" "$od"'
+fi
+t4=$(date +%s)
+echo "roundtrip: dumps $((t1-t0)) s, forms and prints $((t2-t1)) s, again $((t3-t2)) s, objects $((t4-t3)) s" | tee "$work/times.txt"
+arbace_tool -m arbace.repr.cpp.rtcheck judge "$work" "$root/test/repr/cpp/roundtrip-known.edn"
