@@ -1182,3 +1182,9 @@ function reads what it needs of its callers' scope: `only`, `rexe`, `record`.
   record's own executable. When a goi level records, `nethttp_listing` asks the executable (`GoInterp`'s paths, what
   `arbace.go.repl/listed?` asks) and the header says "net/http listed", "unlisted", or "net/http's listing unknown"
   when it does not answer. The Makefile's count is 66.
+- A5, "recorded on:": a local executable (not under `gate-exe/`) is named with its path and its version map's
+  `:describe` and `:runtime`, asked (`-e`) only when recording, and the checkout's own path in ARBACE_PATH is written
+  `<checkout>`, so a re-record from another worktree changes no header.
+
+What the next build's run must check besides the above: `--record` writes the listing and the build the executable
+answers (the two `-e` expressions run on a real executable for the first time there).
