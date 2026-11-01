@@ -150,6 +150,9 @@
         rfile (when (and okey (seq results-dir)) (str results-dir "/" okey ".edn"))
         rrec (when (and rfile (not record?) (.exists (java.io.File. ^String rfile))) (read-string (slurp rfile)))
         rec-files (:files rrec {})
+        ;; CP165 (b), CP172 (b): a recorded :known may carry its class, [:known :forms-differ]; the bare keyword (the old format) holds the verdict alone
+        rv (fn [x] (if (vector? x) (first x) x))
+        rc (fn [x] (when (vector? x) (second x)))
         kfiles (:files known {})
         ;; level 4 (review 007's finding 7): the objects are required unless the run had --no-objects; a compiler may fail on
         ;; the original only where the known file's :orig-fails records it (NAME -> the compilers, #{:gxx :clang})
@@ -217,15 +220,17 @@
                                    (= read "oracle-rejects-new") "fail"
                                    (or (= read "no-dump") (str/starts-with? read "dump-error")) "fail"
                                    (and k (contains? fits first)) "known" :else "fail")
-                     regression (and (= :pass (get rec-files q)) (not= verdict "pass"))
+                     regression (and (= :pass (rv (get rec-files q))) (not= verdict "pass"))
                      ;; report 043's F5: a recorded :known, :oracle-rejects or :oracle-fails that is now another non-pass verdict is
                      ;; a change (a pass is an improvement, counted): the record holds every verdict
-                     changed (and (not regression) (contains? rec-files q) (not= :pass (get rec-files q)) (not= verdict "pass")
-                                  (not= (keyword verdict) (get rec-files q)))
+                     changed (and (not regression) (contains? rec-files q) (not= :pass (rv (get rec-files q))) (not= verdict "pass")
+                                  (or (not= (keyword verdict) (rv (get rec-files q)))
+                                      (and (= verdict "known") (rc (get rec-files q)) (not= (rc (get rec-files q)) k))))
                      verdict0 verdict
                      verdict (if (or regression changed) "fail" verdict)]
                  [q verdict (if k (name k) "-") read (str l1) (str l3) (str g) (str c) (or texts "-") (or full "-") (if first (name first) "-")
-                  (cond regression "regression" changed (str "changed:" (name (get rec-files q)) ">" verdict0) :else "-")]))
+                  (cond regression "regression" changed (str "changed:" (name (rv (get rec-files q))) (when (rc (get rec-files q)) (str ":" (name (rc (get rec-files q))))) ">" verdict0
+                                                       (when (and (= verdict0 "known") k) (str ":" (name k)))) :else "-")]))
         rows (vec rows)
         cnt (fn [pred] (count (filter pred rows)))
         qs (set (map first rows))
@@ -260,7 +265,7 @@
                  :results-record (cond record? (str "recording " okey) rrec okey okey (str "none for " okey) :else "none (no corpus key)")
                  :regressions (cnt #(= (nth % 11) "regression"))
                  :changed (cnt #(str/starts-with? (nth % 11) "changed:"))
-                 :improvements (when rrec (cnt #(and (= (second %) "pass") (contains? rec-files (first %)) (not= :pass (get rec-files (first %))))))
+                 :improvements (when rrec (cnt #(and (= (second %) "pass") (contains? rec-files (first %)) (not= :pass (rv (get rec-files (first %)))))))
                  :results-missing (when rrec (count rec-missing)) :results-new (when rrec (count rec-new))}]
     (spit (str work "/results.tsv") (str/join (map #(str (str/join "\t" %) "\n") rows)))
     (spit (str work "/summary.edn") (pr-str summary))
@@ -302,12 +307,12 @@
               shrinks (println (str "rtcheck: not recorded: the run's " (count rows) " names are not the existing record's " (count rec-names) " in " rfile
                                     " (" (count (remove qs rec-names)) " recorded names missing, " (count (remove rec-names qs)) " new; --replace-results rewrites the record)"))
               :else (do (spit rfile (str ";; bin/repr-cpp roundtrip's recorded results of the list " okey " (CP124 (b); doc/cpp/CPP-SURVEY.md, \"As built: CP120, CP121, CP124,\n"
-                                         ";; CP127\"): NAME -> verdict (:pass, :known, :oracle-rejects, :oracle-fails), the names qualified by the corpus (CP127 (b)). A run of\n"
+                                         ";; CP127\"): NAME -> verdict (:pass, [:known CLASS], :oracle-rejects, :oracle-fails; CP165 (b): a bare :known holds the verdict alone), the names qualified by the corpus (CP127 (b)). A run of\n"
                                          ";; the list fails on a recorded verdict that is not the run's (a :pass that does not pass, another non-pass verdict than the recorded one; a move to :pass is an\n"
                                          ";; improvement, counted), a recorded name it does not have, or a name not recorded;\n"
                                          ";; --record-results writes the file again from a run with no failure. Read with the Clojure reader.\n"
                                          "{:key " (pr-str okey) "\n :summary " (pr-str (dissoc summary :results-record :regressions :changed :improvements :results-missing :results-new)) "\n :files {\n"
-                                         (str/join (for [r (sort-by first rows)] (str "  " (pr-str (first r)) " " (keyword (second r)) "\n")))
+                                         (str/join (for [r (sort-by first rows)] (str "  " (pr-str (first r)) " " (if (and (= (second r) "known") (not= (nth r 2) "-")) (pr-str [:known (keyword (nth r 2))]) (keyword (second r))) "\n")))
                                          " }}\n"))
                         (println (str "rtcheck: recorded " (count rows) " results of " okey " in " rfile)))))
       (System/exit (if (or (seq fails) held-bad unheld shrinks (seq stale) unknown) 1 0)))))
