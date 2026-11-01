@@ -28,6 +28,9 @@ for n in min rej slow crash; do printf '%s.cpp\tc++23\t-std=c++23\t%s\t-std=c++2
 echo '{:files {}}' > "$t/known.edn"
 rt() { # rt WORKNAME ORACLE-FILE [options]: the exit status; the verdicts in one line
   local n=$1 w=$t/$1 o=$2; shift 2
+  # pending.edn lists the corpora the oracle file has, and the one a --record-oracle run writes into it (report 052's N2: a key it
+  # does not have is stale)
+  { [ ! -f "$o" ] || grep -o '"tc2\?"' "$o"; case " $* " in *" --record-oracle "*) case " $* " in *" tc2 "*) echo '"tc2"' ;; *) echo '"tc"' ;; esac ;; esac; } | sort -u | tr '\n' ' ' | sed 's/^/#{/; s/$/}/' > "$t/res/pending.edn"
   REPR_CPP_CXXDUMP_EXE=$t/cx REPR_CPP_CXXDUMP_CACHE=$t/cache REPR_CPP_ROUNDTRIP_KNOWN=$t/known.edn REPR_CPP_ROUNDTRIP_ORACLE=$o \
     "$root/bin/repr-cpp" roundtrip "$t/list.tsv" "$w" --no-objects "$@" > "$t/$n.log" 2>&1
 }
