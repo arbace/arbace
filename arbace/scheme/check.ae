@@ -54,20 +54,49 @@
   [ids all]
   (let [have (set (map :id all))] (vec (remove have ids))))
 
+(defn duplicate-ids
+  "The ids that occur more than once in ids, each once, in the order of their first occurrence (re-review 058, Q5)."
+  [ids]
+  (let [f (frequencies ids)] (vec (distinct (filter #(> (f %) 1) ids)))))
+
+(defn record-plan
+  "record-ref's decision, pure: from the programs' ids, the reference's entries old and Chez's runs, {:refuse [LINE ...]} (nothing
+  written) or {:all ENTRIES :notes [LINE ...]}. A program id named twice in programs.edn is refused (the merge would write its
+  entry twice); a reference entry named twice (a hand edit) is said, one kept: the run's, else the last (re-review 058, Q5)."
+  [ids old runs]
+  (if-let [d (seq (duplicate-ids ids))]
+    {:refuse [(str "test/scheme/si/programs.edn names more than once: " (str/join ", " d) " (nothing recorded)")]}
+    (let [all (merge-runs ids old runs)]
+      {:all all
+       :notes (vec (concat
+                     (when-let [d (seq (duplicate-ids (map :id old)))]
+                       [(str "the reference had more than one entry for: " (str/join ", " d) " (one kept: the run's, else the last)")])
+                     (when-let [m (seq (missing-ids ids all))]
+                       [(str "no reference entry for: " (str/join ", " m) " (run them: bin/si check --record-ref --only ID)")])))})))
+
 (defn- ref-file [] (path "test/scheme/si/ref-chez.edn"))
 
 (defn- cmd-record-ref [[dir]]
   (let [runs (vec (for [{:keys [id]} (programs) :let [r (run-of dir id)] :when r]
                     {:id id :status (:status r) :out (normalise-gensym (:out r)) :err (first-line (:err r))}))
         old (when (.exists (java.io.File. (ref-file))) (read-string (slurp (ref-file))))
-        all (merge-runs (map :id (programs)) old runs)]
-    (spit (ref-file)
-          (str ";; Chez Scheme 10.3.0's runs of si's check programs (bin/si check --record-ref); generated.\n"
-               "[\n" (str/join "" (map #(str (pr-str %) "\n") all)) "]\n"))
-    (println "recorded" (count runs) "runs of Chez into test/scheme/si/ref-chez.edn," (count all) "entries")
-    (when-let [m (seq (missing-ids (map :id (programs)) all))]
-      (println "no reference entry for:" (str/join ", " m) "(run them: bin/si check --record-ref --only ID)"))
-    0))
+        {:keys [refuse all notes]} (record-plan (map :id (programs)) old runs)]
+    (if refuse
+      (do (doseq [l refuse] (println l)) 1)
+      (do (spit (ref-file)
+                (str ";; Chez Scheme 10.3.0's runs of si's check programs (bin/si check --record-ref); generated.\n"
+                     "[\n" (str/join "" (map #(str (pr-str %) "\n") all)) "]\n"))
+          (println "recorded" (count runs) "runs of Chez into test/scheme/si/ref-chez.edn," (count all) "entries")
+          (doseq [l notes] (println l))
+          0))))
+
+(defn- duplicates-code
+  "Re-review 058, Q5: an id twice in programs.edn or in the reference (where the judge's last entry would win silently) said; 1 when one is."
+  []
+  (let [ls (concat (for [d (duplicate-ids (map :id (programs)))] (str "test/scheme/si/programs.edn names more than once: " d))
+                   (for [d (duplicate-ids (map :id (read-string (slurp (ref-file)))))] (str "test/scheme/si/ref-chez.edn has more than one entry for: " d)))]
+    (doseq [l ls] (println "  FAILING" l))
+    (if (seq ls) 1 0)))
 
 (defn- cmd-ref-test
   "The pure parts of record-ref: the merge keeps entries not run and replaces the ones run, the gensym is normalised."
@@ -75,7 +104,10 @@
   (let [e (fn [id o] {:id id :status 0 :out o :err ""})
         m (merge-runs ["a" "b" "c"] [(e "a" "1") (e "b" "2") (e "c" "3")] [(e "b" "X")])
         g (normalise-gensym "R #[#{err kixdzb-2} #<c>] #{err jpjtb3-2}")
+        p (record-plan ["a" "b"] [(e "a" "1") (e "b" "2") (e "a" "3")] [(e "b" "X")])
         ok (and (= ["1" "X" "3"] (map :out m)) (= ["d"] (missing-ids ["a" "d"] m)) (empty? (missing-ids ["a"] m))
+                (= ["a" "c"] (duplicate-ids ["a" "b" "a" "c" "c" "a"])) (empty? (duplicate-ids ["a" "b"]))
+                (:refuse (record-plan ["a" "b" "a"] [] [])) (= ["3" "X"] (map :out (:all p))) (= 1 (count (:notes p)))
                 (= "R #[#{err gensym} #<c>] #{err gensym}" g)
                 (= g (normalise-gensym g)))]
     (println (if ok "ref-test: ok" (str "ref-test: FAILED " (pr-str m) (pr-str g))))
@@ -296,7 +328,7 @@
 (defn -main [& [cmd & args]]
   (let [rc (case cmd
              "record-ref" (cmd-record-ref args)
-             "judge" (binding [*aot* (boolean (some #{"--aot"} args))] (cmd-judge (remove #{"--aot"} args)))
+             "judge" (binding [*aot* (boolean (some #{"--aot"} args))] (max (cmd-judge (remove #{"--aot"} args)) (duplicates-code)))
              "compare" (cmd-compare args)
              "ref-test" (cmd-ref-test)
              "divergences" (binding [*aot* (boolean (some #{"--aot"} args))] (cmd-divergences (remove #{"--aot"} args)))
