@@ -314,6 +314,20 @@
            (or (:vla a) (:vla b) (= (or (:n a) 0) (or (:n b) 0))))
       :else (compatible? a b))))
 
+(defn- union-param-match?
+  "gcc's leniency in a prototype's parameter lists (c-typeck.cc's type_lists_compatible_p): a parameter `u` of a
+  transparent union type, or of a union type with no name (neither a tag nor spelled by a typedef), is compatible with the other's `o` when their sizes are equal and a member's type
+  (unqualified unless an array) is compatible with `o` (`wait (union {union wait *u; int *i} *)` and
+  `wait (union wait *)`; `sendto (__CONST_SOCKADDR_ARG)` and `sendto (const struct sockaddr *)`). Both unqualified."
+  [u o]
+  (and (= :union (:k u))
+       (let [^HashMap r (:rec u)]
+         (and (or (and (nil? (.get r :tag)) (nil? (:typedef-name u))) (:transparent u) (.get r :transparent))
+              (.get r :complete)
+              (let [s (size-of u)] (and (some? s) (= s (size-of o))))
+              (boolean (some (fn [m] (let [mt (:t m)] (compatible? (if (= :array (:k mt)) mt (unq mt)) o)))
+                             (.get r :members)))))))
+
 (defn compatible?
   "Type compatibility (6.2.7), qualifiers compared."
   [a b]
@@ -330,7 +344,9 @@
         :fn (and (compatible? (unq (:ret a)) (unq (:ret b)))
                  (or (not (:proto a)) (not (:proto b))
                      (and (= (count (:params a)) (count (:params b))) (= (boolean (:variadic a)) (boolean (:variadic b)))
-                          (every? true? (map #(compatible? (unq %1) (unq %2)) (:params a) (:params b))))))
+                          (every? true? (map (fn [p q] (let [p (unq p) q (unq q)]
+                                                                         (or (compatible? p q) (union-param-match? p q) (union-param-match? q p))))
+                                             (:params a) (:params b))))))
         (:struct :union :enum) (let [^HashMap ra (:rec a) ^HashMap rb (:rec b)]
                                  (or (identical? ra rb)
                                      (and (= (.get ra :tag) (.get rb :tag)) (some? (.get ra :tag))
@@ -746,6 +762,84 @@
 
 (declare check-struct check-enum)
 
+(defn- int-mode
+  "mode_for_size_tree (size, MODE_INT, limit): the integer mode of `n` bytes, up to TImode, else BLKmode."
+  [n]
+  (if (#{1 2 4 8 16} n) [:int n] :blk))
+
+(defn- int-mode? [m] (and (vector? m) (= :int (first m))))
+
+(defn- mode-precision
+  "GET_MODE_PRECISION of a type-mode."
+  [m]
+  (cond (not (vector? m)) 0
+        (= :int (first m)) (* 8 (long (second m)))
+        (= m [:float :ld]) (if (= 16 (long (size-of {:k :ldouble}))) 80 64)
+        (= :float (first m)) ({:sf 32 :df 64 :hf 16 :bf 16 :tf 128} (second m))
+        (= :dec (first m)) ({:dec32 32 :dec64 64 :dec128 128 :dec64x 128} (second m))
+        (= :complex (first m)) (* 2 (long (mode-precision (second m))))
+        (= :vector (first m)) (* 8 (long (second m)))
+        :else 0))
+
+(defn- type-mode
+  "A model of gcc's TYPE_MODE (x86-64; aarch64 alike for what transparent_union asks): [:int bytes] for the integer
+  classes (pointers too), a float mode per format, a complex or vector mode of its parts, :blk; records by
+  stor-layout.cc's compute_record_mode, arrays by mode_for_array."
+  [t]
+  (case (:k t)
+    (:bool :char :schar :uchar :short :ushort :int :uint :long :ulong :llong :ullong :int128 :uint128 :ptr :nullptr :enum)
+    (int-mode (size-of t))
+    :bitint (int-mode (size-of t))
+    (:float :float32) [:float :sf]
+    (:double :float64 :float32x) [:float :df]
+    (:ldouble :float64x) [:float :ld]
+    :float16 [:float :hf]
+    :bf16 [:float :bf]
+    (:float128 :float128x) [:float :tf]
+    (:dec32 :dec64 :dec128 :dec64x) [:dec (:k t)]
+    :complex [:complex (type-mode (:of t))]
+    :vector [:vector (:n t) (type-mode (:of t))]
+    :array (let [s (size-of t) es (size-of (:of t))]
+             (cond (nil? s) :blk
+                   (= s es) (type-mode (:of t))
+                   :else (int-mode s)))
+    (:struct :union)
+    (let [^HashMap r (:rec t) size (size-of t)
+          prec mode-precision]
+      (if (or (nil? size) (zero? (long size)))
+        :blk
+        (let [mode (reduce (fn [mode m]
+                             (let [ft (:t m)
+                                   tm (type-mode ft)
+                                   ;; layout_decl: a bit-field of an integer mode's width at its boundary takes that mode
+                                   bits (if (:bits m) (long (:bits m)) (when-let [fs (size-of ft)] (* 8 (long fs))))
+                                   fm (if (:bits m) (if (and (zero? (rem bits 8)) (pos? bits)) (int-mode (quot bits 8)) :none) tm)]
+                               (cond
+                                 ;; a member of BLKmode type (not of size 0) makes the record BLKmode
+                                 (and (= tm :blk) (not (and (:bits m) (zero? bits))) (not (= 0 (size-of ft)))) (reduced :blk)
+                                 (nil? bits) (reduced :blk)
+                                 (and (= bits (* 8 (long size))) (not (#{:blk :none} fm)) (> (long (prec fm)) (long (prec mode)))) fm
+                                 :else mode)))
+                           :void (.get r :members))]
+          (cond
+            (= mode :blk) :blk
+            (and (vector? mode) (or (= :struct (:k t)) (int-mode? mode))) mode
+            :else (int-mode size)))))
+    :blk))
+
+(defn- transparent-ok?
+  "Whether gcc keeps transparent_union on the complete union `r` (c-attribs.cc's handle_transparent_union_attribute,
+  c-decl.cc's finish_struct): a first member whose mode (DECL_MODE) is the union's (TYPE_MODE): compute_record_mode
+  gives a union the mode of its widest member as wide as itself only when that mode is an integer one, else the
+  integer mode of its size; so a first member of floating type, or narrower than the union, drops the attribute."
+  [^HashMap r]
+  (let [f (first (.get r :members))
+        um (type-mode {:k :union :rec r})
+        fm (when f (if-let [b (:bits f)]
+                     (let [b (long b)] (when (and (pos? b) (zero? (rem b 8)) (int-mode? (type-mode (:t f)))) (int-mode (quot b 8))))
+                     (type-mode (:t f))))]
+    (boolean (and f (not= um :blk) (= um fm)))))
+
 (defn- spec-attrs-packed [m] (some #(= "packed" (first %)) (apply attrs-of m all-attr-keys)))
 
 (defn- bitint-width
@@ -971,6 +1065,9 @@
         (when al (.put r :min-align al))
         (when (cx :pack) (feat! :cc-attr-layout))
         (layout! r ms kind packed (cx :pack))
+        ;; GNU's transparent_union on the definition: the type itself is transparent (c-attribs.cc)
+        (when (and (= kind :union) (some #(= "transparent_union" (first %)) as) (transparent-ok? r))
+          (.put r :transparent true))
         (.remove r :defining)
         (when redef (.remove redef :redefining))
         (let [t (if (and redef (rec-same? redef r))
@@ -2068,6 +2165,20 @@
   (cond
     (and (= :array (:k old)) (= :array (:k new))) (if (and (nil? (:n new)) (:n old)) (assoc new :n (:n old)) new)
     (and (= :fn (:k old)) (= :fn (:k new)) (not (:proto new)) (:proto old)) old
+    ;; gcc's composite_type: a union parameter one of whose members is the other's type gives the other's type
+    ;; (`wait (union wait *)` preferred), with -Wpedantic's pedwarn
+    (and (= :fn (:k old)) (= :fn (:k new)) (:proto old) (:proto new) (= (count (:params old)) (count (:params new)))
+         (compatible? old new))
+    (let [mv (fn [t] (if (= :array (:k t)) t (unq t)))
+          pick (fn [p q] ; p old's, q new's
+                 (let [up (unq p) uq (unq q)
+                       memb? (fn [u o] (and (= :union (:k u)) (not (identical? (:rec u) (:rec o)))
+                                            (some #(compatible? (mv (:t %)) o) (.get ^HashMap (:rec u) :members))))]
+                   (cond
+                     (memb? up uq) (do (pedwarn! "function types not truly compatible in ISO C") q)
+                     (memb? uq up) (do (pedwarn! "function types not truly compatible in ISO C") p)
+                     :else q)))]
+      (assoc new :params (mapv pick (:params old) (:params new))))
     :else new))
 
 (defn- declare-object!
@@ -2349,7 +2460,14 @@
         m (meta nm)
         t (vectorize (parse-type tf) m)
         t (if-let [al (some #(when (= "aligned" (first %)) (aligned-value (second %))) (attrs-of m :c/attrs :c/after-attrs :c/decl-attrs))]
-            (assoc t :talign al) t)]
+            (assoc t :talign al) t)
+        ;; transparent_union on a typedef: a transparent copy of a complete union (c-attribs.cc)
+        t (if (and (= :union (:k t)) (some #(= "transparent_union" (first %)) (attrs-of m :c/attrs :c/after-attrs :c/decl-attrs))
+                   (.get ^HashMap (:rec t) :complete) (transparent-ok? (:rec t)))
+            (assoc t :transparent true) t)
+        ;; a union named by a typedef has a TYPE_NAME (set_underlying_type's variant): not tagless to
+        ;; type_lists_compatible_p (union-param-match?)
+        t (if (= :union (:k t)) (assoc t :typedef-name n) t)]
     (attr-args! m)
     (decl-position-attrs! (assoc m :tag tf) :typedef t)
     (when (:c/bad-specs m) (err! "two or more data types in declaration specifiers"))
