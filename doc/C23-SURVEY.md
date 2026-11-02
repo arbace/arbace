@@ -4306,8 +4306,8 @@ against the committed records and known files, a regression or a file in no clas
 
 | step | command | parts | hosts | `:mem-gib` | time (measured or C9.2's) |
 |---|---|---|---|---:|---|
-| `c-check` | `env CI_EXE="$GATE_EXE" CI_JOBS=4 bin/ci check --corpus {part}` | the 7 run corpora | `:prog :stage0 :go` (needs `go-build`) | 2 | ~45 min (C9.2 row 5; 37 min on cirun, C5.4) |
-| `c-aot` | `env CI_AOT_NODES=1 CI_JOBS=4 bin/ci check --aot --corpus {part}` | the 7 run corpora | `:stage0 :go` | 4 | ~100 min (row 11a's 60, the interpreted runs beside about 40) |
+| `c-check` | `env CI_EXE="$GATE_EXE" CI_JOBS=4 bin/ci check --corpus {part}` | the 15 run corpora | `:prog :stage0 :go` (needs `go-build`) | 2 | ~48 min (C9.2 row 5; 37 min on cirun, C5.4; the 179 gcc-*-run and ci-run programs about 3 more) |
+| `c-aot` | `env CI_AOT_NODES=1 CI_JOBS=4 bin/ci check --aot --corpus {part}` | the 15 run corpora | `:stage0 :go` | 4 | ~105 min (row 11a's 60, the interpreted runs beside about 40, the 179 programs about 5) |
 | `c-dg` | `env CI_JOBS=4 bin/ci dg` | none (its `:dg` control crosses two groups) | `:stage0` | 3 | ~8 min (C7.1) |
 | `c-annotations` | `bin/ci annotations --corpus {part}` | 21 (the 20 below and `c23`) | `:stage0 :go` | 6 | 31-43 min (row 7) |
 | `c-tokens` | `bin/repr-c check --tokens --corpus {part}` | 20 corpora read in place | `:stage0 :go` | 6 | ~30 min (C2.5: 28.5 min) |
@@ -4320,8 +4320,18 @@ group: the back end's package files and trees, tools/cirun, bin/repr-go), the cc
 (the essential `c-dg-essential`, `c-check-essential`, `c-aot-essential`, `c-c23`, and `c-judge-test` and the seven above; not `c-c2j`) declares the host `:gcc`:
 `bin/lib/gate-run.bash`'s `gate_gcc_id`, the SHA-256 of gcc's `--version` line, of its driver's and cc1's bytes (through their links) and of the headers `test/c/host/headers.sha256` names (gcc's
 include directory, musl's `/usr/include`), in `hosts.edn`; the audit
-(`test/gate/audit.ae`) fails a step that runs gcc or cc1 without it. Added time of `--full`: about 7 to 8 hours serial (the sum above, about 6.2 hours, and the
-parts' starts). Built with them: `bin/repr-c parse-check --mutants-only` (the mutants a whole run draws,
+(`test/gate/audit.ae`) fails a step that runs gcc or cc1 without it. Added time of `--full`: about 7 to 8 hours serial (the sum above, about 6.4 hours, and the
+113 parts' starts).
+
+**Review 150 (VM, the user's decision of 2026-11-02):** the run levels' default corpora (`bin/lib/ci/check`'s and `check-aot`'s `all=`) were the seven
+ccorpus2 and benchmarksgame corpora, so the records' 179 rows of the seven gcc-*-run groups and ci-run were judged by no run, and the essential `--only` lists'
+21 and 2 entries of them were skipped silently; `all=` is now every corpus `test/c/ref-gcc15.edn` records (15), `c-check` and `c-aot` have a part each (the
+gcc-*-run parts read gcc 15.2.0's testsuite through `bin/repr-c gcc-tests`, the tarball pinned by `test/c/corpora.edn`, the main checkout's copy or fetched), and
+an `--only` entry outside the run corpora is refused (status 2; `test/gate/ci-exe-relative-test.bash`). Its fix 3f6c8f14 is cherry-picked (`--pins` in the clean
+clone looks for C's tarballs where the clone's tools take them), and its finding 3 fixed: the scripts take the main checkout as `${root%%/.tmp/gate-clean/*}`
+then `%%/.tmp/worktrees/*`, the two known layouts only, so a checkout under another `/.tmp/` is itself. Noted, not changed: cirun's key leaves out stage 0
+(finding 4: the gate's steps key `:stage0` anyway); the summaries of the cc-based steps may show the lists' lines (finding 5; c-check's and c-aot's now show every
+corpus line). Built with them: `bin/repr-c parse-check --mutants-only` (the mutants a whole run draws,
 the corpora not checked); the C scripts' go-whim default and musl's and gcc's local tarballs found from a clean run's clone (`.tmp/gate-clean/SHA`) as from a
 worktree (`${root%%/.tmp/*}`); queue 138's inputs (cherry-picked) and its finding 4 fixed: `bin/ci cirun-build --ensure` keeps `.tmp/ci/cirun` only while
 `.tmp/ci/key` is the checkout's (test `test/gate/cirun-key-test.bash`); `c-c2j` declares `go/arbace/jrt/*.ae` (c2j's emit scans jrt: `bin/gate --audit c-c2j`
