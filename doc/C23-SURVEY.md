@@ -4330,6 +4330,32 @@ Proposals for the classes no CS decides (F7), decided (the user, 2026-11-02): CS
   read-refused C7, a gap). Options: (a) the spec's sections and C7 stand as their decision, as cited; (b) each restated as a CS. *Recommended: (a)*.
   **Decided (the user, 2026-11-02): (a): the spec's sections and C7 stand as their decision, as cited.**
 
+**The annotations' record at the re-seed window's step 7 (2026-11-02), and the writers' placeholder.** Step 7 (`bin/ci annotations --record` over
+the 21 corpora) wrote 77 entries `{:class :unclassified}`, a class queue 122's F1 had taken out of the REAP classes but no writer stopped writing.
+None was a regression of the day's changes. 45 were the writer's: `record` wrote every non-passing file without an old entry as `:unclassified`,
+the files the judge classes by itself too (`:gcc-rejects`, parse-gcc.tsv's status 1: all 33 torture entries; `:pp-known`, the token check's known
+`:pp`: 12), which C4's record had pruned by hand (its header "that no automatic class explains"). 32 were false errors against parse-gcc.tsv from
+C7's checker: 30 error tests gcc 15.2 rejects at their dg-options (-pedantic-errors' pedwarns, -Wattributes' ignored attributes) or when it compiles
+them (dg-do compile: a misplaced fallthrough, an impossible asm constraint), while the reference runs `gcc -fsyntax-only -w` at the standard alone,
+each checked by gcc 15.2 at the test's options; 2 the checker's own, `:checker-gap` by CS93 (a) (torture-compile pr34885.c and pr46866.c: a
+redeclaration through a `transparent_union` parameter, "conflicting types", since CS133). Proposals:
+- **CS265 Error tests gcc rejects at their options, which the reference accepts** (`test/c/divergences-annot.edn`'s `gcc-rejects-at-options`,
+  30 files). Options: (a) a class by design: the checker follows gcc at the test's options (CS93 (a)'s rule); (b) parse-gcc.tsv recorded again at the
+  modelled options (`-pedantic-errors` from the file's `:pedantic`, `-S` for dg-do compile), the files then `:gcc-rejects`, the round trip's and
+  the tree check's reference changed with it. *Recommended: (a)*.
+  **Decided (the user, 2026-11-02): (a): by design, cited in the class's `:decided`.**
+- **CS266 The judge's own classes counted** (`:gcc-rejects` 33 files, `:pp-known` 12). Options: (a) `--record` writes them into the known file
+  with their classes and texts (`arbace.repr.c.annot/auto-classes`), both by design (`:gcc-rejects`: an error test, whose annotations no
+  reference makes; `:pp-known`: cc's preprocessor's gaps, CS260 (a)'s classes), so bin/reap counts all 131 non-passes; (b) left out as C4's header
+  said, the results file's `:known` rows then counted nowhere. *Recommended: (a)*.
+  **Decided (the user, 2026-11-02): (a): both by design, cited in the classes' `:decided`.**
+- The writers (the user's decision, 2026-11-02): no record writes `:unclassified`. `--record` of the annotations (`arbace.repr.c.annot`), the
+  token check (`arbace.repr.c.ppcheck`, `:pp`, `:lex`, `:gcc`), the tree check (`arbace.repr.c.parsecheck`) and the round trip
+  (`arbace.repr.c.rtcheck`) keeps a file's class, else the judge's own or the guess (`classify`, nil when no rule names the file), else prints
+  the file, leaves it out of the known file and exits 3: the script judges, writes the results and fails. The class's definition left the
+  token check's and the round trip's `:classes`. judge-tests `annot-record-writes-no-placeholder`, `token-record-writes-no-placeholder`,
+  `parse-record-writes-no-placeholder`, `roundtrip-record-writes-no-placeholder`.
+
 **C's read cell counts each corpus file once (VM review 132, F3), decided (the user, 2026-11-02).** Once step 7a's results files exist the read
 cell would sum dg's passes, the token check's and the tree check's, so a corpus file counted up to twice, and the tree check's 4,000 mutants
 (synthetic files for error recovery, not conformance tests) as files. Decided: the read cell leaves the mutants' rows and entries out and counts
