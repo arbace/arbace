@@ -2576,6 +2576,18 @@ From GT7's reruns 7 and 8 (doc/JOURNAL.md, 2026-11-01). Decided by the user:
     are lowered after the next clean run (a line at or below the default 20 is removed). This answers the VM's open
     points 1 and 2 of report 115 (the margin is a number; the audit's CPU sets the line, so the per-test limits replace
     the `audit-timeout` class).
+  - *Clarifications of that decision (review 124; the decision stands).* (1) A line is an integer: the audited CPU
+    divided by 2 is **rounded up to a whole second**, since `test_limit` takes any line that is not all digits (57.5)
+    for the default 20. (2) The lines are **set (raised or lowered)**: a test whose audited CPU is above 120 s gets a
+    line above 60; a test that times out again under the audit is raised and measured again, not computed from the
+    limit it hit (a killed run reports the limit, not the need). (3) **Raise-only is kept** (034's rule: a line
+    raises, never lowers, the check's limit; goi's replace is not adopted), which this answers as open point 3 of
+    report 115. (4) This paragraph **overrides GTS180 (a)'s "quiet CPU"** (and the redo paragraph's wording above) for
+    these 14; `test/java/timeouts.txt`'s header, which still says "quiet CPU", is left for the lowering commit, which
+    edits that file anyway. (5) That commit must also change `test/java/timeouts-test.bash`'s value checks (14 lines,
+    each at 60, the names exactly the 14) to invariants (each line an integer above 20, the names a subset of the
+    14), and drop or invert its `:audit-timeout` checks when the class goes (GTS180 (a)). The test is `gate-tests`'
+    input alone, no Java step keys it (`:java-run` leaves it out), so that edit reruns no Java level.
   - VM 115's limit tests (its report's Appendix A) are committed as `test/java/timeouts-test.bash` (it reads ROOT as its
     first argument) and run by `bin/gate-tests` through `test/gate/java-timeouts-test.bash` (which `bin/gate-tests`' glob
     of `test/gate/*-test.bash` finds); the gate-tests step names the test and the data it reads in its inputs
