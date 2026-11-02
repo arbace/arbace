@@ -4286,9 +4286,9 @@ recommends and is what is built; test `test/gate/seed-make-test.bash` (19 checks
 - **CS259 A setgid `.tmp`** (037 finding 5): `chmod 0755` keeps a directory's setgid, so a setgid `.tmp` makes every directory member `2755`. Options: (a) `seed_go_tar`
   clears the special bits (`chmod u-s,g-s,o-t` after `0755`); (b) `tar --mode=u=rwX,go=rX`; (c) as before, the host's `.tmp` checked (it is `drwxr-xr-x`).
   *Recommended: (a)*: the tar is unchanged where `.tmp` is not setgid.
+  **Decided (the user, 2026-11-02): (a), as built.**
 - Not built (037's lower findings, for later): the overlay cached by mtime (finding 3; for this window C9.2 step 8 removes `.tmp/jrt-go/overlay` first), links in the seed
   tree (6), the fixpoint's printed modules compared (8), `--verify --cold` (9), xz's environment (10), arm64 verified (11), `ARBACE_SEED` vs `ARBACE_SEED_GO` (12).
-  **Decided (the user, 2026-11-02): (a), as built.**
 
 **C's REAP classes after queue 122 (VM report 122's audit; the user's decisions of 2026-11-02, built on `c23-w`).** F1, F3: the VM's fixes
 (`:unclassified` out of the read and print classes; a `:c-known` section the known file lacks is a problem). F2: `:missing-builtin` (deferred) before
