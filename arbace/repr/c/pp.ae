@@ -1736,6 +1736,32 @@
     (when (main-file? c t)
       (record! c (into {:directive (src (second line)) :pos (lex/tok-position t) :off (.-po t) :file (slot c MAIN) :text (line-text line)} (apply hash-map kvs))))))
 
+(defn linemarker-sys
+  "queue 136 (review 130's finding 3): the system status a GNU linemarker `# N \"FILE\" FLAGS...` (its line's tokens) gives
+  the rest of its file, as libcpp's do_linemarker does: true with flag 3 (or 3 4), false with no flag (a system header's
+  rest is then a user header's); nil when it changes nothing (no file name: the status kept) or is one this reader does not
+  follow (flags 1 and 2, which enter and leave a presumed file; a line gcc refuses)."
+  [line]
+  (let [ts (if (= (ch (peek line)) \newline) (pop line) line)]
+    (when (and (>= (count ts) 3) (= (ch (ts 1)) :PPNUMBER) (re-matches #"[0-9]+" (src (ts 1)))
+               (= (ch (ts 2)) :STRINGLITERAL) (.startsWith (src (ts 2)) "\""))
+      (let [fl (mapv src (subvec ts 3))]
+        (cond
+          (= fl []) false
+          (or (= fl ["3"]) (= fl ["3" "4"])) true
+          :else nil)))))
+
+(defn- linemarker!
+  "queue 136: a linemarker in an included file changes its status (the Included's, for the headers it includes afterwards; the
+  layer's record, for the converter's forms after it). In the main file nothing (the checker has no status there)."
+  [^Cpp c line]
+  (let [s (linemarker-sys line)
+        ^Included cur (slot c INCLUDED)
+        ^Tok t (first line)]
+    (when (and (some? s) cur (.-using cur) (= (some-> ^CFile (.-pf t) .-name) (.-path cur)))
+      (slot! c INCLUDED (Included. (.-using cur) s (.-path cur)))
+      (record! c {:directive "system" :file (.-path cur) :off (.-po t) :system s}))))
+
 (defn next-line
   "cpp.nextLine: the next text line, the directives before it executed."
   [^Cpp c]
@@ -1786,7 +1812,7 @@
             (case (x 0)
               :leave (do (slot! c DEPTH (dec (long (slot c DEPTH)))) (pop-tos! c) (recur))
               :text (do (pop-tos! c) (x 1))
-              :nondir (do (pop-tos! c) (record-directive! c (x 1)) (recur))
+              :nondir (do (pop-tos! c) (record-directive! c (x 1)) (linemarker! c (x 1)) (recur))
               :eof (do (slot! c EOFLINE (x 1))
                        (if (zero? (.size ^ArrayList (.-stack c)))
                          [(x 1)]
