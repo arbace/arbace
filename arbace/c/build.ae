@@ -967,7 +967,10 @@
     "__builtin_clrsbl" "__builtin_clrsbll" "__builtin_ffs" "__builtin_ffsl" "__builtin_ffsll"
     "__builtin_isnan" "__builtin_isinf" "__builtin_isinf_sign" "__builtin_isfinite" "__builtin_isnormal"
     "__builtin_signbit" "__builtin_signbitf" "__builtin_signbitl" "__builtin_fpclassify" "__builtin_isunordered"
-    "__builtin_trap" "__builtin_unreachable"})
+    "__builtin_trap" "__builtin_unreachable"
+    ;; queue 126: the float and long double spellings (pr39228.c), the natives of their generic forms
+    "__builtin_isinff" "__builtin_isinfl" "__builtin_isnanf" "__builtin_isnanl" "__builtin_finite"
+    "__builtin_finitef" "__builtin_finitel"})
 
 (defn- callee-type [r]
   (let [t (unq (:t r))]
@@ -989,6 +992,73 @@
       :f (list 'af (:n x))
       :w (list 'aw (:n x))
       :m (list 'am (:n x) (size-of (:t x))))))
+
+;; __builtin_clear_padding (gcc 11; queue 126): the padding bits of the object p points to set to zero, as gcc's
+;; clear_padding_type finds them in the pointed-to type's layout (the checker's, gcc 15.2's on x86-64)
+
+(def ^:private clear-padding-max
+  "The most bytes of padding pattern clear-padding-call unrolls into stores (a larger array is refused)."
+  4096)
+
+(defn- pad-mask
+  "The type t's padding as a vector of bytes, each byte's padding bits set: none for the scalar types (long double is
+  double, CS35); a _BitInt's bits above N in its storage; for a structure the bytes no member holds and the bits of a
+  bit-field unit no named bit-field holds (an unnamed bit-field is padding); for a union the bits that are padding in
+  every named member; an array's its element's, repeated. A flexible array member is refused (gcc: \"does not have
+  well defined padding bits\")."
+  [t]
+  (let [t (under t)
+        n (size-of t)
+        fill (fn [b] (vec (repeat n b)))]
+    (case (:k t)
+      :array (let [e (pad-mask (:of t))] (vec (apply concat (repeat (quot n (max 1 (count e))) e))))
+      :bitint (let [w (long (:n t))]
+                (vec (for [i (range n)]
+                       (let [lo (* 8 i)] (cond (>= lo w) 0xff (> (+ lo 8) w) (bit-and 0xff (bit-shift-left 0xff (- w lo))) :else 0)))))
+      :struct
+      (reduce (fn [mask m]
+                (cond
+                  (and (= :array (:k (unq (:t m)))) (nil? (:n (unq (:t m)))))
+                  (refuse :builder "__builtin_clear_padding: a flexible array member does not have well defined padding bits")
+                  (:bits m)
+                  (if (nil? (:name m))
+                    mask
+                    (let [p0 (+ (* 8 (long (:off m))) (long (or (:bitoff m) 0)))]
+                      (reduce (fn [mk p] (update mk (quot p 8) bit-and (bit-not (bit-shift-left 1 (rem p 8))) 0xff))
+                              mask (range p0 (+ p0 (long (:bits m)))))))
+                  :else
+                  (let [off (long (:off m)) mm (pad-mask (:t m))]
+                    (reduce (fn [mk i] (assoc mk (+ off i) (nth mm i))) mask (range (count mm))))))
+              (fill 0xff) (.get ^HashMap (:rec t) :members))
+      :union
+      (reduce (fn [mask m]
+                (if (and (:bits m) (nil? (:name m)))
+                  mask
+                  (let [mm (if (:bits m)
+                             (vec (for [i (range n)]
+                                    (let [lo (* 8 i) w (long (:bits m))]
+                                      (cond (>= lo w) 0xff (> (+ lo 8) w) (bit-and 0xff (bit-shift-left 0xff (- w lo))) :else 0))))
+                             (pad-mask (:t m)))]
+                    (vec (for [i (range n)] (bit-and (nth mask i) (nth mm i 0xff)))))))
+              (fill 0xff) (.get ^HashMap (:rec t) :members))
+      :complex (into (pad-mask (:of t)) (pad-mask (:of t)))
+      (fill 0))))
+
+(defn- clear-padding-call
+  "__builtin_clear_padding (p): p's value kept in a slot, then a store per byte that holds padding (0, or the byte
+  with its padding bits cleared)."
+  [p]
+  (let [pt (unq (:to (chk/decay (unq (:t (res-of p))))))
+        mask (pad-mask pt)
+        _ (when (> (count (filter pos? mask)) clear-padding-max) (refuse :builder "__builtin_clear_padding of a type with over " clear-padding-max " bytes of padding"))
+        s (temp-i)
+        at (fn [i] (list 'adds (list 'il s) '(i 1) i))
+        sts (for [[i m] (map-indexed vector mask) :when (pos? m)]
+              (if (= m 0xff)
+                (list 'ei (list 'st "u8" (at i) '(i 0)))
+                (list 'ei (list 'st "u8" (at i) (list 'bin "and" "u8" (list 'ld "u8" (at i)) (list 'i (bit-and 0xff (bit-not m))))))))]
+    {:k :v :t chk/t-void
+     :n (list 'ei (list 'seq (vec (cons (list 'ei (list 'is s (:n (ex-as p :i)))) sts)) '(i 0)))}))
 
 (defn- builtin-call
   "A call of a builtin by name, or nil when it is an ordinary call."
@@ -1024,6 +1094,11 @@
       ("__builtin_inff" "__builtin_huge_valf") {:k :f :t t :n (list 'f (fbits Double/POSITIVE_INFINITY))}
       ("__builtin_nan" "__builtin_nanl" "__builtin_nanf") {:k :f :t t :n (list 'f (fbits Double/NaN))}
       ("__builtin_nans" "__builtin_nansf" "__builtin_nansl") {:k :f :t t :n (list 'f (fbits Double/NaN))}
+      ;; queue 126: its operand's value at its operand's type (the checker's); reassociation is not the builder's
+      "__builtin_assoc_barrier" (conv (ex (first args)) t)
+      ;; queue 126: always the checker's constant; __atomic_is_lock_free's when it folded, else the native's call
+      "__atomic_always_lock_free" {:k :i :t chk/t-bool :n (list 'i (or (:v r) 0))}
+      "__builtin_clear_padding" (clear-padding-call (first args))
       ("__builtin_isgreater" "__builtin_isgreaterequal" "__builtin_isless" "__builtin_islessequal" "__builtin_islessgreater")
       (let [[a b] args xa (ex a) xb (ex b)
             ot (with-types (chk/usual (promoted (res-of a)) (promoted (res-of b))))
@@ -1046,28 +1121,106 @@
     "__builtin_ssub_overflow" "__builtin_ssubl_overflow" "__builtin_ssubll_overflow"
     "__builtin_usub_overflow" "__builtin_usubl_overflow" "__builtin_usubll_overflow"
     "__builtin_smul_overflow" "__builtin_smull_overflow" "__builtin_smulll_overflow"
-    "__builtin_umul_overflow" "__builtin_umull_overflow" "__builtin_umulll_overflow"})
+    "__builtin_umul_overflow" "__builtin_umull_overflow" "__builtin_umulll_overflow"
+    ;; queue 126: the predicates (gcc 7): no store, the third argument's type the result's, its value ignored
+    "__builtin_add_overflow_p" "__builtin_sub_overflow_p" "__builtin_mul_overflow_p"})
+
+(defn- exact-bits
+  "The width of a signed type that holds every value of the integer type t: its width, one more when unsigned."
+  ^long [t]
+  (let [[n s] (with-types (chk/int-bits (under t)))] (if s (long n) (inc (long n)))))
 
 (defn- overflow-call
-  "__builtin_OP_overflow(a, b, res): the exact result's wrap into *res's type, 1 when it does not fit."
+  "__builtin_OP_overflow(a, b, res): the exact result's wrap into *res's type, 1 when it does not fit;
+  __builtin_OP_overflow_p(a, b, c): the same against c's type, nothing stored, c evaluated for its effects
+  alone. The exact result is computed in a signed type wide enough for it (__int128 when that is, else a
+  _BitInt: queue 126, for the wide operands and results)."
   [^String nm args]
   (let [[a b p] args
         op (cond (str/includes? nm "add") "add" (str/includes? nm "sub") "sub" :else "mul")
-        rt (unq (:to (chk/decay (unq (:t (res-of p))))))
+        pred (str/ends-with? nm "_overflow_p")
+        rt (if pred (under (unq (:t (res-of p)))) (unq (:to (chk/decay (unq (:t (res-of p)))))))
         ta (chk/decay (unq (:t (res-of a)))) tb (chk/decay (unq (:t (res-of b))))
-        w {:k :int128}
-        ;; computed in 128 bits, then checked against the result type (exact for operands of up to 64 bits)
+        ;; wide enough for the exact result and for every value of rt, so rt's value widened back is exact (queue 154:
+        ;; an unsigned _BitInt(162) result of a 39-bit exact result compared in 128 bits wrapped back to the same value)
+        need (max (if (= op "mul") (+ (exact-bits ta) (exact-bits tb)) (inc (max (exact-bits ta) (exact-bits tb))))
+                  (if (with-types (chk/int-type? rt)) (exact-bits rt) 0))
+        w (if (<= need 128) {:k :int128} {:k :bitint :n need})
+        wt (wty w)
         xa (conv (ex a) w) xb (conv (ex b) w)
-        s (temp-i)
         tmp (frame-temp w)
-        v {:k :w :t w :n (list 'wbin op "s128" (:n xa) (:n xb))}
-        pa (:n (ex-as p :i))]
-    (when (or (wide? ta) (wide? tb) (wide? rt)) (refuse :wide "__builtin_*_overflow on wide integers"))
-    {:k :i :t chk/t-bool
-     :n (list 'seq [(list 'ew (list 'wst "s128" tmp (:n v)))
-                    (list 'ei (list 'is s pa))
-                    (list 'ei (list 'st (ity rt) (list 'il s) (list 'w2i (ity rt) "s128" (list 'wld "s128" tmp))))]
-              (list 'wcmp "ne" "s128" (list 'i2w "s128" (ity rt) (list 'ld (ity rt) (list 'il s))) (list 'wld "s128" tmp)))}))
+        v {:k :w :t w :n (list 'wbin op wt (:n xa) (:n xb))}
+        exact (list 'wld wt tmp)
+        ;; the exact result narrowed to rt, and rt's value widened back
+        [narrow widen] (if (= :w (kind rt))
+                         [(fn [x] (list 'w2w (wty rt) wt x)) (fn [x] (list 'w2w wt (wty rt) x))]
+                         [(fn [x] (list 'w2i (ity rt) wt x)) (fn [x] (list 'i2w wt (ity rt) x))])]
+    (when-not (with-types (chk/int-type? rt)) (refuse :builder nm " with a result of type " (chk/tstr rt)))
+    (if pred
+      {:k :i :t chk/t-bool
+       :n (list 'seq [(list 'ew (list 'wst wt tmp (:n v))) (effect (ex p))]
+                (list 'wcmp "ne" wt (widen (narrow exact)) exact))}
+      (let [s (temp-i)
+            pa (:n (ex-as p :i))
+            st (if (= :w (kind rt))
+                 (list 'ew (list 'wst (wty rt) (list 'il s) (narrow exact)))
+                 (list 'ei (list 'st (ity rt) (list 'il s) (narrow exact))))
+            back (if (= :w (kind rt)) (list 'wld (wty rt) (list 'il s)) (list 'ld (ity rt) (list 'il s)))]
+        {:k :i :t chk/t-bool
+         :n (list 'seq [(list 'ew (list 'wst wt tmp (:n v)))
+                        (list 'ei (list 'is s pa))
+                        st]
+                  (list 'wcmp "ne" wt (widen back) exact))}))))
+
+;; gcc's type-generic bit builtins (gcc 14) and C23's <stdbit.h> builtins (__builtin_stdc_*, gcc 14; the rotates gcc
+;; 15): natives of builtins.ae, called with the operand at its own type (not promoted; a bit-field's width its
+;; own, as gcc takes it) and its width appended; clzg and ctzg with the value for 0 and whether one was given, the
+;; rotates with their count (queue 126; gcc 15.2's extend.texi, "Bit Operation Builtins")
+
+(def ^:private bitg-builtins
+  #{"__builtin_popcountg" "__builtin_parityg" "__builtin_clzg" "__builtin_ctzg" "__builtin_ffsg" "__builtin_clrsbg"
+    "__builtin_stdc_leading_zeros" "__builtin_stdc_leading_ones" "__builtin_stdc_trailing_zeros"
+    "__builtin_stdc_trailing_ones" "__builtin_stdc_first_leading_zero" "__builtin_stdc_first_leading_one"
+    "__builtin_stdc_first_trailing_zero" "__builtin_stdc_first_trailing_one" "__builtin_stdc_count_zeros"
+    "__builtin_stdc_count_ones" "__builtin_stdc_has_single_bit" "__builtin_stdc_bit_width"
+    "__builtin_stdc_bit_floor" "__builtin_stdc_bit_ceil" "__builtin_stdc_rotate_left" "__builtin_stdc_rotate_right"})
+
+(defn- native-call
+  "A call of the native nm with the argument nodes argns, its result of type t."
+  [^String nm argns t]
+  (let [callee (list 'fnref (fn-id nm nm))]
+    (case (kind t)
+      :i {:k :i :t t :n (list 'call callee argns)}
+      :w {:k :w :t t :n (list 'wcall callee argns)})))
+
+(defn- bitg-call
+  "__builtin_popcountg (x), __builtin_clzg (x [, z]), __builtin_stdc_rotate_left (x, c), ...: the native's call."
+  [^String nm args r]
+  (let [[a b] args
+        ra (res-of a)
+        ta (under (chk/decay (unq (:t ra))))
+        _ (when-not (and (with-types (chk/int-type? ta)) (not= :bool (:k ta))) (refuse :builder nm " of an operand of type " (chk/tstr ta)))
+        n (long (or (:bits ra) (first (with-types (chk/int-bits ta)))))
+        x (ex a)
+        xa (case (:k x) :i (list 'ai (:n x)) :w (list 'aw (:n x)))
+        rt (cond (#{"__builtin_stdc_bit_floor" "__builtin_stdc_bit_ceil" "__builtin_stdc_rotate_left" "__builtin_stdc_rotate_right"} nm) ta
+                 (= nm "__builtin_stdc_has_single_bit") chk/t-bool
+                 (str/starts-with? nm "__builtin_stdc_") chk/t-uint
+                 :else chk/t-int)
+        extra (cond
+                (#{"__builtin_clzg" "__builtin_ctzg"} nm)
+                (if b [(arg-node b chk/t-int) '(ai (i 1))] ['(ai (i 0)) '(ai (i 0))])
+                (#{"__builtin_stdc_rotate_left" "__builtin_stdc_rotate_right"} nm)
+                (let [tb (under (chk/decay (unq (:t (res-of b)))))]
+                  (if (wide? tb)
+                    ;; a wide count reduced modulo N in its unsigned type first (queue 154, bitint-121.c)
+                    (let [ut (if (= :int128 (:k tb)) {:k :uint128} (assoc tb :u true))
+                          r {:k :w :t ut :n (list 'wbin "rem" (wty ut) (:n (conv (ex b) ut)) (list 'w (wty ut) (str n)))}]
+                      [(list 'ai (:n (conv r chk/t-ulong)))])
+                    [(arg-node b chk/t-ulong)]))
+                :else [])]
+    (when (and (:bits ra) (= rt ta)) (refuse :builder nm " of a bit-field"))
+    (native-call nm (into [xa (list 'ai (list 'i n))] extra) rt)))
 
 (defn call-node [f h args r]
   (let [hn (when (or (symbol? h) (and (seq? h) (= 'c/id (first h)))) (if (symbol? h) (name h) (second h)))
@@ -1079,6 +1232,7 @@
     (cond
       b b
       (and nm (overflow-builtins nm)) (overflow-call nm args)
+      (and nm (bitg-builtins nm)) (bitg-call nm args r)
       :else
       (let [lib (when (and nm (str/starts-with? nm "__builtin_")) (subs nm 10))
             nm (cond

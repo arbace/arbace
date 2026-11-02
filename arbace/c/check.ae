@@ -1469,6 +1469,62 @@
             (do (err! (str "no member named '" m "' in '" (tstr t) "'")) (res t-invalid)))))
       (do (when-not (= :invalid (:k t)) (err! (str "request for member '" m "' in something not a structure or union"))) (res t-invalid)))))
 
+;; gcc's type-generic bit builtins, C23's <stdbit.h> builtins and __builtin_*_overflow_p folded (queue 126): their
+;; value for constant operands, as gcc folds them (gcc 15.2's extend.texi, "Bit Operation Builtins", "Integer Overflow
+;; Builtins"); the operand taken as its `bits` low bits, unsigned (go/arbace/ci/builtins.ae computes the same at run time)
+
+(defn bit-fold
+  "The value of the bit builtin b (its name less __builtin_: \"popcountg\" ... \"clrsbg\", \"stdc_leading_zeros\" ...
+  \"stdc_rotate_right\") of the constant v, an integer of `bits` bits; z the value clzg and ctzg give for 0 (nil:
+  the width), c a rotate's count."
+  [^String b v bits z c]
+  (let [n (long bits)
+        one BigInteger/ONE
+        m (.subtract (.shiftLeft one (int n)) one)
+        x (.and (biginteger v) m)
+        nx (.xor x m)
+        none? (fn [^BigInteger y] (zero? (.signum y)))
+        len (fn [^BigInteger y] (long (.bitLength y)))
+        tz (fn [^BigInteger y] (if (none? y) n (long (.getLowestSetBit y))))
+        ones (fn [^BigInteger y] (long (.bitCount y)))]
+    (case b
+      "popcountg" (ones x)
+      "parityg" (bit-and (ones x) 1)
+      "clzg" (if (none? x) (or z n) (- n (len x)))
+      "ctzg" (if (none? x) (or z n) (tz x))
+      "ffsg" (if (none? x) 0 (inc (tz x)))
+      "clrsbg" (- n (len (if (.testBit x (int (dec n))) nx x)) 1)
+      "stdc_leading_zeros" (- n (len x))
+      "stdc_leading_ones" (- n (len nx))
+      "stdc_trailing_zeros" (tz x)
+      "stdc_trailing_ones" (tz nx)
+      "stdc_first_leading_zero" (if (none? nx) 0 (inc (- n (len nx))))
+      "stdc_first_leading_one" (if (none? x) 0 (inc (- n (len x))))
+      "stdc_first_trailing_zero" (if (none? nx) 0 (inc (tz nx)))
+      "stdc_first_trailing_one" (if (none? x) 0 (inc (tz x)))
+      "stdc_count_zeros" (- n (ones x))
+      "stdc_count_ones" (ones x)
+      "stdc_has_single_bit" (if (= 1 (ones x)) 1 0)
+      "stdc_bit_width" (len x)
+      "stdc_bit_floor" (if (none? x) 0 (.shiftLeft one (int (dec (len x)))))
+      "stdc_bit_ceil" (if (<= (.compareTo x one) 0) 1 (.and (.shiftLeft one (int (len (.subtract x one)))) m))
+      ("stdc_rotate_left" "stdc_rotate_right")
+      (let [k (long (.mod (biginteger c) (biginteger n)))
+            k (if (= b "stdc_rotate_left") k (mod (- n k) n))]
+        (.and (.or (.shiftLeft x (int k)) (.shiftRight x (int (- n k)))) m)))))
+
+(defn overflow-fold
+  "__builtin_OP_overflow_p's value (OP \"add\", \"sub\" or \"mul\") for the constant operands a and b: 1 when the exact
+  result does not fit an integer of `bits` bits, signed when `signed`, else 0."
+  [^String op a b bits signed]
+  (let [a (biginteger a) b (biginteger b)
+        r (case op "add" (.add a b) "sub" (.subtract a b) (.multiply a b))
+        n (int bits)
+        one BigInteger/ONE
+        lo (if signed (.negate (.shiftLeft one (dec n))) BigInteger/ZERO)
+        hi (.subtract (.shiftLeft one (if signed (dec n) n)) one)]
+    (if (and (>= (.compareTo r lo) 0) (<= (.compareTo r hi) 0)) 0 1)))
+
 (def ^:private builtin-types
   ;; builtins gcc knows and cc's Builtin does not declare: their result types
   {"__builtin_constant_p" t-int "__builtin_choose_expr" nil "__builtin_abort" t-void "__builtin_trap" t-void
@@ -1537,6 +1593,56 @@
     ("__builtin_inf" "__builtin_huge_val") (res t-double :v Double/POSITIVE_INFINITY)
     ("__builtin_inff" "__builtin_huge_valf") (res t-float :v Double/POSITIVE_INFINITY)
     ("__builtin_infl" "__builtin_huge_vall") (res {:k :ldouble} :v Double/POSITIVE_INFINITY)
+    ;; queue 126: gcc's type-generic bit builtins and C23's <stdbit.h> builtins (int, unsigned int, bool or the
+    ;; operand's type), folded when the operand is constant; the operand at its own type, a bit-field's width its own
+    ("__builtin_popcountg" "__builtin_parityg" "__builtin_clzg" "__builtin_ctzg" "__builtin_ffsg" "__builtin_clrsbg"
+     "__builtin_stdc_leading_zeros" "__builtin_stdc_leading_ones" "__builtin_stdc_trailing_zeros" "__builtin_stdc_trailing_ones"
+     "__builtin_stdc_first_leading_zero" "__builtin_stdc_first_leading_one" "__builtin_stdc_first_trailing_zero"
+     "__builtin_stdc_first_trailing_one" "__builtin_stdc_count_zeros" "__builtin_stdc_count_ones" "__builtin_stdc_has_single_bit"
+     "__builtin_stdc_bit_width" "__builtin_stdc_bit_floor" "__builtin_stdc_bit_ceil" "__builtin_stdc_rotate_left"
+     "__builtin_stdc_rotate_right")
+    (let [r0 (first ras)
+          t0 (when r0 (unq (decay (unq (:t r0)))))
+          short (subs b 10)
+          rt (cond (#{"stdc_bit_floor" "stdc_bit_ceil" "stdc_rotate_left" "stdc_rotate_right"} short) t0
+                   (= short "stdc_has_single_bit") t-bool
+                   (str/starts-with? short "stdc_") t-uint
+                   :else t-int)
+          bits (when (and t0 (int-type? t0)) (or (:bits r0) (first (int-bits t0))))
+          r1 (second ras)
+          v (when (and bits (integer? (:v r0)) (or (nil? r1) (integer? (:v r1)))
+                       (or r1 (not (#{"stdc_rotate_left" "stdc_rotate_right"} short))))
+              (bit-fold short (:v r0) bits (when (#{"clzg" "ctzg"} short) (:v r1)) (:v r1)))]
+      (if (and rt bits) (res rt :v (when (some? v) (wrap v rt))) (res t-int)))
+    ;; queue 126: __builtin_OP_overflow_p (a, b, c): bool, folded when the three are constant (c's value ignored, but
+    ;; a c with side effects is not folded)
+    ("__builtin_add_overflow_p" "__builtin_sub_overflow_p" "__builtin_mul_overflow_p")
+    (let [[ra rb rc] ras
+          tc (when rc (unq (:t rc)))]
+      (res t-bool :v (when (and tc (int-type? tc) (integer? (:v ra)) (integer? (:v rb)) (some? (:v rc)))
+                       (let [[n s] (int-bits tc)] (overflow-fold (subs b 10 13) (:v ra) (:v rb) n s)))))
+    ;; queue 126: the float and long double spellings of the classification builtins (long double is double, CS35)
+    ("__builtin_isinff" "__builtin_isinfl" "__builtin_isnanf" "__builtin_isnanl" "__builtin_finite" "__builtin_finitef"
+     "__builtin_finitel")
+    (let [v (:v (first ras))
+          x (when (number? v) (if (str/ends-with? b "f") (double (.floatValue ^Double (Double/valueOf (double v)))) (double v)))]
+      (res t-int :v (when x (cond (str/includes? b "isinf") (if (Double/isInfinite x) 1 0)
+                                  (str/includes? b "isnan") (if (Double/isNaN x) 1 0)
+                                  :else (if (or (Double/isInfinite x) (Double/isNaN x)) 0 1)))))
+    ;; queue 126: __builtin_assoc_barrier (x): x, of x's type (gcc folds it in an enumerator's value)
+    "__builtin_assoc_barrier" (let [r0 (first ras)] (res (unq (:t r0)) :v (:v r0)))
+    "__builtin_clear_padding" (res t-void)
+    ;; queue 126: __atomic_always_lock_free (size, p) folded: sizes 1, 2, 4 and 8 at the size's alignment (a null p)
+    ;; or at p's pointed-to type's; __atomic_is_lock_free folded to 1 where that holds, else asked at run time
+    ("__atomic_always_lock_free" "__atomic_is_lock_free")
+    (let [[rs rp] ras
+          n (:v rs)
+          pt (when rp (decay (unq (:t rp))))
+          al (cond (and rp (some? (:v rp)) (zero? (:v rp))) n
+                   (and pt (ptr-type? pt) (not (void-type? (unq (:to pt))))) (align-of (unq (:to pt)))
+                   :else nil)
+          lf (and (integer? n) (#{1 2 4 8} (long n)) al (>= (long al) (long n)))]
+      (res t-bool :v (cond lf 1 (= b "__atomic_always_lock_free") (when (integer? n) 0) :else nil)))
     ;; CS174 (b): decimal infinities and NaNs of the call's type (`__builtin_infd32 ()`, `__builtin_nansd64 ("")`)
     (when-let [[_ w bits] (re-matches #"__builtin_(inf|nan|nans)d(32|64|128)" b)]
       (let [k (case bits "32" :dec32 "64" :dec64 :dec128)]
