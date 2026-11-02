@@ -2569,6 +2569,17 @@ From GT7's reruns 7 and 8 (doc/JOURNAL.md, 2026-11-01). Decided by the user:
   - *Keys.* `:java-run` leaves the file out and the steps that run programs name it (java-check, java-compiled,
     java-interp, java-compiled-full, java-held), so a lowered line reruns no read, classes, print or diagnostics level.
   The tests near the limit lose nothing else: levels-known.edn holds none of the 14 since audit-070.
+  **Decided (the user, 2026-11-02): what sets the 14 lines, and the test.**
+  - The line of each of the 14 tests is set by its **audited CPU** (its CPU under the clean run's strace, the
+    measurement that timed it out), not its quiet CPU, with the margin **2.5x** as goi's: the CPU limit (5 times the
+    line) is the measured CPU times 2.5, so the line is the audited CPU divided by 2. The lines stay at 60 until then and
+    are lowered after the next clean run (a line at or below the default 20 is removed). This answers the VM's open
+    points 1 and 2 of report 115 (the margin is a number; the audit's CPU sets the line, so the per-test limits replace
+    the `audit-timeout` class).
+  - VM 115's limit tests (its report's Appendix A) are committed as `test/java/timeouts-test.bash` (it reads ROOT as its
+    first argument) and run by `bin/gate-tests` through `test/gate/java-timeouts-test.bash` (which `bin/gate-tests`' glob
+    of `test/gate/*-test.bash` finds); the gate-tests step names the test and the data it reads in its inputs
+    (`gate-reads-test`). It needs `python3` (the steps.edn keys).
 - **GTS103** `bin/gate --clean --only` refuses when a run the record cites has no logs, instead of counting its steps
   as changed (rerun 8's first attempt selected 53 unchanged steps after its logs were deleted).
 
