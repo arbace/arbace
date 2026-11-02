@@ -2461,3 +2461,20 @@ Run on the three files (each its corpus' key; the lists cut from the CX2 and CX7
 (g++'s and clang's objects differ at the `__FILE__` strings `22_locale/.../1.cc` against `1.cc`); after, all three `pass` (levels 1, 3 and 4 for both compilers; the objects equal). Their three entries are
 gone from `test/repr/cpp/roundtrip-known.edn`. No recorded results file (`roundtrip-results/`) holds them. To run on the main host: the whole C++ corpus's round trips (long), to
 see that the maps change no other file's objects (a file whose header is included by `-I`, or whose `__FILE__` is printed by a test, could move either way).
+
+### VM review 123: F2's root map (2026-11-02)
+
+Review 123 (the Mac VM, `.tmp/mac-queue/reports/123-review-cpp-f2.md`) found CP95 (b)'s two maps right (1,865 files built from an identical copy
+under another root: none from equal to differing, nine from differing to equal) and, F1, that the DIR map does match on the print's build: it maps the
+main file's own name (`DIR/base`, compiled from `WORK/print`) to `base`, as on the original's; its headers are absolute and mapped by `ORIGDIR/=`. F2,
+older than the branch: `-fdebug-prefix-map="$r"=.` maps `-g`'s paths of a header found through an absolute `-I` under the original's root (libstdc++'s
+`util/`) to `./util` in the original but leaves them absolute in the print, whose `$r` is `WORK/print`. Decided by the user (2026-11-02): `objs` adds
+`-fdebug-prefix-map=ORIGROOT=.` on both builds for both compilers, ORIGROOT the original's root (`${od%/"$(dirname "$n")"}`, ORIGDIR at the root), before
+the file-prefix maps so that they win for ORIGDIR's paths (GCC takes the last matching map). Run on the main host (one-line lists from the CX7 lists,
+each with its corpus' key): `wrapped_locale.cc` (codecvt/unshift and time_put/put), `23_containers/list/cons/moveable.cc`,
+`23_containers/list/modifiers/swap/2.cc` and `gxx-dg/ext/arm-fp16/arm-fp16-ops-1.C` (clang; g++ in its `:orig-fails`) pass, their five
+`:objects-differ` entries gone from `test/repr/cpp/roundtrip-known.edn`; CP95 (b)'s three passes still pass. `91620.cc` stays `:gxx-objects-location`: its
+line tables' directory and file tables are now equal (the map's part), but its line program and `DW_AT_decl_line`/`decl_column` differ, positions
+inside functions, the class's own cause. `roundtrip-results/gxx-dg-every-10.edn` still records arm-fp16-ops-1.C as `[:known :objects-differ]`: a run of
+the list counts it as an improvement until the record is made again (`--record-results`, a whole-list run). F3 (`$pm` unquoted) is left: no corpus path
+has a space or `=`.
