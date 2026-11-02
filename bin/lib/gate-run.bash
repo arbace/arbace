@@ -527,7 +527,7 @@ audit_reducer() {
   rk=$(cat "$root"/tools/gateaudit/*.go "$root/tools/gateaudit/go.mod" "$tg/VERSION" | sha256sum | cut -c1-64)
   if [ "$(cat "$d/gateaudit.key" 2>"$d/gateaudit.err")" != "$rk" ] || [ ! -x "$d/gateaudit" ]; then
     (cd "$root/tools/gateaudit" && env -u GOOS -u GOARCH GOROOT="$tg" GOFLAGS= GOTOOLCHAIN=local CGO_ENABLED=0 \
-       "$tg/bin/go" build -trimpath -o "$d/gateaudit.new" .) > "$d/gateaudit.err" 2>&1 \
+       "$tg/bin/go" build -trimpath -buildvcs=false -o "$d/gateaudit.new" .) > "$d/gateaudit.err" 2>&1 \
       && mv -f "$d/gateaudit.new" "$d/gateaudit" && echo "$rk" > "$d/gateaudit.key"
   fi
   if [ -x "$d/gateaudit" ] && [ "$(cat "$d/gateaudit.key" 2>"$d/gateaudit.err")" = "$rk" ]; then red=("$d/gateaudit" -root "$root")
