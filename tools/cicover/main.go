@@ -2,16 +2,20 @@
 // gate step): Go's coverage profiles of ci's back end (go/arbace/ci and go/arbace/crt, tools/cirun built with
 // -cover, one GOCOVERDIR per program, each turned into text by `go tool covdata textfmt`) reduced to a
 // small set of programs reaching the same covered blocks, by greedy set cover: the programs that must stay
-// (KEEP 1: a program of a deferred class) taken first, then repeatedly the program adding the most blocks not
-// yet reached (ties: the shorter run, then the id), until none adds one; then each greedy pick whose blocks
-// the rest of the set reaches is dropped (the latest first). A block is a profile line's FILE:START,END;
-// covered when its count is above zero.
+// (KEEP 1: a program of a deferred class) taken first; then, for each class (CLASS, queue 161: the user's (a)
+// for 160's DECISION, one program per class of the corpus's records) none of them is in, its program adding
+// the most blocks (ties: the shorter run, then the id); then repeatedly the program adding the most blocks not
+// yet reached (ties: the shorter run, then the id), until none adds one; then each pick but the kept ones
+// whose blocks the rest of the set reaches, and whose class the rest still has, is dropped (the latest
+// first). A block is a profile line's FILE:START,END; covered when its count is above zero.
 //
 // Usage: cicover [-seeds N] [-o SUBSET] [-curve FILE] INDEX
 //
 //	INDEX  a TSV, one program a line: ID, PROFILE (its textfmt file, or - when it was not run), KEEP (1 or
-//	       0), SECONDS (its plain run's wall time, cirun without -cover)
-//	-o     the subset's ids, one a line (the kept ones first, then the greedy picks in order)
+//	       0), SECONDS (its plain run's wall time, cirun without -cover), and optionally CLASS (its class
+//	       in the corpus's record, - for none: a pass)
+//	-o     the subset's ids, one a line (the kept ones first, then the per-class picks, then the greedy
+//	       picks in order)
 //	-curve the greedy order with the blocks reached after each pick: "N<TAB>ID<TAB>BLOCKS"
 //	-seeds the random subsets of the subset's size drawn for the baseline (seeds 1..N)
 //
@@ -36,6 +40,7 @@ type prog struct {
 	keep bool
 	secs float64
 	run  bool
+	cls  string // its class, "" for none
 	set  []uint64 // the covered blocks, a bit set
 }
 
@@ -89,11 +94,14 @@ func main() {
 			continue
 		}
 		f := strings.Split(line, "\t")
-		if len(f) != 4 {
-			die("index line %q: want 4 fields", line)
+		if len(f) != 4 && len(f) != 5 {
+			die("index line %q: want 4 or 5 fields", line)
 		}
 		secs, _ := strconv.ParseFloat(f[3], 64)
 		p := &prog{id: f[0], keep: f[2] == "1", secs: secs, run: f[1] != "-"}
+		if len(f) == 5 && f[4] != "-" && f[4] != "" {
+			p.cls = f[4]
+		}
 		progs = append(progs, p)
 		if !p.run {
 			continue
@@ -155,6 +163,44 @@ func main() {
 		}
 	}
 	nkeep := len(subset)
+	// one program per class: a class none of the set has gets its program of the most gain
+	has := map[string]bool{}
+	var classes []string
+	for _, p := range progs {
+		if p.cls != "" && !has[p.cls] {
+			has[p.cls] = true
+			classes = append(classes, p.cls)
+		}
+	}
+	for c := range has {
+		has[c] = false
+	}
+	for _, p := range subset {
+		if p.cls != "" {
+			has[p.cls] = true
+		}
+	}
+	for _, c := range classes {
+		if has[c] {
+			continue
+		}
+		var best *prog
+		bg := -1
+		for _, p := range progs {
+			if p.cls != c || in[p] {
+				continue
+			}
+			g := reached.gain(p.set)
+			if g > bg || (g == bg && (p.secs < best.secs || (p.secs == best.secs && p.id < best.id))) {
+				best, bg = p, g
+			}
+		}
+		subset = append(subset, best)
+		in[best] = true
+		has[c] = true
+		reached.or(best.set)
+	}
+	nclass := len(subset) - nkeep
 	type step struct {
 		p *prog
 		n int
@@ -180,16 +226,34 @@ func main() {
 		reached.or(best.set)
 		order = append(order, step{best, reached.count()})
 	}
-	// redundancy: a greedy pick the others reach is dropped, the latest first
+	// redundancy: a pick (per class or greedy) the others reach, its class still in them, is dropped, the latest first
 	for i := len(subset) - 1; i >= nkeep; i-- {
 		rest := bitset(make([]uint64, words))
+		clsIn := false
 		for j, q := range subset {
 			if j != i {
 				rest.or(q.set)
+				if q.cls == subset[i].cls {
+					clsIn = true
+				}
 			}
 		}
-		if rest.count() == total {
+		if rest.count() == total && (subset[i].cls == "" || clsIn) {
+			if i < nkeep+nclass {
+				nclass--
+			}
 			subset = append(subset[:i], subset[i+1:]...)
+		}
+	}
+	for _, c := range classes {
+		ok := false
+		for _, p := range subset {
+			if p.cls == c {
+				ok = true
+			}
+		}
+		if !ok {
+			die("the subset has no program of class %s", c)
 		}
 	}
 	got := bitset(make([]uint64, words))
@@ -254,7 +318,9 @@ func main() {
 	fmt.Printf("blocks-covered\t%d\n", total)
 	fmt.Printf("subset\t%d\n", k)
 	fmt.Printf("subset-kept\t%d\n", nkeep)
-	fmt.Printf("subset-greedy\t%d\n", k-nkeep)
+	fmt.Printf("subset-per-class\t%d\n", nclass)
+	fmt.Printf("subset-greedy\t%d\n", k-nkeep-nclass)
+	fmt.Printf("classes\t%d\t%s\n", len(classes), strings.Join(classes, " "))
 	m, lo, hi := stats(false)
 	fmt.Printf("random-share\t%.4f\t%.4f\t%.4f\t(mean min max over %d seeds)\n", m, lo, hi, *seeds)
 	m, lo, hi = stats(true)
