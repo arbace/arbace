@@ -55,6 +55,37 @@
 
 (defn- slurp-latin1 ^String [^String path] (String. (lex/read-bytes path) "ISO-8859-1"))
 
+(defn- corpus-dir
+  "A corpus's directory: its :where's :root (a key of `roots`) and :path, no trailing slash."
+  [roots corpus]
+  (str/replace (str (get roots (:root (:where corpus))) "/" (:path (:where corpus))) #"/$" ""))
+
+(defn dedup-files
+  "The files a corpus with :dedup {:against ID :select GLOBS} keeps (VM report 156, the user's decision of 2026-11-02):
+  those of its :dedup :select under its directory with no byte-identical file at the same path in the corpus ID's
+  directory, sorted."
+  [man roots corpus]
+  (let [{:keys [against select]} (:dedup corpus)
+        other (or (first (filter #(= (:id %) against) (:corpora man))) (throw (ex-info (str "no corpus " against) {})))
+        dir (corpus-dir roots corpus)
+        odir (corpus-dir roots other)
+        res (map glob->regex select)]
+    (filterv (fn [p]
+               (let [o (java.io.File. (str odir "/" p))]
+                 (not (and (.isFile o)
+                           (java.util.Arrays/equals ^bytes (lex/read-bytes (str dir "/" p)) ^bytes (lex/read-bytes (str odir "/" p)))))))
+             (filterv (fn [p] (some #(re-matches % p) res)) (walk dir)))))
+
+(defn dedup-refusal
+  "Nil when a :dedup corpus's :files are its recomputed files (`dedup-files`), else the message."
+  [man roots corpus]
+  (let [want (dedup-files man roots corpus)
+        have (mapv #(if (string? %) % (first %)) (:files corpus))]
+    (when (not= want have)
+      (str "corpus " (name (:id corpus)) ": its :files (" (count have) ") are not its :dedup's recomputation (" (count want) "): "
+           (count (remove (set want) have)) " listed and not kept, " (count (remove (set have) want)) " kept and not listed"
+           " (bin/repr-c corpus-dedup prints the list)"))))
+
 (defn run-files
   "The files of `names` (relative to `dir`) whose dg action is `run` (C7: a `dg-do run` whose selector is
   not C++'s), those with a dg-additional-sources apart: one file a program."
@@ -108,8 +139,8 @@
             corpus (if-let [l (:like corpus)]
                      (merge (first (filter #(= (:id %) l) (:corpora man))) corpus)
                      corpus)
-            dir (str (get roots (:root (:where corpus))) "/" (:path (:where corpus)))
-            dir (str/replace dir #"/$" "")
+            dir (corpus-dir roots corpus)
+            _ (when-let [m (and (:dedup corpus) (dedup-refusal man roots corpus))] (throw (ex-info m {})))
             files (corpus-files corpus dir)
             files (if (= (:dg-do corpus) :run) (run-files dir files) files)
             corpus (assoc corpus :absolute (= (:root (:where corpus)) :gcc-15.2.0))
@@ -614,6 +645,21 @@
   (case cmd
     "pp" (pp-main (first args) (rest args))
     "lists" (let [[work roots & ids] args] (lists work (read-string roots) ids))
+    ;; bin/repr-c corpus-dedup [--check]: each :dedup corpus's recomputed files, or (--check) their equality with its :files
+    "dedup" (let [[roots check & ids] args
+                  man (read-string (slurp "test/c/corpora.edn"))
+                  roots (read-string roots)
+                  cs (filter #(and (:dedup %) (or (empty? ids) (some #{(name (:id %))} ids))) (:corpora man))
+                  bad (doall (for [c cs
+                                   :let [m (if (= check "--check")
+                                             (dedup-refusal man roots c)
+                                             (do (doseq [f (dedup-files man roots c)] (println (pr-str f))) nil))]
+                                   :when m]
+                               (do (println m) m)))]
+              (when (= check "--check")
+                (doseq [c cs :when (not (some #(str/includes? % (str "corpus " (name (:id c)) ":")) bad))]
+                  (println (str "corpus " (name (:id c)) ": its " (count (:files c)) " :files are its :dedup's recomputation"))))
+              (System/exit (if (seq bad) 1 0)))
     "check" (let [[work levels & ids] args
                   lv (set (str/split levels #","))
                   st (reduce max 0 (map #(check work % lv) ids))
@@ -628,4 +674,4 @@
                ;; 3: the known file written, files of no class left out of it (the caller checks and fails)
                (System/exit (if (pos? n) 3 0)))
     "agree" (let [[work & ids] args] (agree work ids))
-    (do (println "ppcheck: pp, lists, check or record") (System/exit 2))))
+    (do (println "ppcheck: pp, lists, dedup, check or record") (System/exit 2))))

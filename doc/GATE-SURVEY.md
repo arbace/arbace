@@ -596,6 +596,13 @@ Estimates in working days, as the repository's surveys give them.
 | **GT6** scheduling and limits | serial by default, `ARBACE_HEAVY_LOCK` gate-wide, `GATE_HEAVY_CMD`; per-program CPU-time limits with wall caps and the quiet retry (goi, Java, the suite, the oracle); per-step budgets | a concurrent `--full` with no OOM kill and no timeout on a loaded host | 1-2 | GT1 |
 | **GT7** the clean run | `bin/gate --full --clean` (the clone, empty caches, the audit, the record); run at `arbace-reaps-3-crops-v2`'s tag | `test/gate/clean-arbace-reaps-3-crops-v2.edn` committed, every step passing | 0.5 + the run (about 5 h) | GT1-GT4 |
 
+
+**Note beside GT7 (2026-11-02; GT8's first item when a GT8 section is written): C's corpus `torture-execute-mirror` collapsed** (the user's
+decision, VM report 156; doc/C23-SURVEY.md, "Decided (the user, 2026-11-02): collapse `torture-execute-mirror`"): its 1,531 files byte-identical
+to `torture-execute`'s are gone from it, 101 left (`test/c/corpora.edn`'s `:files`, checked against the rule by every listing and
+`bin/repr-c corpus-dedup --check`); the steps' `torture-execute-mirror` parts of c-check, c-aot, c-annotations, c-tokens, c-parse and
+c-roundtrip stay, about 6% of their former size.
+
 **Total.** 8-12 days; the recommended first part (GT1, GT2, GT3, GT6's serial default and
 limits, GT7) 5-7. GT2 and GT3 touch only `bin/gate`, `bin/arbace-go`, `bin/seed`, `bin/javac-vendor`
 and new files under `test/gate/`; GT5 touches `bin/java-check`, `bin/repr-go` and `bin/repr-java`,
