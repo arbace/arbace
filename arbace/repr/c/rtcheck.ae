@@ -281,14 +281,20 @@
 
 (defn record
   "Rewrites test/repr/c/roundtrip-known.edn's entries of the corpora `ids` from WORK: every file that
-  does not pass, its class kept or `:unclassified`."
-  [^String work ids]
+  does not pass, its class kept. A failing file of no class is not written (no placeholder class: queue 122, F1): it is
+  printed and the result is the number of such files (the caller fails)."
+  ([^String work ids] (record work ids known-file))
+  ([^String work ids ^String known-file]
   (let [known (read-string (slurp known-file))
+        left (atom [])
         known (reduce (fn [known id]
                         (let [old (get-in known [:roundtrip (keyword id)] {})
-                              rows (map #(str/split % #"\t" -1) (str/split-lines (slurp (str work "/" id "/files.tsv"))))
-                              es (into (sorted-map) (for [[nm st] rows :when (#{"fail" "known"} st)]
-                                                      [nm (or (get old nm) {:class :unclassified})]))]
+                              rows (map #(str/split % #"\t" -1) (remove str/blank? (str/split-lines (slurp (str work "/" id "/files.tsv")))))
+                              es (into (sorted-map) (for [[nm st & more] rows :when (#{"fail" "known"} st)
+                                                          :let [e (get old nm)
+                                                                _ (when-not e (swap! left conj (str id " " nm ": " st " " (last more))))]
+                                                          :when e]
+                                                      [nm e]))]
                           (if (seq es) (assoc-in known [:roundtrip (keyword id)] es) (update known :roundtrip dissoc (keyword id)))))
                       known ids)]
     (spit known-file
@@ -300,7 +306,12 @@
                (str/join "\n  " (for [[c es] (sort (:roundtrip known))]
                                   (str c "\n  {" (str/join "\n   " (for [[f e] es] (str (pr-str f) " " (pr-str e)))) "}")))
                "}}\n"))
-    (println "recorded" known-file)))
+    (println "recorded" known-file)
+    (doseq [l @left] (println (str "repr-c roundtrip --record: no class: " l)))
+    (when (seq @left)
+      (println (str "repr-c roundtrip --record: " (count @left) " failing files of no class left out of " known-file
+                    ": give each a class of :classes (or a new one) by hand, then judge again")))
+    (count @left))))
 
 (defn -main [cmd & args]
   (case cmd
@@ -312,5 +323,9 @@
               (doseq [r cs] (println "FAIL" (first r) (nth r 2)))
               (shutdown-agents)
               (System/exit (if (seq cs) 1 st)))
-    "record" (let [[work & ids] args] (record work ids))
+    "record" (let [[work & ids] args
+                   n (record work ids)]
+               (shutdown-agents)
+               ;; 3: the known file written, failing files of no class left out of it (the caller judges and fails)
+               (System/exit (if (pos? n) 3 0)))
     (do (println "rtcheck: forms, judge or record") (System/exit 2))))

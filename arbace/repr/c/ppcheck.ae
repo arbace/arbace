@@ -55,6 +55,37 @@
 
 (defn- slurp-latin1 ^String [^String path] (String. (lex/read-bytes path) "ISO-8859-1"))
 
+(defn- corpus-dir
+  "A corpus's directory: its :where's :root (a key of `roots`) and :path, no trailing slash."
+  [roots corpus]
+  (str/replace (str (get roots (:root (:where corpus))) "/" (:path (:where corpus))) #"/$" ""))
+
+(defn dedup-files
+  "The files a corpus with :dedup {:against ID :select GLOBS} keeps (VM report 156, the user's decision of 2026-11-02):
+  those of its :dedup :select under its directory with no byte-identical file at the same path in the corpus ID's
+  directory, sorted."
+  [man roots corpus]
+  (let [{:keys [against select]} (:dedup corpus)
+        other (or (first (filter #(= (:id %) against) (:corpora man))) (throw (ex-info (str "no corpus " against) {})))
+        dir (corpus-dir roots corpus)
+        odir (corpus-dir roots other)
+        res (map glob->regex select)]
+    (filterv (fn [p]
+               (let [o (java.io.File. (str odir "/" p))]
+                 (not (and (.isFile o)
+                           (java.util.Arrays/equals ^bytes (lex/read-bytes (str dir "/" p)) ^bytes (lex/read-bytes (str odir "/" p)))))))
+             (filterv (fn [p] (some #(re-matches % p) res)) (walk dir)))))
+
+(defn dedup-refusal
+  "Nil when a :dedup corpus's :files are its recomputed files (`dedup-files`), else the message."
+  [man roots corpus]
+  (let [want (dedup-files man roots corpus)
+        have (mapv #(if (string? %) % (first %)) (:files corpus))]
+    (when (not= want have)
+      (str "corpus " (name (:id corpus)) ": its :files (" (count have) ") are not its :dedup's recomputation (" (count want) "): "
+           (count (remove (set want) have)) " listed and not kept, " (count (remove (set have) want)) " kept and not listed"
+           " (bin/repr-c corpus-dedup prints the list)"))))
+
 (defn run-files
   "The files of `names` (relative to `dir`) whose dg action is `run` (C7: a `dg-do run` whose selector is
   not C++'s), those with a dg-additional-sources apart: one file a program."
@@ -108,8 +139,8 @@
             corpus (if-let [l (:like corpus)]
                      (merge (first (filter #(= (:id %) l) (:corpora man))) corpus)
                      corpus)
-            dir (str (get roots (:root (:where corpus))) "/" (:path (:where corpus)))
-            dir (str/replace dir #"/$" "")
+            dir (corpus-dir roots corpus)
+            _ (when-let [m (and (:dedup corpus) (dedup-refusal man roots corpus))] (throw (ex-info m {})))
             files (corpus-files corpus dir)
             files (if (= (:dg-do corpus) :run) (run-files dir files) files)
             corpus (assoc corpus :absolute (= (:root (:where corpus)) :gcc-15.2.0))
@@ -436,9 +467,12 @@
   "Rewrites test/repr/c/pp-check-known.edn's entries of the corpora `ids` from WORK: each file whose
   pp dump differs from cc's and whose port stream gives gcc -E's tokens (WORK/ID/gcc/NAME.i), with
   the class `classify` gives it; each lex difference with its class. Files whose stream differs from
-  gcc's too are printed, not recorded."
-  [^String work ids]
+  gcc's too are printed, not recorded. A file of no class (none kept, classify none, at :gcc none kept) is not written (no
+  placeholder class: queue 122, F1): it is printed and the result is the number of such files (the caller fails)."
+  ([^String work ids] (record work ids known-file))
+  ([^String work ids ^String known-file]
   (let [known (read-string (slurp known-file))
+        left (atom [])
         known (reduce
                 (fn [known id]
                   (let [d (str work "/" id)
@@ -447,6 +481,8 @@
                         old-pp (get-in known [:pp (keyword id)] {})
                         old-lex (get-in known [:lex (keyword id)] {})
                         cls (fn [nm old] (or (:class (get old nm)) (let [f (resolve 'arbace.repr.c.ppcheck/classify)] (f (str base "/" nm)))))
+                        ;; an entry of no class: printed, counted, not written
+                        no-class (fn [lvl nm e] (if (:class e) [nm e] (do (swap! left conj (str id " " nm " at " lvl)) nil)))
                         pp-entries (into (sorted-map)
                                          (keep (fn [[nm _ ps dg]]
                                                  (when (#{"differ" "gcc"} ps)
@@ -457,16 +493,16 @@
                                                          gd (when g (tokens-digest (gcc-texts g)))]
                                                      (cond
                                                        (and (not= gst "0") port-errs)
-                                                       [nm {:class (let [k (cls nm old-pp)] (if (= k :unclassified) :error-test k)) :gcc :rejected}]
+                                                       [nm {:class (or (cls nm old-pp) :error-test) :gcc :rejected}]
                                                        (= gd dg)
-                                                       [nm {:class (cls nm old-pp) :gcc gd}]
+                                                       (no-class :pp nm {:class (cls nm old-pp) :gcc gd})
                                                        :else
                                                        (do (println (str id ": " nm ": the port's stream is not gcc's either"
                                                                          (when-not g " (no gcc output)") ": its class at :gcc"))
-                                                           [nm {:class (cls nm old-pp) :gcc :differs}]))))))
+                                                           (no-class :pp nm {:class (cls nm old-pp) :gcc :differs})))))))
                                          rows)
                         lex-entries (into (sorted-map)
-                                          (keep (fn [[nm ls]] (when (= ls "differ") [nm {:class (cls nm old-lex)}])))
+                                          (keep (fn [[nm ls]] (when (= ls "differ") (no-class :lex nm {:class (cls nm old-lex)}))))
                                           rows)
                         ;; CS51 (a): the files whose stream is not gcc's, nor rejected by both
                         old-gcc (get-in known [:gcc (keyword id)] {})
@@ -476,7 +512,7 @@
                                                         port-errs (some #(.startsWith ^String % "#error")
                                                                         (str/split-lines (or (read-or-nil (str d "/port-pp/" nm ".tsv")) "")))]
                                                     (when-not (or (= g dg) (and (= g :rejected) port-errs))
-                                                      [nm {:class (or (:class (get old-gcc nm)) :unclassified)}]))))
+                                                      (no-class :gcc nm {:class (:class (get old-gcc nm))})))))
                                           rows)]
                     (-> known
                         (assoc-in [:pp (keyword id)] pp-entries)
@@ -498,7 +534,12 @@
                                   (for [[k v] (sort (get known level)) :when (seq v)]
                                     (str k "\n  {" (str/join "\n   " (map (fn [[f e]] (str (pr-str f) " " (pr-str e))) v)) "}")))
                         "}" (if (= level :gcc) "}" "") "\n")))))
-    (println "recorded" known-file)))
+    (println "recorded" known-file)
+    (doseq [l @left] (println (str "repr-c check --tokens --record: no class: " l)))
+    (when (seq @left)
+      (println (str "repr-c check --tokens --record: " (count @left) " failing files of no class left out of " known-file
+                    ": give each a class of :classes (or a new one) by hand, then judge again")))
+    (count @left))))
 
 (defn- get-gcc-digest
   "gcc -E's digest of a file of WORK/ID (WORK/ID/gcc/NAME.i and .status), :rejected, or nil when gcc
@@ -562,7 +603,8 @@
   0)
 
 (defn classify
-  "A difference's class from the file's text: the C23 or GNU feature cc lacks that it uses."
+  "A difference's class from the file's text: the C23 or GNU feature cc lacks that it uses, or nil (no placeholder class:
+  queue 122, F1)."
   [^String path]
   (let [s (slurp-latin1 path)]
     (cond
@@ -577,7 +619,7 @@
       (re-find #"(?m)^\s*#\s*if.*\b(true|false)\b" s) :c23-if-true
       (re-find #"\?\?[=(/)'<!>-]" s) :trigraphs
       (re-find #"\\[uU][0-9a-fA-F]{4}" s) :ucn-identifier
-      :else :unclassified)))
+      :else nil)))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; bin/repr-c pp
@@ -603,6 +645,21 @@
   (case cmd
     "pp" (pp-main (first args) (rest args))
     "lists" (let [[work roots & ids] args] (lists work (read-string roots) ids))
+    ;; bin/repr-c corpus-dedup [--check]: each :dedup corpus's recomputed files, or (--check) their equality with its :files
+    "dedup" (let [[roots check & ids] args
+                  man (read-string (slurp "test/c/corpora.edn"))
+                  roots (read-string roots)
+                  cs (filter #(and (:dedup %) (or (empty? ids) (some #{(name (:id %))} ids))) (:corpora man))
+                  bad (doall (for [c cs
+                                   :let [m (if (= check "--check")
+                                             (dedup-refusal man roots c)
+                                             (do (doseq [f (dedup-files man roots c)] (println (pr-str f))) nil))]
+                                   :when m]
+                               (do (println m) m)))]
+              (when (= check "--check")
+                (doseq [c cs :when (not (some #(str/includes? % (str "corpus " (name (:id c)) ":")) bad))]
+                  (println (str "corpus " (name (:id c)) ": its " (count (:files c)) " :files are its :dedup's recomputation"))))
+              (System/exit (if (seq bad) 1 0)))
     "check" (let [[work levels & ids] args
                   lv (set (str/split levels #","))
                   st (reduce max 0 (map #(check work % lv) ids))
@@ -610,6 +667,11 @@
                   cst (report-controls (token-controls work ids lv))]
               (shutdown-agents)
               (System/exit (max st cst)))
-    "record" (let [[work & ids] args] (record work ids) (record-gcc work ids))
+    "record" (let [[work & ids] args
+                   n (record work ids)]
+               (record-gcc work ids)
+               (shutdown-agents)
+               ;; 3: the known file written, files of no class left out of it (the caller checks and fails)
+               (System/exit (if (pos? n) 3 0)))
     "agree" (let [[work & ids] args] (agree work ids))
-    (do (println "ppcheck: pp, lists, check or record") (System/exit 2))))
+    (do (println "ppcheck: pp, lists, dedup, check or record") (System/exit 2))))

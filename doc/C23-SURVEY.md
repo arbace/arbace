@@ -4214,7 +4214,7 @@ embedded namespaces (c2j 25 s), a larger program (about +10% Go), and the `ci`/`
 | 2 | `bin/ci c2j-check`, `bin/ci cinterp-check`, `bin/ci judge-test` on it (light, repeat); then **`bin/j2g-edge verify`** on the merged tree (the frozen JVM, minutes; 118 finding 4: the 24 namespaces embedded name JDK classes, all inside `jdk/sources.txt`'s world, so the edge probably holds; if it differs, `bin/j2g-edge update` and its commit before step 3, else step 3's j2g lacks an answer or the gate's `j2g-edge` step fails after the seed) | 1 + 1 + 3 min, + the edge | 2 GB, 5 GB | `jdk/edge.edn` only if it differs |
 | 3 | `ARBACE_GO_ARCHES=amd64 bin/arbace-go --build 2>&1 \| tee .tmp/c9-build.log` (heavy lock; amd64 alone, W14: the arm64 half is the gate's): the runtime changed (CInterp, a new runtime class: `arbace_runtime_key` differs from stage 0's), so stage 0 compiles nothing (`host_compiles` false) and the build takes the two-run path: the **first program** (with CInterp) prepares and compiles every embedded namespace, `arbace.c.cinterp` included (`prepare` with `aot_out`), then j2g translates again with them. Check: the log has no `image: not prepared: arbace.c.cinterp` line (the first program's compiling prepare and the final image's both print theirs) and its `aot:` line reports 0 failed | ~9 min | 19 GB | `target/arbace-go/amd64/arbace`, `aot/`, `aot.key` |
 | 4 | `ARBACE_GO_ARCHES=amd64 bin/arbace-go --smoke` (W14); `bin/ci cinterp-check --exe target/arbace-go/amd64/arbace`; `ARBACE_HOST_EXE=that bin/ci repl-session` | 3 min | 2 GB | |
-| 5 | `CI_EXE=target/arbace-go/amd64/arbace CI_JOBS=4 bin/ci check` (every run corpus, one process a program; 3,761 programs, +0.15 s a start) | ~45 min | 4 x 0.3 GB | none: this step judges only, no `--record` (the user, 2026-11-02, VM report 153 F1: C9.2 row 5 as CS254 (a)); the gate's `c-check` (row 12) judges the record on the gate's executable |
+| 5 | `CI_EXE=target/arbace-go/amd64/arbace CI_JOBS=4 bin/ci check` (every run corpus, one process a program; 3,761 programs, 2,260 since the mirror's collapse below, +0.15 s a start) | ~45 min (~27 since the collapse) | 4 x 0.3 GB | none: this step judges only, no `--record` (the user, 2026-11-02, VM report 153 F1: C9.2 row 5 as CS254 (a)); the gate's `c-check` (row 12) judges the record on the gate's executable |
 | 6 | (moved after step 11, as 11a: as ordered here stage 0 is still the old one, and nothing of the compiled level's record enters the seed) | | | |
 | 7 | `bin/ci annotations --record` (REPR_C_THREADS 4; rewrites `test/repr/c/annot-known.edn`, `checker-gap` entries removed as they pass, CS93 (a); **writes the results file `test/repr/c/annot-results.edn`, CS240 (a)**) | 31-43 min | 6 GB | `annot-known.edn`, `annot-results.edn` (by hand, committed; then the gate's `c-annotations`, row 12, judges them, never `--record`) |
 | 7a | CS240 (a)'s other full runs, each `--record` over every corpus: `bin/repr-c check --tokens --record` (both levels), `bin/repr-c parse-check --record` (the mutants too), `bin/repr-c roundtrip --record` (not `--no-run`); each rewrites its known file and **writes its results file** (`test/repr/c/{pp-check,parse-check,roundtrip}-results.edn`: every file's row `[ID RESULT REASON]`, `arbace.repr.c.results`); a row `:fail` makes the step fail and `bin/reap` refuse the file | hours (the full runs) | 6 GB | the three known files and results files (by hand, committed; then the gate's `c-tokens`, `c-parse` and `c-roundtrip`, row 12, judge them, never `--record`) |
@@ -4330,6 +4330,32 @@ Proposals for the classes no CS decides (F7), decided (the user, 2026-11-02): CS
   read-refused C7, a gap). Options: (a) the spec's sections and C7 stand as their decision, as cited; (b) each restated as a CS. *Recommended: (a)*.
   **Decided (the user, 2026-11-02): (a): the spec's sections and C7 stand as their decision, as cited.**
 
+**The annotations' record at the re-seed window's step 7 (2026-11-02), and the writers' placeholder.** Step 7 (`bin/ci annotations --record` over
+the 21 corpora) wrote 77 entries `{:class :unclassified}`, a class queue 122's F1 had taken out of the REAP classes but no writer stopped writing.
+None was a regression of the day's changes. 45 were the writer's: `record` wrote every non-passing file without an old entry as `:unclassified`,
+the files the judge classes by itself too (`:gcc-rejects`, parse-gcc.tsv's status 1: all 33 torture entries; `:pp-known`, the token check's known
+`:pp`: 12), which C4's record had pruned by hand (its header "that no automatic class explains"). 32 were false errors against parse-gcc.tsv from
+C7's checker: 30 error tests gcc 15.2 rejects at their dg-options (-pedantic-errors' pedwarns, -Wattributes' ignored attributes) or when it compiles
+them (dg-do compile: a misplaced fallthrough, an impossible asm constraint), while the reference runs `gcc -fsyntax-only -w` at the standard alone,
+each checked by gcc 15.2 at the test's options; 2 the checker's own, `:checker-gap` by CS93 (a) (torture-compile pr34885.c and pr46866.c: a
+redeclaration through a `transparent_union` parameter, "conflicting types", since CS133). Proposals:
+- **CS265 Error tests gcc rejects at their options, which the reference accepts** (`test/c/divergences-annot.edn`'s `gcc-rejects-at-options`,
+  30 files). Options: (a) a class by design: the checker follows gcc at the test's options (CS93 (a)'s rule); (b) parse-gcc.tsv recorded again at the
+  modelled options (`-pedantic-errors` from the file's `:pedantic`, `-S` for dg-do compile), the files then `:gcc-rejects`, the round trip's and
+  the tree check's reference changed with it. *Recommended: (a)*.
+  **Decided (the user, 2026-11-02): (a): by design, cited in the class's `:decided`.**
+- **CS266 The judge's own classes counted** (`:gcc-rejects` 33 files, `:pp-known` 12). Options: (a) `--record` writes them into the known file
+  with their classes and texts (`arbace.repr.c.annot/auto-classes`), both by design (`:gcc-rejects`: an error test, whose annotations no
+  reference makes; `:pp-known`: cc's preprocessor's gaps, CS260 (a)'s classes), so bin/reap counts all 131 non-passes; (b) left out as C4's header
+  said, the results file's `:known` rows then counted nowhere. *Recommended: (a)*.
+  **Decided (the user, 2026-11-02): (a): both by design, cited in the classes' `:decided`.**
+- The writers (the user's decision, 2026-11-02): no record writes `:unclassified`. `--record` of the annotations (`arbace.repr.c.annot`), the
+  token check (`arbace.repr.c.ppcheck`, `:pp`, `:lex`, `:gcc`), the tree check (`arbace.repr.c.parsecheck`) and the round trip
+  (`arbace.repr.c.rtcheck`) keeps a file's class, else the judge's own or the guess (`classify`, nil when no rule names the file), else prints
+  the file, leaves it out of the known file and exits 3: the script judges, writes the results and fails. The class's definition left the
+  token check's and the round trip's `:classes`. judge-tests `annot-record-writes-no-placeholder`, `token-record-writes-no-placeholder`,
+  `parse-record-writes-no-placeholder`, `roundtrip-record-writes-no-placeholder`.
+
 **C's read cell counts each corpus file once (VM review 132, F3), decided (the user, 2026-11-02).** Once step 7a's results files exist the read
 cell would sum dg's passes, the token check's and the tree check's, so a corpus file counted up to twice, and the tree check's 4,000 mutants
 (synthetic files for error recovery, not conformance tests) as files. Decided: the read cell leaves the mutants' rows and entries out and counts
@@ -4404,3 +4430,32 @@ hash). Each prints `pins: ...` or `pins: FAILED: ...`; `--pins FILE`'s `:c` map 
 commit and with a wrong hash in turn, corpora.edn restored.
 
 **Gaps** (not built): go-whim's tree hashes (`:trees`) and ccorpus2's `:zip-sha256` are checked by the tools when they read them (ccdump-build), not by `--pins`.
+
+## Decided (the user, 2026-11-02): collapse `torture-execute-mirror` (VM report 156)
+
+**Decided (the user, 2026-11-02): (a), collapse, now, before the window's seed and runs** (VM report 156, `.tmp/mac-queue/reports/156-corpus-dedup.md`,
+DECISION (a)). The corpus `torture-execute-mirror` (ccorpus2 v1.6.0's `github.com/gcc-mirror/gcc/gcc/testsuite/gcc.c-torture/execute/`, 1,632 files) held
+1,531 files byte-identical to `torture-execute`'s (gcc 9.1.0's) file at the same relative path (the report's exact+directives key gives the same 1,531):
+every C level read, ran and compiled them twice (40.7% of `bin/ci check`'s 3,761 programs). The corpus is now the 101 others:
+
+- `test/c/corpora.edn`: the mirror's `:files` (101) and `:dedup {:against :torture-execute :select ["**/*.c"] :same :bytes :before-count 1632}`,
+  `:count 101`; every listing (`arbace.repr.c.ppcheck`'s `lists`, which `bin/ci check`, `check --aot`, `bin/ci annotations`, `record-ref`,
+  `bin/repr-c check`, `parse-check`, `roundtrip` and so the gate's parts all use) recomputes the rule from both trees and refuses a `:files` that
+  differs; `bin/repr-c corpus-dedup [--check]` prints the recomputation or checks it (status 1 on a difference).
+- The records filtered by `.tmp/collapse-records.sh` (the window's script, idempotent: a row whose ID is a dropped mirror file, or a known file's entry
+  under `:torture-execute-mirror`, removed, every other byte kept): `test/c/check-linux-amd64.edn` and `check-aot-linux-amd64.edn` 1,501 rows each (of
+  1,601 run programs; 100 left), `test/c/ref-gcc15.edn`, `test/repr/c/annot-results.edn`, `pp-gcc.sha256`, `parse-gcc.tsv` 1,531 each,
+  `annot-known.edn` 19 entries (1 left, `pr93908.c`), `roundtrip-known.edn` 16 (2 left, `complex-6.c`, `return-addr.c`); `pp-check-known.edn` and
+  `parse-check-known.edn` had none. The window's step 7a outputs are filtered the same way after they finish.
+- `test/c/essential-check.txt`: the mirror's two passing programs (`20000112-1.c`, `20000113-1.c`, dropped) replaced by two of the kept ones that pass
+  at both run levels (`20030125-1.c`, `20030913-1.c`); the gcc-builtin class's `torture-execute-mirror/20021127-1.c` by its byte-identical twin
+  `torture-execute/20021127-1.c` (the same row, `known gcc-builtin`).
+- The REAP cells (`bin/reap --record`): C eval 3,457 / 195 / 109 -> 2,049 / 124 / 87 (`bin/ci check`: 3,457 pass, 304 not -> 2,049, 211); C AOT
+  3,467 / 187 / 107 -> 2,059 / 116 / 85 (`check --aot`: 3,467, 294 -> 2,059, 201); C print's known 155 -> 139 (design 7 -> 5, deferred 148 -> 134);
+  C read unchanged until step 7a's results files (575+ / 96 / 53). The annotations' source in the eval cell counts annot-class's results (pass 4,806,
+  not 112), not this change alone.
+- Each of the six C steps that run both torture parts (c-check, c-aot, c-annotations, c-tokens, c-parse, c-roundtrip) loses 1,531 file-runs of the
+  mirror part (the report's estimate: about 18 min of c-check and 24 of c-aot; the token-heavy steps about 47% of their torture parts).
+
+Considered: (b) keeping both (the mirror the record of the later snapshot's whole directory; counts in the milestone and the cells stay 1,632): not
+taken. A rule only (no `:files`): the committed list is what the records' rows are checked against at a glance, and the rule's recomputation guards it.
