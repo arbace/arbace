@@ -4319,13 +4319,19 @@ group: the back end's package files and trees, tools/cirun, bin/repr-go), the cc
 hours serial (the sum above, about 5.5 hours, and the parts' starts). Built with them: `bin/repr-c parse-check --mutants-only` (the mutants a whole run draws,
 the corpora not checked); the C scripts' go-whim default and musl's and gcc's local tarballs found from a clean run's clone (`.tmp/gate-clean/SHA`) as from a
 worktree (`${root%%/.tmp/*}`); queue 138's inputs (cherry-picked) and its finding 4 fixed: `bin/ci cirun-build --ensure` keeps `.tmp/ci/cirun` only while
-`.tmp/ci/key` is the checkout's (test `test/gate/cirun-key-test.bash`).
+`.tmp/ci/key` is the checkout's (test `test/gate/cirun-key-test.bash`); `c-c2j` declares `go/arbace/jrt/*.ae` (c2j's emit scans jrt: `bin/gate --audit c-c2j`
+found 71 undeclared reads there, queue 138's medium finding; `c-dg-essential`'s audit ok).
 
 **The pins** (`bin/gate --pins`): gcc 15.2.0's tarball and musl 1.2.6's against `test/c/corpora.edn`'s SHA-256 (the copy the tools take: `REPR_C_GCC_TARBALL` or
 `CI_MUSL_TARBALL`, the checkout's `.tmp`, the main checkout's; none: the tool fetches it and checks it by the pin), and `bin/repr-c host check` (the host's gcc against
 `test/c/host/`'s predefined macros and headers' digests); `--pins FILE`'s map gains `:c`.
 
-**Gaps** (not built): repr/c's token, tree and round-trip checks and the annotations have no negative control (GTS81 (a)); only the run and dg levels do
-(`test/c/controls.edn`). The host's gcc is in no step's key (no `:gcc` host: it is checked by `--pins`, and the ordinary gate does not run `--pins`); go-whim's
+**The negative controls** (GTS81 (a), `test/c/controls.edn`): the run and dg levels' (queue 064) and, cherry-picked from queue 144 (VM, `mac/144-c-controls`),
+the token check's `:lex`, `:pp` and `:gcc-digest`, the tree check's `:tree`, the annotations' `:annot` and the round trip's `:roundtrip` (levels 3 and 4 crossed),
+fannkuchredux.c against fasta-8.c, each judged by its family's judge after the corpora and failing the run when it passes; in the steps above they are judged in
+the benchmarksgame parts (`c-dg` whole). Their judges' four deftests pass on stage 0 (31 assertions); the runs over the real dumps are the window's. Not drafted:
+the round trip's levels 1 and 2 crossed (the run keeps neither the forms' text nor the `:full` print; queue 144's design).
+
+**Gaps** (not built): the host's gcc is in no step's key (no `:gcc` host: it is checked by `--pins`, and the ordinary gate does not run `--pins`); go-whim's
 commit and ccorpus2's module hash are checked by the tools when they read them (ccdump-build), not by `--pins`. `c-aot` runs without `CI_AOT_NODES=1`, so its
 comparison with the interpreter's runs (CS214) is not made in the gate.
