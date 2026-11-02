@@ -4397,4 +4397,10 @@ fannkuchredux.c against fasta-8.c, each judged by its family's judge after the c
 the benchmarksgame parts (`c-dg` whole). Their judges' four deftests pass on stage 0 (31 assertions); the runs over the real dumps are the window's. Not drafted:
 the round trip's levels 1 and 2 crossed (the run keeps neither the forms' text nor the `:full` print; queue 144's design).
 
-**Gaps** (not built): go-whim's commit and ccorpus2's module hash are checked by the tools when they read them (ccdump-build), not by `--pins`.
+**Pins added (the user's decision of 2026-11-02):** `bin/gate --pins` also checks go-whim's commit (the checkout the C tools use, `GOWHIM`, default `go-whim` beside the main
+checkout, as `bin/repr-c` and `bin/lib/ci/check` find it; its `HEAD` against `test/c/corpora.edn`'s `:go-whim-80c49bf5 :commit`, the one constant ccdump-build checks as well) and
+ccorpus2's module hash (`cache/download/modernc.org/ccorpus2/@v/v1.6.0.ziphash` in the module cache of TamaGo's go, no network, against `:ccorpus2-v1.6.0 :h1`, the go.sum
+hash). Each prints `pins: ...` or `pins: FAILED: ...`; `--pins FILE`'s `:c` map gains `:go-whim {:dir :commit}` and `:ccorpus2 {:version :h1}`. Tried: ok, then FAILED with a wrong
+commit and with a wrong hash in turn, corpora.edn restored.
+
+**Gaps** (not built): go-whim's tree hashes (`:trees`) and ccorpus2's `:zip-sha256` are checked by the tools when they read them (ccdump-build), not by `--pins`.
