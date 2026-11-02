@@ -82,13 +82,14 @@
   {:forms (:forms u) :units (:units u)})
 
 (defn light-run-nodes
-  "The light path's back end: tools/cirun over the node program's text, the REPL's output its output."
+  "The light path's back end: tools/cirun over the node program's text, the REPL's output its output; argv[0] is the
+  program's name, which cirun itself supplies (\"a.out\"), so only the rest are its arguments."
   [^String text argv]
   (let [f (java.io.File/createTempFile "ci-repl" ".nodes")
         cirun (or (System/getenv "CIRUN") (str (root) "/.tmp/ci/cirun"))]
     (try
       (spit f text)
-      (let [pb (ProcessBuilder. ^java.util.List (into [cirun (.getPath f)] argv))
+      (let [pb (ProcessBuilder. ^java.util.List (into [cirun (.getPath f)] (rest argv)))
             _ (.redirectErrorStream pb true)
             p (.start pb)
             out (slurp (.getInputStream p))
@@ -97,9 +98,21 @@
         st)
       (finally (.delete f)))))
 
+(def ^:private cinterp-run-nodes
+  ;; the in-process back end, when this executable has it (arbace.c.cinterp needs arbace.lang.CInterp, C9's): else nil
+  (delay (try (require 'arbace.c.cinterp)
+              (resolve 'arbace.c.cinterp/run-nodes)
+              (catch Throwable _ nil))))
+
 (def ^:dynamic *run-nodes*
-  "The back end: (fn [node-program-text argv] status)."
-  light-run-nodes)
+  "The back end: (fn [node-program-text argv] status): arbace.lang.CInterp's on an executable built with ci (C9), else the
+  light path's, tools/cirun as a process."
+  (or @cinterp-run-nodes light-run-nodes))
+
+(defn backend
+  "Which back end *run-nodes* is by default: :cinterp (in process) or :cirun (the light path's process)."
+  []
+  (if @cinterp-run-nodes :cinterp :cirun))
 
 (defn run-main
   "(c/run-main 'c.letters & args): the REPL's units checked, linked with musl, built, main run in the program
@@ -121,3 +134,18 @@
   [ns]
   (swap! units dissoc ns)
   nil)
+
+(defn -main
+  "arbace -m arbace.c.repl run-nodes FILE [ARG...]: the node program in FILE run by the default back end with the arguments
+  (argv[0] \"a.out\"), its status the exit status (bin/lib/ci/check with CI_EXE, one process a program); backend: prints
+  cinterp or cirun."
+  [& args]
+  (case (first args)
+    "run-nodes" (let [[_ f & more] args
+                      st (*run-nodes* (slurp f) (vec (cons "a.out" more)))]
+                  (flush)
+                  (shutdown-agents)
+                  (System/exit (int st)))
+    "backend" (do (println (name (backend))) (shutdown-agents) (System/exit 0))
+    (do (binding [*out* *err*] (println "usage: arbace.c.repl run-nodes FILE [ARG...] | backend"))
+        (System/exit 2))))

@@ -2,10 +2,12 @@
 # gate_key and gate_rest_key leave out the crops' files no build reads (queue 111, 054's finding 9): bin/arbace-go's
 # gate_key and gate_rest_key and bin/lib/version.bash's arbace_embedded_sources, extracted and run alone on a
 # fabricated checkout (one file at each path below), sha256sum, xargs and cut stubbed so the key's input is printed:
-# the crops' check scripts (bin/lib/ci, oi, repr-cpp), their Go forms (go/arbace/{ci,cinterp,crt,oi,scm}) and OCaml's
+# the crops' check scripts (bin/lib/ci, oi, repr-cpp), their Go forms (go/arbace/{oi,scm}; ci, cinterp and crt are read since C9: the
+# build copies them) and OCaml's
 # runtime forms (jdk/ocaml) are absent, and what the builds read is present (the embedded arbace.o2j, arbace/http.ae,
 # arbace/tls, goi, jrt, repr/go's Go forms, jdk/forms, jdk/data, bin/lib/tls-checks.bash, ...). Then the audit's
 # identity of the hosts :gate and :prog (test/gate/audit.ae) names the same exclusions. No executable.
+# C9: ci's namespaces (arbace/c, arbace/repr/c) and arbace.lang.CInterp are embedded, so the key hashes them.
 # By hand: test/gate/gate-key-crops-test.bash [ARBACE_GO [VERSION_BASH [AUDIT_AE]]]   (older copies to test)
 set -uo pipefail
 src=$(cd "$(dirname "$0")/../.." && pwd)
@@ -23,11 +25,12 @@ grep -q '^gate_rest_key() {' "$d/fns.bash" && grep -q '^arbace_embedded_sources(
   || { echo "FAIL: gate_key, gate_rest_key or arbace_embedded_sources not found"; exit 1; }
 
 excluded="bin/lib/ci/check bin/lib/oi/suite.bash bin/lib/repr-cpp/roundtrip
-go/arbace/ci.ae go/arbace/ci/expr.ae go/arbace/cinterp.ae go/arbace/cinterp/natives.ae go/arbace/crt.ae go/arbace/crt/mem.ae
 go/arbace/oi.ae go/arbace/oi/apply.ae go/arbace/scm.ae go/arbace/scm/eval.ae jdk/ocaml/ocaml/rt.ae jdk/ocaml/ocaml/rt/NInt.ae
-arbace/repr/cpp.ae arbace/repr/cpp/convert.ae arbace/repr/llvm.ae arbace/cpp/lower.ae arbace/c.ae arbace/c/build.ae
-arbace/repr/c.ae arbace/repr/ocaml.ae arbace/repr/scheme.ae arbace/scheme/aot.ae"
-kept="arbace/core.ae arbace/o2j.ae arbace/http.ae arbace/tls/x.ae arbace/go/check.ae arbace/repr/go.ae
+arbace/repr/cpp.ae arbace/repr/cpp/convert.ae arbace/repr/llvm.ae arbace/cpp/lower.ae
+arbace/repr/ocaml.ae arbace/repr/scheme.ae arbace/scheme/aot.ae"
+kept="go/arbace/ci.ae go/arbace/ci/expr.ae go/arbace/cinterp.ae go/arbace/cinterp/natives.ae go/arbace/crt.ae go/arbace/crt/mem.ae
+arbace/c.ae arbace/c/build.ae arbace/c/cinterp.ae arbace/repr/c.ae arbace/repr/c/lex.ae arbace/lang/CInterp.ae
+arbace/core.ae arbace/o2j.ae arbace/http.ae arbace/tls/x.ae arbace/go/check.ae arbace/repr/go.ae
 go/arbace.ae go/arbace/api.ae go/arbace/goi.ae go/arbace/goi/x.ae go/arbace/jrt/x.ae go/arbace/repr/go/godump.ae
 go/arbace/gotable.edn go/arbace/cmd/arbace/image.ae go/arbace/cimore/x.ae
 jdk/forms/java.base/x.ae jdk/data/x jdk/edge.edn jdk/sources.txt overlay/go/runtime.ae overlay/jdk/variants/x.ae
@@ -63,8 +66,7 @@ done
 host_block() { awk -v h="$1" '$0 ~ "^ *(\\{)?:" h " " {f=1} f && $0 ~ /^ *:[a-z-]+ / && $0 !~ "^ *(\\{)?:" h " " {exit} f' "$aud"; }
 gb=$(host_block gate); pb=$(host_block prog)
 [ -n "$gb" ] && [ -n "$pb" ] || { echo "FAIL: no :gate or :prog in $aud"; exit 1; }
-for p in '!bin/lib/ci/' '!bin/lib/oi/' '!bin/lib/repr-cpp/' '!jdk/ocaml/' '!go/arbace/ci.ae' '!go/arbace/ci/' \
-         '!go/arbace/cinterp.ae' '!go/arbace/cinterp/' '!go/arbace/crt.ae' '!go/arbace/crt/' '!go/arbace/oi.ae' \
+for p in '!bin/lib/ci/' '!bin/lib/oi/' '!bin/lib/repr-cpp/' '!jdk/ocaml/' '!go/arbace/oi.ae' \
          '!go/arbace/oi/' '!go/arbace/scm.ae' '!go/arbace/scm/'; do
   if echo "$gb" | grep -qF "\"$p\""; then ok "audit :gate names $p"; else bad "audit :gate does not name $p"; fi
 done

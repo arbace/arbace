@@ -4136,4 +4136,96 @@ essential gate run (not run here). C9 is the milestone: `GATE_FULL_SERIAL=1 bin/
   cells print `575+` and `0+`, not a count; a `--record`ed results file per check (rows `[ID RESULT REASON]`, as `bin/ci dg`) would give the counts.
   Options: (a) each check writes a results file (the full runs, hours, once); (b) leave: the known files' non-passes are the judged part; (c) count the passes from the corpora's
   lists (cheap, but the lists are not committed). *Recommended: (a)* at the C9 full run, (b) until then.
+  **Decided (the user, 2026-11-02): (a) at the C9 full run, (b) until then.**
 - **CS241 The essential subsets' size.** Options: (a) as built (45 programs, 10 AOT programs, 92 dg files); (b) smaller for the AOT. *Recommended: (a)*.
+  **Decided (the user, 2026-11-02): (a), as built (45 programs, 10 AOT programs, 92 dg files).**
+
+## As built: C9 (preparation), the re-seed window for C5 and C6 (2026-11-02)
+
+On `c23-c9` from main `619f7335`, in the light tier (the host runs `bin/gate --full`: no executable built, no musl read or compile beyond a copied cache, no
+corpus run, no heavy-lock user). The code of the window that a light check can reach is written and checked; what needs the executable is a list of heavy runs
+below, in order, with what each costs and writes.
+
+### C9.1 What was built (the commits)
+
+1. **The embedded tree** (C5.7 item 1, CS100): `arbace/j2g/embed.ae` no longer excludes `arbace/repr/c` and `arbace/c`; the keys follow
+   (`bin/lib/version.bash`'s `arbace_embedded_sources`, `test/gate/steps.edn`'s `:tools`, `test/gate/audit.ae`'s `:gate`, `bin/arbace-go`'s `gate_key`, which
+   also hashes `go/arbace/{ci,cinterp,crt}` again: j2g copies them into the program; the oi and scm forms and the check scripts stay out).
+   `test/gate/gate-key-crops-test.bash` follows (12 failures against the old key files, passes). **Effect: any build from this branch has a new `gate_key`
+   and `arbace_aot_key`; nothing is built until the window.**
+2. **CInterp** (C5.7 item 2, CS103 (c)): `arbace/lang/CInterp.ae` (the static native `runNodes`), j2g's rule (`arbace/j2g/decls.ae`: its natives are
+   `cinterp`'s, `out.ae`'s import path `arbace/cinterp`) and the copy of `go/arbace/{crt,ci,cinterp}` into the program (`arbace/j2g/main.ae`, beside
+   goi's); `go/arbace/cinterp/natives.ae` reports as tools/cirun does (`cirun: fault:`, `cirun: internal:` with status 70) so the run level's judge reads it
+   unchanged. **`bin/ci cinterp-check`** builds that Go side with TamaGo's go and a stand-in `jrt` (the two types it takes) and runs three fixtures
+   (`test/c/cinterp/`: a program with arguments, stdout and stderr; a fault; `exit(3)`, their node programs) on it and on cirun against their `.expect`:
+   ok on both (it failed with the old fault line). This is the first compile of `cinterp` and of `ci`'s `aot.go` together with `crt` outside tools/cirun.
+3. **The Arbace side**: `arbace.c.cinterp` (needs the class: loads only on an executable built with ci) binds `arbace.c.repl`'s `*run-nodes*`; `arbace.c.repl` gets `backend`
+   and a `-main` (`run-nodes FILE [ARG...]`, `backend`); `bin/lib/ci/check` runs each node program by `CI_EXE -m arbace.c.repl run-nodes FILE` when `CI_EXE` is set (no
+   cirun build); `*run-nodes*`'s contract is one (argv[0] the program's name). Judge-tests `check-runs-nodes-on-ci-exe` (a stand-in executable; it failed without the branch),
+   `repl-backend-default`, `cinterp-check-on-an-executable`. On stage 0 the back end stays `cirun`: **a namespace that names `arbace.lang.CInterp` is not prepared there
+   ("image: not prepared"), so the build's first pass leaves it out and the second pass (the host's runtime is then the checkout's) compiles it** (`bin/lib/program.bash`'s
+   `host_compiles`).
+4. **c2j's first compile of ci's and repr/c's namespaces, done light** (`bin/ci c2j-check`, 25 s, 2 GB, the essential step `c-c2j`): the 24 sources compile (2,537 classes). It
+   found one failure that would have stopped the re-seed's build after hours: `arbace/c/check.ae`, **"unboxed emit of invoke"** (c2j has no back end for a call of a fn with a
+   primitive-hinted return or parameter in a primitive context); fixed by dropping the `^long` hints of ten of the checker's fns. `bin/repr-c check --c23` 62 of 62, the judge tests
+   of the float rules pass. (The check reproduces the `bin/arbace-go --build-program` flow of a program's namespaces without j2g and Go.)
+
+### C9.2 The heavy runs, in order (after `bin/gate --full`; the host free)
+
+Estimates from the standalone notes (G1 in two runs 6:18, G2 and G3 4:13 and 4:19, `--verify` 13:42) and the gate's measured peaks (go-build 19 GiB); C's additions: the
+embedded namespaces (c2j 25 s), a larger program (about +10% Go), and the `ci`/`crt` packages (std only).
+
+| # | command | time | memory | writes |
+|---|---|---|---|---|
+| 0 | merge `c23-c9` (and the other crops' window branches, batched) | | | the commit the seed will name |
+| 1 | `bin/seed --build` (stage 0 from the current seed) | 10 min | 8 GB | `target/seed/amd64/arbace`, `aot/` |
+| 1a | add `-buildvcs=false` to `tools/gateaudit`'s build in `bin/lib/gate-run.bash` (decided by the user, 2026-11-02, for the window, when every step reruns anyway; not changed before) | seconds | | `bin/lib/gate-run.bash` |
+| 2 | `bin/ci c2j-check`, `bin/ci cinterp-check`, `bin/ci judge-test` on it (light, repeat) | 1 + 1 + 3 min | 2 GB | |
+| 3 | `bin/arbace-go --build` (heavy lock): the runtime changed (CInterp), so two runs | ~9 min | 19 GB | `target/arbace-go/amd64/arbace`, `aot/`, `aot.key` |
+| 4 | `bin/arbace-go --smoke`; `bin/ci cinterp-check --exe target/arbace-go/amd64/arbace`; `ARBACE_HOST_EXE=that bin/ci repl-session` | 3 min | 2 GB | |
+| 5 | `CI_EXE=target/arbace-go/amd64/arbace CI_JOBS=4 bin/ci check` (every run corpus, one process a program; 3,761 programs, +0.15 s a start) | ~45 min | 4 x 0.3 GB | none unless it differs (it must not: one loader); `--record` only for an explained difference |
+| 6 | `bin/ci check --aot` (CI_AOT_NODES=1 for the interpreter beside) on the new stage 0 once it is the host | ~60 min | 4 GB | `test/c/check-aot-linux-amd64.edn` only if it differs |
+| 7 | `bin/ci annotations` (REPR_C_THREADS 4; `--record` rewrites `test/repr/c/annot-known.edn`, `checker-gap` entries removed as they pass, CS93 (a)) | 31-43 min | 6 GB | `annot-known.edn` |
+| 8 | `bin/arbace-go --fixpoint` (G1 by stage 0, G2 by G1, G3 by G2) | ~17 min | 19 GB | `target/arbace-go/fixpoint/g{1,2,3}` |
+| 9 | the notes committed first, then `ARBACE_SEED_GO_BUILD=target/arbace-go/fixpoint/g3 bin/seed --make` | 2 min | 1 GB | `seed/arbace-seed-go.tar.xz`, `.sha256` |
+| 10 | `bin/seed --verify` (the seed printed again; stage 0 = G1 = G2 = G3) | ~14 min | 19 GB | none (it must pass) |
+| 11 | `bin/seed --build` again (stage 0 from the new seed, now with ci compiled in), `bin/ci judge-test`, `bin/reap`, `bin/ci dg --essential` | 15 min | 8 GB | |
+| 12 | `bin/gate` (essential) then `GATE_FULL_SERIAL=1 bin/gate --full`; `bin/gate --clean` at the tag | hours | per the table | `test/gate/clean-TAG.edn` |
+
+Re-seed hazards found while preparing: (a) the first `bin/gate` after the merge rebuilds the gate's executables (the key changed); (b) `bin/lib/ci/check`'s CI_EXE needs the
+executable to resolve `-m arbace.c.repl` from its compiled copy (it does once embedded; before, stage 0 evaluates it from the checkout); (c) `arbace.c.cinterp` must be in the
+second pass's `namespaces.txt` (it is: the list is the embedded tree's); (d) the first pass leaves `arbace.c.cinterp` out of the compiled tree, so the first executable has
+`arbace.lang.CInterp` (a runtime class) but `arbace.c.repl` loads `arbace.c.cinterp` from the second pass's compiled tree, not before: step 3's two runs are not optional.
+
+### C9.3 What is not built, with its plan (C6.7 items 3-5; needs the executable)
+
+- **Shards by `arbace.build.go`** (item 3). Today `bin/lib/ci/check-aot` prints cf2g's Go forms and builds a shard with `go build` in a module of its own (the light path). The C6 row says
+  `arbace.build.go` with ci and crt as the program's packages (REAP7b's way). Plan: `bin/arbace-go --build-program` takes `:c-main "FILE.c"` (with `c/` sources, `:std`, `:args` in
+  `program.edn`; `program_edn` and its key list gain it): the C unit is read, checked, linked with musl and translated by `bin/ci aot` into a `main` package; ci and crt (the
+  copies j2g already puts in the shipped program) are listed in the program's goi table (`bin/goi table --program-list`) and the program is a Go program for `bin/build-go --root`.
+  Test after the window: `test/programs/c-hello/` in `bin/arbace-go --build-program --check`. Needs: the new stage 0 (ci compiled), 8 GB, 5 min a program.
+- **musl compiled once** (item 4, CS122 (a)): the library node program of 1,335 units translated by cf2g once into packages (split by directory, CS122: a 3 GB compile for one package),
+  listed in ci's table, and the interpreter and the compiled programs call them. Needs the heavy lock, a Go build of about 6 GB, 20-30 minutes, then the full check again (CS124's time).
+- **The program corpora** (item 5): SQLite (3.50.4's `sqlite3.c` and `shell.c`), Lua 5.4.4, zlib 1.2.11, QuickJS. Each is a program of several units; the check is the program's own test
+  against gcc's recorded run. Proposed definitions (`test/c/programs.edn`, each `{:id :files :args :stdin}`, references recorded by gcc -O0 into `test/c/ref-gcc15-programs.edn` by an
+  extension of `bin/ci record-ref`): zlib = its 13 library units + `example.c` (its self-test, status 0); Lua = `lua.c` and its library, `-e "print(1+1)"` and a script of
+  its test suite; SQLite = `shell.c` + `sqlite3.c`, `:memory:` with a script on stdin; QuickJS = `qjs.c` and its libs, `-e "console.log(1+1)"`. Lua and SQLite and QuickJS are the long
+  programs (each unit alone took 72-255 s to read, C3's numbers).
+
+### C9.4 Proposals (CS250-CS254), decided (the user, 2026-11-02)
+
+- **CS250 The window's order.** Options: (a) as C9.2: the first executable and the light checks first, CI_EXE run second, the fixpoint and `--verify` last (the re-seed once, batched
+  with the other crops' windows); (b) a re-seed for C alone first. *Recommended: (a)*: a seed is rare and every crop's embedded tree is the same build.
+  **Decided (the user, 2026-11-02): (a), as C9.2.**
+- **CS251 Shards by `arbace.build.go`** (C9.3, item 3). Options: (a) as planned (`:c-main` programs; the check keeps `go build` for its 3,761 programs, `arbace.build.go` for the programs and
+  the essential subset's shard); (b) the check's shards by `bin/build-go` too (the C6 row to the letter; slower, the lock). *Recommended: (a)*, (b) if the record of the compiled level is
+  to be remade anyway.
+  **Decided (the user, 2026-11-02): (a), as planned.**
+- **CS252 Program corpora's tests** (C9.3, item 5). Options: (a) the proposed definitions; (b) the upstream test suites (`make test`, zlib's `test/`, Lua's `all.lua`): large and needing the
+  corpora's own driver; (c) the programs built and run on one input each. *Recommended: (a)* first, (b) per program as it is wanted.
+  **Decided (the user, 2026-11-02): (a), the proposed definitions.**
+- **CS253 Musl compiled** (C9.3, item 4). Options: (a) by directory packages as CS122; (b) not now: the interpreter's musl is enough for the milestone and `check --aot` translates the used part
+  (as today, 3,461 pass). *Recommended: (b) for v1 of the milestone, (a) after*: it is a speed, not a conformance, item.
+  **Decided (the user, 2026-11-02): (b) for v1 of the milestone, (a) after.**
+- **CS254 The executable's check of the run corpora** (step 5). Options: (a) the 3,761 programs once at the window, none recorded; (b) in the gate as a heavy step. *Recommended: (a)*.
+  **Decided (the user, 2026-11-02): (a), once at the window, none recorded.**

@@ -378,7 +378,7 @@ rest of it being covered deterministically by the files named:
 - Time and the host: the current time and the clock, the host's `System` properties, the default
   time zone and locale (`(str (java.util.Date. 0))`, `%s` of a Date, `%,d`), host paths, user
   names and process IDs (`time` and `time_zones` use fixed instants, zones and locales, `time_zones`'s GMT-format names
-  relative to the zone's raw offset, which `TimeZone` takes at the current time; `files`
+  relative to the zone's raw offset, which `TimeZone` takes at the current time (accepted by the user, 2026-11-02); `files`
   works in a temporary directory whose path never shows; `processes` checks the environment's
   shape and children's results).
 - Randomness: random values beyond their shape (`rand`, `shuffle`, `random-sample`;
