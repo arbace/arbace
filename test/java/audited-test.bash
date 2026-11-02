@@ -20,8 +20,9 @@ no() { n=$((n + 1)); bad=$((bad + 1)); echo "FAIL $*"; }
 # results DIR LEVEL ID RESULT [REASON] [audited]: a fabricated results file of one level
 results() { local d=$t/$1; mkdir -p "$d"; printf '%s\t%s\t%s\t%s\n' "$3" "$2" "$4" "${5:-}" > "$d/results.tsv"; }
 audited() { printf '%s\n' "$2" > "$t/$1/audited"; }
-# judge ARGS...: bin/java-check --judge, its output in $t/out, its status in $st
-judge() { "$root/bin/java-check" --judge "$@" > "$t/out" 2>&1; st=$?; }
+# judge ARGS...: bin/java-check --judge --partial (the fabricated files hold a test or two: a whole run's other tests
+# would be missing, each a problem: cases 1, 1b and 3 failed so), its output in $t/out, its status in $st
+judge() { "$root/bin/java-check" --judge --partial "$@" > "$t/out" 2>&1; st=$?; }
 
 TO="20 s, then 40 s"
 
@@ -104,6 +105,20 @@ if sed -n '/:id :audit-timeout/,/:id :thread-order/p' "$root/test/java/divergenc
 
 # 8 (review 077, finding 6): no checkout's absolute path in this script (its scratch default is the checkout's own .tmp/tmp)
 if grep -v '^# \|grep -v' "$src/test/java/audited-test.bash" | grep -q '/root/arbace'; then no "a hard-coded /root/arbace path"; else ok "no hard-coded checkout path"; fi
+
+# 9 (review 117, finding 5): an :unstable class clears a levels disagreement only when the side that does not pass is the
+# class's level: :flaky (:level :compiled) names t04819; compiled failing is unstable, no problem; interp failing is a
+# levels problem (and interp's own regression); a test no :unstable class names (t03321) is a levels problem
+rm -f "$t/i/audited" "$t/c/audited"
+results i interp t04819 pass; results c compiled t04819 fail "fail status 1 (the JDK's 0): Got 99 references"
+judge "$t/i/results.tsv" "$t/c/results.tsv"
+if [ $st = 0 ] && grep -q 'unstable (an :unstable class names it at the level that fails' "$t/out" && ! grep -q '^   levels: t04819' "$t/out"; then ok ":flaky's compiled failure of t04819: unstable, no problem"; else no ":flaky's compiled failure of t04819 (status $st)"; fi
+results i interp t04819 fail "fail status 1 (the JDK's 0): Got 99 references"; results c compiled t04819 pass
+judge "$t/i/results.tsv" "$t/c/results.tsv"
+if [ $st = 1 ] && grep -q '^   levels: t04819' "$t/out" && ! grep -q 'unstable (an :unstable' "$t/out"; then ok "t04819 failing interp, a level :flaky is not at: a levels problem"; else no "t04819 failing interp (status $st)"; fi
+results i interp t03321 pass; results c compiled t03321 fail "fail status 1 (the JDK's 0): x"
+judge "$t/i/results.tsv" "$t/c/results.tsv"
+if [ $st = 1 ] && grep -q '^   levels: t03321' "$t/out"; then ok "a test no :unstable class names: a levels problem"; else no "t03321's levels disagreement (status $st)"; fi
 
 echo "audited-test: $((n - bad)) of $n passed"
 [ $bad = 0 ]
