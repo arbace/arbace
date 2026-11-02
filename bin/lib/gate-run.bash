@@ -506,7 +506,7 @@ red=()
 # and paid that in system time against ulimit -t. Every new thread makes an rt_sigprocmask at once (Go's minit,
 # musl's thread start and fork): traced, they leave the fully traced state. gateaudit ignores the lines (no
 # case for the call).
-audit_trace=open,openat,openat2,execve,execveat,readlink,readlinkat,chdir,clone,clone3,fork,vfork,rt_sigprocmask
+audit_trace=open,openat,openat2,execve,execveat,readlink,readlinkat,chdir,fchdir,clone,clone3,fork,vfork,rt_sigprocmask
 # audit_trace_set: the trace set strace gets: GATE_AUDIT_TRACE (e.g. %file) when set, else audit_trace; the reducer's
 # bookkeeping calls and rt_sigprocmask are appended to an override that lacks them (review 080, point 4: without
 # rt_sigprocmask new threads are slow again; review 081, N5: %file holds no clone, so no child would take its
@@ -515,7 +515,7 @@ audit_trace=open,openat,openat2,execve,execveat,readlink,readlinkat,chdir,clone,
 audit_trace_set() {
   local t=${GATE_AUDIT_TRACE:-$audit_trace} c
   case $t in '!'*) echo "$t"; return ;; esac
-  for c in clone clone3 fork vfork chdir execve rt_sigprocmask; do
+  for c in clone clone3 fork vfork chdir fchdir execve rt_sigprocmask; do
     case ",$t," in *,"$c",*) ;; *) t=$t,$c ;; esac
   done
   echo "$t"

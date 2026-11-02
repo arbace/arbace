@@ -19,10 +19,10 @@ case ",$src," in *,rt_sigprocmask,*) ck "audit_trace holds rt_sigprocmask" ok ;;
 eval "$(sed -n '/^audit_trace_set() {/,/^}/p' "$root/bin/lib/gate-run.bash")"
 audit_trace=$src
 o=$(GATE_AUDIT_TRACE=%file,execve audit_trace_set); d=$(audit_trace_set)
-k=$(GATE_AUDIT_TRACE=%file,clone,clone3,fork,vfork,chdir,execve,rt_sigprocmask audit_trace_set)
+k=$(GATE_AUDIT_TRACE=%file,clone,clone3,fork,vfork,chdir,fchdir,execve,rt_sigprocmask audit_trace_set)
 x=$(GATE_AUDIT_TRACE='!write' audit_trace_set)
-{ [ "$o" = "%file,execve,clone,clone3,fork,vfork,chdir,rt_sigprocmask" ] && [ "$d" = "$src" ] \
-  && [ "$k" = "%file,clone,clone3,fork,vfork,chdir,execve,rt_sigprocmask" ] && [ "$x" = '!write' ]; } \
+{ [ "$o" = "%file,execve,clone,clone3,fork,vfork,chdir,fchdir,rt_sigprocmask" ] && [ "$d" = "$src" ] \
+  && [ "$k" = "%file,clone,clone3,fork,vfork,chdir,fchdir,execve,rt_sigprocmask" ] && [ "$x" = '!write' ]; } \
   && ck "an override gets the bookkeeping calls and rt_sigprocmask appended once, a negated one is left" ok \
   || ck "override" "'$o' '$d' '$k' '$x'"
 
@@ -85,6 +85,15 @@ cat > "$w/earlyopen.trace" <<'T'
 101 execve("./nx", ["nx"], 0x7ffd /* 3 vars */) = -1 ENOENT (No such file or directory)
 T
 printf 'R\t/work/sub/x\nX\t/work/sub/nx\n' > "$w/earlyopen.want"
+# fchdir by descriptor (the JVM's perf data: fchdir into /tmp/hsperfdata_root, then a stale file opened by its bare PID
+# name): the name resolves against the directory -y names, not the checkout's root (a failed fchdir changes nothing)
+cat > "$w/fchdir.trace" <<'T'
+100 fchdir(5</tmp/hsperfdata_root>) = 0
+100 openat(AT_FDCWD</tmp/hsperfdata_root>, "42568", O_RDONLY) = 6</tmp/hsperfdata_root/42568>
+100 fchdir(6</nowhere>) = -1 ENOTDIR (Not a directory)
+100 open("42569", O_RDONLY) = 7</tmp/hsperfdata_root/42569>
+T
+printf 'R\t/tmp/hsperfdata_root/42568\nR\t/tmp/hsperfdata_root/42569\n' > "$w/fchdir.want"
 for r in "${reducers[@]}"; do
   reduce "$r" "$w/reusex.trace" > "$w/reusex.out" 2> "$w/reusex.err"
   if [ "$(cat "$w/reusex.out")" = "R	/work/f.txt" ]; then ck "$r: a reused PID's new process does not keep the dead one's executable" ok
@@ -92,6 +101,9 @@ for r in "${reducers[@]}"; do
   reduce "$r" "$w/earlyopen.trace" > "$w/earlyopen.out" 2> "$w/earlyopen.err"
   if cmp -s "$w/earlyopen.out" "$w/earlyopen.want"; then ck "$r: a child's early path line does not stop it taking its parent's directory" ok
   else ck "$r: early path line" "got '$(tr '\n\t' '; ' < "$w/earlyopen.out")'"; fi
+  reduce "$r" "$w/fchdir.trace" > "$w/fchdir.out" 2> "$w/fchdir.err"
+  if cmp -s "$w/fchdir.out" "$w/fchdir.want"; then ck "$r: fchdir sets the process's directory" ok
+  else ck "$r: fchdir" "got '$(tr '\n\t' '; ' < "$w/fchdir.out")'"; fi
   reduce "$r" "$w/plain.trace" > "$w/plain.out" 2> "$w/plain.err"
   reduce "$r" "$w/sig.trace" > "$w/sig.out" 2> "$w/sig.err"
   [ -s "$w/plain.out" ] || ck "$r: fixture" "no paths in the plain trace"

@@ -87,6 +87,9 @@ func heartbeat(file string, fd *atomic.Int64, period time.Duration) {
 	}
 }
 
+// fchdir(N<dir>): the directory -y names (the JVM's perf data enters its hsperfdata directory this way)
+var fchdirRe = regexp.MustCompile(`^[0-9]+<([^>]*)>\)`)
+
 var (
 	cwd     = map[int]string{}
 	exe     = map[int]string{}
@@ -371,6 +374,11 @@ func main() {
 		case call == "chdir":
 			if p := target(args, pid, true); p != "" && !strings.Contains(args, "= -1 ") {
 				cwd[pid] = p
+				cdAt[pid] = nlines.Load()
+			}
+		case call == "fchdir":
+			if m := fchdirRe.FindStringSubmatch(args); m != nil && !strings.Contains(args, "= -1 ") && strings.HasPrefix(m[1], "/") {
+				cwd[pid] = resolve(m[1], "/")
 				cdAt[pid] = nlines.Load()
 			}
 		case call == "execve":

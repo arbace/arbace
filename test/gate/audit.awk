@@ -108,6 +108,15 @@ BEGIN { cwd[0] = root }
     if (p != "" && args !~ /= -1 /) { cwd[pid] = p; cdAt[pid] = NR }
     next
   }
+  # fchdir(N<dir>): a process that enters a directory by descriptor (the JVM's perf data: open "." and the
+  # hsperfdata directory, fchdir, then opens or scans the stale files by their bare names) -y names the directory
+  if (call == "fchdir") {
+    if (match(args, /^[0-9]+<[^>]*>\)/) && args !~ /= -1 /) {
+      m = substr(args, 1, RLENGTH - 1); sub(/^[0-9]+</, "", m); sub(/>$/, "", m)
+      if (m ~ /^\//) { cwd[pid] = norm(m); cdAt[pid] = NR }
+    }
+    next
+  }
   if (call == "execve") { p = target(args, pid, 1); if (p != "") { exe[pid] = p; exAt[pid] = NR; emit("X", p, pid) }; next }
   if (call == "execveat") { p = target(args, pid, 0); if (p != "") emit("X", p, pid); next }
   # the calls whose first argument is the path
