@@ -1,0 +1,83 @@
+(ns arbace.repr.c.results
+  "The C checks' results files (doc/C23-SURVEY.md, CS240 (a), decided by the user for C9's full run): the token check
+  (bin/repr-c check --tokens), the tree check (bin/repr-c parse-check), the round trip (bin/repr-c roundtrip) and the
+  checker's check (bin/ci annotations) write, when they record, a file of rows [ID RESULT REASON] as bin/ci dg does: every
+  file of the corpora run, ID \"CORPUS FILE\" (the case of bin/reap's :c-known reader), RESULT :pass, :known (the known
+  file accounts for it) or :fail, REASON the statuses of its levels. The rows come from each corpus's WORK/CORPUS/files.tsv,
+  written by the check's judge after its record; the other corpora's rows of the file are kept. bin/reap's C cells count
+  the passes from them, the known files staying the judged part (test/reap/main.ae).
+
+  -main KIND WORK OUT [KNOWN] ID...   KIND tokens (KNOWN: the token check's known file, its :lex section), parse,
+                                      roundtrip or annot; OUT the results file rewritten"
+  (:require [arbace.string :as str]))
+
+(set! *warn-on-reflection* true)
+
+(defn- clip [^String s] (let [s (str/replace (str s) #"\s+" " ")] (if (> (count s) 200) (str (subs s 0 200) "...") s)))
+
+(defn- tsv-rows [^String f]
+  (map #(str/split % #"\t" -1) (remove str/blank? (str/split-lines (slurp f)))))
+
+(defn token-row
+  "A row of the token check's files.tsv (name, lex, pp, the port's digest, gcc) as [RESULT REASON]: a level fails on
+  ppcheck's failing statuses (lex differ not in the known file's :lex, pp differ, crash or no-cc, gcc differ or
+  unrecorded), is known on its known statuses (lex differ listed, pp gcc, gcc known), passes otherwise."
+  [known-lex [nm lex pp _ gcc]]
+  (let [lv [(cond (not= lex "differ") :ok (contains? known-lex nm) :known :else :fail)
+            (cond (#{"equal" "-"} pp) :ok (= pp "gcc") :known :else :fail)
+            (cond (#{"agree" "both-reject" "-"} gcc) :ok (= gcc "known") :known :else :fail)]]
+    [(cond (some #{:fail} lv) :fail (some #{:known} lv) :known :else :pass)
+     (str "lex " lex ", pp " pp ", gcc " gcc)]))
+
+(defn status-row
+  "A row of the tree check's, the round trip's or the checker's check's files.tsv (name, status, ...) as [RESULT REASON]:
+  pass or equal a pass, known or pp-known (the token check's known file accounts for the stream) known, else a failure."
+  [kind row]
+  (let [st (second row)
+        r (cond (#{"pass" "equal"} st) :pass (#{"known" "pp-known"} st) :known :else :fail)
+        why (case kind
+              :parse (let [[_ st nodes errs detail] row] (str st ", " nodes " nodes, " errs " errors" (when (seq detail) (str ": " detail))))
+              :roundtrip (let [[_ st rd l1 l2 l3 l4 acc cls detail] row]
+                           (str st ": read " rd ", l1 " l1 ", l2 " l2 ", l3 " l3 ", l4 " l4 ", gcc " acc
+                                (when (seq cls) (str ", class " cls)) (when (seq detail) (str ": " detail))))
+              :annot (let [[_ st an er cls detail] row]
+                       (str st ": annotations " an ", errors " er (when (seq cls) (str ", class " cls)) (when (seq detail) (str ": " detail)))))]
+    [r (clip why)]))
+
+(defn rows
+  "The rows [ID RESULT REASON] of the corpora `ids` under WORK for the check `kind`."
+  [kind ^String work known-lex ids]
+  (vec (for [id ids
+             row (tsv-rows (str work "/" id "/files.tsv"))
+             :let [[r why] (if (= kind :tokens) (token-row (get known-lex (keyword id) {}) row) (status-row kind row))]]
+         [(str id " " (first row)) r why])))
+
+(def ^:private headers
+  {:tokens "the token check (bin/repr-c check --tokens --record): the port's lexer and preprocessor against cc's, the stream against gcc -E's"
+   :parse "the tree check (bin/repr-c parse-check --record): the port's trees against cc's, the mutants' too"
+   :roundtrip "the round trip (bin/repr-c roundtrip --record): levels 1-4 and gcc's acceptance"
+   :annot "the checker's check (bin/ci annotations --record): its annotations against cc's checker's, its errors against gcc's acceptance"})
+
+(defn write
+  "OUT rewritten: the rows of the corpora `ids` from WORK, the other corpora's rows of OUT kept, sorted by ID."
+  [kind ^String work ^String out known-lex ids]
+  (let [new (rows kind work known-lex ids)
+        old (if (.exists (java.io.File. out)) (read-string (slurp out)) [])
+        keep (remove (fn [[id]] (some #(str/starts-with? id (str % " ")) ids)) old)
+        all (sort-by first (concat keep new))
+        fr (frequencies (map second new))]
+    (spit out (str ";; " (get headers kind) ": every file of the corpora, [ID RESULT REASON], ID \"CORPUS FILE\",\n"
+                   ";; RESULT :pass, :known (its known file accounts for it) or :fail (CS240 (a); arbace.repr.c.results; bin/reap counts the passes).\n[\n"
+                   (str/join "\n" (map pr-str all)) "\n]\n"))
+    (println (str "recorded " out ": " (count new) " files of " (count ids) " corpora " (pr-str (into (sorted-map) fr))))
+    (if (contains? fr :fail) 1 0)))
+
+(defn -main [kind work out & more]
+  (let [k (keyword kind)
+        [known ids] (if (= k :tokens) [(first more) (rest more)] [nil more])
+        known-lex (if known (:lex (read-string (slurp known))) {})]
+    (when-not (#{:tokens :parse :roundtrip :annot} k)
+      (println "results: tokens, parse, roundtrip or annot") (System/exit 2))
+    (let [st (write k work out known-lex ids)]
+      (shutdown-agents)
+      (System/exit st))))

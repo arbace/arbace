@@ -4185,11 +4185,12 @@ embedded namespaces (c2j 25 s), a larger program (about +10% Go), and the `ci`/`
 | 4 | `bin/arbace-go --smoke`; `bin/ci cinterp-check --exe target/arbace-go/amd64/arbace`; `ARBACE_HOST_EXE=that bin/ci repl-session` | 3 min | 2 GB | |
 | 5 | `CI_EXE=target/arbace-go/amd64/arbace CI_JOBS=4 bin/ci check` (every run corpus, one process a program; 3,761 programs, +0.15 s a start) | ~45 min | 4 x 0.3 GB | none unless it differs (it must not: one loader); `--record` only for an explained difference |
 | 6 | `bin/ci check --aot` (CI_AOT_NODES=1 for the interpreter beside) on the new stage 0 once it is the host | ~60 min | 4 GB | `test/c/check-aot-linux-amd64.edn` only if it differs |
-| 7 | `bin/ci annotations` (REPR_C_THREADS 4; `--record` rewrites `test/repr/c/annot-known.edn`, `checker-gap` entries removed as they pass, CS93 (a)) | 31-43 min | 6 GB | `annot-known.edn` |
+| 7 | `bin/ci annotations --record` (REPR_C_THREADS 4; rewrites `test/repr/c/annot-known.edn`, `checker-gap` entries removed as they pass, CS93 (a); **writes the results file `test/repr/c/annot-results.edn`, CS240 (a)**) | 31-43 min | 6 GB | `annot-known.edn`, `annot-results.edn` |
+| 7a | CS240 (a)'s other full runs, each `--record` over every corpus: `bin/repr-c check --tokens --record` (both levels), `bin/repr-c parse-check --record` (the mutants too), `bin/repr-c roundtrip --record` (not `--no-run`); each rewrites its known file and **writes its results file** (`test/repr/c/{pp-check,parse-check,roundtrip}-results.edn`: every file's row `[ID RESULT REASON]`, `arbace.repr.c.results`); a row `:fail` makes the step fail and `bin/reap` refuse the file | hours (the full runs) | 6 GB | the three known files and results files |
 | 8 | `bin/arbace-go --fixpoint` (G1 by stage 0, G2 by G1, G3 by G2) | ~17 min | 19 GB | `target/arbace-go/fixpoint/g{1,2,3}` |
 | 9 | the notes committed first, then `ARBACE_SEED_GO_BUILD=target/arbace-go/fixpoint/g3 bin/seed --make` | 2 min | 1 GB | `seed/arbace-seed-go.tar.xz`, `.sha256` |
 | 10 | `bin/seed --verify` (the seed printed again; stage 0 = G1 = G2 = G3) | ~14 min | 19 GB | none (it must pass) |
-| 11 | `bin/seed --build` again (stage 0 from the new seed, now with ci compiled in), `bin/ci judge-test`, `bin/reap`, `bin/ci dg --essential` | 15 min | 8 GB | |
+| 11 | `bin/seed --build` again (stage 0 from the new seed, now with ci compiled in), `bin/ci judge-test`, `bin/reap --record` (the C cells' passes now counted from steps 7 and 7a's results files, CS240 (a): read 575+ and print 0+ become counts), `bin/ci dg --essential` | 15 min | 8 GB | `test/reap/matrix.edn` |
 | 12 | `bin/gate` (essential) then `GATE_FULL_SERIAL=1 bin/gate --full`; `bin/gate --clean` at the tag | hours | per the table | `test/gate/clean-TAG.edn` |
 
 Re-seed hazards found while preparing: (a) the first `bin/gate` after the merge rebuilds the gate's executables (the key changed); (b) `bin/lib/ci/check`'s CI_EXE needs the

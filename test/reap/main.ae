@@ -185,22 +185,47 @@
     {:pass (count (filter #(= :pass (second %)) rows)) :ids (mapv first rows)
      :entries (vec (for [[id r why] rows :when (not= :pass r)] (entry id r why)))}))
 
+(defn- c-results-problems
+  "A C check's results file (CS240 (a): rows [ID RESULT REASON], ID \"CORPUS FILE\", arbace.repr.c.results) against its
+  known file's entries: a row neither :pass nor :known (the record held a failure), a known entry the results pass, and a
+  known entry of a corpus the results hold that they lack (the two files from different runs)."
+  [src rows entries]
+  (let [by (into {} (map (fn [[id r]] [id r]) rows))
+        corpora (set (map #(first (str/split (first %) #" " 2)) rows))
+        some-of (fn [xs] (str (str/join "; " (take 3 xs)) (when (> (count xs) 3) (str " ... (" (count xs) ")"))))
+        bad (for [[id r why] rows :when (not (#{:pass :known} r))] (str id " " (name r) " " why))
+        passed (distinct (for [e entries :when (= :pass (by (:id e)))] (:id e)))
+        lacking (distinct (for [e entries :let [id (:id e)]
+                                :when (and (nil? (by id)) (corpora (first (str/split id #" " 2))))] id))]
+    (concat
+     (when (seq bad) [(str (:name src) ": " (count bad) " rows of " (:results src) " neither pass nor known: " (some-of bad))])
+     (when (seq passed) [(str (:name src) ": " (count passed) " files of " (:file src) " pass in " (:results src) ": " (some-of passed))])
+     (when (seq lacking) [(str (:name src) ": " (count lacking) " files of " (:file src) " absent from " (:results src) ": " (some-of lacking))]))))
+
 (defmethod read-source :c-known [src]
   ;; C's known files (test/repr/c/*-known.edn: bin/ci annotations, bin/repr-c parse-check, check --tokens, roundtrip): the files
   ;; that do not pass, SECTION -> corpus -> file -> {:class K}, the class texts in :classes (flat, or by section as check --tokens'),
-  ;; each file a case "corpus file" of the result :known and the reason "K: the class text"; the passing files are not recorded
-  ;; there (the cell's count is partial). :sections: the known file's sections taken (default the one :section).
+  ;; each file a case "corpus file" of the result :known and the reason "K: the class text". :sections: the known file's sections
+  ;; taken (default the one :section). The passes: the check's results file :results (CS240 (a), written by its --record at C9's
+  ;; full run: every file's row [ID RESULT REASON]) when it is there, its :pass rows counted and held to the known file
+  ;; (c-results-problems); until then not recorded (the cell's count is partial).
   (let [m (read-edn (:file src))
         secs (or (:sections src) [(:section src)])
-        cls (:classes m)]
-    {:pass nil
-     :entries (vec (for [sec secs
-                         :let [texts (if (contains? cls sec) (get cls sec) cls)]
-                         [corpus files] (get m sec)
-                         [f v] (sort-by key files)]
-                     (entry (str (name corpus) " " f) :known
-                            (str (name (:class v)) ": " (str/replace (str (get texts (:class v))) #"\s+" " ")))))
-     :detail "the known file only: the check's passing files are not recorded there"}))
+        cls (:classes m)
+        es (vec (for [sec secs
+                      :let [texts (if (contains? cls sec) (get cls sec) cls)]
+                      [corpus files] (get m sec)
+                      [f v] (sort-by key files)]
+                  (entry (str (name corpus) " " f) :known
+                         (str (name (:class v)) ": " (str/replace (str (get texts (:class v))) #"\s+" " ")))))
+        rows (when (exists? (:results src)) (read-edn (:results src)))]
+    (if rows
+      {:pass (count (filter #(= :pass (second %)) rows)) :entries es
+       :results-problems (vec (c-results-problems src rows es))
+       :detail (str (count rows) " files in " (:results src))}
+      {:pass nil :entries es
+       :detail (str "the known file only: the check's passing files are not recorded there"
+                    (when (:results src) (str " (" (:results src) " not written yet)")))})))
 
 (defmethod read-source :jforms-excluded [src]
   ;; diffcheck's exclusions (test/diffcheck/jforms-excluded.edn: the Java forms' classes not given
@@ -347,6 +372,7 @@
                                 (when (and (:include src) (= 0 (:selected r)))
                                   [(str (:name src) ": its :include " (:include src) " selects nothing")])
                                 (case-problems src r)
+                                (:results-problems r)
                                 ;; a result the cell's check refuses whatever the classes (report 021's
                                 ;; finding 4: goi's judge, test/goi/divergences.ae, fails on any fail or
                                 ;; error; a class whose pattern found one took it as by design here)
