@@ -437,8 +437,11 @@
   (case mode
     :slot-i {:k :i :n (list 'il k) :t t}
     :slot-f {:k :f :n (list 'fl k) :t t}
-    :mem (if bits
-           {:k :i :t t :n (list 'bld unit a bitoff bits (if (unsigned-ty? (ity t)) 0 1))}
+    :mem (cond
+           ;; a bit-field of a wide type (__int128, _BitInt(N > 64)): its bits read byte by byte (queue 164)
+           (and bits (= :w (kind t))) {:k :w :t t :n (list 'wbld (wty t) a bitoff bits)}
+           bits {:k :i :t t :n (list 'bld unit a bitoff bits (if (unsigned-ty? (ity t)) 0 1))}
+           :else
            (case (kind t)
              :i {:k :i :n (list 'ld (ity t) a) :t t}
              :f {:k :f :n (list 'fld (fty t) a) :t t}
@@ -452,8 +455,10 @@
   (case mode
     :slot-i {:k :i :t t :n (list 'is k (:n v))}
     :slot-f {:k :f :t t :n (list 'fs k (:n v))}
-    :mem (if bits
-           {:k :i :t t :n (list 'bst unit a (:n v) bitoff bits (if (unsigned-ty? (ity t)) 0 1))}
+    :mem (cond
+           (and bits (= :w (kind t))) {:k :w :t t :n (list 'wbst (wty t) a (:n v) bitoff bits)}
+           bits {:k :i :t t :n (list 'bst unit a (:n v) bitoff bits (if (unsigned-ty? (ity t)) 0 1))}
+           :else
            (case (kind t)
              :i {:k :i :t t :n (list 'st (ity t) a (:n v))}
              :f {:k :f :t t :n (list 'fst (fty t) a (:n v))}
@@ -575,14 +580,19 @@
         == "eq" != "ne" < "lt" <= "le" > "gt" >= "ge"))
 
 (defn- promoted
-  "An operand's promoted type; a bit-field wider than int of a 64-bit type is gcc's N-bit type (its
-  arithmetic wraps at its width: pr32244-1, bitfld-3)."
+  "An operand's promoted type; a bit-field wider than int of a 64-bit or 128-bit type is gcc's N-bit type (its
+  arithmetic wraps at its width: pr32244-1, bitfld-3; the 128-bit types' since queue 164). A _BitInt bit-field is
+  promoted to its declared type, as chk/promote does (gcc's c-typeck.cc perform_integral_promotions)."
   [r]
   (let [t (with-types (chk/promote (chk/decay (unq (:t r))) (:bits r)))
-        b (:bits r)]
-    (if (and b (> (long b) 32) (< (long b) 64) (#{:long :ulong :llong :ullong} (:k (under t))))
-      {:k :bitint :n (long b) :u (#{:ulong :ullong} (:k (under t))) :bitfield true}
-      t)))
+        b (:bits r)
+        tk (:k (under t))]
+    (cond
+      (and b (> (long b) 32) (< (long b) 64) (#{:long :ulong :llong :ullong} tk))
+      {:k :bitint :n (long b) :u (#{:ulong :ullong} tk) :bitfield true}
+      (and b (> (long b) 32) (< (long b) 128) (#{:int128 :uint128} tk))
+      {:k :bitint :n (long b) :u (= :uint128 tk) :bitfield true}
+      :else t)))
 
 (defn- arith
   "The operator op over the nodes a and b at the operation type ot (the usual arithmetic conversions'),
@@ -713,16 +723,18 @@
       (seq-node pre (place-store pl (conv nv pt)))
       ;; postfix: the old value saved
       (let [k (kind pt)
-            s (if (= k :f) (new-slot! :f) (temp-i))
-            save (case k :f (list 'ef (list 'fs s (:n old))) :w (refuse :wide "++ of a wide integer") (list 'ei (list 'is s (:n old))))
+            ;; a wide old value is saved in a temporary of the frame (queue 164)
+            s (case k :f (new-slot! :f) :w (frame-temp pt) (temp-i))
+            saved (case k :f (list 'fl s) :w (list 'wld (wty pt) s) (list 'il s))
+            save (case k :f (list 'ef (list 'fs s (:n old))) :w (list 'ew (list 'wst (wty pt) s (:n old))) (list 'ei (list 'is s (:n old))))
             pl2 pl
             nv2 (cond
                   (ptr? pt) {:k :i :t pt :n (list 'adds (list 'il s) (list 'i delta) (ptr-target-size pt))}
                   (= :bool (:k (under pt))) {:k :i :t pt :n (if (= delta 1) '(i 1) (list 'lnot (list 'il s)))}
                   :else (let [ot (promoted pr)]
-                          (conv (arith '+ {:k k :t pt :n (if (= k :f) (list 'fl s) (list 'il s))} {:k :i :t chk/t-int :n (list 'i delta)} ot) pt)))]
+                          (conv (arith '+ (conv {:k k :t pt :n saved} ot) {:k :i :t chk/t-int :n (list 'i delta)} ot) pt)))]
         (seq-node (conj pre save (effect (place-store pl2 nv2)))
-                  {:k k :t pt :n (if (= k :f) (list 'fl s) (list 'il s))})))))
+                  {:k k :t pt :n saved})))))
 
 (def ^:dynamic *static-init* false) ; building a static object's initializer (its own frame of slots)
 
@@ -767,8 +779,8 @@
       {:k :v :t t :n (list 'ei (list 'sx (build-stmt (apply list 'do items)) '(i 0)))}
       (let [;; the value is computed by the last item into a slot
             k (kind t)
-            s (if (= k :f) (new-slot! :f) (temp-i))
-            _ (when (= k :w) (refuse :wide "a wide statement expression"))
+            ;; a wide value in a temporary of the frame (queue 164)
+            s (case k :f (new-slot! :f) :w (frame-temp t) (temp-i))
             setv (list 'c/stmt-value s k t lst)
             ;; the last expression statement, in the innermost let of the block's end (§7.2)
             with-value (fn wv [items]
@@ -777,7 +789,10 @@
                              (conj (pop items) (apply list 'let (second lst) (wv (vec (drop 2 lst)))))
                              (conj (pop items) setv))))
             body (build-stmt (apply list 'do (with-value items)))]
-        {:k k :t t :n (case k :f (list 'fsx body (list 'fl s)) (list 'sx body (list 'il s)))}))))
+        {:k k :t t :n (case k
+                        :f (list 'fsx body (list 'fl s))
+                        :w (list 'wseq [(list 'ei (list 'sx body '(i 0)))] (list 'wld (wty t) s))
+                        (list 'sx body (list 'il s)))}))))
 
 (defn ex
   "A form's node: {:k :n :t}."
@@ -1591,12 +1606,27 @@
                      xv (conv x pt)
                      cases (atom {:cases [] :default 0})
                      b (binding [*switch* {:cases cases :t pt} *vla-brk* (count *vla-stack*)] (do-node body))]
-                 (list 'sw (:n xv) (if (unsigned-ty? (ity pt)) 1 0) (mapv vec (:cases @cases)) (:default @cases) b))
+                 (if (= :w (kind pt))
+                   ;; a wide controlling expression (queue 164): its value stored once in a temporary of the frame,
+                   ;; the cases tested in order by wide comparisons into the case's index, the switch over that
+                   (let [tmp (frame-temp pt) wt (wty pt) v (list 'wld wt tmp)
+                         cs (vec (:cases @cases))
+                         wc (fn [x] (list 'w wt (str x)))
+                         test (fn [[lo hi _]] (if (= lo hi)
+                                                (list 'wcmp "eq" wt v (wc lo))
+                                                (list 'and (list 'wcmp "ge" wt v (wc lo)) (list 'wcmp "le" wt v (wc hi)))))
+                         idx (reduce (fn [acc i] (list 'if (test (cs i)) (list 'i (inc i)) acc)) '(i 0) (reverse (range (count cs))))]
+                     (list 'sw (list 'seq [(list 'ew (list 'wst wt tmp (:n xv)))] idx) 1
+                           (vec (map-indexed (fn [i [_ _ c]] [(inc i) (inc i) c]) cs)) (:default @cases) b))
+                   (list 'sw (:n xv) (if (unsigned-ty? (ity pt)) 1 0) (mapv vec (:cases @cases)) (:default @cases) b)))
         case (let [[a b] args
                    c (fresh-code!)
                    pt (:t *switch*)
-                   v (fn [x] (let [v (:v (or (lit-res x) (res-of x)))]
-                               (long (let [w (chk/wrap (if (char? v) (long (int (char v))) v) pt)] (if (instance? arbace.lang.BigInt w) (.longValue ^arbace.lang.BigInt w) w)))))
+                   v (fn [x] (let [v (:v (or (lit-res x) (res-of x)))
+                                   w (chk/wrap (if (char? v) (long (int (char v))) v) pt)]
+                               ;; a wide switch's case keeps its whole value (queue 164)
+                               (if (= :w (kind pt)) w
+                                   (long (if (instance? arbace.lang.BigInt w) (.longValue ^arbace.lang.BigInt w) w)))))
                    lo (v a) hi (if b (v b) lo)]
                (when-not *switch* (refuse :forms "case outside a switch"))
                (swap! (:cases *switch*) update :cases conj [lo hi c])
@@ -1624,7 +1654,7 @@
         c/effect (list 'x (first args))
         c/stmt-value (let [[sl k t e] args
                            x (conv (ex e) t)]
-                       (list 'x (case k :f (list 'ef (list 'fs sl (:n x))) (list 'ei (list 'is sl (:n x))))))
+                       (list 'x (case k :f (list 'ef (list 'fs sl (:n x))) :w (list 'ew (list 'wst (wty t) sl (:n x))) (list 'ei (list 'is sl (:n x))))))
         (if (decl-head? s)
           (list 'do (local-decl s))
           (list 'x (effect (ex s))))))
