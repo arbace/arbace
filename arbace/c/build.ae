@@ -465,19 +465,116 @@
              :w {:k :w :t t :n (list 'wst (wty t) a (:n v))}
              :m {:k :m :t t :n (list 'copy a (:n v) (size-of t))}))))
 
-(defn- vla-elem-size
-  "The size of an element of a VLA type form `(array n T)` at run time: a node."
-  [t]
-  (let [t (unq t)]
-    (if (and (= :array (:k t)) (:vla t))
-      (refuse :vla "a variably modified element type")
-      (list 'i (size-of t)))))
-
 (defn- ptr-target-size
   "The size of what a pointer type points to (1 for void and functions, GNU's)."
   ^long [t]
   (let [to (unq (:to (unq (chk/decay (unq t)))))]
     (if (#{:void :fn} (:k to)) 1 (size-of to))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Variably modified types at run time (CS106; queue 165): a type form's arrays' sizes evaluated where the
+;; declaration, typedef, parameter, cast or sizeof that holds it is executed (6.7.7.3, 6.8p3, 6.9.2p10), kept
+;; in slots; its "run-time type" (rtt) is the checker's type with each variably modified array's size in bytes,
+;; :vsize, a node. An expression's rtt follows its names, derefs, subscripts, casts and pointer arithmetic.
+
+(def ^:dynamic *vm-typedefs* nil) ; the block's variably modified typedefs: an atom of name -> rtt
+
+(defn- vm?
+  "Whether a type is variably modified through arrays and pointers (structs holding VLAs: out of scope)."
+  [t]
+  (let [t (unq t)]
+    (case (:k t)
+      :array (boolean (or (:vla t) (vm? (:of t))))
+      :ptr (vm? (:to t))
+      false)))
+
+(defn- rt-elem "A pointer's or array's rtt's element rtt." [rt]
+  (case (:k (unq rt)) :ptr (:to rt) :array (:of rt) nil))
+
+(defn- rt-dscale
+  "The run-time size of the element of a pointer or array of rtt rt when it is variably modified: a node, else nil."
+  [rt]
+  (when-let [el (and rt (rt-elem rt))]
+    (when (vm? el) (:vsize el))))
+
+(defn- adds-dyn
+  "base + idx elements of the run-time size d (a node)."
+  [base idx d]
+  (list 'adds base (list 'bin "mul" "i64" idx d) 1))
+
+(defn- rtt-of
+  "The rtt of the form f when its type is variably modified and known here, else nil."
+  [f]
+  (let [r (ex-res f) t (:t r)]
+    (when (and t (vm? t))
+      (cond
+        (or (symbol? f) (and (seq? f) (= 'c/id (first f))))
+        (let [e (:entry r) loc (when (and e *f*) (local-of e))] (:rtt loc))
+        (seq? f)
+        (let [[h & args] f
+              as-ptr (fn [rt] (if (and rt (= :array (:k (unq rt))) (ptr? t)) (assoc (unq t) :to (:of rt)) rt))
+              ptr-arg (fn [xs] (some #(let [tt (chk/decay (unq (:t (res-of %))))] (when (ptr? tt) %)) xs))]
+          (case h
+            arbace.core/deref (some-> (rtt-of (first args)) rt-elem)
+            aget (some-> (ptr-arg args) rtt-of rt-elem)
+            addr (when-let [x (rtt-of (first args))] (assoc (unq t) :to x))
+            conv (when-let [^IdentityHashMap m (and *f* (:rtts @*f*))] (.get m f))
+            comma (rtt-of (last args))
+            (set! inc! dec! pre-inc! pre-dec!) (as-ptr (rtt-of (first args)))
+            (+ -) (when (ptr? t) (some-> (ptr-arg args) rtt-of as-ptr))
+            ? (as-ptr (if (= 3 (count args)) (or (rtt-of (second args)) (rtt-of (nth args 2))) (or (rtt-of (first args)) (rtt-of (second args)))))
+            nil))
+        :else nil))))
+
+(defn- with-rtt "The node x of the form f with f's rtt, when it has one." [f x]
+  (if-let [rt (rtt-of f)] (assoc x :rtt rt) x))
+
+(defn- elab
+  "The type form tf of the checker's type t elaborated: [stmts rtt], the statements evaluating its arrays' sizes
+  in order. param: tf is a parameter's declared type, t its adjusted one: the array's own size is evaluated for its
+  effects (gcc evaluates `int b[a++]` at the function's entry) and its element elaborated as the pointer's target."
+  [tf t param]
+  (let [out (java.util.ArrayList.)
+        stmt! (fn [n] (.add out (list 'x n)))
+        tname (fn [tf] (cond (symbol? tf) (name tf) (and (seq? tf) (= 'c/id (first tf))) (second tf)))
+        go (fn go [tf t param]
+             (cond
+               (and (not param) (not (vm? t))) t
+               (tname tf) (or (and (vm? t) *vm-typedefs* (get @*vm-typedefs* (tname tf))) t)
+               (seq? tf)
+               (let [[h a b] tf]
+                 (case h
+                   (const volatile restrict atomic _Nonnull __seg_gs __seg_fs) (go a t param)
+                   * (assoc t :to (go a (:to (unq t)) false))
+                   array (let [[nf ef] (if (= 3 (count tf)) [a b] [nil a])
+                               nf (when-not (= '* nf) nf)]
+                           (if (and param (ptr? t))
+                             ;; a parameter's array: its size for its effects, its element the pointer's target
+                             (do (when (and nf (not (some? (:v (ex-res nf))))) (stmt! (effect (ex nf))))
+                                 (assoc t :to (go ef (:to (unq t)) false)))
+                             (if-not (= :array (:k (unq t)))
+                               t
+                               (let [ns (when nf (let [s (new-slot! :i)] (stmt! (list 'ei (list 'is s (:n (conv (ex nf) chk/t-ulong))))) s))
+                                     el (go ef (:of (unq t)) false)]
+                                 (if (nil? ns)
+                                   (assoc t :of el)
+                                   (let [vs (new-slot! :i)]
+                                     (stmt! (list 'ei (list 'is vs (list 'bin "mul" "u64" (list 'il ns)
+                                                                       (or (:vsize el) (list 'i (size-of el)))))))
+                                     (assoc t :of el :vsize (list 'il vs))))))))
+                   (typeof typeof-unqual)
+                   (do (stmt! (effect (ex a)))
+                       (let [rt (or (rtt-of a) t)] (if (= h 'typeof-unqual) (unq rt) rt)))
+                   (typeof-type typeof-unqual-type) (go a t false)
+                   t))
+               :else t))
+        rt (go tf t param)]
+    [(vec out) rt]))
+
+(defn- set-rtt!
+  "The local entry e's rtt."
+  [e rt]
+  (when rt (swap! *f* assoc-in [:locals (:id e) :rtt] rt)))
 
 (defn- aget-place
   "The place a[i] of element type t (i[a] too)."
@@ -486,7 +583,9 @@
         [base idx] (if (ptr? ta) [a i] [i a])
         bn (ex base)
         in (conv (ex idx) chk/t-long)]
-    {:mode :mem :t t :a (list 'adds (:n bn) (:n in) (size-of t))}))
+    {:mode :mem :t t :a (if-let [d (when (vm? t) (rt-dscale (rtt-of base)))]
+                          (adds-dyn (:n bn) (:n in) d)
+                          (list 'adds (:n bn) (:n in) (size-of t)))}))
 
 (defn- place
   "A form's place (an lvalue)."
@@ -502,7 +601,11 @@
           (nil? e) (refuse :checker "no declaration of " nm)
           (= :fn (:kind e)) {:mode :fn :t t :e e}
           :else
-          (let [loc (when *f* (local-of e))]
+          (let [loc (when *f* (or (local-of e)
+                                  ;; a parameter named in a later parameter's array size: the checker's entry of the
+                                  ;; parameter list's scope, before the definition's (queue 165)
+                                  (when (and (nil? (:id e)) (= :n (:linkage e)))
+                                    (some-> (get (:param-names @*f*) nm) local-of))))]
             (cond
               loc (case (:loc loc)
                     :slot-i {:mode :slot-i :k (:k loc) :t t}
@@ -636,12 +739,21 @@
     (cond
       (#{'== '!= '< '<= '> '>=} h) (compare-nodes h x y rx ry)
       (#{'<< '>>} h) (shift h (conv x (promoted rx)) y)
-      (and (= h '+) (ptr? tx)) {:k :i :t tx :n (list 'adds (:n x) (:n (conv y chk/t-long)) (ptr-target-size tx))}
-      (and (= h '+) (ptr? ty)) {:k :i :t ty :n (list 'adds (:n y) (:n (conv x chk/t-long)) (ptr-target-size ty))}
-      (and (= h '-) (ptr? tx) (ptr? ty)) {:k :i :t chk/t-long :n (list 'pdiff (:n x) (:n y) (ptr-target-size tx))}
+      ;; a pointer to a variably modified type steps by its run-time size (:rtt, with-rtt's; queue 165)
+      (and (= h '+) (ptr? tx)) {:k :i :t tx :rtt (:rtt x)
+                                :n (if-let [d (rt-dscale (:rtt x))] (adds-dyn (:n x) (:n (conv y chk/t-long)) d)
+                                     (list 'adds (:n x) (:n (conv y chk/t-long)) (ptr-target-size tx)))}
+      (and (= h '+) (ptr? ty)) {:k :i :t ty :rtt (:rtt y)
+                                :n (if-let [d (rt-dscale (:rtt y))] (adds-dyn (:n y) (:n (conv x chk/t-long)) d)
+                                     (list 'adds (:n y) (:n (conv x chk/t-long)) (ptr-target-size ty)))}
+      (and (= h '-) (ptr? tx) (ptr? ty)) {:k :i :t chk/t-long
+                                          :n (if-let [d (rt-dscale (:rtt x))] (list 'bin "div" "i64" (list 'pdiff (:n x) (:n y) 1) d)
+                                               (list 'pdiff (:n x) (:n y) (ptr-target-size tx)))}
       ;; the subtrahend widened to long before it is negated, as `assign` does: negated at its own type, an unsigned
       ;; one narrower than 64 bits (or a _Bool) zero-extends to a large positive offset (review 006, finding 2)
-      (and (= h '-) (ptr? tx)) {:k :i :t tx :n (list 'adds (:n x) (:n (ex-neg (conv y chk/t-long))) (ptr-target-size tx))}
+      (and (= h '-) (ptr? tx)) {:k :i :t tx :rtt (:rtt x)
+                                :n (if-let [d (rt-dscale (:rtt x))] (adds-dyn (:n x) (:n (ex-neg (conv y chk/t-long))) d)
+                                     (list 'adds (:n x) (:n (ex-neg (conv y chk/t-long))) (ptr-target-size tx)))}
       :else (arith h x y (with-types (chk/usual (promoted rx) (promoted ry)))))))
 
 (defn- ex-neg [y]
@@ -699,7 +811,8 @@
             old (place-load pl)
             nv (cond
                  (and (ptr? pt) (#{'+ '-} op))
-                 {:k :i :t pt :n (list 'adds (:n old) (:n (conv (if (= op '-) (ex-neg (conv ev chk/t-long)) ev) chk/t-long)) (ptr-target-size pt))}
+                 (let [i (:n (conv (if (= op '-) (ex-neg (conv ev chk/t-long)) ev) chk/t-long))]
+                   {:k :i :t pt :n (if-let [d (rt-dscale (rtt-of pl-f))] (adds-dyn (:n old) i d) (list 'adds (:n old) i (ptr-target-size pt)))})
                  (#{'<< '>>} op) (shift op (conv old (promoted pr)) ev)
                  :else (arith op old ev (with-types (chk/usual (promoted pr) (promoted re)))))]
         (seq-node pre (place-store pl (conv nv pt)))))))
@@ -714,8 +827,10 @@
                    [pl []])
         old (place-load pl)
         delta (if (#{'inc! 'pre-inc!} h) 1 -1)
+        dsc (when (ptr? pt) (rt-dscale (rtt-of pl-f)))
+        step (fn [p] (if dsc (adds-dyn p (list 'i delta) dsc) (list 'adds p (list 'i delta) (ptr-target-size pt))))
         nv (cond
-             (ptr? pt) {:k :i :t pt :n (list 'adds (:n old) (list 'i delta) (ptr-target-size pt))}
+             (ptr? pt) {:k :i :t pt :n (step (:n old))}
              (= :bool (:k (under pt))) {:k :i :t pt :n (if (= delta 1) '(i 1) (list 'lnot (:n old)))}
              :else (let [ot (promoted pr)]
                      (conv (arith '+ old {:k :i :t chk/t-int :n (list 'i delta)} ot) pt)))]
@@ -729,7 +844,7 @@
             save (case k :f (list 'ef (list 'fs s (:n old))) :w (list 'ew (list 'wst (wty pt) s (:n old))) (list 'ei (list 'is s (:n old))))
             pl2 pl
             nv2 (cond
-                  (ptr? pt) {:k :i :t pt :n (list 'adds (list 'il s) (list 'i delta) (ptr-target-size pt))}
+                  (ptr? pt) {:k :i :t pt :n (step (list 'il s))}
                   (= :bool (:k (under pt))) {:k :i :t pt :n (if (= delta 1) '(i 1) (list 'lnot (list 'il s)))}
                   :else (let [ot (promoted pr)]
                           (conv (arith '+ (conv {:k k :t pt :n saved} ot) {:k :i :t chk/t-int :n (list 'i delta)} ot) pt)))]
@@ -816,6 +931,7 @@
           r (res-of f)
           t (:t r)]
       (if (and (some? (:v r)) (not (#{'set! 'aset 'inc! 'dec! 'pre-inc! 'pre-dec! 'comma 'c/call} h)) (not (and (seq? h) true))
+               (not (and (= h 'conv) (vm? t))) ; a cast to a variably modified type evaluates its sizes (queue 165)
                (#{:i :f :w} (try (kind t) (catch Exception _ nil)))
                (not (and (symbol? h) (#{'and 'or} h) false)))
         {:k (kind t) :t t :n (const-node (:v r) t)}
@@ -832,9 +948,9 @@
                         (let [[p re im] (cparts x)] (cmake pt {:k :f :t (:t re) :n (list 'fneg (:n re))} {:k :f :t (:t im) :n (list 'fneg (:n im))} p))
                         (case (:k x) :f {:k :f :t pt :n (list 'fneg (:n x))} (ex-neg x))))
                   (refuse :forms "unary " h)))
-              (loop [acc (ex (first args)) racc (res-of (first args)) xs (next args)]
+              (loop [acc (with-rtt (first args) (ex (first args))) racc (res-of (first args)) xs (next args)]
                 (if xs
-                  (let [y (ex (first xs)) ry (res-of (first xs))
+                  (let [y (with-rtt (first xs) (ex (first xs))) ry (res-of (first xs))
                         z (binary h acc y racc ry t)]
                     (recur z {:t (:t z)} (next xs)))
                   acc)))
@@ -892,18 +1008,27 @@
             -> (let [pl (arrow-place f)
                      x (place-load pl)]
                  (if (= :array (:k (unq (:t pl)))) (assoc x :k :i :t (chk/decay (unq (:t pl)))) x))
-            conv (let [[_ e] args
-                       x (ex e)]
-                   (if (= :array (:k (unq (:t x)))) (conv (assoc x :k :i :t (chk/decay (unq (:t x)))) t) (conv x t)))
+            conv (let [[tf e] args
+                       ;; a cast to a variably modified type: its sizes evaluated, its rtt kept for the expression's users
+                       [es rt] (if (and *f* (vm? t)) (elab tf t false) [[] nil])
+                       _ (when-let [^IdentityHashMap m (and rt (:rtts @*f*))] (.put m f rt))
+                       x (ex e)
+                       y (if (= :array (:k (unq (:t x)))) (conv (assoc x :k :i :t (chk/decay (unq (:t x)))) t) (conv x t))]
+                   (seq-node (mapv second es) y))
             (sizeof sizeof-type alignof alignof-type offsetof types-compatible? classify-type has-attribute?)
             (if (some? (:v r)) {:k :i :t t :n (int-const (:v r) t)}
-                (if (= h 'sizeof)
-                  (let [a (first args)
-                        e (:entry (ex-res a))
-                        loc (when (and e *f*) (local-of e))]
-                    (if (= :vla (:loc loc))
-                      {:k :i :t t :n (list 'il (:size loc))}
-                      (refuse :vla "sizeof of a VLA")))
+                (case h
+                  ;; the operand's run-time size; an operand that is not a name evaluated (6.5.4.4p2)
+                  sizeof (let [a (first args)
+                               v (:vsize (rtt-of a))]
+                           (cond
+                             (nil? v) (refuse :vla "sizeof of a VLA")
+                             (or (symbol? a) (and (seq? a) (= 'c/id (first a)))) {:k :i :t t :n v}
+                             :else (seq-node [(effect (ex a))] {:k :i :t t :n v})))
+                  sizeof-type (let [[es rt] (if (and *f* (:tt r)) (elab (first args) (:tt r) false) [[] nil])]
+                                (if-let [v (:vsize rt)]
+                                  (seq-node (mapv second es) {:k :i :t t :n v})
+                                  (refuse :vla "sizeof of a variably modified type")))
                   (refuse :vla "sizeof of a variably modified type")))
             generic (let [chosen (or (some #(when (= :chosen (ex-res %)) %) (drop 2 f))
                                      (refuse :checker "_Generic without a chosen association"))]
@@ -1478,13 +1603,10 @@
     (list 'do [(list 'x (list 'ei (list 'vlarestore (nth *vla-stack* depth)))) jmp])
     jmp))
 
-(defn- vla-alloc [e tf-form loc]
-  ;; (array n T): n evaluated, n * sizeof(T) bytes on the stack; the storage of the declaration's previous
-  ;; execution, and of its block's previous entry, freed (CS106: ci's VlaAlloc, VlaMark)
-  (let [t (unq (:t e))
-        nf (second tf-form)
-        n (conv (ex nf) chk/t-ulong)
-        size (list 'is (:size loc) (list 'bin "mul" "u64" (:n n) (vla-elem-size (:of t))))]
+(defn- vla-alloc [vsize loc]
+  ;; the VLA's size in bytes (its type elaborated: elab's :vsize) on the stack; the storage of the declaration's
+  ;; previous execution, and of its block's previous entry, freed (CS106: ci's VlaAlloc, VlaMark)
+  (let [size (list 'is (:size loc) vsize)]
     (if *vla-block*
       (let [[_ l] (or @*vla-block* (reset! *vla-block* [(new-slot! :i) (new-slot! :i)]))
             md (new-slot! :i) ed (new-slot! :i)]
@@ -1512,15 +1634,46 @@
                           (swap! *f* assoc :labels (:labels @fs))
                           (.add ^ArrayList (:inits *p*) (init-cmd fs stores))))
                       [])
-                  (= :vla (:loc loc)) [(vla-alloc e (:tag (meta nm)) loc)]
-                  (empty? more) []
+                  (= :vla (:loc loc))
+                  (let [[es rt] (elab (:tag (meta nm)) t false)
+                        _ (set-rtt! e rt)
+                        v (or (:vsize rt) (refuse :vla "a VLA's size"))]
+                    (cond-> (conj es (vla-alloc v loc))
+                      ;; C23's empty initializer, the only one a VLA takes: its bytes zeroed
+                      (seq more) (conj (let [i (new-slot! :i)]
+                                         (list 'do [(list 'x (list 'ei (list 'is i '(i 0))))
+                                                    (list 'loop (list 'cmp "lt" "u64" (list 'il i) v)
+                                                          (list 'ei (list 'is i (list 'bin "add" "u64" (list 'il i) '(i 1))))
+                                                          (list 'do [(list 'x (list 'ei (list 'st "u8" (list 'adds (list 'il (:slot loc)) (list 'il i) 1) '(i 0))))])
+                                                          0)])))))
                   :else
-                  (let [init (first more)]
-                    (case (:loc loc)
-                      :mem [(list 'x (list 'ei (list 'seq (build-init-stores t (list 'fp (:off loc)) init true) '(i 0))))]
-                      (let [x (if (and (seq? init) (= 'init (first init))) (second init) init)]
-                        [(list 'x (effect (place-store (if (= :slot-f (:loc loc)) {:mode :slot-f :k (:k loc) :t t} {:mode :slot-i :k (:k loc) :t t})
-                                                       (conv (ex x) t))))])))))))
+                  ;; a pointer to (or typeof of) a variably modified type: its sizes evaluated first; C23's auto and
+                  ;; __auto_type take the initializer's rtt (queue 165)
+                  (let [vmt (vm? t)
+                        auto? (or (:auto (meta nm)) (:c/auto-type (meta nm)))
+                        [es rt] (if (and vmt (not auto?)) (elab (:tag (meta nm)) t false) [[] nil])
+                        _ (set-rtt! e rt)
+                        init (first more)
+                        ss (cond
+                             (empty? more) []
+                             (= :mem (:loc loc)) [(list 'x (list 'ei (list 'seq (build-init-stores t (list 'fp (:off loc)) init true) '(i 0))))]
+                             :else
+                             (let [x (if (and (seq? init) (= 'init (first init))) (second init) init)]
+                               (let [st (list 'x (effect (place-store (if (= :slot-f (:loc loc)) {:mode :slot-f :k (:k loc) :t t} {:mode :slot-i :k (:k loc) :t t})
+                                                                      (conv (ex x) t))))]
+                                 (when (and vmt auto?) (set-rtt! e (rtt-of x)))
+                                 [st])))]
+                    (into es ss))))))
+    c/typedef (let [[_ nm tf] d
+                    e (ex-res nm)
+                    t (:t e)
+                    n (if (symbol? nm) (name nm) (when (and (seq? nm) (= 'c/id (first nm))) (second nm)))]
+                ;; a block's variably modified typedef: its sizes evaluated where it stands (6.7.9p3), kept by name
+                (if (and t n *vm-typedefs* (vm? t))
+                  (let [[es rt] (elab tf t false)]
+                    (swap! *vm-typedefs* assoc n rt)
+                    es)
+                  []))
     c/group (vec (mapcat local-decl (drop 2 d)))
     c/defn (refuse :by-design "GNU nested functions (SPEC §14)")
     []))
@@ -1569,7 +1722,7 @@
     (let [[h & args] s]
       (case h
         do (do-node args)
-        let (binding [*vla-block* (atom nil)]
+        let (binding [*vla-block* (atom nil) *vm-typedefs* (atom (if *vm-typedefs* @*vm-typedefs* {}))]
              (let [[bv & body] args
                   decls (loop [xs (seq bv) out []]
                           (if-not xs
@@ -1733,24 +1886,44 @@
         (refuse :by-design (:name e) ": inline assembly (SPEC §14)"))
     (try
     (binding [*f* (atom {:ni 0 :nf 0 :frame 0 :labels {} :locals {} :fn-ret rt :fn-name (:name e)
-                         :addressed (addressed-names body)})]
+                         :addressed (addressed-names body) :rtts (IdentityHashMap.)})
+              *vm-typedefs* (atom {})]
       (let [sret (when (= :m (kind rt)) (new-slot! :i))
-            pspecs (vec (for [p ps :when (not (#{'& 'void} p))
-                              :let [pe (ex-res p)]
-                              :when pe]
-                          (param-spec pe (:t pe))))
+            ;; an unnamed parameter (C23) still takes its argument: a place of its own, its type the checker's function
+            ;; type's (queue 165)
+            pts (when-not kr (:params (ex-res ps)))
+            pspecs (vec (keep-indexed (fn [i p]
+                                        (let [pe (ex-res p)]
+                                          (cond
+                                            (and pe (:id pe)) (param-spec pe (:t pe))
+                                            (and (not kr) (< i (count pts))) (param-spec {:id (Object.)} (nth pts i))
+                                            :else nil)))
+                                      (remove #{'& 'void} ps)))
             ;; K&R parameters arrive default-promoted: converted to their declared types
             kr-convs (when kr
                        (vec (for [p ps :let [pe (ex-res p)] :when pe
                                   :let [loc (local-of pe) t (:t pe)]
                                   :when (and (= :slot-i (:loc loc)) (not (#{"i64" "u64" "p"} (ity t))))]
                               (list 'x (list 'ei (list 'is (:k loc) (list 'cv (ity t) (list 'il (:k loc)))))))))
+            ;; the parameters' array sizes evaluated at entry, in order (gcc: `int b[a++]` increments a), and the rtts of
+            ;; the pointers to variably modified types (queue 165)
+            _ (swap! *f* assoc :param-names (into {} (for [p ps :let [pe (ex-res p)] :when (and pe (:id pe))] [(:name pe) pe])))
+            pvla (when-not kr
+                   (vec (mapcat (fn [p]
+                                  (let [pe (ex-res p)
+                                        named (and pe (:id pe))
+                                        tf (if named (:tag (meta p)) p)]
+                                    (when (seq? tf)
+                                      (let [[es rt] (elab tf (if named (:t pe) (chk/ptr {:k :void})) true)]
+                                        (when (and named (vm? (:t pe))) (set-rtt! pe rt))
+                                        es))))
+                                (remove #{'& 'void} ps))))
             b (stmts body)
             b (if (= "main" (:name e)) (conj b '(ret (reti (i 0)))) b)
             st @*f*]
         (list 'code id (:ni st) (:nf st) (:frame st) (if (:variadic ft) 1 0) (if (f32? rt) 1 0)
               (vec (if sret (cons (list 'pi sret) pspecs) pspecs))
-              (let [body (list 'do (into (vec kr-convs) b))]
+              (let [body (list 'do (-> (vec kr-convs) (into pvla) (into b)))]
                 (if (calls-setjmp? body*) (list 'sjbody body) body)))))
       (catch arbace.lang.ExceptionInfo x
         (throw (ex-info (str (:name e) ": " (.getMessage x)) (ex-data x))))))))
