@@ -4093,6 +4093,26 @@ fixtures' counts the tests assert (m-st 1, m-stq 1, m-p7 1, m-p8 0, m-p1 1, m-pn
 23f602c9 fixes a regression of 88b357c9: the main file's `Included` slot was nil, `push!` pushed nothing for it, so a header after a system header took that header's status;
 `c23-nf1` alone is correct for what it tests but carries this bug, so these commits belong with it. Left: a header entered twice (finding 4), musl's cache path (finding 5).
 
+### As built: review 110's finding 2, `_Float128` and `_Float64x` compared exactly, queues 125 and 155 (2026-11-02)
+
+The VM's draft (`mac/125-float128`, 05c5fc79, unrun there) ported onto main as `mac/155-float128` and run on the VM's stage 0 (arm64). The constant evaluator gave
+an exact value (`:ld`) to `long double` alone, so every comparison in `_Float128` or `_Float64x` went through doubles (`0.1L != (_Float128)0.1` false, `1e400F128 <
+2e400F128` false, `1e-4940F128 > 0` false). `arbace.c.check` now keeps the target's wide formats (`wide-formats`: `long double` and `_Float64x` x87's 64-bit
+significand, `_Float128` binary128's 113 bits; linux-amd64): `exact-of` rounds a value to a kind's format and replaces `round-ldouble`/`ld-of`; literals and casts
+give `:ld` to every wide kind (a cast rounds to its format; a wide value with no exact value stays inexact, review 079's 1a through a cast); a comparison whose usual
+type is wide runs exactly, each operand rounded to that type (integers beyond the significand round: `(2^120 + 1) == 0x1p120L`); constexpr refuses a wide object whose
+`:ld` initializer its format does not keep (`constexpr double a = 0.1F128`, `constexpr _Float128 g = 2^120 + 1`); `__float128` (the `q` suffix, the type name) is
+`_Float128` and `__float80` (`w`) `long double`, `q` and `w` pedwarning "non-standard suffix on floating constant" as `bf16` does. ci is unchanged: `_Float128` is out
+of eval by design (SPEC §14) and `_Float64x` is double there (CS35), so it has no runtime comparison to fix.
+
+- **Tests** `float128-compared-exactly` (`test/c/judge/constexpr-float128-compare.c`, 29 assertions, clang x86-64's answers) and `constexpr-float128-representable`
+  (`constexpr-float128.c`, errors on lines 5, 7, 11, 13, 14, 15, gcc's). At main (`bin/ci diagnose`) the first gives 18 false "static assertion failed" and 3 "unknown
+  type name '__float128'", the second misses 5, 7, 11 and 14 and gives line 15 the unknown type; with the change `bin/ci judge-test`: 82 tests, 347 assertions, 0 failures.
+- **Records.** None moved: `bin/ci dg` with `CI_DG_ONLY` over the 21 files of the C23 corpus naming a wide type or suffix (`c23-floatn-*`, `c23-imaginary-constants-*`,
+  `bitint-28..31`, `-97`, `torture/bitint-22`, `-24`) and the 9 comparing `long double` constants under `constexpr` or a static assertion, at main and with the change:
+  the checker's per-file output (`read.edn`) byte for byte the same. Left: wide arithmetic still goes through doubles (CS235 (b)), so `1.0F128 + 0x1p-112F128 != 1.0F128`
+  is still false.
+
 ## Decided (2026-11-01, the user): CS236-CS239
 
 From main's doc/JOURNAL.md, "2026-11-01: the user's decisions after the tag" (VM report 103's sheet 2 for CS236-CS238;
