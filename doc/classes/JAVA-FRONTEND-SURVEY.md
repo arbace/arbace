@@ -6056,6 +6056,16 @@ expression is castable to anything, so the cast's type is its type tree's, as ab
 finding 2 is built: an unqualified call passing the binding declines unless its method is an enclosing class's
 (2626c2e9, sample `BindingImport.java`).
 
+Review 133 (the Mac VM, 2026-11-02) confirmed the revert from javac's source and found two more. Finding B: BindingCast's `0`
+printed `0L` was the converter's, not the printer's: RPS151 (a)'s boxing of a primitive conditional with a literal branch into a
+reference (`coerce`'s `literal-branch?`) saw `if` alone, not `if-instance` (a conditional whose condition binds a pattern);
+fixed (5a6f0045, cherry-picked), BindingCast's forms now `(Integer/valueOf (if-instance ...))`. Finding A: the provider's premise
+"the binding's name is erroneous speculatively" fails when the binding hides a field (or an enclosing local, a static import's
+field): Resolve.findVar finds it in the conditional's own environment, and the arm has its type (`BindingField.java`: a
+String field cast to Integer, javac false; `BindingField2.java`: an int field, javac true). The provider now declines an arm
+whose binding's name resolves in the conditional's environment (`binding-ident?`, the cast arm included); the samples allow
+three declined facts and three fallbacks.
+
 ### JFS133 (a): the numbers
 
 | Level `nread` (3,321 tests, 3,322 after t08324 joined the corpus) | pass | fallback | differ | unread |
