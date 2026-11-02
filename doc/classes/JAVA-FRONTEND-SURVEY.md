@@ -6026,6 +6026,29 @@ s.length()`, a call on a binding's selection): the first version declined every 
 rule above (`spec-erroneous?`) answers them, as javac does. Not found by the 45 tests of the `:nread-*` classes:
 only by the whole level.
 
+### JFS133 (a): a follow-up (2026-11-02)
+
+The full gate after the merges (619f7335) found three files of the vendored corpora that the rule's last branch, "any
+other arm that names a binding of the conditional is declined", sent to javac: overlay/jdk's `ZipFile.getZipEntry`
+(`this instanceof JarFile jarFile ? ZipAccess.javaUtilJarAccess().entryFor(jarFile, name) : new ZipEntry(name)`),
+javac's `JCDiagnostic` (`(o instanceof Fragment frag) ? fragment(frag) : o`) and `ClientCodeWrapper.unwrap`
+(`(fo instanceof WrappedJavaFileObject w) ? ((JavaFileObject) w.clientFileObject) : fo`): `repr-java-nojavac.jdk` 1
+fallback, `.javac` 2, beyond the known 0. Both shapes are answered now as `Attr.isBooleanOrNumeric` answers them:
+
+- a cast (the default case): its type is its type tree's whatever its expression (`Types.isCastable` accepts an
+  erroneous expression, `checkCastable` returns the cast's type), so the arm is `primitiveOrBoxed` of that type;
+- a call whose arguments name the binding (not its method's tree): speculatively the argument is erroneous and
+  compatible with every parameter, so Resolve may choose another method than the real attribution does, but the
+  answer is `memberType(site, msym).getReturnType()`, the declared return type: `expr.ae`'s
+  `arg-binding-call-numeric?` takes every method of that name at the site (`overload.ae`'s `named-closure-methods`,
+  Types.membersClosure; an unqualified call's: every enclosing class's), answers false when none returns a primitive
+  or a box (an ambiguity's or an absence's error symbol is false too), the one method's answer when there is one, and
+  declines otherwise (and when the binding is in the method's tree, or the site is neither a class type nor a type
+  variable).
+
+Checked on the rebuilt tool: `nojavac-check` jdk 906 of 906 native, javac 816 of 816, samples and baseline, the forms
+equal to javac's; `attr-check` jdk and javac, every fact equal to javac's.
+
 ### JFS133 (a): the numbers
 
 | Level `nread` (3,321 tests, 3,322 after t08324 joined the corpus) | pass | fallback | differ | unread |

@@ -363,6 +363,16 @@ gc_env() {
     GOOS=linux GOARCH=amd64 GOAMD64=v1 GOCACHE="${GOI_GOCACHE:-$(env GOROOT="$goroot" "$goroot/bin/go" env GOCACHE)}"
 }
 
+# run_env: the environment Go's test driver gives a run test's program (cmd/internal/testdir's runcmd:
+# STDLIB_IMPORTCFG, the importcfg of std's export files it lists as $gcwork/importcfg is listed, GOENV=off and
+# GOFLAGS=; and the go command that runs the driver puts GOROOT/bin first on PATH), for gc's reference run and
+# goi's and the AOT program's alike: a program that runs the go command runs $goroot's, not the host's, and
+# one that reads STDLIB_IMPORTCFG finds it (fixedbugs/bug369.go: without it gc's own run failed, "open : no
+# such file or directory", skipped since gc_ref_fails). In gc_ref's key by its definition
+run_env() {
+  echo STDLIB_IMPORTCFG="$gcwork/importcfg" GOENV=off GOFLAGS= PATH="$goroot/bin:$PATH"
+}
+
 # stderr_head FILE: stderr up to the first line that starts with "goroutine " (§11.1), the
 # addresses of a [signal ...] line normalized
 stderr_head() {
@@ -477,14 +487,14 @@ gc_ref() {
   [ ${#files[@]} -gt 0 ] || files=("$(basename "$p")")
   key=$( { cat "$goroot/VERSION"; for x in "${files[@]}"; do echo "$x"; cat "$(dirname "$g")/$x"; done
            echo "flags:"; printf '%s\n' ${bflags[@]+"${bflags[@]}"}; echo "args:"; printf '%s\n' ${args[@]+"${args[@]}"}
-           declare -f stderr_head; } | sha256sum | cut -c1-24)
+           declare -f stderr_head run_env; } | sha256sum | cut -c1-24)
   ref=$gcwork/gcref/$key
   [ -f "$ref/exit" ] && return 0
   rt=$ref.tmp.$$; rm -rf "$rt"; mkdir -p "$rt"
   if ! (cd "$(dirname "$g")" && env $(gc_env) "$goroot/bin/go" build ${bflags[@]+"${bflags[@]}"} -o "$rt/exe" "${files[@]}") > "$rt/build.log" 2>&1; then
     printf '%s\terror\tgc reference: the original'"'"'s build failed: %s\n' "$p" "$(head -1 "$rt/build.log" | cut -c1-200)"; rm -rf "$rt"; return 1
   fi
-  gst=0; (cd "$goroot/test" && limited $((tmo * 3)) "$rt/exe" ${args[@]+"${args[@]}"} > "$rt/out" 2> "$rt/err.raw" < "$empty") || gst=$?
+  gst=0; (cd "$goroot/test" && export $(run_env) && limited $((tmo * 3)) "$rt/exe" ${args[@]+"${args[@]}"} > "$rt/out" 2> "$rt/err.raw" < "$empty") || gst=$?
   # a reference that timed out is no reference (GT6: it was cached as gc's status 124 and judged every later run)
   case $gst in 124|137|152) rm -rf "$rt"; printf '%s\terror\tgc reference: the original timed out\n' "$p"; return 1 ;; esac
   stderr_head "$rt/err.raw" > "$rt/err"
@@ -598,12 +608,12 @@ check_one() {
     if ! aot_build "$r.src" "$r.exe" "$r.build.log" ${bflags[@]+"${bflags[@]}"}; then
       printf '%s\terror\tthe AOT build failed: %s\n' "$id" "$(grep -v '^$' "$r.build.log" | head -2 | tr '\n' ' ' | cut -c1-240)"; return
     fi
-    (cd "$goroot/test" && limited "$tmo" "$r.exe" ${args[@]+"${args[@]}"} > "$r.out" 2> "$r.err.raw" < "$empty") || st=$?
+    (cd "$goroot/test" && export $(run_env) && limited "$tmo" "$r.exe" ${args[@]+"${args[@]}"} > "$r.out" 2> "$r.err.raw" < "$empty") || st=$?
     rm -rf "$r.exe" "$r.src"
   elif [ -n "${box:-}" ]; then
     box_run "$cforms" "$tmo" "$ns" "${f#$cforms/}" ${args[@]+"${args[@]}"} > "$r.out" 2> "$r.err.raw" || st=$?
   else
-    (cd "$goroot/test" && limited "$tmo" "$rexe" -m arbace.go.run "$cforms" "$ns" ${args[@]+"${args[@]}"} > "$r.out" 2> "$r.err.raw" < "$empty") || st=$?
+    (cd "$goroot/test" && export $(run_env) && limited "$tmo" "$rexe" -m arbace.go.run "$cforms" "$ns" ${args[@]+"${args[@]}"} > "$r.out" 2> "$r.err.raw" < "$empty") || st=$?
   fi
   stderr_head "$r.err.raw" > "$r.err"
   case $st in
@@ -841,12 +851,12 @@ check_dir() {
     if ! aot_build "$r.src" "$r.exe" "$r.build.log" ${bflags[@]+"${bflags[@]}"}; then
       printf '%s\terror\tthe AOT build failed: %s\n' "$p" "$(grep -v '^$' "$r.build.log" | head -2 | tr '\n' ' ' | cut -c1-240)"; return
     fi
-    (cd "$goroot/test" && limited "$tmo" "$r.exe" > "$r.out" 2>&1 < "$empty") || st=$?
+    (cd "$goroot/test" && export $(run_env) && limited "$tmo" "$r.exe" > "$r.out" 2>&1 < "$empty") || st=$?
     rm -rf "$r.exe" "$r.src"
   elif [ -n "${box:-}" ]; then
     box_run "$dforms" "$tmo" "$ns" "${f#$dforms/}" "${base#$dforms/}" "${base#$dforms/}.ae" > "$r.out" 2>&1 || st=$?
   else
-    (cd "$goroot/test" && limited "$tmo" "$rexe" -m arbace.go.run "$dforms" "$ns" > "$r.out" 2>&1 < "$empty") || st=$?
+    (cd "$goroot/test" && export $(run_env) && limited "$tmo" "$rexe" -m arbace.go.run "$dforms" "$ns" > "$r.out" 2>&1 < "$empty") || st=$?
   fi
   case $st in
     # goi's own refusals only (with their goi: line; report 002, finding 9)
@@ -1433,7 +1443,7 @@ check() {
   # pinned by nothing)
   export PATH=$goroot/bin:$PATH
   echo "== goi check: $(wc -l < "$list") programs, $jobs at a time" >&2
-  export -f forms_rel no_forms_row limited limited_cpu program_tmo ref_commit action_parse check_one check_dir check_err check_err_aot run_verdict dir_verdict syn_verdict err_verdict err_aot_verdict controls_of action_of action_words gc_ref gc_ref_fails aot_build aot_dir_root stderr_head gc_env box_run box_input
+  export -f forms_rel no_forms_row limited limited_cpu program_tmo ref_commit action_parse check_one check_dir check_err check_err_aot run_verdict dir_verdict syn_verdict err_verdict err_aot_verdict controls_of action_of action_words gc_ref gc_ref_fails aot_build aot_dir_root stderr_head gc_env run_env box_run box_input
   export root goroot rexe hexe cforms dforms cwork gcwork empty box bundle aot eforms efull edumps etsv gocmp gocmp_key esyntax eraw
   local t0=$SECONDS
   # a job that dies prints no row: xargs's status is not the check's (missing_rows reports the program)

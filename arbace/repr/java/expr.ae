@@ -1027,6 +1027,38 @@
     (boolean (or (spec-erroneous? p (:lhs x)) (spec-erroneous? p (:rhs x))))
     false))
 
+(defn- arg-binding-call-numeric?
+  "isBooleanOrNumeric's APPLY case (`pob` its primitiveOrBoxed) for call `t` whose arguments name a
+  binding of the conditional `*cond-top*`: speculatively that argument is erroneous, and an erroneous
+  argument is compatible with every parameter, so the method Resolve chooses may not be the one the real
+  attribution chooses; the answer is memberType(site, msym)'s return type, the declared one, whatever the
+  arguments. Answered without the choice when it cannot matter: false when no method of that name at the
+  call's site (the selection's type; an unqualified call's: every enclosing class's) returns a primitive
+  or a box (an ambiguity's or an absence's error symbol answers false too), the one method's answer when
+  there is one; declined otherwise, and when the binding is named in the method's tree (the site itself
+  speculative) or the site is neither a class type nor a type variable (JFS133's follow-up: ZipFile's
+  `this instanceof JarFile jarFile ? ..entryFor(jarFile, name) : ..`, javac's own `fragment(frag)`)."
+  [p t pob]
+  (let [meth (:meth t)
+        no #(d/decline! "a conditional's arm calling with its binding")]
+    (when (inner-binding? p meth) (no))
+    (let [m (method-of p t)
+          env (env-of p t)
+          r (reg p)
+          ident? (= :IDENT (:tag meth))
+          site (if ident? (some-> (env-class env) d/this-type) (etype p (:selected meth)))
+          cands (if ident?
+                  (mapcat #(or (ov/named-closure-methods r (d/this-type %) (:name m)) (no))
+                          (distinct (keep :class (:levels env))))
+                  (or (ov/named-closure-methods r site (:name m)) (no)))
+          listed? (some #(identical? m %) cands)
+          cands (distinct (cons m cands))
+          ans (mapv #(boolean (pob (:ret (ty/member-type r site %)))) cands)]
+      (cond
+        (not-any? true? ans) false
+        (and listed? (= 1 (count cands))) (first ans)
+        :else (no)))))
+
 (defn- boolean-or-numeric?
   "Attr.isBooleanOrNumeric of conditional arm `t`."
   [p t]
@@ -1035,12 +1067,15 @@
       :LITERAL (not= :CLASS (:typetag t))
       (:LAMBDA :REFERENCE) false
       :PARENS (boolean-or-numeric? p (:expr t))
+      ;; (the default case; a cast's type is its type tree's, whatever its expression: an erroneous
+      ;; expression is castable to anything, Types.isCastable, so a binding in it changes nothing)
+      :TYPECAST (pob (etype p t))
       :CONDEXPR (and (boolean-or-numeric? p (:truepart t)) (boolean-or-numeric? p (:falsepart t)))
       :APPLY (let [meth (:meth t)]
                (cond
                  (#{"this" "super"} (:name meth)) false
                  (spec-erroneous? p t) false
-                 (inner-binding? p t) (d/decline! "a conditional's arm calling with its binding")
+                 (inner-binding? p t) (arg-binding-call-numeric? p t pob)
                  :else
                  (let [m (method-of p t)
                        env (env-of p t)
