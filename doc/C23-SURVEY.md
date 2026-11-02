@@ -4260,30 +4260,35 @@ file calls or a stub file for them (linux/arm64, which the gate builds, has both
 - **CS254 The executable's check of the run corpora** (step 5). Options: (a) the 3,761 programs once at the window, none recorded; (b) in the gate as a heavy step. *Recommended: (a)*.
   **Decided (the user, 2026-11-02): (a), once at the window, none recorded.**
 
-**The re-seed's fixes (queue 037's audit, VM report 037; built on `c23-w`, 2026-11-02), proposed, the user's to confirm.** Each option (a) is the one 037
+**The re-seed's fixes (queue 037's audit, VM report 037; built on `c23-w`, 2026-11-02), decided (the user, 2026-11-02): CS255-CS259 all (a).** Each option (a) is the one 037
 recommends and is what is built; test `test/gate/seed-make-test.bash` (19 checks, a fabricated git checkout; 14 fail on the scripts before):
 - **CS255 The seed's version map and the clone's tags** (037 finding 1). `:describe` (`git describe --tags --always --dirty`) is linked into stage 0 and G1-G3 and
   written into SEED.edn, so a clone with other tags or another automatic abbreviation prints another seed and `--verify` fails falsely. Options: (a) `--verify` gives the
   builds the seed's own `:version` (`ARBACE_VERSION`, which `arbace_version` honours only when its `:commit` is HEAD, the tree clean and its `:runtime` the checkout's;
   a `--verify REV` of another commit computes its own) and the describe is `--abbrev=12`; (b) only `--abbrev=12`, the tags a precondition written in doc/STANDALONE-NOTES.md;
   (c) `:describe` out of the linked version. *Recommended: (a)*. (Applies from the next seed on: the committed seed's `--verify` runs its own commit's scripts.)
+  **Decided (the user, 2026-11-02): (a), as built.**
 - **CS256 `--make` packs only a G3 the fixpoint vouched for** (037 finding 2). `fixpoint` wrote `g3/printed-by` before comparing G2 with G3, and `--make` packed any
   build-shaped directory. Options: (a) `fixpoint` writes `printed-by` and `g3/fixpoint.edn` (`{:holds true :g3-sha256 ... :version ...}`) only when G2 = G3, and `--make`
   into the committed seed's path requires it, of this checkout's version and naming the packed executable (another archive: packed with a warning); (b) required for every
   archive; (c) left to `--verify`. *Recommended: (a)*.
+  **Decided (the user, 2026-11-02): (a), as built.**
 - **CS257 `--make` on a checkout that is not clean** (037 findings 2 and 7; 118 finding 3). It warned on `:dirty true` and saw no untracked file. Options: (a) refused when
   `git status --porcelain --untracked-files=all` lists anything, or outside git (`:commit nil`); (b) refused on tracked changes only, untracked ones warned; (c) as before.
   *Recommended: (a)*: a dirty seed's `--verify` builds G1 at another `main.arbaceVersion` and fails, a second `--make`.
+  **Decided (the user, 2026-11-02): (a), as built.**
 - **CS258 Go's environment closed** (037 finding 4). Options: (a) `GOENV=off` in every build's environment (`bin/lib/seed-go.bash`'s `seed_go_env`, `bin/arbace-go`'s
   `go_env`, `bin/jrt`'s `goenv`, `arbace.build.go/go-env`), so no user go env file reaches a build, and `$GOROOT/go.env` and the toolchain's binaries stated trusted in
   doc/STANDALONE-NOTES.md SA4 (`go.env` here sets only GOPROXY, GOSUMDB and GOTOOLCHAIN, each overridden or unused; no `~/.config/go/env` on the main host); (b) also
   `GOFLAGS=-mod=readonly` (not empty) and `go.env` and `pkg/tool/*/{compile,link,asm}`, `bin/go` hashed into `seed/goroot.sha256` (a re-pin); (c) as before.
   *Recommended: (a)* (built: `GOENV=off`; the SA4 note not written, doc/STANDALONE-NOTES.md's to the user), (b) at a later re-pin.
+  **Decided (the user, 2026-11-02): (a), as built; the SA4 note written in doc/STANDALONE-NOTES.md (`$GOROOT/go.env` and the toolchain's binaries trusted); (b) at a later re-pin.**
 - **CS259 A setgid `.tmp`** (037 finding 5): `chmod 0755` keeps a directory's setgid, so a setgid `.tmp` makes every directory member `2755`. Options: (a) `seed_go_tar`
   clears the special bits (`chmod u-s,g-s,o-t` after `0755`); (b) `tar --mode=u=rwX,go=rX`; (c) as before, the host's `.tmp` checked (it is `drwxr-xr-x`).
   *Recommended: (a)*: the tar is unchanged where `.tmp` is not setgid.
 - Not built (037's lower findings, for later): the overlay cached by mtime (finding 3; for this window C9.2 step 8 removes `.tmp/jrt-go/overlay` first), links in the seed
   tree (6), the fixpoint's printed modules compared (8), `--verify --cold` (9), xz's environment (10), arm64 verified (11), `ARBACE_SEED` vs `ARBACE_SEED_GO` (12).
+  **Decided (the user, 2026-11-02): (a), as built.**
 
 **C's REAP classes after queue 122 (VM report 122's audit; the user's decisions of 2026-11-02, built on `c23-w`).** F1, F3: the VM's fixes
 (`:unclassified` out of the read and print classes; a `:c-known` section the known file lacks is a problem). F2: `:missing-builtin` (deferred) before
@@ -4293,21 +4298,26 @@ asm labels `:objects` by design). F6: C's eval record bound to gcc's built progr
 built (the lists are not committed). F7: the CS decisions cited in `:decided`. F8-F10: dg's first matches, the classes and patterns that match nothing,
 vla's pattern, the titles. The matrix: C read 575+ / 104 / 53, eval 3,457 / 195 / 109, AOT 3,467 / 187 / 107, print 0+ / 7 / 148.
 
-Proposals for the classes no CS decides (F7), proposed, the user's to confirm; option (a) recommended in each and what the files say now:
+Proposals for the classes no CS decides (F7), decided (the user, 2026-11-02): CS260-CS264 all (a), the classes' `:decided` citing them:
 - **CS260 The token and tree checks' by-design classes** (`test/c/divergences-read.edn`: assembler, c23-colons, c23-if-true, cc-panic, digit-separators,
   elifdef, embed, error-test, gnu-builtin-macro, has-c-attribute, has-gnu, invalid-paste, pp-errors, pp-known, pragma-once, u-prefix, va-opt; `:decided "C8"`).
   Each is a place where cc (the token check's oracle) lacks or differs from C23 and gcc settles it, the port following gcc. Options: (a) by design, by CS16 (a)
   and CS40 (a)'s rule (the reference is gcc; cc's gaps are the oracle's), cited in `:decided`; (b) deferred until the token check's oracle is gcc's own tokens
   for those files. *Recommended: (a)*. (`undiagnosed`, deferred, stays: the port's preprocessor is to diagnose it.)
+  **Decided (the user, 2026-11-02): (a): by design by CS16 (a) and CS40 (a)'s rule, cited in the classes' `:decided`; `undiagnosed` stays deferred.**
 - **CS261 A main file that includes itself** (print's and eval's `self-include`, 11 files, deferred since F5). Options: (a) deferred, the converter to read
   the re-entered main file's tokens as an include of its own (the layer's `c/include` of the main file), with CS104 (a)'s split declarations in C6;
   (b) by design: preprocessor tests whose program is the expansion, refused. *Recommended: (a)*.
+  **Decided (the user, 2026-11-02): (a): deferred, cited in `self-include`'s `:decided`.**
 - **CS262 Print's reexpansion and run-address** (by design, `:decided "C8"`). Options: (a) by design: reexpansion is N6's limit with the objects equal,
   run-address a program printing addresses (a run's own nondeterminism); (b) reexpansion deferred (the inner invocation recorded so the reread does
   not expand it again). *Recommended: (a)*.
+  **Decided (the user, 2026-11-02): (a): by design, cited in `:decided`.**
 - **CS263 The annotations' cc classes** (`test/c/divergences-annot.edn`: cc-attr-mode, cc-c23-constants, cc-empty-init, cc-layout, cc-preprocessor,
   cc-redeclared, enum-range, item-placement by design; layout-unjudged deferred; `:decided "C8"`). Options: (a) by design where gcc agrees with the
   checker or the item is cc's placement (CS93 (a)'s rule: the checker follows gcc), layout-unjudged deferred until the judge asks gcc about it;
   (b) all deferred until a gcc-based annotation oracle. *Recommended: (a)*.
+  **Decided (the user, 2026-11-02): (a): by design, layout-unjudged deferred, cited in `:decided`.**
 - **CS264 The classes the spec or a phase decided** (eval's gcc-builtin SPEC §7.9 and abi SPEC §12.3 by design, threads §6.5 deferred; dg's
   read-refused C7, a gap). Options: (a) the spec's sections and C7 stand as their decision, as cited; (b) each restated as a CS. *Recommended: (a)*.
+  **Decided (the user, 2026-11-02): (a): the spec's sections and C7 stand as their decision, as cited.**

@@ -338,6 +338,16 @@ About 20 s with Go's build cache warm; minutes cold (gc needs 7-8 GB for `jrt`, 
   candidate, is refused). The check takes 0.65 s with the files in the page cache, 3.6 s cold.
   The toolchain's binaries are not hashed: they are built from these sources, and Go's builds are
   reproducible.
+  *Since CS258 (a) (doc/C23-SURVEY.md, C9.4; the user, 2026-11-02):* every build's environment sets
+  `GOENV=off` (`bin/lib/seed-go.bash`'s `seed_go_env`, `bin/arbace-go`'s `go_env`, `bin/jrt`'s
+  `goenv`, `arbace.build.go/go-env`), so no user's go env file (`~/.config/go/env`) reaches a build.
+  Two inputs stay outside the pin and are trusted: `$GOROOT/go.env`, which Go reads whatever
+  `GOENV` says, and the toolchain's binaries (`bin/go`, `pkg/tool/*/{compile,link,asm}`). TamaGo's
+  `go.env` sets only `GOPROXY=https://proxy.golang.org,direct`, `GOSUMDB=sum.golang.org` and
+  `GOTOOLCHAIN=auto`, each overridden or unused: the builds set `GOPROXY=off` and
+  `GOTOOLCHAIN=local`, and with no proxy no module is fetched, so `GOSUMDB` is never consulted.
+  Hashing `go.env` and the binaries into `seed/goroot.sha256` (with `GOFLAGS=-mod=readonly`) is
+  CS258 (b), left to a later re-pin.
 - **SA5 Stage 0's version** is the version map of the commit the seed was printed from
   (`SEED.edn`'s `:version`, `git describe` there), so stage 0 *is* that commit's Arbace: its
   banner and `*arbace-version*` name that commit, not the checkout building it. A seed made from
