@@ -4113,6 +4113,29 @@ of eval by design (SPEC §14) and `_Float64x` is double there (CS35), so it has 
   the checker's per-file output (`read.edn`) byte for byte the same. Left: wide arithmetic still goes through doubles (CS235 (b)), so `1.0F128 + 0x1p-112F128 != 1.0F128`
   is still false.
 
+### As built: review 130's gaps 4 and 5, queue 157 (2026-11-02, the VM's draft)
+
+Branch `mac/157-headers` off main (2974e68e), run on the VM's stage 0: `bin/ci judge-test` 80 tests, 341 assertions, 0 failures at 2974e68e; 82 tests, 354
+assertions, 0 failures with the two commits and their deftests. gcc 15.2.0 is Alpine's aarch64 one there (the counts checked by hand, no reference recorded).
+
+- **Gap 4: a header entered twice, judged entry by entry.** The tokens of a file's two entries share one CFile, so neither the converter nor the checker could tell
+  them apart: both entries' forms landed in the unit of the first entry's root and took the first entry's status (`header-root`, `file-info`, `:files` by path).
+  Now the pp keeps in each `Included` its entry (the index of its `enter` record in the layer), records with each `enter` its includer's entry (`:in`) and with
+  each `system` record its entry (`:entry`), and gives the parser `:entry`; the parser notes, at each token it pulls, when the entry changes (`:entries`, `[[seq
+  entry] ...]`, moved with the tokens `inject-func-tokens` renumbers). The converter takes each header form's entry from its first token's seq (`entry-at`), its unit
+  from the `:in` chain (`entry-root`), and its status from that entry's `enter` record as that entry's own pragmas and linemarkers before it leave it (`sys-changes`
+  by entry, `sys-at`, moved from the checker): `:form-sys`, one boolean a form, replaces `:form-files`, `:files`, `:form-offs` and `:sys-changes`, and the checker
+  binds `*system-unit*` from it. A form whose first token is not its entry's file's (another file's macro) keeps the old rule, its file's first entry. An include
+  whose forms an earlier include's unit already has is a unit of its own, its name the forms' hash with its rank (`\n#k`), so it is checked at its own `#include`;
+  the first such unit keeps the forms' hash, so a read with no unguarded header entered twice keeps every name.
+- **Gap 5: musl's cache.** `arbace.c.musl/load-forms` (`load-unit` over the cache directory) keeps a unit's `:path` from its `c/header` form, so a unit read back is
+  judged by the old rule (its directory, its pragma line anywhere) and names its errors by its file; before, it had no path and was a user header's. Its status as
+  read from C is not kept: `c/h/NS.ae` is shared by every includer whose forms are the same. musl is checked without `-pedantic-errors`, so nothing moves.
+- **Tests** (`test/c/judge/sysx/chg`, gcc 15.2 on aarch64): `header-entered-twice-by-its-entries`: m-tw 1 (before 0), m-tw2 1 (before 2), m-tp 1 (a pragma under
+  `#ifdef` that only the second entry executes; before 0), m-twn 1 (both entries in one unit; before 2), m-tw3 2 (the main file including it twice), and each read's
+  units' `:form-sys`; `reread-unit-by-the-old-rule`: m-ph.c read back with `-isystem sy` 0 (before 1), `-I sy` 1, m-p1.c read back 0 (the old rule's whole-file
+  pragma; gcc 1, read from C 1).
+
 ## Decided (2026-11-01, the user): CS236-CS239
 
 From main's doc/JOURNAL.md, "2026-11-01: the user's decisions after the tag" (VM report 103's sheet 2 for CS236-CS238;
