@@ -18,12 +18,12 @@ ok() { echo "ok:   $1"; }
 bad() { echo "FAIL: $1"; fails=$((fails + 1)); }
 unset ARBACE_VERSION ARBACE_SEED_GO ARBACE_SEED_GO_BUILD ARBACE_HOST_EXE
 P=$T/root
-mkdir -p "$P/bin/lib" "$P/seed" "$P/arbace/lang" "$P/go" "$T/goroot/src/runtime"
+mkdir -p "$P/bin/lib" "$P/seed" "$P/arbace/lang" "$P/go" "$P/doc" "$T/goroot/src/runtime"
 cp "$src/bin/seed" "$P/bin/"; for f in tmpdir renamed-env seed-go version; do cp "$src/bin/lib/$f.bash" "$P/bin/lib/"; done
 echo go1.27.1 > "$T/goroot/VERSION"; echo 'package runtime' > "$T/goroot/src/runtime/x.go"
 export ARBACE_GOROOT=$T/goroot
 echo "$(root=$P bash -c ". '$P/bin/lib/seed-go.bash'; seed_go_goroot_hash '$T/goroot'")  go1.27.1" > "$P/seed/goroot.sha256"
-echo '(ns arbace.lang.x)' > "$P/arbace/lang/x.ae"
+echo '(ns arbace.lang.x)' > "$P/arbace/lang/x.ae"; echo notes > "$P/doc/n.md"   # doc/ is outside the runtime key
 # bin/jrt overlay: the overlay file's path, runtime/ and reflect/ beside it
 mkdir -p "$T/ovl/runtime" "$T/ovl/reflect"; echo 'package runtime' > "$T/ovl/runtime/p.go"; echo 'package reflect' > "$T/ovl/reflect/r.go"
 printf '#!/bin/bash\necho %s/ovl/overlay.json\n' "$T" > "$P/bin/jrt"; chmod +x "$P/bin/jrt"
@@ -51,6 +51,12 @@ rt=${version/:runtime \"/:runtime \"0}
 (cd "$P" && ARBACE_VERSION=${rt/%\"\}/\"\}} bash -c ". bin/lib/version.bash; arbace_version '$P'") > "$T/v.log" 2>&1 \
   && bad "ARBACE_VERSION of another runtime honoured" || ok "ARBACE_VERSION of another runtime refused"
 
+# a tree not clean: ARBACE_VERSION refused (the change is outside the runtime key and the commit is HEAD's: only the clean check refuses it)
+echo more >> "$P/doc/n.md"
+(cd "$P" && ARBACE_VERSION=$version bash -c ". bin/lib/version.bash; arbace_version '$P'") > "$T/v.log" 2>&1 \
+  && bad "ARBACE_VERSION honoured on a modified tree" || ok "ARBACE_VERSION refused on a modified tree"
+git -C "$P" checkout -q doc/n.md
+
 # finding 2: a G3 the fixpoint did not vouch for
 rm -f "$g3/fixpoint.edn"
 make && bad "--make packed an unvouched G3 into the committed seed" || { [ -f "$P/seed/arbace-seed-go.tar.xz" ] && bad "an archive written" || ok "an unvouched G3 refused for the committed seed"; }
@@ -67,6 +73,12 @@ make && bad "--make on an untracked file" || ok "an untracked file refused"
 rm "$P/go/extra.ae"; echo '(ns arbace.lang.x) ;' > "$P/arbace/lang/x.ae"
 make && bad "--make on a modified file" || ok "a modified file refused"
 git -C "$P" checkout -q arbace/lang/x.ae
+# the same outside the runtime key (the vouch's version still matches: only the clean check refuses; queue 139)
+echo x > "$P/doc/extra.md"
+make && bad "--make on an untracked file outside the runtime" || { grep -q 'not clean' "$T/make.log" && ok "an untracked file outside the runtime refused as not clean" || bad "refused for another reason: $(tail -2 "$T/make.log")"; }
+rm "$P/doc/extra.md"; echo more >> "$P/doc/n.md"
+make && bad "--make on a modified file outside the runtime" || { grep -q 'not clean' "$T/make.log" && ok "a modified file outside the runtime refused as not clean" || bad "refused for another reason: $(tail -2 "$T/make.log")"; }
+git -C "$P" checkout -q doc/n.md
 
 # a vouched G3 of a clean checkout: packed into the committed seed
 make && [ -s "$P/seed/arbace-seed-go.tar.xz" ] && ok "a vouched G3 packed into the committed seed" || bad "a vouched G3: $(tail -3 "$T/make.log")"
@@ -91,12 +103,13 @@ printf 'target/\n' > "$F/.gitignore"
 git -C "$F" init -q && git -C "$F" add -A && git -C "$F" -c user.name=t -c user.email=t@t commit -qm fp || bad "git of the fixpoint's checkout"
 sed -n '/^fixpoint() {/,/^}/p' "$src/bin/arbace-go" > "$T/fixpoint.bash"
 grep -q '^fixpoint() {' "$T/fixpoint.bash" || bad "no fixpoint() in $src/bin/arbace-go"
-fp_run() { # SAME: G3 the same as G2 (1) or not (0); prints g3's files after the run
-  (root=$F discard=$T/discard same=$1
+fp_run() { # SAME: G3 the same as G2 (1) or not (0), LATE (1): a file appears in the checkout while the builds run, (2): the untracked bin/lib/extra.bash goes; prints g3's files after the run
+  (root=$F discard=$T/discard same=$1 late=${2:-0}
    host_arch() { echo amd64; }; gate_key() { echo k; }; since() { echo 0s; }
    arbace_version() { echo '{:describe "x" :commit "c" :dirty false :runtime "r"}'; }
    build() { mkdir -p "$dir/amd64" "$dir/j2g"; echo r > "$dir/j2g/report.edn"
              case $dir in */g3) [ "$same" = 1 ] && echo g > "$dir/amd64/arbace" || echo g3 > "$dir/amd64/arbace" ;; *) echo g > "$dir/amd64/arbace" ;; esac
+             [ "$late" = 1 ] && echo x > "$F/late.txt"; [ "$late" = 2 ] && rm -f "$F/bin/lib/extra.bash"
              echo "bin/arbace-go --build: j2g and repr/go on the host executable" > "$dir/printed-by"; }
    . "$T/fixpoint.bash"; fixpoint > "$T/fp.log" 2>&1
    ls "$F/target/arbace-go/fixpoint/g3"; grep -c 'Go-hosted fixpoint' "$F/target/arbace-go/fixpoint/g3/printed-by")
@@ -113,7 +126,13 @@ echo x > "$F/bin/lib/extra.bash"
 out=$(fp_run 1 2>&1)
 case $out in *fixpoint.edn*) bad "a fixpoint that held on an untracked file wrote fixpoint.edn" ;; *) ok "a fixpoint that held on an untracked file: no fixpoint.edn" ;; esac
 grep -q 'not clean' "$T/fp.log" && ok "the fixpoint says why G3 is not vouched" || bad "no word of the unclean checkout: $(tail -2 "$T/fp.log")"
+# unclean at the start, clean at the end (the change removed while the builds run): not vouched either
+out=$(fp_run 1 2 2>&1); echo x > "$F/bin/lib/extra.bash"
+case $out in *fixpoint.edn*) bad "a fixpoint that held on a checkout unclean at its start wrote fixpoint.edn" ;; *) ok "a fixpoint that held on a checkout unclean at its start, clean at its end: no fixpoint.edn" ;; esac
 rm "$F/bin/lib/extra.bash"
+# queue 139: a change made while the builds run (clean at the start, not at the end) vouches for nothing either
+out=$(fp_run 1 1 2>&1); rm -f "$F/late.txt"
+case $out in *fixpoint.edn*) bad "a fixpoint that held on a checkout changed during the builds wrote fixpoint.edn" ;; *) ok "a fixpoint that held on a checkout changed during the builds: no fixpoint.edn" ;; esac
 
 [ "$fails" = 0 ] && { echo "PASS: seed-make-test"; exit 0; }
 echo "FAIL: seed-make-test ($fails)"; exit 1
