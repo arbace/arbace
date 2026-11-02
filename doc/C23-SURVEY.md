@@ -4231,3 +4231,28 @@ second pass's `namespaces.txt` (it is: the list is the embedded tree's); (d) the
   **Decided (the user, 2026-11-02): (b) for v1 of the milestone, (a) after.**
 - **CS254 The executable's check of the run corpora** (step 5). Options: (a) the 3,761 programs once at the window, none recorded; (b) in the gate as a heavy step. *Recommended: (a)*.
   **Decided (the user, 2026-11-02): (a), once at the window, none recorded.**
+
+**The re-seed's fixes (queue 037's audit, VM report 037; built on `c23-w`, 2026-11-02), proposed, the user's to confirm.** Each option (a) is the one 037
+recommends and is what is built; test `test/gate/seed-make-test.bash` (19 checks, a fabricated git checkout; 14 fail on the scripts before):
+- **CS255 The seed's version map and the clone's tags** (037 finding 1). `:describe` (`git describe --tags --always --dirty`) is linked into stage 0 and G1-G3 and
+  written into SEED.edn, so a clone with other tags or another automatic abbreviation prints another seed and `--verify` fails falsely. Options: (a) `--verify` gives the
+  builds the seed's own `:version` (`ARBACE_VERSION`, which `arbace_version` honours only when its `:commit` is HEAD, the tree clean and its `:runtime` the checkout's;
+  a `--verify REV` of another commit computes its own) and the describe is `--abbrev=12`; (b) only `--abbrev=12`, the tags a precondition written in doc/STANDALONE-NOTES.md;
+  (c) `:describe` out of the linked version. *Recommended: (a)*. (Applies from the next seed on: the committed seed's `--verify` runs its own commit's scripts.)
+- **CS256 `--make` packs only a G3 the fixpoint vouched for** (037 finding 2). `fixpoint` wrote `g3/printed-by` before comparing G2 with G3, and `--make` packed any
+  build-shaped directory. Options: (a) `fixpoint` writes `printed-by` and `g3/fixpoint.edn` (`{:holds true :g3-sha256 ... :version ...}`) only when G2 = G3, and `--make`
+  into the committed seed's path requires it, of this checkout's version and naming the packed executable (another archive: packed with a warning); (b) required for every
+  archive; (c) left to `--verify`. *Recommended: (a)*.
+- **CS257 `--make` on a checkout that is not clean** (037 findings 2 and 7; 118 finding 3). It warned on `:dirty true` and saw no untracked file. Options: (a) refused when
+  `git status --porcelain --untracked-files=all` lists anything, or outside git (`:commit nil`); (b) refused on tracked changes only, untracked ones warned; (c) as before.
+  *Recommended: (a)*: a dirty seed's `--verify` builds G1 at another `main.arbaceVersion` and fails, a second `--make`.
+- **CS258 Go's environment closed** (037 finding 4). Options: (a) `GOENV=off` in every build's environment (`bin/lib/seed-go.bash`'s `seed_go_env`, `bin/arbace-go`'s
+  `go_env`, `bin/jrt`'s `goenv`, `arbace.build.go/go-env`), so no user go env file reaches a build, and `$GOROOT/go.env` and the toolchain's binaries stated trusted in
+  doc/STANDALONE-NOTES.md SA4 (`go.env` here sets only GOPROXY, GOSUMDB and GOTOOLCHAIN, each overridden or unused; no `~/.config/go/env` on the main host); (b) also
+  `GOFLAGS=-mod=readonly` (not empty) and `go.env` and `pkg/tool/*/{compile,link,asm}`, `bin/go` hashed into `seed/goroot.sha256` (a re-pin); (c) as before.
+  *Recommended: (a)* (built: `GOENV=off`; the SA4 note not written, doc/STANDALONE-NOTES.md's to the user), (b) at a later re-pin.
+- **CS259 A setgid `.tmp`** (037 finding 5): `chmod 0755` keeps a directory's setgid, so a setgid `.tmp` makes every directory member `2755`. Options: (a) `seed_go_tar`
+  clears the special bits (`chmod u-s,g-s,o-t` after `0755`); (b) `tar --mode=u=rwX,go=rX`; (c) as before, the host's `.tmp` checked (it is `drwxr-xr-x`).
+  *Recommended: (a)*: the tar is unchanged where `.tmp` is not setgid.
+- Not built (037's lower findings, for later): the overlay cached by mtime (finding 3; for this window C9.2 step 8 removes `.tmp/jrt-go/overlay` first), links in the seed
+  tree (6), the fixpoint's printed modules compared (8), `--verify --cold` (9), xz's environment (10), arm64 verified (11), `ARBACE_SEED` vs `ARBACE_SEED_GO` (12).
