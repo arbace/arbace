@@ -24,4 +24,11 @@ has doc/GATE-SURVEY.md 'replaces only a directory it'
 has CLAUDE.md 'a miss replaces only a directory of its own making'
 lacks CLAUDE.md 'a miss never removes the directory of another key'
 has doc/GATE-SURVEY.md '**Built: (a) with (b)**'
+# queue 118, finding 7: repr/c and arbace/c embedded and in gate_key since C9, ci's Go forms too
+lacks CLAUDE.md 'evaluated from the checkout, not embedded, out of `gate_key`; C'"'"'s essential'
+lacks CLAUDE.md 'repr/rust, repr/c, `arbace/c`, repr/ocaml'
+lacks CLAUDE.md '`go/arbace/{ci,cinterp,crt,oi,scm}`'
+has CLAUDE.md 'embedded and compiled with the program since C9'
+lacks arbace/j2g/embed.ae "repr/c's, which are not embedded"
+grep -q '^;; repr/c' "$here/arbace/j2g/embed.ae" && { echo "FAIL arbace/j2g/embed.ae: a column-0 comment inside the exclusions"; fail=1; } || echo "ok   arbace/j2g/embed.ae: its comments indented"
 exit $fail

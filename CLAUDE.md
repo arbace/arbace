@@ -218,7 +218,8 @@ Prior art:
     (doc/C23-SURVEY.md, CS1-CS63; spec doc/c/SPEC.md): ports of cc's lexer, preprocessor and parser, checked
     token for token against cc run by the helper `tools/ccdump` over `test/c/corpora.edn` and against gcc
     (`bin/repr-c check`, `parse-check`; the parse level's reference is gcc's acceptance, CS61; the Makefile's
-    `repr-c-*`), evaluated from the checkout, not embedded, out of `gate_key`; C's essential subsets are gate steps (C8, CS19:
+    `repr-c-*`), embedded and compiled with the program since C9 (CS100 (b), doc/C23-SURVEY.md "As built: C9 (preparation)"), with ci's `arbace/c` and
+    `arbace.lang.CInterp`, so in `gate_key`; C's essential subsets are gate steps (C8, CS19:
     `c-dg-essential`, `c-check-essential`, `c-aot-essential`, `c-c23` in the essential gate, `c-judge-test` in `--full`; the
     subsets `test/c/essential-{dg,check,aot}.txt`) and its row of `bin/reap` is judged by the `reap` step.
   - `arbace/repr/clojure{.ae,/}`: `arbace.repr.clojure`, Clojure's bridge (`doc/REPR-CLOJURE.md`;
@@ -436,8 +437,8 @@ Prior art:
   the worktree's `target/seed`, `bin/seed --link`, GTS83 (a)), the executable and the test build by stage 0 (`bin/arbace-go
   --gate-build`, cached by key in `ARBACE_GATE_EXES/KEY20` (`KEY20` the first 20 characters of `bin/arbace-go --gate-key`; the one function `bin/lib/gate-cache.bash`'s `arbace_gate_cache` computes it for the gate and for the scripts run by hand; `ARBACE_GATE_CACHE` overrides, and a miss replaces only a directory of its own making, built beside it and swapped in under a lock, so a second run waits and then hits), and keyed by a hash of what they are built from,
   `gate_key`: `arbace/` less the namespaces no executable embeds (`bin/lib/version.bash`'s `arbace_embedded_sources`:
-  repr/java, repr/haskell, repr/rust, repr/c, `arbace/c`, repr/ocaml, repr/scheme, `arbace/scheme`, repr/cpp, repr/llvm,
-  `arbace/cpp`), `go/` less the crops' Go forms (`go/arbace/{ci,cinterp,crt,oi,scm}`), `overlay/` and `jdk/` less
+  repr/java, repr/haskell, repr/rust, repr/ocaml, repr/scheme, `arbace/scheme`, repr/cpp, repr/llvm,
+  `arbace/cpp`), `go/` less the crops' Go forms (`go/arbace/{oi,scm}`; ci's, cinterp's and crt's are in it since C9: j2g copies them into the program), `overlay/` and `jdk/` less
   javac's world, `jdk/platform/`, OCaml's `jdk/ocaml/` and the provenance files, `x509roots/`, the fixtures' forms,
   `bin/lib` (less the repr checks', the crops' `ci/`, `oi/`, `repr-cpp/` and `gate-run.bash`; queue 111: no build
   reads them), since GT7 `tamago/goroot` and `tools/godump` (goi's table), the build's scripts, the
