@@ -900,3 +900,82 @@
     (is (= :passes (run/control-result w refs ["c"] (assoc c :reference "c/a.c"))))
     (is (= :not-judged (run/control-result w refs ["c"] (assoc c :reference "c/z.c"))))
     (is (= :left (run/control-result w refs ["d"] c)))))
+
+;; CS240 (a): the token, tree, round-trip and checker's checks write a results file at --record (arbace.repr.c.results), every
+;; file's row [ID RESULT REASON]; bin/reap's :c-known reader counts its passes and holds it to the known file
+(deftest results-files-give-the-counts
+  (require 'arbace.repr.c.results 'reap.main)
+  (let [write (resolve 'arbace.repr.c.results/write)
+        read-source (resolve 'reap.main/read-source)
+        w (str (System/getProperty "user.dir") "/.tmp/judge-test-results")
+        put (fn [id s] (.mkdirs (java.io.File. (str w "/" id))) (spit (str w "/" id "/files.tsv") s))
+        out (str w "/results.edn")]
+    (.delete (java.io.File. out))
+    ;; the token check: lex, pp and gcc per file; a lex difference known only when the known file's :lex lists it
+    (put "a" (str "x.c\tequal\tequal\td1\tagree\n" "y.c\tdiffer\tequal\td2\tagree\n" "z.c\tequal\tgcc\td3\tknown\n"
+                  "w.c\tdiffer\tequal\td4\tagree\n" "v.c\tequal\tdiffer\td5\tdiffer\n"))
+    (is (= 1 (write :tokens w out {:a {"y.c" {:class :k}}} ["a"])))
+    (is (= {"a v.c" :fail "a w.c" :fail "a x.c" :pass "a y.c" :known "a z.c" :known}
+           (into {} (map (fn [[id r]] [id r]) (read-string (slurp out))))))
+    ;; the tree check (pp-known: the token check's known file accounts for it), a second corpus kept beside the first
+    (put "b" "p.c\tequal\t3\t0\t\nq.c\tpp-known\t3\t0\tpp's class :k\nr.c\tcrash\t0\t0\tboom\n")
+    (is (= 1 (write :parse w out {} ["b"])))
+    (is (= 8 (count (read-string (slurp out)))))
+    ;; a corpus run again replaces its rows alone
+    (put "b" "p.c\tequal\t3\t0\t\nq.c\tknown\t3\t0\tclass :k\n")
+    (is (= 0 (write :parse w out {} ["b"])))
+    (is (= ["a v.c" "a w.c" "a x.c" "a y.c" "a z.c" "b p.c" "b q.c"] (map first (read-string (slurp out)))))
+    ;; the round trip's and the checker's statuses
+    (put "c" "m.c\tpass\tok\tpass\tpass\tpass\t-\tagree\t\t\nn.c\tknown\tok\tpass\tdiffer\tpass\t-\tagree\tobjects\t\n")
+    (is (= 0 (write :roundtrip w (str w "/rt.edn") {} ["c"])))
+    (put "d" "m.c\tpass\tequal\tagree\t\t\nn.c\tfail\tdiffer\tagree\t\tline 3\n")
+    (is (= 1 (write :annot w (str w "/an.edn") {} ["d"])))
+    ;; bin/reap: the passes counted from the results, the known file's entries the judged part
+    (spit (str w "/known.edn") (pr-str {:classes {:k "a class"} :parse {:b {"q.c" {:class :k}}}}))
+    (let [src {:name "t" :reader :c-known :file (str w "/known.edn") :section :parse :results (str w "/rt-b.edn")}]
+      (spit (:results src) (pr-str [["b p.c" :pass "equal"] ["b q.c" :known "known"]]))
+      (let [r (read-source src)]
+        (is (= 1 (:pass r)))
+        (is (= ["b q.c"] (map :id (:entries r))))
+        (is (empty? (:results-problems r))))
+      ;; a failure recorded, a known file's entry the results pass, an entry the results' corpus lacks: problems
+      (spit (:results src) (pr-str [["b p.c" :fail "crash"] ["b q.c" :pass "equal"]]))
+      (is (= 2 (count (:results-problems (read-source src)))))
+      (spit (:results src) (pr-str [["b p.c" :pass "equal"]]))
+      (is (= 1 (count (:results-problems (read-source src)))))
+      ;; no results file yet: the count partial, as before CS240 (a)
+      (.delete (java.io.File. ^String (:results src)))
+      (is (nil? (:pass (read-source src)))))))
+
+;; queue 122, finding 3: a :c-known source's section the known file lacks is a problem (it gave no entries, the cell nothing)
+(deftest c-known-section-missing
+  (require 'reap.main)
+  (let [read-source (resolve 'reap.main/read-source)
+        w (str (System/getProperty "user.dir") "/.tmp/judge-test-sections")
+        f (str w "/known.edn")]
+    (.mkdirs (java.io.File. w))
+    (spit f (pr-str {:classes {:k "a class"} :pp {:a {"x.c" {:class :k}}} :lex {}}))
+    (is (= [] (:sections-missing (read-source {:reader :c-known :file f :sections [:pp :lex]}))))
+    (is (= [:gcc] (:sections-missing (read-source {:reader :c-known :file f :sections [:pp :lex :gcc]}))))
+    (is (= [:roundtrips] (:sections-missing (read-source {:reader :c-known :file f :section :roundtrips}))))))
+
+;; queue 122, findings 4 and 6: the token check's file listed at several levels is one non-pass of its worst kind (:per-file), and
+;; C's eval record must hold exactly the programs gcc built (:ref-runs, every form of the reference runs read)
+(deftest per-file-and-ref-runs
+  (require 'reap.main)
+  (let [per-file @(resolve 'reap.main/per-file)
+        case-problems @(resolve 'reap.main/case-problems)
+        d {:id :d} b {:id :b}
+        es [{:id "a x.c" :class b :kind :design :reason "b: one" :n 1} {:id "a x.c" :class d :kind :deferred :reason "d: two" :n 1}
+            {:id "a y.c" :class b :kind :design :reason "b: one" :n 1} {:id "a z.c" :class nil :kind nil :reason "?" :n 1}
+            {:id "a z.c" :class b :kind :design :reason "b: one" :n 1}]
+        m (per-file es)
+        w (str (System/getProperty "user.dir") "/.tmp/judge-test-refruns")
+        ref (str w "/ref.edn")]
+    (is (= ["a x.c" "a y.c" "a z.c" "a z.c"] (map :id m)))
+    (is (= [:deferred "d: two (also: b)"] ((juxt :kind :reason) (first m))))
+    (.mkdirs (java.io.File. w))
+    (spit ref "{:id \"c/a.c\" :status 0}\n{:id \"c/b.c\" :status :no-build}\n{:id \"c/c.c\" :status 1}\n")
+    (is (empty? (case-problems {:name "t" :file "r" :ref-runs ref} {:ids ["c/a.c" "c/c.c"]})))
+    (is (= 1 (count (case-problems {:name "t" :file "r" :ref-runs ref} {:ids ["c/a.c"]}))))
+    (is (= 1 (count (case-problems {:name "t" :file "r" :ref-runs ref} {:ids ["c/a.c" "c/b.c" "c/c.c"]}))))))

@@ -90,7 +90,7 @@ seed_go_toolchain_check() {
 # go_env ARCH: the build's environment for linux/ARCH (bin/arbace-go's go_env, GOOS linux)
 seed_go_env() {
   local a=$1
-  echo GOROOT="$(seed_go_goroot)" GOTOOLCHAIN=local GOFLAGS= GOWORK=off GO111MODULE=on GOPROXY=off \
+  echo GOROOT="$(seed_go_goroot)" GOENV=off GOTOOLCHAIN=local GOFLAGS= GOWORK=off GO111MODULE=on GOPROXY=off \
     GOEXPERIMENT= CGO_ENABLED=0 GOOS=linux GOARCH="$a" \
     "$( [ "$a" = amd64 ] && echo GOAMD64=v1 || echo GOARM64=v8.0 )"
 }
@@ -99,7 +99,10 @@ seed_go_host_arch() { case $(uname -m) in aarch64) echo arm64 ;; *) echo amd64 ;
 
 seed_go_tar() {
   local d=$1
-  find "$d/$seed_go_top" -type d -exec chmod 0755 {} + && find "$d/$seed_go_top" -type f -exec chmod 0644 {} + || return 1
+  # the setgid, setuid and sticky bits cleared too (queue 037, finding 5): chmod 0755 keeps a directory's setgid,
+  # which a setgid .tmp gives every directory made under it
+  find "$d/$seed_go_top" -type d -exec chmod 0755 {} + -exec chmod u-s,g-s,o-t {} + \
+    && find "$d/$seed_go_top" -type f -exec chmod 0644 {} + || return 1
   LC_ALL=C tar -C "$d" --sort=name --format=posix \
     --pax-option=exthdr.name=%d/PaxHeaders/%f,delete=atime,delete=ctime \
     --mtime=@0 --owner=0 --group=0 --numeric-owner -cf - "$seed_go_top"
@@ -123,7 +126,31 @@ seed_go_make() {
   [ -d "$(dirname "$ovl")/reflect" ] || { echo "bin/seed: no reflect overlay in $(dirname "$ovl")/reflect" >&2; return 1; }
   . "$root/bin/lib/version.bash"
   version=$(arbace_version "$root") || return 1
-  case $version in *':dirty true'*) echo "bin/seed: warning: the checkout is dirty; the seed records it" >&2 ;; esac
+  # a seed names the commit it was printed from (queue 037, findings 2 and 7, CS257 (a)): refused outside git, and
+  # on a tree with any change, staged, unstaged or untracked (describe --dirty sees no untracked file, which the
+  # runtime key and the build's directory scans take in): a dirty seed's --verify cannot print it again
+  case $version in *':commit nil'*) echo "bin/seed: --make: no commit (not a git checkout): a seed must name the commit it is printed from" >&2; return 1 ;; esac
+  local changes
+  changes=$(git -C "$root" status --porcelain --untracked-files=all 2>&1) || { echo "bin/seed: --make: git status failed: $changes" >&2; return 1; }
+  if [ -n "$changes" ] || case $version in *':dirty true'*) true ;; *) false ;; esac; then
+    echo "bin/seed: --make: the checkout is not clean (commit the notes and records first; git status --porcelain):" >&2
+    printf '%s\n' "$changes" | head -10 >&2
+    return 1
+  fi
+  # the fixpoint's word for G3 (queue 037, finding 2, CS256 (a)): bin/arbace-go --fixpoint writes fixpoint.edn into
+  # g3 only when G2 = G3; a seed to commit (ARCHIVE the committed seed's path) must be such a G3, built at this
+  # checkout's version, its executable the one the fixpoint hashed; another ARCHIVE packs any build, with a warning
+  local vouch=$dir/fixpoint.edn why=
+  if [ ! -f "$vouch" ]; then why="$dir has no fixpoint.edn (not a G3 of a fixpoint that held: bin/arbace-go --fixpoint)"
+  elif ! grep -qF ":version $version}" "$vouch"; then why="$vouch is of another version: $(sed -n 's/.*:version //p' "$vouch"), this checkout's $version"
+  elif ! grep -qF ":g3-sha256 \"$(sha256sum < "$dir/$host/arbace" | cut -c1-64)\"" "$vouch"; then why="$dir/$host/arbace is not the executable $vouch names"
+  fi
+  if [ -n "$why" ]; then
+    if [ "$(cd "$(dirname "$archive")" 2>&1 && pwd -P)/$(basename "$archive")" = "$(cd "$root" && pwd -P)/seed/arbace-seed-go.tar.xz" ]; then
+      echo "bin/seed: --make: refused for the committed seed: $why" >&2; return 1
+    fi
+    echo "bin/seed: warning: $why; packed into $archive anyway (not the committed seed)" >&2
+  fi
   goversion=$(head -1 "$(seed_go_goroot)/VERSION")
   goroothash=$(seed_go_toolchain_check) || return 1
   printedby="bin/arbace-go --build: j2g and repr/go on the host executable"

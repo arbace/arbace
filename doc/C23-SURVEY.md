@@ -4202,23 +4202,29 @@ embedded namespaces (c2j 25 s), a larger program (about +10% Go), and the `ci`/`
 |---|---|---|---|---|
 | 0 | merge `c23-c9` (and the other crops' window branches, batched) | | | the commit the seed will name |
 | 1 | `bin/seed --build` (stage 0 from the current seed) | 10 min | 8 GB | `target/seed/amd64/arbace`, `aot/` |
-| 1a | add `-buildvcs=false` to `tools/gateaudit`'s build in `bin/lib/gate-run.bash` (decided by the user, 2026-11-02, for the window, when every step reruns anyway; not changed before) | seconds | | `bin/lib/gate-run.bash` |
-| 2 | `bin/ci c2j-check`, `bin/ci cinterp-check`, `bin/ci judge-test` on it (light, repeat) | 1 + 1 + 3 min | 2 GB | |
-| 3 | `bin/arbace-go --build` (heavy lock): the runtime changed (CInterp), so two runs | ~9 min | 19 GB | `target/arbace-go/amd64/arbace`, `aot/`, `aot.key` |
+| 1a | add `-buildvcs=false` to `tools/gateaudit`'s build in `bin/lib/gate-run.bash` (decided by the user, 2026-11-02, for the window, when every step reruns anyway; not changed before); **committed at once** (step 9 refuses a tree that is not clean) | seconds | | `bin/lib/gate-run.bash` |
+| 2 | `bin/ci c2j-check`, `bin/ci cinterp-check`, `bin/ci judge-test` on it (light, repeat); then **`bin/j2g-edge verify`** on the merged tree (the frozen JVM, minutes; 118 finding 4: the 24 namespaces embedded name JDK classes, all inside `jdk/sources.txt`'s world, so the edge probably holds; if it differs, `bin/j2g-edge update` and its commit before step 3, else step 3's j2g lacks an answer or the gate's `j2g-edge` step fails after the seed) | 1 + 1 + 3 min, + the edge | 2 GB, 5 GB | `jdk/edge.edn` only if it differs |
+| 3 | `bin/arbace-go --build 2>&1 \| tee .tmp/c9-build.log` (heavy lock): the runtime changed (CInterp, a new runtime class: `arbace_runtime_key` differs from stage 0's), so stage 0 compiles nothing (`host_compiles` false) and the build takes the two-run path: the **first program** (with CInterp) prepares and compiles every embedded namespace, `arbace.c.cinterp` included (`prepare` with `aot_out`), then j2g translates again with them. Check: the log has no `image: not prepared: arbace.c.cinterp` line (the first program's compiling prepare and the final image's both print theirs) and its `aot:` line reports 0 failed | ~9 min | 19 GB | `target/arbace-go/amd64/arbace`, `aot/`, `aot.key` |
 | 4 | `bin/arbace-go --smoke`; `bin/ci cinterp-check --exe target/arbace-go/amd64/arbace`; `ARBACE_HOST_EXE=that bin/ci repl-session` | 3 min | 2 GB | |
 | 5 | `CI_EXE=target/arbace-go/amd64/arbace CI_JOBS=4 bin/ci check` (every run corpus, one process a program; 3,761 programs, +0.15 s a start) | ~45 min | 4 x 0.3 GB | none unless it differs (it must not: one loader); `--record` only for an explained difference |
-| 6 | `bin/ci check --aot` (CI_AOT_NODES=1 for the interpreter beside) on the new stage 0 once it is the host | ~60 min | 4 GB | `test/c/check-aot-linux-amd64.edn` only if it differs |
-| 7 | `bin/ci annotations` (REPR_C_THREADS 4; `--record` rewrites `test/repr/c/annot-known.edn`, `checker-gap` entries removed as they pass, CS93 (a)) | 31-43 min | 6 GB | `annot-known.edn` |
-| 8 | `bin/arbace-go --fixpoint` (G1 by stage 0, G2 by G1, G3 by G2) | ~17 min | 19 GB | `target/arbace-go/fixpoint/g{1,2,3}` |
-| 9 | the notes committed first, then `ARBACE_SEED_GO_BUILD=target/arbace-go/fixpoint/g3 bin/seed --make` | 2 min | 1 GB | `seed/arbace-seed-go.tar.xz`, `.sha256` |
-| 10 | `bin/seed --verify` (the seed printed again; stage 0 = G1 = G2 = G3) | ~14 min | 19 GB | none (it must pass) |
-| 11 | `bin/seed --build` again (stage 0 from the new seed, now with ci compiled in), `bin/ci judge-test`, `bin/reap`, `bin/ci dg --essential` | 15 min | 8 GB | |
+| 6 | (moved after step 11, as 11a: as ordered here stage 0 is still the old one, and nothing of the compiled level's record enters the seed) | | | |
+| 7 | `bin/ci annotations --record` (REPR_C_THREADS 4; rewrites `test/repr/c/annot-known.edn`, `checker-gap` entries removed as they pass, CS93 (a); **writes the results file `test/repr/c/annot-results.edn`, CS240 (a)**) | 31-43 min | 6 GB | `annot-known.edn`, `annot-results.edn` |
+| 7a | CS240 (a)'s other full runs, each `--record` over every corpus: `bin/repr-c check --tokens --record` (both levels), `bin/repr-c parse-check --record` (the mutants too), `bin/repr-c roundtrip --record` (not `--no-run`); each rewrites its known file and **writes its results file** (`test/repr/c/{pp-check,parse-check,roundtrip}-results.edn`: every file's row `[ID RESULT REASON]`, `arbace.repr.c.results`); a row `:fail` makes the step fail and `bin/reap` refuse the file | hours (the full runs) | 6 GB | the three known files and results files |
+| 8 | `rm -rf .tmp/jrt-go/overlay` (the patched runtime's print is cached by mtime alone, 037 finding 3: an older host's print would be packed and `--verify`'s fresh print differ), then `bin/arbace-go --fixpoint` (G1 by stage 0, G2 by G1, G3 by G2); it must end `fixpoint: holds (G2 = G3)`, and only then does it write `g3/fixpoint.edn` (CS256) | ~17 min | 19 GB | `target/arbace-go/fixpoint/g{1,2,3}` |
+| 9 | **`git status --porcelain` empty** (the notes, step 1a, the records of steps 2, 7 and 7a committed: a dirty `--make` records `:dirty true` and a `-dirty` describe, and `--verify` then builds G1 at another `main.arbaceVersion`, stage 0 != G1, a second `--make`; `--make` now refuses it, CS257), **step 8's `G2 = G3`** (`--make` refuses a G3 without the fixpoint's `fixpoint.edn` for this version, CS256), then `ARBACE_SEED_GO_BUILD=target/arbace-go/fixpoint/g3 bin/seed --make`, and the seed committed | 2 min | 1 GB | `seed/arbace-seed-go.tar.xz`, `.sha256` |
+| 10 | `bin/seed --verify` (the seed printed again; stage 0 = G1 = G2 = G3); **no tag before it passes** (a tag on the seed's commit changes `git describe` in the verify's worktree: before CS255's `ARBACE_VERSION` the version map, stage 0 != G1; the window's scripts give the builds the seed's own version, but the order stays) | ~14 min | 19 GB | none (it must pass) |
+| 11 | `bin/seed --build` again (stage 0 from the new seed, now with ci compiled in), `bin/ci judge-test`, `bin/reap --record` (the C cells' passes now counted from steps 7 and 7a's results files, CS240 (a): read 575+ and print 0+ become counts), `bin/ci dg --essential` | 15 min | 8 GB | `test/reap/matrix.edn` |
+| 11a | (step 6) `bin/ci check --aot` (CI_AOT_NODES=1 for the interpreter beside) on the new stage 0, ci compiled | ~60 min | 4 GB | `test/c/check-aot-linux-amd64.edn` only if it differs (committed before step 12) |
 | 12 | `bin/gate` (essential) then `GATE_FULL_SERIAL=1 bin/gate --full`; `bin/gate --clean` at the tag | hours | per the table | `test/gate/clean-TAG.edn` |
 
 Re-seed hazards found while preparing: (a) the first `bin/gate` after the merge rebuilds the gate's executables (the key changed); (b) `bin/lib/ci/check`'s CI_EXE needs the
 executable to resolve `-m arbace.c.repl` from its compiled copy (it does once embedded; before, stage 0 evaluates it from the checkout); (c) `arbace.c.cinterp` must be in the
 second pass's `namespaces.txt` (it is: the list is the embedded tree's); (d) the first pass leaves `arbace.c.cinterp` out of the compiled tree, so the first executable has
-`arbace.lang.CInterp` (a runtime class) but `arbace.c.repl` loads `arbace.c.cinterp` from the second pass's compiled tree, not before: step 3's two runs are not optional.
+`arbace.lang.CInterp` (a runtime class) but `arbace.c.repl` loads `arbace.c.cinterp` from the second pass's compiled tree, not before: step 3's two runs are not optional (118 finding 5: with stage 0's runtime not the checkout's, the host compiles nothing and the first program compiles every
+namespace, cinterp included; step 3's check is what proves it); (e) the box (parked) can no longer build the program (118 finding 6): j2g copies `go/arbace/{crt,ci,cinterp}` into every
+program (`arbace/j2g/main.ae`), and `crt/syscall.ae` calls `syscall.Access` and reads `syscall.Stat_t`'s fields, which TamaGo's syscall (`tamago/goroot/go/syscall/`) lacks, so
+`bin/arbace-go --build --box` would fail to compile `arbace/crt` for GOOS=tamago; not a window hazard (the box is out of `--full`); for the box's revival, a `tamago` build tag on crt's
+file calls or a stub file for them (linux/arm64, which the gate builds, has both through `conv`).
 
 ### C9.3 What is not built, with its plan (C6.7 items 3-5; needs the executable)
 
@@ -4253,3 +4259,55 @@ second pass's `namespaces.txt` (it is: the list is the embedded tree's); (d) the
   **Decided (the user, 2026-11-02): (b) for v1 of the milestone, (a) after.**
 - **CS254 The executable's check of the run corpora** (step 5). Options: (a) the 3,761 programs once at the window, none recorded; (b) in the gate as a heavy step. *Recommended: (a)*.
   **Decided (the user, 2026-11-02): (a), once at the window, none recorded.**
+
+**The re-seed's fixes (queue 037's audit, VM report 037; built on `c23-w`, 2026-11-02), proposed, the user's to confirm.** Each option (a) is the one 037
+recommends and is what is built; test `test/gate/seed-make-test.bash` (19 checks, a fabricated git checkout; 14 fail on the scripts before):
+- **CS255 The seed's version map and the clone's tags** (037 finding 1). `:describe` (`git describe --tags --always --dirty`) is linked into stage 0 and G1-G3 and
+  written into SEED.edn, so a clone with other tags or another automatic abbreviation prints another seed and `--verify` fails falsely. Options: (a) `--verify` gives the
+  builds the seed's own `:version` (`ARBACE_VERSION`, which `arbace_version` honours only when its `:commit` is HEAD, the tree clean and its `:runtime` the checkout's;
+  a `--verify REV` of another commit computes its own) and the describe is `--abbrev=12`; (b) only `--abbrev=12`, the tags a precondition written in doc/STANDALONE-NOTES.md;
+  (c) `:describe` out of the linked version. *Recommended: (a)*. (Applies from the next seed on: the committed seed's `--verify` runs its own commit's scripts.)
+- **CS256 `--make` packs only a G3 the fixpoint vouched for** (037 finding 2). `fixpoint` wrote `g3/printed-by` before comparing G2 with G3, and `--make` packed any
+  build-shaped directory. Options: (a) `fixpoint` writes `printed-by` and `g3/fixpoint.edn` (`{:holds true :g3-sha256 ... :version ...}`) only when G2 = G3, and `--make`
+  into the committed seed's path requires it, of this checkout's version and naming the packed executable (another archive: packed with a warning); (b) required for every
+  archive; (c) left to `--verify`. *Recommended: (a)*.
+- **CS257 `--make` on a checkout that is not clean** (037 findings 2 and 7; 118 finding 3). It warned on `:dirty true` and saw no untracked file. Options: (a) refused when
+  `git status --porcelain --untracked-files=all` lists anything, or outside git (`:commit nil`); (b) refused on tracked changes only, untracked ones warned; (c) as before.
+  *Recommended: (a)*: a dirty seed's `--verify` builds G1 at another `main.arbaceVersion` and fails, a second `--make`.
+- **CS258 Go's environment closed** (037 finding 4). Options: (a) `GOENV=off` in every build's environment (`bin/lib/seed-go.bash`'s `seed_go_env`, `bin/arbace-go`'s
+  `go_env`, `bin/jrt`'s `goenv`, `arbace.build.go/go-env`), so no user go env file reaches a build, and `$GOROOT/go.env` and the toolchain's binaries stated trusted in
+  doc/STANDALONE-NOTES.md SA4 (`go.env` here sets only GOPROXY, GOSUMDB and GOTOOLCHAIN, each overridden or unused; no `~/.config/go/env` on the main host); (b) also
+  `GOFLAGS=-mod=readonly` (not empty) and `go.env` and `pkg/tool/*/{compile,link,asm}`, `bin/go` hashed into `seed/goroot.sha256` (a re-pin); (c) as before.
+  *Recommended: (a)* (built: `GOENV=off`; the SA4 note not written, doc/STANDALONE-NOTES.md's to the user), (b) at a later re-pin.
+- **CS259 A setgid `.tmp`** (037 finding 5): `chmod 0755` keeps a directory's setgid, so a setgid `.tmp` makes every directory member `2755`. Options: (a) `seed_go_tar`
+  clears the special bits (`chmod u-s,g-s,o-t` after `0755`); (b) `tar --mode=u=rwX,go=rX`; (c) as before, the host's `.tmp` checked (it is `drwxr-xr-x`).
+  *Recommended: (a)*: the tar is unchanged where `.tmp` is not setgid.
+- Not built (037's lower findings, for later): the overlay cached by mtime (finding 3; for this window C9.2 step 8 removes `.tmp/jrt-go/overlay` first), links in the seed
+  tree (6), the fixpoint's printed modules compared (8), `--verify --cold` (9), xz's environment (10), arm64 verified (11), `ARBACE_SEED` vs `ARBACE_SEED_GO` (12).
+
+**C's REAP classes after queue 122 (VM report 122's audit; the user's decisions of 2026-11-02, built on `c23-w`).** F1, F3: the VM's fixes
+(`:unclassified` out of the read and print classes; a `:c-known` section the known file lacks is a problem). F2: `:missing-builtin` (deferred) before
+`:gcc-builtin`, the 24 programs whose runs fault on a builtin ci lacks. F4: the token check's file once (`:per-file`, its worst kind). F5: print's
+split-declaration, self-include and macro-context deferred, objects split by CS81 (the 36 macro-made bodies the deferred `:objects-macro-body`, the two
+asm labels `:objects` by design). F6: C's eval record bound to gcc's built programs (`:ref-runs`); the dg record's binding to the corpora's dg lists not
+built (the lists are not committed). F7: the CS decisions cited in `:decided`. F8-F10: dg's first matches, the classes and patterns that match nothing,
+vla's pattern, the titles. The matrix: C read 575+ / 104 / 53, eval 3,457 / 195 / 109, AOT 3,467 / 187 / 107, print 0+ / 7 / 148.
+
+Proposals for the classes no CS decides (F7), proposed, the user's to confirm; option (a) recommended in each and what the files say now:
+- **CS260 The token and tree checks' by-design classes** (`test/c/divergences-read.edn`: assembler, c23-colons, c23-if-true, cc-panic, digit-separators,
+  elifdef, embed, error-test, gnu-builtin-macro, has-c-attribute, has-gnu, invalid-paste, pp-errors, pp-known, pragma-once, u-prefix, va-opt; `:decided "C8"`).
+  Each is a place where cc (the token check's oracle) lacks or differs from C23 and gcc settles it, the port following gcc. Options: (a) by design, by CS16 (a)
+  and CS40 (a)'s rule (the reference is gcc; cc's gaps are the oracle's), cited in `:decided`; (b) deferred until the token check's oracle is gcc's own tokens
+  for those files. *Recommended: (a)*. (`undiagnosed`, deferred, stays: the port's preprocessor is to diagnose it.)
+- **CS261 A main file that includes itself** (print's and eval's `self-include`, 11 files, deferred since F5). Options: (a) deferred, the converter to read
+  the re-entered main file's tokens as an include of its own (the layer's `c/include` of the main file), with CS104 (a)'s split declarations in C6;
+  (b) by design: preprocessor tests whose program is the expansion, refused. *Recommended: (a)*.
+- **CS262 Print's reexpansion and run-address** (by design, `:decided "C8"`). Options: (a) by design: reexpansion is N6's limit with the objects equal,
+  run-address a program printing addresses (a run's own nondeterminism); (b) reexpansion deferred (the inner invocation recorded so the reread does
+  not expand it again). *Recommended: (a)*.
+- **CS263 The annotations' cc classes** (`test/c/divergences-annot.edn`: cc-attr-mode, cc-c23-constants, cc-empty-init, cc-layout, cc-preprocessor,
+  cc-redeclared, enum-range, item-placement by design; layout-unjudged deferred; `:decided "C8"`). Options: (a) by design where gcc agrees with the
+  checker or the item is cc's placement (CS93 (a)'s rule: the checker follows gcc), layout-unjudged deferred until the judge asks gcc about it;
+  (b) all deferred until a gcc-based annotation oracle. *Recommended: (a)*.
+- **CS264 The classes the spec or a phase decided** (eval's gcc-builtin SPEC §7.9 and abi SPEC §12.3 by design, threads §6.5 deferred; dg's
+  read-refused C7, a gap). Options: (a) the spec's sections and C7 stand as their decision, as cited; (b) each restated as a CS. *Recommended: (a)*.

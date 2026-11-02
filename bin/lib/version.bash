@@ -13,6 +13,10 @@
 #                        filled it (export-subst): :dirty false, :describe the short commit
 #                        when no tag describes it. Neither: {:describe "unknown" :commit nil
 #                        :dirty nil}.
+#                        ARBACE_VERSION set (bin/seed --verify sets it to the seed's own :version): printed
+#                        instead of the computed map, when its :commit is HEAD, the tree is clean and its
+#                        :runtime the checkout's; else refused (status 1). The describe abbreviates to 12
+#                        (queue 037, finding 1: git's automatic length grows with the repository).
 #
 # The describe takes every tag (no --match): main descends from the freezes, so it reads
 # <last freeze tag>-<commits since>-g<hash> until main has a tag of its own, which then wins as
@@ -50,8 +54,20 @@ arbace_version() {
   mkdir -p "${discard%/*}"
   top=$(git -C "$r" rev-parse --show-toplevel 2>"$discard") && top=$(cd "$top" && pwd -P)
   if [ -n "$top" ] && [ "$top" = "$r" ] && c=$(git -C "$r" rev-parse HEAD 2>"$discard"); then
-    d=$(git -C "$r" describe --tags --always --dirty) || return 1
+    # --abbrev=12 (queue 037, finding 1): git's automatic length grows with the repository's objects
+    d=$(git -C "$r" describe --tags --always --dirty --abbrev=12) || return 1
     case $d in *-dirty) dirty=true ;; esac
+    if [ -n "${ARBACE_VERSION:-}" ]; then
+      # a version map given (bin/seed --verify: the seed's own, so that a clone with other tags prints the
+      # same seed; queue 037, finding 1, CS255 (a)): honoured only for this commit, clean, of this runtime
+      local want="{:describe \"[^\"]*\" :commit \"$c\" :dirty false :runtime \"$(arbace_runtime_key "$r")\"}"
+      if [ "$dirty" = true ] || ! printf '%s\n' "$ARBACE_VERSION" | grep -qx -- "$want"; then
+        echo "arbace_version: ARBACE_VERSION $ARBACE_VERSION is not a version map of $r (commit $c, dirty $dirty, its runtime key)" >&2
+        return 1
+      fi
+      printf '%s\n' "$ARBACE_VERSION"
+      return 0
+    fi
   elif [ -f "$r/VERSION" ] && ! grep -q '\$Format:' "$r/VERSION"; then
     c=$(sed -n 's/^commit //p' "$r/VERSION")
     d=$(sed -n 's/^describe //p' "$r/VERSION")
