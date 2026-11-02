@@ -1,0 +1,103 @@
+#!/bin/bash
+# ci's coverage subsets (queue 160, the test-budget survey's input; a prototype, in no gate step): a run corpus's
+# programs run by ci's back end with Go's coverage on, reduced to a small set reaching the same covered blocks.
+#   1. bin/ci check --corpus C into WORK/C/check (CI_KEEP_NODES=1: every node program kept), timed: the corpus's check
+#      (kept when WORK/C/check/C/run.tsv exists, unless --fresh);
+#   2. each node program run by the plain cirun under its budget (ci_budget), its wall time: WORK/C/times.tsv;
+#   3. each run again by cirun built with -cover -coverpkg=arbace/ci,arbace/crt,arbace/cirun (main must be in it, or
+#      the runtime writes no counters; tools/cicover/cirun's SIGTERM hook: a program at its budget still writes its
+#      counters), GOCOVERDIR=WORK/C/cov/ID, turned into text by `go tool covdata textfmt`, cirun's own blocks left out
+#      (WORK/C/prof/ID.txt);
+#   4. the check's results (WORK/C/check/results.edn) give each program's class; a class of kind :deferred or :gap
+#      (test/c/divergences.edn) makes it kept; tools/cicover reduces the profiles (greedy set cover, the kept ones in):
+#      WORK/C/subset.txt, curve.tsv, summary.tsv;
+#   5. bin/ci check --corpus C --only subset.txt, timed: the subset's check.
+# Usage: bin/ci cover [--corpus C,...] [--seeds N] [--fresh]   (default corpus benchmarksgame; WORK: CI_COVER_WORK,
+#   default .tmp/ci-cover; CI_JOBS, at most 4, the runs' jobs)
+set -uo pipefail
+root=$(cd "$(dirname "$0")/../../.." && pwd)
+. "$root/bin/lib/tmpdir.bash"
+. "$root/bin/lib/ci/budget.bash"
+goroot=${ARBACE_GOROOT:-/root/tamago-go}
+go=$goroot/bin/go
+corpora=benchmarksgame seeds=20 fresh=
+while [ $# -gt 0 ]; do
+  case $1 in
+    --corpus) corpora=$2; shift 2 ;;
+    --seeds) seeds=$2; shift 2 ;;
+    --fresh) fresh=1; shift ;;
+    *) sed -n '2,/^set -/p' "$0" | sed '$d; s/^# \{0,1\}//' >&2; exit 2 ;;
+  esac
+done
+work=${CI_COVER_WORK:-$root/.tmp/ci-cover}
+jobs=${CI_JOBS:-4}; [ "$jobs" -gt 4 ] && jobs=4
+mkdir -p "$work"
+now() { echo "${EPOCHREALTIME/,/.}"; }
+
+# the builds: the plain cirun (bin/ci cirun-build, by its key), the cover cirun from its printed module, the reducer
+"$root/bin/ci" cirun-build --ensure || exit 1
+gobuild() { env -u GOOS -u GOARCH GOROOT="$goroot" GOFLAGS=-mod=mod GOTOOLCHAIN=local CGO_ENABLED=0 GOCACHE="$work/gocache" GOMAXPROCS=4 "$go" "$@"; }
+rm -rf "$work/go" && cp -r "$root/.tmp/ci/go" "$work/go" && cp "$root/tools/cicover/cirun/cover.go" "$work/go/cirun/"
+(cd "$work/go" && gobuild build -p 2 -trimpath -tags cicover -cover -coverpkg=arbace/ci,arbace/crt,arbace/cirun -o "$work/cirun-cover" ./cirun) || exit 1
+(cd "$root/tools/cicover" && gobuild build -trimpath -o "$work/cicover" .) || exit 1
+plain=$root/.tmp/ci/cirun cover=$work/cirun-cover
+# the classes whose programs stay: kind :deferred or :gap (bin/reap's kind map: C's :gap is deferred)
+deferred=$(awk '/:id :/{id=$2} /:kind :(deferred|gap)/{printf "%s ", id}' "$root/test/c/divergences.edn")
+
+run1() { # MODE ID: a node program run, "ID<TAB>STATUS<TAB>SECONDS"
+  local mode=$1 i=$2 f=$check/$2.nodes e=${2//\//__} rd st t0 t1
+  rd=$(mktemp -d "$cw/run.XXXXXX")
+  t0=$(now)
+  if [ "$mode" = cover ]; then
+    rm -rf "$cw/cov/$e"; mkdir -p "$cw/cov/$e"
+    (cd "$rd" && GOCOVERDIR=$cw/cov/$e timeout "$(( $(ci_budget "$i") * 2 ))" "$cover" "$f" < /dev/null > /dev/null 2>&1); st=$?
+  else
+    (cd "$rd" && timeout "$(ci_budget "$i")" "$plain" "$f" < /dev/null > /dev/null 2>&1); st=$?
+  fi
+  t1=$(now)
+  rm -rf "$rd"
+  printf '%s\t%s\t%s\n' "$i" "$st" "$(echo "$t1 - $t0" | bc)"
+}
+export -f run1 ci_budget now; export root plain cover
+
+for c in ${corpora//,/ }; do
+  cw=$work/$c check=$cw/check
+  mkdir -p "$cw"
+  export cw check
+  # 1. the corpus's check
+  if [ -n "$fresh" ] || [ ! -s "$check/$c/run.tsv" ]; then
+    t0=$(now)
+    CI_KEEP_NODES=1 CI_CHECK_WORK=$check "$root/bin/ci" check --corpus "$c" > "$cw/check-full.log" 2>&1
+    echo "$? $(echo "$(now) - $t0" | bc)" > "$cw/check-full.time"
+  fi
+  cp "$check/results.edn" "$cw/results-full.edn" 2>/dev/null
+  # the programs with a node program, ID per line
+  awk -F'\t' '$2 == "ok" && !s[$1]++ {print $1}' "$check/$c/nodes.tsv" | while IFS= read -r i; do [ -f "$check/$i.nodes" ] && echo "$i"; done > "$cw/programs.txt"
+  # 2., 3. the plain and the cover runs
+  xargs -P "$jobs" -I{} bash -c 'run1 plain "$1"' _ {} < "$cw/programs.txt" > "$cw/times.tsv"
+  rm -rf "$cw/prof"; mkdir -p "$cw/prof"
+  xargs -P "$jobs" -I{} bash -c 'run1 cover "$1"' _ {} < "$cw/programs.txt" > "$cw/cover-runs.tsv"
+  while IFS= read -r i; do
+    e=${i//\//__}
+    if ls "$cw/cov/$e"/covcounters.* > /dev/null 2>&1; then
+      gobuild tool covdata textfmt -i="$cw/cov/$e" -o="$cw/prof/$e.all" 2>> "$cw/textfmt.err"
+      grep -v '^arbace/cirun/' "$cw/prof/$e.all" > "$cw/prof/$e.txt"; rm -f "$cw/prof/$e.all"
+    fi
+  done < "$cw/programs.txt"
+  # 4. the index: every judged program (those without a node program too: a kept one costs no run), then the reducer
+  awk -v def=" $deferred " -v times="$cw/times.tsv" -v prof="$cw/prof" '
+    BEGIN { while ((getline l < times) > 0) { split(l, f, "\t"); t[f[1]] = f[3] } }
+    /^\["/ { id = $0; sub(/^\["/, "", id); sub(/".*/, "", id)
+             cls = $0; sub(/\]$/, "", cls); n = split(cls, w, " "); cls = w[n]
+             keep = index(def, " " cls " ") ? 1 : 0
+             e = id; gsub("/", "__", e); p = prof "/" e ".txt"
+             if ((getline x < p) > 0) close(p); else p = "-"
+             printf "%s\t%s\t%d\t%s\n", id, p, keep, (id in t) ? t[id] : 0 }' "$cw/results-full.edn" > "$cw/index.tsv"
+  "$work/cicover" -seeds "$seeds" -o "$cw/subset.txt" -curve "$cw/curve.tsv" "$cw/index.tsv" > "$cw/summary.tsv" || exit 1
+  # 5. the subset's check (its own work directory: the corpus's stays)
+  t0=$(now)
+  CI_CHECK_WORK=$cw/check-subset "$root/bin/ci" check --corpus "$c" --only "$cw/subset.txt" > "$cw/check-subset.log" 2>&1
+  echo "$? $(echo "$(now) - $t0" | bc)" > "$cw/check-subset.time"
+  printf '%s\tcheck-corpus\t%s\n%s\tcheck-subset\t%s\n' "$c" "$(cat "$cw/check-full.time" 2>/dev/null)" "$c" "$(cat "$cw/check-subset.time")" >> "$cw/summary.tsv"
+  echo "== $c"; cat "$cw/summary.tsv"
+done
