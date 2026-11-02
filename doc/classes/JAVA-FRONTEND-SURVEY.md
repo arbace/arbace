@@ -6049,6 +6049,13 @@ fallback, `.javac` 2, beyond the known 0. Both shapes are answered now as `Attr.
 Checked on the rebuilt tool: `nojavac-check` jdk 906 of 906 native, javac 816 of 816, samples and baseline, the forms
 equal to javac's; `attr-check` jdk and javac, every fact equal to javac's.
 
+Review 117 (2026-11-02): the VM's fix of the cast arm (bb1511a5, declining a cast arm that names its binding) is
+reverted on `java-117` (ae03785f), and the user kept the revert: javac types a call with an erroneous argument as an
+error type (an erroneous method template, `Attr.checkIdInternal`), whichever method Resolve chose, and an erroneous
+expression is castable to anything, so the cast's type is its type tree's, as above (sample `BindingCast.java`). Its
+finding 2 is built: an unqualified call passing the binding declines unless its method is an enclosing class's
+(2626c2e9, sample `BindingImport.java`).
+
 ### JFS133 (a): the numbers
 
 | Level `nread` (3,321 tests, 3,322 after t08324 joined the corpus) | pass | fallback | differ | unread |
