@@ -4297,7 +4297,8 @@ their full runs were in `--full` was false; and that no gate step checked C's pi
 
 **The user's decisions (2026-11-02):** (1) C's full checks are heavy `bin/gate --full` steps; (2) C's pins are in `bin/gate --pins`; (3) the milestone's clean
 run is v2's: `bin/gate --full --clean --tag arbace-reaps-4-crops-v1` after `bin/seed --verify` (C9.2 row 10), the tag naming the commit that adds the clean record
-and the docs. C9.2's rows 5, 7, 7a and 12 follow: the window's hand `--record` runs write the records and results files (CS240 (a)), then the gate's steps judge
+and the docs; (4) `c-aot` runs with `CI_AOT_NODES=1`, each compiled run compared with the interpreter's (CS214), a difference failing the step;
+(5) the host's gcc is in the C steps' keys, the host `:gcc`. C9.2's rows 5, 7, 7a and 12 follow: the window's hand `--record` runs write the records and results files (CS240 (a)), then the gate's steps judge
 them; row 12 names the clean run.
 
 **The steps** (`test/gate/steps.edn`, phase `:full`, chain `c-full` after `c-judge-test`, each `:heavy true`, never `--record`, judged by the scripts' own judges
@@ -4306,7 +4307,7 @@ against the committed records and known files, a regression or a file in no clas
 | step | command | parts | hosts | `:mem-gib` | time (measured or C9.2's) |
 |---|---|---|---|---:|---|
 | `c-check` | `env CI_EXE="$GATE_EXE" CI_JOBS=4 bin/ci check --corpus {part}` | the 7 run corpora | `:prog :stage0 :go` (needs `go-build`) | 2 | ~45 min (C9.2 row 5; 37 min on cirun, C5.4) |
-| `c-aot` | `env CI_JOBS=4 bin/ci check --aot --corpus {part}` | the 7 run corpora | `:stage0 :go` | 4 | ~60 min (row 11a) |
+| `c-aot` | `env CI_AOT_NODES=1 CI_JOBS=4 bin/ci check --aot --corpus {part}` | the 7 run corpora | `:stage0 :go` | 4 | ~100 min (row 11a's 60, the interpreted runs beside about 40) |
 | `c-dg` | `env CI_JOBS=4 bin/ci dg` | none (its `:dg` control crosses two groups) | `:stage0` | 3 | ~8 min (C7.1) |
 | `c-annotations` | `bin/ci annotations --corpus {part}` | 21 (the 20 below and `c23`) | `:stage0 :go` | 6 | 31-43 min (row 7) |
 | `c-tokens` | `bin/repr-c check --tokens --corpus {part}` | 20 corpora read in place | `:stage0 :go` | 6 | ~30 min (C2.5: 28.5 min) |
@@ -4315,8 +4316,12 @@ against the committed records and known files, a regression or a file in no clas
 
 Inputs: `:lib-tools`, `:tools` (arbace/c, arbace/repr/c, repr/go's printer), `:c` (bin/ci, bin/lib/ci/, bin/repr-c, bin/lib/repr-c/, test/c/, test/repr/c/), the pin
 `test/c/corpora.edn`; `c-check` also `go/arbace/cinterp{.ae,/}` (CInterp's Go side, in the program its `:prog` host knows by units), `c-aot` `:c-run` (queue 138's
-group: the back end's package files and trees, tools/cirun, bin/repr-go), the cc-based checks `:c-ccdump` (`tools/ccdump/`). Added time of `--full`: about 6 to 7
-hours serial (the sum above, about 5.5 hours, and the parts' starts). Built with them: `bin/repr-c parse-check --mutants-only` (the mutants a whole run draws,
+group: the back end's package files and trees, tools/cirun, bin/repr-go), the cc-based checks `:c-ccdump` (`tools/ccdump/`). Every C step that judges against gcc
+(the essential `c-dg-essential`, `c-check-essential`, `c-aot-essential`, `c-c23`, and `c-judge-test` and the seven above; not `c-c2j`) declares the host `:gcc`:
+`bin/lib/gate-run.bash`'s `gate_gcc_id`, the SHA-256 of gcc's `--version` line, of its driver's and cc1's bytes (through their links) and of the headers `test/c/host/headers.sha256` names (gcc's
+include directory, musl's `/usr/include`), in `hosts.edn`; the audit
+(`test/gate/audit.ae`) fails a step that runs gcc or cc1 without it. Added time of `--full`: about 7 to 8 hours serial (the sum above, about 6.2 hours, and the
+parts' starts). Built with them: `bin/repr-c parse-check --mutants-only` (the mutants a whole run draws,
 the corpora not checked); the C scripts' go-whim default and musl's and gcc's local tarballs found from a clean run's clone (`.tmp/gate-clean/SHA`) as from a
 worktree (`${root%%/.tmp/*}`); queue 138's inputs (cherry-picked) and its finding 4 fixed: `bin/ci cirun-build --ensure` keeps `.tmp/ci/cirun` only while
 `.tmp/ci/key` is the checkout's (test `test/gate/cirun-key-test.bash`); `c-c2j` declares `go/arbace/jrt/*.ae` (c2j's emit scans jrt: `bin/gate --audit c-c2j`
@@ -4332,6 +4337,4 @@ fannkuchredux.c against fasta-8.c, each judged by its family's judge after the c
 the benchmarksgame parts (`c-dg` whole). Their judges' four deftests pass on stage 0 (31 assertions); the runs over the real dumps are the window's. Not drafted:
 the round trip's levels 1 and 2 crossed (the run keeps neither the forms' text nor the `:full` print; queue 144's design).
 
-**Gaps** (not built): the host's gcc is in no step's key (no `:gcc` host: it is checked by `--pins`, and the ordinary gate does not run `--pins`); go-whim's
-commit and ccorpus2's module hash are checked by the tools when they read them (ccdump-build), not by `--pins`. `c-aot` runs without `CI_AOT_NODES=1`, so its
-comparison with the interpreter's runs (CS214) is not made in the gate.
+**Gaps** (not built): go-whim's commit and ccorpus2's module hash are checked by the tools when they read them (ccdump-build), not by `--pins`.

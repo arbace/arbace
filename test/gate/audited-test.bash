@@ -26,8 +26,8 @@ no() { n=$((n + 1)); bad=$((bad + 1)); echo "FAIL $*"; }
 # zeros), its material per step in $t/plan/NAME.inputs
 git -C "$root" ls-files | LC_ALL=C sort | sed 's|^|0000000000000000000000000000000000000000000000000000000000000000  |' > "$t/files.sha256"
 z=$(printf '0%.0s' $(seq 64))
-printf '{:gate "%s" :javac "%s" :prog-units "none" :prog-rest "%s" :javac-prog-units "none" :javac-prog-rest "%s" :stage0 "%s" :frozen "%s" :jdk "%s" :go "%s"}\n' \
-  $z $z $z $z $z $z $z $z > "$t/hosts.edn"
+printf '{:gate "%s" :javac "%s" :prog-units "none" :prog-rest "%s" :javac-prog-units "none" :javac-prog-rest "%s" :stage0 "%s" :frozen "%s" :jdk "%s" :go "%s" :gcc "%s"}\n' \
+  $z $z $z $z $z $z $z $z $z > "$t/hosts.edn"
 mkdir -p "$t/store"
 . "$root/bin/lib/tools.bash"
 planned=0

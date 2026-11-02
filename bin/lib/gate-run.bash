@@ -69,6 +69,17 @@ gate_env() {
   export GATE_JAVA_FORMS=${GATE_JAVA_FORMS:-$main/.tmp/java-check/forms}
 }
 
+gate_gcc_id() {  # the :gcc host's identity: gcc's --version line, its driver's, cc1's and the C checks' headers' SHA-256; none without gcc
+  local g c
+  g=$(command -v gcc) || { echo none; return; }
+  g=$(readlink -f "$g"); c=$(readlink -f "$(gcc -print-prog-name=cc1 2>"$TMPDIR/gate-gcc.err")" 2>"$TMPDIR/gate-gcc.err")
+  { gcc --version 2>"$TMPDIR/gate-gcc.err" | head -1
+    sha256sum < "$g" | cut -c1-64
+    if [ -f "$c" ]; then sha256sum < "$c" | cut -c1-64; else echo "no cc1"; fi
+    # the headers C's checks read through it (test/c/host/headers.sha256's paths: gcc's include directory, musl's /usr/include), their bytes now
+    awk '{print $2}' "$root/test/c/host/headers.sha256" 2>"$TMPDIR/gate-gcc.err" | while read -r h; do
+      if [ -f "$h" ]; then sha256sum "$h"; else echo "missing $h"; fi; done; } | sha256sum | cut -c1-64
+}
 plan_inputs() {  # plan_inputs DIR: DIR/files.sha256 and DIR/hosts.edn
   local d=$1 jdk rel
   mkdir -p "$d"
@@ -115,7 +126,10 @@ javac none
     printf ' :stage0 "%s"\n' "$(cat seed/arbace-seed-go.tar.xz.sha256 seed/goroot.sha256 bin/seed bin/lib/seed-go.bash | sha256sum | cut -c1-64)"
     printf ' :frozen "%s"\n' "$(sha256sum < test/oracle/frozen-jar.sha256 | cut -c1-64)"
     printf ' :jdk "%s"\n' "$rel"
-    printf ' :go "%s"}\n' "$(sha256sum < "${ARBACE_GOROOT:-/root/tamago-go}/VERSION" | cut -c1-64)"; } > "$d/hosts.edn"
+    printf ' :go "%s"\n' "$(sha256sum < "${ARBACE_GOROOT:-/root/tamago-go}/VERSION" | cut -c1-64)"
+    # :gcc (the user, 2026-11-02; doc/C23-SURVEY.md, "As built: C's full checks in the gate"): the host's gcc, C's reference,
+    # by its --version line, the digests of its driver and of cc1, resolved through their links, and of the headers C's checks read; none without gcc
+    printf ' :gcc "%s"}\n' "$(gate_gcc_id)"; } > "$d/hosts.edn"
 }
 run_plan() {  # run_plan DIR [--rerun]: the plan into DIR (plan.tsv, plan/), printed
   local d=$1; shift
