@@ -92,7 +92,9 @@
 #                                   (seed/goroot.sha256), jdk26u's commit and its build tree's platform
 #                                   (jdk/javac/platform.sha256), the system JDK (javac 26), the frozen jar
 #                                   (test/oracle/frozen-jar.sha256, when FROZEN_JAR names it), the frozen
-#                                   tree's tag; $GOROOT/test's digest recorded (FILE: as a map)
+#                                   tree's tag; $GOROOT/test's digest recorded; C's: gcc 15.2.0's and musl 1.2.6's
+#                                   tarballs (test/c/corpora.edn), the host's gcc against test/c/host/ (bin/repr-c
+#                                   host check) (FILE: as a map)
 #        bin/gate --outside-pins    (queue 023, report 022 finding 4; the ordinary gate's pre-step outside)
 #                                   TamaGo's go and \$GOROOT/test hashed against seed/goroot.sha256 and
 #                                   seed/goroot-test.sha256, jdk26u's work tree clean (when there)
@@ -450,7 +452,7 @@ fi
 # TamaGo's go (seed/goroot.sha256), jdk26u and the JDK build tree's platform (jdk/javac/platform.sha256),
 # the frozen jar (test/oracle/frozen-jar.sha256, when FROZEN_JAR gives it: else the clone builds it from
 # its tag and frozen_jar checks it), the system JDK (the reference javac, named by its version and its
-# release file), $GOROOT/test (seed/goroot-test.sha256, GTS50 (a)); FILE gets them as a map. Exit 1 on a pin that fails
+# release file), $GOROOT/test (seed/goroot-test.sha256, GTS50 (a)), C's gcc and musl tarballs and test/c/host/; FILE gets them as a map. Exit 1 on a pin that fails
 clean_pins() {
   local out=${1:-} st=0 g pv ph have gt tp jdk c jv jrel fj want got pd ft
   . "$root/bin/lib/seed-go.bash"
@@ -494,8 +496,32 @@ clean_pins() {
   ft=$(git -C "$root" rev-parse -q --verify 'refs/tags/arbace-for-java-26-v1^{commit}' 2>"$TMPDIR/pins.err") || ft=none
   if [ "$ft" != none ]; then echo "pins: the frozen tree clojure/: arbace-for-java-26-v1 at $ft (extracted into .tmp/frozen by the checkout's git)"
   else echo "pins: FAILED: no tag arbace-for-java-26-v1 (the frozen clojure/)"; st=1; fi
-  [ -n "$out" ] && printf '{:go {:goroot "%s" :version "%s" :sources-sha256 "%s"} :goroot-test-sha256 "%s"\n  :jdk26u {:dir "%s" :commit "%s"} :system-jdk {:version "%s" :release-sha256 "%s"}\n  :frozen-jar "%s" :frozen-tree "%s" :ok %s}\n' \
-    "$g" "$pv" "$have" "$gt" "$jdk" "$(git -C "$jdk" rev-parse HEAD 2>"$TMPDIR/pins.err")" "$jv" "$jrel" "$fj" "$ft" "$([ $st = 0 ] && echo true || echo false)" > "$out"
+  # C's (the user, 2026-11-02; doc/C23-SURVEY.md, "As built: C's full checks in the gate"): gcc 15.2.0's and musl 1.2.6's
+  # tarballs against test/c/corpora.edn's SHA-256 (the copy the tools take: REPR_C_GCC_TARBALL or CI_MUSL_TARBALL, the
+  # checkout's .tmp, then the main checkout's; none: the tool fetches it from the pin's URL and checks it there), and
+  # test/c/host/'s recorded answers of the host's gcc (bin/repr-c host check: its predefined macros, the headers' digests)
+  local ct cw ch=false cg=nil cm=nil
+  c_tarball() { # KEY ENV-COPY CANDIDATE...: the tarball found and checked against corpora.edn's pin KEY
+    local key=$1 env=$2 want f got; shift 2
+    want=$(sed -n "/^ *{\\{0,1\\}:$key\$/,/:top/s/^ *:sha256 \"\([0-9a-f]*\)\"/\1/p" "$root/test/c/corpora.edn" | head -1)
+    for f in $env "$@"; do [ -f "$f" ] && break; f=; done
+    if [ -z "$f" ]; then echo "pins: $key's tarball: no copy here (the tool fetches it from test/c/corpora.edn's URL and checks it by the pin)"; echo nil > "$TMPDIR/pins-c.$key"; return 0; fi
+    got=$(sha256sum < "$f" | cut -c1-64)
+    printf '{:path "%s" :sha256 "%s"}\n' "$f" "$got" > "$TMPDIR/pins-c.$key"
+    if [ -n "$want" ] && [ "$got" = "$want" ]; then echo "pins: $key's tarball $f: test/c/corpora.edn's"
+    else echo "pins: FAILED: $key's tarball $f is $got, test/c/corpora.edn pins ${want:-nothing}"; return 1; fi
+  }
+  # the main checkout as the C tools find it (bin/repr-c gcc_tests, bin/lib/ci/musl): a worktree's or the clean run's
+  # clone's (.tmp/gate-clean/SHA, its own .git: arbace_main_checkout names the clone itself there; queue 150)
+  # (only the two known layouts stripped, so a main checkout under some other /.tmp/ is itself; queue 150, finding 3)
+  cw=${root%%/.tmp/gate-clean/*}; cw=${cw%%/.tmp/worktrees/*}
+  c_tarball gcc-15.2.0 "${REPR_C_GCC_TARBALL:-}" "$root/.tmp/repr-c/gcc-15.2.0.tar.xz" "$cw/.tmp/repr-c/gcc-15.2.0.tar.xz" || st=1
+  c_tarball musl-1.2.6 "${CI_MUSL_TARBALL:-}" "$root/.tmp/ci-musl/musl-1.2.6.tar.gz" "$cw/.tmp/c1/musl/musl-1.2.6.tar.gz" || st=1
+  cg=$(cat "$TMPDIR/pins-c.gcc-15.2.0"); cm=$(cat "$TMPDIR/pins-c.musl-1.2.6")
+  if ct=$("$root/bin/repr-c" host check 2>&1); then ch=true; echo "pins: the host's gcc ($(gcc --version 2>"$TMPDIR/pins.err" | head -1)): test/c/host/'s answers ($(ls "$root/test/c/host/predefined" | wc -l) standards, $(wc -l < "$root/test/c/host/headers.sha256") headers)"
+  else echo "pins: FAILED: the host's gcc against test/c/host/ (bin/repr-c host check):"; printf '%s\n' "$ct" | grep -v ': OK$' | head -5 | sed 's/^/   /'; st=1; fi
+  [ -n "$out" ] && printf '{:go {:goroot "%s" :version "%s" :sources-sha256 "%s"} :goroot-test-sha256 "%s"\n  :jdk26u {:dir "%s" :commit "%s"} :system-jdk {:version "%s" :release-sha256 "%s"}\n  :frozen-jar "%s" :frozen-tree "%s"\n  :c {:gcc-tarball %s :musl-tarball %s :host-check %s}\n  :ok %s}\n' \
+    "$g" "$pv" "$have" "$gt" "$jdk" "$(git -C "$jdk" rev-parse HEAD 2>"$TMPDIR/pins.err")" "$jv" "$jrel" "$fj" "$ft" "$cg" "$cm" "$ch" "$([ $st = 0 ] && echo true || echo false)" > "$out"
   [ $st = 0 ] && echo "pins: ok" || echo "pins: FAILED"
   return $st
 }

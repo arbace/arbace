@@ -218,6 +218,18 @@
   (let [n (max (count a) (count b))]
     (first (for [i (range n) :when (not= (get a i) (get b i))] [(inc i) (get a i) (get b i)]))))
 
+(defn same-dump?
+  "The token check's comparison of a file's dump with cc's (lex and pp alike): cc's dump present and equal as `norm` makes
+  them."
+  [^String cc ^String mine]
+  (boolean (and cc (= (norm mine) (norm cc)))))
+
+(defn gcc-digest-agrees?
+  "The token check's judgment by the reference's digest (gcc-status, CS51 (a)) less its known list: the port's digest is
+  gcc -E's, or gcc rejects the file and the port reports an error."
+  [g ^String dg errors?]
+  (boolean (or (= g dg) (and (= g :rejected) errors?))))
+
 (def gcc-file
   "gcc -E's digest of every file (CS51 (a)): a line a file, the SHA-256 of its tokens as `gcc-texts`
   gives them (identifiers in gcc's spelling, norm-ident) or `rejected`, two spaces, CORPUS/NAME."
@@ -240,8 +252,7 @@
   (let [g (get (:gcc-db host) (str id "/" nm))]
     (cond
       (nil? g) "unrecorded"
-      (= g dg) "agree"
-      (and (= g :rejected) errors?) "both-reject"
+      (gcc-digest-agrees? g dg errors?) (if (= g dg) "agree" "both-reject")
       (contains? (get-in (:known-gcc host) [(keyword id)]) nm) "known"
       :else "differ")))
 
@@ -256,7 +267,7 @@
                        _ (write-utf8 (str d "/port-lex/" (:out e)) mine)
                        cc (read-or-nil (str d "/cc-lex/" (:out e)))]
                    (cond (nil? cc) "no-cc"
-                         (= (norm mine) (norm cc)) "equal"
+                         (same-dump? cc mine) "equal"
                          :else "differ")))
         [pp-st digest detail gst]
         (when (levels "pp")
@@ -271,7 +282,7 @@
               (cond
                 (:crash r) ["crash" dg (:crash r)]
                 (nil? cc) ["no-cc" dg nil]
-                (= (norm mine) (norm cc)) ["equal" dg nil]
+                (same-dump? cc mine) ["equal" dg nil]
                 (and k (= (:gcc k) dg)) ["gcc" dg nil]
                 ;; the reference rejects the file (an error test): the port must report an error too
                 (and k (= (:gcc k) :rejected) (seq (:errors r))) ["gcc" dg nil]
@@ -332,6 +343,92 @@
       ;; a missing __has answer is reported, not failed: the names gcc itself rejects (an error test's
       ;; __has_c_attribute(0)) have none to record
       (if (or (seq pp-fail) (seq lex-fail) (seq gcc-fail) (seq stale)) 1 0))))
+
+;; ---------------------------------------------------------------------------------------------
+;; GTS81 (a): the negative controls of repr/c's checks and the checker's (test/c/controls.edn, :level :lex, :pp,
+;; :gcc-digest, :tree, :annot, :roundtrip): a file's dump judged by its check's own comparison against another file's
+;; reference, which must not pass. The helpers shared with arbace.repr.c.parsecheck (annot and rtcheck, which do not load
+;; this namespace, print alike); no row of files.tsv, report.edn, the known files, the results files or the counts.
+
+(defn controls
+  "The negative controls of a level (test/c/controls.edn); the file must read."
+  [level]
+  (filterv #(= level (:level %)) (read-string (slurp "test/c/controls.edn"))))
+
+(defn control-split
+  "A control's \"CORPUS/NAME\" as [CORPUS NAME] (the name may hold slashes)."
+  [^String fid]
+  (let [i (.indexOf fid "/")] [(subs fid 0 i) (subs fid (inc i))]))
+
+(defn control-entry
+  "The entry {:name :out ...} of NAME in WORK/CORPUS/files.edn (the lists), or nil."
+  [^String work ^String corpus ^String nm]
+  (let [f (java.io.File. (str work "/" corpus "/files.edn"))]
+    (when (.exists f) (first (filter #(= nm (:name %)) (read-string (slurp f)))))))
+
+(defn control-rows
+  "Each control of `level` judged by `judge` (a control -> :differs, :passes, :not-judged or :left) and its result printed
+  (who: the check's name; what: the comparison, \"S's WHAT against R's REF\"); the failing ones as rows [ID :fail WHY]."
+  [who level [what ref] judge]
+  (vec (for [{:keys [id subject reference] :as c} (controls level)
+             :let [v (judge c)
+                   pair (str subject "'s " what " against " reference "'s " ref)
+                   _ (println (case v
+                                :differs (str who ": control " id " (" pair "): differs, as a control must (GTS81 (a))")
+                                :passes (str who ": control passed: " id " (" pair "): the judge passes what differs")
+                                :not-judged (str who ": control not judged: " id ": " reference " has no " ref " in the run")
+                                :left (str who ": control " id ": left (" subject " or " reference " not in the run, or "
+                                           subject " not read: its own row says so)")))]
+             :when (#{:passes :not-judged} v)]
+         [id :fail (str "control " (name v) " (test/c/controls.edn)")])))
+
+(defn report-controls
+  "The failing controls' rows printed (FAIL ID WHY); 1 when there are any, else 0."
+  [rows]
+  (doseq [r rows] (println "FAIL" (first r) (nth r 2)))
+  (if (seq rows) 1 0))
+
+(defn token-control-result
+  "A :lex, :pp or :gcc-digest control judged after the run (WORK's dumps, kept by the run): the subject's port dump against
+  the reference's cc dump by same-dump?, or the subject's digest (files.tsv) against the reference's recorded digest
+  (gcc-db, load-gcc's) by gcc-digest-agrees?. :left when a corpus was not checked (ids), the level not run (levels) or the
+  subject's dump or row is missing; :not-judged when the reference has no cc dump or no recorded digest."
+  [^String work ids levels gcc-db {:keys [level subject reference]}]
+  (let [[sc sn] (control-split subject) [rc rn] (control-split reference)
+        se (control-entry work sc sn) re (control-entry work rc rn)
+        lvl (if (= level :lex) "lex" "pp")]
+    (cond
+      (not (and (some #{sc} ids) (some #{rc} ids) (contains? levels lvl))) :left
+      (nil? se) :left
+      (= level :gcc-digest)
+      (let [row (first (filter #(= sn (first %)) (map #(str/split % #"\t" -1) (remove str/blank? (str/split-lines (slurp (str work "/" sc "/files.tsv")))))))
+            dg (nth row 3 nil)
+            g (get gcc-db (str rc "/" rn))
+            mine (read-or-nil (str work "/" sc "/port-pp/" (:out se)))]
+        (cond
+          (or (nil? dg) (= dg "-") (nil? mine)) :left
+          (nil? g) :not-judged
+          ;; the subject's errors as its dump gives them (pp/dump's #error lines)
+          (gcc-digest-agrees? g dg (boolean (re-find #"(?m)^#error\t" mine))) :passes
+          :else :differs))
+      :else
+      (let [mf (java.io.File. (str work "/" sc "/port-" lvl "/" (:out se)))
+            mine (when (.exists mf) (slurp mf)) ; written by write-utf8: read back as written
+            cc (when re (read-or-nil (str work "/" rc "/cc-" lvl "/" (:out re))))]
+        (cond
+          (nil? mine) :left
+          (nil? cc) :not-judged
+          (same-dump? cc mine) :passes
+          :else :differs)))))
+
+(defn token-controls
+  "The token check's controls after its corpora (`check`'s ids and levels): the failing ones' rows."
+  [^String work ids levels]
+  (let [gcc-db (load-gcc)
+        judge #(token-control-result work ids levels gcc-db %)]
+    (vec (concat (control-rows "repr-c check" :lex ["lex dump" "cc lex dump"] judge)
+                 (control-rows "repr-c check" :pp ["pp dump" "cc pp dump"] judge)
+                 (control-rows "repr-c check" :gcc-digest ["tokens' digest" "gcc -E digest"] judge)))))
 
 (declare get-gcc-digest)
 
@@ -507,9 +604,12 @@
     "pp" (pp-main (first args) (rest args))
     "lists" (let [[work roots & ids] args] (lists work (read-string roots) ids))
     "check" (let [[work levels & ids] args
-                  st (reduce max 0 (map #(check work % (set (str/split levels #","))) ids))]
+                  lv (set (str/split levels #","))
+                  st (reduce max 0 (map #(check work % lv) ids))
+                  ;; GTS81 (a): the negative controls (test/c/controls.edn, :lex, :pp, :gcc-digest), no row of files.tsv
+                  cst (report-controls (token-controls work ids lv))]
               (shutdown-agents)
-              (System/exit st))
+              (System/exit (max st cst)))
     "record" (let [[work & ids] args] (record work ids) (record-gcc work ids))
     "agree" (let [[work & ids] args] (agree work ids))
     (do (println "ppcheck: pp, lists, check or record") (System/exit 2))))

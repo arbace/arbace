@@ -218,6 +218,67 @@
                   (when (seq unclassed) (str "; " (count unclassed) " of no class"))))
     (if (or (seq failing) (seq stale) (seq unclassed)) 1 0)))
 
+;; GTS81 (a): the negative controls of the round trip (test/c/controls.edn, :level :roundtrip): the subject's own row (read,
+;; levels 1 and 2, its acceptance) with its levels 3 and 4 crossed, its print's object file and run against the reference's
+;; original's (the driver's obj/orig/R.o and run/R/o/, kept), compared as the driver compares (cmp -s: byte for byte; the
+;; status and the standard output), the row judged by judge-row, which must not pass. Levels 1 and 2 are the file's own
+;; (the reads are not kept): design only.
+
+(defn- bytes-or-nil ^bytes [^String p] (let [f (java.io.File. p)] (when (.exists f) (lex/read-bytes p))))
+
+(defn crossed
+  "The crossed level-3 and level-4 rows of a subject (its corpus directory sd, name sn) against a reference (rd, rn), as the
+  driver writes obj.tsv's and run.tsv's: [[os ps cmp] [ro rp same]], the original's status the reference's and the print's
+  the subject's; the run row nil when either has none (not a run corpus, --no-run)."
+  [^String sd ^String sn sobj srun ^String rd ^String rn robj rrun]
+  (let [os (first robj) ps (second sobj)
+        eq (fn [a b] (let [x (bytes-or-nil a) y (bytes-or-nil b)] (boolean (and x y (java.util.Arrays/equals x y)))))
+        cmp (if (and (= os "0") (= ps "0")) (if (eq (str rd "/obj/orig/" rn ".o") (str sd "/obj/print/" sn ".o")) "equal" "differ") "-")
+        run (when (and rrun srun (not= "link" (first rrun)) (not= "link" (second srun)))
+              (let [ro (first rrun) rp (second srun)]
+                [ro rp (if (and (= ro rp) (eq (str rd "/run/" rn "/o/stdout") (str sd "/run/" sn "/p/stdout"))) "same" "differ")]))]
+    [[os ps cmp] run]))
+
+(defn roundtrip-control-result
+  "A :roundtrip control judged after the corpora (ids): :left when a corpus was not judged or the subject's own row does
+  not reach level 3 passing levels 1 and 2 (read ok, both equal, its print compiled: its own row says so), :not-judged when
+  the reference's original has no object file (no row or not compiled), else judge-row on the crossed row: :passes or
+  :differs."
+  [^String work ids gcc {:keys [subject reference]}]
+  (let [split (fn [^String fid] (let [i (.indexOf fid "/")] [(subs fid 0 i) (subs fid (inc i))]))
+        [sc sn] (split subject) [rc rn] (split reference)
+        sd (str work "/" sc) rd (str work "/" rc)]
+    (if-not (and (some #{sc} ids) (some #{rc} ids))
+      :left
+      (let [srow (get (read-tsv (str sd "/forms.tsv")) sn)
+            sobj (get (read-tsv (str sd "/obj.tsv")) sn)
+            robj (get (read-tsv (str rd "/obj.tsv")) rn)
+            [read l1 l2] srow]
+        (cond
+          (not (and (= read "ok") (= l1 "equal") (= l2 "equal") (= "0" (second sobj)))) :left
+          (not= "0" (first robj)) :not-judged
+          :else
+          (let [man (read-string (slurp "test/c/corpora.edn"))
+                run? (= :run (:action (first (filter #(= (:id %) (keyword sc)) (:corpora man)))))
+                [obj run] (crossed sd sn sobj (get (read-tsv (str sd "/run.tsv")) sn) rd rn robj (get (read-tsv (str rd "/run.tsv")) rn))
+                j (judge-row (into [sn] srow) obj run (get gcc [sc sn]) nil run?)]
+            (if (= "pass" (:status j)) :passes :differs)))))))
+
+(defn roundtrip-controls
+  "The controls of the corpora judged (ids), each printed; the failing ones as rows [ID :fail WHY]."
+  [^String work ids]
+  (let [gcc (load-gcc)]
+    (vec (for [{:keys [id subject reference] :as c} (filter #(= :roundtrip (:level %)) (read-string (slurp "test/c/controls.edn")))
+               :let [v (roundtrip-control-result work ids gcc c)
+                     pair (str subject "'s print (object, run) against " reference "'s original's")
+                     _ (println (case v
+                                  :differs (str "repr-c roundtrip: control " id " (" pair "): differs, as a control must (GTS81 (a))")
+                                  :passes (str "repr-c roundtrip: control passed: " id " (" pair "): the judge passes what differs")
+                                  :not-judged (str "repr-c roundtrip: control not judged: " id ": " reference "'s original has no object file in the run")
+                                  :left (str "repr-c roundtrip: control " id ": left (" subject " or " reference " not in the run, or " subject " not through levels 1-2)")))]
+               :when (#{:passes :not-judged} v)]
+           [id :fail (str "control " (name v) " (test/c/controls.edn)")]))))
+
 (defn record
   "Rewrites test/repr/c/roundtrip-known.edn's entries of the corpora `ids` from WORK: every file that
   does not pass, its class kept or `:unclassified`."
@@ -244,6 +305,12 @@
 (defn -main [cmd & args]
   (case cmd
     "forms" (let [[work & ids] args] (doseq [id ids] (forms work id)) (shutdown-agents))
-    "judge" (let [[work & ids] args st (reduce max 0 (map #(judge work %) ids))] (shutdown-agents) (System/exit st))
+    "judge" (let [[work & ids] args
+                  st (reduce max 0 (map #(judge work %) ids))
+                  ;; GTS81 (a): the negative controls (test/c/controls.edn, :roundtrip), no row of files.tsv or the counts
+                  cs (roundtrip-controls work ids)]
+              (doseq [r cs] (println "FAIL" (first r) (nth r 2)))
+              (shutdown-agents)
+              (System/exit (if (seq cs) 1 st)))
     "record" (let [[work & ids] args] (record work ids))
     (do (println "rtcheck: forms, judge or record") (System/exit 2))))

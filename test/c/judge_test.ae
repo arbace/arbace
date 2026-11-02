@@ -389,7 +389,7 @@
         work (doto (java.io.File. (str root "/.tmp/judge-test-retry")) (.mkdirs))
         ids (java.io.File. work "ids.txt")
         real (or (System/getenv "CIRUN") (str root "/.tmp/ci/cirun"))]
-    (when-not (.exists (java.io.File. ^String real)) (sh-status {} "bin/ci" "cirun-build"))
+    (when-not (and (System/getenv "CIRUN") (.exists (java.io.File. ^String real))) (sh-status {} "bin/ci" "cirun-build" "--ensure"))
     (try
       (spit ids "ci-run/ptr-sub-unsigned.c\n")
       (is (= 0 (sh-status {"CI_CHECK_WORK" (.getPath work) "CIRUN" (str root "/test/c/judge/cirun-slow-once")
@@ -411,7 +411,7 @@
         ids (java.io.File. work "ids.txt")
         real (or (System/getenv "CIRUN") (str root "/.tmp/ci/cirun"))
         lg (java.io.File. work "log")]
-    (when-not (.exists (java.io.File. ^String real)) (sh-status {} "bin/ci" "cirun-build"))
+    (when-not (and (System/getenv "CIRUN") (.exists (java.io.File. ^String real))) (sh-status {} "bin/ci" "cirun-build" "--ensure"))
     (try
       (spit ids "ci-run/ptr-sub-unsigned.c\n")
       (is (= 0 (sh-status {"CI_CHECK_WORK" (.getPath work) "CIRUN" "/nonexistent/cirun" "CI_EXE" (str root "/test/c/judge/ciexe-standin")
@@ -449,7 +449,7 @@
         work (doto (java.io.File. (str root "/.tmp/judge-test-fatal")) (.mkdirs))
         ids (java.io.File. work "ids.txt")
         real (or (System/getenv "CIRUN") (str root "/.tmp/ci/cirun"))]
-    (when-not (.exists (java.io.File. ^String real)) (sh-status {} "bin/ci" "cirun-build"))
+    (when-not (and (System/getenv "CIRUN") (.exists (java.io.File. ^String real))) (sh-status {} "bin/ci" "cirun-build" "--ensure"))
     (try
       (spit ids "ci-run/ptr-sub-unsigned.c\n")
       ;; the stand-in exits 3 as gcc's run of ptr-sub-unsigned.c does, after Go's fatal error lines: a REGRESSION now
@@ -730,7 +730,7 @@
         budgets (java.io.File. work "budget.edn")
         real (or (System/getenv "CIRUN") (str root "/.tmp/ci/cirun"))
         env {"CI_CHECK_WORK" (.getPath work) "CIRUN" (str root "/test/c/judge/cirun-slow") "CIRUN_REAL" real}]
-    (when-not (.exists (java.io.File. ^String real)) (sh-status {} "bin/ci" "cirun-build"))
+    (when-not (and (System/getenv "CIRUN") (.exists (java.io.File. ^String real))) (sh-status {} "bin/ci" "cirun-build" "--ensure"))
     (try
       (spit ids "ci-run/ptr-sub-unsigned.c\n")
       (spit budgets "{\"ci-run/ptr-sub-unsigned.c\" 30}\n")
@@ -1083,3 +1083,84 @@
     ;; the results are still held to the known file over every corpus: the mutant's known entry absent from them is a problem
     (f "b-results.edn" [["c1 x.c" :known "known"] ["c1 y.c" :pass "equal"] ["c1 z.c" :known "known"]])
     (is (= 1 (count (:results-problems (read-source (src kb rb :section :parse))))))))
+
+;; GTS81 (a), queue 144: repr/c's and the checker's controls (test/c/controls.edn), each judged on a made-up work directory: the
+;; subject's dump against another file's reference differs, against its own passes (a control made to pass), a reference
+;; without one is not judged, a corpus not in the run leaves it. A helper writes the files.
+(defn- put-files [dir files]
+  (doseq [[p s] files] (let [f (java.io.File. (str dir "/" p))] (.mkdirs (.getParentFile f)) (spit f s))))
+
+(deftest token-controls
+  (require 'arbace.repr.c.ppcheck)
+  (let [res (resolve 'arbace.repr.c.ppcheck/token-control-result)
+        w (str (System/getProperty "user.dir") "/.tmp/ci-judge-test-controls-tokens")
+        g {"c/a.c" "DA" "c/b.c" "DB"}
+        r (fn [lvl ids levels g s rf] (res w ids levels g {:level lvl :subject s :reference rf}))]
+    (put-files w {"c/files.edn" "[{:name \"a.c\" :out \"a.c.tsv\"} {:name \"b.c\" :out \"b.c.tsv\"}]\n"
+                  "c/port-pp/a.c.tsv" "int\tx\t\n#error\tmine\n" "c/cc-pp/a.c.tsv" "int\tx\t\n#error\tcc's\n"
+                  "c/cc-pp/b.c.tsv" "double\tx\t\n" "c/port-lex/a.c.tsv" "int\n" "c/cc-lex/a.c.tsv" "int\n"
+                  "c/cc-lex/b.c.tsv" "double\n" "c/files.tsv" "a.c\tequal\tequal\tDA\tagree\n"})
+    (doseq [lvl [:pp :lex]]
+      (is (= :differs (r lvl ["c"] #{"lex" "pp"} g "c/a.c" "c/b.c")))
+      (is (= :passes (r lvl ["c"] #{"lex" "pp"} g "c/a.c" "c/a.c")))
+      (is (= :not-judged (r lvl ["c"] #{"lex" "pp"} g "c/a.c" "c/z.c")))
+      (is (= :left (r lvl ["d"] #{"lex" "pp"} g "c/a.c" "c/b.c"))))
+    (is (= :left (r :lex ["c"] #{"pp"} g "c/a.c" "c/b.c")))
+    (is (= :differs (r :gcc-digest ["c"] #{"pp"} g "c/a.c" "c/b.c")))
+    (is (= :passes (r :gcc-digest ["c"] #{"pp"} g "c/a.c" "c/a.c")))
+    (is (= :passes (r :gcc-digest ["c"] #{"pp"} (assoc g "c/b.c" :rejected) "c/a.c" "c/b.c")))
+    (is (= :not-judged (r :gcc-digest ["c"] #{"pp"} (dissoc g "c/b.c") "c/a.c" "c/b.c")))))
+
+(deftest tree-controls
+  (require 'arbace.repr.c.parsecheck)
+  (let [res (resolve 'arbace.repr.c.parsecheck/tree-control-result)
+        w (str (System/getProperty "user.dir") "/.tmp/ci-judge-test-controls-tree")
+        r (fn [ids s rf] (res w ids {:level :tree :subject s :reference rf}))]
+    (put-files w {"c/files.edn" "[{:name \"a.c\" :out \"a.c.tsv\"} {:name \"b.c\" :out \"b.c.tsv\"} {:name \"n.c\" :out \"n.c.tsv\"}]\n"
+                  "c/control/a.c.tsv.port" "TranslationUnit\t0\nint\t1:1\n" "c/cc-tree/a.c.tsv" "TranslationUnit\t0\nint\t1:1\n"
+                  "c/cc-tree/b.c.tsv" "TranslationUnit\t0\ndouble\t1:1\n"})
+    (is (= :differs (r ["c"] "c/a.c" "c/b.c")))
+    (is (= :passes (r ["c"] "c/a.c" "c/a.c")))
+    (is (= :not-judged (r ["c"] "c/a.c" "c/n.c")))
+    (is (= :left (r ["c"] "c/n.c" "c/b.c")))
+    (is (= :left (r ["d"] "c/a.c" "c/b.c")))))
+
+(deftest annot-controls
+  (let [w (str (System/getProperty "user.dir") "/.tmp/ci-judge-test-controls-annot")
+        r (fn [ids s rf] (annot/annot-control-result w ids {:level :annot :subject s :reference rf}))]
+    (put-files w {"c/files.edn" (str "[{:name \"a.c\" :out \"a.c.tsv\"} {:name \"b.c\" :out \"b.c.tsv\"} {:name \"p.c\" :out \"p.c.tsv\"}"
+                                     " {:name \"g.c\" :out \"g.c.tsv\"} {:name \"n.c\" :out \"n.c.tsv\"}]\n")
+                  "c/port/a.c.tsv" "@3\nd main e int()\ne int 0 = 0\n" "c/cc/a.c.tsv" "@3\ne int 0 = 0\nd main e int()\n"
+                  "c/cc/b.c.tsv" "@5\nd fasta e void(int)\n@9\ne double\n" "c/cc/p.c.tsv" "#panic\tcc fails\n"
+                  "c/cc/g.c.tsv" "@3\nd main e int()\ne int 0 = 7\n"})
+    (is (= :differs (r ["c"] "c/a.c" "c/b.c")))
+    (is (= :passes (r ["c"] "c/a.c" "c/a.c")))
+    ;; every differing item cc's gap (:cc-folds): classed, a pass of the judge, so the control passes
+    (is (= :passes (r ["c"] "c/a.c" "c/g.c")))
+    (is (= :not-judged (r ["c"] "c/a.c" "c/p.c")))
+    (is (= :not-judged (r ["c"] "c/a.c" "c/n.c")))
+    (is (= :left (r ["c"] "c/n.c" "c/b.c")))
+    (is (= :left (r ["d"] "c/a.c" "c/b.c")))))
+
+(deftest roundtrip-controls
+  (require 'arbace.repr.c.rtcheck)
+  (let [res (resolve 'arbace.repr.c.rtcheck/roundtrip-control-result)
+        w (str (System/getProperty "user.dir") "/.tmp/ci-judge-test-controls-rt")
+        ;; benchmarksgame is a run corpus of test/c/corpora.edn: level 4 is judged
+        b "benchmarksgame"
+        g {[b "a.c"] "0"}
+        r (fn [s rf] (res w [b] g {:level :roundtrip :subject (str b "/" s) :reference (str b "/" rf)}))]
+    (put-files w {(str b "/forms.tsv") (str "a.c\tok\tequal\tequal\t\tequal\nb.c\tok\tequal\tequal\t\tequal\nq.c\tok\tequal\tequal\t\tequal\n"
+                                            "l.c\tok\tdiffer\tequal\tform 1\tequal\nx.c\tok\tequal\tequal\t\tequal\n")
+                  (str b "/obj.tsv") "a.c\t0\t0\tequal\nb.c\t0\t0\tequal\nq.c\t0\t0\tequal\nl.c\t0\t0\tequal\nx.c\t1\t1\t-\n"
+                  (str b "/obj/orig/a.c.o") "A" (str b "/obj/print/a.c.o") "A" (str b "/obj/orig/b.c.o") "B"
+                  (str b "/obj/orig/q.c.o") "A"
+                  (str b "/run.tsv") "a.c\t0\t0\tsame\nb.c\t0\t0\tsame\nq.c\t0\t0\tsame\n"
+                  (str b "/run/a.c/o/stdout") "228\n" (str b "/run/a.c/p/stdout") "228\n" (str b "/run/q.c/o/stdout") ">ONE\n"})
+    (is (= :differs (res w [b] g {:subject (str b "/a.c") :reference (str b "/b.c")})))
+    ;; the objects alike, the same status: the standard output tells them apart (level 4)
+    (is (= :differs (r "a.c" "q.c")))
+    (is (= :passes (r "a.c" "a.c")))
+    (is (= :not-judged (r "a.c" "x.c")))
+    (is (= :left (r "l.c" "b.c")))
+    (is (= :left (res w ["c"] g {:subject (str b "/a.c") :reference (str b "/b.c")})))))

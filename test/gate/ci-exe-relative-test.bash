@@ -4,7 +4,7 @@
 # made absolute first. The script runs on a fabricated checkout (arbace_tool, bin/ci and go stubbed), the stand-in
 # executable at target/x/arbace, CI_EXE given relative to the checkout's top as C9.2 does; passes when run.tsv records
 # status 0 for the program (127 when the path is not found after the cd). Then a CI_EXE that is not an executable
-# is refused at once (status 2). No executable, seconds. (The VM's test of queue 118, its appendix.)
+# is refused at once (status 2), and an --only list naming a program outside the run corpora too. No executable, seconds. (The VM's test of queue 118, its appendix.)
 # By hand: test/gate/ci-exe-relative-test.bash [CHECKOUT]   (another checkout's bin/lib/ci/check to test)
 set -uo pipefail
 src=$(cd "${1:-$(dirname "$0")/../..}" && pwd)
@@ -33,5 +33,10 @@ else echo "FAIL: status '$st' for tcc-tests2/p1.c (127: the relative path not fo
 out=$(cd "$t" && CI_EXE=target/x/missing ARBACE_GOROOT=$t/go GOWHIM=$t CI_CHECK_WORK=$t/work2 bash bin/lib/ci/check --corpus tcc-tests2 2>&1); rc=$?
 if [ "$rc" = 2 ] && [ ! -e "$t/work2/tcc-tests2/run.tsv" ]; then echo "ok:   a CI_EXE that is not an executable refused (status 2)"
 else echo "FAIL: a missing CI_EXE gave status $rc"; printf '%s\n' "$out" | tail -3; fails=$((fails + 1)); fi
+# queue 150: an --only entry outside the run corpora is refused (status 2) before anything runs, not skipped
+printf '# a list\ntcc-tests2/p1.c\nci-run/x.c\n' > "$t/only.txt"
+out=$(cd "$t" && ARBACE_GOROOT=$t/go GOWHIM=$t CI_CHECK_WORK=$t/work3 bash bin/lib/ci/check --corpus tcc-tests2 --only "$t/only.txt" 2>&1); rc=$?
+if [ "$rc" = 2 ] && printf '%s' "$out" | grep -q 'ci-run/x.c' && [ ! -e "$t/work3/tcc-tests2" ]; then echo "ok:   an --only entry outside the run corpora refused (status 2)"
+else echo "FAIL: an --only entry outside the run corpora gave status $rc"; printf '%s\n' "$out" | tail -3; fails=$((fails + 1)); fi
 [ "$fails" = 0 ] && { echo "PASS: ci-exe-relative-test"; exit 0; }
 echo "FAIL: ci-exe-relative-test ($fails)"; exit 1

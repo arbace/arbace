@@ -4214,16 +4214,16 @@ embedded namespaces (c2j 25 s), a larger program (about +10% Go), and the `ci`/`
 | 2 | `bin/ci c2j-check`, `bin/ci cinterp-check`, `bin/ci judge-test` on it (light, repeat); then **`bin/j2g-edge verify`** on the merged tree (the frozen JVM, minutes; 118 finding 4: the 24 namespaces embedded name JDK classes, all inside `jdk/sources.txt`'s world, so the edge probably holds; if it differs, `bin/j2g-edge update` and its commit before step 3, else step 3's j2g lacks an answer or the gate's `j2g-edge` step fails after the seed) | 1 + 1 + 3 min, + the edge | 2 GB, 5 GB | `jdk/edge.edn` only if it differs |
 | 3 | `bin/arbace-go --build 2>&1 \| tee .tmp/c9-build.log` (heavy lock): the runtime changed (CInterp, a new runtime class: `arbace_runtime_key` differs from stage 0's), so stage 0 compiles nothing (`host_compiles` false) and the build takes the two-run path: the **first program** (with CInterp) prepares and compiles every embedded namespace, `arbace.c.cinterp` included (`prepare` with `aot_out`), then j2g translates again with them. Check: the log has no `image: not prepared: arbace.c.cinterp` line (the first program's compiling prepare and the final image's both print theirs) and its `aot:` line reports 0 failed | ~9 min | 19 GB | `target/arbace-go/amd64/arbace`, `aot/`, `aot.key` |
 | 4 | `bin/arbace-go --smoke`; `bin/ci cinterp-check --exe target/arbace-go/amd64/arbace`; `ARBACE_HOST_EXE=that bin/ci repl-session` | 3 min | 2 GB | |
-| 5 | `CI_EXE=target/arbace-go/amd64/arbace CI_JOBS=4 bin/ci check` (every run corpus, one process a program; 3,761 programs, +0.15 s a start) | ~45 min | 4 x 0.3 GB | none unless it differs (it must not: one loader); `--record` only for an explained difference |
+| 5 | `CI_EXE=target/arbace-go/amd64/arbace CI_JOBS=4 bin/ci check` (every run corpus, one process a program; 3,761 programs, +0.15 s a start) | ~45 min | 4 x 0.3 GB | none unless it differs (it must not: one loader); `--record` only for an explained difference; afterwards the gate's `c-check` (row 12) judges the record on the gate's executable |
 | 6 | (moved after step 11, as 11a: as ordered here stage 0 is still the old one, and nothing of the compiled level's record enters the seed) | | | |
-| 7 | `bin/ci annotations --record` (REPR_C_THREADS 4; rewrites `test/repr/c/annot-known.edn`, `checker-gap` entries removed as they pass, CS93 (a); **writes the results file `test/repr/c/annot-results.edn`, CS240 (a)**) | 31-43 min | 6 GB | `annot-known.edn`, `annot-results.edn` |
-| 7a | CS240 (a)'s other full runs, each `--record` over every corpus: `bin/repr-c check --tokens --record` (both levels), `bin/repr-c parse-check --record` (the mutants too), `bin/repr-c roundtrip --record` (not `--no-run`); each rewrites its known file and **writes its results file** (`test/repr/c/{pp-check,parse-check,roundtrip}-results.edn`: every file's row `[ID RESULT REASON]`, `arbace.repr.c.results`); a row `:fail` makes the step fail and `bin/reap` refuse the file | hours (the full runs) | 6 GB | the three known files and results files |
+| 7 | `bin/ci annotations --record` (REPR_C_THREADS 4; rewrites `test/repr/c/annot-known.edn`, `checker-gap` entries removed as they pass, CS93 (a); **writes the results file `test/repr/c/annot-results.edn`, CS240 (a)**) | 31-43 min | 6 GB | `annot-known.edn`, `annot-results.edn` (by hand, committed; then the gate's `c-annotations`, row 12, judges them, never `--record`) |
+| 7a | CS240 (a)'s other full runs, each `--record` over every corpus: `bin/repr-c check --tokens --record` (both levels), `bin/repr-c parse-check --record` (the mutants too), `bin/repr-c roundtrip --record` (not `--no-run`); each rewrites its known file and **writes its results file** (`test/repr/c/{pp-check,parse-check,roundtrip}-results.edn`: every file's row `[ID RESULT REASON]`, `arbace.repr.c.results`); a row `:fail` makes the step fail and `bin/reap` refuse the file | hours (the full runs) | 6 GB | the three known files and results files (by hand, committed; then the gate's `c-tokens`, `c-parse` and `c-roundtrip`, row 12, judge them, never `--record`) |
 | 8 | **the records of steps 2, 7 and 7a and the notes committed first, `git status --porcelain` empty** (queue 132: `g3/fixpoint.edn` names the version at the fixpoint, HEAD's commit, so records committed after it make step 9 refuse, "of another version", and the fixpoint vouches only for a checkout clean at its start and end), then `rm -rf .tmp/jrt-go/overlay` (the patched runtime's print is cached by mtime alone, 037 finding 3: an older host's print would be packed and `--verify`'s fresh print differ), then `bin/arbace-go --fixpoint` (G1 by stage 0, G2 by G1, G3 by G2); it must end `fixpoint: holds (G2 = G3)`, and only then does it write `g3/fixpoint.edn` (CS256) | ~17 min | 19 GB | `target/arbace-go/fixpoint/g{1,2,3}` |
 | 9 | **`git status --porcelain` still empty, HEAD still step 8's commit** (the notes, step 1a, the records of steps 2, 7 and 7a committed before step 8: a dirty `--make` records `:dirty true` and a `-dirty` describe, and `--verify` then builds G1 at another `main.arbaceVersion`, stage 0 != G1, a second `--make`; `--make` now refuses it, CS257), **step 8's `G2 = G3`** (`--make` refuses a G3 without the fixpoint's `fixpoint.edn` for this version, CS256), then `ARBACE_SEED_GO_BUILD=target/arbace-go/fixpoint/g3 bin/seed --make`, and the seed committed | 2 min | 1 GB | `seed/arbace-seed-go.tar.xz`, `.sha256` |
 | 10 | `bin/seed --verify` (the seed printed again; stage 0 = G1 = G2 = G3); **no tag before it passes** (a tag on the seed's commit changes `git describe` in the verify's worktree: before CS255's `ARBACE_VERSION` the version map, stage 0 != G1; the window's scripts give the builds the seed's own version, but the order stays) | ~14 min | 19 GB | none (it must pass) |
 | 11 | `bin/seed --build` again (stage 0 from the new seed, now with ci compiled in), `bin/ci judge-test`, `bin/reap --record` (the C cells' passes now counted from steps 7 and 7a's results files, CS240 (a): read 575+ and print 0+ become counts), `bin/ci dg --essential` | 15 min | 8 GB | `test/reap/matrix.edn` |
 | 11a | (step 6) `bin/ci check --aot` (CI_AOT_NODES=1 for the interpreter beside) on the new stage 0, ci compiled | ~60 min | 4 GB | `test/c/check-aot-linux-amd64.edn` only if it differs (committed before step 12) |
-| 12 | `bin/gate` (essential) then `GATE_FULL_SERIAL=1 bin/gate --full`; `bin/gate --clean` at the tag | hours | per the table | `test/gate/clean-TAG.edn` |
+| 12 | `bin/gate` (essential) then `GATE_FULL_SERIAL=1 bin/gate --full` (C's full checks among its steps: `c-check`, `c-aot`, `c-dg`, `c-annotations`, `c-tokens`, `c-parse`, `c-roundtrip`, about 6-7 h more); after row 10's `--verify`, `bin/gate --pins` then **`bin/gate --full --clean --tag arbace-reaps-4-crops-v1`** (v2's way); the tag names the commit that adds the clean record and the docs | hours | per the table | `test/gate/clean-arbace-reaps-4-crops-v1.edn` |
 
 Re-seed hazards found while preparing: (a) the first `bin/gate` after the merge rebuilds the gate's executables (the key changed); (b) `bin/lib/ci/check`'s CI_EXE needs the
 executable to resolve `-m arbace.c.repl` from its compiled copy (it does once embedded; before, stage 0 evaluates it from the checkout); (c) `arbace.c.cinterp` must be in the
@@ -4338,3 +4338,63 @@ non-pass of its worst kind. Built in `test/reap/main.ae` (`count-once`, the `:c-
 the known files over every corpus, mutants included) and `test/reap/cells.edn` (the two sources `:count-once :c-corpus-files :exclude-corpora
 ["mutants"]`); judge-test `read-cell-counts-each-file-once`. The matrix recorded again: C read 575+ / 96 / 53 (104 by design before: the two
 mutants' `invalid-paste` and six files known to both checks counted once).
+
+## As built: C's full checks in the gate, C's pins (2026-11-02)
+
+On `c23-full` from `c23-w` (`53396125`), in the light tier (no build, no corpus run). The VM's checklist for the milestone (queue 140's draft, gaps 1, 5, 6, 7)
+found that §11's C9 asks for `--full` "with C's full checks" while `--full` ran `c-judge-test` alone, and that the comment over the essential C steps saying
+their full runs were in `--full` was false; and that no gate step checked C's pins.
+
+**The user's decisions (2026-11-02):** (1) C's full checks are heavy `bin/gate --full` steps; (2) C's pins are in `bin/gate --pins`; (3) the milestone's clean
+run is v2's: `bin/gate --full --clean --tag arbace-reaps-4-crops-v1` after `bin/seed --verify` (C9.2 row 10), the tag naming the commit that adds the clean record
+and the docs; (4) `c-aot` runs with `CI_AOT_NODES=1`, each compiled run compared with the interpreter's (CS214), a difference failing the step;
+(5) the host's gcc is in the C steps' keys, the host `:gcc`. C9.2's rows 5, 7, 7a and 12 follow: the window's hand `--record` runs write the records and results files (CS240 (a)), then the gate's steps judge
+them; row 12 names the clean run.
+
+**The steps** (`test/gate/steps.edn`, phase `:full`, chain `c-full` after `c-judge-test`, each `:heavy true`, never `--record`, judged by the scripts' own judges
+against the committed records and known files, a regression or a file in no class failing; one part a corpus where the tool takes one):
+
+| step | command | parts | hosts | `:mem-gib` | time (measured or C9.2's) |
+|---|---|---|---|---:|---|
+| `c-check` | `env CI_EXE="$GATE_EXE" CI_JOBS=4 bin/ci check --corpus {part}` | the 15 run corpora | `:prog :stage0 :go` (needs `go-build`) | 2 | ~48 min (C9.2 row 5; 37 min on cirun, C5.4; the 179 gcc-*-run and ci-run programs about 3 more) |
+| `c-aot` | `env CI_AOT_NODES=1 CI_JOBS=4 bin/ci check --aot --corpus {part}` | the 15 run corpora | `:stage0 :go` | 4 | ~105 min (row 11a's 60, the interpreted runs beside about 40, the 179 programs about 5) |
+| `c-dg` | `env CI_JOBS=4 bin/ci dg` | none (its `:dg` control crosses two groups) | `:stage0` | 3 | ~8 min (C7.1) |
+| `c-annotations` | `bin/ci annotations --corpus {part}` | 21 (the 20 below and `c23`) | `:stage0 :go` | 6 | 31-43 min (row 7) |
+| `c-tokens` | `bin/repr-c check --tokens --corpus {part}` | 20 corpora read in place | `:stage0 :go` | 6 | ~30 min (C2.5: 28.5 min) |
+| `c-parse` | `bin/repr-c parse-check --corpus {part} --no-mutants`; part `mutants`: `--mutants-only` | 20 + `mutants` | `:stage0 :go` | 6 | over an hour (C3.5) |
+| `c-roundtrip` | `bin/repr-c roundtrip --corpus {part}` | 20 | `:stage0` | 9 (C3b.3's measured peak; row 7a says 6) | ~80 min (C3b.3) |
+
+Inputs: `:lib-tools`, `:tools` (arbace/c, arbace/repr/c, repr/go's printer), `:c` (bin/ci, bin/lib/ci/, bin/repr-c, bin/lib/repr-c/, test/c/, test/repr/c/), the pin
+`test/c/corpora.edn`; `c-check` also `go/arbace/cinterp{.ae,/}` (CInterp's Go side, in the program its `:prog` host knows by units), `c-aot` `:c-run` (queue 138's
+group: the back end's package files and trees, tools/cirun, bin/repr-go), the cc-based checks `:c-ccdump` (`tools/ccdump/`). Every C step that judges against gcc
+(the essential `c-dg-essential`, `c-check-essential`, `c-aot-essential`, `c-c23`, and `c-judge-test` and the seven above; not `c-c2j`) declares the host `:gcc`:
+`bin/lib/gate-run.bash`'s `gate_gcc_id`, the SHA-256 of gcc's `--version` line, of its driver's and cc1's bytes (through their links) and of the headers `test/c/host/headers.sha256` names (gcc's
+include directory, musl's `/usr/include`), in `hosts.edn`; the audit
+(`test/gate/audit.ae`) fails a step that runs gcc or cc1 without it. Added time of `--full`: about 7 to 8 hours serial (the sum above, about 6.4 hours, and the
+113 parts' starts).
+
+**Review 150 (VM, the user's decision of 2026-11-02):** the run levels' default corpora (`bin/lib/ci/check`'s and `check-aot`'s `all=`) were the seven
+ccorpus2 and benchmarksgame corpora, so the records' 179 rows of the seven gcc-*-run groups and ci-run were judged by no run, and the essential `--only` lists'
+21 and 2 entries of them were skipped silently; `all=` is now every corpus `test/c/ref-gcc15.edn` records (15), `c-check` and `c-aot` have a part each (the
+gcc-*-run parts read gcc 15.2.0's testsuite through `bin/repr-c gcc-tests`, the tarball pinned by `test/c/corpora.edn`, the main checkout's copy or fetched), and
+an `--only` entry outside the run corpora is refused (status 2; `test/gate/ci-exe-relative-test.bash`). Its fix 3f6c8f14 is cherry-picked (`--pins` in the clean
+clone looks for C's tarballs where the clone's tools take them), and its finding 3 fixed: the scripts take the main checkout as `${root%%/.tmp/gate-clean/*}`
+then `%%/.tmp/worktrees/*`, the two known layouts only, so a checkout under another `/.tmp/` is itself. Noted, not changed: cirun's key leaves out stage 0
+(finding 4: the gate's steps key `:stage0` anyway); the summaries of the cc-based steps may show the lists' lines (finding 5; c-check's and c-aot's now show every
+corpus line). Built with them: `bin/repr-c parse-check --mutants-only` (the mutants a whole run draws,
+the corpora not checked); the C scripts' go-whim default and musl's and gcc's local tarballs found from a clean run's clone (`.tmp/gate-clean/SHA`) as from a
+worktree (`${root%%/.tmp/*}`); queue 138's inputs (cherry-picked) and its finding 4 fixed: `bin/ci cirun-build --ensure` keeps `.tmp/ci/cirun` only while
+`.tmp/ci/key` is the checkout's (test `test/gate/cirun-key-test.bash`); `c-c2j` declares `go/arbace/jrt/*.ae` (c2j's emit scans jrt: `bin/gate --audit c-c2j`
+found 71 undeclared reads there, queue 138's medium finding; `c-dg-essential`'s audit ok).
+
+**The pins** (`bin/gate --pins`): gcc 15.2.0's tarball and musl 1.2.6's against `test/c/corpora.edn`'s SHA-256 (the copy the tools take: `REPR_C_GCC_TARBALL` or
+`CI_MUSL_TARBALL`, the checkout's `.tmp`, the main checkout's; none: the tool fetches it and checks it by the pin), and `bin/repr-c host check` (the host's gcc against
+`test/c/host/`'s predefined macros and headers' digests); `--pins FILE`'s map gains `:c`.
+
+**The negative controls** (GTS81 (a), `test/c/controls.edn`): the run and dg levels' (queue 064) and, cherry-picked from queue 144 (VM, `mac/144-c-controls`),
+the token check's `:lex`, `:pp` and `:gcc-digest`, the tree check's `:tree`, the annotations' `:annot` and the round trip's `:roundtrip` (levels 3 and 4 crossed),
+fannkuchredux.c against fasta-8.c, each judged by its family's judge after the corpora and failing the run when it passes; in the steps above they are judged in
+the benchmarksgame parts (`c-dg` whole). Their judges' four deftests pass on stage 0 (31 assertions); the runs over the real dumps are the window's. Not drafted:
+the round trip's levels 1 and 2 crossed (the run keeps neither the forms' text nor the `:full` print; queue 144's design).
+
+**Gaps** (not built): go-whim's commit and ccorpus2's module hash are checked by the tools when they read them (ccdump-build), not by `--pins`.
