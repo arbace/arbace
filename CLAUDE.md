@@ -83,7 +83,7 @@ Prior art:
   `ARBACE_SEED_GO` names another seed for the host as for `bin/seed`): c2j, j2g, repr/go, repr/clojure, the suite's runner,
   compiled into it (S6, SA133), a namespace of a tool or of goi (`arbace/go/`;
   RT.toolSource) whose source in the checkout differs from the embedded copy loaded from the checkout instead, evaluated (`bin/lib/tools.bash`'s
-  `arbace_tool`, `ARBACE_PATH`). The JVM (Java 26 explicitly, the JDK at `/usr/lib/jvm/jdk-26` or `ARBACE_FROZEN_JAVA_HOME`, never the system default: `bin/lib/java26.bash`) runs only the frozen jar of `arbace-for-java-26-v4` (built from its tag,
+  `arbace_tool`, `ARBACE_PATH`). The JVM (Java 26 explicitly, the JDK of the jdk26u checkout's own build, `${JDK:-/root/jdk26u}/build/linux-x86_64-server-release/images/jdk`, or `ARBACE_FROZEN_JAVA_HOME`, never the system default: `bin/lib/java26.bash`) runs only the frozen jar of `arbace-for-java-26-v4` (built from its tag,
   pinned by `test/oracle/frozen-jar.sha256`; `bin/lib/frozen.bash`, its tools' namespaces from the
   checkout as `.clj` links before the jar, repr/java's not among them since JN6): the oracle's
   reference, the back end of `bin/repr-java check --suite` (the converted baseline compiled by the

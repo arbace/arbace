@@ -1,10 +1,10 @@
 # The repo runs Java 26 explicitly (the user, 2026-11-02): the frozen jar is class file version 70,
 # and the system's default JVM (Alpine's /usr/lib/jvm/default-jvm) may be another release. The
-# JDK is ${ARBACE_FROZEN_JAVA_HOME:-/usr/lib/jvm/jdk-26}. Sourced. Defines:
+# JDK is ${ARBACE_FROZEN_JAVA_HOME:-${JDK:-/root/jdk26u}/build/linux-x86_64-server-release/images/jdk}. Sourced. Defines:
 #   arbace_java_home   prints the JDK's home, or fails with a message when it is missing or not 26
 #   arbace_use_java26  puts its bin/ first on PATH (java, javac, jar, ... of every script after it)
 arbace_java_home() {
-  local h=${ARBACE_FROZEN_JAVA_HOME:-/usr/lib/jvm/jdk-26} v
+  local h=${ARBACE_FROZEN_JAVA_HOME:-${JDK:-/root/jdk26u}/build/linux-x86_64-server-release/images/jdk} v
   if [ ! -x "$h/bin/java" ] || [ ! -x "$h/bin/javac" ]; then
     echo "java26: no JDK 26 at $h (java, javac): install it there or set ARBACE_FROZEN_JAVA_HOME" >&2; return 1
   fi

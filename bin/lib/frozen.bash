@@ -66,7 +66,7 @@ frozen_pin() {
   fi
 }
 
-# Java 26 explicitly (bin/lib/java26.bash): ARBACE_FROZEN_JAVA_HOME, else /usr/lib/jvm/jdk-26
+# Java 26 explicitly (bin/lib/java26.bash): ARBACE_FROZEN_JAVA_HOME, else jdk26u's own image, ${JDK:-/root/jdk26u}/build/linux-x86_64-server-release/images/jdk
 . "$(dirname "${BASH_SOURCE[0]}")/java26.bash"
 arbace_use_java26 || exit 1
 

@@ -101,7 +101,7 @@ plan_inputs() {  # plan_inputs DIR: DIR/files.sha256 and DIR/hosts.edn
   # java's (the frozen jar's JVM, bin/lib/frozen.bash) and javac's (the reference javac): the explicit
   # Java 26, ARBACE_FROZEN_JAVA_HOME (bin/lib/java26.bash), never the system's default; none when it is not there
   local b r h= jh
-  jh=${ARBACE_FROZEN_JAVA_HOME:-/usr/lib/jvm/jdk-26}
+  jh=${ARBACE_FROZEN_JAVA_HOME:-${JDK:-/root/jdk26u}/build/linux-x86_64-server-release/images/jdk}
   for b in java javac; do
     r=none
     jdk=$(readlink -f "$jh/bin/$b" 2>"$TMPDIR/jdk.err") && [ -f "${jdk%/bin/$b}/release" ] \
