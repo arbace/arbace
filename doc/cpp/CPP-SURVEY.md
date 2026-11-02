@@ -2446,3 +2446,18 @@ picks).
 - **CP153 (a):** the dry mode's exit 3 as built.
 - **CP154 (b), once CP140 is recorded:** a missing list key in `bin/repr-cpp roundtrip` an error unless
   `--record-oracle` or `--no-oracle` is given.
+
+## As built: CP95 (b) (2026-11-02)
+
+On the branch `cpp-f2` from main's 504ab60d (light tier, stage 0 by `ARBACE_HOST_EXE`, no gate, no build of Arbace). The user's CP95 (b) (2026-10-31), decided on `cpp-cx6` and
+never merged or built (the Mac VM's review 107, F2): `bin/lib/repr-cpp/roundtrip`'s `objs` passes `-ffile-prefix-map` to g++ and clang++ on both builds. One map is the
+decision's, `-ffile-prefix-map=ORIGDIR/=` (the print finds a quoted header by `-iquote ORIGDIR`: `__FILE__` = `ORIGDIR/h.hpp`, now `h.hpp`). The probe showed it is not enough
+alone: the original finds the header by the file's own directory, so its `__FILE__` is `DIR/h.hpp` with DIR the file's directory relative to the root it is compiled in
+(`22_locale/ctype/narrow/wchar_t/1.cc`, `share/adlc/forms.hpp`), and ORIGDIR/= does not touch it. The second map, `-ffile-prefix-map=DIR/=` (DIR = `dirname NAME`, none for a file at
+the root), makes the original's `h.hpp` too; on the print's build it matches nothing (its paths are absolute). `-fdebug-prefix-map="$r"=.` stays.
+
+Run on the three files (each its corpus' key; the lists cut from the CX2 and CX7 lists): `libstdcxx-testsuite/22_locale/ctype/narrow/wchar_t/wrapped_env.cc`,
+`libstdcxx-testsuite/22_locale/time_get/get_monthname/wchar_t/wrapped_env.cc` and `hotspot-x86-linux/share/adlc/formsopt.cpp`: before (the first two) `objects-differ`
+(g++'s and clang's objects differ at the `__FILE__` strings `22_locale/.../1.cc` against `1.cc`); after, all three `pass` (levels 1, 3 and 4 for both compilers; the objects equal). Their three entries are
+gone from `test/repr/cpp/roundtrip-known.edn`. No recorded results file (`roundtrip-results/`) holds them. To run on the main host: the whole C++ corpus's round trips (long), to
+see that the maps change no other file's objects (a file whose header is included by `-I`, or whose `__FILE__` is printed by a test, could move either way).
