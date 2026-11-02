@@ -774,6 +774,31 @@
   (is (= [:ok 2] (chg-errs "m-tw3.c")))
   (is (= [["i/tw.h" [false false false]] ["i/tw.h" [false false false]]] (chg-units "m-tw3.c"))))
 
+;; queue 157 (review 130's finding 5): a unit read back from its .ae (arbace.c.musl's cache: load-forms) has no :form-sys and is judged
+;; by the old rule (CS214, review 079's finding 3): a system header by the directory of its :path, which load-forms keeps from the
+;; c/header form (before: no :path, every such unit a user header's), and by a `#pragma GCC system_header` line anywhere in its file
+(defn- reread-errs [dir main & opts]
+  (let [h (host/load-host "test/c/host")
+        base (str judge-dir "/sysx" (when dir (str "/" dir)))
+        fc (host/file-config (vec (concat ["-std=c23" "-pedantic-errors"] opts)) "gnu23")
+        rd (rc/read-c (host/config h fc base) fc main false)
+        fr (str (System/getProperty "user.dir") "/.tmp/judge-reread/" (or dir "top") "-" main)]
+    (doseq [[p t] (rc/unit-texts rd main)]
+      (let [f (java.io.File. (str fr "/" p))] (.mkdirs (.getParentFile f)) (spit f t)))
+    (spit (str fr "/" main ".units") (pr-str (vec (map str (keys (:units rd))))))
+    (let [back ((requiring-resolve 'arbace.c.musl/load-forms) fr main)
+          r (chk/check-unit (assoc rd :forms (:forms back) :units (:units back)) (keyword (:std fc)) (annot/builtin-forms h fc)
+                            :pedantic (:pedantic fc) :ext-lines (:ext-lines rd) :sys-dirs (host/sys-dirs h fc) :base (:base rd))]
+      [(every? (comp nil? :form-sys) (vals (:units back))) (count (:errors r))])))
+
+(deftest reread-unit-by-the-old-rule
+  ;; sy/ph.h found through -isystem sy: gcc 0 (before: 1), through -I sy: gcc 1
+  (is (= [true 0] (reread-errs nil "m-ph.c" "-isystem" "sy")))
+  (is (= [true 1] (reread-errs nil "m-ph.c" "-I" "sy")))
+  ;; i/p1.h's pedwarn before its pragma: gcc 1, read from C 1 (pragma-from-its-place-on), read back 0: the old rule's pragma line
+  ;; silences the whole file (before: 2, the pragma not seen with no :path)
+  (is (= [true 0] (reread-errs "chg" "m-p1.c" "-I" "i" "-isystem" "sy"))))
+
 (deftest gcc-reread-without-status
   ;; review 079's finding 5: a kept gcc output with no status (an interrupted run) is a difference, not an exception
   (let [work (str (System/getProperty "user.dir") "/.tmp/judge-gcc-status")
