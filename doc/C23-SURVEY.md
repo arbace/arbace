@@ -4136,7 +4136,9 @@ essential gate run (not run here). C9 is the milestone: `GATE_FULL_SERIAL=1 bin/
   cells print `575+` and `0+`, not a count; a `--record`ed results file per check (rows `[ID RESULT REASON]`, as `bin/ci dg`) would give the counts.
   Options: (a) each check writes a results file (the full runs, hours, once); (b) leave: the known files' non-passes are the judged part; (c) count the passes from the corpora's
   lists (cheap, but the lists are not committed). *Recommended: (a)* at the C9 full run, (b) until then.
+  **Decided (the user, 2026-11-02): (a) at the C9 full run, (b) until then.**
 - **CS241 The essential subsets' size.** Options: (a) as built (45 programs, 10 AOT programs, 92 dg files); (b) smaller for the AOT. *Recommended: (a)*.
+  **Decided (the user, 2026-11-02): (a), as built (45 programs, 10 AOT programs, 92 dg files).**
 
 ## As built: C9 (preparation), the re-seed window for C5 and C6 (2026-11-02)
 
@@ -4177,6 +4179,7 @@ embedded namespaces (c2j 25 s), a larger program (about +10% Go), and the `ci`/`
 |---|---|---|---|---|
 | 0 | merge `c23-c9` (and the other crops' window branches, batched) | | | the commit the seed will name |
 | 1 | `bin/seed --build` (stage 0 from the current seed) | 10 min | 8 GB | `target/seed/amd64/arbace`, `aot/` |
+| 1a | add `-buildvcs=false` to `tools/gateaudit`'s build in `bin/lib/gate-run.bash` (decided by the user, 2026-11-02, for the window, when every step reruns anyway; not changed before) | seconds | | `bin/lib/gate-run.bash` |
 | 2 | `bin/ci c2j-check`, `bin/ci cinterp-check`, `bin/ci judge-test` on it (light, repeat) | 1 + 1 + 3 min | 2 GB | |
 | 3 | `bin/arbace-go --build` (heavy lock): the runtime changed (CInterp), so two runs | ~9 min | 19 GB | `target/arbace-go/amd64/arbace`, `aot/`, `aot.key` |
 | 4 | `bin/arbace-go --smoke`; `bin/ci cinterp-check --exe target/arbace-go/amd64/arbace`; `ARBACE_HOST_EXE=that bin/ci repl-session` | 3 min | 2 GB | |
@@ -4209,15 +4212,20 @@ second pass's `namespaces.txt` (it is: the list is the embedded tree's); (d) the
   its test suite; SQLite = `shell.c` + `sqlite3.c`, `:memory:` with a script on stdin; QuickJS = `qjs.c` and its libs, `-e "console.log(1+1)"`. Lua and SQLite and QuickJS are the long
   programs (each unit alone took 72-255 s to read, C3's numbers).
 
-### C9.4 Proposals (CS250-CS254), none decided
+### C9.4 Proposals (CS250-CS254), decided (the user, 2026-11-02)
 
 - **CS250 The window's order.** Options: (a) as C9.2: the first executable and the light checks first, CI_EXE run second, the fixpoint and `--verify` last (the re-seed once, batched
   with the other crops' windows); (b) a re-seed for C alone first. *Recommended: (a)*: a seed is rare and every crop's embedded tree is the same build.
+  **Decided (the user, 2026-11-02): (a), as C9.2.**
 - **CS251 Shards by `arbace.build.go`** (C9.3, item 3). Options: (a) as planned (`:c-main` programs; the check keeps `go build` for its 3,761 programs, `arbace.build.go` for the programs and
   the essential subset's shard); (b) the check's shards by `bin/build-go` too (the C6 row to the letter; slower, the lock). *Recommended: (a)*, (b) if the record of the compiled level is
   to be remade anyway.
+  **Decided (the user, 2026-11-02): (a), as planned.**
 - **CS252 Program corpora's tests** (C9.3, item 5). Options: (a) the proposed definitions; (b) the upstream test suites (`make test`, zlib's `test/`, Lua's `all.lua`): large and needing the
   corpora's own driver; (c) the programs built and run on one input each. *Recommended: (a)* first, (b) per program as it is wanted.
+  **Decided (the user, 2026-11-02): (a), the proposed definitions.**
 - **CS253 Musl compiled** (C9.3, item 4). Options: (a) by directory packages as CS122; (b) not now: the interpreter's musl is enough for the milestone and `check --aot` translates the used part
   (as today, 3,461 pass). *Recommended: (b) for v1 of the milestone, (a) after*: it is a speed, not a conformance, item.
+  **Decided (the user, 2026-11-02): (b) for v1 of the milestone, (a) after.**
 - **CS254 The executable's check of the run corpora** (step 5). Options: (a) the 3,761 programs once at the window, none recorded; (b) in the gate as a heavy step. *Recommended: (a)*.
+  **Decided (the user, 2026-11-02): (a), once at the window, none recorded.**
