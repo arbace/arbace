@@ -125,6 +125,24 @@
 
 (defn- spit-mk [^String p ^String s] (.mkdirs (.getParentFile (java.io.File. p))) (spit p s))
 
+(defn annot-status
+  "The checker's check's comparison of a port dump (`text`) with cc's (`cc`, nil when cc wrote none): \"no-cc\",
+  \"cc-fails\", \"equal\", \"classed:GAP,...\" (every differing item cc's gap: a pass) or \"differ\", then the first
+  difference after a NUL when they differ."
+  ^String [^String cc ^String text]
+  (cond
+    (nil? cc) "no-cc"
+    (re-find #"(?m)^#(notree|panic)" cc) "cc-fails"
+    :else (let [[ci _] (items cc) [pi pf] (items text)]
+            (if-let [df (compare-items ci pi)]
+              (let [ks (filter #(not= (get ci % []) (get pi % [])) (sort (into (set (keys ci)) (keys pi))))
+                    cls (map #(item-class (get ci % []) (get pi % []) (get pf % #{})) ks)]
+                (if (every? some? cls)
+                  (str "classed:" (str/join "," (map name (distinct cls))) "\u0000" df)
+                  ;; the first item no class explains
+                  (str "differ\u0000" (compare-items ci pi (set (keep (fn [[k c]] (when (nil? c) k)) (map vector ks cls)))))))
+              "equal"))))
+
 (defn check-file
   "One file: [name annot errors detail], the port's dump written under WORK/ID/port/."
   [^String work ^String id h ^String base e]
@@ -150,18 +168,7 @@
           (let [_ (spit-mk (str d "/port/" (:out e)) text)
                 f (java.io.File. (str d "/cc/" (:out e)))
                 cc (when (.exists f) (slurp f))
-                st (cond
-                     (nil? cc) "no-cc"
-                     (re-find #"(?m)^#(notree|panic)" cc) "cc-fails"
-                     :else (let [[ci _] (items cc) [pi pf] (items text)]
-                             (if-let [df (compare-items ci pi)]
-                               (let [ks (filter #(not= (get ci % []) (get pi % [])) (sort (into (set (keys ci)) (keys pi))))
-                                     cls (map #(item-class (get ci % []) (get pi % []) (get pf % #{})) ks)]
-                                 (if (every? some? cls)
-                                   (str "classed:" (str/join "," (map name (distinct cls))) "\u0000" df)
-                                   ;; the first item no class explains
-                                   (str "differ\u0000" (compare-items ci pi (set (keep (fn [[k c]] (when (nil? c) k)) (map vector ks cls)))))))
-                               "equal")))
+                st (annot-status cc text)
                 [st df] (str/split st #"\u0000")]
             [nm st (str (count errs)) (one-line (or df (first errs) ""))]))))))
 
@@ -241,6 +248,46 @@
                   (when (seq unclassed) (str "; " (count unclassed) " of no class"))))
     (if (or (seq failing) (seq stale) (seq unclassed)) 1 0)))
 
+;; GTS81 (a): the negative controls of the checker's check (test/c/controls.edn, :level :annot): the subject's port dump
+;; (WORK/CORPUS/port/) against the reference's cc dump (cc/) by annot-status, which must not pass (equal, or every
+;; differing item classed as cc's gap, passes as judge does). Both dumps are kept by the run.
+
+(defn annot-control-result
+  "An :annot control judged after the corpora (ids): :left when a corpus was not judged or the subject has no port dump (not
+  read: its own row says so), :not-judged when the reference has no cc dump to compare (none, or cc fails on it), else
+  :passes or :differs."
+  [^String work ids {:keys [subject reference]}]
+  (let [split (fn [^String fid] (let [i (.indexOf fid "/")] [(subs fid 0 i) (subs fid (inc i))]))
+        [sc sn] (split subject) [rc rn] (split reference)
+        entry (fn [c nm] (let [f (java.io.File. (str work "/" c "/files.edn"))]
+                           (when (.exists f) (first (filter #(= nm (:name %)) (read-string (slurp f)))))))
+        rd (fn [^String p] (let [f (java.io.File. p)] (when (.exists f) (slurp f))))]
+    (if-not (and (some #{sc} ids) (some #{rc} ids))
+      :left
+      (let [se (entry sc sn) re (entry rc rn)
+            text (when se (rd (str work "/" sc "/port/" (:out se))))
+            cc (when re (rd (str work "/" rc "/cc/" (:out re))))
+            st (when (and text cc) (first (str/split (annot-status cc text) #"\u0000")))]
+        (cond
+          (nil? text) :left
+          (or (nil? cc) (#{"no-cc" "cc-fails"} st)) :not-judged
+          (or (= st "equal") (.startsWith ^String st "classed:")) :passes
+          :else :differs)))))
+
+(defn annot-controls
+  "The controls of the corpora judged (ids), each printed; the failing ones as rows [ID :fail WHY]."
+  [^String work ids]
+  (vec (for [{:keys [id subject reference] :as c} (filter #(= :annot (:level %)) (read-string (slurp "test/c/controls.edn")))
+             :let [v (annot-control-result work ids c)
+                   pair (str subject "'s annotations against " reference "'s cc annotations")
+                   _ (println (case v
+                                :differs (str "ci annotations: control " id " (" pair "): differs, as a control must (GTS81 (a))")
+                                :passes (str "ci annotations: control passed: " id " (" pair "): the judge passes what differs")
+                                :not-judged (str "ci annotations: control not judged: " id ": " reference " has no cc dump in the run")
+                                :left (str "ci annotations: control " id ": left (" subject " or " reference " not in the run, or " subject " not read)")))]
+             :when (#{:passes :not-judged} v)]
+         [id :fail (str "control " (name v) " (test/c/controls.edn)")])))
+
 (defn record
   "Rewrites test/repr/c/annot-known.edn's entries of the corpora `ids` from WORK: every file that does
   not pass, its class kept or guessed from its detail (`classify`), else :unclassified."
@@ -305,6 +352,12 @@
       (shutdown-agents)
       (System/exit @st))
     "run" (let [[work & ids] args] (doseq [id ids] (run-corpus work id)) (shutdown-agents))
-    "judge" (let [[work & ids] args st (reduce max 0 (map #(judge work %) ids))] (shutdown-agents) (System/exit st))
+    "judge" (let [[work & ids] args
+                  st (reduce max 0 (map #(judge work %) ids))
+                  ;; GTS81 (a): the negative controls (test/c/controls.edn, :annot), no row of files.tsv or the counts
+                  cs (annot-controls work ids)]
+              (doseq [r cs] (println "FAIL" (first r) (nth r 2)))
+              (shutdown-agents)
+              (System/exit (if (seq cs) 1 st)))
     "record" (let [[work & ids] args] (record work ids guess-class))
     (do (println "annot: check, annot, run, judge or record") (System/exit 2))))
