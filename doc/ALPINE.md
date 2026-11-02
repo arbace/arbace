@@ -71,7 +71,7 @@ scripts and has not yet been tried on a fresh host.
 |---|---|
 | The scripts | `bash coreutils findutils grep sed diffutils tar xz unzip` (flock, setsid, awk, bc, timeout and `time -v` from busybox; `unzip -Z1` needs Info-ZIP's `unzip`, the package) |
 | The gate's audit (`bin/gate --audit`, and `--clean`, whose every step runs under it; GT4, GT7: `strace -f --seccomp-bpf`, `bin/lib/gate-run.bash`) | `strace` |
-| Helpers in some scripts (`alpine-env`, `arbace-go`'s REPL check, `box-arm64-vm`, `box-smoke`, `box-suite`, `goi`, `net-check`, `tamago-vendor`, `toolchain-vendor`) | `python3` |
+| Helpers in some scripts (`alpine-env`, `arbace-go`'s REPL check, `box-arm64-vm`, `box-smoke`, `box-suite`, `goi`, `net-check`, `tamago-vendor`, `toolchain-vendor`, `gate-tests`' `test/java/timeouts-test.bash`) | `python3` |
 | Sources, Clojure's suite's jars from Maven Central, the arm64 VM's netboot | `git curl ca-certificates` |
 | The REPL's line editing (the executable runs its interactive REPL under it, doc/go/EXEC-NOTES.md; checked by `bin/arbace-go --smoke` and `bin/box-smoke`; optional) | `rlwrap` |
 | arm64 executables run on amd64 (`bin/arbace-go`, `bin/jrt`, `bin/j2g-evalproof`, `bin/j2g-check`, `bin/clojure-tests`, `bin/net-check`, `bin/build-go test`, `bin/repr-go check`); amd64 hosts only | `qemu-aarch64` |
