@@ -2413,29 +2413,53 @@
                     (when (and u (not (.contains done u)))
                       (.add done u)
                       (when-let [uf (get (cx :units) (str u))]
+                        (let [read-info (fn [p]
+                                          (let [p (str p)
+                                                f (java.io.File. ^String (if (and (cx :base) (not (.startsWith p "/"))) (str (cx :base) "/" p) p))]
+                                            (if (.isFile f)
+                                              (let [ls (str/split-lines (String. (java.nio.file.Files/readAllBytes (.toPath f)) "ISO-8859-1"))]
+                                                {:ext (set (keep-indexed (fn [i ^String l] (when (.contains l "__extension__") (inc i))) ls))
+                                                 ;; gcc takes a header with this pragma for a system header (no pedwarn in it)
+                                                 :pragma (boolean (some #(re-find #"^\s*#\s*pragma\s+GCC\s+system_header\b" %) ls))})
+                                              {:ext #{} :pragma false})))
+                              unit-sys (if (contains? uf :system)
+                                         ;; the directory the header was found through (review 079's finding 3)
+                                         (boolean (:system uf))
+                                         (let [p (str (:path uf))
+                                               norm (fn [^String x] (str (.normalize (java.nio.file.Paths/get x (make-array String 0)))))
+                                               np (norm p)]
+                                           (boolean (some #(str/starts-with? np (str (norm (str %)) "/")) (cx :sys-dirs)))))
+                              unit-info (delay (read-info (:path uf)))
+                              ;; review 110's finding 1: a nested header's forms judged by their own file's status (libcpp: system
+                              ;; when found through a system directory or entered from a system header, the pp's records), and by its
+                              ;; own lines' pragma, or an includer's
+                              files (:files uf)
+                              infos (java.util.HashMap.)
+                              info-of (fn [p] (if (= p (:path uf))
+                                                unit-info
+                                                (or (.get infos p) (let [d (delay (read-info p))] (.put infos p d) d))))
+                              sys-of (fn [p]
+                                       (loop [p p n 0]
+                                         (let [fi (get files p)]
+                                           (cond
+                                             (nil? fi) false
+                                             (or (:system fi) (:pragma @(info-of p))) true
+                                             (>= n 64) false
+                                             :else (recur (:from fi) (inc n))))))
+                              ffs (:form-files uf)]
                         (binding [*cx* (assoc *cx* :annotating (atom false))
                                   *unit* (str (or (:path uf) u))
-                                  *system-unit* (if (contains? uf :system)
-                                                  ;; the directory the header was found through (review 079's finding 3)
-                                                  (boolean (:system uf))
-                                                  (let [p (str (:path uf))
-                                                        norm (fn [^String x] (str (.normalize (java.nio.file.Paths/get x (make-array String 0)))))
-                                                        np (norm p)]
-                                                    (boolean (some #(str/starts-with? np (str (norm (str %)) "/")) (cx :sys-dirs)))))
-                                  *unit-info* (delay
-                                                (let [p (str (:path uf))
-                                                      f (java.io.File. ^String (if (and (cx :base) (not (.startsWith p "/"))) (str (cx :base) "/" p) p))]
-                                                  (if (.isFile f)
-                                                    (let [ls (str/split-lines (String. (java.nio.file.Files/readAllBytes (.toPath f)) "ISO-8859-1"))]
-                                                      {:ext (set (keep-indexed (fn [i ^String l] (when (.contains l "__extension__") (inc i))) ls))
-                                                       ;; gcc takes a header with this pragma for a system header (no pedwarn in it)
-                                                       :pragma (boolean (some #(re-find #"^\s*#\s*pragma\s+GCC\s+system_header\b" %) ls))})
-                                                    {:ext #{} :pragma false})))]
+                                  *system-unit* unit-sys
+                                  *unit-info* unit-info]
                           ;; each of the unit's forms at its own line, as the main file's are
-                          (doseq [g (:forms uf)]
-                            (binding [*line* (or (and (seq? g) (:line (meta g))) *line*)
-                                      *unit-line?* (boolean (and (seq? g) (:line (meta g))))]
-                              (check-top g)))))))
+                          (doseq [[i g] (map-indexed vector (:forms uf))]
+                            (let [ff (when ffs (nth ffs i nil))
+                                  own (and ff (not= ff (:path uf)) (contains? files ff))]
+                              (binding [*line* (or (and (seq? g) (:line (meta g))) *line*)
+                                        *unit-line?* (boolean (and (seq? g) (:line (meta g))))
+                                        *system-unit* (if own (sys-of ff) *system-unit*)
+                                        *unit-info* (if own (info-of ff) *unit-info*)]
+                                (check-top g)))))))))
         c/pragma (pragma-pack! f)
         c/asm (feat! :asm)
         (c/define c/undef c/directive c/file c/header) nil

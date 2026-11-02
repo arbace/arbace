@@ -614,6 +614,35 @@
       (is (= [["sy/a.h" false] ["sy/b.h" false]] (enters "-I" "sy"))))
     (is (= [:ok 1] (errs "qs" "m.c" "-I" "sy")))))
 
+(deftest nested-header-by-its-own-status
+  ;; review 110's finding 1: a header a unit's top header includes is judged by its own system status, not the top header's
+  ;; (libcpp: system when found through a system directory, entered from a system header or after its pragma); each case run
+  ;; with gcc 15.2 -std=c23 -pedantic-errors -fsyntax-only in test/c/judge/sysx/mix
+  (let [h (host/load-host "test/c/host")
+        base (str judge-dir "/sysx/mix")
+        errs (fn [main & opts]
+               (let [r (dg/read-file h base {:name main :read (str base "/" main)
+                                             :fc (host/file-config (vec (concat ["-std=c23" "-pedantic-errors"] opts)) "gnu23")} :compile)]
+                 [(:status r) (:other r)]))
+        enters (fn [main & opts]
+                 (let [fc (host/file-config (vec (concat ["-std=c23"] opts)) "gnu23")
+                       r (cparse/parse (host/config h fc base) main)]
+                   (mapv (juxt :path :system) (filter #(= "enter" (:directive %)) (:layer r)))))]
+    ;; i/a.h (-I) includes <b.h> found in -isystem sy: b.h's pedwarn is none (gcc 0), with -I sy it is (gcc 1)
+    (is (= [:ok 0] (errs "m.c" "-I" "i" "-isystem" "sy")))
+    (is (= [:ok 1] (errs "m.c" "-I" "i" "-I" "sy")))
+    ;; the includer's own pedwarn after the nested system header still counts (gcc: i/a2.h:2 alone)
+    (is (= [:ok 1] (errs "m2.c" "-I" "i" "-isystem" "sy")))
+    (is (= [:ok 2] (errs "m2.c" "-I" "i" "-I" "sy")))
+    ;; a nested header with `#pragma GCC system_header` (gcc 0)
+    (is (= [:ok 0] (errs "m-p.c" "-I" "i")))
+    ;; the other direction: a -I header a system header includes is a system header (gcc 0; -I sy2: 1)
+    (is (= [:ok 0] (errs "m-c.c" "-isystem" "sy2" "-I" "i2")))
+    (is (= [:ok 1] (errs "m-c.c" "-I" "sy2" "-I" "i2")))
+    ;; the preprocessor's records: i2/d.h entered from a system header is system (gcc -E's flag 3)
+    (is (= [["sy2/c.h" true] ["i2/d.h" true]] (enters "m-c.c" "-isystem" "sy2" "-I" "i2")))
+    (is (= [["i/a.h" false] ["sy/b.h" true]] (enters "m.c" "-I" "i" "-isystem" "sy")))))
+
 (deftest gcc-reread-without-status
   ;; review 079's finding 5: a kept gcc output with no status (an interrupted run) is a difference, not an exception
   (let [work (str (System/getProperty "user.dir") "/.tmp/judge-gcc-status")

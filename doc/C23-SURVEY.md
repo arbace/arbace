@@ -4061,6 +4061,29 @@ Report 086 (the VM) found F79 mergeable with one correction. Each fix is a commi
 Proposal **CS239 `-I-`.** Options: (a) refuse it as unsupported so such files land in a class instead of a wrong verdict (recommended); (b) model the quote/bracket split;
 (c) leave. None decided.
 
+### As built: review 110's finding 1, a nested header's own status (2026-11-02)
+
+Report 110 (the VM) found that the checker judged every form of a header unit by the status of the header the main file included: `m.c` with `#include <a.h>`,
+`i/a.h` with `#include <b.h>`, `sy/b.h` holding a pedwarn, `-I i -isystem sy -pedantic-errors`: gcc 15.2 gives 0 errors (`gcc -E` marks `sy/b.h` with flag 3), the checker
+1. Probes with gcc 15.2 here (x86-64), the cases in `test/c/judge/sysx/mix/`.
+
+- **The records (finding 1b).** libcpp makes a file system when found through a system directory *or* entered from a system header (`_cpp_stack_file`: the
+  larger of the two). pp's `enter` records and its `Included` slot now take `(or found-through-system includer-system)`, which subsumes F86's `""`/`@` case:
+  `sy2/c.h` (`-isystem`) including `<d.h>` found in `-I i2` records `i2/d.h :system true`. The main file's includes are unchanged (the includer's status is nil there).
+- **The checker.** convert records, for a unit whose forms come from more than one file, each form's file (`:form-files`, beside `:forms`) and each of those files'
+  first `enter` record with its includers up to the top header (`:files {path {:system s :from includer}}`); a unit of one file gets neither key, so its map, its
+  namespace (the forms' hash) and every unit the corpora's reads make of one file are as before. The checker binds `*system-unit*` and `*unit-info*` per form: a
+  nested file's forms are system when its record is, or when it or an includer within the unit has `#pragma GCC system_header` (gcc: a file entered after the pragma
+  is entered from a system buffer); the top header's forms as before. `*unit*` (the errors' `FILE:` prefix) stays the unit's path. A unit reread from its `.ae`
+  (`arbace.c.musl`'s cache) has no `:form-files` and is judged as before.
+- **Test** `nested-header-by-its-own-status` (judge-test), nine assertions, each against gcc 15.2: `<b.h>` through `-isystem` (0) and `-I` (1); the includer's own
+  pedwarn after the nested system header (`i/a2.h`: 1, with `-I sy` 2); a nested header with the pragma (0); a `-I` header a system header includes (0, `-I sy2` 1); the
+  records of both directions. Before the fix (c23-c9 with the test alone) it fails on the first, third and fifth error counts and on the `i2/d.h` record; after, all 68 tests pass.
+- **Records.** None changed by reasoning, none rerun: the essential subsets' files with `-pedantic-errors` include only system headers (`<stdbool.h>`, `<float.h>`, ...),
+  whose nested headers were system before and after, or `.c` files with no includes; the dg record could lose false errors only on a non-system header including a
+  system header that pedwarns, or a nested pragma header, which the next `bin/ci dg` run shows. Findings 2 (the `_Float128` comparison) and 3 (4e5aefaf's example) are not
+  part of this: 2 stays with CS235 (b).
+
 ## Decided (2026-11-01, the user): CS236-CS239
 
 From main's doc/JOURNAL.md, "2026-11-01: the user's decisions after the tag" (VM report 103's sheet 2 for CS236-CS238;
