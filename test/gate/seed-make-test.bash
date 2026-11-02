@@ -87,6 +87,8 @@ make "$P/.tmp/out/d.tar.xz" && bad "--make outside git" || ok "--make outside gi
 # finding 2: the fixpoint writes g3's printed-by and fixpoint.edn only when G2 = G3
 F=$T/fp; mkdir -p "$F/bin/lib"; cp "$src/bin/lib/version.bash" "$F/bin/lib/"
 printf 'arbace_host_exe() { echo %s/host-exe; }\n' "$T" > "$F/bin/lib/host.bash"; printf 'host\n' > "$T/host-exe"
+printf 'target/\n' > "$F/.gitignore"
+git -C "$F" init -q && git -C "$F" add -A && git -C "$F" -c user.name=t -c user.email=t@t commit -qm fp || bad "git of the fixpoint's checkout"
 sed -n '/^fixpoint() {/,/^}/p' "$src/bin/arbace-go" > "$T/fixpoint.bash"
 grep -q '^fixpoint() {' "$T/fixpoint.bash" || bad "no fixpoint() in $src/bin/arbace-go"
 fp_run() { # SAME: G3 the same as G2 (1) or not (0); prints g3's files after the run
@@ -106,6 +108,12 @@ out=$(fp_run 1 2>&1)
 case $out in *fixpoint.edn*) ok "a fixpoint that held wrote fixpoint.edn" ;; *) bad "a fixpoint that held: $out $(tail -3 "$T/fp.log")" ;; esac
 [ "$(printf '%s\n' "$out" | tail -1)" = 1 ] && ok "a fixpoint that held: g3's printed-by the fixpoint's" || bad "printed-by: $out"
 grep -q ':holds true :g3-sha256 "[0-9a-f]\{64\}" :version {:describe "x"' "$F/target/arbace-go/fixpoint/g3/fixpoint.edn" && ok "fixpoint.edn names G3's hash and the version" || bad "fixpoint.edn: $(cat "$F/target/arbace-go/fixpoint/g3/fixpoint.edn")"
+# queue 132: a fixpoint that held on a checkout not clean (an untracked file, which describe --dirty does not see) vouches for nothing
+echo x > "$F/bin/lib/extra.bash"
+out=$(fp_run 1 2>&1)
+case $out in *fixpoint.edn*) bad "a fixpoint that held on an untracked file wrote fixpoint.edn" ;; *) ok "a fixpoint that held on an untracked file: no fixpoint.edn" ;; esac
+grep -q 'not clean' "$T/fp.log" && ok "the fixpoint says why G3 is not vouched" || bad "no word of the unclean checkout: $(tail -2 "$T/fp.log")"
+rm "$F/bin/lib/extra.bash"
 
 [ "$fails" = 0 ] && { echo "PASS: seed-make-test"; exit 0; }
 echo "FAIL: seed-make-test ($fails)"; exit 1
