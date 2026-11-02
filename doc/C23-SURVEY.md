@@ -4084,6 +4084,14 @@ Report 110 (the VM) found that the checker judged every form of a header unit by
   system header that pedwarns, or a nested pragma header, which the next `bin/ci dg` run shows. Findings 2 (the `_Float128` comparison) and 3 (4e5aefaf's example) are not
   part of this: 2 stays with CS235 (b).
 
+### As built: review 130's header gaps, queue 136 (2026-11-02)
+
+The VM's drafts (branch `mac/136-c-headers`, four commits, unrun there) landed on `c23-hdr` off `c23-nf1` (88b357c9) and run here: `bin/ci judge-test` 68 tests, 261
+assertions, 0 failures before (17 min), and with the four commits and their new deftests 72 tests, 280 assertions, 0 failures. gcc 15.2.0 on this host gives the
+fixtures' counts the tests assert (m-st 1, m-stq 1, m-p7 1, m-p8 0, m-p1 1, m-pn 1, m-op 1, m-p0 2, m-lp 2, m-lm 2; m-lm is asserted 1: the linemarker's own pedwarn is not given).
+23f602c9 fixes a regression of 88b357c9: the main file's `Included` slot was nil, `push!` pushed nothing for it, so a header after a system header took that header's status;
+`c23-nf1` alone is correct for what it tests but carries this bug, so these commits belong with it. Left: a header entered twice (finding 4), musl's cache path (finding 5).
+
 ## Decided (2026-11-01, the user): CS236-CS239
 
 From main's doc/JOURNAL.md, "2026-11-01: the user's decisions after the tag" (VM report 103's sheet 2 for CS236-CS238;

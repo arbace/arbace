@@ -643,6 +643,68 @@
     (is (= [["sy2/c.h" true] ["i2/d.h" true]] (enters "m-c.c" "-isystem" "sy2" "-I" "i2")))
     (is (= [["i/a.h" false] ["sy/b.h" true]] (enters "m.c" "-I" "i" "-isystem" "sy")))))
 
+;; queue 136: the libcpp rules review 130 found missing, each case run with gcc 15.2 -std=c23 -pedantic-errors -fsyntax-only -I i
+;; -isystem sy in test/c/judge/sysx/chg (the counts) and with gcc -E (the enter records' flag 3)
+(defn- chg-errs [main & opts]
+  (let [h (host/load-host "test/c/host")
+        base (str judge-dir "/sysx/chg")
+        r (dg/read-file h base {:name main :read (str base "/" main)
+                                :fc (host/file-config (vec (concat ["-std=c23" "-pedantic-errors"] (or (seq opts) ["-I" "i" "-isystem" "sy"]))) "gnu23")} :compile)]
+    [(:status r) (:other r)]))
+
+(defn- chg-enters [main]
+  (let [h (host/load-host "test/c/host")
+        fc (host/file-config ["-std=c23" "-I" "i" "-isystem" "sy"] "gnu23")
+        r (cparse/parse (host/config h fc (str judge-dir "/sysx/chg")) main)]
+    (mapv (juxt :path :system) (filter #(= "enter" (:directive %)) (:layer r)))))
+
+(deftest main-file-status-after-a-system-header
+  ;; the main file's status is its own again when a system header it includes is left: a -I header after it is not a system
+  ;; header (gcc 1; before: the slot kept sy/z.h's status, 0), nor a quoted one beside the main file (gcc 1)
+  (is (= [:ok 1] (chg-errs "m-st.c")))
+  (is (= [:ok 1] (chg-errs "m-stq.c")))
+  (is (= [["sy/z.h" true] ["i/w.h" false]] (chg-enters "m-st.c")))
+  (is (= [["sy/z.h" true] ["q.h" false]] (chg-enters "m-stq.c"))))
+
+(deftest includer-pragma-after-the-include
+  ;; review 130's finding 1: i/p7.h includes <p7b.h>, then has `#pragma GCC system_header`: p7b.h was entered before the pragma
+  ;; and is no system header (gcc 1; before: the includer's pragma anywhere counted, 0)
+  (is (= [:ok 1] (chg-errs "m-p7.c")))
+  (is (= [["i/p7.h" false] ["i/p7b.h" false]] (chg-enters "m-p7.c")))
+  ;; i/p8.h has the pragma before its #include <p7b.h>: p7b.h is a system header (gcc 0; -E: `# 1 "i/p7b.h" 1 3`)
+  (is (= [:ok 0] (chg-errs "m-p8.c")))
+  (is (= [["i/p8.h" false] ["i/p7b.h" true]] (chg-enters "m-p8.c"))))
+
+(deftest pragma-from-its-place-on
+  ;; review 130's finding 2: `#pragma GCC system_header` makes the lines after it a system header's, not the lines before (gcc
+  ;; 1 each; before: the pragma anywhere in the file silenced it all, 0): in the unit's top header (m-p1.c), in a nested one
+  ;; (m-pn.c: i/pn.h includes <p1.h>), as _Pragma (m-op.c; before: the line regex missed it, 2)
+  (is (= [:ok 1] (chg-errs "m-p1.c")))
+  (is (= [:ok 1] (chg-errs "m-pn.c")))
+  (is (= [:ok 1] (chg-errs "m-op.c")))
+  ;; a pragma in an #if 0 group or a comment is none (gcc 2; before: the line regex took it, 0)
+  (is (= [:ok 2] (chg-errs "m-p0.c")))
+  ;; the pp's record: at the pragma's offset in its file, i/p0.h's none
+  (let [h (host/load-host "test/c/host")
+        fc (host/file-config ["-std=c23" "-I" "i" "-isystem" "sy"] "gnu23")
+        sys (fn [main] (let [r (cparse/parse (host/config h fc (str judge-dir "/sysx/chg")) main)]
+                         (mapv (juxt :file :system) (filter #(= "system" (:directive %)) (:layer r)))))]
+    (is (= [["i/p1.h" true]] (sys "m-p1.c")))
+    (is (= [["i/op.h" true]] (sys "m-op.c")))
+    (is (= [] (sys "m-p0.c")))))
+
+(deftest linemarker-flag-3
+  ;; review 130's finding 3: a linemarker `# N "FILE"` in a header sets the status of the rest of its file and of the headers it
+  ;; includes afterwards: flag 3 a system header's, no flag a user header's. sy/lp.h (-isystem) has `# 4 "sy/lp.h"`, then a
+  ;; pedwarn and #include <lpc.h> (i/lpc.h, a pedwarn): gcc 2 (before: 0)
+  (is (= [:ok 2] (chg-errs "m-lp.c")))
+  (is (= [["sy/lp.h" true] ["i/lpc.h" false]] (chg-enters "m-lp.c")))
+  ;; i/lm.h has a pedwarn, `# 4 "i/lm.h" 3`, a pedwarn, #include <lmc.h> (i/lmc.h, a pedwarn): gcc -E `# 1 "i/lmc.h" 1 3`, and
+  ;; gcc's errors are i/lm.h's first pedwarn and the linemarker's own "style of line directive is a GCC extension", a pedwarn the
+  ;; pp does not give (so 1 here, not gcc's 2; before: 3)
+  (is (= [["i/lm.h" false] ["i/lmc.h" true]] (chg-enters "m-lm.c")))
+  (is (= [:ok 1] (chg-errs "m-lm.c"))))
+
 (deftest gcc-reread-without-status
   ;; review 079's finding 5: a kept gcc output with no status (an interrupted run) is a difference, not an exception
   (let [work (str (System/getProperty "user.dir") "/.tmp/judge-gcc-status")

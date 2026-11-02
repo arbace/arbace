@@ -254,7 +254,12 @@
   (when-some [t (slot c TOS)] (.add ^ArrayList (.-stack c) t))
   (slot! c TOS v))
 
-(deftype Included [^String using sys])
+(deftype Included [^String using sys ^String path])
+
+;; the main file's Included: no directory (an #include_next there searches the whole chain, as gcc's does) and not a system
+;; header. enter! pushes it for the main file, so the main file's status comes back when its first header is left (before, the
+;; slot kept the last header's, and a header the main file included after a system header was taken for a system header)
+(def ^:private main-included (Included. nil false nil))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Paths (Go's path/filepath on Unix)
@@ -1381,7 +1386,7 @@
   [^Cpp c]
   (let [chain (vec (concat (:include (.-cfg c)) (:sys (.-cfg c))))
         ^Included cur (slot c INCLUDED)]
-    (or (when cur
+    (or (when (and cur (.-using cur))
           (let [using (clean (.-using cur))
                 ;; Arbace (CX2): the list's entries compared cleaned (C++'s has .. in libstdc++'s)
                 i (long (.indexOf ^java.util.List (mapv clean chain) using))]
@@ -1404,10 +1409,10 @@
       "")))
 
 (defn- enter!
-  "A file's groups pushed after the included marker, as cpp.include does."
-  [^Cpp c g ^String using sysdir]
-  (push! c (slot c INCLUDED))
-  (slot! c INCLUDED (Included. using (boolean sysdir)))
+  "A file's groups pushed after the included marker, as cpp.include does (`pth` the file's path, its CFile's name)."
+  [^Cpp c g ^String using sysdir ^String pth]
+  (push! c (or (slot c INCLUDED) main-included))
+  (slot! c INCLUDED (Included. using (boolean sysdir) pth))
   (push! c [:leave])
   (slot! c DEPTH (inc (long (slot c DEPTH))))
   (push! c g))
@@ -1461,7 +1466,7 @@
                     (do ;; Arbace (C3b): the inclusion recorded for the converter's header units
                         (record! c {:directive "enter" :path pth :raw raw :system (boolean sysdir) :off (.-po ^Tok (line 0))
                                     :from (when-let [^CFile f (.-pf ^Tok (line 0))] (.-name f))})
-                        (enter! c g using sysdir))))
+                        (enter! c g using sysdir pth))))
                   (do (eh c (str (pos-str s0) ": include file not found: " raw)) (slot! c CLOSED true)))))))))))
 
 (declare embed-params)
@@ -1706,6 +1711,19 @@
                           (.put ^HashMap (.-mstack c) n (pop s))))))
       ;; Arbace: #pragma once (gcc's; cc ignores it)
       "once" (when-let [^CFile f (.-pf ^Tok (x 0))] (.add ^HashSet (.-once c) (.-name f)))
+      ;; Arbace (queue 136, review 130's finding 1): #pragma GCC system_header (and its _Pragma) makes the rest of the current
+      ;; file a system header, so a header it includes after the pragma is one (libcpp's cpp_make_system_header sets the buffer's
+      ;; sysp, which _cpp_stack_file takes), and one it included before is not; ignored in the main file (gcc warns)
+      ;; queue 136 (review 130's finding 2): the change recorded at the pragma's offset, for the converter to judge each of the
+      ;; file's forms by its place (the lines before the pragma are no system header's); not when the pragma's token stands in
+      ;; another file (a _Pragma from another file's macro)
+      "GCC" (when (and (> (count x) 3) (= (src (x 3)) "system_header"))
+              (let [^Included cur (slot c INCLUDED)]
+                (when (and cur (.-using cur))
+                  (slot! c INCLUDED (Included. (.-using cur) true (.-path cur)))
+                  (let [^Tok t (x 0)]
+                    (when (= (some-> ^CFile (.-pf t) .-name) (.-path cur))
+                      (record! c {:directive "system" :file (.-path cur) :off (.-po t) :system true}))))))
       nil)))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -1717,6 +1735,32 @@
   (let [^Tok t (first line)]
     (when (main-file? c t)
       (record! c (into {:directive (src (second line)) :pos (lex/tok-position t) :off (.-po t) :file (slot c MAIN) :text (line-text line)} (apply hash-map kvs))))))
+
+(defn linemarker-sys
+  "queue 136 (review 130's finding 3): the system status a GNU linemarker `# N \"FILE\" FLAGS...` (its line's tokens) gives
+  the rest of its file, as libcpp's do_linemarker does: true with flag 3 (or 3 4), false with no flag (a system header's
+  rest is then a user header's); nil when it changes nothing (no file name: the status kept) or is one this reader does not
+  follow (flags 1 and 2, which enter and leave a presumed file; a line gcc refuses)."
+  [line]
+  (let [ts (if (= (ch (peek line)) \newline) (pop line) line)]
+    (when (and (>= (count ts) 3) (= (ch (ts 1)) :PPNUMBER) (re-matches #"[0-9]+" (src (ts 1)))
+               (= (ch (ts 2)) :STRINGLITERAL) (.startsWith (src (ts 2)) "\""))
+      (let [fl (mapv src (subvec ts 3))]
+        (cond
+          (= fl []) false
+          (or (= fl ["3"]) (= fl ["3" "4"])) true
+          :else nil)))))
+
+(defn- linemarker!
+  "queue 136: a linemarker in an included file changes its status (the Included's, for the headers it includes afterwards; the
+  layer's record, for the converter's forms after it). In the main file nothing (the checker has no status there)."
+  [^Cpp c line]
+  (let [s (linemarker-sys line)
+        ^Included cur (slot c INCLUDED)
+        ^Tok t (first line)]
+    (when (and (some? s) cur (.-using cur) (= (some-> ^CFile (.-pf t) .-name) (.-path cur)))
+      (slot! c INCLUDED (Included. (.-using cur) s (.-path cur)))
+      (record! c {:directive "system" :file (.-path cur) :off (.-po t) :system s}))))
 
 (defn next-line
   "cpp.nextLine: the next text line, the directives before it executed."
@@ -1768,7 +1812,7 @@
             (case (x 0)
               :leave (do (slot! c DEPTH (dec (long (slot c DEPTH)))) (pop-tos! c) (recur))
               :text (do (pop-tos! c) (x 1))
-              :nondir (do (pop-tos! c) (record-directive! c (x 1)) (recur))
+              :nondir (do (pop-tos! c) (record-directive! c (x 1)) (linemarker! c (x 1)) (recur))
               :eof (do (slot! c EOFLINE (x 1))
                        (if (zero? (.size ^ArrayList (.-stack c)))
                          [(x 1)]

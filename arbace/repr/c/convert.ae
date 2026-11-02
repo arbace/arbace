@@ -1695,6 +1695,20 @@
           :else (recur parent (conj seen f)))))))
 
 (defn- item-file [n] (when-let [t (first (node-tokens n))] (when-let [^CFile f (.-pf ^PTok t)] (.-name f))))
+(defn- item-off [n] (when-let [t (first (node-tokens n))] (.-po ^PTok t)))
+
+(defn sys-changes
+  "queue 136 (review 130's findings 2, 3): the preprocessor's system status changes (its layer's {:directive \"system\"}
+  records: a `#pragma GCC system_header`, a linemarker) by file, {path [[off system?] ...]} in offset order; a file
+  entered twice records its changes twice, the first record at an offset kept."
+  [layer]
+  (into {} (for [[p m] (reduce (fn [m e]
+                                 (if (= (:directive e) "system")
+                                   (update m (:file e) (fn [o] (let [o (or o (sorted-map))]
+                                                                 (if (contains? o (:off e)) o (assoc o (:off e) (boolean (:system e)))))))
+                                   m))
+                               {} layer)]
+             [p (vec m)])))
 
 (defn sha16 ^String [^String s]
   (let [d (.digest (java.security.MessageDigest/getInstance "SHA-256") (.getBytes s "UTF-8"))]
@@ -1757,6 +1771,10 @@
               ;; review 110's finding 1: the file of each of a unit's forms (a nested header's are its own), for the checker
               ;; to judge each by its own file's system status
               hfiles (java.util.HashMap.)
+              ;; queue 136: each of a unit's forms' offset in its file, and the files' status changes, for the checker to judge a
+              ;; form by its place after a pragma or a linemarker (review 130's findings 2, 3)
+              hoffs (java.util.HashMap.)
+              chg (sys-changes (:layer r))
               ;; each header's first enter record: {path {:system s :from includer}}
               file-info (reduce (fn [m e] (if (or (not= (:directive e) "enter") (contains? m (:path e)))
                                             m
@@ -1768,15 +1786,19 @@
               (when-let [off (header-root file)]
                 (let [^ArrayList a (or (.get hforms off) (let [a (ArrayList.)] (.put hforms off a) a))
                       ^ArrayList af (or (.get hfiles off) (let [a (ArrayList.)] (.put hfiles off a) a))
+                      ^ArrayList ao (or (.get hoffs off) (let [a (ArrayList.)] (.put hoffs off a) a))
+                      fo (item-off ed)
                       fs (external ed)]
                   (.addAll a fs)
-                  (doseq [_ fs] (.add af file))))))
+                  (doseq [_ fs] (.add af file) (.add ao fo))))))
           (doseq [e (:layer r) :when (and (= (:directive e) "enter") (= (:from e) main-name))]
             (let [fs (vec (or (.get hforms (:off e)) []))
                   ffs (vec (or (.get hfiles (:off e)) []))
+                  fos (vec (or (.get hoffs (:off e)) []))
                   ns (str "c.h." (sha16 (str/join "\n" (map #(binding [*print-meta* true] (pr-str %)) fs))))]
               (.put unit-of-off (:off e) ns)
-              (.put units ns (cond-> {:header (:raw e) :path (:path e) :system (boolean (:system e)) :forms fs}
+              (.put units ns (cond-> {:header (:raw e) :path (:path e) :system (boolean (:system e)) :forms fs
+                                      :form-offs fos :sys-changes (select-keys chg (distinct (cons (:path e) ffs)))}
                                (some #(not= % (:path e)) ffs)
                                (assoc :form-files ffs
                                       ;; the forms' files and their includers up to the top header (a pragma's status is inherited)
