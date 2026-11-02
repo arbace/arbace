@@ -743,6 +743,37 @@
   (is (= [["i/lm.h" false] ["i/lmc.h" true]] (chg-enters "m-lm.c")))
   (is (= [:ok 1] (chg-errs "m-lm.c"))))
 
+;; queue 157 (review 130's finding 4): a header entered more than once is judged entry by entry, each by its own status, its forms in the
+;; unit of the main file's #include it came through. i/tw.h is unguarded, with a pedwarn (a _Generic association of incomplete type in a
+;; _Static_assert, which may repeat); sy/tws.h includes it. gcc 15.2 (aarch64's, -std=c23 -pedantic-errors -fsyntax-only -I i -isystem
+;; sy) gives 1 error each, the user entry's
+(defn- chg-units [main]
+  (let [h (host/load-host "test/c/host")
+        fc (host/file-config ["-std=c23" "-I" "i" "-isystem" "sy"] "gnu23")
+        rd (rc/read-c (host/config h fc (str judge-dir "/sysx/chg")) fc main false)]
+    (vec (sort (map (fn [u] [(:path u) (:form-sys u)]) (vals (:units rd)))))))
+
+(deftest header-entered-twice-by-its-entries
+  ;; system first (through sy/tws.h: -E `# 1 "i/tw.h" 1 3 4`), then from the main file (`# 1 "i/tw.h" 1`): before, both entries'
+  ;; forms were in tws.h's unit, judged by the first entry's status (0)
+  (is (= [:ok 1] (chg-errs "m-tw.c")))
+  (is (= [["i/tw.h" [false false false]] ["sy/tws.h" [true true true]]] (chg-units "m-tw.c")))
+  ;; the other order: before, both in tw.h's unit, a user header's (2); the two units' forms are the same, judged otherwise: two units
+  (is (= [:ok 1] (chg-errs "m-tw2.c")))
+  (is (= [["i/tw.h" [false false false]] ["sy/tws.h" [true true true]]] (chg-units "m-tw2.c")))
+  ;; i/tp.h has `#pragma GCC system_header` under #ifdef TP_SYS, which the main file defines between its two includes: the first
+  ;; entry is a user header's, the second a system header's after the pragma (gcc 1; before: the pragma's record counted for both, 0)
+  (is (= [:ok 1] (chg-errs "m-tp.c")))
+  (is (= [["i/tp.h" [false false false]] ["i/tp.h" [true true true]]] (chg-units "m-tp.c")))
+  ;; within one unit: i/twn.h includes <tw.h>, then has the pragma, then includes it again (-E: `# 1 "i/tw.h" 1`, then `1 3`): gcc 1
+  ;; (before: both entries judged by the first's status, 2)
+  (is (= [:ok 1] (chg-errs "m-twn.c")))
+  (is (= [["i/twn.h" [false false false true true true]]] (chg-units "m-twn.c")))
+  ;; the main file includes it twice (m-tw3.c): two units, each checked at its #include (gcc 2; before: both entries' forms in the first
+  ;; unit, 2; the units of the same forms one unit checked once would give 1)
+  (is (= [:ok 2] (chg-errs "m-tw3.c")))
+  (is (= [["i/tw.h" [false false false]] ["i/tw.h" [false false false]]] (chg-units "m-tw3.c"))))
+
 (deftest gcc-reread-without-status
   ;; review 079's finding 5: a kept gcc output with no status (an interrupted run) is a difference, not an exception
   (let [work (str (System/getProperty "user.dir") "/.tmp/judge-gcc-status")
