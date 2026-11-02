@@ -210,24 +210,33 @@
   ;; check's results file :results (CS240 (a), written by its --record at C9's full run: every file's row [ID RESULT REASON])
   ;; when it is there, its :pass rows counted and held to the known file (c-results-problems); until then not recorded (the
   ;; cell's count is partial).
+  ;; :exclude-corpora (queue 132 F3, the user's decision of 2026-11-02): corpora whose rows and entries are not counted (the
+  ;; tree check's mutants, synthetic files for error recovery, not conformance tests); the results are held to the known file
+  ;; (c-results-problems) over every corpus. :rows, the counted rows' results by id, for a cell's :count-once group (judge-cell).
   (let [m (read-edn (:file src))
         secs (or (:sections src) [(:section src)])
         cls (:classes m)
-        es (vec (for [sec secs
-                      :let [texts (if (contains? cls sec) (get cls sec) cls)]
-                      [corpus files] (get m sec)
-                      [f v] (sort-by key files)]
-                  (entry (str (name corpus) " " f) :known
-                         (str (name (:class v)) ": " (str/replace (str (get texts (:class v))) #"\s+" " ")))))
+        all (vec (for [sec secs
+                       :let [texts (if (contains? cls sec) (get cls sec) cls)]
+                       [corpus files] (get m sec)
+                       [f v] (sort-by key files)]
+                   (entry (str (name corpus) " " f) :known
+                          (str (name (:class v)) ": " (str/replace (str (get texts (:class v))) #"\s+" " ")))))
+        ex (set (:exclude-corpora src))
+        counted? (fn [^String id] (not (ex (first (str/split id #" " 2)))))
+        es (filterv #(counted? (:id %)) all)
         rows (when (exists? (:results src)) (read-edn (:results src)))
-        missing (vec (remove #(contains? m %) secs))]
+        crows (filter #(counted? (first %)) rows)
+        missing (vec (remove #(contains? m %) secs))
+        excluded (when (seq ex) (str "; not counted: the corpora " (str/join ", " (sort ex))))]
     (if rows
-      {:pass (count (filter #(= :pass (second %)) rows)) :entries es :sections-missing missing
-       :results-problems (vec (c-results-problems src rows es))
-       :detail (str (count rows) " files in " (:results src))}
+      {:pass (count (filter #(= :pass (second %)) crows)) :entries es :sections-missing missing
+       :rows (into {} (map (fn [[id r]] [id r]) crows))
+       :results-problems (vec (c-results-problems src rows all))
+       :detail (str (count rows) " files in " (:results src) excluded)}
       {:pass nil :entries es :sections-missing missing
        :detail (str "the known file only: the check's passing files are not recorded there"
-                    (when (:results src) (str " (" (:results src) " not written yet)")))})))
+                    (when (:results src) (str " (" (:results src) " not written yet)")) excluded)})))
 
 (defmethod read-source :jforms-excluded [src]
   ;; diffcheck's exclusions (test/diffcheck/jforms-excluded.edn: the Java forms' classes not given
@@ -425,14 +434,28 @@
 
 (defn- sum [k es] (reduce + (map :n (filter #(= k (:kind %)) es))))
 
+(defn- count-once
+  "A cell's :count-once group (queue 132 F3, the user's decision of 2026-11-02: C's token and tree checks run the same corpus
+  files): each file one case, a non-pass of its worst kind (per-file) when a check of the group does not pass it, a pass when
+  every check of the group whose results hold it passes it; the passes nil (partial) unless every check's results are there."
+  [g]
+  {:entries (per-file (mapcat :entries g))
+   :pass (when (every? :rows g)
+           (let [rows (map :rows g)]
+             (count (for [id (distinct (mapcat keys rows))
+                          :when (every? #(contains? #{nil :pass} (get % id)) rows)]
+                      id))))})
+
 (defn- judge-cell [cell]
   (let [ss (mapv #(judge-source cell %) (:sources cell))
         checks (filter #(and (not= :beside (:role %)) (:present %)) ss)
-        es (mapcat :entries checks)]
+        units (concat (remove :count-once checks)
+                      (map count-once (vals (group-by :count-once (filter :count-once checks)))))
+        es (mapcat :entries units)]
     (assoc cell :sources ss
                 :checked (boolean (seq checks))
                 :until (some :until (remove :present (:sources cell)))
-                :pass (reduce + (keep :pass checks))
+                :pass (reduce + (keep :pass units))
                 :pass-partial (boolean (some #(and (nil? (:pass %)) (not (:within %))) checks))
                 :design (sum :design es) :deferred (sum :deferred es)
                 :pending (reduce + (map :n (filter #(= :pending (:decided (:class %))) es))))))

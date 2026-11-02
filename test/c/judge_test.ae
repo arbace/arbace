@@ -985,3 +985,39 @@
     (is (empty? (case-problems {:name "t" :file "r" :ref-runs ref} {:ids ["c/a.c" "c/c.c"]})))
     (is (= 1 (count (case-problems {:name "t" :file "r" :ref-runs ref} {:ids ["c/a.c"]}))))
     (is (= 1 (count (case-problems {:name "t" :file "r" :ref-runs ref} {:ids ["c/a.c" "c/b.c" "c/c.c"]}))))))
+
+;; queue 132 F3 (the user, 2026-11-02): C's read cell counts each corpus file once over the token and tree checks (:count-once), a
+;; file passing only when both pass it, and leaves the mutants out (:exclude-corpora), their rows and entries alike
+(deftest read-cell-counts-each-file-once
+  (require 'reap.main)
+  (let [judge-cell @(resolve 'reap.main/judge-cell)
+        read-source (resolve 'reap.main/read-source)
+        w (str (System/getProperty "user.dir") "/.tmp/judge-test-once")
+        f (fn [n x] (let [p (str w "/" n)] (spit p (pr-str x)) p))
+        _ (.mkdirs (java.io.File. w))
+        cf (let [p (str w "/classes.edn")]
+             (spit p "[{:id :k :title \"t\" :kind :deferred :why \"w\" :decided \"x\" :match [#\"^known k:\"]}]") p)
+        ka (f "a-known.edn" {:classes {:k "a class"} :pp {:c1 {"x.c" {:class :k}}}})
+        kb (f "b-known.edn" {:classes {:k "a class"} :parse {:c1 {"x.c" {:class :k} "z.c" {:class :k}} :mutants {"m1.c" {:class :k}}}})
+        ra (str w "/a-results.edn") rb (str w "/b-results.edn")
+        src (fn [k r & kvs] (apply assoc {:name k :unit "files" :reader :c-known :file k :results r :count-once :g
+                                          :exclude-corpora ["mutants"]} kvs))
+        cell {:classes cf :kind-map {:gap :deferred}
+              :sources [(src ka ra :sections [:pp]) (src kb rb :section :parse)]}]
+    (doseq [p [ra rb]] (.delete (java.io.File. ^String p)))
+    ;; no results yet: x.c known by both checks one deferred case, z.c another; the mutant's entry not counted; the passes partial
+    (let [c (judge-cell cell)]
+      (is (= [0 2 true] ((juxt :pass :deferred :pass-partial) c)))
+      (is (empty? (mapcat :problems (:sources c)))))
+    ;; both results: y.c passes both, w.c the one check that has it, z.c passes the token check but not the tree check
+    (f "a-results.edn" [["c1 w.c" :pass "equal"] ["c1 x.c" :known "known"] ["c1 y.c" :pass "equal"] ["c1 z.c" :pass "equal"]])
+    (f "b-results.edn" [["c1 x.c" :known "known"] ["c1 y.c" :pass "equal"] ["c1 z.c" :known "known"]
+                        ["mutants m1.c" :known "known"] ["mutants m2.c" :pass "equal"]])
+    (let [c (judge-cell cell)]
+      (is (= [2 2 false] ((juxt :pass :deferred :pass-partial) c)))
+      (is (empty? (mapcat :problems (:sources c))))
+      ;; each check alone still counts its own (the mutants left out): 3 and 1 passes
+      (is (= [3 1] (map :pass (:sources c)))))
+    ;; the results are still held to the known file over every corpus: the mutant's known entry absent from them is a problem
+    (f "b-results.edn" [["c1 x.c" :known "known"] ["c1 y.c" :pass "equal"] ["c1 z.c" :known "known"]])
+    (is (= 1 (count (:results-problems (read-source (src kb rb :section :parse))))))))

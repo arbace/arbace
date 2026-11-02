@@ -4321,3 +4321,12 @@ Proposals for the classes no CS decides (F7), decided (the user, 2026-11-02): CS
 - **CS264 The classes the spec or a phase decided** (eval's gcc-builtin SPEC §7.9 and abi SPEC §12.3 by design, threads §6.5 deferred; dg's
   read-refused C7, a gap). Options: (a) the spec's sections and C7 stand as their decision, as cited; (b) each restated as a CS. *Recommended: (a)*.
   **Decided (the user, 2026-11-02): (a): the spec's sections and C7 stand as their decision, as cited.**
+
+**C's read cell counts each corpus file once (VM review 132, F3), decided (the user, 2026-11-02).** Once step 7a's results files exist the read
+cell would sum dg's passes, the token check's and the tree check's, so a corpus file counted up to twice, and the tree check's 4,000 mutants
+(synthetic files for error recovery, not conformance tests) as files. Decided: the read cell leaves the mutants' rows and entries out and counts
+each corpus file once over the two checks, a file passing only when both pass it (one that only one check runs: that check's verdict), a
+non-pass of its worst kind. Built in `test/reap/main.ae` (`count-once`, the `:c-known` reader's `:exclude-corpora`; the results still held to
+the known files over every corpus, mutants included) and `test/reap/cells.edn` (the two sources `:count-once :c-corpus-files :exclude-corpora
+["mutants"]`); judge-test `read-cell-counts-each-file-once`. The matrix recorded again: C read 575+ / 96 / 53 (104 by design before: the two
+mutants' `invalid-paste` and six files known to both checks counted once).
