@@ -280,14 +280,30 @@
                 :when (= diagnostics? (= :compile-fail-ref (:category t)))]
             (:id t))))))
 
+(defn- read-forms
+  "Every form of F (a file of one map a line, as test/c/ref-gcc15.edn), where read-edn reads the first."
+  [f]
+  (with-open [r (PushbackReader. (io/reader (path f)))]
+    (loop [xs []]
+      (let [x (read r false ::eof)]
+        (if (= ::eof x) xs (recur (conj xs x)))))))
+
+(def ^:private ref-run-ids
+  (memoize
+   (fn [f]
+     ;; C's reference runs (bin/ci record-ref): the programs gcc built, whose runs the check judges (queue 122, finding 6)
+     (set (for [x (read-forms f) :when (not= :no-build (:status x))] (:id x))))))
+
 (defn- case-problems
   "A source's cases (its rows' ids) against those it must have: a :java-check source's against
   :ref's tests of its :level (test/java/ref-jdk26.edn), a :results source's against the programs
-  of :same-cases (goi's AOT level against its eval level's); an id recorded twice is a problem too."
+  of :same-cases (goi's AOT level against its eval level's) or of :ref-runs (C's eval level against
+  the programs gcc built in test/c/ref-gcc15.edn, every form of it); an id recorded twice is a problem too."
   [src r]
   (when-let [ids (:ids r)]
     (let [want (cond (:ref src) (ref-ids (:ref src) (= :diagnostics (:level src)))
-                     (:same-cases src) (set (map first (read-edn (:same-cases src)))))
+                     (:same-cases src) (set (map first (read-edn (:same-cases src))))
+                     (:ref-runs src) (ref-run-ids (:ref-runs src)))
           have (set ids)
           some-of (fn [xs] (str (str/join " " (take 5 xs)) (when (> (count xs) 5) " ...")))]
       (concat
@@ -298,11 +314,11 @@
                extra (sort (remove want have))]
            (concat
             (when (seq miss)
-              [(str (:name src) ": " (count miss) " cases of " (or (:ref src) (:same-cases src))
+              [(str (:name src) ": " (count miss) " cases of " (or (:ref src) (:same-cases src) (:ref-runs src))
                     " not in " (:file src) ": " (some-of miss))])
             (when (seq extra)
               [(str (:name src) ": " (count extra) " cases of " (:file src) " not in "
-                    (or (:ref src) (:same-cases src)) ": " (some-of extra))]))))))))
+                    (or (:ref src) (:same-cases src) (:ref-runs src)) ": " (some-of extra))]))))))))
 
 ;; the classes
 
@@ -340,11 +356,27 @@
   (let [k (:kind c)]
     (if (#{:design :deferred} k) k (get (:kind-map cell) k))))
 
+(defn- per-file
+  "Entries of one id merged into one: an entry in no class kept as it is (a problem), else the first deferred one, else the first;
+  its reason names the other levels' classes."
+  [es]
+  (let [groups (group-by :id es)]
+    (vec (for [id (distinct (map :id es))
+               :let [g (get groups id)
+                     classed (filter :class g)
+                     pick (or (first (filter #(= :deferred (:kind %)) classed)) (first classed))]
+               e (if (or (nil? pick) (some #(nil? (:class %)) g))
+                   g
+                   [(cond-> pick
+                      (> (count g) 1) (update :reason str " (also: "
+                                              (str/join ", " (distinct (for [x g :when (not= x pick)] (name (:id (:class x)))))) ")"))])]
+           e))))
+
 (defn- missing-files
   "The files a source names that are not there: its :file, :upstream, :known, :ref and :same-cases,
   and the oracle's :expected directory (report 021's finding 3: a directory gone gave no cases)."
   [src]
-  (concat (for [k [:file :upstream :known :ref :same-cases] :let [f (get src k)] :when (and f (not (exists? f)))] f)
+  (concat (for [k [:file :upstream :known :ref :same-cases :ref-runs] :let [f (get src k)] :when (and f (not (exists? f)))] f)
           (when-let [d (:expected src)] (when-not (dir? d) [d]))))
 
 (defn- judge-source
@@ -364,7 +396,10 @@
                  :problems (when-not not-yet (vec (for [f miss] (str (:name src) ": no " f)))))
       (let [r (read-source src)
             classes (classes-of cf)
-            es (for [e (:entries r)] (let [c (classify classes e)] (assoc e :class c :kind (when c (kind-of cell c)))))]
+            es (for [e (:entries r)] (let [c (classify classes e)] (assoc e :class c :kind (when c (kind-of cell c)))))
+            ;; :per-file (the token check's three sections, queue 122 finding 4): a file the known file lists at several levels
+            ;; is one non-pass, of its deferred class when any is (the worst kind), else of its first; an entry in no class stays
+            es (if (:per-file src) (per-file es) es)]
         (merge src r
                {:present true :classes-file cf :entries (vec es)
                 :problems (vec (concat
