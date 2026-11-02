@@ -35,6 +35,11 @@
   (let [n (max (count a) (count b))]
     (first (for [i (range n) :when (not= (get a i) (get b i))] [(inc i) (get a i) (get b i)]))))
 
+(defn same-tree?
+  "The tree check's comparison: cc's dump present and equal to the port's line for line as `norm` makes them."
+  [^String cc ^String mine]
+  (boolean (and cc (= (norm cc) (norm mine)))))
+
 (defn first-error
   "The position of a dump's first error (\"file:line:col\"), :panic, or nil when it has none."
   [lines]
@@ -67,7 +72,7 @@
                   (get-in (:pp-known-all host) [:pp (first from) (second from)]))
               (get (:pp-known host) nm))
         st (cond
-             (and cc (= a b)) "equal"
+             (same-tree? cc mine) "equal"
              k "known"
              ppk "pp-known"
              (.startsWith ^String mine "#crash") "crash"
@@ -76,7 +81,10 @@
     (when-not (= st "equal")
       (spit-latin1 (str d "/diff/" (:out e) ".port") mine)
       (when cc (spit-latin1 (str d "/diff/" (:out e) ".cc") cc)))
-    (when (and (= st "equal") (not (System/getenv "REPR_C_PARSE_KEEP"))) (.delete (java.io.File. ccp)))
+    ;; GTS81 (a): a control's subject keeps its dump and a control's reference its cc dump (control-names)
+    (when (contains? (:control-names host) nm) (spit-latin1 (str d "/control/" (:out e) ".port") mine))
+    (when (and (= st "equal") (not (System/getenv "REPR_C_PARSE_KEEP")) (not (contains? (:control-names host) nm)))
+      (.delete (java.io.File. ccp)))
     [nm st nodes errs
      (case st
        "equal" ""
@@ -88,6 +96,37 @@
          (str "line " n ": cc " (pr-str x) " port " (pr-str y)
               (let [fa (first-error a) fb (first-error b)]
                 (str "; first error cc " (pr-str fa) " port " (pr-str fb))))))]))
+
+;; GTS81 (a): the negative controls of the tree check (test/c/controls.edn, :level :tree): the subject's port dump against
+;; the reference's cc dump by same-tree?, which must not pass. check-file keeps both (control/NAME.tsv.port, cc-tree/).
+
+(defn control-names
+  "The names of the corpus `id` that a :tree control names, as subject or reference."
+  [^String id]
+  (set (for [c (ppcheck/controls :tree) f [(:subject c) (:reference c)]
+             :let [[cid nm] (ppcheck/control-split f)] :when (= cid id)]
+         nm)))
+
+(defn tree-control-result
+  "A :tree control judged after the corpora (ids): :left when a corpus was not checked or the subject's dump was not kept
+  (not in the lists), :not-judged when the reference has no cc dump, else :passes or :differs by same-tree?."
+  [^String work ids {:keys [subject reference]}]
+  (let [[sc sn] (ppcheck/control-split subject) [rc rn] (ppcheck/control-split reference)]
+    (if-not (and (some #{sc} ids) (some #{rc} ids))
+      :left
+      (let [se (ppcheck/control-entry work sc sn) re (ppcheck/control-entry work rc rn)
+            mine (when se (read-or-nil (str work "/" sc "/control/" (:out se) ".port")))
+            cc (when re (read-or-nil (str work "/" rc "/cc-tree/" (:out re))))]
+        (cond
+          (nil? mine) :left
+          (nil? cc) :not-judged
+          (same-tree? cc mine) :passes
+          :else :differs)))))
+
+(defn tree-controls
+  "The tree check's controls after its corpora: the failing ones' rows."
+  [^String work ids]
+  (ppcheck/control-rows "repr-c parse-check" :tree ["tree dump" "cc tree dump"] #(tree-control-result work ids %)))
 
 (defn check
   "The tree check of the corpus `id` under WORK: WORK/ID/files.tsv (name, status, nodes, errors,
@@ -102,7 +141,7 @@
         h (assoc (host/load-host "test/c/host")
                  :pp-known-all (read-string (slurp "test/repr/c/pp-check-known.edn"))
                  :parse-known-all (read-string (slurp known-file)))
-        h (assoc h :pp-known (get-in (:pp-known-all h) [:pp (keyword id)] {}))
+        h (assoc h :pp-known (get-in (:pp-known-all h) [:pp (keyword id)] {}) :control-names (control-names id))
         threads (Integer/parseInt (or (System/getenv "REPR_C_THREADS") "8"))
         pool (Executors/newFixedThreadPool threads)
         t0 (System/nanoTime)
@@ -260,9 +299,11 @@
 (defn -main [cmd & args]
   (case cmd
     "check" (let [[work & ids] args
-                  st (reduce max 0 (map #(check work %) ids))]
+                  st (reduce max 0 (map #(check work %) ids))
+                  ;; GTS81 (a): the negative controls (test/c/controls.edn, :tree), no row of files.tsv or the counts
+                  cst (ppcheck/report-controls (tree-controls work ids))]
               (shutdown-agents)
-              (System/exit st))
+              (System/exit (max st cst)))
     "record" (let [[work & ids] args] (record work ids))
     "mutants" (let [[work seed nfiles per edits & ids] args]
                 (mutants work ids (Long/parseLong seed) (Long/parseLong nfiles) (Long/parseLong per) (Long/parseLong edits)))
