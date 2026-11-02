@@ -4261,3 +4261,30 @@ recommends and is what is built; test `test/gate/seed-make-test.bash` (19 checks
   *Recommended: (a)*: the tar is unchanged where `.tmp` is not setgid.
 - Not built (037's lower findings, for later): the overlay cached by mtime (finding 3; for this window C9.2 step 8 removes `.tmp/jrt-go/overlay` first), links in the seed
   tree (6), the fixpoint's printed modules compared (8), `--verify --cold` (9), xz's environment (10), arm64 verified (11), `ARBACE_SEED` vs `ARBACE_SEED_GO` (12).
+
+**C's REAP classes after queue 122 (VM report 122's audit; the user's decisions of 2026-11-02, built on `c23-w`).** F1, F3: the VM's fixes
+(`:unclassified` out of the read and print classes; a `:c-known` section the known file lacks is a problem). F2: `:missing-builtin` (deferred) before
+`:gcc-builtin`, the 24 programs whose runs fault on a builtin ci lacks. F4: the token check's file once (`:per-file`, its worst kind). F5: print's
+split-declaration, self-include and macro-context deferred, objects split by CS81 (the 36 macro-made bodies the deferred `:objects-macro-body`, the two
+asm labels `:objects` by design). F6: C's eval record bound to gcc's built programs (`:ref-runs`); the dg record's binding to the corpora's dg lists not
+built (the lists are not committed). F7: the CS decisions cited in `:decided`. F8-F10: dg's first matches, the classes and patterns that match nothing,
+vla's pattern, the titles. The matrix: C read 575+ / 104 / 53, eval 3,457 / 195 / 109, AOT 3,467 / 187 / 107, print 0+ / 7 / 148.
+
+Proposals for the classes no CS decides (F7), proposed, the user's to confirm; option (a) recommended in each and what the files say now:
+- **CS260 The token and tree checks' by-design classes** (`test/c/divergences-read.edn`: assembler, c23-colons, c23-if-true, cc-panic, digit-separators,
+  elifdef, embed, error-test, gnu-builtin-macro, has-c-attribute, has-gnu, invalid-paste, pp-errors, pp-known, pragma-once, u-prefix, va-opt; `:decided "C8"`).
+  Each is a place where cc (the token check's oracle) lacks or differs from C23 and gcc settles it, the port following gcc. Options: (a) by design, by CS16 (a)
+  and CS40 (a)'s rule (the reference is gcc; cc's gaps are the oracle's), cited in `:decided`; (b) deferred until the token check's oracle is gcc's own tokens
+  for those files. *Recommended: (a)*. (`undiagnosed`, deferred, stays: the port's preprocessor is to diagnose it.)
+- **CS261 A main file that includes itself** (print's and eval's `self-include`, 11 files, deferred since F5). Options: (a) deferred, the converter to read
+  the re-entered main file's tokens as an include of its own (the layer's `c/include` of the main file), with CS104 (a)'s split declarations in C6;
+  (b) by design: preprocessor tests whose program is the expansion, refused. *Recommended: (a)*.
+- **CS262 Print's reexpansion and run-address** (by design, `:decided "C8"`). Options: (a) by design: reexpansion is N6's limit with the objects equal,
+  run-address a program printing addresses (a run's own nondeterminism); (b) reexpansion deferred (the inner invocation recorded so the reread does
+  not expand it again). *Recommended: (a)*.
+- **CS263 The annotations' cc classes** (`test/c/divergences-annot.edn`: cc-attr-mode, cc-c23-constants, cc-empty-init, cc-layout, cc-preprocessor,
+  cc-redeclared, enum-range, item-placement by design; layout-unjudged deferred; `:decided "C8"`). Options: (a) by design where gcc agrees with the
+  checker or the item is cc's placement (CS93 (a)'s rule: the checker follows gcc), layout-unjudged deferred until the judge asks gcc about it;
+  (b) all deferred until a gcc-based annotation oracle. *Recommended: (a)*.
+- **CS264 The classes the spec or a phase decided** (eval's gcc-builtin SPEC §7.9 and abi SPEC §12.3 by design, threads §6.5 deferred; dg's
+  read-refused C7, a gap). Options: (a) the spec's sections and C7 stand as their decision, as cited; (b) each restated as a CS. *Recommended: (a)*.
