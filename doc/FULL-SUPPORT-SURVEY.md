@@ -3085,16 +3085,16 @@ Its last line: `reap: 16 of 16 cells checked, 0 with no check yet; 0 problems`.
 | class | kind | cases | v1 | since v1 | decision |
 |---|---|---:|---:|---|---|
 | `out-for-good`: XML (SAX), gen-class, Java serialization, Swing/AWT, classes from jars | by design | 23 | - | unchanged | doc/go/B1-PLAN.md D6, "Not to be done (the user, 2026-10-10)"; doc/go/EVAL-NOTES.md, "The suite's last fail... |
-| `interned-at-load`: compiled code interns the vars it names when its namespace's loader starts | by design | 4 | - | unchanged | RPS20 (a), by design as the JVM's AOT |
-| `q1-compiled-prims`: compiled fns are primitive where the evaluator's are not (Q1) | by design | 3 | - | unchanged | doc/go/EVAL-PLAN.md, Q1 (a) (the user, 2026-10-09) |
+| `interned-at-load`: compiled code interns the vars it names when its namespace's loader starts | by design (beside) | 4 | - | unchanged | RPS20 (a), by design as the JVM's AOT |
+| `q1-compiled-prims`: compiled fns are primitive where the evaluator's are not (Q1) | by design (beside) | 3 | - | unchanged | doc/go/EVAL-PLAN.md, Q1 (a) (the user, 2026-10-09) |
 | `class-files`: class files: the Go build writes and reads none | by design | 2 | - | unchanged | doc/STANDALONE-SURVEY.md D13; doc/VENDOR-NOTES.md, hand change 23 |
 | `q1-evaluated`: code the tests evaluate at run time: the evaluator's fns are boxed (Q1) | by design | 2 | - | unchanged | doc/go/EVAL-PLAN.md, Q1 (a) (the user, 2026-10-09) |
 | `javadoc-url`: java.javadoc's javadoc-url-test: java.sql.Connection is not in the Go build | by design | 1 | - | unchanged | doc/go/B1-PLAN.md D6; RPS55 (a): the java.sql assertion by design |
 | `runtime-source`: a source the test writes at run time loads from source | by design | 1 | - | new | by design (the user, 2026-11-02) |
 | `xml-stream`: javax.xml.stream (reflect's invoke-checks-accessibility) | by design | 1 | 1 | reclassified deferred to by design: RPS134 (b) ("Decided (2026-10-28)") | RPS134 (b), doc/FULL-SUPPORT-SURVEY.md, Decided (2026-10-28) |
-| `compiled-loader-line`: Compiler/LINE in a compiled loader | by design | 1 | - | unchanged | RPS20 (a), by design |
-| `identity-hash`: identity hashes (not reproducible) | by design | 1 | - | unchanged | doc/go/EVAL-NOTES.md, phase 2B (as decided for #object printing) |
-| `shared-symbols`: symbols shared in a compiled class's constant pool | by design | 1 | - | unchanged | doc/FUTAMURA-SURVEY.md, F3.3 (a) (the user, 2026-10-17) |
+| `compiled-loader-line`: Compiler/LINE in a compiled loader | by design (beside) | 1 | - | unchanged | RPS20 (a), by design |
+| `identity-hash`: identity hashes (not reproducible) | by design (beside) | 1 | - | unchanged | doc/go/EVAL-NOTES.md, phase 2B (as decided for #object printing) |
+| `shared-symbols`: symbols shared in a compiled class's constant pool | by design (beside) | 1 | - | unchanged | doc/FUTAMURA-SURVEY.md, F3.3 (a) (the user, 2026-10-17) |
 | `fiprims`: FIPrims through interfaces definterface makes at run time | (deferred in v1) | 0 | 2 | removed: RPS54 (b) ("As built: Clojure's deferred cases") | (removed) |
 | `fn-fields`: a compiled fn's closed-over values are its code object's fields, not its class's | (deferred in v1) | 0 | 2 | removed: RPS41 (b), a compiled fn's fields reflected (same section) | (removed) |
 | `compiled-trace-lines`: compiled frames' lines: an unboxed field access or method call, field assignm... | (deferred in v1) | 0 | 1 | removed: RPS42 (b), the compiled frames' lines (same section) | (removed) |
@@ -3165,7 +3165,7 @@ No class: nothing to record at this cell.
 | `jrt-streams`: jrt's own streams otherwise than the JDK's: a closed DataInputStream over a F... | deferred | 2 | 1 | grew by 1: t04243 (DataOutputStream/CounterOverflow), load-failed in v1 (`interp-protected`: the protected field written), runs since JC4b and differs on this class's member, not a re-recording | JCS101: jrt flushing its streams at exit by design (a); the other behaviours deferred with JCS96 (b) |
 | `thread-order`: the order of two threads' output lines: a thread started and the starting thr... | deferred | 2 | - | new at the interp level: t04319 (PipedInputStream/Constructors) and t04327 (PipedReader/Constructors), load-failed in v1 (Thread not extendable), run since JC4b; t04319 differs by the same line order as compiled, t04327 passed on its second run in 1f0cd7b1's (flaky, the known pair); the class has no :level now (JC4b) | JCS104 (b): the two threads' output order recorded status-only |
 | `url-headers`: URLConnection's headers jrt answers otherwise: no MIME type (getFileNameMap h... | deferred | 2 | 2 | unchanged | JCS105 (b): deferred with JCS96 |
-| `interp-world-limits`: the interpreter's known limits: a run-time class extending java.io.StringRead... | deferred | 2 | 2 | unchanged | RPS21 (a), deferred, decided with JC6's ranking |
+| `interp-world-limits`: the interpreter's known limits: a run-time class extending java.io.StringRead... | deferred (beside) | 2 | 2 | unchanged | RPS21 (a), deferred, decided with JC6's ranking |
 | `clock`: stdout names the run's clock (a file's last-modified time made by the run) | deferred | 1 | 1 | unchanged | JCS99 (a): as built, these tests' digests recorded as "-" (c) |
 | `environment`: the run's environment: temporary directory, canonical paths | deferred | 1 | - | new: t04272 (File/UserDirChangedTest) passed in v1 and at the draft (6ad08d82) and differs at both levels in 1f0cd7b1's (a canonical path); the class (As built: JC1, JC2) is :unstable and names it in :tests | As built: JC1, JC2; JCS19 (b) |
 | `identity-sum`: stdout prints sums of identity hash codes (Test6909839's ((c) ? a : b).hashCo... | deferred | 1 | 1 | unchanged | As built: JC1 (:identity, JCS17 (b): hash codes after an @ masked); the sums cannot be masked; JCS99 (a), (c) |
@@ -3319,36 +3319,25 @@ No class: nothing to record at this cell.
 
 | class | kind | cases | v1 | since v1 | decision |
 |---|---|---:|---:|---|---|
-| `by-design`: read and printed, out of eval (SPEC §14) | by design | 340 | - | new | SPEC §14, CS3 (a) |
 | `compile-only-dirtests`: directory tests that only compile: no run level | by design | 127 | - | unchanged | doc/go/ROUNDTRIP.md, "Directory tests"; test/repr/go/roundtrip-dirtest-known.edn |
-| `embed`: C23's #embed and __has_embed (6.10.4, 6.10.1), which cc lacks | by design | 47 | - | new | CS260 (a); C8 |
-| `long-double`: long double is double (CS35) | by design | 17 | - | new | CS35, SPEC §12.5 |
-| `pp-errors`: the trees equal, the errors not | by design | 16 | - | new | CS260 (a); C8 |
-| `cc-layout`: cc's layout of a struct or union differs from the checker's, and gcc agrees w... | by design | 11 | - | new | CS263 (a); C8 |
-| `va-opt`: C23's __VA_OPT__ (6.10.5.1), which cc lacks | by design | 10 | - | new | CS260 (a); C8 |
 | `tests-embed-sources`: TamaGo's tests embed their package's own sources | by design | 9 | - | unchanged | doc/go/ROUNDTRIP.md, "Known gaps"; test/repr/go/roundtrip-tests-known.edn |
-| `speed`: speed: programs beyond the check's 10 s | by design | 9 | - | new | CS107 (a); GOI-SPEC §11.1's rule |
+| `empty-decl-group`: an empty declaration group (import ( ), a local var ()) | by design | 3 | - | unchanged | doc/go/PRINTER-NOTES.md, G2F6 (the user, 2026-10-17); doc/go/SPEC.md §10.2 |
+| `unsafe`: unsafe has no export data or code | by design | 2 | - | unchanged | doc/go/ROUNDTRIP.md, "The corpus and the configuration" |
+
+
+**C read** (classes file `test/c/divergences-read.edn`)
+
+| class | kind | cases | v1 | since v1 | decision |
+|---|---|---:|---:|---|---|
+| `embed`: C23's #embed and __has_embed (6.10.4, 6.10.1), which cc lacks | by design | 47 | - | new | CS260 (a); C8 |
+| `pp-errors`: the trees equal, the errors not | by design | 16 | - | new | CS260 (a); C8 |
+| `va-opt`: C23's __VA_OPT__ (6.10.5.1), which cc lacks | by design | 10 | - | new | CS260 (a); C8 |
 | `dg-unsupported`: DejaGnu's UNSUPPORTED: a directive's selector is false on this target | by design | 8 | - | new | CS195 (a); C8 |
 | `trigraphs`: phase 1's trigraphs, which cc does not read and gcc does: the port follows gcc | by design | 4 | - | new | CS50 (a); C8 |
-| `abi`: gcc's layout options the forms do not carry | by design | 4 | - | new | SPEC §12.3, CS264 (a) |
-| `fenv`: floating-point exception flags and signaling NaNs are not modelled (C7) | by design | 4 | - | new | C7 (write-ahead), CS130 |
-| `gcc-builtin`: gcc's own semantics of a builtin a program redefines | by design | 4 | - | new | SPEC §7.9, CS264 (a) |
-| `ub`: undefined behaviour the reference's runs show (SPEC §13.2) | by design | 4 | - | new | CS10 (a), SPEC §13.2 |
-| `cc-empty-init`: an array of unknown size with an empty initializer {} | by design | 4 | - | new | CS263 (a); C8 |
-| `reexpansion`: a macro invocation inside a larger one is printed expanded, and reexpanded by... | by design | 4 | - | new | CS262 (a); C8 |
-| `empty-decl-group`: an empty declaration group (import ( ), a local var ()) | by design | 3 | - | unchanged | doc/go/PRINTER-NOTES.md, G2F6 (the user, 2026-10-17); doc/go/SPEC.md §10.2 |
 | `u-prefix`: C11's u'x', U'x', u"x", U"x" (6.4.4.5, 6.4.5) | by design | 3 | - | new | CS260 (a); C8 |
 | `ucn-identifier`: universal character names in identifiers, one identifier to gcc: the port fol... | by design | 3 | - | new | CS50 (a); C8 |
-| `cc-redeclared`: cc writes a redeclared array's or function's composite type at the earlier de... | by design | 3 | - | new | CS263 (a); C8 |
-| `item-placement`: an item cc places on another line or file than the forms | by design | 3 | - | new | CS263 (a); C8 |
-| `vector-types`: GNU's vector types, read and checked, out of eval and AOT by design | by design | 3 | - | new | CS3 (a); C8 |
-| `unsafe`: unsafe has no export data or code | by design | 2 | - | unchanged | doc/go/ROUNDTRIP.md, "The corpus and the configuration" |
 | `error-test`: a file the reference rejects (gcc -E's status not 0, a dg-error test) | by design | 2 | - | new | CS260 (a); C8 |
 | `has-c-attribute`: __has_c_attribute (6.10.1), which cc answers 0 (an identifier) | by design | 2 | - | new | CS260 (a); C8 |
-| `cc-attr-mode`: GNU's mode attribute, which cc ignores (the checker gives gcc's type of that ... | by design | 2 | - | new | CS263 (a); C8 |
-| `cc-preprocessor`: the file's stream differs from cc's | by design | 2 | - | new | CS263 (a); C8 |
-| `enum-range`: an enumerator beyond long long's range in an error test | by design | 2 | - | new | CS263 (a); C8 |
-| `objects`: the print is the same program (levels 1, 2, 4) but gcc -O0's object code diff... | by design | 2 | - | new | CS81 (a) for the rest (the user, 2026-10-30) |
 | `assembler`: an assembler source (.S) gcc preprocesses as assembler-with-cpp, its lexing n... | by design | 1 | - | new | CS260 (a); C8 |
 | `c23-colons`: C23's :: punctuator (6.4.6), which cc's scanner lacks | by design | 1 | - | new | CS260 (a); C8 |
 | `cc-panic`: cc's preprocessor panics (the port's too, at the same place), where gcc reads... | by design | 1 | - | new | CS260 (a); C8 |
@@ -3356,36 +3345,86 @@ No class: nothing to record at this cell.
 | `has-gnu`: gcc's __has_attribute, __has_builtin, __has_feature and __has_extension | by design | 1 | - | new | CS260 (a); C8 |
 | `xid-identifier`: an identifier holding a character from 0x80 that is not a letter (a combining... | by design | 1 | - | new | CS63 (a); C8 |
 | `pp-known`: the preprocessed stream is known to differ from cc's (the token check's class) | by design | 1 | - | new | CS260 (a); C8 |
-| `cc-c23-constants`: C23's nullptr, true and false | by design | 1 | - | new | CS263 (a); C8 |
-| `run-address`: the original and the print run differently though their objects are equal | by design | 1 | - | new | CS262 (a); C8 |
-| `vla`: variably modified types beyond a block's arrays (deferred) | deferred | 56 | - | new | CS106 |
-| `missing-builtin`: a builtin ci does not implement yet (deferred) | deferred | 48 | - | new | the user, 2026-11-02 (queue 122, F2) |
-| `wide`: the overflow builtins on wide integers (deferred) | deferred | 48 | - | new | CS35, this section |
-| `cc-grammar`: the reference accepts the file, the port's parser (cc's, C3's trees) does not | deferred | 45 | - | new | CS80 (a); C8 |
-| `objects-macro-body`: the print is the same program (levels 1, 2, 4) but gcc -O0's object code diff... | deferred | 36 | - | new | CS81 (b) for the bodies an invocation made (the user, 2026-10-30; queue 122 F5) |
-| `complex-int`: GNU's complex integer types (deferred) | deferred | 26 | - | new | CS105 |
-| `read`: repr/c's reader's known gaps (deferred) | deferred | 24 | - | new | C3b.2, CS104; self-include CS261 (a) |
-| `converter-gap`: a construct the converter does not write or writes losing a part | deferred | 20 | - | new | CS83 (a); C8 |
-| `eval-limits`: the evaluated port's limits (CS60, CS78) | deferred | 18 | - | new | CS60 (a), CS78 (a); C8 |
-| `print-grammar`: the :lines print holds what cc's grammar (the reread) or gcc refuses though t... | deferred | 14 | - | new | CS80 (a); C8 |
 | `wrong-reason`: the checker errs on the right line for another reason than gcc | deferred | 13 | - | new | CS200 (a) |
-| `checker-gap`: a difference neither cc's known gaps nor the reference explain | deferred | 12 | - | new | CS93 (a); C8 |
-| `self-include`: the main file includes itself (#include __FILE__-like tests) | deferred | 11 | - | new | CS261 (a): deferred, the converter to read the re-entered main file as an include of its own (the user, 202... |
 | `read-refused`: the reader or converter refuses, times out or crashes | deferred | 10 | - | new | C7, CS264 (a) |
 | `decl-diag`: declaration, type and constant-expression errors the checker does not give | deferred | 9 | - | new | CS92 (a) |
 | `pp-diag`: preprocessor diagnostics the port does not give | deferred | 8 | - | new | CS50, CS51 |
-| `checker`: the checker's own differences ci meets (deferred, CS93 (a)) | deferred | 6 | - | new | CS93 (a) |
-| `macro-context`: a recovered invocation or a printed expansion means another thing where the p... | deferred | 6 | - | new | CS82 (b) in C5, (a) until then (the user, 2026-10-30): a fix planned; deferred (the user, 2026-11-02, queue... |
 | `eval-depth`: the parse recurses deeper than the evaluator's 10,000 interpreted calls | deferred | 5 | - | new | CS60 (a); C8 |
-| `layout-unjudged`: a layout cc and the checker part on that the judge could not ask gcc about | deferred | 5 | - | new | CS263 (a): deferred until the judge asks gcc about it; C8 |
-| `split-declaration`: a declaration begins in one file and ends in another (SPEC §4.3's split-decl... | deferred | 5 | - | new | CS104 (a): the converter keeps such a declaration whole (C6); deferred as at eval (the user, 2026-11-02, qu... |
 | `undiagnosed`: a file gcc rejects (a dg-error test) whose error the port's preprocessor does... | deferred | 4 | - | new | CS260 (a): deferred, the port's preprocessor to diagnose it; C8 |
-| `threads`: threads (deferred) | deferred | 4 | - | new | §6.5, CS264 (a) |
 | `parse-gap`: valid C23 (or an error test's other lines) the parser rejects | deferred | 2 | - | new | CS131 (c); C7 |
 | `pedantic-diag`: pedwarns of -pedantic-errors the checker does not know | deferred | 2 | - | new | CS92 (a) |
-| `complit-static`: compound literals with storage class specifiers: the builder's places (C7 fol... | deferred | 2 | - | new | C7 follow-up, CS131 |
+
+
+**C eval** (classes file `test/c/divergences.edn`)
+
+| class | kind | cases | v1 | since v1 | decision |
+|---|---|---:|---:|---|---|
+| `by-design`: read and printed, out of eval (SPEC §14) | by design | 170 | - | new | SPEC §14, CS3 (a) |
+| `cc-layout`: cc's layout of a struct or union differs from the checker's, and gcc agrees w... | by design (beside) | 11 | - | new | CS263 (a); C8 |
+| `speed`: speed: programs beyond the check's 10 s | by design | 9 | - | new | CS107 (a); GOI-SPEC §11.1's rule |
+| `long-double`: long double is double (CS35) | by design | 8 | - | new | CS35, SPEC §12.5 |
+| `cc-empty-init`: an array of unknown size with an empty initializer {} | by design (beside) | 4 | - | new | CS263 (a); C8 |
+| `cc-redeclared`: cc writes a redeclared array's or function's composite type at the earlier de... | by design (beside) | 3 | - | new | CS263 (a); C8 |
+| `item-placement`: an item cc places on another line or file than the forms | by design (beside) | 3 | - | new | CS263 (a); C8 |
+| `vector-types`: GNU's vector types, read and checked, out of eval and AOT by design | by design (beside) | 3 | - | new | CS3 (a); C8 |
+| `abi`: gcc's layout options the forms do not carry | by design | 2 | - | new | SPEC §12.3, CS264 (a) |
+| `fenv`: floating-point exception flags and signaling NaNs are not modelled (C7) | by design | 2 | - | new | C7 (write-ahead), CS130 |
+| `gcc-builtin`: gcc's own semantics of a builtin a program redefines | by design | 2 | - | new | SPEC §7.9, CS264 (a) |
+| `ub`: undefined behaviour the reference's runs show (SPEC §13.2) | by design | 2 | - | new | CS10 (a), SPEC §13.2 |
+| `cc-attr-mode`: GNU's mode attribute, which cc ignores (the checker gives gcc's type of that ... | by design (beside) | 2 | - | new | CS263 (a); C8 |
+| `cc-preprocessor`: the file's stream differs from cc's | by design (beside) | 2 | - | new | CS263 (a); C8 |
+| `enum-range`: an enumerator beyond long long's range in an error test | by design (beside) | 2 | - | new | CS263 (a); C8 |
+| `cc-c23-constants`: C23's nullptr, true and false | by design (beside) | 1 | - | new | CS263 (a); C8 |
+| `vla`: variably modified types beyond a block's arrays (deferred) | deferred | 28 | - | new | CS106 |
+| `missing-builtin`: a builtin ci does not implement yet (deferred) | deferred | 24 | - | new | the user, 2026-11-02 (queue 122, F2) |
+| `wide`: the overflow builtins on wide integers (deferred) | deferred | 24 | - | new | CS35, this section |
+| `complex-int`: GNU's complex integer types (deferred) | deferred | 13 | - | new | CS105 |
+| `read`: repr/c's reader's known gaps (deferred) | deferred | 12 | - | new | C3b.2, CS104; self-include CS261 (a) |
+| `checker-gap`: a difference neither cc's known gaps nor the reference explain | deferred (beside) | 12 | - | new | CS93 (a); C8 |
+| `converter-gap`: the forms lose what the checker needs | deferred (beside) | 7 | - | new | CS83 (a); C8 |
+| `layout-unjudged`: a layout cc and the checker part on that the judge could not ask gcc about | deferred (beside) | 5 | - | new | CS263 (a): deferred until the judge asks gcc about it; C8 |
+| `checker`: the checker's own differences ci meets (deferred, CS93 (a)) | deferred | 3 | - | new | CS93 (a) |
 | `signals`: a signal delivered to the program's handler (review 006) | deferred | 2 | - | new | CS191 (a); review 006 |
-| `checker-layout`: the checker's layout differs from cc's and gcc's static assertions refuse the... | deferred | 1 | - | new | CS93 (a); C8 |
+| `threads`: threads (deferred) | deferred | 2 | - | new | §6.5, CS264 (a) |
+| `complit-static`: compound literals with storage class specifiers: the builder's places (C7 fol... | deferred | 1 | - | new | C7 follow-up, CS131 |
+| `checker-layout`: the checker's layout differs from cc's and gcc's static assertions refuse the... | deferred (beside) | 1 | - | new | CS93 (a); C8 |
+
+
+**C AOT** (classes files `test/c/divergences-aot.edn`, `test/c/divergences.edn`)
+
+| class | kind | cases | v1 | since v1 | decision |
+|---|---|---:|---:|---|---|
+| `by-design`: read and printed, out of eval (SPEC §14) | by design | 170 | - | new | SPEC §14, CS3 (a) |
+| `long-double`: long double is double (CS35) | by design | 9 | - | new | CS35, SPEC §12.5 |
+| `abi`: gcc's layout options the forms do not carry | by design | 2 | - | new | SPEC §12.3, CS264 (a) |
+| `fenv`: floating-point exception flags and signaling NaNs are not modelled (C7) | by design | 2 | - | new | C7 (write-ahead), CS130 |
+| `gcc-builtin`: gcc's own semantics of a builtin a program redefines | by design | 2 | - | new | SPEC §7.9, CS264 (a) |
+| `ub`: undefined behaviour the reference's runs show (SPEC §13.2) | by design | 2 | - | new | CS10 (a), SPEC §13.2 |
+| `vla`: variably modified types beyond a block's arrays (deferred) | deferred | 28 | - | new | CS106 |
+| `missing-builtin`: a builtin ci does not implement yet (deferred) | deferred | 24 | - | new | the user, 2026-11-02 (queue 122, F2) |
+| `wide`: the overflow builtins on wide integers (deferred) | deferred | 24 | - | new | CS35, this section |
+| `complex-int`: GNU's complex integer types (deferred) | deferred | 13 | - | new | CS105 |
+| `read`: repr/c's reader's known gaps (deferred) | deferred | 12 | - | new | C3b.2, CS104; self-include CS261 (a) |
+| `checker`: the checker's own differences ci meets (deferred, CS93 (a)) | deferred | 3 | - | new | CS93 (a) |
+| `threads`: threads (deferred) | deferred | 2 | - | new | §6.5, CS264 (a) |
+| `complit-static`: compound literals with storage class specifiers: the builder's places (C7 fol... | deferred | 1 | - | new | C7 follow-up, CS131 |
+
+
+**C print** (classes file `test/c/divergences-print.edn`)
+
+| class | kind | cases | v1 | since v1 | decision |
+|---|---|---:|---:|---|---|
+| `reexpansion`: a macro invocation inside a larger one is printed expanded, and reexpanded by... | by design | 4 | - | new | CS262 (a); C8 |
+| `objects`: the print is the same program (levels 1, 2, 4) but gcc -O0's object code diff... | by design | 2 | - | new | CS81 (a) for the rest (the user, 2026-10-30) |
+| `run-address`: the original and the print run differently though their objects are equal | by design | 1 | - | new | CS262 (a); C8 |
+| `cc-grammar`: the reference accepts the file, the port's parser (cc's, C3's trees) does not | deferred | 45 | - | new | CS80 (a); C8 |
+| `objects-macro-body`: the print is the same program (levels 1, 2, 4) but gcc -O0's object code diff... | deferred | 36 | - | new | CS81 (b) for the bodies an invocation made (the user, 2026-10-30; queue 122 F5) |
+| `eval-limits`: the evaluated port's limits (CS60, CS78) | deferred | 18 | - | new | CS60 (a), CS78 (a); C8 |
+| `print-grammar`: the :lines print holds what cc's grammar (the reread) or gcc refuses though t... | deferred | 14 | - | new | CS80 (a); C8 |
+| `converter-gap`: a construct the converter does not write or writes losing a part | deferred | 13 | - | new | CS83 (a); C8 |
+| `self-include`: the main file includes itself (#include __FILE__-like tests) | deferred | 11 | - | new | CS261 (a): deferred, the converter to read the re-entered main file as an include of its own (the user, 202... |
+| `macro-context`: a recovered invocation or a printed expansion means another thing where the p... | deferred | 6 | - | new | CS82 (b) in C5, (a) until then (the user, 2026-10-30): a fix planned; deferred (the user, 2026-11-02, queue... |
+| `split-declaration`: a declaration begins in one file and ends in another (SPEC §4.3's split-decl... | deferred | 5 | - | new | CS104 (a): the converter keeps such a declaration whole (C6); deferred as at eval (the user, 2026-11-02, qu... |
 
 <!-- v2-record:end -->
 

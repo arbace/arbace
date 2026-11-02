@@ -9,7 +9,7 @@
 # `Java *` is any Java level). Plain shell and awk; no builds, seconds.
 # Fails (nothing written) on: a missing or unreadable REAP_OUT, changes.tsv or DOC; a DOC without
 # exactly one begin and one end marker, in that order; V1_TAG not a commit here; a bin/reap output
-# that is not 12 cells or whose last line counts problems. Warns (stderr, work/warnings.txt) on a
+# that is not 16 cells or whose last line counts problems. Warns (stderr, work/warnings.txt) on a
 # changes.tsv row no table row uses (a class renamed or gone) and on a note whose leading status
 # word contradicts the computed one.
 set -uo pipefail
@@ -36,18 +36,18 @@ else
   bin/reap > "$w/reap.out" 2>&1 || die "bin/reap failed (see $w/reap.out)"
   when=$(date +%F)
 fi
-ncell=$(grep -cE '^(Clojure|Java|Go) (read|eval|AOT|print): .*; classes ' "$w/reap.out")
-[ "$ncell" = 12 ] || die "$w/reap.out: $ncell cell lines, not 12 (not bin/reap's output?)"
+ncell=$(grep -cE '^(Clojure|Java|Go|C) (read|eval|AOT|print): .*; classes ' "$w/reap.out")
+[ "$ncell" = 16 ] || die "$w/reap.out: $ncell cell lines, not 16 (not bin/reap's output?)"
 grep -qE '^reap: [0-9]+ of [0-9]+ cells checked, [0-9]+ with no check yet; 0 problems$' "$w/reap.out" || die "$w/reap.out: its last line does not say 0 problems"
 : > "$w/warnings.txt"
-grep -qE '^(Clojure|Java|Go) (read|eval|AOT|print): no check yet' "$w/reap.out" && echo "warning: a cell has no check yet" >> "$w/warnings.txt"
+grep -qE '^(Clojure|Java|Go|C) (read|eval|AOT|print): no check yet' "$w/reap.out" && echo "warning: a cell has no check yet" >> "$w/warnings.txt"
 grep -q 'decision pending' "$w/reap.out" && echo "warning: a class's decision is pending" >> "$w/warnings.txt"
 
 # current classes per cell: cell TAB id TAB kind TAB cases TAB title TAB pending TAB beside (a class
 # only beside sources name: counted in the table, not in the matrix, RPS16)
 awk '
- /^(Clojure|Java|Go) (read|eval|AOT|print): /{ cell=$1" "$2; sub(/:$/,"",cell); bs=0; next }
- cell!="" && /^   [^ ]/{ bs=($0 ~ /^   [^,:]* \(beside\)/); next }
+ /^(Clojure|Java|Go|C) (read|eval|AOT|print): /{ cell=$1" "$2; sub(/:$/,"",cell); bs=0; next }
+ cell!="" && /^   [^ ]/{ bs=($0 ~ / \(beside\), /); next }
  cell!="" && /^ +[0-9]+ [^ :]+: .* \((design|deferred)(, decision pending)?\)$/ {
    n=$1; id=$2; sub(/:$/,"",id)
    line=$0; sub(/^ +[0-9]+ [^ ]+ /,"",line)
@@ -78,7 +78,8 @@ awk '/^## REAP v1.s divergences/{s=1; next} s && /^## /{exit} s && /^\| \| read 
 [ "$(wc -l < "$w/v1-matrix.md")" = 5 ] || die "v1's matrix not found in $tag's section"
 
 # each cell'"'"'s classes file and the decisions
-awk '/^(Clojure|Java|Go) (read|eval|AOT|print): /{ c=$1" "$2; sub(/:$/,"",c); f=$0; sub(/^.*; classes /,"",f); print c "\t" f }' "$w/reap.out" > "$w/cellfile.tsv"
+# (a cell of two classes files, C AOT's, prints them as a vector: ["A" "B"], kept here as "A B")
+awk '/^(Clojure|Java|Go|C) (read|eval|AOT|print): /{ c=$1" "$2; sub(/:$/,"",c); f=$0; sub(/^.*; classes /,"",f); gsub(/[]["]/,"",f); print c "\t" f }' "$w/reap.out" > "$w/cellfile.tsv"
 : > "$w/dec.tsv"
 # the cells' files, then the sources' own (:classes in test/reap/cells.edn: diffcheck's, the oracle's)
 srcfiles=$(sed -n 's/.*:classes "\([^"]*\)".*/\1/p' test/reap/cells.edn | sort -u)
@@ -96,22 +97,23 @@ problems=$(sed -n "s/^reap: \(.*\)$/\1/p" "$w/reap.out" | tail -1)
 
 awk -F'\t' -v W="$w" -v CHF="$changes" -v WF="$w/warnings.txt" '
  function short(s,n,  t){ if(length(s)<=n) return s; t=substr(s,1,n-3); if(substr(s,n-2,1) ~ /^[\200-\277]$/){ sub(/[\200-\277]*$/,"",t); sub(/[\300-\377]$/,"",t) } return t "..." } # never half a UTF-8 character
- function dec(f,id,  k,t){ k=f SUBSEP id; if(k in D) t=D[k]; else if(id in DX) t=DX[id]; else return "-"; sub(/ \(doc\/.*$/,"",t); sub(/, as .*$/,"",t); return short(t,110) }
+ function dec(fs,id,  k,t,ff,nf,i){ nf=split(fs,ff," "); t=""; for(i=1;i<=nf && t=="";i++){ k=ff[i] SUBSEP id; if(k in D) t=D[k] } if(t=="" && (id in DX)) t=DX[id]; if(t=="") return "-"; sub(/ \(doc\/.*$/,"",t); sub(/, as .*$/,"",t); return short(t,110) }
  function word(s){ sub(/[:,; (].*$/,"",s); return s }
  BEGIN{
   while((getline l < (W "/cellfile.tsv"))>0){ split(l,a,"\t"); CF[a[1]]=a[2]; cells[++nc]=a[1] }
   while((getline l < (W "/cur.tsv"))>0){ split(l,a,"\t"); k=a[1] SUBSEP a[2]; CK[k]=a[3]; CN[k]=a[4]; CT[k]=a[5]; CP[k]=a[6]; CB[k]=a[7]; if(!(k in inorder)){inorder[k]=1; ids[a[1]]=ids[a[1]] "\n" a[2]} }
   while((getline l < (W "/v1.tsv"))>0){ split(l,a,"\t"); k=a[1] SUBSEP a[2]; VK[k]=a[3]; VN[k]=a[4]; VT[k]=a[5]; if(!(k in inorder) ){ if(!(k in vin)){ids[a[1]]=ids[a[1]] "\n" a[2]} } vin[k]=1 }
-  for(c in CF) ISCF[CF[c]]=1
+  for(c in CF){ nf=split(CF[c],ff," "); for(i=1;i<=nf;i++) ISCF[ff[i]]=1 }
   while((getline l < (W "/dec.tsv"))>0){ split(l,a,"\t"); if(!((a[1] SUBSEP a[2]) in D)) D[a[1] SUBSEP a[2]]=a[3]; if(!(a[1] in ISCF) && !(a[2] in DX)) DX[a[2]]=a[3] }
   nch=0
   while((getline l < CHF)>0){ nch++; if(l ~ /^[ \t]*$/) continue; if(split(l,a,"\t")!=3){ printf "warning: changes.tsv line %d: not 3 tab-separated fields\n", nch >> WF; continue }
    if((a[1] SUBSEP a[2]) in CH) printf "warning: changes.tsv line %d: %s %s again (the later row wins)\n", nch, a[1], a[2] >> WF
    CH[a[1] SUBSEP a[2]]=a[3]; CHL[a[1] SUBSEP a[2]]=nch }
-  nl=split("Clojure read,Clojure eval,Clojure AOT,Clojure print,Java read,Java eval,Java AOT,Java print,Go read,Go eval,Go AOT,Go print",L,",")
+  nl=split("Clojure read,Clojure eval,Clojure AOT,Clojure print,Java read,Java eval,Java AOT,Java print,Go read,Go eval,Go AOT,Go print,C read,C eval,C AOT,C print",L,",")
   for(ci=1;ci<=nl;ci++){
    c=L[ci]; split(c,p," "); lang=p[1]
-   printf "\n**%s** (classes file `%s`)\n\n", c, CF[c]
+   cfs=CF[c]; nf=gsub(/ /,"`, `",cfs)
+   printf "\n**%s** (classes file%s `%s`)\n\n", c, (nf>0?"s":""), cfs
    n=split(ids[c],arr,"\n"); m=0; for(i=1;i<=n;i++) if(arr[i]!="") u[++m]=arr[i]
    if(m==0){ print "No class: nothing to record at this cell.\n"; continue }
    # sort: by design first then deferred, by cases desc (simple insertion sort)
