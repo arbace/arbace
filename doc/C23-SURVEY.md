@@ -4217,6 +4217,7 @@ second pass's `namespaces.txt` (it is: the list is the embedded tree's); (d) the
 - **CS250 The window's order.** Options: (a) as C9.2: the first executable and the light checks first, CI_EXE run second, the fixpoint and `--verify` last (the re-seed once, batched
   with the other crops' windows); (b) a re-seed for C alone first. *Recommended: (a)*: a seed is rare and every crop's embedded tree is the same build.
   **Decided (the user, 2026-11-02): (a), as C9.2.**
+  **Decided (the user, 2026-11-02), on the seed's content: the re-seed for `arbace-reaps-4-crops-v1` embeds C only (`arbace/c`, `arbace/repr/c`, CInterp); C++, OCaml and Scheme embed at a later re-seed, when their rows come.**
 - **CS251 Shards by `arbace.build.go`** (C9.3, item 3). Options: (a) as planned (`:c-main` programs; the check keeps `go build` for its 3,761 programs, `arbace.build.go` for the programs and
   the essential subset's shard); (b) the check's shards by `bin/build-go` too (the C6 row to the letter; slower, the lock). *Recommended: (a)*, (b) if the record of the compiled level is
   to be remade anyway.
