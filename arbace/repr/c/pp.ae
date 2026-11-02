@@ -254,12 +254,12 @@
   (when-some [t (slot c TOS)] (.add ^ArrayList (.-stack c) t))
   (slot! c TOS v))
 
-(deftype Included [^String using sys])
+(deftype Included [^String using sys ^String path])
 
 ;; the main file's Included: no directory (an #include_next there searches the whole chain, as gcc's does) and not a system
 ;; header. enter! pushes it for the main file, so the main file's status comes back when its first header is left (before, the
 ;; slot kept the last header's, and a header the main file included after a system header was taken for a system header)
-(def ^:private main-included (Included. nil false))
+(def ^:private main-included (Included. nil false nil))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Paths (Go's path/filepath on Unix)
@@ -1409,10 +1409,10 @@
       "")))
 
 (defn- enter!
-  "A file's groups pushed after the included marker, as cpp.include does."
-  [^Cpp c g ^String using sysdir]
+  "A file's groups pushed after the included marker, as cpp.include does (`pth` the file's path, its CFile's name)."
+  [^Cpp c g ^String using sysdir ^String pth]
   (push! c (or (slot c INCLUDED) main-included))
-  (slot! c INCLUDED (Included. using (boolean sysdir)))
+  (slot! c INCLUDED (Included. using (boolean sysdir) pth))
   (push! c [:leave])
   (slot! c DEPTH (inc (long (slot c DEPTH))))
   (push! c g))
@@ -1466,7 +1466,7 @@
                     (do ;; Arbace (C3b): the inclusion recorded for the converter's header units
                         (record! c {:directive "enter" :path pth :raw raw :system (boolean sysdir) :off (.-po ^Tok (line 0))
                                     :from (when-let [^CFile f (.-pf ^Tok (line 0))] (.-name f))})
-                        (enter! c g using sysdir))))
+                        (enter! c g using sysdir pth))))
                   (do (eh c (str (pos-str s0) ": include file not found: " raw)) (slot! c CLOSED true)))))))))))
 
 (declare embed-params)
@@ -1714,10 +1714,16 @@
       ;; Arbace (queue 136, review 130's finding 1): #pragma GCC system_header (and its _Pragma) makes the rest of the current
       ;; file a system header, so a header it includes after the pragma is one (libcpp's cpp_make_system_header sets the buffer's
       ;; sysp, which _cpp_stack_file takes), and one it included before is not; ignored in the main file (gcc warns)
+      ;; queue 136 (review 130's finding 2): the change recorded at the pragma's offset, for the converter to judge each of the
+      ;; file's forms by its place (the lines before the pragma are no system header's); not when the pragma's token stands in
+      ;; another file (a _Pragma from another file's macro)
       "GCC" (when (and (> (count x) 3) (= (src (x 3)) "system_header"))
               (let [^Included cur (slot c INCLUDED)]
                 (when (and cur (.-using cur))
-                  (slot! c INCLUDED (Included. (.-using cur) true)))))
+                  (slot! c INCLUDED (Included. (.-using cur) true (.-path cur)))
+                  (let [^Tok t (x 0)]
+                    (when (= (some-> ^CFile (.-pf t) .-name) (.-path cur))
+                      (record! c {:directive "system" :file (.-path cur) :off (.-po t) :system true}))))))
       nil)))
 
 ;; ---------------------------------------------------------------------------------------------

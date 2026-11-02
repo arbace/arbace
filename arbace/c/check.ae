@@ -2399,6 +2399,15 @@
 
 (declare check-top)
 
+(defn- sys-at
+  "queue 136 (review 130's findings 2, 3): a header form's system status: `base` (its file's entry's) as the preprocessor's
+  changes `cs` of its file ([[off system?] ...] in offset order: a `#pragma GCC system_header`, a linemarker) before the form's
+  offset `off` leave it (libcpp: a pragma or a linemarker changes the status from the next line on)."
+  [base cs off]
+  (if (and off (seq cs))
+    (reduce (fn [s [co cv]] (if (< (long co) (long off)) cv s)) base cs)
+    base))
+
 (defn- check-forms [forms]
   (doseq [f forms] (check-top f)))
 
@@ -2442,7 +2451,15 @@
                               sys-of (fn [p]
                                        (let [fi (get files p)]
                                          (boolean (and fi (or (:system fi) (:pragma @(info-of p)))))))
-                              ffs (:form-files uf)]
+                              ffs (:form-files uf)
+                              ;; queue 136 (review 130's findings 2, 3): the pp's status changes by file and each form's offset in its
+                              ;; file, for a unit read from C: a pragma counts from its place on, not for the lines before it, and
+                              ;; not in an #if 0 or a comment (the line regex's :pragma left out). nil for a unit read back from .ae
+                              ;; (musl's cache): the regex's pragma for the whole file, as before
+                              chg (:sys-changes uf)
+                              offs (:form-offs uf)
+                              nopragma (java.util.IdentityHashMap.)
+                              no-pragma (fn [d] (or (.get nopragma d) (let [n (delay (assoc @d :pragma false))] (.put nopragma d n) n)))]
                         (binding [*cx* (assoc *cx* :annotating (atom false))
                                   *unit* (str (or (:path uf) u))
                                   *system-unit* unit-sys
@@ -2450,11 +2467,14 @@
                           ;; each of the unit's forms at its own line, as the main file's are
                           (doseq [[i g] (map-indexed vector (:forms uf))]
                             (let [ff (when ffs (nth ffs i nil))
-                                  own (and ff (not= ff (:path uf)) (contains? files ff))]
+                                  own (and ff (not= ff (:path uf)) (contains? files ff))
+                                  sys (if own (if chg (boolean (:system (get files ff))) (sys-of ff)) *system-unit*)
+                                  sys (if chg (sys-at sys (get chg (or ff (:path uf))) (when offs (nth offs i nil))) sys)
+                                  info (if own (info-of ff) *unit-info*)]
                               (binding [*line* (or (and (seq? g) (:line (meta g))) *line*)
                                         *unit-line?* (boolean (and (seq? g) (:line (meta g))))
-                                        *system-unit* (if own (sys-of ff) *system-unit*)
-                                        *unit-info* (if own (info-of ff) *unit-info*)]
+                                        *system-unit* sys
+                                        *unit-info* (if chg (no-pragma info) info)]
                                 (check-top g)))))))))
         c/pragma (pragma-pack! f)
         c/asm (feat! :asm)
