@@ -2791,7 +2791,7 @@ check; a missing reference is not judged and fails; a selection leaves the contr
 | C++ `bin/cppi lower-check` | P (new): `test/cpp/controls.edn` `_control/bitfields-vs-io` | `arbace.cpp.check/control-result` (`run-verdict`, factored out of `file-result`), the judge's exit; `test/cpp/selftest/controls.sh` | not in `results.tsv` or `summary.edn` | none |
 | Scheme `bin/si r7rs`, `srfi`, `mats`, `ecraven`, `chibi-tests`, `test` (expand) | M | | | |
 | OCaml `bin/oi repl-check`; `bin/repr-ocaml roundtrip` | M | | | |
-| C `bin/ci annotations`, `bin/repr-c roundtrip`, `parse-check`, `check --tokens` | M | | | |
+| C `bin/repr-c check --tokens`, `parse-check`, `bin/ci annotations`, `bin/repr-c roundtrip` | P (queue 144, drafted unrun): `test/c/controls.edn` `:lex`, `:pp`, `:gcc-digest`, `:tree`, `:annot`, `:roundtrip`, fannkuchredux.c against fasta-8.c | after the corpora, from the dumps the run keeps: `arbace.repr.c.ppcheck/token-controls` (`same-dump?`, `gcc-digest-agrees?`), `parsecheck/tree-controls` (`same-tree?`; `check-file` keeps the controls' dumps), `annot/annot-controls` (`annot-status`), `rtcheck/roundtrip-controls` (levels 3 and 4 crossed, `judge-row`); each in its judge's exit | not in `files.tsv`, the known files, the results files or the counts | none (the corpus's own dumps) |
 | C++ `bin/cppi runtime-build`, `bin/repr-cpp roundtrip`, `pp-check`; `bin/repr-llvm roundtrip` | M | | | |
 | repr/java `parse-check`, `front-check`, `attr-check`, `nojavac-check`, `roundtrip`, `check --jdk`, `check --suite` | M | | | |
 | repr/go `native-check`, `roundtrip`; repr/clojure `check` | M | | | |
