@@ -97,13 +97,14 @@ plan_inputs() {  # plan_inputs DIR: DIR/files.sha256 and DIR/hosts.edn
     echo "gate: file names the plan cannot key (a backslash or a newline in them): $(grep '^\\' "$d/files.sha256" | head -3 | cut -c67- | tr '\n' ' ')" >&2
     return 1
   fi
-  # :jdk (queue 023, report 022 finding 3): the release files of the JDK the steps run, java's (the frozen
-  # jar's JVM, bin/lib/frozen.bash) and javac's (the reference javac), each resolved from PATH through its
-  # links; none when neither is there
-  local b r h=
+  # :jdk (queue 023, report 022 finding 3; the user 2026-11-02): the release files of the JDK the steps run,
+  # java's (the frozen jar's JVM, bin/lib/frozen.bash) and javac's (the reference javac): the explicit
+  # Java 26, ARBACE_FROZEN_JAVA_HOME (bin/lib/java26.bash), never the system's default; none when it is not there
+  local b r h= jh
+  jh=${ARBACE_FROZEN_JAVA_HOME:-/usr/lib/jvm/jdk-26}
   for b in java javac; do
     r=none
-    jdk=$(command -v "$b") && jdk=$(readlink -f "$jdk") && [ -f "${jdk%/bin/$b}/release" ] \
+    jdk=$(readlink -f "$jh/bin/$b" 2>"$TMPDIR/jdk.err") && [ -f "${jdk%/bin/$b}/release" ] \
       && r=$(sha256sum < "${jdk%/bin/$b}/release" | cut -c1-64)
     h="$h$b $r
 "

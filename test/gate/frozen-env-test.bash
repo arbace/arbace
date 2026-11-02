@@ -12,7 +12,7 @@ export TMPDIR=${TMPDIR:-$src/.tmp/tmp}; mkdir -p "$TMPDIR"
 t=$TMPDIR/frozen-env-test.ae
 cat > "$t" <<'F'
 (let [steps (read-string (slurp (first *command-line-args*)))
-      need #{"FROZEN_CP" "FROZEN_TAG" "ARBACE_ORACLE_JAR" "ARBACE_ORACLE_TAG"}
+      need #{"ARBACE_FROZEN_JAVA_HOME" "FROZEN_CP" "FROZEN_TAG" "ARBACE_ORACLE_JAR" "ARBACE_ORACLE_TAG"}
       steps (filter map? (if (map? steps) (:steps steps) steps))
       sources? (fn [s] (re-find #"bin/(oracle|j2g-edge)\b" (str (:cmd s))))
       frozen (filter #(or (some #{:frozen} (:hosts %)) (sources? %)) steps)

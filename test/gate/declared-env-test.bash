@@ -32,7 +32,7 @@ scrubbed() {
 # 1. the real table: every name its steps declare in :env
 want=$(grep -o ':env \[[^]]*\]' "$src/test/gate/steps.edn" | grep -o '"[^"]*"' | tr -d '"' | sort -u)
 [ -n "$want" ] || bad "no :env in test/gate/steps.edn"
-for n in FROZEN_CP FROZEN_TAG ARBACE_ORACLE_JAR ARBACE_ORACLE_TAG ARBACE_ORACLE_EXPECTED J2G_FIXTURES J2G_EDGE_WORK; do
+for n in ARBACE_FROZEN_JAVA_HOME FROZEN_CP FROZEN_TAG ARBACE_ORACLE_JAR ARBACE_ORACLE_TAG ARBACE_ORACLE_EXPECTED J2G_FIXTURES J2G_EDGE_WORK; do
   printf '%s\n' "$want" | grep -qx "$n" || bad "test/gate/steps.edn no longer declares $n (this test's premise)"
 done
 got=$(scrubbed "$src/test/gate/steps.edn" $want | sort -u)

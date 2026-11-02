@@ -66,6 +66,10 @@ frozen_pin() {
   fi
 }
 
+# Java 26 explicitly (bin/lib/java26.bash): ARBACE_FROZEN_JAVA_HOME, else /usr/lib/jvm/jdk-26
+. "$(dirname "${BASH_SOURCE[0]}")/java26.bash"
+arbace_use_java26 || exit 1
+
 frozen_jar() {
   if [ -n "${FROZEN_JAR:-${ARBACE_ORACLE_JAR:-}}" ]; then
     local j=${FROZEN_JAR:-$ARBACE_ORACLE_JAR}
@@ -150,6 +154,6 @@ frozen_java() {
   view=$(frozen_view "$kind") || return 1
   while [ $# -gt 0 ] && [ "$1" != -- ]; do opts+=("$1"); shift; done
   [ $# -gt 0 ] && shift
-  java ${TMPDIR:+-Djava.io.tmpdir="$TMPDIR"} "${opts[@]}" -cp "$view:$jar${FROZEN_CP:+:$FROZEN_CP}" arbace.lang.Main "$@"
+  "$ARBACE_FROZEN_JAVA_HOME/bin/java" ${TMPDIR:+-Djava.io.tmpdir="$TMPDIR"} "${opts[@]}" -cp "$view:$jar${FROZEN_CP:+:$FROZEN_CP}" arbace.lang.Main "$@"
 }
 
