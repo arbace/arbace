@@ -173,7 +173,9 @@ Every program that does not pass must fall in a class of `test/rust/divergences-
 class whose `:match` finds `RESULT REASON`); one in none fails the check. `--record` writes the results by id into
 `test/rust/lower-results.edn`. From RE5 the same judge reads the judge's recorded runs (`test/rust/ref-rustc-1.99.1.edn`, RES5)
 and the classes `test/rust/divergences{,-aot}.edn`. RE2's classes (11): `native-unwind`, `known-bug`, `inline-asm`, `simd`,
-`float16-128`, `c-variadic`, `alias`, `lto`, `wide-int`, `optimized-ir`, `speed`; the classes the survey names (§8.2: `threads`, `process`, `net`,
+`float16-128`, `c-variadic`, `alias`, `lto`, `wide-int`, `optimized-ir`, `speed`; RE3's (the lowered std's leg, `:legs [:lowered]`;
+`native-unwind` is the native leg's alone): `not-lowered` (a stub of std reached, §8), `backtrace` (the original prints the native
+unwinder's backtrace under `RUST_BACKTRACE`); RE3's records `test/rust/lower-std-results.edn`, RE2's `lower-results.edn`; the classes the survey names (§8.2: `threads`, `process`, `net`,
 `inline-asm`, `naked`, `simd`, `speed`, `nondeterministic`, `stack-overflow`) enter as programs fall in them.
 
 ## 8. std lowered (RE3)

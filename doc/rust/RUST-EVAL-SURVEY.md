@@ -727,3 +727,86 @@ in a class, none is outside one; the whole 3,718 is the night's run (RE2.5). Cos
   `RSI_JOBS=8` by night): the 3,718 programs, recorded into `test/rust/lower-results.edn`; every unclassified program a class
   or a fix the next day.
 - `bin/rsi std-build` in the main checkout once merged (the pin's place).
+
+## As built: RE3 (write-ahead, 2026-11-03)
+
+Branch `rust-re3` from `rust-re1` (`3802394e`), by an agent on the main host beside C++'s CX8 and the Rust trial's RE2 (light tier: 4 jobs
+for the checks, 8 for std's build and lowering, no heavy lock; stage 0 `/root/arbace/target/seed/amd64/arbace`, the namespaces evaluated
+from the worktree). Spec: doc/rust/EVAL.md §3, §8. Written ahead of the night's whole run (RE3.4): the counts below are the day's.
+
+### RE3.1 What was built
+
+| piece | file | what |
+|---|---|---|
+| std's build (RES17 (b)) | `bin/rsi std-build`, `test/rust/runtime/std.edn`, `ir.sha256` | `library/`'s own workspace built as bootstrap does (package `sysroot`, features `panic-unwind backtrace`, `-Zforce-unstable-if-unmarked`, the manifest's per-package profile overridden by `--config`: compiler_builtins 16 codegen units, the backtrace crates at `-O0`); 110 units, 51 MB, 45 s of Cargo |
+| std lowered | `bin/rsi runtime-build` (`make rsi-runtime-build`) | 94 units (compiler_builtins' 16 native), round trip, pre-pass, lowering, gcc, one archive a crate, `rt.o`, a key as cppi's |
+| the pre-pass | `arbace/rust/lower.ae` (`runtime-forms`, `lower-list --runtime`) | cpuid and xgetbv answered (RES8 (a)); u128's `carrying_mul_add` (i256) replaced by the layer's; other unlowerable defines (f16) stubbed |
+| the layer (RES4) | `arbace/rust/rt/eh.c.ae` | the unwinder's entry points on the pending flag, `cx$catches` for `catch ptr null`, the unwinder's queries as no frame, `cx$uncaught` as std's "failed to initiate panic", C++'s trampolines, `rsi_cpuid`, `rsi_xgetbv`, `rsi_u128_carrying_mul_add`, `rsi_not_lowered` |
+| the link | `bin/lib/rsi/link` (`RSI_RUNTIME`, `RSI_SYSROOT`) | each sysroot rlib replaced in place by its crate's lowered archive, no `-lgcc_s`: the program links musl alone |
+| the check | `bin/rsi lower-check --leg lowered\|native` (default lowered), `arbace/rust/check.ae` (`--leg`, classes' `:legs`) | both sides against std's build; RE2's leg kept as `--leg native` |
+| samples | `test/rust/eval/std.rs`, `unwind.rs` | formatting, collections, strings, `env::args`, `dyn`, i128 and floats; drops while unwinding, nested catches, `resume_unwind`, a panic leaving main (status 101) |
+| classes, records | `test/rust/divergences-lower.edn` (`not-lowered`, `backtrace`; `native-unwind` `:legs [:native]`), `test/rust/lower-std-results.edn` (196 programs) | RES13 (a) |
+
+The lowering (`arbace/cpp/lower.ae`) is unchanged by RE3: nothing of C++'s namespace moved, so no commit there to rebase over CX8.
+
+### RE3.2 Results
+
+- **Determinism (RES17 (b))**: std built in three places (two scratch directories of different depth and `.tmp/rsi/std`, in a worktree,
+  so neither the main checkout's place) gave the same 110 digests; the pin no longer depends on an absolute path.
+- **runtime-build**: 94 of 94 units read, forms equal, objects equal (`clang -c` of the print = of the IR), lowered, compiled by gcc;
+  33 functions stubbed (all `core`'s f16); about 2 minutes at 8 jobs (lowering 103 s, gcc 12 s).
+- **The exit's programs** (rsi's five samples, gcc `-O0` the judge): `hello`, `HashMap`/`BTreeMap`/`HashSet`, `fmt` (widths, `{:#?}`,
+  floats, i128 and u128), `catch_unwind` (payloads, nested, `resume_unwind`), drops while unwinding, a panic's message and status 101,
+  `process::exit`, `env::args`: **5 of 5 run as the original**, linked against the lowered std, musl alone native. The first run found u128's
+  `Display` reaching the i256 stub (`carrying_mul_add`), replaced by the layer since.
+- **The native-unwind class emptied**: RE2's 10 `native-unwind` programs, rerun on the lowered leg: **10 of 10 pass** (drops of unwound
+  frames, catches inlined by `-O` builds, `extern "Rust"` unwinding). The sample `unwind.rs` passes on the lowered leg and is
+  `native-unwind` on the native leg.
+- **A slice**: every 20th UI program from the 7th (186, none in RE2's slices): 179 pass, 3 nondeterministic, 4 in a class (`alias` 1,
+  `optimized-ir` 1, `speed` 1, `backtrace` 1: `location-detail-unwrap-multiline.rs` runs with `RUST_BACKTRACE=1` and the original prints
+  the native unwinder's backtrace), none outside one; 395 s of wall at 4 jobs (about 2.1 s a program: the lowering's 1.9 s of CPU and a
+  link against 13 MB of archives).
+
+### RE3.3 Against the exit criteria
+
+"`hello`, `HashMap`, `fmt`, `catch_unwind`, a panic's message and status 101, `process::exit`, `env::args` run as the original": met by
+the samples (5 of 5). "Every UI program as RE2 or classed": on the day's 196 programs (the slice and RE2's native-unwind programs), every
+non-pass in a class; the whole 3,718 is the night's run. "The native-unwind class emptied": 10 of 10 pass. The UI programs are judged by
+gcc `-O0` until RE4's ci leg, as the brief says.
+
+### RE3.4 Night runs (for tonight)
+
+- `make rsi-lower-check-all` (`RSI_JOBS=8`): the 3,718 programs on the lowered leg, recorded into `test/rust/lower-std-results.edn`;
+  at the slice's rate about 2.1 s a program at 4 jobs, so about 70 minutes at 8 (light: about 1.5 GiB a lowering); every unclassified
+  program a class or a fix the next day.
+- `make rsi-lower-check-native-all` if RE2's whole native record (RE2.5) has not run: it is the same 3,718 on the native leg, about 40
+  minutes at 8; with RE3 it only feeds the comparison (RES27).
+- Nothing in the main checkout is needed for the pin any more: `bin/rsi std-build` holds wherever it runs.
+
+### RE3.5 Proposals (RES23-RES27)
+
+- **RES23 One layer for C++ and Rust (RES4 (a)'s split).** Options: (a) **split `arbace/cpp/rt/eh.c.ae` into the unwinder's entry points
+  and C++'s personality part in the same mechanical commit as RES16's rename (`arbace/llvm/rt/`), after C++'s CX8 merges**, Rust's layer
+  then only its own part (`cx$catches` for null, the unwinder's queries, the CPU's answers); (b) keep two layers (about 40 duplicated
+  lines: the entry points and the trampolines); (c) split now (a conflict with CX8's changes to `eh.c.ae`). *Recommended: (a).*
+- **RES24 std's functions the lowering does not take.** As built: stubs that abort with their name (class `not-lowered`, 33 f16
+  functions) and a table of replacements in the layer (u128's `carrying_mul_add`). Options: (a) **as built now; f16 and f128 lowered
+  as gcc's `_Float16` and `_Float128` at RE5 with the programs' class `float16-128`, the stubs then gone**; (b) lower them now (C forms'
+  types, repr/c's printer and ci's later support); (c) the stubs for good. *Recommended: (a).*
+- **RES25 compiler_builtins.** Options: (a) **native until RE4 (as libgcc is for the lowered C++), ci's own builtins there**; (b) lowered
+  with its f16/f128 and `global_asm!` units stubbed. *Recommended: (a)*: the lowered C calls libgcc's builtins anyway.
+- **RES26 The CPU std sees (RES8 (a)).** As built: an x86-64 baseline (SSE2, vendor `ArbaceRsiCPU`). Options: (a) **as built; a program
+  that prints `is_x86_feature_detected!` results differs from the native judge and is classed (`cpu-features`) when the night finds one**;
+  (b) the judge's runs under the same answers (an `LD_PRELOAD`-free way does not exist for cpuid: no); (c) answer the host's real cpuid
+  (the runs then depend on the host). *Recommended: (a).*
+- **RES27 RE2's native leg.** Options: (a) **kept as `--leg native` and `lower-results.edn` until RE4's ci leg, then removed with
+  `native.c.ae` and `try.rs`** (RES18 (a) said drop it with the layer; it costs nothing kept and shows the layer's effect, `unwind.rs`);
+  (b) removed now. *Recommended: (a).*
+
+### RE3.6 Rule slips, scratch
+
+No slip found: every rustc, clang and gcc ran with `TMPDIR` the worktree's `.tmp/tmp`; no `/dev/null`, no process left running.
+`python3` was used for multi-line edits of the sources (no package installed). Scratch: the worktree's `.tmp/re3/` (`a/`,
+`elsewhere/` the determinism builds; `low1/`, `low2/` the first lowerings of std; `h/` hello's link line; `w-samples/`,
+`w-samples-native/`, `w-nu/`, `w-s20/` the checks' work directories), `.tmp/rsi/std/` and `.tmp/rsi/runtime/` (std's build and its
+lowering), `.tmp/repr-rust/` (hard links of `rust-re1`'s fetched apks and UI sources).
