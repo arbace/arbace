@@ -186,6 +186,12 @@ plan "$t/b2" nightly --night 1
 if grep -qx toy/p20.c "$t/b2/rotation/toy.toy.sub.list"; then ok "this commit's failure stays in its subset after another branch's pass"; else no "a foreign pass cleared this commit's failure"; fi
 store=$t/store
 
+# review 181, finding 5: the evidence the clean record carries (rotation-status --edn)
+(cd "$here" && arbace_tool -p "$here/test" -m gate.plan rotation-status "$r" "$store" --ancestors "$t/ancestors.txt" --edn "$t/rot.edn") > "$t/edn.out" 2>&1
+if grep -q ':status :complete' "$t/rot.edn" && grep -q ':days 7' "$t/rot.edn" && grep -q ':part "toy.toy"' "$t/rot.edn" && grep -q '"c0ffee" true' "$t/rot.edn"; then ok "rotation-status --edn: complete, the period, each slice's covering run and its commit"; else no "the evidence: $(cat "$t/rot.edn" "$t/edn.out")"; fi
+(cd "$here" && GATE_STEPS=$t/steps-norot.edn arbace_tool -p "$here/test" -m gate.plan rotation-status "$r" "$store" --ancestors "$t/ancestors.txt" --edn "$t/rot0.edn") > "$t/edn.out" 2>&1
+if grep -q ':status :none' "$t/rot0.edn"; then ok "rotation-status --edn: :none when no part rotates"; else no "no part rotated: $(cat "$t/rot0.edn" "$t/edn.out")"; fi
+
 # 9. review 181, findings 3 and 4: the night's choice. Every slice passed first (one note a night)
 store=$t/store4; mkdir -p "$store"
 for k in 0 1 2 3 4 5 6; do

@@ -413,7 +413,9 @@ gate_keep_env() {
     ARBACE_SEED_LINK_WAIT) return 0 ;;
     GATE_HEAVY_CMD|GATE_TEST_JOBS|GATE_FRESH_G1|GATE_FULL_PARALLEL|GATE_FULL_SERIAL|GATE_CANARY|GATE_ALL_PARTS) return 0 ;;
     # GT8.4: which slice a night runs, the clock of --rotation-status (the gate's own tests), the clean run's corpora
-    GATE_NIGHT|GATE_NOW|GATE_CLEAN_WHOLE|GATE_CLEAN_ROTATION) return 0 ;;
+    GATE_NIGHT|GATE_CLEAN_WHOLE|GATE_CLEAN_ROTATION) return 0 ;;
+    # review 181, L6: the clock moved only for the gate's own tests, with a store of their own (as GATE_STEPS)
+    GATE_NOW) [ -n "${ARBACE_GATE_STORE:-}" ] ;;
     GATE_CONCURRENT_HELD|GATE_CONCURRENT_LOCK|GATE_CPU_LOG|GATE_AUDIT_*) return 0 ;;
     GATE_STEPS|GATE_PROG_UNITS|GATE_JAVAC_PROG_UNITS) [ -n "${ARBACE_GATE_STORE:-}" ] ;;
     # queue 085 (report 084 finding 5, GTS112 (b)): a name a step of the table declares in :env, which its key
@@ -662,7 +664,9 @@ clean_launch() {
   # which must be complete first (GATE_CLEAN_ROTATION=0: not checked, said in the record; GATE_CLEAN_WHOLE=1: whole parts)
   local rot=whole
   if [ -n "$full" ] && [ "${GATE_CLEAN_WHOLE:-}" != 1 ]; then
-    if rotation_check > "$base/$sha.rotation.txt" 2>&1; then rot=complete
+    if rotation_check --edn "$base/$sha.rotation.edn" > "$base/$sha.rotation.txt" 2>&1; then
+      # review 181, finding 5: :none when no part rotates (every part ran whole), else :complete with its evidence
+      rot=complete; grep -q ':status :none' "$base/$sha.rotation.edn" && rot=none
     elif [ "${GATE_CLEAN_ROTATION:-}" = 0 ]; then rot=unchecked; echo "   gate --clean: warning: the rotation's record is incomplete (GATE_CLEAN_ROTATION=0)"
     else
       sed 's/^/   /' "$base/$sha.rotation.txt"
@@ -693,11 +697,12 @@ clean_launch() {
     esac
   done
   env ${unset[@]+"${unset[@]}"} TMPDIR="$dir/.tmp/tmp" GOCACHE="$dir/.tmp/gocache" GATE_CLEAN_INNER=1 GATE_CLEAN_TAG="$tag" \
-      GATE_CLEAN_ROTATION_STATUS="$rot" ${GATE_CLEAN_WHOLE:+GATE_CLEAN_WHOLE="$GATE_CLEAN_WHOLE"} \
+      GATE_CLEAN_ROTATION_STATUS="$rot" GATE_CLEAN_ROTATION_EDN="$base/$sha.rotation.edn" ${GATE_CLEAN_WHOLE:+GATE_CLEAN_WHOLE="$GATE_CLEAN_WHOLE"} \
       ARBACE_HEAVY_LOCK="${ARBACE_HEAVY_LOCK:-$main/.tmp/big.lock}" ${frozen:+FROZEN_JAR="$frozen"} ${only_env[@]+"${only_env[@]}"} \
       "$dir/bin/gate" ${full:+--full} --clean 2>&1 | tee "$base/$sha.out"
   st=${PIPESTATUS[0]}
   rm -rf "${out:?}"; mkdir -p "$out"
+  for e in txt edn; do [ -f "$base/$sha.rotation.$e" ] && cp "$base/$sha.rotation.$e" "$out/rotation.$e"; done
   cp -a "$dir/.tmp/gate" "$out/gate" 2>"$TMPDIR/gate-clean.err"
   cp "$base/$sha.out" "$out/summary.txt"
   if [ -f "$dir/.tmp/gate/clean-record.edn" ]; then
@@ -715,12 +720,24 @@ clean_launch() {
     publish_passes "$dir/.tmp/gate-pass" "$store_to"
     # GT8.4: the clean run's rotated runs (a whole part's, GATE_CLEAN_WHOLE=1, is a run of every slice; the subsets')
     # appended to the shared store's record of the rotation
-    local rf
-    for rf in "$dir/.tmp/gate-pass/_rotation"/*.runs; do
-      [ -f "$rf" ] || continue
-      mkdir -p "$store_to/_rotation" && cat "$rf" >> "$store_to/_rotation/$(basename "$rf")" \
-        && echo "   the rotation's runs $(basename "$rf" .runs) ($(wc -l < "$rf")) appended to $store_to/_rotation"
-    done
+    # appended to the shared store's record of the rotation, renumbered after its sequence (review 181, finding 2: the
+    # clone's runs are the later), under its lock
+    local rf off cmax c
+    if [ -d "$dir/.tmp/gate-pass/_rotation" ]; then
+      mkdir -p "$store_to/_rotation"
+      {
+        flock 9
+        off=$(cat "$store_to/_rotation/.seq" 2>"$TMPDIR/gate-clean.err" || echo 0)
+        cmax=$(cat "$dir/.tmp/gate-pass/_rotation/.seq" 2>"$TMPDIR/gate-clean.err" || echo 0)
+        for rf in "$dir/.tmp/gate-pass/_rotation"/*.runs "$dir/.tmp/gate-pass/_rotation"/*.failed; do
+          [ -f "$rf" ] || continue
+          case $rf in *.runs) c=8 ;; *) c=1 ;; esac
+          awk -F'\t' -v OFS='\t' -v c="$c" -v o="$off" '{ $c = $c + o; print }' "$rf" >> "$store_to/_rotation/$(basename "$rf")" \
+            && echo "   the rotation's $(basename "$rf") ($(wc -l < "$rf") lines) appended to $store_to/_rotation"
+        done
+        echo $((off + cmax)) > "$store_to/_rotation/.seq"
+      } 9>>"$store_to/_rotation/.lock"
+    fi
     if [ "$st" = 0 ]; then
       for e in "$dir/.tmp/gate-exe"/*; do
         [ -d "$e" ] || continue
@@ -750,8 +767,15 @@ clean_record() {
     "${GATE_CLEAN_TAG:-}" "$commit" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$mode" "$([ "$status" = 0 ] && echo passed || echo failed)" $(( $(date +%s) - start ))
   printf ' :host {:cpus %s :mem-kib %s :kernel "%s"}\n' "$(nproc)" "$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)" "$(uname -r)"
   printf ' :env {:all-parts true :forms-only true :heavy-cmd "%s"}\n' "$GATE_HEAVY_CMD"
-  # GT8.4: the rotated parts' subsets (:rotation :complete: the record checked first; :whole: whole parts; :unchecked)
-  printf ' :rotation :%s\n' "${GATE_CLEAN_ROTATION_STATUS:-whole}"
+  # GT8.4: the rotated parts (review 181, finding 5): :status :complete (the record checked first, its evidence:
+  # rotation-status's period, each slice's covering run, from this commit's clean ancestors), :unchecked
+  # (GATE_CLEAN_ROTATION=0, the evidence as found), :none (no part rotates: every part ran whole), :whole (GATE_CLEAN_WHOLE=1)
+  local rs=${GATE_CLEAN_ROTATION_STATUS:-whole}
+  if [ "$rs" = complete ] || [ "$rs" = unchecked ] && [ -s "${GATE_CLEAN_ROTATION_EDN:-}" ]; then
+    printf ' :rotation {:status :%s :check %s}\n' "$rs" "$(cat "$GATE_CLEAN_ROTATION_EDN")"
+  else
+    printf ' :rotation {:status :%s}\n' "$rs"
+  fi
   printf ' :pins %s\n' "$(cat "$logs/pins.edn" 2>"$logs/count.err" || echo nil)"
   printf ' :hosts %s\n' "$(cat "$logs/hosts.edn")"
   # GTS150 (a): the producers --only did not rerun whose outputs were copied from an earlier run's logs
