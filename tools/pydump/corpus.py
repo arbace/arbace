@@ -17,6 +17,9 @@ directory under BASE; the selected files are the .py files under the PATHs, recu
             a method inherited by several TestCase classes counts once, subTest and load_tests are not seen)
   rejected  the selected files ast.parse rejects, one "RELPATH<TAB>CLASS<TAB>MSG" line each, then the files it
             accepts and ast.parse(type_comments=True) rejects, as "RELPATH<TAB>type-comments<TAB>MSG"
+  list      the selected files, one relative path a line
+  costs     TSV... (bin/repr-python roundtrip's per-file stage files: REL STATUS ... SECONDS RSS as their last two
+            columns): one Clojure map per stage, {:files :seconds :mean :p50 :p95 :max :max-file :peak-kib}
   samples   the selected files each parsed by ast.parse (plain and with type_comments=True) and compiled; then
             the node classes of the oracle's ast (spec-check proves them Python.asdl's) that no sample's tree
             holds, but Interactive, Expression and FunctionType (the other parse modes' tops) and the
@@ -48,8 +51,28 @@ def select(base, paths, excludes):
     return sorted(set(out), key=lambda s: s.encode("utf-8", "surrogateescape"))
 
 
+def costs(paths):
+    out = []
+    for p in paths:
+        rows = [l.split("\t") for l in open(p, encoding="utf-8").read().split("\n") if l]
+        secs = sorted((float(r[-2]), r[0]) for r in rows)
+        n = len(secs)
+        if not n:
+            out.append('{:stage "%s" :files 0}' % os.path.basename(p))
+            continue
+        tot = sum(s for s, _ in secs)
+        q = lambda f: secs[min(n - 1, int(f * n))][0]
+        peak = max(int(r[-1]) for r in rows)
+        out.append('{:stage "%s" :files %d :seconds %.2f :mean %.4f :p50 %.4f :p95 %.4f :max %.4f :max-file "%s" :peak-kib %d}'
+                   % (os.path.basename(p).rsplit(".", 1)[0], n, tot, tot / n, q(0.5), q(0.95), secs[-1][0], secs[-1][1], peak))
+    print("[" + "\n ".join(out) + "]")
+
+
 def main():
     args = sys.argv[1:]
+    if args[0] == "costs":
+        costs(args[1:])
+        return
     verb, base = args[0], args[1]
     paths, excludes = [], []
     i = 2
@@ -106,6 +129,9 @@ def main():
                 ast.parse(b, type_comments=True)
             except SyntaxError as e:
                 print("%s\ttype-comments\t%s" % (f, e.msg))
+    elif verb == "list":
+        for f in files:
+            print(f)
     elif verb == "samples":
         bad = 0
         seen = set()
