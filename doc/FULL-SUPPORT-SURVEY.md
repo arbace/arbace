@@ -3555,6 +3555,486 @@ The draft stood on main `6ad08d82` (2026-10-29). Since:
   `^timeout ` comes first, takes an interp timeout, so `audit-timeout` and `thread-order`'s `:unstable` are the
   judgment's (`java-judge`), not the matrix's: no case moves, and the matrix above and the numbers are as before.
 
+## REAP v3's divergences (2026-11-04, the tag `arbace-reaps-4-crops-v1`)
+
+The milestone's record at the tag: read, eval, AOT and print for Clojure, Java 26 (jdk26u `baf63fbe`), Go 1.27.1 and,
+since C8, C (C23 against gcc 15.2's testsuites and cc's ports, doc/C23-SURVEY.md §10, §11), on the host (linux/amd64),
+forms only, modelled on "REAP v2's divergences". The rule is v1's and v2's: none fails, every non-pass in a recorded
+class, by design or deferred and named, each citing where it was decided. `bin/reap` judges the matrix from the checks'
+recorded results (`test/reap/cells.edn`, `test/reap/main.ae`, the record `test/reap/matrix.edn`); its output at the tag
+is below, with v2's beside it: 16 of 16 cells checked, 0 problems, no class pending. The round is the third (the user,
+2026-11-02: the section's title numbers the rounds, not the crops).
+
+The tables between the markers are generated: `doc/v3-record/refresh.sh` (v2's `doc/v2-record/refresh.sh` with VM
+report 095's hardening and report 151's four crops: C's four cells, C AOT's two classes files, a beside source named
+with a colon; plain shell and awk, seconds, no builds; it fails rather than write on a bad input) reads `bin/reap`'s
+output (`REAP_OUT=FILE` uses a saved one), the classes files it names and v2's generated tables as they stood at the tag
+`arbace-reaps-3-crops-v2` (`V2_TAG`), with its hand-kept notes `doc/v3-record/changes.tsv` (a cell, or `Java *` and
+`C *` for every level of a crop), and rewrites everything between `<!-- v3-record:begin -->` and
+`<!-- v3-record:end -->`:
+
+```
+ARBACE_HOST_EXE=/path/to/stage0/arbace doc/v3-record/refresh.sh
+```
+
+Counts are cases, as in v1 and v2 (a case counted once per source naming it; a class only beside sources name, RPS16,
+is marked "(beside)", counted in its table and not in the matrix). C's read cell counts each corpus file once over the
+token and tree checks and leaves the tree check's mutants out (VM review 132 F3, the user's decision of 2026-11-02,
+d8f82c1c), so its classes' cases sum past the cell's non-passes; C eval's annotations (`bin/ci annotations`, 4,806
+files pass, 112 not) are beside it. "v2" is the count in v2's tables at the tag; "since v2" is computed (new, removed,
+shrunk, grew, reclassified) and carries, from changes.tsv, what moved and the commit or decision that moved it. C's row
+is new since v2: every C class is "new".
+
+**Caveats.**
+
+- **Java's timeouts are by design by a catch-all** (as v2). Java's `speed` class (`test/java/divergences.edn`, kind
+  `:speed`, by design in `test/reap/cells.edn`'s kind maps) has one `:match`, `^timeout `, no `:level` and no `:tests`:
+  the 51 interpreted and 14 compiled timeouts count as by design in Java eval and Java AOT without being judged one by
+  one. Decided by the user (2026-10-31), and again for this tag (2026-11-02, VM audit 149 F2): the record keeps them so;
+  they are curated with GTS102's lowering of the per-test limits (doc/GATE-SURVEY.md, "Decided (2026-11-01): GTS102,
+  GTS103"), after the next clean run.
+- **No all-crops clean run for this tag** (the user, 2026-11-02, the test-budget decision). v2's tag stood on a clean
+  run (`bin/gate --full --clean`, a fresh clone, serial, every step audited, every part: 190,621 s over eight runs for
+  three crops); C's seven full checks add about 7 to 8 hours to `--full` serial (doc/C23-SURVEY.md, "As built: C's full
+  checks in the gate"), and the planned crops (C++, OCaml, Scheme, Haskell, Rust, Python) would multiply it again. The
+  clean run waits for compressed corpora, GT8, the next milestone's main thread (tiers: essential at most 15 minutes,
+  nightly at most 6 hours, clean at most 24 hours for all ten planned crops; by deduplication, coverage subsets,
+  rotation and synthetic corpora). In its place: `bin/seed --verify` at the seed's commit `1fe1063f` (stage 0 = G1 = G2 =
+  G3), the keyed `bin/gate --full` (since 2026-11-02 with C's seven full checks as heavy steps, judged against the
+  records, never `--record`) whose non-C steps passed overnight 2026-11-02/03 and whose C steps reran on the night of
+  2026-11-03 after the night's fixes (TODO(tag): the keyed `--full`'s result: commit, steps run and skipped, wall time,
+  failures), and `bin/gate --audit` of C's new steps (TODO(tag): the audit's result, or that it was not run). C9.2's row
+  12 (`--full --clean --tag arbace-reaps-4-crops-v1`, VM report 153 F2) is superseded by this decision.
+- **C's `speed` class** (`test/c/divergences.edn`, by design, CS107 (a), GOI-SPEC §11.1's rule) takes every interpreted
+  run beyond the check's 10 s (`^fail differ status timeout`): 9 programs of C eval, judged by the catch-all as Java's
+  `speed` is, not one by one.
+- **repr/c's round trip has a negative control at levels 3 and 4 only** (`test/c/controls.edn`'s `:roundtrip`,
+  fannkuchredux.c against fasta-8.c): a run keeps neither the forms' text nor the `:full` print, so levels 1 and 2 are
+  not crossed (queue 144's design). Their control (VM task 159, `mac/159-rt-control`) is held until after the tag (the
+  user, 2026-11-02).
+- **C's gate keys are coarse.** Every C full step declares the whole of `test/c/`, `test/repr/c/`, `bin/lib/ci/` and C's
+  tools: any change there reruns all seven (about 7 to 8 hours). Narrowed inputs (VM task 163, `mac/163-c-keys`) merge
+  after the tag (the user, 2026-11-02), confirmed by `bin/gate --audit` on the listed steps.
+- **`:bad-specs-print` deferred for v1** (C print, 1 file, `gcc-bitint gcc.dg/bitint-1.c`): `long _BitInt (42) h;` is
+  printed `_BitInt(42) h;` and the reread loses `:c/bad-specs` (level 1). Decided (the user, 2026-11-03): deferred for this
+  tag; CS221 (a) with CS232 (a), conflicting specifiers printed as written, after the tag (VM task 168).
+- **CS268 (a) decided, built after the tag** (the user, 2026-11-03): the `--record` writers guess `:pp-errors` only when
+  the differing errors are the preprocessor's, and never fall back to another check's classes. Not built for the tag:
+  repr/c is embedded (in `gate_key`), so a change to it reruns the whole `--full` (VM task 167). The records at the tag
+  were classified by hand (doc/C23-SURVEY.md, "As built: C9.2, the re-seed window"), so no guess of the old writer
+  stands in them unreviewed.
+
+**v2's section since its tag.** "REAP v2's divergences" above was regenerated after its tag by `doc/v2-record/refresh.sh`
+on later `bin/reap` outputs (be3096f8, 2439507a: C's row and the post-tag numbers) and gained two paragraphs (818ff165:
+`speed` decided again; `print-classes` narrowed); the comparison here reads v2's tables from the tag, not from this
+file. TODO(tag): the user's choice whether v2's generated block is restored to the tag's.
+
+<!-- v3-record:begin (generated by doc/v3-record/refresh.sh from bin/reap's output of 2026-11-03; do not edit between the markers) -->
+
+Now (`bin/reap`; pass / by design / deferred), with v2's beside it:
+
+| | read | eval | AOT | print |
+|---|---|---|---|---|
+| Clojure | 908 / 2 / 0 | 21,053 / 81 / 1 | 809 / 30 / 0 | 1,031+ / 0 / 0 |
+| Java | 7,742 / 0 / 96 | 1,848 / 285 / 1,189 | 1,921 / 172 / 1,229 | 2,598 / 615 / 109 |
+| Go | 12,158 / 204 / 0 | 1,620 / 217 / 0 | 1,690 / 147 / 0 | 2,584+ / 141 / 0 |
+| C | 5,201 / 232 / 50 | 2,049 / 124 / 87 | 2,058 / 115 / 87 | 4,767 / 6 / 83 |
+
+| v2 (the tag) | read | eval | AOT | print |
+|---|---|---|---|---|
+| Clojure | 908 / 2 / 0 | 21,052 / 81 / 1 | 809 / 29 / 0 | 1,031+ / 0 / 0 |
+| Java | 7,742 / 3 / 93 | 1,848 / 285 / 1,189 | 1,921 / 172 / 1,229 | 2,598 / 687 / 37 |
+| Go | 12,158 / 204 / 0 | 1,618 / 219 / 0 | 1,688 / 149 / 0 | 2,584+ / 141 / 0 |
+
+Its last line: `reap: 16 of 16 cells checked, 0 with no check yet; 0 problems`.
+
+**Clojure read** (classes file `test/clojure/divergences-read.edn`)
+
+| class | kind | cases | v2 | since v2 | decision |
+|---|---|---:|---:|---|---|
+| `one-way-rules`: repr/clojure's one-way rules: a .cljc's conditionals, SecurityManager's spelling | by design | 2 | 2 | unchanged | doc/REPR-CLOJURE.md, "The one-way rules" |
+
+
+**Clojure eval** (classes file `test/clojure/divergences.edn`)
+
+| class | kind | cases | v2 | since v2 | decision |
+|---|---|---:|---:|---|---|
+| `locales`: locale data: root and English only | by design | 42 | 42 | unchanged | the user, 2026-10-11; doc/go/JRT-NOTES.md, "Text and locales", TM4, TL5 |
+| `out-for-good`: XML (SAX), gen-class, Java serialization, Swing/AWT, classes from jars | by design | 23 | 23 | unchanged | doc/go/B1-PLAN.md D6, "Not to be done (the user, 2026-10-10)"; doc/go/EVAL-NOTES.md, "The suite's last fail... |
+| `q1-boxed-prims`: the evaluator's fns are boxed (Q1): no primitive interfaces | by design | 5 | 5 | unchanged | doc/go/EVAL-PLAN.md, Q1 (a) (the user, 2026-10-09) |
+| `class-files`: class files: the Go build writes and reads none | by design | 2 | 2 | unchanged | doc/STANDALONE-SURVEY.md D13; doc/VENDOR-NOTES.md, hand change 23 |
+| `main-since-v4`: main's divergences from the frozen reference (v4) | by design | 2 | 2 | unchanged | doc/STANDALONE-NOTES.md, "S4: the oracle's reference"; commit ac8b9718; the .ae rename (2026-10-11) |
+| `javadoc-url`: java.javadoc's javadoc-url-test: java.sql.Connection is not in the Go build | by design | 1 | 1 | unchanged | doc/go/B1-PLAN.md D6; RPS55 (a): the java.sql assertion by design |
+| `xml-stream`: javax.xml.stream (reflect's invoke-checks-accessibility) | by design | 1 | 1 | unchanged | RPS134 (b), doc/FULL-SUPPORT-SURVEY.md, Decided (2026-10-28) |
+| `identity-hash`: identity hashes (not reproducible) | by design | 1 | 1 | unchanged | doc/go/EVAL-NOTES.md, phase 2B (as decided for #object printing) |
+| `method-invoke-message`: a message's wording: Method.invoke on a receiver of another class | by design | 1 | 1 | unchanged | RPS19 (a), by design |
+| `security-manager`: java.lang.SecurityManager not in the world | by design | 1 | 1 | unchanged | doc/VENDOR-NOTES.md, hand change 11 |
+| `security-providers`: security providers: SUN and SunJCE only | by design | 1 | 1 | unchanged | doc/go/JRT-NOTES.md, "Security", SC4 |
+| `serialization`: Java serialization | by design | 1 | 1 | unchanged | doc/go/B1-PLAN.md D6, "Not to be done (the user, 2026-10-10)"; doc/go/ORACLE.md, Exclusions |
+| `seq-and-transducer`: speed: transducers' seq-and-transducer (200,000 test.check trials) | deferred | 1 | 1 | unchanged | RPS5 (a), doc/FULL-SUPPORT-SURVEY.md (deferred: speed); doc/go/SPEED-NOTES.md, EC7 |
+
+
+**Clojure AOT** (classes file `test/clojure/divergences-aot.edn`)
+
+| class | kind | cases | v2 | since v2 | decision |
+|---|---|---:|---:|---|---|
+| `out-for-good`: XML (SAX), gen-class, Java serialization, Swing/AWT, classes from jars | by design | 23 | 23 | unchanged | doc/go/B1-PLAN.md D6, "Not to be done (the user, 2026-10-10)"; doc/go/EVAL-NOTES.md, "The suite's last fail... |
+| `interned-at-load`: compiled code interns the vars it names when its namespace's loader starts | by design (beside) | 4 | 4 | unchanged | RPS20 (a), by design as the JVM's AOT |
+| `q1-compiled-prims`: compiled fns are primitive where the evaluator's are not (Q1) | by design (beside) | 3 | 3 | unchanged | doc/go/EVAL-PLAN.md, Q1 (a) (the user, 2026-10-09) |
+| `class-files`: class files: the Go build writes and reads none | by design | 2 | 2 | unchanged | doc/STANDALONE-SURVEY.md D13; doc/VENDOR-NOTES.md, hand change 23 |
+| `q1-evaluated`: code the tests evaluate at run time: the evaluator's fns are boxed (Q1) | by design | 2 | 2 | unchanged | doc/go/EVAL-PLAN.md, Q1 (a) (the user, 2026-10-09) |
+| `javadoc-url`: java.javadoc's javadoc-url-test: java.sql.Connection is not in the Go build | by design | 1 | 1 | unchanged | doc/go/B1-PLAN.md D6; RPS55 (a): the java.sql assertion by design |
+| `runtime-source`: a source the test writes at run time loads from source | by design | 1 | - | new, by design: clojure/bad_def_test.clj, written at run time by compilation's CLJ-1184 test, loads from source (5249c0ba, 8f3d43c6); by design, the user's decision of 2026-11-02 (062de7d1) | by design (the user, 2026-11-02) |
+| `xml-stream`: javax.xml.stream (reflect's invoke-checks-accessibility) | by design | 1 | 1 | unchanged | RPS134 (b), doc/FULL-SUPPORT-SURVEY.md, Decided (2026-10-28) |
+| `compiled-loader-line`: Compiler/LINE in a compiled loader | by design (beside) | 1 | 1 | unchanged | RPS20 (a), by design |
+| `identity-hash`: identity hashes (not reproducible) | by design (beside) | 1 | 1 | unchanged | doc/go/EVAL-NOTES.md, phase 2B (as decided for #object printing) |
+| `shared-symbols`: symbols shared in a compiled class's constant pool | by design (beside) | 1 | 1 | unchanged | doc/FUTAMURA-SURVEY.md, F3.3 (a) (the user, 2026-10-17) |
+
+
+**Clojure print** (classes file `test/clojure/divergences-print.edn`)
+
+No class: nothing to record at this cell.
+
+
+**Java read** (classes file `test/java/divergences.edn`)
+
+| class | kind | cases | v2 | since v2 | decision |
+|---|---|---:|---:|---|---|
+| `classloading`: class loading (ClassLoader's members, defineClass, ServiceLoader, modules, Cl... | (by design in v2) | 0 | 3 | removed at this level: its 3 diagnostics tests (javac on Arbace crashing on a member jrt lacks) are diag-closed-world's since bf844109 (queue 012, report 003 finding 5; merged after v2's tag, 7d9c84d6): the world's and the design's classes are the run levels' | (removed) |
+| `diag-release`: javac on Arbace: --release N, any N (no ct.sym in its platform) | deferred | 44 | 44 | unchanged | JCS50 (a), with (b) first: deferred, --release 26 as -source/-target 26, then the pinned ct.sym served as J... |
+| `diag-processors`: javac on Arbace: annotation processors from class files ("Could not instantia... | deferred | 25 | 25 | unchanged | JCS51 (a): deferred, processors given as sources defined by the interpreter and handed to javac as instances |
+| `diag-doclint`: javac on Arbace: -Xdoclint (compiler.warn.doclint.not.available) | deferred | 8 | 8 | unchanged | JCS52 (a): deferred, jdk.javadoc's doclint added to javac's world |
+| `diag-file-manager`: javac on Arbace's file manager (jdk.internal.jrt.javac.FileManager, not javac... | deferred | 8 | 8 | unchanged | JCS53 (a): deferred, Arbace's Main calling javac's Main.compile with Arbace's file manager, file objects as... |
+| `diag-closed-world`: javac on Arbace: a JDK class outside javac's closed world reached (java.lang.... | deferred | 4 | 1 | grew by 3: classloading's 3 at the diagnostics level (bf844109), javac on Arbace reaching a member jrt lacks; deferred, as JCS9 (b) ranks the world's classes | As built: JC3 (deferred, JCS9 (b): JC6 ranks the world's classes) |
+| `diag-command-line`: javac on Arbace's command line (jdk.internal.jrt.javac.Main, javac's API unde... | deferred | 4 | 4 | unchanged | JCS53 (a): deferred |
+| `read-platform`: javac on Arbace: options its platform lacks (--release N without ct.sym, the ... | deferred | 3 | 3 | unchanged | survey §5.5, JC3; JCS50 (a): --release N deferred |
+
+
+**Java eval** (classes file `test/java/divergences.edn`)
+
+| class | kind | cases | v2 | since v2 | decision |
+|---|---|---:|---:|---|---|
+| `serialization`: serialization (ObjectInputStream, ObjectOutputStream, Externalizable) | by design | 168 | 168 | unchanged | J2G-SPEC §12 (2026-10-10) |
+| `speed`: speed: beyond the check's limit (20 s an action, the definition included, or ... | by design | 51 | 51 | unchanged | survey §6.1, JCS10 (a); a catch-all kept by the user's decision of 2026-10-31, the timeouts curated after ... |
+| `xml`: XML (javax.xml, the XML signature API, Properties in XML) | by design | 22 | 22 | unchanged | J2G-SPEC §12 (2026-10-10) |
+| `classfile`: java.lang.classfile, java.lang.constant | by design | 14 | 14 | unchanged | JCS9 (b), JC6; JCS95 (a): by design |
+| `classloading`: class loading (ClassLoader's members, defineClass, ServiceLoader, modules, Cl... | by design | 13 | 13 | unchanged | J2G-SPEC §12, loading classes from jars for good (the user, 2026-10-10); JCS9 (b): J2G-SPEC §12 stands |
+| `foreign`: the foreign function and memory API (java.lang.foreign: Arena, MemorySegment;... | by design | 8 | 8 | unchanged | JCS95 (a): by design, FFM |
+| `jdi`: the debugger interface (com.sun.jdi) | by design | 4 | 4 | unchanged | JCS97 (a): by design, no JVM to debug |
+| `smartcardio`: javax.smartcardio (PC/SC smart card readers) | by design | 2 | 2 | unchanged | JCS97 (a): by design, no card reader in the sandbox |
+| `desktop`: AWT, Swing (java.desktop) | by design | 1 | 1 | unchanged | J2G-SPEC §12, Swing/AWT for good (the user, 2026-10-10); JCS9 (b): J2G-SPEC §12 stands |
+| `j2g-reflection`: reflection's access checks (Method.invoke, Field.get: the caller's class from... | by design | 1 | 1 | unchanged | JCS98 (a), JCS117 (a) built in JC4c; JCS123 (b): the two j2g ones built, the access checks left out by design |
+| `zip`: the jrt: URL (the run-time image's file system; zip, jar and the jar: URL are... | by design | 1 | 1 | unchanged | JCS106 (a): by design, no run-time image |
+| `security`: security (KeyStore, certificates, providers, permissions, key generators) | deferred | 361 | 361 | unchanged | JCS9 (b), JC6; JCS90 (b): deferred |
+| `net`: networking (datagrams, multicast, NIO channels and selectors, URL protocols, ... | deferred | 233 | 233 | unchanged | JCS9 (b), JC6; JCS91 (b): deferred |
+| `nio`: NIO buffers, files and charsets' coders (direct buffers, FileChannel, FileTim... | deferred | 93 | 93 | unchanged | JCS9 (b), JC6; JCS92 (b): deferred |
+| `reflection`: annotations and reflection's types and metadata (getAnnotation, getTypeParame... | deferred | 80 | 80 | unchanged | JCS9 (b), JC6; JCS94 (b): deferred, its own amendment (it reverses J2G-SPEC's R16) |
+| `management`: java.lang.management, JMX | deferred | 65 | 65 | unchanged | JCS9 (b), JC6; JCS95: java.lang.management's MXBeans deferred (b), JMX by design (a) |
+| `tls`: TLS (javax.net.ssl, javax.net socket factories, HTTPS) | deferred | 58 | 58 | unchanged | JCS90 (b): deferred, providers into the closure first, then TLS over Go's crypto/tls |
+| `invoke`: java.lang.invoke (MethodHandle, MethodHandles, CallSite, LambdaConversionExce... | deferred | 41 | 41 | unchanged | JCS9 (b), JC6; JCS94 (b): deferred |
+| `javac-api`: javac's API (com.sun.tools.javac.Main, javax.tools, com.sun.source): javac's ... | deferred | 39 | 39 | unchanged | JCS9 (b), JC6; JCS95: deferred (not run on arbace-javac before the milestone) |
+| `logging`: java.util.logging, System.Logger | deferred | 28 | 28 | unchanged | JCS9 (b), JC6; JCS95: deferred (not built before the milestone) |
+| `threads`: threads and concurrency's members jrt lacks (thread groups, platform threads,... | deferred | 26 | 26 | unchanged | JCS9 (b), JC6; JCS96 (b): deferred |
+| `charsets-locales`: charsets and locales (UTF-16LE's and UTF-32's coders, EUC-JP, US-ASCII's alia... | deferred | 20 | 20 | unchanged | JCS9 (b), JC6; JCS92 (b): deferred |
+| `interp-protected`: a protected member of a world class that is not an extendable class's instanc... | deferred | 19 | 19 | unchanged | survey §6.1, JC4; JCS98 (a) built in JC4b, JCS112 (a) in JC4c (the protected static methods in the member ... |
+| `references`: references, finalization, collection (PhantomReference, Cleaner, runFinalizat... | deferred | 16 | 16 | unchanged | JCS9 (b), JC6; JCS96 (b): deferred |
+| `jrt-dates`: jrt's dates: Date, Calendar, GregorianCalendar, TimeZone and DateFormat behav... | deferred | 13 | 13 | unchanged | JCS96 (b): deferred |
+| `scripting`: javax.script (ScriptEngineManager, ScriptEngine, Invocable) | deferred | 12 | 12 | unchanged | JCS97 (b): deferred |
+| `util-classes`: java.util and java.lang members jrt lacks: Scanner, Calendar.Builder, Propert... | deferred | 10 | 10 | unchanged | JCS96 (b): deferred (the small members batch not built before the milestone) |
+| `repl-sibling`: the REPL's model: a class of the do used before it is defined, a test's class... | deferred | 9 | 9 | unchanged | survey §6.1, JCS8 (b), JC4 |
+| `stack`: StackWalker, stack traces and their line numbers | deferred | 9 | 9 | unchanged | JCS9 (b), JC6; JCS94 (b): deferred |
+| `naming`: JNDI (javax.naming: InitialContext, LdapName, Rdn, directory attributes) | deferred | 8 | 8 | unchanged | JCS91 (b): deferred, JNDI 1-2 days |
+| `system-properties`: the JVM's identifying system properties (java.version, java.vm.specification.... | deferred | 7 | 7 | unchanged | JCS96 (b): deferred (the small members batch not built before the milestone) |
+| `random`: java.util.random (RandomGeneratorFactory and the algorithms by name) | deferred | 6 | 6 | unchanged | JCS96 (b): deferred (the small members batch not built before the milestone) |
+| `jrt-strings`: jrt's StringBuffer: its capacity, its synchronized methods and an append's bo... | deferred | 4 | 4 | unchanged | JCS96 (b): deferred (the small members batch not built before the milestone) |
+| `sql`: JDBC beyond the Go build's java.sql (javax.sql.rowset, java.sql.Time) | deferred | 4 | 4 | unchanged | JCS97 (b): deferred |
+| `identity`: stdout prints identity hash codes or traces (Object.toString, a stack trace t... | deferred | 3 | 3 | unchanged | As built: JC1; JCS17 (b): stdout's digest with identity hashes masked |
+| `jvm-tools`: a JDK tool the test runs or its jtreg actions ran: the java launcher (java.ho... | deferred | 3 | 3 | unchanged | JCS103 (a): the JDK's own tools a test runs, a harness class |
+| `text-data`: java.text's data jrt lacks: Bidi's (ICU's ubidi data), collation rules of oth... | deferred | 3 | 3 | unchanged | JCS96 (b): deferred (the small members batch not built before the milestone) |
+| `interp-clone`: the interpreter: clone() of an interpreted Cloneable class | deferred | 2 | 2 | unchanged | survey §6.2, JC4 |
+| `jrt-streams`: jrt's own streams otherwise than the JDK's: a closed DataInputStream over a F... | deferred | 2 | 2 | unchanged | JCS101: jrt flushing its streams at exit by design (a); the other behaviours deferred with JCS96 (b) |
+| `thread-order`: the order of two threads' output lines: a thread started and the starting thr... | deferred | 2 | 2 | unchanged | JCS104 (b): the two threads' output order recorded status-only |
+| `url-headers`: URLConnection's headers jrt answers otherwise: no MIME type (getFileNameMap h... | deferred | 2 | 2 | unchanged | JCS105 (b): deferred with JCS96 |
+| `interp-world-limits`: the interpreter's known limits: a run-time class extending java.io.StringRead... | deferred (beside) | 2 | 2 | unchanged | RPS21 (a), deferred, decided with JC6's ranking |
+| `clock`: stdout names the run's clock (a file's last-modified time made by the run) | deferred | 1 | 1 | unchanged | JCS99 (a): as built, these tests' digests recorded as "-" (c) |
+| `environment`: the run's environment: temporary directory, canonical paths | deferred | 1 | 1 | unchanged | As built: JC1, JC2; JCS19 (b) |
+| `identity-sum`: stdout prints sums of identity hash codes (Test6909839's ((c) ? a : b).hashCo... | deferred | 1 | 1 | unchanged | As built: JC1 (:identity, JCS17 (b): hash codes after an @ masked); the sums cannot be masked; JCS99 (a), (c) |
+| `interp-extends`: a superclass the Java forms cannot extend yet: a class of the world not liste... | deferred | 1 | 1 | unchanged | survey §6.1, JC4/JC6; JCS98 (a) built in JC4b, JCS111 (a) in JC4c |
+| `interp-jls`: the interpreter: the JLS corpus's finding: finally's return swallowing an exc... | deferred | 1 | 1 | unchanged | As built: JC1, JC4, JC5 |
+| `interp-synchronized`: two threads' interleaving in synchronized methods printed (Test8267042: read(... | deferred | 1 | 1 | unchanged | JCS98 (a): built in JC4b; the interleaving is JCS71 (a)'s kind |
+| `interp-volatile`: the interpreter's volatile fields: no sequential consistency between threads ... | deferred | 1 | 1 | unchanged | JCS127 (a): deferred, a class now, the fix after the tag arbace-reaps-3-crops-v2 |
+| `jrt-io`: jrt's FileInputStream.skip of a negative count | deferred | 1 | 1 | unchanged | JCS96 (b): deferred (the small members batch not built before the milestone) |
+| `jrt-math`: jrt's Math.pow at large exponents | deferred | 1 | 1 | unchanged | JCS96 (b): deferred (the small members batch not built before the milestone) |
+| `memory-limit`: no heap limit: a test waiting for OutOfMemoryError (the JDK's -Xmx2g) allocat... | deferred | 1 | 1 | unchanged | JCS99 (a): as built, these tests' digests recorded as "-" (c) |
+| `read-failed`: not interpreted or compiled: the read level failed (the test's class at that ... | deferred | 1 | 1 | unchanged | As built: JC1 |
+
+
+**Java AOT** (classes file `test/java/divergences.edn`)
+
+| class | kind | cases | v2 | since v2 | decision |
+|---|---|---:|---:|---|---|
+| `serialization`: serialization (ObjectInputStream, ObjectOutputStream, Externalizable) | by design | 117 | 117 | unchanged | J2G-SPEC §12 (2026-10-10) |
+| `classloading`: class loading (ClassLoader's members, defineClass, ServiceLoader, modules, Cl... | by design | 18 | 18 | unchanged | J2G-SPEC §12, loading classes from jars for good (the user, 2026-10-10); JCS9 (b): J2G-SPEC §12 stands |
+| `speed`: speed: beyond the check's limit (20 s an action, the definition included, or ... | by design | 14 | 14 | unchanged | survey §6.1, JCS10 (a); a catch-all kept by the user's decision of 2026-10-31, the timeouts curated after ... |
+| `jforms-corpus-own`: diffcheck's exclusions: the Java forms compiler's corpus's own classes that f... | by design (beside) | 12 | 12 | unchanged | RPS27 (a): the corpus's own classes failing in both halves by design |
+| `classfile`: java.lang.classfile, java.lang.constant | by design | 10 | 10 | unchanged | JCS9 (b), JC6; JCS95 (a): by design |
+| `foreign`: the foreign function and memory API (java.lang.foreign: Arena, MemorySegment;... | by design | 6 | 6 | unchanged | JCS95 (a): by design, FFM |
+| `xml`: XML (javax.xml, the XML signature API, Properties in XML) | by design | 4 | 4 | unchanged | J2G-SPEC §12 (2026-10-10) |
+| `desktop`: AWT, Swing (java.desktop) | by design | 1 | 1 | unchanged | J2G-SPEC §12, Swing/AWT for good (the user, 2026-10-10); JCS9 (b): J2G-SPEC §12 stands |
+| `j2g-reflection`: reflection's access checks (Method.invoke, Field.get: the caller's class from... | by design | 1 | 1 | unchanged | JCS98 (a), JCS117 (a) built in JC4c; JCS123 (b): the two j2g ones built, the access checks left out by design |
+| `zip`: the jrt: URL (the run-time image's file system; zip, jar and the jar: URL are... | by design | 1 | 1 | unchanged | JCS106 (a): by design, no run-time image |
+| `j2g-unresolved`: j2g: a class whose analysis stops at a type the world does not have (Cannot c... | deferred | 305 | 305 | unchanged | JCS69 (a), then (b): the world, until JCS44 (a)'s messages name the class, then the analysis failing at the... |
+| `security`: security (KeyStore, certificates, providers, permissions, key generators) | deferred | 242 | 242 | unchanged | JCS9 (b), JC6; JCS90 (b): deferred |
+| `net`: networking (datagrams, multicast, NIO channels and selectors, URL protocols, ... | deferred | 156 | 156 | unchanged | JCS9 (b), JC6; JCS91 (b): deferred |
+| `j2g-world`: j2g: a JDK class outside the closed world named by the test whose package the... | deferred | 95 | 95 | unchanged | JCS9 (b), JC6; JCS44 (a): after the world classes |
+| `nio`: NIO buffers, files and charsets' coders (direct buffers, FileChannel, FileTim... | deferred | 88 | 88 | unchanged | JCS9 (b), JC6; JCS92 (b): deferred |
+| `reflection`: annotations and reflection's types and metadata (getAnnotation, getTypeParame... | deferred | 74 | 74 | unchanged | JCS9 (b), JC6; JCS94 (b): deferred, its own amendment (it reverses J2G-SPEC's R16) |
+| `management`: java.lang.management, JMX | deferred | 45 | 45 | unchanged | JCS9 (b), JC6; JCS95: java.lang.management's MXBeans deferred (b), JMX by design (a) |
+| `invoke`: java.lang.invoke (MethodHandle, MethodHandles, CallSite, LambdaConversionExce... | deferred | 36 | 36 | unchanged | JCS9 (b), JC6; JCS94 (b): deferred |
+| `charsets-locales`: charsets and locales (UTF-16LE's and UTF-32's coders, EUC-JP, US-ASCII's alia... | deferred | 22 | 22 | unchanged | JCS9 (b), JC6; JCS92 (b): deferred |
+| `j2g-edge`: j2g: a JDK class's facts the edge does not record (generic signatures, enum c... | deferred | 22 | 22 | unchanged | survey §7.3, JCS9 (b), JC6 |
+| `threads`: threads and concurrency's members jrt lacks (thread groups, platform threads,... | deferred | 21 | 21 | unchanged | JCS9 (b), JC6; JCS96 (b): deferred |
+| `javac-api`: javac's API (com.sun.tools.javac.Main, javax.tools, com.sun.source): javac's ... | deferred | 17 | 17 | unchanged | JCS9 (b), JC6; JCS95: deferred (not run on arbace-javac before the milestone) |
+| `logging`: java.util.logging, System.Logger | deferred | 16 | 16 | unchanged | JCS9 (b), JC6; JCS95: deferred (not built before the milestone) |
+| `jrt-dates`: jrt's dates: Date, Calendar, GregorianCalendar, TimeZone and DateFormat behav... | deferred | 13 | 13 | unchanged | JCS96 (b): deferred |
+| `references`: references, finalization, collection (PhantomReference, Cleaner, runFinalizat... | deferred | 9 | 9 | unchanged | JCS9 (b), JC6; JCS96 (b): deferred |
+| `interp-protected`: a protected member of a world class that is not an extendable class's instanc... | deferred | 8 | 8 | unchanged | survey §6.1, JC4; JCS98 (a) built in JC4b, JCS112 (a) in JC4c (the protected static methods in the member ... |
+| `stack`: StackWalker, stack traces and their line numbers | deferred | 8 | 8 | unchanged | JCS9 (b), JC6; JCS94 (b): deferred |
+| `random`: java.util.random (RandomGeneratorFactory and the algorithms by name) | deferred | 6 | 6 | unchanged | JCS96 (b): deferred (the small members batch not built before the milestone) |
+| `system-properties`: the JVM's identifying system properties (java.version, java.vm.specification.... | deferred | 6 | 6 | unchanged | JCS96 (b): deferred (the small members batch not built before the milestone) |
+| `util-classes`: java.util and java.lang members jrt lacks: Scanner, Calendar.Builder, Propert... | deferred | 4 | 4 | unchanged | JCS96 (b): deferred (the small members batch not built before the milestone) |
+| `jforms-namespace-body`: diffcheck's exclusions: Clojure in a class body naming the namespace's vars o... | deferred (beside) | 4 | 4 | unchanged | RPS27 (a): F2.4's kin deferred to REAP3 |
+| `flaky`: flaky: the result depends on the threads' timing or a Random's draw; passed w... | deferred | 3 | 3 | unchanged | JCS71 (a) |
+| `identity`: stdout prints identity hash codes or traces (Object.toString, a stack trace t... | deferred | 3 | 3 | unchanged | As built: JC1; JCS17 (b): stdout's digest with identity hashes masked |
+| `jrt-strings`: jrt's StringBuffer: its capacity, its synchronized methods and an append's bo... | deferred | 3 | 3 | unchanged | JCS96 (b): deferred (the small members batch not built before the milestone) |
+| `jvm-tools`: a JDK tool the test runs or its jtreg actions ran: the java launcher (java.ho... | deferred | 3 | 3 | unchanged | JCS103 (a): the JDK's own tools a test runs, a harness class |
+| `text-data`: java.text's data jrt lacks: Bidi's (ICU's ubidi data), collation rules of oth... | deferred | 3 | 3 | unchanged | JCS96 (b): deferred (the small members batch not built before the milestone) |
+| `j2g-go`: j2g: Go that does not compile (a local class's captured values missing from i... | deferred | 2 | 2 | unchanged | JCS42 (b): fixed in JC5 |
+| `j2g-pp-override`: j2g: a package-private method redeclared by a class of another package (Go wo... | deferred | 2 | 2 | unchanged | J2G-SPEC §4.4, As built: JC2; JCS118 (a): not built in JC4c, JCS122 |
+| `jrt-streams`: jrt's own streams otherwise than the JDK's: a closed DataInputStream over a F... | deferred | 2 | 2 | unchanged | JCS101: jrt flushing its streams at exit by design (a); the other behaviours deferred with JCS96 (b) |
+| `memory-limit`: no heap limit: a test waiting for OutOfMemoryError (the JDK's -Xmx2g) allocat... | deferred | 2 | 2 | unchanged | JCS99 (a): as built, these tests' digests recorded as "-" (c) |
+| `tls`: TLS (javax.net.ssl, javax.net socket factories, HTTPS) | deferred | 2 | 2 | unchanged | JCS90 (b): deferred, providers into the closure first, then TLS over Go's crypto/tls |
+| `url-headers`: URLConnection's headers jrt answers otherwise: no MIME type (getFileNameMap h... | deferred | 2 | 2 | unchanged | JCS105 (b): deferred with JCS96 |
+| `clock`: stdout names the run's clock (a file's last-modified time made by the run) | deferred | 1 | 1 | unchanged | JCS99 (a): as built, these tests' digests recorded as "-" (c) |
+| `environment`: the run's environment: temporary directory, canonical paths | deferred | 1 | 1 | unchanged | As built: JC1, JC2; JCS19 (b) |
+| `identity-sum`: stdout prints sums of identity hash codes (Test6909839's ((c) ? a : b).hashCo... | deferred | 1 | 1 | unchanged | As built: JC1 (:identity, JCS17 (b): hash codes after an @ masked); the sums cannot be masked; JCS99 (a), (c) |
+| `j2g-deep-stack`: j2g: a StackOverflowError expected of unbounded recursion (LambdaTest5's a3 =... | deferred | 1 | 1 | unchanged | JCS98 (a), JCS118 (a): found in JC4c to be V1, not a limit |
+| `jrt-io`: jrt's FileInputStream.skip of a negative count | deferred | 1 | 1 | unchanged | JCS96 (b): deferred (the small members batch not built before the milestone) |
+| `jrt-math`: jrt's Math.pow at large exponents | deferred | 1 | 1 | unchanged | JCS96 (b): deferred (the small members batch not built before the milestone) |
+| `read-failed`: not interpreted or compiled: the read level failed (the test's class at that ... | deferred | 1 | 1 | unchanged | As built: JC1 |
+| `sql`: JDBC beyond the Go build's java.sql (javax.sql.rowset, java.sql.Time) | deferred | 1 | 1 | unchanged | JCS97 (b): deferred |
+| `thread-order`: the order of two threads' output lines: a thread started and the starting thr... | deferred | 1 | 1 | unchanged | JCS104 (b): the two threads' output order recorded status-only |
+
+
+**Java print** (classes file `test/java/divergences.edn`)
+
+| class | kind | cases | v2 | since v2 | decision |
+|---|---|---:|---:|---|---|
+| `print-classes`: print: the printed Java's class files differ from the original's by what the ... | by design | 580 | 652 | shrunk by 72: the code differences test/java/print.ae does not name (and class files of one side only) moved to print-classes-unnamed (818ff165; VM audit 149 F1, the user's decision of 2026-11-02) | RPS9 (a): print's class files against the original's under bin/repr-java roundtrip's classes |
+| `print-shapes`: print: the printed Java is read to another shape of the same Java (a when for... | by design | 18 | 18 | unchanged | RPS64 (a): restructurings by design, the temporaries' names with them |
+| `print-erasure`: print: the printed Java is read to forms with the casts and tags of Java's ty... | by design | 17 | 17 | unchanged | RPS9 (a), RPS64 (a): type arguments are not in the forms until JFS75 (b)'s model carries them |
+| `print-classes-unnamed`: print: the printed Java's class files differ from the original's by a code di... | deferred | 72 | - | new, deferred: print-classes' 72 unnamed code differences (818ff165), the kind of loss RPS65's overload cast was; to triage | the user, 2026-11-02 (VM audit 149, F1): print-classes narrowed to the named kinds, the rest deferred for t... |
+| `print-type-arguments`: print: javac rejects the printed Java for want of Java's type arguments in co... | deferred | 33 | 33 | unchanged | RPS9 (a): deferred until JFS75 (b)'s model carries type arguments |
+| `print-release`: print: javac on Arbace refuses --release N (no ct.sym in its platform), as fo... | deferred | 2 | 2 | unchanged | JCS50 (a) |
+| `print-overload-cast`: print: the forms lose a cast that chooses an overload (v((Object) "s") read a... | deferred | 1 | 1 | unchanged | RPS65 (a): deferred to JC5, the converter keeping a cast that changes javac's overload choice |
+| `read-failed`: not interpreted or compiled: the read level failed (the test's class at that ... | deferred | 1 | 1 | unchanged | As built: JC1 |
+
+
+**Go read** (classes file `test/repr/go/divergences-read.edn`)
+
+| class | kind | cases | v2 | since v2 | decision |
+|---|---|---:|---:|---|---|
+| `parser-rejects`: files go/parser rejects | by design | 73 | 73 | unchanged | doc/go/GO-PARSER-SURVEY.md, GPS2 (b) (syntax errors from gc's syntax), GPS9 (b) ("Decided (2026-10-20)", th... |
+| `goos-other-boards`: TamaGo's goos packages for other boards and architectures | by design | 67 | 67 | unchanged | doc/go/GO-PARSER-SURVEY.md, "As built: GP3"; GPS17 (a): the helper's failures dumped natively, reported as ... |
+| `invalid-programs`: invalid programs the converter cannot convert (raw forms only) | by design | 64 | 64 | unchanged | GC47 (a); GPS9 (b): the invalid programs checked on their raw forms |
+
+
+**Go eval** (classes file `test/goi/divergences.edn`)
+
+| class | kind | cases | v2 | since v2 | decision |
+|---|---|---:|---:|---|---|
+| `gc-flags`: gc's optimizer diagnostics and flags | by design | 111 | 111 | unchanged | §1.1, GC46 |
+| `frames`: runtime.Caller, runtime.Callers, FuncForPC and traces naming goi's frames | by design | 21 | 21 | unchanged | §1.1, §10.6 |
+| `memory`: finalizer timing, escape analysis, memory statistics, heap profiles | by design | 17 | 17 | unchanged | §1.1 |
+| `gc-phases`: errors of gc's phases after type checking | by design | 13 | 13 | unchanged | GC46, GPS41 (c) |
+| `foreign-code`: assembly, cgo, go:linkname | by design | 9 | 9 | unchanged | §1.1 |
+| `spellings`: message spellings, columns and lines the forms do not keep | by design | 9 | 9 | unchanged | GC49, SPEC.md §6.4, §10.1 |
+| `gc-std`: gc compiling std or the runtime | by design | 7 | 7 | unchanged | §1.1, GC46 |
+| `line-directives`: line directives | by design | 7 | 7 | unchanged | GC46 |
+| `speed`: speed: programs beyond the check's 10 s | by design | 6 | 6 | unchanged | §11.1, GR3's criterion |
+| `race`: -race | by design | 5 | 5 | unchanged | §1.1, GC46 |
+| `no-forms`: syntax errors gc's types2 reports on syntax's tree | by design | 4 | 4 | unchanged | GC47, G1, GPS9, GPS43 |
+| `gc-reference`: gc's own errors no longer pass the test | by design | 3 | 3 | unchanged | GR7b |
+| `unsafe-layout`: unsafe layout and memory order gc decides | by design | 2 | 2 | unchanged | §1.1, §5.4 |
+| `call-depth`: S23's call depth | by design | 1 | 1 | unchanged | S23 |
+| `std-out-of-scope`: standard packages out of goi's scope | by design | 1 | 1 | unchanged | GR8a |
+| `toolchain`: the toolchain's root | by design | 1 | 3 | shrunk by 2: issue21317 and linkobj pass, run in Go's test driver's environment (1ebd4ee6, c430b01e) | §1.1, GR4 |
+
+
+**Go AOT** (classes file `test/goi/divergences-aot.edn`)
+
+| class | kind | cases | v2 | since v2 | decision |
+|---|---|---:|---:|---|---|
+| `no-forms`: invalid programs without forms | by design | 137 | 137 | unchanged | GC47, G1, GPS9, GPS43 |
+| `gc-reference`: gc's own errors no longer pass the test | by design | 4 | 4 | unchanged | GR7b |
+| `positions`: positions mode :lines does not keep: expressions' line breaks, //line directives | by design | 3 | 3 | unchanged | RPS17 (a), SPEC.md §10.1 |
+| `go-build-complete`: go build's -complete | by design | 1 | 1 | unchanged | RPS31 (a), by design |
+| `spellings`: the forms of invalid programs that say another program | by design | 1 | 1 | unchanged | GC49, SPEC.md §6.4 |
+| `toolchain`: the toolchain's root | by design | 1 | 3 | shrunk by 2: issue21317 and linkobj pass at both levels (1ebd4ee6, c430b01e) | §1.1, GR4; BUILD.md (-trimpath) |
+
+
+**Go print** (classes file `test/repr/go/divergences-print.edn`)
+
+| class | kind | cases | v2 | since v2 | decision |
+|---|---|---:|---:|---|---|
+| `compile-only-dirtests`: directory tests that only compile: no run level | by design | 127 | 127 | unchanged | doc/go/ROUNDTRIP.md, "Directory tests"; test/repr/go/roundtrip-dirtest-known.edn |
+| `tests-embed-sources`: TamaGo's tests embed their package's own sources | by design | 9 | 9 | unchanged | doc/go/ROUNDTRIP.md, "Known gaps"; test/repr/go/roundtrip-tests-known.edn |
+| `empty-decl-group`: an empty declaration group (import ( ), a local var ()) | by design | 3 | 3 | unchanged | doc/go/PRINTER-NOTES.md, G2F6 (the user, 2026-10-17); doc/go/SPEC.md §10.2 |
+| `unsafe`: unsafe has no export data or code | by design | 2 | 2 | unchanged | doc/go/ROUNDTRIP.md, "The corpus and the configuration" |
+
+
+**C read** (classes file `test/c/divergences-read.edn`)
+
+| class | kind | cases | v2 | since v2 | decision |
+|---|---|---:|---:|---|---|
+| `gcc-syntax`: a construct cc's parser lacks or reads otherwise, which the port reads as gcc... | by design | 130 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS267 (a) (the user, 2026-11-03; CS131 (c), CS144 (a), CS194 (a); CS40 (a)'s rule: the reference is gcc) |
+| `embed`: C23's #embed and __has_embed (6.10.4, 6.10.1), which cc lacks | by design | 47 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS260 (a); C8 |
+| `pp-errors`: the trees equal, the errors not | by design | 21 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS260 (a); C8 |
+| `va-opt`: C23's __VA_OPT__ (6.10.5.1), which cc lacks | by design | 10 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS260 (a); C8 |
+| `dg-unsupported`: DejaGnu's UNSUPPORTED: a directive's selector is false on this target | by design | 8 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS195 (a); C8 |
+| `u-prefix`: C11's u'x', U'x', u"x", U"x" (6.4.4.5, 6.4.5) | by design | 5 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS260 (a); C8 |
+| `trigraphs`: phase 1's trigraphs, which cc does not read and gcc does: the port follows gcc | by design | 4 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS50 (a); C8 |
+| `ucn-identifier`: universal character names in identifiers, one identifier to gcc: the port fol... | by design | 3 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS50 (a); C8 |
+| `error-test`: a file the reference rejects (gcc -E's status not 0, a dg-error test) | by design | 2 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS260 (a); C8 |
+| `has-c-attribute`: __has_c_attribute (6.10.1), which cc answers 0 (an identifier) | by design | 2 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS260 (a); C8 |
+| `xid-identifier`: an identifier holding a character from 0x80 that is not a letter (a combining... | by design | 2 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS63 (a); C8 |
+| `assembler`: an assembler source (.S) gcc preprocesses as assembler-with-cpp, its lexing n... | by design | 1 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS260 (a); C8 |
+| `c23-colons`: C23's :: punctuator (6.4.6), which cc's scanner lacks | by design | 1 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS260 (a); C8 |
+| `cc-panic`: cc's preprocessor panics (the port's too, at the same place), where gcc reads... | by design | 1 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS260 (a); C8 |
+| `digit-separators`: C23's digit separators in a #line's number, which cc's ParseUint refuses | by design | 1 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS260 (a); C8 |
+| `has-gnu`: gcc's __has_attribute, __has_builtin, __has_feature and __has_extension | by design | 1 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS260 (a); C8 |
+| `pp-known`: the preprocessed stream is known to differ from cc's (the token check's class) | by design | 1 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS260 (a); C8 |
+| `wrong-reason`: the checker errs on the right line for another reason than gcc | deferred | 13 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS200 (a) |
+| `read-refused`: the reader or converter refuses, times out or crashes | deferred | 10 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | C7, CS264 (a) |
+| `decl-diag`: declaration, type and constant-expression errors the checker does not give | deferred | 9 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS92 (a) |
+| `pp-diag`: preprocessor diagnostics the port does not give | deferred | 8 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS50, CS51 |
+| `eval-depth`: the parse recurses deeper than the evaluator's 10,000 interpreted calls | deferred | 5 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS60 (a); C8 |
+| `parse-gap`: valid C23 (or an error test's other lines) the parser rejects | deferred | 2 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS131 (c); C7 |
+| `pedantic-diag`: pedwarns of -pedantic-errors the checker does not know | deferred | 2 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS92 (a) |
+| `undiagnosed`: a file gcc rejects (a dg-error test) whose error the port's preprocessor does... | deferred | 1 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS260 (a): deferred, the port's preprocessor to diagnose it; C8 |
+
+
+**C eval** (classes file `test/c/divergences.edn`)
+
+| class | kind | cases | v2 | since v2 | decision |
+|---|---|---:|---:|---|---|
+| `by-design`: read and printed, out of eval (SPEC §14) | by design | 103 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | SPEC §14, CS3 (a) |
+| `gcc-rejects-at-options`: an error test gcc rejects at its dg-options or when it compiles, which the re... | by design (beside) | 30 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS265 (a) |
+| `gcc-rejects`: gcc 15.2 rejects the file: an error test, whose annotations no reference makes | by design (beside) | 22 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS266 (a) |
+| `pp-known`: the file's preprocessed stream differs from cc's by design | by design (beside) | 12 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS266 (a) |
+| `speed`: speed: programs beyond the check's 10 s | by design | 9 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS107 (a); GOI-SPEC §11.1's rule |
+| `cc-layout`: cc's layout of a struct or union differs from the checker's, and gcc agrees w... | by design (beside) | 8 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS263 (a); C8 |
+| `long-double`: long double is double (CS35) | by design | 5 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS35, SPEC §12.5 |
+| `cc-empty-init`: an array of unknown size with an empty initializer {} | by design (beside) | 3 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS263 (a); C8 |
+| `item-placement`: an item cc places on another line or file than the forms | by design (beside) | 3 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS263 (a); C8 |
+| `vector-types`: GNU's vector types, read and checked, out of eval and AOT by design | by design (beside) | 3 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS3 (a); C8 |
+| `abi`: gcc's layout options the forms do not carry | by design | 2 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | SPEC §12.3, CS264 (a) |
+| `fenv`: floating-point exception flags and signaling NaNs are not modelled (C7) | by design | 2 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | C7 (write-ahead), CS130 |
+| `ub`: undefined behaviour the reference's runs show (SPEC §13.2) | by design | 2 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS10 (a), SPEC §13.2 |
+| `cc-attr-mode`: GNU's mode attribute, which cc ignores (the checker gives gcc's type of that ... | by design (beside) | 2 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS263 (a); C8 |
+| `cc-preprocessor`: the file's stream differs from cc's | by design (beside) | 2 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS263 (a); C8 |
+| `enum-range`: an enumerator beyond long long's range in an error test | by design (beside) | 2 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS263 (a); C8 |
+| `gcc-builtin`: gcc's own semantics of a builtin a program redefines | by design | 1 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | SPEC §7.9, CS264 (a) |
+| `cc-c23-constants`: C23's nullptr, true and false | by design (beside) | 1 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS263 (a); C8 |
+| `cc-redeclared`: cc writes a redeclared array's or function's composite type at the earlier de... | by design (beside) | 1 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS263 (a); C8 |
+| `missing-builtin`: a builtin ci does not implement yet (deferred) | deferred | 23 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | the user, 2026-11-02 (queue 122, F2) |
+| `wide`: the overflow builtins on wide integers (deferred) | deferred | 23 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS35, this section |
+| `vla`: variably modified types beyond a block's arrays (deferred) | deferred | 18 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS106 |
+| `checker-gap`: a difference neither cc's known gaps nor the reference explain | deferred (beside) | 12 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS93 (a); C8 |
+| `complex-int`: GNU's complex integer types (deferred) | deferred | 9 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS105 |
+| `read`: repr/c's reader's known gaps (deferred) | deferred | 7 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | C3b.2, CS104; self-include CS261 (a) |
+| `converter-gap`: the forms lose what the checker needs | deferred (beside) | 5 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS83 (a); C8 |
+| `layout-unjudged`: a layout cc and the checker part on that the judge could not ask gcc about | deferred (beside) | 5 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS263 (a): deferred until the judge asks gcc about it; C8 |
+| `checker`: the checker's own differences ci meets (deferred, CS93 (a)) | deferred | 2 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS93 (a) |
+| `signals`: a signal delivered to the program's handler (review 006) | deferred | 2 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS191 (a); review 006 |
+| `threads`: threads (deferred) | deferred | 2 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | §6.5, CS264 (a) |
+| `complit-static`: compound literals with storage class specifiers: the builder's places (C7 fol... | deferred | 1 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | C7 follow-up, CS131 |
+| `checker-layout`: the checker's layout differs from cc's and gcc's static assertions refuse the... | deferred (beside) | 1 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS93 (a); C8 |
+
+
+**C AOT** (classes files `test/c/divergences-aot.edn`, `test/c/divergences.edn`)
+
+| class | kind | cases | v2 | since v2 | decision |
+|---|---|---:|---:|---|---|
+| `by-design`: read and printed, out of eval (SPEC §14) | by design | 103 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | SPEC §14, CS3 (a) |
+| `long-double`: long double is double (CS35) | by design | 5 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS35, SPEC §12.5 |
+| `abi`: gcc's layout options the forms do not carry | by design | 2 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | SPEC §12.3, CS264 (a) |
+| `fenv`: floating-point exception flags and signaling NaNs are not modelled (C7) | by design | 2 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | C7 (write-ahead), CS130 |
+| `ub`: undefined behaviour the reference's runs show (SPEC §13.2) | by design | 2 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS10 (a), SPEC §13.2 |
+| `gcc-builtin`: gcc's own semantics of a builtin a program redefines | by design | 1 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | SPEC §7.9, CS264 (a) |
+| `missing-builtin`: a builtin ci does not implement yet (deferred) | deferred | 23 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | the user, 2026-11-02 (queue 122, F2) |
+| `wide`: the overflow builtins on wide integers (deferred) | deferred | 23 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS35, this section |
+| `vla`: variably modified types beyond a block's arrays (deferred) | deferred | 18 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS106 |
+| `complex-int`: GNU's complex integer types (deferred) | deferred | 9 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS105 |
+| `read`: repr/c's reader's known gaps (deferred) | deferred | 7 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | C3b.2, CS104; self-include CS261 (a) |
+| `checker`: the checker's own differences ci meets (deferred, CS93 (a)) | deferred | 2 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS93 (a) |
+| `signals`: a signal delivered to the program's handler (review 006) | deferred | 2 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS191 (a); review 006 |
+| `threads`: threads (deferred) | deferred | 2 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | §6.5, CS264 (a) |
+| `complit-static`: compound literals with storage class specifiers: the builder's places (C7 fol... | deferred | 1 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | C7 follow-up, CS131 |
+
+
+**C print** (classes file `test/c/divergences-print.edn`)
+
+| class | kind | cases | v2 | since v2 | decision |
+|---|---|---:|---:|---|---|
+| `objects`: the print is the same program (levels 1, 2, 4) but gcc -O0's object code diff... | by design | 2 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS81 (a) for the rest (the user, 2026-10-30) |
+| `reexpansion`: a macro invocation inside a larger one is printed expanded, and reexpanded by... | by design | 2 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS262 (a); C8 |
+| `run-address`: the original and the print run differently though their objects are equal | by design | 2 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS262 (a); C8 |
+| `objects-macro-body`: the print is the same program (levels 1, 2, 4) but gcc -O0's object code diff... | deferred | 26 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS81 (b) for the bodies an invocation made (the user, 2026-10-30; queue 122 F5) |
+| `converter-gap`: a construct the converter does not write or writes losing a part | deferred | 12 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS83 (a); C8 |
+| `eval-limits`: the evaluated port's limits (CS60, CS78) | deferred | 11 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS60 (a), CS78 (a); C8 |
+| `cc-grammar`: the reference accepts the file, the port's parser (cc's, C3's trees) does not | deferred | 10 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS80 (a); C8 |
+| `macro-context`: a recovered invocation or a printed expansion means another thing where the p... | deferred | 6 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS82 (b) in C5, (a) until then (the user, 2026-10-30): a fix planned; deferred (the user, 2026-11-02, queue... |
+| `print-grammar`: the :lines print holds what cc's grammar (the reread) or gcc refuses though t... | deferred | 6 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS80 (a); C8 |
+| `self-include`: the main file includes itself (#include __FILE__-like tests) | deferred | 6 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS261 (a): deferred, the converter to read the re-entered main file as an include of its own (the user, 202... |
+| `split-declaration`: a declaration begins in one file and ends in another (SPEC §4.3's split-decl... | deferred | 5 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | CS104 (a): the converter keeps such a declaration whole (C6); deferred as at eval (the user, 2026-11-02, qu... |
+| `bad-specs-print`: a declaration whose conflicting specifiers (:c/bad-specs) are printed as one ... | deferred | 1 | - | new: the row is new since v2 (C8, doc/C23-SURVEY.md, "As built: C8, the fourth row") | deferred for v1 (the user, 2026-11-03), CS221 (a) with CS232 (a) after the tag: CS221 (b) and CS232 (b) (th... |
+
+<!-- v3-record:end -->
+
+### What changed since v2, in brief
+
+The work since v2's tag (2026-11-01 to 2026-11-04): the merge window of the waiting branches (7d9c84d6: the gate's
+branches and audits, the crops C23, net/http, OCaml, Scheme and C++23, JN10), the merge-fix round and `--full` at
+504ab60d (2026-11-02), C8 (C's row, 8c61bd89) and C9 (C's crop embedded, the re-seed window, the seed `1fe1063f`).
+
+- **Clojure** (eval 21,052 / 81 / 1 to 21,053 / 81 / 1; AOT 809 / 29 / 0 to 809 / 30 / 0): the oracle's `time_zones`
+  form checks GMT-format names against the zone's raw offset, recorded again on the frozen jar (4acb1ee3; tzdb 2026b moved
+  a standard offset on 2026-11-01), one case more passing; `runtime-source` (by design, the user, 2026-11-02):
+  `clojure/bad_def_test.clj`, written at run time by the suite, loads from source (5249c0ba, 8f3d43c6, 062de7d1). Read and
+  print unchanged.
+- **Java** (read 7,742 / 3 / 93 to 7,742 / 0 / 96; print 2,598 / 687 / 37 to 2,598 / 615 / 109; eval and AOT
+  unchanged): at the diagnostics level, javac on Arbace reaching a member jrt lacks is `diag-closed-world`'s (deferred),
+  not `classloading`'s (bf844109, queue 012); `print-classes` (by design) takes only the differences `test/java/print.ae`
+  names, the 72 others the new deferred `print-classes-unnamed`, to triage (818ff165; VM audit 149 F1, the user,
+  2026-11-02). The dead classes `interp-private-call` and `interp-object-method` removed (b412c5f3, no case); every
+  class's `:decided` cites its decision (724e8499).
+- **Go** (eval 1,618 / 219 / 0 to 1,620 / 217 / 0; AOT 1,688 / 149 / 0 to 1,690 / 147 / 0): issue21317 and linkobj pass
+  at both levels, run in Go's test driver's environment (1ebd4ee6, c430b01e), `toolchain` 3 to 1. Read and print unchanged.
+- **C** (new row; read 5,201 / 232 / 50, eval 2,049 / 124 / 87, AOT 2,058 / 115 / 87, print 4,767 / 6 / 83): C8 made the
+  row (8c61bd89; doc/C23-SURVEY.md, "As built: C8, the fourth row"). Since: the classes audited and cited (queue 122,
+  CS260-CS264, 121a873b, 6fd02a6e); `torture-execute-mirror` collapsed to its 101 files not in `torture-execute` (VM
+  report 156, 1a385469: eval 3,457 / 195 / 109 to 2,049 / 124 / 87); the re-seed window's records (C9.2 steps 7 and 7a:
+  the annotations, the token and tree checks, the round trip) written with their results files (CS240 (a)), so read and
+  print count their passes (575+ and 0+ before), and classified (CS265, CS266, b7e8e8f6; the tree check's 276 files of
+  C7's grammar, `gcc-syntax`, CS267 (a), 14873a86, d16ae499; 255c9d54); after the re-seed, the AOT record's stale pass of
+  `20101011-1.c` corrected and `c23-float-6.c` passing (04947f0e: AOT 2,058 / 115 / 87).
+- **Reclassified**: none at a v2 cell (Java's `classloading` to `diag-closed-world` at the read level is a move between
+  classes, by design to deferred).
+- **Not a cell**: the merge window's gate work (GTS80-GTS103, GTS130-GTS143, GTS170-GTS173, GTS180; doc/GATE-SURVEY.md), Java 26
+  from jdk26u's own build for the frozen jar (24585ae8, 1830be87), the re-seed's guards (CS255-CS259), C's full checks as
+  `--full` steps and C's pins (1c78baee, bc4e4c5a).
+
 ## As built: RPS97 (b) (2026-10-28)
 
 RPS97 (b), decided by the user: `bin/clojure-tests --aot` and `bin/java-check`'s compiled level call
