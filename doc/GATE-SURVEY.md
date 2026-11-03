@@ -3278,3 +3278,153 @@ All (a), as recommended: the essential budget is the gate's wall time; equal per
 the nightly tier every step over its subset plus a rotating slice, seven nights; the clean run over the compressed corpora,
 checking the rotation's record; the C subset rule for every crop; Go's coverage builds kept by key, run at night; synthetic
 corpora against the same references; Java's `speed` curation inside GT8; acceptance as GTS209.
+
+## As built: GT8.4, GT8.7 (write-ahead, branch `gt8-nightly`, 2026-11-03)
+
+GTS202 (a), GTS203 (a), GTS204 (a) in the planner's way: the rotation is data in `test/gate/steps.edn`, decided by
+`test/gate/plan.ae`, noted by `bin/lib/gate-run.bash`, its record in the store of passes.
+
+**The declaration.** A parted step names how its tool takes a file list and where the lists come from:
+`:rotate {:only "--only {list}" :universe RECORD :subset CORPORA :failed-re ERE}`. RECORD is the committed record of the
+part's check (one `["ID" ...]` a line; the part's ids are those under `PART/`): the universe is what the check judges, read
+without the corpus's tree. CORPORA's map `:id :PART` gives `:subset` (names under the corpus, as VM report 161 writes them).
+`:only` is appended to `:cmd` (or put at `{only}`), its `{list}` the runner's `"$GATE_LIST"` (the planner's
+`LOGS/rotation/NAME.list`): no path in a key. `:rotate` itself is not keyed: a part run whole keeps its key. Declared today on
+`c-check` and `c-aot` (`bin/ci check [--aot] --only FILE`, ids `CORPUS/NAME`; `:failed-re "^FAIL ([^ ]+).*$"`, the judge's
+`FAIL ID WHY` lines).
+
+**The tiers** (GT8.7). `bin/gate` (essential) is untouched. `bin/gate --full` runs every part whole, as before.
+`bin/gate --nightly [--plan]` (mode `nightly`: `--full`'s phases) expands each rotated part whose subset is smaller than
+its universe into two checks: `NAME.PART.sub`, the subset plus the files that failed since, and `NAME.PART.sK`, one slice of
+the rest. A part with no `:subset` (every crop but C until GT8.3; C too until VM 161's `:subset` lists are merged) is not
+expanded: its key is `--full`'s, so `--nightly` = `--full` for it and the two tiers share its passes. `bin/gate --full
+--clean` (and `--clean --plan`) runs the subsets alone (`--rotation subset`; `GATE_CLEAN_WHOLE=1`: whole parts), after
+`bin/gate --rotation-status` on the shared store passed (`GATE_CLEAN_ROTATION=0`: not required; the record's `:rotation`
+says `:complete`, `:unchecked` or `:whole`).
+
+**Slices.** A file's slice is the first 8 hex digits of its id's SHA-256 mod 7: a function of the name alone, so a file
+added to a corpus changes only its own slice's list, and a re-recorded reason changes none. Each slice is a check of its own
+in the store (`STORE/NAME.PART.sK/KEY.edn`), keyed as any check plus the line `list SHA N` (its list's digest): its passes
+are kept, pruned and reused like any other. The night's slice: among the non-empty slices, one whose latest run failed, else
+one never run, else the one whose latest run is oldest; ties by the night index (the day of the run's start less 12 hours,
+`GATE_NIGHT`), so that an empty store walks s0..s6 in seven nights and a missed night is caught up, not skipped for a week.
+A slice whose key has a pass is skipped as any check (its "skip" noted: the pass holds at that key); a whole part's run
+counts as a run of every slice (below).
+
+**The record.** The runner appends each rotated check's run (pass, fail, or skip at a pass) to
+`STORE/_rotation/NAME.PART.sK.runs` (epoch, date, status, key, list digest, commit, worktree); a failure's files (the log's
+lines `:failed-re` names that are in its list) go to `STORE/_rotation/NAME.PART.failed`, which the planner adds to the
+part's subset and removes from its slice ("a file that fails joins the subset"); a pass of the subset clears those it
+ran. They stay there until they pass, not for ever: a file that should stay is added to the corpus's `:subset` by hand
+(`--rotation-status` lists them). Not noted in the clean run (its store is its clone's).
+
+**A whole part's run counts for every slice** (the coordinator's follow-up, 2026-11-03). A rotated part run whole
+(`--full`, or the clean run with `GATE_CLEAN_WHOLE=1`) keeps `--full`'s key (its universe is unkeyed, `:whole-list`) and is
+noted as `STORE/_rotation/NAME.PART.whole.runs`, its list the universe (its ids sorted, digested). It is a run of every
+slice: for the night's choice any whole run counts (after one `--full` night every slice ran at once, and the night's index
+decides; after a failed whole run every slice's latest run failed); for completeness a whole run counts for a slice when its
+universe is the current one. "With its current list" is then: a slice's own run counts when its list is the slice's list
+now, a whole run when its universe is the universe now (every current slice's list is in it, however the subset and the
+failed files split the rest since); a whole run of another universe (a program added or removed) counts for none. Of the
+two, the later run decides (in the same second, the slice's own). A whole run's failure sends its named files to the
+subset; its pass clears them. The clean run notes its runs in its clone's store, and `clean_launch` appends them to the
+shared store's `_rotation/` (with `GATE_CLEAN_PUBLISH`): one whole `--full` night, or a whole clean run, completes the
+rotation, and the tag need not wait seven nights.
+
+**Completeness** (`bin/gate --rotation-status [--days N]`, `gate.plan rotation-status`): for every rotated part, every
+non-empty slice's latest run *with its current list* passed or skipped at a pass within 7 days, and no file failed since;
+exit 1 otherwise. *At any key*, decided here: a key changes with every change to the code under check, so requiring the
+current key would make the clean run a full run (GTS204 (b), rejected); within the period a regression outside the subsets
+hides at most the week GTS203 (a) accepts, and the subsets, the coverage set of that code, run at the current key in the
+clean run itself. The list's digest is required to match: a file added since a slice's last run has not run.
+
+**Review 181's fixes** (the Mac's review of this branch, `.tmp/mac-queue/reports/181-review-gt8-nightly.md`; its HIGH
+decided (a) by the user, 2026-11-03). These supersede the paragraphs above where they differ.
+- *Which runs count* (finding 1, (a)): only runs of this commit's ancestors from clean trees, for completeness, the night's
+  slice and the failed files. Each run's line ends `SEQ DIRTY` (the gate's `dirty`: `git status --porcelain
+  --untracked-files=no`, as the passes'); the planner reads `LOGS/ancestors.txt` (`git rev-list HEAD`, written by
+  `plan_inputs`) and `rotation-status` takes `--ancestors FILE` (`bin/gate`'s `rotation_check` writes it); a run of
+  another commit or of a dirty tree is dropped (`counts?`). The failed files are an append-only event log,
+  `NAME.PART.failed` lines `SEQ EPOCH ID fail|clear COMMIT DIRTY`: a file has failed when its latest event that counts is
+  a failure, so a branch's failure does not enter main's subset and a branch's pass does not clear main's failure.
+- *Order* (finding 2): every note takes the store's next sequence number (`STORE/_rotation/.seq`) under the store's lock
+  (`.lock`, L1: no lost update), and runs are ordered by it, then the time: the run noted last is the later one, whatever
+  the clock's second. rotation-test runs with `date +%s` frozen.
+- *The night's choice* (findings 3, 4; `choose-slices`): a slice whose latest run failed runs again, and beside it the
+  rotation's slice among the others: first one not covered with its current list (never run, its list changed since its
+  run, its covering run failed or older than the period), then the one whose latest run is oldest by the sequence; ties by
+  the night index. A list change (a program added, a fixed failure's file back in its slice) is covered the next night;
+  a slice failing with no file named (a build failure, a control) no longer starves the other six.
+- *The clean record* (finding 5): `:rotation {:status :complete|:unchecked|:none|:whole :check EVIDENCE}`, EVIDENCE
+  `rotation-status --edn`'s map (`:days`, `:now`, each part's files, subset, failed files and each slice's covering run
+  as `[K N STATUS DATE COMMIT COVERED]`); `:none` when no part rotates (every part ran whole); its text and data kept in
+  `SHA.logs/rotation.{txt,edn}`. The clone's failed events are published with its runs (L2), both renumbered after the
+  shared store's sequence under its lock. `GATE_NOW` is kept by the scrub only with a store of the caller's own (L6).
+- Left: L3 (the judges print 40 `FAIL` lines: the rest join the subset over later runs), L4 (the controls' subjects in
+  every `:subset`, unchecked), L5 (`:subset` names outside the universe dropped silently), L7 (`.runs` never pruned).
+
+**Tests.** `test/gate/rotation-test.bash` (`bin/gate-tests`, needs stage 0): a made-up tree, table and store (40 ids, a
+subset of 4): `--full` whole; the nightly expansion and its command; the slices as the hash rule says, the seven covering the
+rest once; keys over the list (night 7 = night 0, the subset apart, an unrotated part's key = `--full`'s); `:needs` renamed;
+a failure's file into the subset and out of its slice, the failed slice chosen again, the subset's pass clearing it;
+`rotation-status` incomplete (never run), complete, stale after eight days, incomplete with a failed file; the oldest slice
+chosen; a whole part's run: noted with the universe, its key the one without `:rotate`, completing every slice, the night's
+index deciding after it, a later slice failure making it incomplete, a whole failure's file into the subset and its pass
+clearing it, a whole run of another universe counting for none; the clean run's subsets; since review 181 (with
+`date +%s` frozen): another commit's and a dirty tree's runs counting for nothing, an ancestor's counting, another
+commit's failure and pass moving none of this commit's failed files, the evidence (`--edn`, `:none`), the failed slice
+with the rotation's beside it, a changed list run the next night. 44 of 44.
+
+**The tools' file lists** (what a part needs to be rotated). Take one today: `bin/ci check` and `check --aot` (`--only FILE`
+of ids; rotated); `bin/goi check` and `bin/java-check` (`--only REGEX`: a list becomes an alternation, but their steps are not
+parted by corpus and Java's levels feed `java-judge` by `:uses`, so a slice needs the judge to take a partial run: GT8.5's
+per-corpus records first); `bin/ci dg` (`CI_DG_ONLY`, a file, behind `--essential` only). Take none: `bin/ci annotations`,
+`bin/repr-c check --tokens`, `parse-check`, `roundtrip` (C's four read-level steps, about 220 minutes of C's 300); repr/java's
+tree checks (`parse-check`, `front-check`, `attr-check`, `nojavac-check`, `roundtrip`); `bin/repr-go native-check` (packages);
+`bin/clojure-tests`, `bin/oracle`, `bin/diffcheck`, `bin/repr-clojure check`. Each needs an `--only FILE` and a judge that
+leaves out the rows a partial run does not run (as `CI_SUBSET` does), then a `:rotate` line.
+
+**What remains.** VM 161's `:subset` lists merged (then C's 15 run corpora rotate: 229 of 2,260 programs a night plus a
+seventh of the rest), and their amd64 re-measure; `--only` for the tools above, C's read levels first; a `:universe` format
+for crops whose records are not one id a line (goi's, Java's); the controls' subjects kept in every subset (VM 160 did it by
+hand for benchmarksgame: a control whose subject is not in a slice is "left", not failed); `--costs` (GT8.1) to show the
+nightly tier against its budget; the clean record's `:rotation` read by `test/gate/clean.ae`'s `--only` selection (today it
+names the parts' `.sub` checks, as a fresh clean record would); a first real `--nightly`, then seven, before the tag.
+
+## As built: GT8 (the tools' lists) (write-ahead, branch `gt8-lists`, 2026-11-03)
+
+Every corpus tool but C's (another branch's) takes a file list; the planner reads more record shapes.
+
+**The planner** (`test/gate/plan.ae`, `bin/lib/gate-run.bash`). `:rotate` takes `:id-re` (a regex on the record's lines:
+group 1 the id, group 2 when present the part named on the line, the ids then bare, as the `:subset`'s names: Java's
+`ref-jdk26.edn`, the corpus on each test's line; one group: every line's id in the part, goi's records), `:always` (the
+negative controls' subjects, GTS81 (a): in the subset and in every non-empty slice's list, so every run of the part judges
+its controls; ids of the part's universe only) and `:failed-as` (sed's replacement, default `\1`: repr/go's `KIND CORPUS
+KEY` lines give `\2/\3`). `{part}` in a part's `:uses` names its own part's producer, and a `:uses` naming a rotated
+part names its checks. `:judges {:failed-re :failed-as}` on a step that judges rotated checks' saved runs (Java's
+`java-judge`, whose levels' `--save` runs never fail): when it fails, each producer whose list names a failing id is noted
+as failed (`judge_note`: its run a failure, its ids into the part's subset). The runner exports `GATE_USES`.
+`rotation-test` 40 of 40.
+
+**The tools.**
+- repr/go: `bin/repr-go native-check CORPUS --only FILE` (ids `CORPUS/KEY`, a dump's key; the others neither checked
+  nor missing; the report `:partial`, which `bin/reap record-native-check` refuses); `--record-ids` writes
+  `test/repr/go/native-check-ids.edn` (one `["CORPUS/KEY"]` a line, from the helper's dumps, no check: 11,835 ids of the
+  16 corpora not `:clean-only`). `:rotate` on `repr-go-native`.
+- Java: `bin/java-check --list FILE` (test ids, partial); a run of whole corpora (`--corpus` alone) saves `DIR/corpus`
+  and `--judge` (`java.check/report --corpora`) judges it whole within those corpora (`--record` keeps the other
+  corpora's lines). The level steps are parted by corpus (the six run corpora; `langtools-diagnostics` for
+  diagnostics), interp and compiled reading their own corpus's read (`java-read.{part}/forms.sha256`); `java-judge`
+  judges the results files of `GATE_USES`. Cost: the compiled level's shards are per corpus (about 11 programs, not 7).
+  `test/java/corpora-test.bash` (in `bin/gate-tests`), 10 of 10.
+- goi: `bin/goi check [--aot] --list FILE` (a selection; its own results classified by `goi.divergences --partial`;
+  each failing program `   failing: ID`). goi's check is the step `goi-check-full` (one part, `linux-amd64`), apart
+  from `goi` (annotations, the checker's tests); `goi-aot` one part. Not parted by kind: the kind is not on the
+  record's line, and one rotation over the 1,837 ids balances by the hash.
+- Clojure: `--only FILE` for `bin/clojure-tests` (namespaces, both levels), `bin/oracle check` (case ids `FILE:LINE`;
+  `bin/oracle ids`), `bin/diffcheck` (`FILE:LINE`; `--ids`), `bin/repr-clojure check --roundtrip` (`CORPUS:PATH`;
+  `--ids`). Not rotated: `suite-go`, `oracle-go` and `diffcheck` are essential steps; `suite-aot` and `repr-clojure` are
+  unparted and the oracle's, diffcheck's and repr/clojure's universes are generated (`ids`), not committed records.
+
+**What remains.** The `:subset`s (GT8.3) for repr/go, Java and goi: until then their parts run whole in every tier;
+committed id records (or a `:universe-cmd`) for the oracle, diffcheck and repr/clojure; a part for `suite-aot`.

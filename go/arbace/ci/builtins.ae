@@ -142,3 +142,177 @@
                         (return (aget a 3))))
 
                     (aget a 2)))))))))))
+
+
+
+;; gcc's type-generic bit builtins (__builtin_popcountg, parityg, clzg, ctzg, ffsg, clrsbg; gcc 14) and C23's
+;; <stdbit.h> builtins (__builtin_stdc_*, gcc 14; the rotates gcc 15), queue 126: the builder (arbace.c.build's
+;; bitg-call) passes the operand (an integer, or a wide value) and its width N; clzg and ctzg also the value for 0
+;; and whether one was given, the rotates their count. The operand is taken as its N bits, unsigned (a signed
+;; operand's two's complement bits); a result of the operand's type is wide when N > 64, as the builder's kinds are.
+(go/func init []
+  (let [n Natives
+      wt (fn ^crt/WType [^{:tag (slice Arg)} a] (lit crt/WType :N (conv int (.-I (aget a 1))) :Signed false))
+      opnd (fn ^crt/Wide [^{:tag (slice Arg)} a]
+        (when (== (.-K (aget a 0)) \w)
+          (return (.Norm (wt a) (.-W (aget a 0)))))
+
+        (crt/WFromInt64 (wt a) (.-I (aget a 0))))
+
+      ones (fn ^int [^crt/Wide w]
+        (let [c 0]
+          (range [_ l w]
+            (set! c (+ c (bits/OnesCount64 l))))
+
+          c))
+
+      blen (fn ^int [^crt/Wide w]
+        (for [i (- (len w) 1)] (>= i 0) (dec! i)
+          (when (!= (aget w i) 0)
+            (return (+ (* 64 i) (bits/Len64 (aget w i))))))
+
+        0)
+
+      tz (fn ^int [^crt/Wide w]
+        (range [i l w]
+          (when (!= l 0)
+            (return (+ (* 64 i) (bits/TrailingZeros64 l)))))
+
+        -1)
+
+      res (fn ^Arg [^crt/WType t ^crt/Wide w]
+        (when (> (.-N t) 64)
+          (return (lit Arg :K \w :W w)))
+
+        (ai (conv int64 (aget w 0))))
+
+      cnt (fn ^Arg [^int v] (ai (conv int64 v)))
+      nbits (fn ^int [^{:tag (slice Arg)} a] (conv int (.-I (aget a 1))))]
+
+    (aset n "__builtin_popcountg" (fn ^Arg [^{:tag (* Thread)} t ^{:tag (slice Arg)} a] (cnt (ones (opnd a)))))
+    (aset n "__builtin_parityg" (fn ^Arg [^{:tag (* Thread)} t ^{:tag (slice Arg)} a] (cnt (bit-and (ones (opnd a)) 1))))
+    (aset n "__builtin_clzg" (fn ^Arg [^{:tag (* Thread)} t ^{:tag (slice Arg)} a]
+        (let [k (blen (opnd a))]
+          (when (and (== k 0) (!= (.-I (aget a 3)) 0))
+            (return (aget a 2)))
+
+          (cnt (- (nbits a) k)))))
+
+    (aset n "__builtin_ctzg" (fn ^Arg [^{:tag (* Thread)} t ^{:tag (slice Arg)} a]
+        (let [k (tz (opnd a))]
+          (when (>= k 0)
+            (return (cnt k)))
+
+          (when (!= (.-I (aget a 3)) 0)
+            (return (aget a 2)))
+
+          (cnt (nbits a)))))
+
+    (aset n "__builtin_ffsg" (fn ^Arg [^{:tag (* Thread)} t ^{:tag (slice Arg)} a] (cnt (+ (tz (opnd a)) 1))))
+    (aset n "__builtin_clrsbg" (fn ^Arg [^{:tag (* Thread)} t ^{:tag (slice Arg)} a]
+        (let [w (opnd a)
+            nb (nbits a)
+            top (- nb 1)]
+          (when (!= (bit-and (>> (aget w (/ top 64)) (conv uint (% top 64))) 1) 0)
+            (set! w (.Not (wt a) w)))
+
+          (cnt (- nb (blen w) 1)))))
+
+    ;; C23 7.18 (N3220): each as gcc's c-parser expands it (clzg, ctzg, popcountg of x or ~x, shifts)
+    (let [stdc (fn ^{:tag (func [(* Thread) (slice Arg)] [Arg])} [^{:tag (func [^int nb ^crt/WType t ^crt/Wide x ^crt/Wide nx ^{:tag (slice Arg)} a] [Arg])} f]
+          (fn ^Arg [^{:tag (* Thread)} t ^{:tag (slice Arg)} a]
+            (let [x (opnd a)]
+              (f (nbits a) (wt a) x (.Not (wt a) x) a))))
+        tzn (fn ^int [^int nb ^crt/Wide w]
+          (let [k (tz w)]
+            (when (< k 0)
+              (return nb))
+
+            k))]
+
+      (aset n "__builtin_stdc_leading_zeros" (stdc (fn ^Arg [^int nb ^crt/WType ty ^crt/Wide x ^crt/Wide nx ^{:tag (slice Arg)} a] (cnt (- nb (blen x))))))
+      (aset n "__builtin_stdc_leading_ones" (stdc (fn ^Arg [^int nb ^crt/WType ty ^crt/Wide x ^crt/Wide nx ^{:tag (slice Arg)} a] (cnt (- nb (blen nx))))))
+      (aset n "__builtin_stdc_trailing_zeros" (stdc (fn ^Arg [^int nb ^crt/WType ty ^crt/Wide x ^crt/Wide nx ^{:tag (slice Arg)} a] (cnt (tzn nb x)))))
+      (aset n "__builtin_stdc_trailing_ones" (stdc (fn ^Arg [^int nb ^crt/WType ty ^crt/Wide x ^crt/Wide nx ^{:tag (slice Arg)} a] (cnt (tzn nb nx)))))
+      (aset n "__builtin_stdc_first_leading_zero" (stdc (fn ^Arg [^int nb ^crt/WType ty ^crt/Wide x ^crt/Wide nx ^{:tag (slice Arg)} a]
+          (when (== (blen nx) 0)
+            (return (cnt 0)))
+
+          (cnt (+ (- nb (blen nx)) 1)))))
+
+      (aset n "__builtin_stdc_first_leading_one" (stdc (fn ^Arg [^int nb ^crt/WType ty ^crt/Wide x ^crt/Wide nx ^{:tag (slice Arg)} a]
+          (when (== (blen x) 0)
+            (return (cnt 0)))
+
+          (cnt (+ (- nb (blen x)) 1)))))
+
+      (aset n "__builtin_stdc_first_trailing_zero" (stdc (fn ^Arg [^int nb ^crt/WType ty ^crt/Wide x ^crt/Wide nx ^{:tag (slice Arg)} a] (cnt (+ (tz nx) 1)))))
+      (aset n "__builtin_stdc_first_trailing_one" (stdc (fn ^Arg [^int nb ^crt/WType ty ^crt/Wide x ^crt/Wide nx ^{:tag (slice Arg)} a] (cnt (+ (tz x) 1)))))
+      (aset n "__builtin_stdc_count_zeros" (stdc (fn ^Arg [^int nb ^crt/WType ty ^crt/Wide x ^crt/Wide nx ^{:tag (slice Arg)} a] (cnt (- nb (ones x))))))
+      (aset n "__builtin_stdc_count_ones" (stdc (fn ^Arg [^int nb ^crt/WType ty ^crt/Wide x ^crt/Wide nx ^{:tag (slice Arg)} a] (cnt (ones x)))))
+      (aset n "__builtin_stdc_has_single_bit" (stdc (fn ^Arg [^int nb ^crt/WType ty ^crt/Wide x ^crt/Wide nx ^{:tag (slice Arg)} a]
+          (when (== (ones x) 1)
+            (return (cnt 1)))
+
+          (cnt 0))))
+
+      (aset n "__builtin_stdc_bit_width" (stdc (fn ^Arg [^int nb ^crt/WType ty ^crt/Wide x ^crt/Wide nx ^{:tag (slice Arg)} a] (cnt (blen x)))))
+      (aset n "__builtin_stdc_bit_floor" (stdc (fn ^Arg [^int nb ^crt/WType ty ^crt/Wide x ^crt/Wide nx ^{:tag (slice Arg)} a]
+          (let [k (blen x)]
+            (when (== k 0)
+              (return (res ty x)))
+
+            (res ty (.Shl ty (crt/WFromUint64 ty 1) (conv uint64 (- k 1))))))))
+
+      ;; 0 and 1 give 1; a value above 2^(N-1) gives 0 (Shl's count of N)
+      (aset n "__builtin_stdc_bit_ceil" (stdc (fn ^Arg [^int nb ^crt/WType ty ^crt/Wide x ^crt/Wide nx ^{:tag (slice Arg)} a]
+          (let [one (crt/WFromUint64 ty 1)]
+            (when (== (blen x) 0)
+              (return (res ty one)))
+
+            (res ty (.Shl ty one (conv uint64 (blen (.Sub ty x one)))))))))
+
+      ;; the count modulo N; a count of 0 gives x (Shr's count of N gives 0)
+      (let [rot (fn ^{:tag (func [(* Thread) (slice Arg)] [Arg])} [^bool left]
+          (stdc (fn ^Arg [^int nb ^crt/WType ty ^crt/Wide x ^crt/Wide nx ^{:tag (slice Arg)} a]
+              (let [c (% (conv uint64 (.-I (aget a 2))) (conv uint64 nb))]
+                (when (not left)
+                  (set! c (% (- (conv uint64 nb) c) (conv uint64 nb))))
+
+                (res ty (.Or ty (.Shl ty x c) (.Shr ty x (- (conv uint64 nb) c))))))))]
+
+        (aset n "__builtin_stdc_rotate_left" (rot true))
+        (aset n "__builtin_stdc_rotate_right" (rot false))))))
+
+
+
+;; queue 126: the float and long double spellings of the classification builtins (pr39228.c): their operand is
+;; passed as a double (default promotion; long double is double, CS35), so they are their generic forms'
+(go/func init []
+  (let [n Natives]
+    (aset n "__builtin_isinff" (aget n "__builtin_isinf"))
+    (aset n "__builtin_isinfl" (aget n "__builtin_isinf"))
+    (aset n "__builtin_isnanf" (aget n "__builtin_isnan"))
+    (aset n "__builtin_isnanl" (aget n "__builtin_isnan"))
+    (aset n "__builtin_finite" (aget n "__builtin_isfinite"))
+    (aset n "__builtin_finitef" (aget n "__builtin_isfinite"))
+    (aset n "__builtin_finitel" (aget n "__builtin_isfinite"))))
+
+
+
+;; queue 126: __atomic_is_lock_free (size, p) when the checker did not fold it to 1: libatomic's answer
+;; (libatomic/glfree.c) for a target whose 1-, 2-, 4- and 8-byte accesses are lock-free and 16-byte ones are not
+;; (x86-64 without cmpxchg16b, aarch64 without LSE2): 0 bytes are; up to 8 are when they lie within one aligned
+;; word of 1, 2, 4 or 8 bytes (a null p is aligned); more are not.
+(go/func init []
+  (aset Natives "__atomic_is_lock_free" (fn ^Arg [^{:tag (* Thread)} t ^{:tag (slice Arg)} a]
+      (let [sz (conv uint64 (.-I (aget a 0)))
+          p (conv uint64 (.-I (aget a 1)))]
+        (when (== sz 0)
+          (return (ai 1)))
+
+        (range [_ w (lit (slice uint64) 1 2 4 8)]
+          (when (and (<= sz w) (<= (+ (% p w) sz) w))
+            (return (ai 1))))
+
+        (ai 0)))))

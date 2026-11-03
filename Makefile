@@ -12,9 +12,9 @@ CLOJURE_TESTS_GO ?= target/arbace-go/amd64/arbace-tests
 
 .PHONY: help seed-check stage0 seed-verify reseed build build-tests build-java smoke repl fixpoint goi-table goi-table-size \
   box box-smoke box-oracle box-suite box-goi box-tools box-rebuild box-convert mac-bundle mac-bundle-convert arm64-vm-check arm64-vm-goi \
-  program programs-check programs-essential gate gate-full gate-full-parallel gate-plan gate-why gate-audit gate-prune gate-queue gate-clean gate-full-clean gate-full-clean-only gate-clean-plan gate-pins gate-full-concurrent gate-demos java-check-judge provenance-check reap suite oracle diffcheck generated-check gate-tests verify jdk-verify edge-verify javac-verify javac-classes fixtures-verify tamago-verify \
+  program programs-check programs-essential gate gate-full gate-full-parallel gate-plan gate-costs gate-why gate-audit gate-prune gate-queue corpus-dedup cover-build gate-clean gate-full-clean gate-full-clean-only gate-clean-plan gate-pins gate-full-concurrent gate-demos java-check-judge provenance-check reap suite oracle diffcheck generated-check gate-tests verify jdk-verify edge-verify javac-verify javac-classes fixtures-verify tamago-verify \
   toolchain-verify box-vendor-verify x509roots-verify repr-go-roundtrip repr-go-roundtrip-text repr-go-native-check \
-  repr-java-check repr-java-roundtrip repr-java-text repr-java-jdk repr-java-parse-check repr-java-front-check repr-java-attr-check repr-java-nojavac-check repr-java-closure-check repr-java-platform-pack repr-java-platform-check repr-clojure-check repr-clojure-roundtrip repr-haskell-roundtrip repr-haskell-iface repr-haskell-text repr-haskell-layout repr-haskell-test repr-rust-roundtrip repr-rust-iface repr-rust-text repr-rust-pretty repr-rust-behaviour repr-rust-code repr-rust-all repr-rust-test rsi-samples rsi-lower-check rsi-lower-check-all rsi-lower-check-native-all rsi-std-build rsi-runtime-build repr-cpp-host-record repr-cpp-host-check repr-cpp-pins-check repr-cpp-cxxdump-build repr-cpp-cxxdump-test repr-cpp-spec-check repr-cpp-pp-check repr-cpp-pp-record repr-cpp-cxxdump-check repr-cpp-roundtrip repr-llvm-roundtrip cppi-lower-check cppi-runtime-build cppi-testsuite cppi-selftest repr-c-host-record repr-c-host-check repr-c-ccdump repr-c-check repr-c-record repr-c-parse-check repr-c-read repr-c-print repr-c-roundtrip repr-c-corpus-dedup repr-c-record-gcc repr-c-c23 ci-diagnose ci-run ci-check ci-check-aot ci-dg ci-dg-essential ci-judge-test ci-c2j-check ci-cinterp-check ci-aot-translate ci-repl-session ci-divergences ci-musl ci-cirun-build ci-annot ci-annotations ci-annotations-record ci-record-ref goi-annotations goi-test goi-check goi-check-aot goi-check-aot-essential goi-check-nethttp goi-check-nethttp-arbace goi-divergences goi-divergences-aot java-check java-check-compiled java-check-compiled-essential java-check-print java-check-nread java-check-diagnostics java-check-essential java-check-ref alpine-check alpine-test clean \
+  repr-java-check repr-java-roundtrip repr-java-text repr-java-jdk repr-java-parse-check repr-java-front-check repr-java-attr-check repr-java-nojavac-check repr-java-closure-check repr-java-platform-pack repr-java-platform-check repr-clojure-check repr-clojure-roundtrip repr-haskell-roundtrip repr-haskell-iface repr-haskell-text repr-haskell-layout repr-haskell-test repr-rust-roundtrip repr-rust-iface repr-rust-text repr-rust-pretty repr-rust-behaviour repr-rust-code repr-rust-all repr-rust-test rsi-samples rsi-lower-check rsi-lower-check-all rsi-lower-check-native-all rsi-std-build rsi-runtime-build repr-cpp-host-record repr-cpp-host-check repr-cpp-pins-check repr-cpp-cxxdump-build repr-cpp-cxxdump-test repr-cpp-spec-check repr-cpp-pp-check repr-cpp-pp-record repr-cpp-cxxdump-check repr-cpp-roundtrip repr-llvm-roundtrip cppi-lower-check cppi-runtime-build cppi-testsuite cppi-selftest repr-c-host-record repr-c-host-check repr-c-ccdump repr-c-check repr-c-record repr-c-parse-check repr-c-read repr-c-print repr-c-roundtrip repr-c-corpus-dedup repr-c-record-gcc repr-c-c23 ci-diagnose ci-run ci-check ci-check-aot ci-dg ci-dg-essential ci-judge-test ci-c2j-check ci-cinterp-check ci-aot-translate ci-repl-session ci-divergences ci-musl ci-runtime ci-cirun-build ci-annot ci-annotations ci-annotations-record ci-record-ref ci-synth ci-synth-check goi-annotations goi-test goi-check goi-check-aot goi-check-aot-essential goi-check-nethttp goi-check-nethttp-arbace goi-divergences goi-divergences-aot java-check java-check-compiled java-check-compiled-essential java-check-print java-check-nread java-check-diagnostics java-check-essential java-check-ref alpine-check alpine-test clean \
   suite-aot suite-aot-essential suite-divergences java-forms-verify java-forms-update reap-record-native-check \
   repr-c-gcc-tests repr-scheme-fetch repr-scheme-check repr-scheme-check-quick repr-scheme-record repr-scheme-spec repr-scheme-roundtrip si-vendor-verify si-boot si-boot-check si-test si-test-record si-check-suite si-fixpoint si-unit si-light si-test-si si-check si-check-record-ref si-srfi si-srfi-record si-srfi-aot si-aot-check si-aot-check-record si-bench si-divergences si-r7rs si-r7rs-record si-r7rs-chez si-r7rs-chez-record si-r7rs-chibi si-r7rs-chibi-record si-r7rs-chibi-test si-r7rs-chibi-test-record si-chibi-tests si-chibi-tests-record si-ecraven si-ecraven-record si-ecraven-chez si-ecraven-chez-record si-ecraven-chibi si-ecraven-chibi-record si-mats si-mats-record si-corpora-files si-corpora-divergences repr-ocaml-ocdump repr-ocaml-spec-check repr-ocaml-samples repr-ocaml-corpus repr-ocaml-corpus-count repr-ocaml-roundtrip repr-ocaml-roundtrip-all repr-ocaml-check repr-ocaml-text repr-ocaml-cmi repr-ocaml-dumps oi-stdlib oi-build oi-check oi-divergences oi-record-ref oi-repl oi-aot-lib oi-check-aot oi-divergences-aot oi-suite-check oi-suite-check-aot oi-suite-divergences oi-suite-expect oi-suite-rollup oi-suite-record-ref repr-ocaml-opam check-makefile
 
@@ -94,6 +94,8 @@ gate-full-parallel: ## the full gate's chains concurrently (GATE_FULL_PARALLEL=1
 	GATE_FULL_PARALLEL=1 bin/gate --full
 gate-plan: ## the full gate's plan: each step run, skipped, built or not needed, and why (bin/gate --full --plan)
 	bin/gate --full --plan
+gate-costs: ## each step's cost from the store of passes (the last 5: wall, CPU, peak), per crop and tier against steps.edn's :budgets (bin/gate --full --costs)
+	bin/gate --full --costs
 gate-why: ## why STEP=... runs: its key's inputs, its passes, what changed since the latest (bin/gate --why STEP)
 	bin/gate --why $(STEP)
 gate-audit: ## audit STEP=... (every check without): the files a step reads under strace against its declared inputs in test/gate/steps.edn; an undeclared read fails (bin/gate --audit)
@@ -116,6 +118,8 @@ gate-demos: ## GTS42 (a): a classes file and a j2g comment changed in a scratch 
 	bin/gate-demos $(if $(RECORD),--record $(RECORD))
 gate-queue: ## the host's big-job lock's queue: the tickets of bin/heavy-lock waiting in turn, oldest first (FIFO in front of the flock, GT5; bin/heavy-lock --queue)
 	bin/heavy-lock --queue
+cover-build: ## GT8.3: the cover build, the gate's executable and test build with Go's coverage of the crops' code under check, kept in ARBACE_GATE_EXES/cover-KEY20 (bin/cover build; heavy: run under the host's lock)
+	bin/cover build
 provenance-check: ## the provenance files' repr/java hash equals the reader's (bin/provenance-check; the gate's essential step, seconds)
 	bin/provenance-check
 reap: ## the REAP matrix: read, eval, AOT, print for Clojure, Java, Go, C from the checks' recorded results; every non-pass in a class, by design or deferred (bin/reap; no runs, seconds)
@@ -139,6 +143,8 @@ diffcheck: ## each language's two halves on the same forms: evaluated against co
 generated-check: ## the generated files as their generators write them: arbace/lang/go's variants (CompilerNodes.ae, CompilerAOTFn.ae) and repr/go's Go forms in go/arbace/repr/go (the dumper, gc's syntax renamed) and goi's node factories (go/arbace/goi/ops.ae, registry.ae) and jrt's module table (bin/generated-check; --update rewrites them)
 	bin/generated-check
 
+corpus-dedup: ## the corpora's duplicates (GT8): every corpus a gate step reads, byte-identical and normalized by each language's reader, per corpus, across corpora and per check, the first copy kept (bin/corpus-dedup --normalize; CROP=c,go,java,clojure)
+	bin/corpus-dedup --normalize $(if $(CROP),--crop $(CROP))
 gate-tests: ## the gate's own scripts' tests, test/gate/*-test.bash (bin/gate-tests; the essential gate's step gate-tests)
 	bin/gate-tests
 
@@ -332,6 +338,8 @@ ci-divergences: ## ci's recorded check judged against its classes, test/c/diverg
 	bin/ci divergences
 ci-musl: ## musl 1.2.6 prepared and read into C forms for ci's libc, .tmp/ci-musl/ (bin/ci musl prepare, bin/ci musl read)
 	bin/ci musl prepare && bin/ci musl read
+ci-runtime: ## ci's prebuilt runtime: every musl unit checked and built once into its cached fragment, .tmp/ci-runtime/, the other keys' removed (bin/ci runtime build)
+	bin/ci runtime build
 ci-cirun-build: ## ci's back end (go/arbace/crt, go/arbace/ci) printed and built with tools/cirun, the light path's runner (bin/ci cirun-build)
 	bin/ci cirun-build
 ci-annot: ## a C file's annotations by ci's checker (types, values, layouts, linkage; tools/ccdump's types format), FILE=... (bin/ci annot FILE)
@@ -342,6 +350,10 @@ ci-annotations-record: ## the checker's check, test/repr/c/annot-known.edn rewri
 	bin/ci annotations --record
 ci-record-ref: ## gcc 15.2's runs of the single-file C run corpora recorded as data, test/c/ref-gcc15.edn: -O0 the judge, -O2 the witness (bin/ci record-ref)
 	bin/ci record-ref
+ci-synth: ## synth-c23's C23 programs written into test/c/synth/ from its table, test/c/synth/table.edn (bin/ci synth)
+	bin/ci synth
+ci-synth-check: ## synth-c23's committed programs and its corpus count against its table (bin/ci synth --check)
+	bin/ci synth --check
 repr-c-c23: ## C23's conformance judges over test/c/c23/ and their control (bin/repr-c check --c23)
 	bin/repr-c check --c23
 goi-annotations: ## goi's checker over tamago/goroot, linux std, GOROOT/test: no error, every annotation verified (bin/goi annotations)

@@ -1,0 +1,89 @@
+(ns c.synth.gen
+  "synth-c23's generator (queue 172; doc/GATE-SURVEY.md GT8.6, GTS207 (a)): test/c/synth/table.edn's programs written
+  into test/c/synth/ as C23 files, one a row, and its :support files beside them, deterministically (the table's order,
+  fixed text, no date). `write` writes them and removes a generated .c file the table no longer has; `check` compares
+  them with the committed files and with test/c/corpora.edn's :synth-c23 :count, exit 1 on a difference. bin/ci synth
+  [--check] runs it on the tools' host."
+  (:require [arbace.string :as str]))
+
+(def dir "test/c/synth")
+(def table-file (str dir "/table.edn"))
+(def marker "written by bin/ci synth from test/c/synth/table.edn")
+
+(defn- c-string
+  "The C string literal's body for `s` (its backslashes and quotes escaped)."
+  ^String [^String s]
+  (-> s (str/replace "\\" "\\\\") (str/replace "\"" "\\\"")))
+
+(defn- show-line
+  "One :show item as main's printf: \"EXPR\" (format %d) or [FORMAT EXPR]."
+  ^String [x]
+  (let [[fmt e] (if (string? x) ["%d" x] x)]
+    (str "  printf(\"%s = " fmt "\\n\", \"" (c-string e) "\", " e ");")))
+
+(defn- indent ^String [^String s]
+  (str/join "\n" (map #(if (str/blank? %) "" (str "  " %)) (str/split-lines s))))
+
+(defn program
+  "A row's C text."
+  ^String [{:keys [id what clause annex-a m2 inc top main show]}]
+  (let [inc (if (nil? inc) ["stdio.h"] inc)]
+    (str "// synth-c23/" id ".c, " marker "; edit the table, not this file.\n"
+         "// " what "\n"
+         "// ISO/IEC 9899:2024 " clause "; Annex A: " annex-a "\n"
+         (when m2 (str "// M.2: " m2 "\n"))
+         (str/join (map #(str "#include <" % ">\n") inc))
+         (when (seq top) (str "\n" top "\n"))
+         "\nint main(void) {\n"
+         (when (seq main) (str (indent main) "\n"))
+         (str/join (map #(str (show-line %) "\n") show))
+         "  return 0;\n}\n")))
+
+(defn files
+  "The generated files, [path text] in the table's order: the programs, then :support."
+  [table]
+  (let [ids (map :id (:programs table))
+        dup (keep (fn [[k v]] (when (> v 1) k)) (frequencies ids))]
+    (when (seq dup) (throw (ex-info (str "synth: ids twice in the table: " (vec dup)) {})))
+    (concat (for [p (:programs table)] [(str dir "/" (:id p) ".c") (program p)])
+            (for [s (:support table)] [(str dir "/" (:path s)) (:text s)]))))
+
+(defn- generated-on-disk
+  "The .c files under the directory that carry the generator's marker."
+  []
+  (sort (for [^java.io.File f (.listFiles (java.io.File. ^String dir))
+              :when (and (.isFile f) (str/ends-with? (.getName f) ".c") (str/includes? (slurp f) marker))]
+          (str dir "/" (.getName f)))))
+
+(defn- corpus-count []
+  (let [man (read-string (slurp "test/c/corpora.edn"))]
+    (:count (first (filter #(= (:id %) :synth-c23) (:corpora man))))))
+
+(defn -main [& [verb]]
+  (let [table (read-string (slurp table-file))
+        fs (files table)
+        want (set (map first fs))
+        n (count (:programs table))]
+    (case verb
+      "write"
+      (do (doseq [[p t] fs] (spit p t))
+          (doseq [p (generated-on-disk) :when (not (want p))]
+            (.delete (java.io.File. ^String p))
+            (println "synth: removed" p))
+          (println "synth:" n "programs and" (count (:support table)) "support files written into" dir)
+          (when (not= n (corpus-count))
+            (println "synth: test/c/corpora.edn's :synth-c23 :count is" (corpus-count) "; the table has" n)))
+      "check"
+      (let [bad (concat (for [[p t] fs
+                              :let [f (java.io.File. ^String p)]
+                              :when (not (and (.isFile f) (= t (slurp f))))]
+                          (str p ": differs from the table's (or missing)"))
+                        (for [p (generated-on-disk) :when (not (want p))] (str p ": not in the table"))
+                        (when (not= n (corpus-count))
+                          [(str "test/c/corpora.edn's :synth-c23 :count is " (corpus-count) ", the table has " n)]))]
+        (doseq [b bad] (println "synth:" b))
+        (if (seq bad)
+          (do (println "synth: FAIL, bin/ci synth rewrites the files") (System/exit 1))
+          (println "synth: the" n "programs and" (count (:support table)) "support files are the table's")))
+      (do (binding [*out* *err*] (println "usage: bin/ci synth [--check]")) (System/exit 2)))
+    (shutdown-agents)))
