@@ -37,3 +37,5 @@ print(s.if_nametoindex('lo'), s.if_indextoname(1), err(s.CMSG_LEN, -1), err(s.CM
 print(err(s.getaddrinfo, 'localhost', '\ud800'), err(s.getnameinfo, ('::1', 0, 0xffffffff), 0))
 print(s.getaddrinfo('ff02::1de:c0:face:8D%lo', 1234, s.AF_INET6, s.SOCK_DGRAM, s.IPPROTO_UDP)[0][4])
 print(s.getnameinfo(('ff02::1de:c0:face:8D', 1234, 0, 1), s.NI_NUMERICHOST | s.NI_NUMERICSERV))
+lim = 2**31 - 1
+print(s.CMSG_SPACE(lim - s.CMSG_SPACE(1)), err(s.CMSG_SPACE, lim - s.CMSG_SPACE(1) + 1), s.CMSG_LEN(lim - s.CMSG_LEN(0)), err(s.CMSG_LEN, lim - s.CMSG_LEN(0) + 1))
