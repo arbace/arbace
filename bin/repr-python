@@ -37,7 +37,14 @@
 #                                  Each stage's time and peak RSS per file and per process into
 #                                  .tmp/repr-python/rt/CORPUS/ (costs.edn); --record also writes the corpora's costs into
 #                                  test/python/roundtrip-costs.edn. The helper's stages run in N processes (default 2)
-#   bin/repr-python check          spec-check, samples, then the round trip over the default corpora against the known file
+#   bin/repr-python roundtrip --text [--record] [--jobs N] [CORPUS...]
+#                                  PY3, mode :full: each file also read in mode :full (every node's :pos, the tokens), the
+#                                  forms checked against the tokens (positions on tokens' edges, leaves equal to their
+#                                  tokens) and, without positions, equal to the :lines read; printed from the forms read
+#                                  back (the tokens' text in the file's encoding), then level 4 (the print's bytes equal
+#                                  the original's) and level 5 (marshal of the compiled code equal, positions included),
+#                                  against test/python/full-known.edn; costs into test/python/roundtrip-text-costs.edn
+#   bin/repr-python check          spec-check, samples, then the round trips (:lines, then --text) over the default corpora
 # Environment: REPR_PYTHON_CORPORA, REPR_PYTHON_PIN_VERSION, REPR_PYTHON_APKS, REPR_PYTHON_SPEC name other copies of
 # test/python/corpora.edn, tools/pydump/PYTHON_VERSION, tools/pydump/apks.sha256, doc/python/SPEC.md (negative controls).
 # Seconds each, but the first --fetch (a 24 MB download, and 3.6 MB of apks per architecture).
@@ -236,7 +243,9 @@ cmd_samples() { (cd "$root/test/python/samples" && py corpus.py samples . .); }
 # ---- PY2: read, print, round trip ----
 
 KNOWN="${REPR_PYTHON_KNOWN:-$root/test/python/roundtrip-known.edn}"
+FULL_KNOWN="${REPR_PYTHON_FULL_KNOWN:-$root/test/python/full-known.edn}"
 COSTS="$root/test/python/roundtrip-costs.edn"
+TEXT_COSTS="$root/test/python/roundtrip-text-costs.edn"
 RT="$WORK/rt"
 
 # py_arbace VERB ARGS...: repr/python's command namespace on stage 0, evaluated from the checkout
@@ -260,10 +269,11 @@ timed() {
 # dump_parallel BASE LIST OUT TSV: the helper's tree mode over LIST in $JOBS processes, the TSVs concatenated
 dump_parallel() {
   local base=$1 list=$2 out=$3 tsv=$4 i
+  local -a mode=(); [ -n "${FULL:-}" ] && mode=(--full)
   local d; d=$(dirname "$tsv")/split.$(basename "$tsv"); rm -rf "$d"; mkdir -p "$d"
   split -n "r/$JOBS" -d "$list" "$d/part."
   for i in "$d"/part.*; do
-    python3 -I -S -B "$root/tools/pydump/pydump.py" tree --base "$base" --list "$i" --out "$out" --tsv "$i.tsv" &
+    python3 -I -S -B "$root/tools/pydump/pydump.py" tree "${mode[@]}" --base "$base" --list "$i" --out "$out" --tsv "$i.tsv" &
   done
   wait
   cat "$d"/part.*.tsv | LC_ALL=C sort > "$tsv"
@@ -287,33 +297,42 @@ corpus_base() { # ID -> the base directory and the arguments of corpus.py
 roundtrip_one() {
   local id=$1 record=$2
   local -a info; mapfile -t info < <(corpus_base "$id")
-  local base=${info[0]} d="$RT/$id"
+  local base=${info[0]} d="$RT$TEXT/$id" known=$KNOWN
+  [ -n "$TEXT" ] && known=$FULL_KNOWN
   local -a args=(); IFS=, read -ra pa <<< "${info[1]}"; args+=("${pa[@]}")
   if [ "${info[2]}" != - ]; then IFS=, read -ra ea <<< "${info[2]}"; for e in "${ea[@]}"; do args+=(--exclude "$e"); done; fi
   rm -rf "$d"; mkdir -p "$d"
   STAGES="$d/stages.txt"; : > "$STAGES"
   (cd "$base" && py corpus.py list "$base" "${args[@]}") > "$d/list"
   timed helper-orig dump_parallel "$base" "$d/list" "$d/orig" "$d/helper-orig.tsv"
-  timed convert-print py_arbace convert --dumps "$d/orig" --forms "$d/forms" --printed "$d/printed" --tsv "$d/convert-print.tsv"
+  if [ -n "$TEXT" ]; then
+    # mode :full (PY3): the dumps in mode :full beside the :lines ones, converted, woven, printed from the tokens
+    FULL=1 timed helper-full dump_parallel "$base" "$d/list" "$d/full" "$d/helper-full.tsv"
+    timed convert-print py_arbace convert-full --dumps "$d/full" --lines "$d/orig" --forms "$d/forms" --printed "$d/printed" \
+      --tsv "$d/convert-print.tsv"
+  else
+    timed convert-print py_arbace convert --dumps "$d/orig" --forms "$d/forms" --printed "$d/printed" --tsv "$d/convert-print.tsv"
+  fi
   (cd "$d/printed" && find . -type f | sed 's|^\./||' | LC_ALL=C sort) > "$d/printed.list"
   timed helper-printed dump_parallel "$d/printed" "$d/printed.list" "$d/cand" "$d/helper-printed.tsv"
   local rc=0
   timed compare py_arbace compare --corpus "$id" --orig "$d/orig" --cand "$d/cand" --orig-tsv "$d/helper-orig.tsv" \
-    --cand-tsv "$d/helper-printed.tsv" --convert-tsv "$d/convert-print.tsv" --known "$KNOWN" --results "$d/results.edn" \
-    ${record:+--record} || rc=$?
+    --cand-tsv "$d/helper-printed.tsv" --convert-tsv "$d/convert-print.tsv" --known "$known" --results "$d/results.edn" \
+    ${record:+--record} ${TEXT:+--text} || rc=$?
   { echo "{:corpus :$id :jobs $JOBS"
     echo " :wall-seconds {$(awk '{ printf "%s\"%s\" %s", (NR > 1 ? " " : ""), $1, $2 }' "$STAGES")}"
-    echo " :per-file $(py corpus.py costs "$d/helper-orig.tsv" "$d/convert-print.tsv" "$d/helper-printed.tsv")}"; } > "$d/costs.edn"
+    echo " :per-file $(py corpus.py costs "$d/helper-orig.tsv" ${TEXT:+"$d/helper-full.tsv"} "$d/convert-print.tsv" "$d/helper-printed.tsv")}"; } > "$d/costs.edn"
   awk '{ printf "  %-15s %8.2f s\n", $1, $2 }' "$STAGES"
   return $rc
 }
 
 cmd_roundtrip() {
-  local record="" ids=() rc=0 worst=0
-  JOBS=2
+  local record="" ids=() rc=0 worst=0 costs=$COSTS
+  JOBS=2; TEXT=""
   while [ $# -gt 0 ]; do
     case $1 in
       --record) record=1; shift ;;
+      --text) TEXT=-text; costs=$TEXT_COSTS; shift ;;
       --jobs) JOBS=$2; shift 2 ;;
       *) ids+=("$1"); shift ;;
     esac
@@ -325,7 +344,7 @@ cmd_roundtrip() {
     [ $rc -gt $worst ] && worst=$rc
   done
   if [ -n "$record" ]; then
-    { echo ";; The round trip's costs per corpus (bin/repr-python roundtrip --record; GT8's budget): each stage's wall seconds"
+    { echo ";; The round trip's costs per corpus (bin/repr-python roundtrip ${TEXT:+--text }--record; GT8's budget): each stage's wall seconds"
       echo ";; (the helper's in :jobs processes), and per file each stage's seconds (total, mean, p50, p95, max and its file)"
       echo ";; and :peak-kib, the largest peak RSS of the stage's processes (each process's high-water mark after each file:"
       echo ";; ru_maxrss for the helper, VmHWM for stage 0). Measured where the record was made (:host); machine-dependent,"
@@ -333,8 +352,8 @@ cmd_roundtrip() {
       echo "{:host \"$(uname -m), $(nproc) CPUs\" :date \"$(date -u +%F)\""
       echo " :corpora"
       echo " ["
-      for id in "${ids[@]}"; do [ -f "$RT/$id/costs.edn" ] && sed 's/^/  /' "$RT/$id/costs.edn"; done
-      echo " ]}"; } > "$COSTS"
+      for id in "${ids[@]}"; do [ -f "$RT$TEXT/$id/costs.edn" ] && sed 's/^/  /' "$RT$TEXT/$id/costs.edn"; done
+      echo " ]}"; } > "$costs"
   fi
   return $worst
 }
@@ -357,7 +376,7 @@ cmd_print() {
 }
 
 cmd_check() {
-  cmd_spec_check && cmd_samples && cmd_roundtrip
+  cmd_spec_check && cmd_samples && cmd_roundtrip && cmd_roundtrip --text
 }
 
 command -v python3 >/dev/null || die "no python3 (the oracle, doc/ALPINE.md)"
@@ -368,7 +387,7 @@ case "${1:-}" in
       --fetch) cmd_fetch ;;
       --count) cmd_count ;;
       --check) cmd_check ;;
-      *) sed -n '2,45p' "$0"; exit 2 ;;
+      *) sed -n '2,52p' "$0"; exit 2 ;;
     esac ;;
   spec-check) cmd_spec_check ;;
   samples) cmd_samples ;;
@@ -376,5 +395,5 @@ case "${1:-}" in
   print) shift; cmd_print "$@" ;;
   roundtrip) shift; cmd_roundtrip "$@" ;;
   check) cmd_check ;;
-  *) sed -n '2,45p' "$0"; exit 2 ;;
+  *) sed -n '2,52p' "$0"; exit 2 ;;
 esac

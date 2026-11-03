@@ -561,18 +561,28 @@ the code objects without positions (survey §5.2, levels 1-3). Mode `:full` (PY3
   written in its long spelling (§1.4): `(name x {:pos [1 0 1 1]})`, `(int "0x1F" {:pos [1 14 1 18]})`, `(const None
   {:pos ...})`, `(str "a" :quote "'" {:pos ...})`. Nodes without attributes (`arguments`, `comprehension`,
   `withitem`, `match-case`, the operators) carry none, as in the `ast`.
-- **`:tokens`** in the module's map: the token stream of `tokenize.tokenize` (E5), a vector of `[KIND "TEXT"]`, KIND
-  the token type's name as a keyword (`:name`, `:op`, `:number`, `:string`, `:fstring-start`, `:fstring-middle`,
+- **`:tokens`** in the module's map: the token stream of `tokenize.tokenize` (E5) as one flat vector `[KIND "TEXT" KIND
+  "TEXT" ...]` (a pair a token; flat rather than a vector of pairs, which halves the vectors of a large file), KIND the
+  token type's name as a keyword (`:name`, `:op`, `:number`, `:string`, `:fstring-start`, `:fstring-middle`,
   `:fstring-end`, `:tstring-start`, `:tstring-middle`, `:tstring-end`, `:comment`, `:newline`, `:nl`, `:indent`,
-  `:dedent`, `:endmarker`) and `:ws` for the text between two tokens (spaces, tabs, form feeds, `\` continuations).
-  TEXT is the source's slice, not `tokenize`'s string (which undoubles `{{` in an `fstring-middle`: probe of
-  2026-11-03, `f"a{{b}}"` gives `'a{'` for the source's `a{{`), so the concatenation of every TEXT is the decoded
-  file, exactly (a property of the representation the helper checks on each file).
-- **`:encoding`** (the coding cookie's encoding, PEP 263, default `"utf-8"`) and **`:bom`** `true` for a UTF-8 BOM:
+  `:dedent`, `:endmarker`) and `:ws` for the text between two tokens (spaces, tabs, form feeds, `\` continuations,
+  nothing else: the helper fails otherwise). TEXT is the source's slice, not `tokenize`'s string: an `fstring-middle`
+  or `tstring-middle` runs to the next token, as `tokenize` undoubles `{{` in its string and its end (probe of
+  2026-11-03, `f"a{{b}}"` gives `'a{'` for the source's `a{{`); `tokenize`'s columns count characters, the `ast`'s UTF-8
+  bytes. So the concatenation of every TEXT is the decoded file, exactly.
+- **`:encoding`** (the coding cookie's encoding, PEP 263, when it is not UTF-8) and **`:bom`** `true` for a UTF-8 BOM:
   the print encodes the text back to the original bytes.
 
-The print of `:full` is the tokens' text, encoded; the forms' positions let the converter check that every node lies
-on its tokens and let the printer place a changed node (PY3).
+**The converter** (PY3, `cv/weave-check`) checks the forms against the tokens: every `:pos` begins at a token's start
+and ends at a token's end (with the tokens' positions counted in UTF-8 bytes); every leaf's spelling is its token's
+text (a `name` its `:name` token, NFKC aside; a number its `:number`; a `str` or `bytes` its `:string`, prefix and
+quotes included; a `joined-str` or `template-str` its start token's prefix and quote; `const`, `arg` and `alias`
+their names); and the forms without positions and tokens, with the short spellings back, equal the `:lines` read of
+the same file (`cv/full->lines`).
+
+**The print of `:full`** is the tokens' text, in the file's encoding: the original bytes (level 4), whose compiled code
+is the original's, positions included (level 5, `marshal`). The forms are checked against the tokens but not used to
+print them (as OCaml's and Scheme's `:full`); a printer that places changed nodes by their positions is later work.
 
 ## 12. Errors
 

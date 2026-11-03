@@ -753,3 +753,20 @@ until its row fits GT8's budget.
   `__firstlineno__`, the compiler fuses `STORE_FAST`/`LOAD_FAST` pairs only within a line, inserts `NOP`s by line and
   splits exception ranges and match statements' `SWAP`s by line; the level's digest normalizes the first ones
   (`code_digest`), the rest are `:code-lines`.
+
+## As built: PY3 (2026-11-03, the Mac VM, queue 176)
+
+- **Mode `:full`** (doc/python/SPEC.md §11): the helper's `tree --full` writes every node with attributes in its long
+  spelling with `:pos`, and the module's map with `:mode :full`, `:tokens` (the token stream as one flat vector, the
+  text between tokens as `:ws`; the texts concatenated are the decoded file), `:encoding` (when not UTF-8) and `:bom`.
+- **The converter** checks the forms against the tokens (every position on a token's edge, every leaf's spelling its
+  token's text: 4.1 million positions and 2.07 million leaves over the corpora, 9 non-ASCII names whose tokens differ
+  from the ast's by NFKC, not compared) and, without positions, against the `:lines` read of the same file.
+- **The round trip** `bin/repr-python roundtrip --text [--record]`: level 4, the print's bytes equal to the original's;
+  level 5, `marshal` of the code compiled from each equal, positions included; against `test/python/full-known.edn`.
+  On the VM: samples 6, stdlib 720, site-packages 921 of 921, `Lib/test` 1,148 of 1,149 read (its 4 rejections as at
+  PY2), all at both levels; the one other, `Lib/test/encoded_modules/module_koi8_r.py`, is `:charset` (the runtime has
+  no KOI8-R charset: the DECISION of queue 176). The 30 `:code-lines` files of PY2 pass both levels in `:full`. About
+  8.5 minutes, the costs in `test/python/roundtrip-text-costs.edn`.
+- Type comments and the site-packages set as decided for queue 174, `:code-lines` as decided for 175 (the user,
+  2026-11-03).
