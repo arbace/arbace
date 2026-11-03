@@ -17,6 +17,18 @@
 
 (def ^:dynamic *mode* "The compile mode: :exec, :eval or :single (compile-source)" :exec)
 
+(def ^:dynamic *warnings*
+  "The compiler's SyntaxWarnings, an atom of [MSG LINENO OFFSET END-LINENO END-OFFSET] in the order made (codegen's
+  _PyCompile_Warn); compile-source puts them in the module's code object as :warnings, the runtime emits them"
+  nil)
+
+(defn- warn!
+  "A SyntaxWarning at *pos* (CPython's location: 1-based offsets)"
+  [msg]
+  (when *warnings*
+    (let [[l c el ec] *pos*]
+      (swap! *warnings* conj [msg l (some-> c inc) el (some-> ec inc)]))))
+
 (defn- syntax-error
   "A SyntaxError with CPython's message, located at *pos* when known: :lineno, :offset (1-based), :end-lineno,
   :end-offset, as CPython's SyntaxError fields"
@@ -465,8 +477,78 @@
       (contains? kinds :t) (tstring-of-items! u (items))
       :else (fstring-of-items! u (items)))))
 
+(declare string-token-value pos-of)
+
+(defn- literal-type
+  "codegen's infer_type for the warnings: [TYPE CONST?] of a constant (a tuple of constants folded into one), a
+  display, a comprehension, a lambda, an f-string or a t-string; nil for any other expression"
+  [x]
+  (cond
+    (= 'None x) ["NoneType" :singleton] (#{'True 'False} x) ["bool" :singleton] (= '... x) ["ellipsis" :singleton]
+    (symbol? x) nil
+    (integer? x) ["int" :const] (string? x) ["str" :const] (float? x) ["float" :const]
+    (seq? x)
+    (let [[h p _ _] (node x)]
+      (case h
+        const (literal-type (first p))
+        name (when (#{"True" "False" "None"} (ident (first p))) (literal-type (symbol (ident (first p)))))
+        int ["int" :const] float ["float" :const] imag ["complex" :const]
+        str ["str" :const] bytes ["bytes" :const]
+        str-concat (let [v (string-token-value x)] [(if (string? v) "str" "bytes") :const])
+        tuple (if (every? #(= :const (second (literal-type %))) (first p))
+                (if (every? #(= :singleton (second (literal-type %))) (first p))
+                  ["tuple" :const] ["tuple" :const])
+                ["tuple" :display])
+        (list list-comp) ["list" :display]
+        (dict dict-comp) ["dict" :display]
+        (set set-comp) ["set" :display]
+        generator-exp ["generator" :display]
+        lambda ["function" :display]
+        (joined-str formatted-value) ["str" :display]
+        (template-str interpolation) ["string.templatelib.Template" :display]
+        nil))
+    :else nil))
+
+(defn- constant? [x] (#{:const :singleton} (second (literal-type x))))
+
+(defn- check-compare!
+  "codegen_check_compare: is and is not with a literal (a constant but None, True, False and ...)"
+  [l ops cs]
+  (loop [left l ops ops cs cs]
+    (when (seq ops)
+      (let [right (first cs)
+            arg-ok #(let [[_ k] (literal-type %)] (not (= k :const)))]
+        (if (and (#{'is 'is-not} (first ops)) (not (and (arg-ok left) (arg-ok right))))
+          (let [lit (if (arg-ok left) right left)]
+            (warn! (if (= 'is (first ops))
+                     (str "\"is\" with '" (first (literal-type lit)) "' literal. Did you mean \"==\"?")
+                     (str "\"is not\" with '" (first (literal-type lit)) "' literal. Did you mean \"!=\"?"))))
+          (recur right (rest ops) (rest cs)))))))
+
+(defn- check-caller!
+  "check_caller: a call of a constant, a display, a comprehension or an f-string or t-string"
+  [f]
+  (let [[t k] (literal-type f)]
+    (when (and t (not= t "function"))
+      (binding [*pos* (or (pos-of f) *pos*)]
+        (warn! (str "'" t "' object is not callable; perhaps you missed a comma?"))))))
+
+(defn- check-subscript!
+  "check_subscripter and check_index of value[index] (a load)"
+  [v i]
+  (let [[t k] (literal-type v)]
+    (binding [*pos* (or (pos-of v) *pos*)]
+      (if (and t (or (#{"NoneType" "ellipsis" "int" "float" "complex" "bool"} t)
+                     (#{"set" "generator" "string.templatelib.Template" "function"} t)))
+        (warn! (str "'" t "' object is not subscriptable; perhaps you missed a comma?"))
+        (let [[it _] (literal-type i)]
+          (when (and t it (not (#{"int" "bool"} it))
+                     (#{"str" "bytes" "tuple" "list"} t))
+            (warn! (str t " indices must be integers or slices, not " it "; perhaps you missed a comma?"))))))))
+
 (defn- comparison! [u x]
   (let [[_ [l ops cs] _ _] (node x)
+        _ (check-compare! l ops cs)
         cmp (fn [op] (case op
                        (== != < <= > >=) (emit! u :compare op)
                        is (emit! u :is false) is-not (emit! u :is true)
@@ -598,11 +680,11 @@
                        (when (:coroutine @(:block @u)) (syntax-error "'yield from' inside async function"))
                        (expr! u (first p)) (emit! u :get-yield-from-iter nil) (load-const! u nil) (emit! u :yield-from nil))
         compare (comparison! u x)
-        call (do (expr! u (first p)) (call-args! u (second p) (:keywords o)))
+        call (do (check-caller! (first p)) (expr! u (first p)) (call-args! u (second p) (:keywords o)))
         formatted-value (fstring! u (list 'joined-str [x]))
         interpolation (tstring! u (list 'template-str [x]))
         attribute (do (expr! u (first p)) (emit! u :load-attr (name-index! u (mangle u (ident (second p))))))
-        subscript (do (expr! u (first p)) (expr! u (second p)) (emit! u :subscr nil))
+        subscript (do (check-subscript! (first p) (second p)) (expr! u (first p)) (expr! u (second p)) (emit! u :subscr nil))
         starred (syntax-error "can't use starred expression here")
         slice (let [[lo hi st] p]
                 (if (some? lo) (expr! u lo) (load-const! u nil))
@@ -1437,6 +1519,8 @@
               ;; nothing falls through a raise: what follows is dead code at the same depth
               nil)
       assert (let [[t m] p]
+               (when (let [[th tp _ _] (when (seq? t) (node t))] (and (= th 'tuple) (seq (first tp))))
+                 (warn! "assertion is always true, perhaps remove parentheses?"))
                (expr! u t) (emit! u :to-bool nil)
                (let [j (jump! u :jump-if-true) d (depth u)]
                  (emit! u :call-intrinsic [:assertion-error 0])
@@ -1681,11 +1765,18 @@
   [module]
   (binding [*mode* :exec] (compile-module* module)))
 
+(declare compile-source*)
+
 (defn compile-source
   "compile()'s modes over a module's forms: :exec the module; :eval a module of one expression statement, its value
   returned (an expression's code object); :single the statements with each expression statement's value displayed
   (print-expr, the REPL's)"
   [module mode]
+  (binding [*warnings* (atom [])]
+    (let [code (compile-source* module mode)]
+      (cond-> code (seq @*warnings*) (assoc :warnings @*warnings*)))))
+
+(defn- compile-source* [module mode]
   (case mode
     :exec (compile-module module)
     :single (binding [*mode* :single] (compile-module* module))
