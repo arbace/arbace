@@ -770,3 +770,25 @@ until its row fits GT8's budget.
   8.5 minutes, the costs in `test/python/roundtrip-text-costs.edn`.
 - Type comments and the site-packages set as decided for queue 174, `:code-lines` as decided for 175 (the user,
   2026-11-03).
+
+## As built: PY4 (2026-11-03, the Mac VM, queue 177)
+
+- **The synthetic corpus** (§8.3, GT8.6): `test/python/gen.ae`, run on stage 0 by `bin/pyi gen`, writes 145 programs into
+  `test/python/synth/`: `ops/` (38: every binary, comparison and augmented operator over every pair of 15 operands, the
+  unary and boolean operators), `datamodel/` (45: one special method or protocol each, every binary operator's own,
+  reflected and in-place method among them), `builtins/` (17: every public method of str, bytes, bytearray, list, tuple,
+  dict, set, frozenset, int, float, complex, bool, range, memoryview and slice, and the builtin functions), `constructs/`
+  (32: together every node class of the ast), `paths/` (13: generators' close, throw and delegation, coroutines,
+  async generators, context managers, `except*`, `finally`, recursion, an uncaught exception, `sys.exit`). Each prints
+  reprs and exception names only. `bin/pyi gen --check` regenerates them equal to the committed files and checks the
+  coverage. The grammar's `invalid_*` rules (§8.3 (1)'s error programs) are not generated yet.
+- **The references** (GTS207 (a), PYS14 (a), PYS15 (a)): `bin/pyi record-ref` runs every program (the synthetic corpus and
+  the samples) by CPython 3.14.10 as `python3 -s -P -B` (not `-I`, which would ignore `PYTHONHASHSEED`) with
+  `PYTHONHASHSEED=0`, `LC_ALL=C.UTF-8`, `TZ=UTC`, `PYTHONIOENCODING=utf-8`, HOME and TMPDIR under `.tmp`, twice, into
+  `test/python/ref-cpython314.edn` (151 references, none excluded), and `Lib/test`'s 11 language-core modules by regrtest
+  (`-u none`: no network or other resource), each test method's outcome, into `test/python/ref-cpython314-lib-test.edn`
+  (1,149 methods: 1,138 ok, 8 skipped, 4 excluded as the runner's: subprocesses run `-I` cannot import the tarball's test
+  package). An entry the two runs disagree on, or whose output names an address, the architecture, the C library or a
+  size, is written `:excluded`. `--check` reproduces every reference twice (7.7 s). Seconds per program and module in
+  `test/python/ref-costs.edn` and `ref-costs-lib-test.edn` (all 151 programs in 1.1 s, the 11 modules in 2.6 s).
+- pyperformance is not pinned: the pin is the user's (queue 177's DECISION).
