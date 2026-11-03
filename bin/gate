@@ -98,6 +98,13 @@
 #        bin/gate --outside-pins    (queue 023, report 022 finding 4; the ordinary gate's pre-step outside)
 #                                   TamaGo's go and \$GOROOT/test hashed against seed/goroot.sha256 and
 #                                   seed/goroot-test.sha256, jdk26u's work tree clean (when there)
+#        bin/gate [--full] --costs [--last N] [--tsv]  (GT8.1, queue 170) each step's and part's cost from the
+#                                   store of passes (the last N passes, default 5: wall, CPU, peak, median and
+#                                   max; a step the store does not record, its latest run's .tmp/gate/NAME.mem;
+#                                   else unmeasured), its tier and its crop (steps.edn's :crops), then the sums per
+#                                   crop and per tier against steps.edn's :budgets (test/gate/costs.ae, on the
+#                                   tools' host: the caller's ARBACE_HOST_EXE when set; reads only, no key); --full
+#                                   the full gate's steps too, --tsv the rows as TSV
 #        bin/gate --full --concurrent  (GTS37 (a)) --full's chains at once (GATE_FULL_PARALLEL=1) under the
 #                                   host's big lock taken once for the whole run (bin/heavy-lock;
 #                                   GATE_CONCURRENT_HELD=1: the caller holds it), its heavy steps and the
@@ -334,9 +341,11 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 . "$root/bin/lib/tmpdir.bash" # TMPDIR: .tmp/tmp when unset
 . "$root/bin/lib/renamed-env.bash" # stops on a stale G2A_*, J2A_*, A2G_* or C2A_*
 cd "$root"
+caller_host_exe=${ARBACE_HOST_EXE-} # --costs only (it reads, keys nothing): the caller's tools' host
 unset ARBACE_HOST_EXE J2G_GO_EXE REPR_GO_EXE
-usage() { echo "usage: bin/gate [--full] [--rerun] | bin/gate [--full] --plan [--builds] | bin/gate --why STEP | bin/gate --audit [STEP...] | bin/gate --prune [--dry-run] | bin/gate [--full] --clean [--tag TAG] [--only STEP,...|failed|changed] [--plan] | bin/gate --pins [FILE] | bin/gate --full --concurrent" >&2; exit 2; }
+usage() { echo "usage: bin/gate [--full] [--rerun] | bin/gate [--full] --plan [--builds] | bin/gate [--full] --costs [--last N] [--tsv] | bin/gate --why STEP | bin/gate --audit [STEP...] | bin/gate --prune [--dry-run] | bin/gate [--full] --clean [--tag TAG] [--only STEP,...|failed|changed] [--plan] | bin/gate --pins [FILE] | bin/gate --full --concurrent" >&2; exit 2; }
 full= plan_only= why= rerun= audit= prune= dry= clean= clean_tag= pins= pins_out= concurrent= builds= only= outside=
+costs= costs_last=5 costs_fmt=text
 steps_arg=() orig_args=("$@")
 while [ $# -gt 0 ]; do
   case $1 in
@@ -354,6 +363,9 @@ while [ $# -gt 0 ]; do
     --audit) audit=1; full=1 ;;
     --prune) prune=1 ;;
     --dry-run) dry=--dry-run ;;
+    --costs) costs=1 ;;
+    --last) [ $# -ge 2 ] && [ "$2" -gt 0 ] 2>/dev/null || usage; costs_last=$2; shift ;;
+    --tsv) costs_fmt=tsv ;;
     -*) usage ;;
     *) [ -n "$audit" ] || usage; steps_arg+=("$1") ;;
   esac
@@ -363,6 +375,19 @@ mode=essential; [ -n "$full" ] && mode=full
 [ -n "$builds" ] && [ -z "$plan_only" ] && usage
 [ -n "$clean" ] && { [ -n "$concurrent$audit$why$prune" ] && usage; }
 [ -n "$only" ] && { [ -n "$clean" ] && [ -z "$plan_only" ] || usage; }
+[ -z "$costs" ] && { [ "$costs_last" != 5 ] || [ "$costs_fmt" != text ]; } && usage
+[ -n "$costs" ] && { [ -n "$plan_only$why$rerun$audit$prune$clean$pins$concurrent$builds$outside" ] && usage; }
+
+# --costs (GT8.1, queue 170): the cost table, from the store of passes and the latest run's logs (.tmp/gate/NAME.mem),
+# by test/gate/costs.ae on the tools' host; before the environment's scrub and gate_env: it runs nothing and keys nothing
+if [ -n "$costs" ]; then
+  . "$root/bin/lib/gate-cache.bash"
+  . "$root/bin/lib/tools.bash"
+  [ -n "$caller_host_exe" ] && export ARBACE_HOST_EXE=$caller_host_exe
+  store=${ARBACE_GATE_STORE:-$(arbace_main_checkout "$root")/.tmp/gate-pass}
+  arbace_tool -p "$root/test" -m gate.costs costs "$root" "$store" "$root/.tmp/gate" "$mode" "$costs_last" "$costs_fmt"
+  exit
+fi
 
 # Queue 023 (report 022, finding 1): the caller's environment. A key holds a step's declared :env alone,
 # so a variable the steps' tools read that changes a verdict (CLOJURE_TESTS_EXPECTED, FROZEN_JAR,
