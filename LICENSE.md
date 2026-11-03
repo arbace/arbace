@@ -474,6 +474,8 @@ covers what.
   Arbace's own, under the Eclipse Public License 1.0.
 - `test/c/run/` (ci's own run programs) and `test/c/judge/` (the small files of ci's judges' tests, doc/C23-SURVEY.md,
   "As built: review 006's fixes"): Arbace's own, under the Eclipse Public License 1.0.
+- `test/c/synth/` (synth-c23, C23's synthetic programs construct by construct, their table and generator, queue 172,
+  doc/GATE-SURVEY.md GT8.6): Arbace's own, under the Eclipse Public License 1.0.
 - `arbace/repr/java/lex.ae` and `arbace/repr/java/parse.ae` (repr/java's native lexer and parser,
   doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: JN8"): Arbace forms porting, method by method,
   https://github.com/openjdk/jdk26u at `baf63fb`, `src/jdk.compiler/share/classes/com/sun/tools/javac/`'s

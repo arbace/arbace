@@ -647,14 +647,19 @@
 
 (defn- check-corpus
   "E-tree over corpus spec (its :dumps the helper's), in pool: the report's entry. headers:
-  the headers and the sets of dumps alone, no parse."
-  [goroot-forms spec pool out known headers]
+  the headers and the sets of dumps alone, no parse. only (GT8, --only): nil, or the set of ids
+  NAME/KEY the check is restricted to (the dumps of the others neither checked nor missing)."
+  [goroot-forms spec pool out known headers only]
   (let [t0 (System/nanoTime)
         nm (:name spec)
         dumps (str/replace (:dumps spec) #"/+$" "")
+        sel? (fn [k] (or (nil? only) (contains? only (str nm "/" k))))
         [js results load-ms] (spec-jobs spec)
-        helper (into {} (for [p (rd/dump-files [dumps])]
-                          [(str/replace (subs p (inc (count dumps))) #"\.edn$" "") p]))
+        js (filterv #(sel? (:key %)) js)
+        helper (into {} (for [p (rd/dump-files [dumps])
+                              :let [k (str/replace (subs p (inc (count dumps))) #"\.edn$" "")]
+                              :when (sel? k)]
+                          [k p]))
         hres (helper-results (:tsv spec))
         jkeys (set (map :key js))
         futs (mapv (fn [j]
@@ -697,7 +702,8 @@
      :missing (vec (for [r missing] [(:key r) (:missing r)]))
      :extra (vec (for [r extra] [(:key r) (if (helper-failed? r) (second (get hres (:key r))) "not the helper's failure")]))
      :rejected (count (filter :rejected rs))
-     :unknown (count unknown) :wall-s (/ (- (System/nanoTime) t0) 1e9)}))
+     :unknown (count unknown) :wall-s (/ (- (System/nanoTime) t0) 1e9)
+     :only (when only (count helper))}))
 
 (defn- read-corpus
   "The native reader over corpus spec, no comparison: native dumps under out/NAME."
@@ -754,7 +760,11 @@
   "generate [--goroot DIR] [--cmd DIR] OUT: repr/go's generated Go forms (generated-texts) under
   OUT.
 
-  check|read [--headers] [--jobs N] [--forms DIR] [--known FILE] [--report FILE] [--out DIR] SPEC...
+  check|read [--headers] [--jobs N] [--forms DIR] [--known FILE] [--report FILE] [--out DIR] [--only FILE] SPEC...
+
+  --only FILE (check; GT8, the rotation's lists): the ids NAME/KEY of FILE (one a line, blank and #
+  lines ignored; NAME a spec's :name, KEY a dump's key) alone, a partial check: the other dumps are
+  neither checked nor missing.
 
   check: E-tree (doc/go/GO-PARSER-SURVEY.md §5, §6) of each corpus SPEC (a file read by the
   Clojure reader: {:name :dumps DIR :tsv FILE :loads [LOAD ...]}, LOAD arbace.repr.go.load's):
@@ -783,7 +793,10 @@
                          "--known" (recur (assoc opts :known (first more)) (rest more))
                          "--report" (recur (assoc opts :report (first more)) (rest more))
                          "--out" (recur (assoc opts :out (first more)) (rest more))
+                         "--only" (recur (assoc opts :only (first more)) (rest more))
                          [opts args]))
+        only (when-let [f (:only opts)]
+               (set (remove #(or (str/blank? %) (str/starts-with? % "#")) (map str/trim (str/split-lines (slurp f))))))
         known (when-let [k (:known opts)]
                 (when (.isFile (File. ^String k))
                   (binding [*read-eval* false] (read-string (slurp k)))))
@@ -796,7 +809,7 @@
         results (vec (for [sf specs]
                        (let [spec (read-spec sf)]
                          (if (= cmd "check")
-                           (check-corpus (:forms opts) spec pool (:out opts) (or known {}) (:headers opts))
+                           (check-corpus (:forms opts) spec pool (:out opts) (or known {}) (:headers opts) only)
                            (read-corpus (:forms opts) spec pool (:out opts))))))
         unknown (+ forms-bad (reduce + (map :unknown results)))]
     (.shutdown pool)
@@ -807,7 +820,10 @@
                          "E-tree: %d corpora, %d of %d dumps equal (header and tree), %d files, %d nodes; %d not known")
                        (count results) (reduce + (map :equal results)) (reduce + (map :dumps results))
                        (reduce + (map :files results)) (if (:headers opts) "" (reduce + (map :nodes results))) unknown)))
+    (when only
+      (println (format "native-check: a partial check (--only, %d ids): %d dumps of the listed ones checked; the others neither checked nor missing"
+                       (count only) (reduce + (map :dumps results)))))
     (when-let [rf (:report opts)]
-      (spit rf (with-out-str (binding [*print-length* nil] (prn {:forms fc :corpora results})))))
+      (spit rf (with-out-str (binding [*print-length* nil] (prn (cond-> {:forms fc :corpora results} only (assoc :partial (count only))))))))
     (shutdown-agents)
     (System/exit (if (pos? unknown) 1 0))))

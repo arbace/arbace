@@ -113,6 +113,15 @@ The crops' checks, until their branches merge, add:
 apk add clang ocaml5-compiler-libs chez-scheme chibi-scheme
 ```
 
+The LLVM IR crop (doc/llvm/LLVM-CROP-SURVEY.md, after the tag) adds LLVM's own tools at clang's version, `llvm-as`,
+`opt -verify`, `llvm-dis`, `lli` and `FileCheck` (installed by the user 2026-11-03, 23.1.4). They live in
+`/usr/lib/llvm23/bin`, not on PATH, and the tools name that directory, as Java 26 is named: GHC's `llvm15` and `clang16`
+(its `-fllvm` back end's range) and perf's `llvm22-libs` are other versions beside them, not the reference.
+
+```sh
+apk add llvm23 llvm23-test-utils
+```
+
 The lines are amd64's. On an arm64 host `qemu-aarch64` is not needed (nothing runs amd64 executables
 under emulation, and `bin/arbace-go --fixpoint` runs on amd64 only), and the host's line above loses
 `reptyr`, which edge builds for x86_64 alone (checked 2026-11-01); Arbace's line resolves on both

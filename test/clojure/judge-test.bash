@@ -37,6 +37,27 @@ test_control_strict() {
 }
 t control-subject-missing-essential-fails test_control_strict
 
+# GT8.4: bin/clojure-tests --only FILE: the namespaces of the list (blank and # lines ignored) become the NAMESPACE
+# arguments (the loop's own text run on FILE), and a report of chosen namespaces leaves the control whose subject is
+# not listed (finding 5's lenient mode) and names a regression as "  NAMESPACE - why"
+test_only_list() {
+  local ct=${CT:-$here/bin/clojure-tests} frag
+  frag=$(sed -n '/^jobs=\$(nproc)/,/^step()/p' "$ct" | sed '$d')
+  [ -n "$frag" ] || return 1
+  printf '# a list\n\na.one\n  a.vars  \n#a.skipped\n' > "$tmp/l.txt"
+  [ "$(bash -c "root=/x; $frag"' ; printf "%s " "${only[@]}"' x --only "$tmp/l.txt" a.extra)" = "a.extra a.one a.vars " ] || return 1
+  : > "$tmp/e.txt"
+  bash -c "$frag" x --only "$tmp/e.txt" > /dev/null 2>&1 && return 1
+  # listing only a.one: the control (subject a.macros) is left; a regression is named as the lines say
+  echo '{:ns a.vars :test 1 :pass 1 :fail 0 :error 0}' > "$tmp/out/a.vars.edn"
+  report "a.one a.vars" X=1; [ $? = 1 ] || return 1
+  grep -q '^  a.vars - ' "$tmp/o.txt" && [ -z "$(grep -c 'not listed' "$tmp/o.txt" | grep -v '^0$')" ] \
+    && grep -q 'not judged, a.macros not run' "$tmp/o.txt" || return 1
+  [ "$(sed -n '/^REGRESSIONS/,$p' "$tmp/o.txt" | sed -nE 's/^  ([^ ]+) - .*$/\1/p' | sort -u)" = a.vars ]
+}
+t only-list-and-partial-report test_only_list
+rm -f "$tmp/out/a.vars.edn"
+
 # finding 8: the essential subset's compile log may lack reference entries of sources it never loads, but not name
 # one the reference does not have; the whole run's must equal
 test_sources_check() {

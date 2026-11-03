@@ -50,7 +50,12 @@
     {:why :at :reason}}} and {:counts {corpus {:files N :one-way N :outside N}}}; exit status 1 on
     another, on one that differs otherwise, on one that no longer differs, on a count that differs or
     is not recorded); -v, each
-    difference's first differing line"
+    difference's first differing line; --only FILE (GT8.4): only the files listed in FILE, one a line
+    (blank and # lines ignored; the paths the differences name, a source named N among several as
+    N/path): the directories holding them are read and printed, only the listed files are judged
+    and counted, the known entries of the others are neither stale nor new, and the recorded :counts
+    are not enforced (a partial run); --ids: the files the first half translates, one a line,
+    the universe a list is cut from"
   (:require [arbace.repr.clojure.rules :as rules]
             [arbace.repr.clojure.text :as text]
             [arbace.java.io :as io]
@@ -273,7 +278,15 @@
   Clojure."
   [sources opts]
   (let [[v1 v2] (if (= :arbace (:from opts)) [:print :read] [:read :print])
-        t (tree sources)
+        t-all (tree sources)
+        ;; --only: the directories holding a listed file (a file is planned among its directory's names), the
+        ;; listed files alone judged below
+        only (:only opts)
+        t (if only
+            (let [ds (into #{} (map parent-of) (filter t-all only))]
+              (into (sorted-map) (filter (fn [[rel _]] (contains? ds (parent-of rel)))) t-all))
+            t-all)
+        listed? (fn [rel] (or (nil? only) (contains? only rel)))
         a (half v1 t opts)
         b (half v2 (:tree a) opts)
         ;; from Arbace, the printed tree's own round trip (Clojure -> Arbace -> Clojure)
@@ -282,6 +295,7 @@
         ;; the name each file of a's tree comes back under
         back (into {} (for [[out rel] (:from b)] [rel out]))
         results (for [[out rel] (:from a)
+                      :when (listed? rel)
                       :let [orig (slurp (t rel))
                             out2 (back out)
                             txt (when out2 (get-in b [:tree out2]))
@@ -309,14 +323,24 @@
                                   (= (get-in a [:tree out]) (get-in c [:tree (back2 out2)])))
                              {:why :not-read :at (first-difference orig txt)}
                              :else {:why :text :at (first-difference orig txt)})])]
-    {:files (+ (count results) (count (:errors a)))
+    {:files (+ (count results) (count (filter listed? (keys (:errors a)))))
      :equal (count (remove second results))
+     :listed (when only (count (filter t-all only)))
      :differ (into (sorted-map)
                    (concat (filter second results)
-                           (for [[rel m] (:errors a)] [rel {:why :error :at m}])
+                           (for [[rel m] (:errors a) :when (listed? rel)] [rel {:why :error :at m}])
                            ;; a file of the second half's errors
-                           (for [[out m] (:errors b) :let [rel ((:from a) out)]]
+                           (for [[out m] (:errors b) :let [rel ((:from a) out)] :when (listed? rel)]
                              [rel {:why :error :at m}])))}))
+
+(defn ids
+  "The files of the sources the first half of a round trip translates (their kind planned among
+  their directory's names), sorted: roundtrip --ids."
+  [sources opts]
+  (let [{plan :plan} (verbs (if (= :arbace (:from opts)) :print :read))
+        t (tree sources)
+        dirs (reduce (fn [m rel] (update m (parent-of rel) (fnil conj #{}) (name-of rel))) {} (keys t))]
+    (vec (for [rel (keys t) :when (:kind (plan (name-of rel) (dirs (parent-of rel)) opts))] rel))))
 
 (defn- parse-args [args]
   (loop [[a & more :as args] args o {:sources [] :text [] :skip #{} :kind :clj}]
@@ -332,6 +356,10 @@
       (= a "-q") (recur more (assoc o :quiet true))
       (= a "-v") (recur more (assoc o :verbose true))
       (= a "--from-arbace") (recur more (assoc o :from :arbace))
+      (= a "--ids") (recur more (assoc o :ids true))
+      (= a "--only") (recur (rest more)
+                            (assoc o :only (into #{} (comp (map str/trim) (remove #(or (str/blank? %) (str/starts-with? % "#"))))
+                                                 (str/split-lines (slurp (first more) :encoding "UTF-8")))))
       (= a "--known") (recur (rest more) (assoc o :known (first more)))
       (= a "--corpus") (recur (rest more) (assoc o :corpus (keyword (first more))))
       (= a "--text") (recur (rest more) (update o :text conj (first more)))
@@ -362,10 +390,15 @@
   (if (< (count sources) 2)
     (roundtrip sources opts)
     (reduce (fn [acc src]
-              (let [r (roundtrip [src] opts) n (.getName (io/file src))]
+              (let [n (.getName (io/file src))
+                    pre (str n "/")
+                    r (roundtrip [src] (if (:only opts)
+                                         (assoc opts :only (into #{} (keep #(when (str/starts-with? % pre) (subs % (count pre)))) (:only opts)))
+                                         opts))]
                 (-> acc (update :files + (:files r)) (update :equal + (:equal r))
+                    (update :listed #(when (or % (:only opts)) (+ (or % 0) (or (:listed r) 0))))
                     (update :differ into (for [[rel d] (:differ r)] [(str n "/" rel) d])))))
-            {:files 0 :equal 0 :differ (sorted-map)} sources)))
+            {:files 0 :equal 0 :listed nil :differ (sorted-map)} sources)))
 
 (defn- run-roundtrip
   "roundtrip's command: the counts, each difference with its reason from the known ones (an
@@ -378,6 +411,10 @@
         _ (when (seq missing)
             (println (str "repr-clojure roundtrip: no such source: " (str/join ", " missing)))
             (System/exit 1))
+        _ (when (:ids o)
+            (doseq [src (:sources o), rel (ids [src] o)]
+              (println (if (< (count (:sources o)) 2) rel (str (.getName (io/file src)) "/" rel))))
+            (System/exit 0))
         r (roundtrips (:sources o) o)
         known-all (if (:known o) (read-string (slurp (:known o))) {})
         known (get known-all (:corpus o) {})
@@ -389,12 +426,12 @@
         matches? (fn [rel] (let [e (known rel) d (diff rel)]
                              (and (map? e) (= (:why e) (:why d)) (= (:at e) (:at d)) (= (:as e) (:as d)))))
         new (remove matches? (keys diff))
-        stale (remove #(contains? diff %) (keys known))
+        stale (remove #(contains? diff %) (filter #(or (nil? (:only o)) (contains? (:only o) %)) (keys known)))
         ;; the corpus's size as recorded in the known file's :counts: an empty, shrunken or
         ;; grown corpus, or a file that drifts into an exemption, is a change to look at
         got {:files (:files r) :one-way (count one-way) :outside (count outside)}
         want (when (:known o) (get-in known-all [:counts (:corpus o)]))
-        count-errors (when (:known o)
+        count-errors (when (and (:known o) (nil? (:only o)))
                        (if want
                          (concat
                           (for [k [:files :one-way :outside] :when (and (contains? want k) (not= (k want) (k got)))]
@@ -419,6 +456,9 @@
     (doseq [m count-errors] (println (str "  COUNT " m " (:counts of the known file)")))
     (when (:verbose o)
       (doseq [[rel d] outside] (println (str "  outside " rel "\n      " (:at d)))))
+    (when (:only o)
+      (println (format "  --only: %d of the %d listed files are in this corpus (the others left; counts not enforced)"
+                       (:listed r) (count (:only o)))))
     (println (format "repr-clojure roundtrip%s (%s): %d files, %d equal, %s%d differ (%d known, %d new), %d stale"
                      (if (:corpus o) (str " " (name (:corpus o))) "")
                      (if (= :arbace (:from o)) "Arbace -> Clojure -> Arbace" "Clojure -> Arbace -> Clojure")

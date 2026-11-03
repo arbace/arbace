@@ -1,12 +1,12 @@
 #!/bin/bash
 # Tests of repr/clojure's judge (bin/repr-clojure check, GTS160, audit 076), over fabricated trees
-# and stubbed tools; run: test/repr/clojure/judge-test.bash [frozen|counts|notread|x509|libs|known]...
+# and stubbed tools; run: test/repr/clojure/judge-test.bash [frozen|counts|notread|x509|libs|known|only]...
 # (default: all). Exit status 0 when every case holds. TOOLS_BASH names another bin/lib/tools.bash
 # (the tests of a fix are run with the file from before it to show they fail). The checks that
 # need Arbace run on stage 0 (ARBACE_HOST_EXE) with arbace/repr/clojure.ae from the checkout.
 set -uo pipefail
 here=$(cd "$(dirname "$0")/../../.." && pwd)
-. "$here/bin/lib/tmpdir.bash"
+root=$here; . "$here/bin/lib/tmpdir.bash"
 tools=${TOOLS_BASH:-$here/bin/lib/tools.bash}
 scratch=$(mktemp -d "$here/.tmp/judge-test.XXXXXX") || exit 1
 trap 'rm -rf "$scratch"' EXIT
@@ -157,7 +157,31 @@ t_known() {
   out=$(lost_rt "$d" lose --known "$k" --corpus c); expect "known: a bare reason excuses nothing" 1 $?
 }
 
-tests=("$@"); [ ${#tests[@]} = 0 ] && tests=(frozen counts notread x509 libs known)
+# GT8.4: roundtrip --only FILE judges the listed files alone: an unlisted failing file is not new, an unlisted known
+# entry is not stale, the counts are not enforced, a listed failing file is NEW; --ids lists the files translated;
+# check refuses --only outside --roundtrip
+t_only() {
+  local d=$scratch/o k=$scratch/o-known.edn l=$scratch/o-list out
+  mkdir -p "$d/sub" "$d/other"
+  printf '(ns y)\n(defn f [] (LOST) 1)\n' > "$d/sub/y.ae"; printf '(ns z)\n(def v 1)\n' > "$d/sub/z.ae"
+  printf '(ns q)\n(def w 1)\n' > "$d/other/q.ae"
+  echo '{:c {"other/q.ae" {:why :text :at "line 1: \"a\" / \"b\""}} :counts {:c {:files 99 :one-way 0 :outside 0}}}' > "$k"
+  printf '# the list\n\nsub/z.ae\nno/such.ae\n' > "$l"
+  out=$(lost_rt "$d" lose --known "$k" --corpus c --only "$l"); expect "only: unlisted failing file, unlisted known entry and counts do not count" 0 $?
+  echo "$out" | grep -q 'repr-clojure roundtrip c .*: 1 files, 1 equal' && ok "only: counted the listed file alone" || bad "only: counts: $out"
+  echo "$out" | grep -q '1 of the 2 listed files are in this corpus' && ok "only: an unknown id is said" || bad "only: unknown id: $out"
+  printf 'sub/y.ae\n' > "$l"
+  out=$(lost_rt "$d" lose --known "$k" --corpus c --only "$l"); expect "only: a listed failing file fails" 1 $?
+  [ "$(echo "$out" | sed -nE 's/^  NEW   ([^ ]+) - .*$/\1/p')" = sub/y.ae ] && ok "only: the failure line" || bad "only: failure line: $out"
+  printf 'other/q.ae\n' > "$l"
+  out=$(lost_rt "$d" lose --known "$k" --corpus c --only "$l"); expect "only: a listed known entry that comes back equal is stale" 1 $?
+  echo "$out" | grep -q '^  STALE other/q.ae' && ok "only: the stale line" || bad "only: stale line: $out"
+  out=$(rt --ids --from-arbace "$d"); expect "only: --ids" 0 $?
+  [ "$out" = "$(printf 'other/q.ae\nsub/y.ae\nsub/z.ae')" ] && ok "only: --ids lists the files" || bad "only: ids: $out"
+  "$here/bin/repr-clojure" check --suite --only "$l" > "$scratch/o.out" 2>&1; expect "only: check --suite refuses --only" 2 $?
+}
+
+tests=("$@"); [ ${#tests[@]} = 0 ] && tests=(frozen counts notread x509 libs known only)
 for t in "${tests[@]}"; do "t_$t"; done
 [ $fails = 0 ] && echo "judge-test: all hold" || echo "judge-test: $fails FAILED"
 [ $fails = 0 ]

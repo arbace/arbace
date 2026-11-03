@@ -4093,6 +4093,49 @@ fixtures' counts the tests assert (m-st 1, m-stq 1, m-p7 1, m-p8 0, m-p1 1, m-pn
 23f602c9 fixes a regression of 88b357c9: the main file's `Included` slot was nil, `push!` pushed nothing for it, so a header after a system header took that header's status;
 `c23-nf1` alone is correct for what it tests but carries this bug, so these commits belong with it. Left: a header entered twice (finding 4), musl's cache path (finding 5).
 
+### As built: review 110's finding 2, `_Float128` and `_Float64x` compared exactly, queues 125 and 155 (2026-11-02)
+
+The VM's draft (`mac/125-float128`, 05c5fc79, unrun there) ported onto main as `mac/155-float128` and run on the VM's stage 0 (arm64). The constant evaluator gave
+an exact value (`:ld`) to `long double` alone, so every comparison in `_Float128` or `_Float64x` went through doubles (`0.1L != (_Float128)0.1` false, `1e400F128 <
+2e400F128` false, `1e-4940F128 > 0` false). `arbace.c.check` now keeps the target's wide formats (`wide-formats`: `long double` and `_Float64x` x87's 64-bit
+significand, `_Float128` binary128's 113 bits; linux-amd64): `exact-of` rounds a value to a kind's format and replaces `round-ldouble`/`ld-of`; literals and casts
+give `:ld` to every wide kind (a cast rounds to its format; a wide value with no exact value stays inexact, review 079's 1a through a cast); a comparison whose usual
+type is wide runs exactly, each operand rounded to that type (integers beyond the significand round: `(2^120 + 1) == 0x1p120L`); constexpr refuses a wide object whose
+`:ld` initializer its format does not keep (`constexpr double a = 0.1F128`, `constexpr _Float128 g = 2^120 + 1`); `__float128` (the `q` suffix, the type name) is
+`_Float128` and `__float80` (`w`) `long double`, `q` and `w` pedwarning "non-standard suffix on floating constant" as `bf16` does. ci is unchanged: `_Float128` is out
+of eval by design (SPEC §14) and `_Float64x` is double there (CS35), so it has no runtime comparison to fix.
+
+- **Tests** `float128-compared-exactly` (`test/c/judge/constexpr-float128-compare.c`, 29 assertions, clang x86-64's answers) and `constexpr-float128-representable`
+  (`constexpr-float128.c`, errors on lines 5, 7, 11, 13, 14, 15, gcc's). At main (`bin/ci diagnose`) the first gives 18 false "static assertion failed" and 3 "unknown
+  type name '__float128'", the second misses 5, 7, 11 and 14 and gives line 15 the unknown type; with the change `bin/ci judge-test`: 82 tests, 347 assertions, 0 failures.
+- **Records.** None moved: `bin/ci dg` with `CI_DG_ONLY` over the 21 files of the C23 corpus naming a wide type or suffix (`c23-floatn-*`, `c23-imaginary-constants-*`,
+  `bitint-28..31`, `-97`, `torture/bitint-22`, `-24`) and the 9 comparing `long double` constants under `constexpr` or a static assertion, at main and with the change:
+  the checker's per-file output (`read.edn`) byte for byte the same. Left: wide arithmetic still goes through doubles (CS235 (b)), so `1.0F128 + 0x1p-112F128 != 1.0F128`
+  is still false.
+
+### As built: review 130's gaps 4 and 5, queue 157 (2026-11-02, the VM's draft)
+
+Branch `mac/157-headers` off main (2974e68e), run on the VM's stage 0: `bin/ci judge-test` 80 tests, 341 assertions, 0 failures at 2974e68e; 82 tests, 354
+assertions, 0 failures with the two commits and their deftests. gcc 15.2.0 is Alpine's aarch64 one there (the counts checked by hand, no reference recorded).
+
+- **Gap 4: a header entered twice, judged entry by entry.** The tokens of a file's two entries share one CFile, so neither the converter nor the checker could tell
+  them apart: both entries' forms landed in the unit of the first entry's root and took the first entry's status (`header-root`, `file-info`, `:files` by path).
+  Now the pp keeps in each `Included` its entry (the index of its `enter` record in the layer), records with each `enter` its includer's entry (`:in`) and with
+  each `system` record its entry (`:entry`), and gives the parser `:entry`; the parser notes, at each token it pulls, when the entry changes (`:entries`, `[[seq
+  entry] ...]`, moved with the tokens `inject-func-tokens` renumbers). The converter takes each header form's entry from its first token's seq (`entry-at`), its unit
+  from the `:in` chain (`entry-root`), and its status from that entry's `enter` record as that entry's own pragmas and linemarkers before it leave it (`sys-changes`
+  by entry, `sys-at`, moved from the checker): `:form-sys`, one boolean a form, replaces `:form-files`, `:files`, `:form-offs` and `:sys-changes`, and the checker
+  binds `*system-unit*` from it. A form whose first token is not its entry's file's (another file's macro) keeps the old rule, its file's first entry. An include
+  whose forms an earlier include's unit already has is a unit of its own, its name the forms' hash with its rank (`\n#k`), so it is checked at its own `#include`;
+  the first such unit keeps the forms' hash, so a read with no unguarded header entered twice keeps every name.
+- **Gap 5: musl's cache.** `arbace.c.musl/load-forms` (`load-unit` over the cache directory) keeps a unit's `:path` from its `c/header` form, so a unit read back is
+  judged by the old rule (its directory, its pragma line anywhere) and names its errors by its file; before, it had no path and was a user header's. Its status as
+  read from C is not kept: `c/h/NS.ae` is shared by every includer whose forms are the same. musl is checked without `-pedantic-errors`, so nothing moves.
+- **Tests** (`test/c/judge/sysx/chg`, gcc 15.2 on aarch64): `header-entered-twice-by-its-entries`: m-tw 1 (before 0), m-tw2 1 (before 2), m-tp 1 (a pragma under
+  `#ifdef` that only the second entry executes; before 0), m-twn 1 (both entries in one unit; before 2), m-tw3 2 (the main file including it twice), and each read's
+  units' `:form-sys`; `reread-unit-by-the-old-rule`: m-ph.c read back with `-isystem sy` 0 (before 1), `-I sy` 1, m-p1.c read back 0 (the old rule's whole-file
+  pragma; gcc 1, read from C 1).
+
 ## Decided (2026-11-01, the user): CS236-CS239
 
 From main's doc/JOURNAL.md, "2026-11-01: the user's decisions after the tag" (VM report 103's sheet 2 for CS236-CS238;

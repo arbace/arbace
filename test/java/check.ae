@@ -23,7 +23,7 @@
     plan REF WORK [--list FILE] [--only REGEX] [--corpus C,...]
         the check's plan of every test REF passes on the JDK (or FILE's, the essential subset):
         WORK/run/ID/plan.tsv and WORK/run.list
-    report REF WORK DIVERGENCES CHECKDIR LEVELS [--record] [--essential FILE] [--partial]
+    report REF WORK DIVERGENCES CHECKDIR LEVELS [--record] [--essential FILE] [--partial] [--corpora C,...]
         WORK/results.tsv (ID LEVEL RESULT REASON) against the recorded results
         (CHECKDIR/check-LEVEL.edn): as recorded, new, now passing; a test passing there and not
         now is a regression (unless its result is flaky: bin/java-check ran it again and the
@@ -32,7 +32,8 @@
         area; --record writes the results as CHECKDIR/check-LEVEL.edn. Every test REF passes on the
         JDK must have a row at each level of LEVELS (the diagnostics level's the golden-diagnostics
         tests, the other levels' the rest), unless --partial: a test without one is missing (a run
-        that lost rows, or judged nothing, fails; its recorded line is kept by --record); with
+        that lost rows, or judged nothing, fails; its recorded line is kept by --record); with --corpora
+        (GT8: whole runs of those corpora) the tests of those corpora alone, --record keeping the others' lines; with
         --essential every test of FILE must have one. Exit 1 on a regression, an unclassified test,
         a missing test or an essential test not passing or missing."
   (:require [arbace.string :as str]
@@ -554,11 +555,13 @@
   or one of whose :match regexps finds \"RESULT REASON\". A flaky result (JCS71 (a): a would-be
   regression whose second run passed) only by a class that names it, in :tests or by a :match
   anchored to it (^flaky): the other patterns (the world's classes, unanchored) do not take it, so
-  that a test flaky and named by no class fails the check (report 003's finding 4)."
+  that a test flaky and named by no class fails the check (report 003's finding 4). A class with
+  :results takes only those results (GTS208 (a): :speed's list takes timeouts, not a wrong output)."
   [classes level id result reason]
   (let [s (str (name result) " " reason)
         takes? (fn [re] (or (not= :flaky result) (str/starts-with? (str re) "^flaky")))]
     (or (some (fn [c] (when (and (at-level? c level)
+                                 (or (nil? (:results c)) (some #{result} (:results c)))
                                  (or (some #{id} (:tests c)) (some #(and (takes? %) (re-find % s)) (:match c))))
                         (:id c)))
               classes)
@@ -632,10 +635,14 @@
         partial? (or (flags "--partial") (some? (o "--essential")))
         essential (some->> (o "--essential") lines (remove #(str/starts-with? % "#")) (map #(first (str/split % #"\s+"))) set)
         tests (into {} (for [t (ref-tests ref)] [(:id t) t]))
+        ;; GT8: --corpora C,...: whole runs of those corpora (the gate's parts), judged whole within them
+        corpora (some->> (o "--corpora") (#(str/split % #",")) (remove str/blank?) (map keyword) set)
+        in-corpora? (fn [id] (or (nil? corpora) (contains? corpora (:corpus (tests id)))))
         ;; the tests a whole run has at a level (plan's and plan-diag's): those the JDK passes, the
         ;; golden-diagnostics tests at the level diagnostics, the others at the other levels
         expected (fn [lv] (set (for [t (vals tests) :when (= :pass (:jdk t))
-                                     :when (= (= :diagnostics lv) (= :compile-fail-ref (:category t)))]
+                                     :when (= (= :diagnostics lv) (= :compile-fail-ref (:category t)))
+                                     :when (in-corpora? (:id t))]
                                  (:id t))))
         classes (read-edn divergences)
         all-results (for [[id lv r reason] (tsv (str work "/results.tsv"))] [id (keyword lv) (keyword r) (or reason "")])
@@ -645,7 +652,7 @@
         results (remove #(control-ids (first %)) all-results)
         ;; the levels whose runs were under the clean run's audit (--save's audited marker, GT7 rerun 8):
         ;; a class with :audited at a level switches the hold on there (any such class: it classifies
-        ;; nothing, :speed takes the timeouts): every timeout at the level, in a run --save marked, of a test
+        ;; nothing: a held row is its class's): every timeout at the level, in a run --save marked, of a test
         ;; whose compiled result in this judgment passes (strace's system time, not the test). Interp only: a
         ;; compiled timeout has no passing compiled result, so an :audited class at :compiled holds nothing;
         ;; and inert in a judgment without compiled results (the essential pair, java-check and
@@ -674,7 +681,12 @@
                   by (group-by #(nth % 2) rs)
                   pass? #(= :pass (nth % 2))
                   np (remove pass? rs)
-                  cls (group-by #(classify classes lv (first %) (nth % 2) (nth % 3)) np)
+                  ;; a held row (an audited timeout, audit-held?) is its :audited class's (GTS180 (a)); the
+                  ;; other rows are classified
+                  cls (group-by #(if (audit-held? lv (first %) (nth % 2))
+                                   (:id (first (filter (fn [c] (and (:audited c) (= lv (:level c)))) classes)))
+                                   (classify classes lv (first %) (nth % 2) (nth % 3)))
+                          np)
                   ;; JCS71 (a): a would-be regression run again whose second run passed is
                   ;; :flaky (bin/java-check's again), no regression, and a test recorded :flaky
                   ;; passes in the record's sense; its class names it (a :flaky class's :tests)
@@ -739,13 +751,16 @@
                                ;; a partial run (--only, --corpus, --essential) updates its tests' lines;
                                ;; a whole run's missing tests keep theirs (the run fails on them)
                                (let [now (into {} (for [[id _ r reason] rs] [id [r reason]]))
-                                     all (if partial? (merge rec now) (merge (select-keys rec missing) now))]
+                                     all (cond partial? (merge rec now)
+                                               ;; a run of whole corpora: the other corpora's lines kept
+                                               corpora (merge (into {} (remove #(in-corpora? (key %)) rec)) (select-keys rec missing) now)
+                                               :else (merge (select-keys rec missing) now))]
                                  (for [[id [r reason]] (sort-by key all)]
                                    (str " [" (q id) " " (q (:test (tests id))) " " r " " (q reason) "]")))
                                ["]"]))
         (println (str "   recorded " f))))
     (doseq [lv (map keyword (str/split levels #","))] (controls-judged! controls lv all-results problems))
-    (levels-against! checkdir tests results (set (map keyword (str/split levels #","))) record? partial? problems
+    (levels-against! checkdir tests results (set (map keyword (str/split levels #","))) record? (or partial? (some? corpora)) problems
                      ;; a levels disagreement is held only for a test recorded passing at interp: a timeout recorded
                      ;; as it is now was not made by strace (review 077)
                      (let [rec-i (recorded (str checkdir "/check-interp.edn"))]

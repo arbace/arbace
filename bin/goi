@@ -72,7 +72,7 @@
 #                                 os.Exit exits, an uncaught panic is reported as gc's (status 2).
 #                                 goi: unsupported: REASON (status 125) for what goi does not run
 #                                 yet, goi: error: MESSAGE (126) for its failures
-#   bin/goi check [--record] [--jobs N] [--essential] [--only REGEX]
+#   bin/goi check [--record] [--jobs N] [--essential] [--only REGEX] [--list FILE]
 #                                 the check (§11): the run programs of $GOROOT/test (repr/go's
 #                                 conversion, the corpus linux-test: bin/repr-go read --corpus
 #                                 linux-test when missing or stale: each corpus below is kept by
@@ -107,7 +107,20 @@
 #                                 from its own run (GTS86 (b): no run of its own), in every run but
 #                                 the box's; one that passes, or whose subject is not in the run
 #                                 (but with --only), fails the check; they are no programs of the
-#                                 list, so no "no result" or "missing" line names them. --essential: the
+#                                 list, so no "no result" or "missing" line names them. --list FILE (GT8.7, the
+#                                 gate's nightly rotation; at both levels): the run restricted to the programs
+#                                 FILE names, one id a line (the ids of the records, $GOROOT/test-relative
+#                                 paths such as fixedbugs/issue1.go; blank lines and # lines ignored), run
+#                                 programs, directory tests and errorcheck programs alike; a selection as --only
+#                                 is (what ran is judged: no "missing" line for an unlisted program of the
+#                                 reference, the divergences not classified, a control whose subject is not
+#                                 listed left; --record refused); with --only, the intersection (--only
+#                                 applied to the listed ids); an id of FILE the run does not list is not run
+#                                 ("missing" when the reference has it). The run's own results are classified
+#                                 (goi.divergences --partial: no box records, no essential subset); every program
+#                                 that fails the run (a regression, no result, missing, a fail or error row, a
+#                                 program in no class) is also printed on a line of its own, `   failing: ID`
+#                                 (read with sed -nE 's/^   failing: (.+)$/\1/p'). --essential: the
 #                                 programs of test/goi/essential.txt (GS12, the essential gate's).
 #                                 GR7b: and its errorcheck programs (the corpus linux-errtest:
 #                                 bin/repr-go read --corpus linux-errtest when missing), each
@@ -129,7 +142,7 @@
 #                                 of gc's later phases (-m, -l, -live, -d=..., -race, -std, -+),
 #                                 line directives, or errors go/types does not report either (gc's
 #                                 phases after type checking)
-#   bin/goi check --aot [--record] [--jobs N] [--essential] [--only REGEX]
+#   bin/goi check --aot [--record] [--jobs N] [--essential] [--only REGEX] [--list FILE]
 #                                 the AOT level (REAP2, doc/FULL-SUPPORT-SURVEY.md "As built:
 #                                 REAP2"; RPS10-RPS12, RPS17): the same corpora, each run
 #                                 program's forms built by arbace.build.go (bin/build-go --layout
@@ -181,7 +194,7 @@
 #                                 the timeout's seconds, the status expected, and how to compare
 #                                 (one: the console up to the goroutines' traces; dir: as is);
 #                                 DIR/known.tsv, the known programs and their reasons
-#   bin/goi check --corpus nethttp [--record] [--jobs N] [--only REGEX] [--gc-only] [--update-want]
+#   bin/goi check --corpus nethttp [--record] [--jobs N] [--only REGEX] [--list FILE] [--gc-only] [--update-want]
 #                                 the net/http corpus (NH1, doc/go/NET-HTTP-SURVEY.md, "As built: NH1"):
 #                                 test/nethttp's programs (a module, a package main each, listed in
 #                                 manifest.edn, loopback only), at the gc level built and run by gc
@@ -227,6 +240,8 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 . "$root/bin/lib/renamed-env.bash"
 . "$root/bin/lib/tools.bash"
 . "$root/bin/lib/limit.bash" # limited: CPU-time limits with a wall cap (GT6)
+. "$root/bin/lib/gate-cache.bash"
+. "$root/bin/lib/cover.bash" # ARBACE_COVER_DIR: the cover build, a GOCOVERDIR per program (GT8.3)
 cd "$root"
 
 goroot=${ARBACE_GOROOT:-/root/tamago-go}
@@ -350,6 +365,12 @@ size() {
 # run_exe: the executable that interprets Go forms (GOI_RUN_EXE, else the build's), built when missing
 run_exe() {
   local exe=${GOI_RUN_EXE:-$root/target/arbace-go/amd64/arbace}
+  # GT8.3, GTS206 (a): with ARBACE_COVER_DIR (and no GOI_RUN_EXE) the cover build's executable, each program's
+  # run with its GOCOVERDIR (check_one, check_dir, check_err; not in run_env, which gc's reference runs share and
+  # gc_ref's key hashes, review 182 L1), ARBACE_COVER_DIR/goi/ID
+  if [ -n "${ARBACE_COVER_DIR:-}" ] && [ -z "${GOI_RUN_EXE:-}" ]; then
+    exe=$(cover_exe "$root") || return 1
+  fi
   if [ ! -x "$exe" ]; then
     echo "bin/goi: no executable $exe (bin/arbace-go --build)" >&2
     return 1
@@ -613,7 +634,8 @@ check_one() {
   elif [ -n "${box:-}" ]; then
     box_run "$cforms" "$tmo" "$ns" "${f#$cforms/}" ${args[@]+"${args[@]}"} > "$r.out" 2> "$r.err.raw" || st=$?
   else
-    (cd "$goroot/test" && export $(run_env) && limited "$tmo" "$rexe" -m arbace.go.run "$cforms" "$ns" ${args[@]+"${args[@]}"} > "$r.out" 2> "$r.err.raw" < "$empty") || st=$?
+    (cd "$goroot/test" && export $(run_env) && { [ -z "${ARBACE_COVER_DIR:-}" ] || export $(cover_env goi "$p"); } && limited "$tmo" "$rexe" -m arbace.go.run "$cforms" "$ns" ${args[@]+"${args[@]}"} > "$r.out" 2> "$r.err.raw" < "$empty") || st=$?
+    cover_settle goi "$p"
   fi
   stderr_head "$r.err.raw" > "$r.err"
   case $st in
@@ -684,7 +706,7 @@ controls_of() {
 # in RESULTS (the checkers' lines): fail is a control's result (its subject's run, errors or output against
 # another program's gc run, // ERROR comments or golden output); pass, or another result while its subject
 # passes, a problem (status 1); a subject not in the run (GTS86 (b): the control is its run judged twice) is a
-# problem too, but left in a selection (--only); printed
+# problem too, but left in a selection (--only, --list); printed
 controls_judged() {
   local lv=$1 res=$2 bad=0 c sub r rest
   awk -v l="$lv" '!/^#/ && NF == 4 && $1 == l' "$root/test/goi/controls.txt" > "$res.controls"
@@ -694,7 +716,7 @@ controls_judged() {
     case ${r%%	*} in
       fail) echo "   control $c ($sub judged against another program's reference): fail, as a control must" ;;
       pass) echo "   control passed: $c: the check's comparison passes what differs"; bad=1 ;;
-      *) if [ -z "$rest" ] && [ -n "${only:-}" ]; then echo "   control $c: left, its subject $sub not in this run (--only)"
+      *) if [ -z "$rest" ] && [ -n "${only:-}${listf:-}" ]; then echo "   control $c: left, its subject $sub not in this run (--only or --list)"
          elif [ -z "$rest" ]; then echo "   control not judged: $c: its subject $sub not in this run"; bad=1
          elif [ "$rest" = pass ]; then echo "   control not judged: $c: ${r:-no result} (its subject passes)"; bad=1
          else echo "   control $c: not judged (${r:-no result}), its subject $rest"; fi ;;
@@ -856,7 +878,8 @@ check_dir() {
   elif [ -n "${box:-}" ]; then
     box_run "$dforms" "$tmo" "$ns" "${f#$dforms/}" "${base#$dforms/}" "${base#$dforms/}.ae" > "$r.out" 2>&1 || st=$?
   else
-    (cd "$goroot/test" && export $(run_env) && limited "$tmo" "$rexe" -m arbace.go.run "$dforms" "$ns" > "$r.out" 2>&1 < "$empty") || st=$?
+    (cd "$goroot/test" && export $(run_env) && { [ -z "${ARBACE_COVER_DIR:-}" ] || export $(cover_env goi "$p"); } && limited "$tmo" "$rexe" -m arbace.go.run "$dforms" "$ns" > "$r.out" 2>&1 < "$empty") || st=$?
+    cover_settle goi "$p"
   fi
   case $st in
     # goi's own refusals only (with their goi: line; report 002, finding 9)
@@ -977,7 +1000,8 @@ check_err() {
   if [ -f "$dump" ] && "$gocmp" errorcheck -dump-errors "$dump" > "$r.types" 2> "$r.types.err"; then
     types=$(grep -c . "$r.types" || true)
   fi
-  st=0; (cd "$goroot/test" && limited "$tmo" "$rexe" -m arbace.go.run --errorcheck ${lang:+--lang "$lang"} ${maxerr:+--max-errors "$maxerr"} $raw --gc-front "$g" "$froot" "$ns" > "$r.out" 2> "$r.err" < "$empty") || st=$?
+  st=0; (cd "$goroot/test" && { [ -z "${ARBACE_COVER_DIR:-}" ] || export $(cover_env goi "$p"); } && limited "$tmo" "$rexe" -m arbace.go.run --errorcheck ${lang:+--lang "$lang"} ${maxerr:+--max-errors "$maxerr"} $raw --gc-front "$g" "$froot" "$ns" > "$r.out" 2> "$r.err" < "$empty") || st=$?
+  cover_settle goi "$p"
   if { [ "$st" = 124 ] || [ "$st" = 137 ] || [ "$st" = 152 ]; } && [ "$types" = 0 ] && [ -n "$want" ]; then
     printf '%s\tunsupported\terrors of gc'"'"'s phases after type checking (go/types reports none; goi'"'"'s check over %s s)\n' "$p" "$tmo"; return
   fi
@@ -1243,18 +1267,18 @@ refresh_corpora() {
   fi
 }
 
-# missing_rows LIST RESULTS [REF [ONLY]]: the programs without a row in RESULTS (report 002, finding 3:
+# missing_rows LIST RESULTS [REF [ONLY [IDS]]]: the programs without a row in RESULTS (report 002, finding 3:
 # the regression comparison looked only at the rows there were): each program of LIST ("no result":
 # its job printed no row, killed), and each program of the reference REF (only those that match the
-# regular expression ONLY, as check's --only) that LIST does not name ("missing": a program the list
+# regular expression ONLY, as check's --only, and are in the file IDS, as check's --list) that LIST does not name ("missing": a program the list
 # dropped, its forms gone); one line each
 missing_rows() {
-  local list=$1 res=$2 ref=${3:-} only=${4:-}
+  local list=$1 res=$2 ref=${3:-} only=${4:-} ids=${5:-}
   { cut -f1 "$res" | sed 's/^/R\t/'
     sed 's/^/L\t/' "$list"
     if [ -n "$ref" ]; then
       sed -n 's/^ *\["\([^"]*\)" :\([a-z]*\).*/\1\t\2/p' "$ref" \
-        | while IFS=$'\t' read -r x y; do [ -z "$only" ] || printf '%s\n' "$x" | grep -qE "$only" || continue; printf 'F\t%s\t%s\n' "$x" "$y"; done
+        | while IFS=$'\t' read -r x y; do [ -z "$only" ] || printf '%s\n' "$x" | grep -qE "$only" || continue; [ -z "$ids" ] || grep -qFx -- "$x" "$ids" || continue; printf 'F\t%s\t%s\n' "$x" "$y"; done
     fi; } \
     | awk -F'\t' '$1 == "R" { r[$2] = 1; next } ($2 in r) || seen[$2]++ { next }
                   $1 == "L" { print "   no result: " $2 " (its job printed no row)"; next }
@@ -1299,13 +1323,13 @@ run_program_list() {
   done
 }
 
-# check [--record] [--jobs N] [--essential] [--only REGEX]: the check (§11): every run program of
+# check [--record] [--jobs N] [--essential] [--only REGEX] [--list FILE]: the check (§11): every run program of
 # $GOROOT/test (the corpus linux-test, repr/go's conversion: bin/repr-go read --corpus linux-test,
 # run first when missing) interpreted against gc; results in .tmp/goi-check/results.tsv, against
 # the reference test/goi/check-linux-amd64.edn (a program passing there and not now fails the
 # check; --record writes it) and the known differences test/goi/check-known.edn
 check() {
-  local record="" jobs=16 only="" essential="" ref=$root/test/goi/check-linux-amd64.edn known=$root/test/goi/check-known.edn
+  local record="" jobs=16 only="" essential="" listf="" ref=$root/test/goi/check-linux-amd64.edn known=$root/test/goi/check-known.edn
   local barch=amd64 bknown=""
   box="" bundle="" aot=""
   while [ $# -gt 0 ]; do
@@ -1313,6 +1337,7 @@ check() {
       --record) record=1; shift ;;
       --jobs) jobs=$2; shift 2 ;;
       --only) only=$2; shift 2 ;;
+      --list) listf=$2; shift 2 ;;
       --essential) essential=1; shift ;;
       --aot) aot=1; shift ;;
       --box) box=1; shift ;;
@@ -1322,6 +1347,12 @@ check() {
     esac
   done
   if [ -n "$bundle" ] && [ -z "$box" ]; then echo "bin/goi check: --bundle needs --box" >&2; return 2; fi
+  if [ -n "$listf" ]; then
+    [ -f "$listf" ] || { echo "bin/goi check: --list: no file $listf" >&2; return 2; }
+    [ -z "$record" ] || { echo "bin/goi check: --record writes the whole record: no --list" >&2; return 2; }
+    [ -z "$box" ] || { echo "bin/goi check: --list is for the native levels, not --box" >&2; return 2; }
+    listf=$(cd "$(dirname "$listf")" && pwd)/$(basename "$listf")
+  fi
   if [ -n "$aot" ] && [ -n "$box" ]; then echo "bin/goi check: --aot or --box" >&2; return 2; fi
   if [ -n "$box" ]; then
     # the check in the box (GS13): its own reference and the box's results apart
@@ -1408,6 +1439,12 @@ check() {
     awk 'NR % 2 == 1' "$list" > "$list.half" && mv "$list.half" "$list"
   fi
   [ -n "$only" ] && { grep -E "$only" "$list" > "$list.only" || true; mv "$list.only" "$list"; }
+  # GT8.7: --list FILE, the ids (blank and # lines ignored), whole lines, as a selection like --only
+  if [ -n "$listf" ]; then
+    grep -v '^[[:space:]]*\(#\|$\)' "$listf" > "$cwork/list-ids.txt" || true
+    grep -Fx -f "$cwork/list-ids.txt" "$list" > "$list.only" || true; mv "$list.only" "$list"
+    listf=$cwork/list-ids.txt
+  fi
   # GTS81 (a), GTS86 (b): the negative controls of the level (test/goi/controls.txt) are judged by their
   # subjects' checkers (controls_of), from the subjects' own runs: no entry of the list
   # GP6: gc's syntax errors of the error tests to check (bin/repr-go syntax-errors: gc's syntax
@@ -1443,7 +1480,7 @@ check() {
   # pinned by nothing)
   export PATH=$goroot/bin:$PATH
   echo "== goi check: $(wc -l < "$list") programs, $jobs at a time" >&2
-  export -f forms_rel no_forms_row limited limited_cpu program_tmo ref_commit action_parse check_one check_dir check_err check_err_aot run_verdict dir_verdict syn_verdict err_verdict err_aot_verdict controls_of action_of action_words gc_ref gc_ref_fails aot_build aot_dir_root stderr_head gc_env run_env box_run box_input
+  export -f cover_env cover_settle forms_rel no_forms_row limited limited_cpu program_tmo ref_commit action_parse check_one check_dir check_err check_err_aot run_verdict dir_verdict syn_verdict err_verdict err_aot_verdict controls_of action_of action_words gc_ref gc_ref_fails aot_build aot_dir_root stderr_head gc_env run_env box_run box_input
   export root goroot rexe hexe cforms dforms cwork gcwork empty box bundle aot eforms efull edumps etsv gocmp gocmp_key esyntax eraw
   local t0=$SECONDS
   # a job that dies prints no row: xargs's status is not the check's (missing_rows reports the program)
@@ -1500,7 +1537,7 @@ check() {
   # a whole check (not --essential, not the box's) a program of the reference this run did not list
   # (its forms gone: the list takes the programs repr/go converted); neither recorded over
   local missing
-  missing=$(missing_rows "$list" "$cwork/results.tsv" "$( [ -n "$record$essential$box" ] || [ ! -f "$ref" ] || echo "$ref")" "$only")
+  missing=$(missing_rows "$list" "$cwork/results.tsv" "$( [ -n "$record$essential$box" ] || [ ! -f "$ref" ] || echo "$ref")" "$only" "$listf")
   [ -z "$missing" ] || echo "$missing"
   if [ -n "$record" ] && [ -n "$missing" ]; then echo "   not recorded: programs without a result" >&2; return 1; fi
   if [ -n "$record" ]; then
@@ -1535,22 +1572,34 @@ check() {
   sed -n 's/^ *\["\([^"]*\)" :pass.*/\1/p' "$ref" > "$cwork/ref-pass.txt"
   regress=$(awk -F'\t' 'NR==FNR { p[$1] = 1; next }
                         ($1 in p) && $2 != "pass" { print "   regression: " $1 ": " $2 " " $3 }' "$cwork/ref-pass.txt" "$cwork/results.tsv")
+  # GT8.7: one line `   failing: ID` for each program the regression and missing lines name (a list run's
+  # caller reads them: sed -nE 's/^   failing: (.+)$/\1/p'; the divergences' --partial adds its own)
+  failing() {
+    { printf '%s\n' "$regress" | sed -nE 's/^   regression: ([^ :]+): .*/\1/p'
+      printf '%s\n' "$missing" | sed -nE 's/^   (no result|missing): ([^ :]+) \(.*/\2/p'; } | sed '/^$/d;s/^/   failing: /'
+  }
   if [ -n "$regress" ] || [ -n "$missing" ]; then
     [ -z "$regress" ] || echo "$regress"
+    failing
+    # a list run goes on to the divergences of its own results (the other programs that fail)
+    if [ -n "$listf" ] && [ -z "$only$essential$box" ]; then check_divergences "$aot" "" "" "" "$cwork/results.tsv" "$listf" || true; fi
     return 1
   fi
   echo "   no regression against $(basename "$ref")"
-  # the whole check: its reference's divergences classified (GR10)
-  check_divergences "$aot" "$essential" "$only" "$box" "$cwork/results.tsv"
+  # the whole check: its reference's divergences classified (GR10); a list run: its own results alone
+  check_divergences "$aot" "$essential" "$only" "$box" "$cwork/results.tsv" "$listf"
 }
 
-# check_divergences AOT ESSENTIAL ONLY BOX RESULTS: the end of a check (each argument empty or set). A whole
+# check_divergences AOT ESSENTIAL ONLY BOX RESULTS [LIST]: the end of a check (each argument empty or set). A whole
 # check classifies this run's results (not the record's: report 002, finding 4, a recorded non-pass that now
 # fails or errs was reported nowhere until the next --record). The AOT level's essential subset holds
 # test/goi/essential-aot.txt to the record (report 069, finding D: only the whole check did, so a list naming
 # a known or skipped program passed the essential gate), seconds, no results of its own
 check_divergences() {
-  if [ -z "$3" ] && [ -z "$2" ] && [ -z "$4" ]; then
+  if [ -n "${6:-}" ] && [ -z "$3" ] && [ -z "$2" ] && [ -z "$4" ]; then
+    # GT8.7, a --list run (6th argument, the list): its results alone, --partial
+    GOI_ROOT=$root arbace_tool -p "$root/test" -m goi.divergences ${1:+--aot} --partial --results "$5"
+  elif [ -z "$3" ] && [ -z "$2" ] && [ -z "$4" ]; then
     GOI_ROOT=$root arbace_tool -p "$root/test" -m goi.divergences ${1:+--aot} --results "$5"
   elif [ -n "$1" ] && [ -n "$2" ] && [ -z "$3" ] && [ -z "$4" ]; then
     GOI_ROOT=$root arbace_tool -p "$root/test" -m goi.divergences --aot
@@ -1620,7 +1669,7 @@ nethttp_controls_judged() {
       exit bad }' "$root/test/goi/controls.txt" "$1"
 }
 
-# check_nethttp [--record] [--jobs N] [--only REGEX] [--gc-only] [--update-want]: the net/http corpus
+# check_nethttp [--record] [--jobs N] [--only REGEX] [--list FILE] [--gc-only] [--update-want]: the net/http corpus
 # (bin/goi check --corpus nethttp; NH1, doc/go/NET-HTTP-SURVEY.md, "As built: NH1"): test/nethttp's
 # programs (a module, one package main per directory, listed in manifest.edn), each
 #   - at the gc level: built by gc and run on loopback; passing when its status is 0, its standard
@@ -1634,17 +1683,24 @@ nethttp_controls_judged() {
 #     nethttp): a program's run judged against another's gc run must fail (nethttp_controls_judged), before the record.
 # Offline: loopback only. The work in .tmp/goi-check/nethttp.
 check_nethttp() {
-  local record="" jobs=${NETHTTP_JOBS:-4} only="" gconly="" updwant="" nd=$root/test/nethttp t0=$SECONDS p
+  local record="" jobs=${NETHTTP_JOBS:-4} only="" listf="" gconly="" updwant="" nd=$root/test/nethttp t0=$SECONDS p
   while [ $# -gt 0 ]; do
     case $1 in
       --record) record=1; shift ;;
       --jobs) jobs=$2; shift 2 ;;
       --only) only=$2; shift 2 ;;
+      --list) listf=$2; shift 2 ;;
       --gc-only) gconly=1; shift ;;
       --update-want) updwant=1; shift ;;
       *) echo "bin/goi check --corpus nethttp: unknown option $1" >&2; return 2 ;;
     esac
   done
+  # GT8.7: --list FILE, the names a line (blank and # lines ignored), a selection: --only's regular expression of them
+  # (the names are plain words; with --only too, the list wins)
+  if [ -n "$listf" ]; then
+    [ -f "$listf" ] || { echo "bin/goi check --corpus nethttp: --list: no file $listf" >&2; return 2; }
+    only="^($(grep -v '^[[:space:]]*\(#\|$\)' "$listf" | paste -sd'|' || true))\$"
+  fi
   # report 019, A3: a record of the selected programs alone would drop the others from the reference
   if [ -n "$record" ] && [ -n "$only" ]; then echo "bin/goi check --corpus nethttp: --record writes the whole record: no --only" >&2; return 2; fi
   nwork=$root/.tmp/goi-check/nethttp empty=$root/.tmp/goi-check/empty
