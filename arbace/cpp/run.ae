@@ -55,9 +55,20 @@
                 [k new?] [[(str "fetch_" nm) false] [(str nm "_fetch") true]]]
             (rmw k op new?)))))
 
+(def ci-math
+  "The math builtins the lowering writes for LLVM's math intrinsics (LLVM.md §7) that repr/c's <builtin> source does not declare
+  and ci's back end does not compute (bin/ci run: __builtin_log2(2.75) is 0, __builtin_exp2 0, __builtin_log2f undefined):
+  macros calling musl's function, declared in the expression (each its f and l forms). The declared ones (fabs, sqrt, floor,
+  ceil, copysign, pow, exp, log, log10, sin, cos, tan, ldexp, frexp) are left to ci."
+  (for [f ["log2" "exp2" "trunc" "round" "rint" "nearbyint" "fmin" "fmax" "fma"]
+        [sfx t] [["" "double"] ["f" "float"] ["l" "long double"]]
+        :let [n (str f sfx) args (if (= f "fma") ["x" "y" "z"] (if (#{"fmin" "fmax"} f) ["x" "y"] ["x"]))]]
+    [(str "__builtin_" n "(" (str/join "," args) ")")
+     (str "({ extern " t " " n "(" (str/join ", " (repeat (count args) t)) "); " n "(" (str/join ", " (map #(str "(" % ")") args)) "); })")]))
+
 (def opts
-  "The lowered C's options: the lowering prints C at gnu23 (LLVM.md §7); ci-atomics' macros."
-  (into ["-std=gnu23"] (for [[n d] ci-atomics] (str "-D" n "=" d))))
+  "The lowered C's options: the lowering prints C at gnu23 (LLVM.md §7); ci-atomics' and ci-math's macros."
+  (into ["-std=gnu23"] (for [[n d] (concat ci-atomics ci-math)] (str "-D" n "=" d))))
 
 (defn- spit-mk [^String path ^String s]
   (.mkdirs (.getParentFile (File. path)))
@@ -394,10 +405,13 @@
   "A function of a program's extra library directory (or \"\") giving its libraries: [extra? runtime musl], each loaded once."
   [h ^String rtlib]
   (let [rt (delay (library rtlib))
+        ;; ci's overrides (test/cpp/runtime/ci/*.c, read by bin/cppi runtime-ci into RTLIB/over): linked before the runtime
+        over (delay (when (.exists (File. (str rtlib "/over/index.edn"))) (library (str rtlib "/over"))))
         ms (delay (musl/library h (System/getProperty "user.dir")))
         extra (ConcurrentHashMap.)]
     (fn [^String xdir]
       (vec (concat (when (seq xdir) [(or (.get extra xdir) (let [l (library xdir)] (.putIfAbsent extra xdir l) (.get extra xdir)))])
+                   (when @over [@over])
                    [@rt @ms])))))
 
 (defn nodes-list
