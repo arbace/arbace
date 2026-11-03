@@ -1,0 +1,159 @@
+#!/bin/bash
+# pyi, the evaluator of Python forms (doc/python/PYTHON-SURVEY.md §6, PYS2 (a)): so far (PY4) no interpreter, only its
+# corpora and their references, CPython 3.14.10's runs (GTS207 (a), PYS14 (a), PYS15 (a)). Out of gate_key and the gate
+# (PYS18 (a)); stage 0 only runs the generator (test/python/gen.ae); the programs and Lib/test's modules are run by the
+# oracle under .tmp/repr-python/pyi only (HOME and TMPDIR there, regrtest's resources off: no network).
+#
+#   bin/pyi gen [--check]          the synthetic corpus (survey §8.3): test/python/gen.ae on stage 0 writes
+#                                  test/python/synth/ (ops, datamodel, builtins, constructs, paths; MANIFEST); --check
+#                                  generates it into .tmp and requires it equal to the committed files, the constructs
+#                                  covering every node class of the ast, the builtins every public method of their types,
+#                                  every program compiling
+#   bin/pyi record-ref [--check] [CORPUS...]
+#                                  the reference runs (default: synthetic samples language-core): each program of
+#                                  synthetic and samples run by CPython 3.14.10 with PYTHONHASHSEED=0 (tools/pydump/refs.py),
+#                                  twice; status, stdout's SHA-256, size, first line and stderr's last line into
+#                                  test/python/ref-cpython314.edn; Lib/test's language-core modules (corpora.edn) by
+#                                  regrtest, each test method's outcome into test/python/ref-cpython314-lib-test.edn
+#                                  (sys.implementation.name "cpython"); an entry the two runs disagree on or whose output
+#                                  names the machine is written :excluded with its reason; the seconds into
+#                                  test/python/ref-costs.edn. --check: two more runs, each reproducing every reference
+# Environment: REPR_PYTHON_SRC as for bin/repr-python (the tarball's source).
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+. "$root/bin/lib/tmpdir.bash"
+cd "$root"
+
+WORK="$root/.tmp/repr-python/pyi"
+SYNTH="$root/test/python/synth"
+REF="$root/test/python/ref-cpython314.edn"
+REF_LT="$root/test/python/ref-cpython314-lib-test.edn"
+COSTS="$root/test/python/ref-costs.edn"
+COSTS_LT="$root/test/python/ref-costs-lib-test.edn"
+die() { echo "pyi: $*" >&2; exit 1; }
+
+arbace_exe() {
+  if [ -n "${ARBACE_HOST_EXE:-}" ]; then echo "$ARBACE_HOST_EXE"; return; fi
+  local arch main
+  case $(uname -m) in x86_64) arch=amd64 ;; aarch64) arch=arm64 ;; *) arch=$(uname -m) ;; esac
+  if [ -x "$root/target/seed/$arch/arbace" ]; then echo "$root/target/seed/$arch/arbace"; return; fi
+  main=$(cd "$(git rev-parse --git-common-dir)/.." && pwd)
+  if [ -x "$main/target/seed/$arch/arbace" ]; then echo "$main/target/seed/$arch/arbace"; return; fi
+  die "no stage 0 (bin/seed --build, or ARBACE_HOST_EXE)"
+}
+py() { local s=$1; shift; python3 -I -S -B "$root/tools/pydump/$s" "$@"; }
+
+check_oracle() {
+  local want have
+  want=$(sed -n 's/^sys\.version //p' "$root/tools/pydump/PYTHON_VERSION")
+  have=$(python3 -I -c 'import sys; print(sys.version)')
+  [ "$want" = "$have" ] || die "the oracle is '$have', tools/pydump/PYTHON_VERSION pins '$want'"
+  [ "$(python3 -I -c 'import sys; print(sys.implementation.name)')" = cpython ] || die "the oracle is not CPython"
+}
+
+cmd_gen() {
+  local check=${1:-}
+  if [ "$check" = --check ]; then
+    local d="$WORK/gen"; rm -rf "$d"; mkdir -p "$d"
+    "$(arbace_exe)" "$root/test/python/gen.ae" "$d"
+    local bad=0
+    diff -r "$d" "$SYNTH" > "$WORK/gen.diff" || { echo "gen --check: the generated corpus differs from test/python/synth (bin/pyi gen):"; head -20 "$WORK/gen.diff"; bad=1; }
+    (cd "$SYNTH/constructs" && py corpus.py samples . .) || bad=1
+    (cd "$SYNTH" && py corpus.py samples . . | tail -1)
+    local t
+    for t in str bytes list tuple dict set frozenset int float complex bool range memoryview slice; do
+      py corpus.py methods "$t" "$SYNTH/builtins/$t.py" | tail -1 | grep -q ' of ' || bad=1
+      py corpus.py methods "$t" "$SYNTH/builtins/$t.py" >/dev/null || { py corpus.py methods "$t" "$SYNTH/builtins/$t.py" | grep UNCOVERED; bad=1; }
+    done
+    py corpus.py methods bytearray "$SYNTH/builtins/bytearray.py" "$SYNTH/builtins/bytearray-shared.py" >/dev/null \
+      || { py corpus.py methods bytearray "$SYNTH/builtins/bytearray.py" "$SYNTH/builtins/bytearray-shared.py" | grep UNCOVERED; bad=1; }
+    if [ $bad = 0 ]; then echo "gen --check: $(wc -l < "$SYNTH/MANIFEST") programs as committed; every node class and builtin method covered"; else return 1; fi
+  else
+    rm -rf "$SYNTH"; mkdir -p "$SYNTH"
+    "$(arbace_exe)" "$root/test/python/gen.ae" "$SYNTH"
+  fi
+}
+
+# the language core's modules, from test/python/corpora.edn (the corpus :language-core's paths, as module names)
+core_modules() {
+  "$(arbace_exe)" -e "(println (arbace.string/join \",\" (map #(-> % (subs 9) (arbace.string/replace #\"\\.py\$\" \"\")) (get-in (first (filter #(= :language-core (:id %)) (:corpora (read-string (slurp \"$root/test/python/corpora.edn\"))))) [:where :paths]))))"
+}
+
+tarball_test() {
+  local top="$root/.tmp/repr-python/Python-3.14.10"
+  [ -d "$top/Lib/test" ] || "$root/bin/repr-python" pins --fetch >/dev/null
+  mkdir -p "$WORK/pypath"; ln -sfn "$top/Lib/test" "$WORK/pypath/test"
+}
+
+# run_programs TAG: the synthetic corpus and the samples, one TSV
+run_programs() {
+  local tag=$1 d="$WORK/$1"
+  rm -rf "$d"; mkdir -p "$d"
+  { sed 's|^|synth/|' "$SYNTH/MANIFEST"; (cd "$root/test/python/samples" && ls *.py | sed 's|^|samples/|'); } > "$d/list"
+  mkdir -p "$d/base"; ln -sfn "$SYNTH" "$d/base/synth"; ln -sfn "$root/test/python/samples" "$d/base/samples"
+  py refs.py programs --base "$d/base" --list "$d/list" --work "$d" --out "$d/programs.tsv"
+}
+
+run_libtest() {
+  local tag=$1 d="$WORK/$1"
+  mkdir -p "$d"
+  tarball_test
+  py refs.py libtest --pypath "$WORK/pypath" --modules "$(core_modules)" --work "$d" --out "$d/libtest.tsv"
+}
+
+header() { # FILE WHAT
+  cat > "$1" <<HDR
+;; CPython 3.14.10's reference runs of $2, as data (doc/python/PYTHON-SURVEY.md §8.1, PYS14 (a), PYS15 (a); GTS207 (a)):
+;; one map per line, sorted by :id. Programs: :status the exit status (128+signal, :timeout), :stdout the SHA-256 of
+;; the standard output, :bytes its size, :first its first line (80 chars), :stderr-last the last non-blank line of the
+;; standard error. Lib/test: :outcome :ok, :skipped (:reason), :failure or :error per test method, :module true lines
+;; with regrtest's exit status. :excluded names an entry kept out of the references: the two recording runs disagree,
+;; or its output names the machine (an address, the architecture, the C library, a size): bin/pyi record-ref --check
+;; reproduces the others. Made by: bin/pyi record-ref ($(python3 -I -c 'import sys; print(sys.version.split()[0], sys.implementation.name)'),
+;; python3 -s -P -B, PYTHONHASHSEED=0 LC_ALL=C.UTF-8 TZ=UTC PYTHONIOENCODING=utf-8; regrtest -u none --randseed 1).
+;; date: $(date -u +%F)
+HDR
+}
+
+cmd_record_ref() {
+  local check="" ids=()
+  while [ $# -gt 0 ]; do case $1 in --check) check=1; shift ;; *) ids+=("$1"); shift ;; esac; done
+  [ ${#ids[@]} -gt 0 ] || ids=(programs language-core)
+  check_oracle
+  local id rc=0
+  for id in "${ids[@]}"; do
+    case $id in
+      synthetic|samples|programs)
+        if [ -n "$check" ]; then
+          run_programs check1; run_programs check2
+          py refs.py check --kind programs --ref "$REF" --run "$WORK/check1/programs.tsv" || rc=1
+          py refs.py check --kind programs --ref "$REF" --run "$WORK/check2/programs.tsv" || rc=1
+        else
+          run_programs rec1; run_programs rec2
+          header "$WORK/header.txt" "the synthetic corpus (test/python/synth) and the samples (test/python/samples)"
+          py refs.py record --kind programs --a "$WORK/rec1/programs.tsv" --b "$WORK/rec2/programs.tsv" --out "$REF" \
+            --header "$WORK/header.txt" --costs "$COSTS"
+        fi ;;
+      language-core)
+        if [ -n "$check" ]; then
+          run_libtest check1; run_libtest check2
+          py refs.py check --kind libtest --ref "$REF_LT" --run "$WORK/check1/libtest.tsv" || rc=1
+          py refs.py check --kind libtest --ref "$REF_LT" --run "$WORK/check2/libtest.tsv" || rc=1
+        else
+          run_libtest rec1; run_libtest rec2
+          header "$WORK/header.txt" "Lib/test's language-core modules (test/python/corpora.edn), per test method"
+          py refs.py record --kind libtest --a "$WORK/rec1/libtest.tsv" --b "$WORK/rec2/libtest.tsv" --out "$REF_LT" \
+            --header "$WORK/header.txt" --costs "$COSTS_LT"
+        fi ;;
+      *) die "no corpus $id (programs, language-core)" ;;
+    esac
+  done
+  return $rc
+}
+
+command -v python3 >/dev/null || die "no python3 (the oracle)"
+case "${1:-}" in
+  gen) shift; cmd_gen "$@" ;;
+  record-ref) shift; cmd_record_ref "$@" ;;
+  *) sed -n '2,20p' "$0"; exit 2 ;;
+esac
