@@ -3452,11 +3452,11 @@ rotation's `:failed-re`. Refused with a list: `--record` (all five), `--record-g
 **The planner.** `:rotate`'s `:id-as` (with `:id-re`: the id is the match replaced, `$1/$2`, ids then under `PART/` as
 without `:id-re`): the results files' `"CORPUS FILE"` rows as `CORPUS/FILE`. `:subset-key` (default `:subset`): the corpus
 map's key that holds the subset, since the run corpora's `:subset` (ci's back end, VM 161) is another check's. rotation-test
-54 of 54 (the case: a results file, a subset under its own key, a name with a slash).
+56 of 56 (the case: a results file, a subset under its own key, a name with a slash; C's one pattern, a name with spaces).
 
 **The steps.** `:rotate` on `c-tokens`, `c-parse`, `c-annotations`, `c-roundtrip` (universe the check's results file,
 subset `:subset-tokens`, `:subset-parse`, `:subset-annot`, `:subset-roundtrip`, `:always` the controls' two files,
-`benchmarksgame/fannkuchredux.c` and `fasta-8.c`, `:failed-re "^FAIL ([^ ]+) .*$"`). `c-dg` stays whole: one step over
+`benchmarksgame/fannkuchredux.c` and `fasta-8.c`, `:failed-re "^FAIL ([^[:cntrl:]]+)[[:cntrl:]].*$"`, below). `c-dg` stays whole: one step over
 seven groups, its control crossing two of them (a part per group would leave it in every part).
 
 **The subsets** (GTS205's rule needs the code under check's coverage: repr/c's lexer, preprocessor, parser, converter,
@@ -3476,3 +3476,14 @@ too) prints `FAIL ID`, a tab, `WHY`, and every C step's `:failed-re` is `^FAIL (
 to the tab: the `.rot` file is tab-separated, so no literal tab in the pattern); the runner notes the failed ids one a line
 (`while read`, not word splitting); rotation-test 56 of 56 (one pattern over C's steps; the spaced name noted whole). `c-dg`
 stays one step, unrotated.
+
+**Review 188's fixes** (the Mac's review of `c-lists`, 9adfafe4). The blocker, `test/gate/audited-test-test.bash` taking the
+planner's read of `test/repr/c/parse-check-results.edn` (the rotated `c-parse.benchmarksgame`'s universe) for a bulk read:
+the test now allows every `:universe` the steps table names (read from it), not a path pattern: the planner reads a
+rotated part's universe by design, and a new crop's universe is then allowed without editing the test. The lows: L1 the
+comments; L2 `bin/ci check`, `check --aot` and `bin/ci record-ref` list their corpora with `REPR_C_ONLY` empty; L3 a whole
+`--resume` (roundtrip, annotations) lists a corpus a partial run left again; L4 `bin/ci annotations --judge --only`
+refused; L5 the `:gcc-digest` control not left for a reference outside a partial run (its reference is the recorded
+digest); L6 the planner warns when `:always` names a file of the part its universe lost; L7 every stale entry printed
+after the 40 failures; L8 the refusals' wording; L9 `c-check`'s and `c-aot`'s `:rotate` `:always` their control's two
+files (`benchmarksgame/fannkuchredux.c`, `fasta.c`).

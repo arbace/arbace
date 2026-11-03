@@ -5,7 +5,7 @@
 #                                 REPR_C_ONLY, which arbace.repr.c.ppcheck/lists reads: a corpus keeps its listed files
 #                                 alone and writes WORK/CORPUS/only.txt, the judges' mark of a partial run (a name the
 #                                 corpus does not hold fails the lists)
-#   c_only_refuse WHO WHAT        exit 2 when REPR_C_ONLY is set: WHAT (--record, ...) needs whole corpora
+#   c_only_refuse WHO WHAT        exit 2 when REPR_C_ONLY is set: WHAT (--record, --resume, ...) is not taken with a list
 #   c_only_marked WORK CORPORA    exit 0 when a corpus's last run under WORK was partial (CORPUS/only.txt)
 c_only_set() {
   local f=$1 corpora=$2 who=$3 bad
@@ -16,7 +16,7 @@ c_only_set() {
   export REPR_C_ONLY=$f
 }
 c_only_refuse() {
-  [ -z "${REPR_C_ONLY:-}" ] || { echo "$1: $2 records whole corpora, not --only's list" >&2; exit 2; }
+  [ -z "${REPR_C_ONLY:-}" ] || { echo "$1: $2 is not taken with --only (it needs whole corpora)" >&2; exit 2; }
 }
 c_only_marked() {
   local w=$1 id
