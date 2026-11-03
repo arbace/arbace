@@ -17,6 +17,7 @@ def line(*parts):
 try:
     from test import support
     support.use_resources = []  # regrtest's -u none, before the module's decorators ask: no network, cpu ...
+    support.verbose = 0  # regrtest without -v (its "testing with ..." prints would split the CASE lines; PY6c)
     mod = __import__("test." + name, fromlist=["*"])
     import unittest
 except BaseException as e:
