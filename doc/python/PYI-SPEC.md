@@ -253,9 +253,60 @@ a small module (`test/python/pyi/`); what it leaves out raises `SystemError: pyi
 - **Raising**: a runtime function returns `(Object, error)`; a non-nil error is an exception in flight, always a
   `*Raised{Exc *Exception}`. `Raise(t, msg)`, `Raisef(t, format, args...)`. The iterator protocol's end is
   `Next` returning `(nil, nil)`, not an exception. Go panics are bugs, never Python exceptions.
-- **Numbers' and strings' representations** are private to their files (`Int`'s `int64` in PY5b0, `Str`'s Go string):
-  others use `NewInt`, `(*Int).Int64`, `NewStr`, `(*Str).String`, so PY5b can change them (arbitrary precision; code
-  points with lone surrogates) without touching other files.
+- **Numbers' and strings' representations** are private to their files; others use the constructors and accessors,
+  which stay stable (PY5b, 2026-11-03):
+  - `int`: arbitrary precision (an `int64`, a `*big.Int` beyond). `NewInt(int64)`, `NewIntBig(*big.Int)`,
+    `(*Int).Int64() (int64, bool)` (false beyond 64 bits), `Big()`, `Sign()`, `AsInt(o)`, `ToInt(o)` (`int(x)`),
+    `Index(o)`, `IndexInt(o)` (`__index__`), `ParseInt(s, base)`, `IntBinary(op, x, y)`, `IntPow(x, y, m)`,
+    `MaxStrDigits` (`sys.set_int_max_str_digits`).
+  - `str`: code points with lone surrogates, held as WTF-8. `NewStr(goString)`, `NewStrRunes([]rune)`, `String()`
+    (the WTF-8 text), `Runes()`, `Len()`, `At(i)`, `AsStr(o)`; `Encode`, `Decode` (utf-8, ascii, latin-1 with the
+    error handlers); `PercentFormat` (`str % x`).
+  - `float`: `NewFloat`, `Value()`, `FloatRepr`, `ToFloat(o)`, `ParseFloat`, `FloatPow`, `FloatDivmod`; `complex`:
+    `NewComplex`, `Value()`, `ComplexRepr`, `ComplexPow`; `bytes`: `NewBytes`, `Data()`, `AsBytes(o)`, `BytesRepr`;
+    `set`/`frozenset`: `NewSet(frozen)`, `Add`, `Discard`, `Contains`, `Update`, `Items`, `Copy`, `AsSet`; `range`,
+    `slice` (`NewSlice`, `Indices(n)`); `dict`: `Get`, `Set`, `Delete`, `Keys`, `Copy`, `Update`, `AsDict`; `tuple` and
+    `list`: `Items`, `AsTuple`, `AsList`, `ToSlice(o)`, `ToTuple(o)`, `Iterate(o, f)`, `SortList`; `SetItem`, `Divmod`,
+    `Abs`.
+  - **The subclass convention**: an instance of a subclass of a built-in type is a struct of PY5c's that embeds the
+    base's value struct (`Int`, `Str`, `Float`, `Complex`, `Bytes`, `Tuple`, `List`, `Dict`, `Set`, `Exception`); the
+    embedded value's method `BaseInt()` (`BaseStr()`, ...) is promoted, and every slot of the base type finds the value
+    through it. Each base type's `New` makes a subclass's instance through a hook PY5c sets (`newIntSubclass`,
+    `newStrSubclass`, ..., `dictMissing` for `__missing__`).
+  - **Hashing** is CPython's (E1, E9): numbers by 2**61 - 1, `str` and `bytes` by siphash13 under `HashKey` (zero:
+    `PYTHONHASHSEED=0`, the references'), tuples by xxHash's rounds, frozensets by CPython's shuffle, `None`'s
+    constant; `set`'s table is CPython's (probes, perturbation, dummies, growth), so a set's iteration order is
+    CPython's for the same hashes.
+- **Slots added by PY5b** (2026-11-03): `Abs`, `Divmod`, `RDivmod`, `Pow3` (pow with a modulus; `Pow3(a, b, m)`), and
+  `Format` (`__format__`, for PY5c to fill).
+- **Hooks for the other sub-milestones** (PY5b, 2026-11-03, their REQUESTs):
+  - `BuiltinValueHook` (PY5c sets it to `BuiltinValue`): every core accessor (`asInt`, `AsStr`, `asException`, ...)
+    tries it, so an instance of a class deriving from a built-in type is accepted where its base is. The core types'
+    `New` called with a subclass makes the base value through `newIntSubclass`, `newStrSubclass`, ... (by default the
+    plain base value, for PY5c to wrap or to replace).
+  - `BoundMethodHook` (PY5c): a bound method of a Python function, called by `call` or `call-ex`, pushes the
+    function's frame with the instance first (no nested run).
+  - `newGeneratorHook` (PY5d): a call of a function whose code is `:generator` or `:coroutine` makes its generator,
+    coroutine or async generator object of the bound frame instead of running it (CPython's `RETURN_GENERATOR`), in
+    `call`, `call-ex` and `callFunction`.
+  - `OnTypesReady(f)`: `f` runs once every type's slots are set and inherited, before the first interpreter.
+    (`Dict` hashes a `*Str` key directly, not through `str`'s slot, so an `init` may fill a dictionary in any order.)
+  - `ComputeMRO(t, bases)` (C3); a built-in type made with several `Bases` preset gets their C3 MRO (ExceptionGroup's).
+  - `Raised.Reraise`: a bare `raise` and the IR's `reraise` add no traceback entry for their own frame.
+  - `Exception.Ext`: a subtype's own data (an exception group's); `Exception.Field(name)` its fields (StopIteration's
+    `value`, OSError's `errno`, SyntaxError's `lineno` ...).
+  - `CodeIterableCoroutine` (`CO_ITERABLE_COROUTINE`, set at run time).
+  - `for-iter` ends on a raised `StopIteration` as on `(nil, nil)`.
+  - Traceback objects (`tb_frame`, `tb_lineno`, `tb_lasti`, `tb_next`) and frame objects (`f_code`, `f_lineno`,
+    `f_lasti`, `f_globals`, `f_builtins`, `f_back`, `f_locals`: `FrameLocals`); functions' and code objects'
+    attributes; `Code.Filename` (`co_filename`, `SetFilename`), which tracebacks print.
+  - `FormatExceptionOnly(e)`: traceback.format_exception_only's text (a SyntaxError's location and caret, the notes);
+    `PrintException` prints the chain (`__cause__`, `__context__`), each frame's source line.
+  - `SortObjects(items, keys, reverse)` and `SortList(l, key, reverse)`: the one stable sort.
+  - The compiler's modes (`arbace.python.compile/compile-source`: `:exec`, `:eval`, `:single`); in `:single` an
+    expression statement's value goes to the new IR operation `print-expr` (`sys.displayhook`: PY5e's to implement);
+    a compile-time SyntaxError carries `:lineno`, `:offset`, `:end-lineno`, `:end-offset` from the forms of mode
+    `:full`.
 
 ### 7.2 The IR loader (`load.go`, `code.go`, `ops.go`)
 

@@ -832,3 +832,23 @@ PY5 split into steps reviewed one by one (queue 179's brief); PY5a is the scope 
   interfaces and the skeleton, small, reported and merged early; then the rest of PY5b, and PY5c, PY5d and PY5e
   concurrently (c and d independent; e alongside, its dunder-dependent part and the `Lib/test` core after c), one owner
   per shared file (doc/python/PYI-SPEC.md §9), rebased often, each sub-branch reported in turn.
+
+## As built: PY5b (2026-11-03, the Mac VM, queue 186)
+
+PY5b0's skeleton (PYI-SPEC.md §7-§9) and then the rest of PY5b, the core types, in `go/arbace/py` (Go forms of mode `:full`,
+PY5b0's DECISION (a), decided by the user, 2026-11-03):
+
+- **The types**: `int` of arbitrary precision; `float` (CPython's repr, divmod, a pow correctly rounded in double-double);
+  `complex` (3.14's mixed-mode arithmetic, `_Py_c_quot`, `c_powi`); `str` as code points with lone surrogates (WTF-8);
+  `bytes` with the utf-8, ascii and latin-1 codecs; `tuple`, `list` (a stable merge sort), `dict` with its views;
+  `set` and `frozenset` with CPython's table, so iteration order is CPython's; `range`, `slice`; printf-style `%`;
+  CPython 3.14's exception hierarchy with its fields; functions', code objects', frames' and tracebacks' attributes; the
+  default exception hook's chains and source lines. Hashes are CPython's under `PYTHONHASHSEED=0` (siphash13, the
+  numeric modulus, xxHash's tuple rounds), checked against the oracle's values.
+- **The loop**: every operation PY5b owns; hooks for the other sub-milestones (generators, bound methods, subclasses'
+  values, `OnTypesReady`, C3 for preset bases).
+- **The compiler**: decorators applied nearest first (PY5c's finding); modes `:eval` and `:single` (`print-expr`); compile
+  errors located; `bin/pyi compile-check --full` over every corpus.
+- **The exit**: of `ops/` (38), `constructs/` (32) and the samples (6), with a scratch stand-in for PY5e's builtins,
+  52 run equal to the references; the other 24 are classed: 2 by the last digit of `math`'s transcendental functions
+  (Go's, not musl's: PY6's `math` port), 22 by an operation or builtin of PY5c, PY5d or PY5e.

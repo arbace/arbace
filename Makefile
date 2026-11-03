@@ -458,8 +458,8 @@ pyi-record-ref-check: ## PY4: two more runs reproducing every reference of test/
 	bin/pyi record-ref --check
 pyi-scope-check: ## PY5a: every read file's symbol table by pyi's scope analysis equal to CPython's (bin/pyi scope-check; CORPUS=a b)
 	bin/pyi scope-check $(CORPUS)
-pyi-compile-check: ## PY5a: every read file compiled to pyi's IR, the IR verified, compile errors judged on CPython's (bin/pyi compile-check; CORPUS=a b)
-	bin/pyi compile-check $(CORPUS)
+pyi-compile-check: ## PY5a: every read file compiled to pyi's IR, the IR verified, compile errors judged on CPython's (bin/pyi compile-check; CORPUS=a b; FULL=--full: the forms of mode :full)
+	bin/pyi compile-check $(FULL) $(CORPUS)
 
 pyi-run: ## PY5b0: a Python program run by pyi's runtime on goi (bin/pyi run; FILE=prog.py)
 	bin/pyi run $(FILE)
