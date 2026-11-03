@@ -18,3 +18,7 @@ try: pwd.getpwnam('nosuch')
 except KeyError as e: print(repr(e))
 p = subprocess.Popen([sys.executable if False else 'sleep', '5']); p.kill(); print(p.wait())
 print(subprocess.run(['true'], pass_fds=[w]).returncode)
+for bad in (['echo', 'a\x00b'], ['ec\x00ho']):
+    try: subprocess.run(bad)
+    except ValueError as e: print('ValueError', e)
+print(subprocess.run([sys.executable, '-c', 'import sys; sys.stdout.buffer.write(sys.stdin.buffer.read().upper())'], input=b'abc', capture_output=True).stdout)

@@ -1,5 +1,5 @@
 # PY6e: _socket over loopback: names through /etc/hosts and /etc/services, a socketpair, TCP with a timeout, UDP
-import socket as s
+import socket as s, sys
 print(s.getaddrinfo('localhost',80))
 print(s.getaddrinfo(None,0))
 print(s.getaddrinfo('127.0.0.1','http',type=s.SOCK_STREAM))
@@ -28,3 +28,12 @@ f=conn.makefile('rb'); conn.close(); srv.close()
 u=s.socket(s.AF_INET, s.SOCK_DGRAM); u.bind(('127.0.0.1',0)); u.sendto(b'dg', u.getsockname()); print(u.recvfrom(10)[0])
 print(s.inet_aton('127.1'), s.inet_ntop(s.AF_INET6, s.inet_pton(s.AF_INET6,'::1')), s.htons(1), s.htonl(1))
 import errno, os; print(os.strerror(errno.ETIMEDOUT), errno.errorcode[35])
+def err(f, *a):
+    try: return 'ok %r' % (f(*a),)
+    except Exception as e: return type(e).__name__
+print(err(s.ntohs, -1), err(s.htonl, -1), err(s.htons, 1 << 16), err(s.htonl, 1 << 32), s.ntohl(0xffffffff))
+print(err(s.if_indextoname, 0), err(s.if_indextoname, -1), err(s.if_indextoname, 2**1000), err(s.if_nametoindex, '_DEADBEEF'))
+print(s.if_nametoindex('lo'), s.if_indextoname(1), err(s.CMSG_LEN, -1), err(s.CMSG_LEN, sys.maxsize), err(s.CMSG_SPACE, 2**31))
+print(err(s.getaddrinfo, 'localhost', '\ud800'), err(s.getnameinfo, ('::1', 0, 0xffffffff), 0))
+print(s.getaddrinfo('ff02::1de:c0:face:8D%lo', 1234, s.AF_INET6, s.SOCK_DGRAM, s.IPPROTO_UDP)[0][4])
+print(s.getnameinfo(('ff02::1de:c0:face:8D', 1234, 0, 1), s.NI_NUMERICHOST | s.NI_NUMERICSERV))
