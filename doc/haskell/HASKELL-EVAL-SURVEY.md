@@ -867,3 +867,160 @@ numbers here are those of the runs made by day.
 - The testsuite tarball has a single source for its digest (downloads.haskell.org's SHA256SUMS, unsigned on this
   host): accept, or ask the Mac VM for a second fetch?
 - May the night runs above use the main host tonight (the dumps are under the heavy lock, about 15 minutes)?
+
+## Decided (2026-11-03, the user): HES30-HES36
+
+All as recommended. HE4 starts (the machine and its primops), its first step below.
+
+## As built: HE4a (write-ahead)
+
+Built 2026-11-03 on branch `haskell-he4` from `haskell-he1` (`349a2b58`), on the host's GHC 9.14.1, TamaGo's go and the
+main checkout's stage 0 (`ARBACE_HOST_EXE`), light work by day (no lock, at most 8 jobs, the longest run a minute).
+Write-ahead: HE4's first coherent step, not the milestone; its exit criteria (§11) are not all met (below, "The rest of
+HE4"). Nothing of Haskell is in `gate_key` or a gate step (HES19 (a)).
+
+### What is in the tree
+
+- **`go/arbace/hs.ae`, `go/arbace/hs/*.ae`**: hsi's runtime, the package `arbace/hs` (12 files, about 4,800 lines of Go),
+  written in Go and converted by repr/go's native reader (`bin/repr-go read --goos linux --goarch amd64`, mode `:lines`,
+  as oi's, OC70): the forms are the source, printed back by `bin/hsi build`. It imports std and `arbace/crt` (ci's
+  address space and system calls, HES10 (a)). The parts:
+  - `read`: a reader of the dumps' syntax (STG-SPEC §1) in Go: Arbace's reader reads the forms at 11 MB/s on 8 jobs
+    (HE2), Go's at about 100 MB/s on one, so a run loads its modules' text directly (HES32 (a)'s image deferred, below).
+  - `load`: the units indexed by their dumps' `:unit` (`hsi run --lib DIR...`: `.tmp/hsi/dumps/stg`'s packages and the
+    program's directory, unit `main`); a module loaded when a name of its is first needed (lazily by module, HES14
+    (a)'s first half), in three phases (binders; objects; constructors' fields, other modules loaded as they need);
+    a top-level closure compiled when first entered. `Hello` loads 52 modules (13.3 MB of forms) and runs in 0.16 s;
+    `Exc` 81 modules (21.1 MB) in 0.25 s.
+  - `compile`, `nodes`: each closure's body a tree of nodes over the slots of one frame per closure (its free variables,
+    its arguments, every local binder; scopes restored, so GHC's reused binder numbers are harmless); a join point
+    (`letne`, `:j`) is no closure at all: its arguments are slots of its binder's frame and a jump assigns them (GHC's
+    let-no-escape exactly); `case` pushes a frame unless its scrutinee is a pure primop, a literal or an evaluated
+    variable (then the alternative is chosen at once); unboxed tuples are several return values (`MkSolo#`, `(##)`,
+    `(#,#)`...; their binders positional).
+  - `machine`: HES8 (a)'s eval/apply machine, the loop a Go `for`, never Go recursion: a thread's stack a slice of
+    frames by value (case, update, apply, catch, mask, atomically, catchRetry, catchSTM); a thunk entered is
+    blackholed by its thread and an update frame pushed (eager blackholing: re-entered by its own thread it raises
+    `NonTermination`, `<<loop>>`; by another, that thread waits for its update); exact, partial (PAP) and
+    over-saturated calls; `raise#` unwinds to the nearest catch frame, the thunks under evaluation updated to raise
+    again; an asynchronous exception (`killThread#`, `throwTo`) unwinds them reverted to unevaluated; the handler
+    runs masked interruptibly with an unmask frame when the catch was unmasked (GHC's `raisezh`); the masking states
+    and their frames, pending asynchronous exceptions delivered at unmasking. Green threads (HES9 (a)): a run queue,
+    slices of 20,000 nodes, MVars with FIFO single wake-up (takers, readers, putters), `delay#` on a timer list,
+    `yield#`; when nothing can run and no timer waits, `BlockedIndefinitelyOnMVar` (`OnSTM`) raised in the threads
+    blocked on them (GHC raises in the unreachable ones only; reachability is HE4e's). The program: `:Main.main`
+    applied to the void token in the main thread; at its end, or at `shutdownHaskellAndExit`, `flushStdHandles` run
+    as `hs_exit` runs it, then the status.
+  - `stm`: HES9 (a)'s STM: a transaction is never preempted, so it runs alone to its commit or its `retry`; an undo log
+    per transaction, `orElse` by marks, `catchSTM#`, `retry#` blocking the thread until a transaction commits a write.
+  - `prim_scalar`, `prim_mem`, `prim_ctl`: the primops (below); `mem`: string literals in crt's read-only data
+    (NUL-terminated, one per string), pinned byte arrays and `malloc` in arenas of crt's mapped slabs, an unpinned byte
+    array a Go slice moved into crt's space when its address is asked (`byteArrayContents#`); `ffi`: 196 C functions
+    by symbol (HES11 (a)), a `capi` wrapper's name decoded to its C function (`ghczuwrapperZC23ZC...ZCread` is
+    `read`): the POSIX calls through crt's system calls (its fds 0-2 the process's), errno the machine's, the RTS's
+    API (`getProgArgv`, `getMonotonicNSec`, the `getOrSet...Store`s, `errorBelch2`'s and `debugBelch2`'s formats,
+    `cmp_thread`, ...), `localeEncoding` "UTF-8", base's MD5 (Typeable's fingerprints) on Go's `crypto/md5`, the
+    floating-point predicates and `__int_encodeDouble`'s kin, libm on Go's `math` (the class `:libm`), and C's stdio
+    for a program's own foreign calls (`printf`, `puts`, `putchar`: buffered to the end, as libc's stdout to a file).
+- **`test/haskell/hsi/cmd.ae`, `cmd/main.ae`**: the light driver (`hsi run --lib DIR... --prog DIR --name NAME -- ARGS`,
+  `hsi primops`, `hsi cfunctions`), as oi's `test/ocaml/oi/cmd.ae`.
+- **`bin/hsi build`** (the forms printed by repr/go with `go/arbace/crt`, built by TamaGo's go into `.tmp/hsi/bin/hsi`,
+  kept by the forms' digest; `HSI_EXE` names another), **`run FILE.hs [ARG...]`**, **`check`**
+  (`bin/lib/hsi/check`), **`primops`**; the Makefile's `hsi-build`, `hsi-check`, `hsi-primops`.
+- **`bin/hsi check`**: the samples and the synthetic corpus, each program dumped at `-O0` by the helper (cached by the
+  source's and the helper's digests in `.tmp/hsi/progs/`) and run on hsi over the libraries' dumps as record-ref ran
+  GHC's build (`env -i`, `LANG=C.UTF-8`, `TZ=UTC`, its stdin, arguments and name, CPU and wall limits), judged against
+  `test/haskell/ref-ghc914.edn` by status, stdout's and stderr's SHA-256 (HES16 (a)); results in
+  `test/haskell/check-hsi.edn` (`--record`); every non-pass in a class of **`test/haskell/divergences.edn`**, and
+  every negative control of **`test/haskell/hsi-controls.txt`** (a run judged against another program's reference)
+  failing, else the check fails (GTS81 (a)'s kind).
+- The libraries' dumps the check runs on: `bin/hsi dumps` (HE2's five packages) and `bin/hsi dumps --packages
+  array,stm,deepseq,transformers,mtl --out .tmp/hsi/dumps-extra` (33 s), `HSI_LIBS` naming others.
+- **gate_key**: `go/arbace/hs{.ae,/}` and `bin/lib/hsi/` left out as oi's and scm's (`bin/arbace-go`'s `gate_key` and
+  `gate_rest_key`, `test/gate/audit.ae`'s `:gate` and `:prog`; `test/gate/gate-key-crops-test.bash` extended and
+  passing). `bin/lib/hsi/`'s HE3 scripts were in it on `haskell-he1`: no longer.
+
+### Results
+
+- **`bin/hsi check`: 44 of 47 equal** (status, stdout and stderr byte for byte): **all 10 samples** (Hello, Survey's
+  sieve, `Data.Map` and `try`, Trace's order and uncaught `Map.!` with its `HasCallStack` backtrace, Loop's
+  3,000,000-deep `foldl` and `<<loop>>`, Nfib, Conc's MVars, `threadDelay`, `Chan` and the deadlock detected, Exc's
+  bracket, finally, masks, `killThread` and the uncaught exception's message, Stm's `retry` and `orElse`, Arrays'
+  ST, unboxed arrays and `Integer`, Echo's stdin, arguments, program name and exit status 3) and **34 of the 37
+  synthetic programs** (every class program but `class-floating`; every primop family but `Double#` and `Float#`;
+  the 8 runtime programs). The 3 others are the class `:libm` (deferred, HES37): Go's `math` where GHC calls musl's
+  libm, 9 lines of `primops-double`'s 1,029, 8 of `primops-float`'s, 15 of `class-floating`'s; and `decodeDouble_2Int#
+  0.0`'s sign, which GHC's RTS leaves uninitialised. The controls fail as they must. 47 programs in about 30 s at 4
+  jobs.
+- **A probe of the testsuite's language core** (scratch, not a check yet: HE4c): its 555 single-module run tests with
+  no flags and no run options (of 701; the 20 not built excluded) dumped and run the same way: **504 equal**, 27
+  differ (13 of them killed at 20 s of CPU: hsi's speed; `concurrent`'s scheduling and `allocLimit`, `UnliftedWeakPtr`,
+  `CarryOverflow`), 24 stopped by hsi (`createAdjustor`: `foreign import "wrapper"`, 12; packages without dumps, `unix`,
+  `directory`, `bytestring`, `ghc-experimental`, `ghc-boot`, 6; a test's own C, `sleep`'s thread, a SIMD primop).
+- **Primops** (`bin/hsi primops`, against `:browse GHC.Prim`'s 742 non-SIMD names, the survey's E4): **714
+  implemented**; of the 28 others 7 are not primops at run time (`void#`, `realWorld#`, `nullAddr#`, `proxy#`: the
+  loader's globals; `coerce`, `leftSection`, `rightSection`: gone by Core) and 21 remain: the 11 compact regions'
+  (`compactNew#` ...), `prompt#`, `control0#`, `newPromptTag#` (HE4e), closure inspection (`unpackClosure#`,
+  `closureSize#`, `getApStackVal#`, `annotateStack#`, `whereFrom#`'s kin), `mkApUpd0#`, `addrToAny#`, `newBCO#`
+  (classes, HES12 (a)). The 340 scalar primops of the synthetic programs are checked against GHC's runs (all equal but
+  the `:libm` family); the others by the samples and the probe only (HE4f checks them).
+- **GHC's own behaviour, found and reproduced**: amd64's `minsd`/`maxsd` with GHC's operand order (a literal operand
+  second: a NaN's or a zero's result depends on it); `Char#` compared as an unsigned word (`chr# (-1#)` shows `'\-1'`);
+  the RTS's `hs_bitrev16`, which leaves bits 16-31 of its register (`bitReverse16#` of all ones is 4294967295: its
+  instructions emulated from `rts/bitrev.o`); `dataToTag#` reached by a thunk (a lazy field: evaluated first); a
+  class of one method's dictionary, the method itself, under an `alg` case with a default only; a thread killed before
+  it ran ends silently.
+- **Speed** (E8's `nfib 32`): 13 s on hsi, against 0.32 s native at `-O0` and 3.6 s in GHCi: about 3.6 times GHCi, in
+  §6.8's range (1 to 5). A profile: half of it the Go collector scanning the loaded code (the live heap is mostly
+  compiled code: GOGC 400 by default), the rest allocation (frames, argument slices, boxed `Int#`s) and dispatch.
+  Loop (E7) 12.6 s against 0.78 s native.
+
+### The rest of HE4 (sub-steps, re-estimated: 12 to 18 days)
+
+1. **HE4b libm** (1-2 days): musl 1.2.6's libm functions GHC's code reaches (exp, log, pow, the trigonometric,
+   hyperbolic and inverse ones, expm1, log1p, and their `float` versions) ported to Go from musl's sources (HES37),
+   the class `:libm` empty but `decodeDouble_2Int#`'s uninitialised sign (a class of its own, `:design`).
+2. **HE4c the testsuite's language core as a check** (2-3 days): `bin/hsi check --corpus testsuite-core` from
+   record-ref's plan (flags, several modules, stdin, run options, the C sources HES35 (a) passes), every test in a
+   result or a class; the packages the core imports dumped (`unix`, `directory`, `bytestring`, `process`, `text`).
+3. **HE4d speed** (3-5 days): no allocation for over-saturated calls and returns to apply frames, preboxed small
+   integers, a constructor's tag in a table for `case`, PAPs' arities, and HES32's image (the loaded code's load and
+   scan); the target GHCi's speed or better (nfib 32 under 4 s), the 13 programs the probe killed under their limit.
+4. **HE4e the RTS's semantics** (3-4 days): `throwTo`'s blocking when the target is masked (GHC's), deadlock by
+   reachability (§6.5), `prompt#`/`control0#`, blackholes between threads under test, `threadStatus#`, finalizers
+   (`finalizeWeak#`'s and the C finalizers at exit, `hs_exit`'s), stable names' hashes, `performGC`.
+5. **HE4f the remaining primops and their check** (1-2 days): every primop of `primops.txt.pp` with its attributes in a
+   table checked against hsi's (`can_fail`, `has_side_effects`, `out_of_line`); compact regions as copies (or a class),
+   closure inspection, `mkApUpd0#`, `newBCO#` classes; synthetic programs for the array, `Addr#`, `MutVar#` and
+   concurrency families (the generator's 245 primops not yet covered).
+6. **HE4g the top level and the I/O** (2 days): files (`open`, `stat`, `lseek`, `ftruncate`), the environment,
+   terminals (`hSetEcho`, `tcgetattr`), signals, `iconv` beyond UTF-8 as a class, `foreign import "wrapper"` (HES11:
+   `createAdjustor`, a function pointer of crt's text calling back into the machine).
+7. **HE4h the exit**: the samples and the synthetic corpus all equal or classed, `Hello`, `T.hs`, `U.hs`, `L.hs` byte
+   for byte (§11's HE4 row), the core's run tests every one in a result or a class.
+
+### Proposals (HES37 onward)
+
+- **HES37 libm.** (a) musl's libm functions ported to Go by hand from musl 1.2.6's sources (MIT: `LICENSE.md` and
+  `doc/ARBACE.md`'s origin), checked by the synthetic programs (bit for bit with GHC's runs); (b) musl's C forms run
+  by ci or compiled by cf2g (HES11 (a)'s first idea: needs ci's runtime in hsi's program); (c) Go's `math` and the
+  class kept. *Recommended: (a)*: about 2,000 lines of C, mechanical, no dependency on ci's machinery; (b) when ci's
+  runtime is linked into hsi anyway (HES11 (b)'s `cbits`).
+- **HES38 How hsi's runtime is written.** (a) Go source converted by repr/go's native reader into Go forms (mode
+  `:lines`, as oi's, OC70), the forms the source from then on (a comment inside a function body is not kept: the
+  notes are declarations' doc comments); (b) mode `:full` (every comment and space kept: five times the size); (c)
+  hand-written forms as goi's. *Recommended: (a)*.
+- **HES39 The libraries' dumps the check reads.** (a) `.tmp/hsi/dumps` (HE2's five packages) and `.tmp/hsi/dumps-extra`
+  (array, stm, deepseq, transformers, mtl) until the night run dumps the 41 packages (HE2's night run 1), then the
+  one directory; (b) the 41 now. *Recommended: (a)*.
+- **HES40 `dataToTag#` of a thunk.** (a) evaluated first (as built: GHC 9.14's STG passes a lazy field's value, and its
+  code generator reads the info table of what it gets); (b) a fatal error (the STG's invariant, which the dumps break).
+  *Recommended: (a)*.
+- **HES41 `throwTo` to a masked thread.** (a) GHC's: the thrower blocks until the exception is delivered (HE4e); (b) as
+  built, the exception queued and the thrower going on. *Recommended: (a)*.
+- **HES42 A program's own C stdio.** (a) `printf`, `puts`, `putchar` into a buffer written after the Haskell handles'
+  flush at the end (libc's stdout to a file, the references' case), `fflush` writing it (as built); (b) written at
+  once. *Recommended: (a)*.
+- **HES43 The check's classes.** (a) by the programs' ids (`test/haskell/divergences.edn`'s `:ids`) while the classes
+  are few; (b) by reasons matched as goi's (`:match`), once hsi writes a reason per run (HE6). *Recommended: (a)* now,
+  (b) at HE6.

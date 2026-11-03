@@ -1,0 +1,690 @@
+(in-ns 'go.arbace.hs) (go/file "machine.go" :imports [
+
+
+    ^{:line 4} [fmt "fmt"]
+    ^{:line 5} [io "io"]
+    ^{:line 6} [os "os"]
+    ^{:line 7} [debug "runtime/debug"]
+    ^{:line 8} [sort "sort"]
+    ^{:line 9} [strings "strings"]
+    ^{:line 10} [time "time"]
+
+    ^{:line 12} [crt "arbace/crt"]])
+
+
+
+(go/type Frame "Frame is a frame of a thread's stack (HES8 (a)).\n" (struct
+    ^{:line 17 :tag uint8} k
+    ^{:line 18 :tag (* CaseE)} c
+    ^{:line 19 :tag (slice Value)} env
+    ^{:line 20 :tag Value} x
+    ^{:line 21 :tag (slice Value)} args
+    ^{:line 22 :tag int} n))
+
+
+(go/const
+  ^{:line 26} [^{:tag uint8 :val 0} fCase iota]
+  ^{:line 27} [^{:val 1} fUpd]
+  ^{:line 28} [^{:val 2} fApply]
+  ^{:line 29} [^{:val 3} fCatch]
+  ^{:line 30} [^{:val 4} fMask] ; restores the masking state n on return
+  ^{:line 31} [^{:val 5} fAtomically]
+  ^{:line 32} [^{:val 6} fCatchRetry]
+  ^{:line 33} [^{:val 7} fCatchSTM]
+  ^{:line 34} [^{:val 8} fPrompt])
+
+
+
+
+(go/type Thread "Thread is a Haskell thread: its stack, its resumption, its masking state (0 unmasked, 1 masked\nuninterruptibly, 2 masked interruptibly: getMaskingState#'s numbers).\n" (struct
+    ^{:line 40 :tag int64} ID
+    ^{:line 41 :tag (slice Frame)} stack
+    ^{:line 42 :tag Expr} e
+    ^{:line 43 :tag (slice Value)} env
+    ^{:line 44 :tag Value} r
+    ^{:line 45 :tag (slice Value)} rs
+    ^{:line 46 :tag int} mask
+    ^{:line 47 :tag bool} done
+    ^{:line 48 :tag any} blocked ; what it waits on: *MVar, *Thunk, *sleep, stmWait, nil when runnable
+    ^{:line 49 :tag (slice Value)} pending
+    ^{:line 50 :tag Value} label
+    ^{:line 51 :tag (* stmLog)} stm
+    ^{:line 52 :tag bool} main
+    ^{:line 53 :tag bool} mvRead
+    ^{:line 54 :tag bool} mvPut
+    ^{:line 55 :tag Value} mvVal
+
+    ^{:line 57 :tag bool :doc "an interruptible block (MVar, delay, STM retry): an asynchronous exception may be delivered\n"} interruptible))
+
+
+
+(go/type Machine "Machine is hsi's machine: the loader, the address space, the threads.\n" (struct
+    ^{:line 62 :tag (* Loader)} ld
+    ^{:line 63 :tag (* crt/Mem)} Mem
+    ^{:line 64 :tag (* crt/Sys)} Sys
+    ^{:line 65 :tag (* Thread)} cur
+    ^{:line 66 :tag Value} r
+    ^{:line 67 :tag (slice Value)} rs
+    ^{:line 68 :tag (slice (* Thread))} runq
+    ^{:line 69 :tag (slice (* sleeper))} sleep
+    ^{:line 70 :tag (map int64 (* Thread))} all
+    ^{:line 71 :tag int64} next
+    ^{:line 72 :tag (map (* Thunk) (slice (* Thread)))} bhw
+    ^{:line 73 :tag (slice (* Thread))} stmw
+
+    ^{:line 75 :tag (slice string)} Args
+    ^{:line 76 :tag string} ProgName
+    ^{:line 77 :tag bool} exiting
+    ^{:line 78 :tag int} exitCode
+    ^{:line 79 :tag int64} steps
+    ^{:line 80 :tag (slice Value)} stables
+    ^{:line 81 :tag (map any (* StableName))} snames
+    ^{:line 82 :tag (* crt/Slab)} arena
+    ^{:line 83 :tag uint64} arenaOff
+    ^{:line 84 :tag (map string uint64)} statics
+    ^{:line 85 :tag (map uint64 ffiFunc)} funptrs
+    ^{:line 86 :tag (map string uint64)} labels
+    ^{:line 87 :tag int64} errno
+    ^{:line 88 :tag int} budget
+    ^{:line 89 :tag (slice byte)} cout
+    ^{:line 90 :tag bool} Trace
+    ^{:line 91 :tag io/Writer} Stderr))
+
+
+(go/type sleeper (struct
+    ^{:line 95 :tag (* Thread)} t
+    ^{:line 96 :tag time/Time} when))
+
+
+
+(go/type hsFatal "hsFatal is an error of hsi itself (a class at the check: unimplemented, an impossible state).\n" (struct ^string msg))
+
+
+(go/type exitNow "exitNow ends the program (shutdownHaskellAndExit, an uncaught exception in the main thread).\n" (struct ^int code))
+
+^{:go/end 107} (go/method fatal [^{:tag (* Machine)} m ^string msg]
+  (panic (addr (lit hsFatal msg))))
+
+
+
+^{:go/end 121} (go/func NewMachine "NewMachine is a machine over the STG of the units in libs and the program in prog.\n" [^{:tag (slice string)} libs ^string prog ^io/Reader stdin ^io/Writer stdout ^io/Writer stderr] :results [(* Machine) error]
+  (let [m (addr ^{:go/breaks [8]} (lit Machine :all (lit (map int64 (* Thread))) :bhw (lit (map (* Thunk) (slice (* Thread)))) :snames (lit (map any (* StableName)))
+          :statics (lit (map string uint64)) :funptrs (lit (map uint64 ffiFunc)) :labels (lit (map string uint64)) :Stderr stderr))]
+    (set! (.-Mem m) (crt/NewMem))
+    (set! (.-Sys m) (crt/NewSys (.-Mem m) stdin stdout stderr))
+    (let [(values ld err) (newLoader m libs prog)]
+      (when (!= err nil)
+        (return nil err))
+
+      (set! (.-ld m) ld)
+      (return m nil))))
+
+
+^{:go/end 126} (go/method ret1 [^{:tag (* Machine)} m ^Value v]
+  (set! (.-r m) v)
+  (set! (.-rs m) nil))
+
+
+^{:go/end 135} (go/method retN [^{:tag (* Machine)} m ^{:tag (slice Value)} vs]
+  (set! (.-rs m) vs)
+  (if (== (len vs) 1)
+    (set! (.-r m) (aget vs 0))
+
+    (set! (.-r m) nil)))
+
+
+
+^{:go/end 140} (go/method push [^{:tag (* Machine)} m ^Frame f]
+  (let [t (.-cur m)]
+    (set! (.-stack t) (append (.-stack t) f))))
+
+
+^{:go/end 145} (go/method pushCase [^{:tag (* Machine)} m ^{:tag (* CaseE)} c ^{:tag (slice Value)} env]
+  (let [t (.-cur m)]
+    (set! (.-stack t) (append (.-stack t) (lit Frame :k fCase :c c :env env)))))
+
+
+
+(go/var ^{:tag Expr :doc "blockedE is returned by a node whose thread blocked: its resumption is set already.\n"} blockedE (addr (lit Lit)))
+
+
+^{:go/end 157} (go/method enterValue "enterValue evaluates a value: a thunk entered, anything else returned.\n" [^{:tag (* Machine)} m ^Value v] :results [Expr (slice Value)]
+  (when [(values t ok) (assert (* Thunk) v)] ok
+    (return (.enter m t)))
+
+  (.ret1 m v)
+  (return nil nil))
+
+
+
+^{:go/end 195} (go/method enter "enter evaluates a thunk: its value, or its code under an update frame, the thunk blackholed.\n" [^{:tag (* Machine)} m ^{:tag (* Thunk)} t] :results [Expr (slice Value)]
+  (while true
+    (when (== (.-L t) nil)
+      (let [v (.-Ind t)]
+        (when [(values t2 ok) (assert (* Thunk) v)] ok
+          (set! t t2)
+          (continue))
+
+        (.ret1 m v)
+        (return nil nil)))
+
+    (break))
+
+  (when (!= (.-BH t) nil)
+    (when (== (.-BH t) (.-cur m))
+      (return (.raise m (.globalValue (.-ld m) "ghc-internal:GHC.Internal.Control.Exception.Base/nonTermination"))))
+
+    ;; another thread evaluates it: wait for its update
+    (let [cur (.-cur m)]
+      (aset (.-bhw m) t (append (aget (.-bhw m) t) cur))
+      (set! (.-blocked cur) t)
+      (set! (values (.-e cur) (.-env cur)) (values (addr (lit Enter :f (lit Atom :kind aLit :lit t))) nil))
+      (return blockedE nil)))
+
+  (let [l (.-L t)]
+    (when (== (.-Body l) nil)
+      (.compileTop (.-ld m) l))
+
+    (let [env (make (slice Value) (.-NSlots l))]
+      (copy env (.-Free t))
+      (when (!= (.-Upd l) \r)
+        (set! (.-BH t) (.-cur m))
+        (set! (.-stack (.-cur m)) (append (.-stack (.-cur m)) (lit Frame :k fUpd :x t))))
+
+      (return (.-Body l) env))))
+
+
+
+^{:go/end 209} (go/method update "update overwrites a thunk with its value.\n" [^{:tag (* Machine)} m ^{:tag (* Thunk)} t ^Value v]
+  (set! (.-Ind t) v)
+  (set! (.-L t) nil)
+  (set! (.-Free t) nil)
+  (set! (.-BH t) nil)
+  (when [(values ws ok) (aget (.-bhw m) t)] ok
+    (delete (.-bhw m) t)
+    (range [_ w ws]
+      (.wake m w))))
+
+
+
+
+
+^{:go/end 249} (go/method apply "apply calls f with args (eval/apply: exact, partial, over-saturated).\n" [^{:tag (* Machine)} m ^Value f ^{:tag (slice Value)} args] :results [Expr (slice Value)]
+  (while true
+    (type-switch [x f]
+      (case [(* Fun)]
+        (let [l (.-L x)
+            ^{:line 217} n (.-NArgs l)]
+          (when (== (len args) n)
+            (when (== (.-Body l) nil)
+              (.compileTop (.-ld m) l))
+
+            (let [env (make (slice Value) (.-NSlots l))]
+              (copy env (.-Free x))
+              (copy (subslice env (.-NFree l)) args)
+              (return (.-Body l) env)))
+
+          (when (< (len args) n)
+            (.ret1 m (addr (lit PAP :F x :Args args)))
+            (return nil nil))
+
+          (.push m (lit Frame :k fApply :args (subslice args n)))
+          (set! args (subslice args _ n n))))
+      (case [(* PAP)]
+        (let [all (make (slice Value) 0 (+ (len (.-Args x)) (len args)))]
+          (set! all (append all (spread (.-Args x))))
+          (set! all (append all (spread args)))
+          (set! (values f args) (values (.-F x) all))))
+      (case [(* Thunk)]
+        (when (== (.-L x) nil)
+          (set! f (.-Ind x))
+          (continue))
+
+        (.push m (lit Frame :k fApply :args args))
+        (return (.enter m x)))
+      (default
+        (.fatal m (fmt/Sprintf "applying %s to %d arguments" (showShallow f) (len args)))))))
+
+
+
+
+
+(go/type ApplyV "ApplyV applies a value to values (a thread's start, a primop's callback).\n" (struct
+    ^{:line 253 :tag Value} f
+    ^{:line 254 :tag (slice Value)} args))
+
+
+^{:go/end 259} (go/method eval [^{:tag (* ApplyV)} e ^{:tag (* Machine)} m ^{:tag (slice Value)} env] :results [Expr (slice Value)]
+  (.apply m (.-f e) (append (conv (slice Value) nil) (spread (.-args e)))))
+
+
+
+^{:go/end 292} (go/method ret "ret handles the top frame on a return.\n" [^{:tag (* Machine)} m] :results [Expr (slice Value)]
+  (let [t (.-cur m)
+      ^{:line 264} n (- (len (.-stack t)) 1)
+      ^{:line 265} f (aget (.-stack t) n)]
+    (aset (.-stack t) n (lit Frame))
+    (set! (.-stack t) (subslice (.-stack t) _ n))
+    (switch (.-k f)
+      (case [fCase]
+        (return (.cont (.-c f) m (.-env f))))
+      (case [fUpd]
+        (.update m (assert (* Thunk) (.-x f)) (.-r m)))
+      (case [fApply]
+        (return (.apply m (.-r m) (.-args f))))
+      (case [fCatch fPrompt])
+      (case [fMask]
+        (set! (.-mask t) (.-n f))
+        (when (and (== (.-mask t) 0) (> (len (.-pending t)) 0))
+          (let [x (aget (.-pending t) 0)]
+            (set! (.-pending t) (subslice (.-pending t) 1))
+            (let [(values r rs) (values (.-r m) (.-rs m))]
+              (set! _ r)
+              (set! _ rs)
+              (return (.raiseAsync m x))))))
+
+      (case [fAtomically]
+        (return (.stmCommit m f)))
+      (case [fCatchRetry fCatchSTM]
+        (return (.stmNestedReturn m f))))
+
+    (return nil nil)))
+
+
+
+(go/var ^{:doc "raiseLam is the code of a thunk whose evaluation raised: entered, it raises again.\n"} raiseLam (addr (lit Lambda :Name "raise" :Upd \u :NFree 1 :NSlots 1 :Body (addr (lit RaiseFree)))))
+
+
+(go/type RaiseFree "RaiseFree raises its frame's first slot.\n" (struct))
+
+^{:go/end 302} (go/method eval [^{:tag (* RaiseFree)} e ^{:tag (* Machine)} m ^{:tag (slice Value)} env] :results [Expr (slice Value)]
+  (.raise m (aget env 0)))
+
+
+
+
+^{:go/end 308} (go/method raise "raise raises a synchronous exception (raise#, raiseIO#): the stack unwound to the nearest catch\nframe, the thunks under evaluation on the way updated to raise it again.\n" [^{:tag (* Machine)} m ^Value x] :results [Expr (slice Value)]
+  (.unwind m x false))
+
+
+
+
+^{:go/end 314} (go/method raiseAsync "raiseAsync raises an asynchronous exception in the current thread: the thunks under evaluation on\nthe way reverted to unevaluated (GHC freezes them; the same results).\n" [^{:tag (* Machine)} m ^Value x] :results [Expr (slice Value)]
+  (.unwind m x true))
+
+
+^{:go/end 365} (go/method unwind [^{:tag (* Machine)} m ^Value x ^bool async] :results [Expr (slice Value)]
+  (let [t (.-cur m)]
+    (while (> (len (.-stack t)) 0)
+      (let [n (- (len (.-stack t)) 1)
+          ^{:line 320} f (aget (.-stack t) n)]
+        (aset (.-stack t) n (lit Frame))
+        (set! (.-stack t) (subslice (.-stack t) _ n))
+        (switch (.-k f)
+          (case [fUpd]
+            (let [th (assert (* Thunk) (.-x f))]
+              (if async (do
+                  (set! (.-BH th) nil)
+                  (when [(values ws ok) (aget (.-bhw m) th)] ok
+                    (delete (.-bhw m) th)
+                    (range [_ w ws]
+                      (.wake m w))))
+
+
+                (do
+                  (set! (.-L th) raiseLam)
+                  (set! (.-Free th) (lit (slice Value) x))
+                  (set! (.-BH th) nil)
+                  (when [(values ws ok) (aget (.-bhw m) th)] ok
+                    (delete (.-bhw m) th)
+                    (range [_ w ws]
+                      (.wake m w)))))))
+
+
+
+          (case [fCatch]
+            (if (== (.-n f) 0) (do
+                (set! (.-stack t) (append (.-stack t) (lit Frame :k fMask :n 0)))
+                (set! (.-mask t) 2))
+
+              (set! (.-mask t) (.-n f)))
+
+            (return (.apply m (.-x f) (lit (slice Value) x nil))))
+          (case [fAtomically]
+            (.stmAbort m t))
+          (case [fCatchSTM]
+            (when [(values e env ok) (.stmCatch m f x)] ok
+              (return e env)))
+
+          (case [fCatchRetry]
+            (.stmUndoTo m t (.-n f))))))
+
+
+    (.uncaught m t x)
+    (return blockedE nil)))
+
+
+
+
+
+^{:go/end 377} (go/method uncaught "uncaught ends a thread whose exception reached the bottom of its stack (forkIO's and runMainIO's own\nhandlers catch everything, so only a thread started without them gets here: one killed before it ran,\nwhich ends silently, as GHC's).\n" [^{:tag (* Machine)} m ^{:tag (* Thread)} t ^Value x]
+  (set! (.-done t) true)
+  (when (.-main t)
+    (fmt/Fprintf (.-Stderr m) "hsi: uncaught exception in the main thread without a handler: %s\n" (show (whnf x)))
+    (panic (addr (lit exitNow 1)))))
+
+;; a thread killed before it started (forkIO's handler not yet on its stack) ends silently, as GHC's
+
+
+;; ---- threads ----
+
+^{:go/end 387} (go/method newThread ^{:tag (* Thread)} [^{:tag (* Machine)} m ^Expr e]
+  (inc! (.-next m))
+  (let [t (addr (lit Thread :ID (.-next m) :e e))]
+    (aset (.-all m) (.-ID t) t)
+    (set! (.-runq m) (append (.-runq m) t))
+    ^{:line 386} t))
+
+
+
+^{:go/end 397} (go/method wake "wake makes a blocked thread runnable.\n" [^{:tag (* Machine)} m ^{:tag (* Thread)} t]
+  (when (.-done t)
+    (return))
+
+  (set! (.-blocked t) nil)
+  (set! (.-interruptible t) false)
+  (set! (.-runq m) (append (.-runq m) t)))
+
+
+
+
+^{:go/end 407} (go/method block "block stops the current thread until it is woken; on waking it returns from the blocked call\n(with the return registers its waker sets) or runs e.\n" [^{:tag (* Machine)} m ^any on ^bool interruptible] :results [Expr (slice Value)]
+  (let [t (.-cur m)]
+    (set! (.-blocked t) on)
+    (set! (.-interruptible t) interruptible)
+    (set! (values (.-e t) (.-env t)) (values nil nil))
+    (return blockedE nil)))
+
+
+
+^{:go/end 428} (go/method throwTo "throwTo raises x in t asynchronously (throwTo#, killThread#).\n" [^{:tag (* Machine)} m ^{:tag (* Thread)} t ^Value x]
+  (when (.-done t)
+    (return))
+
+  (when (and (!= (.-mask t) 0) (not (and (== (.-mask t) 2) (!= (.-blocked t) nil) (.-interruptible t))))
+    (set! (.-pending t) (append (.-pending t) x))
+    (return))
+
+  (.unblock m t)
+  (let [(values saved sr srs) (values (.-cur m) (.-r m) (.-rs m))]
+    (set! (.-cur m) t)
+    (let [(values e env) (.raiseAsync m x)]
+      (when (!= e blockedE)
+        (set! (values (.-e t) (.-env t)) (values e env))
+        (set! (values (.-r t) (.-rs t)) (values (.-r m) (.-rs m)))
+        (set! (.-runq m) (append (.-runq m) t)))
+
+      (set! (values (.-cur m) (.-r m) (.-rs m)) (values saved sr srs)))))
+
+
+
+^{:go/end 465} (go/method unblock "unblock takes a blocked thread out of what it waits on.\n" [^{:tag (* Machine)} m ^{:tag (* Thread)} t]
+  (type-switch [b (.-blocked t)]
+    (case [(* MVar)]
+      (range [i w (.-Queue b)]
+        (when (== w t)
+          (set! (.-Queue b) (append (subslice (.-Queue b) _ i i) (spread (subslice (.-Queue b) (+ i 1)))))
+          (break))))
+
+
+    (case [(* Thunk)]
+      (let [ws (aget (.-bhw m) b)]
+        (range [i w ws]
+          (when (== w t)
+            (aset (.-bhw m) b (append (subslice ws _ i i) (spread (subslice ws (+ i 1)))))
+            (break)))))
+
+
+    (case [(* sleeper)]
+      (range [i s (.-sleep m)]
+        (when (== s b)
+          (set! (.-sleep m) (append (subslice (.-sleep m) _ i i) (spread (subslice (.-sleep m) (+ i 1)))))
+          (break))))
+
+
+    (case [stmWait]
+      (range [i w (.-stmw m)]
+        (when (== w t)
+          (set! (.-stmw m) (append (subslice (.-stmw m) _ i i) (spread (subslice (.-stmw m) (+ i 1)))))
+          (break)))))
+
+
+
+  (set! (.-blocked t) nil)
+  (set! (.-interruptible t) false))
+
+
+(go/const ^{:val 20000} slice 20000)
+
+
+^{:go/end 484} (go/method Run "Run runs the program's :Main.main and returns its exit status.\n" [^{:tag (* Machine)} m] :results [^int status]
+  (let [main (.globalValue (.-ld m) "main::Main/main")
+      ^{:line 472} mt (.newThread m (addr (lit ApplyV :f main :args (lit (slice Value) nil))))]
+    (set! (.-main mt) true)
+    (defer (^{:go/end 478} (fn []
+          (when [x (recover)] (!= x nil)
+            (set! status (.recovered m x))))))
+
+
+    (.schedule m mt)
+    (when (.-exiting m)
+      (return (.-exitCode m)))
+
+    (.shutdown m 0)))
+
+
+^{:go/breaks [5] :go/end 504} (go/method recovered ^int [^{:tag (* Machine)} m ^any x]
+  (type-switch [e x]
+    (case [(* exitNow)]
+      (return (.-code e)))
+    (case [(* crt/Exit)]
+      (return (.-Code e)))
+    (case [(* hsFatal)]
+      (fmt/Fprintf (.-Stderr m) "hsi: %s%s\n" (.-msg e) (.where m))
+      (return 3))
+    (case [(* compileError)]
+      (fmt/Fprintf (.-Stderr m) "hsi: %s%s\n" (.-msg e) (.where m))
+      (return 3))
+    (case [(* loadError)]
+      (fmt/Fprintf (.-Stderr m) "hsi: %s%s\n" (.-msg e) (.where m))
+      (return 3)))
+
+  (fmt/Fprintf (.-Stderr m) "hsi: internal error: %v%s\n%s" x (.where m) (debug/Stack))
+  3)
+
+
+
+^{:go/end 531} (go/method where "where describes the current thread's stack for an error message.\n" ^string [^{:tag (* Machine)} m]
+  (let [t (.-cur m)]
+    (when (== t nil)
+      (return ""))
+
+    (let [^strings/Builder b (zero strings/Builder)]
+      (fmt/Fprintf (addr b) " (thread %d, %d frames" (.-ID t) (len (.-stack t)))
+      (let [k 0]
+        (for [i (- (len (.-stack t)) 1)] (and (>= i 0) (< k 8)) (dec! i)
+          (let [f (aget (.-stack t) i)]
+            (switch (.-k f)
+              (case [fUpd]
+                (let [th (assert (* Thunk) (.-x f))]
+                  (when (!= (.-L th) nil)
+                    (fmt/Fprintf (addr b) "; update %s" (.-Name (.-L th)))
+                    (inc! k))))
+
+              (case [fCatch]
+                (.WriteString b "; catch")
+                (inc! k)))))
+
+
+        (.WriteString b ")")
+        (.String b)))))
+
+
+
+^{:go/end 564} (go/method schedule "schedule runs threads until until is done (or every thread is).\n" [^{:tag (* Machine)} m ^{:tag (* Thread)} until]
+  (while (not (.-done until))
+    (when (== (len (.-runq m)) 0)
+      (when (> (len (.-sleep m)) 0)
+        (sort/SliceStable (.-sleep m) ^{:go/end 538} (fn ^bool [^int i ^int j] (.Before (.-when (aget (.-sleep m) i)) (.-when (aget (.-sleep m) j)))))
+        (let [d (time/Until (.-when (aget (.-sleep m) 0)))]
+          (when (> d 0)
+            (time/Sleep d))
+
+          (.wakeSleepers m)
+          (continue)))
+
+      (when (not (.deadlock m))
+        (.fatal m "deadlock: every thread is blocked"))
+
+      (continue))
+
+    (let [t (aget (.-runq m) 0)]
+      (set! (.-runq m) (subslice (.-runq m) 1))
+      (when (or (.-done t) (!= (.-blocked t) nil))
+        (continue))
+
+      (.runSlice m t)
+      (when (and (not (.-done t)) (== (.-blocked t) nil))
+        (set! (.-runq m) (append (.-runq m) t)))
+
+      (when (> (len (.-sleep m)) 0)
+        (.wakeSleepers m)))))
+
+
+
+
+^{:go/end 582} (go/method wakeSleepers [^{:tag (* Machine)} m]
+  (let [now (time/Now)
+      ^{:line 568} keep (subslice (.-sleep m) _ 0)
+      ^{:line 569 :tag (slice (* Thread))} woke (zero (slice (* Thread)))]
+    (range [_ s (.-sleep m)]
+      (if (not (.After (.-when s) now))
+        (set! woke (append woke (.-t s)))
+
+        (set! keep (append keep s))))
+
+
+    (set! (.-sleep m) keep)
+    (range [_ t woke]
+      (set! (values (.-r t) (.-rs t)) (values nil (lit (slice Value))))
+      (.wake m t))))
+
+
+
+
+
+
+^{:go/end 611} (go/method deadlock "deadlock raises BlockedIndefinitelyOnMVar (or OnSTM) in the threads blocked on MVars (STM) when no\nthread can run and none waits for time (GHC finds the unreachable ones by its GC; hsi raises in every\nblocked one, a class).\n" ^bool [^{:tag (* Machine)} m]
+  (let [^{:tag (slice (* Thread))} ts (zero (slice (* Thread)))]
+    (range [_ t (.-all m)]
+      (when (and (not (.-done t)) (!= (.-blocked t) nil))
+        (set! ts (append ts t))))
+
+
+    (sort/Slice ts ^{:go/end 594} (fn ^bool [^int i ^int j] (< (.-ID (aget ts i)) (.-ID (aget ts j)))))
+    (let [any false]
+      (range [_ t ts]
+        (type-switch (.-blocked t)
+          (case [(* MVar)]
+            (let [x (.globalValue (.-ld m) "ghc-internal:GHC.Internal.IO.Exception/blockedIndefinitelyOnMVar")]
+              (set! (.-mask t) 0)
+              (.throwTo m t x)
+              (set! any true)))
+          (case [stmWait]
+            (let [x (.globalValue (.-ld m) "ghc-internal:GHC.Internal.IO.Exception/blockedIndefinitelyOnSTM")]
+              (set! (.-mask t) 0)
+              (.throwTo m t x)
+              (set! any true)))))
+
+
+      ^{:line 610} any)))
+
+
+
+^{:go/end 642} (go/method runSlice "runSlice runs t for a time slice, or until it blocks or ends.\n" [^{:tag (* Machine)} m ^{:tag (* Thread)} t]
+  (set! (.-cur m) t)
+  (let [(values e env) (values (.-e t) (.-env t))]
+    (set! (values (.-r m) (.-rs m)) (values (.-r t) (.-rs t)))
+    (set! (.-budget m) slice)
+    (while true
+      (when (!= e nil)
+        (when (== e blockedE)
+          (return))
+
+        (set! (values e env) (.eval e m env))
+        (dec! (.-budget m))
+        (when (and (<= (.-budget m) 0) (== (.-stm t) nil)) ; a transaction is not preempted (HES9 (a))
+          (break))
+
+        (continue))
+
+      (when (== (len (.-stack t)) 0)
+        (set! (.-done t) true)
+        (delete (.-all m) (.-ID t))
+        (set! (values (.-r t) (.-rs t)) (values (.-r m) (.-rs m)))
+        (return))
+
+      (set! (values e env) (.ret m)))
+
+    (set! (.-steps m) + slice)
+    (set! (values (.-e t) (.-env t)) (values e env))
+    (set! (values (.-r t) (.-rs t)) (values (.-r m) (.-rs m)))))
+
+
+
+^{:go/end 653} (go/method shutdown "shutdown flushes the standard handles (hs_exit's flushStdHandles) and is the exit status.\n" ^int [^{:tag (* Machine)} m ^int code]
+  (set! (.-exiting m) true)
+  (set! (.-exitCode m) code)
+  (let [g (.globalValue (.-ld m) "ghc-internal:GHC.Internal.TopHandler/flushStdHandles")
+      ^{:line 649} ft (.newThread m (addr (lit ApplyV :f g :args (lit (slice Value) nil))))]
+    (.schedule m ft)
+    (.flushC m)
+    ^{:line 652} code))
+
+
+
+^{:go/end 663} (go/method exit "Exit is the program's end requested by shutdownHaskellAndExit: the handles flushed first.\n" [^{:tag (* Machine)} m ^int code]
+  (when (.-exiting m)
+    (panic (addr (lit exitNow code))))
+
+  (set! (.-done (.-cur m)) true)
+  (let [st (.shutdown m code)]
+    (panic (addr (lit exitNow st)))))
+
+
+^{:go/end 667} (go/func init []
+  (set! _ os/Stderr))
+
+
+
+^{:go/end 676} (go/func CFunctions "CFunctions are the C functions hsi's table has.\n" ^{:tag (slice string)} []
+  (let [^{:tag (slice string)} ns (zero (slice string))]
+    (range [n ffiTable]
+      (set! ns (append ns n)))
+
+    ^{:line 675} ns))
+
+
+
+^{:go/end 685} (go/func PrimopNames "PrimopNames are the primops hsi implements.\n" ^{:tag (slice string)} []
+  (let [^{:tag (slice string)} ns (zero (slice string))]
+    (range [n primops]
+      (set! ns (append ns n)))
+
+    ^{:line 684} ns))
+
+
+
+^{:go/end 688} (go/method Loaded "Loaded is the number of modules loaded, LoadedBytes their forms' size, Steps the nodes run (by slices).\n" ^int [^{:tag (* Machine)} m] (.-Loaded (.-ld m)))
+^{:go/end 689} (go/method LoadedBytes ^int64 [^{:tag (* Machine)} m] (.-Bytes (.-ld m)))
+^{:go/end 690} (go/method Steps ^int64 [^{:tag (* Machine)} m] (.-steps m))

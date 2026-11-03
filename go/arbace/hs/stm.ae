@@ -1,0 +1,137 @@
+(in-ns 'go.arbace.hs) (go/file "stm.go" :imports [])
+
+;; STM (HES9 (a)): one thread runs at a time and a transaction is not preempted, so a transaction runs
+;; to its commit or its retry alone: serializable. The log is an undo log of the TVars written; retry
+;; blocks the thread until a transaction commits a write, then runs the transaction again.
+
+(go/type stmLog (struct
+    ^{:line 8 :tag (slice stmUndo)} undo))
+
+
+(go/type stmUndo (struct
+    ^{:line 12 :tag (* TVar)} tv
+    ^{:line 13 :tag Value} old))
+
+
+(go/type stmWait (struct))
+
+
+(go/type atomicallyE "atomicallyE runs a transaction (atomically#, and its rerun after a retry).\n" (struct ^Value stm))
+
+^{:go/end 26} (go/method eval [^{:tag (* atomicallyE)} e ^{:tag (* Machine)} m ^{:tag (slice Value)} env] :results [Expr (slice Value)]
+  (let [t (.-cur m)]
+    (set! (.-stm t) (addr (lit stmLog)))
+    (.push m (lit Frame :k fAtomically :x (.-stm e)))
+    (.apply m (.-stm e) (lit (slice Value) nil))))
+
+
+^{:go/end 64} (go/func init []
+  (pc "atomically#" ^{:go/end 31} (fn [^{:tag (* Machine)} m ^{:tag (slice Value)} a] :results [Expr (slice Value)]
+      (.eval (addr (lit atomicallyE (aget a 0))) m nil)))
+
+  (p1 "newTVar#" ^{:go/end 32} (fn ^Value [^{:tag (slice Value)} a] (addr (lit TVar :V (aget a 0)))))
+  (p1 "readTVar#" ^{:go/end 33} (fn ^Value [^{:tag (slice Value)} a] (.-V (assert (* TVar) (aget a 0)))))
+  (p1 "readTVarIO#" ^{:go/end 34} (fn ^Value [^{:tag (slice Value)} a] (.-V (assert (* TVar) (aget a 0)))))
+  (pc "writeTVar#" ^{:go/end 44} (fn [^{:tag (* Machine)} m ^{:tag (slice Value)} a] :results [Expr (slice Value)]
+      (let [tv (assert (* TVar) (aget a 0))]
+        (when [l (.-stm (.-cur m))] (!= l nil)
+          (set! (.-undo l) (append (.-undo l) (lit stmUndo tv (.-V tv)))))
+
+        (set! (.-V tv) (aget a 1))
+        (inc! (.-Version tv))
+        (.retN m nil)
+        (return nil nil))))
+
+  (pc "retry#" ^{:go/end 45} (fn [^{:tag (* Machine)} m ^{:tag (slice Value)} a] :results [Expr (slice Value)] (.stmRetry m)))
+  ;; catchRetry# first alternative s (orElse)
+  (pc "catchRetry#" ^{:go/end 54} (fn [^{:tag (* Machine)} m ^{:tag (slice Value)} a] :results [Expr (slice Value)]
+      (let [mark 0]
+        (when [l (.-stm (.-cur m))] (!= l nil)
+          (set! mark (len (.-undo l))))
+
+        (.push m (lit Frame :k fCatchRetry :x (aget a 1) :n mark))
+        (.apply m (aget a 0) (lit (slice Value) nil)))))
+
+  ;; catchSTM# stm handler s
+  (pc "catchSTM#" ^{:go/end 63} (fn [^{:tag (* Machine)} m ^{:tag (slice Value)} a] :results [Expr (slice Value)]
+      (let [mark 0]
+        (when [l (.-stm (.-cur m))] (!= l nil)
+          (set! mark (len (.-undo l))))
+
+        (.push m (lit Frame :k fCatchSTM :x (aget a 1) :n mark))
+        (.apply m (aget a 0) (lit (slice Value) nil))))))
+
+
+
+^{:go/end 76} (go/method stmUndoTo [^{:tag (* Machine)} m ^{:tag (* Thread)} t ^int mark]
+  (let [l (.-stm t)]
+    (when (== l nil)
+      (return))
+
+    (for [i (- (len (.-undo l)) 1)] (>= i mark) (dec! i)
+      (let [u (aget (.-undo l) i)]
+        (set! (.-V (.-tv u)) (.-old u))))
+
+    (set! (.-undo l) (subslice (.-undo l) _ mark))))
+
+
+
+^{:go/end 82} (go/method stmAbort "stmAbort undoes a transaction an exception leaves.\n" [^{:tag (* Machine)} m ^{:tag (* Thread)} t]
+  (.stmUndoTo m t 0)
+  (set! (.-stm t) nil))
+
+
+
+^{:go/end 96} (go/method stmCommit "stmCommit ends a transaction: its writes kept, the threads waiting in a retry woken.\n" [^{:tag (* Machine)} m ^Frame f] :results [Expr (slice Value)]
+  (let [t (.-cur m)]
+    (when (and (!= (.-stm t) nil) (> (len (.-undo (.-stm t))) 0))
+      (let [ws (.-stmw m)]
+        (set! (.-stmw m) nil)
+        (range [_ w ws]
+          (.wake m w))))
+
+
+    (set! (.-stm t) nil)
+    (return nil nil)))
+
+
+^{:go/end 98} (go/method stmNestedReturn [^{:tag (* Machine)} m ^Frame f] :results [Expr (slice Value)] (return nil nil))
+
+
+^{:go/end 105} (go/method stmCatch "stmCatch handles an exception at a catchSTM# frame: the nested writes undone, the handler run.\n" [^{:tag (* Machine)} m ^Frame f ^Value x] :results [Expr (slice Value) bool]
+  (.stmUndoTo m (.-cur m) (.-n f))
+  (let [(values e env) (.apply m (.-x f) (lit (slice Value) x nil))]
+    (return e env true)))
+
+
+
+^{:go/end 138} (go/method stmRetry "stmRetry: to the nearest orElse (its alternative run) or to the transaction's start (blocked).\n" [^{:tag (* Machine)} m] :results [Expr (slice Value)]
+  (let [t (.-cur m)]
+    (while (> (len (.-stack t)) 0)
+      (let [n (- (len (.-stack t)) 1)
+          ^{:line 112} f (aget (.-stack t) n)]
+        (aset (.-stack t) n (lit Frame))
+        (set! (.-stack t) (subslice (.-stack t) _ n))
+        (switch (.-k f)
+          (case [fCatchRetry]
+            (.stmUndoTo m t (.-n f))
+            (when (!= (.-x f) nil)
+              (let [alt (.-x f)]
+                (.push m (lit Frame :k fCatchRetry :n (.-n f)))
+                (return (.apply m alt (lit (slice Value) nil))))))
+
+          (case [fAtomically]
+            (.stmUndoTo m t 0)
+            (set! (.-stm t) nil)
+            (set! (.-stmw m) (append (.-stmw m) t))
+            (set! (.-blocked t) (lit stmWait))
+            (set! (.-interruptible t) true)
+            (set! (values (.-e t) (.-env t)) (values (addr (lit atomicallyE (.-x f))) nil))
+            (return blockedE nil))
+          (case [fUpd]
+            (let [th (assert (* Thunk) (.-x f))]
+              (set! (.-BH th) nil))))))
+
+
+    (.fatal m "retry# outside a transaction")
+    (return nil nil)))

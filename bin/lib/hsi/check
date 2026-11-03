@@ -1,0 +1,144 @@
+#!/bin/bash
+# bin/hsi check [--corpus C,...] [--only ID,...] [--jobs N] [--record] [--keep]: Haskell's eval level (HE4a,
+# doc/haskell/HASKELL-EVAL-SURVEY.md, "As built: HE4a (write-ahead)"): each program of the run corpora (samples,
+# synthetic; default both) compiled to STG at -O0 by the helper (tools/hsdump stg, its dump cached by the source's and
+# the helper's digests in .tmp/hsi/progs/), run on hsi (bin/hsi build's light driver) over the libraries' dumps
+# (HSI_LIBS, default .tmp/hsi/dumps/stg and .tmp/hsi/dumps-extra/stg, bin/hsi dumps' outputs) as record-ref ran
+# GHC's build (env -i, LANG=C.UTF-8, TZ=UTC, its stdin, arguments and program name; HSI_TIMEOUT seconds of CPU,
+# default 60, three times that of wall time), and judged against test/haskell/ref-ghc914.edn (HES16 (a)): :pass when
+# the status, stdout's SHA-256 and stderr's SHA-256 are the reference's; else :fail with what differs (:status,
+# :stdout, :stderr), or :hsi when hsi itself stopped (an unimplemented primop or C function, its message). The results
+# into .tmp/hsi/check/results.edn; --record: into test/haskell/check-hsi.edn. --keep keeps each run's outputs in
+# .tmp/hsi/check/out/. Every program that does not pass must be in a class of test/haskell/divergences.edn (its
+# :ids), and every negative control of test/haskell/hsi-controls.txt (a subject's run judged against another
+# program's reference) must fail; else the check fails.
+set -euo pipefail
+root=$(cd "$(dirname "$0")/../../.." && pwd)
+. "$root/bin/lib/tmpdir.bash"
+corpora=samples,synthetic only="" jobs=${HSI_JOBS:-4} record="" keep=""
+while [ $# -gt 0 ]; do
+  case $1 in
+    --corpus) corpora=$2; shift 2 ;;
+    --only) only=,$2,; shift 2 ;;
+    --jobs) jobs=$2; shift 2 ;;
+    --record) record=1; shift ;;
+    --keep) keep=1; shift ;;
+    *) echo "usage: bin/hsi check [--corpus C,...] [--only ID,...] [--jobs N] [--record] [--keep]" >&2; exit 2 ;;
+  esac
+done
+pin=$(cat "$root/tools/hsdump/GHC_VERSION")
+[ "$(ghc --numeric-version)" = "$pin" ] || { echo "hsi check: the host's GHC is not $pin" >&2; exit 1; }
+ref=$root/test/haskell/ref-ghc914.edn
+work=$root/.tmp/hsi/check
+rm -rf "$work"; mkdir -p "$work/res" "$work/out"
+hsi=$("$root/bin/hsi" build)
+libs=${HSI_LIBS:-$root/.tmp/hsi/dumps/stg:$root/.tmp/hsi/dumps-extra/stg}
+"$root/bin/repr-haskell" helper >&2
+helper=$root/.tmp/hsdump/hsdump
+helper_hash=$(cat "$root"/tools/hsdump/*.hs "$root/tools/hsdump/GHC_VERSION" | sha256sum | cut -c1-64)
+libdir=$(ghc --print-libdir)
+export root work hsi libs helper helper_hash libdir ref keep
+export HSI_TIMEOUT=${HSI_TIMEOUT:-60}
+
+plan=$work/plan.txt
+: > "$plan"
+for c in ${corpora//,/ }; do
+  d=$root/test/haskell/eval/$c
+  [ -d "$d" ] || { echo "hsi check: no corpus $c" >&2; exit 2; }
+  for f in "$d"/*.hs; do
+    id=$c/$(basename "$f" .hs)
+    if [ -n "$only" ] && [[ $only != *",$id,"* ]]; then continue; fi
+    echo "$id $d $(basename "$f" .hs)" >> "$plan"
+  done
+done
+
+one() {
+  local id d n
+  read -r id d n <<< "$1"
+  local key prog res=$work/res/${id//\//_}
+  key=$(cat "$d/$n.hs" | sha256sum | cut -c1-16)-${helper_hash:0:16}
+  prog=$root/.tmp/hsi/progs/$id/$key
+  if [ ! -f "$prog/stg/Main.stg.ae" ]; then
+    rm -rf "$root/.tmp/hsi/progs/$id"; mkdir -p "$prog"
+    if ! (cd "$d" && "$helper" stg -o "$prog/stg" --libdir "$libdir" --helper-hash "sha256:$helper_hash" --ghc -O0 \
+            -outputdir "$prog/obj" --files "$n.hs") > "$prog/dump.log" 2>&1; then
+      echo "{:id \"$id\" :result :no-dump}" > "$res"; return 0
+    fi
+  fi
+  local stdin=$work/.empty args=()
+  : > "$stdin"
+  [ -f "$d/$n.stdin" ] && stdin=$d/$n.stdin
+  [ -f "$d/$n.args" ] && read -r -a args < "$d/$n.args"
+  local la=() l
+  IFS=: read -r -a dirs <<< "$libs"
+  for l in "${dirs[@]}"; do [ -d "$l" ] && la+=(--lib "$l"); done
+  local o=$work/out/${id//\//_} st=0 t0 t1
+  t0=$(date +%s.%N)
+  (cd "$d" && ulimit -t "$HSI_TIMEOUT" && env -i PATH=/usr/bin:/bin LANG=C.UTF-8 TZ=UTC HOME="$work" \
+     timeout -s KILL $((HSI_TIMEOUT * 3)) "$hsi" run "${la[@]}" --prog "$prog/stg" --name "$n" -- ${args[@]+"${args[@]}"} \
+     < "$stdin" > "$o.stdout" 2> "$o.stderr") || st=$?
+  t1=$(date +%s.%N)
+  local so se rl rst rso rse
+  so=$(sha256sum < "$o.stdout" | cut -c1-64); se=$(sha256sum < "$o.stderr" | cut -c1-64)
+  rl=$(grep -F "{:id \"$id\" " "$ref" || true)
+  local secs; secs=$(printf '%.2f' "$(echo "$t1 - $t0" | bc)")
+  if [ -z "$rl" ]; then echo "{:id \"$id\" :result :no-ref :run $secs}" > "$res"; return 0; fi
+  rst=$(sed -n 's/.* :status \([^ ]*\) .*/\1/p' <<< "$rl")
+  rso=$(sed -n 's/.* :stdout "\([0-9a-f]*\)".*/\1/p' <<< "$rl")
+  rse=$(sed -n 's/.* :stderr "\([0-9a-f]*\)".*/\1/p' <<< "$rl")
+  if grep -q '^hsi: ' "$o.stderr"; then
+    local msg; msg=$(grep -m1 '^hsi: ' "$o.stderr" | cut -c1-200 | sed 's/\\/\\\\/g; s/"/\\"/g')
+    echo "{:id \"$id\" :result :hsi :status $st :message \"$msg\" :run $secs}" > "$res"
+  elif [ "$st" = "$rst" ] && [ "$so" = "$rso" ] && [ "$se" = "$rse" ]; then
+    echo "{:id \"$id\" :result :pass :run $secs}" > "$res"
+  else
+    local why=""
+    [ "$st" = "$rst" ] || why="$why :status"
+    [ "$so" = "$rso" ] || why="$why :stdout"
+    [ "$se" = "$rse" ] || why="$why :stderr"
+    echo "{:id \"$id\" :result :fail :status $st :differs [${why# }] :run $secs}" > "$res"
+  fi
+  echo "$st" > "$o.status"
+  [ -n "$keep" ] || grep -q "^$id " "$root/test/haskell/hsi-controls.txt" || rm -f "$o.stdout" "$o.stderr"
+}
+export -f one
+tr '\n' '\0' < "$plan" | xargs -0 -P "$jobs" -I{} bash -c 'one "$1"' _ {}
+
+out=$work/results.edn
+{
+  echo ";; hsi's check (bin/hsi check, HE4a): each program of the run corpora on hsi against GHC 9.14.1's -O0 run"
+  echo ";; (test/haskell/ref-ghc914.edn): :pass (status, stdout and stderr byte for byte), :fail (:differs), :hsi (hsi stopped:"
+  echo ";; its message), :no-dump, :no-ref; :run the wall seconds."
+  echo ";; corpora: $corpora"
+  cat "$work"/res/* | sort
+} > "$out"
+total=$(grep -c '^{' "$out" || true)
+for r in pass fail hsi no-dump no-ref; do
+  echo "hsi check: $r $(grep -c ":result :$r" "$out" || true)"
+done
+echo "hsi check: $total programs ($out)"
+# every program that does not pass in a class of test/haskell/divergences.edn (by its :ids)
+unclassed=0
+while read -r id; do
+  c=$(awk -v id="\"$id\"" '/^ *\{:id :/ {cls=$2} index($0, id) && /:ids/ {print cls; exit}' "$root/test/haskell/divergences.edn")
+  if [ -n "$c" ]; then echo "hsi check: $id in class $c"; else echo "hsi check: $id in no class"; unclassed=$((unclassed + 1)); fi
+done < <(grep '^{' "$out" | grep -v ':result :pass' | sed 's/^{:id "\([^"]*\)".*/\1/')
+echo "hsi check: $unclassed not passing in no class of test/haskell/divergences.edn"
+if [ -n "$record" ]; then cp "$out" "$root/test/haskell/check-hsi.edn"; echo "hsi check: recorded test/haskell/check-hsi.edn"; fi
+# the negative controls (test/haskell/hsi-controls.txt): a subject's run judged against another program's reference
+cbad=0
+while read -r subj refid; do
+  case $subj in ''|\#*) continue ;; esac
+  o=$work/out/${subj//\//_}
+  [ -f "$o.stdout" ] || continue
+  rl=$(grep -F "{:id \"$refid\" " "$ref" || true)
+  rst=$(sed -n 's/.* :status \([^ ]*\) .*/\1/p' <<< "$rl"); rso=$(sed -n 's/.* :stdout "\([0-9a-f]*\)".*/\1/p' <<< "$rl")
+  rse=$(sed -n 's/.* :stderr "\([0-9a-f]*\)".*/\1/p' <<< "$rl")
+  so=$(sha256sum < "$o.stdout" | cut -c1-64); se=$(sha256sum < "$o.stderr" | cut -c1-64)
+  if [ "$(cat "$o.status")" = "$rst" ] && [ "$so" = "$rso" ] && [ "$se" = "$rse" ]; then
+    echo "hsi check: control $subj against $refid passes: the judge does not discriminate"; cbad=1
+  else
+    echo "hsi check: control $subj against $refid fails, as it must"
+  fi
+done < "$root/test/haskell/hsi-controls.txt"
+[ $unclassed = 0 ] && [ $cbad = 0 ]

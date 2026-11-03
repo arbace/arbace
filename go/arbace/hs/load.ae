@@ -1,0 +1,373 @@
+(in-ns 'go.arbace.hs) (go/file "load.go" :imports [
+
+
+    ^{:line 4} [fmt "fmt"]
+    ^{:line 5} [os "os"]
+    ^{:line 6} [filepath "path/filepath"]
+    ^{:line 7} [strings "strings"]])
+
+
+
+
+(go/type Loader "Loader loads the STG forms of modules as the program first needs a name of theirs (the libraries\nlazily by module, HES14's image later).\n" (struct
+    ^{:line 13 :tag (* Machine)} m
+    ^{:line 14 :tag (map string string)} units ; unit id → directory of its MODULE.stg.ae
+    ^{:line 15 :tag (map string (* Module))} mods
+    ^{:line 16 :tag (map string (* Global))} globals
+    ^{:line 17 :tag (map string (* DataCon))} dcs
+    ^{:line 18 :tag (map string (* TyCon))} tycons
+    ^{:line 19 :tag int} Loaded
+    ^{:line 20 :tag int64} Bytes))
+
+
+
+(go/type Module "Module is a loaded module.\n" (struct
+    ^{:line 25 :tag (* Loader)} ld
+    ^{:line 26 :tag string} Key
+    ^{:line 27 :tag string} File
+    ^{:line 28 :tag (map string (* Global))} local
+    ^{:line 29 :tag (map (* Lambda) List)} forms))
+
+
+(go/type loadError (struct ^string msg))
+
+^{:go/end 34} (go/method Error ^string [^{:tag (* loadError)} e] (.-msg e))
+
+^{:go/end 38} (go/func lfail [^string f & ^{:tag (slice any)} a]
+  (panic (addr (lit loadError (fmt/Sprintf f (spread a))))))
+
+
+
+
+^{:go/end 81} (go/func newLoader "newLoader indexes the units: each directory of libs (a dump's stg/, its packages as subdirectories,\nor a package's directory) named by the :unit of its first module's header; prog is unit main's.\n" [^{:tag (* Machine)} m ^{:tag (slice string)} libs ^string prog] :results [(* Loader) error]
+  (let [ld (addr ^{:go/breaks [10]} (lit Loader :m m :units (lit (map string string)) :mods (lit (map string (* Module))) :globals (lit (map string (* Global)))
+          :dcs (lit (map string (* DataCon))) :tycons (lit (map string (* TyCon)))))
+      ^{:line 45 :tag (slice string)} dirs (zero (slice string))]
+    (range [_ l libs]
+      (let [(values es err) (os/ReadDir l)]
+        (when (!= err nil)
+          (return nil err))
+
+        (let [has false]
+          (range [_ e es]
+            (cond (.IsDir e)
+              (set! dirs (append dirs (filepath/Join l (.Name e))))
+              (strings/HasSuffix (.Name e) ".stg.ae")
+              (set! has true)))
+
+
+          (when has
+            (set! dirs (append dirs l))))))
+
+
+    (range [_ d dirs]
+      (let [(values u err) (unitOf d)]
+        (when (or (!= err nil) (== u ""))
+          (continue))
+
+        (when [(values _ ok) (aget (.-units ld) u)] (not ok)
+          (aset (.-units ld) u d))))
+
+
+    (when (!= prog "")
+      (aset (.-units ld) "main" prog))
+
+    ;; GHC.Internal.Prim's names: the void token and its kin
+    (range [_ n (lit (slice string) "void#" "realWorld#" "coercionToken#" "proxy#")]
+      (aset (.-globals ld) (+ "ghc-internal:GHC.Internal.Prim/" n) (addr (lit Global :Name n :ok true))))
+
+    (aset (.-globals ld) "ghc-internal:GHC.Internal.Prim/nullAddr#" (addr (lit Global :Name "nullAddr#" :ok true :V (conv uint64 0))))
+    (return ld nil)))
+
+
+
+^{:go/end 113} (go/func unitOf "unitOf is the :unit of the first module of directory d.\n" [^string d] :results [string error]
+  (let [(values es err) (os/ReadDir d)]
+    (when (!= err nil)
+      (return "" err))
+
+    (range [_ e es]
+      (when (not (strings/HasSuffix (.Name e) ".stg.ae"))
+        (continue))
+
+      (let [(values f err) (os/Open (filepath/Join d (.Name e)))]
+        (when (!= err nil)
+          (return "" err))
+
+        (let [buf (make (slice byte) 4096)
+            (values n _) (.Read f buf)]
+          (.Close f)
+          (let [s (conv string (subslice buf _ n))
+              ^{:line 101} i (strings/Index s ":unit \"")]
+            (when (< i 0)
+              (return "" nil))
+
+            (set! s (subslice s (+ i 7)))
+            (let [j (strings/IndexByte s \")]
+              (when (< j 0)
+                (return "" nil))
+
+              (return (subslice s _ j) nil))))))
+
+    (return "" nil)))
+
+
+^{:go/end 126} (go/method global ^{:tag (* Global)} [^{:tag (* Loader)} ld ^string name]
+  (let [g (aget (.-globals ld) name)]
+    (when (== g nil)
+      (set! g (addr (lit Global :Name name :mod (moduleOf name))))
+      (when (isTuple name)
+        ;; an unboxed tuple's worker as a value: only the empty one, a void value
+        (set! (.-ok g) true))
+
+      (aset (.-globals ld) name g))
+
+    ^{:line 125} g))
+
+
+^{:go/end 136} (go/method global ^{:tag (* Global)} [^{:tag (* Module)} md ^string name]
+  (when [g (aget (.-local md) name)] (!= g nil)
+    (return g))
+
+  (when (< (splitName name) 0)
+    (lfail "%s: unbound name %s" (.-Key md) name))
+
+  (.global (.-ld md) name))
+
+
+
+^{:go/end 145} (go/method globalValue "globalValue is a global's value, its module loaded.\n" ^Value [^{:tag (* Loader)} ld ^string name]
+  (let [g (.global ld name)]
+    (when (not (.-ok g))
+      (.force ld g))
+
+    (.-V g)))
+
+
+
+^{:go/end 159} (go/method force "force loads a global's module.\n" [^{:tag (* Loader)} ld ^{:tag (* Global)} g]
+  (when (.-ok g)
+    (return))
+
+  (when (== (.-mod g) "")
+    (lfail "unbound global %s" (.-Name g)))
+
+  (.load ld (.-mod g))
+  (when (not (.-ok g))
+    (lfail "no binding of %s in its module" (.-Name g))))
+
+
+
+^{:go/end 168} (go/method dataCon ^{:tag (* DataCon)} [^{:tag (* Loader)} ld ^string name]
+  (let [d (aget (.-dcs ld) name)]
+    (when (== d nil)
+      (set! d (addr (lit DataCon :Name name)))
+      (aset (.-dcs ld) name d))
+
+    ^{:line 167} d))
+
+
+^{:go/end 177} (go/method tyCon ^{:tag (* TyCon)} [^{:tag (* Loader)} ld ^string name]
+  (let [t (aget (.-tycons ld) name)]
+    (when (== t nil)
+      (set! t (addr (lit TyCon :Name name)))
+      (aset (.-tycons ld) name t))
+
+    ^{:line 176} t))
+
+
+
+^{:go/end 190} (go/method loadDC "loadDC fills a data constructor's record (its module loaded).\n" [^{:tag (* Loader)} ld ^{:tag (* DataCon)} d]
+  (when (.-ok d)
+    (return))
+
+  (when [mk (moduleOf (.-Name d))] (!= mk "")
+    (.load ld mk))
+
+  (when (not (.-ok d))
+    (lfail "no data constructor %s" (.-Name d))))
+
+
+
+^{:go/end 202} (go/method loadTC [^{:tag (* Loader)} ld ^{:tag (* TyCon)} t]
+  (when (.-ok t)
+    (return))
+
+  (when [mk (moduleOf (.-Name t))] (!= mk "")
+    (.load ld mk))
+
+  (when (not (.-ok t))
+    (lfail "no type constructor %s" (.-Name t))))
+
+
+
+
+^{:go/end 237} (go/method load "load loads the module \"UNIT:MODULE\".\n" [^{:tag (* Loader)} ld ^string key]
+  (when [(values _ ok) (aget (.-mods ld) key)] ok
+    (return))
+
+  (let [i (strings/IndexByte key \:)
+      (values unit mod) (values (subslice key _ i) (subslice key (+ i 1)))]
+    (when (and (== unit "main") (== mod ":Main"))
+      (.load ld "main:Main")
+      (aset (.-mods ld) key (aget (.-mods ld) "main:Main"))
+      (return))
+
+    (let [(values dir ok) (aget (.-units ld) unit)]
+      (when (not ok)
+        (lfail "no STG for the unit %s (module %s)" unit mod))
+
+      (let [file (filepath/Join dir (+ mod ".stg.ae"))
+          (values src err) (os/ReadFile file)]
+        (when (!= err nil)
+          (lfail "no STG for the module %s: %v" key err))
+
+        (let [(values forms ^:assign err) (readAll src)]
+          (when (!= err nil)
+            (lfail "%s: %v" file err))
+
+          (inc! (.-Loaded ld))
+          (set! (.-Bytes ld) + (conv int64 (len src)))
+          (let [md (addr (lit Module :ld ld :Key key :File file :local (lit (map string (* Global))) :forms (lit (map (* Lambda) List))))]
+            (aset (.-mods ld) key md)
+            (when (.-Trace (.-m ld))
+              (fmt/Fprintf os/Stderr "hsi: load %s (%d bytes)\n" key (len src)))
+
+            (.loadForms md forms)))))))
+
+
+(go/type pendCon (struct
+    ^{:line 240 :tag (* Con)} c
+    ^{:line 241 :tag Vec} args))
+
+
+
+
+
+^{:go/end 329} (go/method loadForms "loadForms loads a module's forms in three phases: the binders (every top-level name of the module), the\nobjects (closures compiled when first entered, constructors, strings), then the constructors' fields (other\nmodules loaded as their names need, so two modules' constructors may refer to each other).\n" [^{:tag (* Module)} md ^{:tag (slice any)} forms]
+  (let [ld (.-ld md)]
+    ;; phase 0: the binders
+    (let-type [bindF (struct
+          ^{:line 251 :tag (* Global)} g
+          ^{:line 252 :tag List} rhs)]
+
+      (let [^{:tag (slice bindF)} binds (zero (slice bindF))
+          ^{:line 255 :tag (slice List)} strs (zero (slice List))
+          ^{:line 256} reg ^{:go/end 264} (fn ^{:tag (* Global)} [^any b]
+            (let [(values n _) (binderName b)]
+              (when (>= (splitName n) 0)
+                (return (.global ld n)))
+
+              (let [g (addr (lit Global :Name n))]
+                (aset (.-local md) n g)
+                ^{:line 263} g)))]
+
+        (range [_ f forms]
+          (let [(values h l) (head f)]
+            (switch h
+              (case ["stg/module"])
+              (case ["stg/data"]
+                (.loadData md l))
+              (case ["string"]
+                (reg (aget l 1))
+                (set! strs (append strs l)))
+              (case ["bind"]
+                (set! binds (append binds (lit bindF (reg (aget l 1)) l))))
+              (case ["rec"]
+                (range [_ x (subslice l 1)]
+                  (let [(values _ xl) (head x)]
+                    (set! binds (append binds (lit bindF (reg (aget xl 1)) xl))))))
+
+              (default
+                (lfail "%s: unknown top-level form %s" (.-Key md) h)))))
+
+
+        ;; phase 1: the objects
+        (range [_ l strs]
+          (let [(values n _) (binderName (aget l 1))
+              (values s _) (assert string (aget l 2))
+              ^{:line 289} g (.global md n)]
+            (set! (.-V g) (.staticString (.-m ld) (latin1 s)))
+            (set! (.-ok g) true)))
+
+        (let [^{:tag (slice pendCon)} cons (zero (slice pendCon))]
+          (range [_ b binds]
+            (let [(values rh rl) (head (aget (.-rhs b) 2))]
+              (switch rh
+                (case ["closure"]
+                  (let [(values upd _) (assert Kw (aget rl 1))
+                      (values args _) (assert Vec (aget rl 3))
+                      ^{:line 300} l (addr (lit Lambda :Name (.-Name (.-g b)) :Upd (aget (conv string upd) 0) :NArgs (len args) :mod md))]
+                    (aset (.-forms md) l rl)
+                    (if (> (len args) 0)
+                      (set! (.-V (.-g b)) (addr (lit Fun :L l)))
+
+                      (set! (.-V (.-g b)) (addr (lit Thunk :L l))))))
+
+                (case ["rcon"]
+                  (let [(values dcn _) (assert string (aget rl 1))
+                      (values args _) (assert Vec (aget rl 2))
+                      ^{:line 310} c (addr (lit Con :DC (.dataCon ld dcn)))]
+                    (set! (.-V (.-g b)) c)
+                    (when (> (len args) 0)
+                      (set! cons (append cons (lit pendCon c args))))))
+
+                (default
+                  (lfail "%s: bad right-hand side %s" (.-Key md) rh)))
+
+              (set! (.-ok (.-g b)) true)))
+
+          ;; phase 2: the constructors' fields (other modules loaded as their names need)
+          (let [s (addr (lit scope :mod md :vars (lit (map string vinfo))))]
+            (range [_ p cons]
+              (set! (.-F (.-c p)) (make (slice Value) (len (.-args p))))
+              (range [i a (.-args p)]
+                (let [at (.atom s a)]
+                  (aset (.-F (.-c p)) i (.get at (.-m ld) nil)))))))))))
+
+
+
+
+
+^{:go/end 341} (go/method compileTop "compileTop compiles a top-level closure's body when it is first entered.\n" [^{:tag (* Loader)} ld ^{:tag (* Lambda)} l]
+  (let [md (.-mod l)
+      ^{:line 334} f (aget (.-forms md) l)]
+    (when (== f nil)
+      (lfail "no code for %s" (.-Name l)))
+
+    (let [c (.compileLambda md (.-Name l) f 0)]
+      (delete (.-forms md) l)
+      (set! (values (.-NSlots l) (.-NFree l) (.-Body l)) (values (.-NSlots c) (.-NFree c) (.-Body c))))))
+
+
+^{:go/end 374} (go/method loadData [^{:tag (* Module)} md ^List l]
+  (let [ld (.-ld md)
+      (values tn _) (assert string (aget l 1))
+      ^{:line 346} tc (.tyCon ld tn)
+      (values dcs _) (assert Vec (aget l 2))]
+    (set! (.-Cons tc) nil)
+    (range [_ x dcs]
+      (let [(values _ dl) (head x)
+          ;; (dc DATACON TAG [FIELD-REPS...] [MARK...] WORKER?)
+          (values n _) (assert string (aget dl 1))
+          ^{:line 353} d (.dataCon ld n)]
+        (set! (.-Tag d) (conv int (asInt (aget dl 2))))
+        (let [(values reps _) (assert Vec (aget dl 3))
+            (values marks _) (assert Vec (aget dl 4))]
+          (set! (.-Arity d) 0)
+          (range [_ r reps]
+            (when (not (isVoid r))
+              (inc! (.-Arity d))))
+
+
+          (set! (.-Strict d) (make (slice bool) (len marks)))
+          (range [i mk marks]
+            (when [(values k ok) (assert Kw mk)] (and ok (== k "strict"))
+              (aset (.-Strict d) i true)))
+
+
+          (set! (.-TyCon d) tc)
+          (set! (.-ok d) true)
+          (set! (.-Cons tc) (append (.-Cons tc) d)))))
+
+    (set! (.-ok tc) true)))

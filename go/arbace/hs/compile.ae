@@ -1,0 +1,631 @@
+(in-ns 'go.arbace.hs) (go/file "compile.go" :imports [
+
+
+    ^{:line 4} [fmt "fmt"]
+    ^{:line 5} [math "math"]
+    ^{:line 6} [big "math/big"]
+    ^{:line 7} [strings "strings"]])
+
+
+
+
+
+
+(go/type Expr "The compiled code: each closure's body a tree of nodes over the slots of its frame (its free\nvariables first, then its arguments, then every local binder of the body, join points' arguments\namong them). A node's eval returns the next node to run in a frame (a tail position), or nil when it\nhas put its value in the machine's return registers.\n" (interface
+    (eval [^{:tag (* Machine)} m ^{:tag (slice Value)} env] :results [Expr (slice Value)])))
+
+
+
+(go/type Atom "Atom is an argument: a slot, a global or a literal.\n" (struct
+    ^{:line 20 :tag uint8} kind ; aSlot, aGlobal, aLit
+    ^{:line 21 :tag int} slot
+    ^{:line 22 :tag (* Global)} g
+    ^{:line 23 :tag Value} lit))
+
+
+(go/const
+  ^{:line 27} [^{:tag uint8 :val 0} aSlot iota]
+  ^{:line 28} [^{:val 1} aGlobal]
+  ^{:line 29} [^{:val 2} aLit])
+
+
+^{:go/end 44} (go/method get ^Value [^{:tag (* Atom)} a ^{:tag (* Machine)} m ^{:tag (slice Value)} env]
+  (switch (.-kind a)
+    (case [aSlot]
+      (return (aget env (.-slot a))))
+    (case [aGlobal]
+      (let [g (.-g a)]
+        (when (not (.-ok g))
+          (.force (.-ld m) g))
+
+        (return (.-V g)))))
+
+  (.-lit a))
+
+
+^{:go/end 52} (go/method atoms ^{:tag (slice Value)} [^{:tag (* Machine)} m ^{:tag (slice Atom)} as ^{:tag (slice Value)} env]
+  (let [vs (make (slice Value) (len as))]
+    (range [i as]
+      (aset vs i (.get (aget as i) m env)))
+
+    ^{:line 51} vs))
+
+
+
+(go/type scope "scope is a closure's compile-time frame.\n" (struct
+    ^{:line 56 :tag (* Module)} mod
+    ^{:line 57 :tag int} n
+    ^{:line 58 :tag (map string vinfo)} vars
+    ^{:line 59 :tag string} name
+    ^{:line 60 :tag int} depth))
+
+
+(go/type vinfo (struct
+    ^{:line 64 :tag int} slot
+    ^{:line 65 :tag (* Join)} join))
+
+
+(go/type compileError (struct ^string msg))
+
+^{:go/end 70} (go/method Error ^string [^{:tag (* compileError)} e] (.-msg e))
+
+^{:go/end 74} (go/func cfail [^string f & ^{:tag (slice any)} a]
+  (panic (addr (lit compileError (fmt/Sprintf f (spread a))))))
+
+
+^{:go/end 79} (go/method newSlot ^int [^{:tag (* scope)} s]
+  (inc! (.-n s))
+  (- (.-n s) 1))
+
+
+
+^{:go/end 93} (go/method bind "bind gives name a fresh slot; the returned func restores the outer binding.\n" [^{:tag (* scope)} s ^string name] :results [int (func [])]
+  (let [(values old had) (aget (.-vars s) name)
+      ^{:line 84} k (.newSlot s)]
+    (aset (.-vars s) name (lit vinfo :slot k))
+    (return k ^{:go/end 92} (fn []
+        (if had
+          (aset (.-vars s) name old)
+
+          (delete (.-vars s) name))))))
+
+
+
+
+^{:go/end 105} (go/func binderName [^any f] :results [string any]
+  (let [(values v ok) (assert Vec f)]
+    (when (or (not ok) (!= (len v) 2))
+      (cfail "bad binder %v" f))
+
+    (let [(values n ^:assign ok) (assert string (aget v 0))]
+      (when (not ok)
+        (cfail "bad binder %v" f))
+
+      (return n (aget v 1)))))
+
+
+
+^{:go/end 111} (go/func isVoid "isVoid reports a binder's representations of none (:v).\n" ^bool [^any reps]
+  (let [(values k ok) (assert Kw reps)]
+    (and ok (== k "v"))))
+
+
+^{:go/end 120} (go/func head [^any f] :results [Sym List]
+  (let [(values l ok) (assert List f)]
+    (when (or (not ok) (== (len l) 0))
+      (return "" nil))
+
+    (let [(values h _) (assert Sym (aget l 0))]
+      (return h l))))
+
+
+
+^{:go/end 138} (go/method atom "atom compiles an argument.\n" ^Atom [^{:tag (* scope)} s ^any f]
+  (type-switch [x f]
+    (case [string]
+      (when [(values vi ok) (aget (.-vars s) x)] ok
+        (when (!= (.-join vi) nil)
+          (cfail "join point %s as an argument" x))
+
+        (return (lit Atom :kind aSlot :slot (.-slot vi))))
+
+      (return (lit Atom :kind aGlobal :g (.global (.-mod s) x))))
+    (case [List]
+      (return (lit Atom :kind aLit :lit (.literal (.-mod s) x)))))
+
+  (cfail "bad atom %v" f)
+  (lit Atom))
+
+
+^{:go/end 150} (go/method atomList ^{:tag (slice Atom)} [^{:tag (* scope)} s ^any f]
+  (let [(values v ok) (assert Vec f)]
+    (when (not ok)
+      (cfail "bad atoms %v" f))
+
+    (let [as (make (slice Atom) (len v))]
+      (range [i x v]
+        (aset as i (.atom s x)))
+
+      ^{:line 149} as)))
+
+
+^{:go/breaks [5] :go/end 168} (go/func asInt ^int64 [^any f]
+  (type-switch [x f]
+    (case [int64]
+      (return x))
+    (case [uint64]
+      (return (conv int64 x)))
+    (case [(* big/Int)]
+      (when (.IsUint64 x)
+        (return (conv int64 (.Uint64 x))))
+
+      ;; two's complement truncation
+      (let [m (.And (new big/Int) x (.SetUint64 (new big/Int) math/MaxUint64))]
+        (return (conv int64 (.Uint64 m))))))
+
+  (cfail "bad integer %v" f)
+  0)
+
+
+
+^{:go/end 232} (go/method literal "literal is a literal's value (STG-SPEC §5).\n" ^Value [^{:tag (* Module)} md ^List l]
+  ^{:go/breaks [4]} (let [(values h _) (assert Sym (aget l 0))
+      ^{:line 173} arg ^{:go/end 178} (fn ^any []
+        (when (< (len l) 2)
+          (cfail "bad literal %v" l))
+
+        (aget l 1))]
+
+    (switch h
+      (case ["int" "int64"]
+        (return (asInt (arg))))
+      (case ["int8"]
+        (return (conv int64 (conv int8 (asInt (arg))))))
+      (case ["int16"]
+        (return (conv int64 (conv int16 (asInt (arg))))))
+      (case ["int32"]
+        (return (conv int64 (conv int32 (asInt (arg))))))
+      (case ["char"]
+        (return (asInt (arg))))
+      (case ["word" "word64"]
+        (return (conv uint64 (asInt (arg)))))
+      (case ["word8"]
+        (return (conv uint64 (conv uint8 (asInt (arg))))))
+      (case ["word16"]
+        (return (conv uint64 (conv uint16 (asInt (arg))))))
+      (case ["word32"]
+        (return (conv uint64 (conv uint32 (asInt (arg))))))
+      (case ["double"]
+        (return (math/Float64frombits (conv uint64 (asInt (arg))))))
+      (case ["float"]
+        (return (math/Float32frombits (conv uint32 (asInt (arg))))))
+      (case ["str"]
+        (let [(values s _) (assert string (arg))]
+          (return (.staticString (.-m (.-ld md)) (latin1 s)))))
+      (case ["nulladdr"]
+        (return (conv uint64 0)))
+      (case ["label"]
+        (let [(values s _) (assert string (arg))]
+          (return (.label (.-m (.-ld md)) s))))
+      (case ["rubbish"]
+        (when (>= (len l) 3)
+          (type-switch [r (aget l 2)]
+            (case [Kw]
+              (switch r
+                (case ["int" "int8" "int16" "int32" "int64"]
+                  (return (conv int64 0)))
+                (case ["word" "word8" "word16" "word32" "word64" "addr"]
+                  (return (conv uint64 0)))
+                (case ["double"]
+                  (return (conv float64 0)))
+                (case ["float"]
+                  (return (conv float32 0)))))))
+
+
+
+        (return rubbish))
+      (case ["bignat"]
+        (cfail "bignat literal")))
+
+    (cfail "unknown literal %v" l)
+    nil))
+
+
+
+(go/var ^{:doc "rubbish is a LitRubbish of a lifted or unlifted type: never entered.\n"} rubbish (addr (lit Con :DC (addr (lit DataCon :Name "rubbish" :ok true)))))
+
+
+^{:go/end 244} (go/func litKey "literal keys of case alternatives: integers by their 64 bits, floats as themselves.\n" ^Value [^Value v]
+  (type-switch [x v]
+    (case [uint64]
+      (return (conv int64 x))))
+
+  ^{:line 243} v)
+
+
+
+^{:go/end 267} (go/method compileLambda "compileLambda compiles (closure UPD [FREE...] [BINDER...] EXPR) in a frame of its own.\n" ^{:tag (* Lambda)} [^{:tag (* Module)} md ^string name ^List f ^int depth]
+  (when (!= (len f) 5)
+    (cfail "bad closure %v" f))
+
+  (let [(values upd _) (assert Kw (aget f 1))
+      (values free _) (assert Vec (aget f 2))
+      (values args _) (assert Vec (aget f 3))
+      ^{:line 254} s (addr (lit scope :mod md :vars (lit (map string vinfo)) :name name :depth depth))]
+    (range [_ x free]
+      (let [(values n _) (assert string x)]
+        (aset (.-vars s) n (lit vinfo :slot (.newSlot s)))))
+
+    (range [_ a args]
+      (let [(values n _) (binderName a)]
+        (aset (.-vars s) n (lit vinfo :slot (.newSlot s)))))
+
+    (let [l (addr (lit Lambda :Name name :Upd (aget (conv string upd) 0) :NFree (len free) :NArgs (len args) :mod md))]
+      (set! (.-Body l) (.expr s (aget f 4)))
+      (set! (.-NSlots l) (.-n s))
+      ^{:line 266} l)))
+
+
+
+^{:go/end 277} (go/method freeAtoms "freeAtoms are a closure's free variables as atoms of the enclosing frame.\n" ^{:tag (slice Atom)} [^{:tag (* scope)} s ^List f]
+  (let [(values free _) (assert Vec (aget f 2))
+      ^{:line 272} as (make (slice Atom) (len free))]
+    (range [i x free]
+      (aset as i (.atom s x)))
+
+    ^{:line 276} as))
+
+
+
+
+^{:go/end 358} (go/method expr "expr compiles an expression. minDouble#'s and maxDouble#'s (and Float#'s) literal operand goes second:\nGHC's code generator emits minsd reg, [lit], and the operands' order decides a NaN's and a zero's result.\n" ^Expr [^{:tag (* scope)} s ^any f]
+  ^{:go/breaks [5]} (let [(values h l) (head f)]
+    (switch h
+      (case ["app"]
+        (let [(values fn _) (assert string (aget l 1))
+            ^{:line 286} as (.atomList s (aget l 2))]
+          (when [(values vi ok) (aget (.-vars s) fn)] (and ok (!= (.-join vi) nil))
+            (when (!= (len as) (.-n (.-join vi)))
+              (cfail "jump to %s with %d arguments, %d expected" fn (len as) (.-n (.-join vi))))
+
+            (return (addr (lit Jump :j (.-join vi) :args as))))
+
+          (let [fa (.atom s fn)]
+            (when (== (len as) 0)
+              (return (addr (lit Enter :f fa))))
+
+            (return (addr (lit App :f fa :args as))))))
+      (case ["con"]
+        (let [(values dc _) (assert string (aget l 1))
+            ^{:line 300} as (.atomList s (aget l 2))]
+          (when (isTuple dc)
+            (return (addr (lit Tuple :args as))))
+
+          (return (addr (lit ConE :dc (.dataCon (.-ld (.-mod s)) dc) :args as)))))
+      (case ["primop"]
+        (let [(values op _) (assert string (aget l 1))
+            ^{:line 307} as (.atomList s (aget l 2))
+            ^{:line 308} p (aget primops op)]
+          (when (== p nil)
+            (return (addr (lit Unimpl :what (+ "primop " op)))))
+
+          (let [pe (addr (lit PrimE :p p :args as))]
+            (switch op
+              (case ["minDouble#" "maxDouble#" "minFloat#" "maxFloat#"]
+                ;; GHC's code generator puts a literal operand second (minsd reg, [lit]): the order decides
+                ;; a NaN's and a zero's result
+                (when (and (== (len as) 2) (== (.-kind (aget as 0)) aLit) (!= (.-kind (aget as 1)) aLit))
+                  (set! (.-args pe) (lit (slice Atom) (aget as 1) (aget as 0))))))
+
+
+            (when (== op "tagToEnum#")
+              (when (> (len l) 3)
+                (when [(values mm ok) (assert Map (aget l 3))] ok
+                  (when [(values tc ok) (assert string (aget mm (conv Kw "tycon")))] ok
+                    (set! (.-tc pe) (.tyCon (.-ld (.-mod s)) tc)))))
+
+
+
+              (when (== (.-tc pe) nil)
+                (cfail "tagToEnum# without its type")))
+
+
+            (return pe))))
+      (case ["primcall"]
+        (let [(values lbl _) (assert string (aget l 1))
+            ^{:line 336} as (.atomList s (aget l 3))]
+          (when [p (aget primcalls lbl)] (!= p nil)
+            (return (addr (lit PrimE :p p :args as))))
+
+          (return (addr (lit Unimpl :what (+ "primcall " lbl))))))
+      (case ["ffi"]
+        (return (.ffi s l)))
+      (case ["case"]
+        (return (.caseExpr s l)))
+      (case ["let"]
+        (return (.let s (aget l 1) (aget l 2))))
+      (case ["letne"]
+        (return (.letne s (aget l 1) (aget l 2))))
+      (case ["tick"]
+        (return (.expr s (aget l 2)))))
+
+    (when (!= l nil)
+      ;; a literal
+      (return (addr (lit Lit :v (.literal (.-mod s) l)))))
+
+    (cfail "bad expression %v" f)
+    nil))
+
+
+
+^{:go/end 370} (go/func isTuple "isTuple reports an unboxed tuple's constructor (returned as several values, STG-SPEC §3).\n" ^bool [^string dc]
+  (let [o (occ dc)]
+    (when (== o "MkSolo#")
+      (return true))
+
+    (when (or (not (strings/HasPrefix o "(#")) (not (strings/HasSuffix o "#)")))
+      (return false))
+
+    (== (strings/Trim (subslice o 2 (- (len o) 2)) ", ") "")))
+
+
+^{:go/end 434} (go/method caseExpr ^Expr [^{:tag (* scope)} s ^List l]
+  (when (!= (len l) 5)
+    (cfail "bad case"))
+
+  (let [c (addr (lit CaseE :bslot -1))]
+    (set! (.-scrut c) (.expr s (aget l 1)))
+    (let [(values bn breps) (binderName (aget l 2))
+        (values at _) (assert List (aget l 3))
+        (values ak _) (assert Sym (aget at 0))
+        ^{:line 381 :tag (func [])} restore (zero (func []))]
+      (switch ak
+        (case ["multi"]
+          (set! (.-kind c) kMulti))
+        (case ["alg"]
+          (set! (.-kind c) kAlg))
+        (case ["prim"]
+          (set! (.-kind c) kPrim))
+        (case ["poly"]
+          (set! (.-kind c) kPoly)))
+
+      (when (and (!= (.-kind c) kMulti) (not (isVoid breps)))
+        (set! (values (.-bslot c) restore) (.bind s bn))
+        (defer (restore)))
+
+      (let [(values alts _) (assert Vec (aget l 4))]
+        (range [_ a alts]
+          (let [(values al _) (assert List a)]
+            (when (!= (len al) 4)
+              (cfail "bad alternative"))
+
+            (let [(values bs _) (assert Vec (aget al 2))
+                ^{:line 403} ca (addr (lit alt))
+                ^{:line 404 :tag (slice (func []))} rs (zero (slice (func [])))]
+              (range [_ b bs]
+                (let [(values n reps) (binderName b)
+                    (values k r) (.bind s n)]
+                  (set! rs (append rs r))
+                  (set! _ reps)
+                  (set! (.-binds ca) (append (.-binds ca) k))))
+
+              (set! (.-body ca) (.expr s (aget al 3)))
+              (for [i (- (len rs) 1)] (>= i 0) (dec! i)
+                ((aget rs i)))
+
+              (type-switch [con (aget al 1)]
+                (case [Kw]
+                  (set! (.-def c) ca))
+                (case [string]
+                  (if (== (.-kind c) kMulti)
+                    (set! (.-def c) ca)
+                    (do
+                      (set! (.-dc ca) (.dataCon (.-ld (.-mod s)) con))
+                      (set! (.-alts c) (append (.-alts c) ca)))))
+
+                (case [List]
+                  (set! (.-lit ca) (litKey (.literal (.-mod s) con)))
+                  (set! (.-lits c) (append (.-lits c) ca)))
+                (default
+                  (cfail "bad alternative's constructor %v" (aget al 1)))))))
+
+
+        ^{:line 433} c))))
+
+
+
+^{:go/end 495} (go/method let "let compiles (let BIND EXPR): closures and constructors allocated in the frame's slots.\n" ^Expr [^{:tag (* scope)} s ^any b ^any body]
+  (let [(values h bl) (head b)
+      ^{:line 439 :tag (slice List)} binds (zero (slice List))
+      ^{:line 440} rec false]
+    (switch h
+      (case ["bind"]
+        (set! binds (lit (slice List) bl)))
+      (case ["rec"]
+        (set! rec true)
+        (range [_ x (subslice bl 1)]
+          (let [(values _ xl) (head x)]
+            (set! binds (append binds xl)))))
+
+      (default
+        (cfail "bad binding %v" b)))
+
+    (let [le (addr (lit LetE :rec rec))
+        ^{:line 454 :tag (slice (func []))} rs (zero (slice (func [])))
+        ^{:line 455} slots (make (slice int) (len binds))]
+      (when rec
+        (range [i bd binds]
+          (let [(values n _) (binderName (aget bd 1))
+              (values k r) (.bind s n)]
+            (aset slots i k)
+            (set! rs (append rs r)))))
+
+
+      (range [i bd binds]
+        (let [(values n _) (binderName (aget bd 1))
+            (values rh rl) (head (aget bd 2))
+            ^{:line 467} lb (lit letBind)]
+          (switch rh
+            (case ["closure"]
+              (set! (.-lam lb) (.compileLambda (.-mod s) (+ (.-name s) "/" n) rl (+ (.-depth s) 1)))
+              (set! (.-free lb) (.freeAtoms s rl)))
+            (case ["rcon"]
+              (let [(values dc _) (assert string (aget rl 1))]
+                (set! (.-args lb) (.atomList s (aget rl 2)))
+                (when (isTuple dc)
+                  (cfail "rcon of an unboxed tuple"))
+
+                (set! (.-dc lb) (.dataCon (.-ld (.-mod s)) dc))))
+            (default
+              (cfail "bad right-hand side %v" (aget bd 2))))
+
+          (when (not rec)
+            (let [(values k r) (.bind s n)]
+              (aset slots i k)
+              (set! rs (append rs r))))
+
+          (set! (.-slot lb) (aget slots i))
+          (set! (.-binds le) (append (.-binds le) lb))))
+
+      (set! (.-body le) (.expr s body))
+      (for [i (- (len rs) 1)] (>= i 0) (dec! i)
+        ((aget rs i)))
+
+      ^{:line 494} le)))
+
+
+
+^{:go/end 555} (go/method letne "letne compiles join points: their arguments are slots of this frame, a jump assigns them.\n" ^Expr [^{:tag (* scope)} s ^any b ^any body]
+  (let [(values h bl) (head b)
+      ^{:line 500 :tag (slice List)} binds (zero (slice List))]
+    (switch h
+      (case ["bind"]
+        (set! binds (lit (slice List) bl)))
+      (case ["rec"]
+        (range [_ x (subslice bl 1)]
+          (let [(values _ xl) (head x)]
+            (set! binds (append binds xl))))))
+
+
+    (let-type [pend (struct
+          ^{:line 511 :tag (* Join)} j
+          ^{:line 512 :tag Vec} args
+          ^{:line 513 :tag any} body)]
+
+      (let [^{:tag (slice pend)} ps (zero (slice pend))
+          ^{:line 516 :tag (slice (func []))} rs (zero (slice (func [])))]
+        (range [_ bd binds]
+          (let [(values n _) (binderName (aget bd 1))
+              (values rh rl) (head (aget bd 2))]
+            (when (!= rh "closure")
+              (cfail "letne of %v" rh))
+
+            (let [(values args _) (assert Vec (aget rl 3))
+                ^{:line 524} j (addr (lit Join :name n :n (len args)))
+                (values old had) (aget (.-vars s) n)]
+              (aset (.-vars s) n (lit vinfo :join j))
+              (set! rs (append rs ^{:go/end 533} (fn []
+                    (if had
+                      (aset (.-vars s) n old)
+
+                      (delete (.-vars s) n)))))
+
+
+              (set! ps (append ps (lit pend j args (aget rl 4)))))))
+
+        ;; the join points' bodies see each other (rec) and themselves
+        (range [_ p ps]
+          (let [^{:tag (slice (func []))} ars (zero (slice (func [])))]
+            (range [_ a (.-args p)]
+              (let [(values n _) (binderName a)
+                  (values k r) (.bind s n)]
+                (set! ars (append ars r))
+                (set! (.-slots (.-j p)) (append (.-slots (.-j p)) k))))
+
+            (set! (.-body (.-j p)) (.expr s (.-body p)))
+            (for [i (- (len ars) 1)] (>= i 0) (dec! i)
+              ((aget ars i)))))
+
+
+        (let [e (.expr s body)]
+          (for [i (- (len rs) 1)] (>= i 0) (dec! i)
+            ((aget rs i)))
+
+          ^{:line 554} e)))))
+
+
+^{:go/end 579} (go/method ffi ^Expr [^{:tag (* scope)} s ^List l]
+  ;; (ffi TARGET CONV SAFETY [ATOM...] REPS)
+  (when (!= (len l) 6)
+    (cfail "bad ffi"))
+
+  (let [(values tgt tl) (head (aget l 1))
+      ^{:line 563} fe (addr (lit FFIE :args (.atomList s (aget l 4))))]
+    (type-switch [r (aget l 5)]
+      (case [Kw]
+        (set! (.-res fe) (conv string r)))
+      (case [Vec]
+        (set! (.-res fe) "multi")))
+
+    (switch tgt
+      (case ["static"]
+        (let [(values sym _) (assert string (aget tl 1))]
+          (set! (.-sym fe) (cSymbol sym))))
+      (case ["dynamic"]
+        (set! (.-dynamic fe) true)))
+
+    (set! (.-fn fe) (aget ffiTable (.-sym fe)))
+    ^{:line 578} fe))
+
+
+
+
+^{:go/end 590} (go/func cSymbol "cSymbol is the C function a static target calls: a capi wrapper's name decoded\n(ghczuwrapperZC23ZC...ZCread is read).\n" ^string [^string sym]
+  (when (strings/HasPrefix sym "ghczuwrapperZC")
+    (when [i (strings/LastIndex sym "ZC")] (>= i 0)
+      (return (zdecode (subslice sym (+ i 2))))))
+
+
+  ^{:line 589} sym)
+
+
+
+^{:go/end 632} (go/func zdecode "zdecode decodes GHC's z-encoding of a name.\n" ^string [^string s]
+  (let [^strings/Builder b (zero strings/Builder)]
+    (for [i 0] (< i (len s)) (inc! i)
+      (let [c (aget s i)]
+        (when (and ^:go/paren (or (== c \z) (== c \Z)) (< (+ i 1) (len s)))
+          (let [d (aget s (+ i 1))]
+            (inc! i)
+            (if (== c \z)
+              (switch d
+                (case [\z]
+                  (.WriteByte b \z))
+                (case [\u]
+                  (.WriteByte b \_))
+                (case [\i]
+                  (.WriteByte b \.))
+                (case [\m]
+                  (.WriteByte b \-))
+                (case [\h]
+                  (.WriteByte b \#))
+                (default
+                  (.WriteByte b c)
+                  (.WriteByte b d)))
+
+
+              (switch d
+                (case [\Z]
+                  (.WriteByte b \Z))
+                (case [\C]
+                  (.WriteByte b \:))
+                (default
+                  (.WriteByte b c)
+                  (.WriteByte b d))))
+
+
+            (continue)))
+
+        (.WriteByte b c)))
+
+    (.String b)))

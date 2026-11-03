@@ -2,7 +2,7 @@
 # gate_key and gate_rest_key leave out the crops' files no build reads (queue 111, 054's finding 9): bin/arbace-go's
 # gate_key and gate_rest_key and bin/lib/version.bash's arbace_embedded_sources, extracted and run alone on a
 # fabricated checkout (one file at each path below), sha256sum, xargs and cut stubbed so the key's input is printed:
-# the crops' check scripts (bin/lib/ci, oi, repr-cpp), their Go forms (go/arbace/{oi,scm}; ci, cinterp and crt are read since C9: the
+# the crops' check scripts (bin/lib/ci, oi, repr-cpp, hsi), their Go forms (go/arbace/{oi,scm,hs}; ci, cinterp and crt are read since C9: the
 # build copies them) and OCaml's
 # runtime forms (jdk/ocaml) are absent, and what the builds read is present (the embedded arbace.o2j, arbace/http.ae,
 # arbace/tls, goi, jrt, repr/go's Go forms, jdk/forms, jdk/data, bin/lib/tls-checks.bash, ...). Then the audit's
@@ -24,8 +24,8 @@ sed -n '/^arbace_embedded_sources() {/,/^}/p' "$ver" >> "$d/fns.bash"
 grep -q '^gate_rest_key() {' "$d/fns.bash" && grep -q '^arbace_embedded_sources() {' "$d/fns.bash" \
   || { echo "FAIL: gate_key, gate_rest_key or arbace_embedded_sources not found"; exit 1; }
 
-excluded="bin/lib/ci/check bin/lib/oi/suite.bash bin/lib/repr-cpp/roundtrip
-go/arbace/oi.ae go/arbace/oi/apply.ae go/arbace/scm.ae go/arbace/scm/eval.ae jdk/ocaml/ocaml/rt.ae jdk/ocaml/ocaml/rt/NInt.ae
+excluded="bin/lib/ci/check bin/lib/oi/suite.bash bin/lib/repr-cpp/roundtrip bin/lib/hsi/check
+go/arbace/oi.ae go/arbace/oi/apply.ae go/arbace/scm.ae go/arbace/scm/eval.ae go/arbace/hs.ae go/arbace/hs/machine.ae jdk/ocaml/ocaml/rt.ae jdk/ocaml/ocaml/rt/NInt.ae
 arbace/repr/cpp.ae arbace/repr/cpp/convert.ae arbace/repr/llvm.ae arbace/cpp/lower.ae
 arbace/repr/ocaml.ae arbace/repr/scheme.ae arbace/scheme/aot.ae"
 kept="go/arbace/ci.ae go/arbace/ci/expr.ae go/arbace/cinterp.ae go/arbace/cinterp/natives.ae go/arbace/crt.ae go/arbace/crt/mem.ae
@@ -55,7 +55,7 @@ done
 for f in $kept; do
   if echo "$gk" | grep -qxF "$f"; then ok "gate_key hashes $f"; else bad "gate_key leaves out $f"; fi
 done
-for f in bin/lib/ci/check bin/lib/oi/suite.bash bin/lib/repr-cpp/roundtrip; do
+for f in bin/lib/ci/check bin/lib/oi/suite.bash bin/lib/repr-cpp/roundtrip bin/lib/hsi/check; do
   if echo "$rk" | grep -qxF "$f"; then bad "gate_rest_key hashes $f"; else ok "gate_rest_key leaves out $f"; fi
 done
 for f in bin/lib/tls-checks.bash bin/lib/cimore/x overlay/go/runtime.ae x509roots/x; do
@@ -67,10 +67,10 @@ host_block() { awk -v h="$1" '$0 ~ "^ *(\\{)?:" h " " {f=1} f && $0 ~ /^ *:[a-z-
 gb=$(host_block gate); pb=$(host_block prog)
 [ -n "$gb" ] && [ -n "$pb" ] || { echo "FAIL: no :gate or :prog in $aud"; exit 1; }
 for p in '!bin/lib/ci/' '!bin/lib/oi/' '!bin/lib/repr-cpp/' '!jdk/ocaml/' '!go/arbace/oi.ae' \
-         '!go/arbace/oi/' '!go/arbace/scm.ae' '!go/arbace/scm/'; do
+         '!go/arbace/oi/' '!go/arbace/scm.ae' '!go/arbace/scm/' '!bin/lib/hsi/' '!go/arbace/hs.ae' '!go/arbace/hs/'; do
   if echo "$gb" | grep -qF "\"$p\""; then ok "audit :gate names $p"; else bad "audit :gate does not name $p"; fi
 done
-for p in '!bin/lib/ci/' '!bin/lib/oi/' '!bin/lib/repr-cpp/'; do
+for p in '!bin/lib/ci/' '!bin/lib/oi/' '!bin/lib/repr-cpp/' '!bin/lib/hsi/'; do
   if echo "$pb" | grep -qF "\"$p\""; then ok "audit :prog names $p"; else bad "audit :prog does not name $p"; fi
 done
 [ $fails = 0 ] && { echo "PASS: gate-key-crops-test"; exit 0; }

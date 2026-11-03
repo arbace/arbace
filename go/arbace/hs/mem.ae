@@ -1,0 +1,104 @@
+(in-ns 'go.arbace.hs) (go/file "mem.go" :imports [])
+
+;; Memory for Addr# (HES10 (a)): crt's flat address space. String literals in its read-only data,
+;; pinned byte arrays in arenas of mapped slabs (an array as large as an arena gets a slab of its
+;; own), malloc's blocks likewise; unpinned byte arrays are Go slices.
+
+(go/const ^{:val 4194304} arenaSize (<< 4 20))
+
+
+^{:go/end 18} (go/method staticString "staticString is the address of a NUL-terminated copy of b in the read-only data (one per string).\n" ^uint64 [^{:tag (* Machine)} m ^{:tag (slice byte)} b]
+  (when [(values a ok) (aget (.-statics m) (conv string b))] ok
+    (return a))
+
+  (let [a (.Rodata (.-Mem m) (+ (conv uint64 (len b)) 1) 1)]
+    (copy (.W (.-Mem m) a (+ (conv uint64 (len b)) 1)) b)
+    (aset (.-statics m) (conv string b) a)
+    ^{:line 17} a))
+
+
+
+^{:go/end 43} (go/method pinned "pinned allocates n bytes of pinned memory aligned to align: its address and its bytes.\n" [^{:tag (* Machine)} m ^uint64 n ^uint64 align] :results [uint64 (slice byte)]
+  (when (< align 16)
+    (set! align 16))
+
+  (when (> (+ n align) (/ arenaSize 4))
+    (let [a (.Mmap (.-Mem m) 0 (+ n align))
+        ^{:line 27} a2 (bit-and-not (- (+ a align) 1) (- align 1))
+        ^{:line 28} s (.Slab (.-Mem m) a)]
+      (return a2 (subslice (.-B s) (- a2 (.-Base s)) (+ (- a2 (.-Base s)) n) (+ (- a2 (.-Base s)) n)))))
+
+  (let [off (bit-and-not (- (+ (.-arenaOff m) align) 1) (- align 1))]
+    (when (or (== (.-arena m) nil) (> (+ off n) (conv uint64 (len (.-B (.-arena m))))))
+      (let [a (.Mmap (.-Mem m) 0 arenaSize)]
+        (set! (.-arena m) (.Slab (.-Mem m) a))
+        (set! off 0)
+        (when (!= (% (.-Base (.-arena m)) align) 0)
+          (set! off (- (bit-and-not (- (+ (.-Base (.-arena m)) align) 1) (- align 1)) (.-Base (.-arena m)))))))
+
+
+    (set! (.-arenaOff m) (+ off n))
+    (let [a (+ (.-Base (.-arena m)) off)]
+      (return a (subslice (.-B (.-arena m)) off (+ off n) (+ off n))))))
+
+
+
+^{:go/end 55} (go/method newByteArray "newByteArray is a byte array of n bytes, pinned or not.\n" ^{:tag (* ByteArray)} [^{:tag (* Machine)} m ^int64 n ^bool pin ^uint64 align]
+  (when (< n 0)
+    (.fatal m "negative byte array size"))
+
+  (when (not pin)
+    (return (addr (lit ByteArray :B (make (slice byte) n)))))
+
+  (let [(values a b) (.pinned m (conv uint64 n) align)]
+    (addr (lit ByteArray :B b :Addr a))))
+
+
+
+^{:go/end 74} (go/method label "label is the address of a C symbol GHC's code names (foreign import ccall \"&sym\").\n" ^uint64 [^{:tag (* Machine)} m ^string s]
+  (when [(values a ok) (aget (.-labels m) s)] ok
+    (return a))
+
+  (let [^uint64 a (zero uint64)]
+    (if [(values fn ok) (aget ffiTable s)] ok
+      (set! a (.funAddr m s fn))
+      (do
+        ;; a data label: zeroed storage (RtsFlags and friends read as zeros: off)
+        (set! a (.Static (.-Mem m) 4096 16))
+        (when [(values init ok) (aget dataLabels s)] ok
+          (init m a))))
+
+
+    (aset (.-labels m) s a)
+    ^{:line 73} a))
+
+
+
+^{:go/end 87} (go/method funAddr "funAddr is a function's address: a slot of crt's text region, its Go function kept by address.\n" ^uint64 [^{:tag (* Machine)} m ^string name ^ffiFunc fn]
+  (range [a f (.-funptrs m)]
+    (set! _ f)
+    (when (== (aget (.-labels m) name) a)
+      (return a)))
+
+
+  (let [a (+ (conv uint64 0x400000) (* 16 (conv uint64 (+ (len (.-funptrs m)) 1))))]
+    (aset (.-funptrs m) a fn)
+    ^{:line 86} a))
+
+
+^{:go/end 89} (go/method funPtr ^ffiFunc [^{:tag (* Machine)} m ^uint64 a] (aget (.-funptrs m) a))
+
+
+^{:go/end 99} (go/method malloc "malloc is n bytes of C heap (malloc, free a no-op: the arenas are never unmapped, a class).\n" ^uint64 [^{:tag (* Machine)} m ^uint64 n]
+  (when (== n 0)
+    (set! n 1))
+
+  (let [(values a _) (.pinned m (+ n 16) 16)]
+    (.Store64 (.-Mem m) a n)
+    (+ a 16)))
+
+
+
+
+(go/var ^{:doc "dataLabels are the RTS's data GHC's libraries read: enabled_capabilities 1 (the non-threaded RTS);\nRtsFlags all zero (tracing, profiling off).\n"} dataLabels (lit (map string (func [^{:tag (* Machine)} m ^uint64 a]))
+    ^{:line 104} ["enabled_capabilities" ^{:go/end 104} (fn [^{:tag (* Machine)} m ^uint64 a] (.Store32 (.-Mem m) a 1))]))

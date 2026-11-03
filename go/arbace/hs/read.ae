@@ -1,0 +1,271 @@
+;; Package hs is hsi, Arbace's evaluator of GHC's STG (doc/haskell/HASKELL-EVAL-SURVEY.md, HE4; HES8 (a)):
+;; the STG forms of tools/hsdump stg (doc/haskell/STG-SPEC.md) loaded module by module as a program
+;; needs them, compiled into trees of nodes over frame slots, and run by an eval/apply machine with an
+;; explicit, heap-allocated stack per Haskell thread (update, case, apply, catch and mask frames), eager
+;; blackholing, green threads with the non-threaded RTS's semantics (HES9 (a)), the primops in Go
+;; (HES12 (a)), Addr# in C's flat address space (arbace/crt, HES10 (a)) and the C the libraries call as a
+;; Go table by symbol (HES11 (a)).
+(in-ns 'go.arbace.hs) (go/file "read.go" :doc "Package hs is hsi, Arbace's evaluator of GHC's STG (doc/haskell/HASKELL-EVAL-SURVEY.md, HE4; HES8 (a)):\nthe STG forms of tools/hsdump stg (doc/haskell/STG-SPEC.md) loaded module by module as a program\nneeds them, compiled into trees of nodes over frame slots, and run by an eval/apply machine with an\nexplicit, heap-allocated stack per Haskell thread (update, case, apply, catch and mask frames), eager\nblackholing, green threads with the non-threaded RTS's semantics (HES9 (a)), the primops in Go\n(HES12 (a)), Addr# in C's flat address space (arbace/crt, HES10 (a)) and the C the libraries call as a\nGo table by symbol (HES11 (a)).\n" :imports [
+
+
+    ^{:line 11} [fmt "fmt"]
+    ^{:line 12} [big "math/big"]
+    ^{:line 13} [strconv "strconv"]
+    ^{:line 14} [strings "strings"]])
+
+
+
+
+(go/type "The forms as the reader gives them: a list, a vector, a map, a string (a name, or a literal's bytes),\na keyword, a symbol (a head), an integer (int64, uint64 above int64's range, *big.Int beyond).\n"
+  ^{:line 20} [List (slice any)]
+  ^{:line 21} [Vec (slice any)]
+  ^{:line 22} [Map (map any any)]
+  ^{:line 23} [Kw string]
+  ^{:line 24} [Sym string])
+
+
+
+
+(go/type reader "reader reads the Clojure reader's syntax the dumps use: lists, vectors, maps, strings, keywords,\nsymbols, integers (decimal, 0x hexadecimal), comments.\n" (struct
+    ^{:line 30 :tag (slice byte)} s
+    ^{:line 31 :tag int} i
+    ^{:line 32 :tag int} line))
+
+
+(go/type readError (struct ^string msg))
+
+^{:go/end 37} (go/method Error ^string [^{:tag (* readError)} e] (.-msg e))
+
+^{:go/end 41} (go/method fail [^{:tag (* reader)} r ^string f & ^{:tag (slice any)} a]
+  (panic (addr (lit readError (fmt/Sprintf "line %d: %s" (.-line r) (fmt/Sprintf f (spread a)))))))
+
+
+^{:go/end 60} (go/method skip [^{:tag (* reader)} r]
+  (while (< (.-i r) (len (.-s r)))
+    (let [c (aget (.-s r) (.-i r))]
+      (switch
+        (case [(== c \newline)]
+          (inc! (.-line r))
+          (inc! (.-i r)))
+        (case [(or (== c \space) (== c \tab) (== c \return) (== c \,))]
+          (inc! (.-i r)))
+        (case [(== c \;)]
+          (while (and (< (.-i r) (len (.-s r))) (!= (aget (.-s r) (.-i r)) \newline))
+            (inc! (.-i r))))
+
+        (default
+          (return))))))
+
+
+
+
+
+^{:go/end 69} (go/method next "next is the next form, or io's end (ok false).\n" [^{:tag (* reader)} r] :results [any bool]
+  (.skip r)
+  (when (>= (.-i r) (len (.-s r)))
+    (return nil false))
+
+  (return (.form r) true))
+
+
+^{:go/end 114} (go/method form ^any [^{:tag (* reader)} r]
+  (.skip r)
+  (when (>= (.-i r) (len (.-s r)))
+    (.fail r "unexpected end"))
+
+  (let [c (aget (.-s r) (.-i r))]
+    (switch c
+      (case [\(]
+        (inc! (.-i r))
+        (return (conv List (.seq r \)))))
+      (case [\[]
+        (inc! (.-i r))
+        (return (conv Vec (.seq r \]))))
+      (case [\{]
+        (inc! (.-i r))
+        (let [xs (.seq r \})
+            ^{:line 87} m (lit Map)]
+          (for [k 0] (< (+ k 1) (len xs)) (set! k + 2)
+            (aset m (aget xs k) (aget xs (+ k 1))))
+
+          (return m)))
+      (case [\"]
+        (return (.str r)))
+      (case [\:]
+        (inc! (.-i r))
+        (return (conv Kw (.token r)))))
+
+    (let [t (.token r)]
+      (when (== t "")
+        (.fail r "unexpected %q" c))
+
+      (when (or ^:go/paren (and (>= (aget t 0) \0) (<= (aget t 0) \9)) ^:go/paren (and ^:go/paren (or (== (aget t 0) \-) (== (aget t 0) \+)) (> (len t) 1) (>= (aget t 1) \0) (<= (aget t 1) \9)))
+        (return (parseInt r t)))
+
+      (switch t
+        (case ["nil"]
+          (return nil))
+        (case ["true"]
+          (return true))
+        (case ["false"]
+          (return false)))
+
+      (conv Sym t))))
+
+
+^{:go/end 148} (go/func parseInt ^any [^{:tag (* reader)} r ^string t]
+  (let [neg false
+      ^{:line 118} s t]
+    (when (or (== (aget s 0) \-) (== (aget s 0) \+))
+      (set! neg (== (aget s 0) \-))
+      (set! s (subslice s 1)))
+
+    (let [base 10]
+      (when (or (strings/HasPrefix s "0x") (strings/HasPrefix s "0X"))
+        (set! base 16)
+        (set! s (subslice s 2)))
+
+      (set! s (strings/TrimSuffix s "N"))
+      (when [(values u err) (strconv/ParseUint s base 64)] (== err nil)
+        (when (not neg)
+          (when (<= u (- (<< 1 63) 1))
+            (return (conv int64 u)))
+
+          (return u))
+
+        (when (<= u (<< 1 63))
+          (return (- (conv int64 u)))))
+
+
+      (let [(values b ok) (.SetString (new big/Int) s base)]
+        (when (not ok)
+          (.fail r "bad number %q" t))
+
+        (when neg
+          (.Neg b b))
+
+        ^{:line 147} b))))
+
+
+^{:go/end 163} (go/method seq ^{:tag (slice any)} [^{:tag (* reader)} r ^byte end]
+  (let [^{:tag (slice any)} xs (zero (slice any))]
+    (while true
+      (.skip r)
+      (when (>= (.-i r) (len (.-s r)))
+        (.fail r "unclosed %q" end))
+
+      (when (== (aget (.-s r) (.-i r)) end)
+        (inc! (.-i r))
+        (return xs))
+
+      (set! xs (append xs (.form r))))))
+
+
+
+^{:go/breaks [[4 170]] :go/end 171} (go/func isDelim ^bool [^byte c]
+  (switch c
+    (case [\space \tab \newline \return \, \( \) \[ \] \{ \} \" \;]
+      (return true)))
+
+  false)
+
+
+^{:go/end 179} (go/method token ^string [^{:tag (* reader)} r]
+  (let [j (.-i r)]
+    (while (and (< (.-i r) (len (.-s r))) (not (isDelim (aget (.-s r) (.-i r)))))
+      (inc! (.-i r)))
+
+    (conv string (subslice (.-s r) j (.-i r)))))
+
+
+^{:go/end 242} (go/method str ^string [^{:tag (* reader)} r]
+  (inc! (.-i r))
+  (let [j (.-i r)]
+    (while (and (< (.-i r) (len (.-s r))) (!= (aget (.-s r) (.-i r)) \") (!= (aget (.-s r) (.-i r)) \\))
+      (inc! (.-i r)))
+
+    (when (and (< (.-i r) (len (.-s r))) (== (aget (.-s r) (.-i r)) \"))
+      (let [s (conv string (subslice (.-s r) j (.-i r)))]
+        (inc! (.-i r))
+        (return s)))
+
+    (let [^strings/Builder b (zero strings/Builder)]
+      (.Write b (subslice (.-s r) j (.-i r)))
+      (while true
+        (when (>= (.-i r) (len (.-s r)))
+          (.fail r "unclosed string"))
+
+        (let [c (aget (.-s r) (.-i r))]
+          (inc! (.-i r))
+          (switch c
+            (case [\"]
+              (return (.String b)))
+            (case [\newline]
+              (inc! (.-line r))
+              (.WriteByte b c))
+            (case [\\]
+              (when (>= (.-i r) (len (.-s r)))
+                (.fail r "unclosed string"))
+
+              (let [e (aget (.-s r) (.-i r))]
+                (inc! (.-i r))
+                (switch e
+                  (case [\n]
+                    (.WriteByte b \newline))
+                  (case [\t]
+                    (.WriteByte b \tab))
+                  (case [\r]
+                    (.WriteByte b \return))
+                  (case [\b]
+                    (.WriteByte b \backspace))
+                  (case [\f]
+                    (.WriteByte b \formfeed))
+                  (case [\" \\]
+                    (.WriteByte b e))
+                  (case [\u]
+                    (when (> (+ (.-i r) 4) (len (.-s r)))
+                      (.fail r "bad \\u"))
+
+                    (let [(values n err) (strconv/ParseUint (conv string (subslice (.-s r) (.-i r) (+ (.-i r) 4))) 16 32)]
+                      (when (!= err nil)
+                        (.fail r "bad \\u"))
+
+                      (set! (.-i r) + 4)
+                      (.WriteRune b (conv rune n))))
+                  (default
+                    (.fail r "bad escape \\%c" e)))))
+
+            (default
+              (.WriteByte b c))))))))
+
+
+
+
+
+^{:go/end 263} (go/func readAll "readAll is every form of s.\n" [^{:tag (slice byte)} s] :results [^{:tag (slice any)} forms ^error err]
+  (defer (^{:go/end 254} (fn []
+        (when [x (recover)] (!= x nil)
+          (when [(values e ok) (assert (* readError) x)] ok
+            (set! err e)
+            (return))
+
+          (panic x)))))
+
+
+  (let [r (addr (lit reader :s s :line 1))]
+    (while true
+      (let [(values f ok) (.next r)]
+        (when (not ok)
+          (return forms nil))
+
+        (set! forms (append forms f))))))
+
+
+
+
+^{:go/end 272} (go/func latin1 "latin1 is a literal's bytes: one character per byte, U+0000 to U+00FF (STG-SPEC §5).\n" ^{:tag (slice byte)} [^string s]
+  (let [b (make (slice byte) 0 (len s))]
+    (range [_ c s]
+      (set! b (append b (conv byte c))))
+
+    ^{:line 271} b))

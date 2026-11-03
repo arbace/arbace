@@ -1,0 +1,402 @@
+(in-ns 'go.arbace.hs) (go/file "nodes.go" :imports [])
+
+;; The nodes of compiled code (compile.go) and their evaluation.
+
+
+(go/type Lit "Lit returns a literal.\n" (struct ^Value v))
+
+^{:go/end 11} (go/method eval [^{:tag (* Lit)} e ^{:tag (* Machine)} m ^{:tag (slice Value)} env] :results [Expr (slice Value)]
+  (.ret1 m (.-v e))
+  (return nil nil))
+
+
+
+(go/type Enter "Enter is (app x []): a variable's value, evaluated when it is a thunk.\n" (struct ^Atom f))
+
+^{:go/end 18} (go/method eval [^{:tag (* Enter)} e ^{:tag (* Machine)} m ^{:tag (slice Value)} env] :results [Expr (slice Value)]
+  (.enterValue m (.get (.-f e) m env)))
+
+
+
+
+(go/type App "App is a call (app f [args...]); an exact call to a known function puts the arguments straight into the\ncallee's frame.\n" (struct
+    ^{:line 23 :tag Atom} f
+    ^{:line 24 :tag (slice Atom)} args))
+
+
+^{:go/end 46} (go/method eval [^{:tag (* App)} e ^{:tag (* Machine)} m ^{:tag (slice Value)} env] :results [Expr (slice Value)]
+  (let [f (.get (.-f e) m env)]
+    (when [(values t ok) (assert (* Thunk) f)] (and ok (== (.-L t) nil))
+      (set! f (.-Ind t)))
+
+    ;; an exact call: the arguments straight into the callee's frame
+    (when [(values fn ok) (assert (* Fun) f)] (and ok (== (.-NArgs (.-L fn)) (len (.-args e))))
+      (let [l (.-L fn)]
+        (when (== (.-Body l) nil)
+          (.compileTop (.-ld m) l))
+
+        (let [nenv (make (slice Value) (.-NSlots l))]
+          (copy nenv (.-Free fn))
+          (range [i (.-args e)]
+            (aset nenv (+ (.-NFree l) i) (.get (aget (.-args e) i) m env)))
+
+          (return (.-Body l) nenv))))
+
+    (.apply m f (.atoms m (.-args e) env))))
+
+
+
+(go/type Join "Join is a join point (letne): its arguments' slots and its body, in its binder's frame.\n" (struct
+    ^{:line 50 :tag string} name
+    ^{:line 51 :tag int} n
+    ^{:line 52 :tag (slice int)} slots
+    ^{:line 53 :tag Expr} body))
+
+
+
+(go/type Jump "Jump is a jump to a join point.\n" (struct
+    ^{:line 58 :tag (* Join)} j
+    ^{:line 59 :tag (slice Atom)} args))
+
+
+^{:go/end 79} (go/method eval [^{:tag (* Jump)} e ^{:tag (* Machine)} m ^{:tag (slice Value)} env] :results [Expr (slice Value)]
+  (let [j (.-j e)]
+    (switch (len (.-args e))
+      (case [0])
+      (case [1]
+        (aset env (aget (.-slots j) 0) (.get (aget (.-args e) 0) m env)))
+      (default
+        (let [^{:tag (array 8 Value)} buf (zero (array 8 Value))
+            ^{:line 70} vs (subslice buf _ 0)]
+          (range [i (.-args e)]
+            (set! vs (append vs (.get (aget (.-args e) i) m env))))
+
+          (range [i k (.-slots j)]
+            (aset env k (aget vs i))))))
+
+
+    (return (.-body j) env)))
+
+
+
+(go/type ConE "ConE returns a constructor.\n" (struct
+    ^{:line 83 :tag (* DataCon)} dc
+    ^{:line 84 :tag (slice Atom)} args))
+
+
+^{:go/end 90} (go/method eval [^{:tag (* ConE)} e ^{:tag (* Machine)} m ^{:tag (slice Value)} env] :results [Expr (slice Value)]
+  (.ret1 m (.newCon m (.-dc e) (.-args e) env))
+  (return nil nil))
+
+
+^{:go/end 100} (go/method newCon ^{:tag (* Con)} [^{:tag (* Machine)} m ^{:tag (* DataCon)} dc ^{:tag (slice Atom)} args ^{:tag (slice Value)} env]
+  (when (== (len args) 0)
+    (when (== (.-nullary dc) nil)
+      (set! (.-nullary dc) (addr (lit Con :DC dc))))
+
+    (return (.-nullary dc)))
+
+  (addr (lit Con :DC dc :F (.atoms m args env))))
+
+
+
+(go/type Tuple "Tuple returns an unboxed tuple's values.\n" (struct ^{:tag (slice Atom)} args))
+
+^{:go/end 112} (go/method eval [^{:tag (* Tuple)} e ^{:tag (* Machine)} m ^{:tag (slice Value)} env] :results [Expr (slice Value)]
+  (if (== (len (.-args e)) 1)
+    (.ret1 m (.get (aget (.-args e) 0) m env))
+
+    (.retN m (.atoms m (.-args e) env)))
+
+  (return nil nil))
+
+
+
+(go/type PrimE "PrimE is a primop's call.\n" (struct
+    ^{:line 116 :tag (* Primop)} p
+    ^{:line 117 :tag (slice Atom)} args
+    ^{:line 118 :tag (* TyCon)} tc))
+
+
+^{:go/end 149} (go/method eval [^{:tag (* PrimE)} e ^{:tag (* Machine)} m ^{:tag (slice Value)} env] :results [Expr (slice Value)]
+  (let [p (.-p e)
+      ^{:line 123 :tag (array 8 Value)} buf (zero (array 8 Value))
+      ^{:line 124 :tag (slice Value)} as (zero (slice Value))]
+    (if (and (<= (len (.-args e)) (len buf)) (== (.-ctl p) nil)) (do
+        (set! as (subslice buf _ (len (.-args e))))
+        (range [i (.-args e)]
+          (aset as i (.get (aget (.-args e) i) m env))))
+
+
+      (set! as (.atoms m (.-args e) env)))
+
+    (switch
+      (case [(!= (.-f1 p) nil)]
+        (.ret1 m ((.-f1 p) as)))
+      (case [(!= (.-fm p) nil)]
+        (let [r ((.-fm p) as)]
+          (if (== (len r) 1)
+            (.ret1 m (aget r 0))
+
+            (.retN m r))))
+
+      (case [(!= (.-fx p) nil)]
+        (.ret1 m ((.-fx p) m e as)))
+      (case [(!= (.-ctl p) nil)]
+        (return ((.-ctl p) m as))))
+
+    (return nil nil)))
+
+
+
+^{:go/end 169} (go/method simple "simple evaluates e without the machine when it can: a pure primop.\n" [^{:tag (* PrimE)} e ^{:tag (* Machine)} m ^{:tag (slice Value)} env] :results [Value bool]
+  (let [p (.-p e)]
+    (when (and (== (.-f1 p) nil) (== (.-fx p) nil))
+      (return nil false))
+
+    (let [^{:tag (array 8 Value)} buf (zero (array 8 Value))]
+      (when (> (len (.-args e)) (len buf))
+        (return nil false))
+
+      (let [as (subslice buf _ (len (.-args e)))]
+        (range [i (.-args e)]
+          (aset as i (.get (aget (.-args e) i) m env)))
+
+        (when (!= (.-f1 p) nil)
+          (return ((.-f1 p) as) true))
+
+        (return ((.-fx p) m e as) true)))))
+
+
+
+(go/type Unimpl "Unimpl is a primop, primcall or C function hsi does not have: an error when reached.\n" (struct ^string what))
+
+^{:go/end 177} (go/method eval [^{:tag (* Unimpl)} e ^{:tag (* Machine)} m ^{:tag (slice Value)} env] :results [Expr (slice Value)]
+  (.fatal m (+ "unimplemented: " (.-what e)))
+  (return nil nil))
+
+
+
+(go/type FFIE "FFIE is a foreign call: its void arguments (the State# token) are not C's and are dropped.\n" (struct
+    ^{:line 181 :tag string} sym
+    ^{:line 182 :tag bool} dynamic
+    ^{:line 183 :tag (slice Atom)} args
+    ^{:line 184 :tag string} res
+    ^{:line 185 :tag ffiFunc} fn))
+
+
+^{:go/end 218} (go/method eval [^{:tag (* FFIE)} e ^{:tag (* Machine)} m ^{:tag (slice Value)} env] :results [Expr (slice Value)]
+  (let [as (.atoms m (.-args e) env)
+      ;; the void arguments (the State# token) are not C's
+      ^{:line 191} cs (subslice as _ 0 0)]
+    (range [_ a as]
+      (when (!= a nil)
+        (set! cs (append cs a))))
+
+
+    (let [fn (.-fn e)]
+      (cond (.-dynamic e) (do
+          (when (== (len cs) 0)
+            (.fatal m "dynamic foreign call without its address"))
+
+          (let [addr (toW (aget cs 0))]
+            (set! cs (subslice cs 1))
+            (set! fn (.funPtr m addr))
+            (when (== fn nil)
+              (.fatal m "dynamic foreign call to an unknown function pointer"))))
+
+        (== fn nil)
+        (.fatal m (+ "unimplemented C function " (.-sym e))))
+
+      (let [r (go/call fn m cs)]
+        (when (== (.-res e) "v")
+          (.retN m nil)
+          (return nil nil))
+
+        (.ret1 m (convRes r (.-res e)))
+        (return nil nil)))))
+
+
+
+^{:go/end 241} (go/func convRes "convRes is a C result in its representation.\n" ^Value [^Value r ^string rep]
+  (switch rep
+    (case ["int" "int64"]
+      (return (toI r)))
+    (case ["int8"]
+      (return (conv int64 (conv int8 (toI r)))))
+    (case ["int16"]
+      (return (conv int64 (conv int16 (toI r)))))
+    (case ["int32"]
+      (return (conv int64 (conv int32 (toI r)))))
+    (case ["word" "word64" "addr"]
+      (return (toW r)))
+    (case ["word8"]
+      (return (conv uint64 (conv uint8 (toW r)))))
+    (case ["word16"]
+      (return (conv uint64 (conv uint16 (toW r)))))
+    (case ["word32"]
+      (return (conv uint64 (conv uint32 (toW r))))))
+
+  ^{:line 240} r)
+
+
+
+(go/type CaseE "CaseE is a case: its scrutinee evaluated under a case frame, then an alternative chosen.\n" (struct
+    ^{:line 245 :tag Expr} scrut
+    ^{:line 246 :tag int} bslot
+    ^{:line 247 :tag uint8} kind
+    ^{:line 248 :tag (slice (* alt))} alts
+    ^{:line 249 :tag (slice (* alt))} lits
+    ^{:line 250 :tag (* alt)} def))
+
+
+(go/const
+  ^{:line 254} [^{:tag uint8 :val 0} kAlg iota]
+  ^{:line 255} [^{:val 1} kPrim]
+  ^{:line 256} [^{:val 2} kPoly]
+  ^{:line 257} [^{:val 3} kMulti])
+
+
+(go/type alt (struct
+    ^{:line 261 :tag (* DataCon)} dc
+    ^{:line 262 :tag Value} lit
+    ^{:line 263 :tag (slice int)} binds
+    ^{:line 264 :tag Expr} body))
+
+
+^{:go/end 290} (go/method eval [^{:tag (* CaseE)} e ^{:tag (* Machine)} m ^{:tag (slice Value)} env] :results [Expr (slice Value)]
+  (type-switch [s (.-scrut e)]
+    (case [(* PrimE)]
+      (when [(values v ok) (.simple s m env)] ok
+        (.ret1 m v)
+        (return (.cont e m env))))
+
+    (case [(* Lit)]
+      (.ret1 m (.-v s))
+      (return (.cont e m env)))
+    (case [(* Enter)]
+      (let [v (.get (.-f s) m env)]
+        (when [(values t ok) (assert (* Thunk) v)] ok
+          (when (!= (.-L t) nil)
+            (break))
+
+          (set! v (.-Ind t)))
+
+        (.ret1 m v)
+        (return (.cont e m env)))))
+
+  (.pushCase m e env)
+  (return (.-scrut e) env))
+
+
+
+
+^{:go/end 347} (go/method cont "cont chooses the alternative for the value in the return registers. A case of an algebraic type with a\ndefault alone may see a function: a class of one method's dictionary is the method itself (a newtype).\n" [^{:tag (* CaseE)} e ^{:tag (* Machine)} m ^{:tag (slice Value)} env] :results [Expr (slice Value)]
+  (when (== (.-kind e) kMulti)
+    (let [a (.-def e)]
+      (switch (len (.-binds a))
+        (case [0])
+        (case [1]
+          (aset env (aget (.-binds a) 0) (.-r m)))
+        (default
+          (when (!= (len (.-rs m)) (len (.-binds a)))
+            (.fatal m "unboxed tuple of the wrong size"))
+
+          (range [i k (.-binds a)]
+            (aset env k (aget (.-rs m) i)))))
+
+
+      (return (.-body a) env)))
+
+  (let [v (.-r m)]
+    (when (>= (.-bslot e) 0)
+      (aset env (.-bslot e) v))
+
+    (switch (.-kind e)
+      (case [kAlg]
+        (let [(values c ok) (assert (* Con) v)]
+          (when (not ok)
+            ;; a class of one method's dictionary is the method itself (a newtype): a default only
+            (when (== (len (.-alts e)) 0)
+              (break))
+
+            (.fatal m (+ "case of an algebraic type on " (showShallow v))))
+
+          (range [_ a (.-alts e)]
+            (when (== (.-dc a) (.-DC c))
+              (range [i k (.-binds a)]
+                (aset env k (aget (.-F c) i)))
+
+              (return (.-body a) env)))))
+
+
+      (case [kPrim]
+        (when (> (len (.-lits e)) 0)
+          (let [k (litKey v)]
+            (range [_ a (.-lits e)]
+              (when (== (.-lit a) k)
+                (return (.-body a) env)))))))
+
+
+
+
+    (when (== (.-def e) nil)
+      (.fatal m (+ "no alternative for " (show v))))
+
+    (return (.-body (.-def e)) env)))
+
+
+
+(go/type LetE "LetE allocates closures and constructors.\n" (struct
+    ^{:line 351 :tag bool} rec
+    ^{:line 352 :tag (slice letBind)} binds
+    ^{:line 353 :tag Expr} body))
+
+
+(go/type letBind (struct
+    ^{:line 357 :tag int} slot
+    ^{:line 358 :tag (* Lambda)} lam
+    ^{:line 359 :tag (slice Atom)} free
+    ^{:line 360 :tag (* DataCon)} dc
+    ^{:line 361 :tag (slice Atom)} args))
+
+
+^{:go/end 369} (go/func allocClosure ^Value [^{:tag (* Lambda)} l ^{:tag (slice Value)} free]
+  (when (> (.-NArgs l) 0)
+    (return (addr (lit Fun :L l :Free free))))
+
+  (addr (lit Thunk :L l :Free free)))
+
+
+^{:go/end 403} (go/method eval [^{:tag (* LetE)} e ^{:tag (* Machine)} m ^{:tag (slice Value)} env] :results [Expr (slice Value)]
+  (when (not (.-rec e))
+    (range [i (.-binds e)]
+      (let [b (addr (aget (.-binds e) i))]
+        (if (!= (.-lam b) nil)
+          (aset env (.-slot b) (allocClosure (.-lam b) (.atoms m (.-free b) env)))
+
+          (aset env (.-slot b) (.newCon m (.-dc b) (.-args b) env)))))
+
+
+    (return (.-body e) env))
+
+  (range [i (.-binds e)]
+    (let [b (addr (aget (.-binds e) i))]
+      (if (!= (.-lam b) nil)
+        (aset env (.-slot b) (allocClosure (.-lam b) nil))
+
+        (aset env (.-slot b) (addr (lit Con :DC (.-dc b)))))))
+
+
+  (range [i (.-binds e)]
+    (let [b (addr (aget (.-binds e) i))]
+      (type-switch [x (aget env (.-slot b))]
+        (case [(* Fun)]
+          (set! (.-Free x) (.atoms m (.-free b) env)))
+        (case [(* Thunk)]
+          (set! (.-Free x) (.atoms m (.-free b) env)))
+        (case [(* Con)]
+          (set! (.-F x) (.atoms m (.-args b) env))))))
+
+
+  (return (.-body e) env))

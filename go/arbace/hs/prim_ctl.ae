@@ -1,0 +1,372 @@
+(in-ns 'go.arbace.hs) (go/file "prim_ctl.go" :imports [
+
+
+    ^{:line 4} [time "time"]])
+
+
+;; The primops of control: exceptions and masks, tags, threads and MVars, delays, weak and stable
+;; pointers, and the RTS's odds and ends.
+
+
+
+
+^{:go/end 273} (go/func init "The control primops. dataToTag# evaluates its argument when it is not evaluated: the tag inference of\nGHC 9.14's STG does not always make it so (a lazy field's value reaches it). Weak pointers' finalizers\nnever run by a GC (a class); finalizeWeak# returns them. Sparks are no-ops (one capability).\n" []
+  ;; exceptions
+  (pc "raise#" ^{:go/end 15} (fn [^{:tag (* Machine)} m ^{:tag (slice Value)} a] :results [Expr (slice Value)] (.raise m (aget a 0))))
+  (pc "raiseIO#" ^{:go/end 16} (fn [^{:tag (* Machine)} m ^{:tag (slice Value)} a] :results [Expr (slice Value)] (.raise m (aget a 0))))
+  (pc "raiseDivZero#" ^{:go/end 19} (fn [^{:tag (* Machine)} m ^{:tag (slice Value)} a] :results [Expr (slice Value)]
+      (.raise m (.globalValue (.-ld m) "ghc-internal:GHC.Internal.Exception.Type/divZeroException"))))
+
+  (pc "raiseOverflow#" ^{:go/end 22} (fn [^{:tag (* Machine)} m ^{:tag (slice Value)} a] :results [Expr (slice Value)]
+      (.raise m (.globalValue (.-ld m) "ghc-internal:GHC.Internal.Exception.Type/overflowException"))))
+
+  (pc "raiseUnderflow#" ^{:go/end 25} (fn [^{:tag (* Machine)} m ^{:tag (slice Value)} a] :results [Expr (slice Value)]
+      (.raise m (.globalValue (.-ld m) "ghc-internal:GHC.Internal.Exception.Type/underflowException"))))
+
+  ;; catch# io handler s
+  (pc "catch#" ^{:go/end 30} (fn [^{:tag (* Machine)} m ^{:tag (slice Value)} a] :results [Expr (slice Value)]
+      (.push m (lit Frame :k fCatch :x (aget a 1) :n (.-mask (.-cur m))))
+      (.apply m (aget a 0) (lit (slice Value) nil))))
+
+  (let [mask ^{:go/end 45} (fn ^{:tag (func [^{:tag (* Machine)} m ^{:tag (slice Value)} a] [Expr (slice Value)])} [^int state]
+        ^{:go/end 44} (fn [^{:tag (* Machine)} m ^{:tag (slice Value)} a] :results [Expr (slice Value)]
+          (let [t (.-cur m)]
+            (when (!= (.-mask t) state)
+              (.push m (lit Frame :k fMask :n (.-mask t)))
+              (set! (.-mask t) state)
+              (when (and (== state 0) (> (len (.-pending t)) 0))
+                (let [x (aget (.-pending t) 0)]
+                  (set! (.-pending t) (subslice (.-pending t) 1))
+                  (return (.raiseAsync m x)))))
+
+
+            (.apply m (aget a 0) (lit (slice Value) nil)))))]
+
+
+    (pc "maskAsyncExceptions#" (mask 2))
+    (pc "maskUninterruptible#" (mask 1))
+    (pc "unmaskAsyncExceptions#" (mask 0))
+    (px "getMaskingState#" ^{:go/end 49} (fn ^Value [^{:tag (* Machine)} m ^{:tag (* PrimE)} _ ^{:tag (slice Value)} a] (conv int64 (.-mask (.-cur m)))))
+
+    ;; tags
+    (px "tagToEnum#" ^{:go/end 63} (fn ^Value [^{:tag (* Machine)} m ^{:tag (* PrimE)} e ^{:tag (slice Value)} a]
+        (let [tc (.-tc e)]
+          (when (not (.-ok tc))
+            (.loadTC (.-ld m) tc))
+
+          (let [i (toI (aget a 0))
+              ^{:line 58} d (aget (.-Cons tc) i)]
+            (when (== (.-nullary d) nil)
+              (set! (.-nullary d) (addr (lit Con :DC d))))
+
+            (.-nullary d)))))
+
+    ;; dataToTag#: its argument evaluated first when it is not (the tag inference of GHC 9.14's STG does
+    ;; not always make it so: a lazy field's value reaches it)
+    (let [dtt ^{:go/end 74} (fn [^{:tag (* Machine)} m ^{:tag (slice Value)} a] :results [Expr (slice Value)]
+          (let [v (whnf (aget a 0))]
+            (when [(values t ok) (assert (* Thunk) v)] ok
+              (.pushCase m dttCase (lit (slice Value) nil))
+              (return (.enter m t)))
+
+            (.ret1 m (.tagOf m v))
+            (return nil nil)))]
+
+      (pc "dataToTagSmall#" dtt)
+      (pc "dataToTagLarge#" dtt)
+      (p1 "reallyUnsafePtrEquality#" ^{:go/end 77} (fn ^Value [^{:tag (slice Value)} a] (b2i (ptrEq (aget a 0) (aget a 1)))))
+
+      ;; keepAlive# x s f, touch#, seq-likes
+      (pc "keepAlive#" ^{:go/end 80} (fn [^{:tag (* Machine)} m ^{:tag (slice Value)} a] :results [Expr (slice Value)] (.apply m (aget a 2) (lit (slice Value) nil))))
+      (pm "touch#" ^{:go/end 81} (fn ^{:tag (slice Value)} [^{:tag (slice Value)} a] nil))
+      (pm "noDuplicate#" ^{:go/end 82} (fn ^{:tag (slice Value)} [^{:tag (slice Value)} a] nil))
+
+      ;; threads
+      (let [fork ^{:go/end 89} (fn ^{:tag (* Thread)} [^{:tag (* Machine)} m ^Value io]
+            (let [t (.newThread m (addr (lit ApplyV :f io :args (lit (slice Value) nil))))]
+              (set! (.-mask t) (.-mask (.-cur m))) ; forkIO's child inherits the masking state
+              ^{:line 88} t))]
+
+        (px "fork#" ^{:go/end 90} (fn ^Value [^{:tag (* Machine)} m ^{:tag (* PrimE)} _ ^{:tag (slice Value)} a] (fork m (aget a 0))))
+        (px "forkOn#" ^{:go/end 91} (fn ^Value [^{:tag (* Machine)} m ^{:tag (* PrimE)} _ ^{:tag (slice Value)} a] (fork m (aget a 1))))
+        (px "myThreadId#" ^{:go/end 92} (fn ^Value [^{:tag (* Machine)} m ^{:tag (* PrimE)} _ ^{:tag (slice Value)} a] (.-cur m)))
+        (pc "yield#" ^{:go/end 97} (fn [^{:tag (* Machine)} m ^{:tag (slice Value)} a] :results [Expr (slice Value)]
+            (set! (.-budget m) 0)
+            (.retN m nil)
+            (return nil nil)))
+
+        (pc "killThread#" ^{:go/end 106} (fn [^{:tag (* Machine)} m ^{:tag (slice Value)} a] :results [Expr (slice Value)]
+            (let [t (assert (* Thread) (aget a 0))]
+              (when (== t (.-cur m))
+                (return (.raiseAsync m (aget a 1))))
+
+              (.throwTo m t (aget a 1))
+              (.retN m nil)
+              (return nil nil))))
+
+        (pm "labelThread#" ^{:go/breaks [3] :go/end 110} (fn ^{:tag (slice Value)} [^{:tag (slice Value)} a]
+            (set! (.-label (assert (* Thread) (aget a 0))) (aget a 1))
+            nil))
+
+        (pm "threadLabel#" ^{:go/end 117} (fn ^{:tag (slice Value)} [^{:tag (slice Value)} a]
+            (let [t (assert (* Thread) (aget a 0))]
+              (when (== (.-label t) nil)
+                (return (lit (slice Value) (conv int64 0) nil)))
+
+              (lit (slice Value) (conv int64 1) (.-label t)))))
+
+        (pm "threadStatus#" ^{:go/end 137} (fn ^{:tag (slice Value)} [^{:tag (slice Value)} a]
+            (let [t (assert (* Thread) (aget a 0))
+                ^{:line 120} st (conv int64 0)] ; ThreadRunning
+              (switch
+                (case [(.-done t)]
+                  (set! st 16)) ; ThreadComplete
+                (case [(!= (.-blocked t) nil)]
+                  (type-switch (.-blocked t)
+                    (case [(* MVar)]
+                      (set! st 1)) ; BlockedOnMVar
+                    (case [(* Thunk)]
+                      (set! st 2)) ; BlockedOnBlackHole
+                    (case [stmWait]
+                      (set! st 6))
+                    (default
+                      (set! st 5))))) ; BlockedOnDelay? (BlockedOnRead 3, Write 4, Delay 5)
+
+
+              (lit (slice Value) st (conv int64 0) (conv int64 0)))))
+
+        (p1 "isCurrentThreadBound#" ^{:go/end 138} (fn ^Value [^{:tag (slice Value)} a] (conv int64 0)))
+        (px "listThreads#" ^{:go/end 145} (fn ^Value [^{:tag (* Machine)} m ^{:tag (* PrimE)} _ ^{:tag (slice Value)} a]
+            (let [^{:tag (slice Value)} xs (zero (slice Value))]
+              (range [_ t (.-all m)]
+                (set! xs (append xs t)))
+
+              (addr (lit Array :A xs)))))
+
+
+        ;; MVar#
+        (p1 "newMVar#" ^{:go/end 148} (fn ^Value [^{:tag (slice Value)} a] (addr (lit MVar))))
+        (pc "takeMVar#" ^{:go/end 149} (fn [^{:tag (* Machine)} m ^{:tag (slice Value)} a] :results [Expr (slice Value)] (.takeMVar m (assert (* MVar) (aget a 0)) false true)))
+        (pc "readMVar#" ^{:go/end 150} (fn [^{:tag (* Machine)} m ^{:tag (slice Value)} a] :results [Expr (slice Value)] (.takeMVar m (assert (* MVar) (aget a 0)) true true)))
+        (pc "putMVar#" ^{:go/end 151} (fn [^{:tag (* Machine)} m ^{:tag (slice Value)} a] :results [Expr (slice Value)] (.putMVar m (assert (* MVar) (aget a 0)) (aget a 1) true)))
+        (pc "tryTakeMVar#" ^{:go/end 162} (fn [^{:tag (* Machine)} m ^{:tag (slice Value)} a] :results [Expr (slice Value)]
+            (let [mv (assert (* MVar) (aget a 0))]
+              (when (not (.-Full mv))
+                (.retN m (lit (slice Value) (conv int64 0) nil))
+                (return nil nil))
+
+              (let [v (.-V mv)]
+                (.mvarTaken m mv)
+                (.retN m (lit (slice Value) (conv int64 1) v))
+                (return nil nil)))))
+
+        (pc "tryPutMVar#" ^{:go/end 172} (fn [^{:tag (* Machine)} m ^{:tag (slice Value)} a] :results [Expr (slice Value)]
+            (let [mv (assert (* MVar) (aget a 0))]
+              (when (.-Full mv)
+                (.ret1 m (conv int64 0))
+                (return nil nil))
+
+              (.putMVar m mv (aget a 1) false)
+              (.ret1 m (conv int64 1))
+              (return nil nil))))
+
+        (pm "tryReadMVar#" ^{:go/end 179} (fn ^{:tag (slice Value)} [^{:tag (slice Value)} a]
+            (let [mv (assert (* MVar) (aget a 0))]
+              (when (not (.-Full mv))
+                (return (lit (slice Value) (conv int64 0) nil)))
+
+              (lit (slice Value) (conv int64 1) (.-V mv)))))
+
+        (p1 "isEmptyMVar#" ^{:go/end 180} (fn ^Value [^{:tag (slice Value)} a] (b2i (not (.-Full (assert (* MVar) (aget a 0)))))))
+
+        ;; delays
+        (pc "delay#" ^{:go/end 188} (fn [^{:tag (* Machine)} m ^{:tag (slice Value)} a] :results [Expr (slice Value)]
+            (let [us (toI (aget a 0))
+                ^{:line 185} s (addr (lit sleeper :t (.-cur m) :when (.Add (time/Now) (* (conv time/Duration us) time/Microsecond))))]
+              (set! (.-sleep m) (append (.-sleep m) s))
+              (.block m s true))))
+
+        (pm "waitRead#" ^{:go/end 189} (fn ^{:tag (slice Value)} [^{:tag (slice Value)} a] nil))
+        (pm "waitWrite#" ^{:go/end 190} (fn ^{:tag (slice Value)} [^{:tag (slice Value)} a] nil))
+
+        ;; sparks: one capability, no parallelism
+        (p1 "par#" ^{:go/end 193} (fn ^Value [^{:tag (slice Value)} a] (conv int64 1)))
+        (p1 "spark#" ^{:go/end 194} (fn ^Value [^{:tag (slice Value)} a] (aget a 0)))
+        (pm "getSpark#" ^{:go/end 195} (fn ^{:tag (slice Value)} [^{:tag (slice Value)} a] (lit (slice Value) (conv int64 0) nil)))
+        (p1 "numSparks#" ^{:go/end 196} (fn ^Value [^{:tag (slice Value)} a] (conv int64 0)))
+
+        ;; stable pointers and names
+        (px "makeStablePtr#" ^{:go/end 202} (fn ^Value [^{:tag (* Machine)} m ^{:tag (* PrimE)} _ ^{:tag (slice Value)} a]
+            (set! (.-stables m) (append (.-stables m) (aget a 0)))
+            (conv uint64 (len (.-stables m)))))
+
+        (px "deRefStablePtr#" ^{:go/end 209} (fn ^Value [^{:tag (* Machine)} m ^{:tag (* PrimE)} _ ^{:tag (slice Value)} a]
+            (let [i (toW (aget a 0))]
+              (when (or (== i 0) (> i (conv uint64 (len (.-stables m)))))
+                (.fatal m "deRefStablePtr# of a bad stable pointer"))
+
+              (aget (.-stables m) (- i 1)))))
+
+        (p1 "eqStablePtr#" ^{:go/end 210} (fn ^Value [^{:tag (slice Value)} a] (b2i (== (toW (aget a 0)) (toW (aget a 1))))))
+        (px "makeStableName#" ^{:go/end 222} (fn ^Value [^{:tag (* Machine)} m ^{:tag (* PrimE)} _ ^{:tag (slice Value)} a]
+            (let [k (whnf (aget a 0))]
+              (when (not (comparable k))
+                (set! k (aget a 0)))
+
+              (when [(values sn ok) (aget (.-snames m) k)] ok
+                (return sn))
+
+              (let [sn (addr (lit StableName :N (conv int64 (+ (len (.-snames m)) 1))))]
+                (aset (.-snames m) k sn)
+                ^{:line 221} sn))))
+
+        (p1 "stableNameToInt#" ^{:go/end 223} (fn ^Value [^{:tag (slice Value)} a] (.-N (assert (* StableName) (aget a 0)))))
+
+        ;; weak pointers: finalizers never run by a GC (a class); finalizeWeak# runs them
+        (p1 "mkWeak#" ^{:go/end 226} (fn ^Value [^{:tag (slice Value)} a] (addr (lit Weak :Key (aget a 0) :V (aget a 1) :Fin (aget a 2)))))
+        (p1 "mkWeakNoFinalizer#" ^{:go/end 227} (fn ^Value [^{:tag (slice Value)} a] (addr (lit Weak :Key (aget a 0) :V (aget a 1)))))
+        (pm "deRefWeak#" ^{:go/end 234} (fn ^{:tag (slice Value)} [^{:tag (slice Value)} a]
+            (let [w (assert (* Weak) (aget a 0))]
+              (when (.-Dead w)
+                (return (lit (slice Value) (conv int64 0) nil)))
+
+              (lit (slice Value) (conv int64 1) (.-V w)))))
+
+        (pm "finalizeWeak#" ^{:go/end 243} (fn ^{:tag (slice Value)} [^{:tag (slice Value)} a]
+            (let [w (assert (* Weak) (aget a 0))]
+              (when (or (.-Dead w) (== (.-Fin w) nil))
+                (set! (.-Dead w) true)
+                (return (lit (slice Value) (conv int64 0) nil)))
+
+              (set! (.-Dead w) true)
+              (lit (slice Value) (conv int64 1) (.-Fin w)))))
+
+        (p1 "addCFinalizerToWeak#" ^{:go/end 251} (fn ^Value [^{:tag (slice Value)} a]
+            (let [w (assert (* Weak) (aget a 4))]
+              (when (.-Dead w)
+                (return (conv int64 0)))
+
+              (set! (.-CFins w) (append (.-CFins w) (lit cfin :fn (toW (aget a 0)) :arg (toW (aget a 1)) :hasEnv (!= (toI (aget a 2)) 0) :envp (toW (aget a 3)))))
+              (conv int64 1))))
+
+
+        ;; cost centres, events, allocation counters: off
+        (p1 "getCurrentCCS#" ^{:go/end 254} (fn ^Value [^{:tag (slice Value)} a] (conv uint64 0)))
+        (p1 "getCCSOf#" ^{:go/end 255} (fn ^Value [^{:tag (slice Value)} a] (conv uint64 0)))
+        (pm "clearCCS#" ^{:go/end 256} (fn ^{:tag (slice Value)} [^{:tag (slice Value)} a] nil))
+        (pm "traceEvent#" ^{:go/end 257} (fn ^{:tag (slice Value)} [^{:tag (slice Value)} a] nil))
+        (pm "traceMarker#" ^{:go/end 258} (fn ^{:tag (slice Value)} [^{:tag (slice Value)} a] nil))
+        (pm "traceBinaryEvent#" ^{:go/end 259} (fn ^{:tag (slice Value)} [^{:tag (slice Value)} a] nil))
+        (pm "setThreadAllocationCounter#" ^{:go/end 260} (fn ^{:tag (slice Value)} [^{:tag (slice Value)} a] nil))
+        (pm "setOtherThreadAllocationCounter#" ^{:go/end 261} (fn ^{:tag (slice Value)} [^{:tag (slice Value)} a] nil))
+        (aset primcalls "stg_getThreadAllocationCounterzh" (addr (lit Primop :Name "stg_getThreadAllocationCounterzh" :f1 ^{:go/end 262} (fn ^Value [^{:tag (slice Value)} a] (conv int64 0)))))
+        (range [_ k (lit (slice int) 0 1 2 3)]
+          (range [_ n (lit (slice string) "Addr" "ByteArray" "MutableByteArray" "Value")]
+            (pm (+ "prefetch" n (itoa k) "#") ^{:go/end 265} (fn ^{:tag (slice Value)} [^{:tag (slice Value)} a] nil))))
+
+
+        (p1 "anyToAddr#" ^{:go/end 268} (fn ^Value [^{:tag (slice Value)} a] (conv uint64 0)))
+        (pc "whereFrom#" ^{:go/end 272} (fn [^{:tag (* Machine)} m ^{:tag (slice Value)} a] :results [Expr (slice Value)]
+            (.ret1 m (conv int64 0))
+            (return nil nil)))))))
+
+
+
+
+^{:go/breaks [[4 281]] :go/end 282} (go/func comparable ^bool [^Value v]
+  (type-switch v
+    (case [(* Con) (* Fun) (* PAP) (* Thunk) (* MutVar) (* ByteArray) (* Array) (* MVar) (* TVar) (* Thread) (* Weak)]
+      (return true)))
+
+  false)
+
+
+^{:go/breaks [[4 288]] :go/end 289} (go/func ptrEq ^bool [^Value a ^Value b]
+  (when (and (comparable a) (comparable b))
+    (return (== a b)))
+
+  false)
+
+
+
+
+^{:go/end 306} (go/method takeMVar "takeMVar takes (or reads) an MVar's value, blocking while it is empty; a woken taker gets the\nputter's value directly (GHC's single wake-up, FIFO).\n" [^{:tag (* Machine)} m ^{:tag (* MVar)} mv ^bool read ^bool block] :results [Expr (slice Value)]
+  (when (.-Full mv)
+    (let [v (.-V mv)]
+      (when (not read)
+        (.mvarTaken m mv))
+
+      (.ret1 m v)
+      (return nil nil)))
+
+  (let [t (.-cur m)]
+    (set! (.-Queue mv) (append (.-Queue mv) t))
+    (set! (.-mvRead t) read)
+    (.block m mv true)))
+
+
+
+
+^{:go/end 325} (go/method mvarTaken "mvarTaken empties an MVar, a blocked putter's value put in.\n" [^{:tag (* Machine)} m ^{:tag (* MVar)} mv]
+  (set! (.-Full mv) false)
+  (set! (.-V mv) nil)
+  (while (> (len (.-Queue mv)) 0)
+    (let [w (aget (.-Queue mv) 0)]
+      (when (not (.-mvPut w))
+        (break))
+
+      (set! (.-Queue mv) (subslice (.-Queue mv) 1))
+      (set! (values (.-V mv) (.-Full mv)) (values (.-mvVal w) true))
+      (set! (values (.-mvPut w) (.-mvVal w)) (values false nil))
+      (set! (values (.-r w) (.-rs w)) (values nil (lit (slice Value))))
+      (.wake m w)
+      (return))))
+
+
+
+
+^{:go/end 353} (go/method putMVar "putMVar puts a value, blocking while the MVar is full; readers and the first taker woken.\n" [^{:tag (* Machine)} m ^{:tag (* MVar)} mv ^Value v ^bool block] :results [Expr (slice Value)]
+  (when (.-Full mv)
+    (let [t (.-cur m)]
+      (set! (values (.-mvPut t) (.-mvVal t)) (values true v))
+      (set! (.-Queue mv) (append (.-Queue mv) t))
+      (return (.block m mv true))))
+
+  (while (> (len (.-Queue mv)) 0)
+    (let [w (aget (.-Queue mv) 0)]
+      (when (.-mvPut w)
+        (break))
+
+      (set! (.-Queue mv) (subslice (.-Queue mv) 1))
+      (set! (values (.-r w) (.-rs w)) (values v nil))
+      (let [read (.-mvRead w)]
+        (set! (.-mvRead w) false)
+        (.wake m w)
+        (when (not read)
+          (.retN m nil)
+          (return nil nil)))))
+
+
+  (set! (values (.-V mv) (.-Full mv)) (values v true))
+  (.retN m nil)
+  (return nil nil))
+
+
+^{:go/end 364} (go/method tagOf ^int64 [^{:tag (* Machine)} m ^Value v]
+  (let [(values c ok) (assert (* Con) v)]
+    (when (not ok)
+      (.fatal m (+ "dataToTag# of " (showShallow v))))
+
+    (when (not (.-ok (.-DC c)))
+      (.loadDC (.-ld m) (.-DC c)))
+
+    (conv int64 (- (.-Tag (.-DC c)) 1))))
+
+
+(go/var dttCase (addr (lit CaseE :scrut (addr (lit Lit)) :bslot 0 :kind kPoly :def (addr (lit alt :body (addr (lit dttBody)))))))
+
+(go/type dttBody (struct))
+
+^{:go/end 373} (go/method eval [^{:tag (* dttBody)} e ^{:tag (* Machine)} m ^{:tag (slice Value)} env] :results [Expr (slice Value)]
+  (.ret1 m (.tagOf m (aget env 0)))
+  (return nil nil))

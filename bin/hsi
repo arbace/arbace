@@ -30,6 +30,13 @@
 #                                  GHC 9.14.1's -O0 builds of the run corpora run and recorded into
 #                                  test/haskell/ref-ghc914.edn (status, stdout's SHA-256, size and first line,
 #                                  stderr's, the build's and the run's seconds); --only keeps every other line
+#   bin/hsi build                  hsi's light driver built (go/arbace/hs, test/haskell/hsi/cmd.ae and go/arbace/crt printed
+#                                  by repr/go, TamaGo's go) into .tmp/hsi/bin/hsi, its path printed (HSI_EXE names another)
+#   bin/hsi run FILE.hs [ARG...]   FILE compiled to STG at -O0 by the helper and run on hsi (HE4a)
+#   bin/hsi check [--corpus C,...] [--only ID,...] [--record] [--keep]
+#                                  the run corpora (samples, synthetic) on hsi against test/haskell/ref-ghc914.edn
+#                                  (bin/lib/hsi/check); --record writes test/haskell/check-hsi.edn
+#   bin/hsi primops                hsi's primops against GHC.Prim's non-SIMD names
 #   bin/hsi generate [--check]     the synthetic corpus test/haskell/eval/synthetic/ written by its generator
 #                                  (test/haskell/eval/gen.ae, survey §8.3); --check: the committed files equal it
 # Environment: HSI_JOBS (default 8), HSI_CORPORA (another test/haskell/eval-corpora.edn).
@@ -374,6 +381,65 @@ spec_check() {
   echo "hsi spec-check: $n constructors of 23 declarations, every one in doc/haskell/STG-SPEC.md's checklist"
 }
 
+# build_hsi: hsi's light driver (go/arbace/hs and test/haskell/hsi/cmd.ae printed by repr/go with go/arbace/crt, built
+# by TamaGo's go into .tmp/hsi/bin/hsi, kept by the forms' digest; HSI_EXE names another); its path on stdout
+build_hsi() {
+  if [ -n "${HSI_EXE:-}" ]; then echo "$HSI_EXE"; return; fi
+  local d=$WORK/bin mod=$WORK/bin/mod key exe=$WORK/bin/hsi
+  key=$( { find "$root/go/arbace/hs" "$root/go/arbace/crt" "$root/test/haskell/hsi" -type f | LC_ALL=C sort | xargs sha256sum
+           sha256sum "$root/go/arbace/hs.ae" "$root/go/arbace/crt.ae"; } | sha256sum | cut -c1-64)
+  if [ -x "$exe" ] && [ "$(cat "$d/key" 2>/dev/null)" = "$key" ]; then echo "$exe"; return; fi
+  rm -rf "$mod"; mkdir -p "$mod/hs/cmd/hsi" "$mod/crt"
+  printf 'module arbace\n\ngo 1.27\n' > "$mod/go.mod"
+  local h; h=$(arbace_exe)
+  for p in "go/arbace/crt.ae $mod/crt" "go/arbace/hs.ae $mod/hs" "test/haskell/hsi/cmd.ae $mod/hs/cmd/hsi"; do
+    set -- $p
+    ARBACE_HOST_EXE=$h GOMAXPROCS=4 "$root/bin/repr-go" print "$root/$1" "$2" > "$d/print.log" 2>&1 \
+      || { cat "$d/print.log" >&2; die "build: repr-go print $1"; }
+  done
+  (cd "$mod" && GOCACHE=$WORK/bin/gocache GOFLAGS=-p=4 GOMAXPROCS=4 CGO_ENABLED=0 GOTOOLCHAIN=local GOENV=off \
+     "${ARBACE_GOROOT:-/root/tamago-go}/bin/go" build -trimpath -o "$exe.new" ./hs/cmd/hsi) >&2 || die "build: go build"
+  mv -f "$exe.new" "$exe"
+  echo "$key" > "$d/key"
+  echo "$exe"
+}
+
+# run_hsi FILE.hs [ARG...]: FILE compiled to STG at -O0 by the helper and run on hsi over the libraries' dumps
+run_hsi() {
+  [ $# -ge 1 ] || die "usage: bin/hsi run FILE.hs [ARG...]"
+  local f=$1; shift
+  ghc_check
+  local exe; exe=$(build_hsi)
+  "$root/bin/repr-haskell" helper >&2
+  local hh; hh=$(cat "$root"/tools/hsdump/*.hs "$root/tools/hsdump/GHC_VERSION" | sha256sum | cut -c1-64)
+  local d; d=$(mktemp -d "$WORK/run.XXXXXX")
+  (cd "$(dirname "$f")" && "$root/.tmp/hsdump/hsdump" stg -o "$d/stg" --libdir "$libdir" --helper-hash "sha256:$hh" --ghc -O0 \
+     -outputdir "$d/obj" --files "$(basename "$f")") > "$d/dump.log" 2>&1 || { cat "$d/dump.log" >&2; rm -rf "$d"; exit 1; }
+  local la=() l
+  IFS=: read -r -a dirs <<< "${HSI_LIBS:-$WORK/dumps/stg:$WORK/dumps-extra/stg}"
+  for l in "${dirs[@]}"; do [ -d "$l" ] && la+=(--lib "$l"); done
+  local st=0
+  "$exe" run "${la[@]}" --prog "$d/stg" --name "$(basename "$f" .hs)" -- "$@" || st=$?
+  rm -rf "$d"
+  exit $st
+}
+
+# primops_hsi: the non-SIMD primops of GHC 9.14.1 (GHC.Prim's names, :browse by the host's GHC) against hsi's
+primops_hsi() {
+  ghc_check
+  local exe; exe=$(build_hsi)
+  local d=$WORK/primops; mkdir -p "$d"
+  # :browse's names are qualified (GHC.Internal.Prim.x, an operator in parentheses); the SIMD ones (a vector's width in
+  # the name) and seq (not one of primops.txt.pp's) left out: the survey's E4, 742 names
+  echo ':browse GHC.Prim' | ghc --interactive -v0 -ignore-dot-ghci 2>&1 | sed -n 's/^\([^ :][^ ]*\) ::.*/\1/p' \
+    | sed 's/^(\(.*\))$/\1/; s/^GHC\.Internal\.Prim\.//' | grep -v -x seq \
+    | grep -v -E 'X(2|4|8|16|32|64)#?$|X(2|4|8|16|32|64)(Array|OffAddr|AsWord8|AsInt8)' | LC_ALL=C sort -u > "$d/ghc.txt" || true
+  "$exe" primops | LC_ALL=C sort -u > "$d/hsi.txt"
+  local all done; all=$(wc -l < "$d/ghc.txt"); done=$(comm -12 "$d/ghc.txt" "$d/hsi.txt" | wc -l)
+  comm -23 "$d/ghc.txt" "$d/hsi.txt" > "$d/missing.txt"
+  echo "hsi primops: $done of GHC.Prim's $all non-SIMD names implemented; the others in $d/missing.txt"
+}
+
 cmd=${1:-}
 [ $# -gt 0 ] && shift
 case $cmd in
@@ -383,6 +449,10 @@ case $cmd in
   exe) arbace_exe ;;
   tests) exec "$root/bin/lib/hsi/tests" "$@" ;;
   record-ref) exec "$root/bin/lib/hsi/record-ref" "$@" ;;
+  build) build_hsi ;;
+  run) run_hsi "$@" ;;
+  check) exec "$root/bin/lib/hsi/check" "$@" ;;
+  primops) primops_hsi "$@" ;;
   generate) exec "$root/bin/lib/hsi/generate" "$@" ;;
   *) sed -n '2,/^set -euo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac
