@@ -31,3 +31,8 @@ import select
 try: type(select.poll())()
 except TypeError as e: print(e)
 import multiprocessing.reduction
+d = {"KEY1": "V1", "KEY2": "V2", "KEY3": "V3"}
+k, v = d.popitem(); k, v = d.popitem(); d[k] = v; del d["KEY1"]; d.popitem(); d["KEY9"] = 9; print(d)
+sys.stdout.write("text "); sys.stdout.flush(); sys.stdout.buffer.write(b"bytes\n"); sys.stdout.buffer.flush()
+print(sys.stdout.encoding, type(sys.stdout.buffer).__name__, sys.stdout.buffer.fileno())
+with sys.stdout as f: f.write("in with\n")
