@@ -3193,3 +3193,81 @@ What the main host must check: `test/gate/audit-trace-test.bash` and `test/gate/
 `NAME.cpu.tsv` system times of the bumped programs against rerun 8's; the amd64 strace's line count with `rt_sigprocmask`
 traced (bash-heavy steps make many such calls; here the trace of a 7 s stage 0 run grew by 0 lines, a gate step with many forks
 needs a look at its FIFO's size and the reducer's rate).
+
+## GT8, the test budget (2026-11-03; proposals GTS200-GTS209, none decided)
+
+**The goal** (the user, 2026-11-02; before the tag `arbace-reaps-4-crops-v1` since 2026-11-03): every check of every crop
+runs in bounded time on this one host, so that ten crops (Clojure, Java, Go, C, C++, OCaml, Scheme, Haskell, Rust, Python)
+fit, with the heavy runs at night (the user's 6 to 9 hours) and development by day. The tiers:
+
+| tier | budget | runs | today, four crops |
+|---|---|---|---|
+| essential | 15 min | every merge to main | 11m02s wall (`2a39402a`, 26 steps, concurrent) |
+| nightly | 6 h | each night: a keyed `--full` | about 11.8 h serial when every step runs (below) |
+| clean | 24 h | at a tag: a fresh clone, every step audited | v2's: 190,621 s over eight runs, three crops |
+
+**Where the time goes** (`bin/gate --full` at `504ab60d`, 368m55s, 85 steps run, VM report 156's
+`assets/156-step-times-504ab60d.tsv`; C's seven full steps from C9.2's window, doc/C23-SURVEY.md): Java's family (javac's
+tool and checks, repr/java's tree checks, `java-check`'s levels) about 258 min, `java-compiled-full` alone 123 min and
+`java-interp` 44; C's full checks about 300 min (the tree check 77, the token check 49, the annotations 49, the round trip
+48, the AOT check 40, the run check 36); Go's family (repr/go's round trips and native check, goi's checks) about 75 min;
+Clojure's (the suite at both levels, repr/clojure, the oracle, the per-form check) about 33 min; the builds, the
+fixpoint (17 min), the programs and the gate's own tests the rest. Ten crops in 6 h leave about 35 minutes a crop; the
+four take about 2.9 hours each: a factor of five, more for Java and C.
+
+**The methods**, cheapest first:
+
+1. **Measure** (GT8.1): each step's and part's wall, CPU and peak from the store of passes (`:secs`, `:cpu-s`,
+   `:maxrss-kib`), each step's crop and tier, the sums against the budgets (VM task 170, `bin/gate --costs`). A tier over
+   its budget is reported by the planner.
+2. **Deduplicate** (GT8.2): files byte-identical or equal after normalization counted once (`torture-execute-mirror`'s
+   1,431 duplicates, VM report 156, the note beside GT7; VM task 171 over every crop's corpora).
+3. **Coverage subsets** (GT8.3): the files that reach every block of the code under check, every class, every control,
+   every deferred and gap file (VM reports 160, 161 for C: torture-execute 59 of 1,532 programs, 6% of its time; C's 15
+   run corpora 229 programs, the subset check 939 s to 242 s; the user, 2026-11-02: the back end's blocks, the kept classes,
+   the controls and one per class, a `:subset` per corpus). Then Java's interpreted and compiled levels, the largest.
+4. **Rotation** (GT8.4): the nightly tier runs the subsets and a rotating slice of the rest, so every file runs within a
+   period; the store records each file's last run; a failure joins the subset.
+5. **Finer keys** (GT8.5): a step keyed by what it reads (VM report 163 for C's steps), records stored per corpus and
+   parts keyed per corpus (VM report 161, the user's per-corpus storage), so a record's one line reruns one part.
+6. **Synthetic corpora** (GT8.6): per crop, small generated programs covering its specification construct by construct
+   (C23's grammar and Annex J's behaviours, Java's JLS chapters, Go's spec), checked against the same references; a new
+   crop starts with them and a subset of its upstream suite, not the whole suite.
+7. **The tiers in the gate** (GT8.7): `bin/gate` (essential), `bin/gate --nightly` (subsets plus the rotation's slice,
+   keyed), `bin/gate --full --clean` over the compressed corpora (every part, audited) at a tag.
+
+**Acceptance** (proposed, GTS209): an audited clean run of the four crops over the compressed corpora within 4 × 2.4 h
+(the four crops' share of 24 h) and its nightly within 4 × 35 min; the tag `arbace-reaps-4-crops-v1` stands on it.
+
+### Proposals (GTS200-GTS209)
+
+- **GTS200 The essential budget's measure.** (a) the essential gate's wall time on a quiet host, concurrent as it runs;
+  (b) the sum of its steps' wall times. *Recommended: (a)*: the budget is the wait at a merge; the sum is reported beside
+  it (`--costs`) so a step that grows is still seen.
+- **GTS201 Per-crop shares.** (a) equal shares (35 min nightly, 2.4 h clean a crop), the shared steps (builds, fixpoint,
+  gate tests) charged apart, about 10% of each tier; (b) shares by weight (a crop's corpora and levels). *Recommended: (a)*:
+  simple to check, and a crop over its share compresses before it grows.
+- **GTS202 The nightly tier's content.** (a) every step keyed as `--full` today, each corpus step over its subset plus the
+  rotation's slice; (b) the subsets alone, the rotation weekly in one long run. *Recommended: (a)*: every night sees every
+  step, and a regression in the rest is found within the period.
+- **GTS203 The rotation's period.** (a) seven nights; (b) three; (c) fourteen. *Recommended: (a)*: a week bounds how long
+  a regression outside the subsets can hide, and each night's slice is a seventh of the rest.
+- **GTS204 The clean run's corpora.** (a) the compressed corpora, every part, every step audited; (b) the full corpora,
+  once per milestone. *Recommended: (a)*: the full corpora are covered by the rotation's record (every file's last run and
+  result within the period), which the clean run checks is complete and passing.
+- **GTS205 The subset rule for every crop.** (a) the C rule (the user, 2026-11-02): every block of the code under check
+  reached, every class kept with one file each, the controls, every deferred and gap file; (b) per crop. *Recommended: (a)*,
+  the code under check named per step (C: ci's back end and cf2g; Java: jrt and the interpreter; Go: goi's nodes; Clojure:
+  the runtime and c2j).
+- **GTS206 Coverage on the Go build.** Arbace's Go executables measured with Go's own coverage (`go build -cover`,
+  GOCOVERDIR) for the blocks of the code under check. (a) a cover build kept by key beside the gate's builds (VM report
+  160's `bin/ci cover` for C); (b) instrumented once per GT8 round by hand. *Recommended: (a)*, run at night, its subsets
+  recomputed when the code under check changes.
+- **GTS207 Synthetic corpora's references.** (a) the same references as the upstream corpora (gcc, gc, the JDK) run on the
+  generated programs and recorded; (b) the generator's own expected outputs. *Recommended: (a)*: one kind of truth.
+- **GTS208 Java's `speed` curation inside GT8.** (a) GTS102's per-test limits (CPU, 2.5×) applied with the subsets, each
+  of the 51 interpreted and 14 compiled timeouts judged one by one (a slow test kept by design with its time, a hang
+  deferred and named), `speed`'s catch-all `:match` removed; (b) after GT8. *Recommended: (a)*: the user put it before the
+  tag (2026-11-03), and the subsets change which tests run.
+- **GTS209 Acceptance.** As above: the clean run within the four crops' share, the nightly within theirs, `--costs`'
+  table in the tag's record. *Recommended: (a)*.
