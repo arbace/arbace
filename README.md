@@ -116,7 +116,16 @@ ARBACE_BOX_NET=loopback $B                             # with a network: loopbac
 ARBACE_BOX_ARCHES=amd64,arm64 bin/arbace-go --build --box && bin/box-arm64-vm check
 ```
 
-## Three crops: read, eval, AOT and print
+## Four crops: read, eval, AOT and print
+
+The tag `arbace-reaps-4-crops-v1` (2026-11-04, on main) marks REAP for a fourth crop, C (C23, ISO/IEC 9899:2024,
+against gcc 15.2's testsuites, with musl 1.2.6; [doc/C23-SURVEY.md](doc/C23-SURVEY.md)), beside Clojure, Java 26
+and Go 1.27.1: C read into C forms by ports of a C front end's lexer, preprocessor and parser, interpreted at the
+REPL by ci, compiled ahead of time into Go, and printed back to C, on a seed that embeds it (`1fe1063f`, verified).
+`bin/reap` prints the matrix; none of its 16 cells fails, and every case that does not pass is in a recorded class
+([doc/FULL-SUPPORT-SURVEY.md](doc/FULL-SUPPORT-SURVEY.md), "REAP v3's divergences", v2's beside it). C's cases
+passing: read 5,201, eval 2,049, AOT 2,058, print 4,767. The tag stands on a keyed `bin/gate --full` with C's full
+checks; the all-crops clean run waits for compressed corpora (GT8, next).
 
 The tag `arbace-reaps-3-crops-v2` (2026-11-01, on main) marks REAP for Clojure, Java 26 and Go 1.27.1 as
 v1 did, and its second round: the same four levels, each language read into Arbace's forms, evaluated at the
