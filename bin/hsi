@@ -1,7 +1,7 @@
 #!/bin/bash
-# hsi, Haskell's eval (doc/haskell/HASKELL-EVAL-SURVEY.md, HES1-HES21 decided 2026-11-03): so far the trial
-# HE1-HE3 ("As built: HE1-HE3 (write-ahead)"): the pins and corpora, the STG dumps of the helper (tools/hsdump stg,
-# doc/haskell/STG-SPEC.md), the references (GHC 9.14.1's -O0 runs recorded) and the synthetic corpus. Out of
+# hsi, Haskell's eval (doc/haskell/HASKELL-EVAL-SURVEY.md, HES1-HES43 decided 2026-11-03): the trial HE1-HE3 ("As
+# built: HE1-HE3 (write-ahead)") and HE4a-HE4c's machine, libm and checks: the pins and corpora, the STG dumps of
+# the helper (tools/hsdump stg, doc/haskell/STG-SPEC.md), the references (GHC 9.14.1's -O0 runs recorded) and the synthetic corpus. Out of
 # gate_key and the gate (HES19 (a)): the Arbace parts (arbace/repr/haskell/stg.ae, test/haskell/eval/*.ae) are
 # evaluated from the checkout on stage 0, the helper and the references run on the host's GHC
 # (tools/hsdump/GHC_VERSION).
@@ -33,10 +33,18 @@
 #   bin/hsi build                  hsi's light driver built (go/arbace/hs, test/haskell/hsi/cmd.ae and go/arbace/crt printed
 #                                  by repr/go, TamaGo's go) into .tmp/hsi/bin/hsi, its path printed (HSI_EXE names another)
 #   bin/hsi run FILE.hs [ARG...]   FILE compiled to STG at -O0 by the helper and run on hsi (HE4a)
-#   bin/hsi check [--corpus C,...] [--only ID,...] [--record] [--keep]
-#                                  the run corpora (samples, synthetic) on hsi against test/haskell/ref-ghc914.edn
-#                                  (bin/lib/hsi/check); --record writes test/haskell/check-hsi.edn
+#   bin/hsi check [--corpus C,...] [--only ID,...|@FILE] [--jobs N] [--record] [--keep]
+#                                  the run corpora (samples, synthetic, testsuite-core; default the first two) on hsi
+#                                  against test/haskell/ref-ghc914.edn, every non-pass in a class of
+#                                  test/haskell/divergences.edn, the negative controls failing (bin/lib/hsi/check);
+#                                  --only @FILE: a list of ids (test/haskell/hsi/essential.txt, GT8); --record writes
+#                                  test/haskell/check-hsi.edn
 #   bin/hsi primops                hsi's primops against GHC.Prim's non-SIMD names
+#   bin/hsi libm-check [N [SEED]]  hsi's port of musl's libm (go/arbace/hs/libm.ae, HE4b) against the host's libm
+#                                  (musl 1.2.6) function by function: test/haskell/hsi/libm-ref.c built by the host's cc
+#                                  writes each function's results over its edges and N random inputs of each kind
+#                                  (default 20000), hsi recomputes them, every result's bits equal; then the negative
+#                                  control, the same lines by Go's math package, must mismatch
 #   bin/hsi generate [--check]     the synthetic corpus test/haskell/eval/synthetic/ written by its generator
 #                                  (test/haskell/eval/gen.ae, survey §8.3); --check: the committed files equal it
 # Environment: HSI_JOBS (default 8), HSI_CORPORA (another test/haskell/eval-corpora.edn).
@@ -228,7 +236,7 @@ dump_package() { # NAME DIR UNITFLAG FLAGS MODS HSC HFLAGS GENS GFILES OUT
   rm -rf "${r:?}/$b" "$out/stg/$name"; mkdir -p "$r/$b" "$out/stg/$name" "$out/logs"
   for f in $flags; do case $f in -i*) srcdirs+=("${f#-i}") ;; esac; done
   # shellcheck disable=SC2086
-  local hf=($(prefix_rel "$dir" $(echo "$hflags" | sed "s|\\\$libdir|$libdir|g")))
+  local hf=($(prefix_rel "$dir" $(echo "$hflags" | sed "s|\\\$libdir|$libdir|g; s|\\\$repo|$root|g")))
   for f in $hscs; do
     local m; m=$(strip_srcdir "$f" "${srcdirs[@]}")
     mkdir -p "$(dirname "$r/$b/$m")"
@@ -247,7 +255,7 @@ dump_package() { # NAME DIR UNITFLAG FLAGS MODS HSC HFLAGS GENS GFILES OUT
     cp "$root/${f#*=}" "$r/$b/$m"
   done
   # shellcheck disable=SC2046,SC2086
-  local gf=(-this-unit-id "$unit" $(prefix_rel "$dir" $(echo "$flags" | sed "s|\\\$libdir|$libdir|g"))
+  local gf=(-this-unit-id "$unit" $(prefix_rel "$dir" $(echo "$flags" | sed "s|\\\$libdir|$libdir|g; s|\\\$repo|$root|g"))
             "-i$b" "-I$b" -O2 -haddock -outputdir "$b" -j"$jobs")
   t0=$(date +%s.%N)
   # shellcheck disable=SC2086
@@ -416,7 +424,7 @@ run_hsi() {
   (cd "$(dirname "$f")" && "$root/.tmp/hsdump/hsdump" stg -o "$d/stg" --libdir "$libdir" --helper-hash "sha256:$hh" --ghc -O0 \
      -outputdir "$d/obj" --files "$(basename "$f")") > "$d/dump.log" 2>&1 || { cat "$d/dump.log" >&2; rm -rf "$d"; exit 1; }
   local la=() l
-  IFS=: read -r -a dirs <<< "${HSI_LIBS:-$WORK/dumps/stg:$WORK/dumps-extra/stg}"
+  IFS=: read -r -a dirs <<< "${HSI_LIBS:-$WORK/dumps/stg:$WORK/dumps-extra/stg:$WORK/dumps-more/stg}"
   for l in "${dirs[@]}"; do [ -d "$l" ] && la+=(--lib "$l"); done
   local st=0
   "$exe" run "${la[@]}" --prog "$d/stg" --name "$(basename "$f" .hs)" -- "$@" || st=$?
@@ -440,6 +448,27 @@ primops_hsi() {
   echo "hsi primops: $done of GHC.Prim's $all non-SIMD names implemented; the others in $d/missing.txt"
 }
 
+# libm_check [N [SEED]]: hsi's libm against the host's musl, bit for bit, and its negative control
+libm_check() {
+  local exe d=$WORK/libm n=${1:-20000} seed=${2:-1}
+  exe=$(build_hsi)
+  mkdir -p "$d"
+  cc -O0 -fno-builtin -o "$d/libm-ref" "$root/test/haskell/hsi/libm-ref.c" -lm || die "libm-check: cc"
+  "$d/libm-ref" "$n" "$seed" > "$d/ref.txt"
+  local st=0
+  "$exe" libm < "$d/ref.txt" > "$d/result.txt" || st=$?
+  grep '^mismatch' "$d/result.txt" | head -20 >&2 || true
+  local lines bad; lines=$(wc -l < "$d/ref.txt"); bad=$(awk '!/^mismatch/ {n += $3} END {print n + 0}' "$d/result.txt")
+  echo "hsi libm-check: $lines calls of $(grep -vc '^mismatch' "$d/result.txt") functions, $bad mismatches ($d/result.txt)"
+  local cst=0
+  "$exe" libm --control < "$d/ref.txt" > "$d/control.txt" || cst=$?
+  local cbad; cbad=$(awk '!/^mismatch/ {n += $3} END {print n + 0}' "$d/control.txt")
+  rm -f "$d/ref.txt"
+  if [ "$cst" = 0 ]; then echo "hsi libm-check: the control (Go's math) passes: the judge does not discriminate" >&2; exit 1; fi
+  echo "hsi libm-check: the control (Go's math) mismatches $cbad, as it must"
+  [ "$st" = 0 ] || die "libm-check: hsi's libm differs from the host's"
+}
+
 cmd=${1:-}
 [ $# -gt 0 ] && shift
 case $cmd in
@@ -453,6 +482,7 @@ case $cmd in
   run) run_hsi "$@" ;;
   check) exec "$root/bin/lib/hsi/check" "$@" ;;
   primops) primops_hsi "$@" ;;
+  libm-check) libm_check "$@" ;;
   generate) exec "$root/bin/lib/hsi/generate" "$@" ;;
   *) sed -n '2,/^set -euo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac

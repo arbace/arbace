@@ -758,6 +758,17 @@ covers what.
   first line names its source), under the GNU General Public License version 2 (the text below,
   "OpenJDK (jdk26u)"), without the Classpath Exception, which jdk26u's `test/` does not carry.
   They are inputs of the check, in no executable.
+- `go/arbace/hs/libm.ae` and `go/arbace/hs/libm_data.ae` (hsi's libm, doc/haskell/HASKELL-EVAL-SURVEY.md, HES37 (a),
+  "As built: HE4b, HE4c (write-ahead)"): ported to Go by hand, then converted to Go forms, from musl 1.2.6's
+  `src/math` (https://musl.libc.org/releases/musl-1.2.6.tar.gz, SHA-256
+  `d585fd3b613c66151fc3249e8ed44f77020cb5e6c1e635a616d3f9f82460512a`, the pin of `test/c/corpora.edn`; the files the
+  first one's header names): musl, Copyright (c) 2005-2020 Rich Felker, et al., under the MIT License below ("musl");
+  its exp, log, pow, expf, logf and powf code and their tables Copyright (c) 2017-2018 Arm Limited, MIT; the rest from
+  FreeBSD's msun, Copyright (C) 1993 Sun Microsystems, Inc. ("Permission to use, copy, modify, and distribute this
+  software is freely granted, provided that this notice is preserved"), the float kernels and the argument reductions
+  as optimized by Bruce D. Evans and David Schultz (Copyright (c) 2003-2011, "extremely permissive terms", musl's
+  COPYRIGHT). The rest of `go/arbace/hs/` and `test/haskell/hsi/libm-ref.c` are Arbace's own, under the Eclipse Public
+  License 1.0.
 - `scheme/psyntax/` (Scheme's expander, doc/scheme/SCHEME-SURVEY.md, "As built: SM4"; origins in
   `scheme/provenance.edn`): `expander.ae`, `library-manager.ae`, `builders.ae` and `config.ae` are
   psyntax, the R6RS library and syntax-case system of Abdulaziz Ghuloum and R. Kent Dybvig, as Ikarus
@@ -988,6 +999,58 @@ DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
 THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+```
+
+## musl: MIT License
+
+musl 1.2.6's `COPYRIGHT` (its part for the whole and for `src/math`), which covers hsi's libm above:
+
+```
+musl as a whole is licensed under the following standard MIT license:
+
+----------------------------------------------------------------------
+Copyright © 2005-2020 Rich Felker, et al.
+
+Permission is hereby granted, free of charge, to any person obtaining
+a copy of this software and associated documentation files (the
+"Software"), to deal in the Software without restriction, including
+without limitation the rights to use, copy, modify, merge, publish,
+distribute, sublicense, and/or sell copies of the Software, and to
+permit persons to whom the Software is furnished to do so, subject to
+the following conditions:
+
+The above copyright notice and this permission notice shall be
+included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+----------------------------------------------------------------------
+
+Much of the math library code (src/math/* and src/complex/*) is
+Copyright © 1993,2004 Sun Microsystems or
+Copyright © 2003-2011 David Schultz or
+Copyright © 2003-2009 Steven G. Kargl or
+Copyright © 2003-2009 Bruce D. Evans or
+Copyright © 2008 Stephen L. Moshier or
+Copyright © 2017-2018 Arm Limited
+and labelled as such in comments in the individual source files. All
+have been licensed under extremely permissive terms.
+```
+
+The notice of the files from Sun (FreeBSD's msun):
+
+```
+Copyright (C) 1993 by Sun Microsystems, Inc. All rights reserved.
+
+Developed at SunSoft, a Sun Microsystems, Inc. business.
+Permission to use, copy, modify, and distribute this
+software is freely granted, provided that this notice
+is preserved.
 ```
 
 ## psyntax: MIT License

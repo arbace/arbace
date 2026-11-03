@@ -1024,3 +1024,109 @@ HE4"). Nothing of Haskell is in `gate_key` or a gate step (HES19 (a)).
 - **HES43 The check's classes.** (a) by the programs' ids (`test/haskell/divergences.edn`'s `:ids`) while the classes
   are few; (b) by reasons matched as goi's (`:match`), once hsi writes a reason per run (HE6). *Recommended: (a)* now,
   (b) at HE6.
+
+## Decided (2026-11-03, the user): HES37-HES43
+
+All as recommended. HE4's next steps: HE4b (libm) and HE4c (the testsuite's language core as a check), below.
+
+## As built: HE4b, HE4c (write-ahead)
+
+Built 2026-11-03 on branch `haskell-he4b` from `haskell-he4` (`846e987c`), on the host's GHC 9.14.1, TamaGo's go, the
+host's cc and musl, and the main checkout's stage 0 (`ARBACE_HOST_EXE`); light work by day (8 jobs, no lock but for the
+packages' dumps, run under `.tmp/heavy`, 2.5 minutes). Write-ahead: HE4's exit criteria (§11) are still not all met
+(HE4d-HE4h, "The rest of HE4" above). Nothing of Haskell is in `gate_key` or a gate step (HES19 (a)).
+
+### HE4b: musl's libm in Go
+
+- **`go/arbace/hs/libm.ae`, `libm_data.ae`** (HES37 (a)): musl 1.2.6's libm functions GHC's code calls, ported to Go by
+  hand from the pinned tarball's `src/math` (`test/c/corpora.edn`'s `:musl-1.2.6`, SHA-256 `d585fd3b...`; the files the
+  first one's header names: the Arm Limited exp, log and pow and their float versions with their tables; FreeBSD msun's
+  expm1, log1p, the trigonometric kernels and argument reductions, `__rem_pio2_large`, the inverse and hyperbolic
+  functions; `__math_*`), then converted to Go forms by repr/go's native reader as the rest of `go/arbace/hs` (HES38
+  (a), mode `:lines`; the Go source in the worktree's `.tmp/hs/hs-src/`, the forms the source from now on). 34 functions:
+  `exp expm1 log log1p sin cos tan asin acos atan atan2 sinh cosh tanh asinh acosh atanh pow` and the 16 `f` versions
+  with `powf`, `atan2f`; `sqrt fabs floor ceil trunc round` stay on Go's `math` (exact operations, musl's results). As
+  x86_64 compiles them: `FLT_EVAL_METHOD` 0, no FMA (the host's `ld-musl-x86_64.so.1` has no FMA or AVX instruction),
+  `TOINT_INTRINSICS` 0. Two rules of the port: every named constant is a Go variable (Go folds a constant expression
+  exactly, C rounds each operation: `3*pio2_1`, `0x1.c6af84b912394p-5/N/N/N`), and a C double literal in float code
+  makes the operation double, as in C. The tables are the C initializers transcribed mechanically (a scratch script,
+  the x86_64 preprocessor branches; `ipio2` in full, long double's). The floating-point exceptions and `errno` are not
+  kept (no caller reads them). The primops (`expDouble#` ... `atanhFloat#`, `**##`, `powerFloat#`) and the C functions
+  by symbol (`ffi`) call the port; the `Float#` primops call the `f` functions (GHC's code calls `expf`, not `exp`).
+- **`bin/hsi libm-check [N [SEED]]`** (`make hsi-libm-check`): `test/haskell/hsi/libm-ref.c`, built by the host's cc
+  (`-O0 -fno-builtin`, the functions through pointers: no constant folding by gcc), writes for each function its
+  results by the host's musl over the edges (signed zeros, the smallest and largest subnormals, the normal bounds, each
+  edge's neighbours, infinities, three NaNs, the functions' thresholds, multiples of pi/2 up to 2^30, the overflow and
+  underflow bounds), N random bit patterns, N values in five ranges and N/5 subnormals, and for `pow`, `powf`, `atan2`,
+  `atan2f` the edges' cross product with signs and random pairs (negative bases with integer exponents, bases near 1
+  with large exponents); `hsi libm` (the driver) recomputes every line and compares the bits. **1,769,602 calls, 0
+  mismatches** (N 20,000, 1 s); with N 300,000, 25,401,602 calls, 0 mismatches (about 15 s). The negative control,
+  the same lines by Go's `math` (what hsi had at HE4a), mismatches 471,953 and must.
+- **The synthetic corpus**: `class-floating` and `primops-float` now pass; `primops-double` differs in its two lines of
+  `decodeDouble_2Int#` of a zero only, whose sign GHC's RTS leaves uninitialised (`rts/StgPrimFloat.c`): the class
+  `:uninitialised` (`:design`). The class `:libm` is gone. Samples and synthetic: **46 of 47 equal**.
+
+### HE4c: the testsuite's language core as a check
+
+- **`bin/hsi check --corpus testsuite-core`** (`bin/lib/hsi/check`): record-ref's plan (`test/haskell/eval/run_plan.ae`
+  over `testsuite-run.edn` and eval-corpora.edn's nine directories: 701 tests), each test dumped by the helper at `-O0`
+  with its all.T flags (less its own C, Cmm, assembly and object files, HES45) from its directory, GHC following the
+  imports for the multi-module ones (the dump cached by the main file's, the flags' and, for those, the directory's
+  sources' digests), run on hsi in a fresh copy of its directory as record-ref ran GHC's build: its stdin, its
+  `extra_run_opts` through sh (`/dev/null` as an empty file), the driver dropping `+RTS ... -RTS` as GHC's RTS does
+  (`progArgs`; HES47), `env -i`, 60 s of CPU and 180 s of wall time. Every result carries `:dump` and `:run` seconds
+  (GT8). `--only` takes ids or `@FILE` (one id a line, GT8's lists); `--record` keeps the lines of the programs a run
+  does not cover. The reference was complete: every one of the 701 tests has its line in `ref-ghc914.edn` (HE3), so
+  record-ref recorded nothing new; its 20 `:no-build` are tests whose own C, Cmm or `pre_cmd` setup the plan does not
+  pass (HES35 (a)).
+- **The packages the core imports** (HES44): `bin/hsi dumps --packages bytestring,os-string,filepath,time,unix,file-io,
+  directory,ghc-platform,ghc-boot,ghc-experimental,ghc-heap,process,text,binary,pretty,template-haskell,ghc-boot-th,
+  exceptions,ghc-compact,parsec --out .tmp/hsi/dumps-more` (2.5 minutes under the heavy wrapper; 338 dumps, 36 MB, read
+  back with 0 errors), every module's ABI hash equal to the installed one's but `text`'s `Data.Text.Encoding` (1 of 54;
+  not yet looked at). `time`'s `.hsc` needed the corpus's `$repo` (its `cabal_macros.h`) substituted in the dump's flags
+  (fixed in `bin/hsi`). The check's and `bin/hsi run`'s default libraries: `dumps`, `dumps-extra`, `dumps-more`.
+- **Results** (`test/haskell/check-hsi.edn`, samples, synthetic and the core: 748 programs): **630 equal**, of the core
+  **584 of 701** (HE4a's probe: 504 of its 555 plain single-module tests); every other one in a class of
+  `test/haskell/divergences.edn` (HES43 (a), by ids): `:test-c` 54 (the test's own C: HE6), `:callback` 19 (foreign
+  import "wrapper" and foreign exports called back: HE4g), `:rts` 24 (deadlock by reachability, scheduling, throwTo to a
+  masked thread, allocation limits, finalizers, the static pointer table: HE4e), `:speed` 9 (killed at the limit: HE4d;
+  one of them, `T8726`, at 35 to 39 s against the 60 s of CPU Go's collector threads share, passes or not by a few
+  seconds: it passes in the record),
+  `:hsi-bug` 3 (internal errors: HE4f), `:rts-options` 2, `:process` 2, `:c-stdio` 1 (`%f`; HE4g), `:simd` 1,
+  `:skipped` 1 (`T4262`, all.T's unconditional skip, HES46), `:no-reference` 2 (GHC did not build them),
+  `:uninitialised` 1. The negative controls (`test/haskell/hsi-controls.txt`, now also `arr001` against `arr002`) fail
+  as they must.
+- **Times** (GT8): the whole check, 748 programs at 8 jobs, **3.5 minutes** of wall time with the dumps cached (18
+  minutes of CPU), the core's dumps 108 s of helper time when cold; per test the median run 0.20 s, the 90th percentile
+  0.38 s, 546 of the passing core tests under 0.5 s; the 8 `:speed` tests take 180 s each (most of the 977 s summed).
+  Under the 20 minutes the brief allows by day: the whole core is a day run, not a night one.
+- **GT8's list** (HES49): `test/haskell/hsi/essential.txt`, the samples and synthetic programs that run in under 2 s
+  (all but Loop and Nfib, 12 s each), and per directory of the core the 8 fastest passing tests, with the three
+  controls' subjects: 117 programs, **10 s** at 8 jobs with the dumps cached (`make hsi-check-essential`; `bin/hsi
+  check --corpus samples,synthetic,testsuite-core --only @test/haskell/hsi/essential.txt`).
+
+### Night runs (listed, not run)
+
+1. HE2's: `bin/hsi dumps --samples --again` (the 41 packages, twice), then HES44's three directories replaced by it.
+2. `bin/hsi libm-check 3000000 SEED` for a few seeds (about 2.5 minutes each).
+3. `bin/hsi record-ref --corpus testsuite` and a check of the testsuite's 1,713 run tests (the core's rate: about 9
+   minutes).
+
+### Proposals (HES44 onward)
+
+- **HES44 The packages the core imports.** (a) dumped into `.tmp/hsi/dumps-more` until HE2's night run of the 41
+  packages (as built, HES39's interim extended); (b) wait for the night run. *Recommended: (a)*.
+- **HES45 A test's own C in the check.** (a) left out of the helper's flags, the Haskell dumped and run, hsi stopping
+  at the test's function (the class `:test-c`, as built); (b) the test `:no-dump`. *Recommended: (a)*: the reason is
+  hsi's own message, and the C runs once HE6 brings ci beside hsi.
+- **HES46 all.T's unconditional `skip`.** (a) the test kept in the corpus and its non-pass a class `:skipped` (as
+  built); (b) left out of the corpus (eval-corpora.edn's counts change). *Recommended: (a)*.
+- **HES47 The RTS's options.** (a) the driver drops `+RTS ... -RTS` and after `--RTS` keeps the rest (as built), the
+  RTS's rejections a class `:rts-options` until HE4g; (b) parse GHC's RTS options and give its messages now.
+  *Recommended: (a)*.
+- **HES48 libm's check.** (a) `bin/hsi libm-check` by day at N 20,000 (1 s) and by night at millions, the host's musl
+  the reference (its pin: the host's musl package, 1.2.6-r6, whose `src/math` is the tarball's); (b) only the synthetic
+  programs. *Recommended: (a)*.
+- **HES49 GT8's list for Haskell's eval.** (a) `test/haskell/hsi/essential.txt` as built, for the row's share of the
+  essential gate when Haskell's row enters it; (b) a coverage-chosen subset (primops and C functions each reached once)
+  at HE6. *Recommended: (a)* now, (b) at HE6.

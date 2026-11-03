@@ -3,21 +3,27 @@
 ;;	hsi run --lib DIR... --prog DIR [--name NAME] [--stats] [-- ARG...]
 ;;	hsi primops        the primops hsi implements, one a line
 ;;	hsi cfunctions     the C functions of its table, one a line
-(in-ns 'go.arbace.hs.cmd.hsi) (go/file "main.go" :doc "Command hsi runs a Haskell program's STG on hsi (arbace/hs), the light driver of bin/hsi:\n\n\thsi run --lib DIR... --prog DIR [--name NAME] [--stats] [-- ARG...]\n\thsi primops        the primops hsi implements, one a line\n\thsi cfunctions     the C functions of its table, one a line\n" :imports [
+;;	hsi libm           lines NAME A B R (hex bits) on stdin, R the reference's result: each recomputed by hsi's
+;;	                   port of musl's libm, the mismatches and a count per function printed (bin/hsi libm-check);
+;;	                   --control: by Go's math package instead, the check's negative control (it must mismatch)
+(in-ns 'go.arbace.hs.cmd.hsi) (go/file "main.go" :doc "Command hsi runs a Haskell program's STG on hsi (arbace/hs), the light driver of bin/hsi:\n\n\thsi run --lib DIR... --prog DIR [--name NAME] [--stats] [-- ARG...]\n\thsi primops        the primops hsi implements, one a line\n\thsi cfunctions     the C functions of its table, one a line\n\thsi libm           lines NAME A B R (hex bits) on stdin, R the reference's result: each recomputed by hsi's\n\t                   port of musl's libm, the mismatches and a count per function printed (bin/hsi libm-check);\n\t                   --control: by Go's math package instead, the check's negative control (it must mismatch)\n" :imports [
 
 
-    ^{:line 9} [bufio "bufio"]
-    ^{:line 10} [fmt "fmt"]
-    ^{:line 11} [os "os"]
-    ^{:line 12} [debug "runtime/debug"]
-    ^{:line 13} [pprof "runtime/pprof"]
-    ^{:line 14} [sort "sort"]
-    ^{:line 15} [time "time"]
+    ^{:line 12} [bufio "bufio"]
+    ^{:line 13} [fmt "fmt"]
+    ^{:line 14} [math "math"]
+    ^{:line 15} [os "os"]
+    ^{:line 16} [strconv "strconv"]
+    ^{:line 17} [strings "strings"]
+    ^{:line 18} [debug "runtime/debug"]
+    ^{:line 19} [pprof "runtime/pprof"]
+    ^{:line 20} [sort "sort"]
+    ^{:line 21} [time "time"]
 
-    ^{:line 17} [hs "arbace/hs"]])
+    ^{:line 23} [hs "arbace/hs"]])
 
 
-^{:go/end 42} (go/func main []
+^{:go/end 50} (go/func main []
   (when (< (len os/Args) 2)
     (usage))
 
@@ -30,6 +36,8 @@
         (range [_ n ns]
           (fmt/Println n))))
 
+    (case ["libm"]
+      (os/Exit (libm (and (> (len os/Args) 2) (== (aget os/Args 2) "--control")))))
     (case ["primops"]
       (let [ns (hs/PrimopNames)]
         (sort/Strings ns)
@@ -41,17 +49,17 @@
 
 
 
-^{:go/end 47} (go/func usage []
+^{:go/end 55} (go/func usage []
   (fmt/Fprintln os/Stderr "usage: hsi run --lib DIR... --prog DIR [--name NAME] [--stats] [-- ARG...] | hsi primops")
   (os/Exit 2))
 
 
 
 
-^{:go/end 106} (go/func run "run runs a program; the loaded code is most of the live heap, so Go's collector runs less often than its\ndefault (GOGC 400 unless GOGC is set).\n" ^int [^{:tag (slice string)} args]
+^{:go/end 114} (go/func run "run runs a program; the loaded code is most of the live heap, so Go's collector runs less often than its\ndefault (GOGC 400 unless GOGC is set).\n" ^int [^{:tag (slice string)} args]
   (let [^{:tag (slice string)} libs (zero (slice string))
       (values prog name stats trace) (values "" "main" false false)
-      ^{:line 54 :tag (slice string)} rest (zero (slice string))]
+      ^{:line 62 :tag (slice string)} rest (zero (slice string))]
     (for [i 0] (< i (len args)) (inc! i)
       (switch (aget args i)
         (case ["--lib"]
@@ -82,24 +90,123 @@
 
 
     (let [out (bufio/NewWriterSize os/Stdout (<< 1 16))
-        ^{:line 85} errw os/Stderr
+        ^{:line 93} errw os/Stderr
         (values m err) (hs/NewMachine libs prog os/Stdin out errw)]
       (when (!= err nil)
         (fmt/Fprintln os/Stderr "hsi:" err)
         (return 3))
 
       (set! (.-ProgName m) name)
-      (set! (.-Args m) rest)
+      (set! (.-Args m) (progArgs rest))
       (set! (.-Trace m) trace)
       ;; the loaded code is most of the live heap: collect less often than Go's default
       (when (== (os/Getenv "GOGC") "")
         (debug/SetGCPercent 400))
 
       (let [t0 (time/Now)
-          ^{:line 99} st (.Run m)]
+          ^{:line 107} st (.Run m)]
         (.Flush out)
         (when stats
           (fmt/Fprintf os/Stderr "hsi: %s, %d modules (%d bytes) loaded, %d steps\n" (.Round (time/Since t0) time/Millisecond)
             (.Loaded m) (.LoadedBytes m) (.Steps m)))
 
-        ^{:line 105} st))))
+        ^{:line 113} st))))
+
+
+
+
+
+^{:go/end 169} (go/func libm "libm checks hsi's libm against a reference's lines NAME A B R on stdin (hexadecimal bit patterns; B unused by\nthe functions of one argument): each mismatch printed, then NAME CALLS MISMATCHES per function; status 1 on one.\ncontrol: Go's math package computes them (the libm hsi had before HE4b), which must mismatch\n" ^int [^bool control]
+  (let-type [count (struct ^int n ^int bad)]
+    (let [counts (lit (map string (* count)))
+        ^{:line 122} sc (bufio/NewScanner os/Stdin)]
+      (.Buffer sc (make (slice byte) (<< 1 16)) (<< 1 16))
+      (let [bad 0]
+        (while (.Scan sc)
+          (let [f (strings/Fields (.Text sc))]
+            (when (!= (len f) 4)
+              (fmt/Fprintf os/Stderr "hsi libm: bad line %q\n" (.Text sc))
+              (return 2))
+
+            (let [(values a _) (strconv/ParseUint (aget f 1) 16 64)
+                (values b _) (strconv/ParseUint (aget f 2) 16 64)
+                (values want _) (strconv/ParseUint (aget f 3) 16 64)
+                ^{:line 134} call hs/LibmCall]
+              (when control
+                (set! call goMathCall))
+
+              (let [(values got ok) (call (aget f 0) a b)]
+                (when (not ok)
+                  (fmt/Fprintf os/Stderr "hsi libm: no function %s\n" (aget f 0))
+                  (return 2))
+
+                (let [c (aget counts (aget f 0))]
+                  (when (== c nil)
+                    (set! c (addr (lit count)))
+                    (aset counts (aget f 0) c))
+
+                  (inc! (.-n c))
+                  (when (!= got want)
+                    (inc! (.-bad c))
+                    (inc! bad)
+                    (when (<= (.-bad c) 10)
+                      (fmt/Printf "mismatch %s %s %s: musl %x hsi %x\n" (aget f 0) (aget f 1) (aget f 2) want got))))))))
+
+
+
+        ^{:go/breaks [[6 168]]} (let [names (make (slice string) 0 (len counts))]
+          (range [n counts]
+            (set! names (append names n)))
+
+          (sort/Strings names)
+          (range [_ n names]
+            (fmt/Printf "%s %d %d\n" n (.-n (aget counts n)) (.-bad (aget counts n))))
+
+          (when (> bad 0)
+            (return 1))
+
+          0)))))
+
+
+
+^{:go/end 192} (go/func goMathCall "goMathCall is hs.LibmCall on Go's math package, the float functions computed in double and rounded\n" [^string name ^uint64 a ^uint64 b] :results [uint64 bool]
+  (let [d (lit (map string (func [float64] [float64])) ["exp" math/Exp] ["expm1" math/Expm1] ["log" math/Log] ["log1p" math/Log1p]
+        ^{:line 174} ["sin" math/Sin] ["cos" math/Cos] ["tan" math/Tan] ["asin" math/Asin] ["acos" math/Acos] ["atan" math/Atan]
+        ^{:line 175} ["sinh" math/Sinh] ["cosh" math/Cosh] ["tanh" math/Tanh] ["asinh" math/Asinh] ["acosh" math/Acosh]
+        ^{:line 176} ["atanh" math/Atanh])
+      ^{:line 177} d2 (lit (map string (func [float64 float64] [float64])) ["pow" math/Pow] ["atan2" math/Atan2])]
+    (when [(values f ok) (aget d name)] ok
+      (return (math/Float64bits (f (math/Float64frombits a))) true))
+
+    (when [(values f ok) (aget d2 name)] ok
+      (return (math/Float64bits (f (math/Float64frombits a) (math/Float64frombits b))) true))
+
+    (when [(values f ok) (aget d (strings/TrimSuffix name "f"))] ok
+      (return (conv uint64 (math/Float32bits (conv float32 (f (conv float64 (math/Float32frombits (conv uint32 a))))))) true))
+
+    (when [(values f ok) (aget d2 (strings/TrimSuffix name "f"))] ok
+      (let [(values x y) (values (conv float64 (math/Float32frombits (conv uint32 a))) (conv float64 (math/Float32frombits (conv uint32 b))))]
+        (return (conv uint64 (math/Float32bits (conv float32 (f x y)))) true)))
+
+    (return 0 false)))
+
+
+
+
+
+^{:go/end 213} (go/func progArgs "progArgs is the program's arguments as GHC's RTS leaves them to getArgs (a program built -rtsopts): the RTS's\noptions, from +RTS to -RTS or the end, taken out, and after --RTS every argument kept as it is. hsi reads none of\nthem (a heap or stack size, -N, statistics: no effect on its run)\n" ^{:tag (slice string)} [^{:tag (slice string)} args]
+  (let [^{:tag (slice string)} out (zero (slice string))
+      ^{:line 199} rts false]
+    (range [i a args]
+      (switch
+        (case [(== a "--RTS")]
+          (return (append out (spread (subslice args (+ i 1))))))
+        (case [(and rts (== a "-RTS"))]
+          (set! rts false))
+        (case [(== a "+RTS")]
+          (set! rts true))
+        (case [(not rts)]
+          (set! out (append out a)))))
+
+
+    ^{:line 212} out))
