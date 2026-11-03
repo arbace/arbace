@@ -26,3 +26,8 @@ class P:
 print(P(1), P.__slots__, P(1).m() is P)
 print(OSError(2, 'No such file or directory', 'a', None, 'b'))
 print(sys._get_cpu_count_config())
+print(int.__add__(3, 4), int.__radd__(3, 4), type(int.__add__).__name__, (5).__sub__(2), int.__add__(1, 2.5), list.__iadd__([1], [2]))
+import select
+try: type(select.poll())()
+except TypeError as e: print(e)
+import multiprocessing.reduction
