@@ -852,3 +852,15 @@ PY5b0's DECISION (a), decided by the user, 2026-11-03):
 - **The exit**: of `ops/` (38), `constructs/` (32) and the samples (6), with a scratch stand-in for PY5e's builtins,
   52 run equal to the references; the other 24 are classed: 2 by the last digit of `math`'s transcendental functions
   (Go's, not musl's: PY6's `math` port), 22 by an operation or builtin of PY5c, PY5d or PY5e.
+
+## Decided (2026-11-03, the user): PY6b's DECISIONs (queue 200)
+
+- **`.pyc` files carry pyi's own cache tag and magic number, amending PYS12 (a)'s "source-only loader"**: PY6b's (a).
+  `sys.implementation.cache_tag` is `"arbace-314"`, so cached code is `X.arbace-314.pyc`. The magic number is 'a' plus a
+  byte of the IR's digest. `dont_write_bytecode` stays True by default, as CPython's `-B`. Neither interpreter reads the
+  other's code: code of another IR is refused at load. test_importlib's `test_magic_number` (it expects CPython's 3627)
+  is a design class.
+- **An empty built-in `_testmultiphase`**, so test_importlib's util imports and its methods run. A method that needs the
+  extension's contents fails into the class that names it (`test/python/lib-test-known.edn`'s `:extension-modules`).
+  pyi loads no extension modules (§6.6, the `_test*` modules deferred). Built by PY6-core,
+  `go/arbace/py/builtins_testmultiphase.ae`.
