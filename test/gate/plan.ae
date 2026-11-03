@@ -379,21 +379,48 @@
 (defn- lines-of [^String f]
   (let [x (File. f)] (if (.isFile x) (vec (remove str/blank? (str/split-lines (slurp f)))) [])))
 
+(def ^:private counted
+  "review 181 (the user's (a), 2026-11-03): the commits whose runs count toward the rotation's record, this
+  commit's ancestors (git rev-list HEAD: LOGS/ancestors.txt for a plan, --ancestors FILE for rotation-status), or
+  nil (every run, for a caller that gives none)"
+  (atom nil))
+
+(defn- set-counted! [^String f]
+  (reset! counted (when (and f (.isFile (File. f))) (set (remove str/blank? (str/split-lines (slurp f)))))))
+
+(defn- counts?
+  "does a run (or a failed file's event) count: noted by an ancestor of this commit, from a clean tree"
+  [{:keys [commit dirty]}]
+  (or (nil? @counted) (and (contains? @counted (str commit)) (= "false" (str dirty)))))
+
 (def run-order
   "the order of the runs (review 181, finding 2): the store's sequence number (STORE/_rotation/.seq, taken under
   its lock by the runner: the run noted last is the later), then the time"
   (juxt :seq :epoch))
 
 (defn runs-of
-  "a rotated check's runs, STORE/_rotation/NAME.runs (the runner's lines EPOCH DATE STATUS KEY LIST-SHA COMMIT
-  WORKTREE SEQ), the latest last"
+  "a rotated check's runs that count (counts?), STORE/_rotation/NAME.runs (the runner's lines EPOCH DATE STATUS KEY
+  LIST-SHA COMMIT WORKTREE SEQ DIRTY), the latest last"
   [store nm]
   (sort-by run-order
-           (for [l (lines-of (str (rot-dir store) "/" nm ".runs"))
-                 :let [[e d st k ls c w sq] (str/split l #"\t")]
-                 :when (re-matches #"[0-9]+" (str e))]
-             {:epoch (Long/parseLong e) :date d :status st :key k :list-sha ls :commit c :worktree w
-              :seq (if (re-matches #"[0-9]+" (str sq)) (Long/parseLong sq) 0)})))
+           (filter counts?
+                   (for [l (lines-of (str (rot-dir store) "/" nm ".runs"))
+                         :let [[e d st k ls c w sq dt] (str/split l #"\t")]
+                         :when (re-matches #"[0-9]+" (str e))]
+                     {:epoch (Long/parseLong e) :date d :status st :key k :list-sha ls :commit c :worktree w
+                      :seq (if (re-matches #"[0-9]+" (str sq)) (Long/parseLong sq) 0) :dirty dt}))))
+
+(defn failed-of
+  "the part's files that failed since (STORE/_rotation/NAME.PART.failed, the runner's events SEQ EPOCH ID fail|clear
+  COMMIT DIRTY): those whose latest event that counts is a failure (a branch's failure or clearing is not this
+  commit's)"
+  [store nm]
+  (let [evs (filter counts?
+                    (for [l (lines-of (str (rot-dir store) "/" nm ".failed"))
+                          :let [[sq e id ev c dt] (str/split l #"\t")]
+                          :when (and (re-matches #"[0-9]+" (str sq)) id)]
+                      {:seq (Long/parseLong sq) :id id :event ev :commit c :dirty dt}))]
+    (vec (sort (for [[id es] (group-by :id evs) :when (= "fail" (:event (last (sort-by :seq es))))] id)))))
 
 (defn rotation-lists
   "a rotated part's lists, or nil when it is not rotated: {:universe :subset (the declared one, plus the files
@@ -404,7 +431,7 @@
           u (record-ids (str root "/" universe) part)
           uset (set u)
           declared (when subset (corpus-subset (str root "/" subset) part))
-          failed (filterv uset (lines-of (str (rot-dir store) "/" nm ".failed")))
+          failed (filterv uset (failed-of store nm))
           sub (vec (sort (distinct (concat (filter uset declared) failed))))
           subset-set (set sub)
           rest (remove subset-set u)]
@@ -472,6 +499,7 @@
              (:start-after s) (update :start-after #(if-let [n (get renamed (str %))] (last n) %)))))))
 
 (defn plan [root logs store mode rerun? & [rotation]]
+  (set-counted! (str logs "/ancestors.txt"))
   (let [{:keys [groups steps]} (read-file (or (System/getenv "GATE_STEPS") (str root "/test/gate/steps.edn")))
         steps (expand-parts steps)
         files (files-table (str logs "/files.sha256"))
@@ -646,6 +674,7 @@
   period (7 days, at any key: see the survey), and no file failed since (STORE/_rotation/NAME.PART.failed empty).
   Prints a line a part; exit 1 when incomplete. GATE_NOW: the time (epoch seconds) for the gate's own tests"
   [root store args]
+  (set-counted! (second (drop-while #(not= "--ancestors" %) args)))
   (let [{:keys [steps]} (read-file (or (System/getenv "GATE_STEPS") (str root "/test/gate/steps.edn")))
         now (if-let [n (System/getenv "GATE_NOW")] (Long/parseLong n) (quot (System/currentTimeMillis) 1000))
         days (if-let [d (second (drop-while #(not= "--days" %) args))] (Long/parseLong d) period)

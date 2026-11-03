@@ -80,9 +80,11 @@ gate_gcc_id() {  # the :gcc host's identity: gcc's --version line, its driver's,
     awk '{print $2}' "$root/test/c/host/headers.sha256" 2>"$TMPDIR/gate-gcc.err" | while read -r h; do
       if [ -f "$h" ]; then sha256sum "$h"; else echo "missing $h"; fi; done; } | sha256sum | cut -c1-64
 }
-plan_inputs() {  # plan_inputs DIR: DIR/files.sha256 and DIR/hosts.edn
+plan_inputs() {  # plan_inputs DIR: DIR/files.sha256, DIR/hosts.edn and DIR/ancestors.txt
   local d=$1 jdk rel
   mkdir -p "$d"
+  # review 181 (the user's (a)): this commit's ancestors, the commits whose runs count toward the rotation's record
+  git rev-list HEAD > "$d/ancestors.txt" 2>"$d/ancestors.err" || : > "$d/ancestors.txt"
   find . \( -path ./.git -o -path ./.tmp -o -path ./target -o -path ./.claude \) -prune -o -type f -printf '%P\n' \
     | LC_ALL=C sort | xargs -d '\n' sha256sum > "$d/files.sha256" || return 1
   # queue 023, report 022 finding 9: a symbolic link is keyed by its target's text (the SHA-256 of
@@ -397,16 +399,19 @@ rotation_note_locked() {
   rn=$(awk -F'\t' '$1 == "runs" {print $2}' "$r"); rn=${rn:-$n}
   now=$(date +%s)
   sq=$(( $(cat "$rd/.seq" 2>"$logs/$n.rot.err" || echo 0) + 1 )); echo "$sq" > "$rd/.seq"
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$now" "$(date -u -d "@$now" +%Y-%m-%dT%H:%M:%SZ)" "$2" "${key[$n]:--}" "$ls" \
-    "${commit:-unknown}" "$root" "$sq" >> "$rd/$rn.runs"
+  # review 181 (the user's (a)): the commit and whether its tree was dirty, so that only a clean ancestor's runs count
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$now" "$(date -u -d "@$now" +%Y-%m-%dT%H:%M:%SZ)" "$2" "${key[$n]:--}" "$ls" \
+    "${commit:-unknown}" "$root" "$sq" "${dirty:-unknown}" >> "$rd/$rn.runs"
+  # the failed files: events appended (SEQ EPOCH ID fail|clear COMMIT DIRTY), never rewritten, so that each commit's
+  # lineage sees its own (the planner's failed-of)
+  local ids id
   if [ "$2" = fail ] && [ -n "$re" ] && [ -f "$logs/$n.log" ]; then
-    sed -nE "s"$'\001'"$re"$'\001''\1'$'\001''p' "$logs/$n.log" | grep -Fxf "$logs/rotation/$n.list" \
-      | cat - "$rd/$part.failed" 2>"$logs/$n.rot.err" | LC_ALL=C sort -u > "$rd/.$part.failed.$$" \
-      && mv -f "$rd/.$part.failed.$$" "$rd/$part.failed"
-    [ -s "$rd/$part.failed" ] && echo "   $n: $(wc -l < "$rd/$part.failed") file(s) of $part in its subset until they pass ($rd/$part.failed)" >> "$logs/$n.log"
+    ids=$(sed -nE "s"$'\001'"$re"$'\001''\1'$'\001''p' "$logs/$n.log" | grep -Fxf "$logs/rotation/$n.list" | LC_ALL=C sort -u)
+    for id in $ids; do printf '%s\t%s\t%s\tfail\t%s\t%s\n' "$sq" "$now" "$id" "${commit:-unknown}" "${dirty:-unknown}"; done >> "$rd/$part.failed"
+    [ -n "$ids" ] && echo "   $n: $(echo "$ids" | wc -l) file(s) of $part noted as failed: in its subset until they pass ($rd/$part.failed)" >> "$logs/$n.log"
   elif [ "$2" = pass ] && { [ "$slice" = sub ] || [ "$slice" = whole ]; } && [ -s "$rd/$part.failed" ]; then
-    grep -vFxf "$logs/rotation/$n.list" "$rd/$part.failed" > "$rd/.$part.failed.$$"
-    mv -f "$rd/.$part.failed.$$" "$rd/$part.failed"
+    ids=$(awk -F'\t' '$4 == "fail" {print $3}' "$rd/$part.failed" | LC_ALL=C sort -u | grep -Fxf "$logs/rotation/$n.list")
+    for id in $ids; do printf '%s\t%s\t%s\tclear\t%s\t%s\n' "$sq" "$now" "$id" "${commit:-unknown}" "${dirty:-unknown}"; done >> "$rd/$part.failed"
   fi
   return 0
 }

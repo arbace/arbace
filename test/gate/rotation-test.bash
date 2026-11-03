@@ -44,13 +44,17 @@ EOF
 (cd "$r" && find . -type f -printf '%P\n' | LC_ALL=C sort | xargs -d '\n' sha256sum) > "$t/files.sha256"
 cp "$t/files.sha256" "$t/files.base"
 echo '{}' > "$t/hosts.edn"
+# this commit's ancestors (bin/lib/gate-run.bash's plan_inputs: git rev-list HEAD): c0ffee and its parent
+printf 'c0ffee\nbeef00\n' > "$t/ancestors.txt"
 store=$t/store; mkdir -p "$store"
 export GATE_STEPS=$r/test/steps.edn GATE_CANARY=0
 plan() { # plan DIR MODE ARGS...: the planner into DIR
-  local d=$1; shift; rm -rf "$d"; mkdir -p "$d"; cp "$t/files.sha256" "$t/hosts.edn" "$d/"
+  local d=$1; shift; rm -rf "$d"; mkdir -p "$d"; cp "$t/files.sha256" "$t/hosts.edn" "$t/ancestors.txt" "$d/"
   (cd "$here" && arbace_tool -p "$here/test" -m gate.plan plan "$r" "$d" "$store" "$@") > "$d.out" 2>&1
 }
 names() { cut -f1 "$1/plan.tsv" | tr '\n' ' '; }
+# failed_now: the files whose latest event in the failed file is a failure (the runner appends them in order)
+failed_now() { awk -F'\t' '{ e[$3] = $4 } END { for (i in e) if (e[i] == "fail") print i }' "$store/_rotation/toy.toy.failed" 2>"$t/failed.err" | LC_ALL=C sort; }
 col() { awk -F'\t' -v n="$2" -v c="$3" '$1 == n {print $c}' "$1/plan.tsv"; }
 
 # 1. --full: whole parts, {only} gone, no list
@@ -86,24 +90,24 @@ kw=$(col "$t/full" toy.whole 3)
 if [ ${#kw} = 64 ] && [ "$kw" = "$(col "$t/n0" toy.whole 3)" ]; then ok "a part with no :subset: --nightly's key is --full's (its passes serve both)"; else no "toy.whole's keys differ"; fi
 
 # 4. the runner: rotation_note's runs, a failure's files into the subset, a subset's pass clearing them
-root=$here logs=$t/n0 commit=c0ffee
+root=$here logs=$t/n0 commit=c0ffee dirty=false
 declare -A key
 . "$here/bin/lib/gate-run.bash"
 key[toy.toy.s0]=$(col "$t/n0" toy.toy.s0 3) key[toy.toy.sub]=$(col "$t/n0" toy.toy.sub 3)
 victim=$(head -1 "$t/n0/rotation/toy.toy.s0.list")
 printf 'ci judge: ...\nFAIL %s differs\nFAIL toy/p99.c not in the list\n' "$victim" > "$t/n0/toy.toy.s0.log"
 rotation_note toy.toy.s0 fail
-if [ "$(cat "$store/_rotation/toy.toy.failed")" = "$victim" ]; then ok "a slice's failure: its named file (in its list) joins the subset"; else no "the failed file: $(cat "$store/_rotation/toy.toy.failed" 2>&1)"; fi
+if [ "$(failed_now)" = "$victim" ]; then ok "a slice's failure: its named file (in its list) joins the subset"; else no "the failed file: $(cat "$store/_rotation/toy.toy.failed" 2>&1)"; fi
 if [ "$(cut -f3 "$store/_rotation/toy.toy.s0.runs")" = fail ]; then ok "the run noted (fail)"; else no "the runs: $(cat "$store/_rotation/toy.toy.s0.runs")"; fi
 plan "$t/n1" nightly --night 1
 if grep -qx "$victim" "$t/n1/rotation/toy.toy.sub.list" && ! grep -qx "$victim" "$t/n1/rotation/toy.toy.s0.list"; then ok "the failed file in the subset's list, out of its slice's"; else no "the failed file's place"; fi
 case $(names "$t/n1") in *toy.toy.s0*) ok "night 1 runs s0 again: its latest run failed" ;; *) no "night 1: $(names "$t/n1")" ;; esac
 logs=$t/n1; key[toy.toy.sub]=$(col "$t/n1" toy.toy.sub 3)
 rotation_note toy.toy.sub pass
-if [ ! -s "$store/_rotation/toy.toy.failed" ]; then ok "the subset's pass clears the failed file"; else no "failed after the subset passed: $(cat "$store/_rotation/toy.toy.failed")"; fi
+if [ -z "$(failed_now)" ]; then ok "the subset's pass clears the failed file"; else no "failed after the subset passed: $(cat "$store/_rotation/toy.toy.failed")"; fi
 
 # 5. completeness (rotation-status): incomplete, then every slice passed within the period, then a stale one
-status() { (cd "$here" && GATE_NOW="$1" arbace_tool -p "$here/test" -m gate.plan rotation-status "$r" "$store") > "$t/status.out" 2>&1; }
+status() { (cd "$here" && GATE_NOW="$1" arbace_tool -p "$here/test" -m gate.plan rotation-status "$r" "$store" --ancestors "$t/ancestors.txt") > "$t/status.out" 2>&1; }
 if ! status "$(date +%s)" && grep -q '^INCOMPLETE toy.toy' "$t/status.out"; then ok "rotation-status: incomplete with slices never run"; else no "rotation-status (incomplete): $(cat "$t/status.out")"; fi
 logs=$t/n0b; plan "$logs" nightly --night 0
 now=$(date +%s)
@@ -116,9 +120,9 @@ for k in 0 1 2 3 4 5 6; do
 done
 if status "$now" && grep -q '^complete   toy.toy' "$t/status.out"; then ok "rotation-status: complete when every slice passed with its list"; else no "rotation-status (complete): $(cat "$t/status.out")"; fi
 if ! status $((now + 8 * 86400)) && grep -q 'not passed within 7 days' "$t/status.out"; then ok "rotation-status: incomplete eight days later (at any key, within the period)"; else no "rotation-status (stale): $(cat "$t/status.out")"; fi
-echo "$victim" > "$store/_rotation/toy.toy.failed"
+printf '999\t%s\t%s\tfail\tc0ffee\tfalse\n' "$(date +%s)" "$victim" >> "$store/_rotation/toy.toy.failed"
 if ! status "$now" && grep -q 'failed since' "$t/status.out"; then ok "rotation-status: incomplete while a file failed since"; else no "rotation-status (failed): $(cat "$t/status.out")"; fi
-rm -f "$store/_rotation/toy.toy.failed"
+printf '1000\t%s\t%s\tclear\tc0ffee\tfalse\n' "$(date +%s)" "$victim" >> "$store/_rotation/toy.toy.failed"
 # the oldest slice first: every slice ran, s3's run the oldest
 sed -i "s/^[0-9]*\t/$((now - 5000))\t/" "$store/_rotation/toy.toy.s3.runs" 2>"$t/sed.err"
 if [ -s "$store/_rotation/toy.toy.s3.runs" ]; then
@@ -147,16 +151,38 @@ logs=$t/w2; key[toy.toy.s2]=$(col "$t/w2" toy.toy.s2 3)
 if ! status "$(date +%s)" && grep -q 's2 (.*fail' "$t/status.out"; then ok "a slice's failure after the whole pass: incomplete"; else no "a later slice failure: $(cat "$t/status.out")"; fi
 # the whole part again: a failure names its file (into the subset), every slice's latest run a failure; then a pass clears it
 logs=$t/w; printf 'FAIL toy/p20.c differs\n' > "$t/w/toy.toy.log"; rotation_note toy.toy fail
-if [ "$(cat "$store/_rotation/toy.toy.failed")" = toy/p20.c ]; then ok "a whole part's failure: its named file joins the subset"; else no "the whole failure's file: $(cat "$store/_rotation/toy.toy.failed" 2>&1)"; fi
+if [ "$(failed_now)" = toy/p20.c ]; then ok "a whole part's failure: its named file joins the subset"; else no "the whole failure's file: $(cat "$store/_rotation/toy.toy.failed" 2>&1)"; fi
 plan "$t/w3" nightly --night 4
 case $(names "$t/w3") in *toy.toy.s4*) ok "after a whole failure every slice's latest run failed: the night's index decides (s4)" ;; *) no "after a whole failure: $(names "$t/w3")" ;; esac
 rotation_note toy.toy pass
-if [ ! -s "$store/_rotation/toy.toy.failed" ] && status "$(date +%s)"; then ok "the whole part's pass clears the failed file and completes the rotation"; else no "after the whole pass: $(cat "$store/_rotation/toy.toy.failed" "$t/status.out")"; fi
+if [ -z "$(failed_now)" ] && status "$(date +%s)"; then ok "the whole part's pass clears the failed file and completes the rotation"; else no "after the whole pass: $(cat "$store/_rotation/toy.toy.failed" "$t/status.out")"; fi
 # the universe changed since (a program added): the whole run covered the old one, so no slice counts as run
 cp "$r/test/record.edn" "$t/record.bak"
 sed -i 's|^\["toy/p40.c" :pass ""\]$|&\n["toy/p41.c" :pass ""]|' "$r/test/record.edn"
 if ! status "$(date +%s)" && grep -q 'never run with this list, nor the part whole with this universe' "$t/status.out"; then ok "a whole run of another universe counts for no slice"; else no "the changed universe: $(cat "$t/status.out")"; fi
 cp "$t/record.bak" "$r/test/record.edn"
+store=$t/store
+
+# 8. review 181 (the user's (a)): only runs of this commit's ancestors, from clean trees, count: completeness, the
+# night's slice and the failed files
+store=$t/store3; mkdir -p "$store"
+logs=$t/w; key[toy.toy]=$kr
+commit=feedface rotation_note toy.toy pass
+if ! status "$(date +%s)" && grep -q '^INCOMPLETE toy.toy' "$t/status.out"; then ok "another branch's whole pass does not complete this commit's rotation"; else no "a foreign commit's pass counted: $(cat "$t/status.out")"; fi
+dirty=true rotation_note toy.toy pass
+if ! status "$(date +%s)"; then ok "a dirty tree's whole pass does not count"; else no "a dirty run counted: $(cat "$t/status.out")"; fi
+commit=beef00 rotation_note toy.toy pass
+if status "$(date +%s)"; then ok "an ancestor's clean whole pass counts"; else no "an ancestor's pass: $(cat "$t/status.out")"; fi
+# a branch's failure is not this commit's failed file; its clearing does not clear this commit's
+printf 'FAIL toy/p20.c differs\n' > "$t/w/toy.toy.log"
+commit=feedface rotation_note toy.toy fail
+plan "$t/b1" nightly --night 1
+if ! grep -qx toy/p20.c "$t/b1/rotation/toy.toy.sub.list" && status "$(date +%s)"; then ok "another branch's failure joins neither this commit's subset nor its record"; else no "a foreign failure: $(cat "$t/status.out")"; fi
+case $(names "$t/b1") in *toy.toy.s1*) ok "another branch's failed run does not steer this commit's slice (night 1: s1)" ;; *) no "the slice after a foreign failure: $(names "$t/b1")" ;; esac
+rotation_note toy.toy fail
+commit=feedface rotation_note toy.toy pass
+plan "$t/b2" nightly --night 1
+if grep -qx toy/p20.c "$t/b2/rotation/toy.toy.sub.list"; then ok "this commit's failure stays in its subset after another branch's pass"; else no "a foreign pass cleared this commit's failure"; fi
 store=$t/store
 
 # 6. the clean run: the subsets alone
