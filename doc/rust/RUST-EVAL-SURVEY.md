@@ -627,3 +627,99 @@ against the conventions); the first two gcc invocations ran with `TMPDIR` unset,
 
 All as recommended. The trial RE1-RE2 starts now, by an agent on the main host, beside GT8 and C++'s CX8 (light work by
 day).
+
+## As built: RE1-RE2 (write-ahead, 2026-11-03)
+
+Branch `rust-re1` from main `c545ede1`, by an agent on the main host beside C++'s CX8 (light tier: 4 jobs, `GOMEMLIMIT`
+1500 MiB a lowering, no heavy lock; stage 0 `/root/arbace/target/seed/amd64/arbace`, the namespaces evaluated from the
+worktree). Spec: doc/rust/EVAL.md. Written ahead of the night's whole run (RE2.5): the counts below are the day's two 10%
+slices of the UI programs.
+
+### RE2.1 What was built
+
+| piece | file | what |
+|---|---|---|
+| the spec | `doc/rust/EVAL.md` | rsi's pipeline, std's build, the native-std leg, the Rust delta, the lists, the judgment and classes, panics from RE3 |
+| command | `bin/rsi` (`lower`, `list`, `sets`, `std-build`, `lower-check`); Makefile `rsi-samples`, `rsi-lower-check`, `rsi-lower-check-all`, `rsi-std-build` | RES15 (a) |
+| the driver | `arbace/rust/lower.ae` (`arbace.rust.lower`) | read, round trip, the intrinsics a unit declares, the lowering; the native-std leg's substitution (`__rust_try` → `cx_rust_try`) |
+| the judge | `arbace/rust/check.ae` (`arbace.rust.check`) | the sets, the plan's filter, `judge` (results, reasons, classes, `--record`) |
+| the lowered side | `bin/lib/rsi/wrap`, `bin/lib/rsi/link`; `bin/lib/repr-rust/run-program`'s sides take a WRAP (`NAME:SRC:SYSROOT:NORM:WRAP`, `RUN_PROGRAM_ID`) | rustc's own link with the program's and the shim's objects replaced by gcc's of their lowered IR |
+| the layer | `arbace/rust/rt/native.c.ae`, `test/rust/runtime/native/try.rs` | EVAL.md §4 |
+| the lowering's Rust delta | `arbace/cpp/lower.ae`, four commits of its own (intrinsics; vectors; bit-packed vectors and the vector intrinsics' order; bitreverse's widths and load.relative.i64) | EVAL.md §5 |
+| pins | `test/rust/runtime/std.edn` (rustc's and clang's versions, std's profile, flags, crates), `test/rust/runtime/ir.sha256` (std's 103 units) | RE1 |
+| lists | `test/rust/eval-programs.edn` (threads 175 programs, process 63, net 5; 3,506 in none), `test/rust/eval/` (three samples) | RE1 |
+| classes, results | `test/rust/divergences-lower.edn` (11 classes), `test/rust/lower-results.edn` (756 programs) | RES13 (a) |
+
+### RE2.2 Results
+
+The IR scan (every one of the 3,718 programs' `-O0` IR with its flags, 31 s at 12 jobs; 3,716 compile): the intrinsics the
+table lacked were the survey's §5.3 list and `fpto{s,u}i.sat` (Rust's `as` from floats: 29 and 26 programs), `vector.reduce.*`
+(90), `{s,u}cmp` (157), `{u,s}{add,sub}.sat` (91), `fsh{l,r}` (31), `bitreverse`, `bswap.i128`, `powi`, `minimumnum`,
+`ptrmask`, `load.relative`; 86 programs use vector instructions (hashbrown's group in most: `load`, `icmp`, `sext`/`trunc`
+`<16 x i1>`, `bitcast <16 x i1> to i16`, splat `shufflevector`; `core::simd`'s in `simd/`). The samples: 3 of 3 pass.
+
+`bin/rsi lower-check` over every 10th program (372), then every 10th from the 5th (372), then the tests the fixes touched again
+(21 revisions, 12 of them new); recorded in `test/rust/lower-results.edn`:
+
+| run | programs | pass | nondet | in a class | unclassified | wall (4 jobs) |
+|---|---:|---:|---:|---:|---:|---:|
+| every 10th | 372 | 360 | 4 | 8 | 0 (5 before the fixes, rerun) | 420 s |
+| every 10th from the 5th | 372 | 358 | 2 | 12 | 0 (1 before the fixes) | 305 s |
+| the record (both and the fixes' revisions) | 756 | 718 | 6 | 32 | 0 | |
+
+The 32 by class: `native-unwind` 10 (drops of unwound lowered frames, catches inlined into lowered code by `-O` builds),
+`lto` 6 (thin LTO: 19 units), `c-variadic` 3, `inline-asm` 2 (asm goto's `callbr`; `global_asm!`'s LLVM 23 header
+`module asm(target_cpu: ...)`, which repr/llvm does not read), `float16-128` 2 (`half`), `known-bug` 2 (`equal-pointers-unequal`'s
+miscompilations at `-O2`, which the lowered build does not reproduce), `wide-int` 2 (i256 of fat LTO's optimized std),
+`optimized-ir` 2 (a vector GEP, a static initializer gcc does not fold: fat LTO at `-O2`, `-O3`), `simd` 1
+(`llvm.masked.gather`), `alias` 1 (externally implementable items' static alias), `speed` 1 (`mir_heavy_promoted.rs`: a 32 MiB
+constant, 33 MB of IR, past the build's 300 s). Every class but `native-unwind`, `known-bug` and `speed` is a refusal by the
+lowering (or repr/llvm) with its class, never a wrong run. What the slices found and was fixed (the lowering's fourth and fifth
+commits): the vector intrinsics' order (`llvm.ctpop.v4i32` taken by the scalar row: a crash), bit-packed vectors' bitcasts in
+constant expressions (`bitcast (<1 x i4> splat (i4 5) to <4 x i1>)`: gcc refused the C), `bitreverse.i3`, `load.relative.i64`;
+and three programs built with `-g` whose IR has debug records repr/llvm does not read (the lowered side adds `-C debuginfo=0`).
+The round trip through LLVM forms: every unit read is equal as forms and as objects (the units it does not cover are the reader's
+refusals, `callbr`, `module asm(target_cpu:`, and the timeout).
+
+Costs: the lowering evaluated on stage 0 takes about 1.6 s of CPU a program (602 s for 371 units; 0.1 to 7.5 s, 2.2 MB of IR
+for 53 programs), the whole build-and-run about 1.1 s of wall a program at 4 jobs: the whole suite about 70 minutes at 4 jobs,
+35 to 40 at 8. std's build: 38 s of Cargo (8 jobs) and 2 s of `clang -S`, 103 units, 51 MB of IR (CX7's libstdc++: 38 MB).
+
+### RE2.3 Against the exit criteria
+
+RE1 ("the spec accepted; lists counted"): the spec is written (EVAL.md), the lists counted (§6 there), std's flags and IR pinned
+(at the main checkout's place, RES17), rustc's and clang's versions pinned; the synthetic corpus's generator is planned (EVAL.md
+§6), not written. RE2 ("every UI program lowered and run by gcc as the original, or refused in a class"): on the two slices and the fixes'
+revisions (756 programs, 20% of the 3,718), 718 run as the original (95.0%; 96.3% of those judged), 6 are nondeterministic, 32 are
+in a class, none is outside one; the whole 3,718 is the night's run (RE2.5). Costs recorded (RE2.2).
+
+### RE2.4 Decisions taken in the build, and proposals (RES17-RES22)
+
+- **RES17 Where std is built.** Cargo's `-Zbuild-std` hashes std's packages by their absolute path (measured: two places, two
+  sets of disambiguators, whatever the remaps, `__CARGO_DEFAULT_LIB_METADATA`, `-Ztrim-paths` or a copy). Options: (a) build at
+  the main checkout's `.tmp/rsi/std` (as built; the pin holds there and nowhere else: a clean run in another clone re-records);
+  (b) **at RE3, build the library's own workspace (`library/`, the package `sysroot`) with Cargo directly, as rust's bootstrap
+  does**, which hashes its members by their path in the workspace (to verify: the dylib's link and an empty sysroot); (c) pin
+  the IR modulo the disambiguators. *Recommended: (b) at RE3, (a) until then.*
+- **RES18 The native-std leg's catch.** `__rust_try` called as a native `cx_rust_try` (as built) makes catch_unwind work before
+  RE3; drops of unwound lowered frames do not run (class `native-unwind`). Options: (a) **keep it until RE3 and drop it with the
+  layer**; (b) no substitution (every caught panic a difference). *Recommended: (a).*
+- **RES19 Debug records.** Options: (a) **the lowered side adds `-C debuginfo=0` after a test's `-g` (as built)**; (b) repr/llvm
+  reads `#dbg_` records. *Recommended: (a)*: debuginfo changes only backtraces, which RES8 turns off.
+- **RES20 The night's whole run and its record.** Options: (a) **`make rsi-lower-check-all` by night at 8 jobs (about 40
+  minutes, light: about 1.5 GiB a lowering), recorded into `test/rust/lower-results.edn`**, then the classes completed by day;
+  (b) the slices only until RE3. *Recommended: (a).*
+- **RES21 A negative control** (GTS81 (a)) for `lower-check`: a sample's lowered run judged against another's original must
+  differ. *Recommended: at RE5, with the judge's recorded runs.*
+- **RES22 The sets' search.** The thread, process and net sets are a text search (over-approximate). Options: (a) **keep it
+  as the list's first cut and judge the classes by the runs on ci (RE4)**; (b) sets by the IR's calls (`pthread_create`,
+  `posix_spawn`, `socket` reached from `main`). *Recommended: (a).*
+- **RES16's rename** (`arbace.cpp.lower` → `arbace.llvm.lower`, decided (b)) is not done: C++'s CX8 is touching the namespace
+  on `cpp-cx8`; the rename is one mechanical commit after CX8 merges, the Rust delta's four commits rebase over either side.
+
+### RE2.5 Night runs
+
+- `make rsi-lower-check-all` (`bin/rsi list -o .tmp/rsi/all.tsv && bin/rsi lower-check .tmp/rsi/all.tsv .tmp/rsi/all --record`;
+  `RSI_JOBS=8` by night): the 3,718 programs, recorded into `test/rust/lower-results.edn`; every unclassified program a class
+  or a fix the next day.
+- `bin/rsi std-build` in the main checkout once merged (the pin's place).
