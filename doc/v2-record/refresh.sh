@@ -12,6 +12,12 @@
 # that is not 16 cells or whose last line counts problems. Warns (stderr, work/warnings.txt) on a
 # changes.tsv row no table row uses (a class renamed or gone) and on a note whose leading status
 # word contradicts the computed one.
+# Frozen since 2026-11-03 (the user): the section is the record of the tag arbace-reaps-3-crops-v2, its tables as at
+# the tag; the matrix since then is "REAP v3's divergences", doc/v3-record/refresh.sh. V2_RECORD_FORCE=1 runs it anyway.
+if [ -z "${V2_RECORD_FORCE:-}" ]; then
+  echo "doc/v2-record/refresh.sh: v2's section is frozen at its tag; use doc/v3-record/refresh.sh (V2_RECORD_FORCE=1 to run it)" >&2
+  exit 2
+fi
 set -uo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../.." && pwd)

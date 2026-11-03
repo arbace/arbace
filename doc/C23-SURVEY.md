@@ -4460,3 +4460,84 @@ every C level read, ran and compiled them twice (40.7% of `bin/ci check`'s 3,761
 
 Considered: (b) keeping both (the mirror the record of the later snapshot's whole directory; counts in the milestone and the cells stay 1,632): not
 taken. A rule only (no `:files`): the committed list is what the records' rows are checked against at a glance, and the rule's recomputation guards it.
+
+## As built: C9.2, the re-seed window (2026-11-02 to 2026-11-03)
+
+C9.2's heavy runs (the table above), on main from the essential gate's pass at `2a39402a` (2026-11-02 14:46:56, 26 steps run,
+11m02s; the host idle, W2), by the window's scripts in `.tmp/window/` (`run-1-5.sh`, `run-7.sh`, `run-7a2.sh`, `run-seed.sh`,
+`run-night.sh`; their log `progress.log`, each step's output `N.log`). Times are wall clock, UTC.
+
+| step | command | ran | outcome |
+|---|---|---|---|
+| 1 | `bin/seed --build` | 14:47:25, 1 s | ok: stage 0 current (the seed `73b0d637`, built before) |
+| 1a | `-buildvcs=false` for `tools/gateaudit` | | committed at once, `2974e68e` |
+| 2a-2d | `bin/ci c2j-check`, `cinterp-check`, `judge-test`; `bin/j2g-edge verify` | 14:47:26-14:52:41, 22 s, 9 s, 3m42s, 62 s | ok (the edge had been recorded afresh before the window, `1c8e55e2`: 8 classes the embedded namespaces name, hidden while the JVM failed to start) |
+| 3 | `ARBACE_GO_ARCHES=amd64 bin/arbace-go --build` | 14:52:41-14:59:30, 6m49s | ok, the two-run path; `aot: 156 sources compiled, 14886 classes; 0 failed` |
+| 4a-4c | `--smoke`; `cinterp-check --exe`; `repl-session` on it | 14:59:30-15:01:28 | ok |
+| 5 | `CI_EXE=... CI_JOBS=4 bin/ci check` | 15:01:28-15:37:49, 36m21s | ok: the 15 run corpora judged on the new executable, no `--record` (CS254 (a), VM report 153 F1) |
+| 7 | `bin/ci annotations --record` | 15:38:40-16:27:46, 49 min | failed: 77 entries `:unclassified`; classified (CS265 (a), CS266 (a)) and the writers fixed (`b7e8e8f6`, "The annotations' record at the re-seed window's step 7" above) |
+| 7a | `bin/repr-c check --tokens --record`, `parse-check --record`, `roundtrip --record` | 16:28:45-18:39:50 | tokens ok (52 min), the tree check failed (77 min: 335 entries `:unclassified` by the old writer, on the uncollapsed mirror), the round trip stopped by hand at 18:39; outputs kept in `.tmp/window/step7`, `step7a-parse` |
+| (merge) | `torture-execute-mirror` collapsed (VM report 156, `1a385469`), the writers fixed, Java 26 from jdk26u's build (`1830be87`), the pins (`bc4e4c5a`) | | main fast-forwarded to `5de0939b` |
+| 7a2 | the three again, the fixed writers | 18:39:50-21:33:07 | tokens 49 min (3 files of no class), the tree check 77 min (276 files of no class), the round trip 48 min (2 files of no class): each run exits 3 on a file of no class, as the writers now do; all classified by hand (below), none a regression |
+| 8 | `bin/seed --link`, `rm -rf .tmp/jrt-go/overlay`, `bin/arbace-go --fixpoint` | 21:04:54-21:40:25, 35m31s | `fixpoint: holds (G2 = G3)`, in the clean worktree `seed-c9` at `5de0939b` (concurrently with 7a2's round trip; the records stayed in main and were committed after) |
+| 9 | `ARBACE_SEED_GO_BUILD=target/arbace-go/fixpoint/g3 bin/seed --make` | 21:40:25-21:42:25 | the seed `a59cc441…` committed: `1fe1063f` |
+| 10 | `bin/seed --verify` | 21:42:25-22:11:14, 1,724 s | the same archive `a59cc441…`; stage 0 = G1 = G2 = G3, byte for byte (`606d45e6…`) |
+| (merge) | `seed-c9` and `rec-class` (with `parse-class`) | | main `b2a4911f` |
+| 11 | `bin/seed --build`, `bin/ci judge-test`, `bin/reap`, `bin/ci dg --essential` | 22:11:52-22:19:08 | stage 0 from the new seed (2m19s), reap 16 of 16 with 0 problems, dg ok; judge-test failed (3 assertions, two host-dependent tests: below) |
+| 11a | `CI_AOT_NODES=1 CI_JOBS=4 bin/ci check --aot` | 22:19:08-22:59:38, 40m30s | failed: two regressions (one file in two corpora) and one improvement (below) |
+| 12 | `bin/gate --full` (keyed) | from 22:59:38 | `c-c2j` failed (02:16, below); the night's script stopped at 05:21 (the user, 2026-11-03: C's full steps the next night), the audit of C's steps not run; the `--full` stopped by a watcher at its first heavy C step; TODO(tag): when, and the other steps' outcome |
+
+**The records classified (steps 7a2; `14873a86`, `255c9d54`, merged `b2a4911f`).** The tree check's 276 files of no class: none a regression. Each parses as
+cc's dump at C3 (`c65620c8`, the known file's last record) and as the run's at `fe50e1c7` (2026-11-01): the differences are C7's decided parser changes (CS131 (c),
+CS140 (a), CS144 (a), CS194 (a); bisected per group), which CS145 (a), CS156 (a) and CS164 (a) anticipated and no record held (the tree check had not run since C3;
+the old writer hid them as `:unclassified`). They are the new by-design class `:gcc-syntax` (129 corpus files, `c23-attr-syntax-7.c`, 22 mutants of their own and 4
+the writer had guessed: CS267 below); `c23-ucnid-1-utf8.c` is `:xid-identifier` (bisected to CS143 (a)'s lexer, `29e369e1`); 16 mutants' own entries dropped, their
+originals classed. The tree check's results file 12,502 rows: 12,052 pass, 450 known, 0 fail. The token check's 3: `c23-attr-syntax-7.c` at `:gcc`
+`:c23-colons` (CS260 (a)); `c23-ucnid-1-utf8.c` at `:lex` and `:pp` `:xid-identifier` (CS63 (a)); results 4,780 pass, 76 known, 0 fail. The round trip's 2:
+`reverse-complement-5.c` `:run-address` (CS262 (a): on an empty input it reads past its buffer and faults, SIGSEGV or now and then SIGBUS, 2 of 200 runs of the
+original's relinked object), `gcc.dg/bitint-1.c` the new `:bad-specs-print` (below); results 4,767 pass, 89 known, 0 fail. `bin/reap --record`: C read 5,201 /
+232 / 50, print 4,767 / 6 / 83 (575+ / 96 / 53 and 0+ / 5 / 134 before: the results files count the passes, CS240 (a)).
+
+**The night's three fixes** (branch `night-fix` on `b2a4911f`):
+
+- **judge-test's two host-dependent tests** (`04947f0e`). On the new stage 0, which embeds ci compiled: `repl-backend-default` expected cinterp's fn, while
+  `*run-nodes*` holds its var (resolve's); `parser-panic-is-a-crash`'s fixture, 30,000 nested parentheses, no longer overflows the compiled parser (status `:ok`).
+  Both are fixed in the tests (the panic stood in by `with-redefs`, the fixture one line); `arbace/c/repl.ae` left alone: stage 0 runs its embedded copy, so a
+  source fix would wait for the next re-seed.
+- **The AOT record's stale pass of `20101011-1.c`** (`04947f0e`). `torture-execute/20101011-1.c` and its twin in `torture-execute-mirror` (one of the 101
+  kept) were recorded `:pass` at the compiled level since C6 and fail with status 136 (`0 / 0`'s SIGFPE, delivered to the program's handler, which ci does not
+  call), the same on the previous seed's stage 0 (a worktree at `5de0939b`): a stale record, not the re-seed. Re-recorded as known `signals`, as at the
+  interpreted level; `gcc-c23-run/gcc.dg/c23-float-6.c` now passes. `bin/reap --record`: C AOT 2,058 / 115 / 87 (2,059 / 116 / 85 before).
+- **`bin/ci c2j-check` after the re-seed** (`c14a5eca`). The gate's `c-c2j` found 0 sources: the host now embeds C's namespaces compiled, and their compiled
+  loaders record no units, so c2j had nothing to compile. The check runs with `ARBACE_NO_AOT=1`, as `bin/lib/program.bash`'s `host_compiles` does: 25 sources, 0
+  failed on the new stage 0.
+
+### Decided (the user, 2026-11-03): CS267, CS268, `:bad-specs-print`
+
+- **CS267 The tree check's gcc syntax** (`:gcc-syntax`, `test/repr/c/parse-check-known.edn`, `test/c/divergences-read.edn`). A construct cc's parser lacks or
+  reads otherwise, which the port reads as gcc does (CS131 (c): C23 `va_start`'s extra arguments, `...` as the first parameter, `_Generic` over a type, storage
+  classes in compound literals, `_Decimal32x`/`_Decimal64x`, and the rest of C7's grammar; CS140 (a), CS144 (a), CS194 (a)). Options: (a) by design, by CS40
+  (a)'s rule (the reference is gcc; cc's gaps are the oracle's), as CS260 (a) did for the token check; (b) deferred until the tree check's oracle is gcc's own
+  trees. *Recommended: (a)*. **Decided (the user, 2026-11-03): (a)** (`d16ae499`; the class's `:decided` cites it).
+- **CS268 The `--record` writers' guess.** The tree check's writer guessed `:pp-errors` for a file whose differing errors were the parser's (`c23-attr-syntax-7.c`,
+  `...` first) and fell back to the token check's classes, one of which (`:c23-if-true`) the tree check's `:classes` lacks (mutant `m00053-1`). Options: (a) the
+  writers guess `:pp-errors` only when the differing errors are the preprocessor's, and never fall back to another check's classes: such a file is printed, left
+  out of the known file and the run exits 3, as any file of no class (CS265 (a) and CS266 (a)'s writers); (b) as built, the guesses reviewed by hand at each
+  record. *Recommended: (a)*. **Decided (the user, 2026-11-03): (a), built after the tag**: repr/c is embedded (in `gate_key`), so a change to it reruns the whole
+  `bin/gate --full`; the records at the tag were classified by hand (above). VM task 167 (`mac/167-cs268`, off `night-fix`).
+- **`:bad-specs-print`** (C print, deferred, 1 file: `gcc-bitint gcc.dg/bitint-1.c`; `test/c/divergences-print.edn`, `test/repr/c/roundtrip-known.edn`).
+  `long _BitInt (42) h;` and the like are printed `_BitInt(42) h;` and the reread loses `:c/bad-specs ["long" "_BitInt"]` (level 1). CS221 (b) and CS232 (b)
+  (2026-11-01) left a `c/var`'s conflicting words unprinted until a corpus file needs them; this one does since CS203 (a). Options: CS221 (a) with CS232 (a),
+  conflicting specifiers printed as written, now; or the class deferred. **Decided (the user, 2026-11-03): deferred for `arbace-reaps-4-crops-v1`; CS221 (a) with
+  CS232 (a) after the tag** (VM task 168).
+- **Rewording** (`d16ae499`): `:c23-colons` and `:xid-identifier` say what still differs since CS143 (a)'s lexer: the port pastes `:` and `:` into one `::` as
+  gcc does, but gcc -E's text relexed by the digest's lexer (cc's, without `::`) gives two; the port lexes an identifier with a combining mark as one, as gcc,
+  and its stream still differs at U+00A8 (a spacing diaeresis, not in XID): an identifier to gcc -E as recorded
+  (`\U000000a8`), a stray character to the port (VM report 166, which measured it: the pp-numbers agree as the digest sees them).
+
+**Row 12, as decided twice.** The user, 2026-11-02 (the test-budget decision): no all-crops clean run for this tag, the tag on
+the keyed `bin/gate --full` (C's seven full checks among its steps) and `bin/seed --verify` (row 10). The user, 2026-11-03,
+superseding it: the tag waits for GT8 (doc/GATE-SURVEY.md) and the backlog (doc/AGENDA.md), and stands on an audited clean
+run of the four crops over GT8's compressed corpora, within GT8's budget: row 12 again, compressed. The keyed `--full` of
+the night of 2026-11-02 was stopped by hand in goi's AOT check (its non-C steps' passes stay in the store at their keys).
+TODO(tag): the clean run's record.

@@ -13,458 +13,145 @@ The current state of the work. This file is rewritten as things change. For the 
 
 ## State
 
-- The bootstrap starts from the Go-source seed `seed/arbace-seed-go.tar.xz` (`73b0d637…`, 2026-10-29: v2's second re-seed), the
-  program printed by the Go-hosted fixpoint, its toolchain (TamaGo's go1.27.1) pinned by
-  `seed/goroot.sha256`. `bin/seed --check`, `--build` (stage 0), `--make`, `--verify`.
-- Stage 0 hosts every Arbace tool (j2g, repr/go, build/go, c2a, the suite's runner), compiled into it;
-  `bin/arbace-go --build` is a Go-hosted build, `--fixpoint` the chain G1 → G2 → G3.
-- The program's namespaces are compiled to Go (`ARBACE_AOT=1`, the default since S6): the
-  executable 143.7 MB (amd64, with goi's table and digests), a one-run build about 2.5 to 3 minutes.
-- The box: the same program as a TamaGo guest of go-whim's monitor (/dev/kvm on amd64; KVM/arm64
-  and Hypervisor.framework on arm64), and the box rebuilding Arbace inside itself byte for byte
-  (`bin/box-rebuild`, run by hand at milestones).
-- The JVM runs only the frozen jar of `arbace-for-java-26-v4` (pinned by hash): the oracle's
-  reference, the edges' recordings, `bin/repr-java check --suite`'s back end, `jrt-convert`'s edge
-  and the data generators; repr/java and javac run on javac's tool executable (JN6), a JDK's javac
-  the reference of javac on Arbace's class files.
+- The bootstrap starts from the Go-source seed `seed/arbace-seed-go.tar.xz` (`a59cc441…`, committed `1fe1063f`,
+  2026-11-02: C9.2's re-seed, embedding C: `arbace/c`, `arbace/repr/c`, `arbace.lang.CInterp`), the program printed by
+  the Go-hosted fixpoint, its toolchain (TamaGo's go1.27.1) pinned by `seed/goroot.sha256`; `bin/seed --verify` passed
+  (stage 0 = G1 = G2 = G3, `606d45e6…`). `bin/seed --check`, `--build` (stage 0), `--make`, `--verify`.
+- Stage 0 hosts every Arbace tool (c2j, j2g, repr/go, repr/clojure, build/go, the suite's runner, ci and repr/c),
+  compiled into it; `bin/arbace-go --build` is a Go-hosted build, `--fixpoint` the chain G1 → G2 → G3. The program's
+  namespaces are compiled to Go (`ARBACE_AOT=1`, since S6).
+- The REAP matrix (`bin/reap`): four crops, Clojure, Java 26, Go 1.27.1 and C (C23 against gcc 15.2), 16 of 16 cells
+  checked, none failing, every non-pass in a recorded class ([FULL-SUPPORT-SURVEY.md](FULL-SUPPORT-SURVEY.md), "REAP
+  v3's divergences"). The other crops (OCaml, Scheme, C++23, net/http) have their checks and classes, out of the matrix
+  and of the gate.
+- The gate is keyed and audited (GT1-GT7, [GATE-SURVEY.md](GATE-SURVEY.md)); since 2026-11-02 `bin/gate --full` runs C's
+  seven full checks as heavy steps (about 7 to 8 hours more, serial).
+- The JVM (Java 26 from jdk26u's own build, 2026-11-02) runs only the frozen jar of `arbace-for-java-26-v4` (pinned by
+  hash): the oracle's reference, the edges' recordings, `bin/repr-java check --suite`'s back end, `jrt-convert`'s edge
+  and the data generators; repr/java and javac run on javac's tool executable (JN6), a JDK's javac the reference of
+  javac on Arbace's class files.
 - `LICENSE.md` holds all licenses and which files each covers.
-- The host: Alpine edge on amd64 with /dev/kvm ([ALPINE.md](ALPINE.md); `bin/alpine-env`).
-
+- The host: Alpine edge on amd64 with /dev/kvm ([ALPINE.md](ALPINE.md); `bin/alpine-env`). The Mac peer, an arm64 VM,
+  takes queued tasks (reviews, audits, small development branches) through the bare repository's queue.
 
 ## Done (brief; the history is in the journals)
 
-- **The JVM work, to the first freeze (2026-10-06 to 2026-10-08).** The class forms, j2a,
-  Clojure vendored as `arbace/` and self-hosting, Arbace for Java 26. Frozen on
-  `arbace-for-java-26` (tags `-v1` to `-v4`).
-- **B1a, Arbace as a native Go executable (2026-10-08 to 2026-10-11).** g2a, a2g, jrt, the
-  evaluator, `bin/arbace-go`. Frozen on `arbace-for-golang` (tag `arbace-for-go1.27.1-v1`).
-- **After the second freeze (2026-10-11).** `.ae` sources, c2a, the tools renamed, Arbace's own
-  version.
-- **B1b, the box (2026-10-11 to 2026-10-12).** TamaGo's build as a guest of go-whim's monitor
-  ([go/BOX-NOTES.md](go/BOX-NOTES.md)): the boxed REPL, `tamago/` as forms, the store, the
-  network, wake on events, TLS with Mozilla's roots. Milestones `arbace-box-amd64-v1` and
-  `arbace-box-arm64-v1` (KVM/arm64; Hypervisor.framework on an M2 Max, 42 of 42).
-- **The standalone Go-hosted bootstrap, S1-S4 (2026-10-12 to 2026-10-13;
-  [STANDALONE-SURVEY.md](STANDALONE-SURVEY.md), [STANDALONE-NOTES.md](STANDALONE-NOTES.md)).**
-  The JDK's forms committed, a2g without the JVM's reflection, the tools on the Go executable,
-  the seed printed by the fixpoint; the JVM's products removed. Milestone `arbace-seed-is-go-v1`.
-- **Arbace inside itself, S5-S8 (2026-10-13 to 2026-10-15).** S5 (the known issues, closed by
-  measurement), S7 (tool guests, spawned, the action cache), S6 (the namespaces compiled to Go,
-  the default; the size halved, 209.9 → 101.3 MB; the variants merged), S8 (the rebuild in the
-  box byte for byte on amd64, in the emulated arm64 VM and on the Mac, 46 of 46). The host VM
-  survey's HV1-HV9 decided, HV1 (b) built, HV6/HV7 measured on the Mac. Milestone
-  `arbace-inside-itself-v1` (2026-10-15): `bin/gate --full` at `c3fdd36`, `bin/box-rebuild` by
-  hand (`3131e754…`).
+- **The JVM work, to the first freeze (2026-10-06 to 2026-10-08).** Frozen on `arbace-for-java-26` (tags `-v1` to
+  `-v4`).
+- **B1a, Arbace as a native Go executable (2026-10-08 to 2026-10-11).** Frozen on `arbace-for-golang` (tag
+  `arbace-for-go1.27.1-v1`).
+- **B1b, the box (2026-10-11 to 2026-10-12)**, TamaGo's build as a guest of a monitor
+  ([go/BOX-NOTES.md](go/BOX-NOTES.md)). Milestones `arbace-box-amd64-v1` and `arbace-box-arm64-v1`.
+- **The standalone bootstrap, S1-S9 (2026-10-12 to 2026-10-15;
+  [STANDALONE-SURVEY.md](STANDALONE-SURVEY.md), [STANDALONE-NOTES.md](STANDALONE-NOTES.md)).** The seed is Go forms,
+  the Go executable rebuilds itself, the box rebuilds Arbace inside itself byte for byte, Go's toolchain as forms
+  (`tamago/cmd/`). Milestones `arbace-seed-is-go-v1` and `arbace-inside-itself-v1`.
+- **goi (2026-10-17 to 2026-10-20; [go/GOI-SPEC.md](go/GOI-SPEC.md)).** The interpreter of Go forms, complete for
+  Go 1.27.1. Milestone `arbace-interprets-go1.27.1-v1`.
+- **The front ends (2026-10-17 to 2026-10-24).** repr/go's native reader (GP1-GP8); javac on Arbace and repr/java
+  without a JVM (JN1-JN9f); the Java conformance check (JC1-JC6b); the renames; Futamura's F2-F7; repr/haskell and
+  repr/rust (parked).
+- **`arbace-reaps-3-crops-v1`** (2026-10-27) and **`-v2`** (2026-11-01, at `c4f85ace`): REAP for Clojure, Java 26 and
+  Go 1.27.1, 12 of 12 cells; v2 with the gate made efficient and run clean in a fresh clone
+  (`test/gate/clean-arbace-reaps-3-crops-v2.edn`).
+- **`arbace-reaps-4-crops-v1`** (not yet tagged: it waits for GT8 and the backlog, the user, 2026-11-03; TODO(tag): the date and the commit): C the fourth row
+  (C1-C9, [C23-SURVEY.md](C23-SURVEY.md)): read 5,201 / 232 / 50, eval 2,049 / 124 / 87, AOT 2,058 / 115 / 87, print
+  4,767 / 6 / 83 (pass / by design / deferred); 16 of 16 cells, none failing ("REAP v3's divergences"). The merge
+  window after v2 (the gate's branches and audits, the crops, JN10), C8, C9 and its re-seed window (C9.2: the seed
+  `1fe1063f` verified, the records written and classified, CS265-CS268), the keyed `bin/gate --full` with C's full
+  checks (TODO(tag): its result). Its record: an audited clean run of the four crops over GT8's compressed corpora, within budget (the user, 2026-11-03).
 
-## Now
+## Now: GT8, the test budget, and the backlog, before the tag (the user, 2026-11-03)
 
-- The journal started over after the milestone (the user, 2026-10-15).
-- Done (2026-10-15): the docs searched for sloppiness and fixed; the build's speed, first round
-  ([STANDALONE-NOTES.md](STANDALONE-NOTES.md), "After the milestone: the build's speed"): a
-  one-run build about 2:45 to 3:00 (was about 4:15), a2g alone about 100 s (was 160 to 210), the
-  seed remade (`79d4f552…`) and verified. SA160-SA163 decided (a), as built. SA90 (b)'s last
-  case: a do evaluated again names the new sibling class in reflection (`6e9af3c`). The box's
-  oracle and `bin/box-suite` in `bin/gate --full`.
-- Done (2026-10-15): S9, Go's toolchain as forms ([STANDALONE-NOTES.md](STANDALONE-NOTES.md),
-  "S9"; STANDALONE-SURVEY.md §7 b1'): `tamago/cmd/`, the 105 packages `compile`, `link` and
-  `asm` build from, for linux/amd64, tamago/amd64 and tamago/arm64 (`bin/toolchain-vendor`); the
-  nine tools built from the forms byte-identical to the originals'; the box's tool guests built
-  from them (SA203 (b)); `verify` and `check` in `bin/gate --full` (SA204 (a)).
-- Done (2026-10-15): the build's speed, second round ([STANDALONE-NOTES.md](STANDALONE-NOTES.md),
-  "the build's speed, second round", parts A-D): the host's back end run compiled (SA164; about
-  half as long), a2g after the compiled namespaces arrive 66 to 75 s (was 123), g2a's collect
-  index (SA190; its step about 8 s, was 18 to 21), `jrt` not split (SA180). SA164, SA180, SA181,
-  SA190, SA191 decided (a). The seed remade after S9's merge (`9b2a4687…`, was `79d4f552…`) and
-  verified: stage 0 = G1 = G2 = G3 (`2ee89825…`).
-- Done (2026-10-16): the whole chain in the emulated arm64 VM, nothing given (BX117 (a), at
-  `434021a`): the image built in the box = the arm64 host step's, byte for byte (`5e4506de…`),
-  in 40 h 29 min (about 247 times the host's 591 s; a2g alone 28.8 h). Seen there: the guest
-  waiting on a spawn takes 3.5 vCPUs under emulation, an artifact of emulation (natively a few
-  percent of one core; BOX-NOTES.md, BX117; left as it is, the user).
-- Done (2026-10-16): the build's speed, third round (STANDALONE-NOTES.md, "third round"): the
-  loader in parts (analysis 25 → 15 s), a2g's load parallel (10.7 → 5 s), reachability (19-21 →
-  6 s), the compiled tree in several files (read 2 → 0.8 s), ids independent of the checkout's
-  path (SA230); the seed remade (`5858e83c…`) and verified.
-- Done (2026-10-16): the oracle independent of thread interleavings (two concurrency cases;
-  ORACLE.md's rule).
-- Done (2026-10-16): Arbace independent of go-whim (its tests in `box/` on the box's own guests,
-  the C guests in Go's assembly) and of cgo (dropped with the race detector); GW2-GW9 (a)
-  (BOX-NOTES.md).
+The user's decision of 2026-11-02: the checks get a budget before the next crops, so that every crop's full check runs
+in bounded time. The tiers, for all ten planned crops (Clojure, Java, Go, C, C++, OCaml, Scheme, Haskell, Rust, Python):
 
-- Done (2026-10-16): the build's speed, fourth round (STANDALONE-NOTES.md, "fourth round"):
-  reachability's scan in mutable state with shared plans (`:reach` 7-10 → 3-4.5 s), the
-  analysis' fields indexed and supertypes memoized (16 → 5 s); SA250 (a), SA260 (a); the seed
-  remade (`b566d53a…`) and verified.
-- Done (2026-10-16): a tools-only seed measured (JOURNAL.md): -14% to -22% of xz, `tzdb.dat`
-  stays; not pursued (the user).
-- Done (2026-10-17): g2a's printer mode `:full` (Go forms converted with `--full` printed back to
-  the original text byte for byte; the text round trip in `bin/gate --full`; G2F1-G2F8).
+| tier | budget | when |
+|---|---|---|
+| essential | at most 15 minutes | every merge (the essential gate) |
+| nightly | at most 6 hours | each night, a keyed `--full` over compressed corpora |
+| clean | at most 24 hours | a fresh clone, every step audited, at a tag |
 
+The methods: deduplication (byte-identical and equivalent files counted once: `torture-execute-mirror`'s collapse, VM
+report 156, the first case, GATE-SURVEY.md's note beside GT7), coverage subsets (the files that keep every back-end
+block, every kept class, the controls and one per class: VM reports 160 and 161; the user, 2026-11-02: optimise for
+those, keep every deferred and gap program, a `:subset` per corpus), rotation (the rest of a corpus over the nights),
+and synthetic corpora where a corpus is large and repetitive. Heavy runs at night, development by day. The Mac peer takes
+small development tasks. Nothing of GT8 is written yet: its survey first (GATE-SURVEY.md, a GT8 section).
 
-## Next
+## The backlog, before the tag, in this order
 
-- **Done: the milestone `arbace-reaps-3-crops-v1`** (2026-10-27, an annotated tag on main; the user's goal
-  of 2026-10-24): read, eval, AOT and print for Clojure (`98d735fab02f`), Java 26 (jdk26u `baf63fbe`) and Go
-  1.27.1 on the host, forms only; `bin/reap`: 12 of 12 cells checked, none failing, every non-pass in a
-  recorded class (doc/FULL-SUPPORT-SURVEY.md, "REAP v1's divergences"): Clojure 908/2/0, 21,049/80/5,
-  804/28/6, 1,031+/0/0; Java 7,738/3/93, 1,683/325/1,312, 1,869/181/1,270, 2,584/637/99; Go 12,158/204/0,
-  1,618/219/0, 1,685/149/3, 2,584+/141/0 (read, eval, AOT, print: pass/by design/deferred).
-  `GATE_FULL_SERIAL=1 bin/gate --full` passed at `5cfb1f4a`; the seed `b4ac198d` verified. Its history: the
-  journal at the tag.
-- **Done: the milestone `arbace-reaps-3-crops-v2`** (2026-11-01, an annotated tag on main at `c4f85ace`; the user's
-  decision of 2026-10-26): the same rule over the same matrix, with the gate made efficient and run clean in a fresh
-  clone. Its history: the journal at the tag.
-  - The clean record `test/gate/clean-arbace-reaps-3-crops-v2.edn`: a first run at `68b2bba6` and its reruns of the
-    steps that failed or changed (`--clean --only`), merged, `:status :passed`, with GTS42's demonstrations
-    (`bin/gate-demos --record`); the Java steps' timeouts held by the audited rule (`:audit-timeout`'s 13 tests; t03686 passed in rerun 9)
-    were run again untraced before the tag and passed, each at the interp level's second chance.
-  - The seed `73b0d637…` (2026-10-29: the second re-seed), verified.
-  - "REAP v2's divergences" (doc/FULL-SUPPORT-SURVEY.md): 12 of 12 cells checked, none failing, every non-pass in a
-    recorded class; the caveat: Java's timeouts are by design only through the catch-all `speed` class, curated
-    after the tag. The prose brought to 07194e71 by queue 091 (`audit-timeout`, `thread-order` unstable, runs 5 and 6).
-  - The matrix at the tag (pass/by design/deferred; `doc/v2-record/refresh.sh` at the tag's head):
+1. **The Mac VM's held branches** (each built and reported, held because repr/c or ci is embedded and a change reruns
+   the whole `--full`), merged one at a time with their main-host checks:
+   - 154 (`mac/154-builtins`, ci's missing builtins): first re-record its 7 `ref-gcc15` lines on amd64 (they came from
+     aarch64's gcc: `bin/ci record-ref --corpus ci-run --only ...`), check the hand-written record rows, then
+     `bin/ci c2j-check`;
+   - 164 (`mac/164-bitint-wide`, `_BitInt` wider than 64 bits, the `:wide` class; carries 154's two commits: after 154);
+   - 155 (`mac/155-float128`, `_Float128`/`_Float64x` compared exactly);
+   - 157 (`mac/157-headers`, C header gaps 4 and 5; no recorded result moves);
+   - 158 (`mac/158-transparent-union`, the checker's redeclaration through a `transparent_union` parameter): re-record
+     the torture-compile annotations here (ccdump);
+   - 159 (`mac/159-rt-control`, the round trip's levels 1-2 control): judge benchmarksgame's known file on amd64 (the
+     `nbody-8` entry is VM-only); its docs (GATE-SURVEY.md, C23-SURVEY.md's controls paragraph);
+   - 161 (`mac/161-subsets`, coverage subsets of all C run corpora): six amd64 `bin/ci cover` runs here;
+   - 162 (`mac/162-overlay-key`, the overlay keyed by its inputs): `bin/jrt overlay` twice on the main host;
+   - 163 (`mac/163-c-keys`, the C steps keyed by the namespaces they load): confirmed by `bin/gate --audit` on the listed
+     steps;
+   - 165 (`mac/165-vla-aot`, VLAs at AOT: 9 of 18 `:vla` programs pass).
+2. **CS268 (a)**, the `--record` writers' guess narrowed (VM task 167, `mac/167-cs268`).
+3. **CS221 (a) with CS232 (a)**, conflicting specifiers printed as written, `:bad-specs-print` emptied (VM task 168).
+4. **Java's `speed` curated** (GTS102): the per-test limits lowered after the next clean run, the catch-all's timeouts
+   judged one by one.
+5. The night-fix review (VM task 166) and its findings.
+6. The journal starts over after the tag (the user's rule), as after v2: JOURNAL.md's header, README's documentation
+   line.
 
-    | | read | eval | AOT | print |
-    |---|---|---|---|---|
-    | Clojure | 908/2/0 | 21,052/81/1 | 809/29/0 | 1,031+/0/0 |
-    | Java | 7,742/3/93 | 1,848/285/1,189 | 1,921/172/1,229 | 2,598/687/37 |
-    | Go | 12,158/204/0 | 1,618/219/0 | 1,688/149/0 | 2,584+/141/0 |
+## Open
 
-- **Next: the merge window** (the VM's rehearsals 038, 054, 084, 6 and 7: the final line is `mac/112-merge-cp` `56fbb8cf`, report 112, which adds 105, 107, the six 108s, 111 and c23-c7 to `635e2d05` on the line below).
-  Every branch below waits for the tag and merges `--no-ff` unless said "pick"; no branch is merged as 062, 063, 064
-  or 074 (they carry `mac/054-merge` `a69c1dfc`, which holds `java-jn10`: a merge brings it in early and
-  `bin/provenance-check` is red from there). The order is the tested line of `mac/100-merge-cp` (`447348ee`: 32
-  commits past `mac/084-merge-cp` `75f8da57`, no merge commit, one conflict; report 100's 29 steps, here grouped; 1-20
-  are 084's order, 21-28 the fixes and the prose, each tested on top of the steps before it; step 29 of the report is
-  step 9 here). A fix may instead sit beside its branch (report 100's "Interleaving"; those states untested).
-  Main-host-only checks beside each step.
-  1. **The gate branches** (report steps 1-3): merge `mac/029-gts103` (`de5ceeb3`; queue 011-014, 023, 024,
-     GTS80-GTS103), then pick (`git cherry-pick -x`) `mac/062-gts80`'s `89997818` and `mac/063-gts82`'s `ef44c5ad`
-     (84-cp's `1f80bae0`, `01ea0bdc`). Main host: java-check's judgment on real saved runs with both the audited marker
-     and 029's levels and partial files.
-  2. **The gate's audits** (4-12): `audit-040` (`b90a1228`; then 054's `43128659`, `aa3e1f0a`), `audit-041` (`cfacb9b0`),
-     `audit-060` (`340c2341`), `audit-075` (`3574ed37`), `audit-070` (`d687bcd8`; then `ac32bd1e`, `--nested` and a 77),
-     074's three (`2f467bfb`, `9b445743`, `2104befe`; pick), `audit-061` (`4eec9796`; then `7054a4b9`), `audit-065`
-     (`091ea876`), `audit-076` (`1939c6b9`; then `774fd3a4`). Main host, per branch: audit-040's real `--gate-build` and
-     `--audit`; audit-041's edge-mark, edge-verdict, frozen-env, gate-reads and gate-tests-test, `bin/j2g-edge verify`
-     on the JVM; audit-060's first real `--aot` runs, goi's AOT record and `dictionaryCapture-noinline` into
-     `essential-aot.txt`; audit-070's `test/java/audited-test.bash` and `test/gate/audited-test.bash` on stage 0;
-     audit-061's first `parse-check --record` (the diagnostics counts, the mutants' digest, `jdk26u-fallbacks.edn`);
-     audit-065's `alpine-env check`; audit-076's repr-clojure judge cases that need stage 0.
-     **VM 075's `audit_trace` fix** (in `audit-075`, GTS180): `rt_sigprocmask` joins `audit_trace`
-     (`bin/lib/gate-run.bash`, `audit_trace_set` for an override) so that a new thread or child is no longer traced on
-     every syscall until its first traced one, which charged Go's runtime threads against `ulimit -t`. That file is in
-     every step's key: **it rekeys the whole gate**. Main host: build `tools/gateaudit` (queue 081 could not, no Go on
-     the VM) and check it and `test/gate/audit.awk` agree on a real trace; re-measure gcgort, issue13160 and one of the
-     13 under `--audit`; then revisit `test/goi/timeouts.txt`'s audit-only bumps and the `:audited` rule (GTS180 (a)).
-  3. **The essential gate once**, here (`8ea6d798` on 084's line; the same point on this one): failures belong to the
-     gate branches (the crops are not in yet; provenance is still green). Main host: every gate step, `bin/gate --audit
-     gate-tests`. Low, VM 100: `test/gate/limit-test.bash` `wallcap-log: no orphan left` (line 28) flaked once under load
-     (it checks `/proc/$p` right after `limited_cpu` returns 137; poll up to about 1 s, or take a zombie as gone): a
-     red there alone is the flake, rerun it.
-  4. **The crops** (13-18): `c23-c7` merged at `fd1ff91a` (084's; queue 086's review of the newer commits is the only
-     look at them), `nethttp-nh2` (`da90a61c`; then 054's `b069244d`), `ocaml-o1` (`aa67cc08`; then `1816787b`),
-     `scheme-sm1` (`d583b34d`), `cpp-cx6` (`76e9a50b`), `cpp-cx7` (`a603e926`; then `bee83162`). Main host: every crop's
-     checks on real runs; `bin/repr-cpp` pp-check after c23's angled-include change in `pp.ae`.
-  5. `mac/064-gts81`'s eight commits (19; pick; `d16e28b5`; the crops' negative controls, they edit the crops' files).
-  6. `java-jn10` (20; `13db2e60`; then `a69c1dfc`, then 75f8da57's last commit: a comment and key order).
-  7. **The branches' fixes, picked on the tip in this order** (21-27; each fixes the merge above it; the order is the
-     tested one):
-     - 085's three (`847ecaa4`, `7501be78`, `f753948d` = `mac/085-merge-cp`: `git merge --ff-only` or pick; they are
-       cherry-picks of `0f59b47a` `bin/si`'s usage, `3f471fd3` `split-top` once in `arbace/repr/cpp/convert.ae`, `35f71342`
-       `mac/085-frozen-env`: the scrub keeps the steps' declared `:env`, `test/gate/declared-env-test.bash`). Main host:
-       the rekeys (gate-tests by its new input; the frozen steps' keys with the variable set; frozen-env-test);
-       repr/cpp's checks after the move.
-     - Queue 088/093: `git cherry-pick 46b397d2^..56d4401b` (`mac/093-audit-070` `56d4401b`; its first commit is
-       `mac/088-audited-test`'s `8b027465` as `46b397d2`, `test/java/audited-marker-test.bash`: do not pick `8b027465` as
-       well. audit-070's gaps against 088: java-judge's `:uses` markers, `:unstable` on the 13, `--record` with
-       `--audited`, the summary's `held`, the `:rule` text). Main host: the marker test on audit-070's merged rule; the
-       rekeys from java-judge's `:summary`/`:uses`.
-     - `c23-c7`'s newer commits: `git cherry-pick fd1ff91a..8e790afa` (`c23-c7` `8e790afa`, eight commits).
-       **Conflict in `arbace/repr/c/pp.ae` `include-next-paths`** (049e6736): take c23's chain code, keep CX2's
-       comment on the cleaned comparison (the resolution is in report 100, step 3; the rest of `pp.ae` and `dg.ae` merge
-       alone). Main host: `bin/ci judge-test` (c23's 59 cases, include-search-is-gccs among them), `bin/repr-cpp`
-       pp-check (c23's chain also reaches C++'s preprocessor).
-     - `mac/087-nh2`: `git cherry-pick da90a61c..587bbf31` (`4dbf2a74` A3, `49590baa` A4, `587bbf31` A5). Main host: A4
-       and A5's `-e` expressions on a real executable and `bin/goi check --corpus nethttp [--arbace] --record` (NH3); A3
-       on a whole run.
-     - `mac/089-o1`: `aa67cc08..09175fba` (`e76437f3`, `09175fba`), and `mac/089-sm1`: `d583b34d..9010e203` (`393d1436`,
-       `8fa01b46`, `9010e203`), then **`mac/105-sm1` `1ce36d56`** (SC203: the larceny inputs pinned, `:inputs` in
-       `test/scheme/corpora.edn`, `bin/repr-scheme`; one commit on `d583b34d`, cherry-picks cleanly onto 084-cp and
-       085-cp; **not in rehearsal 6**, place after the sm1 pick). Main host: `bin/si check --ref-test` and `check`, a real
-       `--record-ref` (it writes `chez.version`); `bin/oi pins` notes the stale `oi-program` keys until a run of the
-       current key and `--attest`.
-     - `mac/087-jn10`: `13db2e60..5318318c` (`2618543f` A2, `5318318c` A1 `field-order-check` against javac's enum; the
-       survey conflicts if picked out of branch order). Main host: javac's tool rebuilt (A1: `javac_tree.ae` is in its
-       key).
-     - Pending, from queue 107 (C++ re-review) and 108 (unreviewed audit commits): `mac/107-cx7`, `mac/108-audit-*`;
-       not rehearsed, no heads yet. Place `mac/107-cx7` after `cpp-cx7` (step 4) and each `mac/108-audit-*` after the
-       branch it fixes (step 2) once their reports say where they go and how they merge.
-  8. **The v2 prose** (28): `git cherry-pick d2b579f2 2b1c776c fe82f83f 684d5f58` (`mac/026-v2-record` `fe82f83f`'s
-     three, then `mac/091-v2-record` `684d5f58`; doc/FULL-SUPPORT-SURVEY.md only: it commutes with everything here and
-     may go first, or into the tag commit). Low, VM 100: the prose's "The audited timeouts" item says the rule is "as
-     `:unstable` holds its `:tests`", which 093's `459afc81` dropped from `check.ae` as misleading and `165259c0` made
-     per file; it describes 07194e71, so true of the tag, but if it lands after 093 add a sentence that the rule was
-     narrowed after the tag.
-  9. **The four provenance writers in one commit** (29), on javac's tool built from the merged tree, then
-     `bin/provenance-check`: `bin/jrt-convert update`, `bin/javac-vendor convert`, `bin/clojure-tests --java-fixtures
-     update`, `bin/java-check --forms update`. Provenance is red from jn10 (as at 75f8da57); the reader hash they must
-     write is now **`806dce33…`** (aff13645 moved it from `a3cc7643…`; d7b79ff9's `:java.base` line already passes).
-     Then `mac/039-jcs127` (`d6870d37`, after a test on the main host).
-  10. `bin/gate --full`; the batched re-seed (queue 037's fixes first: a verify is host-bound by `git describe`'s tags,
-      Go's env files and a setgid `.tmp`); the essential gate; the journal's entries of every branch as new entries.
-  - Light sets at each step of the rehearsal: no failures but the stage-0 ones (java audited-test, repr/clojure judge-test
-    5, goi's `essential-aot-held-to-the-record`, clojure judge-test), the same 7 `gate-tests` not run; main-host-only
-    beside them: nh2's records on a real executable, sm1's record-ref with Chez, 27 ocaml judge cases, gate-reads-test,
-    gate-tests-test, frozen-env-test, edge-mark-test, edge-verdict-test.
-  - Left to the main host from 085 and 089 beyond the checks above: 085's finding-5 rekey (a `bin/gate --plan` on stage 0
-    with `FROZEN_TAG` set, to see the value in the key and the step rerun); 089's `Q4` (item text `(5000)`/`(20000)`:
-    8 recorded items, a `bin/si mats --record`) and `aot_key` leaving out `bin/lib/oi/*` (re-keys every AOT run, then
-    `--attest`); the CPU-clock skew ratio of 072's oi 137 rule; 084's open points (crop files under `gate_key`'s `bin/lib`,
-    `jdk/` and `go/`; CLAUDE.md's `gate_key` sentence; GTS82 (a)'s linked-worktree test on the VM).
-  - Fixes to write on `c23-c7` after queue 086's re-review of `8e790afa` (low, none made): a quoted sibling of a system
-    header marked non-system (`arbace/repr/c/pp.ae:1372-1381`); `_Float64x`/`_Float128` compared through double; `-iquote`
-    of a system directory; `_Decimal64x` against `_Decimal128` in `float-tie`.
-- **Open decisions** (waiting for the user; each branch built what is stated, none decided; the surveys say "none
-  decided"):
-  - GTS102 (decided (2026-11-01) on the gate branches, 6a26a628, not on main; built as `mac/034-gts102`, `4bd65bc9`):
-    test/java/timeouts.txt, a 60 s floor each; conflicts with main's `:audited` rule and audit-070: merge, redo after
-    audit-075 and audit-070, or drop (raised in queue 034, 083; corrected in queue 097's commit).
-  - GTS130-GTS133 (audit-061; GTS132 (b) built) and GTS137 (`check --jdk` in no gate step: (a) a `--full` step
-    `repr-java-jdk`, (b) by hand, (c) folded into `repr-java-nojavac`; queue 067).
-  - GTS134-GTS136 and GTS138 (audit-065, alpine-env: providers, the host's line, the other findings; queue 065, 068).
-  - GTS140-GTS143 (audit-060; GTS141 (b): 44 of 63 `check-known` entries take any non-pass; queue 060, 069).
-  - GTS150 (`mac/074-clean-judge`: a judgment-only clean rerun, (a) built write-ahead; keep or drop; queue 074).
-  - GTS170-GTS173 (audit-070: java-held under the clean run's strace (b), both signals mark an audit (a), `--record`
-    refused (a), the two test scripts; built as recommended; queue 070, 077).
-  - GTS180 (a)-(e) (audit-075: timeouts.txt's bumps and the `:audited` rule after the fix, nethttp's limits, the JDK
-    reference's timeouts, the doubled Java retry, a 137 told from an OOM kill; queue 075, 080, 081).
-  - CS236-CS238 (c23-c7: every directive of a line, `_Atomic` among `:c/bad-specs`' qualifiers, wrong-reason entries;
-    queue 057, 086) and CS235 (b) (`:ld` through arithmetic, `?:` and constexpr; F79's open points).
-  - OC160 (a light oi-divergences essential step at the merge; queue 072, 089).
-  - JCS127 (`mac/039-jcs127`: volatile fields under Rt's striped locks; merge after jn10 once tested).
-  - The earlier proposals GTS110-GTS126, SC210-SC224, OC140-OC153, CP160-CP174 and CS220-CS235 were decided as
-    recommended (the user, 2026-11-01).
-- **Next: C23 at parity with the three crops** (doc/C23-SURVEY.md; CS1-CS51 decided).
-  - Done: C1, the spec (doc/c/SPEC.md, test/c/corpora.edn); C2, repr/c's lexer and preprocessor, ports of cc's, token
-    for token against `tools/ccdump`.
-  - Beside v2, light: C3, the parser, with CS50 (a) (gcc's trigraphs and UCNs) and CS51 (a) (gcc -E's digests as data);
-    `c23-c7` merges in the merge window above (steps 4 and 7).
-  - Then C3b-C9: cc ported to Arbace (CS4 (b)); musl 1.2.6 as C forms (`long double` as `double`, CS35); gcc 15.2 as
-    the reference; the tag `arbace-reaps-4-crops-v1`.
-  - Also after v2:
-    - JN10 (JFS130-JFS132), merged in the merge window (steps 6 and 7); its writers last;
-    - JCS120 (b), its plan being written;
-    - later: the deferred JDK areas (JCS90-JCS96), JC7.
-- **Working rules added during REAP:** subagents on Sonnet for as much as possible, Opus for the hard parts
-  (the user, 2026-10-25/26); one 20 GiB job at a time on the host; Go's build cache trimmed when the disk
-  fills.
-- **Done: the milestone `arbace-interprets-go1.27.1-v1`** (the user's goal of 2026-10-19; the name,
-  the user, 2026-10-20). Its run is done at main (journal, 2026-10-20, "the milestone run"):
-  - goi is complete at the REPL for Go 1.27.1: GR7a-GR7c, GR8a-GR8b, GR9a-GR9d, GR10, the arm64
-    box check and GC81, each merged, their proposals (GC35-GC165) built as recommended and recorded
-    for the user to revisit.
-  - `bin/goi check`: 1,471 of 1,837 pass, 0 fail, 0 error. The other 366 are in 17 recorded
-    classes (`bin/goi divergences`; GOI-SPEC, "v1's divergences"): 358 by design, 8 deferred
-    (go:embed's 2, GS14 (a); `byte`/`rune`/alias names in messages' 6, GC157). Essential 740 of
-    740; the box on amd64 583 of 584, in the emulated arm64 VM 291 of 292 (the half, GC75).
-  - `bin/gate --full` (its goi step run again alone after `babde67d`), the fixpoint, the seed
-    `fcc37393…` (`fca6d187`) verified (stage 0 `199e126b…`).
-  - The Mac (the user, 2026-10-20): `./mac.sh goi`, all 584 programs, 582 pass, 2 known (in
-    classes), 46 s.
-  - **Tagged** `arbace-interprets-go1.27.1-v1` (2026-10-20, on main). After it, the emulated arm64
-    check over all of box.txt: 582 of 584, 2 known, as the Mac's.
-- **The two front-end surveys (2026-10-20, the user: "make plans"):** plans to decide, not builds.
-  - Done: the Go parser's survey (doc/go/GO-PARSER-SURVEY.md, merged): recommended Go's go/parser
-    from forms run by goi, annotations by goi's checker, gc's syntax for errors (GP1-GP8, 23-32
-    days, the box reads Go at GP8); GPS1-GPS11 decided as recommended (the user, 2026-10-20). GP1 done
-    (2026-10-20: E-tree 12,275 of 12,275; GPS12-GPS15 decided as built). GP2 done (2026-10-20: the
-    loader, headers 12,275 of 12,275, the box's plan unchanged; the program changed, re-seed
-    batched with JN2's; GPS16-GPS20 decided as built). GP3 done (2026-10-21: raw forms,
-    `bin/repr-go raw-check` 12,158 dumps resolved, 0 differ, 117 raw only; the normal conversion
-    unchanged). The seed remade after GP2, JN2 and GP3 (`aa4cb10b…`) and verified. GPS21-GPS26 decided
-    as built (the user, 2026-10-21). GP4 done (2026-10-21: the checker's
-    resolve mode, E-ann 12,158 of 12,158 equal, none known; GPS27-GPS31 decided as built). GP5 done (2026-10-22: the native reader
-    `bin/repr-go read`'s default, the helper the oracle, E-forms 12,158 of 12,158 in `:full` and
-    `:lines`, GPS25 (b)'s corrections, the vendoring tools and goi on the native reader, every committed
-    tree unchanged; GPS32-GPS37 decided as built). GP6 done (2026-10-22: gc's syntax errors
-    by goi running `cmd/compile/internal/syntax` from `tamago/cmd`'s forms, `bin/repr-go
-    syntax-errors`; invalid programs on their raw forms for goi; `bin/goi check` 1,604 of 1,837 pass,
-    was 1,472; GC47 63 of 64; the program changed, re-seed batched with JN7's; GPS38-GPS44 decided as
-    built); GP7 done (2026-10-22: the native reader compiled, go/parser's
-    four packages, the dumper, gc's syntax driver and a renamed copy of syntax in goi's table; std
-    parsed in 0.5 s, the executable +1.06 MB; GPS45-GPS49 decided as built); the seed remade after GP6, JN7,
-    JFS48 (b) and GP7 (`d7303cf8…`) and verified; GP8 done (2026-10-23: the box converts `tamago/goroot`
-    byte for byte on amd64, 167 s, a part of std in the emulated arm64 VM; GPS50-GPS56 decided as
-    built; on the Mac 2026-10-24: the whole tree in the box byte for byte, 112.5 s): the Go parser plan
-    GP1-GP8 complete. GPS49 (c) done (2026-10-24: the raw conversion and layout about twice as fast,
-    std's read 139 → 72 s, `tamago-vendor verify` 8:43 → 4:01, `toolchain-vendor verify` 31:37 → 13:04,
-    every output unchanged; GPS57-GPS59, GPS66, GPS67 decided as built; the re-seed batched). `bin/gate --full` on main: see the Java line.
-  - Done: the Java front end's survey (doc/classes/JAVA-FRONTEND-SURVEY.md, merged): recommended
-    javac itself as Java forms run by Arbace (JF1-JF6, 13-20 days, the JVM out of repr/java), a
-    native front end later; JFS1-JFS11 decided as recommended (the user, 2026-10-20), the
-    milestones named JN1-JN9. JN1 done (2026-10-20: javac's
-    sources on Arbace parse and attribute as on the JVM; a tool executable of 183 MB; JN2 1-2
-    days, JN3 3-4); JFS12-JFS17 decided as recommended (the user). JN2 done (2026-10-20:
-    javac's forms in `jdk/javac/`, unpatched, `bin/javac-vendor`; JFS18-JFS22 decided as built);
-    JN3 done (2026-10-21: javac on Arbace compiles the baseline, the samples, java.base's closure
-    and java.base itself byte for byte as the JVM's javac, `bin/javac-vendor classes`, a `javac`
-    step in `bin/gate --full`; the program changed, re-seed batched with GP4's; JFS23-JFS26
-    decided as built). JN4 done (2026-10-21: repr/java's read on the tool, every corpus byte for
-    byte the JVM reader's, `bin/repr-java host-check`; JFS27-JFS30 decided as built). JN5 done (2026-10-21: javac's forms
-    read by javac on Arbace byte for byte, the tool repr/java's default host, its --full steps on
-    the tool; JFS31-JFS36 decided as built). JN6 done (2026-10-22: the JVM
-    leaves repr/java, no JVM under `bin/repr-java` by an strace trace, `check --jdk` on the tool over
-    68 modules, `jrt.jrt-sources` on the tools' host, `:jdk` the platform's pin; JFS37-JFS42 decided
-    as built); JN7 done (2026-10-22: the generators read by
-    repr/java and run on javac's tool executable, their outputs the JDK build's but CaseFolding's boot
-    JDK entries; `jrt.classfile`, the edge on the tools' host; `bin/jrt-convert` starts no JVM;
-    JFS43-JFS50 decided as built); JFS48 (b) done (2026-10-22: javac's generated sources
-    by compileproperties and propertiesparser on the tool, 20 of 20 the build tree's, no JVM;
-    `FlagsEnum` still copied; JFS51-JFS54 decided as built); JFS52 (b) done (2026-10-22: `FlagsEnum` by flagsgenerator on the
-    tool through javax.tools' API on javac on Arbace, no generated source copied; JFS55-JFS58 decided,
-    JFS58 (a) done: `jdk/edge.edn` re-recorded, stale since GP7); JN8 done (2026-10-23: the native Java 26
-    parser, javac's trees with positions for 52,465 files and 8,000 mutants, none known;
-    `bin/repr-java parse-check` in `--full`; JFS59-JFS66 decided as built); JFS66 (b) done (2026-10-23: the
-    converter on an interface over the tree and attribution by position, the native trees giving the
-    same forms but 3 known files; the split: 69% of lists need at most types, 98% overload; JN9
-    re-estimated 19-34 days; JFS67-JFS71 decided); JFS70 (b) done (2026-10-23: `resolve.ae`'s pins
-    independent of the javac run's history, the known list empty, no committed form changed; `tree.ae`'s
-    notice; JFS72 (b) decided); `bin/gate --full`'s failures fixed (2026-10-24): the edge (GP8's `OpenOption`), the round trip's
-    stale cached originals (not the reader), `nosplit.go` by a per-program limit; `bin/j2g-edge verify`
-    in the essential gate. The seed remade (`54f77c90…`) and verified. JN9a done (2026-10-24: the native
-    attribution provider for the scope and declarations tiers, every fact equal to javac on Arbace's
-    over every corpus, jdk26u's 5,425,925, 0.2% declined to javac by design; JFS71 and JFS72 (b) within
-    it; `bin/repr-java attr-check` in `--full`; the rest re-estimated 7-14 days; JFS74-JFS78 decided:
-    JFS75 (b) next, then JN9b). The Java conformance survey done (2026-10-24,
-    doc/classes/JAVA-CONFORMANCE-SURVEY.md: jdk26u's jtreg tests the corpus; a sample of 2,121 tests
-    passing on the JDK: read and class files 100%, interpreted 60%, compiled by j2g 67%; JC1-JC8, 18-29
-    days; JCS1-JCS15 decided as recommended). JC1 built (`java-check-jc1`, 2026-10-24: `bin/java-check`, jdk26u's
-    jtreg run tests and Arbace's own `test/java/jls` against the JDK's recorded runs, levels read,
-    interp, classes; 2,967 tests passing on the JDK: read 2,965, class files 2,965, interpreted 1,364
-    (46%), every other test in one of 36 classes; the essential subset, 428 tests in 28 s, in the
-    essential gate; JCS16-JCS25 proposed). Then JC4 (running: the interpreter's bugs), then JC2. JFS75 (b), the converter's model behind an interface
-    (`java-model`); JFS65 (b), j2g's array casts (`j2g-array-casts`);. The seed remade after JFS52 (b) and JFS58 (`3ab3b603…`) and verified.
-- **After v1:**
-  - done (2026-10-24): GC157 (b) and go:embed (GS14 (a), GC161 (b)): `bin/goi check` 1,618 of 1,837,
-    no deferred class left; GC166-GC174 decided as built;
-  - staging shared with Futamura's F7 (G16);
-  - speed (F10's inline caches, specialization), which would bring the speed-bound programs back;
-- Parked (the user, 2026-10-26), revisited later piece by piece: the box (with the KU series below, its Mac
-  bundle and arm64 VM, tamago/ and tamago/cmd/'s forms), repr/haskell, repr/rust, the macOS user interface
-  (the Moshi Go note below) and the iOS app (doc/IOS-REPL-SURVEY.md); out of `bin/gate --full` from REAP9 on,
-  their scripts kept. The focus: the three crops and C23.
-- Parked (the user, 2026-10-18): KU3 (processes on arm64). A safety classifier stopped both
-  agents before they wrote anything. The worktree `ku3` is kept, clean at `80294e9a`. Its
-  findings: TamaGo's arm64 `osInit` reads ID_AA64ISAR0_EL1, ID_AA64ISAR1_EL1 and
-  ID_AA64PFR0_EL1, which trap at EL0, so the kernel must answer them (proposal KS15, against
-  KS2's letter, to decide when KU3 resumes); a Mac step needs the guest package in
-  box-vendor's darwin/arm64 configuration and `image()` not skipping without /dev/kvm.
-  KU4-KU6 were to go on, on amd64 alone.
-- Parked (2026-10-18): KU4 (the process manager, amd64). The classifier stopped its agent too,
-  before it wrote anything (worktree `ku4`, clean at `728440fe`). Its findings are in the journal
-  (2026-10-18, "KU4 parked"). The KU series waits for the user's direction.
+- JCS127 (`mac/039-jcs127` `d6870d37`, volatile fields under Rt's striped locks): not in main; after a test on the host
+  (it changes the runtime).
+- GTS137 (a): the `--full` step `repr-java-jdk` (`:heavy true`), at the next reader change (GTS133 (b)).
+- `arbace/c/repl.ae`'s back-end default and the judge tests that stand in for the compiled parser (night-fix): the
+  source's fix waits for the next re-seed.
+- The box can no longer build the program: `go/arbace/crt` calls `syscall.Access` and `syscall.Stat_t`, which TamaGo's
+  syscall lacks (C9.2's hazard (e)); for the box's revival.
+- Waiting for the user: none known; each survey's "Proposed" sections not marked "Decided" are the list.
+- Working rules: subagents on Sonnet for as much as possible, Opus for the hard parts (the user, 2026-10-25/26); one
+  20 GiB job at a time on the host; Go's build cache trimmed when the disk fills.
 
-- Done (2026-10-18): F5 (guarded direct linking, geometric mean 1.10), `repr/clojure print`, `repr/java`'s
-  `:full` mode, the evaluator's compile race fixed. F5.2 found (code layout), CP1 built, the seed
-  remade (`910b4b8f…`). F6 done (2026-10-18: primitive fns and speculative workers, `fib` 0.98 →
-  0.53 ms, geometric mean 1.11×; F6.1-F6.3 decided as built). The seed remade (`ed8a4720…`). F7 done (2026-10-18: `defnode` for five kinds, the evaluator 14%
-  faster; F7.1-F7.4 decided as recommended: F1 (a) for expressions, (c) for storage and control,
-  F8 (b); `bin/generated-check` in the essential gate). The seed remade (`982e071c…`).
+## Parked (the user, 2026-10-26; out of `bin/gate --full`, scripts kept, revisited piece by piece)
 
-- The direction (the user, 2026-10-17): Go forms first-class at the REPL, interpreted like
-  Arbace and Java forms; the three dialects at the same level there "when it is appropriate";
-  Haskell forms stay data. The survey written (doc/GO-FORMS-REPL-SURVEY.md): recommended
-  Arbace's own interpreter of Go forms (a type checker in Arbace, typed closures, a table of the
-  program's compiled packages), milestones GR0-GR6, 22-33 days; proposals G1-G17 open; the build
-  after F3, F4 and the renames. G1-G17 decided as recommended (2026-10-17); GR0 done (doc/go/GOI-SPEC.md,
-  GS1-GS15 decided as recommended); GR1 and GR2 done (the compiled-packages table,
-  GoValue; the checker); GR3 done (2026-10-18: the interpreter's core, 532 of `$GOROOT/test`'s
-  run programs pass, none fail; GC15-GC18 decided as built); GR4 done (2026-10-18: methods, interfaces, concurrency; 832 pass;
-  GC19-GC22 decided as built); GR5 done (the crossings, the package `arbace`, GoPanic, traces,
-  printing, GS7, GS10, `go/run-compiled`, the oracle's `forms/go`; GC23-GC25 as built, GC26 (b));
-  GR5.1 done (GC26 (b): lines stored only where a statement can panic or call; GC27 as built); GR6 done (generics: 186 of typeparam's 200 run
-  programs, `bin/goi check` 1,036 pass, the annotation check over every declaration; GC28-GC34 as
-  built); GR7a done (goi checked in the box, `bin/goi check
-  --box` 565 of 566; `forms/go` in the box's oracle; recursive types as shapes; `bin/goi check` 1,049
-  pass; GC35-GC42 as built; re-seed with GR7b); GR7b running.
-
-- Done (2026-10-17): the rename (doc/NAMING-SURVEY.md, "The rename as built"): j2a → `repr/java`
-  (`bin/repr-java`), g2a → `repr/go` (`bin/repr-go`), its build → `build/go` (`bin/build-go`),
-  a2g → `j2g` (the printed `j2g_*` names, `J2G_*`), `G2A_GOROOT` → `ARBACE_GOROOT`, the old
-  variables guarded; "Java forms" in prose; c2a and `arbace.classes.*` unchanged; R1-R5 decided.
-  The seed remade (`56fabe20…`) and verified; R4 done (`tamago/` converted again, the guests
-  identical). Done: repr/go's directory tests (`bin/repr-go roundtrip --dirs [--text]`, 251 to 254
-  tests per configuration, every level; D1-D3 decided, in `bin/gate --full`). Done: F2 (`bin/diffcheck`, 12,449 of 12,471 cases agree; F2.1-F2.6 decided).
-- `repr/haskell`'s spec written (doc/haskell/SPEC.md; S1-S36; HS1-HS12 decided as recommended).
-  R1 done (2026-10-17: the tree and lines levels over GHC 9.14.1's base libraries, 483 of 483
-  modules; HR1-HR5); R2 done (the interface level, 483 of 483; HR6-HR8); R3 done (`:full`, the
-  text level, 483 of 483 byte for byte; HR9-HR13); R4 and R5 done (the layout
-  printer; the other boot libraries: 1,226 modules, HR14-HR20); R6 done (2026-10-18: .hsc, .lhs, boot files; 1,345 modules; HR21-HR24 decided as built); HR25 done (2026-10-19: HR26 (b), HR27 (a), HR28 (a), the user: the module view writes CPP's
-  disagreeing markers as `{-# LINE #-}`; 1,331 of 1,345 modules with equal trees of mode `:full`, 14 known). Done: `repr/java print` (the round trip over Clojure's Java, the samples and the JDK;
-  JP1-JP4); running: (Java forms → Java,
-  with a round trip; branch `repr-java-print`).
-- Done (2026-10-17): repr/java print. Formerly planned: after the rename (the user, 2026-10-17: "Create jaf print after the naming debate settled"):
-  `repr/java print`, Java's bridge printing back, class forms → Java source, with a round trip like
-  repr/go's (Java → forms → Java → forms, the two forms equal; the text level as repr/go's
-  `:full`); R1: today's `arbace.repr.java.print` (forms as `.ae` text) becomes `layout` with it.
-- The survey of Futamura's projections written (doc/FUTAMURA-SURVEY.md; its experiment on the
-  local branch `futamura-survey`); decided as suggested (the user, 2026-10-17): after the rename,
-  F2 (per-form differential checks), then F3 and F4 (arithmetic fast paths, no initialization
-  guards for the classes initialized at start; one re-seed, preceded by the rename of c2a to
-  `repr/clojure` and of `arbace.aot` to `c2j`: the user, 2026-10-17), then F5 on the numbers,
-  F6, F7. Measured there: `fib`
-  6.40 → 0.168 ms (the JVM 0.16) by a `Long` fast path, var speculation and an unboxed worker;
-  `loop-long` 11.87 → 1.09 ms without the class-initialization guards.
-- Done (2026-10-17): the box's checks on the Mac under macOS 26.7.1: all passed (the checklist 46
-  of 46, the rebuild in the box = Linux's byte for byte in 180 s, the clock about 5 ppm).
-- `repr/rust`: the survey written (doc/REPR-RUST-SURVEY.md, 2026-10-17; ../rust-lisp as prior
-  art): recommended a bridge only, rust-lisp's grammar respelled, a helper on the host's rustc
-  with its `rustc-dev` pinned; RS1-RS17 decided; its spec written (doc/rust/SPEC.md, RSS1-RSS10 decided as
-  recommended); RR1 and RR2 done (the tree and lines levels, 1,074 of 1,074; the interface level,
-  5 of 5 crates); RR3 done (2026-10-18: `:full`, the text level, 1,074 of 1,074 byte for byte;
-  RR-P6-RR-P8 decided as built); RR4 done (2026-10-18: the rest of `library/`, the compiler, a
-  pinned crate set, the pretty layout: 13,397 files; RR-P9-RR-P12 decided as built); RR5 done (the UI suite as a fifth corpus, the behaviour level
-  `roundtrip --run`, std from printed files `--std`; RR-P13-RR-P17 as built); RR6 done (HIR, MIR and objects from the printed files,
-  `roundtrip --code`, opt-in; `include!`'s expression files; RR-P18-RR-P22 as built). The
-  milestones of SPEC §12.1 are all built.
-
-- The standalone Arbace: no Java binary compatibility, with Java at the source level through repr/java.
-  The language is Clojure plus class forms, and later forms for Go. The goal is a
-  self-sustaining REPL in a virtual sandbox, in Arbace down to the bare metal ISA, in the style
-  of Go plus TamaGo. Targets: /dev/kvm on amd64 (Alpine edge Linux host) and
-  Hypervisor.framework on arm64 (macOS host). Open: the runtime's design, Go-inspired (scheduler,
-  GC), with proper tail calls possible.
-- Futamura's projections (the user, 2026-10-14): Arbace's compiler is written by hand, not
-  derived, but it has the pairs the projections relate: the evaluated build (the evaluator and
-  the image) against the compiled one (S6), and the class forms' interpreter
-  (`arbace/classes/interp`) against j2g, kept in step by the suite and the oracle, not by
-  construction. To survey: fns as Go closures (SA156 (c), closure generation, also a Go type
-  fewer per fn); code generation (T4) by partial evaluation of the evaluator, ahead of time, in
-  the way of Truffle/Graal (speculating on vars, falling back when one is redefined); the second
-  projection, j2g derived from the interpreter, one definition of each language's semantics
-  (Clojure, the class forms, later Go). The cost: binding times in a dynamic language (vars,
-  `eval`, macros at load time).
-- A kernel and a user part in the box: the survey written (doc/go/KERNEL-USER-SURVEY.md,
-  2026-10-17): recommended a TamaGo runtime per process at EL0 (the same image, a page table per
-  process), language isolation inside processes, S7's guests where virtualization exists, one
-  spawn request; SYSCALL round trip 24.5 ns measured at ring 3; plan KU0-KU6, 17-27 days;
-  K1-K12 decided as recommended; KU0 done (doc/go/PROCESS-SPEC.md; KS1-KS12 decided as
-  recommended); KU1 and KU2 done (amd64 processes at ring 3, a process on the user board equal to
-  a guest byte for byte; KS13 (a), KS14 (a)); KU3 and KU4 parked (the classifier). The diffcheck flakes' cause, j2g's
-  second round, fixed (2026-10-18).
-- The mapped start measured without nested KVM.
-- A note from the user (2026-10-13): the tooling of the Mac GUI app Moshi Go may be useful for
-  Arbace, to study when Arbace's REPL gets a user interface beyond the terminal. Its build info
-  (`go version -m`, on the user's Mac): module `moshi-go` at `1516bf8173a5` (2026-10-12), go1.27.1
-  (as ours), darwin/arm64, `CGO_ENABLED=0`, `-trimpath`, tag `mygo_noinspector`. Its deps:
+- The box (with its Mac bundle, the arm64 VM and the KU series), `tamago/` and `tamago/cmd/`'s forms, repr/haskell,
+  repr/rust, the macOS user interface (the Moshi Go note below) and the iOS app ([IOS-REPL-SURVEY.md](IOS-REPL-SURVEY.md)).
+- KU3 (processes on arm64). A safety classifier stopped both agents before they wrote anything. The worktree `ku3` is
+  kept, clean at `80294e9a`. Its findings: TamaGo's arm64 `osInit` reads ID_AA64ISAR0_EL1, ID_AA64ISAR1_EL1 and
+  ID_AA64PFR0_EL1, which trap at EL0, so the kernel must answer them (proposal KS15, against KS2's letter, to decide when
+  KU3 resumes); a Mac step needs the guest package in box-vendor's darwin/arm64 configuration and `image()` not skipping
+  without /dev/kvm. KU4-KU6 were to go on, on amd64 alone.
+- KU4 (the process manager, amd64). The classifier stopped its agent too, before it wrote anything (worktree `ku4`,
+  clean at `728440fe`). Its findings are in the journal at `arbace-interprets-go1.27.1-v1` (2026-10-18, "KU4 parked").
+  The KU series waits for the user's direction.
+- A note from the user (2026-10-13): the tooling of the Mac GUI app Moshi Go may be useful for Arbace when its REPL gets
+  a user interface beyond the terminal. Its build info (`go version -m`, on the user's Mac): module `moshi-go` at
+  `1516bf8173a5` (2026-10-12), go1.27.1, darwin/arm64, `CGO_ENABLED=0`, `-trimpath`, tag `mygo_noinspector`; deps
   `github.com/egoist/mygo` v0.4.5 replaced by the fork `github.com/rjyo/mygo` (the GUI toolkit),
-  `github.com/ebitengine/purego` v0.11.1 (as the box's launcher uses), `go-text/typesetting`
-  v0.3.5, `golang.org/x/image`, `alecthomas/chroma/v2` (highlighting), `yuin/goldmark`
-  (Markdown), `creack/pty` and `charmbracelet/x` (pty, conpty, term, termios: a terminal),
-  `coder/websocket`, `dlclark/regexp2/v2`. A pure-Go, cgo-free GUI on macOS is the same shape
-  as the box's launcher there.
-- A touch terminal for Arbace's REPL, a clean-room reimplementation of Moshi's iOS terminal
-  interface (the user, 2026-10-14; long term, for discussion): survey and plan in
-  [IOS-REPL-SURVEY.md](IOS-REPL-SURVEY.md), proposals IR1-IR13 open; more screenshots from the
-  user would answer its §3.
+  `github.com/ebitengine/purego` v0.11.1, `go-text/typesetting` v0.3.5, `golang.org/x/image`, `alecthomas/chroma/v2`,
+  `yuin/goldmark`, `creack/pty` and `charmbracelet/x`, `coder/websocket`, `dlclark/regexp2/v2`. A pure-Go, cgo-free GUI
+  on macOS is the same shape as the box's launcher there.
+- A touch terminal for Arbace's REPL, a clean-room reimplementation of Moshi's iOS terminal interface (the user,
+  2026-10-14; long term): survey and plan in [IOS-REPL-SURVEY.md](IOS-REPL-SURVEY.md), proposals IR1-IR13 open.
+
+## Long term
+
+- The standalone Arbace: no Java binary compatibility, with Java at the source level through repr/java. The language
+  is Clojure plus the Java forms, and later the Go forms. The goal is a self-sustaining REPL in a virtual sandbox, in
+  Arbace down to the bare metal ISA, in the style of Go plus TamaGo. Targets: /dev/kvm on amd64 (Alpine edge Linux
+  host) and Hypervisor.framework on arm64 (macOS host). Open: the runtime's design, Go-inspired (scheduler, GC), with
+  proper tail calls possible.
+- More crops toward the ten (C++, OCaml, Scheme, Haskell, Rust, Python), each a row of the matrix, after GT8's budget;
+  C++, OCaml and Scheme embed at a later re-seed (CS250's decided line).
+- Futamura's projections ([FUTAMURA-SURVEY.md](FUTAMURA-SURVEY.md)): the second projection, j2g derived from the
+  interpreter, one definition of each language's semantics; staging shared with F7 (G16); speed (F10's inline caches,
+  specialization).
+- A kernel and a user part in the box ([go/KERNEL-USER-SURVEY.md](go/KERNEL-USER-SURVEY.md)): KU0-KU2 done, KU3 and KU4
+  parked.
