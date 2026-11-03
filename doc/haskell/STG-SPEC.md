@@ -4,7 +4,7 @@ Status: milestone HE1 of Haskell's eval ([HASKELL-EVAL-SURVEY.md](HASKELL-EVAL-S
 by the user on 2026-11-03), written 2026-11-03 with HE2's helper, which writes these forms, and its checker, which
 reads them back: the grammar below is the one `arbace.repr.haskell.stg` checks over every dump (`bin/hsi dumps`), and
 §10's checklist is the one `bin/hsi spec-check` compares with GHC 9.14.1's sources. Choices made while writing it are
-STG-S1-STG-S12 (§12).
+STG-S1-STG-S13 (§12).
 
 **STG forms** are GHC's final STG of one module, the `[CgStgTopBinding]` GHC's code generator receives (after
 CorePrep, CoreToStg, the STG simplifier, unarisation and tag inference, each closure with its free variables), with the
@@ -149,6 +149,10 @@ LITERAL                                                  ; StgLit
 (tick TICK EXPR)                                         ; StgTick
 ```
 
+- **`con`'s REPS**: GHC's tag inference (`GHC.Stg.EnforceEpt.Rewrite`, `mkSeqs`) rebuilds some constructor
+  applications with a `[[PrimRep]]` that is a panic if evaluated; the helper writes the field only when it evaluates,
+  so a `con` without it is not evidence of an ordinary constructor (hsi takes the fields' representations from the
+  constructor's `dc`).
 - **Atoms** (`StgArg`): a name (`StgVarArg`) or a literal (`StgLitArg`). After unarisation `StgApp` and `StgOpApp`
   keep their void arguments (`:v` binders; GHC needs them to compare a call's arguments with an arity), `StgConApp`
   and `StgRhsCon` drop them.
@@ -349,11 +353,11 @@ The heads, by place: top level `stg/module` `stg/data` `string` `bind` `rec`; in
   (`stg/containers/`), the samples one directory each (`stg/samples/Hello/Main.stg.ae`).
 - **STG-S11** The header's `:flags` are the flags that decide the STG (`-outputdir`, `-j` dropped): two runs into
   different directories write the same bytes.
-- **STG-S13** A representation-polymorphic type's REPS are `:rp` (§4) rather than a failure: GHC's own code
-  generator never asks for them, so they are binders and fields no code moves; hsi treats one as a run-time class.
 - **STG-S12** The hook runs GHC's own code generator after writing the forms, rather than stopping (an empty Cmm
   stream): the compilation's interfaces are then the installed libraries' (HES6's check), and the cost is the code
   generation's seconds.
+- **STG-S13** A representation-polymorphic type's REPS are `:rp` (§4) rather than a failure: GHC's own code
+  generator never asks for them, so they are binders and fields no code moves; hsi treats one as a run-time class.
 
 ## Appendix A: a worked example
 
