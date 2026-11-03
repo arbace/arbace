@@ -71,9 +71,13 @@
   "A library made prebuilt: `lib` with :frags (the fragments made or read, by unit), :frag-dir (the cache's directory for
   its key) and :check (fn [unit-name] checked unit). `lib-key` names the library's sources (musl's forms cache's key)."
   [lib ^String root ^String name ^String lib-key check]
-  (let [key (runtime-key root lib-key)]
+  (let [key (runtime-key root lib-key)
+        dir (str (cache-root root) "/" name "-" key)
+        d (File. dir)]
+    ;; the key's directory marked as used now: bin/ci runtime prune and bin/gate --prune remove only keys unused for a day
+    (when (.isDirectory d) (.setLastModified d (System/currentTimeMillis)))
     (assoc lib :frags (java.util.concurrent.ConcurrentHashMap.) :check check
-               :runtime-key key :frag-dir (str (cache-root root) "/" name "-" key))))
+               :runtime-key key :frag-dir dir)))
 
 (defn- write-atomic
   "s written to f through a temporary name (another process may write the same fragment)."
@@ -94,7 +98,13 @@
               ;; a lowered C++ unit's constructors (arbace.cpp.run's renaming), which its program's _init calls
               fr (cond-> (build/unit-fragment u) (seq (:ctors (:rd u))) (assoc :ctors (:ctors (:rd u))))]
           (when-not *no-cache*
-            (write-atomic f (binding [*print-length* nil *print-level* nil] (pr-str fr))))
+            ;; review 187: a failed write (a full disk, a directory pruned by another process) is no build's failure: the
+            ;; fragment built in memory serves, the next build makes it again
+            (try (write-atomic f (binding [*print-length* nil *print-level* nil] (pr-str fr)))
+                 (catch Exception x
+                   (binding [*out* *err*]
+                     (println "ci runtime: the fragment" (.getPath f) "not written (" (str (.getName (class x)) ": " (.getMessage x))
+                              "): built in memory")))))
           fr))))
 
 (defn lib-fragment
