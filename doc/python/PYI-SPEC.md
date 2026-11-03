@@ -1,11 +1,12 @@
 # pyi: the scope analysis, the compiler and the IR
 
-Status: PY5a (2026-11-03, the Mac VM, queue 179a), for the user's review. pyi is the interpreter of Python forms
+Status: PY5a (2026-11-03, the Mac VM, queue 179a), and PY5b0 (§7-§9: the runtime's interfaces and skeleton, queue
+186), for the user's review. pyi is the interpreter of Python forms
 ([SPEC.md](SPEC.md)) the survey's §6 describes ([PYTHON-SURVEY.md](PYTHON-SURVEY.md); PYS7 (a): an IR of pyi's own on
 heap frames; PYS8 (a): the runtime in `go/arbace/py`). This document fixes the parts PY5a built: the scope
 analysis (§2), the IR the compiler makes (§3), the verifier that checks it (§4), and the checks against CPython
-(§5). The frame machine that runs the IR (PY5b) and the object model are later milestones; §6 states what they
-must give the IR.
+(§5); §6 states what the machine must give the IR, and §7-§9 (PY5b0) the runtime's interfaces, how it is worked
+on, and which sub-milestone owns each of its files: the contract PY5b, PY5c, PY5d and PY5e build against in parallel.
 
 Everything here is evaluated from the checkout on the tools' host, outside `gate_key` and the gate (PYS18 (a)):
 `arbace/python.ae` and `arbace/python/` are excluded like the other crops' namespaces (`bin/lib/version.bash`'s
@@ -223,3 +224,154 @@ The IR is CPython-like in shape and Arbace's in detail; what the machine (`go/ar
 Where the IR differs from CPython 3.14's bytecode on purpose: no specialization, caches or superinstructions; no
 `RESUME`, `PUSH_NULL` or `NOT_TAKEN`; one `yield-from` for the `SEND` loop; constant folding not done (CPython's AST
 optimizer folds constants, which is observable only through `co_consts` and the `dis` module: classed when it shows).
+
+## 7. The runtime: `go/arbace/py` (PY5b0)
+
+The package `arbace/py` (Go forms in `go/arbace/py.ae` and `go/arbace/py/`), standard library only, interpreted by goi on
+stage 0 (PY5a's DECISION (a): loaded from `ARBACE_PATH` as an interpreted package; listed in goi's table and compiled at
+a later batched re-seed). Its Go text is the editing view (§8). PY5b0 gives the interfaces below and enough of each to run
+a small module (`test/python/pyi/`); what it leaves out raises `SystemError: pyi: ... (PY5x's)` naming the owner.
+
+### 7.1 Objects, types and slots (`object.go`, `type.go`)
+
+- `type Object interface { Type() *Type }`: every Python value. Identity is Go's pointer identity, so every object is
+  a pointer (the singletons `None`, `True`, `False`, `NotImplemented`, `Ellipsis` among them); the type is the object's
+  header. A class's instances (PY5c) are a struct of their own carrying their `*Type`.
+- `type Type struct`: `Name`, `Qualname`, `Module`, `Base`, `Bases`, `MRO`, `Dict` (the namespace), `Flags` (CPython's
+  `tp_flags`: base type, heap type, the fast-subclass bits), `Slots`, `Meta` (the metaclass; nil is `type`).
+  `t.IsSubtype(u)`, `t.Lookup(name)` (the MRO's dictionaries: `_PyType_Lookup`), `IsInstance(o, t)`.
+- `type Slots struct`: the protocol functions (CPython's `tp_*` and the number, sequence and mapping structs):
+  `Repr`, `Str`, `Hash` (and `Unhashable` for `__hash__ = None`), `Bool`, `Len`, `RichCompare(a, b, op)`, `GetAttr`,
+  `SetAttr` (a nil value deletes), `Call(f, args, kwnames)`, `Iter`, `Next`, `GetItem`, `SetItem`, `Contains`,
+  `Binary[op]`, `RBinary[op]` (the reflected method, called with the right operand first), `InPlace[op]`, `Unary[op]`,
+  `Index`, `Int`, `Float`, `DescrGet`, `DescrSet`, `New`, `Init`. A nil slot is an unsupported protocol; the abstract
+  functions fall back as CPython's do. A built-in type sets its slots in Go; a class's are filled from its special
+  methods (PY5c, invalidated on assignment as CPython's version tags are). Adding a slot is a change to `type.go` and
+  `inheritSlots` (its owner's: §9).
+- **Calls**: `args []Object` holds the positional then the keyword arguments, `kwnames []*Str` the last
+  `len(kwnames)` arguments' names (CPython's vectorcall convention; the IR's `:call [N KWNAMES]`).
+- **Raising**: a runtime function returns `(Object, error)`; a non-nil error is an exception in flight, always a
+  `*Raised{Exc *Exception}`. `Raise(t, msg)`, `Raisef(t, format, args...)`. The iterator protocol's end is
+  `Next` returning `(nil, nil)`, not an exception. Go panics are bugs, never Python exceptions.
+- **Numbers' and strings' representations** are private to their files (`Int`'s `int64` in PY5b0, `Str`'s Go string):
+  others use `NewInt`, `(*Int).Int64`, `NewStr`, `(*Str).String`, so PY5b can change them (arbitrary precision; code
+  points with lone surrogates) without touching other files.
+
+### 7.2 The IR loader (`load.go`, `code.go`, `ops.go`)
+
+`ReadIR(text)` reads a code object printed by `pr-str` (`arbace.python/ir-text`: the Clojure reader's syntax, the
+subset the IR uses) into a `*Code`: the names, the constants as objects, the instructions decoded, the handler rows, the
+lines, and `CellParams` (a cell that is a parameter, copied in on entry). An instruction is `Instr{Op, A, B}`:
+
+| the IR's ARG | A | B |
+|---|---|---|
+| an index, a count, a jump target | it | 0 |
+| `nil` | 0 | 0 |
+| `true`/`false` (`:is`, `:contains`, `:call-ex`) | 1/0 | 0 |
+| an operator symbol (`:binary`, `:inplace`, `:unary`, `:compare`) | `BinOp`, `UnOp`, `CompareOp` | 0 |
+| `[N KWNAMES]` (`:call`) | N | the kwnames tuple's const index, or -1 |
+| `[BEFORE AFTER]` (`:unpack-ex`), `[N ...]` (`:match-class`) | BEFORE | AFTER |
+| `[NAME N]` (`:call-intrinsic`) | `Intrinsic` | N |
+| `[CONST PARTS]` (`:make-function`) | CONST | `PartDefaults`, `PartKwDefaults`, `PartAnnotate`, `PartClosure` bits |
+| `[CONVERSION SPEC?]` (`:format`, `:build-interpolation`) | the conversion's letter (`'r'`, `'s'`, `'a'`) or 0 | 1 when a spec |
+
+`Op` has one constant per operation of `arbace.python.ir/ops`, in the order of their names (`opNames`), each with its
+owner (`opOwners`, §9); `bin/pyi runtime check` requires the two lists equal. Constants PY5b0 does not load (doubles,
+`{:imag}`, `{:bytes}`, `{:joined}`, ints beyond 64 bits) go through `loadConstHook`, PY5b's to replace.
+
+### 7.3 The registry and `builtins` (`registry.go`, `builtins.go`)
+
+Each file declares its types as package variables made by `NewBuiltinType(name, base, flags)` (no slots there: the
+file's `init` sets them, so slot functions may name any type) and registers its built-in functions with
+`RegisterBuiltin(name, fn)` (a name registered twice panics: one owner per name). `readyTypes` (run once by
+`NewInterp`, after every `init`) completes each type: bases, MRO, and the nil slots inherited from its base
+(`inheritSlots`, CPython's `inherit_slots`). An interpreter's `builtins` dictionary holds every registered public type
+and function, `None`, `True`, `False`, `NotImplemented`, `Ellipsis`, in registration order (`hiddenTypes` names the
+types CPython's `types` module names, not `builtins`).
+
+### 7.4 Frames and threads (`frame.go`)
+
+`Frame`: `Code`, `Func`, `Globals`, `Builtins`, `Locals` (a module's or class's namespace), `Fast` (nil is unbound),
+`Cells` (the cells, then the free variables'), `Stack`, `PC` (the next instruction), `Lasti` (the running one: its line
+is the traceback's), `Back`, `Suspended`. A frame is a heap object; `newFrame` binds a call's arguments (positional,
+`*args`, keyword-only, `**kwargs`, defaults; CPython's `TypeError`s) and makes the cells. `Thread`: `Interp`, `Frame`
+(the current one), `Handled` (the exception being handled: `push-exc-info`, `pop-except`, `sys.exception()`), the
+depth against `Interp.RecursionLimit` (1,000). One thread runs at a time (`currentThread()`, the GIL's holder:
+PY6). `Interp`: `Builtins`, `Modules`, `Stdout`, `Stderr`, `RecursionLimit`, `Main`.
+
+### 7.5 The dispatch loop (`eval.go`)
+
+`(*Thread).run(f)` runs `f` and every frame it calls until `f` returns; `step(f)` runs `f`'s instructions until it
+returns a value, raises, or calls a Python function, which it signals as `*pushFrame`: `run` then continues with the
+callee's frame, so Python's calls never deepen Go's stack (PYS7 (a)); a return pops to `Back` and pushes the value. A
+call from Go (a slot calling a Python function: `Function`'s `Call`) is a nested `run` of an entry frame. An exception
+at `Lasti` adds a `Traceback` entry (outermost first, `Next` inward, as CPython links them) and looks up the covering
+handler (§3.3): the stack popped to its depth, `lasti` pushed when the row says so, the exception pushed, `PC` its
+target; with no handler the frame is left and the caller's call instruction raises it, up to the entry frame.
+
+`step`'s switch holds the operations the loop owns (§9). Any other operation is looked up in `opImpls`, which the file
+that owns it fills from its `init` by `RegisterOp(op, impl)`: `impl(t, f, in)` pops and pushes `f`'s stack and returns
+`(nil, nil)` to go on, `(nil, err)` to raise, `(nil, *pushFrame)` to run a frame, or `(v, nil)` to make `f` return `v`
+(a yield sets `f.Suspended` first; PY5d's generators keep the frame and resume it by `run`). So PY5c, PY5d and PY5e add
+operations without editing `eval.go`.
+
+### 7.6 Entry points (`interp.go`)
+
+`NewInterp(stdout, stderr)`, `(*Interp).ExecModule(code, name)`, `ExecModuleFile(code, name, file)`,
+`PrintException(err)` (CPython's default hook: the traceback's frames and lines, then `Type: text`; PY5b0 without
+chained exceptions, source lines or carets), and `RunModule(ir, file)`, the process's run (exit status 0, 1 for an
+uncaught exception, `SystemExit`'s code), which `bin/pyi run` calls through goi.
+
+### 7.7 What PY5b0 runs
+
+The operations of `step`'s switch and `load-attr`; the types `object`, `type`, `NoneType`, `bool`, `int` (64 bits),
+`str` (concatenation, comparison, `in`), `tuple` and `list` (repr, length, indexing, iteration by `__getitem__`), `dict`
+(insertion order, hashing and equality), functions with every kind of parameter, closures, cells, modules, 20
+exception types with `raise`, `raise from`, `try`/`except`/`finally` and tracebacks; the built-ins `print` (`sep`,
+`end`, `flush`), `repr`, `len`. `test/python/pyi/` (4 programs) runs equal to the oracle (stdout, status, stderr's
+last line). Of the synthetic corpus and the samples (151), 7 run equal to their references (`ref-cpython314.edn`); the
+others stop at a constant or an operation of a later sub-milestone: floats and bytes (PY5b, 57), classes (`load-build-class`,
+PY5c, 42), imports (PY5e, 11), generators (PY5d, 4), and builtins not registered yet.
+
+## 8. Working on the runtime
+
+The forms are in mode `:full` (repr/go's lossless mode: comments, layout and spellings kept), read for linux/amd64, so
+the Go text prints back byte for byte and is the editing view:
+
+```
+bin/pyi runtime print       # go/arbace/py as a Go module in .tmp/repr-python/pyi/runtime (go.mod "module arbace", py/)
+...edit .tmp/repr-python/pyi/runtime/py/*.go...
+bin/pyi runtime vet         # the Go being edited (printed first when absent): gofmt clean, go vet, go test by TamaGo's go
+bin/pyi runtime read        # the edited Go read back into go/arbace/py (repr/go's native reader, --full --tests)
+bin/pyi runtime check       # printed and read again equal to the committed forms; the operations equal the IR's;
+                            # test/python/pyi/ run by pyi equal to the oracle
+bin/pyi run FILE.py         # a program run by pyi on goi
+```
+
+Rules: `gofmt` clean, `go vet` clean; `go test ./py` passes (TamaGo's go builds and tests the printed module natively,
+seconds, before goi runs it); no package outside the standard library; no `unsafe`, `reflect` or cgo; `print`, edit,
+`vet`, `read`; never hand-edit the forms. `print` overwrites the edited copy.
+
+## 9. Owners
+
+One owner per shared file; another sub-milestone that needs a change there asks its owner (or adds a file of its
+own and registers through §7.3 and §7.5's hooks). New files take the owner's prefix in the table.
+
+| file(s) | owner | what |
+|---|---|---|
+| `object.go`, `type.go` (the `Slots` struct, `inheritSlots` in `registry.go`) | PY5b | the object header, the type layout, the slot table |
+| `registry.go` | PY5b | the type registry, `readyTypes` |
+| `code.go`, `load.go`, `ops.go` | PY5b | the IR's Go form, the loader, the operation table (owners per operation) |
+| `frame.go`, `eval.go` | PY5b | frames, threads, binding, the loop, unwinding |
+| `interp.go` | PY5b | the interpreter, entry points, the default exception hook |
+| `core.go`, `int.go`, `str.go`, `containers.go`, `func.go`, `exc.go`; new `float.go`, `complex.go`, `bytes.go`, `set.go`, `range.go`, `slice.go` | PY5b | the core types |
+| `abstract.go`; new `class.go`, `descr.go`, `attr.go`, `format.go`, `annotate.go`, `typing.go` | PY5c | the data model: classes, descriptors, attribute lookup, the operators' rules, formatting, f- and t-strings, annotations, the typing intrinsics |
+| new `gen.go`, `coro.go`, `with.go`, `excgroup.go`, `match.go` | PY5d | generators, coroutines, `with`, `except*`, `match` |
+| `builtins.go`; new `builtins_*.go`, `sys.go`, `repl.go`, `import.go` | PY5e | the builtins module, `sys`, the REPL, single-file imports |
+| `py_test.go` (PY5b); new `*_test.go` by their file's owner | each | Go tests |
+| `arbace/python.ae`, `arbace/python/compile.ae`, `arbace/python/ir.ae`, `bin/pyi`, `test/python/pyi/` (each adds programs with its prefix) | PY5b | the compiler's fixes the runs find, the verbs |
+
+The operations' owners are `opOwners` (`ops.go`): PY5b 66 (the stack, names, operators, containers, calls, jumps,
+iteration, returns, exceptions), PY5c 11 (attributes, `load-build-class`, formatting and templates, the intrinsics,
+`setup-annotations`, `exit-init-check`), PY5d 18 (yield, await, async iteration and `with`, `except*`'s, `match`'s), PY5e 3
+(imports).
