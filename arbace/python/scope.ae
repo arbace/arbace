@@ -28,7 +28,19 @@
 
 (defn- has? [flags bit] (not (zero? (bit-and flags bit))))
 
-(defn- syntax-error [msg] (throw (ex-info msg {:class 'SyntaxError :msg msg})))
+(def ^:dynamic *pos*
+  "The :pos of the innermost statement or expression being visited (mode :full's forms), for a SyntaxError's location
+  (symtable.c's SET_ERROR_LOCATION; PY6a)"
+  nil)
+
+(defn- syntax-error
+  "A SyntaxError with CPython's message, located at *pos* when known (1-based offsets, as compile.ae's)"
+  [msg]
+  (throw (ex-info msg (merge {:class 'SyntaxError :msg msg}
+                             (when-let [[l c el ec] *pos*]
+                               {:lineno l :offset (inc c) :end-lineno el :end-offset (inc ec)})))))
+
+(defn- pos-of [x] (when (and (seq? x) (map? (last x))) (:pos (last x))))
 
 ;; ---- blocks: atoms ----
 
@@ -329,7 +341,7 @@
 
 (defn- maybe-coroutine-for-module! [st] nil)
 
-(defn- visit-stmt! [st x]
+(defn- visit-stmt*! [st x]
   (let [[h p o _] (pp/node x)
         e! (fn [v] (when (some? v) (visit-expr! st v :load)))
         body! (fn [ss] (doseq [s ss] (visit-stmt! st s)))]
@@ -413,6 +425,9 @@
 
 ;; ---- named expressions and comprehensions ----
 
+(defn- visit-stmt! [st x]
+  (if-let [p (pos-of x)] (binding [*pos* p] (visit-stmt*! st x)) (visit-stmt*! st x)))
+
 (defn- extend-namedexpr-scope! [st target]
   (let [nm (name-of target)]
     (loop [bs (reverse (:stack @st))]
@@ -484,7 +499,7 @@
           (syntax-error "asynchronous comprehension outside of an asynchronous function"))
         (when async? (swap! (:cur @st) assoc :coroutine true))))))
 
-(defn- visit-expr! [st x ctx]
+(defn- visit-expr*! [st x ctx]
   (cond
     (symbol? x) (when-not (constant-symbols x) (visit-expr! st (list 'name x) ctx))
     (or (string? x) (number? x) (nil? x)) nil
@@ -549,6 +564,9 @@
         slice (es! p)
         (throw (ex-info (str "scope: unknown expression " h) {}))))
     :else nil))
+
+(defn- visit-expr! [st x ctx]
+  (if-let [p (pos-of x)] (binding [*pos* p] (visit-expr*! st x ctx)) (visit-expr*! st x ctx)))
 
 (defn- visit-pattern! [st x]
   (let [[h p o _] (pp/node x)]
