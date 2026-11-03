@@ -1,0 +1,371 @@
+;; The synthetic corpus of Haskell's eval (doc/haskell/HASKELL-EVAL-SURVEY.md §8.3, GT8.6, GTS207 (a)): small
+;; programs written by this generator, deterministic (no random choice: the boundary values below are its seed),
+;; committed in test/haskell/eval/synthetic/ and run by GHC for the reference (bin/hsi record-ref --corpus synthetic).
+;;
+;;   primops-SECTION.hs  one per scalar section of primops.txt.pp (GHC 9.14.1's, through cpp, as hadrian makes
+;;       primops.txt): every primop of the section whose arguments and results are scalars (Char#, Int#, Word#, IntN#,
+;;       WordN#, Double#, Float#; a result may be an unboxed tuple of them), applied to every combination of its
+;;       arguments' boundary values (at most BOUND lines a primop), each result boxed and shown; a division's zero
+;;       divisor and minBound by -1, an unchecked shift's amount at or past its width, a double-word division whose
+;;       quotient does not fit (its high word not 0) are left out (undefined in GHC: a trap)
+;;   class-CLASS.hs  one per Prelude and base class (survey §8.3, (2)): its methods at its standard instances over
+;;       their boundary values, each result shown, an exception shown as "exception: " and its message; a range
+;;       shown by its first ten elements
+;;   runtime-*.hs    the runtime's paths (survey §8.3, (3)): laziness and evaluation order, deep thunk chains, <<loop>>,
+;;       exceptions and masks, threads and MVars, STM, Integer at every size, text I/O
+;;
+;; usage: arbace test/haskell/eval/gen.ae PRIMOPS.txt OUTDIR
+(require '[arbace.string :as s])
+(import '[java.io File])
+
+(def bound 64)
+
+;; ---------------------------------------------------------------------------------------------------------
+;; Scalars: how a value of the type is written, boxed and shown
+
+(def scalars
+  {"Int#" {:vals ["0#" "1#" "(-1#)" "7#" "(-13#)" "9223372036854775807#" "(-9223372036854775808#)"] :box "I#"}
+   "Word#" {:vals ["0##" "1##" "7##" "63##" "9223372036854775808##" "18446744073709551615##"] :box "W#"}
+   "Int8#" {:vals ["(intToInt8# 0#)" "(intToInt8# 1#)" "(intToInt8# (-1#))" "(intToInt8# 127#)" "(intToInt8# (-128#))" "(intToInt8# 7#)"] :box "I8#"}
+   "Word8#" {:vals ["(wordToWord8# 0##)" "(wordToWord8# 1##)" "(wordToWord8# 7##)" "(wordToWord8# 128##)" "(wordToWord8# 255##)"] :box "W8#"}
+   "Int16#" {:vals ["(intToInt16# 0#)" "(intToInt16# 1#)" "(intToInt16# (-1#))" "(intToInt16# 32767#)" "(intToInt16# (-32768#))" "(intToInt16# 7#)"] :box "I16#"}
+   "Word16#" {:vals ["(wordToWord16# 0##)" "(wordToWord16# 1##)" "(wordToWord16# 7##)" "(wordToWord16# 32768##)" "(wordToWord16# 65535##)"] :box "W16#"}
+   "Int32#" {:vals ["(intToInt32# 0#)" "(intToInt32# 1#)" "(intToInt32# (-1#))" "(intToInt32# 2147483647#)" "(intToInt32# (-2147483648#))" "(intToInt32# 7#)"] :box "I32#"}
+   "Word32#" {:vals ["(wordToWord32# 0##)" "(wordToWord32# 1##)" "(wordToWord32# 7##)" "(wordToWord32# 2147483648##)" "(wordToWord32# 4294967295##)"] :box "W32#"}
+   "Int64#" {:vals ["(intToInt64# 0#)" "(intToInt64# 1#)" "(intToInt64# (-1#))" "(intToInt64# 9223372036854775807#)" "(intToInt64# (-9223372036854775808#))" "(intToInt64# 7#)"] :box "I64#"}
+   "Word64#" {:vals ["(wordToWord64# 0##)" "(wordToWord64# 1##)" "(wordToWord64# 7##)" "(wordToWord64# 9223372036854775808##)" "(wordToWord64# 18446744073709551615##)"] :box "W64#"}
+   "Double#" {:vals ["0.0##" "(negateDouble# 0.0##)" "1.5##" "(-2.5##)" "1.0e308##" "4.9406564584124654e-324##" "(1.0## /## 0.0##)" "(0.0## /## 0.0##)"] :box "D#"}
+   "Float#" {:vals ["0.0#" "(negateFloat# 0.0#)" "1.5#" "(-2.5#)" "3.4028235e38#" "(divideFloat# 1.0# 0.0#)" "(divideFloat# 0.0# 0.0#)"] :box "F#"}
+   "Char#" {:vals ["'a'#" "'\\0'#" "'\\1114111'#" "'\\955'#" "'Z'#"] :box "C#"}})
+
+;; the zero of a type, and minBound and -1 (a division's undefined arguments)
+(def zeros #{"0#" "0##" "(intToInt8# 0#)" "(wordToWord8# 0##)" "(intToInt16# 0#)" "(wordToWord16# 0##)" "(intToInt32# 0#)"
+             "(wordToWord32# 0##)" "(intToInt64# 0#)" "(wordToWord64# 0##)"})
+(def min-bounds #{"(-9223372036854775808#)" "(intToInt8# (-128#))" "(intToInt16# (-32768#))" "(intToInt32# (-2147483648#))"
+                  "(intToInt64# (-9223372036854775808#))"})
+(def minus-ones #{"(-1#)" "(intToInt8# (-1#))" "(intToInt16# (-1#))" "(intToInt32# (-1#))" "(intToInt64# (-1#))"})
+(def shift-amounts ["0#" "1#" "3#" "7#"])
+
+;; ---------------------------------------------------------------------------------------------------------
+;; primops.txt: the primops of a section, with their types and attributes
+
+(defn parse-primops [^String text]
+  (let [lines (s/split-lines text)]
+    (loop [ls lines section nil cur nil acc []]
+      (let [flush (fn [acc] (if cur (conj acc cur) acc))]
+        (if (empty? ls) (flush acc)
+            (let [l (first ls)]
+              (cond
+                (s/starts-with? l "section ") (recur (rest ls) (second (re-find #"section \"([^\"]*)\"" l)) nil (flush acc))
+                (s/starts-with? l "primop ")
+                (let [[_ con occ kind ty] (re-find #"^primop\s+(\S+)\s+\"([^\"]*)\"\s+(\S+)\s*(.*)$" l)]
+                  (recur (rest ls) section {:con con :occ occ :kind kind :section section :type (s/trim (or ty "")) :with ""} (flush acc)))
+                (and cur (re-find #"^\s+with\b" l)) (recur (rest ls) section (assoc cur :in-with true :with (str (:with cur) " " l)) acc)
+                (and cur (:in-with cur) (re-find #"^\s+\S+\s*=" l)) (recur (rest ls) section (update cur :with str " " l) acc)
+                (and cur (not (:in-with cur)) (not (:in-doc cur)) (re-find #"^\s+\{" l))
+                (recur (rest ls) section (assoc cur :in-doc (not (s/includes? l "}"))) acc)
+                (and cur (:in-doc cur)) (recur (rest ls) section (assoc cur :in-doc (not (s/includes? l "}"))) acc)
+                (and cur (not (:in-with cur)) (re-find #"^\s+\S" l) (not (re-find #"^\s+\{" l)))
+                (recur (rest ls) section (update cur :type #(s/trim (str % " " (s/trim l)))) acc)
+                (s/blank? l) (recur (rest ls) section (if cur (assoc cur :in-with true) cur) acc)
+                :else (recur (rest ls) section cur acc))))))))
+
+(defn- split-arrow [t] (map s/trim (s/split t #"->")))
+
+(defn- result-types [r]
+  (if-let [[_ inner] (re-find #"^\(#\s*(.*)\s*#\)$" r)] (map s/trim (s/split inner #",")) [r]))
+
+(defn scalar-primop? [{:keys [type kind]}]
+  (and (#{"GenPrimOp" "Compare" "Monadic" "Dyadic"} kind)
+       (let [ts (split-arrow type) args (butlast ts) res (result-types (last ts))]
+         (and (seq args) (every? scalars args) (every? scalars res)))))
+
+(defn- haskell-op [occ] (if (re-find #"^[A-Za-z_]" occ) occ (str "(" occ ")")))
+
+(defn- combos [vss]
+  (if (empty? vss) [[]] (for [v (first vss) r (combos (rest vss))] (cons v r))))
+
+(defn primop-lines [{:keys [occ type with]}]
+  (let [ts (split-arrow type) args (vec (butlast ts)) res (result-types (last ts))
+        div? (re-find #"div_like\s*=\s*True" with)
+        shift? (re-find #"(?i)shift" occ)
+        vss (map-indexed (fn [i t] (if (and shift? (= i 1) (= t "Int#")) shift-amounts (:vals (scalars t)))) args)
+        ok? (fn [vs] (and (not (and div? (or (zeros (last vs)) (and (min-bounds (first vs)) (minus-ones (last vs))))))
+                          ;; a double-word division's quotient must fit: its high word below the divisor
+                          (or (not= occ "quotRemWord2#") (= "0##" (first vs)))))
+        cs (take bound (filter ok? (combos vss)))
+        n (count res)
+        vars (map #(str "r" %) (range n))
+        shown (if (= 1 n) (str "show (" (:box (scalars (first res))) " r0)")
+                  (str "show (" (s/join ", " (map (fn [v t] (str (:box (scalars t)) " " v)) vars res)) ")"))]
+    (for [vs cs]
+      (let [app (str (haskell-op occ) " " (s/join " " vs))]
+        (if (= 1 n)
+          (str "  t " (pr-str (str occ " " (s/join " " vs))) " (case " app " of r0 -> " shown ")")
+          (str "  t " (pr-str (str occ " " (s/join " " vs))) " (case " app " of (# " (s/join ", " vars) " #) -> " shown ")"))))))
+
+(def prelude-t
+  ["t :: String -> String -> IO ()"
+   "t l x = do"
+   "  r <- try (evaluate (length x `seq` x))"
+   "  putStrLn (l ++ \" = \" ++ either (\\e -> \"exception: \" ++ show (e :: SomeException)) id r)"])
+
+(defn primop-program [section ops]
+  (s/join "\n"
+          (concat [(str "-- generated by test/haskell/eval/gen.ae from GHC 9.14.1's primops.txt.pp, section \"" section "\": do not edit")
+                   "{-# LANGUAGE MagicHash, UnboxedTuples #-}"
+                   "module Main (main) where"
+                   "import GHC.Exts"
+                   "import GHC.Prim"
+                   "import GHC.Int"
+                   "import GHC.Word"
+                   "import Control.Exception"
+                   ""]
+                  prelude-t
+                  [""
+                   "main :: IO ()"
+                   "main = do"]
+                  (mapcat primop-lines ops)
+                  [""])))
+
+;; ---------------------------------------------------------------------------------------------------------
+;; Classes: methods at standard instances
+
+(def instances
+  {"Int" ["0" "1" "(-1)" "7" "(-13)" "maxBound" "minBound"]
+   "Integer" ["0" "1" "(-1)" "7" "(-13)" "(2 ^ (64 :: Int))" "(negate (3 ^ (41 :: Int)))"]
+   "Word8" ["0" "1" "7" "128" "255"]
+   "Int64" ["0" "1" "(-1)" "maxBound" "minBound"]
+   "Word" ["0" "1" "7" "maxBound"]
+   "Double" ["0" "(-0.0)" "1.5" "(-2.5)" "1.0e308" "5.0e-324" "(1/0)" "(0/0)" "0.1"]
+   "Float" ["0" "(-0.0)" "1.5" "(-2.5)" "3.4028235e38" "(1/0)" "(0/0)" "0.1"]
+   "Rational" ["0" "(1 % 3)" "(-7 % 2)" "(22 % 7)"]
+   "Char" ["'a'" "'\\0'" "'\\1114111'" "'\\955'" "'Z'"]
+   "Bool" ["False" "True"]
+   "Ordering" ["LT" "EQ" "GT"]})
+
+(def classes
+  ;; [class [instance types] [method template with x, y], ...]
+  [["Show" ["Int" "Integer" "Double" "Float" "Rational" "Char" "Bool" "Ordering" "Word8"]
+    ["show x" "showsPrec 11 x \"\"" "show [x, x]" "show (Just x)" "show (x, Left x :: Either T ())"]]
+   ["Read" ["Int" "Integer" "Double" "Char" "Bool" "Ordering" "Word8"]
+    ["show (read (show x) :: T)" "show (reads (show x ++ \" rest\") :: [(T, String)])" "show (read (\"  (\" ++ show x ++ \")  \") :: T)"]]
+   ["Eq-Ord" ["Int" "Integer" "Double" "Char" "Bool" "Ordering" "Rational"]
+    ["show (x == y, x /= y)" "show (compare x y, x < y, x <= y, x > y, x >= y)" "show (max x y, min x y)"]]
+   ["Enum" ["Int" "Integer" "Double" "Char" "Bool" "Ordering" "Word8"]
+    ["show (succ x)" "show (pred x)" "show (fromEnum x)" "show (take 5 [x ..])" "show (take 5 [x, y ..])" "show (take 5 [x .. y])"]]
+   ["Bounded" ["Int" "Int64" "Word8" "Word" "Char" "Bool" "Ordering"]
+    ["show (minBound :: T, maxBound :: T)"]]
+   ["Num" ["Int" "Integer" "Word8" "Int64" "Word" "Double" "Float" "Rational"]
+    ["show (x + y)" "show (x - y)" "show (x * y)" "show (negate x)" "show (abs x)" "show (signum x)" "show (fromInteger 300 :: T)"]]
+   ["Integral" ["Int" "Integer" "Word8" "Int64" "Word"]
+    ["show (quot x y, rem x y)" "show (div x y, mod x y)" "show (quotRem x y)" "show (divMod x y)" "show (toInteger x)" "show (gcd x y, lcm x y)" "show (x ^ (3 :: Int))"]]
+   ["Real-Fractional" ["Double" "Float" "Rational"]
+    ["show (toRational x)" "show (x / y)" "show (recip x)" "show (fromRational (7 % 3) :: T)" "show (realToFrac x :: Double)"]]
+   ["RealFrac" ["Double" "Float" "Rational"]
+    ["show (properFraction x :: (Integer, T))" "show (truncate x :: Integer)" "show (round x :: Integer)" "show (ceiling x :: Integer, floor x :: Integer)" "show (round x :: Int)"]]
+   ["Floating" ["Double" "Float"]
+    ["show (exp x, log x, sqrt x)" "show (sin x, cos x, tan x)" "show (asin x, acos x, atan x)" "show (sinh x, cosh x, tanh x)" "show (asinh x, acosh x, atanh x)" "show (x ** y, logBase x y)" "show (pi :: T)"]]
+   ["RealFloat" ["Double" "Float"]
+    ["show (decodeFloat x)" "show (isNaN x, isInfinite x, isNegativeZero x, isDenormalized x)" "show (exponent x, significand x)" "show (atan2 x y)" "show (floatDigits x, floatRange x)" "show (encodeFloat 3 (-2) :: T)"]]
+   ["Bits" ["Int" "Integer" "Word8" "Int64" "Word"]
+    ["show (x .&. y, x .|. y, xor x y)" "show (complement x)" "show (shiftL x 3, shiftR x 3)" "show (popCount x)" "show (testBit x 0, testBit x 7)" "show (rotate x 5)"]]
+   ["FiniteBits" ["Int" "Word8" "Int64" "Word"]
+    ["show (finiteBitSize x, countLeadingZeros x, countTrailingZeros x)"]]
+   ["Ix" ["Int" "Char" "Bool" "Integer"]
+    ["show (take 10 (range (min x y, max x y)))" "show (inRange (min x y, max x y) x)" "show (rangeSize (min x y, max x y))" "show (index (min x y, max x y) (max x y))"]]])
+
+(defn class-program [[cls types methods]]
+  (s/join "\n"
+          (concat [(str "-- generated by test/haskell/eval/gen.ae: the class " cls "'s methods at its standard instances: do not edit")
+                   "module Main (main) where"
+                   "import Control.Exception"
+                   "import Data.Bits"
+                   "import Data.Int"
+                   "import Data.Ix"
+                   "import Data.Ratio"
+                   "import Data.Word"
+                   ""]
+                  prelude-t
+                  [""
+                   "main :: IO ()"
+                   "main = do"]
+                  (for [ty types
+                        :let [vs (instances ty)
+                              pairs (take 12 (for [x vs y vs] [x y]))]
+                        m methods
+                        :let [uses-y (re-find #"\by\b" m) uses-x (re-find #"\bx\b" m)]
+                        [x y] (cond uses-y pairs uses-x (map (fn [v] [v nil]) vs) :else [[nil nil]])]
+                    (let [e (-> m (s/replace #"\bT\b" (fn [_] ty))
+                                (s/replace #"\bx\b" (fn [_] (if x (str "(" x " :: " ty ")") "x")))
+                                (s/replace #"\by\b" (fn [_] (if y (str "(" y " :: " ty ")") "y"))))]
+                      (str "  t " (pr-str (str ty ": " m (when x (str " with " x)) (when y (str ", " y)))) " (" e ")")))
+                  [""])))
+
+;; ---------------------------------------------------------------------------------------------------------
+;; The runtime's paths
+
+(def runtime-programs
+  {"runtime-laziness"
+   ["import Debug.Trace"
+    "import Control.Exception"
+    "main :: IO ()"
+    "main = do"
+    "  print (sum (reverse [trace \"a\" (1 :: Int), trace \"b\" 2, trace \"c\" 3]))"
+    "  let xs = map (\\i -> trace (\"x\" ++ show i) i) [1 .. 4 :: Int]"
+    "  print (length xs)"
+    "  print (xs !! 2)"
+    "  print (fst (trace \"pair\" (1 :: Int, undefined :: Int)))"
+    "  let y = trace \"shared\" (2 :: Int) in print (y + y)"
+    "  r <- try (evaluate (head (drop 5 [1 :: Int, 2])))"
+    "  putStrLn (either (\\e -> \"caught \" ++ takeWhile (/= '\\n') (show (e :: SomeException))) show r)"
+    "  print (take 5 (cycle [trace \"cyc\" 'z']))"
+    "  print (foldr (\\x acc -> x `seq` acc + 1) 0 [1 .. 100000 :: Int])"]
+   "runtime-deep"
+   ["main :: IO ()"
+    "main = do"
+    "  print (foldl (+) 0 [1 .. 1000000 :: Integer])"
+    "  print (foldr (+) 0 [1 .. 1000000 :: Int])"
+    "  print (length (show (iterate (* 2) (1 :: Integer) !! 20000)))"
+    "  let go :: Int -> Int"
+    "      go 0 = 0"
+    "      go n = 1 + go (n - 1)"
+    "  print (go 1000000)"]
+   "runtime-loop"
+   ["main :: IO ()"
+    "main = do"
+    "  putStrLn \"before\""
+    "  let x = x + 1 :: Int"
+    "  print x"]
+   "runtime-exceptions"
+   ["import Control.Exception"
+    "import System.IO"
+    "import qualified Data.Map as M"
+    "data E = E String deriving Show"
+    "instance Exception E"
+    "main :: IO ()"
+    "main = do"
+    "  hSetBuffering stdout NoBuffering"
+    "  r1 <- try (evaluate (1 `div` (0 :: Int)))"
+    "  print (r1 :: Either ArithException Int)"
+    "  r2 <- try (evaluate (minBound `div` (-1 :: Int)))"
+    "  print (r2 :: Either ArithException Int)"
+    "  r3 <- try (throwIO (E \"io\"))"
+    "  print (r3 :: Either E ())"
+    "  r4 <- try (evaluate (throw (E \"pure\") :: Int))"
+    "  print (r4 :: Either E Int)"
+    "  r5 <- try (evaluate (error \"boom\" :: Int))"
+    "  putStrLn (either (\\e -> head (lines (displayException (e :: ErrorCall)))) show r5)"
+    "  handle (\\e -> putStrLn (\"handled \" ++ show (e :: E))) (throwIO (E \"h\"))"
+    "  (putStrLn \"body\" >> throwIO (E \"b\")) `catch` (\\(E s) -> putStrLn (\"caught \" ++ s)) `finally` putStrLn \"finally\""
+    "  _ <- bracket (putStrLn \"acquire\" >> return 1) (\\_ -> putStrLn \"release\") (\\x -> return (x + 1 :: Int))"
+    "  r6 <- try (bracket_ (putStrLn \"in\") (putStrLn \"out\") (throwIO (E \"inner\")))"
+    "  print (r6 :: Either E ())"
+    "  getMaskingState >>= print"
+    "  mask_ (getMaskingState >>= print)"
+    "  uninterruptibleMask_ (getMaskingState >>= print)"
+    "  mask (\\restore -> restore getMaskingState >>= print)"
+    "  r7 <- try (evaluate (M.fromList [(1 :: Int, 'a')] M.! 2))"
+    "  putStrLn (either (\\e -> head (lines (displayException (e :: SomeException)))) show r7)"
+    "  throwIO (E \"uncaught\")"]
+   "runtime-threads"
+   ["import Control.Concurrent"
+    "import Control.Exception"
+    "import Control.Monad"
+    "main :: IO ()"
+    "main = do"
+    "  mv <- newEmptyMVar"
+    "  forM_ [1 .. 5 :: Int] (\\i -> forkIO (putMVar mv i))"
+    "  xs <- replicateM 5 (takeMVar mv)"
+    "  print (sum xs)"
+    "  lock <- newMVar (0 :: Int)"
+    "  done <- newEmptyMVar"
+    "  forM_ [1 .. 10 :: Int] (\\_ -> forkIO (replicateM_ 100 (modifyMVar_ lock (return . (+ 1))) >> putMVar done ()))"
+    "  replicateM_ 10 (takeMVar done)"
+    "  readMVar lock >>= print"
+    "  t <- forkIO (threadDelay 10000000)"
+    "  killThread t"
+    "  putStrLn \"killed\""
+    "  r <- try (newEmptyMVar >>= \\m -> takeMVar (m :: MVar ()))"
+    "  print (r :: Either BlockedIndefinitelyOnMVar ())"
+    "  me <- myThreadId"
+    "  r2 <- try (throwTo me (ErrorCall \"self\"))"
+    "  print (r2 :: Either ErrorCall ())"
+    "  n <- getNumCapabilities"
+    "  print n"]
+   "runtime-stm"
+   ["import Control.Concurrent"
+    "import Control.Concurrent.STM"
+    "import Control.Exception"
+    "import Control.Monad"
+    "main :: IO ()"
+    "main = do"
+    "  tv <- newTVarIO (0 :: Int)"
+    "  done <- newEmptyMVar"
+    "  forM_ [1 .. 20 :: Int] (\\i -> forkIO (atomically (modifyTVar' tv (+ i)) >> putMVar done ()))"
+    "  replicateM_ 20 (takeMVar done)"
+    "  readTVarIO tv >>= print"
+    "  q <- newTQueueIO"
+    "  _ <- forkIO (forM_ [1 .. 5 :: Int] (atomically . writeTQueue q))"
+    "  xs <- replicateM 5 (atomically (readTQueue q))"
+    "  print xs"
+    "  r <- atomically ((readTVar tv >>= \\v -> if v > 0 then retry else return \"no\") `orElse` return \"else\")"
+    "  putStrLn r"
+    "  r2 <- try (atomically (throwSTM (ErrorCall \"stm\")) :: IO ())"
+    "  print (r2 :: Either ErrorCall ())"
+    "  r3 <- try (atomically retry :: IO ())"
+    "  print (r3 :: Either BlockedIndefinitelyOnSTM ())"]
+   "runtime-integer"
+   ["main :: IO ()"
+    "main = do"
+    "  let ks = [31, 32, 63, 64, 65, 127, 128, 1000] :: [Int]"
+    "      ns = concat [[2 ^ k - 1, 2 ^ k, 2 ^ k + 1, negate (2 ^ k)] | k <- ks] :: [Integer]"
+    "  mapM_ (\\n -> print (n, n * n, n `quotRem` 12345678901234567, n `divMod` (-97), gcd n 360)) ns"
+    "  print (product [1 .. 200 :: Integer])"
+    "  print (3 ^ (1000 :: Int) `mod` (10 ^ (40 :: Int)) :: Integer)"
+    "  print (fromIntegral (2 ^ (70 :: Int) :: Integer) :: Double)"
+    "  print (truncate (1.0e30 :: Double) :: Integer)"
+    "  print (read \"-123456789012345678901234567890\" :: Integer)"
+    "  print (toInteger (maxBound :: Int) + 1, fromInteger (2 ^ (64 :: Int) + 5) :: Int)"]
+   "runtime-textio"
+   ["import System.IO"
+    "import Data.Char (toUpper)"
+    "main :: IO ()"
+    "main = do"
+    "  hSetBuffering stdout (BlockBuffering (Just 16))"
+    "  putStr \"block \""
+    "  hPutStrLn stderr \"to stderr\""
+    "  hFlush stdout"
+    "  hSetBuffering stdout LineBuffering"
+    "  putStrLn \"línea ünïcödé λ→ 😀\""
+    "  enc <- hGetEncoding stdout"
+    "  print enc"
+    "  eof <- isEOF"
+    "  print eof"
+    "  s <- getContents"
+    "  mapM_ (putStrLn . map toUpper) (lines s)"
+    "  print (length s)"
+    "  hPutStr stderr \"no newline at the end\""]})
+
+(def runtime-stdin {"runtime-textio" "first line\nsecond, ünïcödé\nlast without newline"})
+
+(let [[primops-file out] *command-line-args*
+      dir (File. ^String out)
+      ops (parse-primops (slurp primops-file))
+      scalar (filter scalar-primop? ops)
+      by-section (group-by :section scalar)
+      write! (fn [name text] (spit (File. dir ^String name) text))]
+  (.mkdirs dir)
+  (doseq [^File f (.listFiles dir)] (.delete f))
+  (doseq [[section os] (sort-by key by-section)]
+    (let [slug (-> section (s/replace "#" "") (s/replace #"[^A-Za-z0-9]+" "-") s/lower-case)]
+      (write! (str "primops-" slug ".hs") (primop-program section os))))
+  (doseq [c classes]
+    (write! (str "class-" (s/lower-case (first c)) ".hs") (class-program c)))
+  (doseq [[n ls] (sort-by key runtime-programs)]
+    (write! (str n ".hs") (str "-- generated by test/haskell/eval/gen.ae: the runtime's paths: do not edit\n"
+                               (s/join "\n" ls) "\n")))
+  (doseq [[n text] runtime-stdin]
+    (write! (str n ".stdin") text))
+  (println (str "hsi generate: " (count by-section) " primop programs (" (count scalar) " of " (count ops) " primops), "
+                (count classes) " class programs, " (count runtime-programs) " runtime programs")))

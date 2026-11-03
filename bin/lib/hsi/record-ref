@@ -1,0 +1,173 @@
+#!/bin/bash
+# bin/hsi record-ref [--corpus C,...] [--only ID,...] [--jobs N] [--out FILE]: the reference of Haskell's eval
+# (doc/haskell/HASKELL-EVAL-SURVEY.md §8.1, HES1 (a), HES16 (a)): each program of the run corpora built by the host's
+# GHC 9.14.1 at -O0 and run, its status, stdout and stderr recorded as data into test/haskell/ref-ghc914.edn (as
+# bin/ci record-ref records gcc's runs, CS14 (a)). Corpora: samples (test/haskell/eval/samples), synthetic
+# (test/haskell/eval/synthetic), testsuite-core (the run tests of eval-corpora.edn's :testsuite-core directories),
+# testsuite (every run test of test/haskell/eval/testsuite-run.edn), nofib (every program, fast mode); default
+# samples,synthetic,testsuite-core,nofib. --only ID,... records those programs and keeps every other line of FILE.
+#
+# Each program: built by `ghc -O0 -rtsopts FLAGS MAIN -o NAME` in a fresh copy of its directory (its files, and a
+# testsuite test's flags from all.T, a nofib program's from its Makefile), NAME the testsuite's name, the sample's or
+# nofib's program name (GHC prints it in its messages); run there with `env -i` and a fixed environment (PATH,
+# LANG=C.UTF-8, TZ=UTC, no GHCRTS, HOME the directory), its stdin NAME.stdin (nofib: NAME.faststdin, else NAME.stdin)
+# or an empty file, its arguments (a testsuite test's extra_run_opts through sh, /dev/null spelled as the empty file;
+# nofib's FAST_OPTS; a sample's NAME.args), 10 s of CPU (HSI_REF_TIMEOUT) and three times that of wall time at most. Recorded per program: :status (the
+# exit status, 128+signal, :timeout, or :no-build with :error, the build's first error line), :stdout and :stderr
+# (SHA-256), :bytes and :err-bytes, :first and :err-first (their first lines, 100 characters, a control character as ?, an invalid UTF-8 sequence
+# left out), :build and :run (seconds,
+# GT8: every program's time), and for a testsuite test :expected (its .stdout file against the run's: :same, :differs,
+# :none) and :exit (all.T's expected status when not 0); for nofib :expected against NAME.faststdout or NAME.stdout.
+set -euo pipefail
+root=$(cd "$(dirname "$0")/../../.." && pwd)
+. "$root/bin/lib/tmpdir.bash"
+corpora=samples,synthetic,testsuite-core,nofib only="" jobs=${HSI_JOBS:-8} out=$root/test/haskell/ref-ghc914.edn
+while [ $# -gt 0 ]; do
+  case $1 in
+    --corpus) corpora=$2; shift 2 ;;
+    --only) only=,$2,; shift 2 ;;
+    --jobs) jobs=$2; shift 2 ;;
+    --out) out=$2; shift 2 ;;
+    *) echo "usage: bin/hsi record-ref [--corpus C,...] [--only ID,...] [--jobs N] [--out FILE]" >&2; exit 2 ;;
+  esac
+done
+pin=$(cat "$root/tools/hsdump/GHC_VERSION")
+[ "$(ghc --numeric-version)" = "$pin" ] || { echo "hsi record-ref: the host's GHC is not $pin" >&2; exit 1; }
+exe=$("$root/bin/hsi" exe)
+ae() { ARBACE_PATH=$root "$exe" "$@"; }
+work=$root/.tmp/hsi/ref
+rm -rf "$work"; mkdir -p "$work/res" "$work/run"
+tests=$root/.tmp/hsi/ghc-9.14.1/testsuite/tests
+"$root/bin/hsi" pins --fetch > "$work/fetch.log" 2>&1 || { cat "$work/fetch.log" >&2; exit 1; }
+
+# the plan: ID KIND SRC-DIR MAIN FLAGS RUN-OPTS EXIT NAME STDIN EXPECTED (separated by U+001F, not a tab: read's IFS
+# would join a tab-separated line's empty fields; "-" for none)
+plan=$work/plan.tsv
+: > "$plan"
+add() { printf '%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\n' "$@" >> "$plan"; }
+want() { [[ ",$corpora," == *",$1,"* ]]; }
+if want samples || want synthetic; then
+  for c in samples synthetic; do
+    want $c || continue
+    d=$root/test/haskell/eval/$c
+    [ -d "$d" ] || continue
+    for f in "$d"/*.hs; do
+      n=$(basename "$f" .hs); a=-
+      [ -f "$d/$n.args" ] && a=$(cat "$d/$n.args")
+      add "$c/$n" plain "$d" "$n.hs" "-" "$a" 0 "$n" "$([ -f "$d/$n.stdin" ] && echo "$n.stdin" || echo -)" \
+        "$([ -f "$d/$n.stdout" ] && echo "$n.stdout" || echo -)"
+    done
+  done
+fi
+if want testsuite || want testsuite-core; then
+  dirs=-
+  if ! want testsuite; then
+    dirs=$(ae -e "(println (apply str (interpose \",\" (get-in (some #(when (= :testsuite-core (:id %)) %) (:corpora (read-string (slurp \"$root/test/haskell/eval-corpora.edn\")))) [:where :dirs]))))")
+  fi
+  ae "$root/test/haskell/eval/run_plan.ae" "$root/test/haskell/eval/testsuite-run.edn" "$tests" "$dirs" 2> "$work/plan.notes" |
+  while IFS=$'\t' read -r id dir kind main flags ropts exit name; do
+    sin=-; [ -f "$tests/$dir/$name.stdin" ] && sin=$name.stdin
+    exp=-; [ -f "$tests/$dir/$name.stdout" ] && exp=$name.stdout
+    add "$id" "$kind" "$tests/$dir" "$main" "${flags:--}" "${ropts:--}" "$exit" "$name" "$sin" "$exp"
+  done
+fi
+if want nofib; then
+  for s in imaginary spectral real shootout gc parallel smp; do
+    for p in "$root/.tmp/hsi/nofib/$s"/*/; do
+      [ -f "$p/Makefile" ] || continue
+      n=$(basename "$p"); mk=$p/Makefile
+      main=-; for m in Main.hs Main.lhs "$n.hs" "$n.lhs"; do [ -f "$p/$m" ] && { main=$m; break; }; done
+      # the Makefile's variables (the plain assignments; a conditional one's first branch)
+      fo=$(sed -n 's/^FAST_OPTS *= *//p' "$mk" | head -1)
+      pa=$(sed -n 's/^PROG_ARGS *+\{0,1\}= *//p' "$mk" | tr '\n' ' ')
+      hc=$(sed -n 's/^SRC_HC_OPTS *+\{0,1\}= *//p' "$mk" | tr '\n' ' ')
+      deps=$(sed -n 's/^SRC_DEPS *= *//p' "$mk" | head -1)
+      for dpk in $deps; do hc="$hc -package $dpk"; done
+      sin=-; for f in "$n.faststdin" "$n.stdin"; do [ -f "$p/$f" ] && { sin=$f; break; }; done
+      exp=-; for f in "$n.faststdout" "$n.stdout"; do [ -f "$p/$f" ] && { exp=$f; break; }; done
+      args=$(echo "$pa ${fo:-}" | xargs)
+      add "nofib/$s/$n" nofib "${p%/}" "$main" "$(echo "$hc" | xargs)" "${args:--}" 0 "$n" "$sin" "$exp"
+    done
+  done
+fi
+if [ -n "$only" ]; then
+  awk -F'\037' -v o="$only" 'index(o, "," $1 ",")' "$plan" > "$plan.only"; mv "$plan.only" "$plan"
+fi
+echo "== hsi record-ref: $(wc -l < "$plan") programs, $jobs at a time" >&2
+
+# one program: its result line, an EDN map, into res/N
+one() {
+  local i=$1 id kind src main flags ropts exit name sin exp
+  IFS=$'\037' read -r id kind src main flags ropts exit name sin exp < <(sed -n "${i}p" "$plan")
+  local w=$work/run/$i r=$work/res/$i t0 t1 t2 st ebuild
+  rm -rf "$w"; mkdir -p "$w"
+  # the program's directory's files (not its subdirectories but those a test names: copied whole, small)
+  cp -r "$src"/. "$w"/ 2> "$w.cp.log" || true
+  : > "$w/.empty"
+  esc() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+  if [ "$main" = - ]; then
+    echo "{:id \"$id\" :status :no-build :error \"no main file\"}" > "$r"; return
+  fi
+  t0=$(date +%s.%N)
+  local fl=(); [ "$flags" != - ] && read -r -a fl <<< "$flags"
+  if (cd "$w" && timeout 300 ghc -O0 -rtsopts -no-user-package-db "${fl[@]}" "$main" -o "$name" -outputdir .obj) > "$w.build.log" 2>&1; then
+    ebuild=""
+  else
+    ebuild=$(grep -m1 -E 'error|rror:' "$w.build.log" | cut -c1-200 || true)
+    [ -n "$ebuild" ] || ebuild=$(head -1 "$w.build.log" | cut -c1-200)
+  fi
+  t1=$(date +%s.%N)
+  if [ -n "$ebuild" ] || [ ! -x "$w/$name" ]; then
+    echo "{:id \"$id\" :status :no-build :error \"$(esc "${ebuild:-no executable}")\" :build $(printf '%.2f' "$(echo "$t1 - $t0" | bc)")}" > "$r"
+    rm -rf "$w"; return
+  fi
+  local cmd="./$name"
+  if [ "$ropts" != - ]; then cmd="$cmd ${ropts//\/dev\/null/.empty}"; fi
+  local stdin=.empty; [ "$sin" != - ] && stdin=$sin
+  [[ $ropts == *"<"* ]] && stdin=.empty
+  st=0
+  (cd "$w" && env -i PATH=/usr/bin:/bin LANG=C.UTF-8 TZ=UTC HOME="$w" \
+     timeout -s KILL "$((3 * ${HSI_REF_TIMEOUT:-10}))" sh -c "ulimit -t ${HSI_REF_TIMEOUT:-10}; exec $cmd" \
+     < "$w/$stdin" > "$w.stdout" 2> "$w.stderr") || st=$?
+  t2=$(date +%s.%N)
+  local status=$st
+  # SIGXCPU (the CPU limit) or SIGKILL at three times it in wall seconds
+  if [ $st = 152 ] || { [ $st = 137 ] && [ "$(echo "$t2 - $t1 >= 3 * ${HSI_REF_TIMEOUT:-10}" | bc)" = 1 ]; }; then status=:timeout; fi
+  local so se fo fe expv=""
+  so=$(sha256sum < "$w.stdout" | cut -c1-64); se=$(sha256sum < "$w.stderr" | cut -c1-64)
+  # the first lines with their control characters as ? (the file stays text)
+  fo=$(head -1 "$w.stdout" | cut -c1-100 | LC_ALL=C tr '\000-\010\013-\037\177' '?' | iconv -c -f UTF-8 -t UTF-8)
+  fe=$(head -1 "$w.stderr" | cut -c1-100 | LC_ALL=C tr '\000-\010\013-\037\177' '?' | iconv -c -f UTF-8 -t UTF-8)
+  if [ "$exp" != - ]; then
+    if cmp -s "$w.stdout" "$src/$exp"; then expv=" :expected :same"; else expv=" :expected :differs"; fi
+  elif [ "$kind" != plain ]; then expv=" :expected :none"; fi
+  local ex=""; [ "$exit" != 0 ] && ex=" :exit $exit"
+  echo "{:id \"$id\" :status $status :stdout \"$so\" :bytes $(stat -c %s "$w.stdout") :first \"$(esc "$fo")\" :stderr \"$se\" :err-bytes $(stat -c %s "$w.stderr") :err-first \"$(esc "$fe")\"$expv$ex :build $(printf '%.2f' "$(echo "$t1 - $t0" | bc)") :run $(printf '%.2f' "$(echo "$t2 - $t1" | bc)")}" > "$r"
+  rm -rf "$w" "$w.build.log" "$w.cp.log" "$w.stdout" "$w.stderr"
+}
+export -f one
+export work plan
+# each program under a cap of its own (the build's 300 s, the run's, the copies)
+seq 1 "$(wc -l < "$plan")" | xargs -P "$jobs" -I{} timeout -s KILL 600 bash -c 'one {}'
+
+# the file: the header, then one line per program sorted by :id (--only: the others kept from FILE)
+new=$work/new.edn
+cat "$work"/res/* | sort > "$new"
+if [ -n "$only" ] && [ -f "$out" ]; then
+  grep '^{' "$out" | awk -v o="$only" '{ match($0, /:id "[^"]*"/); id = substr($0, RSTART + 5, RLENGTH - 6); if (!index(o, "," id ",")) print }' >> "$new"
+  sort -o "$new" "$new"
+fi
+{
+  echo ";; GHC 9.14.1's -O0 runs of the Haskell run corpora, as data (doc/haskell/HASKELL-EVAL-SURVEY.md §8.1, HES1 (a), HES16 (a)):"
+  echo ";; one map per program, sorted by :id. :status the exit status (128+signal), :timeout, or :no-build with :error; :stdout and"
+  echo ";; :stderr the SHA-256 of the outputs, :bytes and :err-bytes their sizes, :first and :err-first their first lines (100 chars);"
+  echo ";; :expected the testsuite's or nofib's expected stdout file against the run's; :exit all.T's expected status; :build and :run"
+  echo ";; seconds (GT8). Each program built by ghc -O0 -rtsopts in a fresh copy of its directory and run under env -i, LANG=C.UTF-8,"
+  echo ";; TZ=UTC, 10 s of CPU and 30 s of wall time (bin/lib/hsi/record-ref)."
+  echo ";; Made by: bin/hsi record-ref --corpus $corpora${only:+ --only ${only:1:${#only}-2}}"
+  echo ";; ghc: $(ghc --version)"
+  echo ";; date: $(date -u +%Y-%m-%d)"
+  cat "$new"
+} > "$out.part"
+mv "$out.part" "$out"
+echo "hsi record-ref: $(grep -c '^{' "$out") programs in $out ($(grep '^{' "$out" | grep -c ':no-build' || true) not built, $(grep '^{' "$out" | grep -c ':timeout' || true) timed out)"
