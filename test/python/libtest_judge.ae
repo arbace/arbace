@@ -1,0 +1,157 @@
+;; The judge of bin/pyi lib-test (queue 194, PY6a): Lib/test's language-core modules run by pyi through
+;; test/python/libtest.py, each test method's outcome against CPython 3.14.10's (test/python/ref-cpython314-lib-test.edn),
+;; a method that is not equal passing only when test/python/lib-test-known.edn names it with a class of its :classes.
+;;
+;; A method's line, what the classes' :match regexes see: "import MESSAGE" (the module does not import: its first error),
+;; "stopped-in MESSAGE" (the driver stopped in the method: the last line of its standard error, or a timeout), "crash
+;; MESSAGE" (the driver stopped before the method), else pyi's
+;; "OUTCOME REASON" (ok, skipped, failure, error; "not-run" when the driver finished without it).
+;;
+;; usage: arbace test/python/libtest_judge.ae --dir DIR --ref REF --known KNOWN [--record] [--no-known] MODULE...
+;;   DIR/MODULE.out is the driver's output, DIR/MODULE.err its standard error. Prints each module's counts (equal,
+;;   classed by class, failing) and every failing method; DIR/summary.tsv gets a line per module.
+;;   Exit 0 when no method fails, 1 when one does.
+;;   --record: rewrites KNOWN's :methods for the modules run (the other modules' kept): every method not equal, with its
+;;   class kept when KNOWN names one, else the first class whose :match finds its line; a method of no class is printed,
+;;   left out, and the run exits 3 (no placeholder class is ever written, as CS265 (a) and CS266 (a)'s writers).
+;;   --no-known: no method classed (the --oracle control: every method equal but the references' :excluded).
+(require '[arbace.string :as str])
+(import '[java.io File])
+
+(defn parse-args [args]
+  (loop [a args o {:mods []}]
+    (if-let [x (first a)]
+      (case x
+        "--dir" (recur (nnext a) (assoc o :dir (second a)))
+        "--ref" (recur (nnext a) (assoc o :ref (second a)))
+        "--known" (recur (nnext a) (assoc o :known (second a)))
+        "--record" (recur (next a) (assoc o :record true))
+        "--no-known" (recur (next a) (assoc o :no-known true))
+        (recur (next a) (update o :mods conj x)))
+      o)))
+
+(def opts (parse-args *command-line-args*))
+
+(defn read-ref
+  "The references: id -> outcome keyword, the :excluded and :module lines left out"
+  [path]
+  (into {}
+        (for [l (str/split-lines (slurp path))
+              :when (str/starts-with? l "{:id ")
+              :let [m (read-string l)]
+              :when (and (:outcome m) (not (:module m)) (not (:excluded m)))]
+          [(:id m) (:outcome m)])))
+
+(defn read-known [path]
+  (if (and path (.exists (File. path)))
+    (read-string (slurp path))
+    {:classes {} :methods {}}))
+
+(defn last-line [path]
+  (let [f (File. path)]
+    (when (.exists f)
+      (last (remove #(or (str/blank? %) (str/starts-with? % " ")) (str/split-lines (slurp f)))))))
+
+(defn read-run
+  "A module's run: {:import MSG} or {:cases {test-id [outcome reason]} :done bool :crash MSG}"
+  [dir m]
+  (let [out (File. (str dir "/" m ".out"))
+        lines (if (.exists out) (str/split-lines (slurp out)) [])
+        rows (map #(str/split % #"\t" -1) lines)
+        imp (some #(when (= "IMPORT" (first %)) (str (second %))) rows)
+        cases (into {} (for [r rows :when (= "CASE" (first r))] [(nth r 1) [(nth r 2 "") (nth r 3 "")]]))
+        done (boolean (some #(= "DONE" (first %)) rows))
+        started (last (keep #(when (= "START" (first %)) (second %)) rows))]
+    (cond
+      imp {:import imp}
+      (and (empty? cases) (not done)) {:import (or (last-line (str dir "/" m ".err")) "no output")}
+      :else {:cases cases :done done
+             :stopped-in (when (and (not done) started (not (contains? cases started))) started)
+             :crash (when-not done
+                      (let [st (let [f (File. (str dir "/" m ".status"))] (when (.exists f) (str/trim (slurp f))))]
+                        (if (= st "124")
+                          "a timeout (the module's run past PYI_LIB_TEST_TIMEOUT)"
+                          (or (last-line (str dir "/" m ".err")) (str "the driver stopped, status " st)))))})))
+
+(defn method-line [run t]
+  (cond
+    (:import run) (str "import " (:import run))
+    (contains? (:cases run) t) (let [[o r] (get (:cases run) t)] (str/trim (str o " " r)))
+    (= t (:stopped-in run)) (str "stopped-in " (:crash run))
+    (:crash run) (str "crash " (:crash run))
+    :else "not-run"))
+
+(defn rule-class [classes line]
+  (some (fn [[id c]] (when (some #(re-find % line) (:match c)) id)) (sort-by key classes)))
+
+(def refs (read-ref (:ref opts)))
+(def known (if (:no-known opts) {:classes {} :methods {}} (read-known (:known opts))))
+(def classes (:classes known))
+(def kmethods (:methods known))
+
+(def results
+  (vec
+   (for [m (:mods opts)]
+     (let [prefix (str m "/")
+           run (read-run (:dir opts) m)
+           ts (sort (for [[id _] refs :when (str/starts-with? id prefix)] id))
+           rows (for [id ts
+                      :let [t (subs id (count prefix))
+                            want (name (get refs id))
+                            got (when-not (:import run) (first (get (:cases run) t)))
+                            line (method-line run t)]]
+                  (if (= got want)
+                    {:id id :equal true}
+                    (let [k (get kmethods id)
+                          cls (if (and k (contains? classes k)) k
+                                  (when (:record opts) (rule-class classes line)))]
+                      {:id id :want want :line line :class cls :listed (boolean (and k (contains? classes k)))})))]
+       {:module m :run run :rows (vec rows)}))))
+
+(def recording? (:record opts))
+(def unclassed (atom 0))
+
+(doseq [{:keys [module run rows]} results]
+  (let [n (count rows)
+        eq (count (filter :equal rows))
+        classed (filter #(and (not (:equal %)) (:class %) (or recording? (:listed %))) rows)
+        failing (filter #(and (not (:equal %)) (not (and (:class %) (or recording? (:listed %))))) rows)
+        by-class (frequencies (map :class classed))]
+    (doseq [r failing]
+      (swap! unclassed inc)
+      (println (str "  FAIL " (:id r) ": " (:line r) " (CPython " (:want r) ")"
+                    (when recording? " -- no class: left out of the known file"))))
+    (println (str "lib-test " module ": " n " methods: " eq " equal, " (count classed) " classed"
+                  (when (seq by-class)
+                    (str " (" (str/join ", " (for [[c k] (sort-by key by-class)] (str (name c) " " k))) ")"))
+                  ", " (count failing) " failing"
+                  (when (:import run) (str " (does not import: " (:import run) ")"))
+                  (when (:crash run) (str " (the driver stopped" (when-let [t (:stopped-in run)] (str " in " t))
+                                          ": " (:crash run) ")"))))
+    (spit (str (:dir opts) "/summary.tsv")
+          (str module "\t" n "\t" eq "\t" (count classed) "\t" (count failing) "\t"
+               (str/join "," (for [[c k] (sort-by key by-class)] (str (name c) "=" k))) "\n")
+          :append true)))
+
+(defn write-known [path]
+  (let [text (slurp path)
+        i (.indexOf ^String text "\n :methods")
+        _ (when (neg? i) (throw (ex-info (str path ": no :methods key at a line's start") {})))
+        run-mods (set (map #(str % "/") (:mods opts)))
+        in-run? (fn [id] (some #(str/starts-with? id %) run-mods))
+        kept (remove (fn [[id _]] (in-run? id)) kmethods)
+        new (for [{:keys [rows]} results r rows :when (and (not (:equal r)) (:class r))] [(:id r) (:class r)])
+        all (sort-by key (concat kept new))]
+    (spit path (str (subs text 0 i) "\n :methods\n {"
+                    (str/join "\n  " (for [[id c] all] (str (pr-str id) " " c)))
+                    "}}\n"))
+    (println (str "lib-test: " path " written, " (count all) " methods classed"))))
+
+(when recording? (write-known (:known opts)))
+
+(let [n (reduce + (map #(count (:rows %)) results))
+      eq (reduce + (map #(count (filter :equal (:rows %))) results))]
+  (println (str "lib-test: " (count results) " modules, " n " methods: " eq " equal, " (- n eq @unclassed) " classed, "
+                @unclassed " failing")))
+
+(System/exit (cond (and recording? (pos? @unclassed)) 3 (pos? @unclassed) 1 :else 0))
