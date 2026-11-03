@@ -1610,6 +1610,12 @@
   (let [k (strip-meta k0)
         h (when (seq? k) (first k))]
     (cond (integer? k) [k (str k)]
+          (float? k) [(if (and (== k (Math/rint k)) (< (Math/abs k) 1e18)) (long k) [:float k]) (str k)]
+          ;; a float or complex key equal to an int is that int's duplicate (0, 0.0, 0j: Python's equality)
+          (= 'float h) (let [v (Double/parseDouble (str/replace (second k) "_" ""))]
+                         [(if (and (== v (Math/rint v)) (< (Math/abs v) 1e18)) (long v) [:float v]) (pp/expr k 0)])
+          (= 'imag h) (let [v (Double/parseDouble (str/replace (let [t (second k)] (subs t 0 (dec (count t)))) "_" ""))]
+                        [(if (zero? v) 0 [:complex v]) (pp/expr k 0)])
           (string? k) [[:str k] (pp/expr k 0)]
           (= 'True k) [1 "True"] (= 'False k) [0 "False"] (= 'None k) [[:none] "None"]
           (= 'int h) (let [v (digits->int (second k))] [v (str v)])
@@ -1622,7 +1628,9 @@
           (#{'str 'bytes} h) (let [v (string-token-value k)] [[:str v] (pp/expr k 0)])
           :else [[:form k] (pp/expr k 0)])))
 
-(defn- pattern!
+(declare pattern!)
+
+(defn- pattern*!
   "Matches the subject on the top: on success the subject is popped and the names bound; on failure the jumps in
   fails (each with the depth it leaves) lead to the case's end (subject popped)"
   [u x fails]
@@ -1640,7 +1648,9 @@
                        :else (do (when (some? nm) (emit! u :copy 1))
                                  (pattern! u q fails)
                                  (when (some? nm) (name-op! u (ident nm) :store)))))
-      match-value (do (emit! u :copy 1) (expr! u (first p)) (emit! u :compare '==) (emit! u :to-bool nil)
+      match-value (do (when (= 'joined-str (head (strip-meta (first p))))
+                        (syntax-error "patterns may only match literals and attribute lookups"))
+                      (emit! u :copy 1) (expr! u (first p)) (emit! u :compare '==) (emit! u :to-bool nil)
                       (fail!) (emit! u :pop nil))
       match-singleton (do (emit! u :copy 1) (expr! u (first p)) (emit! u :is false)
                           (fail!) (emit! u :pop nil))
@@ -1678,6 +1688,8 @@
                                          (sub! q)))))))
       match-mapping (let [[ks ps] p rest-name (some-> (:rest o) ident)]
                       (reduce (fn [seen k]
+                                (when (= 'joined-str (head (strip-meta k)))
+                                  (syntax-error "mapping pattern keys may only match literals and attribute lookups"))
                                 (if-let [[v r] (key-value k)]
                                   (do (when (seen v) (syntax-error (str "mapping pattern checks duplicate key (" r ")")))
                                       (conj seen v))
@@ -1724,6 +1736,11 @@
                  (set-depth! u (dec d)))
       (throw (ex-info (str "compile: unknown pattern " h) {})))))
 
+
+(defn- pattern!
+  "pattern*! at the pattern's location (a SyntaxError's)"
+  [u x fails]
+  (binding [*pos* (or (pos-of x) *pos*)] (pattern*! u x fails)))
 (defn match-stmt! [u x]
   (let [[_ [subject cases] _ _] (node x)
         ends (atom [])]
