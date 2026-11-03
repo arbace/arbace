@@ -38,7 +38,11 @@ Direction:
   milestone on main (tag `arbace-reaps-3-crops-v2`, 2026-11-01): the same matrix, 12 of 12 cells checked, none failing,
   every non-pass in a recorded class (doc/FULL-SUPPORT-SURVEY.md, "REAP v2's divergences"), with the efficient gate
   (doc/GATE-SURVEY.md, GT1-GT7), its clean run in a fresh clone recorded in
-  `test/gate/clean-arbace-reaps-3-crops-v2.edn`. Parked (the user,
+  `test/gate/clean-arbace-reaps-3-crops-v2.edn`. Then REAP for four crops, C joining (doc/C23-SURVEY.md, C8, C9), a
+  milestone on main (tag `arbace-reaps-4-crops-v1`, TODO(tag): the date): the matrix's 16 of 16 cells checked, none
+  failing, every non-pass in a recorded class (doc/FULL-SUPPORT-SURVEY.md, "REAP v3's divergences"), on the seed that
+  embeds C (`d5548e72`, verified 2026-11-05) and an audited clean run of the four crops over GT8's compressed corpora
+  within its budget (doc/GATE-SURVEY.md, GT8), recorded in `test/gate/clean-arbace-reaps-4-crops-v1.edn`. Parked (the user,
   2026-10-26): the box, the macOS UI, the iOS app (repr/haskell and repr/rust parked then too, unparked by the user
   2026-11-03: crops in progress again, as OCaml, Scheme and C++; Python surveyed). Now: doc/AGENDA.md.
 - Long term: Arbace is a standalone ecosystem, not binary compatible with Java. Java stays
@@ -118,7 +122,7 @@ Prior art:
   records `test/c/check{-linux-amd64,-aot-linux-amd64,-dg-linux-amd64}.edn` and the known files of `test/repr/c/`, the reader
   `:c-known`; Go's read numbers `test/repr/go/native-check-results.edn`,
   `bin/reap record-native-check`); the C known files' results files (`test/repr/c/{pp-check,parse-check,annot,roundtrip}-results.edn`,
-  CS240 (a)) do not exist until the full runs write them: C's read and print cells count their non-passes only until then; a cell whose check
+  CS240 (a)), written by the full runs' `--record` since C9.2's window (2026-11-02), give C's read and print cells their passes; a cell whose check
   is not recorded yet prints "no check yet".
   `bin/clojure-tests --divergences [RESULTS]` judges a suite run per test against the Clojure classes.
 - `LICENSE.md` holds all licenses: their full texts and which files each covers. Licenses are
@@ -222,8 +226,8 @@ Prior art:
     token for token against cc run by the helper `tools/ccdump` over `test/c/corpora.edn` and against gcc
     (`bin/repr-c check`, `parse-check`; the parse level's reference is gcc's acceptance, CS61; the Makefile's
     `repr-c-*`), embedded and compiled with the program since C9 (CS100 (b), doc/C23-SURVEY.md "As built: C9 (preparation)"), with ci's `arbace/c` and
-    `arbace.lang.CInterp`, so in `gate_key` (the committed seed predates it: stage 0 built from the seed evaluates them from the
-    checkout, the executables built from this tree carry them, until the re-seed); `arbace/repr/c/` also holds `convert`, `print`, `layout` and
+    `arbace.lang.CInterp`, so in `gate_key` (the seed embeds them compiled since C9.2's re-seed, `1fe1063f`: a change to them reruns
+    the whole `--full`, and stage 0 evaluates a changed one from the checkout until the next re-seed); `arbace/repr/c/` also holds `convert`, `print`, `layout` and
     `annot` (`bin/repr-c read`, `print`, `roundtrip`). ci, C's eval (doc/C23-SURVEY.md §6; `bin/ci`: `run`, `check`, `check --aot`, `dg`,
     `annotations`, `repl-session`, `c2j-check`, `cinterp-check`, `judge-test`; `arbace/c.ae` and `arbace/c/`: the checker, the builder,
     musl 1.2.6 as C forms, cf2g's Go; `go/arbace/{ci,cinterp,crt}`, its back end; `tools/cirun`, the light path; the Makefile's `ci-*`).
@@ -231,8 +235,8 @@ Prior art:
     `c-dg-essential`, `c-check-essential`, `c-aot-essential`, `c-c23` in the essential gate, and `c-c2j` (C9 preparation: `bin/ci c2j-check`,
     ci's and repr/c's namespaces compiled by c2j alone), `c-judge-test` in `--full`; the
     subsets `test/c/essential-{dg,check,aot}.txt`) and its row of `bin/reap` is judged by the `reap` step. C's full runs (`bin/ci check`,
-    `check --aot`, `dg`, `annotations`, `bin/repr-c check --tokens`, `parse-check`, `roundtrip`) are in no gate step: their records are
-    recorded by hand (`--record`) and `bin/reap` judges the records.
+    `check --aot`, `dg`, `annotations`, `bin/repr-c check --tokens`, `parse-check`, `roundtrip`) are heavy `--full` steps since 2026-11-02,
+    which judge the records and never `--record`: the records are recorded by hand (`--record`), and `bin/reap` judges them.
   - The other crops, repr/ocaml (`bin/repr-ocaml`, `bin/oi`), repr/scheme (`bin/repr-scheme`, `bin/si`), repr/cpp and repr/llvm
     (`bin/repr-cpp`, `bin/repr-llvm`, `bin/cppi`): their namespaces (`arbace/repr/{ocaml,scheme,cpp,llvm}`, `arbace/scheme/`,
     `arbace/cpp/`) are evaluated from the checkout, not embedded and out of `gate_key` (`arbace/j2g/embed.ae`'s exclusions); no gate step
@@ -517,12 +521,13 @@ Prior art:
   repo, path and commit/tag for anything studied or vendored. Never edit or delete past entries.
   Correct them with a new entry. Write it so the progress could be recreated from it. At each
   freeze, and after the milestones `arbace-inside-itself-v1`, `arbace-interprets-go1.27.1-v1`,
-  `arbace-reaps-3-crops-v1` and `arbace-reaps-3-crops-v2`,
+  `arbace-reaps-3-crops-v1`, `arbace-reaps-3-crops-v2` and `arbace-reaps-4-crops-v1`,
   main's journal started over, by the user's decision: the history up to 2026-10-08 is on
   `arbace-for-java-26`, from then to 2026-10-11 on `arbace-for-golang`, from then to 2026-10-15 at
   the tag `arbace-inside-itself-v1`, from then to 2026-10-20 at the tag
   `arbace-interprets-go1.27.1-v1`, from then to 2026-10-27 at the tag `arbace-reaps-3-crops-v1`, from then to
-  2026-11-01 at the tag `arbace-reaps-3-crops-v2`, and all of it in git.
+  2026-11-01 at the tag `arbace-reaps-3-crops-v2`, from then to the tag `arbace-reaps-4-crops-v1` (TODO(tag): its date), and
+  all of it in git.
 - When vendoring code from prior art, record its origin (repo, path, revision) in the journal and
   next to the vendored code (for `arbace/`, which holds only `.ae` files: `doc/ARBACE.md`), and
   its license in `LICENSE.md`.
