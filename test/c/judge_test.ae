@@ -1299,11 +1299,71 @@
         b (str w "/src")
         kf (str w "/known.edn")]
     (put-files w {"c/base.txt" b "c/files.tsv" "a.c\tequal\nk.c\tknown\ne.c\tdiffer\nz.c\tcrash\n"
-                  "src/a.c" "int a;\n" "src/k.c" "int k;\n" "src/e.c" "#embed \"f\"\n" "src/z.c" "int z;\n"
-                  "known.edn" (pr-str {:classes {:embed "e" :k "k"} :parse {:c {"k.c" {:class :k}}}})})
+                  "src/a.c" "int a;\n" "src/k.c" "int k;\n" "src/e.c" "??=define E 1\n" "src/z.c" "int z;\n"
+                  "known.edn" (pr-str {:classes {:trigraphs "t" :k "k"} :parse {:c {"k.c" {:class :k}}}})})
     (is (= 1 (rec w ["c"] kf)))
-    (is (= {"k.c" {:class :k} "e.c" {:class :embed}} (get-in (read-string (slurp kf)) [:parse :c])))
+    (is (= {"k.c" {:class :k} "e.c" {:class :trigraphs}} (get-in (read-string (slurp kf)) [:parse :c])))
     (is (not (re-find #"unclassified" (slurp kf))))))
+
+(deftest parse-record-pp-errors-only-the-preprocessors
+  ;; CS268 (a): the tree check's --record guesses :pp-errors only when the trees equal and every differing error line is
+  ;; the preprocessor's (the port's among its preprocessor's errors, cc's on a directive's line), never the parser's: such
+  ;; a file is printed, left out of the known file and counted (the run exits 3)
+  (require 'arbace.repr.c.parsecheck)
+  (let [rec (resolve 'arbace.repr.c.parsecheck/record)
+        w (str (System/getProperty "user.dir") "/.tmp/ci-judge-test-parse-record-pp")
+        b (str w "/src")
+        kf (str w "/known.edn")
+        fc (host/file-config [] "gnu23")
+        h (host/load-host "test/c/host")
+        srcs {"p.c" "#error boom\nint p;\n" "q.c" "int q = ;\n" "r.c" "#if 1\n#endif\nint r;\n" "s.c" "#if 1\n#endif\nint s;\n"
+              "o.c" "#error one\nint o = ;\n"}
+        _ (put-files w (into {} (for [[n t] srcs] [(str "src/" n) t])))
+        port (fn [n] (cparse/result-dump (cparse/parse (host/config h fc b) n)))
+        no-errors (fn [^String d] (str/join (for [l (str/split-lines d) :when (not (.startsWith ^String l "#error"))] (str l "\n"))))
+        errs (fn [^String d] (filter #(.startsWith ^String % "#error") (str/split-lines d)))]
+    ;; the port's dumps: p.c the preprocessor's #error, q.c the parser's error, r.c and s.c none; o.c both, in this order
+    (is (= ["#error\tp.c:1:2: boom"] (errs (port "p.c"))))
+    (is (re-find #"^#error\tq\.c:1:9: unexpected" (first (errs (port "q.c")))))
+    (is (empty? (errs (port "r.c"))))
+    (is (= 2 (count (errs (port "o.c")))))
+    (put-files w (merge
+                   {"c/base.txt" b "c/files.tsv" (str/join (for [n (keys srcs)] (str n "\tdiffer\n")))
+                    "c/files.edn" (pr-str (vec (for [n (keys srcs)] {:name n :read n :out (str n ".tsv") :fc fc})))
+                    "known.edn" (pr-str {:classes {:pp-errors "p"} :parse {}})}
+                   (into {} (for [n (keys srcs)] [(str "c/diff/" n ".tsv.port") (port n)]))
+                   {;; cc without the port's preprocessor's error: guessed
+                    "c/diff/p.c.tsv.cc" (no-errors (port "p.c"))
+                    ;; cc without the port's parser's error: the parser's, not guessed
+                    "c/diff/q.c.tsv.cc" (no-errors (port "q.c"))
+                    ;; cc's own error on a directive's line: guessed; on a declaration's line: not
+                    "c/diff/r.c.tsv.cc" (str (port "r.c") "#error\tr.c:1:5: cc's complaint\n")
+                    "c/diff/s.c.tsv.cc" (str (port "s.c") "#error\ts.c:3:5: cc's complaint\n")
+                    ;; cc with the parser's error alone, not the preprocessor's: the preprocessor's differs, guessed
+                    "c/diff/o.c.tsv.cc" (str (no-errors (port "o.c")) (last (errs (port "o.c"))) "\n")}))
+    (is (= 2 (rec w ["c"] kf)))
+    (is (= {"p.c" {:class :pp-errors} "r.c" {:class :pp-errors} "o.c" {:class :pp-errors}} (get-in (read-string (slurp kf)) [:parse :c])))
+    ;; o.c the other way: cc with the preprocessor's error alone, the port's parser's error the difference: not guessed
+    (put-files w {"c/diff/o.c.tsv.cc" (str (no-errors (port "o.c")) (first (errs (port "o.c"))) "\n")
+                  "known.edn" (pr-str {:classes {:pp-errors "p"} :parse {}})})
+    (is (= 3 (rec w ["c"] kf)))
+    (is (= {"p.c" {:class :pp-errors} "r.c" {:class :pp-errors}} (get-in (read-string (slurp kf)) [:parse :c])))))
+
+(deftest parse-record-no-foreign-class
+  ;; CS268 (a): the tree check's --record never takes another check's class (the token check's classify, :c23-if-true,
+  ;; :has-c-attribute, :embed): a file only those name is printed, left out and counted
+  (require 'arbace.repr.c.parsecheck)
+  (let [rec (resolve 'arbace.repr.c.parsecheck/record)
+        w (str (System/getProperty "user.dir") "/.tmp/ci-judge-test-parse-record-foreign")
+        b (str w "/src")
+        kf (str w "/known.edn")]
+    (doseq [classes [{:pp-errors "p"} {:pp-errors "p" :c23-if-true "c" :has-c-attribute "h" :embed "e"}]]
+      (put-files w {"c/base.txt" b "c/files.tsv" "i.c\tdiffer\nh.c\tdiffer\ne.c\tcrash\n"
+                    "src/i.c" "#if true\n#endif\nint i;\n" "src/h.c" "#if __has_c_attribute(nodiscard)\n#endif\n"
+                    "src/e.c" "#embed \"f\"\n"
+                    "known.edn" (pr-str {:classes classes :parse {}})})
+      (is (= 3 (rec w ["c"] kf)))
+      (is (nil? (get-in (read-string (slurp kf)) [:parse :c]))))))
 
 (deftest roundtrip-record-writes-no-placeholder
   ;; queue 122 F1: the round trip's --record keeps a file's class and leaves a failing file of no class out, never :unclassified
