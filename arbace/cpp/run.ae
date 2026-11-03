@@ -334,6 +334,29 @@
 
 (defn- secs [t0] (format "%.1f" (/ (- (System/nanoTime) t0) 1e9)))
 
+(defn uses-atomic-generic?
+  "Whether the forms call gcc's generic __atomic_load, __atomic_store or __atomic_exchange, which the lowering writes for an
+  atomic of a floating type and repr/c's <builtin> source declares without parameters (the class atomic-generic, review 191 F3)."
+  [forms]
+  (letfn [(walk [x] (or (and (seq? x) (#{'__atomic_load '__atomic_store '__atomic_exchange} (first x)))
+                        (and (or (seq? x) (vector? x)) (some walk x))))]
+    (boolean (some walk forms))))
+
+(defn va-arg-fns
+  "The functions of the IR at `ll` that read a va_list as clang writes va_arg for x86-64 at -O0, inline, by getelementptr into
+  %struct.__va_list_tag (gp_offset, reg_save_area): ci's va_list is its own, so on ci they read garbage (the class va-arg, review
+  191 F2; the user's decision: a gap class now, ci's x86-64 va_list later). Their names as the IR spells them."
+  [^String ll]
+  (let [out (java.util.LinkedHashSet.)]
+    (loop [ls (str/split-lines (slurp ll)) cur nil]
+      (when-let [^String l (first ls)]
+        (let [cur (if (str/starts-with? l "define ")
+                    (second (re-find #"@\"?([^\"(]+)\"?\(" l))
+                    cur)]
+          (when (and cur (str/includes? l "getelementptr") (str/includes? l "%struct.__va_list_tag,")) (.add out cur))
+          (recur (rest ls) cur))))
+    (vec out)))
+
 (defn read-program
   "A program's lowered C read and checked (arbace.c.run/read-unit's, its constructors renamed): a unit with :status :ok, or
   {:status :read-error|:read-refused|:check-error :message}."
@@ -346,6 +369,7 @@
       :else (let [u (crun/check-read h fc (with-ctors rd "p"))]
               (if (seq (:errors u))
                 (assoc u :status :check-error :message (str (str/join "; " (take 3 (:errors u)))
+                                                            (when (uses-atomic-generic? (:forms rd)) " uses-atomic-generic")
                                                             (when (crun/uses-long-double? (:forms rd)) " uses-long-double")))
                 (assoc u :status :ok))))))
 
@@ -362,7 +386,8 @@
   "One program: its IR lowered (a path ending in .ll; else the path is lowered C already), the lowered C read and checked,
   linked, built: [status class message flags seconds cmds], seconds \"LOWER+BUILD\"."
   [h libs-of ^String path]
-  (let [t0 (System/nanoTime)
+  (let [ll path
+        t0 (System/nanoTime)
         refused (when (str/ends-with? path ".ll") (lower-ll path))
         ls (secs t0)
         t0 (System/nanoTime)
@@ -374,7 +399,10 @@
       refused (conj refused "" ls nil)
       (not= :ok (:status u)) [(name (:status u)) "" (:message u) "" (secs t0) nil]
       :else
-      (let [ld (if (crun/uses-long-double? (:forms (:rd u))) "long-double" "")
+      (let [va (when (str/ends-with? ll ".ll") (seq (va-arg-fns ll)))
+            ;; the flags, space-separated: long-double, va-arg=NAME,NAME (the judge's)
+            ld (str/join " " (remove nil? [(when (crun/uses-long-double? (:forms (:rd u))) "long-double")
+                                           (when va (str "va-arg=" (str/join "," va)))]))
             r (try {:cmds (build-linked h (libs-of) [u])}
                    (catch arbace.lang.ExceptionInfo e
                      (if-let [c (:ci/refused (ex-data e))]
