@@ -702,3 +702,10 @@ In the worktree `.tmp/worktrees/python-survey`, `.tmp/python/` (gitignored): `t.
 comment, `0x1F`, an f-string, a t-string, a generic function, `match`, PEP 758's `except`, `type`, a lambda with
 `yield`), `u.py` (E4's UTF-8 offsets, E5's round trip), `sy.py` (a `nonlocal` for `symtable`). The probes were
 one-line `python3 -c` programs over these and over `/usr/lib/python3.14/` (E2, E5, E8), each under a few seconds.
+
+## Decided (2026-11-03, the user): PYS1-PYS20
+
+PYS1-PYS18 and PYS20 all (a), as recommended. PYS19: the Mac VM peer does all of Python, step by step (PY1 through
+PY11, a standing line of queue tasks, each reviewed and merged on the main host), beginning now, beside GT8; the main host
+keeps GT8, the tag `arbace-reaps-4-crops-v1` and the other crops. Python stays out of `gate_key` and the gate (PYS18)
+until its row fits GT8's budget.
