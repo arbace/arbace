@@ -303,5 +303,17 @@ if [ "$(wc -l < "$store/_rotation/toy.toy.s1.runs")" = 50 ] && [ "$(tail -1 "$st
 if [ "$(cat "$store/_rotation/.seq" 2>&1)" = 83 ] && [ -e "$store/_rotation/.lock" ] && [ -s "$store/_rotation/toy.toy.failed" ]; then ok "--prune: the record's .seq, .lock and failed events kept"; else no "--prune removed the record's files: $(ls -A "$store/_rotation")"; fi
 store=$t/store
 
+# review 181 L3: the judge's every failure line (GATE_FAIL_LINES, LOGS/NAME.fail-lines) read with the log, where the
+# log prints the first 40: every failing file of the slice joins the subset in one run
+store=$t/store5; mkdir -p "$store"; logs=$t/n0; key[toy.toy.s0]=$(col "$t/n0" toy.toy.s0 3)
+v1=$(sed -n 1p "$t/n0/rotation/toy.toy.s0.list") v2=$(sed -n 2p "$t/n0/rotation/toy.toy.s0.list")
+printf 'ci judge: ...\nFAIL %s differs\n' "$v1" > "$t/n0/toy.toy.s0.log"
+printf 'FAIL %s differs\nFAIL %s differs\n' "$v1" "$v2" > "$t/n0/toy.toy.s0.fail-lines"
+rotation_note toy.toy.s0 fail
+if [ "$(failed_now)" = "$(printf '%s\n%s' "$v1" "$v2" | LC_ALL=C sort)" ]; then ok "the judge's GATE_FAIL_LINES read with the log: a file past the log's 40 FAIL lines joins the subset too"; else no "GATE_FAIL_LINES: $(cat "$store/_rotation/toy.toy.failed" 2>&1)"; fi
+rm -f "$t/n0/toy.toy.s0.fail-lines"
+if grep -q 'GATE_FAIL_LINES=$logs/$n.fail-lines step ' "$here/bin/lib/gate-run.bash"; then ok "the runner names GATE_FAIL_LINES for each step's run"; else no "the runner sets no GATE_FAIL_LINES"; fi
+store=$t/store
+
 echo "$((n - bad)) of $n passed"
 [ "$bad" = 0 ]
