@@ -42,6 +42,10 @@
 #                                  (test/python/libtest_judge.ae, PY6a): a method not equal passes only in its class of
 #                                  test/python/lib-test-known.edn; --record writes the known file's methods (exit 3 on a
 #                                  method of no class); --judge DIR: judged again, nothing run; --oracle: the driver by python3
+#   bin/pyi python [OPTION...] [-c CMD | -m MOD | FILE | -] [ARGS...]
+#                                  PY6e: CPython's command line over run (sys.executable, tools/pyi/python3), for
+#                                  script_helper's and subprocess's children: the options taken and ignored, run in
+#                                  the caller's directory
 #   bin/pyi runtime print|read|vet|check
 #                                  PY5b0, the runtime's sources (doc/python/PYI-SPEC.md §8): go/arbace/py's Go forms (mode :full,
 #                                  lossless) printed as a Go module into .tmp/repr-python/pyi/runtime (print), edited there,
@@ -253,7 +257,7 @@ stdlib_lib() {
 }
 
 # the host's side of the runtime (arbace.python.run): its work directory and a run's id for its scratch
-pyi_env() { export PYI_ROOT="$root" PYI_WORK="$WORK" PYI_RUN_ID="$$"; }
+pyi_env() { export PYI_ROOT="$root" PYI_WORK="$WORK" PYI_RUN_ID="$$" PYI_EXECUTABLE="$root/tools/pyi/python3"; }
 
 cmd_repl() {
   if [ "${1:-}" = --check ]; then repl_check; return; fi
@@ -298,6 +302,74 @@ cmd_run() {
   shift
   pyi_env
   pa_arbace run --dump "$d/dumps/$name.ae" --file "$f" --lib "$(stdlib_lib)" --argv0 "$argv0" -- "$@" || rc=$?
+  rm -rf "$d"
+  return $rc
+}
+
+# python ARGS...: CPython's command line over bin/pyi run (PY6e, sys.executable: tools/pyi/python3 runs it), for
+# test.support's script_helper and subprocess's children: -c CMD, -m MOD, FILE or - (stdin), the options before them
+# taken and ignored (-I -E -s -S -B -u -b -q -O -P -R -d -v, -X OPT, -W ARG); run in the caller's directory, sys.path[0]
+# '' for -c, -m and stdin
+cmd_python() {
+  local code="" mod="" file="" have=""
+  while [ $# -gt 0 ]; do
+    case $1 in
+      -c) code=$2; have=c; shift 2; break ;;
+      -m) mod=$2; have=m; shift 2; break ;;
+      -X|-W) shift 2 ;;
+      -X*|-W*) shift ;;
+      -) have=s; shift; break ;;
+      --) shift; [ $# -gt 0 ] && { file=$1; have=f; shift; }; break ;;
+      -[IEsSBubqOPRdv]*)
+        local o=${1#-} rest
+        case $o in
+          *c*) rest=${o#*c}; if [ -n "$rest" ]; then code=$rest; shift; else code=$2; shift 2; fi; have=c; break ;;
+          *m*) rest=${o#*m}; if [ -n "$rest" ]; then mod=$rest; shift; else mod=$2; shift 2; fi; have=m; break ;;
+        esac
+        shift ;;
+      -*) echo "pyi python: unknown option $1" >&2; exit 2 ;;
+      *) file=$1; have=f; shift; break ;;
+    esac
+  done
+  local d src argv0
+  d=$(mktemp -d "$WORK/python.XXXXXX")
+  case $have in
+    c) argv0=-c; src=$d/__pyi_c.py; printf 'import sys as __pyi_sys; __pyi_sys.path[0] = ""; del __pyi_sys\n%s\n' "$code" > "$src" ;;
+    m) argv0=-m; src=$d/__pyi_m.py
+       # runpy's _run_module_as_main needs the loader's get_code, which pyi's loader has not (PY6b): the module's
+       # source found by its spec and run as __main__
+       { printf 'import sys as __pyi_sys; __pyi_sys.path[0] = ""; __pyi_mod = %s\n' \
+           "$(python3 -I -c 'import sys; print(repr(sys.argv[1]))' "$mod")"
+         cat <<'PYI_M'
+def __pyi_main(name):
+    import importlib.util, sys, types
+    spec = importlib.util.find_spec(name)
+    if spec is None:
+        sys.exit("%s: No module named %s" % (sys.executable, name))
+    if spec.submodule_search_locations is not None:
+        spec = importlib.util.find_spec(name + ".__main__")
+    with open(spec.origin, encoding="utf-8") as f:
+        code = compile(f.read(), spec.origin, "exec")
+    sys.argv[0] = spec.origin
+    m = types.ModuleType("__main__")
+    m.__file__, m.__spec__, m.__package__, m.__loader__ = spec.origin, spec, spec.parent, spec.loader
+    sys.modules["__main__"] = m
+    exec(code, m.__dict__)
+__pyi_main(__pyi_mod)
+PYI_M
+       } > "$src" ;;
+    s|"") argv0=-; src=$d/__pyi_stdin.py
+       { printf 'import sys as __pyi_sys; __pyi_sys.path[0] = ""; del __pyi_sys\n'; cat; } > "$src" ;;
+    f) case $file in /*) src=$file ;; *) src=$caller_pwd/$file ;; esac; argv0=$file ;;
+  esac
+  [ -f "$src" ] || { echo "python: can't open file '$file': [Errno 2] No such file or directory" >&2; rm -rf "$d"; exit 2; }
+  local name dir rc=0
+  src=$(cd "$(dirname "$src")" && pwd)/$(basename "$src")
+  name=$(basename "$src"); dir=$(dirname "$src")
+  echo "$name" > "$d/list"
+  py pydump.py tree --full --base "$dir" --list "$d/list" --out "$d/dumps" --tsv "$d/tsv" >/dev/null
+  pyi_env
+  (cd "$caller_pwd" && pa_arbace run --dump "$d/dumps/$name.ae" --file "$src" --lib "$(stdlib_lib)" --argv0 "$argv0" -- "$@") || rc=$?
   rm -rf "$d"
   return $rc
 }
@@ -421,6 +493,7 @@ case "${1:-}" in
   run) shift; mkdir -p "$WORK"; cmd_run "$@" ;;
   repl) shift; mkdir -p "$WORK"; cmd_repl "$@" ;;
   lib-test) shift; mkdir -p "$WORK"; cmd_lib_test "$@" ;;
+  python) shift; mkdir -p "$WORK"; cmd_python "$@" ;;
   runtime) shift; mkdir -p "$WORK"; cmd_runtime "$@" ;;
   *) sed -n '2,51p' "$0"; exit 2 ;;
 esac
