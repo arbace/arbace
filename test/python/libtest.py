@@ -89,3 +89,5 @@ if skip:
     mark(suite)
 suite.run(Result())
 line("DONE")
+# a thread a failing test left waiting would hold the exit (threading._shutdown joins it): every line is out
+os._exit(0)
