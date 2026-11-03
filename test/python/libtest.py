@@ -36,7 +36,11 @@ class Result(unittest.TestResult):
         line("CASE", test.id(), "failure", err[1])
 
     def addError(self, test, err):
-        line("CASE", test.id(), "error", err[1])
+        msg = str(err[1])
+        if test.id().startswith("unittest.loader._FailedTest."):
+            # a submodule the loader could not import: its traceback's last line (the judge classes its methods)
+            msg = [l for l in msg.splitlines() if l.strip()][-1].strip() if msg.strip() else msg
+        line("CASE", test.id(), "error", msg)
 
     def addSkip(self, test, reason):
         line("CASE", test.id(), "skipped", reason)
