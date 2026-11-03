@@ -2,11 +2,12 @@
 // Arbace's cover build (bin/arbace-go --gate-build --cover) turned into block sets per test, and those reduced to a
 // subset reaching the same blocks.
 //
-//	covsubset blocks -go GO -pkgs FILE -o OUT [-j N] DIR...
+//	covsubset blocks -go GO -pkgs FILE [-exclude REGEX] -o OUT [-j N] DIR...
 //	    each DIR a test's GOCOVERDIR (bin/lib/cover.bash's cover_env: its id in DIR/id), turned into text by
 //	    `GO tool covdata textfmt -pkg` (the import paths of FILE, one a line: a crop's code under check), its
 //	    covered blocks (count above zero) written to OUT/blocks/N.txt as textfmt lines (FILE:SL.SC,EL.EC NSTMT 1,
-//	    the reducer's profile), N the test's number; OUT/tests.tsv: ID, its blocks file (- when the run left no
+//	    the reducer's profile), N the test's number, but the blocks of the source files -exclude matches (no code
+//	    under check: the user classes j2g puts in arbace/lang); OUT/tests.tsv: ID, its blocks file (- when the run left no
 //	    counters: a run killed before its first flush), the blocks it covers; OUT/files.tsv: each source file
 //	    of the packages with its blocks, those the tests cover and the share; OUT/summary.tsv: the totals
 //	covsubset reduce [-seeds N] [-o SUBSET] [-curve FILE] INDEX
@@ -21,6 +22,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -53,6 +55,7 @@ func blocks(args []string) {
 	pkgsf := fs.String("pkgs", "", "the packages, one a line")
 	out := fs.String("o", "", "the output directory")
 	jobs := fs.Int("j", 8, "textfmt runs at once")
+	exclude := fs.String("exclude", "", "the source files whose blocks are left out (a regexp)")
 	fs.Parse(args)
 	if *pkgsf == "" || *out == "" || fs.NArg() == 0 {
 		die("usage: covsubset blocks -go GO -pkgs FILE -o OUT [-j N] DIR...")
@@ -60,6 +63,10 @@ func blocks(args []string) {
 	pb, err := os.ReadFile(*pkgsf)
 	if err != nil {
 		die("%v", err)
+	}
+	var excl *regexp.Regexp
+	if *exclude != "" {
+		excl = regexp.MustCompile(*exclude)
 	}
 	pkgs := strings.Join(strings.Fields(string(pb)), ",")
 	if pkgs == "" {
@@ -121,11 +128,17 @@ func blocks(args []string) {
 					continue
 				}
 				sp := strings.LastIndexByte(l, ' ')
+				if sp < 0 {
+					continue
+				}
 				sp2 := strings.LastIndexByte(l[:sp], ' ')
-				if sp < 0 || sp2 < 0 {
+				if sp2 < 0 {
 					continue
 				}
 				key := l[:sp2]
+				if excl != nil && excl.MatchString(key[:strings.LastIndexByte(key, ':')+1]) {
+					continue
+				}
 				if first {
 					f := key[:strings.LastIndexByte(key, ':')]
 					if local[f] == nil {
@@ -189,8 +202,10 @@ func blocks(args []string) {
 		fmt.Fprintf(&fb, "%s\t%d\t%d\t%.3f\n", f, n, c, float64(c)/float64(max(n, 1)))
 	}
 	write(filepath.Join(*out, "files.tsv"), fb.String())
-	s := fmt.Sprintf("tests\t%d\ntests-with-counters\t%d\nerrors\t%d\nsource-files\t%d\nblocks\t%d\nblocks-covered\t%d\nshare\t%.4f\n",
-		len(dirs), nrun, nerr, len(files), total, len(cov), float64(len(cov))/float64(max(total, 1)))
+	// a test without counters (killed before any write: the CPU limit's SIGKILL before the first flush, a Go
+	// panic's exit, which runs no exit hook) counts here: its blocks are in no set (review 182 finding 4)
+	s := fmt.Sprintf("tests\t%d\ntests-with-counters\t%d\ntests-without-counters\t%d\nerrors\t%d\nsource-files\t%d\nblocks\t%d\nblocks-covered\t%d\nshare\t%.4f\n",
+		len(dirs), nrun, len(dirs)-nrun-nerr, nerr, len(files), total, len(cov), float64(len(cov))/float64(max(total, 1)))
 	write(filepath.Join(*out, "summary.tsv"), s)
 	fmt.Print(s)
 	if nerr > 0 {

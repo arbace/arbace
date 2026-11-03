@@ -1,6 +1,7 @@
 // covsubset reduce: the reducer of tools/cicover (queue 160, 161: branch mac/161-subsets, eda4ecfc,
 // tools/cicover/main.go), copied whole for every crop (doc/GATE-SURVEY.md, GT8.3, GTS205 (a), GTS206 (a)), its
-// index and outputs unchanged; only its entry is reduce(args) instead of main. Its comment, as it came:
+// index and outputs unchanged; only its entry is reduce(args) instead of main, and a line without spaces is
+// refused before it is cut (review 182 L8). Its comment, as it came:
 //
 // Command cicover is bin/ci cover's reducer (queue 160, the test-budget survey's input; a prototype, in no
 // gate step): Go's coverage profiles of ci's back end (go/arbace/ci and go/arbace/crt, tools/cirun built with
@@ -125,8 +126,11 @@ func reduce(args []string) {
 			}
 			// FILE:SL.SC,EL.EC NSTMTS COUNT
 			sp := strings.LastIndexByte(l, ' ')
+			if sp < 0 {
+				die("%s: bad line %q", f[1], l)
+			}
 			sp2 := strings.LastIndexByte(l[:sp], ' ')
-			if sp < 0 || sp2 < 0 {
+			if sp2 < 0 {
 				die("%s: bad line %q", f[1], l)
 			}
 			key := l[:sp2]
