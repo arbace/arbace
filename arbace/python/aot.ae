@@ -350,10 +350,85 @@
           (recur))))
     0))
 
+;;; ---------------------------------------------------------------------------------------
+;;; The check's judge (bin/pyi check --aot)
+
+(defn- read-lines-edn [f]
+  (for [l (str/split-lines (slurp f)) :when (str/starts-with? l "{")] (read-string l)))
+
+(defn- tsv-rows [f] (for [l (str/split-lines (slurp f)) :when (seq l)] (str/split l #"\t" -1)))
+
+(defn- outcome [[rc sha err]] {:status (if (re-matches #"[0-9]+" rc) (Long/parseLong rc) (keyword rc)) :stdout sha :stderr-last err})
+
+(defn- equal-ref? [o ref]
+  (and (= (:status o) (:status ref)) (= (:stdout o) (:stdout ref)) (= (:stderr-last o) (or (:stderr-last ref) ""))))
+
+(defn- class-of
+  "The class of a non-pass that the rule (:as-pyi) does not take: the first class of CLASSES whose :ids hold ID or
+  whose :match finds itself in TEXT"
+  [classes id text]
+  (first (filter (fn [c] (or (some #{id} (:ids c)) (and (:match c) text (re-find (re-pattern (:match c)) text)))) classes)))
+
+(defn judge
+  "Each run of RUNS (bin/pyi check --aot's runs.tsv) judged: :pass the compiled run CPython's (status, stdout's
+  SHA-256, stderr's last line) and the loop's; :as-pyi (the rule's class) not CPython's but the same as the loop's and
+  pyi's, the interpreter's own divergence, its first stop named; :refused or :differs (compiled not as interpreted)
+  classed by CLASSES (test/python/divergences-aot.edn) or failing"
+  [runs refs classes]
+  (for [[id kind ct & more] runs
+        :let [ref (get refs id)]]
+    (if (= kind "refused")
+      (let [c (class-of classes id (first more))]
+        {:id id :result (if c :classed :failed) :class (or (:class c) :refused) :reason (first more) :compile-ms (Long/parseLong ct)})
+      (let [aot (outcome (subvec (vec more) 0 3))
+            loop (outcome (subvec (vec more) 3 6))
+            pyi (when (not= "-" (nth more 6)) (outcome (subvec (vec more) 6 9)))
+            [ams lms pms] (drop 9 more)
+            ms (fn [x] (when (re-matches #"[0-9]+" (str x)) (Long/parseLong x)))
+            base {:id id :compile-ms (Long/parseLong ct) :aot-ms (ms ams) :loop-ms (ms lms) :pyi-ms (ms pms)
+                  :status (:status aot)}
+            as-loop (= aot loop)
+            as-pyi (or (nil? pyi) (= aot pyi))]
+        (cond
+          (nil? ref) (assoc base :result :failed :class :no-reference)
+          (:excluded ref) (assoc base :result :classed :class :reference-excluded :reason (:excluded ref))
+          (and (equal-ref? aot ref) as-loop) (cond-> (assoc base :result :pass) (not as-pyi) (assoc :pyi-differs true))
+          (and as-loop as-pyi) (assoc base :result :classed :class :as-pyi :reason (:stderr-last aot))
+          :else (let [why (str (when-not as-loop (str "the loop: " (pr-str loop) " ")) (when-not as-pyi (str "pyi: " (pr-str pyi))))
+                      c (class-of classes id why)]
+                  (assoc base :result (if c :classed :failed) :class (or (:class c) :differs) :reason why
+                         :compiled aot)))))))
+
+(defn- cmd-judge [args]
+  (let [opts (apply hash-map args)
+        refs (into {} (for [m (read-lines-edn (get opts "--ref"))] [(:id m) m]))
+        classes (:classes (read-string (slurp (get opts "--classes"))))
+        res (sort-by :id (judge (tsv-rows (get opts "--runs")) refs classes))
+        by (frequencies (map :result res))
+        sum (fn [k] (reduce + 0 (keep k (filter #(= :pass (:result %)) res))))
+        lines (fn [] (str/join "\n" (map #(binding [*print-length* nil] (pr-str %)) res)))]
+    (doseq [r res :when (not= :pass (:result r))]
+      (println (str "  " (name (:result r)) " " (:id r) " " (name (:class r)) (when (:reason r) (str ": " (subs (str (:reason r)) 0 (min 120 (count (str (:reason r))))))))))
+    (doseq [[c n] (sort (frequencies (map :class (filter #(= :classed (:result %)) res))))]
+      (println (str "  class " (name c) ": " n)))
+    (println (str "check --aot: " (count res) " programs: " (get by :pass 0) " pass, " (get by :classed 0) " classed, "
+                  (get by :failed 0) " failing"))
+    (println (str "  the passing programs' run: compiled " (sum :aot-ms) " ms, the loop " (sum :loop-ms) " ms, pyi on goi "
+                  (sum :pyi-ms) " ms; compiling " (sum :compile-ms) " ms"))
+    (when-let [f (get opts "--results")] (spit f (str (lines) "\n")))
+    (when-let [f (get opts "--record")]
+      (spit f (str ";; pyi's AOT (bin/pyi check --aot --record; doc/python/PYTHON-SURVEY.md, \"As built: PY8\"): each program of the\n"
+                   ";; synthetic corpus and the samples compiled and run, judged against CPython's reference (ref-cpython314.edn),\n"
+                   ";; the loop and pyi; :result :pass, :classed (:class, test/python/divergences-aot.edn or the rule :as-pyi) or\n"
+                   ";; :failed; the milliseconds are the recording machine's.\n"
+                   (lines) "\n")))
+    (if (pos? (get by :failed 0)) 1 0)))
+
 (defn -main [& [cmd & args]]
   (let [rc (case cmd
              "program" (cmd-program args)
              "compile-server" (cmd-compile-server args)
+             "judge" (cmd-judge args)
              (do (println "usage: -m arbace.python.aot program FILE SRC PKG LIB [CACHE] | compile-server") 2))]
     (shutdown-agents)
     (System/exit rc)))

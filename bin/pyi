@@ -421,6 +421,133 @@ aot_run() {
   PYI_AOT_COMPILER="$AOT/compiler.sh" "$out" "$@"
 }
 
+# check --aot: the synthetic corpus and the samples (177's references, test/python/ref-cpython314.edn) compiled and run,
+# each judged against CPython's reference (status, stdout's SHA-256, stderr's last line) and against the same program on
+# the loop (PYI_AOT_LOOP: the same executable, every code object on the dispatch loop) and pyi's run (bin/pyi run, on
+# goi; kept by the runtime's, the compiler's and the program's digest); see cmd_check_aot
+aot_list() {
+  { sed 's|^|synth/|' "$SYNTH/MANIFEST"; (cd "$root/test/python/samples" && ls *.py | sed 's|^|samples/|'); }
+}
+aot_file() { case $1 in synth/*) echo "$SYNTH/${1#synth/}" ;; samples/*) echo "$root/test/python/samples/${1#samples/}" ;; esac; }
+# run_one DIR NAME CMD...: CMD in a fresh directory as refs.py runs the oracle (an empty stdin, HOME and TMPDIR inside
+# WORK, the fixed environment, 120 s): DIR/NAME.out, .err, .rc, .time
+run_one() {
+  local d=$1 nm=$2; shift 2
+  local cwd="$d/$nm.cwd"; rm -rf "$cwd"; mkdir -p "$cwd" "$WORK/home" "$WORK/tmp"
+  local t0 t1 rc=0
+  t0=$(date +%s%N)
+  (cd "$cwd" && timeout "${PYI_AOT_TIMEOUT:-120}" env -i PATH=/usr/bin:/bin HOME="$WORK/home" TMPDIR="$WORK/tmp" PYTHONHASHSEED=0 \
+     LC_ALL=C.UTF-8 TZ=UTC PYTHONIOENCODING=utf-8 PYTHONDONTWRITEBYTECODE=1 ARBACE_HOST_EXE="${ARBACE_HOST_EXE:-}" \
+     ${PYI_AOT_LOOP:+PYI_AOT_LOOP=1} PYI_AOT_COMPILER="$AOT/compiler.sh" PYI_AOT_STATS="$d/$nm.stats" \
+     "$@" < /dev/null > "$d/$nm.out" 2> "$d/$nm.err") || rc=$?
+  t1=$(date +%s%N)
+  [ $rc = 124 ] && rc=timeout
+  echo "$rc" > "$d/$nm.rc"; echo $(( (t1 - t0) / 1000000 )) > "$d/$nm.time"
+  rm -rf "$cwd"
+}
+# outcome DIR NAME: "STATUS SHA256 STDERR-LAST" of a run (the reference's fields)
+outcome() {
+  printf '%s\t%s\t%s\n' "$(cat "$1/$2.rc")" "$(sha256sum < "$1/$2.out" | cut -c1-64)" "$(grep -v '^[[:space:]]*$' "$1/$2.err" | tail -1)"
+}
+pyi_key() {
+  { (cd "$root" && find go/arbace/py.ae go/arbace/py go/arbace/libm.ae go/arbace/libm arbace/python arbace/python.ae \
+       arbace/repr/python tools/pydump/pydump.py -type f | LC_ALL=C sort | xargs sha256sum); sha256sum < "$1"; } | sha256sum | cut -c1-24
+}
+
+cmd_check_aot() {
+  local record="" pyi=1 ids=() id
+  while [ $# -gt 0 ]; do case $1 in --record) record=1; shift ;; --no-pyi) pyi=""; shift ;; --only) ids+=("$2"); shift 2 ;; *) die "check --aot: unknown $1" ;; esac; done
+  [ ${#ids[@]} -gt 0 ] || mapfile -t ids < <(aot_list)
+  aot_module
+  local d="$AOT/check" pc="$AOT/pyi-runs"; mkdir -p "$d" "$pc"
+  : > "$d/runs.tsv"
+  for id in "${ids[@]}"; do
+    local f nm pkg exe t0 ct
+    f=$(aot_file "$id"); [ -f "$f" ] || die "no program $id"
+    nm=${id//\//__}; pkg=p_$(echo "$nm" | tr -c 'A-Za-z0-9\n' '_'); exe="$AOT/bin/$pkg"
+    t0=$(date +%s%N); aot_compile "$pkg" "$f" "$exe"; ct=$(( ($(date +%s%N) - t0) / 1000000 ))
+    rm -f "$d/$nm".*
+    if [ -f "$exe.refused" ]; then
+      printf '%s\trefused\t%s\t%s\n' "$id" "$ct" "$(cat "$exe.refused")" >> "$d/runs.tsv"; echo "  $id: refused: $(cat "$exe.refused")"; continue
+    fi
+    if [ -f "$exe.crc" ]; then
+      cp "$exe.cout" "$d/$nm.aot.out"; cp "$exe.cerr" "$d/$nm.aot.err"; cp "$exe.crc" "$d/$nm.aot.rc"; echo 0 > "$d/$nm.aot.time"
+      cp "$exe.cout" "$d/$nm.loop.out"; cp "$exe.cerr" "$d/$nm.loop.err"; cp "$exe.crc" "$d/$nm.loop.rc"; echo 0 > "$d/$nm.loop.time"
+    else
+      run_one "$d" "$nm.aot" "$exe" "$f"
+      PYI_AOT_LOOP=1 run_one "$d" "$nm.loop" "$exe" "$f"
+    fi
+    local pk="" pyo=$'-\t-\t-'
+    if [ -n "$pyi" ]; then
+      pk=$(pyi_key "$f")
+      if [ ! -f "$pc/$pk.rc" ]; then run_one "$pc" "$pk" "$root/bin/pyi" run "$f"; fi
+      pyo=$(outcome "$pc" "$pk")
+    fi
+    printf '%s\tran\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$ct" "$(outcome "$d" "$nm.aot")" "$(outcome "$d" "$nm.loop")" "$pyo" \
+      "$(cat "$d/$nm.aot.time")" "$(cat "$d/$nm.loop.time")" "$(cat "$pc/$pk.time" 2>/dev/null || echo -)" >> "$d/runs.tsv"
+    [ -f "$d/$nm.aot.stats" ] && sed "s|^|$id\t|" "$d/$nm.aot.stats" >> "$d/stats.tsv"
+    rm -f "$exe"
+    echo "  $id: compiled $(cat "$d/$nm.aot.rc"), loop $(cat "$d/$nm.loop.rc")${pk:+, pyi $(cat "$pc/$pk.rc")}"
+  done
+  aot_cache_trim
+  local arch; case $(uname -m) in x86_64) arch=amd64 ;; aarch64) arch=arm64 ;; *) arch=$(uname -m) ;; esac
+  pa_arbace_aot judge --runs "$d/runs.tsv" --ref "$REF" --classes "$root/test/python/divergences-aot.edn" \
+    --results "$d/results.edn" ${record:+--record "$root/test/python/check-aot-linux-$arch.edn"}
+}
+pa_arbace_aot() {
+  ARBACE_PATH="$root" GOMEMLIMIT=${PYI_GOMEMLIMIT:-1500MiB} GOMAXPROCS=${PYI_THREADS:-4} "$(arbace_exe)" -m arbace.python.aot "$@"
+}
+# aot_cache_trim: Go's cache of the compiled programs kept under 2 GB
+aot_cache_trim() {
+  local c=${PYI_AOT_GOCACHE:-$AOT/gocache}
+  [ -d "$c" ] || return 0
+  if [ "$(du -sm "$c" | cut -f1)" -gt "${PYI_AOT_GOCACHE_MB:-2000}" ]; then aot_go clean -cache; fi
+}
+
+# bench [--pyi] [--record] [BM...]: pyperformance's pure-Python benchmarks (test/python/bench/benchmarks.tsv) as plain
+# programs with fixed loops (the pyperf stand-in test/python/bench/pyperf.py), each run by CPython, compiled (pyi's AOT)
+# and on the loop of the same executable (and with --pyi by pyi on goi): the whole process's seconds, the outputs
+# compared with CPython's; --record writes test/python/bench-aot-linux-ARCH.edn
+cmd_bench() {
+  local record="" pyi="" bms=() b loops
+  while [ $# -gt 0 ]; do case $1 in --record) record=1; shift ;; --pyi) pyi=1; shift ;; *) bms+=("$1"); shift ;; esac; done
+  local src="$root/.tmp/repr-python/pyperformance-1.14.0/benchmarks"
+  [ -d "$src" ] || "$root/bin/repr-python" pins --fetch >/dev/null
+  aot_module
+  local d="$AOT/bench"; mkdir -p "$d"; : > "$d/bench.tsv"
+  while IFS=$'\t' read -r b loops; do
+    case $b in '#'*|'') continue ;; esac
+    if [ ${#bms[@]} -gt 0 ]; then case " ${bms[*]} " in *" $b "*) ;; *) continue ;; esac; fi
+    local w="$d/$b"; rm -rf "$w"; mkdir -p "$w"
+    cp "$src/$b/run_benchmark.py" "$root/test/python/bench/pyperf.py" "$w/"
+    echo "LOOPS = $loops" > "$w/pyperf_loops.py"
+    run_one "$d" "$b.cpython" python3 -s -B "$w/run_benchmark.py"
+    local pkg=p_bench_$b exe="$AOT/bin/p_bench_$b" ct t0
+    t0=$(date +%s%N); aot_compile "$pkg" "$w/run_benchmark.py" "$exe"; ct=$(( ($(date +%s%N) - t0) / 1000000 ))
+    local st=ran why=""
+    if [ -f "$exe.refused" ]; then st=refused; why=$(cat "$exe.refused")
+    else
+      run_one "$d" "$b.aot" "$exe" "$w/run_benchmark.py"
+      PYI_AOT_LOOP=1 run_one "$d" "$b.loop" "$exe" "$w/run_benchmark.py"
+      [ -n "$pyi" ] && run_one "$d" "$b.pyi" "$root/bin/pyi" run "$w/run_benchmark.py"
+      rm -f "$exe"
+      if [ "$(outcome "$d" "$b.aot")" != "$(outcome "$d" "$b.cpython")" ]; then st=differs; why="$(grep -v '^[[:space:]]*$' "$d/$b.aot.err" | tail -1)"; fi
+    fi
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$b" "$loops" "$st" "$(cat "$d/$b.cpython.time")" "$(cat "$d/$b.aot.time" 2>/dev/null || echo -)" \
+      "$(cat "$d/$b.loop.time" 2>/dev/null || echo -)" "$(cat "$d/$b.pyi.time" 2>/dev/null || echo -)" "$ct" "$why" | tee -a "$d/bench.tsv"
+  done < "$root/test/python/bench/benchmarks.tsv"
+  awk -F'\t' '$3 == "ran" {n++; c += $4; a += $5; l += $6} END {if (n) printf "bench: %d benchmarks ran as CPython: CPython %d ms, compiled %d ms, the loop %d ms (loop/compiled %.2f, compiled/CPython %.1f)\n", n, c, a, l, l / a, a / c}' "$d/bench.tsv"
+  if [ -n "$record" ]; then
+    local arch; case $(uname -m) in x86_64) arch=amd64 ;; aarch64) arch=arm64 ;; *) arch=$(uname -m) ;; esac
+    { echo ";; pyi's AOT's speed (bin/pyi bench --record; doc/python/PYTHON-SURVEY.md, \"As built: PY8\"): pyperformance 1.14.0's"
+      echo ";; pure-Python benchmarks as plain programs (test/python/bench), the whole process's milliseconds on the recording"
+      echo ";; machine ($(uname -m), $(date -u +%F)): CPython 3.14.10, compiled, the loop of the same executable, pyi on goi (- not run);"
+      echo ";; :result :ran (the output CPython's), :differs or :refused with the reason. Machine-dependent: not a reference."
+      awk -F'\t' 'function esc(s) { gsub(/[\\"]/, "_", s); return s } {printf "{:id \"%s\" :loops %s :result :%s :cpython-ms %s :aot-ms %s :loop-ms %s :pyi-ms %s :compile-ms %s%s}\n", $1, $2, $3, $4, ($5 == "-" ? "nil" : $5), ($6 == "-" ? "nil" : $6), ($7 == "-" ? "nil" : $7), $8, ($9 == "" ? "" : " :reason \"" esc($9) "\"")}' "$d/bench.tsv"
+    } > "$root/test/python/bench-aot-linux-$arch.edn"
+  fi
+}
+
 cmd_aot() {
   [ $# -ge 1 ] || die "usage: bin/pyi aot FILE.py [ARGS...]"
   local f argv0=$1; shift
@@ -515,5 +642,7 @@ case "${1:-}" in
   lib-test) shift; mkdir -p "$WORK"; cmd_lib_test "$@" ;;
   runtime) shift; mkdir -p "$WORK"; cmd_runtime "$@" ;;
   aot) shift; mkdir -p "$WORK"; cmd_aot "$@" ;;
+  bench) shift; mkdir -p "$WORK"; cmd_bench "$@" ;;
+  check) shift; mkdir -p "$WORK"; [ "${1:-}" = --aot ] || die "usage: bin/pyi check --aot [--record] [--no-pyi] [--only ID]..."; shift; cmd_check_aot "$@" ;;
   *) sed -n '2,51p' "$0"; exit 2 ;;
 esac
