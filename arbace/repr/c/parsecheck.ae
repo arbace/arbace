@@ -8,8 +8,10 @@
   corpora with tokens deleted, duplicated, swapped and inserted, accepted or refused alike."
   (:require [arbace.repr.c.lex :as lex]
             [arbace.repr.c.parse :as parse]
+            [arbace.repr.c.pp :as pp]
             [arbace.repr.c.host :as host]
             [arbace.repr.c.ppcheck :as ppcheck]
+            [arbace.repr.c.results :as results]
             [arbace.string :as str])
   (:import [arbace.repr.c.lex Tok CFile]
            [java.util.concurrent Executors Callable]))
@@ -119,6 +121,8 @@
             cc (when re (read-or-nil (str work "/" rc "/cc-tree/" (:out re))))]
         (cond
           (nil? mine) :left
+          ;; GT8: a partial run (--only) that does not hold the reference leaves the control
+          (and (nil? re) (results/partial-names work rc)) :left
           (nil? cc) :not-judged
           (same-tree? cc mine) :passes
           :else :differs)))))
@@ -136,7 +140,9 @@
         base (str/trim (slurp (str d "/base.txt")))
         entries (read-string (slurp (str d "/files.edn")))
         known-all (read-string (slurp known-file))
-        known (get-in known-all [:parse (keyword id)] {})
+        ;; GT8: a partial run (--only) holds the known entries of its files alone to account for them
+        names (results/partial-names work id)
+        known (results/in-run (get-in known-all [:parse (keyword id)] {}) names)
         unclassed (for [[nm e] known :when (not (contains? (:classes known-all) (:class e)))] nm)
         h (assoc (host/load-host "test/c/host")
                  :pp-known-all (read-string (slurp "test/repr/c/pp-check-known.edn"))
@@ -162,7 +168,11 @@
                   (:with-errors report) " with errors, " (:seconds report) " s"
                   (when (seq failing) (str "; " (count failing) " failing"))
                   (when (seq stale) (str "; " (count stale) " known entries stale"))
-                  (when (seq unclassed) (str "; " (count unclassed) " known entries of no defined class"))))
+                  (when (seq unclassed) (str "; " (count unclassed) " known entries of no defined class"))
+                  (when names (str " (a partial run: " (count names) " listed files)"))))
+    ;; GT8: each failing file as FAIL CORPUS/NAME WHY (the rotation's :failed-re)
+    (results/print-failing id (concat (for [r failing] [(first r) (str (second r) " " (nth r 4 ""))]))
+                              (for [nm stale] [nm "known entry stale"]))
     (if (or (seq failing) (seq stale) (seq unclassed)) 1 0)))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -251,40 +261,101 @@
                            ",\"out\":" (pr-str (:out e)) "}\n"))))
     (println (str "mutants: " (count entries) " of " (count picked) " files (seed " seed ", " edits " edits each)"))))
 
+(defn- error-lines [ls] (filterv #(.startsWith ^String % "#error") ls))
+
+(defn- minus
+  "The lines of `a` not matched by one of `b`'s (a multiset difference, `a`'s order)."
+  [a b]
+  (loop [a (seq a) left (frequencies b) out []]
+    (if a
+      (let [l (first a) n (get left l 0)]
+        (if (pos? n) (recur (next a) (assoc left l (dec n)) out) (recur (next a) left (conj out l))))
+      out)))
+
+(defn- port-pp-errors
+  "The port's preprocessor's errors on the file of `entry` (files.edn's) as the tree dump writes them (#error lines): the
+  stream parse/parse pulls (its sources), pulled to the end without the parser; nil when it cannot be run."
+  [host ^String base entry]
+  (try
+    (let [cfg (host/config host (:fc entry) base)
+          nm (:read entry)
+          {errors :errors nxt :next} (pp/stream cfg [["<predefined>" (:predefined cfg)] ["<builtin>" parse/builtin] [nm nil]] nm)]
+      (loop [i 0] (when (and (< i 50000000) (not= :eof (.-ch ^Tok (nxt)))) (recur (inc i))))
+      (set (map #(str "#error\t" (lex/esc %)) errors)))
+    (catch Throwable _ nil)))
+
+(defn- directive-line?
+  "Whether an error line's position (\"file:line:col: ...\", the file read from `base` when relative) is on a
+  preprocessing directive's line (its logical line's first token #, or %:)."
+  [^String base ^String l]
+  (boolean
+    (when-let [[_ f ln] (re-find #"^#error\t(.*?):(\d+):\d+:" l)]
+      (let [file (let [x (java.io.File. ^String f)] (if (.isAbsolute x) x (java.io.File. base ^String f)))]
+        (when (.isFile file)
+          (let [ls (str/split-lines (slurp-latin1 (.getPath file)))
+                i (dec (Long/parseLong ln))]
+            (when (< -1 i (count ls))
+              (let [start (loop [j i] (if (and (pos? j) (.endsWith ^String (nth ls (dec j)) "\\")) (recur (dec j)) j))
+                    t (str/triml (nth ls start))]
+                (or (.startsWith t "#") (.startsWith t "%:"))))))))))
+
+(defn- pp-errors?
+  "CS268 (a): the trees equal and every differing error line the preprocessor's: each the port has and cc not among
+  the port's preprocessor's errors on the file (`pp-errs`, a thunk giving a set, called only then), each cc has and the port not on a directive's line.
+  Never when a differing error line is the parser's, nor when the errors differ only in their order."
+  [cc port pp-errs ^String base]
+  (let [tree-only (fn [ls] (remove #(.startsWith ^String % "#error") ls))
+        ce (error-lines cc)
+        pe (error-lines port)
+        port-only (minus pe ce)
+        cc-only (minus ce pe)]
+    (boolean
+      (and (= (tree-only cc) (tree-only port))
+           (or (seq port-only) (seq cc-only))
+           (or (empty? port-only) (when-let [ps (pp-errs)] (every? #(contains? ps %) port-only)))
+           (every? #(directive-line? base %) cc-only)))))
+
 (defn- guess-class
-  "A new known entry's class: the trees equal but for the errors (:pp-errors: the preprocessor's
-  errors, where the port follows gcc), or what the file uses that cc lacks."
-  [^String d ^String out ^String path]
+  "A new known entry's class, only one of the tree check's own (`classes`, the known file's :classes; CS268 (a): never
+  another check's, as arbace.repr.c.ppcheck/classify's): :pp-errors when the trees equal and the differing error lines
+  are the preprocessor's (pp-errors?; `pp-errs` a thunk giving the port's preprocessor's errors), else what the file
+  uses that cc lacks (trigraphs, UCNs), else nil (the file left out, printed)."
+  [classes ^String d ^String out ^String path ^String base pp-errs]
   (let [cc (some-> (read-or-nil (str d "/diff/" out ".cc")) norm)
         port (some-> (read-or-nil (str d "/diff/" out ".port")) norm)
-        tree-only (fn [ls] (remove #(.startsWith ^String % "#error") ls))
-        text (slurp-latin1 path)]
-    (cond
-      (and cc port (= (tree-only cc) (tree-only port))) :pp-errors
-      (re-find #"\?\?[=(/)'<!>-]" text) :trigraphs
-      (re-find #"\\[uU][0-9a-fA-F]{4}" text) :ucn-identifier
-      :else (ppcheck/classify path))))
+        text (slurp-latin1 path)
+        k (cond
+            (and cc port (pp-errors? cc port pp-errs base)) :pp-errors
+            (re-find #"\?\?[=(/)'<!>-]" text) :trigraphs
+            (re-find #"\\[uU][0-9a-fA-F]{4}" text) :ucn-identifier
+            :else nil)]
+    (when (contains? classes k) k)))
 
 (defn record
   "Rewrites test/repr/c/parse-check-known.edn's entries of the corpora `ids` from WORK: each file whose
   dumps differ (and that the token check's known file does not account for) with its class, kept or
-  guessed. A file of no class is not written (no placeholder class: queue 122, F1): it is printed and the result is the
+  guessed (guess-class: only a class of the known file's :classes, :pp-errors only when the differing error lines are
+  the preprocessor's, CS268 (a)). A file of no class is not written (no placeholder class: queue 122, F1): it is printed and the result is the
   number of such files (the caller fails)."
   ([^String work ids] (record work ids known-file))
   ([^String work ids ^String known-file]
   (let [known (read-string (slurp known-file))
         left (atom [])
+        host (delay (host/load-host "test/c/host"))
         known (reduce
                 (fn [known id]
                   (let [d (str work "/" id)
                         base (str/trim (slurp (str d "/base.txt")))
                         old (get-in known [:parse (keyword id)] {})
                         rows (map #(str/split % #"\t") (str/split-lines (slurp (str d "/files.tsv"))))
+                        ;; the files' entries (their configurations), read only when a guess needs the preprocessor
+                        entries (delay (into {} (for [e (read-string (slurp (str d "/files.edn")))] [(:name e) e])))
+                        pp-errs (fn [nm] (fn [] (when-let [e (get @entries nm)] (port-pp-errors @host base e))))
                         es (into (sorted-map)
                                  (keep (fn [[nm st]]
                                          (when (#{"differ" "known" "crash"} st)
                                            (if-let [e (or (get old nm)
-                                                          (when-let [k (guess-class d (str nm ".tsv") (str base "/" nm))] {:class k}))]
+                                                          (when-let [k (guess-class (:classes known) d (str nm ".tsv") (str base "/" nm) base (pp-errs nm))] {:class k}))]
                                              [nm e]
                                              (do (swap! left conj (str id " " nm ": " st)) nil)))))
                                  rows)]

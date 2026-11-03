@@ -709,3 +709,146 @@ PYS1-PYS18 and PYS20 all (a), as recommended. PYS19: the Mac VM peer does all of
 PY11, a standing line of queue tasks, each reviewed and merged on the main host), beginning now, beside GT8; the main host
 keeps GT8, the tag `arbace-reaps-4-crops-v1` and the other crops. Python stays out of `gate_key` and the gate (PYS18)
 until its row fits GT8's budget.
+
+## As built: PY1 (2026-11-03, the Mac VM, queue 174)
+
+- **The spec**, `doc/python/SPEC.md`: Python forms for every node of `Parser/Python.asdl` (3.14.10: 19 types, 113
+  constructors, 196 fields, 8 types with position attributes), the literals' spellings (§3: numbers, string and bytes
+  bodies as written with `:prefix` and `:quote`, `str-concat` for implicit concatenation, f-strings with `:debug` for
+  `=`, t-strings), `elif` kept, positions and `:full`'s tokens (§11), the error form (§12), the checklist (§13) and the
+  choices S1-S20 (§14). The operators the reader cannot read (`@`, `//`, `^`, `~`) take the Go and C forms' names
+  (S1). `ast.parse(type_comments=True)` rejects one file of `Lib/test` the plain parse accepts, so type comments come
+  from a second parse (S6).
+- **The pins**: the oracle in `tools/pydump/PYTHON_VERSION` (version, `sys.version`, the apk and its APKINDEX
+  checksum per architecture); the tarball in `test/python/corpora.edn` (SHA-256 checked against python.org's
+  published value and its Sigstore bundle's digest, SHA-512 against Alpine's APKBUILD), with five of its reference
+  files; the site-packages set as 20 Alpine apks fetched into `.tmp/` (not installed), pinned per architecture in
+  `tools/pydump/apks.sha256`, their `.py` files identical on x86_64 and aarch64.
+- **The corpora** (`test/python/corpora.edn`): `stdlib` (`Lib/` less `Lib/test`: 720 files, 335,637 lines),
+  `lib-test` (1,153 `.py` files, 667,670 lines; 433 test modules, 3,468 classes with 31,427 test methods counted
+  statically; 4 files `ast.parse` rejects, 1 more that only `type_comments=True` rejects), `language-core` (the 11
+  modules of §8.2: 28,302 lines, 1,140 test methods), `site-packages` (921 files, 330,603 lines), `samples` (6 files,
+  every node class of the `ast` covered).
+- **The checks**, `bin/repr-python pins --fetch|--count|--check`, `spec-check`, `samples` (the Makefile's
+  `repr-python-*`), light, out of `gate_key` and the gate (PYS18).
+
+## As built: PY2 (2026-11-03, the Mac VM, queue 175)
+
+- **The helper** `tools/pydump/pydump.py` (no build; run `python3 -I -S -B`): `tree` writes each file as Python forms in
+  the spec's vocabulary (the literals' spellings scanned in the source and evaluated back to their values; a target's
+  context marked for the converter), or `(python/error ...)`, with a TSV per file of the levels' digests (`ast.dump`;
+  the code without positions) and its seconds and peak RSS; `symtable` (PY5's reference) and `code`. Type comments
+  from a second parse, a file only `type_comments=True` rejects marked `:type-comments :rejected` (queue 174's
+  DECISION (a), decided by the user, 2026-11-03).
+- **The converter and the printer**, `arbace.repr.python.convert` and `.print`, and the command `arbace.repr.python`
+  (`convert`, `print`, `compare`), evaluated on stage 0 from the checkout (`ARBACE_PATH`; not embedded and out of the
+  keys: `arbace/j2g/embed.ae`, `bin/lib/version.bash`, the audit's hosts, PYS18 (a)).
+- **The round trip** `bin/repr-python roundtrip [--record]` (and `read`, `print`, `check`): levels 1-3 of §5.2 over
+  samples, stdlib, site-packages (the 20 pinned apks, queue 174's DECISION (a), decided by the user, 2026-11-03) and `Lib/test`, judged
+  against `test/python/roundtrip-known.edn` (two classes, both by rule: `:rejected`, the 4 files CPython rejects,
+  judged on its message; `:code-lines`, the code differing with the ast equal: the positions'). On the VM (aarch64, 8
+  CPUs), 2,800 files: level 1 2,796 of 2,796 read, level 2 all, level 3 all but 30 (3 stdlib, 21 site-packages, 6
+  `Lib/test`); about 4.5 minutes, the costs per corpus and stage in `test/python/roundtrip-costs.edn`.
+- **E7 corrected**: CPython 3.14's code without positions is not independent of the lines: a class body stores
+  `__firstlineno__`, the compiler fuses `STORE_FAST`/`LOAD_FAST` pairs only within a line, inserts `NOP`s by line and
+  splits exception ranges and match statements' `SWAP`s by line; the level's digest normalizes the first ones
+  (`code_digest`), the rest are `:code-lines`.
+
+## As built: PY3 (2026-11-03, the Mac VM, queue 176)
+
+- **Mode `:full`** (doc/python/SPEC.md §11): the helper's `tree --full` writes every node with attributes in its long
+  spelling with `:pos`, and the module's map with `:mode :full`, `:tokens` (the token stream as one flat vector, the
+  text between tokens as `:ws`; the texts concatenated are the decoded file), `:encoding` (when not UTF-8) and `:bom`.
+- **The converter** checks the forms against the tokens (every position on a token's edge, every leaf's spelling its
+  token's text: 4.1 million positions and 2.07 million leaves over the corpora, 9 non-ASCII names whose tokens differ
+  from the ast's by NFKC, not compared) and, without positions, against the `:lines` read of the same file.
+- **The round trip** `bin/repr-python roundtrip --text [--record]`: level 4, the print's bytes equal to the original's;
+  level 5, `marshal` of the code compiled from each equal, positions included; against `test/python/full-known.edn`.
+  On the VM: samples 6, stdlib 720, site-packages 921 of 921, `Lib/test` 1,148 of 1,149 read (its 4 rejections as at
+  PY2), all at both levels; the one other, `Lib/test/encoded_modules/module_koi8_r.py`, is `:charset` (the runtime has
+  no KOI8-R charset: by design, queue 176's DECISION (a), the user, 2026-11-03: jrt's charsets are the root/English set of the locales decision of 2026-10-11). The 30 `:code-lines` files of PY2 pass both levels in `:full`. About
+  8.5 minutes, the costs in `test/python/roundtrip-text-costs.edn`.
+- Type comments and the site-packages set as decided for queue 174, `:code-lines` as decided for 175 (the user,
+  2026-11-03).
+
+## As built: PY4 (2026-11-03, the Mac VM, queue 177)
+
+- **The synthetic corpus** (§8.3, GT8.6): `test/python/gen.ae`, run on stage 0 by `bin/pyi gen`, writes 145 programs into
+  `test/python/synth/`: `ops/` (38: every binary, comparison and augmented operator over every pair of 15 operands, the
+  unary and boolean operators), `datamodel/` (45: one special method or protocol each, every binary operator's own,
+  reflected and in-place method among them), `builtins/` (17: every public method of str, bytes, bytearray, list, tuple,
+  dict, set, frozenset, int, float, complex, bool, range, memoryview and slice, and the builtin functions), `constructs/`
+  (32: together every node class of the ast), `paths/` (13: generators' close, throw and delegation, coroutines,
+  async generators, context managers, `except*`, `finally`, recursion, an uncaught exception, `sys.exit`). Each prints
+  reprs and exception names only. `bin/pyi gen --check` regenerates them equal to the committed files and checks the
+  coverage. The grammar's `invalid_*` rules (§8.3 (1)'s error programs) are not generated yet.
+- **The references** (GTS207 (a), PYS14 (a), PYS15 (a)): `bin/pyi record-ref` runs every program (the synthetic corpus and
+  the samples) by CPython 3.14.10 as `python3 -s -P -B` (not `-I`, which would ignore `PYTHONHASHSEED`) with
+  `PYTHONHASHSEED=0`, `LC_ALL=C.UTF-8`, `TZ=UTC`, `PYTHONIOENCODING=utf-8`, HOME and TMPDIR under `.tmp`, twice, into
+  `test/python/ref-cpython314.edn` (151 references, none excluded), and `Lib/test`'s 11 language-core modules by regrtest
+  (`-u none`: no network or other resource), each test method's outcome, into `test/python/ref-cpython314-lib-test.edn`
+  (1,149 methods: 1,137 ok, 8 skipped, 4 excluded as the runner's: subprocesses run `-I` cannot import the tarball's test
+  package). An entry the two runs disagree on, or whose output names an address, the architecture, the C library or a
+  size, is written `:excluded`. `--check` reproduces every reference twice (7.7 s). Seconds per program and module in
+  `test/python/ref-costs.edn` and `ref-costs-lib-test.edn` (all 151 programs in 1.1 s, the 11 modules in 2.6 s).
+- pyperformance is not pinned: the pin is the user's (queue 177's DECISION).
+
+## Decided (2026-11-03, the user): pyperformance pinned (queue 177's DECISION (a))
+
+pyperformance 1.14.0's sdist (`pyperformance-1.14.0.tar.gz`, 8,796,350 bytes, SHA-256 `91f74393...a238a8aa`, PyPI's published
+digest) is the speed reference for pyi and its AOT: pinned in `test/python/corpora.edn` (`:pyperformance-1.14.0`), fetched into
+`.tmp/` and read in place by `bin/repr-python pins --fetch`, checked by `pins --check`; its pure-Python benchmarks to run as plain
+programs with fixed loop counts, their output recorded as references (pyperf's timing runner not used).
+
+## As built: PY5a (2026-11-03, the Mac VM, queue 179a)
+
+PY5 split into steps reviewed one by one (queue 179's brief); PY5a is the scope analysis and the compiler, specified in
+[PYI-SPEC.md](PYI-SPEC.md):
+
+- **The scope analysis** `arbace.python.scope`: a port of CPython 3.14.10's `Python/symtable.c` (and `future.c`'s
+  `__future__` check), its table printed in the form of the helper's new mode `pydump.py scopes` (CPython's own
+  `_symtable`). `bin/pyi scope-check` over every read corpus: 2,980 files (samples 6, synthetic 145, errors 75, stdlib
+  720, site-packages 921, lib-test 1,153), every table equal block for block and flag for flag, every rejection with
+  CPython's message; `test/python/scope-known.edn` empty. The corpus `errors` (`test/python/errors/`, Arbace's): one
+  program per message of `symtable.c`, and one per message of `codegen.c` the parser lets through (`compile-*.py`).
+- **The compiler** `arbace.python.compile` (after `codegen.c`) to pyi's IR `arbace.python.ir` (§3 of the spec: code
+  objects as maps, a stack machine with an exception table built from a handler stack as CPython's flowgraph builds
+  it), and its verifier (stack depths by a worklist, handlers, indices, returns). `bin/pyi compile-check` over the same
+  corpora: every file CPython compiles compiles and verifies (about 5.3 million instructions), every file CPython's
+  compiler rejects is rejected with its message; `test/python/compile-known.edn` empty.
+- **The keys** (PYS18 (a)): `arbace/python.ae`, `arbace/python/` and `go/arbace/py` out of `gate_key`, the embedded
+  sources and the audit's tables, as the other crops'; `test/gate/gate-key-crops-test.bash` covers them.
+- Not yet: running the IR (PY5b), so its behaviour is unchecked; lines come only from forms of mode `:full`.
+
+## Decided (2026-11-03, the user): PY5a's DECISIONs and the split of PY5 (queue 179a)
+
+- **Where pyi's runtime runs before a re-seed: (a).** `go/arbace/py` runs interpreted by goi on stage 0 (loaded from
+  `ARBACE_PATH` as any interpreted package of Go forms), out of `gate_key`, and is compiled by a later batched re-seed,
+  when it is also listed in goi's table (`go/arbace/gotable.edn` is in `gate_key`: listing it is the re-seed's step).
+- **Traceback lines: (a).** pyi compiles the forms of mode `:full` (their `:pos`) when it runs a program; the checks'
+  `:lines` dumps stay as they are.
+- **The split of PY5** as 179a proposed it: PY5b (the machine and the core types), PY5c (the data model), PY5d
+  (suspension and exceptions), PY5e (builtins, `sys`, the REPL and `Lib/test`'s core). By the user's order, PY5b0 first: the
+  interfaces and the skeleton, small, reported and merged early; then the rest of PY5b, and PY5c, PY5d and PY5e
+  concurrently (c and d independent; e alongside, its dunder-dependent part and the `Lib/test` core after c), one owner
+  per shared file (doc/python/PYI-SPEC.md §9), rebased often, each sub-branch reported in turn.
+
+## As built: PY5b (2026-11-03, the Mac VM, queue 186)
+
+PY5b0's skeleton (PYI-SPEC.md §7-§9) and then the rest of PY5b, the core types, in `go/arbace/py` (Go forms of mode `:full`,
+PY5b0's DECISION (a), decided by the user, 2026-11-03):
+
+- **The types**: `int` of arbitrary precision; `float` (CPython's repr, divmod, a pow correctly rounded in double-double);
+  `complex` (3.14's mixed-mode arithmetic, `_Py_c_quot`, `c_powi`); `str` as code points with lone surrogates (WTF-8);
+  `bytes` with the utf-8, ascii and latin-1 codecs; `tuple`, `list` (a stable merge sort), `dict` with its views;
+  `set` and `frozenset` with CPython's table, so iteration order is CPython's; `range`, `slice`; printf-style `%`;
+  CPython 3.14's exception hierarchy with its fields; functions', code objects', frames' and tracebacks' attributes; the
+  default exception hook's chains and source lines. Hashes are CPython's under `PYTHONHASHSEED=0` (siphash13, the
+  numeric modulus, xxHash's tuple rounds), checked against the oracle's values.
+- **The loop**: every operation PY5b owns; hooks for the other sub-milestones (generators, bound methods, subclasses'
+  values, `OnTypesReady`, C3 for preset bases).
+- **The compiler**: decorators applied nearest first (PY5c's finding); modes `:eval` and `:single` (`print-expr`); compile
+  errors located; `bin/pyi compile-check --full` over every corpus.
+- **The exit**: of `ops/` (38), `constructs/` (32) and the samples (6), with a scratch stand-in for PY5e's builtins,
+  52 run equal to the references; the other 24 are classed: 2 by the last digit of `math`'s transcendental functions
+  (Go's, not musl's: PY6's `math` port), 22 by an operation or builtin of PY5c, PY5d or PY5e.

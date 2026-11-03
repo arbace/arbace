@@ -22,12 +22,20 @@
 #   the comparison's other side (CI_INTERP then names .tmp/ci-aot/interp by default; without it and without
 #   CI_INTERP the runs are not compared with the interpreter's: CS214)
 #   CI_THREADS (default 3), CI_JOBS (default 4, at most 4), CI_GO_P (default 2), CI_SHARD (default 40 programs)
+#   ARBACE_COVER_DIR (doc/GATE-SURVEY.md, GT8.3, GTS206 (a); bin/lib/cover.bash, bin/cover): each shard built with Go's
+#   coverage of ci's back end as the compiled programs use it (-cover -coverpkg=arbace/ci,arbace/crt and the shard's main,
+#   the cover build's hook tools/covsubset/hook/cover.go in Go's internal/coverage/cfile by an -overlay entry, -tags
+#   arbacecover), each program's run with its GOCOVERDIR, ARBACE_COVER_DIR/ci-aot/ID, its budget CI_COVER_BUDGET_X times
+#   (default 2); and cf2g's (ci-cf2g/ID): each program read, checked, built and translated by a compile-list process of
+#   its own on the cover build's executable (compiled: faster than the tools' host's evaluated one), CI_JOBS at once
 # Writes under .tmp/ci-aot/ (CI_AOT_WORK): CORPUS/list.tsv, nodes.tsv, run.tsv, build.log; results.edn.
 set -uo pipefail
 root=$(cd "$(dirname "$0")/../../.." && pwd)
 . "$root/bin/lib/tmpdir.bash"
 . "$root/bin/lib/tools.bash"
 . "$root/bin/lib/ci/budget.bash"
+. "$root/bin/lib/gate-cache.bash"
+. "$root/bin/lib/cover.bash" # ARBACE_COVER_DIR: a GOCOVERDIR per program (GT8.3)
 cd "$root"
 
 # every corpus test/c/ref-gcc15.edn records (queue 150, the user 2026-11-02: the gcc-*-run groups and ci-run were left out, so
@@ -68,6 +76,29 @@ go=${ARBACE_GOROOT:-/root/tamago-go}/bin/go
 mod=$work/go
 cirun=${CIRUN:-$root/.tmp/ci/cirun}
 mkdir -p "$work"
+# GT8.3: the shards' cover flags (cover_go_flags' for the j2g programs, here over the module's packages)
+cover_x=1 cflags=()
+if [ -n "${ARBACE_COVER_DIR:-}" ]; then
+  cover_x=${CI_COVER_BUDGET_X:-2}
+  printf '{"Replace": {"%s": "%s"}}\n' "${ARBACE_GOROOT:-/root/tamago-go}/src/internal/coverage/cfile/zz_arbace_cover.go" "$root/tools/covsubset/hook/cover.go" > "$work/cover-overlay.json"
+  cflags=(-overlay "$work/cover-overlay.json" -cover -covermode=set -coverpkg=arbace/ci,arbace/crt,arbace/shard -tags=arbacecover)
+  cexe=$(cover_exe "$root") || exit 1
+  echo "ci check --aot: coverage into $ARBACE_COVER_DIR (ci-aot, ci-cf2g on $cexe)" >&2
+fi
+# compile1 LINE: under coverage one program of a shard's list compiled by its own process on the cover build, its
+# package moved into the module, its nodes.tsv line printed
+compile1() {
+  local rw c id=${1%%$'\t'*} pkg=${1##*$'\t'}
+  rw=$(mktemp -d "$work/compile.XXXXXX")
+  printf '%s\n' "$1" > "$rw/one.list"
+  c=$(cover_env ci-cf2g "$id")
+  (cd "$root" && export "$c" && env -u ARBACE_PATH_FIRST -u ARBACE_NO_AOT -u ARBACE_NO_IMAGE GOMAXPROCS=4 GOMEMLIMIT=${CI_GOMEMLIMIT:-1800MiB} \
+     "$cexe" -m arbace.c.cf2g compile-list test/c/host "$rw" "$rw/one.list" 1) > "$rw/log" 2>&1
+  cover_settle ci-cf2g "$id"
+  [ -d "$rw/progs/$pkg" ] && mv "$rw/progs/$pkg" "$mod/progs/$pkg"
+  if [ -s "$rw/nodes.tsv" ]; then grep . "$rw/nodes.tsv"; else printf '%s\tbuild-error\t\tcompile-list: %s\n' "$id" "$(tail -1 "$rw/log" | tr '\t' ' ' | cut -c1-200)"; fi
+  rm -rf "$rw"
+}
 IFS=, read -r -a ids <<< "$corpora"
 # the last run's subset (review 027, finding 3): a run with --only or --sample leaves CORPUS/subset, which --judge reads, so
 # --judge --record never rewrites a corpus's record from a subset either
@@ -103,7 +134,8 @@ if [ -z "$judge" ]; then
     if [ -n "$only" ] || [ "$sample" != 1 ]; then printf '%s %s\n' "${only:-all}" "$sample" > "$d/subset"; else rm -f "$d/subset"; fi
     if [ ! -s "$d/gcc.list" ]; then
       # the corpus's list made here, never taken from another work directory (review 006, finding 11)
-      arbace_tool -m arbace.repr.c.ppcheck lists "$work" "$roots" "$id" > "$d.lists.log" 2>&1 || { cat "$d.lists.log"; exit 1; }
+      # GT8 (review 188, L2): the run corpora's lists whole whatever the caller exported (their --only is their own)
+      REPR_C_ONLY= arbace_tool -m arbace.repr.c.ppcheck lists "$work" "$roots" "$id" > "$d.lists.log" 2>&1 || { cat "$d.lists.log"; exit 1; }
     fi
     base=$(cat "$d/base.txt")
     grep -o '{:id "[^"]*" :status :no-build' test/c/ref-gcc15.edn | cut -d'"' -f2 > "$d/no-build.txt"
@@ -122,7 +154,12 @@ if [ -z "$judge" ]; then
       # the shard's programs read, built and translated: package pN of the shard
       awk -F'\t' '{ print $0 "\tp" NR }' "$s" > "$s.list"
       rm -rf "$mod/progs" "$mod/shard"; mkdir -p "$mod/progs" "$mod/shard"
+      if [ -n "${ARBACE_COVER_DIR:-}" ]; then
+        export -f compile1 cover_env cover_settle; export work root mod cexe ARBACE_COVER_DIR
+        tr '\n' '\0' < "$s.list" | xargs -0 -P "$jobs" -I{} bash -c 'compile1 "$1"' _ {} > "$mod/nodes.tsv" 2> "$s.compile.log"
+      else
       (cd "$root" && GOMAXPROCS=4 GOMEMLIMIT=${CI_GOMEMLIMIT:-1800MiB} arbace_tool -m arbace.c.cf2g compile-list test/c/host "$mod" "$s.list" "$threads") > "$s.compile.log" 2>&1
+      fi
       [ -f "$mod/nodes.tsv" ] && cat "$mod/nodes.tsv" >> "$d/nodes.tsv" && rm -f "$mod/nodes.tsv"
       # the shard's executable: a main naming each translated package
       awk -F'\t' '$2 == "ok" {print $1}' "$d/nodes.tsv" | sort > "$s.ok"
@@ -139,7 +176,7 @@ if [ -z "$judge" ]; then
         } > "$mod/shard/main.go"
         exe=$work/shard.exe
         if ! (cd "$mod" && CGO_ENABLED=0 GOFLAGS=-mod=mod GOCACHE=${CI_GOCACHE:-$root/.tmp/gocache} GOMAXPROCS=4 \
-                "$go" build -p "$gop" -trimpath -o "$exe" ./shard) > "$s.build.log" 2>&1; then
+                "$go" build -p "$gop" -trimpath ${cflags[@]+"${cflags[@]}"} -o "$exe" ./shard) > "$s.build.log" 2>&1; then
           # the shard did not build: each package built alone, those whose Go does not compile taken out
           cut -f2 "$s.built" | while read -r p; do
             if ! (cd "$mod" && CGO_ENABLED=0 GOFLAGS=-mod=mod GOCACHE=${CI_GOCACHE:-$root/.tmp/gocache} GOMAXPROCS=4 "$go" build -p "$gop" -o "$work/pkg.a" "./progs/$p") > "$s.$p.log" 2>&1; then
@@ -151,12 +188,14 @@ if [ -z "$judge" ]; then
             rm -f "$work/pkg.a" "$s.$p.log"
           done
           [ -s "$s.built" ] && (cd "$mod" && CGO_ENABLED=0 GOFLAGS=-mod=mod GOCACHE=${CI_GOCACHE:-$root/.tmp/gocache} GOMAXPROCS=4 \
-                "$go" build -p "$gop" -trimpath -o "$exe" ./shard) >> "$s.build.log" 2>&1
+                "$go" build -p "$gop" -trimpath ${cflags[@]+"${cflags[@]}"} -o "$exe" ./shard) >> "$s.build.log" 2>&1
         fi
         run1() { # ID PKG
           local rd st sum
           rd=$(mktemp -d "$work/run.XXXXXX")
-          (cd "$rd" && timeout "$(ci_budget "$1")" "$exe" "$2" < "$work/empty-stdin" > out 2> err); st=$?
+          (cd "$rd" && { [ -z "${ARBACE_COVER_DIR:-}" ] || export "$(cover_env ci-aot "$1")"; } \
+             && timeout "$(( $(ci_budget "$1") * cover_x ))" "$exe" "$2" < "$work/empty-stdin" > out 2> err); st=$?
+          cover_settle ci-aot "$1"
           [ $st = 124 ] && st=timeout
           sum=$(sha256sum < "$rd/out" | cut -d' ' -f1)
           printf '%s\t%s\t%s\t%s\t%s\n' "$1" "$st" "$sum" "$(wc -c < "$rd/out")" "$(grep -m1 '^\(ciaot: \(fault\|internal\)\|fatal error: \|runtime: \)' "$rd/err" | cut -c1-200 | tr '\t' ' ')"
@@ -172,7 +211,7 @@ if [ -z "$judge" ]; then
         }
         ilog=$work/interp/$id/run.tsv
         mkdir -p "$work/interp/$id"
-        export -f run1 ci_budget; export work exe mod ilog cirun root
+        export -f run1 ci_budget cover_env cover_settle; export work exe mod ilog cirun root cover_x
         # ID PKG lines (an id may hold spaces): the package names the program, the id is looked up again
         [ -x "$exe" ] && cut -f2 "$s.built" | xargs -P "$jobs" -I{} bash -c 'run1 "$(awk -F"\t" -v p="$1" '"'"'$2 == p {print $1}'"'"' "$2")" "$1"' _ {} "$s.built" >> "$d/run.tsv"
         for f in "$ilog".[0-9]*; do [ -f "$f" ] && cat "$f" >> "$ilog" && rm -f "$f"; done

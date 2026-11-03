@@ -18,6 +18,12 @@
 #                        64-CPU host, 3.2 times its 10 s, so a CPU limit of twice the wall limit was too
 #                        tight (the first audit of goi-check) and five times holds the programs measured.
 #
+#   ARBACE_MEM_GIB       each limited program's memory cap in GiB (default 16; 0: none; 2026-11-03, after 25 OOM kills
+#                        from an interpreter's leak, 5 of them other agents' processes): GOMEMLIMIT at three quarters of it
+#                        when the caller set none (Go's collector works hard before it), and a hard address-space limit
+#                        (ulimit -v) at the cap, so a leaking program fails alone (Go: "out of memory", status 2) instead of
+#                        waking the host's OOM killer on its neighbours. A test that needs more names its own, as a check's
+#                        heavy cases do
 #   ARBACE_CPU_LOG       a file: each limited program's STATUS, WALL, USER, SYS seconds and command
 #                        appended to it, tab-separated (GTS33 (a): bin/gate --clean measures the quiet
 #                        CPU times its limits are to be recorded from)
@@ -25,14 +31,22 @@
 # Callers read 124, 137 and 152 as "timeout" and, where the check has one, take the quiet retry (run alone,
 # at the step's end) before they count it. Of the three, 152 (SIGXCPU) never comes from ulimit -t, which sets
 # the soft and the hard limit equal, so the kernel sends SIGKILL (test/gate/limit-test.bash cpu-kill); it is
-# read for a program's own exit 152. 137 is ambiguous: the CPU limit, the wall cap's -k after a SIGTERM
+# read for a program's own exit 152 and for a cover run's CPU limit (limited_cpu's soft limit). 137 is ambiguous: the CPU limit, the wall cap's -k after a SIGTERM
 # survivor, a self-kill, or the OOM killer (a memory kill is read as a timeout and run again alone). Where the
 # distinction matters, ARBACE_CPU_LOG's user and system seconds tell a CPU kill (about the limit) from the rest
 # (review 075, finding 6). Exported for the subshells and xargs that
 # run actions: `export -f limited limited_cpu` where they are set up.
 
 limited_cpu() {
-  local cpu=$1 wall=$2; shift 2
+  local cpu=$1 wall=$2 lim='ulimit -t "$1"; shift; exec "$@"'; shift 2
+  local mem=${ARBACE_MEM_GIB:-16} memlim=
+  # the memory cap (ARBACE_MEM_GIB above): before the CPU limit in the same inline shell, so xargs' exported copy keeps it
+  [ "$mem" = 0 ] || memlim="ulimit -v $((mem * 1048576)); export GOMEMLIMIT=\${GOMEMLIMIT:-$((mem * 768))MiB}; "
+  # under ARBACE_COVER_DIR (GT8.3, bin/lib/cover.bash) a soft limit at the limit and the hard one 5 s above, so the
+  # kernel sends SIGXCPU first and the cover build's hook writes the counters before the program ends (status 152,
+  # a timeout as ever; review 182, finding 4). Inline, not a function: limited_cpu is exported alone to xargs' shells
+  [ -z "${ARBACE_COVER_DIR:-}" ] || lim='ulimit -S -t "$1"; ulimit -H -t "$(($1 + 5))"; shift; exec "$@"'
+  lim=$memlim$lim
   if [ -n "${ARBACE_CPU_LOG:-}" ]; then
     # GTS33 (a)'s measurement (bin/gate --clean): each program's status, wall, user and system seconds
     # and command appended to ARBACE_CPU_LOG, one line each. time runs timeout, not the reverse (review 075,
@@ -40,7 +54,7 @@ limited_cpu() {
     # SIGTERM (137, as without the log; time inside timeout died at the SIGTERM, timeout returned 124 without
     # -k and left the program orphaned, a hang under strace -f) and a wall-cap row has its times
     local tf=$ARBACE_CPU_LOG.$BASHPID st
-    /usr/bin/time -f '%e %U %S' -o "$tf" timeout -k 5 "$wall" bash -c 'ulimit -t "$1"; shift; exec "$@"' limited "$cpu" "$@"; st=$?
+    /usr/bin/time -f '%e %U %S' -o "$tf" timeout -k 5 "$wall" bash -c "$lim" limited "$cpu" "$@"; st=$?
     # time exits with the signal's number when the program was killed: the status a shell gives
     local sig; sig=$(sed -n 's/^Command terminated by signal \([0-9]*\)$/\1/p' "$tf" 2>"$tf.err")
     [ -n "$sig" ] && [ "$st" = "$sig" ] && st=$((128 + sig))
@@ -48,7 +62,7 @@ limited_cpu() {
     rm -f "$tf" "$tf.err"
     return $st
   fi
-  timeout -k 5 "$wall" bash -c 'ulimit -t "$1"; shift; exec "$@"' limited "$cpu" "$@"
+  timeout -k 5 "$wall" bash -c "$lim" limited "$cpu" "$@"
 }
 limited() {
   local t=$1; shift

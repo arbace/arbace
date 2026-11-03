@@ -3278,3 +3278,272 @@ All (a), as recommended: the essential budget is the gate's wall time; equal per
 the nightly tier every step over its subset plus a rotating slice, seven nights; the clean run over the compressed corpora,
 checking the rotation's record; the C subset rule for every crop; Go's coverage builds kept by key, run at night; synthetic
 corpora against the same references; Java's `speed` curation inside GT8; acceptance as GTS209.
+
+## As built: GT8.4, GT8.7 (write-ahead, branch `gt8-nightly`, 2026-11-03)
+
+GTS202 (a), GTS203 (a), GTS204 (a) in the planner's way: the rotation is data in `test/gate/steps.edn`, decided by
+`test/gate/plan.ae`, noted by `bin/lib/gate-run.bash`, its record in the store of passes.
+
+**The declaration.** A parted step names how its tool takes a file list and where the lists come from:
+`:rotate {:only "--only {list}" :universe RECORD :subset CORPORA :failed-re ERE}`. RECORD is the committed record of the
+part's check (one `["ID" ...]` a line; the part's ids are those under `PART/`): the universe is what the check judges, read
+without the corpus's tree. CORPORA's map `:id :PART` gives `:subset` (names under the corpus, as VM report 161 writes them).
+`:only` is appended to `:cmd` (or put at `{only}`), its `{list}` the runner's `"$GATE_LIST"` (the planner's
+`LOGS/rotation/NAME.list`): no path in a key. `:rotate` itself is not keyed: a part run whole keeps its key. Declared today on
+`c-check` and `c-aot` (`bin/ci check [--aot] --only FILE`, ids `CORPUS/NAME`; `:failed-re "^FAIL ([^ ]+).*$"`, the judge's
+`FAIL ID WHY` lines).
+
+**The tiers** (GT8.7). `bin/gate` (essential) is untouched. `bin/gate --full` runs every part whole, as before.
+`bin/gate --nightly [--plan]` (mode `nightly`: `--full`'s phases) expands each rotated part whose subset is smaller than
+its universe into two checks: `NAME.PART.sub`, the subset plus the files that failed since, and `NAME.PART.sK`, one slice of
+the rest. A part with no `:subset` (every crop but C until GT8.3; C too until VM 161's `:subset` lists are merged) is not
+expanded: its key is `--full`'s, so `--nightly` = `--full` for it and the two tiers share its passes. `bin/gate --full
+--clean` (and `--clean --plan`) runs the subsets alone (`--rotation subset`; `GATE_CLEAN_WHOLE=1`: whole parts), after
+`bin/gate --rotation-status` on the shared store passed (`GATE_CLEAN_ROTATION=0`: not required; the record's `:rotation`
+says `:complete`, `:unchecked` or `:whole`).
+
+**Slices.** A file's slice is the first 8 hex digits of its id's SHA-256 mod 7: a function of the name alone, so a file
+added to a corpus changes only its own slice's list, and a re-recorded reason changes none. Each slice is a check of its own
+in the store (`STORE/NAME.PART.sK/KEY.edn`), keyed as any check plus the line `list SHA N` (its list's digest): its passes
+are kept, pruned and reused like any other. The night's slice: among the non-empty slices, one whose latest run failed, else
+one never run, else the one whose latest run is oldest; ties by the night index (the day of the run's start less 12 hours,
+`GATE_NIGHT`), so that an empty store walks s0..s6 in seven nights and a missed night is caught up, not skipped for a week.
+A slice whose key has a pass is skipped as any check (its "skip" noted: the pass holds at that key); a whole part's run
+counts as a run of every slice (below).
+
+**The record.** The runner appends each rotated check's run (pass, fail, or skip at a pass) to
+`STORE/_rotation/NAME.PART.sK.runs` (epoch, date, status, key, list digest, commit, worktree); a failure's files (the log's
+lines `:failed-re` names that are in its list) go to `STORE/_rotation/NAME.PART.failed`, which the planner adds to the
+part's subset and removes from its slice ("a file that fails joins the subset"); a pass of the subset clears those it
+ran. They stay there until they pass, not for ever: a file that should stay is added to the corpus's `:subset` by hand
+(`--rotation-status` lists them). Not noted in the clean run (its store is its clone's).
+
+**A whole part's run counts for every slice** (the coordinator's follow-up, 2026-11-03). A rotated part run whole
+(`--full`, or the clean run with `GATE_CLEAN_WHOLE=1`) keeps `--full`'s key (its universe is unkeyed, `:whole-list`) and is
+noted as `STORE/_rotation/NAME.PART.whole.runs`, its list the universe (its ids sorted, digested). It is a run of every
+slice: for the night's choice any whole run counts (after one `--full` night every slice ran at once, and the night's index
+decides; after a failed whole run every slice's latest run failed); for completeness a whole run counts for a slice when its
+universe is the current one. "With its current list" is then: a slice's own run counts when its list is the slice's list
+now, a whole run when its universe is the universe now (every current slice's list is in it, however the subset and the
+failed files split the rest since); a whole run of another universe (a program added or removed) counts for none. Of the
+two, the later run decides (in the same second, the slice's own). A whole run's failure sends its named files to the
+subset; its pass clears them. The clean run notes its runs in its clone's store, and `clean_launch` appends them to the
+shared store's `_rotation/` (with `GATE_CLEAN_PUBLISH`): one whole `--full` night, or a whole clean run, completes the
+rotation, and the tag need not wait seven nights.
+
+**Completeness** (`bin/gate --rotation-status [--days N]`, `gate.plan rotation-status`): for every rotated part, every
+non-empty slice's latest run *with its current list* passed or skipped at a pass within 7 days, and no file failed since;
+exit 1 otherwise. *At any key*, decided here: a key changes with every change to the code under check, so requiring the
+current key would make the clean run a full run (GTS204 (b), rejected); within the period a regression outside the subsets
+hides at most the week GTS203 (a) accepts, and the subsets, the coverage set of that code, run at the current key in the
+clean run itself. The list's digest is required to match: a file added since a slice's last run has not run.
+
+**Review 181's fixes** (the Mac's review of this branch, `.tmp/mac-queue/reports/181-review-gt8-nightly.md`; its HIGH
+decided (a) by the user, 2026-11-03). These supersede the paragraphs above where they differ.
+- *Which runs count* (finding 1, (a)): only runs of this commit's ancestors from clean trees, for completeness, the night's
+  slice and the failed files. Each run's line ends `SEQ DIRTY` (the gate's `dirty`: `git status --porcelain
+  --untracked-files=no`, as the passes'); the planner reads `LOGS/ancestors.txt` (`git rev-list HEAD`, written by
+  `plan_inputs`) and `rotation-status` takes `--ancestors FILE` (`bin/gate`'s `rotation_check` writes it); a run of
+  another commit or of a dirty tree is dropped (`counts?`). The failed files are an append-only event log,
+  `NAME.PART.failed` lines `SEQ EPOCH ID fail|clear COMMIT DIRTY`: a file has failed when its latest event that counts is
+  a failure, so a branch's failure does not enter main's subset and a branch's pass does not clear main's failure.
+- *Order* (finding 2): every note takes the store's next sequence number (`STORE/_rotation/.seq`) under the store's lock
+  (`.lock`, L1: no lost update), and runs are ordered by it, then the time: the run noted last is the later one, whatever
+  the clock's second. rotation-test runs with `date +%s` frozen.
+- *The night's choice* (findings 3, 4; `choose-slices`): a slice whose latest run failed runs again, and beside it the
+  rotation's slice among the others: first one not covered with its current list (never run, its list changed since its
+  run, its covering run failed or older than the period), then the one whose latest run is oldest by the sequence; ties by
+  the night index. A list change (a program added, a fixed failure's file back in its slice) is covered the next night;
+  a slice failing with no file named (a build failure, a control) no longer starves the other six.
+- *The clean record* (finding 5): `:rotation {:status :complete|:unchecked|:none|:whole :check EVIDENCE}`, EVIDENCE
+  `rotation-status --edn`'s map (`:days`, `:now`, each part's files, subset, failed files and each slice's covering run
+  as `[K N STATUS DATE COMMIT COVERED]`); `:none` when no part rotates (every part ran whole); its text and data kept in
+  `SHA.logs/rotation.{txt,edn}`. The clone's failed events are published with its runs (L2), both renumbered after the
+  shared store's sequence under its lock. `GATE_NOW` is kept by the scrub only with a store of the caller's own (L6).
+- Left: L3 (the judges print 40 `FAIL` lines: the rest join the subset over later runs), L4 (the controls' subjects in
+  every `:subset`, unchecked), L5 (`:subset` names outside the universe dropped silently), L7 (`.runs` never pruned).
+
+**Tests.** `test/gate/rotation-test.bash` (`bin/gate-tests`, needs stage 0): a made-up tree, table and store (40 ids, a
+subset of 4): `--full` whole; the nightly expansion and its command; the slices as the hash rule says, the seven covering the
+rest once; keys over the list (night 7 = night 0, the subset apart, an unrotated part's key = `--full`'s); `:needs` renamed;
+a failure's file into the subset and out of its slice, the failed slice chosen again, the subset's pass clearing it;
+`rotation-status` incomplete (never run), complete, stale after eight days, incomplete with a failed file; the oldest slice
+chosen; a whole part's run: noted with the universe, its key the one without `:rotate`, completing every slice, the night's
+index deciding after it, a later slice failure making it incomplete, a whole failure's file into the subset and its pass
+clearing it, a whole run of another universe counting for none; the clean run's subsets; since review 181 (with
+`date +%s` frozen): another commit's and a dirty tree's runs counting for nothing, an ancestor's counting, another
+commit's failure and pass moving none of this commit's failed files, the evidence (`--edn`, `:none`), the failed slice
+with the rotation's beside it, a changed list run the next night. 44 of 44.
+
+**The tools' file lists** (what a part needs to be rotated). Take one today: `bin/ci check` and `check --aot` (`--only FILE`
+of ids; rotated); `bin/goi check` and `bin/java-check` (`--only REGEX`: a list becomes an alternation, but their steps are not
+parted by corpus and Java's levels feed `java-judge` by `:uses`, so a slice needs the judge to take a partial run: GT8.5's
+per-corpus records first); `bin/ci dg` (`CI_DG_ONLY`, a file, behind `--essential` only). Take none: `bin/ci annotations`,
+`bin/repr-c check --tokens`, `parse-check`, `roundtrip` (C's four read-level steps, about 220 minutes of C's 300); repr/java's
+tree checks (`parse-check`, `front-check`, `attr-check`, `nojavac-check`, `roundtrip`); `bin/repr-go native-check` (packages);
+`bin/clojure-tests`, `bin/oracle`, `bin/diffcheck`, `bin/repr-clojure check`. Each needs an `--only FILE` and a judge that
+leaves out the rows a partial run does not run (as `CI_SUBSET` does), then a `:rotate` line.
+
+**What remains.** VM 161's `:subset` lists merged (then C's 15 run corpora rotate: 229 of 2,260 programs a night plus a
+seventh of the rest), and their amd64 re-measure; `--only` for the tools above, C's read levels first; a `:universe` format
+for crops whose records are not one id a line (goi's, Java's); the controls' subjects kept in every subset (VM 160 did it by
+hand for benchmarksgame: a control whose subject is not in a slice is "left", not failed); `--costs` (GT8.1) to show the
+nightly tier against its budget; the clean record's `:rotation` read by `test/gate/clean.ae`'s `--only` selection (today it
+names the parts' `.sub` checks, as a fresh clean record would); a first real `--nightly`, then seven, before the tag.
+
+## As built: GT8 (the tools' lists) (write-ahead, branch `gt8-lists`, 2026-11-03)
+
+Every corpus tool but C's (another branch's) takes a file list; the planner reads more record shapes.
+
+**The planner** (`test/gate/plan.ae`, `bin/lib/gate-run.bash`). `:rotate` takes `:id-re` (a regex on the record's lines:
+group 1 the id, group 2 when present the part named on the line, the ids then bare, as the `:subset`'s names: Java's
+`ref-jdk26.edn`, the corpus on each test's line; one group: every line's id in the part, goi's records), `:always` (the
+negative controls' subjects, GTS81 (a): in the subset and in every non-empty slice's list, so every run of the part judges
+its controls; ids of the part's universe only) and `:failed-as` (sed's replacement, default `\1`: repr/go's `KIND CORPUS
+KEY` lines give `\2/\3`). `{part}` in a part's `:uses` names its own part's producer, and a `:uses` naming a rotated
+part names its checks. `:judges {:failed-re :failed-as}` on a step that judges rotated checks' saved runs (Java's
+`java-judge`, whose levels' `--save` runs never fail): when it fails, each producer whose list names a failing id is noted
+as failed (`judge_note`: its run a failure, its ids into the part's subset). The runner exports `GATE_USES`.
+`rotation-test` 40 of 40.
+
+**The tools.**
+- repr/go: `bin/repr-go native-check CORPUS --only FILE` (ids `CORPUS/KEY`, a dump's key; the others neither checked
+  nor missing; the report `:partial`, which `bin/reap record-native-check` refuses); `--record-ids` writes
+  `test/repr/go/native-check-ids.edn` (one `["CORPUS/KEY"]` a line, from the helper's dumps, no check: 11,835 ids of the
+  16 corpora not `:clean-only`). `:rotate` on `repr-go-native`.
+- Java: `bin/java-check --list FILE` (test ids, partial); a run of whole corpora (`--corpus` alone) saves `DIR/corpus`
+  and `--judge` (`java.check/report --corpora`) judges it whole within those corpora (`--record` keeps the other
+  corpora's lines). The level steps are parted by corpus (the six run corpora; `langtools-diagnostics` for
+  diagnostics), interp and compiled reading their own corpus's read (`java-read.{part}/forms.sha256`); `java-judge`
+  judges the results files of `GATE_USES`. Cost: the compiled level's shards are per corpus (about 11 programs, not 7).
+  `test/java/corpora-test.bash` (in `bin/gate-tests`), 10 of 10.
+- goi: `bin/goi check [--aot] --list FILE` (a selection; its own results classified by `goi.divergences --partial`;
+  each failing program `   failing: ID`). goi's check is the step `goi-check-full` (one part, `linux-amd64`), apart
+  from `goi` (annotations, the checker's tests); `goi-aot` one part. Not parted by kind: the kind is not on the
+  record's line, and one rotation over the 1,837 ids balances by the hash.
+- Clojure: `--only FILE` for `bin/clojure-tests` (namespaces, both levels), `bin/oracle check` (case ids `FILE:LINE`;
+  `bin/oracle ids`), `bin/diffcheck` (`FILE:LINE`; `--ids`), `bin/repr-clojure check --roundtrip` (`CORPUS:PATH`;
+  `--ids`). Not rotated: `suite-go`, `oracle-go` and `diffcheck` are essential steps; `suite-aot` and `repr-clojure` are
+  unparted and the oracle's, diffcheck's and repr/clojure's universes are generated (`ids`), not committed records.
+
+**What remains.** The `:subset`s (GT8.3) for repr/go, Java and goi: until then their parts run whole in every tier;
+committed id records (or a `:universe-cmd`) for the oracle, diffcheck and repr/clojure; a part for `suite-aot`.
+
+## As built: GT8.3, C's run checks and Clojure's suite on the cover build (write-ahead, branch `gt8-cover2`, 2026-11-03)
+
+GTS205 (a), GTS206 (a) for the two crops the cover build did not reach: one method, the cover build of the gate's key
+(`bin/arbace-go --gate-build --cover`), a GOCOVERDIR per test under `ARBACE_COVER_DIR`, `bin/cover blocks|classes|subset`.
+`bin/lib/cover.bash` is unchanged (its digest is in the cover key): C's and Clojure's packages were already in the build.
+
+**The hooks.** `bin/ci check` (tool `ci`): the node programs on the cover build's `arbace -m arbace.c.repl run-nodes`
+(CInterp's natives over `arbace/ci`, `arbace/crt`) in place of cirun or `CI_EXE`, the budget `CI_COVER_BUDGET_X` (2)
+times; with `CI_COVER_READ=1` also `ci-read`: each program read, checked and built by a `nodes-list` process of its own on
+the cover build (repr/c, the checker, the builder, musl's link). `bin/ci check --aot` (tool `ci-aot`): each shard built
+with `-cover -coverpkg=arbace/ci,arbace/crt,arbace/shard` and the cover build's hook by an overlay; and `ci-cf2g`: each
+program compiled by a `compile-list` process of its own on the cover build (cf2g with the read). `bin/clojure-tests`
+(tool `clojure`): the eval level on the cover build's `arbace-tests`, a GOCOVERDIR per test namespace's process (run
+`cover`); `--aot` (`clojure-aot`): the compiled suite's program built with `cover_go_flags`, its key and run
+(`aot-cover`) apart (wired, not run yet). `bin/cover blocks --pkgs ERE` keeps a level's part of its crop's packages;
+`bin/cover subset` indexes a classed or kept test that wrote no counters (a program refused before its run: tools/cicover's
+rule, every judged program); `bin/cover classes` reads C's records (`.edn` rows) and C's controls (`:level`);
+`bin/cover clojure-classes RESULTS -o OUT [--aot]` classes the suite per namespace as `bin/reap` does
+(`test/cover/clojure_rows.ae`; a namespace of several classes classed by their set).
+
+**The demonstration** (benchmarksgame, 29 programs; the suite, 83 namespaces; at `cc16ac9b`, cover build 5ebb7b5e):
+
+| level | packages | blocks covered | subset | note |
+|---|---|---|---|---|
+| C run (`ci`) | ci, crt | 868 of 2,051 | 11 | the same 11 as `bin/ci cover`'s cirun and corpora.edn's `:subset` |
+| C run (`ci`) | ci, crt, cinterp, c.cinterp, c.repl | 1,129 of 3,495 | 11 | the same |
+| C AOT (`ci-aot`) | ci, crt | 438 of 2,033 | 8 | within the run level's 11 |
+| C cf2g (`ci-cf2g`) | c.cf2g | 5,078 of 12,062 | 7 | adds fasta-2, nbody-7 |
+| C read (`ci-read`) | repr.c.*, c.check, c.build, c.musl | 45,503 of 161,127 | 17 | |
+| Clojure eval (`clojure`) | arbace/lang, the vendored namespaces, c2j | 71,388 of 237,876 | 63 | 75% of the time |
+
+The back end's union is 13 of 29, every level's 21. The run check under coverage, the read compiled: 130 s (stage 0's
+evaluated `nodes-list` and cirun: 1,113 s); the AOT check with cf2g compiled per program: 151 s (stage 0's shard: 935 s).
+So `bin/ci cover` (cirun built with `-cover`) is superseded: the cover build gives the same subset and its read level.
+Clojure's namespaces reduce little: every process loads every test namespace first (about two thirds of its time) and
+each namespace's own tests reach blocks no other reaches; its eval level is 2 min of wall in the essential gate.
+
+**Decided (the user, 2026-11-03).** (1) `bin/ci cover`, `bin/lib/ci/cover` and `tools/cicover` (cirun's `-cover` path and
+its reducer) removed: the cover build is the one method, `tools/covsubset reduce` the reducer. (2) One subset a level in
+`test/c/corpora.edn`: `:subset-run` (the former `:subset`, queue 161's, until the cover build's are recorded),
+`:subset-read`, `:subset-aot`, `:subset-cf2g` (benchmarksgame's recorded from the demonstration above); `:rotate`'s
+`:subset-key` (c-lists') takes a vector, the keys' union: `c-check` `[:subset-run :subset-read]` (the step reads and runs),
+`c-aot` `[:subset-aot :subset-cf2g]`; a corpus with none of its step's keys runs whole (every c-aot part but benchmarksgame
+until tonight's runs). (3) Clojure's eval suite runs whole; only `--aot` gets a coverage subset.
+
+**The night's runs** (from the worktree, one after another; the cover build first, the checkout's key having moved with
+c-lists; `ARBACE_PATH_FIRST=1 ARBACE_NO_AOT=1 ARBACE_NO_IMAGE=1 CI_JOBS=4` for bin/ci):
+
+1. `/root/arbace/.tmp/heavy bin/cover build`: about 25 min.
+2. `ARBACE_COVER_DIR=.tmp/cov-night CI_COVER_READ=1 CI_CHECK_WORK=$PWD/.tmp/ci-check-cov bin/ci check`: the 15 run corpora,
+   2,268 programs at benchmarksgame's 4.5 s a program, about 2 to 3 h.
+3. `ARBACE_COVER_DIR=.tmp/cov-night CI_AOT_WORK=$PWD/.tmp/ci-aot-cov bin/ci check --aot`: about 5 s a program, 2.5 to 3.5 h.
+4. `/root/arbace/.tmp/heavy env ARBACE_COVER_DIR=.tmp/cov-night bin/clojure-tests --aot --no-generative -j 16`: the compiled
+   suite's program with the cover flags (j2g's whole program, about 20 GiB), then its run: about 45 min.
+5. `bin/cover blocks .tmp/cov-night --tool T --pkgs ERE -o .tmp/cov-night/L` for each level (ci ci|crt|cinterp and
+   c.cinterp, c.repl; ci-read repr.c, c.check, c.build, c.musl; ci-aot ci|crt; ci-cf2g c.cf2g; clojure-aot the crop), `bin/cover
+   classes` (C: test/c/divergences.edn, and divergences-aot.edn with divergences.edn for the AOT levels, controls
+   `--control-level run`), `bin/cover clojure-classes test/arbace-go-aot-results.edn --aot`, `bin/cover subset` per corpus:
+   minutes. Then the subsets written as each corpus's four keys.
+
+## As built: GT8 (C's read lists) (write-ahead, branch `c-lists`, 2026-11-03)
+
+C's read-level checks take a file list, so GT8.4's rotation reaches them (about 220 of C's 300 full-check minutes).
+
+**The tools.** `--only LIST` (ids `CORPUS/NAME`, blank and `#` lines apart) on `bin/repr-c check --tokens`, `bin/repr-c
+parse-check`, `bin/repr-c roundtrip` and `bin/ci annotations` (`bin/lib/repr-c/only.bash`: an id outside the corpora, or
+not `CORPUS/NAME`, refused, exit 2; exported as `REPR_C_ONLY`), and on `bin/ci dg` (`CI_DG_ONLY`, which `--essential` used
+alone until now). `arbace.repr.c.ppcheck/lists`, the four checks' common lists, keeps a corpus's listed files and writes
+`WORK/CORPUS/only.txt`, the judges' mark of a partial run; a listed name its corpus does not hold fails the lists. Each
+judge (`ppcheck/check`, `parsecheck/check`, `annot/judge`, `rtcheck/judge`) then judges what the run holds
+(`arbace.repr.c.results`'s `partial-names`, `in-run`): a known entry of a file not run is not stale, and a control whose
+reference the partial run does not hold is left, not "not judged" (a whole run keeps the strict rule). Every judge now
+prints each failing file, and each stale entry, as `FAIL CORPUS/NAME WHY` (at most 40 a corpus, `print-failing`): the
+rotation's `:failed-re`. Refused with a list: `--record` (all five), `--record-gcc`, `--resume` (a kept corpus's lists),
+`--mutants-only` (parse-check; a list draws no mutants), `--essential` (dg); `--judge --record` (annotations) and
+`--resume --record` (roundtrip) after a partial run. Tests: `test/c/judge_test.ae`'s `read-lists-only`,
+`read-partial-judges`, `read-only-refusals` (74 assertions with the five control tests). Shown by hand: the four checks on
+`benchmarksgame/{fannkuchredux,fasta-8,fasta}.c` (15 to 30 s each, every control judged and differing), the token check on
+`fannkuchredux.c` alone (its three controls left), `bin/ci dg --only` on three files of two groups (its control judged).
+
+**The planner.** `:rotate`'s `:id-as` (with `:id-re`: the id is the match replaced, `$1/$2`, ids then under `PART/` as
+without `:id-re`): the results files' `"CORPUS FILE"` rows as `CORPUS/FILE`. `:subset-key` (default `:subset`): the corpus
+map's key that holds the subset, since the run corpora's `:subset` (ci's back end, VM 161) is another check's. rotation-test
+56 of 56 (the case: a results file, a subset under its own key, a name with a slash; C's one pattern, a name with spaces).
+
+**The steps.** `:rotate` on `c-tokens`, `c-parse`, `c-annotations`, `c-roundtrip` (universe the check's results file,
+subset `:subset-tokens`, `:subset-parse`, `:subset-annot`, `:subset-roundtrip`, `:always` the controls' two files,
+`benchmarksgame/fannkuchredux.c` and `fasta-8.c`, `:failed-re "^FAIL ([^[:cntrl:]]+)[[:cntrl:]].*$"`, below). `c-dg` stays whole: one step over
+seven groups, its control crossing two of them (a part per group would leave it in every part).
+
+**The subsets** (GTS205's rule needs the code under check's coverage: repr/c's lexer, preprocessor, parser, converter,
+printer and arbace.c.check). `bin/ci cover`'s method extends in its reducer (`tools/cicover` takes any `KEY N COUNT`
+profile) but not in its measure: ci's back end is a Go program (cirun) built with `-cover`, while repr/c is Arbace code,
+evaluated on stage 0 or compiled into the executable. Proposed: GTS206 (a)'s cover build of the gate's executable
+(`go build -cover -coverpkg` the `aot_arbace_repr_c_*` and `aot_arbace_c_check*` packages, kept by key), the checks run on
+it compiled (not `ARBACE_PATH_FIRST`), one file a process or `runtime/coverage`'s counters cleared and written around each
+file (`REPR_C_THREADS=1`), then `tools/cicover` with KEEP the controls' files and one file per known class. Until then a
+proxy, computed for one corpus: the tree check's `:subset-parse` of benchmarksgame, the cases and token kinds of cc's
+tree dumps (271 over the 52 files; `REPR_C_PARSE_KEEP=1`), reduced by `tools/cicover`: 9 files, 22% of the nodes (with
+parent-child pairs, 1,287 features, 30 files: too fine). It makes `c-parse.benchmarksgame` rotate in `--nightly`.
+
+**Decided** (the user, 2026-11-03). The proxy subset stays, labelled, until the cover build reaches repr/c. A file name may
+hold spaces (`cxgo/main with args.c`): every C judge (the run checks', cf2g's, dg's and the read checks', their controls
+too) prints `FAIL ID`, a tab, `WHY`, and every C step's `:failed-re` is `^FAIL ([^[:cntrl:]]+)[[:cntrl:]].*$` (the id up
+to the tab: the `.rot` file is tab-separated, so no literal tab in the pattern); the runner notes the failed ids one a line
+(`while read`, not word splitting); rotation-test 56 of 56 (one pattern over C's steps; the spaced name noted whole). `c-dg`
+stays one step, unrotated.
+
+**Review 188's fixes** (the Mac's review of `c-lists`, 9adfafe4). The blocker, `test/gate/audited-test-test.bash` taking the
+planner's read of `test/repr/c/parse-check-results.edn` (the rotated `c-parse.benchmarksgame`'s universe) for a bulk read:
+the test now allows every `:universe` the steps table names (read from it), not a path pattern: the planner reads a
+rotated part's universe by design, and a new crop's universe is then allowed without editing the test. The lows: L1 the
+comments; L2 `bin/ci check`, `check --aot` and `bin/ci record-ref` list their corpora with `REPR_C_ONLY` empty; L3 a whole
+`--resume` (roundtrip, annotations) lists a corpus a partial run left again; L4 `bin/ci annotations --judge --only`
+refused; L5 the `:gcc-digest` control not left for a reference outside a partial run (its reference is the recorded
+digest); L6 the planner warns when `:always` names a file of the part its universe lost; L7 every stale entry printed
+after the 40 failures; L8 the refusals' wording; L9 `c-check`'s and `c-aot`'s `:rotate` `:always` their control's two
+files (`benchmarksgame/fannkuchredux.c`, `fasta.c`).
