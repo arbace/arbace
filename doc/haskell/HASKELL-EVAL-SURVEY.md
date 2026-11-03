@@ -1158,3 +1158,126 @@ Built 2026-11-03 on branch `haskell-full` from `haskell-he4b` (`f3672f68`).
   `bin/hsi check --corpus samples,synthetic,testsuite-core`: 630 of 748 equal as before, samples and synthetic 46 of
   47, every other one in its class (3.5 minutes; `T8726`, `:speed`'s edge case, failed at 8 jobs and passed alone, as
   recorded).
+
+## As built: HE4d, HE4e (write-ahead)
+
+Built 2026-11-03 on branch `haskell-he4d` from `haskell-full` (`5553edfd`), with the Mac's `mac/189-libm-fma`
+(`4600a322`) merged; on the host's GHC 9.14.1, TamaGo's go and the main checkout's stage 0, light work by day (8 jobs,
+no lock), the runtime edited through `bin/hsi runtime print` and `read` (HES38 (b)). Write-ahead: HE4's exit criteria
+(§11) are still not all met (HE4f-HE4h below). Nothing of Haskell is in `gate_key` or a gate step (HES19 (a)). The
+host was shared with other agents throughout: the times below vary by about 10 %.
+
+### HE4d: speed and the image
+
+- **Measured first** (CPU profiles, `hsi run --cpuprofile`, which a SIGTERM or SIGXCPU stops cleanly): on nfib half of
+  the time Go's allocator and collector (every call's frame, every closure and constructor two objects, a primop's
+  argument buffer escaping), then the dispatch of class methods at `-O0` (a selector entered as a function every `+`);
+  on the testsuite's slow tests the same, plus linear scans of large case tables and the loaded forms read and
+  compiled per run (a run's median 0.22 s, most of it loading).
+- **The hot paths**: a constructor, function or thunk of up to four fields is one Go object (`alloc.ae`); an updatable
+  thunk is allocated with room for its whole frame and evaluated in place (entered once, blackholed, its free
+  variables never written); a pure primop's arguments go through the machine's buffer; a class method's selector
+  (`\d -> case d of C ... -> field`) applied to an evaluated dictionary takes the method at once; a constructor of
+  literals is one static value; a call in its function's tail position (outside every scrutinee: no frame of the
+  activation is on the stack) reuses the caller's frame; the other frames of slots come from a per-thread arena
+  (`arena.ae`): every stack frame records the arena's top and its pop gives back what was allocated above it (frames
+  never escape: closures copy their values, a continuation's capture copies its frames' slots); case alternatives are
+  indexed by constructor tag and by integer literal; frames shrank from 96 to 72 bytes; GOGC 200 (400 kept the loaded
+  forms' heap; with the image it only grows the peak).
+- **The image** (HES32 (a), `image.ae`; `hsi image --out DIR --lib DIR...`, made by `bin/hsi run` and `bin/hsi check`
+  when stale, `HSI_IMAGE`, default `.tmp/hsi/image`, `none` for none): each library module compiled once into hsi's
+  code trees and written as bytes, `IMAGE/UNIT/MODULE.img`: the dump's size and modification time (stale when either
+  differs), a string table, the module's data declarations, string literals and top-level bindings, then each
+  closure's compiled body (join points numbered, literals by value, string literals and labels by bytes and name,
+  a closure GHC's forms leave uncompilable as its error), decoded when the closure is first entered. The bytes hold no
+  pointers: the collector does not scan them. 957 modules in 0.6 s on 8 jobs, 22 MB (the forms 80 MB).
+- **Results** (before: `haskell-full`'s hsi; after: this branch's): **nfib 32 13.3-14.1 s → 5.8-6.1 s** (2.3 times;
+  GHCi 3.6 s, GHC's `-O0` 0.32 s: the plan's 4 s target is not met); Hello 0.20 s → 0.02-0.06 s (51 of its 52 modules
+  from the image); Loop 11-13 s → 10-14 s (its 7.6 GB peak, allocation-bound: unchanged within the noise). **The
+  check of samples, synthetic and the testsuite's core: 3 min 46 s → 2 min 19 s** of wall time at 8 jobs (748 programs
+  before, 756 after; of the 87 s, about 60 s are T4262's 180 s no longer run, L8 below, and the rest the runs: their
+  summed seconds 1,070 → 923 at the same plan, the median run 0.22 s → 0.07 s); the essential list 123 programs in 10 s.
+  `T23071` and `CarryOverflow` pass now (`:speed`, listed still: near the limit); `T19149` reaches its test's C.
+
+### HE4e: the RTS's semantics (`rts.ae`)
+
+- **throwTo** (HES41 (a), rts/RaiseAsync.c's `throwToMsg` by the target's state): a target that does not accept the
+  exception now (masked and running, uninterruptibly masked anywhere, masked on a blackhole) queues it and the thrower
+  blocks, interruptibly (an exception to the thrower revokes its message); the queue's first is delivered at the
+  target's unmasking (the unmask primop, an unmask frame's return), as it blocks interruptibly while masked
+  interruptibly (an MVar, a delay, an STM retry: review 189's F5), and a finished target wakes its throwers.
+- **The collector's decisions** (rts/sm/MarkWeak.c's stages): hsi's own marking from the roots GHC's major collection
+  has (the running and runnable threads, the sleeping ones, the stable pointers), through heap objects, thread stacks
+  (a case frame keeps only the slots its alternatives read, a closure's code the globals it names: GHC's SRTs), MVars'
+  queues, the TVars a retried transaction read, blackholes' owners and waiters; the weak pointers whose keys are marked
+  keep their values and finalizers; the blocked threads still unmarked are resurrected (oldest first:
+  BlockedIndefinitelyOnMVar, OnSTM, NonTermination on a blackhole; one blocked in throwTo left), their reach marked, the
+  weak pointers again, the rest dead. At `performGC` (and `performMajorGC`, `performBlockingMajorGC`) and when every
+  thread is blocked and none sleeps (scheduleDetectDeadlock: when none is resurrected, the main thread, blocked, gets
+  NonTermination). GHC also collects as allocation goes; hsi does not (HES52).
+- **Weak pointers and finalizers** (Weak.c): every `mkWeak#` registered; a dead one marked dead, its C finalizers run
+  at once (the last added first), its Haskell finalizer given with the others to one new thread running
+  `runFinalizerBatch` (the newest first, as GHC's); `hs_exit`'s C finalizers of the weak pointers still alive at the
+  end; `keepAlive#` a frame keeping its value reachable.
+- **prompt#, control0#, newPromptTag#** (rts/Continuation.c): `control0#` captures the frames above the nearest prompt of
+  its tag (their slots copied), pops them and the prompt, and applies its function to the continuation, a function of
+  two arguments; a capture through an update, atomically, catchRetry or catchSTM frame, or without a prompt, raises
+  `noMatchingContinuationPrompt`; a captured mask frame restores the prompt's masking state at the capture, and on a
+  resume (which copies the frames again: a continuation may resume many times) the outermost mask frame restores the
+  resumer's state and the captured state applies inside.
+- **Review 189's findings** (the Mac's, on `haskell-he4b`): F1 (on arm64 Go fused libm's multiply-adds) by the Mac's
+  413 conversions, with `tools/fmacheck` (a go/types scan: every floating-point product of go/arbace/libm a conversion
+  of itself unless a product's or a quotient's operand; `-w` rewrites) and an FMA-instruction count in `bin/hsi
+  libm-check`; L1 (pow's and atan2's NaN operand) by `lmNaN2`, x86_64 musl's choice whatever order Go emits the add in;
+  L2 the constants written as their value; F2 (a transaction blocked on another thread's blackhole rolled back over
+  another's commit): the user's decision, abort and rerun (the writes undone, its frames popped to atomically#, the
+  thread waits on the blackhole and reruns from its start), and retry's reverted thunks wake their waiters; F3 a
+  readMVar waiter ahead of the takers; F4 an interrupted MVar operation leaves no state; F7 `fmaddFloat#` and its kin
+  rounded once (musl's `fmaf.c`); F8 nested atomically refused; F9 catchSTM# lets asynchronous exceptions pass, a
+  blackhole knot gives NonTermination; L7 a runnable thread is not queued twice. F6, L3 and L8 in the check, below.
+  Their known divergence (an interrupted thunk reverted, not frozen) is the class `:async-revert` (`:design`).
+- **Samples judged against GHC** (`test/haskell/eval/samples/`, references by `bin/hsi record-ref --only`): ThrowMasked,
+  Deadlock, Cont, Weak, StmBlock (F2, F8, F9), MVarOrder (F3, F4, F5), Fma (F7), all equal to GHC's runs and each
+  differing on `haskell-full`'s hsi; AsyncRerun in `:async-revert` (GHC 1, hsi 2).
+- **The check** (review 189's F6, L3, L8): a class's `:results` (and `:message`, a text of hsi's message) are the kinds
+  its members may have: a classed program whose result changes kind is in no class (the negative control, by hand:
+  `:simd`'s `:results [:fail]` makes T22296 unclassed); `:test-c` (hsi stops at the test's C) split from
+  `:test-c-output` (the run goes on without it); `:uninitialised` gone (the generator leaves out `decodeDouble_2Int#`
+  of a zero, primops-double re-recorded, it passes); a check where no control ran fails, and a fourth control judges
+  the status alone (`samples/Echo` against its reference with status 0); a test all.T skips is not run (`:skipped`).
+- **Results**: `bin/hsi check --corpus samples,synthetic,testsuite-core` **649 of 756**: samples 17 of 18, synthetic 37
+  of 37, the core **595 of 701** (584 before: conc016, conc018, conc019, conc024, conc034, conc068, mask002,
+  tryReadMVar2, UnliftedWeakPtr, T23071, CarryOverflow); every other one in its class, the four controls failing;
+  `test/haskell/check-hsi.edn` recorded. `bin/hsi libm-check` 0 mismatches, 0 FMA; `bin/hsi runtime check` the same
+  forms.
+
+### The rest of HE4
+
+1. **HE4f** the remaining primops and their check (as planned), and the scheduling order GHC's timer gives (`:rts`'s
+   conc037, conc065-072, T3279), allocation counters and limits (allocLimit1-4).
+2. **HE4g** the top level and the I/O (as planned), the C data labels (HES57).
+3. **HE4h** the exit; speed beyond HE4d is HE8's AOT (the interpreter's per-node cost now about 30 ns, mostly
+   allocation: STG's thunks, boxed `Int#`s).
+
+### Proposals (HES50 onward)
+
+- **HES50 The image's freshness.** (a) the dump's size and modification time (as built: a stat a module); (b) the dump's
+  SHA-256 (a read and a hash a module each run). *Recommended: (a)*: the dumps are made by `bin/hsi dumps` only.
+- **HES51 Frames of slots.** (a) a per-thread arena given back at frame pops, a tail call reusing its caller's frame (as
+  built); (b) Go's heap for every frame (simpler; nfib about 7 % slower). *Recommended: (a)*.
+- **HES52 When hsi collects.** (a) at `performGC` and at a deadlock only (as built: deterministic; a program that waits
+  for a finalizer without calling performGC waits forever, a class when one is found); (b) also after every N
+  megabytes allocated, as GHC's major collections (the testsuite's runs would depend on N). *Recommended: (a)*.
+- **HES53 The classes' result kinds.** (a) `:results` and `:message` per class (as built, review 189 F6), HES43 (b)'s
+  reasons later; (b) by id alone. *Recommended: (a)*.
+- **HES54 all.T's skipped tests.** (a) not run, their result `:skipped` (as built, review 189 L8); (b) run to the wall
+  cap. *Recommended: (a)*.
+- **HES55 STM blocking.** (a) a transaction that would block on a blackhole aborts and reruns (as built, the user's F2
+  decision); one that blocks inside `unsafeIOToSTM` (an MVar, a delay) keeps its writes in place while it waits, a class
+  when a test shows it; (b) a write-log TRec (GHC's design) at HE4f. *Recommended: (b) at HE4f*.
+- **HES56 Interrupted thunks.** (a) reverted, the class `:async-revert` (`:design`, as built); (b) frozen as GHC's
+  AP_STACK (the stack segment kept in the thunk, resumed by the next demand). *Recommended: (a)* until a test needs (b).
+- **HES57 An unknown C data label.** (a) a stop (`unimplemented C data label NAME`) unless `dataLabels` knows it (review
+  189 L5), at HE4g with the labels the libraries read listed; (b) zeroed storage (as now). *Recommended: (a)* at HE4g.
+- **HES58 libm-check on arm64.** (a) its reference musl's `src/math` from the pinned tarball built as x86_64 builds it
+  (review 189 F1's third fix), at the Mac's next hsi task; (b) amd64 only. *Recommended: (a)*.
