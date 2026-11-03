@@ -346,6 +346,93 @@ cmd_lib_test() {
   return $rc
 }
 
+# pyi's AOT (PY8; doc/python/PYTHON-SURVEY.md §7, PYS13 (a); PYI-SPEC.md §10): the IR translated to Go forms by
+# arbace.python.aot (on the tools' host), printed by repr/go (bin/build-go --print-only) and built with TamaGo's go over
+# go/arbace/py as printed by runtime print (the light tier, as bin/si's AOT: not Arbace's executable), one small
+# executable per program; its modules' packages printed once, kept by their IR's hash (AOT/pkgs-GEN, GEN the
+# generator's digest), so the stdlib's modules are compiled once for every program
+AOT="$WORK/aot"
+aot_go() {
+  (cd "$AOT/mod" && env GOROOT="${ARBACE_GOROOT:-/root/tamago-go}" GOTOOLCHAIN=local GOFLAGS= GOWORK=off GO111MODULE=on \
+     GOPROXY=off CGO_ENABLED=0 GOCACHE="${PYI_AOT_GOCACHE:-$AOT/gocache}" GOMAXPROCS=${GOMAXPROCS:-4} \
+     "${ARBACE_GOROOT:-/root/tamago-go}/bin/go" "$@")
+}
+aot_gen() { cat "$root/arbace/python/aot.ae" | sha256sum | cut -c1-16; }
+# aot_module: the module the compiled programs build in: the runtime (go/arbace/py and go/arbace/libm printed,
+# kept by their forms' digest), the packages of arbace/pyaot
+aot_module() {
+  mkdir -p "$AOT/mod/pyaot"
+  printf 'module arbace\n\ngo 1.27\n' > "$AOT/mod/go.mod"
+  local key; key=$( (cd "$root" && find go/arbace/py.ae go/arbace/py go/arbace/libm.ae go/arbace/libm -type f | LC_ALL=C sort | xargs sha256sum) | sha256sum | cut -c1-16)
+  if [ "$(cat "$AOT/mod/runtime.key" 2>/dev/null)" != "$key" ]; then
+    runtime_print "$AOT/rt"
+    rm -rf "$AOT/mod/py" "$AOT/mod/libm"; mkdir -p "$AOT/mod/py" "$AOT/mod/libm"
+    local f
+    for f in "$AOT/rt"/py/*.go; do case $f in *_test.go) ;; *) cp "$f" "$AOT/mod/py/" ;; esac; done
+    for f in "$AOT/rt"/libm/*.go; do case $f in *_test.go) ;; *) cp "$f" "$AOT/mod/libm/" ;; esac; done
+    echo "$key" > "$AOT/mod/runtime.key"
+  fi
+  # the host's compiler for what a compiled program compiles at run time (arbace.python.aot compile-server)
+  cat > "$AOT/compiler.sh" <<SH
+#!/bin/sh
+exec env ARBACE_PATH="$root" PYI_ROOT="$root" PYI_WORK="$WORK" PYI_RUN_ID="aot\$\$" GOMEMLIMIT=\${PYI_GOMEMLIMIT:-1500MiB} \
+  GOMAXPROCS=\${PYI_THREADS:-4} "$(arbace_exe)" -m arbace.python.aot compile-server
+SH
+  chmod +x "$AOT/compiler.sh"
+}
+# aot_compile PKG FILE OUT: FILE compiled into the executable OUT; on a refusal OUT.refused holds the reason, on a
+# compile-time error of the program OUT.cout, .cerr, .crc its outcome (CPython's: the SyntaxError, status 1)
+aot_compile() {
+  local pkg=$1 file=$2 out=$3 gen; gen=$(aot_gen)
+  local src="$AOT/src/$pkg" w="$AOT/print/$pkg" log="$AOT/log/$pkg" cache="$AOT/pkgs-$gen"
+  mkdir -p "$AOT/log" "$cache" "$(dirname "$out")"
+  rm -rf "$src" "$w" "$AOT/mod/pyaot/$pkg" "$out" "$out".{refused,cout,cerr,crc}
+  local rc=0
+  pyi_env
+  ARBACE_PATH="$root" GOMEMLIMIT=${PYI_GOMEMLIMIT:-1500MiB} GOMAXPROCS=${PYI_THREADS:-4} \
+    "$(arbace_exe)" -m arbace.python.aot program "$file" "$src" "$pkg" "$(stdlib_lib)" "$cache" > "$log.compile" 2>&1 || rc=$?
+  if [ $rc = 4 ]; then
+    local e; e=$(sed -n 's/^error //p' "$log.compile" | head -1)
+    case $e in
+      SyntaxError:*) : > "$out.cout"; echo "${e%%$'\x00'*}" > "$out.cerr"; echo 1 > "$out.crc"; return 0 ;;
+    esac
+    echo "the compiler refuses it: $e" > "$out.refused"; return 0
+  elif [ $rc != 0 ]; then
+    echo "arbace.python.aot fails: $(grep -m1 'rror\|xception' "$log.compile" || tail -1 "$log.compile")" > "$out.refused"; return 0
+  fi
+  if [ -d "$src/go" ] && ! "$root/bin/build-go" --print-only --module arbace --layout lines --work "$w" "$src" > "$log.print" 2>&1; then
+    echo "repr/go does not print it: $(tail -1 "$log.print")" > "$out.refused"; return 0
+  fi
+  local nm st
+  while read -r nm st; do
+    if [ "$st" = new ]; then rm -rf "$cache/$nm"; cp -r "$w/mod/pyaot/$nm" "$cache/$nm"; fi
+    [ -d "$AOT/mod/pyaot/$nm" ] || cp -r "$cache/$nm" "$AOT/mod/pyaot/$nm"
+  done < <(awk '$1 == "module" && $4 != "-" {print $4, $5} $1 == "main" {print $2, $3}' "$log.compile")
+  mkdir -p "$AOT/mod/pyaot/$pkg"; cp -r "$w/mod/pyaot/$pkg/prog" "$AOT/mod/pyaot/$pkg/"
+  rm -rf "$src" "$w"
+  if ! aot_go build -p 2 -trimpath -o "$out" "./pyaot/$pkg/prog" > "$log.build" 2>&1; then
+    echo "go build fails: $(grep -m1 . "$log.build")" > "$out.refused"; return 0
+  fi
+}
+# aot_run OUT ARGS...: the compiled program run as bin/pyi run runs pyi (its compile-time outcome when it has one)
+aot_run() {
+  local out=$1; shift
+  if [ -f "$out.crc" ]; then cat "$out.cout"; cat "$out.cerr" >&2; return "$(cat "$out.crc")"; fi
+  PYI_AOT_COMPILER="$AOT/compiler.sh" "$out" "$@"
+}
+
+cmd_aot() {
+  [ $# -ge 1 ] || die "usage: bin/pyi aot FILE.py [ARGS...]"
+  local f argv0=$1; shift
+  case $argv0 in /*) f=$argv0 ;; *) f=$caller_pwd/$argv0 ;; esac
+  [ -f "$f" ] || die "no file $argv0"
+  aot_module
+  local pkg; pkg=p_$(basename "$f" .py | tr -c 'A-Za-z0-9\n' '_')
+  aot_compile "$pkg" "$f" "$AOT/bin/$pkg"
+  [ -f "$AOT/bin/$pkg.refused" ] && die "aot: refused: $(cat "$AOT/bin/$pkg.refused")"
+  aot_run "$AOT/bin/$pkg" "$argv0" "$@"
+}
+
 RT="$WORK/runtime"
 tamago_go() { (cd "$RT" && env GOROOT= PATH="${ARBACE_GOROOT:-/root/tamago-go}/bin:$PATH" GOCACHE="$WORK/gocache" GOFLAGS=-mod=mod CGO_ENABLED=0 GOTOOLCHAIN=local "$@"); }
 
@@ -427,5 +514,6 @@ case "${1:-}" in
   repl) shift; mkdir -p "$WORK"; cmd_repl "$@" ;;
   lib-test) shift; mkdir -p "$WORK"; cmd_lib_test "$@" ;;
   runtime) shift; mkdir -p "$WORK"; cmd_runtime "$@" ;;
+  aot) shift; mkdir -p "$WORK"; cmd_aot "$@" ;;
   *) sed -n '2,51p' "$0"; exit 2 ;;
 esac
