@@ -2489,7 +2489,7 @@ corpora are tonight's (CX9.4). Nothing embedded changed (repr/cpp is evaluated f
 
 - **`bin/repr-cpp dg`** (`bin/lib/repr-cpp/dg`, `arbace.repr.cpp.dg`; `make repr-cpp-dg` is CX10's): g++.dg's DejaGnu tests in three parts, each file
   in at most one, chosen in this order: **preprocess** (a `dg-do preprocess`: 71 files, 32 of them in `modules/`), **modules** (the rest of
-  `modules/`: 1,621 `.C` files) and **dg-error** (the rest of the files with a `dg-error` directive: 4,597). `--corpus PART,...`, `--dirs D,...`
+  `modules/`: 1,181 files) and **dg-error** (the rest of the files with a `dg-error` directive: 4,597). `--corpus PART,...`, `--dirs D,...`
   (g++.dg's directories, `.` its top level), `--only LIST`, `--sample N`, `--record`, `--record-ref`, `--judge`; per-file seconds in
   `test/cpp/dg-times.edn` (GT8.1).
 - **How a file is run** (DejaGnu's g++-dg-runtest, gcc's `lib/g++-dg.exp`): at one standard, the file's own `-std`, else the first of DejaGnu's
@@ -2528,7 +2528,7 @@ corpora are tonight's (CX9.4). Nothing embedded changed (repr/cpp is evaluated f
 |---|---:|---:|---|
 | dg-error, `DRs eh parse template cpp23 cpp26 lookup` (1,277 of 4,597) | 1,275 supported, 2 unsupported | 1,001 | clang-fewer-errors 65, clang-extra 65, clang-accepts 62, clang-other-lines 51, gxx-disagrees 22, clang-pedantic 8, clang-elsewhere 1 |
 | preprocess (all 71) | 70 supported, 1 unsupported | 38 | pp-diag 24, gxx-disagrees 7, pp-extra 1 |
-| modules, every 10th (119 of 1,621) | 119 | 39 | the oracle's rejections 79 (recorded: 52 `module '...' not found`, 23 a header unit not known, 4 the tests' own errors), known 1 (`tpl-friend-3_a.C`, `:ast-differs`) |
+| modules, every 10th (119 of 1,181) | 119 | 39 | the oracle's rejections 79 (recorded: 52 `module '...' not found`, 23 a header unit not known, 4 the tests' own errors), known 1 (`tpl-friend-3_a.C`, `:ast-differs`) |
 
 The oracle read the dg-error files in 63 s cold (17 s from cxxdump's cache), 4 jobs; the reads 2 s; g++'s reference 11 s. Of the 1,275, clang
 rejected 1,202 and accepted 73 (all 73 read into forms). The modules sample took 18 s (40 units read, all forms equal again, 39 ASTs equal, `:full`
@@ -2539,8 +2539,9 @@ not run, 3 recorded rejections the oracle no longer gives (`:oracle-stale` 3, re
 
 ### CX9.3 The classes
 
-All but two are of the design (CP2 (a), CP3 (a): repr/cpp has no Sema, the errors are clang's and the expectations g++'s), named by how the
-oracle's errors differ: `gxx-disagrees` (first: the reference does not give the directives' errors at this standard on this host), `clang-pedantic`
+The `clang-*` classes are of the design (CP2 (a), CP3 (a): repr/cpp has no Sema, the errors are clang's and the expectations g++'s), named by how the
+oracle's errors differ; `gxx-disagrees` (the reference does not give the directives' errors at this standard on this host) is the harness's
+gap, deferred (review 196, the user's decision; CX9.8), and so are `prune-output` and `oracle-crash`; `clang-pedantic`
 (`-Werror,-W...extensions` that g++ only warns about), `clang-accepts`, `clang-other-lines`, `clang-fewer-errors`, `clang-extra`, `clang-elsewhere`;
 `read-refused` is the converter's gap (none today); the preprocess part's `pp-diag` and `pp-extra` are deferred (cpplib's checks the port does
 not make: UCNs and UTF-8, NFC, #elifdef and #warning before C++23 under -pedantic-errors, the module directives' macro rules). They are classes by
@@ -2550,7 +2551,7 @@ the verdict's kind, coarse: the clang messages behind them are a long tail (the 
 
 - `bin/repr-cpp dg --corpus dg-error --record-ref --record` (4,597 files: the oracle about 4 min cold, g++ about 1 min, the reads seconds): about 6 min.
 - `bin/repr-cpp dg --corpus preprocess --record-ref --record` (71): under 30 s.
-- `bin/repr-cpp dg --corpus modules --record` (1,621 files, key `gxx-modules-all`): about 4 min.
+- `bin/repr-cpp dg --corpus modules --record` (1,181 files, key `gxx-modules-all`): about 3 min.
 - `bin/repr-cpp roundtrip LIST WORK --record-results --replace-results` of `gxx-dg-every-10` with objects (the 53 improvements recorded): about 15 min.
 
 About 25 minutes in all, inside C++'s 35 nightly minutes (GTS201 (a)) only if the round trip is the night's alone; the dg check's own share is
@@ -2585,3 +2586,40 @@ New: `arbace/repr/cpp/dg.ae`, `bin/lib/repr-cpp/dg`, `test/cpp/{check-dg-linux-a
 `test/repr/cpp/dg-preprocess-results.edn`, `test/repr/cpp/roundtrip-results/gxx-modules-every-10.edn`. Changed: `arbace/repr/cpp/convert.ae`, `print.ae`
 (the module forms), `bin/repr-cpp` (`dg`), `test/repr/cpp/roundtrip-{known,oracle}.edn`, `doc/cpp/SPEC.md` §15. Scratch: `.tmp/repr-cpp-dg/`,
 `.tmp/cx9/` of the worktree.
+
+### CX9.8 Review 196's fixes (2026-11-03)
+
+The Mac VM's review 196 (`reports/196-review-cx9.md`, on 78f52fc8) found four highs; the user decided its question (`gxx-disagrees` is the
+harness's gap, deferred, not design). Fixed on `cpp-cx9`:
+
+- **H1, effective targets**: `test/cpp/dg-targets.edn`, C++'s table before C's (the 33 names the lists named, each from target-supports.exp's
+  proc or its probe run with g++ 15.2 on the host); `concepts` (C++20 on, or `-fconcepts`) and `implicit_constexpr` (`-fimplicit-constexpr`)
+  from the run's flags, as check-flags does. A directive an unlisted name decides (Kleene's unknown) makes its file unsupported, the
+  name in the reason: none left but a `{ dg-error: ...}` comment, which is no directive (DejaGnu's scan wants white space after the
+  name; the check's `directives` now does too). `concepts/abbrev5.C` runs at c++26, `ext/packed3.C` expects its three errors,
+  `cpp0x/static_assert9.C` runs.
+- **H2, the directories' drivers**: `test/cpp/dg-drivers.edn`, the 32 `.exp` files of g++.dg read: each file is run by its nearest
+  directory's driver (g++-dg-runtest with its default flags: gomp `-fopenmp`, goacc `-fopenacc`, tls and tm dg.exp's, dfp `""` ...;
+  once: coroutines' `-std=c++20`; gcc-dg-runtest's first torture option `-O0`: torture, asan, tsan; modules.exp's 17 2a 2b for
+  its preprocess files); the drivers not modelled (pch, plugin, debug, special, lto, compat, vect, graphite, ...) make their files
+  unsupported. `[srcdir]` is substituted as `${srcdir}`; the own-standard test is DejaGnu's per-line glob.
+- **H3**: the reference's ` [g++: ...]` (and the new ` [dg-prune-output N]`) only on a line verdict; `gxx-disagrees` anchored on the line
+  kinds and `:kind :deferred`. The oracle's own crashes (two gomp files: clang segfaults under `-fopenmp`) have their class,
+  `oracle-crash` (deferred), anchored on cxxdump's "clang failed (not a rejection): signal:".
+- **H4, dg-line**: C's `arbace.c.dg` resolves `dg-line` names (`line-names`, `resolve-line`'s third argument), its own commit on
+  `c-dg-line` (off main, with the judge test `dg-line-names`), taken here; the dg check loads the checkout's `arbace.c.dg`
+  (`arbace_tool -s`: it is embedded in stage 0). None of C's 627 recorded dg files uses dg-line: C's records do not move.
+- **Mediums**: an error on a `dg-message` line (any diagnostic) or on an xfail `dg-bogus` line is no extra (`:allow`), for the oracle
+  and for the reference; `dg-prune-output` files' line failures are said and classed apart (`prune-output`, deferred: messages are
+  not compared, the regex cannot be applied); module lines inside a conditional group or a directive's continuation are not read;
+  `(cpp/module)`, `(cpp/module-private)` and EmptyDecl's `(c/null)` are constructed lists (a quoted literal carried convert.ae's
+  `:line`, which the layout reads). g++'s kept diagnostics are grepped as text (`grep -a`: a file with invalid UTF-8 was "binary").
+  The reference records its options beside its standard; a record of other options is not used.
+- Not fixed (lows): the one standard picked on dg-do alone (not skip-if), `-ansi` not read as a standard, `-fsyntax-only` acceptance
+  of units clang rejects at code generation, the class not recorded in the row.
+
+The day's numbers after the fixes (the records rewritten from scratch; the dg-error run over `DRs eh parse template cpp23 cpp26 lookup
+gomp coroutines`, 1,549 files): **1,143 of 1,546 supported pass**, 3 unsupported; clang-fewer-errors 112, clang-other-lines 88,
+clang-accepts 84, clang-extra 84, prune-output 17, clang-pedantic 8, gxx-disagrees 4, clang-elsewhere 4, oracle-crash 2.
+Preprocess (71): 38 of 70 pass, pp-diag 28, gxx-disagrees 3, pp-extra 1. Modules every 10th: as before (39 pass, 79 recorded
+rejections, 1 known). The whole corpora tonight as CX9.4 lists, after these fixes.

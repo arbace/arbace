@@ -43,6 +43,16 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; The parts
 
+(defn directives
+  "arbace.c.dg's directives of a file, those whose name DejaGnu reads: dg.exp's scan takes `{ dg-NAME` followed by white
+  space (or the closing brace), so a `{ dg-error: ... }` in a comment is no directive."
+  [^String text]
+  (let [lines (str/split-lines text)]
+    (filterv (fn [{:keys [name line]}]
+               (let [l (nth lines (dec (long line)) "")]
+                 (re-find (re-pattern (str "\\{\\s*dg-" (java.util.regex.Pattern/quote name) "(\\s|\\})")) l)))
+             (cdg/directives text))))
+
 (defn part-of
   "The part of a g++.dg file (its name under g++.dg/ and its text): :preprocess, :modules, :dg-error or nil."
   [^String nm ^String text]
@@ -60,15 +70,24 @@
   ^long [v]
   (let [v (long v)] (if (>= v 90) (+ 1900 v) (+ 2000 v))))
 
+(def ^:private cxx-targets
+  (delay (let [f (java.io.File. "test/cpp/dg-targets.edn")] (if (.exists f) (:effective (read-string (slurp f))) {}))))
+
+(def ^:dynamic *flags* "the run's flags, for the effective targets target-supports.exp decides by check-flags" [])
+
 (defn cxx-atom
   "A selector's atom for a C++ unit at the standard of year `y`: the effective targets c++NN (at least), c++NN_only and
-  c++NN_down (target-supports.exp), c++ true, c false; every other atom C's table's (arbace.repr.c.host/target-atom,
-  test/c/dg-targets.edn; :unknown when it does not list it)."
+  c++NN_down (target-supports.exp), c++ true, c false; concepts (C++20 on, or -fconcepts) and implicit_constexpr
+  (-fimplicit-constexpr) by the run's flags (*flags*); then C++'s table (test/cpp/dg-targets.edn), then C's
+  (arbace.repr.c.host/target-atom, test/c/dg-targets.edn); :unknown when neither lists it (review 196, finding 1)."
   [y ^String w]
   (let [y (long y)]
     (cond
       (= w "c++") true
       (= w "c") false
+      (= w "concepts") (or (>= y 2020) (boolean (some #{"-fconcepts"} *flags*)))
+      (= w "implicit_constexpr") (boolean (some #{"-fimplicit-constexpr"} *flags*))
+      (contains? @cxx-targets w) (boolean (get @cxx-targets w))
       :else
       (if-let [[_ v sfx] (re-matches #"c\+\+(\d\d|0x|1y|1z|2a|2b|2c)(_only|_down)?" w)]
         (let [vy (std-year (Long/parseLong (get {"0x" "11" "1y" "14" "1z" "17" "2a" "20" "2b" "23" "2c" "26"} v v)))
@@ -80,18 +99,23 @@
             (>= yy vy)))
         (if (.startsWith w "c++") :unknown (chost/target-atom w))))))
 
-(def ^:dynamic *unknown* "an atom: the selector names neither table decides (taken to hold)" nil)
+(def ^:dynamic *unknown*
+  "an atom: the names of selectors neither table decides whose value decided a directive (the file is then unsupported)" nil)
 
 (defn holds?
-  "Whether a directive's selector word (`target c++11`, `xfail *-*-*`, nil) holds at year `y`: {:applies :xfail}."
+  "Whether a directive's selector word (`target c++11`, `xfail *-*-*`, nil) holds at year `y`: {:applies :xfail}. A selector
+  whose value an unlisted name leaves open (Kleene's :unknown) names it in *unknown*, which makes the file unsupported
+  (review 196, finding 1: no longer taken to hold, which a `!` turned around)."
   [y sel]
   (if (nil? sel)
     {:applies true :xfail false}
     (let [t (str/trim (str sel))
           xf (.startsWith t "xfail")
           tg (.startsWith t "target")
-          atomf (fn [w] (let [v (cxx-atom y w)] (if (= :unknown v) (do (when *unknown* (swap! *unknown* conj w)) true) v)))
+          seen (atom #{})
+          atomf (fn [w] (let [v (cxx-atom y w)] (when (= :unknown v) (swap! seen conj w)) v))
           v (chost/eval-selector (str/trim (subs t (cond xf 5 tg 6 :else 0))) atomf)
+          _ (when (and (= :unknown v) *unknown*) (swap! *unknown* into @seen))
           v (if (= :unknown v) true (boolean v))]
       (cond xf {:applies true :xfail v}
             tg {:applies v :xfail false}
@@ -116,17 +140,29 @@
 
 (def default-flags "g++.dg/dg.exp's DEFAULT_CXXFLAGS" ["-pedantic-errors" "-Wno-long-long"])
 
+(def ^:private drivers
+  (delay (let [f (java.io.File. "test/cpp/dg-drivers.edn")] (if (.exists f) (read-string (slurp f)) {"" {:runner :g++-dg-runtest :flags default-flags}}))))
+
+(defn driver-of
+  "The driver of a g++.dg file (test/cpp/dg-drivers.edn): its nearest directory's that holds an .exp, else dg.exp's;
+  with :dir."
+  [^String nm]
+  (let [parts (vec (butlast (str/split nm #"/")))]
+    (or (some (fn [n] (let [d (str/join "/" (take n parts))] (when-let [v (get @drivers d)] (assoc v :dir d))))
+              (range (count parts) 0 -1))
+        (assoc (get @drivers "") :dir ""))))
+
 (defn- shell-words [^String s]
   (vec (remove str/blank? (map #(str/replace % "\\\"" "\"") (str/split (str/trim s) #"\s+")))))
 
 (defn options
-  "The options DejaGnu gives a file at year `y` (its dg-options whose selector holds, else the default flags; then its
-  dg-additional-options whose selector holds), ${srcdir} as `srcdir`: {:opts [...] :dg-options bool}."
-  [ds y ^String srcdir]
-  (let [sub #(shell-words (str/replace (str %) "${srcdir}" srcdir))
+  "The options DejaGnu gives a file at year `y` (its dg-options whose selector holds, else the driver's default flags; then
+  its dg-additional-options whose selector holds), ${srcdir} and [srcdir] as `srcdir`: {:opts [...] :dg-options bool}."
+  [ds y ^String srcdir dflt]
+  (let [sub #(shell-words (-> (str %) (str/replace "${srcdir}" srcdir) (str/replace "[srcdir]" srcdir)))
         own (filter #(and (= (:name %) "options") (:applies (holds? y (second (:words %))))) ds)
         add (filter #(and (= (:name %) "additional-options") (:applies (holds? y (second (:words %))))) ds)]
-    {:opts (vec (concat (if (seq own) (sub (first (:words (last own)))) default-flags)
+    {:opts (vec (concat (if (seq own) (sub (first (:words (last own)))) dflt)
                         (mapcat #(sub (first (:words %))) add)))
      :dg-options (boolean (seq own))}))
 
@@ -135,65 +171,87 @@
 (def ^:private clang-ok
   #"^(-pedantic|-pedantic-errors|-Wpedantic|-w|-W[A-Za-z].*|-ansi|-D.*|-U.*|-I.*|-O[0-3sgz]?|-trigraphs|-fno-exceptions|-fexceptions|-fno-rtti|-frtti|-fchar8_t|-fno-char8_t|-fsized-deallocation|-fno-sized-deallocation|-faligned-new|-fno-aligned-new|-fms-extensions|-fopenmp|-fno-operator-names|-fno-elide-constructors|-fno-threadsafe-statics|-funsigned-char|-fsigned-char|-fshort-wchar|-fno-access-control|-fdollars-in-identifiers|-fno-dollars-in-identifiers|-fno-gnu-keywords|-fgnu-keywords|-fno-implicit-templates|-fdeclspec|-ftemplate-depth=.*|-fconstexpr-depth=.*|-fconstexpr-steps=.*|-fno-weak|-fcoroutines|-fpermissive)$")
 
+(defn own-std?
+  "DejaGnu's search_for \"-std=*++\": a line of the file with -std= and ++ after it (Tcl's glob, `*` crossing spaces)."
+  [^String text]
+  (boolean (some #(re-find #"-std=.*\+\+" %) (str/split-lines text))))
+
 (defn file-run
-  "A file's run at its standard: {:std \"c++17\" :gxx [args] :clang [args] :unsupported why-or-nil}."
-  [^String text ds ^String srcdir]
-  (let [own-std (re-find #"-std=\S*\+\+" text)
+  "A file's run at its standard, by its directory's driver (driver-of): {:std \"c++17\" :gxx [args] :clang [args]
+  :unsupported why-or-nil :driver dir}."
+  [^String nm ^String text ds ^String srcdir]
+  (let [drv (driver-of nm)
+        runner (:runner drv)
+        own-std (own-std? text)
         dos (filter #(= (:name %) "do") ds)
-        do-holds (fn [y] (let [d (first dos)] (or (nil? d) (:applies (holds? y (second (:words d)))))))
         prefix (if (re-find #"dg-options" text) "gnu++" "c++")
-        cands (if own-std ["17"] (std-list text))
-        pick (first (filter #(do-holds (std-year (Long/parseLong %))) cands))
-        v (or pick (first cands))
-        y (std-year (Long/parseLong v))
-        {:keys [opts dg-options]} (options ds y srcdir)
-        stdflag (when-not own-std (str "-std=" prefix v))
-        all (vec (concat (when stdflag [stdflag]) opts))
-        ;; the last -std the options give is the unit's
-        std (or (some-> (last (filter #(.startsWith ^String % "-std=") all)) (subs 5) host/canonical-std) host/default-std)
+        stdlist? (and (#{:g++-dg-runtest :modules} runner) (not own-std))
+        ;; modules.exp's module-init: MOD_STD_LIST, 17 2a 2b, the gnu++ prefix with a dg-options line
+        cands (cond (not stdlist?) [nil] (= runner :modules) ["17" "20" "23"] :else (std-list text))
+        ;; the flags at a candidate standard: the standard's (g++-dg-runtest), the torture option (gcc-dg-runtest), the
+        ;; driver's always-flags, then the file's options
+        flags-at (fn [v] (let [y (if v (std-year (Long/parseLong v)) 2017)
+                               {:keys [opts]} (binding [*flags* (:flags drv)] (options ds y srcdir (vec (:flags drv))))]
+                           (vec (concat (when v [(str "-std=" prefix v)]) (when (:torture drv) [(:torture drv)]) (:always drv) opts))))
+        std-of (fn [all] (or (some-> (last (filter #(.startsWith ^String % "-std=") all)) (subs 5) host/canonical-std) host/default-std))
+        do-holds (fn [v] (let [all (flags-at v) y (host/std-year (std-of all)) d (first dos)]
+                           (binding [*flags* all] (or (nil? d) (:applies (holds? y (second (:words d))))))))
+        ok (seq (filter do-holds cands)) ; a candidate may be nil (no standard flag): seq, not first, says whether one holds
+        v (if ok (first ok) (first cands))
+        all (flags-at v)
+        std (std-of all)
+        y (host/std-year std)
         fc (host/file-config all std)
-        req (filter #(= (:name %) "require-effective-target") ds)
-        unmet (first (remove #(:applies (holds? (host/std-year std) (str "target " (first (:words %))))) req))
-        skip (first (filter (fn [d] (and (= (:name d) "skip-if")
-                                         (:applies (holds? (host/std-year std) (str "target " (second (:words d)))))
-                                         (let [inc* (nth (:words d) 2 nil)] (or (nil? inc*) (= (str/trim inc*) "*") (= (str/trim inc*) "")))))
-                            ds))]
+        [unmet skip] (binding [*flags* all]
+                       [(first (remove #(:applies (holds? y (str "target " (first (:words %))))) (filter #(= (:name %) "require-effective-target") ds)))
+                        (first (filter (fn [d] (and (= (:name d) "skip-if")
+                                                    (:applies (holds? y (str "target " (second (:words d)))))
+                                                    (let [inc* (nth (:words d) 2 nil)] (or (nil? inc*) (= (str/trim inc*) "*") (= (str/trim inc*) "")))))
+                                       ds))])]
     {:std std
+     :driver (:dir drv)
+     :flags all
      :gxx (vec (remove #(.startsWith ^String % "-std=") (:all-args fc)))
      :clang (vec (filter #(and (re-matches clang-ok %) (not (#{"-fcoroutines" "-fpermissive"} %))) (:all-args fc)))
      :dropped (vec (remove #(or (re-matches clang-ok %) (.startsWith ^String % "-std=")) (:all-args fc)))
-     :y (host/std-year std)
+     :y y
      :unsupported (cond
-                    (and (seq dos) (nil? pick)) (str "dg-do " (second (:words (first dos))) " at " (str/join ", " (map #(str "c++" %) cands)))
+                    (#{:unmodelled} runner) (str "the driver " (:exp drv) " is not modelled")
+                    (and (seq dos) (not ok)) (str "dg-do " (second (:words (first dos))) " at " (if stdlist? (str/join ", " (map #(str "c++" %) cands)) std))
                     unmet (str "dg-require-effective-target " (first (:words unmet)))
                     skip (str "dg-skip-if " (pr-str (second (:words skip))))
                     :else nil)}))
 
 (defn analyze
-  "A file's directives at year `y`: arbace.c.dg's analysis with the C++ selectors (the expected error lines by line,
-  the xfail ones, a line 0's count, dg-excess-errors)."
-  [^String text y]
-  (let [ds (cdg/directives text)]
-    (reduce
-     (fn [a {:keys [name line words]}]
-       (cond
-         (= name "do") (if (:action a) a (assoc a :action (keyword (first words))))
-         (contains? cdg/message-kinds name)
-         (let [[_ _ sel spec] words
-               {:keys [applies xfail]} (holds? y sel)
-               k (cdg/message-kinds name)
-               l (cond (or (nil? spec) (= spec ".")) line
-                       (re-matches #"\d+" spec) (let [n (Long/parseLong spec)] (if (zero? n) :any n))
-                       :else (if-let [[_ sg d] (re-matches #"\.([+-])(\d+)" spec)] ((if (= sg "+") + -) line (Long/parseLong d)) line))]
-           (cond
-             (not applies) a
-             (= l :any) (update-in a [:any k] (fnil inc 0))
-             xfail (update-in a [:xfail k] (fnil conj []) l)
-             :else (cond-> (update-in a [:expect k] (fnil conj []) l)
-                     (= k :error) (update-in [:msgs l] (fnil conj []) (str (first words))))))
-         (= name "excess-errors") (assoc a :excess true)
-         :else a))
-     {} ds)))
+  "A file's directives at year `y` with the run's flags: arbace.c.dg's analysis with the C++ selectors (the expected error
+  lines by line, the xfail ones, a line 0's count, dg-excess-errors), the lines a dg-line names resolved (arbace.c.dg's
+  resolve-line); :allow, the lines where an error is no extra (a dg-message's, which matches any diagnostic, gcc-dg.exp's
+  process-message; a dg-bogus's that is xfail: the message is expected), :prune the dg-prune-output count."
+  [^String text y flags]
+  (let [ds (directives text)
+        names (cdg/line-names ds)]
+    (binding [*flags* flags]
+      (reduce
+       (fn [a {:keys [name line words]}]
+         (cond
+           (= name "do") (if (:action a) a (assoc a :action (keyword (first words))))
+           (contains? cdg/message-kinds name)
+           (let [[_ _ sel spec] words
+                 {:keys [applies xfail]} (holds? y sel)
+                 k (cdg/message-kinds name)
+                 l (cdg/resolve-line spec line names)]
+             (cond
+               (not applies) a
+               (= l :any) (update-in a [:any k] (fnil inc 0))
+               (and xfail (= name "bogus")) (update a :allow (fnil conj []) l)
+               xfail (update-in a [:xfail k] (fnil conj []) l)
+               (= name "message") (-> a (update-in [:expect k] (fnil conj []) l) (update :allow (fnil conj []) l))
+               :else (cond-> (update-in a [:expect k] (fnil conj []) l)
+                       (= k :error) (update-in [:msgs l] (fnil conj []) (str (first words))))))
+           (= name "excess-errors") (assoc a :excess true)
+           (= name "prune-output") (update a :prune (fnil inc 0))
+           :else a))
+       {} ds))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; lists
@@ -229,10 +287,10 @@
       ;; the round trip's list: NAME, STD, G++'S ARGS, PATH, THE MODELLED ARGS (bin/lib/repr-cpp/roundtrip)
       (let [rows (for [n mine
                        :let [t (get texts n)
-                             r (file-run t (cdg/directives t) srcdir)
+                             r (file-run n t (directives t) srcdir)
                              ;; modules.exp's MOD_STD_LIST is 17 2a 2b (g++ reads modules at 17 under -fmodules-ts); clang reads
                              ;; them from C++20: the file's own -std, else 2a, -std=c++20 (gnu++20 with a dg-options line)
-                             r (if (re-find #"-std=\S*\+\+" t) r
+                             r (if (own-std? t) r
                                    (let [s (if (re-find #"dg-options" t) "gnu++20" "c++20")]
                                      (assoc r :std s :gxx (vec (remove #(.startsWith ^String % "-std=") (:gxx r))))))
                              fc (host/file-config (into [(str "-std=" (:std r))] (:gxx r)) (:std r))]]
@@ -241,13 +299,19 @@
       (let [unk (atom #{})
             rows (into (sorted-map)
                        (for [n mine]
-                         (binding [*unknown* unk]
-                           (let [t (get texts n)
-                                 ds (cdg/directives t)
-                                 r (file-run t ds srcdir)
-                                 a (analyze t (:y r))]
-                             [n (merge (dissoc r :y) (select-keys a [:expect :xfail :any :excess :msgs])
-                                       {:action (or (:action a) :compile)})]))))]
+                         (let [mine-unk (atom #{})]
+                           (binding [*unknown* mine-unk]
+                             (let [t (get texts n)
+                                   ds (directives t)
+                                   r (file-run n t ds srcdir)
+                                   a (analyze t (:y r) (:flags r))
+                                   ;; review 196, finding 1: a directive an unlisted name decides makes the file unsupported
+                                   r (if (and (seq @mine-unk) (not (:unsupported r)))
+                                       (assoc r :unsupported (str "selector names test/cpp/dg-targets.edn does not list: " (str/join " " (sort @mine-unk))))
+                                       r)]
+                               (swap! unk into @mine-unk)
+                               [n (merge (dissoc r :y :flags) (select-keys a [:expect :xfail :any :excess :msgs :allow :prune])
+                                         {:action (or (:action a) :compile)})])))))]
         (spit (str d "/dg.edn") (str "{\n" (str/join "\n" (map (fn [[k v]] (str (pr-str k) " " (pr-str v))) rows)) "\n}\n"))
         (spit (str d "/run.tsv")
               (str/join (for [[n r] rows :when (not (:unsupported r))]
@@ -256,7 +320,7 @@
                       ", unsupported " (count (filter (comp :unsupported val) rows))
                       ", with an expected error " (count (filter #(seq (get-in (val %) [:expect :error])) rows))
                       "; standards " (pr-str (into (sorted-map) (frequencies (map (comp :std val) rows))))
-                      (when (seq @unk) (str "; selector names neither table lists (taken to hold): " (pr-str (vec (sort @unk)))))))))
+                      (when (seq @unk) (str "; selector names neither table lists (their files unsupported): " (pr-str (vec (sort @unk)))))))))
     (when (= part "modules") (println (str part ": " (count mine) " files" (when (< (count mine) n-part) (str " of " n-part)))))))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -359,7 +423,7 @@
                          :let [g (str d "/gxx/" (esc nm))]
                          :when (exists? (str g ".status"))]
                      (let [e (errors-of (slurp-latin1 (str g ".txt")) nm false)]
-                       [(str corpus "/" nm) (cond-> {:status (Long/parseLong (str/trim (slurp (str g ".status")))) :std (:std r)
+                       [(str corpus "/" nm) (cond-> {:status (Long/parseLong (str/trim (slurp (str g ".status")))) :std (:std r) :args (:gxx r)
                                                      :error (:lines e)}
                                               (pos? (long (:other e))) (assoc :other (:other e))
                                               (not (zero? (long (:fatal e)))) (assoc :fatal (:fatal e)))])))]
@@ -370,7 +434,7 @@
             all (into (sorted-map) (merge old rows))]
         (spit ref-file (str ";; g++ 15.2's errors on gcc 15.2.0's g++.dg files as C++'s dg check runs them (bin/repr-cpp dg --record-ref;\n"
                             ";; doc/cpp/CPP-SURVEY.md, \"As built: CX9 (write-ahead)\"): ID -> {:status (g++'s exit status) :std (the\n"
-                            ";; standard) :error {LINE COUNT} (its errors at the main file's lines) :other (errors elsewhere) :fatal (a fatal\n"
+                            ";; standard) :args (its options) :error {LINE COUNT} (its errors at the main file's lines) :other (errors elsewhere) :fatal (a fatal\n"
                             ";; error's line, -1 elsewhere)}. The reference of the directives (CP11 (a), CS14's runs as data). Clojure reader.\n{\n"
                             (str/join "\n" (map (fn [[k v]] (str (pr-str k) " " (pr-str v))) all)) "\n}\n"))
         (println "recorded" ref-file (count all) "files")))))
@@ -379,9 +443,10 @@
   "Whether g++'s errors are the directives' (arbace.c.dg/gcc-agrees on the recorded reference): :yes, [:differ missing extra
   ...], or nil when not recorded."
   [d g]
-  ;; a reference recorded at another standard than the run's is not this run's (the record is stale for the file)
-  (when (and g (= (:std g) (:std d)))
-    (cdg/gcc-agrees d {:error (:error g) :other (:other g 0)
+  ;; a reference recorded at another standard or with other options than the run's is not this run's (the record is stale for the file)
+  (when (and g (= (:std g) (:std d)) (= (:args g) (:gxx d)))
+    ;; a dg-message's line takes any diagnostic, an error too (review 196, finding 5): as an xfail line for the reference
+    (cdg/gcc-agrees (update-in d [:xfail :error] (fnil into []) (:allow d)) {:error (:error g) :other (:other g 0)
                        :fatal-other (if (= -1 (:fatal g)) 1 0)})))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -403,7 +468,7 @@
       [:fail :stopped (str stray " error" (when (> stray 1) "s") " not located in the main file: " (:message r))]
       :else
       (let [exp (set (get-in dg [:expect :error]))
-            allowed (into exp (get-in dg [:xfail :error]))
+            allowed (-> exp (into (get-in dg [:xfail :error])) (into (:allow dg)))
             ours (set (keys (:lines r)))
             excess (:excess dg)
             missed (vec (sort (remove ours exp)))
@@ -442,8 +507,12 @@
         row (case (first v)
               :pass [id :pass (name (:action d))]
               :unsupported [id :unsupported (str (name (:action d)) " (unsupported: " (:unsupported d) ")")]
-              [id :fail (str (name (second v)) ": " (nth v 2)
-                             (when (and ga (not= ga :yes)) (str " [g++: " (pr-str (vec (rest ga))) "]")))])
+              ;; review 196, finding 3: the reference's disagreement and dg-prune-output are said only on a line verdict; a
+              ;; crash, timeout or refusal is no question of the expectations
+              (let [lv (#{:missed :extra :both :stopped :pp-missed :pp-extra :pp-both :pp-stopped} (second v))]
+                [id :fail (str (name (second v)) ": " (nth v 2)
+                               (when (and lv ga (not= ga :yes)) (str " [g++: " (pr-str (vec (rest ga))) "]"))
+                               (when (and lv (:prune d)) (str " [dg-prune-output " (:prune d) "]")))]))
         cls (when (= :fail (second row)) (classify classes row))]
     (cond-> row cls (conj cls))))
 
@@ -483,7 +552,7 @@
         (let [passes-differ (filter (fn [[nm dd]] (and (= :pass (second (get now (str corpus "/" nm))))
                                                        (let [ga (gxx-agrees dd (get gx (str corpus "/" nm)))] (and ga (not= ga :yes)))))
                                     dg)
-              unrec (count (remove #(or (:unsupported (val %)) (= (:std (val %)) (:std (get gx (str corpus "/" (key %)))))) dg))]
+              unrec (count (remove #(or (:unsupported (val %)) (let [g (get gx (str corpus "/" (key %)))] (and (= (:std (val %)) (:std g)) (= (:gxx (val %)) (:args g))))) dg))]
           (println (format "  g++'s reference: %d files not recorded at their standard; %d passes whose directives g++ does not give" unrec (count passes-differ))))
         (spit (str d "/rows.edn") (str "[\n" (str/join "\n" (map pr-str rows)) "\n]\n"))
         (swap! failing into (concat unclassed regress))
