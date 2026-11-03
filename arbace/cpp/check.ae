@@ -226,11 +226,13 @@
   and -O2 runs differ, the status alone."
   [id ref node run]
   (let [[_ nst ncls nmsg flags] node
-        ld (if (= flags "long-double") " uses-long-double" "")]
+        ld (if (= flags "long-double") " uses-long-double" "")
+        ;; the flag once (review 191's low: a runtime unit's refusal carries it in its message already)
+        with-ld (fn [^String r] (if (str/ends-with? r " uses-long-double") r (str r ld)))]
     (cond
       (nil? ref) [id :fail "no g++ run recorded (bin/cppi record-ref)"]
       (nil? node) [id :fail "not built"]
-      (not= nst "ok") [id (keyword nst) (str (when (seq ncls) (str ncls ": ")) nmsg ld)]
+      (not= nst "ok") [id (keyword nst) (with-ld (str (when (seq ncls) (str ncls ": ")) nmsg))]
       (nil? run) [id :fail "not run"]
       :else
       (let [[_ st sum _ fault esum] run
@@ -239,7 +241,8 @@
             same-status (= st want)
             loose (= :differ (:o2 ref))]
         (cond
-          (re-find #"^(ci(run|aot): internal|fatal error: |runtime: )" (str fault)) [id :fail (str "internal: " fault ld)]
+          ;; never flagged long-double (review 191, F1): the runner's failure is no program's layout
+          (re-find #"^(ci(run|aot): internal|fatal error: |runtime: )" (str fault)) [id :fail (str "internal: " fault)]
           (and same-status (or loose (and (= sum (:stdout ref)) (= esum (:stderr ref))))) [id :pass ""]
           :else [id :fail (str (cond (not same-status) (str "differ status " (if (keyword? st) (name st) st) " (g++ " (if (keyword? want) (name want) want) ")")
                                      (not= sum (:stdout ref)) "differ stdout"
@@ -291,6 +294,17 @@
                           row (if (= :pass (second row)) row (conj row (klass row)))]
                       (if aot (conj (if (= 3 (count row)) (conj row nil) row) (second (get interp id))) row))))
         cmp ((resolve 'arbace.c.run/compare-record) rows recf corpora)
+        ;; review 191, F1: a recorded non-pass whose class changes (a long-double check error that now segfaults) is a regression
+        ;; too; compare-record sees only a recorded pass that fails and a changed known reason
+        cmp (let [old (let [f (java.io.File. recf)] (if (.exists f) (read-string (slurp f)) []))
+                  now (into {} (map (juxt first identity) rows))
+                  moved (vec (for [[id r reason :as o] old
+                                   :when (some #(str/starts-with? id (str % "/")) corpora)
+                                   :let [n (get now id)]
+                                   :when (and n (not= :pass r) (not= :pass (second n)) (not= (klass o) (nth n 3 nil)))]
+                               [id (str "recorded " (name r) " in class " (some-> (klass o) name) ", now " (name (second n)) " " (nth n 2)
+                                        " in class " (some-> (nth n 3 nil) name))]))]
+              (update cmp :regressions into moved))
         failing (filter #(and (not= :pass (second %)) (nil? (nth % 3 nil))) rows)
         controls (filterv #(= :run (:level %)) (read-string (slurp "test/cpp/controls.edn")))
         cfail (vec (for [{:keys [id subject reference]} controls
