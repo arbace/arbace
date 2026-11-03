@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+# bin/java-speed: Java's timeouts judged one by one (GTS208 (a), doc/GATE-SURVEY.md, "GT8, the test budget").
+#   bin/java-speed list [speed|hang|all]       the test ids of :speed, of the hang classes, or both (divergences.edn)
+#   bin/java-speed commands                    the exact reruns, printed (what `rerun` runs)
+#   bin/java-speed rerun interp|compiled       the timeouts of that level rerun at a long limit, once (JAVA_CHECK_ONCE), 4 jobs,
+#                                              ARBACE_CPU_LOG recording each action's CPU time; needs the gate's executable:
+#                                              JAVA_CHECK_EXE, REPR_JAVA_EXE and JAVA_CHECK_FORMS as java-held's step sets them
+#                                              (test/gate/steps.edn); the results are saved under .tmp/java-speed/, no record touched
+#   bin/java-speed record LEVEL CPU-LOG        the log's rows (status, wall, user, system, command) into test/java/speed-measured.tsv,
+#                                              with the limit line for test/java/timeouts.txt (5 x the line is the CPU cap: the line
+#                                              is 2.5 times the CPU time over 5, rounded up, GTS102); prints the lines, writes the table
+#   bin/java-speed check                       no :match in divergences.edn takes a timeout; every recorded timeout is named by a
+#                                              :tests list; every :speed test has a row in speed-measured.tsv (unmeasured counted)
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+div=$root/test/java/divergences.edn
+. "$root/bin/lib/tmpdir.bash" 2>/dev/null || true
+out=$root/.tmp/java-speed
+
+# class_tests NAME...: the :tests ids of the classes (a class block runs from its ' {:id :NAME' line to the next)
+class_tests() {
+  local n
+  for n in "$@"; do
+    awk -v n=":$n" '/^ \{:id / { on = ($2 == n) } on' "$div" | grep -E '^ *:tests ' | grep -oE '"t[0-9]{5}"' | tr -d '"' || true
+  done
+}
+
+# timeouts LEVEL: ids recorded as timeout at LEVEL
+timeouts() { sed -n 's/^ \["\(t[0-9]*\)" "[^"]*" :timeout .*/\1/p' "$root/test/java/check-$1.edn"; }
+
+# regex_of IDS: the --only regex (java-check matches "ID TEST")
+regex_of() { echo "^($(paste -sd'|')) "; }
+
+case ${1:-} in
+  list)
+    case ${2:-all} in
+      speed) class_tests speed ;;
+      hang) class_tests speed-hang speed-hang-compiled ;;
+      all) class_tests speed speed-hang speed-hang-compiled ;;
+      *) echo "bin/java-speed list [speed|hang|all]" >&2; exit 2 ;;
+    esac | sort -u ;;
+  commands)
+    i=$(class_tests speed speed-hang | sort -u | regex_of)
+    c=$(class_tests speed-hang speed-hang-compiled | sort -u | regex_of)
+    echo "ARBACE_CPU_LOG=$out/interp.cpu.tsv JAVA_CHECK_ONCE=1 bin/java-check --levels interp --jobs 4 --timeout 120 --only '$i' --save $out/interp"
+    echo "ARBACE_CPU_LOG=$out/compiled.cpu.tsv JAVA_CHECK_ONCE=1 bin/java-check --levels compiled --jobs 4 --timeout 60 --only '$c' --save $out/compiled" ;;
+  rerun)
+    lv=${2:?interp|compiled}
+    mkdir -p "$out"; : > "$out/$lv.cpu.tsv"
+    case $lv in
+      interp) ids=$(class_tests speed speed-hang | sort -u); t=120 ;;
+      compiled) ids=$(class_tests speed-hang speed-hang-compiled | sort -u); t=60 ;;
+      *) echo "interp|compiled" >&2; exit 2 ;;
+    esac
+    cd "$root"
+    ARBACE_CPU_LOG=$out/$lv.cpu.tsv JAVA_CHECK_ONCE=1 exec bin/java-check --levels "$lv" --jobs 4 --timeout "$t" \
+      --only "$(echo "$ids" | regex_of)" --save "$out/$lv" ;;
+  record)
+    lv=${2:?LEVEL}; log=${3:?CPU-LOG}
+    tbl=$root/test/java/speed-measured.tsv
+    # a row of the log: STATUS WALL USER SYS COMMAND...; the test is the -Dtest.classes=.../classes/ID of the command
+    awk -F'\t' -v lv="$lv" '{ id = ""; if (match($5, /classes\/t[0-9]+/)) id = substr($5, RSTART + 8, RLENGTH - 8)
+        if (id == "") next
+        cpu = $3 + $4; lim = int((cpu * 2.5 / 5) + 0.999); if (lim < 20) lim = 20
+        printf "%s\t%s\t%s\t%.2f\t%d\n", id, lv, $1, cpu, lim }' "$log" | sort -u >> "$tbl.new"
+    # the last row of a test and level wins; the committed header kept
+    { grep '^#' "$tbl" || true; { grep -v '^#' "$tbl" || true; cat "$tbl.new"; } | awk -F'\t' '{ r[$1 FS $2] = $0 } END { for (k in r) print r[k] }' | LC_ALL=C sort; } > "$tbl.tmp"
+    mv "$tbl.tmp" "$tbl"; rm -f "$tbl.new"
+    echo "# lines for test/java/timeouts.txt (a test that finished, STATUS 0; JTREG-NAME from the check's second column):"
+    awk -F'\t' '!/^#/ && $3 == 0 && $5 > 20 { print $1, $5 }' "$tbl" ;;
+  check)
+    bad=0
+    if grep -qE ':match \[#"\^timeout' "$div"; then echo "java-speed: a class takes every timeout (:match #\"^timeout \")" >&2; bad=1; fi
+    named=$(class_tests speed speed-hang speed-hang-compiled memory-limit interp-volatile flaky-timeout | sort -u)
+    for lv in interp compiled; do
+      for id in $(timeouts $lv); do
+        echo "$named" | grep -qx "$id" || { echo "java-speed: $id times out at $lv and no :tests list names it" >&2; bad=1; }
+      done
+    done
+    n=0; for id in $(class_tests speed); do awk -F'\t' -v i="$id" '$1 == i && $3 == 0 { f = 1 } END { exit !f }' "$root/test/java/speed-measured.tsv" || n=$((n + 1)); done
+    echo "java-speed: $n of $(class_tests speed | wc -l) :speed tests unmeasured"
+    exit $bad ;;
+  *) sed -n '2,15p' "$0" >&2; exit 2 ;;
+esac
