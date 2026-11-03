@@ -21,6 +21,10 @@ usage:
         MARSHAL sha256 of marshal.dumps of the code compiled from the text, positions included (level 5)
         SHA     sha256 of the file's bytes (level 4: the :full print against the original)
         NODES   the tree's nodes; SECONDS the file's time; RSS the process's peak RSS so far (KiB, ru_maxrss)
+  pydump.py scopes --base DIR --list FILE --out DIR
+                                 each file's symbol table as CPython's _symtable builds it, the raw flags of every
+                                 name: OUT/REL.scopes.ae, (python/scopes (block TYPE "NAME" {"SYM" FLAGS ...} [CHILD
+                                 ...])); bin/pyi scope-check's reference (PY5a)
   pydump.py symtable FILE        the file's symbol tables as (python/symtable SCOPE): (scope TYPE NAME [SYMBOL...]
                                  [CHILD...]), (symbol NAME [FLAG...]); PY5's reference, written here at PY2
   pydump.py code FILE            the CODE digest of one file
@@ -838,11 +842,44 @@ def mode_symtable(path):
     print(form("python/symtable", scope(top)))
 
 
+BLOCK_TYPES = {0: ":function", 1: ":class", 2: ":module", 3: ":annotation", 4: ":type-alias", 5: ":type-parameters",
+               6: ":type-variable"}
+
+
+def scope_form(e):
+    """(block TYPE "NAME" {"SYMBOL" FLAGS ...} [CHILD ...]): CPython's own symbol table, the raw flags of each name
+    (DEF_* | scope << SCOPE_OFF, Include/internal/pycore_symtable.h), the children in its order"""
+    syms = " ".join("%s %d" % (qstr(k), v) for k, v in sorted(e.symbols.items()))
+    return "(block %s %s {%s} [%s])" % (BLOCK_TYPES[e.type], qstr(e.name), syms, " ".join(scope_form(c) for c in e.children))
+
+
+def mode_scopes(args):
+    """scopes --base DIR --list FILE --out DIR: each file's symbol table, OUT/REL.scopes.ae: (python/scopes BLOCK), or
+    (python/error ...) when ast.parse or the symbol table rejects it"""
+    import _symtable
+    base, lst, out = args[args.index("--base") + 1], args[args.index("--list") + 1], args[args.index("--out") + 1]
+    warnings.simplefilter("ignore")
+    for rel in [l for l in open(lst, encoding="utf-8").read().split("\n") if l]:
+        data = open(os.path.join(base, rel), "rb").read()
+        try:
+            text = "(python/scopes %s)" % scope_form(_symtable.symtable(decode(data), rel, "exec"))
+        except (SyntaxError, ValueError) as e:
+            text = error_form(e)
+        except Exception as e:
+            text = form("python/error", "HelperError", qstr("%s: %s" % (type(e).__name__, e)))
+        dst = os.path.join(out, rel + ".scopes.ae")
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        with open(dst, "w", encoding="utf-8", newline="\n") as f:
+            f.write(text + "\n")
+
+
 def main():
     sys.setrecursionlimit(20000)
     a = sys.argv[1:]
     if a[0] == "tree":
         mode_tree(a[1:])
+    elif a[0] == "scopes":
+        mode_scopes(a[1:])
     elif a[0] == "symtable":
         mode_symtable(a[1])
     elif a[0] == "code":

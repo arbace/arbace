@@ -18,6 +18,13 @@
 #                                  (sys.implementation.name "cpython"); an entry the two runs disagree on or whose output
 #                                  names the machine is written :excluded with its reason; the seconds into
 #                                  test/python/ref-costs.edn. --check: two more runs, each reproducing every reference
+#   bin/pyi scope-check [--record] [CORPUS...]
+#                                  PY5a: every read file's symbol table by arbace.python.scope against CPython's own
+#                                  (tools/pydump/pydump.py scopes): the corpora of test/python/corpora.edn (default:
+#                                  samples synthetic errors stdlib site-packages lib-test), against test/python/scope-known.edn
+#   bin/pyi compile-check [--record] [CORPUS...]
+#                                  PY5a: every read file compiled to pyi's IR (arbace.python.compile) and the IR
+#                                  verified (doc/python/PYI-SPEC.md §4), against test/python/compile-known.edn
 # Environment: REPR_PYTHON_SRC as for bin/repr-python (the tarball's source).
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -151,9 +158,52 @@ cmd_record_ref() {
   return $rc
 }
 
+# corpus_list ID DIR: the corpus's base directory (stdout) and its files' list into DIR/list
+corpus_list() {
+  local id=$1 d=$2 line base paths excl
+  line=$("$(arbace_exe)" -e "(let [c (first (filter #(= :$id (:id %)) (:corpora (read-string (slurp \"$root/test/python/corpora.edn\")))))] (when c (let [w (:where c)] (println (if (:pin w) (name (:pin w)) (str \"root:\" (:root w))) (arbace.string/join \",\" (:paths w)) (if (seq (:exclude w)) (arbace.string/join \",\" (:exclude w)) \"-\")))))")
+  [ -n "$line" ] || die "no corpus $id in test/python/corpora.edn"
+  read -r base paths excl <<< "$line"
+  case $base in
+    cpython-3.14.10) base="$root/.tmp/repr-python/Python-3.14.10"; [ -d "$base/Lib" ] || "$root/bin/repr-python" pins --fetch >/dev/null ;;
+    site-packages) base="$root/.tmp/repr-python/site-packages/$(uname -m)"; [ -d "$base" ] || "$root/bin/repr-python" pins --fetch >/dev/null ;;
+    root:*) base="$root/${base#root:}" ;;
+  esac
+  local -a args=(); IFS=, read -ra pa <<< "$paths"; args+=("${pa[@]}")
+  if [ "$excl" != - ]; then IFS=, read -ra ea <<< "$excl"; for e in "${ea[@]}"; do args+=(--exclude "$e"); done; fi
+  mkdir -p "$d"
+  (cd "$base" && py corpus.py list "$base" "${args[@]}") > "$d/list"
+  echo "$base"
+}
+
+pa_arbace() {
+  ARBACE_PATH="$root" GOMEMLIMIT=${PYI_GOMEMLIMIT:-1500MiB} GOMAXPROCS=${PYI_THREADS:-4} "$(arbace_exe)" -m arbace.python "$@"
+}
+
+cmd_scope_check() {
+  local record="" ids=() rc=0 worst=0 id
+  while [ $# -gt 0 ]; do case $1 in --record) record=1; shift ;; *) ids+=("$1"); shift ;; esac; done
+  [ ${#ids[@]} -gt 0 ] || ids=(samples synthetic errors stdlib site-packages lib-test)
+  for id in "${ids[@]}"; do
+    local d="$WORK/scope/$id" base t0
+    rm -rf "$d"
+    base=$(corpus_list "$id" "$d")
+    t0=$(date +%s)
+    py pydump.py tree --base "$base" --list "$d/list" --out "$d/dumps" --tsv "$d/dumps.tsv"
+    py pydump.py scopes --base "$base" --list "$d/list" --out "$d/scopes"
+    rc=0
+    pa_arbace scope-check --corpus "$id" --dumps "$d/dumps" --scopes "$d/scopes" --known "$root/test/python/scope-known.edn" \
+      --results "$d/results.edn" ${record:+--record} || rc=$?
+    echo "  $(( $(date +%s) - t0 )) s"
+    [ $rc -gt $worst ] && worst=$rc
+  done
+  return $worst
+}
+
 command -v python3 >/dev/null || die "no python3 (the oracle)"
 case "${1:-}" in
   gen) shift; cmd_gen "$@" ;;
   record-ref) shift; cmd_record_ref "$@" ;;
-  *) sed -n '2,20p' "$0"; exit 2 ;;
+  scope-check) shift; cmd_scope_check "$@" ;;
+  *) sed -n '2,27p' "$0"; exit 2 ;;
 esac

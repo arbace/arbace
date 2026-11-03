@@ -1,0 +1,721 @@
+;; Ported from CPython 3.14.10, Python/symtable.c and Python/future.c (https://www.python.org/ftp/python/3.14.10/Python-3.14.10.tar.xz):
+;; Copyright (c) 2001 Python Software Foundation; All Rights Reserved. Licensed under the PSF License Agreement for
+;; Python 3.14 (LICENSE.md).
+(ns arbace.python.scope
+  "pyi's scope analysis (doc/python/PYI-SPEC.md §2; doc/python/PYTHON-SURVEY.md §6.2 (1); PY5a): the symbol table of a
+  module of Python forms, as CPython 3.14.10's Python/symtable.c builds it, so that it can be checked against
+  CPython's own (bin/pyi scope-check: every read file's table equal, block for block, flag for flag).
+
+  A port of symtable.c's two passes (its derivation and license: doc/ARBACE.md, LICENSE.md): the first visits the forms
+  and records each name's raw facts in its block (DEF_LOCAL, USE, DEF_PARAM, ...), the second (analyze-block) decides
+  each name's scope (LOCAL, GLOBAL_EXPLICIT, GLOBAL_IMPLICIT, FREE, CELL), the free variables carried up, the
+  comprehensions PEP 709 inlines, the class cells (__class__, __classdict__, __conditional_annotations__), the
+  annotation scopes of PEP 649 and the type parameter scopes of PEP 695. Names are mangled (__x in class C is _C__x).
+  A SyntaxError of the table is thrown as ex-info {:class SyntaxError :msg ...}, with symtable.c's message.
+
+  table: the module's forms -> (block TYPE \"NAME\" {\"SYMBOL\" FLAGS ...} [CHILD ...]), the form of
+  tools/pydump/pydump.py scopes."
+  (:require [arbace.repr.python.print :as pp]
+            [arbace.string :as str]))
+
+;; ---- the flags (Include/internal/pycore_symtable.h) ----
+
+(def DEF_GLOBAL 1) (def DEF_LOCAL 2) (def DEF_PARAM 4) (def DEF_NONLOCAL 8) (def USE 16) (def DEF_FREE_CLASS 64)
+(def DEF_IMPORT 128) (def DEF_ANNOT 256) (def DEF_COMP_ITER 512) (def DEF_TYPE_PARAM 1024) (def DEF_COMP_CELL 2048)
+(def DEF_BOUND (bit-or DEF_LOCAL DEF_PARAM DEF_IMPORT))
+(def SCOPE_OFF 12)
+(def LOCAL 1) (def GLOBAL_EXPLICIT 2) (def GLOBAL_IMPLICIT 3) (def FREE 4) (def CELL 5)
+
+(defn- has? [flags bit] (not (zero? (bit-and flags bit))))
+
+(defn- syntax-error [msg] (throw (ex-info msg {:class 'SyntaxError :msg msg})))
+
+;; ---- blocks: atoms ----
+
+(def ^:private function-like #{:function :annotation :type-variable :type-alias :type-parameters})
+
+(defn- new-block [st name type]
+  (let [cur (:cur @st)
+        c (when cur @cur)]
+    (atom {:name name :type type :symbols {} :order [] :children []
+           :nested (boolean (and c (or (:nested c) (function-like (:type c)))))
+           :comprehension nil :generator false :coroutine false :comp-inlined false :comp-iter-target false
+           :comp-iter-expr 0 :can-see-class false :needs-class-closure false :needs-classdict false
+           :has-conditional-annotations false :in-conditional false :in-unevaluated false :annotation-block nil
+           :mangled-names nil :scope-info nil})))
+
+(defn- function-like? [b] (boolean (function-like (:type @b))))
+
+;; ---- mangling ----
+
+(defn mangle [private name]
+  (if (or (nil? private) (not (str/starts-with? name "__")) (str/ends-with? name "__") (str/includes? name "."))
+    name
+    (let [p (str/replace private #"^_+" "")]
+      (if (empty? p) name (str "_" p name)))))
+
+(defn- maybe-mangle [st b name]
+  (let [mn (:mangled-names @b)]
+    (if (and mn (not (contains? mn name)))
+      name
+      (mangle (:private @st) name))))
+
+;; ---- the first pass's state ----
+
+(defn- enter-existing! [st b add-to-children?]
+  (let [prev (:cur @st)]
+    (swap! st update :stack conj b)
+    (when prev
+      (swap! b assoc :comp-iter-expr (:comp-iter-expr @prev))
+      (when (and (:mangled-names @prev) (not= :class (:type @b)))
+        (swap! b assoc :mangled-names (:mangled-names @prev))))
+    (swap! st assoc :cur b)
+    (when-not (and (:future-annotations @st) (= :annotation (:type @b)))
+      (when (= :module (:type @b)) (swap! st assoc :global b))
+      (when (and add-to-children? prev)
+        (swap! prev update :children conj b)))))
+
+(defn- exit! [st]
+  (swap! st update :stack pop)
+  (swap! st assoc :cur (peek (:stack @st))))
+
+(declare add-def!)
+
+(defn- enter! [st name type]
+  (let [b (new-block st name type)]
+    (enter-existing! st b true)
+    (when (#{:annotation :type-variable :type-alias} type)
+      (add-def! st ".format" DEF_PARAM)
+      (add-def! st ".format" USE))
+    b))
+
+(defn- set-sym! [b name flags]
+  (swap! b (fn [m] (-> m (assoc-in [:symbols name] flags)
+                       (cond-> (not (contains? (:symbols m) name)) (update :order conj name))))))
+
+(defn- lookup [st b name] (get (:symbols @b) (maybe-mangle st b name) 0))
+
+(defn- add-def-helper! [st name flag b]
+  (let [mangled (maybe-mangle st (:cur @st) name)
+        old (get (:symbols @b) mangled)
+        val (if old
+              (do (when (and (has? flag DEF_PARAM) (has? old DEF_PARAM))
+                    (syntax-error (str "duplicate argument '" name "' in function definition")))
+                  (when (and (has? flag DEF_TYPE_PARAM) (has? old DEF_TYPE_PARAM))
+                    (syntax-error (str "duplicate type parameter '" name "'")))
+                  (bit-or old flag))
+              flag)
+        val (if (:comp-iter-target @b)
+              (do (when (has? val (bit-or DEF_GLOBAL DEF_NONLOCAL))
+                    (syntax-error (str "comprehension inner loop cannot rebind assignment expression target '" name "'")))
+                  (bit-or val DEF_COMP_ITER))
+              val)]
+    (set-sym! b mangled val)
+    (when (and (not (has? flag DEF_PARAM)) (has? flag DEF_GLOBAL))
+      (let [g (:global @st)]
+        (set-sym! g mangled (bit-or (get (:symbols @g) mangled 0) flag))))))
+
+(defn- check-name [name ctx]
+  (when (= name "__debug__")
+    (case ctx
+      :store (syntax-error "cannot assign to __debug__")
+      :del (syntax-error "cannot delete __debug__")
+      nil)))
+
+(defn- add-def-ctx! [st name flag ctx]
+  (when (has? flag (bit-or DEF_PARAM DEF_LOCAL DEF_IMPORT)) (check-name name ctx))
+  (when (and (has? flag DEF_TYPE_PARAM) (:mangled-names @(:cur @st)))
+    (swap! (:cur @st) update :mangled-names conj name))
+  (add-def-helper! st name flag (:cur @st)))
+
+(defn add-def! [st name flag] (add-def-ctx! st name flag (if (= flag USE) :load :store)))
+
+;; ---- the forms ----
+
+(def ^:private constant-symbols '#{None True False ...})
+
+(defn- ident [x] (if (string? x) x (str x)))
+
+(defn- name-of
+  "The identifier of a Name node (a symbol or (name ...)), else nil"
+  [x]
+  (cond (and (symbol? x) (not (constant-symbols x))) (str x)
+        (and (seq? x) (= 'name (first x))) (ident (second x))
+        :else nil))
+
+(defn- docstring? [body]
+  (let [s (first body)]
+    (and (seq? s) (= 'expr (first s))
+         (let [v (second s)]
+           (or (string? v) (and (seq? v) ('#{str str-concat} (first v))
+                                (or (= 'str (first v)) (every? #(or (string? %) (and (seq? %) (= 'str (first %)))) (rest v)))))))))
+
+(declare visit-stmt! visit-expr! visit-pattern!)
+
+(defn- visit-exprs! [st xs] (doseq [x xs] (when (some? x) (visit-expr! st x :load))))
+
+(defn- conditional! [st f]
+  (let [b (:cur @st) was (:in-conditional @b)]
+    (swap! b assoc :in-conditional true)
+    (f)
+    (swap! b assoc :in-conditional was)))
+
+(defn- args-of [a] (nth (pp/node a) 2))
+
+(defn- arg-name [a] (if (seq? a) (ident (second a)) (ident a)))
+(defn- arg-ann [a] (when (seq? a) (nth (second (pp/node a)) 1 nil)))
+
+(defn- visit-params! [st as] (doseq [a as] (add-def! st (arg-name a) DEF_PARAM)))
+
+(defn- visit-arguments! [st a]
+  (let [o (args-of a)]
+    (visit-params! st (:posonly o))
+    (visit-params! st (:args o))
+    (visit-params! st (:kwonly o))
+    (when-let [v (:vararg o)] (add-def! st (arg-name v) DEF_PARAM))
+    (when-let [k (:kwarg o)] (add-def! st (arg-name k) DEF_PARAM))))
+
+(defn- visit-annotation! [st annotation]
+  (let [cur (:cur @st)
+        unevaluated (= :function (:type @cur))]
+    (when (and (or (and (= :class (:type @cur)) (:in-conditional @cur)) (= :module (:type @cur)))
+               (not (:has-conditional-annotations @cur)))
+      (swap! cur assoc :has-conditional-annotations true)
+      (add-def! st "__conditional_annotations__" USE))
+    (if-let [ab (:annotation-block @cur)]
+      (enter-existing! st ab false)
+      (let [current-type (:type @cur)
+            ab (enter! st "__annotate__" :annotation)]
+        (swap! cur assoc :annotation-block ab)
+        (when (and (= :class current-type) (not (:future-annotations @st)))
+          (swap! ab assoc :can-see-class true)
+          (swap! cur assoc :needs-classdict true)
+          (add-def! st "__classdict__" USE))))
+    (when unevaluated (swap! (:cur @st) assoc :in-unevaluated true))
+    (visit-expr! st annotation :load)
+    (when unevaluated (swap! (:cur @st) assoc :in-unevaluated false))
+    (exit! st)))
+
+(defn- visit-annotations! [st a returns]
+  (let [cur (:cur @st)
+        is-in-class (:can-see-class @cur)
+        current-type (:type @cur)]
+    (enter! st "__annotate__" :annotation)
+    (when (or is-in-class (= :class current-type))
+      (swap! (:cur @st) assoc :can-see-class true)
+      (add-def! st "__classdict__" USE))
+    (let [o (args-of a)]
+      (doseq [x (concat (:posonly o) (:args o))] (when-let [an (arg-ann x)] (visit-expr! st an :load)))
+      (when-let [an (some-> (:vararg o) arg-ann)] (visit-expr! st an :load))
+      (when-let [an (some-> (:kwarg o) arg-ann)] (visit-expr! st an :load))
+      (doseq [x (:kwonly o)] (when-let [an (arg-ann x)] (visit-expr! st an :load))))
+    (when returns (visit-expr! st returns :load))
+    (exit! st)))
+
+(defn- visit-type-param-bound-or-default! [st e name info]
+  (when (= name "__classdict__") (syntax-error (str "reserved name '" name "' cannot be used for type parameter")))
+  (when (some? e)
+    (let [is-in-class (:can-see-class @(:cur @st))]
+      (enter! st name :type-variable)
+      (swap! (:cur @st) assoc :can-see-class is-in-class :scope-info info)
+      (when is-in-class (add-def! st "__classdict__" USE))
+      (visit-expr! st e :load)
+      (exit! st))))
+
+(defn- visit-type-param! [st tp]
+  (let [[h [nm] o _] (pp/node tp)
+        nm (ident nm)]
+    (add-def! st nm (bit-or DEF_TYPE_PARAM DEF_LOCAL))
+    (case h
+      type-var (do (visit-type-param-bound-or-default!
+                    st (:bound o) nm (when-let [b (:bound o)] (if (and (seq? b) (= 'tuple (first b))) "a TypeVar constraint" "a TypeVar bound")))
+                   (visit-type-param-bound-or-default! st (:default o) nm "a TypeVar default"))
+      type-var-tuple (visit-type-param-bound-or-default! st (:default o) nm "a TypeVarTuple default")
+      param-spec (visit-type-param-bound-or-default! st (:default o) nm "a ParamSpec default"))))
+
+(defn- enter-type-param-block! [st name has-defaults has-kwdefaults class?]
+  (let [current-type (:type @(:cur @st))]
+    (enter! st name :type-parameters)
+    (when (= :class current-type)
+      (swap! (:cur @st) assoc :can-see-class true)
+      (add-def! st "__classdict__" USE))
+    (when class?
+      (add-def! st ".type_params" DEF_LOCAL) (add-def! st ".type_params" USE)
+      (add-def! st ".generic_base" DEF_LOCAL) (add-def! st ".generic_base" USE))
+    (when has-defaults (add-def! st ".defaults" DEF_PARAM))
+    (when has-kwdefaults (add-def! st ".kwdefaults" DEF_PARAM))))
+
+(defn- async-def? [st] (let [c @(:cur @st)] (and (= :function (:type c)) (:coroutine c))))
+
+(defn- visit-function! [st async? x]
+  (let [[_ [nm args body] o _] (pp/node x)
+        nm (ident nm)
+        ao (args-of args)
+        tps (:type-params o)]
+    (add-def! st nm DEF_LOCAL)
+    (visit-exprs! st (:defaults ao))
+    (visit-exprs! st (:kw-defaults ao))
+    (visit-exprs! st (:decorators o))
+    (when (seq tps)
+      (enter-type-param-block! st nm true (boolean (some some? (:kw-defaults ao))) false)
+      (doseq [tp tps] (visit-type-param! st tp)))
+    (let [fb (new-block st nm :function)]
+      (visit-annotations! st args (:returns o))
+      (enter-existing! st fb true)
+      (when async? (swap! fb assoc :coroutine true))
+      (visit-arguments! st args)
+      (doseq [s body] (visit-stmt! st s))
+      (exit! st))
+    (when (seq tps) (exit! st))))
+
+(defn- visit-class! [st x]
+  (let [[_ [nm body] o _] (pp/node x)
+        nm (ident nm)
+        tps (:type-params o)
+        tmp (:private @st)]
+    (add-def! st nm DEF_LOCAL)
+    (visit-exprs! st (:decorators o))
+    (when (seq tps)
+      (enter-type-param-block! st nm false false true)
+      (swap! st assoc :private nm)
+      (swap! (:cur @st) assoc :mangled-names #{})
+      (doseq [tp tps] (visit-type-param! st tp)))
+    (visit-exprs! st (:bases o))
+    (doseq [k (:keywords o)] (let [[_ [kn v] _ _] (pp/node k)] (when (some? kn) (check-name (ident kn) :store))))
+    (doseq [k (:keywords o)] (visit-expr! st (nth (second (pp/node k)) 1) :load))
+    (enter! st nm :class)
+    (swap! st assoc :private nm)
+    (when (seq tps)
+      (add-def! st "__type_params__" DEF_LOCAL)
+      (add-def! st ".type_params" USE))
+    (doseq [s body] (visit-stmt! st s))
+    (exit! st)
+    (when (seq tps) (exit! st))
+    (swap! st assoc :private tmp)))
+
+(defn- visit-alias! [st a]
+  (let [[nm as] (if (seq? a) (let [[_ [n] o _] (pp/node a)] [(ident n) (some-> (:as o) ident)]) [(ident a) nil])
+        name (or as nm)
+        store (first (str/split name #"\."))]
+    (if (not= name "*")
+      (add-def! st store DEF_IMPORT)
+      (when (not= :module (:type @(:cur @st)))
+        (syntax-error "import * only allowed at module level")))))
+
+(defn- directive-check! [st nm global?]
+  (let [cur (lookup st (:cur @st) nm)]
+    (when (has? cur (bit-or DEF_PARAM DEF_LOCAL USE DEF_ANNOT))
+      (syntax-error
+       (str "name '" nm "' "
+            (cond (has? cur DEF_PARAM) (str "is parameter and " (if global? "global" "nonlocal"))
+                  (has? cur USE) (str "is used prior to " (if global? "global" "nonlocal") " declaration")
+                  (has? cur DEF_ANNOT) nil
+                  :else (str "is assigned to before " (if global? "global" "nonlocal") " declaration")))))))
+
+(defn- directive! [st nm global?]
+  (let [cur (lookup st (:cur @st) nm)]
+    (when (has? cur (bit-or DEF_PARAM DEF_LOCAL USE DEF_ANNOT))
+      (if (and (has? cur DEF_ANNOT) (not (has? cur DEF_PARAM)) (not (has? cur USE)))
+        (syntax-error (str "annotated name '" nm "' can't be " (if global? "global" "nonlocal")))
+        (directive-check! st nm global?)))
+    (add-def! st nm (if global? DEF_GLOBAL DEF_NONLOCAL))))
+
+(defn- maybe-coroutine-for-module! [st] nil)
+
+(defn- visit-stmt! [st x]
+  (let [[h p o _] (pp/node x)
+        e! (fn [v] (when (some? v) (visit-expr! st v :load)))
+        body! (fn [ss] (doseq [s ss] (visit-stmt! st s)))]
+    (case h
+      function-def (visit-function! st false x)
+      async-function-def (visit-function! st true x)
+      class-def (visit-class! st x)
+      type-alias
+      (let [[nmf v] p
+            nm (name-of nmf)
+            in-class (= :class (:type @(:cur @st)))
+            tps (:type-params o)]
+        (visit-expr! st nmf :store)
+        (when (seq tps)
+          (enter-type-param-block! st nm false false false)
+          (doseq [tp tps] (visit-type-param! st tp)))
+        (enter! st nm :type-alias)
+        (swap! (:cur @st) assoc :can-see-class in-class)
+        (when in-class (add-def! st "__classdict__" USE))
+        (e! v)
+        (exit! st)
+        (when (seq tps) (exit! st)))
+      return (e! (first p))
+      delete (doseq [t (first p)] (visit-expr! st t :del))
+      assign (do (doseq [t (first p)] (visit-expr! st t :store)) (e! (second p)))
+      ann-assign
+      (let [[t an v] p
+            simple (and (name-of t) (not (false? (:simple o))))]
+        (if-let [nm (name-of t)]
+          (let [cur (lookup st (:cur @st) nm)]
+            (when (and (has? cur (bit-or DEF_GLOBAL DEF_NONLOCAL)) (not= (:cur @st) (:global @st)) simple)
+              (syntax-error (str "annotated name '" nm "' can't be " (if (has? cur DEF_GLOBAL) "global" "nonlocal"))))
+            (if simple
+              (add-def! st nm (bit-or DEF_ANNOT DEF_LOCAL))
+              (when (some? v) (add-def! st nm DEF_LOCAL))))
+          (visit-expr! st t :store))
+        (visit-annotation! st an)
+        (e! v))
+      aug-assign (do (visit-expr! st (first p) :store) (e! (nth p 2)))
+      (for async-for)
+      (do (when (= h 'async-for)
+            (when-not (:coroutine @(:cur @st)) (syntax-error "'async for' outside async function")))
+          (visit-expr! st (first p) :store) (e! (second p))
+          (conditional! st #(do (body! (nth p 2)) (body! (:else o)))))
+      while (do (e! (first p)) (conditional! st #(do (body! (second p)) (body! (:else o)))))
+      if (do (e! (first p)) (conditional! st #(do (body! (second p)) (body! (:else o)))))
+      match (do (e! (first p))
+                (conditional! st #(doseq [c (second p)]
+                                    (let [[_ [pt b] co _] (pp/node c)]
+                                      (visit-pattern! st pt)
+                                      (e! (:guard co))
+                                      (body! b)))))
+      raise (when (some? (first p)) (e! (first p)) (e! (:from o)))
+      (try try-star)
+      (conditional! st #(do (body! (first p))
+                            (doseq [hd (second p)]
+                              (let [[_ [b] ho _] (pp/node hd)]
+                                (e! (:type ho))
+                                (when-let [n (:name ho)] (add-def! st (ident n) DEF_LOCAL))
+                                (body! b)))
+                            (body! (:else o)) (body! (:finally o))))
+      assert (do (e! (first p)) (e! (second p)))
+      import (doseq [a (first p)] (visit-alias! st a))
+      import-from (do (doseq [a (second p)] (visit-alias! st a))
+                      (when (and (= "__future__" (some-> (first p) ident)) (not (:level o))
+                                 (not (contains? (:future-stmts @st) x)))
+                        (syntax-error "from __future__ imports must occur at the beginning of the file")))
+      global (doseq [n (first p)] (directive! st (ident n) true))
+      nonlocal (doseq [n (first p)] (directive! st (ident n) false))
+      expr (e! (first p))
+      (pass break continue) nil
+      (with async-with)
+      (do (when (= h 'async-with)
+            (when-not (:coroutine @(:cur @st)) (syntax-error "'async with' outside async function")))
+          (conditional! st #(do (doseq [i (first p)]
+                                  (let [[_ [c v] _ _] (pp/node i)]
+                                    (e! c)
+                                    (when (some? v) (visit-expr! st v :store))))
+                                (body! (second p)))))
+      (throw (ex-info (str "scope: unknown statement " h) {})))))
+
+;; ---- named expressions and comprehensions ----
+
+(defn- extend-namedexpr-scope! [st target]
+  (let [nm (name-of target)]
+    (loop [bs (reverse (:stack @st))]
+      (let [b (first bs) t (:type @b)]
+        (cond
+          (:comprehension @b)
+          (let [f (lookup st b nm)]
+            (when (and (has? f DEF_COMP_ITER) (has? f DEF_LOCAL))
+              (syntax-error (str "assignment expression cannot rebind comprehension iteration variable '" nm "'")))
+            (recur (rest bs)))
+          (= t :function)
+          (let [f (lookup st b nm)]
+            (add-def! st nm (if (has? f DEF_GLOBAL) DEF_GLOBAL DEF_NONLOCAL))
+            (add-def-helper! st nm DEF_LOCAL b))
+          (= t :module)
+          (do (add-def! st nm DEF_GLOBAL)
+              (add-def-helper! st nm DEF_GLOBAL b))
+          :else
+          (syntax-error (case t
+                          :class "assignment expression within a comprehension cannot be used in a class body"
+                          :type-parameters "assignment expression within a comprehension cannot be used within the definition of a generic"
+                          :type-alias "assignment expression within a comprehension cannot be used in a type alias"
+                          :type-variable "assignment expression within a comprehension cannot be used in a TypeVar bound"
+                          "assignment expression in an unexpected scope")))))))
+
+(defn- raise-if-annotation-block! [st what]
+  (let [c @(:cur @st)]
+    (case (:type c)
+      :annotation (syntax-error (str what " cannot be used within an annotation"))
+      :type-variable (syntax-error (str what " cannot be used within " (:scope-info c)))
+      :type-alias (syntax-error (str what " cannot be used within a type alias"))
+      :type-parameters (syntax-error (str what " cannot be used within the definition of a generic"))
+      nil)))
+
+(defn- visit-comprehension! [st g]
+  (let [[_ [t it] o _] (pp/node g)
+        cur (:cur @st)]
+    (swap! cur assoc :comp-iter-target true)
+    (visit-expr! st t :store)
+    (swap! cur assoc :comp-iter-target false)
+    (swap! cur update :comp-iter-expr inc)
+    (visit-expr! st it :load)
+    (swap! cur update :comp-iter-expr dec)
+    (visit-exprs! st (:ifs o))
+    (when (:async o) (swap! cur assoc :coroutine true))))
+
+(defn- handle-comprehension! [st kind scope-name gens elt value]
+  (let [generator? (= kind :generator)
+        [_ [t it] oo _] (pp/node (first gens))
+        cur (:cur @st)]
+    (swap! cur update :comp-iter-expr inc)
+    (visit-expr! st it :load)
+    (swap! cur update :comp-iter-expr dec)
+    (let [b (enter! st scope-name :function)]
+      (swap! b assoc :comprehension kind)
+      (when (:async oo) (swap! b assoc :coroutine true))
+      (add-def! st ".0" DEF_PARAM)
+      (swap! b assoc :comp-iter-target true)
+      (visit-expr! st t :store)
+      (swap! b assoc :comp-iter-target false)
+      (visit-exprs! st (:ifs oo))
+      (doseq [g (rest gens)] (visit-comprehension! st g))
+      (when (some? value) (visit-expr! st value :load))
+      (visit-expr! st elt :load)
+      (swap! b assoc :generator generator?)
+      (let [async? (and (:coroutine @b) (not generator?))]
+        (exit! st)
+        (when (and async? (not (async-def? st)) (nil? (:comprehension @(:cur @st))))
+          (syntax-error "asynchronous comprehension outside of an asynchronous function"))
+        (when async? (swap! (:cur @st) assoc :coroutine true))))))
+
+(defn- visit-expr! [st x ctx]
+  (cond
+    (symbol? x) (when-not (constant-symbols x) (visit-expr! st (list 'name x) ctx))
+    (or (string? x) (number? x) (nil? x)) nil
+    (seq? x)
+    (let [[h p o _] (pp/node x)
+          e! (fn [v] (when (some? v) (visit-expr! st v :load)))
+          es! (fn [vs] (doseq [v vs] (e! v)))
+          cur (:cur @st)]
+      (case h
+        name (when-not (:in-unevaluated @cur)
+               (let [nm (ident (first p))]
+                 (add-def-ctx! st nm (if (= ctx :load) USE DEF_LOCAL) ctx)
+                 (when (and (= ctx :load) (function-like? cur) (= nm "super"))
+                   (add-def! st "__class__" USE))))
+        named-expr (do (raise-if-annotation-block! st "named expression")
+                       (when (pos? (:comp-iter-expr @cur))
+                         (syntax-error "assignment expression cannot be used in a comprehension iterable expression"))
+                       (when (:comprehension @cur) (extend-namedexpr-scope! st (first p)))
+                       (e! (second p))
+                       (visit-expr! st (first p) :store))
+        bool-op (es! (second p))
+        bin-op (do (e! (nth p 1)) (e! (nth p 2)))
+        unary-op (e! (second p))
+        lambda (let [ao (args-of (first p))]
+                 (es! (:defaults ao)) (es! (:kw-defaults ao))
+                 (enter! st "lambda" :function)
+                 (visit-arguments! st (first p))
+                 (e! (second p))
+                 (exit! st))
+        if-exp (es! p)
+        dict (do (es! (first p)) (es! (second p)))
+        (set list tuple) (doseq [v (first p)] (visit-expr! st v ctx))
+        list-comp (handle-comprehension! st :list "listcomp" (second p) (first p) nil)
+        set-comp (handle-comprehension! st :set "setcomp" (second p) (first p) nil)
+        dict-comp (handle-comprehension! st :dict "dictcomp" (nth p 2) (second p) (first p))
+        generator-exp (handle-comprehension! st :generator "genexpr" (second p) (first p) nil)
+        (yield yield-from)
+        (do (raise-if-annotation-block! st "yield expression")
+            (e! (first p))
+            (swap! cur assoc :generator true)
+            (when-let [k (:comprehension @cur)]
+              (syntax-error (case k :list "'yield' inside list comprehension" :set "'yield' inside set comprehension"
+                                  :dict "'yield' inside dict comprehension" "'yield' inside generator expression"))))
+        await (do (raise-if-annotation-block! st "await expression")
+                  (when-not (function-like? cur) (syntax-error "'await' outside function"))
+                  (when (and (not (async-def? st)) (nil? (:comprehension @cur)))
+                    (syntax-error "'await' outside async function"))
+                  (e! (first p))
+                  (swap! cur assoc :coroutine true))
+        compare (do (e! (first p)) (es! (nth p 2)))
+        call (do (e! (first p)) (es! (second p))
+                 (doseq [k (:keywords o)] (let [[_ [kn _] _ _] (pp/node k)] (when (some? kn) (check-name (ident kn) :store))))
+                 (doseq [k (:keywords o)] (e! (second (second (pp/node k))))))
+        formatted-value (do (e! (first p)) (doseq [part (:format-spec o)] (when-not (string? part) (e! part))))
+        interpolation (do (e! (first p)) (doseq [part (:format-spec o)] (when-not (string? part) (e! part))))
+        (joined-str template-str) (doseq [part (first p)] (when-not (string? part) (e! part)))
+        (str-concat) (doseq [part (rest x)] (when (seq? part) (e! part)))
+        (int float imag str bytes const) nil
+        attribute (do (check-name (ident (second p)) ctx) (e! (first p)))
+        subscript (do (e! (first p)) (e! (second p)))
+        starred (visit-expr! st (first p) ctx)
+        slice (es! p)
+        (throw (ex-info (str "scope: unknown expression " h) {}))))
+    :else nil))
+
+(defn- visit-pattern! [st x]
+  (let [[h p o _] (pp/node x)]
+    (case h
+      match-value (visit-expr! st (first p) :load)
+      match-singleton nil
+      match-sequence (doseq [q (first p)] (visit-pattern! st q))
+      match-star (when (some? (first p)) (add-def! st (ident (first p)) DEF_LOCAL))
+      match-mapping (do (doseq [k (first p)] (visit-expr! st k :load))
+                        (doseq [q (second p)] (visit-pattern! st q))
+                        (when-let [r (:rest o)] (add-def! st (ident r) DEF_LOCAL)))
+      match-class (do (visit-expr! st (first p) :load)
+                      (doseq [q (second p)] (visit-pattern! st q))
+                      (doseq [a (:kwd-attrs o)] (check-name (ident a) :store))
+                      (doseq [q (:kwd-patterns o)] (visit-pattern! st q)))
+      match-as (do (when (some? (first p)) (visit-pattern! st (first p)))
+                   (when (some? (second p)) (add-def! st (ident (second p)) DEF_LOCAL)))
+      match-or (doseq [q (first p)] (visit-pattern! st q)))))
+
+;; ---- the second pass (symtable.c's analyze_block) ----
+
+(defn- scope-of [flags] (bit-and (bit-shift-right flags SCOPE_OFF) 15))
+
+(defn- analyze-name [b scopes name flags bound local free global type-params class-entry]
+  (cond
+    (has? flags DEF_GLOBAL)
+    (do (when (has? flags DEF_NONLOCAL) (syntax-error (str "name '" name "' is nonlocal and global")))
+        (swap! scopes assoc name GLOBAL_EXPLICIT)
+        (swap! global conj name)
+        (when bound (swap! bound disj name)))
+    (has? flags DEF_NONLOCAL)
+    (do (when-not bound (syntax-error "nonlocal declaration not allowed at module level"))
+        (when-not (contains? @bound name) (syntax-error (str "no binding for nonlocal '" name "' found")))
+        (when (contains? @type-params name) (syntax-error (str "nonlocal binding not allowed for type parameter '" name "'")))
+        (swap! scopes assoc name FREE)
+        (swap! free conj name))
+    (has? flags DEF_BOUND)
+    (do (swap! scopes assoc name LOCAL)
+        (swap! local conj name)
+        (swap! global disj name)
+        (if (has? flags DEF_TYPE_PARAM) (swap! type-params conj name) (swap! type-params disj name)))
+    :else
+    (let [cf (when class-entry (get (:symbols @class-entry) name 0))]
+      (cond
+        (and cf (has? cf DEF_GLOBAL)) (swap! scopes assoc name GLOBAL_EXPLICIT)
+        (and cf (has? cf DEF_BOUND) (not (has? cf DEF_NONLOCAL))) (swap! scopes assoc name GLOBAL_IMPLICIT)
+        (and bound (contains? @bound name)) (do (swap! scopes assoc name FREE) (swap! free conj name))
+        :else (swap! scopes assoc name GLOBAL_IMPLICIT)))))
+
+(defn- symbol-scope [b name] (scope-of (get (:symbols @b) name 0)))
+
+(defn- free-in-any-child? [b name] (boolean (some #(= FREE (symbol-scope % name)) (:children @b))))
+
+(defn- remove* [k xs] (remove #(= k %) xs))
+
+(defn- inline-comprehension! [b comp scopes comp-free inlined-cells]
+  (let [dropped (atom #{})]
+    (doseq [k (:order @comp)
+            :let [comp-flags (get (:symbols @comp) k)]
+            :when (and comp-flags (not (has? comp-flags DEF_PARAM)))]
+      (let [scope0 (scope-of comp-flags)
+            only-flags (bit-and comp-flags (dec (bit-shift-left 1 SCOPE_OFF)))
+            _ (when (or (= scope0 CELL) (has? only-flags DEF_COMP_CELL)) (swap! inlined-cells conj k))
+            existing (get (:symbols @b) k)
+            scope (if (and (= scope0 FREE) (= :class (:type @b))
+                           (#{"__class__" "__classdict__" "__conditional_annotations__"} k))
+                    (do (when-not (free-in-any-child? comp k) (swap! comp-free disj k))
+                        (swap! dropped conj k)
+                        GLOBAL_IMPLICIT)
+                    scope0)]
+        (if (nil? existing)
+          (do (set-sym! b k only-flags)
+              (swap! scopes assoc k scope))
+          (do (when (and (= scope FREE) (not= :class (:type @b)) (has? comp-flags USE) (not (has? existing USE)))
+                (set-sym! b k (bit-or existing USE)))
+              (when (and (has? existing DEF_BOUND) (not= :class (:type @b)))
+                (when-not (free-in-any-child? comp k) (swap! comp-free disj k)))))))
+    (doseq [k @dropped] (swap! comp (fn [m] (-> m (update :symbols dissoc k) (update :order (fn [o] (vec (remove* k o))))))))))
+
+(defn- analyze-cells! [scopes free inlined-cells]
+  (doseq [[name scope] @scopes
+          :when (and (= scope LOCAL) (or (contains? @free name) (contains? @inlined-cells name)))]
+    (swap! scopes assoc name CELL)
+    (swap! free disj name)))
+
+(defn- drop-class-free! [b free]
+  (when (contains? @free "__class__") (swap! free disj "__class__") (swap! b assoc :needs-class-closure true))
+  (when (contains? @free "__classdict__") (swap! free disj "__classdict__") (swap! b assoc :needs-classdict true))
+  (when (contains? @free "__conditional_annotations__") (swap! free disj "__conditional_annotations__")
+    (swap! b assoc :has-conditional-annotations true)))
+
+(defn- update-symbols! [b scopes bound free inlined-cells classflag]
+  (doseq [name (:order @b)
+          :let [flags (get (:symbols @b) name)]
+          :when flags]
+    (let [flags (if (contains? @inlined-cells name) (bit-or flags DEF_COMP_CELL) flags)
+          scope (get @scopes name)]
+      (when (nil? scope) (throw (ex-info (str "scope: no scope for " name) {})))
+      (set-sym! b name (bit-or flags (bit-shift-left scope SCOPE_OFF)))))
+  (doseq [name @free]
+    (if-let [v (get (:symbols @b) name)]
+      (when classflag (set-sym! b name (bit-or v DEF_FREE_CLASS)))
+      (when (or (nil? bound) (contains? @bound name))
+        (set-sym! b name (bit-shift-left FREE SCOPE_OFF))))))
+
+(declare analyze-block!)
+
+(defn- analyze-child-block! [entry bound free global type-params class-entry]
+  (let [temp-free (atom @free)]
+    (analyze-block! entry (atom @bound) temp-free (atom @global) (atom @type-params) class-entry)
+    temp-free))
+
+(defn- analyze-block! [b bound free global type-params class-entry]
+  (let [local (atom #{}) scopes (atom {})
+        newglobal (atom #{}) newfree (atom #{}) newbound (atom #{}) inlined-cells (atom #{})
+        class? (= :class (:type @b))]
+    (when class?
+      (swap! newglobal into @global)
+      (when bound (swap! newbound into @bound)))
+    (doseq [name (:order @b)]
+      (analyze-name b scopes name (get (:symbols @b) name) bound local free global type-params class-entry))
+    (if-not class?
+      (do (when (function-like? b) (swap! newbound into @local))
+          (when bound (swap! newbound into @bound))
+          (swap! newglobal into @global))
+      (swap! newbound into #{"__class__" "__classdict__" "__conditional_annotations__"}))
+    (doseq [entry (:children @b)]
+      (let [new-class-entry (when (:can-see-class @entry) (if class? b class-entry))
+            inline? (and (:comprehension @entry) (not (:generator @entry)) (not (:can-see-class @b)))
+            child-free (analyze-child-block! entry newbound newfree newglobal type-params new-class-entry)]
+        (when inline?
+          (inline-comprehension! b entry scopes child-free inlined-cells)
+          (swap! entry assoc :comp-inlined true))
+        (swap! newfree into @child-free)))
+    (swap! b update :children (fn [cs] (vec (mapcat #(if (:comp-inlined @%) (:children @%) [%]) cs))))
+    (cond (function-like? b) (analyze-cells! scopes newfree inlined-cells)
+          class? (drop-class-free! b newfree))
+    (update-symbols! b scopes bound newfree inlined-cells (or class? (:can-see-class @b)))
+    (swap! free into @newfree)))
+
+;; ---- the table ----
+
+(def ^:private future-features
+  #{"nested_scopes" "generators" "division" "absolute_import" "with_statement" "print_function" "unicode_literals"
+    "barry_as_FLUFL" "generator_stop" "annotations"})
+
+(defn- future-stmts
+  "The leading `from __future__ import` statements (Python/future.c): their features, checked"
+  [body]
+  (let [body (if (docstring? body) (rest body) body)]
+    (loop [ss body acc #{} feats #{}]
+      (let [s (first ss)]
+        (if (and (seq? s) (= 'import-from (first s)) (= "__future__" (some-> (second s) ident))
+                 (not (:level (nth (pp/node s) 2))))
+          (let [names (map #(if (seq? %) (ident (second %)) (ident %)) (nth s 2))]
+            (doseq [n names]
+              (cond (= n "braces") (syntax-error "not a chance")
+                    (not (future-features n)) (syntax-error (str "future feature " n " is not defined"))))
+            (recur (rest ss) (conj acc s) (into feats names)))
+          {:stmts acc :features feats})))))
+
+(defn- block-form [b]
+  (let [m @b]
+    (list 'block (:type m) (:name m) (into (sorted-map) (:symbols m)) (mapv block-form (:children m)))))
+
+(defn table
+  "The symbol table of a module's forms ((python/module [STMT ...] ...)), as tools/pydump/pydump.py scopes writes it"
+  [module]
+  (let [body (second module)
+        fut (future-stmts body)
+        st (atom {:stack [] :cur nil :global nil :private nil :future-stmts (:stmts fut)
+                  :future-annotations (contains? (:features fut) "annotations")})
+        top (enter! st "top" :module)]
+    (doseq [s body] (visit-stmt! st s))
+    (exit! st)
+    (analyze-block! top nil (atom #{}) (atom #{}) (atom #{}) nil)
+    (block-form top)))
