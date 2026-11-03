@@ -1,0 +1,282 @@
+(in-ns 'go.arbace.py) ^{:go/comments [[9 1 "// The GIL and the threads' state (PY6f; PYS10 (a); Python/ceval_gil.c, Python/pystate.c). One Python thread runs"] [10 1 "// at a time: the goroutine holding the GIL. current (frame.go) is its *Thread, swapped on taking the GIL as"] [11 1 "// CPython swaps _PyThreadState_Current, so the object model needs no locks and currentThread() is right in every"] [12 1 "// goroutine that holds it. The GIL is inactive until the first thread starts: the starter becomes its holder then,"] [13 1 "// so a program of one thread only pays the eval breaker's load. A waiter asks the holder to drop it after"] [14 1 "// sys.getswitchinterval() (gil_drop_request); the holder drops it at its next check of the eval breaker (a frame's"] [15 1 "// start, a backward jump: eval.go) and waits until another thread took it (FORCE_SWITCHING). Blocking Go that"] [16 1 "// touches no Python object runs with the GIL released (allowThreads, blockOn: Py_BEGIN_ALLOW_THREADS)."] [18 1 "// the eval breaker's bits (evalBreaker, eval.go)"] [20 28 "// another thread waits for the GIL"] [21 28 "// a signal is pending (handled on the main thread)"] [22 28 "// a thread has an asynchronous exception (unused)"] [26 1 "// evalBreaker is CPython's eval_breaker, the bits above: the loop (eval.go) calls handleEvalBreaker when it is"] [27 1 "// non-zero at a frame's start (RESUME) and at a backward jump (JUMP_BACKWARD)."] [30 1 "// switchInterval is sys.getswitchinterval() in nanoseconds."] [35 1 "// getSwitchInterval and setSwitchInterval are sys.getswitchinterval and sys.setswitchinterval."] [48 13 "// CPython keeps microseconds"] [55 23 "// a pointer: goi keeps a struct's fields as values, and a sync.Mutex must not be copied"] [56 23 "// the GIL was dropped"] [57 23 "// a thread took it"] [58 23 "// a thread was started: the GIL is in use"] [61 18 "// takes so far"] [62 18 "// threads waiting in take"] [63 18 "// gil_drop_request"] [75 1 "// activate makes the GIL used, held by t (the running thread, which starts the first other thread)."] [85 1 "// take waits for the GIL and makes t the running thread (take_gil)."] [90 3 "// the timed wait of take_gil: each interval in which the holder has not changed asks it to drop the GIL;"] [91 3 "// one that changed starts a new interval (the timer, re-armed by itself, under g.mu)"] [132 1 "// release drops the GIL (drop_gil); with force, it waits until another thread took it when one waits."] [146 1 "// dropRequested is whether another thread asked for the GIL."] [153 1 "// allowThreads runs f, blocking Go that touches no Python object, with the GIL released."] [165 1 "// blockOn waits, with the GIL released, until a value can be received from ch (received: true), the timeout"] [166 1 "// passes (a negative one never does: false), or, on the main thread, a signal arrives: its handlers then run"] [167 1 "// with the GIL (an exception from one ends the wait) and the wait goes on for the time left. ch nil waits for"] [168 1 "// the timeout or a signal alone."] [219 1 "// sleepFor is time.sleep: d with the GIL released, interruptible by a signal's handler (PEP 475: the sleep goes"] [220 1 "// on after a handler that returns)."] [230 1 "// handleEvalBreaker is the eval breaker's work (eval.go: a frame's start and a backward jump, the breaker non-zero):"] [231 1 "// the GIL yielded on a drop request, the pending signals' handlers run on the main thread."] [242 4 "// the main thread handles signals: let it run"] [250 1 "// threadInfo is a thread's state beyond Thread's own fields (PyThreadState's): touched under the GIL only."] [255 23 "// the thread-local objects that hold a dict for it"] [261 2 "// threadsRunning is the number of threads started and not finished (_thread._count)"] [265 1 "// threadInfoOf is t's state, made on first use: the main thread's ident is mainThreadIdent."] [281 1 "// isMainThread is whether t is its interpreter's main thread (the one that handles signals)."]] :go/pos {:name [1 9] :package [1 1]} :go/semis [[208 34] [267 25]]} (go/file "thread_gil.go" :imports [
+
+
+    ^{:go/apos {1 [4 2]} :go/pos {:lparen [3 8] :rparen [7 1] :tok-pos [3 1]}} [sync "sync"]
+    ^{:go/apos {1 [5 2]}} [atomic "sync/atomic"]
+    ^{:go/apos {1 [6 2]}} [time "time"]])
+
+
+;; The GIL and the threads' state (PY6f; PYS10 (a); Python/ceval_gil.c, Python/pystate.c). One Python thread runs
+;; at a time: the goroutine holding the GIL. current (frame.go) is its *Thread, swapped on taking the GIL as
+;; CPython swaps _PyThreadState_Current, so the object model needs no locks and currentThread() is right in every
+;; goroutine that holds it. The GIL is inactive until the first thread starts: the starter becomes its holder then,
+;; so a program of one thread only pays the eval breaker's load. A waiter asks the holder to drop it after
+;; sys.getswitchinterval() (gil_drop_request); the holder drops it at its next check of the eval breaker (a frame's
+;; start, a backward jump: eval.go) and waits until another thread took it (FORCE_SWITCHING). Blocking Go that
+;; touches no Python object runs with the GIL released (allowThreads, blockOn: Py_BEGIN_ALLOW_THREADS).
+
+
+^{:go/pos {:doc [18 1] :lparen [19 7] :rparen [24 1] :tok-pos [19 1]}} (go/const "the eval breaker's bits (evalBreaker, eval.go)\n"
+  ^{:go/apos {1 [20 26]}} [^{:tag ^{:go/pos {:name-pos [20 18]}} int32 :val 1 :go/pos {:name-pos [20 2]}} breakGILDrop 1] ; another thread waits for the GIL
+  ^{:go/apos {1 [21 26]}} [^{:tag ^{:go/pos {:name-pos [21 18]}} int32 :val 2 :go/pos {:name-pos [21 2]}} breakSignals 2] ; a signal is pending (handled on the main thread)
+  ^{:go/apos {1 [22 26]}} [^{:tag ^{:go/pos {:name-pos [22 18]}} int32 :val 4 :go/pos {:name-pos [22 2]}} breakAsyncExc 4] ; a thread has an asynchronous exception (unused)
+  [^{:val 5000000 :go/pos {:name-pos [23 2]}} switchDefaultNs ^{:go/pos {:lparen [23 31] :rparen [23 52]}} (conv ^{:go/pos {:name-pos [23 26]}} int64 ^{:go/apos {1 [23 32]} :go/pos {:op-pos [23 34]}} (* 5 ^{:go/pos {:dot [23 40] :name-pos [23 41] :x-pos [23 36]}} time/Millisecond))])
+
+
+
+
+^{:go/pos {:doc [26 1] :tok-pos [28 1]}} (go/var ^{:tag ^{:go/pos {:dot [28 23] :name-pos [28 24] :x-pos [28 17]}} atomic/Int32 :doc "evalBreaker is CPython's eval_breaker, the bits above: the loop (eval.go) calls handleEvalBreaker when it is\nnon-zero at a frame's start (RESUME) and at a backward jump (JUMP_BACKWARD).\n" :go/pos {:name-pos [28 5]}} evalBreaker)
+
+
+^{:go/pos {:doc [30 1] :tok-pos [31 1]}} (go/var ^{:tag ^{:go/pos {:dot [31 26] :name-pos [31 27] :x-pos [31 20]}} atomic/Int64 :doc "switchInterval is sys.getswitchinterval() in nanoseconds.\n" :go/pos {:name-pos [31 5]}} switchInterval)
+
+^{:go/pos {:func [33 1] :lbrace [33 13] :rbrace [33 53]}} (go/func ^{:go/pos {:name-pos [33 6]}} init ^{:go/pos {:closing [33 11] :opening [33 10]}} [] ^{:go/pos {:dot [33 29] :lparen [33 35] :name-pos [33 30] :rparen [33 51]}} (.Store ^{:go/pos {:name-pos [33 15]}} switchInterval ^{:go/pos {:name-pos [33 36]}} switchDefaultNs))
+
+
+^{:go/pos {:doc [35 1] :func [36 1] :lbrace [36 34] :rbrace [36 80] :return [36 36]}} (go/func ^{:go/pos {:name-pos [36 6]}} getSwitchInterval "getSwitchInterval and setSwitchInterval are sys.getswitchinterval and sys.setswitchinterval.\n" ^{:tag ^{:go/pos {:name-pos [36 26]}} float64 :go/pos {:closing [36 24] :opening [36 23]}} [] ^{:go/apos {2 [36 76]} :go/atext {2 "1e9"} :go/pos {:op-pos [36 74]}} (/ ^{:go/pos {:lparen [36 50] :rparen [36 72]}} (conv ^{:go/pos {:name-pos [36 43]}} float64 ^{:go/pos {:dot [36 65] :lparen [36 70] :name-pos [36 66] :rparen [36 71]}} (.Load ^{:go/pos {:name-pos [36 51]}} switchInterval)) 1.0E9))
+
+^{:go/pos {:func [38 1] :lbrace [38 40] :rbrace [52 1] :return [51 2]}} (go/func ^{:go/pos {:name-pos [38 6]}} setSwitchInterval ^{:tag ^{:go/pos {:name-pos [38 34]}} error :go/pos {:closing [38 32] :opening [38 23]}} [^{:tag ^{:go/pos {:name-pos [38 26]}} Object :go/pos {:name-pos [38 24]}} o]
+  (let [^{:go/pos {:tok-pos [39 9]}} (values ^{:go/pos {:name-pos [39 2]}} f ^{:go/pos {:name-pos [39 5]}} err) ^{:go/pos {:lparen [39 19] :rparen [39 21]}} (^{:go/pos {:name-pos [39 12]}} ToFloat ^{:go/pos {:name-pos [39 20]}} o)]
+    ^{:go/pos {:if [40 2] :lbrace [40 16] :rbrace [42 2]}} (when ^{:go/apos {2 [40 12]} :go/pos {:op-pos [40 9]}} (!= ^{:go/pos {:name-pos [40 5]}} err nil)
+      ^{:go/pos {:return [41 3]}} (return ^{:go/pos {:name-pos [41 10]}} err))
+
+    ^{:go/pos {:if [43 2] :lbrace [43 14] :rbrace [45 2]}} (when ^{:go/pos {:op-pos [43 5]}} (not ^{:go/apos {2 [43 11]} :go/parens [[[43 6] [43 12]]] :go/pos {:op-pos [43 9]}} (> ^{:go/pos {:name-pos [43 7]}} f 0))
+      ^{:go/pos {:return [44 3]}} (return ^{:go/apos {2 [44 32]} :go/pos {:lparen [44 15] :rparen [44 75]}} (^{:go/pos {:name-pos [44 10]}} Raise ^{:go/pos {:name-pos [44 16]}} ValueErrorType "switch interval must be strictly positive")))
+
+    ^{:go/apos {4 [51 9]}} (let [^{:go/pos {:name-pos [46 2] :tok-pos [46 5]}} ns ^{:go/pos {:lparen [46 13] :rparen [46 21]}} (conv ^{:go/pos {:name-pos [46 8]}} int64 ^{:go/apos {2 [46 18]} :go/atext {2 "1e9"} :go/pos {:op-pos [46 16]}} (* ^{:go/pos {:name-pos [46 14]}} f 1.0E9))]
+      ^{:go/pos {:if [47 2] :lbrace [47 15] :rbrace [49 2]}} (when ^{:go/apos {2 [47 10]} :go/pos {:op-pos [47 8]}} (< ^{:go/pos {:name-pos [47 5]}} ns 1000)
+        ^{:go/apos {2 [48 8]} :go/pos {:tok-pos [48 6]}} (set! ^{:go/pos {:name-pos [48 3]}} ns 1000)) ; CPython keeps microseconds
+
+      ^{:go/pos {:dot [50 16] :lparen [50 22] :name-pos [50 17] :rparen [50 25]}} (.Store ^{:go/pos {:name-pos [50 2]}} switchInterval ^{:go/pos {:name-pos [50 23]}} ns)
+      nil)))
+
+
+^{:go/pos {:tok-pos [54 1]}} (go/type ^{:go/pos {:name-pos [54 6]}} gilState ^{:go/pos {:lbrace [54 22] :rbrace [64 1] :struct [54 15]}} (struct
+    ^{:tag ^{:go/pos {:star [55 11]}} (* ^{:go/pos {:dot [55 16] :name-pos [55 17] :x-pos [55 12]}} sync/Mutex) :go/pos {:name-pos [55 2]}} mu ; a pointer: goi keeps a struct's fields as values, and a sync.Mutex must not be copied
+    ^{:tag ^{:go/pos {:star [56 11]}} (* ^{:go/pos {:dot [56 16] :name-pos [56 17] :x-pos [56 12]}} sync/Cond) :go/pos {:name-pos [56 2]}} free ; the GIL was dropped
+    ^{:tag ^{:go/pos {:star [57 11]}} (* ^{:go/pos {:dot [57 16] :name-pos [57 17] :x-pos [57 12]}} sync/Cond) :go/pos {:name-pos [57 2]}} switched ; a thread took it
+    ^{:tag ^{:go/pos {:name-pos [58 11]}} bool :go/pos {:name-pos [58 2]}} active ; a thread was started: the GIL is in use
+    ^{:tag ^{:go/pos {:name-pos [59 11]}} bool :go/pos {:name-pos [59 2]}} locked
+    ^{:tag ^{:go/pos {:star [60 11]}} (* ^{:go/pos {:name-pos [60 12]}} Thread) :go/pos {:name-pos [60 2]}} holder
+    ^{:tag ^{:go/pos {:name-pos [61 11]}} uint64 :go/pos {:name-pos [61 2]}} switches ; takes so far
+    ^{:tag ^{:go/pos {:name-pos [62 11]}} int :go/pos {:name-pos [62 2]}} waiting ; threads waiting in take
+    ^{:tag ^{:go/pos {:name-pos [63 11]}} bool :go/pos {:name-pos [63 2]}} drop)) ; gil_drop_request
+
+
+^{:go/pos {:tok-pos [66 1]}} (go/var ^{:go/pos {:name-pos [66 5]}} gil ^{:go/pos {:lparen [66 17] :rparen [66 18]}} (^{:go/pos {:name-pos [66 11]}} newGIL))
+
+^{:go/pos {:func [68 1] :lbrace [68 25] :rbrace [73 1] :return [72 2]}} (go/func ^{:go/pos {:name-pos [68 6]}} newGIL ^{:tag ^{:go/pos {:star [68 15]}} (* ^{:go/pos {:name-pos [68 16]}} gilState) :go/pos {:closing [68 13] :opening [68 12]}} []
+  (let [^{:go/pos {:name-pos [69 2] :tok-pos [69 4]}} g ^{:go/pos {:op-pos [69 7]}} (addr ^{:go/acolon {2 [69 19]} :go/apos {2 [69 17]} :go/pos {:lbrace [69 16] :rbrace [69 36]}} (lit ^{:go/pos {:name-pos [69 8]}} gilState :mu ^{:go/pos {:lparen [69 24] :rparen [69 35]}} (^{:go/pos {:name-pos [69 21]}} new ^{:go/pos {:dot [69 29] :name-pos [69 30] :x-pos [69 25]}} sync/Mutex)))]
+    ^{:go/pos {:tok-pos [70 9]}} (set! ^{:go/pos {:dot [70 3] :name-pos [70 4]}} (.-free ^{:go/pos {:name-pos [70 2]}} g) ^{:go/pos {:lparen [70 23] :rparen [70 28]}} (^{:go/pos {:dot [70 15] :name-pos [70 16] :x-pos [70 11]}} sync/NewCond ^{:go/pos {:dot [70 25] :name-pos [70 26]}} (.-mu ^{:go/pos {:name-pos [70 24]}} g)))
+    ^{:go/pos {:tok-pos [71 13]}} (set! ^{:go/pos {:dot [71 3] :name-pos [71 4]}} (.-switched ^{:go/pos {:name-pos [71 2]}} g) ^{:go/pos {:lparen [71 27] :rparen [71 32]}} (^{:go/pos {:dot [71 19] :name-pos [71 20] :x-pos [71 15]}} sync/NewCond ^{:go/pos {:dot [71 29] :name-pos [71 30]}} (.-mu ^{:go/pos {:name-pos [71 28]}} g)))
+    ^{:go/pos {:name-pos [72 9]}} g))
+
+
+
+^{:go/pos {:doc [75 1] :func [76 1] :lbrace [76 40] :rbrace [83 1]}} (go/method ^{:go/pos {:name-pos [76 20]}} activate "activate makes the GIL used, held by t (the running thread, which starts the first other thread).\n" ^{:go/pos {:closing [76 38] :opening [76 28] :recv-closing [76 18] :recv-opening [76 6]}} [^{:tag ^{:go/pos {:star [76 9]}} (* ^{:go/pos {:name-pos [76 10]}} gilState) :go/pos {:name-pos [76 7]}} g ^{:tag ^{:go/pos {:star [76 31]}} (* ^{:go/pos {:name-pos [76 32]}} Thread) :go/pos {:name-pos [76 29]}} t]
+  ^{:go/pos {:dot [77 6] :lparen [77 11] :name-pos [77 7] :rparen [77 12]}} (.Lock ^{:go/pos {:dot [77 3] :name-pos [77 4]}} (.-mu ^{:go/pos {:name-pos [77 2]}} g))
+  ^{:go/pos {:if [78 2] :lbrace [78 15] :rbrace [81 2]}} (when ^{:go/pos {:op-pos [78 5]}} (not ^{:go/pos {:dot [78 7] :name-pos [78 8]}} (.-active ^{:go/pos {:name-pos [78 6]}} g))
+    ^{:go/pos {:tok-pos [79 32]}} (set! (values ^{:go/pos {:dot [79 4] :name-pos [79 5]}} (.-active ^{:go/pos {:name-pos [79 3]}} g) ^{:go/pos {:dot [79 14] :name-pos [79 15]}} (.-locked ^{:go/pos {:name-pos [79 13]}} g) ^{:go/pos {:dot [79 24] :name-pos [79 25]}} (.-holder ^{:go/pos {:name-pos [79 23]}} g)) ^{:go/apos {1 [79 34] 2 [79 40]}} (values true true ^{:go/pos {:name-pos [79 46]}} t))
+    ^{:go/pos {:tok-pos [80 13]}} (inc! ^{:go/pos {:dot [80 4] :name-pos [80 5]}} (.-switches ^{:go/pos {:name-pos [80 3]}} g)))
+
+  ^{:go/pos {:dot [82 6] :lparen [82 13] :name-pos [82 7] :rparen [82 14]}} (.Unlock ^{:go/pos {:dot [82 3] :name-pos [82 4]}} (.-mu ^{:go/pos {:name-pos [82 2]}} g)))
+
+
+
+^{:go/pos {:doc [85 1] :func [86 1] :lbrace [86 36] :rbrace [130 1]}} (go/method ^{:go/pos {:name-pos [86 20]}} take "take waits for the GIL and makes t the running thread (take_gil).\n" ^{:go/pos {:closing [86 34] :opening [86 24] :recv-closing [86 18] :recv-opening [86 6]}} [^{:tag ^{:go/pos {:star [86 9]}} (* ^{:go/pos {:name-pos [86 10]}} gilState) :go/pos {:name-pos [86 7]}} g ^{:tag ^{:go/pos {:star [86 27]}} (* ^{:go/pos {:name-pos [86 28]}} Thread) :go/pos {:name-pos [86 25]}} t]
+  ^{:go/pos {:dot [87 6] :lparen [87 11] :name-pos [87 7] :rparen [87 12]}} (.Lock ^{:go/pos {:dot [87 3] :name-pos [87 4]}} (.-mu ^{:go/pos {:name-pos [87 2]}} g))
+  ^{:go/pos {:if [88 2] :lbrace [88 14] :rbrace [120 2]}} (when ^{:go/pos {:dot [88 6] :name-pos [88 7]}} (.-locked ^{:go/pos {:name-pos [88 5]}} g)
+    ^{:go/pos {:tok-pos [89 12]}} (inc! ^{:go/pos {:dot [89 4] :name-pos [89 5]}} (.-waiting ^{:go/pos {:name-pos [89 3]}} g))
+    ;; the timed wait of take_gil: each interval in which the holder has not changed asks it to drop the GIL;
+    ;; one that changed starts a new interval (the timer, re-armed by itself, under g.mu)
+    (let ^{:go/apos {1 [92 14]}} [^{:go/pos {:name-pos [92 3] :tok-pos [92 11]}} stopped false
+        ^{:tag ^{:go/pos {:star [93 13]}} (* ^{:go/pos {:dot [93 18] :name-pos [93 19] :x-pos [93 14]}} time/Timer) :go/pos {:name-pos [93 7] :tok-pos [93 3]}} timer (zero ^{:go/pos {:star [93 13]}} (* ^{:go/pos {:dot [93 18] :name-pos [93 19] :x-pos [93 14]}} time/Timer))
+        ^{:tag ^{:go/pos {:func [94 11]}} (func ^{:go/pos {:closing [94 25] :opening [94 15]}} [^{:tag ^{:go/pos {:name-pos [94 19]}} uint64 :go/pos {:name-pos [94 16]}} sn]) :go/pos {:name-pos [94 7] :tok-pos [94 3]}} arm (zero ^{:go/pos {:func [94 11]}} (func ^{:go/pos {:closing [94 25] :opening [94 15]}} [^{:tag ^{:go/pos {:name-pos [94 19]}} uint64 :go/pos {:name-pos [94 16]}} sn]))]
+      ^{:go/pos {:tok-pos [95 7]}} (set! ^{:go/pos {:name-pos [95 3]}} arm ^{:go/pos {:func [95 9] :lbrace [95 25] :rbrace [112 3]}} (fn ^{:go/pos {:closing [95 23] :opening [95 13]}} [^{:tag ^{:go/pos {:name-pos [95 17]}} uint64 :go/pos {:name-pos [95 14]}} sn]
+          ^{:go/pos {:tok-pos [96 10]}} (set! ^{:go/pos {:name-pos [96 4]}} timer ^{:go/pos {:lparen [96 26] :rparen [111 5]}} (^{:go/pos {:dot [96 16] :name-pos [96 17] :x-pos [96 12]}} time/AfterFunc ^{:go/pos {:lparen [96 40] :rparen [96 62]}} (conv ^{:go/pos {:dot [96 31] :name-pos [96 32] :x-pos [96 27]}} time/Duration ^{:go/pos {:dot [96 55] :lparen [96 60] :name-pos [96 56] :rparen [96 61]}} (.Load ^{:go/pos {:name-pos [96 41]}} switchInterval)) ^{:go/pos {:func [96 65] :lbrace [96 72] :rbrace [111 4]}} (fn ^{:go/pos {:closing [96 70] :opening [96 69]}} []
+                ^{:go/pos {:dot [97 9] :lparen [97 14] :name-pos [97 10] :rparen [97 15]}} (.Lock ^{:go/pos {:dot [97 6] :name-pos [97 7]}} (.-mu ^{:go/pos {:name-pos [97 5]}} g))
+                ^{:go/pos {:defer [98 5]}} (defer ^{:go/pos {:dot [98 15] :lparen [98 22] :name-pos [98 16] :rparen [98 23]}} (.Unlock ^{:go/pos {:dot [98 12] :name-pos [98 13]}} (.-mu ^{:go/pos {:name-pos [98 11]}} g)))
+                ^{:go/pos {:if [99 5] :lbrace [99 29] :rbrace [101 5]}} (when ^{:go/pos {:op-pos [99 16]}} (or ^{:go/pos {:name-pos [99 8]}} stopped ^{:go/pos {:op-pos [99 19]}} (not ^{:go/pos {:dot [99 21] :name-pos [99 22]}} (.-locked ^{:go/pos {:name-pos [99 20]}} g)))
+                  ^{:go/pos {:return [100 6]}} (return))
+
+                ^{:go/pos {:if [102 5] :lbrace [102 25] :rbrace [105 5]}} (when ^{:go/pos {:op-pos [102 19]}} (!= ^{:go/pos {:dot [102 9] :name-pos [102 10]}} (.-switches ^{:go/pos {:name-pos [102 8]}} g) ^{:go/pos {:name-pos [102 22]}} sn)
+                  ^{:go/pos {:lparen [103 9] :rparen [103 20]}} (^{:go/pos {:name-pos [103 6]}} arm ^{:go/pos {:dot [103 11] :name-pos [103 12]}} (.-switches ^{:go/pos {:name-pos [103 10]}} g))
+                  ^{:go/pos {:return [104 6]}} (return))
+
+                ^{:go/pos {:if [106 5] :lbrace [106 16] :rbrace [109 5]}} (when ^{:go/pos {:op-pos [106 8]}} (not ^{:go/pos {:dot [106 10] :name-pos [106 11]}} (.-drop ^{:go/pos {:name-pos [106 9]}} g))
+                  ^{:go/apos {2 [107 15]} :go/pos {:tok-pos [107 13]}} (set! ^{:go/pos {:dot [107 7] :name-pos [107 8]}} (.-drop ^{:go/pos {:name-pos [107 6]}} g) true)
+                  ^{:go/pos {:dot [108 17] :lparen [108 20] :name-pos [108 18] :rparen [108 33]}} (.Or ^{:go/pos {:name-pos [108 6]}} evalBreaker ^{:go/pos {:name-pos [108 21]}} breakGILDrop))
+
+                ^{:go/pos {:lparen [110 8] :rparen [110 11]}} (^{:go/pos {:name-pos [110 5]}} arm ^{:go/pos {:name-pos [110 9]}} sn))))))
+
+
+      ^{:go/pos {:lparen [113 6] :rparen [113 17]}} (^{:go/pos {:name-pos [113 3]}} arm ^{:go/pos {:dot [113 8] :name-pos [113 9]}} (.-switches ^{:go/pos {:name-pos [113 7]}} g))
+      ^{:go/pos {:for [114 3] :lbrace [114 16] :rbrace [116 3]}} (while ^{:go/pos {:dot [114 8] :name-pos [114 9]}} (.-locked ^{:go/pos {:name-pos [114 7]}} g)
+        ^{:go/pos {:dot [115 10] :lparen [115 15] :name-pos [115 11] :rparen [115 16]}} (.Wait ^{:go/pos {:dot [115 5] :name-pos [115 6]}} (.-free ^{:go/pos {:name-pos [115 4]}} g)))
+
+      ^{:go/apos {2 [117 13]} :go/pos {:tok-pos [117 11]}} (set! ^{:go/pos {:name-pos [117 3]}} stopped true)
+      ^{:go/pos {:dot [118 8] :lparen [118 13] :name-pos [118 9] :rparen [118 14]}} (.Stop ^{:go/pos {:name-pos [118 3]}} timer)
+      ^{:go/pos {:tok-pos [119 12]}} (dec! ^{:go/pos {:dot [119 4] :name-pos [119 5]}} (.-waiting ^{:go/pos {:name-pos [119 3]}} g))))
+
+  ^{:go/pos {:tok-pos [121 21]}} (set! (values ^{:go/pos {:dot [121 3] :name-pos [121 4]}} (.-locked ^{:go/pos {:name-pos [121 2]}} g) ^{:go/pos {:dot [121 13] :name-pos [121 14]}} (.-holder ^{:go/pos {:name-pos [121 12]}} g)) ^{:go/apos {1 [121 23]}} (values true ^{:go/pos {:name-pos [121 29]}} t))
+  ^{:go/pos {:tok-pos [122 12]}} (inc! ^{:go/pos {:dot [122 3] :name-pos [122 4]}} (.-switches ^{:go/pos {:name-pos [122 2]}} g))
+  ^{:go/pos {:if [123 2] :lbrace [123 12] :rbrace [126 2]}} (when ^{:go/pos {:dot [123 6] :name-pos [123 7]}} (.-drop ^{:go/pos {:name-pos [123 5]}} g)
+    ^{:go/apos {2 [124 12]} :go/pos {:tok-pos [124 10]}} (set! ^{:go/pos {:dot [124 4] :name-pos [124 5]}} (.-drop ^{:go/pos {:name-pos [124 3]}} g) false)
+    ^{:go/pos {:dot [125 14] :lparen [125 18] :name-pos [125 15] :rparen [125 32]}} (.And ^{:go/pos {:name-pos [125 3]}} evalBreaker ^{:go/pos {:op-pos [125 19]}} (bit-not ^{:go/pos {:name-pos [125 20]}} breakGILDrop)))
+
+  ^{:go/pos {:dot [127 12] :lparen [127 22] :name-pos [127 13] :rparen [127 23]}} (.Broadcast ^{:go/pos {:dot [127 3] :name-pos [127 4]}} (.-switched ^{:go/pos {:name-pos [127 2]}} g))
+  ^{:go/pos {:dot [128 6] :lparen [128 13] :name-pos [128 7] :rparen [128 14]}} (.Unlock ^{:go/pos {:dot [128 3] :name-pos [128 4]}} (.-mu ^{:go/pos {:name-pos [128 2]}} g))
+  ^{:go/pos {:tok-pos [129 10]}} (set! ^{:go/pos {:name-pos [129 2]}} current ^{:go/pos {:name-pos [129 12]}} t))
+
+
+
+^{:go/pos {:doc [132 1] :func [133 1] :lbrace [133 51] :rbrace [144 1]}} (go/method ^{:go/pos {:name-pos [133 20]}} release "release drops the GIL (drop_gil); with force, it waits until another thread took it when one waits.\n" ^{:go/pos {:closing [133 49] :opening [133 27] :recv-closing [133 18] :recv-opening [133 6]}} [^{:tag ^{:go/pos {:star [133 9]}} (* ^{:go/pos {:name-pos [133 10]}} gilState) :go/pos {:name-pos [133 7]}} g ^{:tag ^{:go/pos {:star [133 30]}} (* ^{:go/pos {:name-pos [133 31]}} Thread) :go/pos {:name-pos [133 28]}} t ^{:tag ^{:go/pos {:name-pos [133 45]}} bool :go/pos {:name-pos [133 39]}} force]
+  ^{:go/pos {:dot [134 6] :lparen [134 11] :name-pos [134 7] :rparen [134 12]}} (.Lock ^{:go/pos {:dot [134 3] :name-pos [134 4]}} (.-mu ^{:go/pos {:name-pos [134 2]}} g))
+  ^{:go/pos {:tok-pos [135 21]}} (set! (values ^{:go/pos {:dot [135 3] :name-pos [135 4]}} (.-locked ^{:go/pos {:name-pos [135 2]}} g) ^{:go/pos {:dot [135 13] :name-pos [135 14]}} (.-holder ^{:go/pos {:name-pos [135 12]}} g)) ^{:go/apos {1 [135 23] 2 [135 30]}} (values false nil))
+  ^{:go/pos {:dot [136 8] :lparen [136 15] :name-pos [136 9] :rparen [136 16]}} (.Signal ^{:go/pos {:dot [136 3] :name-pos [136 4]}} (.-free ^{:go/pos {:name-pos [136 2]}} g))
+  ^{:go/pos {:if [137 2] :lbrace [137 28] :rbrace [142 2]}} (when ^{:go/pos {:op-pos [137 11]}} (and ^{:go/pos {:name-pos [137 5]}} force ^{:go/apos {2 [137 26]} :go/pos {:op-pos [137 24]}} (> ^{:go/pos {:dot [137 15] :name-pos [137 16]}} (.-waiting ^{:go/pos {:name-pos [137 14]}} g) 0))
+    (let [^{:go/pos {:name-pos [138 3] :tok-pos [138 6]}} sn ^{:go/pos {:dot [138 10] :name-pos [138 11]}} (.-switches ^{:go/pos {:name-pos [138 9]}} g)]
+      ^{:go/pos {:for [139 3] :lbrace [139 24] :rbrace [141 3]}} (while ^{:go/pos {:op-pos [139 18]}} (== ^{:go/pos {:dot [139 8] :name-pos [139 9]}} (.-switches ^{:go/pos {:name-pos [139 7]}} g) ^{:go/pos {:name-pos [139 21]}} sn)
+        ^{:go/pos {:dot [140 14] :lparen [140 19] :name-pos [140 15] :rparen [140 20]}} (.Wait ^{:go/pos {:dot [140 5] :name-pos [140 6]}} (.-switched ^{:go/pos {:name-pos [140 4]}} g)))))
+
+
+  ^{:go/pos {:dot [143 6] :lparen [143 13] :name-pos [143 7] :rparen [143 14]}} (.Unlock ^{:go/pos {:dot [143 3] :name-pos [143 4]}} (.-mu ^{:go/pos {:name-pos [143 2]}} g)))
+
+
+
+^{:go/pos {:doc [146 1] :func [147 1] :lbrace [147 41] :rbrace [151 1] :return [150 2]}} (go/method ^{:go/pos {:name-pos [147 20]}} dropRequested "dropRequested is whether another thread asked for the GIL.\n" ^{:tag ^{:go/pos {:name-pos [147 36]}} bool :go/pos {:closing [147 34] :opening [147 33] :recv-closing [147 18] :recv-opening [147 6]}} [^{:tag ^{:go/pos {:star [147 9]}} (* ^{:go/pos {:name-pos [147 10]}} gilState) :go/pos {:name-pos [147 7]}} g]
+  ^{:go/pos {:dot [148 6] :lparen [148 11] :name-pos [148 7] :rparen [148 12]}} (.Lock ^{:go/pos {:dot [148 3] :name-pos [148 4]}} (.-mu ^{:go/pos {:name-pos [148 2]}} g))
+  ^{:go/pos {:defer [149 2]}} (defer ^{:go/pos {:dot [149 12] :lparen [149 19] :name-pos [149 13] :rparen [149 20]}} (.Unlock ^{:go/pos {:dot [149 9] :name-pos [149 10]}} (.-mu ^{:go/pos {:name-pos [149 8]}} g)))
+  ^{:go/pos {:dot [150 10] :name-pos [150 11]}} (.-drop ^{:go/pos {:name-pos [150 9]}} g))
+
+
+
+^{:go/pos {:doc [153 1] :func [154 1] :lbrace [154 29] :rbrace [163 1]}} (go/func ^{:go/pos {:name-pos [154 6]}} allowThreads "allowThreads runs f, blocking Go that touches no Python object, with the GIL released.\n" ^{:go/pos {:closing [154 27] :opening [154 18]}} [^{:tag ^{:go/pos {:func [154 21]}} (func ^{:go/pos {:closing [154 26] :opening [154 25]}} []) :go/pos {:name-pos [154 19]}} f]
+  (let [^{:go/pos {:name-pos [155 2] :tok-pos [155 4]}} t ^{:go/pos {:name-pos [155 7]}} current]
+    ^{:go/pos {:if [156 2] :lbrace [156 29] :rbrace [159 2]}} (when ^{:go/pos {:op-pos [156 17]}} (or ^{:go/pos {:op-pos [156 5]}} (not ^{:go/pos {:dot [156 9] :name-pos [156 10]}} (.-active ^{:go/pos {:name-pos [156 6]}} gil)) ^{:go/apos {2 [156 25]} :go/pos {:op-pos [156 22]}} (== ^{:go/pos {:name-pos [156 20]}} t nil))
+      ^{:go/pos {:lparen [157 4] :rparen [157 5]}} (^{:go/pos {:name-pos [157 3]}} f)
+      ^{:go/pos {:return [158 3]}} (return))
+
+    ^{:go/apos {3 [160 17]} :go/pos {:dot [160 5] :lparen [160 13] :name-pos [160 6] :rparen [160 22]}} (.release ^{:go/pos {:name-pos [160 2]}} gil ^{:go/pos {:name-pos [160 14]}} t false)
+    ^{:go/pos {:lparen [161 3] :rparen [161 4]}} (^{:go/pos {:name-pos [161 2]}} f)
+    ^{:go/pos {:dot [162 5] :lparen [162 10] :name-pos [162 6] :rparen [162 12]}} (.take ^{:go/pos {:name-pos [162 2]}} gil ^{:go/pos {:name-pos [162 11]}} t)))
+
+
+
+
+
+
+^{:go/pos {:doc [165 1] :func [169 1] :lbrace [169 71] :rbrace [217 1]}} (go/func ^{:go/pos {:name-pos [169 6]}} blockOn "blockOn waits, with the GIL released, until a value can be received from ch (received: true), the timeout\npasses (a negative one never does: false), or, on the main thread, a signal arrives: its handlers then run\nwith the GIL (an exception from one ends the wait) and the wait goes on for the time left. ch nil waits for\nthe timeout or a signal alone.\n" ^{:go/pos {:closing [169 55] :opening [169 13]}} [^{:tag ^{:go/pos {:arrow [169 17] :begin [169 17]}} (chan :recv ^{:go/pos {:lbrace [169 30] :rbrace [169 31] :struct [169 24]}} (struct)) :go/pos {:name-pos [169 14]}} ch ^{:tag ^{:go/pos {:dot [169 46] :name-pos [169 47] :x-pos [169 42]}} time/Duration :go/pos {:name-pos [169 34]}} timeout] :results ^{:go/pos {:closing [169 69] :opening [169 57]}} [^{:go/pos {:name-pos [169 58]}} bool ^{:go/pos {:name-pos [169 64]}} error]
+  (let [^{:go/pos {:name-pos [170 2] :tok-pos [170 4]}} t ^{:go/pos {:name-pos [170 7]}} current
+      ^{:tag ^{:go/pos {:dot [171 19] :name-pos [171 20] :x-pos [171 15]}} time/Time :go/pos {:name-pos [171 6] :tok-pos [171 2]}} deadline (zero ^{:go/pos {:dot [171 19] :name-pos [171 20] :x-pos [171 15]}} time/Time)]
+    ^{:go/pos {:if [172 2] :lbrace [172 18] :rbrace [174 2]}} (when ^{:go/apos {2 [172 16]} :go/pos {:op-pos [172 13]}} (>= ^{:go/pos {:name-pos [172 5]}} timeout 0)
+      ^{:go/pos {:tok-pos [173 12]}} (set! ^{:go/pos {:name-pos [173 3]}} deadline ^{:go/pos {:dot [173 24] :lparen [173 28] :name-pos [173 25] :rparen [173 36]}} (.Add ^{:go/pos {:lparen [173 22] :rparen [173 23]}} (^{:go/pos {:dot [173 18] :name-pos [173 19] :x-pos [173 14]}} time/Now) ^{:go/pos {:name-pos [173 29]}} timeout)))
+
+    ^{:go/pos {:for [175 2] :lbrace [175 6] :rbrace [216 2]}} (while true
+      (let [^{:tag ^{:go/pos {:arrow [176 12] :begin [176 12]}} (chan :recv ^{:go/pos {:lbrace [176 25] :rbrace [176 26] :struct [176 19]}} (struct)) :go/pos {:name-pos [176 7] :tok-pos [176 3]}} wake (zero ^{:go/pos {:arrow [176 12] :begin [176 12]}} (chan :recv ^{:go/pos {:lbrace [176 25] :rbrace [176 26] :struct [176 19]}} (struct)))]
+        ^{:go/pos {:if [177 3] :lbrace [177 22] :rbrace [179 3]}} (when ^{:go/pos {:lparen [177 18] :rparen [177 20]}} (^{:go/pos {:name-pos [177 6]}} isMainThread ^{:go/pos {:name-pos [177 19]}} t)
+          ^{:go/pos {:tok-pos [178 9]}} (set! ^{:go/pos {:name-pos [178 4]}} wake ^{:go/pos {:name-pos [178 11]}} sigWake))
+
+        (let [^{:tag ^{:go/pos {:arrow [180 12] :begin [180 12]}} (chan :recv ^{:go/pos {:dot [180 23] :name-pos [180 24] :x-pos [180 19]}} time/Time) :go/pos {:name-pos [180 7] :tok-pos [180 3]}} tick (zero ^{:go/pos {:arrow [180 12] :begin [180 12]}} (chan :recv ^{:go/pos {:dot [180 23] :name-pos [180 24] :x-pos [180 19]}} time/Time))
+            ^{:tag ^{:go/pos {:star [181 13]}} (* ^{:go/pos {:dot [181 18] :name-pos [181 19] :x-pos [181 14]}} time/Timer) :go/pos {:name-pos [181 7] :tok-pos [181 3]}} timer (zero ^{:go/pos {:star [181 13]}} (* ^{:go/pos {:dot [181 18] :name-pos [181 19] :x-pos [181 14]}} time/Timer))]
+          ^{:go/pos {:if [182 3] :lbrace [182 19] :rbrace [189 3]}} (when ^{:go/apos {2 [182 17]} :go/pos {:op-pos [182 14]}} (>= ^{:go/pos {:name-pos [182 6]}} timeout 0)
+            (let [^{:go/pos {:name-pos [183 4] :tok-pos [183 9]}} left ^{:go/pos {:lparen [183 22] :rparen [183 31]}} (^{:go/pos {:dot [183 16] :name-pos [183 17] :x-pos [183 12]}} time/Until ^{:go/pos {:name-pos [183 23]}} deadline)]
+              ^{:go/pos {:if [184 4] :lbrace [184 16] :rbrace [186 4]}} (when ^{:go/apos {2 [184 14]} :go/pos {:op-pos [184 12]}} (< ^{:go/pos {:name-pos [184 7]}} left 0)
+                ^{:go/apos {2 [185 12]} :go/pos {:tok-pos [185 10]}} (set! ^{:go/pos {:name-pos [185 5]}} left 0))
+
+              ^{:go/pos {:tok-pos [187 10]}} (set! ^{:go/pos {:name-pos [187 4]}} timer ^{:go/pos {:lparen [187 25] :rparen [187 30]}} (^{:go/pos {:dot [187 16] :name-pos [187 17] :x-pos [187 12]}} time/NewTimer ^{:go/pos {:name-pos [187 26]}} left))
+              ^{:go/pos {:tok-pos [188 9]}} (set! ^{:go/pos {:name-pos [188 4]}} tick ^{:go/pos {:dot [188 16] :name-pos [188 17]}} (.-C ^{:go/pos {:name-pos [188 11]}} timer))))
+
+          (let [^{:go/pos {:tok-pos [190 27]}} (values ^{:go/pos {:name-pos [190 3]}} got ^{:go/pos {:name-pos [190 8]}} signalled ^{:go/pos {:name-pos [190 19]}} expired) ^{:go/apos {1 [190 30] 2 [190 37] 3 [190 44]}} (values false false false)]
+            ^{:go/pos {:lparen [191 15] :rparen [200 4]}} (^{:go/pos {:name-pos [191 3]}} allowThreads ^{:go/pos {:func [191 16] :lbrace [191 23] :rbrace [200 3]}} (fn ^{:go/pos {:closing [191 21] :opening [191 20]}} []
+                ^{:go/pos {:lbrace [192 11] :rbrace [199 4] :select [192 4]}} (select
+                  ^{:go/pos {:case [193 4] :colon [193 13]}} (case ^{:go/pos {:op-pos [193 9]}} (<! ^{:go/pos {:name-pos [193 11]}} ch)
+                    ^{:go/apos {2 [194 11]} :go/pos {:tok-pos [194 9]}} (set! ^{:go/pos {:name-pos [194 5]}} got true))
+                  ^{:go/pos {:case [195 4] :colon [195 15]}} (case ^{:go/pos {:op-pos [195 9]}} (<! ^{:go/pos {:name-pos [195 11]}} wake)
+                    ^{:go/apos {2 [196 17]} :go/pos {:tok-pos [196 15]}} (set! ^{:go/pos {:name-pos [196 5]}} signalled true))
+                  ^{:go/pos {:case [197 4] :colon [197 15]}} (case ^{:go/pos {:op-pos [197 9]}} (<! ^{:go/pos {:name-pos [197 11]}} tick)
+                    ^{:go/apos {2 [198 15]} :go/pos {:tok-pos [198 13]}} (set! ^{:go/pos {:name-pos [198 5]}} expired true)))))
+
+
+            ^{:go/pos {:if [201 3] :lbrace [201 19] :rbrace [203 3]}} (when ^{:go/apos {2 [201 15]} :go/pos {:op-pos [201 12]}} (!= ^{:go/pos {:name-pos [201 6]}} timer nil)
+              ^{:go/pos {:dot [202 9] :lparen [202 14] :name-pos [202 10] :rparen [202 15]}} (.Stop ^{:go/pos {:name-pos [202 4]}} timer))
+
+            ^{:go/pos {:if [204 3] :lbrace [204 10] :rbrace [206 3]}} (when ^{:go/pos {:name-pos [204 6]}} got
+              ^{:go/apos {1 [205 11] 2 [205 17]} :go/pos {:return [205 4]}} (return true nil))
+
+            ^{:go/pos {:if [207 3] :lbrace [207 16] :rbrace [212 3]}} (when ^{:go/pos {:name-pos [207 6]}} signalled
+              ^{:go/pos {:if [208 4] :lbrace [208 47] :rbrace [210 4]}} (when [^{:go/pos {:name-pos [208 7] :tok-pos [208 11]}} err ^{:go/pos {:lparen [208 31] :rparen [208 33]}} (^{:go/pos {:name-pos [208 14]}} runPendingSignals ^{:go/pos {:name-pos [208 32]}} t)] ^{:go/apos {2 [208 43]} :go/pos {:op-pos [208 40]}} (!= ^{:go/pos {:name-pos [208 36]}} err nil)
+                ^{:go/apos {1 [209 12]} :go/pos {:return [209 5]}} (return false ^{:go/pos {:name-pos [209 19]}} err))
+
+              ^{:go/pos {:tok-pos [211 4]}} (continue))
+
+            ^{:go/pos {:if [213 3] :lbrace [213 14] :rbrace [215 3]}} (when ^{:go/pos {:name-pos [213 6]}} expired
+              ^{:go/apos {1 [214 11] 2 [214 18]} :go/pos {:return [214 4]}} (return false nil))))))))
+
+
+
+
+
+
+^{:go/pos {:doc [219 1] :func [221 1] :lbrace [221 38] :rbrace [228 1] :return [227 2]}} (go/func ^{:go/pos {:name-pos [221 6]}} sleepFor "sleepFor is time.sleep: d with the GIL released, interruptible by a signal's handler (PEP 475: the sleep goes\non after a handler that returns).\n" ^{:tag ^{:go/pos {:name-pos [221 32]}} error :go/pos {:closing [221 30] :opening [221 14]}} [^{:tag ^{:go/pos {:dot [221 21] :name-pos [221 22] :x-pos [221 17]}} time/Duration :go/pos {:name-pos [221 15]}} d]
+  ^{:go/pos {:if [222 2] :lbrace [222 12] :rbrace [225 2]}} (when ^{:go/apos {2 [222 10]} :go/pos {:op-pos [222 7]}} (<= ^{:go/pos {:name-pos [222 5]}} d 0)
+    ^{:go/pos {:lparen [223 15] :rparen [223 25]}} (^{:go/pos {:name-pos [223 3]}} allowThreads ^{:go/pos {:func [223 16] :lbrace [223 23] :rbrace [223 24]}} (fn ^{:go/pos {:closing [223 21] :opening [223 20]}} []))
+    ^{:go/apos {1 [224 10]} :go/pos {:return [224 3]}} (return nil))
+
+  (let [^{:go/pos {:tok-pos [226 9]}} (values ^{:go/pos {:name-pos [226 2]}} _ ^{:go/pos {:name-pos [226 5]}} err) ^{:go/apos {1 [226 20]} :go/pos {:lparen [226 19] :rparen [226 26]}} (^{:go/pos {:name-pos [226 12]}} blockOn nil ^{:go/pos {:name-pos [226 25]}} d)]
+    ^{:go/pos {:name-pos [227 9]}} err))
+
+
+
+
+^{:go/apos {6 [247 9]} :go/pos {:doc [230 1] :func [232 1] :lbrace [232 41] :rbrace [248 1] :return [247 2]}} (go/func ^{:go/pos {:name-pos [232 6]}} handleEvalBreaker "handleEvalBreaker is the eval breaker's work (eval.go: a frame's start and a backward jump, the breaker non-zero):\nthe GIL yielded on a drop request, the pending signals' handlers run on the main thread.\n" ^{:tag ^{:go/pos {:name-pos [232 35]}} error :go/pos {:closing [232 33] :opening [232 23]}} [^{:tag ^{:go/pos {:star [232 26]}} (* ^{:go/pos {:name-pos [232 27]}} Thread) :go/pos {:name-pos [232 24]}} t]
+  ^{:go/pos {:if [233 2] :lbrace [233 39] :rbrace [236 2]}} (when ^{:go/pos {:op-pos [233 16]}} (and ^{:go/pos {:dot [233 8] :name-pos [233 9]}} (.-active ^{:go/pos {:name-pos [233 5]}} gil) ^{:go/pos {:dot [233 22] :lparen [233 36] :name-pos [233 23] :rparen [233 37]}} (.dropRequested ^{:go/pos {:name-pos [233 19]}} gil))
+    ^{:go/apos {3 [234 18]} :go/pos {:dot [234 6] :lparen [234 14] :name-pos [234 7] :rparen [234 22]}} (.release ^{:go/pos {:name-pos [234 3]}} gil ^{:go/pos {:name-pos [234 15]}} t true)
+    ^{:go/pos {:dot [235 6] :lparen [235 11] :name-pos [235 7] :rparen [235 13]}} (.take ^{:go/pos {:name-pos [235 3]}} gil ^{:go/pos {:name-pos [235 12]}} t))
+
+  ^{:go/pos {:if [237 2] :lbrace [237 42] :rbrace [246 2]}} (when ^{:go/apos {2 [237 40]} :go/pos {:op-pos [237 37]}} (!= ^{:go/pos {:op-pos [237 23]}} (bit-and ^{:go/pos {:dot [237 16] :lparen [237 21] :name-pos [237 17] :rparen [237 22]}} (.Load ^{:go/pos {:name-pos [237 5]}} evalBreaker) ^{:go/pos {:name-pos [237 24]}} breakSignals) 0)
+    ^{:go/pos {:if [238 3] :lbrace [238 22] :rbrace [240 3]}} (when ^{:go/pos {:lparen [238 18] :rparen [238 20]}} (^{:go/pos {:name-pos [238 6]}} isMainThread ^{:go/pos {:name-pos [238 19]}} t)
+      ^{:go/pos {:return [239 4]}} (return ^{:go/pos {:lparen [239 28] :rparen [239 30]}} (^{:go/pos {:name-pos [239 11]}} runPendingSignals ^{:go/pos {:name-pos [239 29]}} t)))
+
+    ^{:go/pos {:if [241 3] :lbrace [241 36] :rbrace [245 3]}} (when ^{:go/pos {:op-pos [241 17]}} (and ^{:go/pos {:dot [241 9] :name-pos [241 10]}} (.-active ^{:go/pos {:name-pos [241 6]}} gil) ^{:go/apos {2 [241 34]} :go/pos {:op-pos [241 32]}} (> ^{:go/pos {:dot [241 23] :name-pos [241 24]}} (.-waiting ^{:go/pos {:name-pos [241 20]}} gil) 0))
+      ;; the main thread handles signals: let it run
+      ^{:go/apos {3 [243 19]} :go/pos {:dot [243 7] :lparen [243 15] :name-pos [243 8] :rparen [243 23]}} (.release ^{:go/pos {:name-pos [243 4]}} gil ^{:go/pos {:name-pos [243 16]}} t true)
+      ^{:go/pos {:dot [244 7] :lparen [244 12] :name-pos [244 8] :rparen [244 14]}} (.take ^{:go/pos {:name-pos [244 4]}} gil ^{:go/pos {:name-pos [244 13]}} t)))
+
+
+  nil)
+
+
+
+^{:go/pos {:doc [250 1] :tok-pos [251 1]}} (go/type ^{:go/pos {:name-pos [251 6]}} threadInfo "threadInfo is a thread's state beyond Thread's own fields (PyThreadState's): touched under the GIL only.\n" ^{:go/pos {:lbrace [251 24] :rbrace [256 1] :struct [251 17]}} (struct
+    ^{:tag ^{:go/pos {:name-pos [252 9]}} int64 :go/pos {:name-pos [252 2]}} ident
+    ^{:tag ^{:go/pos {:star [253 9]}} (* ^{:go/pos {:name-pos [253 10]}} threadHandle) :go/pos {:name-pos [253 2]}} handle
+    ^{:tag ^{:go/pos {:name-pos [254 9]}} string :go/pos {:name-pos [254 2]}} name
+    ^{:tag ^{:go/pos {:lbrack [255 9]}} (slice ^{:go/pos {:star [255 11]}} (* ^{:go/pos {:name-pos [255 12]}} localState)) :go/pos {:name-pos [255 2]}} locals)) ; the thread-local objects that hold a dict for it
+
+
+^{:go/pos {:lparen [258 5] :rparen [263 1] :tok-pos [258 1]}} (go/var
+  [^{:go/pos {:name-pos [259 2]}} threadInfos ^{:go/pos {:lbrace [259 39] :rbrace [259 40]}} (lit ^{:go/pos {:map [259 16]}} (map ^{:go/pos {:star [259 20]}} (* ^{:go/pos {:name-pos [259 21]}} Thread) ^{:go/pos {:star [259 28]}} (* ^{:go/pos {:name-pos [259 29]}} threadInfo)))]
+  [^{:go/pos {:name-pos [260 2]}} nextIdent ^{:go/pos {:lparen [260 21] :rparen [260 37]}} (conv ^{:go/pos {:name-pos [260 16]}} int64 ^{:go/pos {:name-pos [260 22]}} mainThreadIdent)]
+
+  [^{:tag ^{:go/pos {:name-pos [262 17]}} int :doc "threadsRunning is the number of threads started and not finished (_thread._count)\n" :go/pos {:name-pos [262 2]}} threadsRunning])
+
+
+
+^{:go/pos {:doc [265 1] :func [266 1] :lbrace [266 42] :rbrace [279 1] :return [278 2]}} (go/func ^{:go/pos {:name-pos [266 6]}} threadInfoOf "threadInfoOf is t's state, made on first use: the main thread's ident is mainThreadIdent.\n" ^{:tag ^{:go/pos {:star [266 30]}} (* ^{:go/pos {:name-pos [266 31]}} threadInfo) :go/pos {:closing [266 28] :opening [266 18]}} [^{:tag ^{:go/pos {:star [266 21]}} (* ^{:go/pos {:name-pos [266 22]}} Thread) :go/pos {:name-pos [266 19]}} t]
+  ^{:go/pos {:if [267 2] :lbrace [267 37] :rbrace [269 2]}} (when [^{:go/pos {:name-pos [267 5] :tok-pos [267 8]}} ti ^{:go/pos {:lbrack [267 22] :rbrack [267 24]}} (aget ^{:go/pos {:name-pos [267 11]}} threadInfos ^{:go/pos {:name-pos [267 23]}} t)] ^{:go/apos {2 [267 33]} :go/pos {:op-pos [267 30]}} (!= ^{:go/pos {:name-pos [267 27]}} ti nil)
+    ^{:go/pos {:return [268 3]}} (return ^{:go/pos {:name-pos [268 10]}} ti))
+
+  (let [^{:go/pos {:name-pos [270 2] :tok-pos [270 5]}} ti ^{:go/pos {:op-pos [270 8]}} (addr ^{:go/pos {:lbrace [270 19] :rbrace [270 20]}} (lit ^{:go/pos {:name-pos [270 9]}} threadInfo))]
+    ^{:go/pos {:else-lbrace [273 9] :else-rbrace [276 2] :if [271 2] :lbrace [271 55] :rbrace [273 2]}} (if ^{:go/ops [[271 14] [271 33]] :go/pos {:op-pos [271 33]}} (or ^{:go/apos {2 [271 10]} :go/pos {:op-pos [271 7]}} (== ^{:go/pos {:name-pos [271 5]}} t nil) ^{:go/apos {2 [271 29]} :go/pos {:op-pos [271 26]}} (== ^{:go/pos {:dot [271 18] :name-pos [271 19]}} (.-Interp ^{:go/pos {:name-pos [271 17]}} t) nil) ^{:go/pos {:op-pos [271 38]}} (== ^{:go/pos {:name-pos [271 36]}} t ^{:go/pos {:dot [271 49] :name-pos [271 50]}} (.-Main ^{:go/pos {:dot [271 42] :name-pos [271 43]}} (.-Interp ^{:go/pos {:name-pos [271 41]}} t))))
+      ^{:go/pos {:tok-pos [272 12]}} (set! ^{:go/pos {:dot [272 5] :name-pos [272 6]}} (.-ident ^{:go/pos {:name-pos [272 3]}} ti) ^{:go/pos {:name-pos [272 14]}} mainThreadIdent)
+      ^{:go/pos {:lbrace [273 9] :rbrace [276 2]}} (do
+        ^{:go/pos {:tok-pos [274 12]}} (inc! ^{:go/pos {:name-pos [274 3]}} nextIdent)
+        ^{:go/pos {:tok-pos [275 12]}} (set! ^{:go/pos {:dot [275 5] :name-pos [275 6]}} (.-ident ^{:go/pos {:name-pos [275 3]}} ti) ^{:go/pos {:name-pos [275 14]}} nextIdent)))
+
+    ^{:go/pos {:lbrack [277 13] :rbrack [277 15] :tok-pos [277 17]}} (aset ^{:go/pos {:name-pos [277 2]}} threadInfos ^{:go/pos {:name-pos [277 14]}} t ^{:go/pos {:name-pos [277 19]}} ti)
+    ^{:go/pos {:name-pos [278 9]}} ti))
+
+
+
+^{:go/pos {:doc [281 1] :func [282 1] :lbrace [282 35] :rbrace [282 94] :return [282 37]}} (go/func ^{:go/pos {:name-pos [282 6]}} isMainThread "isMainThread is whether t is its interpreter's main thread (the one that handles signals).\n" ^{:tag ^{:go/pos {:name-pos [282 30]}} bool :go/pos {:closing [282 28] :opening [282 18]}} [^{:tag ^{:go/pos {:star [282 21]}} (* ^{:go/pos {:name-pos [282 22]}} Thread) :go/pos {:name-pos [282 19]}} t] ^{:go/ops [[282 53] [282 72]] :go/pos {:op-pos [282 72]}} (and ^{:go/apos {2 [282 49]} :go/pos {:op-pos [282 46]}} (!= ^{:go/pos {:name-pos [282 44]}} t nil) ^{:go/apos {2 [282 68]} :go/pos {:op-pos [282 65]}} (!= ^{:go/pos {:dot [282 57] :name-pos [282 58]}} (.-Interp ^{:go/pos {:name-pos [282 56]}} t) nil) ^{:go/pos {:op-pos [282 77]}} (== ^{:go/pos {:name-pos [282 75]}} t ^{:go/pos {:dot [282 88] :name-pos [282 89]}} (.-Main ^{:go/pos {:dot [282 81] :name-pos [282 82]}} (.-Interp ^{:go/pos {:name-pos [282 80]}} t)))))
