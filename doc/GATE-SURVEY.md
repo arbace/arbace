@@ -3466,6 +3466,29 @@ So `bin/ci cover` (cirun built with `-cover`) is superseded: the cover build giv
 Clojure's namespaces reduce little: every process loads every test namespace first (about two thirds of its time) and
 each namespace's own tests reach blocks no other reaches; its eval level is 2 min of wall in the essential gate.
 
+**Decided (the user, 2026-11-03).** (1) `bin/ci cover`, `bin/lib/ci/cover` and `tools/cicover` (cirun's `-cover` path and
+its reducer) removed: the cover build is the one method, `tools/covsubset reduce` the reducer. (2) One subset a level in
+`test/c/corpora.edn`: `:subset-run` (the former `:subset`, queue 161's, until the cover build's are recorded),
+`:subset-read`, `:subset-aot`, `:subset-cf2g` (benchmarksgame's recorded from the demonstration above); `:rotate`'s
+`:subset-key` (c-lists') takes a vector, the keys' union: `c-check` `[:subset-run :subset-read]` (the step reads and runs),
+`c-aot` `[:subset-aot :subset-cf2g]`; a corpus with none of its step's keys runs whole (every c-aot part but benchmarksgame
+until tonight's runs). (3) Clojure's eval suite runs whole; only `--aot` gets a coverage subset.
+
+**The night's runs** (from the worktree, one after another; the cover build first, the checkout's key having moved with
+c-lists; `ARBACE_PATH_FIRST=1 ARBACE_NO_AOT=1 ARBACE_NO_IMAGE=1 CI_JOBS=4` for bin/ci):
+
+1. `/root/arbace/.tmp/heavy bin/cover build`: about 25 min.
+2. `ARBACE_COVER_DIR=.tmp/cov-night CI_COVER_READ=1 CI_CHECK_WORK=$PWD/.tmp/ci-check-cov bin/ci check`: the 15 run corpora,
+   2,268 programs at benchmarksgame's 4.5 s a program, about 2 to 3 h.
+3. `ARBACE_COVER_DIR=.tmp/cov-night CI_AOT_WORK=$PWD/.tmp/ci-aot-cov bin/ci check --aot`: about 5 s a program, 2.5 to 3.5 h.
+4. `/root/arbace/.tmp/heavy env ARBACE_COVER_DIR=.tmp/cov-night bin/clojure-tests --aot --no-generative -j 16`: the compiled
+   suite's program with the cover flags (j2g's whole program, about 20 GiB), then its run: about 45 min.
+5. `bin/cover blocks .tmp/cov-night --tool T --pkgs ERE -o .tmp/cov-night/L` for each level (ci ci|crt|cinterp and
+   c.cinterp, c.repl; ci-read repr.c, c.check, c.build, c.musl; ci-aot ci|crt; ci-cf2g c.cf2g; clojure-aot the crop), `bin/cover
+   classes` (C: test/c/divergences.edn, and divergences-aot.edn with divergences.edn for the AOT levels, controls
+   `--control-level run`), `bin/cover clojure-classes test/arbace-go-aot-results.edn --aot`, `bin/cover subset` per corpus:
+   minutes. Then the subsets written as each corpus's four keys.
+
 ## As built: GT8 (C's read lists) (write-ahead, branch `c-lists`, 2026-11-03)
 
 C's read-level checks take a file list, so GT8.4's rotation reaches them (about 220 of C's 300 full-check minutes).
