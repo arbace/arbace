@@ -685,6 +685,10 @@ Costs: the lowering evaluated on stage 0 takes about 1.6 s of CPU a program (602
 for 53 programs), the whole build-and-run about 1.1 s of wall a program at 4 jobs: the whole suite about 70 minutes at 4 jobs,
 35 to 40 at 8. std's build: 38 s of Cargo (8 jobs) and 2 s of `clang -S`, 103 units, 51 MB of IR (CX7's libstdc++: 38 MB).
 
+C++ unchanged: the 16 C++ samples (`test/cpp/samples`, `test/cpp/runtime/samples`) lowered by this branch's lowering and by
+main's give the same C byte for byte (the refactor of icmp/fcmp and casts is neutral); `bin/cppi lower-check` was not rerun
+(its lowered runtime is keyed by `lower.ae` and would rebuild, minutes: for the merge).
+
 ### RE2.3 Against the exit criteria
 
 RE1 ("the spec accepted; lists counted"): the spec is written (EVAL.md), the lists counted (§6 there), std's flags and IR pinned
