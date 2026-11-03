@@ -1,0 +1,129 @@
+#!/bin/bash
+# GT8.4, GT8.7 (doc/GATE-SURVEY.md, "As built: GT8.4, GT8.7 (write-ahead)"): the rotation on a made-up tree, table
+# and store. The planner (test/gate/plan.ae) slices a toy corpus (a record of 40 ids, a :subset of 4), names the
+# subset and the night's slice as checks of their own, keys each over its list, picks the slice by the store's runs;
+# the runner (bin/lib/gate-run.bash's rotation_note) notes runs and moves a failure's files into the subset;
+# gate.plan's rotation-status judges the record complete or not. Seconds, no build, no gate run.
+# Usage: test/gate/rotation-test.bash
+# needs: exe (the planner on stage 0)
+set -u
+here=$(cd "$(dirname "$0")/../.." && pwd)
+: "${ARBACE_HOST_EXE:?set ARBACE_HOST_EXE to stage 0 (a tool must not build one here)}"
+mkdir -p "${TMPDIR:-$here/.tmp/tmp}"
+t=$(mktemp -d "${TMPDIR:-$here/.tmp/tmp}/gate-rotation-test.XXXXXX") || exit 2
+[ -n "${KEEP:-}" ] || trap 'rm -rf "$t"' EXIT
+n=0 bad=0
+ok() { n=$((n + 1)); echo "ok   $*"; }
+no() { n=$((n + 1)); bad=$((bad + 1)); echo "FAIL $*"; }
+root=$here; . "$here/bin/lib/tools.bash"
+
+# the made-up tree: a record of 40 programs of corpus toy (and 3 of another), its corpora file with a :subset of 4
+r=$t/root; mkdir -p "$r/test" "$r/bin"
+printf '#!/bin/bash\nexit 0\n' > "$r/bin/tool"
+{ echo ";; a record"; echo "["
+  for i in $(seq 1 40); do echo "[\"toy/p$i.c\" :pass \"\"]"; done
+  for i in 1 2 3; do echo "[\"other/q$i.c\" :pass \"\"]"; done
+  echo "]"; } > "$r/test/record.edn"
+cat > "$r/test/corpora.edn" <<'EOF'
+{:corpora [{:id :toy :subset ["p1.c" "p2.c" "p3.c" "p4.c"]}
+           {:id :whole}]}
+EOF
+cat > "$r/test/steps.edn" <<'EOF'
+{:groups {}
+ :steps
+ [{:name toy :phase :full :cmd "bin/tool --corpus {part}" :inputs ["bin/tool"] :hosts []
+   :parts [{:part toy} {:part whole}]
+   :rotate {:only "--only {list}" :universe "test/record.edn" :subset "test/corpora.edn" :failed-re "^FAIL ([^ ]+).*$"}}
+  {:name after-toy :phase :full :cmd "bin/tool" :inputs ["bin/tool"] :hosts [] :needs [toy]}]}
+EOF
+(cd "$r" && find . -type f -printf '%P\n' | LC_ALL=C sort | xargs -d '\n' sha256sum) > "$t/files.sha256"
+cp "$t/files.sha256" "$t/files.base"
+echo '{}' > "$t/hosts.edn"
+store=$t/store; mkdir -p "$store"
+export GATE_STEPS=$r/test/steps.edn GATE_CANARY=0
+plan() { # plan DIR MODE ARGS...: the planner into DIR
+  local d=$1; shift; rm -rf "$d"; mkdir -p "$d"; cp "$t/files.sha256" "$t/hosts.edn" "$d/"
+  (cd "$here" && arbace_tool -p "$here/test" -m gate.plan plan "$r" "$d" "$store" "$@") > "$d.out" 2>&1
+}
+names() { cut -f1 "$1/plan.tsv" | tr '\n' ' '; }
+col() { awk -F'\t' -v n="$2" -v c="$3" '$1 == n {print $c}' "$1/plan.tsv"; }
+
+# 1. --full: whole parts, {only} gone, no list
+plan "$t/full" full || no "the full plan: $(cat "$t/full.out")"
+if [ "$(names "$t/full")" = "toy.toy toy.whole after-toy " ]; then ok "--full: the parts whole"; else no "--full: $(names "$t/full")"; fi
+if [ "$(col "$t/full" toy.toy 18)" = "bin/tool --corpus toy" ]; then ok "--full: the command without --only"; else no "--full's command: $(col "$t/full" toy.toy 18)"; fi
+
+# 2. the slices: a function of the name alone (SHA-256's first 8 hex digits mod 7), every file in one slice
+plan "$t/n0" nightly --night 0 || no "the nightly plan: $(cat "$t/n0.out")"
+s0=$(names "$t/n0")
+case $s0 in "toy.toy.sub toy.toy.s0 toy.whole after-toy ") ok "--nightly, night 0, an empty store: the subset, slice s0, the part with no :subset whole" ;;
+  *) no "--nightly night 0: $s0 ($(head -3 "$t/n0.out"))" ;; esac
+exp0=$(for i in $(seq 5 40); do id=toy/p$i.c; h=$(printf '%s' "$id" | sha256sum | cut -c1-8); [ $(( 16#$h % 7 )) = 0 ] && echo "$id"; done | LC_ALL=C sort)
+if [ "$(cat "$t/n0/rotation/toy.toy.s0.list")" = "$exp0" ] && [ -n "$exp0" ]; then ok "slice s0's list: the ids whose SHA-256 is 0 mod 7 ($(echo "$exp0" | wc -l))"; else no "slice s0's list: $(cat "$t/n0/rotation/toy.toy.s0.list")"; fi
+if [ "$(cat "$t/n0/rotation/toy.toy.sub.list")" = "$(printf 'toy/p1.c\ntoy/p2.c\ntoy/p3.c\ntoy/p4.c')" ]; then ok "the subset's list: the :subset, its corpus's ids"; else no "the subset's list: $(cat "$t/n0/rotation/toy.toy.sub.list")"; fi
+total=0
+for k in 0 1 2 3 4 5 6; do
+  plan "$t/k$k" nightly --night "$k" || no "night $k's plan"
+  f=$t/k$k/rotation/toy.toy.s$k.list
+  [ -f "$f" ] && total=$((total + $(wc -l < "$f")))
+done
+if [ "$total" = 36 ]; then ok "the seven nights' slices cover the rest, 36 files, once each"; else no "the slices cover $total of 36"; fi
+if grep -q 'bin/tool --corpus toy --only "\$GATE_LIST"' "$t/n0/plan.tsv"; then ok "a rotated check's command takes \"\$GATE_LIST\""; else no "the rotated command: $(col "$t/n0" toy.toy.s0 18)"; fi
+if [ "$(col "$t/n0" after-toy 6)" = "toy.toy.sub,toy.toy.s0,toy.whole" ]; then ok ":needs naming the step names its rotated checks"; else no ":needs: $(col "$t/n0" after-toy 6)"; fi
+
+# 3. keys: over the list (a line list SHA N); the same list, the same key; another list, another key
+if grep -q "^list $(sha256sum < "$t/n0/rotation/toy.toy.s0.list" | cut -c1-64) " "$t/n0/plan/toy.toy.s0.inputs"; then ok "the key's material holds the list's digest"; else no "the material: $(grep ^list "$t/n0/plan/toy.toy.s0.inputs")"; fi
+plan "$t/n7" nightly --night 7
+k0=$(col "$t/n0" toy.toy.s0 3)
+if [ ${#k0} = 64 ] && [ "$k0" = "$(col "$t/n7" toy.toy.s0 3)" ]; then ok "night 7 is night 0's slice, at the same key"; else no "night 7's key"; fi
+if [ "$(col "$t/n0" toy.toy.sub 3)" != "$(col "$t/n0" toy.toy.s0 3)" ]; then ok "the subset and the slice keyed apart"; else no "the subset's and the slice's keys equal"; fi
+kw=$(col "$t/full" toy.whole 3)
+if [ ${#kw} = 64 ] && [ "$kw" = "$(col "$t/n0" toy.whole 3)" ]; then ok "a part with no :subset: --nightly's key is --full's (its passes serve both)"; else no "toy.whole's keys differ"; fi
+
+# 4. the runner: rotation_note's runs, a failure's files into the subset, a subset's pass clearing them
+root=$here logs=$t/n0 commit=c0ffee
+declare -A key
+. "$here/bin/lib/gate-run.bash"
+key[toy.toy.s0]=$(col "$t/n0" toy.toy.s0 3) key[toy.toy.sub]=$(col "$t/n0" toy.toy.sub 3)
+victim=$(head -1 "$t/n0/rotation/toy.toy.s0.list")
+printf 'ci judge: ...\nFAIL %s differs\nFAIL toy/p99.c not in the list\n' "$victim" > "$t/n0/toy.toy.s0.log"
+rotation_note toy.toy.s0 fail
+if [ "$(cat "$store/_rotation/toy.toy.failed")" = "$victim" ]; then ok "a slice's failure: its named file (in its list) joins the subset"; else no "the failed file: $(cat "$store/_rotation/toy.toy.failed" 2>&1)"; fi
+if [ "$(cut -f3 "$store/_rotation/toy.toy.s0.runs")" = fail ]; then ok "the run noted (fail)"; else no "the runs: $(cat "$store/_rotation/toy.toy.s0.runs")"; fi
+plan "$t/n1" nightly --night 1
+if grep -qx "$victim" "$t/n1/rotation/toy.toy.sub.list" && ! grep -qx "$victim" "$t/n1/rotation/toy.toy.s0.list"; then ok "the failed file in the subset's list, out of its slice's"; else no "the failed file's place"; fi
+case $(names "$t/n1") in *toy.toy.s0*) ok "night 1 runs s0 again: its latest run failed" ;; *) no "night 1: $(names "$t/n1")" ;; esac
+logs=$t/n1; key[toy.toy.sub]=$(col "$t/n1" toy.toy.sub 3)
+rotation_note toy.toy.sub pass
+if [ ! -s "$store/_rotation/toy.toy.failed" ]; then ok "the subset's pass clears the failed file"; else no "failed after the subset passed: $(cat "$store/_rotation/toy.toy.failed")"; fi
+
+# 5. completeness (rotation-status): incomplete, then every slice passed within the period, then a stale one
+status() { (cd "$here" && GATE_NOW="$1" arbace_tool -p "$here/test" -m gate.plan rotation-status "$r" "$store") > "$t/status.out" 2>&1; }
+if ! status "$(date +%s)" && grep -q '^INCOMPLETE toy.toy' "$t/status.out"; then ok "rotation-status: incomplete with slices never run"; else no "rotation-status (incomplete): $(cat "$t/status.out")"; fi
+logs=$t/n0b; plan "$logs" nightly --night 0
+now=$(date +%s)
+for k in 0 1 2 3 4 5 6; do
+  logs=$t/k$k; [ -f "$logs/rotation/toy.toy.s$k.rot" ] || continue
+  plan "$logs" nightly --night "$k"  # (the plan again: the slices' lists without the failed file)
+  [ -f "$logs/rotation/toy.toy.s$k.rot" ] || continue
+  key[toy.toy.s$k]=$(col "$logs" toy.toy.s$k 3)
+  rotation_note "toy.toy.s$k" pass
+done
+if status "$now" && grep -q '^complete   toy.toy' "$t/status.out"; then ok "rotation-status: complete when every slice passed with its list"; else no "rotation-status (complete): $(cat "$t/status.out")"; fi
+if ! status $((now + 8 * 86400)) && grep -q 'not passed within 7 days' "$t/status.out"; then ok "rotation-status: incomplete eight days later (at any key, within the period)"; else no "rotation-status (stale): $(cat "$t/status.out")"; fi
+echo "$victim" > "$store/_rotation/toy.toy.failed"
+if ! status "$now" && grep -q 'failed since' "$t/status.out"; then ok "rotation-status: incomplete while a file failed since"; else no "rotation-status (failed): $(cat "$t/status.out")"; fi
+rm -f "$store/_rotation/toy.toy.failed"
+# the oldest slice first: every slice ran, s3's run the oldest
+sed -i "s/^[0-9]*\t/$((now - 5000))\t/" "$store/_rotation/toy.toy.s3.runs" 2>"$t/sed.err"
+if [ -s "$store/_rotation/toy.toy.s3.runs" ]; then
+  plan "$t/n5" nightly --night 5
+  case $(names "$t/n5") in *toy.toy.s3*) ok "every slice passed: the night runs the one that ran longest ago (s3)" ;; *) no "the oldest slice: $(names "$t/n5")" ;; esac
+fi
+
+# 6. the clean run: the subsets alone
+plan "$t/clean" full --rotation subset
+if [ "$(names "$t/clean")" = "toy.toy.sub toy.whole after-toy " ]; then ok "--rotation subset (the clean run): the subset alone"; else no "the clean plan: $(names "$t/clean")"; fi
+
+echo "$((n - bad)) of $n passed"
+[ "$bad" = 0 ]
