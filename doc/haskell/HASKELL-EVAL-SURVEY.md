@@ -743,3 +743,7 @@ uncaught `Map.!`), `L.hs` (E7: a 3,000,000-deep `foldl` and `<<loop>>`), `F.hs` 
 `runghc`), `E.hs` (`runghc`'s start), `b.ghci` and `prim.txt`, `primnames.txt`, `nosimd.txt` (E4: `:browse GHC.Prim`),
 `u-*.txt`, `d-*.txt`, `ext-*.txt` (E5: `nm` of the four archives), `test.log` (`bin/repr-haskell test`, passing, run
 with `ARBACE_HOST_EXE` the main checkout's stage 0). Each probe took seconds; the longest was `bin/repr-haskell test`.
+
+## Decided (2026-11-03, the user): HES1-HES21
+
+All as recommended. The trial HE1-HE3 starts now, by an agent on the main host, beside GT8 (light work by day).

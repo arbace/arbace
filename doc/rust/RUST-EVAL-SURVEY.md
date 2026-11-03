@@ -622,3 +622,8 @@ output, `shim.ll` from the shim's bitcode by `clang -S -emit-llvm`), `shim.c`.
 Rule slips: one probe command redirected a pipe through `/dev/fd/1` (`rustc ... 2>/dev/fd/1 | head -0`, harmless, but
 against the conventions); the first two gcc invocations ran with `TMPDIR` unset, so gcc's temporary objects went to
 `/tmp` (removed by gcc itself); `TMPDIR` was `.tmp/tmp` from then on. No process was left running.
+
+## Decided (2026-11-03, the user): RES1-RES16
+
+All as recommended. The trial RE1-RE2 starts now, by an agent on the main host, beside GT8 and C++'s CX8 (light work by
+day).
