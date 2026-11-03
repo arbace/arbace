@@ -450,15 +450,36 @@
       f (str c " " f)
       :else c)))
 
-(defn choose-slice
-  "the slice a night runs (GTS202 (a), GTS203 (a)): among the non-empty ones, first one whose latest run failed,
-  then one never run, then the one whose latest run is oldest; ties by the night index (slice NIGHT mod 7 first)"
-  [store nm slices night]
-  (->> (for [[k ids] slices :when (seq ids)
-             ;; a whole part's run (NAME.PART.whole) is a run of every slice (whatever its list)
-             :let [r (last (sort-by run-order (concat (runs-of store (str nm ".s" k)) (runs-of store (str nm ".whole")))))]]
-         [[(if (= "fail" (:status r)) 0 1) (if r (:epoch r) -1) (mod (- k night) period)] k])
-       sort first second))
+(defn- now-s [] (if-let [n (System/getenv "GATE_NOW")] (Long/parseLong n) (quot (System/currentTimeMillis) 1000)))
+
+(defn slice-state
+  "a slice's state for the night's choice and for completeness: its latest run that counts (its own, any list, or the
+  whole part's) and its covering run (the latest of its own runs with its current list and the whole part's with the
+  current universe), :covered when that one passed (or was skipped at a pass) since SINCE"
+  [store nm k ids usha since]
+  (let [own (runs-of store (str nm ".s" k))
+        wholes (runs-of store (str nm ".whole"))
+        ls (list-sha ids)
+        latest (last (sort-by run-order (concat own wholes)))
+        cover (last (sort-by run-order (concat (filter #(= ls (:list-sha %)) own) (filter #(= usha (:list-sha %)) wholes))))]
+    {:k k :n (count ids) :latest latest :cover cover
+     :covered (boolean (and cover (#{"pass" "skip"} (:status cover)) (>= (:epoch cover) since)))}))
+
+(defn choose-slices
+  "the slices a night runs (GTS202 (a), GTS203 (a); review 181, findings 3 and 4): one whose latest run failed, if
+  any (ties by the night index), and beside it the rotation's slice among the others: first one not covered with its
+  current list (never run, a list changed since its run, or its run failed or aged), then the one whose latest run is
+  oldest (by the store's sequence); ties by the night index (slice NIGHT mod 7 first). A slice that fails naming no file keeps its place the
+  next night, but the rotation goes on beside it"
+  [store nm lists night]
+  (let [usha (list-sha (sort (:universe lists)))
+        since (- (now-s) (* period 86400))
+        sts (for [[k ids] (:slices lists) :when (seq ids)] (slice-state store nm k ids usha since))
+        tie #(mod (- (:k %) night) period)
+        failed (first (sort-by tie (filter #(= "fail" (:status (:latest %))) sts)))
+        other (first (sort-by (juxt #(if (:covered %) 1 0) #(if (:latest %) (:seq (:latest %)) -1) tie)
+                              (remove #(= (:k %) (:k failed)) (remove #(= "fail" (:status (:latest %))) sts))))]
+    (vec (keep :k [failed other]))))
 
 (defn rotate-steps
   "the steps with their rotated parts expanded for ROTATION: nil (--full: whole parts), :subset (the clean run:
@@ -486,9 +507,8 @@
                   (let [sub (mk "sub" (:subset lists) "sub")]
                     (if (= rotation :subset)
                       [sub]
-                      (let [k (choose-slice store (str (:name s)) (:slices lists) rotation)]
-                        (cond-> [sub]
-                          k (conj (mk (str "s" k) (get (:slices lists) k) (str "s" k "/" period))))))))))
+                      (into [sub] (for [k (choose-slices store (str (:name s)) lists rotation)]
+                                    (mk (str "s" k) (get (:slices lists) k) (str "s" k "/" period)))))))))
         out (mapv exp steps)
         renamed (into {} (for [[s xs] (map vector steps out) :when (not= [(:name s)] (map :name xs))]
                            [(str (:name s)) (mapv :name xs)]))
@@ -676,7 +696,7 @@
   [root store args]
   (set-counted! (second (drop-while #(not= "--ancestors" %) args)))
   (let [{:keys [steps]} (read-file (or (System/getenv "GATE_STEPS") (str root "/test/gate/steps.edn")))
-        now (if-let [n (System/getenv "GATE_NOW")] (Long/parseLong n) (quot (System/currentTimeMillis) 1000))
+        now (now-s)
         days (if-let [d (second (drop-while #(not= "--days" %) args))] (Long/parseLong d) period)
         since (- now (* days 86400))
         parts (for [s (expand-parts steps) :when (:rotate s)
@@ -688,14 +708,9 @@
       (doseq [[s {:keys [universe subset failed slices]}] parts]
         (let [nm (str (:name s))
               usha (list-sha (sort universe))
-              wholes (filter #(= usha (:list-sha %)) (runs-of store (str nm ".whole")))
-              st (for [[k ids] slices :when (seq ids)]
-                   ;; a slice's runs with its current list, and the whole part's runs with the current universe (every
-                   ;; current list is in it, however the subset and the failed files split it since)
-                   (let [ls (list-sha ids)
-                         r (last (sort-by run-order (concat (filter #(= ls (:list-sha %)) (runs-of store (str nm ".s" k))) wholes)))
-                         ok (and r (#{"pass" "skip"} (:status r)) (>= (:epoch r) since))]
-                     [k (count ids) r ok]))
+              st (for [[k ids] slices :when (seq ids)
+                       :let [x (slice-state store nm k ids usha since)]]
+                   [k (:n x) (:cover x) (:covered x)])
               incomplete (remove #(nth % 3) st)]
           (when (or (seq incomplete) (seq failed)) (swap! bad inc))
           (println (str (if (or (seq incomplete) (seq failed)) "INCOMPLETE " "complete   ") nm ": " (count universe) " files, subset "

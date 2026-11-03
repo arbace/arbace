@@ -21,6 +21,7 @@ root=$here; . "$here/bin/lib/tools.bash"
 realdate=$(command -v date); mkdir -p "$t/shim"
 printf '#!/bin/sh\nif [ "$1" = "+%%s" ]; then echo 1793000000; else exec %s "$@"; fi\n' "$realdate" > "$t/shim/date"; chmod +x "$t/shim/date"
 PATH=$t/shim:$PATH
+export GATE_NOW=1793000000 # the planner's clock (the night's choice: a slice covered within the period) the same
 
 # the made-up tree: a record of 40 programs of corpus toy (and 3 of another), its corpora file with a :subset of 4
 r=$t/root; mkdir -p "$r/test" "$r/bin"
@@ -124,7 +125,7 @@ printf '999\t%s\t%s\tfail\tc0ffee\tfalse\n' "$(date +%s)" "$victim" >> "$store/_
 if ! status "$now" && grep -q 'failed since' "$t/status.out"; then ok "rotation-status: incomplete while a file failed since"; else no "rotation-status (failed): $(cat "$t/status.out")"; fi
 printf '1000\t%s\t%s\tclear\tc0ffee\tfalse\n' "$(date +%s)" "$victim" >> "$store/_rotation/toy.toy.failed"
 # the oldest slice first: every slice ran, s3's run the oldest
-sed -i "s/^[0-9]*\t/$((now - 5000))\t/" "$store/_rotation/toy.toy.s3.runs" 2>"$t/sed.err"
+awk -F'\t' -v OFS='\t' '{ $8 = 0; print }' "$store/_rotation/toy.toy.s3.runs" > "$t/s3.runs" && cp "$t/s3.runs" "$store/_rotation/toy.toy.s3.runs"
 if [ -s "$store/_rotation/toy.toy.s3.runs" ]; then
   plan "$t/n5" nightly --night 5
   case $(names "$t/n5") in *toy.toy.s3*) ok "every slice passed: the night runs the one that ran longest ago (s3)" ;; *) no "the oldest slice: $(names "$t/n5")" ;; esac
@@ -183,6 +184,30 @@ rotation_note toy.toy fail
 commit=feedface rotation_note toy.toy pass
 plan "$t/b2" nightly --night 1
 if grep -qx toy/p20.c "$t/b2/rotation/toy.toy.sub.list"; then ok "this commit's failure stays in its subset after another branch's pass"; else no "a foreign pass cleared this commit's failure"; fi
+store=$t/store
+
+# 9. review 181, findings 3 and 4: the night's choice. Every slice passed first (one note a night)
+store=$t/store4; mkdir -p "$store"
+for k in 0 1 2 3 4 5 6; do
+  plan "$t/c$k" nightly --night "$k"; logs=$t/c$k
+  for x in $(names "$logs"); do case $x in toy.toy.s*) key[$x]=$(col "$logs" "$x" 3); rotation_note "$x" pass; last=$x ;; esac; done
+done
+if status "$(date +%s)"; then ok "seven nights, one slice each: complete"; else no "seven nights: $(cat "$t/status.out")"; fi
+# finding 4: a slice that fails naming no file is run again, and the rotation's slice beside it
+plan "$t/c7" nightly --night 7; logs=$t/c7
+s7=$(names "$logs" | grep -o 'toy\.toy\.s[0-9]' | head -1); key[$s7]=$(col "$logs" "$s7" 3)
+echo 'bin/ci check: cirun build failed' > "$logs/$s7.log"; rotation_note "$s7" fail
+plan "$t/c8" nightly --night 8
+n8=$(names "$t/c8" | grep -o 'toy\.toy\.s[0-9]' | tr '\n' ' ')
+case $n8 in "$s7 "?*) ok "a slice failing with no file named runs again, and the rotation's slice beside it ($n8)" ;; *) no "after a nameless failure: $n8" ;; esac
+# finding 3: a program added to the slice that ran last: not covered with its list, it runs next, not in a week
+logs=$t/c8; for x in $n8; do key[$x]=$(col "$logs" "$x" 3); rotation_note "$x" pass; last=$x; done
+i=41; while :; do id=toy/p$i.c; h=$(printf '%s' "$id" | sha256sum | cut -c1-8); [ "s$(( 16#$h % 7 ))" = "${last#toy.toy.}" ] && break; i=$((i + 1)); done
+cp "$r/test/record.edn" "$t/record.bak"
+sed -i "s|^\[\"toy/p40.c\" :pass \"\"\]\$|&\n[\"$id\" :pass \"\"]|" "$r/test/record.edn"
+plan "$t/c9" nightly --night 9
+case $(names "$t/c9") in *"$last "*) ok "a slice whose list changed ($id into ${last#toy.toy.}) runs the next night" ;; *) no "after a list change in $last: $(names "$t/c9")" ;; esac
+cp "$t/record.bak" "$r/test/record.edn"
 store=$t/store
 
 # 6. the clean run: the subsets alone
