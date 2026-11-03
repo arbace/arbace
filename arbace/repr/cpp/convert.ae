@@ -1672,6 +1672,16 @@
                 f (list 'cpp/instantiate f)]
             [(if ext (vary-meta f assoc :extern true) f)])
           "EmptyDecl" ['(c/null)]
+          ;; CX9, modules (SPEC §15): an export block's members in (cpp/export ...), one exported declaration's forms with
+          ;; ^:export on the first; an import is the text's (module-lines), its node dropped
+          "ExportDecl"
+          (let [[b] (or (rng n) (gap :module "an export in a macro"))
+                braced (re-find #"^export\s*\{" (text-at b (min (count *src*) (+ (long b) 64))))]
+            (if braced
+              [(apply list 'cpp/export (members n))]
+              (let [fs (vec (mapcat #(decl-forms % ctx outer?) (remove implicit? (kids n))))]
+                (if (seq fs) (assoc fs 0 (vary-meta (first fs) assoc :export true)) (gap :module "an empty export")))))
+          "ImportDecl" []
           [(text-form n k true)])
         (catch arbace.lang.ExceptionInfo e
           (if (:cpp/gap (ex-data e)) [(text-form n (str k "/" (name (:cpp/gap (ex-data e)))) true)] (throw e))))))))
@@ -1808,7 +1818,8 @@
   (let [ctx (if (= (kind n) "CXXRecordDecl") :member :top)
         its (items-of (remove #(and (= (kind %) "CXXRecordDecl") (implicit? %)) (kids n)) ctx)
         [b e] (extent n)]
-    (binding [*directives* (filter (fn [d] (and b (< (long b) (long (:off d)) (long e)))) *directives*)]
+    ;; a module declaration or import is a top-level line (CX9): none inside a declaration context
+    (binding [*directives* (filter (fn [d] (and b (not (:module d)) (< (long b) (long (:off d)) (long e)))) *directives*)]
       (place its))))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -1854,6 +1865,50 @@
       (= v "pragma") (list 'c/pragma (str/trim (subs t (+ (.indexOf t "pragma") 6))))
       :else (list 'c/directive (utf8 t)))))
 
+(defn module-lines
+  "CX9 (SPEC §15): the main file's module declarations and imports (`export module a.b:p;`, `module;`, `module :private;`,
+  `export import a.b;`, `import :p;`, `import <h>;`), each a line of its own outside comments: [{:off :end :form}], placed
+  between the items as the directives are. One the forms do not spell is a text form."
+  [^String s]
+  (let [m (re-matcher #"(?m)^[ \t]*((export[ \t]+)?(module|import)\b[^;\n{}]*;)" s)
+        cmts (let [v (java.util.ArrayList.)]
+               (loop [i 0]
+                 (when (< i (.length s))
+                   (let [c (.charAt s i)]
+                     (cond
+                       (and (= c \/) (< (inc i) (.length s)) (= \* (.charAt s (inc i))))
+                       (let [e (.indexOf s "*/" (int (+ i 2))) e (if (neg? e) (.length s) (+ e 2))] (.add v [i e]) (recur e))
+                       (and (= c \/) (< (inc i) (.length s)) (= \/ (.charAt s (inc i))))
+                       (let [e (.indexOf s "\n" (int i)) e (if (neg? e) (.length s) e)] (.add v [i e]) (recur e))
+                       (= c \") (let [e (loop [j (inc i)] (cond (>= j (.length s)) j (= \\ (.charAt s j)) (recur (+ j 2)) (#{\" \newline} (.charAt s j)) (inc j) :else (recur (inc j))))]
+                                  (recur (long e)))
+                       :else (recur (inc i))))))
+               v)
+        in-cmt? (fn [o] (some (fn [[b e]] (and (<= (long b) (long o)) (< (long o) (long e)))) cmts))]
+    (loop [out []]
+      (if (.find m)
+        (let [b (.start m 1) e (.end m 1) t (.group m 1)
+              ex (boolean (.group m 2))
+              body (str/trim (subs t (+ (if ex (.length (.group m 2)) 0) (count (.group m 3))) (dec (count t))))
+              id #"[A-Za-z_][A-Za-z_0-9]*(?:\.[A-Za-z_][A-Za-z_0-9]*)*"
+              f (if (= (.group m 3) "module")
+                  (cond
+                    (and (= body "") (not ex)) '(cpp/module)
+                    (and (re-matches #":\s*private" body) (not ex)) '(cpp/module-private)
+                    (re-matches id body) (list 'cpp/module (symbol body))
+                    :else (when-let [[_ a p] (re-matches #"([A-Za-z_][\w.]*)\s*:\s*([A-Za-z_][\w.]*)" body)]
+                            (when (and (re-matches id a) (re-matches id p)) (list 'cpp/module (symbol a) :partition (symbol p)))))
+                  (cond
+                    (re-matches id body) (list 'cpp/import (symbol body))
+                    (re-matches #"<[^>\s]+>|\"[^\"]+\"" body) (list 'cpp/import body)
+                    :else (when-let [[_ p] (re-matches #":\s*([A-Za-z_][\w.]*)" body)]
+                            (when (re-matches id p) (list 'cpp/import :partition (symbol p))))))
+              f (cond (nil? f) (list 'cpp/text (utf8 t))
+                      ex (vary-meta f assoc :export true)
+                      :else f)]
+          (recur (if (in-cmt? b) out (conj out {:off b :end e :form f :module true}))))
+        out))))
+
 (defn active-directives
   "The directives the print keeps: those outside every conditional group, and those inside an executed one that are
   not conditionals themselves (`executed`, the lines of the main file's directives the preprocessor executed, as
@@ -1880,7 +1935,7 @@
   [nodes ^String src ^String main executed]
   (let [texts (atom {})]
     (binding [*src* src *main* main *texts* texts
-              *directives* (active-directives src executed)
+              *directives* (vec (sort-by :off (concat (active-directives src executed) (module-lines src))))
               *line-dirs* (vec (for [d (directive-lines src) :when (and (= "line" (:verb d)) (zero? (long (:depth d))))
                                      :let [m (re-find #"^#\s*line\s+(\d[\d']*)" (:text d))] :when m]
                                  [(:end d) (Long/parseLong (str/replace (second m) "'" ""))]))]
