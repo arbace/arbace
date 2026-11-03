@@ -356,7 +356,7 @@ run_one() {  # run_one NAME: a step of the plan, as decided (once: a build of th
   if [ "${kind[$n]}" = build ] && [ "$hv" = yes ] && build_cached "$n"; then hv=cached; fi
   for attempt in 1 2 3; do
     if [ "${outputs[$n]}" = yes ]; then rm -rf "${logs:?}/out/$n"; mkdir -p "$logs/out/$n"; fi
-    audit_step=$aud GATE_OUT=$logs/out/$n GATE_OUTS=$logs/out GATE_LIST=$logs/rotation/$n.list step "$n" "$hv" bash -c "${cmd[$n]}"; st=$?
+    audit_step=$aud GATE_OUT=$logs/out/$n GATE_OUTS=$logs/out GATE_LIST=$logs/rotation/$n.list GATE_USES="${uses[$n]}" step "$n" "$hv" bash -c "${cmd[$n]}"; st=$?
     # GT4: strace -f aborts (ptrace(PTRACE_LISTEN): I/O error) when a traced process dies in a group
     # stop; an aborted trace is no audit and its run no run: again, twice at most
     [ -n "$aud" ] && grep -q '^strace: ptrace' "$logs/$n.log" || break
@@ -665,7 +665,7 @@ gate_audit() {  # gate_audit [STEP...]: the checks named, else every check
       t0=$(date +%s); rm -f "${d:?}/$n.start"
       # the clock starts once the step holds the lock (the start file, as step() does)
       "${hv[@]}" strace -f $([ -n "${GATE_AUDIT_SIGNALS:-}" ] && echo -q || echo -qq) -y -s 4096 --seccomp-bpf -e "trace=$(audit_trace_set)" -o "$fifo" \
-        env $([ "${heavy[$n]}" = yes ] && echo ARBACE_HEAVY_HELD=1) ARBACE_LOADED_LOG="$d/$n.loaded" GATE_AUDITED=1 GATE_OUT="$logs/out/$n" GATE_OUTS="$logs/out" GATE_LIST="$logs/rotation/$n.list" \
+        env $([ "${heavy[$n]}" = yes ] && echo ARBACE_HEAVY_HELD=1) ARBACE_LOADED_LOG="$d/$n.loaded" GATE_AUDITED=1 GATE_OUT="$logs/out/$n" GATE_OUTS="$logs/out" GATE_LIST="$logs/rotation/$n.list" GATE_USES="${uses[$n]}" \
         bash -c 'date +%s > "$1"; exec bash -c "$2"' gate-audit "$d/$n.start" "$acmd_run" > "$d/$n.log" 2>&1
       echo $? > "$d/$n.status"; [ -f "$d/$n.start" ] && t0=$(cat "$d/$n.start"); echo $(( $(date +%s) - t0 )) > "$d/$n.secs"
       wait "$ap"; rm -f "${fifo:?}"
