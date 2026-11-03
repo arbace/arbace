@@ -220,5 +220,54 @@ store=$t/store
 plan "$t/clean" full --rotation subset
 if [ "$(names "$t/clean")" = "toy.toy.sub toy.whole after-toy " ]; then ok "--rotation subset (the clean run): the subset alone"; else no "the clean plan: $(names "$t/clean")"; fi
 
+# 8. GT8, the tools' lists: a record read by an :id-re whose group 2 names the part (Java's ref: ids bare, the corpus
+# on the line), :always (the controls' subjects) in the subset and every slice, :failed-as (the ids' replacement),
+# a :uses of a rotated part renamed, {part} in a part's :uses, and a judge's failure noted for its producers (:judges)
+r2=$t/root2; mkdir -p "$r2/test" "$r2/bin"; cp "$r/bin/tool" "$r2/bin/tool"
+{ echo "["; for i in $(seq 1 30); do echo " {:id \"x$i\" :corpus :a :jdk :pass}"; done
+  for i in 1 2 3; do echo " {:id \"y$i\" :corpus :b :jdk :pass}"; done; echo "]"; } > "$r2/test/rec.edn"
+echo '{:corpora [{:id :a :subset ["x2" "x3"]} {:id :b}]}' > "$r2/test/corp.edn"
+cat > "$r2/test/steps.edn" <<'STEPS'
+{:groups {}
+ :steps
+ [{:name rd :phase :full :cmd "bin/tool --corpus {part}" :inputs ["bin/tool"] :hosts [] :outputs true
+   :parts [{:part a} {:part b}]
+   :rotate {:only "--list {list}" :universe "test/rec.edn" :id-re "^ \\{:id \"([^\"]+)\" :corpus :([a-z]+) " :subset "test/corp.edn"
+            :always ["x1"] :failed-re "^DIFF (a) ([^ ]+)$" :failed-as "\\2"}}
+  {:name lev :phase :full :cmd "bin/tool --corpus {part}" :inputs ["bin/tool"] :hosts [] :outputs true :uses ["rd.{part}/f"]
+   :parts [{:part a} {:part b}]
+   :rotate {:only "--list {list}" :universe "test/rec.edn" :id-re "^ \\{:id \"([^\"]+)\" :corpus :([a-z]+) " :subset "test/corp.edn"
+            :always ["x1"] :failed-re "^nothing$"}}
+  {:name jud :phase :full :cmd "bin/tool" :inputs ["bin/tool"] :hosts [] :uses ["lev/results.tsv"]
+   :judges {:failed-re "^   regression: ([^ ]+) .*$"}}]}
+STEPS
+(cd "$r2" && find . -type f -printf '%P\n' | LC_ALL=C sort | xargs -d '\n' sha256sum) > "$t/files.sha256"
+store=$t/store3; mkdir -p "$store"
+plan2() { local d=$1; shift; rm -rf "$d"; mkdir -p "$d"; cp "$t/files.sha256" "$t/hosts.edn" "$d/"
+  (cd "$here" && GATE_STEPS=$r2/test/steps.edn arbace_tool -p "$here/test" -m gate.plan plan "$r2" "$d" "$store" "$@") > "$d.out" 2>&1; }
+plan2 "$t/i0" nightly --night 0 || no "the :id-re plan: $(cat "$t/i0.out")"
+case $(names "$t/i0") in "rd.a.sub rd.a.s0 rd.b lev.a.sub lev.a.s0 lev.b jud ") ok ":id-re: part a rotated (its corpus's ids, group 2), part b (no :subset) whole" ;;
+  *) no ":id-re's plan: $(names "$t/i0") ($(head -3 "$t/i0.out"))" ;; esac
+if [ "$(cat "$t/i0/rotation/rd.a.sub.list" 2>&1)" = "$(printf 'x1\nx2\nx3')" ]; then ok ":id-re: bare ids; the subset = :subset + :always"; else no "the :id-re subset: $(cat "$t/i0/rotation/rd.a.sub.list" 2>&1)"; fi
+allx1=yes tot=0
+for k in 0 1 2 3 4 5 6; do
+  plan2 "$t/i$k" nightly --night "$k"
+  f=$t/i$k/rotation/rd.a.s$k.list; [ -f "$f" ] || continue
+  grep -qx x1 "$f" || allx1=no; tot=$((tot + $(grep -vcx x1 "$f")))
+  ! grep -q '^y' "$f" || allx1=no
+done
+if [ "$allx1" = yes ] && [ "$tot" = 27 ]; then ok ":always (a control's subject) in every slice's list; the slices still cover the rest once (27)"; else no ":always in the slices: $allx1, $tot of 27"; fi
+if [ "$(col "$t/i0" lev.a.s0 16)" = "rd.a.sub/f,rd.a.s0/f" ]; then ok "{part} in a part's :uses, renamed to its rotated checks"; else no "lev.a.s0's uses: $(col "$t/i0" lev.a.s0 16)"; fi
+if [ "$(col "$t/i0" jud 16)" = "lev.a.sub/results.tsv,lev.a.s0/results.tsv,lev.b/results.tsv" ]; then ok "a :uses of a rotated step names its checks"; else no "jud's uses: $(col "$t/i0" jud 16)"; fi
+logs=$t/i0; key[rd.a.s0]=$(col "$t/i0" rd.a.s0 3); v2=$(grep -vx x1 "$t/i0/rotation/rd.a.s0.list" | head -1)
+printf 'DIFF a %s\nDIFF b %s\n' "$v2" "$v2" > "$t/i0/rd.a.s0.log"; rotation_note rd.a.s0 fail
+if [ "$(cat "$store/_rotation/rd.a.failed" 2>&1)" = "$v2" ]; then ok ":failed-as: the id from group 2 of its failure line"; else no ":failed-as: $(cat "$store/_rotation/rd.a.failed" 2>&1)"; fi
+rm -f "$store/_rotation/rd.a.failed"
+key[lev.a.s0]=$(col "$t/i0" lev.a.s0 3) key[jud]=$(col "$t/i0" jud 3)
+printf 'judge\n   regression: %s at interp\n   regression: y9 at interp\n' "$v2" > "$t/i0/jud.log"
+judge_note jud
+if [ "$(cut -f3 "$store/_rotation/lev.a.s0.runs" 2>&1)" = fail ] && [ "$(cat "$store/_rotation/lev.a.failed" 2>&1)" = "$v2" ] \
+   && [ ! -e "$store/_rotation/lev.a.sub.runs" ]; then ok ":judges: a judge's failure noted for the producer whose list names the id (its file into the subset)"; else no ":judges: $(cat "$store/_rotation/lev.a.s0.runs" "$store/_rotation/lev.a.failed" 2>&1)"; fi
+
 echo "$((n - bad)) of $n passed"
 [ "$bad" = 0 ]

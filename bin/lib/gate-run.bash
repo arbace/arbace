@@ -364,7 +364,7 @@ run_one() {  # run_one NAME: a step of the plan, as decided (once: a build of th
     cp "$logs/$n.log" "$logs/$n.log.aborted$attempt"
   done
   [ -n "$aud" ] && audit_compare "$n" "$st"
-  if [ $st = 0 ]; then rotation_note "$n" pass; else rotation_note "$n" fail; fi
+  if [ $st = 0 ]; then rotation_note "$n" pass; else rotation_note "$n" fail; judge_note "$n"; fi
   if [ $st = 0 ] && [ "${dec[$n]}" = run ]; then
     if [ -n "$aud" ] && [ "$(cat "$logs/$n.audit-status")" != ok ]; then
       echo "gate: the pass of $n not recorded: its audit is $(cat "$logs/$n.audit-status")" >&2
@@ -393,9 +393,12 @@ rotation_note() {
   return 0
 }
 rotation_note_locked() {
-  local n=$1 r=$logs/rotation/$1.rot rd=$store/_rotation part slice ls re now rn sq
+  local n=$1 r=$logs/rotation/$1.rot rd=$store/_rotation part slice ls re as now rn sq lg=${3:-$logs/$1.log}
   part=$(awk -F'\t' '$1 == "part" {print $2}' "$r") slice=$(awk -F'\t' '$1 == "slice" {print $2}' "$r")
   ls=$(awk -F'\t' '$1 == "list-sha" {print $2}' "$r") re=$(awk -F'\t' '$1 == "failed-re" {print $2}' "$r")
+  as=$(awk -F'\t' '$1 == "failed-as" {print $2}' "$r"); as=${as:-\\1}
+  # a judge's failure (judge_note): its log and its own expressions
+  [ -z "${4:-}" ] || { re=$4 as=$5; }
   rn=$(awk -F'\t' '$1 == "runs" {print $2}' "$r"); rn=${rn:-$n}
   now=$(date +%s)
   sq=$(( $(cat "$rd/.seq" 2>"$logs/$n.rot.err" || echo 0) + 1 )); echo "$sq" > "$rd/.seq"
@@ -405,14 +408,32 @@ rotation_note_locked() {
   # the failed files: events appended (SEQ EPOCH ID fail|clear COMMIT DIRTY), never rewritten, so that each commit's
   # lineage sees its own (the planner's failed-of)
   local ids id
-  if [ "$2" = fail ] && [ -n "$re" ] && [ -f "$logs/$n.log" ]; then
-    ids=$(sed -nE "s"$'\001'"$re"$'\001''\1'$'\001''p' "$logs/$n.log" | grep -Fxf "$logs/rotation/$n.list" | LC_ALL=C sort -u)
+  if [ "$2" = fail ] && [ -n "$re" ] && [ -f "$lg" ]; then
+    ids=$(sed -nE "s"$'\001'"$re"$'\001'"$as"$'\001''p' "$lg" | grep -Fxf "$logs/rotation/$n.list" | LC_ALL=C sort -u)
     for id in $ids; do printf '%s\t%s\t%s\tfail\t%s\t%s\n' "$sq" "$now" "$id" "${commit:-unknown}" "${dirty:-unknown}"; done >> "$rd/$part.failed"
     [ -n "$ids" ] && echo "   $n: $(echo "$ids" | wc -l) file(s) of $part noted as failed: in its subset until they pass ($rd/$part.failed)" >> "$logs/$n.log"
   elif [ "$2" = pass ] && { [ "$slice" = sub ] || [ "$slice" = whole ]; } && [ -s "$rd/$part.failed" ]; then
     ids=$(awk -F'\t' '$4 == "fail" {print $3}' "$rd/$part.failed" | LC_ALL=C sort -u | grep -Fxf "$logs/rotation/$n.list")
     for id in $ids; do printf '%s\t%s\t%s\tclear\t%s\t%s\n' "$sq" "$now" "$id" "${commit:-unknown}" "${dirty:-unknown}"; done >> "$rd/$part.failed"
   fi
+  return 0
+}
+# judge_note NAME (GT8, doc/GATE-SURVEY.md, "As built: GT8 (the tools' lists)"): a failed judge of rotated checks
+# (a step whose :judges {:failed-re ERE :failed-as REPL} the planner wrote as LOGS/rotation/NAME.judges, its :uses'
+# rotated producers): each producer whose list has an id its log's failure lines name is noted as failed with them
+# (rotation_note's fail: a run of its slice that failed, its files into the subset), since the producer's own run,
+# which judges nothing (Java's levels' --save), passed
+judge_note() {
+  local n=$1 j=$logs/rotation/$1.judges re as p
+  [ -f "$j" ] && [ -f "$logs/$n.log" ] || return 0
+  re=$(awk -F'\t' '$1 == "failed-re" {print $2}' "$j") as=$(awk -F'\t' '$1 == "failed-as" {print $2}' "$j"); as=${as:-\\1}
+  [ -n "$re" ] || return 0
+  for p in $(awk -F'\t' '$1 == "producer" {print $2}' "$j"); do
+    [ -f "$logs/rotation/$p.rot" ] || continue
+    sed -nE "s"$'\001'"$re"$'\001'"$as"$'\001''p' "$logs/$n.log" | grep -qFxf "$logs/rotation/$p.list" || continue
+    rotation_note "$p" fail "$logs/$n.log" "$re" "$as"
+    echo "   $n: failed ids of $p's list noted as its failure (judge_note)" >> "$logs/$n.log"
+  done
   return 0
 }
 report() {  # report NAME: a step's outcome, times, memory and summary lines

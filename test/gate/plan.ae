@@ -142,6 +142,8 @@
                                             :part (str (:part p))
                                             :inputs (vec (concat (:inputs s) (:inputs p)))
                                             :cmd (sub (or (:cmd p) (:cmd s)) p)})
+                              ;; GT8: {part} in :uses its part's name (a level's part reads its own corpus's read)
+                              (or (:uses p) (:uses s)) (assoc :uses (mapv #(sub % p) (or (:uses p) (:uses s))))
                               (or (:pins s) (:pins p)) (assoc :pins (vec (distinct (concat (:pins s) (:pins p)))))
                               (or (:audit-cmd p) (:audit-cmd s)) (assoc :audit-cmd (sub (or (:audit-cmd p) (:audit-cmd s)) p)))))
                      [(fix s)]))
@@ -197,7 +199,8 @@
 (def ^:private unkeyed
   ;; GT8.4: :rotate (a part run whole keeps its key), :list (its digest is the line list SHA N), :failed-re and
   ;; :rotated-part (the runner's bookkeeping, never a verdict)
-  #{:doc :summary :mem-gib :heavy :audit-cmd :rotate :list :failed-re :rotated-part :whole-list})
+  ;; GT8 (the tools' lists): :failed-as (the ids' replacement) and :judges (a judge's failures noted for its producers)
+  #{:doc :summary :mem-gib :heavy :audit-cmd :rotate :list :failed-re :failed-as :rotated-part :whole-list :judges})
 
 (defn- material
   "the lines a step's key is the hash of (but its :uses lines, use-lines'); a host whose identity is
@@ -326,7 +329,14 @@
                (when-not (str/includes? (str (:only r)) "{list}") [(str nm ": :rotate's :only has no {list}")])
                (for [k [:universe :subset] :let [f (get r k)] :when (and f (not (contains? files f)))]
                  (str nm ": :rotate's " k " " f " is not a file"))
-               (when-not (:universe r) [(str nm ": :rotate has no :universe")])))
+               (when-not (:universe r) [(str nm ": :rotate has no :universe")])
+               (when-let [x (:id-re r)]
+                 (when-not (try (re-pattern x) (catch Throwable _ nil)) [(str nm ": :rotate's :id-re does not compile: " x)]))
+               (when-not (or (nil? (:always r)) (vector? (:always r))) [(str nm ": :rotate's :always is not a vector of ids")])))
+            (when-let [j (:judges s)]
+              (concat
+               (when-not (seq (:uses s)) [(str nm ": :judges on a step without :uses (its producers)")])
+               (when-not (:failed-re j) [(str nm ": :judges has no :failed-re")])))
             (for [t (re-seq #"(?:^|[ \"=;&|(])(bin/[A-Za-z0-9._-]+)" (str (:cmd s)))
                   :let [sc (second t)]
                   :when (not (ok-script? sc))]
@@ -357,22 +367,34 @@
   [^String id]
   (mod (Long/parseLong (subs (sha256 id) 0 8) 16) period))
 
+(def ^:private default-id-re "^\\s*\\[\"([^\"]+)\"")
+
 (defn- record-ids
-  "the ids of a record (test/c/check-linux-amd64.edn's shape: one [\"ID\" ...] a line) under PART/"
-  [^String f ^String part]
-  (let [pre (str part "/")]
-    (vec (for [l (str/split-lines (slurp f))
-               :let [m (re-find #"^\[\"([^\"]+)\"" l)]
-               :when (and m (str/starts-with? (second m) pre))]
-           (second m)))))
+  "the ids of a record under PART: by default its lines [\"ID\" ...] (test/c/check-linux-amd64.edn's shape) whose
+  ID is under PART/; with ID-RE (:rotate's :id-re, a regex on a line), its group 1 on every line it finds, and
+  when it has a group 2, only the lines whose group 2 is PART (the part named on the line: Java's corpus);
+  each id once, in the record's order"
+  [^String f ^String part id-re]
+  (let [pre (str part "/")
+        re (re-pattern (or id-re default-id-re))
+        groups (.groupCount (re-matcher re ""))]
+    (vec (distinct
+          (for [l (str/split-lines (slurp f))
+                :let [m (re-find re l)]
+                :when m
+                :let [id (second m) p (when (> groups 1) (nth m 2))]
+                :when (cond (nil? id-re) (str/starts-with? id pre)
+                            (> groups 1) (= p part)
+                            :else true)]
+            id)))))
 
 (defn- corpus-subset
-  "the :subset of the map whose :id is :PART anywhere in the file (test/c/corpora.edn's shape), each PART/NAME;
-  nil when it has none"
-  [^String f ^String part]
+  "the :subset of the map whose :id is :PART anywhere in the file (test/c/corpora.edn's shape), each PART/NAME
+  (BARE: each NAME as written, the ids of a record read by an :id-re); nil when it has none"
+  [^String f ^String part bare]
   (let [k (keyword part)
         m (first (filter #(and (map? %) (= k (:id %))) (tree-seq coll? seq (read-file f))))]
-    (when-let [s (:subset m)] (mapv #(str part "/" %) s))))
+    (when-let [s (:subset m)] (mapv #(if bare (str %) (str part "/" %)) s))))
 
 (defn- rot-dir [store] (str store "/_rotation"))
 
@@ -423,21 +445,26 @@
     (vec (sort (for [[id es] (group-by :id evs) :when (= "fail" (:event (last (sort-by :seq es))))] id)))))
 
 (defn rotation-lists
-  "a rotated part's lists, or nil when it is not rotated: {:universe :subset (the declared one, plus the files
-  that failed since, STORE/_rotation/NAME.PART.failed) :failed :slices {K [ids]}}"
+  "a rotated part's lists, or nil when it is not rotated: {:universe :subset (the declared one, plus :always's ids
+  and the files that failed since, STORE/_rotation/NAME.PART.failed) :failed :always :slices {K [ids]}}. :always
+  (the negative controls' subjects, GTS81 (a)): ids of the universe in the subset and in every slice's list, so
+  that every run of the part judges its controls"
   [root store step]
-  (when-let [{:keys [universe subset]} (:rotate step)]
+  (when-let [{:keys [universe subset id-re always]} (:rotate step)]
     (let [part (:part step) nm (str (:name step))
-          u (record-ids (str root "/" universe) part)
+          u (record-ids (str root "/" universe) part id-re)
           uset (set u)
-          declared (when subset (corpus-subset (str root "/" subset) part))
+          declared (when subset (corpus-subset (str root "/" subset) part (some? id-re)))
+          always (filterv uset (map str always))
           failed (filterv uset (failed-of store nm))
-          sub (vec (sort (distinct (concat (filter uset declared) failed))))
+          sub (vec (sort (distinct (concat (filter uset declared) always failed))))
           subset-set (set sub)
           rest (remove subset-set u)]
       (when (and declared (seq rest))
-        {:universe u :subset sub :failed failed
-         :slices (into (sorted-map) (for [k (range period)] [k (vec (sort (filter #(= k (slice-of %)) rest)))]))}))))
+        {:universe u :subset sub :failed failed :always always
+         :slices (into (sorted-map) (for [k (range period)]
+                                      (let [ids (sort (filter #(= k (slice-of %)) rest))]
+                                        [k (if (seq ids) (vec (sort (distinct (concat ids always)))) [])])))}))))
 
 (defn- with-only
   "the command with the rotation's list: {only} in it replaced by the :only fragment (else the fragment
@@ -493,6 +520,7 @@
                          (-> (dissoc s :rotate)
                              (assoc :name (symbol (str (:name s) "." suffix)) :rotation tag :list ids
                                     :rotated-part (str (:name s)) :failed-re (:failed-re (:rotate s))
+                                    :failed-as (:failed-as (:rotate s))
                                     :cmd (with-only (:cmd s) frag))))]
                 (cond
                   (not lists)
@@ -502,7 +530,7 @@
                   (= rotation :whole)
                   [(-> s (dissoc :rotate) (update :cmd with-only nil)
                        (assoc :whole-list (vec (sort (:universe lists))) :rotated-part (str (:name s))
-                              :failed-re (:failed-re (:rotate s))))]
+                              :failed-re (:failed-re (:rotate s)) :failed-as (:failed-as (:rotate s))))]
                   :else
                   (let [sub (mk "sub" (:subset lists) "sub")]
                     (if (= rotation :subset)
@@ -512,10 +540,15 @@
         out (mapv exp steps)
         renamed (into {} (for [[s xs] (map vector steps out) :when (not= [(:name s)] (map :name xs))]
                            [(str (:name s)) (mapv :name xs)]))
-        fix (fn [xs] (vec (mapcat #(get renamed (str %) [%]) xs)))]
+        fix (fn [xs] (vec (mapcat #(get renamed (str %) [%]) xs)))
+        ;; a :uses naming a rotated part (STEP or STEP/FILE) names its checks
+        fix-uses (fn [us] (vec (mapcat (fn [u] (let [[st f] (str/split (str u) #"/" 2)]
+                                                 (if-let [ns (get renamed st)] (map #(if f (str % "/" f) (str %)) ns) [(str u)])))
+                                       us)))]
     (vec (for [s (apply concat out)]
            (cond-> s
              (:needs s) (update :needs fix)
+             (:uses s) (update :uses fix-uses)
              (:start-after s) (update :start-after #(if-let [n (get renamed (str %))] (last n) %)))))))
 
 (defn plan [root logs store mode rerun? & [rotation]]
@@ -546,7 +579,13 @@
             (spit (str rdir "/" (:name s) ".list") (apply str (map #(str % "\n") l)))
             (spit (str rdir "/" (:name s) ".rot")
                   (str "part\t" (:rotated-part s) "\nslice\t" tag "\nruns\t" rn "\nlist-sha\t" (list-sha l)
-                       "\nfailed-re\t" (or (:failed-re s) "") "\n")))
+                       "\nfailed-re\t" (or (:failed-re s) "") "\nfailed-as\t" (or (:failed-as s) "\\1") "\n")))
+        ;; GT8: a judge of rotated checks (:judges {:failed-re ERE :failed-as REPL}): its producers and expressions, for
+        ;; the runner's judge_note (a producer that is not rotated has no .rot and is passed over)
+        _ (doseq [s steps :when (:judges s) :let [j (:judges s)]]
+            (spit (str rdir "/" (:name s) ".judges")
+                  (str (apply str (for [p (distinct (map producer (:uses s)))] (str "producer\t" p "\n")))
+                       "failed-re\t" (or (:failed-re j) "") "\nfailed-as\t" (or (:failed-as j) "\\1") "\n")))
         used (set (for [s steps u (:uses s)] (producer u)))
         ;; the checks' decisions, in order: a step that uses others' outputs (GT5) is keyed over them,
         ;; known when its producers are skipped (their passes' outputs), else decided by the runner once
