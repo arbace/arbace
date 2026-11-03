@@ -819,3 +819,16 @@ PY5 split into steps reviewed one by one (queue 179's brief); PY5a is the scope 
 - **The keys** (PYS18 (a)): `arbace/python.ae`, `arbace/python/` and `go/arbace/py` out of `gate_key`, the embedded
   sources and the audit's tables, as the other crops'; `test/gate/gate-key-crops-test.bash` covers them.
 - Not yet: running the IR (PY5b), so its behaviour is unchecked; lines come only from forms of mode `:full`.
+
+## Decided (2026-11-03, the user): PY5a's DECISIONs and the split of PY5 (queue 179a)
+
+- **Where pyi's runtime runs before a re-seed: (a).** `go/arbace/py` runs interpreted by goi on stage 0 (loaded from
+  `ARBACE_PATH` as any interpreted package of Go forms), out of `gate_key`, and is compiled by a later batched re-seed,
+  when it is also listed in goi's table (`go/arbace/gotable.edn` is in `gate_key`: listing it is the re-seed's step).
+- **Traceback lines: (a).** pyi compiles the forms of mode `:full` (their `:pos`) when it runs a program; the checks'
+  `:lines` dumps stay as they are.
+- **The split of PY5** as 179a proposed it: PY5b (the machine and the core types), PY5c (the data model), PY5d
+  (suspension and exceptions), PY5e (builtins, `sys`, the REPL and `Lib/test`'s core). By the user's order, PY5b0 first: the
+  interfaces and the skeleton, small, reported and merged early; then the rest of PY5b, and PY5c, PY5d and PY5e
+  concurrently (c and d independent; e alongside, its dunder-dependent part and the `Lib/test` core after c), one owner
+  per shared file (doc/python/PYI-SPEC.md §9), rebased often, each sub-branch reported in turn.
