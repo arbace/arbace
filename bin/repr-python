@@ -55,6 +55,14 @@
 #                                  known (test/python/lex-check-known.edn); a negative control; then N mutants' files
 #                                  (default 2,000, two mutants of 3 edits each, seed 26: the error paths) the same way.
 #                                  Work in .tmp/repr-python/lex/CORPUS/ (ref/, out/files.tsv, out/diff/)
+#   bin/repr-python pegen [--check]  PY9b: arbace/repr/python/parser.ae generated from the tarball's Grammar/python.gram
+#                                  (arbace.repr.python.pegen, pegen's analyses and an Arbace back end; the actions
+#                                  translated from C over Parser/Python.asdl's fields), or generated again and compared
+#   bin/repr-python parse-check [--record] [--jobs N] [--mutants N|--no-mutants] [CORPUS...]
+#                                  PY9b: the native reader (arbace.repr.python.native: the generated parser, the tree
+#                                  written as the helper's dump) against tools/pydump/pydump.py tree (ast.parse) over the
+#                                  corpora as lex-check's, then the mutants, the dumps byte for byte equal or known
+#                                  (test/python/parse-check-known.edn). Work in .tmp/repr-python/parse/CORPUS/
 #   bin/repr-python check          spec-check, samples, then the round trips (:lines, then --text) over the default corpora
 # Environment: REPR_PYTHON_CORPORA, REPR_PYTHON_PIN_VERSION, REPR_PYTHON_APKS, REPR_PYTHON_SPEC name other copies of
 # test/python/corpora.edn, tools/pydump/PYTHON_VERSION, tools/pydump/apks.sha256, doc/python/SPEC.md (negative controls).
@@ -481,19 +489,90 @@ cmd_lex_check() {
   return $worst
 }
 
+# ---- PY9b: the native parser against ast.parse ----
+
+PARSE_KNOWN="${REPR_PYTHON_PARSE_KNOWN:-$root/test/python/parse-check-known.edn}"
+PARSE="$WORK/parse"
+GRAMMAR_ARGS() { local t; t=$(TOP); echo "$t/Grammar/python.gram $t/Parser/Python.asdl $t/Grammar/Tokens"; }
+
+parsecheck() {
+  ARBACE_PATH="$root" GOMEMLIMIT=${REPR_PYTHON_GOMEMLIMIT:-1500MiB} GOMAXPROCS=${REPR_PYTHON_THREADS:-4} \
+    "$(arbace_exe)" -m arbace.repr.python.parsecheck "$@"
+}
+
+# pegen [--check]: the parser generated from the tarball's grammar into arbace/repr/python/parser.ae, or compared with it
+cmd_pegen() {
+  fetch_tarball >/dev/null
+  local verb=generate; [ "${1:-}" = --check ] && verb=check
+  # shellcheck disable=SC2046
+  ARBACE_PATH="$root" "$(arbace_exe)" -m arbace.repr.python.pegen $verb $(GRAMMAR_ARGS) "$root/arbace/repr/python/parser.ae"
+}
+
+parse_one() { # ID BASE LIST
+  local id=$1 base=$2 list=$3 d="$PARSE/$1" rc=0
+  rm -rf "$d/ref" "$d/out"; mkdir -p "$d"
+  dump_parallel "$base" "$list" "$d/ref" "$d/ref.tsv"
+  parsecheck check --corpus "$id" --base "$base" --list "$list" --ref "$d/ref" --out "$d/out" --known "$PARSE_KNOWN" \
+    --jobs "$JOBS" ${record:+--record} || rc=$?
+  return $rc
+}
+
+cmd_parse_check() {
+  local record="" ids=() nmut=2000 worst=0 rc id
+  JOBS=3
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --record) record=1; shift ;;
+      --jobs) JOBS=$2; shift 2 ;;
+      --mutants) nmut=$2; shift 2 ;;
+      --no-mutants) nmut=0; shift ;;
+      *) ids+=("$1"); shift ;;
+    esac
+  done
+  [ ${#ids[@]} -gt 0 ] || ids=(samples stdlib site-packages lib-test lex-errors)
+  fetch_tarball >/dev/null; fetch_apks >/dev/null
+  local pools=()
+  for id in "${ids[@]}"; do
+    mkdir -p "$PARSE/$id"
+    if [ "$id" = lex-errors ]; then
+      (cd "$root/test/python/lex-errors" && ls | LC_ALL=C sort) > "$PARSE/$id/list"
+      rc=0; parse_one "$id" "$root/test/python/lex-errors" "$PARSE/$id/list" || rc=$?
+      [ $rc -gt $worst ] && worst=$rc
+      continue
+    fi
+    local -a info; mapfile -t info < <(corpus_base "$id")
+    local -a args=(); IFS=, read -ra pa <<< "${info[1]}"; args+=("${pa[@]}")
+    if [ "${info[2]}" != - ]; then IFS=, read -ra ea <<< "${info[2]}"; for e in "${ea[@]}"; do args+=(--exclude "$e"); done; fi
+    (cd "${info[0]}" && py corpus.py list "${info[0]}" "${args[@]}") > "$PARSE/$id/list"
+    { echo "${info[0]}"; cat "$PARSE/$id/list"; } > "$PARSE/$id/pool"
+    pools+=("$PARSE/$id/pool")
+    rc=0; parse_one "$id" "${info[0]}" "$PARSE/$id/list" || rc=$?
+    [ $rc -gt $worst ] && worst=$rc
+  done
+  [ ${#pools[@]} -gt 0 ] && { parsecheck control --base "$(head -1 "${pools[-1]}")" --list "$(dirname "${pools[-1]}")/list" \
+    --ref "$(dirname "${pools[-1]}")/ref" || worst=1; }
+  if [ "$nmut" != 0 ] && [ ${#pools[@]} -gt 0 ]; then
+    rm -rf "$PARSE/mutants"
+    parsecheck mutants --out "$PARSE/mutants" --seed 26 --files "$nmut" --per 2 --edits 3 "${pools[@]}" || return 1
+    rc=0; parse_one mutants "$PARSE/mutants/src" "$PARSE/mutants/list" || rc=$?
+    [ $rc -gt $worst ] && worst=$rc
+  fi
+  return $worst
+}
+
 cmd_check_all() {
   cmd_spec_check && cmd_samples && cmd_roundtrip && cmd_roundtrip --text
 }
 
 command -v python3 >/dev/null || die "no python3 (the oracle, doc/ALPINE.md)"
-case "${1:-}" in pins|spec-check|roundtrip|lex-check|check) load_rows ;; esac
+case "${1:-}" in pins|spec-check|roundtrip|lex-check|parse-check|check) load_rows ;; esac
 case "${1:-}" in
   pins)
     case "${2:-}" in
       --fetch) cmd_fetch ;;
       --count) cmd_count ;;
       --check) cmd_check ;;
-      *) sed -n '2,61p' "$0"; exit 2 ;;
+      *) sed -n '2,69p' "$0"; exit 2 ;;
     esac ;;
   spec-check) cmd_spec_check ;;
   samples) cmd_samples ;;
@@ -501,6 +580,8 @@ case "${1:-}" in
   print) shift; cmd_print "$@" ;;
   roundtrip) shift; cmd_roundtrip "$@" ;;
   lex-check) shift; cmd_lex_check "$@" ;;
+  parse-check) shift; cmd_parse_check "$@" ;;
+  pegen) shift; load_rows; cmd_pegen "$@" ;;
   check) cmd_check_all ;;
-  *) sed -n '2,61p' "$0"; exit 2 ;;
+  *) sed -n '2,69p' "$0"; exit 2 ;;
 esac
