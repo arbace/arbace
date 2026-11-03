@@ -13,3 +13,13 @@ try:
 except AttributeError as x:
     print("AttributeError", x)
 print(e.args)
+for a, v in [("__cause__", 1), ("__context__", 1), ("__suppress_context__", 1), ("__traceback__", 1), ("args", 1)]:
+    try:
+        setattr(e, a, v)
+    except TypeError as x:
+        print(a, "TypeError", x)
+e.__context__ = NameError()
+e.__cause__ = None
+print(type(e.__context__).__name__, e.__cause__, e.__suppress_context__)
+e.__suppress_context__ = False
+print(e.__suppress_context__)
