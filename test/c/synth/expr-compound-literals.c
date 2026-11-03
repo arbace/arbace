@@ -15,6 +15,11 @@ int main(void) {
   ++*counter();
   struct pt *q = &(struct pt){.x = 3, .y = 4};
   q->y += 1;
+  int *ai = &(int){5};
+  *ai += 1;
+  double *ad = &(double){2.5};
+  int (*ar)[2] = &(int[2]){8, 9};
+  long *sl = &(static long){-3};
   printf("%s = %d\n", "fp[2]", fp[2]);
   printf("%s = %d\n", "bp[1]", bp[1]);
   printf("%s = %d\n", "*counter()", *counter());
@@ -22,5 +27,9 @@ int main(void) {
   printf("%s = %d\n", "(constexpr int){42}", (constexpr int){42});
   printf("%s = %d\n", "(register int){7} + 1", (register int){7} + 1);
   printf("%s = %d\n", "(const int){3}", (const int){3});
+  printf("%s = %d\n", "*ai", *ai);
+  printf("%s = %g\n", "*ad", *ad);
+  printf("%s = %d\n", "(*ar)[1]", (*ar)[1]);
+  printf("%s = %ld\n", "*sl", *sl);
   return 0;
 }
