@@ -393,14 +393,33 @@
   [^String n t]
   (or (contains? (:addressed @*f*) n) (#{:m :w} (kind t))))
 
+(defn- obj-align
+  "An object's alignment: its type's, raised by its alignment specifiers (the checker's :c/declared-align, 6.7.6;
+  queue 173)."
+  ^long [e t]
+  (max (long (align-of t)) (long (or (:c/declared-align (:m e)) 1))))
+
+(defn- mem-loc-addr
+  "A frame object's address node: its offset's, rounded up to :align-up when the frame's 16 bytes are not enough."
+  [loc]
+  (let [a (list 'fp (:off loc))]
+    (if-let [al (:align-up loc)]
+      (list 'bin "and" "u64" (list 'bin "add" "u64" a (list 'i (dec (long al)))) (list 'i (- (long al))))
+      a)))
+
 (defn- bind-local!
   "A local object's place (6.2.4: automatic storage), or a static's."
   [e t]
   (let [loc (cond
-              (:static (:m e)) {:loc :static :idx (static-idx [:local (:id e)] (size-of t) (align-of t)
+              (:static (:m e)) {:loc :static :idx (static-idx [:local (:id e)] (size-of t) (obj-align e t)
                                                                 (contains? (chk/quals t) :const))}
               (and (= :array (:k (unq t))) (:vla (unq t))) {:loc :vla :slot (new-slot! :i) :size (new-slot! :i)}
-              (addressed? (:name e) t) {:loc :mem :off (frame-alloc! (size-of t) (align-of t))}
+              (addressed? (:name e) t) (let [al (obj-align e t)]
+                                         ;; the frame's base is 16-aligned (go/arbace/ci's Enter and Call): an object aligned
+                                         ;; more takes al - 16 bytes more and its address is rounded up at run time (queue 173)
+                                         (if (> al 16)
+                                           {:loc :mem :off (frame-alloc! (+ (size-of t) (- al 16)) 16) :align-up al}
+                                           {:loc :mem :off (frame-alloc! (size-of t) al)}))
               :else (case (kind t)
                       :f {:loc :slot-f :k (new-slot! :f)}
                       {:loc :slot-i :k (new-slot! :i)}))]
@@ -424,7 +443,7 @@
         t (:t e)]
     (or (.get ^HashMap (:statics *p*) [:obj k])
         ;; not defined by any unit: a weak reference's (address 0), or one the linker defines
-        (let [i (static-idx [:obj k] (max 1 (or (try (size-of t) (catch Exception _ nil)) 1)) (align-of t) false)]
+        (let [i (static-idx [:obj k] (max 1 (or (try (size-of t) (catch Exception _ nil)) 1)) (obj-align e t) false)]
           (.add ^ArrayList (:undefined *p*) (list 'at i 0))
           i))))
 
@@ -610,7 +629,7 @@
               loc (case (:loc loc)
                     :slot-i {:mode :slot-i :k (:k loc) :t t}
                     :slot-f {:mode :slot-f :k (:k loc) :t t}
-                    :mem {:mode :mem :a (list 'fp (:off loc)) :t t}
+                    :mem {:mode :mem :a (mem-loc-addr loc) :t t}
                     :static {:mode :mem :a (list 'g (:idx loc)) :t t}
                     :vla {:mode :mem :a (list 'il (:slot loc)) :t t})
               (#{:x :i} (:linkage e)) {:mode :mem :a (list 'g (global-obj-idx e)) :t t}
@@ -1670,7 +1689,7 @@
                         init (first more)
                         ss (cond
                              (empty? more) []
-                             (= :mem (:loc loc)) [(list 'x (list 'ei (list 'seq (build-init-stores t (list 'fp (:off loc)) init true) '(i 0))))]
+                             (= :mem (:loc loc)) [(list 'x (list 'ei (list 'seq (build-init-stores t (mem-loc-addr loc) init true) '(i 0))))]
                              :else
                              (let [x (if (and (seq? init) (= 'init (first init))) (second init) init)]
                                (let [st (list 'x (effect (place-store (if (= :slot-f (:loc loc)) {:mode :slot-f :k (:k loc) :t t} {:mode :slot-i :k (:k loc) :t t})
@@ -2051,7 +2070,7 @@
         (binding [*u* u *cfg* (assoc *cfg* :unsigned-char (:unsigned-char u))]
           (let [t (:t e)
                 ro (and (contains? (chk/quals t) :const) init)]
-            (static-idx [:obj k] (max 1 (+ (size-of t) (flex-extra t (when init (nth f 2))))) (align-of t) ro))))
+            (static-idx [:obj k] (max 1 (+ (size-of t) (flex-extra t (when init (nth f 2))))) (obj-align e t) ro))))
       (doseq [[k {:keys [e f init def u]}] defs]
         (binding [*u* u *cfg* (assoc *cfg* :unsigned-char (:unsigned-char u))]
           (let [t (:t e)
