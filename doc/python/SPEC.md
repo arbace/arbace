@@ -88,6 +88,7 @@ value:
 | `:type-comment` | the comment's text after `# type:`, a string | `function-def`, `async-function-def`, `assign`, `for`, `async-for`, `with`, `async-with`, `arg` (§5.8) |
 | `:type-ignores` | a vector of `(type-ignore LINE "TAG")` | `python/module` (§4) |
 | `:elif` | `true`: this `if` is the `elif` of its parent's `:else` | an `if` alone in an `:else` (§5.4) |
+| `:type-comments` | `:rejected`: `ast.parse(type_comments=True)` rejects the file, so it has no type comments (§5.8, S6; provisional, the DECISION of queue 174, pending the user) | `python/module` |
 | `:file` | the file's path relative to its corpus root | `python/module` |
 | `:mode` | `:lines` or `:full` | `python/module` |
 | `:tokens`, `:encoding`, `:bom` | mode `:full`'s token stream and the file's encoding (§11) | `python/module` |
@@ -786,8 +787,27 @@ PY1's, all light (no Arbace build, no stage 0 build; stage 0 only reads data):
   110 (the six samples, 256 lines, are deterministic programs, their stdout the same under `PYTHONHASHSEED` 0 and
   7, for the eval levels' references at PY4).
 
-Next (survey §11): PY2 writes the helper's `tree` and `error` modes and the converter and printer of `:lines`; PY3
-the tokens and `:full`.
+PY2's (the survey's "As built: PY2"):
+
+- **The helper** `tools/pydump/pydump.py tree` writes these forms, plus one thing the forms do not hold: a `Name`,
+  `Attribute`, `Subscript`, `Starred`, `List` or `Tuple` in a `Store` or `Del` context is marked (`^:store x`, `^:del
+  x` on a symbol, `{:ctx :store}` on a list), and the converter checks each mark against its slot and drops it (S15).
+  The literals' spellings are scanned in the source between each node's positions (§3; a replacement field is found
+  by its node's start, so nested quotes need no lexer), and each `Constant`'s spelling is evaluated back to its
+  value (`ast.literal_eval`), checked equal.
+- **The printer's** `:lines` text has no positions, so a module's `# type: ignore` comments are placed one at the end
+  of each of the first lines that end a statement or a block's header without a type comment: level 1 compares their
+  tags, not their lines.
+- **The round trip** `bin/repr-python roundtrip`: level 1 the forms (the original's against the print's dump,
+  converted), level 2 `ast.dump`'s digest, level 3 the code's digest without positions: the code objects compiled
+  from the text, their instructions with `NOP`s dropped, the superinstructions CPython fuses by line split again
+  (`LOAD_FAST_LOAD_FAST` and the like), `LOAD_FAST_BORROW` as `LOAD_FAST`, a class body's `__firstlineno__` constant
+  as a placeholder, `LOAD_SMALL_INT` as `LOAD_CONST`, each instruction's exception handler, a `frozenset` constant's
+  elements sorted (the helper runs `-I`, which ignores `PYTHONHASHSEED`); the names, flags and nested code likewise.
+  The survey's E7 ("code objects equal without positions") holds only after this normalization: on `Lib/` with
+  `ast.unparse` as the printer, 395 of 1,869 files gave equal raw code without positions, 1,859 normalized.
+
+PY3: the tokens and `:full`.
 
 ## 16. Sources
 
