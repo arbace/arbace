@@ -55,6 +55,9 @@ if [ "$images" != none ]; then
 fi
 export root work hsi libs helper helper_hash libdir ref keep images
 export HSI_TIMEOUT=${HSI_TIMEOUT:-60}
+# programs that need more than ARBACE_MEM_GIB name their own cap (ID=GIB ...); none today: the deepest stacks, Loop
+# (7.3 GB of RSS) and T16846 (9.7 GB), pass under the default 16 GiB (measured alone, 2026-11-03)
+export HSI_MEM_CAPS=${HSI_MEM_CAPS:-}
 
 # the plan: ID SRC MAIN FLAGS RUN-OPTS NAME STDIN KIND, separated by U+001F ("-" for none)
 plan=$work/plan.txt
@@ -128,13 +131,18 @@ one() {
   [[ $ro == *"<"* ]] && stdin=.empty
   local cmd; cmd="exec $(printf '%q ' "$hsi" run "${la[@]}" --prog "$prog/stg" --name "$name" --) $ro"
   local o=$work/out/${id//\//_} st=0
+  # the memory cap (bin/lib/limit.bash's ARBACE_MEM_GIB, default 16 GiB: ulimit -v at it, GOMEMLIMIT at three
+  # quarters), so a leaking program fails alone; the deep-stack programs name their own (HSI_MEM_CAPS, ID=GIB)
+  local mem=${ARBACE_MEM_GIB:-16} c
+  for c in $HSI_MEM_CAPS; do [ "${c%%=*}" = "$id" ] && mem=${c#*=}; done
+  local memlim=""; [ "$mem" = 0 ] || memlim="ulimit -v $((mem * 1048576)); export GOMEMLIMIT=$((mem * 768))MiB; "
   # a test all.T skips unconditionally (the class :skipped) is not run: its 180 s at the wall cap spared (review 189, L8)
   if awk '/^ *\{:id :skipped/ {s=1; next} /^ *\{:id :/ {s=0} s' "$root/test/haskell/divergences.edn" | grep -qF "\"$id\""; then
     rm -rf "$w"; echo "{:id \"$id\" :result :skipped :dump $td :run 0}" > "$res"; return 0
   fi
   t0=$(date +%s.%N)
   (cd "$w" && env -i PATH=/usr/bin:/bin LANG=C.UTF-8 TZ=UTC HOME="$w" \
-     timeout -s KILL $((HSI_TIMEOUT * 3)) sh -c "ulimit -t $HSI_TIMEOUT; $cmd" \
+     timeout -s KILL $((HSI_TIMEOUT * 3)) sh -c "${memlim}ulimit -t $HSI_TIMEOUT; $cmd" \
      < "$w/$stdin" > "$o.stdout" 2> "$o.stderr") || st=$?
   t1=$(date +%s.%N)
   rm -rf "$w"

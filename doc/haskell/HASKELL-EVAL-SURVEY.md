@@ -1211,7 +1211,11 @@ host was shared with other agents throughout: the times below vary by about 10 %
   (`clr`, which an updatable thunk evaluated in its own array needs): 237 MB, and allocLimit1, `length [1..]` until
   the limit, 6 GB in 25 s → 235 MB. What stays large is expected: deep stacks, a frame of hsi's being about three of
   GHC's words: Loop 7.3 GB (GHC 0.35 GB), T16846 9.7 GB (`mapM` over 10 million in IO). So hsi's checks run under
-  `.tmp/heavy` at 3 jobs (`bin/hsi check`'s default since). With `-K`, two update frames in a row are squeezed as
+  `.tmp/heavy` at 3 jobs (`bin/hsi check`'s default since). And each program runs under main's memory cap
+  (`bin/lib/limit.bash`'s `ARBACE_MEM_GIB`, default 16 GiB: `ulimit -v` at it, GOMEMLIMIT at three quarters; `bin/hsi
+  check`'s runs and `bin/hsi run`; `HSI_MEM_CAPS` names a program's own, none needed: Loop and T16846 pass under 16
+  GiB): a leaking program fails alone (a list kept live, at `ARBACE_MEM_GIB=2`: Go's out of memory, status 2, at 0.75 GB
+  of RSS in 3 s); the check unchanged under it, 650 of 756 in 4 min 35 s. With `-K`, two update frames in a row are squeezed as
   GHC's stack squeezing does (one frame updates both thunks; cgrun060 at `-K64k`).
 
 ### HE4e: the RTS's semantics (`rts.ae`)
