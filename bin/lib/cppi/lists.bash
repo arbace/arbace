@@ -19,6 +19,9 @@ cppi_gcc=$root/.tmp/cppi/gcc/gcc-15.2.0
 cppi_ts=$cppi_gcc/libstdc++-v3/testsuite
 cppi_gxxdg=$cppi_gcc/gcc/testsuite/g++.dg
 cppi_corpora_all=samples,runtime,libstdcxx,gxx-dg-run
+# the corpora bin/cppi check records and judges by default (185's DECISION (a): the cell judges what is recorded); libstdcxx and
+# gxx-dg-run are sampled (their reference holds every 25th program), run with --corpus and --sample 25
+cppi_corpora_recorded=samples,runtime
 
 # the pinned tarball extracted (the testsuite and g++.dg), its digest checked once per extraction
 cppi_extract() {

@@ -266,7 +266,7 @@ cppi-runtime-ci: ## the lowered runtime's units read by repr/c as ci's library, 
 	bin/cppi runtime-ci
 cppi-record-ref: ## g++ 15.2's -O0 runs of the C++ run corpora recorded, test/cpp/ref-gxx15.edn (bin/cppi record-ref; ARGS=--corpus ...)
 	bin/cppi record-ref $(ARGS)
-cppi-check: ## C++'s run check on ci: the run corpora lowered and run on ci against g++'s runs, every non-pass in a class of test/cpp/divergences.edn (bin/cppi check; ARGS=--corpus ... --only ... --sample N --record)
+cppi-check: ## C++'s run check on ci: the run corpora lowered and run on ci against g++'s runs, every non-pass in a class of test/cpp/divergences.edn (bin/cppi check, default samples,runtime; ARGS=--corpus libstdcxx --sample 25, --only ..., --record)
 	bin/cppi check $(ARGS)
 cppi-check-aot: ## C++'s AOT check: the same programs translated by cf2g and built by TamaGo's go, against g++'s runs and test/cpp/divergences-aot.edn (bin/cppi check --aot; ARGS=...)
 	bin/cppi check --aot $(ARGS)
