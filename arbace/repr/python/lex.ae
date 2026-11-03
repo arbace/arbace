@@ -1,0 +1,1173 @@
+;; Ported from CPython 3.14.10 (https://www.python.org/ftp/python/3.14.10/Python-3.14.10.tar.xz, SHA-256
+;; de414a57119abef52784d8993e341d53aed635fc2b05c2607d9f98a2c5b72032): Parser/lexer/lexer.c, Parser/lexer/state.c,
+;; Parser/tokenizer/helpers.c's errors, Parser/tokenizer/readline_tokenizer.c, Python/Python-tokenize.c's iterator and
+;; Lib/tokenize.py's detect_encoding, Copyright (c) 2001 Python Software Foundation, All Rights Reserved, under the PSF
+;; License Agreement for Python 3.14 (LICENSE.md, "CPython: the PSF License Agreement for Python 3.14").
+
+(ns arbace.repr.python.lex
+  "Python 3.14's lexer, a port of CPython's C tokenizer (doc/python/PYTHON-SURVEY.md, \"As built: PY9a\"): the
+  indentation stack, the f-string and t-string modes of PEP 701 and PEP 750, the numbers, the type comments, and its
+  errors with CPython's messages and positions. The text is held as an int array of code points (`cs`) with the
+  UTF-8 byte offset of each (`boff`); the C tokenizer's pointers are indices into it and its byte columns are kept
+  as the C code keeps them (`:col`), so a token has both the parser's positions (line, UTF-8 column) and tokenize's
+  (line, column in characters, as Python/Python-tokenize.c computes them). The input is read as the readline
+  tokenizer reads it (tokenize.tokenize's path: lines split at \\n, a last line without one given a fake one).
+
+  decode-source: the file's bytes to its text as tokenize.detect_encoding decodes it (the BOM, PEP 263's cookie).
+  lexer: the state over a text (extra tokens: tokenize's COMMENT, NL and OP; type comments: TYPE_COMMENT and
+  TYPE_IGNORE). next-token: the next token's type, its fields in the state (tok-start, tok-end, ...). stream: the
+  tokens as tokenize's TokenizerIter gives them. dump: tools/pydump/tokdump.py's text of a file."
+  (:require [arbace.string :as str]))
+
+(set! *warn-on-reflection* true)
+
+;; ---------------------------------------------------------------------------------------------
+;; Token types (Grammar/Tokens' order, Lib/token.py's numbers)
+
+(def tok-names
+  ["ENDMARKER" "NAME" "NUMBER" "STRING" "NEWLINE" "INDENT" "DEDENT" "LPAR" "RPAR" "LSQB" "RSQB" "COLON" "COMMA"
+   "SEMI" "PLUS" "MINUS" "STAR" "SLASH" "VBAR" "AMPER" "LESS" "GREATER" "EQUAL" "DOT" "PERCENT" "LBRACE" "RBRACE"
+   "EQEQUAL" "NOTEQUAL" "LESSEQUAL" "GREATEREQUAL" "TILDE" "CIRCUMFLEX" "LEFTSHIFT" "RIGHTSHIFT" "DOUBLESTAR"
+   "PLUSEQUAL" "MINEQUAL" "STAREQUAL" "SLASHEQUAL" "PERCENTEQUAL" "AMPEREQUAL" "VBAREQUAL" "CIRCUMFLEXEQUAL"
+   "LEFTSHIFTEQUAL" "RIGHTSHIFTEQUAL" "DOUBLESTAREQUAL" "DOUBLESLASH" "DOUBLESLASHEQUAL" "AT" "ATEQUAL" "RARROW"
+   "ELLIPSIS" "COLONEQUAL" "EXCLAMATION" "OP" "TYPE_IGNORE" "TYPE_COMMENT" "SOFT_KEYWORD" "FSTRING_START"
+   "FSTRING_MIDDLE" "FSTRING_END" "TSTRING_START" "TSTRING_MIDDLE" "TSTRING_END" "COMMENT" "NL" "ERRORTOKEN"
+   "ENCODING"])
+
+(def ^:const ENDMARKER 0) (def ^:const NAME 1) (def ^:const NUMBER 2) (def ^:const STRING 3)
+(def ^:const NEWLINE 4) (def ^:const INDENT 5) (def ^:const DEDENT 6) (def ^:const DOT 23)
+(def ^:const ELLIPSIS 52) (def ^:const OP 55) (def ^:const TYPE_IGNORE 56) (def ^:const TYPE_COMMENT 57)
+(def ^:const FSTRING_START 59) (def ^:const FSTRING_MIDDLE 60) (def ^:const FSTRING_END 61)
+(def ^:const TSTRING_START 62) (def ^:const TSTRING_MIDDLE 63) (def ^:const TSTRING_END 64)
+(def ^:const COMMENT 65) (def ^:const NL 66) (def ^:const ERRORTOKEN 67)
+
+(def ^:private operators
+  "Grammar/Tokens' operators: text -> type"
+  {"(" 7 ")" 8 "[" 9 "]" 10 ":" 11 "," 12 ";" 13 "+" 14 "-" 15 "*" 16 "/" 17 "|" 18 "&" 19 "<" 20 ">" 21
+   "=" 22 "." 23 "%" 24 "{" 25 "}" 26 "==" 27 "!=" 28 "<=" 29 ">=" 30 "~" 31 "^" 32 "<<" 33 ">>" 34 "**" 35
+   "+=" 36 "-=" 37 "*=" 38 "/=" 39 "%=" 40 "&=" 41 "|=" 42 "^=" 43 "<<=" 44 ">>=" 45 "**=" 46 "//" 47
+   "//=" 48 "@" 49 "@=" 50 "->" 51 "..." 52 ":=" 53 "!" 54})
+
+(def ^:private ^java.util.HashMap op-table
+  (let [m (java.util.HashMap.)] (doseq [[k v] operators] (.put m k (long v))) m))
+
+(defn- cp-str ^String [& cs] (let [sb (StringBuilder.)] (doseq [c cs] (.appendCodePoint sb (int c))) (str sb)))
+
+(defn- one-char ^long [^long c]
+  (if (and (>= c 0) (< c 128)) (let [v (.get op-table (cp-str c))] (if v (long v) OP)) OP))
+(defn- two-chars ^long [^long c1 ^long c2]
+  (if (and (>= c1 0) (< c1 128) (>= c2 0) (< c2 128)) (let [v (.get op-table (cp-str c1 c2))] (if v (long v) OP)) OP))
+(defn- three-chars ^long [^long c1 ^long c2 ^long c3]
+  (if (and (>= c1 0) (< c1 128) (>= c2 0) (< c2 128) (>= c3 0) (< c3 128))
+    (let [v (.get op-table (cp-str c1 c2 c3))] (if v (long v) OP)) OP))
+
+(defn string-lit? [^long t] (or (== t STRING) (== t FSTRING_MIDDLE) (== t TSTRING_MIDDLE)))
+
+;; errcode.h
+(def ^:const E_OK 10) (def ^:const E_EOF 11) (def ^:const E_TOKEN 13) (def ^:const E_ERROR 17)
+(def ^:const E_TABSPACE 18) (def ^:const E_TOODEEP 20) (def ^:const E_DEDENT 21) (def ^:const E_DECODE 22)
+(def ^:const E_EOFS 23) (def ^:const E_EOLS 24) (def ^:const E_LINECONT 25)
+
+(def ^:const MAXINDENT 100) (def ^:const MAXLEVEL 200) (def ^:const MAXFSTRINGLEVEL 150)
+(def ^:const MAX_EXPR_NESTING 3) (def ^:const TABSIZE 8)
+
+;; ---------------------------------------------------------------------------------------------
+;; The state: tok_state's scalars in a long array, its stacks in int arrays, the mode stack in one long array
+
+(def ^:private fields
+  (zipmap [:cur :inp :buf :line-start :start :done :lineno :first-lineno :start-col :col :atbol :pendin :indent
+           :level :cont-line :mls :implicit :comment-nl :midx :extra :type-comments :next-line :n :err
+           ;; the token made: type, p_start, p_end, lineno, end_lineno, col_offset, end_col_offset (bytes)
+           :t-type :t-start :t-end :t-line :t-end-line :t-col :t-end-col :t-level :fake]
+          (range)))
+(def ^:private nfields (count fields))
+
+(def ^:private mfields
+  (zipmap [:kind :depth :expr :quote :qsize :raw :start :mls :first-line :last-expr :debug :spec :skind] (range)))
+(def ^:const ^:private MSTRIDE 16)
+(def ^:const TOK_REGULAR_MODE 0) (def ^:const TOK_FSTRING_MODE 1)
+(def ^:const FSTRING 0) (def ^:const TSTRING 1)
+
+(deftype Lx [^ints cs ^ints boff ^longs st ^ints indstack ^ints altindstack ^ints parenstack ^ints parenline
+             ^ints parencol ^longs modes ^objects box])
+;; box: [the error (an object array), the token's metadata (a String or nil)]
+
+(defmacro ^:private g [k] `(aget ~'st ~(long (fields k))))
+(defmacro ^:private s! [k v] `(aset ~'st ~(long (fields k)) (long ~v)))
+(defmacro ^:private mi [] `(* (aget ~'st ~(long (fields :midx))) ~MSTRIDE))
+(defmacro ^:private m [k] `(aget ~'modes (+ (mi) ~(long (mfields k)))))
+(defmacro ^:private m! [k v] `(aset ~'modes (+ (mi) ~(long (mfields k))) (long ~v)))
+(defmacro ^:private cm [k] `(aget ~'modes (+ ~'ci ~(long (mfields k)))))
+(defmacro ^:private cm! [k v] `(aset ~'modes (+ ~'ci ~(long (mfields k))) (long ~v)))
+
+(defmacro ^:private defl
+  "A function of the lexer: `lx` its first argument, its arrays bound"
+  [name args & body]
+  `(defn ~(with-meta name {:private true}) ~(with-meta (into [(with-meta 'lx {:tag 'arbace.repr.python.lex.Lx})] args) (meta args))
+     (let [~(with-meta 'st {:tag 'longs}) (.-st ~'lx)
+           ~(with-meta 'cs {:tag 'ints}) (.-cs ~'lx)
+           ~(with-meta 'modes {:tag 'longs}) (.-modes ~'lx)]
+       ~@body)))
+
+(defn- u8len ^long [^long c] (cond (< c 0x80) 1 (< c 0x800) 2 (< c 0x10000) 3 :else 4))
+
+(defn- digit? [^long c] (and (>= c 48) (<= c 57)))
+(defn- xdigit? [^long c] (or (digit? c) (and (>= c 97) (<= c 102)) (and (>= c 65) (<= c 70))))
+(defn- ident-start? [^long c] (or (and (>= c 97) (<= c 122)) (and (>= c 65) (<= c 90)) (== c 95) (>= c 128)))
+(defn- ident-char? [^long c] (or (ident-start? c) (digit? c)))
+(defn- lower ^long [^long c] (if (and (>= c 65) (<= c 90)) (+ c 32) c))
+
+(defn- substr ^String [^ints cs ^long a ^long b]
+  (if (< a b) (String. cs (int a) (int (- b a))) ""))
+
+(defn lexer
+  "The lexer's state over `text` (a String): readline's lines (split at \\n; a last line without one given a fake
+  one), extra tokens when `extra`, type comments when `type-comments`"
+  ^Lx [^String text extra type-comments]
+  (let [n0 (.codePointCount text 0 (.length text))
+        fake (not (str/ends-with? text "\n"))
+        n (if (and fake (pos? n0)) (inc n0) n0)
+        cs (int-array (inc n))
+        boff (int-array (+ n 2))]
+    (loop [i 0 j 0 b 0]
+      (if (< i (.length text))
+        (let [c (.codePointAt text i)]
+          (aset cs j c) (aset boff j b)
+          (recur (+ i (Character/charCount c)) (inc j) (+ b (u8len c))))
+        (do (when (and fake (pos? n0)) (aset cs j 10) (aset boff j b))
+            (aset boff n (if (and fake (pos? n0)) (inc b) b))
+            (aset boff (inc n) (aget boff n)))))
+    (let [st (long-array nfields)
+          lx (Lx. cs boff st (int-array MAXINDENT) (int-array MAXINDENT) (int-array MAXLEVEL) (int-array MAXLEVEL)
+                  (int-array MAXLEVEL) (long-array (* MSTRIDE MAXFSTRINGLEVEL)) (object-array 2))]
+      (aset st (fields :done) E_OK)
+      (aset st (fields :atbol) 1)
+      (aset st (fields :start) -1)
+      (aset st (fields :start-col) -1)
+      (aset st (fields :col) -1)
+      (aset st (fields :mls) -1)
+      (aset st (fields :extra) (if extra 1 0))
+      (aset st (fields :type-comments) (if type-comments 1 0))
+      (aset st (fields :n) (long n))
+      ;; the fake new-line's index, when there is one: the last line is implicit
+      (aset st (fields :implicit) 0)
+      (aset ^longs (.-modes lx) (+ 0 (long (mfields :expr))) -1)
+      (aset ^objects (.-box lx) 1 nil)
+      (aset st (fields :fake) (if (and fake (pos? n0)) 1 0))
+      lx)))
+
+
+;; ---------------------------------------------------------------------------------------------
+;; Errors (Parser/tokenizer/helpers.c)
+
+(defl syntax-error-range ^long [^String msg ^long col ^long end-col]
+  (when (not= (g :done) E_ERROR)
+    (let [ls (g :line-start) cur (g :cur) inp (g :inp)
+          errtext-len (- cur ls)
+          col (if (== col -1) errtext-len col)
+          end-col (if (== end-col -1) col end-col)
+          nl (loop [i ls] (if (and (< i inp) (not= (aget cs i) 10) (not= (aget cs i) 0)) (recur (inc i)) i)) ; strcspn: to \n or NUL
+          text (substr cs ls (if (not= (- nl ls) errtext-len) nl cur))]
+      (aset ^objects (.-box lx) 0 (object-array ["SyntaxError" msg (g :lineno) col (g :lineno) end-col text]))))
+  (s! :done E_ERROR)
+  ERRORTOKEN)
+
+(defn- syntax-error ^long [^Lx lx ^String msg] (syntax-error-range lx msg -1 -1))
+
+(defl indent-error ^long []
+  (s! :done E_TABSPACE)
+  (s! :cur (g :inp))
+  ERRORTOKEN)
+
+(defn error-of "The error the lexer raised, an object array [CLASS MSG L O EL EO TEXT], or nil" [^Lx lx] (aget ^objects (.-box lx) 0))
+
+;; ---------------------------------------------------------------------------------------------
+;; Reading (readline_tokenizer.c's underflow over the text's lines; lexer.c's tok_nextc and tok_backup)
+
+(defl underflow []
+  (let [n (g :n) nl (g :next-line)]
+    (when (and (< (g :start) 0) (zero? (g :midx)))
+      (s! :buf (g :cur)))
+    (if (>= nl n)
+      (do (s! :done E_EOF) false)
+      (let [end (loop [i nl] (if (and (< i n) (not= (aget cs i) 10)) (recur (inc i)) (if (< i n) (inc i) i)))]
+        (s! :line-start (g :cur))
+        (s! :inp end)
+        (s! :next-line end)
+        ;; the fake new-line is the last char of a text that did not end in one (lexer)
+        (s! :implicit (if (and (== end n) (== 1 (g :fake))) 1 0))
+        (s! :lineno (inc (g :lineno)))
+        (s! :col 0)
+        true))))
+
+(defl nextc ^long []
+  (loop []
+    (let [cur (g :cur)]
+      (if (not= cur (g :inp))
+        (let [c (aget cs cur)]
+          (s! :col (+ (g :col) (u8len c)))
+          (s! :cur (inc cur))
+          c)
+        (if (not= (g :done) E_OK)
+          -1
+          (if (not (underflow lx))
+            (do (s! :cur (g :inp)) -1)
+            (do (s! :line-start (g :cur))
+                (if (loop [i (g :line-start)] (cond (>= i (g :inp)) false (zero? (aget cs i)) true :else (recur (inc i))))
+                  (do (syntax-error lx "source code cannot contain null bytes")
+                      (s! :cur (g :inp))
+                      -1)
+                  (recur)))))))))
+
+(defl backup [^long c]
+  (when (not= c -1)
+    (let [cur (dec (g :cur))]
+      (when (or (< cur 0) (not= (aget cs cur) c))
+        (throw (ex-info "tok_backup: wrong character" {:at cur :c c})))
+      (s! :cur cur)
+      (s! :col (- (g :col) (u8len c))))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Tokens (state.c)
+
+(defl make-token* ^long [^long type ^long p-start ^long p-end]
+  (s! :t-type type)
+  (s! :t-level (g :level))
+  (s! :t-line (if (string-lit? type) (g :first-lineno) (g :lineno)))
+  (s! :t-end-line (g :lineno))
+  (s! :t-start p-start)
+  (s! :t-end p-end)
+  (if (and (>= p-start 0) (>= p-end 0))
+    (do (s! :t-col (g :start-col)) (s! :t-end-col (g :col)))
+    (do (s! :t-col -1) (s! :t-end-col -1)))
+  type)
+
+(defl make-type-comment* ^long [^long type ^long col ^long end-col ^long p-start ^long p-end]
+  (s! :t-type type)
+  (s! :t-level (g :level))
+  (s! :t-line (g :lineno))
+  (s! :t-end-line (g :lineno))
+  (s! :t-col col)
+  (s! :t-end-col end-col)
+  (s! :t-start p-start)
+  (s! :t-end p-end)
+  type)
+
+(defn- prefix-char [^Lx lx] (let [^longs st (.-st lx) ^longs modes (.-modes lx)] (if (== (m :skind) TSTRING) "t" "f")))
+
+;; ---------------------------------------------------------------------------------------------
+;; lexer.c's helpers
+
+(defmacro ^:private make-token [t a b] `(make-token* ~'lx ~t ~a ~b))
+(defmacro ^:private make-type-comment [t c e a b] `(make-type-comment* ~'lx ~t ~c ~e ~a ~b))
+
+(defl set-ftstring-expr ^long [^long c]
+  (if (or (not (or (not= 0 (m :debug)) (== (m :skind) TSTRING))) (some? (aget ^objects (.-box lx) 1)))
+    0
+    (let [e (m :last-expr) end (g :start) size (- end e)
+          hash? (loop [i 0 in-str false q 0]
+                  (if (< i size)
+                    (let [ch (aget cs (+ e i))]
+                      (cond (== ch 92) (recur (+ i 2) in-str q)
+                            (or (== ch 34) (== ch 39)) (cond (not in-str) (recur (inc i) true ch)
+                                                             (== ch q) (recur (inc i) false q)
+                                                             :else (recur (inc i) in-str q))
+                            (and (== ch 35) (not in-str)) true
+                            :else (recur (inc i) in-str q)))
+                    false))
+          res (if hash?
+                (let [sb (StringBuilder.)]
+                  (loop [i 0 in-str false q 0]
+                    (when (< i size)
+                      (let [ch (aget cs (+ e i))]
+                        (cond
+                          (== ch 92) (do (.appendCodePoint sb (int ch))
+                                         (when (< (inc i) size) (.appendCodePoint sb (int (aget cs (+ e i 1)))))
+                                         (recur (+ i 2) in-str q))
+                          (or (== ch 34) (== ch 39)) (do (.appendCodePoint sb (int ch))
+                                                         (cond (not in-str) (recur (inc i) true ch)
+                                                               (== ch q) (recur (inc i) false q)
+                                                               :else (recur (inc i) in-str q)))
+                          (and (== ch 35) (not in-str))
+                          (let [j (long (loop [j i] (if (and (< j size) (not= (aget cs (+ e j)) 10)) (recur (inc j)) j)))]
+                            (when (< j size) (.append sb "\n"))
+                            (recur (inc j) in-str q))
+                          :else (do (.appendCodePoint sb (int ch)) (recur (inc i) in-str q))))))
+                  (str sb))
+                (substr cs e end))]
+      (aset ^objects (.-box lx) 1 res)
+      0)))
+
+(defl lookahead [^String test]
+  (let [n (.length test)]
+    (loop [k 0]
+      (let [c (nextc lx)]
+        (if (and (< k n) (== c (long (int (.charAt test k)))))
+          (recur (inc k))
+          (let [res (and (== k n) (not (ident-char? c)))]
+            (backup lx c)
+            (loop [j (dec k)] (when (>= j 0) (backup lx (long (int (.charAt test j)))) (recur (dec j))))
+            res))))))
+
+(defl verify-end-of-number [^long c ^String kind]
+  (if (not= 0 (g :extra))
+    true
+    (let [r (case (int c)
+              97 (lookahead lx "nd")
+              101 (lookahead lx "lse")
+              102 (lookahead lx "or")
+              105 (let [c2 (nextc lx)] (backup lx c2) (or (== c2 102) (== c2 110) (== c2 115)))
+              111 (lookahead lx "r")
+              110 (lookahead lx "ot")
+              false)]
+      (cond
+        r (do (backup lx c) (nextc lx) true) ; a SyntaxWarning, "invalid %s literal": warnings are not errors here
+        (and (>= c 0) (< c 128) (ident-char? c)) (do (backup lx c) (syntax-error lx (str "invalid " kind " literal")) false)
+        :else true))))
+
+(defn- printable?
+  "Py_UNICODE_ISPRINTABLE: not in Cc, Cf, Cs, Co, Cn, Zl, Zp, Zs (but the space)"
+  [^long c]
+  (if (== c 32)
+    true
+    (let [t (Character/getType (int c))]
+      (not (or (== t Character/CONTROL) (== t Character/FORMAT) (== t Character/SURROGATE) (== t Character/PRIVATE_USE)
+               (== t Character/UNASSIGNED) (== t Character/LINE_SEPARATOR) (== t Character/PARAGRAPH_SEPARATOR)
+               (== t Character/SPACE_SEPARATOR))))))
+
+(defn- xid-start? [^long c] (or (== c 95) (Character/isUnicodeIdentifierStart (int c))))
+(defn- xid-continue? [^long c] (and (Character/isUnicodeIdentifierPart (int c)) (not (Character/isIdentifierIgnorable (int c)))))
+
+(defl verify-identifier []
+  (if (not= 0 (g :extra))
+    true
+    (let [a (g :start) b (g :cur)
+          ;; _PyUnicode_ScanIdentifier: the first character XID_Start or _, the rest XID_Continue
+          bad (loop [i a] (cond (>= i b) -1
+                                (if (== i a) (xid-start? (aget cs i)) (xid-continue? (aget cs i))) (recur (inc i))
+                                :else i))]
+      (if (neg? bad)
+        true
+        (let [ch (aget cs bad)]
+          (when (< (inc bad) b) (s! :cur (inc bad)))
+          (syntax-error lx (if (printable? ch)
+                             (format "invalid character '%s' (U+%04X)" (cp-str ch) ch)
+                             (format "invalid non-printable character U+%04X" ch)))
+          false)))))
+
+(defl decimal-tail ^long []
+  (loop []
+    (let [c (loop [] (let [c (nextc lx)] (if (digit? c) (recur) c)))]
+      (if (not= c 95)
+        c
+        (let [c (nextc lx)]
+          (if (not (digit? c))
+            (do (backup lx c) (syntax-error lx "invalid decimal literal") 0)
+            (recur)))))))
+
+(defl continuation-line ^long []
+  (let [c (nextc lx) c (if (== c 13) (nextc lx) c)]
+    (if (not= c 10)
+      (do (s! :done E_LINECONT) -1)
+      (let [c (nextc lx)]
+        (if (== c -1)
+          (do (s! :done E_EOF) (s! :cur (g :inp)) -1)
+          (do (backup lx c) c))))))
+
+(defl prefix-error [saw-b saw-r saw-u saw-f saw-t]
+  (let [pair (cond (and saw-u saw-b) ["u" "b"] (and saw-u saw-r) ["u" "r"] (and saw-u saw-f) ["u" "f"]
+                   (and saw-u saw-t) ["u" "t"] (and saw-b saw-f) ["b" "f"] (and saw-b saw-t) ["b" "t"]
+                   (and saw-f saw-t) ["f" "t"])]
+    (when pair
+      (syntax-error-range lx (str "'" (first pair) "' and '" (second pair) "' prefixes are incompatible")
+                          (inc (- (g :start) (g :line-start))) (- (g :cur) (g :line-start)))
+      true)))
+
+;; ---------------------------------------------------------------------------------------------
+;; Numbers (tok_get_normal_mode's number part, its gotos as entry points)
+
+(declare after-exponent-digits imaginary)
+
+(defl number-end ^long [^long c]
+  (backup lx c)
+  (make-token NUMBER (g :start) (g :cur)))
+
+(defl after-exponent ^long [^long c]
+  ;; exponent: c is e or E
+  (let [e c c (nextc lx)]
+    (cond
+      (or (== c 43) (== c 45))
+      (let [c (nextc lx)]
+        (if (not (digit? c))
+          (do (backup lx c) (make-token (syntax-error lx "invalid decimal literal") (g :start) (g :cur)))
+          (let [c (decimal-tail lx)]
+            (if (zero? c) (make-token ERRORTOKEN (g :start) (g :cur)) (after-exponent-digits lx c)))))
+      (not (digit? c))
+      (do (backup lx c)
+          (if (not (verify-end-of-number lx e "decimal"))
+            (make-token ERRORTOKEN -1 -1)
+            (do (backup lx e) (make-token NUMBER (g :start) (g :cur)))))
+      :else
+      (let [c (decimal-tail lx)]
+        (if (zero? c) (make-token ERRORTOKEN -1 -1) (after-exponent-digits lx c))))))
+
+(defl imaginary ^long []
+  (let [c (nextc lx)]
+    (if (not (verify-end-of-number lx c "imaginary")) (make-token ERRORTOKEN -1 -1) (number-end lx c))))
+
+(defl after-exponent-digits ^long [^long c]
+  (if (or (== c 106) (== c 74))
+    (imaginary lx)
+    (if (not (verify-end-of-number lx c "decimal")) (make-token ERRORTOKEN -1 -1) (number-end lx c))))
+
+(defl fraction ^long [^long c]
+  (let [c (if (digit? c) (decimal-tail lx) c)]
+    (cond
+      (zero? c) (make-token ERRORTOKEN -1 -1)
+      (or (== c 101) (== c 69)) (after-exponent lx c)
+      :else (after-exponent-digits lx c))))
+
+(defl after-int ^long [^long c]
+  ;; after a decimal's digits: Accept floating-point numbers
+  (if (== c 46) (fraction lx (nextc lx)) (fraction lx c)))
+
+(defl radix-number ^long [^long c digit-ok? ^String kind]
+  ;; 0o and 0b: c is the first char after the prefix
+  (loop [c c]
+    (let [c (if (== c 95) (nextc lx) c)]
+      (if (not (digit-ok? c))
+        (if (digit? c)
+          (make-token (syntax-error lx (format "invalid digit '%s' in %s literal" (cp-str c) kind)) -1 -1)
+          (do (backup lx c) (make-token (syntax-error lx (str "invalid " kind " literal")) -1 -1)))
+        (let [c (long (loop [] (let [c (nextc lx)] (if (digit-ok? c) (recur) c))))]
+          (if (== c 95)
+            (recur c)
+            (cond
+              (digit? c) (make-token (syntax-error lx (format "invalid digit '%s' in %s literal" (cp-str c) kind)) -1 -1)
+              (not (verify-end-of-number lx c kind)) (make-token ERRORTOKEN -1 -1)
+              :else (number-end lx c))))))))
+
+(defl number ^long [^long c]
+  (if (== c 48)
+    (let [c (nextc lx)]
+      (cond
+        (or (== c 120) (== c 88))
+        (loop [c (nextc lx)]
+          (let [c (if (== c 95) (nextc lx) c)]
+            (if (not (xdigit? c))
+              (do (backup lx c) (make-token (syntax-error lx "invalid hexadecimal literal") -1 -1))
+              (let [c (long (loop [] (let [c (nextc lx)] (if (xdigit? c) (recur) c))))]
+                (if (== c 95)
+                  (recur c)
+                  (if (not (verify-end-of-number lx c "hexadecimal")) (make-token ERRORTOKEN -1 -1) (number-end lx c)))))))
+        (or (== c 111) (== c 79)) (radix-number lx (nextc lx) (fn [^long c] (and (>= c 48) (< c 56))) "octal")
+        (or (== c 98) (== c 66)) (radix-number lx (nextc lx) (fn [^long c] (or (== c 48) (== c 49))) "binary")
+        :else
+        ;; maybe old-style octal; in any case, allow '0' as a literal
+        (let [c (loop [c c]
+                  (let [c (if (== c 95)
+                            (let [c (nextc lx)] (if (not (digit? c)) (do (backup lx c) (syntax-error lx "invalid decimal literal") nil) c))
+                            c)]
+                    (cond (nil? c) nil (not= c 48) c :else (recur (nextc lx)))))]
+          (if (nil? c)
+            (make-token ERRORTOKEN -1 -1)
+            (let [zeros-end (g :cur)
+                  nonzero (digit? c)
+                  c (if nonzero (decimal-tail lx) c)]
+              (cond
+                (zero? c) (make-token ERRORTOKEN -1 -1)
+                (== c 46) (fraction lx (nextc lx))
+                (or (== c 101) (== c 69)) (after-exponent lx c)
+                (or (== c 106) (== c 74)) (imaginary lx)
+                (and nonzero (zero? (g :extra)))
+                (do (backup lx c)
+                    (make-token (syntax-error-range lx "leading zeros in decimal integer literals are not permitted; use an 0o prefix for octal integers"
+                                                    (inc (- (g :start) (g :line-start))) (- zeros-end (g :line-start)))
+                                -1 -1))
+                (not (verify-end-of-number lx c "decimal")) (make-token ERRORTOKEN -1 -1)
+                :else (number-end lx c)))))))
+    (let [c (decimal-tail lx)]
+      (if (zero? c) (make-token ERRORTOKEN -1 -1) (after-int lx c)))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Strings
+
+(defl fstring-start ^long [^long c]
+  ;; f_string_quote: c is the quote
+  (let [quote c
+        _ (s! :first-lineno (g :lineno))
+        _ (s! :mls (g :line-start))
+        after (nextc lx)
+        qsize (if (== after quote)
+                (let [aa (nextc lx)]
+                  (if (== aa quote) 3 (do (backup lx aa) (backup lx after) 1)))
+                (do (backup lx after) 1))
+        p-start (g :start) p-end (g :cur)]
+    (if (>= (inc (g :midx)) MAXFSTRINGLEVEL)
+      (make-token (syntax-error lx "too many nested f-strings or t-strings") p-start p-end)
+      (let [_ (s! :midx (inc (g :midx)))
+            s0 (aget cs (g :start)) s1 (lower (aget cs (inc (g :start))))
+            [raw kind] (case (int (lower s0))
+                         116 [(== s1 114) TSTRING]
+                         102 [(== s1 114) FSTRING]
+                         114 [true (if (== s1 116) TSTRING FSTRING)])]
+        (m! :kind TOK_FSTRING_MODE) (m! :quote quote) (m! :qsize qsize) (m! :start (g :start))
+        (m! :mls (g :line-start)) (m! :first-line (g :lineno)) (m! :last-expr -1) (m! :spec 0) (m! :debug 0)
+        (m! :raw (if raw 1 0)) (m! :skind kind) (m! :depth 0) (m! :expr -1)
+        (make-token (if (== kind TSTRING) TSTRING_START FSTRING_START) p-start p-end)))))
+
+(defl string-lit ^long [^long c]
+  ;; letter_quote: c is the quote
+  (let [quote c
+        _ (s! :first-lineno (g :lineno))
+        _ (s! :mls (g :line-start))
+        c (nextc lx)
+        [qsize end-q] (if (== c quote)
+                        (let [c2 (nextc lx)]
+                          (if (== c2 quote) [3 0] (do (backup lx c2) [1 1])))
+                        (do (backup lx c) [1 0]))]
+    (loop [end-q (long end-q) escaped-quote false]
+      (if (== end-q qsize)
+        (make-token STRING (g :start) (g :cur))
+        (let [c (nextc lx)]
+          (cond
+            (== (g :done) E_ERROR) (make-token ERRORTOKEN -1 -1)
+            (== (g :done) E_DECODE) (make-token STRING (g :start) (g :cur))
+            (or (== c -1) (and (== qsize 1) (== c 10)))
+            (let [start-line (g :lineno)]
+              (s! :cur (inc (g :start)))
+              (s! :line-start (g :mls))
+              (s! :lineno (g :first-lineno))
+              (if (and (pos? (g :midx)) (== (m :quote) quote) (== (m :qsize) qsize))
+                (make-token (syntax-error lx (str (prefix-char lx) "-string: expecting '}'")) -1 -1)
+                (if (== qsize 3)
+                  (do (syntax-error lx (str "unterminated triple-quoted string literal (detected at line " start-line ")"))
+                      (when (not= c 10) (s! :done E_EOFS))
+                      (make-token ERRORTOKEN -1 -1))
+                  (do (syntax-error lx (if escaped-quote
+                                         (str "unterminated string literal (detected at line " start-line "); perhaps you escaped the end quote?")
+                                         (str "unterminated string literal (detected at line " start-line ")")))
+                      (when (not= c 10) (s! :done E_EOLS))
+                      (make-token ERRORTOKEN -1 -1)))))
+            (== c quote) (recur (inc end-q) escaped-quote)
+            (== c 92) (let [c (nextc lx) eq (or escaped-quote (== c quote))]
+                        (when (== c 13) (nextc lx))
+                        (recur 0 eq))
+            :else (recur 0 escaped-quote)))))))
+
+;; ---------------------------------------------------------------------------------------------
+;; tok_get_normal_mode
+
+(def ^:private type-comment-prefix "# type: ")
+
+(defl lex-comment ^long [^long c0 blankline]
+  ;; c0 is #; returns a token type, or -2 to go on (the comment skipped)
+  (let [c (long (loop [c c0] (if (and (not= c -1) (not= c 10) (not= c 13)) (recur (long (nextc lx))) c)))
+        p (when (not= 0 (g :extra)) (g :start))
+        tc (when (not= 0 (g :type-comments))
+             (let [n (.length ^String type-comment-prefix)]
+               (loop [k 0 p (g :start) col (g :start-col)]
+                 (if (and (< k n) (< p (g :cur)))
+                   (let [pc (.charAt ^String type-comment-prefix k)]
+                     (cond
+                       (= pc \space) (let [[p col] (loop [p p col col] (let [ch (aget cs p)] (if (or (== ch 32) (== ch 9)) (recur (inc p) (inc col)) [p col])))]
+                                       (recur (inc k) (long p) (long col)))
+                       (== (long (int pc)) (aget cs p)) (recur (inc k) (inc p) (inc col))
+                       :else nil))
+                   (when (== k n) [p col])))))]
+    (if tc
+      (let [[p col] tc p (long p) col (long col)
+            _ (backup lx c)
+            ignore-end (+ p 6)
+            cur (g :cur)
+            ignore? (and (>= cur ignore-end) (= "ignore" (substr cs p (min cur ignore-end)))
+                         (not (and (> cur ignore-end)
+                                   (let [ch (aget cs ignore-end)] (or (>= ch 128) (Character/isLetterOrDigit (int ch)))))))]
+        (if ignore?
+          (let [r-end (g :cur)]
+            (when blankline (nextc lx) (s! :atbol 1))
+            (make-type-comment TYPE_IGNORE (+ col 6) (g :col) ignore-end r-end))
+          (make-type-comment TYPE_COMMENT col (g :col) p (g :cur))))
+      (if (not= 0 (g :extra))
+        (do (backup lx c)
+            (s! :comment-nl (if blankline 1 0))
+            (make-token COMMENT p (g :cur)))
+        (+ 1000 c)))))
+
+(declare fstring-mode normal-token normal-dispatch punct bracket)
+
+(defl normal-mode ^long [^long ci]
+  (loop []
+    ;; nextline:
+    (s! :start -1)
+    (s! :start-col -1)
+    (let [blankline
+          (if (zero? (g :atbol))
+            false
+            (do
+              (s! :atbol 0)
+              (let [r (loop [col 0 altcol 0 cont-col 0]
+                        (let [c (nextc lx)]
+                          (cond
+                            (== c 32) (recur (inc col) (inc altcol) cont-col)
+                            (== c 9) (recur (* (inc (quot col TABSIZE)) TABSIZE) (inc altcol) cont-col)
+                            (== c 12) (recur 0 0 cont-col)
+                            (== c 92) (let [cc (if (zero? cont-col) col cont-col)]
+                                        (if (== -1 (continuation-line lx))
+                                          :error
+                                          (recur col altcol cc)))
+                            (and (== c -1) (some? (error-of lx))) :error
+                            :else [c col altcol cont-col])))]
+                (if (= r :error)
+                  r
+                  (let [[c col altcol cont-col] r c (long c) col (long col) altcol (long altcol) cont-col (long cont-col)]
+                    (backup lx c)
+                    (let [blank (or (== c 35) (== c 10) (== c 13))]
+                      (if (and (not blank) (zero? (g :level)))
+                        (let [col (if (pos? cont-col) cont-col col)
+                              altcol (if (pos? cont-col) cont-col altcol)
+                              ^ints ind (.-indstack lx) ^ints alt (.-altindstack lx)
+                              i (g :indent)]
+                          (cond
+                            (== col (aget ind i))
+                            (if (not= altcol (aget alt i)) :indent-error blank)
+                            (> col (aget ind i))
+                            (cond
+                              (>= (inc i) MAXINDENT) (do (s! :done E_TOODEEP) (s! :cur (g :inp)) :error)
+                              (<= altcol (aget alt i)) :indent-error
+                              :else (do (s! :pendin (inc (g :pendin)))
+                                        (s! :indent (inc i))
+                                        (aset ind (inc i) (int col))
+                                        (aset alt (inc i) (int altcol))
+                                        blank))
+                            :else
+                            (let [i (loop [i i] (if (and (pos? i) (< col (aget ind i)))
+                                                  (do (s! :pendin (dec (g :pendin))) (recur (dec i)))
+                                                  i))]
+                              (s! :indent i)
+                              (cond
+                                (not= col (aget ind i)) (do (s! :done E_DEDENT) (s! :cur (g :inp)) :error)
+                                (not= altcol (aget alt i)) :indent-error
+                                :else blank))))
+                        blank)))))))]
+      (cond
+        (= blankline :error) (make-token ERRORTOKEN -1 -1)
+        (= blankline :indent-error) (make-token (indent-error lx) -1 -1)
+        :else
+        (let [r (normal-token lx ci blankline)]
+          (if (== r -3) (recur) r))))))
+
+(defl normal-token ^long [^long ci blankline]
+  ;; after the indentation: a token type, or -3 to go to nextline
+  (s! :start (g :cur))
+  (s! :start-col (g :col))
+  (if (not= 0 (g :pendin))
+    (if (neg? (g :pendin))
+      (do (s! :pendin (inc (g :pendin)))
+          (if (not= 0 (g :extra)) (make-token DEDENT (g :cur) (g :cur)) (make-token DEDENT -1 -1)))
+      (do (s! :pendin (dec (g :pendin)))
+          (if (not= 0 (g :extra)) (make-token INDENT (g :buf) (g :cur)) (make-token INDENT -1 -1))))
+    (do
+      (backup lx (nextc lx))
+      (loop []
+        ;; again:
+        (s! :start -1)
+        (let [c (loop [] (let [c (nextc lx)] (if (or (== c 32) (== c 9) (== c 12)) (recur) c)))
+              _ (s! :start (dec (g :cur)))
+              _ (s! :start-col (dec (g :col)))
+              r (if (== c 35) (lex-comment lx c blankline) (+ 1000 c))]
+          (if (< r 999)
+            r
+            (let [r (normal-dispatch lx ci (- r 1000) blankline)]
+              (if (== r -4) (recur) r))))))))
+
+(defl normal-dispatch ^long [^long ci ^long c blankline]
+  (cond
+    (== c -1)
+    (if (pos? (g :level))
+      (make-token ERRORTOKEN -1 -1)
+      (make-token (if (== (g :done) E_EOF) ENDMARKER ERRORTOKEN) -1 -1))
+
+    (ident-start? c)
+    (loop [c c saw-b false saw-r false saw-u false saw-f false saw-t false]
+      (let [lc (lower c)
+            [ok b r u f t] (cond (and (not saw-b) (== lc 98)) [true true saw-r saw-u saw-f saw-t]
+                                 (and (not saw-u) (== lc 117)) [true saw-b saw-r true saw-f saw-t]
+                                 (and (not saw-r) (== lc 114)) [true saw-b true saw-u saw-f saw-t]
+                                 (and (not saw-f) (== lc 102)) [true saw-b saw-r saw-u true saw-t]
+                                 (and (not saw-t) (== lc 116)) [true saw-b saw-r saw-u saw-f true]
+                                 :else [false])]
+        (if ok
+          (let [c (long (nextc lx))]
+            (if (or (== c 34) (== c 39))
+              (if (prefix-error lx b r u f t)
+                (make-token ERRORTOKEN -1 -1)
+                (if (or f t) (fstring-start lx c) (string-lit lx c)))
+              (recur c b r u f t)))
+          (let [[c nonascii] (loop [c c nonascii false] (if (ident-char? c) (recur (long (nextc lx)) (or nonascii (>= c 128))) [c nonascii]))]
+            (backup lx c)
+            (if (and nonascii (not (verify-identifier lx)))
+              (make-token ERRORTOKEN -1 -1)
+              (make-token NAME (g :start) (g :cur)))))))
+
+    :else
+    (let [c (if (== c 13) (nextc lx) c)]
+      (cond
+        (== c 10)
+        (do (s! :atbol 1)
+            (if (or blankline (pos? (g :level)))
+              (if (not= 0 (g :extra))
+                (do (s! :comment-nl 0) (make-token NL (g :start) (g :cur)))
+                -3)
+              (if (and (not= 0 (g :comment-nl)) (not= 0 (g :extra)))
+                (do (s! :comment-nl 0) (make-token NL (g :start) (g :cur)))
+                (do (s! :cont-line 0) (make-token NEWLINE (g :start) (dec (g :cur)))))))
+
+        (== c 46)
+        (let [c (nextc lx)]
+          (cond
+            (digit? c) (fraction lx c)
+            (== c 46) (let [c3 (nextc lx)]
+                        (if (== c3 46)
+                          (make-token ELLIPSIS (g :start) (g :cur))
+                          (do (backup lx c3) (backup lx 46) (make-token DOT (g :start) (g :cur)))))
+            :else (do (backup lx c) (make-token DOT (g :start) (g :cur)))))
+
+        (digit? c) (number lx c)
+
+        (or (== c 34) (== c 39))
+        ;; f_string_quote's test (the start f, r or t and a quote) fails for a token that starts at the quote
+        (string-lit lx c)
+
+        (== c 92)
+        (if (== -1 (continuation-line lx))
+          (make-token ERRORTOKEN -1 -1)
+          (do (s! :cont-line 1) -4))
+
+        :else (punct lx ci c)))))
+
+(defl punct ^long [^long ci ^long c]
+  (let [inside (pos? (g :midx))
+        r (if (and (or (== c 58) (== c 125) (== c 33) (== c 123)) inside (>= (cm :expr) 0))
+            (let [cursor (- (cm :depth) (if (not= c 123) 1 0))
+                  spec (cm :spec)
+                  valid (or (zero? cursor) (and (== cursor 1) (or (not= 0 (cm :debug)) (not= 0 spec))))]
+              (if (and valid (not= c 123) (not= 0 (set-ftstring-expr lx c)))
+                (make-token ERRORTOKEN -1 -1)
+                (if (and (== c 58) (== cursor (cm :expr)))
+                  (do (cm! :kind TOK_FSTRING_MODE) (cm! :spec 1)
+                      (make-token (one-char c) (g :start) (g :cur)))
+                  nil)))
+            nil)]
+    (if r
+      r
+      (let [c2 (nextc lx)
+            t2 (two-chars c c2)
+            t2 (if (and (== c 60) (== c2 62)) OP t2)]
+        (if (not= t2 OP)
+          (let [c3 (nextc lx) t3 (three-chars c c2 c3)]
+            (if (not= t3 OP)
+              (make-token t3 (g :start) (g :cur))
+              (do (backup lx c3) (make-token t2 (g :start) (g :cur)))))
+          (do
+            (backup lx c2)
+            (let [r (bracket lx ci c)]
+              (cond
+                r r
+                (not (printable? c)) (make-token (syntax-error lx (format "invalid non-printable character U+%04X" c)) -1 -1)
+                :else
+                (do (when (and (== c 61) (== 1 (- (cm :depth) (cm :expr)))) (cm! :debug 1))
+                    (make-token (one-char c) (g :start) (g :cur)))))))))))
+
+(defl bracket [^long ci ^long c]
+  ;; the parentheses' level: a token type when it is an error, else nil
+  (let [inside (pos? (g :midx))]
+    (cond
+      (or (== c 40) (== c 91) (== c 123))
+      (if (>= (g :level) MAXLEVEL)
+        (make-token (syntax-error lx "too many nested parentheses") -1 -1)
+        (let [lv (g :level)]
+          (aset ^ints (.-parenstack lx) lv (int c))
+          (aset ^ints (.-parenline lx) lv (int (g :lineno)))
+          (aset ^ints (.-parencol lx) lv (int (- (g :start) (g :line-start))))
+          (s! :level (inc lv))
+          (when inside (cm! :depth (inc (cm :depth))))
+          nil))
+      (or (== c 41) (== c 93) (== c 125))
+      (cond
+        (and inside (zero? (cm :depth)) (== c 125))
+        (make-token (syntax-error lx (str (prefix-char lx) "-string: single '}' is not allowed")) -1 -1)
+        (and (zero? (g :extra)) (zero? (g :level)))
+        (make-token (syntax-error lx (str "unmatched '" (cp-str c) "'")) -1 -1)
+        :else
+        (or
+          (when (pos? (g :level))
+            (s! :level (dec (g :level)))
+            (let [lv (g :level) opening (aget ^ints (.-parenstack lx) lv)]
+              (when-not (or (and (== opening 40) (== c 41)) (and (== opening 91) (== c 93)) (and (== opening 123) (== c 125)))
+                (or
+                  (when (and inside (== opening 123) (== (dec (cm :depth)) (cm :expr)))
+                    (make-token (syntax-error lx (str (prefix-char lx) "-string: unmatched '" (cp-str c) "'")) -1 -1))
+                  (cond
+                    (not= 0 (g :extra)) nil
+                    (not= (aget ^ints (.-parenline lx) lv) (g :lineno))
+                    (make-token (syntax-error lx (str "closing parenthesis '" (cp-str c) "' does not match opening parenthesis '"
+                                                      (cp-str opening) "' on line " (aget ^ints (.-parenline lx) lv))) -1 -1)
+                    :else
+                    (make-token (syntax-error lx (str "closing parenthesis '" (cp-str c) "' does not match opening parenthesis '"
+                                                      (cp-str opening) "'")) -1 -1))))))
+          (when inside
+            (cm! :depth (dec (cm :depth)))
+            (if (neg? (cm :depth))
+              (make-token (syntax-error lx (str (prefix-char lx) "-string: unmatched '" (cp-str c) "'")) -1 -1)
+              (do (when (and (== c 125) (== (cm :depth) (cm :expr)))
+                    (cm! :expr (dec (cm :expr))) (cm! :kind TOK_FSTRING_MODE) (cm! :spec 0) (cm! :debug 0))
+                  nil)))))
+      :else nil)))
+
+;; ---------------------------------------------------------------------------------------------
+;; tok_get_fstring_mode
+
+(defl fstring-mode ^long [^long ci]
+  (s! :start (g :cur))
+  (s! :first-lineno (g :lineno))
+  (s! :start-col (g :col))
+  (let [start-char (nextc lx)
+        deferred
+        (if (== start-char 123)
+          (let [peek1 (nextc lx)]
+            (backup lx peek1)
+            (when (not= peek1 123) (cm! :last-expr (g :cur)))
+            (backup lx start-char)
+            (when (not= peek1 123)
+              (cm! :expr (inc (cm :expr)))
+              (if (>= (cm :expr) MAX_EXPR_NESTING)
+                (make-token (syntax-error lx (str (prefix-char lx) "-string: expressions nested too deeply")) (g :start) (g :cur))
+                (do (m! :kind TOK_REGULAR_MODE) (normal-mode lx ci)))))
+          (do (backup lx start-char) nil))]
+    (if deferred
+      deferred
+      (let [at-end (loop [i 0]
+                     (if (< i (cm :qsize))
+                       (let [q (nextc lx)]
+                         (if (not= q (cm :quote)) (do (backup lx q) false) (recur (inc i))))
+                       true))
+            middle (if (== (cm :skind) TSTRING) TSTRING_MIDDLE FSTRING_MIDDLE)]
+        (if at-end
+          (let [p-start (g :start) p-end (g :cur)]
+            (s! :midx (dec (g :midx)))
+            (make-token (if (== (cm :skind) TSTRING) TSTRING_END FSTRING_END) p-start p-end))
+          (do
+            (s! :mls (g :line-start))
+            (loop [end-q 0 unicode-escape false]
+              (if (== end-q (cm :qsize))
+                (do (dotimes [_ (cm :qsize)] (backup lx (cm :quote)))
+                    (make-token middle (g :start) (g :cur)))
+                (let [c (nextc lx)]
+                  (if (or (== (g :done) E_ERROR) (== (g :done) E_DECODE))
+                    (make-token ERRORTOKEN -1 -1)
+                    (let [in-spec (and (not= 0 (cm :spec)) (>= (cm :expr) 0))]
+                      (cond
+                        (or (== c -1) (and (== (cm :qsize) 1) (== c 10)))
+                        (if (and in-spec (== c 10))
+                          (if (== (cm :qsize) 1)
+                            (make-token (syntax-error lx (let [p (prefix-char lx)] (str p "-string: newlines are not allowed in format specifiers for single quoted " p "-strings")))
+                                        -1 -1)
+                            (do (backup lx c) (m! :kind TOK_REGULAR_MODE) (cm! :spec 0)
+                                (make-token middle (g :start) (g :cur))))
+                          (let [start-line (g :lineno)]
+                            (s! :cur (inc (cm :start)))
+                            (s! :line-start (cm :mls))
+                            (s! :lineno (m :first-line))
+                            (if (== (cm :qsize) 3)
+                              (do (syntax-error lx (str "unterminated triple-quoted " (prefix-char lx) "-string literal (detected at line " start-line ")"))
+                                  (when (not= c 10) (s! :done E_EOFS))
+                                  (make-token ERRORTOKEN -1 -1))
+                              (make-token (syntax-error lx (str "unterminated " (prefix-char lx) "-string literal (detected at line " start-line ")")) -1 -1))))
+                        (== c (cm :quote)) (recur (inc end-q) unicode-escape)
+                        (== c 123)
+                        (let [peek (nextc lx)]
+                          (if (or (not= peek 123) in-spec)
+                            (do (backup lx peek)
+                                (cm! :last-expr (g :cur))
+                                (backup lx c)
+                                (cm! :expr (inc (cm :expr)))
+                                (if (>= (cm :expr) MAX_EXPR_NESTING)
+                                  (make-token (syntax-error lx (str (prefix-char lx) "-string: expressions nested too deeply")) -1 -1)
+                                  (do (m! :kind TOK_REGULAR_MODE) (cm! :spec 0)
+                                      (make-token middle (g :start) (g :cur)))))
+                            (make-token middle (g :start) (dec (g :cur)))))
+                        (== c 125)
+                        (if unicode-escape
+                          (make-token middle (g :start) (g :cur))
+                          (let [peek (nextc lx)]
+                            (if (and (== peek 125) (not in-spec) (zero? (cm :depth)))
+                              (make-token middle (g :start) (dec (g :cur)))
+                              (do (backup lx peek) (backup lx c) (m! :kind TOK_REGULAR_MODE) (cm! :spec 0)
+                                  (make-token middle (g :start) (g :cur))))))
+                        (== c 92)
+                        (let [peek (nextc lx) peek (if (== peek 13) (nextc lx) peek)]
+                          (if (or (== peek 123) (== peek 125))
+                            (do (backup lx peek) (recur 0 unicode-escape))
+                            (if (and (zero? (cm :raw)) (== peek 78))
+                              (let [p2 (nextc lx)]
+                                (if (== p2 123) (recur 0 true) (do (backup lx p2) (recur 0 unicode-escape))))
+                              (recur 0 unicode-escape))))
+                        :else (recur 0 unicode-escape)))))))))))))
+
+;; ---------------------------------------------------------------------------------------------
+;; The entry
+
+(defn next-token
+  "The next token's type (_PyTokenizer_Get): its fields in the state (token-fields)"
+  ^long [^Lx lx]
+  (let [^longs st (.-st lx) ^longs modes (.-modes lx)
+        ci (* (aget st (long (fields :midx))) MSTRIDE)]
+    (aset ^objects (.-box lx) 1 nil)
+    (loop []
+      (let [r (if (== (aget modes (+ ci (long (mfields :kind)))) TOK_REGULAR_MODE)
+                (normal-mode lx ci)
+                (fstring-mode lx ci))]
+        r))))
+
+(defn token-fields
+  "The last token's [type p-start p-end lineno end-lineno col end-col level metadata] (col in UTF-8 bytes, as
+  the C tokenizer's)"
+  [^Lx lx]
+  (let [^longs st (.-st lx)]
+    [(g :t-type) (g :t-start) (g :t-end) (g :t-line) (g :t-end-line) (g :t-col) (g :t-end-col) (g :t-level)
+     (aget ^objects (.-box lx) 1)]))
+
+;; ---------------------------------------------------------------------------------------------
+;; tokenize's iterator (Python/Python-tokenize.c's tokenizeriter_next and _tokenizer_error)
+
+(defn- done-error
+  "The error of a done code when no exception was raised (_tokenizer_error)"
+  [^Lx lx]
+  (let [^longs st (.-st lx) ^ints cs (.-cs lx)
+        done (g :done)
+        buf (g :buf) inp (g :inp)
+        line (substr cs buf (max buf (dec inp)))]
+    (if (== done E_EOF)
+      (object-array ["SyntaxError" "unexpected EOF in multi-line statement" (g :lineno)
+                     (max 0 (- (aget ^ints (.-boff lx) inp) (aget ^ints (.-boff lx) buf))) (g :lineno) nil nil])
+      (let [[cls msg] (condp == done
+                        E_TOKEN ["SyntaxError" "invalid token"]
+                        E_DEDENT ["IndentationError" "unindent does not match any outer indentation level"]
+                        E_TABSPACE ["TabError" "inconsistent use of tabs and spaces in indentation"]
+                        E_TOODEEP ["IndentationError" "too many levels of indentation"]
+                        E_LINECONT ["SyntaxError" "unexpected character after line continuation character"]
+                        ["SyntaxError" "unknown tokenization error"])]
+        (object-array [cls msg (g :lineno) (inc (.codePointCount ^String line 0 (.length ^String line))) nil nil line])))))
+
+(defn stream
+  "The tokens of `text` as _tokenize.TokenizerIter gives them (`extra`: extra_tokens), a vector of [TYPE STRING SL
+  SC EL EC] (TYPE the token type's number, columns in characters), and the error that ended them (nil, or
+  [CLASS MSG L O EL EO TEXT]): {:tokens :error}"
+  [^String text extra]
+  (let [lx (lexer text extra false)
+        ^longs st (.-st lx) ^ints cs (.-cs lx) ^ints boff (.-boff lx)
+        out (java.util.ArrayList.)
+        last-lineno (long-array 2)] ; last_lineno, byte_col_offset_diff
+    (aset last-lineno 0 0)
+    (loop []
+      (let [type (next-token lx)]
+        (cond
+          (== type ERRORTOKEN)
+          {:tokens (vec out) :error (vec (or (error-of lx) (done-error lx)))}
+          ;; no line was ever read (an empty text): the C iterator's line is decoded from a NULL line start, which
+          ;; fails without an exception, so the iteration stops (extra tokens' trailing tokens take an empty line)
+          (and (zero? (g :lineno)) (not (and (not= 0 (g :extra)) (or (== type ENDMARKER) (== type DEDENT)))))
+          {:tokens (vec out) :error nil}
+          :else
+          (let [p-start (g :t-start) p-end (g :t-end)
+                s (if (or (neg? p-start) (neg? p-end)) "" (substr cs p-start p-end))
+                trailing (or (== type ENDMARKER) (and (== type DEDENT) (== (g :done) E_EOF)))
+                line-start (if (string-lit? type) (g :mls) (g :line-start))
+                lineno (if (string-lit? type) (g :first-lineno) (g :lineno))
+                end-lineno (g :lineno)
+                line-changed (not (and (not (and (not= 0 (g :extra)) trailing)) (== (g :lineno) (aget last-lineno 0))))
+                _ (when (and (not (and (not= 0 (g :extra)) trailing)) line-changed) (aset last-lineno 1 0))
+                B (fn ^long [^long i] (aget boff i))
+                col (if (and (>= p-start 0) (>= p-start line-start))
+                      (let [byte-off (- (B p-start) (B line-start))]
+                        (if line-changed
+                          (let [c (- p-start line-start)] (aset last-lineno 1 (long (- byte-off c))) c)
+                          (- byte-off (aget last-lineno 1))))
+                      -1)
+                end-col (if (and (>= p-end 0) (>= p-end (g :line-start)))
+                          (if (== lineno end-lineno)
+                            (let [tc (- p-end (max p-start 0))]
+                              (aset last-lineno 1 (long (+ (aget last-lineno 1) (- (- (B p-end) (B (max p-start 0))) tc))))
+                              (+ col tc))
+                            (let [e (- p-end (g :line-start))]
+                              (aset last-lineno 1 (long (+ (aget last-lineno 1) (- (- (B p-end) (B (g :line-start))) e))))
+                              e))
+                          -1)
+                _ (aset last-lineno 0 lineno)
+                [type s lineno end-lineno col end-col]
+                (if (not= 0 (g :extra))
+                  (let [[lineno end-lineno col end-col] (if trailing [(inc lineno) (inc lineno) 0 0] [lineno end-lineno col end-col])]
+                    (cond
+                      (and (> type DEDENT) (< type OP)) [OP s lineno end-lineno col end-col]
+                      (== type NEWLINE) [type (if (not= 0 (g :implicit)) s (if (== (aget cs (g :start)) 13) "\r\n" "\n"))
+                                         lineno end-lineno col (inc end-col)]
+                      (== type NL) [type (if (not= 0 (g :implicit)) "" s) lineno end-lineno col end-col]
+                      :else [type s lineno end-lineno col end-col]))
+                  [type s lineno end-lineno col end-col])]
+            (.add out [type s lineno col end-lineno end-col])
+            (if (== type ENDMARKER)
+              {:tokens (vec out) :error nil}
+              (recur))))))))
+
+;; ---------------------------------------------------------------------------------------------
+;; The source's encoding (Lib/tokenize.py's detect_encoding) and its text
+
+(defn- normal-name
+  "tokenize's _get_normal_name"
+  [^String orig]
+  (let [enc (-> (subs orig 0 (min 12 (count orig))) str/lower-case (str/replace "_" "-"))]
+    (cond
+      (or (= enc "utf-8") (str/starts-with? enc "utf-8-")) "utf-8"
+      (or (#{"latin-1" "iso-8859-1" "iso-latin-1"} enc)
+          (some #(str/starts-with? enc %) ["latin-1-" "iso-8859-1-" "iso-latin-1-"])) "iso-8859-1"
+      :else orig)))
+
+(def ^:private codecs
+  "Python's codec names (encodings.aliases' normalized spellings) of the charsets a source may name -> Java's"
+  {"utf_8" "UTF-8" "utf8" "UTF-8" "u8" "UTF-8" "utf" "UTF-8" "utf8_ucs2" "UTF-8" "utf8_ucs4" "UTF-8" "cp65001" "UTF-8"
+   "utf_8_sig" "UTF-8"
+   "latin_1" "ISO-8859-1" "latin1" "ISO-8859-1" "latin" "ISO-8859-1" "l1" "ISO-8859-1" "iso_8859_1" "ISO-8859-1"
+   "iso8859_1" "ISO-8859-1" "iso8859" "ISO-8859-1" "8859" "ISO-8859-1" "cp819" "ISO-8859-1" "iso_ir_100" "ISO-8859-1"
+   "ascii" "US-ASCII" "us_ascii" "US-ASCII" "646" "US-ASCII" "us" "US-ASCII" "iso646_us" "US-ASCII"
+   "koi8_r" "KOI8-R" "cp1252" "windows-1252" "windows_1252" "windows-1252" "iso8859_15" "ISO-8859-15"
+   "iso_8859_15" "ISO-8859-15" "latin9" "ISO-8859-15" "l9" "ISO-8859-15" "iso8859_2" "ISO-8859-2" "latin2" "ISO-8859-2"
+   "euc_jp" "EUC-JP" "shift_jis" "Shift_JIS" "gb2312" "GB2312" "gbk" "GBK" "big5" "Big5" "cp1251" "windows-1251"})
+
+(defn- codec
+  "The Java charset name of Python's codec `name` (codecs.lookup's normalization), or nil when unknown"
+  [^String name]
+  (let [n (-> (str/lower-case name) (str/replace #"[^a-z0-9.]+" "_") (str/replace #"^_|_$" ""))]
+    (get codecs n)))
+
+(defn- utf8-valid?
+  "Python's strict UTF-8 (no overlong forms, no surrogates, at most U+10FFFF) over `bs` [a, b)"
+  [^bytes bs ^long a ^long b]
+  (loop [i a]
+    (if (>= i b)
+      true
+      (let [c (bit-and (aget bs i) 0xFF)
+            cont (fn [^long k] (and (< k b) (== 0x80 (bit-and (aget bs k) 0xC0))))
+            byte (fn ^long [^long k] (bit-and (aget bs k) 0xFF))]
+        (cond
+          (< c 0x80) (recur (inc i))
+          (and (>= c 0xC2) (<= c 0xDF)) (if (cont (inc i)) (recur (+ i 2)) false)
+          (and (>= c 0xE0) (<= c 0xEF))
+          (if (and (cont (inc i)) (cont (+ i 2))
+                   (let [c1 (byte (inc i))] (cond (== c 0xE0) (>= c1 0xA0) (== c 0xED) (< c1 0xA0) :else true)))
+            (recur (+ i 3)) false)
+          (and (>= c 0xF0) (<= c 0xF4))
+          (if (and (cont (inc i)) (cont (+ i 2)) (cont (+ i 3))
+                   (let [c1 (byte (inc i))] (cond (== c 0xF0) (>= c1 0x90) (== c 0xF4) (< c1 0x90) :else true)))
+            (recur (+ i 4)) false)
+          :else false)))))
+
+(defn- strict-decode?
+  "Whether `bs` [a, b) decode in charset `charset` without error: UTF-8 validated, a single-byte charset by its
+  round trip"
+  [^bytes bs ^long a ^long b ^String charset]
+  (cond
+    (= charset "UTF-8") (utf8-valid? bs a b)
+    (= charset "ISO-8859-1") true
+    :else (let [^String s (try (String. bs (int a) (int (- b a)) charset)
+                       (catch Throwable e
+                         (throw (ex-info (str "the runtime has no charset " charset " (" (.getMessage e) ")") {:class :charset}))))]
+            (java.util.Arrays/equals (.getBytes s charset) (java.util.Arrays/copyOfRange bs (int a) (int b))))))
+
+(defn- line-end ^long [^bytes bs ^long a]
+  (let [n (alength bs)] (loop [i a] (cond (>= i n) n (== (aget bs i) 10) (inc i) :else (recur (inc i))))))
+
+(def ^:private cookie-re #"^[ \t\f]*#.*?coding[:=][ \t]*([-\w.]+)")
+(def ^:private blank-re #"^[ \t\f]*(?:[#\r\n]|$)")
+
+(defn decode-source
+  "The file's bytes as tokenize.tokenize reads them: {:encoding NAME :text TEXT} (the BOM stripped, the rest decoded
+  with errors replaced), or {:error [CLASS MSG nil nil nil nil nil]} (detect_encoding's SyntaxError)"
+  [^bytes bs]
+  (let [n (alength bs)
+        bom (and (>= n 3) (== (aget bs 0) (unchecked-byte 0xEF)) (== (aget bs 1) (unchecked-byte 0xBB)) (== (aget bs 2) (unchecked-byte 0xBF)))
+        a (if bom 3 0)
+        default (if bom "utf-8-sig" "utf-8")
+        latin (fn [x y] (String. bs (int x) (int (- y x)) "ISO-8859-1"))
+        err (fn [msg] {:error ["SyntaxError" msg nil nil nil nil nil]})
+        find-cookie (fn [x y]
+                      (when-let [mm (re-find cookie-re (str/replace (latin x y) #"[\r\n].*" ""))]
+                        (let [enc (normal-name (second mm))]
+                          (cond
+                            (nil? (codec enc)) {:error (str "unknown encoding: " enc)}
+                            (and bom (not= enc "utf-8")) {:error "encoding problem: utf-8"}
+                            bom {:enc (str enc "-sig")}
+                            :else {:enc enc}))))
+        check (fn [x y enc]
+                (cond
+                  (some #(zero? (aget bs (int %))) (range x y)) "source code cannot contain null bytes"
+                  (not (strict-decode? bs x y (codec enc))) "invalid or missing encoding declaration"))
+        found (if (>= a n)
+                {:enc default}
+                (let [e1 (line-end bs a) c1 (find-cookie a e1)]
+                  (cond
+                    (:error c1) c1
+                    c1 (if-let [m (check a e1 (:enc c1))] {:error m} c1)
+                    (not (re-find blank-re (latin a e1))) (if-let [m (check a e1 default)] {:error m} {:enc default})
+                    (>= e1 n) (if-let [m (check a e1 default)] {:error m} {:enc default})
+                    :else (let [e2 (line-end bs e1) c2 (find-cookie e1 e2)]
+                            (cond
+                              (:error c2) c2
+                              c2 (if-let [m (check a e2 (:enc c2))] {:error m} c2)
+                              :else (if-let [m (check a e2 default)] {:error m} {:enc default}))))))]
+    (if (:error found)
+      (err (:error found))
+      (let [enc (if (= (:enc found) "utf-8-sig") "utf-8" (:enc found))
+            charset ^String (codec enc)
+            text (try (String. bs (int a) (int (- n a)) charset)
+                      (catch Throwable e
+                        (throw (ex-info (str "the runtime has no charset " charset " (" (.getMessage e) ")") {:class :charset}))))]
+        {:encoding enc :text text}))))
+
+;; ---------------------------------------------------------------------------------------------
+;; tools/pydump/tokdump.py's text
+
+(defn esc ^String [^String s]
+  (let [sb (StringBuilder.)]
+    (dotimes [i (.length s)]
+      (let [ch (.charAt s i) o (int ch)]
+        (cond
+          (= ch \\) (.append sb "\\\\")
+          (= ch \newline) (.append sb "\\n")
+          (= ch \return) (.append sb "\\r")
+          (= ch \tab) (.append sb "\\t")
+          (or (< o 0x20) (== o 0x7F)) (.append sb (format "\\u%04X" o))
+          :else (.append sb ch))))
+    (str sb)))
+
+(defn- opt [x] (if (nil? x) "-" (str x)))
+
+(defn err-line ^String [[cls msg l o el eo text]]
+  (str "!" cls "\t" (opt l) "\t" (opt o) "\t" (opt el) "\t" (opt eo) "\t" (esc msg) "\t" (if (nil? text) "-" (esc text))))
+
+(defn dump
+  "A file's bytes as tokdump.py writes them (its two streams), the text of OUT/REL.tok"
+  ^String [^bytes bs]
+  (let [{:keys [error encoding text]} (decode-source bs)
+        sb (StringBuilder.)]
+    (if error
+      (.append sb (str (err-line error) "\n"))
+      (do
+        (.append sb (str "@" encoding "\n"))
+        (doseq [[nm extra] [["extra" true] ["parser" false]]]
+          (.append sb (str "#" nm "\n"))
+          (let [{:keys [tokens error]} (stream text extra)]
+            (doseq [[t s sl sc el ec] tokens]
+              (.append sb (str (nth tok-names t) "\t" sl "\t" sc "\t" el "\t" ec "\t" (esc s) "\n")))
+            (when error (.append sb (str (err-line error) "\n")))))))
+    (str sb)))

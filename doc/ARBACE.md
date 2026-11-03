@@ -74,7 +74,12 @@ code. Three kinds of things live here:
   PY5a"; evaluated from the checkout, not embedded, PYS18 (a)): its scope analysis, `python/scope.ae`, ports CPython
   3.14.10's `Python/symtable.c` and `Python/future.c`'s future parse (the release tarball
   https://www.python.org/ftp/python/3.14.10/Python-3.14.10.tar.xz, SHA-256 `de414a57...b72032`), by hand on
-  2026-11-03, the file carrying its notice (LICENSE.md: the PSF License Agreement); the rest is Arbace's own.
+  2026-11-03, the file carrying its notice (LICENSE.md: the PSF License Agreement); the rest is Arbace's own. repr/python
+  (`repr/python.ae`, `repr/python/`, `arbace.repr.python.*`; doc/python/SPEC.md): its converter and printer are Arbace's
+  own; since PY9a (doc/python/PYTHON-SURVEY.md, "As built: PY9a"; queue 199, 2026-11-03) `repr/python/lex.ae` ports
+  CPython 3.14.10's C tokenizer (`Parser/lexer/lexer.c`, `state.c`, `Parser/tokenizer/helpers.c`'s errors and
+  `readline_tokenizer.c`, `Python/Python-tokenize.c`'s iterator, `Lib/tokenize.py`'s `detect_encoding`; the same tarball),
+  by hand, the file carrying its notice; `repr/python/lexcheck.ae` (its check against CPython's) is Arbace's own.
 - Arbace's own namespaces of the program, not derived from Clojure: `box.ae` and `box/`
   (`arbace.box`, the store, over its host layer `arbace.box.host`; the box's build driver
   `arbace.box.build`, its plan `arbace.box.plan` (since GP2 also repr/go's native loader's go

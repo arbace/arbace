@@ -46,6 +46,15 @@
 #                                  back (the tokens' text in the file's encoding), then level 4 (the print's bytes equal
 #                                  the original's) and level 5 (marshal of the compiled code equal, positions included),
 #                                  against test/python/full-known.edn; costs into test/python/roundtrip-text-costs.edn
+#   bin/repr-python lex-check [--record] [--jobs N] [--mutants N|--no-mutants] [CORPUS...]
+#                                  PY9a: the native lexer (arbace.repr.python.lex) against CPython's C tokenizer: every
+#                                  file of the corpora (default samples stdlib site-packages lib-test, and lex-errors:
+#                                  test/python/lex-errors/, a file per tokenizer message or path) dumped by
+#                                  tools/pydump/tokdump.py (the encoding, tokenize's stream and the parser's, the error
+#                                  that ends one) and by the port (arbace.repr.python.lexcheck), line for line equal or
+#                                  known (test/python/lex-check-known.edn); a negative control; then N mutants' files
+#                                  (default 2,000, two mutants of 3 edits each, seed 26: the error paths) the same way.
+#                                  Work in .tmp/repr-python/lex/CORPUS/ (ref/, out/files.tsv, out/diff/)
 #   bin/repr-python check          spec-check, samples, then the round trips (:lines, then --text) over the default corpora
 # Environment: REPR_PYTHON_CORPORA, REPR_PYTHON_PIN_VERSION, REPR_PYTHON_APKS, REPR_PYTHON_SPEC name other copies of
 # test/python/corpora.edn, tools/pydump/PYTHON_VERSION, tools/pydump/apks.sha256, doc/python/SPEC.md (negative controls).
@@ -394,25 +403,104 @@ cmd_print() {
   for f in "$@"; do b=$(basename "$f"); py_arbace print "$f" "$out/${b%.ae}"; echo "${out#$root/}/${b%.ae}"; done
 }
 
+# ---- PY9a: the native lexer against CPython's tokenizer ----
+
+LEX_KNOWN="${REPR_PYTHON_LEX_KNOWN:-$root/test/python/lex-check-known.edn}"
+LEX="$WORK/lex"
+
+lexcheck() {
+  ARBACE_PATH="$root" GOMEMLIMIT=${REPR_PYTHON_GOMEMLIMIT:-1500MiB} GOMAXPROCS=${REPR_PYTHON_THREADS:-4} \
+    "$(arbace_exe)" -m arbace.repr.python.lexcheck "$@"
+}
+
+# tokdump BASE LIST OUT: the helper's token dumps over LIST in $JOBS processes
+tokdump() {
+  local base=$1 list=$2 out=$3 i d
+  d="$out.split"; rm -rf "$d"; mkdir -p "$d"
+  split -n "r/$JOBS" -d "$list" "$d/part."
+  for i in "$d"/part.*; do
+    python3 -I -S -B "$root/tools/pydump/tokdump.py" --base "$base" --list "$i" --out "$out" --tsv "$i.tsv" &
+  done
+  wait
+  cat "$d"/part.*.tsv | LC_ALL=C sort > "$out.tsv"
+  rm -rf "$d"
+}
+
+lex_one() { # ID BASE LIST
+  local id=$1 base=$2 list=$3 d="$LEX/$1" rc=0
+  rm -rf "$d/ref" "$d/out"; mkdir -p "$d"
+  tokdump "$base" "$list" "$d/ref"
+  lexcheck check --corpus "$id" --base "$base" --list "$list" --ref "$d/ref" --out "$d/out" --known "$LEX_KNOWN" \
+    --jobs "$JOBS" ${record:+--record} || rc=$?
+  return $rc
+}
+
+cmd_lex_check() {
+  local record="" ids=() nmut=2000 worst=0 rc id
+  JOBS=3
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --record) record=1; shift ;;
+      --jobs) JOBS=$2; shift 2 ;;
+      --mutants) nmut=$2; shift 2 ;;
+      --no-mutants) nmut=0; shift ;;
+      *) ids+=("$1"); shift ;;
+    esac
+  done
+  [ ${#ids[@]} -gt 0 ] || ids=(samples stdlib site-packages lib-test lex-errors)
+  fetch_tarball >/dev/null; fetch_apks >/dev/null
+  local pools=()
+  for id in "${ids[@]}"; do
+    if [ "$id" = lex-errors ]; then
+      # the tokenizer's own error cases (test/python/lex-errors/: one file a message or path), not a corpus of corpora.edn
+      mkdir -p "$LEX/$id"
+      (cd "$root/test/python/lex-errors" && ls | LC_ALL=C sort) > "$LEX/$id/list"
+      rc=0; lex_one "$id" "$root/test/python/lex-errors" "$LEX/$id/list" || rc=$?
+      [ $rc -gt $worst ] && worst=$rc
+      continue
+    fi
+    local -a info; mapfile -t info < <(corpus_base "$id")
+    local -a args=(); IFS=, read -ra pa <<< "${info[1]}"; args+=("${pa[@]}")
+    if [ "${info[2]}" != - ]; then IFS=, read -ra ea <<< "${info[2]}"; for e in "${ea[@]}"; do args+=(--exclude "$e"); done; fi
+    mkdir -p "$LEX/$id"
+    (cd "${info[0]}" && py corpus.py list "${info[0]}" "${args[@]}") > "$LEX/$id/list"
+    { echo "${info[0]}"; cat "$LEX/$id/list"; } > "$LEX/$id/pool"
+    pools+=("$LEX/$id/pool")
+    rc=0; lex_one "$id" "${info[0]}" "$LEX/$id/list" || rc=$?
+    [ $rc -gt $worst ] && worst=$rc
+  done
+  # the negative control (GTS81 (a)): a file judged against another's dump must differ
+  [ ${#pools[@]} -gt 0 ] && { lexcheck control --base "$(head -1 "${pools[-1]}")" --list "$(dirname "${pools[-1]}")/list" \
+    --ref "$(dirname "${pools[-1]}")/ref" || worst=1; }
+  if [ "$nmut" != 0 ] && [ ${#pools[@]} -gt 0 ]; then
+    rm -rf "$LEX/mutants"
+    lexcheck mutants --out "$LEX/mutants" --seed 26 --files "$nmut" --per 2 --edits 3 "${pools[@]}" || return 1
+    rc=0; lex_one mutants "$LEX/mutants/src" "$LEX/mutants/list" || rc=$?
+    [ $rc -gt $worst ] && worst=$rc
+  fi
+  return $worst
+}
+
 cmd_check_all() {
   cmd_spec_check && cmd_samples && cmd_roundtrip && cmd_roundtrip --text
 }
 
 command -v python3 >/dev/null || die "no python3 (the oracle, doc/ALPINE.md)"
-case "${1:-}" in pins|spec-check|roundtrip|check) load_rows ;; esac
+case "${1:-}" in pins|spec-check|roundtrip|lex-check|check) load_rows ;; esac
 case "${1:-}" in
   pins)
     case "${2:-}" in
       --fetch) cmd_fetch ;;
       --count) cmd_count ;;
       --check) cmd_check ;;
-      *) sed -n '2,54p' "$0"; exit 2 ;;
+      *) sed -n '2,61p' "$0"; exit 2 ;;
     esac ;;
   spec-check) cmd_spec_check ;;
   samples) cmd_samples ;;
   read) shift; cmd_read "$@" ;;
   print) shift; cmd_print "$@" ;;
   roundtrip) shift; cmd_roundtrip "$@" ;;
+  lex-check) shift; cmd_lex_check "$@" ;;
   check) cmd_check_all ;;
-  *) sed -n '2,54p' "$0"; exit 2 ;;
+  *) sed -n '2,61p' "$0"; exit 2 ;;
 esac
