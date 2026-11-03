@@ -418,6 +418,32 @@
         (refuse :op "the floating operator " op))
       (refuse :vector "the operator " op " on " (pr-str t)))))
 
+;; vectors whose elements are narrower than a byte (RES6 (a)): their bitcasts go through the bits
+(defn- packed-vector? [t]
+  (and (seq? t) (= (first t) 'vector) (let [k (int-bits (nth t 2))] (and k (not (#{8 16 32 64 128} k))))))
+
+(defn- bits-type [^long n]
+  (cond (<= n 64) 'unsigned-long (<= n 128) 'unsigned-__int128 :else (refuse :vector "a bitcast of " n " bits")))
+
+(defn- value-bits
+  "The bits of an integer or integer vector expression as an unsigned integer expression (element i at bits i*k)."
+  [t e]
+  (if-let [w (int-bits t)]
+    (list 'conv (bits-type w) (uval e w))
+    (let [[_ n et] t k (or (int-bits et) (refuse :vector "a bitcast of " (pr-str t))) bt (bits-type (* (long n) (long k)))]
+      (apply list 'bit-or (list 'conv bt 0)
+             (for [i (range n)] (list '<< (list 'conv bt (mask (list 'conv (utype (container-bits k)) (list 'aget (list '.-e e) i)) k)) (* i k)))))))
+
+(defn- bits-value
+  "An integer or integer vector of type t from the bits expression x."
+  [t x]
+  (if-let [w (int-bits t)]
+    (mask (list 'conv (ctype t) x) w)
+    (let [[_ n et] t k (or (int-bits et) (refuse :vector "a bitcast to " (pr-str t)))]
+      (bits-type (* (long n) (long k)))
+      (list 'compound-lit (ctype t)
+            (apply list 'init (for [i (range n)] (mask (list 'conv (ctype et) (list '>> x (* i k))) k)))))))
+
 (defn- cast-expr
   [op t1 e t2]
   (let [w1 (int-bits t1) w2 (int-bits t2) c2 (when (or w2 (float-type? t2) (ptr-type? t2) (aggregate? t2)) (ctype t2))]
@@ -436,6 +462,9 @@
       bitcast (cond
                 (and (ptr-type? t1) (ptr-type? t2)) e
                 (= t1 t2) e
+                ;; a vector of elements narrower than a byte (<N x i1>, <1 x i4>) is bit-packed in LLVM and a byte an element
+                ;; here: through the bits as an integer (element i at bits i*k)
+                (or (packed-vector? t1) (packed-vector? t2)) (bits-value t2 (value-bits t1 e))
                 ;; gcc's C has no __builtin_bit_cast: the bytes copied through a compound literal of the source type
                 :else (list 'stmt-expr (list 'let [(list 'c/var (with-meta 'cx$u {:tag c2}))]
                                              (list '__builtin_memcpy (list 'addr 'cx$u) (list 'addr (list 'compound-lit (ctype t1) e))
@@ -564,6 +593,17 @@
         base (second (re-matches #"llvm\.([a-z_.0-9]+?)(\.(p0|i[0-9]+|f[0-9]+|v[0-9].*|f80|isVoid).*)?" nm))
         parts (str/split nm #"\.")]
     (cond
+      ;; an elementwise intrinsic on vectors (RES6 (a)): its scalar form, element by element
+      (and (not (re-matches #"llvm\.(vector|masked)\..*" nm)) (re-find #"\.v[0-9]+(i[0-9]+|f[0-9]+|p0)" nm)
+           (or (vector-type? rt) (some #(vector-type? (first %)) args)))
+      (let [snm (str/replace nm #"\.v[0-9]+(i[0-9]+|f[0-9]+|p0)" ".$1")
+            n (nth (if (vector-type? rt) rt (first (first (filter #(vector-type? (first %)) args)))) 1)]
+        (when (and (not= rt 'void) (not (vector-type? rt))) (refuse :intrinsic nm))
+        (vec (mapcat (fn [i]
+                       (intrinsic snm (vec (for [[t v :as x] args]
+                                             (if (vector-type? t) [(nth t 2) (list 'c/expr (velem (value (peek x) t) i))] x)))
+                                  (when res (velem res i)) (if (vector-type? rt) (nth rt 2) rt)))
+                     (range n))))
       (re-matches #"llvm\.memcpy(\.inline)?\..*" nm) [(list '__builtin_memcpy (a 0) (a 1) (uval (a 2) (w 2)))]
       (re-matches #"llvm\.memmove\..*" nm) [(list '__builtin_memmove (a 0) (a 1) (uval (a 2) (w 2)))]
       (re-matches #"llvm\.memset(\.inline)?\..*" nm) [(list '__builtin_memset (a 0) (list 'conv 'int (a 1)) (uval (a 2) (w 2)))]
@@ -625,17 +665,6 @@
       (let [sfx ({"f32" "f" "f64" "" "f80" "l"} (nth parts 2))]
         (set-res (apply list (symbol (str "__builtin_" (math-fns (nth parts 1)) sfx)) (map a (range (count args))))))
       (re-matches #"llvm\.coro\..*" nm) (refuse :coroutine nm)
-      ;; an elementwise intrinsic on vectors (RES6 (a)): its scalar form, element by element
-      (and (not (re-matches #"llvm\.(vector|masked)\..*" nm)) (re-find #"\.v[0-9]+(i[0-9]+|f[0-9]+|p0)" nm)
-           (or (vector-type? rt) (some #(vector-type? (first %)) args)))
-      (let [snm (str/replace nm #"\.v[0-9]+(i[0-9]+|f[0-9]+|p0)" ".$1")
-            n (nth (if (vector-type? rt) rt (first (first (filter #(vector-type? (first %)) args)))) 1)]
-        (when (and (not= rt 'void) (not (vector-type? rt))) (refuse :intrinsic nm))
-        (vec (mapcat (fn [i]
-                       (intrinsic snm (vec (for [[t v :as x] args]
-                                             (if (vector-type? t) [(nth t 2) (list 'c/expr (velem (value (peek x) t) i))] x)))
-                                  (when res (velem res i)) (if (vector-type? rt) (nth rt 2) rt)))
-                     (range n))))
       (re-matches #"llvm\.vector\.reduce\.[a-z]+\..*" nm)
       (let [op (nth parts 3) fl? (#{"fadd" "fmul"} op) vi (if fl? 1 0) t (at vi)]
         (when-not (vector-type? t) (refuse :intrinsic nm))
@@ -835,17 +864,6 @@
     (trunc zext sext fptrunc fpext fptoui fptosi uitofp sitofp ptrtoint inttoptr bitcast)
     (let [[t1 v t2] args]
       (cond
-        (and (= h 'bitcast) (vector-type? t1) (= 'i1 (nth t1 2)) (int-bits t2))
-        (let [n (nth t1 1) va (value v t1) c (container-bits n)]
-          (when-not (= n (int-bits t2)) (refuse :vector "bitcast of " (pr-str t1) " to " t2))
-          [(list 'set! res (apply list 'bit-or (int-lit 0 n)
-                                  (for [i (range n)] (list '<< (list 'conv (utype c) (list 'bit-and (velem va i) 1)) i))))])
-        (and (= h 'bitcast) (vector-type? t2) (= 'i1 (nth t2 2)))
-        (let [n (nth t2 1) w (int-bits t1) e (value v t1)]
-          (when-not (= n w) (refuse :vector "bitcast of " (pr-str t1) " to " (pr-str t2)))
-          (velems res n #(list 'conv 'unsigned-char (list 'bit-and (list '>> (uval e w) %) 1))))
-        (and (= h 'bitcast) (or (and (vector-type? t1) (= 'i1 (nth t1 2))) (and (vector-type? t2) (= 'i1 (nth t2 2)))))
-        (refuse :vector "bitcast of " (pr-str t1) " to " (pr-str t2))
         (= h 'bitcast) nil
         (and (vector-type? t1) (vector-type? t2))
         (let [va (value v t1)]
