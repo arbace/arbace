@@ -522,3 +522,10 @@ Rule slips: one probe command redirected clang++'s stderr to `/dev/null` (`2>/de
 comparison line used `<(true)` and `>/dev/null` (a no-op left in a loop, replaced by file comparisons); both against the
 conventions, neither left a file or a process. `TMPDIR` was the worktree's `.tmp/tmp` for every clang, gcc and Arbace run.
 No process was left running.
+
+## Note (2026-11-03): LLVM 23's own tools installed
+
+The user installed `llvm23` and `llvm23-test-utils` (23.1.4, clang's version): `llvm-as`, `opt`, `llvm-dis`, `lli` and
+`FileCheck` in `/usr/lib/llvm23/bin` (not on PATH; the host's other LLVM tools are GHC's `llvm15`). The probes above used
+clang 23 for want of them; LL1's pins name `llvm23`'s version beside `clang23`'s, and LLS3/LLS8 can take `opt -verify` and
+`lli` at the pinned version. doc/ALPINE.md lists the line.
