@@ -709,3 +709,25 @@ PYS1-PYS18 and PYS20 all (a), as recommended. PYS19: the Mac VM peer does all of
 PY11, a standing line of queue tasks, each reviewed and merged on the main host), beginning now, beside GT8; the main host
 keeps GT8, the tag `arbace-reaps-4-crops-v1` and the other crops. Python stays out of `gate_key` and the gate (PYS18)
 until its row fits GT8's budget.
+
+## As built: PY1 (2026-11-03, the Mac VM, queue 174)
+
+- **The spec**, `doc/python/SPEC.md`: Python forms for every node of `Parser/Python.asdl` (3.14.10: 19 types, 113
+  constructors, 196 fields, 8 types with position attributes), the literals' spellings (§3: numbers, string and bytes
+  bodies as written with `:prefix` and `:quote`, `str-concat` for implicit concatenation, f-strings with `:debug` for
+  `=`, t-strings), `elif` kept, positions and `:full`'s tokens (§11), the error form (§12), the checklist (§13) and the
+  choices S1-S20 (§14). The operators the reader cannot read (`@`, `//`, `^`, `~`) take the Go and C forms' names
+  (S1). `ast.parse(type_comments=True)` rejects one file of `Lib/test` the plain parse accepts, so type comments come
+  from a second parse (S6).
+- **The pins**: the oracle in `tools/pydump/PYTHON_VERSION` (version, `sys.version`, the apk and its APKINDEX
+  checksum per architecture); the tarball in `test/python/corpora.edn` (SHA-256 checked against python.org's
+  published value and its Sigstore bundle's digest, SHA-512 against Alpine's APKBUILD), with five of its reference
+  files; the site-packages set as 20 Alpine apks fetched into `.tmp/` (not installed), pinned per architecture in
+  `tools/pydump/apks.sha256`, their `.py` files identical on x86_64 and aarch64.
+- **The corpora** (`test/python/corpora.edn`): `stdlib` (`Lib/` less `Lib/test`: 720 files, 335,637 lines),
+  `lib-test` (1,153 `.py` files, 667,670 lines; 433 test modules, 3,468 classes with 31,427 test methods counted
+  statically; 4 files `ast.parse` rejects, 1 more that only `type_comments=True` rejects), `language-core` (the 11
+  modules of §8.2: 28,302 lines, 1,140 test methods), `site-packages` (921 files, 330,603 lines), `samples` (6 files,
+  every node class of the `ast` covered).
+- **The checks**, `bin/repr-python pins --fetch|--count|--check`, `spec-check`, `samples` (the Makefile's
+  `repr-python-*`), light, out of `gate_key` and the gate (PYS18).
