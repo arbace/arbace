@@ -88,7 +88,7 @@ value:
 | `:type-comment` | the comment's text after `# type:`, a string | `function-def`, `async-function-def`, `assign`, `for`, `async-for`, `with`, `async-with`, `arg` (§5.8) |
 | `:type-ignores` | a vector of `(type-ignore LINE "TAG")` | `python/module` (§4) |
 | `:elif` | `true`: this `if` is the `elif` of its parent's `:else` | an `if` alone in an `:else` (§5.4) |
-| `:type-comments` | `:rejected`: `ast.parse(type_comments=True)` rejects the file, so it has no type comments (§5.8, S6; provisional, the DECISION of queue 174, pending the user) | `python/module` |
+| `:type-comments` | `:rejected`: `ast.parse(type_comments=True)` rejects the file, so it has no type comments (§5.8, S6; queue 174's DECISION (a), decided by the user, 2026-11-03) | `python/module` |
 | `:file` | the file's path relative to its corpus root | `python/module` |
 | `:mode` | `:lines` or `:full` | `python/module` |
 | `:tokens`, `:encoding`, `:bom` | mode `:full`'s token stream and the file's encoding (§11) | `python/module` |
@@ -386,7 +386,7 @@ module's `type_ignores`. The forms keep them in metadata (`:type-comment`, `:typ
 `ast.parse(type_comments=True)` rejects some files the plain parse accepts (a comment that only looks like a type
 comment, as `# type: 1 byte` inside an expression in `Lib/test/test_tarfile.py`): the helper parses plainly for the
 tree and the acceptance, then with `type_comments=True` for the metadata alone, and a file the second parse rejects
-has no type comments and says so (`:type-comments :rejected` in its module's map; S6, the DECISION of the report).
+has no type comments and says so (`:type-comments :rejected` in its module's map; S6: queue 174's DECISION (a), decided by the user, 2026-11-03).
 
 ```forms
 ;; py: x = [] # type: list[int]

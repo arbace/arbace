@@ -739,12 +739,12 @@ until its row fits GT8's budget.
   context marked for the converter), or `(python/error ...)`, with a TSV per file of the levels' digests (`ast.dump`;
   the code without positions) and its seconds and peak RSS; `symtable` (PY5's reference) and `code`. Type comments
   from a second parse, a file only `type_comments=True` rejects marked `:type-comments :rejected` (queue 174's
-  DECISION (a), provisional pending the user).
+  DECISION (a), decided by the user, 2026-11-03).
 - **The converter and the printer**, `arbace.repr.python.convert` and `.print`, and the command `arbace.repr.python`
   (`convert`, `print`, `compare`), evaluated on stage 0 from the checkout (`ARBACE_PATH`; not embedded and out of the
   keys: `arbace/j2g/embed.ae`, `bin/lib/version.bash`, the audit's hosts, PYS18 (a)).
 - **The round trip** `bin/repr-python roundtrip [--record]` (and `read`, `print`, `check`): levels 1-3 of §5.2 over
-  samples, stdlib, site-packages (the 20 pinned apks, queue 174's DECISION (a), provisional) and `Lib/test`, judged
+  samples, stdlib, site-packages (the 20 pinned apks, queue 174's DECISION (a), decided by the user, 2026-11-03) and `Lib/test`, judged
   against `test/python/roundtrip-known.edn` (two classes, both by rule: `:rejected`, the 4 files CPython rejects,
   judged on its message; `:code-lines`, the code differing with the ast equal: the positions'). On the VM (aarch64, 8
   CPUs), 2,800 files: level 1 2,796 of 2,796 read, level 2 all, level 3 all but 30 (3 stdlib, 21 site-packages, 6
