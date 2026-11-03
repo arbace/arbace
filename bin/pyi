@@ -25,10 +25,22 @@
 #   bin/pyi compile-check [--record] [CORPUS...]
 #                                  PY5a: every read file compiled to pyi's IR (arbace.python.compile) and the IR
 #                                  verified (doc/python/PYI-SPEC.md §4), against test/python/compile-known.edn
+#   bin/pyi run FILE.py            PY5b0: FILE read in mode :full (tools/pydump/pydump.py tree --full: its lines), compiled to
+#                                  the IR and run by pyi's runtime go/arbace/py, interpreted by goi on stage 0 (PY5a's DECISION
+#                                  (a)); the program's stdout, stderr and exit status
+#   bin/pyi runtime print|read|vet|check
+#                                  PY5b0, the runtime's sources (doc/python/PYI-SPEC.md §8): go/arbace/py's Go forms (mode :full,
+#                                  lossless) printed as a Go module into .tmp/repr-python/pyi/runtime (print), edited there,
+#                                  read back into go/arbace/py (read); vet: the Go there (printed first when absent) gofmt
+#                                  clean, then go vet and go test by TamaGo's go;
+#                                  check: printed and read again equal to the committed forms, the runtime's operations
+#                                  arbace.python.ir/ops's (runtime-ops), the programs of test/python/pyi/ run by bin/pyi run
+#                                  equal to the oracle's runs (stdout, status, stderr's last line)
 # Environment: REPR_PYTHON_SRC as for bin/repr-python (the tarball's source).
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 . "$root/bin/lib/tmpdir.bash"
+caller_pwd=$PWD
 cd "$root"
 
 WORK="$root/.tmp/repr-python/pyi"
@@ -219,11 +231,96 @@ cmd_compile_check() {
   return $worst
 }
 
+cmd_run() {
+  [ $# -ge 1 ] || die "usage: bin/pyi run FILE.py"
+  local f d name
+  case $1 in /*) f=$1 ;; *) f=$caller_pwd/$1 ;; esac
+  f=$(cd "$(dirname "$f")" && pwd)/$(basename "$f")
+  [ -f "$f" ] || die "no file $1"
+  name=$(basename "$f")
+  d=$(mktemp -d "$WORK/run.XXXXXX")
+  echo "$name" > "$d/list"
+  py pydump.py tree --full --base "$(dirname "$f")" --list "$d/list" --out "$d/dumps" --tsv "$d/tsv" >/dev/null
+  local rc=0
+  pa_arbace run --dump "$d/dumps/$name.ae" --file "$f" || rc=$?
+  rm -rf "$d"
+  return $rc
+}
+
+RT="$WORK/runtime"
+tamago_go() { (cd "$RT" && env GOROOT= PATH="${ARBACE_GOROOT:-/root/tamago-go}/bin:$PATH" GOCACHE="$WORK/gocache" GOFLAGS=-mod=mod CGO_ENABLED=0 GOTOOLCHAIN=local "$@"); }
+
+runtime_print() {
+  local out=$1
+  rm -rf "$out"; mkdir -p "$out/py"
+  printf 'module arbace\n\ngo 1.27\n' > "$out/go.mod"
+  ARBACE_PATH="$root" "$root/bin/repr-go" print "$root/go/arbace/py.ae" "$out/py" >/dev/null
+}
+
+runtime_read() {
+  local src=$1 out=$2
+  rm -rf "$out"
+  (cd "$src" && "$root/bin/repr-go" read --full --tests --goos linux --goarch amd64 --out "$out" ./py) > "$out.log" 2>&1 \
+    || { cat "$out.log" >&2; die "the runtime's Go does not read (log $out.log)"; }
+}
+
+cmd_runtime() {
+  local verb=${1:-}
+  case $verb in
+    print) runtime_print "$RT"; echo "the runtime's Go in $RT/py: edit it there, then bin/pyi runtime read" ;;
+    read)
+      [ -d "$RT/py" ] || die "no $RT/py: bin/pyi runtime print first"
+      runtime_read "$RT" "$WORK/runtime-forms"
+      rm -rf "$root/go/arbace/py" "$root/go/arbace/py.ae"
+      cp -r "$WORK/runtime-forms/go/arbace/py" "$WORK/runtime-forms/go/arbace/py.ae" "$root/go/arbace/"
+      echo "go/arbace/py read from $RT/py ($(ls "$root/go/arbace/py" | wc -l) files)" ;;
+    vet)
+      [ -d "$RT/py" ] || runtime_print "$RT"
+      tamago_go gofmt -l py | sed 's/^/not gofmt: /' | grep . && die "gofmt the runtime's Go first"
+      tamago_go go vet ./py
+      tamago_go go test ./py ;;
+    check)
+      local rc=0 t="$WORK/runtime-check" p
+      runtime_print "$t/src"
+      runtime_read "$t/src" "$t/forms"
+      if diff -r "$root/go/arbace/py" "$t/forms/go/arbace/py" >/dev/null && cmp -s "$root/go/arbace/py.ae" "$t/forms/go/arbace/py.ae"; then
+        echo "runtime: go/arbace/py printed and read again: the same forms"
+      else
+        echo "runtime: go/arbace/py printed and read again DIFFERS (diff -r go/arbace/py $t/forms/go/arbace/py)"; rc=1
+      fi
+      pa_arbace runtime-ops || rc=1
+      local n=0 bad=0
+      for p in "$root"/test/python/pyi/*.py; do
+        n=$((n + 1))
+        local want got
+        want=$(cd "$(dirname "$p")" && smoke_run python3 -I "$(basename "$p")")
+        got=$(cd "$(dirname "$p")" && smoke_run "$root/bin/pyi" run "$(basename "$p")")
+        if [ "$want" = "$got" ]; then echo "  pass $(basename "$p")"; else
+          echo "  FAIL $(basename "$p")"; diff <(echo "$want") <(echo "$got") | head -10; bad=$((bad + 1)); fi
+      done
+      echo "runtime: $n programs of test/python/pyi run by pyi as by the oracle: $((n - bad)) equal"
+      [ $bad -eq 0 ] || rc=1
+      return $rc ;;
+    *) die "usage: bin/pyi runtime print|read|vet|check" ;;
+  esac
+}
+
+# smoke_run CMD...: the run's stdout, its exit status and stderr's last line, for comparing pyi with the oracle
+smoke_run() {
+  local o e rc=0
+  o=$(mktemp "$WORK/smoke.XXXXXX"); e=$(mktemp "$WORK/smoke.XXXXXX")
+  timeout 120 env HOME="$WORK" TMPDIR="$WORK" "$@" > "$o" 2> "$e" || rc=$?
+  cat "$o"; echo "status $rc"; echo "stderr $(tail -n 1 "$e")"
+  rm -f "$o" "$e"
+}
+
 command -v python3 >/dev/null || die "no python3 (the oracle)"
 case "${1:-}" in
   gen) shift; cmd_gen "$@" ;;
   record-ref) shift; cmd_record_ref "$@" ;;
   scope-check) shift; cmd_scope_check "$@" ;;
   compile-check) shift; cmd_compile_check "$@" ;;
-  *) sed -n '2,27p' "$0"; exit 2 ;;
+  run) shift; mkdir -p "$WORK"; cmd_run "$@" ;;
+  runtime) shift; mkdir -p "$WORK"; cmd_runtime "$@" ;;
+  *) sed -n '2,38p' "$0"; exit 2 ;;
 esac

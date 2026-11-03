@@ -13,7 +13,13 @@
         jump inside its code, every exception handler's range and target, the stack's depth the same on every path
         and never below zero, every local, cell, free and global name declared); the compile errors judged on
         CPython's (the TSV's code column: \"compile-error: MSG\"); --ops writes the count of each operation; the known
-        file test/python/compile-known.edn"
+        file test/python/compile-known.edn
+    run --dump FILE --file PATH
+        PY5b0: the dump (pydump.py tree --full: lines for tracebacks, PY5a's DECISION (a)) compiled and its IR run by
+        pyi's runtime go/arbace/py, interpreted by goi (PYI-SPEC.md §7): the program's stdout and stderr, its exit status
+    runtime-ops
+        PY5b0: the runtime's operations (go/arbace/py's OpNames) against arbace.python.ir/ops; each unimplemented one's
+        owner printed by milestone; exit 1 when the two lists differ"
   (:require [arbace.python.scope :as sc]
             [arbace.python.compile :as pc]
             [arbace.python.ir :as ir]
@@ -145,6 +151,41 @@
     (judge opts :scope (count files) res (constantly nil) {}
            "The files whose symbol table (arbace.python.scope) is not CPython's (bin/pyi scope-check; doc/python/PYI-SPEC.md §2), by check and corpus.")))
 
+;; ---- run ----
+
+(defn ir-text
+  "A module's code object as the runtime's loader reads it (PYI-SPEC.md §7.2): pr-str, no print limits"
+  [code]
+  (binding [*print-length* nil *print-level* nil *print-meta* false *print-namespace-maps* false]
+    (pr-str code)))
+
+(defn- runtime-fn [sym]
+  (require 'go.arbace.py)
+  (or (resolve (symbol "go.arbace.py" (name sym))) (throw (ex-info (str "no go.arbace.py/" sym) {}))))
+
+(defn- do-run [opts]
+  (let [d (cv/convert (slurp (get opts "--dump")))]
+    (when (cv/error-form? d)
+      (binding [*out* *err*] (println (pr-str d)))
+      (System/exit 1))
+    (let [code (try (pc/compile-module d)
+                    (catch Throwable e
+                      (if (= 'SyntaxError (:class (ex-data e)))
+                        (do (binding [*out* *err*] (println (str "SyntaxError: " (:msg (ex-data e))))) (System/exit 1))
+                        (throw e))))]
+      (System/exit ((runtime-fn 'RunModule) (ir-text code) (get opts "--file"))))))
+
+(defn- do-runtime-ops [opts]
+  (let [theirs (vec ((runtime-fn 'OpNames)))
+        owners (vec ((runtime-fn 'OpOwners)))
+        mine (vec (sort (map name (keys ir/ops))))]
+    (println (str "  the IR's operations " (count mine) ", the runtime's " (count theirs)))
+    (doseq [[o n] (sort (frequencies owners))] (println (str "  " o ": " n " operations")))
+    (if (= mine theirs)
+      (println "runtime-ops: the runtime's operations are arbace.python.ir/ops's")
+      (do (println "runtime-ops: DIFFER: only the IR's" (pr-str (remove (set theirs) mine)) "only the runtime's" (pr-str (remove (set mine) theirs)))
+          (System/exit 1)))))
+
 ;; ---- compile-check ----
 
 (defn- tsv [f]
@@ -185,8 +226,10 @@
 
 (defn -main [& args]
   (let [[verb & more] args
-        opts (parse-args more #{"--corpus" "--dumps" "--scopes" "--known" "--results" "--out" "--tsv" "--ops"})]
+        opts (parse-args more #{"--corpus" "--dumps" "--scopes" "--known" "--results" "--out" "--tsv" "--ops" "--file" "--dump"})]
     (case verb
       "scope-check" (do-scope-check opts)
       "compile-check" (do-compile-check opts)
-      (do (println "usage: -m arbace.python scope-check|compile-check ...") (System/exit 2)))))
+      "run" (do-run opts)
+      "runtime-ops" (do-runtime-ops opts)
+      (do (println "usage: -m arbace.python scope-check|compile-check|run|runtime-ops ...") (System/exit 2)))))
