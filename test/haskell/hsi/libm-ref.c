@@ -85,13 +85,13 @@ int main(int argc, char **argv) {
 			for (int k = 0; k < n / 5; k++) f1(F1[i].n, F1[i].f, (float)ud(-RF[r], RF[r]));
 		for (int k = 0; k < n / 5; k++) f1(F1[i].n, F1[i].f, f32((uint32_t)(rnd() % 0x800000u)));
 	}
-	/* pow and atan2: the edges' cross product, random bit patterns, and values in ranges: x in (0, 10) with y in
+	/* pow, atan2 and hypot: the edges' cross product, random bit patterns, and values in ranges: x in (0, 10) with y in
 	   (-60, 60), x negative with an integer y, x near 1 with large y, subnormal x */
 	for (size_t a = 0; a < sizeof ED / sizeof *ED; a++)
 		for (size_t b = 0; b < sizeof ED / sizeof *ED; b++)
 			for (int s = 0; s < 4; s++) {
 				double x = s & 1 ? -ED[a] : ED[a], y = s & 2 ? -ED[b] : ED[b];
-				d2("pow", pow, x, y); d2("atan2", atan2, x, y);
+				d2("pow", pow, x, y); d2("atan2", atan2, x, y); d2("hypot", hypot, x, y);
 			}
 	for (size_t a = 0; a < sizeof EF / sizeof *EF; a++)
 		for (size_t b = 0; b < sizeof EF / sizeof *EF; b++)
@@ -101,13 +101,17 @@ int main(int argc, char **argv) {
 			}
 	double nans[] = {nand, nann, nanp, 1.0, -1.0, 0.0, INFINITY};
 	for (int a = 0; a < 7; a++) for (int b = 0; b < 7; b++) {
-		d2("pow", pow, nans[a], nans[b]); d2("atan2", atan2, nans[a], nans[b]);
+		d2("pow", pow, nans[a], nans[b]); d2("atan2", atan2, nans[a], nans[b]); d2("hypot", hypot, nans[a], nans[b]);
 	}
 	for (int k = 0; k < n; k++) {
 		d2("pow", pow, d64(rnd()), d64(rnd())); d2("atan2", atan2, d64(rnd()), d64(rnd()));
 		d2("pow", pow, ud(0, 10), ud(-60, 60)); d2("atan2", atan2, ud(-10, 10), ud(-10, 10));
 		d2("pow", pow, -ud(0, 10), (double)(int)ud(-40, 40)); d2("pow", pow, ud(0.999, 1.001), ud(-1e6, 1e6));
 		d2("pow", pow, d64(rnd() % 0x10000000000000ull), ud(-2, 2));
+		/* hypot: bit patterns, ordinary magnitudes, close ones, and the scaled ranges near overflow and underflow */
+		d2("hypot", hypot, d64(rnd()), d64(rnd())); d2("hypot", hypot, ud(-10, 10), ud(-10, 10));
+		{ double h = ud(-1e3, 1e3); d2("hypot", hypot, h, h * (1 + ud(-1e-8, 1e-8))); }
+		d2("hypot", hypot, ud(1e300, 1e308), ud(1e300, 1e308)); d2("hypot", hypot, ud(1e-310, 1e-300), ud(1e-310, 1e-300));
 		f2("powf", powf, f32((uint32_t)rnd()), f32((uint32_t)rnd())); f2("atan2f", atan2f, f32((uint32_t)rnd()), f32((uint32_t)rnd()));
 		f2("powf", powf, (float)ud(0, 10), (float)ud(-40, 40)); f2("atan2f", atan2f, (float)ud(-10, 10), (float)ud(-10, 10));
 		f2("powf", powf, -(float)ud(0, 10), (float)(int)ud(-30, 30)); f2("powf", powf, (float)ud(0.99, 1.01), (float)ud(-1e4, 1e4));
