@@ -30,8 +30,13 @@
 #                                  GHC 9.14.1's -O0 builds of the run corpora run and recorded into
 #                                  test/haskell/ref-ghc914.edn (status, stdout's SHA-256, size and first line,
 #                                  stderr's, the build's and the run's seconds); --only keeps every other line
-#   bin/hsi build                  hsi's light driver built (go/arbace/hs, test/haskell/hsi/cmd.ae and go/arbace/crt printed
-#                                  by repr/go, TamaGo's go) into .tmp/hsi/bin/hsi, its path printed (HSI_EXE names another)
+#   bin/hsi build                  hsi's light driver built (go/arbace/hs, go/arbace/libm, test/haskell/hsi/cmd.ae and
+#                                  go/arbace/crt printed by repr/go, TamaGo's go) into .tmp/hsi/bin/hsi, its path printed
+#                                  (HSI_EXE names another)
+#   bin/hsi runtime print|read|check
+#                                  hsi's runtime as Go forms, mode :full (HES38): print, its Go into .tmp/hsi/runtime (hs,
+#                                  hs/cmd/hsi, libm) to edit; read, that Go read back by repr/go's native reader into the
+#                                  tree; check, the committed forms printed and read again equal to themselves
 #   bin/hsi run FILE.hs [ARG...]   FILE compiled to STG at -O0 by the helper and run on hsi (HE4a)
 #   bin/hsi check [--corpus C,...] [--only ID,...|@FILE] [--jobs N] [--record] [--keep]
 #                                  the run corpora (samples, synthetic, testsuite-core; default the first two) on hsi
@@ -40,7 +45,7 @@
 #                                  --only @FILE: a list of ids (test/haskell/hsi/essential.txt, GT8); --record writes
 #                                  test/haskell/check-hsi.edn
 #   bin/hsi primops                hsi's primops against GHC.Prim's non-SIMD names
-#   bin/hsi libm-check [N [SEED]]  hsi's port of musl's libm (go/arbace/hs/libm.ae, HE4b) against the host's libm
+#   bin/hsi libm-check [N [SEED]]  the port of musl's libm (go/arbace/libm, HE4b) against the host's libm
 #                                  (musl 1.2.6) function by function: test/haskell/hsi/libm-ref.c built by the host's cc
 #                                  writes each function's results over its edges and N random inputs of each kind
 #                                  (default 20000), hsi recomputes them, every result's bits equal; then the negative
@@ -394,22 +399,79 @@ spec_check() {
 build_hsi() {
   if [ -n "${HSI_EXE:-}" ]; then echo "$HSI_EXE"; return; fi
   local d=$WORK/bin mod=$WORK/bin/mod key exe=$WORK/bin/hsi
-  key=$( { find "$root/go/arbace/hs" "$root/go/arbace/crt" "$root/test/haskell/hsi" -type f | LC_ALL=C sort | xargs sha256sum
-           sha256sum "$root/go/arbace/hs.ae" "$root/go/arbace/crt.ae"; } | sha256sum | cut -c1-64)
-  if [ -x "$exe" ] && [ "$(cat "$d/key" 2>/dev/null)" = "$key" ]; then echo "$exe"; return; fi
-  rm -rf "$mod"; mkdir -p "$mod/hs/cmd/hsi" "$mod/crt"
-  printf 'module arbace\n\ngo 1.27\n' > "$mod/go.mod"
-  local h; h=$(arbace_exe)
-  for p in "go/arbace/crt.ae $mod/crt" "go/arbace/hs.ae $mod/hs" "test/haskell/hsi/cmd.ae $mod/hs/cmd/hsi"; do
-    set -- $p
-    ARBACE_HOST_EXE=$h GOMAXPROCS=4 "$root/bin/repr-go" print "$root/$1" "$2" > "$d/print.log" 2>&1 \
-      || { cat "$d/print.log" >&2; die "build: repr-go print $1"; }
-  done
+  key=$( { find "$root/go/arbace/hs" "$root/go/arbace/libm" "$root/go/arbace/crt" "$root/test/haskell/hsi" -type f | LC_ALL=C sort | xargs sha256sum
+           sha256sum "$root/go/arbace/hs.ae" "$root/go/arbace/libm.ae" "$root/go/arbace/crt.ae"; } | sha256sum | cut -c1-64)
+  if [ -x "$exe" ] && [ -f "$d/key" ] && [ "$(cat "$d/key")" = "$key" ]; then echo "$exe"; return; fi
+  mkdir -p "$d"
+  runtime_print "$mod"
   (cd "$mod" && GOCACHE=$WORK/bin/gocache GOFLAGS=-p=4 GOMAXPROCS=4 CGO_ENABLED=0 GOTOOLCHAIN=local GOENV=off \
      "${ARBACE_GOROOT:-/root/tamago-go}/bin/go" build -trimpath -o "$exe.new" ./hs/cmd/hsi) >&2 || die "build: go build"
   mv -f "$exe.new" "$exe"
   echo "$key" > "$d/key"
   echo "$exe"
+}
+
+# hsi's runtime as Go forms (HES38, mode :full, as pyi's): the packages arbace/hs, arbace/hs/cmd/hsi (the driver,
+# test/haskell/hsi/cmd.ae) and arbace/libm (musl's libm, shared with pyi); their source is the forms, the Go text a
+# print of them
+RT_PKGS="go/arbace/hs.ae:hs go/arbace/libm.ae:libm test/haskell/hsi/cmd.ae:hs/cmd/hsi"
+
+# runtime_print DIR: the runtime's forms printed by repr/go into the module DIR, with crt's (hs imports it)
+runtime_print() {
+  local out=$1 p h; h=$(arbace_exe)
+  rm -rf "$out"; mkdir -p "$out"
+  printf 'module arbace\n\ngo 1.27\n' > "$out/go.mod"
+  local pk="$RT_PKGS go/arbace/crt.ae:crt"
+  for p in $pk; do
+    mkdir -p "$out/${p#*:}"
+    ARBACE_HOST_EXE=$h GOMAXPROCS=4 "$root/bin/repr-go" print "$root/${p%%:*}" "$out/${p#*:}" > "$out.print.log" 2>&1 \
+      || { cat "$out.print.log" >&2; die "runtime: repr-go print ${p%%:*}"; }
+  done
+}
+
+# runtime_read SRC OUT: the module SRC's runtime packages read by repr/go's native reader (mode :full) into OUT, laid
+# out as the tree holds them
+runtime_read() {
+  local src=$1 out=$2 h; h=$(arbace_exe)
+  rm -rf "$out" "$out.raw"
+  (cd "$src" && ARBACE_HOST_EXE=$h GOMAXPROCS=4 REPR_GO_JOBS=4 "$root/bin/repr-go" read --full --goos linux --goarch amd64 \
+     --out "$out.raw" ./hs ./hs/cmd/hsi ./libm) > "$out.log" 2>&1 \
+    || { cat "$out.log" >&2; die "runtime: the runtime's Go does not read (log $out.log)"; }
+  mkdir -p "$out/go/arbace" "$out/test/haskell/hsi/cmd"
+  cp -r "$out.raw/go/arbace/hs.ae" "$out.raw/go/arbace/libm.ae" "$out.raw/go/arbace/libm" "$out/go/arbace/"
+  mkdir -p "$out/go/arbace/hs"; cp "$out.raw/go/arbace/hs/"*.ae "$out/go/arbace/hs/"
+  sed 's|(load "hsi/main")|(load "cmd/main")|' "$out.raw/go/arbace/hs/cmd/hsi.ae" > "$out/test/haskell/hsi/cmd.ae"
+  cp "$out.raw/go/arbace/hs/cmd/hsi/"*.ae "$out/test/haskell/hsi/cmd/"
+  rm -rf "$out.raw"
+}
+
+# runtime print|read|check: print, the Go text into .tmp/hsi/runtime to edit; read, that text read back into the
+# tree's forms; check, the committed forms printed and read again equal to themselves (the forms are a read's output)
+runtime_cmd() {
+  local rt=$WORK/runtime t=$WORK/runtime-check
+  case ${1:-} in
+    print) runtime_print "$rt"; echo "hsi runtime: the Go in $rt (hs, hs/cmd/hsi, libm): edit it there, then bin/hsi runtime read" ;;
+    read)
+      [ -d "$rt/hs" ] || die "no $rt/hs: bin/hsi runtime print first"
+      "${ARBACE_GOROOT:-/root/tamago-go}/bin/gofmt" -l "$rt/hs" "$rt/libm" > "$WORK/runtime.gofmt"
+      [ ! -s "$WORK/runtime.gofmt" ] || { cat "$WORK/runtime.gofmt" >&2; die "runtime: gofmt these first"; }
+      runtime_read "$rt" "$WORK/runtime-forms"
+      rm -rf "$root/go/arbace/hs" "$root/go/arbace/hs.ae" "$root/go/arbace/libm" "$root/go/arbace/libm.ae" \
+        "$root/test/haskell/hsi/cmd" "$root/test/haskell/hsi/cmd.ae"
+      cp -r "$WORK/runtime-forms/go/arbace/." "$root/go/arbace/"
+      cp -r "$WORK/runtime-forms/test/haskell/hsi/." "$root/test/haskell/hsi/"
+      echo "hsi runtime: go/arbace/hs, go/arbace/libm and test/haskell/hsi/cmd read from $rt" ;;
+    check)
+      runtime_print "$t/src"
+      runtime_read "$t/src" "$t/forms"
+      local bad=0 f
+      for f in go/arbace/hs.ae go/arbace/hs go/arbace/libm.ae go/arbace/libm test/haskell/hsi/cmd.ae test/haskell/hsi/cmd; do
+        diff -r "$root/$f" "$t/forms/$f" > "$t/$(basename "$f").diff" 2>&1 || { echo "hsi runtime: $f differs ($t/$(basename "$f").diff)"; bad=1; }
+      done
+      [ $bad = 0 ] || die "runtime check: the committed forms are not a read of their own print"
+      echo "hsi runtime: go/arbace/hs, go/arbace/libm and the driver printed and read again: the same forms" ;;
+    *) die "usage: bin/hsi runtime print|read|check" ;;
+  esac
 }
 
 # run_hsi FILE.hs [ARG...]: FILE compiled to STG at -O0 by the helper and run on hsi over the libraries' dumps
@@ -479,6 +541,7 @@ case $cmd in
   tests) exec "$root/bin/lib/hsi/tests" "$@" ;;
   record-ref) exec "$root/bin/lib/hsi/record-ref" "$@" ;;
   build) build_hsi ;;
+  runtime) runtime_cmd "$@" ;;
   run) run_hsi "$@" ;;
   check) exec "$root/bin/lib/hsi/check" "$@" ;;
   primops) primops_hsi "$@" ;;

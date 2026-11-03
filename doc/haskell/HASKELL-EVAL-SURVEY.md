@@ -1130,3 +1130,31 @@ packages' dumps, run under `.tmp/heavy`, 2.5 minutes). Write-ahead: HE4's exit c
 - **HES49 GT8's list for Haskell's eval.** (a) `test/haskell/hsi/essential.txt` as built, for the row's share of the
   essential gate when Haskell's row enters it; (b) a coverage-chosen subset (primops and C functions each reached once)
   at HE6. *Recommended: (a)* now, (b) at HE6.
+
+## Decided (2026-11-03, the user): HES38 is (b), mode `:full`
+
+Correcting "Decided: HES37-HES43" above for HES38 alone: hsi's runtime is Go forms in mode `:full` (every comment and
+space kept), as Python's pyi's runtime (`bin/pyi runtime`, PY5b0), not `:lines`. The other six stand as recommended.
+And Python shares hsi's port of musl's libm: it moves into a package of its own.
+
+## As built: HES38's `:full` forms and the shared libm
+
+Built 2026-11-03 on branch `haskell-full` from `haskell-he4b` (`f3672f68`).
+
+- **`go/arbace/libm.ae`, `go/arbace/libm/`**: the package `arbace/libm` (`libm.go`, `libm_data.go`), HE4b's port moved
+  out of `arbace/hs` and its names exported (`libm.Exp` ... `libm.Atan2f`; `libm.D` and `libm.F` by C name;
+  `libm.Call` on bit patterns, `bin/hsi libm-check`'s subject), its origin in the package's doc comment and
+  LICENSE.md. hsi imports it (`ffi`, `prim_scalar`); pyi may. Out of `gate_key` as `go/arbace/hs` is (`bin/arbace-go`'s
+  `gate_key`, `test/gate/audit.ae`'s `:gate`, `test/gate/gate-key-crops-test.bash`, passing): no executable imports it.
+- **Mode `:full`**: `go/arbace/hs`, `go/arbace/libm` and the driver (`test/haskell/hsi/cmd.ae`, `cmd/main.ae`) read again
+  from their Go text, gofmt'ed first (1.7 MB of forms, against 0.4 MB in `:lines`).
+- **`bin/hsi runtime print|read|check`**, as `bin/pyi runtime`: `print` writes the three packages' Go (with crt's,
+  which hs imports) into the module `.tmp/hsi/runtime` to edit; `read` requires it gofmt'ed and reads it back by repr/go's
+  native reader (`read --full`) into the tree; `check` prints the committed forms and reads them again, and requires
+  the same forms file for file (36 s). `bin/hsi build` prints through the same function. Negative control, by hand: a
+  form a read would not give (`libm.ae`'s `:init-order` with two names swapped) fails the check; an edit a read would
+  give (a literal's value) passes it, by design: the check says the forms are a read's output, not what they compute.
+- **Checks**: `bin/hsi runtime check` passes; `bin/hsi libm-check` 1,769,602 calls, 0 mismatches, the control 471,953;
+  `bin/hsi check --corpus samples,synthetic,testsuite-core`: 630 of 748 equal as before, samples and synthetic 46 of
+  47, every other one in its class (3.5 minutes; `T8726`, `:speed`'s edge case, failed at 8 jobs and passed alone, as
+  recorded).
