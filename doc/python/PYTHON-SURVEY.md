@@ -792,3 +792,10 @@ until its row fits GT8's budget.
   size, is written `:excluded`. `--check` reproduces every reference twice (7.7 s). Seconds per program and module in
   `test/python/ref-costs.edn` and `ref-costs-lib-test.edn` (all 151 programs in 1.1 s, the 11 modules in 2.6 s).
 - pyperformance is not pinned: the pin is the user's (queue 177's DECISION).
+
+## Decided (2026-11-03, the user): pyperformance pinned (queue 177's DECISION (a))
+
+pyperformance 1.14.0's sdist (`pyperformance-1.14.0.tar.gz`, 8,796,350 bytes, SHA-256 `91f74393...a238a8aa`, PyPI's published
+digest) is the speed reference for pyi and its AOT: pinned in `test/python/corpora.edn` (`:pyperformance-1.14.0`), fetched into
+`.tmp/` and read in place by `bin/repr-python pins --fetch`, checked by `pins --check`; its pure-Python benchmarks to run as plain
+programs with fixed loop counts, their output recorded as references (pyperf's timing runner not used).
