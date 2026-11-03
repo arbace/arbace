@@ -194,7 +194,7 @@ rt_unit() { # rt_unit DIR: one unit's print's object against its IR's, gcc -O0 o
   [ -f "$d/lowered.c" ] || return 0
   # shellcheck disable=SC2086
   ( cd "$d" && timeout 900 gcc $GCC_FLAGS -c lowered.c -o lowered.o > gcc.log 2>&1; echo $? > gcc.status )
-  [ -n "${RSI_KEEP:-}" ] || rm -f "$d/lowered.c"
+  # the lowered C kept: bin/rsi runtime-ci reads it as ci's library (RE4)
 }
 export -f rt_unit; export GCC_FLAGS
 
@@ -241,6 +241,50 @@ runtime_build() { # bin/rsi runtime-build [OUT] [--jobs N]: std's IR lowered (EV
   [ "$bad" = 0 ] || { awk -F'\t' '$3 != "same" || $4 != "lowered" || $5 != "0"' "$out/results.tsv" | head -20 >&2; exit 1; }
   mv "$out/key.start" "$out/key.txt"
   sha256sum < "$out/key.txt" | cut -d' ' -f1 > "$out/key"
+}
+
+runtime_ci() { # runtime_ci [OUT]: OUT/ci (RE4, EVAL.md §9): std's lowered units and the layer read by repr/c as ci's library
+  # (OUT/ci/std), ci's ports (test/rust/runtime/ci/*.c, OUT/ci/ports), made again when its key (OUT's key, the reader's
+  # sources and options: arbace/rust/run.ae's marked part, repr/c, test/c/host, the ports) changed; runtime-build first when OUT
+  # is not at the checkout's key. Prints OUT/ci.
+  local out=${1:-${RSI_RUNTIME_DIR:-$root/.tmp/rsi/runtime}} k f u d sb=${RSI_STD_DIR:-$root/.tmp/rsi/std}
+  if ! runtime_current "$out" || [ ! -f "$out/rt.c" ] \
+     || cut -f3 "$out/lower.tsv" | while read -r d; do [ -f "$d/lowered.c" ] || echo missing; done | grep -q missing; then
+    echo "runtime-ci: the lowered std in $out is not at the checkout's key (or has no lowered C): runtime-build" >&2
+    ( runtime_build "$out" ) >&2 || exit 1
+  fi
+  out=$(cd "$out" && pwd)
+  k=$( { cat "$out/key"; (cd "$root" && sed -n '/^;; runtime-ci-key begin/,/^;; runtime-ci-key end/p' arbace/rust/run.ae | sha256sum
+                                 find arbace/repr/c.ae arbace/repr/c test/c/host test/rust/runtime/ci -type f | LC_ALL=C sort | xargs sha256sum); } | sha256sum | cut -d' ' -f1)
+  if [ "$(cat "$out/ci/key" 2>"$TMPDIR/rsi-cikey.err")" != "$k" ]; then
+    # an interrupted read at the same key (ci/pending) resumes: read-lib keeps the units read whole
+    [ "$(cat "$out/ci/pending" 2>"$TMPDIR/rsi-cikey.err")" = "$k" ] || rm -rf "$out/ci"
+    rm -rf "$out/ci/cb" "$out/ci/ports" "$out/ci/key"; mkdir -p "$out/ci/std" "$out/ci/ports"; echo "$k" > "$out/ci/pending"
+    { while IFS=$'\t' read -r u _ d; do printf '%s\t%s\n' "$u" "$d/lowered.c"; done < "$out/lower.tsv"; printf 'rsi-rt\t%s\n' "$out/rt.c"; } > "$out/ci/std/list.tsv"
+    echo "runtime-ci: reading the lowered std into $out/ci/std (minutes)" >&2
+    (cd "$root" && GOMEMLIMIT=${RSI_CI_MEMLIMIT:-6GiB} arbace_tool -m arbace.rust.run read-lib "$out/ci/std" "$out/ci/std/list.tsv" "${RSI_JOBS:-4}") > "$out/ci/std/read.log" 2>&1 \
+      || { grep -v -E 'Reflection|recur arg|Auto-boxing' "$out/ci/std/read.log" | tail -5 >&2; exit 1; }
+    # compiler_builtins lowered for ci (RE4, RES25 (b) on ci): its units given the runtime's pre-pass (f16, f128 and inline
+    # assembly stubbed) and lowered into OUT/ci/cb-src, read as a library linked after musl (musl's mem* and the rest first);
+    # a unit repr/llvm does not read (global_asm!'s module asm: probestack) left out, listed in OUT/ci/cb/left.tsv
+    mkdir -p "$out/ci/cb-src" "$out/ci/cb"
+    (cd "$sb/ir" && find compiler_builtins -name '*.ll' | LC_ALL=C sort) | while read -r f; do
+      u=$(basename "$f" .ll); mkdir -p "$out/ci/cb-src/$u"; printf '%s\t%s\t%s\n' "$u" "$sb/ir/$f" "$out/ci/cb-src/$u"; done > "$out/ci/cb-src/lower.tsv"
+    (cd "$root" && GOMAXPROCS=${RSI_JOBS:-4} RSI_THREADS=${RSI_JOBS:-4} GOMEMLIMIT=${RSI_RT_GOMEMLIMIT:-4GiB} arbace_tool -m arbace.rust.lower lower-list "$out/ci/cb-src/lower.tsv" --runtime) > "$out/ci/cb-src/lower.log" 2>&1 || true
+    while IFS=$'\t' read -r u _ d; do
+      if [ -f "$d/lowered.c" ]; then printf '%s\t%s\n' "$u" "$d/lowered.c" >> "$out/ci/cb/list.tsv"; else printf '%s\t%s\n' "$u" "$(cut -c1-200 "$d/lower.refused" 2>"$TMPDIR/rsi-cb.err")" >> "$out/ci/cb/left.tsv"; fi
+    done < "$out/ci/cb-src/lower.tsv"
+    (cd "$root" && GOMEMLIMIT=${RSI_CI_MEMLIMIT:-6GiB} arbace_tool -m arbace.rust.run read-lib "$out/ci/cb" "$out/ci/cb/list.tsv" "${RSI_JOBS:-4}") > "$out/ci/cb/read.log" 2>&1 \
+      || { grep -v -E 'Reflection|recur arg|Auto-boxing' "$out/ci/cb/read.log" | tail -5 >&2; exit 1; }
+    # ci's ports (test/rust/runtime/ci/*.c, linked before std): what the lowered std needs that ci does not give
+    for f in "$root"/test/rust/runtime/ci/*.c; do [ -f "$f" ] && printf '%s\t%s\n' "ci-$(basename "$f" .c)" "$f"; done > "$out/ci/ports/list.tsv"
+    if [ -s "$out/ci/ports/list.tsv" ]; then
+      (cd "$root" && GOMEMLIMIT=${RSI_CI_MEMLIMIT:-6GiB} arbace_tool -m arbace.rust.run read-lib "$out/ci/ports" "$out/ci/ports/list.tsv" 1) > "$out/ci/ports/read.log" 2>&1 \
+        || { grep -v -E 'Reflection|recur arg|Auto-boxing' "$out/ci/ports/read.log" | tail -5 >&2; exit 1; }
+    else rm -rf "$out/ci/ports"; fi
+    echo "$k" > "$out/ci/key"; rm -f "$out/ci/pending"
+  fi
+  echo "$out/ci"
 }
 
 disk_ok() { # the light tier's disk rule: stop past 80% (RSI_DISK_MAX)
@@ -299,6 +343,7 @@ case ${1:-} in
   std-build) shift; std_build "$@" ;;
   runtime-build) shift; runtime_build "$@" ;;
   lower-check) shift; lower_check "$@" ;;
+  runtime-ci) shift; runtime_ci "$@" ;;
   lower-unit) shift # the lowering's unit cases (test/rust/lower/*.ll, or FILE.ll...): each run by lli and lowered, compiled by gcc -O0 and run, the outputs equal
     lli=${LLI:-/usr/lib/llvm23/bin/lli}; [ -x "$lli" ] || { echo "lower-unit: no lli ($lli)" >&2; exit 1; }
     [ $# -gt 0 ] || set -- "$root"/test/rust/lower/*.ll
@@ -316,5 +361,18 @@ case ${1:-} in
       if cmp -s "$ud/$b.lli" "$ud/$b.out"; then echo "lower-unit: $b: as lli"; else echo "lower-unit: $b: DIFFERS from lli"; diff "$ud/$b.lli" "$ud/$b.out" | head -10; ubad=1; fi
     done
     rm -rf "$ud"; exit $ubad ;;
+  record-ref) shift
+    rplan=$TMPDIR/rsi-ref-plan.$$; rset=all rsample=1 roff=0 ronly="" rcorp=samples,ui
+    while [ $# -gt 0 ]; do case $1 in --corpus) rcorp=$2; shift 2 ;; --set) rset=$2; shift 2 ;; --sample) rsample=$2; shift 2 ;; --offset) roff=$2; shift 2 ;;
+      --only) ronly=$2; shift 2 ;; *) echo "record-ref: unknown option $1" >&2; exit 2 ;; esac; done
+    : > "$rplan"
+    case ",$rcorp," in *,samples,*) list --set samples >> "$rplan" ;; esac
+    case ",$rcorp," in *,ui,*) need_src; list --set "$rset" --sample "$rsample" --offset "$roff" >> "$rplan" ;; esac
+    if [ -n "$ronly" ]; then grep -v '^#' "$ronly" | grep . > "$rplan.ids"; awk -F'\x1f' 'BEGIN { while ((getline l < ARGV[2]) > 0) w[l] = 1; ARGV[2] = "" } ($1 in w)' "$rplan" "$rplan.ids" > "$rplan.only"; mv "$rplan.only" "$rplan"; rm -f "$rplan.ids"; fi
+    std_current "${RSI_STD_DIR:-$root/.tmp/rsi/std}" || ( std_build )
+    "$root/bin/lib/rsi/record-ref" "$rplan" "${RSI_REF_WORK:-$root/.tmp/rsi-ref}"; st=$?; rm -f "$rplan"; exit $st ;;
+  check) shift; exec "$root/bin/lib/rsi/check" "$@" ;;
+  run) shift; exec "$root/bin/lib/rsi/run" "$@" ;;
+  divergences) shift; lvl=eval; [ "${1:-}" = --aot ] && lvl=aot; GOMEMLIMIT=1GiB arbace_tool -m arbace.rust.check divergences "$lvl" ;;
   *) sed -n '2,/^set -e/p' "$0" | sed '$d;s/^# \{0,1\}//' >&2; exit 2 ;;
 esac

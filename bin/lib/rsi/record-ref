@@ -1,0 +1,55 @@
+#!/bin/bash
+# The judge's runs recorded (doc/rust/EVAL.md §9; RES5 (a)): each program of a run-program plan built from its original by rustc
+# 1.99.1 at -O0 (the plan's flags, as run-program builds it) against std's build (bin/rsi std-build's sysroot, RES3 (a)) and run
+# as run-program runs it (in a fresh directory as ./t, an empty standard input, PATH, HOME and the program's own environment,
+# 60 s), three times; the outputs normalized as run-program's (thread ids, a harness's time). One map a program into
+# test/rust/ref-rustc-1.99.1.edn (by :id; the other ids kept): :status (128+signal, or :timeout; :no-build with :error),
+# :stdout and :stderr the SHA-256 of the first run's, :bytes stdout's size, :first its first line (80 characters), :det false
+# when the three runs differ (the program then judged on nothing: nondet).
+#
+#   record-ref PLAN WORK [--jobs N]          (bin/rsi record-ref)
+set -uo pipefail
+root=$(cd "$(dirname "$0")/../../.." && pwd)
+. "$root/bin/lib/tmpdir.bash"
+. "$root/bin/lib/tools.bash"
+plan=$1 work=$2; shift 2
+jobs=${RSI_JOBS:-4}
+while [ $# -gt 0 ]; do case $1 in --jobs) jobs=$2; shift 2 ;; *) echo "record-ref: unknown option $1" >&2; exit 2 ;; esac; done
+sb=${RSI_STD_DIR:-$root/.tmp/rsi/std}
+[ -d "$sb/sysroot" ] || { echo "record-ref: no std build in $sb (bin/rsi std-build)" >&2; exit 1; }
+mkdir -p "$work"; work=$(cd "$work" && pwd); plan=$(cd "$(dirname "$plan")" && pwd)/$(basename "$plan")
+: > "$work/empty"
+export plan work sb root
+one() { # N: one program's map, or nothing
+  . "$root/bin/lib/rsi/plan.bash"
+  plan_line "$plan" "$1"
+  local src=$RSI_SRC d st i e b
+  case $file in test/rust/eval/*) src=$root ;; esac
+  d=$work/ref/$(plan_key "$id"); rm -rf "$d"; mkdir -p "$d"
+  if ! plan_rustc "$src" "$sb/sysroot" "$d/t" > "$d/build.log" 2>&1; then
+    e=$(grep -m1 '^error' "$d/build.log" | cut -c1-120 | sed 's/["\\]/ /g')
+    printf '{:id "%s" :status :no-build :error "%s"}\n' "$id" "$e"; rm -rf "$d"; return 0
+  fi
+  for i in 1 2 3; do
+    rm -rf "$d/x"; mkdir -p "$d/x"; cp "$d/t" "$d/x/t"
+    { (cd "$d/x" && ulimit -f 1024 && env -i PATH=/usr/local/bin:/usr/bin:/bin HOME="$d/x" "${xe[@]}" timeout 60 ./t "${rf[@]}" < "$work/empty" > "$d/$i.out" 2> "$d/$i.err"); } 2> "$d/signal.log"
+    echo $? > "$d/$i.st"
+    plan_norm "$d/$i.out" "$d/$i.err"
+  done
+  st=$(cat "$d/1.st"); [ "$st" = 124 ] && st=:timeout
+  b=true
+  for i in 2 3; do cmp -s "$d/1.out" "$d/$i.out" && cmp -s "$d/1.err" "$d/$i.err" && cmp -s "$d/1.st" "$d/$i.st" || b=false; done
+  printf '{:id "%s" :status %s :stdout "%s" :stderr "%s" :bytes %s :first "%s"%s}\n' "$id" "$st" \
+    "$(sha256sum < "$d/1.out" | cut -d' ' -f1)" "$(sha256sum < "$d/1.err" | cut -d' ' -f1)" "$(wc -c < "$d/1.out")" \
+    "$(head -1 "$d/1.out" | cut -c1-80 | sed 's/["\\]/ /g' | tr -d '\r')" "$([ $b = false ] && echo ' :det false')"
+  rm -rf "$d"
+}
+export -f one
+export RSI_SRC=${RSI_SRC:-$root/.tmp/repr-rust/src/rustc-1.99.1-src}
+mkdir -p "$work/native"
+cc -c -O2 -fPIC -o "$work/native/rust_test_helpers.o" "$RSI_SRC/tests/auxiliary/rust_test_helpers.c" > "$work/native/build.log" 2>&1 \
+  && ar rcs "$work/native/librust_test_helpers.a" "$work/native/rust_test_helpers.o"
+export REPR_RUST_NATIVE=$work/native
+n=$(grep -c . "$plan")
+seq 1 "$n" | xargs -P "$jobs" -I{} nice bash -c 'one "$1"' _ {} > "$work/ref.edn"
+arbace_tool -m arbace.rust.check write-ref "$work/ref.edn" "$root/test/rust/ref-rustc-1.99.1.edn"
