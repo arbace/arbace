@@ -129,17 +129,27 @@ cover_settle() {
   done
 }
 
-# cover_hook_table: the hook's files, a line each, PACKAGE FILE: the Go package (under GOROOT/src) the cover builds'
-# overlay adds FILE (relative to the checkout) to, as zz_arbace_cover.go: internal/coverage/cfile's hook, its
+# cover_hook_table: the hook's files, a line each, PACKAGE FILE PIN: the Go package (under GOROOT/src) the cover
+# builds' overlay adds FILE (relative to the checkout) to, as zz_arbace_cover.go: internal/coverage/cfile's hook, its
 # os/signal part (the program's own signal registrations, review 182 L3) and its runtime part (whether a timer is
-# pending, for the deadlock detector, review 182 L2)
+# pending, for the deadlock detector, review 182 L2). The cover key (bin/arbace-go's cover_key) and the compiled
+# level's program key (bin/java-check) hash this file and cover.go: the other files are pinned here by their SHA-256
+# (PIN; - for cover.go), so that a change to them moves those keys, not gate_key (bin/arbace-go unchanged); a file
+# that differs from its pin fails cover_go_flags (and test/gate/cover-test.bash): its new digest here
 cover_hook_table() {
-  printf '%s\n' "internal/coverage/cfile tools/covsubset/hook/cover.go" "os/signal tools/covsubset/hook/signal/refs.go" \
-    "runtime tools/covsubset/hook/runtime/timers.go"
+  printf '%s\n' "internal/coverage/cfile tools/covsubset/hook/cover.go -" \
+    "os/signal tools/covsubset/hook/signal/refs.go f69a96aabc678f8b7fdbd8e3cdf81b8a4388f0db1a186ec6e016a9fa962b65a4" \
+    "runtime tools/covsubset/hook/runtime/timers.go 7ee8ebb52ddecc820261b1ab1e7a0f03bbf519796bb2061827797613239bc7c4"
 }
-# cover_hook_files: the hook's files (in the cover key, bin/arbace-go's cover_key, and the compiled level's program
-# key, bin/java-check), relative to the checkout
-cover_hook_files() { cover_hook_table | cut -d' ' -f2 | paste -sd' '; }
+
+# cover_hook_stale ROOT: the hook's files under ROOT that differ from their pins, a line each (none: status 0)
+cover_hook_stale() {
+  local p f pin bad=0
+  while read -r p f pin; do
+    [ "$pin" = - ] || [ "$(sha256sum < "$1/$f" | cut -c1-64)" = "$pin" ] || { echo "$f"; bad=1; }
+  done <<< "$(cover_hook_table)"
+  return $bad
+}
 
 # cover_go_flags ROOT PROG WORK OVERLAY OUT: bin/build-go's arguments, one a line, for a cover build of the
 # j2g program PROG printed into WORK with the overlay OVERLAY (bin/jrt overlay's): the overlay with the hook's
@@ -148,7 +158,8 @@ cover_go_flags() {
   local root=$1 prog=$2 work=$3 overlay=$4 ov=$5 pkgs g=${ARBACE_GOROOT:-/root/tamago-go}/src e="" p f
   pkgs=$(cover_pkgs "$prog")
   [ -n "$pkgs" ] || { echo "cover: no package of $prog to cover" >&2; return 1; }
-  while read -r p f; do e="$e,\n \"$g/$p/zz_arbace_cover.go\": \"$root/$f\""; done <<< "$(cover_hook_table)"
+  cover_hook_stale "$root" > "$ov.stale" || { echo "cover: the hook's files differ from their pins in bin/lib/cover.bash's cover_hook_table: $(cat "$ov.stale")" >&2; return 1; }
+  while read -r p f _; do e="$e,\n \"$g/$p/zz_arbace_cover.go\": \"$root/$f\""; done <<< "$(cover_hook_table)"
   sed '$s|}}[[:space:]]*$|'"$e"'}}|' "$overlay" > "$ov"
   [ "$(grep -c zz_arbace_cover "$ov")" = "$(cover_hook_table | wc -l)" ] || { echo "cover: could not add the hook to $overlay" >&2; return 1; }
   printf '%s\n' --overlay "$ov" --go-flag -cover --go-flag -covermode=set --go-flag "-coverpkg=$pkgs" --go-flag -tags=arbacecover

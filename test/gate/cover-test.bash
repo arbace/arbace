@@ -19,10 +19,17 @@ no() { n=$((n + 1)); bad=$((bad + 1)); echo "FAIL $*"; }
 
 # (1) cover_go_flags: the overlay gets every hook file of cover_hook_table, each into its package as zz_arbace_cover.go
 mkdir -p "$t/prog/go/arbace/jrt"; printf '{"Replace":{\n "a.go": "b.go"}}\n' > "$t/overlay.json"
-cover_go_flags /R "$t/prog" "$t/work" "$t/overlay.json" "$t/ov.json" > "$t/flags.txt" || no "cover_go_flags failed"
+cover_go_flags "$here" "$t/prog" "$t/work" "$t/overlay.json" "$t/ov.json" > "$t/flags.txt" || no "cover_go_flags failed"
 miss=0
-while read -r p f; do grep -qF "\"${ARBACE_GOROOT:-/root/tamago-go}/src/$p/zz_arbace_cover.go\": \"/R/$f\"" "$t/ov.json" || miss=$((miss + 1)); done <<< "$(cover_hook_table)"
+while read -r p f _; do grep -qF "\"${ARBACE_GOROOT:-/root/tamago-go}/src/$p/zz_arbace_cover.go\": \"$here/$f\"" "$t/ov.json" || miss=$((miss + 1)); done <<< "$(cover_hook_table)"
 if [ "$miss" = 0 ] && grep -q '"a.go": "b.go",' "$t/ov.json" && [ "$(tail -1 "$t/ov.json" | tail -c 3)" = '}}' ]; then ok "cover_go_flags: every hook file ($(cover_hook_table | wc -l)) in the overlay"; else no "the overlay: $(cat "$t/ov.json")"; fi
+
+# the hook's files pinned (the cover key holds bin/lib/cover.bash and cover.go, not gate_key), a stale pin refused
+if cover_hook_stale "$here" > "$t/stale"; then ok "the hook's files match their pins in cover_hook_table"; else no "stale pins: $(cat "$t/stale")"; fi
+mkdir -p "$t/r/tools/covsubset/hook/signal" "$t/r/tools/covsubset/hook/runtime"
+cp "$here/tools/covsubset/hook/runtime/timers.go" "$t/r/tools/covsubset/hook/runtime/"; echo '// changed' > "$t/r/tools/covsubset/hook/signal/refs.go"
+if ! cover_go_flags "$t/r" "$t/prog" "$t/work" "$t/overlay.json" "$t/ov2.json" > "$t/flags2.txt" 2>"$t/flags2.err" && grep -q 'differ from their pins.*signal/refs.go' "$t/flags2.err"; then
+  ok "cover_go_flags refuses a hook file that differs from its pin"; else no "a stale pin taken: $(cat "$t/flags2.err")"; fi
 
 # (2) the hook in a toy
 tg=${ARBACE_GOROOT:-/root/tamago-go}
@@ -90,7 +97,7 @@ func main() {
 }
 GO
 { printf '{"Replace":{'; sep=
-  while read -r p f; do printf '%s"%s/src/%s/zz_arbace_cover.go": "%s/%s"' "$sep" "$tg" "$p" "$here" "$f"; sep=,; done <<< "$(cover_hook_table)"
+  while read -r p f _; do printf '%s"%s/src/%s/zz_arbace_cover.go": "%s/%s"' "$sep" "$tg" "$p" "$here" "$f"; sep=,; done <<< "$(cover_hook_table)"
   printf '}}\n'; } > "$t/toy.json"
 if (cd "$t/toy" && env -u GOOS -u GOARCH GOROOT="$tg" GOFLAGS= GOTOOLCHAIN=local CGO_ENABLED=0 \
       "$tg/bin/go" build -trimpath -buildvcs=false -overlay "$t/toy.json" -cover -covermode=set -tags=arbacecover -o "$t/toy.exe" .) > "$t/build.log" 2>&1; then
