@@ -15,6 +15,7 @@
             [arbace.repr.c.host :as host]
             [arbace.repr.c.layout :as layout]
             [arbace.repr.c.rtcheck :as rt]
+            [arbace.repr.c.results :as results]
             [arbace.string :as str]))
 
 (def ^:private judge-dir (str (System/getProperty "user.dir") "/test/c/judge"))
@@ -1461,3 +1462,86 @@
     (is (= #{:roundtrip-forms :roundtrip-full}
            (set (filter #{:roundtrip-forms :roundtrip-full} (map :level (read-string (slurp "test/c/controls.edn")))))))
     (is (= #{"fannkuchredux.c" "fasta-8.c"} ((resolve 'arbace.repr.c.rtcheck/control-names) "benchmarksgame")))))
+
+;; GT8 (doc/GATE-SURVEY.md, "As built: GT8 (C's read lists)"): --only LIST for the read checks. ppcheck's lists keep a
+;; corpus's listed files and mark the run partial (CORPUS/only.txt); a judge holds only the known entries of the files
+;; run (an entry of a file not run is not stale), prints each failing file as FAIL CORPUS/NAME, and leaves a control
+;; whose reference a partial run does not hold; the drivers refuse --record (and the options that need whole corpora)
+;; with a list, and a list's id outside the corpora.
+
+(deftest read-lists-only
+  (require 'arbace.repr.c.ppcheck)
+  (let [lists (resolve 'arbace.repr.c.ppcheck/lists)
+        w (str (System/getProperty "user.dir") "/.tmp/ci-judge-test-only-lists")
+        roots {:checkout (System/getProperty "user.dir")}
+        names #(mapv :name (read-string (slurp (str w "/ci-run/files.edn"))))
+        marked #(.exists (java.io.File. (str w "/ci-run/only.txt")))]
+    (lists w roots ["ci-run"] ["ci-run/builtin-bitg.c" "ci-run/nan-to-unsigned.c" "other/x.c"])
+    (is (= ["builtin-bitg.c" "nan-to-unsigned.c"] (names)))
+    (is (= #{"builtin-bitg.c" "nan-to-unsigned.c"} (results/partial-names w "ci-run")))
+    (is (= 2 (count (str/split-lines (slurp (str w "/ci-run/list.jsonl"))))))
+    ;; a listed name the corpus does not hold fails the lists
+    (is (thrown? Exception (lists w roots ["ci-run"] ["ci-run/no-such.c"])))
+    ;; a whole run lists every file and removes the mark
+    (lists w roots ["ci-run"] nil)
+    (is (< 2 (count (names))))
+    (is (not (marked)))
+    (is (nil? (results/partial-names w "ci-run")))))
+
+(deftest read-partial-judges
+  (let [w (str (System/getProperty "user.dir") "/.tmp/ci-judge-test-only-judges")
+        kf (str w "/known.edn")
+        only #(spit (str w "/c/only.txt") (str/join (map (fn [n] (str n "\n")) %)))
+        whole #(.delete (java.io.File. (str w "/c/only.txt")))]
+    ;; the checker's check: a.c passes, s.c is known (absent from a partial run of a.c)
+    (put-files w {"c/port.tsv" "a.c\tequal\t0\t\n"
+                  "known.edn" (pr-str {:classes {:k "k"} :annot {:c {"s.c" {:class :k}}}})})
+    (with-redefs [annot/known-file kf]
+      (whole)
+      (is (= 1 (annot/judge w "c")) "a whole run: s.c's entry stale")
+      (only ["a.c"])
+      (is (= 0 (annot/judge w "c")) "a partial run: s.c not run, its entry not stale")
+      (put-files w {"c/port.tsv" "a.c\tequal\t0\t\nf.c\tdiffer\t0\tx\n"})
+      (only ["a.c" "f.c"])
+      (let [out (with-out-str (is (= 1 (annot/judge w "c"))))]
+        (is (re-find #"(?m)^FAIL c/f\.c annotations differ" out))))
+    ;; the round trip: the same rule
+    (put-files w {"c/forms.tsv" "a.c\tok\tequal\tequal\t\t\n"
+                  "known.edn" (pr-str {:classes {:k "k"} :roundtrip {:c {"s.c" {:class :k}}}})})
+    (with-redefs [rt/known-file kf]
+      (whole)
+      (is (= 1 (rt/judge w "c")))
+      (only ["a.c"])
+      (is (= 0 (rt/judge w "c")))
+      (put-files w {"c/forms.tsv" "a.c\tok\tequal\tequal\t\t\nf.c\tok\tdiffer\tequal\tboom\t\n"})
+      (only ["a.c" "f.c"])
+      (is (re-find #"(?m)^FAIL c/f\.c levels l1" (with-out-str (rt/judge w "c")))))
+    ;; a control whose reference a partial run does not hold is left, not unjudged
+    (require 'arbace.repr.c.parsecheck)
+    (let [tree (resolve 'arbace.repr.c.parsecheck/tree-control-result)
+          ctl {:level :tree :subject "c/a.c" :reference "c/b.c"}]
+      (put-files w {"c/files.edn" "[{:name \"a.c\" :out \"a.c.tsv\"}]\n" "c/control/a.c.tsv.port" "TranslationUnit\t0\n"})
+      (whole)
+      (is (= :not-judged (tree w ["c"] ctl)))
+      (only ["a.c"])
+      (is (= :left (tree w ["c"] ctl))))
+    (put-files w {"c/port/a.c.tsv" "@3\nd main e int()\n"})
+    (only ["a.c"])
+    (is (= :left (annot/annot-control-result w ["c"] {:level :annot :subject "c/a.c" :reference "c/b.c"})))
+    (whole)
+    (is (= :not-judged (annot/annot-control-result w ["c"] {:level :annot :subject "c/a.c" :reference "c/b.c"})))))
+
+(deftest read-only-refusals
+  (let [w (str (System/getProperty "user.dir") "/.tmp/ci-judge-test-only-refusals")
+        l (str w "/list.txt") bad (str w "/bad.txt")]
+    (put-files w {"list.txt" "benchmarksgame/fasta.c\n" "bad.txt" "nosuch/x.c\n"})
+    (is (= 2 (sh-status {} "bin/repr-c" "check" "--tokens" "--corpus" "benchmarksgame" "--only" l "--record")))
+    (is (= 2 (sh-status {} "bin/repr-c" "check" "--tokens" "--corpus" "benchmarksgame" "--only" bad)))
+    (is (= 2 (sh-status {} "bin/repr-c" "parse-check" "--corpus" "benchmarksgame" "--only" l "--mutants-only")))
+    (is (= 2 (sh-status {} "bin/repr-c" "parse-check" "--corpus" "benchmarksgame" "--only" l "--record")))
+    (is (= 2 (sh-status {} "bin/repr-c" "roundtrip" "--corpus" "benchmarksgame" "--only" l "--record")))
+    (is (= 2 (sh-status {} "bin/repr-c" "roundtrip" "--corpus" "benchmarksgame" "--only" l "--resume")))
+    (is (= 2 (sh-status {} "bin/ci" "annotations" "--corpus" "benchmarksgame" "--only" l "--record")))
+    (is (= 2 (sh-status {} "bin/ci" "annotations" "--corpus" "benchmarksgame" "--only" bad)))
+    (is (= 2 (sh-status {} "bin/ci" "dg" "--only" l)) "an id outside the dg groups")
+    (is (= 2 (sh-status {} "bin/ci" "dg" "--only" l "--essential")))))

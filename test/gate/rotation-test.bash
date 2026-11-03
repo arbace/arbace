@@ -269,5 +269,30 @@ judge_note jud
 if [ "$(cut -f3 "$store/_rotation/lev.a.s0.runs" 2>&1)" = fail ] && [ "$(cut -f3 "$store/_rotation/lev.a.failed" 2>&1)" = "$v2" ] \
    && [ ! -e "$store/_rotation/lev.a.sub.runs" ]; then ok ":judges: a judge's failure noted for the producer whose list names the id (its file into the subset)"; else no ":judges: $(cat "$store/_rotation/lev.a.s0.runs" "$store/_rotation/lev.a.failed" 2>&1)"; fi
 
+# 9. GT8, C's read lists: a results file's rows "CORPUS FILE" read as CORPUS/FILE (:id-re with :id-as), the subset under
+# a key of its own (:subset-key: the corpus's run subset under :subset is another check's), a name with a slash kept whole
+r3=$t/root3; mkdir -p "$r3/test" "$r3/bin"; cp "$r/bin/tool" "$r3/bin/tool"
+{ echo "["; for i in $(seq 1 20); do echo "[\"cc d/f$i.c\" :pass \"equal\"]"; done; echo "[\"oo g.c\" :pass \"\"]"; echo "]"; } > "$r3/test/res.edn"
+echo '{:corpora [{:id :cc :subset ["d/f9.c"] :subset-rd ["d/f1.c" "d/f2.c"]} {:id :oo}]}' > "$r3/test/corp.edn"
+cat > "$r3/test/steps.edn" <<'STEPS'
+{:groups {}
+ :steps
+ [{:name rc :phase :full :cmd "bin/tool --corpus {part}" :inputs ["bin/tool"] :hosts []
+   :parts [{:part cc} {:part oo}]
+   :rotate {:only "--only {list}" :universe "test/res.edn" :id-re "^\\[\"([^ \"]+) ([^\"]+)\"" :id-as "$1/$2"
+            :subset "test/corp.edn" :subset-key :subset-rd :always ["cc/d/f3.c" "oo/g.c"] :failed-re "^FAIL ([^ ]+) .*$"}}]}
+STEPS
+(cd "$r3" && find . -type f -printf '%P\n' | LC_ALL=C sort | xargs -d '\n' sha256sum) > "$t/files.sha256"
+store=$t/store4; mkdir -p "$store"
+plan3() { local d=$1; shift; rm -rf "$d"; mkdir -p "$d"; cp "$t/files.sha256" "$t/hosts.edn" "$d/"
+  (cd "$here" && GATE_STEPS=$r3/test/steps.edn arbace_tool -p "$here/test" -m gate.plan plan "$r3" "$d" "$store" "$@") > "$d.out" 2>&1; }
+plan3 "$t/k0" nightly --night 0 || no "the :id-as plan: $(cat "$t/k0.out")"
+case $(names "$t/k0") in "rc.cc.sub rc.cc.s"[0-6]" rc.oo ") ok ":id-as: part cc rotated over its CORPUS/FILE ids, part oo (no :subset-rd) whole" ;;
+  *) no ":id-as's plan: $(names "$t/k0") ($(head -3 "$t/k0.out"))" ;; esac
+if [ "$(cat "$t/k0/rotation/rc.cc.sub.list" 2>&1)" = "$(printf 'cc/d/f1.c\ncc/d/f2.c\ncc/d/f3.c')" ]; then ok ":subset-key: the subset its key's (not :subset's), CORPUS/ prefixed, :always of the part only"; else no "the :subset-key subset: $(cat "$t/k0/rotation/rc.cc.sub.list" 2>&1)"; fi
+tot=0
+for k in 0 1 2 3 4 5 6; do plan3 "$t/k$k" nightly --night "$k"; f=$t/k$k/rotation/rc.cc.s$k.list; [ -f "$f" ] && tot=$((tot + $(grep -vcx 'cc/d/f3.c' "$f"))); done
+if [ "$tot" = 17 ]; then ok ":id-as: the slices cover the other 17 ids once"; else no ":id-as slices: $tot of 17"; fi
+
 echo "$((n - bad)) of $n passed"
 [ "$bad" = 0 ]

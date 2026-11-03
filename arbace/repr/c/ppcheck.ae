@@ -8,6 +8,7 @@
   (:require [arbace.repr.c.lex :as lex]
             [arbace.repr.c.pp :as pp]
             [arbace.repr.c.host :as host]
+            [arbace.repr.c.results :as results]
             [arbace.string :as str])
   (:import [arbace.repr.c.lex Tok]
            [java.util.concurrent Executors Callable]))
@@ -129,8 +130,12 @@
 
 (defn lists
   "Writes WORK/CORPUS/list.jsonl (tools/ccdump's list), files.edn (the entries) and base.txt for
-  each corpus id of `ids`; `roots` maps a :root to its directory."
-  [^String work roots ids]
+  each corpus id of `ids`; `roots` maps a :root to its directory. With `only` (GT8: an --only list's ids, CORPUS/NAME;
+  -main takes them from REPR_C_ONLY's file) a corpus keeps its listed files alone and WORK/CORPUS/only.txt names them
+  (the judges' mark of a partial run, arbace.repr.c.results/partial-names); a listed name its corpus does not hold is an
+  error, not a silent skip."
+  ([^String work roots ids] (lists work roots ids nil))
+  ([^String work roots ids only]
   (let [man (read-string (slurp "test/c/corpora.edn"))]
     (doseq [id ids]
       (let [corpus (or (first (filter #(= (:id %) (keyword id)) (:corpora man)))
@@ -145,8 +150,15 @@
             files (if (= (:dg-do corpus) :run) (run-files dir files) files)
             corpus (assoc corpus :absolute (= (:root (:where corpus)) :gcc-15.2.0))
             entries (mapv #(file-entry corpus dir %) files)
-            d (str work "/" id)]
+            d (str work "/" id)
+            want (when only (results/only-names only id))
+            _ (when want
+                (when-let [bad (seq (remove (set (map :name entries)) (sort want)))]
+                  (throw (ex-info (str "--only lists files corpus " id " does not hold: " (str/join " " (take 5 bad))) {}))))
+            entries (if want (filterv #(contains? want (:name %)) entries) entries)]
         (write-utf8 (str d "/base.txt") dir)
+        (let [m (java.io.File. (str d "/only.txt"))]
+          (if want (spit m (str/join (map #(str (:name %) "\n") entries))) (.delete m)))
         (spit (str d "/files.edn") (pr-str entries))
         (spit (str d "/list.jsonl")
               (str/join (for [e entries]
@@ -157,12 +169,12 @@
         (spit (str d "/gcc.list")
               (str/join (for [e entries]
                           (str (:name e) "\t" (:std (:fc e)) "\t" (str/join " " (:args (:fc e))) "\t" (:read e) "\n"))))
-        (println (str id ": " (count files) " files"
+        (println (str id ": " (count files) " files" (when want (str ", " (count entries) " of them listed (--only)"))
                       (when (and (:count corpus) (not= (:count corpus) (count files)))
                         (str " (the manifest counts " (:count corpus) ")"))))
         (when-let [u (seq (filter :opts-uncertain entries))]
           (println (str id ": " (count u) " files keep option lines whose selector test/c/dg-targets.edn cannot decide: "
-                        (pr-str (vec (take 10 (map (juxt :name :opts-uncertain) u)))))))))))
+                        (pr-str (vec (take 10 (map (juxt :name :opts-uncertain) u))))))))))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; The judge: the reference's tokens
@@ -331,11 +343,13 @@
         base (str/trim (slurp (str d "/base.txt")))
         entries (read-string (slurp (str d "/files.edn")))
         known-all (read-string (slurp known-file))
-        known (get-in known-all [:pp (keyword id)] {})
-        known-lex (get-in known-all [:lex (keyword id)] {})
+        ;; GT8: a partial run (--only) holds the known entries of its files alone to account for them
+        names (results/partial-names work id)
+        known (results/in-run (get-in known-all [:pp (keyword id)] {}) names)
+        known-lex (results/in-run (get-in known-all [:lex (keyword id)] {}) names)
         missing (java.util.concurrent.ConcurrentHashMap/newKeySet)
         h (assoc (host/load-host "test/c/host") :missing missing :gcc-db (load-gcc) :known-gcc (:gcc known-all))
-        known-gcc (get-in known-all [:gcc (keyword id)] {})
+        known-gcc (results/in-run (get-in known-all [:gcc (keyword id)] {}) names)
         threads (Integer/parseInt (or (System/getenv "REPR_C_THREADS") "8"))
         pool (Executors/newFixedThreadPool threads)
         t0 (System/nanoTime)
@@ -370,7 +384,13 @@
                     (when (seq gcc-fail) (str "; " (count gcc-fail) " files not judged by gcc's digest: "
                                               (str/join " " (map first (take 5 gcc-fail)))))
                     (when (seq stale) (str "; " (count stale) " known entries stale"))
-                    (when (seq missing) (str "; " (count missing) " __has answers not recorded"))))
+                    (when (seq missing) (str "; " (count missing) " __has answers not recorded"))
+                    (when names (str " (a partial run: " (count names) " listed files)"))))
+      ;; GT8: each failing file as FAIL CORPUS/NAME WHY (the rotation's :failed-re), a stale entry too
+      (results/print-failing id (concat (for [r pp-fail] [(first r) (str "pp " (nth r 2) " " (nth r 4))])
+                                        (for [r lex-fail :when (not (some #{r} pp-fail))] [(first r) "lex differ, not known"])
+                                        (for [r gcc-fail :when (not (some #{r} pp-fail))] [(first r) (str "gcc " (nth r 5))])
+                                        (for [[lv nm] stale] [nm (str "known entry stale (" (name lv) ")")])))
       ;; a missing __has answer is reported, not failed: the names gcc itself rejects (an error test's
       ;; __has_c_attribute(0)) have none to record
       (if (or (seq pp-fail) (seq lex-fail) (seq gcc-fail) (seq stale)) 1 0))))
@@ -431,6 +451,8 @@
     (cond
       (not (and (some #{sc} ids) (some #{rc} ids) (contains? levels lvl))) :left
       (nil? se) :left
+      ;; GT8: a partial run (--only) that does not hold the reference leaves the control
+      (and (nil? re) (results/partial-names work rc)) :left
       (= level :gcc-digest)
       (let [row (first (filter #(= sn (first %)) (map #(str/split % #"\t" -1) (remove str/blank? (str/split-lines (slurp (str work "/" sc "/files.tsv")))))))
             dg (nth row 3 nil)
@@ -644,7 +666,7 @@
 (defn -main [cmd & args]
   (case cmd
     "pp" (pp-main (first args) (rest args))
-    "lists" (let [[work roots & ids] args] (lists work (read-string roots) ids))
+    "lists" (let [[work roots & ids] args] (lists work (read-string roots) ids (results/only-ids (System/getenv "REPR_C_ONLY"))))
     ;; bin/repr-c corpus-dedup [--check]: each :dedup corpus's recomputed files, or (--check) their equality with its :files
     "dedup" (let [[roots check & ids] args
                   man (read-string (slurp "test/c/corpora.edn"))

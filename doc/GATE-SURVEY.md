@@ -3428,3 +3428,47 @@ as failed (`judge_note`: its run a failure, its ids into the part's subset). The
 
 **What remains.** The `:subset`s (GT8.3) for repr/go, Java and goi: until then their parts run whole in every tier;
 committed id records (or a `:universe-cmd`) for the oracle, diffcheck and repr/clojure; a part for `suite-aot`.
+
+## As built: GT8 (C's read lists) (write-ahead, branch `c-lists`, 2026-11-03)
+
+C's read-level checks take a file list, so GT8.4's rotation reaches them (about 220 of C's 300 full-check minutes).
+
+**The tools.** `--only LIST` (ids `CORPUS/NAME`, blank and `#` lines apart) on `bin/repr-c check --tokens`, `bin/repr-c
+parse-check`, `bin/repr-c roundtrip` and `bin/ci annotations` (`bin/lib/repr-c/only.bash`: an id outside the corpora, or
+not `CORPUS/NAME`, refused, exit 2; exported as `REPR_C_ONLY`), and on `bin/ci dg` (`CI_DG_ONLY`, which `--essential` used
+alone until now). `arbace.repr.c.ppcheck/lists`, the four checks' common lists, keeps a corpus's listed files and writes
+`WORK/CORPUS/only.txt`, the judges' mark of a partial run; a listed name its corpus does not hold fails the lists. Each
+judge (`ppcheck/check`, `parsecheck/check`, `annot/judge`, `rtcheck/judge`) then judges what the run holds
+(`arbace.repr.c.results`'s `partial-names`, `in-run`): a known entry of a file not run is not stale, and a control whose
+reference the partial run does not hold is left, not "not judged" (a whole run keeps the strict rule). Every judge now
+prints each failing file, and each stale entry, as `FAIL CORPUS/NAME WHY` (at most 40 a corpus, `print-failing`): the
+rotation's `:failed-re`. Refused with a list: `--record` (all five), `--record-gcc`, `--resume` (a kept corpus's lists),
+`--mutants-only` (parse-check; a list draws no mutants), `--essential` (dg); `--judge --record` (annotations) and
+`--resume --record` (roundtrip) after a partial run. Tests: `test/c/judge_test.ae`'s `read-lists-only`,
+`read-partial-judges`, `read-only-refusals` (74 assertions with the five control tests). Shown by hand: the four checks on
+`benchmarksgame/{fannkuchredux,fasta-8,fasta}.c` (15 to 30 s each, every control judged and differing), the token check on
+`fannkuchredux.c` alone (its three controls left), `bin/ci dg --only` on three files of two groups (its control judged).
+
+**The planner.** `:rotate`'s `:id-as` (with `:id-re`: the id is the match replaced, `$1/$2`, ids then under `PART/` as
+without `:id-re`): the results files' `"CORPUS FILE"` rows as `CORPUS/FILE`. `:subset-key` (default `:subset`): the corpus
+map's key that holds the subset, since the run corpora's `:subset` (ci's back end, VM 161) is another check's. rotation-test
+54 of 54 (the case: a results file, a subset under its own key, a name with a slash).
+
+**The steps.** `:rotate` on `c-tokens`, `c-parse`, `c-annotations`, `c-roundtrip` (universe the check's results file,
+subset `:subset-tokens`, `:subset-parse`, `:subset-annot`, `:subset-roundtrip`, `:always` the controls' two files,
+`benchmarksgame/fannkuchredux.c` and `fasta-8.c`, `:failed-re "^FAIL ([^ ]+) .*$"`). `c-dg` stays whole: one step over
+seven groups, its control crossing two of them (a part per group would leave it in every part).
+
+**The subsets** (GTS205's rule needs the code under check's coverage: repr/c's lexer, preprocessor, parser, converter,
+printer and arbace.c.check). `bin/ci cover`'s method extends in its reducer (`tools/cicover` takes any `KEY N COUNT`
+profile) but not in its measure: ci's back end is a Go program (cirun) built with `-cover`, while repr/c is Arbace code,
+evaluated on stage 0 or compiled into the executable. Proposed: GTS206 (a)'s cover build of the gate's executable
+(`go build -cover -coverpkg` the `aot_arbace_repr_c_*` and `aot_arbace_c_check*` packages, kept by key), the checks run on
+it compiled (not `ARBACE_PATH_FIRST`), one file a process or `runtime/coverage`'s counters cleared and written around each
+file (`REPR_C_THREADS=1`), then `tools/cicover` with KEEP the controls' files and one file per known class. Until then a
+proxy, computed for one corpus: the tree check's `:subset-parse` of benchmarksgame, the cases and token kinds of cc's
+tree dumps (271 over the 52 files; `REPR_C_PARSE_KEEP=1`), reduced by `tools/cicover`: 9 files, 22% of the nodes (with
+parent-child pairs, 1,287 features, 30 files: too fine). It makes `c-parse.benchmarksgame` rotate in `--nightly`.
+
+**Open.** A file name with a space (`cxgo/main with args.c`) is cut by `[^ ]+` in every C `:failed-re`, the run checks'
+too; `c-dg`'s control (one group, or a part over all groups); whether the proxy subset stays until the cover build.

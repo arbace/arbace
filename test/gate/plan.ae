@@ -332,7 +332,9 @@
                (when-not (:universe r) [(str nm ": :rotate has no :universe")])
                (when-let [x (:id-re r)]
                  (when-not (try (re-pattern x) (catch Throwable _ nil)) [(str nm ": :rotate's :id-re does not compile: " x)]))
-               (when-not (or (nil? (:always r)) (vector? (:always r))) [(str nm ": :rotate's :always is not a vector of ids")])))
+               (when-not (or (nil? (:always r)) (vector? (:always r))) [(str nm ": :rotate's :always is not a vector of ids")])
+               (when (and (:id-as r) (not (:id-re r))) [(str nm ": :rotate's :id-as without an :id-re")])
+               (when-not (or (nil? (:subset-key r)) (keyword? (:subset-key r))) [(str nm ": :rotate's :subset-key is not a keyword")])))
             (when-let [j (:judges s)]
               (concat
                (when-not (seq (:uses s)) [(str nm ": :judges on a step without :uses (its producers)")])
@@ -373,28 +375,37 @@
   "the ids of a record under PART: by default its lines [\"ID\" ...] (test/c/check-linux-amd64.edn's shape) whose
   ID is under PART/; with ID-RE (:rotate's :id-re, a regex on a line), its group 1 on every line it finds, and
   when it has a group 2, only the lines whose group 2 is PART (the part named on the line: Java's corpus);
-  each id once, in the record's order"
-  [^String f ^String part id-re]
+  each id once, in the record's order. With ID-AS (:rotate's :id-as, a replacement of the match, $1 its group 1), the id
+  is the replacement and the part's ids those under PART/, as without ID-RE (C's results files: \"CORPUS FILE\" as
+  CORPUS/FILE)"
+  ([^String f ^String part id-re] (record-ids f part id-re nil))
+  ([^String f ^String part id-re id-as]
   (let [pre (str part "/")
         re (re-pattern (or id-re default-id-re))
         groups (.groupCount (re-matcher re ""))]
     (vec (distinct
           (for [l (str/split-lines (slurp f))
-                :let [m (re-find re l)]
+                :let [mm (re-matcher re l)
+                      m (when (.find mm) (re-groups mm))]
                 :when m
-                :let [id (second m) p (when (> groups 1) (nth m 2))]
-                :when (cond (nil? id-re) (str/starts-with? id pre)
+                :let [id (if id-as
+                           (let [g (.group mm)] (.replaceFirst (re-matcher re g) ^String id-as))
+                           (if (string? m) m (second m)))
+                      p (when (and (not id-as) (> groups 1)) (nth m 2))]
+                :when (cond (or (nil? id-re) id-as) (str/starts-with? id pre)
                             (> groups 1) (= p part)
                             :else true)]
-            id)))))
+            id))))))
 
 (defn- corpus-subset
   "the :subset of the map whose :id is :PART anywhere in the file (test/c/corpora.edn's shape), each PART/NAME
-  (BARE: each NAME as written, the ids of a record read by an :id-re); nil when it has none"
-  [^String f ^String part bare]
+  (BARE: each NAME as written, the ids of a record read by an :id-re); nil when it has none. KEY (:rotate's :subset-key,
+  default :subset) the map's key that holds it: a corpus two checks rotate (C's run and read checks) keeps one each"
+  ([^String f ^String part bare] (corpus-subset f part bare nil))
+  ([^String f ^String part bare key]
   (let [k (keyword part)
         m (first (filter #(and (map? %) (= k (:id %))) (tree-seq coll? seq (read-file f))))]
-    (when-let [s (:subset m)] (mapv #(if bare (str %) (str part "/" %)) s))))
+    (when-let [s (get m (or key :subset))] (mapv #(if bare (str %) (str part "/" %)) s)))))
 
 (defn- rot-dir [store] (str store "/_rotation"))
 
@@ -450,11 +461,11 @@
   (the negative controls' subjects, GTS81 (a)): ids of the universe in the subset and in every slice's list, so
   that every run of the part judges its controls"
   [root store step]
-  (when-let [{:keys [universe subset id-re always]} (:rotate step)]
-    (when-let [declared (when subset (corpus-subset (str root "/" subset) (:part step) (some? id-re)))]
+  (when-let [{:keys [universe subset id-re id-as subset-key always]} (:rotate step)]
+    (when-let [declared (when subset (corpus-subset (str root "/" subset) (:part step) (and (some? id-re) (nil? id-as)) subset-key))]
     (let [part (:part step) nm (str (:name step))
           ;; (the universe read only for a part with a :subset: a plan reads no record of an unrotated part)
-          u (record-ids (str root "/" universe) part id-re)
+          u (record-ids (str root "/" universe) part id-re id-as)
           uset (set u)
           always (filterv uset (map str always))
           failed (filterv uset (failed-of store nm))
