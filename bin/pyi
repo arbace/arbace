@@ -31,8 +31,10 @@
 #   bin/pyi run FILE.py ARGS...    PY5e: sys.argv [FILE ARGS...], sys.path [FILE's directory, the pinned tarball's Lib];
 #                                  imports, exec, eval and compile compiled by the host (arbace.python.run, the IR kept in
 #                                  .tmp/repr-python/pyi/ir-cache by the source's and the compiler's SHA-256)
-#   bin/pyi repl                   PY5e: python3's basic REPL (go/arbace/py's repl.go): statements from stdin, prompts on
-#                                  stderr, expression statements' values displayed (sys.displayhook, builtins._)
+#   bin/pyi repl [--check]         PY5e: python3's basic REPL (go/arbace/py's repl.go): statements from stdin, prompts on
+#                                  stderr, expression statements' values displayed (sys.displayhook, builtins._); --check:
+#                                  test/python/pyi/*.in fed to it and to python3 -q -i, stdout, status and stderr's
+#                                  unindented lines equal
 #   bin/pyi runtime print|read|vet|check
 #                                  PY5b0, the runtime's sources (doc/python/PYI-SPEC.md §8): go/arbace/py's Go forms (mode :full,
 #                                  lossless) printed as a Go module into .tmp/repr-python/pyi/runtime (print), edited there,
@@ -40,7 +42,7 @@
 #                                  clean, then go vet and go test by TamaGo's go;
 #                                  check: printed and read again equal to the committed forms, the runtime's operations
 #                                  arbace.python.ir/ops's (runtime-ops), the programs of test/python/pyi/ run by bin/pyi run
-#                                  equal to the oracle's runs (stdout, status, stderr's last line)
+#                                  equal to the oracle's runs (stdout, status, stderr's last line), and repl --check
 # Environment: REPR_PYTHON_SRC as for bin/repr-python (the tarball's source).
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -247,8 +249,33 @@ stdlib_lib() {
 pyi_env() { export PYI_ROOT="$root" PYI_WORK="$WORK" PYI_RUN_ID="$$"; }
 
 cmd_repl() {
+  if [ "${1:-}" = --check ]; then repl_check; return; fi
   pyi_env
   pa_arbace repl --lib "$(stdlib_lib)"
+}
+
+# repl_check: test/python/pyi/*.in fed to bin/pyi repl and to the oracle's basic REPL (python3 -q -i): stdout and the
+# status equal, and stderr's prompts and exceptions' last lines (the lines not indented)
+repl_check() {
+  local p n=0 bad=0 want got
+  for p in "$root"/test/python/pyi/*.in; do
+    n=$((n + 1))
+    want=$(repl_run "$p" python3 -q -i)
+    got=$(repl_run "$p" "$root/bin/pyi" repl)
+    if [ "$want" = "$got" ]; then echo "  pass $(basename "$p")"; else
+      echo "  FAIL $(basename "$p")"; diff <(echo "$want") <(echo "$got") | head -10; bad=$((bad + 1)); fi
+  done
+  echo "repl: $n sessions of test/python/pyi run by pyi's REPL as by the oracle's: $((n - bad)) equal"
+  [ $bad -eq 0 ]
+}
+
+repl_run() {
+  local in=$1 o e rc=0; shift
+  o=$(mktemp "$WORK/smoke.XXXXXX"); e=$(mktemp "$WORK/smoke.XXXXXX")
+  timeout 300 env HOME="$WORK" TMPDIR="$WORK" "$@" < "$in" > "$o" 2> "$e" || rc=$?
+  cat "$o"; echo "status $rc"
+  sed -E 's/  File "[^"]*", line [0-9]+(, in .*)?$//' "$e" | grep -v '^ ' | grep -v '^Traceback (most recent call last):$'
+  rm -f "$o" "$e"
 }
 
 cmd_run() {
@@ -322,6 +349,7 @@ cmd_runtime() {
       done
       echo "runtime: $n programs of test/python/pyi run by pyi as by the oracle: $((n - bad)) equal"
       [ $bad -eq 0 ] || rc=1
+      repl_check || rc=1
       return $rc ;;
     *) die "usage: bin/pyi runtime print|read|vet|check" ;;
   esac
@@ -345,5 +373,5 @@ case "${1:-}" in
   run) shift; mkdir -p "$WORK"; cmd_run "$@" ;;
   repl) shift; mkdir -p "$WORK"; cmd_repl "$@" ;;
   runtime) shift; mkdir -p "$WORK"; cmd_runtime "$@" ;;
-  *) sed -n '2,44p' "$0"; exit 2 ;;
+  *) sed -n '2,46p' "$0"; exit 2 ;;
 esac
