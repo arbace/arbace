@@ -18,7 +18,8 @@
 #   cover_cache ROOT [KEY]       where the cover build of ROOT's gate_key is: ARBACE_COVER_CACHE when set, else
 #                                ARBACE_GATE_EXES/cover-KEY20 (beside the gate's builds, KEY20/)
 #   cover_exe ROOT [NAME]        the cover build's NAME (arbace, default, or arbace-tests) at ROOT's key: its path,
-#                                status 1 with a note when it is not built (bin/arbace-go --gate-build --cover)
+#                                status 1 with a note when it is not built (bin/arbace-go --gate-build --cover), or
+#                                when ARBACE_COVER_DIR holds another build's data (cover_claim: RUN/key)
 #   cover_env TOOL ID            when ARBACE_COVER_DIR is set: GOCOVERDIR=DIR for the run of test ID by TOOL (a
 #                                check and its level, java-interp, goi, ...), DIR = ARBACE_COVER_DIR/TOOL/ID with /
 #                                in ID as %, made, ID written into DIR/id; nothing when unset
@@ -70,16 +71,36 @@ cover_cache() {
   echo "$(arbace_gate_exes "$root")/cover-${key:0:20}"
 }
 
+# cover_claim CACHE: ARBACE_COVER_DIR holds one cover build's data (review 182 L5): RUN/key names the build its
+# counters come from (CACHE/key, the cover build's key; else the executable's digest), written by the first check
+# run into it; a check run of another build is refused (status 1), so that no counters of two builds mix and bin/cover
+# blocks reads the packages of the build that ran. Nothing without ARBACE_COVER_DIR
+cover_claim() {
+  [ -n "${ARBACE_COVER_DIR:-}" ] || return 0
+  local k have t
+  k=$(cat "$1/key" 2>"${TMPDIR:-.}/cover-key.err") || k=
+  [ -n "$k" ] || k=exe-$(sha256sum < "$1/amd64/arbace" | cut -c1-64) || return 1
+  mkdir -p "$ARBACE_COVER_DIR" || return 1
+  if [ ! -e "$ARBACE_COVER_DIR/key" ]; then
+    # (two checks starting at once: one link wins, the other compares)
+    t=$ARBACE_COVER_DIR/.key.$$; echo "$k" > "$t" && { ln "$t" "$ARBACE_COVER_DIR/key" 2>"${TMPDIR:-.}/cover-key.err"; rm -f "$t"; }
+  fi
+  have=$(cat "$ARBACE_COVER_DIR/key" 2>"${TMPDIR:-.}/cover-key.err")
+  [ "$have" = "$k" ] && return 0
+  echo "cover: $ARBACE_COVER_DIR holds the data of another cover build (its key ${have:0:12}, this build's ${k:0:12}: $1): a directory of its own for each build" >&2
+  return 1
+}
+
 cover_exe() {
   local root=$1 n=${2:-arbace} c k
   c=$(cover_cache "$root") || return 1
   # its key the checkout's cover key (the gate's, the hook, this file: review 182 finding 5); an
   # ARBACE_COVER_CACHE is taken as given, with a note
   if [ -n "${ARBACE_COVER_CACHE:-}" ]; then
-    [ -x "$c/amd64/$n" ] && { echo "cover: $c/amd64/$n (ARBACE_COVER_CACHE), not compared with the checkout's key" >&2; echo "$c/amd64/$n"; return 0; }
+    [ -x "$c/amd64/$n" ] && { echo "cover: $c/amd64/$n (ARBACE_COVER_CACHE), not compared with the checkout's key" >&2; cover_claim "$c" || return 1; echo "$c/amd64/$n"; return 0; }
   else
     k=$("$root/bin/arbace-go" --cover-key) || return 1
-    [ -x "$c/amd64/$n" ] && [ "$(cat "$c/key" 2>"${TMPDIR:-.}/cover-key.err")" = "$k" ] && { echo "$c/amd64/$n"; return 0; }
+    [ -x "$c/amd64/$n" ] && [ "$(cat "$c/key" 2>"${TMPDIR:-.}/cover-key.err")" = "$k" ] && { cover_claim "$c" || return 1; echo "$c/amd64/$n"; return 0; }
   fi
   echo "cover: no cover build at the checkout's key ($c/amd64/$n; bin/arbace-go --gate-build --cover)" >&2
   return 1

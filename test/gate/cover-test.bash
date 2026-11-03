@@ -3,7 +3,8 @@
 # overlay (cover_go_flags: every file of cover_hook_table), and the hook's files (tools/covsubset/hook) built into a toy
 # Go program with -cover by TamaGo's go (ARBACE_GOROOT, /root/tamago-go; skipped with a message when it is missing), as
 # the cover builds add them: the program's own signal handling kept, no tmp.covcounters left, an ignored SIGHUP
-# ignored (L3); a deadlock reported as Go reports it, at once, and none where Go reports none (L2). The cover build is amd64-only; the hook's logic is not: the toy runs on the host's architecture.
+# ignored (L3); a deadlock reported as Go reports it, at once, and none where Go reports none (L2); and a run directory
+# (ARBACE_COVER_DIR) of one cover build's data alone (L5). The cover build is amd64-only; the hook's logic is not: the toy runs on the host's architecture.
 # Seconds after the toy's first build (about 10 s). No Arbace executable.
 # Usage: test/gate/cover-test.bash
 set -u
@@ -142,6 +143,20 @@ else
   no "the toy does not build with the hook: $(tail -5 "$t/build.log")"
 fi
 fi
+
+# (L5) a run directory holds one cover build's data: RUN/key written by the first check's cover_exe, another build's
+# run into it refused, and bin/cover blocks refusing a run of another build than the one whose packages it would read
+for k in 1 2; do mkdir -p "$t/c$k/amd64"; printf '#!/bin/sh\n' > "$t/c$k/amd64/arbace"; chmod +x "$t/c$k/amd64/arbace"; echo "key$k" > "$t/c$k/key"; done
+x1=$(ARBACE_COVER_CACHE=$t/c1 ARBACE_COVER_DIR=$t/run cover_exe "$here" 2>"$t/claim1.err"); s1=$?
+x1b=$(ARBACE_COVER_CACHE=$t/c1 ARBACE_COVER_DIR=$t/run cover_exe "$here" 2>"$t/claim1b.err"); s1b=$?
+if [ "$s1" = 0 ] && [ "$x1" = "$t/c1/amd64/arbace" ] && [ "$(cat "$t/run/key" 2>&1)" = key1 ] && [ "$s1b" = 0 ]; then ok "the first run into a directory names its cover build (RUN/key), a second of the same build is taken"
+else no "the first run's claim: $s1 $s1b '$x1' $(cat "$t/run/key" "$t/claim1.err" 2>&1)"; fi
+x2=$(ARBACE_COVER_CACHE=$t/c2 ARBACE_COVER_DIR=$t/run cover_exe "$here" 2>"$t/claim2.err"); s2=$?
+if [ "$s2" = 1 ] && [ -z "$x2" ] && grep -q 'holds the data of another cover build' "$t/claim2.err" && [ "$(cat "$t/run/key")" = key1 ]; then ok "a run of another cover build into it refused"
+else no "another build's run: status $s2, '$x2', $(cat "$t/claim2.err")"; fi
+(unset ARBACE_COVER_DIR; ARBACE_COVER_CACHE=$t/c2 "$here/bin/cover" blocks "$t/run") > "$t/blocks.out" 2>&1; sb=$?
+if [ "$sb" = 1 ] && grep -q 'holds the data of cover build key1' "$t/blocks.out"; then ok "bin/cover blocks refuses a run of another build than its cover cache's"
+else no "bin/cover blocks on another build's run: status $sb, $(cat "$t/blocks.out")"; fi
 
 echo "$((n - bad)) of $n passed"
 [ "$bad" = 0 ]
