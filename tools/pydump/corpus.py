@@ -20,6 +20,8 @@ directory under BASE; the selected files are the .py files under the PATHs, recu
   list      the selected files, one relative path a line
   costs     TSV... (bin/repr-python roundtrip's per-file stage files: REL STATUS ... SECONDS RSS as their last two
             columns): one Clojure map per stage, {:files :seconds :mean :p50 :p95 :max :max-file :peak-kib}
+  methods   TYPE FILE...: the public methods and attributes of the builtin TYPE (dir(TYPE) less _names) that no FILE
+            names as .NAME, one a line, then a summary; exit 1 on any (bin/pyi gen --check's builtins coverage)
   samples   the selected files each parsed by ast.parse (plain and with type_comments=True) and compiled; then
             the node classes of the oracle's ast (spec-check proves them Python.asdl's) that no sample's tree
             holds, but Interactive, Expression and FunctionType (the other parse modes' tops) and the
@@ -73,6 +75,18 @@ def main():
     if args[0] == "costs":
         costs(args[1:])
         return
+    if args[0] == "methods":
+        import builtins
+        t = args[1]
+        used = set()
+        for f in args[2:]:
+            used |= set(__import__("re").findall(r"\.([A-Za-z_][A-Za-z0-9_]*)", open(f, encoding="utf-8").read()))
+        pub = sorted(n for n in dir(getattr(builtins, t)) if not n.startswith("_"))
+        missing = [n for n in pub if n not in used]
+        for n in missing:
+            print("UNCOVERED %s.%s" % (t, n))
+        print("methods %s: %d of %d named" % (t, len(pub) - len(missing), len(pub)))
+        sys.exit(1 if missing else 0)
     verb, base = args[0], args[1]
     paths, excludes = [], []
     i = 2
