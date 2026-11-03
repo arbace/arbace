@@ -3,18 +3,23 @@
 Python files as Python forms in mode :lines, and the facts the round trip judges by.
 
 usage:
-  pydump.py tree --base DIR --list FILE --out DIR [--tsv FILE]
+  pydump.py tree --base DIR --list FILE --out DIR [--tsv FILE] [--full]
       every file of the list (paths relative to DIR, one a line) parsed by ast.parse (the read level's parse) and
       written as OUT/REL.ae: (python/module [...] {...}) in the spec's forms (the literals' spellings from the
       source, §3), or (python/error ...) when ast.parse rejects it (§12). Type comments come from a second parse
       with type_comments=True (§5.8, S6): a file only it rejects gets {:type-comments :rejected}. A Name, Attribute,
       Subscript, Starred, List or Tuple in a Store or Del context is marked (^:store, ^:del on a symbol,
       {:ctx :store} on a list) for the converter, which checks the mark against the slot and drops it (S15).
-      The TSV, one line a file: REL STATUS AST CODE NODES SECONDS RSS
+      With --full, mode :full (§11, PY3): every node with attributes in its long spelling with :pos, and the
+      module's map with :mode :full, :tokens (the token stream, the text between tokens as :ws: the texts
+      concatenated are the decoded file), :encoding (when not UTF-8) and :bom.
+      The TSV, one line a file: REL STATUS AST CODE MARSHAL SHA NODES SECONDS RSS
         STATUS  ok | error
         AST     sha256 of ast.dump(tree) (no attributes, the plain parse): the round trip's level 2
         CODE    sha256 of the code objects compiled from the text, normalized without positions (code_digest):
                 the round trip's level 3; "compile-error: MSG" when compile rejects what ast.parse accepted
+        MARSHAL sha256 of marshal.dumps of the code compiled from the text, positions included (level 5)
+        SHA     sha256 of the file's bytes (level 4: the :full print against the original)
         NODES   the tree's nodes; SECONDS the file's time; RSS the process's peak RSS so far (KiB, ru_maxrss)
   pydump.py symtable FILE        the file's symbol tables as (python/symtable SCOPE): (scope TYPE NAME [SYMBOL...]
                                  [CHILD...]), (symbol NAME [FLAG...]); PY5's reference, written here at PY2
@@ -34,6 +39,7 @@ import tokenize
 import types
 import warnings
 import dis
+import marshal
 import bisect
 import symtable as symtable_mod
 
@@ -105,6 +111,10 @@ class Source:
             c = len(ln.encode("utf-8")[:col].decode("utf-8", "replace"))
         return self.starts[line - 1] + c
 
+    def cindex(self, line, col):
+        """tokenize's (line, character column)"""
+        return self.starts[line - 1] + col if line <= len(self.starts) else len(self.text)
+
     def span(self, n):
         return self.index(n.lineno, n.col_offset), self.index(n.end_lineno, n.end_col_offset)
 
@@ -114,8 +124,9 @@ class Source:
 
 
 class Writer:
-    def __init__(self, src, tc_tree):
+    def __init__(self, src, tc_tree, full=False):
         self.src = src
+        self.full = full
         self.fields = {}  # start index -> FormattedValue or Interpolation
         self.nodes = 0
         self.tc = {}  # (type, lineno, col) -> type_comment, from the type_comments parse
@@ -144,7 +155,7 @@ class Writer:
             return vec([self.stmt(n.orelse[0], [(":elif", "true")])])
         return self.body(n.orelse)
 
-    def stmt(self, n, extra=()):
+    def _stmt(self, n, extra=()):
         self.nodes += 1
         e, b, t = self.expr, self.body, self.target
         k = type(n)
@@ -195,8 +206,8 @@ class Writer:
             hs = []
             for h in n.handlers:
                 self.nodes += 1
-                hs.append(form("except-handler", b(h.body), opts=[(":type", e(h.type) if h.type else None),
-                                                                  (":name", ident(h.name) if h.name else None)]))
+                hs.append(self.posit(form("except-handler", b(h.body), opts=[(":type", e(h.type) if h.type else None),
+                                                                             (":name", ident(h.name) if h.name else None)]), h))
             return form("try" if k is ast.Try else "try-star", b(n.body), vec(hs),
                         opts=[(":else", b(n.orelse) if n.orelse else None),
                               (":finally", b(n.finalbody) if n.finalbody else None)], meta=list(extra))
@@ -221,17 +232,17 @@ class Writer:
             return form("continue", meta=list(extra))
         raise ValueError("unknown statement " + k.__name__)
 
-    def alias(self, a):
+    def _alias(self, a):
         self.nodes += 1
         if a.asname is None:
             return ident(a.name) if a.name not in NOT_SYMBOLS else form("alias", qstr(a.name))
         return form("alias", ident(a.name), opts=[(":as", ident(a.asname))])
 
-    def keyword(self, k):
+    def _keyword(self, k):
         self.nodes += 1
         return form("keyword", ident(k.arg) if k.arg else "nil", self.expr(k.value))
 
-    def arg(self, a):
+    def _arg(self, a):
         self.nodes += 1
         c = self.tc.get(("arg", a.lineno, a.col_offset))
         if a.annotation is None and c is None:
@@ -261,12 +272,13 @@ class Writer:
             self.nodes += 1
             d = self.expr(p.default_value) if p.default_value else None
             if isinstance(p, ast.TypeVar):
-                out.append(form("type-var", ident(p.name), opts=[(":bound", self.expr(p.bound) if p.bound else None),
-                                                                   (":default", d)]))
+                f = form("type-var", ident(p.name), opts=[(":bound", self.expr(p.bound) if p.bound else None),
+                                                           (":default", d)])
             elif isinstance(p, ast.ParamSpec):
-                out.append(form("param-spec", ident(p.name), opts=[(":default", d)]))
+                f = form("param-spec", ident(p.name), opts=[(":default", d)])
             else:
-                out.append(form("type-var-tuple", ident(p.name), opts=[(":default", d)]))
+                f = form("type-var-tuple", ident(p.name), opts=[(":default", d)])
+            out.append(self.posit(f, p))
         return vec(out)
 
     def case(self, c):
@@ -274,7 +286,7 @@ class Writer:
         return form("match-case", self.pattern(c.pattern), self.body(c.body),
                     opts=[(":guard", self.expr(c.guard) if c.guard else None)])
 
-    def pattern(self, p):
+    def _pattern(self, p):
         self.nodes += 1
         k = type(p)
         if k is ast.MatchValue:
@@ -310,7 +322,7 @@ class Writer:
             return "del"
         return None
 
-    def expr(self, n):
+    def _expr(self, n):
         self.nodes += 1
         e = self.expr
         k = type(n)
@@ -523,7 +535,7 @@ class Writer:
             else:
                 return k
 
-    def field(self, f, raw):
+    def _field(self, f, raw):
         t = self.src.text
         fs, fe = self.src.span(f)
         self.nodes += 1
@@ -557,11 +569,54 @@ class Writer:
             return form("interpolation", self.expr(f.value), qstr(f.str), opts=opts)
         return form("formatted-value", self.expr(f.value), opts=opts)
 
+    # ---- mode :full (§11): every node with attributes carries :pos, written in its long spelling (§1.4)
+    def posit(self, text, n, short=None):
+        """text with n's position in its trailing map (mode :full); a short spelling first made long"""
+        if not self.full or getattr(n, "end_lineno", None) is None:
+            return text
+        pos = ":pos [%d %d %d %d]" % (n.lineno, n.col_offset, n.end_lineno, n.end_col_offset)
+        if not text.startswith("("):
+            ctx = None
+            if text.startswith("^:"):
+                ctx, text = text[2:].split(" ", 1)
+            head = short
+            if head == "const" and PLAIN_INT.match(text):
+                head, text = "int", qstr(text)
+            elif head == "const" and text.startswith('"'):
+                head = "str"
+            text = "(%s %s)" % (head, text)
+            if ctx:
+                pos = ":ctx :%s %s" % (ctx, pos)
+        if text.endswith("})"):
+            return text[:-2] + " " + pos + "})"
+        return text[:-1] + " {" + pos + "})"
+
+    def stmt(self, n, extra=()):
+        return self.posit(self._stmt(n, extra), n)
+
+    def expr(self, n):
+        return self.posit(self._expr(n), n, "name" if isinstance(n, ast.Name) else "const")
+
+    def pattern(self, p):
+        return self.posit(self._pattern(p), p)
+
+    def alias(self, a):
+        return self.posit(self._alias(a), a, "alias")
+
+    def keyword(self, k):
+        return self.posit(self._keyword(k), k)
+
+    def arg(self, a):
+        return self.posit(self._arg(a), a, "arg")
+
+    def field(self, f, raw):
+        return self.posit(self._field(f, raw), f)
+
     def module(self, tree, rel, extra):
         for n in ast.walk(tree):
             if isinstance(n, (ast.FormattedValue, ast.Interpolation)):
                 self.fields[self.src.span(n)[0]] = n
-        meta = [(":file", qstr(rel)), (":mode", ":lines")] + list(extra)
+        meta = [(":file", qstr(rel)), (":mode", ":full" if self.full else ":lines")] + list(extra)
         return form("python/module", self.body(tree.body), meta=meta)
 
 
@@ -655,13 +710,51 @@ def decode(data):
     return text
 
 
-def tree_one(path, rel):
-    """(forms-text, status, ast-digest, code-digest, nodes)"""
+TOKEN_KIND = {t: ":" + n.lower().replace("_", "-") for t, n in tokenize.tok_name.items()}
+MIDDLE = (tokenize.FSTRING_MIDDLE, tokenize.TSTRING_MIDDLE)
+GAP = re.compile(r"(?:[ \t\f]|\\(?:\r\n|\r|\n))*\Z")
+
+
+def tokens(data, src):
+    """The file's tokens (tokenize.tokenize, E5) as a flat vector KIND TEXT KIND TEXT ..., each TEXT the source's
+    slice (tokenize's columns count characters, the ast's UTF-8 bytes), the text between two tokens a :ws entry (spaces, tabs, form feeds, backslash continuations), so that the
+    texts concatenated are the decoded file exactly (§11). An f-string's or t-string's middle runs to the next token
+    (tokenize's string and end undouble {{ and }})."""
+    toks = [t for t in tokenize.tokenize(io.BytesIO(data).readline) if t.type != tokenize.ENCODING]
+    t = src.text
+    out = []
+    prev = 0
+    starts = [src.cindex(*tk.start) for tk in toks]
+    for i, tk in enumerate(toks):
+        a = max(starts[i], prev)
+        if tk.type in MIDDLE and i + 1 < len(toks):
+            z = starts[i + 1]
+        else:
+            z = src.cindex(*tk.end)
+            z = max(z, a)
+        if a > prev:
+            gap = t[prev:a]
+            if not GAP.match(gap):
+                raise ValueError("text between tokens that is not white space: %r" % gap[:40])
+            out += [":ws", qstr(gap)]
+        out += [TOKEN_KIND[tk.type], qstr(t[a:z])]
+        prev = z
+    if prev < len(t):
+        gap = t[prev:]
+        if not GAP.match(gap):
+            raise ValueError("text after the last token that is not white space: %r" % gap[:40])
+        out += [":ws", qstr(gap)]
+    return vec(out)
+
+
+def tree_one(path, rel, full=False):
+    """{:text :status :ast :code :marshal :sha :nodes}"""
     data = open(path, "rb").read()
+    r = {"sha": hashlib.sha256(data).hexdigest(), "ast": "-", "code": "-", "marshal": "-", "nodes": 0}
     try:
         tree = ast.parse(data, rel)
     except (SyntaxError, ValueError) as e:
-        return error_form(e) + "\n", "error", "-", "-", 0
+        return dict(r, text=error_form(e) + "\n", status="error")
     extra = []
     try:
         tc = ast.parse(data, rel, type_comments=True)
@@ -670,16 +763,32 @@ def tree_one(path, rel):
         extra.append((":type-comments", ":rejected"))
     if tc is not None and tc.type_ignores:
         extra.append((":type-ignores", vec([form("type-ignore", str(t.lineno), qstr(t.tag)) for t in tc.type_ignores])))
-    w = Writer(Source(decode(data)), tc)
+    enc, _ = tokenize.detect_encoding(io.BytesIO(data).readline)
+    src = Source(decode(data))
+    if full:
+        if enc not in ("utf-8", "utf-8-sig"):
+            extra.append((":encoding", qstr(enc)))
+        if data.startswith(b"\xef\xbb\xbf"):
+            extra.append((":bom", "true"))
+        extra.append((":tokens", tokens(data, src)))
+    w = Writer(src, tc, full)
     text = w.module(tree, rel, extra)
-    ad = hashlib.sha256(ast.dump(tree).encode("utf-8", "surrogateescape")).hexdigest()
-    return text + "\n", "ok", ad, code_digest(data, rel), w.nodes
+    try:
+        co = compile(data, rel, "exec", dont_inherit=True)
+        r["marshal"] = hashlib.sha256(marshal.dumps(co)).hexdigest()
+    except (SyntaxError, ValueError) as e:
+        r["marshal"] = "compile-error"
+    r.update(text=text + "\n", status="ok", nodes=w.nodes,
+             ast=hashlib.sha256(ast.dump(tree).encode("utf-8", "surrogateescape")).hexdigest(),
+             code=code_digest(data, rel))
+    return r
 
 
 def mode_tree(args):
     base = args[args.index("--base") + 1]
     lst = args[args.index("--list") + 1]
     out = args[args.index("--out") + 1]
+    full = "--full" in args
     tsv = open(args[args.index("--tsv") + 1], "w", encoding="utf-8") if "--tsv" in args else None
     warnings.simplefilter("ignore")
     for rel in open(lst, encoding="utf-8").read().split("\n"):
@@ -687,21 +796,22 @@ def mode_tree(args):
             continue
         t0 = time.perf_counter()
         try:
-            text, status, ad, cd, nodes = tree_one(os.path.join(base, rel), rel)
+            r = tree_one(os.path.join(base, rel), rel, full)
         except RecursionError:
-            text, status, ad, cd, nodes = (form("python/error", "HelperError", qstr("recursion")) + "\n", "helper-error",
-                                           "-", "-", 0)
+            r = dict(text=form("python/error", "HelperError", qstr("recursion")) + "\n", status="helper-error")
         except Exception as e:  # the helper's own failure: reported, the run goes on
             msg = "%s: %s" % (type(e).__name__, e)
-            text, status, ad, cd, nodes = (form("python/error", "HelperError", qstr(msg)) + "\n", "helper-error", "-", "-", 0)
+            r = dict(text=form("python/error", "HelperError", qstr(msg)) + "\n", status="helper-error")
         dst = os.path.join(out, rel + ".ae")
         os.makedirs(os.path.dirname(dst), exist_ok=True)
         with open(dst, "w", encoding="utf-8", newline="\n") as f:
-            f.write(text)
+            f.write(r["text"])
         secs = time.perf_counter() - t0
         rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
         if tsv:
-            tsv.write("%s\t%s\t%s\t%s\t%d\t%.4f\t%d\n" % (rel, status, ad, cd, nodes, secs, rss))
+            tsv.write("%s\t%s\t%s\t%s\t%s\t%s\t%d\t%.4f\t%d\n" % (rel, r["status"], r.get("ast", "-"), r.get("code", "-"),
+                                                             r.get("marshal", "-"), r.get("sha", "-"), r.get("nodes", 0),
+                                                             secs, rss))
     if tsv:
         tsv.close()
 
