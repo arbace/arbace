@@ -1,0 +1,143 @@
+(ns arbace.python.run
+  "pyi's host side of a run and of the REPL (PY5e; doc/python/PYI-SPEC.md §7.6, §9): the compiler the runtime calls
+  back (go.arbace.py/SetCompiler) for an import, exec, eval, compile and each interactive statement, and the run's
+  configuration (go.arbace.py/Configure: sys.argv, sys.path). Evaluated from the checkout on stage 0, as
+  arbace.python is (PYS18 (a)).
+
+  The compiler: source text read by the helper (tools/pydump/pydump.py tree --full: the reader until PY9's native
+  one), converted (arbace.repr.python.convert) and compiled (arbace.python.compile); the IR's text, or
+  \"SyntaxError: MESSAGE\", or for mode single \"incomplete\" (codeop's rule). Mode single rewrites each expression
+  statement outside functions and classes into sys.displayhook(VALUE) (CPython's PRINT_EXPR); mode eval a lone
+  expression into the store of __pyi_eval__ (builtins_exec.go reads it back). Compiled code is kept by the SHA-256
+  of the mode, the source and the compiler's sources, in WORK/ir-cache."
+  (:require [arbace.python.compile :as pc]
+            [arbace.repr.python.convert :as cv]
+            [arbace.java.shell :as sh]
+            [arbace.string :as str])
+  (:import [java.io File]
+           [java.security MessageDigest]))
+
+(def ^:private root (or (System/getenv "PYI_ROOT") "."))
+(def ^:private work (or (System/getenv "PYI_WORK") (str root "/.tmp/repr-python/pyi")))
+
+(defn- hex [^bytes bs] (apply str (map #(format "%02x" (bit-and (int %) 0xff)) bs)))
+
+(defn- sha256 [^String s]
+  (let [md (MessageDigest/getInstance "SHA-256")]
+    (hex (.digest md (.getBytes s "UTF-8")))))
+
+(def ^:private compiler-digest
+  (delay (sha256 (apply str (for [f ["arbace/python/compile.ae" "arbace/python/ir.ae" "arbace/python/scope.ae"
+                                     "arbace/python/run.ae" "arbace/repr/python/convert.ae" "tools/pydump/pydump.py"]
+                                  :let [ff (File. (str root "/" f))] :when (.exists ff)]
+                              (str f "\u0000" (slurp ff) "\u0000"))))))
+
+(def ^:private counter (atom 0))
+
+(defn- read-dump
+  "The helper's dump of source: the module's forms or its (python/error ...)"
+  [source]
+  (let [d (str work "/compile/" (System/getenv "PYI_RUN_ID") "-" (swap! counter inc))
+        dd (File. d)]
+    (.mkdirs dd)
+    (spit (str d "/src.py") source)
+    (spit (str d "/list") "src.py\n")
+    (let [r (sh/sh "python3" "-I" "-S" "-B" (str root "/tools/pydump/pydump.py") "tree" "--full" "--base" d
+                   "--list" (str d "/list") "--out" (str d "/dumps") "--tsv" (str d "/tsv"))
+          f (File. (str d "/dumps/src.py.ae"))]
+      (try
+        (if (.exists f)
+          (cv/convert (slurp f))
+          (list 'python/error 'SystemError (str "the reader failed: " (:err r))))
+        (finally
+          (doseq [^File x (reverse (file-seq dd))] (.delete x)))))))
+
+(defn- node-head [x] (when (seq? x) (first x)))
+
+(defn- display-stmts
+  "Mode single: each expression statement outside function and class bodies made sys.displayhook's call"
+  [x]
+  (cond
+    (and (seq? x) (#{'function-def 'async-function-def 'class-def 'lambda} (first x))) x
+    (and (seq? x) (= 'expr (first x)))
+    (let [[_ e & more] x]
+      (apply list 'expr
+             (list 'call (list 'attribute (list 'call (list 'name '__import__ {}) [(list 'str "sys" :quote "'" {})] {})
+                               'displayhook {})
+                   [(display-stmts e)] {})
+             more))
+    (seq? x) (apply list (map display-stmts x))
+    (vector? x) (mapv display-stmts x)
+    :else x))
+
+(def ^:private incomplete-messages
+  [#"was never closed" #"^expected an indented block" #"unexpected EOF" #"^unterminated triple-quoted"
+   #"incomplete input"])
+
+(defn- incomplete?
+  "codeop's rule, approximated: a reader error of input that goes on, or a compound statement (or a line ending in a
+  backslash) not yet ended by a blank line"
+  [source form]
+  (let [lines (str/split-lines source)
+        last-blank (str/blank? (last lines))]
+    (if (cv/error-form? form)
+      (boolean (some #(re-find % (str (nth form 2))) incomplete-messages))
+      (and (not last-blank)
+           (or (> (count lines) 1)
+               (re-find #":\s*(#.*)?$" (first lines))
+               (re-find #"\\$" (first lines)))))))
+
+(defn- syntax-error [msg] (str "SyntaxError: " msg))
+
+(defn- compile-uncached [mode source]
+  (let [form (read-dump source)]
+    (cond
+      (and (= mode "single") (incomplete? source form)) "incomplete"
+      (cv/error-form? form) (syntax-error (nth form 2))
+      :else
+      (let [body (second form)
+            module (case mode
+                     "single" (apply list (first form) (display-stmts body) (drop 2 form))
+                     "eval" (if (and (= 1 (count body)) (= 'expr (node-head (first body))))
+                              (let [[_ e & more] (first body)]
+                                (apply list (first form) [(apply list 'assign [(list 'name '__pyi_eval__ {})] e more)] (drop 2 form)))
+                              ::bad)
+                     form)]
+        (if (= module ::bad)
+          (syntax-error "invalid syntax")
+          (try ((resolve 'arbace.python/ir-text) (pc/compile-module module))
+               (catch Throwable e
+                 (if (= 'SyntaxError (:class (ex-data e)))
+                   (syntax-error (:msg (ex-data e)))
+                   (str "SystemError: pyi's compiler: " (str/replace (str (.getMessage e)) #"\n" " "))))))))))
+
+(defn compile-source
+  "go.arbace.py's compiler (SetCompiler): MODE exec, eval or single; FILE names the source in messages only"
+  [mode file source]
+  (let [key (sha256 (str mode "\u0000" @compiler-digest "\u0000" source))
+        cf (File. (str work "/ir-cache/" (subs key 0 2) "/" key))]
+    (if (.exists cf)
+      (slurp cf)
+      (let [r (compile-uncached mode source)]
+        (when (or (str/starts-with? r "{") (= r "incomplete") (str/starts-with? r "SyntaxError: "))
+          (.mkdirs (.getParentFile cf))
+          (let [tmp (File. (str (.getPath cf) ".tmp" (swap! counter inc)))]
+            (spit tmp r)
+            (.renameTo tmp cf)))
+        r))))
+
+(defn- runtime-fn [sym]
+  (require 'go.arbace.py)
+  (or (resolve (symbol "go.arbace.py" (name sym))) (throw (ex-info (str "no go.arbace.py/" sym) {}))))
+
+(defn install!
+  "Before RunModule or Repl: the compiler, sys.argv (ARGV) and sys.path (PATH)"
+  [argv path]
+  ((runtime-fn 'SetCompiler) (fn [mode file source] (compile-source mode file source)))
+  ((runtime-fn 'Configure) (str/join "\u0000" argv) (str/join "\u0000" path)))
+
+(defn repl
+  "The REPL on the standard streams (go.arbace.py/Repl); sys.path is ['' LIB]"
+  [lib]
+  (install! [""] (cond-> [""] lib (conj lib)))
+  ((runtime-fn 'Repl)))
