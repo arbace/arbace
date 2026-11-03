@@ -4694,3 +4694,11 @@ forms' names). What is left of the C++ build is the link itself (the node progra
 - Commits on `ci-prebuilt`: the builder's fragments and link; the runtime cache and its callers; this section. Rebased onto
   main `f9c7e7cd` (with `mac/178-ci-gaps`): its `obj-align` taken in the fragments (`obj-size` takes the entry, `unit-fragment`'s
   `:align`) and its `compound-lit-object` with `add-init!`; the Makefile's `.PHONY` line merged.
+
+### PB.6 After the rebase onto main `f9c7e7cd` (with `mac/178-ci-gaps`)
+
+With the checkout's ci (`ARBACE_PATH_FIRST=1 ARBACE_NO_AOT=1 ARBACE_NO_IMAGE=1`): `bin/ci check --only test/c/essential-check.txt`
+with `CI_LINK_CHECK=1` exit 0 (523 s; every program's linked node program equal to the old build's), `check --aot --only
+test/c/essential-aot.txt` exit 0 (415 s), `dg --essential` 0 (85 s), `bin/repr-c check --c23` 0 (70 s), `repl-session` 0 (16 s),
+`c2j-check` 0 (39 s), `judge-test` 0 (596 s); `bin/gate-tests`: 32 tests passed.
+
