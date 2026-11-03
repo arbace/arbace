@@ -8,12 +8,15 @@
         table rejects judged on CPython's message; a file ast.parse rejects skipped (the read level's). A file that
         does not pass is judged against the known file (test/python/scope-known.edn, the round trip's format); --record
         writes it, a file of no class printed and not written, exit 3 (CS265 (a), CS266 (a))
-    compile-check --corpus NAME --dumps DIR --known FILE [--record] [--results FILE] [--out DIR]
+    compile-check --corpus NAME --dumps DIR --tsv FILE --known FILE [--record] [--results FILE] [--ops FILE]
         each dump compiled to pyi's IR (arbace.python.compile) and the IR verified (arbace.python.ir/verify: every
         jump inside its code, every exception handler's range and target, the stack's depth the same on every path
         and never below zero, every local, cell, free and global name declared); the compile errors judged on
-        CPython's (the TSV's code column: \"compile-error: MSG\")"
+        CPython's (the TSV's code column: \"compile-error: MSG\"); --ops writes the count of each operation; the known
+        file test/python/compile-known.edn"
   (:require [arbace.python.scope :as sc]
+            [arbace.python.compile :as pc]
+            [arbace.python.ir :as ir]
             [arbace.repr.python.convert :as cv]
             [arbace.string :as str])
   (:import [java.io File]))
@@ -142,9 +145,48 @@
     (judge opts :scope (count files) res (constantly nil) {}
            "The files whose symbol table (arbace.python.scope) is not CPython's (bin/pyi scope-check; doc/python/PYI-SPEC.md §2), by check and corpus.")))
 
+;; ---- compile-check ----
+
+(defn- tsv [f]
+  (into {} (for [l (str/split-lines (slurp f)) :when (seq l)] (let [c (str/split l #"\t")] [(first c) c]))))
+
+(defn- compile-judge [dump-text cpython-code ops]
+  (let [d (cv/convert dump-text)]
+    (when-not (cv/error-form? d)
+      (let [mine (try {:code (pc/compile-module d)}
+                      (catch Throwable e
+                        (if (= 'SyntaxError (:class (ex-data e)))
+                          {:error (:msg (ex-data e))}
+                          {:failed (one-line (str (.getMessage e) " " (pr-str (dissoc (ex-data e) :form))))})))
+            theirs (when (and cpython-code (str/starts-with? cpython-code "compile-error: ")) (subs cpython-code 15))]
+        (when-let [c (:code mine)] (swap! ops #(merge-with + % (ir/count-ops c))))
+        (cond
+          (:failed mine) {:level :failed :message (:failed mine)}
+          (and theirs (nil? (:error mine))) {:level :accepted :message (str "CPython's compile rejects it: " theirs)}
+          (and theirs (not= theirs (:error mine))) {:level :error-message :message (str (:error mine) " | CPython: " theirs)}
+          theirs nil
+          (:error mine) {:level :rejected :message (str "the compiler rejects it: " (:error mine))}
+          :else (when-let [v (ir/verify (:code mine))] {:level :verify :message v}))))))
+
+(defn- do-compile-check [opts]
+  (let [dumps (get opts "--dumps")
+        t (tsv (get opts "--tsv"))
+        files (files-under dumps ".ae")
+        ops (atom {})
+        res (into (sorted-map)
+                  (for [f files]
+                    (let [r (subs (rel dumps f) 0 (- (count (rel dumps f)) 3))]
+                      [r (try (compile-judge (slurp f) (nth (get t r) 3 nil) ops)
+                              (catch Throwable e {:level :failed :message (one-line (.getMessage e))}))])))]
+    (when-let [o (get opts "--ops")] (spit-mk o (pr-str (into (sorted-map) @ops))))
+    (println (str "  instructions " (reduce + 0 (vals @ops)) " of " (count @ops) " kinds"))
+    (judge opts :compile (count files) res (constantly nil) {}
+           "The files pyi's compiler (arbace.python.compile) does not compile to verified IR as CPython compiles them (bin/pyi compile-check; doc/python/PYI-SPEC.md §4), by check and corpus.")))
+
 (defn -main [& args]
   (let [[verb & more] args
-        opts (parse-args more #{"--corpus" "--dumps" "--scopes" "--known" "--results" "--out" "--tsv"})]
+        opts (parse-args more #{"--corpus" "--dumps" "--scopes" "--known" "--results" "--out" "--tsv" "--ops"})]
     (case verb
       "scope-check" (do-scope-check opts)
+      "compile-check" (do-compile-check opts)
       (do (println "usage: -m arbace.python scope-check|compile-check ...") (System/exit 2)))))
