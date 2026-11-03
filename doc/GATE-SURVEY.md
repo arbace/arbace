@@ -3338,6 +3338,31 @@ current key would make the clean run a full run (GTS204 (b), rejected); within t
 hides at most the week GTS203 (a) accepts, and the subsets, the coverage set of that code, run at the current key in the
 clean run itself. The list's digest is required to match: a file added since a slice's last run has not run.
 
+**Review 181's fixes** (the Mac's review of this branch, `.tmp/mac-queue/reports/181-review-gt8-nightly.md`; its HIGH
+decided (a) by the user, 2026-11-03). These supersede the paragraphs above where they differ.
+- *Which runs count* (finding 1, (a)): only runs of this commit's ancestors from clean trees, for completeness, the night's
+  slice and the failed files. Each run's line ends `SEQ DIRTY` (the gate's `dirty`: `git status --porcelain
+  --untracked-files=no`, as the passes'); the planner reads `LOGS/ancestors.txt` (`git rev-list HEAD`, written by
+  `plan_inputs`) and `rotation-status` takes `--ancestors FILE` (`bin/gate`'s `rotation_check` writes it); a run of
+  another commit or of a dirty tree is dropped (`counts?`). The failed files are an append-only event log,
+  `NAME.PART.failed` lines `SEQ EPOCH ID fail|clear COMMIT DIRTY`: a file has failed when its latest event that counts is
+  a failure, so a branch's failure does not enter main's subset and a branch's pass does not clear main's failure.
+- *Order* (finding 2): every note takes the store's next sequence number (`STORE/_rotation/.seq`) under the store's lock
+  (`.lock`, L1: no lost update), and runs are ordered by it, then the time: the run noted last is the later one, whatever
+  the clock's second. rotation-test runs with `date +%s` frozen.
+- *The night's choice* (findings 3, 4; `choose-slices`): a slice whose latest run failed runs again, and beside it the
+  rotation's slice among the others: first one not covered with its current list (never run, its list changed since its
+  run, its covering run failed or older than the period), then the one whose latest run is oldest by the sequence; ties by
+  the night index. A list change (a program added, a fixed failure's file back in its slice) is covered the next night;
+  a slice failing with no file named (a build failure, a control) no longer starves the other six.
+- *The clean record* (finding 5): `:rotation {:status :complete|:unchecked|:none|:whole :check EVIDENCE}`, EVIDENCE
+  `rotation-status --edn`'s map (`:days`, `:now`, each part's files, subset, failed files and each slice's covering run
+  as `[K N STATUS DATE COMMIT COVERED]`); `:none` when no part rotates (every part ran whole); its text and data kept in
+  `SHA.logs/rotation.{txt,edn}`. The clone's failed events are published with its runs (L2), both renumbered after the
+  shared store's sequence under its lock. `GATE_NOW` is kept by the scrub only with a store of the caller's own (L6).
+- Left: L3 (the judges print 40 `FAIL` lines: the rest join the subset over later runs), L4 (the controls' subjects in
+  every `:subset`, unchecked), L5 (`:subset` names outside the universe dropped silently), L7 (`.runs` never pruned).
+
 **Tests.** `test/gate/rotation-test.bash` (`bin/gate-tests`, needs stage 0): a made-up tree, table and store (40 ids, a
 subset of 4): `--full` whole; the nightly expansion and its command; the slices as the hash rule says, the seven covering the
 rest once; keys over the list (night 7 = night 0, the subset apart, an unrotated part's key = `--full`'s); `:needs` renamed;
@@ -3345,7 +3370,10 @@ a failure's file into the subset and out of its slice, the failed slice chosen a
 `rotation-status` incomplete (never run), complete, stale after eight days, incomplete with a failed file; the oldest slice
 chosen; a whole part's run: noted with the universe, its key the one without `:rotate`, completing every slice, the night's
 index deciding after it, a later slice failure making it incomplete, a whole failure's file into the subset and its pass
-clearing it, a whole run of another universe counting for none; the clean run's subsets. 33 of 33.
+clearing it, a whole run of another universe counting for none; the clean run's subsets; since review 181 (with
+`date +%s` frozen): another commit's and a dirty tree's runs counting for nothing, an ancestor's counting, another
+commit's failure and pass moving none of this commit's failed files, the evidence (`--edn`, `:none`), the failed slice
+with the rotation's beside it, a changed list run the next night. 44 of 44.
 
 **The tools' file lists** (what a part needs to be rotated). Take one today: `bin/ci check` and `check --aot` (`--only FILE`
 of ids; rotated); `bin/goi check` and `bin/java-check` (`--only REGEX`: a list becomes an alternation, but their steps are not
