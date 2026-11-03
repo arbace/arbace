@@ -276,3 +276,30 @@ pending flag and the in-flight exception are per thread (CP103 (b)), a thread's 
 §8), and the atomics of the lowered library and programs are gcc's `__atomic_*` builtins (CP121 (c), §7): the refcounts of
 `std::shared_ptr` and `std::exception_ptr`, the guards of function-local statics (`__cxa_guard_acquire`, libsupc++'s,
 lowered) and `std::atomic` are shared state that works across threads (the runtime sample `atomics.cpp`).
+
+## 11. The lowered program on ci and compiled (CX8)
+
+Since CX8 the lowered C runs on C23's back end, ci (C5), and is compiled by cf2g (C6); gcc `-O0` stays the judge of the
+lowering alone (`bin/cppi lower-check`, §9). `arbace.cpp.run` (`arbace/cpp/run.ae`):
+
+- **The runtime as ci's library.** `bin/cppi runtime-ci [OUT]` reads the lowered C of each unit of the runtime
+  (`OUT/units/NAME/lowered.c`, which `runtime-build` keeps since CX8) and of the pending-flag layer (`OUT/rt.c`) with repr/c, as
+  ci reads any C file, into `OUT/ci/forms/NAME.ae`, and indexes what each unit defines and references (`OUT/ci/index.edn`,
+  arbace.c.musl's `unit-defs` and `refs`); keyed by the runtime's key and the reader's sources (`OUT/ci/key`). About 3
+  minutes, 61 MB.
+- **Linking.** A program's lowered C is read and checked as a C file of ci's (arbace.c.run/read-unit, `-std=gnu23`), then linked
+  as a static link pulls archive members, from the libraries in order: the corpus's own (the testsuite's `util/`, lowered and
+  read in the run), the runtime, musl's forms (arbace.c.musl): for each name the program or a linked unit references and nothing
+  linked defines, the first library defining it gives its unit, a strong definition before a weak one. The linked units are
+  checked by ci's checker (once a process, shared by the programs a process builds) and built with the program into one node
+  program (arbace.c.build, `__libc_start_main`'s start). A program with `<iostream>` links about 140 units (2 MB of nodes).
+- **Atomics.** The lowering writes gcc's `__atomic_*` builtins (CP121 (c)); ci's back end has none. ci's read of the lowered C
+  (the program's and the runtime's) defines them as macros of plain operations (`arbace.cpp.run/ci-atomics`: each operand
+  evaluated once, the orders not at all), right for ci's one thread (ci runs no threads, doc/c/SPEC.md §6.5). The generic
+  `__atomic_load`, `__atomic_store` and `__atomic_exchange` (which the lowering writes for a float) are left: repr/c's
+  `<builtin>` source declares them as functions, and a program reaching one faults on the undefined function.
+- **eval**: the node program run by `tools/cirun` (`bin/cppi run`, `bin/cppi check`); **AOT**: the node program translated by
+  cf2g (`arbace.c.cf2g/translate`, about 4 MB of Go a program, the runtime's part included) and built by TamaGo's go in shards
+  (`bin/cppi check --aot`).
+- `long double` (`x86_fp80`) is 8 bytes in ci (CS35) while the lowering's structs carry the IR's 16-byte layout in their static
+  assertions: a program whose types hold one fails ci's check (the class `long-double`).
