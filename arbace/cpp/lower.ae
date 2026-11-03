@@ -617,6 +617,62 @@
       (let [sfx ({"f32" "f" "f64" "" "f80" "l"} (nth parts 2))]
         (set-res (apply list (symbol (str "__builtin_" (math-fns (nth parts 1)) sfx)) (map a (range (count args))))))
       (re-matches #"llvm\.coro\..*" nm) (refuse :coroutine nm)
+      ;; rustc's (doc/rust/RUST-EVAL-SURVEY.md §5.3; RE2): saturating arithmetic, funnel shifts, three-way compares, bit
+      ;; reversal, i128's byte swap, saturating float-to-int casts (Rust's `as`), ptrmask, powi, the IEEE minimumNumber and
+      ;; maximumNumber, load.relative
+      (re-matches #"llvm\.([su])(add|sub)\.sat\.i[0-9]+" nm)
+      (let [[_ sg op] (re-matches #"llvm\.([su])(add|sub)\..*" nm) wd (w 0) sgn (= sg "s") c (container-bits wd)]
+        (when-not (#{8 16 32 64 128} wd) (refuse :intrinsic nm))
+        (when res
+          (let [v #(if sgn (sval (a %) wd) (uval (a %) wd))
+                place (if sgn (list 'conv (list '* (stype c)) (list 'addr res)) (list 'addr res))
+                lim (cond
+                      (not sgn) (int-lit (if (= op "add") -1 0) wd)
+                      :else (let [mn (int-lit (.shiftLeft BigInteger/ONE (int (dec wd))) wd)
+                                  mx (int-lit (.subtract (.shiftLeft BigInteger/ONE (int (dec wd))) BigInteger/ONE) wd)]
+                              (if (= op "add") (list '? (list '< (v 1) 0) mn mx) (list '? (list '< (v 1) 0) mx mn))))]
+            [(list 'when (list (symbol (str "__builtin_" op "_overflow")) (v 0) (v 1) place) (list 'set! res lim))])))
+      (re-matches #"llvm\.fsh[lr]\.i[0-9]+" nm)
+      (let [wd (w 0) left (= \l (nth nm 8))
+            s (list '% (uval (a 2) wd) (int-lit wd (wide-bits wd)))]
+        (when (> wd 128) (refuse :intrinsic nm))
+        (set-res (list '? (list '== s 0) (if left (a 0) (a 1))
+                       (mask (if left
+                               (list 'bit-or (list '<< (uval (a 0) wd) s) (list '>> (uval (a 1) wd) (list '- wd s)))
+                               (list 'bit-or (list '<< (uval (a 0) wd) (list '- wd s)) (list '>> (uval (a 1) wd) s)))
+                             wd))))
+      (re-matches #"llvm\.[su]cmp\.i[0-9]+\.i[0-9]+" nm)
+      (let [sgn (= \s (nth nm 5)) wd (w 0) rw (int-bits rt) v #(if sgn (sval (a %) wd) (uval (a %) wd))]
+        (set-res (list '? (list '< (v 0) (v 1)) (int-lit -1 rw) (list '? (list '> (v 0) (v 1)) (int-lit 1 rw) (int-lit 0 rw)))))
+      (re-matches #"llvm\.bitreverse\.i[0-9]+" nm)
+      (let [wd (w 0) x (uval (a 0) wd)]
+        (when-not (#{8 16 32 64 128} wd) (refuse :intrinsic nm))
+        (set-res (apply list 'bit-or (for [i (range wd)]
+                                       (list '<< (list 'bit-and (list '>> x i) (int-lit 1 (wide-bits wd))) (- wd 1 i))))))
+      (= nm "llvm.bswap.i128")
+      (let [x (uval (a 0) 128)]
+        (set-res (list 'bit-or (list '<< (list 'conv 'unsigned-__int128 (list '__builtin_bswap64 (list 'conv 'unsigned-long x))) 64)
+                       (list 'conv 'unsigned-__int128 (list '__builtin_bswap64 (list 'conv 'unsigned-long (list '>> x 64)))))))
+      (re-matches #"llvm\.fpto[su]i\.sat\.i[0-9]+\.(f32|f64|f80)" nm)
+      (let [sgn (= \s (nth nm 9)) rw (int-bits rt) x (a 0)
+            p2 (fn [k] (list '__builtin_ldexpl (list 'lit 'long-double 1.0) k))]
+        (when-not (#{8 16 32 64 128} rw) (refuse :intrinsic nm))
+        (set-res (if sgn
+                   (list '? (list '!= x x) (int-lit 0 rw)
+                         (list '? (list '<= x (list '- (p2 (dec rw)))) (int-lit (.shiftLeft BigInteger/ONE (int (dec rw))) rw)
+                               (list '? (list '>= x (p2 (dec rw))) (int-lit (.subtract (.shiftLeft BigInteger/ONE (int (dec rw))) BigInteger/ONE) rw)
+                                     (list 'conv (utype rw) (list 'conv (stype rw) x)))))
+                   (list '? (list 'not (list '> x -1.0)) (int-lit 0 rw)
+                         (list '? (list '>= x (p2 rw)) (int-lit -1 rw) (list 'conv (utype rw) x))))))
+      (re-matches #"llvm\.ptrmask\.p0\.i64" nm)
+      (set-res (list 'conv '(* void) (list 'bit-and (list 'conv 'unsigned-long (a 0)) (uval (a 1) 64))))
+      (re-matches #"llvm\.powi\.(f32|f64|f80)\.i32" nm)
+      (set-res (list (symbol (str "__builtin_powi" ({"f32" "f" "f64" "" "f80" "l"} (nth parts 2)))) (a 0) (sval (a 1) 32)))
+      (re-matches #"llvm\.(minimumnum|maximumnum)\.(f32|f64|f80)" nm)
+      (set-res (list (symbol (str "__builtin_f" (if (= (nth parts 1) "minimumnum") "min" "max") ({"f32" "f" "f64" "" "f80" "l"} (nth parts 2)))) (a 0) (a 1)))
+      (re-matches #"llvm\.load\.relative\.i32" nm)
+      (set-res (list 'conv '(* void) (list '+ (list 'conv '(* char) (a 0))
+                                           (list 'deref (list 'conv '(* int) (list '+ (list 'conv '(* char) (a 0)) (sval (a 1) 32)))))))
       :else (refuse :intrinsic nm))))
 
 (defn- edge
