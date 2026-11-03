@@ -261,12 +261,12 @@ if [ "$(col "$t/i0" lev.a.s0 16)" = "rd.a.sub/f,rd.a.s0/f" ]; then ok "{part} in
 if [ "$(col "$t/i0" jud 16)" = "lev.a.sub/results.tsv,lev.a.s0/results.tsv,lev.b/results.tsv" ]; then ok "a :uses of a rotated step names its checks"; else no "jud's uses: $(col "$t/i0" jud 16)"; fi
 logs=$t/i0; key[rd.a.s0]=$(col "$t/i0" rd.a.s0 3); v2=$(grep -vx x1 "$t/i0/rotation/rd.a.s0.list" | head -1)
 printf 'DIFF a %s\nDIFF b %s\n' "$v2" "$v2" > "$t/i0/rd.a.s0.log"; rotation_note rd.a.s0 fail
-if [ "$(cat "$store/_rotation/rd.a.failed" 2>&1)" = "$v2" ]; then ok ":failed-as: the id from group 2 of its failure line"; else no ":failed-as: $(cat "$store/_rotation/rd.a.failed" 2>&1)"; fi
+if [ "$(cut -f3 "$store/_rotation/rd.a.failed" 2>&1)" = "$v2" ]; then ok ":failed-as: the id from group 2 of its failure line"; else no ":failed-as: $(cat "$store/_rotation/rd.a.failed" 2>&1)"; fi
 rm -f "$store/_rotation/rd.a.failed"
 key[lev.a.s0]=$(col "$t/i0" lev.a.s0 3) key[jud]=$(col "$t/i0" jud 3)
 printf 'judge\n   regression: %s at interp\n   regression: y9 at interp\n' "$v2" > "$t/i0/jud.log"
 judge_note jud
-if [ "$(cut -f3 "$store/_rotation/lev.a.s0.runs" 2>&1)" = fail ] && [ "$(cat "$store/_rotation/lev.a.failed" 2>&1)" = "$v2" ] \
+if [ "$(cut -f3 "$store/_rotation/lev.a.s0.runs" 2>&1)" = fail ] && [ "$(cut -f3 "$store/_rotation/lev.a.failed" 2>&1)" = "$v2" ] \
    && [ ! -e "$store/_rotation/lev.a.sub.runs" ]; then ok ":judges: a judge's failure noted for the producer whose list names the id (its file into the subset)"; else no ":judges: $(cat "$store/_rotation/lev.a.s0.runs" "$store/_rotation/lev.a.failed" 2>&1)"; fi
 
 echo "$((n - bad)) of $n passed"
