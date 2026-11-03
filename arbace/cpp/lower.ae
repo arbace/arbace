@@ -123,8 +123,12 @@
         (seq? t) (case (first t)
                    ptr [8 8]
                    array (let [[s a] (size-align (nth t 2))] [(* (long (nth t 1)) (long s)) a])
-                   vector (let [[s _] (size-align (nth t 2))
-                                bytes (* (long (nth t 1)) (long s))
+                   vector (let [k (int-bits (nth t 2))
+                                ;; a vector of elements narrower than a byte (<N x i1>) is bit-packed in memory (LangRef: its
+                                ;; alloc size is that of its N*k bits): <16 x i1> takes 2 bytes, its value's C struct 16
+                                bytes (if (and k (not (#{8 16 32 64 128} k)))
+                                        (quot (+ (* (long (nth t 1)) (long k)) 7) 8)
+                                        (* (long (nth t 1)) (long (first (size-align (nth t 2))))))
                                 al (loop [p 1] (if (>= p bytes) p (recur (* 2 p))))]
                             [(* al (quot (+ bytes al -1) al)) al])
                    struct (let [[_ s a] (struct-layout (rest t) false)] [s a])
@@ -139,6 +143,15 @@
 
 (declare ctype)
 
+(declare packed-vector?)
+
+(defn- packed-vector-c-size-align
+  "[size alignment] of a bit-packed vector's value (<N x i1>): the C struct of one array, a byte an element (size-align gives
+  its size in memory, the bits')."
+  [t]
+  (let [bytes (long (nth t 1)) al (loop [p 1] (if (>= p bytes) p (recur (* 2 p))))]
+    [(* al (quot (+ bytes al -1) al)) al]))
+
 (defn- struct-tag
   "The C struct tag that stands for an aggregate LLVM type, its definition added (members first) on first use."
   [t]
@@ -151,7 +164,9 @@
         (swap! *structs* assoc-in [:tags t] tag)
         (if (or (nil? d) (= d 'opaque))
           (swap! *structs* update :defs conj (list 'c/struct tag))
-          (let [[s a] (size-align d)
+          (let [[s a] (if (packed-vector? d) (packed-vector-c-size-align d) (size-align d))
+                _ (when (and (#{'struct 'packed 'array} (first d)) (some packed-vector? (if (= 'array (first d)) [(nth d 2)] (rest d))))
+                    (refuse :vector "a bit-packed vector inside " (pr-str d)))
                 members (case (first d)
                           (struct packed) (vec (map-indexed (fn [i ft] (with-meta (symbol (str "f" i)) {:tag (ctype ft)})) (rest d)))
                           (array vector) [(with-meta 'e {:tag (list 'array (nth d 1) (ctype (nth d 2)))})]
@@ -422,6 +437,10 @@
 (defn- packed-vector? [t]
   (and (seq? t) (= (first t) 'vector) (let [k (int-bits (nth t 2))] (and k (not (#{8 16 32 64 128} k))))))
 
+(defn- packed-bytes
+  "A bit-packed vector's bytes in memory: ceil(N*k/8)."
+  ^long [t] (quot (+ (* (long (nth t 1)) (long (int-bits (nth t 2)))) 7) 8))
+
 (defn- bits-type [^long n]
   (cond (<= n 64) 'unsigned-long (<= n 128) 'unsigned-__int128 :else (refuse :vector "a bitcast of " n " bits")))
 
@@ -430,7 +449,8 @@
   [t e]
   (if-let [w (int-bits t)]
     (list 'conv (bits-type w) (uval e w))
-    (let [[_ n et] t k (or (int-bits et) (refuse :vector "a bitcast of " (pr-str t))) bt (bits-type (* (long n) (long k)))]
+    (let [_ (when-not (and (seq? t) (= 'vector (first t))) (refuse :vector "a bitcast of " (pr-str t) " through bits"))
+          [_ n et] t k (or (int-bits et) (refuse :vector "a bitcast of " (pr-str t))) bt (bits-type (* (long n) (long k)))]
       (apply list 'bit-or (list 'conv bt 0)
              (for [i (range n)] (list '<< (list 'conv bt (mask (list 'conv (utype (container-bits k)) (list 'aget (list '.-e e) i)) k)) (* i k)))))))
 
@@ -439,7 +459,8 @@
   [t x]
   (if-let [w (int-bits t)]
     (mask (list 'conv (ctype t) x) w)
-    (let [[_ n et] t k (or (int-bits et) (refuse :vector "a bitcast to " (pr-str t)))]
+    (let [_ (when-not (and (seq? t) (= 'vector (first t))) (refuse :vector "a bitcast to " (pr-str t) " through bits"))
+          [_ n et] t k (or (int-bits et) (refuse :vector "a bitcast to " (pr-str t)))]
       (bits-type (* (long n) (long k)))
       (list 'compound-lit (ctype t)
             (apply list 'init (for [i (range n)] (mask (list 'conv (ctype et) (list '>> x (* i k))) k)))))))
@@ -967,6 +988,11 @@
                                                     'cx$u))
                              w))
                w (set (mask (list 'deref (list 'conv (list '* ct) (typed-value pv))) w))
+               ;; a bit-packed vector (<N x i1>): its N*k bits read as an integer, element i at bit i*k
+               (packed-vector? t) (let [n (packed-bytes t) bt (bits-type (* 8 (long n)))]
+                                    (set (bits-value t (list 'stmt-expr (list 'let [(list 'c/var (with-meta 'cx$u {:tag bt}) (list 'conv bt 0))]
+                                                                              (list '__builtin_memcpy (list 'addr 'cx$u) (typed-value pv) n)
+                                                                              'cx$u)))))
                :else (set (list 'deref (list 'conv (list '* ct) (typed-value pv))))))
       store (let [[v pv] [(second x) (nth x 2)] ct0 (ctype (first v)) ct (if (:volatile o) (list 'volatile ct0) ct0) w (int-bits (first v))
                   ss (when w (store-bytes w))]
@@ -977,6 +1003,10 @@
                               :else (refuse :atomic "an atomic store of " (pr-str (first v))))
                 ss
                 [(list '__builtin_memcpy (typed-value pv) (list 'addr (list 'compound-lit ct0 (typed-value v))) ss)]
+                ;; a bit-packed vector (<N x i1>): its bits written as ceil(N*k/8) bytes (LLVM's layout, element i at bit i*k)
+                (packed-vector? (first v))
+                (let [n (packed-bytes (first v)) bt (bits-type (* 8 (long n)))]
+                  [(list '__builtin_memcpy (typed-value pv) (list 'addr (list 'compound-lit bt (value-bits (first v) (typed-value v)))) n)])
                 :else
                 [(list 'set! (list 'deref (list 'conv (list '* ct) (typed-value pv))) (typed-value v))]))
       getelementptr (let [[st base & idxs] args] (set (gep-expr st (typed-value base) (take-while vector? idxs))))
