@@ -1,6 +1,6 @@
 (ns reap.main
   "bin/reap (doc/FULL-SUPPORT-SURVEY.md, REAP1, RPS3, RPS13): the REAP matrix, read, eval, AOT and
-  print for Clojure, Java, Go and C, from the checks' recorded results alone (no runs). The cells and
+  print for Clojure, Java, Go, C and Scheme (and the rows test/reap/cells.edn adds), from the checks' recorded results alone (no runs). The cells and
   their sources are data, test/reap/cells.edn; each source's reference gives its passing cases and
   its non-passing ones (read-source), each non-pass falls into a class of its classes file, the
   first whose :match finds \"RESULT REASON\" (test/goi/divergences.edn's format), and the matrix
@@ -277,6 +277,32 @@
   {:pass nil :entries (vec (for [[p why] (sort-by key (read-edn (:file src)))] (entry p :known (str "text: " why))))
    :detail "the known file only: the level's passing files are not recorded"})
 
+(defn- scheme-entries
+  "A Scheme record's non-pass items (test/scheme/check*-linux-amd64.edn: {:id :verdict :items [{:item \"KIND ID DETAIL\" :class K}]}):
+  each an entry of the record's id, its result KIND and its reason the rest of the item, so that a class's :match finds the item
+  whole (\"RESULT REASON\"), the class the check recorded kept to be compared (:recorded-class); a non-pass with no item an entry
+  :non-pass no class takes."
+  [r]
+  (if (seq (:items r))
+    (for [{:keys [item class]} (:items r)
+          :let [[k why] (str/split (str item) #" " 2)]]
+      (assoc (entry (:id r) (keyword k) (or why "")) :recorded-class class))
+    [(entry (:id r) :non-pass (str (:id r) ": verdict " (pr-str (:verdict r)) " with no item"))]))
+
+(defmethod read-source :scheme [src]
+  ;; SM9 (doc/scheme/SCHEME-SURVEY.md, \"As built: SM9 (write-ahead)\"): Scheme's records, one map a program, suite or file. :count
+  ;; :verdict (the default): a record is a case, passing when its :verdict is :pass (the :id the case's, its items its non-passes:
+  ;; with :per-file one non-pass of its worst kind); :count :tests: a record counts its tests, :pass (or the path :pass-path) the
+  ;; passing ones, each item a non-passing one (Chibi's suite, the SRFIs' programs, Chibi's own tests, the mats).
+  (let [rows (read-edn (:file src))
+        tests? (= :tests (:count src))]
+    {:pass (if tests?
+             (reduce + (map #(or (get-in % (or (:pass-path src) [:pass])) 0) rows))
+             (count (filter #(= :pass (:verdict %)) rows)))
+     :ids (when-not tests? (mapv :id rows))
+     :entries (vec (mapcat (fn [r] (when (or (not= :pass (:verdict r)) (seq (:items r))) (scheme-entries r))) rows))
+     :detail (str (count rows) (if tests? " records" " cases") " in " (:file src))}))
+
 ;; the cases a source must have (report 021's finding 1: a shrunk record is a valid record)
 
 (def ^:private ref-ids
@@ -310,7 +336,7 @@
   [src r]
   (when-let [ids (:ids r)]
     (let [want (cond (:ref src) (ref-ids (:ref src) (= :diagnostics (:level src)))
-                     (:same-cases src) (set (map first (read-edn (:same-cases src))))
+                     (:same-cases src) (set (map #(if (map? %) (:id %) (first %)) (read-edn (:same-cases src))))
                      (:ref-runs src) (ref-run-ids (:ref-runs src)))
           have (set ids)
           some-of (fn [xs] (str (str/join " " (take 5 xs)) (when (> (count xs) 5) " ...")))]
@@ -427,6 +453,10 @@
                                 (for [e es :when (some #{(:result e)} (:refuse cell))]
                                   (str (:name src) ": " (:id e) " " (name (:result e)) " " (:reason e)
                                        ": the cell's check refuses the result " (name (:result e)) " whatever its class"))
+;; a Scheme record's item (:scheme): the class its check recorded is the one the matrix finds (SM9)
+                                (for [e es :when (and (:recorded-class e) (:class e) (not= (:recorded-class e) (:id (:class e))))]
+                                  (str (:name src) ": " (:id e) " " (name (:result e)) " " (:reason e) ": recorded in the class "
+                                       (name (:recorded-class e)) ", the matrix finds " (name (:id (:class e)))))
                                 (for [e es :when (nil? (:class e))]
                                   (str (:name src) ": " (:id e) " in no class of " cf ": " (name (:result e)) " " (:reason e)))
                                 (for [c (distinct (keep :class es)) :when (nil? (kind-of cell c))]
