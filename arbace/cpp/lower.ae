@@ -346,6 +346,11 @@
         ('#{array vector c-string} (first v))
         (list 'compound-lit (ctype t) (apply list 'init elems))
         :else (apply list 'compound-lit (ctype t) elems)))
+    ;; an operand already lowered (the vector intrinsics' elements)
+    (and (seq? v) (= (first v) 'c/expr)) (second v)
+    (and (seq? v) (= (first v) 'splat))
+    (let [[_ [et ev]] v] (when-not (and (seq? t) (= (first t) 'vector)) (refuse :value "a splat of " (pr-str t)))
+      (list 'compound-lit (ctype t) (apply list 'init (repeat (nth t 1) (value ev et)))))
     (seq? v) (const-expr v t)
     :else (refuse :value "the value " (pr-str v))))
 
@@ -500,7 +505,8 @@
   (let [h (first x) [fl args] (split-flags (rest x))]
     (case h
       (add sub mul udiv sdiv urem srem shl lshr ashr and or xor fadd fsub fmul fdiv frem fneg) (first args)
-      (icmp fcmp) 'i1
+      (icmp fcmp) (let [t (first args)] (if (and (seq? t) (= (first t) 'vector)) (list 'vector (nth t 1) 'i1) 'i1))
+      shufflevector (let [[[t] _ [mt]] (rest x)] (list 'vector (nth mt 1) (nth t 2)))
       (trunc zext sext fptrunc fpext fptoui fptosi uitofp sitofp ptrtoint inttoptr bitcast addrspacecast) (nth args 2)
       alloca 'ptr
       load (second x)
@@ -545,6 +551,8 @@
   {"fabs" "fabs" "sqrt" "sqrt" "floor" "floor" "ceil" "ceil" "trunc" "trunc" "round" "round" "rint" "rint" "nearbyint" "nearbyint"
    "copysign" "copysign" "pow" "pow" "exp" "exp" "exp2" "exp2" "log" "log" "log2" "log2" "log10" "log10" "sin" "sin" "cos" "cos"
    "fma" "fma" "minnum" "fmin" "maxnum" "fmax" "roundeven" "roundeven" "ldexp" "ldexp" "tan" "tan"})
+
+(declare vector-type? vector-reduce velem)
 
 (defn- intrinsic
   "The statements of an intrinsic call (`res`: its result's C variable or nil)."
@@ -617,6 +625,21 @@
       (let [sfx ({"f32" "f" "f64" "" "f80" "l"} (nth parts 2))]
         (set-res (apply list (symbol (str "__builtin_" (math-fns (nth parts 1)) sfx)) (map a (range (count args))))))
       (re-matches #"llvm\.coro\..*" nm) (refuse :coroutine nm)
+      ;; an elementwise intrinsic on vectors (RES6 (a)): its scalar form, element by element
+      (and (not (re-matches #"llvm\.(vector|masked)\..*" nm)) (re-find #"\.v[0-9]+(i[0-9]+|f[0-9]+|p0)" nm)
+           (or (vector-type? rt) (some #(vector-type? (first %)) args)))
+      (let [snm (str/replace nm #"\.v[0-9]+(i[0-9]+|f[0-9]+|p0)" ".$1")
+            n (nth (if (vector-type? rt) rt (first (first (filter #(vector-type? (first %)) args)))) 1)]
+        (when (and (not= rt 'void) (not (vector-type? rt))) (refuse :intrinsic nm))
+        (vec (mapcat (fn [i]
+                       (intrinsic snm (vec (for [[t v :as x] args]
+                                             (if (vector-type? t) [(nth t 2) (list 'c/expr (velem (value (peek x) t) i))] x)))
+                                  (when res (velem res i)) (if (vector-type? rt) (nth rt 2) rt)))
+                     (range n))))
+      (re-matches #"llvm\.vector\.reduce\.[a-z]+\..*" nm)
+      (let [op (nth parts 3) fl? (#{"fadd" "fmul"} op) vi (if fl? 1 0) t (at vi)]
+        (when-not (vector-type? t) (refuse :intrinsic nm))
+        (set-res (vector-reduce op t (a vi) (when fl? (a 0)))))
       ;; rustc's (doc/rust/RUST-EVAL-SURVEY.md §5.3; RE2): saturating arithmetic, funnel shifts, three-way compares, bit
       ;; reversal, i128's byte swap, saturating float-to-int casts (Rust's `as`), ptrmask, powi, the IEEE minimumNumber and
       ;; maximumNumber, load.relative
@@ -755,6 +778,114 @@
      (list 'when (list '== (list '.-f1 res) (int-lit nomatch 32)) (dummy-return))
      '(set! cx$pending 0)]))
 
+(defn icmp-expr
+  "An integer or pointer compare's C expression on the operands' expressions."
+  [pr t va vb]
+  (let [w (int-bits t)
+        [a b] (cond w [va vb] (ptr-type? t) [(list 'conv 'unsigned-long va) (list 'conv 'unsigned-long vb)] :else (refuse :vector "icmp of " (pr-str t)))
+        u #(if w (uval % w) %) s #(if w (sval % w) (list 'conv 'long %))
+        op ({:eq '== :ne '!= :ugt '> :uge '>= :ult '< :ule '<= :sgt '> :sge '>= :slt '< :sle '<=} pr)
+        sg (#{:sgt :sge :slt :sle} pr)]
+    (list op (if sg (s a) (u a)) (if sg (s b) (u b)))))
+
+(defn fcmp-expr
+  "A floating compare's C expression on the operands' expressions."
+  [pr t a b]
+  (when-not (float-type? t) (refuse :vector "fcmp of " (pr-str t)))
+  (let [ord (list 'and (list '== a a) (list '== b b))
+        uno (list 'or (list '!= a a) (list '!= b b))]
+    (case pr
+      :false 0 :true 1 :oeq (list '== a b) :ogt (list '> a b) :oge (list '>= a b) :olt (list '< a b) :ole (list '<= a b)
+      :one (list 'or (list '< a b) (list '> a b)) :ord ord :uno uno
+      :ueq (list 'not (list 'or (list '< a b) (list '> a b))) :ugt (list 'not (list '<= a b)) :uge (list 'not (list '< a b))
+      :ult (list 'not (list '>= a b)) :ule (list 'not (list '> a b)) :une (list '!= a b))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Fixed-width vectors (RES6 (a), doc/rust/RUST-EVAL-SURVEY.md §5.3; RE2): a vector is the struct of one array its type
+;; lowers to (ctype), and an operation on vectors is the scalar operation element by element, each element a statement;
+;; <N x i1> holds one byte (0 or 1) an element, so its bitcasts to and from iN pack and unpack the bits (LLVM's order: element
+;; i is bit i). Scalable vectors are refused (:vector).
+
+(defn vector-type? [t] (and (seq? t) (= (first t) 'vector)))
+
+(defn- velem
+  "Element i of a vector's C expression."
+  [e i] (list 'aget (list '.-e e) i))
+
+(defn- velems
+  "The statements setting each element i of res to (f i)."
+  [res n f] (vec (for [i (range n)] (list 'set! (velem res i) (f i)))))
+
+(defn- vector-stmts
+  "A vector instruction's statements, or nil when x is not one."
+  [h fl args x res]
+  (case h
+    (add sub mul udiv sdiv urem srem shl lshr ashr and or xor fadd fsub fmul fdiv frem)
+    (let [[t a b] args]
+      (when (vector-type? t)
+        (let [et (nth t 2) va (value a t) vb (value b t)]
+          (velems res (nth t 1) #(binop h et (velem va %) (velem vb %))))))
+    fneg (let [[t a] args]
+           (when (vector-type? t)
+             (let [va (value a t)] (velems res (nth t 1) #(list '- (velem va %))))))
+    (icmp fcmp) (let [pr (last fl) [t a b] args]
+                  (when (vector-type? t)
+                    (let [et (nth t 2) va (value a t) vb (value b t)]
+                      (velems res (nth t 1) #((if (= h 'icmp) icmp-expr fcmp-expr) pr et (velem va %) (velem vb %))))))
+    (trunc zext sext fptrunc fpext fptoui fptosi uitofp sitofp ptrtoint inttoptr bitcast)
+    (let [[t1 v t2] args]
+      (cond
+        (and (= h 'bitcast) (vector-type? t1) (= 'i1 (nth t1 2)) (int-bits t2))
+        (let [n (nth t1 1) va (value v t1) c (container-bits n)]
+          (when-not (= n (int-bits t2)) (refuse :vector "bitcast of " (pr-str t1) " to " t2))
+          [(list 'set! res (apply list 'bit-or (int-lit 0 n)
+                                  (for [i (range n)] (list '<< (list 'conv (utype c) (list 'bit-and (velem va i) 1)) i))))])
+        (and (= h 'bitcast) (vector-type? t2) (= 'i1 (nth t2 2)))
+        (let [n (nth t2 1) w (int-bits t1) e (value v t1)]
+          (when-not (= n w) (refuse :vector "bitcast of " (pr-str t1) " to " (pr-str t2)))
+          (velems res n #(list 'conv 'unsigned-char (list 'bit-and (list '>> (uval e w) %) 1))))
+        (and (= h 'bitcast) (or (and (vector-type? t1) (= 'i1 (nth t1 2))) (and (vector-type? t2) (= 'i1 (nth t2 2)))))
+        (refuse :vector "bitcast of " (pr-str t1) " to " (pr-str t2))
+        (= h 'bitcast) nil
+        (and (vector-type? t1) (vector-type? t2))
+        (let [va (value v t1)]
+          (velems res (nth t2 1) #(cast-expr h (nth t1 2) (velem va %) (nth t2 2))))
+        (or (vector-type? t1) (vector-type? t2)) (refuse :vector h " of " (pr-str t1) " to " (pr-str t2))
+        :else nil))
+    select (let [[[ct c] [t a] [_ b]] args]
+             (when (vector-type? ct)
+               (let [vc (value c ct) va (value a t) vb (value b t)]
+                 (velems res (nth t 1) #(list '? (velem vc %) (velem va %) (velem vb %))))))
+    shufflevector (let [[[t a] [_ b] [mt m]] (rest x)
+                        n (nth t 1) mn (nth mt 1) va (value a t) vb (value b t)
+                        idx (cond
+                              (and (symbol? m) (#{"zeroinitializer"} (name m))) (repeat mn 0)
+                              (and (symbol? m) (#{"poison" "undef"} (name m))) (repeat mn nil)
+                              (and (seq? m) (= (first m) 'vector)) (map (fn [[_ ev]] (when (integer? ev) ev)) (rest m))
+                              :else (refuse :vector "a shufflevector mask " (pr-str m)))
+                        et (nth t 2)]
+                    (when-not (vector-type? t) (refuse :vector "shufflevector of " (pr-str t)))
+                    (vec (for [[i k] (map-indexed vector idx)]
+                           (list 'set! (velem res i)
+                                 (cond (nil? k) (value 'zeroinitializer et)
+                                       (< (long k) (long n)) (velem va k)
+                                       :else (velem vb (- (long k) (long n))))))))
+    nil))
+
+(defn- vector-reduce
+  "llvm.vector.reduce.OP's expression over the vector expression e of type t (fadd and fmul: from start, in order)."
+  [^String op t e start]
+  (let [n (nth t 1) et (nth t 2) w (int-bits et) es (map #(velem e %) (range n))
+        fold (fn [f] (reduce f es))]
+    (case op
+      ("and" "or" "xor" "add" "mul") (fold #(binop (symbol op) et %1 %2))
+      ("umin" "umax" "smin" "smax") (let [sg (= \s (first op)) mx (str/ends-with? op "max") v #(if sg (sval % w) (uval % w))]
+                                      (fold #(list '? (list (if mx '> '<) (v %1) (v %2)) %1 %2)))
+      "fadd" (reduce #(list '+ %1 %2) start es)
+      "fmul" (reduce #(list '* %1 %2) start es)
+      ("fmin" "fmax") (fold #(list (symbol (str "__builtin_f" (subs op 1) ({"float" "f" "double" ""} (name et)))) %1 %2))
+      (refuse :intrinsic "llvm.vector.reduce." op))))
+
 ;; atomics (CP121 (c)): gcc's __atomic_* builtins with the IR's orderings (__ATOMIC_RELAXED 0, ACQUIRE 2, RELEASE 3, ACQ_REL 4,
 ;; SEQ_CST 5; LLVM's unordered and monotonic are relaxed); a syncscope("singlethread") fence is a signal fence, a
 ;; singlethread operation stays a thread-wide atomic (stronger, the same result)
@@ -787,26 +918,14 @@
         h (first x)
         [fl args] (split-flags (rest x))
         set (fn [e] [(list 'set! res e)])]
-    (case h
+    (or
+     (vector-stmts h fl args x res)
+     (case h
       (add sub mul udiv sdiv urem srem shl lshr ashr and or xor fadd fsub fmul fdiv frem)
       (let [[t a b] args] (set (binop h t (value a t) (value b t))))
       fneg (let [[t a] args] (when-not (float-type? t) (refuse :vector "fneg of " (pr-str t))) (set (list '- (value a t))))
-      icmp (let [pr (last fl) [t a b] args w (int-bits t) va (value a t) vb (value b t)
-                 [a b] (cond w [va vb] (ptr-type? t) [(list 'conv 'unsigned-long va) (list 'conv 'unsigned-long vb)] :else (refuse :vector "icmp of " (pr-str t)))
-                 u #(if w (uval % w) %) s #(if w (sval % w) (list 'conv 'long %))
-                 op ({:eq '== :ne '!= :ugt '> :uge '>= :ult '< :ule '<= :sgt '> :sge '>= :slt '< :sle '<=} pr)
-                 sg (#{:sgt :sge :slt :sle} pr)]
-             (set (list op (if sg (s a) (u a)) (if sg (s b) (u b)))))
-      fcmp (let [pr (last fl) [t a b] args
-                 _ (when-not (float-type? t) (refuse :vector "fcmp of " (pr-str t)))
-                 a (value a t) b (value b t)
-                 ord (list 'and (list '== a a) (list '== b b))
-                 uno (list 'or (list '!= a a) (list '!= b b))]
-             (set (case pr
-                    :false 0 :true 1 :oeq (list '== a b) :ogt (list '> a b) :oge (list '>= a b) :olt (list '< a b) :ole (list '<= a b)
-                    :one (list 'or (list '< a b) (list '> a b)) :ord ord :uno uno
-                    :ueq (list 'not (list 'or (list '< a b) (list '> a b))) :ugt (list 'not (list '<= a b)) :uge (list 'not (list '< a b))
-                    :ult (list 'not (list '>= a b)) :ule (list 'not (list '> a b)) :une (list '!= a b))))
+      icmp (let [pr (last fl) [t a b] args] (set (icmp-expr pr t (value a t) (value b t))))
+      fcmp (let [pr (last fl) [t a b] args] (set (fcmp-expr pr t (value a t) (value b t))))
       (trunc zext sext fptrunc fpext fptoui fptosi uitofp sitofp ptrtoint inttoptr bitcast addrspacecast)
       (let [[t1 v t2] args] (set (cast-expr h t1 (value v t1) t2)))
       alloca (let [[t] args [s a] (size-align t) cnt (:count o) al (max (long a) (long (or (:align o) 1)))
@@ -910,8 +1029,8 @@
       resume [(list 'cx$resume (list '.-f0 (value (nth x 2) (second x)))) (dummy-return)]
       indirectbr (refuse :indirectbr "indirectbr")
       va_arg (refuse :va "the va_arg instruction")
-      (extractelement-dynamic shufflevector) (refuse :vector (str h))
-      (refuse :instruction "the instruction " h))))
+      extractelement-dynamic (refuse :vector (str h))
+      (refuse :instruction "the instruction " h)))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Functions
