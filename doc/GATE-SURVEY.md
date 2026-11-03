@@ -3194,7 +3194,7 @@ What the main host must check: `test/gate/audit-trace-test.bash` and `test/gate/
 traced (bash-heavy steps make many such calls; here the trace of a 7 s stage 0 run grew by 0 lines, a gate step with many forks
 needs a look at its FIFO's size and the reducer's rate).
 
-## GT8, the test budget (2026-11-03; proposals GTS200-GTS209, none decided)
+## GT8, the test budget (2026-11-03; proposals GTS200-GTS209, decided below)
 
 **The goal** (the user, 2026-11-02; before the tag `arbace-reaps-4-crops-v1` since 2026-11-03): every check of every crop
 runs in bounded time on this one host, so that ten crops (Clojure, Java, Go, C, C++, OCaml, Scheme, Haskell, Rust, Python)
@@ -3271,3 +3271,10 @@ four take about 2.9 hours each: a factor of five, more for Java and C.
   tag (2026-11-03), and the subsets change which tests run.
 - **GTS209 Acceptance.** As above: the clean run within the four crops' share, the nightly within theirs, `--costs`'
   table in the tag's record. *Recommended: (a)*.
+
+## Decided (2026-11-03, the user): GTS200-GTS209
+
+All (a), as recommended: the essential budget is the gate's wall time; equal per-crop shares with the shared steps apart;
+the nightly tier every step over its subset plus a rotating slice, seven nights; the clean run over the compressed corpora,
+checking the rotation's record; the C subset rule for every crop; Go's coverage builds kept by key, run at night; synthetic
+corpora against the same references; Java's `speed` curation inside GT8; acceptance as GTS209.
