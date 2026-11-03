@@ -128,6 +128,10 @@ one() {
   [[ $ro == *"<"* ]] && stdin=.empty
   local cmd; cmd="exec $(printf '%q ' "$hsi" run "${la[@]}" --prog "$prog/stg" --name "$name" --) $ro"
   local o=$work/out/${id//\//_} st=0
+  # a test all.T skips unconditionally (the class :skipped) is not run: its 180 s at the wall cap spared (review 189, L8)
+  if awk '/^ *\{:id :skipped/ {s=1; next} /^ *\{:id :/ {s=0} s' "$root/test/haskell/divergences.edn" | grep -qF "\"$id\""; then
+    rm -rf "$w"; echo "{:id \"$id\" :result :skipped :dump $td :run 0}" > "$res"; return 0
+  fi
   t0=$(date +%s.%N)
   (cd "$w" && env -i PATH=/usr/bin:/bin LANG=C.UTF-8 TZ=UTC HOME="$w" \
      timeout -s KILL $((HSI_TIMEOUT * 3)) sh -c "ulimit -t $HSI_TIMEOUT; $cmd" \
@@ -171,16 +175,30 @@ out=$work/results.edn
   cat "$work"/res/* | sort
 } > "$out"
 total=$(grep -c '^{' "$out" || true)
-for r in pass fail hsi no-dump no-ref; do
+for r in pass fail hsi skipped no-dump no-ref; do
   echo "hsi check: $r $(grep -c ":result :$r" "$out" || true)"
 done
 echo "hsi check: $total programs ($out)"
-# every program that does not pass in a class of test/haskell/divergences.edn (by its :ids)
+# every program that does not pass in a class of test/haskell/divergences.edn (by its :ids), with the result the class
+# records (its :results, and for :hsi its :message's text in hsi's message; review 189, F6): a classed program whose
+# result changed kind is in no class
 unclassed=0
-while read -r id; do
-  c=$(awk -v id="\"$id\"" '/^ *\{:id :/ {cls=$2} index($0, id) {print cls; exit}' "$root/test/haskell/divergences.edn")
-  if [ -n "$c" ]; then echo "hsi check: $id in class $c"; else echo "hsi check: $id in no class"; unclassed=$((unclassed + 1)); fi
-done < <(grep '^{' "$out" | grep -v ':result :pass' | sed 's/^{:id "\([^"]*\)".*/\1/')
+while IFS= read -r line; do
+  id=$(sed 's/^{:id "\([^"]*\)".*/\1/' <<< "$line"); kind=$(sed -n 's/.* :result :\([a-z-]*\).*/\1/p' <<< "$line")
+  IFS=$'\t' read -r c cres cmsg < <(awk -v id="\"$id\"" '
+    /^ *\{:id :/ {cls=$2; res=""; msg=""}
+    /^ *:results \[/ {res=$0; sub(/.*:results \[/, "", res); sub(/\].*/, "", res)}
+    /^ *:message "/ {msg=$0; sub(/.*:message "/, "", msg); sub(/".*/, "", msg)}
+    index($0, id) {printf "%s\t%s\t%s\n", cls, res, msg; exit}' "$root/test/haskell/divergences.edn") || true
+  if [ -z "$c" ]; then echo "hsi check: $id in no class"; unclassed=$((unclassed + 1)); continue; fi
+  if [ -n "$cres" ] && [[ " $cres " != *" :$kind "* ]]; then
+    echo "hsi check: $id in class $c, but its result :$kind is not the class's ($cres)"; unclassed=$((unclassed + 1)); continue
+  fi
+  if [ -n "$cmsg" ] && [ "$kind" = hsi ] && [[ $line != *"$cmsg"* ]]; then
+    echo "hsi check: $id in class $c, but hsi's message is not the class's (\"$cmsg\")"; unclassed=$((unclassed + 1)); continue
+  fi
+  echo "hsi check: $id in class $c"
+done < <(grep '^{' "$out" | grep -v ':result :pass')
 echo "hsi check: $unclassed not passing in no class of test/haskell/divergences.edn"
 if [ -n "$record" ]; then
   rec=$root/test/haskell/check-hsi.edn
@@ -194,13 +212,16 @@ if [ -n "$record" ]; then
   mv "$rec.part" "$rec"; echo "hsi check: recorded test/haskell/check-hsi.edn"
 fi
 # the negative controls (test/haskell/hsi-controls.txt): a subject's run judged against another program's reference
-cbad=0
-while read -r subj refid; do
+cbad=0 cran=0
+while read -r subj refid over; do
   case $subj in ''|\#*) continue ;; esac
   o=$work/out/${subj//\//_}
   [ -f "$o.stdout" ] || { echo "hsi check: control $subj not run"; continue; }
+  cran=$((cran + 1))
   rl=$(grep -F "{:id \"$refid\" " "$ref" || true)
   rst=$(sed -n 's/.* :status \([^ ]*\) .*/\1/p' <<< "$rl"); rso=$(sed -n 's/.* :stdout "\([0-9a-f]*\)".*/\1/p' <<< "$rl")
+  # status=N: the reference with another status (a control of the status's comparison alone)
+  case $over in status=*) rst=${over#status=}; refid="$refid ($over)" ;; esac
   rse=$(sed -n 's/.* :stderr "\([0-9a-f]*\)".*/\1/p' <<< "$rl")
   so=$(sha256sum < "$o.stdout" | cut -c1-64); se=$(sha256sum < "$o.stderr" | cut -c1-64)
   if [ "$(cat "$o.status")" = "$rst" ] && [ "$so" = "$rso" ] && [ "$se" = "$rse" ]; then
@@ -209,4 +230,6 @@ while read -r subj refid; do
     echo "hsi check: control $subj against $refid fails, as it must"
   fi
 done < "$root/test/haskell/hsi-controls.txt"
+# a check in which no control ran proves nothing about its judge (review 189, L3)
+[ $cran -gt 0 ] || { echo "hsi check: no negative control ran"; cbad=1; }
 [ $unclassed = 0 ] && [ $cbad = 0 ]

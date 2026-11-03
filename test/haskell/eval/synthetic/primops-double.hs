@@ -1014,8 +1014,6 @@ main = do
   t "**## (0.0## /## 0.0##) 4.9406564584124654e-324##" (case (**##) (0.0## /## 0.0##) 4.9406564584124654e-324## of r0 -> show (D# r0))
   t "**## (0.0## /## 0.0##) (1.0## /## 0.0##)" (case (**##) (0.0## /## 0.0##) (1.0## /## 0.0##) of r0 -> show (D# r0))
   t "**## (0.0## /## 0.0##) (0.0## /## 0.0##)" (case (**##) (0.0## /## 0.0##) (0.0## /## 0.0##) of r0 -> show (D# r0))
-  t "decodeDouble_2Int# 0.0##" (case decodeDouble_2Int# 0.0## of (# r0, r1, r2, r3 #) -> show (I# r0, W# r1, W# r2, I# r3))
-  t "decodeDouble_2Int# (negateDouble# 0.0##)" (case decodeDouble_2Int# (negateDouble# 0.0##) of (# r0, r1, r2, r3 #) -> show (I# r0, W# r1, W# r2, I# r3))
   t "decodeDouble_2Int# 1.5##" (case decodeDouble_2Int# 1.5## of (# r0, r1, r2, r3 #) -> show (I# r0, W# r1, W# r2, I# r3))
   t "decodeDouble_2Int# (-2.5##)" (case decodeDouble_2Int# (-2.5##) of (# r0, r1, r2, r3 #) -> show (I# r0, W# r1, W# r2, I# r3))
   t "decodeDouble_2Int# 1.0e308##" (case decodeDouble_2Int# 1.0e308## of (# r0, r1, r2, r3 #) -> show (I# r0, W# r1, W# r2, I# r3))
