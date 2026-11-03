@@ -2,7 +2,8 @@
 // bit for bit another implementation's: the musl libm port go/arbace/libm (doc/haskell/HASKELL-EVAL-SURVEY.md,
 // "As built: HE4d, HE4e (write-ahead)"; the Mac's review 189, F1). Go's specification lets an implementation fuse
 // x*y + z, and gc does on arm64 (and on amd64 at GOAMD64=v3), but never across an explicit conversion: float64(x*y) + z
-// rounds the product first. So every floating-point product of the package is written as a conversion of itself.
+// rounds the product first. So every floating-point product of the package is written as a conversion of itself, but
+// one that is the operand of another product or of a quotient (its result rounded before any add).
 //
 //	fmacheck DIR       lists each floating-point product (a*b, or a *= b) of DIR's package that is not the operand
 //	                   of a conversion to its own type, as FILE:LINE:COL; exit status 1 when there is one
@@ -85,9 +86,23 @@ func main() {
 		for _, n := range names {
 			f := pkg.Files[n]
 			var edits []edit
-			// conv: the products that are a conversion's operand already
+			// conv: the products that are a conversion's operand already, or the operand of a product or a quotient
+			// (whose own result is what an add could fuse with)
 			conv := map[ast.Expr]bool{}
+			unparen := func(a ast.Expr) ast.Expr {
+				for {
+					p, ok := a.(*ast.ParenExpr)
+					if !ok {
+						return a
+					}
+					a = p.X
+				}
+			}
 			ast.Inspect(f, func(x ast.Node) bool {
+				if b, ok := x.(*ast.BinaryExpr); ok && (b.Op == token.MUL || b.Op == token.QUO) && floatName(b) != "" {
+					conv[unparen(b.X)] = true
+					conv[unparen(b.Y)] = true
+				}
 				if c, ok := x.(*ast.CallExpr); ok && len(c.Args) == 1 {
 					if id, ok := c.Fun.(*ast.Ident); ok && (id.Name == "float64" || id.Name == "float32") {
 						if tv, ok := info.Types[c.Fun]; ok && tv.IsType() {
