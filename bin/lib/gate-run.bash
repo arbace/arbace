@@ -515,6 +515,8 @@ gate_prune() {  # gate_prune [--dry-run]
   for d in "$store"/*/; do
     [ -d "$d" ] || continue
     n=$(basename "$d"); i=0
+    # the rotation's record is no step's passes: its .seq and .lock are never temporaries (review 181 L7)
+    [ "$n" = _rotation ] && continue
     while IFS= read -r f; do
       [ -n "$f" ] || continue
       i=$((i + 1)); npass=$((npass + 1)); k=${f%.edn}
@@ -539,6 +541,7 @@ gate_prune() {  # gate_prune [--dry-run]
     done <<< "$(ls "$d" | sed -nE 's/^([0-9a-f]+)\.(log|inputs|out)$/\1/p' | sort -u)"
     [ -n "$dry" ] || find "$d" -maxdepth 1 -name '.*' -mmin +1440 -exec rm -rf {} + 2>"$store/.prune.err"
   done
+  rotation_prune "$now" "$days" "$dry"
   echo "gate --prune: $npass passes, $nkeep kept, $((npass - nkeep)) ${dry:+would be }removed ($freed bytes), $norphan left without a record ${dry:+would be }removed in $store"
   for pat in gate javac cover; do
     i=0
@@ -560,6 +563,29 @@ gate_prune() {  # gate_prune [--dry-run]
       [ -n "$dry" ] || rm -rf "${f:?}"
     done <<< "$(ls -dt "$exes"/* 2>"$store/.prune.err")"
   done
+}
+
+# rotation_prune NOW DAYS [DRY] (review 181 L7): each rotated check's runs, STORE/_rotation/NAME.runs, trimmed to the last
+# ARBACE_GATE_KEEP_RUNS (50) lines and every line younger than DAYS (its EPOCH), under the store's lock (the runner
+# appends to them under it). The period the record is judged over (7 days) is shorter than DAYS, and a slice whose
+# every run is older reads as never run, which the night's choice ranks with the oldest: no decision moves. The failed
+# files' events (NAME.PART.failed) are kept: a failure stands until a later event clears it
+rotation_prune() {
+  local now=$1 days=$2 dry=$3 rd=$store/_rotation keep=${ARBACE_GATE_KEEP_RUNS:-50} f nl kept tot=0 cut=0
+  [ -d "$rd" ] || return 0
+  for f in "$rd"/*.runs; do
+    [ -f "$f" ] || continue
+    nl=$(wc -l < "$f")
+    kept=$(awk -F'\t' -v n="$nl" -v k="$keep" -v since=$(( now - days * 86400 )) 'NR > n - k || $1 >= since' "$f" | wc -l)
+    tot=$((tot + nl)); [ "$kept" -lt "$nl" ] || continue
+    cut=$((cut + nl - kept))
+    echo "gate --prune: ${dry:+would trim }_rotation/${f##*/} ($nl runs, $kept kept)"
+    [ -n "$dry" ] && continue
+    { flock 9 && nl=$(wc -l < "$f") \
+        && awk -F'\t' -v n="$nl" -v k="$keep" -v since=$(( now - days * 86400 )) 'NR > n - k || $1 >= since' "$f" > "$f.tmp.$$" \
+        && mv -f "$f.tmp.$$" "$f"; } 9>>"$rd/.lock"
+  done
+  echo "gate --prune: $tot rotation runs, $cut ${dry:+would be }trimmed in $rd"
 }
 
 # the audit's reducer (GT5, GTS30 (a)): tools/gateaudit, the Go port of test/gate/audit.awk (23 times

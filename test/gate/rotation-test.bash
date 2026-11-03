@@ -284,5 +284,24 @@ case $(names "$t/u2") in "toy.toy.s0 toy.whole after-toy ") ok "an empty :subset
 plan3 "$t/u3" full --rotation subset
 case $(names "$t/u3") in "toy.whole after-toy ") ok "an empty :subset in the clean run: nothing of the part" ;; *) no "an empty subset, clean: $(names "$t/u3")" ;; esac
 
+# review 181 L7: --prune trims the runs (the last 50 and the 30 days' kept) and leaves the record's .seq and .lock
+store=$t/store7; mkdir -p "$store/_rotation"
+old=$(( $(date +%s) - 40 * 86400 ))
+{ for i in $(seq 1 80); do printf '%s\td\tpass\tk\tl\tc0ffee\t/w\t%s\tfalse\n' "$old" "$i"; done
+  for i in 81 82 83; do printf '%s\td\tpass\tk\tl\tc0ffee\t/w\t%s\tfalse\n' "$(date +%s)" "$i"; done; } > "$store/_rotation/toy.toy.s1.runs"
+{ for i in $(seq 1 60); do printf '%s\td\tpass\tk\tl\tc0ffee\t/w\t%s\tfalse\n' "$(date +%s)" "$i"; done; } > "$store/_rotation/toy.toy.s2.runs"
+echo 83 > "$store/_rotation/.seq"; : > "$store/_rotation/.lock"; touch -d '2 days ago' "$store/_rotation/.seq" "$store/_rotation/.lock"
+printf '1\t%s\ttoy/p9.c\tfail\tc0ffee\tfalse\n' "$old" > "$store/_rotation/toy.toy.failed"
+mkdir -p "$t/exes"; exes=$t/exes
+gate_prune --dry-run > "$t/prune-dry.out" 2>&1
+[ "$(wc -l < "$store/_rotation/toy.toy.s1.runs")" = 83 ] && grep -q 'would trim _rotation/toy.toy.s1.runs (83 runs, 50 kept)' "$t/prune-dry.out" \
+  && ok "--prune --dry-run: the runs to trim named, none trimmed" || no "--prune --dry-run: $(cat "$t/prune-dry.out")"
+gate_prune > "$t/prune.out" 2>&1
+if [ "$(wc -l < "$store/_rotation/toy.toy.s1.runs")" = 50 ] && [ "$(tail -1 "$store/_rotation/toy.toy.s1.runs" | cut -f8)" = 83 ] \
+   && [ "$(head -1 "$store/_rotation/toy.toy.s1.runs" | cut -f8)" = 34 ] && [ "$(wc -l < "$store/_rotation/toy.toy.s2.runs")" = 60 ]; then
+  ok "--prune: a check's runs trimmed to the last 50, those of the last 30 days kept"; else no "--prune's runs: $(wc -l "$store"/_rotation/*.runs; cat "$t/prune.out")"; fi
+if [ "$(cat "$store/_rotation/.seq" 2>&1)" = 83 ] && [ -e "$store/_rotation/.lock" ] && [ -s "$store/_rotation/toy.toy.failed" ]; then ok "--prune: the record's .seq, .lock and failed events kept"; else no "--prune removed the record's files: $(ls -A "$store/_rotation")"; fi
+store=$t/store
+
 echo "$((n - bad)) of $n passed"
 [ "$bad" = 0 ]
