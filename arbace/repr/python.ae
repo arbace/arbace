@@ -1,0 +1,248 @@
+(ns arbace.repr.python
+  "Command line of repr/python (doc/python/SPEC.md, doc/python/PYTHON-SURVEY.md \"As built: PY2\"), run by
+  bin/repr-python as -m arbace.repr.python VERB ..., evaluated from the checkout (not embedded, PYS18 (a)):
+
+    convert --dumps DIR --forms DIR --printed DIR [--tsv FILE]
+        each helper dump DUMPS/REL.ae (tools/pydump/pydump.py tree): converted (arbace.repr.python.convert: heads and
+        contexts checked), written as FORMS/REL.ae and read back equal, printed (arbace.repr.python.print) as
+        PRINTED/REL; an error dump is not printed. The TSV: REL STATUS SECONDS RSS (STATUS ok, error, or
+        failed: MESSAGE; RSS the process's VmHWM after the file, KiB)
+    print FORMS.ae OUT        one forms file printed to OUT
+    compare --corpus NAME --orig DIR --cand DIR --orig-tsv FILE --cand-tsv FILE --convert-tsv FILE
+            --known FILE [--record] [--results FILE]
+        the round trip's levels (survey §5.2) per file: 1 forms (the original's dump converted against the print's,
+        the module's map but :type-ignores' tags left out: their lines are positions), 2 ast (ast.dump's digest), 3
+        code (the normalized code's digest); a file ast.parse rejects is judged on CPython's class and message against
+        the known file (test/python/roundtrip-known.edn). Each file that does not pass every level has a class of the
+        known file's :classes; --record rewrites the corpus's entries, and a file the writer cannot class (only
+        :rejected, a rejection, and :code-lines, a code difference with the ast equal, are classed by rule) is printed
+        and not written: the run exits 3 (CS265 (a), CS266 (a)'s rule)."
+  (:require [arbace.repr.python.convert :as cv]
+            [arbace.repr.python.print :as pr]
+            [arbace.string :as str])
+  (:import [java.io File]))
+
+(defn- parse-args [args with-value]
+  (loop [as args opts {} pos []]
+    (if (empty? as)
+      {:opts opts :args pos}
+      (let [[a & more] as]
+        (cond
+          (contains? with-value a) (recur (rest more) (assoc opts a (first more)) pos)
+          (str/starts-with? a "--") (recur more (assoc opts a true) pos)
+          :else (recur more opts (conj pos a)))))))
+
+(defn- files-under [^String dir ext]
+  (->> (file-seq (File. dir))
+       (filter #(and (.isFile ^File %) (str/ends-with? (.getName ^File %) ext)))
+       (map #(.getPath ^File %))
+       sort))
+
+(defn- rel [^String root ^String path]
+  (let [r (str (.getCanonicalPath (File. root)) "/")
+        p (.getCanonicalPath (File. path))]
+    (if (str/starts-with? p r) (subs p (count r)) path)))
+
+(defn- spit-mk [^String path text]
+  (let [f (File. path)]
+    (.mkdirs (.getParentFile f))
+    (spit f text)))
+
+(defn- strip-ae [^String s] (subs s 0 (- (count s) 3)))
+
+(defn- vm-hwm
+  "The process's peak resident set (KiB) so far, from /proc/self/status; -1 when unknown"
+  []
+  (try
+    (let [l (first (filter #(str/starts-with? % "VmHWM:") (str/split-lines (slurp "/proc/self/status"))))]
+      (Long/parseLong (str/trim (str/replace (subs l 6) "kB" ""))))
+    (catch Throwable _ -1)))
+
+;; ---- convert and print ----
+
+(defn- one-line [s] (str/replace (str s) #"[\t\n]" " "))
+
+(defn- do-convert [{:keys [opts]}]
+  (let [dumps (get opts "--dumps") forms (get opts "--forms") printed (get opts "--printed")
+        files (files-under dumps ".ae")
+        sb (StringBuilder.)
+        n (atom 0) errs (atom 0) bad (atom 0)]
+    (doseq [f files]
+      (let [r (strip-ae (rel dumps f))
+            t0 (System/nanoTime)
+            status (try
+                     (let [x (cv/convert (slurp f))]
+                       (if (cv/error-form? x)
+                         (do (swap! errs inc) "error")
+                         (let [text (cv/write-forms x)]
+                           (cv/read-check text x)
+                           (spit-mk (str forms "/" r ".ae") text)
+                           (spit-mk (str printed "/" r) (pr/print-module x))
+                           (swap! n inc)
+                           "ok")))
+                     (catch Throwable e
+                       (swap! bad inc)
+                       (str "failed: " (one-line (.getMessage e))
+                            (when-let [c (:class (ex-data e))] (str " " c)))))]
+        (.append sb (str r "\t" status "\t" (format "%.4f" (/ (- (System/nanoTime) t0) 1e9)) "\t" (vm-hwm) "\n"))))
+    (when-let [t (get opts "--tsv")] (spit-mk t (str sb)))
+    (println (str "convert: " (count files) " dumps: " @n " converted and printed, " @errs " rejected by CPython, "
+                  @bad " failed (the round trip classes them)"))))
+
+(defn- do-print [{:keys [args]}]
+  (let [[in out] args]
+    (spit-mk out (pr/print-module (read-string (slurp in))))))
+
+;; ---- compare ----
+
+(defn- first-diff
+  "The path to the first difference of two forms, with both sides"
+  [a b path]
+  (cond
+    (= a b) nil
+    (and (sequential? a) (sequential? b))
+    (or (some (fn [i] (first-diff (nth a i) (nth b i) (conj path (if (seq? a) (str (first a) "." i) i))))
+              (range (min (count a) (count b))))
+        [path (str "length " (count a)) (str "length " (count b))])
+    (and (map? a) (map? b))
+    (or (some (fn [k] (first-diff (get a k) (get b k) (conj path k))) (distinct (concat (keys a) (keys b))))
+        [path "map" "map"])
+    :else [path (let [s (pr-str a)] (subs s 0 (min 160 (count s)))) (let [s (pr-str b)] (subs s 0 (min 160 (count s))))]))
+
+(defn- level1-form
+  "A module's forms as level 1 compares them: the map without :file and :type-comments (facts of the file's text: the
+  print has no comment that only looks like a type comment), the :type-ignores' lines left out"
+  [x]
+  (let [m (last x)]
+    (if (map? m)
+      (let [m2 (cond-> (dissoc m :file :type-comments)
+                 (:type-ignores m) (update :type-ignores (fn [v] (mapv #(nth % 2) v))))]
+        (apply list (concat (butlast x) [m2])))
+      x)))
+
+(defn- tsv [f]
+  (if (and f (.exists (File. ^String f)))
+    (into {} (for [l (str/split-lines (slurp f)) :when (seq l)]
+               (let [c (str/split l #"\t")] [(first c) c])))
+    {}))
+
+(def ^:private rule-classes
+  {:rejected {:what "CPython's ast.parse rejects the file (a deliberately bad file of Lib/test: an unknown or wrong encoding, a character no identifier takes): the read gives (python/error CLASS MSG ...), judged on CPython's class and message (survey §5.3); nothing to print"
+              :decided "the survey's §5.3 (PYS3 (a)): the read level's reference is CPython's acceptance and message"}
+   :code-lines {:what "levels 1 and 2 pass (the forms and the ast without positions are equal) but the code compiled from the print differs from the original's after the normalization of tools/pydump's code_digest: CPython 3.14's code generation depends on the lines a node spans beyond what the normalization removes (where an exception range or a jump falls), and :lines carries no lines"
+                :decided "by definition: compile() is a function of the ast with its positions, so with the ast equal the difference is the positions'; :full (PY3) keeps them"}})
+
+(defn- classify
+  "The class the --record writer may give a file by rule, else nil (CS265 (a), CS266 (a): no guess)"
+  [v]
+  (case (:level v)
+    :rejected :rejected
+    :code (when (:ast-equal v) :code-lines)
+    nil))
+
+(defn- judge-file [r a-text b-text oa ob cv]
+  (let [status (nth oa 1 nil)]
+    (cond
+      (= status "error")
+      (let [x (read-string a-text)]
+        {:level :rejected :error (nth x 1) :message (nth x 2)})
+      (not= status "ok") {:level :helper :message (str "the helper failed on the original: " (one-line a-text))}
+      (not= (nth cv 1 nil) "ok") {:level :convert :message (str (nth cv 1 "no convert line"))}
+      (nil? b-text) {:level :print :message "no dump of the printed file"}
+      (not= (nth ob 1 nil) "ok") {:level :printed-rejected :message (one-line b-text)}
+      :else
+      (let [a (level1-form (cv/convert a-text)) b (level1-form (cv/convert b-text))
+            d (first-diff a b [])
+            ast= (= (nth oa 2) (nth ob 2))
+            code= (= (nth oa 3) (nth ob 3))]
+        (cond
+          d {:level :forms :at (first d) :orig (second d) :printed (nth d 2)}
+          (not ast=) {:level :ast}
+          (not code=) {:level :code :ast-equal true :orig (nth oa 3) :printed (nth ob 3)}
+          :else nil)))))
+
+(defn- entry [v cls]
+  (cond-> {:class cls}
+    (:error v) (assoc :error (:error v))
+    (:message v) (assoc :message (:message v))
+    (= :forms (:level v)) (assoc :at (:at v) :orig (:orig v) :printed (:printed v))))
+
+(defn- write-known [file known]
+  (let [k (fn [m] (into (sorted-map) m))
+        classes (k (:classes known))
+        rt (k (:roundtrip known))]
+    (spit-mk file
+             (str ";; The files of repr/python's round trip (bin/repr-python roundtrip; doc/python/PYTHON-SURVEY.md, \"As built: PY2\")\n"
+                  ";; that do not pass every level, by corpus, each with its class (:classes, each with what it is and the decision\n"
+                  ";; it rests on). Written by bin/repr-python roundtrip --record, the classes kept; the writer classes a file only by\n"
+                  ";; rule (:rejected, :code-lines) and never writes a guess: a file of no class makes the run exit 3. Read with the\n"
+                  ";; Clojure reader.\n"
+                  "{:classes\n {"
+                  (str/join "\n  " (for [[c v] classes] (str (pr-str c) "\n  " (pr-str (into (sorted-map) v)))))
+                  "}\n :roundtrip\n {"
+                  (str/join "\n  " (for [[c files] rt]
+                                     (str (pr-str c) "\n  {"
+                                          (str/join "\n   " (for [[f v] (k files)] (str (pr-str f) " " (pr-str (into (sorted-map) v)))))
+                                          "}")))
+                  "}}\n"))))
+
+(defn- do-compare [{:keys [opts]}]
+  (let [corpus (keyword (get opts "--corpus"))
+        orig (get opts "--orig") cand (get opts "--cand")
+        oa (tsv (get opts "--orig-tsv")) ob (tsv (get opts "--cand-tsv")) ct (tsv (get opts "--convert-tsv"))
+        known-file (get opts "--known")
+        known (if (.exists (File. ^String known-file)) (read-string (slurp known-file)) {:classes {} :roundtrip {}})
+        classes (merge rule-classes (:classes known))
+        mine (get-in known [:roundtrip corpus] {})
+        record? (get opts "--record")
+        files (sort (keys oa))
+        res (into (sorted-map)
+                  (for [r files]
+                    (let [af (File. (str orig "/" r ".ae")) bf (File. (str cand "/" r ".ae"))]
+                      [r (judge-file r (slurp af) (when (.exists bf) (slurp bf)) (get oa r) (get ob r) (get ct r))])))
+        failing (into (sorted-map) (filter (comp some? val) res))
+        counts (frequencies (map :level (vals failing)))
+        n (count files)
+        pass1 (- n (count (filter #(#{:rejected :helper :convert :print :printed-rejected :forms} (:level %)) (vals failing))))
+        pass2 (- pass1 (get counts :ast 0))
+        pass3 (- pass2 (get counts :code 0))
+        line (str "roundtrip " (name corpus) ": " n " files: level 1 (forms) " pass1 ", level 2 (ast) " pass2
+                  ", level 3 (code) " pass3 "; not passing " (pr-str (into (sorted-map) counts)))]
+    (println line)
+    (when-let [rf (get opts "--results")]
+      (spit-mk rf (pr-str {:corpus corpus :files n :level1 pass1 :level2 pass2 :level3 pass3
+                           :failing (into (sorted-map) (map (fn [[r v]] [r (:level v)]) failing))})))
+    (if record?
+      (let [classed (into {} (for [[r v] failing] [r (classify v)]))
+            unclassed (filter (comp nil? val) classed)
+            ;; a file of no class: printed and left out; its entry kept only if it had one and its class still holds
+            new (into {} (for [[r v] failing :let [c (or (classed r) (:class (get mine r)))] :when c] [r (entry v c)]))]
+        (doseq [[r v] failing :when (nil? (classed r))]
+          (println (str "NO CLASS " r " " (pr-str v)
+                        (when-let [old (get mine r)] (str " (kept as " (:class old) ": its class is the record's, not the rule's)")))))
+        (write-known known-file (-> known
+                                    (assoc :classes (merge (select-keys rule-classes (set (keep :class (vals new))))
+                                                           (:classes known)))
+                                    (assoc-in [:roundtrip corpus] new)))
+        (System/exit (if (some (fn [[r _]] (nil? (get new r))) unclassed) 3 0)))
+      (let [problems (concat
+                      (for [[r v] failing
+                            :let [k (get mine r)]
+                            :when (or (nil? k) (not (contains? classes (:class k)))
+                                      (not= (dissoc (entry v (:class k)) :class) (dissoc k :class)))]
+                        (str "UNEXPECTED " r " " (pr-str v) (when k (str " (known: " (pr-str k) ")"))))
+                      (for [[r k] mine :when (and (contains? res r) (nil? (get failing r)))]
+                        (str "GONE (known as " (:class k) ", passes now) " r))
+                      (for [[r k] mine :when (not (contains? classes (:class k)))]
+                        (str "NO SUCH CLASS " (:class k) " for " r)))]
+        (doseq [p problems] (println p))
+        (System/exit (if (empty? problems) 0 1))))))
+
+(defn -main [& args]
+  (let [[verb & more] args
+        pa (fn [wv] (parse-args more wv))]
+    (case verb
+      "convert" (do-convert (pa #{"--dumps" "--forms" "--printed" "--tsv"}))
+      "print" (do-print (pa #{}))
+      "compare" (do-compare (pa #{"--corpus" "--orig" "--cand" "--orig-tsv" "--cand-tsv" "--convert-tsv" "--known" "--results"}))
+      (do (println "usage: -m arbace.repr.python convert|print|compare ...") (System/exit 2)))))

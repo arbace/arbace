@@ -1,0 +1,129 @@
+(ns arbace.repr.python.convert
+  "The converter of repr/python (doc/python/SPEC.md; PY2, mode :lines): the helper's dump (tools/pydump/pydump.py,
+  forms in the spec's vocabulary, PYS3 (a), PYS5 (a)) as Python forms, and their .ae text.
+
+  convert: reads the dump with Arbace's reader, checks every head against the spec's checklist (§13: an unknown head
+  is an error), and checks the contexts: the helper marks a Name, Attribute, Subscript, Starred, List or Tuple in a
+  Store or Del context (^:store, ^:del on a symbol, {:ctx :store} on a list), and the mark must be the slot's (a
+  target slot is Store, a delete's targets Del, the elements of a target tuple or list and a target's starred value
+  the target's, everything else Load: §1.2, S15); the marks are then dropped, so the forms are the spec's.
+  write-forms: the forms as .ae text, a form on one line when it fits in 110 columns, else its fields one a line
+  (a statement vector one statement a line); read back and compared by the caller (read-check)."
+  (:require [arbace.string :as str]))
+
+(def known-heads
+  (set '[python/module python/interactive python/expression python/function-type python/error
+         function-def async-function-def class-def return delete assign type-alias aug-assign ann-assign for
+         async-for while if with async-with match raise try try-star assert import import-from global nonlocal
+         expr pass break continue bool-op named-expr bin-op unary-op lambda if-exp dict set list-comp set-comp
+         dict-comp generator-exp await yield yield-from compare call formatted-value interpolation joined-str
+         template-str int float imag str bytes const attribute subscript starred name list tuple slice
+         comprehension except-handler arguments arg keyword alias withitem match-case match-value match-singleton
+         match-sequence match-mapping match-class match-star match-as match-or type-ignore type-var param-spec
+         type-var-tuple str-concat]))
+
+(defn error-form? [x] (and (seq? x) (= 'python/error (first x))))
+
+;; the target slots: [head positional-index] -> the context of that field's nodes
+(def ^:private target-slots
+  {['assign 0] :store ['aug-assign 0] :store ['ann-assign 0] :store ['for 0] :store ['async-for 0] :store
+   ['comprehension 0] :store ['named-expr 0] :store ['type-alias 0] :store ['withitem 1] :store ['delete 0] :del})
+
+(def ^:private ctx-heads '#{name attribute subscript starred list tuple})
+
+(defn- mark-of [x]
+  (cond
+    (symbol? x) (let [m (meta x)] (cond (:store m) :store (:del m) :del))
+    (and (seq? x) (map? (last x))) (:ctx (last x))))
+
+(declare clean)
+
+(defn- clean-list
+  "A list node, its context checked against expect and its children cleaned"
+  [x expect]
+  (let [h (first x)
+        _ (when-not (and (symbol? h) (known-heads h)) (throw (ex-info (str "unknown head " (pr-str h)) {:head h})))
+        own (mark-of x)
+        _ (when (and (ctx-heads h) (not= own (when (#{:store :del} expect) expect)))
+            (throw (ex-info (str "context " (or own :load) " of " h " where the slot takes " expect) {:head h})))
+        _ (when (and own (not (ctx-heads h))) (throw (ex-info (str h " carries a context") {:head h})))
+        xs (vec (rest x))
+        xs (if (and (seq xs) (map? (peek xs)) (contains? (peek xs) :ctx))
+             (let [m (dissoc (peek xs) :ctx)] (if (empty? m) (pop xs) (conj (pop xs) m)))
+             xs)
+        target? (#{:store :del} expect)
+        child (fn [i]
+                (or (target-slots [h i])
+                    (when (and target? ('#{tuple list starred} h) (zero? i)) expect)
+                    :load))]
+    (loop [i 0 in-opts false ys xs acc [h]]
+      (if (empty? ys)
+        (apply list acc)
+        (let [y (first ys)]
+          (cond
+            (keyword? y) (recur i true (rest ys) (conj acc y))
+            in-opts (recur i in-opts (rest ys) (conj acc (clean y :load)))
+            :else (recur (inc i) false (rest ys) (conj acc (clean y (child i))))))))))
+
+(defn clean [x expect]
+  (cond
+    (symbol? x) (do (when (and (mark-of x) (not= (mark-of x) expect))
+                      (throw (ex-info (str "context " (mark-of x) " of " x " where the slot takes " expect) {})))
+                    (when (and (#{:store :del} expect) (not (mark-of x)) (not (#{'None 'True 'False '...} x)))
+                      (throw (ex-info (str "context load of " x " where the slot takes " expect) {})))
+                    (with-meta x nil))
+    (seq? x) (clean-list x expect)
+    (vector? x) (mapv #(clean % expect) x)
+    (map? x) (into {} (map (fn [[k v]] [k (clean v :load)]) x))
+    :else x))
+
+(defn convert
+  "A dump's text as Python forms in mode :lines; an error dump ((python/error ...)) is returned as it is"
+  [text]
+  (let [x (read-string text)]
+    (when-not (seq? x) (throw (ex-info "the dump is not a form" {})))
+    (if (error-form? x) x (clean x :load))))
+
+;; ---- the .ae writer ----
+
+(defn- atom-text [x]
+  (cond (nil? x) "nil"
+        (string? x) (pr-str x)
+        (symbol? x) (str x)
+        :else (pr-str x)))
+
+(defn- flat [x]
+  (cond (seq? x) (str "(" (str/join " " (map flat x)) ")")
+        (vector? x) (str "[" (str/join " " (map flat x)) "]")
+        (map? x) (str "{" (str/join " " (map (fn [[k v]] (str (flat k) " " (flat v))) x)) "}")
+        :else (atom-text x)))
+
+(def ^:private width 110)
+
+(defn- write-x [^StringBuilder sb x ind]
+  (let [f (flat x)]
+    (if (or (<= (+ ind (count f)) width) (not (coll? x)) (map? x) (str/includes? f "\n"))
+      (.append sb f)
+      (let [pad (str "\n" (apply str (repeat (inc ind) \space)))]
+        (if (seq? x)
+          (let [[h & more] x]
+            (.append sb (str "(" (flat h)))
+            (doseq [y more] (.append sb pad) (write-x sb y (inc ind)))
+            (.append sb ")"))
+          (do (.append sb "[")
+              (doseq [[i y] (map-indexed vector x)]
+                (when (pos? i) (.append sb pad))
+                (write-x sb y (inc ind)))
+              (.append sb "]")))))))
+
+(defn write-forms [x]
+  (let [sb (StringBuilder.)]
+    (write-x sb x 0)
+    (.append sb "\n")
+    (str sb)))
+
+(defn read-check
+  "The written text reads back to the forms"
+  [text x]
+  (when-not (= (read-string text) x)
+    (throw (ex-info "the written forms do not read back equal" {}))))
