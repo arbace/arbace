@@ -3390,3 +3390,41 @@ for crops whose records are not one id a line (goi's, Java's); the controls' sub
 hand for benchmarksgame: a control whose subject is not in a slice is "left", not failed); `--costs` (GT8.1) to show the
 nightly tier against its budget; the clean record's `:rotation` read by `test/gate/clean.ae`'s `--only` selection (today it
 names the parts' `.sub` checks, as a fresh clean record would); a first real `--nightly`, then seven, before the tag.
+
+## As built: GT8 (the tools' lists) (write-ahead, branch `gt8-lists`, 2026-11-03)
+
+Every corpus tool but C's (another branch's) takes a file list; the planner reads more record shapes.
+
+**The planner** (`test/gate/plan.ae`, `bin/lib/gate-run.bash`). `:rotate` takes `:id-re` (a regex on the record's lines:
+group 1 the id, group 2 when present the part named on the line, the ids then bare, as the `:subset`'s names: Java's
+`ref-jdk26.edn`, the corpus on each test's line; one group: every line's id in the part, goi's records), `:always` (the
+negative controls' subjects, GTS81 (a): in the subset and in every non-empty slice's list, so every run of the part judges
+its controls; ids of the part's universe only) and `:failed-as` (sed's replacement, default `\1`: repr/go's `KIND CORPUS
+KEY` lines give `\2/\3`). `{part}` in a part's `:uses` names its own part's producer, and a `:uses` naming a rotated
+part names its checks. `:judges {:failed-re :failed-as}` on a step that judges rotated checks' saved runs (Java's
+`java-judge`, whose levels' `--save` runs never fail): when it fails, each producer whose list names a failing id is noted
+as failed (`judge_note`: its run a failure, its ids into the part's subset). The runner exports `GATE_USES`.
+`rotation-test` 40 of 40.
+
+**The tools.**
+- repr/go: `bin/repr-go native-check CORPUS --only FILE` (ids `CORPUS/KEY`, a dump's key; the others neither checked
+  nor missing; the report `:partial`, which `bin/reap record-native-check` refuses); `--record-ids` writes
+  `test/repr/go/native-check-ids.edn` (one `["CORPUS/KEY"]` a line, from the helper's dumps, no check: 11,835 ids of the
+  16 corpora not `:clean-only`). `:rotate` on `repr-go-native`.
+- Java: `bin/java-check --list FILE` (test ids, partial); a run of whole corpora (`--corpus` alone) saves `DIR/corpus`
+  and `--judge` (`java.check/report --corpora`) judges it whole within those corpora (`--record` keeps the other
+  corpora's lines). The level steps are parted by corpus (the six run corpora; `langtools-diagnostics` for
+  diagnostics), interp and compiled reading their own corpus's read (`java-read.{part}/forms.sha256`); `java-judge`
+  judges the results files of `GATE_USES`. Cost: the compiled level's shards are per corpus (about 11 programs, not 7).
+  `test/java/corpora-test.bash` (in `bin/gate-tests`), 10 of 10.
+- goi: `bin/goi check [--aot] --list FILE` (a selection; its own results classified by `goi.divergences --partial`;
+  each failing program `   failing: ID`). goi's check is the step `goi-check-full` (one part, `linux-amd64`), apart
+  from `goi` (annotations, the checker's tests); `goi-aot` one part. Not parted by kind: the kind is not on the
+  record's line, and one rotation over the 1,837 ids balances by the hash.
+- Clojure: `--only FILE` for `bin/clojure-tests` (namespaces, both levels), `bin/oracle check` (case ids `FILE:LINE`;
+  `bin/oracle ids`), `bin/diffcheck` (`FILE:LINE`; `--ids`), `bin/repr-clojure check --roundtrip` (`CORPUS:PATH`;
+  `--ids`). Not rotated: `suite-go`, `oracle-go` and `diffcheck` are essential steps; `suite-aot` and `repr-clojure` are
+  unparted and the oracle's, diffcheck's and repr/clojure's universes are generated (`ids`), not committed records.
+
+**What remains.** The `:subset`s (GT8.3) for repr/go, Java and goi: until then their parts run whole in every tier;
+committed id records (or a `:universe-cmd`) for the oracle, diffcheck and repr/clojure; a part for `suite-aot`.
