@@ -23,3 +23,14 @@ e.__cause__ = None
 print(type(e.__context__).__name__, e.__cause__, e.__suppress_context__)
 e.__suppress_context__ = False
 print(e.__suppress_context__)
+e = Exception(42)
+e.blah = 53
+e.__setstate__({'a': 1, 'b': 2})
+print(e.args, e.blah, e.a, e.b)
+e.__setstate__({'a': 11, 'args': (1, 2, 3), 'blah': 35})
+print(e.args, e.blah, e.a, e.b)
+e.__setstate__(None)
+try:
+    e.__setstate__(42)
+except TypeError as x:
+    print("TypeError", x)
