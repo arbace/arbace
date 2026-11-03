@@ -419,12 +419,80 @@
   (form "python/error" [cls (qstr msg)]
         [[":pos" (when (some? l) (vecs (map #(if (nil? %) "nil" (str %)) [l o el eo])))] [":text" (when text (qstr text))]] nil))
 
+(def ^:private token-kind
+  (mapv #(str ":" (str/replace (str/lower-case %) "_" "-")) lex/tok-names))
+
+(def ^:private gap-re #"(?:[ \t\f]|\\(?:\r\n|\r|\n))*")
+
+(defn- tokens-text
+  "pydump's tokens: tokenize's stream as [KIND TEXT ...], each TEXT the source's slice, :ws between tokens"
+  ^String [^String text]
+  (let [^Src s (src text)
+        ^ints starts (.-starts s)
+        n (alength ^ints (.-cs s))
+        cindex (fn ^long [^long line ^long col] (if (<= line (alength starts)) (+ (aget starts (dec line)) col) n))
+        toks (:tokens (lex/stream text true))
+        nt (count toks)
+        out (java.util.ArrayList.)
+        gap (fn [^String g] (when-not (re-matches gap-re g) (throw (ex-info (str "text between tokens that is not white space: " (pr-str g)) {})))
+              (.add out ":ws") (.add out (qstr g)))]
+    (loop [i 0 prev 0]
+      (if (< i nt)
+        (let [[t _ sl sc el ec] (nth toks i)
+              a (max (cindex sl sc) prev)
+              z (if (and (#{lex/FSTRING_MIDDLE lex/TSTRING_MIDDLE} t) (< (inc i) nt))
+                  (let [[_ _ sl2 sc2] (nth toks (inc i))] (cindex sl2 sc2))
+                  (max (cindex el ec) a))]
+          (when (> a prev) (gap (sub s prev a)))
+          (.add out (nth token-kind t)) (.add out (qstr (sub s a z)))
+          (recur (inc i) (long z)))
+        (when (< prev n) (gap (sub s prev n)))))
+    (vecs out)))
+
+(defn- valid-utf8-len
+  "string_tokenizer's valid_utf8: the length of the sequence at i, or 0"
+  ^long [^bytes bs ^long i]
+  (let [n (alength bs) b (fn ^long [^long k] (if (< k n) (bit-and (aget bs k) 0xFF) 0)) c (b i)]
+    (cond
+      (< c 0x80) 1
+      (< c 0xE0) (if (< c 0xC2) 0 (if (and (>= (b (inc i)) 0x80) (< (b (inc i)) 0xC0)) 2 0))
+      (< c 0xF0) (cond (and (== c 0xE0) (< (b (inc i)) 0xA0)) 0
+                       (and (== c 0xED) (>= (b (inc i)) 0xA0)) 0
+                       :else (if (every? #(let [x (b (+ i %))] (and (>= x 0x80) (< x 0xC0))) [1 2]) 3 0))
+      (< c 0xF5) (if (if (< (b (inc i)) 0x90) (== c 0xF0) (== c 0xF4))
+                   0
+                   (if (every? #(let [x (b (+ i %))] (and (>= x 0x80) (< x 0xC0))) [1 2 3]) 4 0))
+      :else 0)))
+
+(defn- utf8-error
+  "_PyTokenizer_ensure_utf8 over the source's bytes (after its BOM), as decode_str runs it when no encoding is declared:
+  nil, or the error"
+  [^bytes bs ^long from]
+  (let [n (alength bs)]
+    (loop [i from line 1 ls from]
+      (cond
+        (or (>= i n) (zero? (aget bs i))) nil
+        :else
+        (let [len (valid-utf8-len bs i)]
+          (if (zero? len)
+            (let [le (loop [k i] (if (and (< k n) (not= (aget bs k) 10)) (recur (inc k)) k))
+                  prefix (String. bs (int ls) (int (- i ls)) "UTF-8")
+                  col (inc (.codePointCount prefix 0 (.length prefix)))
+                  text (String. bs (int ls) (int (- le ls)) "UTF-8")]
+              ["SyntaxError" (format "Non-UTF-8 code starting with '\\x%02x' on line %d, but no encoding declared; see https://peps.python.org/pep-0263/ for details"
+                                     (bit-and (aget bs i) 0xFF) line)
+               line col line col text])
+            (if (== (aget bs i) 10) (recur (inc i) (inc line) (inc i)) (recur (+ i len) line ls))))))))
+
 (defn read-dump
-  "A file's bytes as the helper's tree mode writes them (mode :lines): (python/module ...) or (python/error ...), and a
-  newline"
-  ^String [^bytes bs ^String rel]
-  (let [{:keys [error text]} (lex/decode-source bs)]
-    (if error
+  "A file's bytes as the helper's tree mode writes them (mode :lines, or :full when `full`): (python/module ...) or
+  (python/error ...), and a newline"
+  ^String [^bytes bs ^String rel & [full]]
+  (let [{:keys [error text encoding]} (lex/decode-source bs)]
+    (if-let [error (or error
+                       (when (= encoding "utf-8")
+                         (utf8-error bs (if (and (>= (alength bs) 3) (== (aget bs 0) (unchecked-byte 0xEF)) (== (aget bs 1) (unchecked-byte 0xBB))
+                                                 (== (aget bs 2) (unchecked-byte 0xBF))) 3 0))))]
       (str (error-text error) "\n")
       (try
         (let [tree (parse-text text false)
@@ -434,8 +502,12 @@
               extra (cond-> []
                       (= tc-tree :rejected) (conj [":type-comments" ":rejected"])
                       (and (map? tc-tree) (seq (:type_ignores tc-tree)))
-                      (conj [":type-ignores" (vecs (for [t (:type_ignores tc-tree)] (form "type-ignore" [(str (:lineno t)) (qstr (:tag t))] [] nil)))]))]
-          (str (module-text text tree (when (map? tc-tree) tc-tree) rel false extra) "\n"))
+                      (conj [":type-ignores" (vecs (for [t (:type_ignores tc-tree)] (form "type-ignore" [(str (:lineno t)) (qstr (:tag t))] [] nil)))])
+                      (and full (not= encoding "utf-8")) (conj [":encoding" (qstr encoding)])
+                      (and full (>= (alength bs) 3) (== (aget bs 0) (unchecked-byte 0xEF)) (== (aget bs 1) (unchecked-byte 0xBB))
+                           (== (aget bs 2) (unchecked-byte 0xBF))) (conj [":bom" "true"])
+                      full (conj [":tokens" (tokens-text text)]))]
+          (str (module-text text tree (when (map? tc-tree) tc-tree) rel (boolean full) extra) "\n"))
         (catch arbace.lang.ExceptionInfo e
           (if-let [pe (:python-error (ex-data e))]
             (str (error-text pe) "\n")

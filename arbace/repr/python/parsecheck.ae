@@ -51,6 +51,8 @@
           (let [x (get a i) y (get b i)]
             (if (= x y) (recur (inc i)) [(inc i) (or x "<none>") (or y "<none>")])))))))
 
+(def ^:dynamic *full* false)
+
 (defn- one-file
   "[rel status detail]: :equal, :differ [line ref mine], :crash message, :no-ref"
   [^String base ^String ref-dir ^String out rel]
@@ -58,13 +60,15 @@
     (if (not (.exists rf))
       [rel :no-ref nil]
       (let [ref (slurp rf)
-            mine (try (nv/read-dump (read-bytes (str base "/" rel)) rel)
+            mine (try (nv/read-dump (read-bytes (str base "/" rel)) rel *full*)
                       (catch Throwable e
                         (if-let [c (:class (ex-data e))] {:refused c :message (.getMessage e)} (str "!Crash\t" (.getMessage e)))))]
         (cond
           (map? mine) [rel :refused (:refused mine)]
           (= ref mine)
           [rel :equal nil]
+          (str/starts-with? ref "(python/error HelperError")
+          [rel :refused :helper-error]
           (and (str/starts-with? ref "(python/error") (str/starts-with? mine "(python/error"))
           [rel :refused :error-message]
           :else
@@ -77,11 +81,12 @@
 
 (defn- run-files [base ref-dir out rels jobs]
   (let [parts (partition-all (max 1 (long (Math/ceil (/ (count rels) (double jobs))))) rels)
-        fs (mapv (fn [part] (future (mapv #(one-file base ref-dir out %) part))) parts)]
+        full *full*
+        fs (mapv (fn [part] (future (binding [*full* full] (mapv #(one-file base ref-dir out %) part)))) parts)]
     (vec (mapcat deref fs))))
 
 (defn- read-known [^String f]
-  (if (.exists (File. f)) (read-string (slurp f)) {:classes {} :lex {}}))
+  (if (.exists (File. f)) (read-string (slurp f)) {:classes {} :lines {} :full {}}))
 
 (defn- write-known [^String f known]
   (let [k (fn [m] (into (sorted-map) m))]
@@ -92,21 +97,32 @@
                   ";; file of no class is printed and not written (the run exits 3). Read with the Clojure reader.\n"
                   "{:classes\n {"
                   (str/join "\n  " (for [[c v] (k (:classes known))] (str (pr-str c) "\n  " (pr-str (into (sorted-map) v)))))
-                  "}\n :lex\n {"
-                  (str/join "\n  " (for [[c files] (k (:lex known))]
-                                     (str (pr-str c) "\n  {"
-                                          (str/join "\n   " (for [[f v] (k files)] (str (pr-str f) " " (pr-str (into (sorted-map) v)))))
-                                          "}")))
-                  "}}\n"))))
+                  "}"
+                  (str/join (for [sec [:lines :full] :when (contains? known sec)]
+                              (str "\n " sec "\n {"
+                                   (str/join "\n  " (for [[c files] (k (get known sec))]
+                                                      (str (pr-str c) "\n  {"
+                                                           (str/join "\n   " (for [[f v] (k files)] (str (pr-str f) " " (pr-str (into (sorted-map) v)))))
+                                                           "}")))
+                                   "}")))
+                  "}\n"))))
 
 (def ^:private rule-classes
-  {:error-message
+  {:helper-error
+   {:what "the helper itself fails on the file (its tree --full: the token weave's Source splits lines at a lone CR, tokenize does not, so the text between two tokens is not white space): no reference to judge by"
+    :decided "the helper's, classed by rule (a mutant with a lone CR inserted); the native reader is not judged on such a file"}
+   :error-message
    {:what "CPython's ast.parse rejects the file and so does the native parser, but the message or position differs: the first pass's failure is reported as \"invalid syntax\" at the last token read, the second pass (the grammar's invalid_ rules) and pegen_errors.c's messages are not ported yet"
     :decided "PY9b's scope (the coordinator, queue 199: the parser equal to ast over the corpora without errors first; the errors PY9c's)"}
    :charset {:what "the file is in an encoding Arbace's runtime has no charset for (KOI8-R: Lib/test's module_koi8_r.py), so the lexer has no text to read: the decoder's refusal"
              :decided "by design (queue 176's DECISION (a), the user, 2026-11-03): jrt's charsets are the root/English set the locales decision of 2026-10-11 chose; classed by rule, as roundtrip --text's :charset"}})
 
+(declare do-check*)
 (defn- do-check [{:keys [opts]}]
+  (binding [*full* (boolean (get opts "--full"))]
+    (do-check* opts)))
+
+(defn- do-check* [opts]
   (let [corpus (keyword (get opts "--corpus"))
         base (get opts "--base") ref-dir (get opts "--ref") out (get opts "--out")
         known-file (get opts "--known")
@@ -116,7 +132,8 @@
         res (run-files base ref-dir out rels jobs)
         secs (/ (- (System/nanoTime) t0) 1e9)
         known (read-known known-file)
-        mine (get-in known [:lex corpus] {})
+        section (if *full* :full :lines)
+        mine (get-in known [section corpus] {})
         bad (filter #(not= :equal (second %)) res)
         freq (frequencies (map second res))]
     (spit-mk (str out "/files.tsv")
@@ -131,7 +148,7 @@
             unclassed (remove #(contains? new (first %)) bad)]
         (doseq [[r s d] unclassed] (println "NO CLASS" r (name s) (pr-str d)))
         (write-known known-file (-> known
-                                    (assoc-in [:lex corpus] new)
+                                    (assoc-in [section corpus] new)
                                     (update :classes #(merge (select-keys rule-classes (set (map :class (vals new)))) %))))
         (System/exit (if (seq unclassed) 3 0)))
       (let [problems (concat
@@ -212,8 +229,8 @@
         made (atom [])]
     (doseq [[i p] (map-indexed vector picked)
             j (range per)]
-      (let [{:keys [text error]} (lex/decode-source (read-bytes p))]
-        (when (and text (= "utf-8" (:encoding (lex/decode-source (read-bytes p)))))
+      (let [{:keys [text error encoding]} (try (lex/decode-source (read-bytes p)) (catch Throwable _ nil))]
+        (when (and text (= "utf-8" encoding))
           (when-let [m (mutate text rnd edits)]
             (let [nm (format "m%05d-%d.py" i j)]
               (spit-mk (str out "/src/" nm) m)
@@ -236,10 +253,21 @@
       (do (println "parse-check control: FAILED, a file's dump equals another's:" (pr-str (first passed))) (System/exit 1))
       (println (str "parse-check control: " (count pairs) " files each judged against another's dump, none equal")))))
 
+(defn- do-dump
+  "dump --base DIR --list FILE --out DIR [--full]: each file's native dump as OUT/REL.ae (bin/repr-python read --reader
+  native), and a TSV REL STATUS on stdout"
+  [{:keys [opts]}]
+  (let [base (get opts "--base") out (get opts "--out") full (boolean (get opts "--full"))]
+    (doseq [rel (remove str/blank? (str/split-lines (slurp (get opts "--list"))))]
+      (let [text (nv/read-dump (read-bytes (str base "/" rel)) rel full)]
+        (spit-mk (str out "/" rel ".ae") text)
+        (println (str rel "\t" (if (str/starts-with? text "(python/error") "error" "ok")))))))
+
 (defn -main [& args]
   (let [[verb & more] args pa (fn [wv] (parse-args more wv))]
     (case verb
       "check" (do-check (pa #{"--corpus" "--base" "--list" "--ref" "--out" "--known" "--jobs"}))
       "mutants" (do-mutants (pa #{"--out" "--seed" "--files" "--per" "--edits"}))
       "control" (do-control (pa #{"--base" "--list" "--ref"}))
+      "dump" (do-dump (pa #{"--base" "--list" "--out"}))
       (do (println "usage: -m arbace.repr.python.parsecheck check|mutants|control ...") (System/exit 2)))))

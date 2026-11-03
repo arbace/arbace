@@ -25,8 +25,10 @@
 #                                  reader on stage 0 (test/python/read_forms.ae)
 #   bin/repr-python samples        test/python/samples/: every file parsed (plain and with type comments) and
 #                                  compiled by the oracle, the samples together covering every node class of the ast
-#   bin/repr-python read [-o DIR] FILE...      PY2: each .py to Python forms in mode :lines (DIR/NAME.ae, default
-#                                  .tmp/repr-python/forms): tools/pydump/pydump.py's dump converted by arbace.repr.python
+#   bin/repr-python read [-o DIR] [--reader helper|native] FILE...
+#                                  PY2: each .py to Python forms in mode :lines (DIR/NAME.ae, default
+#                                  .tmp/repr-python/forms): tools/pydump/pydump.py's dump converted by arbace.repr.python;
+#                                  --reader native (PY9b; REPR_PYTHON_READER): the native reader's dump instead, no CPython
 #   bin/repr-python print [-o DIR] FORMS.ae... forms to Python text (DIR/NAME less .ae, default .tmp/repr-python/printed)
 #   bin/repr-python roundtrip [--record] [--jobs N] [CORPUS...]
 #                                  PY2's round trip (survey §5.2, levels 1-3) over corpora of test/python/corpora.edn
@@ -58,11 +60,12 @@
 #   bin/repr-python pegen [--check]  PY9b: arbace/repr/python/parser.ae generated from the tarball's Grammar/python.gram
 #                                  (arbace.repr.python.pegen, pegen's analyses and an Arbace back end; the actions
 #                                  translated from C over Parser/Python.asdl's fields), or generated again and compared
-#   bin/repr-python parse-check [--record] [--jobs N] [--mutants N|--no-mutants] [CORPUS...]
+#   bin/repr-python parse-check [--record] [--full] [--jobs N] [--mutants N|--no-mutants] [CORPUS...]
 #                                  PY9b: the native reader (arbace.repr.python.native: the generated parser, the tree
 #                                  written as the helper's dump) against tools/pydump/pydump.py tree (ast.parse) over the
 #                                  corpora as lex-check's, then the mutants, the dumps byte for byte equal or known
-#                                  (test/python/parse-check-known.edn). Work in .tmp/repr-python/parse/CORPUS/
+#                                  (test/python/parse-check-known.edn). --full: mode :full (every node's position, the
+#                                  tokens) against pydump.py tree --full. Work in .tmp/repr-python/parse{,-full}/CORPUS/
 #   bin/repr-python check          spec-check, samples, then the round trips (:lines, then --text) over the default corpora
 # Environment: REPR_PYTHON_CORPORA, REPR_PYTHON_PIN_VERSION, REPR_PYTHON_APKS, REPR_PYTHON_SPEC name other copies of
 # test/python/corpora.edn, tools/pydump/PYTHON_VERSION, tools/pydump/apks.sha256, doc/python/SPEC.md (negative controls).
@@ -395,12 +398,23 @@ cmd_roundtrip() {
 }
 
 cmd_read() {
-  local out="$WORK/forms" tmp="$WORK/read" f
-  if [ "${1:-}" = "-o" ]; then out=$2; shift 2; fi
+  local out="$WORK/forms" tmp="$WORK/read" f reader=${REPR_PYTHON_READER:-helper}
+  while [ $# -gt 0 ]; do
+    case $1 in
+      -o) out=$2; shift 2 ;;
+      --reader) reader=$2; shift 2 ;;
+      *) break ;;
+    esac
+  done
   rm -rf "$tmp"; mkdir -p "$tmp/src"
   for f in "$@"; do cp "$f" "$tmp/src/$(basename "$f")"; done
   (cd "$tmp/src" && ls) > "$tmp/list"
-  py pydump.py tree --base "$tmp/src" --list "$tmp/list" --out "$tmp/dumps" --tsv "$tmp/dumps.tsv"
+  case $reader in
+    helper) py pydump.py tree --base "$tmp/src" --list "$tmp/list" --out "$tmp/dumps" --tsv "$tmp/dumps.tsv" ;;
+    # PY9b: the native reader (no CPython): the generated parser's dumps, the helper's text
+    native) parsecheck dump --base "$tmp/src" --list "$tmp/list" --out "$tmp/dumps" > "$tmp/dumps.tsv" ;;
+    *) die "read: --reader helper|native" ;;
+  esac
   py_arbace convert --dumps "$tmp/dumps" --forms "$out" --printed "$tmp/printed" --tsv "$tmp/convert.tsv"
   awk -F'\t' '$2 != "ok" { print "  " $1 ": " $2 }' "$tmp/convert.tsv"
 }
@@ -511,18 +525,19 @@ cmd_pegen() {
 parse_one() { # ID BASE LIST
   local id=$1 base=$2 list=$3 d="$PARSE/$1" rc=0
   rm -rf "$d/ref" "$d/out"; mkdir -p "$d"
-  dump_parallel "$base" "$list" "$d/ref" "$d/ref.tsv"
+  FULL=$PFULL dump_parallel "$base" "$list" "$d/ref" "$d/ref.tsv"
   parsecheck check --corpus "$id" --base "$base" --list "$list" --ref "$d/ref" --out "$d/out" --known "$PARSE_KNOWN" \
-    --jobs "$JOBS" ${record:+--record} || rc=$?
+    --jobs "$JOBS" ${record:+--record} ${PFULL:+--full} || rc=$?
   return $rc
 }
 
 cmd_parse_check() {
   local record="" ids=() nmut=2000 worst=0 rc id
-  JOBS=3
+  JOBS=3; PFULL=
   while [ $# -gt 0 ]; do
     case $1 in
       --record) record=1; shift ;;
+      --full) PFULL=1; PARSE="$WORK/parse-full"; shift ;;
       --jobs) JOBS=$2; shift 2 ;;
       --mutants) nmut=$2; shift 2 ;;
       --no-mutants) nmut=0; shift ;;
@@ -572,7 +587,7 @@ case "${1:-}" in
       --fetch) cmd_fetch ;;
       --count) cmd_count ;;
       --check) cmd_check ;;
-      *) sed -n '2,69p' "$0"; exit 2 ;;
+      *) sed -n '2,72p' "$0"; exit 2 ;;
     esac ;;
   spec-check) cmd_spec_check ;;
   samples) cmd_samples ;;
@@ -583,5 +598,5 @@ case "${1:-}" in
   parse-check) shift; cmd_parse_check "$@" ;;
   pegen) shift; load_rows; cmd_pegen "$@" ;;
   check) cmd_check_all ;;
-  *) sed -n '2,69p' "$0"; exit 2 ;;
+  *) sed -n '2,72p' "$0"; exit 2 ;;
 esac
