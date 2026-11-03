@@ -382,15 +382,23 @@ run_one() {  # run_one NAME: a step of the plan, as decided (once: a build of th
 # is noted as NAME.PART.whole.runs, its list the universe: a run of every slice. In the clean run the clone's store
 # gets them, and bin/gate's clean_launch appends its runs to the shared store's. Never for an unrotated check
 rotation_note() {
-  local n=$1 r=$logs/rotation/$1.rot rd part slice ls re now rn
-  [ -f "$r" ] || return 0
-  rd=$store/_rotation; mkdir -p "$rd" || return 0
+  local rd=$store/_rotation
+  [ -f "$logs/rotation/$1.rot" ] || return 0
+  mkdir -p "$rd" || return 0
+  # review 181: under the store's lock (L1: two gates' notes lose no failed file), each run numbered by the store's
+  # sequence (finding 2: the run noted last is the later one, whatever the clock's second)
+  { flock 9 && rotation_note_locked "$@"; } 9>>"$rd/.lock"
+  return 0
+}
+rotation_note_locked() {
+  local n=$1 r=$logs/rotation/$1.rot rd=$store/_rotation part slice ls re now rn sq
   part=$(awk -F'\t' '$1 == "part" {print $2}' "$r") slice=$(awk -F'\t' '$1 == "slice" {print $2}' "$r")
   ls=$(awk -F'\t' '$1 == "list-sha" {print $2}' "$r") re=$(awk -F'\t' '$1 == "failed-re" {print $2}' "$r")
   rn=$(awk -F'\t' '$1 == "runs" {print $2}' "$r"); rn=${rn:-$n}
   now=$(date +%s)
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$now" "$(date -u -d "@$now" +%Y-%m-%dT%H:%M:%SZ)" "$2" "${key[$n]:--}" "$ls" \
-    "${commit:-unknown}" "$root" >> "$rd/$rn.runs"
+  sq=$(( $(cat "$rd/.seq" 2>"$logs/$n.rot.err" || echo 0) + 1 )); echo "$sq" > "$rd/.seq"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$now" "$(date -u -d "@$now" +%Y-%m-%dT%H:%M:%SZ)" "$2" "${key[$n]:--}" "$ls" \
+    "${commit:-unknown}" "$root" "$sq" >> "$rd/$rn.runs"
   if [ "$2" = fail ] && [ -n "$re" ] && [ -f "$logs/$n.log" ]; then
     sed -nE "s"$'\001'"$re"$'\001''\1'$'\001''p' "$logs/$n.log" | grep -Fxf "$logs/rotation/$n.list" \
       | cat - "$rd/$part.failed" 2>"$logs/$n.rot.err" | LC_ALL=C sort -u > "$rd/.$part.failed.$$" \

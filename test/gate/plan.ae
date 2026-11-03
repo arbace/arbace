@@ -379,15 +379,21 @@
 (defn- lines-of [^String f]
   (let [x (File. f)] (if (.isFile x) (vec (remove str/blank? (str/split-lines (slurp f)))) [])))
 
+(def run-order
+  "the order of the runs (review 181, finding 2): the store's sequence number (STORE/_rotation/.seq, taken under
+  its lock by the runner: the run noted last is the later), then the time"
+  (juxt :seq :epoch))
+
 (defn runs-of
   "a rotated check's runs, STORE/_rotation/NAME.runs (the runner's lines EPOCH DATE STATUS KEY LIST-SHA COMMIT
-  WORKTREE), the latest last"
+  WORKTREE SEQ), the latest last"
   [store nm]
-  (sort-by :epoch
+  (sort-by run-order
            (for [l (lines-of (str (rot-dir store) "/" nm ".runs"))
-                 :let [[e d st k ls c w] (str/split l #"\t")]
+                 :let [[e d st k ls c w sq] (str/split l #"\t")]
                  :when (re-matches #"[0-9]+" (str e))]
-             {:epoch (Long/parseLong e) :date d :status st :key k :list-sha ls :commit c :worktree w})))
+             {:epoch (Long/parseLong e) :date d :status st :key k :list-sha ls :commit c :worktree w
+              :seq (if (re-matches #"[0-9]+" (str sq)) (Long/parseLong sq) 0)})))
 
 (defn rotation-lists
   "a rotated part's lists, or nil when it is not rotated: {:universe :subset (the declared one, plus the files
@@ -423,8 +429,7 @@
   [store nm slices night]
   (->> (for [[k ids] slices :when (seq ids)
              ;; a whole part's run (NAME.PART.whole) is a run of every slice (whatever its list)
-             :let [r (last (sort-by (juxt :epoch :whole) (concat (map #(assoc % :whole 1) (runs-of store (str nm ".s" k)))
-                                                           (map #(assoc % :whole 0) (runs-of store (str nm ".whole"))))))]]
+             :let [r (last (sort-by run-order (concat (runs-of store (str nm ".s" k)) (runs-of store (str nm ".whole")))))]]
          [[(if (= "fail" (:status r)) 0 1) (if r (:epoch r) -1) (mod (- k night) period)] k])
        sort first second))
 
@@ -654,13 +659,12 @@
       (doseq [[s {:keys [universe subset failed slices]}] parts]
         (let [nm (str (:name s))
               usha (list-sha (sort universe))
-              wholes (map #(assoc % :whole 0) (filter #(= usha (:list-sha %)) (runs-of store (str nm ".whole"))))
+              wholes (filter #(= usha (:list-sha %)) (runs-of store (str nm ".whole")))
               st (for [[k ids] slices :when (seq ids)]
                    ;; a slice's runs with its current list, and the whole part's runs with the current universe (every
                    ;; current list is in it, however the subset and the failed files split it since)
                    (let [ls (list-sha ids)
-                         r (last (sort-by (juxt :epoch :whole) ; in the same second the slice's own run is the later
-                                          (concat (map #(assoc % :whole 1) (filter #(= ls (:list-sha %)) (runs-of store (str nm ".s" k)))) wholes)))
+                         r (last (sort-by run-order (concat (filter #(= ls (:list-sha %)) (runs-of store (str nm ".s" k))) wholes)))
                          ok (and r (#{"pass" "skip"} (:status r)) (>= (:epoch r) since))]
                      [k (count ids) r ok]))
               incomplete (remove #(nth % 3) st)]

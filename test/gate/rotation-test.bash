@@ -16,6 +16,11 @@ n=0 bad=0
 ok() { n=$((n + 1)); echo "ok   $*"; }
 no() { n=$((n + 1)); bad=$((bad + 1)); echo "FAIL $*"; }
 root=$here; . "$here/bin/lib/tools.bash"
+# review 181, finding 2: every note in one second (date +%s frozen, as a fast run's notes are): the order of the
+# runs is the store's sequence, never the clock's second
+realdate=$(command -v date); mkdir -p "$t/shim"
+printf '#!/bin/sh\nif [ "$1" = "+%%s" ]; then echo 1793000000; else exec %s "$@"; fi\n' "$realdate" > "$t/shim/date"; chmod +x "$t/shim/date"
+PATH=$t/shim:$PATH
 
 # the made-up tree: a record of 40 programs of corpus toy (and 3 of another), its corpora file with a :subset of 4
 r=$t/root; mkdir -p "$r/test" "$r/bin"
