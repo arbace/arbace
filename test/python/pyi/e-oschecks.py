@@ -24,3 +24,4 @@ print(_stat.filemode(0o140755), _stat.filemode(0o104755), _stat.S_ISDIR(0o040000
 d = os.path.join(os.environ.get('TMPDIR', '.'), 'e-oschecks-%d' % os.getpid()); os.mkdir(d); old = os.getcwd(); os.chdir(d)
 s = socket.socket(socket.AF_UNIX); s.bind('@sock'); print(s.getsockname(), stat.S_ISSOCK(os.stat('@sock').st_mode)); s.close()
 os.unlink('@sock'); os.chdir(old); os.rmdir(d)
+print([err(f, 0) for f in (os.read, os.readinto, os.write, os.lseek, os.kill, os.pread)], err(os.close), err(os.umask))
