@@ -62,5 +62,30 @@ Result.subfailed = set()
 
 loader = unittest.TestLoader()
 suite = loader.loadTestsFromModule(mod)  # the module's load_tests with the standard tests, as regrtest
+
+# PYI_LIB_TEST_SKIP names a file of "ID<TAB>REASON" lines: tests that would hang pyi's run (a blocking wait on what
+# pyi cannot do yet, as os.fork's child), not run: each an error naming the reason, which the known file classes
+import os
+skip = {}
+if os.environ.get("PYI_LIB_TEST_SKIP"):
+    with open(os.environ["PYI_LIB_TEST_SKIP"], encoding="utf-8") as f:
+        for l in f:
+            if l.strip() and not l.startswith("#"):
+                tid, _, why = l.rstrip("\n").partition("\t")
+                skip[tid] = why
+
+
+def mark(s):
+    for t in s:
+        if isinstance(t, unittest.TestSuite):
+            mark(t)
+        elif t.id() in skip:
+            def not_run(why=skip[t.id()]):
+                raise RuntimeError("pyi: not run, the runner's skip list: " + why)
+            setattr(t, t._testMethodName, not_run)
+
+
+if skip:
+    mark(suite)
 suite.run(Result())
 line("DONE")
