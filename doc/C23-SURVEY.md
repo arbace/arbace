@@ -4677,15 +4677,20 @@ forms' names). What is left of the C++ build is the link itself (the node progra
   1.5-7 MB: the placeholders' replacement and the text): next, a fragment's replacement table per item instead of a regex, and cf2g
   translating a unit's functions once.
 
+### Decided (the user, 2026-11-03): CS270-CS273, all as recommended
+
+- **CS270 (a)**: the prebuilt runtime is ci's default (as built); the full check with `CI_LINK_CHECK=1` in the next heavy window.
+- **CS271 (a)**: the gate's `c-check-essential` runs with `CI_LINK_CHECK=1` (`test/gate/steps.edn`).
+- **CS272 (a)**: `bin/ci runtime build` and `bin/ci runtime prune` remove musl's fragments of the other keys; `bin/gate --prune`
+  (`bin/lib/gate-run.bash`'s `gate_prune`, also at the end of every `--full`) trims the checkout's `.tmp/ci-runtime/` as the
+  executables' directories: per library the newest 3 directories kept, an older one removed when a day old.
+- **CS273 (a)**: the C++ adaptation (`ci-prebuilt-cpp`'s `build-linked-prebuilt`) goes to CX8's line, not this branch.
+
 ### PB.5 Open
 
-- `bin/ci judge-test` fails 21 assertions on `backlog` already (the gate runs it without `ARBACE_PATH_FIRST`, so on the seed's
-  embedded ci, which predates the tests): not this branch's; the gate's `c-judge-test` would fail on `backlog` until the env is set
-  or the re-seed.
+- `bin/ci judge-test` without `ARBACE_PATH_FIRST` failed 21 assertions on `backlog` already (the seed's embedded ci); the gate's
+  `c-judge-test` runs it with the env trio (main since `f9c7e7cd`'s line), as PB.6 does.
 - The full `bin/ci check` and `check --aot` with `CI_LINK_CHECK=1` (all 15 corpora) not run: the heavy tier's.
-- Commits on `ci-prebuilt`: the builder's fragments and link; the runtime cache and its callers; this section. The Mac's
-  `mac/178-ci-gaps` conflicts in `arbace/c/build.ae` at three small places (its `obj-align` where the fragment's object
-  size and `global-obj-idx` call `align-of`; its `compound-lit-object` where this branch's `add-init!` replaces the `.add` to
-  `:inits`; build-program's phase 1, now `build-program-direct` and `unit-fragment`'s `:align`), and in the Makefile's `.PHONY`
-  line: a rebase applies `obj-align` in `unit-fragment`, `obj-size` (given the entry) and `build-program-direct`. Its
-  `test/c/check-known.edn` conflict is with `backlog`, not this branch.
+- Commits on `ci-prebuilt`: the builder's fragments and link; the runtime cache and its callers; this section. Rebased onto
+  main `f9c7e7cd` (with `mac/178-ci-gaps`): its `obj-align` taken in the fragments (`obj-size` takes the entry, `unit-fragment`'s
+  `:align`) and its `compound-lit-object` with `add-init!`; the Makefile's `.PHONY` line merged.
