@@ -152,4 +152,52 @@ test_essential_aot() {
 }
 t essential-aot-held-to-the-record test_essential_aot
 
+# GT8.7: check --list FILE: a selection by ids (missing_rows, controls_judged, check_divergences, divergences --partial)
+test_list_selection() {
+  load missing_rows controls_judged check_divergences || return 1
+  local T=$'\t' ref=$tmp/l.edn lst=$tmp/l.txt ids=$tmp/l.ids res=$tmp/l.tsv
+  printf '[\n ["a.go" :pass ""]\n ["b/c.go" :pass ""]\n ["d.go" :pass ""]\n]\n' > "$ref"
+  printf 'a.go\nb/c.go\n' > "$lst"
+  # the results lack b/c.go (no result), and d.go (in the reference, not listed) is no "missing" line
+  printf 'a.go\tpass\t\n' > "$res"
+  [ "$(missing_rows "$lst" "$res" "$ref" "" "$lst")" = "   no result: b/c.go (its job printed no row)" ] || return 1
+  # a listed id of the reference the run's list lacks is missing; one unlisted is not
+  printf 'a.go\n' > "$ids"; printf 'a.go\tpass\t\n' > "$res"
+  [ "$(missing_rows "$ids" "$res" "$ref" "" "$lst" | cut -c1-33)" = "   missing: b/c.go (recorded pass" ] || return 1
+  # controls: a subject outside the list is left, inside it judged
+  local root=$tmp/cr only="" listf=""
+  mkdir -p "$root/test/goi"
+  printf 'interp _control/x-vs-y x.go y.go\n' > "$root/test/goi/controls.txt"
+  printf '_control/x-vs-y\tfail\tr\n' > "$res"
+  controls_judged interp "$res" | grep -q 'fail, as a control must' || return 1
+  : > "$res"
+  controls_judged interp "$res" > /dev/null && return 1
+  listf=$lst
+  controls_judged interp "$res" | grep -q 'left, its subject x.go not in this run' || return 1
+  # check_divergences: a list run (6th argument) judges its results alone, --partial
+  local calls=$tmp/calls
+  arbace_tool() { echo "$*" >> "$calls"; }
+  : > "$calls"; check_divergences "" "" "" "" /res "$lst"
+  [ "$(cat "$calls")" = "-p $root/test -m goi.divergences --partial --results /res" ] || { cat "$calls" >&2; return 1; }
+  : > "$calls"; check_divergences 1 "" "" "" /res "$lst"
+  [ "$(cat "$calls")" = "-p $root/test -m goi.divergences --aot --partial --results /res" ] || return 1
+  : > "$calls"; check_divergences 1 "" x "" /res "$lst"
+  [ ! -s "$calls" ]
+}
+t list-selects-by-ids test_list_selection
+
+# GT8.7: divergences --partial judges a selection's results (no box records, no essential subset) and names the failing programs
+test_divergences_partial() {
+  local r=$tmp/dp out st
+  mkdir -p "$r/test/goi"
+  printf '[{:id :k :title "known" :kind :design :why "w" :decided "d" :match [#"^known "]}]\n' > "$r/test/goi/divergences.edn"
+  printf '[["a.go" :pass ""]]\n' > "$r/test/goi/check-linux-amd64.edn"
+  printf 'a.go\n' > "$r/test/goi/essential.txt"
+  printf 'a.go\tpass\t\nb.go\tknown\tknown x\nc.go\tfail\tstatus 1\nd.go\tunsupported\tother\n' > "$tmp/dp.tsv"
+  out=$(GOI_ROOT=$r ARBACE_PATH=$here:$here/test "$host" -m goi.divergences --partial --results "$tmp/dp.tsv") && st=0 || st=$?
+  [ "$st" = 1 ] && [ "$(printf '%s\n' "$out" | sed -nE 's/^   failing: (.+)$/\1/p' | paste -sd,)" = c.go,d.go ] \
+    || { echo "$out" >&2; return 1; }
+}
+t divergences-partial-names-failing test_divergences_partial
+
 exit $failed
