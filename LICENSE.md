@@ -302,6 +302,11 @@ covers what.
   1995-2026 Jean-loup Gailly and Mark Adler, and the Arbace authors for the ports, under the zlib
   License (section "zlib: zlib License" below); their public APIs follow jdk26u's documented
   `java.util.zip.Deflater` and `Inflater`.
+- `go/arbace/py/zlib_zutil.ae`, `zlib_deflate.ae`, `zlib_trees.ae`, `zlib_inflate.ae` (queue 200, PY6d: pyi's module
+  `zlib`): zlib 1.3.2's deflate and inflate ported to Go from the two Java ports above and, for the paths they leave
+  out (deflate_rle, Z_FIXED, the gzip wrapper, inflate's gzip header), zlib's C (deflate.c, trees.c, inflate.c,
+  inftrees.c): Copyright (C) 1995-2026 Jean-loup Gailly and Mark Adler, and the Arbace authors for the port, under the
+  zlib License (section "zlib: zlib License" below).
 - `overlay/jdk/`: jrt's own Java sources and Go-build variants of JDK classes (doc/go/JRT-NOTES.md,
   "Phase 2C"; `overlay/jdk/javac/`, those of javac's tool build, doc/classes/JAVA-FRONTEND-SURVEY.md,
   JN2), written for Arbace in place of jdk26u's files of the same names (from their
