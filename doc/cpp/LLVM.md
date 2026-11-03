@@ -301,5 +301,12 @@ lowering alone (`bin/cppi lower-check`, §9). `arbace.cpp.run` (`arbace/cpp/run.
 - **eval**: the node program run by `tools/cirun` (`bin/cppi run`, `bin/cppi check`); **AOT**: the node program translated by
   cf2g (`arbace.c.cf2g/translate`, about 4 MB of Go a program, the runtime's part included) and built by TamaGo's go in shards
   (`bin/cppi check --aot`).
+- **va_arg.** A va_list passed on (to `vsnprintf`, `va_copy`, a lowered forwarder) works: the lowering passes the va_list itself
+  (§7). A lowered function that reads its va_list does it as clang writes va_arg for x86-64 at `-O0`, inline, by the
+  `__va_list_tag`'s fields, which ci's own va_list does not have: it faults on ci. The build's flags name such functions (their IR
+  GEPs into `%struct.__va_list_tag`) and the judge classes a fault in one (`va-arg`, a gap, the user's decision of queue 191: ci's
+  x86-64 va_list with C++'s next round). libstdc++'s one such function, `__snprintf_lite`, has a C override for ci
+  (`test/cpp/runtime/ci/`, a library linked before the runtime).
 - `long double` (`x86_fp80`) is 8 bytes in ci (CS35) while the lowering's structs carry the IR's 16-byte layout in their static
-  assertions: a program whose types hold one fails ci's check (the class `long-double`).
+  assertions: a program whose types hold one fails ci's check (the class `long-double`, only those static assertions and C's
+  two differ shapes of a long double computation).
