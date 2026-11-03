@@ -277,8 +277,36 @@ a small module (`test/python/pyi/`); what it leaves out raises `SystemError: pyi
     `PYTHONHASHSEED=0`, the references'), tuples by xxHash's rounds, frozensets by CPython's shuffle, `None`'s
     constant; `set`'s table is CPython's (probes, perturbation, dummies, growth), so a set's iteration order is
     CPython's for the same hashes.
-- **Slots added by PY5b** (2026-11-03): `Abs`, `Divmod`, `RDivmod` (number protocol) and `Format` (`__format__`, for
-  PY5c to fill).
+- **Slots added by PY5b** (2026-11-03): `Abs`, `Divmod`, `RDivmod`, `Pow3` (pow with a modulus; `Pow3(a, b, m)`), and
+  `Format` (`__format__`, for PY5c to fill).
+- **Hooks for the other sub-milestones** (PY5b, 2026-11-03, their REQUESTs):
+  - `BuiltinValueHook` (PY5c sets it to `BuiltinValue`): every core accessor (`asInt`, `AsStr`, `asException`, ...)
+    tries it, so an instance of a class deriving from a built-in type is accepted where its base is. The core types'
+    `New` called with a subclass makes the base value through `newIntSubclass`, `newStrSubclass`, ... (by default the
+    plain base value, for PY5c to wrap or to replace).
+  - `BoundMethodHook` (PY5c): a bound method of a Python function, called by `call` or `call-ex`, pushes the
+    function's frame with the instance first (no nested run).
+  - `newGeneratorHook` (PY5d): a call of a function whose code is `:generator` or `:coroutine` makes its generator,
+    coroutine or async generator object of the bound frame instead of running it (CPython's `RETURN_GENERATOR`), in
+    `call`, `call-ex` and `callFunction`.
+  - `OnTypesReady(f)`: `f` runs once every type's slots are set and inherited, before the first interpreter.
+    (`Dict` hashes a `*Str` key directly, not through `str`'s slot, so an `init` may fill a dictionary in any order.)
+  - `ComputeMRO(t, bases)` (C3); a built-in type made with several `Bases` preset gets their C3 MRO (ExceptionGroup's).
+  - `Raised.Reraise`: a bare `raise` and the IR's `reraise` add no traceback entry for their own frame.
+  - `Exception.Ext`: a subtype's own data (an exception group's); `Exception.Field(name)` its fields (StopIteration's
+    `value`, OSError's `errno`, SyntaxError's `lineno` ...).
+  - `CodeIterableCoroutine` (`CO_ITERABLE_COROUTINE`, set at run time).
+  - `for-iter` ends on a raised `StopIteration` as on `(nil, nil)`.
+  - Traceback objects (`tb_frame`, `tb_lineno`, `tb_lasti`, `tb_next`) and frame objects (`f_code`, `f_lineno`,
+    `f_lasti`, `f_globals`, `f_builtins`, `f_back`, `f_locals`: `FrameLocals`); functions' and code objects'
+    attributes; `Code.Filename` (`co_filename`, `SetFilename`), which tracebacks print.
+  - `FormatExceptionOnly(e)`: traceback.format_exception_only's text (a SyntaxError's location and caret, the notes);
+    `PrintException` prints the chain (`__cause__`, `__context__`), each frame's source line.
+  - `SortObjects(items, keys, reverse)` and `SortList(l, key, reverse)`: the one stable sort.
+  - The compiler's modes (`arbace.python.compile/compile-source`: `:exec`, `:eval`, `:single`); in `:single` an
+    expression statement's value goes to the new IR operation `print-expr` (`sys.displayhook`: PY5e's to implement);
+    a compile-time SyntaxError carries `:lineno`, `:offset`, `:end-lineno`, `:end-offset` from the forms of mode
+    `:full`.
 
 ### 7.2 The IR loader (`load.go`, `code.go`, `ops.go`)
 

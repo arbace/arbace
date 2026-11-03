@@ -11,7 +11,19 @@
             [arbace.repr.python.print :as pp]
             [arbace.string :as str]))
 
-(defn- syntax-error [msg] (throw (ex-info msg {:class 'SyntaxError :msg msg})))
+(def ^:dynamic *pos*
+  "The :pos of the innermost statement or expression being compiled (mode :full's forms), for a SyntaxError's location"
+  nil)
+
+(def ^:dynamic *mode* "The compile mode: :exec, :eval or :single (compile-source)" :exec)
+
+(defn- syntax-error
+  "A SyntaxError with CPython's message, located at *pos* when known: :lineno, :offset (1-based), :end-lineno,
+  :end-offset, as CPython's SyntaxError fields"
+  [msg]
+  (throw (ex-info msg (merge {:class 'SyntaxError :msg msg}
+                             (when-let [[l c el ec] *pos*]
+                               {:lineno l :offset (inc c) :end-lineno el :end-offset (inc ec)})))))
 (defn- node [x] (pp/node x))
 (defn- ident [x] (if (string? x) x (str x)))
 (def ^:private constant-symbols '#{None True False ...})
@@ -520,7 +532,16 @@
 
 (declare annotations-fn! lambda! comprehension! pattern-case! match-stmt!)
 
+(defn- pos-of [x] (when (and (seq? x) (map? (last x))) (:pos (last x))))
+
+(declare expr*!)
+
 (defn- expr! [u x]
+  (if-let [p (pos-of x)]
+    (binding [*pos* p] (expr*! u x))
+    (expr*! u x)))
+
+(defn- expr*! [u x]
   (cond
     (symbol? x) (case x None (load-const! u nil) True (load-const! u true) False (load-const! u false)
                   ... (load-const! u :ellipsis) (name-op! u (str x) :load))
@@ -1342,11 +1363,20 @@
 
 (defn- line-of [x] (when (and (seq? x) (map? (last x))) (first (:pos (last x)))))
 
+(declare stmt*!)
+
 (defn stmt! [u x]
+  (if-let [p (pos-of x)]
+    (binding [*pos* p] (stmt*! u x))
+    (stmt*! u x)))
+
+(defn- stmt*! [u x]
   (let [[h p o _] (node x)]
     (when-let [l (line-of x)] (swap! u assoc :line l))
     (case h
-      expr (do (expr! u (first p)) (emit! u :pop nil))
+      ;; mode :single: an expression statement's value displayed (CPython's CALL_INTRINSIC_1 INTRINSIC_PRINT:
+      ;; sys.displayhook), the IR's print-expr
+      expr (do (expr! u (first p)) (emit! u (if (and (= *mode* :single) (= :module (:kind @u))) :print-expr :pop) nil))
       assign (let [[ts v] p]
                (expr! u v)
                (doseq [t (butlast ts)] (emit! u :copy 1) (store-target! u t))
@@ -1466,15 +1496,31 @@
   any sub-pattern (codegen's pc->allow_irrefutable)"
   true)
 
+(defn- strip-meta
+  "A form without its trailing metadata maps (mode :full's :pos), recursively"
+  [x]
+  (cond (seq? x) (let [xs (if (map? (last x)) (butlast x) x)] (apply list (map strip-meta xs)))
+        (vector? x) (mapv strip-meta x)
+        :else x))
+
 (defn- key-value
-  "A mapping pattern's literal key as Python's equality sees it ([normalised repr]), or nil for an attribute lookup"
-  [k]
-  (cond (integer? k) [k (str k)]
-        (string? k) [[:str k] (pp/expr k 0)]
-        (= 'True k) [1 "True"] (= 'False k) [0 "False"] (= 'None k) [[:none] "None"]
-        (and (seq? k) (= 'unary-op (first k)) (= '- (second k)) (integer? (nth k 2 nil))) [(- (nth k 2)) (str (- (nth k 2)))]
-        (and (seq? k) (= 'attribute (first k))) nil
-        :else [[:form k] (pp/expr k 0)]))
+  "A mapping pattern's literal key as Python's equality sees it ([normalised repr]), or nil for an attribute lookup;
+  the short and the long (mode :full) spellings alike"
+  [k0]
+  (let [k (strip-meta k0)
+        h (when (seq? k) (first k))]
+    (cond (integer? k) [k (str k)]
+          (string? k) [[:str k] (pp/expr k 0)]
+          (= 'True k) [1 "True"] (= 'False k) [0 "False"] (= 'None k) [[:none] "None"]
+          (= 'int h) (let [v (digits->int (second k))] [v (str v)])
+          (and (= 'const h) (not (seq? (second k)))) (key-value (second k))
+          (and (= 'name h) (#{"True" "False" "None"} (str (second k)))) (key-value (symbol (str (second k))))
+          (and (= 'unary-op h) (= '- (second k)))
+          (let [[v r] (key-value (nth k 2 nil))]
+            (if (integer? v) [(- v) (str (- v))] [[:form k] (pp/expr k 0)]))
+          (= 'attribute h) nil
+          (#{'str 'bytes} h) (let [v (string-token-value k)] [[:str v] (pp/expr k 0)])
+          :else [[:form k] (pp/expr k 0)])))
 
 (defn- pattern!
   "Matches the subject on the top: on success the subject is popped and the names bound; on failure the jumps in
@@ -1593,9 +1639,34 @@
      :locals (:locals m) :cells (:cells m) :frees (:frees m) :names (:names m) :consts (:consts m)
      :docstring (:docstring m) :code (:code m) :handlers (handler-table (:hs-of m)) :lines (:lines m)}))
 
+(declare compile-module*)
+
 (defn compile-module
-  "A module's forms to its code object; SyntaxError as ex-info {:class SyntaxError :msg ...}"
+  "A module's forms to its code object; SyntaxError as ex-info {:class SyntaxError :msg ... :lineno ...}"
   [module]
+  (binding [*mode* :exec] (compile-module* module)))
+
+(defn compile-source
+  "compile()'s modes over a module's forms: :exec the module; :eval a module of one expression statement, its value
+  returned (an expression's code object); :single the statements with each expression statement's value displayed
+  (print-expr, the REPL's)"
+  [module mode]
+  (case mode
+    :exec (compile-module module)
+    :single (binding [*mode* :single] (compile-module* module))
+    :eval (let [body (second module)
+                [h p _ _] (when (= 1 (count body)) (node (first body)))]
+            (when-not (= h 'expr) (syntax-error "invalid syntax"))
+            (let [t (sc/analyze module)]
+              (binding [*mode* :eval
+                        *table* (assoc t :future-annotations (contains? (:features t) "annotations"))]
+                (let [u (new-unit (:top t) :module "<module>" "<module>" nil)]
+                  (when-let [l (line-of (first body))] (swap! u assoc :line l))
+                  (expr! u (first p))
+                  (emit! u :return nil)
+                  (code-of u)))))))
+
+(defn- compile-module* [module]
   (let [t (sc/analyze module)
         body (second module)]
     (binding [*table* (assoc t :future-annotations (contains? (:features t) "annotations"))]
