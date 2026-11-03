@@ -747,3 +747,123 @@ with `ARBACE_HOST_EXE` the main checkout's stage 0). Each probe took seconds; th
 ## Decided (2026-11-03, the user): HES1-HES21
 
 All as recommended. The trial HE1-HE3 starts now, by an agent on the main host, beside GT8 (light work by day).
+
+## As built: HE1-HE3 (write-ahead)
+
+Built 2026-11-03 on branch `haskell-he1` from main `c545ede1`, on the host's GHC 9.14.1 and the main checkout's stage 0.
+Write-ahead: the whole boot-library dump and the whole testsuite reference are night runs (below), not yet run; the
+numbers here are those of the runs made by day.
+
+### HE1: the spec and the pins
+
+- **`doc/haskell/STG-SPEC.md`**: STG forms for every constructor of the 23 declarations GHC 9.14.1's final STG is made
+  of (`GHC.Stg.Syntax`, `AltCon`, `Literal`, `LitNumType`, `PrimRep`, `PrimElemRep`, `Levity`, `CCallTarget`,
+  `CCallConv`, `Safety`, `GenTickish`, `StrictnessMark`, ...: 89 constructors), names (§3: strings, external
+  `"UNIT:MODULE/OCC"`, internal `"OCC_N"` numbered per module), representations (§4), literals (§5), data
+  constructors (§8), Core forms (§9), choices STG-S1-STG-S13. `bin/hsi spec-check` extracts the constructors from the
+  pinned source tarball and requires each in the checklist (a spec with one renamed fails: its negative control).
+- **Pins** (`test/haskell/eval-corpora.edn`, `bin/hsi pins --fetch|--count|--check`): the testsuite tarball
+  `ghc-9.14.1-testsuite.tar.xz` (8,154,160 bytes, SHA-256 `84aefc21...`, the line of downloads.haskell.org's
+  SHA256SUMS, the same host's: no second source; SHA-512 recorded); nofib at `d4750745` (master's head, 2026-07-10;
+  tree `1f5a8852` checked; no licence at its top: read in place, never committed); the source tarball repr/haskell's.
+- **Counted**: the testsuite's 520 `all.T` read by `test/haskell/eval/allt.ae` (HES17 (a): Python's lexical syntax and
+  the calls `test(...)`, `setTestOpts(...)` at any depth, none unread): 10,286 tests, of them **1,713 run tests**
+  (`compile_and_run` 1,594, `multimod_compile_and_run` 94, `multi_compile_and_run` 22), listed with their options in
+  `test/haskell/eval/testsuite-run.edn`; besides them 980 `makefile_test` and 27 `run_command` (shell scripts),
+  3,742 `compile`, 2,374 `compile_fail`, 582 `ghci_script`. The survey's guess of 3,000 to 4,000 run tests was high.
+  11,227 `.hs`/`.lhs` files (311,309 lines). The language core (§8.2's nine directories): 701 run tests. nofib: 144
+  programs (imaginary 15, spectral 46, real 29, shootout 8, gc 15, parallel 19, smp 12), 628 files. Samples:
+  `test/haskell/eval/samples/` (10: Hello, the survey's T/U/L/F as Survey, Trace, Loop, Nfib, and Conc, Exc, Stm,
+  Arrays, Echo with its stdin and arguments).
+
+### HE2: the STG dump
+
+- **The helper** (`tools/hsdump/Stg.hs`; `hsdump stg [--core] [--one-shot]`, `core`): GHC's `stgToCmmHook` writes each
+  module's `CgStgTopBinding`s and data constructors, then runs GHC's own `StgToCmm.codeGen` (the objects and
+  interfaces as without it); `--core` adds a static plugin's pass at the end of the Core pipeline. Built `-threaded`
+  (`bin/repr-haskell helper`; its key changed). Two of GHC's lazy fields are panics when forced, found by the
+  libraries: a `StgConApp`'s `[[PrimRep]]` rebuilt by tag inference (`mkSeqs`), written only when it evaluates; and
+  `typePrimRep` of a representation-polymorphic type, written `:rp` (STG-S13; 4,095 in the five packages below).
+- **HES6 reproduced exactly**, checked by the interfaces' ABI hashes against the installed ones: equal for every
+  module of `ghc-internal` (267 of 267, with the GMP backend), `base` (241), `containers` (35), `ghc-prim`,
+  `ghc-bignum`. What it takes: the installed unit ids (every package's hashed id, `containers-0.8-b42e`; `ghc-internal`
+  alone wired-in, plain); paths from the source tree's root (`libraries/...`; `.tmp/hsi/root` with `libraries` linked
+  to the extracted tarball and hadrian's `_build/stage1/.../build` for the `.hsc` and generated modules); `-O2`;
+  hsc2hs with hadrian's `-Dx86_64_HOST_ARCH=1 -Dlinux_HOST_OS=1` (without them `ExecutablePath` takes another branch);
+  and **one-shot compilation**, a process per module in dependency order as hadrian's `ghc -c` (`--one-shot`, `-j8` of
+  them): `ghc --make` rehydrates an hs-boot loop with the real interfaces, so 50 modules' unfoldings lost the
+  `noinline` GHC puts around an id seen through a boot file; and one process compiling the modules in order keeps the
+  interfaces it read (wrong exports). The check discriminates: `-O1`, or paths from the package's directory, give
+  other hashes.
+- **HES7** (native bignum): 190 of `ghc-internal`'s 267 ABI hashes differ from the installed, but its STG differs
+  from the GMP build's in 5 modules only (`Bignum.Backend.Native`, `BigNat`, `Integer`, `Natural`, `Real`): the rest
+  is the hashes' cascade. `base`'s and `containers`' STG name no GMP backend id; no `__gmpn_*` call remains.
+- **`bin/hsi dumps`** (`arbace.repr.haskell.stg`, `test/haskell/eval/dump_plan.ae`): every dump read back by Arbace's
+  reader on stage 0 and checked against the spec's grammar (every head known at its place), 0 errors; `--again`: two
+  runs byte for byte equal (`ghc-internal`, `containers`, the samples, 2026-11-03).
+- **Sizes and times** (five packages and the samples; `.tmp/hsi/dumps/report.edn`): `ghc-internal` 268 modules,
+  **32.0 MB**, 100 s to compile at `-O2` one-shot; `base` 3.7 MB, 9 s; `containers` 9.5 MB, 24 s; `ghc-prim`,
+  `ghc-bignum` 1 KB each; the samples 95 KB (10 KB each at `-O0`). In all 555 dumps, **45.3 MB**, read back and
+  checked in 4 s on 8 jobs; peak 0.95 GB. The 41 packages' 1,319 modules are a night run: about 100 to 150 MB of
+  forms by these ratios (`Cabal`, `Cabal-syntax`, `text`, `bytestring` the large ones), about 10 to 15 minutes.
+- **The inventory** (the five packages): 735 distinct primops called (of 742 non-SIMD), 195 foreign symbols (519
+  `ccall`, 83 `capi` call sites; `__hscore_*`, libc, the RTS's `arenaAlloc`, `cmp_thread`, `epoll_*`...), 21 Cmm
+  `primcall`s (`stg_cloneMyStackzh`, the stack decoder's `getStackClosurezh`...); 137,838 `app`, 97,318 `case`, 72,535
+  closures (36,595 `:r`, 29,026 `:u`, 4,733 `:j`, 2,181 `:s`), no ticks.
+- **Not built**: the binary image and its loader (the survey's HE2 row; not in this trial's brief): HES32.
+
+### HE3: references and synthetic corpora
+
+- **`bin/hsi record-ref`** (`bin/lib/hsi/record-ref`, `test/haskell/eval/run_plan.ae`) writes
+  `test/haskell/ref-ghc914.edn`: each program built by `ghc -O0 -rtsopts` in a fresh copy of its directory and run
+  under `env -i`, `LANG=C.UTF-8`, `TZ=UTC`, 10 s of CPU, 30 s of wall time; status, stdout's and stderr's SHA-256, sizes
+  and first lines, a testsuite test's or nofib program's expected stdout file compared (`:expected`), and every
+  program's build and run seconds (GT8); `--only` keeps the other lines. Recorded 892 programs in 2.5 minutes, 8 at a
+  time: samples 10, synthetic 37 (35 exit 0, `runtime-exceptions` and `runtime-loop` 1 as meant), the language core
+  701 (623 exit 0, 56 another status, 46 of them all.T's `exit_code`, 20 not built: their C sources or objects,
+  which the plan does not pass yet, 2 timed out: `T4262`, `hs_try_putmvar001`; stdout as the expected file 528,
+  differs 38, none 115), nofib 144 (78 exit 0, 59 not built: packages not installed, `parallel`, `random`,
+  `old-time`, and modules hidden without their `-package`; expected 53 same, 7 differ). Build seconds 828, run
+  seconds 206 in all.
+- **The generator** (`test/haskell/eval/gen.ae`, `bin/hsi generate [--check]`, §8.3): from the tarball's
+  `primops.txt.pp` (through cpp, as hadrian makes it) one program per scalar section (15: `Char#`, the eight sized
+  integers, `Int#`, `Word#`, narrowings, `Double#`, `Float#`, fused multiply-add) covering **340 of the 585 primops**
+  (those with scalar arguments and results), each over every combination of boundary values (64 at most a primop;
+  a division's zero divisor and minBound by -1, an unchecked shift past its width, `quotRemWord2#` with a quotient that
+  does not fit left out: traps); 14 class programs (Show, Read, Eq/Ord, Enum, Bounded, Num, Integral, Real/Fractional,
+  RealFrac, Floating, RealFloat, Bits, FiniteBits, Ix at their standard instances); 8 runtime programs (laziness and
+  `trace` order, deep chains, `<<loop>>`, exceptions and masks, threads and deadlock, STM, Integer at every size,
+  text I/O). Deterministic (its boundary values are its seed); 37 files, 11,469 lines, all built by GHC.
+
+### Night runs (listed, not run)
+
+1. `bin/hsi dumps --samples --again`: the 41 packages twice (their ABI hashes, sizes, times, determinism).
+2. `bin/hsi record-ref --corpus samples,synthetic,testsuite,nofib`: the 1,713 run tests (about 6 minutes by the day's
+   rate).
+3. `bin/hsi pins --check`, `bin/hsi spec-check`, `bin/hsi generate --check` (seconds; passing 2026-11-03).
+
+### Proposals (HES30 onward, HES2 (a)'s numbering)
+
+- **HES30 The libraries' compilation mode.** (a) one-shot, a helper process per module (as built: the only mode whose
+  interfaces are the installed ones); (b) `--make` (faster, one process; 50 modules differ in unfoldings).
+  *Recommended: (a)*.
+- **HES31 HES7's check.** (a) at each pin, the native build's STG compared with a GMP build's (`HSI_BIGNUM=gmp`),
+  the differing modules a recorded list (today 5), and the GMP build's ABI hashes all equal to the installed;
+  (b) the native build's ABI hashes alone (190 differ: says nothing). *Recommended: (a)*.
+- **HES32 The binary image.** (a) at HE4 with hsi's code trees (its format follows the loader's needs); (b) now, a
+  serialized form tree. *Recommended: (a)*: the forms read at 11 MB/s (45 MB in 4 s on 8 jobs), so per run cost
+  matters only for hsi's start.
+- **HES33 Where the dumps live** (HES13 (a) as decided, the size now measured): cached by key under `.tmp/` (GHC's
+  pin, the tarball's, the helper's hash, the plan); committed never in v1 (100 to 150 MB).
+- **HES34 The testsuite's tests beyond the run functions.** (a) `makefile_test` (980) and `run_command` (27) a class
+  in v1 ("a shell script's test"), their Makefiles read later; (b) read now. *Recommended: (a)*.
+- **HES35 The runner's C and packages.** (a) record-ref passes a test's C sources and objects (the
+  `extra_files`/`multi_compile` lists, `*_c.c`) at HE6, and nofib's missing packages are a class (`parallel`, `random`,
+  `old-time`, `unboxed-ref`: not boot libraries); (b) fetch those packages by pin. *Recommended: (a)*.
+- **HES36 `:rp`** (STG-S13). (a) as built; (b) the kind's variable written. *Recommended: (a)*.
+
+### Open questions for the user
+
+- The testsuite tarball has a single source for its digest (downloads.haskell.org's SHA256SUMS, unsigned on this
+  host): accept, or ask the Mac VM for a second fetch?
+- May the night runs above use the main host tonight (the dumps are under the heavy lock, about 15 minutes)?
