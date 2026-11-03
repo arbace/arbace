@@ -108,14 +108,25 @@ cover_settle() {
   done
 }
 
+# cover_hook_table: the hook's files, a line each, PACKAGE FILE: the Go package (under GOROOT/src) the cover builds'
+# overlay adds FILE (relative to the checkout) to, as zz_arbace_cover.go: internal/coverage/cfile's hook and its
+# os/signal part (the program's own signal registrations, review 182 L3)
+cover_hook_table() {
+  printf '%s\n' "internal/coverage/cfile tools/covsubset/hook/cover.go" "os/signal tools/covsubset/hook/signal/refs.go"
+}
+# cover_hook_files: the hook's files (in the cover key, bin/arbace-go's cover_key, and the compiled level's program
+# key, bin/java-check), relative to the checkout
+cover_hook_files() { cover_hook_table | cut -d' ' -f2 | paste -sd' '; }
+
 # cover_go_flags ROOT PROG WORK OVERLAY OUT: bin/build-go's arguments, one a line, for a cover build of the
-# j2g program PROG printed into WORK with the overlay OVERLAY (bin/jrt overlay's): the overlay with the hook
-# (tools/covsubset/hook/cover.go) added to Go's internal/coverage/cfile, written to OUT, and the cover flags
+# j2g program PROG printed into WORK with the overlay OVERLAY (bin/jrt overlay's): the overlay with the hook's
+# files (cover_hook_table) added to their Go packages, written to OUT, and the cover flags
 cover_go_flags() {
-  local root=$1 prog=$2 work=$3 overlay=$4 ov=$5 pkgs
+  local root=$1 prog=$2 work=$3 overlay=$4 ov=$5 pkgs g=${ARBACE_GOROOT:-/root/tamago-go}/src e="" p f
   pkgs=$(cover_pkgs "$prog")
   [ -n "$pkgs" ] || { echo "cover: no package of $prog to cover" >&2; return 1; }
-  sed '$s|}}[[:space:]]*$|,\n "'"${ARBACE_GOROOT:-/root/tamago-go}/src/internal/coverage/cfile/zz_arbace_cover.go"'": "'"$root/tools/covsubset/hook/cover.go"'"}}|' "$overlay" > "$ov"
-  grep -q zz_arbace_cover "$ov" || { echo "cover: could not add the hook to $overlay" >&2; return 1; }
+  while read -r p f; do e="$e,\n \"$g/$p/zz_arbace_cover.go\": \"$root/$f\""; done <<< "$(cover_hook_table)"
+  sed '$s|}}[[:space:]]*$|'"$e"'}}|' "$overlay" > "$ov"
+  [ "$(grep -c zz_arbace_cover "$ov")" = "$(cover_hook_table | wc -l)" ] || { echo "cover: could not add the hook to $overlay" >&2; return 1; }
   printf '%s\n' --overlay "$ov" --go-flag -cover --go-flag -covermode=set --go-flag "-coverpkg=$pkgs" --go-flag -tags=arbacecover
 }

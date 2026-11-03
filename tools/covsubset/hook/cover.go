@@ -14,15 +14,33 @@
 // CPU limit still leaves the blocks it reached up to the last flush. Each write is a counter file of its own
 // (covcounters.HASH.PID.TIME); `go tool covdata textfmt` merges them. After tools/cicover/cirun/cover.go (queue
 // 160, which exits 124 instead).
+//
+// A program's own signal handling stays its own (review 182 L3): a signal the program receives on a channel of its
+// own (os/signal's count, tools/covsubset/hook/signal/refs.go's ArbaceCoverRefs, the second overlay file) has the
+// counters written and is then left to the program, neither raised again nor its handler reset (signal.Stop of the
+// hook's channel alone, never signal.Reset); a write in progress holds the program's exit (an exit hook) so that no
+// tmp.covcounters file is left; and a signal ignored at the start (SIGHUP under nohup) is not caught, so it stays
+// ignored.
 package cfile
 
 import (
+	"internal/runtime/exithook"
 	"os"
 	"os/signal"
 	"strconv"
+	"sync"
 	"syscall"
 	"time"
 )
+
+// arbaceEmitMu: one write of the hook's at a time, and the program's exit waits for it
+var arbaceEmitMu sync.Mutex
+
+func arbaceEmit(d string) {
+	arbaceEmitMu.Lock()
+	defer arbaceEmitMu.Unlock()
+	emitCounterDataToDirectory(d)
+}
 
 func init() {
 	arbaceCoverHook()
@@ -33,16 +51,31 @@ func arbaceCoverHook() {
 	if d == "" {
 		return
 	}
-	c := make(chan os.Signal, 1)
-	signal.Notify(c, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGXCPU)
-	go func() {
-		s := <-c
-		emitCounterDataToDirectory(d)
-		signal.Reset(s)
-		syscall.Kill(os.Getpid(), s.(syscall.Signal))
-		time.Sleep(time.Second)
-		os.Exit(128 + int(s.(syscall.Signal)))
-	}()
+	// an exit (os.Exit, main's return: Go's own counter hook has run by then, registered after this one) waits for the
+	// hook's write in progress, never released: the process is exiting
+	exithook.Add(exithook.Hook{F: func() { arbaceEmitMu.Lock() }, RunOnFailure: true})
+	var sigs []os.Signal
+	for _, s := range []os.Signal{syscall.SIGTERM, syscall.SIGHUP, syscall.SIGXCPU} {
+		if !signal.Ignored(s) {
+			sigs = append(sigs, s)
+		}
+	}
+	if len(sigs) > 0 {
+		c := make(chan os.Signal, 1)
+		signal.Notify(c, sigs...)
+		go func() {
+			for s := range c {
+				arbaceEmit(d)
+				if signal.ArbaceCoverRefs(s) > 1 {
+					continue // the program's own handler has it too
+				}
+				signal.Stop(c) // the hook's alone: the signal's default action back (no other channel wants it)
+				syscall.Kill(os.Getpid(), s.(syscall.Signal))
+				time.Sleep(time.Second)
+				os.Exit(128 + int(s.(syscall.Signal)))
+			}
+		}()
+	}
 	secs := 20
 	if v, err := strconv.Atoi(os.Getenv("ARBACE_COVER_FLUSH")); err == nil {
 		secs = v
@@ -50,7 +83,7 @@ func arbaceCoverHook() {
 	if secs > 0 {
 		go func() {
 			for range time.Tick(time.Duration(secs) * time.Second) {
-				emitCounterDataToDirectory(d)
+				arbaceEmit(d)
 			}
 		}()
 	}
