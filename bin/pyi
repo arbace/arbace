@@ -309,7 +309,8 @@ cmd_run() {
 # --record: the known file's methods of the modules run written again (a method's class kept, else the first class
 # whose :match finds its line; one of no class printed and left out, the run exits 3). --judge DIR: the runs in DIR
 # judged again, nothing run. --oracle runs the driver by python3 instead, judged with no class (the judge's control:
-# every method equal but the references' :excluded)
+# every method equal but the references' :excluded). PYI_LIB_TEST_JOBS modules at once (default 1),
+# PYI_LIB_TEST_TIMEOUT seconds a module (default 1800)
 cmd_lib_test() {
   local oracle="" record="" judge="" mods=() m d="$WORK/lib-test" lib rc=0
   while [ $# -gt 0 ]; do case $1 in --oracle) oracle=1; shift ;; --record) record=1; shift ;; --judge) judge=$2; shift 2 ;; *) mods+=("$1"); shift ;; esac; done
@@ -318,15 +319,22 @@ cmd_lib_test() {
     d=$(cd "$caller_pwd" && cd "$judge" && pwd); rm -f "$d/summary.tsv"
   else
     lib=$(stdlib_lib); rm -rf "$d"; mkdir -p "$d"
+    # PYI_LIB_TEST_JOBS modules at once (default 1; each pyi run takes up to a few GB)
+    local jobs=${PYI_LIB_TEST_JOBS:-1} running=0
     for m in "${mods[@]}"; do
-      if [ -n "$oracle" ]; then
-        (cd "$d" && timeout 900 env PYTHONHASHSEED=0 LC_ALL=C.UTF-8 TZ=UTC PYTHONIOENCODING=utf-8 HOME="$WORK" TMPDIR="$WORK" PYTHONPATH="$lib" \
-          python3 -s -P -B "$root/test/python/libtest.py" "$m" > "$d/$m.out" 2> "$d/$m.err"; echo $? > "$d/$m.status") || true
-      else
-        (cd "$d" && timeout "${PYI_LIB_TEST_TIMEOUT:-1800}" "$root/bin/pyi" run "$root/test/python/libtest.py" "$m" > "$d/$m.out" 2> "$d/$m.err"; echo $? > "$d/$m.status") || true
-      fi
-      echo "lib-test: $m run"
+      if [ "$running" -ge "$jobs" ]; then wait -n || true; running=$((running - 1)); fi
+      (
+        if [ -n "$oracle" ]; then
+          (cd "$d" && timeout 900 env PYTHONHASHSEED=0 LC_ALL=C.UTF-8 TZ=UTC PYTHONIOENCODING=utf-8 HOME="$WORK" TMPDIR="$WORK" PYTHONPATH="$lib" \
+            python3 -s -P -B "$root/test/python/libtest.py" "$m" > "$d/$m.out" 2> "$d/$m.err"; echo $? > "$d/$m.status") || true
+        else
+          (cd "$d" && timeout "${PYI_LIB_TEST_TIMEOUT:-1800}" "$root/bin/pyi" run "$root/test/python/libtest.py" "$m" > "$d/$m.out" 2> "$d/$m.err"; echo $? > "$d/$m.status") || true
+        fi
+        echo "lib-test: $m run"
+      ) &
+      running=$((running + 1))
     done
+    wait
   fi
   "$(arbace_exe)" "$root/test/python/libtest_judge.ae" --dir "$d" --ref "$REF_LT" --known "$root/test/python/lib-test-known.edn" \
     ${record:+--record} ${oracle:+--no-known} "${mods[@]}" || rc=$?
