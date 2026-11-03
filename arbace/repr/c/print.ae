@@ -226,9 +226,24 @@
              (when (contains? m :c/alignas) (str "_Alignas(" (expr-str (:c/alignas m) 15 nil nil) ")"))
              (when-let [a (:c/alignas-type m)] (str "_Alignas(" (type-name a) ")")))))
 
+(defn- words-spec
+  "A declaration's type specifiers as written, from the converter's :c/bad-specs words (CS203 (a), CS221 (a), CS232 (a)):
+  the words joined, `_BitInt` with the width of the base type form `t`; nil when the words are not a vector or `t` is a
+  form the words cannot spell (a struct's, typeof's, _Atomic's: the normalized type then)."
+  ^String [words t]
+  (when (vector? words)
+    (let [u (if (and (seq? t) (= (first t) 'complex)) (second t) t)]
+      (cond
+        (and (seq? u) ('#{bit-int unsigned-bit-int} (first u)) (= 1 (count (filter #{"_BitInt"} words))))
+        (str/join " " (map #(if (= % "_BitInt") (str "_BitInt(" (expr-str (second u) 15 (meta u) 1) ")") %) words))
+        (and (or (symbol? u) (and (seq? u) (= (first u) 'c/id))) (not-any? #{"_BitInt"} words)) (str/join " " words)
+        :else nil))))
+
 (defn split-type
-  "A type form around the declarator text `inner`: [specifiers declarator] (no type: implicit int)."
-  [t ^String inner base]
+  "A type form around the declarator text `inner`: [specifiers declarator] (no type: implicit int); with `words` (a
+  declared name's :c/bad-specs) the base's specifiers as written (words-spec)."
+  ([t inner base] (split-type t inner base nil))
+  ([t ^String inner base words]
   (loop [t (if (nil? t) 'int t) inner inner]
     (cond
       ;; qualifiers: on a pointer after its *, else before the base
@@ -240,7 +255,7 @@
                 in (str ptr inner)
                 in (if (and (seq? u) ('#{array fn} (first u))) (str "(" in ")") in)]
             (recur u in))
-          (let [[s d] (split-type x inner base)] [(str (str/join " " (map name qs)) " " s) d])))
+          (let [[s d] (split-type x inner base words)] [(str (str/join " " (map name qs)) " " s) d])))
       (and (seq? t) (= (first t) '*))
       (let [[_ u] t
             in (str "*" (when-let [a (:c/attrs (meta t))] (str (attrs-str a) " ")) inner)
@@ -258,8 +273,8 @@
       :else
       (let [t (if (nil? t) 'int t)
             m (meta t)
-            s (base-spec t base)]
-        [(join-sp (spec-meta-str (:c/spec m)) s) inner]))))
+            s (or (when-not (= t 'c/base) (words-spec words t)) (base-spec t base))]
+        [(join-sp (spec-meta-str (:c/spec m)) s) inner])))))
 
 (defn type-name
   "A type form as a type name (a cast's, sizeof's): its specifiers' metadata (:c/spec) first."
@@ -290,7 +305,7 @@
                        (and (or (symbol? p) (and (seq? p) (= (first p) 'c/id))) (contains? (meta p) :tag))
                        (let [m (meta p)
                              nm (if (seq? p) (second p) (name p))
-                             [s d] (split-type (:tag m) (str nm (when-let [a (:c/attrs m)] (str " " (attrs-str a)))) nil)]
+                             [s d] (split-type (:tag m) (str nm (when-let [a (:c/attrs m)] (str " " (attrs-str a)))) nil (:c/bad-specs m))]
                          (join-sp (decl-head m) (implicit s m) (type-attrs-str m) d (attrs-str (:c/after-attrs m))))
                        :else (let [m (meta p)] (join-sp (decl-head (:c/spec m)) (type-name (if (:c/spec m) (vary-meta p dissoc :c/spec) p)) (type-attrs-str (:c/spec m))))))
                    ps))))
@@ -311,7 +326,7 @@
                             :else
                             (let [mm (meta m)
                                   nm (if (seq? m) (second m) (name m))
-                                  [s d] (split-type (:tag mm) (str nm (when-let [a (:c/attrs mm)] (str " " (attrs-str a)))) nil)
+                                  [s d] (split-type (:tag mm) (str nm (when-let [a (:c/attrs mm)] (str " " (attrs-str a)))) nil (:c/bad-specs mm))
                                   bits (when (contains? mm :c/bits)
                                          (str " : " (if-let [bm (:c/bits-meta mm)]
                                                       (if-let [t (:c/macro bm)] t (str "(" (expr-str (:c/bits mm) 16 nil nil) ")"))
@@ -509,7 +524,7 @@
   "A declared name's [specifiers declarator] from its metadata (its :tag the type)."
   [x base]
   (let [m (meta x)
-        [s d] (split-type (:tag m) (str (nm-str x) (when-let [a (:c/attrs m)] (str " " (attrs-str a)))) base)]
+        [s d] (split-type (:tag m) (str (nm-str x) (when-let [a (:c/attrs m)] (str " " (attrs-str a)))) base (:c/bad-specs m))]
     [(join-sp (decl-head m) (implicit s m) (type-attrs-str m)) d]))
 
 (defn- decl-tail ^String [m]
@@ -559,7 +574,9 @@
       (case (first f)
         (c/var c/declare c/typedef) (let [[s d] (var-str f nil)] (str (join-sp s d) (end-attrs m) ";"))
         (c/struct c/union c/enum) (str (join-sp (decl-head m) (type-name (with-meta (cons (symbol (name (first f))) (rest f)) m))) (end-attrs m) ";")
-        c/declare-specs (str (join-sp (decl-head (assoc m :typedef (:c/typedef m))) (implicit (if (vector? (:c/bad-specs m)) (str/join " " (concat (map #(if (= 'atomic %) "_Atomic" (name %)) (leading-quals (second f) (:c/atomic-qual m))) (:c/bad-specs m))) (type-name (second f))) m) (type-attrs-str m)) (end-attrs m) ";")
+        c/declare-specs (str (join-sp (decl-head (assoc m :typedef (:c/typedef m))) (implicit (let [qs (leading-quals (second f) (:c/atomic-qual m))
+                                                                                                ws (words-spec (:c/bad-specs m) (nth (iterate second (second f)) (count qs)))]
+                                                                                            (if ws (join-sp (str/join " " (map #(if (= 'atomic %) "_Atomic" (name %)) qs)) ws) (type-name (second f)))) m) (type-attrs-str m)) (end-attrs m) ";")
         c/group (let [[_ base & fs] f
                       [bs _] (split-type base "" nil)
                       parts (map #(var-str % bs) fs)
@@ -717,7 +734,7 @@
         xm (meta x)
         pm (meta ps)
         t (list 'fn ps (:tag pm))
-        [s d] (split-type t (str (nm-str x) (when-let [a (:c/attrs xm)] (str " " (attrs-str a)))) nil)
+        [s d] (split-type t (str (nm-str x) (when-let [a (:c/attrs xm)] (str " " (attrs-str a)))) nil (:c/bad-specs xm))
         head (join-sp (decl-head xm) (implicit s pm) (type-attrs-str xm))
         b (StringBuilder.)]
     (when (seq head) (line b head))

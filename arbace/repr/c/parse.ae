@@ -330,6 +330,9 @@ void __atomic_store();
 (def ^:const SCOPE 0) (def ^:const FNSCOPE 1) (def ^:const GOTOS 2) (def ^:const SWITCH 3)
 (def ^:const SEQ 4) (def ^:const LDOK 5) (def ^:const COMPLIT 6) (def ^:const ORDER 7) (def ^:const EOFERRS 8)
 (def ^:const SOFT 9) (def ^:const HARD 10)
+;; queue 157 (review 130's finding 4): the preprocessor's entry function (arbace.repr.c.pp/stream's :entry) and the entries' first
+;; tokens, an ArrayList of [seq entry] in seq order, one each time the entry changes (the converter's :entries)
+(def ^:const ENTRY 11) (def ^:const ENTRIES 12)
 
 (deftype Parser [nx ^ArrayList errs ^ArrayList toks kw ^objects st])
 
@@ -456,6 +459,10 @@ void __atomic_store();
                     ;; CS150 (*recover*): a space token of the preprocessor (a comment of a macro's body) before the token
                     sp-sep (if (and *recover* sp (= "" (.-sep t))) " " (.-sep t))]
                 (slot! p SEQ seq)
+                (when-let [ef (slot p ENTRY)]
+                  (let [e (ef) ^ArrayList es (slot p ENTRIES) n (.size es)]
+                    (when (if (zero? n) (some? e) (not= e (second (.get es (dec n)))))
+                      (.add es [seq e]))))
                 (.add ^ArrayList (.-toks p) (conv p t (if (and b (pos? (.length b))) (str b sp-sep) sp-sep) seq)))))))
 
 (defn- typename-tok?
@@ -795,6 +802,13 @@ void __atomic_store();
         seq (+ (.-seq lbrace) 9)]
     (rn p)
     (let [^ArrayList ts (.-toks p)
+          ;; queue 157: the entries' boundaries in the renumbered tokens move with them
+          _ (when (pos? (.size ts))
+              (let [first-old (.-seq ^PTok (.get ts 0)) d (- (inc seq) first-old) ^ArrayList es (slot p ENTRIES)]
+                (when es
+                  (dotimes [k (.size es)]
+                    (let [[s e] (.get es k)]
+                      (when (>= (long s) first-old) (.set es k [(+ (long s) d) e])))))))
           seq (loop [i 0 seq seq]
                 (if (< i (.size ts))
                   (do (.set ts i (tree/with-seq (.get ts i) (inc seq))) (recur (inc i) (inc seq)))
@@ -2471,9 +2485,9 @@ void __atomic_store();
   `cfg` (arbace.repr.c.host/config's): {:tree TranslationUnit-or-nil :errors [...] :notree bool},
   or {:panic msg} where cc would panic."
   [cfg sources ^String main]
-  (let [{:keys [errors next layer]} (pp/stream cfg sources main)
-        st (object-array 11)
-        _ (do (aset st SCOPE (new-scope* nil)) (aset st SEQ (Long/valueOf 0)) (aset st LDOK false))
+  (let [{:keys [errors next layer entry]} (pp/stream cfg sources main)
+        st (object-array 13)
+        _ (do (aset st SCOPE (new-scope* nil)) (aset st SEQ (Long/valueOf 0)) (aset st LDOK false) (aset st ENTRY entry) (aset st ENTRIES (ArrayList.)))
         p (Parser. next errors (ArrayList.) (keywords (:predefined cfg)) st)]
     (try
       (rn p)
@@ -2483,11 +2497,11 @@ void __atomic_store();
                      (let [x (first a)] (when (= (.get ^HashMap x :node) "Declarator") x)))
                 errs (dedupe-errors errors)
                 errs (if pd errs (conj errs "<bultin>: missing definition of '__predefined_declarator'"))]
-            (cond-> {:tree tu :errors errs :layer layer}
+            (cond-> {:tree tu :errors errs :layer layer :entries (vec (aget st ENTRIES))}
               (and (pos? (long (or (aget st SOFT) 0))) (zero? (long (or (aget st HARD) 0)))) (assoc :recovered true)))
           (let [t (sh p)]
             (eh p (str (tpos t) ": unexpected " (rname (ch t)) ", expected EOF"))
-            {:tree tu :errors (dedupe-errors errors) :notree true :layer layer})))
+            {:tree tu :errors (dedupe-errors errors) :notree true :layer layer :entries (vec (aget st ENTRIES))})))
       (catch StackOverflowError _ {:panic "stack overflow"})
       (catch Exception e
         (if (:panic (ex-data e)) {:panic (ex-message e)} (throw e))))))
