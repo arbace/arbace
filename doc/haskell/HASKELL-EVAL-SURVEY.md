@@ -1199,6 +1199,21 @@ host was shared with other agents throughout: the times below vary by about 10 %
   summed seconds 1,070 → 923 at the same plan, the median run 0.22 s → 0.07 s); the essential list 123 programs in 10 s.
   `T23071` and `CarryOverflow` pass now (`:speed`, listed still: near the limit); `T19149` reaches its test's C.
 
+- **Memory** (after the coordinator's report of two hsi runs of about 20 GB each, outside the heavy lock, at 8 jobs):
+  each slow program's peak RSS measured alone under the lock (`/usr/bin/time`, 30 s of CPU). Two leaks, found and
+  fixed: (1) conc012's endless recursion grew the stack without bound: hsi had no `-K`; now the driver takes `+RTS
+  -K<size>` (the one RTS option it keeps) and a thread's stack is bounded (by default 2 GiB of frames, 72 bytes
+  each), StackOverflow raised past it as GHC's `threadStackOverflow` (11.7 GB → 96 MB; conc012 passes); (2) a list
+  consumed by `length` was kept whole (`length [1..5000000]`: 1.36 GB, also on `haskell-full`'s hsi, 2.4 GB) by a
+  dead slot of a case frame (a frame keeps its activation's slots, GHC's only the live ones): a call inside a
+  scrutinee now clears, once its arguments are read, every slot no pending continuation of its activation reads
+  (`live.ae`, `App.kill`, `Enter.kill`), and a call or entry in tail position clears the activation's locals
+  (`clr`, which an updatable thunk evaluated in its own array needs): 237 MB, and allocLimit1, `length [1..]` until
+  the limit, 6 GB in 25 s → 235 MB. What stays large is expected: deep stacks, a frame of hsi's being about three of
+  GHC's words: Loop 7.3 GB (GHC 0.35 GB), T16846 9.7 GB (`mapM` over 10 million in IO). So hsi's checks run under
+  `.tmp/heavy` at 3 jobs (`bin/hsi check`'s default since). With `-K`, two update frames in a row are squeezed as
+  GHC's stack squeezing does (one frame updates both thunks; cgrun060 at `-K64k`).
+
 ### HE4e: the RTS's semantics (`rts.ae`)
 
 - **throwTo** (HES41 (a), rts/RaiseAsync.c's `throwToMsg` by the target's state): a target that does not accept the
@@ -1245,9 +1260,10 @@ host was shared with other agents throughout: the times below vary by about 10 %
   `:test-c-output` (the run goes on without it); `:uninitialised` gone (the generator leaves out `decodeDouble_2Int#`
   of a zero, primops-double re-recorded, it passes); a check where no control ran fails, and a fourth control judges
   the status alone (`samples/Echo` against its reference with status 0); a test all.T skips is not run (`:skipped`).
-- **Results**: `bin/hsi check --corpus samples,synthetic,testsuite-core` **649 of 756**: samples 17 of 18, synthetic 37
-  of 37, the core **595 of 701** (584 before: conc016, conc018, conc019, conc024, conc034, conc068, mask002,
-  tryReadMVar2, UnliftedWeakPtr, T23071, CarryOverflow); every other one in its class, the four controls failing;
+- **Results**: `bin/hsi check --corpus samples,synthetic,testsuite-core` **650 of 756**: samples 17 of 18, synthetic 37
+  of 37, the core **596 of 701** (584 before: conc012, conc016, conc018, conc019, conc024, conc034, conc068, mask002,
+  tryReadMVar2, UnliftedWeakPtr, T23071, CarryOverflow; compareByteArrays at 51 s, near the limit); every other one in
+  its class, the four controls failing; 2 min 19 s at 8 jobs, 4 min 55 s at 3 jobs under `.tmp/heavy` (the memory rule);
   `test/haskell/check-hsi.edn` recorded. `bin/hsi libm-check` 0 mismatches, 0 FMA; `bin/hsi runtime check` the same
   forms.
 
