@@ -29,3 +29,8 @@ except FileNotFoundError as e: print(str(e).replace(d, 'D'))
 print(os.stat_result(tuple(range(10))).st_atime, repr(os.stat_result(tuple(range(10)))))
 print(os.cpu_count() > 0)
 shutil.rmtree(d); print(os.path.exists(d))
+fifo = os.path.join(os.environ.get("TMPDIR", "."), "e-posix-fifo-%d" % os.getpid()); os.mkfifo(fifo)
+for f in (os.listdir, os.scandir):
+    try: f(fifo)
+    except NotADirectoryError as e: print(f.__name__, 'NotADirectoryError', e.errno)
+print(list(os.walk(fifo))); os.unlink(fifo)
