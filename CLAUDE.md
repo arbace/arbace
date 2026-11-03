@@ -39,7 +39,8 @@ Direction:
   every non-pass in a recorded class (doc/FULL-SUPPORT-SURVEY.md, "REAP v2's divergences"), with the efficient gate
   (doc/GATE-SURVEY.md, GT1-GT7), its clean run in a fresh clone recorded in
   `test/gate/clean-arbace-reaps-3-crops-v2.edn`. Parked (the user,
-  2026-10-26): the box, repr/haskell, repr/rust, the macOS UI, the iOS app. Now: doc/AGENDA.md.
+  2026-10-26): the box, the macOS UI, the iOS app (repr/haskell and repr/rust parked then too, unparked by the user
+  2026-11-03: crops in progress again, as OCaml, Scheme and C++; Python surveyed). Now: doc/AGENDA.md.
 - Long term: Arbace is a standalone ecosystem, not binary compatible with Java. Java stays
   usable at the source level through repr/java. The language is Clojure extended with an idiomatic
   representation of Java (the Java forms), and later of Go: the Arbace language. The goal is a
@@ -497,8 +498,9 @@ Prior art:
   of `--full` (kept as they are, run by hand with their scripts and Makefile targets, revisited later
   piece by piece): the box (`bin/arbace-go --build --box` with `bin/tamago-vendor check`, the box's smoke test, oracle
   subset, `bin/box-suite`, `bin/goi check --box`, `bin/box-vendor roundtrip`, `kvm-tests`, `purego-check`),
-  `tamago/` and `tamago/cmd/` (`bin/tamago-vendor verify`, `bin/toolchain-vendor verify`, `check`), repr/haskell
-  and repr/rust (`bin/repr-haskell`, `bin/repr-rust` round trips). Run it when the Java forms'
+  `tamago/` and `tamago/cmd/` (`bin/tamago-vendor verify`, `bin/toolchain-vendor verify`, `check`); repr/haskell
+  and repr/rust (`bin/repr-haskell`, `bin/repr-rust` round trips), unparked 2026-11-03, stay out of `--full` until their
+  rows fit GT8's budget. Run it when the Java forms'
   front end, repr/java, repr/go, j2g or jrt change (after a change to `overlay/jdk/java.base`, jrt's closure
   or repr/java, `bin/jrt-convert update` first; after a change to what j2g asks of the JVM,
   `bin/j2g-edge update`). `--full` is serial by default since GT3 (GTS13 (a); at once its chains overload a 62 GB host:
