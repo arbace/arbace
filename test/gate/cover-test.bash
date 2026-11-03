@@ -3,7 +3,7 @@
 # overlay (cover_go_flags: every file of cover_hook_table), and the hook's files (tools/covsubset/hook) built into a toy
 # Go program with -cover by TamaGo's go (ARBACE_GOROOT, /root/tamago-go; skipped with a message when it is missing), as
 # the cover builds add them: the program's own signal handling kept, no tmp.covcounters left, an ignored SIGHUP
-# ignored (L3). The cover build is amd64-only; the hook's logic is not: the toy runs on the host's architecture.
+# ignored (L3); a deadlock reported as Go reports it, at once, and none where Go reports none (L2). The cover build is amd64-only; the hook's logic is not: the toy runs on the host's architecture.
 # Seconds after the toy's first build (about 10 s). No Arbace executable.
 # Usage: test/gate/cover-test.bash
 set -u
@@ -115,6 +115,29 @@ if (cd "$t/toy" && env -u GOOS -u GOARCH GOROOT="$tg" GOFLAGS= GOTOOLCHAIN=local
   fresh; (trap '' HUP; GOCOVERDIR=$t/cov exec "$toy" loop) > "$t/out" 2>&1 & p=$!
   sleep 0.3; kill -HUP "$p"; sleep 1.5
   if kill -0 "$p" 2>"$t/kill.err"; then ok "an ignored SIGHUP (nohup) stays ignored"; { kill -KILL "$p"; wait "$p"; } 2>"$t/kill.err"; else wait "$p"; no "an ignored SIGHUP ended the program: status $?"; fi
+
+  # (L2) a deadlock is one: Go's message and status 2 at once, the counters written (the hook's signal thread and flush
+  # kept Go's own detector off: the check's wall cap, 124, ended it); none where Go reports none
+  # run MODE SECS: the toy's run under timeout SECS (stdin empty; for stdin, a pipe that stays open 3 s); st, $t/out, $t/err
+  : > "$t/empty"
+  run() {
+    if [ "$1" = stdin ]; then (sleep 3; echo x) | GOCOVERDIR=$t/cov timeout "$2" "$toy" "$1" > "$t/out" 2> "$t/err"; st=$?
+    else GOCOVERDIR=$t/cov timeout "$2" "$toy" "$1" < "$t/empty" > "$t/out" 2> "$t/err"; st=$?; fi
+  }
+  fresh; s0=$(date +%s); run deadlock 8
+  if [ "$st" = 2 ] && [ $(( $(date +%s) - s0 )) -le 3 ] && [ "$(sed -n 1p "$t/err")" = "fatal error: all goroutines are asleep - deadlock!" ] \
+     && grep -q '^goroutine 1 \[chan receive (nil chan)\]:' "$t/err" && [ "$(counters)" -ge 1 ]; then ok "a deadlock: Go's message, the goroutines, status 2 at once, the counters written"
+  else no "a deadlock: status $st in $(( $(date +%s) - s0 )) s, $(head -3 "$t/err" | tr '\n' ' '), $(counters) counter files"; fi
+  fresh; run wg 8
+  if [ "$st" = 2 ] && grep -q 'deadlock!' "$t/err"; then ok "a deadlock on a WaitGroup and a mutex: status 2"; else no "the WaitGroup's deadlock: status $st"; fi
+  fresh; run timer 8
+  if [ "$st" = 0 ] && grep -q after "$t/out"; then ok "a wait a timer ends: no deadlock"; else no "a timer's wait: status $st, $(cat "$t/err")"; fi
+  fresh; run stdin 8
+  if [ "$st" = 0 ] && grep -q read "$t/out"; then ok "a read of the standard input: no deadlock"; else no "a read: status $st, $(cat "$t/err")"; fi
+  fresh; run ownsig 3
+  if [ "$st" = 124 ]; then ok "a wait for a signal of the program's own: no deadlock (as Go)"; else no "a wait for its own signal: status $st, $(cat "$t/err")"; fi
+  fresh; ARBACE_COVER_DEADLOCK=0 run deadlock 3
+  if [ "$st" = 124 ]; then ok "ARBACE_COVER_DEADLOCK=0: not detected"; else no "ARBACE_COVER_DEADLOCK=0: status $st"; fi
 else
   no "the toy does not build with the hook: $(tail -5 "$t/build.log")"
 fi

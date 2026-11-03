@@ -109,10 +109,12 @@ cover_settle() {
 }
 
 # cover_hook_table: the hook's files, a line each, PACKAGE FILE: the Go package (under GOROOT/src) the cover builds'
-# overlay adds FILE (relative to the checkout) to, as zz_arbace_cover.go: internal/coverage/cfile's hook and its
-# os/signal part (the program's own signal registrations, review 182 L3)
+# overlay adds FILE (relative to the checkout) to, as zz_arbace_cover.go: internal/coverage/cfile's hook, its
+# os/signal part (the program's own signal registrations, review 182 L3) and its runtime part (whether a timer is
+# pending, for the deadlock detector, review 182 L2)
 cover_hook_table() {
-  printf '%s\n' "internal/coverage/cfile tools/covsubset/hook/cover.go" "os/signal tools/covsubset/hook/signal/refs.go"
+  printf '%s\n' "internal/coverage/cfile tools/covsubset/hook/cover.go" "os/signal tools/covsubset/hook/signal/refs.go" \
+    "runtime tools/covsubset/hook/runtime/timers.go"
 }
 # cover_hook_files: the hook's files (in the cover key, bin/arbace-go's cover_key, and the compiled level's program
 # key, bin/java-check), relative to the checkout

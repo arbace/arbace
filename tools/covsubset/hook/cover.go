@@ -21,17 +21,81 @@
 // hook's channel alone, never signal.Reset); a write in progress holds the program's exit (an exit hook) so that no
 // tmp.covcounters file is left; and a signal ignored at the start (SIGHUP under nohup) is not caught, so it stays
 // ignored.
+//
+// A deadlock is still one (review 182 L2): the hook's os/signal thread keeps Go's own detector (runtime.checkdead)
+// from firing, as a flush timer would (so the flush is a goroutine sleeping in nanosleep, no runtime timer), and a
+// deadlocked program would wait for the check's wall cap. The hook detects it as checkdead does, once a second
+// (ARBACE_COVER_DEADLOCK=0: not): no runtime timer pending (runtime.timeSleepUntil, which the third overlay file,
+// tools/covsubset/hook/runtime/timers.go, pushes to it), no signal of the program's own (with one, os/signal's thread
+// keeps Go's detector off too), no goroutine running or runnable but this one (the scheduler's counts, runtime/metrics),
+// and then, in all the goroutines' traces (runtime.Stack), every goroutine but the hook's and os/signal's blocked in a
+// channel, select or sync wait (not IO wait, a syscall or sleep); then it prints Go's message and those goroutines and
+// exits 2, as Go's fatal error does (Go's own exit hook writing the counters).
 package cfile
 
 import (
 	"internal/runtime/exithook"
 	"os"
 	"os/signal"
+	"runtime"
+	"runtime/metrics"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
+	_ "unsafe" // go:linkname
 )
+
+//go:linkname arbaceTimeSleepUntil runtime.arbaceCoverTimeSleepUntil
+func arbaceTimeSleepUntil() int64
+
+// the wait reasons of a goroutine only another goroutine can wake (runtime2.go's waitReasonStrings)
+var arbaceBlocked = map[string]bool{
+	"chan receive (nil chan)": true, "chan send (nil chan)": true, "select (no cases)": true,
+	"chan receive": true, "chan send": true, "select": true, "semacquire": true, "sync.Cond.Wait": true,
+	"sync.Mutex.Lock": true, "sync.RWMutex.RLock": true, "sync.RWMutex.Lock": true, "sync.WaitGroup.Wait": true,
+}
+
+// arbaceDeadlock: the program's goroutines' traces when it is deadlocked as runtime.checkdead would say (OWN: the
+// hook's signal registrations), else ""
+func arbaceDeadlock(own int64) string {
+	if arbaceTimeSleepUntil() != 1<<63-1 || signal.ArbaceCoverRefs(nil) > own {
+		return ""
+	}
+	// a cheap look first (the scheduler's counts, no stop of the world): a goroutine running beside this one, or
+	// runnable, is no deadlock
+	ms := []metrics.Sample{{Name: "/sched/goroutines/running:goroutines"}, {Name: "/sched/goroutines/runnable:goroutines"}}
+	metrics.Read(ms)
+	if ms[0].Value.Kind() == metrics.KindUint64 && (ms[0].Value.Uint64() > 1 || ms[1].Value.Uint64() > 0) {
+		return ""
+	}
+	buf := make([]byte, 1<<16)
+	for {
+		n := runtime.Stack(buf, true)
+		if n < len(buf) {
+			buf = buf[:n]
+			break
+		}
+		buf = make([]byte, 2*len(buf))
+	}
+	var gs []string
+	for _, g := range strings.Split(strings.TrimRight(string(buf), "\n"), "\n\n") {
+		if strings.Contains(g, "internal/coverage/cfile.arbaceCoverHook") || strings.Contains(g, "os/signal.signal_recv") {
+			continue
+		}
+		hdr, _, _ := strings.Cut(g, "\n")
+		i, j := strings.Index(hdr, "["), strings.LastIndex(hdr, "]")
+		if i < 0 || j < i {
+			return ""
+		}
+		if st, _, _ := strings.Cut(hdr[i+1:j], ","); !arbaceBlocked[st] {
+			return ""
+		}
+		gs = append(gs, g)
+	}
+	return strings.Join(gs, "\n\n")
+}
 
 // arbaceEmitMu: one write of the hook's at a time, and the program's exit waits for it
 var arbaceEmitMu sync.Mutex
@@ -80,10 +144,21 @@ func arbaceCoverHook() {
 	if v, err := strconv.Atoi(os.Getenv("ARBACE_COVER_FLUSH")); err == nil {
 		secs = v
 	}
-	if secs > 0 {
+	dl := os.Getenv("ARBACE_COVER_DEADLOCK") != "0"
+	if secs > 0 || dl {
 		go func() {
-			for range time.Tick(time.Duration(secs) * time.Second) {
-				arbaceEmit(d)
+			for t := 1; ; t++ {
+				ts := syscall.Timespec{Sec: 1}
+				syscall.Nanosleep(&ts, nil) // not time.Sleep: a runtime timer would hide a deadlock
+				if secs > 0 && t%secs == 0 {
+					arbaceEmit(d)
+				}
+				if dl {
+					if gs := arbaceDeadlock(int64(len(sigs))); gs != "" {
+						os.Stderr.WriteString("fatal error: all goroutines are asleep - deadlock!\n\n" + gs + "\n")
+						os.Exit(2) // Go's counter hook writes the counters
+					}
+				}
 			}
 		}()
 	}
