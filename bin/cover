@@ -9,14 +9,21 @@
 #                        a check run with coverage: bin/java-check (the interp and compiled levels; --essential,
 #                        --essential-compiled) and bin/goi check run the cover build (the compiled level its programs
 #                        built with the same flags), each test with its GOCOVERDIR, RUN/TOOL/ID (TOOL java-interp,
-#                        java-compiled, goi)
-#   bin/cover blocks RUN [--tool TOOL,...] [--crop CROP] [-o OUT]
+#                        java-compiled, goi); bin/ci check (TOOL ci: the node programs on the cover build; with
+#                        CI_COVER_READ=1 also ci-read: each program read, checked and built by a process of its own on
+#                        it), bin/ci check --aot (ci-aot: the shards built with -cover of arbace/ci and arbace/crt),
+#                        bin/clojure-tests (clojure: the eval level on the cover build's arbace-tests; --aot,
+#                        clojure-aot: the compiled suite's program built with the cover flags), a namespace a test
+#   bin/cover blocks RUN [--tool TOOL,...] [--crop CROP] [--pkgs ERE] [-o OUT]
 #                        each test's covered blocks of a crop's code under check (tools/covsubset blocks): for each
 #                        TOOL of RUN (default all) OUT/TOOL (default RUN/blocks/TOOL): tests.tsv (ID, its blocks,
 #                        their count), blocks/N.txt, files.tsv (each source file's blocks and the covered share),
 #                        summary.tsv (tests-without-counters: runs that wrote none, a SIGKILL before the first flush
 #                        or a Go panic's exit). The crop: --crop, else the tool's (java-* java, goi go, ci c,
-#                        clojure clojure); the files of cover_exclude (j2g's user classes in arbace/lang) left out
+#                        clojure clojure); the files of cover_exclude (j2g's user classes in arbace/lang) left out;
+#                        --pkgs: only the crop's packages ERE matches (a level's part of its crop: C's run level
+#                        '^arbace/(ci|crt|cinterp|aot_arbace_c_(cinterp|repl))$', its read level
+#                        '^arbace/aot_arbace_(repr_c|c_check|c_build|c_musl)')
 #   bin/cover classes DIVERGENCES RESULTS [--level L] [--controls FILE] -o OUT
 #                        each test's class (the subset's --classes and --keep): RESULTS a check's rows, ID [LEVEL]
 #                        RESULT REASON tab-separated (bin/goi check's results.tsv, bin/java-check's), a non-pass
@@ -25,6 +32,13 @@
 #                        (ID<TAB>CLASS), OUT.keep (the tests of a class whose :kind is one whose work remains,
 #                        test/cover/classes.ae's keep-kinds, and the controls' subjects and references: test/java/controls.edn's :subject and :reference, or
 #                        test/goi/controls.txt's LEVEL ID SUBJECT REFERENCE lines, LEVEL interp, or --control-level)
+#   bin/cover clojure-classes RESULTS -o OUT [--aot]
+#                        Clojure's suite's classes per test namespace (test/cover/clojure_rows.ae): RESULTS the
+#                        suite's results (test/arbace-go-results.edn; --aot test/arbace-go-aot-results.edn), each
+#                        namespace's cases as bin/reap judges them against upstream's, classed by the level's files
+#                        (test/clojure/divergences-read.edn and divergences.edn; --aot divergences-aot.edn); a
+#                        namespace of several classes classed by their set (A+B); OUT.classes, OUT.keep (the kept
+#                        kinds' namespaces and test/clojure/controls.edn's), OUT.cases
 #   bin/cover subset OUT [--keep FILE] [--classes FILE] [--times FILE] [--seeds N]
 #                        the subset of a tool's tests by GTS205 (a) (tools/covsubset reduce, queue 160's and 161's
 #                        reducer): the tests of --keep (one id a line: the controls' subjects and references, the
@@ -62,12 +76,13 @@ crop_of() {
 }
 
 blocks() {
-  local run=${1:?bin/cover blocks RUN} tools="" crop="" out="" t c cache pk ex
+  local run=${1:?bin/cover blocks RUN} tools="" crop="" out="" pre="" t c cache pk ex
   shift
   while [ $# -gt 0 ]; do
     case $1 in
       --tool) tools=${2//,/ }; shift 2 ;;
       --crop) crop=$2; shift 2 ;;
+      --pkgs) pre=$2; shift 2 ;;
       -o) out=$2; shift 2 ;;
       *) echo "cover blocks: unknown option $1" >&2; return 2 ;;
     esac
@@ -81,7 +96,7 @@ blocks() {
     pk=${out:-$run/blocks}/$t.pkgs
     mkdir -p "${out:-$run/blocks}/$t"
     # the crop's packages of the cover builds (the executable's and the test build's)
-    cat "$cache"/pkgs-*.txt 2>"$discard" | LC_ALL=C sort -u | grep -E "$(cover_pkg_re "$c")" > "$pk" \
+    cat "$cache"/pkgs-*.txt 2>"$discard" | LC_ALL=C sort -u | grep -E "$(cover_pkg_re "$c")" | grep -E "${pre:-.}" > "$pk" \
       || { echo "cover blocks: no package of crop $c in $cache/pkgs-*.txt" >&2; return 1; }
     echo "== $t ($c: $(wc -l < "$pk") packages)"
     find "$run/$t" -mindepth 1 -maxdepth 1 -type d | LC_ALL=C sort > "${out:-$run/blocks}/$t.dirs"
@@ -109,7 +124,11 @@ subset() {
     BEGIN { while ((getline l < keep) > 0) if (l != "") k[l] = 1
             while ((getline l < cls) > 0) { split(l, a, "\t"); if (a[2] != "") c[a[1]] = a[2] }
             while ((getline l < tm) > 0) { split(l, a, "\t"); t[a[1]] = a[2] } }
-    { print $1 "\t" $2 "\t" (($1 in k) ? 1 : 0) "\t" (($1 in t) ? t[$1] : 0) "\t" (($1 in c) ? c[$1] : "-") }' "$o/tests.tsv" > "$o/index.tsv"
+    { seen[$1] = 1; print $1 "\t" $2 "\t" (($1 in k) ? 1 : 0) "\t" (($1 in t) ? t[$1] : 0) "\t" (($1 in c) ? c[$1] : "-") }
+    # a test of --classes or --keep that wrote no counters (not run: a program refused before its run, by design) is
+    # still the subset'"'"'s, its profile - (tools/cicover'"'"'s index: every judged program, a kept one costs no run)
+    END { for (i in c) if (!(i in seen)) { seen[i] = 1; print i "\t-\t" ((i in k) ? 1 : 0) "\t" ((i in t) ? t[i] : 0) "\t" c[i] }
+          for (i in k) if (!(i in seen)) print i "\t-\t1\t" ((i in t) ? t[i] : 0) "\t-" }' "$o/tests.tsv" | LC_ALL=C sort > "$o/index.tsv"
   "$ex" reduce -seeds "$seeds" -o "$o/subset.txt" -curve "$o/curve.tsv" "$o/index.tsv" | tee "$o/reduce.tsv"
 }
 
@@ -132,6 +151,14 @@ classes() {
 
 case ${1:-} in
   classes) shift; classes "$@" ;;
+  clojure-classes)
+    shift; res=${1:?bin/cover clojure-classes RESULTS -o OUT [--aot]}; shift; o="" divs="test/clojure/divergences-read.edn test/clojure/divergences.edn"
+    while [ $# -gt 0 ]; do case $1 in -o) o=$2; shift 2 ;; --aot) divs=test/clojure/divergences-aot.edn; shift ;; *) echo "cover clojure-classes: unknown option $1" >&2; exit 2 ;; esac; done
+    [ -n "$o" ] || { echo "cover clojure-classes: -o OUT" >&2; exit 2; }
+    res=$(realpath "$res"); o=$(realpath -m "$o")
+    exe=$(. "$root/bin/lib/host.bash" && arbace_host_exe) || exit 1
+    # shellcheck disable=SC2086
+    cd "$root" && ARBACE_PATH=$root:$root/test "$exe" test/cover/clojure_rows.ae "$res" test/baseline-results.edn test/clojure/controls.edn "$o" $divs ;;
   build) shift; exec "$root/bin/arbace-go" --gate-build --cover "$@" ;;
   exe) cover_exe "$root" "${2:-arbace}" ;;
   blocks) shift; blocks "$@" ;;

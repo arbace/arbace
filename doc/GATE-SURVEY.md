@@ -3428,3 +3428,40 @@ as failed (`judge_note`: its run a failure, its ids into the part's subset). The
 
 **What remains.** The `:subset`s (GT8.3) for repr/go, Java and goi: until then their parts run whole in every tier;
 committed id records (or a `:universe-cmd`) for the oracle, diffcheck and repr/clojure; a part for `suite-aot`.
+
+## As built: GT8.3, C's run checks and Clojure's suite on the cover build (write-ahead, branch `gt8-cover2`, 2026-11-03)
+
+GTS205 (a), GTS206 (a) for the two crops the cover build did not reach: one method, the cover build of the gate's key
+(`bin/arbace-go --gate-build --cover`), a GOCOVERDIR per test under `ARBACE_COVER_DIR`, `bin/cover blocks|classes|subset`.
+`bin/lib/cover.bash` is unchanged (its digest is in the cover key): C's and Clojure's packages were already in the build.
+
+**The hooks.** `bin/ci check` (tool `ci`): the node programs on the cover build's `arbace -m arbace.c.repl run-nodes`
+(CInterp's natives over `arbace/ci`, `arbace/crt`) in place of cirun or `CI_EXE`, the budget `CI_COVER_BUDGET_X` (2)
+times; with `CI_COVER_READ=1` also `ci-read`: each program read, checked and built by a `nodes-list` process of its own on
+the cover build (repr/c, the checker, the builder, musl's link). `bin/ci check --aot` (tool `ci-aot`): each shard built
+with `-cover -coverpkg=arbace/ci,arbace/crt,arbace/shard` and the cover build's hook by an overlay; and `ci-cf2g`: each
+program compiled by a `compile-list` process of its own on the cover build (cf2g with the read). `bin/clojure-tests`
+(tool `clojure`): the eval level on the cover build's `arbace-tests`, a GOCOVERDIR per test namespace's process (run
+`cover`); `--aot` (`clojure-aot`): the compiled suite's program built with `cover_go_flags`, its key and run
+(`aot-cover`) apart (wired, not run yet). `bin/cover blocks --pkgs ERE` keeps a level's part of its crop's packages;
+`bin/cover subset` indexes a classed or kept test that wrote no counters (a program refused before its run: tools/cicover's
+rule, every judged program); `bin/cover classes` reads C's records (`.edn` rows) and C's controls (`:level`);
+`bin/cover clojure-classes RESULTS -o OUT [--aot]` classes the suite per namespace as `bin/reap` does
+(`test/cover/clojure_rows.ae`; a namespace of several classes classed by their set).
+
+**The demonstration** (benchmarksgame, 29 programs; the suite, 83 namespaces; at `cc16ac9b`, cover build 5ebb7b5e):
+
+| level | packages | blocks covered | subset | note |
+|---|---|---|---|---|
+| C run (`ci`) | ci, crt | 868 of 2,051 | 11 | the same 11 as `bin/ci cover`'s cirun and corpora.edn's `:subset` |
+| C run (`ci`) | ci, crt, cinterp, c.cinterp, c.repl | 1,129 of 3,495 | 11 | the same |
+| C AOT (`ci-aot`) | ci, crt | 438 of 2,033 | 8 | within the run level's 11 |
+| C cf2g (`ci-cf2g`) | c.cf2g | 5,078 of 12,062 | 7 | adds fasta-2, nbody-7 |
+| C read (`ci-read`) | repr.c.*, c.check, c.build, c.musl | 45,503 of 161,127 | 17 | |
+| Clojure eval (`clojure`) | arbace/lang, the vendored namespaces, c2j | 71,388 of 237,876 | 63 | 75% of the time |
+
+The back end's union is 13 of 29, every level's 21. The run check under coverage, the read compiled: 130 s (stage 0's
+evaluated `nodes-list` and cirun: 1,113 s); the AOT check with cf2g compiled per program: 151 s (stage 0's shard: 935 s).
+So `bin/ci cover` (cirun built with `-cover`) is superseded: the cover build gives the same subset and its read level.
+Clojure's namespaces reduce little: every process loads every test namespace first (about two thirds of its time) and
+each namespace's own tests reach blocks no other reaches; its eval level is 2 min of wall in the essential gate.
