@@ -3,7 +3,9 @@
   (arbace.repr.llvm), its round trip, and arbace.cpp.lower's C forms (RES16: the lowering keeps C++'s namespace until its
   rename, after C++'s CX8). What is Rust's own here is the native-std leg's one substitution (EVAL.md §4): rustc's internal
   __rust_try, catch_unwind's frame, is not lowered but called as cx_rust_try, a native function, so that the native unwinder's
-  panics are caught where the original catches them."
+  panics are caught where the original catches them; and since RE3 the runtime's pre-pass over std's units (EVAL.md §8): the
+  inline assembly std_detect runs answered by the layer (cpuid, xgetbv: RES8 (a)'s fixed CPU), and the functions whose IR the
+  lowering does not take (f16, f128, integers past 128 bits) made stubs that abort with their name when called."
   (:require [arbace.string :as str]
             [arbace.walk :as walk]
             [arbace.repr.llvm :as llvm]
@@ -22,6 +24,98 @@
                                    (vec (remove #(and (= (first %) 'llvm/define) (contains? olds (second %))) forms)))]
         (conj renamed '(llvm/declare g/cx_rust_try i1 [[ptr] [ptr] [ptr]] :ret-attrs [:zeroext]))))))
 
+(def ^:private unlowered-types #{"half" "bfloat" "fp128" "ppc_fp128" "x86_amx"})
+
+(defn- unlowered-type
+  "The name of an LLVM type the lowering does not take (f16, bf16, f128, integers past __int128), or nil."
+  [x]
+  (when (and (symbol? x) (nil? (namespace x)))
+    (let [n (name x)]
+      (or (unlowered-types n)
+          (when-let [[_ b] (re-matches #"i([0-9]+)" n)] (when (> (Long/parseLong b) 128) n))))))
+
+(def asm-answers
+  "The inline assembly of std's units the layer answers (arbace/rust/rt/eh.c.ae; RES8 (a)): core::arch's __cpuid_count as std_detect
+  inlines it (cpuid with rbx saved: the outputs ebx, eax, ecx, edx; the inputs eax and ecx) -> rsi_cpuid."
+  {["mov ${0:q}, rbx\ncpuid\nxchg ${0:q}, rbx" "=&r,=&{ax},=&{cx},=&{dx},1,2,~{memory}"]
+   ['g/rsi_cpuid '(llvm/declare g/rsi_cpuid (struct i32 i32 i32 i32) [[i32] [i32]])]})
+
+(def replaced-functions
+  "std's functions whose IR the lowering does not take but the layer implements (arbace/rust/rt/eh.c.ae): the define keeps its name,
+  linkage and parameters, its body a call of the layer's function with them. u128's carrying_mul_add multiplies in i256 (u128's
+  Display and the integer parsing call it)."
+  {#"_4core3numo16carrying_mul_add" 'g/rsi_u128_carrying_mul_add})
+
+(def renamed-intrinsics
+  "The target's intrinsics std's units call that the layer answers (RES8 (a))."
+  {'g/llvm.x86.xgetbv 'g/rsi_xgetbv})
+
+(defn- asm-callee? [x] (and (seq? x) (= (first x) 'asm)))
+
+(defn- unanswered-asm
+  "The template of a non-empty inline assembly in x that asm-answers does not answer, or nil."
+  [x]
+  (some #(when (and (asm-callee? %) (not= "" (second %)) (not (asm-answers [(second %) (nth % 2)]))) (second %))
+        (tree-seq coll? seq x)))
+
+(defn- mentions
+  "Why a define cannot be lowered (its first unlowered type, or inline assembly), or nil."
+  [f]
+  (or (some unlowered-type (tree-seq coll? seq f))
+      (when (unanswered-asm f) "inline-asm")))
+
+(defn runtime-forms
+  "std's unit's forms for the runtime (EVAL.md §8): the answered assembly and intrinsics called as the layer's functions; each
+  define the lowering does not take a stub of the same name and linkage (void, no parameters) that calls rsi_not_lowered with its
+  name and reason (a direct call of it then goes through a cast pointer, as calls whose types differ do); declarations of those
+  types no longer referenced dropped. [forms stubbed], stubbed: [[name reason]...]."
+  [forms]
+  (let [used-answers (atom #{})
+        forms (walk/postwalk (fn [x]
+                               (cond
+                                 (and (seq? x) (= (first x) 'call) (asm-callee? (nth x 2 nil)))
+                                 (let [a (nth x 2)]
+                                   (if-let [[g d] (asm-answers [(second a) (nth a 2)])]
+                                     (do (swap! used-answers conj d) (apply list (concat (take 2 x) [g] (drop 3 x))))
+                                     x))
+                                 (contains? renamed-intrinsics x) (renamed-intrinsics x)
+                                 :else x))
+                             forms)
+        stubbed (atom [])
+        replaced (atom [])
+        forms (vec (for [f forms]
+                     (if-let [g (and (= (first f) 'llvm/define) (= 'void (nth f 2))
+                                     (some (fn [[re g]] (when (re-find re (lower/gname-str (second f))) g)) replaced-functions))]
+                       (let [[_ n rt ps & more] f
+                             o (apply hash-map more)
+                             args (vec (for [p ps] [(first p) (peek p)]))]
+                         (swap! replaced conj (list 'llvm/declare g rt (vec (for [p ps] [(first p)]))))
+                         (apply list 'llvm/define n rt ps
+                                (concat (mapcat (fn [kk] (when-let [v (kk o)] [kk v])) [:linkage :visibility])
+                                        [:body [(list 'block nil (list 'call rt g args) '(ret void))]])))
+                     (if-let [why (and (= (first f) 'llvm/define) (mentions f))]
+                       (let [n (lower/gname-str (second f))
+                             k (count @stubbed)
+                             o (apply hash-map (drop 4 f))
+                             msg (str n " (" why ")")]
+                         (swap! stubbed conj [n why msg k])
+                         (apply list 'llvm/define (second f) 'void []
+                                (concat (mapcat (fn [kk] (when-let [v (kk o)] [kk v])) [:linkage :visibility])
+                                        [:body [(list 'block nil
+                                                      (list 'call 'void 'g/rsi_not_lowered [['ptr (symbol "g" (str "rsi.nl." k))]])
+                                                      '(unreachable))]])))
+                       f))))
+        refs (set (for [f forms :when (not= (first f) 'llvm/declare) x (tree-seq coll? seq (drop 2 f))
+                        :when (and (symbol? x) (= (namespace x) "g"))] x))
+        forms (vec (remove #(and (= (first %) 'llvm/declare) (mentions %) (not (refs (second %)))) forms))
+        extra (concat (seq @used-answers) (distinct @replaced)
+                      (when (seq @stubbed)
+                        (cons '(llvm/declare g/rsi_not_lowered void [[ptr]])
+                              (for [[_ _ msg k] @stubbed]
+                                (list 'llvm/global (symbol "g" (str "rsi.nl." k)) (list 'array (inc (count msg)) 'i8)
+                                      (list 'c-string (str msg "\u0000")) :linkage :private :constant true :align 1)))))]
+    [(into forms extra) (mapv (fn [[n why]] [n why]) @stubbed)]))
+
 (defn- intrinsics
   "The llvm.* names a module declares, sorted."
   [forms]
@@ -30,15 +124,22 @@
 (defn lower-one
   "One unit: read, round trip (DIR/forms.ae, DIR/print.ll, DIR/rt.status), the intrinsics it declares (DIR/intrinsics.txt),
   lowered (DIR/lowered.c, or DIR/lower.refused: CLASS<tab>MESSAGE), its times (DIR/lower.times: read and lower in ms)."
-  [^String ll ^String dir ^String c-name native?]
-  (let [t0 (System/currentTimeMillis)
+  [^String ll ^String dir ^String c-name mode]
+  (let [native? (= mode :native-std)
+        t0 (System/currentTimeMillis)
         forms (try (llvm/read-ll ll) (catch Throwable e nil))
         t1 (System/currentTimeMillis)
         [_ rt d] (llvm/roundtrip-one (str dir "/forms.ae") (or forms ll) (str dir "/print.ll"))
         _ (spit (str dir "/rt.status") (str rt "\t" d "\n"))
         _ (when forms (spit (str dir "/intrinsics.txt") (apply str (map #(str % "\n") (intrinsics forms)))))
         t2 (System/currentTimeMillis)
-        r (lower/lower-file (if forms (if native? (native-std forms) forms) ll) c-name)
+        [forms stubbed] (cond (nil? forms) [nil nil]
+                              (= mode :runtime) (runtime-forms forms)
+                              native? [(native-std forms) nil]
+                              :else [forms nil])
+        _ (when (= mode :runtime)
+            (spit (str dir "/stubbed.tsv") (apply str (for [[n why] stubbed] (str n "\t" why "\n")))))
+        r (lower/lower-file (or forms ll) c-name)
         t3 (System/currentTimeMillis)]
     (spit (str dir "/lower.times") (str (- t1 t0) "\t" (- t3 t2) "\n"))
     (if (:refused r)
@@ -47,16 +148,19 @@
     (boolean (:refused r))))
 
 (defn -main
-  "bin/rsi lower FILE.ll [-o OUT.c] [--native-std]: FILE's IR lowered and printed as C (a refusal: its class on stderr, exit 3);
-  lower-list LIST [--native-std]: NAME<tab>LL<tab>OUTDIR lines, each lowered by lower-one (RSI_THREADS, default 2)."
+  "bin/rsi lower FILE.ll [-o OUT.c] [--native-std|--runtime]: FILE's IR lowered and printed as C (a refusal: its class on stderr,
+  exit 3); lower-list LIST [--native-std|--runtime]: NAME<tab>LL<tab>OUTDIR lines, each lowered by lower-one (RSI_THREADS, default
+  2). --native-std: the native-std leg's substitution (EVAL.md §4); --runtime: std's units' pre-pass (runtime-forms, EVAL.md §8)."
   [verb & args]
-  (let [native? (boolean (some #{"--native-std"} args))
-        args (remove #{"--native-std"} args)]
+  (let [mode (cond (some #{"--native-std"} args) :native-std (some #{"--runtime"} args) :runtime)
+        native? (= mode :native-std)
+        args (remove #{"--native-std" "--runtime"} args)]
     (case verb
       "lower" (let [[f & more] args o (apply hash-map more)
                     out (or (get o "-o") (str/replace f #"\.ll$" ".c"))
                     forms (llvm/read-ll f)
-                    r (lower/lower-file (if native? (native-std forms) forms) (.getName (java.io.File. ^String out)))]
+                    r (lower/lower-file (case mode :native-std (native-std forms) :runtime (first (runtime-forms forms)) forms)
+                                        (.getName (java.io.File. ^String out)))]
                 (if (:refused r)
                   (do (binding [*out* *err*] (println (str f ": refused (" (name (:refused r)) "): " (:message r)))) (System/exit 3))
                   (llvm/spit-latin1 out (:c r))))
@@ -64,7 +168,7 @@
                          rows (for [l (str/split-lines (slurp lst)) :when (seq l)] (str/split l #"\t"))
                          pool (java.util.concurrent.Executors/newFixedThreadPool (Integer/parseInt (or (System/getenv "RSI_THREADS") "2")))
                          futs (mapv (fn [[n ll dir]]
-                                      (.submit pool ^java.util.concurrent.Callable (fn [] (lower-one ll dir (str n ".c") native?))))
+                                      (.submit pool ^java.util.concurrent.Callable (fn [] (lower-one ll dir (str n ".c") mode))))
                                     rows)
                          refused (count (filter #(.get ^java.util.concurrent.Future %) futs))]
                      (.shutdown pool)
