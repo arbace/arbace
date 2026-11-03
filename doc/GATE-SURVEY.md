@@ -3465,3 +3465,62 @@ evaluated `nodes-list` and cirun: 1,113 s); the AOT check with cf2g compiled per
 So `bin/ci cover` (cirun built with `-cover`) is superseded: the cover build gives the same subset and its read level.
 Clojure's namespaces reduce little: every process loads every test namespace first (about two thirds of its time) and
 each namespace's own tests reach blocks no other reaches; its eval level is 2 min of wall in the essential gate.
+
+## As built: GT8 (C's read lists) (write-ahead, branch `c-lists`, 2026-11-03)
+
+C's read-level checks take a file list, so GT8.4's rotation reaches them (about 220 of C's 300 full-check minutes).
+
+**The tools.** `--only LIST` (ids `CORPUS/NAME`, blank and `#` lines apart) on `bin/repr-c check --tokens`, `bin/repr-c
+parse-check`, `bin/repr-c roundtrip` and `bin/ci annotations` (`bin/lib/repr-c/only.bash`: an id outside the corpora, or
+not `CORPUS/NAME`, refused, exit 2; exported as `REPR_C_ONLY`), and on `bin/ci dg` (`CI_DG_ONLY`, which `--essential` used
+alone until now). `arbace.repr.c.ppcheck/lists`, the four checks' common lists, keeps a corpus's listed files and writes
+`WORK/CORPUS/only.txt`, the judges' mark of a partial run; a listed name its corpus does not hold fails the lists. Each
+judge (`ppcheck/check`, `parsecheck/check`, `annot/judge`, `rtcheck/judge`) then judges what the run holds
+(`arbace.repr.c.results`'s `partial-names`, `in-run`): a known entry of a file not run is not stale, and a control whose
+reference the partial run does not hold is left, not "not judged" (a whole run keeps the strict rule). Every judge now
+prints each failing file, and each stale entry, as `FAIL CORPUS/NAME WHY` (at most 40 a corpus, `print-failing`): the
+rotation's `:failed-re`. Refused with a list: `--record` (all five), `--record-gcc`, `--resume` (a kept corpus's lists),
+`--mutants-only` (parse-check; a list draws no mutants), `--essential` (dg); `--judge --record` (annotations) and
+`--resume --record` (roundtrip) after a partial run. Tests: `test/c/judge_test.ae`'s `read-lists-only`,
+`read-partial-judges`, `read-only-refusals` (74 assertions with the five control tests). Shown by hand: the four checks on
+`benchmarksgame/{fannkuchredux,fasta-8,fasta}.c` (15 to 30 s each, every control judged and differing), the token check on
+`fannkuchredux.c` alone (its three controls left), `bin/ci dg --only` on three files of two groups (its control judged).
+
+**The planner.** `:rotate`'s `:id-as` (with `:id-re`: the id is the match replaced, `$1/$2`, ids then under `PART/` as
+without `:id-re`): the results files' `"CORPUS FILE"` rows as `CORPUS/FILE`. `:subset-key` (default `:subset`): the corpus
+map's key that holds the subset, since the run corpora's `:subset` (ci's back end, VM 161) is another check's. rotation-test
+56 of 56 (the case: a results file, a subset under its own key, a name with a slash; C's one pattern, a name with spaces).
+
+**The steps.** `:rotate` on `c-tokens`, `c-parse`, `c-annotations`, `c-roundtrip` (universe the check's results file,
+subset `:subset-tokens`, `:subset-parse`, `:subset-annot`, `:subset-roundtrip`, `:always` the controls' two files,
+`benchmarksgame/fannkuchredux.c` and `fasta-8.c`, `:failed-re "^FAIL ([^[:cntrl:]]+)[[:cntrl:]].*$"`, below). `c-dg` stays whole: one step over
+seven groups, its control crossing two of them (a part per group would leave it in every part).
+
+**The subsets** (GTS205's rule needs the code under check's coverage: repr/c's lexer, preprocessor, parser, converter,
+printer and arbace.c.check). `bin/ci cover`'s method extends in its reducer (`tools/cicover` takes any `KEY N COUNT`
+profile) but not in its measure: ci's back end is a Go program (cirun) built with `-cover`, while repr/c is Arbace code,
+evaluated on stage 0 or compiled into the executable. Proposed: GTS206 (a)'s cover build of the gate's executable
+(`go build -cover -coverpkg` the `aot_arbace_repr_c_*` and `aot_arbace_c_check*` packages, kept by key), the checks run on
+it compiled (not `ARBACE_PATH_FIRST`), one file a process or `runtime/coverage`'s counters cleared and written around each
+file (`REPR_C_THREADS=1`), then `tools/cicover` with KEEP the controls' files and one file per known class. Until then a
+proxy, computed for one corpus: the tree check's `:subset-parse` of benchmarksgame, the cases and token kinds of cc's
+tree dumps (271 over the 52 files; `REPR_C_PARSE_KEEP=1`), reduced by `tools/cicover`: 9 files, 22% of the nodes (with
+parent-child pairs, 1,287 features, 30 files: too fine). It makes `c-parse.benchmarksgame` rotate in `--nightly`.
+
+**Decided** (the user, 2026-11-03). The proxy subset stays, labelled, until the cover build reaches repr/c. A file name may
+hold spaces (`cxgo/main with args.c`): every C judge (the run checks', cf2g's, dg's and the read checks', their controls
+too) prints `FAIL ID`, a tab, `WHY`, and every C step's `:failed-re` is `^FAIL ([^[:cntrl:]]+)[[:cntrl:]].*$` (the id up
+to the tab: the `.rot` file is tab-separated, so no literal tab in the pattern); the runner notes the failed ids one a line
+(`while read`, not word splitting); rotation-test 56 of 56 (one pattern over C's steps; the spaced name noted whole). `c-dg`
+stays one step, unrotated.
+
+**Review 188's fixes** (the Mac's review of `c-lists`, 9adfafe4). The blocker, `test/gate/audited-test-test.bash` taking the
+planner's read of `test/repr/c/parse-check-results.edn` (the rotated `c-parse.benchmarksgame`'s universe) for a bulk read:
+the test now allows every `:universe` the steps table names (read from it), not a path pattern: the planner reads a
+rotated part's universe by design, and a new crop's universe is then allowed without editing the test. The lows: L1 the
+comments; L2 `bin/ci check`, `check --aot` and `bin/ci record-ref` list their corpora with `REPR_C_ONLY` empty; L3 a whole
+`--resume` (roundtrip, annotations) lists a corpus a partial run left again; L4 `bin/ci annotations --judge --only`
+refused; L5 the `:gcc-digest` control not left for a reference outside a partial run (its reference is the recorded
+digest); L6 the planner warns when `:always` names a file of the part its universe lost; L7 every stale entry printed
+after the 40 failures; L8 the refusals' wording; L9 `c-check`'s and `c-aot`'s `:rotate` `:always` their control's two
+files (`benchmarksgame/fannkuchredux.c`, `fasta.c`).
