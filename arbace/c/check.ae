@@ -1312,8 +1312,12 @@
       (int-type? t) (cond (integer? v) (wrap v t)
                           (instance? Double v) (let [d (double v)]
                                                  (feat! :cc-float-fold)
-                                                 (when-not (or (Double/isNaN d) (Double/isInfinite d))
-                                                   (wrap (bigint (.toBigInteger (java.math.BigDecimal. d))) t)))
+                                                 (cond
+                                                   ;; 6.3.1.2: to bool, 0 when the value compares equal to 0, else 1 (a NaN
+                                                   ;; and an infinity too); never truncated first ((bool)0.5 is 1, queue 173)
+                                                   (= :bool (:k t)) (if (zero? d) 0 1)
+                                                   (or (Double/isNaN d) (Double/isInfinite d)) nil
+                                                   :else (wrap (bigint (.toBigInteger (java.math.BigDecimal. d))) t)))
                           :else nil)
       ;; review 057's finding 4: an integer is rounded once to float, not through a double (2^53 + 2^29 + 1)
       (and (integer? v) (#{:float :float32 :float16 :bf16} (:k t))) (round-big (java.math.BigDecimal. (biginteger v)) (:k t))
@@ -1652,6 +1656,27 @@
 
 (declare ptr-conv! constexpr-check! attr-decl-check! exi)
 
+(def ^:private math-builtin-fns
+  "Queue 178: <math.h>'s functions whose __builtin_ spelling cc's Builtin does not declare, with their prototypes (gcc's,
+  C23 7.12), for the double, float (f) and long double (l) spellings: an undeclared builtin's int result and unpromoted
+  arguments made __builtin_log2(2.75) 0 (CX8). The builder calls musl's function of the name less __builtin_."
+  (let [ld {:k :ldouble}]
+    (into {}
+          (for [[names shape] [[["log2" "exp2" "trunc" "round" "rint" "nearbyint" "cbrt" "expm1" "log1p" "logb"] :f-f]
+                               [["fmin" "fmax" "hypot" "fdim" "remainder"] :ff-f]
+                               [["fma"] :fff-f]
+                               [["ilogb"] :f-int]
+                               [["lround" "lrint"] :f-long]
+                               [["llround" "llrint"] :f-llong]
+                               [["scalbn"] :fi-f]]
+                n names
+                [sfx ft] [["" t-double] ["f" t-float] ["l" ld]]]
+            [(str "__builtin_" n sfx)
+             (let [[ret ps] (case shape
+                              :f-f [ft [ft]] :ff-f [ft [ft ft]] :fff-f [ft [ft ft ft]] :f-int [t-int [ft]]
+                              :f-long [t-long [ft]] :f-llong [t-llong [ft]] :fi-f [ft [ft t-int]])]
+               {:k :fn :ret ret :params ps :variadic false :proto true})]))))
+
 (defn- call
   "A call's result: the callee's result, its arguments checked."
   [f args form]
@@ -1663,7 +1688,7 @@
              (cond
                (or (str/starts-with? fname "__builtin_") (str/starts-with? fname "__sync_") (str/starts-with? fname "__atomic_"))
                (do (feat! :cc-undeclared-builtin)
-                   (res {:k :fn :ret (get builtin-types fname t-int) :params [] :proto false} :builtin fname))
+                   (res (or (math-builtin-fns fname) {:k :fn :ret (get builtin-types fname t-int) :params [] :proto false}) :builtin fname))
                :else (do (when (c99?) (err! (str "implicit declaration of function '" fname "'")))
                          (res (:t (implicit-fn! fname)))))
              (if bk (res (:t bk)) (ex f)))
@@ -2345,8 +2370,11 @@
         (feat! :cc-auto)
         (record! nm (declare-object! n t m :obj nil false)))
       (let [t (vectorize (parse-type (or (:tag m) 'int)) m)
-            t (if (contains? m :c/alignas) (do (exi (:c/alignas m)) t) t)
-            _ (when-let [at (:c/alignas-type m)] (parse-type at))
+            ;; the alignment specifiers' alignment (6.7.6; 0 none), kept in the entry's :m for the builder's layout (queue 173:
+            ;; it laid every object out at its type's alignment)
+            alv (when (contains? m :c/alignas) (:v (exi (:c/alignas m))))
+            alt (when-let [at (:c/alignas-type m)] (align-of (parse-type at)))
+            m (if (or (integer? alv) alt) (assoc m :c/declared-align (max (long (if (integer? alv) alv 0)) (long (or alt 0)))) m)
             empty-init (and (seq? init) (= '(init) init))
             ;; C23: `{}` gives an array of unknown size none (gcc: the zero-size diagnostic), a variable-length array only `{}`
             _ (when (and has-init (not (cx :permissive)) (= :array (:k (unq t))) (nil? (:n (unq t))) (not (:vla (unq t))) empty-init)
