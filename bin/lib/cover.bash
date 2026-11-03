@@ -4,8 +4,9 @@
 #   cover_crops                  the crops whose code under check is measured: java go c clojure
 #   cover_pkg_re CROP            an extended regex of the import paths of CROP's code under check, over the
 #                                packages of the program j2g makes (module arbace): Java's, jrt (the Java
-#                                runtime and the translated JDK), the translated runtime arbace/lang and the
-#                                Java forms' front end and interpreter (arbace.classes.*); Go's, goi's back end
+#                                runtime and the translated JDK) and the Java forms' front end and interpreter
+#                                (arbace.classes.*), GTS205 (a)'s "jrt and the interpreter" (not arbace/lang, the
+#                                Clojure runtime, review 182 finding 2); Go's, goi's back end
 #                                go/arbace/goi and its namespaces (arbace.go, arbace.go.*); C's, ci's back end
 #                                (arbace/ci, arbace/crt, arbace/cinterp), ci's namespaces (arbace.c, arbace.c.*:
 #                                the checker, the builder, cf2g) and repr/c's (the front half, VM report 160's
@@ -22,7 +23,8 @@
 #                                check and its level, java-interp, goi, ...), DIR = ARBACE_COVER_DIR/TOOL/ID with /
 #                                in ID as %, made, ID written into DIR/id; nothing when unset
 #   cover_settle TOOL ID         after the run: the meta-data file the run wrote (about 15 MB, Go writes it into
-#                                every GOCOVERDIR) kept once in ARBACE_COVER_DIR/meta, linked from DIR
+#                                every GOCOVERDIR) kept once in ARBACE_COVER_DIR/meta, hard-linked from DIR
+#   cover_exclude CROP           the source files of CROP's packages that are no code under check (bin/cover blocks)
 #   cover_go_flags ROOT PROG WORK OVERLAY OUT
 #                                bin/build-go's arguments for a cover build of the j2g program PROG
 #
@@ -33,9 +35,19 @@
 
 cover_crops() { echo java go c clojure; }
 
+# a relative ARBACE_COVER_DIR made absolute once: the checks run their programs from other directories (goi
+# from $GOROOT/test, java-check from the test's), review 182 finding 3
+[ -z "${ARBACE_COVER_DIR:-}" ] || { ARBACE_COVER_DIR=$(realpath -m "$ARBACE_COVER_DIR"); export ARBACE_COVER_DIR; }
+
+# cover_exclude CROP: an extended regex of the source files (textfmt's FILE) of CROP's packages that are not code
+# under check: the user classes j2g puts in arbace/lang (J_..._J, names.ae's user-class?: the compiled level's
+# tests, the fixtures), each reached by its own test alone, which would force every test into the cover (review
+# 182 finding 2)
+cover_exclude() { echo '^arbace/lang/J_'; }
+
 cover_pkg_re() {
   case $1 in
-    java) echo '^arbace/(jrt|lang|aot_arbace_classes(_[a-z_]+)?)$' ;;
+    java) echo '^arbace/(jrt|aot_arbace_classes(_[a-z_]+)?)$' ;;
     go) echo '^arbace/(goi|aot_arbace_go(_[a-z_]+)?)$' ;;
     c) echo '^arbace/(ci|crt|cinterp|aot_arbace_c|aot_arbace_c_[a-z0-9_]+|aot_arbace_repr_c(_[a-z0-9_]+)?)$' ;;
     clojure) echo '^arbace/(lang|aot_arbace_(core|core_[a-z_]+|c2j_[a-z_]+|data|datafy|edn|genclass|gvec|inspector|instant|java_[a-z_]+|main|math|pprint|pprint_[a-z_]+|reflect|reflect_java|repl|set|spec_[a-z_]+|stacktrace|string|template|test|test_[a-z_]+|uuid|walk|xml|zip))$' ;;
@@ -59,9 +71,16 @@ cover_cache() {
 }
 
 cover_exe() {
-  local root=$1 n=${2:-arbace} c
+  local root=$1 n=${2:-arbace} c k
   c=$(cover_cache "$root") || return 1
-  [ -x "$c/amd64/$n" ] && [ -f "$c/key" ] && { echo "$c/amd64/$n"; return 0; }
+  # its key the checkout's cover key (the gate's, the hook, this file: review 182 finding 5); an
+  # ARBACE_COVER_CACHE is taken as given, with a note
+  if [ -n "${ARBACE_COVER_CACHE:-}" ]; then
+    [ -x "$c/amd64/$n" ] && { echo "cover: $c/amd64/$n (ARBACE_COVER_CACHE), not compared with the checkout's key" >&2; echo "$c/amd64/$n"; return 0; }
+  else
+    k=$("$root/bin/arbace-go" --cover-key) || return 1
+    [ -x "$c/amd64/$n" ] && [ "$(cat "$c/key" 2>"${TMPDIR:-.}/cover-key.err")" = "$k" ] && { echo "$c/amd64/$n"; return 0; }
+  fi
   echo "cover: no cover build at the checkout's key ($c/amd64/$n; bin/arbace-go --gate-build --cover)" >&2
   return 1
 }
@@ -84,7 +103,8 @@ cover_settle() {
     [ -f "$m" ] && [ ! -L "$m" ] || continue
     s=$ARBACE_COVER_DIR/meta/${m##*/}
     if [ -f "$s" ]; then rm -f "$m"; else mv -f "$m" "$s"; fi
-    ln -s "$s" "$m"
+    # a hard link (a run's directory copied with cp -a or tar keeps it, review 182 L7), else a symbolic one
+    ln "$s" "$m" 2>"${TMPDIR:-.}/cover-ln.err" || ln -s "$s" "$m"
   done
 }
 
