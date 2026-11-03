@@ -147,5 +147,5 @@ fi
   v=$(limited_cpu 30 60 bash -c 'ulimit -v'); g=$(limited_cpu 30 60 bash -c 'echo $GOMEMLIMIT'); z=$(ARBACE_MEM_GIB=0 limited_cpu 30 60 bash -c 'ulimit -v')
   echo "$v $g $z" >> "$T/mem.st" )
 grep -q '^over [1-9]' "$T/mem.st" && ck "mem-cap: a program over ARBACE_MEM_GIB fails alone" ok || ck "mem-cap: over the cap" "$(cat "$T/mem.st")"
-grep -q '^16777216 12288MiB unlimited$' "$T/mem.st" && ck "mem-cap: default 16 GiB, GOMEMLIMIT 12 GiB, 0 lifts it" ok || ck "mem-cap: defaults" "$(tail -1 "$T/mem.st")"
+grep -q '^25165824 18432MiB unlimited$' "$T/mem.st" && ck "mem-cap: default 24 GiB, GOMEMLIMIT 18 GiB, 0 lifts it" ok || ck "mem-cap: defaults" "$(tail -1 "$T/mem.st")"
 exit $fail
