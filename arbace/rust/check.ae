@@ -1,0 +1,127 @@
+(ns arbace.rust.check
+  "rsi's lists and judges (doc/rust/EVAL.md §6, §7; bin/rsi): the program sets of the UI suite, and lower-check's judgment of
+  run-program's results against the classes of test/rust/divergences-lower.edn (goi's format: a program's class is the first
+  whose :match finds \"RESULT REASON\")."
+  (:require [arbace.string :as str]
+            [arbace.pprint :as pp])
+  (:import [java.io File]))
+
+(defn- lines [^String path] (remove str/blank? (str/split-lines (slurp path))))
+(defn- slurp? [^String path] (when (.exists (File. path)) (slurp path)))
+(defn- first-line [s] (when s (first (str/split-lines s))))
+
+(defn plan-file
+  "A plan line's file (run-program's PLAN: fields separated by 0x1f, the second the file)."
+  [^String l] (second (str/split l #"\u001f")))
+
+(defn plan-set
+  "The plan's lines of SET (all, run: in no set apart, threads, process, net), every Nth."
+  [plan-path sets-path which n]
+  (let [sets (read-string (slurp sets-path))
+        apart (set (concat (:threads sets) (:process sets) (:net sets)))
+        keep? (case which
+                "all" (constantly true)
+                "run" #(not (apart %))
+                ("threads" "process" "net") #(contains? (set (get sets (keyword which))) %)
+                (throw (ex-info (str "rsi list: no set " which) {})))
+        ls (filter #(keep? (plan-file %)) (lines plan-path))]
+    (doseq [[i l] (map-indexed vector ls) :when (zero? (mod i (long n)))] (println l))))
+
+(defn write-sets [out threads process net]
+  (let [rd (fn [p] (vec (sort (distinct (lines p)))))
+        t (rd threads) p (rd process) nt (rd net)]
+    (spit out
+          (str ";; The UI suite's programs set apart for rsi (doc/rust/EVAL.md §6; RES7 (a): threads a class in v1; processes and\n"
+               ";; sockets classes as C's): the files of test/rust/corpus-rustc-1.99.1-ui.edn's :programs whose own text names\n"
+               ";; threads (thread::spawn, scope, Builder, mpsc, Barrier, ...), processes (process::Command, fork, current_exe, ...)\n"
+               ";; or sockets (std::net), by bin/rsi sets (a file may be in several sets; a program's revisions follow its file).\n"
+               ";; Made by bin/rsi sets. Read with the Clojure reader.\n"
+               "{:threads ;; " (count t) "\n " (pr-str t) "\n"
+               " :process ;; " (count p) "\n " (pr-str p) "\n"
+               " :net ;; " (count nt) "\n " (pr-str nt) "}\n"))))
+
+(defn- key-of [^String id] (str/replace id #"[/#]" "%"))
+
+(defn- reason
+  "A program's result and reason from run-program's line and the unit's files."
+  [work src {:keys [status id detail n file]}]
+  (let [d (str work "/files/" (key-of id))
+        x-ref (first-line (slurp? (str d "/x.refused")))
+        lref (first-line (slurp? (str d "/x/lower.refused")))
+        sref (first-line (slurp? (str d "/shim/lower.refused")))
+        gcc-st (some-> (slurp? (str d "/x/gcc.status")) str/trim)
+        refused (fn [l sfx] (let [[c m] (str/split l #"\t" 2)] (str "refused " c " " m sfx)))]
+    (case status
+      ("same" "same-cols" "same-pos") ["pass" ""]
+      "nondet" ["nondet" detail]
+      "skip" ["skip" detail]
+      "build-fail" (cond
+                     x-ref ["refused" (refused x-ref "")]
+                     lref ["refused" (refused lref "")]
+                     sref ["refused" (refused sref " (the shim)")]
+                     (and gcc-st (not= gcc-st "0"))
+                     ["gcc" (str "gcc " (or (first (filter #(re-find #"error" %) (str/split-lines (or (slurp? (str d "/x/gcc.log")) ""))))
+                                         "failed"))]
+                     (and (.exists (File. (str d "/list"))) (not (.exists (File. (str d "/lower.ms")))))
+                     ["build" (str "build the lowering did not finish within the build's 300 s " detail)]
+                     :else ["build" (str "build " detail)])
+      "differs" (let [err (slurp? (str work "/diffs/" n "/orig/1.err"))
+                      low-st (some-> (slurp? (str work "/diffs/" n "/lowered/1.st")) str/trim)]
+                  ["differs" (str "differs " detail
+                                  (when (and err (re-find #"panicked at" err)) " (the original panics)")
+                                  (when (some->> (slurp? (str src "/" file)) (re-find #"(?m)^//@ *known-bug")) " (a known-bug test)")
+                                  (when (#{"132" "134" "139" "-6" "-11"} low-st) (str " (the lowered build dies: " low-st ")")))])
+      [status (str status " " detail)])))
+
+(defn judge
+  "lower-check's judgment: WORK/judged.tsv (ID RESULT CLASS REASON), WORK/summary.edn; exit 1 on a program that does not pass
+  in no class."
+  [^String work ^String src ^String classes-path record]
+  (let [classes (read-string (slurp classes-path))
+        plan (vec (lines (str work "/plan.tsv")))
+        line-of (into {} (for [[i l] (map-indexed vector plan)] [(first (str/split l #"\u001f")) (inc i)]))
+        file-of (into {} (for [l plan] [(first (str/split l #"\u001f")) (plan-file l)]))
+        rows (for [l (lines (str work "/results.tsv"))
+                   :let [[st side id detail] (str/split l #"\t" -1)]]
+               {:status st :side side :id id :detail detail :n (line-of id) :file (file-of id)})
+        judged (vec (for [r rows]
+                      (let [[res why] (reason work src r)
+                            s (str res " " why)
+                            cls (when-not (#{"pass" "nondet" "skip"} res)
+                                  (some #(when (some (fn [m] (re-find m s)) (:match %)) (:id %)) classes))]
+                        (assoc r :result res :reason why :class cls))))
+        failing (filter #(and (not (#{"pass" "nondet" "skip"} (:result %))) (nil? (:class %))) judged)
+        units (for [r judged :let [d (str work "/files/" (key-of (:id r)))] :when (.exists (File. (str d "/x")))] d)
+        rt-ok (count (filter #(= "ok" (first (str/split (or (slurp? (str % "/x/rt.status")) "") #"\t"))) units))
+        obj-same (count (filter #(= "same" (some-> (slurp? (str % "/x/object")) str/trim)) units))
+        ms (reduce + (for [u units :let [s (slurp? (str u "/lower.ms"))] :when s] (Long/parseLong (str/trim s))))
+        bytes (reduce + (for [u units :let [s (slurp? (str u "/x/ir.bytes"))] :when s] (Long/parseLong (str/trim s))))
+        intr (frequencies (for [u units :let [s (slurp? (str u "/x/intrinsics.txt"))] :when s l (str/split-lines s) :when (seq l)]
+                            (str/replace l #"\.(i[0-9]+|p0|f[0-9]+|v[0-9]+[a-z0-9]+)(?=\.|$)" ".*")))
+        summary {:programs (count judged)
+                 :results (into (sorted-map) (frequencies (map :result judged)))
+                 :classes (into (sorted-map) (frequencies (keep :class judged)))
+                 :unclassified (count failing)
+                 :round-trip {:units (count units) :forms-equal rt-ok :objects-equal obj-same}
+                 :lowering {:ms ms :ir-bytes bytes}
+                 :intrinsics (into (sorted-map) intr)}]
+    (spit (str work "/judged.tsv")
+          (apply str (for [r judged] (str (:id r) "\t" (:result r) "\t" (some-> (:class r) name) "\t" (:reason r) "\n"))))
+    (spit (str work "/summary.edn") (with-out-str (pp/pprint summary)))
+    (when record
+      (let [old (if (.exists (File. ^String record)) (read-string (slurp record)) {})
+            new (into (sorted-map) (merge old (into {} (for [r judged] [(:id r) (if (:class r) [(keyword (:result r)) (:class r)] (keyword (:result r)))]))))]
+        (spit record (str ";; rsi lower-check's recorded results (bin/rsi lower-check --record; doc/rust/EVAL.md §7): each program's id, its\n"
+                          ";; result (:pass, :nondet, :skip) or [result class] (test/rust/divergences-lower.edn). Read with the Clojure reader.\n"
+                          "{\n" (apply str (for [[k v] new] (str " " (pr-str k) " " (pr-str v) "\n"))) "}\n"))))
+    (println (str "lower-check: " (count judged) " programs: " (pr-str (:results summary)) "; classes " (pr-str (:classes summary))
+                  "; round trip " rt-ok "/" (count units) " forms, " obj-same " objects; lowering " ms " ms"))
+    (doseq [r (take 40 failing)] (println "  unclassified:" (:id r) (:result r) (:reason r)))
+    (when (seq failing) (System/exit 1))))
+
+(defn -main [verb & args]
+  (case verb
+    "plan-set" (let [[p s set n] args] (plan-set p s set (Long/parseLong n)))
+    "write-sets" (apply write-sets args)
+    "judge" (let [[work src classes & more] args o (apply hash-map more)] (judge work src classes (get o "--record")))
+    (do (println "arbace.rust.check: plan-set, write-sets or judge") (System/exit 2))))

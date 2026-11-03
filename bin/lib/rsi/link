@@ -1,0 +1,51 @@
+#!/bin/bash
+# The lowered side's linker (bin/lib/rsi/wrap's -C linker; doc/rust/EVAL.md §4), called by rustc with the cc command line of the
+# original's link: the program's codegen unit (NAME-cgu.0.rcgu.o) and the allocator shim (the other .rcgu.o) replaced by the gcc
+# objects of their lowered IR (the program's from --emit=llvm-ir, kept by -C save-temps, the shim's from its kept bitcode by clang -S -emit-llvm), the
+# native-std leg's layer (RSI_RT: native.o, try.o) added; the host's std rlibs, crt objects and libraries as rustc gives them.
+# Each unit (RSI_LOW/x, RSI_LOW/shim): its round trip through LLVM forms (rt.status; object: clang -c of the print against
+# clang -c of the IR), the intrinsics it declares, its lowering (lowered.c or lower.refused) and gcc (gcc.status, gcc.log). A
+# refusal or gcc's failure: exit 1 (run-program's build-fail; bin/rsi's judge reads the class from RSI_LOW).
+set -u
+root=$(cd "$(dirname "$0")/../../.." && pwd)
+. "$root/bin/lib/tools.bash"
+low=${RSI_LOW:?} prog=() shim="" new=()
+GCC_FLAGS="-std=gnu23 -O0 -w -fno-builtin -fno-strict-aliasing -ffp-contract=off"
+for a in "$@"; do
+  case $a in
+    *.rcgu.o) case $(basename "$a") in *-cgu.*) prog+=("$a") ;; *) shim=$a ;; esac ;;
+  esac
+done
+if [ "${#prog[@]}" != 1 ]; then echo "cgu	${#prog[@]} codegen units" > "$low/x.refused"; echo "rsi: ${#prog[@]} codegen units" >&2; exit 1; fi
+: > "$low/list"
+# the program's IR: its codegen unit's, kept by -C save-temps beside its object (rustc copies it to the --emit path after the link)
+cp "${prog[0]%.o}.ll" "$low/x.ll" || { echo "ir	no IR beside ${prog[0]}" > "$low/x.refused"; exit 1; }
+mkdir -p "$low/x"; printf 'x\t%s\t%s\n' "$low/x.ll" "$low/x" >> "$low/list"
+if [ -n "$shim" ]; then
+  mkdir -p "$low/shim"
+  clang -S -emit-llvm "${shim%.o}.bc" -o "$low/shim.ll" 2> "$low/shim/ir.log" || { echo "shim-ir	clang -S -emit-llvm of the shim" > "$low/x.refused"; exit 1; }
+  printf 'shim\t%s\t%s\n' "$low/shim.ll" "$low/shim" >> "$low/list"
+fi
+t0=$(date +%s%N)
+GOMAXPROCS=${RSI_GOMAXPROCS:-2} GOMEMLIMIT=${RSI_GOMEMLIMIT:-1500MiB} arbace_tool -m arbace.rust.lower lower-list "$low/list" --native-std > "$low/lower.log" 2>&1
+t1=$(date +%s%N)
+echo $(( (t1 - t0) / 1000000 )) > "$low/lower.ms"
+st=0
+while IFS=$'\t' read -r n ll d; do
+  ( cd "$d" && clang -c "$ll" -o x.o 2> obj.log && clang -c print.ll -o print.o 2>> obj.log && { cmp -s x.o print.o && echo same || echo differs; } > object ) || echo none > "$d/object"
+  [ -f "$ll" ] && stat -c %s "$ll" > "$d/ir.bytes"
+  rm -f "$d/x.o" "$d/print.o" "$d/print.ll" "$d/forms.ae"
+  if [ -f "$d/lower.refused" ]; then st=1; continue; fi
+  # shellcheck disable=SC2086
+  ( cd "$d" && gcc $GCC_FLAGS -c lowered.c -o lowered.o > gcc.log 2>&1; echo $? > gcc.status )
+  [ -n "${RSI_KEEP:-}" ] || rm -f "$d/lowered.c"
+  [ "$(cat "$d/gcc.status")" = 0 ] || st=1
+done < "$low/list"
+[ -n "${RSI_KEEP:-}" ] || rm -f "$low/x.ll" "$low/shim.ll"
+[ "$st" = 0 ] || { echo "rsi: the lowering refused or gcc failed ($low)" >&2; exit 1; }
+for a in "$@"; do
+  if [ "$a" = "${prog[0]}" ]; then new+=("$low/x/lowered.o" "${RSI_RT:?}/native.o" "$RSI_RT/try.o")
+  elif [ -n "$shim" ] && [ "$a" = "$shim" ]; then new+=("$low/shim/lowered.o")
+  else new+=("$a"); fi
+done
+exec cc "${new[@]}"

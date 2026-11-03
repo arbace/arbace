@@ -1,0 +1,72 @@
+(ns arbace.rust.lower
+  "rsi's driver over the lowering (doc/rust/EVAL.md §3, §4; doc/rust/RUST-EVAL-SURVEY.md RE2): rustc's IR read as LLVM forms
+  (arbace.repr.llvm), its round trip, and arbace.cpp.lower's C forms (RES16: the lowering keeps C++'s namespace until its
+  rename, after C++'s CX8). What is Rust's own here is the native-std leg's one substitution (EVAL.md §4): rustc's internal
+  __rust_try, catch_unwind's frame, is not lowered but called as cx_rust_try, a native function, so that the native unwinder's
+  panics are caught where the original catches them."
+  (:require [arbace.string :as str]
+            [arbace.walk :as walk]
+            [arbace.repr.llvm :as llvm]
+            [arbace.cpp.lower :as lower]))
+
+(defn- rust-try? [g] (and (symbol? g) (= (namespace g) "g") (re-matches #"__rust_try(\.[0-9]+)?" (name g))))
+
+(defn native-std
+  "The native-std leg's forms: each define of __rust_try (internal, three pointers, i1) made a declaration of cx_rust_try and
+  every reference to it renamed."
+  [forms]
+  (let [olds (set (for [f forms :when (and (= (first f) 'llvm/define) (rust-try? (second f)))] (second f)))]
+    (if (empty? olds)
+      forms
+      (let [renamed (walk/postwalk #(if (contains? olds %) 'g/cx_rust_try %)
+                                   (vec (remove #(and (= (first %) 'llvm/define) (contains? olds (second %))) forms)))]
+        (conj renamed '(llvm/declare g/cx_rust_try i1 [[ptr] [ptr] [ptr]] :ret-attrs [:zeroext]))))))
+
+(defn- intrinsics
+  "The llvm.* names a module declares, sorted."
+  [forms]
+  (sort (for [f forms :when (= (first f) 'llvm/declare) :let [s (lower/gname-str (second f))] :when (str/starts-with? s "llvm.")] s)))
+
+(defn lower-one
+  "One unit: read, round trip (DIR/forms.ae, DIR/print.ll, DIR/rt.status), the intrinsics it declares (DIR/intrinsics.txt),
+  lowered (DIR/lowered.c, or DIR/lower.refused: CLASS<tab>MESSAGE), its times (DIR/lower.times: read and lower in ms)."
+  [^String ll ^String dir ^String c-name native?]
+  (let [t0 (System/currentTimeMillis)
+        forms (try (llvm/read-ll ll) (catch Throwable e nil))
+        t1 (System/currentTimeMillis)
+        [_ rt d] (llvm/roundtrip-one (str dir "/forms.ae") (or forms ll) (str dir "/print.ll"))
+        _ (spit (str dir "/rt.status") (str rt "\t" d "\n"))
+        _ (when forms (spit (str dir "/intrinsics.txt") (apply str (map #(str % "\n") (intrinsics forms)))))
+        t2 (System/currentTimeMillis)
+        r (lower/lower-file (if forms (if native? (native-std forms) forms) ll) c-name)
+        t3 (System/currentTimeMillis)]
+    (spit (str dir "/lower.times") (str (- t1 t0) "\t" (- t3 t2) "\n"))
+    (if (:refused r)
+      (spit (str dir "/lower.refused") (str (name (:refused r)) "\t" (str/replace (str (:message r)) #"[\t\n]" " ") "\n"))
+      (llvm/spit-latin1 (str dir "/lowered.c") (:c r)))
+    (boolean (:refused r))))
+
+(defn -main
+  "bin/rsi lower FILE.ll [-o OUT.c] [--native-std]: FILE's IR lowered and printed as C (a refusal: its class on stderr, exit 3);
+  lower-list LIST [--native-std]: NAME<tab>LL<tab>OUTDIR lines, each lowered by lower-one (RSI_THREADS, default 2)."
+  [verb & args]
+  (let [native? (boolean (some #{"--native-std"} args))
+        args (remove #{"--native-std"} args)]
+    (case verb
+      "lower" (let [[f & more] args o (apply hash-map more)
+                    out (or (get o "-o") (str/replace f #"\.ll$" ".c"))
+                    forms (llvm/read-ll f)
+                    r (lower/lower-file (if native? (native-std forms) forms) (.getName (java.io.File. ^String out)))]
+                (if (:refused r)
+                  (do (binding [*out* *err*] (println (str f ": refused (" (name (:refused r)) "): " (:message r)))) (System/exit 3))
+                  (llvm/spit-latin1 out (:c r))))
+      "lower-list" (let [[lst] args
+                         rows (for [l (str/split-lines (slurp lst)) :when (seq l)] (str/split l #"\t"))
+                         pool (java.util.concurrent.Executors/newFixedThreadPool (Integer/parseInt (or (System/getenv "RSI_THREADS") "2")))
+                         futs (mapv (fn [[n ll dir]]
+                                      (.submit pool ^java.util.concurrent.Callable (fn [] (lower-one ll dir (str n ".c") native?))))
+                                    rows)
+                         refused (count (filter #(.get ^java.util.concurrent.Future %) futs))]
+                     (.shutdown pool)
+                     (when (pos? refused) (System/exit 3)))
+      (do (println "rsi: lower or lower-list") (System/exit 2)))))

@@ -1,0 +1,190 @@
+#!/bin/bash
+# rsi, Rust's eval (doc/rust/EVAL.md; doc/rust/RUST-EVAL-SURVEY.md, RES1 (b), "As built: RE1-RE2"): the oracle (rustc 1.99.1
+# -O0) compiles a Rust program to LLVM IR, repr/llvm reads it as LLVM forms (arbace.repr.llvm) and the lowering
+# (arbace.cpp.lower, C++'s; RES16's rename to arbace.llvm.lower after C++'s CX8) lowers them to C forms, printed as C by repr/c.
+# Until RE3 lowers std and RE4 runs ci, the program is linked with the host's native std (the native-std leg, EVAL.md §4) and
+# gcc -O0 is the second judge; the original is RR5's run-program's build and run (bin/lib/repr-rust/run-program). All of it on
+# the tools' host (stage 0, evaluated from the checkout); the light tier by default (RSI_JOBS 4).
+#
+#   bin/rsi lower FILE.ll [-o OUT.c] [--native-std]
+#                               FILE's IR lowered to C forms and printed as C (default FILE.c); --native-std: the native-std
+#                               leg's substitution (__rust_try called as the native cx_rust_try)
+#   bin/rsi list [--set all|run|threads|process|net|samples] [--sample N] [--only REGEX] [-o PLAN]
+#                               the UI suite's programs (test/rust/corpus-rustc-1.99.1-ui.edn's :programs, RR5) as
+#                               run-program's plan (default the standard output): the set (EVAL.md §6,
+#                               test/rust/eval-programs.edn: threads, process and net set apart; run: the rest; default all),
+#                               every Nth line (default 1), those whose id REGEX finds; samples: rsi's own (test/rust/eval/,
+#                               built from the checkout)
+#   bin/rsi sets                test/rust/eval-programs.edn made again: each program's file searched for threads, processes and
+#                               sockets (the source tree of the corpus fetched by bin/repr-rust corpus fetch rustc-1.99.1-ui)
+#   bin/rsi std-build [--update] [--jobs N]
+#                               std's sysroot with its IR (RES3 (a), EVAL.md §3; test/rust/runtime/std.edn: the oracle's and the
+#                               assembler's versions, the profile, the flags): rust-src's library/ (the pinned apk, bin/repr-rust
+#                               corpus fetch) mirrored into a scratch workspace in the main checkout's .tmp/rsi/std/ (RSI_STD_DIR;
+#                               Cargo's -Zbuild-std hashes std's packages by their absolute path, so the crates' disambiguators and
+#                               the IR's digests hold at that place alone: EVAL.md §3),
+#                               built by Cargo's -Zbuild-std offline (the vendored crates by source replacement, RR5's build),
+#                               each codegen unit's bitcode made IR text (ir/CRATE/UNIT.ll) and its digest checked against
+#                               test/rust/runtime/ir.sha256 (--update rewrites it); the sysroot beside it (sysroot/)
+#   bin/rsi lower-check PLAN WORK [--jobs N] [--record]
+#                               each program of PLAN built and run by run-program from the original (rustc) and from its
+#                               lowered IR (bin/lib/rsi/wrap, bin/lib/rsi/link: the IR, its round trip through LLVM forms, the
+#                               lowering, gcc -O0, the original's link with the gcc objects in place of rustc's), the status,
+#                               stdout and stderr compared; judged by arbace.rust.check against test/rust/divergences-lower.edn
+#                               (every program that does not pass in a class) into WORK/results.tsv and WORK/summary.edn;
+#                               --record: WORK's results into test/rust/lower-results.edn (by id; other ids kept)
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+. "$root/bin/lib/tmpdir.bash"
+. "$root/bin/lib/tools.bash"
+export GOMAXPROCS=${GOMAXPROCS:-4} GOMEMLIMIT=${GOMEMLIMIT:-1500MiB}
+corpus=$root/test/rust/corpus-rustc-1.99.1-ui.edn
+srcroot=$root/.tmp/repr-rust/src/rustc-1.99.1-src
+main_checkout=$root
+case $root in */.tmp/worktrees/*) main_checkout=${root%%/.tmp/worktrees/*} ;; esac
+GCC_FLAGS="-std=gnu23 -O0 -w -fno-builtin -fno-strict-aliasing -ffp-contract=off"
+
+need_src() {
+  [ -d "$srcroot/tests/ui" ] || { echo "rsi: no $srcroot/tests/ui (bin/repr-rust corpus fetch rustc-1.99.1-ui)" >&2; exit 1; }
+}
+
+list() {
+  local set=all n=1 only="" out=""
+  while [ $# -gt 0 ]; do case $1 in --set) set=$2; shift 2 ;; --sample) n=$2; shift 2 ;; --only) only=$2; shift 2 ;; -o) out=$2; shift 2 ;;
+    *) echo "list: unknown option $1" >&2; exit 2 ;; esac; done
+  if [ "$set" = samples ]; then # rsi's own samples (test/rust/eval/*.rs, edition 2021, built from the checkout)
+    local f us=$'\x1f' text=""
+    for f in "$root"/test/rust/eval/*.rs; do
+      f=test/rust/eval/$(basename "$f"); text+="$f$us$f${us}2021$us$us$us$us"$'\n'
+    done
+    if [ -n "$out" ]; then printf '%s' "$text" > "$out"; else printf '%s' "$text"; fi
+    return 0
+  fi
+  local tmp; tmp=$(mktemp "$TMPDIR/rsi-plan.XXXXXX")
+  GOMEMLIMIT=1GiB arbace_tool -m arbace.repr.rust run-plan --corpus "$corpus" -o "$tmp" ${only:+--only "$only"}
+  GOMEMLIMIT=1GiB arbace_tool -m arbace.rust.check plan-set "$tmp" "$root/test/rust/eval-programs.edn" "$set" "$n" > "$tmp.out"
+  if [ -n "$out" ]; then mv "$tmp.out" "$out"; else cat "$tmp.out"; rm -f "$tmp.out"; fi
+  rm -f "$tmp"
+}
+
+sets() { # the sets of EVAL.md §6: each program's file searched (its own text, not its modules')
+  need_src
+  local tmp; tmp=$(mktemp "$TMPDIR/rsi-files.XXXXXX")
+  GOMEMLIMIT=1GiB arbace_tool -e "(doseq [p (:programs (read-string (slurp \"$corpus\")))] (println (:file p)))" | sort -u > "$tmp"
+  ( cd "$srcroot"
+    xargs grep -l -E 'thread::(spawn|scope|Builder)|std::thread\b|use std::thread|\bthread::sleep|mpsc::|Barrier|spawn\(' < "$tmp" > "$tmp.threads" || true
+    xargs grep -l -E 'process::Command|Command::new|\bfork\(|execv|process::Stdio|\.spawn\(\)|current_exe' < "$tmp" > "$tmp.process" || true
+    xargs grep -l -E 'std::net|TcpListener|TcpStream|UdpSocket|net::' < "$tmp" > "$tmp.net" || true )
+  GOMEMLIMIT=1GiB arbace_tool -m arbace.rust.check write-sets "$root/test/rust/eval-programs.edn" "$tmp.threads" "$tmp.process" "$tmp.net"
+  rm -f "$tmp" "$tmp.threads" "$tmp.process" "$tmp.net"
+}
+
+rt_build() { # RT: the native-std leg's layer (arbace/rust/rt/native.c.ae by gcc, test/rust/runtime/native/try.rs by rustc)
+  local rt=$1
+  mkdir -p "$rt"
+  arbace_tool -m arbace.cpp.lower lower-rt "$root/arbace/rust/rt/native.c.ae" "$rt/native.c"
+  # shellcheck disable=SC2086
+  gcc $GCC_FLAGS -c "$rt/native.c" -o "$rt/native.o"
+  RUSTC_BOOTSTRAP=1 rustc --edition 2024 --crate-type=lib --emit=obj -Copt-level=0 -Cdebuginfo=0 \
+    "$root/test/rust/runtime/native/try.rs" -o "$rt/try.o" 2> "$rt/try.log"
+}
+
+std_build() {
+  local update="" jobs=${RSI_JOBS:-8} pins=$root/test/rust/runtime/std.edn sb=${RSI_STD_DIR:-$main_checkout/.tmp/rsi/std}
+  while [ $# -gt 0 ]; do case $1 in --update) update=1; shift ;; --jobs) jobs=$2; shift 2 ;; *) echo "std-build: unknown option $1" >&2; exit 2 ;; esac; done
+  local libsrc=$root/.tmp/repr-rust/apks/rust-src/usr/src/rust/library
+  [ -d "$libsrc" ] || { echo "rsi: no $libsrc (bin/repr-rust corpus fetch)" >&2; exit 1; }
+  local want_rustc want_clang target profile flags crates
+  want_rustc=$(arbace_tool -e "(print (:rustc (read-string (slurp \"$pins\"))))")
+  want_clang=$(arbace_tool -e "(print (:clang (read-string (slurp \"$pins\"))))")
+  [ "$(rustc --version)" = "$want_rustc" ] || { echo "rsi std-build: rustc is '$(rustc --version)', $pins pins '$want_rustc'" >&2; exit 1; }
+  [ "$(clang --version | head -1)" = "$want_clang" ] || { echo "rsi std-build: clang is '$(clang --version | head -1)', $pins pins '$want_clang'" >&2; exit 1; }
+  target=$(arbace_tool -e "(print (:target (read-string (slurp \"$pins\"))))")
+  profile=$(arbace_tool -e "(doseq [[k v] (:profile (read-string (slurp \"$pins\")))] (println (str \"CARGO_PROFILE_RELEASE_\" k \"=\" v)))")
+  flags=$(arbace_tool -e "(print (apply str (interpose \" \" (:rustflags (read-string (slurp \"$pins\"))))))")
+  crates=$(arbace_tool -e "(print (:build-std (read-string (slurp \"$pins\"))))")
+  # one build at a time in the place (a worktree builds in the main checkout's .tmp, EVAL.md §3)
+  mkdir -p "$(dirname "$sb")"
+  exec 9> "$sb.lock"; flock 9
+  rm -rf "$sb"; mkdir -p "$sb/ws/src" "$sb/home" "$sb/ir"
+  cp -rs "$libsrc" "$sb/ws/library"
+  printf '[package]\nname = "scratch"\nversion = "0.1.0"\nedition = "2024"\n[workspace]\n' > "$sb/ws/Cargo.toml"
+  mkdir -p "$sb/ws/.cargo"
+  printf '[source.crates-io]\nreplace-with = "vendored-sources"\n[source.vendored-sources]\ndirectory = "library/vendor"\n' > "$sb/ws/.cargo/config.toml"
+  echo 'fn main() { println!("rsi std"); }' > "$sb/ws/src/main.rs"
+  local t0 t1 t2 f u c
+  t0=$(date +%s)
+  # shellcheck disable=SC2086
+  (cd "$sb/ws" && env $profile CARGO_HOME=$sb/home CARGO_TARGET_DIR=$sb/target RUSTC_BOOTSTRAP=1 __CARGO_TESTS_ONLY_SRC_ROOT=$sb/ws/library __CARGO_DEFAULT_LIB_METADATA=rsi \
+     RUSTFLAGS="$flags" \
+     cargo build --offline --release -j "$jobs" --target "$target" -Ztrim-paths -Zbuild-std="$crates") > "$sb/build.log" 2>&1 ||
+    { tail -20 "$sb/build.log" >&2; exit 1; }
+  t1=$(date +%s)
+  # each codegen unit's optimized bitcode (at -O0: the IR codegen read) as IR text: deps/CRATE-HASH.CRATE.HASH-cgu.N.rcgu.bc,
+  # named relative to deps/ (the IR's ModuleID names the file clang read)
+  for f in "$sb/target/$target/release/deps/"*.rcgu.bc; do
+    case $f in *.no-opt.bc|*/scratch-*) continue ;; esac
+    u=$(basename "$f" .rcgu.bc); c=${u%%-*}; mkdir -p "$sb/ir/$c"
+    printf '%s\t%s\n' "$f" "$sb/ir/$c/$u.ll"
+  done > "$sb/units.tsv"
+  tr '\t\n' '\037\0' < "$sb/units.tsv" | xargs -0 -P "$jobs" -I{} bash -c 'IFS=$'"'"'\037'"'"' read -r b l <<< "$1"; cd "$(dirname "$b")" && clang -S -emit-llvm "$(basename "$b")" -o "$l"' _ {}
+  (cd "$sb/ir" && find . -name '*.ll' | LC_ALL=C sort | sed 's|^\./||' | while read -r f; do printf '%s  %s\n' "$(sha256sum < "$f" | cut -d' ' -f1)" "$f"; done) > "$sb/ir.sha256"
+  t2=$(date +%s)
+  local tl=$sb/sysroot/lib/rustlib/$target host; host=$(rustc --print sysroot)
+  mkdir -p "$tl/lib"
+  ln -s "$host/lib/rustlib/$target/bin" "$tl/bin"
+  for f in "$host/lib/rustlib/$target/lib/"*; do case $f in *.rlib|*.rmeta|*.so) ;; *) ln -s "$f" "$tl/lib/" ;; esac; done
+  cp "$sb/target/$target/release/deps/"*.rlib "$tl/lib/"
+  find "$sb/target" -name '*.rcgu.*' -delete
+  echo "std-build: cargo $((t1-t0)) s, IR $((t2-t1)) s; $(wc -l < "$sb/ir.sha256") units, $(du -sm "$sb/ir" | cut -f1) MB of IR" | tee "$sb/times.txt"
+  if [ -n "$update" ]; then
+    cp "$sb/ir.sha256" "$root/test/rust/runtime/ir.sha256"
+  elif ! diff "$root/test/rust/runtime/ir.sha256" "$sb/ir.sha256" > "$sb/ir.diff"; then
+    echo "rsi std-build: the IR differs from test/rust/runtime/ir.sha256 (--update after a look):" >&2; head -20 "$sb/ir.diff" >&2; exit 1
+  fi
+}
+
+disk_ok() { # the light tier's disk rule: stop past 80% (RSI_DISK_MAX)
+  local u; u=$(df --output=pcent "$root" | tail -1 | tr -dc 0-9)
+  [ "$u" -le "${RSI_DISK_MAX:-80}" ] || { echo "rsi: the disk is at $u%, stopping" >&2; exit 3; }
+}
+
+lower_check() {
+  local plan=$1 work=$2; shift 2
+  local jobs=${RSI_JOBS:-4} record="" src=$srcroot
+  while [ $# -gt 0 ]; do case $1 in --jobs) jobs=$2; shift 2 ;; --record) record=1; shift ;; *) echo "lower-check: unknown option $1" >&2; exit 2 ;; esac; done
+  need_src
+  grep -q . "$plan" || { echo "lower-check: $plan has no program" >&2; exit 2; }
+  # rsi's samples are built from the checkout (bin/rsi list --set samples)
+  case $(head -1 "$plan") in test/rust/eval/*) src=$root ;; esac
+  disk_ok
+  mkdir -p "$work"; work=$(cd "$work" && pwd)
+  rm -rf "$work/files" "$work/jobs" "$work/diffs" "$work/results.tsv" "$work/summary.edn"
+  cp "$plan" "$work/plan.tsv"
+  rt_build "$work/rt"
+  : > "$work/empty"
+  mkdir -p "$work/native"
+  cc -c -O2 -fPIC -o "$work/native/rust_test_helpers.o" "$srcroot/tests/auxiliary/rust_test_helpers.c" > "$work/native/build.log" 2>&1
+  ar rcs "$work/native/librust_test_helpers.a" "$work/native/rust_test_helpers.o"
+  export REPR_RUST_NATIVE=$work/native RSI_WORK=$work RSI_RT=$work/rt
+  local n t0 t1
+  n=$(wc -l < "$work/plan.tsv")
+  echo "== rsi lower-check: $n programs, built and run from the originals and from their lowered IR ($jobs at a time)" >&2
+  t0=$(date +%s)
+  seq 1 "$n" | xargs -P "$jobs" -I{} nice "$root/bin/lib/repr-rust/run-program" "$work/plan.tsv" {} "$work/jobs" "$work/empty" \
+    "orig:$src:" "lowered:$src:::$root/bin/lib/rsi/wrap" > "$work/results.tsv"
+  t1=$(date +%s)
+  find "$work/files" -name lowered.o -delete
+  rm -rf "$work/jobs"
+  echo "lower-check: build and run $((t1-t0)) s" | tee "$work/times.txt"
+  arbace_tool -m arbace.rust.check judge "$work" "$src" "$root/test/rust/divergences-lower.edn" ${record:+--record "$root/test/rust/lower-results.edn"}
+}
+
+case ${1:-} in
+  lower) shift; arbace_tool -m arbace.rust.lower lower "$@" ;;
+  list) shift; list "$@" ;;
+  sets) sets ;;
+  std-build) shift; std_build "$@" ;;
+  lower-check) shift; lower_check "$@" ;;
+  *) sed -n '2,/^set -e/p' "$0" | sed '$d;s/^# \{0,1\}//' >&2; exit 2 ;;
+esac
