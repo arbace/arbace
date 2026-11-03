@@ -3,6 +3,7 @@
 // ISO/IEC 9899:2024 6.5.3.6; Annex A: compound-literal, storage-class-specifiers
 // M.2: storage-class specifiers in compound literals (static, constexpr, register, thread_local)
 #include <stdio.h>
+#include <string.h>
 
 struct pt { int x, y; };
 static int *fp = (int[]){4, 5, 6};
@@ -20,6 +21,9 @@ int main(void) {
   double *ad = &(double){2.5};
   int (*ar)[2] = &(int[2]){8, 9};
   long *sl = &(static long){-3};
+  unsigned mx = 0;
+  memcpy(&mx, &(unsigned){7u}, sizeof mx);
+  printf("%s = %u\n", "mx", mx);
   printf("%s = %d\n", "fp[2]", fp[2]);
   printf("%s = %d\n", "bp[1]", bp[1]);
   printf("%s = %d\n", "*counter()", *counter());
