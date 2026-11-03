@@ -40,8 +40,6 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 export GOMAXPROCS=${GOMAXPROCS:-4} GOMEMLIMIT=${GOMEMLIMIT:-1500MiB}
 corpus=$root/test/rust/corpus-rustc-1.99.1-ui.edn
 srcroot=$root/.tmp/repr-rust/src/rustc-1.99.1-src
-main_checkout=$root
-case $root in */.tmp/worktrees/*) main_checkout=${root%%/.tmp/worktrees/*} ;; esac
 GCC_FLAGS="-std=gnu23 -O0 -w -fno-builtin -fno-strict-aliasing -ffp-contract=off"
 
 need_src() {
@@ -91,51 +89,57 @@ rt_build() { # RT: the native-std leg's layer (arbace/rust/rt/native.c.ae by gcc
 }
 
 std_build() {
-  local update="" jobs=${RSI_JOBS:-8} pins=$root/test/rust/runtime/std.edn sb=${RSI_STD_DIR:-$main_checkout/.tmp/rsi/std}
+  local update="" jobs=${RSI_JOBS:-8} pins=$root/test/rust/runtime/std.edn sb=${RSI_STD_DIR:-$root/.tmp/rsi/std}
   while [ $# -gt 0 ]; do case $1 in --update) update=1; shift ;; --jobs) jobs=$2; shift 2 ;; *) echo "std-build: unknown option $1" >&2; exit 2 ;; esac; done
   local libsrc=$root/.tmp/repr-rust/apks/rust-src/usr/src/rust/library
   [ -d "$libsrc" ] || { echo "rsi: no $libsrc (bin/repr-rust corpus fetch)" >&2; exit 1; }
-  local want_rustc want_clang target profile flags crates
-  want_rustc=$(arbace_tool -e "(print (:rustc (read-string (slurp \"$pins\"))))")
-  want_clang=$(arbace_tool -e "(print (:clang (read-string (slurp \"$pins\"))))")
+  local want_rustc want_clang target profile flags pkg features cfgs
+  pin() { arbace_tool -e "(let [p (read-string (slurp \"$pins\"))] $1)"; }
+  want_rustc=$(pin '(print (:rustc p))')
+  want_clang=$(pin '(print (:clang p))')
   [ "$(rustc --version)" = "$want_rustc" ] || { echo "rsi std-build: rustc is '$(rustc --version)', $pins pins '$want_rustc'" >&2; exit 1; }
   [ "$(clang --version | head -1)" = "$want_clang" ] || { echo "rsi std-build: clang is '$(clang --version | head -1)', $pins pins '$want_clang'" >&2; exit 1; }
-  target=$(arbace_tool -e "(print (:target (read-string (slurp \"$pins\"))))")
-  profile=$(arbace_tool -e "(doseq [[k v] (:profile (read-string (slurp \"$pins\")))] (println (str \"CARGO_PROFILE_RELEASE_\" k \"=\" v)))")
-  flags=$(arbace_tool -e "(print (apply str (interpose \" \" (:rustflags (read-string (slurp \"$pins\"))))))")
-  crates=$(arbace_tool -e "(print (:build-std (read-string (slurp \"$pins\"))))")
-  # one build at a time in the place (a worktree builds in the main checkout's .tmp, EVAL.md §3)
+  target=$(pin '(print (:target p))')
+  profile=$(pin '(doseq [[k v] (:profile p)] (println (str "CARGO_PROFILE_RELEASE_" k "=" v)))')
+  flags=$(pin '(print (apply str (interpose " " (:rustflags p))))')
+  pkg=$(pin '(print (:package p))')
+  features=$(pin '(print (:features p))')
+  # the workspace's own per-package profile (library/Cargo.toml: compiler_builtins' codegen units, the backtrace crates' opt-level "s")
+  # overridden by Cargo's --config, which takes precedence over the manifest (RES17 (b): std.edn's :package-profile)
+  mapfile -t cfgs < <(pin '(doseq [[pk kvs] (:package-profile p) [k v] kvs] (println "--config") (println (str "profile.release.package." pk "." k "=" (pr-str v))))')
+  # one build at a time in the place; the place no longer matters (RES17 (b)): Cargo hashes the workspace's members by their path in it
   mkdir -p "$(dirname "$sb")"
   exec 9> "$sb.lock"; flock 9
-  rm -rf "$sb"; mkdir -p "$sb/ws/src" "$sb/home" "$sb/ir"
-  cp -rs "$libsrc" "$sb/ws/library"
-  printf '[package]\nname = "scratch"\nversion = "0.1.0"\nedition = "2024"\n[workspace]\n' > "$sb/ws/Cargo.toml"
-  mkdir -p "$sb/ws/.cargo"
-  printf '[source.crates-io]\nreplace-with = "vendored-sources"\n[source.vendored-sources]\ndirectory = "library/vendor"\n' > "$sb/ws/.cargo/config.toml"
-  echo 'fn main() { println!("rsi std"); }' > "$sb/ws/src/main.rs"
+  rm -rf "$sb"; mkdir -p "$sb/home" "$sb/ir"
+  cp -rs "$libsrc" "$sb/library"
   local t0 t1 t2 f u c
   t0=$(date +%s)
+  # library/'s own workspace, built as rust's bootstrap builds it (its package sysroot, the vendored crates by source replacement);
+  # -Zforce-unstable-if-unmarked as bootstrap gives every std crate (hashbrown's const fns under std's stability rules)
   # shellcheck disable=SC2086
-  (cd "$sb/ws" && env $profile CARGO_HOME=$sb/home CARGO_TARGET_DIR=$sb/target RUSTC_BOOTSTRAP=1 __CARGO_TESTS_ONLY_SRC_ROOT=$sb/ws/library __CARGO_DEFAULT_LIB_METADATA=rsi \
-     RUSTFLAGS="$flags" \
-     cargo build --offline --release -j "$jobs" --target "$target" -Ztrim-paths -Zbuild-std="$crates") > "$sb/build.log" 2>&1 ||
-    { tail -20 "$sb/build.log" >&2; exit 1; }
+  (cd "$sb/library" && env $profile CARGO_HOME=$sb/home CARGO_TARGET_DIR=$sb/target RUSTC_BOOTSTRAP=1 RUSTFLAGS="$flags" \
+     cargo build --offline --release -j "$jobs" --target "$target" -p "$pkg" --features "$features" -Ztrim-paths \
+       --config 'source.crates-io.replace-with="vendored-sources"' --config 'source.vendored-sources.directory="vendor"' "${cfgs[@]}") \
+     > "$sb/build.log" 2>&1 || { tail -20 "$sb/build.log" >&2; exit 1; }
   t1=$(date +%s)
-  # each codegen unit's optimized bitcode (at -O0: the IR codegen read) as IR text: deps/CRATE-HASH.CRATE.HASH-cgu.N.rcgu.bc,
-  # named relative to deps/ (the IR's ModuleID names the file clang read)
-  for f in "$sb/target/$target/release/deps/"*.rcgu.bc; do
-    case $f in *.no-opt.bc|*/scratch-*) continue ;; esac
-    u=$(basename "$f" .rcgu.bc); c=${u%%-*}; mkdir -p "$sb/ir/$c"
+  # each codegen unit's optimized bitcode (at -O0: the IR codegen read) as IR text: deps/CRATE-HASH.CRATE.HASH-cgu.N.rcgu.bc (std's:
+  # std.std.HASH-cgu.N, its dylib's), named relative to deps/ (the IR's ModuleID names the file clang read); the package sysroot's
+  # own unit and the std dylib's allocator shim (no -cgu.) are not std's code
+  for f in "$sb/target/$target/release/deps/"*-cgu.*.rcgu.bc; do
+    u=$(basename "$f" .rcgu.bc); c=${u%%.*}; c=${c%%-*}
+    [ "$c" = "$pkg" ] && continue
+    mkdir -p "$sb/ir/$c"
     printf '%s\t%s\n' "$f" "$sb/ir/$c/$u.ll"
   done > "$sb/units.tsv"
   tr '\t\n' '\037\0' < "$sb/units.tsv" | xargs -0 -P "$jobs" -I{} bash -c 'IFS=$'"'"'\037'"'"' read -r b l <<< "$1"; cd "$(dirname "$b")" && clang -S -emit-llvm "$(basename "$b")" -o "$l"' _ {}
   (cd "$sb/ir" && find . -name '*.ll' | LC_ALL=C sort | sed 's|^\./||' | while read -r f; do printf '%s  %s\n' "$(sha256sum < "$f" | cut -d' ' -f1)" "$f"; done) > "$sb/ir.sha256"
   t2=$(date +%s)
+  # the sysroot: the host's but for its rlibs, which are the build's (std's dylib left out: a -C prefer-dynamic program does not build)
   local tl=$sb/sysroot/lib/rustlib/$target host; host=$(rustc --print sysroot)
   mkdir -p "$tl/lib"
   ln -s "$host/lib/rustlib/$target/bin" "$tl/bin"
   for f in "$host/lib/rustlib/$target/lib/"*; do case $f in *.rlib|*.rmeta|*.so) ;; *) ln -s "$f" "$tl/lib/" ;; esac; done
-  cp "$sb/target/$target/release/deps/"*.rlib "$tl/lib/"
+  for f in "$sb/target/$target/release/deps/"lib*.rlib; do case $(basename "$f") in "lib$pkg-"*) ;; *) cp "$f" "$tl/lib/" ;; esac; done
   find "$sb/target" -name '*.rcgu.*' -delete
   echo "std-build: cargo $((t1-t0)) s, IR $((t2-t1)) s; $(wc -l < "$sb/ir.sha256") units, $(du -sm "$sb/ir" | cut -f1) MB of IR" | tee "$sb/times.txt"
   if [ -n "$update" ]; then
@@ -143,6 +147,7 @@ std_build() {
   elif ! diff "$root/test/rust/runtime/ir.sha256" "$sb/ir.sha256" > "$sb/ir.diff"; then
     echo "rsi std-build: the IR differs from test/rust/runtime/ir.sha256 (--update after a look):" >&2; head -20 "$sb/ir.diff" >&2; exit 1
   fi
+  sha256sum < "$sb/ir.sha256" | cut -d' ' -f1 > "$sb/key"
 }
 
 disk_ok() { # the light tier's disk rule: stop past 80% (RSI_DISK_MAX)
