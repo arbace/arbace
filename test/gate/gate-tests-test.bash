@@ -102,7 +102,7 @@ cd "$src" || exit 1
 # the file list from git's index (tracked files; fake hashes): nothing of the checkout is read, so the step's
 # declared inputs stay true (bin/gate --audit); the planner only checks that its rules match names
 git -C "$src" ls-files | LC_ALL=C sort | sed 's|^|0000000000000000000000000000000000000000000000000000000000000000  |' > "$scratch/logs/files.sha256"
-echo '{:gate "a" :javac "b" :prog-units "pending" :prog-rest "c" :javac-prog-units "pending" :javac-prog-rest "d" :stage0 "e" :frozen "f" :jdk "g" :go "h" :gcc "i"}' > "$scratch/logs/hosts.edn"
+echo '{:gate "a" :javac "b" :prog-units "pending" :prog-rest "c" :javac-prog-units "pending" :javac-prog-rest "d" :stage0 "e" :frozen "f" :jdk "g" :go "h" :gcc "i" :ocaml "j"}' > "$scratch/logs/hosts.edn"
 . "$src/bin/lib/tools.bash"
 root=$src
 arbace_tool -p "$src/test" -m gate.plan plan "$src" "$scratch/logs" "$scratch/store" essential > "$scratch/plan.out" 2>&1

@@ -80,6 +80,18 @@ gate_gcc_id() {  # the :gcc host's identity: gcc's --version line, its driver's,
     awk '{print $2}' "$root/test/c/host/headers.sha256" 2>"$TMPDIR/gate-gcc.err" | while read -r h; do
       if [ -f "$h" ]; then sha256sum "$h"; else echo "missing $h"; fi; done; } | sha256sum | cut -c1-64
 }
+gate_ocaml_id() {  # the :ocaml host's identity (O8): OCaml's reference and oracle, ocamlc's and ocamlopt's version lines, the digests of
+  # their executables resolved through their links, of compiler-libs' libraries (tools/ocdump's) and of the installed stdlib's archives
+  # (what the references' and the helper's compilations link); none without ocamlc
+  local c o w f
+  c=$(command -v ocamlc) && o=$(command -v ocamlopt) || { echo none; return; }
+  w=$(ocamlc -where 2>"$TMPDIR/gate-ocaml.err")
+  { ocamlc -version 2>"$TMPDIR/gate-ocaml.err"; ocamlopt -version 2>"$TMPDIR/gate-ocaml.err"
+    sha256sum < "$(readlink -f "$c")" | cut -c1-64; sha256sum < "$(readlink -f "$o")" | cut -c1-64
+    for f in "$w/compiler-libs/ocamlcommon.cmxa" "$w/compiler-libs/ocamlcommon.a" "$w/compiler-libs/ocamlcommon.cma" \
+             "$w/stdlib.cma" "$w/stdlib.cmxa" "$w/stdlib.a"; do
+      if [ -f "$f" ]; then sha256sum < "$f" | cut -c1-64; else echo "missing $f"; fi; done; } | sha256sum | cut -c1-64
+}
 plan_inputs() {  # plan_inputs DIR: DIR/files.sha256 and DIR/hosts.edn
   local d=$1 jdk rel
   mkdir -p "$d"
@@ -130,7 +142,10 @@ javac none
     printf ' :go "%s"\n' "$(sha256sum < "${ARBACE_GOROOT:-/root/tamago-go}/VERSION" | cut -c1-64)"
     # :gcc (the user, 2026-11-02; doc/C23-SURVEY.md, "As built: C's full checks in the gate"): the host's gcc, C's reference,
     # by its --version line, the digests of its driver and of cc1, resolved through their links, and of the headers C's checks read; none without gcc
-    printf ' :gcc "%s"}\n' "$(gate_gcc_id)"; } > "$d/hosts.edn"
+    printf ' :gcc "%s"\n' "$(gate_gcc_id)"
+    # :ocaml (O8; doc/ocaml/OCAML-SURVEY.md, "As built: O8 (write-ahead)"): the host's OCaml 5.5.0, repr/ocaml's oracle (tools/ocdump on
+    # compiler-libs) and oi's references (ocamlc's and ocamlopt's runs); the steps judge against the recorded runs, the helper live
+    printf ' :ocaml "%s"}\n' "$(gate_ocaml_id)"; } > "$d/hosts.edn"
 }
 run_plan() {  # run_plan DIR [--rerun]: the plan into DIR (plan.tsv, plan/), printed
   local d=$1; shift
