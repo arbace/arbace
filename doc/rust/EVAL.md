@@ -1,6 +1,7 @@
 # rsi: Rust's eval (spec)
 
-Status: RE1's spec, 2026-11-03, with RE2 built (doc/rust/RUST-EVAL-SURVEY.md, "As built: RE1-RE2 (write-ahead)"). The survey's
+Status: RE1's spec, 2026-11-03, with RE2 and RE3 built (doc/rust/RUST-EVAL-SURVEY.md, "As built: RE1-RE2 (write-ahead)", "As built:
+RE3 (write-ahead)"). The survey's
 decisions bind it (RES1-RES16, all as recommended, the user 2026-11-03): Rust's eval and AOT are rustc's `-O0` compilation run
 on Arbace through C++'s path (RES1 (b)). This file says what rsi does and how its results are judged; the survey says why.
 
@@ -25,7 +26,7 @@ byte for byte) goes:
 4. **The back end**: until RE4, gcc `-O0` (cppi's flags: `-std=gnu23 -O0 -w -fno-builtin -fno-strict-aliasing
    -ffp-contract=off`) compiles the printed C, the second judge (survey §8.1); from RE4, ci runs the C forms, and from RE6 cf2g
    compiles them (AOT).
-5. **The link** (§4 until RE3, §3 from RE3).
+5. **The link**: since RE3 with std's lowered units (§8); RE2's native-std leg (§4) stays as `--leg native`.
 
 The run is compared with the judge's on status, stdout and stderr (§7).
 
@@ -40,8 +41,9 @@ budget, RES14 (a)):
 | `list [--set all\|run\|threads\|process\|net\|samples] [--sample N] [--only RE] [-o PLAN]` | the UI programs (RR5's `:programs`) as run-program's plan; the sets of §6; rsi's samples (`test/rust/eval/`) | RE1, RE2 |
 | `sets` | `test/rust/eval-programs.edn` made again | RE1 |
 | `std-build [--update]` | std's sysroot with its IR, pinned (§3) | RE1 |
-| `lower-check PLAN WORK [--jobs N] [--record]` | each program built and run from the original and from its lowered IR, judged (§7) | RE2 |
-| `runtime-build`, `run`, `check [--aot]`, `divergences`, `record-ref` | std lowered; ci; cf2g; the classes; the judge's runs recorded | RE3-RE6 |
+| `lower-check PLAN WORK [--jobs N] [--record] [--leg lowered\|native] [--runtime OUT]` | each program built and run from the original and from its lowered IR, judged (§7); the leg: std lowered (RE3, the default) or the host's native std (RE2) | RE2, RE3 |
+| `runtime-build [OUT] [--jobs N]` | std's IR lowered, compiled and archived by crate, the pending-flag layer (§8) | RE3 |
+| `run`, `check [--aot]`, `divergences`, `record-ref` | ci; cf2g; the classes; the judge's runs recorded | RE4-RE6 |
 
 The pieces: `arbace/rust/lower.ae` (`arbace.rust.lower`: the driver over the lowering, the native-std leg's substitution),
 `arbace/rust/check.ae` (`arbace.rust.check`: the sets, the plan's filter, the judge), `arbace/rust/rt/native.c.ae` (§4's layer),
@@ -50,29 +52,30 @@ its sides take a WRAP since RE2), `test/rust/runtime/` (std's pins; `native/try.
 
 ## 3. std's build (RES3 (a))
 
-One sysroot, built from the pinned `rust-src` (`tools/rsdump/apks.sha256`) by Cargo's `-Zbuild-std` offline (RR5's build: the
-library's vendored crates by source replacement), is what every lowered program and the judge compile against from RE3 on; its
-IR is lowered as CX7 lowered libstdc++. `test/rust/runtime/std.edn` pins:
+One sysroot, built from the pinned `rust-src` (`tools/rsdump/apks.sha256`), is what every lowered program and the judge compile
+against from RE3 on; its IR is lowered as CX7 lowered libstdc++. Since RE3 (RES17 (b)) it is built as rust's bootstrap builds std:
+Cargo on `library/`'s own workspace (`library/Cargo.toml`, the package `sysroot` with the features `panic-unwind backtrace`), offline,
+the vendored crates by source replacement (`--config`), `RUSTC_BOOTSTRAP=1`, `-Zforce-unstable-if-unmarked` (as bootstrap gives every
+std crate: without it std's const `HashMap::with_hasher` is refused). Until RE3 it was Cargo's `-Zbuild-std` from a scratch package,
+which hashes std's packages by their absolute path, so the pin held at one place alone; a workspace's members are hashed by their
+path in it, and three builds at three places (two scratch directories and `.tmp/rsi/std`, in a worktree) gave the same 110 digests.
+`test/rust/runtime/std.edn` pins:
 
 - the oracle and the assembler: `rustc 1.99.1 (58cf8f9c3 2026-10-13) (Alpine Linux Rust 1.99.1-r0)` (LLVM 23.1.3) and `Alpine
   clang version 23.1.4` (`bin/rsi std-build` refuses others; a move is a recorded decision, as for `RUSTC_VERSION`);
 - the profile: Cargo's release profile with `opt-level 0`, `debug-assertions false`, `overflow-checks false`, `panic unwind`,
   `debug 0`, `trim-paths all` (survey §7.3: at `-O0` the lowering's tail stays the programs'; std's own checks off as in the host's release std,
-  so its panics' texts are the judge's);
-- the flags: `-Csave-temps -Cembed-bitcode=yes` (the units' bitcode kept; the rlibs carry bitcode for `-C lto` programs), and
-  the crates `std,panic_unwind,panic_abort,proc_macro,test`;
-- the IR: each codegen unit's bitcode made IR text by `clang -S -emit-llvm`, `test/rust/runtime/ir.sha256` (`CRATE/UNIT.ll`).
+  so its panics' texts are the judge's), and the workspace manifest's own per-package settings overridden (`--config`, which Cargo
+  takes over the manifest): `compiler_builtins` at 16 codegen units (the manifest's 10,000 made 337 units), the backtrace crates at
+  `opt-level 0` (the manifest's `"s"`);
+- the flags: `-Csave-temps -Cembed-bitcode=yes -Zforce-unstable-if-unmarked`; the package `sysroot`, its features;
+- the IR: each codegen unit's bitcode made IR text by `clang -S -emit-llvm`, `test/rust/runtime/ir.sha256` (`CRATE/UNIT.ll`): 110
+  units of 25 crates (the package `sysroot`'s own unit and std's dylib's allocator shim left out), 51 MB, 45 s of Cargo on 8 jobs.
 
-Determinism: two builds at the same place give the same 103 units byte for byte (51 MB of IR, 38 s of Cargo on 8 jobs). The
-place matters: Cargo's `-Zbuild-std` hashes std's packages by their absolute path into `-C metadata` (measured: the same
-library at two places gives other disambiguators, so other symbol names and unit files, whatever `--remap-path-prefix`,
-`__CARGO_DEFAULT_LIB_METADATA`, `-Ztrim-paths` or a real copy instead of links), so `bin/rsi std-build` builds in the main
-checkout's `.tmp/rsi/std/` (a worktree too, under a lock; `RSI_STD_DIR` names another place, whose IR then differs from the
-pin) and the pin holds there. The paths the IR prints are not the place's: std's crates' files are named relative to the
-workspace (`library/core/src/any.rs`), `-Ztrim-paths` (the profile's `trim-paths all`) maps the workspace to `.` for the
-vendored crates (`./library/vendor/hashbrown-0.17.1/src/raw.rs`), and the units are made IR text from `deps/` (their
-`ModuleID` names the bitcode file alone): no unit names `/root`. RES17 proposes building the library's workspace itself, as rust's bootstrap does,
-which hashes its members by their path in the workspace.
+The paths the IR prints are the workspace's: std's crates' files relative to `library/` (`core/src/any.rs`, where `-Zbuild-std`'s
+scratch package gave `library/core/src/any.rs`), the vendored crates' `./vendor/hashbrown-0.17.1/src/raw.rs`; no unit names `/root`.
+The panics' locations in std print so on both sides (the judge compiles against the same sysroot). The sysroot is the host's but
+for its rlibs, the build's (std's dylib is left out: a `-C prefer-dynamic` program does not build on either side).
 
 **share-generics** (survey §7.1): at `-O0` a program calls generic instances exported by std's crates under their
 disambiguators, so a program must be compiled against the sysroot whose IR is lowered: every cache key from RE3 on includes the
@@ -173,10 +176,50 @@ and the classes `test/rust/divergences{,-aot}.edn`. RE2's classes (11): `native-
 `float16-128`, `c-variadic`, `alias`, `lto`, `wide-int`, `optimized-ir`, `speed`; the classes the survey names (§8.2: `threads`, `process`, `net`,
 `inline-asm`, `naked`, `simd`, `speed`, `nondeterministic`, `stack-overflow`) enter as programs fall in them.
 
-## 8. Panics from RE3 (RES4 (a))
+## 8. std lowered (RE3)
 
-The pending-flag layer proper: `eh.c.ae` split into the unwinder's entry points (`_Unwind_RaiseException`, `_Unwind_Resume`,
-shared with C++) and C++'s personality part; Rust's personality (`rust_eh_personality`, std's `personality/gcc.rs`) and
-`panic_unwind` lowered with std. Rust's landing pads have three clause shapes (survey P6): `cleanup`, `filter [0 x ptr]
-zeroinitializer` (a `nounwind` boundary: selector -1, the IR's `panic_cannot_unwind` path), `catch ptr null` (`__rust_try`):
-no `type_info` matching. Then `__rust_try` is lowered like any function and `native.c.ae` and `try.rs` are dropped.
+`bin/rsi runtime-build [OUT]` (default `.tmp/rsi/runtime`; `std-build` first when `.tmp/rsi/std`'s IR is not at the pin): each unit of
+std's crates but `compiler_builtins` (94 of 110) read as LLVM forms, round-tripped (the forms' print assembled by clang, its object
+equal to the IR's), given the runtime's pre-pass, lowered, compiled by gcc `-O0` and archived by crate (`OUT/lib/libCRATE.a`), the
+layer `arbace/rust/rt/eh.c.ae` as `OUT/rt.o`; `OUT/results.tsv` (unit, round trip, objects, lowering, gcc, stubs), `OUT/stubbed.tsv`,
+`OUT/key` (as cppi's runtime key: the lowering's namespaces, the layer, std's pins, the build's steps, gcc's flags and version, clang's,
+the tools' host). About 2 minutes at 8 jobs (lowering 105 s, gcc 12 s).
+
+**compiler_builtins stays native**: it is the C compiler's builtins (libgcc's role for the lowered C++ of CX7), and its units are the
+ones the lowering cannot take (f16 and f128 arithmetic, `global_asm!`'s probestack, `xgetbv`); its rlib from the sysroot is linked as
+it is. On ci (RE4) the builtins are ci's own.
+
+**The pre-pass** (`arbace.rust.lower`'s `runtime-forms`, `lower-list --runtime`):
+
+- the inline assembly std runs, answered by the layer (RES8 (a)): `core::arch`'s `__cpuid_count` as std_detect inlines it (the `cpuid`
+  template with rbx saved) calls `rsi_cpuid`, `llvm.x86.xgetbv` is `rsi_xgetbv`; the CPU answered is a fixed x86-64 baseline (leaf 0:
+  the highest leaf 1, the vendor `ArbaceRsiCPU`; leaf 1: fpu, tsc, cx8, cmov, mmx, fxsr, sse, sse2; nothing else), so std's
+  runtime-detected features are off and its generic paths run;
+- functions whose IR the lowering does not take, replaced by the layer (`replaced-functions`: the body a call of the layer's function
+  with the same parameters): u128's `carrying_mul_add`, which multiplies in i256 and which u128's `Display` calls
+  (`rsi_u128_carrying_mul_add`, by 64-bit limbs);
+- the other defines whose IR names a type the lowering does not take (`half`, `bfloat`, `fp128`, integers past 128 bits) or inline
+  assembly it does not answer: stubs of the same name and linkage (`void`, no parameters) that print `rsi: not lowered: NAME (WHY)` and
+  abort; a direct call of one goes through a cast pointer, as calls whose types differ do; declarations of such types no longer
+  referenced dropped. At RE3: 33 functions, all `core`'s f16 (its formatting, parsing and arithmetic); a program that reaches one is
+  in the class `not-lowered`.
+
+**The link** (`bin/lib/rsi/link` with `RSI_RUNTIME`, `RSI_SYSROOT`): rustc's own link line against the sysroot, the program's unit and
+the allocator shim (per program, from `-C save-temps`) as their lowered objects, the layer's `rt.o` beside them, each rlib of the
+sysroot replaced by its crate's archive in the same place of the line (the line's order is the crates' dependency order, and one
+archive a crate keeps `panic_unwind` and `panic_abort`, which both define `__rust_start_panic`, apart), `compiler_builtins` native, no
+`-lgcc_s`: the lowered program links musl alone (`ldd`).
+
+**Panics** (RES4 (a); the layer `arbace/rust/rt/eh.c.ae`): the unwinder's entry points (`_Unwind_RaiseException`, `_Unwind_Resume`,
+`_Unwind_Resume_or_Rethrow`, `_Unwind_DeleteException`) raise the pending flag; the lowered frames return while it is set, through
+their cleanup pads (drops while unwinding run), to a `catch ptr null` pad (`__rust_try`, lowered like any function: `cx$catches` takes
+every exception for a null clause, Rust has no typed catch) or to a `filter [0 x ptr] zeroinitializer` pad (selector -1, the IR's
+`panic_cannot_unwind`/`panic_in_cleanup` path, std's abort). `rust_eh_personality` is lowered with std and never called; the queries
+the personality and std's backtrace make of the unwinder (`_Unwind_GetIP`, `_Unwind_Backtrace`, ...) answer as an unwinder that finds
+no frame. A panic no frame catches (none in std's threads: `lang_start` and the thread start catch every panic) prints what std's
+`rust_panic` prints when the native unwinder finds no handler, `fatal runtime error: failed to initiate panic, error 5, aborting`, and
+aborts. The trampolines of `pthread_create` and the exit handlers are C++'s (CP120 (b), CP160 (b)), Rust's copy. RES4 (a)'s one layer
+for both languages (`eh.c.ae` split into the entry points and C++'s personality part) waits for RES16's rename (RES23): until then the
+Rust layer holds the entry points it needs.
+
+The native-std leg's `native.c.ae` and `test/rust/runtime/native/try.rs` stay for `--leg native` (RE2's records) and nothing else.
