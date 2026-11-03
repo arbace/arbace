@@ -1,0 +1,194 @@
+(ns arbace.c.runtime
+  "ci's prebuilt runtime (doc/C23-SURVEY.md, \"As built: ci's prebuilt runtime\"; the user, 2026-11-03): a library's units (musl's,
+  arbace.c.musl; a lowered C++ runtime's, any library of read units with an index) each checked and built once into its
+  fragment (arbace.c.build/unit-fragment), cached on disk by the runtime's key (the fragments' format, the target, the
+  library's own key, ci's checker and builder as this process loaded them) under .tmp/ci-runtime/NAME-KEY/ (CI_RUNTIME), so
+  that a program checks and builds only its own units and links the library's fragments by symbol
+  (arbace.c.build/link-text) into the node program both back ends take (go/arbace/ci's Loader, arbace.c.cf2g). Apart from
+  arbace.c.musl so that the libc's forms cache, keyed by musl.ae, is not read again when the linker changes."
+  (:require [arbace.c.build :as build]
+            [arbace.c.musl :as musl]
+            [arbace.string :as str])
+  (:import (java.io File)))
+
+(set! *warn-on-reflection* true)
+
+(defn- env [^String k ^String d] (or (System/getenv k) d))
+
+(defn check-unit
+  "A musl source read from the forms cache and checked."
+  [lib ^String src]
+  (let [rd (musl/load-unit (:root lib) src)
+        [fc _] (musl/config (:h lib) (:root lib))]
+    (assoc ((resolve 'arbace.c.run/check-read) (:h lib) fc rd) :src src)))
+
+
+(defn- sha256-hex ^String [^bytes b]
+  (let [d (.digest (java.security.MessageDigest/getInstance "SHA-256") b)
+        sb (StringBuilder.)]
+    (doseq [x d] (.append sb (format "%02x" (bit-and 0xff (long x)))))
+    (str sb)))
+
+(def runtime-sources
+  "The sources a library unit's fragment is made by: the checker, its builtins' declarations, the builder, check-read and
+  the libc's reader (with the forms cache's key: repr/c, the host, configure's headers)."
+  ["arbace/c/check.ae" "arbace/c/build.ae" "arbace/c/run.ae" "arbace/c/musl.ae" "arbace/c/runtime.ae" "arbace/repr/c/annot.ae"])
+
+(defn- embedded-bytes
+  "The embedded copy of the source f (the executable's), or nil."
+  ^bytes [^String f]
+  (when-let [ins (arbace.lang.RT/resourceAsStream nil f)]
+    (try (.readAllBytes ins) (finally (.close ins)))))
+
+(defn- source-bytes
+  "What the source `f` ran as in this process, as RT.load chose (review 187: ARBACE_PATH_FIRST alone does not say it):
+  [how bytes]. A namespace with a compiled loader in the executable (Compiler$AOT/loader, unless ARBACE_NO_AOT) ran
+  compiled from its embedded copy, whatever ARBACE_PATH_FIRST says (RT.load takes the loader for a source read as embedded
+  or first on ARBACE_PATH), unless it is a tool's source under arbace/repr/ whose checkout copy differs, evaluated instead;
+  else it was evaluated from the checkout's copy (ARBACE_PATH_FIRST, or a tool's source), else from the embedded one."
+  [^String root ^String f]
+  (let [cf (File. root f)
+        checkout (when (.exists cf) (java.nio.file.Files/readAllBytes (.toPath cf)))
+        emb (embedded-bytes f)
+        tool? (str/starts-with? f "arbace/repr/")
+        compiled? (some? (arbace.lang.Compiler$AOT/loader (subs f 0 (- (count f) 3))))]
+    (cond
+      (and tool? checkout (not (java.util.Arrays/equals ^bytes checkout ^bytes emb))) ["evaluated" checkout]
+      (and compiled? emb) ["compiled" emb]
+      (and checkout (or (System/getenv "ARBACE_PATH_FIRST") tool? (nil? emb))) ["evaluated" checkout]
+      emb ["evaluated" emb]
+      :else ["absent" (.getBytes (str "absent " f) "UTF-8")])))
+
+(defn runtime-key
+  "The prebuilt runtime's key: the fragments' format, the target, the library's own key (`lib-key`: its sources' digest)
+  and runtime-sources' digests as loaded."
+  ^String [^String root ^String lib-key]
+  (sha256-hex (.getBytes (str "ci-runtime " build/fragment-version "\n"
+                              "target linux-amd64 ldouble-size 8\n"
+                              "library " lib-key "\n"
+                              (str/join (for [f runtime-sources :let [[how b] (source-bytes root f)]] (str f " " how " " (sha256-hex b) "\n"))))
+                         "UTF-8")))
+
+(defn- musl-key
+  "The forms cache's key (bin/lib/ci/musl's forms/key), else its index's digest."
+  ^String [^String root]
+  (let [k (File. (str (musl/forms-root root) "/key"))
+        ix (File. (str (musl/forms-root root) "/index.edn"))]
+    (cond
+      (.exists k) (str "musl " (str/trim (slurp k)))
+      (.exists ix) (str "musl-index " (sha256-hex (java.nio.file.Files/readAllBytes (.toPath ix))))
+      :else "musl none")))
+
+(defn cache-root ^String [^String root] (env "CI_RUNTIME" (str root "/.tmp/ci-runtime")))
+
+(defn prebuilt
+  "A library made prebuilt: `lib` with :frags (the fragments made or read, by unit), :frag-dir (the cache's directory for
+  its key) and :check (fn [unit-name] checked unit). `lib-key` names the library's sources (musl's forms cache's key)."
+  [lib ^String root ^String name ^String lib-key check]
+  (let [key (runtime-key root lib-key)
+        dir (str (cache-root root) "/" name "-" key)
+        d (File. dir)]
+    ;; the key's directory marked as used now: bin/ci runtime prune and bin/gate --prune remove only keys unused for a day
+    (when (.isDirectory d) (.setLastModified d (System/currentTimeMillis)))
+    (assoc lib :frags (java.util.concurrent.ConcurrentHashMap.) :check check
+               :runtime-key key :frag-dir dir)))
+
+(defn- write-atomic
+  "s written to f through a temporary name (another process may write the same fragment)."
+  [^File f ^String s]
+  (.mkdirs (.getParentFile f))
+  (let [tmp (File. (str (.getPath f) ".tmp" (System/nanoTime) "-" (.getId (Thread/currentThread))))]
+    (spit tmp s)
+    (when-not (.renameTo tmp f) (.delete tmp))))
+
+(def ^:dynamic *no-cache* (some? (System/getenv "CI_RUNTIME_NO_DISK")))
+
+(defn- make-fragment
+  [lib ^String src]
+  (let [f (File. (str (:frag-dir lib) "/" src ".frag"))]
+    (or (when (and (not *no-cache*) (.exists f))
+          (try (read-string (slurp f)) (catch Exception _ nil)))
+        (let [u ((:check lib) src)
+              ;; a lowered C++ unit's constructors (arbace.cpp.run's renaming), which its program's _init calls
+              fr (cond-> (build/unit-fragment u) (seq (:ctors (:rd u))) (assoc :ctors (:ctors (:rd u))))]
+          (when-not *no-cache*
+            ;; review 187: a failed write (a full disk, a directory pruned by another process) is no build's failure: the
+            ;; fragment built in memory serves, the next build makes it again
+            (try (write-atomic f (binding [*print-length* nil *print-level* nil] (pr-str fr)))
+                 (catch Exception x
+                   (binding [*out* *err*]
+                     (println "ci runtime: the fragment" (.getPath f) "not written (" (str (.getName (class x)) ": " (.getMessage x))
+                              "): built in memory")))))
+          fr))))
+
+(defn lib-fragment
+  "A library unit's fragment: made once per process, read from the cache, or checked, built and cached."
+  [lib ^String src]
+  (let [^java.util.concurrent.ConcurrentHashMap m (:frags lib)
+        d (or (.get m src) (let [d (delay (make-fragment lib src))] (or (.putIfAbsent m src d) d)))]
+    @d))
+
+(defn library
+  "musl as a prebuilt library: arbace.c.musl/library's {:root :index :by-name :checked} with prebuilt's keys."
+  [h ^String root]
+  (let [lib (musl/library h root)]
+    (prebuilt lib root "musl" (musl-key root) #(check-unit lib %))))
+
+(defn- normalize
+  "A node program's text with the names of statics of no name (an identity's print) made equal."
+  [^String s]
+  (str/replace s #"Object@[0-9a-f]+" "Object@"))
+
+(defn link-text
+  "The node program's text of the program's units linked with what they need of musl: the program's units built into
+  fragments, musl's prebuilt (lib-fragment). CI_PREBUILT=0: every unit checked and built together, as before
+  (arbace.c.build/build-program-direct); CI_LINK_CHECK=1: both, their texts required equal."
+  ^String [lib units]
+  (let [pdefs (set (mapcat #(keys (musl/unit-defs (:forms (:rd %)))) units))
+        prefs (set (mapcat #(musl/refs (concat (:forms (:rd %)) (mapcat :forms (vals (:units (:rd %)))))) units))
+        ;; a builtin's library function (__builtin_memset is memset's call)
+        prefs (into prefs (keep #(when (str/starts-with? % "__builtin_") (subs % 10)) prefs))
+        srcs (musl/closure lib pdefs prefs)
+        _ (when (System/getenv "CI_TRACE") (binding [*out* *err*] (println "musl: linked" (count srcs) srcs)))
+        direct #(build/program-text (build/build-program-direct (into (vec units) (map (fn [s] (musl/checked-unit lib s)) srcs))
+                                                                :libc-start true))
+        linked #(build/link-text (into (mapv build/unit-fragment units) (map (fn [s] (lib-fragment lib s)) srcs))
+                                 :libc-start true)]
+    (cond
+      (= "0" (System/getenv "CI_PREBUILT")) (direct)
+      (System/getenv "CI_LINK_CHECK")
+      (let [a (try [:ok (direct)] (catch arbace.lang.ExceptionInfo x [:ex (.getMessage x) (:ci/refused (ex-data x))]))
+            b (try [:ok (linked)] (catch arbace.lang.ExceptionInfo x [:ex (.getMessage x) (:ci/refused (ex-data x))]))]
+        (when-not (= (map #(if (string? %) (normalize %) %) a) (map #(if (string? %) (normalize %) %) b))
+          (throw (ex-info (str "ci link check: the linked program differs from the direct build ("
+                               (if (= :ok (first a)) (count (second a)) (second a)) " / "
+                               (if (= :ok (first b)) (count (second b)) (second b)) ")")
+                          {})))
+        (if (= :ok (first b)) (second b) (throw (ex-info (second b) (if (nth b 2) {:ci/refused (nth b 2)} {})))))
+      :else (linked))))
+
+(defn build-linked
+  "The node program of the program's units linked with what they need of musl (its commands)."
+  [lib units]
+  (build/read-program (link-text lib units)))
+
+(defn prebuild
+  "Every musl source's fragment made (read from the cache or checked, built and cached), in `threads` threads (bin/ci runtime
+  build): {:units N :made M :items-refused R}, the cache's directory printed."
+  [lib threads]
+  (let [srcs (vec (keys (:index lib)))
+        q (java.util.concurrent.ConcurrentLinkedQueue. ^java.util.Collection srcs)
+        refused (atom 0)
+        made (atom 0)
+        workers (doall (for [_ (range threads)]
+                         (future
+                           (loop []
+                             (when-let [s (.poll q)]
+                               (let [had (.exists (File. (str (:frag-dir lib) "/" s ".frag")))
+                                     fr (lib-fragment lib s)]
+                                 (when-not had (swap! made inc))
+                                 (swap! refused + (count (filter :ex (concat (map :item (:fcands fr)) (keep :item (:objs fr))))))
+                                 (.remove ^java.util.concurrent.ConcurrentHashMap (:frags lib) s)
+                                 (recur)))))))]
+    (doseq [w workers] @w)
+    {:units (count srcs) :made @made :items-refused @refused :dir (:frag-dir lib)}))

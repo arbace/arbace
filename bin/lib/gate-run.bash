@@ -561,6 +561,21 @@ gate_prune() {  # gate_prune [--dry-run]
       [ -n "$dry" ] || rm -rf "${f:?}"
     done <<< "$(ls -dt "$exes"/* 2>"$store/.prune.err")"
   done
+  # ci's prebuilt runtime (doc/C23-SURVEY.md, "As built: ci's prebuilt runtime", CS272 (a)): the checkout's cache of
+  # fragments, a directory per library and key (NAME-KEY); per library the newest 3 kept, an older one removed when a day old
+  local rtc=${CI_RUNTIME:-$root/.tmp/ci-runtime} lib
+  if [ -d "$rtc" ]; then
+    for lib in $(ls "$rtc" | sed -n 's/^\(.*\)-[0-9a-f]\{64\}$/\1/p' | sort -u); do
+      i=0
+      while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        i=$((i + 1)); [ $i -gt 3 ] || continue
+        [ $(( now - $(stat -c %Y "$f") )) -ge 86400 ] || continue
+        echo "gate --prune: ${dry:+would remove }ci's runtime $f"
+        [ -n "$dry" ] || rm -rf "${f:?}"
+      done <<< "$(ls -dt "$rtc/$lib"-* 2>"$store/.prune.err")"
+    done
+  fi
 }
 
 # the audit's reducer (GT5, GTS30 (a)): tools/gateaudit, the Go port of test/gate/audit.awk (23 times
