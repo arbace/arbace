@@ -12,21 +12,17 @@
 #                                finding 2); Clojure's, arbace/lang and the vendored Clojure's namespaces with
 #                                c2j (GTS205 (a): the runtime and c2j)
 #   cover_pkgs PROG              the cover build's -coverpkg: the packages of PROG (j2g's program,
-#                                PROG/go/arbace/...) that any crop's regex takes, comma-separated (one build
-#                                for every crop; a crop's blocks are its packages' when the profiles are read)
+#                                PROG/go/arbace/...) that any crop's regex takes, comma-separated, and the main
+#                                package arbace/cmd/arbace (one build for every crop; a crop's blocks are its packages' when the profiles are read)
 #   cover_cache ROOT [KEY]       where the cover build of ROOT's gate_key is: ARBACE_COVER_CACHE when set, else
 #                                ARBACE_GATE_EXES/cover-KEY20 (beside the gate's builds, KEY20/)
 #   cover_exe ROOT [NAME]        the cover build's NAME (arbace, default, or arbace-tests) at ROOT's key: its path,
 #                                status 1 with a note when it is not built (bin/arbace-go --gate-build --cover)
 #   cover_env TOOL ID            when ARBACE_COVER_DIR is set: GOCOVERDIR=DIR for the run of test ID by TOOL (a
-#                                check and its level, java-interp, goi-run, ...), DIR =
-#                                ARBACE_COVER_DIR/TOOL/ID with / in ID as %, made, ID written into DIR/id and
-#                                the build's meta-data file (ARBACE_COVER_META's, ARBACE_COVER_DIR/meta's) linked into it (Go writes a covered program's
-#                                meta-data, tens of MB, into each GOCOVERDIR that lacks it: linked, a run writes
-#                                only its counters); nothing when unset
-#   cover_meta EXE               EXE's meta-data directory in the cover build: a tool that runs EXE exports it as
-#                                ARBACE_COVER_META, whose covmeta files cover_env links
-#   cover_settle TOOL ID         after the run: a meta-data file the run wrote moved to ARBACE_COVER_DIR/meta
+#                                check and its level, java-interp, goi, ...), DIR = ARBACE_COVER_DIR/TOOL/ID with /
+#                                in ID as %, made, ID written into DIR/id; nothing when unset
+#   cover_settle TOOL ID         after the run: the meta-data file the run wrote (about 15 MB, Go writes it into
+#                                every GOCOVERDIR) kept once in ARBACE_COVER_DIR/meta, linked from DIR
 #   cover_go_flags ROOT PROG WORK OVERLAY OUT
 #                                bin/build-go's arguments for a cover build of the j2g program PROG
 #
@@ -50,7 +46,9 @@ cover_pkg_re() {
 cover_pkgs() {
   local prog=$1 re c
   re=$(for c in $(cover_crops); do cover_pkg_re "$c"; done | paste -sd'|')
-  (cd "$prog/go" && find arbace -mindepth 1 -maxdepth 1 -type d) | LC_ALL=C sort | grep -E "$re" | paste -sd,
+  # and the main package: Go initializes the coverage output only from an instrumented main (VM report 160); its
+  # blocks are no crop's
+  { (cd "$prog/go" && find arbace -mindepth 1 -maxdepth 1 -type d) | LC_ALL=C sort | grep -E "$re"; echo arbace/cmd/arbace; } | paste -sd,
 }
 
 cover_cache() {
@@ -70,39 +68,34 @@ cover_exe() {
 
 cover_env() {
   [ -n "${ARBACE_COVER_DIR:-}" ] || return 0
-  local d=$ARBACE_COVER_DIR/$1/${2//\//%} m
+  local d=$ARBACE_COVER_DIR/$1/${2//\//%}
   mkdir -p "$d" "$ARBACE_COVER_DIR/meta" || return 1
   printf '%s\n' "$2" > "$d/id"
-  for m in "$ARBACE_COVER_DIR"/meta/covmeta.* ${ARBACE_COVER_META:+"$ARBACE_COVER_META"/covmeta.*}; do
-    [ -f "$m" ] && [ ! -e "$d/${m##*/}" ] && ln -s "$m" "$d/${m##*/}"
-  done
   echo "GOCOVERDIR=$d"
 }
 
-# cover_settle TOOL ID: after the run of ID, a meta-data file it wrote itself (a program not linked yet: the
-# compiled level's shard programs) moved into ARBACE_COVER_DIR/meta and linked back, so the next runs of that
-# program link it
-# cover_meta EXE: the cover build's meta-data directory of EXE (CACHE/amd64/NAME: CACHE/meta-NAME), for
-# ARBACE_COVER_META
-cover_meta() { echo "$(dirname "$(dirname "$1")")/meta-$(basename "$1")"; }
-
+# cover_settle TOOL ID: after the run of ID, the meta-data file it wrote (Go writes it into each GOCOVERDIR,
+# whatever is there already: its size check never holds, go1.27.1's cfile.openMetaFile) kept once in
+# ARBACE_COVER_DIR/meta and linked from the test's directory, where go tool covdata reads it
 cover_settle() {
   [ -n "${ARBACE_COVER_DIR:-}" ] || return 0
-  local d=$ARBACE_COVER_DIR/$1/${2//\//%} m
+  local d=$ARBACE_COVER_DIR/$1/${2//\//%} m s
   for m in "$d"/covmeta.*; do
     [ -f "$m" ] && [ ! -L "$m" ] || continue
-    mv -f "$m" "$ARBACE_COVER_DIR/meta/${m##*/}" && ln -s "$ARBACE_COVER_DIR/meta/${m##*/}" "$m"
+    s=$ARBACE_COVER_DIR/meta/${m##*/}
+    if [ -f "$s" ]; then rm -f "$m"; else mv -f "$m" "$s"; fi
+    ln -s "$s" "$m"
   done
 }
 
 # cover_go_flags ROOT PROG WORK OVERLAY OUT: bin/build-go's arguments, one a line, for a cover build of the
 # j2g program PROG printed into WORK with the overlay OVERLAY (bin/jrt overlay's): the overlay with the hook
-# (tools/covsubset/hook/cover.go) added to WORK's main package, written to OUT, and the cover flags
+# (tools/covsubset/hook/cover.go) added to Go's internal/coverage/cfile, written to OUT, and the cover flags
 cover_go_flags() {
   local root=$1 prog=$2 work=$3 overlay=$4 ov=$5 pkgs
   pkgs=$(cover_pkgs "$prog")
   [ -n "$pkgs" ] || { echo "cover: no package of $prog to cover" >&2; return 1; }
-  sed '$s|}}[[:space:]]*$|,\n "'"$work/mod/cmd/arbace/zz_arbace_cover.go"'": "'"$root/tools/covsubset/hook/cover.go"'"}}|' "$overlay" > "$ov"
+  sed '$s|}}[[:space:]]*$|,\n "'"${ARBACE_GOROOT:-/root/tamago-go}/src/internal/coverage/cfile/zz_arbace_cover.go"'": "'"$root/tools/covsubset/hook/cover.go"'"}}|' "$overlay" > "$ov"
   grep -q zz_arbace_cover "$ov" || { echo "cover: could not add the hook to $overlay" >&2; return 1; }
   printf '%s\n' --overlay "$ov" --go-flag -cover --go-flag -covermode=set --go-flag "-coverpkg=$pkgs" --go-flag -tags=arbacecover
 }

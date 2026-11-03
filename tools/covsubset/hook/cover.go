@@ -1,8 +1,10 @@
 //go:build arbacecover
 
 // The cover build's hook (doc/GATE-SURVEY.md, GT8.3, GTS206 (a); bin/arbace-go --gate-build --cover): added
-// to the main package arbace/cmd/arbace of the cover executables by an -overlay entry and built with
-// -tags arbacecover, never part of a shipped build. Go writes a covered program's counters when it exits
+// to Go's internal/coverage/cfile (the package that writes a covered program's data, linked into every cover
+// build) by an -overlay entry of the cover builds alone (bin/lib/cover.bash's cover_go_flags), built with
+// -tags arbacecover, never part of a shipped build. Not in the main package: the main package is covered (Go
+// initializes the output only from a covered main) and the cover tool reads its files without the overlay. Go writes a covered program's counters when it exits
 // (os.Exit or main's return), not when a signal kills it; a check's limits end a program with SIGTERM (the wall
 // cap, timeout) or SIGKILL (the CPU limit, ulimit -t). So, when GOCOVERDIR is set: on SIGTERM or SIGHUP the
 // counters are written and the signal raised again (the status a check reads stays the signal's), and every
@@ -10,18 +12,21 @@
 // CPU limit still leaves the blocks it reached up to the last flush. Each write is a counter file of its own
 // (covcounters.HASH.PID.TIME); `go tool covdata textfmt` merges them. After tools/cicover/cirun/cover.go (queue
 // 160, which exits 124 instead).
-package main
+package cfile
 
 import (
 	"os"
 	"os/signal"
-	"runtime/coverage"
 	"strconv"
 	"syscall"
 	"time"
 )
 
 func init() {
+	arbaceCoverHook()
+}
+
+func arbaceCoverHook() {
 	d := os.Getenv("GOCOVERDIR")
 	if d == "" {
 		return
@@ -30,7 +35,7 @@ func init() {
 	signal.Notify(c, syscall.SIGTERM, syscall.SIGHUP)
 	go func() {
 		s := <-c
-		coverage.WriteCountersDir(d)
+		emitCounterDataToDirectory(d)
 		signal.Reset(s)
 		syscall.Kill(os.Getpid(), s.(syscall.Signal))
 		time.Sleep(time.Second)
@@ -43,7 +48,7 @@ func init() {
 	if secs > 0 {
 		go func() {
 			for range time.Tick(time.Duration(secs) * time.Second) {
-				coverage.WriteCountersDir(d)
+				emitCounterDataToDirectory(d)
 			}
 		}()
 	}
