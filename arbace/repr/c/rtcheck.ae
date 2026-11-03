@@ -62,9 +62,41 @@
 
 (defn- one-line ^String [x] (str/replace (str x) #"[\t\n]" " "))
 
+(defn level1
+  "Level 1's comparison: the read's forms text and header units (a, ua) against the reread's (b, ub): [\"equal\" nil] or
+  [\"differ\" DETAIL]."
+  [^String a ua ^String b ub]
+  (if (and (= a b) (= (set ua) (set ub)))
+    ["equal" nil]
+    ["differ" (or (first-diff a b) "header units")]))
+
+(defn level2
+  "Level 2's comparison: the original's bytes against the :full print's (ISO-8859-1), byte for byte: \"equal\" or \"differ\"."
+  [^bytes orig ^bytes printed]
+  (if (java.util.Arrays/equals orig printed) "equal" "differ"))
+
+(def ^:private keep-levels #{:roundtrip-forms :roundtrip-full})
+
+(defn control-names
+  "The names of the corpus `id` that a :roundtrip-forms or :roundtrip-full control (test/c/controls.edn) names, as subject or
+  reference: the files whose texts check-file keeps under control/ (queue 159)."
+  [^String id]
+  (set (for [c (read-string (slurp "test/c/controls.edn")) :when (keep-levels (:level c))
+             f [(:subject c) (:reference c)]
+             :let [i (.indexOf ^String f "/")] :when (= (subs f 0 i) id)]
+         (subs f (inc i)))))
+
+(defn- keep-text
+  "GTS81 (a), queue 159: a control's file keeps what levels 1 and 2 compared, under WORK/ID/control/NAME.KIND."
+  [^String d ^String nm ^String kind ^bytes bs]
+  (spit-bytes (str d "/control/" nm "." kind) bs))
+
 (defn check-file
-  "One file: [name read l1 l2 detail], the print written under WORK/ID/print/."
-  [^String work ^String id h ^String base e]
+  "One file: [name read l1 l2 detail], the print written under WORK/ID/print/. A control's file (keep, control-names)
+  keeps what levels 1 and 2 compared under WORK/ID/control/: NAME.read and NAME.reread (the forms texts, with their header
+  units in NAME.read-units and NAME.reread-units), NAME.orig and NAME.full (the original's bytes, the :full print's)."
+  ([^String work ^String id h ^String base e] (check-file work id h base e false))
+  ([^String work ^String id h ^String base e keep]
   (let [nm (:name e)
         d (str work "/" id)
         fc (:fc e)
@@ -91,25 +123,31 @@
                 _ (spit-bytes (str pdir "/" nm) (.getBytes ^String pr "UTF-8"))
                 fc2 (update (abs-incs fc base [(dir-of (str base "/" nm))]) :embed-dirs #(vec (concat % [(dir-of (str base "/" nm))])))
                 rd2 (try (rc/read-c (host/config h fc2 pdir) fc2 nm false) (catch Throwable x {:crash (str x)}))
+                a (forms-text rd)
+                _ (when keep
+                    (keep-text d nm "read" (.getBytes ^String a "UTF-8"))
+                    (keep-text d nm "read-units" (.getBytes (pr-str (vec (sort (map str (keys (:units rd)))))) "UTF-8")))
                 [l1 detail] (cond
                               (:crash rd2) ["reread-crash" (:crash rd2)]
                               (:error rd2) ["reread-error" (first (:error rd2))]
                               (:refused rd2) ["reread-refused" (:message rd2)]
-                              :else (let [a (forms-text rd) b (forms-text rd2)]
-                                      (if (and (= a b) (= (set (keys (:units rd))) (set (keys (:units rd2)))))
-                                        ["equal" nil]
-                                        ["differ" (or (first-diff a b) "header units")])))
+                              :else (let [b (forms-text rd2)]
+                                      (when keep
+                                        (keep-text d nm "reread" (.getBytes ^String b "UTF-8"))
+                                        (keep-text d nm "reread-units" (.getBytes (pr-str (vec (sort (map str (keys (:units rd2)))))) "UTF-8")))
+                                      (level1 a (map str (keys (:units rd))) b (map str (keys (:units rd2))))))
                 full (try (rc/read-c cfg fc rn true) (catch Throwable x {:crash (str x)}))
                 l2 (cond
                      (:crash full) "crash"
                      (:refused full) (str "refused:" (name (:refused full)))
                      (:error full) "error"
-                     :else (let [t (rc/print-c (:file-form full) (:forms full))]
-                             (if (java.util.Arrays/equals ^bytes orig (.getBytes ^String t "ISO-8859-1")) "equal" "differ")))
+                     :else (let [t (.getBytes ^String (rc/print-c (:file-form full) (:forms full)) "ISO-8859-1")]
+                             (when keep (keep-text d nm "orig" orig) (keep-text d nm "full" t))
+                             (level2 orig t)))
                 fix (if (or (:crash rd2) (:error rd2) (:refused rd2))
                       "-"
                       (if (= pr (try (rc/print-c (:file-form rd2) (:forms rd2)) (catch Throwable _ nil))) "equal" "differ"))]
-            [nm "ok" l1 l2 (if detail (one-line detail) "") fix])))))))
+            [nm "ok" l1 l2 (if detail (one-line detail) "") fix]))))))))
 
 (defn forms
   "Levels 1 and 2 of the corpus `id` under WORK (its lists made by arbace.repr.c.ppcheck/lists):
@@ -120,10 +158,11 @@
         base (str/trim (slurp (str d "/base.txt")))
         entries (read-string (slurp (str d "/files.edn")))
         h (host/load-host "test/c/host")
+        keep (control-names id)
         threads (Integer/parseInt (or (System/getenv "REPR_C_THREADS") "8"))
         pool (Executors/newFixedThreadPool threads)
         t0 (System/nanoTime)
-        futs (mapv (fn [e] (.submit pool ^Callable (fn [] (try (check-file work id h base e)
+        futs (mapv (fn [e] (.submit pool ^Callable (fn [] (try (check-file work id h base e (contains? keep (:name e)))
                                                                (catch Throwable x [(:name e) "crash" "-" "-" (one-line x)])))))
                    entries)
         rs (mapv #(.get ^java.util.concurrent.Future %) futs)
@@ -221,8 +260,8 @@
 ;; GTS81 (a): the negative controls of the round trip (test/c/controls.edn, :level :roundtrip): the subject's own row (read,
 ;; levels 1 and 2, its acceptance) with its levels 3 and 4 crossed, its print's object file and run against the reference's
 ;; original's (the driver's obj/orig/R.o and run/R/o/, kept), compared as the driver compares (cmp -s: byte for byte; the
-;; status and the standard output), the row judged by judge-row, which must not pass. Levels 1 and 2 are the file's own
-;; (the reads are not kept): design only.
+;; status and the standard output), the row judged by judge-row, which must not pass. Levels 1 and 2 crossed are the
+;; :roundtrip-forms and :roundtrip-full controls below (queue 159), from the texts check-file keeps for the controls' files.
 
 (defn- bytes-or-nil ^bytes [^String p] (let [f (java.io.File. p)] (when (.exists f) (lex/read-bytes p))))
 
@@ -279,6 +318,69 @@
                :when (#{:passes :not-judged} v)]
            [id :fail (str "control " (name v) " (test/c/controls.edn)")]))))
 
+;; GTS81 (a), queue 159: levels 1 and 2 crossed, one control each (test/c/controls.edn, :level :roundtrip-forms and
+;; :roundtrip-full): the subject's own row with one level replaced, by the level's own comparison (level1, level2) on the
+;; texts check-file kept for the controls' files (control/), the subject's reread forms against the reference's read
+;; (:roundtrip-forms), the subject's :full print against the reference's original (:roundtrip-full); the row judged by
+;; judge-row, which must not pass. The subject's own row must pass whole (else it would fail the crossed row by itself).
+
+(defn- slurp-or-nil [^String p] (when (.exists (java.io.File. p)) (slurp p)))
+
+(defn text-control-result
+  "A :roundtrip-forms or :roundtrip-full control judged after the corpora (ids): :left when a corpus was not judged or the
+  subject's own row does not pass (judge-row, no known entry); :not-judged when a text the level compares was not kept
+  (the subject's reread or :full print, the reference's read or original); else judge-row on the subject's row with the
+  level crossed: :passes or :differs."
+  [^String work ids gcc {:keys [level subject reference]}]
+  (let [split (fn [^String fid] (let [i (.indexOf fid "/")] [(subs fid 0 i) (subs fid (inc i))]))
+        [sc sn] (split subject) [rc rn] (split reference)
+        sd (str work "/" sc) rd (str work "/" rc)]
+    (if-not (and (some #{sc} ids) (some #{rc} ids))
+      :left
+      (let [srow (get (read-tsv (str sd "/forms.tsv")) sn)
+            sobj (get (read-tsv (str sd "/obj.tsv")) sn)
+            srun (get (read-tsv (str sd "/run.tsv")) sn)
+            man (read-string (slurp "test/c/corpora.edn"))
+            run? (= :run (:action (first (filter #(= (:id %) (keyword sc)) (:corpora man)))))
+            g (get gcc [sc sn])
+            own (when srow (judge-row (into [sn] srow) sobj srun g nil run?))
+            [read l1 l2 _ & more] srow
+            crossed-l (case level
+                        :roundtrip-forms
+                        (let [a (slurp-or-nil (str rd "/control/" rn ".read")) ua (slurp-or-nil (str rd "/control/" rn ".read-units"))
+                              b (slurp-or-nil (str sd "/control/" sn ".reread")) ub (slurp-or-nil (str sd "/control/" sn ".reread-units"))]
+                          (when (and a ua b ub) (first (level1 a (read-string ua) b (read-string ub)))))
+                        :roundtrip-full
+                        (let [o (bytes-or-nil (str rd "/control/" rn ".orig")) t (bytes-or-nil (str sd "/control/" sn ".full"))]
+                          (when (and o t) (level2 o t))))]
+        (cond
+          (not= "pass" (:status own)) :left
+          (nil? crossed-l) :not-judged
+          :else
+          (let [row (case level
+                      :roundtrip-forms (into [sn read crossed-l l2 ""] more)
+                      :roundtrip-full (into [sn read l1 crossed-l ""] more))
+                j (judge-row row sobj srun g nil run?)]
+            (if (= "pass" (:status j)) :passes :differs)))))))
+
+(defn text-controls
+  "The :roundtrip-forms and :roundtrip-full controls of the corpora judged (ids), each printed; the failing ones as rows
+  [ID :fail WHY]."
+  [^String work ids]
+  (let [gcc (load-gcc)
+        what {:roundtrip-forms ["reread forms (level 1)" "read forms"] :roundtrip-full [":full print (level 2)" "original"]}]
+    (vec (for [{:keys [id level subject reference] :as c} (filter #(what (:level %)) (read-string (slurp "test/c/controls.edn")))
+               :let [v (text-control-result work ids gcc c)
+                     [w r] (what level)
+                     pair (str subject "'s " w " against " reference "'s " r)
+                     _ (println (case v
+                                  :differs (str "repr-c roundtrip: control " id " (" pair "): differs, as a control must (GTS81 (a))")
+                                  :passes (str "repr-c roundtrip: control passed: " id " (" pair "): the judge passes what differs")
+                                  :not-judged (str "repr-c roundtrip: control not judged: " id ": the " r " of " reference " or the " w " of " subject " not kept in the run")
+                                  :left (str "repr-c roundtrip: control " id ": left (" subject " or " reference " not in the run, or " subject "'s own row not passing)")))]
+               :when (#{:passes :not-judged} v)]
+           [id :fail (str "control " (name v) " (test/c/controls.edn)")]))))
+
 (defn record
   "Rewrites test/repr/c/roundtrip-known.edn's entries of the corpora `ids` from WORK: every file that
   does not pass, its class kept. A failing file of no class is not written (no placeholder class: queue 122, F1): it is
@@ -319,7 +421,7 @@
     "judge" (let [[work & ids] args
                   st (reduce max 0 (map #(judge work %) ids))
                   ;; GTS81 (a): the negative controls (test/c/controls.edn, :roundtrip), no row of files.tsv or the counts
-                  cs (roundtrip-controls work ids)]
+                  cs (into (roundtrip-controls work ids) (text-controls work ids))]
               (doseq [r cs] (println "FAIL" (first r) (nth r 2)))
               (shutdown-agents)
               (System/exit (if (seq cs) 1 st)))

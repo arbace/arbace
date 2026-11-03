@@ -1,0 +1,357 @@
+(ns arbace.repr.python.print
+  "The printer of repr/python (doc/python/SPEC.md; PY2, mode :lines): Python forms to Python text that
+  CPython parses back to the same forms (the round trip's level 1), the same ast without positions (level 2) and the
+  same code without positions (level 3).
+
+  Expressions are printed by precedence (the levels below, from Python's grammar: an operand is parenthesized when
+  its node binds more loosely than its slot allows), tuples always in parentheses but in a subscript, named
+  expressions always in parentheses; statements one a line, blocks indented by four spaces, an elif printed as
+  elif ({:elif true}, SPEC §5.4); literals from their spellings (§3); type comments after their line (§5.8), the
+  module's type: ignore comments on its first simple statement (their lines are positions, which :lines does not
+  keep)."
+  (:require [arbace.string :as str]))
+
+;; ---- the forms' parts ----
+
+(defn node
+  "[head positional options meta] of a form: the positional fields up to the first keyword, then :key value pairs,
+  then an optional trailing map"
+  [x]
+  (let [h (first x)
+        xs (vec (rest x))
+        n (count xs)
+        meta (when (and (pos? n) (map? (peek xs))
+                        (not (and (> n 1) (keyword? (nth xs (- n 2))))))
+               (peek xs))
+        xs (if meta (pop xs) xs)
+        pos (vec (take-while #(not (keyword? %)) xs))
+        kvs (drop (count pos) xs)]
+    [h pos (apply hash-map kvs) (or meta {})]))
+
+(defn- ident [x] (if (string? x) x (str x)))
+
+;; ---- literals ----
+
+(defn- string-token [h body o]
+  (let [prefix (get o :prefix (if (= h 'bytes) "b" ""))
+        q (get o :quote "\"")]
+    (str prefix q body q)))
+
+(declare expr fstring-parts)
+
+(defn- fstring [h parts o]
+  (let [prefix (get o :prefix (if (= h 'joined-str) "f" "t"))
+        q (get o :quote "\"")]
+    (str prefix q (fstring-parts parts) q)))
+
+(defn- field [x]
+  (let [[h p o _] (node x)
+        conv (when-let [c (:conversion o)] (str "!" c))
+        spec (when-let [s (:format-spec o)] (str ":" (fstring-parts s)))
+        e (or (:debug o)
+              (if (= h 'interpolation)
+                (second p)
+                (let [s (expr (first p) 3)]
+                  (if (str/starts-with? s "{") (str " " s) s))))]
+    (str "{" e conv spec "}")))
+
+(defn fstring-parts [parts]
+  (apply str (map #(if (string? %) % (field %)) parts)))
+
+;; ---- expressions ----
+;; precedence: 0 tuple-free top, 1 yield, 2 lambda/expression, 3 if-exp, 4 or, 5 and, 6 not, 7 compare, 9 |, 10 ^,
+;; 11 &, 12 shifts, 13 + -, 14 * / // % @, 15 unary, 16 **, 17 await, 18 primary and atoms
+
+(def ^:private bin-ops
+  {'+ ["+" 13] '- ["-" 13] '* ["*" 14] 'mat-mult ["@" 14] '/ ["/" 14] '% ["%" 14] 'floor-div ["//" 14]
+   '** ["**" 16] '<< ["<<" 12] '>> [">>" 12] 'bit-or ["|" 9] 'bit-xor ["^" 10] 'bit-and ["&" 11]})
+(def ^:private cmp-ops
+  {'== "==" '!= "!=" '< "<" '<= "<=" '> ">" '>= ">=" 'is "is" 'is-not "is not" 'in "in" 'not-in "not in"})
+
+(defn- paren [s p level] (if (< p level) (str "(" s ")") s))
+
+(defn- args-text
+  "An arguments form as a parameter list (annotations when ann?)"
+  [x ann?]
+  (let [[_ _ o _] (node x)
+        posonly (:posonly o []) args (:args o []) kwonly (:kwonly o [])
+        defaults (:defaults o [])
+        kwd (or (:kw-defaults o) (vec (repeat (count kwonly) nil)))
+        npos (+ (count posonly) (count args))
+        dstart (- npos (count defaults))
+        one (fn [a dflt star]
+              (let [[nm an] (if (seq? a) (let [[_ p _ _] (node a)] p) [a nil])
+                    s (str star (ident nm) (when (and ann? an) (str ": " (expr an 2))))]
+                (if (some? dflt) (str s (if (and ann? an) " = " "=") (expr dflt 2)) s)))
+        ps (concat
+            (map-indexed (fn [i a] (one a (when (>= i dstart) (nth defaults (- i dstart))) "")) posonly)
+            (when (seq posonly) ["/"])
+            (map-indexed (fn [i a] (let [j (+ i (count posonly))]
+                                     (one a (when (>= j dstart) (nth defaults (- j dstart))) ""))) args)
+            (cond (:vararg o) [(one (:vararg o) nil "*")]
+                  (seq kwonly) ["*"])
+            (map (fn [a d] (one a d "")) kwonly kwd)
+            (when (:kwarg o) [(one (:kwarg o) nil "**")]))]
+    (vec ps)))
+
+(defn- arg-comment [a]
+  (when (seq? a) (:type-comment (nth (node a) 3))))
+
+(defn- slice-text [x]
+  (if (and (seq? x) (= 'slice (first x)))
+    (let [[_ [lo hi st] _ _] (node x)]
+      (str (when (some? lo) (expr lo 3)) ":" (when (some? hi) (expr hi 3)) (when (some? st) (str ":" (expr st 3)))))
+    (expr x 2)))
+
+(defn- subscript-text [s]
+  (if (and (seq? s) (= 'tuple (first s)))
+    (let [els (second s)]
+      (cond (empty? els) "()"
+            (= 1 (count els)) (str (slice-text (first els)) ",")
+            :else (str/join ", " (map slice-text els))))
+    (slice-text s)))
+
+(defn- elts [xs] (str/join ", " (map #(expr % 2) xs)))
+
+(defn- comprehension-text [gens]
+  (str/join " " (for [g gens]
+                  (let [[_ [t it] o _] (node g)]
+                    (str (when (:async o) "async ") "for " (expr t 0) " in " (expr it 4)
+                         (apply str (map #(str " if " (expr % 4)) (:ifs o))))))))
+
+(defn- call-args [pos kws]
+  (let [one-gen (and (= 1 (count pos)) (empty? kws) (seq? (first pos)) (= 'generator-exp (ffirst pos)))]
+    (if one-gen
+      (let [g (expr (first pos) 18)] (subs g 1 (dec (count g))))
+      (str/join ", " (concat (map #(expr % 2) pos)
+                             (for [k kws]
+                               (let [[_ [nm v] _ _] (node k)]
+                                 (if (nil? nm) (str "**" (expr v 2)) (str (ident nm) "=" (expr v 2))))))))))
+
+(defn- int-literal? [x]
+  (or (integer? x) (and (seq? x) (= 'int (first x)))))
+
+(defn expr
+  "The text of expression x in a slot that takes precedence level or above"
+  [x level]
+  (cond
+    (symbol? x) (str x)
+    (integer? x) (str x)
+    (string? x) (str "\"" x "\"")
+    (seq? x)
+    (let [[h p o _] (node x)]
+      (case h
+        name (ident (first p))
+        const (str (first p))
+        (int float imag) (first p)
+        (str bytes) (string-token h (first p) o)
+        (joined-str template-str) (fstring h (first p) o)
+        str-concat (paren (str/join " " (map #(expr % 18) (rest x))) 17 level)
+        bool-op (let [[op vs] p
+                      pr (if (= op 'and) 5 4)]
+                  (paren (str/join (str " " op " ") (map #(expr % (inc pr)) vs)) pr level))
+        named-expr (str "(" (expr (first p) 18) " := " (expr (second p) 2) ")")
+        bin-op (let [[op l r] p
+                     [s pr] (bin-ops op)]
+                 (paren (if (= op '**)
+                          (str (expr l 17) " ** " (expr r 15))
+                          (str (expr l pr) " " s " " (expr r (inc pr))))
+                        pr level))
+        unary-op (let [[op v] p]
+                   (if (= op 'not)
+                     (paren (str "not " (expr v 6)) 6 level)
+                     (paren (str (case op + "+" - "-" bit-not "~") (expr v 15)) 15 level)))
+        lambda (let [ps (args-text (first p) false)]
+                 (paren (str "lambda" (when (seq ps) (str " " (str/join ", " ps))) ": " (expr (second p) 2)) 2 level))
+        if-exp (let [[t b e] p] (paren (str (expr b 4) " if " (expr t 4) " else " (expr e 3)) 3 level))
+        dict (let [[ks vs] p]
+               (str "{" (str/join ", " (map (fn [k v] (if (nil? k) (str "**" (expr v 9)) (str (expr k 3) ": " (expr v 3)))) ks vs)) "}"))
+        set (str "{" (elts (first p)) "}")
+        list (str "[" (elts (first p)) "]")
+        tuple (let [es (first p)]
+                (cond (empty? es) "()"
+                      (= 1 (count es)) (str "(" (expr (first es) 2) ",)")
+                      :else (str "(" (elts es) ")")))
+        list-comp (str "[" (expr (first p) 2) " " (comprehension-text (second p)) "]")
+        set-comp (str "{" (expr (first p) 2) " " (comprehension-text (second p)) "}")
+        generator-exp (str "(" (expr (first p) 2) " " (comprehension-text (second p)) ")")
+        dict-comp (str "{" (expr (first p) 3) ": " (expr (second p) 3) " " (comprehension-text (nth p 2)) "}")
+        await (paren (str "await " (expr (first p) 18)) 17 level)
+        yield (paren (if (some? (first p)) (str "yield " (expr (first p) 0)) "yield") 1 level)
+        yield-from (paren (str "yield from " (expr (first p) 2)) 1 level)
+        compare (let [[l ops cs] p]
+                  (paren (apply str (expr l 8) (map (fn [op c] (str " " (cmp-ops op) " " (expr c 8))) ops cs)) 7 level))
+        call (str (expr (first p) 18) "(" (call-args (second p) (:keywords o)) ")")
+        attribute (let [v (first p)]
+                    (str (if (int-literal? v) (str "(" (expr v 0) ")") (expr v 18)) "." (ident (second p))))
+        subscript (str (expr (first p) 18) "[" (subscript-text (second p)) "]")
+        starred (str "*" (expr (first p) 9))
+        slice (slice-text x)
+        (throw (ex-info (str "print: unknown expression head " h) {:head h}))))
+    :else (throw (ex-info (str "print: not an expression: " (pr-str x)) {}))))
+
+;; ---- patterns ----
+
+(defn pattern [x level]
+  (let [[h p o _] (node x)]
+    (case h
+      match-value (expr (first p) 2)
+      match-singleton (str (first p))
+      match-sequence (str "[" (str/join ", " (map #(pattern % 1) (first p))) "]")
+      match-mapping (let [[ks ps] p]
+                      (str "{" (str/join ", " (concat (map (fn [k q] (str (expr k 2) ": " (pattern q 1))) ks ps)
+                                                     (when (:rest o) [(str "**" (ident (:rest o)))]))) "}"))
+      match-class (let [[c ps] p]
+                    (str (expr c 18) "(" (str/join ", " (concat (map #(pattern % 1) ps)
+                                                               (map (fn [a q] (str (ident a) "=" (pattern q 1)))
+                                                                    (:kwd-attrs o) (:kwd-patterns o)))) ")"))
+      match-star (str "*" (if (some? (first p)) (ident (first p)) "_"))
+      match-as (let [[q nm] p]
+                 (cond (and (nil? q) (nil? nm)) "_"
+                       (nil? q) (ident nm)
+                       :else (paren (str (pattern q 2) " as " (ident nm)) 1 level)))
+      match-or (paren (str/join " | " (map #(pattern % 3) (first p))) 2 level)
+      (throw (ex-info (str "print: unknown pattern head " h) {:head h})))))
+
+;; ---- statements ----
+
+(declare stmts)
+
+(defn- tparams [ps]
+  (when (seq ps)
+    (str "[" (str/join ", " (for [t ps]
+                              (let [[h [nm] o _] (node t)]
+                                (str (case h type-var "" type-var-tuple "*" param-spec "**") (ident nm)
+                                     (when-let [b (:bound o)] (str ": " (expr b 2)))
+                                     (when-let [d (:default o)] (str " = " (expr d 2)))))))
+         "]")))
+
+(def ^:dynamic *ignores*
+  "The module's type: ignore tags not yet placed (an atom), each placed at the end of the next line printed that
+  ends a statement or a block's header and has no type comment"
+  nil)
+
+(defn- ign []
+  (if-let [a *ignores*]
+    (if-let [t (first @a)] (do (swap! a rest) (str "  # type: ignore" t)) "")
+    ""))
+
+(defn- tc [m] (if-let [c (:type-comment m)] (str "  # type: " c) (ign)))
+
+(defn- block [header body ind] (str ind header (ign) "\n" (stmts body (str ind "    "))))
+
+(defn- def-header [h p o m ind]
+  (let [[nm args] p
+        ps (args-text args true)
+        argcs (let [[_ _ ao _] (node args)]
+                (map arg-comment (concat (:posonly ao) (:args ao) (when (:vararg ao) [(:vararg ao)]) (:kwonly ao)
+                                         (when (:kwarg ao) [(:kwarg ao)]))))
+        head (str (when (= h 'async-function-def) "async ") "def " (ident nm) (tparams (:type-params o)))
+        ret (when-let [r (:returns o)] (str " -> " (expr r 2)))]
+    (if (some some? argcs)
+      ;; one parameter a line, each with its type comment after its comma (the markers / and * have none)
+      (let [inner (str ind "    ")
+            ps-with (loop [ps ps cs argcs acc []]
+                      (if (empty? ps) acc
+                          (let [p0 (first ps)]
+                            (if (#{"/" "*"} p0)
+                              (recur (rest ps) cs (conj acc (str inner p0 ",")))
+                              (recur (rest ps) (rest cs)
+                                     (conj acc (str inner p0 "," (when-let [c (first cs)] (str "  # type: " c)))))))))]
+        (str (str/join "\n" (cons (str ind head "(") ps-with)) "\n" ind ")" ret ":" (tc m)))
+      (str ind head "(" (str/join ", " ps) ")" ret ":" (tc m)))))
+
+(defn- else-text [o ind]
+  (when-let [e (:else o)]
+    (if (and (= 1 (count e)) (seq? (first e)) (= 'if (ffirst e)) (:elif (nth (node (first e)) 3)))
+      (let [[_ [t b] o2 _] (node (first e))]
+        (str ind "elif " (expr t 2) ":" (ign) "\n" (stmts b (str ind "    ")) (else-text o2 ind)))
+      (str ind "else:" (ign) "\n" (stmts e (str ind "    "))))))
+
+(defn stmt
+  "The text of statement x indented by ind, with its newline"
+  [x ind]
+  (let [[h p o m] (node x)
+        line (fn [s] (str ind s (if (str/includes? s "  # type: ") "" (ign)) "\n"))]
+    (case h
+      (function-def async-function-def)
+      (str (apply str (map #(line (str "@" (expr % 2))) (:decorators o)))
+           (def-header h p o m ind) "\n" (stmts (nth p 2) (str ind "    ")))
+      class-def
+      (let [[nm body] p
+            args (call-args (:bases o []) (:keywords o))]
+        (str (apply str (map #(line (str "@" (expr % 2))) (:decorators o)))
+             (block (str "class " (ident nm) (tparams (:type-params o)) (when (seq args) (str "(" args ")")) ":") body ind)))
+      return (line (if (some? (first p)) (str "return " (expr (first p) 2)) "return"))
+      delete (line (str "del " (str/join ", " (map #(expr % 2) (first p)))))
+      assign (line (str (str/join " = " (map #(expr % 0) (first p))) " = " (expr (second p) 0) (tc m)))
+      type-alias (line (str "type " (expr (first p) 18) (tparams (:type-params o)) " = " (expr (second p) 2)))
+      aug-assign (let [[t op v] p] (line (str (expr t 0) " " (first (bin-ops op)) "= " (expr v 0))))
+      ann-assign (let [[t an v] p
+                       ts (if (false? (:simple o)) (str "(" (expr t 0) ")") (expr t 0))]
+                   (line (str ts ": " (expr an 2) (when (some? v) (str " = " (expr v 0))))))
+      (for async-for) (let [[t it body] p]
+                        (str ind (when (= h 'async-for) "async ") "for " (expr t 0) " in " (expr it 0) ":" (tc m) "\n"
+                             (stmts body (str ind "    ")) (else-text o ind)))
+      while (str (block (str "while " (expr (first p) 2) ":") (second p) ind) (else-text o ind))
+      if (str (block (str "if " (expr (first p) 2) ":") (second p) ind) (else-text o ind))
+      (with async-with)
+      (let [[items body] p
+            its (for [i items]
+                  (let [[_ [c v] _ _] (node i)
+                        cs (if (and (seq? c) (= 'tuple (first c))) (str "(" (expr c 2) ")") (expr c 2))]
+                    (if (some? v) (str cs " as " (expr v 2)) cs)))]
+        (str ind (when (= h 'async-with) "async ") "with " (str/join ", " its) ":" (tc m) "\n" (stmts body (str ind "    "))))
+      match (let [[s cases] p]
+              (str (line (str "match " (expr s 2) ":"))
+                   (apply str (for [c cases]
+                                (let [[_ [pt body] co _] (node c)]
+                                  (block (str "case " (pattern pt 0) (when-let [g (:guard co)] (str " if " (expr g 2))) ":")
+                                         body (str ind "    ")))))))
+      raise (line (str "raise" (when (some? (first p)) (str " " (expr (first p) 2)))
+                       (when-let [c (:from o)] (str " from " (expr c 2)))))
+      (try try-star)
+      (let [[body hs] p
+            star (if (= h 'try-star) "*" "")]
+        (str (block "try:" body ind)
+             (apply str (for [x hs]
+                          (let [[_ [b] ho _] (node x)]
+                            (block (str "except" (when-let [t (:type ho)] (str star " " (expr t 2)))
+                                        (when-let [n (:name ho)] (str " as " (ident n))) ":")
+                                   b ind))))
+             (when-let [e (:else o)] (block "else:" e ind))
+             (when-let [f (:finally o)] (block "finally:" f ind))))
+      assert (line (str "assert " (expr (first p) 2) (when (some? (second p)) (str ", " (expr (second p) 2)))))
+      import (line (str "import " (str/join ", " (map #(let [[_ [nm] ao _] (if (seq? %) (node %) [nil [%] {} {}])]
+                                                       (str (ident nm) (when-let [a (:as ao)] (str " as " (ident a)))))
+                                                     (first p)))))
+      import-from (let [[md names] p]
+                    (line (str "from " (apply str (repeat (:level o 0) ".")) (when (some? md) (ident md)) " import "
+                               (str/join ", " (map #(let [[_ [nm] ao _] (if (seq? %) (node %) [nil [%] {} {}])]
+                                                      (str (ident nm) (when-let [a (:as ao)] (str " as " (ident a)))))
+                                                    names)))))
+      global (line (str "global " (str/join ", " (map ident (first p)))))
+      nonlocal (line (str "nonlocal " (str/join ", " (map ident (first p)))))
+      expr (line (expr (first p) 0))
+      pass (line "pass")
+      break (line "break")
+      continue (line "continue")
+      (throw (ex-info (str "print: unknown statement head " h) {:head h})))))
+
+(defn stmts [xs ind] (apply str (map #(stmt % ind) xs)))
+
+(def ^:private compound
+  '#{function-def async-function-def class-def for async-for while if with async-with match try try-star})
+
+(defn print-module
+  "A python/module's text; its :type-ignores as comments, one at the end of each of the first lines that end a
+  statement or a header and carry no type comment (their lines are positions, which :lines does not keep)"
+  [x]
+  (let [[h p _ m] (node x)
+        _ (when-not (= h 'python/module) (throw (ex-info (str "print: not a python/module: " h) {})))
+        tags (map #(let [[_ [_ tag] _ _] (node %)] tag) (:type-ignores m))
+        a (atom tags)
+        text (binding [*ignores* a] (stmts (first p) ""))]
+    (when (seq @a)
+      (throw (ex-info "print: too few lines to carry the type: ignore comments" {:class :type-ignore-placement})))
+    text))

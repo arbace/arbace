@@ -254,12 +254,14 @@
   (when-some [t (slot c TOS)] (.add ^ArrayList (.-stack c) t))
   (slot! c TOS v))
 
-(deftype Included [^String using sys ^String path])
+;; queue 157 (review 130's finding 4): `entry` the index in the layer of the enter record that entered the file (nil for the main
+;; file), which tells the entries of a header entered twice apart (their tokens share one CFile)
+(deftype Included [^String using sys ^String path entry])
 
 ;; the main file's Included: no directory (an #include_next there searches the whole chain, as gcc's does) and not a system
 ;; header. enter! pushes it for the main file, so the main file's status comes back when its first header is left (before, the
 ;; slot kept the last header's, and a header the main file included after a system header was taken for a system header)
-(def ^:private main-included (Included. nil false nil))
+(def ^:private main-included (Included. nil false nil nil))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Paths (Go's path/filepath on Unix)
@@ -1410,9 +1412,9 @@
 
 (defn- enter!
   "A file's groups pushed after the included marker, as cpp.include does (`pth` the file's path, its CFile's name)."
-  [^Cpp c g ^String using sysdir ^String pth]
+  [^Cpp c g ^String using sysdir ^String pth entry]
   (push! c (or (slot c INCLUDED) main-included))
-  (slot! c INCLUDED (Included. using (boolean sysdir) pth))
+  (slot! c INCLUDED (Included. using (boolean sysdir) pth entry))
   (push! c [:leave])
   (slot! c DEPTH (inc (long (slot c DEPTH))))
   (push! c g))
@@ -1463,10 +1465,14 @@
                   (let [sysdir (or sysdir cur-sys)]
                   (if (.contains ^HashSet (.-once c) pth)
                     nil ; Arbace: #pragma once (gcc's), which cc ignores
-                    (do ;; Arbace (C3b): the inclusion recorded for the converter's header units
-                        (record! c {:directive "enter" :path pth :raw raw :system (boolean sysdir) :off (.-po ^Tok (line 0))
-                                    :from (when-let [^CFile f (.-pf ^Tok (line 0))] (.-name f))})
-                        (enter! c g using sysdir pth))))
+                    ;; Arbace (C3b): the inclusion recorded for the converter's header units; queue 157 (review 130's finding 4): with
+                    ;; :in, the includer's entry (its enter record's index in the layer, nil for the main file), and the new entry's index
+                    ;; kept in its Included, so the parser can tell which entry each token came from (arbace.repr.c.parse's :entries)
+                    (let [entry (.size ^ArrayList (.-layer c))]
+                      (record! c {:directive "enter" :path pth :raw raw :system (boolean sysdir) :off (.-po ^Tok (line 0))
+                                  :from (when-let [^CFile f (.-pf ^Tok (line 0))] (.-name f))
+                                  :in (when-let [^Included cur (slot c INCLUDED)] (.-entry cur))})
+                      (enter! c g using sysdir pth entry))))
                   (do (eh c (str (pos-str s0) ": include file not found: " raw)) (slot! c CLOSED true)))))))))))
 
 (declare embed-params)
@@ -1720,10 +1726,10 @@
       "GCC" (when (and (> (count x) 3) (= (src (x 3)) "system_header"))
               (let [^Included cur (slot c INCLUDED)]
                 (when (and cur (.-using cur))
-                  (slot! c INCLUDED (Included. (.-using cur) true (.-path cur)))
+                  (slot! c INCLUDED (Included. (.-using cur) true (.-path cur) (.-entry cur)))
                   (let [^Tok t (x 0)]
                     (when (= (some-> ^CFile (.-pf t) .-name) (.-path cur))
-                      (record! c {:directive "system" :file (.-path cur) :off (.-po t) :system true}))))))
+                      (record! c {:directive "system" :file (.-path cur) :entry (.-entry cur) :off (.-po t) :system true}))))))
       nil)))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -1759,8 +1765,8 @@
         ^Included cur (slot c INCLUDED)
         ^Tok t (first line)]
     (when (and (some? s) cur (.-using cur) (= (some-> ^CFile (.-pf t) .-name) (.-path cur)))
-      (slot! c INCLUDED (Included. (.-using cur) s (.-path cur)))
-      (record! c {:directive "system" :file (.-path cur) :off (.-po t) :system s}))))
+      (slot! c INCLUDED (Included. (.-using cur) s (.-path cur) (.-entry cur)))
+      (record! c {:directive "system" :file (.-path cur) :entry (.-entry cur) :off (.-po t) :system s}))))
 
 (defn next-line
   "cpp.nextLine: the next text line, the directives before it executed."
@@ -1935,6 +1941,9 @@
         last (object-array 1)]
     {:errors (.-errs c)
      :layer (.-layer c) ; Arbace (C3b): the directives the converter places
+     ;; queue 157: the entry the stream is in (the index in the layer of the current file's enter record, nil in the main file), which
+     ;; the parser asks at each token
+     :entry (fn [] (when-let [^Included i (slot c INCLUDED)] (.-entry i)))
      :next (fn []
              (if (slot c CLOSED)
                (let [^Tok l (aget last 0)]
