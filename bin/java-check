@@ -167,6 +167,7 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 . "$root/bin/lib/gate-cache.bash" # arbace_gate_cache: the gate's builds, ARBACE_GATE_EXES/KEY20
 . "$root/bin/lib/program.bash" # the compiled level's j2g and build-go calls, as --build-program's (RPS97 (b))
 . "$root/bin/lib/limit.bash" # limited: CPU-time limits with a wall cap (GT6)
+. "$root/bin/lib/cover.bash" # ARBACE_COVER_DIR: the cover build, a GOCOVERDIR per test (GT8.3)
 cd "$root"
 
 jdk=${JDK:-/root/jdk26u}
@@ -469,6 +470,26 @@ diag_judge() {
 # ---------------------------------------------------------------------------------------------
 # the check
 
+# cover_setup (GT8.3, GTS206 (a)): under ARBACE_COVER_DIR, cover_rexe the cover build's executable at the checkout's
+# key (bin/lib/cover.bash; the interp level's) and ARBACE_COVER_META its meta-data, exported; rexe stays the
+# gate's, which hosts j2g
+cover_setup() {
+  [ -n "${ARBACE_COVER_DIR:-}" ] || return 0
+  cover_rexe=$(cover_exe "$root") || return 1
+  export cover_rexe ARBACE_COVER_META; ARBACE_COVER_META=$(cover_meta "$cover_rexe")
+  echo "java-check: coverage into $ARBACE_COVER_DIR (the interp level on $cover_rexe)" >&2
+}
+
+# cover_flags PROG WORK DIR: cflags, bin/build-go's cover arguments for the compiled level's program PROG
+# printed into WORK (bin/lib/cover.bash's cover_go_flags), empty without ARBACE_COVER_DIR
+cover_flags() {
+  cflags=()
+  [ -n "${ARBACE_COVER_DIR:-}" ] || return 0
+  local f
+  cover_go_flags "$root" "$1" "$2" "$(program_overlay)" "$3/cover-overlay.json" > "$3/cover-flags.txt" || return 1
+  while IFS= read -r f; do cflags+=("$f"); done < "$3/cover-flags.txt"
+}
+
 # run_exe: the executable that interprets and hosts j2g: JAVA_CHECK_EXE (the gate's), else the gate's build
 # at the checkout's key, else ARBACE_GATE_CACHE's or a --build's, which nothing compares with the checkout
 # (report 003's finding 8): named so
@@ -552,6 +573,9 @@ test_limit() {
 run_actions() {
   local level=$1 exe=$2 mode=$3 fdir=$4 res="" i st w tmp lim st0="" res0="" cres n tmo
   local -a x c
+  # GT8.3, GTS206 (a): under ARBACE_COVER_DIR the interp level runs the cover build's executable (cover_rexe), the
+  # compiled level its programs built with the cover flags, each test with its GOCOVERDIR, ARBACE_COVER_DIR/java-LEVEL/ID
+  [ -z "${ARBACE_COVER_DIR:-}" ] || [ "$level" != interp ] || exe=$cover_rexe
   read -r w tmp <<< "$(run_dirs "$id")"
   tmo=$(test_limit "$(awk -F'\t' '$1 == "test" { print $2; exit }' "$p/plan.tsv")")
   while [ -z "$res" ] && IFS=$'\t' read -r -a x; do
@@ -563,7 +587,8 @@ run_actions() {
     for lim in $(attempt_limits "$tmo" "${JAVA_CHECK_ONCE:-}"); do
       n=$((n + 1))
       rm -rf "$w" "$tmp"; mkdir -p "$w" "$tmp"
-      st=0; (cd "$w" && export TMPDIR="$tmp" && { [ -z "$fdir" ] || export ARBACE_PATH=$fdir; } && limited "$lim" "$exe" "$root/test/java/run.ae" --load "$mode" "${fdir:--}" "${x[8]}" \
+      st=0; (cd "$w" && export TMPDIR="$tmp" && { [ -z "$fdir" ] || export ARBACE_PATH=$fdir; } \
+               && { [ -z "${ARBACE_COVER_DIR:-}" ] || export $(cover_env "java-$level" "$id"); } && limited "$lim" "$exe" "$root/test/java/run.ae" --load "$mode" "${fdir:--}" "${x[8]}" \
                -Dtest.src="$dir" -Dtest.classes="$work/classes/$id" -Djava.io.tmpdir="$tmp" -- "${x[@]:9}" \
                < "$work/empty" > "$p/out$i" 2> "$p/err$i") || st=$?
       if [ "$st" = 126 ] && grep -q '^java-check: load-failed: ' "$p/err$i"; then
@@ -572,6 +597,7 @@ run_actions() {
         res=$(judge "$st" "$p/out$i" "$p/err$i")
       fi
       note_attempt java-check "$id" "$n" "$lim" "$st" "$res"
+      cover_settle "java-$level" "$id"
       case $res in timeout*) ;; *) break ;; esac
     done
     if [ -n "${JAVA_CHECK_ONCE:-}" ]; then case $res in timeout*) res="timeout	$tmo s" ;; esac
@@ -680,7 +706,8 @@ compiled_shard() {
     [ "${n:-0}" = 0 ] || continue
     [ "$st" = 0 ] || { echo "java-check compiled: shard $k: j2g's errors not attributed to a test ($s/j2g$round.log)" >&2; return 1; }
     echo "== java-check compiled: shard $k, round $round: bin/build-go ($(since_t0))" >&2
-    st=0; program_heavy=$heavy program_build_go "$rexe" amd64 "$s/work" "$s/prog" "$s/build$round.log" "$s/out/prog" || st=$?
+    cover_flags "$s/out/prog" "$s/work" "$s" || return 1
+    st=0; program_heavy=$heavy program_build_go "$rexe" amd64 "$s/work" "$s/prog" "$s/build$round.log" "$s/out/prog" ${cflags[@]+"${cflags[@]}"} || st=$?
     [ "$st" = 0 ] && break
     # every Go error of the package lang: the tests whose Go does not compile
     (cd "$s/work/mod" && env GOROOT="$goroot" GOTOOLCHAIN=local GOFLAGS= GOWORK=off GO111MODULE=on GOPROXY=off GOEXPERIMENT= \
@@ -1021,6 +1048,7 @@ check() {
   fi
   # the executable interprets and hosts j2g: the levels read, nread, classes, print and diagnostics need none
   case ",$levels," in *,interp,*|*,compiled,*) rexe=$(run_exe) || return 1 ;; *) rexe=none ;; esac
+  cover_setup || return 1
   mkdir -p "$formsc"; : > "$work/empty"
   rm -rf "$work/run"; rm -f "$work/forms-misses"
   # GTS41 (c): JAVA_CHECK_FORMS_ONLY=1 forces the read's cache for the levels that consume its output
@@ -1042,7 +1070,7 @@ check() {
   jc plan "$ref" "$work" ${pargs[@]+"${pargs[@]}"} >&2
   jc plan-diag "$ref" "$work" "$levels" >&2
   echo "== java-check: $(wc -l < "$work/run.list") tests at the levels $levels, $jobs at a time (the executable $rexe)" >&2
-  export -f limited limited_cpu attempt_limits timeout_kind note_attempt program_tmo test_limit check_one nread_one read_opts read_finished first_line root_cause classes_sha classes_verdict judge run_actions run_dirs mask_hashes mask_dirs test_dir check_diag diag_actions diag_root diag_norm diag_first_diff diag_golden diag_judge
+  export -f cover_env cover_settle limited limited_cpu attempt_limits timeout_kind note_attempt program_tmo test_limit check_one nread_one read_opts read_finished first_line root_cause classes_sha classes_verdict judge run_actions run_dirs mask_hashes mask_dirs test_dir check_diag diag_actions diag_root diag_norm diag_first_diff diag_golden diag_judge
   reset_timeout_log "$work/timeout-attempts.tsv"
   export root work formsc forms_only save jdktest levels timeout from_committed load rexe reader_key="${reader_key:-}" classes_opts_s="${classes_opts[*]}"
   xargs -a "$work/run.list" -P "$jobs" -I{} bash -c 'classes_opts=($classes_opts_s); check_one "$1"' _ {} | LC_ALL=C sort > "$work/results.tsv"
@@ -1312,7 +1340,9 @@ essential_compiled() {
   done
   timeout=20 from_committed=1 levels=compiled load=none
   rexe=$(run_exe) || return 1
-  work=$work/essential-compiled
+  cover_setup || return 1
+  # (a cover build's program is kept apart: the essential gate's is cached by key)
+  work=$work/essential-compiled${ARBACE_COVER_DIR:+-cover}
   local s=$work/prog aot goroot=${ARBACE_GOROOT:-/root/tamago-go}
   java_check_base || return 1
   [ -f "$aot/packages.edn" ] || { echo "java-check --essential-compiled: no compiled namespaces $aot (bin/arbace-go --build, or JAVA_CHECK_AOT)" >&2; return 1; }
@@ -1352,13 +1382,14 @@ essential_compiled() {
       echo "java-check --essential-compiled: j2g refused tests that pass compiled ($s/j2g.log)" >&2; return 1
     fi
     echo "== java-check --essential-compiled: bin/build-go ($(since_t0))" >&2
-    program_heavy= program_build_go "$rexe" amd64 "$s/work" "$s/arbace-ec" "$s/build.log" "$s/shard/out/prog" \
+    cover_flags "$s/shard/out/prog" "$s/work" "$s" || return 1
+    program_heavy= program_build_go "$rexe" amd64 "$s/work" "$s/arbace-ec" "$s/build.log" "$s/shard/out/prog" ${cflags[@]+"${cflags[@]}"} \
       || { grep -v '^==' "$s/build.log" | tail -20 >&2; echo "java-check --essential-compiled: the build failed ($s/build.log)" >&2; return 1; }
     rm -rf "$s/shard/out" "$s/work" "$s/shard/forms"
     echo "$key" > "$s/key"
   fi
   echo "== java-check --essential-compiled: the runs of $(wc -l < "$work/run.list") tests, $jobs at a time ($(since_t0))" >&2
-  export -f limited limited_cpu attempt_limits timeout_kind note_attempt program_tmo test_limit compiled_one run_actions judge first_line root_cause mask_hashes mask_dirs run_dirs test_dir
+  export -f cover_env cover_settle limited limited_cpu attempt_limits timeout_kind note_attempt program_tmo test_limit compiled_one run_actions judge first_line root_cause mask_hashes mask_dirs run_dirs test_dir
   reset_timeout_log "$work/timeout-attempts.tsv"
   export root work jdktest timeout
   xargs -a "$work/run.list" -P "$jobs" -I{} bash -c 'compiled_one "$1" "$2"' _ {} "$s/arbace-ec" | LC_ALL=C sort > "$work/results.tsv"
