@@ -787,7 +787,7 @@ until its row fits GT8's budget.
   `PYTHONHASHSEED=0`, `LC_ALL=C.UTF-8`, `TZ=UTC`, `PYTHONIOENCODING=utf-8`, HOME and TMPDIR under `.tmp`, twice, into
   `test/python/ref-cpython314.edn` (151 references, none excluded), and `Lib/test`'s 11 language-core modules by regrtest
   (`-u none`: no network or other resource), each test method's outcome, into `test/python/ref-cpython314-lib-test.edn`
-  (1,149 methods: 1,138 ok, 8 skipped, 4 excluded as the runner's: subprocesses run `-I` cannot import the tarball's test
+  (1,149 methods: 1,137 ok, 8 skipped, 4 excluded as the runner's: subprocesses run `-I` cannot import the tarball's test
   package). An entry the two runs disagree on, or whose output names an address, the architecture, the C library or a
   size, is written `:excluded`. `--check` reproduces every reference twice (7.7 s). Seconds per program and module in
   `test/python/ref-costs.edn` and `ref-costs-lib-test.edn` (all 151 programs in 1.1 s, the 11 modules in 2.6 s).
