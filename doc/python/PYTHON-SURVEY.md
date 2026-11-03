@@ -766,7 +766,7 @@ until its row fits GT8's budget.
   level 5, `marshal` of the code compiled from each equal, positions included; against `test/python/full-known.edn`.
   On the VM: samples 6, stdlib 720, site-packages 921 of 921, `Lib/test` 1,148 of 1,149 read (its 4 rejections as at
   PY2), all at both levels; the one other, `Lib/test/encoded_modules/module_koi8_r.py`, is `:charset` (the runtime has
-  no KOI8-R charset: the DECISION of queue 176). The 30 `:code-lines` files of PY2 pass both levels in `:full`. About
+  no KOI8-R charset: by design, queue 176's DECISION (a), the user, 2026-11-03: jrt's charsets are the root/English set of the locales decision of 2026-10-11). The 30 `:code-lines` files of PY2 pass both levels in `:full`. About
   8.5 minutes, the costs in `test/python/roundtrip-text-costs.edn`.
 - Type comments and the site-packages set as decided for queue 174, `:code-lines` as decided for 175 (the user,
   2026-11-03).
