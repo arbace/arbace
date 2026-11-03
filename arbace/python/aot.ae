@@ -363,6 +363,20 @@
 (defn- equal-ref? [o ref]
   (and (= (:status o) (:status ref)) (= (:stdout o) (:stdout ref)) (= (:stderr-last o) (or (:stderr-last ref) ""))))
 
+(defn- name-or [x] (if (keyword? x) (name x) (str x)))
+
+(defn control
+  "The judge's negative control (GTS81 (a)): the first two passing programs' compiled runs judged against each other's
+  references, which must not pass; nil when they do not (or when fewer than two pass), else the pair"
+  [runs refs]
+  (let [ok (for [[id kind _ & more] runs
+                 :when (= kind "ran")
+                 :let [aot (outcome (subvec (vec more) 0 3)) ref (get refs id)]
+                 :when (and ref (not (:excluded ref)) (equal-ref? aot ref))]
+             [id aot ref])
+        [[a ao ar] [b bo br]] ok]
+    (when (and b (or (equal-ref? ao br) (equal-ref? bo ar))) [a b])))
+
 (defn- class-of
   "The class of a non-pass that the rule (:as-pyi) does not take: the first class of CLASSES whose :ids hold ID or
   whose :match finds itself in TEXT"
@@ -393,7 +407,9 @@
           (nil? ref) (assoc base :result :failed :class :no-reference)
           (:excluded ref) (assoc base :result :classed :class :reference-excluded :reason (:excluded ref))
           (and (equal-ref? aot ref) as-loop) (cond-> (assoc base :result :pass) (not as-pyi) (assoc :pyi-differs true))
-          (and as-loop as-pyi) (assoc base :result :classed :class :as-pyi :reason (:stderr-last aot))
+          (and as-loop as-pyi) (assoc base :result :classed :class :as-pyi
+                                      :reason (if (seq (:stderr-last aot)) (:stderr-last aot)
+                                                  (str "stdout not CPython's (status " (name-or (:status aot)) ")")))
           :else (let [why (str (when-not as-loop (str "the loop: " (pr-str loop) " ")) (when-not as-pyi (str "pyi: " (pr-str pyi))))
                       c (class-of classes id why)]
                   (assoc base :result (if c :classed :failed) :class (or (:class c) :differs) :reason why
@@ -406,7 +422,8 @@
         res (sort-by :id (judge (tsv-rows (get opts "--runs")) refs classes))
         by (frequencies (map :result res))
         sum (fn [k] (reduce + 0 (keep k (filter #(= :pass (:result %)) res))))
-        lines (fn [] (str/join "\n" (map #(binding [*print-length* nil] (pr-str %)) res)))]
+        lines (fn [] (str/join "\n" (map #(binding [*print-length* nil] (pr-str %)) res)))
+        ctl (control (tsv-rows (get opts "--runs")) refs)]
     (doseq [r res :when (not= :pass (:result r))]
       (println (str "  " (name (:result r)) " " (:id r) " " (name (:class r)) (when (:reason r) (str ": " (subs (str (:reason r)) 0 (min 120 (count (str (:reason r))))))))))
     (doseq [[c n] (sort (frequencies (map :class (filter #(= :classed (:result %)) res))))]
@@ -422,7 +439,10 @@
                    ";; the loop and pyi; :result :pass, :classed (:class, test/python/divergences-aot.edn or the rule :as-pyi) or\n"
                    ";; :failed; the milliseconds are the recording machine's.\n"
                    (lines) "\n")))
-    (if (pos? (get by :failed 0)) 1 0)))
+    (if ctl
+      (println (str "  the negative control FAILS: " (first ctl) " and " (second ctl) " pass against each other's references"))
+      (println "  the negative control: two passing programs' runs judged against each other's references do not pass"))
+    (if (or ctl (pos? (get by :failed 0))) 1 0)))
 
 (defn -main [& [cmd & args]]
   (let [rc (case cmd

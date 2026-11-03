@@ -22,7 +22,7 @@ class _ArgParser:
     def add_argument(self, *names, **kw):
         dest = kw.get("dest")
         if dest is None:
-            dest = [n for n in names if n.startswith("--")][0][2:].replace("-", "_")
+            dest = ([n for n in names if n.startswith("--")] or [names[0]])[0].lstrip("-").replace("-", "_")
         self._defaults[dest] = kw.get("default")
 
 
