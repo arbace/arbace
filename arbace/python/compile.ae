@@ -1553,14 +1553,32 @@
                            n (count ps)]
                        (when (next stars) (syntax-error "multiple starred names in sequence pattern"))
                        (when (and star (>= star 256)) (syntax-error "too many expressions in star-unpacking sequence pattern"))
-                       (emit! u :match-sequence nil) (fail!)
-                       (emit! u :get-len nil) (load-const! u (if star (dec n) n))
-                       (emit! u :compare (if star '>= '==)) (fail!)
-                       (if star (emit! u :unpack-ex [star (- n star 1)]) (emit! u :unpack-sequence n))
-                       (doseq [q ps]
-                         (if (= 'match-star (head q))
-                           (let [[_ [nm] _ _] (node q)] (if (some? nm) (name-op! u (ident nm) :store) (emit! u :pop nil)))
-                           (sub! q))))
+                       ;; codegen_pattern_sequence: the length checked unless a star stands alone; only wildcards
+                       ;; pop the subject, a star wildcard (*_) indexes it (pattern_helper_sequence_subscr, the
+                       ;; subject never unpacked: range(1 << 30)), else it is unpacked
+                       (let [wild? (fn [q] (let [[qh [qp qn] _ _] (node q)] (and (= 'match-as qh) (nil? qp) (nil? qn))))
+                             star-wild? (and star (nil? (first (second (node (nth ps star))))))
+                             only-wild? (every? #(if (= 'match-star (head %)) (nil? (first (second (node %)))) (wild? %)) ps)]
+                         (emit! u :match-sequence nil) (fail!)
+                         (when (or (nil? star) (> n 1))
+                           (emit! u :get-len nil) (load-const! u (if star (dec n) n))
+                           (emit! u :compare (if star '>= '==)) (fail!))
+                         (cond
+                           only-wild? (emit! u :pop nil)
+                           star-wild? (do (doseq [[i q] (map-indexed vector ps)
+                                                  :when (not (or (= i star) (wild? q)))]
+                                            (emit! u :copy 1)
+                                            (if (< i star)
+                                              (load-const! u i)
+                                              (do (emit! u :get-len nil) (load-const! u (- n i)) (emit! u :binary '-)))
+                                            (emit! u :subscr nil)
+                                            (sub! q))
+                                          (emit! u :pop nil))
+                           :else (do (if star (emit! u :unpack-ex [star (- n star 1)]) (emit! u :unpack-sequence n))
+                                     (doseq [q ps]
+                                       (if (= 'match-star (head q))
+                                         (let [[_ [nm] _ _] (node q)] (if (some? nm) (name-op! u (ident nm) :store) (emit! u :pop nil)))
+                                         (sub! q)))))))
       match-mapping (let [[ks ps] p rest-name (some-> (:rest o) ident)]
                       (reduce (fn [seen k]
                                 (if-let [[v r] (key-value k)]
