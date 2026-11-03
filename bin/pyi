@@ -36,6 +36,10 @@
 #                                  stderr, expression statements' values displayed (sys.displayhook, builtins._); --check:
 #                                  test/python/pyi/*.in fed to it and to python3 -q -i, stdout, status and stderr
 #                                  byte for byte
+#   bin/pyi lib-test [--oracle] [MODULE...]
+#                                  PY5e: Lib/test's language-core modules run by pyi (test/python/libtest.py: unittest's
+#                                  loader, each test's outcome), judged per method against ref-cpython314-lib-test.edn;
+#                                  a module that does not import classed :module-import; --oracle: the driver by python3
 #   bin/pyi runtime print|read|vet|check
 #                                  PY5b0, the runtime's sources (doc/python/PYI-SPEC.md §8): go/arbace/py's Go forms (mode :full,
 #                                  lossless) printed as a Go module into .tmp/repr-python/pyi/runtime (print), edited there,
@@ -296,6 +300,52 @@ cmd_run() {
   return $rc
 }
 
+# lib-test [--oracle] [MODULE...]: Lib/test's language-core modules (corpora.edn) run by pyi through
+# test/python/libtest.py (unittest's loader, each test's outcome), judged per test method against 177's references
+# (test/python/ref-cpython314-lib-test.edn): equal outcomes pass; a module that does not import is one case, its
+# methods classed :module-import with the first error (survey §8.1); anything else fails. --oracle runs the driver
+# by python3 instead (the judge's control: every method equal but the references' :excluded)
+cmd_lib_test() {
+  local oracle="" mods=() m d="$WORK/lib-test" lib rc=0
+  while [ $# -gt 0 ]; do case $1 in --oracle) oracle=1; shift ;; *) mods+=("$1"); shift ;; esac; done
+  [ ${#mods[@]} -gt 0 ] || IFS=, read -ra mods <<< "$(core_modules)"
+  lib=$(stdlib_lib); rm -rf "$d"; mkdir -p "$d"
+  for m in "${mods[@]}"; do
+    if [ -n "$oracle" ]; then
+      (cd "$d" && timeout 900 env PYTHONHASHSEED=0 LC_ALL=C.UTF-8 TZ=UTC PYTHONIOENCODING=utf-8 HOME="$WORK" TMPDIR="$WORK" PYTHONPATH="$lib" \
+        python3 -s -P -B "$root/test/python/libtest.py" "$m" > "$d/$m.out" 2> "$d/$m.err") || true
+    else
+      (cd "$d" && timeout 1800 "$root/bin/pyi" run "$root/test/python/libtest.py" "$m" > "$d/$m.out" 2> "$d/$m.err") || true
+    fi
+    [ -s "$d/$m.out" ] || echo "IMPORT	$(grep -v '^ ' "$d/$m.err" | tail -1)" > "$d/$m.out"
+    awk -F'\t' -v m="$m" -v ref="$REF_LT" '
+      BEGIN {
+        while ((getline l < ref) > 0) {
+          if (l !~ /^\{:id "/) continue
+          id = l; sub(/^\{:id "/, "", id); sub(/".*/, "", id)
+          if (index(id, m "/") != 1 || l ~ /:module true/) continue
+          if (l ~ /:excluded/) { excl[substr(id, length(m) + 2)] = 1; continue }
+          o = l; sub(/.*:outcome :/, "", o); sub(/[ }].*/, "", o)
+          want[substr(id, length(m) + 2)] = o; n++
+        }
+      }
+      $1 == "IMPORT" { imp = $2 }
+      $1 == "CASE" { got[$2] = $3; why[$2] = $4 }
+      END {
+        for (t in want) {
+          if (t in got && got[t] == want[t]) pass++
+          else if (imp != "") classed++
+          else { fail++; if (shown++ < 5) printf "  FAIL %s/%s: %s, CPython %s %s\n", m, t, (t in got ? got[t] : "not run"), want[t], why[t] }
+        }
+        printf "%s\t%d\t%d\t%d\t%d\t%s\n", m, n, pass, classed, fail, imp > "/dev/stderr"
+        printf "lib-test %s: %d methods: %d equal, %d classed :module-import, %d failing%s\n", m, n, pass, classed, fail, (imp != "" ? " (" imp ")" : "")
+        exit (fail > 0)
+      }' "$d/$m.out" 2>> "$d/summary.tsv" || rc=1
+  done
+  awk -F'\t' '{n += $2; p += $3; c += $4; f += $5} END {printf "lib-test: %d modules, %d methods: %d equal, %d classed, %d failing\n", NR, n, p, c, f}' "$d/summary.tsv"
+  return $rc
+}
+
 RT="$WORK/runtime"
 tamago_go() { (cd "$RT" && env GOROOT= PATH="${ARBACE_GOROOT:-/root/tamago-go}/bin:$PATH" GOCACHE="$WORK/gocache" GOFLAGS=-mod=mod CGO_ENABLED=0 GOTOOLCHAIN=local "$@"); }
 
@@ -372,6 +422,7 @@ case "${1:-}" in
   compile-check) shift; cmd_compile_check "$@" ;;
   run) shift; mkdir -p "$WORK"; cmd_run "$@" ;;
   repl) shift; mkdir -p "$WORK"; cmd_repl "$@" ;;
+  lib-test) shift; mkdir -p "$WORK"; cmd_lib_test "$@" ;;
   runtime) shift; mkdir -p "$WORK"; cmd_runtime "$@" ;;
-  *) sed -n '2,47p' "$0"; exit 2 ;;
+  *) sed -n '2,51p' "$0"; exit 2 ;;
 esac
