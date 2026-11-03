@@ -2478,3 +2478,97 @@ line tables' directory and file tables are now equal (the map's part), but its l
 inside functions, the class's own cause. `roundtrip-results/gxx-dg-every-10.edn` still records arm-fp16-ops-1.C as `[:known :objects-differ]`: a run of
 the list counts it as an improvement until the record is made again (`--record-results`, a whole-list run). F3 (`$pm` unquoted) is left: no corpus path
 has a space or `=`.
+
+## As built: CX10 (write-ahead) (2026-11-03)
+
+On the branch `cpp-cx10` from main `a25d12d1`, held until after `arbace-reaps-4-crops-v1` and merged then as the fifth row (its own milestone tag later).
+Light tier only (stage 0 by `ARBACE_HOST_EXE`, 4 threads, `GOMEMLIMIT=1500MiB`; no gate run, no executable built, no heavy lock). CX8 (eval, AOT) and CX9
+(dg) are built beside it on `cpp-cx8` and `cpp-cx9`; their records are wired by name and absent here.
+
+### CX10.1 The row
+
+| cell | sources | classes | state here |
+|---|---|---|---|
+| `[:cpp :read]` | `bin/repr-cpp pp-check` (`test/repr/cpp/pp-check-known.edn`, `:sections [:pp :lex]`, `:per-file`, `:id-sep "/"`, results `pp-check-results.edn`); `bin/cppi dg` (`test/cpp/check-dg-linux-amd64.edn`, `:until "CX9"`, classes `divergences-dg.edn`) | `test/cpp/divergences-read.edn` (5) | **1,903 / 30 / 1** |
+| `[:cpp :eval]` | `bin/cppi check` (`test/cpp/check-linux-amd64.edn`, `:ref-runs test/cpp/ref-gxx15.edn`, `:until "CX8"`); beside: `bin/cppi lower-check` (`test/cpp/lower-results.edn`, `lower-known.edn`, reader `:cpp-lower`, classes `divergences-lower.edn`) | `test/cpp/divergences.edn` (CX8's) | no check yet (CX8); beside 250 of 250 |
+| `[:cpp :aot]` | `bin/cppi check --aot` (`test/cpp/check-aot-linux-amd64.edn`, `:same-cases` the eval record, `:until "CX8"`) | `divergences-aot.edn` then `divergences.edn` (CX8's) | no check yet (CX8) |
+| `[:cpp :print]` | `bin/repr-cpp roundtrip`: the recorded lists `test/repr/cpp/roundtrip-results/*.edn` (reader `:cpp-roundtrip :part :recorded`; the `-essential` records not counted again) and the known file's files no record holds (`:part :unrecorded`, passes not recorded) | `test/cpp/divergences-print.edn` (8) | **1,203+ / 914 / 68** |
+
+`bin/reap`: **18 of 20 cells checked, 2 with no check yet, 0 problems**; `test/reap/matrix.edn` recorded. Built in `test/reap/main.ae`: the readers `:cpp-roundtrip` (a recorded list's
+`:pass`, `[:known CLASS]`, `:oracle-rejects`, `:oracle-fails`; problems: a summary's count not its files', a file in two records, a recorded class the known file names otherwise;
+a recorded known file the known file no longer lists counted and said, `gxx-dg/ext/arm-fp16/arm-fp16-ops-1.C` today, an improvement until gxx-dg-every-10's next
+`--record-results`) and `:cpp-lower`; `:c-known`'s `:id-sep`; a source with `:until` whose `:file` is missing is "not yet" even when its references (`:ref-runs`, `:same-cases`)
+are missing too (C++'s eval and AOT wait for CX8's record and its references alike). Tested on a scratch copy (`REAP_ROOT`, stand-in records, not committed): the three
+cells with records checked and their `:until`s reported stale; the eval record without `ref-gxx15.edn` a problem; a non-pass in no class a problem; a stand-in results file of
+the token check counted. The classes' kinds are CX10's (as C8's were): a judge's property, the oracle's rejection, a file outside C++ and what the compilers settle by
+design; the converter's, the printer's, the lexer's and the oracle's failures deferred.
+
+### CX10.2 Two path bugs found and fixed
+
+- **The token check's digests held a worktree's path.** A file read by its absolute name (the corpora read in place from gcc's tarball) expands `__FILE__` (assert's
+  message) to the checkout's path; CX2 recorded `pp-gxx.sha256` in `cpp-cx2`'s worktree, so 9 files of g++.dg's tenth and 10 headers failed in every other checkout and in
+  the gate's clean clone (found running the tenth here). The judge now writes the corpus' directory `{base}` on both sides (`ppcheck/unplaced`); `--record` again of the two
+  samplings moved exactly those 19 lines (the lexical corpus, read relatively, and `lex-clang.sha256` and the option deltas unchanged).
+- **The lowered runtime's IR pin held a worktree's path.** The two shims' IR (`assert_fail.cc`, `random.cc`) names its source in the module ID and `source_filename`, which
+  `-ffile-prefix-map` does not touch; `test/cpp/runtime/ir.sha256` held `cpp-cx7`'s path, so `runtime-build` refused in any other checkout. `rt_ir` writes those two lines
+  relative to the checkout; the pin's two lines recorded again (`--update`, the other 196 unchanged).
+- Both scripts and `bin/cppi` and `bin/repr-cpp` find the main checkout from the clean run's clone too (`.tmp/gate-clean/SHA`, as C's since queue 150).
+
+### CX10.3 The gate
+
+Essential, one chain `cpp-essential`, on stage 0 with `:cxx` (new host: g++'s and clang++'s version lines, their drivers', cc1plus's and clang's digests, the headers
+`test/cpp/host/headers.sha256` names; `bin/lib/gate-run.bash`, so every key moves once, at the merge with GT8's planner change):
+
+| step | command | subset | measured here |
+|---|---|---|---|
+| `cpp-read-essential` | `bin/repr-cpp pp-check --essential` | `test/cpp/essential-read.txt`: the lexical corpus (19), of g++.dg one file per known class, 2 both-reject, every 70th of the tenth (31), 3 headers (one known) | 9 s |
+| `cpp-print-essential` | `bin/repr-cpp roundtrip-corpus gxx-dg-essential && ... samples` | `test/cpp/essential-print.txt`: 33 of g++.dg's tenth (each known class, the CP95 (b) file, 2 oracle rejections, an `:orig-fails` pass, every 40th pass), held to its own records (`roundtrip-oracle.edn`'s `gxx-dg-essential`, `roundtrip-results/gxx-dg-essential.edn`); the 9 samples keyless | 21 s cold, 10 s warm; samples 35 s |
+| `cpp-lower-essential` | `bin/cppi lower-essential` | `test/cpp/essential-lower.txt`: 6 programs, the negative control's pair among them | 6 of 6, the control differs; 27 s warm (native 6, Arbace 19, gcc and runs 2), 3.6 min with the runtime built (198 of 198) |
+
+`--full`, chain `cpp-full`, last: `cpp-selftest`; `cpp-tokens` (parts `cpp-lexical`, `gxx-dg` at `--sample 10`, `libstdcxx-headers` at `--sample 8`: 2, 52, 62 s);
+`cpp-roundtrip` (parts `gxx-dg-every-10` about 8 min (CP124's run), `gxx-old-deja-every-10`, `c-c++-common-every-10`, `libstdcxx-testsuite-every-40` (both pending in
+`pending.edn`), `samples`); `cpp-lower` (`bin/cppi lower-corpus samples`, `libstdcxx-every-15th`: 40 s and about 16 min, plus 4 min when the runtime is stale). New
+verbs: `pp-check --only FILE|--essential|--record-results|--lists-only`, `bin/repr-cpp roundtrip-corpus KEY`, `bin/cppi lower-corpus KEY`, `lower-essential`, `list essential`;
+rtcheck takes `-essential` and `-only` keys as of their corpus. `bin/gate --pins` adds `bin/repr-cpp pins check` and `host check` (`:cpp` in the pins map). `bin/gate --plan`
+and `--full --plan` accept the table (essential 3 new steps, full 4 steps in 12 parts). Makefile: `cpp-essential`, `repr-cpp-pp-essential`, `repr-cpp-roundtrip-essential`,
+`repr-cpp-roundtrip-corpus`, `repr-cpp-pp-record-results`, `cppi-lower-corpus`, `cppi-lower-essential`; `make check-makefile` passes.
+
+**Against C++'s share (GTS201 (a): 35 min nightly, 2.4 h clean).** Essential: about 1.5 min warm, 6 min cold, its own chain beside C's. Nightly, every part whole, without
+CX8/CX9: about 30-35 min (selftest unmeasured), at the share before CX8's check and AOT and CX9's dg arrive; so the rotation (GT8.4) is needed from the start for
+`cpp-lower.libstdcxx-every-15th` (16 of the 35 min), `cpp-roundtrip.gxx-dg-every-10` and CX8's two levels (CX10.5). Clean: within 2.4 h on today's lists.
+
+### CX10.4 What waits on CX8 and CX9
+
+- Records: `test/cpp/check-linux-amd64.edn`, `check-aot-linux-amd64.edn`, `ref-gxx15.edn`, `divergences.edn`, `divergences-aot.edn` (CX8), `check-dg-linux-amd64.edn`,
+  `divergences-dg.edn` (CX9). With them: drop the three `:until`s in `test/reap/cells.edn` (else reap reports them stale), `bin/reap --record`.
+- Steps, to add with their commands (C's shapes): essential `cpp-check-essential` (`bin/cppi check --only test/cpp/essential-check.txt`) and `cpp-aot-essential`
+  (`--aot`, one shard) in the chain `cpp-essential`; `--full` `cpp-check`, `cpp-aot` (a part a run corpus, `--corpus {part}`), `cpp-dg` (whole, its control).
+  Hosts `[:stage0 :go :cxx :gcc]` (and `:prog` when ci runs on the gate's executable as C's `c-check`).
+
+### CX10.5 Proposals (CP180-CP184; none decided)
+
+- **CP180 Embedding C++ (a re-seed).** The row needs none: every cell is judged from records, and the checks run evaluated on stage 0. The cost is speed: the lowering
+  is about 14 s a file a thread evaluated (CP87), so CX8's check over its run corpora and the libstdc++ list take most of the nightly share. CS250's decision (the user,
+  2026-11-02) puts C++'s embedding at a later re-seed, when its row comes. Options: (a) embed `arbace/repr/llvm`, `arbace/cpp` and `arbace/repr/cpp` at the first re-seed
+  after `arbace-reaps-4-crops-v1` (as C9.1: `embed.ae`'s exclusions, `arbace_embedded_sources`, `:tools`, the audit's `:gate`, `gate_key`; a `cpp-c2j` essential step first, as
+  C's `c-c2j`, proving c2j compiles them); (b) the hot part only (`repr/llvm`, `cpp/lower`); (c) none for v1, the budget met by subsets. *Recommended: (a)*, with the `cpp-c2j`
+  step before the window.
+- **CP181 The rotation for C++.** GT8.4's `:rotate` needs a list's `--only` and a record of one `["PART/NAME" ...]` row a line. Today `pp-check --only` takes such lists and
+  `pp-check-results.edn` is such a record; the round trip's and the lowering's records are maps. Options: (a) `:rotate` on `cpp-tokens` now (universe `pp-check-results.edn`,
+  `:subset` in `test/cpp/corpora.edn`), then `roundtrip-corpus` and `lower-corpus` taking `--only` and their records written one row a line too (or a reader in the planner);
+  (b) the lists sampled more thinly instead. *Recommended: (a)*, the subsets by GTS205's rule (the lowering's blocks, the classes, the controls).
+- **CP182 The token check's passes.** As CS240 for C: (a) `--record-results` at each `--record` of the samplings (built: `make repr-cpp-pp-record-results`, 1,903 passes);
+  (b) the known file only. *Recommended: (a)*.
+- **CP183 The kinds of CX10's classes** (`divergences-read`, `-print`, `-lower`). Options: (a) as chosen (CX10.1); (b) `:oracle-rejects` deferred until CX9 judges the error
+  tests at read. *Recommended: (a)*.
+- **CP184 The samples' round-trip key** (CP163 (b)'s remaining part). The samples run keyless (not held). Options: (a) `bin/cppi list samples` heads `#list samples-all` for the
+  round trip, with its oracle and results records; (b) as built. *Recommended: (a)*, a two-file record.
+
+### CX10.6 Heavy list (for the night) and slips
+
+- Night: `bin/gate --full` over C++'s parts once (the round trip's pending corpora `c-c++-common-every-10` and `libstdcxx-testsuite-every-40` are recorded with
+  `--record-results`, CP170 (b), and leave `pending.edn`); `cpp-selftest`'s time; the essential gate's first run (keys every step anew: `gate-run.bash`).
+- Slips: two commands redirected to `/dev/null` (a probe of `bin/repr-cpp pins check`'s status, a wait loop's `cat`); `bin/cppi` edited while a background
+  `runtime-build` ran it (its tail failed after 198 of 198; run again), and a second `lower-essential` started while the first chain's still ran on the same runtime
+  directory (four units crashed; run again alone: 6 of 6); `python3` for multi-line edits.
+- Scratch: `.tmp/reap-scratch/` (the stand-in records), `.tmp/repr-cpp-check/`, `.tmp/repr-cpp-roundtrip/`, `.tmp/cppi/` in the worktree.

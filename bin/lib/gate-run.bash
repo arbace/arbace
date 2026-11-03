@@ -80,6 +80,20 @@ gate_gcc_id() {  # the :gcc host's identity: gcc's --version line, its driver's,
     awk '{print $2}' "$root/test/c/host/headers.sha256" 2>"$TMPDIR/gate-gcc.err" | while read -r h; do
       if [ -f "$h" ]; then sha256sum "$h"; else echo "missing $h"; fi; done; } | sha256sum | cut -c1-64
 }
+gate_cxx_id() {  # the :cxx host's identity (CX10): g++'s and clang++'s --version lines, the digests of their drivers, cc1plus and clang's
+  # binary, resolved through their links, and of the headers C++'s checks read (test/cpp/host/headers.sha256's: libstdc++'s, musl's); none
+  # without either compiler
+  local g c p
+  g=$(command -v g++) && c=$(command -v clang++) || { echo none; return; }
+  g=$(readlink -f "$g"); c=$(readlink -f "$c"); p=$(readlink -f "$(g++ -print-prog-name=cc1plus 2>"$TMPDIR/gate-cxx.err")" 2>"$TMPDIR/gate-cxx.err")
+  { g++ --version 2>"$TMPDIR/gate-cxx.err" | head -1
+    clang++ --version 2>"$TMPDIR/gate-cxx.err" | head -1
+    sha256sum < "$g" | cut -c1-64
+    if [ -f "$p" ]; then sha256sum < "$p" | cut -c1-64; else echo "no cc1plus"; fi
+    sha256sum < "$c" | cut -c1-64
+    awk '{print $2}' "$root/test/cpp/host/headers.sha256" 2>"$TMPDIR/gate-cxx.err" | while read -r h; do
+      if [ -f "$h" ]; then sha256sum "$h"; else echo "missing $h"; fi; done; } | sha256sum | cut -c1-64
+}
 plan_inputs() {  # plan_inputs DIR: DIR/files.sha256 and DIR/hosts.edn
   local d=$1 jdk rel
   mkdir -p "$d"
@@ -130,7 +144,9 @@ javac none
     printf ' :go "%s"\n' "$(sha256sum < "${ARBACE_GOROOT:-/root/tamago-go}/VERSION" | cut -c1-64)"
     # :gcc (the user, 2026-11-02; doc/C23-SURVEY.md, "As built: C's full checks in the gate"): the host's gcc, C's reference,
     # by its --version line, the digests of its driver and of cc1, resolved through their links, and of the headers C's checks read; none without gcc
-    printf ' :gcc "%s"}\n' "$(gate_gcc_id)"; } > "$d/hosts.edn"
+    printf ' :gcc "%s"\n' "$(gate_gcc_id)"
+    # :cxx (CX10; doc/cpp/CPP-SURVEY.md, "As built: CX10 (write-ahead)"): the host's g++ and clang++, C++'s references and oracle
+    printf ' :cxx "%s"}\n' "$(gate_cxx_id)"; } > "$d/hosts.edn"
 }
 run_plan() {  # run_plan DIR [--rerun]: the plan into DIR (plan.tsv, plan/), printed
   local d=$1; shift

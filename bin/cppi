@@ -13,7 +13,7 @@
 #   bin/cppi runtime OUT.c      the runtime of exceptions printed as C
 #   bin/cppi testsuite          libstdc++-v3/testsuite extracted from the pinned gcc 15.2.0 tarball into .tmp/cppi/gcc/
 #                               (REPR_CPP_GCC_TARBALL, default the main checkout's .tmp/c1/gcc/gcc-15.2.0.tar.xz)
-#   bin/cppi list samples|runtime|samples+runtime|libstdcxx [--sample N]
+#   bin/cppi list samples|runtime|samples+runtime|essential|libstdcxx [--sample N]
 #                               a check list on the standard output (NAME, STD, ARGS, PATH, tab-separated; a first line `#list KEY` names the recorded list
 #                               it is, `#part NAME` a part of one; `samples+runtime`: the recorded `samples`): test/cpp/samples,
 #                               test/cpp/runtime/samples (CX7), or
@@ -32,6 +32,12 @@
 #                               OUT's key against the checkout's (the lowering, repr/llvm, repr/c, eh.c.ae, units.edn and the
 #                               shims, the IR's pin, runtime-build's own steps, gcc's flags, gcc, clang and the tools' host):
 #                               "current", or "stale" and the inputs that differ (exit 1); --print: the checkout's key lines
+#   bin/cppi lower-corpus samples|libstdcxx-every-15th [WORK] [lower-check's options]
+#                               lower-check over a recorded list of test/cpp/lower-results.edn, made by its key (CX10: the gate's cpp-lower
+#                               parts; the testsuite extracted first when it is not; WORK default .tmp/cppi/lower-KEY)
+#   bin/cppi lower-essential [WORK] [lower-check's options]
+#                               lower-check over test/cpp/essential-lower.txt's programs (CX10: the gate's cpp-lower-essential; `bin/cppi list
+#                               essential`, a part never held to the record; WORK default .tmp/cppi/essential)
 #   bin/cppi selftest [--accept-skips] [NAME...] the checks' own tests (test/cpp/selftest/NAME.sh: the review 007 cases; ARBACE_HOST_EXE=/bin/true: the dry mode, which skips the tests that need the tools and exits 3, 0 with --accept-skips)
 # The judges are arbace.cpp.check's (apart from the lowering, so they are not in the runtime's key).
 #   bin/cppi lower-check LIST WORK [--jobs N] [--runtime OUT] [--recorded KEY|none|auto]
@@ -52,8 +58,9 @@ set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 . "$root/bin/lib/tmpdir.bash"
 . "$root/bin/lib/tools.bash"
-main_checkout=$root
-case $root in */.tmp/worktrees/*) main_checkout=${root%%/.tmp/worktrees/*} ;; esac
+# the main checkout: a worktree's (.tmp/worktrees/NAME) or the clean run's clone's (.tmp/gate-clean/SHA), else this one (CX10, as C's
+# tools since queue 150)
+main_checkout=${root%%/.tmp/gate-clean/*}; main_checkout=${main_checkout%%/.tmp/worktrees/*}
 export GOMAXPROCS=${GOMAXPROCS:-4} GOMEMLIMIT=${GOMEMLIMIT:-1500MiB}
 ts_root=$root/.tmp/cppi/gcc/gcc-15.2.0/libstdc++-v3/testsuite
 GCC_FLAGS="-std=gnu23 -O0 -w -fno-builtin -fno-strict-aliasing -ffp-contract=off"
@@ -72,6 +79,11 @@ list_samples() {
   local f
   [ "${1:-}" = body ] || echo "#part samples"
   for f in "$root"/test/cpp/samples/*.cpp; do printf '%s\t%s\t%s\t%s\n' "samples/$(basename "$f")" c++23 "" "$f"; done
+}
+
+list_essential() { # CX10: test/cpp/essential-lower.txt's files of the samples and the runtime's samples, a part (never held to a record)
+  echo "#part essential"
+  { list_samples body; list_runtime body; } | awk -F'\t' 'NR == FNR { if ($0 !~ /^#/ && $0 != "") want[$0] = 1; next } ($1 in want)' "$root/test/cpp/essential-lower.txt" -
 }
 
 list_runtime() { # CX7's samples of the runtime (test/cpp/runtime/samples)
@@ -174,6 +186,10 @@ rt_ir() { # rt_ir UNIT SOURCE STD FLAGS: one runtime unit's IR (cwd the tarball'
         -isystem /usr/include/c++/15.2.0/backward -I"$rt/gen" -Ilibgcc -Ilibstdc++-v3/libsupc++ -I"$(dirname "$2")" $fl "$src" -o "$d/x.ll"
       echo $? > "$d/ir.status" ) 2>&1 | cap "$d/ir.log"
   fi
+  # CX10: a shim's IR names its source by its absolute path in the module's ID and source_filename, which -ffile-prefix-map does not
+  # touch: written relative to the checkout as the maps write the rest, so test/cpp/runtime/ir.sha256 holds in any checkout (it held
+  # cpp-cx7's worktree path: assert_fail.cc's and random.cc's digests differed everywhere else)
+  [ "$(cat "$d/ir.status")" = 0 ] && sed -i "1,2s|$root/test/cpp/runtime/|test/cpp/runtime/|" "$d/x.ll"
   [ "$(cat "$d/ir.status")" = 0 ] && ( cd "$d" && timeout 600 clang -c x.ll -o x.o ) 2>&1 | cap "$d/obj.log"
   return 0
 }
@@ -371,9 +387,20 @@ case ${1:-} in
           samples) list_samples ;;
           runtime) list_runtime ;;
           samples+runtime) echo "#list samples"; list_samples body; list_runtime body ;;
+          essential) list_essential ;;
           libstdcxx) n=15; [ "${3:-}" = --sample ] && n=$4; list_libstdcxx "$n" ;;
-          *) echo "list: samples, runtime or libstdcxx" >&2; exit 2 ;;
+          *) echo "list: samples, runtime, samples+runtime, essential or libstdcxx" >&2; exit 2 ;;
         esac ;;
   lower-check) shift; lower_check "$@" ;;
+  lower-corpus) shift; k=${1:?lower-corpus KEY [WORK]: samples or libstdcxx-every-15th}; shift; w=$root/.tmp/cppi/lower-$k
+                case ${1:-} in ""|--*) ;; *) w=$1; shift ;; esac
+                case $k in
+                  samples) { echo "#list samples"; list_samples body; list_runtime body; } > "$TMPDIR/cppi-$k.list" ;;
+                  libstdcxx-every-15th) [ -d "$ts_root" ] || testsuite; list_libstdcxx 15 > "$TMPDIR/cppi-$k.list" ;;
+                  *) echo "lower-corpus: samples or libstdcxx-every-15th, the recorded lists of test/cpp/lower-results.edn" >&2; exit 2 ;;
+                esac
+                lower_check "$TMPDIR/cppi-$k.list" "$w" --recorded "$k" "$@" ;;
+  lower-essential) shift; w=${1:-$root/.tmp/cppi/essential}; [ $# -gt 0 ] && shift
+                   list_essential > "$TMPDIR/cppi-essential.list"; lower_check "$TMPDIR/cppi-essential.list" "$w" "$@" ;;
   *) sed -n '2,/^set -e/p' "$0" | sed '$d;s/^# \{0,1\}//' >&2; exit 2 ;;
 esac
