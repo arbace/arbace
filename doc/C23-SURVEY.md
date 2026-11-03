@@ -3699,7 +3699,8 @@ assertions (from 30, 90). Commits, in order: `1f49fb5a` (CS215), `cf190c73` and 
   whole name (or the path it was read as), gcc's lines by the exact name, no longer any name ending with the base name; test file
   `suffix.c` includes `xsuffix.c`, whose error was the main file's (`:lines {1 1}`, now `:unlocated`/stray, the verdict `:stopped`). R7: a read whose error
   is the parser's `panic: ...` is `:crash`, never the one error of a line-0 directive (`parser-panic.c`: 30,000 nested parentheses, a stack
-  exhaustion with `dg-error` at line 0: a pass before, `:crash` now). Tests `known-row-now-passing-is-no-regression`,
+  exhaustion with `dg-error` at line 0: a pass before, `:crash` now; since the re-seed of C9 the compiled parser reads that nesting, so the test
+  stands the parser's panic in by `with-redefs` and the fixture is one line, the night of 2026-11-02). Tests `known-row-now-passing-is-no-regression`,
   `main-file-is-the-whole-path`, `parser-panic-is-a-crash` (seven assertions fail before).
 - **CS214 (a), R3 and R5; R6 and R8 noted.** R3: `bin/ci check --aot` compares the compiled runs with the interpreter's only with
   `CI_AOT_NODES` (this run's) or a named `CI_INTERP`; otherwise `cf2g`'s judge prints "compiled against interpreted (runs): not
