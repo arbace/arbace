@@ -759,6 +759,7 @@ covers what.
   "OpenJDK (jdk26u)"), without the Classpath Exception, which jdk26u's `test/` does not carry.
   They are inputs of the check, in no executable.
 - `go/arbace/libm.ae` and `go/arbace/libm/` (the package `arbace/libm`, musl's libm in Go, shared by hsi and pyi;
+  also `go/arbace/hs/prim_scalar.ae`'s `fmaf`, musl 1.2.6's `src/math/fmaf.c` ported likewise, HE4e;
   doc/haskell/HASKELL-EVAL-SURVEY.md, HES37 (a), "As built: HE4b, HE4c (write-ahead)", "As built: HES38's :full
   forms"; until then `go/arbace/hs/libm.ae` and `libm_data.ae`): ported to Go by hand, then converted to Go forms, from musl 1.2.6's
   `src/math` (https://musl.libc.org/releases/musl-1.2.6.tar.gz, SHA-256
