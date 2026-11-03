@@ -3496,7 +3496,7 @@ is new since v2: every C class is "new".
   nightly at most 6 hours, clean at most 24 hours for all ten planned crops; by deduplication, coverage subsets,
   rotation and synthetic corpora). In its place: `bin/seed --verify` at the seed's commit `1fe1063f` (stage 0 = G1 = G2 =
   G3), the keyed `bin/gate --full` (since 2026-11-02 with C's seven full checks as heavy steps, judged against the
-  records, never `--record`) whose non-C steps passed overnight 2026-11-02/03 and whose C steps reran on the night of
+  records, never `--record`) whose non-C steps ran overnight 2026-11-02/03 (TODO(tag): their outcome; `c-c2j` failed and was fixed) and whose C steps reran on the night of
   2026-11-03 after the night's fixes (TODO(tag): the keyed `--full`'s result: commit, steps run and skipped, wall time,
   failures), and `bin/gate --audit` of C's new steps (TODO(tag): the audit's result, or that it was not run). C9.2's row
   12 (`--full --clean --tag arbace-reaps-4-crops-v1`, VM report 153 F2) is superseded by this decision.
