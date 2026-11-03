@@ -272,7 +272,8 @@ if [ "$(cut -f3 "$store/_rotation/lev.a.s0.runs" 2>&1)" = fail ] && [ "$(cut -f3
 # 9. GT8, C's read lists: a results file's rows "CORPUS FILE" read as CORPUS/FILE (:id-re with :id-as), the subset under
 # a key of its own (:subset-key: the corpus's run subset under :subset is another check's), a name with a slash kept whole
 r3=$t/root3; mkdir -p "$r3/test" "$r3/bin"; cp "$r/bin/tool" "$r3/bin/tool"
-{ echo "["; for i in $(seq 1 20); do echo "[\"cc d/f$i.c\" :pass \"equal\"]"; done; echo "[\"oo g.c\" :pass \"\"]"; echo "]"; } > "$r3/test/res.edn"
+{ echo "["; for i in $(seq 1 20); do echo "[\"cc d/f$i.c\" :pass \"equal\"]"; done; echo "[\"cc main with args.c\" :pass \"\"]"
+  echo "[\"oo g.c\" :pass \"\"]"; echo "]"; } > "$r3/test/res.edn"
 echo '{:corpora [{:id :cc :subset ["d/f9.c"] :subset-rd ["d/f1.c" "d/f2.c"]} {:id :oo}]}' > "$r3/test/corp.edn"
 cat > "$r3/test/steps.edn" <<'STEPS'
 {:groups {}
@@ -280,8 +281,13 @@ cat > "$r3/test/steps.edn" <<'STEPS'
  [{:name rc :phase :full :cmd "bin/tool --corpus {part}" :inputs ["bin/tool"] :hosts []
    :parts [{:part cc} {:part oo}]
    :rotate {:only "--only {list}" :universe "test/res.edn" :id-re "^\\[\"([^ \"]+) ([^\"]+)\"" :id-as "$1/$2"
-            :subset "test/corp.edn" :subset-key :subset-rd :always ["cc/d/f3.c" "oo/g.c"] :failed-re "^FAIL ([^ ]+) .*$"}}]}
+            :subset "test/corp.edn" :subset-key :subset-rd :always ["cc/d/f3.c" "oo/g.c"] :failed-re "CFAILRE"}}]}
 STEPS
+# every C step's :failed-re (the user, 2026-11-03: the id up to the tab of FAIL ID<tab>WHY), the same one
+cre=$(grep -o ':failed-re "^FAIL [^"]*"' "$here/test/gate/steps.edn" | sort -u)
+[ "$(echo "$cre" | wc -l)" = 1 ] && ok "every C step's :failed-re is one pattern" || no "C's :failed-re differ: $cre"
+cre=${cre#:failed-re \"}; cre=${cre%\"}
+sed -i "s|CFAILRE|$cre|" "$r3/test/steps.edn"
 (cd "$r3" && find . -type f -printf '%P\n' | LC_ALL=C sort | xargs -d '\n' sha256sum) > "$t/files.sha256"
 store=$t/store4; mkdir -p "$store"
 plan3() { local d=$1; shift; rm -rf "$d"; mkdir -p "$d"; cp "$t/files.sha256" "$t/hosts.edn" "$d/"
@@ -292,7 +298,12 @@ case $(names "$t/k0") in "rc.cc.sub rc.cc.s"[0-6]" rc.oo ") ok ":id-as: part cc 
 if [ "$(cat "$t/k0/rotation/rc.cc.sub.list" 2>&1)" = "$(printf 'cc/d/f1.c\ncc/d/f2.c\ncc/d/f3.c')" ]; then ok ":subset-key: the subset its key's (not :subset's), CORPUS/ prefixed, :always of the part only"; else no "the :subset-key subset: $(cat "$t/k0/rotation/rc.cc.sub.list" 2>&1)"; fi
 tot=0
 for k in 0 1 2 3 4 5 6; do plan3 "$t/k$k" nightly --night "$k"; f=$t/k$k/rotation/rc.cc.s$k.list; [ -f "$f" ] && tot=$((tot + $(grep -vcx 'cc/d/f3.c' "$f"))); done
-if [ "$tot" = 17 ]; then ok ":id-as: the slices cover the other 17 ids once"; else no ":id-as slices: $tot of 17"; fi
+if [ "$tot" = 18 ]; then ok ":id-as: the slices cover the other 18 ids once"; else no ":id-as slices: $tot of 18"; fi
+# a failing file whose name holds spaces (cxgo's "main with args.c"): C's pattern reads it whole, the runner notes it whole
+for k in 0 1 2 3 4 5 6; do grep -qx 'cc/main with args.c' "$t/k$k/rotation/rc.cc.s$k.list" 2>"$t/k.err" && { ks=$k; break; }; done
+logs=$t/k$ks; key[rc.cc.s$ks]=$(col "$t/k$ks" rc.cc.s$ks 3)
+printf 'FAIL cc/main with args.c\tdiffer stdout (status 0)\nFAIL _control/x\tcontrol passed\n' > "$t/k$ks/rc.cc.s$ks.log"; rotation_note rc.cc.s$ks fail
+if [ "$(cut -f3 "$store/_rotation/rc.cc.failed" 2>&1)" = "cc/main with args.c" ]; then ok "C's :failed-re: a name with spaces read up to the tab, noted whole (the control's line not in the list)"; else no "the spaced name: $(cat "$store/_rotation/rc.cc.failed" 2>&1)"; fi
 
 echo "$((n - bad)) of $n passed"
 [ "$bad" = 0 ]

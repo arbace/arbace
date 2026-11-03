@@ -3470,5 +3470,9 @@ proxy, computed for one corpus: the tree check's `:subset-parse` of benchmarksga
 tree dumps (271 over the 52 files; `REPR_C_PARSE_KEEP=1`), reduced by `tools/cicover`: 9 files, 22% of the nodes (with
 parent-child pairs, 1,287 features, 30 files: too fine). It makes `c-parse.benchmarksgame` rotate in `--nightly`.
 
-**Open.** A file name with a space (`cxgo/main with args.c`) is cut by `[^ ]+` in every C `:failed-re`, the run checks'
-too; `c-dg`'s control (one group, or a part over all groups); whether the proxy subset stays until the cover build.
+**Decided** (the user, 2026-11-03). The proxy subset stays, labelled, until the cover build reaches repr/c. A file name may
+hold spaces (`cxgo/main with args.c`): every C judge (the run checks', cf2g's, dg's and the read checks', their controls
+too) prints `FAIL ID`, a tab, `WHY`, and every C step's `:failed-re` is `^FAIL ([^[:cntrl:]]+)[[:cntrl:]].*$` (the id up
+to the tab: the `.rot` file is tab-separated, so no literal tab in the pattern); the runner notes the failed ids one a line
+(`while read`, not word splitting); rotation-test 56 of 56 (one pattern over C's steps; the spaced name noted whole). `c-dg`
+stays one step, unrotated.
