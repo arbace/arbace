@@ -93,7 +93,7 @@
 #                                 run by goi. The native read's summary gives them as the message
 #                                 of a file go/parser rejects; goi's check judges the error tests
 #                                 on them (and arbace.go.run --errorcheck --gc-front merges them)
-#   bin/repr-go native-check [--fresh] [--headers] [CORPUS...]
+#   bin/repr-go native-check [--fresh] [--headers] [--only FILE | --record-ids] [CORPUS...]
 #                                 the native reader against the helper over the corpora (default
 #                                 all): repr/go's corpora above (std with linux-errtest) and the
 #                                 vendored trees' sources (bin/lib/repr-go/native-corpus:
@@ -112,7 +112,13 @@
 #                                 empty, or that the helper dumped nothing of, fails; --headers: the loader alone,
 #                                 the headers and the sets, no parse (seconds); exits non-zero on
 #                                 a difference that test/repr/go/native-known.edn does not list;
-#                                 report in .tmp/repr-go/native-check[-headers].report.edn
+#                                 report in .tmp/repr-go/native-check[-headers].report.edn.
+#                                 --only FILE (GT8, the gate's rotation): the ids CORPUS/KEY of
+#                                 FILE alone (one a line; KEY a dump's key), a partial check (the
+#                                 others neither checked nor missing; its report :partial, which
+#                                 bin/reap record-native-check refuses); --record-ids: no check,
+#                                 test/repr/go/native-check-ids.edn's lines of the corpora written
+#                                 from the helper's dumps (the rotation's universe)
 #   bin/repr-go roundtrip [[GOOS/]ARCH] [--goos GOOS] [--record]
 #                                 the round trip: convert std and $GOROOT/test's programs for
 #                                 GOOS/ARCH (default tamago/amd64; GOOS tamago or linux, ARCH
@@ -473,19 +479,53 @@ native_read() {
 # corpora (default all of native_corpora; arbace.repr.go.annotate), or the headers alone
 # (--headers: arbace.repr.go.parse)
 native_check() {
-  local fresh="" headers="" specs=() c native_ns=arbace.repr.go.annotate
+  local fresh="" headers="" specs=() c native_ns=arbace.repr.go.annotate only="" record_ids="" corpora=()
   while [ $# -gt 0 ]; do
     case $1 in
       --fresh) fresh=1; shift ;;
       --headers) headers=--headers; native_ns=arbace.repr.go.parse; shift ;;
-      *) break ;;
+      --only) only=$(realpath -m "$2"); shift 2 ;;
+      --record-ids) record_ids=1; shift ;;
+      -*) echo "native-check: unknown option $1" >&2; return 2 ;;
+      *) corpora+=("$1"); shift ;;
     esac
   done
-  [ $# -gt 0 ] || set -- $native_corpora
-  for c in "$@"; do specs+=("$(native_dumps "$c" "$fresh")"); done
+  [ ${#corpora[@]} -gt 0 ] || corpora=($native_corpora)
+  if [ -n "$only" ]; then
+    [ -f "$only" ] || { echo "native-check: --only $only: no such file" >&2; return 2; }
+    [ -z "$record_ids" ] || { echo "native-check: --record-ids writes every id of its corpora: no --only" >&2; return 2; }
+  fi
+  for c in "${corpora[@]}"; do specs+=("$(native_dumps "$c" "$fresh")") || return 1; done
+  # --record-ids (GT8, the rotation's universe): the helper's dumps of each corpus (the check's denominator), one id
+  # CORPUS/KEY a line, into test/repr/go/native-check-ids.edn, the other corpora's lines kept; no check run
+  if [ -n "$record_ids" ]; then native_record_ids "${specs[@]}"; return; fi
   mkdir -p "$root/.tmp/repr-go"
-  native_run check $headers --known "$root/test/repr/go/native-known.edn" \
+  native_run check $headers --known "$root/test/repr/go/native-known.edn" ${only:+--only "$only"} \
     --report "${REPR_GO_NATIVE_REPORT:-$root/.tmp/repr-go/native-check${headers:+-headers}.report.edn}" "${specs[@]}"
+}
+
+# native_record_ids SPEC...: test/repr/go/native-check-ids.edn's lines of the specs' corpora written afresh from their
+# helper's dumps (the keys of the .edn files under each spec's :dumps), the other corpora's lines kept
+native_record_ids() {
+  local f=$root/test/repr/go/native-check-ids.edn t sp name dumps
+  t=$root/.tmp/repr-go/native-check-ids.$$; mkdir -p "$root/.tmp/repr-go"
+  : > "$t.new"; : > "$t.names"
+  for sp in "$@"; do
+    name=$(sed -n 's/^{:name "\([^"]*\)".*/\1/p' "$sp") dumps=$(sed -n 's/.*:dumps "\([^"]*\)".*/\1/p' "$sp" | head -1)
+    dumps=${dumps%/}
+    [ -n "$name" ] && [ -d "$dumps" ] || { echo "native-check --record-ids: $sp: no :name or no dumps directory" >&2; return 1; }
+    echo "$name" >> "$t.names"
+    (cd "$dumps" && find . -name '*.edn' -type f | sed 's|^\./||; s|\.edn$||') | LC_ALL=C sort \
+      | awk -v n="$name" '{ printf "[\"%s/%s\"]\n", n, $0 }' >> "$t.new"
+  done
+  [ -f "$f" ] && grep '^\["' "$f" | awk -F'"' 'NR == FNR { drop[$0] = 1; next } { split($2, a, "/"); if (!(a[1] in drop)) print }' "$t.names" - >> "$t.new"
+  { echo ";; bin/repr-go native-check's ids (GT8, doc/GATE-SURVEY.md, \"As built: GT8 (the tools' lists)\"): per corpus its helper's"
+    echo ";; dumps, the check's denominator, one [\"CORPUS/KEY\"] a line (KEY a dump's key: a package's path, a program's file),"
+    echo ";; the universe of the gate's rotation of repr-go-native (bin/repr-go native-check CORPUS --only LIST). Written by"
+    echo ";; bin/repr-go native-check --record-ids [CORPUS...] from the helper's dumps (made when missing), no check run."
+    echo "["; LC_ALL=C sort -u "$t.new"; echo "]"; } > "$f"
+  echo "native-check --record-ids: $(grep -c '^\["' "$f") ids in $f ($(paste -sd' ' "$t.names") written afresh)"
+  rm -f "$t.new" "$t.names"
 }
 
 convert_main() {

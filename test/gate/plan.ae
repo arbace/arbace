@@ -35,6 +35,10 @@
     (.update md (.getBytes s "UTF-8"))
     (apply str (map #(format "%02x" (bit-and (long %) 0xff)) (.digest md)))))
 
+(defn list-sha
+  "GT8.4: a rotated check's list digested (its ids, one a line), as its key's line list SHA N and the runs' LIST-SHA"
+  [ids] (sha256 (apply str (map #(str % "\n") ids))))
+
 (defn- hex [^bytes b] (apply str (map #(format "%02x" (bit-and (long %) 0xff)) b)))
 
 (defn- file-sha256 [^File f]
@@ -138,6 +142,8 @@
                                             :part (str (:part p))
                                             :inputs (vec (concat (:inputs s) (:inputs p)))
                                             :cmd (sub (or (:cmd p) (:cmd s)) p)})
+                              ;; GT8: {part} in :uses its part's name (a level's part reads its own corpus's read)
+                              (or (:uses p) (:uses s)) (assoc :uses (mapv #(sub % p) (or (:uses p) (:uses s))))
                               (or (:pins s) (:pins p)) (assoc :pins (vec (distinct (concat (:pins s) (:pins p)))))
                               (or (:audit-cmd p) (:audit-cmd s)) (assoc :audit-cmd (sub (or (:audit-cmd p) (:audit-cmd s)) p)))))
                      [(fix s)]))
@@ -190,7 +196,11 @@
                                             (str n " " sha "\n")))))))))
     (or (get hosts h) (throw (ex-info (str "hosts.edn: no host " h) {})))))
 
-(def ^:private unkeyed #{:doc :summary :mem-gib :heavy :audit-cmd})
+(def ^:private unkeyed
+  ;; GT8.4: :rotate (a part run whole keeps its key), :list (its digest is the line list SHA N), :failed-re and
+  ;; :rotated-part (the runner's bookkeeping, never a verdict)
+  ;; GT8 (the tools' lists): :failed-as (the ids' replacement) and :judges (a judge's failures noted for its producers)
+  #{:doc :summary :mem-gib :heavy :audit-cmd :rotate :list :failed-re :failed-as :rotated-part :whole-list :judges})
 
 (defn- material
   "the lines a step's key is the hash of (but its :uses lines, use-lines'); a host whose identity is
@@ -206,6 +216,7 @@
      (for [h (:hosts step)] (let [id (host-id hosts step h)] (str "host " (name h) " " (if (= id :pending) "pending" id))))
      (for [p (:pins step)] (str "pin " (get files p "missing") " " p))
      (for [e (:env step)] (let [v (System/getenv (str e))] (str "env " e (if v (str "=" v) " unset"))))
+     (when-let [l (:list step)] [(str "list " (list-sha l) " " (count l))])
      (for [f sel] (str "file " (get files f) " " f)))))
 
 (defn- use-line
@@ -311,6 +322,21 @@
             (when (and (seq (:never-loads s)) (some #{:gate :javac} (:hosts s)))
               [(str nm ": :never-loads on :gate or :javac, whose identity holds every namespace: :prog, :javac-prog")])
             (for [p (:pins s) :when (not (contains? files p))] (str nm ": pin " p " is not a file"))
+            ;; GT8.4: a :rotate names its record and corpora files, and its :only takes the {list}
+            (when-let [r (:rotate s)]
+              (concat
+               (when-not (:part s) [(str nm ": :rotate on a step without :parts")])
+               (when-not (str/includes? (str (:only r)) "{list}") [(str nm ": :rotate's :only has no {list}")])
+               (for [k [:universe :subset] :let [f (get r k)] :when (and f (not (contains? files f)))]
+                 (str nm ": :rotate's " k " " f " is not a file"))
+               (when-not (:universe r) [(str nm ": :rotate has no :universe")])
+               (when-let [x (:id-re r)]
+                 (when-not (try (re-pattern x) (catch Throwable _ nil)) [(str nm ": :rotate's :id-re does not compile: " x)]))
+               (when-not (or (nil? (:always r)) (vector? (:always r))) [(str nm ": :rotate's :always is not a vector of ids")])))
+            (when-let [j (:judges s)]
+              (concat
+               (when-not (seq (:uses s)) [(str nm ": :judges on a step without :uses (its producers)")])
+               (when-not (:failed-re j) [(str nm ": :judges has no :failed-re")])))
             (for [t (re-seq #"(?:^|[ \"=;&|(])(bin/[A-Za-z0-9._-]+)" (str (:cmd s)))
                   :let [sc (second t)]
                   :when (not (ok-script? sc))]
@@ -327,12 +353,212 @@
 
 (defn- producer [u] (first (str/split (str u) #"/" 2)))
 
-(defn plan [root logs store mode rerun?]
+;; ---- GT8.4, GT8.7 (doc/GATE-SURVEY.md, "As built: GT8.4, GT8.7 (write-ahead)"): the rotation. A part whose
+;; step declares :rotate {:only "--only {list}" :universe RECORD :subset CORPORA :failed-re ERE} runs, in the
+;; nightly tier, its subset (NAME.PART.sub: the corpus's :subset, plus the files that failed since) and one
+;; slice of the rest (NAME.PART.sK, K in 0..6: the files whose name's SHA-256, its first 8 hex digits, is K
+;; mod 7), each a check of its own, keyed over its list; the clean run its subset alone; --full the whole part.
+;; A part with no :subset, or one that covers the universe, is not rotated: it runs whole in every tier.
+
+(def period 7)
+
+(defn slice-of
+  "the rotation's slice of a file id: the first 8 hex digits of its SHA-256, mod 7"
+  [^String id]
+  (mod (Long/parseLong (subs (sha256 id) 0 8) 16) period))
+
+(def ^:private default-id-re "^\\s*\\[\"([^\"]+)\"")
+
+(defn- record-ids
+  "the ids of a record under PART: by default its lines [\"ID\" ...] (test/c/check-linux-amd64.edn's shape) whose
+  ID is under PART/; with ID-RE (:rotate's :id-re, a regex on a line), its group 1 on every line it finds, and
+  when it has a group 2, only the lines whose group 2 is PART (the part named on the line: Java's corpus);
+  each id once, in the record's order"
+  [^String f ^String part id-re]
+  (let [pre (str part "/")
+        re (re-pattern (or id-re default-id-re))
+        groups (.groupCount (re-matcher re ""))]
+    (vec (distinct
+          (for [l (str/split-lines (slurp f))
+                :let [m (re-find re l)]
+                :when m
+                :let [id (second m) p (when (> groups 1) (nth m 2))]
+                :when (cond (nil? id-re) (str/starts-with? id pre)
+                            (> groups 1) (= p part)
+                            :else true)]
+            id)))))
+
+(defn- corpus-subset
+  "the :subset of the map whose :id is :PART anywhere in the file (test/c/corpora.edn's shape), each PART/NAME
+  (BARE: each NAME as written, the ids of a record read by an :id-re); nil when it has none"
+  [^String f ^String part bare]
+  (let [k (keyword part)
+        m (first (filter #(and (map? %) (= k (:id %))) (tree-seq coll? seq (read-file f))))]
+    (when-let [s (:subset m)] (mapv #(if bare (str %) (str part "/" %)) s))))
+
+(defn- rot-dir [store] (str store "/_rotation"))
+
+(defn- lines-of [^String f]
+  (let [x (File. f)] (if (.isFile x) (vec (remove str/blank? (str/split-lines (slurp f)))) [])))
+
+(def ^:private counted
+  "review 181 (the user's (a), 2026-11-03): the commits whose runs count toward the rotation's record, this
+  commit's ancestors (git rev-list HEAD: LOGS/ancestors.txt for a plan, --ancestors FILE for rotation-status), or
+  nil (every run, for a caller that gives none)"
+  (atom nil))
+
+(defn- set-counted! [^String f]
+  (reset! counted (when (and f (.isFile (File. f))) (set (remove str/blank? (str/split-lines (slurp f)))))))
+
+(defn- counts?
+  "does a run (or a failed file's event) count: noted by an ancestor of this commit, from a clean tree"
+  [{:keys [commit dirty]}]
+  (or (nil? @counted) (and (contains? @counted (str commit)) (= "false" (str dirty)))))
+
+(def run-order
+  "the order of the runs (review 181, finding 2): the store's sequence number (STORE/_rotation/.seq, taken under
+  its lock by the runner: the run noted last is the later), then the time"
+  (juxt :seq :epoch))
+
+(defn runs-of
+  "a rotated check's runs that count (counts?), STORE/_rotation/NAME.runs (the runner's lines EPOCH DATE STATUS KEY
+  LIST-SHA COMMIT WORKTREE SEQ DIRTY), the latest last"
+  [store nm]
+  (sort-by run-order
+           (filter counts?
+                   (for [l (lines-of (str (rot-dir store) "/" nm ".runs"))
+                         :let [[e d st k ls c w sq dt] (str/split l #"\t")]
+                         :when (re-matches #"[0-9]+" (str e))]
+                     {:epoch (Long/parseLong e) :date d :status st :key k :list-sha ls :commit c :worktree w
+                      :seq (if (re-matches #"[0-9]+" (str sq)) (Long/parseLong sq) 0) :dirty dt}))))
+
+(defn failed-of
+  "the part's files that failed since (STORE/_rotation/NAME.PART.failed, the runner's events SEQ EPOCH ID fail|clear
+  COMMIT DIRTY): those whose latest event that counts is a failure (a branch's failure or clearing is not this
+  commit's)"
+  [store nm]
+  (let [evs (filter counts?
+                    (for [l (lines-of (str (rot-dir store) "/" nm ".failed"))
+                          :let [[sq e id ev c dt] (str/split l #"\t")]
+                          :when (and (re-matches #"[0-9]+" (str sq)) id)]
+                      {:seq (Long/parseLong sq) :id id :event ev :commit c :dirty dt}))]
+    (vec (sort (for [[id es] (group-by :id evs) :when (= "fail" (:event (last (sort-by :seq es))))] id)))))
+
+(defn rotation-lists
+  "a rotated part's lists, or nil when it is not rotated: {:universe :subset (the declared one, plus :always's ids
+  and the files that failed since, STORE/_rotation/NAME.PART.failed) :failed :always :slices {K [ids]}}. :always
+  (the negative controls' subjects, GTS81 (a)): ids of the universe in the subset and in every slice's list, so
+  that every run of the part judges its controls"
+  [root store step]
+  (when-let [{:keys [universe subset id-re always]} (:rotate step)]
+    (when-let [declared (when subset (corpus-subset (str root "/" subset) (:part step) (some? id-re)))]
+    (let [part (:part step) nm (str (:name step))
+          ;; (the universe read only for a part with a :subset: a plan reads no record of an unrotated part)
+          u (record-ids (str root "/" universe) part id-re)
+          uset (set u)
+          always (filterv uset (map str always))
+          failed (filterv uset (failed-of store nm))
+          sub (vec (sort (distinct (concat (filter uset declared) always failed))))
+          subset-set (set sub)
+          rest (remove subset-set u)]
+      (when (and declared (seq rest))
+        {:universe u :subset sub :failed failed :always always
+         :slices (into (sorted-map) (for [k (range period)]
+                                      (let [ids (sort (filter #(= k (slice-of %)) rest))]
+                                        [k (if (seq ids) (vec (sort (distinct (concat ids always)))) [])])))})))))
+
+(defn- with-only
+  "the command with the rotation's list: {only} in it replaced by the :only fragment (else the fragment
+  appended), {list} in the fragment the runner's \"$GATE_LIST\"; NIL fragment: {only} removed"
+  [cmd frag]
+  (let [c (str cmd)
+        f (when frag (str/replace (str frag) "{list}" "\"$GATE_LIST\""))]
+    (cond
+      (str/includes? c "{only}") (str/replace c "{only}" (or f ""))
+      f (str c " " f)
+      :else c)))
+
+(defn- now-s [] (if-let [n (System/getenv "GATE_NOW")] (Long/parseLong n) (quot (System/currentTimeMillis) 1000)))
+
+(defn slice-state
+  "a slice's state for the night's choice and for completeness: its latest run that counts (its own, any list, or the
+  whole part's) and its covering run (the latest of its own runs with its current list and the whole part's with the
+  current universe), :covered when that one passed (or was skipped at a pass) since SINCE"
+  [store nm k ids usha since]
+  (let [own (runs-of store (str nm ".s" k))
+        wholes (runs-of store (str nm ".whole"))
+        ls (list-sha ids)
+        latest (last (sort-by run-order (concat own wholes)))
+        cover (last (sort-by run-order (concat (filter #(= ls (:list-sha %)) own) (filter #(= usha (:list-sha %)) wholes))))]
+    {:k k :n (count ids) :latest latest :cover cover
+     :covered (boolean (and cover (#{"pass" "skip"} (:status cover)) (>= (:epoch cover) since)))}))
+
+(defn choose-slices
+  "the slices a night runs (GTS202 (a), GTS203 (a); review 181, findings 3 and 4): one whose latest run failed, if
+  any (ties by the night index), and beside it the rotation's slice among the others: first one not covered with its
+  current list (never run, a list changed since its run, or its run failed or aged), then the one whose latest run is
+  oldest (by the store's sequence); ties by the night index (slice NIGHT mod 7 first). A slice that fails naming no file keeps its place the
+  next night, but the rotation goes on beside it"
+  [store nm lists night]
+  (let [usha (list-sha (sort (:universe lists)))
+        since (- (now-s) (* period 86400))
+        sts (for [[k ids] (:slices lists) :when (seq ids)] (slice-state store nm k ids usha since))
+        tie #(mod (- (:k %) night) period)
+        failed (first (sort-by tie (filter #(= "fail" (:status (:latest %))) sts)))
+        other (first (sort-by (juxt #(if (:covered %) 1 0) #(if (:latest %) (:seq (:latest %)) -1) tie)
+                              (remove #(= (:k %) (:k failed)) (remove #(= "fail" (:status (:latest %))) sts))))]
+    (vec (keep :k [failed other]))))
+
+(defn rotate-steps
+  "the steps with their rotated parts expanded for ROTATION: nil (--full: whole parts), :subset (the clean run:
+  NAME.PART.sub alone) or a night index (NAME.PART.sub and the night's slice); each expanded check carries its
+  :list (its key's line list SHA N, the runner's GATE_LIST file) and :rotation"
+  [root store steps rotation]
+  (let [exp (fn [s]
+              (let [lists (when rotation (rotation-lists root store s))
+                    frag (:only (:rotate s))
+                    mk (fn [suffix ids tag]
+                         (-> (dissoc s :rotate)
+                             (assoc :name (symbol (str (:name s) "." suffix)) :rotation tag :list ids
+                                    :rotated-part (str (:name s)) :failed-re (:failed-re (:rotate s))
+                                    :failed-as (:failed-as (:rotate s))
+                                    :cmd (with-only (:cmd s) frag))))]
+                (cond
+                  (not lists)
+                  [(cond-> s (:cmd s) (update :cmd with-only nil))]
+                  ;; a rotated part run whole (--full, the clean run's GATE_CLEAN_WHOLE=1): its key as before (the
+                  ;; universe unkeyed, :whole-list), its run noted as NAME.PART.whole, a run of every slice
+                  (= rotation :whole)
+                  [(-> s (dissoc :rotate) (update :cmd with-only nil)
+                       (assoc :whole-list (vec (sort (:universe lists))) :rotated-part (str (:name s))
+                              :failed-re (:failed-re (:rotate s)) :failed-as (:failed-as (:rotate s))))]
+                  :else
+                  (let [sub (mk "sub" (:subset lists) "sub")]
+                    (if (= rotation :subset)
+                      [sub]
+                      (into [sub] (for [k (choose-slices store (str (:name s)) lists rotation)]
+                                    (mk (str "s" k) (get (:slices lists) k) (str "s" k "/" period)))))))))
+        out (mapv exp steps)
+        renamed (into {} (for [[s xs] (map vector steps out) :when (not= [(:name s)] (map :name xs))]
+                           [(str (:name s)) (mapv :name xs)]))
+        fix (fn [xs] (vec (mapcat #(get renamed (str %) [%]) xs)))
+        ;; a :uses naming a rotated part (STEP or STEP/FILE) names its checks
+        fix-uses (fn [us] (vec (mapcat (fn [u] (let [[st f] (str/split (str u) #"/" 2)]
+                                                 (if-let [ns (get renamed st)] (map #(if f (str % "/" f) (str %)) ns) [(str u)])))
+                                       us)))]
+    (vec (for [s (apply concat out)]
+           (cond-> s
+             (:needs s) (update :needs fix)
+             (:uses s) (update :uses fix-uses)
+             (:start-after s) (update :start-after #(if-let [n (get renamed (str %))] (last n) %)))))))
+
+(defn plan [root logs store mode rerun? & [rotation]]
+  (set-counted! (str logs "/ancestors.txt"))
   (let [{:keys [groups steps]} (read-file (or (System/getenv "GATE_STEPS") (str root "/test/gate/steps.edn")))
         steps (expand-parts steps)
         files (files-table (str logs "/files.sha256"))
         hosts (read-file (str logs "/hosts.edn"))
-        phases (if (= mode "full") #{:pre :build :essential :full} #{:pre :build :essential})
+        phases (if (#{"full" "nightly"} mode) #{:pre :build :essential :full} #{:pre :build :essential})
         cache (atom {})
         problems (validate groups steps files hosts cache)
         _ (when (seq problems)
@@ -340,8 +566,27 @@
             (doseq [p problems] (println (str "   " p)))
             (System/exit 1))
         steps (filter #(phases (:phase %)) steps)
+        ;; GT8.4: the rotated parts (--nightly: the subset and the night's slice; the clean run: the subset)
+        _ (when (and (= mode "nightly") (not (integer? rotation)))
+            (println "gate plan: nightly needs --night N") (System/exit 2))
+        steps (rotate-steps root store steps (when (#{"full" "nightly"} mode) (or rotation :whole)))
         pdir (File. (str logs "/plan"))
         _ (.mkdirs pdir)
+        rdir (File. (str logs "/rotation"))
+        _ (.mkdirs rdir)
+        _ (doseq [s steps :when (or (:rotation s) (:whole-list s))
+                  :let [l (or (:list s) (:whole-list s)) tag (or (:rotation s) "whole")
+                        rn (if (:whole-list s) (str (:name s) ".whole") (str (:name s)))]]
+            (spit (str rdir "/" (:name s) ".list") (apply str (map #(str % "\n") l)))
+            (spit (str rdir "/" (:name s) ".rot")
+                  (str "part\t" (:rotated-part s) "\nslice\t" tag "\nruns\t" rn "\nlist-sha\t" (list-sha l)
+                       "\nfailed-re\t" (or (:failed-re s) "") "\nfailed-as\t" (or (:failed-as s) "\\1") "\n")))
+        ;; GT8: a judge of rotated checks (:judges {:failed-re ERE :failed-as REPL}): its producers and expressions, for
+        ;; the runner's judge_note (a producer that is not rotated has no .rot and is passed over)
+        _ (doseq [s steps :when (:judges s) :let [j (:judges s)]]
+            (spit (str rdir "/" (:name s) ".judges")
+                  (str (apply str (for [p (distinct (map producer (:uses s)))] (str "producer\t" p "\n")))
+                       "failed-re\t" (or (:failed-re j) "") "\nfailed-as\t" (or (:failed-as j) "\\1") "\n")))
         used (set (for [s steps u (:uses s)] (producer u)))
         ;; the checks' decisions, in order: a step that uses others' outputs (GT5) is keyed over them,
         ;; known when its producers are skipped (their passes' outputs), else decided by the runner once
@@ -449,6 +694,10 @@
       (println (str "gate plan (" mode "): " (count decided) " steps; "
                     (str/join ", " (for [k ["always" "build" "run" "after" "skip" "none"] :when (freq k)]
                                      (str (freq k) " " k))))))
+    (when (some #(:rotation (:step %)) decided)
+      (println (str "   rotation (GT8.4): " (if (integer? rotation) (str "night " rotation ", slices of " period) "the subsets alone (the clean run)")
+                    "; " (str/join ", " (for [d decided :let [s (:step d)] :when (:rotation s)]
+                                          (str (:name d) " " (count (:list s)) " files"))))))
     (doseq [{:keys [name decision why]} decided]
       (println (format "   %-6s %-28s %s" (if (= decision "none") "-" decision) name why)))))
 
@@ -479,10 +728,59 @@
                 (doseq [l (remove b now)] (println (str "   + " l)))
                 (doseq [l (remove a then)] (println (str "   - " l)))))))))))
 
+(defn rotation-status
+  "GT8.4, GTS204 (a): the rotation's record complete? For every rotated part (a :subset smaller than its universe):
+  every non-empty slice's latest run of its current list (LIST-SHA) passed or was skipped at a pass, within the
+  period (7 days, at any key: see the survey), and no file failed since (STORE/_rotation/NAME.PART.failed empty).
+  Prints a line a part; exit 1 when incomplete. GATE_NOW: the time (epoch seconds) for the gate's own tests"
+  [root store args]
+  (set-counted! (second (drop-while #(not= "--ancestors" %) args)))
+  (let [{:keys [steps]} (read-file (or (System/getenv "GATE_STEPS") (str root "/test/gate/steps.edn")))
+        now (now-s)
+        days (if-let [d (second (drop-while #(not= "--days" %) args))] (Long/parseLong d) period)
+        since (- now (* days 86400))
+        parts (for [s (expand-parts steps) :when (:rotate s)
+                    :let [l (rotation-lists root store s)] :when l]
+                [s l])
+        bad (atom 0)
+        edn (second (drop-while #(not= "--edn" %) args))
+        evidence (atom [])]
+    (if (empty? parts)
+      (println "gate rotation: no corpus is compressed (no rotated part has a :subset smaller than its universe): --nightly runs every part whole, nothing to rotate")
+      (doseq [[s {:keys [universe subset failed slices]}] parts]
+        (let [nm (str (:name s))
+              usha (list-sha (sort universe))
+              st (for [[k ids] slices :when (seq ids)
+                       :let [x (slice-state store nm k ids usha since)]]
+                   [k (:n x) (:cover x) (:covered x)])
+              incomplete (remove #(nth % 3) st)]
+          (when (or (seq incomplete) (seq failed)) (swap! bad inc))
+          ;; review 181, finding 5: the evidence, for the clean record: each slice's covering run
+          (swap! evidence conj {:part nm :files (count universe) :subset (count subset) :failed (vec failed)
+                                :slices (vec (for [[k n r ok] st]
+                                               [k n (if r (keyword (:status r)) :none) (:date r) (:commit r) (boolean ok)]))})
+          (println (str (if (or (seq incomplete) (seq failed)) "INCOMPLETE " "complete   ") nm ": " (count universe) " files, subset "
+                        (count subset) ", " (count st) " slices"
+                        (when (seq incomplete)
+                          (str "; not passed within " days " days: "
+                               (str/join ", " (for [[k n r] incomplete]
+                                                (str "s" k " (" n " files, "
+                                                     (if r (str (:status r) " " (:date r)) "never run with this list, nor the part whole with this universe") ")")))))
+                        (when (seq failed) (str "; failed since, to pass (and to add to :subset): " (str/join " " (take 10 failed))
+                                                (when (> (count failed) 10) (str " (+" (- (count failed) 10) ")")))))))))
+    (when edn
+      (spit edn (pr-str {:status (cond (empty? parts) :none (pos? @bad) :incomplete :else :complete)
+                         :days days :now now :parts @evidence})))
+    (when (pos? @bad) (System/exit 1))))
+
 (defn -main [& args]
   (case (first args)
-    "plan" (let [[_ root logs store mode & more] args]
-             (plan root logs store mode (some #{"--rerun"} more)))
+    "plan" (let [[_ root logs store mode & more] args
+                 night (second (drop-while #(not= "--night" %) more))
+                 rot (second (drop-while #(not= "--rotation" %) more))]
+             (plan root logs store mode (some #{"--rerun"} more)
+                   (cond night (Long/parseLong night) (= rot "subset") :subset :else nil)))
+    "rotation-status" (let [[_ root store & more] args] (rotation-status root store more))
     "why" (let [[_ root logs store nm] args] (why root logs store nm))
-    (do (println "usage: gate.plan plan ROOT LOGS STORE MODE [--rerun] | why ROOT LOGS STORE NAME")
+    (do (println "usage: gate.plan plan ROOT LOGS STORE MODE [--rerun] [--night N|--rotation subset] | why ROOT LOGS STORE NAME | rotation-status ROOT STORE")
         (System/exit 2))))

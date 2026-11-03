@@ -11,8 +11,13 @@
                      run time shadow the compiled ones by name, SA136) against evaluated with the
                      classes j2g translated into EXE
 
-  Usage: run EXE GEN [-j JOBS] [--timeout S] [--expected FILE | --write-expected FILE] [SEL...]
-  (SEL: parts of corpus paths). Prints a line per corpus, the first mismatches of each; all of
+  Usage: run EXE GEN [-j JOBS] [--timeout S] [--expected FILE | --write-expected FILE] [--only FILE] [SEL...]
+         ids GEN
+  (SEL: parts of corpus paths). --only FILE (GT8.4): the cases listed in FILE, one id a line (FILE:LINE as the
+  mismatches name them; blank and # lines ignored): the corpora holding a listed case run (both runs, whole:
+  their cases share state), only the listed cases are compared and counted, and only the listed known cases
+  are held against the reference; the negative control is judged when its two cases are listed, else printed
+  left, not failed; refused with --write-expected. ids: every case's id, one a line, from GEN/corpora.edn. Prints a line per corpus, the first mismatches of each; all of
   them in .tmp/diffcheck/check.txt. With --expected FILE (test/diffcheck/known.edn) it passes
   when the mismatching cases are exactly those FILE records, with their reasons, and each known
   case's recorded pair (:got: the two runs' kinds and a digest of both) is this run's (the oracle's
@@ -80,11 +85,17 @@
   "Runs the selected corpora; {:ok :mismatches [{:case :form}...] :incomplete n
   :incomplete-files #{} :files #{} :errors [...]} as oracle.runner/check returns (an error: a
   selector that selects no corpus, or no corpus selected)."
-  [exe gen jobs timeout sel]
+  ([exe gen jobs timeout sel] (check exe gen jobs timeout sel nil))
+  ([exe gen jobs timeout sel only]
   (let [all (runner/read-expected (io/file gen "corpora.edn"))
-        corpora (filter #(selected? sel %) all)
+        recorded (into #{} (for [c all, e (:cases c)] (str (:file c) ":" (:line e))))
+        only-files (when only (into #{} (comp (filter recorded) (map #(subs % 0 (.lastIndexOf ^String % ":")))) only))
+        listed? (fn [id] (or (nil? only) (contains? only id)))
+        corpora (filter #(and (selected? sel %) (or (nil? only) (contains? only-files (:file %)))) all)
         errors (vec (concat (for [s sel :when (not-any? #(str/includes? (:file %) s) all)]
                               (str "the selector " s " selects no corpus"))
+                            (when (and only (not-any? recorded only))
+                              [(str "--only: none of the " (count only) " listed ids is a case")])
                             (when (empty? corpora) ["no corpus selected"])))
         work (for [c corpora, k [0 1]] [c k])
         results (@#'runner/pool-map jobs (fn [[c k]]
@@ -106,20 +117,21 @@
     (doseq [[c [a b]] (map vector corpora by-corpus)]
       (let [[na _ nb _] (runs c)
             pair (if (:compiled c) :clojure :java)
-            _ (doseq [e (:cases c) :let [id (str (:file c) ":" (:line e))] :when (wanted id)]
+            cases (filterv #(listed? (str (:file c) ":" (:line %))) (:cases c))
+            _ (doseq [e cases :let [id (str (:file c) ":" (:line e))] :when (wanted id)]
                 (swap! by-id assoc id {:x (get (:by a) (:id e)) :y (get (:by b) (:id e))}))
-            mism (doall (disagreements (:cases c) (:by a) (:by b)))
+            mism (doall (disagreements cases (:by a) (:by b)))
             done? (and (:done a) (:done b))
             ;; the Java forms' pair: a case whose classes stay interpreted in both runs (defined by
             ;; more than one case, or in jforms-excluded.edn) compares the interpreter with itself
-            jc (if (= pair :java) (:jcompiled c 0) (count (:cases c)))
+            jc (if (= pair :java) (:jcompiled c 0) (count cases))
             line (format "%-44s %-7s %5d/%5d agree %6d ms %6d ms%s" (:file c) (name pair)
-                         (- (count (:cases c)) (count mism)) (count (:cases c)) (:ms a) (:ms b)
+                         (- (count cases) (count mism)) (count cases) (:ms a) (:ms b)
                          (str (when (= pair :java) (str ", " jc " with their classes compiled"))
                               (when-not (:done a) (str ", " na " run incomplete (exit " (:exit a) ")"))
                               (when-not (:done b) (str ", " nb " run incomplete (exit " (:exit b) ")"))))]
-        (swap! total + (count (:cases c))) (swap! bad + (count mism))
-        (swap! pair-totals update pair (fnil (fn [[n m j]] [(+ n (count (:cases c))) (+ m (count mism)) (+ j jc)]) [0 0 0]))
+        (swap! total + (count cases)) (swap! bad + (count mism))
+        (swap! pair-totals update pair (fnil (fn [[n m j]] [(+ n (count cases)) (+ m (count mism)) (+ j jc)]) [0 0 0]))
         (when-not done? (swap! incomplete inc) (swap! cut conj (:file c)))
         (println line)
         (.append report (str "== " line "\n"))
@@ -143,6 +155,10 @@
     (doseq [[pair [n m j]] (sort @pair-totals)]
       (println (format "== %s's pair: %d of %d cases agree, %d disagree%s" (name pair) (- n m) n m
                        (if (= pair :java) (str "; " j " cases with their classes compiled, the others' classes interpreted in both runs") ""))))
+    (when only
+      (println (format "== --only: %d listed cases in %d corpora%s" (count (filter recorded only)) (count only-files)
+                       (let [absent (remove recorded only)]
+                         (if (seq absent) (str "; " (count absent) " listed ids are no case (ignored), as " (first (sort absent))) "")))))
     (println (format "== %d of %d cases agree, %d disagree (all in .tmp/diffcheck/check.txt)%s"
                      (- @total @bad) @total @bad
                      (if (pos? @incomplete) (str "; " @incomplete " corpora incomplete") "")))
@@ -153,12 +169,13 @@
      :incomplete @incomplete
      :incomplete-files @cut
      :files (into #{} (map :file) corpora)
+     :only only
      :controls (doall (for [c controls
                             :let [sub (@by-id (:subject c)) ref (@by-id (:reference c))]]
                         ;; a record a run did not write is no record: not judged
                         (assoc c :result (cond (not (and (:x sub) (:y ref))) :missing
                                                (differs? (:x sub) (:y ref)) :differ
-                                               :else :pass))))}))
+                                               :else :pass))))})))
 
 (defn write-known
   "Rewrites the known disagreements f from a check's (oracle.runner/write-known's rules: a
@@ -187,10 +204,20 @@
                  (= "--timeout" (first args)) (recur (nnext args) (assoc o :timeout (Long/parseLong (second args))))
                  (= "--expected" (first args)) (recur (nnext args) (assoc o :expected (second args)))
                  (= "--write-expected" (first args)) (recur (nnext args) (assoc o :write-expected (second args)))
+                 (= "--only" (first args)) (recur (nnext args) (assoc o :only (second args)))
                  :else (recur (next args) (update o :sel conj (first args)))))
         [exe gen & sel] (:sel opts)
+        only (when (:only opts)
+               (try (runner/read-only-list (io/file (:only opts)))
+                    (catch Throwable t (println "bin/diffcheck:" (.getMessage t)) (System/exit 2))))
+        _ (when (and only (:write-expected opts))
+            (println "bin/diffcheck: --only is a partial run: it does not go with --write-expected")
+            (System/exit 2))
         ok (case cmd
-             "run" (let [r (check exe gen (:jobs opts) (:timeout opts) (vec sel))]
+             "ids" (do (doseq [c (runner/read-expected (io/file exe "corpora.edn")), e (:cases c)]
+                         (println (str (:file c) ":" (:line e))))
+                       true)
+             "run" (let [r (check exe gen (:jobs opts) (:timeout opts) (vec sel) only)]
                      ;; a check of nothing fails whatever the reference (mac/013); GTS81 (a): the controls
                      ;; judged in every mode, and printed
                      (let [k (and (empty? (:errors r))

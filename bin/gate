@@ -38,6 +38,19 @@
 # heavy process alone (GTS31 (b), bin/lib/heavy.bash); --full ends with --prune (GTS34 (a)).
 #
 # Usage: bin/gate [--full] [--rerun]
+#        bin/gate --nightly [--plan] (GT8.4, GT8.7; doc/GATE-SURVEY.md, "As built: GT8.4, GT8.7 (write-ahead)")
+#                                   the nightly tier: --full's steps keyed as --full keys them, each part whose
+#                                   step declares :rotate (and whose corpus has a :subset smaller than it) run as
+#                                   NAME.PART.sub, its subset and the files that failed since, and NAME.PART.sK,
+#                                   one slice of the rest (a file's slice: its name's SHA-256 mod 7), the slice
+#                                   whose latest run failed, else never ran, else ran longest ago (ties: the
+#                                   night's index, GATE_NIGHT), each a check with its own key and passes; every
+#                                   run noted in STORE/_rotation/
+#        bin/gate --rotation-status [--days N]  the rotation's record complete? every slice of every rotated part
+#                                   passed (or skipped at its pass) with its current list within 7 days (N), no
+#                                   file failed since; exit 1 when not. bin/gate --full --clean checks it first and
+#                                   runs the subsets alone (GTS204 (a); GATE_CLEAN_WHOLE=1: whole parts;
+#                                   GATE_CLEAN_ROTATION=0: not checked, its record says :unchecked)
 #        bin/gate [--full] --plan   the plan alone: each step, run, skipped, built or not needed,
 #                                   and why (the inputs changed since its latest pass); stage 0
 #                                   first when missing
@@ -335,12 +348,16 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 . "$root/bin/lib/renamed-env.bash" # stops on a stale G2A_*, J2A_*, A2G_* or C2A_*
 cd "$root"
 unset ARBACE_HOST_EXE J2G_GO_EXE REPR_GO_EXE
-usage() { echo "usage: bin/gate [--full] [--rerun] | bin/gate [--full] --plan [--builds] | bin/gate --why STEP | bin/gate --audit [STEP...] | bin/gate --prune [--dry-run] | bin/gate [--full] --clean [--tag TAG] [--only STEP,...|failed|changed] [--plan] | bin/gate --pins [FILE] | bin/gate --full --concurrent" >&2; exit 2; }
+usage() { echo "usage: bin/gate [--full|--nightly] [--rerun] | bin/gate --rotation-status [--days N] | bin/gate [--full] --plan [--builds] | bin/gate --why STEP | bin/gate --audit [STEP...] | bin/gate --prune [--dry-run] | bin/gate [--full] --clean [--tag TAG] [--only STEP,...|failed|changed] [--plan] | bin/gate --pins [FILE] | bin/gate --full --concurrent" >&2; exit 2; }
 full= plan_only= why= rerun= audit= prune= dry= clean= clean_tag= pins= pins_out= concurrent= builds= only= outside=
+nightly= rotation_status= rot_days=
 steps_arg=() orig_args=("$@")
 while [ $# -gt 0 ]; do
   case $1 in
     --full) full=1 ;;
+    --nightly) nightly=1; full=1 ;;
+    --rotation-status) rotation_status=1 ;;
+    --days) [ $# -ge 2 ] || usage; rot_days=$2; shift ;;
     --plan) plan_only=1 ;;
     --builds) builds=1 ;;
     --clean) clean=1 ;;
@@ -360,6 +377,17 @@ while [ $# -gt 0 ]; do
   shift
 done
 mode=essential; [ -n "$full" ] && mode=full
+# GT8.4, GT8.7 (doc/GATE-SURVEY.md, "As built: GT8.4, GT8.7 (write-ahead)"): --nightly, --full's steps with each
+# rotated part's subset and the night's slice (the night: the day of the run's start less 12 hours, so that a
+# night that crosses midnight is one; GATE_NIGHT gives it); the clean run its subsets alone (GATE_CLEAN_WHOLE=1:
+# whole parts, as --full)
+plan_rot=()
+if [ -n "$nightly" ]; then
+  [ -n "$clean$concurrent$audit" ] && usage
+  mode=nightly; plan_rot=(--night "${GATE_NIGHT:-$(( ($(date +%s) - 43200) / 86400 ))}")
+elif [ -n "$clean" ] && [ -n "$full" ] && [ "${GATE_CLEAN_WHOLE:-}" != 1 ]; then
+  plan_rot=(--rotation subset)
+fi
 [ -n "$builds" ] && [ -z "$plan_only" ] && usage
 [ -n "$clean" ] && { [ -n "$concurrent$audit$why$prune" ] && usage; }
 [ -n "$only" ] && { [ -n "$clean" ] && [ -z "$plan_only" ] || usage; }
@@ -384,6 +412,10 @@ gate_keep_env() {
     # re-review 020, finding 2: how long stage0_choose's bin/seed --link waits for the main checkout's stage 0 build
     ARBACE_SEED_LINK_WAIT) return 0 ;;
     GATE_HEAVY_CMD|GATE_TEST_JOBS|GATE_FRESH_G1|GATE_FULL_PARALLEL|GATE_FULL_SERIAL|GATE_CANARY|GATE_ALL_PARTS) return 0 ;;
+    # GT8.4: which slice a night runs, the clock of --rotation-status (the gate's own tests), the clean run's corpora
+    GATE_NIGHT|GATE_CLEAN_WHOLE|GATE_CLEAN_ROTATION) return 0 ;;
+    # review 181, L6: the clock moved only for the gate's own tests, with a store of their own (as GATE_STEPS)
+    GATE_NOW) [ -n "${ARBACE_GATE_STORE:-}" ] ;;
     GATE_CONCURRENT_HELD|GATE_CONCURRENT_LOCK|GATE_CPU_LOG|GATE_AUDIT_*) return 0 ;;
     GATE_STEPS|GATE_PROG_UNITS|GATE_JAVAC_PROG_UNITS) [ -n "${ARBACE_GATE_STORE:-}" ] ;;
     # queue 085 (report 084 finding 5, GTS112 (b)): a name a step of the table declares in :env, which its key
@@ -628,6 +660,20 @@ clean_launch() {
   mkdir -p "$base" || return 1
   [ -e "$dir" ] && { chmod -R u+w "$dir" 2>"$TMPDIR/gate-clean.err"; rm -rf "${dir:?}"; }
   echo "== gate$( [ -n "$full" ] && echo ' --full') --clean: $(git log -1 --format='%h %s'), tag $tag, in $dir"
+  # GT8.4, GTS204 (a): the clean run runs the compressed corpora (the subsets); the rest is the rotation's record,
+  # which must be complete first (GATE_CLEAN_ROTATION=0: not checked, said in the record; GATE_CLEAN_WHOLE=1: whole parts)
+  local rot=whole
+  if [ -n "$full" ] && [ "${GATE_CLEAN_WHOLE:-}" != 1 ]; then
+    if rotation_check --edn "$base/$sha.rotation.edn" > "$base/$sha.rotation.txt" 2>&1; then
+      # review 181, finding 5: :none when no part rotates (every part ran whole), else :complete with its evidence
+      rot=complete; grep -q ':status :none' "$base/$sha.rotation.edn" && rot=none
+    elif [ "${GATE_CLEAN_ROTATION:-}" = 0 ]; then rot=unchecked; echo "   gate --clean: warning: the rotation's record is incomplete (GATE_CLEAN_ROTATION=0)"
+    else
+      sed 's/^/   /' "$base/$sha.rotation.txt"
+      echo "== gate --clean FAILED: the rotation's record is incomplete (bin/gate --rotation-status; GATE_CLEAN_ROTATION=0 to run anyway)"; return 1
+    fi
+    sed 's/^/   /' "$base/$sha.rotation.txt"
+  fi
   git clone -q --shared --no-checkout "$common" "$dir" && git -C "$dir" checkout -q --detach "$sha" \
     || { echo "gate --clean: the clone failed" >&2; return 1; }
   mkdir -p "$dir/.tmp/tmp" "$dir/.tmp/gocache"
@@ -651,10 +697,12 @@ clean_launch() {
     esac
   done
   env ${unset[@]+"${unset[@]}"} TMPDIR="$dir/.tmp/tmp" GOCACHE="$dir/.tmp/gocache" GATE_CLEAN_INNER=1 GATE_CLEAN_TAG="$tag" \
+      GATE_CLEAN_ROTATION_STATUS="$rot" GATE_CLEAN_ROTATION_EDN="$base/$sha.rotation.edn" ${GATE_CLEAN_WHOLE:+GATE_CLEAN_WHOLE="$GATE_CLEAN_WHOLE"} \
       ARBACE_HEAVY_LOCK="${ARBACE_HEAVY_LOCK:-$main/.tmp/big.lock}" ${frozen:+FROZEN_JAR="$frozen"} ${only_env[@]+"${only_env[@]}"} \
       "$dir/bin/gate" ${full:+--full} --clean 2>&1 | tee "$base/$sha.out"
   st=${PIPESTATUS[0]}
   rm -rf "${out:?}"; mkdir -p "$out"
+  for e in txt edn; do [ -f "$base/$sha.rotation.$e" ] && cp "$base/$sha.rotation.$e" "$out/rotation.$e"; done
   cp -a "$dir/.tmp/gate" "$out/gate" 2>"$TMPDIR/gate-clean.err"
   cp "$base/$sha.out" "$out/summary.txt"
   if [ -f "$dir/.tmp/gate/clean-record.edn" ]; then
@@ -670,6 +718,26 @@ clean_launch() {
     # the run passed, into the shared directory where absent
     store_to=${ARBACE_GATE_STORE:-$main/.tmp/gate-pass} exes_to=$(arbace_gate_exes "$root")
     publish_passes "$dir/.tmp/gate-pass" "$store_to"
+    # GT8.4: the clean run's rotated runs (a whole part's, GATE_CLEAN_WHOLE=1, is a run of every slice; the subsets')
+    # appended to the shared store's record of the rotation
+    # appended to the shared store's record of the rotation, renumbered after its sequence (review 181, finding 2: the
+    # clone's runs are the later), under its lock
+    local rf off cmax c
+    if [ -d "$dir/.tmp/gate-pass/_rotation" ]; then
+      mkdir -p "$store_to/_rotation"
+      {
+        flock 9
+        off=$(cat "$store_to/_rotation/.seq" 2>"$TMPDIR/gate-clean.err" || echo 0)
+        cmax=$(cat "$dir/.tmp/gate-pass/_rotation/.seq" 2>"$TMPDIR/gate-clean.err" || echo 0)
+        for rf in "$dir/.tmp/gate-pass/_rotation"/*.runs "$dir/.tmp/gate-pass/_rotation"/*.failed; do
+          [ -f "$rf" ] || continue
+          case $rf in *.runs) c=8 ;; *) c=1 ;; esac
+          awk -F'\t' -v OFS='\t' -v c="$c" -v o="$off" '{ $c = $c + o; print }' "$rf" >> "$store_to/_rotation/$(basename "$rf")" \
+            && echo "   the rotation's $(basename "$rf") ($(wc -l < "$rf") lines) appended to $store_to/_rotation"
+        done
+        echo $((off + cmax)) > "$store_to/_rotation/.seq"
+      } 9>>"$store_to/_rotation/.lock"
+    fi
     if [ "$st" = 0 ]; then
       for e in "$dir/.tmp/gate-exe"/*; do
         [ -d "$e" ] || continue
@@ -699,6 +767,15 @@ clean_record() {
     "${GATE_CLEAN_TAG:-}" "$commit" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$mode" "$([ "$status" = 0 ] && echo passed || echo failed)" $(( $(date +%s) - start ))
   printf ' :host {:cpus %s :mem-kib %s :kernel "%s"}\n' "$(nproc)" "$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)" "$(uname -r)"
   printf ' :env {:all-parts true :forms-only true :heavy-cmd "%s"}\n' "$GATE_HEAVY_CMD"
+  # GT8.4: the rotated parts (review 181, finding 5): :status :complete (the record checked first, its evidence:
+  # rotation-status's period, each slice's covering run, from this commit's clean ancestors), :unchecked
+  # (GATE_CLEAN_ROTATION=0, the evidence as found), :none (no part rotates: every part ran whole), :whole (GATE_CLEAN_WHOLE=1)
+  local rs=${GATE_CLEAN_ROTATION_STATUS:-whole}
+  if [ "$rs" = complete ] || [ "$rs" = unchecked ] && [ -s "${GATE_CLEAN_ROTATION_EDN:-}" ]; then
+    printf ' :rotation {:status :%s :check %s}\n' "$rs" "$(cat "$GATE_CLEAN_ROTATION_EDN")"
+  else
+    printf ' :rotation {:status :%s}\n' "$rs"
+  fi
   printf ' :pins %s\n' "$(cat "$logs/pins.edn" 2>"$logs/count.err" || echo nil)"
   printf ' :hosts %s\n' "$(cat "$logs/hosts.edn")"
   # GTS150 (a): the producers --only did not rerun whose outputs were copied from an earlier run's logs
@@ -731,6 +808,17 @@ clean_record() {
   printf ']}\n'
 }
 
+# GT8.4, GTS204 (a): the rotation's record complete (bin/gate --rotation-status; gate.plan's rotation-status): every
+# slice of every rotated part passed within the period, no file failed since
+rotation_check() {
+  # review 181 (the user's (a)): only this commit's ancestors' runs from clean trees count
+  local anc=$TMPDIR/gate-ancestors.$$ st
+  git rev-list HEAD > "$anc" || return 1
+  arbace_tool -p "$root/test" -m gate.plan rotation-status "$root" "${ARBACE_GATE_STORE:-$(main_checkout)/.tmp/gate-pass}" \
+    --ancestors "$anc" ${rot_days:+--days "$rot_days"} "$@"; st=$?
+  rm -f "$anc"; return $st
+}
+if [ -n "$rotation_status" ]; then rotation_check; exit; fi
 if [ -n "$pins" ]; then clean_pins "$pins_out"; exit; fi
 if [ -n "$outside" ]; then outside_pins; exit; fi
 if [ -n "$clean" ] && [ -z "${GATE_CLEAN_INNER:-}" ]; then
@@ -818,7 +906,7 @@ if [ -n "$plan_only$why" ]; then
     rm -f "$d"/*.done
     run_plan "$d"
   else
-    echo "== gate$( [ -n "$full" ] && echo ' --full')$( [ -n "$clean" ] && echo ' --clean') --plan: $(git log -1 --format='%h %s'), store $store"
+    echo "== gate$( [ -n "$nightly" ] && echo ' --nightly' || { [ -n "$full" ] && echo ' --full'; })$( [ -n "$clean" ] && echo ' --clean') --plan: $(git log -1 --format='%h %s'), store $store"
     run_plan "$d" ${rerun:+--rerun}
   fi
   exit
@@ -832,7 +920,7 @@ status=0
 commit=$(git rev-parse HEAD 2>"$TMPDIR/gate-git.err" || echo unknown)
 dirty=false; [ -z "$(git status --porcelain --untracked-files=no 2>"$TMPDIR/gate-git.err")" ] || dirty=true
 
-echo "== gate$( [ -n "$full" ] && echo ' --full'): $(git log -1 --format='%h %s')"
+echo "== gate$( [ -n "$nightly" ] && echo ' --nightly' || { [ -n "$full" ] && echo ' --full'; }): $(git log -1 --format='%h %s')"
 # Go's build cache, trimmed by every gate run (bin/lib/gocache.bash)
 . "$root/bin/lib/gocache.bash"
 gocache_trim
