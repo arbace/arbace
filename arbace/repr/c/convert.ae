@@ -1753,6 +1753,31 @@
     :ExternalDeclarationEmpty []
     (refuse :declaration (str "external declaration " (cs ed)) ed)))
 
+(def ^:dynamic *include-inside*
+  "Queue 178: when true, a declaration whose other files' tokens all come from headers its own extent includes is the main
+  file's (included-inside?), not refused as :split-declaration. ci's libc read binds it (arbace.c.musl/read-one: five of
+  musl 1.2.6's sources include a table inside a declaration); the corpora's reads keep the refusal, since such a form
+  prints the table inline and the text levels need its #include."
+  false)
+
+(defn- included-inside?
+  "Queue 178: whether every token of the declaration `n` from another file than the main one comes from a file the main
+  file includes inside the declaration's extent (or one such a file includes): a table an initializer or a member list
+  includes, musl's src/errno/strerror.c including __strerror.h three times, ctype's punct.h, locale's codepages.h. The
+  declaration is the main file's then, its header tokens' nodes with no line of their own (pos-of); a declaration a
+  header begins or ends stays refused (:split-declaration)."
+  [layer ^String main-name n]
+  (let [lo (min-po n) hi (max-end n)
+        enters (filter #(= "enter" (:directive %)) layer)
+        direct (set (keep #(when (and (= main-name (:from %)) (<= lo (long (:off %)) hi)) (:path %)) enters))
+        inside (loop [s direct]
+                 (let [s2 (into s (keep #(when (contains? s (:from %)) (:path %)) enters))]
+                   (if (= s2 s) s (recur s2))))]
+    (and (seq inside)
+         (every? (fn [t] (let [^CFile f (.-pf ^PTok t)]
+                           (or (nil? f) (identical? f (cx :main-file)) (contains? inside (.-name f)))))
+                 (filter #(instance? PTok %) (node-tokens n))))))
+
 (defn convert
   "The forms of a parse `r` ({:tree :layer}, arbace.repr.c.parse) of the main file `main-name` (its bytes
   `main-bytes`) read at the standard `std` (a keyword): {:forms [the main unit's forms], :units {ns
@@ -1776,7 +1801,7 @@
         (let [groups (when main-file (compute-groups! (tu-tokens tree)))
               eds (vec (remove #(contains? #{"<builtin>" "<predefined>"} (item-file %)) eds))
               _ (doseq [ed eds]
-                  (when (and (has-other? ed) (has-main? ed))
+                  (when (and (has-other? ed) (has-main? ed) (not (and *include-inside* (included-inside? (:layer r) main-name ed))))
                     (refuse :split-declaration "a declaration that begins in one file and ends in another" ed)))
               main-eds (vec (filter has-main? eds))
               ;; header units first (their typedefs are the main file's too): each main-file include's

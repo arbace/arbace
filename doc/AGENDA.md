@@ -50,7 +50,7 @@ The current state of the work. This file is rewritten as things change. For the 
   Go 1.27.1. Milestone `arbace-interprets-go1.27.1-v1`.
 - **The front ends (2026-10-17 to 2026-10-24).** repr/go's native reader (GP1-GP8); javac on Arbace and repr/java
   without a JVM (JN1-JN9f); the Java conformance check (JC1-JC6b); the renames; Futamura's F2-F7; repr/haskell and
-  repr/rust (parked).
+  repr/rust (parked 2026-10-26, unparked 2026-11-03).
 - **`arbace-reaps-3-crops-v1`** (2026-10-27) and **`-v2`** (2026-11-01, at `c4f85ace`): REAP for Clojure, Java 26 and
   Go 1.27.1, 12 of 12 cells; v2 with the gate made efficient and run clean in a fresh clone
   (`test/gate/clean-arbace-reaps-3-crops-v2.edn`).
@@ -121,8 +121,7 @@ small development tasks. Nothing of GT8 is written yet: its survey first (GATE-S
 
 ## Parked (the user, 2026-10-26; out of `bin/gate --full`, scripts kept, revisited piece by piece)
 
-- The box (with its Mac bundle, the arm64 VM and the KU series), `tamago/` and `tamago/cmd/`'s forms, repr/haskell,
-  repr/rust, the macOS user interface (the Moshi Go note below) and the iOS app ([IOS-REPL-SURVEY.md](IOS-REPL-SURVEY.md)).
+- The box (with its Mac bundle, the arm64 VM and the KU series), `tamago/` and `tamago/cmd/`'s forms, the macOS user interface (the Moshi Go note below) and the iOS app ([IOS-REPL-SURVEY.md](IOS-REPL-SURVEY.md)).
 - KU3 (processes on arm64). A safety classifier stopped both agents before they wrote anything. The worktree `ku3` is
   kept, clean at `80294e9a`. Its findings: TamaGo's arm64 `osInit` reads ID_AA64ISAR0_EL1, ID_AA64ISAR1_EL1 and
   ID_AA64PFR0_EL1, which trap at EL0, so the kernel must answer them (proposal KS15, against KS2's letter, to decide when
@@ -148,6 +147,9 @@ small development tasks. Nothing of GT8 is written yet: its survey first (GATE-S
   Arbace down to the bare metal ISA, in the style of Go plus TamaGo. Targets: /dev/kvm on amd64 (Alpine edge Linux
   host) and Hypervisor.framework on arm64 (macOS host). Open: the runtime's design, Go-inspired (scheduler, GC), with
   proper tail calls possible.
+- **Haskell and Rust unparked** (the user, 2026-11-03): crops in progress again (read and print with their round trips
+  exist; eval and AOT not begun), their state checked afresh against the pinned GHC 9.14.1 and rustc 1.99.1. **Python
+  surveyed** (doc/python/PYTHON-SURVEY.md, the user, 2026-11-03).
 - More crops toward the ten (C++, OCaml, Scheme, Haskell, Rust, Python), each a row of the matrix, after GT8's budget;
   C++, OCaml and Scheme embed at a later re-seed (CS250's decided line).
 - Futamura's projections ([FUTAMURA-SURVEY.md](FUTAMURA-SURVEY.md)): the second projection, j2g derived from the

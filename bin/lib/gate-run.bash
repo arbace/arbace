@@ -505,7 +505,7 @@ names_of() { local n; for n in "${order[@]}"; do [ "${phase[$n]}" = "$1" ] && ec
 
 # GTS27 (a): per step the last ARBACE_GATE_KEEP (5) passes and every pass younger than
 # ARBACE_GATE_KEEP_DAYS (30) kept, the rest removed (a pass is KEY.edn, KEY.log, KEY.inputs); the
-# executables' directories (the gate's, javac's) older than a day but the newest 3 of each removed; a
+# executables' directories (the gate's, javac's, the cover builds', GT8.3) older than a day but the newest 3 of each removed; a
 # KEY.log, KEY.inputs or KEY.out with no KEY.edn, and a temporary, removed once older than a day
 gate_prune() {  # gate_prune [--dry-run]
   local dry= keep=${ARBACE_GATE_KEEP:-5} days=${ARBACE_GATE_KEEP_DAYS:-30} d n f k i pat npass=0 nkeep=0 freed=0 sz b now
@@ -541,7 +541,7 @@ gate_prune() {  # gate_prune [--dry-run]
     [ -n "$dry" ] || find "$d" -maxdepth 1 -name '.*' -mmin +1440 -exec rm -rf {} + 2>"$store/.prune.err"
   done
   echo "gate --prune: $npass passes, $nkeep kept, $((npass - nkeep)) ${dry:+would be }removed ($freed bytes), $norphan left without a record ${dry:+would be }removed in $store"
-  for pat in gate javac; do
+  for pat in gate javac cover; do
     i=0
     while IFS= read -r f; do
       [ -n "$f" ] || continue
@@ -554,7 +554,7 @@ gate_prune() {  # gate_prune [--dry-run]
         [ $(( now - $(stat -c %Y "$f") )) -ge 3600 ] || continue
         echo "gate --prune: ${dry:+would remove }executables $f (a miss's leftover)"
         [ -n "$dry" ] || rm -rf "${f:?}"; continue ;; esac
-      case $pat in javac) case $b in javac-*) ;; *) continue ;; esac ;; gate) case $b in javac-*) continue ;; esac ;; esac
+      case $pat in javac|cover) case $b in "$pat"-*) ;; *) continue ;; esac ;; gate) case $b in javac-*|cover-*) continue ;; esac ;; esac
       i=$((i + 1)); [ $i -gt 3 ] || continue
       [ $(( now - $(stat -c %Y "$f") )) -ge 86400 ] || continue
       echo "gate --prune: ${dry:+would remove }executables $f"

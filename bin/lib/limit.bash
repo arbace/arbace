@@ -25,14 +25,18 @@
 # Callers read 124, 137 and 152 as "timeout" and, where the check has one, take the quiet retry (run alone,
 # at the step's end) before they count it. Of the three, 152 (SIGXCPU) never comes from ulimit -t, which sets
 # the soft and the hard limit equal, so the kernel sends SIGKILL (test/gate/limit-test.bash cpu-kill); it is
-# read for a program's own exit 152. 137 is ambiguous: the CPU limit, the wall cap's -k after a SIGTERM
+# read for a program's own exit 152 and for a cover run's CPU limit (limited_cpu's soft limit). 137 is ambiguous: the CPU limit, the wall cap's -k after a SIGTERM
 # survivor, a self-kill, or the OOM killer (a memory kill is read as a timeout and run again alone). Where the
 # distinction matters, ARBACE_CPU_LOG's user and system seconds tell a CPU kill (about the limit) from the rest
 # (review 075, finding 6). Exported for the subshells and xargs that
 # run actions: `export -f limited limited_cpu` where they are set up.
 
 limited_cpu() {
-  local cpu=$1 wall=$2; shift 2
+  local cpu=$1 wall=$2 lim='ulimit -t "$1"; shift; exec "$@"'; shift 2
+  # under ARBACE_COVER_DIR (GT8.3, bin/lib/cover.bash) a soft limit at the limit and the hard one 5 s above, so the
+  # kernel sends SIGXCPU first and the cover build's hook writes the counters before the program ends (status 152,
+  # a timeout as ever; review 182, finding 4). Inline, not a function: limited_cpu is exported alone to xargs' shells
+  [ -z "${ARBACE_COVER_DIR:-}" ] || lim='ulimit -S -t "$1"; ulimit -H -t "$(($1 + 5))"; shift; exec "$@"'
   if [ -n "${ARBACE_CPU_LOG:-}" ]; then
     # GTS33 (a)'s measurement (bin/gate --clean): each program's status, wall, user and system seconds
     # and command appended to ARBACE_CPU_LOG, one line each. time runs timeout, not the reverse (review 075,
@@ -40,7 +44,7 @@ limited_cpu() {
     # SIGTERM (137, as without the log; time inside timeout died at the SIGTERM, timeout returned 124 without
     # -k and left the program orphaned, a hang under strace -f) and a wall-cap row has its times
     local tf=$ARBACE_CPU_LOG.$BASHPID st
-    /usr/bin/time -f '%e %U %S' -o "$tf" timeout -k 5 "$wall" bash -c 'ulimit -t "$1"; shift; exec "$@"' limited "$cpu" "$@"; st=$?
+    /usr/bin/time -f '%e %U %S' -o "$tf" timeout -k 5 "$wall" bash -c "$lim" limited "$cpu" "$@"; st=$?
     # time exits with the signal's number when the program was killed: the status a shell gives
     local sig; sig=$(sed -n 's/^Command terminated by signal \([0-9]*\)$/\1/p' "$tf" 2>"$tf.err")
     [ -n "$sig" ] && [ "$st" = "$sig" ] && st=$((128 + sig))
@@ -48,7 +52,7 @@ limited_cpu() {
     rm -f "$tf" "$tf.err"
     return $st
   fi
-  timeout -k 5 "$wall" bash -c 'ulimit -t "$1"; shift; exec "$@"' limited "$cpu" "$@"
+  timeout -k 5 "$wall" bash -c "$lim" limited "$cpu" "$@"
 }
 limited() {
   local t=$1; shift
