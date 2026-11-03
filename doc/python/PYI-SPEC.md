@@ -333,6 +333,40 @@ last line). Of the synthetic corpus and the samples (151), 7 run equal to their 
 others stop at a constant or an operation of a later sub-milestone: floats and bytes (PY5b, 57), classes (`load-build-class`,
 PY5c, 42), imports (PY5e, 11), generators (PY5d, 4), and builtins not registered yet.
 
+### 7.8 The data model (PY5c)
+
+PY5c's files (`class.go`, `descr.go`, `attr.go`, `format.go`, `annotate.go`, `typing.go`, and `abstract.go`) give the
+other files these interfaces:
+
+- **Classes.** A class statement's type is a `*Type` with `FlagHeapType`, its `Meta` the metaclass (nil for `type`),
+  its MRO by C3. Its instances are `*Instance`. A class deriving from a built-in type other than `object`,
+  `BaseException` and `type` keeps the built-in's value in its instance, and its inherited slots work on that value.
+  `BuiltinValue(o)` is that value (`o` itself for any other object): a core type's function taking its subclasses
+  (`int(MyInt(5))`, `asInt`) should call it. An exception class's instances are PY5b's `*Exception`, its `T` the class.
+- **Slots of a class** are filled by `fixupSlots` from the special methods of the classes in its MRO, over the slots
+  of its first built-in type in the MRO. They are refilled for the class and its subclasses when a special attribute
+  is assigned or deleted on the class (`type.__setattr__`).
+- **Lookup.** `lookupAttr(t, name)` is `_PyType_Lookup` over the MRO. For each type it checks the dictionary, then the
+  type's `GetSet`s (`AddGetSet(t, name, get, set)`: CPython's `tp_getset` and `tp_members`), then, for a built-in
+  type, its slots seen as methods (slot wrappers: `object.__init__`, `int.__add__`, `type.__call__` ...). The other
+  lookups build on it: `GenericGetAttr` and `GenericSetAttr` (object's), `typeGetAttr` and `typeSetAttr` (type's),
+  `GetAttr`, `SetAttr`, `DelAttr`, `GetAttrOptional`, `LookupSpecial(o, name)` (a special method bound to `o`, or
+  nil), and `CallSpecial(o, name, args...)` (found, result: for the built-ins that have no slot, such as `__abs__`,
+  `__divmod__`, `__round__`, `__reversed__`, `__length_hint__`, `__fspath__`).
+- **Built-in methods.** `AddMethod(t, name, fn)` and `AddToDict(t, name, v)` put entries in a built-in type's dictionary
+  once the runtime is ready. An `init` function may run before `str.go`'s, and a dictionary hashes its keys by
+  str's slot. A `*Builtin` found on a built-in type is bound to the instance, or to its value for a subclass's
+  instance.
+- **Functions.** `IsInstanceOf(o, cls)` and `IsSubclass(c, cls)` honour `__instancecheck__` and `__subclasscheck__`
+  (`isinstance` and `issubclass` should call them). `Format(o, spec)` is `format()`; `RegisterFormatter(t, f)` sets
+  a built-in type's `__format__` (a float's, once floats exist). `Ascii(o)` is `ascii()`.
+- **Builtins PY5c registers:** `__build_class__` and `format`. The types it registers: `property`, `classmethod`,
+  `staticmethod` and `super`, and these hidden types: `method`, `getset_descriptor`, `member_descriptor`,
+  `wrapper_descriptor`, `mappingproxy`, `TypeVar`, `TypeVarTuple`, `ParamSpec`, `TypeAliasType`, `GenericAlias`,
+  and `string.templatelib`'s `Template` and `Interpolation`. `TemplateLib()` returns the names that module needs.
+- **Slots of `object` and `type`.** PY5c sets `ObjectType.Slots.New` and `Init` (object's `__new__` and `__init__`, with
+  CPython's excess-argument rules) and `TypeType.Slots.New`, `Init`, `GetAttr` and `SetAttr`.
+
 ## 8. Working on the runtime
 
 The forms are in mode `:full` (repr/go's lossless mode: comments, layout and spellings kept), read for linux/amd64, so
