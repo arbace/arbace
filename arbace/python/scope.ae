@@ -37,7 +37,7 @@
 (defn- new-block [st name type]
   (let [cur (:cur @st)
         c (when cur @cur)]
-    (atom {:name name :type type :symbols {} :order [] :children []
+    (atom {:name name :type type :symbols {} :order [] :children [] :varnames []
            :nested (boolean (and c (or (:nested c) (function-like (:type c)))))
            :comprehension nil :generator false :coroutine false :comp-inlined false :comp-iter-target false
            :comp-iter-expr 0 :can-see-class false :needs-class-closure false :needs-classdict false
@@ -45,6 +45,11 @@
            :mangled-names nil :scope-info nil})))
 
 (defn- function-like? [b] (boolean (function-like (:type @b))))
+
+(defn- keyed!
+  "The block made for the form k (by identity: the compiler finds each form's block, doc/python/PYI-SPEC.md §2)"
+  ([st k b] (.put ^java.util.IdentityHashMap (:keys @st) k b) b)
+  ([st kind k b] (.put ^java.util.IdentityHashMap (get @st kind) k b) b))
 
 ;; ---- mangling ----
 
@@ -111,6 +116,7 @@
                   (bit-or val DEF_COMP_ITER))
               val)]
     (set-sym! b mangled val)
+    (when (has? flag DEF_PARAM) (swap! b update :varnames conj mangled))
     (when (and (not (has? flag DEF_PARAM)) (has? flag DEF_GLOBAL))
       (let [g (:global @st)]
         (set-sym! g mangled (bit-or (get (:symbols @g) mangled 0) flag))))))
@@ -200,7 +206,7 @@
   (let [cur (:cur @st)
         is-in-class (:can-see-class @cur)
         current-type (:type @cur)]
-    (enter! st "__annotate__" :annotation)
+    (keyed! st a (enter! st "__annotate__" :annotation))
     (when (or is-in-class (= :class current-type))
       (swap! (:cur @st) assoc :can-see-class true)
       (add-def! st "__classdict__" USE))
@@ -212,11 +218,12 @@
     (when returns (visit-expr! st returns :load))
     (exit! st)))
 
-(defn- visit-type-param-bound-or-default! [st e name info]
+(defn- visit-type-param-bound-or-default! [st e name info tp-key]
   (when (= name "__classdict__") (syntax-error (str "reserved name '" name "' cannot be used for type parameter")))
   (when (some? e)
     (let [is-in-class (:can-see-class @(:cur @st))]
-      (enter! st name :type-variable)
+      (keyed! st (if (= info "a TypeVar bound") :keys-bound (if (str/ends-with? info "default") :keys-default :keys-bound)) tp-key
+              (enter! st name :type-variable))
       (swap! (:cur @st) assoc :can-see-class is-in-class :scope-info info)
       (when is-in-class (add-def! st "__classdict__" USE))
       (visit-expr! st e :load)
@@ -228,14 +235,14 @@
     (add-def! st nm (bit-or DEF_TYPE_PARAM DEF_LOCAL))
     (case h
       type-var (do (visit-type-param-bound-or-default!
-                    st (:bound o) nm (when-let [b (:bound o)] (if (and (seq? b) (= 'tuple (first b))) "a TypeVar constraint" "a TypeVar bound")))
-                   (visit-type-param-bound-or-default! st (:default o) nm "a TypeVar default"))
-      type-var-tuple (visit-type-param-bound-or-default! st (:default o) nm "a TypeVarTuple default")
-      param-spec (visit-type-param-bound-or-default! st (:default o) nm "a ParamSpec default"))))
+                    st (:bound o) nm (when-let [b (:bound o)] (if (and (seq? b) (= 'tuple (first b))) "a TypeVar constraint" "a TypeVar bound")) tp)
+                   (visit-type-param-bound-or-default! st (:default o) nm "a TypeVar default" tp))
+      type-var-tuple (visit-type-param-bound-or-default! st (:default o) nm "a TypeVarTuple default" tp)
+      param-spec (visit-type-param-bound-or-default! st (:default o) nm "a ParamSpec default" tp))))
 
-(defn- enter-type-param-block! [st name has-defaults has-kwdefaults class?]
+(defn- enter-type-param-block! [st name has-defaults has-kwdefaults class? tps]
   (let [current-type (:type @(:cur @st))]
-    (enter! st name :type-parameters)
+    (keyed! st tps (enter! st name :type-parameters))
     (when (= :class current-type)
       (swap! (:cur @st) assoc :can-see-class true)
       (add-def! st "__classdict__" USE))
@@ -257,9 +264,9 @@
     (visit-exprs! st (:kw-defaults ao))
     (visit-exprs! st (:decorators o))
     (when (seq tps)
-      (enter-type-param-block! st nm true (boolean (some some? (:kw-defaults ao))) false)
+      (enter-type-param-block! st nm true (boolean (some some? (:kw-defaults ao))) false tps)
       (doseq [tp tps] (visit-type-param! st tp)))
-    (let [fb (new-block st nm :function)]
+    (let [fb (keyed! st x (new-block st nm :function))]
       (visit-annotations! st args (:returns o))
       (enter-existing! st fb true)
       (when async? (swap! fb assoc :coroutine true))
@@ -276,14 +283,14 @@
     (add-def! st nm DEF_LOCAL)
     (visit-exprs! st (:decorators o))
     (when (seq tps)
-      (enter-type-param-block! st nm false false true)
+      (enter-type-param-block! st nm false false true tps)
       (swap! st assoc :private nm)
       (swap! (:cur @st) assoc :mangled-names #{})
       (doseq [tp tps] (visit-type-param! st tp)))
     (visit-exprs! st (:bases o))
     (doseq [k (:keywords o)] (let [[_ [kn v] _ _] (pp/node k)] (when (some? kn) (check-name (ident kn) :store))))
     (doseq [k (:keywords o)] (visit-expr! st (nth (second (pp/node k)) 1) :load))
-    (enter! st nm :class)
+    (keyed! st x (enter! st nm :class))
     (swap! st assoc :private nm)
     (when (seq tps)
       (add-def! st "__type_params__" DEF_LOCAL)
@@ -337,9 +344,9 @@
             tps (:type-params o)]
         (visit-expr! st nmf :store)
         (when (seq tps)
-          (enter-type-param-block! st nm false false false)
+          (enter-type-param-block! st nm false false false tps)
           (doseq [tp tps] (visit-type-param! st tp)))
-        (enter! st nm :type-alias)
+        (keyed! st x (enter! st nm :type-alias))
         (swap! (:cur @st) assoc :can-see-class in-class)
         (when in-class (add-def! st "__classdict__" USE))
         (e! v)
@@ -452,14 +459,14 @@
     (visit-exprs! st (:ifs o))
     (when (:async o) (swap! cur assoc :coroutine true))))
 
-(defn- handle-comprehension! [st kind scope-name gens elt value]
+(defn- handle-comprehension! [st x kind scope-name gens elt value]
   (let [generator? (= kind :generator)
         [_ [t it] oo _] (pp/node (first gens))
         cur (:cur @st)]
     (swap! cur update :comp-iter-expr inc)
     (visit-expr! st it :load)
     (swap! cur update :comp-iter-expr dec)
-    (let [b (enter! st scope-name :function)]
+    (let [b (keyed! st x (enter! st scope-name :function))]
       (swap! b assoc :comprehension kind)
       (when (:async oo) (swap! b assoc :coroutine true))
       (add-def! st ".0" DEF_PARAM)
@@ -503,17 +510,17 @@
         unary-op (e! (second p))
         lambda (let [ao (args-of (first p))]
                  (es! (:defaults ao)) (es! (:kw-defaults ao))
-                 (enter! st "lambda" :function)
+                 (keyed! st x (enter! st "lambda" :function))
                  (visit-arguments! st (first p))
                  (e! (second p))
                  (exit! st))
         if-exp (es! p)
         dict (do (es! (first p)) (es! (second p)))
         (set list tuple) (doseq [v (first p)] (visit-expr! st v ctx))
-        list-comp (handle-comprehension! st :list "listcomp" (second p) (first p) nil)
-        set-comp (handle-comprehension! st :set "setcomp" (second p) (first p) nil)
-        dict-comp (handle-comprehension! st :dict "dictcomp" (nth p 2) (second p) (first p))
-        generator-exp (handle-comprehension! st :generator "genexpr" (second p) (first p) nil)
+        list-comp (handle-comprehension! st x :list "listcomp" (second p) (first p) nil)
+        set-comp (handle-comprehension! st x :set "setcomp" (second p) (first p) nil)
+        dict-comp (handle-comprehension! st x :dict "dictcomp" (nth p 2) (second p) (first p))
+        generator-exp (handle-comprehension! st x :generator "genexpr" (second p) (first p) nil)
         (yield yield-from)
         (do (raise-if-annotation-block! st "yield expression")
             (e! (first p))
@@ -564,6 +571,8 @@
 ;; ---- the second pass (symtable.c's analyze_block) ----
 
 (defn- scope-of [flags] (bit-and (bit-shift-right flags SCOPE_OFF) 15))
+(defn scope-of* "A symbol's scope (LOCAL 1 ... CELL 5) from its flags" [flags] (scope-of flags))
+(defn has-bit? [flags bit] (has? flags bit))
 
 (defn- analyze-name [b scopes name flags bound local free global type-params class-entry]
   (cond
@@ -707,15 +716,24 @@
   (let [m @b]
     (list 'block (:type m) (:name m) (into (sorted-map) (:symbols m)) (mapv block-form (:children m)))))
 
-(defn table
-  "The symbol table of a module's forms ((python/module [STMT ...] ...)), as tools/pydump/pydump.py scopes writes it"
+(defn analyze
+  "The symbol table of a module's forms ((python/module [STMT ...] ...)): {:top BLOCK :keys IDENTITY-MAP :keys-bound
+  :keys-default :features}, each block an atom (its :type, :name, final :symbols, :varnames, :children, the flags of
+  §2), each map from a form (by identity) to the block it made"
   [module]
   (let [body (second module)
         fut (future-stmts body)
         st (atom {:stack [] :cur nil :global nil :private nil :future-stmts (:stmts fut)
-                  :future-annotations (contains? (:features fut) "annotations")})
+                  :future-annotations (contains? (:features fut) "annotations")
+                  :keys (java.util.IdentityHashMap.) :keys-bound (java.util.IdentityHashMap.)
+                  :keys-default (java.util.IdentityHashMap.)})
         top (enter! st "top" :module)]
     (doseq [s body] (visit-stmt! st s))
     (exit! st)
     (analyze-block! top nil (atom #{}) (atom #{}) (atom #{}) nil)
-    (block-form top)))
+    {:top top :keys (:keys @st) :keys-bound (:keys-bound @st) :keys-default (:keys-default @st) :features (:features fut)}))
+
+(defn table
+  "The symbol table of a module's forms ((python/module [STMT ...] ...)), as tools/pydump/pydump.py scopes writes it"
+  [module]
+  (block-form (:top (analyze module))))
