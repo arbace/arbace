@@ -1,6 +1,6 @@
 # rsi: Rust's eval (spec)
 
-Status: RE1's spec, 2026-11-03, with RE2 and RE3 built (doc/rust/RUST-EVAL-SURVEY.md, "As built: RE1-RE2 (write-ahead)", "As built:
+Status: RE1's spec, 2026-11-03, with RE2, RE3 and RE4 built (doc/rust/RUST-EVAL-SURVEY.md, "As built: RE1-RE2 (write-ahead)", "As built:
 RE3 (write-ahead)"). The survey's
 decisions bind it (RES1-RES16, all as recommended, the user 2026-11-03): Rust's eval and AOT are rustc's `-O0` compilation run
 on Arbace through C++'s path (RES1 (b)). This file says what rsi does and how its results are judged; the survey says why.
@@ -24,8 +24,8 @@ byte for byte) goes:
 3. **The lowering**: `arbace.cpp.lower` (C++'s, with the Rust delta of §5), driven by `arbace.rust.lower`. A construct it does
    not take is refused with a class (`{:lower/refused CLASS}`), recorded (`lower.refused`).
 4. **The back end**: until RE4, gcc `-O0` (cppi's flags: `-std=gnu23 -O0 -w -fno-builtin -fno-strict-aliasing
-   -ffp-contract=off`) compiles the printed C, the second judge (survey §8.1); from RE4, ci runs the C forms, and from RE6 cf2g
-   compiles them (AOT).
+   -ffp-contract=off`) compiles the printed C, the second judge (survey §8.1); since RE4 ci runs the C forms and cf2g compiles
+   them (AOT, §9).
 5. **The link**: since RE3 with std's lowered units (§8); RE2's native-std leg (§4) stays as `--leg native`.
 
 The run is compared with the judge's on status, stdout and stderr (§7).
@@ -43,7 +43,9 @@ budget, RES14 (a)):
 | `std-build [--update]` | std's sysroot with its IR, pinned (§3) | RE1 |
 | `lower-check PLAN WORK [--jobs N] [--record] [--leg lowered\|native] [--runtime OUT]` | each program built and run from the original and from its lowered IR, judged (§7); the leg: std lowered (RE3, the default) or the host's native std (RE2) | RE2, RE3 |
 | `runtime-build [OUT] [--jobs N]` | std's IR lowered, compiled and archived by crate, the pending-flag layer (§8) | RE3 |
-| `run`, `check [--aot]`, `divergences`, `record-ref` | ci; cf2g; the classes; the judge's runs recorded | RE4-RE6 |
+| `runtime-ci [OUT]` | std's lowered units, the layer and compiler_builtins read as ci's libraries, ci's ports (§9) | RE4 |
+| `run [--edition E] FILE.rs [-- ARG...]`, `check [--aot] [--corpus samples,ui] [--set S] [--only LIST] [--sample N [--offset K]] [--record]`, `divergences [--aot]`, `record-ref [--sample N] [--only LIST]` | ci; cf2g; the classes; the judge's runs recorded (§9) | RE4 |
+| `lower-unit [FILE.ll...]` | the lowering's unit cases (`test/rust/lower/`) against lli | RE4 |
 
 The pieces: `arbace/rust/lower.ae` (`arbace.rust.lower`: the driver over the lowering, the native-std leg's substitution),
 `arbace/rust/check.ae` (`arbace.rust.check`: the sets, the plan's filter, the judge), `arbace/rust/rt/native.c.ae` (§4's layer),
@@ -225,3 +227,37 @@ for both languages (`eh.c.ae` split into the entry points and C++'s personality 
 Rust layer holds the entry points it needs.
 
 The native-std leg's `native.c.ae` and `test/rust/runtime/native/try.rs` stay for `--leg native` (RE2's records) and nothing else.
+
+## 9. The ci leg (RE4)
+
+`bin/rsi run|check|check --aot|record-ref|divergences|runtime-ci` (`bin/lib/rsi/{run,check,record-ref,wrap-ir,link-ir,plan.bash}`,
+`arbace/rust/run.ae`, the judge `arbace.rust.check/run-judge`). The program's IR comes from the oracle as for the lowered leg
+(`bin/lib/rsi/wrap-ir`: the plan's command line, one codegen unit, `-C save-temps`), but its linker `bin/lib/rsi/link-ir` links
+nothing: it keeps the program's unit (`x.ll`) and the allocator shim's (`shim.ll`). `arbace.rust.run` lowers both, reads their C by
+repr/c with ci's options (C++'s ci macros: gcc's `__atomic_*` as plain operations on ci's one thread, the math builtins ci lacks
+calling musl's), checks them with ci's checker, and links them as a static link pulls archive members from its libraries in order:
+
+1. `RSI_EXTRA_LIBS`: the check's `tests/auxiliary/rust_test_helpers.c` (compiletest's native helpers, the original's `-L native=`),
+   read as a library;
+2. ci's ports, `test/rust/runtime/ci/*.c` (what the lowered std needs that ci does not give);
+3. std's lowered units (`bin/rsi runtime-build`'s 94, their C kept since RE4) and the pending-flag layer (`rt.c`), read by
+   `bin/rsi runtime-ci` into `OUT/ci/std` (keyed: the runtime's key, run.ae's read options, repr/c, the host, the ports);
+4. musl's forms (`arbace.c.musl`, ci's libc);
+5. compiler_builtins, lowered for ci with the runtime's pre-pass (RES25 (b) on ci, `OUT/ci/cb`): after musl, so musl's `mem*`
+   and the rest come first; its `global_asm!` unit (probestack) is not read and left out.
+
+Each library is ci's prebuilt runtime (`arbace.c.runtime`, doc/C23-SURVEY.md "As built: ci's prebuilt runtime"): a unit's
+fragment checked and built once and cached by the library's key (`CI_RUNTIME`, the checkout's `.tmp/ci-runtime/` by default), the
+Rust libraries' candidates cut at the link to what the program reaches. The node program is run by `tools/cirun` (eval) or
+translated by cf2g into a Go package built by TamaGo's go in shards (AOT).
+
+**The run** is run-program's (§7): a fresh directory, an empty standard input, `env -i` with `PATH`, `HOME` and the program's
+`exec-env`, its run flags (`--test-threads=1` for a harness), 60 s (`test/rust/check-budget.edn`), a 1 MiB output cap, the thread
+ids and harness times normalized. **The judge** (RES5 (a)) is rustc's `-O0` build of the original against std's build, run so,
+three times, recorded as data by `bin/rsi record-ref` into `test/rust/ref-rustc-1.99.1.edn` (status, the outputs' SHA-256,
+`:det false` when the three runs differ). A program passes when its status and both outputs' digests are the judge's; a program
+whose judge runs differ and that does not pass is `:nondet` (not a failure); every other non-pass falls in a class of
+`test/rust/divergences.edn` (AOT: `divergences-aot.edn` first) or fails the check; the record `test/rust/check-linux-amd64.edn`
+(`check-aot-linux-amd64.edn`) holds `[ID RESULT REASON]`, a recorded pass that fails is a regression; the per-program seconds
+(IR, lowering, ci's build, run) in `test/rust/check{,-aot}-times-linux-amd64.edn` (GT8, GTS205); the negative control
+`test/rust/controls.edn` (GTS81 (a)). `--only LIST`, `--sample N --offset K`, `--set` choose subsets (never `--record`ed).
