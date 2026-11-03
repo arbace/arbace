@@ -1,0 +1,745 @@
+# Haskell's eval and AOT: survey and plan
+
+Status: initial survey and plan, 2026-11-03, at the user's request, after Haskell was unparked (doc/JOURNAL.md,
+"2026-11-03: Haskell and Rust unparked; Python's survey"). Nothing here is adopted: no code under `arbace/`, `go/`,
+`bin/`, `tools/` or `test/` changed, and only this file was written. The decisions are the user's, as proposals
+HES1-HES22 (§12); the milestones are HE1-HE11 (§11), named by HES2.
+
+Base: branch `haskell-eval-survey` from main `a25d12d1`. The work is reading (repr/haskell's survey, spec and notes, the
+crop surveys of OCaml, Scheme and Python, GATE-SURVEY.md's GT8, C23-SURVEY's memory model) and probes of a few seconds
+each with the host's GHC 9.14.1 (`ghc -ddump-stg-final`, `-ddump-simpl`, `-ddump-prep`, `-fwrite-if-simplified-core`,
+`--show-iface`, `:browse GHC.Prim`, `nm` of the installed libraries, runs of four small programs; scratch in the
+worktree's `.tmp/haskell-eval/`, Appendix A), and the existing `bin/repr-haskell test` (passing, on the main checkout's
+stage 0). No Arbace executable was built, no lock taken, nothing installed, nothing downloaded. What the host does not
+hold (GHC's testsuite tarball, nofib, Csaba Hruska's external STG tools) is named from memory of the projects, every
+such size, URL or license marked **to verify**, verified at the fetch the user decides (HES1).
+
+Words used throughout:
+
+- **Haskell forms**: Haskell modules written as Arbace forms (doc/haskell/SPEC.md), what repr/haskell reads and prints.
+  Surface syntax: operator chains unresolved, names unrenamed, no types inferred, no dictionaries.
+- **STG forms**: GHC's final STG of a module (after CorePrep, CoreToStg, unarisation; `-ddump-stg-final`'s program)
+  written as Arbace forms (§4), the input of eval and AOT. A second representation beside Haskell forms, produced by
+  the helper, never printed back to Haskell.
+- **hsi**: the evaluator of STG forms for programs and at the REPL (the name is HES2's), as goi is Go's, oi OCaml's,
+  si Scheme's, pyi Python's. Its runtime **`go/arbace/hs`**: hand-written Go forms, as `go/arbace/oi` and
+  `go/arbace/scm`.
+- **The helper**: `tools/hsdump`, repr/haskell's GHC API program, extended with STG (and Core) modes (§5).
+- **The front end**: GHC 9.14.1's renamer, type checker, desugarer, simplifier, CorePrep and CoreToStg, run by the
+  helper. **The judge** of runs: the same GHC's builds of the originals, their runs recorded as data (§8.1).
+- **The boot libraries**: the 41 packages of the pinned `ghc-9.14.1-src.tar.xz` that repr/haskell's corpus holds
+  (`test/haskell/corpus-ghc-9.14.1.edn`, 1,226 modules, R1 and R5), `ghc-internal` and `base` first.
+
+Contents: Summary · 1 What parity means · 2 The host and prior art · 3 Measurements · 4 STG forms · 5 The front end:
+the helper's STG · 6 eval: hsi · 7 AOT · 8 The references and the corpora · 9 Licenses · 10 The row and GT8's budget ·
+11 Plan (HE1-HE11) · 12 Proposals (HES1-HES22) · 13 What to decide first · 14 Risks · 15 Sources · Appendix A: the
+scratch.
+
+## Summary
+
+- **Haskell's meaning is not in its syntax, and the gap is the largest of the crops.** Fixity, renaming, type
+  inference with type classes (dictionary passing), type families, GADTs, defaulting, deriving, the desugaring of `do`,
+  list comprehensions, records and pattern matching, rewrite rules, Template Haskell's splices: all lie between Haskell
+  forms and anything that runs. GHC's front end is several hundred thousand lines (to verify); an Arbace type checker
+  for GHC Haskell with the boot libraries' extensions is out of reach of one crop. So, as OCaml's crop took Lambda from
+  `ocamlc` (OC4 (a), OC5 (a)), **eval takes GHC's final STG from the host's GHC** (HES3 (a)): the language GHC's own
+  back ends share (the native code generator through Cmm, the JavaScript back end `GHC.StgToJS`, GHCi's
+  `GHC.StgToByteCode`), A-normal, untyped but with each variable's representation, laziness explicit (`\u` updatable
+  thunks, `\r` functions), constructors and primops saturated, evaluation order fixed by `case`.
+- **Interpreting GHC's STG of the same compilation as the reference gives the same evaluation order**: which thunk is
+  forced first, which of two imprecise exceptions is raised, the order `Debug.Trace` prints (E6: `sum (reverse [trace
+  "a" 1, trace "b" 2])` prints `b` then `a`). A front end of Arbace's own could not promise that.
+- **Haskell's library is almost all Haskell** (E4, E5): `Show Double`, `Read`, `Data.Char`'s Unicode tables, the
+  UTF-8 codec, `Handle`s and their buffers, `printf`, `Data.Map`, the top-level exception handler and its message, the
+  `HasCallStack` backtraces: all STG from `ghc-internal`, `base` and the other boot libraries, interpreted as the
+  program is. What is not Haskell is small and enumerable: **1,498 primops, 742 of them without SIMD** (E4; 299 of those
+  array, `Addr#` and `MutVar#` accessors), the out-of-line primops GHC writes in Cmm (`stg_*zh`), and the C the
+  libraries call: **375 external symbols from `ghc-internal`'s archive, 77 from `base`'s** (E5): libc (`read`, `write`,
+  `open`, `poll`, `isatty`, `getenv`, ...), libm, 31 GMP functions (avoidable: GHC's own pure-Haskell bignum backend,
+  HES7), and the RTS's API (about 200, most of them for the threaded RTS, profiling and the event log, never reached by a
+  non-threaded run).
+- **The machine is GHC's own design, on Go.** An eval/apply STG machine (Marlow and Peyton Jones, "Making a fast curry")
+  with an explicit, heap-allocated stack per Haskell thread (HES8 (a)): update frames, case continuations, catch and mask
+  frames, STM and prompt frames on it, so deep thunk chains (E7: `foldl (+) 0 [1..3000000]` at `-O0` needs 350 MB of
+  stack natively and runs), green threads, asynchronous exceptions, `<<loop>>` detection (E7) and the delimited
+  continuation primops are all frames, as si's heap frames are Scheme's (SCHEME-SURVEY §5.2 (a)). Haskell threads are
+  green threads on hsi's scheduler with the non-threaded RTS's semantics (HES9 (a)); memory for `Addr#` is ci's flat
+  address space (`go/arbace/crt`, C23-SURVEY §6.3), so `malloc`, `peek`, `poke`, the C ports and musl's libm are
+  shared with the C crop (HES10 (a)).
+- **AOT is STG → Go forms over the same runtime** (HES15 (a)), GHC's JavaScript back end's shape: each closure's code a
+  Go function, tail calls through a trampoline, the stack the same explicit stack; realistic speed 3 to 10 times hsi,
+  well under GHC's `-O0` native code (§7). The boot libraries compiled once this way and linked into hsi is GHCi's own
+  model (libraries native, the program interpreted), HES14 (b).
+- **Print stays as it is** (§1, HES20): repr/haskell's read and print, their tree, interface, text and layout levels
+  over the boot libraries, are the row's read and print cells; the print cell gains a behaviour level (the printed
+  modules compiled and run, as ghc-lisp's run corpus did) and the read corpus gains the testsuite's sources.
+- **Plan (§11): HE1-HE11, about 54 to 88 working days**; HE4 (the machine and its primops, 15-25) and HE5 (the
+  libraries' C and the I/O, 8-14) are the long poles, HE8 (AOT, 10-16) the third. A standalone front end (GHC itself
+  compiled by hsi's AOT, as javac runs on Arbace; HES21) is a later survey.
+- **GT8 from day one (§10):** the GHC testsuite's run tests and nofib through coverage subsets and the seven-night
+  rotation; synthetic programs per primop family and per Prelude class; the dumps and the references cached by key so a
+  night pays only for runs. The read and print levels already cost about 10 minutes (HASKELL-NOTES R5: 585 s), so
+  Haskell's 35 minutes leave about 20 for eval and AOT: they must be subsets.
+- **To decide first (§13):** what eval interprets (HES3), how the helper captures STG (HES4), the libraries'
+  compilation (HES6) and bignum backend (HES7), the machine (HES8), the memory model (HES10), when (HES22).
+
+## 1. What parity means
+
+Under the crops' rule (doc/FULL-SUPPORT-SURVEY.md, "The binding decisions"; C23-SURVEY §1; OCAML-SURVEY §1;
+PYTHON-SURVEY §1): on the host (linux/amd64), forms only, each level's results recorded as data, `bin/reap` judging
+from the records with no runs, none failing, every non-pass in a recorded class.
+
+| cell | in Arbace (proposed) | corpus | reference | judge |
+|---|---|---|---|---|
+| **Haskell read** | repr/haskell `read` (as built, R1-R6) | the boot libraries (1,345 modules with R6), the testsuite's sources, nofib, the samples, synthetic (§8.2) | GHC 9.14.1's parse (`HsModule GhcPs`), its acceptance and its parse errors | trees equal (tree level), interfaces equal (interface level), as today; a rejected file rejected with GHC's message and span |
+| **Haskell eval** | the Haskell forms printed by repr/haskell (`:full`, byte for byte), the front end's STG (GHC, HES3), hsi | the run programs: synthetic, the testsuite's run tests, nofib, samples | GHC 9.14.1's `-O0` builds of the originals run, recorded (status, stdout, stderr; §8.1) | byte for byte, no masks by default (HES16); per test for the testsuite |
+| **Haskell AOT** | the same STG → Go forms → `arbace.build.go` (HES15) | as eval | as eval | as eval; hsi and compiled compared (diffcheck's kind) |
+| **Haskell print** | repr/haskell `print` (`:lines`, `:full`, the layout layout) as built | every read corpus | the original text; GHC's trees and interfaces of the print; the run programs' behaviour | the four levels as built; plus behaviour: the printed program compiled by GHC runs as the original (HE9) |
+
+What differs from the other crops:
+
+- **The front end is the oracle's, for good in v1.** Java's eval was Arbace's from the start (the Java forms'
+  interpreter), Go's checker is "after go/types", Python needs no checker (PYTHON-SURVEY §1). For Haskell, as for
+  OCaml's v1 (OC4 (a)), types and everything up to STG come from the pinned compiler; eval begins at STG. Eval of
+  Haskell forms is therefore: print the forms (`:full`, byte for byte, so columns in `HasCallStack` text are the
+  original's), compile with the front end, run the STG in hsi. The record of the dumps makes a check need no GHC only
+  if the dumps are committed (HES13).
+- **The front end's tests are not eval's.** Most of GHC's testsuite tests the type checker (`compile_fail`, `compile`,
+  `ghci_script` with `:t`): with GHC as the front end they test GHC, not Arbace; they are read and print corpus, and a
+  class at eval ("front end is GHC's").
+- **Columns reach behaviour** (REPR-HASKELL-SURVEY §1.3; E6: `error, called at
+  libraries/containers/containers/src/Data/Map/Internal.hs:629:17 in containers-0.8-b42e:Data.Map.Internal`): the
+  source paths, the columns and the unit ids of the boot libraries are part of the stderr the judge compares, so the
+  libraries' dumps must be compiled from the same relative paths with the same unit ids as the installed ones (HES6).
+
+## 2. The host and prior art
+
+### 2.1 The host
+
+- `ghc-9.14.1-r2` (Alpine edge), the `ghc` library `ghc-9.14.1-f453` (hidden), `base-4.22.0.0-3875`,
+  `ghc-internal-9.1401.0-6d86`: `Tables next to code` YES, `Have interpreter` YES, `Support SMP` YES, `GHC Dynamic`
+  YES, LLVM `llc` 15 configured (unused by default). The bignum backend is **GMP** (31 `__gmpn_*` symbols in
+  `ghc-internal`'s archive, E5).
+- The installed interfaces carry unfoldings only, not whole programs (E3: `--show-iface` of
+  `GHC/Internal/List.hi` has `Unfolding: Core:` entries and no `extra decls`): the libraries' STG must come from
+  compiling their sources, which repr/haskell's interface level already does package by package with each package's
+  configuration (HASKELL-NOTES R2, R5: 184 s for all, four packages at a time).
+- `-fwrite-if-simplified-core` writes the whole simplified Core of a module into its `.hi` (`extra decls`, E3), the
+  input GHCi's `-fprefer-byte-code` reads; `-ddump-stg-final`, `-ddump-prep`, `-ddump-simpl`, `-ddump-bcos`,
+  `-ddump-cmm` are all there (E2).
+- Not on the host: GHC's testsuite (the release's `ghc-9.14.1-testsuite.tar.xz`, to verify), nofib, Hackage packages
+  beyond the boot libraries. `/root/forks/ghc-lisp` keeps ghc-lisp as patches only; its numbers (11,423 parseable
+  testsuite files, 1,069 single-module run programs) are from GHC 10.1's tree (REPR-HASKELL-SURVEY §2.1).
+
+### 2.2 How GHC runs Haskell (the facts eval must reproduce; from GHC's source and papers, to verify against 9.14.1)
+
+- **The pipeline**: parse → rename → typecheck → desugar (Core) → simplify → CorePrep (A-normal form, saturated
+  applications) → CoreToStg → STG passes (unarise: unboxed tuples and sums become several values, `State#` and other
+  void arguments vanish; lambda lifting at `-O1`; tag inference) → Cmm → code. GHCi's bytecode, the JS back end and the
+  Cmm code generator all start from the final STG.
+- **The STG machine**: closures (functions `\r`, updatable thunks `\u`, single-entry `\s`, constructors), partial
+  applications (PAPs), eval/apply calls with arity checks (`stg_ap_*` in E5's list), update frames that overwrite a
+  thunk with an indirection to its value, blackholing (a thunk under evaluation is marked so that re-entering it is
+  `<<loop>>`, E7), pointer tagging (an optimization, invisible to programs).
+- **The RTS**: the scheduler (green threads on capabilities; the non-threaded RTS has one), MVars with FIFO wake-up,
+  `threadDelay` and I/O waits, asynchronous exceptions (`throwTo`, `killThread`, `timeout`) with masking states, the
+  interrupted thunks frozen (`raiseAsync` turns the stack into `AP_STACK` closures), STM (transaction records,
+  validation, `retry` blocking on the read set), weak pointers and finalizers, stable pointers and names, the
+  deadlock detection that raises `BlockedIndefinitelyOnMVar`/`OnSTM` to unreachable blocked threads, stack overflow
+  at `-K` (default 80% of physical memory), heap overflow, compact regions, the `prompt#`/`control0#` delimited
+  continuations (9.6+).
+- **The top level**: `:Main.main = runMainIO main`, Haskell code in `GHC.Internal.TopHandler`: it flushes `stdout` and
+  `stderr`, prints an uncaught exception as `PROG: Uncaught exception TYPE:` with its `displayException` and the
+  backtraces (E6), and sets the exit status (1; `ExitFailure n`; signals). The program name is `getProgName`, the
+  basename of `argv[0]`.
+
+### 2.3 Prior art (from memory, to verify)
+
+- **GHC's back ends** (gitlab.haskell.org/ghc/ghc, BSD-3-Clause): `compiler/GHC/StgToJS/` (STG → JavaScript, 9.6+,
+  from GHCJS; a trampolined machine with its own heap objects, the model of §7), `compiler/GHC/StgToByteCode.hs` and
+  `rts/Interpreter.c` (GHCi: bytecode from STG, interpreted by a C loop inside the RTS, interoperating with compiled
+  code), `compiler/GHC/StgToCmm/` (the native path), the WebAssembly back end (9.6+, through Cmm and the NCG,
+  the RTS compiled to wasm: not a model, it keeps GHC's RTS). `rts/` (the C and Cmm runtime), `utils/genprimopcode`
+  and `compiler/GHC/Builtin/primops.txt.pp` (every primop's type and attributes: the table hsi's primops are checked
+  against).
+- **The external STG interpreter** (Csaba Hruska, github.com/grin-compiler/ghc-whole-program-compiler-project, BSD-3
+  to verify): a GHC fork exports every module's STG in a serialized "external STG" format (`.o_stgbin`), and an STG
+  interpreter written in Haskell runs whole programs from it, with the primops, the FFI through libffi, threads,
+  MVars, STM, exceptions, weak pointers; reported to run GHC itself and pandoc (to verify). The closest prior art: it
+  shows that GHC's STG plus a primop table plus the C calls is enough, and its primop implementations are a checklist
+  (a reference, not vendored: HES5).
+- **MicroHs** (Lennart Augustsson, github.com/augustss/MicroHs, Apache-2.0, 0.16.0.0 of 2026-06-02 per
+  REPR-HASKELL-SURVEY §7): a self-hosting Haskell compiler (Haskell 2010 and many GHC extensions) in Haskell, compiling
+  to combinators run by a small C runtime. Its own `base`, not GHC's: it cannot run GHC's boot libraries. A candidate
+  standalone front end (HES21 (b)).
+- **Hugs** (BSD-style, unmaintained since 2006): an interpreter with its own front end, Haskell 98 and some extensions;
+  shows the size of a full front end of its time. **GHCJS** (MIT), **Eta** (BSD-3, GHC 7.10's STG to JVM bytecode,
+  abandoned: the Java-forms route of HES15 (b)), **Frege** (BSD-3, a Haskell-like language on the JVM), **stgi** (David
+  Luposchainsky, BSD-3, an educational STG interpreter of the 1992 paper's machine), **ministg** (Bernie Pope).
+- **Papers**: Peyton Jones, "Implementing lazy functional languages on stock hardware: the Spineless Tagless
+  G-machine" (JFP 1992); Marlow and Peyton Jones, "Making a fast curry: push/enter vs. eval/apply for higher-order
+  languages" (ICFP 2004, JFP 2006); Marlow, Peyton Jones, Moran, Reppy, "Asynchronous exceptions in Haskell" (PLDI
+  2001); Harris, Marlow, Peyton Jones, Herlihy, "Composable memory transactions" (PPoPP 2005); Marlow, Peyton Jones,
+  Singh, "Runtime support for multicore Haskell" (ICFP 2009); Peyton Jones, Reid, Hoare, Marlow, Henderson, "A semantics
+  for imprecise exceptions" (PLDI 1999).
+
+### 2.4 What Arbace already has
+
+- repr/haskell (R1-R6, HR1-HR28): the helper `tools/hsdump` on GHC's API with the package configurations of all 41
+  boot libraries (`test/haskell/corpus-ghc-9.14.1.edn`: unit ids, CPP flags, hsc2hs, the generated modules), the
+  interface level's per-package `ghc --make` (the same compilations HE2 needs, with a dump added), `bin/repr-haskell
+  test` (passing on 2026-11-03).
+- oi (`go/arbace/oi`): an interpreter of a compiler's IR dumped by its oracle (Lambda), with a primitives table, proper
+  tail calls, a depth limit, effects by goroutine hand-off: the closest pattern. si's heap frames (`go/arbace/scm`):
+  the explicit-stack machine of HES8 (a). goi's check machinery (`--record-ref`, `divergences`, controls, CPU limits,
+  essential subsets).
+- ci's runtime `go/arbace/crt`: one flat 64-bit address space of Go slabs with a block table (C23-SURVEY §6.3), libc's
+  system calls, and musl 1.2.6 as C forms with cf2g: the base for `Addr#`, `malloc`, the libc and libm calls of E5
+  (HES10, HES11).
+
+## 3. Measurements
+
+Probes (seconds each; Appendix A):
+
+- **E1, the host.** `ghc --version`, `ghc --info`: as §2.1.
+- **E2, the dumps.** On `T.hs` (31 lines: a class and instance, a lazy sieve, `Data.Map.Strict`, `IORef`, `Integer`,
+  `try`/`evaluate`), `ghc -O0 -ddump-simpl -ddump-prep -ddump-stg-final -ddump-to-file` took 1.2 s with linking. Final
+  STG is 506 lines (55 KB with uniques suppressed, 20 KB of Core at `-O0`; at `-O1` 49 KB of STG, 46 KB of Core). The
+  text dump is not an interface: with `-dsuppress-uniques` two different binders print as the same name
+  (`$carea_sat` shadows `$carea_sat` in one `let`), and the dump omits the representations and the data constructors'
+  tags. So the helper must serialize GHC's STG data structures itself (HES4), not scrape the text.
+- **E3, whole Core in interfaces.** `-fwrite-if-simplified-core` adds `extra decls` (the module's whole Core, fully
+  qualified, with types) to `T.hi` (8 KB); the installed libraries' `.hi` files have only unfoldings.
+- **E4, primops.** `:browse GHC.Prim` lists **1,498 primops** (`GHC.Internal.Prim` in 9.14); **756** are SIMD vector
+  operations (`X2` to `X64`), **742** are not, 299 of those array, `ByteArray#`, `Addr#`, `MutVar#` and `SmallArray#`
+  operations; among the rest `fork#`, `forkOn#`, `atomically#`, `keepAlive#`, `prompt#`, `control0#`,
+  `newPromptTag#`, `compactNew#`, `newBCO#` and the exception, masking, MVar, TVar, weak and stable families.
+- **E5, the C the libraries call.** Undefined symbols of the installed archives not defined in them, without GHC's own
+  `_info`/`_closure` symbols: **`ghc-internal` 375** (31 GMP `__gmpn_*`, 139 `stg_*` RTS entry points and out-of-line
+  primops, about 200 RTS API and libc and libm functions: `read`, `write`, `open`, `close`, `lseek`, `fstat`, `poll`,
+  `epoll_*`, `eventfd`, `pipe`, `isatty`, `tcgetattr`, `getenv`, `setenv`, `environ`, `iconv*`, `nl_langinfo`,
+  `strerror_r`, `malloc`, `free`, `memcpy`, `sin` ... `tanhf`, `getMonotonicNSec`, `rts_*`, `hs_popcnt*`, `hs_pdep*`,
+  `libdw*`, `lookupIPE`, `getOrSet*Store`, `performGC`, ...), **`base` 77** (mostly `stg_*` again and libm),
+  `ghc-bignum` and `ghc-prim` none (re-export shims). The list for a non-threaded run reached by the corpora is smaller
+  and is measured at HE5.
+- **E6, observable order and the top handler.** `sum (reverse [trace "a" 1, trace "b" 2])` prints `b`, `a`, `3`;
+  `M.fromList [(1,'x')] M.! 2` ends the program with status 1 and on stderr `U: Uncaught exception
+  ghc-internal:GHC.Internal.Exception.ErrorCall:`, the message, and `HasCallStack backtrace:` with the library's source
+  path, line, column and unit id (`containers-0.8-b42e`). All of it is Haskell (the top handler), so hsi prints it if
+  the libraries' STG is compiled from the same paths with the same unit ids.
+- **E7, depth and loops.** `foldl (+) 0 [1..3000000::Integer]` at `-O0` runs natively in 0.78 s with a peak RSS of
+  352,856 KB (a 3,000,000-deep chain of thunks forced on GHC's growable stack); `let x = x + 1 :: Int in print x` ends
+  with `L: Uncaught exception ghc-internal:GHC.Internal.Control.Exception.Base.NonTermination:` and `<<loop>>`, status
+  1. A Go-recursive evaluator would not survive the first (or would need a gigabyte Go stack) and could not detect the
+  second the same way.
+- **E8, speed.** `nfib 32` (7,049,155 calls, `Int` with `Num` dictionaries at `-O0`): `-O0` native 0.32 s, `-O1`
+  0.02 s, GHCi's bytecode (`runghc`) 3.62 s, of which about 0.23 s is `runghc`'s start (`main = print 1`). GHCi's
+  interpreter is about 10 times `-O0` native: the order hsi can hope for (§6.8).
+
+## 4. STG forms
+
+### 4.1 Principles
+
+The other crops' (doc/go/SPEC.md, doc/ocaml/SPEC.md §11.2's Lambda forms): data readable by the Clojure reader, one
+form per node, `(head field...)` with an optional trailing metadata map, keywords for flags, vectors for lists. They
+are a compiler's IR, not a user's source: written by the helper, read by hsi and the AOT, never printed as Haskell
+(HES19). Top form per module `(stg/module UNIT MODULE {:imports [...] :foreign-stubs ...} bindings...)`; the heads
+follow GHC's `GHC.Stg.Syntax` constructors (proposed, to fix at HE1):
+
+```
+(stg/rec [...])  (stg/bind ID RHS)                         ; StgTopLifted (rec or non-rec); StgTopStringLit
+(closure :u [] BODY)  (closure :r [ARGS] BODY)             ; StgRhsClosure, update flag \u \r \s
+(con DATACON [ATOMS])                                      ; StgRhsCon, StgConApp
+(app ID [ATOMS])  (op PRIMOP [ATOMS])  (ffi "sym" CONV [ATOMS] {:safe ...}) ; StgApp, StgOpApp
+(case SCRUT BNDR ALT-TYPE [(alt :default [] E) (alt DATACON [B...] E) (alt (lit ...) [] E)])
+(let BIND E)  (let-no-escape BIND E)  (tick T E)  (lit ...)
+```
+
+- **Ids** as symbols with their unique and their module (`base:GHC.Internal.Base.map`, `x_s1Ab`), each binder's
+  `PrimRep` list in metadata (`:rep [:lifted]`, `[:int :word]`, `[]` for void) and arity; no types otherwise.
+- **Data constructors** by name, with the tag, arity, field representations and the strictness marks of their
+  wrapper-free worker in a per-module table (`stg/data`), so hsi builds them without GHC.
+- **Literals** with their representation (`Int#`, `Word8#`, `Double#` as the IEEE bits, `Addr#` strings as bytes, label
+  literals for `foreign import ... &sym`).
+- **Positions**: the source notes (`tick`s at `-g`) only where the dump asks for them; `HasCallStack` text is already in
+  the literals (E6), so eval needs none.
+
+### 4.2 Size and storage
+
+Text forms are large (E2: 55 KB for 31 lines) and Arbace's reader reads forms at a few MB/s (REPR-HASKELL-SURVEY E2:
+20 MB in 12 s on 16 jobs): the boot libraries' STG as text is of the order of 100 to 300 MB (to measure at HE2). So the
+forms are the specification and the check's medium (a dump read back by Arbace's reader, every head known, as
+`arbace.repr.ocaml.lambda` checks Lambda dumps), and hsi loads a **binary image** compiled from them (HES14).
+
+## 5. The front end: the helper's STG
+
+### 5.1 The pipeline
+
+`bin/hsi build FILE.hs` → `tools/hsdump stg` (a GHC API driver: the module compiled as `ghc -O0 -c` would compile it,
+with the package's configuration from the corpus file) → STG forms (`.stg.ae`) → hsi's loader. For Haskell forms the
+first step is repr/haskell's `print` in mode `:full` (the original text byte for byte); for `:lines` forms, the layout
+printer's output (columns differ: a class, E6).
+
+### 5.2 Capturing STG (HES4)
+
+GHC's driver offers a hook between STG and Cmm (`GHC.Driver.Hooks`' `stgToCmmHook`, to verify in 9.14.1): the helper
+installs it, serializes the `CgStgTopBinding`s, the module's data constructors (`TyCon`s and `DataCon`s with tags and
+representations) and foreign stubs, and lets code generation go on, so one compilation gives both the object the
+reference links and the STG hsi runs. A Core-to-Core plugin sees Core only (no STG); scraping `-ddump-stg-final` is
+lossy (E2). Core is also dumped (`core` mode, from the same compilation or from `-fwrite-if-simplified-core`'s
+interfaces) for the REPL's types and for debugging, not for eval.
+
+### 5.3 The boot libraries (HES6, HES7)
+
+Every module of the 41 packages compiled from the pinned tarball **as hadrian compiled the installed ones**: the same
+unit ids (`-this-unit-id`, already in the corpus file), the same relative source paths (E6's
+`libraries/containers/containers/src/...`), the same optimization level and flags (hadrian's release flavour, `-O1`
+or `-O2` per package: to verify from the installed `.hi` files' flags, `--show-iface`'s "flags" hash), so that the STG is
+what the installed libraries were compiled from, up to the bignum backend (HES7). The dumps are cached by key (GHC's
+pin, the tarball's sha256, the configuration), rebuilt only when one changes (minutes, as the interface level's 184
+s).
+
+### 5.4 What GHC's front end decides and hsi inherits
+
+Typing, defaulting, instance selection, rewrite rules, inlining across modules (unfoldings of the libraries' `.hi`
+into the program's STG), worker/wrapper and strictness at `-O1`, Template Haskell (splices run by GHC at compile time:
+a TH program's STG is ordinary), deriving, `HasCallStack`'s implicit parameters (call sites as string literals), the
+order of evaluation. A program GHC rejects never reaches hsi: its rejection is the read or the front end's business.
+
+## 6. eval: hsi
+
+### 6.1 What eval means for Haskell
+
+Program runs (`bin/hsi run FILE.hs ARGS`, or `run --stg DIR` on dumps), with `getArgs`, `getProgName` (the reference's
+name), stdin, stdout, stderr and the exit status as GHC's top handler sets them; and a REPL (`bin/hsi`, GHCi's
+behaviour for expressions and `let`, `it`, `:t` and `:k` answered by GHC; HES18). Not in v1: GHCi's other commands,
+`-threaded`, profiling, `+RTS` options beyond `-K` and `-M` (classes).
+
+### 6.2 The parts
+
+1. **The front end** (§5): the helper's `stg` mode, the libraries' dumps, the image.
+2. **The machine** `go/arbace/hs` (§6.3): heap objects, eval/apply, the stack, updates, blackholes, the scheduler.
+3. **The primops** (§6.4): the 742 non-SIMD ones in Go, the SIMD ones a class (HES12).
+4. **The C ports** (§6.6): the libc, libm and RTS functions the libraries call, on `crt`.
+5. **The tools**: `bin/hsi run|check|record-ref|divergences|test`, `arbace.hs.check` on the tools' host, as goi's.
+
+### 6.3 The machine (HES8)
+
+- **Heap objects** as Go structs: `*Con` (data constructor, tag and fields), `*Fun` (code and free variables, arity),
+  `*Thunk` (code, free variables; on update its value and the indirection), `*PAP`, `*AP` (a frozen application), the
+  unlifted kinds (`Int#` as `int64`, `Word#` `uint64`, `Double#` `float64`, `Addr#` a `crt` address, `ByteArray#`,
+  `MutableArray#`, `MutVar#`, `MVar#`, `TVar#`, `ThreadId#`, `Weak#`, `StablePtr#`, `StableName#`, `BCO` refused) and
+  unboxed tuples as multiple return values (unarisation has flattened them already).
+- **Eval/apply** with an explicit stack per thread (a Go slice of frames, grown on demand to the `-K` limit; GHC's
+  default is 80% of memory, hsi's a recorded figure): return frames for `case` (the continuation's code and saved
+  variables), update frames, apply frames for over-saturated calls, catch frames, mask and unmask frames, `atomically`
+  and `catchRetry`/`catchSTM` frames, prompt frames. A `case` pushes its frame and evaluates the scrutinee; a value
+  returns to the top frame; a thunk entered pushes an update frame and is marked a blackhole (eager blackholing), so
+  re-entering it from the same thread raises `NonTermination` (E7) and from another thread blocks on it, as GHC's
+  `BLACKHOLE` does.
+- **The loop** is a Go `for` over the current code, never Go recursion: depth is the stack slice's, tail calls are
+  free, and a thread switch is a change of stack.
+- **Code**: each `closure`'s body compiled once at load into a tree of Go closures over frame slots (goi's and oi's
+  technique), with the frequent primops and the known-arity calls as nodes of their own.
+- **Alternatives** (HES8): (b) direct style on Go's stack, one goroutine per Haskell thread (calls fast; E7's chain
+  and `<<loop>>` lost, asynchronous exceptions and `control0#` impossible without the same bookkeeping); (c) push/enter
+  (GHC's pre-2004 machine; no gain over eval/apply here).
+
+### 6.4 Primops (HES12)
+
+The 742 non-SIMD primops (E4), checked against `primops.txt.pp`'s attributes (`can_fail`, `has_side_effects`,
+`out_of_line`): integer and word arithmetic at every width with GHC's overflow and division semantics (`quotRemInt#`,
+`timesInt2#`, `addIntC#`), `Double#`/`Float#` with IEEE results (`decodeDouble_2Int#`, the conversions), `Char#`,
+the array families (bounds unchecked as in GHC: an out-of-bounds index is undefined behaviour there, a Go panic
+turned into a class here), `Addr#` loads and stores at every width on `crt`, `MutVar#` (`atomicModifyMutVar2#`), the
+exceptions (`raise#`, `raiseIO#`, `catch#`, the masks), MVars, TVars, `fork#`, `yield#`, `myThreadId#`, `killThread#`,
+`delay#`, `waitRead#`, `mkWeak#`, `finalizeWeak#`, `makeStablePtr#`, `makeStableName#`, `seq#`, `keepAlive#`,
+`dataToTag#`, `tagToEnum#`, `reallyUnsafePtrEquality#`, `prompt#`, `control0#`, `getSpark#` and `par#` (no-ops:
+one capability), `traceEvent#` (no-op). `compactNew#` and friends, `newBCO#`, `unpackClosure#`, `getApStackVal#`,
+`getCCSOf#` (profiling) and the SIMD vectors are classes in v1. The Cmm out-of-line primops (`stg_*zh`, E5) are among
+these, written in Go.
+
+### 6.5 Threads, exceptions, STM (HES9)
+
+- **Green threads** on hsi's own scheduler, the non-threaded RTS's semantics: one Haskell thread runs at a time,
+  switched at allocation counts (GHC switches on a 20 ms timer at heap checks; the switch points are a design class),
+  MVars with FIFO wake-up, `threadDelay` on a timer queue, `threadWaitRead`/`Write` by `poll` when every thread is
+  blocked, `getNumCapabilities` 1, `forkOn` as `fork`.
+- **Deadlock**: when no thread can run and no timer or I/O is pending, the blocked threads not reachable from a root
+  get `BlockedIndefinitelyOnMVar` or `OnSTM` (GHC finds them by its GC; hsi by a reachability walk of its own heap from
+  the runnable threads, the stable pointers and the main thread's waiters, at that moment only).
+- **Asynchronous exceptions**: `throwTo` delivered at the target's next safe point when unmasked, the target's stack
+  unwound to the nearest catch frame; the thunks under evaluation on the unwound part are reverted to unevaluated
+  (GHC freezes them as `AP_STACK` to resume the work later: the same results, different cost; observable only through
+  `unsafePerformIO` side effects, a class).
+- **STM**: transactions on a log; with one thread running at a time, a transaction is not preempted (it runs to its
+  commit or its `retry`), which is serializable and so a valid execution; `retry` blocks the thread on its read set;
+  `orElse` nests logs.
+- **Delimited continuations**: `control0#` captures the stack segment up to its `prompt#` frame as an object;
+  resuming it pushes the segment back.
+
+### 6.6 The C and the RTS (HES11)
+
+- **A table by C symbol**, `ffi` forms resolved at load: each entry a Go function over the arguments' representations.
+  Families: the POSIX calls the I/O library makes (`read`, `write`, `open`, `close`, `lseek`, `fstat`, `ftruncate`,
+  `poll`, `isatty`, `tcgetattr`/`tcsetattr`, `dup`, `pipe`, `unlink`, `getenv`, `environ`, ...) on `crt`'s system
+  calls; libm through musl's own C forms compiled by cf2g (bit-exact with the host's GHC, which links musl's libm) or
+  Go's `math` with a class for the last bit; the RTS API the libraries call (`getMonotonicNSec`, `getProgArgv`,
+  `rtsSupportsBoundThreads` = 0, `performGC`, `getRTSStatsEnabled` = 0, `lockFile`, `hs_popcnt*`, `hs_pdep*`,
+  `hs_bitrev*`, `hs_word2float*`, `__int_encodeDouble`, `getOrSet...Store`, `cmp_thread`, `rts_isThreaded` = 0, ...);
+  the C files of the packages (`cbits/`) ported or read as C forms and run by ci (HES11 (b)).
+- **Unreached is a class**: the event manager's `epoll`/`eventfd` (threaded RTS only), `libdw*` and `lookupIPE`
+  (backtraces from DWARF and info tables, off by default), profiling, `iconv` beyond UTF-8 (the references run under
+  `LANG=C.UTF-8`, where the Haskell UTF-8 codec is used).
+- **`foreign import ccall "wrapper"`** (`createAdjustor`, a C function pointer calling Haskell) and `foreign export`:
+  classes in v1; a user program's own C (`c-sources` in the testsuite) through ci later (HES11 (b)).
+
+### 6.7 Memory, GC, finalizers (HES10)
+
+- **Lifted heap objects** are Go objects under Go's GC; a thunk's update leaves an indirection the code short-cuts on
+  every read (GHC's GC removes indirections; hsi's loads do).
+- **Selector thunks** (`fst p` where `p` is evaluated) are evaluated at update time where GHC's GC would, so the
+  classic space leaks GHC avoids are avoided (a memory difference only).
+- **`Addr#` and pinned memory** in `crt`'s flat address space (C23-SURVEY §6.3): `malloc`/`free` (musl's, as ci's),
+  string literals (`"..."#`) in a static segment, pinned `ByteArray#`s (`newPinnedByteArray#`, every `ByteString`) in
+  slabs, `byteArrayContents#` an address. Unpinned byte arrays are Go `[]byte`.
+- **Weak pointers and finalizers** on Go's `weak` package and `runtime.AddCleanup`, run by a finalizer thread at
+  `performGC` (which calls `runtime.GC`) and at exit as GHC's `hs_exit` does for C finalizers; their timing is a
+  design class (as Python's PYS9 (a), OCaml's OC11).
+- **Stable pointers** a table; **stable names** a weak-keyed map from Go pointers (Go's GC does not move objects), the
+  hash values a class.
+
+### 6.8 Speed
+
+GHCi's bytecode runs `nfib` about 10 times slower than `-O0` native code (E8); goi-style closure trees on Go with
+boxing and an explicit stack are likely 1 to 5 times GHCi (to measure at HE4), so 10 to 50 times `-O0` native. The
+`-O0` programs' STG has dictionaries passed for every `+` (E2's `* $fNumDouble`), which `-O1` removes: hsi runs `-O0`
+STG for the judge's sake (HES6), and runs a library compiled at `-O1`/`-O2`, which carries most of a typical program's
+time.
+
+## 7. AOT
+
+STG → Go forms over `go/arbace/hs` (HES15 (a)), printed by repr/go and built by `arbace.build.go`, as Scheme's AOT
+(SC9 (a)) and Python's (PYS13 (a)):
+
+- each closure's code a Go function of the frame, returning the next code to run (a trampoline: Go has no tail calls),
+  the explicit stack and heap objects the interpreter's, so an AOT program and hsi share the scheduler, the primops,
+  the C ports and every class; GHC's JS back end has this shape (`GHC.StgToJS`: a trampoline over its own heap
+  objects);
+- known calls of known arity direct (a Go call where the callee returns to its caller without a thread switch or a
+  stack growth check failing), primops inlined, `case` on a tag a Go `switch`;
+- the libraries compiled once per pin into the program's packages (with hsi's image they are the same STG), so a
+  compiled program and hsi with compiled libraries (HES14 (b)) differ only in the user's modules.
+
+Realistic speed: 3 to 10 times hsi on call-heavy code (the dispatch and closure-tree overheads gone, the boxing and
+the trampoline left), still slower than GHC's `-O0` native code; the gain is small on code that spends its time in
+the libraries once those are compiled for hsi too. The alternatives: (b) STG → Java forms → j2g (Eta's route): j2g
+adds a translation of closures and statuses for nothing, the runtime being Go forms already; (c) Cmm → Go (the
+unregisterised C back end's shape): Cmm assumes GHC's RTS and heap layout, so the RTS (scheduler, GC, stacks) would
+have to be ported to Go too.
+
+The check: `bin/hsi check --aot` over the run corpora against the same references, and hsi against compiled per
+program (diffcheck's kind).
+
+## 8. The references and the corpora
+
+### 8.1 The references
+
+- **Runs recorded as data** (`test/haskell/ref-ghc914.edn`, `bin/hsi record-ref`, as `bin/java-check --record-ref`
+  and `bin/oi`'s references): each program built by the host's GHC at `-O0` (the user's brief, and the level whose STG
+  hsi runs) and run under a fixed environment (`LANG=C.UTF-8`, `TZ=UTC`, `GHCRTS` unset, no terminal, a fixed program
+  name), its status, stdout's digest and text, stderr's digest and text. The check needs no GHC beyond the dumps
+  (HES13).
+- **Masks**: none by default (GHC's outputs carry no addresses); timings and `GHC.Stats` a class. The testsuite's own
+  normalisers (`normalise_errmsg_fun`, `ignore_stdout`, ...) apply to its expected files (below).
+- **The testsuite's expected files** (`T.stdout`, `T.stderr`, with platform variants `-ws-64`, `-mingw32`, ...): a
+  second judge, as jtreg's golden files are Java's diagnostics level; where they disagree with the host's run (they
+  are made for GHC's own build configuration), the recorded run wins and the difference is listed.
+- **`-O1` runs** a later second reference (programs whose output depends on optimization: imprecise exceptions,
+  `trace` order, `unsafePerformIO`), against `-O1` STG.
+
+### 8.2 The corpora
+
+| corpus | source | size | license | use |
+|---|---|---|---|---|
+| the boot libraries | the pinned `ghc-9.14.1-src.tar.xz` (repr/haskell's corpus) | 41 packages, 1,345 modules with R6, 11 MB | BSD-3-Clause and each package's (BSD-3 mostly; to verify per package) | read, print (as built); compiled to STG: hsi's library; AOT |
+| the testsuite | `ghc-9.14.1-testsuite.tar.xz` from downloads.haskell.org (to verify) | of the order of 10,000 tests (to verify), of which the `compile_and_run` and `run_command` ones perhaps 3,000 to 4,000 (to verify; ghc-lisp ran 1,069 single-module ones of GHC 10.1's tree) | BSD-3-Clause (GHC's) | read, print (every `.hs`); eval and AOT for run tests, judged per test against the host's runs and the expected files; the rest a class |
+| the testsuite's language core | `testsuite/tests/{codeGen/should_run,deSugar/should_run,typecheck/should_run,concurrent/should_run,lib/base,primops/should_run,array/should_run,ffi/should_run}` (names to verify) | a few hundred | as above | the first eval corpus |
+| nofib | gitlab.haskell.org/ghc/nofib at a pinned commit (to verify) | about 100 programs in `imaginary`, `spectral`, `real`, `shootout`, `gc`, `parallel`, with inputs and expected outputs, run in its `fast` mode | per program, BSD-like and others (to verify) | eval and AOT; speed |
+| synthetic | generated (§8.3) | hundreds of small programs | Arbace's | every level; the essential subsets |
+| samples | `test/haskell/sample/` (repr/haskell's) and `test/haskell/eval/samples/`, one per runtime feature | tens | Arbace's | every level |
+| Hackage set (later) | a pinned set of pure packages with their test programs (`QuickCheck`, `tasty`, `random`, `splitmix`, ...) | to choose | each package's | eval (the boot libraries' own test suites need them) |
+
+### 8.3 Synthetic corpora (GT8.6, GTS207 (a))
+
+From the start: (1) one program per primop family (E4), printing each operation's results over boundary values
+(`minBound`, `maxBound`, `-0.0`, NaN, shifts by the width); (2) one per Prelude and `base` class method at its standard
+instances (`Show`, `Read`, `Enum`, `Num`, `Integral`, `RealFrac`, `Floating`, `Bits`, `Ix`), printing; (3) the
+runtime's paths: laziness (`trace` order, `seq`, deep thunk chains, `<<loop>>`), exceptions (`throw` in pure code,
+`catch`, `bracket`, `finally`, masks, `throwTo`, `timeout`), concurrency (MVar fairness, `threadDelay`, deadlock
+detection), STM (`retry`, `orElse`), weak pointers, `IORef` and arrays, `Integer` at every size, text I/O (encodings,
+buffering, `hSetBuffering`, `interact`). Each run by the same GHC and recorded (GTS207 (a)); generated by an Arbace
+generator from `primops.txt.pp`'s list and the classes' method lists, committed with its seed.
+
+## 9. Licenses
+
+GHC (`compiler/`, `rts/`, `utils/genprimopcode`, the testsuite) is under the **Glasgow Haskell Compiler License**, a
+BSD-3-Clause text; `ghc-internal`, `base`, `ghc-prim`, `ghc-bignum` the same; the other boot libraries each under their
+own (BSD-3-Clause for most: `containers`, `bytestring`, `text`, `transformers`, `mtl`, `parsec`, `stm`, `time`,
+`unix`, `directory`, `process`, `filepath`, `deepseq`, `array`, `binary`; `haskeline` BSD-3; to verify each `LICENSE`
+in the tarball). `LICENSE.md` gains them when STG dumps or ports derived from them are committed (HES13): an STG dump
+is a translation of the library's code, so it carries the library's notice, as `jdk/`'s Java forms carry the JDK's.
+GMP (LGPL-3.0-or-later or GPL-2.0-or-later) is not needed with the native bignum backend (HES7 (a)). nofib's programs
+have mixed licenses (to verify per program: some are BSD-style, some "free for research"); a program without a clear
+license stays out of the committed corpus and is fetched by pin. MicroHs (Apache-2.0) and the external STG
+interpreter (BSD-3, to verify) are references, not vendored.
+
+## 10. The row and GT8's budget
+
+### 10.1 The row
+
+`test/reap/cells.edn` gains `:haskell` with four cells and classes files (`test/haskell/divergences{,-read,-aot,-print}.edn`);
+the read and print cells judged from repr/haskell's existing records (the round trip's results files, written by the
+full runs as C's are, CS240 (a)), extended to the testsuite's sources; the Makefile gains `hsi-*` targets (`make
+check-makefile`). As the other crops since OC120 (b), its steps enter the gate only when its row fits GT8's budget
+(the journal, 2026-11-03).
+
+### 10.2 The budget (GTS201 (a): about 35 minutes nightly, about 2.4 hours clean, a share of the essential 15 minutes)
+
+| tier | Haskell's content (proposed) | estimate (to measure at HE2, HE4, HE6) |
+|---|---|---|
+| essential (about 1 min) | the samples at every level; the synthetic core's coverage subset under hsi from cached dumps; one AOT program; 20 boot-library modules round-tripped at the tree level | under 60 s on stage 0 and the gate's executable, the dumps and the libraries' image cached by key |
+| nightly (35 min) | read and print over the boot libraries (today 585 s, HASKELL-NOTES R5; the interface level's 4.5 minutes the largest part, so a coverage subset of its packages plus the rotation) and the testsuite's sources, deduplicated (GT8.2); eval and AOT over the coverage subset of the testsuite's run tests and nofib's `fast` mode (GTS205 (a): every block of `go/arbace/hs` reached, every primop family, every class with one case, the controls, every deferred case) plus the rotation's seventh (GTS203 (a)) | read and print about 8 min after compression; eval about 15 min (hundreds of programs at 1 to 10 s each under hsi, eight at a time); AOT about 10 min (the Go builds of shards, under the heavy lock) |
+| clean (2.4 h) | every part over the compressed corpora, audited; the rotation's record complete; the dumps rebuilt from GHC in the fresh clone | the dumps of the boot libraries about 5 minutes (as the interface level's compiles); the rest within 2.4 h if the nightly is within 35 min |
+
+**Why the testsuite whole cannot be nightly.** GHC's own validate runs the testsuite in tens of minutes on many cores
+natively (to verify); each run test is a GHC compilation (about 1 s, E2) plus a run that hsi makes 10 to 50 times
+slower (§6.8). The references and dumps are recorded once per pin, so a night pays only for hsi's runs; the coverage
+subset carries the night, the rotation the week, and per-test CPU limits (GTS102, GTS208) catch the slow ones (nofib's
+`real` programs, the `concurrent` stress tests).
+
+## 11. Plan (HE1-HE11)
+
+Estimates in working days, as the other surveys give them. Each milestone ends with its check green and its records.
+
+| milestone | content | exit criteria | days |
+|---|---|---|---:|
+| **HE1** the spec and pins | `doc/haskell/STG-SPEC.md`: STG forms for every `GHC.Stg.Syntax` constructor of 9.14.1, Ids, data constructors, representations, literals, foreign calls (§4); pins (the testsuite tarball's sha256, nofib's commit, `test/haskell/eval-corpora.edn`); the testsuite's run tests counted; samples | the spec accepted; every corpus pinned and counted | 2-3 |
+| **HE2** the STG dump | `tools/hsdump stg` and `core` (the hook, §5.2); the boot libraries compiled as hadrian did (HES6) with the bignum backend of HES7 and dumped; `bin/hsi dumps` (each dump read back by Arbace's reader, every head known, two runs byte for byte equal); sizes and times recorded; the binary image format and its loader | every module of the 41 packages and every sample dumped and checked; the image loads in a measured time | 3-5 |
+| **HE3** references and synthetic corpora | `bin/hsi record-ref`, `test/haskell/ref-ghc914.edn`; the generator of §8.3; the testsuite's `all.T` read (HES17), its run tests listed with their options | references for the synthetic, the language-core tests and nofib | 3-5 |
+| **HE4** hsi's machine | `go/arbace/hs`: heap objects, the explicit-stack eval/apply loop, updates, blackholes, PAPs; the 742 primops; exceptions and masks; green threads, MVars, `delay#`; the top level (`runMainIO`, argv, exit); the first C ports (the I/O library's POSIX calls on `crt`); `bin/hsi run` | the samples and the synthetic corpus run or classed; `Hello`, `T.hs`, `U.hs`, `L.hs` (Appendix A) byte for byte | 15-25 |
+| **HE5** the libraries' C and the rest of the RTS | every C symbol the corpora reach, libm through musl's C forms, the `cbits` of `base`, `bytestring`, `text`, `containers`, `unix`, `directory`, `process`, `time`; STM; asynchronous exceptions, `timeout`, deadlock detection; weak pointers, finalizers, stable names; `prompt#`/`control0#` | the testsuite's language-core run tests and nofib: none failing, every non-pass classed | 8-14 |
+| **HE6** the check and the classes | `bin/hsi check`, `divergences`, controls (GTS81 (a)), the coverage subsets and rotation slices (GT8), the testsuite's run tests whole | every run test in a result or a class; the nightly within its share | 4-6 |
+| **HE7** the REPL | the helper as a GHC session server (statements, `let`, `it`, `:t`, `:k`), hsi's REPL holding the session's STG | a scripted session byte for byte against GHCi's output for expressions and `let` | 3-5 |
+| **HE8** AOT | STG → Go forms (§7), the libraries compiled once per pin, `bin/hsi check --aot`, hsi against compiled; hsi with compiled libraries (HES14 (b)) | none failing; every refusal with a reason; speed recorded | 10-16 |
+| **HE9** read and print extended | the testsuite's and nofib's sources read and printed at the four levels; the behaviour level (the printed run programs compiled by GHC and run against the originals' references) | every file in a result or a class; the print cell's behaviour level recorded | 3-4 |
+| **HE10** the row | `cells.edn` `:haskell`, classes files, `bin/reap`, essential subsets, steps (`:parts` per corpus), Makefile | `bin/reap`: Haskell's four cells checked, none failing; `bin/gate --costs` within the share | 1-2 |
+| **HE11** the milestone | `bin/gate --full --clean` with Haskell's steps within budget, the embedding and re-seed if decided (HES19), the tag | the tag | 1-2 |
+
+**Total: about 54 to 88 working days** (HE1 2-3, HE2 3-5, HE3 3-5, HE4 15-25, HE5 8-14, HE6 4-6, HE7 3-5, HE8 10-16,
+HE9 3-4, HE10 1-2, HE11 1-2). HE1-HE3 (8 to 13 days) are a trial with no runtime commitment: they give the dumps and
+the references, from which the size of the long poles is re-estimated. HE7 and HE9 can run beside HE4-HE6. A standalone
+front end (HES21) is not in the total.
+
+**Sonnet and Opus** (the user's split): Sonnet for HE1's spec from `GHC.Stg.Syntax`, the helper's serializer (Haskell,
+mechanical once the heads are fixed), HE3's references, `all.T` reading and the generator, the libc and libm ports'
+tables, HE6's classing, HE9, HE10. Opus for the machine (stack, updates, blackholes, the scheduler), asynchronous
+exceptions and STM, the deadlock walk, the memory model's join with `crt`, the AOT's trampolined code, HE5's harder
+`cbits`.
+
+**Re-seed needs.** HE1-HE3 change tools' namespaces and the helper only (evaluated from the checkout, out of
+`gate_key`). `go/arbace/hs` is evaluated by goi until listed in goi's table and compiled; embedding hsi in the shipped
+program waits for a re-seed batched with the other crops' (CS250's decided line).
+
+## 12. Proposals (HES1-HES22)
+
+Each with options, the recommended one first.
+
+- **HES1 The reference and its pins.**
+  - Options: (a) GHC 9.14.1 as on the host (Alpine `ghc-9.14.1-r2`, `tools/hsdump/GHC_VERSION`), the source tarball
+    already pinned by repr/haskell, the release's testsuite tarball (`ghc-9.14.1-testsuite.tar.xz`, sha256 pinned, to
+    verify that the release ships one) and nofib at a pinned commit, fetched at HE1; (b) a GHC bindist pinned by hash in
+    `.tmp/` (independent of Alpine's moves); (c) GHC 9.12 (the previous series).
+  - *Recommended: (a)*, (b) if Alpine edge moves before HE11 (repr/haskell's H11 (a) already says so).
+- **HES2 Names.**
+  - Options: (a) `hsi` (`bin/hsi`), the runtime `go/arbace/hs`, STG forms with heads `stg/...`, the spec
+    `doc/haskell/STG-SPEC.md`, milestones HE1-HE11, proposals HES (HES30 onward after HE1); (b) `ghi` (close to GHCi);
+    (c) `stgi` (an existing project's name, §2.3).
+  - *Recommended: (a)*.
+- **HES3 What eval interprets.**
+  - Options: (a) GHC's final STG (after unarisation) from the helper: the representation GHC's three back ends share,
+    evaluation order fixed, untyped with representations; (b) Core (`-fwrite-if-simplified-core`'s `extra decls`, or
+    the simplifier's output) with Arbace's own CorePrep and CoreToStg (saturation, A-normal form, unarisation: some
+    thousands of lines re-done, typed and more stable across releases); (c) an Arbace front end (renamer, type checker
+    with classes, families, GADTs and the boot libraries' extensions: far beyond one crop); (d) GHCi's bytecode
+    (`-ddump-bcos`): an internal format tied to `rts/Interpreter.c`.
+  - *Recommended: (a)*: the same STG the judge's code is generated from, so evaluation order and imprecise exceptions
+    agree; (b) if STG's changes between releases cost more than CorePrep's re-implementation would.
+- **HES4 How the helper captures STG.**
+  - Options: (a) a GHC API driver in `tools/hsdump` with the hook between STG and Cmm, serializing the STG bindings,
+    the data constructors and the foreign stubs, the compilation continuing to the object; (b) a plugin (Core-to-Core
+    plugins see Core only; a later GHC's STG plugin point if any, to verify); (c) `-ddump-stg-final`'s text scraped
+    (lossy, E2).
+  - *Recommended: (a)*, as `hsdump` already drives GHC's API.
+- **HES5 Prior art's role.**
+  - Options: (a) references: Hruska's external STG interpreter's primops and FFI as a checklist, GHC's `rts/` and
+    `StgToJS` as the models, no code vendored; (b) vendor the external STG format and its exporter (a patched GHC, not
+    the host's); (c) none.
+  - *Recommended: (a)*: the host's GHC and its API serve; a patched GHC is a second compiler to pin.
+- **HES6 The libraries' compilation.**
+  - Options: (a) every boot library compiled from the pinned tarball as hadrian compiled the installed ones (unit ids,
+    relative paths, the release flavour's optimization levels, verified against the installed `.hi` files), the user's
+    programs at `-O0`; (b) everything at `-O0` (simpler; the library's STG then differs from what the reference
+    linked: `trace`, imprecise exceptions and `unsafePerformIO` inside libraries may differ); (c) everything at `-O1`.
+  - *Recommended: (a)*: the reference program links the installed libraries, so their STG must be theirs.
+- **HES7 The bignum backend.**
+  - Options: (a) `ghc-internal` compiled with GHC's pure-Haskell native backend (`GHC.Internal.Bignum.Backend.Native`,
+    the flag's name to verify), so `Integer` and `Natural` need no C (results identical; speed lower; the backend's name
+    is the one observable difference, a class); (b) the 31 GMP functions of E5 ported to Go (math/big's internals are
+    not exported); (c) GMP read as C forms and run by ci (LGPL; its generic C only).
+  - *Recommended: (a)*; (b) at HE8 if `Integer`-heavy programs are too slow.
+- **HES8 The machine.**
+  - Options: (a) eval/apply with an explicit heap-allocated stack per thread, eager blackholing, the loop a Go `for`,
+    code as closure trees compiled at load (§6.3); (b) direct style on Go's stack with goroutines as Haskell threads
+    (fast calls; E7's deep chains, `<<loop>>`, asynchronous exceptions and `control0#` lost or rebuilt); (c) push/enter.
+  - *Recommended: (a)*, as si's heap frames for Scheme (SC5) and PYS7's frames for Python.
+- **HES9 Haskell threads.**
+  - Options: (a) green threads on hsi's scheduler with the non-threaded RTS's semantics (one capability, `forkOn` as
+    `fork`, STM transactions unpreempted), `-threaded` a class; (b) goroutines (the threaded RTS's semantics: MVars,
+    TVars, blackholes and the heap need locks; nondeterminism in the judge's runs); (c) no concurrency in v1.
+  - *Recommended: (a)*: the references are non-threaded runs (GHC's default).
+- **HES10 Memory for `Addr#` and pinned data.**
+  - Options: (a) `crt`'s flat address space (C23-SURVEY §6.3) for `Addr#`, `malloc` (musl's), pinned byte arrays and
+    string literals, shared with ci, so C ports and C read as forms see the same bytes; (b) `Addr#` as a Go slice and
+    an offset of hsi's own (no C interop beyond hand-written ports); (c) `unsafe.Pointer` into Go memory (GC hazards).
+  - *Recommended: (a)*.
+- **HES11 The C the libraries call.**
+  - Options: (a) a Go table by symbol, ported as the corpora reach them (measured at HE5), libm through musl's C forms
+    (cf2g) for bit-exact results, the unreached a run-time class with the symbol's name; (b) (a) plus the packages'
+    `cbits/*.c` read by repr/c and run by ci where a port is long (`text`'s simdutf is C++: a port or a class), and a
+    user program's own C the same way, later; (c) GHC's RTS read as C forms (it assumes its own heap and stacks: no).
+  - *Recommended: (a)*, (b) studied at HE5.
+- **HES12 Primops.**
+  - Options: (a) the 742 non-SIMD primops in Go, checked one by one against `primops.txt.pp` and the synthetic corpus,
+    SIMD, compact regions, BCOs, closure inspection and profiling primops a class; (b) SIMD too (Go has no portable
+    vectors: element loops); (c) only those the corpora reach.
+  - *Recommended: (a)*; (b) when a corpus needs it.
+- **HES13 Where the dumps live.**
+  - Options: (a) cached by key under `.tmp/` (GHC's pin, the sources' digests, the flags), rebuilt by the helper in
+    minutes, so eval's checks need the host's GHC as read's and print's do today; (b) committed as data per corpus
+    (OC4 (a)'s way: checks need no GHC; sizes of the order of 100 MB to verify, compressed); (c) the boot libraries'
+    image committed, the programs' dumps cached.
+  - *Recommended: (a)* in v1, (c) when the standalone direction asks for it, the sizes measured at HE2.
+- **HES14 How hsi loads the libraries.**
+  - Options: (a) a binary image of the libraries' STG (compiled code trees serialized, one file per pin and
+    configuration) loaded per run, its load time measured; (b) the libraries AOT-compiled into hsi (GHCi's own model:
+    libraries native, the program interpreted), at HE8; (c) the forms read per run (too slow, §4.2).
+  - *Recommended: (a)* until HE8, then (b).
+- **HES15 AOT's path.**
+  - Options: (a) STG → Go forms over `go/arbace/hs`, trampolined, sharing the stack and heap objects (StgToJS's
+    shape); (b) STG → Java forms → j2g (Eta's route); (c) Cmm → Go (needs GHC's RTS in Go).
+  - *Recommended: (a)*, as Scheme's SC9 (a) and Python's PYS13 (a).
+- **HES16 The run judge.**
+  - Options: (a) status, stdout and stderr byte for byte, the program name fixed, `LANG=C.UTF-8`, `TZ=UTC`, `GHCRTS`
+    unset, no masks by default (masks per class where timings or `GHC.Stats` print); (b) stdout only; (c) stderr's
+    last line only (as Python's default).
+  - *Recommended: (a)*: GHC's stderr is deterministic and its backtraces are Haskell (E6), so it can be judged whole.
+- **HES17 The testsuite's runner and judge.**
+  - Options: (a) Arbace's own runner: `all.T`'s common forms (`test(name, opts, compile_and_run, [flags])`, `extra_files`,
+    `exit_code`, `ignore_stdout`, `only_ways`, `when(...)`) read as data (by repr/python's reader once it exists, a
+    small reader of that subset until then), each test a case judged against the host's recorded run and its expected
+    files, tests beyond the subset a class; (b) GHC's Python driver (`testsuite/driver`) with a `TEST_HC` wrapper that
+    compiles with GHC and makes the "executable" a launcher of hsi (its normalisers for free; the host's Python at
+    check time); (c) only single-module tests with a `.stdout` (ghc-lisp's method).
+  - *Recommended: (a)*, as goi reads `$GOROOT/test`'s directives itself; (b) as a cross-check at HE6.
+- **HES18 The REPL.**
+  - Options: (a) the helper as a GHC session server (InteractiveContext: each statement typed and compiled to STG by
+    GHC, its value shown by `show` as GHCi's `print`), hsi holding the bindings, at HE7; (b) programs only in v1; (c)
+    GHCi itself with hsi as its external interpreter (`-fexternal-interpreter`'s protocol runs bytecode, not STG: no).
+  - *Recommended: (a)*.
+- **HES19 Embedding.**
+  - Options: (a) the helper's modes and hsi's tools evaluated from the checkout, `go/arbace/hs` evaluated by goi, out of
+    `gate_key`, until the row fits the budget, then embedded at a re-seed batched with the other crops'; (b) embedded
+    from HE4.
+  - *Recommended: (a)*, as the crops since CS250 and PYS18.
+- **HES20 Print.**
+  - Options: (a) as built (R1-R6, HR1-HR28): the four levels are the print cell, plus the behaviour level of HE9; STG
+    forms are never printed as Haskell (a `-ddump-stg-final`-like text printer for debugging only); (b) a Core level
+    (the print compiled, its Core equal to the original's: REPR-HASKELL-SURVEY H8's "Core later"), beside the interface
+    level; (c) nothing new.
+  - *Recommended: (a)*; (b) if the interface level proves too weak (it already compares `-O1` interfaces with
+    unfoldings).
+- **HES21 A standalone front end (later).**
+  - Options: (a) a later survey: GHC itself (the installed `ghc` library, about the size of javac's world many times
+    over) compiled to STG by the host's GHC and through hsi's AOT, as javac runs on Arbace (JN3-JN6), making the front end
+    Arbace's executable; (b) MicroHs on hsi (smaller; its own `base`, so its STG is not the judge's); (c) an Arbace type
+    checker for Haskell (years).
+  - *Recommended: (a)*, after HE11, its survey first.
+- **HES22 The crop's place in the order.**
+  - Options: (a) after the tag `arbace-reaps-4-crops-v1` and GT8's compressed corpora: HE1-HE3 (light: a spec, the
+    helper's modes, references) any time beside Python, HE4 onward when the night budget has room, on the main host;
+    (b) on the Mac VM after Python (PYS19's line); (c) beside Rust's eval survey, whichever row is nearer first.
+  - *Recommended: (a)*; (b) if the main host stays on GT8 and the other crops.
+
+## 13. What to decide first
+
+HES3 (what eval interprets) and HES4 (how the STG is captured), then HES6 and HES7 (the libraries' compilation and
+bignum backend), HES8 (the machine), HES10 (memory), and HES22 (when). The rest follow. A cheap trial is HE1-HE3: the
+dumps of the boot libraries, their sizes, and the references, with no runtime commitment.
+
+## 14. Risks
+
+- **The libraries' STG must be the installed libraries'** (HES6): hadrian's flags, unit ids and source paths
+  reproduced exactly, or `HasCallStack` text (E6) and library-internal evaluation order differ. Checked at HE2 by the
+  interfaces: the dumped compilation's `.hi` files equal to the installed ones (repr/haskell's interface level already
+  compares interfaces), up to the bignum backend's modules.
+- **The RTS's semantics are many and subtle**: asynchronous exceptions and masking, `BlockedIndefinitely` detection,
+  finalizer timing, scheduling points, `timeout`. The testsuite's `concurrent` directory exercises them; classes may
+  be large, each with its reason.
+- **Speed** (§6.8): hsi at 10 to 50 times `-O0` native narrows the nightly share; nofib's `real` programs and the
+  testsuite's stress tests may need the AOT or per-test limits.
+- **The C tail** (E5): `iconv`, `process`'s `fork`/`exec`, terminal handling (`haskeline`, `terminfo`), `text`'s C and
+  C++ (`simdutf`, to verify), sockets (not a boot library) as classes or ports; a program importing an unported one is a
+  class, not a failure.
+- **STG changes between GHC releases**: the helper's serializer and the spec follow `GHC.Stg.Syntax`; a new pin means a
+  new spec revision (as repr/haskell's tree did, REPR-HASKELL-SURVEY E3).
+- **The front end stays GHC's** (HES3): the row is not standalone in v1; the standalone path (HES21) is a long one.
+- **Dump sizes** (§4.2): of the order of 100 MB or more of text for the libraries (to measure): the binary image and
+  the cache keep it off the nightly's time, not off the disk.
+- **Moving pins**: Alpine edge may move GHC (to 9.14.2 or 9.16, to verify); the apk's version recorded, HES1 (b) the
+  fallback.
+- **Estimates**: HE4's range (15-25) is the widest; the primops are many but mechanical, the machine is the risk. The
+  plan is re-estimated after HE3's numbers and HE4's first runs.
+
+## 15. Sources
+
+- The host: `/usr/bin/ghc` 9.14.1 (Alpine `ghc-9.14.1-r2`), `ghc --info`, `ghc --show-options`, `ghc --show-iface`,
+  `/usr/lib/ghc-9.14.1/lib/x86_64-linux-ghc-9.14.1-07a2/` (`ghc-internal-9.1401.0-6d86`, `base-4.22.0.0-3875`,
+  `ghc-bignum-1.4-aa8c`, `ghc-prim-0.13.1-b8e0` and their `.a` archives, E5), `runghc`.
+- Upstream (not downloaded; to verify at HE1): gitlab.haskell.org/ghc/ghc at tag `ghc-9.14.1-release`:
+  `compiler/GHC/Stg/Syntax.hs`, `compiler/GHC/Stg/Unarise.hs`, `compiler/GHC/CoreToStg.hs`, `compiler/GHC/CoreToStg/Prep.hs`,
+  `compiler/GHC/StgToJS/`, `compiler/GHC/StgToByteCode.hs`, `compiler/GHC/Driver/Hooks.hs`,
+  `compiler/GHC/Builtin/primops.txt.pp`, `rts/` (`Schedule.c`, `RaiseAsync.c`, `STM.c`, `Threads.c`, `Interpreter.c`,
+  `PrimOps.cmm`, `Updates.cmm`), `libraries/ghc-internal/` (`GHC/Internal/TopHandler.hs`, `GHC/Internal/Bignum/Backend/`,
+  `cbits/`), `hadrian/src/Settings/` (the release flavour), `testsuite/` (`driver/`, `tests/`, `mk/`); the release
+  tarballs at downloads.haskell.org/ghc/9.14.1/ (`ghc-9.14.1-src.tar.xz` pinned by repr/haskell;
+  `ghc-9.14.1-testsuite.tar.xz` to verify); gitlab.haskell.org/ghc/nofib; the GHC User's Guide (the RTS options,
+  concurrency, the FFI chapter).
+- Prior art (references, not vendored; licenses to verify): grin-compiler/ghc-whole-program-compiler-project (Csaba
+  Hruska: external STG, the STG interpreter), augustss/MicroHs (Apache-2.0), Hugs (haskell.org/hugs), GHCJS (MIT), Eta
+  (typelead/eta, BSD-3), Frege (BSD-3), stgi (quchen/stgi, BSD-3), ministg; the papers of §2.3.
+- Arbace: CLAUDE.md; doc/REPR-HASKELL-SURVEY.md (H1-H14, §5.2 "Translators"), doc/haskell/SPEC.md,
+  doc/haskell/HASKELL-NOTES.md (R1-R6, HR1-HR28; R5's times); doc/ocaml/OCAML-SURVEY.md (OC4, OC5, O4, O5: the
+  oracle's IR interpreted); doc/scheme/SCHEME-SURVEY.md (§5.2 heap frames, §6 AOT); doc/python/PYTHON-SURVEY.md (this
+  file's shape); doc/C23-SURVEY.md (§6.3, the memory model; CS250); doc/GATE-SURVEY.md, "GT8, the test budget" and its
+  decisions; doc/FULL-SUPPORT-SURVEY.md; `tools/hsdump`, `test/haskell/corpus-ghc-9.14.1.edn`, `go/arbace/{oi,scm,crt}`.
+
+## Appendix A: the scratch
+
+In the worktree `.tmp/worktrees/haskell-eval-survey`, `.tmp/haskell-eval/` (gitignored): `T.hs` (E2, E3: a class and
+instance, a lazy sieve, `Data.Map.Strict`, `IORef`, `Integer`, `try`/`evaluate`; its `T.dump-simpl`, `T.dump-prep`,
+`T.dump-stg-final` at `-O0` and `-O1`, `T.hi` with `-fwrite-if-simplified-core`), `U.hs` (E6: `trace` order and an
+uncaught `Map.!`), `L.hs` (E7: a 3,000,000-deep `foldl` and `<<loop>>`), `F.hs` (E8: `nfib 32` at `-O0`, `-O1` and under
+`runghc`), `E.hs` (`runghc`'s start), `b.ghci` and `prim.txt`, `primnames.txt`, `nosimd.txt` (E4: `:browse GHC.Prim`),
+`u-*.txt`, `d-*.txt`, `ext-*.txt` (E5: `nm` of the four archives), `test.log` (`bin/repr-haskell test`, passing, run
+with `ARBACE_HOST_EXE` the main checkout's stage 0). Each probe took seconds; the longest was `bin/repr-haskell test`.
