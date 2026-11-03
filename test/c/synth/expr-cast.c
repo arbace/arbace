@@ -3,6 +3,8 @@
 // ISO/IEC 9899:2024 6.5.5, 6.3; Annex A: cast-expression
 #include <stdio.h>
 
+static const bool sb1 = 0.25, sb2 = 0.0, sb3 = -0.0, sb4 = -1e-300;
+
 int main(void) {
   double d = 3.75;
   int n = -7;
@@ -20,5 +22,11 @@ int main(void) {
   printf("%s = %d\n", "(bool)0.5", (bool)0.5);
   printf("%s = %d\n", "(bool)2", (bool)2);
   printf("%s = %d\n", "(int)(unsigned short)-1", (int)(unsigned short)-1);
+  printf("%s = %d\n", "sb1", sb1);
+  printf("%s = %d\n", "sb2", sb2);
+  printf("%s = %d\n", "sb3", sb3);
+  printf("%s = %d\n", "sb4", sb4);
+  printf("%s = %d\n", "(bool)-0.75", (bool)-0.75);
+  printf("%s = %d\n", "(int)(bool)2.5f", (int)(bool)2.5f);
   return 0;
 }
