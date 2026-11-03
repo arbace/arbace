@@ -799,3 +799,23 @@ pyperformance 1.14.0's sdist (`pyperformance-1.14.0.tar.gz`, 8,796,350 bytes, SH
 digest) is the speed reference for pyi and its AOT: pinned in `test/python/corpora.edn` (`:pyperformance-1.14.0`), fetched into
 `.tmp/` and read in place by `bin/repr-python pins --fetch`, checked by `pins --check`; its pure-Python benchmarks to run as plain
 programs with fixed loop counts, their output recorded as references (pyperf's timing runner not used).
+
+## As built: PY5a (2026-11-03, the Mac VM, queue 179a)
+
+PY5 split into steps reviewed one by one (queue 179's brief); PY5a is the scope analysis and the compiler, specified in
+[PYI-SPEC.md](PYI-SPEC.md):
+
+- **The scope analysis** `arbace.python.scope`: a port of CPython 3.14.10's `Python/symtable.c` (and `future.c`'s
+  `__future__` check), its table printed in the form of the helper's new mode `pydump.py scopes` (CPython's own
+  `_symtable`). `bin/pyi scope-check` over every read corpus: 2,980 files (samples 6, synthetic 145, errors 75, stdlib
+  720, site-packages 921, lib-test 1,153), every table equal block for block and flag for flag, every rejection with
+  CPython's message; `test/python/scope-known.edn` empty. The corpus `errors` (`test/python/errors/`, Arbace's): one
+  program per message of `symtable.c`, and one per message of `codegen.c` the parser lets through (`compile-*.py`).
+- **The compiler** `arbace.python.compile` (after `codegen.c`) to pyi's IR `arbace.python.ir` (§3 of the spec: code
+  objects as maps, a stack machine with an exception table built from a handler stack as CPython's flowgraph builds
+  it), and its verifier (stack depths by a worklist, handlers, indices, returns). `bin/pyi compile-check` over the same
+  corpora: every file CPython compiles compiles and verifies (about 5.3 million instructions), every file CPython's
+  compiler rejects is rejected with its message; `test/python/compile-known.edn` empty.
+- **The keys** (PYS18 (a)): `arbace/python.ae`, `arbace/python/` and `go/arbace/py` out of `gate_key`, the embedded
+  sources and the audit's tables, as the other crops'; `test/gate/gate-key-crops-test.bash` covers them.
+- Not yet: running the IR (PY5b), so its behaviour is unchecked; lines come only from forms of mode `:full`.
