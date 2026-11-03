@@ -197,7 +197,7 @@
 (def ^:private unkeyed
   ;; GT8.4: :rotate (a part run whole keeps its key), :list (its digest is the line list SHA N), :failed-re and
   ;; :rotated-part (the runner's bookkeeping, never a verdict)
-  #{:doc :summary :mem-gib :heavy :audit-cmd :rotate :list :failed-re :rotated-part})
+  #{:doc :summary :mem-gib :heavy :audit-cmd :rotate :list :failed-re :rotated-part :whole-list})
 
 (defn- material
   "the lines a step's key is the hash of (but its :uses lines, use-lines'); a host whose identity is
@@ -422,7 +422,9 @@
   then one never run, then the one whose latest run is oldest; ties by the night index (slice NIGHT mod 7 first)"
   [store nm slices night]
   (->> (for [[k ids] slices :when (seq ids)
-             :let [r (last (runs-of store (str nm ".s" k)))]]
+             ;; a whole part's run (NAME.PART.whole) is a run of every slice (whatever its list)
+             :let [r (last (sort-by (juxt :epoch :whole) (concat (map #(assoc % :whole 1) (runs-of store (str nm ".s" k)))
+                                                           (map #(assoc % :whole 0) (runs-of store (str nm ".whole"))))))]]
          [[(if (= "fail" (:status r)) 0 1) (if r (:epoch r) -1) (mod (- k night) period)] k])
        sort first second))
 
@@ -439,8 +441,16 @@
                              (assoc :name (symbol (str (:name s) "." suffix)) :rotation tag :list ids
                                     :rotated-part (str (:name s)) :failed-re (:failed-re (:rotate s))
                                     :cmd (with-only (:cmd s) frag))))]
-                (if-not lists
+                (cond
+                  (not lists)
                   [(cond-> s (:cmd s) (update :cmd with-only nil))]
+                  ;; a rotated part run whole (--full, the clean run's GATE_CLEAN_WHOLE=1): its key as before (the
+                  ;; universe unkeyed, :whole-list), its run noted as NAME.PART.whole, a run of every slice
+                  (= rotation :whole)
+                  [(-> s (dissoc :rotate) (update :cmd with-only nil)
+                       (assoc :whole-list (vec (sort (:universe lists))) :rotated-part (str (:name s))
+                              :failed-re (:failed-re (:rotate s))))]
+                  :else
                   (let [sub (mk "sub" (:subset lists) "sub")]
                     (if (= rotation :subset)
                       [sub]
@@ -472,15 +482,17 @@
         ;; GT8.4: the rotated parts (--nightly: the subset and the night's slice; the clean run: the subset)
         _ (when (and (= mode "nightly") (not (integer? rotation)))
             (println "gate plan: nightly needs --night N") (System/exit 2))
-        steps (rotate-steps root store steps (when (#{"full" "nightly"} mode) rotation))
+        steps (rotate-steps root store steps (when (#{"full" "nightly"} mode) (or rotation :whole)))
         pdir (File. (str logs "/plan"))
         _ (.mkdirs pdir)
         rdir (File. (str logs "/rotation"))
         _ (.mkdirs rdir)
-        _ (doseq [s steps :when (:rotation s)]
-            (spit (str rdir "/" (:name s) ".list") (apply str (map #(str % "\n") (:list s))))
+        _ (doseq [s steps :when (or (:rotation s) (:whole-list s))
+                  :let [l (or (:list s) (:whole-list s)) tag (or (:rotation s) "whole")
+                        rn (if (:whole-list s) (str (:name s) ".whole") (str (:name s)))]]
+            (spit (str rdir "/" (:name s) ".list") (apply str (map #(str % "\n") l)))
             (spit (str rdir "/" (:name s) ".rot")
-                  (str "part\t" (:rotated-part s) "\nslice\t" (:rotation s) "\nlist-sha\t" (list-sha (:list s))
+                  (str "part\t" (:rotated-part s) "\nslice\t" tag "\nruns\t" rn "\nlist-sha\t" (list-sha l)
                        "\nfailed-re\t" (or (:failed-re s) "") "\n")))
         used (set (for [s steps u (:uses s)] (producer u)))
         ;; the checks' decisions, in order: a step that uses others' outputs (GT5) is keyed over them,
@@ -641,9 +653,14 @@
       (println "gate rotation: no corpus is compressed (no rotated part has a :subset smaller than its universe): --nightly runs every part whole, nothing to rotate")
       (doseq [[s {:keys [universe subset failed slices]}] parts]
         (let [nm (str (:name s))
+              usha (list-sha (sort universe))
+              wholes (map #(assoc % :whole 0) (filter #(= usha (:list-sha %)) (runs-of store (str nm ".whole"))))
               st (for [[k ids] slices :when (seq ids)]
+                   ;; a slice's runs with its current list, and the whole part's runs with the current universe (every
+                   ;; current list is in it, however the subset and the failed files split it since)
                    (let [ls (list-sha ids)
-                         r (last (filter #(= ls (:list-sha %)) (runs-of store (str nm ".s" k))))
+                         r (last (sort-by (juxt :epoch :whole) ; in the same second the slice's own run is the later
+                                          (concat (map #(assoc % :whole 1) (filter #(= ls (:list-sha %)) (runs-of store (str nm ".s" k)))) wholes)))
                          ok (and r (#{"pass" "skip"} (:status r)) (>= (:epoch r) since))]
                      [k (count ids) r ok]))
               incomplete (remove #(nth % 3) st)]
@@ -654,7 +671,7 @@
                           (str "; not passed within " days " days: "
                                (str/join ", " (for [[k n r] incomplete]
                                                 (str "s" k " (" n " files, "
-                                                     (if r (str (:status r) " " (:date r)) "never run with this list") ")")))))
+                                                     (if r (str (:status r) " " (:date r)) "never run with this list, nor the part whole with this universe") ")")))))
                         (when (seq failed) (str "; failed since, to pass (and to add to :subset): " (str/join " " (take 10 failed))
                                                 (when (> (count failed) 10) (str " (+" (- (count failed) 10) ")")))))))))
     (when (pos? @bad) (System/exit 1))))

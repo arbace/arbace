@@ -121,6 +121,39 @@ if [ -s "$store/_rotation/toy.toy.s3.runs" ]; then
   case $(names "$t/n5") in *toy.toy.s3*) ok "every slice passed: the night runs the one that ran longest ago (s3)" ;; *) no "the oldest slice: $(names "$t/n5")" ;; esac
 fi
 
+# 7. a whole part's run (--full; the clean run with GATE_CLEAN_WHOLE=1) is a run of every slice: noted as
+# NAME.PART.whole with the universe as its list, completing the rotation in one night
+store=$t/store2; mkdir -p "$store"
+plan "$t/w" full || no "the whole plan"
+if [ "$(sed -n 's/^slice\t//p' "$t/w/rotation/toy.toy.rot")" = whole ] && [ "$(wc -l < "$t/w/rotation/toy.toy.list")" = 40 ]; then ok "--full: a rotated part's run noted as whole, its list the universe (40)"; else no "the whole part's .rot: $(cat "$t/w/rotation/toy.toy.rot" 2>&1)"; fi
+sed 's/^   :rotate .*}}$/}/' "$r/test/steps.edn" > "$t/steps-norot.edn"
+GATE_STEPS=$t/steps-norot.edn plan "$t/wn" full
+kr=$(col "$t/w" toy.toy 3)
+if [ ${#kr} = 64 ] && [ "$kr" = "$(col "$t/wn" toy.toy 3)" ]; then ok "--full: the whole part's key is the one without :rotate"; else no "the whole part's key changed with :rotate: $kr $(col "$t/wn" toy.toy 3)"; fi
+logs=$t/w; key[toy.toy]=$kr
+rotation_note toy.toy pass
+if [ -s "$store/_rotation/toy.toy.whole.runs" ] && [ ! -e "$store/_rotation/toy.toy.s0.runs" ]; then ok "the whole run noted in toy.toy.whole.runs"; else no "the whole run's note: $(ls "$store/_rotation")"; fi
+if status "$(date +%s)" && grep -q '^complete   toy.toy' "$t/status.out"; then ok "rotation-status: one whole pass completes every slice"; else no "rotation-status after a whole pass: $(cat "$t/status.out")"; fi
+plan "$t/w2" nightly --night 2
+case $(names "$t/w2") in *toy.toy.s2*) ok "after a whole pass every slice ran at once: the night's index decides (s2)" ;; *) no "after a whole pass: $(names "$t/w2")" ;; esac
+# a slice run that fails after the whole pass: its latest run fails, the rotation is incomplete again
+logs=$t/w2; key[toy.toy.s2]=$(col "$t/w2" toy.toy.s2 3)
+: > "$t/w2/toy.toy.s2.log"; rotation_note toy.toy.s2 fail
+if ! status "$(date +%s)" && grep -q 's2 (.*fail' "$t/status.out"; then ok "a slice's failure after the whole pass: incomplete"; else no "a later slice failure: $(cat "$t/status.out")"; fi
+# the whole part again: a failure names its file (into the subset), every slice's latest run a failure; then a pass clears it
+logs=$t/w; printf 'FAIL toy/p20.c differs\n' > "$t/w/toy.toy.log"; rotation_note toy.toy fail
+if [ "$(cat "$store/_rotation/toy.toy.failed")" = toy/p20.c ]; then ok "a whole part's failure: its named file joins the subset"; else no "the whole failure's file: $(cat "$store/_rotation/toy.toy.failed" 2>&1)"; fi
+plan "$t/w3" nightly --night 4
+case $(names "$t/w3") in *toy.toy.s4*) ok "after a whole failure every slice's latest run failed: the night's index decides (s4)" ;; *) no "after a whole failure: $(names "$t/w3")" ;; esac
+rotation_note toy.toy pass
+if [ ! -s "$store/_rotation/toy.toy.failed" ] && status "$(date +%s)"; then ok "the whole part's pass clears the failed file and completes the rotation"; else no "after the whole pass: $(cat "$store/_rotation/toy.toy.failed" "$t/status.out")"; fi
+# the universe changed since (a program added): the whole run covered the old one, so no slice counts as run
+cp "$r/test/record.edn" "$t/record.bak"
+sed -i 's|^\["toy/p40.c" :pass ""\]$|&\n["toy/p41.c" :pass ""]|' "$r/test/record.edn"
+if ! status "$(date +%s)" && grep -q 'never run with this list, nor the part whole with this universe' "$t/status.out"; then ok "a whole run of another universe counts for no slice"; else no "the changed universe: $(cat "$t/status.out")"; fi
+cp "$t/record.bak" "$r/test/record.edn"
+store=$t/store
+
 # 6. the clean run: the subsets alone
 plan "$t/clean" full --rotation subset
 if [ "$(names "$t/clean")" = "toy.toy.sub toy.whole after-toy " ]; then ok "--rotation subset (the clean run): the subset alone"; else no "the clean plan: $(names "$t/clean")"; fi

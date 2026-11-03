@@ -3308,7 +3308,8 @@ in the store (`STORE/NAME.PART.sK/KEY.edn`), keyed as any check plus the line `l
 are kept, pruned and reused like any other. The night's slice: among the non-empty slices, one whose latest run failed, else
 one never run, else the one whose latest run is oldest; ties by the night index (the day of the run's start less 12 hours,
 `GATE_NIGHT`), so that an empty store walks s0..s6 in seven nights and a missed night is caught up, not skipped for a week.
-A slice whose key has a pass is skipped as any check (its "skip" noted: the pass holds at that key).
+A slice whose key has a pass is skipped as any check (its "skip" noted: the pass holds at that key); a whole part's run
+counts as a run of every slice (below).
 
 **The record.** The runner appends each rotated check's run (pass, fail, or skip at a pass) to
 `STORE/_rotation/NAME.PART.sK.runs` (epoch, date, status, key, list digest, commit, worktree); a failure's files (the log's
@@ -3316,6 +3317,19 @@ lines `:failed-re` names that are in its list) go to `STORE/_rotation/NAME.PART.
 part's subset and removes from its slice ("a file that fails joins the subset"); a pass of the subset clears those it
 ran. They stay there until they pass, not for ever: a file that should stay is added to the corpus's `:subset` by hand
 (`--rotation-status` lists them). Not noted in the clean run (its store is its clone's).
+
+**A whole part's run counts for every slice** (the coordinator's follow-up, 2026-11-03). A rotated part run whole
+(`--full`, or the clean run with `GATE_CLEAN_WHOLE=1`) keeps `--full`'s key (its universe is unkeyed, `:whole-list`) and is
+noted as `STORE/_rotation/NAME.PART.whole.runs`, its list the universe (its ids sorted, digested). It is a run of every
+slice: for the night's choice any whole run counts (after one `--full` night every slice ran at once, and the night's index
+decides; after a failed whole run every slice's latest run failed); for completeness a whole run counts for a slice when its
+universe is the current one. "With its current list" is then: a slice's own run counts when its list is the slice's list
+now, a whole run when its universe is the universe now (every current slice's list is in it, however the subset and the
+failed files split the rest since); a whole run of another universe (a program added or removed) counts for none. Of the
+two, the later run decides (in the same second, the slice's own). A whole run's failure sends its named files to the
+subset; its pass clears them. The clean run notes its runs in its clone's store, and `clean_launch` appends them to the
+shared store's `_rotation/` (with `GATE_CLEAN_PUBLISH`): one whole `--full` night, or a whole clean run, completes the
+rotation, and the tag need not wait seven nights.
 
 **Completeness** (`bin/gate --rotation-status [--days N]`, `gate.plan rotation-status`): for every rotated part, every
 non-empty slice's latest run *with its current list* passed or skipped at a pass within 7 days, and no file failed since;
@@ -3329,7 +3343,9 @@ subset of 4): `--full` whole; the nightly expansion and its command; the slices 
 rest once; keys over the list (night 7 = night 0, the subset apart, an unrotated part's key = `--full`'s); `:needs` renamed;
 a failure's file into the subset and out of its slice, the failed slice chosen again, the subset's pass clearing it;
 `rotation-status` incomplete (never run), complete, stale after eight days, incomplete with a failed file; the oldest slice
-chosen; the clean run's subsets. 23 of 23.
+chosen; a whole part's run: noted with the universe, its key the one without `:rotate`, completing every slice, the night's
+index deciding after it, a later slice failure making it incomplete, a whole failure's file into the subset and its pass
+clearing it, a whole run of another universe counting for none; the clean run's subsets. 33 of 33.
 
 **The tools' file lists** (what a part needs to be rotated). Take one today: `bin/ci check` and `check --aot` (`--only FILE`
 of ids; rotated); `bin/goi check` and `bin/java-check` (`--only REGEX`: a list becomes an alternation, but their steps are not
