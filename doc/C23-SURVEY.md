@@ -4702,3 +4702,17 @@ with `CI_LINK_CHECK=1` exit 0 (523 s; every program's linked node program equal 
 test/c/essential-aot.txt` exit 0 (415 s), `dg --essential` 0 (85 s), `bin/repr-c check --c23` 0 (70 s), `repl-session` 0 (16 s),
 `c2j-check` 0 (39 s), `judge-test` 0 (596 s); `bin/gate-tests`: 32 tests passed.
 
+
+### PB.7 Review 187's two mediums (the Mac, 2026-11-03)
+
+1. A fragment that cannot be written (a full disk, a directory removed by another process) no longer fails the build: the
+   fragment built in memory serves, with a line `ci runtime: the fragment ... not written (...): built in memory` on the standard
+   error (`96f5a73d`; tried with `CI_RUNTIME` under a plain file). `bin/ci runtime build|prune` removes another key's directory
+   only when unused for a day; each build marks its key's directory used (its mtime), so a stage 0's ci or another worktree's
+   running beside keeps its fragments; `bin/gate --prune`'s rule was already the newest 3 and a day.
+2. The key names the ci that ran, not `ARBACE_PATH_FIRST` alone (`baf77aa3`): RT.load runs a namespace through its compiled
+   loader whenever the executable has one and `ARBACE_NO_AOT` is unset, `ARBACE_PATH_FIRST` or not (stage 0 with
+   `ARBACE_PATH_FIRST=1` alone loads the seed's compiled `arbace.c.build`: `Compiler$AOT/loader` true for it, and the checkout's
+   `runtime.ae`, which the old build lacks, fails to load: no fragments made under a wrong key). Each source of the key is now
+   tagged `compiled` (its embedded copy's digest) or `evaluated` (the checkout's under `ARBACE_PATH_FIRST` or a differing tool
+   source under `arbace/repr/`, else the embedded copy).
