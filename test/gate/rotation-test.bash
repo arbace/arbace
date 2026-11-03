@@ -269,5 +269,20 @@ judge_note jud
 if [ "$(cut -f3 "$store/_rotation/lev.a.s0.runs" 2>&1)" = fail ] && [ "$(cut -f3 "$store/_rotation/lev.a.failed" 2>&1)" = "$v2" ] \
    && [ ! -e "$store/_rotation/lev.a.sub.runs" ]; then ok ":judges: a judge's failure noted for the producer whose list names the id (its file into the subset)"; else no ":judges: $(cat "$store/_rotation/lev.a.s0.runs" "$store/_rotation/lev.a.failed" 2>&1)"; fi
 
+# review 181 L5: a :subset name outside the record fails the plan (no longer dropped silently); an empty subset is no check
+r3=$t/root3; rm -rf "$r3"; cp -a "$r" "$r3"
+plan3() { local d=$1; shift; rm -rf "$d"; mkdir -p "$d"
+  (cd "$r3" && find . -type f -printf '%P\n' | LC_ALL=C sort | xargs -d '\n' sha256sum) > "$d/files.sha256"; cp "$t/hosts.edn" "$t/ancestors.txt" "$d/"
+  (cd "$here" && GATE_STEPS=$r3/test/steps.edn arbace_tool -p "$here/test" -m gate.plan plan "$r3" "$d" "$t/store6" "$@") > "$d.out" 2>&1; }
+mkdir -p "$t/store6"
+sed -i 's/"p4.c"/"p4.c" "nope.c"/' "$r3/test/corpora.edn"
+if ! plan3 "$t/u0" nightly --night 0 && grep -q 'toy.toy: test/corpora.edn.s :subset of toy names 1 file(s) not in test/record.edn: toy/nope.c' "$t/u0.out"; then ok "a :subset name not in the record fails the plan, named"; else no "an unknown :subset name: $(cat "$t/u0.out")"; fi
+if ! plan3 "$t/u1" full && grep -q 'nope.c' "$t/u1.out"; then ok "... in --full too (the clean run's subsets)"; else no "an unknown :subset name in --full: $(head -3 "$t/u1.out")"; fi
+echo '{:corpora [{:id :toy :subset []} {:id :whole}]}' > "$r3/test/corpora.edn"
+plan3 "$t/u2" nightly --night 0 || no "the empty subset's plan: $(cat "$t/u2.out")"
+case $(names "$t/u2") in "toy.toy.s0 toy.whole after-toy ") ok "an empty :subset: no subset check, the night's slice alone" ;; *) no "an empty subset: $(names "$t/u2")" ;; esac
+plan3 "$t/u3" full --rotation subset
+case $(names "$t/u3") in "toy.whole after-toy ") ok "an empty :subset in the clean run: nothing of the part" ;; *) no "an empty subset, clean: $(names "$t/u3")" ;; esac
+
 echo "$((n - bad)) of $n passed"
 [ "$bad" = 0 ]
