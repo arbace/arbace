@@ -1,0 +1,235 @@
+(ns arbace.python
+  "pyi's command line (doc/python/PYI-SPEC.md; PY5), run by bin/pyi as -m arbace.python VERB ..., evaluated from the
+  checkout (not embedded, PYS18 (a)):
+
+    scope-check --corpus NAME --dumps DIR --scopes DIR --known FILE [--record] [--results FILE]
+        for each DUMPS/REL.ae (tools/pydump/pydump.py tree) and SCOPES/REL.scopes.ae (pydump.py scopes, CPython's own
+        symbol table): the table of arbace.python.scope equal to CPython's, block for block, flag for flag; a file the
+        table rejects judged on CPython's message; a file ast.parse rejects skipped (the read level's). A file that
+        does not pass is judged against the known file (test/python/scope-known.edn, the round trip's format); --record
+        writes it, a file of no class printed and not written, exit 3 (CS265 (a), CS266 (a))
+    compile-check --corpus NAME --dumps DIR --tsv FILE --known FILE [--record] [--results FILE] [--ops FILE]
+        each dump compiled to pyi's IR (arbace.python.compile) and the IR verified (arbace.python.ir/verify: every
+        jump inside its code, every exception handler's range and target, the stack's depth the same on every path
+        and never below zero, every local, cell, free and global name declared); the compile errors judged on
+        CPython's (the TSV's code column: \"compile-error: MSG\"); --ops writes the count of each operation; the known
+        file test/python/compile-known.edn
+    run --dump FILE --file PATH
+        PY5b0: the dump (pydump.py tree --full: lines for tracebacks, PY5a's DECISION (a)) compiled and its IR run by
+        pyi's runtime go/arbace/py, interpreted by goi (PYI-SPEC.md §7): the program's stdout and stderr, its exit status
+    runtime-ops
+        PY5b0: the runtime's operations (go/arbace/py's OpNames) against arbace.python.ir/ops; each unimplemented one's
+        owner printed by milestone; exit 1 when the two lists differ"
+  (:require [arbace.python.scope :as sc]
+            [arbace.python.compile :as pc]
+            [arbace.python.ir :as ir]
+            [arbace.repr.python.convert :as cv]
+            [arbace.string :as str])
+  (:import [java.io File]))
+
+(defn- parse-args [args with-value]
+  (loop [as args opts {}]
+    (if (empty? as)
+      opts
+      (let [[a & more] as]
+        (if (contains? with-value a)
+          (recur (rest more) (assoc opts a (first more)))
+          (recur more (assoc opts a true)))))))
+
+(defn- files-under [^String dir ext]
+  (->> (file-seq (File. dir))
+       (filter #(and (.isFile ^File %) (str/ends-with? (.getName ^File %) ext)))
+       (map #(.getPath ^File %))
+       sort))
+
+(defn- rel [^String root ^String path]
+  (let [r (str (.getCanonicalPath (File. root)) "/")
+        p (.getCanonicalPath (File. path))]
+    (if (str/starts-with? p r) (subs p (count r)) path)))
+
+(defn- spit-mk [^String path text]
+  (let [f (File. path)]
+    (.mkdirs (.getParentFile f))
+    (spit f text)))
+
+(defn first-diff [a b path]
+  (cond
+    (= a b) nil
+    (and (sequential? a) (sequential? b))
+    (or (some (fn [i] (first-diff (nth a i) (nth b i) (conj path (if (seq? a) (str (first a) "." i) i))))
+              (range (min (count a) (count b))))
+        [path (str "length " (count a)) (str "length " (count b))])
+    (and (map? a) (map? b))
+    (or (some (fn [k] (first-diff (get a k) (get b k) (conj path k))) (sort (distinct (concat (keys a) (keys b)))))
+        [path "map" "map"])
+    :else [path (let [s (pr-str a)] (subs s 0 (min 160 (count s)))) (let [s (pr-str b)] (subs s 0 (min 160 (count s))))]))
+
+(defn- one-line [s] (str/replace (str s) #"[\t\n]" " "))
+
+(defn- read-known [f]
+  (if (and f (.exists (File. ^String f))) (read-string (slurp f)) {:classes {} :checks {}}))
+
+(defn- write-known [f known what]
+  (spit-mk f
+           (str ";; " what "\n"
+                ";; Written by --record, the classes kept; a file is classed only by rule, never by a guess: a file of no class\n"
+                ";; makes the run exit 3. Read with the Clojure reader.\n"
+                "{:classes\n {"
+                (str/join "\n  " (for [[c v] (into (sorted-map) (:classes known))] (str (pr-str c) "\n  " (pr-str (into (sorted-map) v)))))
+                "}\n :checks\n {"
+                (str/join "\n  " (for [[c files] (into (sorted-map) (:checks known))]
+                                   (str (pr-str c) "\n  {"
+                                        (str/join "\n   " (for [[f v] (into (sorted-map) files)] (str (pr-str f) " " (pr-str (into (sorted-map) v)))))
+                                        "}")))
+                "}}\n")))
+
+(defn- judge
+  "Prints each failing file, writes the results; with --record the known file (rule-classes: a fn of a failure to a
+  class or nil); exit 0, 1 (a failure the known file does not hold), 3 (--record: a file of no class)"
+  [opts check-name n res rule-classes rule-defs what]
+  (let [corpus (keyword (get opts "--corpus"))
+        known-file (get opts "--known")
+        known (read-known known-file)
+        ck [check-name corpus]
+        mine (get-in known [:checks ck] {})
+        failing (into (sorted-map) (filter (comp some? val) res))
+        passed (- n (count failing))]
+    (println (str (name check-name) " " (name corpus) ": " n " files: " passed " equal; not passing "
+                  (pr-str (frequencies (map :level (vals failing))))))
+    (when-let [rf (get opts "--results")]
+      (spit-mk rf (pr-str {:check check-name :corpus corpus :files n :passed passed
+                           :failing (into (sorted-map) (map (fn [[r v]] [r (:level v)]) failing))})))
+    (if (get opts "--record")
+      (let [new (into {} (for [[r v] failing :let [c (or (rule-classes v) (:class (get mine r)))] :when c]
+                           [r (assoc (select-keys v [:level :message]) :class c)]))]
+        (doseq [[r v] failing :when (nil? (get new r))] (println "NO CLASS" r (pr-str v)))
+        (write-known known-file (-> known (update :classes #(merge (select-keys rule-defs (set (map :class (vals new)))) %))
+                                    (assoc-in [:checks ck] new))
+                     what)
+        (System/exit (if (= (count new) (count failing)) 0 3)))
+      (let [problems (concat
+                      (for [[r v] failing :let [k (get mine r)]
+                            :when (or (nil? k) (not= (select-keys v [:level :message]) (select-keys k [:level :message]))
+                                      (not (contains? (:classes known) (:class k))))]
+                        (str "UNEXPECTED " r " " (pr-str v) (when k (str " (known: " (pr-str k) ")"))))
+                      (for [[r k] mine :when (and (contains? res r) (nil? (get failing r)))]
+                        (str "GONE (known as " (:class k) ", passes now) " r)))]
+        (doseq [p problems] (println p))
+        (System/exit (if (empty? problems) 0 1))))))
+
+;; ---- scope-check ----
+
+(defn- scope-judge [dump-text scopes-text]
+  (let [d (cv/convert dump-text)]
+    (if (cv/error-form? d)
+      nil
+      (let [ref (read-string scopes-text)
+            mine (try {:table (sc/table d)}
+                      (catch Throwable e
+                        (if (= 'SyntaxError (:class (ex-data e)))
+                          {:error (:msg (ex-data e))}
+                          {:failed (one-line (.getMessage e))})))]
+        (cond
+          (:failed mine) {:level :failed :message (:failed mine)}
+          (= 'python/error (first ref))
+          (cond (nil? (:error mine)) {:level :accepted :message (str "CPython's table rejects it: " (nth ref 2))}
+                (not= (:error mine) (nth ref 2)) {:level :error-message :message (str (:error mine) " | CPython: " (nth ref 2))}
+                :else nil)
+          (:error mine) {:level :rejected :message (str "the port rejects it: " (:error mine))}
+          :else (when-let [d (first-diff (:table mine) (second ref) [])]
+                  {:level :table :message (str (pr-str (first d)) ": " (second d) " | CPython: " (nth d 2))}))))))
+
+(defn- do-scope-check [opts]
+  (let [dumps (get opts "--dumps") scopes (get opts "--scopes")
+        files (files-under dumps ".ae")
+        res (into (sorted-map)
+                  (for [f files]
+                    (let [r (subs (rel dumps f) 0 (- (count (rel dumps f)) 3))
+                          s (File. (str scopes "/" r ".scopes.ae"))]
+                      [r (try (scope-judge (slurp f) (slurp s))
+                              (catch Throwable e {:level :failed :message (one-line (.getMessage e))}))])))]
+    (judge opts :scope (count files) res (constantly nil) {}
+           "The files whose symbol table (arbace.python.scope) is not CPython's (bin/pyi scope-check; doc/python/PYI-SPEC.md §2), by check and corpus.")))
+
+;; ---- run ----
+
+(defn ir-text
+  "A module's code object as the runtime's loader reads it (PYI-SPEC.md §7.2): pr-str, no print limits"
+  [code]
+  (binding [*print-length* nil *print-level* nil *print-meta* false *print-namespace-maps* false]
+    (pr-str code)))
+
+(defn- runtime-fn [sym]
+  (require 'go.arbace.py)
+  (or (resolve (symbol "go.arbace.py" (name sym))) (throw (ex-info (str "no go.arbace.py/" sym) {}))))
+
+(defn- do-run [opts]
+  (let [d (cv/convert (slurp (get opts "--dump")))]
+    (when (cv/error-form? d)
+      (binding [*out* *err*] (println (pr-str d)))
+      (System/exit 1))
+    (let [code (try (pc/compile-module d)
+                    (catch Throwable e
+                      (if (= 'SyntaxError (:class (ex-data e)))
+                        (do (binding [*out* *err*] (println (str "SyntaxError: " (:msg (ex-data e))))) (System/exit 1))
+                        (throw e))))]
+      (System/exit ((runtime-fn 'RunModule) (ir-text code) (get opts "--file"))))))
+
+(defn- do-runtime-ops [opts]
+  (let [theirs (vec ((runtime-fn 'OpNames)))
+        owners (vec ((runtime-fn 'OpOwners)))
+        mine (vec (sort (map name (keys ir/ops))))]
+    (println (str "  the IR's operations " (count mine) ", the runtime's " (count theirs)))
+    (doseq [[o n] (sort (frequencies owners))] (println (str "  " o ": " n " operations")))
+    (if (= mine theirs)
+      (println "runtime-ops: the runtime's operations are arbace.python.ir/ops's")
+      (do (println "runtime-ops: DIFFER: only the IR's" (pr-str (remove (set theirs) mine)) "only the runtime's" (pr-str (remove (set mine) theirs)))
+          (System/exit 1)))))
+
+;; ---- compile-check ----
+
+(defn- tsv [f]
+  (into {} (for [l (str/split-lines (slurp f)) :when (seq l)] (let [c (str/split l #"\t")] [(first c) c]))))
+
+(defn- compile-judge [dump-text cpython-code ops]
+  (let [d (cv/convert dump-text)]
+    (when-not (cv/error-form? d)
+      (let [mine (try {:code (pc/compile-module d)}
+                      (catch Throwable e
+                        (if (= 'SyntaxError (:class (ex-data e)))
+                          {:error (:msg (ex-data e))}
+                          {:failed (one-line (str (.getMessage e) " " (pr-str (dissoc (ex-data e) :form))))})))
+            theirs (when (and cpython-code (str/starts-with? cpython-code "compile-error: ")) (subs cpython-code 15))]
+        (when-let [c (:code mine)] (swap! ops #(merge-with + % (ir/count-ops c))))
+        (cond
+          (:failed mine) {:level :failed :message (:failed mine)}
+          (and theirs (nil? (:error mine))) {:level :accepted :message (str "CPython's compile rejects it: " theirs)}
+          (and theirs (not= theirs (:error mine))) {:level :error-message :message (str (:error mine) " | CPython: " theirs)}
+          theirs nil
+          (:error mine) {:level :rejected :message (str "the compiler rejects it: " (:error mine))}
+          :else (when-let [v (ir/verify (:code mine))] {:level :verify :message v}))))))
+
+(defn- do-compile-check [opts]
+  (let [dumps (get opts "--dumps")
+        t (tsv (get opts "--tsv"))
+        files (files-under dumps ".ae")
+        ops (atom {})
+        res (into (sorted-map)
+                  (for [f files]
+                    (let [r (subs (rel dumps f) 0 (- (count (rel dumps f)) 3))]
+                      [r (try (compile-judge (slurp f) (nth (get t r) 3 nil) ops)
+                              (catch Throwable e {:level :failed :message (one-line (.getMessage e))}))])))]
+    (when-let [o (get opts "--ops")] (spit-mk o (pr-str (into (sorted-map) @ops))))
+    (println (str "  instructions " (reduce + 0 (vals @ops)) " of " (count @ops) " kinds"))
+    (judge opts :compile (count files) res (constantly nil) {}
+           "The files pyi's compiler (arbace.python.compile) does not compile to verified IR as CPython compiles them (bin/pyi compile-check; doc/python/PYI-SPEC.md §4), by check and corpus.")))
+
+(defn -main [& args]
+  (let [[verb & more] args
+        opts (parse-args more #{"--corpus" "--dumps" "--scopes" "--known" "--results" "--out" "--tsv" "--ops" "--file" "--dump"})]
+    (case verb
+      "scope-check" (do-scope-check opts)
+      "compile-check" (do-compile-check opts)
+      "run" (do-run opts)
+      "runtime-ops" (do-runtime-ops opts)
+      (do (println "usage: -m arbace.python scope-check|compile-check|run|runtime-ops ...") (System/exit 2)))))
