@@ -34,16 +34,30 @@
   the libc's reader (with the forms cache's key: repr/c, the host, configure's headers)."
   ["arbace/c/check.ae" "arbace/c/build.ae" "arbace/c/run.ae" "arbace/c/musl.ae" "arbace/c/runtime.ae" "arbace/repr/c/annot.ae"])
 
+(defn- embedded-bytes
+  "The embedded copy of the source f (the executable's), or nil."
+  ^bytes [^String f]
+  (when-let [ins (arbace.lang.RT/resourceAsStream nil f)]
+    (try (.readAllBytes ins) (finally (.close ins)))))
+
 (defn- source-bytes
-  "The bytes of the source `f` as this process loaded it: the checkout's (ARBACE_PATH_FIRST, or a tool's source under
-  arbace/repr/, which RT.load takes from the checkout when it differs), else the embedded one."
-  ^bytes [^String root ^String f]
-  (let [cf (File. root f)]
-    (if (and (.exists cf) (or (System/getenv "ARBACE_PATH_FIRST") (str/starts-with? f "arbace/repr/")))
-      (java.nio.file.Files/readAllBytes (.toPath cf))
-      (if-let [ins (arbace.lang.RT/resourceAsStream nil f)]
-        (try (.readAllBytes ins) (finally (.close ins)))
-        (.getBytes (str "absent " f) "UTF-8")))))
+  "What the source `f` ran as in this process, as RT.load chose (review 187: ARBACE_PATH_FIRST alone does not say it):
+  [how bytes]. A namespace with a compiled loader in the executable (Compiler$AOT/loader, unless ARBACE_NO_AOT) ran
+  compiled from its embedded copy, whatever ARBACE_PATH_FIRST says (RT.load takes the loader for a source read as embedded
+  or first on ARBACE_PATH), unless it is a tool's source under arbace/repr/ whose checkout copy differs, evaluated instead;
+  else it was evaluated from the checkout's copy (ARBACE_PATH_FIRST, or a tool's source), else from the embedded one."
+  [^String root ^String f]
+  (let [cf (File. root f)
+        checkout (when (.exists cf) (java.nio.file.Files/readAllBytes (.toPath cf)))
+        emb (embedded-bytes f)
+        tool? (str/starts-with? f "arbace/repr/")
+        compiled? (some? (arbace.lang.Compiler$AOT/loader (subs f 0 (- (count f) 3))))]
+    (cond
+      (and tool? checkout (not (java.util.Arrays/equals ^bytes checkout ^bytes emb))) ["evaluated" checkout]
+      (and compiled? emb) ["compiled" emb]
+      (and checkout (or (System/getenv "ARBACE_PATH_FIRST") tool? (nil? emb))) ["evaluated" checkout]
+      emb ["evaluated" emb]
+      :else ["absent" (.getBytes (str "absent " f) "UTF-8")])))
 
 (defn runtime-key
   "The prebuilt runtime's key: the fragments' format, the target, the library's own key (`lib-key`: its sources' digest)
@@ -52,7 +66,7 @@
   (sha256-hex (.getBytes (str "ci-runtime " build/fragment-version "\n"
                               "target linux-amd64 ldouble-size 8\n"
                               "library " lib-key "\n"
-                              (str/join (for [f runtime-sources] (str f " " (sha256-hex (source-bytes root f)) "\n"))))
+                              (str/join (for [f runtime-sources :let [[how b] (source-bytes root f)]] (str f " " how " " (sha256-hex b) "\n"))))
                          "UTF-8")))
 
 (defn- musl-key
