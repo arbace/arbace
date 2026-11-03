@@ -18,6 +18,12 @@
 #                        64-CPU host, 3.2 times its 10 s, so a CPU limit of twice the wall limit was too
 #                        tight (the first audit of goi-check) and five times holds the programs measured.
 #
+#   ARBACE_MEM_GIB       each limited program's memory cap in GiB (default 16; 0: none; 2026-11-03, after 25 OOM kills
+#                        from an interpreter's leak, 5 of them other agents' processes): GOMEMLIMIT at three quarters of it
+#                        when the caller set none (Go's collector works hard before it), and a hard address-space limit
+#                        (ulimit -v) at the cap, so a leaking program fails alone (Go: "out of memory", status 2) instead of
+#                        waking the host's OOM killer on its neighbours. A test that needs more names its own, as a check's
+#                        heavy cases do
 #   ARBACE_CPU_LOG       a file: each limited program's STATUS, WALL, USER, SYS seconds and command
 #                        appended to it, tab-separated (GTS33 (a): bin/gate --clean measures the quiet
 #                        CPU times its limits are to be recorded from)
@@ -33,10 +39,14 @@
 
 limited_cpu() {
   local cpu=$1 wall=$2 lim='ulimit -t "$1"; shift; exec "$@"'; shift 2
+  local mem=${ARBACE_MEM_GIB:-16} memlim=
+  # the memory cap (ARBACE_MEM_GIB above): before the CPU limit in the same inline shell, so xargs' exported copy keeps it
+  [ "$mem" = 0 ] || memlim="ulimit -v $((mem * 1048576)); export GOMEMLIMIT=\${GOMEMLIMIT:-$((mem * 768))MiB}; "
   # under ARBACE_COVER_DIR (GT8.3, bin/lib/cover.bash) a soft limit at the limit and the hard one 5 s above, so the
   # kernel sends SIGXCPU first and the cover build's hook writes the counters before the program ends (status 152,
   # a timeout as ever; review 182, finding 4). Inline, not a function: limited_cpu is exported alone to xargs' shells
   [ -z "${ARBACE_COVER_DIR:-}" ] || lim='ulimit -S -t "$1"; ulimit -H -t "$(($1 + 5))"; shift; exec "$@"'
+  lim=$memlim$lim
   if [ -n "${ARBACE_CPU_LOG:-}" ]; then
     # GTS33 (a)'s measurement (bin/gate --clean): each program's status, wall, user and system seconds
     # and command appended to ARBACE_CPU_LOG, one line each. time runs timeout, not the reverse (review 075,
