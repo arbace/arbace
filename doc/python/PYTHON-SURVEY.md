@@ -864,3 +864,24 @@ PY5b0's DECISION (a), decided by the user, 2026-11-03):
   extension's contents fails into the class that names it (`test/python/lib-test-known.edn`'s `:extension-modules`).
   pyi loads no extension modules (§6.6, the `_test*` modules deferred). Built by PY6-core,
   `go/arbace/py/builtins_testmultiphase.ae`.
+
+## Decided (2026-11-04, the user): PY6e's and PY6g's DECISIONs (queue 200)
+
+- **No `os.fork`** (PY6e's DECISION (a)). Go's runtime is multithreaded, so a forked child could not go on running
+  Python. pyi's processes are created by `_posixsubprocess.fork_exec`, `os.posix_spawn`/`posix_spawnp` and `os.spawn*`,
+  all over Go's `syscall.ForkExec`. `test.support`'s `has_fork_support` is False. The tests that need a fork skip and
+  are classed by design (`test/python/lib-test-known.edn`'s `:fork`). subprocess's `preexec_fn` raises RuntimeError
+  (no Python can run between fork and exec).
+- **The pointer system calls are a design class** (PY6e2's proposal, `:pointer-syscall`). Go forms take no pointer for
+  a raw `syscall.Syscall`, so the posix functions that need one are absent and their tests skip where CPython runs
+  them:
+  - `sched_setaffinity`;
+  - `openpty`;
+  - `memfd_create`;
+  - the xattr functions;
+  - `prlimit`;
+  - `tcgetpgrp`/`tcsetpgrp`;
+  - `unshare`/`setns`.
+- **`_decimal` and `_datetime` stay absent** (PY6g's DECISION 1). decimal and datetime run as their pure-Python twins
+  (`_pydecimal`, `_pydatetime`), as pickle and json do (§6.6, PYS11). The tests of their C variants are classed by
+  design (`:c-accelerators`), as are those of `_pickle` and `_json`.
