@@ -61,10 +61,14 @@
 #   bin/repr-ocaml native-check [--jobs N] [--layout] [CORPUS...] | --list FILE [--base DIR]
 #                                 the native reader against the helper: each file's dump with positions (ocdump --loc)
 #                                 equal byte for byte (a rejected file's error: kind, message, location), and each
-#                                 file's report equal to what ocamlc -stop-after parsing -nopervasives -w -a -c prints
+#                                 file's report equal to what ocamlc -stop-after parsing -nopervasives -c prints (default warnings, OC172 (b))
 #                                 on stderr (the locations, the quoted source, the sub-messages; OC172 (a)); --layout: the layouts of
 #                                 mode :full (ocdump --mode tokens) too; default corpora samples stdlib; --list: paths
 #                                 relative to --base (default the tarball's top)
+#   bin/repr-ocaml errors-check [--record|--ocamlc]   the hand cases of test/ocaml/errors/ (OC172 (b): one for each error
+#                                 of syntaxerr.ml and lexer.mll and each warning of the lexer and the docstrings, with ocamlc's flags in
+#                                 FILE.flags) reported natively, equal to FILE.err (ocamlc's recorded stderr); --record writes the
+#                                 .err files with ocamlc, --ocamlc also checks them against ocamlc's live stderr
 #   bin/repr-ocaml menhir [--check|--verify]   the tables of the native parser: arbace.repr.ocaml.menhir builds
 #                                 parser.mly's LALR(1) automaton and writes arbace/repr/ocaml/tables.ae; --check: the
 #                                 automaton against Menhir's own tables in the tarball's boot/menhir/parser.ml (states,
@@ -689,12 +693,12 @@ helper_loc_one() {
 }
 export -f helper_loc_one
 
-# ocamlc_err_one REL: what ocamlc prints on stderr parsing one file of $BASE into $OUT/REL.err (warnings off; no initial
+# ocamlc_err_one REL: what ocamlc prints on stderr parsing one file of $BASE into $OUT/REL.err (default warnings; no initial
 # open of Stdlib, which stdlib.ml itself cannot have)
 ocamlc_err_one() {
   local rel=$1
   mkdir -p "$OUT/$(dirname "$rel")"
-  (cd "$BASE" && ocamlc -stop-after parsing -nopervasives -w -a -c "$rel") 2> "$OUT/$rel.err" || true
+  (cd "$BASE" && ocamlc -stop-after parsing -nopervasives -c "$rel") 2> "$OUT/$rel.err" || true
 }
 export -f ocamlc_err_one
 
@@ -715,6 +719,30 @@ native_check_one() {
     rt_arbace_ns arbace.repr.ocaml.native check --root "$base" --list "$list" --helper "$w/helper-$m" \
       --report "$w/report-$m.edn" "${extra[@]}" || rc=1
   done
+  return $rc
+}
+
+# errors-check [--record|--ocamlc]: the hand cases of test/ocaml/errors/ (OC172 (b)): each FILE.ml/.mli with its FILE.flags
+# reported by the native reader, equal to FILE.err, the stderr of ocamlc -stop-after parsing -nopervasives FLAGS -c FILE;
+# --record writes the .err files with the host's ocamlc; --ocamlc also compares them with ocamlc's live stderr
+cmd_errors_check() {
+  local dir="$root/test/ocaml/errors" f fl rc=0 mode=${1:-}
+  if [ "$mode" = --record ] || [ "$mode" = --ocamlc ]; then
+    command -v ocamlc >/dev/null || { echo "errors-check: no ocamlc on this host" >&2; return 2; }
+    for f in "$dir"/*.ml "$dir"/*.mli; do
+      [ -f "$f" ] || continue
+      fl=""; [ -f "$f.flags" ] && fl=$(cat "$f.flags")
+      if [ "$mode" = --record ]; then
+        (cd "$dir" && ocamlc -stop-after parsing -nopervasives $fl -c "$(basename "$f")") 2> "$f.err" || true
+      else
+        (cd "$dir" && ocamlc -stop-after parsing -nopervasives $fl -c "$(basename "$f")") 2> "$root/.tmp/errors-check.err" || true
+        cmp -s "$f.err" "$root/.tmp/errors-check.err" || { echo "DRIFT $(basename "$f"): ocamlc's stderr differs from its .err"; rc=1; }
+      fi
+    done
+    rm -f "$dir"/*.cmi "$dir"/*.cmo "$dir"/*.cmti
+    [ "$mode" = --record ] && return 0
+  fi
+  rt_arbace_ns arbace.repr.ocaml.native errors-check --dir "$dir" || rc=1
   return $rc
 }
 
@@ -787,6 +815,7 @@ case "${1:-}" in
     done
     if [ -n "$full" ]; then cmd_read_full "$@"; else cmd_read "$@"; fi ;;
   native-check) shift; cmd_native_check "$@" ;;
+  errors-check) shift; cmd_errors_check "$@" ;;
   menhir) shift; cmd_menhir "$@" ;;
   print) shift; cmd_print "$@" ;;
   roundtrip) shift; cmd_roundtrip "$@" ;;
