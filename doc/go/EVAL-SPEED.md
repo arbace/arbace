@@ -217,6 +217,15 @@ regenerates `arbace/lang/go/CompilerNodes.ae` from the changed definitions.
 - `bin/j2g --slice arbace/lang/Compiler --root 'arbace/lang/Compiler$*'` (on the gate's
   executable, a minute) after each change: Compiler's classes, the generated nodes among them,
   analyzed and translated by j2g, no analysis failure, the same untranslated stubs as main's.
+- The oracle on the new executable (`bin/oracle check "EXE -" --timeout 900 --expected
+  test/oracle/known-go-amd64-frozen.edn`, `FROZEN_JAR` the main checkout's pinned jar):
+  22,689 of 22,741 cases match, the 52 known mismatches as recorded, 0 new, 0 now passing.
+- `bin/j2g-edge verify` (the frozen JVM compiles j2g's namespaces from the checkout): its first
+  run failed, `MethodTooLargeException` compiling `arbace/j2g/dyn.clj`, `forms`' static
+  initializer past the JVM's 64 KB with dynConvert's one more quoted form; dynConvert's form is
+  now a fn of its own (`dyn-convert-form`), j2g's output byte for byte the same (a slice run's
+  `gen/` tree compared); its second run was not finished when this was written (the night's
+  gate runs it).
 
 ## The night's proof
 
