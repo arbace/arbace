@@ -4,14 +4,19 @@
   the rest of repr/ocaml (the converter, the printer) takes either. Run by bin/repr-ocaml as -m arbace.repr.ocaml
   .native VERB ...:
 
-    dump [--loc] [--intf] [--use-file] --file NAME FILE   the dump of FILE on stdout, as ocdump's
-    read --root DIR --list LIST --out OUT [--loc]   each file of LIST (relative to DIR) dumped into OUT/REL.ae
-    check --root DIR --list LIST --helper HDIR [--report FILE]
+    dump [--loc] [--intf] [--use-file] [--mode tokens] --file NAME FILE   the dump of FILE on stdout, as ocdump's
+                                                    (--mode tokens: the layout of mode :full, ocdump's tokens_form)
+    read --out OUT [--loc] [--mode tokens] FILE...  each FILE dumped into OUT/BASENAME.ae, named by its basename
+    read --root DIR --list LIST --out OUT [--loc] [--mode tokens]   each file of LIST (relative to DIR) into OUT/REL.ae
+    check --root DIR --list LIST --helper HDIR [--mode tokens] [--report FILE]
                                                     native-check: each file of LIST dumped with positions and
                                                     compared byte for byte with the helper's HDIR/REL.ae (ocdump
-                                                    --loc); a file both reject passes when the kinds agree (the
-                                                    messages are a later step: counted, not compared)"
+                                                    --loc; --mode tokens: the layouts, ocdump --mode tokens); a file
+                                                    both reject passes when the kinds agree (the messages are a later
+                                                    step: counted, not compared)"
   (:require [arbace.repr.ocaml.parser :as p]
+            [arbace.repr.ocaml.lex :as lex]
+            [arbace.repr.ocaml.docstrings :as ds]
             [arbace.string :as str])
   (:import [java.io File]))
 
@@ -51,6 +56,46 @@
         i (or (first (keep-indexed (fn [i [x y]] (when (not= x y) i)) (map vector la lb))) (min (count la) (count lb)))]
     [(inc i) (get la i) (get lb i)]))
 
+(defn layout-text
+  "ocdump --mode tokens: the file's text as (ocaml/layout [GAP ITEM ... GAP] {...}), an item a token's text,
+  (comment TEXT) or (doc TEXT), from the lexer's raw token rule (Lexer.token_with_comments); a file that is not
+  valid UTF-8 is (ocaml/error :encoding ...)"
+  [^bytes b fname]
+  (if-not (lex/valid-utf8? b)
+    "(ocaml/error :encoding \"the file is not valid UTF-8\")\n"
+    (let [lb (lex/new-lexbuf b fname)
+          src (String. b "UTF-8")
+          ;; offsets are bytes: the text between two offsets is decoded from the bytes
+          sub (fn [i j] (String. b (int i) (int (- j i)) "UTF-8"))
+          items (java.util.ArrayList.)]
+      (try
+        (binding [ds/*state* (ds/new-state)]
+          (loop [prev 0]
+            (let [t (lex/token-rule lb)
+                  [s e kind] (case (first t)
+                               :EOF nil
+                               :EOL [:skip]
+                               :COMMENT (let [[_ l] (second t)] [(lex/pos-cnum (nth l 0)) (lex/pos-cnum (nth l 1)) :comment])
+                               :DOCSTRING (let [l (ds/ds-loc (second t))] [(lex/pos-cnum (nth l 0)) (lex/pos-cnum (nth l 1)) :doc])
+                               [(lex/pos-cnum (lex/start-p lb)) (lex/pos-cnum (lex/curr-p lb)) :tok])]
+              (cond
+                (nil? s) (.add items (sub prev (alength b)))
+                (= s :skip) (recur prev)
+                :else (do (.add items (sub prev s))
+                          (.add items (case kind :tok (sub s e) :comment (list 'comment (sub s e)) :doc (list 'doc (sub s e))))
+                          (recur e))))))
+        (p/layout-form (vec items) fname)
+        (catch arbace.lang.ExceptionInfo ex
+          (let [d (ex-data ex)]
+            (if (= :lexer (:ocaml-error d))
+              (p/error-text :lexer (:message d) nil)
+              (throw ex))))))))
+
+(defn- dump-of [^bytes b rel opts]
+  (if (= "tokens" (get opts "--mode"))
+    (layout-text b rel)
+    (p/dump b rel (kind-of rel opts) (boolean (get opts "--loc")))))
+
 (defn- do-check [{:keys [opts]}]
   (let [root (get opts "--root") files (list-files (get opts "--list")) hdir (get opts "--helper")
         st (atom {:equal 0 :both-rejected 0 :differ 0 :failed 0})
@@ -62,7 +107,7 @@
             theirs (slurp (str hdir "/" rel ".ae"))
             mine (try (let [b (read-bytes path)]
                         (swap! bytes-read + (alength b))
-                        (p/dump b rel (kind-of rel opts) true))
+                        (dump-of b rel (assoc opts "--loc" true)))
                       (catch Throwable t (str "(native-failure " (pr-str (str (.getMessage t))) ")")))
             hk (error-head theirs) mk (error-head mine)]
         (cond
@@ -85,12 +130,14 @@
                             :problems @bad})))
       (System/exit (if (and (zero? differ) (zero? failed)) 0 1)))))
 
-(defn- do-read [{:keys [opts]}]
-  (let [root (get opts "--root") files (list-files (get opts "--list")) out (get opts "--out")
-        with-loc (boolean (get opts "--loc")) bad (atom 0)]
-    (doseq [rel files]
+(defn- do-read [{:keys [opts args]}]
+  (let [root (get opts "--root") out (get opts "--out")
+        files (if root (mapv (fn [rel] [(str root "/" rel) rel]) (list-files (get opts "--list")))
+                  (mapv (fn [f] [f (.getName (File. ^String f))]) args))
+        bad (atom 0)]
+    (doseq [[path rel] files]
       (try
-        (spit-mk (str out "/" rel ".ae") (p/dump (read-bytes (str root "/" rel)) rel (kind-of rel opts) with-loc))
+        (spit-mk (str out "/" rel ".ae") (dump-of (read-bytes path) rel opts))
         (catch Throwable t (swap! bad inc) (println "FAIL" rel (.getMessage t)))))
     (println (str "native read: " (count files) " files, " @bad " failures"))
     (System/exit (if (zero? @bad) 0 1))))
@@ -98,14 +145,14 @@
 (defn- do-dump [{:keys [opts args]}]
   (let [f (first args)
         name (or (get opts "--file") f)]
-    (print (p/dump (read-bytes f) name (kind-of name opts) (boolean (get opts "--loc"))))
+    (print (dump-of (read-bytes f) name opts))
     (flush)))
 
 (defn -main [& args]
   (let [[verb & more] args
         pa (fn [wv] (parse-args more wv))]
     (case verb
-      "dump" (do-dump (pa #{"--file"}))
-      "read" (do-read (pa #{"--root" "--list" "--out"}))
-      "check" (do-check (pa #{"--root" "--list" "--helper" "--report"}))
+      "dump" (do-dump (pa #{"--file" "--mode"}))
+      "read" (do-read (pa #{"--root" "--list" "--out" "--mode"}))
+      "check" (do-check (pa #{"--root" "--list" "--helper" "--report" "--mode"}))
       (do (println "usage: -m arbace.repr.ocaml.native dump|read|check ...") (System/exit 2)))))

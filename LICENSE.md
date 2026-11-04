@@ -197,6 +197,20 @@ covers what.
   GNU Lesser General Public License version 2.1 with the OCaml LGPL linking exception (below). The test
   data `test/ocaml/oi/testdata/` and the tables in `go/arbace/oi/lexdata*_test.ae` and `parsedata_test.ae`
   are outputs of the host's OCaml 5.5.0 (ocaml, ocamllex, ocamlyacc) over Arbace's own test programs.
+- repr/ocaml's native reader (doc/ocaml/OCAML-SURVEY.md, "As built: the native reader"): `arbace/repr/ocaml/lex.ae`
+  (parsing/lexer.mll, the parts of stdlib/lexing.ml that update the positions, utils/misc.ml's Utf8_lexeme),
+  `docstrings.ae` (parsing/docstrings.ml), `ast.ae`'s constructors and docstring attributes (parsing/ast_helper.ml,
+  docstrings.ml, location.ml's mkloc), `actions.ae` (parsing/parser.mly's header and its semantic actions) and the
+  generated `tables.ae` (parser.mly's automaton, with its actions' texts) are ports of OCaml 5.5.0 (the release
+  tarball https://caml.inria.fr/pub/distrib/ocaml-5.5/ocaml-5.5.0.tar.xz, SHA-256
+  `fcc6ae665d1ec51d52510eaac7834a86a9806bf5a258bb7cca78733fccf015ba`, Copyright INRIA), by hand on 2026-11-04, the
+  files carrying the notices: under the GNU Lesser General Public License version 2.1 with the OCaml LGPL linking
+  exception (below). `parser.ae`'s engine follows MenhirLib's (boot/menhir/menhirLib.ml of the same tarball: Engine,
+  TableInterpreter) and `menhir.ae` follows Menhir 20250912's documented construction, reproduces nine rules of its
+  standard library (standard.mly) and decodes MenhirLib's table format (PackedIntArray, RowDisplacement): under
+  MenhirLib's terms ("Menhir and MenhirLib", below). The rest of them (`ast.ae`'s dump, which ports Arbace's own
+  tools/ocdump/ocdump.ml, `native.ae`, the LALR(1) construction of `menhir.ae`) is Arbace's own, under the Eclipse
+  Public License 1.0.
 - `jdk/ocaml/` (OCaml's runtime as Java forms, the package `ocaml.rt`; doc/ocaml/OCAML-SURVEY.md, "As built: O6
   (write-ahead)") and `arbace/o2j.ae` (o2j, Lambda to Java forms): the values, the application, the program's
   start (`Block`, `Closure`, `Pap`, `Native`, `Code`, `Exn`, `Exit`, `Fatal`, `I64`, `NInt`, `Custom`, `Rt`, `Main`, `Gil`,
@@ -2470,6 +2484,23 @@ Ty Coon, President of Vice
 That's all there is to it!
 
 --------------------------------------------------
+
+## Menhir and MenhirLib: GNU Library General Public License version 2 with a special exception on linking
+
+MenhirLib, Menhir's runtime library, as OCaml 5.5.0's release tarball carries it (`boot/menhir/menhirLib.ml`), states:
+
+```
+Menhir
+
+Copyright Inria. All rights reserved. This file is distributed under
+the terms of the GNU Library General Public License version 2, with a
+special exception on linking, as described in the file LICENSE.
+```
+
+Menhir's standard library (`standard.mly`) is distributed under the same terms. In the tarball that carries
+MenhirLib, the file LICENSE is OCaml's: the GNU Lesser General Public License text and the linking exception of
+the section "The OCaml Core System" above (the Lesser GPL 2.1 is the Library GPL 2's successor). Arbace's files
+that follow them are named in the list at the top (repr/ocaml's native reader).
 
 ## SRFI 14 (char-sets): MIT Scheme license
 
