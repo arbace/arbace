@@ -549,6 +549,16 @@ protocol), values, line numbers otherwise: the same as round 1's.
   (a native `guard` with a flag, recovering only on a panic, then panicking from its caller) saves
   3 ns of a call's 85 (3.5%), for a j2g-generated native and a change to jrt's stack-trace mapping
   (`isEvalCall`): not worth it now.
+- **An evaluated fn called directly by `CodeInvokeN`** (tried in a third build, reverted): a
+  construct `(eval-or ev em)` of `arbace.c2j.node` (the evaluator's form, the emitted code's) let
+  the `invoke` defnode test its fn for an `EvalFn` (a concrete Go assertion) and call it directly,
+  the `IFn` cast and the interface call only for the others; c2j's output stayed byte for byte (the
+  155 compiled namespaces but c2j's own the same Java forms) and the traces the same. si's tests
+  23.9 s and 23.8 s against this build's 23.9 and 24.0, its fixpoint 29.0 and 28.2 s against
+  27.8 and 28.3, the calls' micro-benchmarks unchanged: the cast's misses are at the calls of
+  compiled fns (each a Go type of its own: `AOTFn`'s subclasses), which the test does not cover.
+  (That build's `make-closure` 97 ns and `new-sb` 158, on code it did not change: the layout
+  effect below.)
 - **A record's field by keyword** (`(:r rec)`, 485 ns): c2j compiles it as the evaluator runs it
   (`Keyword.invoke`; the JVM's `KeywordLookupSite` thunks are not c2j's), so a faster evaluator path
   would be a divergence from the compiled code rather than its equivalent.
@@ -613,7 +623,8 @@ this build and not on the round's first, which has the same code on their paths 
 runs each, against this build's 132, 185 and 378-419; the profile puts the time in `runAll`'s loads
 of its argument array's header. The loops and their arithmetic move by 2-8 ns from build to build
 both ways (`loop`: round 1's 20-25 ns, the round's first build 28, this one 24-26). A property of
-each binary (the builds are deterministic), not of the change: the next build may move it.
+each binary (the builds are deterministic), not of the change: the third build of the round
+(Declined) moved it back (`make-closure` 97 ns, `new-sb` 158).
 
 **The workloads** (test/bench/eval-bench.ae, ms, the best of two runs each): `protocol` 68.8 →
 19.5 (3.5x); the other 18 within ±5% (`reduce-fn` 27.8 → 24.4, `transduce` 18.3 → 16.7,
@@ -623,8 +634,8 @@ each binary (the builds are deterministic), not of the change: the next build ma
 
 | run | before | after |
 |---|---:|---:|
-| si's expander tests, `bin/si test` | 32.7 s | 25.2 s |
-| `bin/si fixpoint` (psyntax expanding its sources on Arbace) | 33.9 s (expander 26.6) | 28.6 s (22.2) |
+| si's expander tests, `bin/si test` | 31.2-32.7 s | 23.9-25.2 s |
+| `bin/si fixpoint` (psyntax expanding its sources on Arbace) | 33.0-33.9 s (expander 26.3-26.6) | 27.8-28.6 s (21.7-22.2) |
 | Clojure's suite, its 78 namespaces 8 at a time, the processes' times summed | 595-682 s | 583-721 s |
 
 The suite is the same within the host's noise (four runs each: few of its calls are of protocols
@@ -637,10 +648,8 @@ faster (1.7-2.1 times against main's, round 1's table).
   cast in `CodeInvokeN` 2.8%, the frame's reset 2.2%, slot stores 3%, the var's root 3%): `IFn`'s
   cast is a Go assertion to an interface at one site for every fn type (each compiled fn is a Go
   type of its own), so its cache misses and the itab table is searched (`itabTableType.find`);
-  `CodeInvokeN` could test for an `EvalFn` first and call it directly (a concrete assertion, a
-  direct call), but the node is a defnode's: it needs a construct of `arbace.c2j.node` for an
-  evaluator-only alternative (the emitter's code must stay byte for byte), and a check that c2j's
-  output is unchanged. The `try`'s 3 ns (Declined) is the rest of it.
+  testing for an `EvalFn` first does not help (Declined): the misses are the compiled fns'; the
+  `try`'s 3 ns (Declined) is the rest of it.
 - **The garbage collector, 15-18% of si's runs**: boxed longs, closures' captured values, the
   host calls' argument arrays; the tools' host runs at Go's default `GOGC` where j2g and the
   suite's runs set 400 (a choice of the tools' memory, not the evaluator's).
