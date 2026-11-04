@@ -1,0 +1,194 @@
+;; The engine follows MenhirLib's (Menhir 20250912, https://gitlab.inria.fr/fpottier/menhir, lib/Engine.ml and
+;; TableInterpreter.ml, as boot/menhir/menhirLib.ml of the pinned OCaml 5.5.0 tarball carries it: LGPL-2.0 with the
+;; OCaml linking exception, LICENSE.md "Menhir and MenhirLib"): a token read after each shift, default reductions,
+;; the positions of a reduction (an empty production's start and end the previous cell's end, one object); and
+;; parsing/parse.ml's wrap (the lexer's and docstrings' state per parse). Read and reimplemented by hand on 2026-11-04;
+;; the rest is Arbace's own.
+
+(ns arbace.repr.ocaml.parser
+  "OCaml's parser in Arbace: arbace.repr.ocaml.tables' LALR(1) automaton (generated from parser.mly by
+  arbace.repr.ocaml.menhir) driven as MenhirLib drives it, each reduction evaluating its production's plan (the
+  composed source actions of arbace.repr.ocaml.actions, inlined items first, right to left, as Menhir's generated
+  code binds them) with Menhir's positions ($startpos, $endpos, $symbolstartpos of each composed action, from the
+  cells it covers). `parse` reads the bytes of a file into the Parsetree (arbace.repr.ocaml.ast); `dump` writes it
+  as tools/ocdump writes its parse (the same forms, the same text)."
+  (:require [arbace.repr.ocaml.tables :as t]
+            [arbace.repr.ocaml.actions :as act]
+            [arbace.repr.ocaml.lex :as lex]
+            [arbace.repr.ocaml.docstrings :as ds]
+            [arbace.repr.ocaml.ast :as ast])
+  (:import [arbace.repr.ocaml.actions Env]))
+
+(set! *warn-on-reflection* false)
+
+;; ---------------------------------------------------------------------------------------------
+;; The tables, loaded once into arrays
+
+(def ^:private nterms (count t/terminals))
+(def ^:private term-index (into {} (map-indexed (fn [i n] [(keyword n) i]) t/terminals)))
+(def ^:private n-states (count t/states))
+
+(def ^:private plhs (int-array (map first t/productions)))
+(def ^:private plen (int-array (map second t/productions)))
+(def ^:private pstart (object-array (map #(nth % 3) t/productions)))
+(def ^:private pnull (object-array (map #(boolean-array (nth % 4)) t/productions)))
+
+(def ^:private action-fns
+  (let [missing (remove #(contains? act/actions %) t/actions)]
+    (when (seq missing)
+      (throw (ex-info (str (count missing) " actions of the tables have no translation: " (pr-str (take 5 missing))) {:missing (vec missing)})))
+    (object-array (map #(get act/actions %) t/actions))))
+
+(defn- compile-plan
+  "A plan with its action resolved: [fn len names-array items], an item an int or [lo hi plan]"
+  [plan]
+  (when plan
+    (let [[aid len names items] plan]
+      [(aget ^objects action-fns aid) len (object-array names)
+       (mapv (fn [it] (if (vector? it) [(nth it 0) (nth it 1) (compile-plan (nth it 2))] it)) items)])))
+
+(def ^:private pplan (object-array (map #(compile-plan (nth % 2)) t/productions)))
+
+(def ^:private defred (int-array (map first t/states)))
+
+;; per state: terminal -> 0 (error), s+1 (shift to s), -(p+1) (reduce p)
+(def ^:private actions
+  (object-array
+   (for [[_ acts _] t/states]
+     (let [a (int-array nterms)]
+       (doseq [[tm code] (partition 2 acts)]
+         (aset a (int tm) (int (if (neg? code) code (inc code)))))
+       a))))
+
+(def ^:private gotos
+  (object-array
+   (for [[_ _ gs] t/states]
+     (let [m (java.util.HashMap.)]
+       (doseq [[x s] (partition 2 gs)] (.put m (int x) (int s)))
+       m))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Plans: the composed actions of a production, with Menhir's positions
+
+(defn- eval-plan
+  "The value of a plan over the reduced cells from base: its items right to left (an inlined item's own plan
+  evaluated in place), then its action on the environment of their values and positions"
+  [plan ^objects vals ^objects sps ^objects eps ^booleans nullable pbase base endpos0]
+  (let [[f len ^objects names items] plan
+        n (count items)
+        iv (object-array n) is (object-array n) ie (object-array n)
+        before (fn [i] (if (> i 0) (aget eps (dec i)) endpos0))]
+    (loop [k (dec n)]
+      (when (>= k 0)
+        (let [it (nth items k)]
+          (if (vector? it)
+            (let [lo (+ base (nth it 0)) hi (+ base (nth it 1))]
+              (aset iv k (eval-plan (nth it 2) vals sps eps nullable pbase lo endpos0))
+              (if (> hi lo)
+                (do (aset is k (aget sps lo)) (aset ie k (aget eps (dec hi))))
+                (let [b (before lo)] (aset is k b) (aset ie k b))))
+            (let [c (+ base it)]
+              (aset iv k (aget vals c)) (aset is k (aget sps c)) (aset ie k (aget eps c)))))
+        (recur (dec k))))
+    (let [start (if (> len 0) (aget sps base) (before base))
+          end (if (> len 0) (aget eps (+ base len -1)) start)
+          symstart (loop [c base]
+                     (cond
+                       (>= c (+ base len)) end
+                       (or (not (aget nullable (- c pbase))) (not (identical? (aget sps c) (aget eps c)))) (aget sps c)
+                       :else (recur (inc c))))]
+      (f (Env. iv is ie names start end symstart)))))
+
+;; ---------------------------------------------------------------------------------------------
+;; The engine
+
+(defn- syntax-error-data [msg loc] {:ocaml-error :syntax :message msg :loc loc})
+
+(defn- run
+  "The parse from a start state: the start production's value, or an ex-info {:ocaml-error ...}"
+  [lb start-state]
+  (let [cap 256
+        st (volatile! (int-array cap))
+        vals (volatile! (object-array cap))
+        sps (volatile! (object-array cap))
+        eps (volatile! (object-array cap))
+        top (volatile! 0)
+        grow! (fn []
+                (let [n (* 2 (alength ^ints @st))]
+                  (vreset! st (java.util.Arrays/copyOf ^ints @st (int n)))
+                  (vreset! vals (java.util.Arrays/copyOf ^objects @vals (int n)))
+                  (vreset! sps (java.util.Arrays/copyOf ^objects @sps (int n)))
+                  (vreset! eps (java.util.Arrays/copyOf ^objects @eps (int n)))))
+        push! (fn [s v sp ep]
+                (when (>= @top (alength ^ints @st)) (grow!))
+                (let [i @top]
+                  (aset ^ints @st i (int s)) (aset ^objects @vals i v) (aset ^objects @sps i sp) (aset ^objects @eps i ep)
+                  (vreset! top (inc i))))
+        p0 (lex/curr-p lb)
+        read-token (fn []
+                     (let [tk (lex/token lb)]
+                       [tk (lex/start-p lb) (lex/curr-p lb)]))]
+    ;; the bottom cell: the start state, its end the initial position
+    (push! start-state nil p0 p0)
+    (loop [[tk tsp tep :as la] (read-token)]
+      (let [s (aget ^ints @st (dec @top))
+            d (aget ^ints defred s)
+            reduce! (fn [p]
+                      (let [n (aget ^ints plen p)
+                            tp @top
+                            base (- tp n)
+                            ^objects vs @vals ^objects ss @sps ^objects es @eps
+                            endpos0 (aget es (dec base))
+                            v (if-let [plan (aget ^objects pplan p)]
+                                (eval-plan plan vs ss es (aget ^objects pnull p) base base endpos0)
+                                (aget vs (dec tp)))
+                            sp (if (> n 0) (aget ss base) endpos0)
+                            ep (if (> n 0) (aget es (dec tp)) sp)]
+                        (if (aget ^objects pstart p)
+                          [:accept v]
+                          (do (vreset! top base)
+                              (let [below (aget ^ints @st (dec base))
+                                    g (.get ^java.util.HashMap (aget ^objects gotos below) (int (aget ^ints plhs p)))]
+                                (push! g v sp ep))
+                              nil))))]
+        (if (>= d 0)
+          (let [r (reduce! d)] (if r (second r) (recur la)))
+          (let [ti (get term-index (first tk))
+                a (if ti (aget ^ints (aget ^objects actions s) (int ti)) 0)]
+            (cond
+              (pos? a) (do (push! (dec a) (if (> (count tk) 1) (second tk) :unit) tsp tep)
+                           (recur (if (= :EOF (first tk)) la (read-token))))
+              (neg? a) (let [r (reduce! (- (- a) 1))] (if r (second r) (recur la)))
+              :else (throw (ex-info "Syntax error" (syntax-error-data "Syntax error" [tsp tep false]))))))))))
+
+(defn parse
+  "The bytes of a file parsed as kind (:impl, :intf, :toplevel): [:ok tree] or [:error kind message loc]"
+  [^bytes bytes fname kind]
+  (binding [ds/*state* (ds/new-state)]
+    (let [lb (lex/new-lexbuf bytes fname)
+          start (get t/starts (case kind :impl "implementation" :intf "interface" :toplevel "use_file"))]
+      (try
+        [:ok (run lb start)]
+        (catch arbace.lang.ExceptionInfo ex
+          (let [d (ex-data ex)]
+            (case (:ocaml-error d)
+              :lexer [:error :lexer (:message d) (:loc d)]
+              :syntax [:error :syntax (:message d) (:loc d)]
+              ;; Parse.wrap: an Escape_error is a syntax error at the current token
+              :escape [:error :syntax "Syntax error" [(lex/start-p lb) (lex/curr-p lb) false]]
+              (throw ex))))))))
+
+(defn dump-form
+  "The helper's dump of a file (ocdump --mode parse [--loc] [--intf] [--use-file] --file FNAME) as its tree"
+  [^bytes bytes fname kind with-loc]
+  (binding [ast/*with-loc* with-loc]
+    (let [r (parse bytes fname kind)]
+      (if (= :ok (first r))
+        (ast/top-form kind (second r) fname)
+        (let [[_ k msg lc] r] (ast/error-form k msg lc))))))
+
+(defn dump
+  "The helper's dump text of a file"
+  [^bytes bytes fname kind with-loc]
+  (binding [ast/*with-loc* with-loc]
+    (ast/dump-text (dump-form bytes fname kind with-loc))))

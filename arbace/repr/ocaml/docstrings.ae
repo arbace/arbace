@@ -1,0 +1,137 @@
+;; Ported from OCaml 5.5.0 (the release tarball https://caml.inria.fr/pub/distrib/ocaml-5.5/ocaml-5.5.0.tar.xz, SHA-256
+;; fcc6ae665d1ec51d52510eaac7834a86a9806bf5a258bb7cca78733fccf015ba), parsing/docstrings.ml, whose notice follows
+;; (LICENSE.md, "The OCaml Core System"):
+;;
+;;                                 OCaml
+;;
+;;                               Leo White
+;;
+;;   Copyright 1996 Institut National de Recherche en Informatique et
+;;     en Automatique.
+;;
+;;   All rights reserved.  This file is distributed under the terms of
+;;   the GNU Lesser General Public License version 2.1, with the
+;;   special exception on linking described in the file LICENSE.
+
+(ns arbace.repr.ocaml.docstrings
+  "Docstrings, after OCaml's parsing/docstrings.ml: a docstring (its body, its location, its attachment state); the
+  lexer's tables from positions to the docstrings before and after the tokens there (pre, post, floating, pre-extra,
+  post-extra), filled by arbace.repr.ocaml.lex's token function; the parser actions' lookups (symbol_docs, rhs_info,
+  symbol_text, ...), which mark what they attach, so a docstring taken as a field's info is no item's doc. A table is
+  keyed by the position's offset (one file: an offset names one position). The state of one parse is *state*.")
+
+(set! *warn-on-reflection* false)
+
+;; A docstring: body, loc, and mutable attachment (:unattached :info :docs) and association (:zero :one :many)
+(defprotocol Mark
+  (get-attached [ds])
+  (set-attached! [ds v])
+  (get-associated [ds])
+  (set-associated! [ds v]))
+
+(deftype Docstring [body loc ^:unsynchronized-mutable attached ^:unsynchronized-mutable associated]
+  Mark
+  (get-attached [_] attached)
+  (set-attached! [_ v] (set! attached v))
+  (get-associated [_] associated)
+  (set-associated! [_ v] (set! associated v))
+  Object
+  (toString [_] (str "(** " body " *)")))
+
+(defn docstring [body loc] (Docstring. body loc :unattached :zero))
+(defn ds-body [^Docstring ds] (.-body ds))
+(defn ds-loc [^Docstring ds] (.-loc ds))
+
+;; The tables of one parse: maps from a position's offset to a docstring list
+(defn new-state []
+  {:pre (java.util.HashMap.) :post (java.util.HashMap.) :floating (java.util.HashMap.)
+   :pre-extra (java.util.HashMap.) :post-extra (java.util.HashMap.) :all (java.util.ArrayList.)})
+
+(def ^:dynamic *state* nil)
+
+(defn- pos-key [p] (.-cnum p))
+
+(defn register [ds] (.add ^java.util.ArrayList (:all *state*) ds))
+
+(defn- set-table [k pos dsl]
+  (when (seq dsl) (.put ^java.util.HashMap (get *state* k) (pos-key pos) (vec dsl))))
+
+(defn set-pre-docstrings [pos dsl] (set-table :pre pos dsl))
+(defn set-post-docstrings [pos dsl] (set-table :post pos dsl))
+(defn set-floating-docstrings [pos dsl] (set-table :floating pos dsl))
+(defn set-pre-extra-docstrings [pos dsl] (set-table :pre-extra pos dsl))
+(defn set-post-extra-docstrings [pos dsl] (set-table :post-extra pos dsl))
+
+(defn- find-table [k pos] (.get ^java.util.HashMap (get *state* k) (pos-key pos)))
+
+;; Find the first non-info docstring in a list, attach it and return it
+(defn- get-docstring [info dsl]
+  (loop [l (seq dsl)]
+    (when l
+      (let [ds (first l)]
+        (if (= :info (get-attached ds))
+          (recur (next l))
+          (do (set-attached! ds (if info :info :docs)) ds))))))
+
+;; Find all the non-info docstrings in a list, attach them and return them
+(defn- get-docstrings [dsl]
+  (vec (for [ds dsl :when (not= :info (get-attached ds))]
+         (do (set-attached! ds :docs) ds))))
+
+(defn- associate-docstrings [dsl]
+  (doseq [ds dsl]
+    (set-associated! ds (if (= :zero (get-associated ds)) :one :many))))
+
+(defn get-pre-docs [pos]
+  (when-let [dsl (find-table :pre pos)]
+    (associate-docstrings dsl)
+    (get-docstring false dsl)))
+
+(defn mark-pre-docs [pos]
+  (when-let [dsl (find-table :pre pos)] (associate-docstrings dsl)))
+
+(defn get-post-docs [pos]
+  (when-let [dsl (find-table :post pos)]
+    (associate-docstrings dsl)
+    (get-docstring false dsl)))
+
+(defn mark-post-docs [pos]
+  (when-let [dsl (find-table :post pos)] (associate-docstrings dsl)))
+
+(defn get-info [pos]
+  (when-let [dsl (find-table :post pos)] (get-docstring true dsl)))
+
+(defn get-text [pos] (if-let [dsl (find-table :floating pos)] (get-docstrings dsl) []))
+(defn get-post-text [pos] (if-let [dsl (find-table :post pos)] (get-docstrings dsl) []))
+(defn get-pre-extra-text [pos] (if-let [dsl (find-table :pre-extra pos)] (get-docstrings dsl) []))
+(defn get-post-extra-text [pos] (if-let [dsl (find-table :post-extra pos)] (get-docstrings dsl) []))
+
+;; Docstrings from parser actions (Docstrings.WithMenhir): a docs is {:pre ds-or-nil :post ds-or-nil}
+
+(def empty-docs {:pre nil :post nil})
+
+(defn symbol-docs [[startpos endpos]]
+  ;; OCaml evaluates a record's fields right to left: the post docstring first
+  (let [post (get-post-docs endpos)
+        pre (get-pre-docs startpos)]
+    {:pre pre :post post}))
+
+(defn symbol-docs-lazy [[p1 p2]] (delay (symbol-docs [p1 p2])))
+(defn rhs-docs [pos1 pos2] (symbol-docs [pos1 pos2]))
+(defn rhs-docs-lazy [p1 p2] (delay (symbol-docs [p1 p2])))
+(defn mark-symbol-docs [[startpos endpos]] (mark-pre-docs startpos) (mark-post-docs endpos) nil)
+(defn mark-rhs-docs [pos1 pos2] (mark-pre-docs pos1) (mark-post-docs pos2) nil)
+(defn symbol-info [endpos] (get-info endpos))
+(defn rhs-info [endpos] (get-info endpos))
+(defn symbol-text [startpos] (get-text startpos))
+(defn symbol-text-lazy [startpos] (delay (get-text startpos)))
+(defn rhs-text [pos] (get-text pos))
+(defn rhs-post-text [pos] (get-post-text pos))
+(defn rhs-text-lazy [pos] (delay (get-text pos)))
+(defn symbol-pre-extra-text [startpos] (get-pre-extra-text startpos))
+(defn symbol-post-extra-text [endpos] (get-post-extra-text endpos))
+(defn rhs-pre-extra-text [pos] (get-pre-extra-text pos))
+(defn rhs-post-extra-text [pos] (get-post-extra-text pos))
+
+(def empty-text [])
+(def empty-text-lazy (delay []))

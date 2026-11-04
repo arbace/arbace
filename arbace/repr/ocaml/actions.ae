@@ -1,0 +1,1213 @@
+;; Ported from OCaml 5.5.0 (the release tarball https://caml.inria.fr/pub/distrib/ocaml-5.5/ocaml-5.5.0.tar.xz, SHA-256
+;; fcc6ae665d1ec51d52510eaac7834a86a9806bf5a258bb7cca78733fccf015ba), parsing/parser.mly: its header's helpers and the
+;; semantic action of each of its productions (and of the rules of Menhir's standard library it uses), whose notice
+;; follows (LICENSE.md, "The OCaml Core System"):
+;;
+;;                                 OCaml
+;;
+;;             Xavier Leroy, projet Cristal, INRIA Rocquencourt
+;;
+;;   Copyright 1996 Institut National de Recherche en Informatique et
+;;     en Automatique.
+;;
+;;   All rights reserved.  This file is distributed under the terms of
+;;   the GNU Lesser General Public License version 2.1, with the
+;;   special exception on linking described in the file LICENSE.
+
+(ns arbace.repr.ocaml.actions
+  "parser.mly's semantic actions in Arbace: `actions` maps each action's text (parser.mly's, comments removed and white
+  space collapsed: arbace.repr.ocaml.menhir/normalize-action, the key the tables' plans name) to a function of the
+  action's environment: its items' values ($ e 1, $ e \"name\") and positions, its $startpos, $endpos,
+  $symbolstartpos, $sloc and $loc as Menhir defines them for the production after %inline expansion (arbace.repr.ocaml
+  .parser computes them). OCaml's values: a list a sequence, a tuple a vector, an option nil or the value, unit
+  :unit, the Parsetree arbace.repr.ocaml.ast's maps and vectors."
+  (:require [arbace.repr.ocaml.ast :as ast]
+            [arbace.repr.ocaml.docstrings :as ds]
+            [arbace.repr.ocaml.lex :as lex]))
+
+(set! *warn-on-reflection* false)
+
+;; ---------------------------------------------------------------------------------------------
+;; The environment of an action
+
+(deftype Env [^objects vals ^objects starts ^objects ends ^objects names start end symstart])
+
+(defn- item-index [^Env e k]
+  (if (integer? k)
+    (dec k)
+    (let [^objects names (.-names e)]
+      (loop [i 0] (cond (>= i (alength names)) (throw (ex-info (str "no item " k) {}))
+                        (= k (aget names i)) i
+                        :else (recur (inc i)))))))
+
+(defn $ [^Env e k] (aget ^objects (.-vals e) (item-index e k)))
+(defn spos [^Env e] (.-start e))
+(defn epos [^Env e] (.-end e))
+(defn sspos [^Env e] (.-symstart e))
+(defn sloc [^Env e] [(.-symstart e) (.-end e)])
+(defn mloc [^Env e] [(.-start e) (.-end e)])
+(defn spos-of [^Env e k] (aget ^objects (.-starts e) (item-index e k)))
+(defn epos-of [^Env e k] (aget ^objects (.-ends e) (item-index e k)))
+(defn loc-of [^Env e k] [(spos-of e k) (epos-of e k)])
+
+;; ---------------------------------------------------------------------------------------------
+;; Errors (Syntaxerr); their messages as ocamlc words them are a later step
+
+(defn- syntax-error-at [loc msg]
+  (throw (ex-info msg {:ocaml-error :syntax :message msg :loc loc})))
+
+(defn syntax-error [] (throw (ex-info "Syntax error" {:ocaml-error :escape})))
+
+(defn make-loc [[s e]] [s e false])
+(defn ghost-loc [[s e]] [s e true])
+
+(defn unclosed [opening-name opening-loc closing-name closing-loc]
+  (syntax-error-at (make-loc closing-loc) (str "Syntax error: " closing-name " expected")))
+(defn expecting [loc nonterm] (syntax-error-at (make-loc loc) (str "Syntax error: " nonterm " expected.")))
+(defn not-expecting [loc nonterm] (syntax-error-at (make-loc loc) (str "Syntax error: " nonterm " not expected.")))
+(defn removed-string-set [loc]
+  (syntax-error-at (make-loc loc) "Syntax error: strings are immutable, there is no assignment syntax for them."))
+
+;; ---------------------------------------------------------------------------------------------
+;; The header's helpers
+
+(def unit :unit)
+(defn mkloc [txt loc] {:txt txt :loc loc})
+(defn mknoloc [txt] {:txt txt :loc ast/none})
+
+(defn mktyp ([loc d] (mktyp loc nil d)) ([loc attrs d] (ast/typ-mk (make-loc loc) attrs d)))
+(defn mkpat ([loc d] (mkpat loc nil d)) ([loc attrs d] (ast/pat-mk (make-loc loc) attrs d)))
+(defn mkexp ([loc d] (mkexp loc nil d)) ([loc attrs d] (ast/exp-mk (make-loc loc) attrs d)))
+(defn mkmty ([loc d] (mkmty loc nil d)) ([loc attrs d] (ast/mty-mk (make-loc loc) attrs d)))
+(defn mksig [loc d] (ast/sig-mk (make-loc loc) d))
+(defn mkmod ([loc d] (mkmod loc nil d)) ([loc attrs d] (ast/mod-mk (make-loc loc) attrs d)))
+(defn mkstr [loc d] (ast/str-mk (make-loc loc) d))
+(defn mkclass ([loc d] (mkclass loc nil d)) ([loc attrs d] (ast/cl-mk (make-loc loc) attrs d)))
+(defn mkcty ([loc d] (mkcty loc nil d)) ([loc attrs d] (ast/cty-mk (make-loc loc) attrs d)))
+(defn mkconst [loc c] (ast/const-mk (make-loc loc) c))
+
+(defn pstr-extension [body attrs] [[:Pstr_extension body attrs] nil])
+(defn pstr-attribute [body] [[:Pstr_attribute body] nil])
+(defn pstr-typext [[te ext]] [[:Pstr_typext te] ext])
+(defn pstr-primitive [[vd ext]] [[:Pstr_primitive vd] ext])
+(defn pstr-type [[[nr ext] tys]] [[:Pstr_type nr tys] ext])
+(defn pstr-exception [[te ext]] [[:Pstr_exception te] ext])
+(defn pstr-include [[body ext]] [[:Pstr_include body] ext])
+(defn pstr-module [[body ext]] [[:Pstr_module body] ext])
+(defn pstr-recmodule [[ext bindings]] [[:Pstr_recmodule bindings] ext])
+(defn pstr-modtype [[body ext]] [[:Pstr_modtype body] ext])
+(defn pstr-open [[body ext]] [[:Pstr_open body] ext])
+(defn pstr-class [[ext l]] [[:Pstr_class l] ext])
+(defn pstr-class-type [[ext l]] [[:Pstr_class_type l] ext])
+
+(defn psig-extension [body attrs] [[:Psig_extension body attrs] nil])
+(defn psig-attribute [body] [[:Psig_attribute body] nil])
+(defn psig-typext [[te ext]] [[:Psig_typext te] ext])
+(defn psig-value [[vd ext]] [[:Psig_value vd] ext])
+(defn psig-type [[[nr ext] tys]] [[:Psig_type nr tys] ext])
+(defn psig-typesubst [[[nr ext] tys]] [[:Psig_typesubst tys] ext])
+(defn psig-exception [[te ext]] [[:Psig_exception te] ext])
+(defn psig-include [[body ext]] [[:Psig_include body] ext])
+(defn psig-module [[body ext]] [[:Psig_module body] ext])
+(defn psig-modsubst [[body ext]] [[:Psig_modsubst body] ext])
+(defn psig-recmodule [[ext l]] [[:Psig_recmodule l] ext])
+(defn psig-modtype [[body ext]] [[:Psig_modtype body] ext])
+(defn psig-modtypesubst [[body ext]] [[:Psig_modtypesubst body] ext])
+(defn psig-open [[body ext]] [[:Psig_open body] ext])
+(defn psig-class [[ext l]] [[:Psig_class l] ext])
+(defn psig-class-type [[ext l]] [[:Psig_class_type l] ext])
+
+(defn mkctf [loc attrs docs d] (ast/ctf-mk {:loc (make-loc loc) :attrs attrs :docs docs} d))
+(defn mkcf [loc attrs docs d] (ast/cf-mk {:loc (make-loc loc) :attrs attrs :docs docs} d))
+
+(defn mkrhs [rhs loc] (mkloc rhs (make-loc loc)))
+(defn ghrhs [rhs loc] (mkloc rhs (ghost-loc loc)))
+(defn ldot [lid lid-loc name loc] [:Ldot (mkrhs lid lid-loc) (mkrhs name loc)])
+
+(defn- push-loc [x acc] (if (ast/loc-ghost? x) acc (cons x acc)))
+(defn reloc-pat [loc x] (assoc x :ppat_loc (make-loc loc) :ppat_loc_stack (push-loc (:ppat_loc x) (:ppat_loc_stack x))))
+(defn reloc-exp [loc x] (assoc x :pexp_loc (make-loc loc) :pexp_loc_stack (push-loc (:pexp_loc x) (:pexp_loc_stack x))))
+(defn reloc-typ [loc x] (assoc x :ptyp_loc (make-loc loc) :ptyp_loc_stack (push-loc (:ptyp_loc x) (:ptyp_loc_stack x))))
+
+(defn mkexpvar [loc name] (mkexp loc [:Pexp_ident (mkrhs [:Lident name] loc)]))
+(def mkoperator mkexpvar)
+(defn mkpatvar [loc name] (mkpat loc [:Ppat_var (mkrhs name loc)]))
+
+(defn ghexp ([loc d] (ghexp loc nil d)) ([loc attrs d] (ast/exp-mk (ghost-loc loc) attrs d)))
+(defn ghpat ([loc d] (ghpat loc nil d)) ([loc attrs d] (ast/pat-mk (ghost-loc loc) attrs d)))
+(defn ghtyp ([loc d] (ghtyp loc nil d)) ([loc attrs d] (ast/typ-mk (ghost-loc loc) attrs d)))
+(defn ghloc [loc d] {:txt d :loc (ghost-loc loc)})
+(defn ghstr [loc d] (ast/str-mk (ghost-loc loc) d))
+(defn ghsig [loc d] (ast/sig-mk (ghost-loc loc) d))
+
+(def nolabel [:Nolabel])
+(defn mkinfix [arg1 op arg2] [:Pexp_apply op [[nolabel arg1] [nolabel arg2]]])
+
+(defn- neg-string [^String f]
+  (if (and (pos? (count f)) (= \- (.charAt f 0))) (subs f 1) (str "-" f)))
+
+(defn- const-desc-of [arg]
+  (let [d (:pexp_desc arg)]
+    (when (and (= :Pexp_constant (first d)) (empty? (:pexp_attributes arg)))
+      (:pconst_desc (nth d 1)))))
+
+(defn mkuminus [sloc oploc name arg]
+  (let [c (const-desc-of arg)]
+    (cond
+      (and (= name "-") (= :Pconst_integer (first c))) [:Pexp_constant (mkconst sloc [:Pconst_integer (neg-string (nth c 1)) (nth c 2)])]
+      (and (#{"-" "-."} name) (= :Pconst_float (first c))) [:Pexp_constant (mkconst sloc [:Pconst_float (neg-string (nth c 1)) (nth c 2)])]
+      :else [:Pexp_apply (mkoperator oploc (str "~" name)) [[nolabel arg]]])))
+
+(defn mkuplus [sloc oploc name arg]
+  (let [c (const-desc-of arg)]
+    (if (or (and (= name "+") (= :Pconst_integer (first c)))
+            (and (#{"+" "+."} name) (= :Pconst_float (first c))))
+      [:Pexp_constant (mkconst sloc c)]
+      [:Pexp_apply (mkoperator oploc (str "~" name)) [[nolabel arg]]])))
+
+(defn mk-attr [loc name payload] (ast/attr-mk loc name payload))
+
+(defn mkexp-cons-desc [consloc args] [:Pexp_construct (mkrhs [:Lident "::"] consloc) args])
+(defn mkexp-cons [loc consloc args] (mkexp loc (mkexp-cons-desc consloc args)))
+(defn mkpat-cons-desc [consloc args] [:Ppat_construct (mkrhs [:Lident "::"] consloc) [() args]])
+(defn mkpat-cons [loc consloc args] (mkpat loc (mkpat-cons-desc consloc args)))
+(defn- ghexp-cons-desc [consloc args] [:Pexp_construct (ghrhs [:Lident "::"] consloc) args])
+(defn- ghpat-cons-desc [consloc args] [:Ppat_construct (ghrhs [:Lident "::"] consloc) [() args]])
+
+(defn mktailexp
+  "[desc loc] of a list literal's elements and the location of its ]: the :: chain, iteratively from the end"
+  [nilloc es]
+  (loop [es (reverse es)
+         acc [[:Pexp_construct (ghloc nilloc [:Lident "[]"]) nil] nilloc]]
+    (if (empty? es)
+      acc
+      (let [e1 (first es) [exp-el el-loc] acc
+            loc [(ast/loc-start (:pexp_loc e1)) (second el-loc)]
+            arg (ghexp loc [:Pexp_tuple [[nil e1] [nil (ghexp el-loc exp-el)]]])]
+        (recur (rest es) [(ghexp-cons-desc loc arg) loc])))))
+
+(defn mktailpat [nilloc ps]
+  (loop [ps (reverse ps)
+         acc [[:Ppat_construct (ghloc nilloc [:Lident "[]"]) nil] nilloc]]
+    (if (empty? ps)
+      acc
+      (let [p1 (first ps) [pat-pl el-loc] acc
+            loc [(ast/loc-start (:ppat_loc p1)) (second el-loc)]
+            arg (ghpat loc [:Ppat_tuple [[nil p1] [nil (ghpat el-loc pat-pl)]] :Closed])]
+        (recur (rest ps) [(ghpat-cons-desc loc arg) loc])))))
+
+(defn mkstrexp [e attrs] {:pstr_desc [:Pstr_eval e attrs] :pstr_loc (:pexp_loc e)})
+
+(defn mkexp-desc-constraint [e t]
+  (case (first t)
+    :Pconstraint [:Pexp_constraint e (nth t 1)]
+    :Pcoerce [:Pexp_coerce e (nth t 1) (nth t 2)]))
+(defn mkexp-constraint [loc e t] (mkexp loc (mkexp-desc-constraint e t)))
+(defn mkexp-opt-constraint [loc e c] (if c (mkexp-constraint loc e c) e))
+(defn mkpat-opt-constraint [loc p typ] (if typ (mkpat loc [:Ppat_constraint p typ]) p))
+
+;; indexing operators
+(defn- bigarray-untuplify [exp]
+  (let [d (:pexp_desc exp)]
+    (if (and (= :Pexp_tuple (first d)) (every? #(nil? (first %)) (nth d 1)))
+      (mapv second (nth d 1))
+      [exp])))
+
+(def builtin-indexing-operators
+  {:index (fn [loc paren-kind index]
+            (case paren-kind
+              (:Paren :Bracket) [:One [[nolabel index]]]
+              :Brace (let [coords (bigarray-untuplify index)]
+                       (case (count coords)
+                         1 [:One [[nolabel (nth coords 0)]]]
+                         2 [:Two [[nolabel (nth coords 0)] [nolabel (nth coords 1)]]]
+                         3 [:Three [[nolabel (nth coords 0)] [nolabel (nth coords 1)] [nolabel (nth coords 2)]]]
+                         [:Many [[nolabel (ghexp loc [:Pexp_array coords])]]]))))
+   :name (fn [loc _ assign paren-kind n]
+           (let [opname (if assign "set" "get")
+                 prefix (case paren-kind
+                          :Paren [:Lident "Array"]
+                          :Bracket (if assign (removed-string-set loc) [:Lident "String"])
+                          :Brace [:Ldot (mknoloc [:Lident "Bigarray"])
+                                  (mknoloc (case n :One "Array1" :Two "Array2" :Three "Array3" :Many "Genarray"))])]
+             (ghloc loc [:Ldot (mknoloc prefix) (mknoloc opname)])))})
+
+(defn- paren-to-strings [k] (case k :Paren ["(" ")"] :Bracket ["[" "]"] :Brace ["{" "}"]))
+
+(def user-indexing-operators
+  {:index (fn [loc _ index]
+            (if (= 1 (count index))
+              [:One [[nolabel (first index)]]]
+              [:Many [[nolabel (mkexp loc [:Pexp_array index])]]]))
+   :name (fn [loc [prefix ext] assign paren-kind n]
+           (let [[left right] (paren-to-strings paren-kind)
+                 name (str "." ext left (if (= n :One) "" ";..") right (if assign "<-" ""))
+                 lid (if prefix [:Ldot (mknoloc prefix) (mknoloc name)] [:Lident name])]
+             (ghloc loc lid)))})
+
+(defn mk-indexop-expr [op loc [array dot paren index set-expr]]
+  (let [assign (some? set-expr)
+        [n idx] ((:index op) loc paren index)
+        f ((:name op) loc dot assign paren n)
+        set-arg (if set-expr [[nolabel set-expr]] [])]
+    (mkexp loc [:Pexp_apply (ghexp loc [:Pexp_ident f]) (concat [[nolabel array]] idx set-arg)])))
+
+(defn indexop-unclosed-error [loc-s s loc-e]
+  (let [[left right] (paren-to-strings s)] (unclosed left loc-s right loc-e)))
+
+(defn lapply [loc p1 loc-p1 p2 loc-p2] [:Lapply (mkrhs p1 loc-p1) (mkrhs p2 loc-p2)])
+
+(defn make-ghost [x] (assoc x :loc (ast/make-ghost-loc (:loc x))))
+(defn- longident-last [lid]
+  (case (first lid) :Lident (nth lid 1) :Ldot (:txt (nth lid 2)) :Lapply (throw (ex-info "Longident.last" {}))))
+(defn loc-last [id] (assoc id :txt (longident-last (:txt id))))
+(defn loc-lident [id] (assoc id :txt [:Lident (:txt id)]))
+(defn exp-of-longident [lid]
+  (let [lid (assoc lid :txt [:Lident (longident-last (:txt lid))])]
+    (ast/exp-mk (:loc lid) nil [:Pexp_ident lid])))
+(defn exp-of-label [lbl] (ast/exp-mk (:loc lbl) nil [:Pexp_ident (loc-lident lbl)]))
+(defn pat-of-label [lbl] (ast/pat-mk (:loc lbl) nil [:Ppat_var (loc-last lbl)]))
+
+(defn mk-newtypes [loc newtypes exp]
+  (reduce (fn [e nt] (mkexp loc [:Pexp_newtype nt e])) exp (reverse newtypes)))
+
+(defn wrap-type-annotation [loc newtypes core-type body]
+  (let [exp (mkexp loc [:Pexp_constraint body core-type])
+        exp (mk-newtypes loc newtypes exp)
+        ;; a tuple is evaluated right to left: the type first
+        poly (ghtyp loc [:Ptyp_poly newtypes (ast/varify-constructors newtypes core-type)])]
+    [exp poly]))
+
+(defn pexp-extension [id e] [:Pexp_extension [id [:PStr [(mkstrexp e ())]]]])
+
+(defn mkexp-attrs [loc desc [ext attrs]]
+  (if (nil? ext) (mkexp loc attrs desc) (mkexp loc (pexp-extension ext (ghexp loc attrs desc)))))
+(defn mktyp-attrs [loc desc [ext attrs]]
+  (if (nil? ext) (mktyp loc attrs desc) (mktyp loc [:Ptyp_extension [ext [:PTyp (ghtyp loc attrs desc)]]])))
+(defn mkpat-attrs [loc desc [ext attrs]]
+  (if (nil? ext) (mkpat loc attrs desc) (mkpat loc [:Ppat_extension [ext [:PPat (ghpat loc attrs desc) nil]]])))
+
+(defn wrap-class-attrs [_loc body attrs] (assoc body :pcl_attributes (concat attrs (:pcl_attributes body))))
+(defn wrap-mod-attrs [_loc attrs body] (assoc body :pmod_attributes (concat attrs (:pmod_attributes body))))
+(defn wrap-mty-attrs [_loc attrs body] (assoc body :pmty_attributes (concat attrs (:pmty_attributes body))))
+
+(defn wrap-mkstr-ext [loc [item ext]]
+  (if (nil? ext) (mkstr loc item) (mkstr loc [:Pstr_extension [ext [:PStr [(ghstr loc item)]]] ()])))
+(defn wrap-mksig-ext [loc [item ext]]
+  (if (nil? ext) (mksig loc item) (mksig loc [:Psig_extension [ext [:PSig [(ghsig loc item)]]] ()])))
+
+(defn mk-quotedext [loc [id idloc s strloc delim]]
+  (let [exp-id (mkloc id idloc)
+        const (ast/const-mk strloc [:Pconst_string s strloc delim])
+        e (ghexp loc [:Pexp_constant const])]
+    [exp-id [:PStr [(mkstrexp e ())]]]))
+
+(defn text-str [pos] (ast/str-text (ds/rhs-text pos)))
+(defn text-sig [pos] (ast/sig-text (ds/rhs-text pos)))
+(defn text-cstr [pos] (ast/cf-text (ds/rhs-text pos)))
+(defn text-csig [pos] (ast/ctf-text (ds/rhs-text pos)))
+(defn- def-text [txt] (mapv (fn [d] [:Ptop_def [d]]) (ast/str-text txt)))
+(defn text-def [pos] (def-text (ds/rhs-text pos)))
+
+(defn extra-text [startpos endpos text items]
+  (if (empty? items)
+    (let [post (ds/rhs-post-text endpos)
+          post-extras (ds/rhs-post-extra-text endpos)]
+      (concat (text post) (text post-extras)))
+    (let [pre-extras (ds/rhs-pre-extra-text startpos)
+          post-extras (ds/rhs-post-extra-text endpos)]
+      (concat (text pre-extras) items (text post-extras)))))
+
+(defn extra-str [p1 p2 items] (extra-text p1 p2 ast/str-text items))
+(defn extra-sig [p1 p2 items] (extra-text p1 p2 ast/sig-text items))
+(defn extra-cstr [p1 p2 items] (extra-text p1 p2 ast/cf-text items))
+(defn extra-csig [p1 p2 items] (extra-text p1 p2 ast/ctf-text items))
+(defn extra-def [p1 p2 items] (extra-text p1 p2 def-text items))
+
+(defn extra-rhs-core-type [ct pos]
+  (let [docs (ds/rhs-info pos)]
+    (assoc ct :ptyp_attributes (ast/add-info-attrs docs (:ptyp_attributes ct)))))
+
+;; let bindings
+(defn mklb [first? loc [p e typ is-pun] attrs]
+  {:lb_pattern p :lb_expression e :lb_constraint typ :lb_is_pun is-pun :lb_attributes attrs
+   :lb_docs (ds/symbol-docs-lazy loc)
+   :lb_text (if first? ds/empty-text-lazy (ds/symbol-text-lazy (first loc)))
+   :lb_loc (make-loc loc)})
+
+(defn addlb [lbs lb]
+  (when (and (:lb_is_pun lb) (nil? (:lbs_extension lbs))) (syntax-error))
+  (assoc lbs :lbs_bindings (cons lb (:lbs_bindings lbs))))
+
+(defn mklbs [ext rf lb] (addlb {:lbs_bindings () :lbs_rec rf :lbs_extension ext} lb))
+
+(defn val-of-let-bindings [loc lbs]
+  (let [bindings (mapv (fn [lb]
+                         ;; Vb.mk's arguments are evaluated right to left: the text forced before the docs
+                         (let [text (force (:lb_text lb))
+                               docs (force (:lb_docs lb))]
+                           (ast/vb-mk (:lb_pattern lb) (:lb_expression lb)
+                                      {:loc (:lb_loc lb) :attrs (:lb_attributes lb) :docs docs :text text
+                                       :value_constraint (:lb_constraint lb)})))
+                       (:lbs_bindings lbs))
+        str (mkstr loc [:Pstr_value (:lbs_rec lbs) (reverse bindings)])]
+    (if (nil? (:lbs_extension lbs))
+      str
+      (ghstr loc [:Pstr_extension [(:lbs_extension lbs) [:PStr [str]]] ()]))))
+
+(defn- plain-bindings [lbs]
+  (mapv (fn [lb] (ast/vb-mk (:lb_pattern lb) (:lb_expression lb)
+                            {:loc (:lb_loc lb) :attrs (:lb_attributes lb) :value_constraint (:lb_constraint lb)}))
+        (:lbs_bindings lbs)))
+
+(defn expr-of-let-bindings [loc lbs body]
+  (mkexp-attrs loc [:Pexp_let (:lbs_rec lbs) (reverse (plain-bindings lbs)) body] [(:lbs_extension lbs) ()]))
+
+(defn class-of-let-bindings [loc lbs body]
+  (mkclass loc [:Pcl_let (:lbs_rec lbs) (reverse (plain-bindings lbs)) body]))
+
+;; functions
+(defn- all-params-as-newtypes [params]
+  (when (every? #(= :Pparam_newtype (first (:pparam_desc %))) params)
+    (mapv (fn [p] [(nth (:pparam_desc p) 1) (:pparam_loc p)]) params)))
+
+(defn- mkghost-newtype-function-body [newtypes body-constraint body]
+  (let [wrapped (if body-constraint
+                  (ast/exp-mk (ast/make-ghost-loc (:pexp_loc body)) nil (mkexp-desc-constraint body body-constraint))
+                  body)
+        expr (reduce (fn [e [nt nt-loc]]
+                       (ghexp [(ast/loc-start nt-loc) (ast/loc-end (:pexp_loc body))] [:Pexp_newtype nt e]))
+                     wrapped (reverse newtypes))]
+    (:pexp_desc expr)))
+
+(defn mkfunction [params body-constraint body]
+  (case (first body)
+    :Pfunction_cases [:Pexp_function params body-constraint body]
+    :Pfunction_body (if-let [nts (all-params-as-newtypes params)]
+                      (mkghost-newtype-function-body nts body-constraint (nth body 1))
+                      [:Pexp_function params body-constraint body])))
+
+(defn mk-functor-typ [args mty]
+  (reduce (fn [acc [startpos arg]] (mkmty [startpos (ast/loc-end (:pmty_loc mty))] [:Pmty_functor arg acc])) mty args))
+
+(defn package-type-of-module-type [pmty]
+  (let [err (fn [loc s] (syntax-error-at loc (str "Syntax error: invalid package type: " s)))
+        map-cstr (fn [c]
+                   (if (= :Pwith_type (first c))
+                     (let [lid (nth c 1) ptyp (nth c 2) loc (:ptype_loc ptyp)]
+                       (when (seq (:ptype_params ptyp)) (err loc "parametrized types are not supported"))
+                       (when (seq (:ptype_constraints ptyp)) (err loc "constrained types are not supported"))
+                       (when (not= :Public (:ptype_private ptyp)) (err loc "private types are not supported"))
+                       [lid (:ptype_manifest ptyp)])
+                     (err (:pmty_loc pmty) "only with type t = constraints are supported")))
+        d (:pmty_desc pmty)]
+    (cond
+      (= :Pmty_ident (first d)) [(nth d 1) () (:pmty_attributes pmty)]
+      (and (= :Pmty_with (first d)) (= :Pmty_ident (first (:pmty_desc (nth d 1)))))
+      [(nth (:pmty_desc (nth d 1)) 1) (mapv map-cstr (nth d 2)) (:pmty_attributes pmty)]
+      :else (err (:pmty_loc pmty) "only module type identifier and with type constraints are supported"))))
+
+(defn mk-directive-arg [loc k] {:pdira_desc k :pdira_loc (make-loc loc)})
+(defn mk-directive [loc name arg] [:Ptop_dir {:pdir_name name :pdir_arg arg :pdir_loc (make-loc loc)}])
+
+;; Ast_helper's records as the actions name them
+(defn- opn [expr o] (ast/opn-mk expr o))
+;; Str.open_ without ~loc: Ast_helper's default location, Location.none
+(defn- str-open [od] (ast/str-mk nil [:Pstr_open od]))
+(defn- mod-ident [loc x] (ast/mod-mk loc nil [:Pmod_ident x]))
+(defn- exp-case ([lhs rhs] (ast/exp-case lhs nil rhs)) ([lhs guard rhs] (ast/exp-case lhs guard rhs)))
+(defn- labelled [s] [:Labelled s])
+(defn- optional [s] [:Optional s])
+(defn- docs-of [e] (ds/symbol-docs (sloc e)))
+
+;; ---------------------------------------------------------------------------------------------
+;; The actions
+
+(defmacro ^:private acts [& pairs]
+  `(hash-map ~@(mapcat (fn [[k v]] [k `(fn [~'e] ~v)]) (partition 2 pairs))))
+
+(def ^:private actions-1
+  (acts
+   ;; Menhir's standard library
+   "None" nil
+   "Some x" ($ e "x")
+   "[]" ()
+   "x :: xs" (cons ($ e "x") ($ e "xs"))
+   "[ x ]" (list ($ e "x"))
+   "x" ($ e "x")
+   "List.rev xs" (reverse ($ e "xs"))
+   "List.flatten xss" (apply concat ($ e "xss"))
+   "xs @ ys" (concat ($ e "xs") ($ e "ys"))
+   ;; macros
+   "extra_str $startpos $endpos $1" (extra-str (spos e) (epos e) ($ e 1))
+   "extra_sig $startpos $endpos $1" (extra-sig (spos e) (epos e) ($ e 1))
+   "extra_cstr $startpos $endpos $1" (extra-cstr (spos e) (epos e) ($ e 1))
+   "extra_csig $startpos $endpos $1" (extra-csig (spos e) (epos e) ($ e 1))
+   "extra_def $startpos $endpos $1" (extra-def (spos e) (epos e) ($ e 1))
+   "extra_text $startpos $endpos $1" (extra-text (spos e) (epos e) ($ e 1))
+   "extra_rhs_core_type $1 ~pos:$endpos($1)" (extra-rhs-core-type ($ e 1) (epos-of e 1))
+   "mkrhs $1 $sloc" (mkrhs ($ e 1) (sloc e))
+   "text_str $startpos @ [$1]" (concat (text-str (spos e)) [($ e 1)])
+   "text_str $startpos" (text-str (spos e))
+   "text_sig $startpos @ [$1]" (concat (text-sig (spos e)) [($ e 1)])
+   "text_sig $startpos" (text-sig (spos e))
+   "text_def $startpos @ [$1]" (concat (text-def (spos e)) [($ e 1)])
+   "Ptop_def [$1]" [:Ptop_def [($ e 1)]]
+   "text_cstr $startpos @ [$1]" (concat (text-cstr (spos e)) [($ e 1)])
+   "text_csig $startpos @ [$1]" (concat (text-csig (spos e)) [($ e 1)])
+   "mark_rhs_docs $startpos $endpos; $1" (do (ds/mark-rhs-docs (spos e) (epos e)) ($ e 1))
+   "mkoperator ~loc:$sloc $1" (mkoperator (sloc e) ($ e 1))
+   "mkloc $1 (make_loc $sloc)" (mkloc ($ e 1) (make-loc (sloc e)))
+   "mkexp ~loc:$sloc $1" (mkexp (sloc e) ($ e 1))
+   "mkpat ~loc:$sloc $1" (mkpat (sloc e) ($ e 1))
+   "mktyp ~loc:$sloc $1" (mktyp (sloc e) ($ e 1))
+   "mkmod ~loc:$sloc $1" (mkmod (sloc e) ($ e 1))
+   "mkmty ~loc:$sloc $1" (mkmty (sloc e) ($ e 1))
+   "mkcty ~loc:$sloc $1" (mkcty (sloc e) ($ e 1))
+   "mkctf ~loc:$sloc $1" (mkctf (sloc e) nil nil ($ e 1))
+   "mkcf ~loc:$sloc $1" (mkcf (sloc e) nil nil ($ e 1))
+   "mkclass ~loc:$sloc $1" (mkclass (sloc e) ($ e 1))
+   "wrap_mkstr_ext ~loc:$sloc $1" (wrap-mkstr-ext (sloc e) ($ e 1))
+   "wrap_mksig_ext ~loc:$sloc $1" (wrap-mksig-ext (sloc e) ($ e 1))
+   "mk_directive_arg ~loc:$sloc $1" (mk-directive-arg (sloc e) ($ e 1))
+   ;; generic definitions
+   "xs" ($ e "xs")
+   "List.rev x" (reverse ($ e "x"))
+   "List.rev_append x xs" (concat (reverse ($ e "x")) ($ e "xs"))
+   "[ x2; x1 ]" (list ($ e "x2") ($ e "x1"))
+   "[x]" (list ($ e "x"))
+   "let (x, b) = a in x, b :: bs" (let [[x b] ($ e "a")] [x (cons b ($ e "bs"))])
+   "[x], None" [(list ($ e "x")) nil]
+   "[x], Some y" [(list ($ e "x")) ($ e "y")]
+   "let xs, y = tail in x :: xs, y" (let [[xs y] ($ e "tail")] [(cons ($ e "x") xs) y])
+   ;; entry points
+   "$1" ($ e 1)
+   "Ptop_def $1" [:Ptop_def ($ e 1)]
+   "raise End_of_file" (throw (ex-info "End_of_file" {:ocaml-error :end-of-file}))
+   ;; functors
+   "$startpos, Unit" [(spos e) :Unit]
+   "$startpos, Named (x, mty)" [(spos e) [:Named ($ e "x") ($ e "mty")]]
+   "Some x" ($ e "x")
+   ;; module expressions
+   "mkmod ~loc:$sloc ~attrs (Pmod_structure s)" (mkmod (sloc e) ($ e "attrs") [:Pmod_structure ($ e "s")])
+   "unclosed \"struct\" $loc($1) \"end\" $loc($4)" (unclosed "struct" (loc-of e 1) "end" (loc-of e 4))
+   "expecting $loc($1) \"struct\"" (expecting (loc-of e 1) "struct")
+   "wrap_mod_attrs ~loc:$sloc attrs ( List.fold_left (fun acc (startpos, arg) -> mkmod ~loc:(startpos, $endpos) (Pmod_functor (arg, acc)) ) me args )"
+   (wrap-mod-attrs (sloc e) ($ e "attrs")
+                   (reduce (fn [acc [startpos arg]] (mkmod [startpos (epos e)] [:Pmod_functor arg acc])) ($ e "me") ($ e "args")))
+   "me" ($ e "me")
+   "Mod.attr me attr" (ast/mod-attr ($ e "me") ($ e "attr"))
+   "Pmod_ident x" [:Pmod_ident ($ e "x")]
+   "Pmod_apply(me1, me2)" [:Pmod_apply ($ e "me1") ($ e "me2")]
+   "Pmod_apply_unit me" [:Pmod_apply_unit ($ e "me")]
+   "Pmod_extension ex" [:Pmod_extension ($ e "ex")]
+   "mkmod ~loc:$sloc (Pmod_constraint(me, mty))" (mkmod (sloc e) [:Pmod_constraint ($ e "me") ($ e "mty")])
+   "unclosed \"(\" $loc($1) \")\" $loc($5)" (unclosed "(" (loc-of e 1) ")" (loc-of e 5))
+   "unclosed \"(\" $loc($1) \")\" $loc($3)" (unclosed "(" (loc-of e 1) ")" (loc-of e 3))
+   "mkmod ~loc:$sloc ~attrs (Pmod_unpack e)" (mkmod (sloc e) ($ e "attrs") [:Pmod_unpack ($ e "e")])
+   "unclosed \"(\" $loc($1) \")\" $loc($6)" (unclosed "(" (loc-of e 1) ")" (loc-of e 6))
+   "e" ($ e "e")
+   "mkexp ~loc:$loc (Pexp_constraint (e, ty))" (mkexp (mloc e) [:Pexp_constraint ($ e "e") ($ e "ty")])
+   "mkexp ~loc:$loc (Pexp_coerce (e, Some ty1, ty2))" (mkexp (mloc e) [:Pexp_coerce ($ e "e") ($ e "ty1") ($ e "ty2")])
+   "mkexp ~loc:$loc (Pexp_coerce (e, None, ty2))" (mkexp (mloc e) [:Pexp_coerce ($ e "e") nil ($ e "ty2")])
+   ;; structures
+   "items" ($ e "items")
+   "mkstrexp e attrs" (mkstrexp ($ e "e") ($ e "attrs"))
+   "val_of_let_bindings ~loc:$sloc $1" (val-of-let-bindings (sloc e) ($ e 1))
+   "pstr_include $1" (pstr-include ($ e 1))
+   "pstr_extension $1 (add_docs_attrs (symbol_docs $sloc) $2)" (pstr-extension ($ e 1) (ast/add-docs-attrs (docs-of e) ($ e 2)))
+   "pstr_attribute $1" (pstr-attribute ($ e 1))
+   "pstr_primitive $1" (pstr-primitive ($ e 1))
+   "pstr_type $1" (pstr-type ($ e 1))
+   "pstr_typext $1" (pstr-typext ($ e 1))
+   "pstr_exception $1" (pstr-exception ($ e 1))
+   "pstr_recmodule $1" (pstr-recmodule ($ e 1))
+   "pstr_modtype $1" (pstr-modtype ($ e 1))
+   "pstr_class $1" (pstr-class ($ e 1))
+   "pstr_class_type $1" (pstr-class-type ($ e 1))
+   "pstr_module $1" (pstr-module ($ e 1))
+   "pstr_open $1" (pstr-open ($ e 1))
+   "let docs = symbol_docs $sloc in let loc = make_loc $sloc in let attrs = attrs1 @ attrs2 in let body = Mb.mk name body ~attrs ~loc ~docs in body, ext"
+   (let [docs (docs-of e) loc (make-loc (sloc e)) attrs (concat ($ e "attrs1") ($ e "attrs2"))
+         body (ast/mb-mk ($ e "name") ($ e "body") {:attrs attrs :loc loc :docs docs})]
+     [body ($ e "ext")])
+   "expecting $loc($1) \"=\"" (expecting (loc-of e 1) "=")
+   "Pmod_constraint(me, mty)" [:Pmod_constraint ($ e "me") ($ e "mty")]
+   "let (_, arg) = arg_and_pos in Pmod_functor(arg, body)" (let [[_ arg] ($ e "arg_and_pos")] [:Pmod_functor arg ($ e "body")])
+   "let loc = make_loc $sloc in let attrs = attrs1 @ attrs2 in let docs = symbol_docs $sloc in ext, Mb.mk name body ~attrs ~loc ~docs"
+   (let [loc (make-loc (sloc e)) attrs (concat ($ e "attrs1") ($ e "attrs2")) docs (docs-of e)]
+     [($ e "ext") (ast/mb-mk ($ e "name") ($ e "body") {:attrs attrs :loc loc :docs docs})])
+   "let loc = make_loc $sloc in let attrs = attrs1 @ attrs2 in let docs = symbol_docs $sloc in let text = symbol_text $symbolstartpos in Mb.mk name body ~attrs ~loc ~text ~docs"
+   (let [loc (make-loc (sloc e)) attrs (concat ($ e "attrs1") ($ e "attrs2")) docs (docs-of e) text (ds/symbol-text (sspos e))]
+     (ast/mb-mk ($ e "name") ($ e "body") {:attrs attrs :loc loc :text text :docs docs}))
+   "let attrs = attrs1 @ attrs2 in let loc = make_loc $sloc in let docs = symbol_docs $sloc in Incl.mk thing ~attrs ~loc ~docs, ext"
+   (let [attrs (concat ($ e "attrs1") ($ e "attrs2")) loc (make-loc (sloc e)) docs (docs-of e)]
+     [(ast/incl-mk ($ e "thing") {:attrs attrs :loc loc :docs docs}) ($ e "ext")])
+   "let attrs = attrs1 @ attrs2 in let loc = make_loc $sloc in let docs = symbol_docs $sloc in Mtd.mk id ?typ ~attrs ~loc ~docs, ext"
+   (let [attrs (concat ($ e "attrs1") ($ e "attrs2")) loc (make-loc (sloc e)) docs (docs-of e)]
+     [(ast/mtd-mk ($ e "id") {:typ ($ e "typ") :attrs attrs :loc loc :docs docs}) ($ e "ext")])
+   "let attrs = attrs1 @ attrs2 in let loc = make_loc $sloc in let docs = symbol_docs $sloc in Opn.mk me ~override ~attrs ~loc ~docs, ext"
+   (let [attrs (concat ($ e "attrs1") ($ e "attrs2")) loc (make-loc (sloc e)) docs (docs-of e)]
+     [(opn ($ e "me") {:override ($ e "override") :attrs attrs :loc loc :docs docs}) ($ e "ext")])
+   "let attrs = attrs1 @ attrs2 in let loc = make_loc $sloc in let docs = symbol_docs $sloc in Opn.mk id ~override ~attrs ~loc ~docs, ext"
+   (let [attrs (concat ($ e "attrs1") ($ e "attrs2")) loc (make-loc (sloc e)) docs (docs-of e)]
+     [(opn ($ e "id") {:override ($ e "override") :attrs attrs :loc loc :docs docs}) ($ e "ext")])
+   "let loc = make_loc $loc($1) in let me = Mod.ident ~loc $1 in Opn.mk ~loc me"
+   (let [loc (make-loc (loc-of e 1)) me (mod-ident loc ($ e 1))] (opn me {:loc loc}))
+   ;; module types
+   "mkmty ~loc:$sloc ~attrs (Pmty_signature s)" (mkmty (sloc e) ($ e "attrs") [:Pmty_signature ($ e "s")])
+   "unclosed \"sig\" $loc($1) \"end\" $loc($4)" (unclosed "sig" (loc-of e 1) "end" (loc-of e 4))
+   "expecting $loc($1) \"sig\"" (expecting (loc-of e 1) "sig")
+   "wrap_mty_attrs ~loc:$sloc attrs (mk_functor_typ args mty)" (wrap-mty-attrs (sloc e) ($ e "attrs") (mk-functor-typ ($ e "args") ($ e "mty")))
+   "mk_functor_typ args mty" (mk-functor-typ ($ e "args") ($ e "mty"))
+   "mkmty ~loc:$sloc ~attrs:$4 (Pmty_typeof $5)" (mkmty (sloc e) ($ e 4) [:Pmty_typeof ($ e 5)])
+   "$2" ($ e 2)
+   "Mty.attr $1 $2" (ast/mty-attr ($ e 1) ($ e 2))
+   "Pmty_ident $1" [:Pmty_ident ($ e 1)]
+   "Pmty_functor(Named (mknoloc None, $1), $3)" [:Pmty_functor [:Named (mknoloc nil) ($ e 1)] ($ e 3)]
+   "Pmty_with($1, $3)" [:Pmty_with ($ e 1) ($ e 3)]
+   "Pmty_extension $1" [:Pmty_extension ($ e 1)]
+   ;; signatures
+   "psig_extension $1 (add_docs_attrs (symbol_docs $sloc) $2)" (psig-extension ($ e 1) (ast/add-docs-attrs (docs-of e) ($ e 2)))
+   "psig_attribute $1" (psig-attribute ($ e 1))
+   "psig_value $1" (psig-value ($ e 1))
+   "psig_type $1" (psig-type ($ e 1))
+   "psig_typesubst $1" (psig-typesubst ($ e 1))
+   "psig_typext $1" (psig-typext ($ e 1))
+   "psig_exception $1" (psig-exception ($ e 1))
+   "psig_module $1" (psig-module ($ e 1))
+   "psig_modsubst $1" (psig-modsubst ($ e 1))
+   "psig_recmodule $1" (psig-recmodule ($ e 1))
+   "psig_modtype $1" (psig-modtype ($ e 1))
+   "psig_modtypesubst $1" (psig-modtypesubst ($ e 1))
+   "psig_open $1" (psig-open ($ e 1))
+   "psig_include $1" (psig-include ($ e 1))
+   "psig_class $1" (psig-class ($ e 1))
+   "psig_class_type $1" (psig-class-type ($ e 1))
+   "let attrs = attrs1 @ attrs2 in let loc = make_loc $sloc in let docs = symbol_docs $sloc in Md.mk name body ~attrs ~loc ~docs, ext"
+   (let [attrs (concat ($ e "attrs1") ($ e "attrs2")) loc (make-loc (sloc e)) docs (docs-of e)]
+     [(ast/md-mk ($ e "name") ($ e "body") {:attrs attrs :loc loc :docs docs}) ($ e "ext")])
+   "mty" ($ e "mty")
+   "expecting $loc($1) \":\"" (expecting (loc-of e 1) ":")
+   "let (_, arg) = arg_and_pos in Pmty_functor(arg, body)" (let [[_ arg] ($ e "arg_and_pos")] [:Pmty_functor arg ($ e "body")])
+   "Mty.alias ~loc:(make_loc $sloc) id" (ast/mty-mk (make-loc (sloc e)) nil [:Pmty_alias ($ e "id")])
+   "let attrs = attrs1 @ attrs2 in let loc = make_loc $sloc in let docs = symbol_docs $sloc in Ms.mk uid body ~attrs ~loc ~docs, ext"
+   (let [attrs (concat ($ e "attrs1") ($ e "attrs2")) loc (make-loc (sloc e)) docs (docs-of e)]
+     [(ast/ms-mk ($ e "uid") ($ e "body") {:attrs attrs :loc loc :docs docs}) ($ e "ext")])
+   "expecting $loc($6) \"module path\"" (expecting (loc-of e 6) "module path")
+   "let attrs = attrs1 @ attrs2 in let loc = make_loc $sloc in let docs = symbol_docs $sloc in ext, Md.mk name mty ~attrs ~loc ~docs"
+   (let [attrs (concat ($ e "attrs1") ($ e "attrs2")) loc (make-loc (sloc e)) docs (docs-of e)]
+     [($ e "ext") (ast/md-mk ($ e "name") ($ e "mty") {:attrs attrs :loc loc :docs docs})])
+   "let attrs = attrs1 @ attrs2 in let docs = symbol_docs $sloc in let loc = make_loc $sloc in let text = symbol_text $symbolstartpos in Md.mk name mty ~attrs ~loc ~text ~docs"
+   (let [attrs (concat ($ e "attrs1") ($ e "attrs2")) docs (docs-of e) loc (make-loc (sloc e)) text (ds/symbol-text (sspos e))]
+     (ast/md-mk ($ e "name") ($ e "mty") {:attrs attrs :loc loc :text text :docs docs}))
+   "let attrs = attrs1 @ attrs2 in let loc = make_loc $sloc in let docs = symbol_docs $sloc in Mtd.mk id ~typ ~attrs ~loc ~docs, ext"
+   (let [attrs (concat ($ e "attrs1") ($ e "attrs2")) loc (make-loc (sloc e)) docs (docs-of e)]
+     [(ast/mtd-mk ($ e "id") {:typ ($ e "typ") :attrs attrs :loc loc :docs docs}) ($ e "ext")])
+   ;; classes
+   "let attrs = attrs1 @ attrs2 in let loc = make_loc $sloc in let docs = symbol_docs $sloc in ext, Ci.mk id body ~virt ~params ~attrs ~loc ~docs"
+   (let [attrs (concat ($ e "attrs1") ($ e "attrs2")) loc (make-loc (sloc e)) docs (docs-of e)]
+     [($ e "ext") (ast/ci-mk ($ e "id") ($ e "body") {:virt ($ e "virt") :params ($ e "params") :attrs attrs :loc loc :docs docs})])
+   "let attrs = attrs1 @ attrs2 in let loc = make_loc $sloc in let docs = symbol_docs $sloc in let text = symbol_text $symbolstartpos in Ci.mk id body ~virt ~params ~attrs ~loc ~text ~docs"
+   (let [attrs (concat ($ e "attrs1") ($ e "attrs2")) loc (make-loc (sloc e)) docs (docs-of e) text (ds/symbol-text (sspos e))]
+     (ast/ci-mk ($ e "id") ($ e "body") {:virt ($ e "virt") :params ($ e "params") :attrs attrs :loc loc :text text :docs docs}))
+   "Pcl_constraint($4, $2)" [:Pcl_constraint ($ e 4) ($ e 2)]
+   "let (l,o,p) = $1 in Pcl_fun(l, o, p, $2)" (let [[l o p] ($ e 1)] [:Pcl_fun l o p ($ e 2)])
+   "params" ($ e "params")
+   "wrap_class_attrs ~loc:$sloc $3 $2" (wrap-class-attrs (sloc e) ($ e 3) ($ e 2))
+   "class_of_let_bindings ~loc:$sloc $1 $3" (class-of-let-bindings (sloc e) ($ e 1) ($ e 3))
+   "let loc = ($startpos($2), $endpos($5)) in let od = Opn.mk ~override:$3 ~loc:(make_loc loc) $5 in mkclass ~loc:$sloc ~attrs:$4 (Pcl_open(od, $7))"
+   (let [loc [(spos-of e 2) (epos-of e 5)] od (opn ($ e 5) {:override ($ e 3) :loc (make-loc loc)})]
+     (mkclass (sloc e) ($ e 4) [:Pcl_open od ($ e 7)]))
+   "Cl.attr $1 $2" (ast/cl-attr ($ e 1) ($ e 2))
+   "Pcl_apply($1, $2)" [:Pcl_apply ($ e 1) ($ e 2)]
+   "Pcl_extension $1" [:Pcl_extension ($ e 1)]
+   "Pcl_constr(cid, tys)" [:Pcl_constr ($ e "cid") ($ e "tys")]
+   "unclosed \"object\" $loc($1) \"end\" $loc($4)" (unclosed "object" (loc-of e 1) "end" (loc-of e 4))
+   "Pcl_constraint($2, $4)" [:Pcl_constraint ($ e 2) ($ e 4)]
+   "mkclass ~loc:$sloc ~attrs:$2 (Pcl_structure $3)" (mkclass (sloc e) ($ e 2) [:Pcl_structure ($ e 3)])
+   "let (l,o,p) = $1 in Pcl_fun(l, o, p, e)" (let [[l o p] ($ e 1)] [:Pcl_fun l o p ($ e "e")])
+   "Cstr.mk $1 $2" (ast/cstr-mk ($ e 1) ($ e 2))
+   "reloc_pat ~loc:$sloc $2" (reloc-pat (sloc e) ($ e 2))
+   "Ppat_constraint($2, $4)" [:Ppat_constraint ($ e 2) ($ e 4)]
+   "ghpat ~loc:$sloc Ppat_any" (ghpat (sloc e) [:Ppat_any])
+   "let docs = symbol_docs $sloc in mkcf ~loc:$sloc (Pcf_inherit ($2, $4, self)) ~attrs:($3@$6) ~docs"
+   (let [docs (docs-of e)] (mkcf (sloc e) (concat ($ e 3) ($ e 6)) docs [:Pcf_inherit ($ e 2) ($ e 4) ($ e "self")]))
+   "let v, attrs = $2 in let docs = symbol_docs $sloc in mkcf ~loc:$sloc (Pcf_val v) ~attrs:(attrs@$3) ~docs"
+   (let [[v attrs] ($ e 2) docs (docs-of e)] (mkcf (sloc e) (concat attrs ($ e 3)) docs [:Pcf_val v]))
+   "let meth, attrs = $2 in let docs = symbol_docs $sloc in mkcf ~loc:$sloc (Pcf_method meth) ~attrs:(attrs@$3) ~docs"
+   (let [[meth attrs] ($ e 2) docs (docs-of e)] (mkcf (sloc e) (concat attrs ($ e 3)) docs [:Pcf_method meth]))
+   "let docs = symbol_docs $sloc in mkcf ~loc:$sloc (Pcf_constraint $3) ~attrs:($2@$4) ~docs"
+   (let [docs (docs-of e)] (mkcf (sloc e) (concat ($ e 2) ($ e 4)) docs [:Pcf_constraint ($ e 3)]))
+   "let docs = symbol_docs $sloc in mkcf ~loc:$sloc (Pcf_initializer $3) ~attrs:($2@$4) ~docs"
+   (let [docs (docs-of e)] (mkcf (sloc e) (concat ($ e 2) ($ e 4)) docs [:Pcf_initializer ($ e 3)]))
+   "let docs = symbol_docs $sloc in mkcf ~loc:$sloc (Pcf_extension $1) ~attrs:$2 ~docs"
+   (let [docs (docs-of e)] (mkcf (sloc e) ($ e 2) docs [:Pcf_extension ($ e 1)]))
+   "Pcf_attribute $1" [:Pcf_attribute ($ e 1)]
+   "(label, mutable_, Cfk_virtual ty), attrs" [[($ e "label") ($ e "mutable_") [:Cfk_virtual ($ e "ty")]] ($ e "attrs")]
+   "($4, $3, Cfk_concrete ($1, $6)), $2" [[($ e 4) ($ e 3) [:Cfk_concrete ($ e 1) ($ e 6)]] ($ e 2)]
+   "let e = mkexp_constraint ~loc:$sloc $7 $5 in ($4, $3, Cfk_concrete ($1, e)), $2"
+   (let [x (mkexp-constraint (sloc e) ($ e 7) ($ e 5))] [[($ e 4) ($ e 3) [:Cfk_concrete ($ e 1) x]] ($ e 2)])
+   "(label, private_, Cfk_virtual ty), attrs" [[($ e "label") ($ e "private_") [:Cfk_virtual ($ e "ty")]] ($ e "attrs")]
+   "let e = $5 in let loc = Location.(e.pexp_loc.loc_start, e.pexp_loc.loc_end) in ($4, $3, Cfk_concrete ($1, ghexp ~loc (Pexp_poly (e, None)))), $2"
+   (let [x ($ e 5) loc [(ast/loc-start (:pexp_loc x)) (ast/loc-end (:pexp_loc x))]]
+     [[($ e 4) ($ e 3) [:Cfk_concrete ($ e 1) (ghexp loc [:Pexp_poly x nil])]] ($ e 2)])
+   "let poly_exp = let loc = ($startpos($6), $endpos($8)) in ghexp ~loc (Pexp_poly($8, Some $6)) in ($4, $3, Cfk_concrete ($1, poly_exp)), $2"
+   (let [poly-exp (ghexp [(spos-of e 6) (epos-of e 8)] [:Pexp_poly ($ e 8) ($ e 6)])]
+     [[($ e 4) ($ e 3) [:Cfk_concrete ($ e 1) poly-exp]] ($ e 2)])
+   "let poly_exp_loc = ($startpos($7), $endpos($11)) in let poly_exp = let exp, poly = wrap_type_annotation ~loc:$sloc $7 $9 $11 in ghexp ~loc:poly_exp_loc (Pexp_poly(exp, Some poly)) in ($4, $3, Cfk_concrete ($1, poly_exp)), $2"
+   (let [poly-exp-loc [(spos-of e 7) (epos-of e 11)]
+         poly-exp (let [[x poly] (wrap-type-annotation (sloc e) ($ e 7) ($ e 9) ($ e 11))]
+                    (ghexp poly-exp-loc [:Pexp_poly x poly]))]
+     [[($ e 4) ($ e 3) [:Cfk_concrete ($ e 1) poly-exp]] ($ e 2)])
+   ;; class types
+   "Pcty_arrow(label, domain, codomain)" [:Pcty_arrow ($ e "label") ($ e "domain") ($ e "codomain")]
+   "Pcty_constr (cid, tys)" [:Pcty_constr ($ e "cid") ($ e "tys")]
+   "Pcty_extension $1" [:Pcty_extension ($ e 1)]
+   "mkcty ~loc:$sloc ~attrs:$2 (Pcty_signature $3)" (mkcty (sloc e) ($ e 2) [:Pcty_signature ($ e 3)])
+   "Cty.attr $1 $2" (ast/cty-attr ($ e 1) ($ e 2))
+   "let loc = ($startpos($2), $endpos($5)) in let od = Opn.mk ~override:$3 ~loc:(make_loc loc) $5 in mkcty ~loc:$sloc ~attrs:$4 (Pcty_open(od, $7))"
+   (let [loc [(spos-of e 2) (epos-of e 5)] od (opn ($ e 5) {:override ($ e 3) :loc (make-loc loc)})]
+     (mkcty (sloc e) ($ e 4) [:Pcty_open od ($ e 7)]))
+   "tys" ($ e "tys")
+   "Csig.mk $1 $2" (ast/csig-mk ($ e 1) ($ e 2))
+   "ghtyp ~loc:$sloc Ptyp_any" (ghtyp (sloc e) [:Ptyp_any])
+   "let docs = symbol_docs $sloc in mkctf ~loc:$sloc (Pctf_inherit $3) ~attrs:($2@$4) ~docs"
+   (let [docs (docs-of e)] (mkctf (sloc e) (concat ($ e 2) ($ e 4)) docs [:Pctf_inherit ($ e 3)]))
+   "let docs = symbol_docs $sloc in mkctf ~loc:$sloc (Pctf_val $3) ~attrs:($2@$4) ~docs"
+   (let [docs (docs-of e)] (mkctf (sloc e) (concat ($ e 2) ($ e 4)) docs [:Pctf_val ($ e 3)]))
+   "let (p, v) = $3 in let docs = symbol_docs $sloc in mkctf ~loc:$sloc (Pctf_method ($4, p, v, $6)) ~attrs:($2@$7) ~docs"
+   (let [[p v] ($ e 3) docs (docs-of e)] (mkctf (sloc e) (concat ($ e 2) ($ e 7)) docs [:Pctf_method [($ e 4) p v ($ e 6)]]))
+   "let docs = symbol_docs $sloc in mkctf ~loc:$sloc (Pctf_constraint $3) ~attrs:($2@$4) ~docs"
+   (let [docs (docs-of e)] (mkctf (sloc e) (concat ($ e 2) ($ e 4)) docs [:Pctf_constraint ($ e 3)]))
+   "let docs = symbol_docs $sloc in mkctf ~loc:$sloc (Pctf_extension $1) ~attrs:$2 ~docs"
+   (let [docs (docs-of e)] (mkctf (sloc e) ($ e 2) docs [:Pctf_extension ($ e 1)]))
+   "Pctf_attribute $1" [:Pctf_attribute ($ e 1)]
+   "let mut, virt = flags in label, mut, virt, ty" (let [[mut virt] ($ e "flags")] [($ e "label") mut virt ($ e "ty")])
+   "$1, $3, make_loc $sloc" [($ e 1) ($ e 3) (make-loc (sloc e))]
+   "$1, $3" [($ e 1) ($ e 3)]
+   "let attrs = attrs1 @ attrs2 in let loc = make_loc $sloc in let docs = symbol_docs $sloc in ext, Ci.mk id cty ~virt ~params ~attrs ~loc ~docs"
+   (let [attrs (concat ($ e "attrs1") ($ e "attrs2")) loc (make-loc (sloc e)) docs (docs-of e)]
+     [($ e "ext") (ast/ci-mk ($ e "id") ($ e "cty") {:virt ($ e "virt") :params ($ e "params") :attrs attrs :loc loc :docs docs})])
+   "let attrs = attrs1 @ attrs2 in let loc = make_loc $sloc in let docs = symbol_docs $sloc in let text = symbol_text $symbolstartpos in Ci.mk id cty ~virt ~params ~attrs ~loc ~text ~docs"
+   (let [attrs (concat ($ e "attrs1") ($ e "attrs2")) loc (make-loc (sloc e)) docs (docs-of e) text (ds/symbol-text (sspos e))]
+     (ast/ci-mk ($ e "id") ($ e "cty") {:virt ($ e "virt") :params ($ e "params") :attrs attrs :loc loc :text text :docs docs}))
+   "let attrs = attrs1 @ attrs2 in let loc = make_loc $sloc in let docs = symbol_docs $sloc in ext, Ci.mk id csig ~virt ~params ~attrs ~loc ~docs"
+   (let [attrs (concat ($ e "attrs1") ($ e "attrs2")) loc (make-loc (sloc e)) docs (docs-of e)]
+     [($ e "ext") (ast/ci-mk ($ e "id") ($ e "csig") {:virt ($ e "virt") :params ($ e "params") :attrs attrs :loc loc :docs docs})])
+   "let attrs = attrs1 @ attrs2 in let loc = make_loc $sloc in let docs = symbol_docs $sloc in let text = symbol_text $symbolstartpos in Ci.mk id csig ~virt ~params ~attrs ~loc ~text ~docs"
+   (let [attrs (concat ($ e "attrs1") ($ e "attrs2")) loc (make-loc (sloc e)) docs (docs-of e) text (ds/symbol-text (sspos e))]
+     (ast/ci-mk ($ e "id") ($ e "csig") {:virt ($ e "virt") :params ($ e "params") :attrs attrs :loc loc :text text :docs docs}))))
+
+(def ^:private actions-2
+  (acts
+   ;; core expressions
+   "let loc = make_loc $sloc in let cases = $3 in let desc = mkfunction [] None (Pfunction_cases (cases, loc, [])) in mkexp_attrs ~loc:$sloc desc $2"
+   (let [loc (make-loc (sloc e)) cases ($ e 3) desc (mkfunction () nil [:Pfunction_cases cases loc ()])]
+     (mkexp-attrs (sloc e) desc ($ e 2)))
+   "Pexp_sequence($1, $3)" [:Pexp_sequence ($ e 1) ($ e 3)]
+   "mkexp_attrs ~loc:$sloc (Pexp_sequence ($1, $5)) (Some $4, [])" (mkexp-attrs (sloc e) [:Pexp_sequence ($ e 1) ($ e 5)] [($ e 4) ()])
+   "(Optional (fst $3), $4, snd $3)" [(optional (first ($ e 3))) ($ e 4) (second ($ e 3))]
+   "(Optional (fst $2), None, snd $2)" [(optional (first ($ e 2))) nil (second ($ e 2))]
+   "(Optional $1, $4, $3)" [(optional ($ e 1)) ($ e 4) ($ e 3)]
+   "(Optional $1, None, $2)" [(optional ($ e 1)) nil ($ e 2)]
+   "(Labelled (fst $3), None, snd $3)" [(labelled (first ($ e 3))) nil (second ($ e 3))]
+   "(Labelled (fst $2), None, snd $2)" [(labelled (first ($ e 2))) nil (second ($ e 2))]
+   "(Labelled $1, None, $2)" [(labelled ($ e 1)) nil ($ e 2)]
+   "(Nolabel, None, $1)" [nolabel nil ($ e 1)]
+   "(Labelled $1, None, $3)" [(labelled ($ e 1)) nil ($ e 3)]
+   "(Nolabel, None, $2)" [nolabel nil ($ e 2)]
+   "Ppat_var $1" [:Ppat_var ($ e 1)]
+   "Ppat_any" [:Ppat_any]
+   "let lab, pat = x in lab, mkpat ~loc:$sloc (Ppat_constraint (pat, cty))"
+   (let [[lab pat] ($ e "x")] [lab (mkpat (sloc e) [:Ppat_constraint pat ($ e "cty")])])
+   "($1.Location.txt, mkpat ~loc:$sloc (Ppat_var $1))" [(:txt ($ e 1)) (mkpat (sloc e) [:Ppat_var ($ e 1)])]
+   "Ppat_constraint($1, $3)" [:Ppat_constraint ($ e 1) ($ e 3)]
+   "Ppat_constraint(pat, cty)" [:Ppat_constraint ($ e "pat") ($ e "cty")]
+   "array, d, Paren, i, r" [($ e "array") ($ e "d") :Paren ($ e "i") ($ e "r")]
+   "array, d, Brace, i, r" [($ e "array") ($ e "d") :Brace ($ e "i") ($ e "r")]
+   "array, d, Bracket, i, r" [($ e "array") ($ e "d") :Bracket ($ e "i") ($ e "r")]
+   "indexop_unclosed_error $loc(_p) Paren $loc(_e)" (indexop-unclosed-error (loc-of e "_p") :Paren (loc-of e "_e"))
+   "indexop_unclosed_error $loc(_p) Brace $loc(_e)" (indexop-unclosed-error (loc-of e "_p") :Brace (loc-of e "_e"))
+   "indexop_unclosed_error $loc(_p) Bracket $loc(_e)" (indexop-unclosed-error (loc-of e "_p") :Bracket (loc-of e "_e"))
+   "$1, $2" [($ e 1) ($ e 2)]
+   "let desc, attrs = $1 in mkexp_attrs ~loc:$sloc desc attrs" (let [[desc attrs] ($ e 1)] (mkexp-attrs (sloc e) desc attrs))
+   "expr_of_let_bindings ~loc:$sloc $1 $3" (expr-of-let-bindings (sloc e) ($ e 1) ($ e 3))
+   "let (pbop_pat, pbop_exp, rev_ands) = bindings in let ands = List.rev rev_ands in let pbop_loc = make_loc $sloc in let let_ = {pbop_op; pbop_pat; pbop_exp; pbop_loc} in mkexp ~loc:$sloc (Pexp_letop{ let_; ands; body})"
+   (let [[pbop-pat pbop-exp rev-ands] ($ e "bindings")
+         ands (reverse rev-ands)
+         pbop-loc (make-loc (sloc e))
+         let_ {:pbop_op ($ e "pbop_op") :pbop_pat pbop-pat :pbop_exp pbop-exp :pbop_loc pbop-loc}]
+     (mkexp (sloc e) [:Pexp_letop {:let_ let_ :ands ands :body ($ e "body")}]))
+   "mkexp_cons ~loc:$sloc $loc($2) (ghexp ~loc:$sloc (Pexp_tuple[None,$1;None,$3]))"
+   (mkexp-cons (sloc e) (loc-of e 2) (ghexp (sloc e) [:Pexp_tuple [[nil ($ e 1)] [nil ($ e 3)]]]))
+   "mkexp ~loc:$sloc (Pexp_setinstvar($1, $3))" (mkexp (sloc e) [:Pexp_setinstvar ($ e 1) ($ e 3)])
+   "mkexp ~loc:$sloc (Pexp_setfield($1, $3, $5))" (mkexp (sloc e) [:Pexp_setfield ($ e 1) ($ e 3) ($ e 5)])
+   "Some v" ($ e "v")
+   "mk_indexop_expr builtin_indexing_operators ~loc:$sloc $1" (mk-indexop-expr builtin-indexing-operators (sloc e) ($ e 1))
+   "mk_indexop_expr user_indexing_operators ~loc:$sloc $1" (mk-indexop-expr user-indexing-operators (sloc e) ($ e 1))
+   "Exp.attr $1 $2" (ast/exp-attr ($ e 1) ($ e 2))
+   "not_expecting $loc($1) \"wildcard \\\"_\\\"\"" (not-expecting (loc-of e 1) "wildcard \"_\"")
+   "Pexp_struct_item($3, $5), $2" [[:Pexp_struct_item ($ e 3) ($ e 5)] ($ e 2)]
+   "let body_constraint = Option.map (fun x -> Pconstraint x) $4 in mkfunction $3 body_constraint $6, $2"
+   (let [body-constraint (when-let [x ($ e 4)] [:Pconstraint x])]
+     [(mkfunction ($ e 3) body-constraint ($ e 6)) ($ e 2)])
+   "Pexp_match($3, $5), $2" [[:Pexp_match ($ e 3) ($ e 5)] ($ e 2)]
+   "Pexp_try($3, $5), $2" [[:Pexp_try ($ e 3) ($ e 5)] ($ e 2)]
+   "syntax_error()" (syntax-error)
+   "Pexp_ifthenelse($3, $5, Some $7), $2" [[:Pexp_ifthenelse ($ e 3) ($ e 5) ($ e 7)] ($ e 2)]
+   "Pexp_ifthenelse($3, $5, None), $2" [[:Pexp_ifthenelse ($ e 3) ($ e 5) nil] ($ e 2)]
+   "Pexp_while($3, $4), $2" [[:Pexp_while ($ e 3) ($ e 4)] ($ e 2)]
+   "Pexp_for($3, $5, $7, $6, $8), $2" [[:Pexp_for ($ e 3) ($ e 5) ($ e 7) ($ e 6) ($ e 8)] ($ e 2)]
+   "Pexp_assert $3, $2" [[:Pexp_assert ($ e 3)] ($ e 2)]
+   "Pexp_lazy $3, $2" [[:Pexp_lazy ($ e 3)] ($ e 2)]
+   "unclosed \"do\" $loc($1) \"done\" $loc($2)" (unclosed "do" (loc-of e 1) "done" (loc-of e 2))
+   "Pexp_apply($1, $2)" [:Pexp_apply ($ e 1) ($ e 2)]
+   "Pexp_tuple($1)" [:Pexp_tuple ($ e 1)]
+   "Pexp_construct($1, Some $2)" [:Pexp_construct ($ e 1) ($ e 2)]
+   "Pexp_variant($1, Some $2)" [:Pexp_variant ($ e 1) ($ e 2)]
+   "mkinfix e1 op e2" (mkinfix ($ e "e1") ($ e "op") ($ e "e2"))
+   "mkuminus ~sloc:$sloc ~oploc:$loc($1) $1 $2" (mkuminus (sloc e) (loc-of e 1) ($ e 1) ($ e 2))
+   "mkuplus ~sloc:$sloc ~oploc:$loc($1) $1 $2" (mkuplus (sloc e) (loc-of e 1) ($ e 1) ($ e 2))
+   "reloc_exp ~loc:$sloc $2" (reloc-exp (sloc e) ($ e 2))
+   "mkexp_constraint ~loc:$sloc $2 $3" (mkexp-constraint (sloc e) ($ e 2) ($ e 3))
+   "e.pexp_desc, (ext, attrs @ e.pexp_attributes)" (let [x ($ e "e")] [(:pexp_desc x) [($ e "ext") (concat ($ e "attrs") (:pexp_attributes x))]])
+   "Pexp_construct (mkloc (Lident \"()\") (make_loc $sloc), None), $2"
+   [[:Pexp_construct (mkloc [:Lident "()"] (make-loc (sloc e))) nil] ($ e 2)]
+   "unclosed \"begin\" $loc($1) \"end\" $loc($4)" (unclosed "begin" (loc-of e 1) "end" (loc-of e 4))
+   "Pexp_new($3), $2" [[:Pexp_new ($ e 3)] ($ e 2)]
+   "Pexp_pack ($4, None), $3" [[:Pexp_pack ($ e 4) nil] ($ e 3)]
+   "Pexp_pack ($4, Some $6), $3" [[:Pexp_pack ($ e 4) ($ e 6)] ($ e 3)]
+   "Pexp_object $3, $2" [[:Pexp_object ($ e 3)] ($ e 2)]
+   "mkexp ~loc:$sloc (pexp_extension ~id:(mknoloc \"metaocaml.escape\") e)" (mkexp (sloc e) (pexp-extension (mknoloc "metaocaml.escape") ($ e "e")))
+   "mkexp ~loc:$sloc (pexp_extension ~id:(mknoloc \"metaocaml.bracket\") e)" (mkexp (sloc e) (pexp-extension (mknoloc "metaocaml.bracket") ($ e "e")))
+   "Pexp_ident ($1)" [:Pexp_ident ($ e 1)]
+   "Pexp_constant $1" [:Pexp_constant ($ e 1)]
+   "Pexp_construct($1, None)" [:Pexp_construct ($ e 1) nil]
+   "Pexp_variant($1, None)" [:Pexp_variant ($ e 1) nil]
+   "Pexp_apply($1, [Nolabel,$2])" [:Pexp_apply ($ e 1) [[nolabel ($ e 2)]]]
+   "\"!\"" "!"
+   "Pexp_override $2" [:Pexp_override ($ e 2)]
+   "unclosed \"{<\" $loc($1) \">}\" $loc($3)" (unclosed "{<" (loc-of e 1) ">}" (loc-of e 3))
+   "Pexp_override []" [:Pexp_override ()]
+   "Pexp_field($1, $3)" [:Pexp_field ($ e 1) ($ e 3)]
+   "Pexp_struct_item(Str.open_ od, $4)" [:Pexp_struct_item (str-open ($ e "od")) ($ e 4)]
+   "Pexp_struct_item(Str.open_ od, mkexp ~loc:$sloc (Pexp_override $4))"
+   [:Pexp_struct_item (str-open ($ e "od")) (mkexp (sloc e) [:Pexp_override ($ e 4)])]
+   "unclosed \"{<\" $loc($3) \">}\" $loc($5)" (unclosed "{<" (loc-of e 3) ">}" (loc-of e 5))
+   "Pexp_send($1, $3)" [:Pexp_send ($ e 1) ($ e 3)]
+   "mkinfix $1 $2 $3" (mkinfix ($ e 1) ($ e 2) ($ e 3))
+   "Pexp_extension $1" [:Pexp_extension ($ e 1)]
+   "Lident \"()\"" [:Lident "()"]
+   "Pexp_struct_item(Str.open_ od, mkexp ~loc:($loc($3)) (Pexp_construct($3, None)))"
+   [:Pexp_struct_item (str-open ($ e "od")) (mkexp (loc-of e 3) [:Pexp_construct ($ e 3) nil])]
+   "unclosed \"(\" $loc($3) \")\" $loc($5)" (unclosed "(" (loc-of e 3) ")" (loc-of e 5))
+   "let (exten, fields) = $2 in Pexp_record(fields, exten)" (let [[exten fields] ($ e 2)] [:Pexp_record fields exten])
+   "unclosed \"{\" $loc($1) \"}\" $loc($3)" (unclosed "{" (loc-of e 1) "}" (loc-of e 3))
+   "let (exten, fields) = $4 in Pexp_struct_item(Str.open_ od, mkexp ~loc:($startpos($3), $endpos) (Pexp_record(fields, exten)))"
+   (let [[exten fields] ($ e 4)]
+     [:Pexp_struct_item (str-open ($ e "od")) (mkexp [(spos-of e 3) (epos e)] [:Pexp_record fields exten])])
+   "unclosed \"{\" $loc($3) \"}\" $loc($5)" (unclosed "{" (loc-of e 3) "}" (loc-of e 5))
+   "Pexp_array($2)" [:Pexp_array ($ e 2)]
+   "unclosed \"[|\" $loc($1) \"|]\" $loc($3)" (unclosed "[|" (loc-of e 1) "|]" (loc-of e 3))
+   "Pexp_array []" [:Pexp_array ()]
+   "Pexp_struct_item(Str.open_ od, mkexp ~loc:($startpos($3), $endpos) (Pexp_array($4)))"
+   [:Pexp_struct_item (str-open ($ e "od")) (mkexp [(spos-of e 3) (epos e)] [:Pexp_array ($ e 4)])]
+   "Pexp_struct_item(Str.open_ od, mkexp ~loc:($startpos($3), $endpos) (Pexp_array []))"
+   [:Pexp_struct_item (str-open ($ e "od")) (mkexp [(spos-of e 3) (epos e)] [:Pexp_array ()])]
+   "unclosed \"[|\" $loc($3) \"|]\" $loc($5)" (unclosed "[|" (loc-of e 3) "|]" (loc-of e 5))
+   "fst (mktailexp $loc($3) $2)" (first (mktailexp (loc-of e 3) ($ e 2)))
+   "unclosed \"[\" $loc($1) \"]\" $loc($3)" (unclosed "[" (loc-of e 1) "]" (loc-of e 3))
+   "let list_exp = let tail_exp, _tail_loc = mktailexp $loc($5) $4 in mkexp ~loc:($startpos($3), $endpos) tail_exp in Pexp_struct_item(Str.open_ od, list_exp)"
+   (let [list-exp (let [[tail-exp _] (mktailexp (loc-of e 5) ($ e 4))] (mkexp [(spos-of e 3) (epos e)] tail-exp))]
+     [:Pexp_struct_item (str-open ($ e "od")) list-exp])
+   "Lident \"[]\"" [:Lident "[]"]
+   "Pexp_struct_item(Str.open_ od, mkexp ~loc:$loc($3) (Pexp_construct($3, None)))"
+   [:Pexp_struct_item (str-open ($ e "od")) (mkexp (loc-of e 3) [:Pexp_construct ($ e 3) nil])]
+   "unclosed \"[\" $loc($3) \"]\" $loc($5)" (unclosed "[" (loc-of e 3) "]" (loc-of e 5))
+   "let modexp = mkexp_attrs ~loc:($startpos($3), $endpos) (Pexp_pack ($6, Some ptyp)) $5 in Pexp_struct_item(Str.open_ od, modexp)"
+   (let [modexp (mkexp-attrs [(spos-of e 3) (epos e)] [:Pexp_pack ($ e 6) ($ e "ptyp")] ($ e 5))]
+     [:Pexp_struct_item (str-open ($ e "od")) modexp])
+   "unclosed \"(\" $loc($3) \")\" $loc($8)" (unclosed "(" (loc-of e 3) ")" (loc-of e 8))
+   "(Nolabel, $1)" [nolabel ($ e 1)]
+   "(Labelled $1, $2)" [(labelled ($ e 1)) ($ e 2)]
+   "let loc = $loc(label) in (Labelled label, mkexpvar ~loc label)" (let [loc (loc-of e "label")] [(labelled ($ e "label")) (mkexpvar loc ($ e "label"))])
+   "(Labelled label, mkexp_constraint ~loc:($startpos($2), $endpos) (mkexpvar ~loc:$loc(label) label) ty)"
+   [(labelled ($ e "label")) (mkexp-constraint [(spos-of e 2) (epos e)] (mkexpvar (loc-of e "label") ($ e "label")) ($ e "ty"))]
+   "let loc = $loc(label) in (Optional label, mkexpvar ~loc label)" (let [loc (loc-of e "label")] [(optional ($ e "label")) (mkexpvar loc ($ e "label"))])
+   "(Optional $1, $2)" [(optional ($ e 1)) ($ e 2)]
+   "mkpatvar ~loc:$sloc $1" (mkpatvar (sloc e) ($ e 1))
+   "($1, $2, None)" [($ e 1) ($ e 2) nil]
+   "let v = $1 in let t = match $2 with Pconstraint t -> Pvc_constraint { locally_abstract_univars = []; typ=t } | Pcoerce (ground, coercion) -> Pvc_coercion { ground; coercion} in (v, $4, Some t)"
+   (let [v ($ e 1) c ($ e 2)
+         t (case (first c) :Pconstraint [:Pvc_constraint () (nth c 1)] :Pcoerce [:Pvc_coercion (nth c 1) (nth c 2)])]
+     [v ($ e 4) t])
+   "let t = ghtyp ~loc:($loc($3)) $3 in ($1, $5, Some (Pvc_constraint { locally_abstract_univars = []; typ=t }))"
+   (let [t (ghtyp (loc-of e 3) ($ e 3))] [($ e 1) ($ e 5) [:Pvc_constraint () t]])
+   "let constraint' = Pvc_constraint { locally_abstract_univars=$4; typ = $6} in ($1, $8, Some constraint')"
+   (let [c [:Pvc_constraint ($ e 4) ($ e 6)]] [($ e 1) ($ e 8) c])
+   "($1, $3, None)" [($ e 1) ($ e 3) nil]
+   "($1, $5, Some(Pvc_constraint { locally_abstract_univars=[]; typ=$3 }))" [($ e 1) ($ e 5) [:Pvc_constraint () ($ e 3)]]
+   "let p,e,c = $1 in (p,e,c,false)" (let [[p x c] ($ e 1)] [p x c false])
+   "(mkpatvar ~loc:$loc $1, mkexpvar ~loc:$loc $1, None, true)"
+   ;; a tuple is evaluated right to left
+   (let [ex (mkexpvar (mloc e) ($ e 1)) p (mkpatvar (mloc e) ($ e 1))] [p ex nil true])
+   "addlb $1 $2" (addlb ($ e 1) ($ e 2))
+   "let attrs = attrs1 @ attrs2 in mklbs ext rec_flag (mklb ~loc:$sloc true body attrs)"
+   (let [attrs (concat ($ e "attrs1") ($ e "attrs2"))] (mklbs ($ e "ext") ($ e "rec_flag") (mklb true (sloc e) ($ e "body") attrs)))
+   "let attrs = attrs1 @ attrs2 in mklb ~loc:$sloc false body attrs"
+   (let [attrs (concat ($ e "attrs1") ($ e "attrs2"))] (mklb false (sloc e) ($ e "body") attrs))
+   "(pat, exp)" [($ e "pat") ($ e "exp")]
+   "(mkpatvar ~loc:$loc $1, mkexpvar ~loc:$loc $1)" (let [ex (mkexpvar (mloc e) ($ e 1)) p (mkpatvar (mloc e) ($ e 1))] [p ex])
+   "let loc = ($startpos(pat), $endpos(typ)) in (ghpat ~loc (Ppat_constraint(pat, typ)), exp)"
+   (let [loc [(spos-of e "pat") (epos-of e "typ")]] [(ghpat loc [:Ppat_constraint ($ e "pat") ($ e "typ")]) ($ e "exp")])
+   "let let_pat, let_exp = body in let_pat, let_exp, []" (let [[let-pat let-exp] ($ e "body")] [let-pat let-exp ()])
+   "let let_pat, let_exp, rev_ands = bindings in let pbop_pat, pbop_exp = body in let pbop_loc = make_loc $sloc in let and_ = {pbop_op; pbop_pat; pbop_exp; pbop_loc} in let_pat, let_exp, and_ :: rev_ands"
+   (let [[let-pat let-exp rev-ands] ($ e "bindings")
+         [pbop-pat pbop-exp] ($ e "body")
+         pbop-loc (make-loc (sloc e))
+         and_ {:pbop_op ($ e "pbop_op") :pbop_pat pbop-pat :pbop_exp pbop-exp :pbop_loc pbop-loc}]
+     [let-pat let-exp (cons and_ rev-ands)])
+   "ghexp ~loc:$sloc (mkfunction $1 $2 $4)" (ghexp (sloc e) (mkfunction ($ e 1) ($ e 2) ($ e 4)))
+   "let ext, attrs = $2 in match ext with | None -> Pfunction_cases ($3, make_loc $sloc, attrs) | Some _ -> let cases = Pfunction_cases ($3, make_loc $sloc, []) in Pfunction_body (mkexp_attrs ~loc:$sloc (mkfunction [] None cases) $2)"
+   (let [[ext attrs] ($ e 2)]
+     (if (nil? ext)
+       [:Pfunction_cases ($ e 3) (make-loc (sloc e)) attrs]
+       (let [cases [:Pfunction_cases ($ e 3) (make-loc (sloc e)) ()]]
+         [:Pfunction_body (mkexp-attrs (sloc e) (mkfunction () nil cases) ($ e 2))])))
+   "Pfunction_body $1" [:Pfunction_body ($ e 1)]
+   "Exp.case $1 $3" (exp-case ($ e 1) ($ e 3))
+   "Exp.case $1 ~guard:$3 $5" (exp-case ($ e 1) ($ e 3) ($ e 5))
+   "Exp.case $1 (Exp.unreachable ~loc:(make_loc $loc($3)) ())" (exp-case ($ e 1) (ast/exp-mk (make-loc (loc-of e 3)) nil [:Pexp_unreachable]))
+   "let loc = match ty_params with | [] -> assert false | [_] -> make_loc $sloc | _ :: _ :: _ -> ghost_loc $sloc in List.map (fun x -> { pparam_loc = loc; pparam_desc = Pparam_newtype x }) ty_params"
+   (let [ps ($ e "ty_params")
+         loc (if (= 1 (count ps)) (make-loc (sloc e)) (ghost-loc (sloc e)))]
+     (mapv (fn [x] {:pparam_loc loc :pparam_desc [:Pparam_newtype x]}) ps))
+   "let a, b, c = $1 in [ { pparam_loc = make_loc $sloc; pparam_desc = Pparam_val (a, b, c) } ]"
+   (let [[a b c] ($ e 1)] [{:pparam_loc (make-loc (sloc e)) :pparam_desc [:Pparam_val a b c]}])
+   "None, $1" [nil ($ e 1)]
+   "Some $1, $2" [($ e 1) ($ e 2)]
+   "let loc = $loc(label) in Some label, mkexpvar ~loc label" (let [loc (loc-of e "label")] [($ e "label") (mkexpvar loc ($ e "label"))])
+   "Some label, mkexp_constraint ~loc:($startpos($2), $endpos) (mkexpvar ~loc:$loc(label) label) c"
+   [($ e "label") (mkexp-constraint [(spos-of e 2) (epos e)] (mkexpvar (loc-of e "label") ($ e "label")) ($ e "c"))]
+   "x :: xs" (cons ($ e "x") ($ e "xs"))
+   "[ x2; None, x1 ]" (list ($ e "x2") [nil ($ e "x1")])
+   "[ x2; Some l1, x1 ]" (list ($ e "x2") [($ e "l1") ($ e "x1")])
+   "let loc = $loc(l1) in [ x2; Some l1, mkexpvar ~loc l1]" (let [loc (loc-of e "l1")] (list ($ e "x2") [($ e "l1") (mkexpvar loc ($ e "l1"))]))
+   "let x1 = mkexp_constraint ~loc:($startpos($2), $endpos) (mkexpvar ~loc:$loc(l1) l1) c in [ x2; Some l1, x1]"
+   (let [x1 (mkexp-constraint [(spos-of e 2) (epos e)] (mkexpvar (loc-of e "l1") ($ e "l1")) ($ e "c"))] (list ($ e "x2") [($ e "l1") x1]))
+   "eo, fields" [($ e "eo") ($ e "fields")]
+   "let constraint_loc, label, e = match eo with | None -> $sloc, make_ghost label, exp_of_longident label | Some e -> ($startpos(c), $endpos), label, e in label, mkexp_opt_constraint ~loc:constraint_loc e c"
+   (let [eo ($ e "eo") label ($ e "label")
+         [constraint-loc label x] (if (nil? eo)
+                                    ;; a tuple: right to left
+                                    (let [x (exp-of-longident label) l (make-ghost label)] [(sloc e) l x])
+                                    [[(spos-of e "c") (epos e)] label eo])]
+     [label (mkexp-opt-constraint constraint-loc x ($ e "c"))])
+   "let label, e = match oe with | None -> make_ghost label, exp_of_label label | Some e -> label, e in label, e"
+   (let [oe ($ e "oe") label ($ e "label")
+         [label x] (if (nil? oe) (let [x (exp-of-label label) l (make-ghost label)] [l x]) [label oe])]
+     [label x])
+   "es" ($ e "es")
+   "Pconstraint $2" [:Pconstraint ($ e 2)]
+   "Pcoerce (Some $2, $4)" [:Pcoerce ($ e 2) ($ e 4)]
+   "Pcoerce (None, $2)" [:Pcoerce nil ($ e 2)]))
+
+(def ^:private actions-3
+  (acts
+   ;; patterns
+   "mkpat_attrs ~loc:$sloc (Ppat_exception $3) $2" (mkpat-attrs (sloc e) [:Ppat_exception ($ e 3)] ($ e 2))
+   "mkpat ~loc:$sloc (Ppat_effect($2,$4))" (mkpat (sloc e) [:Ppat_effect ($ e 2) ($ e 4)])
+   "mkpat_cons ~loc:$sloc $loc($2) (ghpat ~loc:$sloc (Ppat_tuple ([None, $1; None, $3], Closed)))"
+   (mkpat-cons (sloc e) (loc-of e 2) (ghpat (sloc e) [:Ppat_tuple [[nil ($ e 1)] [nil ($ e 3)]] :Closed]))
+   "Pat.attr $1 $2" (ast/pat-attr ($ e 1) ($ e 2))
+   "Ppat_alias($1, $3)" [:Ppat_alias ($ e 1) ($ e 3)]
+   "expecting $loc($3) \"identifier\"" (expecting (loc-of e 3) "identifier")
+   "expecting $loc($3) \"pattern\"" (expecting (loc-of e 3) "pattern")
+   "Ppat_or($1, $3)" [:Ppat_or ($ e 1) ($ e 3)]
+   "Ppat_construct($1, Some ([], $2))" [:Ppat_construct ($ e 1) [() ($ e 2)]]
+   "Ppat_construct(constr, Some (newtypes, pat))" [:Ppat_construct ($ e "constr") [($ e "newtypes") ($ e "pat")]]
+   "Ppat_variant($1, Some $2)" [:Ppat_variant ($ e 1) ($ e 2)]
+   "mkpat_attrs ~loc:$sloc (Ppat_lazy $3) $2" (mkpat-attrs (sloc e) [:Ppat_lazy ($ e 3)] ($ e 2))
+   "Ppat_var ($1)" [:Ppat_var ($ e 1)]
+   "mkpat_attrs ~loc:$sloc (Ppat_unpack (name, None)) ext_attrs" (mkpat-attrs (sloc e) [:Ppat_unpack ($ e "name") nil] ($ e "ext_attrs"))
+   "mkpat_attrs ~loc:$sloc (Ppat_unpack (name, Some ptyp)) ext_attrs" (mkpat-attrs (sloc e) [:Ppat_unpack ($ e "name") ($ e "ptyp")] ($ e "ext_attrs"))
+   "Ppat_constant $1" [:Ppat_constant ($ e 1)]
+   "Ppat_interval ($1, $3)" [:Ppat_interval ($ e 1) ($ e 3)]
+   "Ppat_construct($1, None)" [:Ppat_construct ($ e 1) nil]
+   "Ppat_variant($1, None)" [:Ppat_variant ($ e 1) nil]
+   "Ppat_type ($2)" [:Ppat_type ($ e 2)]
+   "Ppat_open($1, $3)" [:Ppat_open ($ e 1) ($ e 3)]
+   "Ppat_open($1, mkpat ~loc:$sloc (Ppat_construct($3, None)))" [:Ppat_open ($ e 1) (mkpat (sloc e) [:Ppat_construct ($ e 3) nil])]
+   "Ppat_open ($1, $4)" [:Ppat_open ($ e 1) ($ e 4)]
+   "expecting $loc($4) \"pattern\"" (expecting (loc-of e 4) "pattern")
+   "expecting $loc($4) \"type\"" (expecting (loc-of e 4) "type")
+   "unclosed \"(\" $loc($1) \")\" $loc($7)" (unclosed "(" (loc-of e 1) ")" (loc-of e 7))
+   "Ppat_extension $1" [:Ppat_extension ($ e 1)]
+   "let (fields, closed) = $2 in Ppat_record(fields, closed)" (let [[fields closed] ($ e 2)] [:Ppat_record fields closed])
+   "fst (mktailpat $loc($3) $2)" (first (mktailpat (loc-of e 3) ($ e 2)))
+   "Ppat_array $2" [:Ppat_array ($ e 2)]
+   "Ppat_array []" [:Ppat_array ()]
+   "None, $1" [nil ($ e 1)]
+   "let loc = $loc(label) in Some label, mkpatvar ~loc label" (let [loc (loc-of e "label")] [($ e "label") (mkpatvar loc ($ e "label"))])
+   "let lbl_loc = $loc(label) in let pat_loc = $startpos($2), $endpos in let pat = mkpatvar ~loc:lbl_loc label in Some label, mkpat ~loc:pat_loc (Ppat_constraint(pat, cty))"
+   (let [lbl-loc (loc-of e "label") pat-loc [(spos-of e 2) (epos e)] pat (mkpatvar lbl-loc ($ e "label"))]
+     [($ e "label") (mkpat pat-loc [:Ppat_constraint pat ($ e "cty")])])
+   "$3 :: $1" (cons ($ e 3) ($ e 1))
+   "[ $3; $1 ]" (list ($ e 3) ($ e 1))
+   "Closed, $1" [:Closed ($ e 1)]
+   "Open, $1" [:Open ($ e 1)]
+   "Open, [ $1 ]" [:Open (list ($ e 1))]
+   "let closed, pat = $1 in Ppat_tuple(List.rev pat, closed)" (let [[closed pat] ($ e 1)] [:Ppat_tuple (reverse pat) closed])
+   "ps" ($ e "ps")
+   "let fields, closed = $1 in let closed = match closed with Some () -> Open | None -> Closed in fields, closed"
+   (let [[fields closed] ($ e 1)] [fields (if (some? closed) :Open :Closed)])
+   "let constraint_loc, label, pat = match opat with | None -> $sloc, make_ghost label, pat_of_label label | Some pat -> ($startpos(octy), $endpos), label, pat in label, mkpat_opt_constraint ~loc:constraint_loc pat octy"
+   (let [opat ($ e "opat") label ($ e "label")
+         [constraint-loc label pat] (if (nil? opat)
+                                      (let [p (pat-of-label label) l (make-ghost label)] [(sloc e) l p])
+                                      [[(spos-of e "octy") (epos e)] label opat])]
+     [label (mkpat-opt-constraint constraint-loc pat ($ e "octy"))])
+   ;; value descriptions and declarations
+   "let attrs = attrs1 @ attrs2 in let loc = make_loc $sloc in let docs = symbol_docs $sloc in Val.mk id ty ~attrs ~loc ~docs, ext"
+   (let [attrs (concat ($ e "attrs1") ($ e "attrs2")) loc (make-loc (sloc e)) docs (docs-of e)]
+     [(ast/val-mk ($ e "id") ($ e "ty") {:attrs attrs :loc loc :docs docs}) ($ e "ext")])
+   "let attrs = attrs1 @ attrs2 in let loc = make_loc $sloc in let docs = symbol_docs $sloc in Val.mk id ty ~prim ~attrs ~loc ~docs, ext"
+   (let [attrs (concat ($ e "attrs1") ($ e "attrs2")) loc (make-loc (sloc e)) docs (docs-of e)]
+     [(ast/val-mk ($ e "id") ($ e "ty") {:prim ($ e "prim") :attrs attrs :loc loc :docs docs}) ($ e "ext")])
+   "let (kind, priv, manifest) = kind_priv_manifest in let docs = symbol_docs $sloc in let attrs = attrs1 @ attrs2 in let loc = make_loc $sloc in (flag, ext), Type.mk id ~params ~constraints ~kind ~priv ?manifest ~attrs ~loc ~docs"
+   (let [[kind priv manifest] ($ e "kind_priv_manifest") docs (docs-of e)
+         attrs (concat ($ e "attrs1") ($ e "attrs2")) loc (make-loc (sloc e))]
+     [[($ e "flag") ($ e "ext")]
+      (ast/type-mk ($ e "id") {:params ($ e "params") :constraints ($ e "constraints") :kind kind :priv priv
+                               :manifest manifest :attrs attrs :loc loc :docs docs})])
+   "let (kind, priv, manifest) = kind_priv_manifest in let docs = symbol_docs $sloc in let attrs = attrs1 @ attrs2 in let loc = make_loc $sloc in let text = symbol_text $symbolstartpos in Type.mk id ~params ~constraints ~kind ~priv ?manifest ~attrs ~loc ~docs ~text"
+   (let [[kind priv manifest] ($ e "kind_priv_manifest") docs (docs-of e)
+         attrs (concat ($ e "attrs1") ($ e "attrs2")) loc (make-loc (sloc e)) text (ds/symbol-text (sspos e))]
+     (ast/type-mk ($ e "id") {:params ($ e "params") :constraints ($ e "constraints") :kind kind :priv priv
+                              :manifest manifest :attrs attrs :loc loc :docs docs :text text}))
+   "(Ptype_abstract, priv, Some ty)" [:Ptype_abstract ($ e "priv") ($ e "ty")]
+   "(Ptype_variant cs, priv, oty)" [[:Ptype_variant ($ e "cs")] ($ e "priv") ($ e "oty")]
+   "(Ptype_open, priv, oty)" [:Ptype_open ($ e "priv") ($ e "oty")]
+   "(Ptype_record ls, priv, oty)" [[:Ptype_record ($ e "ls")] ($ e "priv") ($ e "oty")]
+   "(Ptype_external name, Public, None)" [[:Ptype_external ($ e "name")] :Public nil]
+   "(Ptype_abstract, Public, None)" [:Ptype_abstract :Public nil]
+   "[p]" (list ($ e "p"))
+   "ps" ($ e "ps")
+   "$2, $1" [($ e 2) ($ e 1)]
+   "Ptyp_var tyvar" [:Ptyp_var ($ e "tyvar")]
+   "Ptyp_any" [:Ptyp_any]
+   "NoVariance, NoInjectivity" [:NoVariance :NoInjectivity]
+   "Covariant, NoInjectivity" [:Covariant :NoInjectivity]
+   "Contravariant, NoInjectivity" [:Contravariant :NoInjectivity]
+   "NoVariance, Injective" [:NoVariance :Injective]
+   "Covariant, Injective" [:Covariant :Injective]
+   "Contravariant, Injective" [:Contravariant :Injective]
+   "if $1 = \"+!\" then Covariant, Injective else if $1 = \"-!\" then Contravariant, Injective else if $1 = \"+-\" then Bivariant, NoInjectivity else if $1 = \"-+\" then Bivariant, NoInjectivity else if $1 = \"+-!\" then Bivariant, Injective else if $1 = \"-+!\" then Bivariant, Injective else expecting $loc($1) \"type_variance\""
+   (case ($ e 1)
+     "+!" [:Covariant :Injective] "-!" [:Contravariant :Injective] "+-" [:Bivariant :NoInjectivity]
+     "-+" [:Bivariant :NoInjectivity] "+-!" [:Bivariant :Injective] "-+!" [:Bivariant :Injective]
+     (expecting (loc-of e 1) "type_variance"))
+   "if $1 = \"!+\" then Covariant, Injective else if $1 = \"!-\" then Contravariant, Injective else if $1 = \"!+-\" then Bivariant, Injective else if $1 = \"!-+\" then Bivariant, Injective else expecting $loc($1) \"type_variance\""
+   (case ($ e 1)
+     "!+" [:Covariant :Injective] "!-" [:Contravariant :Injective] "!+-" [:Bivariant :Injective] "!-+" [:Bivariant :Injective]
+     (expecting (loc-of e 1) "type_variance"))
+   "cs" ($ e "cs")
+   "let vars, args, res = vars_args_res in let info = symbol_info $endpos in let loc = make_loc $sloc in cid, vars, args, res, attrs, loc, info"
+   (let [[vars args res] ($ e "vars_args_res") info (ds/symbol-info (epos e)) loc (make-loc (sloc e))]
+     [($ e "cid") vars args res ($ e "attrs") loc info])
+   "let cid, vars, args, res, attrs, loc, info = d in Type.constructor cid ~vars ~args ?res ~attrs ~loc ~info"
+   (let [[cid vars args res attrs loc info] ($ e "d")]
+     (ast/type-constructor cid {:vars vars :args args :res res :attrs attrs :loc loc :info info}))
+   "let loc = make_loc $sloc in let docs = symbol_docs $sloc in Te.mk_exception ~attrs ~loc (Te.rebind id lid ~attrs:(attrs1 @ attrs2) ~loc ~docs) , ext"
+   (let [loc (make-loc (sloc e)) docs (docs-of e)]
+     [(ast/te-mk-exception (ast/te-rebind ($ e "id") ($ e "lid") {:attrs (concat ($ e "attrs1") ($ e "attrs2")) :loc loc :docs docs})
+                           {:attrs ($ e "attrs") :loc loc})
+      ($ e "ext")])
+   "let vars, args, res = vars_args_res in let loc = make_loc ($startpos, $endpos(attrs2)) in let docs = symbol_docs $sloc in Te.mk_exception ~attrs ~loc (Te.decl id ~vars ~args ?res ~attrs:(attrs1 @ attrs2) ~loc ~docs) , ext"
+   (let [[vars args res] ($ e "vars_args_res") loc (make-loc [(spos e) (epos-of e "attrs2")]) docs (docs-of e)]
+     [(ast/te-mk-exception (ast/te-decl ($ e "id") {:vars vars :args args :res res :attrs (concat ($ e "attrs1") ($ e "attrs2"))
+                                                    :loc loc :docs docs})
+                           {:attrs ($ e "attrs") :loc loc})
+      ($ e "ext")])
+   "([],Pcstr_tuple [],None)" [() [:Pcstr_tuple ()] nil]
+   "([],$2,None)" [() ($ e 2) nil]
+   "([],$2,Some $4)" [() ($ e 2) ($ e 4)]
+   "($2,$4,Some $6)" [($ e 2) ($ e 4) ($ e 6)]
+   "([],Pcstr_tuple [],Some $2)" [() [:Pcstr_tuple ()] ($ e 2)]
+   "($2,Pcstr_tuple [],Some $4)" [($ e 2) [:Pcstr_tuple ()] ($ e 4)]
+   "Pcstr_tuple tys" [:Pcstr_tuple ($ e "tys")]
+   "Pcstr_record $2" [:Pcstr_record ($ e 2)]
+   "[$1]" (list ($ e 1))
+   "$1 :: $2" (cons ($ e 1) ($ e 2))
+   "let info = symbol_info $endpos in Type.field $2 $4 ~mut:$1 ~attrs:$5 ~loc:(make_loc $sloc) ~info"
+   (let [info (ds/symbol-info (epos e))] (ast/type-field ($ e 2) ($ e 4) {:mut ($ e 1) :attrs ($ e 5) :loc (make-loc (sloc e)) :info info}))
+   "let info = match rhs_info $endpos($5) with | Some _ as info_before_semi -> info_before_semi | None -> symbol_info $endpos in Type.field $2 $4 ~mut:$1 ~attrs:($5 @ $7) ~loc:(make_loc $sloc) ~info"
+   (let [info (or (ds/rhs-info (epos-of e 5)) (ds/symbol-info (epos e)))]
+     (ast/type-field ($ e 2) ($ e 4) {:mut ($ e 1) :attrs (concat ($ e 5) ($ e 7)) :loc (make-loc (sloc e)) :info info}))
+   "let docs = symbol_docs $sloc in let attrs = attrs1 @ attrs2 in let loc = make_loc $sloc in Te.mk tid cs ~params ~priv ~attrs ~docs ~loc, ext"
+   (let [docs (docs-of e) attrs (concat ($ e "attrs1") ($ e "attrs2")) loc (make-loc (sloc e))]
+     [(ast/te-mk ($ e "tid") ($ e "cs") {:params ($ e "params") :priv ($ e "priv") :attrs attrs :docs docs :loc loc}) ($ e "ext")])
+   "let cid, vars, args, res, attrs, loc, info = d in Te.decl cid ~vars ~args ?res ~attrs ~loc ~info"
+   (let [[cid vars args res attrs loc info] ($ e "d")]
+     (ast/te-decl cid {:vars vars :args args :res res :attrs attrs :loc loc :info info}))
+   "let info = symbol_info $endpos in Te.rebind cid lid ~attrs ~loc:(make_loc $sloc) ~info"
+   (let [info (ds/symbol-info (epos e))] (ast/te-rebind ($ e "cid") ($ e "lid") {:attrs ($ e "attrs") :loc (make-loc (sloc e)) :info info}))
+   ;; with constraints
+   "let lident = loc_last $3 in Pwith_type ($3, (Type.mk lident ~params:$2 ~constraints:$6 ~manifest:$5 ~priv:$4 ~loc:(make_loc $sloc)))"
+   (let [lident (loc-last ($ e 3))]
+     [:Pwith_type ($ e 3) (ast/type-mk lident {:params ($ e 2) :constraints ($ e 6) :manifest ($ e 5) :priv ($ e 4) :loc (make-loc (sloc e))})])
+   "let lident = loc_last $3 in Pwith_typesubst ($3, (Type.mk lident ~params:$2 ~manifest:$5 ~loc:(make_loc $sloc)))"
+   (let [lident (loc-last ($ e 3))]
+     [:Pwith_typesubst ($ e 3) (ast/type-mk lident {:params ($ e 2) :manifest ($ e 5) :loc (make-loc (sloc e))})])
+   "Pwith_module ($2, $4)" [:Pwith_module ($ e 2) ($ e 4)]
+   "Pwith_modsubst ($2, $4)" [:Pwith_modsubst ($ e 2) ($ e 4)]
+   "Pwith_modtype (l, rhs)" [:Pwith_modtype ($ e "l") ($ e "rhs")]
+   "Pwith_modtypesubst (l, rhs)" [:Pwith_modtypesubst ($ e "l") ($ e "rhs")]
+   "Public" :Public
+   "Private" :Private
+   ;; types
+   "mkrhs $2 $sloc" (mkrhs ($ e 2) (sloc e))
+   "Ptyp_poly($1, $3)" [:Ptyp_poly ($ e 1) ($ e 3)]
+   "Typ.attr $1 $2" (ast/typ-attr ($ e 1) ($ e 2))
+   "Ptyp_alias(ty, tyvar)" [:Ptyp_alias ($ e "ty") ($ e "tyvar")]
+   "ty" ($ e "ty")
+   "Ptyp_arrow(label, domain, codomain)" [:Ptyp_arrow ($ e "label") ($ e "domain") ($ e "codomain")]
+   "let ty, ltys = tuple in let tuple_loc = $loc(tuple) in let domain = mktyp ~loc:tuple_loc (Ptyp_tuple ((None, ty) :: ltys)) in let domain = extra_rhs_core_type domain ~pos:(snd tuple_loc) in Ptyp_arrow(Labelled label, domain, codomain)"
+   (let [[ty ltys] ($ e "tuple") tuple-loc (loc-of e "tuple")
+         domain (mktyp tuple-loc [:Ptyp_tuple (cons [nil ty] ltys)])
+         domain (extra-rhs-core-type domain (second tuple-loc))]
+     [:Ptyp_arrow (labelled ($ e "label")) domain ($ e "codomain")])
+   "let ty, ltys = $3 in mktyp ~loc:$sloc (Ptyp_tuple ((Some label, ty) :: ltys))"
+   (let [[ty ltys] ($ e 3)] (mktyp (sloc e) [:Ptyp_tuple (cons [($ e "label") ty] ltys)]))
+   "let ptyp = {ptyp with ppt_attrs = snd attrs @ ptyp.ppt_attrs } in Ptyp_functor(label, id, ptyp, codomain)"
+   (let [ptyp ($ e "ptyp") ptyp (assoc ptyp :ppt_attrs (concat (second ($ e "attrs")) (:ppt_attrs ptyp)))]
+     [:Ptyp_functor ($ e "label") ($ e "id") ptyp ($ e "codomain")])
+   "Optional label" (optional ($ e "label"))
+   "Labelled label" (labelled ($ e "label"))
+   "Nolabel" nolabel
+   "reloc_typ ~loc:$sloc $2" (reloc-typ (sloc e) ($ e 2))
+   "let ty, ltys = $1 in mktyp ~loc:$sloc (Ptyp_tuple ((None, ty) :: ltys))"
+   (let [[ty ltys] ($ e 1)] (mktyp (sloc e) [:Ptyp_tuple (cons [nil ty] ltys)]))
+   "ty, ltys" [($ e "ty") ($ e "ltys")]
+   "Some label, ty" [($ e "label") ($ e "ty")]
+   "type_" ($ e "type_")
+   "mktyp_attrs ~loc:$sloc (Ptyp_package package_type) ext_attrs" (mktyp-attrs (sloc e) [:Ptyp_package ($ e "package_type")] ($ e "ext_attrs"))
+   "Ptyp_variant([ field ], Closed, None)" [:Ptyp_variant (list ($ e "field")) :Closed nil]
+   "Ptyp_variant(fields, Closed, None)" [:Ptyp_variant ($ e "fields") :Closed nil]
+   "Ptyp_variant(field :: fields, Closed, None)" [:Ptyp_variant (cons ($ e "field") ($ e "fields")) :Closed nil]
+   "Ptyp_variant(fields, Open, None)" [:Ptyp_variant ($ e "fields") :Open nil]
+   "Ptyp_variant([], Open, None)" [:Ptyp_variant () :Open nil]
+   "Ptyp_variant(fields, Closed, Some [])" [:Ptyp_variant ($ e "fields") :Closed ()]
+   "Ptyp_variant(fields, Closed, Some tags)" [:Ptyp_variant ($ e "fields") :Closed ($ e "tags")]
+   "let (f, c) = meth_list in Ptyp_object (f, c)" (let [[f c] ($ e "meth_list")] [:Ptyp_object f c])
+   "Ptyp_object ([], Closed)" [:Ptyp_object () :Closed]
+   "Ptyp_extension ext" [:Ptyp_extension ($ e "ext")]
+   "Ptyp_constr (tid, tys)" [:Ptyp_constr ($ e "tid") ($ e "tys")]
+   "Ptyp_class (cid, tys)" [:Ptyp_class ($ e "cid") ($ e "tys")]
+   "Ptyp_open (mod_ident, type_)" [:Ptyp_open ($ e "mod_ident") ($ e "type_")]
+   "Ptyp_var ident" [:Ptyp_var ($ e "ident")]
+   "[ ty ]" (list ($ e "ty"))
+   "tys" ($ e "tys")
+   "let (lid, cstrs, attrs) = package_type_of_module_type $1 in Typ.package_type ~loc:(make_loc $sloc) ~attrs lid cstrs"
+   (let [[lid cstrs attrs] (package-type-of-module-type ($ e 1))] (ast/typ-package-type (make-loc (sloc e)) attrs lid cstrs))
+   "mktyp ~loc:$sloc (Ptyp_package $1)" (mktyp (sloc e) [:Ptyp_package ($ e 1)])
+   "Rf.inherit_ ~loc:(make_loc $sloc) $1" (ast/rf-inherit (make-loc (sloc e)) ($ e 1))
+   "let info = symbol_info $endpos in let attrs = add_info_attrs info $5 in Rf.tag ~loc:(make_loc $sloc) ~attrs $1 $3 $4"
+   (let [info (ds/symbol-info (epos e)) attrs (ast/add-info-attrs info ($ e 5))] (ast/rf-tag (make-loc (sloc e)) attrs ($ e 1) ($ e 3) ($ e 4)))
+   "let info = symbol_info $endpos in let attrs = add_info_attrs info $2 in Rf.tag ~loc:(make_loc $sloc) ~attrs $1 true []"
+   (let [info (ds/symbol-info (epos e)) attrs (ast/add-info-attrs info ($ e 2))] (ast/rf-tag (make-loc (sloc e)) attrs ($ e 1) true ()))
+   "true" true
+   "false" false
+   "let (f, c) = tail in (head :: f, c)" (let [[f c] ($ e "tail")] [(cons ($ e "head") f) c])
+   "[head], Closed" [(list ($ e "head")) :Closed]
+   "[], Open" [() :Open]
+   "let info = symbol_info $endpos in let attrs = add_info_attrs info $4 in Of.tag ~loc:(make_loc $sloc) ~attrs $1 $3"
+   (let [info (ds/symbol-info (epos e)) attrs (ast/add-info-attrs info ($ e 4))] (ast/of-tag (make-loc (sloc e)) attrs ($ e 1) ($ e 3)))
+   "let info = match rhs_info $endpos($4) with | Some _ as info_before_semi -> info_before_semi | None -> symbol_info $endpos in let attrs = add_info_attrs info ($4 @ $6) in Of.tag ~loc:(make_loc $sloc) ~attrs $1 $3"
+   (let [info (or (ds/rhs-info (epos-of e 4)) (ds/symbol-info (epos e))) attrs (ast/add-info-attrs info (concat ($ e 4) ($ e 6)))]
+     (ast/of-tag (make-loc (sloc e)) attrs ($ e 1) ($ e 3)))
+   "Of.inherit_ ~loc:(make_loc $sloc) ty" (ast/of-inherit (make-loc (sloc e)) ($ e "ty"))
+   ;; constants
+   "let (n, m) = $1 in mkconst ~loc:$sloc (Pconst_integer (n, m))" (let [[n m] ($ e 1)] (mkconst (sloc e) [:Pconst_integer n m]))
+   "mkconst ~loc:$sloc (Pconst_char $1)" (mkconst (sloc e) [:Pconst_char ($ e 1)])
+   "let (s, strloc, d) = $1 in mkconst ~loc:$sloc (Pconst_string (s,strloc,d))" (let [[s strloc d] ($ e 1)] (mkconst (sloc e) [:Pconst_string s strloc d]))
+   "let (f, m) = $1 in mkconst ~loc:$sloc (Pconst_float (f, m))" (let [[f m] ($ e 1)] (mkconst (sloc e) [:Pconst_float f m]))
+   "let (n, m) = $2 in mkconst ~loc:$sloc (Pconst_integer(\"-\" ^ n, m))" (let [[n m] ($ e 2)] (mkconst (sloc e) [:Pconst_integer (str "-" n) m]))
+   "let (f, m) = $2 in mkconst ~loc:$sloc (Pconst_float(\"-\" ^ f, m))" (let [[f m] ($ e 2)] (mkconst (sloc e) [:Pconst_float (str "-" f) m]))
+   "let (n, m) = $2 in mkconst ~loc:$sloc (Pconst_integer (n, m))" (let [[n m] ($ e 2)] (mkconst (sloc e) [:Pconst_integer n m]))
+   "let (f, m) = $2 in mkconst ~loc:$sloc (Pconst_float(f, m))" (let [[f m] ($ e 2)] (mkconst (sloc e) [:Pconst_float f m]))
+   ;; identifiers
+   "expecting $loc($2) \"operator\"" (expecting (loc-of e 2) "operator")
+   "expecting $loc($3) \"module-expr\"" (expecting (loc-of e 3) "module-expr")
+   "unclosed \"(\" $loc($1) \")\" $loc($3)" (unclosed "(" (loc-of e 1) ")" (loc-of e 3))
+   "\".\"^ $1 ^\"(\" ^ $3 ^ \")\"" (str "." ($ e 1) "(" ($ e 3) ")")
+   "\".\"^ $1 ^ \"(\" ^ $3 ^ \")<-\"" (str "." ($ e 1) "(" ($ e 3) ")<-")
+   "\".\"^ $1 ^\"[\" ^ $3 ^ \"]\"" (str "." ($ e 1) "[" ($ e 3) "]")
+   "\".\"^ $1 ^ \"[\" ^ $3 ^ \"]<-\"" (str "." ($ e 1) "[" ($ e 3) "]<-")
+   "\".\"^ $1 ^\"{\" ^ $3 ^ \"}\"" (str "." ($ e 1) "{" ($ e 3) "}")
+   "\".\"^ $1 ^ \"{\" ^ $3 ^ \"}<-\"" (str "." ($ e 1) "{" ($ e 3) "}<-")
+   "op" ($ e "op")
+   "\"+\"" "+" "\"+.\"" "+." "\"+=\"" "+=" "\"-\"" "-" "\"-.\"" "-." "\"*\"" "*" "\"%\"" "%" "\"=\"" "="
+   "\"<\"" "<" "\">\"" ">" "\"or\"" "or" "\"||\"" "||" "\"&\"" "&" "\"&&\"" "&&" "\":=\"" ":="
+   "\"\"" "" "\";..\"" ";.." "\"::\"" "::" "\"[]\"" "[]" "\"()\"" "()" "\"false\"" "false" "\"true\"" "true"
+   "ldot $1 $loc($1) $3 $loc($3)" (ldot ($ e 1) (loc-of e 1) ($ e 3) (loc-of e 3))
+   "Lident $1" [:Lident ($ e 1)]
+   "lapply ~loc:$sloc $1 $loc($1) $3 $loc($3)" (lapply (sloc e) ($ e 1) (loc-of e 1) ($ e 3) (loc-of e 3))
+   "expecting $loc($3) \"module path\"" (expecting (loc-of e 3) "module path")
+   ;; toplevel directives
+   "mk_directive ~loc:$sloc dir arg" (mk-directive (sloc e) ($ e "dir") ($ e "arg"))
+   "let (s, _, _) = $1 in Pdir_string s" (let [[s _ _] ($ e 1)] [:Pdir_string s])
+   "let (n, m) = $1 in Pdir_int (n ,m)" (let [[n m] ($ e 1)] [:Pdir_int n m])
+   "Pdir_ident $1" [:Pdir_ident ($ e 1)]
+   "Pdir_bool false" [:Pdir_bool false]
+   "Pdir_bool true" [:Pdir_bool true]
+   ;; miscellaneous
+   "()" :unit
+   "let body, _, _ = s in body" (let [[body _ _] ($ e "s")] body)
+   "Nonrecursive" :Nonrecursive
+   "Recursive" :Recursive
+   "not_expecting $loc \"nonrec flag\"" (not-expecting (mloc e) "nonrec flag")
+   "Upto" :Upto
+   "Downto" :Downto
+   "Immutable" :Immutable
+   "Mutable" :Mutable
+   "Concrete" :Concrete
+   "Virtual" :Virtual
+   "Immutable, Concrete" [:Immutable :Concrete]
+   "Mutable, Concrete" [:Mutable :Concrete]
+   "Immutable, Virtual" [:Immutable :Virtual]
+   "Mutable, Virtual" [:Mutable :Virtual]
+   "Public, Concrete" [:Public :Concrete]
+   "Private, Concrete" [:Private :Concrete]
+   "Public, Virtual" [:Public :Virtual]
+   "Private, Virtual" [:Private :Virtual]
+   "Fresh" :Fresh
+   "Override" :Override
+   "label" ($ e "label")
+   ;; attributes and extensions
+   "\"and\"" "and" "\"as\"" "as" "\"assert\"" "assert" "\"begin\"" "begin" "\"class\"" "class"
+   "\"constraint\"" "constraint" "\"do\"" "do" "\"done\"" "done" "\"downto\"" "downto" "\"effect\"" "effect"
+   "\"else\"" "else" "\"end\"" "end" "\"exception\"" "exception" "\"external\"" "external" "\"for\"" "for"
+   "\"fun\"" "fun" "\"function\"" "function" "\"functor\"" "functor" "\"if\"" "if" "\"in\"" "in"
+   "\"include\"" "include" "\"inherit\"" "inherit" "\"initializer\"" "initializer" "\"lazy\"" "lazy"
+   "\"let\"" "let" "\"match\"" "match" "\"method\"" "method" "\"module\"" "module" "\"mutable\"" "mutable"
+   "\"new\"" "new" "\"nonrec\"" "nonrec" "\"object\"" "object" "\"of\"" "of" "\"open\"" "open"
+   "\"private\"" "private" "\"rec\"" "rec" "\"sig\"" "sig" "\"struct\"" "struct" "\"then\"" "then"
+   "\"to\"" "to" "\"try\"" "try" "\"type\"" "type" "\"val\"" "val" "\"virtual\"" "virtual" "\"when\"" "when"
+   "\"while\"" "while" "\"with\"" "with"
+   "$1 ^ \".\" ^ $3.txt" (str ($ e 1) "." (:txt ($ e 3)))
+   "mk_attr ~loc:(make_loc $sloc) $2 $3" (mk-attr (make-loc (sloc e)) ($ e 2) ($ e 3))
+   "mark_symbol_docs $sloc; mk_attr ~loc:(make_loc $sloc) $2 $3" (do (ds/mark-symbol-docs (sloc e)) (mk-attr (make-loc (sloc e)) ($ e 2) ($ e 3)))
+   "Some $2" ($ e 2)
+   "not_expecting $loc \"extension\"" (not-expecting (mloc e) "extension")
+   "($2, $3)" [($ e 2) ($ e 3)]
+   "mk_quotedext ~loc:$sloc $1" (mk-quotedext (sloc e) ($ e 1))
+   "PStr $1" [:PStr ($ e 1)]
+   "PSig $2" [:PSig ($ e 2)]
+   "PTyp $2" [:PTyp ($ e 2)]
+   "PPat ($2, None)" [:PPat ($ e 2) nil]
+   "PPat ($2, Some $4)" [:PPat ($ e 2) ($ e 4)]
+   "Builtin_attributes.mark_payload_attrs_used $1; $1" ($ e 1)))
+
+(def actions (merge actions-1 actions-2 actions-3))

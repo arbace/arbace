@@ -1,0 +1,111 @@
+(ns arbace.repr.ocaml.native
+  "repr/ocaml's native reader (doc/ocaml/OCAML-SURVEY.md, \"As built: the native reader\"): OCaml text read by Arbace
+  alone (arbace.repr.ocaml.lex, arbace.repr.ocaml.parser), written as the helper tools/ocdump writes its parse, so
+  the rest of repr/ocaml (the converter, the printer) takes either. Run by bin/repr-ocaml as -m arbace.repr.ocaml
+  .native VERB ...:
+
+    dump [--loc] [--intf] [--use-file] --file NAME FILE   the dump of FILE on stdout, as ocdump's
+    read --root DIR --list LIST --out OUT [--loc]   each file of LIST (relative to DIR) dumped into OUT/REL.ae
+    check --root DIR --list LIST --helper HDIR [--report FILE]
+                                                    native-check: each file of LIST dumped with positions and
+                                                    compared byte for byte with the helper's HDIR/REL.ae (ocdump
+                                                    --loc); a file both reject passes when the kinds agree (the
+                                                    messages are a later step: counted, not compared)"
+  (:require [arbace.repr.ocaml.parser :as p]
+            [arbace.string :as str])
+  (:import [java.io File]))
+
+(set! *warn-on-reflection* false)
+
+(defn- kind-of [^String rel opts]
+  (cond (get opts "--use-file") :toplevel
+        (or (get opts "--intf") (str/ends-with? rel ".mli")) :intf
+        :else :impl))
+
+(defn- read-bytes ^bytes [^String path] (java.nio.file.Files/readAllBytes (.toPath (File. path))))
+
+(defn- spit-mk [^String path text]
+  (let [f (File. path)] (.mkdirs (.getParentFile (.getAbsoluteFile f))) (spit f text)))
+
+(defn- parse-args [args with-value]
+  (loop [as args opts {} pos []]
+    (if (empty? as)
+      {:opts opts :args pos}
+      (let [[a & more] as]
+        (cond
+          (contains? with-value a) (recur (rest more) (assoc opts a (first more)) pos)
+          (str/starts-with? a "--") (recur more (assoc opts a true) pos)
+          :else (recur more opts (conj pos a)))))))
+
+(defn- list-files [^String list-file]
+  (vec (remove str/blank? (str/split-lines (slurp list-file)))))
+
+(defn- error-head
+  "The kind of an error dump's text, or nil"
+  [^String text]
+  (when (str/starts-with? text "(ocaml/error")
+    (second (re-find #"^\(ocaml/error\s+:(\w+)" text))))
+
+(defn- first-diff-line [^String a ^String b]
+  (let [la (str/split-lines a) lb (str/split-lines b)
+        i (or (first (keep-indexed (fn [i [x y]] (when (not= x y) i)) (map vector la lb))) (min (count la) (count lb)))]
+    [(inc i) (get la i) (get lb i)]))
+
+(defn- do-check [{:keys [opts]}]
+  (let [root (get opts "--root") files (list-files (get opts "--list")) hdir (get opts "--helper")
+        st (atom {:equal 0 :both-rejected 0 :differ 0 :failed 0})
+        bad (atom [])
+        t0 (System/nanoTime)
+        bytes-read (atom 0)]
+    (doseq [rel files]
+      (let [path (str root "/" rel)
+            theirs (slurp (str hdir "/" rel ".ae"))
+            mine (try (let [b (read-bytes path)]
+                        (swap! bytes-read + (alength b))
+                        (p/dump b rel (kind-of rel opts) true))
+                      (catch Throwable t (str "(native-failure " (pr-str (str (.getMessage t))) ")")))
+            hk (error-head theirs) mk (error-head mine)]
+        (cond
+          (= mine theirs) (swap! st update :equal inc)
+          (and hk mk (= hk mk)) (swap! st update :both-rejected inc)
+          (str/starts-with? mine "(native-failure")
+          (do (swap! st update :failed inc) (swap! bad conj [rel :failure (subs mine 0 (min 300 (count mine)))]))
+          :else
+          (let [[ln a b] (first-diff-line theirs mine)]
+            (swap! st update :differ inc)
+            (swap! bad conj [rel :differ (str "line " ln ": helper " (pr-str a) " native " (pr-str b))])))))
+    (let [{:keys [equal both-rejected differ failed]} @st
+          secs (/ (- (System/nanoTime) t0) 1e9)]
+      (doseq [[rel k m] @bad] (println (if (= k :differ) "DIFF" "FAIL") rel m))
+      (println (str "native-check: " (count files) " files: " equal " equal to the helper's dump byte for byte, "
+                    both-rejected " rejected by both (same kind), " differ " differ, " failed " native failures ("
+                    (format "%.1f s, %d bytes" secs @bytes-read) ")"))
+      (when-let [r (get opts "--report")]
+        (spit-mk r (pr-str {:files (count files) :equal equal :both-rejected both-rejected :differ differ :failed failed
+                            :problems @bad})))
+      (System/exit (if (and (zero? differ) (zero? failed)) 0 1)))))
+
+(defn- do-read [{:keys [opts]}]
+  (let [root (get opts "--root") files (list-files (get opts "--list")) out (get opts "--out")
+        with-loc (boolean (get opts "--loc")) bad (atom 0)]
+    (doseq [rel files]
+      (try
+        (spit-mk (str out "/" rel ".ae") (p/dump (read-bytes (str root "/" rel)) rel (kind-of rel opts) with-loc))
+        (catch Throwable t (swap! bad inc) (println "FAIL" rel (.getMessage t)))))
+    (println (str "native read: " (count files) " files, " @bad " failures"))
+    (System/exit (if (zero? @bad) 0 1))))
+
+(defn- do-dump [{:keys [opts args]}]
+  (let [f (first args)
+        name (or (get opts "--file") f)]
+    (print (p/dump (read-bytes f) name (kind-of name opts) (boolean (get opts "--loc"))))
+    (flush)))
+
+(defn -main [& args]
+  (let [[verb & more] args
+        pa (fn [wv] (parse-args more wv))]
+    (case verb
+      "dump" (do-dump (pa #{"--file"}))
+      "read" (do-read (pa #{"--root" "--list" "--out"}))
+      "check" (do-check (pa #{"--root" "--list" "--helper" "--report"}))
+      (do (println "usage: -m arbace.repr.ocaml.native dump|read|check ...") (System/exit 2)))))
