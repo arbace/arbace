@@ -176,3 +176,94 @@
   (let [[l c] (line-col src off)
         text (source-line src l)]
     (str prog ": " file ":" l ":" c ": error: " msg "\n" text "\n" (caret-line text c) "\n")))
+
+;; ---------------------------------------------------------------------------------------------
+;; Metadata numbers as the AsmWriter's slot tracker gives them (what the Verifier prints: `!dbg !91`)
+;;
+;; The text's numbers are the AsmWriter's for a module it printed; a module changed since has its instructions'
+;; nodes numbered in another order. The module-level nodes (globals', named metadata's, functions' attachments, and
+;; what they reach) keep theirs; the nodes first reached from the instructions (debug records, a call's metadata
+;; arguments, attachments) are numbered after them in the order of use, a node before its operands.
+
+(def ^:private di-operand-order
+  {"DILocation" [:scope :inlinedAt] "DILexicalBlock" [:file :scope] "DILexicalBlockFile" [:file :scope]
+   "DILocalVariable" [:scope :name :file :type :annotations] "DILabel" [:scope :name :file]
+   "DISubprogram" [:file :scope :name :linkageName :type :unit :declaration :retainedNodes :containingType :templateParams :thrownTypes :annotations :targetFuncName]
+   "DIDerivedType" [:file :scope :name :baseType :extraData :annotations]
+   "DICompositeType" [:file :scope :name :baseType :elements :vtableHolder :templateParams :identifier :discriminator :dataLocation :associated :allocated :rank :annotations]
+   "DIGlobalVariable" [:scope :name :linkageName :file :type :staticDataMemberDecl :templateParams :annotations]
+   "DIGlobalVariableExpression" [:var :expr]
+   "DICompileUnit" [:file :producer :flags :splitDebugFilename :enumTypes :retainedTypes :globalVariables :importedEntities :macros]})
+
+(defn- md-ref? [x] (and (symbol? x) (nil? (namespace x)) (boolean (re-matches #"![0-9]+" (name x)))))
+
+(defn- refs-in
+  "The metadata references inside a value, in order."
+  [x]
+  (cond (md-ref? x) [x]
+        (or (seq? x) (vector? x)) (vec (mapcat refs-in x))
+        :else []))
+
+(defn node-operands
+  "A node's operand references in the slot tracker's order."
+  [node]
+  (let [h (when (and (seq? node) (symbol? (first node))) (name (first node)))
+        kind (when (and h (.startsWith ^String h "!DI")) (subs h 1))]
+    (if-let [order (and kind (get di-operand-order kind))]
+      (let [fields (apply hash-map (rest node))
+            listed (set order)]
+        (vec (concat (mapcat #(refs-in (get fields %)) order)
+                     (mapcat (fn [[k v]] (when-not (listed k) (refs-in v))) (partition 2 (rest node))))))
+      (refs-in node))))
+
+(defn- md-vals [md] (vec (take-nth 2 (rest md))))
+
+(defn- opt-of [b k] (some (fn [[i y]] (when (= y k) (nth b (inc i) nil))) (map-indexed vector b)))
+
+(defn md-slots
+  "{old-symbol new-symbol} of the nodes a module's instructions number differently from the text."
+  [forms]
+  (let [nodes (into {} (keep #(when (= (first %) 'llvm/meta) [(second %) (nth % 2)]) forms))
+        in-r (java.util.LinkedHashSet.)
+        walk (fn walk [r on-new]
+               (when (and (md-ref? r) (contains? nodes r) (on-new r))
+                 (doseq [c (node-operands (get nodes r))] (walk c on-new))))
+        roots (concat
+               (for [f forms :when (= (first f) 'llvm/global)
+                     :let [[_ _ _ & more] f o (apply hash-map (if (and (seq more) (not (keyword? (first more)))) (rest more) more))]
+                     v (md-vals (:md o))] v)
+               (for [f forms :when (= (first f) 'llvm/named-meta) r (refs-in (nth f 2))] r))
+        _ (doseq [r roots] (walk r (fn [r] (when-not (.contains in-r r) (.add in-r r) true))))
+        base (count in-r)
+        assigned (java.util.LinkedHashMap.)
+        visit (fn [r] (walk r (fn [r] (when-not (or (.contains in-r r) (.containsKey assigned r))
+                                        (.put assigned r (symbol (str "!" (+ base (.size assigned))))) true))))
+        fn-roots
+        (fn [f]
+          (let [o (apply hash-map (drop 4 f))]
+            (concat
+             (md-vals (:md o))
+             (for [blk (:body o) x (drop 2 blk)
+                   :let [b (if (= (first x) '=) (nth x 2) x)]
+                   r (if (and (symbol? (first b)) (.startsWith ^String (name (first b)) "dbg_"))
+                       (mapcat #(if (vector? %) [] (refs-in %)) (rest b))
+                       (concat (when (#{'call 'invoke 'callbr} (first b)) (refs-in (nth b 3 nil)))
+                               (md-vals (opt-of b :md))))]
+               r))))]
+    (doseq [f forms :when (#{'llvm/define 'llvm/declare} (first f)) r (fn-roots f)] (visit r))
+    (into {} (for [[k v] assigned :when (not= k v)] [k v]))))
+
+(defn renumber
+  "A printed text with its `!N` references numbered by `slots` (md-slots)."
+  ^String [^String text slots]
+  (if (empty? slots)
+    text
+    (let [m (re-matcher #"!([0-9]+)" text) b (StringBuilder.)]
+      (loop [last 0]
+        (if (.find m)
+          (let [k (symbol (str "!" (.group m 1)))]
+            (.append b (subs text last (.start m)))
+            (.append b (str (get slots k k)))
+            (recur (.end m)))
+          (.append b (subs text last))))
+      (str b))))

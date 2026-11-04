@@ -32,6 +32,7 @@
 
 (set! *warn-on-reflection* true)
 
+(declare label-text)
 (def ^:dynamic *ctx* nil)   ; where a check runs: {:fn F :bb LABEL :inst X} (the Verifier), {:form I :item K} (the parser)
 (def ^:dynamic ^java.util.List *errs* nil)   ; the Verifier's errors, in order (it goes on after a failed visit)
 
@@ -622,7 +623,7 @@
       (= h 'select) (let [[[ct] [at] [bt]] ps* ct (norm-type ct)]
                       (cond
                         (not (or (= ct 'i1) (and (vec-type? ct) (= (elem ct) 'i1)))) (verr :parser/select "select condition must be i1 or <n x i1>" {:at [:ty]})
-                        (not= (norm-type at) (norm-type bt)) (verr :parser/select "both values to select must have same type" {:at [:op 1]})))
+                        (not= (norm-type at) (norm-type bt)) (verr :parser/select "both values to select must have same type" {:at [:ty]})))
       ('#{call invoke callbr} h)
       (let [t (norm-type (first ps)) args (nth ps 2)]
         (when (and (seq? t) (= (first t) 'fn))
@@ -1226,39 +1227,39 @@
 (defn- check-range-md [x rt]
   (let [ops (md-ops x)]
     (when ops
-      (when (empty? ops) (verr :verifier/md-range "It should have at least one range!"))
-      (when (odd? (count ops)) (verr :verifier/md-range "Unfinished range!"))
+      (when (empty? ops) (verr :verifier/md-range "It should have at least one range!" [:mdv x]))
+      (when (odd? (count ops)) (verr :verifier/md-range "Unfinished range!" [:mdv x]))
       (let [w (when (int-type? (elem rt)) (int-bits (elem rt)))]
         (loop [pairs (partition 2 ops) last nil]
           (when-let [[lo hi] (first pairs)]
-            (when-not (md-int-op? lo) (verr :verifier/md-range "The lower limit must be an integer!"))
-            (when-not (md-int-op? hi) (verr :verifier/md-range "The upper limit must be an integer!"))
+            (when-not (md-int-op? lo) (verr :verifier/md-range "The lower limit must be an integer!" [:mdv x]))
+            (when-not (md-int-op? hi) (verr :verifier/md-range "The upper limit must be an integer!" [:mdv x]))
             (when-not (and (= (norm-type (first lo)) (elem rt)) (= (norm-type (first hi)) (elem rt)))
               (verr :verifier/md-range "Range types must match instruction type!"))
             (let [l (md-int-val lo) h (md-int-val hi)]
-              (when (= (bi-mod l w) (bi-mod h w)) (verr :verifier/md-range "Range must not be empty!"))
+              (when (= (bi-mod l w) (bi-mod h w)) (verr :verifier/md-range "Range must not be empty!" [:mdv x]))
               (when last
                 (let [[ll lh] last]
-                  (when (or (md-in-range? ll lh l w) (md-in-range? l h ll w)) (verr :verifier/md-range "Intervals are overlapping"))
-                  (when-not (> l ll) (verr :verifier/md-range "Intervals are not in order"))
-                  (when (= (bi-mod l w) (bi-mod lh w)) (verr :verifier/md-range "Intervals are contiguous"))))
+                  (when (or (md-in-range? ll lh l w) (md-in-range? l h ll w)) (verr :verifier/md-range "Intervals are overlapping" [:mdv x]))
+                  (when-not (> l ll) (verr :verifier/md-range "Intervals are not in order" [:mdv x]))
+                  (when (= (bi-mod l w) (bi-mod lh w)) (verr :verifier/md-range "Intervals are contiguous" [:mdv x]))))
               (recur (rest pairs) [l h]))))))))
 
 (defn- check-tbaa-tag [x]
   (when-let [ops (md-ops x)]
-    (when (empty? ops) (verr :verifier/md-misc "TBAA metadata cannot have 0 operands"))
+    (when (empty? ops) (verr :verifier/md-misc "TBAA metadata cannot have 0 operands" :inst [:mdv x]))
     (let [acc (md-ops (second ops))]
       (when-not (and (>= (count ops) 3) acc (= 3 (count acc)) (md-str (first acc)) (md-int-op? (nth acc 2)) (zero? (.signum ^java.math.BigInteger (md-int-val (nth acc 2)))))
-        (verr :verifier/md-misc "Access type node must be a valid scalar type"))
+        (verr :verifier/md-misc "Access type node must be a valid scalar type" :inst [:mdv x]))
       (when (and (>= (count ops) 3) (md-int-op? (nth ops 2)) (not= (norm-type (first (nth ops 2))) (norm-type (first (nth acc 2)))))
-        (verr :verifier/md-misc "Access bit-width not the same as description bit-width")))))
+        (verr :verifier/md-misc "Access bit-width not the same as description bit-width" :inst [:mdv x])))))
 
 (defn- check-prof-md [x hd b]
   (let [ops (md-ops x)]
     (when ops
-      (when (< (count ops) 1) (verr :verifier/md-prof "!prof annotations should have at least 1 operand"))
-      (when-not (md-str (first ops)) (verr :verifier/md-prof "expected string with name of the !prof annotation"))
-      (when (< (count ops) 2) (verr :verifier/md-prof "!prof annotations should have no less than 2 operands"))
+      (when (< (count ops) 1) (verr :verifier/md-prof "!prof annotations should have at least 1 operand" [:mdv x]))
+      (when-not (md-str (first ops)) (verr :verifier/md-prof "expected string with name of the !prof annotation" [:mdv x]))
+      (when (< (count ops) 2) (verr :verifier/md-prof "!prof annotations should have no less than 2 operands" [:mdv x]))
       (let [nm (md-str (first ops)) [_ ps o] (split-inst b)]
         (cond
           (= nm "branch_weights")
@@ -1273,12 +1274,14 @@
                            select 2
                            callbr (inc (count (:indirect o)))
                            nil)]
-            (when-not expected (verr :verifier/md-prof "!prof branch_weights are not allowed for this instruction"))
-            (when-not (= n expected)
-              (verr :verifier/md-prof (if (= hd 'invoke) "Wrong number of InvokeInst branch_weights operands" "Wrong number of operands")))
-            (doseq [w ws] (when-not (md-int-op? w) (verr :verifier/md-prof "!prof brunch_weights operand is not a const int"))))
+            (when-not expected
+              (try (verr :verifier/md-prof "!prof branch_weights are not allowed for this instruction" [:mdv x])
+                   (catch arbace.lang.ExceptionInfo e (.add *errs* e))))
+            (when-not (= n (or expected 0))
+              (verr :verifier/md-prof (if (= hd 'invoke) "Wrong number of InvokeInst branch_weights operands" "Wrong number of operands") [:mdv x]))
+            (doseq [w ws] (when-not (md-int-op? w) (verr :verifier/md-prof "!prof brunch_weights operand is not a const int" [:mdv x]))))
           (= nm "VP") nil
-          :else (verr :verifier/md-prof "expected either branch_weights or VP profile name"))))))
+          :else (verr :verifier/md-prof "expected either branch_weights or VP profile name" [:mdv x]))))))
 
 (defn- check-inst-metadata
   "The attachments of an instruction `hd` (result type `rt`, body `b`): their placement and their operands."
@@ -1327,8 +1330,8 @@
     (when-let [ops (md-ops x)]
       (doseq [s ops]
         (let [sops (md-ops s)]
-          (when-not (or (md-ref? s) (and (seq? s) (= (first s) '!))) (verr :verifier/md-misc "scope list must consist of MDNodes"))
-          (when (and sops (not (<= 2 (count sops) 3))) (verr :verifier/md-misc "scope must have two or three operands"))))))
+          (when-not (or (md-ref? s) (and (seq? s) (= (first s) '!))) (verr :verifier/md-misc "scope list must consist of MDNodes" [:mdv s]))
+          (when (and sops (not (<= 2 (count sops) 3))) (verr :verifier/md-misc "scope must have two or three operands" [:mdv s]))))))
   (when-let [x (get md '!tbaa)] (check-tbaa-tag x))
   (when-let [x (get md '!prof)] (check-prof-md x hd b)))
 
@@ -1337,37 +1340,38 @@
   [md]
   (when-let [x (get md '!prof)]
     (when-let [ops (md-ops x)]
-      (when (< (count ops) 1) (verr :verifier/md-prof "!prof annotations should have at least 1 operand"))
-      (when-not (md-str (first ops)) (verr :verifier/md-prof "expected string with name of the !prof annotation"))
-      (when (< (count ops) 2) (verr :verifier/md-prof "!prof annotations should have no less than 2 operands"))
+      (when (< (count ops) 1) (verr :verifier/md-prof "!prof annotations should have at least 1 operand" [:mdv x]))
+      (when-not (md-str (first ops)) (verr :verifier/md-prof "expected string with name of the !prof annotation" [:mdv x]))
+      (when (< (count ops) 2) (verr :verifier/md-prof "!prof annotations should have no less than 2 operands" [:mdv x]))
       (when-not (#{"function_entry_count" "synthetic_function_entry_count"} (md-str (first ops)))
-        (verr :verifier/md-prof "first operand should be 'function_entry_count' or 'synthetic_function_entry_count'"))
-      (when-not (md-int-op? (second ops)) (verr :verifier/md-prof "expected integer argument to function_entry_count")))))
+        (verr :verifier/md-prof "first operand should be 'function_entry_count' or 'synthetic_function_entry_count'" [:mdv x]))
+      (when-not (md-int-op? (second ops)) (verr :verifier/md-prof "expected integer argument to function_entry_count" [:mdv x])))))
 
 (defn- check-module-flags [forms]
   (let [flags (vec (mapcat #(when (and (= (first %) 'llvm/named-meta) (= (second %) '!llvm.module.flags)) (nth % 2)) forms))
         ids (java.util.HashMap.)]
     (doseq [f flags]
+     (visiting
       (let [ops (md-ops f)]
-        (when-not (= 3 (count ops)) (verr :verifier/md-flags "incorrect number of operands in module flag"))
+        (when-not (= 3 (count ops)) (verr :verifier/md-flags "incorrect number of operands in module flag" [:mdv f]))
         (let [[b id v] ops]
-          (when-not (md-int-op? b) (verr :verifier/md-flags "invalid behavior operand in module flag (expected constant integer)"))
+          (when-not (md-int-op? b) (verr :verifier/md-flags "invalid behavior operand in module flag (expected constant integer)" [:mdv b]))
           (let [bv (.longValue ^java.math.BigInteger (md-int-val b))]
-            (when-not (<= 1 bv 8) (verr :verifier/md-flags "invalid behavior operand in module flag (unexpected constant)"))
-            (when-not (md-str id) (verr :verifier/md-flags "invalid ID operand in module flag (expected metadata string)"))
+            (when-not (<= 1 bv 8) (verr :verifier/md-flags "invalid behavior operand in module flag (unexpected constant)" [:mdv b]))
+            (when-not (md-str id) (verr :verifier/md-flags "invalid ID operand in module flag (expected metadata string)" [:mdv id]))
             (case bv
               3 (let [pr (md-ops v)]
-                  (when-not (= 2 (count pr)) (verr :verifier/md-flags "invalid value for 'require' module flag (expected metadata pair)"))
-                  (when-not (md-str (first pr)) (verr :verifier/md-flags "invalid value for 'require' module flag (first value operand should be a string)")))
-              (5 6) (when-not (md-ops v) (verr :verifier/md-flags "invalid value for 'append'-type module flag (expected a metadata node)"))
-              7 (when-not (md-int-op? v) (verr :verifier/md-flags "invalid value for 'max' module flag (expected constant integer)"))
-              8 (when-not (and (md-int-op? v) (not (neg? (.signum ^java.math.BigInteger (md-int-val v))))) (verr :verifier/md-flags "invalid value for 'min' module flag (expected constant non-negative integer)"))
+                  (when-not (= 2 (count pr)) (verr :verifier/md-flags "invalid value for 'require' module flag (expected metadata pair)" [:mdv v]))
+                  (when-not (md-str (first pr)) (verr :verifier/md-flags "invalid value for 'require' module flag (first value operand should be a string)" [:mdv v])))
+              (5 6) (when-not (md-ops v) (verr :verifier/md-flags "invalid value for 'append'-type module flag (expected a metadata node)" [:mdv v]))
+              7 (when-not (md-int-op? v) (verr :verifier/md-flags "invalid value for 'max' module flag (expected constant integer)" [:mdv v]))
+              8 (when-not (and (md-int-op? v) (not (neg? (.signum ^java.math.BigInteger (md-int-val v))))) (verr :verifier/md-flags "invalid value for 'min' module flag (expected constant non-negative integer)" [:mdv v]))
               nil)
             (when (and (= (md-str id) "wchar_size") (not (md-int-op? v)))
-              (verr :verifier/md-flags "wchar_size metadata requires constant integer argument"))
+              (verr :verifier/md-flags "wchar_size metadata requires constant integer argument" [:mdv v]))
             (when (and (not= bv 3) (.containsKey ids (md-str id)))
-              (verr :verifier/md-flags "module flag identifiers must be unique (or of 'require' type)"))
-            (when (not= bv 3) (.put ids (md-str id) true))))))
+              (verr :verifier/md-flags "module flag identifiers must be unique (or of 'require' type)" [:mdv id]))
+            (when (not= bv 3) (.put ids (md-str id) true)))))))
     (doseq [f flags]
       (let [[b _ v] (md-ops f)]
         (when (= 3 (.longValue ^java.math.BigInteger (md-int-val b)))
@@ -1376,9 +1380,10 @@
 
 (defn- check-module-ident [forms]
   (doseq [f forms :when (and (= (first f) 'llvm/named-meta) (#{'!llvm.ident '!llvm.commandline} (second f))) n (nth f 2)]
+   (visiting
     (let [ops (md-ops n) nm (if (= (second f) '!llvm.ident) "llvm.ident" "llvm.commandline")]
-      (when-not (= 1 (count ops)) (verr :verifier/md-misc (str "incorrect number of operands in " nm " metadata")))
-      (when-not (md-str (first ops)) (verr :verifier/md-misc (str "invalid value for " nm " metadata entry operand(the operand should be a string)"))))))
+      (when-not (= 1 (count ops)) (verr :verifier/md-misc (str "incorrect number of operands in " nm " metadata") [:mdv n]))
+      (when-not (md-str (first ops)) (verr :verifier/md-misc (str "invalid value for " nm " metadata entry operand(the operand should be a string)") [:mdv (first ops)]))))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Debug info (Verifier's DebugInfoCheck: opt takes a module whose debug info is broken, warns and strips it)
@@ -1435,32 +1440,38 @@
             (and (:inlinedAt fs) (< n 1000) (not= (:inlinedAt fs) 'null)) (recur (:inlinedAt fs) (inc n))
             :else (di-sp (:scope fs))))))
 
-(def ^:dynamic *inst-locs* #{})   ; the DILocations that instructions carry as !dbg
+(def ^:dynamic *inst-locs* {})   ; the DILocations that instructions carry as !dbg
 
 (def ^:private di-type-kinds #{"DIBasicType" "DIDerivedType" "DICompositeType" "DISubroutineType" "DIStringType" "DIFixedPointType" "DISubrangeType"})
 (def ^:private di-file-checked #{"DICompileUnit" "DISubprogram" "DILocalVariable" "DIGlobalVariable" "DICompositeType" "DIDerivedType" "DILexicalBlock"})
 
 (defn- check-di-node [id node]
-  (let [k (di-kind node) fs (di-fields node)]
+  (let [k (di-kind node) fs (di-fields node)
+        N (fn [f] [[:md id] [:mdv (get fs f)]])]
     (when fs
       (let [kind-of (fn [x] (when (and x (not= x 'null)) (di-kind (node-of x))))
             set? (fn [f] (and (contains? fs f) (not= (get fs f) 'null)))
             tuple? (fn [x] (some? (md-ops x)))]
-        (when (and (di-file-checked k) (set? :file) (not= "DIFile" (kind-of (:file fs)))) (verr :di/node "invalid file"))
+        (when (and (di-file-checked k) (set? :file) (not= "DIFile" (kind-of (:file fs)))) (apply verr :di/node "invalid file" (N :file)))
         (when (and (#{"DIGlobalVariable" "DILocalVariable" "DITemplateTypeParameter"} k) (set? :type) (not (di-type-kinds (kind-of (:type fs)))))
-          (verr :di/node "invalid type ref"))
+          (apply verr :di/node "invalid type ref" (N :type)))
         (when (and (#{"DISubprogram" "DICompositeType" "DIDerivedType"} k) (set? :scope) (not (scope-kinds (kind-of (:scope fs)))))
-          (verr :di/node "invalid scope"))
+          (apply verr :di/node "invalid scope" (N :scope)))
         (when (and (#{"DIDerivedType" "DICompositeType"} k) (set? :baseType) (not (di-type-kinds (kind-of (:baseType fs)))))
-          (verr :di/node "invalid base type"))
-        (when (and (= k "DICompileUnit") (set? :globals) (not (tuple? (:globals fs)))) (verr :di/node "invalid global variable list"))
-        (when (and (= k "DISubprogram") (set? :retainedNodes) (not (tuple? (:retainedNodes fs)))) (verr :di/node "invalid retained nodes list"))
-        (when (and (= k "DISubroutineType") (set? :types) (not (tuple? (:types fs)))) (verr :di/node "invalid composite elements"))
+          (apply verr :di/node "invalid base type" (N :baseType)))
+        (when (and (= k "DICompileUnit") (set? :globals) (not (tuple? (:globals fs)))) (apply verr :di/node "invalid global variable list" (N :globals)))
+        (when (and (= k "DISubprogram") (set? :retainedNodes) (not (tuple? (:retainedNodes fs)))) (apply verr :di/node "invalid retained nodes list" (N :retainedNodes)))
+        (when (and (= k "DISubroutineType") (set? :types) (not (tuple? (:types fs)))) (apply verr :di/node "invalid composite elements" (N :types)))
         (when (and (#{"DICompositeType" "DIDerivedType" "DISubprogram" "DISubrangeType"} k) (not (contains? fs :file)) (some? (:line fs)) (not (zero? (long (:line fs)))))
-          (verr :di/node "line specified with no file"))
+          (verr :di/node "line specified with no file" [:md id]))
         (case k
           "DILocation" (do (when-not (local-scope-kinds (kind-of (:scope fs)))
-                             (verr :di/node (if (contains? *inst-locs* id) "DILocation's scope must be a DILocalScope" "location requires a valid scope")))
+                             (do (when-let [[lf lx] (get *inst-locs* id)]
+                                   (try (verr :di/node "DILocation's scope must be a DILocalScope"
+                                              [:mdv (get (apply hash-map (:md (apply hash-map (drop 4 lf)))) '!dbg)]
+                                              [:fn lf] [:inst lx] [:mdv id] [:mdv (:scope fs)])
+                                        (catch arbace.lang.ExceptionInfo e (.add *errs* e))))
+                                 (apply verr :di/node "location requires a valid scope" (N :scope))))
                            (when (and (:inlinedAt fs) (not= (:inlinedAt fs) 'null) (not= "DILocation" (kind-of (:inlinedAt fs))))
                              (verr :di/node "inlined-at should be a location")))
           "DILocalVariable" (when-not (local-scope-kinds (kind-of (:scope fs))) (verr :di/node "local variable requires a valid scope"))
@@ -1534,9 +1545,10 @@
         (do
           (when-not (= v 3) (verr :di/version (str "ignoring debug info with an invalid version (" v ")")))
           (do
-            (binding [*inst-locs* (set (for [f defs [_ _ & items] (:body (apply hash-map (drop 4 f))) x items
-                                             :let [b (body x)] :when (not (dbg-record? b))
-                                             :let [l (get (apply hash-map (:md (nth (split-inst b) 2))) '!dbg)] :when l] l))]
+            (binding [*inst-locs* (reduce (fn [m [l lf lx]] (if (contains? m l) m (assoc m l [lf lx])))
+                                          {} (for [f defs [_ _ & items] (:body (apply hash-map (drop 4 f))) x items
+                                                   :let [b (body x)] :when (not (dbg-record? b))
+                                                   :let [l (get (apply hash-map (:md (nth (split-inst b) 2))) '!dbg)] :when l] [l f x]))]
               (doseq [[id n] nodes] (visiting (binding [*ctx* {:md id}] (check-di-node id n)))))
             (doseq [f forms :when (#{'llvm/define 'llvm/declare} (first f))]
               (let [o (apply hash-map (drop 4 f)) md (apply hash-map (:md o))
@@ -1544,29 +1556,32 @@
                 (when sp
                   (visiting
                    (binding [*ctx* {:fn f}]
-                     (when-not (= "DISubprogram" (di-kind spn)) (verr :di/function "function !dbg attachment must be a subprogram"))
+                     (when-not (= "DISubprogram" (di-kind spn)) (verr :di/function "function !dbg attachment must be a subprogram" :fn [:mdv sp]))
                      (when (and (= (first f) 'llvm/declare) (flag? (:spFlags (di-fields spn)) "DISPFlagDefinition"))
-                       (verr :di/function "function declaration may only have a unique !dbg attachment")))))
+                       (verr :di/function "function declaration may only have a unique !dbg attachment" :fn [:mdv sp])))))
                 (when (and sp (= (first f) 'llvm/define))
-                  (doseq [[_ _ & items] (:body o) x items]
+                  (doseq [[_ l & items] (:body o) x items]
                     (let [b (body x)]
                       (if (dbg-record? b)
                         nil
                         (let [loc (get (apply hash-map (:md (nth (split-inst b) 2))) '!dbg)]
                           (when (and loc (not= (di-loc-sp loc) sp))
-                            (visiting (binding [*ctx* {:fn f :inst x}]
-                                        (verr :di/function "!dbg attachment points at wrong subprogram for function"))))))))
-                  (doseq [[_ _ & items] (:body o) x items :let [b (body x)] :when (dbg-record? b)]
+                            (visiting (binding [*ctx* {:fn f :bb l :inst x}]
+                                        (verr :di/function "!dbg attachment points at wrong subprogram for function"
+                                              [:mdv sp] :fn :inst [:mdv loc] [:mdv (:scope (di-fields (node-of loc)))] [:mdv (di-loc-sp loc)]))))))))
+                  (doseq [[_ l & items] (:body o) x items :let [b (body x)] :when (dbg-record? b)]
                     (case (first b)
                       (dbg_declare dbg_value dbg_declare_value)
                       (let [[_ _ var expr loc] b vn (node-of var) en (node-of expr) ln (node-of loc)]
-                       (visiting (binding [*ctx* {:fn f :inst x}]
-                        (when-not (= "DILocalVariable" (di-kind vn)) (verr :di/record "invalid #dbg record variable"))
-                        (when-not (= "DIExpression" (di-kind en)) (verr :di/record "invalid #dbg record expression"))
+                       (visiting (binding [*ctx* {:fn f :bb l :inst x}]
+                        (when-not (= "DILocalVariable" (di-kind vn)) (verr :di/record "invalid #dbg record variable" :inst [:mdv var] :bb :fn))
+                        (when-not (= "DIExpression" (di-kind en)) (verr :di/record "invalid #dbg record expression" :inst [:mdv expr] :bb :fn))
                         (when (and (= "DILocation" (di-kind ln)) (not= (di-sp (:scope (di-fields vn))) (di-sp (:scope (di-fields ln)))))
-                          (verr :di/record "mismatched subprogram between #dbg record variable and DILocation"))
+                          (verr :di/record "mismatched subprogram between #dbg record variable and DILocation"
+                                :inst :bb :fn [:mdv var] [:mdv (di-sp (:scope (di-fields vn)))] [:mdv loc] [:mdv (di-sp (:scope (di-fields ln)))] :bb :fn))
                         (when (and (= "DILocation" (di-kind ln)) (not= (di-loc-sp loc) sp))
-                          (verr :di/function "!dbg attachment points at wrong subprogram for function")))))
+                          (verr :di/function "!dbg attachment points at wrong subprogram for function"
+                                [:mdv sp] :fn :inst [:mdv loc] [:mdv (:scope (di-fields ln))] [:mdv (di-loc-sp loc)])))))
                       nil))))))
           (doseq [f forms :when (= (first f) 'llvm/global)]
             (let [o (apply hash-map (let [[_ _ _ & more] f] (if (and (seq more) (not (keyword? (first more)))) (rest more) more)))
@@ -1593,12 +1608,12 @@
     (check-function-header h (norm-type rt) ps o k (:body o))
     (when (str/starts-with? k "llvm.")
       (when (= h 'llvm/define) (verr :verifier/intrinsic-defined "llvm intrinsics cannot be defined!"))
-      (check-intrinsic-signature k (:fty (.get *gdefs* k)))
       ;; hasAddressTaken ignores the assume-like intrinsics' calls
       (when-not (re-find #"^llvm\.(assume|sideeffect|pseudoprobe|dbg\.|invariant\.|lifetime\.|experimental\.noalias\.scope\.decl|objectsize|ptr\.annotation|var\.annotation)" k)
         (doseq [[u ux] (get users k)]
           (when-not (or (= u (:fty (.get *gdefs* k))) (old-form-decl? k (:fty (.get *gdefs* k))))
-            (verr :verifier/intrinsic-user "Invalid user of intrinsic instruction!" [:inst ux])))))
+            (verr :verifier/intrinsic-user "Invalid user of intrinsic instruction!" [:inst ux]))))
+      (check-intrinsic-signature k (:fty (.get *gdefs* k))))
     (when (and (:comdat o) (= h 'llvm/declare)) (verr :verifier/comdat-declaration "Declaration may not be in a Comdat!"))
     (check-function-md (apply hash-map (:md o)))))
     (when (= h 'llvm/define)
@@ -1619,7 +1634,7 @@
             g (cfg blocks)
             defs (java.util.HashMap.)  ; local key -> [block index item index body]
             _ (doseq [[bi [_ _ & items]] (map-indexed vector blocks) [ii x] (map-indexed vector items)]
-                (when-let [r (result x)] (.put defs (local-key r) [bi ii (body x)])))
+                (when-let [r (result x)] (.put defs (local-key r) [bi ii (body x) x])))
             lp-type (volatile! nil)]
         (visiting (binding [*ctx* {:fn f :bb (second (first blocks))}]
                     (when (seq (nth (:preds g) 0)) (verr :verifier/entry-predecessors "Entry block to function must not have predecessors!"))))
@@ -1632,19 +1647,24 @@
             (when (and (seq insts) (= 'phi (first (body (first insts)))))
               (let [preds (vec (sort (nth (:preds g) bi)))]
                 (doseq [x insts :while (= 'phi (first (body x)))]
-                  (let [ins (vec (rest (strip-flags (second (split-inst (body x))))))
-                        vals (vec (sort-by (fn [[v l]] [(get (:idx g) (local-key l) -1) (pr-str v)])
+                 (binding [*ctx* {:fn f :bb l :inst x}]
+                  (let [pty (norm-type (first (strip-flags (second (split-inst (body x))))))
+                        ins (vec (rest (strip-flags (second (split-inst (body x))))))
+                        vals (vec (sort-by (fn [[v l]] (get (:idx g) (local-key l) -1))
                                            (map (fn [[v l]] [v l]) ins)))]
                     (when-not (= (count ins) (count preds))
                       (verr :verifier/phi-predecessors "PHINode should have one entry for each predecessor of its parent basic block!"))
                     (doseq [i (range 1 (count vals))]
                       (let [[v l] (nth vals i)]
                         (when (and (= (local-key l) (local-key (second (nth vals (dec i))))) (not= v (first (nth vals (dec i)))))
-                          (verr :verifier/phi-duplicate "PHI node has multiple entries for the same basic block with different incoming values!"))))
+                          (verr :verifier/phi-duplicate "PHI node has multiple entries for the same basic block with different incoming values!"
+                                :inst (label-text (second (nth blocks (get (:idx g) (local-key l)))))
+                                (pr/typed-str [pty v]) (pr/typed-str [pty (first (nth vals (dec i)))])))))
                     (doseq [i (range (count vals))]
                       (let [[v l] (nth vals i)]
                         (when-not (= (get (:idx g) (local-key l)) (nth preds i))
-                          (verr :verifier/phi-entries "PHI node entries do not match predecessors!"))))))))))
+                          (verr :verifier/phi-entries "PHI node entries do not match predecessors!"
+                                :inst (label-text (second (nth blocks (get (:idx g) (local-key l) 0)))) (label-text (second (nth blocks (nth preds i)))))))))))))))
             (loop [ii 0 seen-non-phi false]
               (when (< ii (count items))
                 (let [x (nth items ii) b (body x) hd (first b)]
@@ -1708,7 +1728,7 @@
                               (verr :verifier/self-reference "Only PHI nodes may reference their own value!"))))
                         (doseq [[v t blk] us]
                           (when (and (local? v) (not= t 'label))
-                            (when-let [[dbi dii db] (.get defs (local-key v))]
+                            (when-let [[dbi dii db dx] (.get defs (local-key v))]
                               (let [use-b (if blk (get (:idx g) (local-key blk) bi) bi)
                                     dh (first db)
                                     ok (cond
@@ -1720,7 +1740,7 @@
                                          (not= dbi use-b) (block-dominates? g dbi use-b)
                                          (= hd 'phi) true
                                          :else (< (long dii) ii))]
-                                (when-not ok (verr :verifier/dominance "Instruction does not dominate all uses!")))))))
+                                (when-not ok (verr :verifier/dominance "Instruction does not dominate all uses!" [:inst dx] :inst)))))))
                       (let [[_ _ io] (split-inst b)] (check-inst-metadata (apply hash-map (:md io)) hd (result-type b) b))
                       (when (= hd 'invoke)
                         (let [[_ _ io] (split-inst b) u (get (:idx g) (local-key (:unwind io)))]
@@ -1803,10 +1823,16 @@
     (string? c) c
     (= c :inst) (let [x (:inst ctx) b (body x)] (if (dbg-record? b) (pr/item-inst-str x) (str "  " (pr/item-inst-str x))))
     (= c :fn) (fn-operand (:fn ctx))
-    (= c :decl) (pr/fn-head-str (:fn ctx))
+    (= c :decl) (let [f (:fn ctx) o (apply hash-map (drop 4 f)) as (group-items (:attrs o))]
+                  (str (when (seq as) (str "; Function Attrs: " (str/join " " (map pr/attr-str as)) "\n")) (pr/fn-head-str f)))
     (= c :bb) (label-text (:bb ctx))
     (= c :global) (fn-operand (:global ctx))
     (and (vector? c) (= (first c) :md)) (if-let [f (get metaforms (second c))] (pr/top-str f) (str (second c)))
+    (and (vector? c) (= (first c) :mdv)) (let [v (second c)]
+                                           (cond (nil? v) "null"
+                                                 (and (symbol? v) (get metaforms v)) (pr/top-str (get metaforms v))
+                                                 (vector? v) (pr/typed-str v)
+                                                 :else (pr/md-str v)))
     (and (vector? c) (= (first c) :inst)) (let [x (second c) b (body x)] (if (dbg-record? b) (pr/item-inst-str x) (str "  " (pr/item-inst-str x))))
     (and (vector? c) (= (first c) :fn)) (fn-operand (second c))
     (and (vector? c) (= (first c) :bb)) (label-text (second c))
@@ -1817,10 +1843,10 @@
 
 (defn- error-text
   "The text opt prints for a Verifier error: its message and the values it names, a line each."
-  ^String [e metaforms]
+  ^String [e metaforms slots]
   (let [d (ex-data e) ctx (:ctx d)
         cs (if (seq (:culprits d)) (:culprits d) (default-culprits ctx))]
-    (apply str (.getMessage ^Throwable e) "\n" (map #(str (culprit-text % ctx metaforms) "\n") cs))))
+    (apply str (.getMessage ^Throwable e) "\n" (map #(str (diag/renumber (culprit-text % ctx metaforms) slots) "\n") cs))))
 
 (defn- parse-offset
   "The offset in the text of a parser error: its item and hint."
@@ -1842,6 +1868,7 @@
   [forms ^String src spans ^String file]
   (let [[pe es] (run-phases forms)
         metaforms (into {} (keep #(when (= (first %) 'llvm/meta) [(second %) %]) forms))
+        slots (when (or pe (seq es)) (try (diag/md-slots forms) (catch Throwable _ {})))
         rule-of #(:llvm/verify (ex-data %))
         di? #(= "di" (namespace (rule-of %)))
         broken (vec (remove di? es))
@@ -1856,11 +1883,16 @@
       :else
       (let [ver (first (filter #(= :di/version (rule-of %)) dis))
             dis (remove #(= :di/version (rule-of %)) dis)
-            body-text (str (apply str (map #(error-text % metaforms) broken))
-                           (when-not ver (apply str (map #(error-text % metaforms) dis))))
+            body-text (str (when ver (str "warning: " (.getMessage ^Throwable ver) " in " file "\n"))
+                           (apply str (map #(error-text % metaforms slots) broken))
+                           (when-not ver (apply str (map #(error-text % metaforms slots) dis))))
             tail (cond
-                   (seq broken) (str (prog) ": " file ": error: input module is broken!\n")
-                   ver (str "warning: " (.getMessage ^Throwable ver) " in " file "\n")
+                   (seq broken) (if (some (fn [f] (and (= (first f) 'llvm/named-meta) (= (second f) '!llvm.dbg.cu))) forms)
+                                  (str "LLVM ERROR: Broken module found, compilation aborted!\n"
+                                       "PLEASE submit a bug report to https://github.com/llvm/llvm-project/issues/ and include the crash backtrace and instructions to reproduce the bug.\n"
+                                       "Stack dump:\n0.\tProgram arguments: " (prog) " -passes=verify -disable-output " file "\n")
+                                  (str (prog) ": " file ": error: input module is broken!\n"))
+                   ver ""
                    :else (str "warning: ignoring invalid debug info in " file "\n"))]
         [(if (seq broken) "invalid" "debug") (.getMessage ^Throwable first-e) (str (rule-of first-e)) (str body-text tail)]))))
 
