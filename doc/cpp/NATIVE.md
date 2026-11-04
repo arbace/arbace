@@ -393,8 +393,8 @@ classes of its read differences: it fails when a difference is of a class not li
 1 known, as before, `builtin-signature`'s pr45679-1_1.C):
 
 - a non-static member named unqualified in a function's body (a default member initializer's too) is clang's `MemberExpr` through an
-  implicit `this` (`CXXThisExpr`, `:implicit`), not a `DeclRefExpr` (121 `CXXThisExpr` missing in the lists, 6 left: members of
-  overloaded or dependent members in odd places); marked on the `DeclRefExpr` while parsing, so the parser's own uses of it are
+  implicit `this` (`CXXThisExpr`, `:implicit`), not a `DeclRefExpr` (121 `CXXThisExpr` missing in the lists before, 2 after; the sample's
+  member-access class 46 to 29: members of overloaded or dependent members in odd places); marked on the `DeclRefExpr` while parsing, so the parser's own uses of it are
   unchanged, and rewritten after the unit (`this-members`);
 - a member of a type-dependent object that no class of the current instantiation has is a `CXXDependentScopeMemberExpr` (`:member`),
   not a `MemberExpr` (36 of the kind differences, 18 left: conversion-function names `b.operator typename A<T>::type()` and a
@@ -412,24 +412,24 @@ classes of its read differences: it fails when a difference is of a class not li
   equal, no decline (its `native-decline` entry left `test/repr/cpp/native-known.edn`; the 977-file sample has no declined construct now).
 
 **The classes** (what the parser does not compute and the converter does not need: each is a Sema fact, the same kind as §4's). The six
-light lists together (382 files, 293 `same`, 88 `differ`, 1 `skipped`; 417 differences read, 51,000 or so ignored) and the 977-file sample
-(736 `same`, 240 `differ`, 1 `skipped`; 788 read, 132,000 ignored; 239 of the 240 differ at the tree level with the forms the same):
+light lists together (382 files, 295 `same`, 86 `differ`, 1 `skipped`; 410 differences read, 37,000 ignored) and the 977-file sample
+(744 `same`, 232 `differ`, 1 `skipped`; 770 read, 132,000 ignored; 231 of the 232 differ at the tree level with the forms the same):
 
 | class | the fact | the lists | the sample |
 |---|---|---|---|
 | `implicit-construction` | a `CXXConstructExpr`, `CXXTemporaryObjectExpr` or default argument clang adds (copy and move constructions, a class's temporary, `ParenListExpr` for a mem-initializer), a cast clang reads as a construction | 41 / 15 files | 175 / 68 |
 | `operator-call` | `CXXOperatorCallExpr` for an overloaded operator on class operands (overload resolution; the native tree has the operator's own node) | 39 / 23 | 130 / 81 |
 | `template-instances` | the `TemplateArgument` nodes of a partial specialization (`type-parameter-0-0`'s canonical spelling) and a function template's instances | 51 / 27 | 91 / 43 |
-| `conversion-function` | an implicit call of a conversion function (`while (S{})` through `operator bool`: `CXXMemberCallExpr` over a `MemberExpr` of the conversion) | 95 / 16 | 72 / 27 |
+| `conversion-function` | an implicit call of a conversion function (`while (S{})` through `operator bool`: `CXXMemberCallExpr` over a `MemberExpr` of the conversion) | 95 / 16 | 73 / 27 |
 | `init-list-form` | an initializer list's semantic form beyond §8's (`std::vector<int> v = {1, 2}`'s `CXXStdInitializerListExpr`, an array's `array_filler`, an elided nested aggregate) | 88 / 17 | 64 / 31 |
 | `dependent-member` | the unresolved forms of dependent names beyond the member access (a conversion-function name, a template `operator()`) | 30 / 5 | 59 / 12 |
 | `range-for` | the hidden declarations and expressions of a range-based `for` (`__range1`, `__begin1`, `__end1`, the condition and the increment) | 39 / 7 | 55 / 11 |
-| `member-access` | implicit-this accesses of overloaded or dependent members, a destructor's pseudo-destructor call | 8 / 6 | 46 / 27 |
+| `member-access` | implicit-this accesses of overloaded or dependent members, a destructor's pseudo-destructor call | 8 / 6 | 29 / 18 |
 | `abbreviated-template` | the invented template parameters of `void f(auto p)` (`FunctionTemplateDecl`, `TemplateTypeParmDecl`) | 16 / 8 | 13 / 5 |
-| `unresolved-lookup`, `attributes`, `gnu-vector`, `friend-template`, `coroutine`, `builtin-signature`, `pragma-range` | `UnresolvedLookupExpr`'s name; clang's attribute nodes (`UnusedAttr`...) for the parser's `NativeAttr`; `__vector_size__` in a type; a friend member template; `CoroutineBodyStmt`; §8's `_Nonnull`; a `#pragma omp` before a declaration | 3 files | 29, 21, 6, 3, 1 |
+| `unresolved-lookup`, `attributes`, `gnu-vector`, `friend-template`, `coroutine`, `builtin-signature`, `pragma-range` | `UnresolvedLookupExpr`'s name; clang's attribute nodes (`UnusedAttr`...) for the parser's `NativeAttr`; `__vector_size__` in a type; a friend member template; `CoroutineBodyStmt`; §8's `_Nonnull`; a `#pragma omp` before a declaration | 2 files (coroutine, builtin-signature) | 29, 21, 6, 3, 1 (unclassed: 21 in 12 files) |
 
-**The ignored differences** (132,073 in the sample; the same shapes in the lists), what the native tree deliberately does not carry because
-the converter does not read it: clang's expression types and value categories (about 10% each: every `DeclRefExpr`, `MemberExpr`,
+**The ignored differences** (132,248 in the sample; the same shapes in the lists), what the native tree deliberately does not carry because
+the converter does not read it: clang's expression types and value categories (over a third of them together: every `DeclRefExpr`, `MemberExpr`,
 `BinaryOperator`, call and literal's `:type` and `:valueCategory`), `isUsed`, `isReferenced`, `mangledName`, `isHidden`,
 `previousDecl`, `parentDeclContextId`, declaration links (`referencedDecl`'s kind and type, `referencedMemberDecl`,
 `foundReferencedDecl`), `definitionData`, `depth` and `index` of template parameters, `castKind`, `nonOdrUseReason`, `canOverflow`;
@@ -445,11 +445,11 @@ position, and `\n` as `\012` in a string from a macro: the converter reads the e
 |---|---|---|---|---|---|---|
 | samples | 9: 4 / 5 | 1,158 / 622 | 611 (225) | 430 / 11 | 14 / 1,197 | 5 |
 | native | 1: 0 / 1 | 929 / 547 | 524 (162) | 303 / 23 | 14 / 1,184 | 1 |
-| gxx-a | 62: 43 / 19 | 3,323 / 2,010 | 1,971 (722) | 1,050 / 39 | 67 / 3,813 | 19 |
-| gxx-26 | 38: 18 / 20 | 8,909 / 6,035 | 5,836 (2,135) | 1,929 / 199 | 167 / 11,136 | 20 |
-| gxx-b | 163: 127 / 35, 1 skipped | 10,975 / 7,059 | 6,988 (2,156) | 2,660 / 71 | 139 / 16,236 | 34 |
+| gxx-a | 62: 45 / 17 | 3,323 / 2,013 | 1,974 (722) | 1,047 / 39 | 64 / 3,807 | 17 |
+| gxx-26 | 38: 18 / 20 | 8,909 / 6,037 | 5,838 (2,135) | 1,927 / 199 | 165 / 11,132 | 20 |
+| gxx-b | 163: 127 / 35, 1 skipped | 10,975 / 7,059 | 6,988 (2,157) | 2,660 / 71 | 137 / 16,236 | 34 |
 | gxx-mod | 109: 101 / 8 | 2,161 / 1,555 | 1,551 (330) | 467 / 4 | 16 / 3,488 | 8 |
-| the 977-file sample | 977: 736 / 240, 1 skipped | 75,930 / 46,654 | 46,198 (12,258) | 20,764 / 456 | 788 / 132,073 | 239 |
+| the 977-file sample | 977: 744 / 232, 1 skipped | 75,930 / 46,676 | 46,220 (12,259) | 20,737 / 456 | 770 / 132,248 | 231 |
 
 Every list passes the judgment (the files' classes are in the known file). Forms level, unchanged by the fixes: samples 9 of 9, native 1 of
 1, gxx-a 62 of 62, gxx-26 38 of 38, gxx-mod 109 of 109, gxx-b 162 of 163 (1 known), the 977-file sample 976 of 977 (1 known), 0 declines.
