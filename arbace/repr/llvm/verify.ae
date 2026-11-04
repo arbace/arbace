@@ -13,6 +13,13 @@
      and personalities, unwind destinations, intrinsics' signatures at their declarations and calls, metadata
      attachments' placement and types, declarations in comdats.
 
+  3. Debug info (`phase-debug`), when both pass: opt takes a module whose debug info is broken, prints the message, warns
+     and strips it, so these rules have the verdict `debug` (`verify-file`), not `invalid`.
+
+  The Verifier's rules of LL4b (attributes and their placement, calling conventions, call sites and operand bundles,
+  `musttail`, the intrinsic table of `arbace.repr.llvm.intr`, funclets, metadata structure) are in the sections of their
+  names below; doc/cpp/LLVM.md §6.2.1 lists them.
+
   Messages are LLVM's words, the first line of what opt prints (without the file and the position); every check has a
   rule name (`rules`, the ported list). The forms are the reader's (arbace.repr.llvm.read): a module that does not read
   is the reader's error, not this namespace's."
@@ -878,6 +885,13 @@
     (and (re-find #"^llvm\.masked\.store\." nm) (= n 4)) (into (subvec ps 0 2) (into ['i32] (subvec ps 2)))
     :else ps))
 
+(defn- old-form-decl?
+  "Whether the intrinsic `nm` is declared with one of AutoUpgrade's old signatures (its calls are upgraded with it)."
+  [^String nm fty]
+  (when-let [[_ ps] (intrinsic-entry nm)]
+    (let [n (count (remove #{'&} (nth fty 2)))]
+      (not= ps (old-form-pattern nm ps n)))))
+
 (defn- check-intrinsic-signature
   "The Verifier's matchIntrinsicSignature over the declared type `fty` of the intrinsic `nm` (a table entry): the argument
   count, then the return type and each argument against their descriptors, the ones that name an overload not yet seen
@@ -1067,18 +1081,19 @@
                           (subvec ptypes 0 (min nparams (count ptypes))) fattrs direct-intr? (and (seq? c) (= (first c) 'asm)) true)
     (when (has-attr? fattrs "speculatable") (verr :verifier/attr-misc "speculatable attribute may not apply to call sites"))
     (let [d (when (global? c) (.get *gdefs* (global-key c)))
-          dps (when (and d (= (:kind d) :function)) (vec (remove #{'&} (nth (:form d) 3))))]
-      (doseq [[i a] (map-indexed vector args) :when (< i nparams)]
-        (when (and dps (< i (count dps)) (vector? (nth dps i)) (has-attr? (nth pattrs i) "immarg")
-                   (not (has-attr? (group-items (param-attrs (nth dps i))) "immarg")))
-          (verr :verifier/attr-misc "immarg may not apply only to call sites"))
-        (when (or (has-attr? (nth pattrs i) "immarg") (and dps (< i (count dps)) (vector? (nth dps i)) (has-attr? (group-items (param-attrs (nth dps i))) "immarg")))
-          (let [x (peek a)]
-            (when-not (or (integer? x) (boolean? x) (and (seq? x) (#{'fp 'int} (first x))))
-              (verr :verifier/attr-misc "immarg operand has non-immediate parameter"))))))
-    (when (has-attr? fattrs "preallocated") (verr :verifier/attr-misc "preallocated as a call site attribute can only be on llvm.call.preallocated.arg"))
+          dps (when (and d (= (:kind d) :function)) (vec (remove #{'&} (nth (:form d) 3))))
+          intr-pos (when (and (global? c) (intr/recognized? (global-key c))) (get intr/immargs (intr/base-name (global-key c)) #{}))]
+      (doseq [[i a] (map-indexed vector args)]
+        (let [call-imm? (has-attr? (nth pattrs i) "immarg")
+              callee-imm? (if intr-pos (contains? intr-pos i)
+                              (boolean (and dps (< i (count dps)) (vector? (nth dps i)) (has-attr? (group-items (param-attrs (nth dps i))) "immarg"))))]
+          (when (and call-imm? (not callee-imm?)) (verr :verifier/attr-misc "immarg may not apply only to call sites"))
+          (when (or call-imm? callee-imm?)
+            (let [x (peek a)]
+              (when-not (or (integer? x) (boolean? x) (and (seq? x) (#{'fp 'int} (first x))))
+                (verr :verifier/attr-misc "immarg operand has non-immediate parameter")))))))
     (doseq [[i a] (map-indexed vector pattrs) :when (>= i nparams)]
-      (when (has-attr? a "sret") (verr :verifier/attr-misc "Attribute 'sret' cannot be used for vararg call arguments!")))
+      (check-param-attrs a (nth ptypes i)))
     (when (some #(has-attr? % "preallocated") pattrs)
       (let [bundle? (boolean (some #(= (first %) "preallocated") (:bundles o))) mt? (= (:tail o) :musttail)]
         (when (= bundle? mt?)
@@ -1549,7 +1564,8 @@
       ;; hasAddressTaken ignores the assume-like intrinsics' calls
       (when-not (re-find #"^llvm\.(assume|sideeffect|pseudoprobe|dbg\.|invariant\.|lifetime\.|experimental\.noalias\.scope\.decl|objectsize|ptr\.annotation|var\.annotation)" k)
         (doseq [u (get users k)]
-          (when-not (= u (:fty (.get *gdefs* k))) (verr :verifier/intrinsic-user "Invalid user of intrinsic instruction!")))))
+          (when-not (or (= u (:fty (.get *gdefs* k))) (old-form-decl? k (:fty (.get *gdefs* k))))
+            (verr :verifier/intrinsic-user "Invalid user of intrinsic instruction!")))))
     (when (and (:comdat o) (= h 'llvm/declare)) (verr :verifier/comdat-declaration "Declaration may not be in a Comdat!"))
     (check-function-md (apply hash-map (:md o)))
     (when (= h 'llvm/define)
@@ -1622,7 +1638,8 @@
                       (when-let [c (callee-of b)]
                         (when (and (global? c) (str/starts-with? (global-key c) "llvm."))
                           (let [d (.get *gdefs* (global-key c)) [_ ps] (split-inst b)]
-                            (when (and d (= (:kind d) :function) (not= (:fty d) (call-fty (first ps) (nth ps 2))))
+                            (when (and d (= (:kind d) :function) (not= (:fty d) (call-fty (first ps) (nth ps 2)))
+                                       (not (old-form-decl? (global-key c) (:fty d))))
                               (verr :verifier/intrinsic-call "Intrinsic called with incompatible signature"))
                             (when (re-find #"^llvm\.ptrmask\." (global-key c))
                               (let [[a m] (map #(norm-type (first %)) (nth ps 2))]
@@ -1706,19 +1723,24 @@
         (if-let [r (:llvm/verify (ex-data e))] {:rule r :message (.getMessage e)} (throw e))))))
 
 (def rules
-  "The ported rules, by phase."
+  "The ported rules, by phase. The `:di` rules are debug info's: opt takes the module (the verdict `debug`)."
   {:parser [:parser/value-type :parser/not-a-block :parser/forward-type :parser/numbering :parser/redefinition :parser/undefined-value
             :parser/undefined-global :parser/undefined-metadata :parser/global-type :parser/int-constant :parser/fp-constant
             :parser/constant-type :parser/null :parser/void-name :parser/terminator :parser/operand-type :parser/icmp :parser/fcmp
             :parser/cast :parser/load :parser/store :parser/atomic-align :parser/gep :parser/phi :parser/select :parser/call-argument
             :parser/call-arguments :parser/ret :parser/br :parser/switch :parser/extractvalue :parser/insertvalue :parser/vector
             :parser/atomicrmw :parser/cmpxchg :parser/align :parser/linkage :parser/visibility :parser/dll :parser/dbg-record
-            :parser/syntax :parser/local-outside]
+            :parser/syntax :parser/local-outside
+            :parser/attr-placement :parser/attr-value :parser/sret-return :parser/arg-type :parser/musttail :parser/di-field]
    :verifier [:verifier/entry-predecessors :verifier/phi-predecessors :verifier/phi-duplicate :verifier/phi-entries
               :verifier/phi-grouped :verifier/terminator-middle :verifier/self-reference :verifier/dominance :verifier/landingpad
               :verifier/eh-pad-entry :verifier/unwind-dest :verifier/intrinsic-call :verifier/lifetime :verifier/intrinsic-user
               :verifier/intrinsic-signature :verifier/intrinsic-defined :verifier/md-range :verifier/md-nonnull :verifier/md-align
-              :verifier/md-dereferenceable :verifier/comdat-declaration]})
+              :verifier/md-dereferenceable :verifier/comdat-declaration
+              :verifier/attr-type :verifier/attr-pair :verifier/attr-value :verifier/attr-misc :verifier/attr-placement
+              :verifier/cc :verifier/naked-argument :verifier/function-type :verifier/musttail :verifier/bundle :verifier/funclet
+              :verifier/md-misc :verifier/md-prof :verifier/md-flags]
+   :di [:di/node :di/function :di/record :di/global :di/version]})
 
 (defn- forms-of-file [^String path]
   (let [s (String. (java.nio.file.Files/readAllBytes (.toPath (java.io.File. path))) "ISO-8859-1")]
