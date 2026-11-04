@@ -619,7 +619,12 @@ covers what.
   `GHC/Types/Error/Codes.hs`, the printing of `GHC/Types/Error.hs`, `GHC/Utils/Error.hs`,
   `GHC/Driver/Errors.hs`, `GHC/Utils/Logger.hs` and the Outputable instances of
   `GHC/Hs/{Expr,Pat,Type,Lit,Binds,Decls}.hs` and `GHC/Parser/Types.hs`, by hand on 2026-11-04, each file
-  carrying GHC's notice (the Glasgow license, below).
+  carrying GHC's notice (the Glasgow license, below). `arbace/repr/haskell/driver.ae` (the driver's header
+  phase, 2026-11-05) ports `GHC/Parser/Header.hs` (getOptions', toArgs, checkExtension,
+  checkProcessArgsResult), `GHC/Driver/CmdLine.hs` (processArgs), `GHC/Driver/Session.hs` and
+  `GHC/Driver/Pipeline/Execute.hs` (getFileArgs) with GHC's notice; `arbace/repr/haskell/flags.ae` is generated
+  by the helper's `flags` verb from the names of `flagsDynamic` and `supportedLanguagePragmas` of the same
+  tarball's GHC (the Glasgow license).
 - `decodeUTF16` and `encodeUTF16` in `go/arbace/jrt/codec.ae`, and `indent`, `stripIndent` and
   `translateEscapes` in `go/arbace/jrt/string.ae`: jrt's hand-written Go forms following the code
   of https://github.com/openjdk/jdk26u at `baf63fb`

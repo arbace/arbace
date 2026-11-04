@@ -463,12 +463,20 @@
       (L (getLoc ltc) (set-rdr-name-space tc 'data))
       (pp/fatal! (lx/msg :PsErrNotADataCon (getLoc ltc) tc)))))
 
+(defn- check-not-promoted-data-con
+  "checkNotPromotedDataCon: a data/newtype constructor is not written 'MkT"
+  [prom ldc]
+  (when (= 'IsPromoted prom)
+    (pp/add-error! (lx/msg :PsErrIllegalPromotionQuoteDataCon (getLoc ldc) (unLoc ldc)))))
+
 (defn ty-to-data-con-builder
   "tyToDataConBuilder: the head of a constructor declaration: a type constructor, or a tuple's"
   [t]
   (let [l (getLoc t) n (unLoc t)]
     (case (first n)
-      HsTyVar (L l (list 'PrefixDataConBuilder [] (ty-con-to-data-con (nth n 3))))
+      HsTyVar (let [dc (ty-con-to-data-con (nth n 3))]
+                (check-not-promoted-data-con (nth n 2) dc)
+                (L l (list 'PrefixDataConBuilder [] dc)))
       HsTupleTy (case (nth n 2)
                   HsBoxedOrConstraintTuple
                   (L l (list 'PrefixDataConBuilder (vec (nth n 3)) (L l (a/exact 'data (tuple-datacon-occ true (count (nth n 3)))))))
@@ -501,7 +509,16 @@
 (defn mk-hs-op-ty-pv "mkHsOpTyPV" [mode prom lhs op rhs]
   (case mode
     :ty (mk-lhs-op-ty prom lhs op rhs)
-    :dcb (L (combine (getLoc lhs) (getLoc rhs)) (list 'InfixDataConBuilder lhs (ty-con-to-data-con op) rhs))))
+    :dcb (let [l (combine (getLoc lhs) (getLoc rhs))
+               no-ops (fn no-ops [t]
+                        (let [n (unLoc t)]
+                          (cond (bang-ty? n) (no-ops (nth (second n) 3))
+                                (= 'HsOpTy (first n)) (pp/add-error! (lx/msg :PsErrInvalidInfixDataCon l (unLoc lhs) (unLoc op) n))
+                                :else nil)))
+               _ (no-ops rhs)
+               dc (ty-con-to-data-con op)]
+           (check-not-promoted-data-con prom dc)
+           (L l (list 'InfixDataConBuilder lhs dc rhs)))))
 
 (defn mk-unpackedness-pv "mkUnpackednessPV" [mode unpk b]
   (case mode
@@ -510,7 +527,8 @@
            (if (= 'InfixDataConBuilder (first d))
              (L (combine (getLoc unpk) (getLoc b))
                 (list 'InfixDataConBuilder (add-unpackedness-p unpk (nth d 1)) (nth d 2) (nth d 3)))
-             b))))
+             (do (pp/add-error! (lx/msg :PsErrUnpackDataCon (getLoc unpk)))
+                 b)))))
 
 (defn data-con-builder-con "dataConBuilderCon" [b] (nth (unLoc b) 2))
 
@@ -548,7 +566,8 @@
         (case (first n)
           HsParTy (let [inner (nth n 2) ni (unLoc inner)]
                     (if (= 'HsStarTy (first ni))
-                      [(L (combine (getLoc inner) l) (a/unqual 'tc (if (nth ni 2) "★" "*"))) (vec acc) fix np]
+                      (do (lx/add-warning! pp/*ps* (lx/msg :PsWarnStarBinder (getLoc inner)))
+                      [(L (combine (getLoc inner) l) (a/unqual 'tc (if (nth ni 2) "★" "*"))) (vec acc) fix np])
                       (recur inner acc (inc np) fix)))
           HsTyVar (let [ltc (nth n 3)]
                     (if (rdr-tc? (unLoc ltc)) [ltc (vec acc) fix np] (malformed l)))
@@ -696,6 +715,10 @@
   "cvBindsAndSigs: a binding group's declarations (splices dropped) as [binds sigs families
   type-family-instances data-family-instances docs]"
   [decls]
+  ;; drop_bad_decls: a declaration splice is not allowed here
+  (doseq [d decls]
+    (when (= 'SpliceD (first (unLoc d)))
+      (pp/add-error! (lx/msg :PsErrDeclSpliceNotAtTopLevel (getLoc d) (nth (unLoc d) 2)))))
   (partition-binds-and-sigs (get-mono-bind-all (remove #(= 'SpliceD (first (unLoc %))) decls))))
 
 (defn cv-bind-group
@@ -757,6 +780,10 @@
   "mkDataDefn: ext a GADT-style declaration's `where` token (nil when none), which the Haddock
   pass reads (dd_ext's AnnDataDefn; the dump has it nil)"
   [ext ctype mcxt ksig cons derivs]
+  ;; checkDatatypeContext
+  (when-let [c (a/from-just mcxt)]
+    (when-not (lx/get-bit pp/*ps* :DatatypeContextsBit)
+      (pp/add-error! (lx/msg :PsErrIllegalDataTypeContext (getLoc c) c))))
   (con HsDataDefn ext mcxt ctype ksig cons (vec derivs)))
 
 (defn mk-ty-data
@@ -876,6 +903,8 @@
         b (unLoc body)
         [args res] (if (and (= 'HsFunTy (first b)) (rec-ty? (unLoc (nth b 3))))
                      (let [rt (nth b 3)]
+                       (when-not (= 'HsUnannotated (first (nth b 2)))
+                         (pp/add-error! (lx/msg :PsErrIllegalGadtRecordMultiplicity (getLoc body) (nth b 2))))
                        [(con RecConGADT nil (L (getLoc rt) (vec (nth (second (unLoc rt)) 2)))) (nth b 4)])
                      (let [[_ _ as r] (split-hs-fun-type body)] [(con PrefixConGADT nx as) r]))
         outer-loc (if (= 'HsOuterImplicit (first outer)) (getLoc ty) (anchor outer))]

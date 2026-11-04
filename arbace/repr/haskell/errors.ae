@@ -107,7 +107,8 @@
    :PsErrIllegalGadtRecordMultiplicity "37475" :PsErrInvalidCApiImport "72744"
    :PsErrMultipleConForNewtype "05380" :PsErrUnicodeCharLooksLike "31623" :PsErrInvalidPun "52943"
    :PsErrIllegalOrPat "29847" :PsErrTypeSyntaxInPat "32181" :PsErrSpecExprMultipleTypeAscription "62037"
-   :PsWarnSpecMultipleTypeAscription "73026" :PsWarnPatternNamespaceSpecifier "68383"})
+   :PsWarnSpecMultipleTypeAscription "73026" :PsWarnPatternNamespaceSpecifier "68383"
+   :DriverUnrecognisedFlag "93741" :DriverDeprecatedFlag "53692"})
 
 ;;; The warnings' flags (diagnosticReason's WarningWithFlag, warnFlagNames' first name)
 (def ^:private warning-flags
@@ -119,7 +120,9 @@
    :PsWarnUnrecognisedPragma "unrecognised-pragmas" :PsWarnMisplacedPragma "misplaced-pragmas"
    :PsWarnImportPreQualified "prepositive-qualified-module"
    :PsWarnViewPatternSignatures "view-pattern-signatures" :PsWarnSpecMultipleTypeAscription "deprecated-pragmas"
-   :PsWarnPatternNamespaceSpecifier "pattern-namespace-specifier"})
+   :PsWarnPatternNamespaceSpecifier "pattern-namespace-specifier"
+   :DriverUnrecognisedFlag "unrecognised-warning-flags"
+   :DriverDeprecatedFlag "deprecated-flags"})
 
 (defn warning? [m] (contains? warning-flags (:con m)))
 (defn warning-flag "A warning's flag" [m] (warning-flags (:con m)))
@@ -442,7 +445,7 @@
                                     (text eq)))])])])
       :PsErrInvalidPackageName [(vcat [(<+> (<> (text "Parse error") d/colon) (quotes (text x)))
                                        (<+> (text "Version number or non-alphanumeric") (text "character in package name"))])]
-      :PsErrIllegalGadtRecordMultiplicity [(vcat [(<+> (<> (text "Parse error") d/colon) (quotes (ph/ppr-arrow x)))
+      :PsErrIllegalGadtRecordMultiplicity [(vcat [(<+> (<> (text "Parse error") d/colon) (quotes (d/parens (ph/ppr-arrow x))))
                                                   (text "Record constructors in GADTs must use an ordinary, non-linear arrow.")])]
       :PsErrInvalidCApiImport [(vcat [(text "Wrapper stubs can't be used with CApiFFI.")])]
       :PsErrMultipleConForNewtype [(vcat [(sep [(text "A newtype must have exactly one constructor,")
@@ -479,6 +482,9 @@
                                        (text "  E.g. {-# OPTIONS_GHC -Wall -O2 #-}")
                                        (text (str "Input was: " (show-string x)))])]
       :PsErrUnknownOptionsPragma [(<+> (text "Unknown flag in  {-# OPTIONS_GHC #-} pragma:") (text x))]
+      ;; the driver's flag warning (DriverUnrecognisedFlag arg)
+      :DriverUnrecognisedFlag [(text (str "unrecognised warning flag: -" x))]
+      :DriverDeprecatedFlag [(text (str x " is deprecated: " y))]
       ;; a message the native reader does not make as GHC does yet
       :Unported [(text (str "<unported: " x ">"))])))
 
@@ -610,20 +616,70 @@
                (text (str " " (apply str (repeat start \space)) (apply str (repeat width \^)) (if multiline "..." "")))]))
     d/empty))
 
-(defn- location [span]
-  (if span (str (nth span 0) ":" (nth span 1) ":" (nth span 2)) "<no location info>"))
+(defn span-text
+  "A span as GHC prints it (pprUserRealSpan): file:line:col, with -ferror-spans file:line:col-col
+  (the end column inclusive; just file:line:col for a span of one column or none), or
+  file:(line,col)-(line,col) over lines; nil: no location"
+  [span error-spans]
+  (if-not span
+    "<no location info>"
+    (let [[f l1 c1 l2 c2] span]
+      (cond
+        (not error-spans) (str f ":" l1 ":" c1)
+        (= l1 l2) (str f ":" l1 ":" c1 (when (> (- c2 c1) 1) (str "-" (dec c2))))
+        :else (str f ":(" l1 "," c1 ")-(" l2 "," (if (zero? c2) c2 (dec c2)) ")")))))
+
+(defn- location [span] (span-text span false))
 
 (defn message-text
-  "One message as GHC's default log action prints it"
-  [m source-line]
+  "One message as GHC's default log action prints it; opts: {:error-spans :show-caret (default
+  true) :ppr-cols (default 100)}; a message with :fatal is an error that was a warning (-Werror)"
+  ([m source-line] (message-text m source-line nil))
+  ([m source-line opts]
+   (let [w (and (warning? m) (not (:fatal m)))
+         header (<+> (<> (text (span-text (:span m) (:error-spans opts))) d/colon)
+                     (<> (text (if w "warning" "error")) d/colon)
+                     (d/brackets (text (str "GHC-" (codes (:con m) "?????"))))
+                     (cond w (d/brackets (text (str "-W" (warning-flags (:con m)))))
+                           (and (warning? m) (:fatal m))
+                           (d/brackets (text (str "-W" (warning-flags (:con m)) ", Werror=" (warning-flags (:con m)))))
+                           :else d/empty))
+         car (if (false? (:show-caret opts)) d/empty (caret (:span m) source-line))
+         doc ($$ ($+$ (hang header 4 (message-with-hints m)) car d/blank-line)
+                 (text ""))]
+     (d/render doc (or (:ppr-cols opts) 100)))))
+
+;;; -fdiagnostics-as-json (GHC.Types.Error's ToJson (MsgEnvelope e), schema 1.1; GHC.Utils.Json)
+
+(defn- json-string [^String s]
+  (let [sb (StringBuilder. "\"")]
+    (doseq [c s]
+      (let [ch (long (int c))]
+        (case ch
+          8 (.append sb "\\b") 12 (.append sb "\\f") 10 (.append sb "\\n") 13 (.append sb "\\r") 9 (.append sb "\\t")
+          34 (.append sb "\\\"") 92 (.append sb "\\\\")
+          (if (or (< ch 32) (>= ch 127))
+            (.append sb (str "\\u" (let [h (Long/toHexString ch)] (str (apply str (repeat (- 4 (count h)) \0)) h))))
+            (.append sb c)))))
+    (.append sb "\"")
+    (.toString sb)))
+
+(defn message-json
+  "One message as -fdiagnostics-as-json prints it: a line of JSON"
+  [m]
   (let [w (warning? m)
-        header (<+> (<> (text (location (:span m))) d/colon)
-                    (<> (text (if w "warning" "error")) d/colon)
-                    (d/brackets (text (str "GHC-" (codes (:con m) "?????"))))
-                    (if w (d/brackets (text (str "-W" (warning-flags (:con m))))) d/empty))
-        doc ($$ ($+$ (hang header 4 (message-with-hints m)) (caret (:span m) source-line) d/blank-line)
-                (text ""))]
-    (d/render doc)))
+        [f l1 c1 l2 c2] (:span m)
+        docs (remove d/is-empty? (message-docs m))
+        sev (if (and w (not (:fatal m))) "Warning" "Error")]
+    (str "{\"version\":\"1.1\",\"ghcVersion\":\"ghc-9.14.1\","
+         (when (:span m)
+           (str "\"span\":{\"file\":" (json-string f) ",\"start\":{\"line\":" l1 ",\"column\":" c1
+                "},\"end\":{\"line\":" l2 ",\"column\":" c2 "}},"))
+         "\"severity\":\"" sev "\",\"code\":" (parse-long (codes (:con m)))
+         ",\"message\":[" (str/join "," (map #(json-string (d/render %)) docs))
+         "],\"hints\":[" (str/join "," (map #(json-string (d/render (ppr-hint %))) (hints m))) "]"
+         (when w (str ",\"reason\":{\"flags\":[" (json-string (warning-flags (:con m))) "]}"))
+         "}")))
 
 (defn- span-key [s]
   (if s [1 (nth s 1) (nth s 2) (nth s 3) (nth s 4)] [0]))
@@ -636,9 +692,15 @@
 
 (defn messages-text
   "The messages as printMessages prints them, sorted, each with its caret lines; source-line a fn
-  of a span's file and line to that line's text (nil: none)"
-  [ms source-line]
-  (apply str (map #(message-text % source-line) (sort-messages ms))))
+  of a span's file and line to that line's text (nil: none); opts as message-text's"
+  ([ms source-line] (messages-text ms source-line nil))
+  ([ms source-line opts]
+   ;; sortMsgBag's limit, -fmax-errors=N (a limit below one prints one)
+   (let [sorted (sort-messages ms)
+         sorted (if-let [n (:max-errors opts)] (take (max 1 (long n)) sorted) sorted)]
+     (if (:json opts)
+       (apply str (map #(str (message-json %) "\n") sorted))
+       (apply str (map #(message-text % source-line opts) sorted))))))
 
 (defn text-lines
   "A source-line fn over texts: files a fn of a file name to its text (nil when unreadable), the

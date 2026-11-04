@@ -84,44 +84,73 @@
          (catch Exception e
            (if-let [m (ps-message e)] [nil m ps] (throw e))))))
 
+(defn render-opts
+  "The message printer's options a flags state gives (-ferror-spans, -fdiagnostics-show-caret,
+  -dppr-cols, -fdiagnostics-as-json)"
+  [d]
+  (select-keys d [:error-spans :show-caret :ppr-cols :json :max-errors]))
+
+(defn- marked
+  "The warnings of ps the flags state d turns on, each marked :fatal when d makes its flag fatal
+  (-Werror: the message is an error)"
+  [d ps]
+  (let [flag (requiring-resolve 'arbace.repr.haskell.errors/warning-flag)]
+    (vec (keep (fn [m] (let [f (flag m)]
+                         (when (hd/warning-on? d f)
+                           (if (contains? (:fatal d) f) (assoc m :fatal true) m))))
+               (lx/warnings ps)))))
+
 (defn read-text
   "Reads a module's text (the text GHC parses) of file under flags (the GHC flags of the helper's
   --ghc): {:tree :pragmas :exts :dflags}, the tree in the dump's form; signature: an .hsig. A
-  module GHC rejects gives {:messages [warnings errors]} instead, the messages ghc -fno-code
-  prints, in its driver's order (doc/haskell/NATIVE.md, \"Messages\"): when the module's parse
-  fails or records errors, the header's parse (getImports' parseHeader) first, its errors alone
-  when it fails; else the module's warnings (when its parse failed) and then its errors"
+  module GHC rejects gives {:messages batches :dflags :opts} instead, the messages ghc -fno-code
+  prints, in its driver's order (doc/haskell/NATIVE.md, \"Messages\"): the header's own errors
+  first (arbace.repr.haskell.driver: a batch is a vector of messages, or the text of a usage
+  error); else the header's warnings, and when the module's parse fails or records errors the
+  header's parse (getImports' parseHeader) first, its errors alone when it fails; else the module's
+  warnings (when its parse failed, those that are not errors under -Werror) and then its errors
+  (and the warnings that -Werror made errors); a parse that succeeds with only such warnings gives
+  them all in one batch"
   [^String text ^String file flags & {:keys [signature]}]
   (let [cs (lx/code-points text)
         d0 (hd/dyn-flags flags)
-        [prags opts] (hd/header-pragmas cs file (hd/parser-bits d0))
-        d (hd/dyn-flags d0 opts)
-        bits (hd/parser-bits d)
-        [lmod fatal ps] (run-parser cs file bits (if signature "parseSignatureNoHaddock" "parseModuleNoHaddock"))
-        errs (lx/errors ps)]
-    (if (or fatal (seq errs))
-      (let [[_ hfatal hps] (run-parser cs file bits "parseHeader")
-            herrs (lx/errors hps)]
-        (if (or hfatal (seq herrs))
-          {:messages [[] (cond-> herrs hfatal (conj hfatal))] :dflags d}
-          {:messages [(if fatal (filterv #(hd/warning-on? d ((requiring-resolve 'arbace.repr.haskell.errors/warning-flag) %))
-                                         (lx/warnings ps))
-                              [])
-                      (cond-> errs fatal (conj fatal))]
-           :dflags d}))
-      (let [lmod (if (:haddock d) (haddock-pass lmod (lx/hdk-comments ps)) lmod)]
-        {:tree (a/to-dump lmod file)
-         :pragmas (mapv (fn [[k line v f]] (if (= f file) (list k line v) (list k line v f))) prags)
-         :exts (hd/extensions d)
-         :dflags d}))))
+        hdr ((requiring-resolve 'arbace.repr.haskell.driver/file-args) cs file d0)]
+    (if (:error hdr)
+      {:messages (:error hdr) :dflags d0 :opts (render-opts d0)}
+      (let [[prags _] (hd/header-pragmas cs file (hd/parser-bits d0))
+            d (:d hdr)
+            bits (hd/parser-bits d)
+            [lmod fatal ps] (run-parser cs file bits (if signature "parseSignatureNoHaddock" "parseModuleNoHaddock"))
+            errs (lx/errors ps)
+            ws (marked d ps)
+            fatal-ws (filterv :fatal ws)
+            opts (render-opts d)
+            pre (fn [] @(:pre hdr))]
+        (cond
+          (or fatal (seq errs))
+          (let [[_ hfatal hps] (run-parser cs file bits "parseHeader")
+                herrs (lx/errors hps)]
+            (if (or hfatal (seq herrs))
+              {:messages (into (pre) [(cond-> herrs hfatal (conj hfatal))]) :dflags d :opts opts}
+              {:messages (into (pre) [(if fatal ws [])
+                                      (cond-> errs fatal (conj fatal))])
+               :dflags d :opts opts}))
+          (seq fatal-ws)
+          {:messages (into (pre) [ws]) :dflags d :opts opts}
+          :else
+          (let [lmod (if (:haddock d) (haddock-pass lmod (lx/hdk-comments ps)) lmod)]
+            {:tree (a/to-dump lmod file)
+             :pragmas (mapv (fn [[k line v f]] (if (= f file) (list k line v) (list k line v f))) prags)
+             :exts (hd/extensions d)
+             :dflags d}))))))
 
 (defn messages-text
   "The text ghc -fno-code prints for a read's messages (\"\" for an accepted module); source-line
   a fn of a file and a line to the line's text (arbace.repr.haskell.errors/text-lines)"
-  [{:keys [messages]} source-line]
+  [{:keys [messages opts]} source-line]
   (if messages
     (let [txt (requiring-resolve 'arbace.repr.haskell.errors/messages-text)]
-      (apply str (map #(txt % source-line) messages)))
+      (apply str (map #(if (string? %) % (txt % source-line opts)) messages)))
     ""))
 
 (defn dump-forms

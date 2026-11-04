@@ -161,6 +161,12 @@
     (unless-bit :QualifiedDoBit
                 (lx/msg :PsErrIllegalQualifiedDo (gl tok)
                         ((requiring-resolve 'arbace.repr.haskell.doc/text) (str (if (string? m) m (a/mod-name m)) "." kw))))))
+(defn require-lt-puns
+  "requireLTPuns: without ListTuplePuns, the construct from the token or node s to e is an error"
+  [kind s e]
+  (when-not (lx/get-bit *ps* :ListTuplePunsBit)
+    (add-error! (lx/msg :PsErrInvalidPun (a/comb2 s e) kind))))
+
 (defn warn-star-is-type "warnStarIsType" [tok] (lx/add-warning! *ps* (lx/msg :PsWarnStarIsType (gl tok))))
 
 (def parse-error "parseError: the placeholder of an expression in error" (con HsHole 'HoleError))
@@ -331,7 +337,16 @@
         (not overloaded)
         (con RecordUpd (a/tuple (just nil) (just nil)) exp (con RegularRecUpdFields nx (mapv mk-rec-upd-field fs)))
         :else
-        (con RecordUpd (a/tuple (just nil) (just nil)) exp
+        (do
+          ;; the fields are not qualified (a fatal error at the first that is)
+          (doseq [[k v] fbinds]
+            (when (= k :left)
+              (let [lhs (nth (nth v 2) 2)
+                    [_ _ focc] lhs
+                    [_ _ rdr] (nth focc 2)]
+                (when (a/rdr-qual? rdr)
+                  (fatal! (lx/msg :PsErrOverloadedRecordUpdateNoQualifiedFields (getLoc lhs)))))))
+          (con RecordUpd (a/tuple (just nil) (just nil)) exp
              (con OverloadedRecUpdFields nx
                   (mapv (fn [[k v]]
                           (if (= k :right)
@@ -345,7 +360,7 @@
                                   fl (con DotFieldOcc nil (L loc (con FieldLabelString f)))
                                   arg' (if pun (L nil (con HsVar nx (L nil (a/unqual 'var f)))) arg)]
                               (mk-rdr-proj-update l (L loc [(L loc fl)]) arg' pun anns))))
-                        fbinds)))))))
+                        fbinds))))))))
 
 (defn- mk-pat-rec "mkPatRec" [ps p fields]
   (let [pb (unLoc p)]
@@ -417,10 +432,20 @@
     :pat (L (getLoc v) (con PatBuilderVar v))
     :cmd (cmd-fail #(ph :ppr-name (unLoc v)) (getLoc v))))
 
+(defn- check-unboxed-lit-pat
+  "checkUnboxedLitPat: a pattern is not a primitive string, Float# or Double# literal"
+  [llit]
+  (let [lit (unLoc llit)]
+    (case (first lit)
+      HsStringPrim (add-error! (lx/msg :PsErrIllegalUnboxedStringInPat (getLoc llit) lit))
+      (HsFloatPrim HsDoublePrim) (add-error! (lx/msg :PsErrIllegalUnboxedFloatingLitInPat (getLoc llit) lit))
+      nil)))
+
 (defn mk-hs-lit-pv "mkHsLitPV" [mode llit]
   (case mode
     :expr (L (getLoc llit) (con HsLit nx (unLoc llit)))
-    :pat (L (getLoc llit) (con PatBuilderPat (con LitPat nx (unLoc llit))))
+    :pat (do (check-unboxed-lit-pat llit)
+             (L (getLoc llit) (con PatBuilderPat (con LitPat nx (unLoc llit)))))
     :cmd (cmd-fail #(ph :ppr-lit (unLoc llit)) (getLoc llit))))
 
 (defn mk-hs-over-lit-pv "mkHsOverLitPV" [mode llit]
@@ -449,9 +474,19 @@
       (go p))
     (L l (con SigPat nil p sig))))
 
+(defn reject-pragma-pv
+  "rejectPragmaPV (expressions): a pragma at the left of an infix expression or before a type
+  signature, or of an operator section, is not allowed"
+  [e]
+  (let [n (unLoc e)]
+    (case (first n)
+      OpApp (reject-pragma-pv (nth n 4))
+      HsPragE (add-error! (lx/msg :PsErrUnallowedPragma (getLoc e) (nth n 2)))
+      nil)))
+
 (defn mk-hs-ty-sig-pv "mkHsTySigPV" [ps mode l a sig]
   (case mode
-    :expr (L l (con ExprWithTySig nil a (hs-type-to-hs-sig-wc-type sig)))
+    :expr (do (reject-pragma-pv a) (L l (con ExprWithTySig nil a (hs-type-to-hs-sig-wc-type sig))))
     :pat (let [p (check-lpat ps a)
                sig (con HsPS nil sig)
                sp (add-sig-pat-p l p sig)]
@@ -537,7 +572,7 @@
 
 (defn mk-hs-op-app-pv "mkHsOpAppPV" [mode l e1 op e2]
   (case mode
-    :expr (L l (con OpApp nx e1 op e2))
+    :expr (do (reject-pragma-pv e1) (L l (con OpApp nx e1 op e2)))
     :cmd (let [cmd-arg (fn [c] (L (getLoc c) (con HsCmdTop nx c)))]
            (L l (con HsCmdArrForm nil op 'Infix [(cmd-arg e1) (cmd-arg e2)])))
     :pat (L l (con PatBuilderOpApp e1 op e2 nil))))
