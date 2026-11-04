@@ -453,7 +453,7 @@
       (let [[lo hi] (mapv #(Long/parseLong %) (re-seq #"[0-9]+" (str (second a))))
             hi (or hi lo)]
         (when (zero? lo) (verr :verifier/attr-value "'vscale_range' minimum must be greater than 0"))
-        (when-not (pow2? lo) (verr :verifier/attr-value "'vscale_range' minimum must be power-of-two value"))
+        (visiting (when-not (pow2? lo) (verr :verifier/attr-value "'vscale_range' minimum must be power-of-two value")))
         (when (and (pos? hi) (not (pow2? hi))) (verr :verifier/attr-value "'vscale_range' maximum must be power-of-two value"))
         (when (and (pos? hi) (> lo hi)) (verr :verifier/attr-value "'vscale_range' minimum cannot be greater than maximum"))))
     (when-let [a (str-attr attrs "vector-function-abi-variant")]
@@ -486,12 +486,12 @@
   (when (or (seq ret-attrs) (some seq pattrs) (seq fattrs))
     (doseq [a ret-attrs :let [n (aname a)] :when n]
       (when (and (= n "captures") (keyword? a)) (verr :verifier/attr-placement (str "Attribute '" (attr-str a) "' does not apply to function return values"))))
-    (check-param-attrs ret-attrs rt)
+    (visiting (check-param-attrs ret-attrs rt))
     (let [saw (java.util.HashSet.)]
       (doseq [[i attrs] (map-indexed vector pattrs) :let [t (nth ptypes i)]]
         (when-not intrinsic? (when (has-attr? attrs "immarg") (verr :verifier/attr-misc "immarg attribute only applies to intrinsics")))
         (when-not asm? (when (has-attr? attrs "elementtype") (verr :verifier/attr-misc "Attribute 'elementtype' can only be applied to intrinsics and inline asm.")))
-        (check-param-attrs attrs t)
+        (visiting (check-param-attrs attrs t))
         (when (has-attr? attrs "nest")
           (when (.contains saw "nest") (verr :verifier/attr-misc "More than one parameter has attribute nest!")) (.add saw "nest"))
         (when (has-attr? attrs "returned")
@@ -771,10 +771,10 @@
       (if (= (:kind d) :function)
         (verr :parser/redefinition (str "invalid redefinition of function '" k "'") {:at [:kind :gname]})
         (verr :parser/redefinition (str "redefinition of global '@" k "'") {:at [:kind :gname]})))
-    (doseq [p ps :when (vector? p)]
+    (doseq [[pi p] (map-indexed vector ps) :when (vector? p)]
       (let [nmx (when (local? (peek p)) (peek p))]
         (when (and nmx (numbered? (local-key nmx)) (< (Long/parseLong (local-key nmx)) (aget ^longs (.next ^Fn st) 0)))
-          (verr :parser/numbering (str "argument expected to be numbered '%" (aget ^longs (.next ^Fn st) 0) "' or greater") {:at [:param (.indexOf ^java.util.List (vec (remove #{'&} ps)) p)]}))
+          (verr :parser/numbering (str "argument expected to be numbered '%" (aget ^longs (.next ^Fn st) 0) "' or greater") {:at [:param pi]}))
         (when (= what :define) (define-value st nmx (norm-type (first p)) "argument"))))
     (check-align (:align o))
     (note-md! (:md o))
@@ -814,7 +814,12 @@
         llvm/global (parse-global f)
         (llvm/alias llvm/ifunc) (parse-alias f)
         llvm/meta (do (.add *mdefs* (second f)) (note-md! (drop 2 f)) (check-di-parse (second f) (nth f 2) (:distinct (apply hash-map (drop 3 f)))))
-        llvm/named-meta (note-md! (nth f 2))
+        llvm/named-meta (do (doseq [[oi op] (map-indexed vector (nth f 2))]
+                              (cond
+                                (md-ref? op) nil
+                                (vector? op) (verr :parser/syntax "Expected '!' here" {:at [:brace-item oi 0]})
+                                (and (seq? op) (= (first op) '!) (string? (second op))) (verr :parser/syntax "expected integer" {:at [:brace-item oi 1]})))
+                            (note-md! (nth f 2)))
         llvm/attributes (do (check-attr-placement :fn (nth f 2)) (check-attr-values (nth f 2)))
         llvm/uselistorder (let [[_ [t v]] f] (use-value nil v (norm-type t)))
         nil)))
@@ -826,10 +831,16 @@
   (let [missing (sort (map #(Long/parseLong (subs (name %) 1)) (remove #(.contains *mdefs* %) *mrefs*)))]
     (when (seq missing) (verr :parser/undefined-metadata (str "use of undefined metadata '!" (first missing) "'") {:at [:mod-find (str "!" (first missing)) 1]})))
   ;; a debug record's location must be a DILocation (resolved at the module's end)
-  (doseq [f forms :when (= (first f) 'llvm/define) [_ _ & items] (:body (apply hash-map (drop 4 f))) x items
-          :let [b (body x)] :when (and (dbg-record? b) (#{'dbg_declare 'dbg_value 'dbg_declare_value} (first b)))]
+  (doseq [[fi f] (map-indexed vector forms) :when (= (first f) 'llvm/define)
+          :let [ic (volatile! 0)]
+          blk (:body (apply hash-map (drop 4 f)))
+          :let [[_ l & items] blk _ (when l (vswap! ic inc))]
+          x items
+          :let [_ (vswap! ic inc) b (body x)] :when (and (dbg-record? b) (#{'dbg_declare 'dbg_value 'dbg_declare_value} (first b)))]
     (let [loc (nth b 4 nil) n (when loc (node-of loc))]
-      (when (and n (di-kind n) (not= "DILocation" (di-kind n))) (verr :parser/dbg-record "invalid debug location")))))
+      (when (and n (di-kind n) (not= "DILocation" (di-kind n)))
+        (binding [*ctx* {:form fi :item @ic}]
+          (verr :parser/dbg-record "invalid debug location" {:at [:plus :start 1]}))))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Phase 2: the Verifier's rules
@@ -1643,7 +1654,7 @@
                      (when-not (= "DISubprogram" (di-kind spn)) (verr :di/function "function !dbg attachment must be a subprogram" :fn [:mdv sp]))
                      (when (and (= (first f) 'llvm/declare) (flag? (:spFlags (di-fields spn)) "DISPFlagDefinition"))
                        (verr :di/function "function declaration may only have a unique !dbg attachment" :fn [:mdv sp])))))
-                (when (and sp (= (first f) 'llvm/define))
+                (when (and sp (= "DISubprogram" (di-kind spn)) (= (first f) 'llvm/define))
                   (doseq [[_ l & items] (:body o) x items]
                     (let [b (body x)]
                       (if (dbg-record? b)
@@ -1660,7 +1671,7 @@
                        (visiting (binding [*ctx* {:fn f :bb l :inst x}]
                         (when-not (= "DILocalVariable" (di-kind vn)) (verr :di/record "invalid #dbg record variable" :inst [:mdv var] :bb :fn))
                         (when-not (= "DIExpression" (di-kind en)) (verr :di/record "invalid #dbg record expression" :inst [:mdv expr] :bb :fn))
-                        (when (and (= "DILocation" (di-kind ln)) (not= (di-sp (:scope (di-fields vn))) (di-sp (:scope (di-fields ln)))))
+                        (when (and (= "DILocation" (di-kind ln)) (some? (di-sp (:scope (di-fields ln)))) (not= (di-sp (:scope (di-fields vn))) (di-sp (:scope (di-fields ln)))))
                           (verr :di/record "mismatched subprogram between #dbg record variable and DILocation"
                                 :inst :bb :fn [:mdv var] [:mdv (di-sp (:scope (di-fields vn)))] [:mdv loc] [:mdv (di-sp (:scope (di-fields ln)))] :bb :fn))
                         (when (and (= "DILocation" (di-kind ln)) (not= (di-loc-sp loc) sp))
