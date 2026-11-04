@@ -1239,3 +1239,34 @@ CPython 3.14.10:
 - **Finalization (PYS9 (a)) is not built yet:** goi does not run a `runtime.SetFinalizer` finalizer (a probe:
   an object dropped, `runtime.GC()` twice, a second's wait, the finalizer never ran), so the finalizer queue
   `:finalization-collect` needs goi's finalizers first, or a mark phase of pyi's own at `gc.collect()`.
+
+## As built: 202a, PY6's open items (2026-11-04, the Mac VM, queue 202)
+
+- **_sre's matcher is iterative, as sre_lib.h's** (`go/arbace/py/sre.go`). The continuation-passing matcher recursed
+  on Go's stack once per repetition (test_re's test_stack_overflow, `:recursion-limit`). SRE(match)'s DO_JUMP contexts
+  are now an explicit stack of backtracking points and its DO_JUMP0 bodies (asserts, atomic groups, possessive
+  repeats' iterations) a stack of frames; a repetition costs heap. The port keeps sre's bookkeeping exactly:
+  LASTMARK_SAVE and MARK_PUSH where sre does them (marks only inside a repeat for most ops), MARK clearing the
+  skipped marks, GROUPREF and GROUPREF_EXISTS seeing only marks below lastmark, POSSESSIVE_REPEAT going on past its
+  body's SUCCESS (the old matcher accepted there), the case-insensitive ops on the lower case alone, LOCALE's
+  `char_loc_ignore` and `charset_loc_ignore`, and the case mappings and categories of CPython's Unicode database.
+  A differential harness (the printed runtime's package with a Go test running sre.go on code compiled by CPython's
+  `re._compiler`, against CPython's spans and lastindex) found 0 differences in about 2.2 million cases; the old
+  matcher differed on possessive repeats and case-insensitive sets.
+- **_sre's objects as sre.c's** (`sre_obj.go`): a mutable subject read again by `group()`, `match_getindex`'s
+  `__index__`, `pattern_repr`'s `%.200R`. test_re: 140 equal and 12 unclassed at the base, 151 equal and 0 unclassed
+  after (with the mappingproxy REQUEST); `:recursion-limit` emptied.
+- **The three `:run-hangs` tests** pass alone and in their modules' runs (test_asyncio.test_sock_lowlevel 45 of 45,
+  test_asyncio.test_subprocess 86 of 86). test_huge_content's cause: `bytes(x)` did not call `x.__bytes__`, so
+  wsgiref's `send_headers` (`bytes(self.headers)`, `wsgiref.headers.Headers.__bytes__`) raised in the test server's
+  thread after `headers_sent`; no response came. 8013d5bb's bytes.go hunk fixed it (bisected by file).
+- **Three-argument pow** holds on test_decimal's power tests; PyCoverage.test_implicit_context then met
+  `sys.set_int_max_str_digits`, a no-op (REQUEST for the core owner, with the mappingproxy comparison).
+- **lib-test-all's unclassed methods** on a sample (`bin/pyi check --only`, 2 jobs): the families' 15 modules and
+  the two asyncio modules above, 861 methods, 824 equal, 37 classed, 5 of no class before (test_ucn's 4 `\N{NAME}`
+  names, `:ucn-names`, the native reader's; test_queue's one timeout, `:slow-on-goi`); 16 other modules, 859 methods,
+  401 equal, 458 classed after: test_configparser does not import under the native reader (`'\N{RS}'`, an alias,
+  `:ucn-names`, 383 methods); `_heapq` and `readline` absent (`:c-modules-deferred`); abc's, super's and
+  rlcompleter's data-model gaps (`:data-model`); a dict subclass's `__getitem__` that skipped `__missing__` (a
+  REQUEST, which clears test_http_cookies' 3 and test_wsgiref's 2); a signal that cannot interrupt Go's `send()`
+  (`:signal-timing`).
