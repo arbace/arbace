@@ -151,6 +151,41 @@
                                "; source tail: " (context srcs (min (count printed) (count toks))))
                           {})))))))
 
+(defn expand-macros
+  "The text with each macro an object-like expansion came from replaced by the expansion, when the
+  dump's tokens (positions in the preprocessed output's columns) and the text differ only so
+  (R6 and CPP: a literate module's text is the source, unlit's and CPP's output give the tokens, so
+  `x = __GLASGOW_HASKELL__` has the token 914 at the columns of its three characters): where the
+  printer's token printed is not the source's token at a position, the source's identifier
+  there is the macro's name, and its output is the token (its width the span's); the later tokens
+  of the line move by the difference. Returns text itself when nothing differs"
+  [^String text dumped printed]
+  (let [{:keys [toks]} (tokens-of text dumped)
+        ends (into {} (for [[l c l2 c2 k] dumped :when (not= k :c)] [[l c] [l2 c2]]))
+        lines (vec (str/split text #"\n" -1))
+        printed (vec printed)]
+    (loop [i 0 delta {} reps (sorted-map)]
+      (if (and (< i (count printed)) (< i (count toks)))
+        (let [p (nth printed i) [[l c :as pos] s] (nth toks i)]
+          (if (or (= p s) (spelling? p s))
+            (recur (inc i) delta reps)
+            (let [d (get delta l 0)
+                  line ^String (get lines (dec l) "")
+                  sc (+ (dec c) d)
+                  id (when (<= 0 sc (count line)) (re-find #"^[A-Za-z_][A-Za-z0-9_']*" (subs line sc)))
+                  [l2 c2] (get ends pos)]
+              (if (and id (= l l2) (= (count p) (- c2 c)))
+                (recur (inc i) (assoc delta l (+ d (- (count id) (count p))))
+                       (update reps l (fnil conj []) [sc (count id) p]))
+                (recur (count printed) delta reps)))))
+        (if (empty? reps)
+          text
+          (str/join "\n"
+                    (map-indexed (fn [k ^String line]
+                                   (reduce (fn [^String ln [sc n p]] (str (subs ln 0 sc) p (subs ln (+ sc n))))
+                                           line (reverse (get reps (inc k) []))))
+                                 lines)))))))
+
 ;;; Positions on the forms
 
 (defn- span-start [s] [(nth s 0) (nth s 1)])
@@ -257,9 +292,11 @@
   "The forms of mode :full: forms (converted with cv/*full*, their spans on them) with the
   dump's text and its tokens (tokens-of), checked against the printer's tokens of read-forms
   (the forms as read back from their text)"
-  [forms read-forms ^String text source]
-  (let [{:keys [toks punct comments]} source
-        texts (spellings (pr/print-tokens read-forms) toks)
+  [forms read-forms ^String text0 dumped]
+  (let [printed (pr/print-tokens read-forms)
+        text (expand-macros text0 dumped printed)
+        {:keys [toks punct comments]} (tokens-of text dumped)
+        texts (spellings printed toks)
         elems (sort-by first (concat toks (map (fn [[l c t]] [[l c] t]) punct)
                                      (map (fn [[l c _ _ t]] [[l c] t]) comments)))
         [space tail] (space-of text elems)

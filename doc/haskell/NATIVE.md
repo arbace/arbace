@@ -305,6 +305,37 @@ module, alex's outputs with and without CPP and HR26's module included, equal.
 `test/haskell/full/Space.hs` (tabs, a CRLF, trailing blanks, a form feed, Unicode syntax...) read
 natively and printed: byte for byte.
 
+### The converter's limits of mode `:full`, lifted (2026-11-04, branch `haskell-full2`)
+
+The 3 modules of the list and the 4 of the 88 that the converter rejected in mode `:full`, for the
+helper's dump as for the native one, had two causes, both in the pairing of the full layout's tokens
+with the dump's (`arbace.repr.haskell.full`), neither in the tree:
+
+- **Haskell from another file** (`Incl.hs`, `Trad.hs`, `filepath`'s and `os-string`'s Posix and Windows
+  modules: a CPP `#include` of a file whose text is Haskell). The dump's text is the module view (SPEC
+  §2.8: the other files' lines dropped) and its tokens are the module's file's, so the tokens of the
+  included nodes (the converter marks the first form of each file with `:hs/file`, R5) are in no text. The
+  full layout (`print.ae`) now follows the forms' files: a node of a file other than the module's
+  (`:file`, or `:hs/module-file` for an `.hsc`'s output) prints no token (`foreign?`; `at!` takes the
+  file of a form, a documentation form's included, a pragma's not: its file only names a `{-# LINE #-}`),
+  so the printed module is the module view byte for byte, as §2.8 defines the text level's reference.
+  The forms keep the included nodes (the layouts of mode `:lines` print them with `{-# LINE #-}`). What
+  it does not do is HR18 (c): the other files' text and tokens in the forms, which the module view would
+  then hold whole; the helper's dump has neither.
+- **A macro expansion in a literate module** (`Lit.lhs`: unlit, then CPP). The dump's text is the
+  literate source, its tokens the lexer's on unlit's and CPP's output, so `x = __GLASGOW_HASKELL__` has
+  the token `914` at the columns of three of the source's characters. `full/expand-macros` finds, where
+  the printer's token is not the source's at a position, the identifier there (the macro's name) and
+  replaces it in the text by the token, when the dump's span has the token's width, so that the text is
+  the source with its object-like macros expanded and the later tokens of the line at their columns: the
+  text the forms print back (as a CPP module's, which is the preprocessed text, never the source with its
+  macros). A function-like macro or an expansion of several tokens is still an error. `native-check`
+  expects that text (`want`).
+
+Results (same day, stage 0 as above): `native-check --full` 60 of 60 equal (`:lines` 60 of 60), the 88
+preprocessed modules 88 of 88 in `:full` and in `:lines`, and `bin/repr-haskell test`'s ten steps ok
+(the samples' round trips, mode `:full` byte for byte, unchanged).
+
 ## The converter's fixes (2026-11-04, branch `haskell-pp`)
 
 The three rare-syntax modules the native reader was checked on showed bugs of the converter
