@@ -87,10 +87,10 @@
 #   bin/pyi runtime print|read|vet|check
 #                                  PY5b0, the runtime's sources (doc/python/PYI-SPEC.md §8): go/arbace/py's Go forms (mode :full,
 #                                  lossless) printed as a Go module into .tmp/repr-python/pyi/runtime (print), edited there,
-#                                  read back into go/arbace/py (read; go/arbace/libm and go/arbace/expat, the packages it
-#                                  imports, printed beside it, not read back); vet: the Go there (printed first when absent)
-#                                  gofmt clean, then go vet and go test by TamaGo's go (py and expat);
-#                                  check: printed and read again equal to the committed forms (py and expat), the runtime's operations
+#                                  read back into go/arbace/py (read; go/arbace/libm, go/arbace/expat and go/arbace/pyexpat,
+#                                  printed beside it, not read back); vet: the Go there (printed first when absent)
+#                                  gofmt clean, then go vet and go test by TamaGo's go (py, expat and pyexpat);
+#                                  check: printed and read again equal to the committed forms (py, expat, pyexpat), the runtime's operations
 #                                  arbace.python.ir/ops's (runtime-ops), the programs of test/python/pyi/ run by bin/pyi run
 #                                  equal to the oracle's runs (stdout, status, stderr's last line), and repl --check;
 #                                  also the Unicode tables and the CJK codecs' (tools/pyi/unicodedata_table.py and
@@ -629,14 +629,15 @@ aot_gen() { cat "$root/arbace/python/aot.ae" | sha256sum | cut -c1-16; }
 aot_module() {
   mkdir -p "$AOT/mod/pyaot"
   printf 'module arbace\n\ngo 1.27\n' > "$AOT/mod/go.mod"
-  local key; key=$( (cd "$root" && find go/arbace/py.ae go/arbace/py go/arbace/libm.ae go/arbace/libm go/arbace/expat.ae go/arbace/expat -type f | LC_ALL=C sort | xargs sha256sum) | sha256sum | cut -c1-16)
+  local key; key=$( (cd "$root" && find go/arbace/py.ae go/arbace/py go/arbace/libm.ae go/arbace/libm go/arbace/expat.ae go/arbace/expat go/arbace/pyexpat.ae go/arbace/pyexpat -type f | LC_ALL=C sort | xargs sha256sum) | sha256sum | cut -c1-16)
   if [ "$(cat "$AOT/mod/runtime.key" 2>/dev/null)" != "$key" ]; then
     runtime_print "$AOT/rt"
-    rm -rf "$AOT/mod/py" "$AOT/mod/libm" "$AOT/mod/expat"; mkdir -p "$AOT/mod/py" "$AOT/mod/libm" "$AOT/mod/expat"
+    rm -rf "$AOT/mod/py" "$AOT/mod/libm" "$AOT/mod/expat" "$AOT/mod/pyexpat"; mkdir -p "$AOT/mod/py" "$AOT/mod/libm" "$AOT/mod/expat" "$AOT/mod/pyexpat"
     local f
     for f in "$AOT/rt"/py/*.go; do case $f in *_test.go) ;; *) cp "$f" "$AOT/mod/py/" ;; esac; done
     for f in "$AOT/rt"/libm/*.go; do case $f in *_test.go) ;; *) cp "$f" "$AOT/mod/libm/" ;; esac; done
     for f in "$AOT/rt"/expat/*.go; do case $f in *_test.go) ;; *) cp "$f" "$AOT/mod/expat/" ;; esac; done
+    for f in "$AOT/rt"/pyexpat/*.go; do case $f in *_test.go) ;; *) cp "$f" "$AOT/mod/pyexpat/" ;; esac; done
     echo "$key" > "$AOT/mod/runtime.key"
   fi
   # the host's compiler for what a compiled program compiles at run time (arbace.python.aot compile-server)
@@ -723,7 +724,7 @@ outcome() {
   printf '%s\t%s\t%s\n' "$(cat "$1/$2.rc")" "$(sha256sum < "$1/$2.out" | cut -c1-64)" "$(grep -v '^[[:space:]]*$' "$1/$2.err" | tail -1)"
 }
 pyi_key() {
-  { (cd "$root" && find go/arbace/py.ae go/arbace/py go/arbace/libm.ae go/arbace/libm go/arbace/expat.ae go/arbace/expat arbace/python arbace/python.ae \
+  { (cd "$root" && find go/arbace/py.ae go/arbace/py go/arbace/libm.ae go/arbace/libm go/arbace/expat.ae go/arbace/expat go/arbace/pyexpat.ae go/arbace/pyexpat arbace/python arbace/python.ae \
        arbace/repr/python tools/pydump/pydump.py -type f | LC_ALL=C sort | xargs sha256sum); sha256sum < "$1"; } | sha256sum | cut -c1-24
 }
 
@@ -1071,6 +1072,9 @@ runtime_print() {
   # expat's port the module pyexpat imports (go/arbace/expat, queue 202e): printed beside it, not read back
   mkdir -p "$out/expat"
   ARBACE_PATH="$root" "$root/bin/repr-go" print "$root/go/arbace/expat.ae" "$out/expat" >/dev/null
+  # pyexpat's package (go/arbace/pyexpat, over py and expat), loaded on the module's first import: printed beside them
+  mkdir -p "$out/pyexpat"
+  ARBACE_PATH="$root" "$root/bin/repr-go" print "$root/go/arbace/pyexpat.ae" "$out/pyexpat" >/dev/null
 }
 
 runtime_read() {
@@ -1093,8 +1097,8 @@ cmd_runtime() {
     vet)
       [ -d "$RT/py" ] || runtime_print "$RT"
       tamago_go gofmt -l py | sed 's/^/not gofmt: /' | grep . && die "gofmt the runtime's Go first"
-      tamago_go go vet ./py ./expat
-      tamago_go go test ./py ./expat ;;
+      tamago_go go vet ./py ./expat ./pyexpat
+      tamago_go go test ./py ./expat ./pyexpat ;;
     check)
       local rc=0 t="$WORK/runtime-check" p
       runtime_print "$t/src"
@@ -1104,15 +1108,17 @@ cmd_runtime() {
       else
         echo "runtime: go/arbace/py printed and read again DIFFERS (diff -r go/arbace/py $t/forms/go/arbace/py)"; rc=1
       fi
-      # expat's port (queue 202e): go/arbace/expat printed and read again the same forms
-      (cd "$t/src" && "$root/bin/repr-go" read --full --tests --goos linux --goarch amd64 --out "$t/expat-forms" ./expat) \
-        > "$t/expat-forms.log" 2>&1 || { cat "$t/expat-forms.log" >&2; rc=1; }
-      if diff -r "$root/go/arbace/expat" "$t/expat-forms/go/arbace/expat" >/dev/null \
-         && cmp -s "$root/go/arbace/expat.ae" "$t/expat-forms/go/arbace/expat.ae"; then
-        echo "runtime: go/arbace/expat printed and read again: the same forms"
-      else
-        echo "runtime: go/arbace/expat printed and read again DIFFERS (diff -r go/arbace/expat $t/expat-forms/go/arbace/expat)"; rc=1
-      fi
+      # expat's port and pyexpat's package (queue 202e): printed and read again the same forms
+      for p in expat pyexpat; do
+        (cd "$t/src" && "$root/bin/repr-go" read --full --tests --goos linux --goarch amd64 --out "$t/$p-forms" "./$p") \
+          > "$t/$p-forms.log" 2>&1 || { cat "$t/$p-forms.log" >&2; rc=1; }
+        if diff -r "$root/go/arbace/$p" "$t/$p-forms/go/arbace/$p" >/dev/null \
+           && cmp -s "$root/go/arbace/$p.ae" "$t/$p-forms/go/arbace/$p.ae"; then
+          echo "runtime: go/arbace/$p printed and read again: the same forms"
+        else
+          echo "runtime: go/arbace/$p printed and read again DIFFERS (diff -r go/arbace/$p $t/$p-forms/go/arbace/$p)"; rc=1
+        fi
+      done
       # the Unicode database's tables (PY6c): builtins_unicodedata_table.go as tools/pyi/unicodedata_table.py makes it
       # from the pinned tarball's generated headers
       local top="$root/.tmp/repr-python/Python-3.14.10"
