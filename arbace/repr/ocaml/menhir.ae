@@ -1,0 +1,966 @@
+;; Menhir's construction, ported for OCaml 5.5.0's grammar: the front end of Menhir 20250912 as the pinned tarball's
+;; parsing/parser.mly needs it (its .mly syntax, the parameterized and anonymous rules, %inline expansion with the
+;; positions of inlined actions, the standard library's option, ioption, list, nonempty_list, preceded, terminated,
+;; rev, flatten and append, standard.mly's definitions, its "LGPL-2.0 with the OCaml linking exception"), its LALR(1)
+;; automaton (--lalr: the LR(0) automaton and the LALR(1) lookahead sets, here by DeRemer and Pennello's relations),
+;; its resolution of conflicts by precedence and its default reductions, and the decoding of MenhirLib's tables
+;; (PackedIntArray, RowDisplacement, TableInterpreter's encoding) to compare the automaton with the one Menhir wrote
+;; into the tarball's boot/menhir/parser.ml. Menhir (https://gitlab.inria.fr/fpottier/menhir) is Copyright Inria,
+;; Francois Pottier and Yann Regis-Gianas; read, the algorithms reimplemented by hand on 2026-11-04 (LICENSE.md,
+;; "Menhir and MenhirLib"). The rest is Arbace's own.
+
+(ns arbace.repr.ocaml.menhir
+  "Menhir in Arbace, for repr/ocaml's native reader (doc/ocaml/OCAML-SURVEY.md, \"As built: the native reader\"):
+  parser.mly read, its parameterized and anonymous rules instantiated and its %inline rules expanded as Menhir does
+  (each expanded production keeps a plan: the source actions it composes and the cells each one covers, so the
+  driver evaluates them in Menhir's order with Menhir's positions), the LALR(1) automaton built, its conflicts
+  resolved by the precedence declarations, the default reductions chosen; the result written as the namespace
+  arbace.repr.ocaml.tables. `check` compares the automaton with Menhir's own tables in boot/menhir/parser.ml
+  (an isomorphism of states, productions and nonterminals: every action, goto and default reduction equal).
+
+    generate PARSER.MLY OUT.ae          write the tables
+    check PARSER.MLY BOOT-PARSER.ML     the automaton against Menhir's
+    verify PARSER.MLY TABLES.ae         generate again and compare with the committed file"
+  (:require [arbace.string :as str])
+  (:import [java.util ArrayList HashMap BitSet ArrayDeque Arrays]
+           [java.io File]))
+
+(set! *warn-on-reflection* false)
+
+;; ---------------------------------------------------------------------------------------------
+;; The .mly lexer: the declarations and the rules, the header and the actions skipped as OCaml text
+
+(declare ocaml-skip-string)
+
+(defn- ocaml-skip-comment
+  "From i at `(*`, the index after the matching `*)` (OCaml comments nest; strings inside are skipped)"
+  [^String s i]
+  (let [n (count s)]
+    (loop [i (+ i 2) depth 1]
+      (cond
+        (>= i n) (throw (ex-info "unterminated comment" {:at i}))
+        (and (= (.charAt s i) \() (< (inc i) n) (= (.charAt s (inc i)) \*)) (recur (+ i 2) (inc depth))
+        (and (= (.charAt s i) \*) (< (inc i) n) (= (.charAt s (inc i)) \)))
+        (if (= depth 1) (+ i 2) (recur (+ i 2) (dec depth)))
+        (= (.charAt s i) \") (recur (long (ocaml-skip-string s i)) depth)
+        :else (recur (inc i) depth)))))
+
+(defn ocaml-skip-string
+  "From i at a double quote, the index after the closing one"
+  [^String s i]
+  (let [n (count s)]
+    (loop [i (inc i)]
+      (cond
+        (>= i n) (throw (ex-info "unterminated string" {:at i}))
+        (= (.charAt s i) \\) (recur (+ i 2))
+        (= (.charAt s i) \") (inc i)
+        :else (recur (inc i))))))
+
+(defn- ocaml-char-end
+  "At a quote: the index after a character literal ('x', '\\n', '\\123', '\\xhh', '\\''), else nil"
+  [^String s i]
+  (let [n (count s)]
+    (cond
+      (and (< (+ i 2) n) (not= (.charAt s (inc i)) \\) (= (.charAt s (+ i 2)) \')) (+ i 3)
+      (and (< (+ i 3) n) (= (.charAt s (inc i)) \\) (= (.charAt s (+ i 3)) \')) (+ i 4)
+      (and (< (+ i 5) n) (= (.charAt s (inc i)) \\) (= (.charAt s (+ i 5)) \')) (+ i 6)
+      (and (< (+ i 4) n) (= (.charAt s (inc i)) \\) (= (.charAt s (+ i 2)) \x) (= (.charAt s (+ i 4)) \')) (+ i 5)
+      :else nil)))
+
+(defn- action-end
+  "From i at `{`, the index after the matching `}` of an OCaml action"
+  [^String s i]
+  (let [n (count s)]
+    (loop [i (inc i) depth 1]
+      (if (>= i n)
+        (throw (ex-info "unterminated action" {:at i}))
+        (let [c (.charAt s i)]
+          (cond
+            (and (= c \() (< (inc i) n) (= (.charAt s (inc i)) \*)) (recur (long (ocaml-skip-comment s i)) depth)
+            (= c \") (recur (long (ocaml-skip-string s i)) depth)
+            (= c \') (recur (long (or (ocaml-char-end s i) (inc i))) depth)
+            (= c \{) (recur (inc i) (inc depth))
+            (= c \}) (if (= depth 1) (inc i) (recur (inc i) (dec depth)))
+            :else (recur (inc i) depth)))))))
+
+(defn- ident-char? [c] (or (Character/isLetterOrDigit (char c)) (= c \_) (= c \')))
+
+(defn- line-of
+  "The 1-based line of offset i, by a table of line starts"
+  [^ints starts i]
+  (let [k (Arrays/binarySearch starts (int i))]
+    (if (neg? k) (- (- k) 1) (inc k))))
+
+(defn lex-mly
+  "The tokens of a .mly text: [kind value line col], kind :id :str :action :pct :punct :type :sep :header"
+  [^String s]
+  (let [n (count s)
+        starts (int-array (cons 0 (keep-indexed (fn [i c] (when (= c \newline) (inc i))) s)))
+        out (ArrayList.)
+        tok (fn [k v i] (let [ln (line-of starts i)] (.add out [k v ln (- i (aget starts (dec ln)))])))]
+    (loop [i 0]
+      (when (< i n)
+        (let [c (.charAt s i)]
+          (cond
+            (Character/isWhitespace c) (recur (inc i))
+            (.startsWith s "/*" i) (recur (+ 2 (.indexOf s "*/" (int (+ i 2)))))
+            (.startsWith s "(*" i) (recur (long (ocaml-skip-comment s i)))
+            (.startsWith s "//" i) (let [j (.indexOf s "\n" (int i))] (recur (if (neg? j) n j)))
+            (.startsWith s "%{" i) (let [j (.indexOf s "%}" (int i))] (tok :header nil i) (recur (+ j 2)))
+            (.startsWith s "%%" i) (do (tok :sep nil i) (recur (+ i 2)))
+            (= c \%) (let [j (loop [j (inc i)] (if (and (< j n) (ident-char? (.charAt s j))) (recur (inc j)) j))]
+                       (tok :pct (subs s i j) i) (recur j))
+            (= c \{) (let [j (action-end s i)] (tok :action (subs s (inc i) (dec j)) i) (recur j))
+            (= c \") (let [j (ocaml-skip-string s i)] (tok :str (subs s (inc i) (dec j)) i) (recur j))
+            (= c \<) (let [j (.indexOf s ">" (int i))] (tok :type (subs s (inc i) j) i) (recur (inc j)))
+            (or (Character/isLetter c) (= c \_))
+            (let [j (loop [j (inc i)] (if (and (< j n) (ident-char? (.charAt s j))) (recur (inc j)) j))]
+              (tok :id (subs s i j) i) (recur j))
+            (#{\: \| \; \( \) \, \= \? \* \+} c) (do (tok :punct (str c) i) (recur (inc i)))
+            :else (throw (ex-info (str "unexpected character " c) {:line (line-of starts i)}))))))
+    (vec out)))
+
+;; ---------------------------------------------------------------------------------------------
+;; The .mly parser: declarations, rules, productions, anonymous rules
+
+(def ^:private anon-counter (atom 0))
+
+(defn- parse-mly
+  "The grammar of a .mly text: {:tokens [{:name :typed :alias}] :levels [[assoc [sym...]]...] :starts [..]
+  :rules {name {:name :params :inline :groups}}}; a group is {:prods [{:items [{:id :actual}] :prec}] :action
+  {:text :line :col}}, an actual {:name :args [..]} or {:anon [groups] :id k}, its modifiers as {:name option|list|
+  nonempty_list :args [actual]}"
+  [toks]
+  (let [toks (vec toks)
+        n (count toks)
+        pos (atom 0)
+        peek (fn ([] (get toks @pos)) ([k] (get toks (+ @pos k))))
+        is (fn [t k v] (and t (= (nth t 0) k) (or (nil? v) (= (nth t 1) v))))
+        next! (fn [] (let [t (get toks @pos)] (swap! pos inc) t))
+        expect (fn [k v] (let [t (next!)] (when-not (is t k v) (throw (ex-info (str "expected " v " got " (pr-str t)) {}))) t))
+        tokens (ArrayList.) levels (ArrayList.) starts (ArrayList.) rules (java.util.LinkedHashMap.)]
+    ;; declarations
+    (loop []
+      (let [t (peek)]
+        (cond
+          (nil? t) (throw (ex-info "no %%" {}))
+          (is t :sep nil) (next!)
+          (is t :header nil) (do (next!) (recur))
+          (is t :pct "%token")
+          (do (next!)
+              (let [typed (when (is (peek) :type nil) (next!) true)]
+                (loop []
+                  (when (is (peek) :id nil)
+                    (let [nm (nth (next!) 1)
+                          alias (when (is (peek) :str nil) (nth (next!) 1))]
+                      (.add tokens {:name nm :typed (boolean typed) :alias alias})
+                      (recur)))))
+              (recur))
+          (#{"%left" "%right" "%nonassoc"} (nth t 1))
+          (do (next!)
+              (let [syms (loop [acc []] (if (is (peek) :id nil) (recur (conj acc (nth (next!) 1))) acc))]
+                (.add levels [(keyword (subs (nth t 1) 1)) syms]))
+              (recur))
+          (is t :pct "%start")
+          (do (next!) (when (is (peek) :type nil) (next!))
+              (loop [] (when (is (peek) :id nil) (.add starts (nth (next!) 1)) (recur)))
+              (recur))
+          (is t :pct nil)
+          (do (next!) (when (is (peek) :type nil) (next!))
+              (loop [] (when (is (peek) :id nil) (next!) (recur)))
+              (recur))
+          :else (throw (ex-info (str "unexpected declaration " (pr-str t)) {})))))
+    ;; rules
+    (letfn [(rule-start? []
+              (let [t (peek)]
+                (or (is t :pct "%inline") (is t :pct "%public")
+                    (and (is t :id nil)
+                         (or (is (peek 1) :punct ":")
+                             (and (is (peek 1) :punct "(")
+                                  (let [close (loop [k 2 d 1]
+                                                (let [u (peek k)]
+                                                  (cond (nil? u) nil
+                                                        (is u :punct "(") (recur (inc k) (inc d))
+                                                        (is u :punct ")") (if (= d 1) k (recur (inc k) (dec d)))
+                                                        :else (recur (inc k) d))))]
+                                    (and close (is (peek (inc close)) :punct ":")))))))))
+            (stop? [in-arg]
+              (let [t (peek)]
+                (or (nil? t) (is t :sep nil) (is t :action nil) (is t :pct "%prec")
+                    (is t :punct "|") (is t :punct ";")
+                    (and in-arg (or (is t :punct ",") (is t :punct ")")))
+                    (and (not in-arg) (rule-start?)))))
+            (parse-actual [in-arg]
+              (let [nm (nth (expect :id nil) 1)
+                    args (when (is (peek) :punct "(")
+                           (next!)
+                           (loop [acc [(parse-arg)]]
+                             (if (is (peek) :punct ",")
+                               (do (next!) (recur (conj acc (parse-arg))))
+                               (do (expect :punct ")") acc))))]
+                (loop [a {:name nm :args (vec args)}]
+                  (let [t (peek)]
+                    (cond
+                      (is t :punct "?") (do (next!) (recur {:name "option" :args [a]}))
+                      (is t :punct "*") (do (next!) (recur {:name "list" :args [a]}))
+                      (is t :punct "+") (do (next!) (recur {:name "nonempty_list" :args [a]}))
+                      :else a)))))
+            (parse-item [in-arg]
+              (let [id (when (and (is (peek) :id nil) (is (peek 1) :punct "=")) (let [t (next!)] (next!) (nth t 1)))]
+                {:id id :actual (parse-actual in-arg)}))
+            (parse-production [in-arg]
+              (loop [items []]
+                (if (stop? in-arg)
+                  (let [prec (when (is (peek) :pct "%prec") (next!) (nth (expect :id nil) 1))]
+                    {:items items :prec prec})
+                  (recur (conj items (parse-item in-arg))))))
+            (parse-groups [in-arg]
+              (when (is (peek) :punct "|") (next!))
+              (loop [groups []]
+                (let [prods (loop [prods [(parse-production in-arg)]]
+                              (if (is (peek) :punct "|")
+                                (do (next!) (recur (conj prods (parse-production in-arg))))
+                                prods))
+                      a (peek)
+                      _ (when-not (is a :action nil) (throw (ex-info (str "expected an action at " (pr-str a)) {})))
+                      _ (next!)
+                      prec2 (when (is (peek) :pct "%prec") (next!) (nth (expect :id nil) 1))
+                      prods (if prec2 (mapv #(assoc % :prec (or (:prec %) prec2)) prods) prods)
+                      groups (conj groups {:prods prods :action {:text (nth a 1) :line (nth a 2) :col (nth a 3)}})]
+                  (if (is (peek) :punct "|")
+                    (do (next!) (recur groups))
+                    groups))))
+            (parse-arg []
+              ;; an actual, or an anonymous rule (productions with actions)
+              (let [save @pos
+                    t (peek)]
+                (if (and (is t :id nil) (not (is (peek 1) :punct "=")))
+                  (let [a (parse-actual true)]
+                    (if (or (is (peek) :punct ",") (is (peek) :punct ")"))
+                      a
+                      (do (reset! pos save) {:anon (parse-groups true) :id (swap! anon-counter inc)})))
+                  {:anon (parse-groups true) :id (swap! anon-counter inc)})))]
+      (loop []
+        (let [t (peek)]
+          (cond
+            (or (nil? t) (is t :sep nil)) nil
+            (is t :punct ";") (do (next!) (recur))
+            :else
+            (let [flags (loop [fl #{}]
+                          (cond (is (peek) :pct "%inline") (do (next!) (recur (conj fl :inline)))
+                                (is (peek) :pct "%public") (do (next!) (recur (conj fl :public)))
+                                :else fl))
+                  nm (nth (expect :id nil) 1)
+                  params (when (is (peek) :punct "(")
+                           (next!)
+                           (loop [acc [(nth (expect :id nil) 1)]]
+                             (if (is (peek) :punct ",")
+                               (do (next!) (recur (conj acc (nth (expect :id nil) 1))))
+                               (do (expect :punct ")") acc))))
+                  _ (expect :punct ":")
+                  groups (parse-groups false)]
+              (when (.containsKey rules nm) (throw (ex-info (str "rule defined twice: " nm) {})))
+              (.put rules nm {:name nm :params (vec params) :inline (contains? flags :inline) :groups groups})
+              (recur))))))
+    {:tokens (vec tokens) :levels (vec levels) :starts (vec starts) :rules (into {} rules)}))
+
+(def standard-mly
+  "The rules of Menhir's standard library (standard.mly) that parser.mly uses"
+  "%%
+%public option(X):
+  /* nothing */ { None }
+| x = X { Some x }
+%public %inline ioption(X):
+  /* nothing */ { None }
+| x = X { Some x }
+%public list(X):
+  /* nothing */ { [] }
+| x = X xs = list(X) { x :: xs }
+%public nonempty_list(X):
+  x = X { [ x ] }
+| x = X xs = nonempty_list(X) { x :: xs }
+%public %inline preceded(opening, X):
+  opening x = X { x }
+%public %inline terminated(X, closing):
+  x = X closing { x }
+%public %inline rev(XS):
+  xs = XS { List.rev xs }
+%public %inline flatten(XSS):
+  xss = XSS { List.flatten xss }
+%public %inline append(XS, YS):
+  xs = XS ys = YS { xs @ ys }
+%%
+")
+
+(defn read-grammar
+  "parser.mly's text read, with the standard library's rules"
+  [^String text]
+  (reset! anon-counter 0)
+  (let [g (parse-mly (lex-mly text))
+        std (parse-mly (lex-mly standard-mly))]
+    (update g :rules #(merge (:rules std) %))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Action texts: the dictionary key of a source action (comments removed, white space collapsed)
+
+(defn normalize-action
+  "An action's text as its key: OCaml comments removed, white space collapsed to single spaces, trimmed"
+  [^String s]
+  (let [sb (StringBuilder.) n (count s)]
+    (loop [i 0]
+      (when (< i n)
+        (let [c (.charAt s i)]
+          (cond
+            (and (= c \() (< (inc i) n) (= (.charAt s (inc i)) \*)) (do (.append sb " ") (recur (long (ocaml-skip-comment s i))))
+            (= c \") (let [j (ocaml-skip-string s i)] (.append sb (subs s i j)) (recur (long j)))
+            :else (do (.append sb c) (recur (inc i)))))))
+    (str/join " " (remove empty? (str/split (str/trim (str sb)) #"\s+")))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Instantiation and %inline expansion
+;;
+;; A resolved symbol is [:t NAME] (a terminal), [:nt NAME ARGS] (an instance of a rule, ARGS resolved symbols) or
+;; [:anon ID ENV] (an anonymous rule with the environment of formals it was written in: always %inline, as Menhir's
+;; anonymous rules are). A plan is [ACTION-KEY LEN NAMES ITEMS]: the action, the number of cells it covers, its items'
+;; names, and per item either a cell index or [LO HI PLAN], an inlined item covering cells LO..HI-1, relative to the
+;; plan's own first cell.
+
+(defn- resolve-actual [g terminal? env a]
+  (if-let [anon (:anon a)]
+    [:anon (:id a) env anon]
+    (let [nm (:name a)
+          args (mapv #(resolve-actual g terminal? env %) (:args a))]
+      (cond
+        (contains? env nm) (let [v (get env nm)]
+                             (if (empty? args)
+                               v
+                               (do (when-not (and (= :nt (first v)) (empty? (nth v 2)))
+                                     (throw (ex-info (str "higher-order parameter " nm " applied to " (pr-str v)) {})))
+                                   [:nt (nth v 1) args])))
+        (terminal? nm) (do (when (seq args) (throw (ex-info (str "terminal with arguments: " nm) {}))) [:t nm])
+        (= nm "error") [:t "error"]
+        :else (do (when-not (get-in g [:rules nm]) (throw (ex-info (str "undefined symbol " nm) {})))
+                  [:nt nm args])))))
+
+(defn- sym-key
+  "The identity of a resolved symbol (an anonymous rule by its id and environment, without its body)"
+  [s]
+  (case (first s)
+    :t s
+    :nt [:nt (nth s 1) (mapv sym-key (nth s 2))]
+    :anon [:anon (nth s 1) (into (sorted-map) (map (fn [[k v]] [k (sym-key v)]) (nth s 2)))]))
+
+(defn- inline? [g s]
+  (case (first s)
+    :t false
+    :anon true
+    :nt (boolean (:inline (get-in g [:rules (nth s 1)])))))
+
+(defn- sym-name [s]
+  (case (first s)
+    :t (nth s 1)
+    :anon (str "__anonymous_" (nth s 1))
+    :nt (if (empty? (nth s 2)) (nth s 1) (str (nth s 1) "(" (str/join "," (map sym-name (nth s 2))) ")"))))
+
+(defn- rule-productions
+  "The productions of a resolved nonterminal: [{:items [{:id :sym}] :prec :action}]"
+  [g terminal? s]
+  (let [[groups env] (case (first s)
+                       :nt (let [r (get-in g [:rules (nth s 1)])]
+                             (when-not (= (count (:params r)) (count (nth s 2)))
+                               (throw (ex-info (str "arity of " (nth s 1)) {})))
+                             [(:groups r) (zipmap (:params r) (nth s 2))])
+                       :anon [(nth s 3) (nth s 2)])]
+    (vec (for [grp groups prod (:prods grp)]
+           {:items (mapv (fn [it] {:id (:id it) :sym (resolve-actual g terminal? env (:actual it))}) (:items prod))
+            :prec (:prec prod)
+            :action (:action grp)}))))
+
+(defn expand
+  "The expanded grammar: {:prods [{:lhs KEY :cells [SYM...] :prec P :plan PLAN :line L}] :nts [KEY...] :names {KEY name}
+  :starts [[name KEY]]}, the instances reachable from the start symbols, %inline rules expanded away"
+  [g]
+  (let [term-names (set (map :name (:tokens g)))
+        terminal? #(or (contains? term-names %) (= % "error"))
+        memo (HashMap.)
+        queue (ArrayDeque.)
+        seen (java.util.LinkedHashMap.)
+        prods (ArrayList.)
+        enqueue (fn [s] (let [k (sym-key s)] (when-not (.containsKey seen k) (.put seen k s) (.add queue s))))
+        depth (atom 0)]
+    (letfn [(expand-inline [s]
+              (let [k (sym-key s)]
+                (or (.get memo k)
+                    (do (when (> (swap! depth inc) 50) (throw (ex-info (str "%inline cycle at " (sym-name s)) {})))
+                        (let [r (vec (mapcat expand-production (rule-productions g terminal? s)))]
+                          (swap! depth dec)
+                          (.put memo k r)
+                          r)))))
+            (expand-production [p]
+              ;; alternatives [{:cells :items :prec}], the items' plans relative to the production's first cell
+              (let [items (:items p)
+                    last-i (dec (count items))
+                    alts (reduce
+                          (fn [alts [i it]]
+                            (let [s (:sym it)]
+                              (if (inline? g s)
+                                (let [subs (expand-inline s)]
+                                  (vec (for [a alts sub subs]
+                                         (let [lo (count (:cells a))
+                                               hi (+ lo (count (:cells sub)))
+                                               prec (cond
+                                                      (nil? (:prec sub)) (:prec a)
+                                                      (not= i last-i) (throw (ex-info (str "%prec in an inlined production not in tail position: " (sym-name s)) {}))
+                                                      (:prec a) (throw (ex-info (str "two %prec annotations: " (sym-name s)) {}))
+                                                      :else (:prec sub))]
+                                           {:cells (into (:cells a) (:cells sub))
+                                            :items (conj (:items a) [lo hi (:plan sub)])
+                                            :prec prec}))))
+                                (do (when (= :nt (first s)) (enqueue s))
+                                    (mapv (fn [a] {:cells (conj (:cells a) (sym-key s))
+                                                   :items (conj (:items a) (count (:cells a)))
+                                                   :prec (:prec a)})
+                                          alts)))))
+                          [{:cells [] :items [] :prec (:prec p)}]
+                          (map-indexed vector items))]
+                (mapv (fn [a]
+                        {:cells (:cells a) :prec (:prec a)
+                         :plan [(normalize-action (:text (:action p))) (count (:cells a)) (mapv :id items) (:items a)]
+                         :line (:line (:action p))})
+                      alts)))]
+      (doseq [st (:starts g)] (enqueue [:nt st []]))
+      (loop []
+        (when-let [s (.poll queue)]
+          (doseq [p (rule-productions g terminal? s)
+                  alt (expand-production p)]
+            (.add prods (assoc alt :lhs (sym-key s))))
+          (recur)))
+      (let [nts (vec (keys seen))]
+        {:prods (vec prods)
+         :nts nts
+         :names (into {} (map (fn [[k s]] [k (sym-name s)]) seen))
+         :starts (mapv (fn [st] [st (sym-key [:nt st []])]) (:starts g))}))))
+
+;; ---------------------------------------------------------------------------------------------
+;; The LR(0) automaton and the LALR(1) lookahead sets
+
+(defn- bitset-of [xs] (let [b (BitSet.)] (doseq [x xs] (.set b (int x))) b))
+
+(defn- digraph
+  "DeRemer and Pennello's digraph: F(x) = F'(x) union the F(y) of every y reachable by R, F' given as BitSets
+  (modified in place), R as a vector of int vectors; iterative"
+  [^objects fs rel]
+  (let [n (alength fs)
+        nn (int-array n)
+        stack (ArrayDeque.)
+        inf Integer/MAX_VALUE]
+    (dotimes [x0 n]
+      (when (zero? (aget nn x0))
+        ;; an explicit traversal stack of [x next-edge-index depth]
+        (let [work (ArrayDeque.)]
+          (.push stack (int x0)) (aset nn x0 (int (.size stack)))
+          (.push work (long-array [x0 0 (.size stack)]))
+          (loop []
+            (when-let [^longs fr (.peek work)]
+              (let [x (aget fr 0) ei (aget fr 1) ys (nth rel x)]
+                (if (< ei (count ys))
+                  (let [y (nth ys ei)]
+                    (aset fr 1 (inc ei))
+                    (if (zero? (aget nn y))
+                      (do (.push stack (int y)) (aset nn y (int (.size stack)))
+                          (.push work (long-array [y 0 (.size stack)])))
+                      (do (aset nn x (int (min (aget nn x) (aget nn y))))
+                          (.or ^BitSet (aget fs x) ^BitSet (aget fs y)))))
+                  (do
+                    (.pop work)
+                    (let [d (aget fr 2)]
+                      (when (= (aget nn x) d)
+                        (loop []
+                          (let [top (int (.pop stack))]
+                            (aset nn top (int inf))
+                            (when-not (= top x)
+                              (aset fs top (.clone ^BitSet (aget fs x)))
+                              (recur))))))
+                    ;; propagate to the parent frame
+                    (when-let [^longs pf (.peek work)]
+                      (let [px (aget pf 0)]
+                        (aset nn px (int (min (aget nn px) (aget nn x))))
+                        (.or ^BitSet (aget fs px) ^BitSet (aget fs x))))))
+                (recur)))))))
+    fs))
+
+(defn build
+  "The LALR(1) automaton of an expanded grammar: terminals (error first, the tokens, # last), nonterminals (the
+  start symbols' primes first), productions (the start productions first), states with their transitions, the
+  lookahead sets of their reductions, the conflicts resolved and the default reductions"
+  [g ex]
+  (let [tokens (:tokens g)
+        terms (vec (concat ["error"] (map :name tokens) ["#"]))
+        nt (count terms)
+        sharp (dec nt)
+        tidx (into {} (map-indexed (fn [i t] [t i]) terms))
+        starts (:starts ex)
+        nts (vec (concat (map (fn [[st _]] [:start st]) starts) (:nts ex)))
+        nidx (into {} (map-indexed (fn [i k] [k i]) nts))
+        nnt (count nts)
+        sym (fn [s] (case (first s) :t (tidx (nth s 1)) :nt (+ nt (nidx s)) :anon (+ nt (nidx s))))
+        ;; productions: the start productions S' -> S first
+        prods (vec (concat
+                    (map-indexed (fn [i [st k]] {:lhs i :rhs (int-array [(+ nt (nidx k))]) :start st :plan nil :prec nil}) starts)
+                    (map (fn [p] {:lhs (nidx (:lhs p)) :rhs (int-array (map sym (:cells p))) :plan (:plan p)
+                                  :prec (:prec p) :line (:line p)})
+                         (:prods ex))))
+        np (count prods)
+        plhs (int-array (map :lhs prods))
+        prhs (object-array (map :rhs prods))
+        by-lhs (let [v (object-array nnt)]
+                 (dotimes [i nnt] (aset v i (ArrayList.)))
+                 (dotimes [p np] (.add ^ArrayList (aget v (aget plhs p)) (int p)))
+                 v)
+        ;; nullable nonterminals
+        nullable (let [b (boolean-array nnt)]
+                   (loop []
+                     (let [changed (atom false)]
+                       (dotimes [p np]
+                         (let [l (aget plhs p) ^ints r (aget prhs p)]
+                           (when (and (not (aget b l))
+                                      (every? (fn [s] (and (>= s nt) (aget b (- s nt)))) r))
+                             (aset b l true) (reset! changed true))))
+                       (when @changed (recur))))
+                   b)
+        sym-nullable? (fn [s] (and (>= s nt) (aget nullable (- s nt))))
+        ;; LR(0) states: kernels of items, an item p*256+dot
+        item (fn [p d] (+ (* p 256) d))
+        closure (fn [^ints kernel]
+                  (let [out (ArrayList.) seen (java.util.HashSet.) seen-nt (boolean-array nnt)]
+                    (doseq [it kernel] (when (.add seen (int it)) (.add out (int it))))
+                    (loop [i 0]
+                      (when (< i (.size out))
+                        (let [it (.get out i) p (quot it 256) d (rem it 256) ^ints r (aget prhs p)]
+                          (when (< d (alength r))
+                            (let [s (aget r d)]
+                              (when (and (>= s nt) (not (aget seen-nt (- s nt))))
+                                (aset seen-nt (- s nt) true)
+                                (doseq [q (aget by-lhs (- s nt))]
+                                  (let [j (item q 0)] (when (.add seen (int j)) (.add out (int j))))))))
+                          (recur (inc i)))))
+                    out))
+        state-index (HashMap.)
+        kernels (ArrayList.)
+        trans (ArrayList.)         ; per state: a HashMap sym -> state
+        add-state (fn [^ints k]
+                    (let [key (vec k)]
+                      (or (.get state-index key)
+                          (let [i (.size kernels)]
+                            (.put state-index key (int i))
+                            (.add kernels k)
+                            (.add trans nil)
+                            i))))
+        start-states (mapv (fn [i] (add-state (int-array [(item i 0)]))) (range (count starts)))]
+    ;; the states, breadth first
+    (loop [s 0]
+      (when (< s (.size kernels))
+        (let [cl (closure (.get kernels s))
+              groups (java.util.TreeMap.)]
+          (doseq [it cl]
+            (let [p (quot it 256) d (rem it 256) ^ints r (aget prhs p)]
+              (when (< d (alength r))
+                (let [x (aget r d)
+                      ^ArrayList l (or (.get groups (int x)) (let [l (ArrayList.)] (.put groups (int x) l) l))]
+                  (.add l (int (item p (inc d))))))))
+          (let [m (HashMap.)]
+            (doseq [[x l] groups]
+              (let [k (int-array (sort l))]
+                (.put m (int x) (int (add-state k)))))
+            (.set trans s m))
+          (recur (inc s)))))
+    (let [ns (.size kernels)
+          goto (fn [s x] (when-let [^HashMap m (.get trans s)] (.get m (int x))))
+          ;; nonterminal transitions
+          ntrans (ArrayList.)
+          ntidx (HashMap.)
+          _ (dotimes [s ns]
+              (doseq [[x t] (sort-by key (.get trans s))]
+                (when (>= x nt)
+                  (.put ntidx (+ (* s 1000) (- x nt)) (int (.size ntrans)))
+                  (.add ntrans [s (- x nt) t]))))
+          nx (.size ntrans)
+          xid (fn [s a] (.get ntidx (+ (* s 1000) a)))
+          ;; DR and reads
+          fs (object-array nx)
+          reads (object-array nx)
+          _ (dotimes [x nx]
+              (let [[p a r] (.get ntrans x)
+                    b (BitSet.)
+                    rd (ArrayList.)]
+                (doseq [[y _] (.get trans r)]
+                  (if (< y nt)
+                    (.set b (int y))
+                    (when (aget nullable (- y nt)) (.add rd (int (xid r (- y nt)))))))
+                (aset fs x b)
+                (aset reads x (vec rd))))
+          ;; the start transitions are followed by #
+          _ (doseq [[i s0] (map-indexed vector start-states)]
+              (let [a (+ nt (nidx (second (nth starts i))))]
+                (.set ^BitSet (aget fs (xid s0 (- a nt))) (int sharp))))
+          _ (digraph fs (vec reads))
+          ;; includes and lookback
+          includes (object-array nx)
+          _ (dotimes [x nx] (aset includes x (ArrayList.)))
+          lookback (HashMap.)
+          _ (dotimes [x nx]
+              (let [[p0 b _] (.get ntrans x)]
+                (doseq [q (aget by-lhs b)]
+                  (let [^ints r (aget prhs q) len (alength r)]
+                    (loop [i 0 s p0]
+                      (if (< i len)
+                        (let [y (aget r i)]
+                          (when (and (>= y nt)
+                                     (loop [j (inc i)] (or (>= j len) (and (sym-nullable? (aget r j)) (recur (inc j))))))
+                            (.add ^ArrayList (aget includes (xid s (- y nt))) (int x)))
+                          (recur (inc i) (goto s y)))
+                        (let [k (+ (* (long s) 100000) q)
+                              ^ArrayList l (or (.get lookback k) (let [l (ArrayList.)] (.put lookback k l) l))]
+                          (.add l (int x)))))))))
+          _ (digraph fs (mapv vec includes))
+          ;; the precedence of tokens and productions
+          levels (:levels g)
+          tok-prec (into {} (for [[i [assoc syms]] (map-indexed vector levels) s syms] [s [i assoc]]))
+          prod-prec (fn [p]
+                      (let [pr (nth prods p)]
+                        (if-let [ps (:prec pr)]
+                          (or (tok-prec ps) (throw (ex-info (str "%prec of an undeclared symbol " ps) {})))
+                          (let [^ints r (aget prhs p)
+                                last-t (loop [i (dec (alength r))] (when (>= i 0) (if (< (aget r i) nt) (aget r i) (recur (dec i)))))]
+                            (when last-t (tok-prec (nth terms last-t)))))))
+          conflicts (ArrayList.)
+          ;; the action table: per state a TreeMap terminal -> [:shift s] | [:reduce p]
+          actions (object-array ns)
+          defred (int-array ns -1)]
+      (dotimes [s ns]
+        (let [cl (closure (.get kernels s))
+              reds (java.util.TreeMap.)] ; terminal -> list of prods
+          (doseq [it cl]
+            (let [p (quot it 256) d (rem it 256) ^ints r (aget prhs p)]
+              (when (= d (alength r))
+                (let [la (if (:start (nth prods p))
+                           (bitset-of [sharp])
+                           (let [b (BitSet.)]
+                             (doseq [x (.get lookback (+ (* (long s) 100000) p))] (.or b ^BitSet (aget fs x)))
+                             b))]
+                  (loop [t (.nextSetBit ^BitSet la 0)]
+                    (when (>= t 0)
+                      (.put reds (int t) (conj (or (.get reds (int t)) []) p))
+                      (recur (.nextSetBit ^BitSet la (inc t)))))))))
+          (let [row (java.util.TreeMap.)]
+            (dotimes [t nt]
+              (let [sh (goto s t) rs (.get reds (int t))]
+                (cond
+                  (and (nil? sh) (empty? rs)) nil
+                  (and sh (empty? rs)) (.put row (int t) [:shift sh])
+                  (and (nil? sh) (= 1 (count rs))) (.put row (int t) [:reduce (first rs)])
+                  (nil? sh) (.add conflicts {:state s :terminal (nth terms t) :kind :reduce-reduce :prods rs})
+                  :else
+                  (let [choices (for [p rs]
+                                  (let [tp (tok-prec (nth terms t)) pp (prod-prec p)]
+                                    (cond
+                                      (or (nil? tp) (nil? pp)) :dont-know
+                                      (> (first tp) (first pp)) :shift
+                                      (< (first tp) (first pp)) :reduce
+                                      :else (case (second tp) :left :reduce :right :shift :nonassoc :neither))))]
+                    (cond
+                      (some #{:dont-know} choices)
+                      (.add conflicts {:state s :terminal (nth terms t) :kind :shift-reduce :prods rs})
+                      ;; every reduction loses to the shift: the shift (Menhir resolves each shift/reduce pair)
+                      (every? #{:shift} choices) (.put row (int t) [:shift sh])
+                      (> (count rs) 1)
+                      (.add conflicts {:state s :terminal (nth terms t) :kind :shift-reduce-reduce :prods rs :choices choices})
+                      :else
+                      (case (first choices)
+                        :shift (.put row (int t) [:shift sh])
+                        :reduce (.put row (int t) [:reduce (first rs)])
+                        :neither nil))))))
+            (aset actions s row)
+            ;; a default reduction: no shift, one production reduced
+            (let [vs (vals row)]
+              (when (and (seq vs) (every? #(= :reduce (first %)) vs) (apply = (map second vs)))
+                (aset defred s (int (second (first vs)))))))))
+      {:terms terms :nts (mapv (fn [k] (if (= :start (first k)) (str (second k) "'") (get (:names ex) k))) nts)
+       :prods prods :nullable nullable :nt nt
+       :states ns :kernels kernels :trans trans :actions actions :defred defred
+       :start-states (into {} (map (fn [[st _] s] [st s]) starts start-states))
+       :conflicts (vec conflicts)})))
+
+;; ---------------------------------------------------------------------------------------------
+;; The tables written as a namespace
+
+(defn- plan-data
+  "A plan with action keys replaced by indices into the action vector"
+  [plan aidx]
+  (when plan
+    (let [[k len names items] plan]
+      [(aidx k) len names (mapv (fn [it] (if (vector? it) [(nth it 0) (nth it 1) (plan-data (nth it 2) aidx)] it)) items)])))
+
+(defn- collect-actions [plan acc]
+  (if plan
+    (let [[k _ _ items] plan]
+      (reduce (fn [acc it] (if (vector? it) (collect-actions (nth it 2) acc) acc)) (conj acc k) items))
+    acc))
+
+(defn tables-data
+  "The automaton as data for the driver: terminals, nonterminals, productions [lhs len plan start-name nullable-cells],
+  states [default-reduction actions gotos], start states, the action texts"
+  [a]
+  (let [nt (:nt a)
+        akeys (vec (sort (reduce (fn [acc p] (collect-actions (:plan p) acc)) #{} (:prods a))))
+        aidx (into {} (map-indexed (fn [i k] [k i]) akeys))]
+    {:terminals (:terms a)
+     :nonterminals (:nts a)
+     :productions (mapv (fn [p]
+                          (let [^ints r (:rhs p)]
+                            [(:lhs p) (alength r) (plan-data (:plan p) aidx) (:start p)
+                             ;; per cell: true when its symbol is a nullable nonterminal ($symbolstartpos)
+                             (mapv (fn [s] (and (>= s nt) (aget ^booleans (:nullable a) (- s nt)))) r)]))
+                        (:prods a))
+     :states (vec (for [s (range (:states a))]
+                    [(aget ^ints (:defred a) s)
+                     (vec (mapcat (fn [[t [k v]]] [t (if (= k :shift) v (- (inc v)))]) (aget ^objects (:actions a) s)))
+                     (vec (mapcat (fn [[x t]] (when (>= x nt) [(- x nt) t])) (sort-by key (.get ^ArrayList (:trans a) s))))]))
+     :starts (:start-states a)
+     :actions akeys}))
+
+(defn- write-tables [data ^String out ^String source]
+  (let [sb (StringBuilder.)]
+    (.append sb ";; Generated by `bin/repr-ocaml menhir` (arbace.repr.ocaml.menhir) from the pinned OCaml 5.5.0 tarball's\n")
+    (.append sb (str ";; parsing/parser.mly (" source "): its LALR(1) automaton, as Menhir 20250912 --lalr builds it. Do not edit;\n"))
+    (.append sb ";; `bin/repr-ocaml menhir --verify` generates it again and compares. The actions' texts are parser.mly's, the\n")
+    (.append sb ";; keys of arbace.repr.ocaml.actions (LICENSE.md: \"The OCaml Core System\").\n")
+    (.append sb "(ns arbace.repr.ocaml.tables\n  \"The OCaml parser's LALR(1) tables (generated by arbace.repr.ocaml.menhir from parser.mly)\")\n\n")
+    (doseq [[k v] [[:terminals (:terminals data)] [:nonterminals (:nonterminals data)] [:starts (:starts data)]
+                   [:actions (:actions data)]]]
+      (.append sb (str "(def " (name k) "\n  '"))
+      (if (vector? v)
+        (do (.append sb "[")
+            (doseq [[i x] (map-indexed vector v)]
+              (when (pos? i) (.append sb "\n   "))
+              (.append sb (pr-str x)))
+            (.append sb "]"))
+        (.append sb (pr-str (into (sorted-map) v))))
+      (.append sb ")\n\n"))
+    (.append sb "(def productions\n  '[")
+    (doseq [[i p] (map-indexed vector (:productions data))]
+      (when (pos? i) (.append sb "\n    "))
+      (.append sb (pr-str p)))
+    (.append sb "])\n\n(def states\n  '[")
+    (doseq [[i s] (map-indexed vector (:states data))]
+      (when (pos? i) (.append sb "\n    "))
+      (.append sb (pr-str s)))
+    (.append sb "])\n")
+    (let [f (File. out)] (.mkdirs (.getParentFile (.getAbsoluteFile f))) (spit f (str sb)))))
+
+;; ---------------------------------------------------------------------------------------------
+;; MenhirLib's tables in boot/menhir/parser.ml, decoded (PackedIntArray, RowDisplacement, TableInterpreter)
+
+(defn- ocaml-string-bytes
+  "The bytes of the OCaml string literal at i (a double quote): [bytes next-index]"
+  [^String s i]
+  (let [out (java.io.ByteArrayOutputStream.)]
+    (loop [i (inc i)]
+      (let [c (.charAt s i)]
+        (cond
+          (= c \") [(.toByteArray out) (inc i)]
+          (= c \\)
+          (let [d (.charAt s (inc i))]
+            (cond
+              (Character/isDigit d) (do (.write out (Integer/parseInt (subs s (inc i) (+ i 4)))) (recur (+ i 4)))
+              (= d \n) (do (.write out 10) (recur (+ i 2)))
+              (= d \t) (do (.write out 9) (recur (+ i 2)))
+              (= d \r) (do (.write out 13) (recur (+ i 2)))
+              (= d \b) (do (.write out 8) (recur (+ i 2)))
+              (= d \\) (do (.write out 92) (recur (+ i 2)))
+              (= d \") (do (.write out 34) (recur (+ i 2)))
+              (= d \') (do (.write out 39) (recur (+ i 2)))
+              (= d \space) (do (.write out 32) (recur (+ i 2)))
+              (= d \x) (do (.write out (Integer/parseInt (subs s (+ i 2) (+ i 4)) 16)) (recur (+ i 4)))
+              (= d \newline) (recur (loop [j (+ i 2)] (if (#{\space \tab} (.charAt s j)) (recur (inc j)) j)))
+              :else (throw (ex-info (str "escape \\" d) {}))))
+          :else (do (.write out (int c)) (recur (inc i))))))))
+
+(defn- packed-at
+  "The PackedIntArray (k, s) whose parenthesis is at q: [[k bytes] index-after]"
+  [^String src q]
+  (let [m (re-find #"^\((\d+), " (subs src q (+ q 10)))
+        bits (Long/parseLong (second m))
+        [bs j] (ocaml-string-bytes src (.indexOf src "\"" (int q)))]
+    [[bits bs] j]))
+
+(defn- packed
+  "The PackedIntArray after `and NAME =` (nth-one 1: the second of a pair, a RowDisplacement table's data)"
+  [^String src ^String nm nth-one]
+  (let [i (.indexOf src (str "and " nm " =\n"))
+        _ (when (neg? i) (throw (ex-info (str "no table " nm) {})))
+        first-q (loop [q (.indexOf src "(" (int i))]
+                  (if (re-find #"^\((\d+), \"" (subs src q (+ q 12))) q (recur (.indexOf src "(" (int (inc q))))))
+        [t1 j] (packed-at src first-q)]
+    (if (zero? nth-one)
+      t1
+      (let [q (loop [q (.indexOf src "(" (int j))]
+                (if (re-find #"^\((\d+), \"" (subs src q (+ q 12))) q (recur (.indexOf src "(" (int (inc q))))))]
+        (first (packed-at src q))))))
+
+(defn- pget [[bits ^bytes s] i]
+  (let [u (fn [k] (bit-and 0xff (aget s k)))]
+    (case (int bits)
+      1 (bit-and (bit-shift-right (u (bit-shift-right i 3)) (- 7 (bit-and i 7))) 1)
+      2 (bit-and (bit-shift-right (u (bit-shift-right i 2)) (* 2 (- 3 (bit-and i 3)))) 3)
+      4 (bit-and (bit-shift-right (u (bit-shift-right i 1)) (* 4 (- 1 (bit-and i 1)))) 15)
+      8 (u i)
+      16 (bit-or (bit-shift-left (u (* 2 i)) 8) (u (inc (* 2 i))))
+      32 (reduce (fn [acc k] (bit-or (bit-shift-left acc 8) (u (+ (* 4 i) k)))) 0 (range 4)))))
+
+(defn- rd-get [[disp data] i j]
+  (let [d (pget disp i)
+        k (if (zero? (bit-and d 1)) (bit-shift-right d 1) (- (bit-shift-right d 1)))]
+    (pget data (+ k j))))
+
+(defn read-menhir-tables
+  "Menhir's tables from boot/menhir/parser.ml: the token numbering, default reductions, the error bitmap, actions,
+  gotos, the productions' left-hand sides and the entry states"
+  [^String src]
+  (let [t2t (let [i (.indexOf src "let token2terminal")
+                  j (.indexOf src "and error_terminal")]
+              (into {} (for [[_ nm n] (re-seq #"\| ([A-Z0-9_]+)(?: _)? ->\s+(\d+)" (subs src i j))] [nm (Long/parseLong n)])))
+        [ebits ebytes] (packed src "error" 0)
+        entry (into {} (for [[_ nm n] (re-seq #"(?s)(?:let|and) ([a-z_]+) =\s+fun lexer lexbuf : \([^)]*\) ->\s+Obj.magic \(MenhirInterpreter.entry `Simplified (\d+)" src)]
+                         [nm (Long/parseLong n)]))]
+    {:token2terminal t2t
+     :nterms ebits
+     :default (packed src "default_reduction" 0)
+     :error [ebits ebytes]
+     :action [(packed src "action" 0) (packed src "action" 1)]
+     :lhs (packed src "lhs" 0)
+     :goto [(packed src "goto" 0) (packed src "goto" 1)]
+     :entry entry}))
+
+(defn- m-defred [m s] (let [c (pget (:default m) s)] (when (pos? c) (dec c))))
+(defn- m-action [m s t]
+  (let [[n bs] (:error m)]
+    (when (= 1 (pget [1 bs] (+ (* n s) t)))
+      (let [a (rd-get (:action m) s t) op (bit-and a 3) param (bit-shift-right a 2)]
+        (if (>= op 2) [:shift param] [:reduce param])))))
+(defn- m-goto [m s x] (dec (rd-get (:goto m) s x)))
+(defn- m-lhs [m p] (pget (:lhs m) p))
+
+(defn compare-with-menhir
+  "The automaton a against Menhir's tables m: states paired from the entry states, productions and nonterminals
+  paired as the reductions meet (each pairing a bijection), then every action, goto and default reduction compared
+  through the pairing; the differences listed (at most 40)"
+  [a m]
+  (let [terms (:terms a) nt (:nt a)
+        tmap (into {} (for [[i t] (map-indexed vector terms) :when (not= t "#")]
+                        [i (if (= t "error") 0 (get (:token2terminal m) t))]))
+        spair (HashMap.) sback (HashMap.) prpair (HashMap.) prback (HashMap.) ntpair (HashMap.) ntback (HashMap.)
+        problems (ArrayList.)
+        problem (fn [& xs] (when (< (.size problems) 40) (.add problems (apply str xs))))
+        queue (ArrayDeque.)
+        pair-state (fn [s ms]
+                     (if-let [o (.get spair (int s))]
+                       (when-not (= o ms) (problem "state " s " pairs with " o " and " ms))
+                       (if-let [ob (.get sback (long ms))]
+                         (problem "Menhir's state " ms " pairs with " ob " and " s)
+                         (do (.put spair (int s) (long ms)) (.put sback (long ms) (int s)) (.add queue [s ms])))))
+        pair-prod (fn [p mp]
+                    (if-let [o (.get prpair (int p))]
+                      (when-not (= o mp) (problem "production " p " pairs with " o " and " mp))
+                      (if-let [ob (.get prback (long mp))]
+                        (problem "Menhir's production " mp " pairs with " ob " and " p)
+                        (do (.put prpair (int p) (long mp)) (.put prback (long mp) (int p))
+                            (let [l (:lhs (nth (:prods a) p)) ml (m-lhs m mp)]
+                              (if-let [o (.get ntpair (int l))]
+                                (when-not (= o ml) (problem "nonterminal " (nth (:nts a) l) " pairs with " o " and " ml))
+                                (if-let [ob (.get ntback (long ml))]
+                                  (problem "Menhir's nonterminal " ml " pairs with " ob " and " l)
+                                  (do (.put ntpair (int l) (long ml)) (.put ntback (long ml) (int l))))))))))
+        visit (fn [s ms]
+                (let [d (aget ^ints (:defred a) s) md (m-defred m ms)]
+                  (cond
+                    (and (>= d 0) md) (pair-prod d md)
+                    (or (>= d 0) md) (problem "state " s ": default reduction " d " against Menhir's " md)
+                    :else
+                    (doseq [t (range (dec (count terms)))]
+                      (let [mine (get (aget ^objects (:actions a) s) (int t))
+                            theirs (m-action m ms (tmap t))]
+                        (cond
+                          (and (nil? mine) (nil? theirs)) nil
+                          (and (= :shift (first mine)) (= :shift (first theirs))) (pair-state (second mine) (second theirs))
+                          (and (= :reduce (first mine)) (= :reduce (first theirs))) (pair-prod (second mine) (second theirs))
+                          :else (problem "state " s " (Menhir's " ms "), terminal " (nth terms t) ": " (pr-str mine) " against " (pr-str theirs))))))))
+        gotos (fn [s ms final]
+                (doseq [[x t] (.get ^ArrayList (:trans a) s)]
+                  (when (>= x nt)
+                    (if-let [mx (.get ntpair (int (- x nt)))]
+                      (pair-state t (m-goto m ms mx))
+                      (when final (problem "nonterminal " (nth (:nts a) (- x nt)) " never reduced"))))))
+        drain (fn [] (loop [] (when-let [[s ms] (.poll queue)] (visit s ms) (gotos s ms false) (recur))))]
+    (doseq [[st s] (:start-states a)]
+      (pair-state s (get (:entry m) st)))
+    (drain)
+    ;; gotos whose nonterminal was paired after their state was visited, to a fixpoint
+    (loop []
+      (let [before [(.size spair) (.size ntpair)]]
+        (doseq [[s ms] (vec spair)] (gotos s ms false))
+        (drain)
+        (when-not (= before [(.size spair) (.size ntpair)]) (recur))))
+    (doseq [[s ms] (vec spair)] (gotos s ms true))
+    {:states (:states a) :paired-states (.size spair)
+     :prods (count (:prods a)) :paired-prods (.size prpair)
+     :nonterminals (count (:nts a)) :paired-nonterminals (.size ntpair)
+     :menhir-states (quot (* 8 (alength ^bytes (second (:error m)))) (:nterms m))
+     :menhir-prods (alength ^bytes (second (:lhs m)))
+     :problems (vec problems)}))
+
+;; ---------------------------------------------------------------------------------------------
+;; The command
+
+(defn generate
+  "parser.mly's text to [grammar expanded automaton]"
+  [^String text]
+  (let [g (read-grammar text)
+        ex (expand g)
+        a (build g ex)]
+    [g ex a]))
+
+(defn -main [& args]
+  (let [[verb mly x] args
+        t0 (System/nanoTime)
+        secs #(format "%.1f s" (/ (- (System/nanoTime) t0) 1e9))
+        [g ex a] (generate (slurp mly))]
+    (println (str "menhir: " (count (:tokens g)) " tokens, " (count (:rules g)) " rules, " (count (:prods ex))
+                  " expanded productions, " (count (:nts ex)) " nonterminals; " (:states a) " LALR(1) states; "
+                  (count (:conflicts a)) " unresolved conflicts (" (secs) ")"))
+    (doseq [c (take 20 (:conflicts a))]
+      (println "  CONFLICT" (pr-str (update c :prods (fn [ps] (mapv #(str (nth (:nts a) (:lhs (nth (:prods a) %))) "@" (:line (nth (:prods a) %))) ps))))))
+    (case verb
+      "generate" (let [data (tables-data a)]
+                   (write-tables data x (str "SHA-256 " (or (System/getenv "MLY_SHA256") "?")))
+                   (println (str "menhir: " (count (:actions data)) " distinct actions; wrote " x " (" (secs) ")"))
+                   (System/exit (if (empty? (:conflicts a)) 0 1)))
+      "check" (let [m (read-menhir-tables (slurp x))
+                    r (compare-with-menhir a m)]
+                (doseq [p (:problems r)] (println "  DIFF" p))
+                (println (str "menhir check: " (:paired-states r) " of " (:states r) " states paired with Menhir's "
+                              (:menhir-states r) ", " (:paired-prods r) " of " (:prods r) " productions with Menhir's "
+                              (:menhir-prods r) ", " (:paired-nonterminals r) " of " (:nonterminals r) " nonterminals; "
+                              (count (:problems r)) " differences (" (secs) ")"))
+                (System/exit (if (and (empty? (:problems r)) (empty? (:conflicts a))
+                                      (= (:states r) (:paired-states r) (:menhir-states r))
+                                      (= (:prods r) (:paired-prods r) (:menhir-prods r)))
+                               0 1)))
+      "verify" (let [data (tables-data a)
+                     tmp (str x ".verify")]
+                 (write-tables data tmp (str "SHA-256 " (or (System/getenv "MLY_SHA256") "?")))
+                 (let [same (= (slurp tmp) (slurp x))]
+                   (.delete (File. tmp))
+                   (println (if same "menhir verify: the tables are the committed ones" (str "menhir verify: " x " differs from a fresh generation")))
+                   (System/exit (if same 0 1))))
+      (do (println "usage: generate|check|verify PARSER.MLY FILE") (System/exit 2)))))
