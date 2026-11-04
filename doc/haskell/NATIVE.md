@@ -202,7 +202,7 @@ hung over the message, its hints (`Suggested fix:`), the caret lines and a blank
   instances print it (expressions, patterns, `PatBuilder`, types, literals, matches, statements,
   bindings, signatures), with `pprDeeper`'s depth of 5 and `pprDeeperList`'s `....`.
 
-- **The driver's header phase** (`arbace.repr.haskell.driver`, 2026-11-05, branch `haskell-errors2`).
+- **The driver's header phase** (`arbace.repr.haskell.fileargs`, 2026-11-05, branch `haskell-errors2`).
   GHC's driver reads a module's header before it parses it (`getFileArgs`: `getOptions`, then the
   pragmas' flags through `parseDynamicFilePragma`, then `checkProcessArgsResult`), and what it finds there
   stops it or comes before the parse's messages. The helper's `errors` verb runs the same three

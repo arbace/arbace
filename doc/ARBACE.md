@@ -59,7 +59,7 @@ code. Three kinds of things live here:
   combinators, `errors.ae` the parser's messages (`GHC/Parser/Errors/Ppr.hs`, `GHC/Types/Hint/Ppr.hs`, the
   codes of `GHC/Types/Error/Codes.hs`, the printing of `GHC/Types/Error.hs`, `GHC/Utils/Error.hs`,
   `GHC/Driver/Errors.hs`, `GHC/Utils/Logger.hs`), `pprhs.ae` the Outputable instances of the parsed tree
-  (`GHC/Hs/{Expr,Pat,Type,Lit,Binds,Decls}.hs`, `GHC/Parser/Types.hs`), the same day; `driver.ae` the driver's
+  (`GHC/Hs/{Expr,Pat,Type,Lit,Binds,Decls}.hs`, `GHC/Parser/Types.hs`), the same day; `fileargs.ae` the driver's
   header phase (`GHC/Parser/Header.hs`, `GHC/Driver/{CmdLine,Session}.hs`, `GHC/Driver/Pipeline/Execute.hs`'s
   getFileArgs), with `flags.ae`, the names and kinds of `flagsDynamic` as the helper's `flags` verb prints them
   (2026-11-05); `ast.ae`,
