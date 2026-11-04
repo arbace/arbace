@@ -20,6 +20,10 @@
 --       BlankSrcSpan BlankEpAnnotations after eraseEpLayout (NoBlank... with --full), and
 --       OUTDIR/FILE.lines: the start line of every located node (hsdump lines)
 --   hsdump lines [--libdir DIR] [--ghc FLAG... --files] FILE...   the lines, to standard output
+--   hsdump cpp -o OUTDIR [--libdir DIR] [--ghc FLAG... --files] FILE...
+--       one OUTDIR/FILE.hspp per module: the text GHC parses (CPP's output, unlit's, hsc2hs's),
+--       which repr/haskell's native reader reads (arbace.repr.haskell.native), and
+--       OUTDIR/FILE.hspp.edn, the dump's (hsdump/config {...}) of it (the preprocessing's keys)
 -- FILE is relative to the current directory (the package's directory: it is the file name of
 -- every span). R6: an .hsc FILE is run through the host's hsc2hs first (--hsc2hs-arg A, repeated:
 -- its arguments; the output X.hs written beside X.hsc, as Cabal's build writes it, recorded in
@@ -192,6 +196,20 @@ main = do
         "lines" -> case res of
           Left msg -> putStrLn ("hsdump/error " ++ firstLine msg)
           Right p -> hPutBuilder' stdout (linesOf (mkFastString file) (pModule p))
+        -- the text GHC parses (the CPP output, unlit's, hsc2hs's; the source otherwise), for the
+        -- native reader (arbace.repr.haskell.native), which leaves the preprocessing to GHC's driver
+        -- and the preprocessing's configuration, the dump's (hsdump/config {...}) in FILE.hspp.edn
+        "cpp" -> do
+          out <- outFile o file ".hspp"
+          outc <- outFile o file ".hspp.edn"
+          case res of
+            Left msg -> do
+              withUtf8File out $ \h -> hPutStrLn h ("hsdump/error " ++ firstLine msg)
+              withUtf8File outc $ \h -> hPutBuilder' h (BB.string7 "(hsdump/error " <> str msg <> BB.char7 ')' <> BB.char7 '\n')
+            Right p -> do
+              B.writeFile out (pText p)
+              cfg <- configOf o libdir (fromMaybe "" ghcUnit) dflags2 p
+              withUtf8File outc $ \h -> hPutBuilder' h (cfg <> BB.char7 '\n')
         v -> hPutStrLn stderr ("hsdump: unknown verb " ++ v) >> exitWith (ExitFailure 2)
   n <- readIORef failures
   when (n > 0) $ exitWith (ExitFailure 1)

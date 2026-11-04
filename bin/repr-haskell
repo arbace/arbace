@@ -88,6 +88,28 @@
 #                                 .tmp/repr-haskell/iface/CORPUS.layout.report.edn). --layout-only:
 #                                 the layout layout alone (dump, convert, print, trees; with --iface
 #                                 its interfaces only)
+#   bin/repr-haskell read --reader native [-o DIR] FILE... [--hsc2hs-arg A...] [--ghc FLAG...]
+#                                 the native reader (doc/haskell/NATIVE.md): each module read by
+#                                 Arbace code alone (arbace.repr.haskell.native: GHC 9.14.1's lexer,
+#                                 its Happy grammar's tables and actions, the Haddock pass), its dump
+#                                 into DIR/FILE.edn (default .tmp/repr-haskell/native), then converted
+#                                 to forms as the helper's dumps are (DIR/forms/); a module that needs
+#                                 CPP (or unlit, hsc2hs) read from the text GHC's driver makes, the
+#                                 helper's `cpp` verb (the preprocessing stays GHC's: DIR/hspp/)
+#   bin/repr-haskell tables [--check]
+#                                 the native parser's tables (arbace/repr/haskell/tables.ae) generated
+#                                 from GHC's grammar, the pinned tarball's compiler/GHC/Parser.y,
+#                                 by arbace.repr.haskell.happy (Happy's LALR(1) construction in
+#                                 Arbace); --check: the productions and the tables against the
+#                                 tarball's generated Parser.hs (Happy's own), state for state, and
+#                                 the committed tables.ae against a fresh generation
+#   bin/repr-haskell native-check [LIST]
+#                                 the native reader against the helper over a list of modules
+#                                 (default test/haskell/native-check.txt: lines DIR FILE [FLAG...],
+#                                 DIR a corpus package or test:SUBDIR of test/haskell/): each module
+#                                 dumped by the helper (mode :lines), read natively, the trees and
+#                                 header pragmas compared as data, then both converted and the forms
+#                                 compared as text; report .tmp/repr-haskell/native-check/report.edn
 #   bin/repr-haskell test         the spec's cases (test/haskell/; bin/lib/repr-haskell/test): the
 #                                 reader's samples, the worked example converted and its round trip,
 #                                 the interface level's normalizations (test/haskell/iface/), the
@@ -567,6 +589,111 @@ tree_level() {
     --times "dump $((t1 - t0)) convert $((t2 - t1)) print $((t3 - t2)) parse $((t4 - t3))"
 }
 
+# native_read [-o DIR] FILE... [--ghc FLAG...]: the native reader over modules (relative to the
+# current directory), dumps into DIR/FILE.edn and forms into DIR/forms/; a module that needs CPP,
+# unlit or hsc2hs first preprocessed by the helper's cpp verb (GHC's driver) into DIR/hspp/
+native_read() {
+  local out=$rh/native files=() gflags=() hargs=() f need=() hspp=""
+  while [ $# -gt 0 ]; do
+    case $1 in
+      -o) out=$2; shift 2 ;;
+      --hsc2hs-arg) hargs+=("$1" "$2"); shift 2 ;;
+      --ghc) shift; gflags=("$@"); break ;;
+      *) files+=("$1"); shift ;;
+    esac
+  done
+  mkdir -p "$out"
+  for f in "${files[@]}"; do
+    case $f in
+      *.lhs|*.lhs-boot|*.lhsig|*.hsc) need+=("$f") ;;
+      *) if grep -q -E -i '^[[:space:]]*\{-#[[:space:]]*(LANGUAGE[^#]*\bCPP\b|OPTIONS(_GHC)?[^#]*(-cpp|-XCPP))' "$f" ||
+            printf '%s\n' "${gflags[@]}" | grep -q -x -E -e '-XCPP|-cpp'; then need+=("$f"); fi ;;
+    esac
+  done
+  if [ ${#need[@]} -gt 0 ]; then
+    ghc_check; build
+    hsdump cpp -o "$out/hspp" "${hargs[@]}" --ghc "${gflags[@]}" --files "${need[@]}" || return 1
+    hspp=$out/hspp
+  fi
+  local st=0 dumps=() m
+  for f in "${files[@]}"; do m=$f; [ "${f%.hsc}" != "$f" ] && m=${f%c}; rm -f "$out/$m.edn"; done
+  arbace_tool -m arbace.repr.haskell.native read -o "$out" ${hspp:+--hspp "$hspp"} \
+    --cpp-files "$(printf '%s ' "${need[@]}")" --flags "$(printf '%s ' "${gflags[@]}")" "${files[@]}" || st=1
+  # the modules read (an .hsc module's dump is its X.hs's), converted as the helper's dumps are
+  for f in "${files[@]}"; do
+    m=$f; [ "${f%.hsc}" != "$f" ] && m=${f%c}
+    [ -f "$out/$m.edn" ] && dumps+=("$out/$m.edn")
+  done
+  [ ${#dumps[@]} -eq 0 ] || read_files --jobs "$jobs" -o "$out/forms" "${dumps[@]}" || st=1
+  return $st
+}
+
+# parser_src: GHC's grammar and its Happy-generated parser, extracted from the pinned tarball (the
+# corpus's) into .tmp/repr-haskell/parser/, read in place by arbace.repr.haskell.happy
+parser_src() {
+  corpus_fetch ghc-9.14.1 > "$TMPDIR/repr-haskell-fetch.txt"
+  local f url tb d=$rh/parser
+  f=$(corpus_file ghc-9.14.1)
+  url=$(arbace_tool -e "(println (:url (:tarball (read-string (slurp \"$f\")))))")
+  tb=$rh/corpus/$(basename "$url")
+  mkdir -p "$d"
+  if [ ! -f "$d/ghc-9.14.1/compiler/GHC/Parser.y.source" ] || [ ! -f "$d/ghc-9.14.1/compiler/GHC/Parser.hs" ]; then
+    tar -xJf "$tb" -C "$d" ghc-9.14.1/compiler/GHC/Parser.y.source ghc-9.14.1/compiler/GHC/Parser.hs
+  fi
+  parser_y=$d/ghc-9.14.1/compiler/GHC/Parser.y.source
+  parser_hs=$d/ghc-9.14.1/compiler/GHC/Parser.hs
+}
+
+tables() {
+  parser_src
+  if [ "${1:-}" = --check ]; then
+    arbace_tool -m arbace.repr.haskell.happy check --parser-y "$parser_y" --parser-hs "$parser_hs"
+  else
+    arbace_tool -m arbace.repr.haskell.happy gen --parser-y "$parser_y" --out "$root/arbace/repr/haskell/tables.ae"
+  fi
+}
+
+# native_check [LIST]: the native check (test/haskell/native-check.txt by default)
+native_check() {
+  local list=${1:-$root/test/haskell/native-check.txt} w=$rh/native-check dir flags key src
+  corpus_fetch ghc-9.14.1 > "$TMPDIR/repr-haskell-fetch.txt"
+  rm -rf "$w"; mkdir -p "$w"
+  local pl; pl=$(mktemp "$TMPDIR/repr-haskell-plan.XXXXXX")
+  corpus_plan ghc-9.14.1 all > "$pl"
+  : > "$w/list.txt"
+  local d f rest hargs mf
+  while read -r d f rest; do
+    case $d in ''|'#'*) continue ;; esac
+    hargs=""
+    if [ "${d#test:}" != "$d" ]; then
+      # a copy of the test directory (hsc2hs writes its output beside the .hsc)
+      dir=$w/src/${d#test:}; flags=${rest:--XGHC2021 -haddock}; key=test/${d#test:}
+      [ -d "$dir" ] || { mkdir -p "$dir" && cp -R "$root/test/haskell/${d#test:}/." "$dir/"; }
+    else
+      IFS=$'\t' read -r _ dir flags _ hargs < <(grep -P "^$d\t" "$pl")
+      [ -n "$dir" ] || { echo "repr-haskell: native-check: no package $d" >&2; continue; }
+      dir=$srcroot/$dir; key=$d
+    fi
+    # the helper's options as the corpus's dumps give them: hsc2hs's arguments (R6), the flags
+    # shellcheck disable=SC2086
+    (cd "$dir" && "$helper" dump -o "$w/dumps/$key" --libdir "$libdir" --corpus ghc-9.14.1 \
+       --helper-hash "sha256:$(helper_hash)" --repo "$root" $hargs --ghc $flags --files "$f") 2>> "$w/helper.err" || true
+    # an .hsc module is its hsc2hs output X.hs (R6); a module the helper preprocessed (CPP,
+    # unlit, hsc2hs) is read from the text GHC parses, the helper's cpp verb's X.hspp
+    mf=$f; [ "${f%.hsc}" != "$f" ] && mf=${f%c}
+    src=$dir/$f
+    if [ "$mf" != "$f" ] || grep -q ':cpp {\|:unlit true\|:hsc2hs {' "$w/dumps/$key/$mf.edn" 2> "$TMPDIR/repr-haskell-grep.txt"; then
+      # shellcheck disable=SC2086
+      (cd "$dir" && "$helper" cpp -o "$w/hspp/$key" --libdir "$libdir" --repo "$root" $hargs \
+         --ghc $flags --files "$f") 2>> "$w/helper.err" || true
+      src=$w/hspp/$key/$mf.hspp
+    fi
+    printf '%s %s %s\n' "$w/dumps/$key/$mf.edn" "$src" "$mf" >> "$w/list.txt"
+  done < "$list"
+  rm -f "$pl"
+  arbace_tool -m arbace.repr.haskell.native check --list "$w/list.txt" --report "$w/report.edn"
+}
+
 cmd=${1:-}
 [ $# -gt 0 ] && shift
 case $cmd in
@@ -604,6 +731,11 @@ case $cmd in
     done
     hsdump dump $full -o "$out" --ghc "${gflags[@]}" --files "${files[@]}" ;;
   read)
+    if [ "${1:-}" = --reader ]; then
+      reader=${2:-helper}; shift 2
+      if [ "$reader" = native ]; then native_read "$@"; exit $?; fi
+      [ "$reader" = helper ] || { echo "repr-haskell: --reader native|helper" >&2; exit 2; }
+    fi
     full=""
     if [ "${1:-}" = --full ] && [ "${2:-}" = --corpus ]; then full=--full; shift; fi
     if [ "${1:-}" = --corpus ]; then
@@ -618,6 +750,8 @@ case $cmd in
     fi ;;
   print) arbace_tool -m arbace.repr.haskell print --jobs "$jobs" "$@" ;;
   roundtrip) ghc_check; roundtrip "$@" ;;
+  native-check) ghc_check; build; native_check "$@" ;;
+  tables) ghc_check; tables "$@" ;;
   test) exec "$root/bin/lib/repr-haskell/test" "$@" ;;
   *) sed -n '2,/^set -euo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac
