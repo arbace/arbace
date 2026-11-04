@@ -128,7 +128,7 @@
 (defn- src-of "A literal's SourceText, nil without" [x]
   (some #(when (and (seq? %) (= 'src (first %))) (second %)) (when (seq? x) x)))
 
-(declare ppr-lexpr ppr-expr ppr_expr ppr-lpat ppr-pat ppr-ltype ppr-type ppr-lit ppr-local-binds
+(declare ppr-lexpr ppr-expr ppr_expr ppr-lpat ppr-pat ppr-ltype ppr-type ppr-lit ppr-local-binds ppr-pragma ppr-decl ppr-cmd ppr-quasi
          ppr-mg ppr-stmt ppr-sig-type ppr-wc ppr-lcmd ppr-cmd ppr-bind ppr-sig ppr-grhss ppr-con-decl-field)
 
 ;;; ------------------------------------------------------------------------------------------
@@ -239,7 +239,10 @@
                                  (ppr-ltype ty)))
                   HsRecTy (d/braces (sep (d/punctuate d/comma (map ppr-con-decl-field (f2 x)))))
                   (unknown x)))
-      HsSpliceTy (unknown t)
+      HsSpliceTy (let [sp (f2 t)]
+                   (case (hd sp)
+                     HsUntypedSpliceExpr (<> (text "$") (ppr-lexpr (f2 sp)))
+                     HsQuasiQuote (ppr-quasi sp)))
       (unknown t))))
 
 (defn ppr-ltype [t] (ppr-type t))
@@ -362,7 +365,7 @@
 ;;; Expressions (pprExpr, ppr_expr)
 
 (defn- atomic-expr? [e] (contains? '#{HsVar HsLit HsOverLit HsIPVar HsOverLabel HsHole} (hd e)))
-(defn- quiet-expr? [e] (contains? '#{HsPar HsApp HsAppType OpApp} (hd e)))
+(defn- quiet-expr? [e] (contains? '#{HsPar HsApp HsAppType OpApp HsCmdPar HsCmdApp} (hd e)))
 
 (defn ppr-expr "pprExpr: pprDeeper unless atomic or quiet" [e]
   (let [e (ul e)]
@@ -409,6 +412,17 @@
       (let [[x & more] as
             punc (if more (if (= 'Present (hd (first more))) (<> d/comma d/space) d/comma) d/empty)]
         (recur more (conj out (if (= 'Present (hd x)) (<> (ppr_expr (ul (f2 x))) punc) punc)))))))
+
+(defn- ppr-flabel
+  "ppr of a DotFieldOcc (located or not): its field label"
+  [f]
+  (text (str (second (ul (f2 (ul f)))))))
+
+(defn- th-brackets "thBrackets" [kind body]
+  (<+> (<> (d/char* \[) kind d/vbar) body (text "|]")))
+
+(defn- ppr-quasi "ppr_quasi of an HsQuasiQuote" [q]
+  (d/hcat [(d/char* \[) (ppr-name (ul (f2 q))) d/vbar (text (str (ul (f3 q)))) (text "|]")]))
 
 (defn ppr_expr "ppr_expr" [e]
   (let [e (ul e)]
@@ -465,25 +479,38 @@
                                                                          l (let [o (ul lhs)] (if (= 'FieldOcc (hd o)) (ppr-prefix-occ (ul (f2 o))) (unknown o)))]
                                                                      (if pun l (<+> l d/equals (ppr-lexpr rhs)))))
                                                           (f2 flds)))))))
-      HsGetField (<> (ppr_expr (f2 e)) d/dot (text (str (second (ul (f3 e))))))
+      HsGetField (<> (ppr_expr (f2 e)) d/dot (ppr-flabel (f3 e)))
+      HsProjection (parens (d/hcat (cons d/dot (d/punctuate d/dot (map ppr-flabel (f2 e))))))
+      HsPragE (sep [(ppr-pragma (f2 e)) (ppr-lexpr (f3 e))])
+      HsTypedSplice (<> (text "$$") (ppr-lexpr (f2 (f2 e))))
+      HsUntypedSplice (let [sp (f2 e)]
+                        (case (hd sp)
+                          HsUntypedSpliceExpr (<> (text "$") (ppr-lexpr (f2 sp)))
+                          HsQuasiQuote (ppr-quasi sp)))
+      HsTypedBracket (<+> (text "[||") (ppr-lexpr (f2 e)) (text "||]"))
       ExprWithTySig (hang (<+> (nest 2 (ppr_expr (f2 e))) d/dcolon) 4 (ppr-wc (f3 e)))
       ArithSeq (let [info (f3 e)
                      x #(ppr-lexpr %)]
                  (d/brackets
                   (case (hd info)
-                    From (<> (x (f1 info)) (text ".."))
-                    FromThen (<> (x (f1 info)) d/comma (x (f2 info)) (text ".."))
-                    FromTo (d/hcat [(x (f1 info)) (text "..") (x (f2 info))])
-                    FromThenTo (d/hcat [(x (f1 info)) d/comma (x (f2 info)) (text "..") (x (f3 info))]))))
+                    From (d/hcat [(x (f1 info)) (text " .. ")])
+                    FromThen (d/hcat [(x (f1 info)) d/comma d/space (x (f2 info)) (text " .. ")])
+                    FromTo (d/hcat [(x (f1 info)) (text " .. ") (x (f2 info))])
+                    FromThenTo (d/hcat [(x (f1 info)) d/comma d/space (x (f2 info)) (text " .. ") (x (f3 info))]))))
       HsProc (d/hsep [(text "proc") (ppr-lpat (f2 e)) d/arrow (ppr-lcmd (f2 (ul (f3 e))))])
       HsStatic (d/hsep [(text "static") (ppr-lexpr (f2 e))])
       HsEmbTy (d/hsep [(text "type") (ppr-wc (f2 e))])
       HsUntypedBracket (let [q (f2 e)]
                          (case (hd q)
                            VarBr (if (f2 q) (<> (d/char* \') (ppr-prefix-occ (ul (f3 q)))) (<> (text "''") (ppr-prefix-occ (ul (f3 q)))))
-                           ExpBr (d/hcat [(text "[|") (ppr-lexpr (f2 q)) (text "|]")])
+                           ExpBr (th-brackets d/empty (ppr-lexpr (f2 q)))
+                           PatBr (th-brackets (d/char* \p) (ppr-lpat (f2 q)))
+                           TypBr (th-brackets (d/char* \t) (ppr-ltype (f2 q)))
+                           DecBrL (th-brackets (d/char* \d) (vcat (map ppr-decl (f2 q))))
                            (unknown q)))
-      (unknown e))))
+      (if (and (hd e) (str/starts-with? (name (hd e)) "HsCmd"))
+        (ppr-cmd e)
+        (unknown e)))))
 
 ;;; ------------------------------------------------------------------------------------------
 ;;; Matches, statements, bindings
@@ -538,6 +565,15 @@
       BindStmt (d/hsep [(ppr-lpat (f2 s)) d/larrow (ppr-lexpr (f3 s))])
       LetStmt (d/hsep [(text "let") (deeper #(ppr-local-binds (f2 s)))])
       BodyStmt (ppr-lexpr (f2 s))
+      ParStmt (sep (d/punctuate (text " | ")
+                                (map (fn [b] (d/interpp'-sp (map ppr-stmt (f2 b)))) (f2 s))))
+      TransStmt (let [[_ _ form stmts _ using by] s
+                      by-doc (if (a/just? by) (<+> (text "by") (ppr-lexpr (second by))) d/empty)]
+                  (sep (d/punctuate d/comma
+                                    (concat (map ppr-stmt stmts)
+                                            [(if (= form 'GroupForm)
+                                               (sep [(text "then group") (nest 2 by-doc) (nest 2 (<+> (text "using") (ppr-lexpr using)))])
+                                               (sep [(text "then") (nest 2 (ppr-lexpr using)) (nest 2 by-doc)]))]))))
       RecStmt (<+> (text "rec") (vcat [(deeper-list vcat (map (fn [x] (delay (ppr-stmt x))) (ul (f2 s))))]))
       (unknown s))))
 
@@ -572,8 +608,43 @@
 ;;; ------------------------------------------------------------------------------------------
 ;;; Commands
 
-(defn ppr-cmd "ppr_cmd" [c] (unknown (ul c)))
-(defn ppr-lcmd [c] (ppr-cmd c))
+(defn- cmd-arg "pprCmdArg: an HsCmdTop's command" [t] (ppr-cmd (let [t (ul t)] (if (= 'HsCmdTop (hd t)) (f2 t) t))))
+
+(defn ppr-cmd "ppr_cmd" [c]
+  (let [c (ul c)]
+    (case (hd c)
+      HsCmdPar (parens (ppr-cmd (f2 c)))
+      HsCmdApp (let [collect (fn collect [fun args]
+                               (let [f (ul fun)]
+                                 (if (= 'HsCmdApp (hd f)) (collect (f2 f) (cons (f3 f) args)) [fun args])))
+                     [fun args] (collect (f2 c) [(f3 c)])]
+                 (hang (ppr-cmd fun) 2 (sep (map ppr-lexpr args))))
+      HsCmdLam (let [[_ _ v mg] c]
+                 (if (= v 'LamSingle) (ppr-mg mg) (sep [(lam-case-keyword v) (nest 2 (ppr-mg mg))])))
+      HsCmdCase (let [[_ _ x mg] c]
+                  (sep [(sep [(text "case") (nest 4 (ppr-lexpr x)) (text "of")]) (nest 2 (ppr-mg mg))]))
+      HsCmdIf (let [[_ _ _ e ct ce] c]
+                (sep [(d/hsep [(text "if") (nest 2 (ppr-lexpr e)) (text "then")])
+                      (nest 4 (ppr-lexpr ct)) (text "else") (nest 4 (ppr-lexpr ce))]))
+      HsCmdLet (let [[_ _ binds body] c]
+                 (if (= 'HsCmdLet (hd (ul body)))
+                   (sep [(hang (text "let") 2 (d/hsep [(ppr-local-binds binds) (text "in")])) (ppr-cmd body)])
+                   (sep [(hang (text "let") 2 (ppr-local-binds binds)) (hang (text "in") 2 (ppr-lexpr body))])))
+      HsCmdDo (<+> (text "do") (deeper-list vcat (map (fn [s] (delay (ppr-stmt s))) (ul (f2 c)))))
+      HsCmdArrApp (let [[_ _ arrow arg order left?] c
+                        [t1 t2] (if (= order 'HsFirstOrderApp) ["-<" ">-"] ["-<<" ">>-"])]
+                    (if left?
+                      (d/hsep [(ppr-lexpr arrow) (text t1) (ppr-lexpr arg)])
+                      (d/hsep [(ppr-lexpr arg) (text t2) (ppr-lexpr arrow)])))
+      HsCmdArrForm (let [[_ _ op fix args] c
+                         o (ul op)
+                         fall (hang (<+> (text "(|") (ppr_expr o)) 4
+                                    (<+> (sep (map cmd-arg args)) (text "|)")))]
+                     (if (and (= 'HsVar (hd o)) (= 2 (count args)) (= fix 'Infix))
+                       (hang (cmd-arg (first args)) 4 (sep [(ppr-infix-occ (ul (f2 o))) (cmd-arg (second args))]))
+                       fall))
+      (ppr_expr c))))
+(defn ppr-lcmd "pprLCmd" [c] (ppr-expr c))
 
 ;;; ------------------------------------------------------------------------------------------
 ;;; Not yet printed
@@ -597,7 +668,7 @@
                     src (some #(when (and (seq? %) (= 'src (first %))) (second %)) (when (seq? st) (list st)))
                     lsrc (nth sl 1)]
                 (<+> (text (or (when (string? st) st) src "{-# SCC"))
-                     (if (and (seq? lsrc) (= 'src (first lsrc))) (text (second lsrc)) (d/double-quotes (text (nth sl 2))))
+                     (if (and (seq? lsrc) (= 'src (first lsrc))) (text (second lsrc)) (text (nth sl 2)))
                      (text "#-}")))
     (unknown x)))
 
