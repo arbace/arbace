@@ -52,7 +52,7 @@ applied on this branch: the existing `reap` step's `:inputs` gain `"test/python/
 
 ;; ---- the essential tier: one chain, 40 s warm on the VM (GTS215 (a): <= 2 min, <= 4 threads, <= 3 GiB, no lock)
 {:name pyi-aot-runtime :phase :build :kind :build :mem-gib 3          ; cold: 6.6 min (the runtime printed, the stdlib modules compiled)
- :cmd "bin/pyi check --aot --no-pyi --only samples/functions.py"      ; warms .tmp/repr-python/pyi/aot (REQUEST R4: a shared cache)
+ :cmd "bin/pyi check --aot --no-pyi --only samples/functions.py"      ; warms the AOT cache (R4, abd7071a: shared from the main checkout)
  :hosts [:stage0 :go] :inputs [:lib-tools :tools :pyi]}
 {:name python-read-essential :mem-gib 2 :phase :essential :chain python-essential
  :cmd "bin/repr-python spec-check && bin/repr-python samples && bin/repr-python roundtrip samples && bin/repr-python roundtrip --text samples && bin/pyi gen --check && bin/pyi scope-check samples synthetic errors && bin/pyi compile-check --full samples synthetic errors"
@@ -93,9 +93,11 @@ applied on this branch: the existing `reap` step's `:inputs` gain `"test/python/
  :hosts [:stage0 :go :python] :never-loads [arbace.j2g] :pins ["test/python/corpora.edn"] :inputs [:lib-tools :tools :python :pyi]
  :parts [{:part language-core} {:part stdlib-tests} {:part lib-test-asyncio} {:part lib-test-all}]
  :summary ["methods:|classed|failing|regressions|control" 5]
- :rotate {:only "--only {list}" :universe "test/python/check-lib-test-linux-amd64.edn" :id-re "^\\[\"([^\"/]+)/"   ; modules (PY7's)
-          :subset "test/python/corpora.edn" :subset-key :subset-lib-test :always ["test_bool" "test_int"]
-          :failed-re "^   failing: ([^/]+)/.*$"}}
+ :rotate {:only "--only {list}" :universe "test/python/check-lib-test-linux-amd64.edn"    ; PY7-check's declaration (as settled)
+          :subset "test/python/corpora.edn"                    ; each corpus's :subset, lib-test-all's the top-level :lib-test-all map
+          :id-re "^\\s*\\[\"([^\"]+)\" :[a-z-]+ \".*\" :([a-z-]+)\\]$"  ; method ids, the corpus as group 2
+          :slice-re "^([^/]+)/"                                ; sliced by module: REQUEST cc463c8d (plan.ae)
+          :failed-re "^   failing: (.+)$"}}                    ; no :always: --only adds the controls' subjects itself
 {:name pyi-bench :mem-gib 3 :phase :full :chain python-full :cmd "bin/pyi bench"
  :hosts [:stage0 :go :python] :never-loads [arbace.j2g] :inputs [:lib-tools :tools :python :pyi]
  :parts [{:part pyperformance :clean-only true}] :summary ["benchmarks|classed|FAIL" 3]}
@@ -107,8 +109,9 @@ applied on this branch: the existing `reap` step's `:inputs` gain `"test/python/
 **The negative controls before entry** (GTS218 (a)): each step's family must have one that fails. Present: `check --aot`'s
 judge (two passing programs against each other's references; the essential's 20 hold it), `lex-check`'s, PY7's
 `test/python/controls.edn` (`bin/pyi check`), `lib-test-all`'s. Missing: the round trips (both modes), `parse-check`,
-`scope-check` and `compile-check`: REQUESTs R1 and R3. Until they exist, `python-roundtrip`, `python-front` and the
-`parse-check` half of `python-native` cannot enter under GTS218 (a), and `python-read-essential` enters only with them.
+`scope-check` and `compile-check` (R3: present since PY7-check's dc8aa6d1, judged by their own judge). Until R1's exist,
+`python-roundtrip` and the `parse-check` half of `python-native` cannot enter under GTS218 (a), and
+`python-read-essential` enters only with them.
 
 **The REQUESTs** (to their owners; R2 and R5 are commits on this branch, the others text):
 - **R1 (PY9, `bin/repr-python`):** `roundtrip`, `roundtrip --text`, `lex-check` and `parse-check` write their results file on
@@ -116,10 +119,10 @@ judge (two passing programs against each other's references; the essential's 20 
   `--only-list FILE` (ids `CORPUS/FILE`, a judge that leaves out what a partial run did not run: GTS223 (a)); print a
   failure as `FAIL ID<TAB>WHY`; a negative control in the round trips and `parse-check` (a file's output judged against
   another file's reference, which must fail); `--no-mutants` keeps working beside a corpus argument.
-- **R2 (PY7-check, `bin/pyi`; commit 407eac20):** `check --aot --only-list FILE`.
-- **R3 (PY7-check, `bin/pyi`):** a negative control in `scope-check` and `compile-check` (a file's table or verdict judged
+- **R2 (PY7-check, `bin/pyi`; commit 407eac20):** `check --aot --only-list FILE`. Taken as PY7-check's 3c34bf52.
+- **R3 (PY7-check, `bin/pyi`; done, dc8aa6d1):** a negative control in `scope-check` and `compile-check` (a file's table or verdict judged
   against another file's reference).
-- **R4 (PY7-check, `bin/pyi`):** the AOT's work directory (`.tmp/repr-python/pyi/aot`: the printed runtime, keyed by its
+- **R4 (PY7-check, `bin/pyi`; done, abd7071a: `.tmp/repr-python/pyi/aot-shared`, `PYI_AOT_SHARED`):** the AOT's work directory (`.tmp/repr-python/pyi/aot`: the printed runtime, keyed by its
   forms' digest, and the compiled modules, keyed by their IR's hash) shareable from the main checkout's `.tmp` (as the
   gate's executables are), so the essential tier's cold 6.6 minutes are paid once per runtime, not once per worktree.
 - **R5 (PY7-runtime, `arbace/python/aot.ae`; commit 36bf4e52):** the judge keeps pyi's outcome (`:pyi-outcome`) on a

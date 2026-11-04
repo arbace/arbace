@@ -530,7 +530,7 @@ python-essential: ## PY10: Python's essential chain as the gate's proposed steps
 	bin/pyi gen --check
 	bin/pyi scope-check samples synthetic errors
 	bin/pyi compile-check --full samples synthetic errors
-	bin/pyi check --aot --no-pyi $$(sed -n 's/^[^#]/--only &/p' test/python/essential-aot.txt)
+	bin/pyi check --aot --no-pyi --only-list test/python/essential-aot.txt
 
 pyi-bench: ## PY8: pyperformance's pure benchmarks run by CPython, compiled and on the loop, the seconds (bin/pyi bench)
 	bin/pyi bench
