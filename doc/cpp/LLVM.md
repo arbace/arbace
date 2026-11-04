@@ -7,9 +7,9 @@ C23's interpreter (ci, C5) and AOT (C6); CP7 (a): exceptions by a pending flag (
 
 Pieces:
 
-- `arbace.repr.llvm` (`arbace/repr/llvm.ae`, `arbace/repr/llvm/{read,print,full,verify,mutate}.ae`): IR text → LLVM forms
-  (`read`), LLVM forms → IR text (`print`), the forms as `.ae` text (`module-text`), mode `:full` (§6.1), the verifier and
-  its mutants (§6.2); `bin/repr-llvm read|print|roundtrip|verify|verify-check|mutants`.
+- `arbace.repr.llvm` (`arbace/repr/llvm.ae`, `arbace/repr/llvm/{read,print,full,verify,intr,mutate}.ae`): IR text → LLVM forms
+  (`read`), LLVM forms → IR text (`print`), the forms as `.ae` text (`module-text`), mode `:full` (§6.1), the verifier (§6.2, §6.2.1; `intr`: the intrinsics' names and signatures) and
+  its mutants; `bin/repr-llvm read|print|roundtrip|verify|verify-check|mutants`.
 - `arbace.cpp.lower` (`arbace/cpp/lower.ae`): LLVM forms → C forms; `bin/cppi lower`, `bin/cppi lower-check`.
 - The runtime (CX7, §10): libsupc++ and libstdc++-v3/src compiled to IR by the oracle and lowered by `arbace.cpp.lower`
   (`bin/cppi runtime-build`, `test/cpp/runtime/units.edn`), and the pending-flag layer of exceptions,
@@ -264,14 +264,41 @@ Ported (the namespace's `rules`):
 | | `comdat-declaration` | `Declaration may not be in a Comdat!` |
 
 Not ported: LLParser's syntax errors with their positions (the reader refuses a text outside the grammar with its own
-message); the Verifier's attribute rules (parameter and function attributes' compatibility, `sret`, `byval`, `inalloca`,
-`swifterror`, `immarg`), calling conventions, `musttail`, GC statepoints and the per-intrinsic checks of
-visitIntrinsicCall beyond `lifetime` (the intrinsic table is small); Windows EH's funclet rules (catchswitch, catchpad and
-cleanuppad parents, funclet bundles); atomic orderings' constraints; the structure of metadata nodes (module flags,
-`!prof`, `!tbaa`, a `!range`'s contents) and of debug info (opt only warns on broken debug info and strips it: no
-verdict); aliases' and ifuncs' rules, global ctors and dtors, use-list orders' validity, `blockaddress`; AutoUpgrade
-beyond lifetime's old form. One known divergence: a label defined twice (`a:` ... `a:`) is a second block here, LLParser
-appends the second's instructions to the first's block.
+message); GC statepoints and the per-intrinsic checks of visitIntrinsicCall beyond `lifetime`, `ptrmask` and the
+signatures of the table (the coroutine, statepoint, vector-predication, matrix and constrained-FP intrinsics have no
+entry); Windows EH's sibling and nesting rules (`Unwind edges out of a funclet pad must have the same unwind dest`, `A
+cleanupret must exit its cleanup`, `A single unwind edge may only enter one EH pad`, which need the funclets' coloring);
+swifterror's argument rules, `clang.arc.attachedcall`, VFABI names, the `memory(...)` and `PIC Level` module flag
+values' syntax; atomic orderings' constraints; DI nodes beyond the list of §6.2.1; aliases' and ifuncs' rules, global
+ctors and dtors, use-list orders' validity, `blockaddress`; AutoUpgrade beyond the old intrinsic forms of
+`old-form-pattern`. Known divergences: a label defined twice (`a:` ... `a:`) is a second block here, LLParser appends
+the second's instructions to the first's block; opt aborts (`PLEASE submit a bug report`) on a call to an intrinsic
+declared with a mismatching signature and fewer arguments, and AutoUpgrade rewrites a `lifetime` declared with an extra
+parameter; an intrinsic's declaration and its calls are verified in module order, so a mismatching declaration after
+its calls is reported after theirs, as opt does, but the table's patterns for a few intrinsics (`ptrmask`'s return) are
+looser than Intrinsics.td's.
+
+### 6.2.1 Attributes, calls, intrinsics, funclets, metadata and debug info (LL4b)
+
+The rules added on 2026-11-04 (branch `llvm-verify2`), after LLVM 23's `Verifier.cpp` and `LLParser.cpp` as the pin's
+`libLLVM-23.so` shows them (its strings, in code order, name every message; the order and the conditions were found by
+probing opt: `test/llvm/probes/`). Rules are named `phase/name`; a message is opt's, and a rule that opt reports as a
+warning (debug info) has the verdict `debug`.
+
+| family | rules | LLVM's message (examples) |
+|---|---|---|
+| attributes, parser | `parser/attr-placement`, `parser/attr-value`, `parser/sret-return`, `parser/arg-type`, `parser/di-field` | `this attribute does not apply to functions` / `return values` / `parameters` (Attributes.td's applicability: `nonnull` on a function, `noinline` on a parameter, in a header, a call or an attribute group); `byte count specified must be non-zero`, `stack alignment is not a power of two`, `Invalid (unordered or overlapping) range list`, `invalid mask value for 'nofpclass'`, `unknown allockind X`, `void type only allowed for function results`; `functions with 'sret' argument must return void`; `'builtin' attribute not valid on function` |
+| attributes, verifier | `verifier/attr-type`, `attr-pair`, `attr-value`, `attr-misc`, `attr-placement` | `Attribute 'sret(i32)' applied to incompatible type!` (the pointer-only attributes on a non-pointer, `zeroext`/`signext`/`allocalign` on a non-integer, `range` on a non-integer or of another width, `nofpclass` on a non-float, vectors of pointers included); `Attributes 'zeroext and signext' are incompatible!` and the like (`readnone`/`readonly`/`writeonly`/`writable`, `inalloca`/`readonly`, `sret`/`returned`, `noinline`/`alwaysinline`, `optnone` and `noinline`/`optsize`/`minsize`/`optdebug`); `Attributes 'byval', 'inalloca', 'preallocated', 'inreg', 'nest', 'byref', and 'sret' are incompatible!`; `Attribute 'immarg' is incompatible with other attributes except the 'range' attribute`; `Attribute 'byval' does not support unsized types!`; `More than one parameter has attribute nest!` / `returned`, `Incompatible argument and return types for 'returned' attribute`, `Cannot have multiple 'sret' parameters!` / `swiftself` / `swiftasync` / `swifterror`, `Attribute 'sret' is not on first or second parameter!`, `inalloca isn't on the last parameter!`; `immarg attribute only applies to intrinsics`, `Attribute 'elementtype' can only be applied to intrinsics and inline asm.`; the function attributes' values (`'vscale_range' minimum must be power-of-two value`, `'allocsize' element size argument is out of bounds`, `invalid value for 'frame-pointer' attribute: X`, `\"patchable-function-entry\" takes an unsigned integer: x`, `'allockind()' requires exactly one of alloc, realloc, and free`, `Attribute 'jumptable' requires 'unnamed_addr'`); an intrinsic declaration whose type is the intrinsic's has the intrinsic's own attributes, the text's are not checked (Function::isIntrinsic) |
+| calling conventions | `verifier/cc`, `naked-argument`, `function-type` | `Calling convention parameter requires byval` (`x86_intrcc`), `Calling convention requires void return type` (`spir_kernel`, `amdgpu_kernel`, `amdgpu_cs_chain`), `Calling convention does not allow sret`, `disallows byval` / `preallocated` / `inalloca` / `stack byref` (the shaders and kernels but `spir_kernel`), `Calling convention does not support varargs or perfect forwarding!` (these, `fastcc`, `coldcc`, `ptx_kernel`, `intel_ocl_bicc`), `calling convention does not permit calls` (a call with a kernel's or shader's), `cannot use argument of naked function`, `Function takes metadata but isn't an intrinsic` (token likewise, a returned token), `Function declaration shouldn't have a personality routine`; opt does not compare a call's convention with its callee's |
+| call sites | `verifier/attr-*`, `bundle` | the function attributes' rules over the call's (`speculatable attribute may not apply to call sites`, `preallocated as a call site attribute can only be on llvm.call.preallocated.arg`, `Attribute 'sret' cannot be used for vararg call arguments!`, `inalloca isn't on the last argument!`, `immarg operand has non-immediate parameter`, `Return type cannot be token for indirect call!`, `Cannot invoke an intrinsic other than donothing, ...`); operand bundles: `Multiple deopt operand bundles` (`gc-transition`, `funclet`, `cfguardtarget`, `ptrauth`, `kcfi`, `gc-live`), `Expected exactly one funclet bundle operand`, `Funclet bundle operands should correspond to a FuncletPadInst`, `Expected exactly two ptrauth bundle operands`, `Direct call cannot have a ptrauth bundle`, `The 'convergencectrl' bundle requires exactly one token use.` |
+| `musttail` | `verifier/musttail`, `parser/musttail` | in opt's order: `cannot use musttail call with inline asm`, `mismatched varargs`, `mismatched return types` (an intrinsic callee exempts the varargs, counts and parameter types), `mismatched calling conv`, `musttail call must precede a ret`, `musttail call result must be returned`, `mismatched parameter counts`, `mismatched parameter types`, `mismatched ABI impacting function attributes` (`sret`, `byval`, `inalloca`, `inreg`, `swiftself`, `swiftasync`, `swifterror`, `preallocated`, `byref` with their types; `nest` and `returned` excluded); `expected '...' at end of argument list for musttail call in varargs function` |
+| intrinsics | `verifier/intrinsic-signature` over `arbace.repr.llvm.intr` | the table `intr/signatures` (about 130 intrinsics: memory, overflow and saturating arithmetic, `fshl`/`fshr`, bit counting, `abs`, min/max, the floating-point math ones, `powi`, `is.fpclass`, `lround`, `fptosi.sat`, every vector reduction, `masked.load`/`store`, `ptrmask`, `objectsize`, `prefetch`, `scmp`/`ucmp`, ...) as Intrinsics.td's descriptors, which opt reports in a fixed phrasing: `intrinsic return type (overload type 0) expected any integer or integer vector, but got ptr`, `intrinsic argument 1 type (matching overload type 0) expected i32, but got i64`, `intrinsic return type (vector element of overload type 0) expected i32 (overload type 0 is <4 x i32>), but got i64`, `intrinsic return type (same vector width of overload type 0) ...`, `intrinsic return struct element 1 type expected i1, but got i32`, `intrinsic return type expected literal non-packed struct with 2 elements, but got ptr`; the return and the arguments are checked first, the argument count after them (`intrinsic has incorrect number of args. Expected N, but got M`), the descriptors that name an overload not yet seen at the end; AutoUpgrade's old forms (`memcpy` with the alignment argument, `ctlz` without `i1`, `objectsize` without the dynamic flag, `masked.load` with the alignment, `lifetime` with its size) match their old types; `llvm.ptrmask`'s three call rules; the names `intr/recognized?` takes for intrinsics are the pin's generic table (709 names) and its targets' prefixes |
+| funclets | `verifier/funclet`, `eh-pad-entry` | `CatchSwitchInst needs to be in a function with a personality.` (`CatchPadInst`, `CleanupPadInst`, `ResumeInst`), `CleanupPadInst not the first non-PHI instruction in the block.`, `CatchPadInst needs to be directly nested in a CatchSwitchInst.`, `CleanupPadInst has an invalid parent.`, `EH pad cannot be in entry block.`, `EH pad must be jumped to via an unwind edge`, `Block containg CatchPadInst must be jumped to only by its catchswitch.`, `CatchSwitchInst handlers must be catchpads`, `CatchReturnInst needs to be provided a CatchPad`, `CleanupReturnInst needs to be provided a CleanupPad`, `CleanupReturnInst must unwind to an EH block which is not a landingpad.`, `EH pad cannot handle exceptions raised within it`; `expected scope value for catchpad` (parser) |
+| metadata | `verifier/md-*` | `Unfinished range!`, `The lower limit must be an integer!`, `Range types must match instruction type!`, `Range must not be empty!`, `Intervals are overlapping` / `contiguous` / `not in order`; `align takes one operand!`, `align metadata value must be an i64!` / `a power of 2!`; `nonnull metadata must be empty`, `noundef applies only to load instructions`, `dereferenceable, dereferenceable_or_null take one operand!`, `invariant.load metadata is only for loads and readonly intrinsic calls`, `invariant.group ...`, `fpmath requires a floating point result!` / `accuracy must have float type` / `not a positive number!`, `scope list must consist of MDNodes`, `scope must have two or three operands`, `noalias.addrspace type must be i32!`, `TBAA metadata cannot have 0 operands`, `Access type node must be a valid scalar type`, `Access bit-width not the same as description bit-width`; `!prof` (`expected string with name of the !prof annotation`, `expected either branch_weights or VP profile name`, `Wrong number of operands` with the origin string `!\"expected\"` skipped, `Wrong number of InvokeInst branch_weights operands`, `!prof branch_weights are not allowed for this instruction`, a function's `first operand should be 'function_entry_count' or ...`); the module flags (`incorrect number of operands in module flag`, `invalid behavior operand ... (expected constant integer)` / `(unexpected constant)`, `invalid ID operand ...`, the `require`, `append`, `max`, `min` values, `wchar_size metadata requires constant integer argument`, `module flag identifiers must be unique (or of 'require' type)`, `invalid requirement on flag, flag is not present in module`) and `llvm.ident` |
+| debug info, verdict `debug` | `di/node`, `di/function`, `di/record`, `di/global`, `di/version`, `parser/di-field` | opt prints the message, then `warning: ignoring invalid debug info`, strips it and goes on (exit 0): `subprogram definitions must have a compile unit`, `subprogram declarations must not have a compile unit`, `invalid subroutine type`, `location requires a valid scope` (`DILocation's scope must be a DILocalScope` for an instruction's `!dbg`), `local variable requires a valid scope`, `invalid file`, `invalid type ref`, `invalid scope`, `invalid global variable list`, `invalid retained nodes list`, `invalid composite elements`, `array types must have a base type`, `Subrange can have any one of count or upperBound`, `DWARF address space only applies to pointer or reference types`, `line specified with no file`, `missing global variable type`, `function !dbg attachment must be a subprogram`, `function declaration may only have a unique !dbg attachment`, `!dbg attachment points at wrong subprogram for function`, `mismatched subprogram between #dbg record variable and DILocation`, `invalid #dbg record variable` / `expression`, `!dbg attachment of global variable must be a DIGlobalVariableExpression`; a Debug Info Version other than 3 (or none) with debug info: `ignoring debug info with an invalid version (N)`; only the nodes reachable from the named metadata, the attachments and the records are checked, as opt visits them. LLParser's own: `missing required field 'X'` (the table `di-required`, derived from opt by dropping each field of each node kind), `missing 'distinct', required for !DISubprogram that is a Definition`, `'checksumkind' and 'checksum' must be provided together`, `invalid debug location` |
+
+The reader takes function attributes in a parameter's or a return value's place (the grammar of LLParser's
+`parseOptionalParamAttrs` accepts any attribute word and rejects it by Attributes.td), so the placement rules see them.
 
 **The check**, `bin/repr-llvm verify-check LIST WORK`: opt (`REPR_LLVM_OPT`, default `/usr/lib/llvm23/bin/opt -passes=verify
 -disable-output`) and the verifier on each file of LIST, `WORK/verify.tsv` (NAME, opt's verdict, Arbace's, the verdicts
@@ -292,6 +319,60 @@ dominance 78, undefined values 67, phi predecessors 40, alignment 40, intrinsic 
 without terminators 36, value types 31, linkage 27, forward types 23, phis not grouped 19, self-references 17, unwind
 destinations 15, phi entries 13, visibility 13, the rest 15. Seventy-three hand-written probes, one a rule each, written
 while porting: 72 of 73 verdicts and 64 of 65 messages (the twice-defined label). About 45 s for the 912, opt's runs serial.
+
+**The check, extended (LL4b).** `verify-check` has a third verdict, `debug`: opt exits 0 on a module whose debug info is
+broken after printing the message (its first line is the message, `warning: ignoring invalid debug info` follows) and a
+`Debug Info Version` it does not know prints only the warning (`ignoring debug info with an invalid version (N)`); the
+verdicts are compared as `valid`, `invalid` and `debug`, and `bin/repr-llvm verify` prints a `debug` file's message as a
+`warning`, exit 0. `bin/repr-llvm mutants LIST OUT [N [FIRST [FAMILY]]]` takes a FAMILY of kinds (`arbace.repr.llvm.mutate/
+families`): `base` (the 17 kinds above), `attrs` (a pointer-only attribute on a non-pointer and the reverse, mutually
+exclusive pairs on a parameter, an argument or the function, an attribute where Attributes.td does not allow it, a
+once-only attribute twice, `returned` of another type, invalid attribute values, `immarg` on a non-intrinsic), `cc` (a
+convention that restricts the function it names; a call with a kernel's), `musttail`, `bundles`, `intrinsics` (a
+declaration's type changed, an argument `undef`, a name replaced by another intrinsic's), `funclets` (a pad, a parent, a
+position, a handler, a bundle token or the personality changed; an invoke's unwind edge to its normal destination),
+`metadata` (an attachment the Verifier checks with a node that breaks its rules; an operand of a `!range`, `!prof`, `!tbaa`,
+module flag or `llvm.ident` node dropped, added or replaced), `debug` (a field of a DI node dropped, a reference sent to a
+node of another kind, a record's variable, expression or location replaced, a `!dbg` attachment sent elsewhere, the
+`Debug Info Version` changed). Without a family every kind cycles (41 kinds). A mutant of the module's named types is not
+made (`%name` is also a type's spelling).
+
+On 2026-11-04, on the 282 modules of the lists above (all valid: **282 of 282 verdicts as opt's, 0 invalid**; one, `misc`, has `!dbg`
+attachments and no `Debug Info Version`, `debug` from both) the sets of each family (indices from 0; the rules were fitted to
+them), opt's verdicts and first messages:
+
+| set | mutants | verdicts as opt's | first messages as opt's |
+|---|---|---|---|
+| attrs | 200 | 200 of 200 | 168 of 168 |
+| cc | 100 | 100 of 100 | 74 of 74 |
+| musttail | 100 | 100 of 100 | 95 of 95 |
+| bundles | 100 | 100 of 100 | 88 of 88 |
+| intrinsics | 150 | 150 of 150 | 120 of 130 |
+| funclets (16 modules with EH) | 150 | 148 of 150 | 141 of 144 |
+| metadata | 97 | 97 of 97 | 91 of 91 |
+| debug | 200 | 197 of 200 | 160 of 164 |
+| base, indices 0 on (the 278 modules of §6.1) | 294 | 294 of 294 | 284 of 284 |
+| base, indices 1,000 on | 294 | 294 of 294 | 285 of 287 |
+
+(the earlier 630 mutants, `bin/repr-llvm verify-check` over the 912 files of 2026-11-04: 912 of 912 verdicts, 614 of 614 first
+messages with these rules). The held-out sets, generated after the rules were fixed, all kinds together (indices 100,000 and
+200,000 on, 600 asked, over the 282 modules and eight hand-written funclet modules): the first, 542 mutants: **539 of 542
+verdicts as opt's, 470 of 481 first messages** as generated, before the three fixes it showed (`immarg` of a call's argument that
+the callee's parameter lacks, a DI node's `baseType` of the wrong kind, a lexical block's scope: not a Verifier rule), and 541 of
+542, 474 of 481 with the final rules; the second, 544 mutants: **534 of 544 verdicts, 479 of 486 first messages** as generated, before its
+fixes (the old intrinsic forms' calls and users, `immarg` positions from Intrinsics.td, the attributes of a vararg argument), and
+541 of 544, 480 of 486 with the final rules. What the held-out sets still show: `is.fpclass`'s constant mask, `eh.exceptionpointer`'s argument, a
+DI `type` of a global variable expression, the sibling funclet rules, an intrinsic renamed to one whose arguments count
+differs (opt's order of the count and the types, and its abort).
+
+The hand-written modules are committed: `test/llvm/hw/` (the four modules with comments, blank lines, odd spacing, numbered
+and unnamed values, unlabelled blocks, hex floats and laid-out metadata; `test/llvm/hw.list`, NAME<TAB>PATH from the
+repository's root; the round trips of §6.1 and `verify-check` take it) and `test/llvm/probes/` (478 small modules, one
+rule each, by family: `verify/` the 73 of LL4, `attrs/`, `cc/`, `musttail/`, `funclets/`, `metadata/`, `debug/` (from
+`hw/dbg.ll`), `intrinsics/` (`good.ll`: a valid declaration of every intrinsic of the table); `test/llvm/probes.list`):
+`bin/repr-llvm verify-check test/llvm/probes.list WORK` gives opt's verdicts on 467 of 478, first messages 310 of 323 (the others: syntax outside the
+reader's grammar, the twice-defined label, swifterror's call rules, `clang.arc.attachedcall`, VFABI names, `PIC Level`, a
+funclet's parent of itself).
 
 ## 7. The lowering (`arbace.cpp.lower`)
 
