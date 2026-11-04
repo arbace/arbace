@@ -1,0 +1,392 @@
+;; goi: the interpreted program's frames as runtime's API shows them (GOI-SPEC.md, "Since v1:
+;; frames"): runtime.Caller, Callers, CallersFrames, FuncForPC and runtime.Func's methods,
+;; runtime.Stack, debug.Stack and debug.PrintStack, and reflect.Value.Pointer of an interpreted
+;; function, the table's overrides (go/arbace/gotable.edn's :overrides, §6.7), answered from the
+;; goroutine's thread (§4.3: each frame's function and line) with goi's own program counters;
+;; and the goroutine traces of runtime.Stack and of an uncaught panic in gc's format.
+(in-ns 'go.arbace.goi)
+
+(go/file "frames.go"
+  :imports [[os "os"] [reflect "reflect"] [runtime "runtime"] [strconv "strconv"] [strings "strings"]
+            [sync "sync"] [atomic "sync/atomic"] [unsafe "unsafe"]])
+
+;; ---------------------------------------------------------------------------------------
+;; The functions program counters name: interpreted functions' codes and gc's runtime frames
+
+(go/type pcFunc
+  "pcFunc is a function goi's program counters name: an interpreted function's code (fn, c), or
+one of gc's runtime functions goi shows below or between them (fn nil); id its number, name gc's
+name of it, file and entry its source file and first line, end its last line (0: unbounded),
+args whether its frame has arguments (gc prints (...) for them, () without). A *pcFunc is the
+*runtime.Func FuncForPC gives for goi's program counters.\n"
+  (struct ^int32 id ^{:tag (* Func)} fn ^{:tag (* Code)} c ^string name ^string file ^int32 entry ^int32 end ^bool args))
+
+(go/type pcKey "pcKey is an interpreted function's code, a pcFunc's key.\n"
+  (struct ^{:tag (* Func)} f ^{:tag (* Code)} c))
+
+(go/var ^{:tag sync/Mutex :doc "pcMu guards pcFuncs, pcByCode and pcByPtr.\n"} pcMu)
+
+(go/var ^{:tag (slice (* pcFunc)) :doc "pcFuncs are the pcFuncs by id.\n"} pcFuncs)
+
+(go/var ^{:tag (map pcKey (* pcFunc)) :doc "pcByCode are the interpreted functions' pcFuncs by code.\n"}
+  pcByCode (make (map pcKey (* pcFunc))))
+
+(go/var ^{:tag (map unsafe/Pointer (* pcFunc)) :doc "pcByPtr are the pcFuncs by their address, the *runtime.Func FuncForPC gave.\n"}
+  pcByPtr (make (map unsafe/Pointer (* pcFunc))))
+
+(go/const [^{:tag uintptr :doc "pcBase is the first of goi's program counters: base + id<<32 + line<<8 (+1 for a return address), above every address of gc's code.\n"}
+           pcBase 0x4000000000000000])
+
+(go/func addPCFunc "addPCFunc registers f (under pcMu): its id.\n" ^{:tag (* pcFunc)} [^{:tag (* pcFunc)} f]
+  (set! (.-id f) (conv int32 (len pcFuncs)))
+  (set! pcFuncs (append pcFuncs f))
+  (aset pcByPtr (conv unsafe/Pointer f) f)
+  f)
+
+(go/func funcOf
+  "funcOf is the pcFunc of interpreted function fn's current code: its gc name (the code's, else
+the package's name and the function's), its file (the code's directory and the function's file),
+its lines.\n"
+  ^{:tag (* pcFunc)} [^{:tag (* Func)} fn]
+  (let [c (.Load (.-code fn))
+        k (lit pcKey fn c)]
+    (.Lock pcMu)
+    (defer (.Unlock pcMu))
+    (let [f (aget pcByCode k)]
+      (when (!= f nil)
+        (return f))
+      (set! f (addr (lit pcFunc :fn fn :c c :name (+ (.-Pkg fn) "." (.-Name fn)) :file (.-File fn) :args true)))
+      (when (!= c nil)
+        (when (!= (.-GoName c) "")
+          (set! (.-name f) (.-GoName c)))
+        (when (and (!= (.-Dir c) "") (!= (.-File fn) ""))
+          (set! (.-file f) (+ (.-Dir c) "/" (.-File fn))))
+        (set! (.-entry f) (.-Line0 c))
+        (set! (.-end f) (.-End c))
+        (set! (.-args f) (.-Args c)))
+      (when (== (.-file f) "")
+        (set! (.-file f) "?"))
+      (aset pcByCode k f)
+      (addPCFunc f))))
+
+(go/func CodeFrame
+  "CodeFrame gives code c (a *Code) its frames' gc name, source directory, first and last lines
+and whether it has arguments (the builder's; GOI-SPEC.md, \"Since v1: frames\").\n"
+  [^any c ^string name ^string dir ^int32 line0 ^int32 end ^bool args]
+  (let [(values code ok) (assert (* Code) c)]
+    (when (or (not ok) (== code nil))
+      (return))
+    (set! (.-GoName code) name)
+    (set! (.-Dir code) dir)
+    (set! (.-Line0 code) line0)
+    (set! (.-End code) end)
+    (set! (.-Args code) args)))
+
+(go/func AtLineR
+  "AtLineR is x evaluated at line l of its frame (a select case's channel, on a line of its own:
+gc's line of a panic there).\n"
+  ^R [^R x ^int32 l]
+  (fn ^any [^{:tag (* Frame)} fr]
+    (set! (.-Line fr) l)
+    (x fr)))
+
+;; gc's runtime functions goi shows (go1.27.1's lines; the files under this executable's runtime)
+(go/var ^{:tag (* pcFunc)} rtGopanic)
+(go/var ^{:tag (* pcFunc)} rtPanicmem)
+(go/var ^{:tag (* pcFunc)} rtSigpanic)
+(go/var ^{:tag (* pcFunc)} rtPanicBounds64)
+(go/var ^{:tag (* pcFunc)} rtPanicBounds)
+(go/var ^{:tag (* pcFunc)} rtPanicdivide)
+(go/var ^{:tag (* pcFunc)} rtPanicdottype)
+(go/var ^{:tag (* pcFunc)} rtMain)
+(go/var ^{:tag (* pcFunc)} rtMainInit)
+(go/var ^{:tag (* pcFunc)} rtDoInit1)
+(go/var ^{:tag (* pcFunc)} rtDoInit)
+(go/var ^{:tag (* pcFunc)} rtGoexit)
+(go/var ^{:tag (* pcFunc)} rtCallers)
+(go/var ^{:tag (* pcFunc)} rtDebugStack)
+
+(go/func runtimeDir
+  "runtimeDir is the runtime's source directory as this executable's own runtime names it (the
+file of runtime.GC's code), else runtime.\n"
+  ^string []
+  (let [f (runtime/FuncForPC (.Pointer (reflect/ValueOf runtime/GC)))]
+    (when (!= f nil)
+      (let [(values file _) (.FileLine f (.Entry f))
+            i (strings/LastIndex file "/")]
+        (when (> i 0)
+          (return (subslice file _ i))))))
+  "runtime")
+
+(go/func init []
+  (let [dir (runtimeDir)
+        asm (+ "asm_" runtime/GOARCH ".s")
+        rt (fn ^{:tag (* pcFunc)} [^string name ^string file ^int32 line ^bool args]
+             (addPCFunc (addr (lit pcFunc :name name :file (+ dir "/" file) :entry line :end line :args args))))]
+    (.Lock pcMu)
+    (set! rtGopanic (rt "runtime.gopanic" "panic.go" 859 true))
+    (set! rtPanicmem (rt "runtime.panicmem" "panic.go" 336 false))
+    (set! rtSigpanic (rt "runtime.sigpanic" "signal_unix.go" 931 false))
+    (set! rtPanicBounds64 (rt "runtime.panicBounds64" "panic.go" 236 true))
+    (set! rtPanicBounds (rt "runtime.panicBounds" asm 1622 false))
+    (set! rtPanicdivide (rt "runtime.panicdivide" "panic.go" 315 false))
+    (set! rtPanicdottype (rt "runtime.panicdottypeE" "iface.go" 293 true))
+    (set! rtMain (rt "runtime.main" "proc.go" 303 false))
+    (set! rtMainInit (rt "runtime.main" "proc.go" 270 false))
+    (set! rtDoInit1 (rt "runtime.doInit1" "proc.go" 8211 true))
+    (set! rtDoInit (rt "runtime.doInit" "proc.go" 8178 true))
+    (set! rtGoexit (rt "runtime.goexit" asm 1264 false))
+    (set! rtCallers (rt "runtime.Callers" "extern.go" 341 true))
+    (set! rtDebugStack (rt "runtime/debug.Stack" "debug/stack.go" 26 false))
+    (.Unlock pcMu)))
+
+(go/const
+  [^{:tag int32 :doc "bottomInit: the program's goroutine running the packages' initialization.\n"} bottomInit 1]
+  [^{:tag int32 :doc "bottomMain: the program's goroutine running main.\n"} bottomMain 2]
+  [^{:tag int32 :doc "bottomGo: a goroutine of a go statement.\n"} bottomGo 3])
+
+(go/var ^{:tag atomic/Int64 :doc "goids numbers the goroutines of go statements (the program's is 1).\n"} goids)
+
+;; ---------------------------------------------------------------------------------------
+;; A goroutine's stack
+
+(go/type pcFrame "pcFrame is one frame of a goroutine's stack: its function and line.\n"
+  (struct ^{:tag (* pcFunc)} f ^int32 line))
+
+(go/func frameAt0 "frameAt0 is function f's frame at its own line.\n" ^pcFrame [^{:tag (* pcFunc)} f]
+  (lit pcFrame f (.-entry f)))
+
+(go/func panicFrames
+  "panicFrames are gc's runtime frames between a deferred call running in panic p and the frame
+that panicked, innermost first: gopanic, and the run-time error's own (a nil dereference's
+panicmem and sigpanic, a bounds check's, a division's, a type assertion's).\n"
+  ^{:tag (slice pcFrame)} [^{:tag (slice pcFrame)} out ^any p]
+  (set! out (append out (frameAt0 rtGopanic)))
+  (let [(values e ok) (assert error p)]
+    (when ok
+      (let [m (.Error e)]
+        (cond
+          (strings/HasSuffix m "invalid memory address or nil pointer dereference")
+          (set! out (append out (frameAt0 rtPanicmem) (frameAt0 rtSigpanic)))
+          (or (strings/HasPrefix m "runtime error: index out of range")
+              (strings/HasPrefix m "runtime error: slice bounds out of range"))
+          (set! out (append out (frameAt0 rtPanicBounds64) (frameAt0 rtPanicBounds)))
+          (== m "runtime error: integer divide by zero")
+          (set! out (append out (frameAt0 rtPanicdivide)))
+          (strings/HasPrefix m "interface conversion: ")
+          (set! out (append out (frameAt0 rtPanicdottype)))))))
+  out)
+
+(go/method stack
+  "stack is the thread's frames innermost first, as gc's traceback walks them: each interpreted
+frame whose body has started (a frame entered for a call whose arguments are being evaluated has
+line 0 and is not one yet; a compiled callee's has no function), after a deferred call that
+runs in a panic gc's panic frames (gopanic ...), then gc's runtime frames under the goroutine's
+first function (runtime.main's, a go statement's goexit).\n"
+  ^{:tag (slice pcFrame)} [^{:tag (* Thread)} th]
+  (let [out (make (slice pcFrame) 0 (+ (.-depth th) 4))]
+    (for [d (.-depth th)] (>= d 1) (dec! d)
+      (when (< (conv int d) (len (.-frames th)))
+        (let [f (aget (.-frames th) d)]
+          (when (and (!= (.-Fn f) nil) (!= (.-Line f) 0))
+            (set! out (append out (lit pcFrame (funcOf (.-Fn f)) (.-Line f))))
+            (when (and (!= (.-rec f) nil) (!= (.-val (.-rec f)) nil))
+              (set! out (panicFrames out (.-val (.-rec f)))))))))
+    (switch (.-bottom th)
+      (case [bottomInit] (set! out (append out (frameAt0 rtDoInit1) (frameAt0 rtDoInit) (frameAt0 rtMainInit) (frameAt0 rtGoexit))))
+      (case [bottomMain] (set! out (append out (frameAt0 rtMain) (frameAt0 rtGoexit))))
+      (case [bottomGo] (set! out (append out (frameAt0 rtGoexit)))))
+    out))
+
+(go/func pcOf "pcOf is goi's program counter of frame fr: a return address in its function at its line.\n"
+  ^uintptr [^pcFrame fr]
+  (+ pcBase (<< (conv uintptr (.-id (.-f fr))) 32) (<< (conv uintptr (bit-and (.-line fr) 0xffffff)) 8) 1))
+
+(go/func entryOf "entryOf is goi's program counter of function f's entry.\n" ^uintptr [^{:tag (* pcFunc)} f]
+  (+ pcBase (<< (conv uintptr (.-id f)) 32) (<< (conv uintptr (bit-and (.-entry f) 0xffffff)) 8)))
+
+(go/func decodePC
+  "decodePC is goi's program counter pc's function and line; nil when pc is not goi's (gc's code)
+or names no function.\n"
+  [^uintptr pc] :results [^{:tag (* pcFunc)} f ^int32 line]
+  (when (< pc pcBase)
+    (return))
+  (let [id (>> (- pc pcBase) 32)]
+    (set! line (conv int32 (bit-and (>> (- pc pcBase) 8) 0xffffff)))
+    (.Lock pcMu)
+    (when (< id (conv uintptr (len pcFuncs)))
+      (set! f (aget pcFuncs id)))
+    (.Unlock pcMu)
+    (return)))
+
+(go/func goiFunc "goiFunc is the pcFunc a *runtime.Func is, or nil (gc's).\n" ^{:tag (* pcFunc)} [^{:tag (* runtime/Func)} rf]
+  (when (== rf nil)
+    (return nil))
+  (.Lock pcMu)
+  (defer (.Unlock pcMu))
+  (aget pcByPtr (conv unsafe/Pointer rf)))
+
+(go/func rtFunc "rtFunc is f as the *runtime.Func FuncForPC gives (goi's methods read it, never gc's).\n"
+  ^{:tag (* runtime/Func)} [^{:tag (* pcFunc)} f]
+  (conv (* runtime/Func) (conv unsafe/Pointer f)))
+
+;; ---------------------------------------------------------------------------------------
+;; The overrides (§6.7)
+
+(go/func RTCaller
+  "RTCaller is runtime.Caller for interpreted code: the frame skip frames above the caller's,
+from the goroutine's interpreted frames.\n"
+  [^int skip] :results [^uintptr pc ^string file ^int line ^bool ok]
+  (let [fs (.stack (CurrentThread))]
+    (when (or (< skip 0) (>= skip (len fs)))
+      (return))
+    (let [fr (aget fs skip)]
+      (return (pcOf fr) (.-file (.-f fr)) (conv int (.-line fr)) true))))
+
+(go/func RTCallers
+  "RTCallers is runtime.Callers for interpreted code: runtime.Callers' own frame, then the
+goroutine's, from the skip-th on, as goi's program counters.\n"
+  ^int [^int skip ^{:tag (slice uintptr)} pcs]
+  (let [fs (append (lit (slice pcFrame) (frameAt0 rtCallers)) (spread (.stack (CurrentThread))))
+        n 0]
+    (when (< skip 0)
+      (set! skip 0))
+    (for [i skip] (and (< i (len fs)) (< n (len pcs))) (inc! i)
+      (aset pcs n (pcOf (aget fs i)))
+      (inc! n))
+    n))
+
+(go/func RTFuncForPC
+  "RTFuncForPC is runtime.FuncForPC: for goi's program counters its pcFunc (nil past the
+function's last line), else gc's.\n"
+  ^{:tag (* runtime/Func)} [^uintptr pc]
+  (when (< pc pcBase)
+    (return (runtime/FuncForPC pc)))
+  (let [(values f line) (decodePC pc)]
+    (when (or (== f nil) (< line (.-entry f)) (and (> (.-end f) 0) (> line (.-end f))))
+      (return nil))
+    (rtFunc f)))
+
+(go/func RTFuncName "RTFuncName is (*runtime.Func).Name.\n" ^string [^{:tag (* runtime/Func)} rf]
+  (when (== rf nil)
+    (return ""))
+  (let [f (goiFunc rf)]
+    (when (!= f nil)
+      (return (.-name f))))
+  (.Name rf))
+
+(go/func RTFuncEntry "RTFuncEntry is (*runtime.Func).Entry.\n" ^uintptr [^{:tag (* runtime/Func)} rf]
+  (let [f (goiFunc rf)]
+    (when (!= f nil)
+      (return (entryOf f))))
+  (.Entry rf))
+
+(go/func RTFuncFileLine "RTFuncFileLine is (*runtime.Func).FileLine: goi's program counter's line.\n"
+  [^{:tag (* runtime/Func)} rf ^uintptr pc] :results [^string file ^int line]
+  (let [f (goiFunc rf)]
+    (when (== f nil)
+      (return (.FileLine rf pc)))
+    (let [(values g l) (decodePC pc)]
+      (if (== g f)
+        (return (.-file f) (conv int l))
+        (return (.-file f) (conv int (.-entry f)))))))
+
+(go/type pcFrames "pcFrames is the state of a runtime.Frames over goi's program counters.\n"
+  (struct ^{:tag (slice uintptr)} pcs ^int i))
+
+(go/var ^{:tag sync/Map :doc "framesOf are the runtime.Frames RTCallersFrames made (their addresses) to their states.\n"} framesOf)
+
+(go/func RTCallersFrames
+  "RTCallersFrames is runtime.CallersFrames: gc's for gc's program counters alone, else a
+runtime.Frames whose Next is goi's (RTFramesNext).\n"
+  ^{:tag (* runtime/Frames)} [^{:tag (slice uintptr)} callers]
+  (let [mine false]
+    (range [_ pc callers]
+      (when (>= pc pcBase)
+        (set! mine true)))
+    (when (not mine)
+      (return (runtime/CallersFrames callers)))
+    (let [ci (new runtime/Frames)]
+      (.Store framesOf (conv unsafe/Pointer ci) (addr (lit pcFrames :pcs callers)))
+      ci)))
+
+(go/func RTFramesNext
+  "RTFramesNext is (*runtime.Frames).Next over goi's program counters (a gc one's frame by gc's).\n"
+  [^{:tag (* runtime/Frames)} ci] :results [^{:tag runtime/Frame} frame ^bool more]
+  (let [(values x ok) (.Load framesOf (conv unsafe/Pointer ci))]
+    (when (not ok)
+      (return (.Next ci)))
+    (let [st (assert (* pcFrames) x)]
+      (when (>= (.-i st) (len (.-pcs st)))
+        (.Delete framesOf (conv unsafe/Pointer ci))
+        (return))
+      (let [pc (aget (.-pcs st) (.-i st))]
+        (inc! (.-i st))
+        (set! more (< (.-i st) (len (.-pcs st))))
+        (when (not more)
+          (.Delete framesOf (conv unsafe/Pointer ci)))
+        (if (< pc pcBase)
+          (let [(values fr _) (.Next (runtime/CallersFrames (lit (slice uintptr) pc)))]
+            (set! frame fr))
+          (let [(values f line) (decodePC pc)]
+            (when (!= f nil)
+              (set! frame (lit runtime/Frame :PC (- pc 1) :Func (rtFunc f) :Function (.-name f) :File (.-file f)
+                               :Line (conv int line) :Entry (entryOf f))))))
+        (return)))))
+
+(go/func traceText
+  "traceText is the thread's goroutine trace as gc's traceback prints it (runtime.Stack, an
+uncaught panic): the header, each frame's function and its file and line (gc's runtime frames
+hidden but a panic's, shown as panic(...) when not the first), the go statement that started
+it; debug, debug.Stack's (its own frame first).\n"
+  ^string [^{:tag (* Thread)} th ^bool debug]
+  (let [b (lit strings/Builder)
+        fs (.stack th)
+        goid (.-goid th)]
+    (when (== goid 0)
+      (set! goid 1))
+    (.WriteString (addr b) (+ "goroutine " (strconv/FormatInt goid 10) " [running"))
+    (when (== (.-bottom th) bottomInit)
+      (.WriteString (addr b) ", locked to thread"))
+    (.WriteString (addr b) "]:\n")
+    (when debug
+      (set! fs (append (lit (slice pcFrame) (frameAt0 rtDebugStack)) (spread fs))))
+    (range [i fr fs]
+      (let [f (.-f fr)
+            name (.-name f)]
+        (when (or (== (.-fn f) nil) (strings/HasPrefix name "runtime."))
+          (cond
+            (and (== f rtGopanic) (> i 0)) (set! name "panic")
+            (strings/HasPrefix name "runtime.") (continue)))
+        (.WriteString (addr b) name)
+        (if (.-args f)
+          (.WriteString (addr b) "(...)\n\t")
+          (.WriteString (addr b) "()\n\t"))
+        (.WriteString (addr b) (+ (.-file f) ":" (strconv/Itoa (conv int (.-line fr))) " +0x0\n"))))
+    (when (and (== (.-bottom th) bottomGo) (!= (.-creator th) nil))
+      (let [c (funcOf (.-creator th))]
+        (.WriteString (addr b) (+ "created by " (.-name c) " in goroutine " (strconv/FormatInt (.-creatorGoid th) 10) "\n\t"
+                                  (.-file c) ":" (strconv/Itoa (conv int (.-creatorLine th))) " +0x0\n"))))
+    (.String (addr b))))
+
+(go/func RTStack
+  "RTStack is runtime.Stack for interpreted code: the goroutine's trace (all: the current
+goroutine's only; goi knows no other's frames).\n"
+  ^int [^{:tag (slice byte)} buf ^bool all]
+  (copy buf (traceText (CurrentThread) false)))
+
+(go/func DebugStack "DebugStack is runtime/debug.Stack for interpreted code.\n" ^{:tag (slice byte)} []
+  (conv (slice byte) (traceText (CurrentThread) true)))
+
+(go/func DebugPrintStack "DebugPrintStack is runtime/debug.PrintStack for interpreted code.\n" []
+  (.Write os/Stderr (DebugStack)))
+
+(go/func ValuePointer
+  "ValuePointer is reflect.Value.Pointer for interpreted code: an interpreted function's entry as
+goi's program counter (runtime.FuncForPC names it), else reflect's.\n"
+  ^uintptr [^{:tag reflect/Value} v]
+  (when (and (== (.Kind v) reflect/Func) (not (.IsNil v)) (.CanInterface v))
+    (let [(values c ok) (assert (* Closure) (closureOf (.Interface v)))]
+      (when (and ok (!= (.-F c) nil) (!= (.Load (.-code (.-F c))) nil))
+        (return (entryOf (funcOf (.-F c)))))))
+  (.Pointer v))

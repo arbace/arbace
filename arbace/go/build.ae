@@ -37,6 +37,11 @@
 
 (defn- oa [xs] (object-array xs))
 
+(def ^:private code-frames?
+  "Whether goi's back end takes the frames' data (CodeFrame, AtLineR: GOI-SPEC.md, \"Since v1:
+  frames\"); an executable built before it does not."
+  (delay (try (op "CodeFrame" nil "" "" 0 0 false) true (catch Throwable _ false))))
+
 (defn unsupported!
   "Ends the build of a form goi does not support yet (§3.4): what, the milestone that brings it."
   [what gr]
@@ -2386,6 +2391,15 @@ GR9a)."
                :assign (assign-stmt (assoc c :rhs (assoc (vec (:rhs c)) 0 marker))))]
     {:ch ch :ct ct :k k :vs vs :oks oks :bind bind}))
 
+(defn- at-case-line
+  "A select case's channel node, at the case's line when it has one of its own (gc's line of a
+  panic evaluating it: GOI-SPEC.md, \"Since v1: frames\")."
+  [node n cl c]
+  (let [l (long (or (:line c) (:line cl) 0))]
+    (if (and (pos? l) (not= l (long (or (:line n) 0))) @code-frames?)
+      (op "AtLineR" node l)
+      node)))
+
 (defn- select-stmt [n]
   (let [brk (next-code!)
         lbl (:goi/label n)
@@ -2399,10 +2413,10 @@ GR9a)."
                       (let [ch (:ch c) ct (:type ch)
                             v (elem-node (:value c) (elem-type ct))
                             body (push-target tg #(stmt-list (:body cl)))]
-                        (op "NewSelCase" true (exk ch :R) (desc ct) v 0 -1 -1 nil body))
+                        (op "NewSelCase" true (at-case-line (exk ch :R) n cl c) (desc ct) v 0 -1 -1 nil body))
                       (let [{:keys [ch ct k vs oks bind]} (select-recv c)
                             body (push-target tg #(stmt-list (:body cl)))]
-                        (op "NewSelCase" false (exk ch :R) (desc ct) nil (long (int (first (name k)))) (long vs) (long oks)
+                        (op "NewSelCase" false (at-case-line (exk ch :R) n cl c) (desc ct) nil (long (int (first (name k)))) (long vs) (long oks)
                             bind body))))))
         def (when defcl (push-target tg #(stmt-list (:body defcl))))]
     (op "Select" (oa cases) (boolean defcl) def (long brk))))
@@ -2495,18 +2509,44 @@ GR9a)."
       ;; only when not declared inside
       (vec (remove #(.containsKey declared %) (keys out))))))
 
+(defn gc-prefix
+  "The package part of gc's names of the functions of the package being built: main's main, else
+  its path."
+  []
+  (if (= "main" (:name *ctx*)) "main" (str (:path *ctx*))))
+
+(defn- gc-func-name
+  "gc's name of the function of tree (built as fname): a literal's or an initialization's given
+  (:gc-name), a method's pkg.T.M or pkg.(*T).M, else pkg.fname."
+  [tree fname]
+  (or (:gc-name tree)
+      (let [o (:obj tree)]
+        (if (and o (e/o o :method) (e/o o :recv-named))
+          (let [base (:name (t/info (e/o o :recv-named)))]
+            (str (gc-prefix) "." (if (e/o o :ptr-recv) (str "(*" base ")") base) "." (e/o o :name)))
+          (str (gc-prefix) "." fname)))))
+
+(defn code-frame!
+  "Gives code its frames' data for runtime's API (GOI-SPEC.md, \"Since v1: frames\"): gc's name,
+  the source directory, its first and last lines, whether it has arguments."
+  [code gc-name line0 end args?]
+  (when @code-frames?
+    (op "CodeFrame" code (str gc-name) (str (or (:dir *ctx*) "")) (long (or line0 0)) (long (or end 0)) (boolean args?)))
+  code)
+
 (defn build-code
   "The *goi.Code of a function node (:func, :fn, :body) with its signature sig; captures, the
   cells it receives first (a literal's); a method's receiver (:recv, of type :recv-type or its
   method object's) laid after the parameters and results."
   [tree fname captures]
   (let [sig (or (:sig tree) (sig-of (:type tree)))
+        gc-name (gc-func-name tree fname)
         rty (or (:recv-type tree) (when (and (:obj tree) (e/o (:obj tree) :method)) (recv-type-of (:obj tree))))
         {:keys [params results counts recv]} (slot-layout sig rty)
         src (or (when-let [o (:obj tree)] (when-let [sf (:source *ctx*)] (sf (e/o o :file)))) (:src *fn*))
         f {:slots (volatile! (assoc counts :C 0)) :locs (IdentityHashMap.) :code (volatile! 2)
            :defer (volatile! false) :targets [] :labels (HashMap.) :calls (IdentityHashMap.) :name fname
-           :src src :has-defer (has-defer? (:body tree))}]
+           :src src :has-defer (has-defer? (:body tree)) :gc-name gc-name :gc-lits (volatile! 0) :gc-lit (boolean (:gc-lit tree))}]
     (binding [*fn* f]
       ;; the captured cells, the first C slots
       (doseq [x captures]
@@ -2544,17 +2584,23 @@ GR9a)."
           (binding [*fn* (assoc *fn* :results rs)]
             (let [body (stmt (:body tree))
                   {:keys [I F S R C]} @(:slots *fn*)]
-              (op "NewCode" (long I) (long F) (long S) (long R) (long C) (oa @pro) body
-                  (or @(:defer *fn*) (has-defer? (:body tree))) (oa @epi)))))))))
+              (code-frame! (op "NewCode" (long I) (long F) (long S) (long R) (long C) (oa @pro) body
+                               (or @(:defer *fn*) (has-defer? (:body tree))) (oa @epi))
+                           gc-name (:line tree) (some-> (:form tree) meta :go/end)
+                           (or (seq (:params tree)) (:recv tree))))))))))
 
 (defn build-fn-lit
   "A function literal's closure node (its code built now)."
   [n]
   (let [caps (free-locals n)
         nm (str (:name *fn*) ".func" (swap! (:lit-count *ctx*) inc))
+        ;; gc's name: its enclosing function's, .funcN after a declared function's, .N after a
+        ;; literal's (the literals numbered per enclosing function)
+        gc-name (when-let [pn (:gc-name *fn*)]
+                  (str pn (if (:gc-lit *fn*) "." ".func") (vswap! (:gc-lits *fn*) inc)))
         cell (op "FuncCell" nm (:name *ctx*) nil)
         _ (when-let [[ns f] (:src *fn*)] (op "FuncSource" cell ns f))
-        code (build-code n nm caps)]
+        code (build-code (cond-> (assoc n :gc-lit true) gc-name (assoc :gc-name gc-name)) nm caps)]
     (op "SetCode" cell code nil)
     (op "MakeClosure" cell (oa (map #(long (nth (loc %) 1)) caps)))))
 
@@ -2570,15 +2616,20 @@ GR9a)."
   (trees {:op :var-init :lhs :rhs}), as a function of no parameters."
   [inits]
   (let [f {:slots (volatile! {:I 0 :F 0 :S 0 :R 0 :C 0}) :locs (IdentityHashMap.) :code (volatile! 2)
-           :defer (volatile! false) :targets [] :labels (HashMap.) :calls (IdentityHashMap.) :name "init"}]
+           :defer (volatile! false) :targets [] :labels (HashMap.) :calls (IdentityHashMap.) :name "init"
+           :gc-name (str (gc-prefix) ".init") :gc-lits (volatile! 0)}]
     (binding [*fn* (assoc f :results [])]
       (let [ss (vec (for [tr inits]
                       (let [lhs (:lhs tr)
                             places (mapv (fn [x] (if (= "_" (e/o x :name)) :blank {:op :place-global :obj x :type (e/o x :type)})) lhs)]
                         (assign-stmt {:lhs places :rhs (:rhs tr)}))))
-            body (op "Seq" (oa ss) (oa []))
-            {:keys [I F S R C]} @(:slots *fn*)]
-        (op "NewCode" (long I) (long F) (long S) (long R) (long C) (oa []) body (boolean @(:defer *fn*)) (oa []))))))
+            ;; each initializer's line, its frame's (gc's package init function's lines)
+            lines (mapv #(long (or (:line %) (some-> (first (:lhs %)) (e/o :line)) 0)) inits)
+            body (op "SeqL" (oa ss) (oa []) (oa (if (some pos? lines) lines [])))
+            {:keys [I F S R C]} @(:slots *fn*)
+            ls (filter pos? lines)]
+        (code-frame! (op "NewCode" (long I) (long F) (long S) (long R) (long C) (oa []) body (boolean @(:defer *fn*)) (oa []))
+                     (:gc-name f) (when (seq ls) (apply min ls)) (when (seq ls) (apply max ls)) false)))))
 
 ;;; Generics: instances per type-argument list (§9.2, GR6)
 

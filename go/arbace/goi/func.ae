@@ -12,10 +12,13 @@
 (go/type Code
   "Code is a function's built body (§4.6): its slot counts per kind, its prologue (parameters
 moved into cells, named results made zero), its body (run inside a Go defer of unwind when it
-defers: S30) and its epilogue (named results held in cells copied to their result slots).\n"
+defers: S30) and its epilogue (named results held in cells copied to their result slots);
+GoName, Dir, Line0, End and Args its frames as runtime's API shows them (CodeFrame; GOI-SPEC.md,
+\"Since v1: frames\").\n"
   (struct ^int32 NI ^int32 NF ^int32 NS ^int32 NR ^int32 NC
           ^{:tag (slice (func [(* Frame)]))} Pro ^Stmt Body ^bool HasDefer
-          ^{:tag (slice (func [(* Frame)]))} Epi))
+          ^{:tag (slice (func [(* Frame)]))} Epi
+          ^string GoName ^string Dir ^int32 Line0 ^int32 End ^bool Args))
 
 (go/type Func
   "Func is a function's cell (§4.6): its code, replaced when the function is defined again (G9)
@@ -335,6 +338,8 @@ arguments written by args into a frame of the signature's layout, its results in
           d (+ (.-depth th) 1)]
       (set! nf (.frameAt th d))
       (set! (.-depth th) d)
+      ;; no interpreted function's frame: traces skip it
+      (set! (.-Fn nf) nil)
       (set! (.-I nf) (.takeI th (aget n 0)))
       (set! (.-F nf) (.takeF th (aget n 1)))
       (set! (.-S nf) (.takeS th (aget n 2)))
@@ -493,11 +498,14 @@ n), the call made by unwind (§4.7).\n"
       (set! (.-defers fr) (append (.-defers fr) (lit deferred mini call)))
       0)))
 
-(go/func runDeferring "runDeferring runs a body that defers, unwind deferred by Go (S30).\n"
+(go/func runDeferring
+  "runDeferring runs a body that defers, unwind deferred by Go (S30). A body that ends without a
+return runs its deferred calls at the function's closing brace, gc's line of that frame then.\n"
   [^{:tag (* Code)} c ^{:tag (* Frame)} nf]
   (set! (.-defers nf) (subslice (.-defers nf) _ 0))
   (defer (unwind nf))
-  ((.-Body c) nf))
+  (when (and (== ((.-Body c) nf) 0) (!= (.-End c) 0))
+    (set! (.-Line nf) (.-End c))))
 
 (go/func unwind
   "unwind runs a frame's deferred calls, last in first out (§4.7): in a panic (Go's recover gives
@@ -665,12 +673,7 @@ are goi's frames' names.\n"
   (let [(values err ok) (assert error p)]
     (when (and ok (== (.Error err) "runtime error: invalid memory address or nil pointer dereference"))
       (print "[signal SIGSEGV: segmentation violation code=0x1 addr=0x0 pc=0x0]\n")))
-  (print "\ngoroutine 1 [running]:\n")
-  (for [d (.-depth th)] (>= d 1) (dec! d)
-    (when (< (conv int d) (len (.-frames th)))
-      (let [f (aget (.-frames th) d)]
-        (when (!= (.-Fn f) nil)
-          (print (.-Pkg (.-Fn f)) "." (.-Name (.-Fn f)) "(...)\n\t?:0 +0x0\n"))))))
+  (print "\n" (traceText th false)))
 
 (go/func RunProgram
   "RunProgram runs a program in program mode (§2.7): its packages' initializations (inits, in
@@ -678,8 +681,11 @@ order), then main; returns the exit status: 0, or 2 after an uncaught panic repo
   ^int [^{:tag (slice (* Func))} inits ^{:tag (* Func)} main]
   (set! ProgramMode true)
   (let [th (CurrentThread)]
+    (set! (.-goid th) 1)
+    (set! (.-bottom th) bottomInit)
     (let [status (runReporting th (fn []
                                     (range [_ f inits] (runTop th f))
+                                    (set! (.-bottom th) bottomMain)
                                     (when (!= main nil)
                                       (runTop th main))))]
       status)))
