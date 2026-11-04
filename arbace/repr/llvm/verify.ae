@@ -18,6 +18,7 @@
   is the reader's error, not this namespace's."
   (:require [arbace.repr.llvm.read :as rd]
             [arbace.repr.llvm.print :as pr]
+            [arbace.repr.llvm.intr :as intr]
             [arbace.string :as str])
   (:import [java.util.concurrent Executors Callable Future]))
 
@@ -237,6 +238,242 @@
       :else [])))
 
 ;; ---------------------------------------------------------------------------------------------
+;; Attributes (Attributes.td; LLParser's placement checks; Verifier::verifyAttributeTypes, verifyParameterAttrs,
+;; verifyFunctionAttrs)
+
+(def ^:dynamic *groups* {})   ; attribute group number -> its attributes
+
+(def ^:private type-attrs #{"byval" "sret" "byref" "inalloca" "preallocated" "elementtype"})
+
+(defn- attr-item? [x] (or (keyword? x) (and (seq? x) (keyword? (first x))) (and (vector? x) (string? (first x)))))
+
+(defn- aname
+  "An enum, int or type attribute's name (`nocapture` is LLVM 23's `captures(none)`); nil for a string attribute."
+  [a]
+  (cond (keyword? a) (let [n (name a)] (if (= n "nocapture") "captures" n))
+        (seq? a) (name (first a))
+        :else nil))
+
+(defn- attr-str
+  "Attribute::getAsString."
+  ^String [a]
+  (cond
+    (vector? a) (if (second a) (str "\"" (first a) "\"=\"" (second a) "\"") (str "\"" (first a) "\""))
+    (and (keyword? a) (= (name a) "nocapture")) "captures(none)"
+    (keyword? a) (name a)
+    :else (let [n (name (first a)) v (second a)]
+            (cond (= n "align") (str "align " v)
+                  (type-attrs n) (str n "(" (tstr (norm-type v)) ")")
+                  :else (str n "(" v ")")))))
+
+(defn- attr-of [attrs n] (first (filter #(= (aname %) n) attrs)))
+(defn- has-attr? [attrs n] (some? (attr-of attrs n)))
+(defn- str-attr [attrs k] (first (filter #(and (vector? %) (= (first %) k)) attrs)))
+
+(defn- param-attrs [p] (vec (filter attr-item? (rest p))))
+
+(defn- group-items [attrs] (vec (mapcat (fn [a] (if (integer? a) (get *groups* a) [a])) attrs)))
+
+(def ^:private fn-only
+  #{"alignstack" "allocsize" "allockind" "alwaysinline" "builtin" "cold" "convergent" "coro_elide_safe" "coro_only_destroy_when_complete"
+    "disable_sanitizer_instrumentation" "fn_ret_thunk_extern" "hot" "inlinehint" "jumptable" "memory" "minsize" "mustprogress" "naked"
+    "nobuiltin" "nocallback" "nocf_check" "nodivergencesource" "noduplicate" "noimplicitfloat" "noinline" "nomerge" "nonlazybind"
+    "nooutline" "noprofile" "norecurse" "noredzone" "noreturn" "nosanitize_bounds" "nosanitize_coverage" "nosync" "nounwind"
+    "null_pointer_is_valid" "optdebug" "optforfuzzing" "optnone" "optsize" "presplitcoroutine" "returns_twice" "safestack"
+    "sanitize_address" "sanitize_hwaddress" "sanitize_memory" "sanitize_memtag" "sanitize_numerical_stability" "sanitize_realtime"
+    "sanitize_realtime_blocking" "sanitize_thread" "sanitize_type" "shadowcallstack" "speculatable" "speculative_load_hardening"
+    "ssp" "sspreq" "sspstrong" "strictfp" "uwtable" "vscale_range" "willreturn"})
+(def ^:private fn-and-param #{"nofree" "readnone" "readonly" "writeonly"})
+(def ^:private ret-ok
+  #{"align" "dereferenceable" "dereferenceable_or_null" "inreg" "noalias" "noext" "nofpclass" "nonnull" "noundef" "range" "signext" "zeroext"
+    "elementtype"})
+(def ^:private param-only
+  #{"allocalign" "allocptr" "byref" "byval" "captures" "dead_on_return" "dead_on_unwind" "immarg" "inalloca" "initializes" "nest"
+    "preallocated" "returned" "sret" "swiftasync" "swifterror" "swiftself" "writable"})
+
+(defn- not-on-fn? [n] (or (contains? ret-ok n) (contains? param-only n)))
+(defn- not-on-ret? [n] (and (not (contains? ret-ok n)) (or (contains? fn-only n) (contains? param-only n) (contains? fn-and-param n))))
+(defn- not-on-param? [n] (contains? fn-only n))
+
+(defn- check-attr-placement
+  "LLParser: `ret`/`param`/`fn` attributes written where Attributes.td does not allow them (the parser's, with its
+  message). `captures(none)` (nocapture) on a return value is the Verifier's."
+  [kind attrs]
+  (doseq [a attrs :let [n (aname a)] :when n]
+    (case kind
+      :fn (when (and (not= n "align") (not-on-fn? n)) (verr :parser/attr-placement "this attribute does not apply to functions"))
+      :ret (when (and (not= n "captures") (not-on-ret? n)) (verr :parser/attr-placement "this attribute does not apply to return values"))
+      :param (when (not-on-param? n) (verr :parser/attr-placement "this attribute does not apply to parameters")))))
+
+(defn- check-attr-values
+  "LLParser's checks of an attribute's argument."
+  [attrs]
+  (doseq [a attrs :when (seq? a)]
+    (let [n (aname a) v (second a)]
+      (case n
+        ("dereferenceable" "dereferenceable_or_null")
+        (when (and (string? v) (re-matches #"[0-9]+" v) (zero? (Long/parseLong v))) (verr :parser/attr-value "byte count specified must be non-zero"))
+        "alignstack"
+        (when-let [k (and (string? v) (re-matches #"[0-9]+" v) (Long/parseLong v))]
+          (when-not (and (pos? k) (zero? (bit-and k (dec k)))) (verr :parser/attr-value "stack alignment is not a power of two")))
+        "align"
+        (when (and (integer? v) (pos? v) (not (zero? (bit-and (long v) (dec (long v)))))) (verr :parser/align "alignment is not a power of two"))
+        "initializes"
+        (let [nums (when (string? v) (mapv #(Long/parseLong %) (re-seq #"-?[0-9]+" v)))
+              prs (when nums (partition 2 nums))]
+          (when (and prs (not (and (every? (fn [[lo hi]] (< lo hi)) prs)
+                                   (every? (fn [[[_ a] [b _]]] (< a b)) (partition 2 1 prs)))))
+            (verr :parser/attr-value "Invalid (unordered or overlapping) range list")))
+        ("byval" "sret" "byref" "inalloca" "preallocated" "elementtype")
+        (when (= (norm-type v) 'void) (verr :parser/attr-value "void type only allowed for function results"))
+        "nofpclass"
+        (when (and (string? v) (= (str/trim v) "0")) (verr :parser/attr-value "invalid mask value for 'nofpclass'"))
+        "allockind"
+        (doseq [w (str/split (str/replace (str v) "\"" "") #",")]
+          (when-not (contains? #{"alloc" "realloc" "free" "uninitialized" "zeroed" "aligned"} (str/trim w))
+            (verr :parser/attr-value (str "unknown allockind " (str/trim w)))))
+        nil))))
+
+(defn- ptr-scalar? [t] (ptr-type? t))
+(def ^:private ptr-only-attrs
+  #{"align" "allocptr" "byref" "byval" "captures" "dead_on_return" "dead_on_unwind" "dereferenceable" "dereferenceable_or_null"
+    "inalloca" "initializes" "nest" "noalias" "nonnull" "preallocated" "readnone" "readonly" "sret" "swifterror" "writable"})
+
+(defn- type-incompatible?
+  "AttributeFuncs::typeIncompatible: attribute `a` (item) on a value of type `t`."
+  [a t]
+  (let [n (aname a)]
+    (cond
+      (nil? n) false
+      (contains? ptr-only-attrs n) (not (ptr-scalar? t))
+      (= n "allocalign") (not (int-type? t))
+      (#{"signext" "zeroext"} n) (not (int-type? t))
+      (= n "range") (or (not (int-ish? t))
+                        (let [m (when (string? (second a)) (re-find #"^\s*(i[0-9]+)" (second a)))]
+                          (and m (not= (symbol (second m)) (elem t)))))
+      (= n "nofpclass") (not (fp-ish? t))
+      :else false)))
+
+(defn- sized? [t]
+  (let [t (resolve-type t)]
+    (not (or (= t 'void) (= t 'opaque) (= t 'label) (= t 'metadata) (and (seq? t) (= (first t) 'fn))))))
+
+(defn- pow2? [k] (and (pos? k) (zero? (bit-and (long k) (dec (long k))))))
+
+(defn- check-param-attrs
+  "Verifier::verifyParameterAttrs: attributes `attrs` of a value of type `t` (a parameter, an argument or a return value)."
+  [attrs t]
+  (when (seq attrs)
+    (let [has #(has-attr? attrs %)]
+      (when (has "immarg")
+        (let [k (count attrs)]
+          (when-not (or (= k 1) (and (= k 2) (has "range")))
+            (verr :verifier/attr-pair "Attribute 'immarg' is incompatible with other attributes except the 'range' attribute"))))
+      (when (> (+ (if (has "byval") 1 0) (if (has "inalloca") 1 0) (if (has "preallocated") 1 0)
+                  (if (or (has "sret") (has "inreg")) 1 0) (if (has "nest") 1 0) (if (has "byref") 1 0)) 1)
+        (verr :verifier/attr-pair "Attributes 'byval', 'inalloca', 'preallocated', 'inreg', 'nest', 'byref', and 'sret' are incompatible!"))
+      (doseq [[a b msg] [["inalloca" "readonly" "Attributes 'inalloca and readonly' are incompatible!"]
+                         ["sret" "returned" "Attributes 'sret and returned' are incompatible!"]
+                         ["zeroext" "signext" "Attributes 'zeroext and signext' are incompatible!"]
+                         ["readnone" "readonly" "Attributes 'readnone and readonly' are incompatible!"]
+                         ["readnone" "writeonly" "Attributes 'readnone and writeonly' are incompatible!"]
+                         ["readonly" "writeonly" "Attributes 'readonly and writeonly' are incompatible!"]
+                         ["noinline" "alwaysinline" "Attributes 'noinline and alwaysinline' are incompatible!"]
+                         ["writable" "readnone" "Attributes writable and readnone are incompatible!"]
+                         ["writable" "readonly" "Attributes writable and readonly are incompatible!"]]]
+        (when (and (has a) (has b)) (verr :verifier/attr-pair msg)))
+      (doseq [a attrs]
+        (when (type-incompatible? a t)
+          (verr :verifier/attr-type (str "Attribute '" (attr-str a) "' applied to incompatible type!"))))
+      (when (and (ptr-type? t) (not (named-type? t)))
+        (doseq [n ["byval" "byref" "inalloca" "preallocated"]]
+          (when-let [a (attr-of attrs n)]
+            (when (and (seq? a) (not (sized? (norm-type (second a)))))
+              (verr :verifier/attr-type (str "Attribute '" n "' does not support unsized types!")))))))))
+
+(defn- fn-has [attrs n] (has-attr? attrs n))
+
+(defn- check-fn-attr-values
+  "The function attributes' own rules (verifyFunctionAttrs after its param loop)."
+  [attrs ptypes]
+  (let [has #(fn-has attrs %)]
+    (when (and (has "noinline") (has "alwaysinline")) (verr :verifier/attr-pair "Attributes 'noinline and alwaysinline' are incompatible!"))
+    (when (has "optnone")
+      (when-not (has "noinline") (verr :verifier/attr-pair "Attribute 'optnone' requires 'noinline'!"))
+      (when (has "optsize") (verr :verifier/attr-pair "Attributes 'optsize and optnone' are incompatible!"))
+      (when (has "minsize") (verr :verifier/attr-pair "Attributes 'minsize and optnone' are incompatible!"))
+      (when (has "optdebug") (verr :verifier/attr-pair "Attributes 'optdebug and optnone' are incompatible!")))
+    (when (and (has "optdebug") (has "optsize")) (verr :verifier/attr-pair "Attributes 'optsize and optdebug' are incompatible!"))
+    (when (and (has "optdebug") (has "minsize")) (verr :verifier/attr-pair "Attributes 'minsize and optdebug' are incompatible!"))
+    (when-let [a (attr-of attrs "allocsize")]
+      (let [[e n] (mapv #(Long/parseLong %) (re-seq #"[0-9]+" (str (second a))))]
+        (letfn [(chk [k what]
+                  (when k
+                    (when (>= k (count ptypes)) (verr :verifier/attr-value (str "'allocsize' " what " argument is out of bounds")))
+                    (when-not (int-type? (nth ptypes k)) (verr :verifier/attr-value (str "'allocsize' " what " argument must refer to an integer parameter")))))]
+          (chk e "element size")
+          (chk n "number of elements"))))
+    (when-let [a (attr-of attrs "vscale_range")]
+      (let [[lo hi] (mapv #(Long/parseLong %) (re-seq #"[0-9]+" (str (second a))))
+            hi (or hi lo)]
+        (when (zero? lo) (verr :verifier/attr-value "'vscale_range' minimum must be greater than 0"))
+        (when-not (pow2? lo) (verr :verifier/attr-value "'vscale_range' minimum must be power-of-two value"))
+        (when (and (pos? hi) (not (pow2? hi))) (verr :verifier/attr-value "'vscale_range' maximum must be power-of-two value"))
+        (when (and (pos? hi) (> lo hi)) (verr :verifier/attr-value "'vscale_range' minimum cannot be greater than maximum"))))
+    (when-let [a (str-attr attrs "frame-pointer")]
+      (when-not (#{"all" "non-leaf" "none" "reserved" "non-leaf-no-reserve"} (second a))
+        (verr :verifier/attr-value (str "invalid value for 'frame-pointer' attribute: " (second a)))))
+    (doseq [k ["patchable-function-prefix" "patchable-function-entry" "warn-stack-size"]]
+      (when-let [a (str-attr attrs k)]
+        (when-not (re-matches #"[0-9]+" (str (second a)))
+          (verr :verifier/attr-value (str "\"" k "\" takes an unsigned integer: " (second a))))))
+    (when-let [a (str-attr attrs "sign-return-address")]
+      (when-not (#{"none" "all" "non-leaf"} (second a)) (verr :verifier/attr-value (str "invalid value for 'sign-return-address' attribute: " (second a)))))
+    (when-let [a (str-attr attrs "branch-target-enforcement")]
+      (when-not (#{"true" "false"} (second a)) (verr :verifier/attr-value (str "invalid value for 'branch-target-enforcement' attribute: " (second a)))))
+    (when-let [a (attr-of attrs "allockind")]
+      (let [ws (set (map str/trim (str/split (str/replace (str (second a)) "\"" "") #",")))
+            k (count (filter ws ["alloc" "realloc" "free"]))]
+        (when-not (= k 1) (verr :verifier/attr-value "'allockind()' requires exactly one of alloc, realloc, and free"))
+        (when (and (ws "zeroed") (ws "uninitialized")) (verr :verifier/attr-value "'allockind()' can't be both zeroed and uninitialized"))))
+    (when (has "jumptable") (verr :verifier/attr-value "Attribute 'jumptable' requires 'unnamed_addr'"))))
+
+(defn- check-function-attrs
+  "Verifier::verifyFunctionAttrs over a function type's parts: `ret-attrs`, per-parameter attribute vectors `pattrs`
+  (their types `ptypes`), the function attributes `fattrs`; `intrinsic?`, `asm?`: the callee."
+  [ret-attrs rt pattrs ptypes fattrs intrinsic? asm?]
+  (when (or (seq ret-attrs) (some seq pattrs) (seq fattrs))
+    (doseq [a ret-attrs :let [n (aname a)] :when n]
+      (when (and (= n "captures")) (verr :verifier/attr-placement (str "Attribute '" (attr-str a) "' does not apply to function return values"))))
+    (check-param-attrs ret-attrs rt)
+    (let [saw (java.util.HashSet.)]
+      (doseq [[i attrs] (map-indexed vector pattrs) :let [t (nth ptypes i)]]
+        (when-not intrinsic? (when (has-attr? attrs "immarg") (verr :verifier/attr-misc "immarg attribute only applies to intrinsics")))
+        (when-not asm? (when (has-attr? attrs "elementtype") (verr :verifier/attr-misc "Attribute 'elementtype' can only be applied to intrinsics and inline asm.")))
+        (check-param-attrs attrs t)
+        (when (has-attr? attrs "nest")
+          (when (.contains saw "nest") (verr :verifier/attr-misc "More than one parameter has attribute nest!")) (.add saw "nest"))
+        (when (has-attr? attrs "returned")
+          (when (.contains saw "returned") (verr :verifier/attr-misc "More than one parameter has attribute returned!"))
+          (when-not (or (= t rt) (and (ptr-type? t) (ptr-type? rt) (= (addrspace t) (addrspace rt)))
+                        (and (some? (bits t)) (some? (bits rt)) (= (bits t) (bits rt)) (not (aggregate? t)) (not (aggregate? rt))
+                             (not (and (or (ptr-ish? t) (ptr-ish? rt))))))
+            (verr :verifier/attr-misc "Incompatible argument and return types for 'returned' attribute"))
+          (.add saw "returned"))
+        (when (has-attr? attrs "sret")
+          (when (.contains saw "sret") (verr :verifier/attr-misc "Cannot have multiple 'sret' parameters!"))
+          (when-not (<= i 1) (verr :verifier/attr-misc "Attribute 'sret' is not on first or second parameter!"))
+          (.add saw "sret"))
+        (doseq [[n m] [["swiftself" "swiftself"] ["swiftasync" "swiftasync"] ["swifterror" "swifterror"]]]
+          (when (has-attr? attrs n)
+            (when (.contains saw n) (verr :verifier/attr-misc (str "Cannot have multiple '" m "' parameters!")))
+            (.add saw n)))
+        (when (has-attr? attrs "inalloca")
+          (when-not (= i (dec (count ptypes))) (verr :verifier/attr-misc "inalloca isn't on the last parameter!")))))
+    (when (seq fattrs)
+      (check-fn-attr-values fattrs ptypes))))
+
+;; ---------------------------------------------------------------------------------------------
 ;; Phase 1: LLParser's checks
 
 (def ^:dynamic ^java.util.Map *gdefs* nil)   ; global name -> {:kind :type}
@@ -406,8 +643,16 @@
     (doseq [x (rest b)]
       (if (vector? x) (use-value st (second x) (norm-type (first x))) (note-md! x)))))
 
+(defn- parse-call-attrs
+  "LLParser's attribute checks of a call's text: return value, arguments, function attributes."
+  [ps o]
+  (check-attr-placement :ret (:ret-attrs o)) (check-attr-values (:ret-attrs o))
+  (doseq [a (nth ps 2)] (let [as (param-attrs a)] (check-attr-placement :param as) (check-attr-values as)))
+  (let [as (remove integer? (:attrs o))] (check-attr-placement :fn as) (check-attr-values as)))
+
 (defn- inst-uses! [st b]
   (let [[h ps o] (split-inst b)]
+    (when ('#{call invoke callbr} h) (parse-call-attrs ps o))
     ;; the grammar's own: a phi without an entry, written as forms, prints as text LLParser does not read
     (when (and (= h 'phi) (< (count (strip-flags ps)) 2)) (verr :parser/syntax "expected value token"))
     (doseq [u (uses b)] (use-value st (first u) (second u)))
@@ -461,6 +706,14 @@
         st (fn-state)
         k (global-key nm)]
     (check-linkage o what)
+    (check-attr-placement :ret (:ret-attrs o)) (check-attr-values (:ret-attrs o))
+    (doseq [p ps :when (vector? p)] (let [as (param-attrs p)] (check-attr-placement :param as) (check-attr-values as)))
+    (let [as (remove integer? (:attrs o))] (check-attr-placement :fn as) (check-attr-values as))
+    (when (and (not= (norm-type rt) 'void) (some #(has-attr? (param-attrs %) "sret") (remove #{'&} ps)))
+      (verr :parser/sret-return "functions with 'sret' argument must return void"))
+    (doseq [p (remove #{'&} ps) :let [t (norm-type (first p))]]
+      (when (= t 'void) (verr :parser/arg-type "void type only allowed for function results"))
+      (when (= t 'label) (verr :parser/arg-type "invalid type for function argument")))
     (when-let [d (.get *gdefs* k)]
       (if (= (:kind d) :function)
         (verr :parser/redefinition (str "invalid redefinition of function '" k "'"))
@@ -508,6 +761,7 @@
       (llvm/alias llvm/ifunc) (parse-alias f)
       llvm/meta (do (.add *mdefs* (second f)) (note-md! (drop 2 f)))
       llvm/named-meta (note-md! (nth f 2))
+      llvm/attributes (do (check-attr-placement :fn (nth f 2)) (check-attr-values (nth f 2)))
       llvm/uselistorder (let [[_ [t v]] f] (use-value nil v (norm-type t)))
       nil))
   (let [undef (sort (remove #(str/starts-with? % "llvm.") (keys *gfwd*)))
@@ -633,12 +887,174 @@
 
 (defn- callee-of [b] (let [[h ps] (split-inst b)] (when ('#{call invoke callbr} h) (second ps))))
 
+;; ---------------------------------------------------------------------------------------------
+;; Calling conventions, function headers, call sites, musttail, operand bundles
+
+(def ^:private cc-no-calls
+  #{"spir_kernel" "amdgpu_kernel" "amdgpu_vs" "amdgpu_hs" "amdgpu_es" "amdgpu_gs" "amdgpu_ps" "amdgpu_cs" "amdgpu_cs_chain"
+    "amdgpu_cs_chain_preserve" "ptx_kernel"})
+(def ^:private cc-void-ret #{"amdgpu_kernel" "spir_kernel" "amdgpu_cs_chain" "amdgpu_cs_chain_preserve"})
+(def ^:private cc-shader #{"amdgpu_vs" "amdgpu_hs" "amdgpu_es" "amdgpu_gs" "amdgpu_ps" "amdgpu_cs"})
+(def ^:private cc-no-varargs #{"fastcc" "coldcc" "intel_ocl_bicc" "ptx_kernel" "ptx_device"})
+
+(defn- check-function-header
+  "visitFunction after its attributes: builtin, naked, the calling convention's restrictions, the parameters' and
+  return type's kinds, a declaration's personality."
+  [h rt ps o k blocks]
+  (let [fattrs (group-items (:attrs o)) intr? (intr/recognized? k)
+        pl (vec (remove #{'&} ps)) var? (boolean (some #{'&} ps))
+        pattrs (mapv #(group-items (param-attrs %)) pl)
+        cc (:cconv o)]
+    (when-not intr?
+      (when (has-attr? fattrs "builtin") (verr :verifier/attr-misc "Attribute 'builtin' can only be applied to a callsite.")))
+    (when (and (has-attr? fattrs "naked") (= h 'llvm/define))
+      (let [names (set (keep #(when (local? (peek %)) (local-key (peek %))) pl))]
+        (doseq [[_ _ & items] blocks x items :when (not (dbg-record? (body x)))
+                [v t] (uses (body x))
+                :when (and (local? v) (not= t 'label) (contains? names (local-key v)))]
+          (verr :verifier/naked-argument "cannot use argument of naked function"))))
+    (let [first-attrs (first pattrs)]
+      (cond
+        (= cc "x86_intrcc")
+        (when-not (or (empty? pl) (has-attr? first-attrs "byval")) (verr :verifier/cc "Calling convention parameter requires byval"))
+        (or (contains? cc-void-ret cc) (contains? cc-shader cc) (contains? cc-no-varargs cc))
+        (do
+          (when (contains? cc-void-ret cc)
+            (when-not (= rt 'void) (verr :verifier/cc "Calling convention requires void return type")))
+          (when (or (contains? cc-void-ret cc) (contains? cc-shader cc))
+            (when (some #(has-attr? % "sret") pattrs) (verr :verifier/cc "Calling convention does not allow sret"))
+            (when (not= cc "spir_kernel")
+              (doseq [[a msg] [["byval" "Calling convention disallows byval"] ["preallocated" "Calling convention disallows preallocated"]
+                               ["inalloca" "Calling convention disallows inalloca"] ["byref" "Calling convention disallows stack byref"]]]
+                (when (some #(has-attr? % a) pattrs) (verr :verifier/cc msg)))))
+          (when var? (verr :verifier/cc "Calling convention does not support varargs or perfect forwarding!")))
+        :else nil))
+    (when-not intr?
+      (doseq [p pl :let [t (norm-type (first p))]]
+        (when (= t 'metadata) (verr :verifier/function-type "Function takes metadata but isn't an intrinsic"))
+        (when (= t 'token) (verr :verifier/function-type "Function takes token but isn't an intrinsic")))
+      (when (= rt 'token) (verr :verifier/function-type "Function returns a token but isn't an intrinsic")))
+    (when (and (= h 'llvm/declare) (:personality o))
+      (verr :verifier/function-type "Function declaration shouldn't have a personality routine"))))
+
+(defn- congruent? [a b]
+  (or (= a b) (and (ptr-type? a) (ptr-type? b) (= (addrspace a) (addrspace b)))))
+
+(defn- abi-attrs
+  "The parameter attributes that change the ABI (Verifier's getParameterABIAttributes), as comparable values."
+  [attrs]
+  (set (keep (fn [a] (let [n (aname a)]
+                       (when (#{"sret" "byval" "inalloca" "inreg" "alignstack" "swiftself" "swiftasync" "swifterror" "preallocated" "byref"} n)
+                         (if (seq? a) [n (let [v (second a)] (if (type-attrs n) (norm-type v) v))] n))))
+             attrs)))
+
+(defn- check-musttail
+  "Verifier::verifyMustTailCall: the call `x` (item `ii` of `items`) in the function whose header is `f`."
+  [f x b items ii]
+  (let [[_ ps o] (split-inst b)
+        args (nth ps 2)
+        callee (second ps)
+        [_ _ rt cps & fopts] f
+        fo (apply hash-map fopts)
+        cty (call-fty (first ps) args)
+        crt (norm-type rt)
+        cpl (mapv #(norm-type (first %)) (remove #{'&} cps))
+        cvar? (boolean (some #{'&} cps))
+        ty-params (vec (remove #{'&} (nth cty 2)))
+        ty-var? (boolean (some #{'&} (nth cty 2)))]
+    (when (and (seq? callee) (= (first callee) 'asm)) (verr :verifier/musttail "cannot use musttail call with inline asm"))
+    (let [intr? (and (global? callee) (str/starts-with? (global-key callee) "llvm."))]
+      (when-not intr?
+        (when-not (= cvar? ty-var?) (verr :verifier/musttail "cannot guarantee tail call due to mismatched varargs"))
+        (when-not (congruent? crt (norm-type (second cty))) (verr :verifier/musttail "cannot guarantee tail call due to mismatched return types")))
+      (when-not (= (:cconv fo) (:cconv o)) (verr :verifier/musttail "cannot guarantee tail call due to mismatched calling conv"))
+      (let [nxt (first (remove #(dbg-record? (body %)) (drop (inc ii) items)))
+            nb (when nxt (body nxt))]
+        (when-not (and nb (= 'ret (first nb))) (verr :verifier/musttail "musttail call must precede a ret"))
+        (let [[_ rps] (split-inst nb)]
+          (when (and (not= (first rps) 'void) (not= (second rps) (result x)))
+            (verr :verifier/musttail "musttail call result must be returned"))))
+      (when-not intr?
+        (when-not (= (count cpl) (count ty-params)) (verr :verifier/musttail "cannot guarantee tail call due to mismatched parameter counts"))
+        (doseq [[a c] (map vector cpl ty-params)]
+          (when-not (congruent? a c) (verr :verifier/musttail "cannot guarantee tail call due to mismatched parameter types")))))
+    (let [cattrs (map #(group-items (param-attrs %)) (remove #{'&} cps))
+          lattrs (map #(group-items (param-attrs %)) args)]
+      (doseq [[a c] (map vector cattrs lattrs)]
+        (when-not (= (abi-attrs a) (abi-attrs c))
+          (verr :verifier/musttail "cannot guarantee tail call due to mismatched ABI impacting function attributes"))))))
+
+(defn- check-bundles
+  "The operand bundles of a call (visitCallBase's loop over them); `defs` finds a local's defining body."
+  [bundles defs]
+  (let [seen (java.util.HashSet.)]
+    (doseq [[tag & ops] bundles]
+      (letfn [(once [t msg] (when (.contains seen t) (verr :verifier/bundle msg)) (.add seen t))]
+        (case tag
+          "deopt" (once "deopt" "Multiple deopt operand bundles")
+          "gc-transition" (once "gc-transition" "Multiple gc-transition operand bundles")
+          "funclet" (do (once "funclet" "Multiple funclet operand bundles")
+                        (when-not (= 1 (count ops)) (verr :verifier/bundle "Expected exactly one funclet bundle operand"))
+                        (let [v (peek (first ops)) d (when (local? v) (.get ^java.util.Map defs (local-key v)))]
+                          (when-not (and d (#{'catchpad 'cleanuppad} (first (nth d 2))))
+                            (verr :verifier/bundle "Funclet bundle operands should correspond to a FuncletPadInst"))))
+          "cfguardtarget" (do (once "cfguardtarget" "Multiple CFGuardTarget operand bundles")
+                              (when-not (= 1 (count ops)) (verr :verifier/bundle "Expected exactly one cfguardtarget bundle operand")))
+          "ptrauth" (do (once "ptrauth" "Multiple ptrauth operand bundles")
+                        (when-not (= 2 (count ops)) (verr :verifier/bundle "Expected exactly two ptrauth bundle operands"))
+                        (when-not (= 'i32 (first (first ops))) (verr :verifier/bundle "Ptrauth bundle key operand must be an i32 constant"))
+                        (when-not (= 'i64 (first (second ops))) (verr :verifier/bundle "Ptrauth bundle discriminator operand must be an i64")))
+          "kcfi" (do (once "kcfi" "Multiple kcfi operand bundles")
+                     (when-not (= 1 (count ops)) (verr :verifier/bundle "Expected exactly one kcfi bundle operand"))
+                     (when-not (= 'i32 (first (first ops))) (verr :verifier/bundle "Kcfi bundle operand must be an i32 constant")))
+          "gc-live" (once "gc-live" "Multiple gc-live operand bundles")
+          "convergencectrl" (when-not (and (= 1 (count ops)) (= 'token (first (first ops))))
+                              (verr :verifier/bundle "The 'convergencectrl' bundle requires exactly one token use."))
+          nil)))))
+
+(defn- check-call-site
+  "visitCallBase after the arguments' types: the calling convention, the attributes of the call, immediate arguments,
+  vararg and inalloca arguments, indirect calls' return types, operand bundles."
+  [b defs]
+  (let [[h ps o] (split-inst b)
+        args (nth ps 2) fty (call-fty (first ps) args) c (second ps)
+        direct-intr? (and (global? c) (intr/recognized? (global-key c)))
+        nparams (count (remove #{'&} (nth fty 2)))
+        ptypes (mapv #(norm-type (first %)) args)
+        pattrs (mapv #(group-items (param-attrs %)) args)
+        fattrs (group-items (:attrs o))]
+    (when (contains? cc-no-calls (:cconv o)) (verr :verifier/cc "calling convention does not permit calls"))
+    (check-function-attrs (group-items (:ret-attrs o)) (norm-type (second fty)) (subvec pattrs 0 (min nparams (count pattrs)))
+                          (subvec ptypes 0 (min nparams (count ptypes))) fattrs direct-intr? (and (seq? c) (= (first c) 'asm)))
+    (when (has-attr? fattrs "speculatable") (verr :verifier/attr-misc "speculatable attribute may not apply to call sites"))
+    (when (has-attr? fattrs "preallocated") (verr :verifier/attr-misc "preallocated as a call site attribute can only be on llvm.call.preallocated.arg"))
+    (doseq [[i a] (map-indexed vector pattrs) :when (>= i nparams)]
+      (when (has-attr? a "sret") (verr :verifier/attr-misc "Attribute 'sret' cannot be used for vararg call arguments!")))
+    (when (some #(has-attr? % "preallocated") pattrs)
+      (let [bundle? (boolean (some #(= (first %) "preallocated") (:bundles o))) mt? (= (:tail o) :musttail)]
+        (when (= bundle? mt?)
+          (verr :verifier/attr-misc "preallocated operand either requires a preallocated bundle or the call to be musttail (but not both)"))))
+    (doseq [[i a] (map-indexed vector pattrs) :when (has-attr? a "inalloca")]
+      (when-not (= i (dec (count pattrs))) (verr :verifier/attr-misc "inalloca isn't on the last argument!")))
+    (when-not direct-intr?
+      (doseq [t ptypes]
+        (when (= t 'metadata) (verr :verifier/function-type "Function has metadata parameter but isn't an intrinsic"))
+        (when (= t 'token) (verr :verifier/function-type "Function has token parameter but isn't an intrinsic")))
+      (when-not (global? c)
+        (when (= (norm-type (second fty)) 'token) (verr :verifier/function-type "Return type cannot be token for indirect call!"))))
+    (check-bundles (:bundles o) defs)))
+
 (defn- verify-function
   "The Verifier's rules over one definition (visitFunction, visitBasicBlock and the instructions' visitors)."
   [f users]
   (let [[h nm rt ps & opts] f
         o (apply hash-map opts)
         k (global-key nm)]
+    (when-not (intr/recognized? k)   ; an intrinsic has its own attributes, the text's are dropped
+      (let [ptypes (mapv #(norm-type (first %)) (remove #{'&} ps))
+            pattrs (mapv #(group-items (param-attrs %)) (remove #{'&} ps))]
+        (check-function-attrs (:ret-attrs o) (norm-type rt) pattrs ptypes (group-items (:attrs o)) false false)))
+    (check-function-header h (norm-type rt) ps o k (:body o))
     (when (str/starts-with? k "llvm.")
       (when (= h 'llvm/define) (verr :verifier/intrinsic-defined "llvm intrinsics cannot be defined!"))
       (check-intrinsic-signature k (:fty (.get *gdefs* k)))
@@ -721,6 +1137,10 @@
                                 (when-not (or (= a 'poison)
                                               (and (local? a) (when-let [[_ _ db] (.get defs (local-key a))] (= 'alloca (first db)))))
                                   (verr :verifier/lifetime "llvm.lifetime.start/end can only be used on alloca or poison")))))))
+                      (when ('#{call invoke callbr} hd)
+                        (check-call-site b defs)
+                        (when (and (= hd 'call) (= :musttail (:tail (nth (split-inst b) 2))))
+                          (check-musttail f x b items ii)))
                       ;; visitInstruction: self-references, dominance, metadata attachments
                       (let [r (result x) us (uses b)]
                         (doseq [[v t blk] us]
@@ -779,6 +1199,7 @@
   "A module's first error, {:rule R :message M}, or nil when it is valid."
   [forms]
   (binding [*types* (into {} (keep #(when (= (first %) 'llvm/type) [(second %) (norm-type (nth % 2))]) forms))
+            *groups* (into {} (keep #(when (= (first %) 'llvm/attributes) [(second %) (nth % 2)]) forms))
             *gdefs* (java.util.HashMap.) *gfwd* (java.util.TreeMap.) *mdefs* (java.util.HashSet.) *mrefs* (java.util.HashSet.)]
     (try
       (phase-parser forms)
