@@ -1,0 +1,293 @@
+;; Ported from GHC 9.14.1 (https://downloads.haskell.org/ghc/9.14.1/ghc-9.14.1-src.tar.xz, SHA-256
+;; 2a83779c9af86554a3289f2787a38d6aa83d00d136aa9f920361dd693c101e77): compiler/GHC/Parser/Header.hs
+;; (getOptions, toArgs), GHC/Driver/DynFlags.hs (languageExtensions), GHC/Driver/Flags.hs
+;; (extensionName, impliedXFlags), GHC/Driver/Session.hs (setExtensionFlag', the -X flags), whose
+;; notice follows (LICENSE.md, "GHC: the Glasgow Haskell Compiler License"):
+;;
+;; The Glasgow Haskell Compiler License
+;;
+;; Copyright 2002, The University Court of the University of Glasgow.
+;; All rights reserved.
+;;
+;; Redistribution and use in source and binary forms, with or without
+;; modification, are permitted provided that the following conditions are met:
+;;
+;; - Redistributions of source code must retain the above copyright notice,
+;; this list of conditions and the following disclaimer.
+;;
+;; - Redistributions in binary form must reproduce the above copyright notice,
+;; this list of conditions and the following disclaimer in the documentation
+;; and/or other materials provided with the distribution.
+;;
+;; - Neither name of the University nor the names of its contributors may be
+;; used to endorse or promote products derived from this software without
+;; specific prior written permission.
+;;
+;; THIS SOFTWARE IS PROVIDED BY THE UNIVERSITY COURT OF THE UNIVERSITY OF
+;; GLASGOW AND THE CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES,
+;; INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND
+;; FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
+;; UNIVERSITY COURT OF THE UNIVERSITY OF GLASGOW OR THE CONTRIBUTORS BE LIABLE
+;; FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+;; DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+;; SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+;; CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+;; LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+;; OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
+;; DAMAGE.
+
+(ns arbace.repr.haskell.header
+  "A module's header and the parser's options, as GHC's driver makes them (doc/haskell/NATIVE.md):
+  the header pragmas (GHC.Parser.Header's getOptions, by the lexer's option_prags start code, with
+  each pragma's kind and line as the helper records them, tools/hsdump's headerOptions), the
+  dynamic flags of the command line and of the pragmas (-X, the languages Haskell98, Haskell2010,
+  GHC2021, GHC2024, Safe Haskell's -XSafe/-XTrustworthy/-XUnsafe, -cpp, -haddock) as
+  GHC.Driver.Session processes them (each extension turned on with what it implies,
+  impliedXFlags; the language's set under the list of On/Off), and the lexer's bitmap
+  (mkParserOpts, arbace.repr.haskell.lex/parser-bits)."
+  (:require [arbace.repr.haskell.lex :as lx]
+            [arbace.string :as str]))
+
+(def languages #{"Haskell98" "Haskell2010" "GHC2021" "GHC2024"})
+
+(def ^:private haskell98
+  ["ImplicitPrelude" "StarIsType" "CUSKs" "MonomorphismRestriction" "NPlusKPatterns"
+   "DatatypeContexts" "TraditionalRecordSyntax" "FieldSelectors" "NondecreasingIndentation"
+   "DeepSubsumption" "ListTuplePuns" "ImplicitStagePersistence"])
+
+(def ^:private haskell2010
+  ["ImplicitPrelude" "StarIsType" "CUSKs" "MonomorphismRestriction" "DatatypeContexts"
+   "TraditionalRecordSyntax" "EmptyDataDecls" "ForeignFunctionInterface" "PatternGuards"
+   "DoAndIfThenElse" "FieldSelectors" "RelaxedPolyRec" "DeepSubsumption" "ListTuplePuns"
+   "ImplicitStagePersistence"])
+
+(def ^:private ghc2021
+  ["ImplicitPrelude" "StarIsType" "MonomorphismRestriction" "TraditionalRecordSyntax"
+   "EmptyDataDecls" "ForeignFunctionInterface" "PatternGuards" "DoAndIfThenElse" "FieldSelectors"
+   "RelaxedPolyRec" "ListTuplePuns" "BangPatterns" "BinaryLiterals" "ConstrainedClassMethods"
+   "ConstraintKinds" "DeriveDataTypeable" "DeriveFoldable" "DeriveFunctor" "DeriveGeneric"
+   "DeriveLift" "DeriveTraversable" "EmptyCase" "EmptyDataDeriving" "ExistentialQuantification"
+   "ExplicitForAll" "FlexibleContexts" "FlexibleInstances" "GADTSyntax"
+   "GeneralizedNewtypeDeriving" "HexFloatLiterals" "ImportQualifiedPost" "InstanceSigs"
+   "KindSignatures" "MultiParamTypeClasses" "NamedFieldPuns" "NamedWildCards"
+   "NumericUnderscores" "PolyKinds" "PostfixOperators" "RankNTypes" "ScopedTypeVariables"
+   "StandaloneDeriving" "StandaloneKindSignatures" "TupleSections" "TypeApplications"
+   "TypeOperators" "TypeSynonymInstances" "ImplicitStagePersistence"])
+
+(def ^:private ghc2024
+  (into ghc2021 ["DataKinds" "DerivingStrategies" "DisambiguateRecordFields" "ExplicitNamespaces"
+                 "GADTs" "MonoLocalBinds" "LambdaCase" "RoleAnnotations"]))
+
+(defn language-extensions
+  "languageExtensions: the extensions a language turns on (GHC2021 when none)"
+  [lang]
+  (case lang
+    "Haskell98" haskell98 "Haskell2010" haskell2010 "GHC2024" ghc2024 ghc2021))
+
+(def extension-names
+  "The extensions' names (extensionName)"
+  #{"CPP" "OverlappingInstances" "UndecidableInstances" "IncoherentInstances" "UndecidableSuperClasses"
+    "MonomorphismRestriction" "MonoLocalBinds" "DeepSubsumption" "RelaxedPolyRec" "ExtendedDefaultRules"
+    "NamedDefaults" "ForeignFunctionInterface" "UnliftedFFITypes" "InterruptibleFFI" "CApiFFI"
+    "GHCForeignImportPrim" "JavaScriptFFI" "ParallelArrays" "Arrows" "TemplateHaskell"
+    "TemplateHaskellQuotes" "QualifiedDo" "QuasiQuotes" "ImplicitParams" "ImplicitPrelude"
+    "ScopedTypeVariables" "AllowAmbiguousTypes" "UnboxedTuples" "UnboxedSums" "UnliftedNewtypes"
+    "UnliftedDatatypes" "BangPatterns" "TypeFamilies" "TypeFamilyDependencies" "TypeInType"
+    "OverloadedStrings" "OverloadedLists" "NumDecimals" "OrPatterns" "DisambiguateRecordFields"
+    "RecordWildCards" "NamedFieldPuns" "ViewPatterns" "GADTs" "GADTSyntax" "NPlusKPatterns"
+    "DoAndIfThenElse" "BlockArguments" "RebindableSyntax" "ConstraintKinds" "PolyKinds" "DataKinds"
+    "TypeData" "InstanceSigs" "ApplicativeDo" "LinearTypes" "RequiredTypeArguments"
+    "StandaloneDeriving" "DeriveDataTypeable" "AutoDeriveTypeable" "DeriveFunctor" "DeriveTraversable"
+    "DeriveFoldable" "DeriveGeneric" "DefaultSignatures" "DeriveAnyClass" "DeriveLift"
+    "DerivingStrategies" "DerivingVia" "TypeSynonymInstances" "FlexibleContexts" "FlexibleInstances"
+    "ConstrainedClassMethods" "MultiParamTypeClasses" "NullaryTypeClasses" "FunctionalDependencies"
+    "UnicodeSyntax" "ExistentialQuantification" "MagicHash" "EmptyDataDecls" "KindSignatures"
+    "RoleAnnotations" "ParallelListComp" "TransformListComp" "MonadComprehensions"
+    "GeneralizedNewtypeDeriving" "RecursiveDo" "PostfixOperators" "TupleSections" "PatternGuards"
+    "LiberalTypeSynonyms" "RankNTypes" "ImpredicativeTypes" "TypeOperators" "ExplicitNamespaces"
+    "PackageImports" "ExplicitForAll" "AlternativeLayoutRule" "AlternativeLayoutRuleTransitional"
+    "DatatypeContexts" "NondecreasingIndentation" "RelaxedLayout" "TraditionalRecordSyntax"
+    "LambdaCase" "MultiWayIf" "BinaryLiterals" "NegativeLiterals" "HexFloatLiterals"
+    "DuplicateRecordFields" "OverloadedLabels" "EmptyCase" "PatternSynonyms" "PartialTypeSignatures"
+    "NamedWildCards" "StaticPointers" "TypeApplications" "Strict" "StrictData" "EmptyDataDeriving"
+    "NumericUnderscores" "QuantifiedConstraints" "StarIsType" "ImportQualifiedPost" "CUSKs"
+    "StandaloneKindSignatures" "LexicalNegation" "FieldSelectors" "OverloadedRecordDot"
+    "OverloadedRecordUpdate" "TypeAbstractions" "ExtendedLiterals" "ListTuplePuns" "MultilineStrings"
+    "ExplicitLevelImports" "ImplicitStagePersistence"})
+
+(def ^:private alternate-names
+  "extensionAlternateNames, extensionDeprecatedNames"
+  {"GeneralisedNewtypeDeriving" "GeneralizedNewtypeDeriving" "Rank2Types" "RankNTypes"
+   "PolymorphicComponents" "RankNTypes" "DoRec" "RecursiveDo" "RecordPuns" "NamedFieldPuns"
+   "PatternSignatures" "ScopedTypeVariables"})
+
+(def ^:private implied
+  "impliedXFlags: [extension [:on|:off implied]]"
+  [["RankNTypes" :on "ExplicitForAll"] ["QuantifiedConstraints" :on "ExplicitForAll"]
+   ["ScopedTypeVariables" :on "ExplicitForAll"] ["LiberalTypeSynonyms" :on "ExplicitForAll"]
+   ["ExistentialQuantification" :on "ExplicitForAll"] ["FlexibleInstances" :on "TypeSynonymInstances"]
+   ["FunctionalDependencies" :on "MultiParamTypeClasses"] ["MultiParamTypeClasses" :on "ConstrainedClassMethods"]
+   ["TypeFamilyDependencies" :on "TypeFamilies"] ["RebindableSyntax" :off "ImplicitPrelude"]
+   ["DerivingVia" :on "DerivingStrategies"] ["GADTs" :on "GADTSyntax"] ["GADTs" :on "MonoLocalBinds"]
+   ["TypeFamilies" :on "MonoLocalBinds"] ["TypeFamilies" :on "KindSignatures"]
+   ["PolyKinds" :on "KindSignatures"] ["TypeInType" :on "DataKinds"] ["TypeInType" :on "PolyKinds"]
+   ["TypeInType" :on "KindSignatures"] ["StandaloneKindSignatures" :off "CUSKs"]
+   ["AutoDeriveTypeable" :on "DeriveDataTypeable"] ["TypeFamilies" :on "ExplicitNamespaces"]
+   ["TypeOperators" :on "ExplicitNamespaces"] ["ImpredicativeTypes" :on "RankNTypes"]
+   ["RecordWildCards" :on "DisambiguateRecordFields"] ["ParallelArrays" :on "ParallelListComp"]
+   ["MonadComprehensions" :on "ParallelListComp"] ["JavaScriptFFI" :on "InterruptibleFFI"]
+   ["DeriveTraversable" :on "DeriveFunctor"] ["DeriveTraversable" :on "DeriveFoldable"]
+   ["DuplicateRecordFields" :on "DisambiguateRecordFields"] ["TemplateHaskell" :on "TemplateHaskellQuotes"]
+   ["Strict" :on "StrictData"] ["UnboxedTuples" :on "UnboxedSums"] ["UnliftedDatatypes" :on "DataKinds"]
+   ["UnliftedDatatypes" :on "StandaloneKindSignatures"] ["LinearTypes" :on "MonoLocalBinds"]
+   ["ExplicitLevelImports" :off "ImplicitStagePersistence"]])
+
+(defn- set-extension
+  "setExtensionFlag': the On of ext prepended to the list (newest first), then what it implies,
+  recursively (an Off implied is not followed further)"
+  [onoff ext]
+  (let [deps (filter #(= ext (first %)) implied)]
+    (reduce (fn [acc [_ k d]] (if (= k :on) (set-extension acc d) (conj acc [:off d])))
+            (conj onoff [:on ext])
+            ;; foldr ($) (xopt_set dflags f) deps: the last dependency applied first
+            (reverse deps))))
+
+(defn dyn-flags
+  "The dynamic flags' state after flags (strings, in order) from state d ({:language :onoff
+  :safe :haddock}): -X<extension>, -XNo<extension>, -X<language>, -XSafe/-XTrustworthy/-XUnsafe,
+  -cpp, -haddock; the others ignored"
+  ([flags] (dyn-flags {:language nil :onoff '() :safe nil :haddock false} flags))
+  ([d flags]
+   (reduce
+    (fn [d ^String f]
+      (cond
+        (= f "-cpp") (update d :onoff set-extension "CPP")
+        (= f "-haddock") (assoc d :haddock true)
+        (= f "-no-haddock") (assoc d :haddock false)
+        (str/starts-with? f "-X")
+        (let [x (subs f 2)
+              canon (fn [n] (or (alternate-names n) (when (contains? extension-names n) n)))]
+          (cond
+            (contains? languages x) (assoc d :language x)
+            (#{"Safe" "Trustworthy" "Unsafe"} x) (assoc d :safe x)
+            (canon x) (update d :onoff set-extension (canon x))
+            (and (str/starts-with? x "No") (canon (subs x 2))) (update d :onoff conj [:off (canon (subs x 2))])
+            :else d))
+        :else d))
+    d flags)))
+
+(defn extensions
+  "flattenExtensionFlags: the extensions on: the language's, then the On/Off list oldest first"
+  [d]
+  (reduce (fn [s [k e]] (if (= k :on) (conj s e) (disj s e)))
+          (set (language-extensions (:language d)))
+          (reverse (:onoff d))))
+
+(defn parser-bits
+  "initParserOpts: the lexer's bitmap of a flags state (raw: comments as tokens)"
+  ^long [d & {:keys [raw]}]
+  (lx/parser-bits (extensions d) {:safe (some? (:safe d)) :haddock (:haddock d) :raw-tokens raw}))
+
+;;; ------------------------------------------------------------------------------------------
+;;; The header pragmas (getOptions; the helper's headerOptions)
+
+(defn- read-hs-string
+  "A Haskell string literal at the start of s: [value rest] (the escapes the lexer knows), or nil"
+  [^String s]
+  (when (str/starts-with? s "\"")
+    (let [cs (lx/code-points s) n (alength cs)
+          e (loop [k 1] (cond (>= k n) nil (= 34 (aget cs k)) k (= 92 (aget cs k)) (recur (+ k 2)) :else (recur (inc k))))]
+      (when e
+        [(let [v (lx/lex-string-chars cs 1 e) sb (StringBuilder.)] (doseq [c v] (.appendCodePoint sb (int c))) (.toString sb))
+         (String. cs (int (inc e)) (int (- n (inc e))))]))))
+
+(defn to-args
+  "toArgs: an OPTIONS pragma's text as its arguments (white space separated; a quoted string
+  without its quotes; an argument with a quoted part keeps it quoted; a [\"..\", ..] list)"
+  [^String s]
+  (let [ws? #(Character/isWhitespace (char %))
+        s (str/triml s)]
+    (if (str/starts-with? s "[")
+      (let [inner (str/trim (subs s 1))]
+        (if (str/starts-with? inner "]")
+          []
+          (loop [r inner out []]
+            (if-let [[v rest] (read-hs-string (str/triml r))]
+              (let [rest (str/triml rest)]
+                (cond (str/starts-with? rest ",") (recur (subs rest 1) (conj out v))
+                      :else (conj out v)))
+              out))))
+      (loop [r s out []]
+        (let [r (str/triml r)]
+          (cond
+            (empty? r) out
+            (str/starts-with? r "\"") (if-let [[v rest] (read-hs-string r)] (recur rest (conj out v)) out)
+            :else
+            (let [k (or (first (keep-indexed (fn [i c] (when (or (ws? c) (= c \")) i)) r)) (count r))
+                  part1 (subs r 0 k)
+                  rest (subs r k)]
+              (if (str/starts-with? rest "\"")
+                (if-let [[v rest2] (read-hs-string rest)]
+                  (recur rest2 (conj out (str part1 (pr-str v))))
+                  out)
+                (recur rest (conj out part1))))))))))
+
+(defn header-pragmas
+  "The header pragmas of a module's text (getOptions' loop): [[kind line value file] ...], kind
+  one of language, options, options-ghc, include, options-haddock (OPTIONS_GHC told from OPTIONS
+  by the source's spelling), value the extension names, the arguments or the text; and the
+  dynamic flags they give, in order"
+  [text ^String file ^long bits]
+  (let [cs (if (string? text) (lx/code-points text) text)
+        ps (lx/make-state cs file bits :prags true)
+        next-tok (fn [] (try (lx/lex-token ps) (catch Exception _ [:ITeof nil nil])))
+        comment? #(#{:ITlineComment :ITblockComment :ITdocComment} (first %))
+        line-of (fn [t] (nth (nth t 2) 1))
+        file-of (fn [t] (nth (nth t 2) 0))
+        word-at (fn [t]
+                  ;; the helper's pragName (tools/hsdump/HsDump.hs, headerOptions): the word 3
+                  ;; characters after the token's start column on its (physical) start line; the
+                  ;; token of an OPTIONS pragma begins after the pragma's name (lex_string_prag),
+                  ;; so the word is the options' and an OPTIONS_GHC pragma is recorded as options,
+                  ;; as the helper records it
+                  (let [[_ l1 c1] (nth t 2)
+                        n (alength ^ints cs)
+                        ls (loop [k 0 line 1] (cond (= line (long l1)) k (>= k n) n (= 10 (aget ^ints cs k)) (recur (inc k) (inc line)) :else (recur (inc k) line)))
+                        le (loop [k ls] (if (and (< k n) (not= 10 (aget ^ints cs k))) (recur (inc k)) k))
+                        x (String. ^ints cs (int ls) (int (- le ls)))
+                        x (let [d (min (count x) (dec (long c1)))] (subs x d))
+                        x (subs x (min 3 (count x)))
+                        x (str/triml x)]
+                    (first (str/split (str x " ") #"\s"))))]
+    (loop [t (next-tok) out [] opts []]
+      (let [k (first t)]
+        (cond
+          (comment? t) (recur (next-tok) out opts)
+          (#{:IToptions_prag :ITinclude_prag :ITdocOptions} k)
+          (let [c (next-tok)]
+            (if (= :ITclose_prag (first c))
+              (case k
+                :IToptions_prag
+                (let [args (to-args (second t))
+                      kind (if (str/starts-with? (str/upper-case (word-at t)) "OPTIONS_GHC") 'options-ghc 'options)]
+                  (recur (next-tok) (conj out [kind (line-of t) args (file-of t)]) (into opts args)))
+                :ITinclude_prag
+                (recur (next-tok) (conj out ['include (line-of t) (second t) (file-of t)])
+                       (into opts ["-#include" (str/replace (second t) #"\s" "")]))
+                :ITdocOptions
+                (recur (next-tok) (conj out ['options-haddock (line-of t) (second t) (file-of t)])
+                       (into opts ["-haddock-opts" (str/replace (second t) #"\s" "")])))
+              [out opts]))
+          (= k :ITlanguage_prag)
+          (let [[names ok] (loop [names [] u (next-tok)]
+                             (if (= :ITconid (first u))
+                               (let [v (next-tok)]
+                                 (case (first v)
+                                   :ITcomma (recur (conj names (second u)) (next-tok))
+                                   :ITclose_prag [(conj names (second u)) true]
+                                   [names false]))
+                               [names false]))]
+            (if ok
+              (recur (next-tok) (conj out ['language (line-of t) names (file-of t)]) (into opts (map #(str "-X" %) names)))
+              [out opts]))
+          :else [out opts])))))
