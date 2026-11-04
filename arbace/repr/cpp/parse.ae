@@ -1035,24 +1035,89 @@
   (let [b (ix p)]
     (expect! p "{")
     (with-gt p true
-      (loop [out []]
+      (loop [out [] desigs []]
         (cond
-          (is? p "}") (do (adv! p) (node p "InitListExpr" b (last-ix p) {:inner out}))
+          (is? p "}") (do (adv! p) (node p "InitListExpr" b (last-ix p) (cond-> {:inner out} (some some? desigs) (assoc :_desigs desigs))))
           :else
-          (let [_ (loop [] ; designators: .a = , [0] = , .a.b[1] =
-                    (cond (and (is? p ".") (identical? :id (tk (nxt p 1))))
-                          (do (adv! p) (adv! p) (when (or (is? p ".") (is? p "[")) (recur)))
-                          (and (is? p "[") (not (is-at? p 1 "["))) (let [s (ix p)] (skip-balanced! p) (if (or (is? p "=") (is? p ".") (is? p "[")) (when-not (is? p "=") (recur)) (seek! p s)))
-                          :else nil))
+          (let [dz (loop [dz []] ; designators: .a = , [0] = , .a.b[1] = : [[:f "a"] [:i 0] ...] (:i nil an index not a literal)
+                     (cond (and (is? p ".") (identical? :id (tk (nxt p 1))))
+                           (let [nm (ts (nxt p 1)) di (ix p)] (adv! p) (adv! p) (let [dz (conj dz [:f nm di])] (if (or (is? p ".") (is? p "[")) (recur dz) dz)))
+                           (and (is? p "[") (not (is-at? p 1 "[")))
+                           (let [s (ix p) ^T n (nxt p 1)
+                                 v (when (and (identical? :num (.-k n)) (is-at? p 2 "]")) (try (Long/decode (.-s n)) (catch Exception _ nil)))]
+                             (skip-balanced! p)
+                             (if (or (is? p "=") (is? p ".") (is? p "["))
+                               (let [dz (conj dz [:i v s])] (if (is? p "=") dz (recur dz)))
+                               (do (seek! p s) dz)))
+                           :else dz))
                 _ (when (and (is? p "=") (> (ix p) (inc b))) (let [^T pv (tok-at p (dec (ix p)))] (when (or (identical? :id (.-k pv)) (t= pv "]")) (adv! p))))
                 x (parse-init-clause p)
                 x (if (is? p "...") (let [e (ix p)] (adv! p) (node p "PackExpansionExpr" (nb x) e {:inner [x]})) x)
-                out (conj out x)]
-            (cond (accept! p ",") (recur out)
-                  (is? p "}") (recur out)
+                out (conj out x)
+                desigs (conj desigs (when (seq dz) dz))]
+            (cond (accept! p ",") (recur out desigs)
+                  (is? p "}") (recur out desigs)
                   :else (perr p "an initializer list"))))))))
 
-(declare dependent-type?)
+(defn- class-ent-of
+  "The class entity a type names (through a typedef or an alias), or nil."
+  [t]
+  (when (#{:n :elab} (:t t))
+    (let [e (:ent t)]
+      (cond (:fields e) e
+            (:fields (:target e)) (:target e)
+            :else nil))))
+
+(defn- designate
+  "An initializer list `x` for an object of type `t` in clang's semantic form: its designated elements put at their
+  members' (an aggregate's, as declared) or their indices' (an array's) places, the members or elements skipped
+  between them value-initialized (ImplicitValueInitExpr), the trailing ones left out (the converter's reading); a
+  nested designator's elements (.a.y = 2) in a list of the member's own without braces; a nested list designated in
+  turn by its member's or element's type. A list whose designators the parser cannot place (an index not a literal, a
+  class with bases, a union, an unknown type, an element without a designator after a nested one) is kept as written."
+  [^P p t x]
+  (if-not (= "InitListExpr" (:kind x))
+    x
+    (let [ds (:_desigs x)
+          kids (vec (:inner x))
+          ce (class-ent-of t)
+          arr (= :a (:t t))
+          fields (when ce (vec (:fields ce)))
+          ftypes (when ce (:ftypes ce))
+          sub-type (fn [^long i] (cond arr (:of t)
+                                       (and fields (empty? (:bases-order ce)) (< i (count fields))) (get ftypes (fields i))
+                                       :else nil))
+          head-ok (fn [[k v]] (if arr (and (= k :i) v) (and (= k :f) (some #{v} fields))))
+          placeable (and ds (or arr (and ce (not (:union ce)) (empty? (:bases-order ce))))
+                         (every? (fn [d] (or (nil? d) (head-ok (first d)))) ds)
+                         (not (some (fn [[d e]] (and (> (count d) 1) (nil? e))) (partition 2 1 ds))))
+          slots (when placeable
+                  (loop [i 0 at 0 m (sorted-map)]
+                    (if (>= i (count kids))
+                      m
+                      (let [d (get ds i)
+                            [k v] (first d)
+                            at (long (if d (if (= k :i) v (.indexOf ^java.util.List fields v)) at))
+                            x (kids i)]
+                        (if (> (count d) 1)
+                          ;; a nested designator: its rest and its value into the member's list without braces
+                          (let [sub (let [o (get m at)]
+                                      (if (:_nested o) o {:kind "InitListExpr" :_nested true :inner [] :_desigs []
+                                                          :range {:begin (loc p (long (nth (second d) 2))) :end (:end (:range x))}}))
+                                sub (-> sub (update :inner conj x) (update :_desigs conj (vec (rest d))) (assoc-in [:range :end] (:end (:range x))))]
+                            (recur (inc i) (inc at) (assoc m at sub)))
+                          (recur (inc i) (inc at) (assoc m at x)))))))
+          inner (if placeable
+                  (let [n (if (seq slots) (inc (long (key (last slots)))) 0)]
+                    (mapv (fn [^long j] (let [k (get slots j)]
+                                          (cond (nil? k) {:kind "ImplicitValueInitExpr"}
+                                                (sub-type j) (designate p (sub-type j) (dissoc k :_nested))
+                                                :else (dissoc k :_nested :_desigs))))
+                          (range n)))
+                  (vec (map-indexed (fn [j k] (if (and (nil? ds) (sub-type j)) (designate p (sub-type j) k) k)) kids)))]
+      (assoc (dissoc x :_desigs) :inner inner))))
+
+(declare dependent-type? designate)
 
 (defn- class-type? [t]
   (and (#{:n :elab :tn} (:t t))
@@ -1072,7 +1137,7 @@
   "A functional cast or temporary object: T(args) or T{args}, the type `t` spelled from b."
   [^P p ^long b t builtin]
   (if (is? p "{")
-    (let [l (parse-braced-init p)]
+    (let [l (designate p t (parse-braced-init p))]
       (node p (if (and (in-template? p) (dependent-type? t)) "CXXUnresolvedConstructExpr" "CXXFunctionalCastExpr") b (ne l)
             (assoc (type-node-fields t) :inner [l])))
     (let [as (paren-args p) e (last-ix p)]
@@ -1196,7 +1261,7 @@
             qn (parse-name p :parse)]
         (if qn
           (if (or (type-ent? (:ent qn)) (and (is? p "(") false))
-            (construct-node p b {:t :n :s (name-str p qn)} false)
+            (construct-node p b {:t :n :s (name-str p qn) :ent (:ent qn)} false)
             (node p "DeclRefExpr" b (:e qn) {:referencedDecl {:name (or (:s (peek (:parts qn))) "")}}))
           (do (seek! p save)
               (let [ty (parse-type-specs p :expr)]
@@ -1207,7 +1272,7 @@
             lp (peek (:parts qn))]
         (cond
           (and (type-ent? en) (or (is? p "(") (is? p "{")) (or (:s lp)))
-          (construct-node p b {:t :n :s (name-str p qn)} false)
+          (construct-node p b {:t :n :s (name-str p qn) :ent en :qn qn} false)
           ;; a member of an anonymous union or struct of a block or a namespace: clang's member access through its implicit object
           (and (:anon en) (= 1 (count (:parts qn))))
           (node p "MemberExpr" b (:e qn) {:name (:s lp) :isArrow false :inner [(node p "DeclRefExpr" b (:e qn) {:referencedDecl {:name ""}})]})
@@ -1919,7 +1984,10 @@
                          (expect! p "]")
                          (aset lastx 0 (last-ix p))
                          (recur (conj out {:a true :n (when x (tok-text p (nb x) (ne x))) :x x})))))
-                 (and (is? p "(") (or (not= mode :named) (nil? name) (special-name? name) (is-function-declarator? p)))
+                 (and (is? p "(") (or (not= mode :named) (nil? name) (special-name? name)
+                                      ;; a qualified declarator-id naming a member function (Sema::isDeclaratorFunctionLike)
+                                      (and qcls (= :fn (:k (sc/find-in (:scope qcls) (:s (peek (:parts name)))))))
+                                      (is-function-declarator? p)))
                  (let [f (parse-fn-suffix p)] (aset lastx 0 (last-ix p)) (recur (conj out f)))
                  :else out)))
         sufs (if qcls (in-scope p (sc/new-scope :lookup (scope p) qcls) (suffixes)) (suffixes))
@@ -2083,7 +2151,8 @@
               simple (and qn (= 1 (count (:parts qn))) (not (:g qn)))
               cs (sc/new-scope :class (scope p) nil)
               tmpl (boolean (and hdr (pos? (long (:n hdr))) (nil? (:args lp))))
-              ent (cond-> {:k :type :name nm :tag true :class true :scope cs :fields (ArrayList.) :bases-order (ArrayList.)}
+              ent (cond-> {:k :type :name nm :tag true :class true :scope cs :fields (ArrayList.) :bases-order (ArrayList.)
+                           :ftypes (java.util.HashMap.) :union (= kw "union")}
                     tmpl (assoc :tmpl true :tps (:params hdr)))
               _ (when (and nm simple (nil? (:args lp))) (declare! p ent))
               _ (when nm (sc/declare! cs (cond-> (assoc ent :tag false)
@@ -2117,7 +2186,7 @@
                                :loc (loc p (if lp (long (:i lp)) kb))}
                         nm (assoc :name nm)
                         (:args lp) (assoc :_args (:args lp) :_qn qn)))]
-          {:type (if nm {:t :n :s (if simple nm (name-str p qn)) :ent ent} (assoc (unnamed-type p kw kb) :cs cs)) :node n})))))
+          {:type (if nm {:t :n :s (if simple nm (name-str p qn)) :ent ent} (assoc (unnamed-type p kw kb) :cs cs :ent ent)) :node n})))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Enumerations
@@ -2436,7 +2505,9 @@
             ;; a variable, a data member
             :else
             (let [field (and (= ctx :member) (not= "static" (:storage ds)) (not (:friend ds)))
-                  _ (when (and field nm (:skim (class-ctx p))) (when-let [^ArrayList fs (:fields (:ent (class-ctx p)))] (.add fs nm)))
+                  _ (when (and field nm (:skim (class-ctx p)))
+                      (when-let [^ArrayList fs (:fields (:ent (class-ctx p)))] (.add fs nm))
+                      (when-let [^java.util.HashMap ft (:ftypes (:ent (class-ctx p)))] (.put ft nm ty)))
                   bits (when (and (= ctx :member) (is? p ":")) (adv! p) (if (skim? p) (do (skip-until! p #{"," ";" "=" "{"}) nil) (parse-cond-expr p)))
                   as1 (attr-nodes p)
                   _ (skip-asm-label! p)
@@ -2448,6 +2519,7 @@
                                                                (let [ab (ix p) as (paren-args p)] [(if (= 1 (count as)) (first as) (node p "ParenListExpr" ab (last-ix p) {:inner as})) "call"]))
                              :else [nil nil])
                   e (cond x (last-ix p) bits (ne bits) :else (long (:e d)))
+                  x (when x (designate p ty x))
                   ty (if (and (:constexpr ds) (not field) (not (#{:lr :rr} (:t ty)))) (with-cv ty true nil) ty)
                   n (if field
                       (node p "FieldDecl" (:b ds) e
