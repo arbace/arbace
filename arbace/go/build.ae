@@ -2071,8 +2071,15 @@ GR9a)."
           ;; labeled declarations (L: x := e) resume the block there (GR8a, F1): a goto from
           ;; the block's body to any of them; one from before the block reaches the first
           ;; through the enclosing list's label (body-node)
-          labels (if (:let-type n) [] (mapv #(if-let [l (:decl-label %)] (label-code! l) 0) (:decls n)))]
-      (op "Seq" (oa (conj ds rest)) (oa (map long (if (some pos? labels) (conj labels 0) [])))))
+          labels (if (:let-type n) [] (mapv #(if-let [l (:decl-label %)] (label-code! l) 0) (:decls n)))
+          ;; a declaration on a line of its own after the let's first stores its line, as a
+          ;; statement does (§10.6; gc's line of a call or panic in it: GOI-SPEC.md, "Since v1: frames")
+          lines (if (or (:let-type n) (not @code-frames?))
+                  []
+                  (let [l0 (long (or (:line n) 0))
+                        ls (mapv #(let [l (stored-line %)] (if (= l l0) 0 l)) (:decls n))]
+                    (if (some pos? ls) (conj ls 0) [])))]
+      (op "SeqL" (oa (conj ds rest)) (oa (map long (if (some pos? labels) (conj labels 0) []))) (oa (map long lines))))
     (body-node (:stmts n))))
 
 (defn- loop-target [n]
@@ -2534,6 +2541,51 @@ GR9a)."
     (op "CodeFrame" code (str gc-name) (str (or (:dir *ctx*) "")) (long (or line0 0)) (long (or end 0)) (boolean args?)))
   code)
 
+(defn- code-end
+  "The last line of a function's code as gc's line table has it: its closing brace's (:go/end,
+  where a function that ends without a return returns and runs its deferred calls), or the line
+  of its last statement when that is a return (gc emits no code at the brace then)."
+  [tree]
+  (let [end (some-> (:form tree) meta :go/end)
+        last-stmt (loop [s (last (:stmts (:body tree)))]
+                    ;; a let's block holds the rest of its list
+                    (if (and (map? s) (= :block (:op s)) (seq (:stmts s))) (recur (last (:stmts s))) s))]
+    (if (and (map? last-stmt) (= :return (:op last-stmt)) (:line last-stmt))
+      (:line last-stmt)
+      end)))
+
+(defn- line-dirs!
+  "Gives code the //line directives of function tree's body (gc's updateBase: a comment //line
+  FILE:LINE or FILE:LINE:COL makes the next line LINE of FILE; an empty FILE is ?? without COL,
+  the file before with it), for its frames (GOI-SPEC.md, \"Since v1: frames\")."
+  [code tree src-file]
+  (when @code-frames?
+    (let [walk (fn walk [n]
+                 (cond
+                   (vector? n) (mapcat walk n)
+                   (map? n) (if (= :directive (:op n)) [n] (mapcat #(walk (get n %)) [:stmts :body :then :else :clauses :stmt]))
+                   :else nil))
+          ds (->> (walk (:body tree))
+                  (filter #(and (string? (:text %))
+                                (str/starts-with? (:text %) "//line ") (:line %)))
+                  (sort-by :line))]
+      (when (seq ds)
+        (let [rows (loop [ds ds prev src-file acc []]
+                     (if-let [d (first ds)]
+                       (let [text (subs (:text d) 7)
+                             [f n] (or (when-let [[_ f n] (re-find #"^(.*):([0-9]+):[0-9]+$" text)]
+                                         [(if (= "" f) prev f) (Long/parseLong n)])
+                                       (when-let [[_ f n] (re-find #"^(.*):([0-9]+)$" text)]
+                                         [f (Long/parseLong n)]))]
+                         (if (and f (pos? (long n)))
+                           (recur (rest ds) f (conj acc [(long (:line d)) f n]))
+                           (recur (rest ds) prev acc)))
+                       acc))]
+          (when (seq rows)
+            (op "CodeLineDirs" code (oa (map #(long (nth % 0)) rows)) (oa (map #(str (nth % 1)) rows))
+                (oa (map #(long (nth % 2)) rows))))))))
+  code)
+
 (defn build-code
   "The *goi.Code of a function node (:func, :fn, :body) with its signature sig; captures, the
   cells it receives first (a literal's); a method's receiver (:recv, of type :recv-type or its
@@ -2584,10 +2636,11 @@ GR9a)."
           (binding [*fn* (assoc *fn* :results rs)]
             (let [body (stmt (:body tree))
                   {:keys [I F S R C]} @(:slots *fn*)]
-              (code-frame! (op "NewCode" (long I) (long F) (long S) (long R) (long C) (oa @pro) body
-                               (or @(:defer *fn*) (has-defer? (:body tree))) (oa @epi))
-                           gc-name (:line tree) (some-> (:form tree) meta :go/end)
-                           (or (seq (:params tree)) (:recv tree))))))))))
+              (line-dirs! (code-frame! (op "NewCode" (long I) (long F) (long S) (long R) (long C) (oa @pro) body
+                                           (or @(:defer *fn*) (has-defer? (:body tree))) (oa @epi))
+                                       gc-name (:line tree) (code-end tree)
+                                       (or (seq (:params tree)) (:recv tree)))
+                          tree (second src)))))))))
 
 (defn build-fn-lit
   "A function literal's closure node (its code built now)."

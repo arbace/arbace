@@ -82,6 +82,38 @@ and whether it has arguments (the builder's; GOI-SPEC.md, \"Since v1: frames\").
     (set! (.-End code) end)
     (set! (.-Args code) args)))
 
+(go/type lineDir
+  "lineDir is a //line directive in a function's body (gc's updateBase): from the line after
+from, line base of file (an empty file: ??; relative, in the source's directory).\n"
+  (struct ^int32 from ^string file ^int32 base))
+
+(go/func CodeLineDirs
+  "CodeLineDirs gives code c (a *Code) the //line directives of its body, in order (the builder's).\n"
+  [^any c ^{:tag (slice int32)} froms ^{:tag (slice string)} files ^{:tag (slice int32)} bases]
+  (let [(values code ok) (assert (* Code) c)]
+    (when (or (not ok) (== code nil))
+      (return))
+    (set! (.-Dirs code) nil)
+    (range [i fr froms]
+      (set! (.-Dirs code) (append (.-Dirs code) (lit lineDir fr (aget files i) (aget bases i)))))))
+
+(go/method pos
+  "pos is the file and line gc names for line l of function f's source (its code's //line
+directives applied).\n"
+  [^{:tag (* pcFunc)} f ^int32 l] :results [^string file ^int line]
+  (set! file (.-file f))
+  (set! line (conv int l))
+  (when (or (== (.-c f) nil) (== (len (.-Dirs (.-c f))) 0))
+    (return))
+  (range [_ d (.-Dirs (.-c f))]
+    (when (< (.-from d) l)
+      (set! line (conv int (+ (.-base d) (- l (.-from d) 1))))
+      (cond
+        (== (.-file d) "") (set! file "??")
+        (or (strings/HasPrefix (.-file d) "/") (== (.-Dir (.-c f)) "")) (set! file (.-file d))
+        :else (set! file (+ (.-Dir (.-c f)) "/" (.-file d))))))
+  (return))
+
 (go/func AtLineR
   "AtLineR is x evaluated at line l of its frame (a select case's channel, on a line of its own:
 gc's line of a panic there).\n"
@@ -240,8 +272,9 @@ from the goroutine's interpreted frames.\n"
   (let [fs (.stack (CurrentThread))]
     (when (or (< skip 0) (>= skip (len fs)))
       (return))
-    (let [fr (aget fs skip)]
-      (return (pcOf fr) (.-file (.-f fr)) (conv int (.-line fr)) true))))
+    (let [fr (aget fs skip)
+          (values fl l) (.pos (.-f fr) (.-line fr))]
+      (return (pcOf fr) fl l true))))
 
 (go/func RTCallers
   "RTCallers is runtime.Callers for interpreted code: runtime.Callers' own frame, then the
@@ -288,8 +321,8 @@ function's last line), else gc's.\n"
       (return (.FileLine rf pc)))
     (let [(values g l) (decodePC pc)]
       (if (== g f)
-        (return (.-file f) (conv int l))
-        (return (.-file f) (conv int (.-entry f)))))))
+        (return (.pos f l))
+        (return (.pos f (.-entry f)))))))
 
 (go/type pcFrames "pcFrames is the state of a runtime.Frames over goi's program counters.\n"
   (struct ^{:tag (slice uintptr)} pcs ^int i))
@@ -330,8 +363,9 @@ runtime.Frames whose Next is goi's (RTFramesNext).\n"
             (set! frame fr))
           (let [(values f line) (decodePC pc)]
             (when (!= f nil)
-              (set! frame (lit runtime/Frame :PC (- pc 1) :Func (rtFunc f) :Function (.-name f) :File (.-file f)
-                               :Line (conv int line) :Entry (entryOf f))))))
+              (let [(values file l) (.pos f line)]
+                (set! frame (lit runtime/Frame :PC (- pc 1) :Func (rtFunc f) :Function (.-name f) :File file
+                                 :Line l :Entry (entryOf f)))))))
         (return)))))
 
 (go/func traceText
@@ -362,11 +396,13 @@ it; debug, debug.Stack's (its own frame first).\n"
         (if (.-args f)
           (.WriteString (addr b) "(...)\n\t")
           (.WriteString (addr b) "()\n\t"))
-        (.WriteString (addr b) (+ (.-file f) ":" (strconv/Itoa (conv int (.-line fr))) " +0x0\n"))))
+        (let [(values file l) (.pos f (.-line fr))]
+          (.WriteString (addr b) (+ file ":" (strconv/Itoa l) " +0x0\n")))))
     (when (and (== (.-bottom th) bottomGo) (!= (.-creator th) nil))
-      (let [c (funcOf (.-creator th))]
+      (let [c (funcOf (.-creator th))
+            (values file l) (.pos c (.-creatorLine th))]
         (.WriteString (addr b) (+ "created by " (.-name c) " in goroutine " (strconv/FormatInt (.-creatorGoid th) 10) "\n\t"
-                                  (.-file c) ":" (strconv/Itoa (conv int (.-creatorLine th))) " +0x0\n"))))
+                                  file ":" (strconv/Itoa l) " +0x0\n"))))
     (.String (addr b))))
 
 (go/func RTStack
