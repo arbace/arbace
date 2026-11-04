@@ -135,6 +135,14 @@ both readers through `bin/repr-rust native-check` (modes `:lines` and `:full`).
 
 ## Checks (2026-11-04)
 
+- Unicode (`bin/rust-unicode probe`, `probe all`): boundaries, 3,774 characters: start 2,312 and continue
+  1,589 lines rejected by rustc, the same lines by the native lexer; `all` (planes 0-3 and 14 and the
+  edges, 264,073 characters, rustc about 10 minutes): 116,804 and 113,485, the same lines; the 3,351
+  identifiers of the boundaries' `ident.rs` equal in both modes, and the 319,230 of `all` (every
+  identifier character, its NFD form too) equal in mode `:lines` (17 minutes on a loaded host);
+  `bin/rust-unicode check`: the generated file is what the pinned crates give, the pins those of rustc's
+  `Cargo.lock`; native-check 68 of 68, and 68 of 68 with `--full`, after the change.
+
 - `bin/repr-rust native-check`: 68 of 68 files equal (the 8 samples and the 60 library files),
   and 68 of 68 with `--full`; 45 s and 53 s.
 - By hand, beyond the list (light runs, no corpus): 50 more files of alloc, core and std and 42
