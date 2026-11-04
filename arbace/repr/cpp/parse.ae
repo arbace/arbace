@@ -29,8 +29,9 @@
 ;; operator); o: the offset in its file (a macro's token: the invocation's, as clang's expansion location); n: the token's
 ;; length as clang measures it at o (a `>` split from `>>` measures `>>`); f: the file's name as clang knows it (the main
 ;; file's as the converter's *main*); mac: a macro's token: the length of the invocation's name at o; glue: a `>` split from
-;; `>>`, `>=` or `>>=` whose next token is the rest of it.
-(deftype T [k ^String s ^long o ^long n f mac glue])
+;; `>>`, `>=` or `>>=` whose next token is the rest of it; scr: a token spelled in clang's scratch space (a builtin macro's: __LINE__,
+;; __FILE__, __COUNTER__; a split `>`).
+(deftype T [k ^String s ^long o ^long n f mac glue scr])
 
 (def ^:private alt-ops
   {"and" "&&" "or" "||" "not" "!" "not_eq" "!=" "bitand" "&" "bitor" "|" "xor" "^" "compl" "~" "and_eq" "&=" "or_eq" "|="
@@ -74,7 +75,8 @@
   `src` the main file's text (one char a byte), `kws` the keyword set."
   [pp-toks ^String main-path ^String main ^String src kws]
   (let [out (ArrayList.)
-        add (fn [k ^String s o n f mac glue] (.add out (T. k s (long o) (long n) f mac glue)))]
+        scr (volatile! nil)
+        add (fn [k ^String s o n f mac glue] (.add out (T. k s (long o) (long n) f mac glue @scr)))]
     (doseq [^Tok t pp-toks]
       (let [ch (.-ch t)]
         (when-not (or (= ch \space) (= ch \newline))
@@ -84,6 +86,9 @@
                 f (if main? main (or fname "<built-in>"))
                 o (.-po t)
                 mac (when (and main? (seq (.-hs t))) (id-len src o))
+                _ (vreset! scr (when-let [m (.-m t)]
+                                 (when-let [^Tok nm (:name m)]
+                                   (contains? #{"__LINE__" "__FILE__" "__COUNTER__" "__BASE_FILE__" "__INCLUDE_LEVEL__" "__FILE_NAME__"} (.-src nm)))))
                 ^String s (.-src t)
                 n (count s)]
             (case ch
@@ -105,7 +110,7 @@
                             (add :punct "=" (if mac o (+ o 2)) 1 f mac nil))
                   (add :punct s o n f mac nil))))))))
     (let [^T l (when (pos? (.size out)) (.get out (dec (.size out))))]
-      (.add out (T. :eof "" (if l (+ (.-o l) (.-n l)) 0) 0 main nil nil)))
+      (.add out (T. :eof "" (if l (+ (.-o l) (.-n l)) 0) 0 main nil nil nil)))
     (.toArray out)))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -122,7 +127,8 @@
 (def ^:private ^:const GTOP 6)     ; false inside a template argument list: `>` ends it
 (def ^:private ^:const UNNAMED 7)  ; a counter of unnamed entities
 (def ^:private ^:const REASONS 8)  ; the declines' reasons (a HashMap: reason -> count)
-(def ^:private ^:const THDR 9)     ; the template header the next declaration is under: its parameters' names (for the injected class name)
+(def ^:private ^:const THDR 9)
+(def ^:private ^:const PATTRS 10)   ; the attributes the ptr-operators of the declarator being parsed carried     ; the template header the next declaration is under: its parameters' names (for the injected class name)
 
 (defn- stv [^P p k] (aget ^objects (.-st p) (int k)))
 (defn- st! [^P p k v] (aset ^objects (.-st p) (int k) v))
@@ -152,6 +158,13 @@
 (defn- expect! [^P p ^String s] (if (is? p s) (adv! p) (perr p (str "expected " s))))
 
 (defn- skim? [^P p] (boolean (stv p SKIM)))
+
+(declare scope)
+(defn- in-template?
+  "Whether the cursor is in a template (a parameter list with parameters encloses it; an explicit specialization's has none)."
+  [^P p]
+  (loop [^Scope s (stv p SCOPE)]
+    (when s (if (and (= :tparams (sc/kind-of s)) (pos? (.size ^java.util.HashMap (sc/names-of s)))) true (recur (sc/parent-of s))))))
 (defn- scope ^Scope [^P p] (stv p SCOPE))
 
 (defmacro ^:private with-scope
@@ -187,8 +200,9 @@
 
 (defn- loc [^P p ^long i]
   (let [^T t (tok-at p i)]
-    (if-let [m (.-mac t)]
-      {:spellingLoc {:offset (.-o t) :file "<macro>" :tokLen (.-n t)} :expansionLoc {:offset (.-o t) :file (.-f t) :tokLen (long m)}}
+    (if-let [m (or (.-mac t) (when (and (.-glue t) (identical? :punct (.-k t)) (= ">" (.-s t))) (.-n t)))]
+      {:spellingLoc {:offset (.-o t) :file (if (or (.-scr t) (.-glue t)) "<scratch space>" "<macro>") :tokLen (.-n t)}
+       :expansionLoc {:offset (.-o t) :file (.-f t) :tokLen (long m)}}
       {:offset (.-o t) :file (.-f t) :tokLen (.-n t)})))
 
 (defn- rng [^P p ^long b ^long e] {:begin (loc p b) :end (loc p e)})
@@ -200,18 +214,29 @@
 
 (defn- last-ix ^long [^P p] (dec (ix p)))
 
+(declare builtin-name)
+
+(def ^:private builtin-type-words
+  #{"char" "short" "int" "long" "signed" "unsigned" "float" "double" "__int128" "_Complex" "__signed" "__signed__" "bool" "void"
+    "wchar_t" "char8_t" "char16_t" "char32_t"})
+
 (defn- tok-text
-  "The tokens' texts from b to e (included), a space between: a printed name's or expression's text."
+  "The tokens' texts from b to e (included), a space between: a printed name's or expression's text, its integer
+  literals and builtin types' words as clang's StmtPrinter writes them."
   ^String [^P p ^long b ^long e]
   (let [sb (StringBuilder.)]
     (loop [i b]
       (when (<= i e)
         (let [^T t (tok-at p i)]
           (when (> i b) (when-not (and (t= (tok-at p (dec i)) ">") (.-glue (tok-at p (dec i)))) (.append sb " ")))
-          (.append sb (if (and (identical? :num (.-k t)) (lit/int-literal (.-s t)))
-                        (let [[v ty] (lit/int-literal (.-s t))] (lit/int-print v ty))
-                        (.-s t)))
-          (recur (inc i)))))
+          (if (and (identical? :kw (.-k t)) (contains? builtin-type-words (.-s t)))
+            (let [j (loop [j i] (if (and (<= (inc j) e) (let [^T n (tok-at p (inc j))] (and (identical? :kw (.-k n)) (contains? builtin-type-words (.-s n))))) (recur (inc j)) j))]
+              (.append sb (builtin-name (mapv #(.-s ^T (tok-at p %)) (range i (inc j)))))
+              (recur (inc j)))
+            (do (.append sb (if (and (identical? :num (.-k t)) (lit/int-literal (.-s t)))
+                              (let [[v ty] (lit/int-literal (.-s t))] (lit/int-print v ty))
+                              (.-s t)))
+                (recur (inc i)))))))
     (str sb)))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -387,11 +412,18 @@
          (cond
            (identical? :id (.-k t))
            (let [s (.-s t) i (ix p)
-                 e (cond member nil first? (sc/lookup (scope p) s) :else (find-member qe s))]
+                 e (cond member (when (or (is-at? p 1 "::")
+                                          (and (is-at? p 1 "<") (let [c (angle-close p (inc (ix p)))] (and c (t= (tok-at p (inc (long c))) "::")))))
+                                  (sc/lookup (scope p) s))
+                         first? (sc/lookup (scope p) s)
+                         :else (find-member qe s))]
              (adv! p)
              (let [lt (when (is? p "<") (angle-close p (ix p)))
                    tmpl? (and lt (or tkw (tmpl-ent? e)
                                      (and first? (not member) (assumed-template? p e))
+                                     ;; before C++20 too, as clang's extension (ext_adl_only_template_id): a call's template-id
+                                     (and first? (not member) (or (nil? e) (and (= :fn (:k e)) (not (:tmpl e))))
+                                          (t= (tok-at p (inc (long lt))) "("))
                                      (and member (contains? ^HashSet (stv p MTMPL) s) (t= (tok-at p (inc (long lt))) "("))))
                    [args ab ae] (when tmpl?
                                   (let [ab (ix p)]
@@ -478,8 +510,11 @@
   ^String [^P p qn]
   (let [parts (:parts qn)
         e (:ent qn)]
-    (if (and (= 1 (count parts)) (not (:g qn)) (:inj e) (nil? (:args (first parts))))
+    (cond
+      (and (= 1 (count parts)) (not (:g qn)) (:inj-full e) (nil? (:args (first parts)))) (:inj-full e)
+      (and (= 1 (count parts)) (not (:g qn)) (:inj e) (nil? (:args (first parts))))
       (str (:s (first parts)) "<" (str/join ", " (:inj e)) ">")
+      :else
       (str (when (:g qn) "::") (str/join "::" (map #(part-str p %) parts))))))
 
 (defn- name-plain
@@ -1017,7 +1052,16 @@
                   (is? p "}") (recur out)
                   :else (perr p "an initializer list"))))))))
 
-(defn- type-node-fields [t] {:type {:qualType (qt t)} :valueCategory "prvalue"})
+(defn- class-type? [t]
+  (and (#{:n :elab :tn} (:t t))
+       (let [e (:ent t)] (or (nil? e) (:class e) (:class (:target e)) (:tparam e) (and (:target e) (nil? (:scope e)) false)))))
+
+(defn- cast-type
+  "A cast's type as clang's expression has it: a prvalue of a non-class type has no top-level cv-qualifiers."
+  [t]
+  (if (or (#{:lr :rr} (:t t)) (class-type? t)) t (dissoc t :c :v)))
+
+(defn- type-node-fields [t] {:type {:qualType (qt (cast-type t))} :valueCategory "prvalue"})
 
 (defn- cast-node [^P p ^String kind ^long b t x]
   (node p kind b (ne x) (assoc (type-node-fields t) :inner [x])))
@@ -1029,7 +1073,7 @@
     (let [l (parse-braced-init p)] (node p "CXXFunctionalCastExpr" b (ne l) (assoc (type-node-fields t) :inner [l])))
     (let [as (paren-args p) e (last-ix p)]
       (cond
-        (= 1 (count as)) (node p "CXXFunctionalCastExpr" b e (assoc (type-node-fields t) :inner as))
+        (and (= 1 (count as)) (not= "InitListExpr" (:kind (first as)))) (node p "CXXFunctionalCastExpr" b e (assoc (type-node-fields t) :inner as))
         (and (empty? as) builtin) (node p "CXXScalarValueInitExpr" b e (type-node-fields t))
         :else (node p "CXXTemporaryObjectExpr" b e (assoc (type-node-fields t) :inner as))))))
 
@@ -1052,7 +1096,7 @@
         (node p "StringLiteral" b e {:value v :type {:qualType (str "const " ty "[" n "]")} :valueCategory "lvalue"})))))
 
 (defn- trait-name? [^String s]
-  (boolean (re-matches #"__(is|has|array|reference|builtin_is|builtin_has)_[A-Za-z0-9_]+|__is_same|__is_convertible_to|__builtin_types_compatible_p|__can_pass_in_regs|__is_pod|__is_empty|__is_enum|__is_union|__is_class|__is_abstract|__is_polymorphic|__is_literal|__is_final" s)))
+  (boolean (re-matches #"__(is|has|array|reference)_[A-Za-z0-9_]+|__is_same|__is_convertible_to|__builtin_types_compatible_p|__can_pass_in_regs|__builtin_is_virtual_base_of|__builtin_is_implicit_lifetime|__builtin_is_cpp_trivially_relocatable|__builtin_structured_binding_size" s)))
 
 (defn- parse-number [^P p]
   (let [^T t (cur p) s (.-s t) i (ix p)]
@@ -1061,7 +1105,10 @@
       (node p "IntegerLiteral" i i {:value v :type {:qualType ty} :valueCategory "prvalue"})
       (if-let [[v ty] (lit/float-literal s)]
         (node p "FloatingLiteral" i i {:value v :type {:qualType ty} :valueCategory "prvalue"})
-        (node p "UserDefinedLiteral" i i {})))))
+        (if (and (re-matches #"(?i)[0-9.][0-9a-z.'+-]*?(i|j)(f|l|u|ul|ll|ull)?|(?i)[0-9.][0-9a-z.'+-]*?(f|l)(i|j)" s)
+                 (not (sc/lookup (scope p) (str "operator\"\"" (second (re-find #"([A-Za-z_]+)$" s))))))
+          (node p "ImaginaryLiteral" i i {})
+          (node p "UserDefinedLiteral" i i {}))))))
 
 (defn- simple-type-start?
   "A simple-type-specifier begins at the cursor and a ( or { follows it: a functional cast or construction (not a
@@ -1128,7 +1175,8 @@
       (do (adv! p) (skip-balanced! p) (text-node p "TypeTraitExpr" b))
       ;; builtins clang's AST has as expressions of their own, not calls: the converter writes them as their text
       (and (identical? k :id) (is-at? p 1 "(") (re-matches #"__(c11_|opencl_|scoped_|hip_)?atomic_[a-z_]+" s)
-           (not (#{"__atomic_thread_fence" "__atomic_signal_fence" "__atomic_always_lock_free" "__atomic_is_lock_free"} s)))
+           (not (#{"__atomic_thread_fence" "__atomic_signal_fence" "__atomic_always_lock_free" "__atomic_is_lock_free"} s))
+           (not (in-template? p)))
       (do (adv! p) (skip-balanced! p) (text-node p "AtomicExpr" b))
       (and (identical? k :id) (is-at? p 1 "(") (#{"__builtin_shufflevector" "__builtin_FILE" "__builtin_LINE" "__builtin_FUNCTION" "__builtin_FUNCSIG"
                                                    "__builtin_COLUMN" "__builtin_source_location" "__builtin_FILE_NAME" "__builtin_astype"
@@ -1158,7 +1206,7 @@
           (and (:anon en) (= 1 (count (:parts qn))))
           (node p "MemberExpr" b (:e qn) {:name (:s lp) :isArrow false :inner [(node p "DeclRefExpr" b (:e qn) {:referencedDecl {:name ""}})]})
           :else
-          (node p "DeclRefExpr" b (:e qn) {:referencedDecl {:name (or (:s lp) (some->> (:op lp) (str "operator")) "")}})))
+          (node p "DeclRefExpr" b (:e qn) {:referencedDecl {:name (or (:s lp) (when (:op lp) (if (re-find #"^[a-z]" (:op lp)) (str "operator " (:op lp)) (str "operator" (:op lp)))) "")}})))
       :else (perr p "an expression"))))
 
 (defn- member-node [^P p base arrow]
@@ -1215,7 +1263,10 @@
         arr (seq dims)
         elem (reduce (fn [t d] {:t :a :n (when d (tok-text p (nb d) (ne d))) :of t}) ty (reverse (rest dims)))
         init (cond (is? p "(") (let [ab (ix p) as (paren-args p)]
-                                 [(if (= 1 (count as)) (first as) (node p "ParenListExpr" ab (last-ix p) {:inner as})) "call"])
+                                 [(cond (= 1 (count as)) (first as)
+                                        (and (empty? as) (not (class-type? ty))) {:kind "ImplicitValueInitExpr"}
+                                        :else (node p "ParenListExpr" ab (last-ix p) {:inner as}))
+                                  "call"])
                    (is? p "{") [(parse-braced-init p) "list"]
                    :else nil)
         e (last-ix p)
@@ -1492,7 +1543,8 @@
       (or (and (t= t "[") (is-at? p 1 "[")) (t= t "__attribute__"))
       (let [as (attr-nodes p)]
         (if (block-decl-start? p)
-          (parse-block-decl p)
+          ;; the attributes of a declaration: its declaration-specifiers' (from them again)
+          (do (seek! p b) (parse-block-decl p))
           (let [s (parse-statement p)]
             (if (seq as) (node p "AttributedStmt" b (ne s) {:inner (conj (vec as) s)}) s))))
       (block-decl-start? p) (parse-block-decl p)
@@ -1517,13 +1569,13 @@
     "nomerge" "not_tail_called" "disable_tail_calls" "preserve_most" "preserve_all" "vectorcall" "regcall" "ext_vector_type"
     "address_space" "callback" "warn_unused" "maybe_unused" "standalone_debug" "trivial_abi" "no_destroy" "always_destroy"
     "require_constant_initialization" "internal_linkage" "exclude_from_explicit_instantiation" "no_builtin" "noescape"
-    "musttail" "nouwtype" "cpu_specific" "cpu_dispatch" "no_profile_instrument_function" "no_caller_saved_registers"
+    "nouwtype" "cpu_specific" "cpu_dispatch" "no_profile_instrument_function" "no_caller_saved_registers"
     "nocf_check" "force_align_arg_pointer" "no_speculative_load_hardening" "speculative_load_hardening" "objc_root_class"
     "availability" "flag_enum" "enum_extensibility" "pass_object_size" "format_matches" "counted_by" "sized_by" "guarded_by"
     "pt_guarded_by" "capability" "lockable" "scoped_lockable" "acquire_capability" "release_capability"
     "no_thread_safety_analysis" "noinit" "persistent" "strict_flex_arrays" "unsafe_buffer_usage" "using_if_exists"
     "btf_decl_tag" "btf_type_tag" "randomize_layout" "no_randomize_layout" "nonblocking" "nonallocating" "blocking"
-    "allocating" "hybrid_patchable" "vecreturn" "matrix_type" "noipa" "simd" "symver" "init_seg" "selectany" "dllimport"
+    "allocating" "hybrid_patchable" "vecreturn" "matrix_type" "simd" "symver" "init_seg" "selectany" "dllimport"
     "dllexport" "thread" "nonnull_if_nonzero"})
 
 (defn- known-gnu-attr? [^String s] (contains? gnu-attrs (str/replace s #"^__|__$" "")))
@@ -1565,9 +1617,11 @@
                         (and (is? p ")") (is-at? p 1 ")")) (do (adv! p) (adv! p) out)
                         (is? p ",") (do (adv! p) (recur out))
                         (or (id? p) (identical? :kw (tk (cur p))))
-                        (let [b (ix p)]
+                        (let [b (ix p)
+                              ;; format with a kind of gcc's own (__gcc_diag__ ...): clang drops the attribute
+                              gcc-kind (and (is-at? p 1 "(") (re-matches #"__gcc_\w+__|gcc_\w+" (ts (tok-at p (+ b 2)))))]
                           (adv! p) (when (is? p "(") (skip-balanced! p))
-                          (recur (if (known-gnu-attr? (ts (tok-at p b))) (conj out (node p "NativeAttr" b (last-ix p) {:_gnu (ts (tok-at p b))})) out)))
+                          (recur (if (and (known-gnu-attr? (ts (tok-at p b))) (not gcc-kind)) (conj out (node p "NativeAttr" b (last-ix p) {:_gnu (ts (tok-at p b))})) out)))
                         :else (perr p "a GNU attribute")))]
             (recur out)))
       (and (or (is? p "alignas") (is? p "_Alignas")) (is-at? p 1 "("))
@@ -1592,7 +1646,9 @@
       (let [i (if (and (is-at? p 1 "<") (angle-close p (inc (ix p)))) (inc (long (angle-close p (inc (ix p))))) (inc (ix p)))]
         (and (t= (tok-at p i) "(")
              (or (t= (tok-at p (inc i)) ")")
-                 (let [save (ix p)] (seek! p (inc i)) (let [r (try (tp-param-clause! p false) (catch arbace.lang.ExceptionInfo _ :error))] (seek! p save) (not= r :false))))))
+                 (let [save (ix p)] (seek! p (inc i)) (let [r (try (tp-param-clause! p false) (catch arbace.lang.ExceptionInfo _ :error))] (seek! p save) (not= r :false)))
+                 (and (identical? :id (tk (tok-at p (inc i)))) (t= (tok-at p (+ i 2)) "::")
+                      (:tparam (sc/lookup (scope p) (ts (tok-at p (inc i)))))))))
       (name-start? p)
       (when-let [[qn e] (scan-name p)]
         (let [parts (:parts qn)
@@ -1617,8 +1673,10 @@
   :constinit :mutable :tls :attrs :tag-node}, :b its first token after the leading attribute-specifier-seq (clang's
   range starts there), :tag-node a class or enumeration declared in it."
   [^P p ctx]
-  (let [lead (when (and (is? p "[") (is-at? p 1 "[")) (attr-nodes p))
-        b (ix p)
+  (let [b0 (ix p)
+        lead (when (and (is? p "[") (is-at? p 1 "[")) (attr-nodes p))
+        b (if (some #(#{"fastcall" "stdcall" "thiscall" "vectorcall" "regcall" "ms_abi" "preserve_most" "preserve_all"} (some-> (:_gnu %) (str/replace #"^__|__$" ""))) lead)
+            b0 (ix p))
         decl-ctx (contains? #{:top :member :block :param :tmpl} ctx)]
     (loop [ds {:b b :attrs (vec lead)} words []]
       (let [^T t (cur p) s (.-s t) k (.-k t)
@@ -1664,7 +1722,7 @@
             (and (= s "enum") (not has-type))
             (let [{:keys [type node]} (parse-enum-specifier p ds ctx)] (recur (cond-> (assoc ds :type type) node (assoc :tag-node node)) words))
             (and (= s "typename") (not has-type))
-            (do (adv! p) (let [qn (or (parse-name p :parse) (perr p "a typename's name"))] (recur (assoc ds :type {:t :tn :s (name-str p qn)}) words)))
+            (do (adv! p) (let [qn (or (parse-name p :parse) (perr p "a typename's name"))] (recur (assoc ds :type {:t :tn :s (name-str p qn) :qn qn}) words)))
             (contains? attr-kws s) (let [as (attr-nodes p)] (recur (update ds :attrs into as) words))
             :else (cond-> (assoc ds :e (last-ix p)) (seq words) (assoc :type {:t :b :w words})))
           (and (t= t "[") (is-at? p 1 "[")) (let [as (attr-nodes p)] (recur (update ds :attrs into as) words))
@@ -1713,7 +1771,8 @@
                           (cond (or (is? p "const") (is? p "__const")) (do (adv! p) (recur true v r))
                                 (or (is? p "volatile") (is? p "__volatile") (is? p "__volatile__")) (do (adv! p) (recur c true r))
                                 (or (is? p "__restrict") (is? p "__restrict__") (id-is? p "restrict")) (do (adv! p) (recur c v true))
-                                (or (and (is? p "[") (is-at? p 1 "[")) (is? p "__attribute__")) (do (attr-nodes p) (recur c v r))
+                                (is? p "__attribute__") (do (.addAll ^ArrayList (stv p PATTRS) ^java.util.Collection (attr-nodes p)) (recur c v r))
+                                (and (is? p "[") (is-at? p 1 "[")) (do (attr-nodes p) (recur c v r))
                                 :else [c v r]))]
             (recur (conj out (cond-> (with-cv {:t :p} c v) r (assoc :rs true))))))
       (is? p "&") (do (adv! p) (attr-nodes p) (recur (conj out {:t :lr})))
@@ -1748,6 +1807,29 @@
                  (seek! p save)
                  r))))))
 
+(defn- member-name?
+  "Whether `nm`, looked up from the cursor's scope, is a non-static member of the class being defined (or of an
+  out-of-class member's class), not a name of a scope inside it."
+  [^P p ^String nm]
+  (loop [^Scope s (scope p)]
+    (when s
+      (case (sc/kind-of s)
+        :class (let [e (or (sc/find-in s nm) (when-let [late (:late (class-ctx p))] (sc/find-in late nm)))]
+                 (and e (#{:var :fn} (:k e)) (not (:static e))))
+        :lookup (let [e (sc/find-in s nm)] (and e (#{:var :fn} (:k e)) (not (:static e))))
+        (if (.get ^java.util.HashMap (sc/names-of s) nm) false (recur (sc/parent-of s)))))))
+
+(defn- tok-text-this
+  "tok-text, a non-static member's name written as clang prints an implicit member access: this->name."
+  ^String [^P p ^long b ^long e]
+  (str/join " " (for [i (range b (inc e))
+                      :let [^T t (tok-at p i)
+                            pv (when (> i b) (ts (tok-at p (dec i))))
+                            nx (when (< i e) (ts (tok-at p (inc i))))]]
+                  (if (and (identical? :id (.-k t)) (not (#{"." "->" "::"} pv)) (not= "::" nx) (member-name? p (.-s t)))
+                    (str "this -> " (.-s t))
+                    (tok-text p i i)))))
+
 (defn- fn-quals
   "The qualifiers after a parameter list: [quals-text meta], meta {:const :volatile :ref :noexcept :trailing}."
   [^P p]
@@ -1761,7 +1843,7 @@
       (is? p "noexcept")
       (do (adv! p)
           (if (is? p "(")
-            (let [ob (ix p)] (skip-balanced! p) (recur (str q " noexcept(" (tok-text p (inc ob) (- (ix p) 2)) ")") (assoc m :noexcept true)))
+            (let [ob (ix p)] (skip-balanced! p) (recur (str q " noexcept(" (tok-text-this p (inc ob) (- (ix p) 2)) ")") (assoc m :noexcept true)))
             (recur (str q " noexcept") (assoc m :noexcept true))))
       (and (is? p "throw") (is-at? p 1 "("))
       (do (adv! p) (let [ob (ix p)] (skip-balanced! p) (recur (str q " throw(" (tok-text p (inc ob) (- (ix p) 2)) ")") (assoc m :throw true))))
@@ -1783,7 +1865,11 @@
   isCXXFunctionDeclarator says so), :either (a parameter's), :abstract (a type-id's)."
   [^P p mode]
   (let [b (ix p)
+        saved (stv p PATTRS)
+        _ (st! p PATTRS (ArrayList.))
         ptrs (ptr-ops p)
+        pattrs (vec (stv p PATTRS))
+        _ (st! p PATTRS saved)
         pack (accept! p "...")
         [name ni nested]
         (cond
@@ -1813,7 +1899,7 @@
                  (and (is? p "(") (or (not= mode :named) (nil? name) (is-function-declarator? p)))
                  (let [f (parse-fn-suffix p)] (aset lastx 0 (last-ix p)) (recur (conj out f)))
                  :else out))
-        as (into (vec mid) (attr-nodes p))]
+        as (into (into pattrs mid) (attr-nodes p))]
     {:ptrs ptrs :name name :ni ni :nested nested :sufs sufs :pack pack :b b :e (aget lastx 0) :attrs as
      :after (ix p)}))
 
@@ -1912,8 +1998,9 @@
 ;; Classes (clang's ParseClassSpecifier, ParseCXXMemberSpecification)
 
 (defn- parse-bases
-  "A base-clause after its :, the class scope `cs` given the bases' scopes: the :bases entries."
-  [^P p ^Scope cs]
+  "A base-clause after its :, the class scope `cs` given the bases' scopes: the :bases entries; each base's name (its
+  last part's) and whether it is virtual added to `order`."
+  [^P p ^Scope cs ^ArrayList order]
   (loop [out []]
     (attr-nodes p)
     (let [[virt acc] (loop [virt false acc nil]
@@ -1922,8 +2009,12 @@
                              :else [virt acc]))
           ty (if (is? p "decltype")
                (let [ds (parse-decl-specs p :type-id)] (ds-type ds))
-               (let [qn (or (parse-name p :parse) (perr p "a base class"))]
+               (let [qn (or (parse-name p :parse) (perr p "a base class"))
+                     lp (peek (:parts qn))]
                  (sc/add-base! cs (ent-scope (:ent qn)))
+                 (.add order [(:s lp) virt])
+                 ;; (i) a base class template's injected name, found in the derived class, is the base's type
+                 (when (and (:args lp) (:ent qn)) (sc/declare! cs {:k :type :name (:s lp) :scope (ent-scope (:ent qn)) :tmpl true :inj-full (name-str p qn)}))
                  {:t :n :s (name-str p qn)}))
           pack (accept! p "...")
           b (cond-> {:type {:qualType (qt ty)} :writtenAccess (or acc "none")} virt (assoc :isVirtual true) pack (assoc :isPackExpansion true))
@@ -1952,13 +2043,14 @@
               lp (when qn (peek (:parts qn)))
               e (if (and e (= (:at e) (:i lp))) nil e)
               alone (and (is? p ";") (not (:friend ds)))
-              spec (and alone hdr (:args lp) (= 1 (count (:parts qn))))
+              spec (and alone hdr (:args lp))
               new? (and nm (nil? (:args lp)) (or alone (nil? e)))
               n (when (and (or new? spec) (not (:friend ds)) (not (skim? p)))
                   (node p "CXXRecordDecl" kb (:e qn) (cond-> {:tagUsed kw :name (or nm (:s lp)) :loc (loc p (:i lp))}
                                                        spec (assoc :_args (:args lp) :_qn qn))))]
           (when (and new? (not (:friend ds)))
-            (let [ent {:k :type :name nm :tag true :scope (sc/new-scope :class (scope p) nil) :incomplete true :at (:i lp)
+            (let [ent {:k :type :name nm :tag true :class true :scope (sc/new-scope :class (scope p) nil) :incomplete true :at (:i lp)
+                       :tps (:params hdr)
                        :tmpl (boolean (and hdr (pos? (long (:n hdr))) (nil? (:args (peek (:parts qn))))))}]
               (if alone (declare! p ent) (sc/declare! (or (sc/enclosing (scope p) #{:ns :block}) (scope p)) ent))))
           {:type {:t :elab :kw kw :s (if qn (name-str p qn) "") :ent e :kb kb :ni (when lp (:i lp)) :e (when qn (:e qn))} :node n})
@@ -1967,30 +2059,37 @@
               simple (and qn (= 1 (count (:parts qn))) (not (:g qn)))
               cs (sc/new-scope :class (scope p) nil)
               tmpl (boolean (and hdr (pos? (long (:n hdr))) (nil? (:args lp))))
-              ent (cond-> {:k :type :name nm :tag true :scope cs} tmpl (assoc :tmpl true))
+              ent (cond-> {:k :type :name nm :tag true :class true :scope cs :fields (ArrayList.) :bases-order (ArrayList.)}
+                    tmpl (assoc :tmpl true :tps (:params hdr)))
               _ (when (and nm simple (nil? (:args lp))) (declare! p ent))
               _ (when nm (sc/declare! cs (cond-> (assoc ent :tag false)
                                           tmpl (assoc :inj (:names hdr))
                                           (:args lp) (assoc :tmpl true :inj (mapv #(arg-str p %) (:args lp))))))
-              bases (if (accept! p ":") (parse-bases p cs) [])
+              bases (if (accept! p ":") (parse-bases p cs (:bases-order ent)) [])
               _ (expect! p "{")
               ;; [class.mem]/7: member functions' bodies, default arguments and initializers see the whole class (clang
               ;; parses them after it): its members are declared by a skim of the body before it is parsed
-              _ (when-not (skim? p)
-                  (let [save (ix p) old (stv p CLS)]
-                    (in-scope p cs
-                      (st! p CLS (cons {:name nm :ent ent} old))
-                      (try (skimming p true (with-gt p true (decl-seq p :member))) (finally (st! p CLS old))))
-                    (seek! p save)))
+              late (when-not (skim? p)
+                     (let [save (ix p) old (stv p CLS)
+                           late (sc/new-scope :class (sc/parent-of cs) nil)]
+                       (doseq [b (sc/bases-of cs)] (sc/add-base! late b))
+                       (doseq [[_ v] (sc/names-of cs)] (sc/declare! late v))
+                       (in-scope p late
+                         (st! p CLS (cons {:name nm :ent ent :skim true} old))
+                         (try (skimming p true (with-gt p true (decl-seq p :member))) (finally (st! p CLS old))))
+                       (seek! p save)
+                       late))
               members (in-scope p cs
                         (let [old (stv p CLS)]
-                          (st! p CLS (cons {:name nm :ent ent} old))
+                          (st! p CLS (cons {:name nm :ent ent :late late} old))
                           (try (with-gt p true (decl-seq p :member)) (finally (st! p CLS old)))))
               _ (expect! p "}")
               e (last-ix p)
+              ;; GNU attributes after the closing brace appertain to the class
+              post (when (or (is? p "__attribute__") (is? p "__attribute")) (attr-nodes p))
               fin-n (when fin [(node p "FinalAttr" fin fin {})])
               n (node p "CXXRecordDecl" kb e
-                      (cond-> {:tagUsed kw :completeDefinition true :bases bases :inner (vec (concat attrs fin-n members))
+                      (cond-> {:tagUsed kw :completeDefinition true :bases bases :inner (vec (concat attrs post fin-n members))
                                :loc (loc p (if lp (long (:i lp)) kb))}
                         nm (assoc :name nm)
                         (:args lp) (assoc :_args (:args lp) :_qn qn)))]
@@ -2034,7 +2133,8 @@
                              (recur (conj out n))))
                          :else (perr p "an enumerator")))))
               e (last-ix p)
-              n (node p "EnumDecl" kb e (cond-> {:inner (vec (concat attrs cs)) :loc (loc p (if qn (long (:i (peek (:parts qn)))) kb))}
+              post (when (and body? (or (is? p "__attribute__") (is? p "__attribute"))) (attr-nodes p))
+              n (node p "EnumDecl" kb e (cond-> {:inner (vec (concat attrs post cs)) :loc (loc p (if qn (long (:i (peek (:parts qn)))) kb))}
                                          nm (assoc :name nm)
                                          scoped (assoc :scopedEnumTag scoped)
                                          fixed (assoc :fixedUnderlyingType {:qualType (qt fixed)})
@@ -2054,6 +2154,25 @@
             (and (zero? d) (t= t "}")) nil
             (or (t= t "(") (t= t "[") (t= t "{")) (do (skip-balanced! p) (recur d))
             :else (do (adv! p) (recur d))))))
+
+(defn- init-order
+  "The mem-initializers `inits` in clang's order, the initialization's ([class.base.init]/13): the virtual bases, the
+  other direct bases, the members, as the class `ce` declares them; one it does not name keeps its place after them."
+  [inits ce]
+  (let [bases (vec (:bases-order ce))
+        fields (vec (:fields ce))
+        nm-of (fn [i] (or (get-in i [:anyInit :name])
+                          (some-> (get-in i [:baseInit :qualType]) (str/replace #"<.*$" "") (str/split #"::") last)))
+        key (fn [[k i]]
+              (let [n (nm-of i)
+                    vb (keep-indexed (fn [j [b v]] (when (and v (= b n)) j)) bases)
+                    nb (keep-indexed (fn [j [b v]] (when (and (not v) (= b n)) j)) bases)
+                    fi (keep-indexed (fn [j f] (when (= f n) j)) fields)]
+                (cond (seq vb) [0 (first vb)] (seq nb) [1 (first nb)] (seq fi) [2 (first fi)] :else [3 k])))]
+    (if (or (<= (count inits) 1) (and (empty? fields) (empty? bases))
+            (some #(= 3 (first (key [0 %]))) inits))
+      inits
+      (mapv second (sort-by key (map-indexed vector inits))))))
 
 (defn- ctor-inits
   "A ctor-initializer's mem-initializers, the : consumed: CXXCtorInitializer nodes."
@@ -2080,6 +2199,14 @@
   [qn]
   (let [e (:q qn)] (when (type-ent? e) e)))
 
+(defn- with-late*
+  "Runs f with the class being defined's complete scope (its pre-skim's) looked up first: a member function's body, a
+  default member initializer ([class.mem]/7)."
+  [^P p f]
+  (if-let [late (:late (class-ctx p))]
+    (in-scope p (sc/new-scope :lookup (scope p) {:scope late}) (f))
+    (f)))
+
 (defn- fn-body
   "A function's body at the cursor ({, try, or : and mem-initializers): [inits body], the parameters `names` in scope,
   the class `cls` (an out-of-class member's) looked up through."
@@ -2088,7 +2215,8 @@
               (with-scope p :fparams nil
                 (declare-params! p names)
                 (let [inits (when (accept! p ":")
-                              (if (skim? p) (do (skip-until! p #{"{"}) nil) (ctor-inits p)))]
+                              (if (skim? p) (do (skip-until! p #{"{"}) nil)
+                                  (init-order (ctor-inits p) (or cls (:ent (class-ctx p))))))]
                   (cond
                     (is? p "try")
                     (if (skim? p)
@@ -2098,7 +2226,7 @@
                     :else [inits (parse-compound-stmt p)]))))]
     (if cls
       (in-scope p (sc/new-scope :lookup (scope p) cls) (run))
-      (run))))
+      (with-late* p run))))
 
 (defn- virt-specifiers
   "override, final (and GNU's __final) after a member function's declarator: their attribute nodes."
@@ -2163,6 +2291,7 @@
   :member, :block): its nodes, the ; consumed."
   [^P p ctx]
   (let [tmpl (stv p THDR)
+        b0 (ix p)
         ds (parse-decl-specs p ctx)
         _ (st! p THDR nil)
         pre (:tag-node ds)
@@ -2177,7 +2306,8 @@
         [pre (node p (if (= ctx :member) "FieldDecl" "VarDecl") (:b ds) e {:isImplicit true :type {:qualType (qt base0)}})])
       (is? p ";")
       (do (adv! p)
-          (cond (:friend ds) [(node p "FriendDecl" (:b ds) (:e ds)
+          (cond (and (nil? base0) (nil? pre) (not (:friend ds)) (= ctx :top) (> (long (:b ds)) b0)) [(node p "EmptyDecl" (last-ix p) (last-ix p) {})]
+                (:friend ds) [(node p "FriendDecl" (:b ds) (:e ds)
                                     (cond-> {:type {:qualType (qt (or base0 {:t :n :s ""}))} :loc (loc p (:e ds))}
                                       (and (= :elab (:t base0)) (:ni base0) (#{"class" "struct" "union"} (:kw base0)))
                                       (assoc :_elab {:kw (:kw base0) :kb (:kb base0) :ni (:ni base0) :e (:e base0)}
@@ -2242,12 +2372,16 @@
                   ;; Sema fact, not the parser's; the known class `defaulted-noexcept`)
                   ;; GNU's nothrow and noreturn are attributes of the function's type (clang prints them in it), its
                   ;; redeclarations' too (a header's declaration of a library function among them)
+                  fty (if (and (= :f (:t fty)) (#{"delete" "delete[]"} (:op lp)) (not (:noexcept (:m fs))) (not (:throw (:m fs))))
+                        (assoc fty :q (str (:q fty) " noexcept")) fty)
                   fe (when nm (sc/lookup (scope p) nm))
                   gnu (set (keep #(some-> (:_gnu %) (str/replace #"^__|__$" "")) (concat (:attrs ds) (:attrs d) (:attrs (:m fs)) as1 as2)))
                   nothrow (or (gnu "nothrow") (:nothrow fe))
                   noreturn (or (gnu "noreturn") (:noreturn fe))
-                  fty (if (and (= :f (:t fty)) (or nothrow noreturn))
-                        (assoc fty :q (str (:q fty) (when nothrow " __attribute__((nothrow))") (when noreturn " __attribute__((noreturn))")))
+                  cc (first (filter gnu ["fastcall" "stdcall" "thiscall" "vectorcall" "regcall" "ms_abi" "preserve_most" "preserve_all"]))
+                  fty (if (and (= :f (:t fty)) (or nothrow noreturn cc))
+                        (assoc fty :q (str (:q fty) (when nothrow " __attribute__((nothrow))") (when noreturn " __attribute__((noreturn))")
+                                           (when cc (str " __attribute__((" cc "))"))))
                         fty)
                   n (node p kind (:b ds) e
                           (cond-> {:name (fn-name p lp ctor guide) :loc (loc p ni) :type {:qualType (qt fty)}
@@ -2263,8 +2397,10 @@
                             (:va fs) (assoc :variadic true)
                             (:args lp) (assoc :_args (:args lp))))
                   n (if (:friend ds) (node p "FriendDecl" (:b ds) e {:loc (loc p ni) :inner [n]}) n)]
-              (when (and nm (not (:friend ds)) (not ctor) (not guide))
+              (when (:lit lp) (declare! p {:k :fn :name (str "operator\"\"" (:lit lp))}))
+              (when (and nm (nil? (:args lp)) (not (:friend ds)) (not ctor) (not guide))
                 (declare! p (cond-> {:k :fn :name nm :tmpl (boolean (and tmpl (pos? (long (:n tmpl)))))}
+                              (= "static" (:storage ds)) (assoc :static true)
                               nothrow (assoc :nothrow true)
                               noreturn (assoc :noreturn true)))
                 (when (and tmpl (= ctx :member)) (.add ^HashSet (stv p MTMPL) nm)))
@@ -2276,13 +2412,14 @@
             ;; a variable, a data member
             :else
             (let [field (and (= ctx :member) (not= "static" (:storage ds)) (not (:friend ds)))
+                  _ (when (and field nm (:skim (class-ctx p))) (when-let [^ArrayList fs (:fields (:ent (class-ctx p)))] (.add fs nm)))
                   bits (when (and (= ctx :member) (is? p ":")) (adv! p) (if (skim? p) (do (skip-until! p #{"," ";" "=" "{"}) nil) (parse-cond-expr p)))
                   as1 (attr-nodes p)
                   _ (skip-asm-label! p)
                   as1 (into as1 (attr-nodes p))
                   [x init] (cond
-                             (accept! p "=") [(if (skim? p) (do (skip-init! p) nil) (parse-init-clause p)) "c"]
-                             (is? p "{") [(if (skim? p) (do (skip-balanced! p) nil) (parse-braced-init p)) "list"]
+                             (accept! p "=") [(if (skim? p) (do (skip-init! p) nil) (with-late* p #(parse-init-clause p))) "c"]
+                             (is? p "{") [(if (skim? p) (do (skip-balanced! p) nil) (with-late* p #(parse-braced-init p))) "list"]
                              (and (is? p "(") (not field)) (if (skim? p) (do (skip-balanced! p) [nil nil])
                                                                (let [ab (ix p) as (paren-args p)] [(if (= 1 (count as)) (first as) (node p "ParenListExpr" ab (last-ix p) {:inner as})) "call"]))
                              :else [nil nil])
@@ -2305,7 +2442,8 @@
                               (:tls ds) (assoc :tls "static")
                               init (assoc :init init)
                               (:args lp) (assoc :_args (:args lp)))))]
-              (when nm (declare! p {:k :var :name nm :tmpl (boolean (and tmpl (pos? (long (:n tmpl)))))}))
+              (when (and nm (nil? (:args lp))) (declare! p (cond-> {:k :var :name nm :tmpl (boolean (and tmpl (pos? (long (:n tmpl)))))}
+                                                             (= "static" (:storage ds)) (assoc :static true))))
               (cond
                 (accept! p ",") (recur (conj out n))
                 (accept! p ";") (conj out n)
@@ -2387,7 +2525,8 @@
                     pack (or (:pack d) (= :pk (:t ty)))]
                 (when nm (sc/declare! (scope p) {:k :var :name nm :tparam true}))
                 [(node p "NonTypeTemplateParmDecl" (:b ds) (last-ix p)
-                       (cond-> {:loc (loc p ni) :type {:qualType (qt (param-type (if (= :pk (:t ty)) (:of ty) ty)))} :inner (if dflt [{:kind "TemplateArgument" :inner [dflt]}] [])}
+                       (cond-> {:loc (loc p ni) :type {:qualType (qt (param-type (if (and (= :pk (:t ty)) (not (:pack (:ent base))) (not (:pack (:q (:qn base))))) (:of ty) ty)))}
+                                :inner (if dflt [{:kind "TemplateArgument" :inner [dflt]}] [])}
                          nm (assoc :name nm) pack (assoc :isParameterPack true)))
                  (when nm (str nm (when pack "...")))]))]
         (let [ns (conj ns n) names (conj names nm)]
@@ -2408,15 +2547,45 @@
                                "<<" (bit-shift-left a b) ">>" (bit-shift-right a b) "&" (bit-and a b) "|" (bit-or a b) "^" (bit-xor a b) nil)))
     nil))
 
+(defn- targ-node
+  "A written template argument as clang's TemplateArgument of a specialization, converted to its parameter `prm`'s type
+  (clang's integral values: a bool's true is -1, a 1-bit signed value)."
+  [a prm]
+  (let [pt (get-in prm [:type :qualType])]
+    (case (:k a)
+      :type {:kind "TemplateArgument" :type {:qualType (qt (:t a))}}
+      :expr (let [v (fold-const (:x a))
+                  v (cond (nil? v) nil
+                          (= pt "bool") (if (if (number? v) (not (zero? (long v))) v) -1 0)
+                          (boolean? v) (if v 1 0)
+                          :else v)]
+              (if (some? v) {:kind "TemplateArgument" :value v} {:kind "TemplateArgument" :isExpr true :inner [(:x a)]}))
+      {:kind "TemplateArgument"})))
+
+(defn- default-targ
+  "A template parameter's default argument as its TemplateArgument, or nil."
+  [prm]
+  (when-let [d (first (filter #(= "TemplateArgument" (:kind %)) (:inner prm)))]
+    (if (:type d)
+      d
+      (let [x (first (:inner d)) v (fold-const x)]
+        (targ-node {:k :expr :x x} prm)))))
+
 (defn- targ-nodes
-  "A written template argument list as clang's TemplateArgument nodes of a specialization."
-  [^P p args]
-  (mapv (fn [a]
-          (case (:k a)
-            :type {:kind "TemplateArgument" :type {:qualType (qt (:t a))}}
-            :expr (let [v (fold-const (:x a))] (if (some? v) {:kind "TemplateArgument" :value v} {:kind "TemplateArgument" :isExpr true :inner [(:x a)]}))
-            {:kind "TemplateArgument"}))
-        args))
+  "A specialization's written template arguments as clang's TemplateArgument nodes, against the primary template's
+  parameters `tps` when known: each converted to its parameter's type, a pack's arguments one pack (no form: the
+  converter writes the specialization as its text), the parameters with no argument their defaults."
+  ([^P p args] (targ-nodes p args nil))
+  ([^P p args tps]
+   (if (empty? tps)
+     (mapv #(targ-node % nil) args)
+     (loop [as (seq args) ps (seq tps) out []]
+       (let [prm (first ps)]
+         (cond
+           (nil? prm) (into out (map #(targ-node % nil) as))
+           (:isParameterPack prm) (conj out {:kind "TemplateArgument" :isPack true})
+           (nil? as) (if-let [d (default-targ prm)] (recur nil (next ps) (conj out d)) out)
+           :else (recur (next as) (next ps) (conj out (targ-node (first as) prm)))))))))
 
 (defn- set-begin
   "A node whose range begins at token b."
@@ -2434,13 +2603,13 @@
       (and explicit (= k "CXXRecordDecl"))
       (node p "ClassTemplateSpecializationDecl" ob e
             (-> (dissoc n :_args :_qn :kind :range)
-                (assoc :inner (vec (concat (targ-nodes p (:_args n)) (:inner n))))))
+                (assoc :inner (vec (concat (targ-nodes p (:_args n) (:tps (:ent (:_qn n)))) (:inner n))))))
       explicit (cond-> (set-begin p n ob) (:_args n) (update :inner (fn [xs] (vec (concat (targ-nodes p (:_args n)) xs)))))
       (= k "CXXRecordDecl")
       (if (:_args n)
-        (node p "ClassTemplatePartialSpecializationDecl" hb e
+        (node p "ClassTemplatePartialSpecializationDecl" (if (> depth 1) ob hb) e
               (-> (dissoc n :_args :_qn :kind :range) (assoc :inner (vec (concat ps (:inner n))))))
-        (node p "ClassTemplateDecl" hb e {:name (:name n) :loc (:loc n) :inner (conj (vec ps) n)}))
+        (node p "ClassTemplateDecl" hb e {:name (:name n) :loc (:loc n) :inner (conj (vec ps) (if (> depth 1) (set-begin p n ob) n))}))
       (#{"FunctionDecl" "CXXMethodDecl" "CXXConstructorDecl" "CXXDestructorDecl" "CXXConversionDecl" "CXXDeductionGuideDecl" "VarDecl"} k)
       (if (<= depth (long (or (:_qtmpl n) 0)))
         (set-begin p n ob)
@@ -2451,6 +2620,9 @@
       (let [{:keys [kw kb ni e]} (:_elab n)
             r (node p "CXXRecordDecl" kb e {:tagUsed kw :name (:_name n) :loc (loc p ni)})]
         (node p "FriendDecl" ob (long (:_e n)) {:loc (:loc n) :inner [(node p "ClassTemplateDecl" hb (long (:_e n)) {:name (:_name n) :loc (loc p ni) :inner (conj (vec ps) r)})]}))
+      (and (= k "FriendDecl") (seq (:inner n)) (#{"FunctionDecl" "CXXMethodDecl" "CXXConstructorDecl"} (:kind (first (:inner n)))))
+      (let [f (first (:inner n))]
+        (node p "FriendDecl" ob e {:loc (:loc n) :inner [(node p "FunctionTemplateDecl" hb e {:name (:name f) :loc (:loc f) :inner (conj (vec ps) (if (> depth 1) (set-begin p f ob) f))})]}))
       (= k "FriendDecl") (set-begin p n ob)
       :else (set-begin p n ob))))
 
@@ -2463,8 +2635,19 @@
     (expect! p "template")
     (if-not (is? p "<")
       ;; an explicit instantiation: the converter reads it from its text
-      (do (skip-until! p #{";"})
-          (let [e (last-ix p)] (expect! p ";") [(node p "ExplicitInstantiationDecl" hb e {})]))
+      (let [b0 (ix p)
+            names (try (skimming p true
+                         (let [ds (parse-decl-specs p :top) d (parse-declarator p :named) fs (fn-suffix-of d)]
+                           (when fs (:names fs))))
+                       (catch arbace.lang.ExceptionInfo _ nil))
+            _ (seek! p b0)
+            _ (skip-until! p #{";"})
+            e (last-ix p)]
+        (expect! p ";")
+        [(node p "ExplicitInstantiationDecl" hb e
+               (if (some some? names)
+                 {:inner [{:kind "FunctionProtoTypeLoc" :inner (mapv (fn [nm] (cond-> {:kind "ParmVarDecl"} nm (assoc :name nm))) names)}]}
+                 {}))])
       (with-scope p :tparams nil
         (adv! p)
         (let [[ps names] (parse-template-params p)
@@ -2482,7 +2665,7 @@
                     (sc/declare! (sc/decl-scope (scope p)) {:k :concept :name nm})
                     [(node p "ConceptDecl" hb e {:name nm :loc (loc p ni) :inner ps})])))
             :else
-            (do (st! p THDR {:names (vec (remove nil? names)) :n (count names)})
+            (do (st! p THDR {:names (vec (remove nil? names)) :n (count names) :params ps})
                 (let [ns (try (parse-external-decl p (if (= ctx :member) :member :top)) (finally (st! p THDR nil)))]
                   (mapv #(wrap-template p % hb ob ps names depth) ns)))))))))
 
@@ -2550,6 +2733,24 @@
         (let [ns (parse-external-decl p :top)]
           [(node p "LinkageSpecDecl" b (if (seq ns) (ne (peek ns)) (last-ix p)) {:language lang :inner ns})])))))
 
+(defn- dependent-type? [t]
+  (case (:t t)
+    (:n :tn) (or (= :tn (:t t)) (nil? (:ent t)) (:tparam (:ent t))
+                 (some (fn [part] (some #(case (:k %) :type (dependent-type? (:t %)) false) (:args part))) (:parts (:qn t))))
+    (:p :lr :rr :a :pk) (dependent-type? (:of t))
+    :dt true
+    false))
+
+(defn- dependent-arg?
+  "A template argument that depends on a template parameter (an expression's: in a template, when it names one)."
+  [^P p a]
+  (case (:k a)
+    :type (dependent-type? (:t a))
+    :expr (and (in-template? p)
+               (some (fn [i] (let [^T t (tok-at p i)] (and (identical? :id (.-k t)) (:tparam (sc/lookup (scope p) (.-s t))))))
+                     (range (:b a) (inc (long (:e a))))))
+    false))
+
 (defn- parse-using [^P p]
   (let [b (ix p)]
     (adv! p)
@@ -2574,11 +2775,13 @@
         (adv! p)
         (let [as (attr-nodes p)
               _ (expect! p "=")
-              ty (parse-type-id p :alias)
+              ds (parse-decl-specs p :type-id)
+              ty (build-type (or (ds-type ds) (perr p "an alias's type")) (parse-declarator p :abstract))
               e (last-ix p)]
           (expect! p ";")
           (declare! p {:k :type :name nm :tmpl (boolean (and tmpl (pos? (long (:n tmpl))))) :target (:ent ty) :scope (ent-scope (:ent ty))})
-          [(node p "TypeAliasDecl" b e {:name nm :loc (loc p ni) :type {:qualType (qt ty)} :inner (vec as)})]))
+          (vec (concat (when-let [n (:tag-node ds)] [n])
+                       [(node p "TypeAliasDecl" b e {:name nm :loc (loc p ni) :type {:qualType (qt ty)} :inner (vec as)})]))))
       :else
       (let [tn (accept! p "typename")
             out (loop [out []]
@@ -2588,7 +2791,8 @@
                     (accept! p "...")
                     (when-let [nm (:s lp)]
                       (declare! p (or (when-let [t (:ent qn)] (assoc t :name nm)) (if tn {:k :type :name nm} {:k :fn :name nm}))))
-                    (let [dep (or (some :args (butlast (:parts qn))) (nil? (:q qn)) (:tparam (:q qn)))
+                    (let [dep (or (nil? (:q qn)) (:tparam (:q qn))
+                                  (some #(some (fn [a] (dependent-arg? p a)) (:args %)) (butlast (:parts qn))))
                           out (conj out (node p (cond (not dep) "UsingDecl" tn "UnresolvedUsingTypenameDecl" :else "UnresolvedUsingValueDecl") b e {}))]
                       (if (accept! p ",") (recur out) out))))]
         (expect! p ";")
@@ -2750,7 +2954,9 @@
                                     (is? p "(") (let [as (paren-args p)] (recur (into inits (take 1 as))))
                                     :else (recur (conj inits (node p "DeclRefExpr" i i {:referencedDecl {:name nm}})))))
                             (perr p "a capture")))))
-            tmpl (when (is? p "<") (with-scope p :tparams nil (adv! p) (parse-template-params p) (expect! p ">") true))
+            tmpl (when (is? p "<")
+                   (let [ts (sc/new-scope :tparams (scope p) nil)]
+                     (st! p SCOPE ts) (adv! p) (parse-template-params p) (expect! p ">") true))
             _ (when (is? p "requires") (skip-requires-clause! p))
             pl (when (is? p "(") (adv! p) (parse-param-list p))
             _ (loop [] (cond (or (is? p "mutable") (is? p "constexpr") (is? p "consteval") (is? p "static")) (do (adv! p) (recur))
@@ -2833,7 +3039,7 @@
   (let [root (sc/new-scope :ns nil {:k :ns :name ""})
         p (P. toks (alength toks) (long-array 1) (object-array 16) main src year gnu)]
     (st! p SCOPE root) (st! p ROOT root) (st! p SKIM false) (st! p MTMPL (HashSet.)) (st! p DECLINES 0) (st! p GTOP true)
-    (st! p UNNAMED 0) (st! p REASONS (HashMap.)) (st! p CLS nil) (st! p THDR nil)
+    (st! p UNNAMED 0) (st! p REASONS (HashMap.)) (st! p CLS nil) (st! p THDR nil) (st! p PATTRS (ArrayList.))
     (doseq [nm builtin-types] (sc/declare! root {:k :type :name nm}))
     (let [nodes (loop [out []]
                   (let [out (into out (decl-seq p :top))]

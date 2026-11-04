@@ -2623,3 +2623,15 @@ gomp coroutines`, 1,549 files): **1,143 of 1,546 supported pass**, 3 unsupported
 clang-accepts 84, clang-extra 84, prune-output 17, clang-pedantic 8, gxx-disagrees 4, clang-elsewhere 4, oracle-crash 2.
 Preprocess (71): 38 of 70 pass, pp-diag 28, gxx-disagrees 3, pp-extra 1. Modules every 10th: as before (39 pass, 79 recorded
 rejections, 1 known). The whole corpora tonight as CX9.4 lists, after these fixes.
+
+## As built: CX11, first part (2026-11-04)
+
+On the branch `cpp-native` from `cpp-cx9`, in the light tier (stage 0 by `ARBACE_HOST_EXE`, 4 jobs, no gate, nothing embedded: no
+re-seed). The native parser, its design, its check and its numbers: [NATIVE.md](NATIVE.md). New: `arbace/repr/cpp/parse.ae` (the
+parser: C++23's grammar decided as clang's Parse decides it, clang's AST as data), `scope.ae` (the names' kinds), `lit.ae` (literals
+as clang holds them), `native.ae` (the read without the oracle), `ncheck.ae` and `bin/lib/repr-cpp/native-check` (both reads' forms
+compared), `test/repr/cpp/native/` (the parser's own sample, the two g++.dg lists), `test/repr/cpp/native-known.edn` (the classes,
+each a Sema fact). Changed: `arbace/repr/cpp.ae` (`read-cpp-native`, `read --reader native`), `bin/repr-cpp` (`read --reader native`,
+`native-check`). The converter is unchanged. Numbers: samples 9 of 9 files the same, the subset sample 30 of 30 items, g++.dg 60 of
+62 and 156 of 163 files (every difference classed); over the 977 recorded passes of g++.dg's every-10th sample, 942 the same.
+
