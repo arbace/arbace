@@ -10,7 +10,9 @@
 #                                  covering every node class of the ast, the builtins every public method of their types,
 #                                  every program compiling
 #   bin/pyi record-ref [--check] [CORPUS...]
-#                                  the reference runs (default: synthetic samples language-core): each program of
+#                                  the reference runs (default: synthetic samples language-core; lib-test-all, PY6i: every
+#                                  module of Lib/test as regrtest finds it, PYI_LIB_TEST_JOBS shards at once, into
+#                                  test/python/ref-cpython314-lib-test-all.edn): each program of
 #                                  synthetic and samples run by CPython 3.14.10 with PYTHONHASHSEED=0 (tools/pydump/refs.py),
 #                                  twice; status, stdout's SHA-256, size, first line and stderr's last line into
 #                                  test/python/ref-cpython314.edn; Lib/test's language-core modules (corpora.edn) by
@@ -45,6 +47,19 @@
 #                                  test/python/lib-test-known.edn; --record writes the known file's methods (exit 3 on a
 #                                  method of no class); --judge DIR: judged again, nothing run; --oracle: the driver by python3;
 #                                  pyi's runs skip test/python/lib-test-skip.tsv's tests (PYI_LIB_TEST_SKIP, the driver's)
+#   bin/pyi lib-test-all [--oracle] [--record] [--judge DIR] [--fresh] [--all] [MODULE...]
+#                                  PY6i: Lib/test as regrtest finds it, less the families' modules (tools/pyi/libtest_all.py; the
+#                                  modules the :module lines of ref-cpython314-lib-test-all.edn): each module by pyi through test/python/libtest_run.py,
+#                                  a test's crash or timeout ending that test alone (the driver started again on the rest),
+#                                  judged by libtest_judge.ae against the references and lib-test-known.edn's classes, then the
+#                                  negative controls (test/python/lib-test-all-controls.edn) and the table (RUN/table.md); the
+#                                  modules a family owns (test/python/lib-test-all-owners.tsv) left out, its rows the family's,
+#                                  but with --all, --oracle (the driver's control, every module) or named; the
+#                                  run in .tmp/repr-python/pyi/lib-test-all/run resumes (--fresh: anew); --record: the known
+#                                  file's classes applied by their :match into RUN/known.edn (the committed file untouched; exit 3
+#                                  on a method of no class). PYI_LIB_TEST_JOBS (default 2), PYI_LIB_TEST_TEST_TIMEOUT (300 s),
+#                                  PYI_LIB_TEST_TIMEOUT (a module's cap, 3600 s), PYI_LIB_TEST_TMP (the runs' short TMPDIRs, default
+#                                  .tmp/t6i: multiprocessing's AF_UNIX paths fit; /tmp checked and cleaned after each module)
 #   bin/pyi runtime print|read|vet|check
 #                                  PY5b0, the runtime's sources (doc/python/PYI-SPEC.md §8): go/arbace/py's Go forms (mode :full,
 #                                  lossless) printed as a Go module into .tmp/repr-python/pyi/runtime (print), edited there,
@@ -79,6 +94,8 @@ REF="$root/test/python/ref-cpython314.edn"
 REF_LT="$root/test/python/ref-cpython314-lib-test.edn"
 COSTS="$root/test/python/ref-costs.edn"
 COSTS_LT="$root/test/python/ref-costs-lib-test.edn"
+REF_ALL="$root/test/python/ref-cpython314-lib-test-all.edn"
+COSTS_ALL="$root/test/python/ref-costs-lib-test-all.edn"
 die() { echo "pyi: $*" >&2; exit 1; }
 
 arbace_exe() {
@@ -91,6 +108,7 @@ arbace_exe() {
   die "no stage 0 (bin/seed --build, or ARBACE_HOST_EXE)"
 }
 py() { local s=$1; shift; python3 -I -S -B "$root/tools/pydump/$s" "$@"; }
+pyall() { python3 -I -S -B "$root/tools/pyi/libtest_all.py" "$@"; }
 
 check_oracle() {
   local want have
@@ -209,6 +227,27 @@ cmd_record_ref() {
           py refs.py record --kind libtest --a "$WORK/rec1/libtest.tsv" --b "$WORK/rec2/libtest.tsv" --out "$REF_LT" \
             --header "$WORK/header.txt" --costs "$COSTS_LT"
         fi ;;
+      lib-test-all)
+        local L="$WORK/lib-test-all"; mkdir -p "$L"; tarball_test
+        # the modules outside every family's (test/python/lib-test-all-owners.tsv): the families' are lib-test's references
+        pyall list --pypath "$WORK/pypath" --work "$L" --out "$L/all-modules.txt"
+        pyall owned --owners "$root/test/python/lib-test-all-owners.tsv" --modules "$L/all-modules.txt" --invert > "$L/modules.txt"
+        local t runs="rec1 rec2"; [ -z "$check" ] || runs="check1 check2"
+        for t in $runs; do
+          rm -rf "${L:?}/$t"; mkdir -p "$L/$t"
+          # PYTHONPATH the tarball's Lib, as pyi and the driver's control see it (its Tools/ and i18n data, its paths)
+          pyall refs --pypath "$(stdlib_lib)" --modules "$L/modules.txt" --work "$L/$t" --out "$L/$t/libtest.tsv" --jobs "${PYI_LIB_TEST_JOBS:-2}" \
+            --tmp-base "${PYI_LIB_TEST_TMP:-$root/.tmp/t6i}" || true
+        done
+        if [ -n "$check" ]; then
+          py refs.py check --kind libtest --ref "$REF_ALL" --run "$L/check1/libtest.tsv" || rc=1
+          py refs.py check --kind libtest --ref "$REF_ALL" --run "$L/check2/libtest.tsv" || rc=1
+        else
+          header "$WORK/header.txt" "Lib/test as regrtest finds it (python3 -m test --list-tests) but the PY6 families' modules (test/python/lib-test-all-owners.tsv): $(wc -l < "$L/modules.txt") of $(wc -l < "$L/all-modules.txt") modules, PYTHONPATH the tarball's Lib; per test method"
+          py refs.py record --kind libtest --a "$L/rec1/libtest.tsv" --b "$L/rec2/libtest.tsv" --out "$REF_ALL" \
+            --header "$WORK/header.txt" --costs "$COSTS_ALL"
+          pyall fixrefs --ref "$REF_ALL" --root "$root"
+        fi ;;
       lib-test-*)
         # another lib-test corpus (PY6h's REQUEST, queue 200): its references in ref-cpython314-ID.edn
         local mods ref="$root/test/python/ref-cpython314-$id.edn"; mods=$(corpus_modules "$id")
@@ -222,7 +261,7 @@ cmd_record_ref() {
           py refs.py record --kind libtest --a "$WORK/rec1-$id/libtest.tsv" --b "$WORK/rec2-$id/libtest.tsv" --out "$ref" \
             --header "$WORK/header.txt" --costs "$root/test/python/ref-costs-$id.edn"
         fi ;;
-      *) die "no corpus $id (programs, language-core, lib-test-*)" ;;
+      *) die "no corpus $id (programs, language-core, lib-test-all, lib-test-*)" ;;
     esac
   done
   return $rc
@@ -341,7 +380,9 @@ cmd_run() {
   local rc=0
   shift
   pyi_env
-  pa_arbace run --dump "$d/dumps/$name.ae" --file "$f" --lib "$(stdlib_lib)" --argv0 "$argv0" -- "$@" || rc=$?
+  # in the caller's directory, as python3 runs a program (PY6e's REQUEST 5: lib-test's TESTFN files were made in the
+  # checkout's root)
+  (cd "$caller_pwd" && pa_arbace run --dump "$d/dumps/$name.ae" --file "$f" --lib "$(stdlib_lib)" --argv0 "$argv0" -- "$@") || rc=$?
   rm -rf "$d"
   return $rc
 }
@@ -635,6 +676,43 @@ cmd_aot() {
   aot_run "$AOT/bin/$pkg" "$argv0" "$@"
 }
 
+# lib-test-all [--oracle] [--record] [--judge DIR] [--fresh] [--all] [MODULE...] (PY6i): see the header
+cmd_lib_test_all() {
+  local oracle="" record="" judge="" fresh="" all="" mods=() d rc=0 known="$root/test/python/lib-test-known.edn"
+  while [ $# -gt 0 ]; do case $1 in --oracle) oracle=1; shift ;; --record) record=1; shift ;; --fresh) fresh=1; shift ;; --all) all=1; shift ;;
+    --judge) judge=$2; shift 2 ;; *) mods+=("$1"); shift ;; esac; done
+  [ -f "$REF_ALL" ] || die "no $REF_ALL (bin/pyi record-ref lib-test-all)"
+  local owners="$root/test/python/lib-test-all-owners.tsv" refmods="$WORK/lib-test-all/ref-modules.txt"
+  mkdir -p "$WORK/lib-test-all"; sed -n 's/^{:id "\([^"/]*\)" :module true.*/\1/p' "$REF_ALL" > "$refmods"
+  # the modules a family owns are the family's to measure (test/python/lib-test-all-owners.tsv), but by --all or --oracle
+  if [ ${#mods[@]} -eq 0 ]; then
+    if [ -n "$all$oracle" ]; then mapfile -t mods < "$refmods"
+    else mapfile -t mods < <(pyall owned --owners "$owners" --modules "$refmods" --invert); fi
+  fi
+  if [ -n "$judge" ]; then
+    d=$(cd "$caller_pwd" && cd "$judge" && pwd)
+  else
+    d="$WORK/lib-test-all/run${oracle:+-oracle}"
+    [ -z "$fresh" ] || rm -rf "$d"
+    mkdir -p "$d"; printf '%s\n' "${mods[@]}" > "$d/modules.txt"
+    PYI_LIB_TEST_SKIP="${PYI_LIB_TEST_SKIP-$root/test/python/lib-test-skip.tsv}" pyall run --root "$root" --modules "$d/modules.txt" --dir "$d" --jobs "${PYI_LIB_TEST_JOBS:-2}" \
+      --test-timeout "${PYI_LIB_TEST_TEST_TIMEOUT:-300}" --module-timeout "${PYI_LIB_TEST_TIMEOUT:-3600}" ${oracle:+--oracle "$(stdlib_lib)"} \
+      --tmp-base "${PYI_LIB_TEST_TMP:-$root/.tmp/t6i}"
+  fi
+  rm -f "$d/summary.tsv"
+  if [ -n "$record" ]; then cp "$known" "$d/known.edn"; known="$d/known.edn"; fi
+  "$(arbace_exe)" "$root/test/python/libtest_judge.ae" --dir "$d" --ref "$REF_ALL" --known "$known" \
+    ${record:+--record} ${oracle:+--no-known} "${mods[@]}" > "$d/judge.log" || rc=$?
+  grep -v '^  FAIL ' "$d/judge.log" | tail -n 1
+  echo "lib-test-all: $(grep -c '^  FAIL ' "$d/judge.log") methods failing (listed in $d/judge.log)"
+  # the table's rows of the families' and the not-run modules: regrtest's whole list (record-ref lib-test-all's)
+  local allmods="$WORK/lib-test-all/all-modules.txt"; [ -f "$allmods" ] || allmods=$refmods
+  pyall table --dir "$d" --summary "$d/summary.tsv" --out "$d/table.md" ${oracle:---owners "$owners" --modules "$allmods"}
+  pyall controls --dir "$d" --controls "$root/test/python/lib-test-all-controls.edn" --ref "$REF_ALL" \
+    --judge "$(arbace_exe)" "$root/test/python/libtest_judge.ae" || rc=1
+  return $rc
+}
+
 RT="$WORK/runtime"
 tamago_go() { (cd "$RT" && env GOROOT= PATH="${ARBACE_GOROOT:-/root/tamago-go}/bin:$PATH" GOCACHE="$WORK/gocache" GOFLAGS=-mod=mod CGO_ENABLED=0 GOTOOLCHAIN=local "$@"); }
 
@@ -731,9 +809,10 @@ case "${1:-}" in
   run) shift; mkdir -p "$WORK"; cmd_run "$@" ;;
   repl) shift; mkdir -p "$WORK"; cmd_repl "$@" ;;
   lib-test) shift; mkdir -p "$WORK"; cmd_lib_test "$@" ;;
+  lib-test-all) shift; mkdir -p "$WORK"; cmd_lib_test_all "$@" ;;
   runtime) shift; mkdir -p "$WORK"; cmd_runtime "$@" ;;
   aot) shift; mkdir -p "$WORK"; cmd_aot "$@" ;;
   bench) shift; mkdir -p "$WORK"; cmd_bench "$@" ;;
   check) shift; mkdir -p "$WORK"; [ "${1:-}" = --aot ] || die "usage: bin/pyi check --aot [--record] [--no-pyi] [--only ID]..."; shift; cmd_check_aot "$@" ;;
-  *) sed -n '2,68p' "$0"; exit 2 ;;
+  *) sed -n '2,83p' "$0"; exit 2 ;;
 esac
