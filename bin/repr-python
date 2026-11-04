@@ -68,6 +68,17 @@
 #                                  corpora as lex-check's, then the mutants, the dumps byte for byte equal or known
 #                                  (test/python/parse-check-known.edn). --full: mode :full (every node's position, the
 #                                  tokens) against pydump.py tree --full. Work in .tmp/repr-python/parse{,-full}/CORPUS/
+#   bin/repr-python ast-check [--limit N] [--mode M] [CORPUS...]
+#                                  PY9 (queue 201): pyi's _ast on the native reader: each file's answer to compile()'s
+#                                  PyCF_ONLY_AST in tools/pyi/ast_json.py's form, natively (arbace.repr.python.astjson)
+#                                  and by CPython (tools/pydump/astdump.py), byte for byte (default samples lex-errors
+#                                  syntax-errors; --limit: each corpus's first N files)
+#   The round trips, lex-check and parse-check (queue 201, PY10's R1): --only-list FILE runs the files of FILE (CORPUS/NAME
+#   a line) and judges them alone (a known entry of a file not run kept, also by --record); a failing file is printed FAIL
+#   CORPUS/NAME, a tab and why; --record also writes the results file test/python/{roundtrip,full,lex-check,parse-check}-results.edn
+#   (rows ["CORPUS FILE" :pass|:known|:fail REASON], arbace.repr.python.results, bin/reap's); each has a negative control
+#   (a file judged against another's reference must fail). parse-check's corpora also syntax-errors (PY9:
+#   tools/pydump/syntax_cases.py, CPython's own syntax-error cases from the tarball's Lib/test)
 #   bin/repr-python check          spec-check, samples, then the round trips (:lines, then --text) over the default corpora
 # Environment: REPR_PYTHON_CORPORA, REPR_PYTHON_PIN_VERSION, REPR_PYTHON_APKS, REPR_PYTHON_SPEC name other copies of
 # test/python/corpora.edn, tools/pydump/PYTHON_VERSION, tools/pydump/apks.sha256, doc/python/SPEC.md (negative controls).
@@ -335,6 +346,17 @@ corpus_base() { # ID -> the base directory and the arguments of corpus.py
   die "no corpus $id in test/python/corpora.edn"
 }
 
+# --only-list FILE (queue 201, PY10's R1): a partial run, the files of FILE (CORPUS/NAME a line) of each corpus; only_filter
+# keeps a corpus's listed files in its list (none: the corpus is not run)
+ONLY=""
+only_filter() { # LIST ID
+  [ -n "$ONLY" ] || return 0
+  local t="$1.all"; mv "$1" "$t"
+  grep -v '^#' "$ONLY" | sed -n "s|^$2/||p" | LC_ALL=C sort -u > "$1.names"
+  grep -Fxf "$1.names" "$t" > "$1" || true
+  [ -s "$1" ]
+}
+
 roundtrip_one() {
   local id=$1 record=$2
   local -a info; mapfile -t info < <(corpus_base "$id")
@@ -345,6 +367,7 @@ roundtrip_one() {
   rm -rf "$d"; mkdir -p "$d"
   STAGES="$d/stages.txt"; : > "$STAGES"
   (cd "$base" && py corpus.py list "$base" "${args[@]}") > "$d/list"
+  only_filter "$d/list" "$id" || { echo "roundtrip $id: no file of --only-list"; return 0; }
   timed helper-orig dump_parallel "$base" "$d/list" "$d/orig" "$d/helper-orig.tsv"
   if [ -n "$TEXT" ]; then
     # mode :full (PY3): the dumps in mode :full beside the :lines ones, converted, woven, printed from the tokens
@@ -359,7 +382,8 @@ roundtrip_one() {
   local rc=0
   timed compare py_arbace compare --corpus "$id" --orig "$d/orig" --cand "$d/cand" --orig-tsv "$d/helper-orig.tsv" \
     --cand-tsv "$d/helper-printed.tsv" --convert-tsv "$d/convert-print.tsv" --known "$known" --results "$d/results.edn" \
-    ${record:+--record} ${TEXT:+--text} || rc=$?
+    ${record:+--record} ${TEXT:+--text} ${ONLY:+--partial} \
+    ${record:+--results-file "$root/test/python/$([ -n "$TEXT" ] && echo full || echo roundtrip)-results.edn"} || rc=$?
   { echo "{:corpus :$id :jobs $JOBS"
     echo " :wall-seconds {$(awk '{ printf "%s\"%s\" %s", (NR > 1 ? " " : ""), $1, $2 }' "$STAGES")}"
     echo " :per-file $(py corpus.py costs "$d/helper-orig.tsv" ${TEXT:+"$d/helper-full.tsv"} "$d/convert-print.tsv" "$d/helper-printed.tsv")}"; } > "$d/costs.edn"
@@ -374,6 +398,7 @@ cmd_roundtrip() {
     case $1 in
       --record) record=1; shift ;;
       --text) TEXT=-text; costs=$TEXT_COSTS; shift ;;
+      --only-list) ONLY=$(cd "$(dirname "$2")" && pwd)/$(basename "$2"); shift 2 ;;
       --jobs) JOBS=$2; shift 2 ;;
       *) ids+=("$1"); shift ;;
     esac
@@ -453,9 +478,10 @@ tokdump() {
 lex_one() { # ID BASE LIST
   local id=$1 base=$2 list=$3 d="$LEX/$1" rc=0
   rm -rf "$d/ref" "$d/out"; mkdir -p "$d"
+  if [ -n "$ONLY" ]; then cp "$list" "$d/list.only"; list="$d/list.only"; only_filter "$list" "$id" || { echo "lex-check $id: no file of --only-list"; return 0; }; fi
   tokdump "$base" "$list" "$d/ref"
   lexcheck check --corpus "$id" --base "$base" --list "$list" --ref "$d/ref" --out "$d/out" --known "$LEX_KNOWN" \
-    --jobs "$JOBS" ${record:+--record} || rc=$?
+    --jobs "$JOBS" ${record:+--record} ${ONLY:+--partial} ${record:+--results-file "$root/test/python/lex-check-results.edn"} || rc=$?
   return $rc
 }
 
@@ -465,6 +491,7 @@ cmd_lex_check() {
   while [ $# -gt 0 ]; do
     case $1 in
       --record) record=1; shift ;;
+      --only-list) ONLY=$(cd "$(dirname "$2")" && pwd)/$(basename "$2"); shift 2 ;;
       --jobs) JOBS=$2; shift 2 ;;
       --mutants) nmut=$2; shift 2 ;;
       --no-mutants) nmut=0; shift ;;
@@ -494,7 +521,7 @@ cmd_lex_check() {
     [ $rc -gt $worst ] && worst=$rc
   done
   # the negative control (GTS81 (a)): a file judged against another's dump must differ
-  [ ${#pools[@]} -gt 0 ] && { lexcheck control --base "$(head -1 "${pools[-1]}")" --list "$(dirname "${pools[-1]}")/list" \
+  [ ${#pools[@]} -gt 0 ] && { lexcheck control --base "$(head -1 "${pools[-1]}")" --list "$(d=$(dirname "${pools[-1]}"); [ -n "$ONLY" ] && [ -f "$d/list.only" ] && echo "$d/list.only" || echo "$d/list")" \
     --ref "$(dirname "${pools[-1]}")/ref" || worst=1; }
   if [ "$nmut" != 0 ] && [ ${#pools[@]} -gt 0 ]; then
     rm -rf "$LEX/mutants"
@@ -527,9 +554,11 @@ cmd_pegen() {
 parse_one() { # ID BASE LIST
   local id=$1 base=$2 list=$3 d="$PARSE/$1" rc=0
   rm -rf "$d/ref" "$d/out"; mkdir -p "$d"
+  if [ -n "$ONLY" ]; then cp "$list" "$d/list.only"; list="$d/list.only"; only_filter "$list" "$id" || { echo "parse-check $id: no file of --only-list"; return 0; }; fi
   FULL=$PFULL dump_parallel "$base" "$list" "$d/ref" "$d/ref.tsv"
   parsecheck check --corpus "$id" --base "$base" --list "$list" --ref "$d/ref" --out "$d/out" --known "$PARSE_KNOWN" \
-    --jobs "$JOBS" ${record:+--record} ${PFULL:+--full} || rc=$?
+    --jobs "$JOBS" ${record:+--record} ${PFULL:+--full} ${ONLY:+--partial} \
+    ${record:+--results-file "$root/test/python/parse-check-results.edn"} || rc=$?
   return $rc
 }
 
@@ -540,6 +569,7 @@ cmd_parse_check() {
     case $1 in
       --record) record=1; shift ;;
       --full) PFULL=1; PARSE="$WORK/parse-full"; shift ;;
+      --only-list) ONLY=$(cd "$(dirname "$2")" && pwd)/$(basename "$2"); shift 2 ;;
       --jobs) JOBS=$2; shift 2 ;;
       --mutants) nmut=$2; shift 2 ;;
       --no-mutants) nmut=0; shift ;;
@@ -575,7 +605,7 @@ cmd_parse_check() {
     rc=0; parse_one "$id" "${info[0]}" "$PARSE/$id/list" || rc=$?
     [ $rc -gt $worst ] && worst=$rc
   done
-  [ ${#pools[@]} -gt 0 ] && { parsecheck control --base "$(head -1 "${pools[-1]}")" --list "$(dirname "${pools[-1]}")/list" \
+  [ ${#pools[@]} -gt 0 ] && { parsecheck control --base "$(head -1 "${pools[-1]}")" --list "$(d=$(dirname "${pools[-1]}"); [ -n "$ONLY" ] && [ -f "$d/list.only" ] && echo "$d/list.only" || echo "$d/list")" \
     --ref "$(dirname "${pools[-1]}")/ref" || worst=1; }
   if [ "$nmut" != 0 ] && [ ${#pools[@]} -gt 0 ]; then
     rm -rf "$PARSE/mutants"
@@ -652,7 +682,7 @@ case "${1:-}" in
       --fetch) cmd_fetch ;;
       --count) cmd_count ;;
       --check) cmd_check ;;
-      *) sed -n '2,72p' "$0"; exit 2 ;;
+      *) sed -n '2,90p' "$0"; exit 2 ;;
     esac ;;
   spec-check) cmd_spec_check ;;
   samples) cmd_samples ;;
