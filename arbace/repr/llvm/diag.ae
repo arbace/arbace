@@ -206,9 +206,9 @@
    "DISubprogram" [:file :scope :name :linkageName :type :unit :declaration :retainedNodes :containingType :templateParams :thrownTypes :annotations :targetFuncName]
    "DIDerivedType" [:file :scope :name :baseType :extraData :annotations]
    "DICompositeType" [:file :scope :name :baseType :elements :vtableHolder :templateParams :identifier :discriminator :dataLocation :associated :allocated :rank :annotations]
-   "DIGlobalVariable" [:scope :name :linkageName :file :type :staticDataMemberDecl :templateParams :annotations]
+   "DIGlobalVariable" [:scope :name :linkageName :file :type :staticDataMemberDeclaration :templateParams :annotations]
    "DIGlobalVariableExpression" [:var :expr]
-   "DICompileUnit" [:file :producer :flags :splitDebugFilename :enumTypes :retainedTypes :globalVariables :importedEntities :macros]})
+   "DICompileUnit" [:file :producer :flags :splitDebugFilename :enums :retainedTypes :globals :imports :macros]})
 
 (defn- md-ref? [x] (and (symbol? x) (nil? (namespace x)) (boolean (re-matches #"![0-9]+" (name x)))))
 
@@ -236,23 +236,21 @@
 (defn- opt-of [b k] (some (fn [[i y]] (when (= y k) (nth b (inc i) nil))) (map-indexed vector b)))
 
 (defn md-slots
-  "{old-symbol new-symbol} of the nodes a module's instructions number differently from the text."
+  "{old-symbol new-symbol} of the nodes the slot tracker numbers differently from the text, by its traversal: the
+  globals' attachments, named metadata's operands, then each function's attachments and its instructions' metadata (the
+  debug records' variable, value and location, a call's metadata arguments, the attachments), a node before its operands."
   [forms]
   (let [nodes (into {} (keep #(when (= (first %) 'llvm/meta) [(second %) (nth % 2)]) forms))
-        in-r (java.util.LinkedHashSet.)
-        walk (fn walk [r on-new]
-               (when (and (md-ref? r) (contains? nodes r) (on-new r))
-                 (doseq [c (node-operands (get nodes r))] (walk c on-new))))
+        assigned (java.util.LinkedHashMap.)
+        visit (fn visit [r]
+                (when (and (md-ref? r) (contains? nodes r) (not (.containsKey assigned r)))
+                  (.put assigned r (symbol (str "!" (.size assigned))))
+                  (doseq [c (node-operands (get nodes r))] (visit c))))
         roots (concat
                (for [f forms :when (= (first f) 'llvm/global)
                      :let [[_ _ _ & more] f o (apply hash-map (if (and (seq more) (not (keyword? (first more)))) (rest more) more))]
                      v (md-vals (:md o))] v)
                (for [f forms :when (= (first f) 'llvm/named-meta) r (refs-in (nth f 2))] r))
-        _ (doseq [r roots] (walk r (fn [r] (when-not (.contains in-r r) (.add in-r r) true))))
-        base (count in-r)
-        assigned (java.util.LinkedHashMap.)
-        visit (fn [r] (walk r (fn [r] (when-not (or (.contains in-r r) (.containsKey assigned r))
-                                        (.put assigned r (symbol (str "!" (+ base (.size assigned))))) true))))
         fn-roots
         (fn [f]
           (let [o (apply hash-map (drop 4 f))]
@@ -261,7 +259,7 @@
              (for [blk (:body o) x (drop 2 blk)
                    :let [b (if (= (first x) '=) (nth x 2) x)]
                    r (if (and (symbol? (first b)) (.startsWith ^String (name (first b)) "dbg_"))
-                       ;; the variable, the value and the location, never the expression (processDbgRecordMetadata)
+                       ;; the value, the variable and the location, never the expression (processDbgRecordMetadata)
                        (concat (when-not (vector? (nth b 1 nil)) (refs-in (nth b 1 nil)))
                                (refs-in (nth b 2 nil))
                                (when (= (first b) 'dbg_assign) (concat (refs-in (nth b 4 nil)) (refs-in (nth b 5 nil))))
@@ -269,6 +267,7 @@
                        (concat (when (#{'call 'invoke 'callbr} (first b)) (refs-in (nth b 3 nil)))
                                (md-vals (opt-of b :md))))]
                r))))]
+    (doseq [r roots] (visit r))
     (doseq [f forms :when (#{'llvm/define 'llvm/declare} (first f)) r (fn-roots f)] (visit r))
     (into {} (for [[k v] assigned :when (not= k v)] [k v]))))
 
