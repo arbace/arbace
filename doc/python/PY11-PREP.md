@@ -12,7 +12,7 @@ sample, and the budget per tier. The clean run and the tag are the main host's. 
 
 | cell | sources (the check's record) | classes | on this branch |
 |---|---|---|---|
-| read | `bin/repr-python roundtrip` (`roundtrip-known.edn`, levels forms, ast, code); `lex-check` (`lex-check-known.edn`, PY9); `parse-check --full` (`parse-check-known.edn`, PY9); each file counted once (`:count-once`), the mutants not counted | `test/python/divergences-read.edn` | 0+ / 34 / 0 (PY9's two sources `:until` its merge) |
+| read | `bin/repr-python roundtrip` (`roundtrip-known.edn`, levels forms, ast, code); `lex-check` (`lex-check-known.edn`, PY9); `parse-check --full` (`parse-check-known.edn`, PY9); each file counted once (`:count-once`), the mutants not counted | `test/python/divergences-read.edn` | 0+ / 37 / 0 (PY9 merged: its two sources counted, their passes once R1's results files are recorded) |
 | eval | `bin/pyi check` (`check-lib-test-linux-amd64.edn`, PY7); pyi on goi over the synthetic corpus and the samples (`check-aot-linux-amd64.edn`'s pyi runs); beside: `scope-check`, `compile-check` | `test/python/divergences.edn` (PY7's); `divergences-synth.edn` | no check yet (both records the main host's) |
 | AOT | `bin/pyi check --aot` (`check-aot-linux-amd64.edn`'s compiled runs; an `:as-pyi` run classed by the eval classes of the same program) | `divergences-aot.edn`, `divergences-synth.edn` | no check yet |
 | print | `bin/repr-python roundtrip --text` (`full-known.edn`, levels bytes and marshal) | `divergences-print.edn` | 0+ / 5 / 0 |
@@ -237,7 +237,7 @@ On this branch alone (stage 0 of the seed `a59cc441`):
   `the negative control: ... do not pass`.
 
 At the merges, in order:
-1. PY9 (`mac/201-python-py9`): remove `:until` from the `lex-check` and `parse-check` sources; `bin/reap --record`.
+1. PY9 (`mac/201-python-py9`): done at the integration (queue 201): the two `:until` removed, `bin/reap --record`.
 2. On amd64, `bin/pyi check --aot --record` → `check --aot: 151 programs: 138 pass, 13 classed, 0 failing` as on the VM (fewer
    classed once PY7-runtime fixes `divergences-synth.edn`'s classes; a program pyi on goi runs otherwise than the compiled one
    shows as `pyi-differs` in the eval cell); remove both `:until "PY8 ..."`; `bin/reap --record` → AOT `138 / 0 / 13`.
