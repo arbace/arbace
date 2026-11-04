@@ -640,7 +640,7 @@ each binary (the builds are deterministic), not of the change: the third build o
 
 The suite is the same within the host's noise (four runs each: few of its calls are of protocols
 made at run time); si's psyntax, whose records and protocols are evaluated, is 1.2-1.3 times
-faster (1.7-2.1 times against main's, round 1's table).
+faster (its tests 2.2 times against main's 54.1 s, round 1's table).
 
 ## What is left (after round 2)
 
