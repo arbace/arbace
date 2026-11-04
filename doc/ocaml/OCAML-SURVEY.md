@@ -1809,3 +1809,95 @@ picks).
 - **OC131 (a):** the dependency-order build not now; the streams stay sequential.
 - **OC160 (a):** a light `oi-divergences` step in the merge's essential gate (the four judgments of the committed
   records, stage 0).
+
+## As built: the native reader (2026-11-04)
+
+OCaml text read into OCaml forms by Arbace alone, no ocamlc at read time (the survey's O6a half, OC3 (a)'s "native
+reader later"; the helper `tools/ocdump` stays the oracle and `read`'s default). Built on the branch `ocaml-native` from
+main `46d04247` under light rules: no gate, no Arbace build, no re-seed; every run on stage 0
+(`target/seed/amd64/arbace`) under 1.1 GB. Sources read in place from the pinned tarball (`test/ocaml/corpora.edn`'s
+`:ocaml-5.5.0`, extracted into `.tmp/repr-ocaml/`).
+
+**The design: Menhir ported, the tables generated from parser.mly** (rather than a hand-written recursive descent)
+
+- OCaml's parser *is* an LALR(1) automaton: `parsing/parser.mly` is not stratified ("concise but fragile", its own
+  comment), its 28 precedence levels and `%prec` annotations resolve the conflicts of expressions, patterns, types,
+  module expressions and functor types, and its locations are Menhir's (`$sloc` is `$symbolstartpos`, which skips
+  nullable symbols by a runtime test; an `%inline` symbol's span is its cells'). A hand-written parser would re-derive
+  each resolution and each location by hand, with no way to show it complete. Generating the automaton from the grammar
+  gets both by construction, as PY9 got CPython's parser by porting pegen.
+- It is checkable: `bin/repr-ocaml menhir --check` pairs the generated automaton with the one Menhir itself wrote into
+  the tarball (`boot/menhir/parser.ml`'s `--table` back end, MenhirLib's encoding decoded): 2,327 of 2,327 states,
+  1,024 of 1,024 productions and 238 of 238 nonterminals paired, every action, goto and default reduction equal. "The
+  whole grammar" is a checked claim, not a sample's.
+- It is small: the construction (the `.mly` reader, parameterized and anonymous rules, `%inline` expansion, LR(0),
+  DeRemer and Pennello's lookaheads, Menhir's precedence and default-reduction rules) is about 900 lines and runs in
+  2.5 s. The semantic actions need translating in either design; keyed by their text (comments out, blanks collapsed)
+  the 887 action sites are 611 distinct texts, shared by Menhir's 1,009 expanded productions.
+- The grammar stays the source: a new OCaml is `bin/repr-ocaml menhir` again plus its new actions (the loader names
+  every action with no translation). Rejected: decoding Menhir's tables and using them directly (the production-to-action
+  mapping is only in the generated OCaml's let structure; kept as the cross-check); translating the actions by machine
+  (it needs an OCaml expression reader, this one; possible later).
+
+**What is in the tree** (`arbace/repr/ocaml/`, evaluated from the checkout, not embedded, as all of repr/ocaml, OC30 (a))
+
+- `menhir.ae` (`arbace.repr.ocaml.menhir`): the construction. Each expanded production keeps a *plan*: the source
+  actions it composes (an inlined symbol's action nested where it was) and the cells each covers.
+- `tables.ae` (generated, 696 KB): terminals, nonterminals, productions with their plans, states (default reduction,
+  actions, gotos), start states, the action texts. `bin/repr-ocaml menhir --verify` generates it again and compares.
+- `lex.ae`: `lexer.mll` with ocamllex's longest match (earliest rule on a tie), Lexing's position updates (a fresh
+  position object per boundary: Menhir's `$symbolstartpos` tests identity), `Utf8_lexeme` (Latin-9, NFC), strings as
+  byte strings, and Lexer.token's docstring filing. `docstrings.ae`: `docstrings.ml`, the attachment marks that make a
+  field's info no item's doc.
+- `ast.ae`: the Parsetree as data (the OCaml field names as keywords), Ast_helper's constructors, and the helper's dump
+  (`ocdump.ml`'s printer, its exact text: a node prints flat when its last check point fits, computed once per node).
+- `actions.ae`: parser.mly's header helpers and its actions, OCaml's evaluation order kept where it is observable
+  (docstring lookups; the right-to-left tuples of `mkexpvar`/`mkpatvar` puns; lazy let-binding docs forced as
+  `val_of_let_bindings` forces them).
+- `parser.ae`: MenhirLib's engine: a token read after each shift, default reductions, an empty production's start and
+  end the previous cell's end (one object); a plan's items evaluated right to left, inlined ones first, as Menhir's
+  generated code binds them, each action with its `$startpos`, `$endpos`, `$symbolstartpos` from its cells.
+- `native.ae`: `dump`, `read`, `check`; `bin/repr-ocaml read --reader native` (and `read --full --reader native`, the
+  layout of mode `:full` from the native lexer), `dump --reader native`, `native-check [--layout] [CORPUS...] | --list
+  FILE`, `menhir [--check|--verify]`; Makefile `repr-ocaml-native-check`, `repr-ocaml-menhir`.
+
+**The checks** (each file's native dump with positions against `ocdump --loc`, byte for byte; light: one Arbace process)
+
+| corpus | files | equal | rejected by both | differ |
+|---|---:|---:|---:|---:|
+| samples (also their `:full` layouts, 8 of 8) | 8 | 8 | 0 | 0 |
+| stdlib | 150 | 148 | 2 (the `templates/`) | 0 |
+| compiler sources (parsing, typing, lambda, utils, driver) | 248 | 248 | 0 | 0 |
+| testsuite: parsing, lexing, typing-objects, effects, effect-syntax, exotic-syntax, let-syntax, generalized-open, formatting, functors, extension-constructor, typing-modules, typing-poly, typing-labeled-tuples, typing-misc, parsetree | 234 | 231 | 3 | 0 |
+| `--use-file` (the toplevel's phrases): tool-toplevel and typing-modules, first 40 | 40 | 37 | 3 | 0 |
+
+Equal counts include 7 rejected files whose error form (kind, message, location) is already the helper's. The 8 rejected
+by both with another message (the 2 templates, 3 testsuite files, 3 `#use` files) are the later step's (below): 6 need
+Menhir's error token ("Syntax error: end expected", "`)` expected"), 2 the lexer's wording; every location agrees. `read --reader native` gives the
+helper path's forms exactly (`:lines` and `:full`, samples and `stdlib/list.ml`); `menhir --check`: 0 differences.
+Speed on stage 0: about 40 KB/s (the stdlib's 1.9 MB in 48 s, the compiler's 4.0 MB in 118 s, peak RSS 1.0 GB), half
+lexing; the helper reads about 2 MB/s.
+
+**Left** (none run here: whole corpora, mutants, the gate)
+
+- Error messages as ocamlc's (the later step): Menhir's simplified error strategy (the `error` token shifted, the error
+  productions' `unclosed`/`expecting` messages: "Syntax error: ) expected" where the native reader says "Syntax error");
+  the lexer's messages as Format prints them (its `@ ` breaks, `%S` quoting); warnings (comment start, illegal backslash)
+  not reported.
+- The whole corpora: the testsuite's 1,862 files, go-whim's whiml (57k lines in one file), the opam set.
+- Speed (OC173).
+
+**Proposals** (OC170-OC174; options, recommendation first, none decided)
+
+- **OC170 `read`'s default reader.** (a) the helper until `native-check` has passed every corpus once (recorded as
+  `read`'s results are), then native; (b) native now; (c) the helper for good. *Recommended: (a)*.
+- **OC171 A gate step.** (a) with OCaml's steps (OC120 (b)), a light `--full` step `bin/repr-ocaml menhir --check`
+  `--verify` plus `native-check samples` (seconds), the stdlib's run by hand; (b) the stdlib in it too (about a minute);
+  (c) none. *Recommended: (a)*.
+- **OC172 Error messages.** (a) port MenhirLib's simplified strategy and the error printers (`Syntaxerr`, `Lexer`'s
+  `prepare_error`, Format's breaks), judged by `native-check` on every rejected file (message and location); (b) the
+  strategy only; (c) kinds only, as built. *Recommended: (a)*, next.
+- **OC173 Speed.** (a) as built; (b) the lexer buffer as a type with fields (no map lookups per byte), fewer position
+  objects; (c) embedded and compiled with the program at a re-seed (OC30). *Recommended: (b)* when a corpus run needs it.
+- **OC174 The actions' translation.** (a) by hand, keyed by text (as built; the loader refuses tables with an
+  untranslated action); (b) by machine from parser.mly through this reader. *Recommended: (a)*; (b) at a new OCaml.

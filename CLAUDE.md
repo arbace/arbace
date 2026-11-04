@@ -236,7 +236,11 @@ Prior art:
   - The other crops, repr/ocaml (`bin/repr-ocaml`, `bin/oi`), repr/scheme (`bin/repr-scheme`, `bin/si`), repr/cpp and repr/llvm
     (`bin/repr-cpp`, `bin/repr-llvm`, `bin/cppi`): their namespaces (`arbace/repr/{ocaml,scheme,cpp,llvm}`, `arbace/scheme/`,
     `arbace/cpp/`) are evaluated from the checkout, not embedded and out of `gate_key` (`arbace/j2g/embed.ae`'s exclusions); no gate step
-    runs them.
+    runs them. repr/ocaml reads natively too (doc/ocaml/OCAML-SURVEY.md, "As built: the native reader"; the helper `tools/ocdump` stays
+    the oracle and `read`'s default): `arbace/repr/ocaml/menhir.ae` builds parser.mly's LALR(1) automaton as Menhir does into the
+    generated `tables.ae` (`bin/repr-ocaml menhir`, `--check` against Menhir's own tables in the tarball, `--verify`), `lex.ae`,
+    `docstrings.ae`, `actions.ae` and `parser.ae` port lexer.mll, docstrings.ml, parser.mly's actions and MenhirLib's engine;
+    `bin/repr-ocaml read --reader native`, `native-check` (the dumps against the helper's, byte for byte).
   - `arbace/repr/clojure{.ae,/}`: `arbace.repr.clojure`, Clojure's bridge (`doc/REPR-CLOJURE.md`;
     `bin/repr-clojure read`, `print`, `roundtrip`, `check`): Clojure source into Arbace's, the
     names of the vendored Clojure, `.clj`/`.cljc` into `.ae`, a table of rules for the dialects'

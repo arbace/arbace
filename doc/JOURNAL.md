@@ -260,3 +260,30 @@ On branch `night-fix` (from `b2a4911f`), not merged while `--full` ran on main:
 - Python on the Mac VM: PY1-PY3 done (spec and pins; read and print over 2,800 files; `:full` byte for byte with
   `marshal` equal on 2,795), the user's decisions: two parses for type comments, 20 pinned site-packages apks,
   `:code-lines` by design for `:lines`, `:charset` by design; PY4 running.
+
+## 2026-11-04: repr/ocaml's native reader (branch ocaml-native)
+
+- OCaml text read into OCaml forms by Arbace alone (the survey's O6a half; doc/ocaml/OCAML-SURVEY.md, "As built: the native
+  reader"). **Decision: port Menhir's construction and generate the tables from parser.mly**, not a hand-written recursive
+  descent: OCaml's parser is the LALR(1) automaton of `parsing/parser.mly` with its conflicts resolved by 28 precedence
+  levels and `%prec`, and its locations are Menhir's (`$symbolstartpos`, `%inline` spans); generating the automaton gets
+  both by construction and makes the claim checkable. Alternatives: a hand-written parser (each resolution and location
+  re-derived by hand, completeness unprovable); Menhir's own tables decoded from `boot/menhir/parser.ml` and used directly
+  (the production-to-action mapping only in the generated code; kept as the cross-check); the actions translated by
+  machine (needs this reader; OC174 (b)).
+- Sources, all from the pinned tarball https://caml.inria.fr/pub/distrib/ocaml-5.5/ocaml-5.5.0.tar.xz (SHA-256
+  `fcc6ae665d1ec51d52510eaac7834a86a9806bf5a258bb7cca78733fccf015ba`): `parsing/parser.mly` (read by the generator; its
+  611 distinct action texts translated by hand into `arbace/repr/ocaml/actions.ae`), `parsing/lexer.mll` (`lex.ae`, with
+  stdlib/lexing.ml's position updates and utils/misc.ml's Utf8_lexeme), `parsing/docstrings.ml` (`docstrings.ae`),
+  `parsing/ast_helper.ml` (`ast.ae`), `boot/menhir/menhirLib.ml` (the engine `parser.ae` follows, and the table format
+  `menhir.ae` decodes) and `boot/menhir/parser.ml` (Menhir 20250912's tables, the cross-check). Menhir's standard library
+  rules (`option`, `ioption`, `list`, `nonempty_list`, `preceded`, `terminated`, `rev`, `flatten`, `append`) written from
+  standard.mly's definitions (inline-ness confirmed by the cross-check). LICENSE.md: the OCaml Core System's LGPL-2.1 with
+  the linking exception; a new section for MenhirLib's terms.
+- Checks (light, stage 0): `bin/repr-ocaml menhir --check`: 2,327 of 2,327 states, 1,024 of 1,024 productions, 238 of 238
+  nonterminals paired with Menhir's, every action, goto and default reduction equal. `native-check` (the dump with
+  positions against `ocdump --loc`, byte for byte): samples 8 of 8 (and their `:full` layouts), stdlib 148 of 150 (the 2
+  templates rejected by both), the compiler's parsing/typing/lambda/utils/driver 248 of 248, 16 syntax-heavy testsuite
+  directories 231 of 234 (3 rejected by both), 37 of 40 `#use` files; the rejected files' messages are the later step
+  (OC172), their locations agree. `read --reader native` gives the helper path's forms exactly in `:lines` and `:full`.
+  About 40 KB/s on stage 0, peak 1.0 GB. Not run: the gate, whole corpora, mutants. Proposals OC170-OC174, none decided.
