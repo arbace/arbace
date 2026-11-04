@@ -853,6 +853,37 @@ PY5b0's DECISION (a), decided by the user, 2026-11-03):
   52 run equal to the references; the other 24 are classed: 2 by the last digit of `math`'s transcendental functions
   (Go's, not musl's: PY6's `math` port), 22 by an operation or builtin of PY5c, PY5d or PY5e.
 
+## As built: PY8a (2026-11-03, the Mac VM, queue 198)
+
+PY8's first part, the AOT itself, specified in [PYI-SPEC.md](PYI-SPEC.md) §10:
+
+- **The IR straight to Go forms** (PYS13 (a)), `arbace.python.aot`, as Scheme's AOT: a compiled interpreter, each code
+  object a Go function over the machine's heap frame, its entry a switch on the frame's PC (every instruction a label),
+  its instructions calls of `go/arbace/py`'s helpers (`aot.go`) with constant arguments, its jumps gotos; the operations
+  the helpers do not spell out (PY5c's, PY5d's and PY5e's registered ones among them) by `AotExec`, the loop's own
+  implementation without its decoding. The loop runs a compiled code object in place of `step` (`Code.Native`), so calls
+  push heap frames as before (RecursionError where CPython raises it), exceptions unwind by the same tables, and
+  **generators, coroutines and async generators are state machines** on their resume point over the frame they keep.
+- **A program** is its main module and the modules its module-level code imports, found statically on its `sys.path` and
+  compiled ahead into packages of their own (keyed by their IR's hash, so `collections`' 9 modules compile once for
+  every program that imports them); `exec`, `eval`, `compile` and other imports go at run time to the host's compiler
+  (a compile server on stage 0) and run on the loop. Built by TamaGo's go alone (never `bin/arbace-go`), out of
+  `gate_key` (PYS18 (a)).
+- **`bin/pyi check --aot`**: the synthetic corpus and the samples (151, 177's references) compiled and run, each judged
+  against CPython's reference, the same executable on the loop (`PYI_AOT_LOOP`) and pyi's run on goi: on the VM **123
+  pass, 28 classed, 0 failing, 0 refused**; every classed one by the rule `:as-pyi` (its compiled run equal to the loop's
+  and to pyi's: PY5's own classes, the C modules of PY6 among them, `test/python/divergences-aot.edn` holding no
+  class of its own); a negative control (two passing programs judged against each other's references) fails as it must.
+  About 1.2 s to compile a program, 17 minutes for the check with pyi's runs (pyi on goi about 100 times the compiled).
+- **Speed** (`bin/pyi bench`, pyperformance 1.14.0's pure benchmarks with a pyperf stand-in, `test/python/bench`;
+  `test/python/bench-aot-linux-arm64.edn`, the VM's): 13 run as CPython does, the 9 others classed `:module-import`
+  (`_sre`, `_io`, `_random`, `array`: PY6's C modules). Compiled 21.9 s, the loop 22.7 s, CPython 3.3 s on a quiet VM (the
+  recorded run, under a load of 8 from parallel tasks: 42.2, 42.3 and 3.8 s): the compiled
+  interpreter is **1.04 times the loop**, not §7's 1.5 to 3, because the loop's dispatch is about 3% of the time (Go's
+  profile of `deltablue`): the runtime's attribute lookup (`lookupAttr` 31 to 35%, an MRO walk of dictionary lookups per
+  access), dictionaries and allocation dominate. The str hash kept and the name strs made once (PY5b's files) took
+  `richards` from 6.0 to 4.2 s on both; a type attribute cache (prototyped, not committed: PY5c's) about 20% more.
+
 ## Decided (2026-11-03, the user): PY6b's DECISIONs (queue 200)
 
 - **`.pyc` files carry pyi's own cache tag and magic number, amending PYS12 (a)'s "source-only loader"**: PY6b's (a).

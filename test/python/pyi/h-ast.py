@@ -1,0 +1,11 @@
+# PY6h's REQUEST: compile()'s PyCF_ONLY_AST (ast.parse, literal_eval, dump, unparse, compiling a tree)
+import ast
+t = ast.parse("x = [1, 2.5, b'a', ..., 3j, 10**30]\nif x: print(x)")
+print(ast.dump(t, include_attributes=True)[:400])
+print(ast.literal_eval("{'a': (1, -2.5, None, True), 'b': [b'x', 1+2j]}"))
+print(ast.unparse(t))
+e = ast.parse("1 + 2", mode="eval"); print(eval(compile(e, "<ast>", "eval")))
+c = compile(t, "<ast>", "exec"); exec(c)
+try: ast.parse("x = (")
+except SyntaxError as e: print("SyntaxError", e.msg, e.lineno, e.offset)
+print(type(ast.parse("def f(): pass").body[0]).__name__, ast.get_docstring(ast.parse('"""doc"""')))
