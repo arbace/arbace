@@ -1640,6 +1640,23 @@
         (recur)))
     seen))
 
+(defn- numbered-blocks
+  "A definition's blocks with the numbers LLParser gives unlabelled blocks and unnamed values (the AsmWriter prints them)."
+  [f]
+  (let [[_ _ _ ps & opts] f o (apply hash-map opts)
+        ^Fn st (fn-state)]
+    (doseq [p ps :when (vector? p)] (let [x (when (local? (peek p)) (peek p))] (define-value st x 'arg "argument")))
+    (mapv (fn [blk]
+            (let [[_ l & items] blk
+                  l (or l (symbol (str "%" (aget ^longs (.next ^Fn st) 0))))]
+              (define-value st l 'label "label")
+              (apply list 'block l (map (fn [x] (let [b (body x) t (if (dbg-record? b) 'void (result-type b))]
+                                                  (if (and (not= t 'void) (nil? (result x)))
+                                                    (let [r (symbol (str "%" (aget ^longs (.next ^Fn st) 0)))] (define-value st r t "instruction") (list '= r b))
+                                                    (do (when (and (result x) (not= t 'void)) (define-value st (result x) t "instruction")) x))))
+                                        items))))
+          (:body o))))
+
 (defn- phase-debug
   "Debug info checks: nothing here makes the module invalid (opt warns and strips), the first message is the result."
   [forms]
@@ -1677,7 +1694,7 @@
                      (when (and (= (first f) 'llvm/declare) (flag? (:spFlags (di-fields spn)) "DISPFlagDefinition"))
                        (verr :di/function "function declaration may only have a unique !dbg attachment" :fn [:mdv sp])))))
                 (when (and sp (= "DISubprogram" (di-kind spn)) (= (first f) 'llvm/define))
-                  (visiting (doseq [[_ l & items] (:body o) x items]
+                  (visiting (doseq [[_ l & items] (numbered-blocks f) x items]
                     (let [b (body x)]
                       (if (dbg-record? b)
                         nil
@@ -1686,7 +1703,7 @@
                             (binding [*ctx* {:fn f :bb l :inst x}]
                                         (verr :di/function "!dbg attachment points at wrong subprogram for function"
                                               [:mdv sp] :fn :inst [:mdv loc] [:mdv (:scope (di-fields (node-of loc)))] [:mdv (di-loc-sp loc)]))))))))
-                  (doseq [[_ l & items] (:body o) x items :let [b (body x)] :when (dbg-record? b)]
+                  (doseq [[_ l & items] (numbered-blocks f) x items :let [b (body x)] :when (dbg-record? b)]
                     (case (first b)
                       (dbg_declare dbg_value dbg_declare_value)
                       (let [[_ _ var expr loc] b vn (node-of var) en (node-of expr) ln (node-of loc)]
@@ -1787,20 +1804,7 @@
     (when (and (:comdat o) (= h 'llvm/declare)) (verr :verifier/comdat-declaration "Declaration may not be in a Comdat!"))
     (check-function-md (apply hash-map (:md o)))))
     (when (= h 'llvm/define)
-      (let [blocks (vec (:body o))
-            ;; the numbers LLParser gives unlabelled blocks and unnamed values
-            ^Fn st (fn-state)
-            _ (doseq [p ps :when (vector? p)] (let [x (when (local? (peek p)) (peek p))] (define-value st x 'arg "argument")))
-            blocks (mapv (fn [blk]
-                           (let [[_ l & items] blk
-                                 l (or l (symbol (str "%" (aget ^longs (.next ^Fn st) 0))))]
-                             (define-value st l 'label "label")
-                             (apply list 'block l (map (fn [x] (let [b (body x) t (if (dbg-record? b) 'void (result-type b))]
-                                                                 (if (and (not= t 'void) (nil? (result x)))
-                                                                   (let [r (symbol (str "%" (aget ^longs (.next ^Fn st) 0)))] (define-value st r t "instruction") (list '= r b))
-                                                                   (do (when (and (result x) (not= t 'void)) (define-value st (result x) t "instruction")) x))))
-                                                       items))))
-                         blocks)
+      (let [blocks (numbered-blocks f)
             g (cfg blocks)
             rank (bb-ranks blocks)
             defs (java.util.HashMap.)  ; local key -> [block index item index body]
