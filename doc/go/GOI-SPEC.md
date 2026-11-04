@@ -1194,7 +1194,7 @@ table points them to goi's functions:
 |---|---|
 | `os.Exit` | §2.7 |
 | `runtime.Goexit` | Go's own (the interpreted defers run through `unwind`: §4.7), listed to document it |
-| `runtime.Caller`, `runtime.Callers`, `runtime.FuncForPC` | goi's frames where it can (file, line, function name of interpreted frames), else gc's: a known difference |
+| `runtime.Caller`, `runtime.Callers`, `runtime.FuncForPC` | goi's frames where it can (file, line, function name of interpreted frames), else gc's: a known difference (as built since v1: goi's frames and program counters, with `CallersFrames`, `runtime.Func`'s methods, `runtime.Stack`, `debug.Stack` and `reflect.Value.Pointer`: "Since v1: frames") |
 | `os.Args` | the program's arguments in program mode; at the REPL the REPL's (`*command-line-args*`) |
 | `runtime.NumGoroutine`, `runtime.GC`, `runtime.KeepAlive`, `runtime.SetFinalizer` | Go's own (finalizers of reflect-made values work; timing unspecified) |
 
@@ -4749,6 +4749,102 @@ the reference adds to the agenda's list were each checked against their programs
 classes by the action lines `check_err` reads, the phases' class by go/types' empty error lists
 in godump's dumps, the syntax and conversion class by the dumps' `:fail` rows and the converter's
 log, the spellings' class program by program (GR7b, GR7c, and again here).
+
+## Since v1: frames (2026-11-04, branch `goi-frames`)
+
+The class "runtime.Caller, Callers, FuncForPC and traces naming goi's frames" (24 programs since the
+classes were reduced, `test/goi/check-known.edn`) was a design: runtime's API answered from gc's code,
+which in goi is the interpreter's nodes (`reflect/value.go:369` for `runtime.Caller(1)`). The design
+below answers it from the interpreted program's own frames, which goi already keeps (§4.3, §10.6), so
+it costs nothing on a call.
+
+**The frames.** Every interpreted call already takes its `Frame` from the goroutine's thread (§4.3) and
+sets its function (`Fn`) and line 0; every statement that can panic or call stores its line before it
+runs (§10.6, GC26 (b)); a panic leaves the frames as they were (the panic's frames stay under the
+deferred calls `unwind` runs, at the depths above). So the stack runtime's API asks for is the thread's
+frames from its depth down, read on demand; nothing is recorded per call beyond what was. What is new:
+
+- each function's code knows its frames' data (`Code`'s `GoName`, `Dir`, `Line0`, `End`, `Args`; the
+  builder's op `CodeFrame`): gc's name (`pkg.f`, `pkg.T.M`, `pkg.(*T).M`, a literal's `pkg.f.funcN`
+  and `pkg.f.funcN.M` numbered per enclosing function as gc does, the initializers' `pkg.init`, the
+  init functions' `pkg.init.N`; `main` for the main package, else the package's path), its source
+  directory (the package file's: the forms' corpus mirrors the Go tree, so the file is gc's shape,
+  `DIR/issue7690.go`), its first line and its last as gc's line table has it (the closing brace's,
+  `:go/end`, where a function that ends without a return returns; its last return's line when it ends
+  with one), and its body's `//line` directives (`CodeLineDirs`: gc's `updateBase`, a frame's line
+  shown as the directive's file and line; `//line :N` names `??`);
+- a `let`'s declarations after its first, each on a line of its own (Go's separate statements), store
+  their lines as statements do (they did not: `n := runtime.Stack(...)` showed the `let`'s first line);
+  the package's initializers store theirs, and their frame (`pkg.init`) names their file;
+- a function that defers and ends without a return stores its closing brace's line before its deferred
+  calls run (gc's line of that frame), in `runDeferring` alone;
+- a select case's channel, on a line of its own, is evaluated at that line (`AtLineR`; gc's line of a
+  panic there);
+- a compiled function called through a func value takes a frame without a function (`callValue`), which
+  traces skip;
+- each thread knows its goroutine's number, what gc's runtime has under its first function (the
+  program's goroutine: `runtime.doInit1`, `doInit`, `runtime.main` during initialization, `runtime.main`
+  then; a go statement's: `runtime.goexit`) and the go statement that started it (`created by`).
+
+**The stack** (`Thread.stack`, `go/arbace/goi/frames.ae`): from the thread's depth down, each frame with
+a function and a line (a frame entered for a call whose arguments are being evaluated has line 0: not one
+yet); after a frame that is a deferred call running in a panic (its `rec` holds the panic), gc's
+runtime frames of the panic, `runtime.gopanic` and the run-time error's own (`panicmem` and `sigpanic` of
+a nil dereference, `panicBounds64` and `panicBounds` of a bounds check, `panicdivide`,
+`panicdottypeE`); then the runtime's frames below. gc's runtime frames are `pcFunc`s of their own with
+go1.27.1's files and lines (the directory this executable's runtime names for `runtime.GC`'s code).
+
+**Program counters are goi's own handles.** A `pcFunc` per interpreted function's code (and per runtime
+frame above), numbered; a frame's program counter is `pcBase + id<<32 + line<<8 + 1` (a return
+address: `pc-1`, the idiom of `FuncForPC(pc-1)`, is the same line), a function's entry `pcBase + id<<32
++ Line0<<8`, `pcBase` = 2^62, above any address of gc's code, so the two never meet. The overrides
+(§6.7, `go/arbace/gotable.edn`'s `:overrides`; goi's functions in `frames.ae`):
+
+| member | goi's |
+|---|---|
+| `runtime.Caller(skip)` | the stack's frame `skip` (0: the caller's) |
+| `runtime.Callers(skip, pcs)` | `runtime.Callers`' own frame, then the stack, from `skip` |
+| `runtime.FuncForPC(pc)` | goi's: the `pcFunc` as a `*runtime.Func` (nil past the function's lines, so `pc++` walks end); gc's: gc's |
+| `(*runtime.Func).Name`, `Entry`, `FileLine` | a `pcFunc`'s (recognized by its address), else gc's |
+| `runtime.CallersFrames`, `(*runtime.Frames).Next` | over goi's counters a `runtime.Frames` whose state goi keeps (by its address), each `Frame` with `Func`, `Function`, `File`, `Line`, `Entry`; gc's counters by gc's |
+| `runtime.Stack(buf, all)`, `runtime/debug.Stack`, `PrintStack` | the goroutine's trace in gc's format (below; `all`: the current goroutine only) |
+| `reflect.Value.Pointer` | an interpreted function's (a closure made a Go func, §4.6 S29) entry as goi's counter, else reflect's |
+
+**Traces in gc's format** (`traceText`; also an uncaught panic's report, §10.7, which printed `?:0`
+before): `goroutine N [running]:` (`, locked to thread` during initialization), then each frame as gc's
+traceback prints it, `pkg.f(...)` (`pkg.f()` without arguments) and `\tFILE:LINE +0x0`; gc's runtime
+frames hidden but a panic's, printed `panic(...)` when not the first (gc's `showframe`); a go
+statement's goroutine ends with `created by pkg.f in goroutine N` and its line. `debug.Stack`'s begins
+with its own frame, `runtime/debug.Stack()`, as gc's.
+
+**What it does not do.** Frames of compiled code between interpreted ones (a `sort.Slice` calling an
+interpreted less) are not shown: goi knows only its own. Positions within a line (`/*line` directives,
+gc's operator line of an expression spread over lines: `v.\n A()`) are not kept by the forms (SPEC.md
+§10.1). `//line` directives are applied to frames only within a function's body (a directive between
+declarations is not in any function's forms). Program
+counters of gc's code taken by unsafe means (a func value's code word read through pointers, mprotect
+over the text) are gc's.
+
+**The cost.** None on a call: `enter` stores the function and line 0 as before, statements store their
+lines as before; what is added runs only when a function that defers ends without a return (one
+store), when a compiled function is called through a func value (one store), when a `let`'s later
+declaration can call or panic (one store), and when the program asks (`funcOf` builds a function's
+`pcFunc` once per code, under a lock). Measured on `fib 27` (635,621 interpreted calls) and `dfib 22`
+(57,313 calls that defer), best of five, three alternations against an executable of `next` before the
+change: 27.7-28.3 ms against 27.7-29.0 ms (about 44 ns a call either way), 13.8-14.0 ms against
+13.5-15.2 ms (about 240 ns): within the noise.
+
+**Results** (`bin/goi check --list` over the class's 24 programs, against gc's recorded runs): 21 pass,
+`inline_literal`, `inline_caller`, `inline_callers`, `fixedbugs/bug347`, `bug348`, `issue11656`,
+`issue14646`, `issue17381`, `issue18149`, `issue19467`, `issue21879`, `issue22083`, `issue27201`,
+`issue29919`, `issue33724`, `issue4562`, `issue58300`, `issue58300b`, `issue5856`, `issue7690`,
+`issue79762`; three stay known in the class (renamed "runtime.Caller, runtime.Callers, FuncForPC and
+traces at positions within a line"): `fixedbugs/issue22662` and `issue29504` (`/*line`
+directives within a line or an expression) and `devirtualization_nil_panics` (a call `v.\n A()` at its
+operator's line in gc's, at its statement's in the forms). `test/goi/check-linux-amd64.edn`'s lines of
+the 21 are `:pass`, the three's reasons rewritten, every other line kept: **1,643 of 1,837 pass before,
+1,664 after**. `bin/goi test` and `bin/goi check --essential` (801 of 801) pass on the executable built
+from this branch.
 
 ## Decided (2026-10-24): GC157 (b), GS14 (a) and GC161 (b)
 
