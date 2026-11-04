@@ -15,12 +15,25 @@
     (.mkdirs (.getParentFile f))
     (spit f s)))
 
+(defn- native-reader?
+  "Whether the reads are the native parser's (REPR_CPP_READER=native, bin/repr-cpp roundtrip --reader native; CX11):
+  the file read with no oracle, the oracle's dumps kept for the levels that compare clang's ASTs."
+  []
+  (= "native" (System/getenv "REPR_CPP_READER")))
+
+(defn- read-file
+  "The file `src` (named `nm`) read from its dump, or natively with the options `args`."
+  [^String dump ^String src ^String nm ^String std args full]
+  (if (native-reader?)
+    (rc/read-cpp-native src nm std args full)
+    (rc/read-cpp dump src nm std full)))
+
 (defn- full-level
   "Level 5 (mode :full): the file read in mode :full, written as .ae text and read back, printed: the original's bytes.
   \"same\", \"differs\" or \"refused: CLASS\"."
-  [^String dump ^String src ^String nm ^String std]
+  [^String dump ^String src ^String nm ^String std args]
   (try
-    (let [rd (rc/read-cpp dump src nm std true)]
+    (let [rd (read-file dump src nm std args true)]
       (if (:refused rd)
         (str "refused: " (name (:refused rd)))
         (let [[ff forms] (rc/read-unit-text (rc/unit-text rd))
@@ -31,9 +44,9 @@
 
 (defn- one
   "One file: [name status texts detail]; status ok, refused, crash."
-  [^String work ^String nm ^String std ^String dump ^String src ^String forms-dir ^String print-dir]
+  [^String work ^String nm ^String std ^String dump ^String src ^String forms-dir ^String print-dir args]
   (try
-    (let [rd (rc/read-cpp dump src nm std)]
+    (let [rd (read-file dump src nm std args false)]
       (if (:refused rd)
         [nm "refused" 0 (str (name (:refused rd)) ": " (str/replace (str (:message rd)) #"[\t\n]" " "))]
         (let [ae (rc/unit-text rd)
@@ -41,7 +54,7 @@
               n (reduce + (vals (dissoc (:texts rd) :macro-form :group)))]
           (spit-utf8 (str forms-dir "/" nm ".ae") ae)
           (when print-dir (spit-utf8 (str print-dir "/" nm) txt))
-          [nm "ok" n (pr-str (:texts rd)) (if print-dir (full-level dump src nm std) "-")])))
+          [nm "ok" n (pr-str (:texts rd)) (if print-dir (full-level dump src nm std args) "-")])))
     (catch Throwable e
       [nm "crash" 0 (str/replace (str e) #"[\t\n]" " ")])))
 
@@ -54,9 +67,12 @@
         threads (Integer/parseInt (or (System/getenv "REPR_CPP_THREADS") "4"))
         pool (Executors/newFixedThreadPool threads)
         t0 (System/nanoTime)
-        futs (mapv (fn [[nm std]]
-                     (.submit pool ^Callable (fn [] (one nil nm std (str dumps "/" nm ".edn") (str src-root "/" nm) forms-dir
-                                                         (when-not (= print-dir "-") print-dir)))))
+        futs (mapv (fn [[nm std _ path cargs]]
+                     ;; the native read's options: the modelled ones and -iquote the original's directory, as the dumps'
+                     (let [args (into (vec (remove str/blank? (str/split (or cargs "") #"\s+")))
+                                      (when path ["-iquote" (str (.getParent (java.io.File. ^String path)))]))]
+                       (.submit pool ^Callable (fn [] (one nil nm std (str dumps "/" nm ".edn") (str src-root "/" nm) forms-dir
+                                                           (when-not (= print-dir "-") print-dir) args)))))
                    rows)
         rs (mapv #(.get ^Future %) futs)]
     (.shutdown pool)
