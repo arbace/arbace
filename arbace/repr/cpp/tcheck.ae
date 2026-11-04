@@ -1,0 +1,454 @@
+(ns arbace.repr.cpp.tcheck
+  "repr/cpp's tree-level check of the native parser (doc/cpp/NATIVE.md §9; bin/repr-cpp native-check --tree): each
+  file's native tree (arbace.repr.cpp.parse's nodes: clang's AST as tools/cxxdump writes it) compared node for node
+  with the oracle's dump of the same file. The nodes of the two trees are aligned list by list (a longest common
+  subsequence over kind, name and first offset; the nodes of a gap paired through the single-child wrappers clang
+  has and the native tree omits, then by kind and name), and each pair's fields compared (clang's `:id`, `:line` and
+  `:col` and the parser's own `_` keys left out): the differences are a node clang has and the native tree lacks
+  (`missing`, a `wrapper` when its only child is paired), a node the native tree has alone (`extra`), and a field
+  that differs (`value`) or that one tree lacks (`absent`).
+  Each difference is then classed READ or IGNORED by what the converter does with it: the difference applied to the
+  tree it makes the forms from (the native tree's field put into the oracle's, a missing node taken out of it, an
+  extra node out of the native tree) and the forms compared with the unchanged tree's; a difference that leaves the
+  forms alone is one the converter ignores (its field, its node is not read where it stands). A unit of differences
+  (a node kind's field, a node kind) is tried on all its nodes at once first, then node by node when that changes
+  the forms. A file's result is `same` when no difference is read, `differ` else; the forms level's own result
+  (arbace.repr.cpp.ncheck) is beside it, so a `same` forms level over `differ` trees is what the forms hide."
+  (:require [arbace.repr.cpp :as rc]
+            [arbace.repr.cpp.native :as native]
+            [arbace.repr.cpp.convert :as convert]
+            [arbace.repr.c.layout :as layout]
+            [arbace.string :as str])
+  (:import [java.util.concurrent Executors Callable Future]))
+
+(set! *warn-on-reflection* true)
+
+(defn- spit-mk [^String path ^String s]
+  (let [f (java.io.File. path)] (.mkdirs (.getParentFile f)) (spit f s)))
+
+(defn- status [^String p] (let [f (java.io.File. p)] (when (.exists f) (str/trim (slurp f)))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Trees
+
+(defn- skip-key? [k] (or (#{:id :inner :line :col} k) (and (keyword? k) (str/starts-with? (name k) "_"))))
+
+(defn- vec-tree
+  "A node's children as vectors all the way down (the trees are addressed by index paths)."
+  [n]
+  (if (map? n)
+    (if-let [in (:inner n)] (assoc n :inner (mapv vec-tree in)) n)
+    n))
+
+(defn- bkey
+  "A node's first offset: its range's begin, a macro location's expansion."
+  [n]
+  (let [b (get-in n [:range :begin])]
+    (or (:offset b) (:offset (:expansionLoc b)) (:offset (:spellingLoc b)))))
+
+(defn- ekey [n]
+  (let [b (get-in n [:range :end])]
+    (or (:offset b) (:offset (:expansionLoc b)) (:offset (:spellingLoc b)))))
+
+(defn- seg [n] (str (or (:kind n) "-") (when (:name n) (str " " (:name n))) (when-let [o (bkey n)] (str "@" o))))
+
+(defn- size [n] (if (map? n) (inc (reduce + 0 (map size (:inner n)))) 0))
+
+(defn- real? [n] (and (map? n) (:kind n)))
+
+(defn- count-nodes [ns] (reduce + 0 (map (fn [n] (if (real? n) (+ 1 (count-nodes (:inner n))) (count-nodes (:inner n)))) ns)))
+
+(defn- match? [c n]
+  (and (= (:kind c) (:kind n))
+       (let [bc (bkey c) bn (bkey n)]
+         (if (and bc bn) (and (= bc bn) (= (:name c) (:name n))) (= (:name c) (:name n))))))
+
+(defn- kind-match? [c n] (and (= (:kind c) (:kind n)) (= (:name c) (:name n))))
+
+(defn- lcs-core
+  "The longest common subsequence of cs[c0,c1) and ns[n0,n1) under `match?`: [[i j] ...] ascending (a table of
+  (c1-c0+1)*(n1-n0+1) cells; a greedy alignment looking 40 nodes ahead when that is more than 1,500,000)."
+  [cs ns ^long c0 ^long c1 ^long n0 ^long n1]
+  (let [m (- c1 c0) k (- n1 n0)]
+    (cond
+      (or (zero? m) (zero? k)) []
+      (> (* m k) 1500000)
+      (loop [i c0 j n0 out []]
+        (if (or (>= i c1) (>= j n1))
+          out
+          (if (match? (nth cs i) (nth ns j))
+            (recur (inc i) (inc j) (conj out [i j]))
+            (let [fj (first (filter #(match? (nth cs i) (nth ns %)) (range (inc j) (min n1 (+ j 40)))))
+                  fi (first (filter #(match? (nth cs %) (nth ns j)) (range (inc i) (min c1 (+ i 40)))))]
+              (cond (and fj (or (nil? fi) (<= (- fj j) (- fi i)))) (recur i fj out)
+                    fi (recur fi j out)
+                    :else (recur (inc i) (inc j) out))))))
+      :else
+      (let [w (inc k)
+            dp (int-array (* (inc m) w))]
+        (loop [i (dec m)]
+          (when (>= i 0)
+            (loop [j (dec k)]
+              (when (>= j 0)
+                (aset dp (+ (* i w) j)
+                      (if (match? (nth cs (+ c0 i)) (nth ns (+ n0 j)))
+                        (inc (aget dp (+ (* (inc i) w) (inc j))))
+                        (max (aget dp (+ (* (inc i) w) j)) (aget dp (+ (* i w) (inc j))))))
+                (recur (dec j))))
+            (recur (dec i))))
+        (loop [i 0 j 0 out []]
+          (if (or (>= i m) (>= j k))
+            out
+            (cond (and (match? (nth cs (+ c0 i)) (nth ns (+ n0 j)))
+                       (= (aget dp (+ (* i w) j)) (inc (aget dp (+ (* (inc i) w) (inc j))))))
+                  (recur (inc i) (inc j) (conj out [(+ c0 i) (+ n0 j)]))
+                  (>= (aget dp (+ (* (inc i) w) j)) (aget dp (+ (* i w) (inc j)))) (recur (inc i) j out)
+                  :else (recur i (inc j) out))))))))
+
+(defn- lcs-pairs
+  "The alignment of two vectors under `match?`: the common prefix and suffix, the rest by lcs-core: [[i j] ...] ascending."
+  [cs ns]
+  (let [m (count cs) k (count ns)
+        pre (loop [i 0] (if (and (< i m) (< i k) (match? (nth cs i) (nth ns i))) (recur (inc i)) i))
+        suf (loop [i 0] (if (and (< i (- m pre)) (< i (- k pre)) (match? (nth cs (- m 1 i)) (nth ns (- k 1 i)))) (recur (inc i)) i))]
+    (vec (concat (map (fn [i] [i i]) (range pre))
+                 (lcs-core cs ns pre (- m suf) pre (- k suf))
+                 (map (fn [i] [(+ (- m suf) i) (+ (- k suf) i)]) (range suf))))))
+
+(defn- sole-child [n]
+  (let [in (:inner n)] (when (= 1 (count in)) (let [x (first in)] (when (real? x) x)))))
+
+(defn- wrapped
+  "[[wrapper-index-chain core]] for the descendants of x through single-child chains that `ok?` accepts: the chain of
+  child indexes (all 0) and the wrappers' nodes."
+  [x ok?]
+  (loop [d x ws [] depth 0]
+    (cond (ok? d) [ws d]
+          (and (< depth 6) (sole-child d)) (recur (sole-child d) (conj ws d) (inc depth))
+          :else nil)))
+
+(def ^:private wrapper-kinds #{"ImplicitCastExpr" "ConstantExpr" "ExprWithCleanups" "MaterializeTemporaryExpr" "CXXBindTemporaryExpr"})
+(defn- wrapper-kind? [k] (contains? wrapper-kinds k))
+
+(declare diff-node)
+
+(defn- vdiff
+  "The differences of two field values: records {:kp keypath :cv c's value :nv native's (::none when it lacks it)}."
+  [kp c n out]
+  (cond
+    (and (map? c) (map? n))
+    (doseq [k (distinct (concat (keys c) (keys n)))
+            :when (not (skip-key? k))]
+      (let [hc (contains? c k) hn (contains? n k)]
+        (cond (and hc hn) (vdiff (conj kp k) (get c k) (get n k) out)
+              hc (swap! out conj {:kp (conj kp k) :cv (get c k) :nv ::none})
+              :else (swap! out conj {:kp (conj kp k) :cv ::none :nv (get n k)}))))
+    (and (sequential? c) (sequential? n) (= (count c) (count n)))
+    (dotimes [i (count c)] (vdiff (conj kp i) (nth c i) (nth n i) out))
+    (= c n) nil
+    :else (swap! out conj {:kp kp :cv c :nv n})))
+
+(defn- diff-list
+  "The differences of two children lists under the paths cp and np (index vectors): appended to `out` (an atom),
+  and `st` (an atom of counts) updated."
+  [cs ns cp np ps out st]
+  (let [prs (lcs-pairs cs ns)
+        anchors (concat prs [[(count cs) (count ns)]])]
+    (loop [as anchors ci 0 ni 0]
+      (when as
+        (let [[ai aj] (first as)
+              uc (range ci ai)
+              un (vec (range ni aj))
+              used (atom #{})
+              pairs (atom {})]
+          ;; pass 1: a wrapper chain whose core matches a native node of the gap
+          (doseq [i uc]
+            (let [x (nth cs i)]
+              (when (real? x)
+                (when-let [[ws core] (wrapped x (fn [d] (some (fn [j] (when (and (not (@used j)) (real? (nth ns j)) (match? d (nth ns j))) j)) un)))]
+                  (when (seq ws)
+                    (let [j (first (filter (fn [j] (and (not (@used j)) (real? (nth ns j)) (match? core (nth ns j)))) un))]
+                      (swap! used conj j)
+                      (swap! pairs assoc i [j ws core])))))))
+          ;; pass 1b: clang's wrappers (casts, cleanups, temporaries) over a core that is another kind in the native tree
+          (doseq [i uc :when (and (not (@pairs i)) (wrapper-kind? (:kind (nth cs i))))]
+            (let [x (nth cs i)
+                  [ws core] (loop [d x ws []]
+                              (if (and (wrapper-kind? (:kind d)) (sole-child d)) (recur (sole-child d) (conj ws d)) [ws d]))]
+              (when (and (bkey core) (not (wrapper-kind? (:kind core))))
+                (when-let [j (first (filter (fn [j] (let [y (nth ns j)]
+                                                      (and (not (@used j)) (real? y) (= (bkey core) (bkey y)) (= (ekey core) (ekey y)))))
+                                            un))]
+                  (swap! used conj j) (swap! pairs assoc i [j ws core])))))
+          ;; pass 2: by kind and name, in order
+          (doseq [i uc :when (not (@pairs i))]
+            (let [x (nth cs i)
+                  j (first (filter (fn [j] (and (not (@used j)) (kind-match? x (nth ns j)))) un))]
+              (when j (swap! used conj j) (swap! pairs assoc i [j [] x]))))
+          ;; pass 3: the same first and last offset, another kind (the native tree's CallExpr for clang's CXXMemberCallExpr)
+          (doseq [i uc :when (not (@pairs i))]
+            (let [x (nth cs i)]
+              (when (and (real? x) (bkey x))
+                (when-let [j (first (filter (fn [j] (let [y (nth ns j)]
+                                                      (and (not (@used j)) (real? y) (= (bkey x) (bkey y)) (= (ekey x) (ekey y)))))
+                                            un))]
+                  (swap! used conj j) (swap! pairs assoc i [j [] x])))))
+          (doseq [i uc]
+            (let [x (nth cs i)]
+              (if-let [[j ws core] (get @pairs i)]
+                (let [y (nth ns j)
+                      segs (map seg (concat [x] (rest ws) (when (seq ws) [core])))
+                      pstr (str ps (when (seq ps) " > ") (str/join " > " segs))
+                      nw (count ws)]
+                  (dotimes [k nw]
+                    (let [w (nth ws k)]
+                      (swap! out conj {:t :wrapper :kind (:kind w)
+                                       :path (str ps (when (seq ps) " > ") (str/join " > " (map seg (take (inc k) (concat [x] (rest ws))))))
+                                       :cpath (vec (concat cp [i] (mapcat (fn [_] [:inner 0]) (range k))))
+                                       :impl (boolean (:isImplicit w)) :size 1})))
+                  (diff-node core y (vec (concat cp [i] (mapcat (fn [_] [:inner 0]) ws))) (conj np j) pstr out st))
+                (when (real? x)
+                  (swap! out conj {:t :missing :kind (:kind x) :path (str ps (when (seq ps) " > ") (seg x)) :cpath (conj cp i)
+                                   :impl (boolean (:isImplicit x)) :size (count-nodes [x])})
+                  (swap! st update :missing + (count-nodes [x]))))))
+          (doseq [j un :when (and (not (@used j)) (real? (nth ns j)))]
+            (let [y (nth ns j)]
+              (swap! out conj {:t :extra :kind (:kind y) :path (str ps (when (seq ps) " > ") (seg y)) :npath (conj np j) :size (count-nodes [y])})
+              (swap! st update :extra + (count-nodes [y]))))
+          (when (< ai (count cs))
+            (let [x (nth cs ai)]
+              (diff-node x (nth ns aj) (conj cp ai) (conj np aj) (str ps (when (seq ps) " > ") (seg x)) out st)))
+          (recur (next as) (inc ai) (inc aj)))))))
+
+(defn- diff-node [c n cp np ps out st]
+  (when (real? c) (swap! st update :paired inc))
+  (let [fs (atom [])
+        cm (dissoc c :inner) nm (dissoc n :inner)]
+    (vdiff [] cm nm fs)
+    (when (seq @fs)
+      (swap! st update :unequal inc)
+      (doseq [f @fs]
+        (swap! out conj (assoc f :t (cond (= ::none (:nv f)) :absent-n (= ::none (:cv f)) :absent-c :else :value)
+                               :kind (:kind c) :path ps :cpath cp :npath np)))))
+  (diff-list (or (:inner c) []) (or (:inner n) []) (vec (concat cp [:inner])) (vec (concat np [:inner])) ps out st))
+
+(defn diff-trees
+  "The differences of two lists of top-level nodes: {:diffs [...] :stats {:paired :unequal :missing :extra}}.
+  A record's `:path` is a string, `:cpath` and `:npath` index vectors into the trees ([i :inner j ...])."
+  [cnodes nnodes]
+  (let [out (atom []) st (atom {:paired 0 :unequal 0 :missing 0 :extra 0})]
+    (diff-list cnodes nnodes [] [] "" out st)
+    {:diffs @out :stats @st}))
+
+;; ---------------------------------------------------------------------------------------------
+;; What the converter does with a difference
+
+(defn- conj-all [v xs] (reduce conj v xs))
+
+(defn- upd-path
+  "The vector of nodes with the node at `path` ([i :inner j ...]) replaced by (f node): f gives a node, ::remove, or a
+  vector of nodes put in its place."
+  [nodes path f]
+  (let [i (first path)]
+    (if (nil? (next path))
+      (let [r (f (nth nodes i))]
+        (cond (= r ::remove) (into (subvec nodes 0 i) (subvec nodes (inc i)))
+              (vector? r) (into (conj-all (subvec nodes 0 i) r) (subvec nodes (inc i)))
+              :else (assoc nodes i r)))
+      (let [nd (nth nodes i)]
+        (assoc nodes i (assoc nd :inner (upd-path (:inner nd) (vec (nnext path)) f)))))))
+
+
+
+(defn- map-nodes
+  "Every node of the vector (and of the splices) through f: a node, ::remove or a vector of nodes."
+  [f nodes]
+  (vec (mapcat (fn [n]
+                 (if-not (map? n)
+                   [n]
+                   (let [r (f n)]
+                     (cond (= r ::remove) []
+                           (vector? r) (map-nodes f r)
+                           :else [(if-let [in (:inner r)] (assoc r :inner (map-nodes f in)) r)]))))
+               nodes)))
+
+(defn- removal
+  "A node taken out: a declaration with what is under it, any other node with its children left in its place."
+  [n]
+  (if (and (seq (:inner n)) (not (str/ends-with? (str (:kind n)) "Decl"))) (vec (:inner n)) ::remove))
+
+(defn- dissoc-in [m kp]
+  (if (= 1 (count kp)) (dissoc m (first kp)) (update-in m (pop kp) dissoc (peek kp))))
+
+(defn- items-of [nodes ^String src ^String main executed]
+  (try (let [c (convert/convert nodes src main executed)]
+         (if (:refused c) [:refused (str (:refused c))] (mapv layout/form-str (:forms c))))
+       (catch Throwable e [:error (str e)])))
+
+(def ^:private budget 400)
+
+(defn- classify
+  "Each difference with :read true (the forms change when it is applied), false, or :unknown (the budget of
+  conversions was spent)."
+  [diffs cn nn base-c base-n src main cexec nexec]
+  (let [left (atom budget)
+        t0 (System/nanoTime)
+        spent? (fn [] (> (- (System/nanoTime) t0) 120000000000))
+        cache (atom {})
+        try-c (fn [nodes] (if (and (pos? @left) (not (spent?))) (do (swap! left dec) (not= base-c (items-of nodes src main cexec))) :unknown))
+        try-n (fn [nodes] (if (and (pos? @left) (not (spent?))) (do (swap! left dec) (not= base-n (items-of nodes src main nexec))) :unknown))
+        agg (fn [ukey f] (if (contains? @cache ukey) (get @cache ukey) (let [r (f)] (swap! cache assoc ukey r) r)))]
+    ;; the groups first: every unit of a kind of difference at once; when the forms stay, none of its units is read
+    (let [by (group-by :t diffs)
+          kinds (fn [ds] (set (map :kind ds)))
+          dels (fn [ds] (reduce (fn [m d] (update m (:kind d) (fnil conj #{}) (:kp d))) {} ds))
+          del-all (fn [m] (fn [n] (reduce (fn [n kp] (if (get-in n kp) (dissoc-in n kp) n)) n (get m (:kind n)))))
+          rm-all (fn [ks] (fn [n] (if (contains? ks (:kind n)) (removal n) n)))]
+      (when-let [ds (seq (concat (:missing by) (:wrapper by)))]
+        (let [ks (kinds ds)]
+          (when (false? (try-c (map-nodes (rm-all ks) cn))) (doseq [k ks] (swap! cache assoc [:c :rm k] false)))))
+      (when-let [ds (seq (:extra by))]
+        (let [ks (kinds ds)]
+          (when (false? (try-n (map-nodes (rm-all ks) nn))) (doseq [k ks] (swap! cache assoc [:n :rm k] false)))))
+      (when-let [ds (seq (:absent-n by))]
+        (let [m (dels ds)]
+          (when (false? (try-c (map-nodes (del-all m) cn)))
+            (doseq [[k kps] m kp kps] (swap! cache assoc [:c :del k kp] false)))))
+      (when-let [ds (seq (:absent-c by))]
+        (let [m (dels ds)]
+          (when (false? (try-n (map-nodes (del-all m) nn)))
+            (doseq [[k kps] m kp kps] (swap! cache assoc [:n :del k kp] false))))))
+    (mapv
+     (fn [d]
+       (let [k (:kind d) t (:t d) kp (:kp d)
+             r (case t
+                 (:missing :wrapper)
+                 (if (false? (agg [:c :rm k] #(try-c (map-nodes (fn [n] (if (= (:kind n) k) (removal n) n)) cn))))
+                   false
+                   (try-c (upd-path cn (:cpath d) removal)))
+                 :extra
+                 (if (false? (agg [:n :rm k] #(try-n (map-nodes (fn [n] (if (= (:kind n) k) (removal n) n)) nn))))
+                   false
+                   (try-n (upd-path nn (:npath d) removal)))
+                 :absent-n
+                 (if (false? (agg [:c :del k kp] #(try-c (map-nodes (fn [n] (if (and (= (:kind n) k) (get-in n kp)) (dissoc-in n kp) n)) cn))))
+                   false
+                   (try-c (upd-path cn (:cpath d) #(dissoc-in % kp))))
+                 :absent-c
+                 (if (false? (agg [:n :del k kp] #(try-n (map-nodes (fn [n] (if (and (= (:kind n) k) (get-in n kp)) (dissoc-in n kp) n)) nn))))
+                   false
+                   (try-n (upd-path nn (:npath d) #(dissoc-in % kp))))
+                 :value (try-c (upd-path cn (:cpath d) #(assoc-in % kp (:nv d)))))]
+         (assoc d :read r)))
+     diffs)))
+
+;; ---------------------------------------------------------------------------------------------
+;; A file
+
+(defn- show [x] (let [s (pr-str x)] (if (> (count s) 90) (str (subs s 0 87) "...") s)))
+
+(defn- kp-str [kp] (str/join "." (map #(if (keyword? %) (name %) (str "#" %)) kp)))
+
+(defn- unit-of [d]
+  (case (:t d)
+    (:missing :wrapper :extra) (str (name (:t d)) " " (or (:kind d) "-"))
+    (str (name (:t d)) " " (or (:kind d) "-") "." (kp-str (:kp d)))))
+
+(defn- detail [d]
+  (case (:t d)
+    (:missing :wrapper :extra) (str (name (:t d)) " " (:kind d) (when (:impl d) " (implicit)") (when (> (long (:size d)) 1) (str " +" (dec (long (:size d))) " below")))
+    :absent-n (str "native lacks " (kp-str (:kp d)) " = " (show (:cv d)))
+    :absent-c (str "clang lacks " (kp-str (:kp d)) " = " (show (:nv d)))
+    :value (str (kp-str (:kp d)) " clang " (show (:cv d)) " native " (show (:nv d)))))
+
+(def ^:private max-dump 4000000)
+
+(defn compare-file
+  "One file: a map {:name :status :forms :cn :nn :paired :unequal :missing :extra :read :ignored :first :units :text}."
+  [^String work ^String nm ^String std ^String cargs ^String path]
+  (let [dump (str work "/dump/" nm ".edn")
+        st (status (str work "/dump/" nm ".status"))
+        args (vec (remove str/blank? (str/split (or cargs "") #"\s+")))
+        t0 (System/nanoTime)
+        res (fn [s d] {:name nm :status s :detail d})]
+    (try
+      (cond
+        (not= st "0") (res "clang-rejects" (str "cxxdump " st))
+        (> (.length (java.io.File. dump)) max-dump) (res "skipped" (str "the dump is " (quot (.length (java.io.File. dump)) 1000000) " MB: too large for the light tier's memory"))
+        :else
+        (let [[_ cnodes0 cexec] (rc/read-dump dump)
+              u (native/parse-file path nm std args)
+              src (rc/latin1 path)
+              cn (mapv vec-tree cnodes0) nn (mapv vec-tree (:nodes u))
+              base-c (items-of cn src nm cexec)
+              base-n (items-of nn src nm (:executed u))]
+          (if (= :refused (first base-c))
+            (res "clang-refused" (str base-c))
+            (if (= :refused (first base-n))
+              (res "native-refused" (str base-n))
+              (let [{:keys [diffs stats]} (diff-trees cn nn)
+                    cd (classify diffs cn nn base-c base-n src nm cexec (:executed u))
+                    rd (filterv #(true? (:read %)) cd)
+                    unk (filterv #(= :unknown (:read %)) cd)
+                    ig (filterv #(false? (:read %)) cd)
+                    units (reduce (fn [m d] (update m [(unit-of d) (false? (:read d))] (fn [x] (if x (update x :n inc) {:n 1 :first (:path d)})))) {} cd)
+                    text (str "forms " (if (= base-c base-n) "same" "differ") "; clang nodes " (count-nodes cn) ", native " (count-nodes nn)
+                              ", paired " (:paired stats) " (" (:unequal stats) " with a differing field), missing " (:missing stats) ", extra " (:extra stats) "\n"
+                              "READ differences (" (count rd) "):\n"
+                              (str/join (for [d rd] (str "  " (:path d) " :: " (detail d)  "\n")))
+                              "IGNORED differences (" (count ig) "), by unit:\n"
+                              (str/join (for [[[u _] v] (sort-by (fn [[[u _] v]] [(- (long (:n v))) u]) (filter (fn [[[_ ign] _]] ign) units))]
+                                          (str "  " (:n v) "\t" u "\t" (:first v) "\n"))))]
+                (when (or (seq rd) (seq ig) (seq unk)) (spit-mk (str work "/tree/" nm ".txt") text))
+                {:name nm :status (cond (seq rd) "differ" (seq unk) "unknown" :else "same") :forms (if (= base-c base-n) "same" "differ")
+                 :cn (count-nodes cn) :nn (count-nodes nn) :paired (:paired stats) :unequal (:unequal stats)
+                 :missing (:missing stats) :extra (:extra stats) :read (count rd) :unknown (count unk) :ignored (count ig)
+                 :first (when-let [d (first rd)] (str (:path d) " :: " (detail d)))
+                 :units units :declines (or (:declines u) 0) :secs (/ (double (- (System/nanoTime) t0)) 1e9)})))))
+      (catch Throwable e (res "crash" (str/replace (str e) #"[\t\n]" " "))))))
+
+(def known-file "test/repr/cpp/native-tree-known.edn")
+
+(defn run
+  "Every line of LIST (as ncheck's) compared at the tree level: WORK/tree-results.tsv, WORK/tree/NAME.txt, WORK/tree-units.tsv and a
+  summary, judged against the known file (a file with a read difference must be listed with its class). 0 when no file crashed
+  and none fails the judgment."
+  [^String list ^String work]
+  (let [key (some #(second (re-find #"^#list (\S+)" %)) (str/split-lines (slurp list)))
+        corpus (cond (nil? key) "samples" (str/starts-with? key "native-gxx") "gxx-dg" :else key)
+        rows (for [l (str/split-lines (slurp list)) :when (and (seq l) (not (str/starts-with? l "#")))] (str/split l #"\t" -1))
+        threads (Integer/parseInt (or (System/getenv "REPR_CPP_THREADS") "4"))
+        pool (Executors/newFixedThreadPool threads)
+        t0 (System/nanoTime)
+        futs (mapv (fn [[nm std _ path cargs]] (.submit pool ^Callable (fn [] (compare-file work nm std cargs path)))) rows)
+        rs (mapv #(.get ^Future %) futs)
+        _ (.shutdown pool)
+        by (frequencies (map :status rs))
+        ok (filter #(#{"same" "differ"} (:status %)) rs)
+        sum (fn [k] (reduce + 0 (map #(long (or (get % k) 0)) ok)))
+        hidden (filter #(and (= "differ" (:status %)) (= "same" (:forms %))) rs)
+        units (reduce (fn [m r] (reduce (fn [m [k v]] (-> m (update-in [k :n] (fnil + 0) (:n v)) (update-in [k :files] (fnil inc 0)))) m (:units r))) {} ok)]
+    (spit-mk (str work "/tree-results.tsv")
+             (str/join (for [r rs] (str (str/join "\t" [(:name r) (:status r) (or (:forms r) "") (or (:cn r) 0) (or (:nn r) 0) (or (:paired r) 0) (or (:unequal r) 0)
+                                                        (or (:missing r) 0) (or (:extra r) 0) (or (:read r) 0) (or (:ignored r) 0) (format "%.1f" (double (or (:secs r) 0))) (or (:first r) (:detail r) "")]) "\n"))))
+    (spit-mk (str work "/tree-units.tsv")
+             (str/join (for [[[u ign] v] (sort-by (fn [[[u _] v]] [(- (long (:n v))) u]) units)] (str (if ign "ignored" "READ") "\t" (:n v) "\t" (:files v) "\t" u "\n"))))
+    (println (str (count rs) " files: " (pr-str (into (sorted-map) by)) "; clang nodes " (sum :cn) ", native " (sum :nn) ", paired " (sum :paired)
+                  " (" (- (sum :paired) (sum :unequal)) " equal), missing " (sum :missing) ", extra " (sum :extra) "; differences read " (sum :read)
+                  ", ignored " (sum :ignored) "; forms differ in " (count (filter #(= "differ" (:forms %)) ok)) ", tree reads differ with the forms the same in " (count hidden)
+                  "; " (Math/round (double (/ (- (System/nanoTime) t0) 1e9))) " s"))
+    (let [known (let [f (java.io.File. ^String known-file)] (if (.exists f) (read-string (slurp f)) {}))
+          kf (get known :files {})
+          q #(str corpus "/" %)
+          bad (vec (for [r rs :when (and (not (#{"same" "clang-rejects" "skipped"} (:status r))) (not (contains? kf (q (:name r)))))] (str (q (:name r)) " " (:status r))))
+          better (vec (for [r rs :when (and (= "same" (:status r)) (contains? kf (q (:name r))))] (q (:name r))))
+          classes (frequencies (keep #(get kf (q (:name %))) (filter #(= "differ" (:status %)) rs)))]
+      (when (seq classes) (println (str "known: " (pr-str (into (sorted-map) classes)))))
+      (when (seq better) (println (str (count better) " known files now the same: " (str/join " " better))))
+      (when (seq bad) (println (str (count bad) " failing: " (str/join "; " bad))))
+      (if (or (pos? (long (get by "crash" 0))) (seq bad)) 1 0))))
+
+(defn -main [cmd & args]
+  (case cmd
+    "run" (System/exit (int (apply run args)))
+    (do (println "tcheck: run LIST WORK") (System/exit 2))))
