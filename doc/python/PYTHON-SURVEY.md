@@ -995,3 +995,41 @@ PY9c's.
   tokenizer's errors mapped, "'(' was never closed", the generic error's location), `decode_str`'s other errors (an
   unknown or wrong encoding are tokenize's messages so far), the start rules other than `file` untried; then `_ast` and
   `_tokenize` in pyi on the native reader.
+
+## As built: PY9 (errors, pyi; 2026-11-04, the Mac VM, queue 201)
+
+PY9's rest (§5.5, PYS4 (a)): the native parser's syntax errors equal to CPython's, `_ast` and `_tokenize` in pyi on the
+native reader, and `read --reader native` the default.
+
+- **The errors** (`arbace.repr.python.peg`, `native`): `pegen_errors.c` ported: `_PyPegen_run_parser`'s second pass
+  (the memo cleared, the `invalid_` rules on; an error raised in the first pass ends it at once, as `error_indicator`
+  does), `_Pypegen_set_syntax_error` (the generic "invalid syntax" at the first pass's last token, unexpected
+  indent/unindent, the EOF cases), `_PyPegen_tokenize_full_source_to_check_for_errors` (a bracket left open on an
+  earlier line, a later tokenizer error, outside an f-string), `_Pypegen_tokenizer_error` (the done codes the
+  tokenizer sets without raising), `_PyPegen_raise_error` and `_raise_error_known_location` (the error's line from
+  the string tokenizer's buffers, byte offsets made characters as `_PyPegen_byte_offset_to_character_offset` does);
+  pegen.h's `RAISE_*` macros (the generator now passes the parser, pegen.ae) and `action_helpers.c`'s error helpers
+  (`_PyPegen_get_expr_name`, `get_invalid_target`, `arguments_parsing_error`, `nonparen_genexp_in_call`, ...);
+  `string_parser.c`'s decoding errors ("(unicode error) 'unicodeescape' codec ...", "(value error) invalid \x
+  escape ...", bytes' non-ASCII characters, f-string parts at their constant); `decode_str` (the coding specs of the
+  first two lines, BOM conflicts, unknown encodings and strict decoding errors as `_PyPegen_raise_tokenizer_init_error`
+  makes them, UTF-8 checked otherwise; NUL as `_Py_SourceAsString`'s error); the barry_as_FLUFL future (the lexer's
+  `<>`) and `future.c`'s feature check that compile()'s AST preprocessing runs. The lexer reads in the string
+  tokenizer's way for the parser (tok->buf moved only on a line read).
+- **The check**: `parse-check` judges an error by its line (class, message, position, text); the class
+  `:error-message` is gone. A new corpus `syntax-errors`: CPython's own syntax-error cases (`tools/pydump/syntax_cases.py`
+  from the tarball's Lib/test: test_syntax's doctests, the sources test_exceptions', test_fstring's and test_grammar's
+  error checks compile; 874 files). Samples on the VM (aarch64), both modes: lex-errors 62 of 62, syntax-errors 872 of
+  874 (2 `:charset`: cp1251 and iso8859-7 coding specs), Lib/test's rejected files 4 of 4, stdlib 720 and
+  site-packages 921 of 921 with 292 and 284 mutants (seed 26, 150 files' pools), all equal.
+- **pyi** (`arbace.repr.python.astjson`): compile()'s PyCF_ONLY_AST answered from the native tree in
+  `tools/pyi/ast_json.py`'s JSON (literal values decoded, strings' parts folded as `_build_concatenated_str`,
+  Python.asdl's fields, positions and sequences emitted by pegen into parser.ae), the modes exec, eval, single
+  (one statement) and func_type, incomplete input; `_tokenize.TokenizerIter` (go/arbace/py's `builtins_tokenize.go`)
+  over the native lexer through the compiler's mode `tokenize:EXTRA`; pyi's compiler reads with the native reader.
+  `bin/repr-python ast-check` compares the answers with CPython's compile() (`tools/pydump/astdump.py`) byte for
+  byte: samples 6, lex-errors 58, syntax-errors 864, stdlib's and Lib/test's first 150 files (148 UTF-8) all equal.
+  `test/python/pyi/f-ast-tokenize.py` runs equal to CPython. arbace.python.run's change is a REQUEST to PY7-runtime.
+- **Not yet**: `feature_version` (CHECK_VERSION) and optimize > 0 are ignored; a codec other than UTF-8, ASCII and
+  Latin-1 has no strict decoding errors; TokenizerIter reads its readline to the end first; `\N{}` names are the
+  runtime's Unicode data.
