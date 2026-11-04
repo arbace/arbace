@@ -773,7 +773,7 @@
       (check-attr-placement :fn as) (check-attr-values as)
       (when (has-attr? as "builtin") (verr :parser/attr-placement "'builtin' attribute not valid on function")))
     (when (and (not= (norm-type rt) 'void) (some #(has-attr? (param-attrs %) "sret") (remove #{'&} ps)))
-      (verr :parser/sret-return "functions with 'sret' argument must return void" {:at [:tok 1]}))
+      (verr :parser/sret-return "functions with 'sret' argument must return void" {:at [:before-gname]}))
     (doseq [[pi p] (map-indexed vector (remove #{'&} ps)) :let [t (norm-type (first p))]]
       (when (= t 'void) (verr :parser/arg-type "void type only allowed for function results" {:at [:param pi]}))
       (when (= t 'label) (verr :parser/arg-type "invalid type for function argument" {:at [:param pi]})))
@@ -1162,7 +1162,7 @@
           intr-pos (when (and (global? c) (intr/recognized? (global-key c)) d
                               (nil? (try (check-intrinsic-signature (global-key c) (:fty d)) nil (catch arbace.lang.ExceptionInfo e (.getMessage e)))))
                      (get intr/immargs (intr/base-name (global-key c)) #{}))]
-      (doseq [[i a] (map-indexed vector args)]
+      (doseq [[i a] (map-indexed vector args) :when (< i nparams)]
         (let [call-imm? (has-attr? (nth pattrs i) "immarg")
               callee-imm? (if intr-pos (contains? intr-pos i)
                               (boolean (and dps (< i (count dps)) (vector? (nth dps i)) (has-attr? (group-items (param-attrs (nth dps i))) "immarg"))))]
@@ -1558,7 +1558,7 @@
 (def ^:dynamic *inst-locs* {})   ; the DILocations that instructions carry as !dbg
 
 (def ^:private di-type-kinds #{"DIBasicType" "DIDerivedType" "DICompositeType" "DISubroutineType" "DIStringType" "DIFixedPointType" "DISubrangeType"})
-(def ^:private di-file-checked #{"DICompileUnit" "DISubprogram" "DILocalVariable" "DIGlobalVariable" "DICompositeType" "DIDerivedType" "DILexicalBlock"})
+(def ^:private di-file-checked #{"DICompileUnit" "DISubprogram" "DILocalVariable" "DIGlobalVariable" "DICompositeType" "DIDerivedType"})
 
 (defn- check-di-node [id node]
   (let [k (di-kind node) fs (di-fields node)
@@ -1688,7 +1688,13 @@
                                           {} (for [f defs [_ _ & items] (:body (apply hash-map (drop 4 f))) x items
                                                    :let [b (body x)] :when (not (dbg-record? b))
                                                    :let [l (get (apply hash-map (:md (nth (split-inst b) 2))) '!dbg)] :when l] [l f x]))]
-              (doseq [[id n] nodes] (visiting (binding [*ctx* {:md id}] (check-di-node id n)))))
+              (doseq [[id n] nodes]
+                ;; visitDIGlobalVariableExpression checks its variable, which is then visited on its own too
+                (when (= "DIGlobalVariableExpression" (di-kind n))
+                  (let [v (:var (di-fields n))]
+                    (when (and v (some? (get *meta* v)) (= "DIGlobalVariable" (di-kind (get *meta* v))))
+                      (visiting (binding [*ctx* {:md v}] (check-di-node v (get *meta* v)))))))
+                (visiting (binding [*ctx* {:md id}] (check-di-node id n)))))
             (doseq [f forms :when (#{'llvm/define 'llvm/declare} (first f))]
               (let [o (apply hash-map (drop 4 f)) md (apply hash-map (:md o))
                     sp (get md '!dbg) spn (node-of sp)]
@@ -2079,7 +2085,7 @@
       (#{"range" "initializes"} n) [3 n]
       :else [0 (get enum-attr-names n n)])))
 
-(defn- sort-attrs [as] (vec (sort-by attr-sort-key (vec as))))
+(defn- sort-attrs [as] (vec (sort-by attr-sort-key (vals (into (array-map) (map (fn [a] [(attr-str a) a]) as))))))
 
 (defn- sort-arg
   "An argument or parameter [type attr... value] with its attributes in the set's order."
