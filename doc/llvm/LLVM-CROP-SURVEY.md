@@ -529,3 +529,9 @@ The user installed `llvm23` and `llvm23-test-utils` (23.1.4, clang's version): `
 `FileCheck` in `/usr/lib/llvm23/bin` (not on PATH; the host's other LLVM tools are GHC's `llvm15`). The probes above used
 clang 23 for want of them; LL1's pins name `llvm23`'s version beside `clang23`'s, and LLS3/LLS8 can take `opt -verify` and
 `lli` at the pinned version. doc/ALPINE.md lists the line.
+
+## Decided (2026-11-03, the user): LLS17
+
+LLVM IR's GT8 share is half a crop's (about 17 minutes nightly, 1.2 hours clean), carved from C++'s and Rust's shares (their
+checks shrink to the language-specific parts once LLVM checks the shared lowering). The crops are "10+1": ten languages and
+LLVM IR beside them. LLS1-LLS16 wait for after the tag (the user).

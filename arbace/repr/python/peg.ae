@@ -1,0 +1,432 @@
+;; Ported from CPython 3.14.10 (https://www.python.org/ftp/python/3.14.10/Python-3.14.10.tar.xz, SHA-256
+;; de414a57119abef52784d8993e341d53aed635fc2b05c2607d9f98a2c5b72032): Parser/pegen.c (the token buffer, keywords, the memo,
+;; the token functions, lookahead helpers), Parser/action_helpers.c (the grammar's helpers) and the parts of
+;; Parser/string_parser.c the parser's nodes need, Copyright (c) 2001 Python Software Foundation, All Rights Reserved,
+;; under the PSF License Agreement for Python 3.14 (LICENSE.md, "CPython: the PSF License Agreement for Python 3.14").
+
+(ns arbace.repr.python.peg
+  "The runtime of Python's generated parser (arbace.repr.python.parser; doc/python/PYTHON-SURVEY.md, \"As built: PY9b\"):
+  the parser's state over the native lexer, its token buffer (keywords given their types, TYPE_IGNORE comments
+  recorded), the memo (pegen.c), and the grammar's action helpers (action_helpers.c). A node is a map: :t its ast class
+  (:Name, :BinOp, ...), its fields by Parser/Python.asdl's names, and :lineno :col_offset :end_lineno :end_col_offset
+  (UTF-8 columns) when the class has positions. A Constant's :value is :None, :True, :False, :Ellipsis, [:int TEXT],
+  [:float TEXT], [:complex TEXT], [:str] or [:bytes]: the kind of value (the forms keep the spelling, not the value).
+  A token is a map {:type :string :lineno :col_offset :end_lineno :end_col_offset :metadata :level}."
+  (:require [arbace.repr.python.lex :as lex]
+            [arbace.string :as str]))
+
+(set! *warn-on-reflection* true)
+
+(def FAIL (Object.))
+(def CUT (Object.))
+(def MISS (Object.))
+
+(deftype Parser [lx ^java.util.ArrayList toks ^longs st ^java.util.HashMap memo ^java.util.Map keywords
+                 ^java.util.Set soft ^java.util.ArrayList type-ignores ^objects types])
+;; st: [mark fill call-invalid]; types: [an int array of the tokens' types]
+
+(defn parser
+  "A parser over `text` (the string tokenizer's input: new-lines translated, ending in one), with type comments
+  when `type-comments`"
+  ^Parser [^String text keywords soft type-comments]
+  (Parser. (lex/lexer text false type-comments) (java.util.ArrayList.) (long-array 4) (java.util.HashMap.)
+           keywords (set soft) (java.util.ArrayList.) (object-array [(int-array 1024)])))
+
+(defn mark ^long [^Parser p] (aget ^longs (.-st p) 0))
+(defn reset [^Parser p ^long m] (aset ^longs (.-st p) 0 m))
+(defn fill ^long [^Parser p] (aget ^longs (.-st p) 1))
+(defn call-invalid? [^Parser p] (not (zero? (aget ^longs (.-st p) 2))))
+(defn set-call-invalid [^Parser p v] (aset ^longs (.-st p) 2 (long (if v 1 0))))
+(defmacro without-invalid [p & body]
+  `(let [p# ~p prev# (call-invalid? p#)]
+     (set-call-invalid p# false)
+     (try ~@body (finally (set-call-invalid p# prev#)))))
+(defn tokens [^Parser p] (vec (.-toks p)))
+
+(defn syntax-error
+  "Raises the parser's error: an ex-info with :python-error [CLASS MSG L O EL EO]"
+  [cls msg l o el eo]
+  (throw (ex-info (str cls ": " msg) {:python-error [cls msg l o el eo]})))
+
+(defn- fill-token
+  "_PyPegen_fill_token: the next token of the lexer, TYPE_IGNORE comments recorded and skipped, NAME's keywords typed"
+  [^Parser p]
+  (let [lx (.-lx p)]
+    (loop []
+      (let [type (lex/next-token lx)
+            [_ a b line end-line col end-col level meta] (lex/token-fields lx)
+            ^ints cs (.-cs ^arbace.repr.python.lex.Lx lx)
+            s (if (or (neg? a) (neg? b)) "" (String. cs (int a) (int (- b a))))]
+        (cond
+          (== type lex/TYPE_IGNORE)
+          (do (.add ^java.util.ArrayList (.-type-ignores p) [line s]) (recur))
+          (== type lex/ERRORTOKEN)
+          (let [e (or (lex/error-of lx) [:tokenizer "a tokenizer error" line col line end-col])]
+            (throw (ex-info "the tokenizer's error" {:python-error (vec e) :tokenizer true})))
+          :else
+          (let [type (if (== type lex/NAME) (long (or (.get ^java.util.Map (.-keywords p) s) lex/NAME)) type)
+                t {:type type :string s :lineno line :col_offset col :end_lineno end-line :end_col_offset end-col
+                   :metadata meta :level level}
+                n (.size ^java.util.ArrayList (.-toks p))
+                ^ints ty (aget ^objects (.-types p) 0)
+                ^ints ty (if (< n (alength ty))
+                           ty
+                           (let [t2 (java.util.Arrays/copyOf ty (* 2 (alength ty)))] (aset ^objects (.-types p) 0 t2) t2))]
+            (aset ty n (int type))
+            (.add ^java.util.ArrayList (.-toks p) t)
+            (aset ^longs (.-st p) 1 (long (inc n)))))))))
+
+(defn- ensure-token [^Parser p ^long m]
+  (when (== m (aget ^longs (.-st p) 1)) (fill-token p)))
+
+(defn token-at [^Parser p ^long i] (.get ^java.util.ArrayList (.-toks p) (int i)))
+
+(defn expect
+  "_PyPegen_expect_token"
+  [^Parser p ^long type]
+  (let [m (mark p)]
+    (ensure-token p m)
+    (when (== type (aget ^ints (aget ^objects (.-types p) 0) m))
+      (reset p (inc m))
+      (.get ^java.util.ArrayList (.-toks p) (int m)))))
+
+(defn start-token [^Parser p] (let [m (mark p)] (ensure-token p m) (.get ^java.util.ArrayList (.-toks p) (int m))))
+
+(defn last-nonws-token
+  "_PyPegen_get_last_nonnwhitespace_token"
+  [^Parser p]
+  (loop [m (dec (mark p)) tok nil]
+    (if (< m 0)
+      tok
+      (let [t (.get ^java.util.ArrayList (.-toks p) (int m)) ty (long (:type t))]
+        (if (and (not= ty lex/ENDMARKER) (or (< ty lex/NEWLINE) (> ty lex/DEDENT)))
+          t
+          (recur (dec m) t))))))
+
+(defn extra
+  "EXTRA: the start token's start, the last non-white-space token's end"
+  [^Parser p start]
+  (let [e (last-nonws-token p)]
+    {:lineno (:lineno start) :col_offset (:col_offset start) :end_lineno (:end_lineno e) :end_col_offset (:end_col_offset e)}))
+
+(defn extra-expr [a b] {:lineno (:lineno a) :col_offset (:col_offset a) :end_lineno (:end_lineno b) :end_col_offset (:end_col_offset b)})
+(defn pos [l c el ec] {:lineno l :col_offset c :end_lineno el :end_col_offset ec})
+(defn mk [pos m] (into m pos))
+
+(defn kind [x] (or (:kind x) (:t x)))
+(defn truthy? [x] (not (or (nil? x) (false? x) (and (number? x) (zero? (long x))))))
+(defn not? [x] (not (truthy? x)))
+(defn c= [a b] (if (and (number? a) (number? b)) (== (long a) (long b)) (= a b)))
+
+;; ---- the memo (pegen.c)
+
+(defn- memo-key ^long [^long m ^long id] (+ (* m 4096) id))
+
+(defn memoized
+  "_PyPegen_is_memoized: the memoized result (the mark moved to its end), or MISS"
+  [^Parser p ^long id]
+  (let [m (mark p)]
+    (ensure-token p m)
+    (let [^objects e (.get ^java.util.HashMap (.-memo p) (memo-key m id))]
+      (if e
+        (do (reset p (long (aget e 1))) (aget e 0))
+        MISS))))
+
+(defn insert-memo [^Parser p ^long m ^long id res]
+  (.put ^java.util.HashMap (.-memo p) (memo-key m id) (object-array [res (mark p)])))
+
+(defn update-memo [^Parser p ^long m ^long id res] (insert-memo p m id res))
+
+;; ---- tokens as nodes
+
+(defn- nfkc ^String [^String s]
+  (if (every? #(< (int %) 128) s) s (java.text.Normalizer/normalize s java.text.Normalizer$Form/NFKC)))
+
+(defn name-from-token [^Parser p t]
+  (when t
+    (let [id (nfkc (:string t))]
+      (when (#{"None" "True" "False"} id)
+        (throw (ex-info (str "identifier field can't represent '" id "' constant") {:python-error ["ValueError" (str "identifier field can't represent '" id "' constant") nil nil nil nil]})))
+      {:t :Name :id id :ctx :Load :lineno (:lineno t) :col_offset (:col_offset t) :end_lineno (:end_lineno t)
+       :end_col_offset (:end_col_offset t)})))
+
+(defn name-token [^Parser p] (name-from-token p (expect p lex/NAME)))
+(defn string-token [^Parser p] (expect p lex/STRING))
+
+(defn soft-keyword-token [^Parser p]
+  (let [m (mark p) t (expect p lex/NAME)]
+    (when t
+      (if (contains? (.-soft p) (:string t)) (name-from-token p t) nil))))
+
+(defn expect-soft [^Parser p ^String kw]
+  (let [m (mark p)]
+    (ensure-token p m)
+    (let [t (.get ^java.util.ArrayList (.-toks p) (int m))]
+      (when (and (== (long (:type t)) lex/NAME) (= (:string t) kw))
+        (name-token p)))))
+
+(defn number-kind
+  "parsenumber's kind of value: :int, :float or :complex"
+  [^String s]
+  (let [s (str/replace s "_" "")]
+    (cond
+      (or (str/ends-with? s "j") (str/ends-with? s "J")) :complex
+      (re-matches #"0[xX][0-9a-fA-F]+|0[oO][0-7]+|0[bB][01]+|[0-9]+" s) :int
+      :else :float)))
+
+(defn number-token [^Parser p]
+  (when-let [t (expect p lex/NUMBER)]
+    {:t :Constant :value [(number-kind (:string t)) (:string t)] :kind nil :lineno (:lineno t) :col_offset (:col_offset t)
+     :end_lineno (:end_lineno t) :end_col_offset (:end_col_offset t)}))
+
+(defn expect-forced [^Parser p ^long type ^String expected]
+  (or (expect p type)
+      (let [t (start-token p)]
+        (syntax-error "SyntaxError" (str "expected " expected) (:lineno t) (:col_offset t) (:end_lineno t) (:end_col_offset t)))))
+
+(defn expect-forced-result [^Parser p result ^String expected]
+  (or result (let [t (start-token p)] (syntax-error "SyntaxError" (str "expected (" expected ")") (:lineno t) (:col_offset t) nil nil))))
+
+(def ^:private the-dummy {:t :Name :id "" :ctx :Load :lineno 1 :col_offset 0 :end_lineno 1 :end_col_offset 0 :dummy true})
+(defn dummy-name [& _] the-dummy)
+
+;; ---- sequences (action_helpers.c)
+
+(defn singleton-seq [p a] [a])
+(defn seq-insert-in-front [p a s] (if s (into [a] s) [a]))
+(defn seq-append-to-end [p s a] (if s (conj (vec s) a) [a]))
+(defn seq-flatten [p seqs] (vec (mapcat identity seqs)))
+(defn join-sequences [p a b] (into (vec a) b))
+
+(defn join-names-with-dot [p a b]
+  (into {:t :Name :id (str (:id a) "." (:id b)) :ctx :Load} (extra-expr a b)))
+
+(defn seq-count-dots [s] (reduce + (map #(if (== (long (:type %)) lex/ELLIPSIS) 3 1) s)))
+
+(defn alias-for-star [p ex] (into {:t :alias :name "*" :asname nil} ex))
+
+(defn map-names-to-ids [p s] (mapv :id s))
+(defn cmpop-expr-pair [p op e] {:cmpop op :expr e})
+(defn get-cmpops [p s] (mapv :cmpop s))
+(defn get-exprs [p s] (mapv :expr s))
+
+(declare set-expr-context)
+(defn- set-seq-context [p s ctx] (when (seq s) (mapv #(set-expr-context p % ctx) s)))
+
+(defn set-expr-context
+  "_PyPegen_set_expr_context: a copy of `e` (a Name, Tuple, List, Subscript, Attribute or Starred) with `ctx`"
+  [p e ctx]
+  (case (:t e)
+    :Name (assoc e :ctx ctx)
+    (:Tuple :List) (assoc e :elts (set-seq-context p (:elts e) ctx) :ctx ctx)
+    (:Subscript :Attribute) (assoc e :ctx ctx)
+    :Starred (assoc e :value (set-expr-context p (:value e) ctx) :ctx ctx)
+    e))
+
+(defn key-value-pair [p k v] {:key k :value v})
+(defn get-keys [p s] (mapv :key s))
+(defn get-values [p s] (mapv :value s))
+(defn key-pattern-pair [p k pat] {:key k :pattern pat})
+(defn get-pattern-keys [p s] (mapv :key s))
+(defn get-patterns [p s] (mapv :pattern s))
+
+(defn new-type-comment [p t] (when t (:string t)))
+
+(defn add-type-comment-to-arg [p a tc]
+  (if (nil? tc) a (assoc a :type_comment (:string tc))))
+
+(defn name-default-pair [p arg value tc] {:arg (add-type-comment-to-arg p arg tc) :value value})
+(defn slash-with-default [p plain with-defaults] {:plain_names plain :names_with_defaults with-defaults})
+(defn star-etc [p vararg kwonly kwarg] {:vararg vararg :kwonlyargs kwonly :kwarg kwarg})
+
+(defn make-arguments
+  "_PyPegen_make_arguments"
+  [p slash-without slash-with plain-names names-with-default star-etc]
+  (let [names (fn [s] (mapv :arg s))
+        defaults (fn [s] (mapv :value s))
+        posonly (cond slash-without slash-without
+                      slash-with (into (vec (:plain_names slash-with)) (names (:names_with_defaults slash-with)))
+                      :else [])
+        posargs (cond (and names-with-default plain-names) (into (vec plain-names) (names names-with-default))
+                      names-with-default (names names-with-default)
+                      plain-names plain-names
+                      :else [])
+        posdefaults (cond (and slash-with names-with-default) (into (defaults (:names_with_defaults slash-with)) (defaults names-with-default))
+                          names-with-default (defaults names-with-default)
+                          slash-with (defaults (:names_with_defaults slash-with))
+                          :else [])
+        kwonly (if (and star-etc (:kwonlyargs star-etc)) (names (:kwonlyargs star-etc)) [])
+        kwdefaults (if (and star-etc (:kwonlyargs star-etc)) (defaults (:kwonlyargs star-etc)) [])]
+    {:t :arguments :posonlyargs posonly :args posargs :vararg (:vararg star-etc) :kwonlyargs kwonly
+     :kw_defaults kwdefaults :kwarg (:kwarg star-etc) :defaults posdefaults}))
+
+(defn empty-arguments [p]
+  {:t :arguments :posonlyargs [] :args [] :vararg nil :kwonlyargs [] :kw_defaults [] :kwarg nil :defaults []})
+
+(defn augoperator [p op] {:kind op})
+
+(defn function-def-decorators [p decorators f] (assoc f :decorator_list decorators))
+(defn class-def-decorators [p decorators c] (assoc c :decorator_list decorators))
+
+(defn keyword-or-starred [p element is-keyword] {:element element :is_keyword is-keyword})
+
+(defn seq-extract-starred-exprs [p kwargs]
+  (let [s (vec (for [k kwargs :when (not (truthy? (:is_keyword k)))] (:element k)))] (when (seq s) s)))
+(defn seq-delete-starred-exprs [p kwargs]
+  (let [s (vec (for [k kwargs :when (truthy? (:is_keyword k))] (:element k)))] (when (seq s) s)))
+
+(defn collect-call-seqs [p a b ex]
+  (if (nil? b)
+    (into {:t :Call :func (dummy-name p) :args a :keywords nil} ex)
+    (into {:t :Call :func (dummy-name p) :args (into (vec a) (seq-extract-starred-exprs p b))
+           :keywords (seq-delete-starred-exprs p b)} ex)))
+
+(defn ensure-imaginary [p e]
+  (if (and (= :Constant (:t e)) (vector? (:value e)) (= :complex (first (:value e))))
+    e
+    (syntax-error "SyntaxError" "imaginary number required in complex literal" (:lineno e) (inc (long (:col_offset e))) (:end_lineno e) (inc (long (:end_col_offset e))))))
+
+(defn ensure-real [p e]
+  (if (and (= :Constant (:t e)) (not (and (vector? (:value e)) (= :complex (first (:value e))))))
+    e
+    (syntax-error "SyntaxError" "real number required in complex literal" (:lineno e) (inc (long (:col_offset e))) (:end_lineno e) (inc (long (:end_col_offset e))))))
+
+(defn make-module [^Parser p a]
+  {:t :Module :body (or a []) :type_ignores (vec (for [[l tag] (.-type-ignores p)] {:t :TypeIgnore :lineno l :tag tag}))})
+
+(defn register-stmts [p s] s)
+(defn interactive-exit [p] nil)
+
+(defn checked-future-import [p module names level ex]
+  (into {:t :ImportFrom :module module :names names :level level} ex))
+
+(defn check-barry-as-flufl [p t] (if (= (:string t) "!=") 0 1))
+(defn tokens-are-adjacent [a b] (and (c= (:end_lineno a) (:lineno b)) (c= (:end_col_offset a) (:col_offset b))))
+(defn check-legacy-stmt [p name] (and (= :Name (:t name)) (contains? #{"print" "exec"} (:id name))))
+
+;; ---- strings (action_helpers.c's f-string and concatenation helpers; the values' kinds only)
+
+(defn- string-prefix ^String [^String s] (let [m (re-find #"^[A-Za-z]*" s)] m))
+
+(defn constant-from-string [p t]
+  (let [pre (str/lower-case (string-prefix (:string t)))]
+    {:t :Constant :value (if (str/includes? pre "b") [:bytes] [:str]) :kind (when (str/starts-with? (:string t) "u") "u")
+     :lineno (:lineno t) :col_offset (:col_offset t) :end_lineno (:end_lineno t) :end_col_offset (:end_col_offset t)}))
+
+(defn constant-from-token [p t]
+  {:t :Constant :value [:str] :kind nil :lineno (:lineno t) :col_offset (:col_offset t) :end_lineno (:end_lineno t)
+   :end_col_offset (:end_col_offset t)})
+
+(defn decoded-constant-from-token [p t] (constant-from-token p t))
+
+(defn- flat-values
+  "_get_resized_exprs: a debug field's [Constant, FormattedValue] pair spliced in"
+  [raw]
+  (vec (mapcat (fn [x] (if (and (= :JoinedStr (:t x)) (:debug-pair x)) (:values x) [x])) raw)))
+
+(defn joined-str [p a raw b]
+  {:t :JoinedStr :values (flat-values raw) :lineno (:lineno a) :col_offset (:col_offset a) :end_lineno (:end_lineno b)
+   :end_col_offset (:end_col_offset b)})
+
+(defn template-str [p a raw b]
+  {:t :TemplateStr :values (flat-values raw) :lineno (:lineno a) :col_offset (:col_offset a) :end_lineno (:end_lineno b)
+   :end_col_offset (:end_col_offset b)})
+
+(defn concatenate-strings [p strings ex]
+  (let [kinds (map (fn [e] (case (:t e) :Constant (if (= :bytes (first (:value e))) :bytes :str) :f)) strings)
+        bytes (some #{:bytes} kinds)]
+    (when (and bytes (some #{:str :f} kinds))
+      (syntax-error "SyntaxError" "cannot mix bytes and nonbytes literals" (:lineno ex) (inc (long (:col_offset ex))) (:end_lineno ex) (inc (long (:end_col_offset ex)))))
+    (cond
+      (not (some #{:f} kinds)) (if (= 1 (count strings))
+                                 (first strings)
+                                 (into {:t :Constant :value (if bytes [:bytes] [:str]) :kind (:kind (first strings))} ex))
+      :else (into {:t :JoinedStr :values (vec (mapcat #(if (= :JoinedStr (:t %)) (:values %) [%]) strings))} ex))))
+
+(defn concatenate-tstrings [p strings ex]
+  (into {:t :TemplateStr :values (vec (mapcat #(if (#{:JoinedStr :TemplateStr} (:t %)) (:values %) [%]) strings))} ex))
+
+(defn check-fstring-conversion [p conv-token conv]
+  (when (or (not (c= (:lineno conv-token) (:lineno conv))) (not (c= (:end_col_offset conv-token) (:col_offset conv))))
+    (syntax-error "SyntaxError" "f-string: conversion type must come right after the exclamation mark"
+                  (:lineno conv-token) (inc (long (:col_offset conv-token))) (:end_lineno conv) (inc (long (:end_col_offset conv)))))
+  (let [id (:id conv)]
+    (when (or (> (count id) 1) (not (#{"s" "r" "a"} id)))
+      (syntax-error "SyntaxError" (str "f-string: invalid conversion character '" id "': expected 's', 'r', or 'a'")
+                    (:lineno conv) (inc (long (:col_offset conv))) (:end_lineno conv) (inc (long (:end_col_offset conv))))))
+  {:result conv :metadata (:metadata conv-token)})
+
+(defn setup-full-format-spec [p colon spec ex]
+  (let [spec (vec (remove #(and (= :Constant (:t %)) (= [:str] (:value %)) (:empty %)) spec))
+        res (if (or (empty? spec) (and (= 1 (count spec)) (= :Constant (:t (first spec)))))
+              (into {:t :JoinedStr :values spec} ex)
+              (concatenate-strings p spec ex))]
+    {:result res :metadata (:metadata colon)}))
+
+(defn- conversion-val [debug conversion format]
+  (cond
+    conversion (long (int (.charAt ^String (:id (:result conversion)) 0)))
+    (and debug (not format)) 114
+    :else -1))
+
+(defn- debug-end [conversion format ex closing]
+  (cond
+    conversion [(:lineno (:result conversion)) (:col_offset (:result conversion)) (:metadata conversion)]
+    format [(:lineno (:result format)) (inc (long (:col_offset (:result format)))) (:metadata format)]
+    :else [(:end_lineno ex) (:end_col_offset ex) (:metadata closing)]))
+
+(defn- strip-debug-expr
+  "_strip_interpolation_debug_expr"
+  [^String s]
+  (let [len (long (loop [len (count s)]
+              (let [[len nl] (loop [len len nl false]
+                               (if (and (pos? len) (Character/isWhitespace (.charAt s (dec len))))
+                                 (recur (dec len) (or nl (#{\return \newline} (.charAt s (dec len)))))
+                                 [len nl]))]
+                (if (or (not nl) (zero? len) (not= (.charAt s (dec len)) \\))
+                  len
+                  (recur (dec (long len)))))))]
+    (if (or (zero? len) (not= (.charAt s (dec len)) \=)) s (subs s 0 (dec len)))))
+
+(defn- with-debug [p node debug conversion format closing ex]
+  (if-not debug
+    node
+    (let [[del deo meta] (debug-end conversion format ex closing)
+          text {:t :Constant :value [:str] :kind nil :lineno (:lineno ex) :col_offset (inc (long (:col_offset ex)))
+                :end_lineno del :end_col_offset (dec (long deo)) :debug-text meta}]
+      {:t :JoinedStr :values [text node] :debug-pair true :lineno (:lineno ex) :col_offset (:col_offset ex)
+       :end_lineno del :end_col_offset deo})))
+
+(defn formatted-value [p expression debug conversion format closing ex]
+  (with-debug p (into {:t :FormattedValue :value expression :conversion (conversion-val debug conversion format)
+                       :format_spec (:result format)} ex)
+    debug conversion format closing ex))
+
+(defn interpolation [p expression debug conversion format closing ex]
+  (let [exprstr (cond conversion (:metadata conversion) format (:metadata format) :else (:metadata closing))
+        s (if debug (strip-debug-expr exprstr) exprstr)]
+    (with-debug p (into {:t :Interpolation :value expression :str s :conversion (conversion-val debug conversion format)
+                         :format_spec (:result format)} ex)
+      debug conversion format closing ex)))
+
+;; ---- the error helpers (the invalid_ rules, the second pass: PY9c's)
+
+(defn PyErr-Occurred [& _] false)
+(defn- pending
+  "An error helper of the grammar not ported yet (PY9c's): the file is rejected with a placeholder message, so that it
+  is judged as a rejection whose message is not CPython's"
+  [what]
+  (fn [& _] (throw (ex-info (str what ": PY9c's") {:python-error ["SyntaxError" (str what " (PY9c's)") nil nil nil nil] :pending true}))))
+(def RAISE-ERROR-KNOWN-LOCATION (pending "RAISE_ERROR_KNOWN_LOCATION"))
+(def RAISE-INDENTATION-ERROR (pending "RAISE_INDENTATION_ERROR"))
+(def RAISE-SYNTAX-ERROR (pending "RAISE_SYNTAX_ERROR"))
+(def RAISE-SYNTAX-ERROR-INVALID-TARGET (pending "RAISE_SYNTAX_ERROR_INVALID_TARGET"))
+(def RAISE-SYNTAX-ERROR-KNOWN-LOCATION (pending "RAISE_SYNTAX_ERROR_KNOWN_LOCATION"))
+(def RAISE-SYNTAX-ERROR-KNOWN-RANGE (pending "RAISE_SYNTAX_ERROR_KNOWN_RANGE"))
+(def RAISE-SYNTAX-ERROR-ON-NEXT-TOKEN (pending "RAISE_SYNTAX_ERROR_ON_NEXT_TOKEN"))
+(def RAISE-SYNTAX-ERROR-STARTING-FROM (pending "RAISE_SYNTAX_ERROR_STARTING_FROM"))
+(def arguments-parsing-error (pending "_PyPegen_arguments_parsing_error"))
+(def get-expr-name (pending "_PyPegen_get_expr_name"))
+(def get-last-comprehension-item (pending "_PyPegen_get_last_comprehension_item"))
+(def nonparen-genexp-in-call (pending "_PyPegen_nonparen_genexp_in_call"))
+(defn token-string [t] (:string t))

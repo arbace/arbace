@@ -182,6 +182,16 @@ covers what.
   `de414a57119abef52784d8993e341d53aed635fc2b05c2607d9f98a2c5b72032`), by hand on 2026-11-03: Copyright (c) 2001 Python
   Software Foundation, All Rights Reserved, under the PSF License Agreement for Python 3.14 (text below, the tarball's
   `LICENSE` whole). `arbace/python.ae` and the rest of `arbace/python/` are Arbace's own, under the Eclipse Public License 1.0.
+- `arbace/repr/python/lex.ae` (repr/python's native lexer; doc/python/PYTHON-SURVEY.md, "As built: PY9a"): a port to Arbace
+  of CPython 3.14.10's C tokenizer, `Parser/lexer/lexer.c` and `state.c`, the errors of `Parser/tokenizer/helpers.c`,
+  `Parser/tokenizer/readline_tokenizer.c`'s underflow, `Python/Python-tokenize.c`'s iterator and `Lib/tokenize.py`'s
+  `detect_encoding`, from the same release tarball, by hand on 2026-11-03: Copyright (c) 2001 Python Software Foundation,
+  All Rights Reserved, under the PSF License Agreement for Python 3.14 (text below). Likewise since PY9b ("As built: PY9b"):
+  `arbace/repr/python/pegen.ae` (a port of `Tools/peg_generator/pegen`'s metagrammar, `grammar.py`, `parser_generator.py`,
+  `sccutils.py` and `c_generator.py`'s code shapes), `arbace/repr/python/peg.ae` (of `Parser/pegen.c` and
+  `Parser/action_helpers.c`) and `arbace/repr/python/parser.ae` (generated from `Grammar/python.gram`, its actions
+  translated), from the same tarball. The rest of `arbace/repr/python/` and `tools/pydump/` are Arbace's own, under the
+  Eclipse Public License 1.0.
 - `go/arbace/oi.ae` and `go/arbace/oi/` (oi, the interpreter of OCaml's Lambda; doc/ocaml/OCAML-SURVEY.md, "As
   built: O5 (write-ahead)"): the interpreter's core (values, the compiler of Lambda, application, exceptions,
   effects, the toplevel) is Arbace's own, under the Eclipse Public License 1.0; the externals are ports to Go
