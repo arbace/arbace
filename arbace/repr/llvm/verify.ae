@@ -25,13 +25,29 @@
   is the reader's error, not this namespace's."
   (:require [arbace.repr.llvm.read :as rd]
             [arbace.repr.llvm.print :as pr]
+            [arbace.repr.llvm.diag :as diag]
             [arbace.repr.llvm.intr :as intr]
             [arbace.string :as str])
   (:import [java.util.concurrent Executors Callable Future]))
 
 (set! *warn-on-reflection* true)
 
-(defn- verr [rule msg] (throw (ex-info msg {:llvm/verify rule})))
+(def ^:dynamic *ctx* nil)   ; where a check runs: {:fn F :bb LABEL :inst X} (the Verifier), {:form I :item K} (the parser)
+(def ^:dynamic ^java.util.List *errs* nil)   ; the Verifier's errors, in order (it goes on after a failed visit)
+
+(defn- verr
+  "Throws the check's failure: its rule, LLVM's message, and what the message prints after it (the culprits: strings,
+  :inst the instruction visited, :fn the function as `ptr @f`, :bb its block, or a form of the module) and, for a
+  parser error, a map {:at HINT} (arbace.repr.llvm.diag's hints) naming the token it is reported at."
+  [rule msg & more]
+  (throw (ex-info msg {:llvm/verify rule :ctx *ctx* :culprits (vec (remove map? more)) :opts (apply merge (filter map? more))})))
+
+(defmacro ^:private visiting
+  "Runs body as one of the Verifier's visits: a failed check is recorded, the visit ends and the next one goes on."
+  [& body]
+  `(try (do ~@body)
+        (catch arbace.lang.ExceptionInfo e#
+          (if (:llvm/verify (ex-data e#)) (.add *errs* e#) (throw e#)))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Types
@@ -302,15 +318,17 @@
 (defn- not-on-ret? [n] (and (not (contains? ret-ok n)) (or (contains? fn-only n) (contains? param-only n) (contains? fn-and-param n))))
 (defn- not-on-param? [n] (contains? fn-only n))
 
+(def ^:dynamic *fn-attr-at* nil)
+
 (defn- check-attr-placement
   "LLParser: `ret`/`param`/`fn` attributes written where Attributes.td does not allow them (the parser's, with its
   message). `captures(none)` (nocapture) on a return value is the Verifier's."
   [kind attrs]
   (doseq [a attrs :let [n (aname a)] :when n]
     (case kind
-      :fn (when (and (not= n "align") (not-on-fn? n)) (verr :parser/attr-placement "this attribute does not apply to functions"))
-      :ret (when (and (not (and (= n "captures") (keyword? a))) (not-on-ret? n)) (verr :parser/attr-placement "this attribute does not apply to return values"))
-      :param (when (not-on-param? n) (verr :parser/attr-placement "this attribute does not apply to parameters")))))
+      :fn (when (and (not= n "align") (not-on-fn? n)) (verr :parser/attr-placement "this attribute does not apply to functions" {:at (or *fn-attr-at* [:find n])}))
+      :ret (when (and (not (and (= n "captures") (keyword? a))) (not-on-ret? n)) (verr :parser/attr-placement "this attribute does not apply to return values" {:at [:find n]}))
+      :param (when (not-on-param? n) (verr :parser/attr-placement "this attribute does not apply to parameters" {:at [:find n]})))))
 
 (defn- check-attr-values
   "LLParser's checks of an attribute's argument."
@@ -319,26 +337,26 @@
     (let [n (aname a) v (second a)]
       (case n
         ("dereferenceable" "dereferenceable_or_null")
-        (when (and (string? v) (re-matches #"[0-9]+" v) (zero? (Long/parseLong v))) (verr :parser/attr-value "byte count specified must be non-zero"))
+        (when (and (string? v) (re-matches #"[0-9]+" v) (zero? (Long/parseLong v))) (verr :parser/attr-value "byte count specified must be non-zero" {:at [:attr-val n]}))
         "alignstack"
         (when-let [k (and (string? v) (re-matches #"[0-9]+" v) (Long/parseLong v))]
-          (when-not (and (pos? k) (zero? (bit-and k (dec k)))) (verr :parser/attr-value "stack alignment is not a power of two")))
+          (when-not (and (pos? k) (zero? (bit-and k (dec k)))) (verr :parser/attr-value "stack alignment is not a power of two" {:at [:attr-val n]})))
         "align"
-        (when (and (integer? v) (pos? v) (not (zero? (bit-and (long v) (dec (long v)))))) (verr :parser/align "alignment is not a power of two"))
+        (when (and (integer? v) (pos? v) (not (zero? (bit-and (long v) (dec (long v)))))) (verr :parser/align "alignment is not a power of two" {:at [:attr-val n]}))
         "initializes"
         (let [nums (when (string? v) (mapv #(Long/parseLong %) (re-seq #"-?[0-9]+" v)))
               prs (when nums (partition 2 nums))]
           (when (and prs (not (and (every? (fn [[lo hi]] (< lo hi)) prs)
                                    (every? (fn [[[_ a] [b _]]] (< a b)) (partition 2 1 prs)))))
-            (verr :parser/attr-value "Invalid (unordered or overlapping) range list")))
+            (verr :parser/attr-value "Invalid (unordered or overlapping) range list" {:at [:attr-after n]})))
         ("byval" "sret" "byref" "inalloca" "preallocated" "elementtype")
-        (when (= (norm-type v) 'void) (verr :parser/attr-value "void type only allowed for function results"))
+        (when (= (norm-type v) 'void) (verr :parser/attr-value "void type only allowed for function results" {:at [:find-last "void"]}))
         "nofpclass"
-        (when (and (string? v) (= (str/trim v) "0")) (verr :parser/attr-value "invalid mask value for 'nofpclass'"))
+        (when (and (string? v) (= (str/trim v) "0")) (verr :parser/attr-value "invalid mask value for 'nofpclass'" {:at [:attr-close n]}))
         "allockind"
         (doseq [w (str/split (str/replace (str v) "\"" "") #",")]
           (when-not (contains? #{"alloc" "realloc" "free" "uninitialized" "zeroed" "aligned"} (str/trim w))
-            (verr :parser/attr-value (str "unknown allockind " (str/trim w)))))
+            (verr :parser/attr-value (str "unknown allockind " (str/trim w)) {:at [:attr-val n]})))
         nil))))
 
 (defn- ptr-scalar? [t] (ptr-type? t))
@@ -496,8 +514,8 @@
 (defn- check-align [a]
   (when (some? a)
     (when-not (and (integer? a) (pos? a) (zero? (bit-and (long a) (dec (long a)))))
-      (verr :parser/align "alignment is not a power of two"))
-    (when (> (long a) 4294967296) (verr :parser/align "huge alignments are not supported yet"))))
+      (verr :parser/align "alignment is not a power of two" {:at [:attr-val "align"]}))
+    (when (> (long a) 4294967296) (verr :parser/align "huge alignments are not supported yet" {:at [:attr-val "align"]}))))
 
 (declare use-value check-di-parse node-of di-kind)
 
@@ -507,7 +525,7 @@
     (walk x)))
 
 (defn- use-global [^Fn st x t]
-  (when-not (ptr-type? t) (verr :parser/global-type "global variable reference must have pointer type"))
+  (when-not (ptr-type? t) (verr :parser/global-type "global variable reference must have pointer type" {:at [:val {:text (pr/value-str x)}]}))
   (let [k (global-key x)]
     (when-not (.containsKey *gdefs* k) (.put *gfwd* k true))))
 
@@ -518,19 +536,19 @@
         f (.get ^java.util.Map (.fwd st) k)
         have (or d f)]
     (cond
-      (and have (= t 'label) (not= have 'label)) (verr :parser/not-a-block (str shown " is not a basic block"))
-      (and have (not= have t)) (verr :parser/value-type (str shown " defined with type '" (tstr have) "' but expected '" (tstr t) "'"))
+      (and have (= t 'label) (not= have 'label)) (verr :parser/not-a-block (str shown " is not a basic block") {:at [:use (str "%" k)]})
+      (and have (not= have t)) (verr :parser/value-type (str shown " defined with type '" (tstr have) "' but expected '" (tstr t) "'") {:at [:use (str "%" k)]})
       have nil
       :else (.put ^java.util.Map (.fwd st) k t))))
 
 (defn- use-const [st v t]
   (cond
     (or (integer? v) (and (seq? v) (= (first v) 'int)))
-    (when-not (int-type? t) (verr :parser/int-constant "integer/byte constant must have integer/byte type"))
+    (when-not (int-type? t) (verr :parser/int-constant "integer/byte constant must have integer/byte type" {:at [:val {:text (pr/value-str v)}]}))
     (and (seq? v) (= (first v) 'fp))
-    (when-not (fp-type? t) (verr :parser/fp-constant "floating-point constant invalid for type"))
-    (boolean? v) (when-not (= t 'i1) (verr :parser/constant-type (str "constant expression type mismatch: got type 'i1' but expected '" (tstr t) "'")))
-    (= v 'null) (when-not (ptr-type? t) (verr :parser/null "null must be a pointer type"))
+    (when-not (fp-type? t) (verr :parser/fp-constant "floating-point constant invalid for type" {:at [:val {:text (pr/value-str v) :fp true}]}))
+    (boolean? v) (when-not (= t 'i1) (verr :parser/constant-type (str "constant expression type mismatch: got type 'i1' but expected '" (tstr t) "'") {:at [:val {:text (pr/value-str v)}]}))
+    (= v 'null) (when-not (ptr-type? t) (verr :parser/null "null must be a pointer type" {:at [:val {:text "null"}]}))
     (seq? v) (let [h (first v)]
                (cond
                  ('#{struct packed array vector} h) (doseq [e (rest v)] (when (vector? e) (use-value st (second e) (norm-type (first e)))))
@@ -559,18 +577,18 @@
       (let [nxt (aget ^longs (.next ^Fn st) 0)
             n (if k (Long/parseLong k) nxt)]
         (when (< n nxt)
-          (verr :parser/numbering (str kind " expected to be numbered '" (when-not (= kind "label") "%") nxt "' or greater")))
+          (verr :parser/numbering (str kind " expected to be numbered '" (when-not (= kind "label") "%") nxt "' or greater") {:at (if (= kind "argument") [:find-last (str "%" k)] [:tok 0])}))
         (let [ks (str n) f (.get ^java.util.Map (.fwd st) ks)]
           (when (and f (not= f t))
-            (verr :parser/forward-type (if (= t 'label) (str "'%" ks "' is not a basic block") (str kind " forward referenced with type '" (tstr f) "'"))))
+            (verr :parser/forward-type (if (= t 'label) (str "'%" ks "' is not a basic block") (str kind " forward referenced with type '" (tstr f) "'")) {:at [:tok 0]}))
           (.remove ^java.util.Map (.fwd st) ks)
           (.put ^java.util.Map (.vals st) ks t)
           (aset ^longs (.next st) 0 (inc n))))
       (let [f (.get ^java.util.Map (.fwd st) k)]
         (when (and f (not= f t))
-          (verr :parser/forward-type (if (= t 'label) (str "'%" k "' is not a basic block") (str kind " forward referenced with type '" (tstr f) "'"))))
+          (verr :parser/forward-type (if (= t 'label) (str "'%" k "' is not a basic block") (str kind " forward referenced with type '" (tstr f) "'")) {:at [:tok 0]}))
         (when (and (.containsKey ^java.util.Map (.vals st) k) (not= t 'label))
-          (verr :parser/redefinition (str "multiple definition of local value named '" k "'")))
+          (verr :parser/redefinition (str "multiple definition of local value named '" k "'") {:at (if (= kind "argument") [:find-last (str "%" k)] [:tok 0])}))
         (.remove ^java.util.Map (.fwd st) k)
         (.put ^java.util.Map (.vals st) k t)))))
 
@@ -581,30 +599,30 @@
         ps* (strip-flags ps)]
     (cond
       (bin-ops h) (let [t (norm-type (first ps*))]
-                    (when-not (if (fp-ops h) (fp-ish? t) (int-ish? t)) (verr :parser/operand-type "invalid operand type for instruction")))
-      (= h 'fneg) (when-not (fp-ish? (norm-type (first ps*))) (verr :parser/operand-type "invalid operand type for instruction"))
+                    (when-not (if (fp-ops h) (fp-ish? t) (int-ish? t)) (verr :parser/operand-type "invalid operand type for instruction" {:at [:ty]})))
+      (= h 'fneg) (when-not (fp-ish? (norm-type (first ps*))) (verr :parser/operand-type "invalid operand type for instruction" {:at [:ty]}))
       (= h 'icmp) (let [t (norm-type (first (drop-while keyword? ps)))]
-                    (when-not (or (int-ish? t) (ptr-ish? t)) (verr :parser/icmp "icmp requires integer operands")))
+                    (when-not (or (int-ish? t) (ptr-ish? t)) (verr :parser/icmp "icmp requires integer operands" {:at [:body 2]})))
       (= h 'fcmp) (let [t (norm-type (first (drop-while keyword? ps)))]
-                    (when-not (fp-ish? t) (verr :parser/fcmp "fcmp requires floating point operands")))
+                    (when-not (fp-ish? t) (verr :parser/fcmp "fcmp requires floating point operands" {:at [:body 2]})))
       (cast-ops h) (let [[t _ t2] ps* a (norm-type t) c (norm-type t2)]
                      (when-not (cast-valid? h a c)
-                       (verr :parser/cast (str "invalid cast opcode for cast from '" (tstr a) "' to '" (tstr c) "'"))))
+                       (verr :parser/cast (str "invalid cast opcode for cast from '" (tstr a) "' to '" (tstr c) "'") {:at [:ty]})))
       (= h 'catchpad) (when (= (first ps) 'none) (verr :parser/syntax "expected scope value for catchpad"))
       (= h 'alloca) (check-align (:align o))
-      (= h 'load) (do (when-not (ptr-type? (norm-type (first (second ps)))) (verr :parser/load "load operand must be a pointer to a first class type"))
+      (= h 'load) (do (when-not (ptr-type? (norm-type (first (second ps)))) (verr :parser/load "load operand must be a pointer to a first class type" {:at [:op 1]}))
                       (when (and (:atomic o) (nil? (:align o))) (verr :parser/atomic-align "atomic load must have explicit non-zero alignment"))
                       (check-align (:align o)))
-      (= h 'store) (do (when-not (ptr-type? (norm-type (first (second ps)))) (verr :parser/store "store operand must be a pointer"))
-                       (when-not (first-class? (norm-type (first (first ps)))) (verr :parser/store "store operand must be a first class value"))
+      (= h 'store) (do (when-not (ptr-type? (norm-type (first (second ps)))) (verr :parser/store "store operand must be a pointer" {:at [:op 1]}))
+                       (when-not (first-class? (norm-type (first (first ps)))) (verr :parser/store "store operand must be a first class value" {:at [:ty]}))
                        (when (and (:atomic o) (nil? (:align o))) (verr :parser/atomic-align "atomic store must have explicit non-zero alignment"))
                        (check-align (:align o)))
-      (= h 'getelementptr) (when-not (ptr-ish? (norm-type (first (second ps*)))) (verr :parser/gep "base of getelementptr must be a pointer"))
-      (= h 'phi) (when-not (first-class? (norm-type (first ps*))) (verr :parser/phi "phi node must have first class type"))
+      (= h 'getelementptr) (when-not (ptr-ish? (norm-type (first (second ps*)))) (verr :parser/gep "base of getelementptr must be a pointer" {:at [:op 1]}))
+      (= h 'phi) (when-not (first-class? (norm-type (first ps*))) (verr :parser/phi "phi node must have first class type" {:at [:ty]}))
       (= h 'select) (let [[[ct] [at] [bt]] ps* ct (norm-type ct)]
                       (cond
-                        (not (or (= ct 'i1) (and (vec-type? ct) (= (elem ct) 'i1)))) (verr :parser/select "select condition must be i1 or <n x i1>")
-                        (not= (norm-type at) (norm-type bt)) (verr :parser/select "both values to select must have same type")))
+                        (not (or (= ct 'i1) (and (vec-type? ct) (= (elem ct) 'i1)))) (verr :parser/select "select condition must be i1 or <n x i1>" {:at [:ty]})
+                        (not= (norm-type at) (norm-type bt)) (verr :parser/select "both values to select must have same type" {:at [:op 1]})))
       ('#{call invoke callbr} h)
       (let [t (norm-type (first ps)) args (nth ps 2)]
         (when (and (seq? t) (= (first t) 'fn))
@@ -612,22 +630,22 @@
             (doseq [[i a] (map-indexed vector args)]
               (cond
                 (< i (count params)) (when-not (= (norm-type (first a)) (nth params i))
-                                       (verr :parser/call-argument (str "argument is not of expected type '" (tstr (nth params i)) "'")))
-                (not var?) (verr :parser/call-arguments "too many arguments specified")))
-            (when (< (count args) (count params)) (verr :parser/call-arguments "not enough parameters specified for call")))))
+                                       (verr :parser/call-argument (str "argument is not of expected type '" (tstr (nth params i)) "'") {:at [:call-arg i]}))
+                (not var?) (verr :parser/call-arguments "too many arguments specified" {:at [:call-arg i]})))
+            (when (< (count args) (count params)) (verr :parser/call-arguments "not enough parameters specified for call" {:at [:ty]})))))
       (= h 'ret) (let [t (if (= (first ps) 'void) 'void (norm-type (first ps)))]
-                   (when-not (= t ret-type) (verr :parser/ret (str "value doesn't match function result type '" (tstr ret-type) "'"))))
-      (= h 'br) (when (and (= 4 (count ps)) (not= (norm-type (first ps)) 'i1)) (verr :parser/br "branch condition must have 'i1' type"))
+                   (when-not (= t ret-type) (verr :parser/ret (str "value doesn't match function result type '" (tstr ret-type) "'") {:at [:ty]})))
+      (= h 'br) (when (and (= 4 (count ps)) (not= (norm-type (first ps)) 'i1)) (verr :parser/br "branch condition must have 'i1' type" {:at [:ty]}))
       (= h 'switch) (let [t (norm-type (first ps))]
-                      (when-not (int-type? t) (verr :parser/switch "switch condition must have integer type"))
-                      (loop [seen #{} cs (seq (nth ps 3))]
+                      (when-not (int-type? t) (verr :parser/switch "switch condition must have integer type" {:at [:ty]}))
+                      (loop [seen #{} cs (seq (nth ps 3)) idx 0]
                         (when cs
                           (let [[_ v] (first cs)]
-                            (when-not (or (integer? v) (and (seq? v) (= (first v) 'int))) (verr :parser/switch "case value is not a constant integer"))
-                            (when (seen v) (verr :parser/switch "duplicate case value in switch"))
-                            (recur (conj seen v) (next cs))))))
+                            (when-not (or (integer? v) (and (seq? v) (= (first v) 'int))) (verr :parser/switch "case value is not a constant integer" {:at [:case idx]}))
+                            (when (seen v) (verr :parser/switch "duplicate case value in switch" {:at [:case idx]}))
+                            (recur (conj seen v) (next cs) (inc idx))))))
       (= h 'extractvalue) (let [t (norm-type (first (first ps)))]
-                            (when-not (aggregate? t) (verr :parser/extractvalue "extractvalue operand must be aggregate type"))
+                            (when-not (aggregate? t) (verr :parser/extractvalue "extractvalue operand must be aggregate type" {:at [:ty]}))
                             (when-not (index-type t (rest ps)) (verr :parser/extractvalue "invalid indices for extractvalue")))
       (= h 'insertvalue) (let [t (norm-type (first (first ps))) vt (norm-type (first (second ps)))]
                            (when-not (aggregate? t) (verr :parser/insertvalue "insertvalue operand must be aggregate type"))
@@ -647,8 +665,8 @@
 
 (defn- parse-dbg [st b]
   (let [n (dbg-arity (first b)) k (count (rest b))]
-    (when (and n (< k n)) (verr :parser/dbg-record "Expected ',' here"))
-    (when (and n (> k n)) (verr :parser/dbg-record "Expected ')' here"))
+    (when (and n (< k n)) (verr :parser/dbg-record "Expected ',' here" {:at [:find-last ")"]}))
+    (when (and n (> k n)) (verr :parser/dbg-record "Expected ')' here" {:at [:comma (dec n)]}))
     (doseq [x (rest b)]
       (if (vector? x) (use-value st (second x) (norm-type (first x))) (note-md! x)))))
 
@@ -661,7 +679,7 @@
     (verr :parser/musttail "expected '...' at end of argument list for musttail call in varargs function"))
   (check-attr-placement :ret (:ret-attrs o)) (check-attr-values (:ret-attrs o))
   (doseq [a (nth ps 2)] (let [as (param-attrs a)] (check-attr-placement :param as) (check-attr-values as)))
-  (let [as (remove integer? (:attrs o))] (check-attr-placement :fn as) (check-attr-values as)))
+  (let [as (remove integer? (:attrs o))] (binding [*fn-attr-at* [:last-attr]] (check-attr-placement :fn as)) (check-attr-values as)))
 
 (defn- inst-uses! [st b]
   (let [[h ps o] (split-inst b)]
@@ -674,29 +692,34 @@
 
 (defn- parse-body [^Fn st f ret-type]
   (let [o (apply hash-map (drop 4 f))
-        blocks (:body o)]
+        blocks (:body o)
+        ic (volatile! 0)   ; the item of the text: the header is 0
+        at (fn [] (assoc *ctx* :item @ic))]
     (when (or (empty? blocks) (and (= 1 (count blocks)) (nil? (second (first blocks))) (empty? (drop 2 (first blocks)))))
-      (verr :parser/syntax "function body requires at least one basic block"))
+      (verr :parser/syntax "function body requires at least one basic block" {:at [:find-last "{"]}))
     (doseq [[i blk] (map-indexed vector blocks)]
       (let [[_ l & items] blk]
-        (define-value st l 'label "label")
+        (when l (vswap! ic inc))
+        (binding [*ctx* (at)] (define-value st l 'label "label"))
         (doseq [x items]
-          (let [b (body x)]
-            (if (dbg-record? b)
-              (parse-dbg st b)
-              (do (inst-uses! st b)
-                  (check-inst st b ret-type)
-                  (let [t (result-type b) r (result x)]
-                    (cond
-                      (and r (= t 'void)) (verr :parser/void-name "instructions returning void cannot have a name")
-                      (not= t 'void) (define-value st r t "instruction")))))))
+          (vswap! ic inc)
+          (binding [*ctx* (assoc (at) :inst x :bb l)]
+            (let [b (body x)]
+              (if (dbg-record? b)
+                (parse-dbg st b)
+                (do (inst-uses! st b)
+                    (check-inst st b ret-type)
+                    (let [t (result-type b) r (result x)]
+                      (cond
+                        (and r (= t 'void)) (verr :parser/void-name "instructions returning void cannot have a name" {:at :body})
+                        (not= t 'void) (define-value st r t "instruction"))))))))
         (when-not (and (seq items) (terminator? (last items)))
-          (verr :parser/terminator "expected instruction opcode"))))
+          (binding [*ctx* (assoc *ctx* :item (inc @ic))] (verr :parser/terminator "expected instruction opcode")))))
     (doseq [u (:uselistorder o)] (note-md! u))
     (let [named (sort (remove numbered? (keys (.fwd st))))
           nums (sort (map #(Long/parseLong %) (filter numbered? (keys (.fwd st)))))]
-      (when (seq named) (verr :parser/undefined-value (str "use of undefined value '%" (first named) "'")))
-      (when (seq nums) (verr :parser/undefined-value (str "use of undefined value '%" (first nums) "'"))))))
+      (when (seq named) (verr :parser/undefined-value (str "use of undefined value '%" (first named) "'") {:at [:fn-find (str "%" (first named))]}))
+      (when (seq nums) (verr :parser/undefined-value (str "use of undefined value '%" (first nums) "'") {:at [:fn-find (str "%" (first nums))]})))))
 
 (defn- local-linkage? [l] (#{:internal :private} l))
 
@@ -704,10 +727,10 @@
   (let [l (:linkage o)]
     (case what
       :declare (when (#{:private :internal :available_externally :linkonce :linkonce_odr :weak :weak_odr} l)
-                 (verr :parser/linkage "invalid linkage for function declaration"))
-      :define (when (= l :extern_weak) (verr :parser/linkage "invalid linkage for function definition"))
+                 (verr :parser/linkage "invalid linkage for function declaration" {:at [:tok 1]}))
+      :define (when (= l :extern_weak) (verr :parser/linkage "invalid linkage for function definition" {:at [:tok 1]}))
       nil)
-    (when (and (#{:declare :define} what) (#{:appending :common} l)) (verr :parser/linkage "invalid function linkage type"))
+    (when (and (#{:declare :define} what) (#{:appending :common} l)) (verr :parser/linkage "invalid function linkage type" {:at [:tok 1]}))
     (when (and (local-linkage? l) (:visibility o) (not= (:visibility o) :default))
       (verr :parser/visibility "symbol with local linkage must have default visibility"))
     (when (and (local-linkage? l) (:dll o)) (verr :parser/dll "symbol with local linkage cannot have a DLL storage class"))))
@@ -725,14 +748,14 @@
       (check-attr-placement :fn as) (check-attr-values as)
       (when (has-attr? as "builtin") (verr :parser/attr-placement "'builtin' attribute not valid on function")))
     (when (and (not= (norm-type rt) 'void) (some #(has-attr? (param-attrs %) "sret") (remove #{'&} ps)))
-      (verr :parser/sret-return "functions with 'sret' argument must return void"))
-    (doseq [p (remove #{'&} ps) :let [t (norm-type (first p))]]
-      (when (= t 'void) (verr :parser/arg-type "void type only allowed for function results"))
-      (when (= t 'label) (verr :parser/arg-type "invalid type for function argument")))
+      (verr :parser/sret-return "functions with 'sret' argument must return void" {:at [:tok 1]}))
+    (doseq [[pi p] (map-indexed vector (remove #{'&} ps)) :let [t (norm-type (first p))]]
+      (when (= t 'void) (verr :parser/arg-type "void type only allowed for function results" {:at [:param pi]}))
+      (when (= t 'label) (verr :parser/arg-type "invalid type for function argument" {:at [:param pi]})))
     (when-let [d (.get *gdefs* k)]
       (if (= (:kind d) :function)
-        (verr :parser/redefinition (str "invalid redefinition of function '" k "'"))
-        (verr :parser/redefinition (str "redefinition of global '@" k "'"))))
+        (verr :parser/redefinition (str "invalid redefinition of function '" k "'") {:at [:kind :gname]})
+        (verr :parser/redefinition (str "redefinition of global '@" k "'") {:at [:kind :gname]})))
     (doseq [p ps :when (vector? p)]
       (let [nmx (when (local? (peek p)) (peek p))]
         (when (and nmx (numbered? (local-key nmx)) (< (Long/parseLong (local-key nmx)) (aget ^longs (.next ^Fn st) 0)))
@@ -753,7 +776,7 @@
         o (apply hash-map opts)
         k (global-key nm)]
     (check-linkage o :global)
-    (when (.containsKey *gdefs* k) (verr :parser/redefinition (str "redefinition of global '@" k "'")))
+    (when (.containsKey *gdefs* k) (verr :parser/redefinition (str "redefinition of global '@" k "'") {:at [:kind :gname]}))
     (when (some? init) (use-value nil init (norm-type t)))
     (check-align (:align o))
     (note-md! (:md o))
@@ -763,29 +786,30 @@
 (defn- parse-alias [f]
   (let [[h nm t a & opts] f o (apply hash-map opts) k (global-key nm)]
     (check-linkage o :alias)
-    (when (.containsKey *gdefs* k) (verr :parser/redefinition (str "redefinition of global '@" k "'")))
+    (when (.containsKey *gdefs* k) (verr :parser/redefinition (str "redefinition of global '@" k "'") {:at [:kind :gname]}))
     (if (vector? a) (use-value nil (second a) (norm-type (first a))) (use-value nil a 'ptr))
     (.put *gdefs* k {:kind (if (= h 'llvm/alias) :alias :ifunc) :type (norm-type t) :form f})
     (.remove *gfwd* k)))
 
 (defn- phase-parser [forms]
-  (doseq [f forms]
-    (case (first f)
-      (llvm/define llvm/declare) (parse-function f)
-      llvm/global (parse-global f)
-      (llvm/alias llvm/ifunc) (parse-alias f)
-      llvm/meta (do (.add *mdefs* (second f)) (note-md! (drop 2 f)) (check-di-parse (second f) (nth f 2) (:distinct (apply hash-map (drop 3 f)))))
-      llvm/named-meta (note-md! (nth f 2))
-      llvm/attributes (do (check-attr-placement :fn (nth f 2)) (check-attr-values (nth f 2)))
-      llvm/uselistorder (let [[_ [t v]] f] (use-value nil v (norm-type t)))
-      nil))
+  (doseq [[fi f] (map-indexed vector forms)]
+    (binding [*ctx* {:form fi :item 0}]
+      (case (first f)
+        (llvm/define llvm/declare) (parse-function f)
+        llvm/global (parse-global f)
+        (llvm/alias llvm/ifunc) (parse-alias f)
+        llvm/meta (do (.add *mdefs* (second f)) (note-md! (drop 2 f)) (check-di-parse (second f) (nth f 2) (:distinct (apply hash-map (drop 3 f)))))
+        llvm/named-meta (note-md! (nth f 2))
+        llvm/attributes (do (check-attr-placement :fn (nth f 2)) (check-attr-values (nth f 2)))
+        llvm/uselistorder (let [[_ [t v]] f] (use-value nil v (norm-type t)))
+        nil)))
   (let [undef (sort (remove #(str/starts-with? % "llvm.") (keys *gfwd*)))
         named (remove numbered? undef)
         nums (sort (map #(Long/parseLong %) (filter numbered? undef)))]
-    (when (seq named) (verr :parser/undefined-global (str "use of undefined value '@" (first named) "'")))
-    (when (seq nums) (verr :parser/undefined-global (str "use of undefined value '@" (first nums) "'"))))
+    (when (seq named) (verr :parser/undefined-global (str "use of undefined value '@" (first named) "'") {:at [:mod-find (str "@" (first named))]}))
+    (when (seq nums) (verr :parser/undefined-global (str "use of undefined value '@" (first nums) "'") {:at [:mod-find (str "@" (first nums))]})))
   (let [missing (sort (map #(Long/parseLong (subs (name %) 1)) (remove #(.contains *mdefs* %) *mrefs*)))]
-    (when (seq missing) (verr :parser/undefined-metadata (str "use of undefined metadata '!" (first missing) "'"))))
+    (when (seq missing) (verr :parser/undefined-metadata (str "use of undefined metadata '!" (first missing) "'") {:at [:mod-find (str "!" (first missing)) 1]})))
   ;; a debug record's location must be a DILocation (resolved at the module's end)
   (doseq [f forms :when (= (first f) 'llvm/define) [_ _ & items] (:body (apply hash-map (drop 4 f))) x items
           :let [b (body x)] :when (and (dbg-record? b) (#{'dbg_declare 'dbg_value 'dbg_declare_value} (first b)))]
@@ -900,7 +924,7 @@
   (when-let [[r ps] (when-let [[r ps] (intrinsic-entry nm)] [r (old-form-pattern nm ps (count (remove #{'&} (nth fty 2))))])]
     (let [[_ fr fps] fty fps (vec (remove #{'&} fps))
           ovs (java.util.HashMap.) deferred (java.util.ArrayList.)
-          fail (fn [what detail] (verr :verifier/intrinsic-signature (str what " type " detail)))
+          fail (fn [what detail] (verr :verifier/intrinsic-signature (str what " type " detail) :decl))
           check (fn check [what pat t]
                   (cond
                     (and (seq? pat) (= (first pat) 'ov))
@@ -931,7 +955,7 @@
       (check "intrinsic return" r fr)
       (doseq [[i p] (map-indexed vector ps) :when (< i (count fps))] (check (str "intrinsic argument " i) p (nth fps i)))
       (when-not (= (count ps) (count fps))
-        (verr :verifier/intrinsic-signature (str "intrinsic has incorrect number of args. Expected " (count ps) ", but got " (count fps))))
+        (verr :verifier/intrinsic-signature (str "intrinsic has incorrect number of args. Expected " (count ps) ", but got " (count fps)) :decl))
       (doseq [d deferred] (d)))))
 
 (defn- callee-of [b] (let [[h ps] (split-inst b)] (when ('#{call invoke callbr} h) (second ps))))
@@ -1513,14 +1537,16 @@
             (binding [*inst-locs* (set (for [f defs [_ _ & items] (:body (apply hash-map (drop 4 f))) x items
                                              :let [b (body x)] :when (not (dbg-record? b))
                                              :let [l (get (apply hash-map (:md (nth (split-inst b) 2))) '!dbg)] :when l] l))]
-              (doseq [[id n] nodes] (check-di-node id n)))
+              (doseq [[id n] nodes] (visiting (binding [*ctx* {:md id}] (check-di-node id n)))))
             (doseq [f forms :when (#{'llvm/define 'llvm/declare} (first f))]
               (let [o (apply hash-map (drop 4 f)) md (apply hash-map (:md o))
                     sp (get md '!dbg) spn (node-of sp)]
                 (when sp
-                  (when-not (= "DISubprogram" (di-kind spn)) (verr :di/function "function !dbg attachment must be a subprogram"))
-                  (when (and (= (first f) 'llvm/declare) (flag? (:spFlags (di-fields spn)) "DISPFlagDefinition"))
-                    (verr :di/function "function declaration may only have a unique !dbg attachment")))
+                  (visiting
+                   (binding [*ctx* {:fn f}]
+                     (when-not (= "DISubprogram" (di-kind spn)) (verr :di/function "function !dbg attachment must be a subprogram"))
+                     (when (and (= (first f) 'llvm/declare) (flag? (:spFlags (di-fields spn)) "DISPFlagDefinition"))
+                       (verr :di/function "function declaration may only have a unique !dbg attachment")))))
                 (when (and sp (= (first f) 'llvm/define))
                   (doseq [[_ _ & items] (:body o) x items]
                     (let [b (body x)]
@@ -1528,23 +1554,25 @@
                         nil
                         (let [loc (get (apply hash-map (:md (nth (split-inst b) 2))) '!dbg)]
                           (when (and loc (not= (di-loc-sp loc) sp))
-                            (verr :di/function "!dbg attachment points at wrong subprogram for function"))))))
+                            (visiting (binding [*ctx* {:fn f :inst x}]
+                                        (verr :di/function "!dbg attachment points at wrong subprogram for function"))))))))
                   (doseq [[_ _ & items] (:body o) x items :let [b (body x)] :when (dbg-record? b)]
                     (case (first b)
                       (dbg_declare dbg_value dbg_declare_value)
                       (let [[_ _ var expr loc] b vn (node-of var) en (node-of expr) ln (node-of loc)]
+                       (visiting (binding [*ctx* {:fn f :inst x}]
                         (when-not (= "DILocalVariable" (di-kind vn)) (verr :di/record "invalid #dbg record variable"))
                         (when-not (= "DIExpression" (di-kind en)) (verr :di/record "invalid #dbg record expression"))
                         (when (and (= "DILocation" (di-kind ln)) (not= (di-sp (:scope (di-fields vn))) (di-sp (:scope (di-fields ln)))))
                           (verr :di/record "mismatched subprogram between #dbg record variable and DILocation"))
                         (when (and (= "DILocation" (di-kind ln)) (not= (di-loc-sp loc) sp))
-                          (verr :di/function "!dbg attachment points at wrong subprogram for function")))
+                          (verr :di/function "!dbg attachment points at wrong subprogram for function")))))
                       nil))))))
           (doseq [f forms :when (= (first f) 'llvm/global)]
             (let [o (apply hash-map (let [[_ _ _ & more] f] (if (and (seq more) (not (keyword? (first more)))) (rest more) more)))
                   d (get (apply hash-map (:md o)) '!dbg)]
               (when (and d (not= "DIGlobalVariableExpression" (di-kind (node-of d))))
-                (verr :di/global "!dbg attachment of global variable must be a DIGlobalVariableExpression")))))))))
+                (visiting (binding [*ctx* {:global f}] (verr :di/global "!dbg attachment of global variable must be a DIGlobalVariableExpression")))))))))))
 
 (declare check-intrinsic-signature)
 
@@ -1554,6 +1582,8 @@
   (let [[h nm rt ps & opts] f
         o (apply hash-map opts)
         k (global-key nm)]
+    (visiting
+     (binding [*ctx* {:fn f}]
     (when-not (and (intr/recognized? k)   ; an intrinsic has its own attributes, the text's are dropped (when its type is the intrinsic's)
                    (let [d (.get *gdefs* k)]
                      (nil? (try (check-intrinsic-signature k (:fty d)) nil (catch arbace.lang.ExceptionInfo e (.getMessage e))))))
@@ -1566,11 +1596,11 @@
       (check-intrinsic-signature k (:fty (.get *gdefs* k)))
       ;; hasAddressTaken ignores the assume-like intrinsics' calls
       (when-not (re-find #"^llvm\.(assume|sideeffect|pseudoprobe|dbg\.|invariant\.|lifetime\.|experimental\.noalias\.scope\.decl|objectsize|ptr\.annotation|var\.annotation)" k)
-        (doseq [u (get users k)]
+        (doseq [[u ux] (get users k)]
           (when-not (or (= u (:fty (.get *gdefs* k))) (old-form-decl? k (:fty (.get *gdefs* k))))
-            (verr :verifier/intrinsic-user "Invalid user of intrinsic instruction!")))))
+            (verr :verifier/intrinsic-user "Invalid user of intrinsic instruction!" [:inst ux])))))
     (when (and (:comdat o) (= h 'llvm/declare)) (verr :verifier/comdat-declaration "Declaration may not be in a Comdat!"))
-    (check-function-md (apply hash-map (:md o)))
+    (check-function-md (apply hash-map (:md o)))))
     (when (= h 'llvm/define)
       (let [blocks (vec (:body o))
             ;; the numbers LLParser gives unlabelled blocks and unnamed values
@@ -1591,11 +1621,14 @@
             _ (doseq [[bi [_ _ & items]] (map-indexed vector blocks) [ii x] (map-indexed vector items)]
                 (when-let [r (result x)] (.put defs (local-key r) [bi ii (body x)])))
             lp-type (volatile! nil)]
-        (when (seq (nth (:preds g) 0)) (verr :verifier/entry-predecessors "Entry block to function must not have predecessors!"))
+        (visiting (binding [*ctx* {:fn f :bb (second (first blocks))}]
+                    (when (seq (nth (:preds g) 0)) (verr :verifier/entry-predecessors "Entry block to function must not have predecessors!"))))
         (doseq [[bi [_ l & items]] (map-indexed vector blocks)]
           (let [items (vec items)
                 insts (vec (remove #(dbg-record? (body %)) items))]
             ;; visitBasicBlock: the phis against the predecessors
+            (visiting
+             (binding [*ctx* {:fn f :bb l}]
             (when (and (seq insts) (= 'phi (first (body (first insts)))))
               (let [preds (vec (sort (nth (:preds g) bi)))]
                 (doseq [x insts :while (= 'phi (first (body x)))]
@@ -1611,16 +1644,18 @@
                     (doseq [i (range (count vals))]
                       (let [[v l] (nth vals i)]
                         (when-not (= (get (:idx g) (local-key l)) (nth preds i))
-                          (verr :verifier/phi-entries "PHI node entries do not match predecessors!"))))))))
+                          (verr :verifier/phi-entries "PHI node entries do not match predecessors!"))))))))))
             (loop [ii 0 seen-non-phi false]
               (when (< ii (count items))
                 (let [x (nth items ii) b (body x) hd (first b)]
                   (if (dbg-record? b)
                     (recur (inc ii) seen-non-phi)
                     (do
+                     (visiting
+                      (binding [*ctx* {:fn f :bb l :inst x :defs defs}]
                       (when (and (terminator? x) (< ii (dec (count items))))
                         (verr :verifier/terminator-middle "Terminator found in the middle of a basic block!"))
-                      (when (and (= hd 'phi) seen-non-phi) (verr :verifier/phi-grouped "PHI nodes not grouped at top of basic block!"))
+                      (when (and (= hd 'phi) seen-non-phi) (verr :verifier/phi-grouped "PHI nodes not grouped at top of basic block!" :inst :bb))
                       (when (= hd 'landingpad)
                         (let [[_ ps] (split-inst b)]
                           (when-not (or (some #{:cleanup} ps) (some seq? ps)) (verr :verifier/landingpad "LandingPadInst needs at least one clause or to be a cleanup."))
@@ -1691,6 +1726,7 @@
                         (let [[_ _ io] (split-inst b) u (get (:idx g) (local-key (:unwind io)))]
                           (when (and u (not (eh-pad? (drop 2 (nth blocks u)))))
                             (verr :verifier/unwind-dest "The unwind destination does not have an exception handling instruction!"))))
+                      ))
                       (recur (inc ii) (or seen-non-phi (not= hd 'phi))))))))))))))
 
 (defn- phase-verifier [forms]
@@ -1701,7 +1737,7 @@
             blk (:body o) x (drop 2 blk)
             :let [b (body x) c (callee-of b)]
             :when (and c (global? c) (str/starts-with? (global-key c) "llvm."))]
-      (let [[_ ps] (split-inst b)] (.put users (global-key c) (conj (vec (.get users (global-key c))) (call-fty (first ps) (nth ps 2))))))
+      (let [[_ ps] (split-inst b)] (.put users (global-key c) (conj (vec (.get users (global-key c))) [(call-fty (first ps) (nth ps 2)) x]))))
     (doseq [f forms :when (#{'llvm/define 'llvm/declare} (first f))]
       (verify-function f (into {} users)))
     (doseq [f forms :when (= (first f) 'llvm/global)]
@@ -1710,20 +1746,29 @@
     (check-module-flags forms)
     (check-module-ident forms)))
 
-(defn verify-forms
-  "A module's first error, {:rule R :message M}, or nil when it is valid."
+(defn- run-phases
+  "The checks over the forms: [parser-error verifier-errors], an error an ExceptionInfo of `verr`. A parser error stops
+  at the first; the Verifier's visits go on (`visiting`), the debug info's last."
   [forms]
   (binding [*types* (into {} (keep #(when (= (first %) 'llvm/type) [(second %) (norm-type (nth % 2))]) forms))
             *groups* (into {} (keep #(when (= (first %) 'llvm/attributes) [(second %) (nth % 2)]) forms))
             *meta* (into {} (keep #(when (= (first %) 'llvm/meta) [(second %) (nth % 2)]) forms))
-            *gdefs* (java.util.HashMap.) *gfwd* (java.util.TreeMap.) *mdefs* (java.util.HashSet.) *mrefs* (java.util.HashSet.)]
+            *gdefs* (java.util.HashMap.) *gfwd* (java.util.TreeMap.) *mdefs* (java.util.HashSet.) *mrefs* (java.util.HashSet.)
+            *errs* (java.util.ArrayList.)]
     (try
       (phase-parser forms)
-      (phase-verifier forms)
-      (phase-debug forms)
-      nil
+      (try (phase-verifier forms) (catch arbace.lang.ExceptionInfo e (if (:llvm/verify (ex-data e)) (.add *errs* e) (throw e))))
+      (try (phase-debug forms) (catch arbace.lang.ExceptionInfo e (if (:llvm/verify (ex-data e)) (.add *errs* e) (throw e))))
+      [nil (vec *errs*)]
       (catch arbace.lang.ExceptionInfo e
-        (if-let [r (:llvm/verify (ex-data e))] {:rule r :message (.getMessage e)} (throw e))))))
+        (if (:llvm/verify (ex-data e)) [e []] (throw e))))))
+
+(defn verify-forms
+  "A module's first error, {:rule R :message M}, or nil when it is valid."
+  [forms]
+  (let [[pe es] (run-phases forms)
+        e (or pe (first es))]
+    (when e {:rule (:llvm/verify (ex-data e)) :message (.getMessage ^Throwable e)})))
 
 (def rules
   "The ported rules, by phase. The `:di` rules are debug info's: opt takes the module (the verdict `debug`)."
@@ -1745,45 +1790,128 @@
               :verifier/md-misc :verifier/md-prof :verifier/md-flags]
    :di [:di/node :di/function :di/record :di/global :di/version]})
 
-(defn- forms-of-file [^String path]
+(defn- prog ^String [] (or (System/getenv "REPR_LLVM_OPT") "/usr/lib/llvm23/bin/opt"))
+
+(defn- label-text [l] (if l (str "label " (pr/local-str l)) "label %0"))
+
+(defn- fn-operand [f] (str "ptr " (pr/global-str (nth f 1))))
+
+(defn- culprit-text
+  "What the Verifier prints for one culprit, a line (its own newline kept by the caller)."
+  [c ctx metaforms]
+  (cond
+    (string? c) c
+    (= c :inst) (let [x (:inst ctx) b (body x)] (if (dbg-record? b) (pr/item-inst-str x) (str "  " (pr/item-inst-str x))))
+    (= c :fn) (fn-operand (:fn ctx))
+    (= c :decl) (pr/fn-head-str (:fn ctx))
+    (= c :bb) (label-text (:bb ctx))
+    (= c :global) (fn-operand (:global ctx))
+    (and (vector? c) (= (first c) :md)) (if-let [f (get metaforms (second c))] (pr/top-str f) (str (second c)))
+    (and (vector? c) (= (first c) :inst)) (let [x (second c) b (body x)] (if (dbg-record? b) (pr/item-inst-str x) (str "  " (pr/item-inst-str x))))
+    (and (vector? c) (= (first c) :fn)) (fn-operand (second c))
+    (and (vector? c) (= (first c) :bb)) (label-text (second c))
+    :else (str c)))
+
+(defn- default-culprits [ctx]
+  (cond (:inst ctx) [:inst] (:md ctx) [[:md (:md ctx)]] (:global ctx) [:global] (contains? ctx :bb) [:bb] (:fn ctx) [:fn] :else []))
+
+(defn- error-text
+  "The text opt prints for a Verifier error: its message and the values it names, a line each."
+  ^String [e metaforms]
+  (let [d (ex-data e) ctx (:ctx d)
+        cs (if (seq (:culprits d)) (:culprits d) (default-culprits ctx))]
+    (apply str (.getMessage ^Throwable e) "\n" (map #(str (culprit-text % ctx metaforms) "\n") cs))))
+
+(defn- parse-offset
+  "The offset in the text of a parser error: its item and hint."
+  [^String src spans forms e]
+  (let [d (ex-data e) ctx (:ctx d) hint (:at (:opts d))
+        fi (:form ctx) k (or (:item ctx) 0)
+        sp (when fi (nth spans fi nil))
+        whole (when (seq sp) [(first (first sp)) (second (peek sp))])
+        item (when sp (nth sp (min k (dec (count sp))) nil))]
+    (cond
+      (and (vector? hint) (= (first hint) :mod-find)) (+ (diag/offset-of src 0 (count src) [:find (second hint)]) (long (or (nth hint 2 nil) 0)))
+      (and (vector? hint) (= (first hint) :fn-find) whole) (diag/offset-of src (first whole) (second whole) [:find (second hint)])
+      item (diag/offset-of src (first item) (second item) hint)
+      :else 0)))
+
+(defn diagnose
+  "[verdict message rule text] of forms: verdict valid, invalid or debug; the text what `opt -passes=verify` prints to
+  stderr (empty when valid). `src`, `spans` (reader's items) and `file` give the parser errors their position."
+  [forms ^String src spans ^String file]
+  (let [[pe es] (run-phases forms)
+        metaforms (into {} (keep #(when (= (first %) 'llvm/meta) [(second %) %]) forms))
+        rule-of #(:llvm/verify (ex-data %))
+        di? #(= "di" (namespace (rule-of %)))
+        broken (vec (remove di? es))
+        dis (vec (filter di? es))
+        first-e (or pe (first es))]
+    (cond
+      (nil? first-e) ["valid" "" "" ""]
+      pe ["invalid" (.getMessage ^Throwable pe) (str (rule-of pe))
+          (if src
+            (diag/parse-error-text (prog) file src (parse-offset src spans forms pe) (.getMessage ^Throwable pe))
+            (str (prog) ": " file ": error: " (.getMessage ^Throwable pe) "\n"))]
+      :else
+      (let [ver (first (filter #(= :di/version (rule-of %)) dis))
+            dis (remove #(= :di/version (rule-of %)) dis)
+            body-text (str (apply str (map #(error-text % metaforms) broken))
+                           (when-not ver (apply str (map #(error-text % metaforms) dis))))
+            tail (cond
+                   (seq broken) (str (prog) ": " file ": error: input module is broken!\n")
+                   ver (str "warning: " (.getMessage ^Throwable ver) " in " file "\n")
+                   :else (str "warning: ignoring invalid debug info in " file "\n"))]
+        [(if (seq broken) "invalid" "debug") (.getMessage ^Throwable first-e) (str (rule-of first-e)) (str body-text tail)]))))
+
+(defn- forms-of-file
+  "[forms src spans] of a file: .ae text has no source to point into."
+  [^String path]
   (let [s (String. (java.nio.file.Files/readAllBytes (.toPath (java.io.File. path))) "ISO-8859-1")]
     (if (str/ends-with? path ".ae")
       (let [r (arbace.lang.LineNumberingPushbackReader. (java.io.StringReader. s)) eof (Object.)]
-        (vec (remove #(and (seq? %) (= (first %) 'in-ns))
-                     (loop [out []] (let [x (read r false eof)] (if (identical? x eof) out (recur (conj out x))))))))
-      (rd/read-module s))))
+        [(vec (remove #(and (seq? %) (= (first %) 'in-ns))
+                      (loop [out []] (let [x (read r false eof)] (if (identical? x eof) out (recur (conj out x)))))))
+         nil nil])
+      (let [[forms spans] (rd/read-module-items s)] [forms s spans]))))
 
 (defn verify-file
-  "[verdict message rule] of a file: valid, invalid (a rule's message) or unread (the reader's refusal)."
+  "[verdict message rule text] of a file: valid, invalid, debug, or unread (the reader's refusal)."
   [^String path]
-  (let [forms (try (forms-of-file path) (catch Throwable e e))]
-    (if (instance? Throwable forms)
-      ["unread" (str/replace (str (.getMessage ^Throwable forms)) #"[\t\n]" " ") ""]
-      (if-let [e (try (verify-forms forms) (catch Throwable e {:rule :crash :message (str (.getMessage e))}))]
-        [(if (= "di" (namespace (:rule e))) "debug" "invalid") (:message e) (str (:rule e))]
-        ["valid" "" ""]))))
+  (let [r (try (forms-of-file path) (catch Throwable e e))]
+    (if (instance? Throwable r)
+      ["unread" (str/replace (str (.getMessage ^Throwable r)) #"[\t\n]" " ") "" ""]
+      (let [[forms src spans] r]
+        (try (diagnose forms src spans path)
+             (catch Throwable e ["invalid" (str (.getMessage e)) ":crash" ""]))))))
 
 (defn verify-main
-  "bin/repr-llvm verify FILE...: each invalid file's first error; 1 when one is invalid."
+  "bin/repr-llvm verify FILE...: what opt -passes=verify prints for each invalid file; 1 when one is invalid."
   [files]
   (let [bad (volatile! 0)]
     (doseq [f files]
-      (let [[v m r] (verify-file f)]
+      (let [[v m r t] (verify-file f)]
         (when-not (= v "valid")
           (when (= v "invalid") (vswap! bad inc))
-          (println (str f ": " (if (= v "debug") "warning" "error") ": " m (when (seq r) (str " [" (subs r 1) "]")))))))
+          (if (= v "unread") (println (str f ": error: " m)) (print t)))))
     (flush)
     (if (pos? @bad) 1 0)))
 
 (defn verify-list
-  "LIST OUT: NAME<tab>verdict<tab>message<tab>rule for each NAME<tab>PATH of LIST."
-  [[lst out]]
+  "LIST OUT [ERRDIR]: NAME<tab>verdict<tab>message<tab>rule for each NAME<tab>PATH of LIST; with ERRDIR, the text opt
+  would print in ERRDIR/NAME.err."
+  [[lst out errdir]]
   (let [rows (for [l (str/split-lines (slurp lst)) :when (seq l)] (str/split l #"\t"))
         threads (Integer/parseInt (or (System/getenv "REPR_LLVM_THREADS") "4"))
         pool (Executors/newFixedThreadPool threads)
         futs (mapv (fn [[n p]] (.submit pool ^Callable (fn [] (into [n] (verify-file p))))) rows)
         res (mapv #(.get ^Future %) futs)]
     (.shutdown pool)
-    (spit out (str (str/join "\n" (map #(str/join "\t" %) res)) "\n"))
+    (when errdir
+      (doseq [[n _ _ _ t] res]
+        (let [f (java.io.File. (str errdir "/" n ".err"))]
+          (when-let [d (.getParentFile f)] (.mkdirs d))
+          (java.nio.file.Files/write (.toPath f) (.getBytes ^String t "ISO-8859-1") ^"[Ljava.nio.file.OpenOption;" (make-array java.nio.file.OpenOption 0)))))
+    (spit out (str (str/join "\n" (map #(str/join "\t" (take 4 %)) res)) "\n"))
     (println (count res) "files," (count (filter #(= "valid" (second %)) res)) "valid,"
              (count (filter #(= "invalid" (second %)) res)) "invalid")))
