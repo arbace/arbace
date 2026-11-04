@@ -260,3 +260,32 @@ On branch `night-fix` (from `b2a4911f`), not merged while `--full` ran on main:
 - Python on the Mac VM: PY1-PY3 done (spec and pins; read and print over 2,800 files; `:full` byte for byte with
   `marshal` equal on 2,795), the user's decisions: two parses for type comments, 20 pinned site-packages apks,
   `:code-lines` by design for `:lines`, `:charset` by design; PY4 running.
+
+## 2026-11-04: repr/rust's native reader (branch `rust-native`)
+
+- Rust text is now read into Rust forms with no rustc: `arbace.repr.rust.lex` and `arbace.repr.rust.parse` port, function by
+  function and in rustc's order, rustc 1.99.1's lexer and parser from https://github.com/rust-lang/rust at `58cf8f9c3` as
+  Alpine's `rust-src-1.99.1-r0` carries it (pinned by `tools/rsdump/apks.sha256`, read in place in `.tmp/repr-rust/apks/`):
+  `compiler/rustc_lexer/src/lib.rs`, `compiler/rustc_parse/src/lexer/{mod,tokentrees}.rs`,
+  `compiler/rustc_parse/src/parser/{mod,attr,path,generics,ty,expr,stmt,pat,item,function}.rs` and the accepting paths of
+  `diagnostics.rs`, `compiler/rustc_ast/src/{token,ast}.rs`, `util/{classify,parser,literal}.rs`, `attr/mod.rs`,
+  `compiler/rustc_span/src/symbol.rs`, and the escape checks of the crate rustc-literal-escaper 0.0.8 (its `.crate` pinned by
+  rustc's `Cargo.lock`, SHA-256 `bfe6f213...c705f71e`). `arbace.repr.rust.native` writes each file's dump exactly as the helper
+  `tools/rsdump` writes it (tree, `rsdump/mac-exprs`, `rsdump/meta`, comments or `--full`'s tokens, `--expr` files), so
+  `arbace.repr.rust.convert` is unchanged and gives the same forms. Licenses: MIT OR Apache-2.0, taken under MIT (LICENSE.md,
+  "Rust (rustc 1.99.1)", the MIT text from the escaper's `LICENSE-MIT`); origins in doc/ARBACE.md; design and what is left
+  out in doc/rust/NATIVE-READER.md.
+- Why a port and not a grammar: the oracle is rustc's own tree with its spans, so the reader must make rustc's choices
+  (restrictions, the struct-literal and statement ambiguities, `break_up_float`, ungluing, edition keywords, the order of
+  `parse_expr_bottom`); a grammar written anew (the Reference's) would agree on valid code only up to those choices.
+  Recovery is not ported: where rustc reports an error the native reader rejects the file, and the helper rejects the same
+  files (it refuses any file rustc reported errors on), so acceptance is what has to match; rustc's messages are later work.
+  Macro expansion is not reading: macro calls stay token trees, as in rustc's parsed tree.
+- Wired as `bin/repr-rust dump|read --reader native` (`REPR_RUST_READER`; no rustc needed then) and `bin/repr-rust
+  native-check` (`make repr-rust-native-check`): the helper and the native reader dump the same files and the dumps are
+  compared as data. Its list `test/rust/native-check.txt`: the 8 samples at their editions and 60 files of core and std
+  (53,158 lines): 68 of 68 equal, also with `--full` (45 s and 53 s; the reader evaluated on stage 0 at about 3,300 lines
+  a second, 0.55 GB). By hand, light: 92 more files (alloc, core, std, ten compiler crates) equal; 39 edge-case files at
+  the four editions equal or rejected by both; 1,400 one-edit mutants (seeds 26-28): 254 equal, 1,146 rejected by both,
+  none differing; the converter's forms of native dumps byte for byte the helper's. No corpus run, no gate step
+  (repr/rust stays out of the gate).
