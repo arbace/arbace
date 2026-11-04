@@ -774,7 +774,7 @@
     (doseq [p ps :when (vector? p)]
       (let [nmx (when (local? (peek p)) (peek p))]
         (when (and nmx (numbered? (local-key nmx)) (< (Long/parseLong (local-key nmx)) (aget ^longs (.next ^Fn st) 0)))
-          (verr :parser/numbering (str "argument expected to be numbered '%" (aget ^longs (.next ^Fn st) 0) "' or greater") {:at [:find-last (str "%" (local-key nmx))]}))
+          (verr :parser/numbering (str "argument expected to be numbered '%" (aget ^longs (.next ^Fn st) 0) "' or greater") {:at [:param (.indexOf ^java.util.List (vec (remove #{'&} ps)) p)]}))
         (when (= what :define) (define-value st nmx (norm-type (first p)) "argument"))))
     (check-align (:align o))
     (note-md! (:md o))
@@ -1308,8 +1308,8 @@
       (let [w (when (int-type? (elem rt)) (int-bits (elem rt)))]
         (loop [pairs (partition 2 ops) last nil]
           (when-let [[lo hi] (first pairs)]
-            (when-not (md-int-op? lo) (verr :verifier/md-range "The lower limit must be an integer!" [:mdv x]))
-            (when-not (md-int-op? hi) (verr :verifier/md-range "The upper limit must be an integer!" [:mdv x]))
+            (when-not (md-int-op? lo) (verr :verifier/md-range "The lower limit must be an integer!" :none))
+            (when-not (md-int-op? hi) (verr :verifier/md-range "The upper limit must be an integer!" :none))
             (when-not (and (= (norm-type (first lo)) (elem rt)) (= (norm-type (first hi)) (elem rt)))
               (verr :verifier/md-range "Range types must match instruction type!"))
             (let [l (md-int-val lo) h (md-int-val hi)]
@@ -1326,9 +1326,10 @@
     (when (empty? ops) (verr :verifier/md-misc "TBAA metadata cannot have 0 operands" :inst [:mdv x]))
     (let [acc (md-ops (second ops))]
       (when-not (and (>= (count ops) 3) acc (= 3 (count acc)) (md-str (first acc)) (md-int-op? (nth acc 2)) (zero? (.signum ^java.math.BigInteger (md-int-val (nth acc 2)))))
-        (verr :verifier/md-misc "Access type node must be a valid scalar type" :inst [:mdv x]))
+        (verr :verifier/md-misc "Access type node must be a valid scalar type" :inst [:mdv x] [:mdv (second ops)]))
       (when (and (>= (count ops) 3) (md-int-op? (nth ops 2)) (not= (norm-type (first (nth ops 2))) (norm-type (first (nth acc 2)))))
-        (verr :verifier/md-misc "Access bit-width not the same as description bit-width" :inst [:mdv x])))))
+        (verr :verifier/md-misc "Access bit-width not the same as description bit-width" :inst [:mdv x]
+                (str (int-bits (norm-type (first (nth acc 2))))) (str (int-bits (norm-type (first (nth ops 2))))))))))
 
 (defn- check-prof-md [x hd b]
   (let [ops (md-ops x)]
@@ -1406,7 +1407,7 @@
     (when-let [ops (md-ops x)]
       (doseq [s ops]
         (let [sops (md-ops s)]
-          (when-not (or (md-ref? s) (and (seq? s) (= (first s) '!))) (verr :verifier/md-misc "scope list must consist of MDNodes" [:mdv s]))
+          (when-not (or (md-ref? s) (and (seq? s) (= (first s) '!))) (verr :verifier/md-misc "scope list must consist of MDNodes" [:mdv x]))
           (when (and sops (not (<= 2 (count sops) 3))) (verr :verifier/md-misc "scope must have two or three operands" [:mdv s]))))))
   (when-let [x (get md '!tbaa)] (check-tbaa-tag x))
   (when-let [x (get md '!prof)] (check-prof-md x hd b)))
@@ -1425,9 +1426,10 @@
 
 (defn- check-module-flags [forms]
   (let [flags (vec (mapcat #(when (and (= (first %) 'llvm/named-meta) (= (second %) '!llvm.module.flags)) (nth % 2)) forms))
-        ids (java.util.HashMap.)]
+        ids (java.util.HashMap.) bad (java.util.HashSet.)]
     (doseq [f flags]
-     (visiting
+     (let [n (.size *errs*)]
+      (visiting
       (let [ops (md-ops f)]
         (when-not (= 3 (count ops)) (verr :verifier/md-flags "incorrect number of operands in module flag" [:mdv f]))
         (let [[b id v] ops]
@@ -1448,15 +1450,17 @@
               8 (when-not (and (md-int-op? v) (not (neg? (.signum ^java.math.BigInteger (md-int-val v))))) (verr :verifier/md-flags "invalid value for 'min' module flag (expected constant non-negative integer)" [:mdv v]))
               nil)
             (when (and (#{"wchar_size" "SemanticInterposition"} (md-str id)) (not (md-int-op? v)))
-              (verr :verifier/md-flags (str (md-str id) " metadata requires constant integer argument") [:mdv v]))
+              (verr :verifier/md-flags (str (md-str id) " metadata requires constant integer argument") :none))
             (when (and (not= bv 3) (.containsKey ids (md-str id)))
               (verr :verifier/md-flags "module flag identifiers must be unique (or of 'require' type)" [:mdv id]))
-            (when (not= bv 3) (.put ids (md-str id) true)))))))
-    (doseq [f flags]
+            (when (not= bv 3) (.put ids (md-str id) true))))))
+      (when (> (.size *errs*) n) (.add bad f))))
+    (doseq [f flags :when (not (.contains bad f))]
+     (visiting
       (let [[b _ v] (md-ops f)]
         (when (= 3 (.longValue ^java.math.BigInteger (md-int-val b)))
           (let [[rid rv] (md-ops v)]
-            (when-not (.containsKey ids (md-str rid)) (verr :verifier/md-flags "invalid requirement on flag, flag is not present in module"))))))))
+            (when-not (.containsKey ids (md-str rid)) (verr :verifier/md-flags "invalid requirement on flag, flag is not present in module" [:mdv rid])))))))))
 
 (defn- check-module-ident [forms]
   (doseq [f forms :when (and (= (first f) 'llvm/named-meta) (#{'!llvm.ident '!llvm.commandline} (second f))) n (nth f 2)]
@@ -1559,7 +1563,7 @@
                              (verr :di/node "cannot have column info without line info"))
           "DISubprogram"
           (let [def? (flag? (:spFlags fs) "DISPFlagDefinition")]
-            (when (and (:type fs) (not= (:type fs) 'null) (not= "DISubroutineType" (kind-of (:type fs)))) (verr :di/node "invalid subroutine type"))
+            (when (and (:type fs) (not= (:type fs) 'null) (not= "DISubroutineType" (kind-of (:type fs)))) (verr :di/node "invalid subroutine type" [:md id] [:mdv (:type fs)]))
             (if def?
               (do (when-not (and (:unit fs) (not= (:unit fs) 'null)) (verr :di/node "subprogram definitions must have a compile unit"))
                   (when-not (= "DICompileUnit" (kind-of (:unit fs))) (verr :di/node "invalid unit type")))
