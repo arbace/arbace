@@ -1,0 +1,41 @@
+# PY6e: _socket over loopback: names through /etc/hosts and /etc/services, a socketpair, TCP with a timeout, UDP
+import socket as s, sys
+print(s.getaddrinfo('localhost',80))
+print(s.getaddrinfo(None,0))
+print(s.getaddrinfo('127.0.0.1','http',type=s.SOCK_STREAM))
+print(s.getaddrinfo(None,0,flags=s.AI_PASSIVE,family=s.AF_INET))
+try: s.getaddrinfo('nonexistent.invalid',0)
+except Exception as e: print(repr(e), e.errno)
+try: s.getaddrinfo('localhost','nosuchservice')
+except Exception as e: print(repr(e))
+print(s.gethostbyname('localhost'), s.gethostbyaddr('127.0.0.1'), s.gethostbyname_ex('localhost'))
+print(s.getnameinfo(('127.0.0.1',80),0), s.getnameinfo(('127.0.0.1',80),s.NI_NUMERICHOST|s.NI_NUMERICSERV))
+print(s.getservbyname('http'), s.getservbyport(80), s.getprotobyname('tcp'))
+a,b=s.socketpair(); print(a.getsockname(), b.getpeername(), a.type, a.family)
+a.sendall(b'hello'); print(b.recv(10))
+x=s.socket(); print(x.gettimeout()); x.settimeout(0); print(x.type, x.getblocking())
+srv=s.create_server(('127.0.0.1',0)); port=srv.getsockname()[1]
+c=s.create_connection(('127.0.0.1',port),timeout=5); conn,addr=srv.accept()
+print(addr[0], conn.getsockname()==c.getpeername())
+c.sendall(b'x'*100000); conn.settimeout(1)
+got=b''
+while len(got)<100000: got+=conn.recv(65536)
+print(len(got))
+try: conn.recv(1)
+except TimeoutError as e: print('timeout', e)
+c.close(); print(conn.recv(1))
+f=conn.makefile('rb'); conn.close(); srv.close()
+u=s.socket(s.AF_INET, s.SOCK_DGRAM); u.bind(('127.0.0.1',0)); u.sendto(b'dg', u.getsockname()); print(u.recvfrom(10)[0])
+print(s.inet_aton('127.1'), s.inet_ntop(s.AF_INET6, s.inet_pton(s.AF_INET6,'::1')), s.htons(1), s.htonl(1))
+import errno, os; print(os.strerror(errno.ETIMEDOUT), errno.errorcode[35])
+def err(f, *a):
+    try: return 'ok %r' % (f(*a),)
+    except Exception as e: return type(e).__name__
+print(err(s.ntohs, -1), err(s.htonl, -1), err(s.htons, 1 << 16), err(s.htonl, 1 << 32), s.ntohl(0xffffffff))
+print(err(s.if_indextoname, 0), err(s.if_indextoname, -1), err(s.if_indextoname, 2**1000), err(s.if_nametoindex, '_DEADBEEF'))
+print(s.if_nametoindex('lo'), s.if_indextoname(1), err(s.CMSG_LEN, -1), err(s.CMSG_LEN, sys.maxsize), err(s.CMSG_SPACE, 2**31))
+print(err(s.getaddrinfo, 'localhost', '\ud800'), err(s.getnameinfo, ('::1', 0, 0xffffffff), 0))
+print(s.getaddrinfo('ff02::1de:c0:face:8D%lo', 1234, s.AF_INET6, s.SOCK_DGRAM, s.IPPROTO_UDP)[0][4])
+print(s.getnameinfo(('ff02::1de:c0:face:8D', 1234, 0, 1), s.NI_NUMERICHOST | s.NI_NUMERICSERV))
+lim = 2**31 - 1
+print(s.CMSG_SPACE(lim - s.CMSG_SPACE(1)), err(s.CMSG_SPACE, lim - s.CMSG_SPACE(1) + 1), s.CMSG_LEN(lim - s.CMSG_LEN(0)), err(s.CMSG_LEN, lim - s.CMSG_LEN(0) + 1))
