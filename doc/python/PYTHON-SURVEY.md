@@ -1346,3 +1346,56 @@ The user's decision on PY7-runtime's DECISION (2026-11-04): (a), expat ported to
     callbacks after `del` (test_weakref, test_cyclic_gc: PYS9's finalization), 500,000 nested SubElements past the
     300 s timeout (test_deeply_nested_deepcopy), and test_error_path_no_crash, which needs `_testcapi`'s memory-error
     injection as its class's other two tests do.
+
+## As built: pyi's speed (2026-11-04, the Mac VM, queue 202b)
+
+EVAL-SPEED's lessons (origin/eval-speed, doc/go/EVAL-SPEED.md: a call's cost, allocations, inline caches of the
+lookups a call site repeats) applied where Go's profile (`PYI_CPUPROFILE` on a compiled benchmark, `go tool pprof`)
+put pyi's time. Before them, on richards compiled: Go's collector 25-30%, a call's frame (the frame, its locals, a
+stack grown by append from nothing, the arguments copied twice) 15-20%, attribute lookup 17% (lookupAttr's map by
+name, then the instance dict's Go map), the dispatch through AotExec for load-attr and store-attr; and every compiled
+program spent about 0.6 s of its start in the host's compiler, started only to read its own IR cache. The changes,
+each measured before and after on the sample (least CPU seconds of 3 alternated runs) and kept only when it paid:
+
+| change | where | measured on the VM (compiled) |
+|---|---|---|
+| a compiled program reads the host's IR cache itself (`compiler.sh`'s `# ir-cache: DIR DIGEST`) | aot.go, bin/pyi | -0.6 s every run |
+| frames: locals and stack one buffer (`Code.stackHint`); a returned frame nothing can reach reused (per code, at most 4; escaped by `sys._getframe`, tracebacks, `gi_frame`, `f_back`, signal handlers) | frame.go, eval.go | 25-37% |
+| inline caches of load-attr/store-attr/delete-attr by (type, typeEpoch) per instruction; `co_names` interned | attr.go, load.go | 3-11% |
+| calls bind a Python function's arguments where they are on the stack (self in the callable's slot), keyword names made once | eval.go (`callStack`), aot.go | 17% (richards, deltablue) |
+| exact int/float operations, int/float comparisons, list/tuple items without the slots' lookups | abstract.go, eval.go | nbody 22% |
+| Go's collector at GOGC 400 under a 2 GiB soft limit (GOGC, GOMEMLIMIT override) | aot.go | 20-30%, peak RSS about 2x (64 -> 120 MB) |
+| load-attr/store-attr compiled to `AotLoadAttr`/`AotStoreAttr`, not through AotExec | aot.ae, aot.go | raytrace 8% |
+| dict: the index a Go map to each hash's first entry, the rest chained | dict.go | goi-neutral (see below) |
+
+The dict was first an open-addressing table with no index up to 8 entries (4b51f741): 3-11% on the compiled sample,
+but deltablue on goi about 15% slower (goi interprets the scans and probes, where a Go map's lookup is one native
+call); the chained index (05453791) is goi-neutral and 2-14% behind open addressing compiled. Open addressing is the
+better choice once pyi is compiled into stage 0 (the re-seed after Python's tag).
+
+**The table** (`bin/pyi bench`, the process's milliseconds, two runs each; aarch64 VM shared with other tasks, load
+5-30: differences under 10-15% are noise; CPython 3.14.10; pyi on goi: the benchmark's own seconds of one loop,
+`time.perf_counter` around it, deltablue 5 loops, the base and this branch alternated):
+
+| benchmark | loops | CPython | compiled before | compiled after | loop before | loop after | pyi on goi before | pyi on goi after |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| richards | 10 | 324-331 | 3,132-3,186 | 1,245-1,249 | 3,481-3,497 | 1,429-1,479 | 23.5-25.6 s | 23.5-27.9 s |
+| deltablue | 50 | 130-134 | 1,829-2,030 | 670-691 | 1,924-2,015 | 686-705 | 11.3-12.7 s | 11.3-13.4 s |
+| nbody | 3 | 302-311 | 1,658-1,801 | 534-567 | 1,747-1,821 | 563-568 | 53.7-60.2 s | 39.3 s |
+| float | 4 | 223-232 | 1,793-1,819 | 640-689 | 1,797-2,062 | 690-695 | 31.5-32.8 s | 30.8 s |
+| raytrace | 1 | 208-210 | 2,412-2,458 | 900-914 | 2,413-2,561 | 933-946 | 134.7-153.3 s | 126.4 s |
+
+Compiled, the sample went from 5.5-9.6 times CPython to 1.8-4.3 times (the process, the start included); the loop
+(`PYI_AOT_LOOP`) gained as much, the runtime being the same. On goi (this branch's head; the pairs alternated, so a range is the load's) nbody gained about 30% and raytrace a little,
+richards, float and deltablue are within the noise: goi's own costs
+(its calls, its closures) dominate what pyi's runtime does, and its start (about 20-26 s, stage 0 loading the runtime's
+forms) is untouched; there GOMEMLIMIT is what binds (`PYI_GOMEMLIMIT=3GiB` took nbody's start from 26-28 s to 19-21 s,
+peak RSS 1.5 -> 2.3 GB: a decision for the main host, the report's).
+
+The main host's table (amd64): `bin/pyi bench bm_richards bm_deltablue bm_nbody bm_float bm_raytrace` on this branch and
+on its base 45ce1e92 (a worktree), and `bin/pyi bench --pyi ...` for pyi's whole process on goi; `bin/pyi bench --record`
+over all 71 rewrites `test/python/bench-aot-linux-amd64.edn` (the night's).
+
+Not taken (the profile's next items, for later): a load-method form in the IR (a method call still makes a bound method
+for the call to unwrap; CPython's LOAD_ATTR method variant), global loads cached by the dicts' keys version, a fused
+to-bool/jump (AotToBool pushes a bool AotTruthy pops), frame reuse for generator frames.
