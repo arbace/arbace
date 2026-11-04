@@ -838,56 +838,77 @@
   (let [x (first (remove #(let [b (body %)] (or (= 'phi (first b)) (dbg-record? b))) items))]
     (and x (contains? '#{landingpad catchpad cleanuppad catchswitch} (first (body x))))))
 
-(def ^:private intrinsics
-  "Basic signatures of common intrinsics: [return params]; (ov K class) defines overload type K, (m K) matches it."
-  '{"llvm.memcpy" [void [(ov 0 :ptr) (ov 1 :ptr) (ov 2 :int) i1]]
-    "llvm.memmove" [void [(ov 0 :ptr) (ov 1 :ptr) (ov 2 :int) i1]]
-    "llvm.memset" [void [(ov 0 :ptr) i8 (ov 1 :int) i1]]
-    "llvm.trap" [void []] "llvm.debugtrap" [void []] "llvm.assume" [void [i1]]
-    "llvm.smax" [(ov 0 :int) [(m 0) (m 0)]] "llvm.smin" [(ov 0 :int) [(m 0) (m 0)]]
-    "llvm.umax" [(ov 0 :int) [(m 0) (m 0)]] "llvm.umin" [(ov 0 :int) [(m 0) (m 0)]]
-    "llvm.sadd.sat" [(ov 0 :int) [(m 0) (m 0)]] "llvm.uadd.sat" [(ov 0 :int) [(m 0) (m 0)]]
-    "llvm.ssub.sat" [(ov 0 :int) [(m 0) (m 0)]] "llvm.usub.sat" [(ov 0 :int) [(m 0) (m 0)]]
-    "llvm.expect" [(ov 0 :int) [(m 0) (m 0)]]
-    "llvm.abs" [(ov 0 :int) [(m 0) i1]] "llvm.ctlz" [(ov 0 :int) [(m 0) i1]] "llvm.cttz" [(ov 0 :int) [(m 0) i1]]
-    "llvm.ctpop" [(ov 0 :int) [(m 0)]] "llvm.bswap" [(ov 0 :int) [(m 0)]] "llvm.bitreverse" [(ov 0 :int) [(m 0)]]
-    "llvm.lifetime.start" [void [(ov 0 :ptr)]] "llvm.lifetime.end" [void [(ov 0 :ptr)]]
-    "llvm.stacksave" [(ov 0 :ptr) []] "llvm.stackrestore" [void [(ov 0 :ptr)]]
-    "llvm.va_start" [void [(ov 0 :ptr)]] "llvm.va_end" [void [(ov 0 :ptr)]] "llvm.va_copy" [void [(ov 0 :ptr) (m 0)]]
-    "llvm.eh.typeid.for" [i32 [(ov 0 :ptr)]]
-    "llvm.fabs" [(ov 0 :fp) [(m 0)]] "llvm.sqrt" [(ov 0 :fp) [(m 0)]] "llvm.floor" [(ov 0 :fp) [(m 0)]]
-    "llvm.ceil" [(ov 0 :fp) [(m 0)]] "llvm.fmuladd" [(ov 0 :fp) [(m 0) (m 0) (m 0)]] "llvm.fma" [(ov 0 :fp) [(m 0) (m 0) (m 0)]]})
-
 (defn- intrinsic-entry [^String nm]
   (loop [k nm]
     (cond
-      (contains? intrinsics k) (intrinsics k)
+      (contains? intr/signatures k) (intr/signatures k)
       (str/includes? k ".") (recur (subs k 0 (.lastIndexOf k ".")))
       :else nil)))
 
-(def ^:private class-words {:int "any integer type" :ptr "any pointer type" :fp "any floating-point type"})
-(defn- class-ok? [c t] (case c :int (int-ish? t) :ptr (ptr-ish? t) :fp (fp-ish? t) true))
+(def ^:private class-words
+  {:int "any integer or integer vector" :ptr "any pointer type" :fp "any fp or fp vector" :intvec "any integer vector"
+   :fpvec "any fp vector" :vec "any vector type" :any "any type"})
 
-(defn- check-intrinsic-signature [^String nm fty]
-  (when-let [[r ps] (when-not (and (re-find #"^llvm\.lifetime\.(start|end)" nm) (= (nth fty 2) '[i64 ptr]))  ; AutoUpgrade's old form
-                      (intrinsic-entry nm))]
+(defn- class-ok? [c t]
+  (case c
+    :int (int-ish? t) :ptr (ptr-ish? t) :fp (fp-ish? t)
+    :intvec (and (vec-type? t) (int-type? (elem t))) :fpvec (and (vec-type? t) (fp-type? (elem t)))
+    :vec (vec-type? t) :any (first-class? t) true))
+
+(defn- old-form-pattern
+  "AutoUpgrade's old signatures: the pattern `ps` of the intrinsic `nm` adjusted to the `n` parameters it was declared
+  with (memcpy, memmove and memset with their alignment argument, ctlz and cttz without the zero-undef flag, objectsize
+  without the dynamic flag, masked load and store with their alignment, lifetime with its size)."
+  [^String nm ps n]
+  (cond
+    (and (re-find #"^llvm\.(memcpy|memmove|memset)\." nm) (= n 5)) (into (subvec ps 0 3) ['(ov 98 :any) '(ov 99 :any)])
+    (and (re-find #"^llvm\.(ctlz|cttz)\." nm) (= n 1)) (subvec ps 0 1)
+    (and (re-find #"^llvm\.objectsize\." nm) (= n 3)) (subvec ps 0 3)
+    (and (re-find #"^llvm\.masked\.load\." nm) (= n 4)) (into [(first ps) 'i32] (rest ps))
+    (and (re-find #"^llvm\.masked\.store\." nm) (= n 4)) (into (subvec ps 0 2) (into ['i32] (subvec ps 2)))
+    :else ps))
+
+(defn- check-intrinsic-signature
+  "The Verifier's matchIntrinsicSignature over the declared type `fty` of the intrinsic `nm` (a table entry): the argument
+  count, then the return type and each argument against their descriptors, the ones that name an overload not yet seen
+  deferred to the end."
+  [^String nm fty]
+  (when-let [[r ps] (when-let [[r ps] (intrinsic-entry nm)] [r (old-form-pattern nm ps (count (remove #{'&} (nth fty 2))))])]
     (let [[_ fr fps] fty fps (vec (remove #{'&} fps))
-          ovs (java.util.HashMap.)
-          check (fn [what pat t]
+          ovs (java.util.HashMap.) deferred (java.util.ArrayList.)
+          fail (fn [what detail] (verr :verifier/intrinsic-signature (str what " type " detail)))
+          check (fn check [what pat t]
                   (cond
                     (and (seq? pat) (= (first pat) 'ov))
                     (if (class-ok? (nth pat 2) t)
                       (.put ovs (second pat) t)
-                      (verr :verifier/intrinsic-signature (str what " (overload type " (second pat) ") expected " (class-words (nth pat 2)) ", but got " (tstr t))))
-                    (and (seq? pat) (= (first pat) 'm))
-                    (let [want (.get ovs (second pat))]
-                      (when (and want (not= want t))
-                        (verr :verifier/intrinsic-signature (str what " (matching overload type " (second pat) ") expected " (tstr want) ", but got " (tstr t)))))
-                    :else (when-not (= pat t) (verr :verifier/intrinsic-signature (str what " expected " (tstr pat) ", but got " (tstr t))))))]
+                      (fail what (str "(overload type " (second pat) ") expected " (class-words (nth pat 2)) ", but got " (tstr t))))
+                    (and (seq? pat) (#{'m 'elt 'vw} (first pat)))
+                    (if-let [want (.get ovs (second pat))]
+                      (case (first pat)
+                        m (when-not (= want t) (fail what (str "(matching overload type " (second pat) ") expected " (tstr want) ", but got " (tstr t))))
+                        elt (let [e (elem want)]
+                              (when-not (= e t) (fail what (str "(vector element of overload type " (second pat) ") expected " (tstr e) " (overload type " (second pat) " is " (tstr want) "), but got " (tstr t)))))
+                        vw (let [e (nth pat 2) w (if (vec-type? want) (list (first want) (nth want 1) e) e)]
+                             (when-not (= w t)
+                               (fail what (cond
+                                            (not (vec-type? want)) (str "expected " (tstr w) ", but got " (tstr t))
+                                            (not (vec-type? t))
+                                            (str "(same vector width of overload type " (second pat) ") expected vector (overload type " (second pat) " is " (tstr want) "), but got " (tstr t))
+                                            :else (str "(same vector width of overload type " (second pat) ") expected " (tstr w) ", but got " (tstr t)))))))
+                      (.add deferred #(check what pat t)))
+                    (and (seq? pat) (= (first pat) 'struct))
+                    (let [t (resolve-type t)]
+                      (when-not (and (seq? t) (= (first t) 'struct) (= (count (rest t)) (count (rest pat))))
+                        (fail what (str "expected literal non-packed struct with " (count (rest pat)) " elements, but got " (tstr t))))
+                      (doseq [[k p e] (map vector (range) (rest pat) (rest t))]
+                        (check (str what " struct element " k) p e)))
+                    :else (when-not (= pat t) (fail what (str "expected " (tstr pat) ", but got " (tstr t))))))]
+      (check "intrinsic return" r fr)
+      (doseq [[i p] (map-indexed vector ps) :when (< i (count fps))] (check (str "intrinsic argument " i) p (nth fps i)))
       (when-not (= (count ps) (count fps))
         (verr :verifier/intrinsic-signature (str "intrinsic has incorrect number of args. Expected " (count ps) ", but got " (count fps))))
-      (check "intrinsic return type" r fr)
-      (doseq [[i p] (map-indexed vector ps)] (check (str "intrinsic argument " i " type") p (nth fps i))))))
+      (doseq [d deferred] (d)))))
 
 (defn- callee-of [b] (let [[h ps] (split-inst b)] (when ('#{call invoke callbr} h) (second ps))))
 
@@ -1145,6 +1166,11 @@
                           (let [d (.get *gdefs* (global-key c)) [_ ps] (split-inst b)]
                             (when (and d (= (:kind d) :function) (not= (:fty d) (call-fty (first ps) (nth ps 2))))
                               (verr :verifier/intrinsic-call "Intrinsic called with incompatible signature"))
+                            (when (re-find #"^llvm\.ptrmask\." (global-key c))
+                              (let [[a m] (map #(norm-type (first %)) (nth ps 2))]
+                                (when-not (ptr-ish? a) (verr :verifier/intrinsic-call "llvm.ptrmask intrinsic first argument must be pointer or vector of pointers"))
+                                (when-not (= (vec-type? a) (vec-type? m)) (verr :verifier/intrinsic-call "llvm.ptrmask intrinsic arguments must be both scalars or both vectors"))
+                                (when (and (vec-type? a) (not= (nth a 1) (nth m 1))) (verr :verifier/intrinsic-call "llvm.ptrmask intrinsic arguments must have the same number of elements"))))
                             (when (re-find #"^llvm\.lifetime\.(start|end)" (global-key c))
                               (let [a (peek (last (nth ps 2)))]
                                 (when-not (or (= a 'poison)
