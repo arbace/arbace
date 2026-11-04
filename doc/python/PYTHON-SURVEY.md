@@ -995,7 +995,9 @@ run's non-passes stopped at those two. A sample was rerun at 9e41dc00's runtime:
     about 0.3% of the methods.
 - **Statically over all of Lib/test.** 431 test methods use weak references, `__del__`, `getrefcount` or `ResourceWarning`:
   174 with `gc.collect`, 226 without, 31 `cpython_only`.
-- The choice between (a), (c) and (b) for the 47 is the user's (queue 201's DECISION).
+- **Decided (the user, 2026-11-04): (a).** The 47 are classed by design: `:finalization` is `:kind :design`, with no
+  reference counting, (c) or (b). Its methods stay few: CPython's own refcount tests are `cpython_only`. The 50 of
+  `:finalization-collect` stay deferred, for PY7-runtime's finalizer queue (PYS9 (a): `gc.collect()` drains it).
 
 **The coverage subset and the rotation (GT8.3, GT8.4, GTS205 (a)).**
 - **Why the AOT route.** Under goi, Go's `-cover` sees goi and not the interpreted runtime. PY8's AOT compiles the driver
