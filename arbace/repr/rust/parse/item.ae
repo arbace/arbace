@@ -410,7 +410,7 @@
 
 (defn- parse-static-item [^P p safety m]
   (let [ident (parse-ident p)]
-    (when (check p :Lt) (fail p "static items may not have generic parameters"))
+    (when (is? :Lt) (let [g (parse-generics p)] (emit p "static items may not have generic parameters" (fget g :span))))
     (let [colon (eat p :Colon)
           ty (if (and colon (not (or (check p :Eq) (check p :Semi)))) (parse-ty p)
                  (missing-global-item-type p (if (= m 'Mut) "static mut" "static")))
@@ -654,28 +654,33 @@
               (parse-generics p)
               (generics [] (where-clause false [] DUMMY) (sp-hi (psp))))]
       (when (or (and (>= (ed) 2018) (kw? (tok) "async")) (kw-followed-by-ident? p "async"))
-        (fail p "`async` trait implementations are unsupported"))
+        (bump p) (emit p "`async` trait implementations are unsupported" (psp)))
       (let [polarity (parse-polarity p)
+            neg-span (psp)
             ty-first (if (and (kw? (tok) "for") (not (identical? (.-kind (la p 1)) :Lt)))
-                       (fail p "missing trait in a trait impl")
+                       (fail p "missing trait in a trait impl" (sp-between (psp) (tsp)))
                        (parse-ty-common p {:ty-generics g}))
             has-for (eat-kw p "for")
-            ty-second (cond (check p :DotDot) (do (bump p) (mk-ty (psp) 'Dummy))
+            missing-for (sp-between (psp) (tsp))
+            ty-second (cond (is? :DotDot) (do (bump p) (mk-ty (psp) 'Dummy))
                             (or has-for (can-begin-type? (tok) (ed))) (parse-ty p)
                             :else nil)
             g (fset g :where_clause (parse-where-clause p))
             [items inner] (if is-reuse [[] []] (parse-item-list p #(parse-assoc-item p {:req-name (fn [_ _] true) :context :impl :req-body true})))
             [of-trait self-ty]
             (if ty-second
-              (do (when-not has-for (fail p "missing `for` in a trait impl"))
+              (do (when-not has-for (emit p "missing `for` in a trait impl" missing-for))
                   (let [k (ty-kind ty-first)]
-                    (when-not (and (variant? k 'Path) (= 'None (nth k 1))) (fail p "expected a trait, found type"))
+                    (when-not (and (variant? k 'Path) (= 'None (nth k 1)))
+                      (if (and (variant? k 'ImplTrait) (= 1 (count (nth k 1))) (= 'Trait (first (first (nth k 1)))))
+                        (emit p "unexpected `impl` keyword" (sp-until (ty-span ty-first) (bound-span (first (nth k 1)))))
+                        (fail p "expected a trait, found type" (ty-span ty-first))))
                     [(list 'Some (list 'TraitImplHeader :defaultness defaultness :safety safety :polarity polarity
                                        :trait_ref (list 'TraitRef :path (nth k 2))))
                      ty-second]))
-              (do (when (variant? safety 'Unsafe) (fail p "inherent impls cannot be unsafe"))
-                  (when (= polarity "negative") (fail p "inherent impls cannot be negative"))
-                  (when (variant? defaultness 'Default) (fail p "inherent impls cannot be default"))
+              (do (when (variant? safety 'Unsafe) (emit p "inherent impls cannot be unsafe" (ty-span ty-first) "E0197"))
+                  (when (= polarity "negative") (emit p "inherent impls cannot be negative" (ty-span ty-first)))
+                  (when (variant? defaultness 'Default) (emit p "inherent impls cannot be default" (ty-span ty-first)))
                   ['None ty-first]))]
         [(list 'Impl (list 'Impl :generics g :constness constness :of_trait of-trait :self_ty self-ty :items items)) inner]))))
 

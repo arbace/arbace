@@ -4,6 +4,8 @@
 
 (in-ns 'arbace.repr.rust.parse)
 
+(declare parse-ident-norecover)
+
 ;; ---------------------------------------------------------------------------------------------
 ;; util/parser.rs: AssocOp and ExprPrecedence (Jump 0 ... Unambiguous 14); a bound on precedences is
 ;; -1 (unbounded), 2p (included) or 2p+1 (excluded)
@@ -374,12 +376,12 @@
   [^P p self-arg ^Sp lo]
   (cond
     (and (>= (ed) 2018) (eat-kw p "await")) (let [e (mk-expr (sp-to lo (psp)) (list 'Await self-arg (psp)))]
-                                              (when (and (check p :OpenParen) (identical? (.-kind (la p 1)) :CloseParen))
-                                                (fail p "incorrect use of `await`"))
+                                              (when (and (is? :OpenParen) (identical? (.-kind (la p 1)) :CloseParen))
+                                                (let [s (sp-to (tsp) (tspan (la p 1)))] (bump p) (bump p) (emit p "incorrect use of `await`" s)))
                                               e)
     (eat-kw p "use") (let [e (mk-expr (sp-to lo (psp)) (list 'Use self-arg (psp)))]
-                       (when (and (check p :OpenParen) (identical? (.-kind (la p 1)) :CloseParen))
-                         (fail p "incorrect use of `use`"))
+                       (when (and (is? :OpenParen) (identical? (.-kind (la p 1)) :CloseParen))
+                         (let [s (sp-to (tsp) (tspan (la p 1)))] (bump p) (bump p) (emit p "incorrect use of `use`" s)))
                        e)
     (eat-kw p "match") (parse-match-block p lo (psp) self-arg 'Postfix)
     (eat-kw p "yield") (mk-expr (sp-to lo (psp)) (list 'Yield (list 'Postfix self-arg)))
@@ -387,7 +389,16 @@
     (let [fn-lo (tsp)
           seg (parse-path-segment p :expr nil)]
       (check-trailing-angle-brackets p seg #{:OpenParen})
-      (when (and (check p :PathSep) (nil? (seg-args seg))) (fail p "missing angle brackets in a turbofish"))
+      (when (and (is? :PathSep) (nil? (seg-args seg)))
+        (let [s (snap p)]
+          (bump p)
+          (let [lo (tsp)
+                ok (attempt (parse-angle-args p nil) true)]
+            (when ok
+              (let [sp (sp-to lo (psp))]
+                (loop [] (when (or (is? :Shr) (is? :Gt)) (bump p) (recur)))
+                (when (is? :OpenParen) (emit p "generic parameters without surrounding angle brackets" sp))))
+            (restore! p s))))
       (if (check p :OpenParen)
         (let [args (parse-expr-paren-seq p)]
           (mk-expr (sp-to lo (psp)) (list 'MethodCall (list 'MethodCall :seg seg :receiver self-arg :args args
@@ -739,6 +750,7 @@
         constness (parse-closure-constness p)
         movability (if (eat-kw p "static") 'Static 'Movable)
         ck (when (>= (ed) 2018) (parse-coroutine-kind p :sensitive))
+        _ (when (and ck (= binder 'NotPresent)) (add-exp! p :OpenBrace))
         cc (parse-capture-clause p)
         [decl arg-span] (parse-fn-block-decl p)
         decl-hi (psp)
@@ -810,12 +822,14 @@
     e))
 
 (defn parse-expr-let [^P p ^long restrictions]
-  (when (zero? (bit-and restrictions R-LET)) (fail p "expected expression, found `let` statement"))
+  (when (zero? (bit-and restrictions R-LET))
+    (if (identical? (.-kind ^Tok (prev)) :Or)
+      (fail p "expected expression, found `let` statement")
+      (emit p "expected expression, found `let` statement")))
   (bump p)
   (let [lo (psp)
         pat (parse-pat-no-top-guard p nil :recover-comma :recover-colon :likely-tuple)]
-    (when (check p :EqEq) (fail p "expected `=`, found `==`"))
-    (expect p :Eq)
+    (if (is? :EqEq) (emit p "expected `=`, found `==`") (expect p :Eq))
     (let [e (parse-expr-assoc p (inc (* 2 P-LAND)))
           s (sp-to lo (expr-span e))]
       (mk-expr s (list 'Let pat e s 'No)))))
@@ -908,6 +922,25 @@
       (fail p "unexpected parentheses surrounding `match` arm pattern"))
     [pat (parse-match-arm-guard p)]))
 
+(defn- arm-body-missing-braces
+  "parse_arm_body_missing_braces after `;`: statements up to the next arm or the `}` are the error
+  MatchArmBodyWithoutBraces (emitted), else nothing (the state restored)"
+  [^P p first-e]
+  (let [s0 (snap p)]
+    (bump p)
+    (loop [last-sp (expr-span first-e)]
+      (cond (is? :CloseBrace) (emit p "`match` arm body without braces" (sp-to (expr-span first-e) last-sp))
+            (is? :Comma) (do (restore! p s0) nil)
+            :else
+            (let [s1 (snap p)
+                  at-arm (and (attempt (parse-pat-no-top-alt p nil nil) true) (is? :FatArrow))]
+              (restore! p s1)
+              (if at-arm
+                (emit p "`match` arm body without braces" (sp-to (expr-span first-e) last-sp))
+                (if-let [st (attempt (parse-stmt-without-recovery p true))]
+                  (recur (stmt-span st))
+                  (do (restore! p s0) nil))))))))
+
 (defn parse-arm
   "parse_arm"
   [^P p]
@@ -918,15 +951,30 @@
         fat (check p :FatArrow)
         almost (contains? #{:Eq :RArrow :Ge :Gt} (tk))
         armless (or (and (not fat) (not almost) (could-be-never-pattern? pat)) (contains? #{:Comma :CloseBrace} (tk)))
+        arm-lo lo
+        missing-comma
+        (fn [body-hi]
+          ;; the missing comma's recovery: a pattern and `=>` next make it MissingCommaAfterMatchArm
+          (fn [e]
+            (let [d (pending p) s (snap p)
+                  follows (and (attempt (parse-pat-no-top-guard p nil :recover-comma :recover-colon :either-tuple-or-pipe) true)
+                               (check p :FatArrow))]
+              (restore! p s)
+              (if follows
+                (emit p "expected `,` following `match` arm" (sp-hi body-hi))
+                (fail-diag p d)))))
         body (if armless
-               (do (when-not (or (eat p :Comma) (check p :CloseBrace)) (unexpected p)) nil)
-               (do (expect p :FatArrow)
-                   (let [e (parse-expr-res p R-STMT)
-                         require-comma (and (not (expr-complete-kind? (expr-kind e))) (not (check p :CloseBrace)))]
-                     (if-not require-comma
-                       (eat p :Comma)
-                       (when-not (or (eat p :Comma) (check p :CloseBrace))
-                         (fail p (str "expected one of `,`, `.`, `?`, `}`, or an operator, found " (describe (tok))))))
+               (do (on-err p (expect-one-of p [:Comma] [:CloseBrace])
+                           (if (could-be-never-pattern? pat) (missing-comma before-body) (fn [e] (throw e))))
+                   nil)
+               (do (on-err p (expect p :FatArrow)
+                           (fn [e] (if almost (do (emit-diag p (pending p))) (throw e))))
+                   (let [arrow (psp)
+                         e (parse-expr-res p R-STMT)
+                         require-comma (and (not (expr-complete-kind? (expr-kind e))) (not (is? :CloseBrace)))]
+                     (cond (not require-comma) (eat p :Comma)
+                           (and (is? :Semi) (arm-body-missing-braces p e)) nil
+                           :else (on-err p (expect-one-of p [:Comma] [:CloseBrace]) (missing-comma (expr-span e))))
                      e)))
         hi (if body (expr-span body) before-body)]
     (list 'Arm :attrs attrs :pat pat :guard (opt guard) :body (opt body) :span (sp-to lo hi) :is_placeholder false)))
@@ -940,37 +988,45 @@
         shorthand (not (contains? #{:Colon :Eq} (.-kind (la p 1))))
         wrong (and (non-reserved-ident? (tok) (ed))
                    (not (contains? #{:Colon :Eq :Comma :CloseBrace :CloseParen} (.-kind (la p 1)))))]
-    (when wrong (fail p "expected one of `,`, `:`, or `}`"))
+    (when wrong (fail p (str "expected one of `,`, `:`, or `}`, found `" (token-str (la p 1)) "`") (tspan (la p 1))))
     (let [[ident e] (if shorthand
-                      (let [i (parse-ident-common p)] [i (mk-expr (id-span i) (list 'Path 'None (path-from-ident i)))])
+                      (let [i (parse-ident-norecover p)] [i (mk-expr (id-span i) (list 'Path 'None (path-from-ident i)))])
                       (let [i (parse-field-name p)]
-                        (when (check p :Eq) (fail p "expected `:`, found `=`"))
+                        (when (is? :Eq) (emit p "expected `:`, found `=`"))
                         (bump p)
                         [i (parse-expr p)]))]
       (list 'ExprField :attrs attrs :span (sp-to lo (expr-span e)) :ident ident :expr e :is_shorthand shorthand
             :is_placeholder false))))
 
 (defn- parse-struct-fields
-  "parse_struct_fields: [fields rest]"
-  [^P p close]
-  (loop [fields (transient [])]
-    (if (check p close)
-      [(persistent! fields) 'None]
-      (if (or (eat p :DotDot) (and (not (identical? close (.-kind (la p 1)))) (check p :DotDotDot) (fail p "expected `..`, found `...`")))
-        (if (check p close)
-          [(persistent! fields) (list 'Rest (psp))]
-          (let [e (parse-expr p)]
-            (when (check p :Comma) (fail p "cannot use a comma after the base struct"))
-            [(persistent! fields) (list 'Base e)]))
-        (let [f (parse-expr-field p)]
-          (when-not (or (eat p :Comma) (check p close)) (fail p (str "expected `,`, found " (describe (tok)))))
-          (recur (conj! fields f)))))))
+  "parse_struct_fields: [fields rest]; recover: rustc emits a field's error and goes on (here: stops
+  with it), else returns it"
+  [^P p close recover]
+  (let [handle (fn [e] (if (or (not recover) (and (restr? R-GUARD) (= close :CloseBrace)))
+                         (throw e)
+                         (emit-diag p (pending p))))]
+    (loop [fields (transient [])]
+      (if (is? close)
+        [(persistent! fields) 'None]
+        (if (or (eat p :DotDot)
+                (and (not (identical? close (.-kind (la p 1)))) (eat p :DotDotDot)
+                     (emit p "expected `..`, found `...`" (psp))))
+          (let [exp-span (psp)]
+            (if (check p close)
+              [(persistent! fields) (list 'Rest (psp))]
+              (let [e (on-err p (parse-expr p) handle)]
+                (when (is? :Comma) (emit p "cannot use a comma after the base struct" (sp-to exp-span (psp))))
+                [(persistent! fields) (list 'Base e)])))
+          (let [f (on-err p (parse-expr-field p) handle)]
+            (when (fget f :is_shorthand) (add-exp! p :Colon))
+            (on-err p (expect-one-of p [:Comma] [close]) handle)
+            (recur (conj! fields f))))))))
 
 (defn parse-expr-struct
   "parse_expr_struct (the { eaten)"
   [^P p qself path recover]
   (let [lo (path-span path)
-        [fields rest] (parse-struct-fields p :CloseBrace)
+        [fields rest] (parse-struct-fields p :CloseBrace recover)
         s (sp-to lo (tsp))]
     (expect p :CloseBrace)
     (mk-expr s (list 'Struct (list 'StructExpr :qself (opt qself) :path path :fields fields :rest rest)))))
