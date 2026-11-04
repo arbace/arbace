@@ -609,7 +609,7 @@
       (cast-ops h) (let [[t _ t2] ps* a (norm-type t) c (norm-type t2)]
                      (when-not (cast-valid? h a c)
                        (verr :parser/cast (str "invalid cast opcode for cast from '" (tstr a) "' to '" (tstr c) "'") {:at [:ty]})))
-      (= h 'catchpad) (when (= (first ps) 'none) (verr :parser/syntax "expected scope value for catchpad"))
+      (= h 'catchpad) (when (= (first ps) 'none) (verr :parser/syntax "expected scope value for catchpad" {:at [:body 2]}))
       (= h 'alloca) (check-align (:align o))
       (= h 'load) (do (when-not (ptr-type? (norm-type (first (second ps)))) (verr :parser/load "load operand must be a pointer to a first class type" {:at [:op 1]}))
                       (when (and (:atomic o) (nil? (:align o))) (verr :parser/atomic-align "atomic load must have explicit non-zero alignment"))
@@ -1150,6 +1150,7 @@
   "The Verifier's rules of the funclet instructions, `x` (head `hd`) at item `ii` of block `bi`."
   [hd b x bi blocks items insts g defs personality?]
   (let [[_ ps o] (split-inst b) idx (:idx g)
+        op-inst (fn [v] (if-let [[_ _ _ dx] (when (local? v) (.get ^java.util.Map defs (local-key v)))] [:inst dx] ""))
         pad-of (fn [v] (when (local? v) (when-let [[_ _ db] (.get ^java.util.Map defs (local-key v))] (first db))))]
     (when (#{'catchswitch 'catchpad 'cleanuppad} hd)
       (let [nm (case hd catchswitch "CatchSwitchInst" catchpad "CatchPadInst" cleanuppad "CleanupPadInst")]
@@ -1162,36 +1163,70 @@
           (when (and (= hd 'catchpad) (not= pk 'catchswitch))
             (verr :verifier/funclet "CatchPadInst needs to be directly nested in a CatchSwitchInst.")))
         (when (zero? bi) (verr :verifier/eh-pad-entry "EH pad cannot be in entry block."))
-        (doseq [p (nth (:preds g) bi)]
-          (let [t (last (nth blocks p)) [th _ to] (split-inst (body t))
-                lbl-is-me (fn [l] (and l (= (get idx (local-key l)) bi)))]
-            (if (= hd 'catchpad)
-              (when-not (and (= th 'catchswitch) (= (result t) (first ps)))
-                (verr :verifier/funclet "Block containg CatchPadInst must be jumped to only by its catchswitch."))
-              (when-not (case th
-                          invoke (and (lbl-is-me (:unwind to)) (not (lbl-is-me (:to to))))
-                          catchswitch (lbl-is-me (:unwind to))
-                          cleanupret (lbl-is-me (:unwind to))
-                          false)
-                (verr :verifier/funclet "EH pad must be jumped to via an unwind edge")))))
+        (let [key-of (fn [v] (if (or (= v 'none) (nil? v)) :none (local-key v)))
+              def-of (fn [k] (when (string? k) (.get ^java.util.Map defs k)))
+              parent-of (fn [k] (if-let [[_ _ db] (def-of k)] (key-of (first (nth (split-inst db) 1))) :none))
+              to-key (when (result x) (local-key (result x)))
+              to-parent (key-of (first ps))]
+          (visiting
+          (doseq [p (nth (:preds g) bi)]
+            (let [t (last (nth blocks p)) [th tps to] (split-inst (body t))
+                  lbl-is-me (fn [l] (and l (= (get idx (local-key l)) bi)))]
+              (if (= hd 'catchpad)
+                (when-not (and (= th 'catchswitch) (= (result t) (first ps)))
+                  (verr :verifier/funclet "Block containg CatchPadInst must be jumped to only by its catchswitch." :inst))
+                (let [bad (fn [] (verr :verifier/funclet "EH pad must be jumped to via an unwind edge" :inst [:inst t]))
+                      from (case th
+                             invoke (do (when-not (and (lbl-is-me (:unwind to)) (not (lbl-is-me (:to to)))) (bad))
+                                        (if-let [f (first (filter #(= (first %) "funclet") (:bundles to)))] (key-of (peek (second f))) :none))
+                             cleanupret (do (when-not (lbl-is-me (:unwind to)) (bad))
+                                            (let [fp (key-of (first tps))]
+                                              (when (= fp to-parent) (verr :verifier/funclet "A cleanupret must exit its cleanup" [:inst t]))
+                                              fp))
+                             catchswitch (do (when-not (lbl-is-me (:unwind to)) (bad)) (key-of (result t)))
+                             (bad))]
+                  (loop [from from seen #{}]
+                    (when (= from to-key)
+                      (verr :verifier/funclet "EH pad cannot handle exceptions raised within it" (if-let [[_ _ _ dx] (def-of from)] [:inst dx] "") [:inst t]))
+                    (when-not (= from to-parent)
+                      (when (= from :none) (verr :verifier/funclet "A single unwind edge may only enter one EH pad" [:inst t]))
+                      (when (seen from) (verr :verifier/funclet "EH pad jumps through a cycle of pads" (if-let [[_ _ _ dx] (def-of from)] [:inst dx] "")))
+                      (recur (parent-of from) (conj seen from)))))))))
+          (when to-key
+            (loop [k to-parent seen #{}]
+              (when (and (string? k) (< (count seen) 1000))
+                (when (= k to-key) (verr :verifier/funclet "FuncletPadInst must not be nested within itself" :inst))
+                (recur (parent-of k) (conj seen k)))))
+          (when (and to-key (#{'cleanuppad 'catchpad} hd))
+            (let [users (for [[_ _ & its] blocks ux its :let [ub (body ux)] :when (#{'invoke 'cleanupret} (first ub))
+                              :let [[uh ups uo] (split-inst ub)
+                                    pad (if (= uh 'invoke)
+                                          (when-let [f (first (filter #(= (first %) "funclet") (:bundles uo)))] (key-of (peek (second f))))
+                                          (key-of (first ups)))]
+                              :when (= pad to-key)]
+                          [ux (:unwind uo)])]
+              (loop [us users first-user nil first-pad nil]
+                (when-let [[ux u] (first us)]
+                  (let [upk (cond (or (nil? u) (= u 'caller)) :none
+                                  :else (when-let [ubi (get idx (local-key u))]
+                                          (when-let [px (first-non-phi (drop 2 (nth blocks ubi)))]
+                                            (when (#{'catchswitch 'catchpad 'cleanuppad 'landingpad} (first (body px)))
+                                              (if (result px) (local-key (result px)) :none)))))]
+                    (cond
+                      (nil? upk) (recur (rest us) first-user first-pad)
+                      (and (string? upk) (= (parent-of upk) to-key)) (recur (rest us) first-user first-pad)
+                      (nil? first-user) (recur (rest us) ux upk)
+                      (not= upk first-pad) (verr :verifier/funclet "Unwind edges out of a funclet pad must have the same unwind dest" :inst [:inst first-user] [:inst ux])
+                      :else (recur (rest us) first-user first-pad))))))))
         (when (= hd 'catchswitch)
           (doseq [l (second ps)]
-            (when-not (= 'catchpad (pad-head blocks idx l)) (verr :verifier/funclet "CatchSwitchInst handlers must be catchpads")))
+            (when-not (= 'catchpad (pad-head blocks idx l)) (verr :verifier/funclet "CatchSwitchInst handlers must be catchpads" :inst (label-text l))))
           (when-let [u (:unwind o)]
             (when-not (= u 'caller)
               (when (= 'landingpad (pad-head blocks idx u)) (verr :verifier/funclet "CatchSwitchInst must unwind to an EH block which is not a landingpad.")))))))
-    (when (#{'catchswitch 'cleanupret 'invoke} hd)
-      (let [u (:unwind o) ub (when (and u (not= u 'caller)) (get idx (local-key u)))
-            home (case hd
-                   catchswitch bi
-                   cleanupret (when-let [[db] (when (local? (first ps)) (.get ^java.util.Map defs (local-key (first ps))))] db)
-                   invoke (when-let [f (first (filter #(= (first %) "funclet") (:bundles o)))]
-                            (let [t (peek (second f))] (when (local? t) (first (.get ^java.util.Map defs (local-key t))))))
-                   nil)]
-        (when (and ub home (= ub home)) (verr :verifier/funclet "EH pad cannot handle exceptions raised within it"))))
     (case hd
-      catchret (when-not (= 'catchpad (pad-of (first ps))) (verr :verifier/funclet "CatchReturnInst needs to be provided a CatchPad"))
-      cleanupret (do (when-not (= 'cleanuppad (pad-of (first ps))) (verr :verifier/funclet "CleanupReturnInst needs to be provided a CleanupPad"))
+      catchret (when-not (= 'catchpad (pad-of (first ps))) (verr :verifier/funclet "CatchReturnInst needs to be provided a CatchPad" :inst (op-inst (first ps))))
+      cleanupret (do (when-not (= 'cleanuppad (pad-of (first ps))) (verr :verifier/funclet "CleanupReturnInst needs to be provided a CleanupPad" :inst (op-inst (first ps))))
                      (when-let [u (:unwind o)]
                        (when-not (= u 'caller)
                          (when (= 'landingpad (pad-head blocks idx u)) (verr :verifier/funclet "CleanupReturnInst must unwind to an EH block which is not a landingpad.")))))
@@ -1589,6 +1624,46 @@
               (when (and d (not= "DIGlobalVariableExpression" (di-kind (node-of d))))
                 (visiting (binding [*ctx* {:global f}] (verr :di/global "!dbg attachment of global variable must be a DIGlobalVariableExpression")))))))))))
 
+(defn- check-sibling-unwinds
+  "Verifier::verifySiblingFuncletUnwinds: pads that unwind to a sibling pad (a catchswitch to its unwind destination, a
+  cleanuppad through its cleanupret) must not form a cycle."
+  [blocks g defs]
+  (let [idx (:idx g)
+        pad-at (fn [lbl] (when (and lbl (not= lbl 'caller))
+                           (when-let [bi (get idx (local-key lbl))]
+                             (let [x (first-non-phi (drop 2 (nth blocks bi)))]
+                               (when (and x (#{'catchswitch 'catchpad 'cleanuppad} (first (body x)))) (local-key (result x)))))))
+        info (into {}
+                   (concat
+                    (for [[_ _ & items] blocks x items :let [b (body x)] :when (and (= 'catchswitch (first b)) (result x))
+                          :let [[_ _ o] (split-inst b)] :when (and (:unwind o) (not= (:unwind o) 'caller))]
+                      [(local-key (result x)) [x (pad-at (:unwind o))]])
+                    (for [[_ _ & items] blocks x items :let [b (body x)] :when (= 'cleanupret (first b))
+                          :let [[_ ps o] (split-inst b) pk (when (local? (first ps)) (local-key (first ps)))]
+                          :when (and pk (:unwind o) (not= (:unwind o) 'caller) (.get ^java.util.Map defs pk))]
+                      [pk [x (pad-at (:unwind o))]])))]
+    (loop [ks (keys info) visited #{}]
+      (when (seq ks)
+        (let [start (first ks)]
+          (if (visited start)
+            (recur (rest ks) visited)
+            (let [r (loop [pad start active #{start} vis visited]
+                      (let [[term succ] (get info pad)]
+                        (cond
+                          (nil? succ) [nil vis]
+                          (active succ) [succ vis]
+                          (vis succ) [nil vis]
+                          (nil? (get info succ)) [nil (conj vis pad)]
+                          :else (recur succ (conj active succ) (conj vis pad)))))]
+              (when-let [cyc (first r)]
+                (let [nodes (loop [p cyc out []]
+                              (let [[term succ] (get info p)
+                                    pad-item (when-let [[_ _ _ dx] (.get ^java.util.Map defs p)] dx)
+                                    out (cond-> (conj out [:inst pad-item]) (not= term pad-item) (conj [:inst term]))]
+                                (if (= succ cyc) out (recur succ out))))]
+                  (apply verr :verifier/funclet "EH pads can't handle each other's exceptions" nodes)))
+              (recur (rest ks) (second r)))))))))
+
 (declare check-intrinsic-signature)
 
 (defn- verify-function
@@ -1747,7 +1822,8 @@
                           (when (and u (not (eh-pad? (drop 2 (nth blocks u)))))
                             (verr :verifier/unwind-dest "The unwind destination does not have an exception handling instruction!"))))
                       ))
-                      (recur (inc ii) (or seen-non-phi (not= hd 'phi))))))))))))))
+                      (recur (inc ii) (or seen-non-phi (not= hd 'phi))))))))))
+        (visiting (binding [*ctx* {:fn f}] (check-sibling-unwinds blocks g defs)))))))
 
 (defn- phase-verifier [forms]
   (let [users (java.util.HashMap.)]
