@@ -18,13 +18,17 @@ All three are tools' namespaces evaluated from the checkout on the tools' host (
 
 ## 1. Principles
 
-1. **The text's grammar, LangRef's, as clang 23 writes it at `-O0`.** One form per top-level entity in the text's
-   order; one form per instruction in its block's order. What the forms do not keep is spelling (white space,
-   comments, the `; preds =` annotations, the spelling of an attribute group's members); the judge is the object:
-   `clang -c` of the print equals `clang -c` of the original byte for byte (§6).
+1. **The text's grammar, LLParser's (LLVM 23), as clang 23 writes it and LangRef documents it.** One form per top-level
+   entity in the text's order; one form per instruction or debug record in its block's order. What the forms do not keep
+   is spelling (white space, comments, the `; preds =` and `; guid =` annotations, the spelling of an attribute group's
+   members); the judges are the object and the bitcode: `clang -c` of the print equals `clang -c` of the original byte for
+   byte, and so does `llvm-as`'s bitcode (§6). Since 2026-11-04 the reader takes every construct of the pin's grammar
+   (doc/llvm/LLVM-CROP-SURVEY.md's "Read gaps" closed: debug records and the DI metadata as structured forms, `callbr`,
+   Windows EH's pads, module summaries, `ptrtoaddr`, use-list orders, typed pointers, and the corners below); the lowering
+   (§7) takes the subset clang writes at `-O0` and refuses the rest in a class.
 2. **Plain Clojure syntax**, read by Arbace's reader without data readers. LLVM's sigils that the reader cannot take
    are spelled otherwise: `@x` (which the reader reads as a deref) is `g/x`; names the reader would not read back as a
-   symbol are `(% "...")` and `(g "...")`.
+   symbol are `(% "...")` and `(g "...")`; `#dbg_value` (a dispatch) is `dbg_value`; `^3` (metadata) is `(summary 3)`.
 3. **Positional where LLVM is positional, keyword options where LLVM's syntax is optional**: an instruction is its
    opcode, its flags (keywords), its type and operands in the text's order, then `:key value` options (`:align`,
    `:volatile`, `:md` ...) that are written only when present.
@@ -40,6 +44,7 @@ All three are tools' namespaces evaluated from the checkout on the tools' host (
 | `$comdat` | the string `"comdat"` (in `llvm/comdat` and `:comdat`) |
 | `!0`, `!llvm.loop` | the symbols `!0`, `!llvm.loop` |
 | `#3` (an attribute group) | the integer `3` in an `:attrs` vector |
+| `^3` (a summary entry), `readonly ^3`, `writeonly ^3` | `(summary 3)`, `(summary 3 :readonly)`, `(summary 3 :writeonly)` |
 
 A global's name is a plain `g/NAME` when it starts with a letter, `$` or `_` and holds neither `..` nor a final `.`;
 a string's bytes are chars 0-255 (`\XX` escapes decoded).
@@ -49,14 +54,16 @@ a string's bytes are chars 0-255 (`\XX` escapes decoded).
 | IR | form |
 |---|---|
 | `void`, `i1`, `i32`, `i128`, `float`, `double`, `x86_fp80`, `fp128`, `half`, `ptr`, `label`, `metadata`, `token` | the symbol |
-| `ptr addrspace(1)` | `(ptr 1)` |
+| `ptr addrspace(1)`, `ptr addrspace("A")` (a data layout's name for it) | `(ptr 1)`, `(ptr "A")` |
 | `[4 x i8]`, `<4 x i32>`, `<vscale x 4 x i32>` | `(array 4 i8)`, `(vector 4 i32)`, `(vscale 4 i32)` |
 | `{ i32, ptr }`, `{}`, `<{ i8, i32 }>` | `(struct i32 ptr)`, `(struct)`, `(packed i8 i32)` |
 | `i32 (ptr, ...)` | `(fn i32 [ptr &])` |
 | `%struct.S` | `%struct.S` (a named type: `(llvm/type %struct.S (struct ...))` or `(llvm/type %struct.S opaque)`) |
 | `target("x", i8, 1)` | `(target "x" i8 1)` |
+| `i8*`, `i8 addrspace(1)*`, `void (i32)*` (typed pointers) | `(* i8)`, `(* i8 1)`, `(* (fn void [i32]))` |
 
-Typed pointers (`i8*`) are refused (`:typed-pointer`): clang 23 writes opaque pointers only.
+Typed pointers are LLParser's upgrade (it reads `T*` as `ptr`): read and printed as written, the bitcode judging (clang 23
+writes opaque pointers only; the lowering does not take them).
 
 ## 4. Values and constants
 
@@ -68,20 +75,33 @@ Typed pointers (`i8*`) are refused (`:typed-pointer`): clang 23 writes opaque po
 | `c"ab\00"` | `(c-string "ab\u0000")` |
 | `{ i32 1, ptr null }`, `<{ ... }>`, `[i32 1, i32 2]`, `<i32 1, i32 2>` | `(struct [i32 1] [ptr null])`, `(packed ...)`, `(array [i32 1] [i32 2])`, `(vector ...)` |
 | `getelementptr inbounds (T, ptr @g, i64 0, i32 1)` | `(getelementptr :inbounds T [ptr g/g] [i64 0] [i32 1])`; `inrange(-16, 8)` is the flag `(:inrange "-16, 8")` |
-| `ptrtoint (ptr @f to i64)`, `add (i64 a, i64 b)` | `(ptrtoint ptr g/f i64)`, `(add i64 a b)` (a constant cast or binary operator has its instruction's form) |
+| `ptrtoint (ptr @f to i64)`, `ptrtoaddr (ptr @f to i64)`, `add (i64 a, i64 b)` | `(ptrtoint ptr g/f i64)`, `(ptrtoaddr ptr g/f i64)`, `(add i64 a b)` (a constant cast or binary operator has its instruction's form) |
+| `extractelement (<2 x i64> v, i32 0)`, `insertelement (...)`, `shufflevector (...)` | `(extractelement [(vector 2 i64) v] [i32 0])` ...: the typed operands |
 | `blockaddress(@f, %bb)`, `dso_local_equivalent @f`, `no_cfi @f`, `splat (i32 1)` | `(blockaddress g/f %bb)`, `(dso_local_equivalent g/f)`, `(no_cfi g/f)`, `(splat [i32 1])` |
+| `ptrauth (ptr @f, i32 0, i64 1234)` | `(ptrauth [ptr g/f] [i32 0] [i64 1234])` |
 | `asm sideeffect "nop", ""` | `(asm "nop" "" :sideeffect)` |
 
 A typed operand `T v` is the vector `[T v]`; a call argument or a parameter with attributes `[T attr... v]`.
 
 **Attributes**: a bare word is a keyword (`:nounwind`, `:noundef`); `align 8` is `(:align 8)`; `word(ARGS)` is
 `(:word TYPE)` for the type-taking ones (`byval`, `sret`, `byref`, `inalloca`, `preallocated`, `elementtype`) and
-`(:word "ARGS")` (the text) for the others (`dereferenceable(8)`, `memory(argmem: readwrite)`); `word=N` is
-`(:word= N)`; a string attribute `"k"="v"` is `["k" "v"]`, `"k"` is `["k"]`.
+`(:word "ARGS")` (the text) for the others (`dereferenceable(8)`, `memory(argmem: readwrite)`, `denormal_fpenv(dynamic,
+float: preservesign)`); `word=N` is `(:word= N)`; a string attribute `"k"="v"` is `["k" "v"]`, `"k"` is `["k"]`, also on
+a parameter, an argument or a return value. A call site's function attributes are its group numbers and its inline
+attributes, `:attrs [5 :nounwind ["k" "v"]]` (clang writes groups only).
 
-**Metadata**: `!N`, `!name` symbols; `!"s"` is `(! "s")`; `!{...}` is `(! [...])`; a specialized node
-(`!DILocation(...)`) is `(!DI "!DILocation(...)")`, its text kept (no `-g` at `-O0`: none in the corpora); a typed
-constant in a node is `[T v]`.
+**Metadata**: `!N`, `!name` symbols; `!"s"` is `(! "s")`; `!{...}` is `(! [...])`; a typed constant in a node is `[T v]`.
+A specialized node (LLS19 (a)) is a list headed by its name with its `!`, its keyed fields in the text's order:
+`!DILocation(line: 3, column: 5, scope: !10)` is `(!DILocation :line 3 :column 5 :scope !10)`. A field's value is an
+integer, `true` or `false`, a string (an MDString field: `name: "x"` is `"x"`, where `!"x"` is `(! "x")`), `null`, a
+word as a symbol (`tag: DW_TAG_member`, `emissionKind: FullDebug`, `nameTableKind: None`), metadata (a reference or an
+inline node), a typed constant (`extraData: i64 0`, `value: i32 7` as `[i64 0]`, `[i32 7]`), words and integers joined
+by `|` as `(| DIFlagPrototyped DIFlagArtificial 1048576)`, and GenericDINode's `operands: {!1, null}` as `(list !1 null)`.
+Three kinds take positional operands: `!DIExpression(DW_OP_LLVM_fragment, 0, 32)` is `(!DIExpression DW_OP_LLVM_fragment
+0 32)` (the `DW_OP_` and `DW_ATE_` words symbols), `!DIArgList(i32 %a, i32 %b)` is `(!DIArgList [i32 %a] [i32 %b])`,
+`!DIAssignID()` is `(!DIAssignID)`. The fields are not checked against the node's kind (LLParser and the verifier do
+that): the forms keep what the text writes, and every kind of LLVM 23 reads alike (`DICompileUnit` ... `DISubrangeType`,
+`DIFixedPointType`, the fields of later releases among them).
 
 ## 5. Instructions and the top level
 
@@ -101,14 +121,27 @@ constant in a node is `[T v]`.
 (= %lp (landingpad (struct ptr i32) :cleanup (catch ptr g/_ZTIi) (catch ptr null)))
 (br i1 %c %then %else) (br %next) (switch i32 %x %default [[i32 1 %one] [i32 2 %two]])
 (ret i32 0) (ret void) (resume (struct ptr i32) %lp) (unreachable)
+;; asm goto: callbr ... to label %ft [label %a, label %b]
+(= %r (callbr i32 (asm "..." "=r,!i,!i") [[i32 %x]] :to %ft :indirect [%a %b] :attrs [3]))
+;; Windows EH (funclets)
+(= %cs (catchswitch none [%c1 %c2] :unwind %outer))  ; catchswitch within none [label %c1, label %c2] unwind label %outer
+(= %p (catchpad %cs [[ptr null] [i32 64] [ptr null]])) ; catchpad within %cs [ptr null, i32 64, ptr null]
+(= %cl (cleanuppad none []))                         ; cleanuppad within none []
+(catchret %p :to %done)                              ; catchret from %p to label %done
+(cleanupret %cl :unwind caller)                      ; cleanupret from %cl unwind to caller
+;; a debug record, before the instruction it is attached to
+(dbg_value [i32 %x] !12 (!DIExpression) !15)         ; #dbg_value(i32 %x, !12, !DIExpression(), !15)
 ;; metadata attachments, in order:
 (br %for.cond :md [!llvm.loop !8])
 ```
 
-The rest: `fneg`, `fcmp`, every cast, `extractvalue`/`insertvalue` (indices after the typed operands),
-`extractelement`, `insertelement`, `shufflevector`, `freeze`, `va_arg`, `fence ORDERING`, `atomicrmw OP [ptr p] [T v]
-ORDERING`, `cmpxchg [ptr p] [T c] [T n] SUCCESS FAILURE`, `indirectbr`, `tail call` (`:tail :tail`), atomic loads and
-stores (`:atomic :seq_cst`, `:syncscope "x"`). `uselistorder` and `callbr` are refused.
+The rest: `fneg`, `fcmp`, every cast (`ptrtoaddr` among them), `extractvalue`/`insertvalue` (indices after the typed
+operands), `extractelement`, `insertelement`, `shufflevector`, `freeze`, `va_arg`, `fence ORDERING`, `atomicrmw OP [ptr p]
+[T v] ORDERING` (`elementwise` is `:elementwise true`), `cmpxchg [ptr p] [T c] [T n] SUCCESS FAILURE`, `indirectbr`, `tail
+call` (`:tail :tail`), atomic loads and stores (`:atomic :seq_cst`, `:syncscope "x"`). `unwind to caller` (`catchswitch`,
+`cleanupret`) is the symbol `caller`, `unwind label %bb` the label. A debug record (`#dbg_value`, `#dbg_declare`,
+`#dbg_assign`, `#dbg_label`, `#dbg_declare_value`) is `(dbg_KIND operand...)`, its operands metadata (§4: the value
+`[i32 %x]`, `!N`, an inline `(!DIExpression ...)` or `(!DIArgList ...)`), an item of its block in the text's order.
 
 Top level: `(llvm/source-filename "x.cpp")`, `(llvm/datalayout "...")`, `(llvm/triple "...")`, `(llvm/type NAME T)`,
 `(llvm/comdat "name" :any)`, `(llvm/global NAME T INIT? :linkage :internal :constant true :align 4 ...)`, `(llvm/alias
@@ -116,15 +149,44 @@ Top level: `(llvm/source-filename "x.cpp")`, `(llvm/datalayout "...")`, `(llvm/t
 true :personality [ptr g/__gxx_personality_v0] :attrs [0] :body [(block LABEL inst...) ...])` (the entry block's
 label `nil` when the text does not write it), `(llvm/attributes 0 [...])`, `(llvm/meta !5 MD :distinct true)`,
 `(llvm/named-meta !llvm.ident [!5])`, `(llvm/module-asm "...")`. A parameter is `[T attr... %name]` (`[T attr...]`
-unnamed in a declare), `&` for `...`.
+unnamed in a declare), `&` for `...`. Besides:
+
+- A global's properties (`, section "s"`, `, partition "p"`, `, comdat`, `, align N`, `, code_model "large"`, the
+  sanitizer words `, no_sanitize_address` ... as `:no_sanitize_address true`) are options in the text's order, then
+  `:attrs` (its groups and inline attributes, printed after its metadata as LLParser requires) and `:md` (its
+  attachments, wherever the text puts them among the properties). An alias's or an ifunc's `:partition`; an aliasee that
+  the text writes without its type (`bitcast`, `getelementptr`, `addrspacecast`, `inttoptr`: LLParser implies it) is the
+  constant alone, `(llvm/alias g/a ptr (getelementptr :inbounds ...))`.
+- A declaration's metadata, written before its header (`declare !dbg !5 void @f()`), is its `:md`, as a definition's
+  (after its header) is; a function's `prefalign(N)` is `:prefalign N`; a calling convention is its word as a string
+  (`:cconv "fastcc"`, `"cc 10"`, `"riscv_vls_cc(256)"`).
+- Use-list orders: `uselistorder ptr @g, { 1, 0, 2 }` is `(llvm/uselistorder [ptr g/g] [1 0 2])`; a function's, after its
+  last block, its define's `:uselistorder [(uselistorder [i32 %x] [1 0]) ...]` after `:body`. (`uselistorder_bb` is not
+  LLVM 23's.)
+- A module summary entry `^N = KIND: VALUE` (`module`, `gv`, `typeid`, `typeidCompatibleVTable`, `flags`, `blockcount`)
+  is `(llvm/summary N :KIND VALUE)`; a summary value is an integer, a string, a word (a symbol: `linkage: internal`), a
+  reference (`(summary N)`, §2), a tuple `(key: v, ..., v ...)` as a vector of `:key v` pairs and bare values in the
+  text's order, and a parameter access's `[a, b]` as `(range a b)`: `^0 = module: (path: "x.o", hash: (0, 0, 0, 0, 0))`
+  is `(llvm/summary 0 :module [:path "x.o" :hash [0 0 0 0 0]])`, `refs: (readonly ^4)` is `:refs [(summary 4
+  :readonly)]`. Summaries are data: read and printed, never lowered.
 
 ## 6. The round trip
 
-`bin/repr-llvm roundtrip LIST WORK`, and the first levels of `bin/cppi lower-check`:
+`bin/repr-llvm roundtrip LIST WORK` (levels 1 and 2 are also `bin/cppi lower-check`'s first, on x86-64 Linux IR, whose
+triple is the host's):
 
 1. **Forms**: the forms written as `.ae` text and read back are equal; the print read again gives the same forms.
-2. **Object**: `clang -c` of the print equals `clang -c` of the original, byte for byte. (`clang -c` of the
-   original IR, not of the C++ source: the IR is the eval's input.)
+2. **Object**: `clang -c` of the print equals `clang -c` of the original, byte for byte, each built for the module's
+   own `target triple` (`-target`; clang would otherwise build it for the host's) with `-mno-incremental-linker-compatible`
+   (a COFF object without its time stamp). (`clang -c` of the original IR, not of the C++ source: the IR is the eval's
+   input.)
+3. **Bitcode**: LLVM 23's `llvm-as` (`/usr/lib/llvm23/bin/llvm-as`, `REPR_LLVM_AS`) gives the print the original's
+   bitcode, byte for byte: the judge that sees module summaries and the metadata no object holds (LLS5 (a)'s canonical
+   text follows from it).
+
+A judge is `same`, `differs` (the outputs differ, or the print does not build where the original does) or `none` (the
+original does not build: a back end that cannot lower the module, `ptrauth` on x86-64); a file passes when its forms are
+equal, no judge differs and one judge is `same`.
 
 ## 7. The lowering (`arbace.cpp.lower`)
 
