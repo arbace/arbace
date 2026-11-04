@@ -1270,3 +1270,37 @@ CPython 3.14.10:
   rlcompleter's data-model gaps (`:data-model`); a dict subclass's `__getitem__` that skipped `__missing__` (a
   REQUEST, which clears test_http_cookies' 3 and test_wsgiref's 2); a signal that cannot interrupt Go's `send()`
   (`:signal-timing`).
+
+## As built: 202c (the reader, `_ast`; 2026-11-04, the Mac VM, queue 202)
+
+The native reader stays `bin/repr-python read`'s default (PY9, queue 201): on the VM's samples (a few files of each
+read corpus, lex-errors and syntax-errors whole, 92 mutants of seed 26) its trees and errors are CPython's in both modes;
+the whole-corpus `parse-check` with the mutants is the main host's night run. Then `_ast`'s object model:
+
+- **compile() of an AST object** (go/arbace/py's `builtins_ast_parse.go`): converted as Python-ast.c's `obj2ast_*`
+  functions convert it (Python.asdl's fields and attributes from `astTable`: required fields, lists, identifiers,
+  strings, ints, the sums' "expected some sort of ..." and the constructors' "field 'X' is required for Y"), checked by a
+  port of Python/ast.c's `_PyAST_Validate` (contexts, positions, empty bodies, patterns, constants), the mode's node
+  (`PyAst_CheckMode`); with `PyCF_ONLY_AST` the tree is preprocessed and made objects again (`PyAST_mod2obj`), else
+  unparsed and compiled as before (PY6h's design).
+- **Python/ast_preprocess.c** over the same tree: `ast.parse(optimize=1)` (`PyCF_OPTIMIZED_AST`) folds `__debug__`, a
+  str's `%` with a tuple of simple `s`/`r`/`a` units into an f-string, a pattern's `-C` and `C1 +/- C2`; optimize 2
+  removes docstrings (a lone one becomes `pass`).
+- **The node classes** (`builtins_ast.go`): `ast_type_init`'s 3.14 rules (a field not given: optional None, a list [],
+  `expr_context` Load(), else the DeprecationWarning; a keyword neither field nor attribute warned; "missing from
+  _field_types"), `__replace__` (`ast_type_replace`), `__reduce__` (`ast_type_reduce`), the asdl signatures as
+  `__doc__`, `ast_repr_max_depth`, AST's methods bound as method descriptors, `ast.AST`'s tp_name in messages, the
+  parser's identifiers interned.
+- **SyntaxError._metadata**: the second pass records the last compound statement's start
+  (`_PyPegen_register_stmts`), the SyntaxError carries `(line, column, source)` (`_PyPegen_set_syntax_error_metadata`;
+  the compiler's answer kind `m`), and a module `_suggestions` (Python/suggestions.c): traceback's keyword typos
+  ("invalid syntax. Did you mean 'for'?") as CPython's. `ast-check`'s reference writes CPython's `_metadata` too:
+  lex-errors 58 and syntax-errors 864 equal with it.
+- Samples (the VM, 2 jobs): test_ast 122 -> 201 of 217 methods equal (`bin/pyi lib-test-all test_ast`; the rest
+  classed `:ast-objects` and `:cpython-only`); test_syntax's doctest 25 -> 1 example failing of 510 (all 23 keyword
+  suggestions pass; left: a symtable error printed with its file, "no binding for nonlocal"); `bin/pyi lib-test
+  test_syntax test_exceptions` unchanged, 117 of 157 equal, 40 classed.
+- **Not yet**: the code objects' constants are not interned (`node.id is 'x'` inside a function), a `**{object(): ...}`
+  keyword is refused by the call before `__init__` sees it, `b''`'s identity, AST's garbage collection, the int digits
+  limit at parse time (`ast.literal_eval('3'*4001)`), test_pickling's time; compile()'s mode `single` of several
+  statements gives the parser's error, not "multiple statements found".
