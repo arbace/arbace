@@ -662,24 +662,33 @@
         [b _] (rng n)
         close (loop [i 1 d 1] (cond (>= i (count t)) (gap :lambda "captures") (= \[ (.charAt t i)) (recur (inc i) (inc d))
                                     (= \] (.charAt t i)) (if (= d 1) i (recur (inc i) (dec d))) :else (recur (inc i) d)))
-        caps (str/trim (subs t 1 close))
+        caps-raw (subs t 1 close)
+        caps (str/trim caps-raw)
         cls (first (filter #(= (kind %) "CXXRecordDecl") (kids n)))
-        mids (atom (vec (butlast (remove #(= (kind %) "CXXRecordDecl") (kids n)))))
+        ;; the capture initializers clang lists (one an explicit capture, then the implicit ones'): an init-capture's is
+        ;; the one that begins within its text, found by its offset (not by its place in the list: a simple capture
+        ;; before it has one too, the variable it names)
+        mids (vec (butlast (remove #(= (kind %) "CXXRecordDecl") (kids n))))
+        init-at (fn [^long cb ^long ce]
+                  (or (first (filter #(when-let [[mb _] (rng %)] (and (<= cb (long mb)) (< (long mb) ce))) mids))
+                      (gap :lambda "an init-capture's initializer")))
+        pieces (let [ps (split-top caps-raw)]
+                 (first (reduce (fn [[out ^long at] ^String c] [(conj out [c (+ b 1 at) (+ b 1 at (count c))]) (+ at (count c) 1)])
+                                [[] 0] ps)))
         cap-forms (if (= caps "")
                     []
-                    (mapv (fn [^String c]
+                    (mapv (fn [[^String c cb ce]]
                             (let [c (str/trim c)]
                               (cond
                                 (re-matches #"(?s)&?\s*[A-Za-z_][A-Za-z0-9_]*\s*=[^=].*" c)
                                 (let [[_ amp nm] (re-find #"^(&?)\s*([A-Za-z_][A-Za-z0-9_]*)" c)
-                                      e (or (first @mids) (gap :lambda "an init-capture's initializer"))]
-                                  (swap! mids subvec 1)
+                                      e (init-at cb ce)]
                                   (if (= amp "&") (list '& (ident nm) (ex e)) (list '= (ident nm) (ex e))))
                                 (= c "&") '& (= c "=") '= (= c "this") 'this (= c "*this") '(deref this)
                                 (re-matches #"[A-Za-z_][A-Za-z0-9_]*" c) (ident c)
                                 (re-matches #"&\s*[A-Za-z_][A-Za-z0-9_]*" c) (list '& (ident (str/trim (subs c 1))))
                                 :else (gap :lambda "a capture"))))
-                          (split-top caps)))
+                          pieces))
         op (first (filter #(and (= (kind %) "CXXMethodDecl") (= (:name %) "operator()")) (kids cls)))
         _ (when-not op (gap :lambda "a generic lambda"))
         body (last (kids n))
