@@ -916,3 +916,107 @@ PY8's first part, the AOT itself, specified in [PYI-SPEC.md](PYI-SPEC.md) §10:
 - **`_decimal` and `_datetime` stay absent** (PY6g's DECISION 1). decimal and datetime run as their pure-Python twins
   (`_pydecimal`, `_pydatetime`), as pickle and json do (§6.6, PYS11). The tests of their C variants are classed by
   design (`:c-accelerators`), as are those of `_pickle` and `_json`.
+
+## As built: PY7 (the check, 2026-11-04, the Mac VM, queue 201)
+
+PY7's check over Lib/test, on `mac/201-python-py7check` (base 9e41dc00, PY6 closed). The VM ran samples only (the user,
+2026-11-04); the record and the cover run are the main host's night.
+
+**The files** (PY10's row builds on them):
+
+| file | what | written by |
+|---|---|---|
+| `test/python/divergences.edn` | the classes, GR10's format: a vector of `{:id :title :kind :owner :why :decided :match :tests}` | by hand |
+| `test/python/check-lib-test-linux-amd64.edn` | the record: every method `["MODULE/TEST-ID" :RESULT "REASON" :CORPUS]` | `bin/pyi check --record`, the main host |
+| `test/python/controls.edn` | the negative controls, crossed pairs `{:id :subject :reference :why}` | by hand |
+| `test/python/corpora.edn` | each lib-test corpus's `:subset` (method ids), lib-test-all's in the top-level map `:lib-test-all` | `bin/pyi cover subset --write` |
+
+- **A row.** RESULT is `:pass` when pyi's outcome is CPython's, else the first word of the method's line (`import`,
+  `stopped-in`, `crash`, `not-run`, `ok`, `skipped`, `failure`, `error`, `timeout`) and REASON the rest. A non-pass's
+  class is the first class of the vector that names it in `:tests` or one of whose `:match` finds "RESULT REASON":
+  `test/reap/main.ae`'s, `test/cover/classes.ae`'s and `java.check`'s rule, so `bin/reap`'s `:results` reader reads the
+  record as it is and `bin/cover classes` reads a run's `results.tsv`.
+- **The corpora** are the record's fourth field: `language-core`, `stdlib-tests`, `lib-test-asyncio` (the families' 104
+  modules, ref-cpython314-lib-test.edn's and -asyncio's) and `lib-test-all` (the 425 modules of
+  ref-cpython314-lib-test-all.edn that no family owns): 529 modules in all.
+
+**Why divergences.edn replaces the known file** (not one generated from the other). The known file held the classes and a
+method-to-class map; the record holds every method's result. With both, the classes' patterns and the record decide every
+method's class, and the map is redundant but for the methods no pattern finds: those are the classes' `:tests`, as Java's.
+A generated copy would be a second truth to keep in step, and the REAP row needs the classes in GR10's shape, which only
+the replacement gives. So the 64 classes moved in the known file's writer's order (alphabetical: the order its record was
+made in), and the 4,393 methods became 2,422 found by their class's patterns and 1,971 `:tests` names. One method's class
+changed, from `:generators` to `:coroutines`, because its line is `:coroutines`' pattern. Two overlaps that would have
+taken `:testcapi`'s methods were taken out: `:c-modules-deferred`'s `_testinternalcapi` and `:extension-modules`'
+`_test[a-z_]*`. The known file's guard, that a method newly not equal fails even when a pattern would class it, is now
+the record's: a method the record passes that does not pass is a regression. A new method no pattern finds fails, as
+before.
+
+**The verbs.**
+- `bin/pyi check [--corpus ID,...] [--only FILE] [--record] [--judge DIR] [--oracle]` runs the universe's modules through
+  PY6i's restartable runner (`test/python/libtest_run.py` for every corpus now). It judges each method against CPython's
+  references, divergences.edn and the record, prints `   failing: ID` lines (the gate's `:failed-re`), then judges the
+  controls.
+  - `--only FILE` takes MODULE or MODULE/TEST-ID lines; the driver runs only the listed methods (`PYI_LIB_TEST_ONLY`).
+  - `--judge DIR` judges a saved run again with no rerun: `RUN/results.tsv` holds the rows.
+- `bin/pyi divergences [--table|--methods]` classifies the record with no run. A non-pass in no class fails, and so does
+  a `:tests` name that another class takes first.
+- `bin/pyi lib-test` and `lib-test-all` judge with the same judge (`test/python/libtest_judge.ae`).
+
+**The negative controls** (GTS81 (a)) are judged as before: the subject's run is judged as the reference module with no
+classes, and must fail. `--only` adds the subjects to every selection, so every rotated run judges them. Control 2 is
+now test_getopt against test_filecmp's references (about 50 s each). test_list's 692 s, with two 300 s timeouts, were
+too dear for a module every selection runs.
+
+**The oracle's control of the driver on the families' modules** was run, by python3 (`check --oracle --corpus
+language-core,stdlib-tests,lib-test-asyncio`). Result: 12,399 of 12,400 methods equal. The one left is
+test_selectors' `test_modify_unregister` (`:ref-empty-skip`: regrtest records `skipTest("")` as a pass). So the
+families can move from libtest.py to libtest_run.py.
+
+**PY6i's 8,179 unclassed methods.** They were measured before PY6e's `_socket` and `os.chmod` merged, and 18,214 of that
+run's non-passes stopped at those two. A sample was rerun at 9e41dc00's runtime: 17 of PY6i's modules (6 that stopped at
+`_socket`, 4 at `os.chmod`, 2 at `str.__doc__`, `_compare_digest`, test_userdict, and the controls' four).
+- Before: 315 methods, 115 equal.
+- Now: 230 equal and 85 classed, none failing.
+- New classes, added at the vector's end so that the converted `:tests` keep their methods: `:doctests`,
+  `:module-annotations`, `:pickle-iterators` and `:function-constructor`.
+- Patterns added to `:int-core`, `:eval-source`, `:pickle-core`, `:data-model`, `:testcapi`, `:tracing` and
+  `:remote-debugging`, and `:tests` names where a line is generic.
+- PY6i's proposed classes, added at PY6-core's integration, keep their owners. `:str-doc` should match nothing at the
+  next record (round 5's fix).
+- The rest of the 437 modules is the main host's record. Its `--record` lists every method of no class (exit 3).
+
+**Finalization (PYS9), measured.**
+- **pyi today.** It has no finalizer at all: `weakref.ref` holds its referent and `gc.collect()` returns 0.
+- **The families' record.** Of its 14,132 methods, 97 were in `:finalization`:
+  - 50 call `gc.collect()` or `support.gc_collect()` before they look, so a finalizer queue drained at `gc.collect()`
+    (PYS9 (a)) would serve them. They are the new class `:finalization-collect` (deferred, the runtime's work);
+  - 47 look right after the last reference goes, which needs reference counting's timing. They stay `:finalization`,
+    about 0.3% of the methods.
+- **Statically over all of Lib/test.** 431 test methods use weak references, `__del__`, `getrefcount` or `ResourceWarning`:
+  174 with `gc.collect`, 226 without, 31 `cpython_only`.
+- The choice between (a), (c) and (b) for the 47 is the user's (queue 201's DECISION).
+
+**The coverage subset and the rotation (GT8.3, GT8.4, GTS205 (a)).**
+- **Why the AOT route.** Under goi, Go's `-cover` sees goi and not the interpreted runtime. PY8's AOT compiles the driver
+  over go/arbace/py printed as Go, so the runtime's blocks are Go's there.
+- **`bin/pyi cover run`.** It builds the driver by the AOT with `-cover -covermode=atomic` over `arbace/py` and its main
+  package, then runs the check through it. The cover build's runtime gains `tools/pyi/libtest_cover.go` (`_pyi_cover`,
+  never in go/arbace/py), whose `flush` writes each test's counters into a directory of its own and clears them. So each
+  method has its own block set: the module's import counts with its first test, and the meta-data is hard-linked.
+- **`bin/pyi cover blocks`** turns them into block sets (`tools/covsubset blocks`).
+- **`bin/pyi cover subset [--write]`** selects the subset (`bin/cover classes` and `subset`). The subset holds: every
+  method of a `:deferred` class, the controls' subjects and references, one method per class, then by greedy set cover
+  every covered block. With `--write` it goes into corpora.edn.
+- **The rotation's universe is the record** (`:id-re` with the corpus as group 2, the ids bare). Slices are by module:
+  REQUEST cc463c8d, plan.ae's `:slice-re "^([^/]+)/"`. A night's slice then starts a seventh of the 529 modules whole,
+  where slicing by method would start nearly all of them.
+- **Measured on a sample on the VM** (24 modules, the 17 above with test_grammar, test_patma, test_fstring, test_tstring,
+  test_type_params, test_fractions and test_struct):
+  - 1,021 methods ran on the cover driver, each with its own counters, at 2 to 5 s a module (on goi: 20 to 160 s).
+  - They cover 11,224 of the runtime's 27,448 blocks (41%).
+  - The subset is 351 methods, which reach all 11,224: 195 kept (the deferred classes' and the controls'), 4 for their
+    classes, 152 by the set cover.
+  - On the cover driver only, 8 methods err with `Permission denied: ''`: a child started from `sys.executable`, which the
+    AOT executable leaves empty. They are judged in that run alone, never recorded.
+- The cover run itself is the main host's.
