@@ -2117,6 +2117,19 @@
 
 (defn- attrs-key [attrs] (set (map attr-str (group-items (remove #(and (not (integer? %)) (not (attr-item? %))) attrs)))))
 
+(defn- own-intrinsic?
+  "A declaration or definition named for an intrinsic with that intrinsic's own type: LLParser gives it the intrinsic's
+  attributes (Intrinsics.td), not the text's (clang's adds `mustprogress`)."
+  [f]
+  (let [nm (global-key (nth f 1))]
+    (boolean (and (str/starts-with? nm "llvm.") (intr/recognized? nm)
+                  (nil? (try (check-intrinsic-signature nm (list 'fn (norm-type (nth f 2)) (mapv #(if (= % '&) % (norm-type (first %))) (nth f 3))))
+                             nil (catch arbace.lang.ExceptionInfo e (.getMessage e))))))))
+
+(defn- fn-attrs-key [f]
+  (let [k (attrs-key (:attrs (apply hash-map (drop 4 f))))]
+    (if (own-intrinsic? f) (disj k "mustprogress") k)))
+
 (defn- calls-of [f]
   (for [blk (:body (apply hash-map (drop 4 f))) x (drop 2 blk)
         :let [b (body x)] :when (#{'call 'invoke 'callbr} (first b))]
@@ -2129,9 +2142,10 @@
   ([forms f]
    (binding [*groups* (into {} (keep #(when (= (first %) 'llvm/attributes) [(second %) (nth % 2)]) forms))]
      (let [m (java.util.LinkedHashMap.)
-           note (fn [attrs] (let [k (attrs-key attrs)] (when (and (seq k) (not (.containsKey m k))) (.put m k (.size m)))))]
+           note-key (fn [k] (when (and (seq k) (not (.containsKey m k))) (.put m k (.size m))))
+           note (fn [attrs] (note-key (attrs-key attrs)))]
        (doseq [g forms :when (#{'llvm/define 'llvm/declare} (first g))]
-         (note (:attrs (apply hash-map (drop 4 g)))))
+         (note-key (fn-attrs-key g)))
        (when (and f (= (first f) 'llvm/define))
          (doseq [attrs (calls-of f)] (note attrs)))
        (into {} m)))))
@@ -2164,7 +2178,7 @@
                     (or (get @*group-memo* f) (let [r (group-numbers *group-forms* f)] (swap! *group-memo* assoc f r) r)))
                   *group-numbers*)
               nb (set-opt b :attrs (fn [attrs]
-                                     (let [k (attrs-key attrs)]
+                                     (let [k (if (#{'llvm/define 'llvm/declare} h) (fn-attrs-key b) (attrs-key attrs))]
                                        (if-let [n (get m k)] [n] attrs))))]
           (if (= (first x) '=) (list '= (second x) nb) nb))
         :else x))))
@@ -2222,7 +2236,8 @@
     (string? c) c
     (= c :inst) (let [x (canon-fps (number-groups (canon-attr-order (with-default-align (:inst ctx))))) b (body x)] (if (dbg-record? b) (pr/item-inst-str x) (str "  " (pr/item-inst-str x))))
     (= c :fn) (fn-operand (:fn ctx))
-    (= c :decl) (let [f (:fn ctx) o (apply hash-map (drop 4 f)) as (group-items (:attrs o))]
+    (= c :decl) (let [f (:fn ctx) o (apply hash-map (drop 4 f))
+                        as (cond->> (group-items (:attrs o)) (own-intrinsic? f) (remove #(= (aname %) "mustprogress")))]
                   (str (when (seq as) (str "; Function Attrs: " (str/join " " (map pr/attr-str as)) "\n")) (pr/fn-head-str (number-groups (canon-attr-order f)))))
     (= c :bb) (label-text (:bb ctx))
     (= c :global) (fn-operand (:global ctx))
