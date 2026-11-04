@@ -1030,6 +1030,7 @@ native reader, and `read --reader native` the default.
   `bin/repr-python ast-check` compares the answers with CPython's compile() (`tools/pydump/astdump.py`) byte for
   byte: samples 6, lex-errors 58, syntax-errors 864, stdlib's and Lib/test's first 150 files (148 UTF-8) all equal.
   `test/python/pyi/f-ast-tokenize.py` runs equal to CPython. arbace.python.run's change is a REQUEST to PY7-runtime.
-- **Not yet**: `feature_version` (CHECK_VERSION) and optimize > 0 are ignored; a codec other than UTF-8, ASCII and
+- `feature_version` holds the grammar's CHECK_VERSIONs and the numbers' underscores (compile()'s `_feature_version`).
+- **Not yet**: optimize > 0 is ignored; compile() of an AST object has no `PyAST_Validate` (test_ast: 113 of 217 equal); a codec other than UTF-8, ASCII and
   Latin-1 has no strict decoding errors; TokenizerIter reads its readline to the end first; `\N{}` names are the
   runtime's Unicode data.
