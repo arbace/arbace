@@ -1052,6 +1052,8 @@
                   (is? p "}") (recur out)
                   :else (perr p "an initializer list"))))))))
 
+(declare dependent-type?)
+
 (defn- class-type? [t]
   (and (#{:n :elab :tn} (:t t))
        (let [e (:ent t)] (or (nil? e) (:class e) (:class (:target e)) (:tparam e) (and (:target e) (nil? (:scope e)) false)))))
@@ -1070,9 +1072,13 @@
   "A functional cast or temporary object: T(args) or T{args}, the type `t` spelled from b."
   [^P p ^long b t builtin]
   (if (is? p "{")
-    (let [l (parse-braced-init p)] (node p "CXXFunctionalCastExpr" b (ne l) (assoc (type-node-fields t) :inner [l])))
+    (let [l (parse-braced-init p)]
+      (node p (if (and (in-template? p) (dependent-type? t)) "CXXUnresolvedConstructExpr" "CXXFunctionalCastExpr") b (ne l)
+            (assoc (type-node-fields t) :inner [l])))
     (let [as (paren-args p) e (last-ix p)]
       (cond
+        ;; a dependent type's construction (Sema::BuildCXXTypeConstructExpr): unresolved until instantiated
+        (and (in-template? p) (dependent-type? t)) (node p "CXXUnresolvedConstructExpr" b e (assoc (type-node-fields t) :inner as))
         (and (= 1 (count as)) (not= "InitListExpr" (:kind (first as)))) (node p "CXXFunctionalCastExpr" b e (assoc (type-node-fields t) :inner as))
         (and (empty? as) builtin) (node p "CXXScalarValueInitExpr" b e (type-node-fields t))
         :else (node p "CXXTemporaryObjectExpr" b e (assoc (type-node-fields t) :inner as))))))
@@ -1745,7 +1751,10 @@
                 (if (is? p "auto") (adv! p) (dotimes [_ 4] (adv! p)))
                 (recur (assoc ds :type {:t :auto :cn cn}) words))
               ;; a dependent name where only a type can stand (P0634: a parameter's, an alias's, a return type's)
-              (and decl-ctx (nil? e) (or (:q qn) (> (count (:parts qn)) 1)) (or (id? p) (is? p "*") (is? p "&") (is? p "&&")) (not (is? p "(")))
+              (and decl-ctx (nil? e) (or (:q qn) (> (count (:parts qn)) 1))
+                   (or (id? p) (is? p "*") (is? p "&") (is? p "&&")
+                       ;; an abstract parameter declarator: B(T::type); (clang's implicit typename, an extension before C++20)
+                       (and (= ctx :param) (or (is? p ")") (is? p ",") (is? p "=") (is? p "...")))))
               (recur (assoc ds :type {:t :n :s (name-str p qn) :qn qn}) words)
               (and decl-ctx (nil? e) (id? p) (not (#{"final" "override"} (ts (cur p)))))
               (recur (assoc ds :type {:t :n :s (name-str p qn) :qn qn :unknown true}) words)
@@ -1860,6 +1869,16 @@
         tr (when (is? p "->") (adv! p) (parse-type-id p :trailing))]
     (assoc pl :f true :q q :m m :trailing tr)))
 
+(defn- special-name?
+  "A declarator-id that is not an identifier (clang's UnqualifiedIdKind other than IK_Identifier: an operator, a
+  destructor, a conversion function, a literal operator, a qualified constructor X::X): never followed by a direct
+  initializer (Declarator::mayBeFollowedByCXXDirectInit), so its ( opens a parameter list."
+  [qn]
+  (let [parts (:parts qn) n (count parts) lp (peek parts)]
+    (boolean
+      (or (:op lp) (:dtor lp) (:conv lp) (:lit lp)
+          (and (>= n 2) (:s lp) (= (:s lp) (:s (nth parts (- n 2)))) (nil? (:args lp)))))))
+
 (defn parse-declarator
   "A declarator at the cursor; `mode` :named (a declarator-id, a ( after it a parameter list only when
   isCXXFunctionDeclarator says so), :either (a parameter's), :abstract (a type-id's)."
@@ -1884,7 +1903,11 @@
         mid (ArrayList.)
         lastx (long-array 1)
         _ (aset lastx 0 (last-ix p))
-        sufs (loop [out []]
+        ;; after a qualified declarator-id the declarator's rest is in its class's scope (clang's DeclScopeObj)
+        qcls (when (and name (:q name)) (let [e (:q name)] (when (and (type-ent? e) (:scope e)) e)))
+        suffixes
+        (fn []
+             (loop [out []]
                (cond
                  (and (is? p "[") (is-at? p 1 "[")) (do (.addAll mid ^java.util.Collection (attr-nodes p)) (recur out))
                  (is? p "[")
@@ -1896,9 +1919,10 @@
                          (expect! p "]")
                          (aset lastx 0 (last-ix p))
                          (recur (conj out {:a true :n (when x (tok-text p (nb x) (ne x))) :x x})))))
-                 (and (is? p "(") (or (not= mode :named) (nil? name) (is-function-declarator? p)))
+                 (and (is? p "(") (or (not= mode :named) (nil? name) (special-name? name) (is-function-declarator? p)))
                  (let [f (parse-fn-suffix p)] (aset lastx 0 (last-ix p)) (recur (conj out f)))
-                 :else out))
+                 :else out)))
+        sufs (if qcls (in-scope p (sc/new-scope :lookup (scope p) qcls) (suffixes)) (suffixes))
         as (into (into pattrs mid) (attr-nodes p))]
     {:ptrs ptrs :name name :ni ni :nested nested :sufs sufs :pack pack :b b :e (aget lastx 0) :attrs as
      :after (ix p)}))
