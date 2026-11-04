@@ -405,72 +405,102 @@
 ;; Escapes (rustc_literal_escaper): the checks rustc_parse's lexer makes, and the unescaping of
 ;; ast::LitKind::from_token_lit
 
-(defn- unescape-error [msg] (throw (ex-info msg {:rust-lex true})))
+(defn- unescape-error
+  "An escape error: rustc's message for it and its span, code points [from, to) of the content"
+  ([msg] (throw (ex-info msg {:rust-lex true})))
+  ([msg from to] (throw (ex-info msg {:rust-lex true :from from :to to}))))
+
+(defn- esc-char
+  "escaped_char of a code point (printable ASCII as is, else Rust's escape_default)"
+  ^String [^long c]
+  (cond (and (>= c 0x20) (<= c 0x7e)) (String. (int-array [c]) 0 1)
+        (== c 9) "\\t" (== c 13) "\\r" (== c 10) "\\n"
+        :else (str "\\u{" (Long/toHexString c) "}")))
 
 (defn unescape
   "The units of a literal's content in a mode (:char :byte :str :byte-str :c-str): a vector of code
-  points (and for bytes and C strings, bytes as longs with a :byte mark: [:b n]); an invalid content
-  throws with rustc's reason"
+  points (and for C strings, bytes above 0x7f as [:b n]); an invalid content throws rustc's error
+  (rustc-literal-escaper's EscapeError, as rustc_parse's emit_unescape_error words it, with its
+  span: code points of the content)"
   [^String s mode]
-  (let [len (.length s)
+  (let [cps (.toArray (.codePoints s))
+        len (alength cps)
+        at (fn [^long i] (if (< i len) (aget cps (int i)) -1))
         units (java.util.ArrayList.)
         unicode? (contains? #{:char :str :c-str} mode)
-        bytes? (contains? #{:byte :byte-str} mode)]
-    (loop [i 0]
-      (when (< i len)
-        (let [c (.codePointAt s i) w (Character/charCount c)]
-          (cond
-            (== c 92)
-            (let [i (+ i 1)]
-              (when (>= i len) (unescape-error "lone backslash"))
-              (let [e (.charAt s i)]
-                (case e
-                  \n (do (.add units 10) (recur (inc i)))
-                  \r (do (.add units 13) (recur (inc i)))
-                  \t (do (.add units 9) (recur (inc i)))
-                  \\ (do (.add units 92) (recur (inc i)))
-                  \0 (do (when (= mode :c-str) (unescape-error "null characters in C string literals are not supported"))
-                         (.add units 0) (recur (inc i)))
-                  \' (do (.add units 39) (recur (inc i)))
-                  \" (do (.add units 34) (recur (inc i)))
-                  \x (let [h (subs s (inc i) (min len (+ i 3)))]
-                       (when-not (and (= 2 (count h)) (every? #(hex? (long %)) h))
-                         (unescape-error "numeric character escape is too short or invalid"))
-                       (let [v (Long/parseLong h 16)]
-                         (when (and (> v 0x7f) (contains? #{:char :str} mode)) (unescape-error "out of range hex escape"))
-                         (when (and (zero? v) (= mode :c-str)) (unescape-error "null characters in C string literals are not supported"))
-                         (.add units (if (and (= mode :c-str) (> v 0x7f)) [:b v] v))
-                         (recur (+ i 3))))
-                  \u (do
-                       (when bytes? (unescape-error "unicode escape in byte string"))
-                       (when-not (and (< (inc i) len) (= \{ (.charAt s (inc i)))) (unescape-error "incorrect unicode escape sequence"))
-                       (let [close (.indexOf s "}" (int (inc i)))]
-                         (when (neg? close) (unescape-error "unterminated unicode escape"))
-                         (let [ds (subs s (+ i 2) close)
-                               digits (.replace ds "_" "")]
-                           (when (or (empty? digits) (str/starts-with? ds "_")) (unescape-error "empty unicode escape"))
-                           (when (> (count digits) 6) (unescape-error "overlong unicode escape"))
-                           (when-not (every? #(hex? (long %)) digits) (unescape-error "invalid character in unicode escape"))
-                           (let [v (Long/parseLong digits 16)]
-                             (when (or (> v 0x10FFFF) (and (>= v 0xD800) (<= v 0xDFFF))) (unescape-error "invalid unicode character escape"))
-                             (when (and (zero? v) (= mode :c-str)) (unescape-error "null characters in C string literals are not supported"))
-                             (.add units v)
-                             (recur (long (inc close)))))))
-                  \newline (do (when-not (contains? #{:str :byte-str :c-str} mode) (unescape-error "unknown character escape"))
-                               (recur (long (loop [k (inc i)]
-                                              (if (and (< k len) (let [d (.charAt s k)] (or (= d \space) (= d \tab) (= d \newline) (= d \return))))
-                                                (recur (inc k)) k)))))
-                  (unescape-error "unknown character escape"))))
-            (== c 13) (unescape-error "bare CR not allowed in string")
-            :else
-            (do (when (and bytes? (> c 127)) (unescape-error "non-ASCII character in byte literal"))
-                (when (and (= mode :char) (or (== c 39) (== c 10) (== c 9))) (unescape-error "character constant must be escaped"))
-                (when (and (zero? c) (= mode :c-str)) (unescape-error "null characters in C string literals are not supported"))
-                (.add units c)
-                (recur (+ i w)))))))
-    (when (and (contains? #{:char :byte} mode) (not= 1 (.size units)))
-      (unescape-error (if (zero? (.size units)) "empty character literal" "character literal may only contain one codepoint")))
-    (vec units)))
+        bytes? (contains? #{:byte :byte-str} mode)
+        char? (contains? #{:char :byte} mode)
+        last-char (fn [msg ^long from ^long to] (unescape-error msg (dec to) to))
+        nul (fn [^long from ^long to] (unescape-error "null characters in C string literals are not supported" from to))
+        ;; scan_escape: the escape at i (the backslash), [unit next]
+        escape
+        (fn [^long i]
+          (let [e (at (inc i))]
+            (case (long e)
+              -1 (unescape-error "invalid trailing slash in literal" i (inc i))
+              110 [10 (+ i 2)] 114 [13 (+ i 2)] 116 [9 (+ i 2)] 92 [92 (+ i 2)] 39 [39 (+ i 2)] 34 [34 (+ i 2)]
+              48 (do (when (= mode :c-str) (nul i (+ i 2))) [0 (+ i 2)])
+              120 (let [h (at (+ i 2)) l (at (+ i 3))]
+                    (when (neg? h) (unescape-error "numeric character escape is too short" i (+ i 2)))
+                    (when (neg? (Character/digit (int h) 16))
+                      (last-char (str "invalid character in numeric character escape: `" (esc-char h) "`") i (+ i 3)))
+                    (when (neg? l) (unescape-error "numeric character escape is too short" i (+ i 3)))
+                    (when (neg? (Character/digit (int l) 16))
+                      (last-char (str "invalid character in numeric character escape: `" (esc-char l) "`") i (+ i 4)))
+                    (let [v (+ (* 16 (Character/digit (int h) 16)) (Character/digit (int l) 16))]
+                      (when (and (> v 0x7f) (contains? #{:char :str} mode)) (unescape-error "out of range hex escape" i (+ i 4)))
+                      (when (and (zero? v) (= mode :c-str)) (nul i (+ i 4)))
+                      [(if (and (= mode :c-str) (> v 0x7f)) [:b v] v) (+ i 4)]))
+              117 (let [j (+ i 2)]
+                    (when-not (== 123 (at j)) (unescape-error "incorrect unicode escape sequence" i j))
+                    (let [c0 (at (inc j))]
+                      (cond (neg? c0) (unescape-error "unterminated unicode escape" i (inc j))
+                            (== c0 95) (last-char "invalid start of unicode escape: `_`" i (+ j 2))
+                            (== c0 125) (unescape-error "empty unicode escape" i (+ j 2))
+                            (neg? (Character/digit (int c0) 16))
+                            (last-char (str "invalid character in unicode escape: `" (esc-char c0) "`") i (+ j 2)))
+                      (loop [k (+ j 2) nd 1 v (long (Character/digit (int c0) 16))]
+                        (let [c (at k)]
+                          (cond (neg? c) (unescape-error "unterminated unicode escape" i k)
+                                (== c 95) (recur (inc k) nd v)
+                                (== c 125)
+                                (do (when (> nd 6) (unescape-error "overlong unicode escape" i (inc k)))
+                                    (when-not unicode? (unescape-error "unicode escape in byte string" i (inc k)))
+                                    (when (or (> v 0x10FFFF) (and (>= v 0xD800) (<= v 0xDFFF)))
+                                      (unescape-error "invalid unicode character escape" i (inc k)))
+                                    (when (and (zero? v) (= mode :c-str)) (nul i (inc k)))
+                                    [v (inc k)])
+                                (neg? (Character/digit (int c) 16))
+                                (last-char (str "invalid character in unicode escape: `" (esc-char c) "`") i (inc k))
+                                :else (let [nd (inc nd)]
+                                        (recur (inc k) nd (if (> nd 6) v (+ (* 16 v) (Character/digit (int c) 16))))))))))
+              (last-char (str (if bytes? "unknown byte escape" "unknown character escape") ": `" (esc-char e) "`")
+                         i (+ i 2)))))
+        plain-check
+        (fn [^long i ^long c]
+          (when (and bytes? (> c 127))
+            (last-char (str "non-ASCII character in " (if (= mode :byte) "byte literal" "byte string literal")) i (inc i)))
+          (when (and (zero? c) (= mode :c-str)) (nul i (inc i))))]
+    (if char?
+      (let [c (at 0)]
+        (when (neg? c) (unescape-error "empty character literal" 0 0))
+        (let [[u nxt] (cond (== c 92) (escape 0)
+                            (or (== c 39) (== c 10) (== c 9))
+                            (unescape-error (str (if (= mode :byte) "byte" "character") " constant must be escaped: `" (esc-char c) "`") 0 1)
+                            (== c 13) (unescape-error "character constant must be escaped: `\\r`" 0 1)
+                            :else (do (plain-check 0 c) [c 1]))]
+          (when (< (long nxt) len) (unescape-error "character literal may only contain one codepoint"))
+          [u]))
+      (loop [i 0]
+        (if (>= i len)
+          (vec units)
+          (let [c (aget cps (int i))]
+            (cond (== c 92)
+                  (if (== 10 (at (inc i)))
+                    (recur (loop [k (+ i 2)] (let [d (at k)] (if (or (== d 32) (== d 9) (== d 10) (== d 13)) (recur (inc k)) k))))
+                    (let [[u nxt] (escape i)] (.add units u) (recur (long nxt))))
+                  (== c 13) (unescape-error "bare CR not allowed in string, use `\\r` instead" i (inc i))
+                  :else (do (plain-check i c) (.add units c) (recur (inc i))))))))))
 
 (defn- check-raw
   "The checks of a raw literal's content: no bare CR; ASCII only in raw byte strings; no NUL in raw C
