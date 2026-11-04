@@ -2030,7 +2030,7 @@
 (def ^:private enum-attr-names
   {"allocalign" "AllocAlign" "allocptr" "AllocatedPointer" "alwaysinline" "AlwaysInline" "builtin" "Builtin" "cold" "Cold"
    "convergent" "Convergent" "coro_only_destroy_when_complete" "CoroDestroyOnlyWhenComplete" "coro_elide_safe" "CoroElideSafe"
-   "dead_on_unwind" "DeadOnUnwind" "dead_on_return" "DeadOnReturn" "disable_sanitizer_instrumentation" "DisableSanitizerInstrumentation"
+   "dead_on_unwind" "DeadOnUnwind" "disable_sanitizer_instrumentation" "DisableSanitizerInstrumentation"
    "fn_ret_thunk_extern" "FnRetThunkExtern" "hot" "Hot" "immarg" "ImmArg" "inreg" "InReg" "inlinehint" "InlineHint" "jumptable" "JumpTable"
    "minsize" "MinSize" "mustprogress" "MustProgress" "naked" "Naked" "nest" "Nest" "noalias" "NoAlias" "nobuiltin" "NoBuiltin"
    "nocallback" "NoCallback" "nocf_check" "NoCfCheck" "noduplicate" "NoDuplicate" "nofree" "NoFree" "noimplicitfloat" "NoImplicitFloat"
@@ -2048,7 +2048,7 @@
 
 (def ^:private type-attr-names {"byref" "ByRef" "byval" "ByVal" "elementtype" "ElementType" "inalloca" "InAlloca" "preallocated" "Preallocated" "sret" "StructRet"})
 (def ^:private int-attr-names
-  {"align" "Alignment" "allockind" "AllocKind" "allocsize" "AllocSize" "captures" "Captures" "dereferenceable" "Dereferenceable"
+  {"align" "Alignment" "allockind" "AllocKind" "allocsize" "AllocSize" "captures" "Captures" "dead_on_return" "DeadOnReturn" "dereferenceable" "Dereferenceable"
    "dereferenceable_or_null" "DereferenceableOrNull" "memory" "Memory" "alignstack" "StackAlignment" "uwtable" "UWTable"
    "vscale_range" "VScaleRange"})
 
@@ -2099,35 +2099,39 @@
 
 (defn- attrs-key [attrs] (set (map attr-str (group-items (remove #(and (not (integer? %)) (not (attr-item? %))) attrs)))))
 
+(defn- calls-of [f]
+  (for [blk (:body (apply hash-map (drop 4 f))) x (drop 2 blk)
+        :let [b (body x)] :when (#{'call 'invoke 'callbr} (first b))]
+    (:attrs (nth (split-inst b) 2))))
+
 (defn group-numbers
-  "{set-key group-number} of a module's function attribute sets."
-  [forms]
-  (binding [*groups* (into {} (keep #(when (= (first %) 'llvm/attributes) [(second %) (nth % 2)]) forms))]
-    (let [m (java.util.LinkedHashMap.)
-          note (fn [attrs] (let [k (attrs-key attrs)] (when (and (seq k) (not (.containsKey m k))) (.put m k (.size m)))))]
-      (doseq [f forms :when (#{'llvm/define 'llvm/declare} (first f))]
-        (note (:attrs (apply hash-map (drop 4 f)))))
-      (doseq [f forms :when (= (first f) 'llvm/define)
-              blk (:body (apply hash-map (drop 4 f))) x (drop 2 blk)
-              :let [b (body x)] :when (#{'call 'invoke 'callbr} (first b))]
-        (note (:attrs (nth (split-inst b) 2))))
-      (into {} m))))
+  "{set-key group-number} of a module's function attribute sets: the functions' in module order; with `f`, then the
+  sets of the calls in the function `f` (the slot tracker numbers a function's calls when it prints one of them)."
+  ([forms] (group-numbers forms nil))
+  ([forms f]
+   (binding [*groups* (into {} (keep #(when (= (first %) 'llvm/attributes) [(second %) (nth % 2)]) forms))]
+     (let [m (java.util.LinkedHashMap.)
+           note (fn [attrs] (let [k (attrs-key attrs)] (when (and (seq k) (not (.containsKey m k))) (.put m k (.size m)))))]
+       (doseq [g forms :when (#{'llvm/define 'llvm/declare} (first g))]
+         (note (:attrs (apply hash-map (drop 4 g)))))
+       (when (and f (= (first f) 'llvm/define))
+         (doseq [attrs (calls-of f)] (note attrs)))
+       (into {} m)))))
 
 (defn group-mismatches
-  "The functions and calls of a module printed by the AsmWriter whose single group `#N` is not N in this numbering."
+  "The functions and calls of a module printed by the AsmWriter whose single group `#N` is not N in this numbering
+  (a call's group counted from its function's calls only, so `#N` of the text is expected for the first function)."
   [forms]
-  (let [m (group-numbers forms)]
-    (binding [*groups* (into {} (keep #(when (= (first %) 'llvm/attributes) [(second %) (nth % 2)]) forms))]
-      (let [chk (fn [attrs] (when (and (= 1 (count attrs)) (integer? (first attrs)))
+  (binding [*groups* (into {} (keep #(when (= (first %) 'llvm/attributes) [(second %) (nth % 2)]) forms))]
+    (let [base (group-numbers forms)
+          chk (fn [m attrs] (when (and (= 1 (count attrs)) (integer? (first attrs)))
                               (let [n (get m (attrs-key attrs))] (when-not (= n (first attrs)) [(first attrs) n]))))]
-        (vec (concat (for [f forms :when (#{'llvm/define 'llvm/declare} (first f))
-                           :let [r (chk (:attrs (apply hash-map (drop 4 f))))] :when r] r)
-                     (for [f forms :when (= (first f) 'llvm/define)
-                           blk (:body (apply hash-map (drop 4 f))) x (drop 2 blk)
-                           :let [b (body x)] :when (#{'call 'invoke 'callbr} (first b))
-                           :let [r (chk (:attrs (nth (split-inst b) 2)))] :when r] r)))))))
+      (vec (concat (for [f forms :when (#{'llvm/define 'llvm/declare} (first f))
+                         :let [r (chk base (:attrs (apply hash-map (drop 4 f))))] :when r] r))))))
 
-(def ^:dynamic *group-numbers* nil)
+(def ^:dynamic *group-numbers* nil)   ; the functions' sets, with the module's forms in *group-forms*
+(def ^:dynamic *group-forms* nil)
+(def ^:dynamic *group-memo* nil)
 
 (defn- number-groups
   "A call or function header whose `:attrs` is the one group of the AsmWriter's numbering (nil numbering: unchanged)."
@@ -2137,9 +2141,13 @@
     (let [b (body x) h (first b)]
       (cond
         (#{'call 'invoke 'callbr 'llvm/define 'llvm/declare} h)
-        (let [nb (set-opt b :attrs (fn [attrs]
+        (let [m (if (and (#{'call 'invoke 'callbr} h) (:fn *ctx*))
+                  (let [f (:fn *ctx*)]
+                    (or (get @*group-memo* f) (let [r (group-numbers *group-forms* f)] (swap! *group-memo* assoc f r) r)))
+                  *group-numbers*)
+              nb (set-opt b :attrs (fn [attrs]
                                      (let [k (attrs-key attrs)]
-                                       (if-let [n (get *group-numbers* k)] [n] attrs))))]
+                                       (if-let [n (get m k)] [n] attrs))))]
           (if (= (first x) '=) (list '= (second x) nb) nb))
         :else x))))
 
@@ -2216,7 +2224,8 @@
   ^String [e metaforms slots]
   (let [d (ex-data e) ctx (:ctx d)
         cs (cond (= [:none] (:culprits d)) [] (seq (:culprits d)) (:culprits d) :else (default-culprits ctx))]
-    (apply str (.getMessage ^Throwable e) "\n" (map #(str (diag/renumber (culprit-text % ctx metaforms) slots) "\n") cs))))
+    (binding [*ctx* ctx]
+      (apply str (.getMessage ^Throwable e) "\n" (map #(str (diag/renumber (culprit-text % ctx metaforms) slots) "\n") cs)))))
 
 (defn- parse-offset
   "The offset in the text of a parser error: its item and hint."
@@ -2253,6 +2262,7 @@
       :else
       (binding [*groups* (into {} (keep #(when (= (first %) 'llvm/attributes) [(second %) (nth % 2)]) forms))
                 *group-numbers* (try (group-numbers forms) (catch Throwable _ nil))
+                *group-forms* forms *group-memo* (atom {})
                 *dl* (or (some #(when (= (first %) 'llvm/datalayout) (second %)) forms) "")
                 *types* (into {} (keep #(when (= (first %) 'llvm/type) [(second %) (norm-type (nth % 2))]) forms))]
        (let [ver (first (filter #(= :di/version (rule-of %)) dis))
