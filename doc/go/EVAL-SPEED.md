@@ -442,3 +442,221 @@ compiled):
 - **Stage 0**: the crops evaluated on stage 0 (its seed predates this) get none of it until a
   re-seed; the executables built from the checkout (the gate's, `bin/arbace-go --build`'s) have
   it, and `ARBACE_HOST_EXE` can name one as the tools' host meanwhile.
+
+# Round 2 (2026-11-04, afternoon)
+
+The same branch, from round 1's third build (`2a830d97`, "before" below): the items of "What is
+left" that measured worth it, and the costs the crops' real workloads showed.
+
+## Where the time went (round 1's build)
+
+- **si's expander tests** (`bin/si test`, psyntax evaluated on the tools' host, `ARBACE_HOST_EXE`
+  the executable; 33 s, profiled with `ARBACE_CPUPROFILE`): the calls of the methods of interfaces
+  made at run time on objects of deftypes and records (psyntax's records and protocols) through the
+  methods' invokers, 19% (`Compiler$Dyn`'s `addInterfaceMethod` invoker: `dynOf`, the fn found in a
+  Go map by a string key, `dynCall`, `dynConvert`; and the protocol fns' calls above them); the
+  frame's release, a checked `RefArray.Store` per slot, 7%; `Class.isInstance` 7.6%, most of it
+  the classes made at run time's test (an assertion to the Go interface `dynObject`, an itab
+  lookup) under `instance?` and the checkcast of the interface calls; `CodeRun.fixed` 3.6%, the
+  frame's reset 2.5%, `IFn`'s cast 2.7%. `bin/si fixpoint` (psyntax expanding its own sources on
+  Arbace, 46 s): the same, with closures' captures (`CodeFn`) and the garbage collector (15%) more.
+- **A protocol call, 450-630 ns** (`protocol-record` 494, `protocol-2` 631): the profile is that
+  of three evaluated calls (the protocol fn, its interface fn `ginterf`, the record's method), the
+  checkcast and the invoker between the last two.
+- **A reflective call's hit, 225-530 ns**: allocation, a third of it: `Method.getParameterTypes`
+  copied at each call (jrt's `classArray`), `Reflector.boxArgs`' array, `Method.invoke`'s
+  wrapping literal (`callWrapping`, a second deferred `Catch`) and `InvocationTargetException`'s
+  unwrapping.
+- **The call's `try`** (j2g's literal with its deferred `jrt.Catch`): measured apart, a Go
+  benchmark of the same shape (`.tmp`'s, TamaGo's go 1.27.1 on this host): a call through the
+  literal 13.7 ns, the same call with no `try` 6.1 ns; with a `defer` that recovers in the
+  function itself (no literal) 10.0 ns; two functions, the inner one's `defer` recovering only on
+  a panic (a flag), 11.0 ns; a `defer` without `recover` 7.2 ns. See "Declined".
+- **`pr-str`**: none of it is the evaluator's (its profile is compiled code: `binding`'s
+  `push-thread-bindings` 19%, the writer, allocation; the loop around it 2%).
+- **goi's runs** (`bin/goi run test/goi/run/go t.NAME`, on the executable as the tools' host): no
+  evaluator node in the profile: goi's front end is compiled in the executable, its interpreter is
+  Go (`go/arbace/goi`). The Python crop has no interpreter in this checkout yet (`bin/pyi`: corpora
+  and references, PY4); the OCaml and Haskell corpora are not fetched in this checkout (no
+  downloads): si is the crop whose evaluated workload was measured.
+
+## The changes (round 2)
+
+1. **Protocol calls straight to the method** (`CodeProto`, `CodeCompiler.compileProto`): a call
+   of a protocol fn (`InvokeExpr.isProtocol`, its interface `protocolOn` and method `onMethod`)
+   whose interface was made at run time (defprotocol's, evaluated), of at most 3 arguments after
+   the target, whose method's parameters and return are `Object`: the fn, the target and the
+   arguments evaluated as `CodeInvokeN` evaluates them (the same order, the same `IFn` cast, the
+   same line, `clearThis` in tail position); then, when the target is an object of a deftype,
+   defrecord or reify made at run time that implements the interface, the fn its class set for the
+   method (`Dyn.setMethod`) is called with the target and the arguments, as compiled code calls
+   the interface's method when the target implements it (InvokeExpr.emitProto, c2j's
+   `invoke-linked`); else the protocol fn as before. The fn is found by the target's class in a
+   per-site cache (`CodeImplEntry`: up to 8 classes, each with its fn or nil) filled by
+   `Class.isInstance` and the new native `Dyn.methodImpl` (the class's `ByKey` fn of the method's
+   key, nil for a proxy, an interpreted Java class's object, or no fn). The call through the
+   method's invoker that the protocol's interface fn made (`addInterfaceMethod`'s: the same fn by
+   the same key, `dynCallFast`'s invoke of that arity, a reference result as it is,
+   `Reflector.prepRet` of `Object` the identity) is that call.
+2. **Calls of a run-time interface's method on a run-time class's object** (`CodeHostInstance`,
+   a hinted `(.m ^I x ...)` of a definterface or protocol interface, the same restrictions): the
+   same per-site cache; a fn found means the target implements the method's class, so the
+   checkcast, which passes, is not made; else the checkcast and the invoker as before.
+3. **Classes made at run time** (arbace/j2g/dyn.ae, j2g_dyn.go): a deftype's class's `isInstance`
+   is a Go assertion to `*Dyn` (its objects' type; a proxy's `DynSub_C` is of another class) and a
+   comparison of its class, where an assertion to the interface `dynObject` looked its itab up; a
+   run-time interface's `isInstance` takes the same path first for a `*Dyn`; `Dyn.getField` reads a
+   `*Dyn`'s field directly. `defineClass`'s native is a fn of its own (`define-class-native`), so
+   that `forms`' constants stay under the frozen JVM's limit of a static initializer (round 1's
+   `MethodTooLargeException`), with `method-impl-native`.
+4. **The frame** (`Frame`, `CMethod`): `release` clears its slots by a native, `CodeRun.clear`
+   (jrt's `natives.ae`: Go's `clear` of the slice, one bulk write with its write barrier, where
+   a checked store per slot was 7% of si's tests); `reset` sets the method, objx and source and
+   sizes the slots and prims only when the frame was last made ready for another compiled method
+   (`Frame.cm`; a pooled frame at a depth is mostly reused by the same method); the marker of an
+   arity without a fixed method is a field of its `CMethod` (`none`), one load where `fixed` loaded
+   the array's last element and asserted its type.
+5. **Reflective calls' hits** (`CodeReflectEntry`): the entry keeps its method's parameter and
+   return classes (no `getParameterTypes` copy per call); its arguments boxed by
+   `Reflector.boxArg` in the call's own array (`boxed`; the array `argsOf` or `widened` made for
+   this call, which no one keeps) where `boxArgs` made another; and when the method's class is
+   public and the entry's receiver class is assignable to it (a static method: no receiver), the
+   method's invoker is called directly (`Evaluator.invokeDirect`, as the hinted calls since round
+   1): `Method.invoke`'s `InvocationTargetException`, which `invoke` unwrapped (its cause thrown,
+   as `invokeDirect` lets the method's exception propagate), and its second `Catch` are not made;
+   an entry whose receiver class `Method.invoke` would refuse (`invokeInstanceMethodOfClass` of an
+   unrelated qualifying class) keeps `invoke`'s path and its `IllegalArgumentException`.
+
+What it changes, all toward the frozen JVM's answers (test/bench/eval-traces.ae, new: its cases
+run on round 1's build, this one's and the v4 jar): a protocol call on an object that implements the protocol no longer shows the protocol fn's
+two evaluated frames and the invoker's `Compiler$Dyn.addInterfaceMethod` frame in stack traces, nor a
+hinted call of a run-time interface's method the invoker's frame (the JVM's compiled call has
+neither); and `with-redefs` (or `alter-var-root`) of a protocol fn no longer
+reaches such a call, as on the JVM (the known Clojure behaviour of `emitProto`: the redefinition is
+seen by the objects that do not implement the interface: extended classes, nil). Exceptions, their
+classes and messages ("No implementation of method: ..." for nil, a Long, a record of another
+protocol), values, line numbers otherwise: the same as round 1's.
+
+## Declined
+
+- **The call's `try` without its literal** (the 7.5 ns of the benchmark above): the cheapest
+  form, a `defer` without `recover` (1 ns), lets a Go run-time error (a nil dereference in the
+  evaluated code: NullPointerException) be converted by an outer `Catch` after the inner calls'
+  deferred pops ran, so its stack trace would miss their evaluated frames (`Evaluator.trace`
+  reads the frames still pushed); re-panicking from the deferred function itself keeps them but
+  unwinds an exception through N evaluated frames in O(N²) (each panic walks the frames below the
+  ones still on the stack: a StackOverflowError through 10,000 frames). The form that keeps both
+  (a native `guard` with a flag, recovering only on a panic, then panicking from its caller) saves
+  3 ns of a call's 85 (3.5%), for a j2g-generated native and a change to jrt's stack-trace mapping
+  (`isEvalCall`): not worth it now.
+- **A record's field by keyword** (`(:r rec)`, 485 ns): c2j compiles it as the evaluator runs it
+  (`Keyword.invoke`; the JVM's `KeywordLookupSite` thunks are not c2j's), so a faster evaluator path
+  would be a divergence from the compiled code rather than its equivalent.
+
+## Checks (round 2, by day)
+
+- The builds: `bin/arbace-go --build`'s first program loads every embedded namespace from source on
+  the new evaluator and c2j compiles them: 157 compiled, 0 failed (both builds of the round).
+  `bin/j2g --slice arbace/lang/Compiler --root 'arbace/lang/Compiler$*'` after each change: no
+  stub of the changed classes.
+- Clojure's suite, its 78 namespaces on the plain executables (the main checkout's translated
+  suite, as `bin/clojure-tests` runs them; the 8 that need the Java fixtures fail to load on
+  both): the 78 results files byte for byte round 1's build's, in each of four runs.
+- si's expander tests and `bin/si fixpoint`: the same output as round 1's build (60 of 64, 4
+  known; 6 of 6 libraries expanded as on Chez).
+- test/bench/eval-traces.ae: round 1's build's output but for the protocol calls' traces and the
+  with-redefs case (above), which are the v4 jar's; round 1's stack and message probe
+  (`.tmp`'s, the cases of "Checks (by day)" above): the same output.
+- `bin/generated-check EXE`: `CompilerNodes.ae` as test/c2j/gen_nodes.ae writes it (no defnode
+  changed), the other generated files unchanged.
+- The oracle (`bin/oracle check "EXE -" --timeout 900 --expected
+  test/oracle/known-go-amd64-frozen.edn`): 22,689 of 22,741 match, the 52 known mismatches as
+  recorded, 0 new, 0 now passing.
+- `bin/j2g-edge verify` (arbace/j2g/dyn.ae and Compiler.ae changed): passes, `jdk/edge.edn` is the
+  JVM's answer; the frozen JVM compiles dyn.clj (`forms` smaller: defineClass's native moved out).
+
+## Measurements (round 2)
+
+Round 1's third build against this round's second (`bin/arbace-go --build`, amd64), on the shared
+host (load 6 to 30 during the runs).
+
+**The micro-benchmarks** (the best of 3 interleaved runs of each group, `EVAL_MICRO_MS=400`; ns per
+iteration, the loop included; of the 126 measured, 17 1.1 times faster or more, 31 by 3-10%, 59
+within 3%, 13 by 3-10% slower and 6 more (`make-closure`, `new-sb`, `loop`, `boxed-lt`,
+`long-arith`, `string-from-bytes`; see below)):
+
+| benchmark | before (ns) | after (ns) | speedup |
+|---|---:|---:|---:|
+| `protocol-record` | 494 | 108 | 4.6x |
+| `protocol-deftype` | 486 | 107 | 4.5x |
+| `protocol-2` | 635 | 120 | 5.3x |
+| `protocol-poly` (new) | 567 | 138 | 4.1x |
+| `iface-call` (new) | 174 | 102 | 1.7x |
+| `protocol-extended` | 257 | 246 | 1.0x |
+| `aset-longs-object` | 532 | 442 | 1.2x |
+| `aget-unhinted-longs` | 369 | 320 | 1.2x |
+| `aset-unhinted-longs` | 606 | 463 | 1.3x |
+| `aset-unhinted-objects` | 486 | 429 | 1.1x |
+| `alength-unhinted` | 245 | 204 | 1.2x |
+| `arraylist-get-unhinted` | 293 | 239 | 1.2x |
+| `sb-append-unhinted` | 430 | 430 | 1.0x |
+| `call0` | 86 | 82 | 1.0x |
+| `call1` | 112 | 104 | 1.1x |
+| `call6` | 325 | 272 | 1.2x |
+| `make-closure` | 109 | 134 | 0.8x |
+| `new-sb` | 152 | 185 | 0.8x |
+| `loop` | 23 | 25 | 0.9x |
+
+`make-closure`, `make-closure-call`, `new-sb` and `string-from-bytes` (+25 to 50 ns) are slower on
+this build and not on the round's first, which has the same code on their paths (`CodeRun.runAll`,
+`CodeFn`, `CodeHostNew`): its `make-closure` 107, `new-sb` 158, `string-from-bytes` 325-341, three
+runs each, against this build's 132, 185 and 378-419; the profile puts the time in `runAll`'s loads
+of its argument array's header. The loops and their arithmetic move by 2-8 ns from build to build
+both ways (`loop`: round 1's 20-25 ns, the round's first build 28, this one 24-26). A property of
+each binary (the builds are deterministic), not of the change: the next build may move it.
+
+**The workloads** (test/bench/eval-bench.ae, ms, the best of two runs each): `protocol` 68.8 →
+19.5 (3.5x); the other 18 within ±5% (`reduce-fn` 27.8 → 24.4, `transduce` 18.3 → 16.7,
+`closures` 39.5 → 42.0).
+
+**Whole runs** (one after the other on the same host):
+
+| run | before | after |
+|---|---:|---:|
+| si's expander tests, `bin/si test` | 32.7 s | 25.2 s |
+| `bin/si fixpoint` (psyntax expanding its sources on Arbace) | 33.9 s (expander 26.6) | 28.6 s (22.2) |
+| Clojure's suite, its 78 namespaces 8 at a time, the processes' times summed | 595-682 s | 583-721 s |
+
+The suite is the same within the host's noise (four runs each: few of its calls are of protocols
+made at run time); si's psyntax, whose records and protocols are evaluated, is 1.2-1.3 times
+faster (1.7-2.1 times against main's, round 1's table).
+
+## What is left (after round 2)
+
+- **The call's constant, 60-80 ns** (si's fixpoint after this round: `CodeRun.fixed` 3.9%, `IFn`'s
+  cast in `CodeInvokeN` 2.8%, the frame's reset 2.2%, slot stores 3%, the var's root 3%): `IFn`'s
+  cast is a Go assertion to an interface at one site for every fn type (each compiled fn is a Go
+  type of its own), so its cache misses and the itab table is searched (`itabTableType.find`);
+  `CodeInvokeN` could test for an `EvalFn` first and call it directly (a concrete assertion, a
+  direct call), but the node is a defnode's: it needs a construct of `arbace.c2j.node` for an
+  evaluator-only alternative (the emitter's code must stay byte for byte), and a check that c2j's
+  output is unchanged. The `try`'s 3 ns (Declined) is the rest of it.
+- **The garbage collector, 15-18% of si's runs**: boxed longs, closures' captured values, the
+  host calls' argument arrays; the tools' host runs at Go's default `GOGC` where j2g and the
+  suite's runs set 400 (a choice of the tools' memory, not the evaluator's).
+- **Arrays of nodes** (`Code[]`, a `RefArray` of `any`): each element read is an assertion to the
+  `Code` interface (`jrt.As`), `runAll` 11% of si's fixpoint with its children.
+- **A protocol extended to a class** (`protocol-extended`, 246 ns): the protocol fn's evaluated
+  call remains, as the JVM's compiled call keeps it (InvokeExpr.emitProto calls the protocol fn
+  for a class that does not implement the interface); a site cache of the fn `fnFor` gives, by the
+  protocol fn's identity and the class, would skip the protocol fn's frame, which the JVM's trace
+  shows.
+- **A record's field by keyword** (485 ns) and **reflective hits** (200-460 ns): see Declined, and
+  round 1's "What is left" (the reflection warnings).
+
+## The night's proof (round 2)
+
+As round 1's: `bin/gate` (the per-form differential check above all: protocol calls evaluated
+against compiled), and the fixpoint `bin/arbace-go --fixpoint --g1 "$(. bin/lib/gate-cache.bash;
+arbace_gate_cache "$PWD")"`; by hand, test/bench/eval-traces.ae on the gate's executable against
+the v4 jar.
