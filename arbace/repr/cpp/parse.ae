@@ -1230,7 +1230,7 @@
                 (use-member! p (:ent ei) :ctor0))))
       nil)))
 
-(declare class-member?)
+(declare class-member? in-body-member?)
 
 (defn- local-name?
   "Whether unqualified lookup of `nm` finds a block's or a function's parameters' name."
@@ -1543,6 +1543,11 @@
           (node p "UnresolvedMemberExpr" b (:e qn) {})
           :else
           (node p "DeclRefExpr" b (:e qn) {:_ent en
+                                           :_this (boolean (and (= 1 (count (:parts qn))) (not (:g qn)) (:s lp)
+                                                                (or (= :var (:k en))
+                                                                    (and (= :fn (:k en))
+                                                                         (not (and (or (in-template? p) (dep-this? p)) (or (:ovl en) (:tmpl en))))))
+                                                                (in-body-member? p (:s lp))))
                                            :_mfn (when (and (= :fn (:k en)) (= 1 (count (:parts qn))) (not (:g qn)) (:s lp) (or (in-template? p) (dep-this? p))
                                                             (class-member? p (:s lp)))
                                                    en)
@@ -1561,7 +1566,16 @@
                       (let [e (sc/lookup (scope p) (:s lp))] (when (and (= :fn (:k e)) (class-member? p (:s lp))) [e (dep-this? p)]))
                       (when-let [[ce d] (object-class p base arrow)]
                         (let [e (sc/find-in (:scope ce) (:s lp))] (when (= :fn (:k e)) [e d])))))]
-    (node p "MemberExpr" (nb base) (:e qn) (cond-> {:name nm :isArrow arrow :inner [base]} mfn (assoc :_mfn mfn :_objdep dep)))))
+    (node p "MemberExpr" (nb base) (:e qn)
+          (cond-> {:name nm :isArrow arrow :inner [base]}
+            mfn (assoc :_mfn mfn :_objdep dep)
+            ;; a member of a type-dependent object that no class of the current instantiation has: clang's
+            ;; CXXDependentScopeMemberExpr (Sema::ActOnMemberAccessExpr, ActOnDependentMemberExpr)
+            (and (nil? mfn) (:s lp) (= 1 (count (:parts qn))) (type-dependent? p base)
+                 (if (= "CXXThisExpr" (:kind base))
+                   (not (class-member? p (:s lp)))
+                   (not (when-let [[ce _] (object-class p base arrow)] (and (:scope ce) (sc/find-in (:scope ce) (:s lp)))))))
+            (assoc :_depscope true)))))
 
 (defn parse-postfix [^P p x]
   (loop [x x]
@@ -2195,6 +2209,41 @@
         :lookup (let [e (sc/find-in s nm)] (and e (#{:var :fn} (:k e)) (not (:static e))))
         (if (.get ^java.util.HashMap (sc/names-of s) nm) false (recur (sc/parent-of s)))))))
 
+(defn- in-body-member?
+  "Whether `nm` names a non-static member of the class being defined, reached from a function's parameters or body (a
+  scope of kind :fparams or :block below the class's): clang's implicit member access this->nm there (an unevaluated
+  operand of the class's own scope is a plain reference)."
+  [^P p ^String nm]
+  (loop [^Scope s (scope p) body false]
+    (when s
+      (case (sc/kind-of s)
+        :class (let [e (or (sc/find-in s nm) (when-let [late (:late (class-ctx p))] (sc/find-in late nm)))]
+                 (and body e (#{:var :fn} (:k e)) (not (:static e)) (not (:enumerator e)) (not (:anon e)) (not (:unres e)) (not (:tmpl e))))
+        :lookup (let [e (sc/find-in s nm)]
+                  (and body e (#{:var :fn} (:k e)) (not (:static e)) (not (:enumerator e)) (not (:anon e)) (not (:unres e)) (not (:tmpl e))))
+        (if (.get ^java.util.HashMap (sc/names-of s) nm)
+          false
+          (recur (sc/parent-of s) (or body (contains? #{:fparams :block} (sc/kind-of s)))))))))
+
+(defn- this-members
+  "The tree with the member names the parser marked (`:_this`: an unqualified non-static member of the class, named
+  in a function's body) as clang's tree has them: a MemberExpr through the implicit `this`."
+  [nodes]
+  (letfn [(walk [n]
+            (if-not (map? n)
+              n
+              (let [n (if-let [in (:inner n)] (assoc n :inner (mapv walk in)) n)]
+                (cond
+                  (and (:_depscope n) (= "MemberExpr" (:kind n)))
+                  (-> n (dissoc :name :_depscope) (assoc :kind "CXXDependentScopeMemberExpr" :member (:name n)))
+                  (and (:_this n) (= "DeclRefExpr" (:kind n)))
+                  (let [r (:range n) nm (get-in n [:referencedDecl :name])]
+                    (-> n (dissoc :referencedDecl :_this)
+                        (assoc :kind "MemberExpr" :name nm :isArrow true
+                               :inner [{:kind "CXXThisExpr" :implicit true :range r :inner []}])))
+                  :else n))))]
+    (mapv walk nodes)))
+
 (defn- tok-text-this
   "tok-text, a non-static member's name written as clang prints an implicit member access: this->name."
   ^String [^P p ^long b ^long e]
@@ -2715,7 +2764,7 @@
         ty (cond-> base ref (#(hash-map :t ref :of %)))
         bs (mapv (fn [[nm i]] (declare! p {:k :var :name nm}) {:kind "BindingDecl" :name nm :loc (loc p i)}) names)]
     (node p "DecompositionDecl" (:b ds) (last-ix p)
-          (cond-> {:loc (loc p li) :type {:qualType (qt ty)} :inner (vec (concat bs (when x [x])))}
+          (cond-> {:loc (loc p li) :type {:qualType (qt ty)} :inner (vec (concat (when x [x]) bs))}
             init (assoc :init init)
             (:storage ds) (assoc :storageClass (:storage ds))))))
 
@@ -3683,5 +3732,5 @@
                     (if (eof? p) out (do (adv! p) (recur out)))))]
       {:nodes (let [^ArrayList us (stv p USES)
                     r (when (seq us) (sema/resolve-uses (vec us) year))]
-                (if (seq r) (sema/patch-defaulted nodes r) nodes))
+                (this-members (if (seq r) (sema/patch-defaulted nodes r) nodes)))
        :declines (stv p DECLINES) :reasons (into {} (stv p REASONS)) :root (stv p ROOT) :skim-cache cached}))))
