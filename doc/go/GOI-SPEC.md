@@ -4788,7 +4788,12 @@ frames from its depth down, read on demand; nothing is recorded per call beyond 
 
 **The stack** (`Thread.stack`, `go/arbace/goi/frames.ae`): from the thread's depth down, each frame with
 a function and a line (a frame entered for a call whose arguments are being evaluated has line 0: not one
-yet); after a frame that is a deferred call running in a panic (its `rec` holds the panic), gc's
+yet; a method set entry's thunk, gc's wrapper, which gc's traces never show, has no lines either), as
+many as asked (`runtime.Callers` into a buffer of 10 walks 10 frames, `Caller(skip)` skip + 1), a run of
+wrappers' frames skipped at once (`CodeWrapper`: a wrapper's frame records, in its prologue, the depth
+below its run, cleared by its epilogue; so `Callers` through 10,000 promoted methods costs what it does
+through 1,000, as gc's tail-call wrappers, `fixedbugs/issue75764`, which the first build of this design
+failed); after a frame that is a deferred call running in a panic (its `rec` holds the panic), gc's
 runtime frames of the panic, `runtime.gopanic` and the run-time error's own (`panicmem` and `sigpanic` of
 a nil dereference, `panicBounds64` and `panicBounds` of a bounds check, `panicdivide`,
 `panicdottypeE`); then the runtime's frames below. gc's runtime frames are `pcFunc`s of their own with
@@ -4825,10 +4830,18 @@ declarations is not in any function's forms). Program
 counters of gc's code taken by unsafe means (a func value's code word read through pointers, mprotect
 over the text) are gc's.
 
+**Executables built before it.** The builder asks once whether the back end has `CodeFrame` (an
+executable of before this branch has not) and then gives no frame data and no `AtLineR`, `CodeLineDirs`
+or `CodeWrapper`: the checkout's builder runs on an older executable as before; goi's frames need an
+executable built from this branch (go/arbace/goi is compiled into it, in `gate_key`).
+`reflect.Value.Pointer` of two different interpreted functions now differs (it was the shared code of
+their adapters, §4.6).
+
 **The cost.** None on a call: `enter` stores the function and line 0 as before, statements store their
 lines as before; what is added runs only when a function that defers ends without a return (one
 store), when a compiled function is called through a func value (one store), when a `let`'s later
-declaration can call or panic (one store), and when the program asks (`funcOf` builds a function's
+declaration can call or panic (one store), in a wrapper's prologue and epilogue (a load and two
+stores), and when the program asks (`funcOf` builds a function's
 `pcFunc` once per code, under a lock). Measured on `fib 27` (635,621 interpreted calls) and `dfib 22`
 (57,313 calls that defer), best of five, three alternations against an executable of `next` before the
 change: 27.7-28.3 ms against 27.7-29.0 ms (about 44 ns a call either way), 13.8-14.0 ms against
