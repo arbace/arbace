@@ -535,3 +535,32 @@ clang 23 for want of them; LL1's pins name `llvm23`'s version beside `clang23`'s
 LLVM IR's GT8 share is half a crop's (about 17 minutes nightly, 1.2 hours clean), carved from C++'s and Rust's shares (their
 checks shrink to the language-specific parts once LLVM checks the shared lowering). The crops are "10+1": ten languages and
 LLVM IR beside them. LLS1-LLS16 wait for after the tag (the user).
+
+## As built: LL8 (`:full`, LLS18 (a)) and LL4 (the verifier, LLS6 (a)), 2026-11-04 (write-ahead)
+
+Branch `llvm-full` from `llvm-read` (`5249bc5c`); the details in doc/cpp/LLVM.md §6.1 and §6.2. Both run on the main
+checkout's stage 0 (`ARBACE_HOST_EXE`), evaluated from the checkout; no gate step, no whole corpus.
+
+- **`:full`** (`arbace/repr/llvm/full.ae`; `bin/repr-llvm read --full`, `print --full`, `roundtrip --text`): the plain
+  forms and a layer kept item by item (a top-level form; a definition's header, labels, instructions, debug records,
+  use-list orders and `}`): the gap before each item when it is not the canonical layout's, the item's text when its
+  spelling is not the printer's, with the hash of its canonical print (an edited form prints canonically). The printer
+  was rebuilt on the same items, its output unchanged byte for byte on the 278 modules. The reader now starts a new block
+  after a terminator when the text writes no label, as LLParser does. Over the round trip's lists (278 modules: C's
+  torture programs at `-O0`/`-O2`/`-g`, C++ samples at `-O0`/`-O2`/LTO and for Windows, Rust, the six hand-written corner
+  modules) and four new hand-written modules with comments (`notes`, `implicit`, `dbg`, `unnamed`): **282 of 282 printed
+  back byte for byte**, the `.ae` text read back to the same forms and layer, the plain print read in `:full` with an
+  empty layer; 4,322 forms with an entry, 7,130 gaps, 18 texts. The plain round trip over the same 282: forms 282 of 282,
+  objects 279 (3 `none`), bitcode 282.
+- **The verifier** (`arbace/repr/llvm/verify.ae`; `bin/repr-llvm verify`, `verify-check`): LLParser's checks beyond the
+  grammar in the text's order, then the Verifier's rules by function and module, 42 parser rules and 21 Verifier rules
+  named, messages in LLVM 23's words (the ported and the missing ones in LLVM.md §6.2). The mutants
+  (`arbace/repr/llvm/mutate.ae`, `bin/repr-llvm mutants`): 17 kinds, the moves also renumbered so that the Verifier's
+  rules decide. Against `opt -passes=verify` of the pin: the 282 valid modules 0 errors on both; 630 mutants (two sets
+  of 315, the second held out from the fitting): **912 of 912 verdicts, 613 of 613 rejections with opt's first message**;
+  73 hand-written probes 72 of 73 (a twice-defined label, LLParser merges the blocks).
+
+What is left: `llvm/test`'s rejection tests as the corpus (LLS6 (i), (ii): the tarball's re-fetch), LLParser's syntax
+errors with positions (the reader's refusals keep their own words), the attribute, calling-convention, `musttail`,
+funclet and metadata-structure rules, a fuller intrinsic table (`Intrinsics.td`'s), and the Makefile's targets for
+`roundtrip --text`, `verify-check` and `mutants` (this branch touches only repr/llvm, its script and the docs).

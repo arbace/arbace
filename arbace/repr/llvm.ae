@@ -2,10 +2,12 @@
   "repr/llvm, LLVM IR's bridge (doc/cpp/LLVM.md; doc/cpp/CPP-SURVEY.md §5.2, \"As built: CX6\"): `read-ll` reads IR
   text into LLVM forms (arbace.repr.llvm.read), `module-text` writes them as .ae text (a top-level form a line, a
   function's blocks and instructions a line each), `print-ll` prints forms back to IR (arbace.repr.llvm.print). The
-  judge is clang: `clang -c` of the print gives the original's object. `-main` is bin/repr-llvm read, print and the
-  Arbace half of its round trip."
+  judge is clang: `clang -c` of the print gives the original's object. Mode :full (arbace.repr.llvm.full) keeps the
+  text's layer beside the forms and prints the original back byte for byte. `-main` is bin/repr-llvm read, print,
+  verify (arbace.repr.llvm.verify) and the Arbace half of its round trips."
   (:require [arbace.repr.llvm.read :as rd]
             [arbace.repr.llvm.print :as pr]
+            [arbace.repr.llvm.full :as full]
             [arbace.repr.c.layout :as layout]
             [arbace.string :as str])
   (:import [java.util.concurrent Executors Callable Future]))
@@ -99,20 +101,77 @@
       [ae-path (if-let [c (:llvm/refused (ex-data e))] (str "refused:" (name c)) "crash")
        (str/replace (str (.getMessage e)) #"[\t\n]" " ")])))
 
+(defn full-ae
+  "A module's `.ae` text in mode :full: its forms as the plain mode writes them, then the layer's line."
+  ^String [^String ns {:keys [forms layer]}]
+  (str (module-text ns forms) (full/layer-text layer)))
+
+(defn text-one
+  "One file's round trip in mode :full: read in :full (the forms the plain mode's), its `.ae` text read back (the forms
+  and the layer equal), printed back (the original byte for byte), and the plain print read in :full (a canonical
+  text: no layer). Writes the `.ae` text at `ae-path`; [ae-path status detail forms-kept gaps texts]."
+  [^String ae-path ^String ll]
+  (try
+    (let [src (latin1 ll)
+          {:keys [forms layer] :as r} (full/read-full src)
+          ae (full-ae (ns-name-of ll) r)
+          _ (spit-latin1 ae-path ae)
+          back (strip-line (read-module-text ae))
+          st (full/layer-stats layer)
+          plain (print-ll forms)
+          pr2 (full/read-full plain)
+          status (cond
+                   (not= forms (rd/read-module src)) "forms-differ"
+                   (not= back forms) "ae-differs"
+                   (not= (full/layer-of-ae ae) layer) "layer-differs"
+                   (not= (full/print-full forms layer) src) "text-differs"
+                   (not= (:forms pr2) forms) "plain-forms-differ"
+                   (or (some some? (:items (:layer pr2))) (:end (:layer pr2))) "plain-layer"
+                   (not= (full/print-full forms (:layer pr2)) plain) "plain-differs"
+                   :else "ok")]
+      [ae-path status "" (:forms st) (:gaps st) (:texts st)])
+    (catch Throwable e
+      [ae-path (if-let [c (:llvm/refused (ex-data e))] (str "refused:" (name c)) "crash")
+       (str/replace (str (.getMessage e)) #"[\t\n]" " ") 0 0 0])))
+
+(defn- pool-map
+  "f over rows on REPR_LLVM_THREADS threads, in order."
+  [f rows]
+  (let [threads (Integer/parseInt (or (System/getenv "REPR_LLVM_THREADS") "4"))
+        pool (Executors/newFixedThreadPool threads)
+        futs (mapv (fn [r] (.submit pool ^Callable (fn [] (f r)))) rows)
+        res (mapv #(.get ^Future %) futs)]
+    (.shutdown pool)
+    res))
+
+(defn- list-rows [lst] (for [l (str/split-lines (slurp lst)) :when (seq l)] (str/split l #"\t")))
+
 (defn -main
-  "bin/repr-llvm read FILE.ll [-o OUT.ae]; print FILE.ae [-o OUT.ll]; rt LIST WORK (NAME<tab>PATH.ll lines: the
-  Arbace half of the round trip, WORK/rt.tsv)."
+  "bin/repr-llvm read [--full] FILE.ll [-o OUT.ae]; print [--full] FILE.ae [-o OUT.ll]; verify FILE.ll|FILE.ae; rt LIST
+  WORK (NAME<tab>PATH.ll lines: the Arbace half of the round trip, WORK/rt.tsv); rt-text LIST WORK (mode :full's,
+  WORK/text.tsv); verify-list LIST OUT (each file's verdict and first message, a line each)."
   [verb & args]
-  (case verb
-    "read" (let [[f _ o] args t (module-text (ns-name-of f) (read-ll f))] (if o (spit o t) (print t)) (flush))
-    "print" (let [[f _ o] args t (print-ll (read-module-text (slurp f)))] (if o (spit-latin1 o t) (print t)) (flush))
-    "rt" (let [[lst work] args
-               rows (for [l (str/split-lines (slurp lst)) :when (seq l)] (str/split l #"\t"))
-               threads (Integer/parseInt (or (System/getenv "REPR_LLVM_THREADS") "4"))
-               pool (Executors/newFixedThreadPool threads)
-               futs (mapv (fn [[n p]] (.submit pool ^Callable (fn [] (assoc (roundtrip-one (str work "/forms/" n ".ae") p (str work "/print/" n ".ll")) 0 n)))) rows)
-               res (mapv #(.get ^Future %) futs)]
-           (.shutdown pool)
-           (spit (str work "/rt.tsv") (str (str/join "\n" (map #(str/join "\t" %) res)) "\n"))
-           (println (count res) "files," (count (filter #(= "ok" (second %)) res)) "read and printed"))
-    (do (println "repr/llvm: read, print or rt") (System/exit 2))))
+  (let [full? (= (first args) "--full")
+        args (if full? (rest args) args)]
+    (case verb
+      "read" (let [[f _ o] args
+                   t (if full? (full-ae (ns-name-of f) (full/read-full (latin1 f))) (module-text (ns-name-of f) (read-ll f)))]
+               (if o (spit-latin1 o t) (print t)) (flush))
+      "print" (let [[f _ o] args
+                    ae (latin1 f)
+                    forms (strip-line (read-module-text ae))
+                    t (if full? (full/print-full forms (full/layer-of-ae ae)) (print-ll forms))]
+                (if o (spit-latin1 o t) (print t)) (flush))
+      "verify" (let [vf (requiring-resolve 'arbace.repr.llvm.verify/verify-main)] (System/exit (int (vf args))))
+      "verify-list" (let [vf (requiring-resolve 'arbace.repr.llvm.verify/verify-list)] (vf args))
+      "rt" (let [[lst work] args
+                 res (pool-map (fn [[n p]] (assoc (roundtrip-one (str work "/forms/" n ".ae") p (str work "/print/" n ".ll")) 0 n)) (list-rows lst))]
+             (spit (str work "/rt.tsv") (str (str/join "\n" (map #(str/join "\t" %) res)) "\n"))
+             (println (count res) "files," (count (filter #(= "ok" (second %)) res)) "read and printed"))
+      "rt-text" (let [[lst work] args
+                      res (pool-map (fn [[n p]] (assoc (text-one (str work "/full/" n ".ae") p) 0 n)) (list-rows lst))]
+                  (spit (str work "/text.tsv") (str (str/join "\n" (map #(str/join "\t" %) res)) "\n"))
+                  (println (count res) "files," (count (filter #(= "ok" (second %)) res)) "printed back byte for byte;"
+                           (reduce + (map #(nth % 3) res)) "forms with a layer entry,"
+                           (reduce + (map #(nth % 4) res)) "gaps and" (reduce + (map #(nth % 5) res)) "texts kept"))
+      (do (println "repr/llvm: read, print, verify or rt") (System/exit 2)))))

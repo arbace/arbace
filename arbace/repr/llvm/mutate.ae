@@ -1,0 +1,308 @@
+(ns arbace.repr.llvm.mutate
+  "Invalid mutants of valid IR for the verifier's check (doc/cpp/LLVM.md §6.2; bin/repr-llvm mutants): a module's forms
+  with one change that LLParser or LLVM's Verifier rejects (most of the time: the check takes opt's verdict, not this
+  namespace's intent), printed by arbace.repr.llvm.print. The kinds: an operand's type changed, a use moved above its
+  definition, a terminator removed, a phi's incoming block renamed (to a block that does not exist or to another of
+  the function's), a phi moved below a non-phi, an alignment not a power of two, a declaration's or a global's linkage
+  and visibility made illegal, an operand renamed to a value never defined, a result renamed to an earlier one's, a
+  landingpad moved down, an intrinsic's call without its last argument, a branch's condition widened; the moves again
+  with the function renumbered (`renumber`: the parser's numbering kept, so that the Verifier's rules decide), a branch
+  to the entry block, a phi without one of its entries, an operand replaced by the instruction's own result. Deterministic:
+  java.util.Random seeded by the mutant's index."
+  (:require [arbace.repr.llvm.read :as rd]
+            [arbace.repr.llvm.print :as pr]
+            [arbace.repr.llvm.verify :as vf]
+            [arbace.string :as str]))
+
+(set! *warn-on-reflection* true)
+
+(defn- latin1 ^String [^String path]
+  (String. (java.nio.file.Files/readAllBytes (.toPath (java.io.File. path))) "ISO-8859-1"))
+
+(defn- spit-latin1 [^String path ^String s]
+  (java.nio.file.Files/write (.toPath (java.io.File. path)) (.getBytes s "ISO-8859-1")
+                             ^"[Ljava.nio.file.OpenOption;" (make-array java.nio.file.OpenOption 0)))
+
+;; ---------------------------------------------------------------------------------------------
+;; Places in a module's forms
+
+(defn- defines [forms] (keep-indexed (fn [i f] (when (= (first f) 'llvm/define) i)) forms))
+
+(defn- body-of [f] (let [v (vec f) bi (.indexOf ^java.util.List v :body)] [bi (nth v (inc bi))]))
+
+(defn- with-body [f blocks] (let [v (vec f) [bi _] (body-of f)] (apply list (assoc v (inc bi) blocks))))
+
+(defn- inst-places
+  "[fi bi ii inst] for every block item of every definition."
+  [forms]
+  (for [fi (defines forms)
+        :let [[_ blocks] (body-of (nth forms fi))]
+        [bi b] (map-indexed vector blocks)
+        [ii x] (map-indexed vector (drop 2 b))]
+    [fi bi ii x]))
+
+(defn- set-inst
+  "The forms with block item `ii` of block `bi` of form `fi` replaced by the items `xs` (none: removed)."
+  [forms fi bi ii xs]
+  (let [f (nth forms fi)
+        [_ blocks] (body-of f)
+        b (vec (nth blocks bi))
+        items (subvec b 2)
+        items (vec (concat (subvec items 0 ii) xs (subvec items (inc ii))))]
+    (assoc forms fi (with-body f (assoc blocks bi (apply list (concat (subvec b 0 2) items)))))))
+
+(defn- body [x] (if (= (first x) '=) (nth x 2) x))
+(defn- result [x] (when (= (first x) '=) (nth x 1)))
+(defn- rebody [x b] (if (= (first x) '=) (list '= (nth x 1) b) b))
+
+(def ^:private int-types '#{i1 i8 i16 i32 i64})
+(def ^:private other-int '{i1 i32 i8 i32 i16 i64 i32 i64 i64 i32})
+(def ^:private bin-ops '#{add sub mul udiv sdiv urem srem shl lshr ashr and or xor})
+(def ^:private terminators '#{ret br switch indirectbr invoke resume unreachable cleanupret catchret catchswitch callbr})
+(def ^:private cast-ops '#{trunc zext sext ptrtoint inttoptr bitcast})
+
+(defn- operands-of
+  "The local values an instruction's body uses (a rough walk: the symbols that are %names)."
+  [x]
+  (let [out (java.util.ArrayList.)]
+    (letfn [(walk [y] (cond (and (symbol? y) (nil? (namespace y)) (str/starts-with? (name y) "%")) (.add out y)
+                            (or (seq? y) (vector? y)) (doseq [z y] (walk z))))]
+      (walk (rest (body x))))
+    (vec out)))
+
+(defn- retype
+  "An instruction with its type changed, or nil when the kind does not apply."
+  [x]
+  (let [b (body x) h (first b)
+        swap (fn [t] (cond (int-types t) (other-int t) (= t 'ptr) 'i64 :else nil))]
+    (cond
+      (bin-ops h) (let [v (vec b) i (count (take-while keyword? (rest b)))
+                        t (nth v (inc i))]
+                    (when-let [t2 (swap t)] (rebody x (apply list (assoc v (inc i) t2)))))
+      (#{'icmp} h) (let [v (vec b) i (inc (count (take-while keyword? (rest b))))]
+                     (when-let [t2 (swap (nth v i))] (rebody x (apply list (assoc v i t2)))))
+      (= h 'load) (when-let [t2 (swap (nth b 1))] (rebody x (apply list (assoc (vec b) 1 t2))))
+      (= h 'store) (let [[t v] (nth b 1)] (when-let [t2 (swap t)] (rebody x (apply list (assoc (vec b) 1 [t2 v])))))
+      (cast-ops h) (let [v (vec b) i (count (take-while keyword? (rest b)))]
+                     (when-let [t2 (swap (nth v (inc i)))] (rebody x (apply list (assoc v (inc i) t2)))))
+      (and (= h 'ret) (= 3 (count b))) (when-let [t2 (swap (nth b 1))] (apply list (assoc (vec b) 1 t2)))
+      (and (= h 'br) (= 5 (count b))) (apply list (assoc (vec b) 1 'i32))
+      (= h 'select) (let [[t v] (nth b 2)] (when-let [t2 (swap t)] (rebody x (apply list (assoc (vec b) 2 [t2 v])))))
+      (= h 'call) (let [args (nth b 3)
+                        k (first (keep-indexed (fn [i a] (when (swap (first a)) i)) args))]
+                    (when k (let [a (nth args k)] (rebody x (apply list (assoc (vec b) 3 (assoc args k (assoc a 0 (swap (first a))))))))))
+      :else nil)))
+
+;; ---------------------------------------------------------------------------------------------
+;; The kinds
+
+(defn- pick [^java.util.Random r xs] (when (seq xs) (nth xs (.nextInt r (count xs)))))
+
+(defn- m-type [r forms]
+  (when-let [[fi bi ii x] (pick r (filter #(retype (nth % 3)) (inst-places forms)))]
+    (set-inst forms fi bi ii [(retype x)])))
+
+(defn- m-hoist
+  "An instruction moved above the instruction of its block that defines one of its operands."
+  [r forms]
+  (let [cands (for [[fi bi ii x] (inst-places forms)
+                    :when (and (not= 'phi (first (body x))) (not (terminators (first (body x)))))
+                    :let [[_ blocks] (body-of (nth forms fi))
+                          items (vec (drop 2 (nth blocks bi)))
+                          ops (set (operands-of x))
+                          d (first (keep-indexed (fn [j y] (when (and (< j ii) (ops (result y)) (not= 'phi (first (body y)))) j)) items))]
+                    :when d]
+                [fi bi ii x d])]
+    (when-let [[fi bi ii x d] (pick r cands)]
+      (let [f (nth forms fi) [_ blocks] (body-of f)
+            b (vec (nth blocks bi)) items (vec (subvec b 2))
+            items (vec (concat (subvec items 0 d) [x] (remove #(identical? % x) (subvec items d))))]
+        (assoc forms fi (with-body f (assoc blocks bi (apply list (concat (subvec b 0 2) items)))))))))
+
+(defn- m-noterm [r forms]
+  (when-let [[fi bi ii] (pick r (filter #(terminators (first (body (nth % 3)))) (inst-places forms)))]
+    (set-inst forms fi bi ii [])))
+
+(defn- labels-of [f] (let [[_ blocks] (body-of f)] (vec (keep second blocks))))
+
+(defn- phi-parts
+  "[head-flags-type incoming options] of a phi's body."
+  [b]
+  (let [v (vec b) i (inc (count (take-while keyword? (rest v))))
+        tail (subvec v (inc i))
+        ins (vec (take-while vector? tail))]
+    [(subvec v 0 (inc i)) ins (drop (count ins) tail)]))
+
+(defn- m-phiblock [r forms]
+  (when-let [[fi bi ii x] (pick r (filter #(= 'phi (first (body (nth % 3)))) (inst-places forms)))]
+    (let [[pre ins opts] (phi-parts (body x))
+          k (.nextInt ^java.util.Random r (count ins))
+          [v l] (nth ins k)
+          others (vec (remove #{l} (labels-of (nth forms fi))))
+          l2 (if (or (.nextBoolean ^java.util.Random r) (empty? others)) '%nosuch.bb (pick r others))
+          b2 (apply list (concat pre (assoc ins k [v l2]) opts))]
+      (set-inst forms fi bi ii [(rebody x b2)]))))
+
+(defn- m-phimove [r forms]
+  (let [cands (for [[fi bi ii x] (inst-places forms)
+                    :when (= 'phi (first (body x)))
+                    :let [[_ blocks] (body-of (nth forms fi))
+                          items (vec (drop 2 (nth blocks bi)))]
+                    :when (some #(and (not= 'phi (first (body %))) (not (terminators (first (body %))))
+                                      (not (str/starts-with? (name (first (body %))) "dbg_"))) items)]
+                [fi bi ii x])]
+    (when-let [[fi bi ii x] (pick r cands)]
+      (let [f (nth forms fi) [_ blocks] (body-of f)
+            b (vec (nth blocks bi)) items (vec (remove #(identical? % x) (subvec b 2)))
+            j (inc (first (keep-indexed (fn [j y] (when (and (not= 'phi (first (body y))) (not (str/starts-with? (name (first (body y))) "dbg_"))) j)) items)))
+            items (vec (concat (subvec items 0 j) [x] (subvec items j)))]
+        (assoc forms fi (with-body f (assoc blocks bi (apply list (concat (subvec b 0 2) items)))))))))
+
+(defn- m-align [r forms]
+  (when-let [[fi bi ii x] (pick r (filter #(some #{:align} (body (nth % 3))) (inst-places forms)))]
+    (let [b (vec (body x)) k (.indexOf ^java.util.List b :align)]
+      (set-inst forms fi bi ii [(rebody x (apply list (assoc b (inc k) (pick r [3 6 12]))))]))))
+
+(defn- m-linkage [r forms]
+  (let [decls (keep-indexed (fn [i f] (when (= (first f) 'llvm/declare) i)) forms)
+        globs (keep-indexed (fn [i f] (when (and (= (first f) 'llvm/global) (not (some #{:linkage} f))) i)) forms)]
+    (if (and (seq decls) (or (empty? globs) (.nextBoolean ^java.util.Random r)))
+      (let [i (pick r decls) f (vec (nth forms i))]
+        (assoc forms i (apply list (concat (subvec f 0 4) [:linkage (pick r [:internal :private :linkonce_odr])] (subvec f 4)))))
+      (when-let [i (pick r globs)]
+        (let [f (vec (nth forms i)) k (if (and (> (count f) 3) (not (keyword? (nth f 3)))) 4 3)]
+          (assoc forms i (apply list (concat (subvec f 0 k) [:linkage :internal :visibility (pick r [:hidden :protected])] (subvec f k)))))))))
+
+(defn- rename-first
+  "x with the first occurrence of the symbol `a` in its body's operands replaced by `b`."
+  [x a b]
+  (let [done (volatile! false)]
+    (letfn [(walk [y] (cond (and (not @done) (= y a)) (do (vreset! done true) b)
+                            (vector? y) (mapv walk y)
+                            (seq? y) (apply list (map walk y))
+                            :else y))]
+      (rebody x (apply list (first (body x)) (map walk (rest (body x))))))))
+
+(defn- m-undef [r forms]
+  (when-let [[fi bi ii x] (pick r (filter #(and (seq (operands-of (nth % 3))) (not= 'br (first (body (nth % 3))))) (inst-places forms)))]
+    (set-inst forms fi bi ii [(rename-first x (pick r (operands-of x)) '%nosuch.value)])))
+
+(defn- m-dupdef [r forms]
+  (let [cands (for [fi (defines forms)
+                    :let [rs (keep (fn [[f2 _ _ x]] (when (= f2 fi) (result x))) (inst-places forms))
+                          named (vec rs)]
+                    :when (> (count named) 1)]
+                [fi named])]
+    (when-let [[fi named] (pick r cands)]
+      (let [k (inc (.nextInt ^java.util.Random r (dec (count named))))
+            target (nth named k) earlier (nth named (dec k))
+            [_ bi ii x] (first (filter (fn [[f2 _ _ y]] (and (= f2 fi) (= (result y) target))) (inst-places forms)))]
+        (set-inst forms fi bi ii [(list '= earlier (body x))])))))
+
+(defn- m-lpad [r forms]
+  (let [cands (for [[fi bi ii x] (inst-places forms)
+                    :when (= 'landingpad (first (body x)))
+                    :let [[_ blocks] (body-of (nth forms fi)) items (vec (drop 2 (nth blocks bi)))]
+                    :when (> (count items) (+ ii 2))]
+                [fi bi ii x])]
+    (when-let [[fi bi ii x] (pick r cands)]
+      (let [f (nth forms fi) [_ blocks] (body-of f)
+            b (vec (nth blocks bi)) items (vec (subvec b 2))
+            y (nth items (inc ii))
+            items (assoc items ii y (inc ii) x)]
+        (assoc forms fi (with-body f (assoc blocks bi (apply list (concat (subvec b 0 2) items)))))))))
+
+(defn- m-intrinsic [r forms]
+  (when-let [[fi bi ii x] (pick r (filter #(let [b (body (nth % 3))]
+                                             (and (= 'call (first b)) (symbol? (nth b 2)) (= "g" (namespace (nth b 2)))
+                                                  (str/starts-with? (name (nth b 2)) "llvm.") (seq (nth b 3))
+                                                  (not (str/starts-with? (name (nth b 2)) "llvm.dbg."))))
+                                          (inst-places forms)))]
+    (let [b (vec (body x))]
+      (set-inst forms fi bi ii [(rebody x (apply list (assoc b 3 (pop (nth b 3)))))]))))
+
+(defn- numbered-sym? [x] (and (symbol? x) (nil? (namespace x)) (boolean (re-matches #"%[0-9]+" (name x)))))
+
+(defn renumber
+  "A definition with its numbered values, labels and arguments numbered again in the text's order (LLParser's
+  numbering: an unnamed argument, an unlabelled block and an unnamed non-void instruction take a number too), so that
+  a mutation that moves a numbered value keeps the parser's numbering and reaches the Verifier."
+  [f]
+  (let [v (vec f) [bi blocks] (body-of f)
+        m (java.util.HashMap.) n (long-array 1)
+        take! (fn [x] (let [k (aget n 0)] (aset n 0 (inc k)) (when (numbered-sym? x) (.put m x (symbol (str "%" k))))))]
+    (doseq [p (nth v 3) :when (vector? p)] (let [x (peek p)] (if (and (> (count p) 1) (or (symbol? x) (seq? x)) (vf/local?* x)) (when (numbered-sym? x) (take! x)) (take! nil))))
+    (doseq [[_ l & items] blocks]
+      (if (and l (not (numbered-sym? l))) nil (take! l))
+      (doseq [x items]
+        (let [b (body x)]
+          (when-not (str/starts-with? (name (first b)) "dbg_")
+            (let [t (vf/result-type b) r (result x)]
+              (cond
+                (and r (numbered-sym? r)) (take! r)
+                (and (nil? r) (not= t 'void)) (take! nil)))))))
+    (letfn [(walk [y] (cond (numbered-sym? y) (or (.get m y) y)
+                            (vector? y) (mapv walk y)
+                            (seq? y) (apply list (map walk y))
+                            :else y))]
+      (apply list (assoc v 3 (walk (nth v 3)) (inc bi) (walk blocks))))))
+
+(defn- renumbered
+  "A kind whose mutation is followed by the renumbering of the definitions it changed."
+  [k]
+  (fn [r forms]
+    (when-let [m (k r forms)]
+      (mapv (fn [a b] (if (and (= (first b) 'llvm/define) (not= a b)) (renumber b) b)) forms m))))
+
+(defn- m-entrybr
+  "The entry block labelled and a branch of the function sent to it (the entry block may not have predecessors)."
+  [r forms]
+  (when-let [[fi bi ii x] (pick r (filter #(and (= 'br (first (body (nth % 3)))) (= 2 (count (body (nth % 3))))) (inst-places forms)))]
+    (let [f (nth forms fi) [_ blocks] (body-of f)
+          l0 (or (second (nth blocks 0)) '%entry.m)
+          blocks (assoc blocks 0 (apply list 'block l0 (drop 2 (nth blocks 0))))
+          f2 (with-body f blocks)
+          forms2 (assoc forms fi f2)]
+      (set-inst forms2 fi bi ii [(list 'br l0)]))))
+
+(defn- m-phicount [r forms]
+  (when-let [[fi bi ii x] (pick r (filter #(and (= 'phi (first (body (nth % 3)))) (> (count (filter vector? (body (nth % 3)))) 1)) (inst-places forms)))]
+    (let [[pre ins opts] (phi-parts (body x)) k (.nextInt ^java.util.Random r (count ins))]
+      (set-inst forms fi bi ii [(rebody x (apply list (concat pre (subvec ins 0 k) (subvec ins (inc k)) opts)))]))))
+
+(defn- m-selfref [r forms]
+  (when-let [[fi bi ii x] (pick r (filter #(let [y (nth % 3)] (and (result y) (not= 'phi (first (body y))) (seq (operands-of y)))) (inst-places forms)))]
+    (set-inst forms fi bi ii [(rename-first x (pick r (operands-of x)) (result x))])))
+
+(def kinds
+  [[:type m-type] [:hoist m-hoist] [:noterm m-noterm] [:phiblock m-phiblock] [:phimove m-phimove] [:align m-align]
+   [:linkage m-linkage] [:undef m-undef] [:dupdef m-dupdef] [:lpad m-lpad] [:intrinsic m-intrinsic]
+   [:hoistr (renumbered m-hoist)] [:phimover (renumbered m-phimove)] [:lpadr (renumbered m-lpad)] [:entrybr (renumbered m-entrybr)]
+   [:phicount m-phicount] [:selfref m-selfref]])
+
+(defn -main
+  "LIST OUT N [FIRST]: N mutants of LIST's modules (NAME<tab>PATH.ll), the K-th of them K = FIRST (default 0) ...,
+  OUT/NAME.KIND.K.ll and OUT/mutants.list."
+  [lst out n & [first-k]]
+  (let [rows (vec (for [l (str/split-lines (slurp lst)) :when (seq l)] (str/split l #"\t")))
+        n (Integer/parseInt n)
+        cache (java.util.HashMap.)
+        forms-of (fn [p] (or (.get cache p) (let [f (try (rd/read-module (latin1 p)) (catch Throwable _ [])) ] (.put cache p f) f)))
+        lines (java.util.ArrayList.)]
+    (doseq [k (range (Integer/parseInt (or first-k "0")) (+ n (Integer/parseInt (or first-k "0"))))]
+      (let [[kind f] (nth kinds (mod k (count kinds)))
+            start (mod (* k 7919) (count rows))]
+        (loop [j 0]
+          (when (< j 60)
+            (let [r (java.util.Random. (long (+ (* 1000 k) j)))
+                  [nm p] (nth rows (mod (+ start j) (count rows)))
+                  forms (forms-of p)
+                  m (when (seq (defines forms)) (try (f r (vec forms)) (catch Throwable _ nil)))
+                  txt (when (and m (not= m forms)) (try (pr/print-module m) (catch Throwable _ nil)))]
+              (if txt
+                (let [mn (str nm "." (name kind) "." k) path (str out "/" mn ".ll")]
+                  (spit-latin1 path txt)
+                  (.add lines (str mn "\t" path)))
+                (recur (inc j))))))))
+    (spit (str out "/mutants.list") (str (str/join "\n" lines) "\n"))
+    (println (.size lines) "mutants in" out)))

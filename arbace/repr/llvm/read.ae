@@ -84,6 +84,14 @@
 (defn- text ^String ([] (aget ^objects (.texts *t*) (p))) ([^long d] (aget ^objects (.texts *t*) (min (+ (p) d) (dec (alength ^objects (.texts *t*)))))))
 (defn- adv! [] (aset ^ints (.pos *t*) 0 (inc (p))) nil)
 
+;; Mode :full's item spans (arbace.repr.llvm.full): when bound, each item's [start end] offsets in the text's order (a
+;; top-level form, or a definition's header up to `{`, its labels, instructions, debug records, use-list orders and `}`).
+(def ^:dynamic ^java.util.ArrayList *items* nil)
+(def ^:dynamic ^"[J" *top* nil)
+
+(defn- tok-start ^long [] (aget ^ints (.starts *t*) (p)))
+(defn- item! [^long s] (when *items* (.add *items* [s (long (aget ^ints (.ends *t*) (dec (p))))])) nil)
+
 (defn- line-of ^long [^long off]
   (let [^String s (.src *t*)]
     (loop [i 0 n 1] (if (>= i (min off (count s))) n (recur (inc i) (if (= (.charAt s (int i)) \newline) (inc n) n))))))
@@ -712,22 +720,34 @@
   (expect! "uselistorder")
   (let [tv (parse-typed)] (expect! ",") [tv (parse-index-list)]))
 
+(def ^:private terminators '#{ret br switch indirectbr invoke resume unreachable cleanupret catchret catchswitch callbr})
+
+(defn- terminator? [x] (terminators (first (if (= (first x) '=) (nth x 2) x))))
+
 (defn- parse-body
-  "A function's blocks, (block LABEL item...) with LABEL nil for an unlabelled entry block, each item an instruction or a
-  debug record in the text's order; then the use-list orders after the last block: [blocks orders]."
+  "A function's blocks, (block LABEL item...) with LABEL nil for a block the text does not label (the entry block, or a
+  block after a terminator: LLParser numbers it), each item an instruction or a debug record in the text's order; then
+  the use-list orders after the last block: [blocks orders]."
   []
   (expect! "{")
-  (loop [blocks [] cur nil insts []]
-    (let [close (fn [] (if (or cur (seq insts)) (conj blocks (apply list 'block cur insts)) blocks))]
+  (when *top* (item! (aget *top* 0)))
+  (loop [blocks [] cur nil insts [] ended false]
+    (let [close (fn [] (if (or cur (seq insts)) (conj blocks (apply list 'block cur insts)) blocks))
+          s (tok-start)]
       (cond
-        (punct? "}") (do (adv!) [(close) []])
-        (= (kind) :label) (let [l (local-name (text))] (adv!) (recur (close) l []))
-        (= (kind) :qlabel) (let [l (local-name (unescape (text)))] (adv!) (recur (close) l []))
-        (= (kind) :dbgrec) (recur blocks cur (conj insts (parse-dbg-record)))
-        (word? "uselistorder") (let [os (loop [out []] (if (accept! "}") out (recur (conj out (apply list 'uselistorder (parse-uselistorder))))))]
+        (punct? "}") (do (adv!) (item! s) [(close) []])
+        (= (kind) :label) (let [l (local-name (text))] (adv!) (item! s) (recur (close) l [] false))
+        (= (kind) :qlabel) (let [l (local-name (unescape (text)))] (adv!) (item! s) (recur (close) l [] false))
+        (word? "uselistorder") (let [os (loop [out []]
+                                          (let [s (tok-start)]
+                                            (if (accept! "}")
+                                              (do (item! s) out)
+                                              (let [o (apply list 'uselistorder (parse-uselistorder))] (item! s) (recur (conj out o))))))]
                                  [(close) os])
         (= (kind) :eof) (refuse "unterminated function body")
-        :else (recur blocks cur (conj insts (parse-inst)))))))
+        ended (recur (close) nil [] false)
+        (= (kind) :dbgrec) (let [r (parse-dbg-record)] (item! s) (recur blocks cur (conj insts r) false))
+        :else (let [x (parse-inst)] (item! s) (recur blocks cur (conj insts x) (boolean (terminator? x))))))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Module summaries (^N = module: (...), gv: (...), typeid: (...), typeidCompatibleVTable: (...), flags: N, blockcount: N)
@@ -909,3 +929,16 @@
   (binding [*t* (lex src)]
     (loop [out []]
       (if (= (kind) :eof) out (recur (conj out (parse-top)))))))
+
+(defn read-module-items
+  "Mode :full's reading: [forms spans], spans a vector per top-level form of its items' [start end] offsets."
+  [^String src]
+  (binding [*t* (lex src) *items* (java.util.ArrayList.) *top* (long-array 1)]
+    (loop [out [] spans []]
+      (if (= (kind) :eof)
+        [out spans]
+        (let [s (tok-start) n (.size *items*)
+              _ (aset ^"[J" *top* 0 (long s))
+              f (parse-top)]
+          (when (= (.size *items*) n) (item! s))
+          (recur (conj out f) (conj spans (vec (.subList *items* n (.size *items*))))))))))

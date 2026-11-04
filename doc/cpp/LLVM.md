@@ -7,8 +7,9 @@ C23's interpreter (ci, C5) and AOT (C6); CP7 (a): exceptions by a pending flag (
 
 Pieces:
 
-- `arbace.repr.llvm` (`arbace/repr/llvm.ae`, `arbace/repr/llvm/{read,print}.ae`): IR text → LLVM forms (`read`), LLVM
-  forms → IR text (`print`), the forms as `.ae` text (`module-text`); `bin/repr-llvm read|print|roundtrip`.
+- `arbace.repr.llvm` (`arbace/repr/llvm.ae`, `arbace/repr/llvm/{read,print,full,verify,mutate}.ae`): IR text → LLVM forms
+  (`read`), LLVM forms → IR text (`print`), the forms as `.ae` text (`module-text`), mode `:full` (§6.1), the verifier and
+  its mutants (§6.2); `bin/repr-llvm read|print|roundtrip|verify|verify-check|mutants`.
 - `arbace.cpp.lower` (`arbace/cpp/lower.ae`): LLVM forms → C forms; `bin/cppi lower`, `bin/cppi lower-check`.
 - The runtime (CX7, §10): libsupc++ and libstdc++-v3/src compiled to IR by the oracle and lowered by `arbace.cpp.lower`
   (`bin/cppi runtime-build`, `test/cpp/runtime/units.edn`), and the pending-flag layer of exceptions,
@@ -187,6 +188,110 @@ triple is the host's):
 A judge is `same`, `differs` (the outputs differ, or the print does not build where the original does) or `none` (the
 original does not build: a back end that cannot lower the module, `ptrauth` on x86-64); a file passes when its forms are
 equal, no judge differs and one judge is `same`.
+
+### 6.1 Mode `:full` (LLS18 (a), LL8)
+
+`bin/repr-llvm read --full FILE.ll [-o OUT.ae]` reads a module with its text's layer, `print --full FILE.ae [-o OUT.ll]`
+prints it back, the original byte for byte (`arbace.repr.llvm.full`). The forms are the plain mode's, unchanged (the same
+reader, the same `.ae` text); the layer is the `.ae`'s last line, `#_(llvm/layer {...})`, which the reader skips, so a
+`:full` `.ae` is also a plain one. The layer is kept item by item, an item being a top-level form, or in a definition its
+header up to `{`, each label, instruction, debug record and use-list order, and its `}`; for each item it holds what the
+canonical print does not write:
+
+- the **gap** before it (white space and comments: `; ModuleID`, `; Function Attrs:`, `; preds = %2`, a `RUN:` line, a
+  hand-written note, blank lines), when it is not the canonical layout's;
+- the item's **text**, when its spelling is not the printer's: spacing inside it, a name quoted that need not be
+  (`@"plain"`) or one the printer quotes otherwise (clang quotes `$`), an escape, an optional word (`external` on a
+  declaration, `default`), a global's properties or metadata in another order, `{ i32,i32 }`, `!{ !1, !1 }`, a typed
+  pointer, `#dbg_value` at another indentation.
+
+What LLVM lets a text write in several ways and the forms already distinguish stays in the forms: numbered and named
+values, an instruction written without `%N =` and a block without a label (LLParser numbers both: the form has no `=`,
+the block's label is nil), hex and decimal floats (`(fp "0x400921FB54442D18")`, `(fp "1.5")`), `u0x`/`s0x` integers,
+attribute groups and inline attributes, `align` written or not. A kept text carries the hash of the item's canonical print:
+when the form has changed since (an edited `.ae`), the item prints canonically; a form whose item count changed prints
+canonically whole, its first gap kept. A layer is `{:items [E ...] :end S}`, an `E` per top-level form, nil when all its
+items are canonical, else an entry per item: nil, the gap alone (a string), or `[GAP TEXT HASH]`; `:end` the text after
+the last item. The printer is built from the same items (`form-items`, `module-gap`), so the canonical text is the layer's
+empty case: the plain print of the 278 modules below is byte for byte what it was.
+
+`read -o` and `print` now write and read the `.ae` text as Latin-1 (a string's bytes are chars 0-255), as the round
+trip always did. The reader changed with it in one place: a block that follows a terminator without a label starts a new block (label
+nil), as LLParser parses it; before, its instructions joined the previous block. No module of the lists has one.
+
+`bin/repr-llvm roundtrip --text LIST WORK` (`WORK/full/NAME.ae`, `WORK/text.tsv`: NAME, status, detail, forms with an
+entry, gaps, texts): each file read in `:full` (its forms the plain reader's), its `.ae` text read back (forms and layer
+equal), printed back (the original byte for byte), and the plain print read in `:full` with an empty layer and printed
+back to itself (the plain mode idempotent). On 2026-11-04 over the round trip's lists (278 modules of `-O0`, `-O2`, `-g`,
+LTO and Windows IR from C, C++ and Rust, the six hand-written corner modules) and four hand-written modules with
+comments, blank lines, odd spacing, numbered and unnamed values, unlabelled blocks, hex floats and laid-out metadata: **282
+of 282 printed back byte for byte**, 4,322 top-level forms with a layer entry, 7,130 gaps and 18 texts kept (clang writes
+the canonical spelling but for the gaps and its quoted `$` names), 29 s at 4 threads. The four hand-written modules pass
+the plain round trip's judges too (forms, objects and bitcode equal).
+
+### 6.2 The verifier (LL4, LLS6 (a))
+
+`bin/repr-llvm verify FILE.ll|FILE.ae...` (`arbace.repr.llvm.verify`): each invalid file's first error in LLVM's words
+with its rule, `FILE: error: MESSAGE [RULE]`, exit 1 when one is invalid. It runs in two phases, as the pin's `opt
+-passes=verify` does: LLParser's checks beyond the grammar (`llvm/lib/AsmParser/LLParser.cpp`), in the text's order and
+stopping at the first; then, when they pass, the Verifier's rules (`llvm/lib/IR/Verifier.cpp`), each function in the
+module's order (visitFunction, then each block's visitBasicBlock and its instructions' visitors), then the module's. The
+message is the first line opt prints, without its file and position (the forms have no positions).
+
+Ported (the namespace's `rules`):
+
+| phase | rule | LLVM's message |
+|---|---|---|
+| parser | `value-type`, `not-a-block` | `'%x' defined with type 'i32' but expected 'i64'`; `'%x' is not a basic block` |
+| | `forward-type` | `instruction forward referenced with type 'T'` |
+| | `numbering` | `instruction expected to be numbered '%N' or greater` (`argument`, `label` alike; LLVM 23 allows gaps) |
+| | `redefinition` | `multiple definition of local value named 'x'`, `redefinition of global '@g'`, `invalid redefinition of function 'f'` |
+| | `undefined-value`, `undefined-global`, `undefined-metadata` | `use of undefined value '%x'` (a function's end: names in byte order, then numbers), `'@g'` and `'!N'` at the module's end (`llvm.*` names exempt: LLVM 23 declares them) |
+| | `global-type`, `int-constant`, `fp-constant`, `constant-type`, `null` | `global variable reference must have pointer type`, `integer/byte constant must have integer/byte type`, `floating-point constant invalid for type`, `constant expression type mismatch: got type 'i1' but expected 'T'`, `null must be a pointer type` |
+| | `void-name`, `terminator`, `syntax` | `instructions returning void cannot have a name`; `expected instruction opcode` (a block without a terminator: LLParser reads a block up to one); `expected value token` (a phi without entries), `function body requires at least one basic block` |
+| | `operand-type`, `icmp`, `fcmp`, `cast`, `select`, `phi`, `gep`, `load`, `store`, `atomic-align`, `atomicrmw`, `cmpxchg`, `extractvalue`, `insertvalue`, `vector` | the operand rules of each instruction (`invalid operand type for instruction`, `invalid cast opcode for cast from 'i64' to 'i32'` with CastInst::castIsValid, `select condition must be i1 or <n x i1>`, `load operand must be a pointer to a first class type`, ...) |
+| | `call-argument`, `call-arguments`, `ret`, `br`, `switch` | `argument is not of expected type 'T'`, `too many arguments specified`; `value doesn't match function result type 'T'`; `branch condition must have 'i1' type`; `switch condition must have integer type`, `duplicate case value in switch` |
+| | `align` | `alignment is not a power of two`, `huge alignments are not supported yet` |
+| | `linkage`, `visibility`, `dll` | `invalid linkage for function declaration` / `definition`, `invalid function linkage type`, `symbol with local linkage must have default visibility`, `... cannot have a DLL storage class` |
+| | `dbg-record` | a debug record's operand count: `Expected ',' here`, `Expected ')' here` |
+| verifier | `entry-predecessors` | `Entry block to function must not have predecessors!` |
+| | `phi-predecessors`, `phi-duplicate`, `phi-entries`, `phi-grouped` | `PHINode should have one entry for each predecessor of its parent basic block!`, `PHI node has multiple entries for the same basic block with different incoming values!`, `PHI node entries do not match predecessors!`, `PHI nodes not grouped at top of basic block!` |
+| | `dominance`, `self-reference` | `Instruction does not dominate all uses!` (dominators by Cooper, Harvey and Kennedy; a use in an unreachable block dominated, a definition in one dominating nothing, an invoke's result on its normal edge, a phi's use at its incoming block's end; callbr's results are available in every destination); `Only PHI nodes may reference their own value!` |
+| | `terminator-middle` | `Terminator found in the middle of a basic block!` (forms written by hand: the reader splits such a block) |
+| | `landingpad`, `eh-pad-entry`, `unwind-dest` | the landingpad's rules (a clause or cleanup, only an invoke's unwind edge, a personality, the first non-PHI, one type in a function); `EH pad cannot be in entry block.`; `The unwind destination does not have an exception handling instruction!` |
+| | `intrinsic-call`, `intrinsic-user`, `intrinsic-signature`, `intrinsic-defined`, `lifetime` | `Intrinsic called with incompatible signature`; `Invalid user of intrinsic instruction!` (at the declaration's visit; the assume-like intrinsics' calls ignored, as hasAddressTaken does); a declaration against a table of about 40 base names with their overloads, `intrinsic has incorrect number of args. Expected N, but got M`, `intrinsic argument K type (matching overload type J) expected T, but got U`, `intrinsic return type expected void, but got i32`; `llvm intrinsics cannot be defined!`; `llvm.lifetime.start/end can only be used on alloca or poison` (lifetime's old two-argument form accepted, as AutoUpgrade takes it) |
+| | `md-range`, `md-nonnull`, `md-align`, `md-dereferenceable` | metadata attachments' placement and types (`Ranges are only for loads, calls and invokes!`, `nonnull applies only to pointer types`, ...) |
+| | `comdat-declaration` | `Declaration may not be in a Comdat!` |
+
+Not ported: LLParser's syntax errors with their positions (the reader refuses a text outside the grammar with its own
+message); the Verifier's attribute rules (parameter and function attributes' compatibility, `sret`, `byval`, `inalloca`,
+`swifterror`, `immarg`), calling conventions, `musttail`, GC statepoints and the per-intrinsic checks of
+visitIntrinsicCall beyond `lifetime` (the intrinsic table is small); Windows EH's funclet rules (catchswitch, catchpad and
+cleanuppad parents, funclet bundles); atomic orderings' constraints; the structure of metadata nodes (module flags,
+`!prof`, `!tbaa`, a `!range`'s contents) and of debug info (opt only warns on broken debug info and strips it: no
+verdict); aliases' and ifuncs' rules, global ctors and dtors, use-list orders' validity, `blockaddress`; AutoUpgrade
+beyond lifetime's old form. One known divergence: a label defined twice (`a:` ... `a:`) is a second block here, LLParser
+appends the second's instructions to the first's block.
+
+**The check**, `bin/repr-llvm verify-check LIST WORK`: opt (`REPR_LLVM_OPT`, default `/usr/lib/llvm23/bin/opt -passes=verify
+-disable-output`) and the verifier on each file of LIST, `WORK/verify.tsv` (NAME, opt's verdict, Arbace's, the verdicts
+same, the first messages same, the two messages); opt's message is its first line that is not a warning, without its
+program and position (an abort's `LLVM ERROR` after the message aside). Exit 1 on a different verdict. Its invalid inputs
+are mutants, `bin/repr-llvm mutants LIST OUT [N [FIRST]]` (`arbace.repr.llvm.mutate`, deterministic by the mutant's
+index): one change of a valid module's forms, printed: an operand's type changed (`i32` ↔ `i64`, `ptr` → `i64`, a branch
+condition widened), a use moved above its definition, a terminator removed, a phi's incoming block renamed (to a block that
+does not exist or to another of the function's), a phi moved below a non-phi, a phi without one entry, an alignment
+not a power of two, a declaration's linkage or a global's visibility made illegal, an operand renamed to an undefined value
+or to the instruction's own result, a result renamed to an earlier one's, a landingpad moved down, an intrinsic call
+without its last argument, a branch to the entry block; the moves also with the function renumbered (`renumber`), so that
+the parser's numbering holds and the Verifier decides. On 2026-11-04: the 282 modules of §6.1 (all valid: 0 errors from
+both) and 630 mutants (two sets of 315, the second, indices 1,000 on, written after the rules were fitted to the first):
+**912 of 912 verdicts as opt's, 613 of 613 rejections with opt's first message** (17 mutants opt takes, a type change of
+a load's result unused, a hoist that keeps dominance: valid here too); the rules' share of the 613: numbering 103,
+dominance 78, undefined values 67, phi predecessors 40, alignment 40, intrinsic calls 38, entry predecessors 38, blocks
+without terminators 36, value types 31, linkage 27, forward types 23, phis not grouped 19, self-references 17, unwind
+destinations 15, phi entries 13, visibility 13, the rest 15. Seventy-three hand-written probes, one a rule each, written
+while porting: 72 of 73 verdicts and 64 of 65 messages (the twice-defined label). About 45 s for the 912, opt's runs serial.
 
 ## 7. The lowering (`arbace.cpp.lower`)
 

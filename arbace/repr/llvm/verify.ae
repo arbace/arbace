@@ -1,0 +1,846 @@
+(ns arbace.repr.llvm.verify
+  "LLVM IR's verifier over LLVM forms (doc/cpp/LLVM.md §6.2; doc/llvm/LLVM-CROP-SURVEY.md, LL4, LLS6 (a)): `verify-forms`
+  gives a module's first error, {:rule R :message M}, or nil. Two phases, as the pin's `opt -passes=verify` runs them:
+
+  1. LLParser's checks beyond the grammar (llvm/lib/AsmParser/LLParser.cpp, LLVM 23), in the text's order: values'
+     types at their uses, forward references, numbering, definitions, constants' types, each instruction's operand
+     rules, linkage, visibility and DLL storage, alignments, debug records' operands; at a function's end its undefined
+     values, at the module's its undefined globals and metadata.
+  2. The Verifier's rules (llvm/lib/IR/Verifier.cpp) when the first phase passes, each function in the module's order
+     (visitFunction, then each block's visitBasicBlock and its instructions), then the module's: entry blocks without
+     predecessors, phis grouped and matching their block's predecessors, dominance of every use by its definition
+     (invoke's and callbr's results on their normal edge, unreachable uses dominated), self-references, EH pads' placement
+     and personalities, unwind destinations, intrinsics' signatures at their declarations and calls, metadata
+     attachments' placement and types, declarations in comdats.
+
+  Messages are LLVM's words, the first line of what opt prints (without the file and the position); every check has a
+  rule name (`rules`, the ported list). The forms are the reader's (arbace.repr.llvm.read): a module that does not read
+  is the reader's error, not this namespace's."
+  (:require [arbace.repr.llvm.read :as rd]
+            [arbace.repr.llvm.print :as pr]
+            [arbace.string :as str])
+  (:import [java.util.concurrent Executors Callable Future]))
+
+(set! *warn-on-reflection* true)
+
+(defn- verr [rule msg] (throw (ex-info msg {:llvm/verify rule})))
+
+;; ---------------------------------------------------------------------------------------------
+;; Types
+
+(def ^:dynamic *types* {})
+
+(def ^:private fp-bits '{half 16 bfloat 16 float 32 double 64 x86_fp80 80 fp128 128 ppc_fp128 128})
+
+(defn norm-type
+  "A type with LLParser's upgrades: a typed pointer (* T) is ptr, (* T N) and (ptr N) are (ptr N), (ptr 0) is ptr."
+  [t]
+  (cond
+    (seq? t) (case (first t)
+               * (let [a (nth t 2 0)] (if (= a 0) 'ptr (list 'ptr a)))
+               ptr (if (= (second t) 0) 'ptr t)
+               fn (list 'fn (norm-type (nth t 1)) (mapv #(if (= % '&) % (norm-type %)) (nth t 2)))
+               (array vector vscale) (list (first t) (nth t 1) (norm-type (nth t 2)))
+               (struct packed) (apply list (first t) (map norm-type (rest t)))
+               t)
+    :else t))
+
+(defn- tstr ^String [t] (pr/type-str t))
+(defn- int-type? [t] (and (symbol? t) (nil? (namespace t)) (boolean (re-matches #"i[0-9]+" (name t)))))
+(defn- int-bits ^long [t] (Long/parseLong (subs (name t) 1)))
+(defn- fp-type? [t] (contains? fp-bits t))
+(defn- ptr-type? [t] (or (= t 'ptr) (and (seq? t) (= (first t) 'ptr))))
+(defn- vec-type? [t] (and (seq? t) (#{'vector 'vscale} (first t))))
+(defn- elem [t] (if (vec-type? t) (nth t 2) t))
+(defn- int-ish? [t] (int-type? (elem t)))
+(defn- fp-ish? [t] (fp-type? (elem t)))
+(defn- ptr-ish? [t] (ptr-type? (elem t)))
+(defn- resolve-type [t] (if (and (symbol? t) (str/starts-with? (name t) "%")) (get *types* t t) (if (and (seq? t) (= (first t) '%)) (get *types* t t) t)))
+(defn- aggregate? [t] (let [t (resolve-type t)] (and (seq? t) (#{'struct 'packed 'array} (first t)))))
+(defn- named-type? [t] (or (and (symbol? t) (nil? (namespace t)) (str/starts-with? (name t) "%")) (and (seq? t) (= (first t) '%))))
+(defn- first-class? [t] (not (or (= t 'void) (and (seq? t) (= (first t) 'fn)))))
+(defn- addrspace [t] (if (seq? t) (second t) 0))
+
+(defn- bits
+  "A first-class non-aggregate type's size in bits (nil when it has none: pointers, labels, ...)."
+  [t]
+  (cond
+    (int-type? t) (int-bits t)
+    (fp-type? t) (fp-bits t)
+    (vec-type? t) (when-let [b (bits (nth t 2))] (* (nth t 1) b))
+    :else nil))
+
+(defn- shape [t] (if (vec-type? t) [(first t) (nth t 1)] nil))
+
+(defn- cast-valid?
+  "CastInst::castIsValid: a cast opcode from `a` to `b`."
+  [op a b]
+  (let [same-shape (= (shape a) (shape b))
+        ea (elem a) eb (elem b)]
+    (case op
+      trunc (and same-shape (int-type? ea) (int-type? eb) (> (int-bits ea) (int-bits eb)))
+      (zext sext) (and same-shape (int-type? ea) (int-type? eb) (< (int-bits ea) (int-bits eb)))
+      fptrunc (and same-shape (fp-type? ea) (fp-type? eb) (> (long (fp-bits ea)) (long (fp-bits eb))))
+      fpext (and same-shape (fp-type? ea) (fp-type? eb) (< (long (fp-bits ea)) (long (fp-bits eb))))
+      (fptoui fptosi) (and same-shape (fp-type? ea) (int-type? eb))
+      (uitofp sitofp) (and same-shape (int-type? ea) (fp-type? eb))
+      (ptrtoint ptrtoaddr) (and same-shape (ptr-type? ea) (int-type? eb))
+      inttoptr (and same-shape (int-type? ea) (ptr-type? eb))
+      addrspacecast (and same-shape (ptr-type? ea) (ptr-type? eb) (not= (addrspace ea) (addrspace eb)))
+      bitcast (cond
+                (or (ptr-ish? a) (ptr-ish? b)) (and (ptr-ish? a) (ptr-ish? b) (= (addrspace ea) (addrspace eb)) same-shape)
+                :else (and (first-class? a) (first-class? b) (not (aggregate? a)) (not (aggregate? b))
+                           (some? (bits a)) (= (bits a) (bits b))))
+      true)))
+
+;; ---------------------------------------------------------------------------------------------
+;; Names
+
+(defn- local? [x] (or (and (symbol? x) (nil? (namespace x)) (str/starts-with? (name x) "%")) (and (seq? x) (= (first x) '%))))
+(defn local?* "A local name's form." [x] (local? x))
+(defn- global? [x] (or (and (symbol? x) (= (namespace x) "g")) (and (seq? x) (= (first x) 'g) (= 2 (count x)))))
+(defn- local-key ^String [x] (if (symbol? x) (subs (name x) 1) (second x)))
+(defn- global-key ^String [x] (if (symbol? x) (name x) (str (second x))))
+(defn- numbered? [^String k] (boolean (re-matches #"[0-9]+" k)))
+(defn- md-ref? [x] (and (symbol? x) (nil? (namespace x)) (boolean (re-matches #"![0-9]+" (name x)))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Instructions: their options, operands with their expected types, results' types
+
+(def ^:private option-keys
+  #{:count :align :addrspace :atomic :syncscope :volatile :elementwise :md :to :unwind :indirect :fmf :cconv :ret-attrs :attrs :bundles
+    :tail :weak})
+
+(defn- split-inst
+  "[head positional options] of an instruction's body."
+  [b]
+  (let [n (count (take-while #(not (and (keyword? %) (option-keys %))) (rest b)))]
+    [(first b) (vec (take n (rest b))) (apply hash-map (drop (inc n) b))]))
+
+(def ^:private bin-ops '#{add sub mul udiv sdiv urem srem shl lshr ashr and or xor fadd fsub fmul fdiv frem})
+(def ^:private fp-ops '#{fadd fsub fmul fdiv frem})
+(def ^:private cast-ops '#{trunc zext sext fptrunc fpext fptoui fptosi uitofp sitofp ptrtoint ptrtoaddr inttoptr bitcast addrspacecast})
+(def ^:private terminators '#{ret br switch indirectbr invoke resume unreachable cleanupret catchret catchswitch callbr})
+
+(defn- body [x] (if (= (first x) '=) (nth x 2) x))
+(defn- result [x] (when (= (first x) '=) (nth x 1)))
+(defn- dbg-record? [b] (let [h (first b)] (and (symbol? h) (str/starts-with? (name h) "dbg_"))))
+(defn- terminator? [x] (contains? terminators (first (body x))))
+(defn- strip-flags [ps] (vec (drop-while #(or (keyword? %) (and (seq? %) (keyword? (first %)))) ps)))
+
+(defn- index-type
+  "The type at `idxs` inside the aggregate `t` (nil when the indices are invalid)."
+  [t idxs]
+  (reduce (fn [t i]
+            (let [t (resolve-type t)]
+              (cond
+                (nil? t) (reduced nil)
+                (and (seq? t) (#{'struct 'packed} (first t))) (if (< -1 i (dec (count t))) (nth t (inc i)) (reduced nil))
+                (and (seq? t) (= (first t) 'array)) (if (< -1 i (nth t 1)) (nth t 2) (reduced nil))
+                :else (reduced nil))))
+          t idxs))
+
+(defn- call-fty
+  "A call's function type: its written (fn R [P...]) or R with its arguments' types."
+  [t args]
+  (let [t (norm-type t)]
+    (if (and (seq? t) (= (first t) 'fn)) t (list 'fn t (mapv #(norm-type (first %)) args)))))
+
+(defn- vector-width [ts] (some #(when (vec-type? %) %) ts))
+
+(defn result-type
+  "An instruction's result type."
+  [b]
+  (let [[h ps o] (split-inst b)
+        ps* (strip-flags ps)]
+    (cond
+      (bin-ops h) (norm-type (first ps*))
+      (= h 'fneg) (norm-type (first ps*))
+      ('#{icmp fcmp} h) (let [t (norm-type (first (drop-while keyword? ps)))] (if (vec-type? t) (list (first t) (nth t 1) 'i1) 'i1))
+      (cast-ops h) (norm-type (nth ps* 2))
+      (= h 'alloca) (if-let [a (:addrspace o)] (norm-type (list 'ptr a)) 'ptr)
+      (= h 'load) (norm-type (first ps))
+      (= h 'getelementptr) (let [[_ [bt _] & idx] ps* bt (norm-type bt)
+                                 v (vector-width (cons bt (map #(norm-type (first %)) idx)))]
+                             (if v (list (first v) (nth v 1) (elem bt)) bt))
+      (= h 'phi) (norm-type (first ps*))
+      (= h 'select) (norm-type (first (nth ps* 1)))
+      ('#{call invoke callbr} h) (second (call-fty (first ps) (nth ps 2)))
+      (= h 'extractvalue) (index-type (norm-type (first (first ps))) (rest ps))
+      (= h 'insertvalue) (norm-type (first (first ps)))
+      (= h 'extractelement) (elem (norm-type (first (first ps))))
+      (= h 'insertelement) (norm-type (first (first ps)))
+      (= h 'shufflevector) (let [v (norm-type (first (first ps))) m (norm-type (first (nth ps 2)))]
+                             (if (and (vec-type? v) (vec-type? m)) (list (first m) (nth m 1) (nth v 2)) v))
+      (= h 'freeze) (norm-type (first ps))
+      (= h 'va_arg) (norm-type (second ps))
+      (= h 'landingpad) (norm-type (first ps))
+      ('#{catchswitch catchpad cleanuppad} h) 'token
+      (= h 'cmpxchg) (list 'struct (norm-type (first (nth ps 1))) 'i1)
+      (= h 'atomicrmw) (norm-type (first (nth ps 2)))
+      :else 'void)))
+
+(defn- labels-of
+  "The labels an instruction's body names (its successors), in LLVM's successor order."
+  [b]
+  (let [[h ps o] (split-inst b)]
+    (case h
+      br (if (= 1 (count ps)) [(first ps)] [(nth ps 2) (nth ps 3)])
+      switch (into [(nth ps 2)] (map #(nth % 2) (nth ps 3)))
+      indirectbr (vec (nth ps 2))
+      invoke [(:to o) (:unwind o)]
+      callbr (into [(:to o)] (:indirect o))
+      catchswitch (cond-> (vec (second ps)) (not= (:unwind o) 'caller) (conj (:unwind o)))
+      catchret [(:to o)]
+      cleanupret (if (= (:unwind o) 'caller) [] [(:unwind o)])
+      [])))
+
+(defn uses
+  "An instruction's operands in the text's order, [value type] each (`label` for a block), a phi's incoming value
+  [value type block] (its block a use [block label] after it)."
+  [b]
+  (let [[h ps o] (split-inst b)
+        ps* (strip-flags ps)
+        typed (fn [[t v]] [v (norm-type t)])
+        arg (fn [a] [(peek a) (norm-type (first a))])]
+    (cond
+      (bin-ops h) (let [[t a c] ps* t (norm-type t)] [[a t] [c t]])
+      (= h 'fneg) (let [[t a] ps*] [[a (norm-type t)]])
+      ('#{icmp fcmp} h) (let [[t a c] (drop-while keyword? ps) t (norm-type t)] [[a t] [c t]])
+      (cast-ops h) (let [[t v] ps*] [[v (norm-type t)]])
+      (= h 'alloca) (if-let [c (:count o)] [(typed c)] [])
+      (= h 'load) [(typed (second ps))]
+      (= h 'store) [(typed (first ps)) (typed (second ps))]
+      (= h 'getelementptr) (mapv typed (rest ps*))
+      (= h 'phi) (let [t (norm-type (first ps*))] (vec (mapcat (fn [[v l]] [[v t l] [l 'label]]) (rest ps*))))
+      (= h 'select) (mapv typed ps*)
+      (= h 'call) (conj (mapv arg (nth ps 2)) [(second ps) 'ptr])
+      (= h 'invoke) (conj (into (mapv arg (nth ps 2)) [[(:to o) 'label] [(:unwind o) 'label]]) [(second ps) 'ptr])
+      (= h 'callbr) (conj (into (mapv arg (nth ps 2)) (map (fn [l] [l 'label]) (cons (:to o) (:indirect o)))) [(second ps) 'ptr])
+      (= h 'ret) (if (= (first ps) 'void) [] [[(second ps) (norm-type (first ps))]])
+      (= h 'br) (if (= 1 (count ps)) [[(first ps) 'label]] [[(nth ps 1) (norm-type (first ps))] [(nth ps 2) 'label] [(nth ps 3) 'label]])
+      (= h 'switch) (into [[(nth ps 1) (norm-type (first ps))] [(nth ps 2) 'label]]
+                          (mapcat (fn [[t v l]] [[v (norm-type t)] [l 'label]]) (nth ps 3)))
+      (= h 'indirectbr) (into [[(nth ps 1) (norm-type (first ps))]] (map (fn [l] [l 'label]) (nth ps 2)))
+      (= h 'resume) [[(second ps) (norm-type (first ps))]]
+      (= h 'landingpad) (vec (keep #(when (seq? %) [(nth % 2) (norm-type (second %))]) (rest ps)))
+      ('#{extractvalue insertvalue extractelement insertelement shufflevector} h) (mapv typed (filter vector? ps))
+      (= h 'freeze) [[(second ps) (norm-type (first ps))]]
+      (= h 'va_arg) [(typed (first ps))]
+      (= h 'atomicrmw) [(typed (nth ps 1)) (typed (nth ps 2))]
+      (= h 'cmpxchg) [(typed (nth ps 0)) (typed (nth ps 1)) (typed (nth ps 2))]
+      (= h 'catchswitch) (into [[(first ps) 'token]] (concat (map (fn [l] [l 'label]) (second ps))
+                                                          (when-not (= (:unwind o) 'caller) [[(:unwind o) 'label]])))
+      ('#{catchpad cleanuppad} h) (into [[(first ps) 'token]] (keep (fn [[t v]] (when-not (= t 'metadata) [v (norm-type t)])) (second ps)))
+      (= h 'catchret) [[(first ps) 'token] [(:to o) 'label]]
+      (= h 'cleanupret) (cond-> [[(first ps) 'token]] (not= (:unwind o) 'caller) (conj [(:unwind o) 'label]))
+      :else [])))
+
+;; ---------------------------------------------------------------------------------------------
+;; Phase 1: LLParser's checks
+
+(def ^:dynamic ^java.util.Map *gdefs* nil)   ; global name -> {:kind :type}
+(def ^:dynamic ^java.util.Map *gfwd* nil)    ; global name referenced before its definition -> true
+(def ^:dynamic ^java.util.Set *mdefs* nil)   ; !N defined
+(def ^:dynamic ^java.util.Set *mrefs* nil)   ; !N referenced
+
+(deftype Fn [^java.util.Map vals ^java.util.Map fwd ^longs next])
+
+(defn- fn-state [] (Fn. (java.util.HashMap.) (java.util.HashMap.) (long-array [0])))
+
+(defn- check-align [a]
+  (when (some? a)
+    (when-not (and (integer? a) (pos? a) (zero? (bit-and (long a) (dec (long a)))))
+      (verr :parser/align "alignment is not a power of two"))
+    (when (> (long a) 4294967296) (verr :parser/align "huge alignments are not supported yet"))))
+
+(declare use-value)
+
+(defn- note-md! [x]
+  (letfn [(walk [y] (cond (md-ref? y) (.add *mrefs* y)
+                          (or (seq? y) (vector? y)) (doseq [z y] (walk z))))]
+    (walk x)))
+
+(defn- use-global [^Fn st x t]
+  (when-not (ptr-type? t) (verr :parser/global-type "global variable reference must have pointer type"))
+  (let [k (global-key x)]
+    (when-not (.containsKey *gdefs* k) (.put *gfwd* k true))))
+
+(defn- use-local [^Fn st x t]
+  (let [k (local-key x)
+        shown (str "'%" k "'")
+        d (.get ^java.util.Map (.vals st) k)
+        f (.get ^java.util.Map (.fwd st) k)
+        have (or d f)]
+    (cond
+      (and have (= t 'label) (not= have 'label)) (verr :parser/not-a-block (str shown " is not a basic block"))
+      (and have (not= have t)) (verr :parser/value-type (str shown " defined with type '" (tstr have) "' but expected '" (tstr t) "'"))
+      have nil
+      :else (.put ^java.util.Map (.fwd st) k t))))
+
+(defn- use-const [st v t]
+  (cond
+    (or (integer? v) (and (seq? v) (= (first v) 'int)))
+    (when-not (int-type? t) (verr :parser/int-constant "integer/byte constant must have integer/byte type"))
+    (and (seq? v) (= (first v) 'fp))
+    (when-not (fp-type? t) (verr :parser/fp-constant "floating-point constant invalid for type"))
+    (boolean? v) (when-not (= t 'i1) (verr :parser/constant-type (str "constant expression type mismatch: got type 'i1' but expected '" (tstr t) "'")))
+    (= v 'null) (when-not (ptr-type? t) (verr :parser/null "null must be a pointer type"))
+    (seq? v) (let [h (first v)]
+               (cond
+                 ('#{struct packed array vector} h) (doseq [e (rest v)] (when (vector? e) (use-value st (second e) (norm-type (first e)))))
+                 (= h 'splat) (let [[et ev] (second v)] (use-value st ev (norm-type et)))
+                 (cast-ops h) (let [[t x] (strip-flags (rest v))] (use-value st x (norm-type t)))
+                 (bin-ops h) (let [[t a b] (strip-flags (rest v))] (use-value st a (norm-type t)) (use-value st b (norm-type t)))
+                 (or (= h 'getelementptr) ('#{extractelement insertelement shufflevector ptrauth} h))
+                 (doseq [e (rest v)] (when (vector? e) (use-value st (second e) (norm-type (first e)))))
+                 :else nil))
+    :else nil))
+
+(defn use-value
+  "LLParser's resolution of `v` as a value of type `t` in the function `st` (nil at the top level)."
+  [st v t]
+  (cond
+    (local? v) (if st (use-local st v t) (verr :parser/local-outside "expected a constant value"))
+    (global? v) (use-global st v t)
+    (= t 'metadata) (note-md! v)
+    (md-ref? v) (.add *mrefs* v)
+    (and (seq? v) (symbol? (first v)) (str/starts-with? (name (first v)) "!")) (note-md! v)
+    :else (use-const st v t)))
+
+(defn- define-value [^Fn st x t kind]
+  (let [k (when x (local-key x))]
+    (if (or (nil? k) (numbered? k))
+      (let [nxt (aget ^longs (.next ^Fn st) 0)
+            n (if k (Long/parseLong k) nxt)]
+        (when (< n nxt)
+          (verr :parser/numbering (str kind " expected to be numbered '" (when-not (= kind "label") "%") nxt "' or greater")))
+        (let [ks (str n) f (.get ^java.util.Map (.fwd st) ks)]
+          (when (and f (not= f t))
+            (verr :parser/forward-type (if (= t 'label) (str "'%" ks "' is not a basic block") (str kind " forward referenced with type '" (tstr f) "'"))))
+          (.remove ^java.util.Map (.fwd st) ks)
+          (.put ^java.util.Map (.vals st) ks t)
+          (aset ^longs (.next st) 0 (inc n))))
+      (let [f (.get ^java.util.Map (.fwd st) k)]
+        (when (and f (not= f t))
+          (verr :parser/forward-type (if (= t 'label) (str "'%" k "' is not a basic block") (str kind " forward referenced with type '" (tstr f) "'"))))
+        (when (and (.containsKey ^java.util.Map (.vals st) k) (not= t 'label))
+          (verr :parser/redefinition (str "multiple definition of local value named '" k "'")))
+        (.remove ^java.util.Map (.fwd st) k)
+        (.put ^java.util.Map (.vals st) k t)))))
+
+(defn- check-inst
+  "LLParser's rules of one instruction after its operands are resolved."
+  [st b ret-type]
+  (let [[h ps o] (split-inst b)
+        ps* (strip-flags ps)]
+    (cond
+      (bin-ops h) (let [t (norm-type (first ps*))]
+                    (when-not (if (fp-ops h) (fp-ish? t) (int-ish? t)) (verr :parser/operand-type "invalid operand type for instruction")))
+      (= h 'fneg) (when-not (fp-ish? (norm-type (first ps*))) (verr :parser/operand-type "invalid operand type for instruction"))
+      (= h 'icmp) (let [t (norm-type (first (drop-while keyword? ps)))]
+                    (when-not (or (int-ish? t) (ptr-ish? t)) (verr :parser/icmp "icmp requires integer operands")))
+      (= h 'fcmp) (let [t (norm-type (first (drop-while keyword? ps)))]
+                    (when-not (fp-ish? t) (verr :parser/fcmp "fcmp requires floating point operands")))
+      (cast-ops h) (let [[t _ t2] ps* a (norm-type t) c (norm-type t2)]
+                     (when-not (cast-valid? h a c)
+                       (verr :parser/cast (str "invalid cast opcode for cast from '" (tstr a) "' to '" (tstr c) "'"))))
+      (= h 'alloca) (check-align (:align o))
+      (= h 'load) (do (when-not (ptr-type? (norm-type (first (second ps)))) (verr :parser/load "load operand must be a pointer to a first class type"))
+                      (when (and (:atomic o) (nil? (:align o))) (verr :parser/atomic-align "atomic load must have explicit non-zero alignment"))
+                      (check-align (:align o)))
+      (= h 'store) (do (when-not (ptr-type? (norm-type (first (second ps)))) (verr :parser/store "store operand must be a pointer"))
+                       (when-not (first-class? (norm-type (first (first ps)))) (verr :parser/store "store operand must be a first class value"))
+                       (when (and (:atomic o) (nil? (:align o))) (verr :parser/atomic-align "atomic store must have explicit non-zero alignment"))
+                       (check-align (:align o)))
+      (= h 'getelementptr) (when-not (ptr-ish? (norm-type (first (second ps*)))) (verr :parser/gep "base of getelementptr must be a pointer"))
+      (= h 'phi) (when-not (first-class? (norm-type (first ps*))) (verr :parser/phi "phi node must have first class type"))
+      (= h 'select) (let [[[ct] [at] [bt]] ps* ct (norm-type ct)]
+                      (cond
+                        (not (or (= ct 'i1) (and (vec-type? ct) (= (elem ct) 'i1)))) (verr :parser/select "select condition must be i1 or <n x i1>")
+                        (not= (norm-type at) (norm-type bt)) (verr :parser/select "both values to select must have same type")))
+      ('#{call invoke callbr} h)
+      (let [t (norm-type (first ps)) args (nth ps 2)]
+        (when (and (seq? t) (= (first t) 'fn))
+          (let [params (vec (remove #{'&} (nth t 2))) var? (some #{'&} (nth t 2))]
+            (doseq [[i a] (map-indexed vector args)]
+              (cond
+                (< i (count params)) (when-not (= (norm-type (first a)) (nth params i))
+                                       (verr :parser/call-argument (str "argument is not of expected type '" (tstr (nth params i)) "'")))
+                (not var?) (verr :parser/call-arguments "too many arguments specified")))
+            (when (< (count args) (count params)) (verr :parser/call-arguments "not enough parameters specified for call")))))
+      (= h 'ret) (let [t (if (= (first ps) 'void) 'void (norm-type (first ps)))]
+                   (when-not (= t ret-type) (verr :parser/ret (str "value doesn't match function result type '" (tstr ret-type) "'"))))
+      (= h 'br) (when (and (= 4 (count ps)) (not= (norm-type (first ps)) 'i1)) (verr :parser/br "branch condition must have 'i1' type"))
+      (= h 'switch) (let [t (norm-type (first ps))]
+                      (when-not (int-type? t) (verr :parser/switch "switch condition must have integer type"))
+                      (loop [seen #{} cs (seq (nth ps 3))]
+                        (when cs
+                          (let [[_ v] (first cs)]
+                            (when-not (or (integer? v) (and (seq? v) (= (first v) 'int))) (verr :parser/switch "case value is not a constant integer"))
+                            (when (seen v) (verr :parser/switch "duplicate case value in switch"))
+                            (recur (conj seen v) (next cs))))))
+      (= h 'extractvalue) (let [t (norm-type (first (first ps)))]
+                            (when-not (aggregate? t) (verr :parser/extractvalue "extractvalue operand must be aggregate type"))
+                            (when-not (index-type t (rest ps)) (verr :parser/extractvalue "invalid indices for extractvalue")))
+      (= h 'insertvalue) (let [t (norm-type (first (first ps))) vt (norm-type (first (second ps)))]
+                           (when-not (aggregate? t) (verr :parser/insertvalue "insertvalue operand must be aggregate type"))
+                           (let [it (index-type t (nnext ps))]
+                             (when-not it (verr :parser/insertvalue "invalid indices for insertvalue"))
+                             (when-not (= (norm-type it) vt)
+                               (verr :parser/insertvalue (str "insertvalue operand and field disagree in type: '" (tstr vt) "' instead of '" (tstr (norm-type it)) "'")))))
+      (= h 'extractelement) (let [[[vt] [it]] ps] (when-not (and (vec-type? (norm-type vt)) (int-type? (norm-type it))) (verr :parser/vector "invalid extractelement operands")))
+      (= h 'insertelement) (let [[[vt] [et] [it]] ps vt (norm-type vt)]
+                             (when-not (and (vec-type? vt) (= (elem vt) (norm-type et)) (int-type? (norm-type it))) (verr :parser/vector "invalid insertelement operands")))
+      (= h 'shufflevector) (let [[[at] [bt]] ps] (when-not (and (vec-type? (norm-type at)) (= (norm-type at) (norm-type bt))) (verr :parser/vector "invalid shufflevector operands")))
+      (= h 'atomicrmw) (do (when-not (ptr-type? (norm-type (first (nth ps 1)))) (verr :parser/atomicrmw "atomicrmw operand must be a pointer")) (check-align (:align o)))
+      (= h 'cmpxchg) (do (when-not (ptr-type? (norm-type (first (nth ps 0)))) (verr :parser/cmpxchg "cmpxchg operand must be a pointer")) (check-align (:align o)))
+      :else nil)))
+
+(def ^:private dbg-arity '{dbg_value 4 dbg_declare 4 dbg_declare_value 4 dbg_assign 7 dbg_label 2})
+
+(defn- parse-dbg [st b]
+  (let [n (dbg-arity (first b)) k (count (rest b))]
+    (when (and n (< k n)) (verr :parser/dbg-record "Expected ',' here"))
+    (when (and n (> k n)) (verr :parser/dbg-record "Expected ')' here"))
+    (doseq [x (rest b)]
+      (if (vector? x) (use-value st (second x) (norm-type (first x))) (note-md! x)))))
+
+(defn- inst-uses! [st b]
+  (let [[h ps o] (split-inst b)]
+    ;; the grammar's own: a phi without an entry, written as forms, prints as text LLParser does not read
+    (when (and (= h 'phi) (< (count (strip-flags ps)) 2)) (verr :parser/syntax "expected value token"))
+    (doseq [u (uses b)] (use-value st (first u) (second u)))
+    (note-md! (:md o))
+    (note-md! (:bundles o))))
+
+(defn- parse-body [^Fn st f ret-type]
+  (let [o (apply hash-map (drop 4 f))
+        blocks (:body o)]
+    (when (or (empty? blocks) (and (= 1 (count blocks)) (nil? (second (first blocks))) (empty? (drop 2 (first blocks)))))
+      (verr :parser/syntax "function body requires at least one basic block"))
+    (doseq [[i blk] (map-indexed vector blocks)]
+      (let [[_ l & items] blk]
+        (define-value st l 'label "label")
+        (doseq [x items]
+          (let [b (body x)]
+            (if (dbg-record? b)
+              (parse-dbg st b)
+              (do (inst-uses! st b)
+                  (check-inst st b ret-type)
+                  (let [t (result-type b) r (result x)]
+                    (cond
+                      (and r (= t 'void)) (verr :parser/void-name "instructions returning void cannot have a name")
+                      (not= t 'void) (define-value st r t "instruction")))))))
+        (when-not (and (seq items) (terminator? (last items)))
+          (verr :parser/terminator "expected instruction opcode"))))
+    (doseq [u (:uselistorder o)] (note-md! u))
+    (let [named (sort (remove numbered? (keys (.fwd st))))
+          nums (sort (map #(Long/parseLong %) (filter numbered? (keys (.fwd st)))))]
+      (when (seq named) (verr :parser/undefined-value (str "use of undefined value '%" (first named) "'")))
+      (when (seq nums) (verr :parser/undefined-value (str "use of undefined value '%" (first nums) "'"))))))
+
+(defn- local-linkage? [l] (#{:internal :private} l))
+
+(defn- check-linkage [o what]
+  (let [l (:linkage o)]
+    (case what
+      :declare (when (#{:private :internal :available_externally :linkonce :linkonce_odr :weak :weak_odr} l)
+                 (verr :parser/linkage "invalid linkage for function declaration"))
+      :define (when (= l :extern_weak) (verr :parser/linkage "invalid linkage for function definition"))
+      nil)
+    (when (and (#{:declare :define} what) (#{:appending :common} l)) (verr :parser/linkage "invalid function linkage type"))
+    (when (and (local-linkage? l) (:visibility o) (not= (:visibility o) :default))
+      (verr :parser/visibility "symbol with local linkage must have default visibility"))
+    (when (and (local-linkage? l) (:dll o)) (verr :parser/dll "symbol with local linkage cannot have a DLL storage class"))))
+
+(defn- parse-function [f]
+  (let [[h nm rt ps & opts] f
+        o (apply hash-map opts)
+        what (if (= h 'llvm/define) :define :declare)
+        st (fn-state)
+        k (global-key nm)]
+    (check-linkage o what)
+    (when-let [d (.get *gdefs* k)]
+      (if (= (:kind d) :function)
+        (verr :parser/redefinition (str "invalid redefinition of function '" k "'"))
+        (verr :parser/redefinition (str "redefinition of global '@" k "'"))))
+    (doseq [p ps :when (vector? p)]
+      (let [nmx (when (local? (peek p)) (peek p))]
+        (when (and nmx (numbered? (local-key nmx)) (< (Long/parseLong (local-key nmx)) (aget ^longs (.next ^Fn st) 0)))
+          (verr :parser/numbering (str "argument expected to be numbered '%" (aget ^longs (.next ^Fn st) 0) "' or greater")))
+        (when (= what :define) (define-value st nmx (norm-type (first p)) "argument"))))
+    (check-align (:align o))
+    (note-md! (:md o))
+    (when-let [p (:personality o)] (use-value nil (second p) (norm-type (first p))))
+    (when-let [p (:prefix o)] (use-value nil (second p) (norm-type (first p))))
+    (when-let [p (:prologue o)] (use-value nil (second p) (norm-type (first p))))
+    (.put *gdefs* k {:kind :function :fty (list 'fn (norm-type rt) (mapv #(if (= % '&) % (norm-type (first %))) ps)) :form f})
+    (.remove *gfwd* k)
+    (when (= what :define) (parse-body st f (norm-type rt)))))
+
+(defn- parse-global [f]
+  (let [[h nm t & more] f
+        [init opts] (if (and (seq more) (not (keyword? (first more)))) [(first more) (rest more)] [nil more])
+        o (apply hash-map opts)
+        k (global-key nm)]
+    (check-linkage o :global)
+    (when (.containsKey *gdefs* k) (verr :parser/redefinition (str "redefinition of global '@" k "'")))
+    (when (some? init) (use-value nil init (norm-type t)))
+    (check-align (:align o))
+    (note-md! (:md o))
+    (.put *gdefs* k {:kind :global :type (norm-type t) :form f})
+    (.remove *gfwd* k)))
+
+(defn- parse-alias [f]
+  (let [[h nm t a & opts] f o (apply hash-map opts) k (global-key nm)]
+    (check-linkage o :alias)
+    (when (.containsKey *gdefs* k) (verr :parser/redefinition (str "redefinition of global '@" k "'")))
+    (if (vector? a) (use-value nil (second a) (norm-type (first a))) (use-value nil a 'ptr))
+    (.put *gdefs* k {:kind (if (= h 'llvm/alias) :alias :ifunc) :type (norm-type t) :form f})
+    (.remove *gfwd* k)))
+
+(defn- phase-parser [forms]
+  (doseq [f forms]
+    (case (first f)
+      (llvm/define llvm/declare) (parse-function f)
+      llvm/global (parse-global f)
+      (llvm/alias llvm/ifunc) (parse-alias f)
+      llvm/meta (do (.add *mdefs* (second f)) (note-md! (drop 2 f)))
+      llvm/named-meta (note-md! (nth f 2))
+      llvm/uselistorder (let [[_ [t v]] f] (use-value nil v (norm-type t)))
+      nil))
+  (let [undef (sort (remove #(str/starts-with? % "llvm.") (keys *gfwd*)))
+        named (remove numbered? undef)
+        nums (sort (map #(Long/parseLong %) (filter numbered? undef)))]
+    (when (seq named) (verr :parser/undefined-global (str "use of undefined value '@" (first named) "'")))
+    (when (seq nums) (verr :parser/undefined-global (str "use of undefined value '@" (first nums) "'"))))
+  (let [missing (sort (map #(Long/parseLong (subs (name %) 1)) (remove #(.contains *mdefs* %) *mrefs*)))]
+    (when (seq missing) (verr :parser/undefined-metadata (str "use of undefined metadata '!" (first missing) "'")))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Phase 2: the Verifier's rules
+
+(defn- cfg
+  "A definition's blocks with their index, successors, predecessors (with repeats), reachability and immediate
+  dominators."
+  [blocks]
+  (let [n (count blocks)
+        idx (into {} (keep-indexed (fn [i [_ l]] (when l [(local-key l) i])) blocks))
+        ;; an unlabelled block is numbered by LLParser: its number is found from the definitions' numbering
+        succ (mapv (fn [[_ _ & items]]
+                     (if-let [t (last items)]
+                       (vec (keep #(get idx (local-key %)) (labels-of (body t))))
+                       []))
+                   blocks)
+        preds (let [p (vec (repeat n []))] (reduce (fn [p [i ss]] (reduce #(update %1 %2 conj i) p ss)) p (map-indexed vector succ)))
+        order (let [seen (boolean-array n) out (java.util.ArrayList.)]
+                (letfn [(dfs [i] (when-not (aget seen i) (aset seen i true) (doseq [s (nth succ i)] (dfs s)) (.add out i)))]
+                  (when (pos? n) (dfs 0)))
+                (vec (reverse out)))
+        rpo (into {} (map-indexed (fn [k i] [i k]) order))
+        idom (let [d (int-array n -1)]
+               (when (pos? n) (aset d 0 0))
+               (loop []
+                 (let [changed (volatile! false)]
+                   (doseq [b (rest order)]
+                     (let [ps (filter #(and (contains? rpo %) (>= (aget d %) 0)) (nth preds b))]
+                       (when (seq ps)
+                         (let [nd (reduce (fn [a c]
+                                            (loop [x a y c]
+                                              (cond (= x y) x
+                                                    (> (long (rpo x)) (long (rpo y))) (recur (aget d x) y)
+                                                    :else (recur x (aget d y)))))
+                                          (first ps) (rest ps))]
+                           (when-not (= nd (aget d b)) (aset d b (int nd)) (vreset! changed true))))))
+                   (when @changed (recur))))
+               d)]
+    {:n n :idx idx :succ succ :preds preds :reach (set order) :idom idom}))
+
+(defn- block-dominates? [g a b]
+  (let [reach (:reach g) ^ints d (:idom g)]
+    (cond
+      (= a b) true
+      (not (reach b)) true
+      (not (reach a)) false
+      :else (loop [x b] (cond (= x a) true (= x 0) false :else (recur (aget d x)))))))
+
+(defn- edge-dominates? [g start end use-b]
+  (and (block-dominates? g end use-b)
+       (let [ps (nth (:preds g) end)]
+         (or (= 1 (count ps))
+             (loop [ps (seq ps) dup 0]
+               (cond
+                 (nil? ps) true
+                 (= (first ps) start) (if (pos? dup) false (recur (next ps) (inc dup)))
+                 (not (block-dominates? g end (first ps))) false
+                 :else (recur (next ps) dup)))))))
+
+(defn- eh-pad? [items]
+  (let [x (first (remove #(let [b (body %)] (or (= 'phi (first b)) (dbg-record? b))) items))]
+    (and x (contains? '#{landingpad catchpad cleanuppad catchswitch} (first (body x))))))
+
+(def ^:private intrinsics
+  "Basic signatures of common intrinsics: [return params]; (ov K class) defines overload type K, (m K) matches it."
+  '{"llvm.memcpy" [void [(ov 0 :ptr) (ov 1 :ptr) (ov 2 :int) i1]]
+    "llvm.memmove" [void [(ov 0 :ptr) (ov 1 :ptr) (ov 2 :int) i1]]
+    "llvm.memset" [void [(ov 0 :ptr) i8 (ov 1 :int) i1]]
+    "llvm.trap" [void []] "llvm.debugtrap" [void []] "llvm.assume" [void [i1]]
+    "llvm.smax" [(ov 0 :int) [(m 0) (m 0)]] "llvm.smin" [(ov 0 :int) [(m 0) (m 0)]]
+    "llvm.umax" [(ov 0 :int) [(m 0) (m 0)]] "llvm.umin" [(ov 0 :int) [(m 0) (m 0)]]
+    "llvm.sadd.sat" [(ov 0 :int) [(m 0) (m 0)]] "llvm.uadd.sat" [(ov 0 :int) [(m 0) (m 0)]]
+    "llvm.ssub.sat" [(ov 0 :int) [(m 0) (m 0)]] "llvm.usub.sat" [(ov 0 :int) [(m 0) (m 0)]]
+    "llvm.expect" [(ov 0 :int) [(m 0) (m 0)]]
+    "llvm.abs" [(ov 0 :int) [(m 0) i1]] "llvm.ctlz" [(ov 0 :int) [(m 0) i1]] "llvm.cttz" [(ov 0 :int) [(m 0) i1]]
+    "llvm.ctpop" [(ov 0 :int) [(m 0)]] "llvm.bswap" [(ov 0 :int) [(m 0)]] "llvm.bitreverse" [(ov 0 :int) [(m 0)]]
+    "llvm.lifetime.start" [void [(ov 0 :ptr)]] "llvm.lifetime.end" [void [(ov 0 :ptr)]]
+    "llvm.stacksave" [(ov 0 :ptr) []] "llvm.stackrestore" [void [(ov 0 :ptr)]]
+    "llvm.va_start" [void [(ov 0 :ptr)]] "llvm.va_end" [void [(ov 0 :ptr)]] "llvm.va_copy" [void [(ov 0 :ptr) (m 0)]]
+    "llvm.eh.typeid.for" [i32 [(ov 0 :ptr)]]
+    "llvm.fabs" [(ov 0 :fp) [(m 0)]] "llvm.sqrt" [(ov 0 :fp) [(m 0)]] "llvm.floor" [(ov 0 :fp) [(m 0)]]
+    "llvm.ceil" [(ov 0 :fp) [(m 0)]] "llvm.fmuladd" [(ov 0 :fp) [(m 0) (m 0) (m 0)]] "llvm.fma" [(ov 0 :fp) [(m 0) (m 0) (m 0)]]})
+
+(defn- intrinsic-entry [^String nm]
+  (loop [k nm]
+    (cond
+      (contains? intrinsics k) (intrinsics k)
+      (str/includes? k ".") (recur (subs k 0 (.lastIndexOf k ".")))
+      :else nil)))
+
+(def ^:private class-words {:int "any integer type" :ptr "any pointer type" :fp "any floating-point type"})
+(defn- class-ok? [c t] (case c :int (int-ish? t) :ptr (ptr-ish? t) :fp (fp-ish? t) true))
+
+(defn- check-intrinsic-signature [^String nm fty]
+  (when-let [[r ps] (when-not (and (re-find #"^llvm\.lifetime\.(start|end)" nm) (= (nth fty 2) '[i64 ptr]))  ; AutoUpgrade's old form
+                      (intrinsic-entry nm))]
+    (let [[_ fr fps] fty fps (vec (remove #{'&} fps))
+          ovs (java.util.HashMap.)
+          check (fn [what pat t]
+                  (cond
+                    (and (seq? pat) (= (first pat) 'ov))
+                    (if (class-ok? (nth pat 2) t)
+                      (.put ovs (second pat) t)
+                      (verr :verifier/intrinsic-signature (str what " (overload type " (second pat) ") expected " (class-words (nth pat 2)) ", but got " (tstr t))))
+                    (and (seq? pat) (= (first pat) 'm))
+                    (let [want (.get ovs (second pat))]
+                      (when (and want (not= want t))
+                        (verr :verifier/intrinsic-signature (str what " (matching overload type " (second pat) ") expected " (tstr want) ", but got " (tstr t)))))
+                    :else (when-not (= pat t) (verr :verifier/intrinsic-signature (str what " expected " (tstr pat) ", but got " (tstr t))))))]
+      (when-not (= (count ps) (count fps))
+        (verr :verifier/intrinsic-signature (str "intrinsic has incorrect number of args. Expected " (count ps) ", but got " (count fps))))
+      (check "intrinsic return type" r fr)
+      (doseq [[i p] (map-indexed vector ps)] (check (str "intrinsic argument " i " type") p (nth fps i))))))
+
+(defn- callee-of [b] (let [[h ps] (split-inst b)] (when ('#{call invoke callbr} h) (second ps))))
+
+(defn- verify-function
+  "The Verifier's rules over one definition (visitFunction, visitBasicBlock and the instructions' visitors)."
+  [f users]
+  (let [[h nm rt ps & opts] f
+        o (apply hash-map opts)
+        k (global-key nm)]
+    (when (str/starts-with? k "llvm.")
+      (when (= h 'llvm/define) (verr :verifier/intrinsic-defined "llvm intrinsics cannot be defined!"))
+      (check-intrinsic-signature k (:fty (.get *gdefs* k)))
+      ;; hasAddressTaken ignores the assume-like intrinsics' calls
+      (when-not (re-find #"^llvm\.(assume|sideeffect|pseudoprobe|dbg\.|invariant\.|lifetime\.|experimental\.noalias\.scope\.decl|objectsize|ptr\.annotation|var\.annotation)" k)
+        (doseq [u (get users k)]
+          (when-not (= u (:fty (.get *gdefs* k))) (verr :verifier/intrinsic-user "Invalid user of intrinsic instruction!")))))
+    (when (and (:comdat o) (= h 'llvm/declare)) (verr :verifier/comdat-declaration "Declaration may not be in a Comdat!"))
+    (when (= h 'llvm/define)
+      (let [blocks (vec (:body o))
+            ;; the numbers LLParser gives unlabelled blocks and unnamed values
+            ^Fn st (fn-state)
+            _ (doseq [p ps :when (vector? p)] (let [x (when (local? (peek p)) (peek p))] (define-value st x 'arg "argument")))
+            blocks (mapv (fn [blk]
+                           (let [[_ l & items] blk
+                                 l (or l (symbol (str "%" (aget ^longs (.next ^Fn st) 0))))]
+                             (define-value st l 'label "label")
+                             (apply list 'block l (map (fn [x] (let [b (body x) t (if (dbg-record? b) 'void (result-type b))]
+                                                                 (if (and (not= t 'void) (nil? (result x)))
+                                                                   (let [r (symbol (str "%" (aget ^longs (.next ^Fn st) 0)))] (define-value st r t "instruction") (list '= r b))
+                                                                   (do (when (and (result x) (not= t 'void)) (define-value st (result x) t "instruction")) x))))
+                                                       items))))
+                         blocks)
+            g (cfg blocks)
+            defs (java.util.HashMap.)  ; local key -> [block index item index body]
+            _ (doseq [[bi [_ _ & items]] (map-indexed vector blocks) [ii x] (map-indexed vector items)]
+                (when-let [r (result x)] (.put defs (local-key r) [bi ii (body x)])))
+            lp-type (volatile! nil)]
+        (when (seq (nth (:preds g) 0)) (verr :verifier/entry-predecessors "Entry block to function must not have predecessors!"))
+        (doseq [[bi [_ l & items]] (map-indexed vector blocks)]
+          (let [items (vec items)
+                insts (vec (remove #(dbg-record? (body %)) items))]
+            ;; visitBasicBlock: the phis against the predecessors
+            (when (and (seq insts) (= 'phi (first (body (first insts)))))
+              (let [preds (vec (sort (nth (:preds g) bi)))]
+                (doseq [x insts :while (= 'phi (first (body x)))]
+                  (let [ins (vec (rest (strip-flags (second (split-inst (body x))))))
+                        vals (vec (sort-by (fn [[v l]] [(get (:idx g) (local-key l) -1) (pr-str v)])
+                                           (map (fn [[v l]] [v l]) ins)))]
+                    (when-not (= (count ins) (count preds))
+                      (verr :verifier/phi-predecessors "PHINode should have one entry for each predecessor of its parent basic block!"))
+                    (doseq [i (range (count vals))]
+                      (let [[v l] (nth vals i)]
+                        (when (and (pos? i) (= (local-key l) (local-key (second (nth vals (dec i))))) (not= v (first (nth vals (dec i)))))
+                          (verr :verifier/phi-duplicate "PHI node has multiple entries for the same basic block with different incoming values!"))
+                        (when-not (= (get (:idx g) (local-key l)) (nth preds i))
+                          (verr :verifier/phi-entries "PHI node entries do not match predecessors!"))))))))
+            (loop [ii 0 seen-non-phi false]
+              (when (< ii (count items))
+                (let [x (nth items ii) b (body x) hd (first b)]
+                  (if (dbg-record? b)
+                    (recur (inc ii) seen-non-phi)
+                    (do
+                      (when (and (terminator? x) (< ii (dec (count items))))
+                        (verr :verifier/terminator-middle "Terminator found in the middle of a basic block!"))
+                      (when (and (= hd 'phi) seen-non-phi) (verr :verifier/phi-grouped "PHI nodes not grouped at top of basic block!"))
+                      (when (= hd 'landingpad)
+                        (let [[_ ps] (split-inst b)]
+                          (when-not (or (some #{:cleanup} ps) (some seq? ps)) (verr :verifier/landingpad "LandingPadInst needs at least one clause or to be a cleanup."))
+                          (when (zero? bi) (verr :verifier/eh-pad-entry "EH pad cannot be in entry block."))
+                          (doseq [p (nth (:preds g) bi)]
+                            (let [t (body (last (nth blocks p))) [th _ to] (split-inst t)]
+                              (when-not (and (= th 'invoke) (= (get (:idx g) (local-key (:unwind to))) bi) (not= (get (:idx g) (local-key (:to to))) bi))
+                                (verr :verifier/landingpad "Block containing LandingPadInst must be jumped to only by the unwind edge of an invoke."))))
+                          (let [t (result-type b)]
+                            (if @lp-type
+                              (when-not (= @lp-type t) (verr :verifier/landingpad "The landingpad instruction should have a consistent result type inside a function."))
+                              (vreset! lp-type t)))
+                          (when-not (:personality o) (verr :verifier/landingpad "LandingPadInst needs to be in a function with a personality."))
+                          (when-not (= x (first (remove #(= 'phi (first (body %))) insts)))
+                            (verr :verifier/landingpad "LandingPadInst not the first non-PHI instruction in the block."))))
+                      ;; visitCallBase
+                      (when-let [c (callee-of b)]
+                        (when (and (global? c) (str/starts-with? (global-key c) "llvm."))
+                          (let [d (.get *gdefs* (global-key c)) [_ ps] (split-inst b)]
+                            (when (and d (= (:kind d) :function) (not= (:fty d) (call-fty (first ps) (nth ps 2))))
+                              (verr :verifier/intrinsic-call "Intrinsic called with incompatible signature"))
+                            (when (re-find #"^llvm\.lifetime\.(start|end)" (global-key c))
+                              (let [a (peek (last (nth ps 2)))]
+                                (when-not (or (= a 'poison)
+                                              (and (local? a) (when-let [[_ _ db] (.get defs (local-key a))] (= 'alloca (first db)))))
+                                  (verr :verifier/lifetime "llvm.lifetime.start/end can only be used on alloca or poison")))))))
+                      ;; visitInstruction: self-references, dominance, metadata attachments
+                      (let [r (result x) us (uses b)]
+                        (doseq [[v t blk] us]
+                          (when (and (local? v) (not= t 'label))
+                            (when (and r (= (local-key v) (local-key r)) (not= hd 'phi))
+                              (verr :verifier/self-reference "Only PHI nodes may reference their own value!"))))
+                        (doseq [[v t blk] us]
+                          (when (and (local? v) (not= t 'label))
+                            (when-let [[dbi dii db] (.get defs (local-key v))]
+                              (let [use-b (if blk (get (:idx g) (local-key blk) bi) bi)
+                                    dh (first db)
+                                    ok (cond
+                                         (not ((:reach g) use-b)) true
+                                         (not ((:reach g) dbi)) false
+                                         (= 'invoke dh)
+                                         (let [[_ _ dob] (split-inst db) nd (get (:idx g) (local-key (:to dob)))]
+                                           (if (and blk (= bi nd) (= use-b dbi)) true (edge-dominates? g dbi nd use-b)))
+                                         (not= dbi use-b) (block-dominates? g dbi use-b)
+                                         (= hd 'phi) true
+                                         :else (< (long dii) ii))]
+                                (when-not ok (verr :verifier/dominance "Instruction does not dominate all uses!")))))))
+                      (let [[_ _ io] (split-inst b) md (apply hash-map (:md io)) rt (result-type b)]
+                        (when (get md '!range)
+                          (when-not ('#{load call invoke} hd) (verr :verifier/md-range "Ranges are only for loads, calls and invokes!")))
+                        (when (get md '!nonnull)
+                          (when-not (ptr-type? rt) (verr :verifier/md-nonnull "nonnull applies only to pointer types"))
+                          (when-not (= hd 'load) (verr :verifier/md-nonnull "nonnull applies only to load instructions, use attributes for calls or invokes")))
+                        (when (get md '!align)
+                          (when-not (ptr-type? rt) (verr :verifier/md-align "align applies only to pointer types"))
+                          (when-not (= hd 'load) (verr :verifier/md-align "align applies only to load instructions, use attributes for calls or invokes")))
+                        (when (or (get md '!dereferenceable) (get md '!dereferenceable_or_null))
+                          (when-not (ptr-type? rt) (verr :verifier/md-dereferenceable "dereferenceable, dereferenceable_or_null apply only to pointer types"))
+                          (when-not ('#{load inttoptr} hd) (verr :verifier/md-dereferenceable "dereferenceable, dereferenceable_or_null apply only to load and inttoptr instructions, use attributes for calls or invokes"))))
+                      (when (= hd 'invoke)
+                        (let [[_ _ io] (split-inst b) u (get (:idx g) (local-key (:unwind io)))]
+                          (when (and u (not (eh-pad? (drop 2 (nth blocks u)))))
+                            (verr :verifier/unwind-dest "The unwind destination does not have an exception handling instruction!"))))
+                      (recur (inc ii) (or seen-non-phi (not= hd 'phi))))))))))))))
+
+(defn- phase-verifier [forms]
+  (let [users (java.util.HashMap.)]
+    ;; the function types an intrinsic is called with (its users)
+    (doseq [f forms :when (= (first f) 'llvm/define)
+            :let [o (apply hash-map (drop 4 f))]
+            blk (:body o) x (drop 2 blk)
+            :let [b (body x) c (callee-of b)]
+            :when (and c (global? c) (str/starts-with? (global-key c) "llvm."))]
+      (let [[_ ps] (split-inst b)] (.put users (global-key c) (conj (vec (.get users (global-key c))) (call-fty (first ps) (nth ps 2))))))
+    (doseq [f forms :when (#{'llvm/define 'llvm/declare} (first f))]
+      (verify-function f (into {} users)))
+    (doseq [f forms :when (= (first f) 'llvm/global)]
+      (let [[_ _ _ & more] f o (apply hash-map (if (and (seq more) (not (keyword? (first more)))) (rest more) more))]
+        (when (and (:comdat o) (#{:external :extern_weak} (:linkage o))) (verr :verifier/comdat-declaration "Declaration may not be in a Comdat!"))))))
+
+(defn verify-forms
+  "A module's first error, {:rule R :message M}, or nil when it is valid."
+  [forms]
+  (binding [*types* (into {} (keep #(when (= (first %) 'llvm/type) [(second %) (norm-type (nth % 2))]) forms))
+            *gdefs* (java.util.HashMap.) *gfwd* (java.util.TreeMap.) *mdefs* (java.util.HashSet.) *mrefs* (java.util.HashSet.)]
+    (try
+      (phase-parser forms)
+      (phase-verifier forms)
+      nil
+      (catch arbace.lang.ExceptionInfo e
+        (if-let [r (:llvm/verify (ex-data e))] {:rule r :message (.getMessage e)} (throw e))))))
+
+(def rules
+  "The ported rules, by phase."
+  {:parser [:parser/value-type :parser/not-a-block :parser/forward-type :parser/numbering :parser/redefinition :parser/undefined-value
+            :parser/undefined-global :parser/undefined-metadata :parser/global-type :parser/int-constant :parser/fp-constant
+            :parser/constant-type :parser/null :parser/void-name :parser/terminator :parser/operand-type :parser/icmp :parser/fcmp
+            :parser/cast :parser/load :parser/store :parser/atomic-align :parser/gep :parser/phi :parser/select :parser/call-argument
+            :parser/call-arguments :parser/ret :parser/br :parser/switch :parser/extractvalue :parser/insertvalue :parser/vector
+            :parser/atomicrmw :parser/cmpxchg :parser/align :parser/linkage :parser/visibility :parser/dll :parser/dbg-record
+            :parser/syntax :parser/local-outside]
+   :verifier [:verifier/entry-predecessors :verifier/phi-predecessors :verifier/phi-duplicate :verifier/phi-entries
+              :verifier/phi-grouped :verifier/terminator-middle :verifier/self-reference :verifier/dominance :verifier/landingpad
+              :verifier/eh-pad-entry :verifier/unwind-dest :verifier/intrinsic-call :verifier/lifetime :verifier/intrinsic-user
+              :verifier/intrinsic-signature :verifier/intrinsic-defined :verifier/md-range :verifier/md-nonnull :verifier/md-align
+              :verifier/md-dereferenceable :verifier/comdat-declaration]})
+
+(defn- forms-of-file [^String path]
+  (let [s (String. (java.nio.file.Files/readAllBytes (.toPath (java.io.File. path))) "ISO-8859-1")]
+    (if (str/ends-with? path ".ae")
+      (let [r (arbace.lang.LineNumberingPushbackReader. (java.io.StringReader. s)) eof (Object.)]
+        (vec (remove #(and (seq? %) (= (first %) 'in-ns))
+                     (loop [out []] (let [x (read r false eof)] (if (identical? x eof) out (recur (conj out x))))))))
+      (rd/read-module s))))
+
+(defn verify-file
+  "[verdict message rule] of a file: valid, invalid (a rule's message) or unread (the reader's refusal)."
+  [^String path]
+  (let [forms (try (forms-of-file path) (catch Throwable e e))]
+    (if (instance? Throwable forms)
+      ["unread" (str/replace (str (.getMessage ^Throwable forms)) #"[\t\n]" " ") ""]
+      (if-let [e (try (verify-forms forms) (catch Throwable e {:rule :crash :message (str (.getMessage e))}))]
+        ["invalid" (:message e) (str (:rule e))]
+        ["valid" "" ""]))))
+
+(defn verify-main
+  "bin/repr-llvm verify FILE...: each invalid file's first error; 1 when one is invalid."
+  [files]
+  (let [bad (volatile! 0)]
+    (doseq [f files]
+      (let [[v m r] (verify-file f)]
+        (when-not (= v "valid")
+          (vswap! bad inc)
+          (println (str f ": error: " m (when (seq r) (str " [" (subs r 1) "]")))))))
+    (flush)
+    (if (pos? @bad) 1 0)))
+
+(defn verify-list
+  "LIST OUT: NAME<tab>verdict<tab>message<tab>rule for each NAME<tab>PATH of LIST."
+  [[lst out]]
+  (let [rows (for [l (str/split-lines (slurp lst)) :when (seq l)] (str/split l #"\t"))
+        threads (Integer/parseInt (or (System/getenv "REPR_LLVM_THREADS") "4"))
+        pool (Executors/newFixedThreadPool threads)
+        futs (mapv (fn [[n p]] (.submit pool ^Callable (fn [] (into [n] (verify-file p))))) rows)
+        res (mapv #(.get ^Future %) futs)]
+    (.shutdown pool)
+    (spit out (str (str/join "\n" (map #(str/join "\t" %) res)) "\n"))
+    (println (count res) "files," (count (filter #(= "valid" (second %)) res)) "valid,"
+             (count (filter #(= "invalid" (second %)) res)) "invalid")))
