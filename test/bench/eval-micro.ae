@@ -1,0 +1,282 @@
+;; The evaluator's micro-benchmarks (doc/go/EVAL-SPEED.md): the cost of one operation of each
+;; kind the evaluated code does most (calls of each arity, closures, recur, arrays of each type
+;; with hinted and unhinted operands, collections, transients, strings, instance?, protocols,
+;; multimethods, pr-str, interop), in ns per operation, on the Go executable that runs the script
+;; (the script's own code is evaluated; arbace.core is compiled).
+;;
+;; Usage: EXE test/bench/eval-micro.ae [NAME...|GROUP...]
+;; Each benchmark is a loop of N iterations doing the operation once (100,000, 10,000 for the
+;; slower ones); its thunk runs once (warm-up and the evaluator's compilation), the collector runs,
+;; then the thunk runs again until MIN-MS (default 300, the environment's EVAL_MICRO_MS) have
+;; passed and 3 runs are done. One EDN map per benchmark: {:name :call1 :ns 105.3 :net 90.1}, :ns
+;; the best run's time per iteration, :net less the empty loop's (:loop, measured first for 200
+;; ms). With no NAME, all; a GROUP (:calls :arrays :colls :strings :dispatch :print :interop :misc)
+;; runs its benchmarks.
+
+(set! *warn-on-reflection* false)
+
+(import '[java.util ArrayList HashMap])
+
+;; ---------------------------------------------------------------------------------------
+;; the operations' subjects
+
+(defn f0 [] nil)
+(defn f1 [a] a)
+(defn f2 [a b] a)
+(defn f3 [a b c] a)
+(defn f4 [a b c d] a)
+(defn f5 [a b c d e] a)
+(defn f6 [a b c d e g] a)
+(defn f8 [a b c d e g h k] a)
+(defn fv [a & more] a)
+(defn fl ^long [^long a] a)
+(defn fd ^double [^double a] a)
+(defn fmulti ([a] a) ([a b] b) ([a b c] c))
+(defn fself [a] (if (nil? a) 0 a))
+
+(defprotocol Shape (area [s]) (scale [s k]))
+(defrecord Circle [r] Shape (area [_] r) (scale [_ k] k))
+(deftype Rect [w h] Shape (area [_] w) (scale [_ k] k))
+(extend-type String Shape (area [s] 1) (scale [s k] k))
+(extend-type Long Shape (area [s] 2) (scale [s k] k))
+
+(defmulti mkind :kind)
+(defmethod mkind :a [m] 1)
+(defmethod mkind :b [m] 2)
+(defmethod mkind :default [m] 0)
+
+(defmulti mclass class)
+(defmethod mclass String [x] 1)
+(defmethod mclass Long [x] 2)
+(defmethod mclass :default [x] 0)
+
+(def ^:dynamic *dyn* 7)
+(def plain-var 7)
+
+(def sink (volatile! nil))
+
+;; ---------------------------------------------------------------------------------------
+;; the benchmarks: [name group doc thunk]; each thunk loops n times
+
+(defmacro iter
+  "A loop of n iterations (n a literal; i the iteration, a primitive long) running body once each,
+  the count in the thunk's metadata (:iterations)."
+  [n & body]
+  `(with-meta (fn [] (loop [~'i 0] (if (< ~'i ~n) (do ~@body (recur (inc ~'i))) nil)))
+     {:iterations ~n}))
+
+(def n 100000)
+
+(def benchmarks
+  (let [bs (byte-array 16) ss (short-array 16) is (int-array 16) ls (long-array 16)
+        fs (float-array 16) ds (double-array 16) cs (char-array 16) zs (boolean-array 16)
+        os (object-array 16)
+        v16 (vec (range 16)) m3 {:a 1 :b 2 :c 3}
+        hm (zipmap (map #(keyword (str "k" %)) (range 32)) (range 32))
+        al (ArrayList. ^java.util.Collection (range 16))
+        jhm (doto (HashMap.) (.put "a" 1) (.put "b" 2))
+        rec (->Circle 2) rt (Rect. 2 5)
+        sb (StringBuilder.)
+        s "hello world"
+        bytes (.getBytes "hello world, hello world" "UTF-8")
+        atm (atom 0) vol (volatile! 0)
+        lst (list 1 2 3 4)
+        boxed-one (Long/valueOf 1)
+        boxed-byte (Byte/valueOf (byte 1))
+        ;; the same values as Objects (identity's result has no type): the reflective calls
+        ls-o (identity ls) bs-o (identity bs) os-o (identity os) sb-o (identity sb) s-o (identity s)
+        al-o (identity al) one-o (identity boxed-one)
+        g1 (fn [a] a)
+        k 5
+        gc (fn [a] (+ a k))]
+    [;; the loop itself
+     [:loop :misc "the empty loop: (< i n), (inc i), recur" (iter 100000)]
+     [:loop-boxed :misc "a loop with a boxed accumulator (+ acc 1)"
+      (fn [] (loop [i 0 acc boxed-one] (if (< i 100000) (recur (inc i) (+ acc 1)) acc)))]
+     [:loop-2 :misc "a loop recurring two primitive longs" (fn [] (loop [i 0 j 0] (if (< i 100000) (recur (inc i) (+ j 2)) j)))]
+     [:loop-double :misc "a loop with a double: (+ d 1.5)" (fn [] (loop [i 0 d 0.0] (if (< i 100000) (recur (inc i) (+ d 1.5)) d)))]
+
+     ;; calls
+     [:call0 :calls "(f0), a defn of arity 0" (iter 100000 (f0))]
+     [:call1 :calls "(f1 i)" (iter 100000 (f1 i))]
+     [:call2 :calls "(f2 i i)" (iter 100000 (f2 i i))]
+     [:call3 :calls "(f3 i i i)" (iter 100000 (f3 i i i))]
+     [:call4 :calls "(f4 i i i i)" (iter 100000 (f4 i i i i))]
+     [:call5 :calls "(f5 i i i i i)" (iter 100000 (f5 i i i i i))]
+     [:call6 :calls "(f6 ...) of 6 arguments (RestFn's seq)" (iter 100000 (f6 i i i i i i))]
+     [:call8 :calls "(f8 ...) of 8 arguments (RestFn's seq)" (iter 100000 (f8 i i i i i i i i))]
+     [:call-variadic :calls "(fv i i), [a & more]" (iter 100000 (fv i i))]
+     [:call-apply :calls "(apply f2 i [1])" (iter 100000 (apply f2 i [1]))]
+     [:call-multi :calls "(fmulti i i), a fn of three arities" (iter 100000 (fmulti i i))]
+     [:call-long :calls "(fl i), ^long [^long a]" (iter 100000 (fl i))]
+     [:call-double :calls "(fd 1.5), ^double [^double a]" (iter 100000 (fd 1.5))]
+     [:call-local :calls "(g1 i), a fn in a local" (iter 100000 (g1 i))]
+     [:call-closure :calls "(gc i), a closure over a local" (iter 100000 (gc i))]
+     [:call-self :calls "(fself i), a fn whose body tests and returns" (iter 100000 (fself i))]
+     [:call-core :calls "(identity i), a compiled core fn" (iter 100000 (identity i))]
+     [:call-core2 :calls "(max i 3), a compiled core fn of 2" (iter 100000 (max i 3))]
+     [:make-closure :calls "(fn [x] (+ x i)), made each time" (iter 100000 (fn [x] (+ x i)))]
+     [:make-closure-call :calls "((fn [x] (+ x i)) 1)" (iter 100000 ((fn [x] (+ x i)) 1))]
+     [:letfn :calls "letfn of one fn, called" (iter 100000 (letfn [(h [x] x)] (h i)))]
+     [:kw-invoke :calls "(:b m3)" (iter 100000 (:b m3))]
+
+     ;; arithmetic
+     [:boxed-add :misc "(+ boxed-one 1)" (iter 100000 (+ boxed-one 1))]
+     [:boxed-lt :misc "(< boxed-one 3)" (iter 100000 (< boxed-one 3))]
+     [:long-arith :misc "(+ (* i 3) (bit-xor i 7))" (iter 100000 (+ (* i 3) (bit-xor i 7)))]
+     [:eq-kw :misc "(= :a :b)" (iter 100000 (= :a :b))]
+     [:eq-long :misc "(= i 3)" (iter 100000 (= i 3))]
+     [:var-deref :misc "plain-var" (iter 100000 plain-var)]
+     [:dyn-deref :misc "*dyn*, a dynamic var" (iter 100000 *dyn*)]
+     [:atom-swap :misc "(swap! atm inc)" (iter 100000 (swap! atm inc))]
+     [:vswap :misc "(vswap! vol inc)" (iter 100000 (vswap! vol inc))]
+     [:case-kw :misc "(case :c :a 1 :b 2 :c 3 0)" (let [kk :c] (iter 100000 (case kk :a 1 :b 2 :c 3 0)))]
+     [:case-int :misc "(case (bit-and i 3) 0 :a 1 :b 2 :c :d)" (iter 100000 (case (bit-and i 3) 0 :a 1 :b 2 :c :d))]
+     [:let-vec :misc "(let [[a b] v16] a)" (iter 100000 (let [[a b] v16] a))]
+     [:let-map :misc "(let [{:keys [a b]} m3] a)" (iter 100000 (let [{:keys [a b]} m3] a))]
+
+     ;; arrays: hinted (the array's type known), the index a long
+     [:aget-bytes :arrays "(aget ^bytes a j)" (iter 100000 (aget ^bytes bs (bit-and i 15)))]
+     [:aget-shorts :arrays "(aget ^shorts a j)" (iter 100000 (aget ^shorts ss (bit-and i 15)))]
+     [:aget-ints :arrays "(aget ^ints a j)" (iter 100000 (aget ^ints is (bit-and i 15)))]
+     [:aget-longs :arrays "(aget ^longs a j)" (iter 100000 (aget ^longs ls (bit-and i 15)))]
+     [:aget-floats :arrays "(aget ^floats a j)" (iter 100000 (aget ^floats fs (bit-and i 15)))]
+     [:aget-doubles :arrays "(aget ^doubles a j)" (iter 100000 (aget ^doubles ds (bit-and i 15)))]
+     [:aget-chars :arrays "(aget ^chars a j)" (iter 100000 (aget ^chars cs (bit-and i 15)))]
+     [:aget-booleans :arrays "(aget ^booleans a j)" (iter 100000 (aget ^booleans zs (bit-and i 15)))]
+     [:aget-objects :arrays "(aget ^objects a j)" (iter 100000 (aget ^objects os (bit-and i 15)))]
+     [:aget-bytes-use :arrays "(+ 1 (aget ^bytes a j)), the byte used as a number" (iter 100000 (+ 1 (aget ^bytes bs (bit-and i 15))))]
+     [:aset-bytes :arrays "(aset ^bytes a j (byte 1))" (iter 100000 (aset ^bytes bs (bit-and i 15) (byte 1)))]
+     [:aset-shorts :arrays "(aset ^shorts a j (short 1))" (iter 100000 (aset ^shorts ss (bit-and i 15) (short 1)))]
+     [:aset-ints :arrays "(aset ^ints a j (int i))" (iter 100000 (aset ^ints is (bit-and i 15) (int i)))]
+     [:aset-longs :arrays "(aset ^longs a j i)" (iter 100000 (aset ^longs ls (bit-and i 15) i))]
+     [:aset-floats :arrays "(aset ^floats a j (float 1.5))" (iter 100000 (aset ^floats fs (bit-and i 15) (float 1.5)))]
+     [:aset-doubles :arrays "(aset ^doubles a j 1.5)" (iter 100000 (aset ^doubles ds (bit-and i 15) 1.5))]
+     [:aset-chars :arrays "(aset ^chars a j \\a)" (iter 100000 (aset ^chars cs (bit-and i 15) \a))]
+     [:aset-booleans :arrays "(aset ^booleans a j true)" (iter 100000 (aset ^booleans zs (bit-and i 15) true))]
+     [:aset-objects :arrays "(aset ^objects a j :x)" (iter 100000 (aset ^objects os (bit-and i 15) :x))]
+     ;; a boxed value into a typed array: resolved when its class is known, else reflective
+     [:aset-longs-boxed :arrays "(aset ^longs a j boxed), a Long (resolved)" (iter 100000 (aset ^longs ls (bit-and i 15) boxed-one))]
+     [:aset-ints-boxed :arrays "(aset ^ints a j boxed), a Long (resolved)" (iter 100000 (aset ^ints is (bit-and i 15) boxed-one))]
+     [:aset-bytes-boxed :arrays "(aset ^bytes a j boxed-byte), a Byte" (iter 100000 (aset ^bytes bs (bit-and i 15) boxed-byte))]
+     [:aset-longs-object :arrays "(aset ^longs a j o), o an Object to the analyzer: reflective" (iter 100000 (aset ^longs ls (bit-and i 15) one-o))]
+     ;; the array unhinted: reflective
+     [:aget-unhinted-longs :arrays "(aget a j), a long[] not hinted" (iter 100000 (aget ls-o (bit-and i 15)))]
+     [:aget-unhinted-bytes :arrays "(aget a j), a byte[] not hinted" (iter 100000 (aget bs-o (bit-and i 15)))]
+     [:aget-unhinted-objects :arrays "(aget a j), an Object[] not hinted" (iter 100000 (aget os-o (bit-and i 15)))]
+     [:aset-unhinted-longs :arrays "(aset a j i), a long[] not hinted" (iter 100000 (aset ls-o (bit-and i 15) i))]
+     [:aset-unhinted-objects :arrays "(aset a j :x), an Object[] not hinted" (iter 100000 (aset os-o (bit-and i 15) :x))]
+     [:alength-hinted :arrays "(alength ^longs a)" (iter 100000 (alength ^longs ls))]
+     [:alength-unhinted :arrays "(alength a)" (iter 100000 (alength ls-o))]
+
+     ;; collections
+     [:vec-nth :colls "(nth v16 j)" (iter 100000 (nth v16 (bit-and i 15)))]
+     [:vec-get :colls "(get v16 j)" (iter 100000 (get v16 (bit-and i 15)))]
+     [:vec-invoke :colls "(v16 j)" (iter 100000 (v16 (bit-and i 15)))]
+     [:map-get :colls "(get m3 :b)" (iter 100000 (get m3 :b))]
+     [:map-invoke :colls "(m3 :b)" (iter 100000 (m3 :b))]
+     [:hash-map-get :colls "(get hm :k7), 32 keys" (iter 100000 (get hm :k7))]
+     [:assoc :colls "(assoc m3 :x i)" (iter 100000 (assoc m3 :x i))]
+     [:conj-vec :colls "(conj v16 i)" (iter 100000 (conj v16 i))]
+     [:count-vec :colls "(count v16)" (iter 100000 (count v16))]
+     [:first-next :colls "(first (next lst))" (iter 100000 (first (next lst)))]
+     [:transient-conj :colls "conj! onto a transient vector"
+      (fn [] (loop [t (transient []) i 0] (if (< i 100000) (recur (conj! t i) (inc i)) (persistent! t))))]
+     [:transient-assoc :colls "assoc! of 16 keys, again and again, into a transient map"
+      (fn [] (loop [t (transient {}) i 0] (if (< i 100000) (recur (assoc! t (bit-and i 15) i) (inc i)) (persistent! t))))]
+     [:into-vec :colls "(into [] lst), 4 elements" (iter 10000 (into [] lst))]
+     [:seq-vec :colls "(seq v16)" (iter 100000 (seq v16))]
+
+     ;; strings
+     [:str-1 :strings "(str i)" (iter 100000 (str i))]
+     [:str-3 :strings "(str \"a\" i \"b\")" (iter 100000 (str "a" i "b"))]
+     [:str-13 :strings "str of 13 arguments"
+      (iter 10000 (str "a" i "b" i "c" i "d" i "e" i "f" i "g"))]
+     [:str-fn :strings "(apply str [\"a\" \"b\"]), the fn" (iter 100000 (apply str ["a" "b"]))]
+     [:sb-append :strings "(.append ^StringBuilder sb \"x\"), then setLength 0"
+      (iter 100000 (.append ^StringBuilder sb "x") (.setLength ^StringBuilder sb 0))]
+     [:sb-append-unhinted :strings "(.append sb \"x\") not hinted, then setLength 0, reflective"
+      (iter 100000 (.append sb-o "x") (.setLength sb-o 0))]
+     [:string-length :strings "(.length ^String s)" (iter 100000 (.length ^String s))]
+     [:string-length-unhinted :strings "(.length s) not hinted" (iter 100000 (.length s-o))]
+     [:string-charat :strings "(.charAt ^String s 3)" (iter 100000 (.charAt ^String s 3))]
+     [:subs :strings "(subs s 1 4)" (iter 100000 (subs s 1 4))]
+     [:string-from-bytes :strings "(String. ^bytes b \"UTF-8\"), 24 bytes" (iter 100000 (String. ^bytes bytes "UTF-8"))]
+
+     ;; type tests
+     [:instance :misc "(instance? String s)" (iter 100000 (instance? String s))]
+     [:string? :misc "(string? s)" (iter 100000 (string? s))]
+     [:class :misc "(class s)" (iter 100000 (class s))]
+     [:nil? :misc "(nil? s)" (iter 100000 (nil? s))]
+
+     ;; dispatch
+     [:protocol-record :dispatch "(area rec), a record implementing it" (iter 100000 (area rec))]
+     [:protocol-deftype :dispatch "(area rt), a deftype implementing it" (iter 100000 (area rt))]
+     [:protocol-extended :dispatch "(area s), String extended" (iter 100000 (area s))]
+     [:protocol-2 :dispatch "(scale rec 3), arity 2" (iter 100000 (scale rec 3))]
+     [:record-field :dispatch "(:r rec)" (iter 100000 (:r rec))]
+     [:record-field-dot :dispatch "(.-r ^Circle rec)" (iter 100000 (.-r ^Circle rec))]
+     [:deftype-field :dispatch "(.-w ^Rect rt)" (iter 100000 (.-w ^Rect rt))]
+     [:multimethod :dispatch "(mkind m), dispatch on :kind" (let [mm {:kind :b}] (iter 100000 (mkind mm)))]
+     [:multimethod-class :dispatch "(mclass s), dispatch on class" (iter 100000 (mclass s))]
+
+     ;; printing
+     [:pr-str-long :print "(pr-str 12345)" (iter 10000 (pr-str 12345))]
+     [:pr-str-string :print "(pr-str \"abc\")" (iter 10000 (pr-str "abc"))]
+     [:pr-str-kw :print "(pr-str :abc)" (iter 10000 (pr-str :abc))]
+     [:pr-str-vec :print "(pr-str [1 2 3])" (iter 10000 (pr-str [1 2 3]))]
+     [:pr-str-map :print "(pr-str {:a 1 :b \"x\"})" (iter 10000 (pr-str {:a 1 :b "x"}))]
+     [:str-vec :print "(str [1 2 3])" (iter 10000 (str [1 2 3]))]
+
+     ;; interop
+     [:arraylist-get :interop "(.get ^ArrayList al (int j))" (iter 100000 (.get ^ArrayList al (int (bit-and i 15))))]
+     [:arraylist-get-unhinted :interop "(.get al j) not hinted" (iter 100000 (.get al-o (bit-and i 15)))]
+     [:arraylist-set :interop "(.set ^ArrayList al (int j) :x)" (iter 100000 (.set ^ArrayList al (int (bit-and i 15)) :x))]
+     [:arraylist-add :interop "(.add ^ArrayList l :x), then clear every 16"
+      (let [l (ArrayList.)] (iter 100000 (.add ^ArrayList l :x) (when (== 0 (bit-and i 15)) (.clear ^ArrayList l))))]
+     [:arraylist-size :interop "(.size ^ArrayList al)" (iter 100000 (.size ^ArrayList al))]
+     [:hashmap-get :interop "(.get ^HashMap jhm \"a\")" (iter 100000 (.get ^HashMap jhm "a"))]
+     [:static-call :interop "(Math/abs i)" (iter 100000 (Math/abs i))]
+     [:static-call-other :interop "(Character/isDigit \\5)" (iter 100000 (Character/isDigit \5))]
+     [:static-field :interop "Long/MAX_VALUE" (iter 100000 Long/MAX_VALUE)]
+     [:new-object :interop "(Object.)" (iter 100000 (Object.))]
+     [:new-sb :interop "(StringBuilder. \"ab\")" (iter 100000 (StringBuilder. "ab"))]]))
+
+(defn now-ns ^long [] (System/nanoTime))
+
+(defn run-one
+  "Benchmark b's best run, in ns, its runs taking at least ms milliseconds."
+  [[name _ _ thunk] ms]
+  (let [limit (* 1000000 ms)]
+    (vreset! sink (thunk))
+    ;; the earlier benchmarks' garbage collected first (their heap would weigh on this one's)
+    (System/gc)
+    (let [t0 (now-ns)]
+      (loop [runs 0 best Long/MAX_VALUE]
+        (let [t (now-ns)
+              _ (vreset! sink (thunk))
+              d (- (now-ns) t)
+              best (min best d)
+              runs (inc runs)]
+          (if (and (>= runs 3) (> (- (now-ns) t0) limit))
+            best
+            (recur runs best)))))))
+
+(defn iterations
+  "The iterations of benchmark b's loop: its thunk's (iter's), else n (the loops written out)."
+  [b]
+  (:iterations (meta (nth b 3)) n))
+
+(defn round2 [x] (/ (Math/round (* (double x) 100.0)) 100.0))
+
+(let [args (set (map keyword *command-line-args*))
+      groups #{:calls :arrays :colls :strings :dispatch :print :interop :misc}
+      chosen (filter (fn [b] (or (empty? args) (args (first b)) (args (second b)))) benchmarks)
+      ms (Long/parseLong (or (System/getenv "EVAL_MICRO_MS") "300"))
+      ;; the empty loop's time, measured for 200 ms (the profiles see little of it)
+      loop-ns (/ (double (run-one (first benchmarks) 200)) n)]
+  (doseq [b chosen]
+    (let [best (run-one b ms)
+          per (/ (double best) (iterations b))]
+      (println (pr-str {:name (first b) :ns (round2 per) :net (round2 (- per loop-ns))}))
+      (flush))))
