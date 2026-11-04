@@ -474,8 +474,8 @@
     (when-let [a (attr-of attrs "allockind")]
       (let [ws (set (map str/trim (str/split (str/replace (str (second a)) "\"" "") #",")))
             k (count (filter ws ["alloc" "realloc" "free"]))]
-        (when-not (= k 1) (verr :verifier/attr-value "'allockind()' requires exactly one of alloc, realloc, and free"))
-        (when (and (ws "zeroed") (ws "uninitialized")) (verr :verifier/attr-value "'allockind()' can't be both zeroed and uninitialized"))))
+        (when-not (= k 1) (verr :verifier/attr-value "'allockind()' requires exactly one of alloc, realloc, and free" :none))
+        (when (and (ws "zeroed") (ws "uninitialized")) (verr :verifier/attr-value "'allockind()' can't be both zeroed and uninitialized" :none))))
     (when (and (has "jumptable") (not call?)) (verr :verifier/attr-value "Attribute 'jumptable' requires 'unnamed_addr'"))))
 
 (defn- check-function-attrs
@@ -691,7 +691,7 @@
   "LLParser's attribute checks of a call's text: return value, arguments, function attributes."
   [ps o]
   (when (and *caller-varargs* (= (:tail o) :musttail))
-    (verr :parser/musttail "expected '...' at end of argument list for musttail call in varargs function"))
+    (verr :parser/musttail "expected '...' at end of argument list for musttail call in varargs function" {:at [:find-last ")"]}))
   (check-attr-placement :ret (:ret-attrs o)) (check-attr-values (:ret-attrs o))
   (doseq [a (nth ps 2)] (let [as (param-attrs a)] (check-attr-placement :param as) (check-attr-values as)))
   (let [as (remove integer? (:attrs o))] (binding [*fn-attr-at* [:last-attr]] (check-attr-placement :fn as)) (check-attr-values as)))
@@ -726,7 +726,7 @@
                     (check-inst st b ret-type)
                     (let [t (result-type b) r (result x)]
                       (cond
-                        (and r (= t 'void)) (verr :parser/void-name "instructions returning void cannot have a name" {:at :body})
+                        (and r (= t 'void)) (verr :parser/void-name "instructions returning void cannot have a name" {:at :start})
                         (not= t 'void) (define-value st r t "instruction"))))))))
         (when-not (and (seq items) (terminator? (last items)))
           (binding [*ctx* (assoc *ctx* :item (inc @ic))] (verr :parser/terminator "expected instruction opcode")))))
@@ -774,7 +774,7 @@
     (doseq [p ps :when (vector? p)]
       (let [nmx (when (local? (peek p)) (peek p))]
         (when (and nmx (numbered? (local-key nmx)) (< (Long/parseLong (local-key nmx)) (aget ^longs (.next ^Fn st) 0)))
-          (verr :parser/numbering (str "argument expected to be numbered '%" (aget ^longs (.next ^Fn st) 0) "' or greater")))
+          (verr :parser/numbering (str "argument expected to be numbered '%" (aget ^longs (.next ^Fn st) 0) "' or greater") {:at [:find-last (str "%" (local-key nmx))]}))
         (when (= what :define) (define-value st nmx (norm-type (first p)) "argument"))))
     (check-align (:align o))
     (note-md! (:md o))
@@ -1002,7 +1002,9 @@
         (doseq [[_ _ & items] blocks x items :when (not (dbg-record? (body x)))
                 [v t] (uses (body x))
                 :when (and (local? v) (not= t 'label) (contains? names (local-key v)))]
-          (verr :verifier/naked-argument "cannot use argument of naked function"))))
+          (verr :verifier/naked-argument "cannot use argument of naked function"
+                (let [i (first (keep-indexed (fn [i q] (when (and (local? (peek q)) (= (local-key (peek q)) (local-key v))) i)) pl))]
+                  (pr/typed-str [(norm-type (first (nth pl i))) v]))))))
     (let [first-attrs (first pattrs)]
       (cond
         (= cc "x86_intrcc")
@@ -1020,9 +1022,9 @@
           (when var? (verr :verifier/cc "Calling convention does not support varargs or perfect forwarding!")))
         :else nil))
     (when-not intr?
-      (doseq [p pl :let [t (norm-type (first p))]]
-        (when (= t 'metadata) (verr :verifier/function-type "Function takes metadata but isn't an intrinsic"))
-        (when (= t 'token) (verr :verifier/function-type "Function takes token but isn't an intrinsic")))
+      (doseq [[pi p] (map-indexed vector pl) :let [t (norm-type (first p)) at (str (pr/type-str t) " " (pr/value-str (if (local? (peek p)) (peek p) (symbol (str "%" pi)))))]]
+        (when (= t 'metadata) (verr :verifier/function-type "Function takes metadata but isn't an intrinsic" at :fn))
+        (when (= t 'token) (verr :verifier/function-type "Function takes token but isn't an intrinsic" at :fn)))
       (when (= rt 'token) (verr :verifier/function-type "Function returns a token but isn't an intrinsic")))
     (when (and (= h 'llvm/declare) (:personality o))
       (verr :verifier/function-type "Function declaration shouldn't have a personality routine"))))
@@ -1063,16 +1065,17 @@
         (when-not (and nb (= 'ret (first nb))) (verr :verifier/musttail "musttail call must precede a ret"))
         (let [[_ rps] (split-inst nb)]
           (when (and (not= (first rps) 'void) (not= (second rps) (result x)))
-            (verr :verifier/musttail "musttail call result must be returned"))))
+            (verr :verifier/musttail "musttail call result must be returned" [:inst nxt]))))
       (when-not intr?
         (when-not (= (count cpl) (count ty-params)) (verr :verifier/musttail "cannot guarantee tail call due to mismatched parameter counts"))
         (doseq [[a c] (map vector cpl ty-params)]
           (when-not (congruent? a c) (verr :verifier/musttail "cannot guarantee tail call due to mismatched parameter types")))))
     (let [cattrs (map #(group-items (param-attrs %)) (remove #{'&} cps))
           lattrs (map #(group-items (param-attrs %)) args)]
-      (doseq [[a c] (map vector cattrs lattrs)]
+      (doseq [[i a c] (map vector (range) cattrs lattrs)]
         (when-not (= (abi-attrs a) (abi-attrs c))
-          (verr :verifier/musttail "cannot guarantee tail call due to mismatched ABI impacting function attributes"))))))
+          (verr :verifier/musttail "cannot guarantee tail call due to mismatched ABI impacting function attributes"
+                :inst (pr/typed-str [(norm-type (first (nth args i))) (peek (nth args i))])))))))
 
 (defn- check-bundles
   "The operand bundles of a call (visitCallBase's loop over them); `defs` finds a local's defining body; `direct?`: the callee
@@ -1145,7 +1148,9 @@
     (when (some #(has-attr? % "preallocated") pattrs)
       (let [bundle? (boolean (some #(= (first %) "preallocated") (:bundles o))) mt? (= (:tail o) :musttail)]
         (when (= bundle? mt?)
-          (verr :verifier/attr-misc "preallocated operand either requires a preallocated bundle or the call to be musttail (but not both)"))))
+          (verr :verifier/attr-misc "preallocated operand either requires a preallocated bundle or the call to be musttail (but not both)"
+                (let [i (first (keep-indexed (fn [i a] (when (has-attr? a "preallocated") i)) pattrs))]
+                  (pr/typed-str [(nth ptypes i) (peek (nth args i))])) :inst))))
     (doseq [[i a] (map-indexed vector pattrs) :when (has-attr? a "inalloca")]
       (when-not (= i (dec (count pattrs))) (verr :verifier/attr-misc "inalloca isn't on the last argument!")))
     (when-not direct-intr?
@@ -1153,7 +1158,7 @@
         (when (= t 'metadata) (verr :verifier/function-type "Function has metadata parameter but isn't an intrinsic"))
         (when (= t 'token) (verr :verifier/function-type "Function has token parameter but isn't an intrinsic")))
       (when-not (global? c)
-        (when (= (norm-type (second fty)) 'token) (verr :verifier/function-type "Return type cannot be token for indirect call!"))))
+        (when (= (norm-type (second fty)) 'token) (verr :verifier/function-type "Return type cannot be token for indirect call!" :none))))
     ;; swifterror arguments come from a swifterror alloca or parameter
     (doseq [[i a] (map-indexed vector args) :when (has-attr? (nth pattrs i) "swifterror")]
       (let [v (peek a) k (when (local? v) (local-key v))
@@ -1484,10 +1489,10 @@
   [id node distinct?]
   (when-let [k (di-kind node)]
     (when-let [fs (di-fields node)]
-      (doseq [r (get di-required k)] (when-not (contains? fs r) (verr :parser/di-field (str "missing required field '" (name r) "'"))))
+      (doseq [r (get di-required k)] (when-not (contains? fs r) (verr :parser/di-field (str "missing required field '" (name r) "'") {:at [:find-last ")"]})))
       (when (and (= k "DISubprogram") (flag? (:spFlags fs) "DISPFlagDefinition") (not distinct?))
-        (verr :parser/di-field "missing 'distinct', required for !DISubprogram that is a Definition"))
-      (when (and (= k "DICompileUnit") (not distinct?)) (verr :parser/di-field "missing 'distinct', required for !DICompileUnit"))
+        (verr :parser/di-field "missing 'distinct', required for !DISubprogram that is a Definition" {:at [:tok 2]}))
+      (when (and (= k "DICompileUnit") (not distinct?)) (verr :parser/di-field "missing 'distinct', required for !DICompileUnit" {:at [:tok 2]}))
       (when (and (= k "DIFile") (not= (contains? fs :checksumkind) (contains? fs :checksum)))
         (verr :parser/di-field "'checksumkind' and 'checksum' must be provided together")))))
 
@@ -1538,7 +1543,7 @@
         (when (and (= k "DISubprogram") (set? :retainedNodes) (not (tuple? (:retainedNodes fs)))) (apply verr :di/node "invalid retained nodes list" (N :retainedNodes)))
         (when (and (= k "DISubroutineType") (set? :types) (not (tuple? (:types fs)))) (apply verr :di/node "invalid composite elements" (N :types)))
         (when (and (#{"DICompositeType" "DIDerivedType" "DISubprogram" "DISubrangeType"} k) (not (contains? fs :file)) (some? (:line fs)) (not (zero? (long (:line fs)))))
-          (verr :di/node "line specified with no file" [:md id]))
+          (verr :di/node "line specified with no file" [:md id] (str (:line fs))))
         (case k
           "DILocation" (do (when-not (local-scope-kinds (kind-of (:scope fs)))
                              (do (when-let [[lf lx] (get *inst-locs* id)]
@@ -1640,7 +1645,7 @@
                       (if (dbg-record? b)
                         nil
                         (let [loc (get (apply hash-map (:md (nth (split-inst b) 2))) '!dbg)]
-                          (when (and loc (not= (di-loc-sp loc) sp))
+                          (when (and loc (some? (di-loc-sp loc)) (not= (di-loc-sp loc) sp))
                             (visiting (binding [*ctx* {:fn f :bb l :inst x}]
                                         (verr :di/function "!dbg attachment points at wrong subprogram for function"
                                               [:mdv sp] :fn :inst [:mdv loc] [:mdv (:scope (di-fields (node-of loc)))] [:mdv (di-loc-sp loc)]))))))))
@@ -1838,7 +1843,10 @@
                         (let [c (second (nth (split-inst b) 1))]
                           (when (and (global? c) (intr/recognized? (global-key c))
                                      (not (re-find #"^llvm\.(donothing|experimental\.patchpoint|experimental\.gc\.statepoint|coro\.resume|coro\.destroy|seh\.|wasm\.(re)?throw)" (global-key c))))
-                            (verr :verifier/intrinsic-call "Cannot invoke an intrinsic other than donothing, patchpoint, statepoint, coro_resume, coro_destroy, clang.arc.attachedcall or wasm.(re)throw"))))
+                            (let [go (fn [] (verr :verifier/intrinsic-call "Cannot invoke an intrinsic other than donothing, patchpoint, statepoint, coro_resume, coro_destroy, clang.arc.attachedcall or wasm.(re)throw"))]
+              ;; checked by visitCallBase and again by visitInvokeInst
+              (try (go) (catch arbace.lang.ExceptionInfo e (.add *errs* e)))
+              (go)))))
                       (when ('#{call invoke callbr} hd)
                         (check-call-site b defs)
                         (when (and (= hd 'call) (= :musttail (:tail (nth (split-inst b) 2))))
@@ -1934,6 +1942,82 @@
               :verifier/md-misc :verifier/md-prof :verifier/md-flags]
    :di [:di/node :di/function :di/record :di/global :di/version]})
 
+;; ---------------------------------------------------------------------------------------------
+;; The data layout's alignments (what the AsmWriter prints for a load, store or alloca written without `align`)
+
+(def ^:dynamic *dl* "")
+
+(defn- dl-specs
+  "{:int {bits abi-bytes} :float {...} :vec {...} :ptr {addrspace [size abi]}} of a data layout string over LLVM's defaults."
+  [^String dl]
+  (let [base {:int {1 1 8 1 16 2 32 4 64 4} :float {16 2 32 4 64 8 128 16} :vec {64 8 128 16} :ptr {0 [8 8]}}]
+    (reduce (fn [m spec]
+              (if-let [[_ k n more] (re-matches #"([ifvp])([0-9]*):(.*)" spec)]
+                (let [parts (str/split more #":") nn (when (seq n) (Long/parseLong n))
+                      num (fn [i] (Long/parseLong (nth parts i)))]
+                  (case k
+                    "i" (assoc-in m [:int nn] (quot (num 0) 8))
+                    "f" (assoc-in m [:float nn] (quot (num 0) 8))
+                    "v" (assoc-in m [:vec nn] (quot (num 0) 8))
+                    "p" (assoc-in m [:ptr (or nn 0)] [(quot (num 0) 8) (quot (num 1) 8)])))
+                m))
+            base (str/split dl #"-"))))
+
+(defn- spec-align [table n]
+  (let [ks (sort (keys table))]
+    (get table (or (first (filter #(>= % n) ks)) (last ks)))))
+
+(defn- type-align
+  "The ABI alignment in bytes of a type under the data layout specs `sp`."
+  [sp t]
+  (let [t (resolve-type (norm-type t))]
+    (cond
+      (int-type? t) (spec-align (:int sp) (int-bits t))
+      (fp-type? t) (spec-align (:float sp) (long (fp-bits t)))
+      (ptr-type? t) (second (get (:ptr sp) (if (seq? t) (second t) 0) (get (:ptr sp) 0)))
+      (vec-type? t) (let [b (* (nth t 1) (or (bits (nth t 2)) 64))]
+                      (or (get (:vec sp) b) (loop [a 1] (if (>= (* 8 a) b) a (recur (* 2 a))))))
+      (and (seq? t) (= (first t) 'array)) (type-align sp (nth t 2))
+      (and (seq? t) (= (first t) 'struct)) (reduce max 1 (map #(type-align sp %) (rest t)))
+      :else 1)))
+
+(defn- canon-fp
+  "A floating constant as the AsmWriter prints it: %e when it reads back to the same value, else the double's bits."
+  [^String text ty]
+  (try
+    (let [^double v (if (.startsWith text "0x")
+                      (if (= ty 'float) (double (Float/intBitsToFloat (unchecked-int (.longValue (java.math.BigInteger. ^String (subs text 2) (int 16))))))
+                          (Double/longBitsToDouble (.longValue (java.math.BigInteger. ^String (subs text 2) (int 16)))))
+                      (if (= ty 'float) (double (Float/parseFloat text)) (Double/parseDouble text)))
+          e (String/format "%e" (to-array [v]))]
+      (if (= (Double/parseDouble e) v) e (String/format "0x%016X" (to-array [(Double/doubleToRawLongBits v)]))))
+    (catch Throwable _ text)))
+
+(defn- canon-fps [x]
+  (let [ty (volatile! nil)]
+    (letfn [(walk [y]
+              (cond
+                (and (symbol? y) (#{'float 'double} y)) (do (vreset! ty y) y)
+                (and (seq? y) (= (first y) 'fp) (string? (second y)) (#{'float 'double} @ty)) (list 'fp (canon-fp (second y) @ty))
+                (seq? y) (apply list (map walk y))
+                (vector? y) (mapv walk y)
+                :else y))]
+      (walk x))))
+
+(defn- with-default-align
+  "A load, store or alloca written without `align` as the AsmWriter prints it, with the ABI alignment."
+  [x]
+  (let [b (body x) h (first b)]
+    (if (and (#{'load 'store 'alloca} h) (nil? (:align (nth (split-inst b) 2))))
+      (let [sp (dl-specs *dl*)
+            [_ ps] (split-inst b)
+            t (case h alloca (first (strip-flags ps)) load (first ps) store (first (first ps)))
+            al (try (type-align sp t) (catch Throwable _ nil))]
+        (if al
+          (let [nb (concat b [:align al])] (if (= (first x) '=) (list '= (second x) nb) nb))
+          x))
+      x)))
+
 (defn- prog ^String [] (or (System/getenv "REPR_LLVM_OPT") "/usr/lib/llvm23/bin/opt"))
 
 (defn- label-text [l] (if l (str "label " (pr/local-str l)) "label %0"))
@@ -1945,7 +2029,7 @@
   [c ctx metaforms]
   (cond
     (string? c) c
-    (= c :inst) (let [x (:inst ctx) b (body x)] (if (dbg-record? b) (pr/item-inst-str x) (str "  " (pr/item-inst-str x))))
+    (= c :inst) (let [x (canon-fps (with-default-align (:inst ctx))) b (body x)] (if (dbg-record? b) (pr/item-inst-str x) (str "  " (pr/item-inst-str x))))
     (= c :fn) (fn-operand (:fn ctx))
     (= c :decl) (let [f (:fn ctx) o (apply hash-map (drop 4 f)) as (group-items (:attrs o))]
                   (str (when (seq as) (str "; Function Attrs: " (str/join " " (map pr/attr-str as)) "\n")) (pr/fn-head-str f)))
@@ -1957,7 +2041,7 @@
                                                  (and (symbol? v) (get metaforms v)) (pr/top-str (get metaforms v))
                                                  (vector? v) (pr/typed-str v)
                                                  :else (pr/md-str v)))
-    (and (vector? c) (= (first c) :inst)) (let [x (second c) b (body x)] (if (dbg-record? b) (pr/item-inst-str x) (str "  " (pr/item-inst-str x))))
+    (and (vector? c) (= (first c) :inst)) (let [x (canon-fps (with-default-align (second c))) b (body x)] (if (dbg-record? b) (pr/item-inst-str x) (str "  " (pr/item-inst-str x))))
     (and (vector? c) (= (first c) :fn)) (fn-operand (second c))
     (and (vector? c) (= (first c) :bb)) (label-text (second c))
     :else (str c)))
@@ -2005,7 +2089,9 @@
             (diag/parse-error-text (prog) file src (parse-offset src spans forms pe) (.getMessage ^Throwable pe))
             (str (prog) ": " file ": error: " (.getMessage ^Throwable pe) "\n"))]
       :else
-      (let [ver (first (filter #(= :di/version (rule-of %)) dis))
+      (binding [*dl* (or (some #(when (= (first %) 'llvm/datalayout) (second %)) forms) "")
+                *types* (into {} (keep #(when (= (first %) 'llvm/type) [(second %) (norm-type (nth % 2))]) forms))]
+       (let [ver (first (filter #(= :di/version (rule-of %)) dis))
             dis (remove #(= :di/version (rule-of %)) dis)
             body-text (str (when ver (str "warning: " (.getMessage ^Throwable ver) " in " file "\n"))
                            (apply str (map #(error-text % metaforms slots) broken))
@@ -2018,7 +2104,7 @@
                                   (str (prog) ": " file ": error: input module is broken!\n"))
                    ver ""
                    :else (str "warning: ignoring invalid debug info in " file "\n"))]
-        [(if (seq broken) "invalid" "debug") (.getMessage ^Throwable first-e) (str (rule-of first-e)) (str body-text tail)]))))
+        [(if (seq broken) "invalid" "debug") (.getMessage ^Throwable first-e) (str (rule-of first-e)) (str body-text tail)])))))
 
 (defn- forms-of-file
   "[forms src spans] of a file: .ae text has no source to point into."
