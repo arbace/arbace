@@ -1,0 +1,802 @@
+;; Ported from CPython 3.14.10 (https://www.python.org/ftp/python/3.14.10/Python-3.14.10.tar.xz, SHA-256
+;; de414a57119abef52784d8993e341d53aed635fc2b05c2607d9f98a2c5b72032): Tools/peg_generator/pegen's metagrammar.gram (as a
+;; hand-written parser), grammar.py, parser_generator.py's analyses (nullables, the first graph, the left-recursive leaders),
+;; sccutils.py and c_generator.py's code shapes (its back end retargeted to Arbace), Copyright (c) 2001 Python Software
+;; Foundation, All Rights Reserved, under the PSF License Agreement for Python 3.14 (LICENSE.md, "CPython: the PSF License
+;; Agreement for Python 3.14").
+
+(ns arbace.repr.python.pegen
+  "pegen in Arbace (doc/python/PYTHON-SURVEY.md, \"As built: PY9b\"): Grammar/python.gram read by the metagrammar's parser,
+  the rules' analyses as pegen makes them (nullable items, the first graph's strongly connected components and their
+  leaders, the memoized rules), the artificial rules of groups, repeats and gathers, and a back end that writes the parser
+  as Arbace (arbace.repr.python.parser) in the shape of c_generator.py's C: each alternative's items in order, the cut,
+  lookaheads, forced tokens, the default actions, the memo and the left-recursion loop, the invalid_ alternatives guarded
+  by the second pass's flag. The grammar's C actions are read as C expressions and translated: the _PyAST_ constructors
+  into nodes (maps whose keys are Parser/Python.asdl's fields), the helpers into arbace.repr.python.peg's functions.
+
+    generate GRAMMAR ASDL TOKENS OUT     write the parser
+    check GRAMMAR ASDL TOKENS FILE       generate again and compare with the committed FILE"
+  (:require [arbace.repr.python.lex :as lex]
+            [arbace.string :as str])
+  (:import [java.io File]))
+
+(set! *warn-on-reflection* true)
+
+;; ---------------------------------------------------------------------------------------------
+;; The metagrammar's parser (metagrammar.gram), over tokenize's tokens less NL and COMMENT
+
+(defn- grammar-tokens [^String text]
+  (let [{:keys [tokens error]} (lex/stream text true)]
+    (when error (throw (ex-info (str "the grammar does not tokenize: " (pr-str error)) {})))
+    (vec (for [[t s] tokens :when (not (#{lex/NL lex/COMMENT} t))] [(nth lex/tok-names t) s]))))
+
+(def ^:private ^:dynamic *toks* nil)
+(def ^:private item-counter (atom 0))
+
+(defn- tok [i] (get *toks* i))
+(defn- tok-is [i typ] (when-let [[t] (tok i)] (= t typ)))
+(defn- tok-op [i s] (when-let [[t x] (tok i)] (and (= t "OP") (= x s))))
+(defn- tok-name [i] (when-let [[t x] (tok i)] (when (= t "NAME") x)))
+
+(declare p-alts)
+
+(defn- p-target-atoms
+  "target_atoms from i: [tokens i'] (the action's or annotation's tokens, nested braces kept)"
+  [i]
+  (loop [i i out []]
+    (let [[t s :as tk] (tok i)]
+      (cond
+        (nil? tk) nil
+        (and (= t "OP") (#{"{" "["} s))
+        (let [close (if (= s "{") "}" "]")
+              [inner j] (or (p-target-atoms (inc i)) [[] (inc i)])]
+          (if (tok-op j close)
+            (recur (inc j) (-> out (conj tk) (into inner) (conj (tok j))))
+            nil))
+        (and (= t "OP") (#{"}" "]"} s)) (when (seq out) [out i])
+        (#{"NAME" "NUMBER" "STRING" "OP" "FSTRING_START" "FSTRING_MIDDLE" "FSTRING_END"} t) (recur (inc i) (conj out tk))
+        :else (when (seq out) [out i])))))
+
+(defn- p-action [i]
+  (when (tok-op i "{")
+    (when-let [[ts j] (p-target-atoms (inc i))]
+      (when (tok-op j "}") [ts (inc j)]))))
+
+(defn- p-annotation [i]
+  (when (tok-op i "[")
+    (when-let [[ts j] (p-target-atoms (inc i))]
+      (when (tok-op j "]") [(str/join " " (map second ts)) (inc j)]))))
+
+(defn- p-atom [i]
+  (cond
+    (tok-op i "(") (when-let [[rhs j] (p-alts (inc i))] (when (tok-op j ")") [[:group rhs] (inc j)]))
+    (tok-name i) [[:name (tok-name i)] (inc i)]
+    (tok-is i "STRING") [[:string (second (tok i))] (inc i)]))
+
+(defn- p-item [i]
+  (if (tok-op i "[")
+    (when-let [[rhs j] (p-alts (inc i))] (when (tok-op j "]") [[:opt [:group rhs]] (inc j)]))
+    (when-let [[a j] (p-atom i)]
+      (cond
+        (tok-op j "?") [[:opt a] (inc j)]
+        (tok-op j "*") [[:rep0 a] (inc j)]
+        (tok-op j "+") [[:rep1 a] (inc j)]
+        (and (tok-op j ".") (p-atom (inc j)) (tok-op (second (p-atom (inc j))) "+"))
+        (let [[b k] (p-atom (inc j))] [[:gather a b] (inc k)])
+        :else [a j]))))
+
+(defn- named [nm typ item] {:id (swap! item-counter inc) :name nm :type typ :item item})
+
+(defn- p-named-item [i]
+  (or
+    (when-let [nm (tok-name i)]
+      (or (when-let [[ann j] (p-annotation (inc i))]
+            (when (tok-op j "=") (when-let [[it k] (p-item (inc j))] [(named nm ann it) k])))
+          (when (tok-op (inc i) "=") (when-let [[it k] (p-item (+ i 2))] [(named nm nil it) k]))))
+    (when-let [[it j] (p-item i)] [(named nil nil it) j])
+    (when (and (tok-op i "&") (tok-op (inc i) "&")) (when-let [[a j] (p-atom (+ i 2))] [(named nil nil [:forced a]) j]))
+    (when (tok-op i "&") (when-let [[a j] (p-atom (inc i))] [(named nil nil [:pos a]) j]))
+    (when (tok-op i "!") (when-let [[a j] (p-atom (inc i))] [(named nil nil [:neg a]) j]))
+    (when (tok-op i "~") [(named nil nil [:cut]) (inc i)])))
+
+(defn- p-alt [i]
+  (when-let [[it j] (p-named-item i)]
+    (let [[items j] (loop [items [it] j j] (if-let [[it k] (p-named-item j)] (recur (conj items it) k) [items j]))
+          [items j] (if (tok-op j "$") [(conj items (named nil nil [:name "ENDMARKER"])) (inc j)] [items j])]
+      (if-let [[act k] (p-action j)]
+        [{:items items :action act} k]
+        [{:items items :action nil} j]))))
+
+(defn- p-alts [i]
+  (when-let [[a j] (p-alt i)]
+    (loop [alts [a] j j]
+      (if (tok-op j "|")
+        (if-let [[a k] (p-alt (inc j))] (recur (conj alts a) k) [alts j])
+        [alts j]))))
+
+(defn- p-more-alts [i]
+  (loop [alts [] i i]
+    (if (tok-op i "|")
+      (if-let [[as j] (p-alts (inc i))]
+        (if (tok-is j "NEWLINE") (recur (into alts as) (inc j)) (when (seq alts) [alts i]))
+        (when (seq alts) [alts i]))
+      (when (seq alts) [alts i]))))
+
+(defn- p-rule [i]
+  (when-let [nm (tok-name i)]
+    (let [[typ j] (or (p-annotation (inc i)) [nil (inc i)])
+          [memo j] (if (and (tok-op j "(") (= (tok-name (inc j)) "memo") (tok-op (+ j 2) ")")) [true (+ j 3)] [false j])]
+      (when (tok-op j ":")
+        (let [j (inc j)]
+          (or
+            (when-let [[as k] (p-alts j)]
+              (when (tok-is k "NEWLINE")
+                (or (when (tok-is (inc k) "INDENT")
+                      (when-let [[more l] (p-more-alts (+ k 2))]
+                        (when (tok-is l "DEDENT") [{:name nm :type typ :memo memo :alts (into as more)} (inc l)])))
+                    [{:name nm :type typ :memo memo :alts as} (inc k)])))
+            (when (and (tok-is j "NEWLINE") (tok-is (inc j) "INDENT"))
+              (when-let [[more l] (p-more-alts (+ j 2))]
+                (when (tok-is l "DEDENT") [{:name nm :type typ :memo memo :alts more} (inc l)])))))))))
+
+(defn parse-grammar
+  "Grammar/python.gram as {:metas {NAME VALUE} :rules [RULE...]}: a rule {:name :type :memo :alts}, an alternative
+  {:items :action} (the action a vector of [TYPE TEXT] tokens), a named item {:id :name :type :item}, an item [:name N],
+  [:string S], [:group ALTS], [:opt X], [:rep0 X], [:rep1 X], [:gather SEP NODE], [:pos X], [:neg X], [:forced X], [:cut]"
+  [^String text]
+  (reset! item-counter 0)
+  (binding [*toks* (grammar-tokens text)]
+    (let [[metas i] (loop [metas {} i 0]
+                      (if (tok-op i "@")
+                        (let [nm (tok-name (inc i))]
+                          (cond
+                            (tok-is (+ i 2) "NEWLINE") (recur (assoc metas nm nil) (+ i 3))
+                            (and (tok-name (+ i 2)) (tok-is (+ i 3) "NEWLINE")) (recur (assoc metas nm (tok-name (+ i 2))) (+ i 4))
+                            (and (tok-is (+ i 2) "STRING") (tok-is (+ i 3) "NEWLINE")) (recur (assoc metas nm (second (tok (+ i 2)))) (+ i 4))
+                            :else (throw (ex-info (str "bad meta at token " i) {}))))
+                        [metas i]))
+          [rules i] (loop [rules [] i i]
+                      (if-let [[r j] (p-rule i)] (recur (conj rules r) j) [rules i]))]
+      (when-not (tok-is i "ENDMARKER")
+        (throw (ex-info (str "the grammar does not parse at token " i ": " (pr-str (subvec *toks* i (min (count *toks*) (+ i 12))))) {})))
+      {:metas metas :rules rules})))
+
+;; ---------------------------------------------------------------------------------------------
+;; The analyses (parser_generator.py: NullableVisitor, InitialNamesVisitor, compute_left_recursives; sccutils.py)
+
+(defn- compute-nullables
+  "pegen's NullableVisitor, its quirks kept: a lookahead has no visit method (its class is not LookAhead), so it is
+  not nullable; a rule visited again is not nullable on that visit. The set of nullable rule names and item ids"
+  [rules]
+  (let [by-name (into {} (map (juxt :name identity) rules))
+        visited (java.util.HashSet.)
+        nullables (java.util.HashSet.)]
+    (letfn [(v-rule [r]
+              (if (.contains visited (:name r))
+                false
+                (do (.add visited (:name r))
+                    (when (v-rhs (:alts r)) (.add nullables (:name r)))
+                    (.contains nullables (:name r)))))
+            (v-rhs [alts] (boolean (some v-alt alts)))
+            (v-alt [alt] (every? v-named (:items alt)))
+            (v-named [it] (when (v-item (:item it)) (.add nullables (:id it))) (.contains nullables (:id it)))
+            (v-item [x]
+              (case (first x)
+                :forced true
+                (:pos :neg) false
+                :opt true
+                :rep0 true
+                :rep1 false
+                :gather false
+                :cut false
+                :group (v-rhs (second x))
+                :name (if-let [r (by-name (second x))] (v-rule r) false)
+                :string (= (second x) "")))]
+      (doseq [r rules] (v-rule r)))
+    nullables))
+
+(defn- initial-names [x ^java.util.HashSet nullables]
+  (letfn [(names [x]
+            (case (first x)
+              :forced #{}
+              :cut #{}
+              (:pos :neg :opt :rep0 :rep1) (names (second x))
+              :gather (names (nth x 2))
+              :group (reduce into #{} (map alt-names (second x)))
+              :name #{(second x)}
+              :string #{}))
+          (alt-names [alt]
+            (loop [items (:items alt) acc #{}]
+              (if-let [it (first items)]
+                (let [acc (into acc (names (:item it)))]
+                  (if (.contains nullables (:id it)) (recur (rest items) acc) acc))
+                acc)))]
+    (reduce into #{} (map alt-names x))))
+
+(defn- sccs
+  "The strongly connected components of the graph (Tarjan)"
+  [vertices graph]
+  (let [index (java.util.HashMap.) low (java.util.HashMap.) on (java.util.HashSet.)
+        stack (java.util.ArrayList.) out (java.util.ArrayList.) counter (long-array 1)]
+    (letfn [(strong [v]
+              (.put index v (aget counter 0)) (.put low v (aget counter 0))
+              (aset counter 0 (inc (aget counter 0)))
+              (.add stack v) (.add on v)
+              (doseq [w (sort (get graph v))]
+                (cond
+                  (not (.containsKey index w)) (do (strong w) (.put low v (min (long (.get low v)) (long (.get low w)))))
+                  (.contains on w) (.put low v (min (long (.get low v)) (long (.get index w))))))
+              (when (= (.get low v) (.get index v))
+                (let [scc (loop [scc #{}]
+                            (let [w (.remove stack (dec (.size stack)))]
+                              (.remove on w)
+                              (if (= w v) (conj scc w) (recur (conj scc w)))))]
+                  (.add out scc))))]
+      (doseq [v vertices] (when-not (.containsKey index v) (strong v))))
+    (vec out)))
+
+(defn- cycles-in-scc [graph scc start]
+  (let [g (into {} (for [[s ds] graph :when (scc s)] [s (filter scc ds)]))
+        out (java.util.ArrayList.)]
+    (letfn [(dfs [node path]
+              (if (some #{node} path)
+                (.add out (conj path node))
+                (let [path (conj path node)] (doseq [c (sort (get g node))] (dfs c path)))))]
+      (dfs start []))
+    (vec out)))
+
+(defn left-recursives
+  "{:left-recursive #{names} :leaders #{names}}, as compute_left_recursives makes them"
+  [rules]
+  (let [nullables (compute-nullables rules)
+        graph (let [g (into {} (for [r rules] [(:name r) (initial-names (:alts r) nullables)]))]
+                (reduce (fn [g v] (if (contains? g v) g (assoc g v #{}))) g (mapcat val g)))
+        comps (sccs (map :name rules) graph)]
+    (reduce (fn [acc scc]
+              (if (> (count scc) 1)
+                (let [leaders (reduce (fn [ls start]
+                                        (reduce (fn [ls cyc] (let [ls (apply disj ls (remove (set cyc) scc))]
+                                                               (when (empty? ls) (throw (ex-info (str "SCC " scc " has no leader") {})))
+                                                               ls))
+                                                ls (cycles-in-scc graph scc start)))
+                                      (set scc) scc)]
+                  (-> acc (update :left-recursive into scc) (update :leaders conj (first (sort leaders)))))
+                (let [n (first scc)]
+                  (if (contains? (get graph n) n)
+                    (-> acc (update :left-recursive conj n) (update :leaders conj n))
+                    acc))))
+            {:left-recursive #{} :leaders #{}} comps)))
+
+;; ---------------------------------------------------------------------------------------------
+;; Parser/Python.asdl: each constructor's fields, in order
+
+(defn parse-asdl [^String text]
+  (let [text (str/replace text #"--[^\n]*" "")
+        ctors (re-seq #"([A-Za-z_]+)\s*\(([^)]*)\)" text)
+        bare (map second (re-seq #"[|=]\s*([A-Z][A-Za-z]*)\b(?!\s*\()" text))
+        products (re-seq #"(?m)^\s*([a-z_]+)\s*=\s*\(([^)]*)\)" text)
+        fields (fn [s] (vec (for [f (str/split s #",") :let [f (str/trim f)] :when (seq f)] (last (str/split f #"\s+")))))]
+    (merge (into {} (for [n bare] [n []]))
+           (into {} (for [[_ n fs] ctors :when (not= n "attributes")] [n (fields fs)]))
+           (into {} (for [[_ n fs] products] [n (fields fs)])))))
+
+(defn asdl-seqs
+  "The sequence fields (TYPE* NAME) as \"Ctor.field\", sorted"
+  [^String text]
+  (let [text (str/replace text #"--[^\n]*" "")
+        ctors (concat (re-seq #"([A-Za-z_]+)\s*\(([^)]*)\)" text) (re-seq #"(?m)^\s*([a-z_]+)\s*=\s*\(([^)]*)\)" text))]
+    (vec (sort (distinct (for [[_ n fs] ctors :when (not= n "attributes")
+                               f (str/split fs #",") :let [[t nm] (str/split (str/trim f) #"\s+")]
+                               :when (and t (str/ends-with? t "*"))]
+                           (str n "." nm)))))))
+
+(defn asdl-positioned
+  "The constructors whose type has attributes (lineno, col_offset, end_lineno, end_col_offset), sorted"
+  [^String text]
+  (let [text (str/replace text #"--[^\n]*" "")
+        defs (rest (str/split text #"(?m)^\s*(?=[a-z_]+\s*=)"))]
+    (vec (sort (for [d defs :when (re-find #"\battributes\s*\(" d)
+                     :let [body (str/replace d #"attributes\s*\([^)]*\)" "")
+                           product (re-find #"^\s*([a-z_]+)\s*=\s*\(" body)]
+                     n (if product [(second product)] (map second (re-seq #"([A-Z][A-Za-z]*)\b" body)))]
+                 n)))))
+
+;; ---------------------------------------------------------------------------------------------
+;; The C actions: a C expression read from the action's tokens and translated into Arbace
+
+(def ^:private enum-names
+  #{"Load" "Store" "Del" "And" "Or" "Add" "Sub" "Mult" "MatMult" "Div" "Mod" "Pow" "LShift" "RShift" "BitOr" "BitXor"
+    "BitAnd" "FloorDiv" "Invert" "Not" "UAdd" "USub" "Eq" "NotEq" "Lt" "LtE" "Gt" "GtE" "Is" "IsNot" "In" "NotIn"})
+
+(def ^:private c-types
+  #{"expr_ty" "stmt_ty" "arg_ty" "keyword_ty" "alias_ty" "pattern_ty" "withitem_ty" "excepthandler_ty" "arguments_ty"
+    "comprehension_ty" "match_case_ty" "type_param_ty" "mod_ty" "Token" "void" "char" "int" "Py_ssize_t" "PyObject"
+    "CmpopExprPair" "KeyValuePair" "KeyPatternPair" "NameDefaultPair" "SlashWithDefault" "StarEtc" "AugOperator"
+    "KeywordOrStarred" "ResultTokenWithMetadata" "identifier" "asdl_seq" "constant" "string"})
+
+(defn- c-type? [s] (or (contains? c-types s) (str/starts-with? s "asdl_")))
+
+(def ^:private ^:dynamic *ctx* nil) ; {:vars #{...} :asdl {...} :uses (atom #{})}
+
+(defn- c-error [msg ts i] (throw (ex-info (str msg " at " i " in " (str/join " " (map second ts))) {})))
+
+(declare c-expr c-expr-unary)
+
+(defn- c-primary [ts i]
+  (let [[t s] (get ts i)]
+    (cond
+      (and (= t "OP") (= s "("))
+      (let [[t2 s2] (get ts (inc i))]
+        (if (and (= t2 "NAME") (c-type? s2)
+                 (let [j (loop [j (+ i 2)] (if (= (second (get ts j)) "*") (recur (inc j)) j))] (= (second (get ts j)) ")")))
+          ;; a cast: dropped
+          (let [j (loop [j (+ i 2)] (if (= (second (get ts j)) "*") (recur (inc j)) j))]
+            (c-expr-unary ts (inc j)))
+          (let [[e j] (c-expr ts (inc i))]
+            (when-not (= (second (get ts j)) ")") (c-error "')' expected" ts j))
+            [e (inc j)])))
+      (= t "NUMBER") [(Long/parseLong s) (inc i)]
+      (= t "STRING") (loop [j i acc ""]
+                       (if (= (first (get ts j)) "STRING")
+                         (recur (inc j) (str acc (read-string (second (get ts j)))))
+                         [acc j]))
+      (= t "NAME") [[:name s] (inc i)]
+      :else (c-error "unexpected token" ts i))))
+
+(defn- c-args [ts i]
+  ;; after '(' : [args j]
+  (if (= (second (get ts i)) ")")
+    [[] (inc i)]
+    (loop [i i args []]
+      (let [[e j] (c-expr ts i)]
+        (case (second (get ts j))
+          "," (recur (inc j) (conj args e))
+          ")" [(conj args e) (inc j)]
+          (c-error "',' or ')' expected" ts j))))))
+
+(defn- c-postfix [ts i]
+  (let [[e j] (c-primary ts i)]
+    (loop [e e j j]
+      (let [[t s] (get ts j)]
+        (cond
+          (and (= t "OP") (= s "("))
+          (if (#{[:name "CHECK"] [:name "CHECK_NULL_ALLOWED"] [:name "CHECK_VERSION"]} e)
+            ;; the macros' first argument is a type
+            (let [k (loop [k (inc j)] (if (= (second (get ts k)) ",") (inc k) (recur (inc k))))
+                  [args k] (c-args ts k)]
+              (recur [:call e (into [:type] args)] k))
+            (let [[args k] (c-args ts (inc j))] (recur [:call e args] k)))
+          (and (= t "OP") (= s "->"))
+          (let [[names k] (loop [k (inc j) names [(second (get ts (inc j)))]]
+                            (if (= (second (get ts (+ k 1))) ".") (recur (+ k 2) (conj names (second (get ts (+ k 2))))) [names (inc k)]))]
+            (recur [:field e names] k))
+          (and (= t "OP") (= s "[")) (let [[ix k] (c-expr ts (inc j))]
+                                       (when-not (= (second (get ts k)) "]") (c-error "']' expected" ts k))
+                                       (recur [:index e ix] (inc k)))
+          :else [e j])))))
+
+(defn- c-expr-unary [ts i]
+  (let [[t s] (get ts i)]
+    (cond
+      (and (= t "OP") (= s "!")) (let [[e j] (c-expr-unary ts (inc i))] [[:not e] j])
+      (and (= t "OP") (= s "-")) (let [[e j] (c-expr-unary ts (inc i))] [[:neg e] j])
+      (and (= t "OP") (= s "&")) (let [[e j] (c-expr-unary ts (inc i))] [[:addr e] j])
+      :else (c-postfix ts i))))
+
+(defn- c-binary [ts i]
+  ;; + - , then == != < >, then && ||: one level a pass, left-associative
+  (letfn [(level [ops sub]
+            (fn [i]
+              (let [[a j] (sub i)]
+                (loop [a a j j]
+                  (let [[t s] (get ts j)]
+                    (if (and (= t "OP") (contains? ops s))
+                      (let [[b k] (sub (inc j))] (recur [:bin s a b] k))
+                      ;; && and || are two tokens each
+                      (if (and (= t "OP") (contains? ops (str s (second (get ts (inc j))))) (#{"&" "|"} s))
+                        (let [[b k] (sub (+ j 2))] (recur [:bin (str s s) a b] k))
+                        [a j])))))))]
+    (let [add (level #{"+" "-"} #(c-expr-unary ts %))
+          cmp (level #{"==" "!=" "<" ">" "<=" ">="} add)
+          and* (level #{"&&"} cmp)
+          or* (level #{"||"} and*)]
+      (or* i))))
+
+(defn- c-expr [ts i]
+  (let [[c j] (c-binary ts i)]
+    (if (= (second (get ts j)) "?")
+      (let [[a k] (c-expr ts (inc j))
+            _ (when-not (= (second (get ts k)) ":") (c-error "':' expected" ts k))
+            [b l] (c-expr ts (inc k))]
+        [[:if c a b] l])
+      [c j])))
+
+(defn- helper-sym [^String n]
+  (symbol "pk" (-> (cond (str/starts-with? n "_PyPegen_") (subs n 9) (str/starts-with? n "_Pypegen_") (subs n 9) :else n)
+                   (str/replace "_" "-"))))
+
+(defn- var-sym [n] (symbol (str "v-" n)))
+
+(defn- extra? [e] (or (= e [:name "EXTRA"]) (and (vector? e) (= (first e) :call) (= (second e) [:name "EXTRA_EXPR"]))))
+(defn- arena? [e] (= e [:field [:name "p"] ["arena"]]))
+
+(declare c-emit)
+
+(defn- node-form [ctor args]
+  (let [fields (or (get (:asdl *ctx*) ctor) (throw (ex-info (str "no ASDL constructor " ctor) {})))
+        n (count fields)
+        [vals tail] [(take n args) (drop n args)]
+        pos (cond
+              (and (= 1 (count tail)) (extra? (first tail))) (c-emit (first tail))
+              (and (= 1 (count tail)) (arena? (first tail))) nil
+              (empty? tail) nil
+              (= 5 (count tail)) (list 'pk/pos (c-emit (nth tail 0)) (c-emit (nth tail 1)) (c-emit (nth tail 2)) (c-emit (nth tail 3)))
+              :else (throw (ex-info (str ctor ": " (count args) " arguments for " n " fields") {})))
+        m (into {:t (keyword ctor)} (map (fn [f v] [(keyword f) (c-emit v)]) fields vals))]
+    (if pos (list 'pk/mk pos m) m)))
+
+(defn- c-emit [e]
+  (cond
+    (number? e) e
+    (string? e) e
+    :else
+    (case (first e)
+      :name (let [n (second e)]
+              (cond
+                (contains? (:vars *ctx*) n) (var-sym n)
+                (= n "p") 'p
+                (= n "NULL") nil
+                (= n "EXTRA") (do (swap! (:uses *ctx*) conj :extra) 'extra)
+                (contains? enum-names n) (keyword n)
+                (#{"Py_None" "Py_True" "Py_False" "Py_Ellipsis"} n) (keyword (subs n 3))
+                (c-type? n) nil
+                (str/starts-with? n "PyExc_") (keyword (subs n 6))
+                (re-matches #"[A-Z][A-Z_]+" n) (keyword n)
+                (str/ends-with? n "_kind") (keyword (subs n 0 (- (count n) 5)))
+                :else (throw (ex-info (str "unknown name " n " in an action") {}))))
+      :call (let [[_ f args] e]
+              (when-not (= (first f) :name) (throw (ex-info (str "a call of " (pr-str f)) {})))
+              (let [fname (second f)]
+                (case fname
+                  ("CHECK" "CHECK_NULL_ALLOWED") (c-emit (second args))
+                  ;; INVALID_VERSION_CHECK: the node, or the error when the feature version is older
+                  "CHECK_VERSION" (list 'pk/check-version 'p (c-emit (nth args 1)) (c-emit (nth args 2)) (c-emit (nth args 3)))
+                  "NEW_TYPE_COMMENT" (list 'pk/new-type-comment 'p (c-emit (second args)))
+                  "asdl_seq_LEN" (list 'count (c-emit (first args)))
+                  "PyPegen_last_item" (list 'last (c-emit (first args)))
+                  "PyPegen_first_item" (list 'first (c-emit (first args)))
+                  "asdl_seq_GET" (list 'nth (c-emit (first args)) (c-emit (second args)))
+                  "EXTRA_EXPR" (list 'pk/extra-expr (c-emit (first args)) (c-emit (second args)))
+                  ;; a token's bytes: its string
+                  "PyBytes_AS_STRING" (let [a (first args)]
+                                        (list 'pk/token-string (c-emit (if (and (= :field (first a)) (= ["bytes"] (nth a 2))) (second a) a))))
+                  (if (str/starts-with? fname "_PyAST_")
+                    (node-form (subs fname 7) args)
+                    (let [s (helper-sym fname)]
+                      (swap! (:uses *ctx*) conj s)
+                      ;; pegen.h's RAISE_* macros take the parser implicitly
+                      (apply list s (cond->> (map (fn [a] (if (arena? a) nil (c-emit a))) args)
+                                      (and (str/starts-with? fname "RAISE_") (not= fname "RAISE_ERROR_KNOWN_LOCATION")) (cons 'p))))))))
+      :field (let [[_ x names] e]
+               (if (= x [:name "p"])
+                 (case (first names)
+                   "arena" nil
+                   "tokens" '(pk/tokens p)
+                   "fill" '(pk/fill p)
+                   "mark" '(pk/mark p)
+                   "tok" 'p
+                   (throw (ex-info (str "p->" (str/join "." names)) {})))
+                 (if (= (last names) "kind")
+                   (list 'pk/kind (c-emit x))
+                   (list (keyword (last names)) (c-emit x)))))
+      :index (list 'nth (c-emit (second e)) (c-emit (nth e 2)))
+      :not (list 'pk/not? (c-emit (second e)))
+      :neg (list '- (c-emit (second e)))
+      :addr (c-emit (second e))
+      :if (list 'if (list 'pk/truthy? (c-emit (nth e 1))) (c-emit (nth e 2)) (c-emit (nth e 3)))
+      :bin (let [[_ op a b] e]
+             (case op
+               "&&" (list 'and (list 'pk/truthy? (c-emit a)) (list 'pk/truthy? (c-emit b)))
+               "||" (list 'or (list 'pk/truthy? (c-emit a)) (list 'pk/truthy? (c-emit b)))
+               "==" (list 'pk/c= (c-emit a) (c-emit b))
+               "!=" (list 'not (list 'pk/c= (c-emit a) (c-emit b)))
+               ("<" ">" "<=" ">=" "+" "-") (list (symbol op) (c-emit a) (c-emit b)))))))
+
+(defn translate-action
+  "The action's tokens as an Arbace form, the alternative's variables `vars` bound as v-NAME"
+  [ts vars asdl uses]
+  (binding [*ctx* {:vars vars :asdl asdl :uses uses}]
+    (let [[e j] (c-expr ts 0)]
+      (when (< j (count ts)) (c-error "trailing tokens" ts j))
+      (c-emit e))))
+
+;; ---------------------------------------------------------------------------------------------
+;; The rules: artificial rules for groups, repeats and gathers (parser_generator.py's), keywords
+
+(defn- string-leaf-value [^String s] (read-string (str "\"" (subs s 1 (dec (count s))) "\"")))
+(defn- keyword-literal? [^String s] (boolean (re-matches #"[a-zA-Z_]\w*" (string-leaf-value s))))
+
+(defn- item-str
+  "pegen's __str__ of an item, the key of its artificial rule"
+  [x]
+  (case (first x)
+    :name (second x)
+    :string (second x)
+    :group (str "(" (str/join " | " (map (fn [a] (str/join " " (map #(let [s (item-str (:item %))] (if (:name %) (str (:name %) "=" s) s)) (:items a))))
+                                         (second x))) ")")
+    :opt (str "[" (item-str (second x)) "]")
+    :rep0 (str (item-str (second x)) "*")
+    :rep1 (str (item-str (second x)) "+")
+    :gather (str (item-str (second x)) "." (item-str (nth x 2)) "+")
+    :pos (str "&" (item-str (second x)))
+    :neg (str "!" (item-str (second x)))
+    :forced (str "&&" (item-str (second x)))
+    :cut "~"))
+
+(defn- inlinable? [alts] (and (= 1 (count alts)) (= 1 (count (:items (first alts)))) (nil? (:action (first alts)))))
+
+(defn expand-rules
+  "The grammar's rules and the artificial ones (_tmp_N, _loop0_N, _loop1_N, _gather_N), each item's call made
+  explicit: [:rule NAME], [:token TYPE-NAME], [:keyword S], [:soft S], [:literal S], [:opt CALL], [:pos CALL],
+  [:neg CALL], [:forced S], [:cut]"
+  [rules]
+  (let [all (java.util.LinkedHashMap.)
+        cache (java.util.HashMap.)
+        counter (atom 0)
+        rule-names (set (map :name rules))]
+    (doseq [r rules] (.put all (:name r) r))
+    (letfn [(artificial [key mk]
+              (or (.get cache key)
+                  (let [nm (mk)] (.put cache key nm) nm)))
+            (call [x]
+              (case (first x)
+                :name (let [n (second x)] (if (rule-names n) [:rule n] [:token n]))
+                :string (let [s (second x)]
+                          (if (keyword-literal? s)
+                            (if (str/ends-with? s "'") [:keyword (string-leaf-value s)] [:soft (string-leaf-value s)])
+                            [:literal (string-leaf-value s)]))
+                :group (let [alts (second x)]
+                         (if (inlinable? alts)
+                           (call (:item (first (:items (first alts)))))
+                           [:rule (artificial (str "rhs_" (item-str x))
+                                              (fn [] (let [nm (str "_tmp_" (swap! counter inc))]
+                                                       (.put all nm {:name nm :alts (mapv xalt alts)})
+                                                       nm)))]))
+                :opt [:opt (call (second x))]
+                :rep0 [:rule (artificial (str "repeat0_" (item-str (second x)))
+                                         (fn [] (let [nm (str "_loop0_" (swap! counter inc))]
+                                                  (.put all nm {:name nm :loop :rep0 :alts [{:items [(xnamed (named nil nil (second x)))]}]})
+                                                  nm)))]
+                :rep1 [:rule (artificial (str "repeat1_" (item-str (second x)))
+                                         (fn [] (let [nm (str "_loop1_" (swap! counter inc))]
+                                                  (.put all nm {:name nm :loop :rep1 :alts [{:items [(xnamed (named nil nil (second x)))]}]})
+                                                  nm)))]
+                :gather [:rule (artificial (str "gather_" (item-str x))
+                                           (fn [] (let [l (str "_loop0_" (swap! counter inc))
+                                                        _ (.put all l {:name l :loop :rep0
+                                                                       :alts [{:items [(xnamed (named nil nil (second x)))
+                                                                                       (xnamed (named "elem" nil (nth x 2)))]
+                                                                               :action [["NAME" "elem"]]}]})
+                                                        g (str "_gather_" (swap! counter inc))]
+                                                    (.put all g {:name g :gather true
+                                                                 :alts [{:items [(xnamed (named "elem" nil (nth x 2)))
+                                                                                 (assoc (named "seq" nil [:name l]) :call [:rule l])]}]})
+                                                    g)))]
+                :pos [:pos (call (second x))]
+                :neg [:neg (call (second x))]
+                :forced (let [a (second x)]
+                          (if (= (first a) :string)
+                            [:forced (string-leaf-value (second a))]
+                            [:forced-result (call a) (item-str a)]))
+                :cut [:cut]))
+            (xnamed [it] (if (:call it) it (assoc it :call (call (:item it)))))
+            (xalt [alt] (update alt :items #(mapv xnamed %)))]
+      ;; the grammar's rules first, in order, each flattened when it is a single group (Rule.flatten)
+      (doseq [r rules]
+        (let [alts (:alts r)
+              alts (if (and (= 1 (count alts)) (= 1 (count (:items (first alts)))) (= :group (first (:item (first (:items (first alts))))))
+                            (nil? (:action (first alts))) (nil? (:name (first (:items (first alts))))))
+                     (second (:item (first (:items (first alts)))))
+                     alts)]
+          (.put all (:name r) (assoc r :alts (mapv xalt alts)))))
+      (vec (.values all)))))
+
+;; ---------------------------------------------------------------------------------------------
+;; The back end
+
+(def ^:private base-tokens #{"NAME" "NUMBER" "STRING" "SOFT_KEYWORD"})
+
+(defn- default-var
+  "c_generator's assigned_variable of a call (its default name)"
+  [c]
+  (case (first c)
+    :rule (str (second c) "_var")
+    :token (str (str/lower-case (second c)) "_var")
+    :keyword "_keyword"
+    :soft "_keyword"
+    :literal "_literal"
+    :opt "_opt_var"
+    :forced "_literal"
+    :forced-result "_literal"
+    :cut "_cut_var"
+    (:pos :neg) nil))
+
+(defn- dedupe-name [names n]
+  (loop [k 0 nm n] (if (some #{nm} names) (recur (inc k) (str n "_" (inc k))) nm)))
+
+(defn- call-form [c ops]
+  (case (first c)
+    :rule (list (symbol (str "r-" (second c))) 'p)
+    :token (let [t (second c)]
+             (case t
+               "NAME" '(pk/name-token p)
+               "NUMBER" '(pk/number-token p)
+               "STRING" '(pk/string-token p)
+               "SOFT_KEYWORD" '(pk/soft-keyword-token p)
+               (let [i (.indexOf ^java.util.List lex/tok-names t)]
+                 (when (neg? i) (throw (ex-info (str "unknown token " t) {})))
+                 (list 'pk/expect 'p i))))
+    :keyword (list 'pk/expect 'p (get (:keywords ops) (second c)))
+    :soft (list 'pk/expect-soft 'p (second c))
+    :literal (list 'pk/expect 'p (or (get (:operators ops) (second c)) (throw (ex-info (str "unknown literal " (second c)) {}))))
+    :opt (call-form (second c) ops)
+    :forced (list 'pk/expect-forced 'p (or (get (:operators ops) (second c)) (throw (ex-info (str "unknown literal " (second c)) {})))
+                  (str "'" (second c) "'"))
+    :forced-result (list 'pk/expect-forced-result 'p (call-form (second c) ops) (nth c 2))))
+
+(defn- uses-extra? [alt] (some #(= % ["NAME" "EXTRA"]) (:action alt)))
+
+(defn- alt-form
+  "An alternative: its items in order, then its action; pk/FAIL when an item fails (pk/CUT after a cut)"
+  [rule alt ops]
+  (let [items (:items alt)
+        vars (reduce (fn [vs it]
+                       (if-let [n (or (:name it) (default-var (:call it)))] (conj vs (dedupe-name vs n)) vs))
+                     [] items)
+        ;; each item with its variable (nil for a lookahead)
+        named (loop [items items vs vars out []]
+                (if-let [it (first items)]
+                  (if (or (:name it) (default-var (:call it)))
+                    (recur (rest items) (rest vs) (conj out [it (first vs)]))
+                    (recur (rest items) vs (conj out [it nil])))
+                  out))
+        uses (atom #{})
+        action (cond
+                 (:action alt) (translate-action (:action alt) (set vars) (:asdl ops) uses)
+                 (and (:gather rule) (= 2 (count vars))) (list 'pk/seq-insert-in-front 'p (var-sym (first vars)) (var-sym (second vars)))
+                 (> (count vars) 1) '(pk/dummy-name p)
+                 (= 1 (count vars)) (var-sym (first vars))
+                 :else '(pk/dummy-name p))
+        action (if (contains? @uses :extra) (list 'let ['extra '(pk/extra p start)] action) action)]
+    (swap! (:helpers ops) into (filter symbol? @uses))
+    (letfn [(build [named fail]
+              (if-let [[it v] (first named)]
+                (let [c (:call it) sym (when v (var-sym v))]
+                  (case (first c)
+                    :cut (list 'let [sym true] (build (rest named) 'pk/CUT))
+                    :opt (list 'let [sym (call-form c ops)] (build (rest named) fail))
+                    (:pos :neg) (list 'if (list 'let ['m '(pk/mark p) 'r (call-form (second c) ops)] '(pk/reset p m)
+                                                (if (= :pos (first c)) '(some? r) '(nil? r)))
+                                      (build (rest named) fail) fail)
+                    (list 'let [sym (call-form c ops)] (list 'if (list 'nil? sym) fail (build (rest named) fail)))))
+                action))]
+      (let [f (build named 'pk/FAIL)
+            f (if (and (= 1 (count items)) (str/starts-with? (item-str (:item (first items))) "invalid_"))
+                (list 'if '(pk/call-invalid? p) f 'pk/FAIL)
+                f)]
+        {:form f :extra (uses-extra? alt)}))))
+
+(defn- rule-form [rule ops ids lr]
+  (let [nm (:name rule)
+        id (get ids nm)
+        alts (mapv #(alt-form rule % ops) (:alts rule))
+        extra (some :extra alts)
+        loop? (:loop rule)
+        memo (and (:memo rule) (not (contains? (:left-recursive lr) nm)))
+        leader (contains? (:leaders lr) nm)
+        fsym (symbol (str "r-" nm))
+        bind (if extra ['mark '(pk/mark p) 'start '(pk/start-token p)] ['mark '(pk/mark p)])
+        body (if loop?
+               (list 'loop ['acc '(transient [])]
+                     (list 'let ['m '(pk/mark p) 'r (:form (first alts))]
+                           (list 'cond
+                                 '(identical? r pk/FAIL) (list 'do '(pk/reset p m) (if (= loop? :rep1) '(if (zero? (count acc)) nil (persistent! acc)) '(persistent! acc)))
+                                 '(identical? r pk/CUT) '(do (pk/reset p m) nil)
+                                 :else '(recur (conj! acc r)))))
+               (reduce (fn [nxt a]
+                         (list 'let ['r (:form a)]
+                               (list 'cond
+                                     '(identical? r pk/FAIL) (list 'do '(pk/reset p mark) nxt)
+                                     '(identical? r pk/CUT) '(do (pk/reset p mark) nil)
+                                     :else 'r)))
+                       nil (reverse alts)))
+        body (list 'let bind body)
+        body (if (str/ends-with? nm "without_invalid") (list 'pk/without-invalid 'p body) body)
+        body (if memo
+               (list 'let ['hit (list 'pk/memoized 'p id)]
+                     (list 'if '(identical? hit pk/MISS)
+                           (list 'let ['mark0 '(pk/mark p) 'res body] (list 'pk/insert-memo 'p 'mark0 id 'res) 'res)
+                           'hit))
+               body)]
+    (if leader
+      [(list 'defn (symbol (str "r-" nm "-raw")) ['p] body)
+       (list 'defn fsym ['p]
+             (list 'let ['hit (list 'pk/memoized 'p id)]
+                   (list 'if '(identical? hit pk/MISS)
+                         (list 'let ['mark '(pk/mark p)]
+                               (list 'loop ['res nil 'resmark 'mark]
+                                     (list 'pk/update-memo 'p 'mark id 'res)
+                                     '(pk/reset p mark)
+                                     (list 'let ['raw (list (symbol (str "r-" nm "-raw")) 'p)]
+                                           '(if (or (nil? raw) (<= (pk/mark p) resmark))
+                                              (do (pk/reset p resmark) res)
+                                              (recur raw (pk/mark p))))))
+                         'hit)))]
+      [(list 'defn fsym ['p] body)])))
+
+(defn- collect-keywords
+  "The keywords (single-quoted) in the order the rules give them, numbered from 500, and the soft keywords"
+  [rules]
+  (let [kw (java.util.LinkedHashMap.) soft (java.util.TreeSet.)]
+    (letfn [(walk [c]
+              (case (first c)
+                :keyword (when-not (.containsKey kw (second c)) (.put kw (second c) (long (+ 500 (.size kw)))))
+                :soft (.add soft (second c))
+                (:opt :pos :neg) (walk (second c))
+                :forced-result (walk (second c))
+                nil))]
+      (doseq [r rules a (:alts r) it (:items a)] (walk (:call it))))
+    [(into {} kw) (vec soft)]))
+
+(def ^:private header
+  ";; GENERATED by arbace.repr.python.pegen from CPython 3.14.10's Grammar/python.gram (the release tarball pinned in
+;; test/python/corpora.edn): do not edit; bin/repr-python pegen writes it, bin/repr-python pegen --check compares it.
+;; Its actions are the grammar's, translated from C; the grammar's notice: Copyright (c) 2001 Python Software Foundation,
+;; All Rights Reserved, under the PSF License Agreement for Python 3.14 (LICENSE.md).
+")
+
+(defn generate
+  "The parser's text"
+  [^String gram ^String asdl ^String tokens-file]
+  (let [g (parse-grammar gram)
+        rules (:rules g)
+        lr (left-recursives rules)
+        asdl-text asdl
+        asdl (parse-asdl asdl)
+        operators (into {} (for [l (str/split-lines tokens-file)
+                                 :let [m (re-matches #"^([A-Z_]+)\s+'(.*)'\s*$" (str/trim l))] :when m]
+                             [(nth m 2) (.indexOf ^java.util.List lex/tok-names (second m))]))
+        all (expand-rules rules)
+        [keywords soft] (collect-keywords all)
+        ids (into {} (map-indexed (fn [i r] [(:name r) (+ 1000 i)]) all))
+        helpers (atom #{})
+        ops {:keywords keywords :operators operators :asdl asdl :helpers helpers}
+        forms (doall (mapcat #(rule-form % ops ids lr) all))
+        decls (cons 'declare (mapcat (fn [r] (if (contains? (:leaders lr) (:name r))
+                                                [(symbol (str "r-" (:name r))) (symbol (str "r-" (:name r) "-raw"))]
+                                                [(symbol (str "r-" (:name r)))])) all))
+        sb (StringBuilder.)]
+    (.append sb header)
+    (.append sb "\n(ns arbace.repr.python.parser\n  \"Python 3.14's parser, generated by arbace.repr.python.pegen from Grammar/python.gram (doc/python/PYTHON-SURVEY.md,\n  \\\"As built: PY9b\\\"): a function r-RULE of the parser state for each rule, over arbace.repr.python.peg.\"\n  (:require [arbace.repr.python.peg :as pk]))\n\n")
+    (.append sb (str "(def keywords " (pr-str (into (sorted-map) keywords)) ")\n"))
+    (.append sb (str "(def soft-keywords " (pr-str soft) ")\n"))
+    (.append sb (str "(def left-recursive " (pr-str (vec (sort (:left-recursive lr)))) ")\n"))
+    (.append sb (str "(def leaders " (pr-str (vec (sort (:leaders lr)))) ")\n"))
+    (.append sb (str "(def helpers " (pr-str (vec (sort (map str @helpers)))) ")\n"))
+    ;; Parser/Python.asdl's constructors, for _ast's trees (arbace.repr.python.astjson)
+    (.append sb (str "(def asdl-fields " (pr-str (into (sorted-map) asdl)) ")\n"))
+    (.append sb (str "(def asdl-positioned " (pr-str (asdl-positioned asdl-text)) ")\n"))
+    (.append sb (str "(def asdl-seqs " (pr-str (asdl-seqs asdl-text)) ")\n\n"))
+    (.append sb (str (pr-str decls) "\n\n"))
+    (doseq [f forms] (.append sb (pr-str f)) (.append sb "\n\n"))
+    (str sb)))
+
+(defn -main [& args]
+  (let [[verb gram asdl tokens out] args
+        text (generate (slurp gram) (slurp asdl) (slurp tokens))]
+    (case verb
+      "generate" (do (spit out text) (println (str "pegen: " out " written (" (count (str/split-lines text)) " lines)")))
+      "check" (if (= text (slurp out))
+                (println (str "pegen --check: " out " is the grammar's generated parser"))
+                (do (println (str "pegen --check: FAILED, " out " differs from the parser generated from the grammar"))
+                    (System/exit 1))))))

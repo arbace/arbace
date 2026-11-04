@@ -145,6 +145,7 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 arbace_use_java26 || exit 1
 . "$root/bin/lib/gate-cache.bash" # arbace_gate_cache: --aot's default executables, ARBACE_GATE_EXES/KEY20
 . "$root/bin/lib/program.bash" # --aot's j2g and build-go calls, as --build-program's (RPS97 (b))
+. "$root/bin/lib/cover.bash" # ARBACE_COVER_DIR: the cover build, a GOCOVERDIR per namespace (GT8.3)
 base=$root/.tmp/clojure-tests
 if [ "${1:-}" = --divergences ]; then
   . "$root/bin/lib/tools.bash"
@@ -183,6 +184,24 @@ if [ "${1:-}" = --aot ]; then
   CLOJURE_TESTS_GO=$base/$CLOJURE_TESTS_RUN/aot-build/arbace-aot
   CLOJURE_TESTS_AOT=$root/test/suite_aot_hook.ae
   export CLOJURE_TESTS_AOT CLOJURE_TESTS_EXPECTED
+fi
+# GT8.3, GTS206 (a) (doc/GATE-SURVEY.md; bin/lib/cover.bash, bin/cover): under ARBACE_COVER_DIR each test
+# namespace's process runs with its GOCOVERDIR, ARBACE_COVER_DIR/clojure/NS (--aot: clojure-aot/NS); the
+# eval level on the cover build's test executable (cover_exe arbace-tests, whatever CLOJURE_TESTS_GO names),
+# --aot's program built with the cover flags (cover_go_flags; its key and its run, aot-cover, apart); the
+# listing, the report and test.generative are no test's and run without a GOCOVERDIR; the run CLOJURE_TESTS_RUN
+# defaults to cover (aot-cover, aot-essential-cover)
+cover_tool=${CLOJURE_TESTS_COVER_TOOL:-clojure}
+if [ -n "${ARBACE_COVER_DIR:-}" ] && [ "${1:-}" != --run-one ]; then
+  if [ -n "$aot" ]; then
+    cover_tool=clojure-aot
+    CLOJURE_TESTS_RUN=$CLOJURE_TESTS_RUN-cover; CLOJURE_TESTS_GO=$base/$CLOJURE_TESTS_RUN/aot-build/arbace-aot
+  elif [ -z "$java_fixtures$fixtures_mode" ]; then
+    CLOJURE_TESTS_GO=$(cover_exe "$root" arbace-tests) || exit 1
+    : "${CLOJURE_TESTS_RUN:=cover}"
+  fi
+  CLOJURE_TESTS_COVER_TOOL=$cover_tool; export CLOJURE_TESTS_COVER_TOOL
+  echo "clojure-tests: coverage into $ARBACE_COVER_DIR/$cover_tool (${CLOJURE_TESTS_GO:-})" >&2
 fi
 # ess_filter FILE: with --aot --essential, FILE's namespaces (a list in the suite's order) cut to
 # test/clojure/essential-aot.txt's, each of which must be there
@@ -314,8 +333,11 @@ if [ "${1:-}" = "--run-one" ]; then
   status=0
   if [ -n "$go_exe" ]; then
     start=$(date +%s%N)
+    [ -z "${ARBACE_COVER_DIR:-}" ] || export "$(cover_env "$cover_tool" "$ns")"
     go_run "$timeout_s" "$runner" run "$ns" "$work/out/$ns.edn" "$work/namespaces.txt" "$expected" \
       > "$work/out/$ns.log" 2>&1 || status=$?
+    unset GOCOVERDIR
+    cover_settle "$cover_tool" "$ns"
     printf '%-62s exit %s %6d ms\n' "$ns" "$status" $(( ($(date +%s%N) - start) / 1000000 )) | tee "$work/out/$ns.time"
     exit 0
   fi
@@ -531,6 +553,8 @@ aot_build() {
            (cd "$suite" && find test src -type f | LC_ALL=C sort | xargs -d '\n' sha256sum)
            echo "$repr_clojure_stamp $deps"
            (cd "$root" && sha256sum test/suite_aot_hook.ae test/run_clojure_tests.clj bin/clojure-tests bin/lib/program.bash "$expected" ${ess_list:+"$ess_list"}
+            # under coverage the cover flags' and the hook's sources too (GT8.3)
+            [ -z "${ARBACE_COVER_DIR:-}" ] || sha256sum bin/lib/cover.bash tools/covsubset/hook/cover.go
             # the checkout's tools (c2j, j2g, ...), which the executables load from it when they differ
             find arbace test/suite-go test/java-fixtures -type f | LC_ALL=C sort | xargs -d '\n' sha256sum
             bin/arbace-go --gate-key); } \
@@ -577,7 +601,12 @@ aot_build() {
   grep '^j2g: .*classes analyzed\|^j2g: error' "$ab/j2g.log" | head -20
   echo "   j2g: $(( $(date +%s) - t0 )) s"
   t0=$(date +%s)
-  program_build_go "$gexe" amd64 "$ab/work" "$ab/arbace-aot" "$ab/build.log" "$ab/j2g/prog" \
+  local cflags=() f
+  if [ -n "${ARBACE_COVER_DIR:-}" ]; then
+    cover_go_flags "$root" "$ab/j2g/prog" "$ab/work" "$(program_overlay)" "$ab/cover-overlay.json" > "$ab/cover-flags.txt" || return 1
+    while IFS= read -r f; do cflags+=("$f"); done < "$ab/cover-flags.txt"
+  fi
+  program_build_go "$gexe" amd64 "$ab/work" "$ab/arbace-aot" "$ab/build.log" "$ab/j2g/prog" ${cflags[@]+"${cflags[@]}"} \
     || { grep -v '^==' "$ab/build.log" | tail -20; echo "clojure-tests --aot: the build failed ($ab/build.log)" >&2; return 1; }
   echo "   build-go: $(( $(date +%s) - t0 )) s"
   # the essential subset's work module and j2g tree removed (RPS77 (b)): a cache hit reads only the

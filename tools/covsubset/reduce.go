@@ -1,5 +1,5 @@
 // covsubset reduce: the reducer of tools/cicover (queue 160, 161: branch mac/161-subsets, eda4ecfc,
-// tools/cicover/main.go), copied whole for every crop (doc/GATE-SURVEY.md, GT8.3, GTS205 (a), GTS206 (a)), its
+// tools/cicover/main.go; tools/cicover and bin/ci cover removed since, GT8.3: the cover build the one method), copied whole for every crop (doc/GATE-SURVEY.md, GT8.3, GTS205 (a), GTS206 (a)), its
 // index and outputs unchanged; only its entry is reduce(args) instead of main, and a line without spaces is
 // refused before it is cut (review 182 L8). Its comment, as it came:
 //

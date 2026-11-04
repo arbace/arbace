@@ -1,0 +1,246 @@
+;; Parts ported from CPython 3.14.10 (https://www.python.org/ftp/python/3.14.10/Python-3.14.10.tar.xz, SHA-256
+;; de414a57119abef52784d8993e341d53aed635fc2b05c2607d9f98a2c5b72032): Parser/action_helpers.c's _build_concatenated_str
+;; and _get_resized_exprs (the folding of a string's parts), Parser/pegen.c's bad_single_statement and the incomplete
+;; input rule, Copyright (c) 2001 Python Software Foundation, All Rights Reserved, under the PSF License Agreement for
+;; Python 3.14 (LICENSE.md, "CPython: the PSF License Agreement for Python 3.14").
+
+(ns arbace.repr.python.astjson
+  "compile()'s PyCF_ONLY_AST for pyi on the native reader (doc/python/PYTHON-SURVEY.md, \"As built: PY9 (errors,
+  pyi)\"): the source parsed by the generated parser (arbace.repr.python.native) in compile()'s mode, the tree written
+  as tools/pyi/ast_json.py writes CPython's (a node {\"_\": CLASS, FIELD: VALUE ..., ATTRIBUTE: INT ...} in
+  Parser/Python.asdl's order, constants other than None, bools and str tagged: {\"$\": \"int\", \"v\": DECIMAL},
+  {\"$\": \"float\", \"v\": HEX}, {\"$\": \"complex\", \"r\": HEX, \"i\": HEX}, {\"$\": \"bytes\", \"v\": HEX},
+  {\"$\": \"...\"}; JSON as json.dumps(ensure_ascii=True) spells it), for go/arbace/py's _ast module to rebuild.
+
+    answer MODE FILE SOURCE: \"AST:\" and the JSON, or the error as the compiler's answer (arbace.python.run's form:
+    \"TYPE: MSG\" and after NULs the line, offset, end line, end offset, p and the text)."
+  (:require [arbace.repr.python.convert :as cv]
+            [arbace.repr.python.lex :as lex]
+            [arbace.repr.python.native :as nv]
+            [arbace.repr.python.parser :as ps]
+            [arbace.repr.python.peg :as pk]
+            [arbace.string :as str]))
+
+(set! *warn-on-reflection* true)
+
+(def ^:private positioned (set ps/asdl-positioned))
+(def ^:private seqs (set ps/asdl-seqs))
+
+;; ---- JSON (json.dumps with ensure_ascii and compact separators)
+
+(defn- jstr [^StringBuilder sb ^String s]
+  (.append sb \")
+  (dotimes [i (.length s)]
+    (let [c (.charAt s i)]
+      (case c
+        \" (.append sb "\\\"")
+        \\ (.append sb "\\\\")
+        \newline (.append sb "\\n")
+        \return (.append sb "\\r")
+        \tab (.append sb "\\t")
+        \backspace (.append sb "\\b")
+        \formfeed (.append sb "\\f")
+        (if (or (< (int c) 0x20) (> (int c) 0x7e))
+          (.append sb (format "\\u%04x" (int c)))
+          (.append sb c)))))
+  (.append sb \"))
+
+(defn float-hex
+  "float.hex"
+  ^String [^double d]
+  (cond
+    (Double/isNaN d) "nan"
+    (Double/isInfinite d) (if (pos? d) "inf" "-inf")
+    :else
+    (let [bits (Double/doubleToRawLongBits d)
+          neg (neg? bits)
+          e (bit-and (bit-shift-right bits 52) 0x7ff)
+          m (bit-and bits 0xfffffffffffff)
+          sign (if neg "-" "")]
+      (cond
+        (and (zero? e) (zero? m)) (str sign "0x0.0p+0")
+        (zero? e) (str sign "0x0." (format "%013x" m) "p-1022")
+        :else (let [x (- e 1023)] (str sign "0x1." (format "%013x" m) "p" (if (neg? x) "-" "+") (Math/abs x)))))))
+
+(defn- parse-float ^double [^String s] (Double/parseDouble (str/replace s "_" "")))
+
+(defn- int-text ^String [^String s]
+  (let [s (str/replace s "_" "")
+        [radix body] (cond (re-find #"^0[xX]" s) [16 (subs s 2)] (re-find #"^0[oO]" s) [8 (subs s 2)]
+                           (re-find #"^0[bB]" s) [2 (subs s 2)] :else [10 s])]
+    (str (java.math.BigInteger. ^String body (int radix)))))
+
+(declare value)
+
+(defn- constant-value [^StringBuilder sb n]
+  (let [v (:value n)]
+    (cond
+      (= v :None) (.append sb "null")
+      (= v :True) (.append sb "true")
+      (= v :False) (.append sb "false")
+      (= v :Ellipsis) (.append sb "{\"$\":\"...\"}")
+      (vector? v)
+      (case (first v)
+        :int (do (.append sb "{\"$\":\"int\",\"v\":") (jstr sb (int-text (second v))) (.append sb "}"))
+        :float (do (.append sb "{\"$\":\"float\",\"v\":") (jstr sb (float-hex (parse-float (second v)))) (.append sb "}"))
+        :complex (let [t (second v)]
+                   (.append sb "{\"$\":\"complex\",\"r\":\"0x0.0p+0\",\"i\":")
+                   (jstr sb (float-hex (parse-float (subs t 0 (dec (count t))))))
+                   (.append sb "}"))
+        :str (jstr sb (or (:sv n) (throw (ex-info "astjson: a string constant without its value" {:node n}))))
+        :bytes (do (.append sb "{\"$\":\"bytes\",\"v\":\"")
+                   (doseq [b (or (:bv n) (throw (ex-info "astjson: a bytes constant without its value" {:node n})))]
+                     (.append sb (format "%02x" (int b))))
+                   (.append sb "\"}")))
+      :else (throw (ex-info (str "astjson: a constant's value " (pr-str v)) {})))))
+
+;; ---- the strings' parts as CPython's actions leave them
+
+(defn- empty-str? [x] (and (= :Constant (:t x)) (= [:str] (:value x)) (= "" (:sv x))))
+
+(defn- fold-parts
+  "_build_concatenated_str: adjacent constants folded into one (the first's kind, the run's range), empty ones dropped"
+  [values]
+  (let [values (vec values)
+        n (count values)]
+    (loop [i 0 out []]
+      (if (>= i n)
+        out
+        (let [x (nth values i)]
+          (if (= :Constant (:t x))
+            (let [j (loop [j i] (if (and (< j n) (= :Constant (:t (nth values j)))) (recur (inc j)) j))
+                  run (subvec values i j)
+                  y (if (> (count run) 1)
+                      (let [a (first run) b (peek run)]
+                        {:t :Constant :value [:str] :kind (:kind a) :sv (apply str (map :sv run))
+                         :lineno (:lineno a) :col_offset (:col_offset a) :end_lineno (:end_lineno b) :end_col_offset (:end_col_offset b)})
+                      x)]
+              (recur (long j) (if (empty-str? y) out (conj out y))))
+            (recur (inc i) (conj out x))))))))
+
+(defn- string-parts
+  "A JoinedStr's or TemplateStr's values: a concatenation's folded (its empty parts dropped first), a single string's
+  literal parts that decode to nothing dropped (_get_resized_exprs)"
+  [n]
+  (if (:concat n)
+    (fold-parts (remove empty-str? (:values n)))
+    (vec (remove #(and (:middle %) (empty-str? %)) (:values n)))))
+
+;; ---- the tree
+
+(defn- node [^StringBuilder sb n]
+  (let [cls (name (:t n))
+        fields (or (get ps/asdl-fields cls) (throw (ex-info (str "astjson: no ASDL class " cls) {:node n})))]
+    (.append sb "{\"_\":") (jstr sb cls)
+    (doseq [f fields]
+      (.append sb ",") (jstr sb f) (.append sb ":")
+      (cond
+        (and (#{"Constant" "MatchSingleton"} cls) (= f "value")) (constant-value sb n)
+        (and (#{"JoinedStr" "TemplateStr"} cls) (= f "values")) (value sb (string-parts n))
+        :else (let [v (get n (keyword f))] (value sb (if (and (nil? v) (seqs (str cls "." f))) [] v)))))
+    (when (positioned cls)
+      (doseq [a ["lineno" "col_offset" "end_lineno" "end_col_offset"]]
+        (.append sb ",") (jstr sb a) (.append sb ":")
+        (let [v (get n (keyword a))] (.append sb (if (nil? v) "null" (str (long v)))))))
+    (.append sb "}")))
+
+(defn- value [^StringBuilder sb x]
+  (cond
+    (nil? x) (.append sb "null")
+    (map? x) (if (:t x) (node sb x) (throw (ex-info "astjson: a map that is no node" {:x x})))
+    (sequential? x) (do (.append sb "[")
+                        (doseq [[i y] (map-indexed vector x)] (when (pos? i) (.append sb ",")) (value sb y))
+                        (.append sb "]"))
+    (keyword? x) (do (.append sb "{\"_\":") (jstr sb (name x)) (.append sb "}"))
+    (string? x) (jstr sb x)
+    (true? x) (.append sb "{\"$\":\"int\",\"v\":\"1\"}")
+    (false? x) (.append sb "{\"$\":\"int\",\"v\":\"0\"}")
+    (integer? x) (do (.append sb "{\"$\":\"int\",\"v\":\"") (.append sb (str x)) (.append sb "\"}"))
+    :else (throw (ex-info (str "astjson: a value " (pr-str x)) {}))))
+
+(defn tree-json ^String [tree] (let [sb (StringBuilder.)] (value sb tree) (str sb)))
+
+;; ---- compile()'s parse
+
+(def ^:const PyCF_TYPE_COMMENTS 0x1000)
+(def ^:const PyCF_ALLOW_INCOMPLETE_INPUT 0x4000)
+
+(defn- error-answer [[cls msg l o el eo text]]
+  (str (if (#{"SyntaxError" "IndentationError" "TabError"} cls) cls "SyntaxError") ": " msg
+       (apply str (map #(str "\u0000" (if (nil? %) "" %)) [l o el eo]))
+       "\u0000p" (when (some? text) (str "\u0000" text))))
+
+(defn answer
+  "compile(SOURCE, FILE, MODE, FLAGS | PyCF_ONLY_AST) as pyi's compiler hook asks for it (MODE \"ast:MODE:FLAGS:FEATURE:OPTIMIZE\")"
+  ^String [^String mode ^String file ^String source]
+  (let [[_ m flags feature] (str/split mode #":")
+        flags (Long/parseLong (or flags "0"))
+        feature (Long/parseLong (or feature "-1"))]
+    (try
+      (let [tree (nv/parse-source source (keyword (or m "exec"))
+                                  {:type-comments (pos? (bit-and flags PyCF_TYPE_COMMENTS))
+                                   :incomplete (pos? (bit-and flags PyCF_ALLOW_INCOMPLETE_INPUT))
+                                   :feature feature})]
+        (str "AST:" (tree-json tree)))
+      (catch arbace.lang.ExceptionInfo e
+        (if-let [pe (:python-error (ex-data e))]
+          (if (#{"SyntaxError" "IndentationError" "TabError"} (first pe))
+            (error-answer pe)
+            (str (first pe) ": " (second pe)))
+          (throw e))))))
+
+;; ---- _tokenize's TokenizerIter (go/arbace/py's builtins_tokenize.go): the compiler's mode "tokenize:EXTRA"
+
+(defn- jnum [^StringBuilder sb x] (.append sb (if (nil? x) "null" (str (long x)))))
+
+(defn tokenize-answer
+  "The tokens of SOURCE (the lines a readline gave) as _tokenize.TokenizerIter yields them (arbace.repr.python.lex's
+  stream; MODE \"tokenize:1\": extra tokens): \"TOK:\" and {\"t\": [[TYPE, STRING, SL, SC, EL, EC, LINE] ...],
+  \"e\": null or [CLASS, MSG, L, O, EL, EO, TEXT]}"
+  ^String [^String mode ^String file ^String source]
+  (let [{:keys [tokens error]} (lex/stream source (= mode "tokenize:1"))
+        sb (StringBuilder. "TOK:{\"t\":[")]
+    (doseq [[i [t s sl sc el ec line]] (map-indexed vector tokens)]
+      (when (pos? i) (.append sb ","))
+      (.append sb "[") (jnum sb t) (.append sb ",") (jstr sb s) (.append sb ",") (jnum sb sl) (.append sb ",") (jnum sb sc)
+      (.append sb ",") (jnum sb el) (.append sb ",") (jnum sb ec) (.append sb ",") (jstr sb (or line "")) (.append sb "]"))
+    (.append sb "],\"e\":")
+    (if-let [[cls msg l o el eo text] (seq error)]
+      (do (.append sb "[") (jstr sb (str cls)) (.append sb ",") (jstr sb (str msg))
+          (doseq [x [l o el eo]] (.append sb ",") (jnum sb x))
+          (.append sb ",") (if (nil? text) (.append sb "null") (jstr sb (str text))) (.append sb "]"))
+      (.append sb "null"))
+    (.append sb "}")
+    (str sb)))
+
+(defn compile-answer
+  "pyi's compiler hook's answers that the native reader gives (arbace.python.run's compile-source): the \"ast:\" and
+  \"tokenize:\" modes, nil for the others"
+  [^String mode ^String file ^String source]
+  (cond
+    (str/starts-with? mode "ast:") (answer mode file source)
+    (str/starts-with? mode "tokenize:") (tokenize-answer mode file source)))
+
+(defn read-forms
+  "The compiler's reading of a source (str): the module's forms in mode :full, or its (python/error ...), as
+  tools/pydump/pydump.py tree --full and arbace.repr.python.convert give them"
+  [^String source]
+  (cv/convert (nv/read-dump (.getBytes source "UTF-8") "src.py" true)))
+
+;; ---- the check's driver: bin/repr-python ast-check
+
+(defn -main [& args]
+  (let [[verb & more] args
+        opt (fn [k d] (let [i (.indexOf ^java.util.List (vec more) k)] (if (neg? i) d (nth more (inc i)))))]
+    (case verb
+      "dump"
+      (let [base (opt "--base" nil) out (opt "--out" nil) mode (opt "--mode" "exec") flags (opt "--flags" "0")]
+        (doseq [rel (remove str/blank? (str/split-lines (slurp (opt "--list" nil))))]
+          (let [src (String. (java.nio.file.Files/readAllBytes (.toPath (java.io.File. (str base "/" rel)))) "UTF-8")
+                r (try (answer (str "ast:" mode ":" flags ":-1:0") "<unknown>" src)
+                       (catch Throwable e (str "!Crash " (.getMessage e))))
+                f (java.io.File. (str out "/" rel ".json"))]
+            (.mkdirs (.getParentFile f))
+            (spit f r))))
+      (do (println "usage: -m arbace.repr.python.astjson dump --base DIR --list FILE --out DIR [--mode M] [--flags N]")
+          (System/exit 2)))))

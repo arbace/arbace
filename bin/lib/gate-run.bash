@@ -410,11 +410,12 @@ rotation_note_locked() {
   local ids id
   if [ "$2" = fail ] && [ -n "$re" ] && [ -f "$lg" ]; then
     ids=$(sed -nE "s"$'\001'"$re"$'\001'"$as"$'\001''p' "$lg" | grep -Fxf "$logs/rotation/$n.list" | LC_ALL=C sort -u)
-    for id in $ids; do printf '%s\t%s\t%s\tfail\t%s\t%s\n' "$sq" "$now" "$id" "${commit:-unknown}" "${dirty:-unknown}"; done >> "$rd/$part.failed"
+    # one id a line (a name may hold spaces: cxgo's "main with args.c")
+    [ -z "$ids" ] || while IFS= read -r id; do printf '%s\t%s\t%s\tfail\t%s\t%s\n' "$sq" "$now" "$id" "${commit:-unknown}" "${dirty:-unknown}"; done <<< "$ids" >> "$rd/$part.failed"
     [ -n "$ids" ] && echo "   $n: $(echo "$ids" | wc -l) file(s) of $part noted as failed: in its subset until they pass ($rd/$part.failed)" >> "$logs/$n.log"
   elif [ "$2" = pass ] && { [ "$slice" = sub ] || [ "$slice" = whole ]; } && [ -s "$rd/$part.failed" ]; then
     ids=$(awk -F'\t' '$4 == "fail" {print $3}' "$rd/$part.failed" | LC_ALL=C sort -u | grep -Fxf "$logs/rotation/$n.list")
-    for id in $ids; do printf '%s\t%s\t%s\tclear\t%s\t%s\n' "$sq" "$now" "$id" "${commit:-unknown}" "${dirty:-unknown}"; done >> "$rd/$part.failed"
+    [ -z "$ids" ] || while IFS= read -r id; do printf '%s\t%s\t%s\tclear\t%s\t%s\n' "$sq" "$now" "$id" "${commit:-unknown}" "${dirty:-unknown}"; done <<< "$ids" >> "$rd/$part.failed"
   fi
   return 0
 }

@@ -1,0 +1,721 @@
+(ns arbace.repr.python.native
+  "repr/python's native reader (doc/python/PYTHON-SURVEY.md, \"As built: PY9b\"): a file's bytes decoded, its text parsed
+  by the generated parser (arbace.repr.python.parser over arbace.repr.python.peg and the native lexer) as ast.parse parses
+  it (new-lines translated, a last one added; type comments from a second parse with type comments, as the helper
+  takes them, S6), and the tree written as the helper's dump: tools/pydump/pydump.py's Writer ported (the forms of
+  doc/python/SPEC.md, the literals' spellings scanned in the source), so that the native dump of a file is the helper's
+  text, byte for byte. read-dump: the dump's text of a file."
+  (:require [arbace.repr.python.lex :as lex]
+            [arbace.repr.python.peg :as pk :refer [byte-offset->char]]
+            [arbace.repr.python.parser :as ps]
+            [arbace.string :as str]))
+
+(set! *warn-on-reflection* true)
+
+;; ---------------------------------------------------------------------------------------------
+;; The parse
+
+;; the future features (Python/future.c's future_parse, as compile()'s AST preprocessing runs it for ast.parse)
+(def ^:private future-features
+  #{"nested_scopes" "generators" "division" "absolute_import" "with_statement" "print_function" "unicode_literals"
+    "barry_as_FLUFL" "generator_stop" "annotations"})
+
+(defn future-check
+  "future_parse over the leading future imports (after a docstring): \"not a chance\" for braces, an undefined feature
+  rejected, at the alias (UTF-8 offsets, no text); the tree"
+  [tree]
+  (let [body (:body tree)
+        doc? (let [s (first body)] (and (= :Expr (:t s)) (= :Constant (:t (:value s))) (= [:str] (:value (:value s)))))]
+    (loop [ss (if doc? (rest body) body)]
+      (when-let [s (first ss)]
+        (when (and (= :ImportFrom (:t s)) (pk/c= 0 (:level s)) (= "__future__" (:module s)))
+          (doseq [a (:names s) :let [f (:name a)] :when (not (future-features f))]
+            (throw (ex-info "future" {:python-error ["SyntaxError" (if (= f "braces") "not a chance" (str "future feature " f " is not defined"))
+                                                     (:lineno a) (inc (long (:col_offset a))) (:end_lineno a) (inc (long (:end_col_offset a))) nil]})))
+          (recur (rest ss)))))
+    tree))
+
+(defn parse-source
+  "compile(SOURCE, ...)'s parse of a str source (_PyTokenizer_FromUTF8: no coding spec; new-lines translated, exec
+  input ending in one) in `mode` :exec, :eval, :single or :func_type; opts :type-comments, :incomplete, :feature
+  (_feature_version, the minor version; -1 the current). The tree, or
+  throws the error (ex-data :python-error)"
+  [^String source mode opts]
+  (when (str/includes? source "\u0000")
+    (throw (ex-info "null bytes" {:python-error ["SyntaxError" "source code string cannot contain null bytes" nil nil nil nil nil]})))
+  (let [t (-> source (str/replace "\r\n" "\n") (str/replace "\r" "\n"))
+        t (if (and (= mode :exec) (seq t) (not (str/ends-with? t "\n"))) (str t "\n") t)
+        p (pk/set-feature-version (pk/parser t ps/keywords ps/soft-keywords (:type-comments opts)) (long (or (:feature opts) -1)))
+        rule (case mode :exec ps/r-file :eval ps/r-eval :single ps/r-interactive :func_type ps/r-func_type)
+        tree (pk/run-parser p rule {:incomplete (:incomplete opts) :single (= mode :single)})]
+    (if (#{:exec :single} mode) (future-check tree) tree)))
+
+(defn parse-text
+  "The module's tree of `text` (decoded, its BOM stripped), or throws the parser's error (ex-data :python-error)"
+  [^String text type-comments]
+  (let [t (-> text (str/replace "\r\n" "\n") (str/replace "\r" "\n"))
+        t (if (str/ends-with? t "\n") t (str t "\n"))
+        p (pk/parser t ps/keywords ps/soft-keywords type-comments)]
+    (future-check (pk/run-parser p ps/r-file))))
+
+;; ---------------------------------------------------------------------------------------------
+;; The writer (tools/pydump/pydump.py's Writer, the spec's vocabulary)
+
+(def ^:private BINOP {:Add "+" :Sub "-" :Mult "*" :MatMult "mat-mult" :Div "/" :Mod "%" :Pow "**" :LShift "<<" :RShift ">>"
+                      :BitOr "bit-or" :BitXor "bit-xor" :BitAnd "bit-and" :FloorDiv "floor-div"})
+(def ^:private UNARY {:Invert "bit-not" :Not "not" :UAdd "+" :USub "-"})
+(def ^:private BOOL {:And "and" :Or "or"})
+(def ^:private CMP {:Eq "==" :NotEq "!=" :Lt "<" :LtE "<=" :Gt ">" :GtE ">=" :Is "is" :IsNot "is-not" :In "in" :NotIn "not-in"})
+(def ^:private NOT-SYMBOLS #{"nil" "true" "false"})
+
+(defn qstr ^String [^String s] (str "\"" (-> s (str/replace "\\" "\\\\") (str/replace "\"" "\\\"")) "\""))
+(defn- ident ^String [^String n] (if (contains? NOT-SYMBOLS n) (qstr n) n))
+(defn- vecs ^String [xs] (str "[" (str/join " " xs) "]"))
+
+(defn- form
+  "pydump's form: the fields (trailing nils dropped, nil as nil), the options whose value is not nil, the meta pairs"
+  ^String [head fields opts meta]
+  (let [fs (loop [fs (vec fields)] (if (and (seq fs) (nil? (peek fs))) (recur (pop fs)) fs))
+        parts (concat [head] (map #(if (nil? %) "nil" %) fs)
+                      (mapcat (fn [[k v]] (when (some? v) [k v])) opts)
+                      (when (seq meta) [(str "{" (str/join " " (map (fn [[k v]] (str k " " v)) meta)) "}")]))]
+    (str "(" (str/join " " parts) ")")))
+
+(deftype Src [^ints cs ^ints starts ^String text])
+
+(defn- src [^String text]
+  (let [n (.codePointCount text 0 (.length text))
+        cs (int-array n)
+        _ (loop [i 0 j 0] (when (< i (.length text)) (let [c (.codePointAt text i)] (aset cs j c) (recur (+ i (Character/charCount c)) (inc j)))))
+        starts (java.util.ArrayList.)]
+    (.add starts (int 0))
+    (loop [i 0]
+      (when (< i n)
+        (let [c (aget cs i)]
+          (cond
+            (and (== c 13) (< (inc i) n) (== (aget cs (inc i)) 10)) (do (.add starts (int (+ i 2))) (recur (+ i 2)))
+            (or (== c 13) (== c 10)) (do (.add starts (int (inc i))) (recur (inc i)))
+            :else (recur (inc i))))))
+    (Src. cs (int-array (map int starts)) text)))
+
+(defn- ch ^long [^Src s ^long i] (let [^ints cs (.-cs s)] (if (and (>= i 0) (< i (alength cs))) (aget cs i) -1)))
+(defn- sub ^String [^Src s ^long a ^long b]
+  (let [^ints cs (.-cs s) b (min b (alength cs))] (if (< a b) (String. cs (int a) (int (- b a))) "")))
+(defn- starts-with? [^Src s ^String q ^long k]
+  (let [n (.length q)] (loop [i 0] (cond (>= i n) true (== (ch s (+ k i)) (long (int (.charAt q i)))) (recur (inc i)) :else false))))
+
+(defn- index
+  "The (line, UTF-8 byte column) as an index into the text"
+  ^long [^Src s ^long line ^long col]
+  (let [^ints starts (.-starts s) a (aget starts (dec line))]
+    (loop [i a b 0]
+      (if (>= b col) i (let [c (ch s i)] (recur (inc i) (+ b (long (cond (< c 0x80) 1 (< c 0x800) 2 (< c 0x10000) 3 :else 4)))))))))
+
+(defn- span [^Src s n] [(index s (:lineno n) (:col_offset n)) (index s (:end_lineno n) (:end_col_offset n))])
+(defn- seg [^Src s n] (let [[a b] (span s n)] (sub s a b)))
+
+(defn- walk [x f]
+  (cond
+    (map? x) (do (when (:t x) (f x)) (doseq [v (vals x)] (when (or (map? v) (vector? v)) (walk v f))))
+    (vector? x) (doseq [v x] (walk v f))))
+
+(def ^:private plain-int #"(?:0|[1-9][0-9]*)")
+
+(deftype W [^Src src full ^java.util.HashMap fields ^java.util.HashMap tc])
+
+(declare expr stmt pattern arg-w alias-w keyword-w field-w)
+
+(defn- posit
+  "pydump's posit: in mode :full, the node's position in its trailing map, a short spelling made long"
+  ^String [^W w ^String text n short]
+  (if (or (not (.-full w)) (nil? (:end_lineno n)))
+    text
+    (let [pos (str ":pos [" (:lineno n) " " (:col_offset n) " " (:end_lineno n) " " (:end_col_offset n) "]")
+          [text pos] (if (str/starts-with? text "(")
+                       [text pos]
+                       (let [[ctx text] (if (str/starts-with? text "^:") (let [i (.indexOf text " ")] [(subs text 2 i) (subs text (inc i))]) [nil text])
+                             [head text] (cond
+                                           (and (= short "const") (re-matches plain-int text)) ["int" (qstr text)]
+                                           (and (= short "const") (str/starts-with? text "\"")) ["str" text]
+                                           :else [short text])]
+                         [(str "(" head " " text ")") (if ctx (str ":ctx :" ctx " " pos) pos)]))]
+      (if (str/ends-with? text "})")
+        (str (subs text 0 (- (count text) 2)) " " pos "})")
+        (str (subs text 0 (dec (count text))) " {" pos "})")))))
+
+(defn- tname [n] (name (:t n)))
+
+(defn- meta-tc [^W w n extra]
+  (let [c (.get ^java.util.HashMap (.-tc w) [(tname n) (:lineno n) (:col_offset n)])]
+    (cond-> (vec extra) (some? c) (conj [":type-comment" (qstr c)]))))
+
+(defn- body [^W w stmts] (vecs (map #(stmt w % nil) stmts)))
+
+(defn- orelse [^W w n]
+  (let [o (:orelse n)]
+    (when (seq o)
+      (if (and (= :If (:t n)) (= 1 (count o)) (= :If (:t (first o)))
+               (starts-with? (.-src w) "elif" (index (.-src w) (:lineno (first o)) (:col_offset (first o)))))
+        (vecs [(stmt w (first o) [[":elif" "true"]])])
+        (body w o)))))
+
+(defn- arguments [^W w x]
+  (let [kwd (when (some some? (:kw_defaults x)) (vecs (map #(if (nil? %) "nil" (expr w %)) (:kw_defaults x))))]
+    (form "arguments" []
+          [[":posonly" (when (seq (:posonlyargs x)) (vecs (map #(arg-w w %) (:posonlyargs x))))]
+           [":args" (when (seq (:args x)) (vecs (map #(arg-w w %) (:args x))))]
+           [":vararg" (when (:vararg x) (arg-w w (:vararg x)))]
+           [":kwonly" (when (seq (:kwonlyargs x)) (vecs (map #(arg-w w %) (:kwonlyargs x))))]
+           [":kw-defaults" kwd]
+           [":kwarg" (when (:kwarg x) (arg-w w (:kwarg x)))]
+           [":defaults" (when (seq (:defaults x)) (vecs (map #(expr w %) (:defaults x))))]]
+          nil)))
+
+(defn- tparams [^W w ps]
+  (when (seq ps)
+    (vecs (for [p ps]
+            (let [d (when (:default_value p) (expr w (:default_value p)))
+                  f (case (:t p)
+                      :TypeVar (form "type-var" [(ident (:name p))] [[":bound" (when (:bound p) (expr w (:bound p)))] [":default" d]] nil)
+                      :ParamSpec (form "param-spec" [(ident (:name p))] [[":default" d]] nil)
+                      (form "type-var-tuple" [(ident (:name p))] [[":default" d]] nil))]
+              (posit w f p nil))))))
+
+(defn- stmt* [^W w n extra]
+  (let [e #(expr w %) b #(body w %) opt-vec (fn [xs f] (when (seq xs) (vecs (map f xs))))]
+    (case (:t n)
+      (:FunctionDef :AsyncFunctionDef)
+      (form (if (= :FunctionDef (:t n)) "function-def" "async-function-def") [(ident (:name n)) (arguments w (:args n)) (b (:body n))]
+            [[":decorators" (opt-vec (:decorator_list n) e)] [":returns" (when (:returns n) (e (:returns n)))]
+             [":type-params" (tparams w (:type_params n))]]
+            (meta-tc w n extra))
+      :ClassDef (form "class-def" [(ident (:name n)) (b (:body n))]
+                      [[":bases" (opt-vec (:bases n) e)] [":keywords" (opt-vec (:keywords n) #(keyword-w w %))]
+                       [":decorators" (opt-vec (:decorator_list n) e)] [":type-params" (tparams w (:type_params n))]]
+                      extra)
+      :Return (form "return" [(when (:value n) (e (:value n)))] [] extra)
+      :Delete (form "delete" [(vecs (map e (:targets n)))] [] extra)
+      :Assign (form "assign" [(vecs (map e (:targets n))) (e (:value n))] [] (meta-tc w n extra))
+      :TypeAlias (form "type-alias" [(e (:name n)) (e (:value n))] [[":type-params" (tparams w (:type_params n))]] extra)
+      :AugAssign (form "aug-assign" [(e (:target n)) (BINOP (:op n)) (e (:value n))] [] extra)
+      :AnnAssign (let [simple (when (and (= :Name (:t (:target n))) (not (pk/truthy? (:simple n)))) "false")]
+                   (form "ann-assign" [(e (:target n)) (e (:annotation n)) (when (:value n) (e (:value n)))] [[":simple" simple]] extra))
+      (:For :AsyncFor) (form (if (= :For (:t n)) "for" "async-for") [(e (:target n)) (e (:iter n)) (b (:body n))]
+                             [[":else" (orelse w n)]] (meta-tc w n extra))
+      :While (form "while" [(e (:test n)) (b (:body n))] [[":else" (orelse w n)]] extra)
+      :If (form "if" [(e (:test n)) (b (:body n))] [[":else" (orelse w n)]] extra)
+      (:With :AsyncWith) (let [items (vecs (for [i (:items n)]
+                                             (form "withitem" [(e (:context_expr i)) (when (:optional_vars i) (e (:optional_vars i)))] [] nil)))]
+                           (form (if (= :With (:t n)) "with" "async-with") [items (b (:body n))] [] (meta-tc w n extra)))
+      :Match (form "match" [(e (:subject n)) (vecs (for [c (:cases n)]
+                                                     (form "match-case" [(pattern w (:pattern c)) (body w (:body c))]
+                                                           [[":guard" (when (:guard c) (e (:guard c)))]] nil)))]
+                   [] extra)
+      :Raise (form "raise" [(when (:exc n) (e (:exc n)))] [[":from" (when (:cause n) (e (:cause n)))]] extra)
+      (:Try :TryStar)
+      (let [hs (for [h (:handlers n)]
+                 (posit w (form "except-handler" [(b (:body h))]
+                                [[":type" (when (:type h) (e (:type h)))] [":name" (when (:name h) (ident (:name h)))]] nil)
+                        h nil))]
+        (form (if (= :Try (:t n)) "try" "try-star") [(b (:body n)) (vecs hs)]
+              [[":else" (when (seq (:orelse n)) (b (:orelse n)))] [":finally" (when (seq (:finalbody n)) (b (:finalbody n)))]] extra))
+      :Assert (form "assert" [(e (:test n)) (when (:msg n) (e (:msg n)))] [] extra)
+      :Import (form "import" [(vecs (map #(alias-w w %) (:names n)))] [] extra)
+      :ImportFrom (form "import-from" [(or (:module n) "nil") (vecs (map #(alias-w w %) (:names n)))]
+                        [[":level" (when (pk/truthy? (:level n)) (str (:level n)))]] extra)
+      :Global (form "global" [(vecs (map ident (:names n)))] [] extra)
+      :Nonlocal (form "nonlocal" [(vecs (map ident (:names n)))] [] extra)
+      :Expr (form "expr" [(e (:value n))] [] extra)
+      :Pass (form "pass" [] [] extra)
+      :Break (form "break" [] [] extra)
+      :Continue (form "continue" [] [] extra)
+      (throw (ex-info (str "unknown statement " (:t n)) {})))))
+
+(defn stmt [^W w n extra] (posit w (stmt* w n extra) n nil))
+
+(defn alias-w [^W w a]
+  (posit w (if (nil? (:asname a))
+             (if (contains? NOT-SYMBOLS (:name a)) (form "alias" [(qstr (:name a))] [] nil) (ident (:name a)))
+             (form "alias" [(ident (:name a))] [[":as" (ident (:asname a))]] nil))
+         a "alias"))
+
+(defn keyword-w [^W w k] (posit w (form "keyword" [(if (:arg k) (ident (:arg k)) "nil") (expr w (:value k))] [] nil) k nil))
+
+(defn arg-w [^W w a]
+  (let [c (.get ^java.util.HashMap (.-tc w) ["arg" (:lineno a) (:col_offset a)])]
+    (posit w (if (and (nil? (:annotation a)) (nil? c))
+               (if (contains? NOT-SYMBOLS (:arg a)) (form "arg" [(qstr (:arg a))] [] nil) (ident (:arg a)))
+               (form "arg" [(ident (:arg a)) (when (:annotation a) (expr w (:annotation a)))] []
+                     (when (some? c) [[":type-comment" (qstr c)]])))
+           a "arg")))
+
+(defn- pattern* [^W w p]
+  (case (:t p)
+    :MatchValue (form "match-value" [(expr w (:value p))] [] nil)
+    :MatchSingleton (form "match-singleton" [(name (:value p))] [] nil)
+    :MatchSequence (form "match-sequence" [(vecs (map #(pattern w %) (:patterns p)))] [] nil)
+    :MatchMapping (form "match-mapping" [(vecs (map #(expr w %) (:keys p))) (vecs (map #(pattern w %) (:patterns p)))]
+                        [[":rest" (when (:rest p) (ident (:rest p)))]] nil)
+    :MatchClass (form "match-class" [(expr w (:cls p)) (vecs (map #(pattern w %) (:patterns p)))]
+                      [[":kwd-attrs" (when (seq (:kwd_attrs p)) (vecs (map ident (:kwd_attrs p))))]
+                       [":kwd-patterns" (when (seq (:kwd_patterns p)) (vecs (map #(pattern w %) (:kwd_patterns p))))]] nil)
+    :MatchStar (form "match-star" [(when (:name p) (ident (:name p)))] [] nil)
+    :MatchAs (form "match-as" [(when (:pattern p) (pattern w (:pattern p))) (when (:name p) (ident (:name p)))] [] nil)
+    :MatchOr (form "match-or" [(vecs (map #(pattern w %) (:patterns p)))] [] nil)
+    (throw (ex-info (str "unknown pattern " (:t p)) {}))))
+
+(defn pattern [^W w p] (posit w (pattern* w p) p nil))
+
+;; ---- literals (§3)
+
+(declare strings)
+
+(defn- constant [^W w n]
+  (let [v (:value n)]
+    (case v
+      :None "None" :True "True" :False "False" :Ellipsis "..."
+      (case (first v)
+        (:str :bytes) (strings w n)
+        :int (let [text (seg (.-src w) n)] (if (re-matches plain-int text) text (form "int" [(qstr text)] [] nil)))
+        :float (form "float" [(qstr (seg (.-src w) n))] [] nil)
+        :complex (form "imag" [(qstr (seg (.-src w) n))] [] nil)))))
+
+(defn- in? [^long c ^String chars] (and (>= c 0) (>= (.indexOf chars (int c)) 0)))
+
+(defn- skip ^long [^W w ^long k more]
+  (let [s (.-src w)]
+    (loop [k k]
+      (let [c (ch s k)]
+        (cond
+          (or (in? c " \t\r\n\f") (and more (in? c more))) (recur (inc k))
+          (== c 35) (recur (long (loop [k k] (if (or (in? (ch s k) "\r\n") (== (ch s k) -1)) k (recur (inc k))))))
+          (and (== c 92) (in? (ch s (inc k)) "\r\n")) (recur (+ k 2))
+          :else k)))))
+
+(defn- nocomment [^String s] (str/replace s #"#[^\r\n]*" ""))
+
+(declare fbody)
+
+(defn field-w [^W w f raw]
+  (let [s (.-src w)
+        [fs fe] (span s f)
+        [vs ve] (span s (:value f))
+        k (skip w ve ")")
+        [k debug] (if (and (== (ch s k) 61) (not= (ch s (inc k)) 61))
+                    (let [k2 (skip w (inc k) nil)]
+                      [k2 (str (nocomment (sub s (inc fs) vs)) (sub s vs ve) (nocomment (sub s ve k2)))])
+                    [k nil])
+        [k conv] (if (== (ch s k) 33)
+                   (let [c (sub s (inc k) (+ k 2))
+                         k (loop [k (+ k 2)] (if (in? (ch s k) " \t\r\n\f") (recur (inc k)) k))]
+                     [k c])
+                   [k nil])
+        spec (when (== (ch s k) 58)
+               (let [[items _] (fbody w (inc k) nil (dec fe) (dec fe) raw)] (vecs items)))
+        opts [[":conversion" conv] [":format-spec" spec] [":debug" (when debug (qstr debug))]]]
+    (posit w (if (= :Interpolation (:t f))
+               (form "interpolation" [(expr w (:value f)) (qstr (:str f))] opts nil)
+               (form "formatted-value" [(expr w (:value f))] opts nil))
+           f nil)))
+
+(defn- fbody
+  "The parts of an f-string's or t-string's body from k to its closing quote (or to spec-end): literal text as written,
+  and replacement fields"
+  [^W w ^long k quote ^long z spec-end raw]
+  (let [s (.-src w) items (java.util.ArrayList.)]
+    (loop [k k lit k]
+      (if (if spec-end (>= k (long spec-end)) (starts-with? s quote k))
+        (do (when (< lit k) (.add items (qstr (sub s lit k))))
+            [(vec items) (if spec-end k (+ k (count quote)))])
+        (let [c (ch s k)]
+          (cond
+            (== c 92) (let [nxt (ch s (inc k))]
+                        (cond
+                          (and (not raw) (== nxt 78) (== (ch s (+ k 2)) 123))
+                          (recur (inc (long (loop [j k] (if (== (ch s j) 125) j (recur (inc j)))))) lit)
+                          (or (== nxt 123) (== nxt 125) (and raw (not (in? nxt "\\'\"")))) (recur (inc k) lit)
+                          :else (recur (+ k 2) lit)))
+            (and (== c 123) (== (ch s (inc k)) 123) (nil? spec-end)) (recur (+ k 2) lit)
+            (and (== c 125) (== (ch s (inc k)) 125) (nil? spec-end)) (recur (+ k 2) lit)
+            (== c 123) (let [f (.get ^java.util.HashMap (.-fields w) (long k))]
+                         (when (nil? f) (throw (ex-info (str "no replacement field at " k) {})))
+                         (when (< lit k) (.add items (qstr (sub s lit k))))
+                         (.add items (field-w w f raw))
+                         (let [e (long (second (span s f)))] (recur e e)))
+            :else (recur (inc k) lit)))))))
+
+(defn- strings
+  "A Constant str or bytes, a JoinedStr or a TemplateStr: its tokens scanned in the source (§3.2-§3.5)"
+  [^W w n]
+  (let [s (.-src w) [a z] (span s n) parts (java.util.ArrayList.)]
+    (loop [i a]
+      (when (< i z)
+        (let [c (ch s i)]
+          (cond
+            (in? c " \t\f\r\n") (recur (inc i))
+            (== c 92) (recur (inc i))
+            (== c 35) (recur (loop [i i] (if (and (< i z) (not (in? (ch s i) "\r\n"))) (recur (inc i)) i)))
+            :else
+            (let [j (loop [j i] (if (in? (ch s j) "rRbBuUfFtT") (recur (inc j)) j))
+                  prefix (sub s i j)
+                  q3 (sub s j (+ j 3))
+                  quote (if (#{"\"\"\"" "'''"} q3) q3 (sub s j (inc j)))
+                  _ (when-not (#{"\"" "'" "\"\"\"" "'''"} quote) (throw (ex-info (str "no string token at " i) {})))
+                  k (+ j (count quote))
+                  lower (str/lower-case prefix)]
+              (if (or (str/includes? lower "f") (str/includes? lower "t"))
+                (let [[items k] (fbody w k quote z nil (str/includes? lower "r"))
+                      fs (str/includes? lower "f")
+                      default (if fs "f" "t")]
+                  (.add parts (form (if fs "joined-str" "template-str") [(vecs items)]
+                                    [[":prefix" (when (not= prefix default) (qstr prefix))] [":quote" (when (not= quote "\"") (qstr quote))]] nil))
+                  (recur k))
+                (let [b0 k
+                      k (loop [k k] (if (starts-with? s quote k) k (recur (+ k (if (== (ch s k) 92) 2 1)))))
+                      bd (sub s b0 k)
+                      k (+ k (count quote))]
+                  (.add parts (cond
+                                (str/includes? lower "b") (form "bytes" [(qstr bd)] [[":prefix" (when (not= prefix "b") (qstr prefix))]
+                                                                                 [":quote" (when (not= quote "\"") (qstr quote))]] nil)
+                                (and (= prefix "") (= quote "\"") (not (str/includes? bd "\\"))) (qstr bd)
+                                :else (form "str" [(qstr bd)] [[":prefix" (when (seq prefix) (qstr prefix))]
+                                                              [":quote" (when (not= quote "\"") (qstr quote))]] nil)))
+                  (recur k))))))))
+    (when (zero? (.size parts)) (throw (ex-info "no string token in the node's span" {})))
+    (if (= 1 (.size parts)) (.get parts 0) (str "(str-concat " (str/join " " parts) ")"))))
+
+;; ---- expressions
+
+(defn- ctxmark [n] (case (:ctx n) :Store "store" :Del "del" nil))
+
+(defn- gens [^W w gs]
+  (vecs (for [g gs]
+          (form "comprehension" [(expr w (:target g)) (expr w (:iter g))]
+                [[":ifs" (when (seq (:ifs g)) (vecs (map #(expr w %) (:ifs g))))] [":async" (when (pk/truthy? (:is_async g)) "true")]] nil))))
+
+(defn- expr* [^W w n]
+  (let [e #(expr w %) cm (ctxmark n) lmeta (when cm [[":ctx" (str ":" cm)]])]
+    (case (:t n)
+      :Name (let [s (ident (:id n))]
+              (if (contains? NOT-SYMBOLS (:id n)) (form "name" [s] [] lmeta) (str (if cm (str "^:" cm " ") "") s)))
+      :Constant (constant w n)
+      (:JoinedStr :TemplateStr) (strings w n)
+      :BoolOp (form "bool-op" [(BOOL (:op n)) (vecs (map e (:values n)))] [] nil)
+      :NamedExpr (form "named-expr" [(e (:target n)) (e (:value n))] [] nil)
+      :BinOp (form "bin-op" [(BINOP (:op n)) (e (:left n)) (e (:right n))] [] nil)
+      :UnaryOp (form "unary-op" [(UNARY (:op n)) (e (:operand n))] [] nil)
+      :Lambda (form "lambda" [(arguments w (:args n)) (e (:body n))] [] nil)
+      :IfExp (form "if-exp" [(e (:test n)) (e (:body n)) (e (:orelse n))] [] nil)
+      :Dict (form "dict" [(vecs (map #(if (nil? %) "nil" (e %)) (:keys n))) (vecs (map e (:values n)))] [] nil)
+      :Set (form "set" [(vecs (map e (:elts n)))] [] nil)
+      :ListComp (form "list-comp" [(e (:elt n)) (gens w (:generators n))] [] nil)
+      :SetComp (form "set-comp" [(e (:elt n)) (gens w (:generators n))] [] nil)
+      :GeneratorExp (form "generator-exp" [(e (:elt n)) (gens w (:generators n))] [] nil)
+      :DictComp (form "dict-comp" [(e (:key n)) (e (:value n)) (gens w (:generators n))] [] nil)
+      :Await (form "await" [(e (:value n))] [] nil)
+      :Yield (form "yield" [(when (:value n) (e (:value n)))] [] nil)
+      :YieldFrom (form "yield-from" [(e (:value n))] [] nil)
+      :Compare (form "compare" [(e (:left n)) (vecs (map CMP (:ops n))) (vecs (map e (:comparators n)))] [] nil)
+      :Call (form "call" [(e (:func n)) (vecs (map e (:args n)))]
+                  [[":keywords" (when (seq (:keywords n)) (vecs (map #(keyword-w w %) (:keywords n))))]] nil)
+      :Attribute (form "attribute" [(e (:value n)) (ident (:attr n))] [] lmeta)
+      :Subscript (form "subscript" [(e (:value n)) (e (:slice n))] [] lmeta)
+      :Starred (form "starred" [(e (:value n))] [] lmeta)
+      :List (form "list" [(vecs (map e (:elts n)))] [] lmeta)
+      :Tuple (form "tuple" [(vecs (map e (:elts n)))] [] lmeta)
+      :Slice (form "slice" [(when (:lower n) (e (:lower n))) (when (:upper n) (e (:upper n))) (when (:step n) (e (:step n)))] [] nil)
+      (throw (ex-info (str "unknown expression " (:t n)) {})))))
+
+(defn expr [^W w n] (posit w (expr* w n) n (if (= :Name (:t n)) "name" "const")))
+
+;; ---------------------------------------------------------------------------------------------
+;; The dump
+
+(defn- tc-map [tc-tree]
+  (let [m (java.util.HashMap.)]
+    (when tc-tree
+      (walk tc-tree (fn [n] (when-let [c (:type_comment n)] (.put m [(name (:t n)) (:lineno n) (:col_offset n)] c)))))
+    m))
+
+(defn module-text [^String text tree tc-tree rel full extra]
+  (let [s (src text)
+        fields (java.util.HashMap.)
+        w (W. s full fields (tc-map tc-tree))]
+    (walk tree (fn [n] (when (#{:FormattedValue :Interpolation} (:t n)) (.put fields (long (first (span s n))) n))))
+    (form "python/module" [(body w (:body tree))] []
+          (concat [[":file" (qstr rel)] [":mode" (if full ":full" ":lines")]] extra))))
+
+(defn error-text [[cls msg l o el eo text]]
+  (form "python/error" [cls (qstr msg)]
+        [[":pos" (when (some? l) (vecs (map #(if (nil? %) "nil" (str %)) [l o el eo])))] [":text" (when text (qstr text))]] nil))
+
+(def ^:private token-kind
+  (mapv #(str ":" (str/replace (str/lower-case %) "_" "-")) lex/tok-names))
+
+(def ^:private gap-re #"(?:[ \t\f]|\\(?:\r\n|\r|\n))*")
+
+(defn- tokens-text
+  "pydump's tokens: tokenize's stream as [KIND TEXT ...], each TEXT the source's slice, :ws between tokens"
+  ^String [^String text]
+  (let [^Src s (src text)
+        ^ints starts (.-starts s)
+        n (alength ^ints (.-cs s))
+        cindex (fn ^long [^long line ^long col] (if (<= line (alength starts)) (+ (aget starts (dec line)) col) n))
+        toks (:tokens (lex/stream text true))
+        nt (count toks)
+        out (java.util.ArrayList.)
+        gap (fn [^String g] (when-not (re-matches gap-re g) (throw (ex-info (str "text between tokens that is not white space: " (pr-str g)) {})))
+              (.add out ":ws") (.add out (qstr g)))]
+    (loop [i 0 prev 0]
+      (if (< i nt)
+        (let [[t _ sl sc el ec] (nth toks i)
+              a (max (cindex sl sc) prev)
+              z (if (and (#{lex/FSTRING_MIDDLE lex/TSTRING_MIDDLE} t) (< (inc i) nt))
+                  (let [[_ _ sl2 sc2] (nth toks (inc i))] (cindex sl2 sc2))
+                  (max (cindex el ec) a))]
+          (when (> a prev) (gap (sub s prev a)))
+          (.add out (nth token-kind t)) (.add out (qstr (sub s a z)))
+          (recur (inc i) (long z)))
+        (when (< prev n) (gap (sub s prev n)))))
+    (vecs out)))
+
+(defn- valid-utf8-len
+  "string_tokenizer's valid_utf8: the length of the sequence at i, or 0"
+  ^long [^bytes bs ^long i]
+  (let [n (alength bs) b (fn ^long [^long k] (if (< k n) (bit-and (aget bs k) 0xFF) 0)) c (b i)]
+    (cond
+      (< c 0x80) 1
+      (< c 0xE0) (if (< c 0xC2) 0 (if (and (>= (b (inc i)) 0x80) (< (b (inc i)) 0xC0)) 2 0))
+      (< c 0xF0) (cond (and (== c 0xE0) (< (b (inc i)) 0xA0)) 0
+                       (and (== c 0xED) (>= (b (inc i)) 0xA0)) 0
+                       :else (if (every? #(let [x (b (+ i %))] (and (>= x 0x80) (< x 0xC0))) [1 2]) 3 0))
+      (< c 0xF5) (if (if (< (b (inc i)) 0x90) (== c 0xF0) (== c 0xF4))
+                   0
+                   (if (every? #(let [x (b (+ i %))] (and (>= x 0x80) (< x 0xC0))) [1 2 3]) 4 0))
+      :else 0)))
+
+(defn- utf8-error
+  "_PyTokenizer_ensure_utf8 over the source's bytes (after its BOM), as decode_str runs it when no encoding is declared:
+  nil, or the error"
+  [^bytes bs ^long from]
+  (let [n (alength bs)]
+    (loop [i from line 1 ls from]
+      (cond
+        (or (>= i n) (zero? (aget bs i))) nil
+        :else
+        (let [len (valid-utf8-len bs i)]
+          (if (zero? len)
+            (let [le (loop [k i] (if (and (< k n) (not= (aget bs k) 10)) (recur (inc k)) k))
+                  prefix (String. bs (int ls) (int (- i ls)) "UTF-8")
+                  col (inc (.codePointCount prefix 0 (.length prefix)))
+                  text (String. bs (int ls) (int (- le ls)) "UTF-8")]
+              ["SyntaxError" (format "Non-UTF-8 code starting with '\\x%02x' on line %d, but no encoding declared; see https://peps.python.org/pep-0263/ for details"
+                                     (bit-and (aget bs i) 0xFF) line)
+               line col line col text])
+            (if (== (aget bs i) 10) (recur (inc i) (inc line) (inc i)) (recur (+ i (long len)) line (long ls)))))))))
+
+(defn- translate-newlines
+  "_PyTokenizer_translate_newlines over bytes: CR LF and CR to LF, a last LF added (exec input)"
+  ^bytes [^bytes bs ^long from]
+  (let [out (java.io.ByteArrayOutputStream. (+ 2 (alength bs))) n (alength bs)]
+    (loop [i from last 0]
+      (if (< i n)
+        (let [b (aget bs i)]
+          (if (== b 13)
+            (do (.write out 10) (recur (if (and (< (inc i) n) (== (aget bs (inc i)) 10)) (+ i 2) (inc i)) 10))
+            (do (.write out (int b)) (recur (inc i) (long b)))))
+        (when (and (not= last 10) (not= last 0)) (.write out 10))))
+    (.toByteArray out)))
+
+(defn- normal-name
+  "helpers.c's get_normal_name (utf-8 and latin-1 by their first 12 characters)"
+  ^String [^String r]
+  (let [b (-> (subs r 0 (min 12 (count r))) (str/replace "_" "-") str/lower-case)]
+    (cond
+      (or (= b "utf-8") (str/starts-with? b "utf-8-")) "utf-8"
+      (or (#{"latin-1" "iso-8859-1" "iso-latin-1"} b) (some #(str/starts-with? b %) ["latin-1-" "iso-8859-1-" "iso-latin-1-"])) "iso-8859-1"
+      :else r)))
+
+(defn- coding-spec
+  "helpers.c's get_coding_spec over the line bs[a, a+size): the coding spec, :none (no comment-only line), or nil"
+  [^bytes bs ^long a ^long size]
+  (let [at (fn ^long [^long i] (if (< (+ a i) (alength bs)) (bit-and (aget bs (+ a i)) 0xFF) 0))
+        lim (- size 6)
+        i0 (loop [i 0] (cond (>= i lim) i (== (at i) 35) i (not (#{32 9 12} (at i))) -1 :else (recur (inc i))))]
+    (if (neg? i0)
+      :code
+      (loop [i i0]
+        (when (< i lim)
+          (if (and (== (at i) 99) (== (at (+ i 1)) 111) (== (at (+ i 2)) 100) (== (at (+ i 3)) 105) (== (at (+ i 4)) 110)
+                   (== (at (+ i 5)) 103) (#{58 61} (at (+ i 6))))
+            (let [b (loop [t (+ i 7)] (if (#{32 9} (at t)) (recur (inc t)) t))
+                  e (loop [t b] (let [c (at t)] (if (or (Character/isLetterOrDigit (char c)) (#{45 95 46} c)) (if (< c 128) (recur (inc t)) t) t)))]
+              (if (< b e)
+                (normal-name (String. bs (int (+ a b)) (int (- e b)) "ISO-8859-1"))
+                (recur (inc i))))
+            (recur (inc i))))))))
+
+(defn- code-line?
+  "check_coding_spec without a spec: the line holds something before a comment (the cookie's search stops)"
+  [^bytes bs ^long a ^long size]
+  (loop [i 0]
+    (if (>= i size)
+      false
+      (let [c (aget bs (+ a i))]
+        (cond (#{35 10 13} c) false
+              (not (#{32 9 12} c)) true
+              :else (recur (inc i)))))))
+
+(defn- decode-error-text
+  "str() of the UnicodeDecodeError strict decoding raises (the codecs whose errors the corpora meet), or nil"
+  [^String enc ^bytes bs]
+  (let [name (case (lex/codec enc) "UTF-8" "utf-8" "US-ASCII" "ascii" nil)]
+    (when name
+      (loop [i 0]
+        (when (< i (alength bs))
+          (let [b (bit-and (aget bs i) 0xFF)]
+            (if (= name "ascii")
+              (if (>= b 128) (format "'ascii' codec can't decode byte 0x%02x in position %d: ordinal not in range(128)" b i) (recur (inc i)))
+              (let [k (valid-utf8-len bs i)]
+                (if (pos? k)
+                  (recur (+ i (long k)))
+                  (let [n (alength bs)
+                        cont? (fn [j] (and (< j n) (== 0x80 (bit-and (aget bs j) 0xC0))))
+                        need (cond (and (>= b 0xC2) (<= b 0xDF)) 1 (and (>= b 0xE0) (<= b 0xEF)) 2 (and (>= b 0xF0) (<= b 0xF4)) 3 :else 0)]
+                    (cond
+                      (zero? need) (format "'utf-8' codec can't decode byte 0x%02x in position %d: invalid start byte" b i)
+                      ;; a valid prefix cut by the end of the data
+                      (and (every? cont? (range (inc i) n)) (< (- n i 1) need)) (format "'utf-8' codec can't decode byte%s in position %s: unexpected end of data" (if (== n (inc i)) (format " 0x%02x" b) "s") (if (== n (inc i)) (str i) (str i "-" (dec n))))
+                      :else (let [j (loop [j (inc i)] (if (and (< j n) (cont? j) (< (- j i) (inc need))) (recur (inc j)) j))]
+                              (if (== j (inc i))
+                                (format "'utf-8' codec can't decode byte 0x%02x in position %d: invalid continuation byte" b i)
+                                (format "'utf-8' codec can't decode bytes in position %d-%d: invalid continuation byte" i (dec j)))))))))))))))
+
+;; Python's codecs on Linux (Lib/encodings' modules and encodings.aliases' names of them, normalized; the pinned
+;; tarball's): a coding spec naming one the runtime has no charset for is the runtime's refusal, not "unknown encoding"
+(def ^:private python-codecs
+  (set (str/split (str/join " " [
+   "037 1026 1125 1140 1250 1251 1252 1253 1254 1255 1256 1257 1258 273 424 437 500 646 775 850 852 855 857 858"
+   "860 861 862 863 864 865 866 869 874 8859 932 936 949 950 ansi_x3.4_1968 ansi_x3.4_1986 ansi_x3_4_1968 arabic"
+   "ascii asmo_708 base64 base64_codec base_64 big5 big5_hkscs big5_tw big5hkscs bz2 bz2_codec charmap chinese"
+   "cp00858 cp01140 cp037 cp1006 cp1026 cp1051 cp1125 cp1140 cp1250 cp1251 cp1252 cp1253 cp1254 cp1255 cp1256"
+   "cp1257 cp1258 cp1361 cp154 cp273 cp367 cp424 cp437 cp500 cp65001 cp720 cp737 cp775 cp819 cp850 cp852 cp855"
+   "cp856 cp857 cp858 cp860 cp861 cp862 cp863 cp864 cp865 cp866 cp866u cp869 cp874 cp875 cp932 cp936 cp949 cp950"
+   "cp_gr cp_is csHPRoman8 csascii csbig5 cseuckr csibm00858 csibm01140 csibm037 csibm1026 csibm273 csibm424"
+   "csibm500 csibm855 csibm857 csibm858 csibm860 csibm861 csibm863 csibm864 csibm865 csibm866 csibm869 csiso2022jp"
+   "csiso2022kr csiso58gb231280 csisolatin1 csisolatin2 csisolatin3 csisolatin4 csisolatin5 csisolatin6"
+   "csisolatinarabic csisolatincyrillic csisolatingreek csisolatinhebrew cskoi8r cspc775baltic cspc850multilingual"
+   "cspc862latinhebrew cspc8codepage437 cspcp852 csptcp154 csshiftjis cyrillic cyrillic_asian ebcdic_cp_be"
+   "ebcdic_cp_ca ebcdic_cp_ch ebcdic_cp_he ebcdic_cp_nl ebcdic_cp_us ebcdic_cp_wt ebcdic_us_37_euro ecma_114"
+   "ecma_118 elot_928 euc_cn euc_jis2004 euc_jis_2004 euc_jisx0213 euc_jp euc_kr euccn eucgb2312_cn eucjis2004"
+   "eucjisx0213 eucjp euckr gb18030 gb18030_2000 gb2312 gb2312_1980 gb2312_80 gbk greek greek8 hebrew hex"
+   "hex_codec hkscs hp_roman8 hz hz_gb hz_gb_2312 hzgb ibm00858 ibm01140 ibm037 ibm039 ibm1026 ibm1051 ibm1125"
+   "ibm1140 ibm273 ibm367 ibm424 ibm437 ibm500 ibm775 ibm819 ibm850 ibm852 ibm855 ibm857 ibm858 ibm860 ibm861"
+   "ibm862 ibm863 ibm864 ibm865 ibm866 ibm869 idna iso2022_jp iso2022_jp_1 iso2022_jp_2 iso2022_jp_2004"
+   "iso2022_jp_3 iso2022_jp_ext iso2022_kr iso2022jp iso2022jp_1 iso2022jp_2 iso2022jp_2004 iso2022jp_3"
+   "iso2022jp_ext iso2022kr iso646_us iso8859 iso8859_1 iso8859_10 iso8859_11 iso8859_13 iso8859_14 iso8859_15"
+   "iso8859_16 iso8859_2 iso8859_3 iso8859_4 iso8859_5 iso8859_6 iso8859_7 iso8859_8 iso8859_9 iso_2022_jp"
+   "iso_2022_jp_1 iso_2022_jp_2 iso_2022_jp_2004 iso_2022_jp_3 iso_2022_jp_ext iso_2022_kr iso_646.irv_1991"
+   "iso_8859_1 iso_8859_10 iso_8859_10_1992 iso_8859_11 iso_8859_11_2001 iso_8859_13 iso_8859_14 iso_8859_14_1998"
+   "iso_8859_15 iso_8859_16 iso_8859_16_2001 iso_8859_1_1987 iso_8859_2 iso_8859_2_1987 iso_8859_3 iso_8859_3_1988"
+   "iso_8859_4 iso_8859_4_1988 iso_8859_5 iso_8859_5_1988 iso_8859_6 iso_8859_6_1987 iso_8859_7 iso_8859_7_1987"
+   "iso_8859_8 iso_8859_8_1988 iso_8859_8_e iso_8859_8_i iso_8859_9 iso_8859_9_1989 iso_celtic iso_ir_100"
+   "iso_ir_101 iso_ir_109 iso_ir_110 iso_ir_126 iso_ir_127 iso_ir_138 iso_ir_144 iso_ir_148 iso_ir_157 iso_ir_166"
+   "iso_ir_199 iso_ir_226 iso_ir_58 iso_ir_6 jisx0213 johab koi8_r koi8_t koi8_u korean ks_c_5601 ks_c_5601_1987"
+   "ks_x_1001 ksc5601 ksx1001 kz1048 kz_1048 l1 l10 l2 l3 l4 l5 l6 l7 l8 l9 latin latin1 latin10 latin2 latin3"
+   "latin4 latin5 latin6 latin7 latin8 latin9 latin_1 mac_arabic mac_centeuro mac_croatian mac_cyrillic mac_farsi"
+   "mac_greek mac_iceland mac_latin2 mac_roman mac_romanian mac_turkish maccentraleurope maccyrillic macgreek"
+   "maciceland macintosh maclatin2 macroman macturkish ms1361 ms874 ms932 ms936 ms949 ms950 ms_kanji mskanji"
+   "palmos pc_multilingual_850_euro pt154 ptcp154 punycode quopri quopri_codec quoted_printable quotedprintable r8"
+   "raw_unicode_escape rk1048 roman8 rot13 rot_13 ruscii s_jis s_jis_2004 s_jisx0213 shift_jis shift_jis_2004"
+   "shift_jisx0213 shiftjis shiftjis2004 shiftjisx0213 sjis sjis_2004 sjisx0213 strk1048_2002 thai tis620 tis_620"
+   "tis_620_0 tis_620_2529_0 tis_620_2529_1 u16 u32 u7 u8 u_jis uhc ujis undefined unicode_1_1_utf_7"
+   "unicode_escape unicodebigunmarked unicodelittleunmarked us us_ascii utf utf16 utf32 utf7 utf8 utf8_ucs2"
+   "utf8_ucs4 utf_16 utf_16_be utf_16_le utf_16be utf_16le utf_32 utf_32_be utf_32_le utf_32be utf_32le utf_7"
+   "utf_8 utf_8_sig uu uu_codec windows_1250 windows_1251 windows_1252 windows_1253 windows_1254 windows_1255"
+   "windows_1256 windows_1257 windows_1258 windows_31j windows_874 x_mac_japanese x_mac_korean x_mac_simp_chinese"
+   "x_mac_trad_chinese zip zlib zlib_codec"])
+                  #" ")))
+
+(defn- python-codec? [^String cs]
+  (let [n (-> (str/lower-case cs) (str/replace #"[^a-z0-9.]+" "_") (str/replace #"^_|_$" ""))]
+    (or (contains? python-codecs n) (contains? python-codecs (str/replace n "." "_")))))
+
+(defn source-text
+  "compile()'s reading of a source's bytes, ast.parse's (Python/pythonrun.c's _Py_SourceAsString, then
+  string_tokenizer.c's decode_str: new-lines translated, the BOM, the coding spec of the first two lines, the text
+  decoded, or UTF-8 checked when none is declared): {:text TEXT} (ending in a new-line) or {:error [CLASS MSG L O EL EO
+  TEXT]}"
+  [^bytes bs]
+  (if (some #(zero? (long %)) bs)
+    {:error ["SyntaxError" "source code string cannot contain null bytes" nil nil nil nil nil]}
+    (let [tr (translate-newlines bs 0)
+          n (alength tr)
+          bom (and (>= n 3) (== (aget tr 0) (unchecked-byte 0xEF)) (== (aget tr 1) (unchecked-byte 0xBB)) (== (aget tr 2) (unchecked-byte 0xBF)))
+          a (if bom 3 0)
+          nl (fn [i] (loop [i i] (cond (>= i n) nil (== (aget tr i) 10) i :else (recur (inc i)))))
+          n1 (nl a)
+          n2 (when n1 (nl (inc n1)))
+          init-error (fn [msg] {:error ["SyntaxError" msg 0 -1 nil nil nil]})
+          spec (fn [lineno la size]
+                 (let [cs (coding-spec tr la size)]
+                   (cond
+                     (= cs :code) :code
+                     (nil? cs) (if (code-line? tr la size) :code nil)
+                     (and bom (not= cs "utf-8"))
+                     (let [line (String. tr (int la) (int (- (long (nl la)) la)) "UTF-8")]
+                       {:error ["SyntaxError" (str "encoding problem: " cs " with BOM") lineno 0 lineno
+                                (byte-offset->char line size) line]})
+                     :else {:cs cs})))
+          r1 (when n1 (spec 1 a (- (long n1) a)))
+          r (cond
+              (:error r1) r1
+              (:cs r1) r1
+              (and (nil? r1) n2) (spec 2 (inc (long n1)) (- (long n2) (long n1)))
+              :else nil)]
+      (cond
+        (:error r) r
+        (and (:cs r) (not= (:cs r) "utf-8"))
+        (let [cs (:cs r) charset (lex/codec cs) body (java.util.Arrays/copyOfRange tr (int a) (int n))]
+          (cond
+            (and (nil? charset) (python-codec? cs))
+            (throw (ex-info (str "the runtime has no charset for Python's codec " cs) {:class :charset}))
+            (nil? charset) (init-error (str "unknown encoding: " cs))
+            :else (if-let [m (decode-error-text cs body)]
+                    (init-error m)
+                    {:text (str/replace (try (String. body ^String charset)
+                                               (catch Throwable e
+                                                 (throw (ex-info (str "the runtime has no charset " charset " (" (.getMessage e) ")") {:class :charset}))))
+                                             #"\r\n?" "\n")})))
+        :else
+        (if-let [e (utf8-error tr a)]
+          {:error e}
+          {:text (String. tr (int a) (int (- n a)) "UTF-8")})))))
+
+(defn read-dump
+  "A file's bytes as the helper's tree mode writes them (mode :lines, or :full when `full`): (python/module ...) or
+  (python/error ...), and a newline"
+  ^String [^bytes bs ^String rel & [full]]
+  (let [{:keys [error] stext :text} (source-text bs)]
+    (if error
+      (str (error-text error) "\n")
+      (let [{:keys [text encoding]} (let [d (try (lex/decode-source bs) (catch Throwable _ nil))]
+                                      (if (and d (:text d)) d {:text stext :encoding "utf-8"}))]
+        (try
+          (let [tree (parse-text stext false)
+                tc-tree (if (re-find #"#[ \t]*type[ \t]*:" stext)
+                          (try (parse-text stext true) (catch arbace.lang.ExceptionInfo e (if (:python-error (ex-data e)) :rejected (throw e))))
+                          tree)
+                extra (cond-> []
+                        (= tc-tree :rejected) (conj [":type-comments" ":rejected"])
+                        (and (map? tc-tree) (seq (:type_ignores tc-tree)))
+                        (conj [":type-ignores" (vecs (for [t (:type_ignores tc-tree)] (form "type-ignore" [(str (:lineno t)) (qstr (:tag t))] [] nil)))])
+                        (and full (not= encoding "utf-8")) (conj [":encoding" (qstr encoding)])
+                        (and full (>= (alength bs) 3) (== (aget bs 0) (unchecked-byte 0xEF)) (== (aget bs 1) (unchecked-byte 0xBB))
+                             (== (aget bs 2) (unchecked-byte 0xBF))) (conj [":bom" "true"])
+                        full (conj [":tokens" (tokens-text text)]))]
+            (str (module-text text tree (when (map? tc-tree) tc-tree) rel (boolean full) extra) "\n"))
+          (catch arbace.lang.ExceptionInfo e
+            (if-let [pe (:python-error (ex-data e))]
+              (str (error-text pe) "\n")
+              (throw e))))))))

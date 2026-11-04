@@ -25,8 +25,12 @@
 #                                  reader on stage 0 (test/python/read_forms.ae)
 #   bin/repr-python samples        test/python/samples/: every file parsed (plain and with type comments) and
 #                                  compiled by the oracle, the samples together covering every node class of the ast
-#   bin/repr-python read [-o DIR] FILE...      PY2: each .py to Python forms in mode :lines (DIR/NAME.ae, default
-#                                  .tmp/repr-python/forms): tools/pydump/pydump.py's dump converted by arbace.repr.python
+#   bin/repr-python read [-o DIR] [--reader helper|native] FILE...
+#                                  PY2: each .py to Python forms in mode :lines (DIR/NAME.ae, default
+#                                  .tmp/repr-python/forms): a dump converted by arbace.repr.python, by default
+#                                  the native reader's (PY9b; the default since PY9, queue 201: its trees and errors
+#                                  equal to ast.parse's on the samples), no CPython; --reader helper (REPR_PYTHON_READER):
+#                                  tools/pydump/pydump.py's, the oracle's
 #   bin/repr-python print [-o DIR] FORMS.ae... forms to Python text (DIR/NAME less .ae, default .tmp/repr-python/printed)
 #   bin/repr-python roundtrip [--record] [--jobs N] [CORPUS...]
 #                                  PY2's round trip (survey §5.2, levels 1-3) over corpora of test/python/corpora.edn
@@ -46,6 +50,35 @@
 #                                  back (the tokens' text in the file's encoding), then level 4 (the print's bytes equal
 #                                  the original's) and level 5 (marshal of the compiled code equal, positions included),
 #                                  against test/python/full-known.edn; costs into test/python/roundtrip-text-costs.edn
+#   bin/repr-python lex-check [--record] [--jobs N] [--mutants N|--no-mutants] [CORPUS...]
+#                                  PY9a: the native lexer (arbace.repr.python.lex) against CPython's C tokenizer: every
+#                                  file of the corpora (default samples stdlib site-packages lib-test, and lex-errors:
+#                                  test/python/lex-errors/, a file per tokenizer message or path) dumped by
+#                                  tools/pydump/tokdump.py (the encoding, tokenize's stream and the parser's, the error
+#                                  that ends one) and by the port (arbace.repr.python.lexcheck), line for line equal or
+#                                  known (test/python/lex-check-known.edn); a negative control; then N mutants' files
+#                                  (default 2,000, two mutants of 3 edits each, seed 26: the error paths) the same way.
+#                                  Work in .tmp/repr-python/lex/CORPUS/ (ref/, out/files.tsv, out/diff/)
+#   bin/repr-python pegen [--check]  PY9b: arbace/repr/python/parser.ae generated from the tarball's Grammar/python.gram
+#                                  (arbace.repr.python.pegen, pegen's analyses and an Arbace back end; the actions
+#                                  translated from C over Parser/Python.asdl's fields), or generated again and compared
+#   bin/repr-python parse-check [--record] [--full] [--jobs N] [--mutants N|--no-mutants] [CORPUS...]
+#                                  PY9b: the native reader (arbace.repr.python.native: the generated parser, the tree
+#                                  written as the helper's dump) against tools/pydump/pydump.py tree (ast.parse) over the
+#                                  corpora as lex-check's, then the mutants, the dumps byte for byte equal or known
+#                                  (test/python/parse-check-known.edn). --full: mode :full (every node's position, the
+#                                  tokens) against pydump.py tree --full. Work in .tmp/repr-python/parse{,-full}/CORPUS/
+#   bin/repr-python ast-check [--limit N] [--mode M] [CORPUS...]
+#                                  PY9 (queue 201): pyi's _ast on the native reader: each file's answer to compile()'s
+#                                  PyCF_ONLY_AST in tools/pyi/ast_json.py's form, natively (arbace.repr.python.astjson)
+#                                  and by CPython (tools/pydump/astdump.py), byte for byte (default samples lex-errors
+#                                  syntax-errors; --limit: each corpus's first N files)
+#   The round trips, lex-check and parse-check (queue 201, PY10's R1): --only-list FILE runs the files of FILE (CORPUS/NAME
+#   a line) and judges them alone (a known entry of a file not run kept, also by --record); a failing file is printed FAIL
+#   CORPUS/NAME, a tab and why; --record also writes the results file test/python/{roundtrip,full,lex-check,parse-check}-results.edn
+#   (rows ["CORPUS FILE" :pass|:known|:fail REASON], arbace.repr.python.results, bin/reap's); each has a negative control
+#   (a file judged against another's reference must fail). parse-check's corpora also syntax-errors (PY9:
+#   tools/pydump/syntax_cases.py, CPython's own syntax-error cases from the tarball's Lib/test)
 #   bin/repr-python check          spec-check, samples, then the round trips (:lines, then --text) over the default corpora
 # Environment: REPR_PYTHON_CORPORA, REPR_PYTHON_PIN_VERSION, REPR_PYTHON_APKS, REPR_PYTHON_SPEC name other copies of
 # test/python/corpora.edn, tools/pydump/PYTHON_VERSION, tools/pydump/apks.sha256, doc/python/SPEC.md (negative controls).
@@ -313,6 +346,17 @@ corpus_base() { # ID -> the base directory and the arguments of corpus.py
   die "no corpus $id in test/python/corpora.edn"
 }
 
+# --only-list FILE (queue 201, PY10's R1): a partial run, the files of FILE (CORPUS/NAME a line) of each corpus; only_filter
+# keeps a corpus's listed files in its list (none: the corpus is not run)
+ONLY=""
+only_filter() { # LIST ID
+  [ -n "$ONLY" ] || return 0
+  local t="$1.all"; mv "$1" "$t"
+  grep -v '^#' "$ONLY" | sed -n "s|^$2/||p" | LC_ALL=C sort -u > "$1.names"
+  grep -Fxf "$1.names" "$t" > "$1" || true
+  [ -s "$1" ]
+}
+
 roundtrip_one() {
   local id=$1 record=$2
   local -a info; mapfile -t info < <(corpus_base "$id")
@@ -323,6 +367,7 @@ roundtrip_one() {
   rm -rf "$d"; mkdir -p "$d"
   STAGES="$d/stages.txt"; : > "$STAGES"
   (cd "$base" && py corpus.py list "$base" "${args[@]}") > "$d/list"
+  only_filter "$d/list" "$id" || { echo "roundtrip $id: no file of --only-list"; return 0; }
   timed helper-orig dump_parallel "$base" "$d/list" "$d/orig" "$d/helper-orig.tsv"
   if [ -n "$TEXT" ]; then
     # mode :full (PY3): the dumps in mode :full beside the :lines ones, converted, woven, printed from the tokens
@@ -337,7 +382,8 @@ roundtrip_one() {
   local rc=0
   timed compare py_arbace compare --corpus "$id" --orig "$d/orig" --cand "$d/cand" --orig-tsv "$d/helper-orig.tsv" \
     --cand-tsv "$d/helper-printed.tsv" --convert-tsv "$d/convert-print.tsv" --known "$known" --results "$d/results.edn" \
-    ${record:+--record} ${TEXT:+--text} || rc=$?
+    ${record:+--record} ${TEXT:+--text} ${ONLY:+--partial} \
+    ${record:+--results-file "$root/test/python/$([ -n "$TEXT" ] && echo full || echo roundtrip)-results.edn"} || rc=$?
   { echo "{:corpus :$id :jobs $JOBS"
     echo " :wall-seconds {$(awk '{ printf "%s\"%s\" %s", (NR > 1 ? " " : ""), $1, $2 }' "$STAGES")}"
     echo " :per-file $(py corpus.py costs "$d/helper-orig.tsv" ${TEXT:+"$d/helper-full.tsv"} "$d/convert-print.tsv" "$d/helper-printed.tsv")}"; } > "$d/costs.edn"
@@ -352,6 +398,7 @@ cmd_roundtrip() {
     case $1 in
       --record) record=1; shift ;;
       --text) TEXT=-text; costs=$TEXT_COSTS; shift ;;
+      --only-list) ONLY=$(cd "$(dirname "$2")" && pwd)/$(basename "$2"); shift 2 ;;
       --jobs) JOBS=$2; shift 2 ;;
       *) ids+=("$1"); shift ;;
     esac
@@ -378,12 +425,23 @@ cmd_roundtrip() {
 }
 
 cmd_read() {
-  local out="$WORK/forms" tmp="$WORK/read" f
-  if [ "${1:-}" = "-o" ]; then out=$2; shift 2; fi
+  local out="$WORK/forms" tmp="$WORK/read" f reader=${REPR_PYTHON_READER:-native}
+  while [ $# -gt 0 ]; do
+    case $1 in
+      -o) out=$2; shift 2 ;;
+      --reader) reader=$2; shift 2 ;;
+      *) break ;;
+    esac
+  done
   rm -rf "$tmp"; mkdir -p "$tmp/src"
   for f in "$@"; do cp "$f" "$tmp/src/$(basename "$f")"; done
   (cd "$tmp/src" && ls) > "$tmp/list"
-  py pydump.py tree --base "$tmp/src" --list "$tmp/list" --out "$tmp/dumps" --tsv "$tmp/dumps.tsv"
+  case $reader in
+    helper) py pydump.py tree --base "$tmp/src" --list "$tmp/list" --out "$tmp/dumps" --tsv "$tmp/dumps.tsv" ;;
+    # PY9b: the native reader (no CPython): the generated parser's dumps, the helper's text
+    native) parsecheck dump --base "$tmp/src" --list "$tmp/list" --out "$tmp/dumps" > "$tmp/dumps.tsv" ;;
+    *) die "read: --reader helper|native" ;;
+  esac
   py_arbace convert --dumps "$tmp/dumps" --forms "$out" --printed "$tmp/printed" --tsv "$tmp/convert.tsv"
   awk -F'\t' '$2 != "ok" { print "  " $1 ": " $2 }' "$tmp/convert.tsv"
 }
@@ -394,25 +452,247 @@ cmd_print() {
   for f in "$@"; do b=$(basename "$f"); py_arbace print "$f" "$out/${b%.ae}"; echo "${out#$root/}/${b%.ae}"; done
 }
 
+# ---- PY9a: the native lexer against CPython's tokenizer ----
+
+LEX_KNOWN="${REPR_PYTHON_LEX_KNOWN:-$root/test/python/lex-check-known.edn}"
+LEX="$WORK/lex"
+
+lexcheck() {
+  ARBACE_PATH="$root" GOMEMLIMIT=${REPR_PYTHON_GOMEMLIMIT:-1500MiB} GOMAXPROCS=${REPR_PYTHON_THREADS:-4} \
+    "$(arbace_exe)" -m arbace.repr.python.lexcheck "$@"
+}
+
+# tokdump BASE LIST OUT: the helper's token dumps over LIST in $JOBS processes
+tokdump() {
+  local base=$1 list=$2 out=$3 i d
+  d="$out.split"; rm -rf "$d"; mkdir -p "$d"
+  split -n "r/$JOBS" -d "$list" "$d/part."
+  for i in "$d"/part.*; do
+    python3 -I -S -B "$root/tools/pydump/tokdump.py" --base "$base" --list "$i" --out "$out" --tsv "$i.tsv" &
+  done
+  wait
+  cat "$d"/part.*.tsv | LC_ALL=C sort > "$out.tsv"
+  rm -rf "$d"
+}
+
+lex_one() { # ID BASE LIST
+  local id=$1 base=$2 list=$3 d="$LEX/$1" rc=0
+  rm -rf "$d/ref" "$d/out"; mkdir -p "$d"
+  if [ -n "$ONLY" ]; then cp "$list" "$d/list.only"; list="$d/list.only"; only_filter "$list" "$id" || { echo "lex-check $id: no file of --only-list"; return 0; }; fi
+  tokdump "$base" "$list" "$d/ref"
+  lexcheck check --corpus "$id" --base "$base" --list "$list" --ref "$d/ref" --out "$d/out" --known "$LEX_KNOWN" \
+    --jobs "$JOBS" ${record:+--record} ${ONLY:+--partial} ${record:+--results-file "$root/test/python/lex-check-results.edn"} || rc=$?
+  return $rc
+}
+
+cmd_lex_check() {
+  local record="" ids=() nmut=2000 worst=0 rc id
+  JOBS=3
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --record) record=1; shift ;;
+      --only-list) ONLY=$(cd "$(dirname "$2")" && pwd)/$(basename "$2"); shift 2 ;;
+      --jobs) JOBS=$2; shift 2 ;;
+      --mutants) nmut=$2; shift 2 ;;
+      --no-mutants) nmut=0; shift ;;
+      *) ids+=("$1"); shift ;;
+    esac
+  done
+  [ ${#ids[@]} -gt 0 ] || ids=(samples stdlib site-packages lib-test lex-errors)
+  fetch_tarball >/dev/null; fetch_apks >/dev/null
+  local pools=()
+  for id in "${ids[@]}"; do
+    if [ "$id" = lex-errors ]; then
+      # the tokenizer's own error cases (test/python/lex-errors/: one file a message or path), not a corpus of corpora.edn
+      mkdir -p "$LEX/$id"
+      (cd "$root/test/python/lex-errors" && ls | LC_ALL=C sort) > "$LEX/$id/list"
+      rc=0; lex_one "$id" "$root/test/python/lex-errors" "$LEX/$id/list" || rc=$?
+      [ $rc -gt $worst ] && worst=$rc
+      continue
+    fi
+    local -a info; mapfile -t info < <(corpus_base "$id")
+    local -a args=(); IFS=, read -ra pa <<< "${info[1]}"; args+=("${pa[@]}")
+    if [ "${info[2]}" != - ]; then IFS=, read -ra ea <<< "${info[2]}"; for e in "${ea[@]}"; do args+=(--exclude "$e"); done; fi
+    mkdir -p "$LEX/$id"
+    (cd "${info[0]}" && py corpus.py list "${info[0]}" "${args[@]}") > "$LEX/$id/list"
+    { echo "${info[0]}"; cat "$LEX/$id/list"; } > "$LEX/$id/pool"
+    pools+=("$LEX/$id/pool")
+    rc=0; lex_one "$id" "${info[0]}" "$LEX/$id/list" || rc=$?
+    [ $rc -gt $worst ] && worst=$rc
+  done
+  # the negative control (GTS81 (a)): a file judged against another's dump must differ
+  [ ${#pools[@]} -gt 0 ] && { lexcheck control --base "$(head -1 "${pools[-1]}")" --list "$(d=$(dirname "${pools[-1]}"); [ -n "$ONLY" ] && [ -f "$d/list.only" ] && echo "$d/list.only" || echo "$d/list")" \
+    --ref "$(dirname "${pools[-1]}")/ref" || worst=1; }
+  if [ "$nmut" != 0 ] && [ ${#pools[@]} -gt 0 ]; then
+    rm -rf "$LEX/mutants"
+    lexcheck mutants --out "$LEX/mutants" --seed 26 --files "$nmut" --per 2 --edits 3 "${pools[@]}" || return 1
+    rc=0; lex_one mutants "$LEX/mutants/src" "$LEX/mutants/list" || rc=$?
+    [ $rc -gt $worst ] && worst=$rc
+  fi
+  return $worst
+}
+
+# ---- PY9b: the native parser against ast.parse ----
+
+PARSE_KNOWN="${REPR_PYTHON_PARSE_KNOWN:-$root/test/python/parse-check-known.edn}"
+PARSE="$WORK/parse"
+GRAMMAR_ARGS() { local t; t=$(TOP); echo "$t/Grammar/python.gram $t/Parser/Python.asdl $t/Grammar/Tokens"; }
+
+parsecheck() {
+  ARBACE_PATH="$root" GOMEMLIMIT=${REPR_PYTHON_GOMEMLIMIT:-1500MiB} GOMAXPROCS=${REPR_PYTHON_THREADS:-4} \
+    "$(arbace_exe)" -m arbace.repr.python.parsecheck "$@"
+}
+
+# pegen [--check]: the parser generated from the tarball's grammar into arbace/repr/python/parser.ae, or compared with it
+cmd_pegen() {
+  fetch_tarball >/dev/null
+  local verb=generate; [ "${1:-}" = --check ] && verb=check
+  # shellcheck disable=SC2046
+  ARBACE_PATH="$root" "$(arbace_exe)" -m arbace.repr.python.pegen $verb $(GRAMMAR_ARGS) "$root/arbace/repr/python/parser.ae"
+}
+
+parse_one() { # ID BASE LIST
+  local id=$1 base=$2 list=$3 d="$PARSE/$1" rc=0
+  rm -rf "$d/ref" "$d/out"; mkdir -p "$d"
+  if [ -n "$ONLY" ]; then cp "$list" "$d/list.only"; list="$d/list.only"; only_filter "$list" "$id" || { echo "parse-check $id: no file of --only-list"; return 0; }; fi
+  FULL=$PFULL dump_parallel "$base" "$list" "$d/ref" "$d/ref.tsv"
+  parsecheck check --corpus "$id" --base "$base" --list "$list" --ref "$d/ref" --out "$d/out" --known "$PARSE_KNOWN" \
+    --jobs "$JOBS" ${record:+--record} ${PFULL:+--full} ${ONLY:+--partial} \
+    ${record:+--results-file "$root/test/python/parse-check-results.edn"} || rc=$?
+  return $rc
+}
+
+cmd_parse_check() {
+  local record="" ids=() nmut=2000 worst=0 rc id
+  JOBS=3; PFULL=
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --record) record=1; shift ;;
+      --full) PFULL=1; PARSE="$WORK/parse-full"; shift ;;
+      --only-list) ONLY=$(cd "$(dirname "$2")" && pwd)/$(basename "$2"); shift 2 ;;
+      --jobs) JOBS=$2; shift 2 ;;
+      --mutants) nmut=$2; shift 2 ;;
+      --no-mutants) nmut=0; shift ;;
+      *) ids+=("$1"); shift ;;
+    esac
+  done
+  [ ${#ids[@]} -gt 0 ] || ids=(samples stdlib site-packages lib-test lex-errors syntax-errors)
+  fetch_tarball >/dev/null; fetch_apks >/dev/null
+  local pools=()
+  for id in "${ids[@]}"; do
+    mkdir -p "$PARSE/$id"
+    if [ "$id" = lex-errors ]; then
+      (cd "$root/test/python/lex-errors" && ls | LC_ALL=C sort) > "$PARSE/$id/list"
+      rc=0; parse_one "$id" "$root/test/python/lex-errors" "$PARSE/$id/list" || rc=$?
+      [ $rc -gt $worst ] && worst=$rc
+      continue
+    fi
+    if [ "$id" = syntax-errors ]; then
+      # CPython's own syntax-error cases (tools/pydump/syntax_cases.py: test_syntax's doctests, the sources the tests'
+      # error checks compile), a file each, generated from the pinned tarball's Lib/test
+      rm -rf "$PARSE/$id/src"
+      py syntax_cases.py --src "$(TOP)" --out "$PARSE/$id/src" > "$PARSE/$id/list"
+      rc=0; parse_one "$id" "$PARSE/$id/src" "$PARSE/$id/list" || rc=$?
+      [ $rc -gt $worst ] && worst=$rc
+      continue
+    fi
+    local -a info; mapfile -t info < <(corpus_base "$id")
+    local -a args=(); IFS=, read -ra pa <<< "${info[1]}"; args+=("${pa[@]}")
+    if [ "${info[2]}" != - ]; then IFS=, read -ra ea <<< "${info[2]}"; for e in "${ea[@]}"; do args+=(--exclude "$e"); done; fi
+    (cd "${info[0]}" && py corpus.py list "${info[0]}" "${args[@]}") > "$PARSE/$id/list"
+    { echo "${info[0]}"; cat "$PARSE/$id/list"; } > "$PARSE/$id/pool"
+    pools+=("$PARSE/$id/pool")
+    rc=0; parse_one "$id" "${info[0]}" "$PARSE/$id/list" || rc=$?
+    [ $rc -gt $worst ] && worst=$rc
+  done
+  [ ${#pools[@]} -gt 0 ] && { parsecheck control --base "$(head -1 "${pools[-1]}")" --list "$(d=$(dirname "${pools[-1]}"); [ -n "$ONLY" ] && [ -f "$d/list.only" ] && echo "$d/list.only" || echo "$d/list")" \
+    --ref "$(dirname "${pools[-1]}")/ref" || worst=1; }
+  if [ "$nmut" != 0 ] && [ ${#pools[@]} -gt 0 ]; then
+    rm -rf "$PARSE/mutants"
+    parsecheck mutants --out "$PARSE/mutants" --seed 26 --files "$nmut" --per 2 --edits 3 "${pools[@]}" || return 1
+    rc=0; parse_one mutants "$PARSE/mutants/src" "$PARSE/mutants/list" || rc=$?
+    [ $rc -gt $worst ] && worst=$rc
+  fi
+  return $worst
+}
+
+# ---- PY9: pyi's _ast on the native reader against compile()'s PyCF_ONLY_AST ----
+
+# ast-check [--limit N] [--mode M] [CORPUS...]: each file's answer to pyi's "ast:" compile (tools/pydump/astdump.py on
+# CPython, arbace.repr.python.astjson natively) byte for byte; CORPUS a corpus of corpora.edn, lex-errors or
+# syntax-errors; --limit: the first N files of each (a sample). Files that are not UTF-8 are left out (pyi's sources are
+# text). Work in .tmp/repr-python/ast/CORPUS/
+cmd_ast_check() {
+  local ids=() limit=0 mode=exec id worst=0
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --limit) limit=$2; shift 2 ;;
+      --mode) mode=$2; shift 2 ;;
+      *) ids+=("$1"); shift ;;
+    esac
+  done
+  [ ${#ids[@]} -gt 0 ] || ids=(samples lex-errors syntax-errors)
+  fetch_tarball >/dev/null; fetch_apks >/dev/null
+  local AST="$WORK/ast"
+  for id in "${ids[@]}"; do
+    local d="$AST/$id" base
+    rm -rf "$d"; mkdir -p "$d"
+    case $id in
+      lex-errors) base="$root/test/python/lex-errors"; (cd "$base" && ls | LC_ALL=C sort) > "$d/all" ;;
+      syntax-errors) base="$d/src"; py syntax_cases.py --src "$(TOP)" --out "$base" > "$d/all" ;;
+      *) local -a info; mapfile -t info < <(corpus_base "$id"); base=${info[0]}
+         local -a args=(); IFS=, read -ra pa <<< "${info[1]}"; args+=("${pa[@]}")
+         if [ "${info[2]}" != - ]; then IFS=, read -ra ea <<< "${info[2]}"; for e in "${ea[@]}"; do args+=(--exclude "$e"); done; fi
+         (cd "$base" && py corpus.py list "$base" "${args[@]}") > "$d/all" ;;
+    esac
+    # UTF-8 files only
+    (if [ "$limit" != 0 ]; then head -n "$limit" "$d/all"; else cat "$d/all"; fi) | python3 -I -S -B -c '
+import sys
+for rel in sys.stdin.read().split("\n"):
+    if rel:
+        try:
+            open(sys.argv[1] + "/" + rel, "rb").read().decode("utf-8")
+            print(rel)
+        except UnicodeDecodeError:
+            pass' "$base" > "$d/list"
+    py astdump.py --base "$base" --list "$d/list" --out "$d/ref" --mode "$mode"
+    ARBACE_PATH="$root" GOMEMLIMIT=${REPR_PYTHON_GOMEMLIMIT:-1500MiB} "$(arbace_exe)" -m arbace.repr.python.astjson dump \
+      --base "$base" --list "$d/list" --out "$d/out" --mode "$mode" 2> "$d/stderr" || { echo "ast-check $id: the native run failed"; worst=1; continue; }
+    local n=0 eq=0 bad=()
+    while IFS= read -r rel; do
+      n=$((n + 1))
+      if cmp -s "$d/ref/$rel.json" "$d/out/$rel.json"; then eq=$((eq + 1)); else bad+=("$rel"); fi
+    done < "$d/list"
+    echo "ast-check $id: $n files ($mode): equal $eq, differ ${#bad[@]}"
+    for rel in "${bad[@]:0:20}"; do echo "  DIFFER $rel"; done
+    [ ${#bad[@]} -eq 0 ] || worst=1
+  done
+  return $worst
+}
+
 cmd_check_all() {
   cmd_spec_check && cmd_samples && cmd_roundtrip && cmd_roundtrip --text
 }
 
 command -v python3 >/dev/null || die "no python3 (the oracle, doc/ALPINE.md)"
-case "${1:-}" in pins|spec-check|roundtrip|check) load_rows ;; esac
+case "${1:-}" in pins|spec-check|roundtrip|lex-check|parse-check|ast-check|check) load_rows ;; esac
 case "${1:-}" in
   pins)
     case "${2:-}" in
       --fetch) cmd_fetch ;;
       --count) cmd_count ;;
       --check) cmd_check ;;
-      *) sed -n '2,54p' "$0"; exit 2 ;;
+      *) sed -n '2,90p' "$0"; exit 2 ;;
     esac ;;
   spec-check) cmd_spec_check ;;
   samples) cmd_samples ;;
   read) shift; cmd_read "$@" ;;
   print) shift; cmd_print "$@" ;;
   roundtrip) shift; cmd_roundtrip "$@" ;;
+  lex-check) shift; cmd_lex_check "$@" ;;
+  parse-check) shift; cmd_parse_check "$@" ;;
+  ast-check) shift; cmd_ast_check "$@" ;;
+  pegen) shift; load_rows; cmd_pegen "$@" ;;
   check) cmd_check_all ;;
-  *) sed -n '2,54p' "$0"; exit 2 ;;
+  *) sed -n '2,72p' "$0"; exit 2 ;;
 esac
