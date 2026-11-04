@@ -247,10 +247,24 @@
   (let [^Pos p @(:curr-p lb)]
     (vreset! (:curr-p lb) (Pos. (or file (.-fname p)) (if absolute line (+ (.-lnum p) line)) (- (.-cnum p) chars) (.-cnum p)))))
 
-(defn- lex-error [loc msg]
-  (throw (ex-info msg {:ocaml-error :lexer :message msg :loc loc})))
+(defn- lex-error
+  "Lexer.Error: its message as prepare_error words it (\\u0001 a Format break hint, `@ `), :sub the report's
+  sub-messages [TEXT LOC] (a ghost LOC: no location printed)"
+  ([loc msg] (lex-error loc msg []))
+  ([loc msg sub] (throw (ex-info msg {:ocaml-error :lexer :message msg :loc loc :sub sub}))))
 
 (defn- error [lb msg] (lex-error (curr-loc lb) msg))
+
+(defn- escaped
+  "String.escaped of a byte string (Char.escaped when quote? also escapes ')"
+  [^String s quote?]
+  (apply str (map (fn [ch]
+                    (let [c (int ch)]
+                      (cond (= c 92) "\\\\" (= c 34) (if quote? "\"" "\\\"") (and quote? (= c 39)) "\\'"
+                            (= c 10) "\\n" (= c 9) "\\t" (= c 13) "\\r" (= c 8) "\\b"
+                            (or (< c 32) (> c 126)) (format "\\%03d" c)
+                            :else (str ch))))
+                  s)))
 
 ;; the string buffer
 (defn- reset-sbuf [lb] (.reset ^java.io.ByteArrayOutputStream (:sbuf lb)))
@@ -434,7 +448,7 @@
   (let [name (validate-encoding lb raw)]
     (if (is-lowercase name)
       name
-      (error lb (str name " cannot be used as a quoted string delimiter, it must contain only lowercase letters.")))))
+      (error lb (str name " cannot be used as a quoted string delimiter,\u0001it must contain only lowercase letters.")))))
 
 (defn- validate-ext [lb raw]
   (let [name (validate-encoding lb raw)
@@ -560,9 +574,10 @@
             (try (string-rule lb)
                  (catch arbace.lang.ExceptionInfo e
                    (if (= "String literal not terminated" (:message (ex-data e)))
-                     (let [l @(:comment-start lb) start (last l)]
+                     (let [l @(:comment-start lb)]
                        (vreset! (:comment-start lb) ())
-                       (lex-error (first l) "This comment contains an unterminated string literal"))
+                       (lex-error (first l) "This comment contains an unterminated string literal"
+                                  [["String literal begins here" (:loc (ex-data e))]]))
                      (throw e))))
             (vreset! (:in-string lb) false)
             (store-char lb 34)
@@ -591,7 +606,8 @@
                        (if (= "String literal not terminated" (:message (ex-data e)))
                          (let [l @(:comment-start lb)]
                            (vreset! (:comment-start lb) ())
-                           (lex-error (first l) "This comment contains an unterminated string literal"))
+                           (lex-error (first l) "This comment contains an unterminated string literal"
+                                      [["String literal begins here" (:loc (ex-data e))]]))
                          (throw e))))
                 (vreset! (:in-string lb) false)
                 (store-char lb 124) (store-string lb delim) (store-char lb 125)
@@ -666,7 +682,7 @@
                 (matched! lb (- e i))
                 (let [n (try (Long/parseLong num) (catch Exception _ nil))]
                   (if (or (nil? n) (> n 4611686018427387903))
-                    (error lb (str "Invalid lexer directive \"#" directive "\": line number out of range"))
+                    (error lb (str "Invalid lexer directive \"" (escaped (str "#" directive) false) "\": line number out of range"))
                     (do (update-loc lb name (dec n) true 0)
                         (token-rule lb))))))))))))
 
@@ -834,7 +850,7 @@
                    [6 31 (fn [] (matched! lb 6) [:CHAR (char-for-hexadecimal-code lb 3)])])
                  (when (and (= c1 92) (not= c2 35) (not= c2 -1))
                    [3 32 (fn [] (matched! lb 3) (error lb (str "Illegal backslash escape in string or character (" (sub lb (inc i) (+ i 3)) ")")))])
-                 (when (= c1 39) [2 33 (fn [] (matched! lb 2) (error lb "Illegal empty character literal ''"))])])
+                 (when (= c1 39) [2 33 (fn [] (matched! lb 2) (lex-error (curr-loc lb) "Illegal empty character literal ''" [["Hint: Did you mean ' ' or a type variable 'a?" none]]))])])
               ;; comments
               (= c 40)
               (let [star-end (run-end lb (+ i 2) #(= % 42))]
@@ -929,11 +945,7 @@
         (if b
           ((nth b 2))
           (do (matched! lb 1)
-              (error lb (str "Illegal character (" (let [ch (char c)]
-                                                      (cond (= c 92) "\\\\" (= c 39) "\\'"
-                                                            (= c 10) "\\n" (= c 9) "\\t" (= c 13) "\\r" (= c 8) "\\b"
-                                                            (or (< c 32) (> c 126)) (format "\\%03d" c)
-                                                            :else (str ch))) ")"))))))))
+              (error lb (str "Illegal character (" (escaped (str (char c)) true) ")"))))))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Lexer.token: comments skipped, docstrings filed around the next token

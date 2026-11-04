@@ -200,7 +200,9 @@ covers what.
 - repr/ocaml's native reader (doc/ocaml/OCAML-SURVEY.md, "As built: the native reader"): `arbace/repr/ocaml/lex.ae`
   (parsing/lexer.mll, the parts of stdlib/lexing.ml that update the positions, utils/misc.ml's Utf8_lexeme),
   `docstrings.ae` (parsing/docstrings.ml), `ast.ae`'s constructors and docstring attributes (parsing/ast_helper.ml,
-  docstrings.ml, location.ml's mkloc), `actions.ae` (parsing/parser.mly's header and its semantic actions) and the
+  docstrings.ml, location.ml's mkloc), `actions.ae` (parsing/parser.mly's header and its semantic actions), `report.ae` (parsing/location.ml's
+  batch-mode report printer, utils/format_doc.ml's pp_two_columns, the break rule of stdlib/format.ml; parse.ml's and
+  lexer.mll's error messages are in `actions.ae` and `lex.ae`) and the
   generated `tables.ae` (parser.mly's automaton, with its actions' texts) are ports of OCaml 5.5.0 (the release
   tarball https://caml.inria.fr/pub/distrib/ocaml-5.5/ocaml-5.5.0.tar.xz, SHA-256
   `fcc6ae665d1ec51d52510eaac7834a86a9806bf5a258bb7cca78733fccf015ba`, Copyright INRIA), by hand on 2026-11-04, the
