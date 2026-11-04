@@ -49,11 +49,11 @@ import GHC.Driver.Env (HscEnv(..), hscSetFlags)
 import GHC.Driver.Config.Parser (initParserOpts, supportedLanguagePragmas)
 import GHC.Driver.Pipeline (preprocess)
 import GHC.Driver.Errors.Types (DriverMessages, DriverMessage(..))
-import GHC.Parser.Errors.Types (PsMessage)
+import GHC.Parser.Errors.Types (PsMessage(..))
 import GHC.Utils.Logger (LogAction, Logger, pushLogHook, setLogFlags, defaultLogActionWithHandles)
 import GHC.Driver.Config.Diagnostic (initDiagOpts)
 import GHC.Driver.Errors (printMessages)
-import GHC.Types.Error (Messages, errorsOrFatalWarningsFound, partitionMessages, isEmptyMessages, unionMessages, NoDiagnosticOpts(..))
+import GHC.Types.Error (Messages, errorsOrFatalWarningsFound, partitionMessages, isEmptyMessages, unionMessages, NoDiagnosticOpts(..), singleMessage)
 import System.IO.Unsafe (unsafePerformIO)
 import GHC.Driver.Config.Logger (initLogFlags)
 import GHC.Parser.Lexer (ParserOpts, initParserState, initPragState, unP, lexer, lexTokenStream, ParseResult(..), Token(..), getPsErrorMessages, getPsMessages)
@@ -65,7 +65,7 @@ import GHC.Types.SourceError (SourceError, srcErrorMessages)
 import GHC.Utils.Panic (GhcException(..))
 import GHC.Data.Bag (bagToList)
 import qualified GHC.Driver.CmdLine as CL
-import GHC.Data.StringBuffer (StringBuffer, hGetStringBuffer, lexemeToString, atLine, stringToStringBuffer)
+import GHC.Data.StringBuffer (StringBuffer, hGetStringBuffer, lexemeToString, atLine, stringToStringBuffer, containsBidirectionalFormatChar, bidirectionalFormatChars, nextChar, atEnd)
 import GHC.Data.FastString
 import qualified GHC.Data.Strict
 import GHC.Types.SrcLoc
@@ -78,7 +78,7 @@ import GHC.Unit.Module (unitString)
 import GHC.Hs.Dump (showAstData, BlankSrcSpan(..), BlankEpAnnotations(..))
 import GHC.Hs.DocString (HsDocStringChunk, unpackHDSC)
 import GHC.Utils.Outputable (showSDocUnsafe, renderWithContext, defaultSDocContext)
-import GHC.Utils.Error (pprMessages)
+import GHC.Utils.Error (pprMessages, mkPlainMsgEnvelope)
 import GHC.Types.Error (getMessages, MsgEnvelope(..), defaultDiagnosticOpts)
 import GHC.Settings.Config (cProjectVersion)
 import GHC.Platform.ArchOS (stringEncodeArch, stringEncodeOS)
@@ -559,7 +559,9 @@ parseText hsc_env dflagsIn file src text cpp view lit hsc = do
     _ -> case unP (if isSignature file then P.parseSignature else P.parseModule) st of
       POk pst m
         | not (isEmptyMessages (getPsErrorMessages pst)) -> failure [getPsErrorMessages pst]
-        | (ws, _) <- getPsMessages pst, errorsOrFatalWarningsFound ws -> failure [ws]
+        | (ws0, _) <- getPsMessages pst
+        , let ws = bidiWarning dflags file buf `unionMessages` ws0
+        , errorsOrFatalWarningsFound ws -> failure [ws]
         | otherwise -> return (Right (ModP m src text prags cpp dflags toks view lit hsc))
       PFailed pst -> let (ws, es) = getPsMessages pst
                          (wWarns, wErrs) = partitionMessages ws
@@ -1177,3 +1179,22 @@ sha256Hex msg = concatMap hex8 (go h0 (pad msg))
               0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
               0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
               0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2] :: [Word32]
+
+-- hscParse's check for bidirectional formatting characters (GHC.Driver.Main, not exported): its
+-- warning, logged before the parse, so one of the parse's batches when the parse goes through
+bidiWarning :: DynFlags -> FilePath -> StringBuffer -> Messages PsMessage
+bidiWarning dflags file buf
+  | not (wopt Opt_WarnUnicodeBidirectionalFormatCharacters dflags) = mempty
+  | not (containsBidirectionalFormatChar buf) = mempty
+  | otherwise = case go (PsLoc (mkRealSrcLoc (mkFastString file) 1 1) (BufPos 0)) buf of
+      [] -> mempty
+      chars@((eloc, chr, _) : rest) ->
+        singleMessage (mkPlainMsgEnvelope (initDiagOpts dflags) (mkSrcSpanPs (mkPsSpan eloc (advancePsLoc eloc chr)))
+                         (PsWarnBidirectionalFormatChars (NE.fromList chars)))
+  where
+    go loc sb
+      | atEnd sb = []
+      | otherwise = case nextChar sb of
+          (chr, sb')
+            | Just desc <- lookup chr bidirectionalFormatChars -> (loc, chr, desc) : go (advancePsLoc loc chr) sb'
+            | otherwise -> go (advancePsLoc loc chr) sb'

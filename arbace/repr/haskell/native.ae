@@ -100,6 +100,31 @@
                            (if (contains? (:fatal d) f) (assoc m :fatal true) m))))
                (lx/warnings ps)))))
 
+(def ^:private bidi-chars
+  "bidirectionalFormatChars"
+  {0x202a "U+202A LEFT-TO-RIGHT EMBEDDING (LRE)" 0x202b "U+202B RIGHT-TO-LEFT EMBEDDING (RLE)"
+   0x202c "U+202C POP DIRECTIONAL FORMATTING (PDF)" 0x202d "U+202D LEFT-TO-RIGHT OVERRIDE (LRO)"
+   0x202e "U+202E RIGHT-TO-LEFT OVERRIDE (RLO)" 0x2066 "U+2066 LEFT-TO-RIGHT ISOLATE (LRI)"
+   0x2067 "U+2067 RIGHT-TO-LEFT ISOLATE (RLI)" 0x2068 "U+2068 FIRST STRONG ISOLATE (FSI)"
+   0x2069 "U+2069 POP DIRECTIONAL ISOLATE (PDI)"})
+
+(defn- bidi-warning
+  "hscParse's checkBidirectionFormatChars over the text's code points cs: the warning
+  PsWarnBidirectionalFormatChars at the first such character with every one's offset, or nil"
+  [cs file]
+  (loop [i 0 l 1 c 1 found []]
+    (if (< i (count cs))
+      (let [ch (long (nth cs i))
+            d (get bidi-chars ch)
+            found (if d (conj found [i l c d]) found)]
+        (cond (= ch 10) (recur (inc i) (inc l) 1 found)
+              (= ch 9) (recur (inc i) l (inc (* 8 (quot (+ c 7) 8))) found)
+              :else (recur (inc i) l (inc c) found)))
+      (when (seq found)
+        (let [[_ l c _] (first found)]
+          (lx/msg :PsWarnBidirectionalFormatChars [file l c l (inc c) nil nil]
+                  (mapv (fn [[i _ _ d]] [i d]) found)))))))
+
 (defn read-text
   "Reads a module's text (the text GHC parses) of file under flags (the GHC flags of the helper's
   --ghc): {:tree :pragmas :exts :dflags}, the tree in the dump's form; signature: an .hsig. A
@@ -127,7 +152,15 @@
                    lmod)
             errs (lx/errors ps)
             ws (marked d ps)
-            fatal-ws (filterv :fatal ws)
+            ;; hscParse' logs the bidirectional characters' warning before the parse; the Hsc
+            ;; monad's warnings go with an exception, so it is in the batches of a parse that goes
+            ;; through only
+            bflag (let [m (lx/msg :PsWarnBidirectionalFormatChars nil)] ((requiring-resolve 'arbace.repr.haskell.errors/warning-flag) m))
+            bidi (when (hd/warning-on? d bflag)
+                   (when-let [b (bidi-warning cs file)]
+                     (if (contains? (:fatal d) bflag) (assoc b :fatal true) b)))
+            ws* (if bidi (vec (cons bidi ws)) ws)
+            fatal-ws (filterv :fatal ws*)
             opts (render-opts d)
             pre (fn [] @(:pre hdr))]
         (cond
@@ -140,7 +173,7 @@
                                       (cond-> errs fatal (conj fatal))])
                :dflags d :opts opts}))
           (seq fatal-ws)
-          {:messages (into (pre) [ws]) :dflags d :opts opts}
+          {:messages (into (pre) [ws*]) :dflags d :opts opts}
           :else
           (let []
             {:tree (a/to-dump lmod file)
