@@ -711,7 +711,7 @@
         ic (volatile! 0)   ; the item of the text: the header is 0
         at (fn [] (assoc *ctx* :item @ic))]
     (when (or (empty? blocks) (and (= 1 (count blocks)) (nil? (second (first blocks))) (empty? (drop 2 (first blocks)))))
-      (verr :parser/syntax "function body requires at least one basic block" {:at [:find-last "{"]}))
+      (binding [*ctx* (assoc *ctx* :item 1)] (verr :parser/syntax "function body requires at least one basic block" {:at :start})))
     (doseq [[i blk] (map-indexed vector blocks)]
       (let [[_ l & items] blk]
         (when l (vswap! ic inc))
@@ -742,10 +742,10 @@
   (let [l (:linkage o)]
     (case what
       :declare (when (#{:private :internal :available_externally :linkonce :linkonce_odr :weak :weak_odr} l)
-                 (verr :parser/linkage "invalid linkage for function declaration" {:at [:tok 1]}))
-      :define (when (= l :extern_weak) (verr :parser/linkage "invalid linkage for function definition" {:at [:tok 1]}))
+                 (verr :parser/linkage "invalid linkage for function declaration" {:at [:linkage]}))
+      :define (when (= l :extern_weak) (verr :parser/linkage "invalid linkage for function definition" {:at [:linkage]}))
       nil)
-    (when (and (#{:declare :define} what) (#{:appending :common} l)) (verr :parser/linkage "invalid function linkage type" {:at [:tok 1]}))
+    (when (and (#{:declare :define} what) (#{:appending :common} l)) (verr :parser/linkage "invalid function linkage type" {:at [:linkage]}))
     (when (and (local-linkage? l) (:visibility o) (not= (:visibility o) :default))
       (verr :parser/visibility "symbol with local linkage must have default visibility"))
     (when (and (local-linkage? l) (:dll o)) (verr :parser/dll "symbol with local linkage cannot have a DLL storage class"))))
@@ -1051,9 +1051,16 @@
                          (if (seq? a) [n (let [v (second a)] (if (type-attrs n) (norm-type v) v))] n))))
              attrs)))
 
+(defn- value-culprit
+  "What the Verifier prints for a value: an instruction whole, any other as an operand with its type."
+  [t v defs]
+  (if-let [[_ _ _ dx] (when (and defs (local? v)) (.get ^java.util.Map defs (local-key v)))]
+    [:inst dx]
+    (str (pr/type-str t) " " (pr/value-str v))))
+
 (defn- check-musttail
   "Verifier::verifyMustTailCall: the call `x` (item `ii` of `items`) in the function whose header is `f`."
-  [f x b items ii]
+  [f x b items ii defs]
   (let [[_ ps o] (split-inst b)
         args (nth ps 2)
         callee (second ps)
@@ -1086,7 +1093,7 @@
       (doseq [[i a c] (map vector (range) cattrs lattrs)]
         (when-not (= (abi-attrs a) (abi-attrs c))
           (verr :verifier/musttail "cannot guarantee tail call due to mismatched ABI impacting function attributes"
-                :inst (pr/typed-str [(norm-type (first (nth args i))) (peek (nth args i))])))))))
+                :inst (value-culprit (norm-type (first (nth args i))) (peek (nth args i)) defs)))))))
 
 (defn- check-bundles
   "The operand bundles of a call (visitCallBase's loop over them); `defs` finds a local's defining body; `direct?`: the callee
@@ -1161,7 +1168,7 @@
         (when (= bundle? mt?)
           (verr :verifier/attr-misc "preallocated operand either requires a preallocated bundle or the call to be musttail (but not both)"
                 (let [i (first (keep-indexed (fn [i a] (when (has-attr? a "preallocated") i)) pattrs))]
-                  (pr/typed-str [(nth ptypes i) (peek (nth args i))])) :inst))))
+                  (value-culprit (nth ptypes i) (peek (nth args i)) defs)) :inst))))
     (doseq [[i a] (map-indexed vector pattrs) :when (has-attr? a "inalloca")]
       (when-not (= i (dec (count pattrs))) (verr :verifier/attr-misc "inalloca isn't on the last argument!")))
     (when-not direct-intr?
@@ -1727,6 +1734,19 @@
                   (apply verr :verifier/funclet "EH pads can't handle each other's exceptions" nodes)))
               (recur (rest ks) (second r)))))))))
 
+(defn- bb-ranks
+  "The order the parser creates the blocks in (what LLVM's pointer order of blocks follows): a block when it is first
+  mentioned, as a label or as a use; the vector's ith is block i's rank."
+  [blocks]
+  (let [m (java.util.HashMap.)
+        mention (fn [k] (when-not (.containsKey m k) (.put m k (.size m))))]
+    (doseq [[_ l & items] blocks]
+      (mention (local-key l))
+      (doseq [x items :let [b (body x)] :when (not (dbg-record? b))
+              [v t] (uses b) :when (and (= t 'label) (local? v))]
+        (mention (local-key v))))
+    (mapv (fn [[_ l]] (.get m (local-key l))) blocks)))
+
 (declare check-intrinsic-signature)
 
 (defn- verify-function
@@ -1770,6 +1790,7 @@
                                                        items))))
                          blocks)
             g (cfg blocks)
+            rank (bb-ranks blocks)
             defs (java.util.HashMap.)  ; local key -> [block index item index body]
             _ (doseq [[bi [_ _ & items]] (map-indexed vector blocks) [ii x] (map-indexed vector items)]
                 (when-let [r (result x)] (.put defs (local-key r) [bi ii (body x) x])))
@@ -1783,12 +1804,12 @@
             (visiting
              (binding [*ctx* {:fn f :bb l}]
             (when (and (seq insts) (= 'phi (first (body (first insts)))))
-              (let [preds (vec (sort (nth (:preds g) bi)))]
+              (let [preds (vec (sort-by #(nth rank %) (nth (:preds g) bi)))]
                 (doseq [x insts :while (= 'phi (first (body x)))]
                  (binding [*ctx* {:fn f :bb l :inst x}]
                   (let [pty (norm-type (first (strip-flags (second (split-inst (body x))))))
                         ins (vec (rest (strip-flags (second (split-inst (body x))))))
-                        vals (vec (sort-by (fn [[v l]] (get (:idx g) (local-key l) -1))
+                        vals (vec (sort-by (fn [[v l]] (if-let [i (get (:idx g) (local-key l))] (nth rank i) -1))
                                            (map (fn [[v l]] [v l]) ins)))]
                     (when-not (= (count ins) (count preds))
                       (verr :verifier/phi-predecessors "PHINode should have one entry for each predecessor of its parent basic block!"))
@@ -1797,7 +1818,7 @@
                         (when (and (= (local-key l) (local-key (second (nth vals (dec i))))) (not= v (first (nth vals (dec i)))))
                           (verr :verifier/phi-duplicate "PHI node has multiple entries for the same basic block with different incoming values!"
                                 :inst (label-text (second (nth blocks (get (:idx g) (local-key l)))))
-                                (pr/typed-str [pty v]) (pr/typed-str [pty (first (nth vals (dec i)))])))))
+                                (value-culprit pty v defs) (value-culprit pty (first (nth vals (dec i))) defs)))))
                     (doseq [i (range (count vals))]
                       (let [[v l] (nth vals i)]
                         (when-not (= (get (:idx g) (local-key l)) (nth preds i))
@@ -1868,7 +1889,7 @@
                       (when ('#{call invoke callbr} hd)
                         (check-call-site b defs)
                         (when (and (= hd 'call) (= :musttail (:tail (nth (split-inst b) 2))))
-                          (check-musttail f x b items ii)))
+                          (check-musttail f x b items ii defs)))
                       ;; visitInstruction: self-references, dominance, metadata attachments
                       (let [r (result x) us (uses b)]
                         (doseq [[v t blk] us]
@@ -2069,6 +2090,56 @@
              :else b)]
     (if (= (first x) '=) (list '= (second x) nb) nb)))
 
+;; ---------------------------------------------------------------------------------------------
+;; Attribute group numbers as the slot tracker gives them: the function attribute sets of the functions in module order,
+;; then those of the calls in the order they are printed; an equal set is one group.
+
+(defn- attrs-key [attrs] (set (map attr-str (group-items (remove #(and (not (integer? %)) (not (attr-item? %))) attrs)))))
+
+(defn group-numbers
+  "{set-key group-number} of a module's function attribute sets."
+  [forms]
+  (binding [*groups* (into {} (keep #(when (= (first %) 'llvm/attributes) [(second %) (nth % 2)]) forms))]
+    (let [m (java.util.LinkedHashMap.)
+          note (fn [attrs] (let [k (attrs-key attrs)] (when (and (seq k) (not (.containsKey m k))) (.put m k (.size m)))))]
+      (doseq [f forms :when (#{'llvm/define 'llvm/declare} (first f))]
+        (note (:attrs (apply hash-map (drop 4 f)))))
+      (doseq [f forms :when (= (first f) 'llvm/define)
+              blk (:body (apply hash-map (drop 4 f))) x (drop 2 blk)
+              :let [b (body x)] :when (#{'call 'invoke 'callbr} (first b))]
+        (note (:attrs (nth (split-inst b) 2))))
+      (into {} m))))
+
+(defn group-mismatches
+  "The functions and calls of a module printed by the AsmWriter whose single group `#N` is not N in this numbering."
+  [forms]
+  (let [m (group-numbers forms)]
+    (binding [*groups* (into {} (keep #(when (= (first %) 'llvm/attributes) [(second %) (nth % 2)]) forms))]
+      (let [chk (fn [attrs] (when (and (= 1 (count attrs)) (integer? (first attrs)))
+                              (let [n (get m (attrs-key attrs))] (when-not (= n (first attrs)) [(first attrs) n]))))]
+        (vec (concat (for [f forms :when (#{'llvm/define 'llvm/declare} (first f))
+                           :let [r (chk (:attrs (apply hash-map (drop 4 f))))] :when r] r)
+                     (for [f forms :when (= (first f) 'llvm/define)
+                           blk (:body (apply hash-map (drop 4 f))) x (drop 2 blk)
+                           :let [b (body x)] :when (#{'call 'invoke 'callbr} (first b))
+                           :let [r (chk (:attrs (nth (split-inst b) 2)))] :when r] r)))))))
+
+(def ^:dynamic *group-numbers* nil)
+
+(defn- number-groups
+  "A call or function header whose `:attrs` is the one group of the AsmWriter's numbering (nil numbering: unchanged)."
+  [x]
+  (if (nil? *group-numbers*)
+    x
+    (let [b (body x) h (first b)]
+      (cond
+        (#{'call 'invoke 'callbr 'llvm/define 'llvm/declare} h)
+        (let [nb (set-opt b :attrs (fn [attrs]
+                                     (let [k (attrs-key attrs)]
+                                       (if-let [n (get *group-numbers* k)] [n] attrs))))]
+          (if (= (first x) '=) (list '= (second x) nb) nb))
+        :else x))))
+
 (defn- canon-fp
   "A floating constant as the AsmWriter prints it: %e when it reads back to the same value, else the double's bits."
   [^String text ty]
@@ -2117,10 +2188,10 @@
   [c ctx metaforms]
   (cond
     (string? c) c
-    (= c :inst) (let [x (canon-fps (canon-attr-order (with-default-align (:inst ctx)))) b (body x)] (if (dbg-record? b) (pr/item-inst-str x) (str "  " (pr/item-inst-str x))))
+    (= c :inst) (let [x (canon-fps (number-groups (canon-attr-order (with-default-align (:inst ctx))))) b (body x)] (if (dbg-record? b) (pr/item-inst-str x) (str "  " (pr/item-inst-str x))))
     (= c :fn) (fn-operand (:fn ctx))
     (= c :decl) (let [f (:fn ctx) o (apply hash-map (drop 4 f)) as (group-items (:attrs o))]
-                  (str (when (seq as) (str "; Function Attrs: " (str/join " " (map pr/attr-str as)) "\n")) (pr/fn-head-str (canon-attr-order f))))
+                  (str (when (seq as) (str "; Function Attrs: " (str/join " " (map pr/attr-str as)) "\n")) (pr/fn-head-str (number-groups (canon-attr-order f)))))
     (= c :bb) (label-text (:bb ctx))
     (= c :global) (fn-operand (:global ctx))
     (and (vector? c) (= (first c) :md)) (if-let [f (get metaforms (second c))] (pr/top-str f) (str (second c)))
@@ -2129,7 +2200,7 @@
                                                  (and (symbol? v) (get metaforms v)) (pr/top-str (get metaforms v))
                                                  (vector? v) (pr/typed-str v)
                                                  :else (pr/md-str v)))
-    (and (vector? c) (= (first c) :inst)) (let [x (canon-fps (canon-attr-order (with-default-align (second c)))) b (body x)] (if (dbg-record? b) (pr/item-inst-str x) (str "  " (pr/item-inst-str x))))
+    (and (vector? c) (= (first c) :inst)) (let [x (canon-fps (number-groups (canon-attr-order (with-default-align (second c))))) b (body x)] (if (dbg-record? b) (pr/item-inst-str x) (str "  " (pr/item-inst-str x))))
     (and (vector? c) (= (first c) :fn)) (fn-operand (second c))
     (and (vector? c) (= (first c) :bb)) (label-text (second c))
     :else (str c)))
@@ -2177,7 +2248,9 @@
             (diag/parse-error-text (prog) file src (parse-offset src spans forms pe) (.getMessage ^Throwable pe))
             (str (prog) ": " file ": error: " (.getMessage ^Throwable pe) "\n"))]
       :else
-      (binding [*dl* (or (some #(when (= (first %) 'llvm/datalayout) (second %)) forms) "")
+      (binding [*groups* (into {} (keep #(when (= (first %) 'llvm/attributes) [(second %) (nth % 2)]) forms))
+                *group-numbers* (try (group-numbers forms) (catch Throwable _ nil))
+                *dl* (or (some #(when (= (first %) 'llvm/datalayout) (second %)) forms) "")
                 *types* (into {} (keep #(when (= (first %) 'llvm/type) [(second %) (norm-type (nth % 2))]) forms))]
        (let [ver (first (filter #(= :di/version (rule-of %)) dis))
             dis (remove #(= :di/version (rule-of %)) dis)
