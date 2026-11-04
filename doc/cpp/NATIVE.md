@@ -1,7 +1,7 @@
 # repr/cpp's native parser (CX11)
 
 Status: CX11's first part, on the branch `cpp-native` from `cpp-cx9` (2026-11-04); its second part on `cpp-native2` from
-`cpp-native` (2026-11-04, §7). The survey's §4.4 and its CX11 row
+`cpp-native` (2026-11-04, §7); Sema's minimum for the recorded classes on `cpp-sema` from `cpp-native2` (2026-11-04, §8). The survey's §4.4 and its CX11 row
 ([CPP-SURVEY.md](CPP-SURVEY.md) §11) planned a C++ parser of Arbace's own, "name-kind tracking, a port of the grammar", so that
 repr/cpp reads C++23 without the oracle's AST dump at read time; clang stays the oracle. This note is its design: what C++'s
 parsing needs beyond C's (§1), the reference model and why (§2), the design as built (§3), the check (§4), what is left (§5).
@@ -143,8 +143,10 @@ converter writes it as its text (`(cpp/text "...")`) and counts it under that ki
 designated elements at their members' places in declaration order (the skim of a class records its fields and their types), an
 array's at their indices, a member skipped before a written one value-initialized (an `ImplicitValueInitExpr`: the converter writes
 such a list as its text), the trailing ones left out; a nested designator (`.a.y = 2`) a list of the member's own without braces;
-a nested list designated by its member's type. A list the parser cannot place (an index not a literal, a class with bases, a union,
-an unknown type: a function's argument, whose parameter only overload resolution knows) is kept as written (`init-list-form`).
+a nested list designated by its member's type; a designator of an anonymous union's or struct's member through that member (clang's
+implicit `.anon.a`); a function's argument by its parameter's type when the function is not overloaded (§8). A list the parser
+cannot place (an index not a literal, a class with bases, a union, an unknown type: an overloaded function's argument) is kept as
+written (`init-list-form`).
 
 **3.11 Modules** ([module.unit], [module.import]): `module;`, `export? module NAME[:PARTITION] attrs;`, `module :private;` and
 `export? import NAME|:PARTITION|<h>|"h" attrs;` parsed; clang's AST has no node for a module declaration (the converter reads its
@@ -186,6 +188,9 @@ is judged against `test/repr/cpp/native-known.edn`, where each file that differs
 | `implicit-argument` | a call's argument clang adds (a default argument of the `operator new` a new-expression calls) |
 | `clang-recovery` | an ill-formed construct clang reads by its error recovery |
 | `deduced-type` | a function's deduced return type, held in its type (`auto f() { return [=](int b) {...}; }`: a closure type, which the converter writes as the function's text) |
+| `native-decline` | a construct the parser declines (its text) and clang reads: the grammar's gap, not a Sema fact (since §8) |
+
+Since §8 the parser computes each class's fact as clang does where that is bounded; a class stays for the cases it leaves to clang.
 
 The lists: `samples` (test/cpp/samples, 9 files), `native` (test/repr/cpp/native/samples: `subset.cpp`, one construct of each kind
 of §1's subset), `gxx-a` and `gxx-b` (test/repr/cpp/native/: of the recorded round-trip passes of g++.dg's every-10th sample, every
@@ -215,13 +220,13 @@ natively, without objects: 62 of 62 pass; dg over cpp26 and five modules files: 
 
 ## 5. What is left
 
-- **Sema's facts** of §4's classes, and the instantiation-dependent kinds (`S<int>::x` a type or a value by the specialization a
+- **Sema's facts** beyond §8's minimum (clang's builtin table, overload resolution, CTAD with packs or user guides), and the instantiation-dependent kinds (`S<int>::x` a type or a value by the specialization a
   program selects; a name declared only in a template's instance): a checker's work (CX12's), or classes.
 - **The tree level**: the native tree against the oracle's node for node (the fields the converter reads), as JN8's parse-check;
   mutants for the error recovery; the whole g++.dg compile corpus, libstdc++'s headers as a read corpus (the survey's stress test),
   the other corpora; CX11's exit: trees equal over the corpora or known.
-- **The grammar's remainder**: designated initializers in a function's argument (overload resolution's) and brace elision (the
-  `init-list-form` class: the elided braces restored by the members' types, which the skim now records: a next step), C++26's
+- **The grammar's remainder**: dump1.C's `typedef __future_base::_Ptr<_Result<_Res>> _Ptr_type;` (declined in that file's context,
+  read in every reduction tried; `native-decline`), C++26's
   contracts and reflection (clang 23 rejects them), header units (`import <h>;`: clang without `-fmodule-header` rejects them, so the
   parser does not read the header's names), Objective-C++, `__declspec`, nested functions, `asm` operands, `if consteval`'s forms
   (the converter's gap), generic lambdas' forms (the converter's gap).
@@ -265,3 +270,82 @@ the samples' round trip; no whole corpus, no gate):
 4. **The headers' cache** (§3.13).
 5. **The native reader as an option** of `roundtrip` and `dg` (§4); the native host configuration takes `-iquote`.
 
+
+## 8. Sema's minimum (cpp-sema, 2026-11-04)
+
+The recorded classes of §4 were facts of clang's Sema; for each the question was whether a port on the parser's side is bounded.
+The ports are `arbace.repr.cpp.sema` (`arbace/repr/cpp/sema.ae`, in the skim cache's key) with the parser's records, following
+clang's functions by name; type information only as far as they need it. A class's facts are kept in a map of its own under the
+entity's `:info`, filled as the parser skims the class's body (main file and headers): the fields (an anonymous union or struct a
+field of its own), their types and default member initializers, the bases with their access and virtuality, the current access,
+the constructors (user-declared, user-provided, explicit; their parameters' types and own template parameters), virtual functions,
+the special members by kind with their written exception specifications, a class template's parameters with their defaults; the
+id of the class (its class-key's token, shared by the skimmed and the parsed entity). Variables, parameters, value template
+parameters, typedefs and aliases record their types; a skimmed array bound keeps its text (`:sn`).
+
+- **`init-list-form`**: SemaInit.cpp's InitListChecker, CheckListElementTypes / CheckSubElementType / CheckImplicitInitList /
+  CheckStructUnionTypes / CheckArrayType / FillInEmptyInitializations: an aggregate's ([dcl.init.aggr]/1 by the standard's year:
+  user-declared or -provided constructors, virtual functions, non-public fields, bases) or an array's list in its semantic form; an
+  element that is an expression initializes the subobject when it can (a scalar, its own class, a string for a char array) and
+  otherwise the braces are elided ([dcl.init.aggr]/16): an implicit list from that element for the subobject, an array's as many as
+  its bound, a flexible array's the rest; the members a short list leaves out filled as clang's tree has them (a default member
+  initializer's `CXXDefaultInitExpr`, a class member's empty list, a scalar's value-initialization not appended), a base of a class
+  whose default constructor is not user-provided none. Also the mem-initializers' braced lists by the member's or the base's type,
+  a direct-initialization's `T x({...})` and `m({...})` of a class as its copy constructor's `CXXConstructExpr` over the list, a
+  designator naming an anonymous member's member, a non-overloaded function's braced argument. A list whose decision needs a type
+  not known (dependent, a call's, a header class template's) is left as written: in a template when an element's type is not known.
+- **`dependent-member`**: Sema::BuildMemberReferenceExpr's UnresolvedMemberExpr: in a class template (or a partial
+  specialization, a member of one defined outside it; templates with unnamed parameters too), a member function named through the
+  implicit or an explicit dependent object (`f()`, `this->f()`, `e->f()` with `e` of the current instantiation) or with a
+  type-dependent argument (`S2(0).s(*this)`, `f(u)` in a member template), when the name is an overload set or a template (the
+  scope marks a function declared twice `:ovl`) and not all static; a value named through a dependent using-declaration (`using
+  Base<T>::i;`). Probed against clang: one non-overloaded member function, a static overload set, are resolved.
+- **`defaulted-noexcept`**: SemaExceptionSpec's ResolveExceptionSpec when Sema::MarkFunctionReferenced uses the member, and
+  ComputeDefaultedSpecialMemberExceptionSpec: the uses the parser records (a variable's default construction, from `{}`, an
+  array's elements a list leaves out, `T()`, `T{}` of a class that is not an aggregate; a copy from an lvalue, a move from an xvalue
+  (`static_cast<T&&>`, `move(x)`), an implicit move of a local on return; a copy capture; an assignment; `==` and `!=`;
+  `__is_nothrow_constructible`; a user-provided constructor's definition default-constructing the members it does not initialize)
+  and the uses a defaulted or implicit member's definition makes of its bases' and members' members, a move falling back to a copy
+  when the class has no move ([class.copy.ctor]/8); the specification noexcept when every function it invokes is, noexcept(false)
+  else, unknown (left unevaluated) when a subobject's class or a constructor is not known. The parsed tree's defaulted members are
+  given the evaluated specification in their type after the unit (`patch-defaulted`).
+- **`ctad`**: SemaTemplateDeductionGuide's implicit guides and SemaTemplateDeduction's deduction from a call: the template's
+  constructors (with their own template parameters), the copy deduction candidate, a braced initializer's initializer-list
+  constructors first ([over.match.list]), an alias template's target's guides deducing the alias's parameters
+  ([over.match.class.deduct]/3), a member template of a specialization with the enclosing arguments; [temp.deduct.call]'s matching
+  (references and top-level cv dropped, arrays decayed, a template-id against the argument's type or its bases'), defaults for the
+  parameters not deduced; the type printed as clang prints it (a class's trailing default arguments omitted, an alias's in full).
+  Kept only when certain: one viable guide (or all deducing the same), every argument's type known, no user-declared guide, no pack.
+  A deduction from a closure (`Merged(l1, l2)` with lambdas, through its user guide) is a type with a closure in it: the converter's
+  text, as clang's.
+- **`deduced-type`**: a function's plain `auto` return deduced from a returned lambda-expression (outside templates): a closure type.
+- **`implicit-argument`**: a new-expression calling its class's `operator new` with a default argument: the argument clang adds.
+- **`builtin-signature`**: the `__sync` builtins overloaded on the pointee (Sema's BuiltinAtomicOverloaded: `__sync_fetch_and_add`
+  on an 8-byte pointee calls `__sync_fetch_and_add_8`; the size by LP64's table, a typedef's GNU `mode`). **Stays a class** for a
+  library function's redeclaration with the attributes of clang's builtin (`fprintf`'s parameters `_Nonnull`): that is clang's
+  table of library builtins (Builtins.td, with each one's header, signature and attributes), not on the host as source; a table of
+  hundreds of entries derived by probing clang would be data of clang's, not a port.
+- **`clang-recovery`**: `inline template <...>` read as clang's recovery reads it, the stray specifier dropped.
+
+Two parser gaps found on the way were fixed too: the injected-class-name as the argument of a type template parameter is the class
+([temp.local]/1: `__constrain_pkgdtask<packaged_task, _Fn>` in `packaged_task<_Res(_ArgTypes...)>`), and `...` after a parameter
+whose type names a parameter pack is a pack expansion, not C's ellipsis (`F(typename decay<B>::type...)`).
+
+The check, light (`native-check`, 4 jobs; every class's files before and after; "files" are the known files of the lists and the
+977-file sample together, 37 before):
+
+| class | before | after |
+|---|---|---|
+| `defaulted-noexcept` | 11 | 0 |
+| `init-list-form` | 10 | 0 |
+| `ctad` | 5 | 0 |
+| `dependent-member` | 5 | 0 (dump1.C's three differences: its unresolved call fixed; its other two parser gaps fixed; one decline left, `native-decline`) |
+| `builtin-signature` | 2 | 1 (pr45679-1_1.C: `_Nonnull`) |
+| `deduced-type` | 2 | 0 |
+| `implicit-argument` | 1 | 0 |
+| `clang-recovery` | 1 | 0 |
+| `native-decline` | - | 1 (dump1.C) |
+
+Numbers (2026-11-04): samples 9 of 9 (68 of 68 items); native 1 of 1 (30 of 30); gxx-a 62 of 62 (293 of 293); gxx-b 162 of 163
+(743 of 744), 1 known; gxx-26 38 of 38 (244 of 244); gxx-mod 109 of 109 (389 of 389); the 977-file sample 975 the same (5,133 of
+5,135 items) in 122 s, 2 known, 1 construct declined; no failure. `REPR_CPP_SEMA_DEBUG=1` says why a CTAD was not decided.
