@@ -1175,3 +1175,30 @@ native reader, and `read --reader native` the default.
 - **Not yet**: optimize > 0 is ignored; compile() of an AST object has no `PyAST_Validate` (test_ast: 113 of 217 equal); a codec other than UTF-8, ASCII and
   Latin-1 has no strict decoding errors; TokenizerIter reads its readline to the end first; `\N{}` names are the
   runtime's Unicode data.
+
+## As built: PY7-runtime (2026-11-04, the Mac VM, queue 201)
+
+The runtime causes PY6's close and PY6i left open, each with a program of `test/python/pyi/` (`p7-*.py`) equal to
+CPython 3.14.10:
+
+- **The C level's recursion check.** CPython 3.14 guards its recursive built-in calls with `_Py_EnterRecursiveCall`
+  and measures the machine's stack; pyi's built-ins recurse on Go's stack (a goroutine's at most 1 GB), which a deep
+  structure overflowed (a fatal Go error, PY6i's 10 driver crashes). pyi counts the guarded levels per thread
+  (`Thread.cdepth`, 10,000 of them): comparison, repr, str, a tuple's hash, isinstance's and issubclass's recursions,
+  and Go's calls into the machine (`Thread.run`, the eval loop entered from C). The message is CPython's form,
+  "Stack overflow (used N kB)WHERE", N a nominal 100 bytes a level (CPython's own N is the host's). The Python
+  frames' limit (`sys.setrecursionlimit`) is unchanged. test_re's test_stack_overflow is left: sre.go's matcher
+  recurses per repetition.
+- **Constants and docstrings:** `\N{NAME}` escapes the compiler's host does not know (aliases) resolved by the
+  runtime's Unicode data; docstrings of implicitly concatenated strs; a lambda's and a generator expression's lines.
+- **The data model's gaps:** `pow(a, b, m)` as `ternary_op`; an unbound built-in method called with no argument;
+  `dict.fromkeys` a class method; `dict.__reversed__`; `range.count`/`index`; bytes' `center`, `expandtabs`,
+  `istitle`; `float`/`complex.from_number`; memoryview's 1-D attributes, `count`, `index`, `toreadonly`; `__bytes__`
+  and `__buffer__` (PEP 688); `~bool`'s DeprecationWarning; `next()` of a generator with its return value;
+  `_operator._compare_digest`.
+- **The system calls:** `os.waitid`'s `WNOWAIT` without the pointer system call (`/proc/PID/stat`'s zombie status and
+  a pidfd waited on by epoll), so asyncio's subprocesses end; `os.sendfile` releases the GIL.
+- **The GIL's mutex** is a struct field again (goi takes a field's address as gc does, main 35b713ae).
+- **Finalization (PYS9 (a)) is not built yet:** goi does not run a `runtime.SetFinalizer` finalizer (a probe:
+  an object dropped, `runtime.GC()` twice, a second's wait, the finalizer never ran), so the finalizer queue
+  `:finalization-collect` needs goi's finalizers first, or a mark phase of pyi's own at `gc.collect()`.
