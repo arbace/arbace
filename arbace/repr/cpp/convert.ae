@@ -307,6 +307,11 @@
 
 (defn- prefix-words [n] (set (keep (fn [[k t]] (when (= k :id) t)) (prefix-tokens n))))
 
+(def ^:private qualifier-keywords
+  #{"struct" "class" "union" "enum" "typename" "friend" "template" "using" "namespace" "return" "new" "delete" "operator" "void" "bool"
+    "char" "int" "long" "short" "signed" "unsigned" "float" "double" "auto" "const" "volatile" "static" "extern" "inline" "virtual"
+    "explicit" "constexpr" "consteval" "constinit" "typedef" "export"})
+
 (defn- qualifier
   "The qualifier written before a declaration's name (`S::` of `int S::f()`), as name parts' text, or nil."
   ^String [n]
@@ -325,9 +330,11 @@
                              :else (recur (dec k) d)))
                      j)
                 k (when j2 (loop [k (long j2)] (if (and (pos? k) (let [c (.charAt s (int (dec k)))] (or (Character/isLetterOrDigit c) (= c \_) (> (int c) 127)))) (recur (dec k)) k)))]
-            (if (and k (< k j2))
-              (recur k k)
-              (when start (str/replace (subs s (int start) (int (:offset l))) #"\s+" ""))))
+            (cond
+              ;; a keyword before the :: is no qualifier: the :: is the global one (`friend struct ::X`, CX9's modules part)
+              (and k (< k j2) (= j2 j) (qualifier-keywords (subs s (int k) (int j2)))) (str/replace (subs s (int (- i 2)) (int (:offset l))) #"\s+" "")
+              (and k (< k j2)) (recur k k)
+              :else (when start (str/replace (subs s (int start) (int (:offset l))) #"\s+" ""))))
           (when start (str/replace (subs s (int start) (int (:offset l))) #"\s+" "")))))))
 
 (defn- decl-name
@@ -1336,6 +1343,27 @@
         (catch arbace.lang.ExceptionInfo _ r))
       r)))
 
+;; CX9's modules part: an explicit specialization's written template arguments (`template <> void f<int>() {}`: no parameter
+;; deduces T), the template-id read from the text after the name
+(defn- spec-fn-name [n]
+  (when (some #(= (kind %) "TemplateArgument") (kids n))
+    (when-let [l (plain (:loc n))]
+      (let [s ^String *src*
+            nm ^String (:name n)
+            o (long (:offset l))
+            e (+ o (count nm))]
+        (when (and (re-matches #"[A-Za-z_][A-Za-z0-9_]*" nm) (<= e (count s)) (= nm (subs s (int o) (int e))))
+          (let [i (loop [i e] (if (and (< i (count s)) (Character/isWhitespace (.charAt s (int i)))) (recur (inc i)) i))]
+            (when (and (< i (count s)) (= \< (.charAt s (int i))))
+              (when-let [j (loop [j i d 0]
+                             (when (< j (count s))
+                               (let [c (.charAt s (int j))]
+                                 (cond (#{\( \) \{ \} \;} c) (if (and (= c \() (pos? d)) (recur (inc j) d) (when (pos? d) (when-not (#{\{ \} \;} c) (recur (inc j) d))))
+                                       (= c \<) (recur (inc j) (inc d))
+                                       (= c \>) (if (= d 1) (inc j) (recur (inc j) (dec d)))
+                                       :else (recur (inc j) d)))))]
+                (name-of (str (qualifier n) (subs s (int o) (int j))))))))))))
+
 (defn fn-form [n]
   (let [k (kind n)
         ft (type-of (qt n))
@@ -1368,6 +1396,7 @@
             m (if (re-find #"\bnoexcept\b" (let [t (-> (or (ntext n) "") (str/replace #"//[^\n]*" "") (str/replace #"(?s)/\*.*?\*/" "")) i (.indexOf ^String t "{")] (if (neg? i) t (subs t 0 i)))) m (dissoc m :noexcept))]
         (addm f (cond-> (dissoc m :const :volatile :cpp/ref) declare? (assoc :cpp/declare true))))
       (let [nm (or (decl-name n) (gap :fn "a name"))
+            nm (or (spec-fn-name n) nm)
             ;; a conversion function's name is its return type, qualifiers included (clang's name drops them)
             nm (if (and (= k "CXXConversionDecl") (seq? nm) (= (first nm) 'operator) (= (second nm) 'conv) r (not= r (nth nm 2 nil)))
                  (with-meta (list 'operator 'conv r) (meta nm))
@@ -1386,7 +1415,7 @@
             (:isVirtual b) (assoc :virtual true))]
     (addm t m)))
 
-(declare members)
+(declare members items-of)
 
 (defn record-form [n ctx]
   (let [tag (symbol (str "cpp/" (:tagUsed n)))
@@ -1595,7 +1624,11 @@
                            (try (type-of (str/trim (-> w (str/replace #"^friend\s+" "") (str/replace #";\s*$" ""))))
                                 (catch arbace.lang.ExceptionInfo _ nil))))
                        (type-of (:qualType t))))]
-            [(list 'cpp/friend (first (decl-forms (first (kids n)) ctx)))])
+            ;; a friend naming a function template's specialization (`friend void ns::f<int>();`, CX9's modules part) is its
+            ;; declaration, the pattern clang links it to aside; a friend without forms is a gap, never (cpp/friend nil)
+            (let [d (first (kids n))
+                  d (if (and (= (kind d) "FunctionDecl") (contains? d :TemplateInstantiationPattern)) (dissoc d :TemplateInstantiationPattern) d)]
+              [(list 'cpp/friend (or (first (decl-forms d ctx)) (gap :friend "a declaration without forms")))]))
           ("FunctionTemplateDecl" "ClassTemplateDecl" "VarTemplateDecl" "TypeAliasTemplateDecl") [(template-form n ctx)]
           "ClassTemplateSpecializationDecl"
           (let [nm (decl-name n)
@@ -1622,6 +1655,9 @@
                        j))
                 outer (butlast (outer-headers t))
                 ki (or (first (filter #(#{"struct" "class" "union"} (tt ts %)) (range he (count ts)))) (gap :template "a partial specialization's keyword"))
+                ;; a requires-clause between the headers and the keyword is not read yet, as template-form's (CX9's modules part:
+                ;; its constraint expression is a child of the node, which record-form would write as a member)
+                _ (when (some #(= "requires" (tt ts %)) (range he ki)) (gap :template "a partial specialization's requires clause"))
                 ;; skip attributes between the keyword and the name
                 ni (loop [j (inc ki)]
                      (cond (= "[" (tt ts j)) (let [e (loop [k j d 0] (let [x (tt ts k)] (cond (nil? x) k (= x "[") (recur (inc k) (inc d)) (= x "]") (if (= d 1) (inc k) (recur (inc k) (dec d))) :else (recur (inc k) d))))] (recur e))
@@ -1675,11 +1711,13 @@
           ;; CX9, modules (SPEC §15): an export block's members in (cpp/export ...), one exported declaration's forms with
           ;; ^:export on the first; an import is the text's (module-lines), its node dropped
           "ExportDecl"
-          (let [[b] (or (rng n) (gap :module "an export in a macro"))
+          ;; its begin is enough (clang leaves the end of `export template <...> using T = Ts...[I];` empty)
+          (let [b (or (:offset (plain (:begin (:range n)))) (gap :module "an export in a macro"))
                 braced (re-find #"^export\s*\{" (text-at b (min (count *src*) (+ (long b) 64))))]
             (if braced
               [(apply list 'cpp/export (members n))]
-              (let [fs (vec (mapcat #(decl-forms % ctx outer?) (remove implicit? (kids n))))]
+              ;; the members as items, so that `export typedef struct {...} T;` keeps the class and its declarator one group (CP75 (b))
+              (let [fs (vec (mapcat :fs (items-of (kids n) ctx)))]
                 (if (seq fs) (assoc fs 0 (vary-meta (first fs) assoc :export true)) (gap :module "an empty export")))))
           "ImportDecl" []
           [(text-form n k true)])
@@ -1870,7 +1908,8 @@
   `export import a.b;`, `import :p;`, `import <h>;`), each a line of its own outside comments: [{:off :end :form}], placed
   between the items as the directives are. One the forms do not spell is a text form."
   [^String s]
-  (let [m (re-matcher #"(?m)^[ \t]*((export[ \t]+)?(module|import)\b[^;\n{}]*;)" s)
+  ;; a line whose ; a macro writes (`module :private SEMI`, pmp-6.C) is matched to its end and kept as a text form
+  (let [m (re-matcher #"(?m)^[ \t]*((export[ \t]+)?(module|import)\b[^;\n{}]*;|(export[ \t]+)?(?:module|import)[ \t]+[:A-Za-z_<\"][^;\n{}()=,/]*?(?=[ \t]*(?://[^\n]*)?$))" s)
         cmts (let [v (java.util.ArrayList.)]
                (loop [i 0]
                  (when (< i (.length s))
