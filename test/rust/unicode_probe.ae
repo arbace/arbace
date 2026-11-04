@@ -1,0 +1,90 @@
+;; The probe of repr/rust's Unicode tables (doc/rust/NATIVE-READER.md, "Unicode"; bin/rust-unicode probe):
+;; the native lexer's character classes against rustc 1.99.1's.
+;;
+;; Usage: arbace test/rust/unicode_probe.ae write DIR [boundaries|all]
+;;          DIR/start.rs: one line per probe character c (`all`: every non-ASCII code point of planes 0-3 and 14 and the edges of the rest, else the
+;;          boundaries of the generated ranges, each one beyond them and some inside), the line `c`;
+;;          DIR/cont.rs: the line `ac`;
+;;          DIR/ident.rs: a Rust file that binds, with `let`, each probe character that is XID_Start as an
+;;          identifier and `a` + each that is XID_Continue (its identifiers go through NFC, the NFD forms
+;;          of the same names too), for bin/repr-rust native-check against the helper.
+;;        arbace test/rust/unicode_probe.ae compare DIR START-ERRORS CONT-ERRORS
+;;          START-ERRORS, CONT-ERRORS: rustc's `-Z parse-crate-root-only --error-format=short` output on
+;;          start.rs and cont.rs (rustc's lexer is done before its parser, so the lexer's "unknown start of
+;;          token" errors are all there): the lines rustc reports against the lines on which the native
+;;          lexer (arbace.repr.rust.lex/token-trees) throws; exits 1 on a difference.
+;; (bin/rust-unicode probe runs it all.)
+
+(ns rust-unicode-probe
+  (:require [arbace.string :as str]
+            [arbace.repr.rust.lex :as lx]
+            [arbace.repr.rust.unicode :as uc]))
+
+(defn- cp-str ^String [c] (String. (int-array [c]) 0 1))
+
+(defn- probe-cps
+  "the code points to probe: all of them, or the boundaries of the three tables"
+  [all?]
+  (let [surrogate? #(and (>= % 0xD800) (<= % 0xDFFF))
+        ok #(and (>= % 128) (<= % 0x10FFFF) (not (surrogate? %)))]
+    (if all?
+      ;; every code point of planes 0-3 and 14 (the planes with assigned characters) and the edges of the
+      ;; rest (rustc reports an error per unassigned character, minutes for the million of them)
+      (filterv ok (concat (range 128 0x40000) (range 0xE0000 0xE1000)
+                          [0x40000 0xF0000 0xFFFFD 0xFFFFE 0xFFFFF 0x100000 0x10FFFD 0x10FFFE 0x10FFFF]))
+      (let [;; boundaries: found by scanning, a change of class between neighbours
+            cls (fn [c] [(uc/xid-start? c) (uc/xid-continue? c) (uc/emoji-char? c)])
+            edges (loop [c 129 acc (transient #{128 0x10FFFF 0xA0 0x85 0x2028 0x2029 0x200C 0x200D 0x200E 0x200F 0xFEFF 0x2795 0x2796 0x1F600})]
+                    (if (> c 0x10FFFF)
+                      (persistent! acc)
+                      (recur (inc c) (if (not= (cls c) (cls (dec c))) (conj! (conj! acc c) (dec c)) acc))))]
+        (->> edges (filter ok) sort vec)))))
+
+(defn- nfd ^String [^String s] (java.text.Normalizer/normalize s java.text.Normalizer$Form/NFD))
+
+(defn- write [dir all?]
+  (let [cps (probe-cps all?)
+        cs (map cp-str cps)]
+    (spit (str dir "/start.rs") (str (str/join "\n" cs) "\n"))
+    (spit (str dir "/cont.rs") (str (str/join "\n" (map #(str "a" %) cs)) "\n"))
+    (let [lets (mapcat (fn [c s]
+                         (concat (when (uc/xid-start? c) [s (nfd s)])
+                                 (when (uc/xid-continue? c) [(str "a" s) (str "a" (nfd s))])))
+                       cps cs)
+          lets (distinct lets)]
+      (spit (str dir "/ident.rs")
+            (str "fn main() {\n" (str/join "\n" (map #(str "    let " % " = 0;") lets)) "\n}\n")))
+    (println (count cps) "probe characters")))
+
+(defn- rustc-error-lines
+  "the line numbers of the `unknown start of token` errors of a rustc short-format output"
+  [file]
+  (set (keep (fn [l] (when-let [m (re-find #":(\d+):\d+: error: unknown start of token" l)] (Long/parseLong (second m))))
+             (str/split-lines (slurp file)))))
+
+(defn- native-error-lines [file]
+  (loop [ls (str/split-lines (slurp file)) i 1 acc #{}]
+    (if-let [[l & more] (seq ls)]
+      (recur more (inc i)
+             (if (try (lx/token-trees (lx/source (str "\n" l)) 2024 :shebang-and-frontmatter) false
+                      (catch Exception e (if (:rust-lex (ex-data e)) true (throw e))))
+               (conj acc i) acc))
+      acc)))
+
+(defn- compare-lines [dir start-errs cont-errs]
+  (let [bad (atom 0)]
+    (doseq [[nm errs] [["start" start-errs] ["cont" cont-errs]]]
+      (let [file (str dir "/" nm ".rs")
+            r (rustc-error-lines errs)
+            n (native-error-lines file)
+            lines (vec (str/split-lines (slurp file)))
+            show (fn [i] (let [s (nth lines (dec i))] (str "U+" (format "%04X" (.codePointAt ^String s (dec (count s)))))))]
+        (println (str nm ".rs") (count lines) "lines:" (count r) "rejected by rustc," (count n) "by the native lexer")
+        (doseq [i (sort (remove n r))] (swap! bad inc) (println "  rustc rejects, native accepts:" (show i)))
+        (doseq [i (sort (remove r n))] (swap! bad inc) (println "  native rejects, rustc accepts:" (show i)))))
+    (if (zero? @bad) (println "equal") (do (println @bad "differences") (System/exit 1)))))
+
+(let [[cmd & args] *command-line-args*]
+  (case cmd
+    "write" (write (first args) (= "all" (second args)))
+    "compare" (let [[dir s c] args] (compare-lines dir s c))))

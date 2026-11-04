@@ -83,7 +83,12 @@ code. Three kinds of things live here:
   `compiler/rustc_lexer`, `rustc_parse`'s `lexer/` and `parser/`, parts of `rustc_ast` and `rustc_span`
   and the escapes' checks of the crate rustc-literal-escaper 0.0.8 (LICENSE.md names the files; MIT OR
   Apache-2.0), by hand on 2026-11-04, each file's header naming its sources (doc/rust/NATIVE-READER.md);
-  the rest of `repr/rust/` is Arbace's own.
+  `repr/rust/unicode.ae` is generated (`bin/rust-unicode`, `test/rust/unicode_gen.ae`) from the tables of the
+  crates unicode-ident 1.0.24 (`src/tables.rs`: XID_Start, XID_Continue; MIT OR Apache-2.0 and the Unicode
+  License V3) and unicode-properties 0.1.4 (`src/tables.rs`: `EMOJI_STATUS`; MIT OR Apache-2.0), both from
+  https://crates.io, the versions and checksums of rustc 1.99.1's `Cargo.lock` (SHA-256
+  `e6e4313c...47da75` and `7df058c7...f8d71d`, `tools/rsdump/unicode-crates.sha256`), on 2026-11-04
+  (LICENSE.md); the rest of `repr/rust/` is Arbace's own.
 - Arbace's own namespaces of the program, not derived from Clojure: `box.ae` and `box/`
   (`arbace.box`, the store, over its host layer `arbace.box.host`; the box's build driver
   `arbace.box.build`, its plan `arbace.box.plan` (since GP2 also repr/go's native loader's go
