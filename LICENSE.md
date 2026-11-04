@@ -317,6 +317,17 @@ covers what.
   out (deflate_rle, Z_FIXED, the gzip wrapper, inflate's gzip header), zlib's C (deflate.c, trees.c, inflate.c,
   inftrees.c): Copyright (C) 1995-2026 Jean-loup Gailly and Mark Adler, and the Arbace authors for the port, under the
   zlib License (section "zlib: zlib License" below).
+- `go/arbace/expat.ae`, `go/arbace/expat/` (queue 202e: expat for pyi's module `pyexpat`): Expat 2.9.0 (`Modules/expat/`
+  of the CPython 3.14.10 release tarball, https://www.python.org/ftp/python/3.14.10/Python-3.14.10.tar.xz, SHA-256
+  `de414a57...b72032`; xmlparse.c's first line names Expat's commit `e3ca8454...` "2.9.0+"), its `xmlparse.c`,
+  `xmltok.c`, `xmltok_impl.c`, `xmltok_ns.c`, `xmlrole.c`, `xcs.c`, `siphash.h` and the headers they need ported to Go
+  statement for statement; and `go/arbace/py/builtins_pyexpat.ae`, a port of the same tarball's `Modules/pyexpat.c`
+  (under the PSF License Agreement, section "CPython: the PSF License Agreement for Python 3.14" below). Expat:
+  Copyright (c) 1998-2000 Thai Open Source Software Center Ltd and Clark Cooper, Copyright (c) 2001-2025 Expat
+  maintainers, each file with its own list of copyright holders, and the Arbace authors for the port, under the MIT
+  License (section "Expat: MIT License" below); but `go/arbace/expat/siphash.ae`, siphash.h's port (SipHash-2-4 by
+  William Ahern after Jean-Philippe Aumasson's and Daniel J. Bernstein's reference implementation), under the CC0 1.0
+  Universal Public Domain Dedication its notice states (https://creativecommons.org/publicdomain/zero/1.0/).
 - `overlay/jdk/`: jrt's own Java sources and Go-build variants of JDK classes (doc/go/JRT-NOTES.md,
   "Phase 2C"; `overlay/jdk/javac/`, those of javac's tool build, doc/classes/JAVA-FRONTEND-SURVEY.md,
   JN2), written for Arbace in place of jdk26u's files of the same names (from their
@@ -2827,6 +2838,35 @@ DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
 THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
 THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+```
+
+## Expat: MIT License
+
+The `COPYING` of Expat 2.9.0 as CPython 3.14.10 vendors it (`Modules/expat/COPYING`); it covers `go/arbace/expat.ae`
+and `go/arbace/expat/` (above):
+
+```
+Copyright (c) 1998-2000 Thai Open Source Software Center Ltd and Clark Cooper
+Copyright (c) 2001-2025 Expat maintainers
+
+Permission is hereby granted, free of charge, to any person obtaining
+a copy of this software and associated documentation files (the
+"Software"), to deal in the Software without restriction, including
+without limitation the rights to use, copy, modify, merge, publish,
+distribute, sublicense, and/or sell copies of the Software, and to
+permit persons to whom the Software is furnished to do so, subject to
+the following conditions:
+
+The above copyright notice and this permission notice shall be included
+in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
 ## CPython: the PSF License Agreement for Python 3.14
