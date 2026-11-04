@@ -224,8 +224,7 @@ regenerates `arbace/lang/go/CompilerNodes.ae` from the changed definitions.
   run failed, `MethodTooLargeException` compiling `arbace/j2g/dyn.clj`, `forms`' static
   initializer past the JVM's 64 KB with dynConvert's one more quoted form; dynConvert's form is
   now a fn of its own (`dyn-convert-form`), j2g's output byte for byte the same (a slice run's
-  `gen/` tree compared); its second run was not finished when this was written (the night's
-  gate runs it).
+  `gen/` tree compared); its second run passed: `jdk/edge.edn` is the JVM's answer.
 
 ## The night's proof
 
