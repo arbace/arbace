@@ -55,7 +55,12 @@ code. Three kinds of things live here:
   2026-11-04 (the tarball names the Alex and Happy sources `*.x.source`, `Parser.y.source`), the files
   carrying GHC's notice; `tables.ae` is generated from the tarball's `Parser.y.source` by
   `happy.ae`, Arbace's own port of Happy's LALR(1) construction, checked equal to the tables of the
-  tarball's `Parser.hs` (Happy 1.20.1.1's output); `ast.ae`, `parse.ae`, `native.ae` are Arbace's own),
+  tarball's `Parser.hs` (Happy 1.20.1.1's output); `doc.ae` ports `GHC/Utils/Ppr.hs` and Outputable's
+  combinators, `errors.ae` the parser's messages (`GHC/Parser/Errors/Ppr.hs`, `GHC/Types/Hint/Ppr.hs`, the
+  codes of `GHC/Types/Error/Codes.hs`, the printing of `GHC/Types/Error.hs`, `GHC/Utils/Error.hs`,
+  `GHC/Driver/Errors.hs`, `GHC/Utils/Logger.hs`), `pprhs.ae` the Outputable instances of the parsed tree
+  (`GHC/Hs/{Expr,Pat,Type,Lit,Binds,Decls}.hs`, `GHC/Parser/Types.hs`), the same day; `ast.ae`,
+  `parse.ae`, `native.ae`, `mutate.ae` are Arbace's own),
   `repr/c/` (repr/c, C's bridge,
   `arbace.repr.c.*`; doc/C23-SURVEY.md, doc/c/SPEC.md: its lexer and preprocessor, `repr/c/lex.ae` and
   `pp.ae`, are ports of modernc.org/cc/v4 v4.29.7 as go-whim carries it, https://github.com/arbace/go-whim

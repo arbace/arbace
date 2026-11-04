@@ -611,8 +611,15 @@ covers what.
   Haskell Compiler License" below). `arbace/repr/haskell/tables.ae` is generated from that tarball's
   `compiler/GHC/Parser.y.source` (its grammar, the same Glasgow license) by `happy.ae`, Arbace's own port of
   Happy's LALR(1) construction (no Happy code: Happy is a tool, its tables in GHC's generated
-  `Parser.hs` the check); `happy.ae`, `ast.ae`, `parse.ae` and `native.ae` are Arbace's own, under the
-  Eclipse Public License 1.0.
+  `Parser.hs` the check); `happy.ae`, `ast.ae`, `parse.ae`, `native.ae` and `mutate.ae` are Arbace's own,
+  under the Eclipse Public License 1.0. `arbace/repr/haskell/doc.ae`, `errors.ae` and `pprhs.ae` (the
+  native reader's messages, doc/haskell/NATIVE.md, "Messages") port from the same tarball
+  `compiler/GHC/Utils/Ppr.hs` (GHC's copy of the pretty library's HughesPJ printer) and the combinators of
+  `GHC/Utils/Outputable.hs`, `GHC/Parser/Errors/Ppr.hs`, `GHC/Types/Hint/Ppr.hs`, the parser's codes of
+  `GHC/Types/Error/Codes.hs`, the printing of `GHC/Types/Error.hs`, `GHC/Utils/Error.hs`,
+  `GHC/Driver/Errors.hs`, `GHC/Utils/Logger.hs` and the Outputable instances of
+  `GHC/Hs/{Expr,Pat,Type,Lit,Binds,Decls}.hs` and `GHC/Parser/Types.hs`, by hand on 2026-11-04, each file
+  carrying GHC's notice (the Glasgow license, below).
 - `decodeUTF16` and `encodeUTF16` in `go/arbace/jrt/codec.ae`, and `indent`, `stripIndent` and
   `translateEscapes` in `go/arbace/jrt/string.ae`: jrt's hand-written Go forms following the code
   of https://github.com/openjdk/jdk26u at `baf63fb`
