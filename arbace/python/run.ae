@@ -28,7 +28,8 @@
 
 (def ^:private compiler-digest
   (delay (sha256 (apply str (for [f ["arbace/python/compile.ae" "arbace/python/ir.ae" "arbace/python/scope.ae"
-                                     "arbace/python/run.ae" "arbace/repr/python/convert.ae" "tools/pydump/pydump.py"]
+                                     "arbace/python/run.ae" "arbace/repr/python/convert.ae" "tools/pydump/pydump.py"
+                                     "tools/pyi/ast_json.py"]
                                   :let [ff (File. (str root "/" f))] :when (.exists ff)]
                               (str f "\u0000" (slurp ff) "\u0000"))))))
 
@@ -96,6 +97,17 @@
   [form]
   (second (drop-while #(not= :pos %) form)))
 
+(defn- ast-answer
+  "compile()'s PyCF_ONLY_AST (mode \"ast:MODE:FLAGS:FEATURE:OPTIMIZE\"): the host's CPython parses (tools/pyi/ast_json.py,
+  the reader until PY9's native one), \"AST:\" and the tree as JSON, or the SyntaxError answer (PY6h's REQUEST, queue 200)"
+  [mode file source]
+  (let [[_ m flags feature opt] (str/split mode #":")
+        r (sh/sh "python3" "-I" "-S" "-B" (str root "/tools/pyi/ast_json.py") (or file "<unknown>") m flags feature opt
+                 :in source)]
+    (if (and (zero? (:exit r)) (seq (:out r)))
+      (:out r)
+      (str "SystemError: pyi's ast reader: " (str/replace (str (:err r)) #"\n" " ")))))
+
 (defn- compile-uncached [mode source]
   (let [form (read-dump source)]
     (cond
@@ -115,8 +127,8 @@
         cf (File. (str work "/ir-cache/" (subs key 0 2) "/" key))]
     (if (.exists cf)
       (slurp cf)
-      (let [r (compile-uncached mode source)]
-        (when (or (str/starts-with? r "{") (= r "incomplete") (str/starts-with? r "SyntaxError: "))
+      (let [r (if (str/starts-with? mode "ast:") (ast-answer mode file source) (compile-uncached mode source))]
+        (when (or (str/starts-with? r "{") (str/starts-with? r "AST:") (= r "incomplete") (str/starts-with? r "SyntaxError: "))
           (.mkdirs (.getParentFile cf))
           (let [tmp (File. (str (.getPath cf) ".tmp" (swap! counter inc)))]
             (spit tmp r)
