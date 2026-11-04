@@ -3279,6 +3279,26 @@ the nightly tier every step over its subset plus a rotating slice, seven nights;
 checking the rotation's record; the C subset rule for every crop; Go's coverage builds kept by key, run at night; synthetic
 corpora against the same references; Java's `speed` curation inside GT8; acceptance as GTS209.
 
+## Decided (2026-11-04, the user): fitting the clean run into one night (GTS227-GTS230)
+
+The analysis (`.tmp/night5/clean-fit.md`, not committed; its estimates): the four crops' clean run serially about
+14.5-18 h (C's four read checks whole, 223 min on the old stage 0; `gate-tests` and C's essential chain; a fresh clone's
+1.35x over the store's medians, Java's levels 1.7x); under 10 h (about 9-9.5 h) only with two memory lanes and Java's
+compiled level on a subset. The user's decisions, each (a):
+
+- **GTS227 Two memory lanes in the clean run.** Lane 1 the big-memory steps one at a time (Java's levels, peaks 48-50 GiB:
+  `java-interp`'s declaration, 2 GiB and not heavy, corrected), lane 2 the small-memory heavy steps beside it (C's seven
+  full checks, 2-9 GiB, CPU-bound); code in `bin/gate` and `bin/lib/gate-run.bash` before the clean run's night.
+- **GTS228 Java's compiled level on its coverage subset** (GTS205 (a)'s rule) in the nightly and clean tiers, from night
+  4's Java compiled coverage; the rest rotates.
+- **GTS229 C's read checks timed after the re-seed** (tokens, tree, annotations, round trip), proxy subsets decided then
+  if they still do not fit.
+- **GTS230 The rotation's record:** one keyed `--full` of the rotated parts on the re-seed's night (a whole run counts for
+  every slice), so the clean run finds the rotation complete.
+
+GTS231-GTS234 (the parked parts if lane 1 fits; the clean clone's caches empty; nothing reused from v2's record; the
+second night for failures only) stand as proposed, recommended (a), not yet asked.
+
 ## Decided (2026-11-04, the user): the day and the night (GTS224-GTS226, amending GTS209)
 
 The night shift is nominally 12 hours, 19:00 to 07:00 UTC: gating, testing, working out details and fixing the bugs the
