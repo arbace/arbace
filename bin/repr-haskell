@@ -109,7 +109,16 @@
 #                                 DIR a corpus package or test:SUBDIR of test/haskell/): each module
 #                                 dumped by the helper (mode :lines), read natively, the trees and
 #                                 header pragmas compared as data, then both converted and the forms
-#                                 compared as text; report .tmp/repr-haskell/native-check/report.edn
+#                                 compared as text; report .tmp/repr-haskell/native-check/report.edn;
+#                                 a module the helper rejects compared by its messages (below)
+#   bin/repr-haskell native-check --errors [--count N] [--seed S] [LIST]
+#                                 the parser's messages (doc/haskell/NATIVE.md, "Messages"): each
+#                                 module of LIST, the rejected samples of test/haskell/errors/ (their
+#                                 flags in its errors.txt) and N mutants (default 10, seed 1) of each
+#                                 listed module that needs no preprocessing (arbace.repr.haskell.mutate)
+#                                 given to the helper's errors verb (what ghc -fno-code prints) and
+#                                 read natively, the texts compared; report
+#                                 .tmp/repr-haskell/errors-check/report.edn
 #   bin/repr-haskell test         the spec's cases (test/haskell/; bin/lib/repr-haskell/test): the
 #                                 reader's samples, the worked example converted and its round trip,
 #                                 the interface level's normalizations (test/haskell/iface/), the
@@ -694,6 +703,73 @@ native_check() {
   arbace_tool -m arbace.repr.haskell.native check --list "$w/list.txt" --report "$w/report.edn"
 }
 
+# errors_check [--count N] [--seed S] [LIST]: the messages' check (native-check --errors)
+errors_check() {
+  local count=10 seed=1 list=$root/test/haskell/native-check.txt w=$rh/errors-check
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --count) count=$2; shift 2 ;;
+      --seed) seed=$2; shift 2 ;;
+      *) list=$1; shift ;;
+    esac
+  done
+  corpus_fetch ghc-9.14.1 > "$TMPDIR/repr-haskell-fetch.txt"
+  rm -rf "$w"; mkdir -p "$w/base" "$w/m"
+  local pl; pl=$(mktemp "$TMPDIR/repr-haskell-plan.XXXXXX")
+  corpus_plan ghc-9.14.1 all > "$pl"
+  : > "$w/list.txt"; : > "$w/bases.txt"
+  local d f rest hargs mf dir flags key
+  # the rejected samples (test/haskell/errors/errors.txt: FILE [FLAG...])
+  if [ -f "$root/test/haskell/errors/errors.txt" ]; then
+    mkdir -p "$w/src/errors"; cp -R "$root/test/haskell/errors/." "$w/src/errors/"
+    while read -r f rest; do
+      case $f in ''|'#'*) continue ;; esac
+      flags=${rest:--XGHC2021}
+      # shellcheck disable=SC2086
+      (cd "$w/src/errors" && "$helper" errors -o "$w/errors/errors" --libdir "$libdir" --ghc $flags --files "$f") 2>> "$w/helper.err" || true
+      printf '%s %s %s %s %s\n' "$w/errors/errors/$f.errors" "$w/errors/errors/$f.errors.hspp" "$f" "$w/src/errors" "$flags" >> "$w/list.txt"
+    done < "$root/test/haskell/errors/errors.txt"
+  fi
+  while read -r d f rest; do
+    case $d in ''|'#'*) continue ;; esac
+    hargs=""
+    if [ "${d#test:}" != "$d" ]; then
+      dir=$w/src/${d#test:}; flags=${rest:--XGHC2021 -haddock}; key=test/${d#test:}
+      [ -d "$dir" ] || { mkdir -p "$dir" && cp -R "$root/test/haskell/${d#test:}/." "$dir/"; }
+    else
+      IFS=$'\t' read -r _ dir flags _ hargs < <(grep -P "^$d\t" "$pl")
+      [ -n "$dir" ] || { echo "repr-haskell: native-check --errors: no package $d" >&2; continue; }
+      dir=$srcroot/$dir; key=$d
+    fi
+    mf=$f; [ "${f%.hsc}" != "$f" ] && mf=${f%c}
+    # shellcheck disable=SC2086
+    (cd "$dir" && "$helper" errors -o "$w/errors/$key" --libdir "$libdir" --repo "$root" $hargs --ghc $flags --files "$f") 2>> "$w/helper.err" || true
+    printf '%s %s %s %s %s\n' "$w/errors/$key/$mf.errors" "$w/errors/$key/$mf.errors.hspp" "$mf" "$dir" "$flags" >> "$w/list.txt"
+    # mutants of a module GHC parses as it is (no preprocessing)
+    if [ "$mf" = "$f" ] && [ -f "$w/errors/$key/$mf.errors.hspp" ] && cmp -s "$dir/$f" "$w/errors/$key/$mf.errors.hspp" &&
+       [ "${f%.hs}" != "$f" ]; then
+      mkdir -p "$(dirname "$w/base/$key/$f")"; cp "$dir/$f" "$w/base/$key/$f"
+      printf '%s\t%s\t%s\n' "$key" "$f" "$flags" >> "$w/bases.txt"
+    fi
+  done < "$list"
+  rm -f "$pl"
+  if [ "$count" -gt 0 ] && [ -s "$w/bases.txt" ]; then
+    # shellcheck disable=SC2046
+    (cd "$w/base" && arbace_tool -m arbace.repr.haskell.mutate --seed "$seed" --count "$count" -o "$w/m" \
+       $(cut -f1,2 "$w/bases.txt" | tr '\t' /)) > "$w/mutants.txt"
+    local k ms
+    while IFS=$'\t' read -r key f flags; do
+      mapfile -t ms < <(grep -F "$key/$f/m" "$w/mutants.txt")
+      # shellcheck disable=SC2086
+      (cd "$w/m" && "$helper" errors -o "$w/errors-m" --libdir "$libdir" --ghc $flags --files "${ms[@]}") 2>> "$w/helper.err" || true
+      for k in "${ms[@]}"; do
+        printf '%s %s %s %s %s\n' "$w/errors-m/$k.errors" "$w/errors-m/$k.errors.hspp" "$k" "$w/m" "$flags" >> "$w/list.txt"
+      done
+    done < "$w/bases.txt"
+  fi
+  arbace_tool -m arbace.repr.haskell.native errors --list "$w/list.txt" --report "$w/report.edn" --quiet 1
+}
+
 cmd=${1:-}
 [ $# -gt 0 ] && shift
 case $cmd in
@@ -750,7 +826,8 @@ case $cmd in
     fi ;;
   print) arbace_tool -m arbace.repr.haskell print --jobs "$jobs" "$@" ;;
   roundtrip) ghc_check; roundtrip "$@" ;;
-  native-check) ghc_check; build; native_check "$@" ;;
+  native-check) ghc_check; build
+                if [ "${1:-}" = --errors ]; then shift; errors_check "$@"; else native_check "$@"; fi ;;
   tables) ghc_check; tables "$@" ;;
   test) exec "$root/bin/lib/repr-haskell/test" "$@" ;;
   *) sed -n '2,/^set -euo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 2 ;;

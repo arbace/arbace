@@ -24,6 +24,11 @@
 --       one OUTDIR/FILE.hspp per module: the text GHC parses (CPP's output, unlit's, hsc2hs's),
 --       which repr/haskell's native reader reads (arbace.repr.haskell.native), and
 --       OUTDIR/FILE.hspp.edn, the dump's (hsdump/config {...}) of it (the preprocessing's keys)
+--   hsdump errors -o OUTDIR [--libdir DIR] [--ghc FLAG... --files] FILE...
+--       one OUTDIR/FILE.errors per module: the parser's messages of a module GHC rejects, as
+--       ghc -fno-code prints them (the driver's header parse, parseHeader, then the module's
+--       parse: its warnings, then its errors; GHC's own printMessages and log action), empty for a
+--       module it accepts; and OUTDIR/FILE.errors.hspp, the text parsed (doc/haskell/NATIVE.md)
 -- FILE is relative to the current directory (the package's directory: it is the file name of
 -- every span). R6: an .hsc FILE is run through the host's hsc2hs first (--hsc2hs-arg A, repeated:
 -- its arguments; the output X.hs written beside X.hsc, as Cabal's build writes it, recorded in
@@ -40,9 +45,13 @@ import GHC.Driver.Config.Parser (initParserOpts, supportedLanguagePragmas)
 import GHC.Driver.Pipeline (preprocess)
 import GHC.Driver.Errors.Types (DriverMessages, DriverMessage)
 import GHC.Parser.Errors.Types (PsMessage)
-import GHC.Utils.Logger (LogAction, Logger, pushLogHook, setLogFlags)
+import GHC.Utils.Logger (LogAction, Logger, pushLogHook, setLogFlags, defaultLogActionWithHandles)
+import GHC.Driver.Config.Diagnostic (initDiagOpts)
+import GHC.Driver.Errors (printMessages)
+import GHC.Types.Error (Messages, partitionMessages, isEmptyMessages, unionMessages, NoDiagnosticOpts(..))
+import System.IO.Unsafe (unsafePerformIO)
 import GHC.Driver.Config.Logger (initLogFlags)
-import GHC.Parser.Lexer (ParserOpts, initParserState, initPragState, unP, lexer, lexTokenStream, ParseResult(..), Token(..), getPsErrorMessages)
+import GHC.Parser.Lexer (ParserOpts, initParserState, initPragState, unP, lexer, lexTokenStream, ParseResult(..), Token(..), getPsErrorMessages, getPsMessages)
 import qualified GHC.Parser as P
 import GHC.Parser.Header (toArgs)
 import GHC.Data.StringBuffer (StringBuffer, hGetStringBuffer, lexemeToString, atLine, stringToStringBuffer)
@@ -210,6 +219,21 @@ main = do
               B.writeFile out (pText p)
               cfg <- configOf o libdir (fromMaybe "" ghcUnit) dflags2 p
               withUtf8File outc $ \h -> hPutBuilder' h (cfg <> BB.char7 '\n')
+        -- the parser's messages as ghc -fno-code prints them (a rejected module's), from the
+        -- failure parseText recorded
+        "errors" -> do
+          out <- outFile o file ".errors"
+          fl <- readIORef failureRef
+          writeIORef failureRef Nothing
+          case (res, fl) of
+            (Left _, Just (dfl, text, msgs)) -> do
+              B.writeFile (out ++ ".hspp") text
+              withFile out WriteMode $ \h -> do
+                hSetEncoding h utf8
+                let lg = pushLogHook (const (defaultLogActionWithHandles h h)) (setLogFlags (hsc_logger hsc_env) (initLogFlags dfl))
+                forM_ msgs (printMessages lg NoDiagnosticOpts (initDiagOpts dfl))
+            (Left msg, Nothing) -> withUtf8File out $ \h -> hPutStrLn h ("hsdump/error " ++ firstLine msg)
+            (Right p, _) -> B.writeFile out B.empty >> B.writeFile (out ++ ".hspp") (pText p)
         v -> hPutStrLn stderr ("hsdump: unknown verb " ++ v) >> exitWith (ExitFailure 2)
   n <- readIORef failures
   when (n > 0) $ exitWith (ExitFailure 1)
@@ -435,9 +459,28 @@ parseText hsc_env dflagsIn file src text cpp view lit hsc = do
         POk _ ts -> Right ts
         PFailed _ -> Left "the lexer's token stream failed"
   -- a signature by GHC's parseSignature (R6), any other module by parseModule
-  case unP (if isSignature file then P.parseSignature else P.parseModule) st of
-    POk _ m -> return (Right (ModP m src text prags cpp dflags toks view lit hsc))
-    PFailed pst -> return (Left ("parse failed: " ++ showSDocUnsafe (pprMessages (defaultDiagnosticOpts @PsMessage) (getPsErrorMessages pst))))
+  -- the driver's order (GHC.Driver.Make's summarise, then hscParse'): the header (getImports'
+  -- parseHeader) first, its errors alone; then the module, its warnings and then its errors when
+  -- the parse fails, its errors alone when it succeeds with errors (recorded for the errors verb)
+  let failure ms = do
+        writeIORef failureRef (Just (dflags, text, ms))
+        return (Left ("parse failed: " ++ showSDocUnsafe (pprMessages (defaultDiagnosticOpts @PsMessage) (last ms))))
+  case unP P.parseHeader st of
+    PFailed pst -> failure [getPsErrorMessages pst]
+    POk pst _ | not (isEmptyMessages (getPsErrorMessages pst)) -> failure [getPsErrorMessages pst]
+    _ -> case unP (if isSignature file then P.parseSignature else P.parseModule) st of
+      POk pst m
+        | not (isEmptyMessages (getPsErrorMessages pst)) -> failure [getPsErrorMessages pst]
+        | otherwise -> return (Right (ModP m src text prags cpp dflags toks view lit hsc))
+      PFailed pst -> let (ws, es) = getPsMessages pst
+                         (wWarns, wErrs) = partitionMessages ws
+                     in failure [wWarns, es `unionMessages` wErrs]
+
+-- the failure of the last module parsed: its flags, the text parsed and the messages ghc prints
+-- (the errors verb's; a helper of one thread)
+{-# NOINLINE failureRef #-}
+failureRef :: IORef (Maybe (DynFlags, B.ByteString, [Messages PsMessage]))
+failureRef = unsafePerformIO (newIORef Nothing)
 
 bufferOf :: B.ByteString -> StringBuffer
 bufferOf = stringToStringBuffer . decodeUtf8

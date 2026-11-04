@@ -215,7 +215,8 @@
 
 (def ^:private slot-index
   {:cs 0 :n 1 :pos 2 :line 3 :col 4 :file 5 :lex 6 :ctx 7 :exts 8 :last-tk 9 :last-loc 10
-   :last-len 11 :prev-loc 12 :hdk 13 :errors 14 :srcfiles 15 :warnings 16 :file0 17})
+   :last-len 11 :prev-loc 12 :hdk 13 :errors 14 :srcfiles 15 :warnings 16 :file0 17
+   :tab-first 18 :tab-count 19})
 
 (defmacro ^:private st [ps k] `(aget ~(with-meta ps {:tag 'objects}) ~(int (slot-index k))))
 (defmacro ^:private st! [ps k v] `(aset ~(with-meta ps {:tag 'objects}) ~(int (slot-index k)) ^Object (box ~v)))
@@ -233,7 +234,7 @@
   option_prags 0]"
   [text ^String file ^long exts & {:keys [prags]}]
   (let [cs (if (string? text) (code-points text) text)
-        ps (object-array 18)]
+        ps (object-array 20)]
     (st! ps :cs cs)
     (st! ps :n (alength ^ints cs))
     (st! ps :pos 0) (st! ps :line 1) (st! ps :col 1) (st! ps :file file)
@@ -249,6 +250,8 @@
     (st! ps :srcfiles '())
     (st! ps :warnings (java.util.ArrayList.))
     (st! ps :file0 file)
+    (st! ps :tab-first nil)
+    (st! ps :tab-count 0)
     ps))
 
 (defn exts ^long [ps] (long (st ps :exts)))
@@ -264,17 +267,60 @@
 (defn lex-state [ps] (first (st ps :lex)))
 (defn push-lex-state! [ps s] (st! ps :lex (conj (st ps :lex) s)))
 (defn pop-lex-state! [ps] (let [l (st ps :lex)] (st! ps :lex (rest l)) (first l)))
-(defn errors [ps] (vec (st ps :errors)))
+(defn errors "The non-fatal errors recorded (messages, arbace.repr.haskell.errors)" [ps] (vec (st ps :errors)))
+
+(defn msg "A message (arbace.repr.haskell.errors): constructor con at span, its fields" [con span & args]
+  {:con con :span span :args (vec args)})
+
+(defn fatal!
+  "addFatalError: the parse fails with the message m (an exception carrying it)"
+  [m]
+  (throw (ex-info (str "parse failed: " (name (:con m)) (when (seq (:args m)) (str " " (pr-str (first (:args m))))))
+                  {:span (:span m) :error (name (:con m)) :ps-message m})))
 
 (defn lex-error!
-  "A fatal lexical or parse error: an exception carrying its span and message"
-  [ps msg span]
-  (throw (ex-info (str "lexical error: " msg) {:span span :error msg :state :lexer})))
+  "A fatal lexical or parse error, the message m"
+  [ps m]
+  (fatal! m))
 
 (defn add-error!
-  "A non-fatal error (GHC's addError): recorded, parsing goes on"
-  [ps msg span]
-  (let [^java.util.ArrayList l (st ps :errors)] (.add l [span msg])))
+  "addError: the message m recorded, parsing goes on"
+  [ps m]
+  (let [^java.util.ArrayList l (st ps :errors)] (.add l m)))
+
+(defn add-warning!
+  "addPsMessage of a warning on by default: recorded"
+  [ps m]
+  (let [^java.util.ArrayList l (st ps :warnings)] (.add l m)))
+
+(defn warnings
+  "The warnings (getPsMessages: the tab warning added, at the first tab with their count)"
+  [ps]
+  (let [ws (vec (st ps :warnings))]
+    (if-let [tf (st ps :tab-first)]
+      (conj ws (msg :PsWarnTab tf (st ps :tab-count)))
+      ws)))
+
+(defn- prev-chars
+  "decodePrevNChars n: StringBuffer's n code points before the one before position p (it starts
+  from the last byte before p, and decodes the characters before that one), fewer at the start"
+  ^String [^ints cs ^long p ^long n]
+  (let [e (max 0 (dec p)) b (max 0 (- e n))] (String. cs (int b) (int (- e b)))))
+
+(defn src-parse-err
+  "srcParseErr: the parse error at the last token (its text, or none for a virtual one: the
+  message's possibly incorrect indentation) with its details, at the last token's span"
+  [ps]
+  (let [^ints cs (st ps :cs) p (long (st ps :pos)) len (long (st ps :last-len))
+        token (String. cs (int (- p len)) (int len))
+        last100 (prev-chars cs p 100)
+        ex (long (st ps :exts))]
+    (msg :PsErrParse (st ps :last-loc) token
+         {:th (not (zero? (bit-and ex (xbit :ThQuotesBit))))
+          :do100 (str/includes? last100 "do")
+          :mdo100 (str/includes? last100 "mdo")
+          :patsyn (not (zero? (bit-and ex (xbit :PatternSynonymsBit))))
+          :pattern (= "pattern " (prev-chars cs p 8))})))
 
 (defn loc
   "The current location [file line col pos]"
@@ -300,6 +346,47 @@
           (= ch 9) (recur (inc i) l (inc (bit-shift-left (inc (bit-shift-right (dec c) 3)) 3)))
           :else (recur (inc i) l (inc c))))
       [l c])))
+
+(defn- loc-of
+  "The location [file line col pos] of position p, at or after the current position"
+  [ps ^long p]
+  (let [[l c] (advance (st ps :cs) (st ps :pos) p (st ps :line) (st ps :col))]
+    [(st ps :file) l c p]))
+
+(defn- report-lex-error!
+  "reportLexError: the lexical error err from location l1 to position p2, at the end of the
+  input, else at p2's character"
+  [ps err l1 ^long p2]
+  (let [l2 (loc-of ps p2)
+        eof (>= p2 (long (st ps :n)))
+        c (when-not eof (aget ^ints (st ps :cs) p2))]
+    (if (and c (zero? (long c)))
+      ;; a decoding error (StringBuffer's \0): at p2
+      (fatal! (msg :PsErrLexer [(nth l2 0) (nth l2 1) (nth l2 2) (nth l2 1) (nth l2 2) p2 p2] err [:utf8]))
+      (fatal! (msg :PsErrLexer [(nth l1 0) (nth l1 1) (nth l1 2) (nth l2 1) (nth l2 2) (nth l1 3) p2] err
+                   (if eof [:eof] [:char c]))))))
+
+(defn- error-at!
+  "throwStringLexError's lexError: the error err at position p after the location l0 [file line
+  col pos] (a token's start)"
+  [ps err l0 ^long p]
+  (let [[f l c b] l0
+        [l2 c2] (advance (st ps :cs) b p l c)
+        n (long (st ps :n))]
+    (fatal! (msg :PsErrLexer [f l2 c2 l2 c2 p p] err
+                 (if (>= p n) [:eof] [:char (aget ^ints (st ps :cs) p)])))))
+
+(defn- lex-error-here!
+  "lexError: the lexical error err at the current position"
+  [ps err]
+  (let [p (long (st ps :pos))] (report-lex-error! ps err (loc-of ps p) p)))
+
+(defn- smart-quote-error!
+  "throwSmartQuoteError: the smart quote c at the zero-width span of location l"
+  [ps ^long c l]
+  (let [single (or (= c 0x2018) (= c 0x2019))]
+    (fatal! (msg :PsErrUnicodeCharLooksLike [(nth l 0) (nth l 1) (nth l 2) (nth l 1) (nth l 2) (nth l 3) (nth l 3)]
+                 c (if single 39 34) (if single "Single Quote" "Quotation Mark")))))
 
 (defn- loc-at
   "The location at position p, from the current location (p after it)"
@@ -331,7 +418,7 @@
   (let [c (st ps :ctx)]
     (if (seq c)
       (st! ps :ctx (rest c))
-      (lex-error! ps "parse error (popContext of no context)" (st ps :last-loc)))))
+      (lex-error! ps (src-parse-err ps)))))
 
 (defn push-current-context!
   "pushCurrentContext: a layout context at the start column of the last token"
@@ -531,6 +618,41 @@
           (or (and (graphic? c) (not= c 92)) (space? c)) (recur (inc j))
           :else j)))))
 
+(defn- dfa-stop
+  "Where Alex's automaton stops on input that no rule matches from i (the error's end: the
+  longest prefix of some rule's expression): within a string or a character literal, else at i"
+  ^long [ps sc ^long i]
+  (let [^ints cs (st ps :cs) n (long (st ps :n))
+        c (ch cs n i)]
+    (cond
+      (= c 34)
+      (loop [j (inc i)]
+        (if (>= j n)
+          n
+          (let [c (aget cs j)]
+            (cond
+              (= c 34) j
+              (= c 92)
+              (let [d (ch cs n (inc j))]
+                (cond
+                  (< d 0) n
+                  (whitechar? d) (let [k (m-run cs n (inc j) whitechar?)]
+                                   (if (= 92 (ch cs n k)) (recur (inc k)) k))
+                  :else (let [es (m-escape-ends cs n (inc j) true)]
+                          (if (seq es) (recur (long (apply max es))) (inc j)))))
+              (or (and (graphic? c) (not= c 92)) (space? c)) (recur (inc j))
+              :else j))))
+      (= c 39)
+      (let [j (inc i) d (ch cs n j)]
+        (cond
+          (< d 0) n
+          (= d 39) (+ i 2)
+          (= d 92) (let [es (m-escape-ends cs n (inc j) false)]
+                     (if (seq es) (long (apply max es)) (min n (inc j))))
+          (or (graphic? d) (space? d)) (min n (inc j))
+          :else j))
+      :else i)))
+
 (defn- m-char-lit
   "\\' @char \\' at i: the end after the closing quote, or -1"
   ^long [^ints cs ^long n ^long i]
@@ -721,7 +843,14 @@
             (if (= 38 (long (nth v (inc i))))
               (recur (+ i 2) out)
               (let [[e j] (resolve-escape v (inc i))]
-                (when (> (long e) 0x10ffff) (throw (ex-info "numeric escape sequence out of range" {})))
+                (when (> (long e) 0x10ffff)
+                  ;; parseNum: the error at the digit that takes the value out of range
+                  (let [c (long (nth v (inc i)))
+                        [k base] (case (int c) 120 [(+ i 2) 16] 111 [(+ i 2) 8] [(inc i) 10])
+                        at (loop [k (long k) x 0]
+                             (let [x (+ (* x (long base)) (long (hex-digit (nth v k))))]
+                               (if (> x 0x10ffff) k (recur (inc k) x))))]
+                    (throw (ex-info "numeric escape sequence out of range" {:at at}))))
                 (recur (long j) (conj! out e))))
             (recur (inc i) (conj! out c))))))))
 
@@ -844,13 +973,14 @@
 (defn- nested-comment-end
   "nested_comment_logic from position j inside a comment (depth 1): the position after the
   closing -}, the comment's text after j; CPP line markers inside the comment followed
-  (parseNestedPragma)"
-  [ps ^long j]
+  (parseNestedPragma); an unterminated comment an error from l0 (the comment's start, by
+  default the {- token's)"
+  [ps ^long j & [l0]]
   (let [^ints cs (st ps :cs) n (long (st ps :n))]
     (loop [i j depth 1]
       (cond
         (zero? depth) i
-        (>= i n) (lex-error! ps "unterminated `{-'" (st ps :last-loc))
+        (>= i n) (report-lex-error! ps :LexUnterminatedComment (or l0 (loc-at-start (st ps :last-loc))) n)
         :else
         (let [c (aget cs i)]
           (cond
@@ -891,7 +1021,7 @@
     (if (= kind :eof)
      nil
      (let [sl (loc ps)
-          e (nested-comment-end ps start)
+          e (nested-comment-end ps start sl)
           el (loc-at ps e)
           text (substr cs start (- e 2))
           [hdk] (doc-decorated kind (fn [dec] (list 'NestedDocString dec (doc-chunk (mk-span sl el) text))))]
@@ -1245,6 +1375,13 @@
   (let [p (preceded-by-closing? cs i) f (followed-by-opening? cs n e)]
     (cond (and (not p) f) :prefix (and p (not f)) :suffix (and p f) :tight :else :loose)))
 
+(defn- ext-conflict!
+  "varsym_prefix's warnExtConflict: the prefix use of an operator an extension would make special
+  (-Woperator-whitespace-ext-conflict), then the operator"
+  [ps span sym s]
+  (add-warning! ps (msg :PsWarnOperatorWhitespaceExtConflict span sym))
+  [:ITvarsym s])
+
 (defn- varsym-token
   "varsym's meaning overrides by occurrence (Note [Whitespace-sensitive operator parsing])"
   [ps ^String s ws span]
@@ -1252,9 +1389,9 @@
     (case ws
       :prefix (cond
                 (= s "@") [:ITtypeApp nil]
-                (= s "%") (if (xtest ex :LinearTypesBit) [:ITpercent nil] [:ITvarsym s])
-                (= s "$") (if (xtest ex :ThQuotesBit) [:ITdollar nil] [:ITvarsym s])
-                (= s "$$") (if (xtest ex :ThQuotesBit) [:ITdollardollar nil] [:ITvarsym s])
+                (= s "%") (if (xtest ex :LinearTypesBit) [:ITpercent nil] (ext-conflict! ps span :PrefixPercent s))
+                (= s "$") (if (xtest ex :ThQuotesBit) [:ITdollar nil] (ext-conflict! ps span :PrefixDollar s))
+                (= s "$$") (if (xtest ex :ThQuotesBit) [:ITdollardollar nil] (ext-conflict! ps span :PrefixDollarDollar s))
                 (= s "-") [:ITprefixminus nil]
                 (and (= s ".") (xtest ex :OverloadedRecordDotBit)) [:ITproj true]
                 (= s ".") [:ITdot nil]
@@ -1262,7 +1399,16 @@
                 (= s "~") [:ITtilde nil]
                 :else [:ITvarsym s])
       :suffix (cond
-                (= s "@") (lex-error! ps "suffix occurrence of @" span)
+                (= s "@") (let [^ints cs (st ps :cs) n (long (st ps :n))
+                                [f l c b] (loc-at-start span)
+                                ;; errSuffixAt: the spaces after the @ and one character more,
+                                ;; counted from the @'s start
+                                [l2 c2] (loop [k (long (st ps :pos)) l l c c]
+                                          (if (< k n)
+                                            (let [[l' c'] (advance cs k (inc k) l c)]
+                                              (if (= 32 (aget cs k)) (recur (inc k) l' c') [l' c']))
+                                            [l c]))]
+                            (fatal! (msg :PsErrSuffixAT [f l c l2 c2 b nil])))
                 (= s ".") [:ITdot nil]
                 :else [:ITvarsym s])
       :tight (cond
@@ -1293,7 +1439,7 @@
       (let [lt (st ps :last-tk)
             kw (if (and lt (= :ITlam (first lt))) :ITlcase :ITcase)]
         (when (and (= kw :ITlcase) (not (get-bit ps :LambdaCaseBit)))
-          (add-error! ps "Illegal lambda-case" (st ps :last-loc)))
+          (add-error! ps (msg :PsErrLambdaCase (st ps :last-loc))))
         (maybe-layout! ps kw)
         [kw nil])
       (= k :ITlcases)
@@ -1349,7 +1495,11 @@
   "lex_chars: the value of a string or character literal between its delimiters"
   [ps ^ints cs ^long from ^long to span]
   (try (lex-string-chars cs from to)
-       (catch Exception e (lex-error! ps (ex-message e) span))))
+       (catch Exception e
+         ;; throwStringLexError: at the escape's position (a numeric escape out of range)
+         (let [at (:at (ex-data e))
+               p (if at (+ from (long at)) from)]
+           (error-at! ps :LexNumEscapeRange (loc-at-start span) p)))))
 
 (defn- qq-token!
   "lex_quasiquote_tok, lex_qquasiquote_tok: the quote up to |] (no escapes)"
@@ -1357,7 +1507,7 @@
   (let [^ints cs (st ps :cs) n (long (st ps :n))
         quoter-text (substr cs (inc i) (dec e))
         quote-start (loc ps)
-        q-end (loop [k e] (cond (>= k (dec n)) (lex-error! ps "unterminated quasi-quotation" span)
+        q-end (loop [k e] (cond (>= k (dec n)) (report-lex-error! ps :LexUnterminatedQQ quote-start n)
                                 (and (= 124 (aget cs k)) (= 93 (aget cs (inc k)))) k
                                 :else (recur (inc k))))
         quote (substr cs e q-end)
@@ -1378,7 +1528,7 @@
   [ps kind negate ^long offset ^long translen radix ^ints cs ^long i ^long e span]
   (let [src (substr cs i e)
         _ (when (and (not (get-bit ps :NumericUnderscoresBit)) (str/includes? src "_"))
-            (add-error! ps "Use NumericUnderscores to allow underscores in integer literals" span))
+            (add-error! ps (msg :PsErrNumUnderscores span :Integral)))
         v (parse-unsigned cs (+ i offset) (- e (- translen offset)) radix)
         v (if negate (- v) v)]
     (if (= kind :ITinteger)
@@ -1390,7 +1540,7 @@
   [ps kind hex? ^ints cs ^long i ^long e ^long drop span]
   (let [src (substr cs i (- e drop))]
     (when (and (not (get-bit ps :NumericUnderscoresBit)) (str/includes? src "_"))
-      (add-error! ps "Use NumericUnderscores to allow underscores in floating literals" span))
+      (add-error! ps (msg :PsErrNumUnderscores span :Float)))
     (tok kind (fractional-lit src hex?) span)))
 
 (defn- prim-ext-kind [^String suffix]
@@ -1416,10 +1566,12 @@
   (let [^ints cs (st ps :cs) n (long (st ps :n))
         lexeme (fn [] (substr cs i e))]
     (case (int rule)
-      2 nil                                               ; warnTab
+      2 (do (when-not (st ps :tab-first) (st! ps :tab-first span))   ; warnTab
+            (st! ps :tab-count (inc (long (st ps :tab-count))))
+            nil)
       3 (nested-comment! ps span e)
       (4 5 6 7 8 9) (when (get-bit ps :RawTokenStreamBit) (tok :ITlineComment (lexeme) span))
-      10 (lex-error! ps "smart quote" span)
+      10 (smart-quote-error! ps (aget cs (dec e)) (loc-at-start span))
       12 (do (push-lex-state! ps :line-prag1) nil)
       13 (do (push-lex-state! ps :line-prag1) nil)
       17 (do-bol! ps span)
@@ -1427,7 +1579,7 @@
       (let [ctx (st ps :ctx) top (first ctx) offset (long (st ps :col))]
         (if (or (get-bit ps :RelaxedLayoutBit) (not (vector? top)) (< (long (nth top 1)) offset))
           (do (pop-lex-state! ps) (st! ps :ctx (conj ctx :nolayout)) (tok :ITocurly nil span))
-          (lex-error! ps "Missing block" span)))
+          (fatal! (msg :PsErrMissingBlock span))))
       20 (do (push-lex-state! ps :line-prag1) nil)
       21 (new-layout-context! ps true false :ITvbar 1 span)
       22 (do (pop-lex-state! ps) nil)
@@ -1440,7 +1592,7 @@
         (do (push-lex-state! ps :line-prag2) nil)
         (tok :ITline_prag (list 'src (lexeme)) span))
       28 (set-line-and-file! ps :line-prag1a span i e)
-      29 (if (get-bit ps :InNestedCommentBit) (tok :ITcomment_line_prag nil span) (lex-error! ps "lexical error in pragma" span))
+      29 (if (get-bit ps :InNestedCommentBit) (tok :ITcomment_line_prag nil span) (lex-error-here! ps :LexErrorInPragma))
       30 (if (get-bit ps :InNestedCommentBit) (tok :ITcomment_line_prag nil span) (do (pop-lex-state! ps) nil))
       31 (set-line-and-file! ps :line-prag2a span i e)
       32 (do (pop-lex-state! ps) nil)
@@ -1454,7 +1606,13 @@
       37 (do (set-exts! ps (bit-and (exts ps) (bit-not (xbit :InRulePragBit)))) (tok :ITclose_prag nil span))
       38 (header-pragma-token! ps (lexeme) span)
       39 (nested-comment! ps span e)
-      (40 41) (let [^java.util.ArrayList l (st ps :warnings)] (.add l [span "unrecognised pragma"]) (nested-comment! ps span e))
+      ;; warn_unknown_prag: the pragma's name upper-cased, the known ones (the union's keys, sorted)
+      ;; for the suggestions
+      (40 41) (do (add-warning! ps (msg :PsWarnUnrecognisedPragma span (str/upper-case (clean-pragma (lexeme)))
+                                        (if (= rule 40)
+                                          (mapv str/upper-case (sort (concat one-word-prags file-header-prags ignored-prags line-prags)))
+                                          [])))
+                  (nested-comment! ps span e))
       42 (multiline-doc-comment! ps span e)
       43 (nested-doc-comment! ps span e)
       44 (tok :ITopenExpQuote [:NoE :normal] span)
@@ -1524,7 +1682,7 @@
       (113 114 115 116 117 118 119 120)
       (let [hash (loop [k i] (if (= 35 (aget cs k)) k (recur (inc k))))
             suffix (substr cs (inc hash) e)
-            kind (or (prim-ext-kind suffix) (lex-error! ps "parse error (literal suffix)" span))
+            kind (or (prim-ext-kind suffix) (lex-error-here! ps :LexError))
             [neg offset radix] (case (int rule) 113 [false 0 10] 114 [false 2 2] 115 [false 2 8] 116 [false 2 16]
                                  117 [true 1 10] 118 [true 3 2] 119 [true 3 8] 120 [true 3 16])
             translen (+ (- e hash 1) offset 1)]
@@ -1539,7 +1697,7 @@
             v (lex-chars-value ps cs (inc i) (if hash (- e 2) (dec e)) span)
             src (list 'src (lexeme))]
         (if hash
-          (do (when (some #(> (long %) 0xff) v) (add-error! ps "primitive string literal must contain only characters <= '\\xFF'" span))
+          (do (when (some #(> (long %) 0xff) v) (add-error! ps (msg :PsErrPrimStringInvalidChar span)))
               (tok :ITprimstring [src (cps->str v)] span))
           (tok :ITstring [src (cps->str v)] span)))
       (132 133)
@@ -1547,7 +1705,7 @@
             v (lex-chars-value ps cs (inc i) (if hash (- e 2) (dec e)) span)
             src (list 'src (lexeme))]
         (tok (if hash :ITprimchar :ITchar) [src (first v)] span))
-      (134 135 136) (lex-error! ps "smart quote" span)
+      (134 135 136) (smart-quote-error! ps (aget cs (dec e)) (loc-at-start span))
       137 (tok :ITtyQuote nil span)
       138 (tok :ITsimpleQuote nil span))))
 
@@ -1559,17 +1717,27 @@
         ;; the end: the first """ not inside an escape or gap
         close (loop [k start]
                 (cond
-                  (>= k n) (lex-error! ps "unterminated multiline string" span)
+                  (>= k n) (do ;; checkSmartQuotes: a double smart quote not escaped, else a
+                               ;; lexical error at the end
+                               (loop [j i]
+                                 (when (< j n)
+                                   (let [c (aget cs j)]
+                                     (cond (= c 92) (recur (+ j 2))
+                                           (or (= c 0x201C) (= c 0x201D)) (smart-quote-error! ps c (loc-of ps j))
+                                           :else (recur (inc j))))))
+                               (set-input! ps n)
+                               (lex-error-here! ps :LexError))
                   (and (= 34 (aget cs k)) (= 34 (ch cs n (inc k))) (= 34 (ch cs n (+ k 2)))) k
                   (= 92 (aget cs k))
                   (let [d (ch cs n (inc k))]
                     (if (and (>= d 0) (whitechar? d))
                       (let [m (m-run cs n (inc k) whitechar?)] (recur (inc m)))
                       (let [es (m-escape-ends cs n (inc k) true)]
-                        (if (seq es) (recur (long (apply max es))) (lex-error! ps "lexical error in string" span)))))
+                        (if (seq es) (recur (long (apply max es))) (do (set-input! ps (inc k)) (lex-error-here! ps :LexError))))))
                   :else (recur (inc k))))
         e (+ close 3)
-        v (try (lex-multiline-chars cs start close) (catch Exception x (lex-error! ps (ex-message x) span)))
+        v (try (lex-multiline-chars cs start close)
+               (catch Exception x (error-at! ps :LexNumEscapeRange (loc-at-start span) (+ start (long (or (:at (ex-data x)) 0))))))
         _ (set-input! ps e)
         full (mk-span (loc-at-start span) (loc ps))]
     (tok :ITstringMulti [(list 'src (substr cs i e)) (cps->str v)] full)))
@@ -1616,7 +1784,7 @@
     ;; lex_string_prag: the text up to #-}
     (let [^ints cs (st ps :cs) n (long (st ps :n))
           start (long (st ps :pos))
-          k (loop [k start] (cond (>= (+ k 2) n) (lex-error! ps "unterminated OPTIONS pragma" span)
+          k (loop [k start] (cond (>= (+ k 2) n) (report-lex-error! ps :LexUnterminatedOptions (loc-at-start span) n)
                                   (and (= 35 (aget cs k)) (= 45 (aget cs (inc k))) (= 125 (aget cs (+ k 2)))) k
                                   :else (recur (inc k))))
           s0 (loc ps)
@@ -1643,8 +1811,8 @@
           (let [l (loc ps) span (mk-span l l)]
             (st! ps :last-loc span) (st! ps :last-len 0)
             [:ITeof nil span])
-          (lex-error! ps (str "lexical error at character " (pr-str (str (char (aget ^ints (st ps :cs) i)))))
-                      (let [l (loc ps)] (mk-span l l))))
+          ;; AlexError: from the token's start to where Alex's automaton stopped
+          (report-lex-error! ps :LexError (loc ps) (dfa-stop ps sc i)))
         (let [[e rule] m
               e (long e) rule (long rule)]
           (if (or (= rule 1) (= rule 11) (= rule 14) (= rule 15) (= rule 16) (= rule 19))

@@ -1,0 +1,537 @@
+;; Ported from GHC 9.14.1 (https://downloads.haskell.org/ghc/9.14.1/ghc-9.14.1-src.tar.xz, SHA-256
+;; 2a83779c9af86554a3289f2787a38d6aa83d00d136aa9f920361dd693c101e77): the Outputable instances of the
+;; parsed tree that GHC's parser messages print, compiler/GHC/Hs/{Expr,Pat,Type,Lit,Binds,Decls}.hs,
+;; GHC/Parser/Types.hs (PatBuilder), GHC/Types/Name/Reader.hs and Occurrence.hs (RdrName, OccName),
+;; GHC/Utils/Outputable.hs (pprDeeper); GHC's notice is in LICENSE.md, "GHC: the Glasgow Haskell
+;; Compiler License".
+
+(ns arbace.repr.haskell.pprhs
+  "GHC's printing of the parsed tree in its messages (doc/haskell/NATIVE.md, \"Messages\"): the
+  native reader's nodes (arbace.repr.haskell.ast) as GHC's Outputable instances print them in the
+  user style of diagnostics, pprDeeper's depth (5, -dppr-user-length) included."
+  (:require [arbace.repr.haskell.ast :as a :refer [unLoc]]
+            [arbace.repr.haskell.doc :as d :refer [text <> <+> $$ nest hang vcat sep fsep parens quotes]]
+            [arbace.string :as str]))
+
+(set! *warn-on-reflection* true)
+
+(def ^:dynamic *depth*
+  "pprDeeper's depth: nil the DefaultDepth, n PartWay n"
+  nil)
+
+(defn- deeper
+  "pprDeeper: f's document one level deeper, ... at the depth's end"
+  [f]
+  (let [n (or *depth* 5)]
+    (if (zero? (long n)) (text "...") (binding [*depth* (dec (long n))] (f)))))
+
+(defn- deeper-list
+  "pprDeeperList f ds: under a PartWay depth n at most n of ds (then ....), one level deeper"
+  [f ds]
+  (let [ds (vec ds)]
+    (cond
+      (empty? ds) (f [])
+      (nil? *depth*) (f (mapv force ds))
+      (zero? (long *depth*)) (text "...")
+      :else (let [n (long *depth*)]
+              (binding [*depth* (dec n)]
+                (f (vec (concat (map force (take n ds)) (when (> (count ds) n) [(text "....")])))))))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Names (RdrName, OccName)
+
+(defn- sym-char? [^long c]
+  (not (or (Character/isLetterOrDigit (int c)) (= c 95) (= c 39) (= c 40) (= c 91) (= c 34))))
+
+(defn sym-occ?
+  "isSymOcc: an operator's occurrence"
+  [r]
+  (let [^String s (a/rdr-occ r)]
+    (and (pos? (count s)) (sym-char? (.codePointAt s 0)))))
+
+(defn ppr-name "ppr of a RdrName" [r]
+  (case (first r)
+    qual (text (str (nth r 2) "." (nth r 3)))
+    (text (a/rdr-occ r))))
+
+(defn ppr-prefix-occ "pprPrefixOcc" [r] (if (sym-occ? r) (parens (ppr-name r)) (ppr-name r)))
+(defn ppr-infix-occ "pprInfixOcc" [r]
+  (if (sym-occ? r) (ppr-name r) (<> (d/char* \`) (ppr-name r) (d/char* \`))))
+
+(defn- lname [x] (if (a/L? x) (unLoc x) x))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Helpers
+
+(defn- unknown "A node not yet printed: its constructor in angle brackets (a mismatch shows it)" [x]
+  (text (str "<" (if (seq? x) (first x) (type x)) ">")))
+
+(defn- hd [x] (when (seq? x) (first x)))
+(defn- f1 [x] (nth x 1 nil))
+(defn- f2 [x] (nth x 2 nil))
+(defn- f3 [x] (nth x 3 nil))
+(defn- f4 [x] (nth x 4 nil))
+(defn- ul [x] (if (a/L? x) (unLoc x) x))
+(defn- just-val [x] (when (a/just? x) (second x)))
+
+(def ^:private top-prec 0)
+(def ^:private sig-prec 1)
+(def ^:private fun-prec 2)
+(def ^:private op-prec 3)
+(def ^:private app-prec 5)
+
+(defn- src-of "A literal's SourceText, nil without" [x]
+  (some #(when (and (seq? %) (= 'src (first %))) (second %)) (when (seq? x) x)))
+
+(declare ppr-lexpr ppr-expr ppr_expr ppr-lpat ppr-pat ppr-ltype ppr-type ppr-lit ppr-local-binds
+         ppr-mg ppr-stmt ppr-sig-type ppr-wc ppr-lcmd ppr-cmd ppr-bind ppr-sig ppr-grhss)
+
+;;; ------------------------------------------------------------------------------------------
+;;; Literals (HsLit, HsOverLit, OverLitVal, IntegralLit, FractionalLit)
+
+(defn ppr-lit
+  "ppr of a literal: its source text (pprWithSourceText), else its value"
+  [x]
+  (let [x (ul x)]
+    (case (hd x)
+      OverLit (ppr-lit (f2 x))
+      (HsIntegral HsFractional) (ppr-lit (f1 x))
+      HsIsString (if-let [s (src-of x)] (text s) (text (pr-str (f2 x))))
+      IL (if-let [s (src-of x)] (text s) (text (str (f3 x))))
+      (if-let [s (src-of x)]
+        (text s)
+        (case (hd x)
+          HsString (d/double-quotes (text (f2 x)))
+          (unknown x))))))
+
+(defn- lit-neg? [x]
+  (let [x (ul x)]
+    (case (hd x)
+      OverLit (lit-neg? (f2 x))
+      (HsIntegral HsFractional) (lit-neg? (f1 x))
+      (IL FL) (true? (f2 x))
+      HsInt (lit-neg? (f2 x))
+      false)))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Types (ppr_mono_ty)
+
+(defn- ppr-occ-with-tick [prefix? prom r]
+  (let [d (if prefix? (ppr-prefix-occ r) (ppr-infix-occ r))]
+    (if (= prom 'IsPromoted) (d/quote* d) d)))
+
+(defn ppr-arrow "pprHsArrow" [m]
+  (case (hd m)
+    HsUnannotated d/arrow
+    HsLinearAnn (text "%1 ->")
+    HsExplicitMult (<+> (<> (text "%") (ppr-ltype (f2 m))) d/arrow)
+    d/arrow))
+
+(defn- ppr-tvb "ppr of an HsTyVarBndr" [b]
+  (let [b (ul b)
+        [_ _ flag bvar kind] b
+        v (case (hd bvar) HsBndrVar (ppr-prefix-occ (ul (f2 bvar))) d/underscore)
+        body (case (hd kind) HsBndrKind (d/hsep [v d/dcolon (ppr-ltype (f2 kind))]) v)]
+    (cond
+      (= flag 'InferredSpec) (d/braces body)
+      (= (hd kind) 'HsBndrKind) (parens body)
+      :else body)))
+
+(defn- ppr-forall-tele [tele]
+  (let [bs (f2 tele)
+        sep* (if (= (hd tele) 'HsForAllVis) (<> d/space d/arrow) d/dot)]
+    (if (empty? bs) d/empty (<> (<+> (text "forall") (sep (map ppr-tvb bs))) sep*))))
+
+(defn ppr-lcontext "pprLHsContextAlways" [lctxt]
+  (let [ctxt (ul lctxt)]
+    (case (count ctxt)
+      0 (<+> (parens d/empty) d/darrow)
+      1 (<+> (ppr-ltype (first ctxt)) d/darrow)
+      (<+> (parens (d/interpp'-sp (map ppr-ltype ctxt))) d/darrow))))
+
+(defn ppr-type "ppr_mono_ty" [t]
+  (let [t (ul t)]
+    (case (hd t)
+      HsForAllTy (sep [(ppr-forall-tele (f2 t)) (ppr-ltype (f3 t))])
+      HsQualTy (sep [(ppr-lcontext (f2 t)) (ppr-ltype (f3 t))])
+      HsTyVar (ppr-occ-with-tick true (f2 t) (ul (f3 t)))
+      HsFunTy (sep [(ppr-ltype (f3 t)) (<+> (ppr-arrow (f2 t)) (ppr-ltype (f4 t)))])
+      HsTupleTy (let [ts (f3 t) unboxed (= (f2 t) 'HsUnboxedTuple)]
+                  (if (and (= 1 (count ts)) (not unboxed))
+                    (sep [(text "Solo") (ppr-ltype (first ts))])
+                    (if unboxed
+                      (<> (text "(#") (<+> (d/ppr-with-commas ppr-ltype ts) (text "#)")))
+                      (parens (d/ppr-with-commas ppr-ltype ts)))))
+      HsSumTy (<> (text "(#") (<+> (fsep (d/punctuate (text " |") (map ppr-ltype (f2 t)))) (text "#)")))
+      HsKindSig (<+> (ppr-ltype (f2 t)) d/dcolon (ppr-ltype (f3 t)))
+      HsListTy (d/brackets (ppr-ltype (f2 t)))
+      HsIParamTy (<+> (<> (text "?") (text (str (second (ul (f2 t)))))) d/dcolon (ppr-ltype (f3 t)))
+      HsExplicitListTy (let [ts (f3 t) body (d/interpp'-sp (map ppr-ltype ts))]
+                         (if (= (f2 t) 'IsPromoted) (d/quote* (d/brackets body)) (d/brackets body)))
+      HsExplicitTupleTy (let [ts (f3 t) body (parens (d/interpp'-sp (map ppr-ltype ts)))]
+                          (if (= (f2 t) 'IsPromoted) (d/quote* body) body))
+      HsTyLit (ppr-lit (f2 t))
+      HsWildCardTy d/underscore
+      HsStarTy (d/char* (if (f2 t) (char 0x2605) \*))
+      HsAppTy (d/hsep [(ppr-ltype (f2 t)) (ppr-ltype (f3 t))])
+      HsAppKindTy (<+> (ppr-ltype (f2 t)) (<> (d/char* \@) (ppr-ltype (f3 t))))
+      HsOpTy (sep [(ppr-ltype (f3 t)) (sep [(ppr-occ-with-tick false (f2 t) (ul (f4 t))) (ppr-ltype (nth t 5))])])
+      HsParTy (parens (ppr-ltype (f2 t)))
+      HsDocTy (ppr-ltype (f2 t))
+      HsBangTy (let [[_ _ bang ty] t
+                     [_ _ unpack strict] bang]
+                 (<> (<+> (case unpack SrcUnpack (text "{-# UNPACK #-}") SrcNoUnpack (text "{-# NOUNPACK #-}") d/empty)
+                          (case strict SrcLazy (d/char* \~) SrcStrict (d/char* \!) d/empty))
+                     (ppr-ltype ty)))
+      HsSpliceTy (unknown t)
+      (unknown t))))
+
+(defn ppr-ltype [t] (ppr-type t))
+
+(defn ppr-sig-type "ppr of an HsSigType" [s]
+  (let [s (ul s)]
+    (case (hd s)
+      HsSig (let [outer (f2 s)]
+              (<+> (case (hd outer)
+                     HsOuterExplicit (ppr-forall-tele (list 'HsForAllInvis nil (f2 outer)))
+                     d/empty)
+                   (ppr-ltype (f3 s))))
+      (ppr-type s))))
+
+(defn ppr-wc "ppr of HsWildCardBndrs" [w]
+  (if (= 'HsWC (hd w)) (let [b (ul (f2 w))] (if (= 'HsSig (hd b)) (ppr-sig-type b) (ppr-type b))) (ppr-type w)))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Patterns (pprPat, PatBuilder)
+
+(defn- con-pat-needs-parens [p details]
+  (case (hd details)
+    PrefixCon (and (>= p app-prec) (seq (f1 details)))
+    InfixCon (>= p op-prec)
+    false))
+
+(defn- pat-needs-parens [p pat]
+  (case (hd pat)
+    NPlusKPat (> p op-prec)
+    OrPat (> p top-prec)
+    ConPat (boolean (con-pat-needs-parens p (f3 pat)))
+    SigPat (>= p sig-prec)
+    (ViewPat EmbTyPat) true
+    TuplePat (and (= 1 (count (f2 pat))) (= 'Boxed (f3 pat)) (>= p app-prec))
+    LitPat (and (> p top-prec) (lit-neg? (f2 pat)))
+    NPat (and (> p top-prec) (lit-neg? (f2 pat)))
+    false))
+
+(defn- ppr-parend-lpat [p lp]
+  (let [pat (ul lp)]
+    (if (pat-needs-parens p pat) (parens (ppr-pat pat)) (ppr-pat pat))))
+
+(defn- ppr-rec-fields "ppr of HsRecFields" [rf pp-rhs]
+  (let [[_ _ flds dd] rf
+        fld (fn [lf]
+              (let [[_ _ lhs rhs pun] (ul lf)
+                    l (let [o (ul lhs)] (case (hd o) FieldOcc (ppr-prefix-occ (ul (f2 o))) (ppr-name (ul (f2 o)))))]
+                (if pun l (<+> l d/equals (pp-rhs rhs)))))]
+    (d/braces (fsep (d/punctuate d/comma (concat (map fld flds)
+                                                  (when (a/just? dd) [(text "..")])))))))
+
+(defn- ppr-con-args [details]
+  (case (hd details)
+    PrefixCon (fsep (map #(ppr-parend-lpat app-prec %) (f1 details)))
+    InfixCon (sep [(ppr-parend-lpat app-prec (f1 details)) (ppr-parend-lpat app-prec (f2 details))])
+    RecCon (ppr-rec-fields (f1 details) ppr-lpat)
+    (unknown details)))
+
+(defn ppr-pat "pprPat" [p]
+  (let [p (ul p)]
+    (case (hd p)
+      VarPat (ppr-prefix-occ (ul (f2 p)))
+      WildPat d/underscore
+      LazyPat (<> (d/char* \~) (ppr-parend-lpat app-prec (f2 p)))
+      BangPat (<> (d/char* \!) (ppr-parend-lpat app-prec (f2 p)))
+      AsPat (d/hcat [(ppr-prefix-occ (ul (f2 p))) (d/char* \@) (ppr-parend-lpat app-prec (f3 p))])
+      ViewPat (d/hcat [(ppr-lexpr (f2 p)) (text " -> ") (ppr-lpat (f3 p))])
+      ParPat (parens (ppr-lpat (f2 p)))
+      LitPat (ppr-lit (f2 p))
+      NPat (if (a/just? (f3 p)) (<> (d/char* \-) (ppr-lit (f2 p))) (ppr-lit (f2 p)))
+      NPlusKPat (d/hcat [(ppr-name (ul (f2 p))) (d/char* \+) (ppr-lit (f3 p))])
+      SigPat (<+> (ppr-lpat (f2 p)) d/dcolon (let [t (f3 p)] (ppr-ltype (if (= 'HsPS (hd t)) (f2 t) t))))
+      ListPat (d/brackets (d/interpp'-sp (map ppr-lpat (f2 p))))
+      OrPat (fsep (d/punctuate d/semi (map ppr-lpat (f2 p))))
+      TuplePat (let [ps (f2 p)]
+                 (cond
+                   (and (= 1 (count ps)) (= 'Boxed (f3 p))) (d/hcat [(text "MkSolo") (ppr-parend-lpat app-prec (first ps))])
+                   (= 'Unboxed (f3 p)) (<> (text "(#") (<+> (d/ppr-with-commas ppr-lpat ps) (text "#)")))
+                   :else (parens (d/ppr-with-commas ppr-lpat ps))))
+      ConPat (let [c (ul (f2 p)) details (f3 p)]
+               (if (= 'InfixCon (hd details))
+                 (<+> (ppr-lpat (f1 details)) (ppr-infix-occ c) (ppr-lpat (f2 details)))
+                 (<+> (ppr-prefix-occ c) (ppr-con-args details))))
+      EmbTyPat (<+> (text "type") (ppr-ltype (f2 (f2 p))))
+      InvisPat (let [tp (ul (f2 (f2 p)))
+                     inferred (= 'InferredSpec (nth (f1 p) 2 nil))]
+                 (<> (d/char* \@) (cond inferred (d/braces (ppr-type tp))
+                                        (#{'HsAppTy 'HsFunTy 'HsForAllTy 'HsQualTy 'HsOpTy 'HsKindSig 'HsAppKindTy} (hd tp)) (parens (ppr-type tp))
+                                        :else (ppr-type tp))))
+      (unknown p))))
+
+(defn ppr-lpat [p] (ppr-pat p))
+
+(defn ppr-patbuilder "ppr of a PatBuilder" [pb]
+  (let [pb (ul pb)]
+    (case (hd pb)
+      PatBuilderPat (ppr-pat (f1 pb))
+      PatBuilderPar (parens (ppr-patbuilder (f2 pb)))
+      PatBuilderApp (<+> (ppr-patbuilder (f1 pb)) (ppr-patbuilder (f2 pb)))
+      PatBuilderAppType (<+> (ppr-patbuilder (f1 pb)) (<> (text "@") (ppr-ltype (let [t (f3 pb)] (if (= 'HsTP (hd t)) (f2 t) t)))))
+      PatBuilderOpApp (<+> (ppr-patbuilder (f1 pb)) (ppr-name (ul (f2 pb))) (ppr-patbuilder (f3 pb)))
+      PatBuilderVar (ppr-name (ul (f1 pb)))
+      PatBuilderOverLit (ppr-lit (f1 pb))
+      (ppr-pat pb))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Expressions (pprExpr, ppr_expr)
+
+(defn- atomic-expr? [e] (contains? '#{HsVar HsLit HsOverLit HsIPVar HsOverLabel HsHole} (hd e)))
+(defn- quiet-expr? [e] (contains? '#{HsPar HsApp HsAppType OpApp} (hd e)))
+
+(defn ppr-expr "pprExpr: pprDeeper unless atomic or quiet" [e]
+  (let [e (ul e)]
+    (if (or (atomic-expr? e) (quiet-expr? e)) (ppr_expr e) (deeper #(ppr_expr e)))))
+
+(defn ppr-lexpr "pprLExpr" [e] (ppr-expr e))
+
+(defn- ppr-infix-expr "ppr_infix_expr: an operator's infix form, nil when it has none" [op]
+  (let [op (ul op)]
+    (case (hd op)
+      HsVar (ppr-infix-occ (ul (f2 op)))
+      HsHole (let [h (f1 op)] (if (= 'HoleVar (hd h)) (ppr-infix-occ (ul (f1 h))) (text "_")))
+      nil)))
+
+(defn- ppr-apps [e args]
+  (case (hd e)
+    HsApp (recur (ul (f2 e)) (cons [:e (f3 e)] args))
+    HsAppType (recur (ul (f2 e)) (cons [:t (f3 e)] args))
+    (hang (ppr_expr e) 2 (fsep (map (fn [[k x]] (if (= k :e) (ppr-lexpr x) (<> (text "@") (ppr-wc x)))) args)))))
+
+(defn- lam-case-keyword [v]
+  (case v LamSingle (text "lambda") LamCase (text "\\case") LamCases (text "\\cases")))
+
+(defn- ppr-do-flavour [fl stmts]
+  (let [m (just-val (f1 fl))
+        prefix (if m (text (str (second m) ".")) d/empty)]
+    (case (hd fl)
+      DoExpr (<+> (<> prefix (text "do")) (deeper-list vcat (map (fn [s] (delay (ppr-stmt s))) stmts)))
+      MDoExpr (<+> (<> prefix (text "mdo")) (deeper-list vcat (map (fn [s] (delay (ppr-stmt s))) stmts)))
+      (ListComp MonadComp)
+      (d/brackets
+       (let [stmts (vec stmts) l (ul (peek stmts))]
+         (if (= 'LastStmt (hd l))
+           (if (= 1 (count stmts))
+             (ppr-lexpr (f2 l))
+             (hang (<+> (ppr-lexpr (f2 l)) d/vbar) 2 (d/interpp'-sp (map ppr-stmt (pop stmts)))))
+           (d/interpp'-sp (map ppr-stmt stmts)))))
+      (unknown fl))))
+
+(defn- ppr-tup-args [args]
+  (loop [as (seq args) out []]
+    (if-not as
+      out
+      (let [[x & more] as
+            punc (if more (if (= 'Present (hd (first more))) (<> d/comma d/space) d/comma) d/empty)]
+        (recur more (conj out (if (= 'Present (hd x)) (<> (ppr_expr (ul (f2 x))) punc) punc)))))))
+
+(defn ppr_expr "ppr_expr" [e]
+  (let [e (ul e)]
+    (case (hd e)
+      HsVar (ppr-prefix-occ (ul (f2 e)))
+      HsHole (let [h (f1 e)] (if (= 'HoleVar (hd h)) (ppr-prefix-occ (ul (f1 h))) (text "_")))
+      HsIPVar (<> (text "?") (text (str (second (f2 e)))))
+      HsOverLabel (<> (d/char* \#) (if-let [s (src-of (f1 e))] (text s) (text (str (f2 e)))))
+      HsLit (ppr-lit (f2 e))
+      HsOverLit (ppr-lit (f2 e))
+      HsPar (parens (ppr_expr (f2 e)))
+      (HsApp HsAppType) (ppr-apps e [])
+      OpApp (let [[_ _ e1 op e2] e
+                  pp1 (ppr-lexpr e1) pp2 (ppr-lexpr e2)]
+              (if-let [pop (ppr-infix-expr op)]
+                (hang pp1 2 (sep [pop (nest 2 pp2)]))
+                (hang (ppr-lexpr op) 2 (sep [pp1 pp2]))))
+      NegApp (<+> (d/char* \-) (ppr-lexpr (f2 e)))
+      SectionL (let [[_ _ x op] e] (if-let [pop (ppr-infix-expr op)] (sep [(ppr-lexpr x) pop]) (unknown e)))
+      SectionR (let [[_ _ op x] e] (if-let [pop (ppr-infix-expr op)] (sep [pop (ppr-lexpr x)]) (unknown e)))
+      ExplicitTuple (let [[_ _ args bx] e]
+                      (if (and (= 1 (count args)) (= 'Present (hd (first args))) (= 'Boxed bx))
+                        (d/hsep [(text "MkSolo") (ppr-lexpr (f2 (first args)))])
+                        (let [body (d/fcat (ppr-tup-args args))]
+                          (if (= 'Boxed bx) (parens body) (<> (text "(#") (<+> body (text "#)")))))))
+      ExplicitSum (let [[_ _ alt arity x] e
+                        bars (fn [n] (d/hsep (repeat n d/vbar)))]
+                    (<+> (text "(#") (bars (dec (long alt))) (ppr-lexpr x) (bars (- (long arity) (long alt))) (text "#)")))
+      HsLam (let [[_ _ v mg] e]
+              (if (= v 'LamSingle) (ppr-mg mg) (sep [(sep [(lam-case-keyword v)]) (nest 2 (ppr-mg mg))])))
+      HsCase (let [[_ _ x mg] e
+                   alts (ul (f2 mg))]
+               (sep [(sep [(text "case") (nest 4 (ppr-lexpr x)) (text "of")])
+                     (if (empty? alts) (text "{}") (nest 2 (ppr-mg mg)))]))
+      HsIf (let [[_ _ c t f] e]
+             (sep [(d/hsep [(text "if") (nest 2 (ppr-lexpr c)) (text "then")])
+                   (nest 4 (ppr-lexpr t)) (text "else") (nest 4 (ppr-lexpr f))]))
+      HsMultiIf (hang (text "if") 3
+                      (vcat (map (fn [lg] (let [[_ _ guards body] (ul lg)]
+                                            (hang d/vbar 2 (hang (d/interpp'-sp (map ppr-stmt guards)) 2
+                                                                 (<+> d/arrow (deeper #(ppr-lexpr body)))))))
+                                 (f2 e))))
+      HsLet (let [[_ _ binds body] e]
+              (if (= 'HsLet (hd (ul body)))
+                (sep [(hang (text "let") 2 (d/hsep [(deeper #(ppr-local-binds binds)) (text "in")])) (ppr_expr body)])
+                (sep [(hang (text "let") 2 (deeper #(ppr-local-binds binds))) (hang (text "in") 2 (ppr-lexpr body))])))
+      HsDo (ppr-do-flavour (f2 e) (ul (f3 e)))
+      ExplicitList (d/brackets (deeper-list fsep (d/punctuate d/comma (map ppr_expr (f2 e)))))
+      RecordCon (hang (ppr-name (ul (f2 e))) 2 (ppr-rec-fields (f3 e) ppr-lexpr))
+      RecordUpd (let [[_ _ x flds] e]
+                  (hang (ppr_expr x) 2
+                        (d/braces (fsep (d/punctuate d/comma
+                                                     (map (fn [lf] (let [[_ _ lhs rhs pun] (ul lf)
+                                                                         l (let [o (ul lhs)] (if (= 'FieldOcc (hd o)) (ppr-prefix-occ (ul (f2 o))) (unknown o)))]
+                                                                     (if pun l (<+> l d/equals (ppr-lexpr rhs)))))
+                                                          (f2 flds)))))))
+      HsGetField (<> (ppr_expr (f2 e)) d/dot (text (str (second (ul (f3 e))))))
+      ExprWithTySig (hang (<+> (nest 2 (ppr_expr (f2 e))) d/dcolon) 4 (ppr-wc (f3 e)))
+      ArithSeq (let [info (f3 e)
+                     x #(ppr-lexpr %)]
+                 (d/brackets
+                  (case (hd info)
+                    From (<> (x (f1 info)) (text ".."))
+                    FromThen (<> (x (f1 info)) d/comma (x (f2 info)) (text ".."))
+                    FromTo (d/hcat [(x (f1 info)) (text "..") (x (f2 info))])
+                    FromThenTo (d/hcat [(x (f1 info)) d/comma (x (f2 info)) (text "..") (x (f3 info))]))))
+      HsProc (d/hsep [(text "proc") (ppr-lpat (f2 e)) d/arrow (ppr-lcmd (f2 (ul (f3 e))))])
+      HsStatic (d/hsep [(text "static") (ppr-lexpr (f2 e))])
+      HsEmbTy (d/hsep [(text "type") (ppr-wc (f2 e))])
+      HsUntypedBracket (let [q (f2 e)]
+                         (case (hd q)
+                           VarBr (if (f2 q) (<> (d/char* \') (ppr-prefix-occ (ul (f3 q)))) (<> (text "''") (ppr-prefix-occ (ul (f3 q)))))
+                           ExpBr (d/hcat [(text "[|") (ppr-lexpr (f2 q)) (text "|]")])
+                           (unknown q)))
+      (unknown e))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Matches, statements, bindings
+
+(defn- match-separator [ctxt]
+  (case (hd ctxt)
+    (FunRhs PatBindRhs PatBindGuards RecUpd) d/equals
+    (StmtCtxt PatSyn) d/larrow
+    d/arrow))
+
+(defn ppr-grhss "pprGRHSs" [ctxt g]
+  (let [[_ _ grhss binds] g
+        rhs (fn [body] (<+> (match-separator ctxt) (deeper #(ppr-lexpr body))))]
+    ($$ (vcat (map (fn [lg] (let [[_ _ guards body] (ul lg)]
+                              (if (empty? guards)
+                                (rhs body)
+                                (sep [(<+> d/vbar (d/interpp'-sp (map ppr-stmt guards))) (rhs body)]))))
+                   grhss))
+        (if (= 'EmptyLocalBinds (hd binds))
+          d/empty
+          ($$ (text "where") (nest 4 (deeper #(ppr-local-binds binds))))))))
+
+(defn- ppr-match [m]
+  (let [[_ _ ctxt lpats grhss] (ul m)
+        pats (vec (ul lpats))
+        [herald others]
+        (case (hd ctxt)
+          FunRhs (let [fun (ul (f1 ctxt)) fixity (f2 ctxt) strict (f3 ctxt)]
+                   (cond
+                     (= strict 'SrcStrict) [(<> (d/char* \!) (ppr-prefix-occ fun)) pats]
+                     (= fixity 'Prefix) [(ppr-prefix-occ fun) pats]
+                     :else (let [[p1 p2 & rest] pats
+                                 pin (<+> (ppr-parend-lpat op-prec p1) (ppr-infix-occ fun) (ppr-parend-lpat op-prec p2))]
+                             (if (empty? rest) [pin []] [(parens pin) (vec rest)]))))
+          LamAlt (case (f1 ctxt)
+                   LamSingle [(d/char* \\) pats]
+                   LamCases (if (empty? pats) [d/empty []] [(ppr-parend-lpat app-prec (first pats)) (rest pats)])
+                   (case (count pats) 0 [d/empty []] [(ppr-lpat (first pats)) []]))
+          (case (count pats) 0 [d/empty []] [(ppr-lpat (first pats)) []]))]
+    (sep [(sep (cons herald (map #(nest 2 (ppr-parend-lpat app-prec %)) others)))
+          (nest 2 (ppr-grhss ctxt grhss))])))
+
+(defn ppr-mg "pprMatches" [mg]
+  (vcat (map ppr-match (ul (f2 mg)))))
+
+(defn ppr-stmt "pprStmt" [s]
+  (let [s (ul s)]
+    (case (hd s)
+      LastStmt (let [m (f3 s)]
+                 (<+> (cond (= m '(Just true)) (text "return $") (= m '(Just false)) (text "return") :else d/empty)
+                      (ppr-lexpr (f2 s))))
+      BindStmt (d/hsep [(ppr-lpat (f2 s)) d/larrow (ppr-lexpr (f3 s))])
+      LetStmt (d/hsep [(text "let") (deeper #(ppr-local-binds (f2 s)))])
+      BodyStmt (ppr-lexpr (f2 s))
+      RecStmt (<+> (text "rec") (vcat [(deeper-list vcat (map (fn [x] (delay (ppr-stmt x))) (ul (f2 s))))]))
+      (unknown s))))
+
+(defn ppr-sig "ppr_sig" [s]
+  (let [s (ul s)
+        var-sig (fn [vars ty] (sep [(<+> (d/hsep (d/punctuate d/comma (map #(ppr-prefix-occ (ul %)) vars))) d/dcolon) (nest 2 ty)]))]
+    (case (hd s)
+      TypeSig (var-sig (f2 s) (ppr-wc (f3 s)))
+      ClassOpSig (let [v (var-sig (f3 s) (ppr-sig-type (f4 s)))] (if (f2 s) (<+> (text "default") v) v))
+      PatSynSig (<+> (text "pattern") (var-sig (f2 s) (ppr-sig-type (f3 s))))
+      (unknown s))))
+
+(defn ppr-bind "ppr_monobind" [b]
+  (let [b (ul b)]
+    (case (hd b)
+      FunBind (ppr-mg (f3 b))
+      PatBind (sep [(ppr-lpat (f2 b)) (nest 2 (ppr-grhss '(PatBindRhs) (f4 b)))])
+      (unknown b))))
+
+(defn- span-start-key [l] (let [s (a/getLoc l)] (if s [1 (nth s 1) (nth s 2) (nth s 3) (nth s 4)] [0])))
+
+(defn ppr-local-binds "ppr of HsLocalBinds" [lb]
+  (case (hd lb)
+    EmptyLocalBinds d/empty
+    HsValBinds (let [vb (f2 lb)
+                     [_ _ binds sigs] vb
+                     decls (sort-by first (concat (map (fn [s] [(span-start-key s) (delay (ppr-sig s))]) sigs)
+                                                 (map (fn [b] [(span-start-key b) (delay (ppr-bind b))]) binds)))]
+                 (deeper-list vcat (map second decls)))
+    (unknown lb)))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Commands
+
+(defn ppr-cmd "ppr_cmd" [c] (unknown (ul c)))
+(defn ppr-lcmd [c] (ppr-cmd c))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Not yet printed
+
+(defn ppr-decl "ppr of an HsDecl (its binding or signature)" [x]
+  (let [x (ul x)]
+    (case (hd x)
+      ValD (ppr-bind (f2 x))
+      SigD (ppr-sig (f2 x))
+      (unknown x))))
+
+(defn ppr-pragma [x] (unknown x))
+
+(defn ppr-sum-or-tuple
+  "pprSumOrTuple: [boxity [:tuple [[:missing] [:present e]...]]] or [boxity [:sum alt arity e]]"
+  [[boxity sot]]
+  (let [[po pc] (if (= boxity 'Boxed) [(text "(") (text ")")] [(text "(#") (text "#)")])
+        pp (fn [x] (if (= 'PatBuilder (some-> (hd (ul x)) name (subs 0 (min 10 (count (name (hd (ul x))))))))
+                     (ppr-patbuilder x)
+                     (ppr-lexpr x)))]
+    (case (first sot)
+      :sum (let [[_ alt arity e] sot bars (fn [n] (d/hsep (repeat n d/vbar)))]
+             (<+> po (bars (dec (long alt))) (pp e) (bars (- (long arity) (long alt))) pc))
+      :tuple (<> po (d/fcat (loop [as (seq (second sot)) out []]
+                              (if-not as
+                                out
+                                (let [[[k e] & more] as
+                                      punc (if more (if (= :present (first (first more))) (<> d/comma d/space) d/comma) d/empty)]
+                                  (recur more (conj out (if (= k :present) (<> (pp e) punc) punc)))))))
+                 pc))))

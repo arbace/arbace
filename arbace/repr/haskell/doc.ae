@@ -1,0 +1,355 @@
+;; Ported from GHC 9.14.1 (https://downloads.haskell.org/ghc/9.14.1/ghc-9.14.1-src.tar.xz, SHA-256
+;; 2a83779c9af86554a3289f2787a38d6aa83d00d136aa9f920361dd693c101e77): compiler/GHC/Utils/Ppr.hs
+;; (itself John Hughes's and Simon Peyton Jones's pretty-printer, as the pretty library's
+;; Text.PrettyPrint.HughesPJ) and the combinators of compiler/GHC/Utils/Outputable.hs that GHC's
+;; parser messages use; GHC's notice is in LICENSE.md, "GHC: the Glasgow Haskell Compiler License".
+
+(ns arbace.repr.haskell.doc
+  "GHC's pretty-printer (doc/haskell/NATIVE.md, \"Messages\"): GHC.Utils.Ppr's Doc, its reduction
+  (beside, above, sep, fill), best and display in PageMode, and the SDoc combinators of
+  GHC.Utils.Outputable the parser's messages are made of, at the context GHC prints diagnostics
+  with (user style, Unicode quotes, no Unicode syntax, lines of 100 columns and 1.5 ribbons).
+
+  A Doc is :empty, :nodoc, [:nil-above d], [:text s width d] (TextBeside), [:nest k d], [:union p q],
+  [:beside p space? q] or [:above p no-overlap? q]; a union's arguments may be delays (forced where
+  matched), Haskell's laziness where the alternatives are built.
+
+  (render d) is the text printSDoc writes for d (no final newline)."
+  (:refer-clojure :exclude [empty])
+  (:require [arbace.string :as str]))
+
+(set! *warn-on-reflection* true)
+
+(defn- tag [d] (if (keyword? d) d (nth d 0)))
+(defn- fd "A doc, forced" [d] (force d))
+
+(defn- width "Haskell's length of a String: its code points" ^long [^String s]
+  (.codePointCount s 0 (.length s)))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Primitives
+
+(def empty :empty)
+(defn text [^String s] [:text s (width s) :empty])
+(defn char* [c] (text (str c)))
+(defn sized-text [^String s ^long n] [:text s n :empty])
+(def empty-text (sized-text "" 0))
+(defn int* [n] (text (str n)))
+
+(defn is-empty? [d] (= :empty (fd d)))
+
+(defn- text-beside [s sl p] [:text s sl p])
+(defn- nest_ [k p] [:nest k p])
+(defn- union_ [p q] [:union p q])
+(defn- nil-above_ [p] [:nil-above p])
+
+(declare beside above reduce-doc)
+
+(defn reduce-doc
+  "reduceDoc: Beside and Above made into the reduced forms; the right spine of a vcat or hcat of
+  many documents walked in a loop (the interpreter's call depth), from its last one"
+  [d]
+  (let [spine (java.util.ArrayList.)]
+    (loop [d (fd d)]
+      (if (#{:beside :above} (tag d))
+        (do (.add spine d) (recur (fd (nth d 3))))
+        (loop [i (dec (.size spine)) acc d]
+          (if (neg? i)
+            acc
+            (let [x (.get spine i)]
+              (recur (dec i) (if (= :above (tag x))
+                               (above (nth x 1) (nth x 2) acc)
+                               (beside (nth x 1) (nth x 2) acc))))))))))
+
+(defn- mk-nest [k p]
+  (let [p (fd p) k (long k)]
+    (case (tag p)
+      :nest (recur (+ k (long (nth p 1))) (nth p 2))
+      :nodoc :nodoc
+      :empty :empty
+      (if (zero? k) p (nest_ k p)))))
+
+(defn- mk-union [p q] (if (= :empty (fd p)) :empty (union_ p q)))
+
+(defn- beside' [g p q] (if (= :empty (fd q)) p [:beside p g q]))
+(defn- above' [g p q] (if (= :empty (fd q)) p [:above p g q]))
+
+(defn- reduce-ab [d]
+  (let [d (fd d)]
+    (if (and (#{:above :beside} (tag d)) (= :empty (fd (nth d 1))))
+      (nth d 3)
+      d)))
+
+(defn- foldr-docs [f ds] (reduce (fn [acc p] (f p acc)) :empty (reverse ds)))
+
+(defn hcat [ds] (reduce-ab (foldr-docs #(beside' false %1 %2) ds)))
+(defn hsep [ds] (reduce-ab (foldr-docs #(beside' true %1 %2) ds)))
+(defn vcat [ds] (reduce-ab (foldr-docs #(above' false %1 %2) ds)))
+
+(defn nest [k p] (mk-nest k (reduce-doc p)))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Vertical composition
+
+(defn- above_ [p g q]
+  (cond (= :empty (fd q)) p
+        (= :empty (fd p)) q
+        :else [:above p g q]))
+
+(defn $$ "Above, overlapping the second's first line into the first's last when it fits"
+  ([p q] (above_ p false q))
+  ([p q & more] (reduce $$ ($$ p q) more)))
+(defn $+$ "Above, never overlapping"
+  ([p q] (above_ p true q))
+  ([p q & more] (reduce $+$ ($+$ p q) more)))
+
+(declare above-nest)
+
+(defn- nil-above-nest [g k q]
+  (let [q (fd q) k (long k)]
+    (case (tag q)
+      :empty :empty
+      :nest (recur g (+ k (long (nth q 1))) (nth q 2))
+      (if (and (not g) (pos? k))
+        (text-beside (apply str (repeat k \space)) k q)
+        (nil-above_ (mk-nest k q))))))
+
+(defn- above-nest [p g k q]
+  (let [p (fd p) k (long k)]
+    (case (tag p)
+      :nodoc :nodoc
+      :union (union_ (delay (above-nest (nth p 1) g k q)) (delay (above-nest (nth p 2) g k q)))
+      :empty (mk-nest k q)
+      :nest (let [k1 (long (nth p 1))] (nest_ k1 (above-nest (nth p 2) g (- k k1) q)))
+      :nil-above (nil-above_ (above-nest (nth p 1) g k q))
+      :text (let [[_ s sl r] p
+                  k1 (- k (long sl))]
+              (text-beside s sl (if (= :empty (fd r)) (nil-above-nest g k1 q) (above-nest r g k1 q)))))))
+
+(defn above [p g q]
+  (let [p (fd p)]
+    (case (tag p)
+      :above (above (nth p 1) (nth p 2) (above (nth p 3) g q))
+      :beside (above-nest (reduce-doc p) g 0 (reduce-doc q))
+      (above-nest p g 0 (reduce-doc q)))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Horizontal composition
+
+(defn- beside_ [p g q]
+  (cond (= :empty (fd q)) p
+        (= :empty (fd p)) q
+        :else [:beside p g q]))
+
+(defn <> "Beside"
+  ([] :empty)
+  ([p] p)
+  ([p q] (beside_ p false q))
+  ([p q & more] (reduce <> (<> p q) more)))
+(defn <+> "Beside, with a space"
+  ([] :empty)
+  ([p] p)
+  ([p q] (beside_ p true q))
+  ([p q & more] (reduce <+> (<+> p q) more)))
+
+(defn- nil-beside [g p]
+  (let [p (fd p)]
+    (case (tag p)
+      :empty :empty
+      :nest (recur g (nth p 2))
+      (if g (text-beside " " 1 p) p))))
+
+(defn beside [p g q]
+  (let [p (fd p)]
+    (case (tag p)
+      :nodoc :nodoc
+      :union (union_ (delay (beside (nth p 1) g q)) (delay (beside (nth p 2) g q)))
+      :empty q
+      :nest (nest_ (nth p 1) (beside (nth p 2) g q))
+      :beside (let [[_ p1 g1 q1] p]
+                (if (= g1 g) (beside p1 g1 (beside q1 g q)) (beside (reduce-doc p) g q)))
+      :above (beside (reduce-doc p) g q)
+      :nil-above (nil-above_ (beside (nth p 1) g q))
+      :text (let [[_ s sl r] p]
+              (text-beside s sl (if (= :empty (fd r)) (nil-beside g q) (beside r g q)))))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; sep, cat, fsep, fcat
+
+(defn- one-liner [p]
+  (let [p (fd p)]
+    (case (tag p)
+      :nodoc :nodoc
+      :empty :empty
+      :nil-above :nodoc
+      :text (let [[_ s sl r] p] (text-beside s sl (one-liner r)))
+      :nest (nest_ (nth p 1) (one-liner (nth p 2)))
+      :union (one-liner (nth p 1)))))
+
+(declare sep-x sep1)
+
+(defn- sep-nb [g p k ys]
+  (let [p (fd p)]
+    (case (tag p)
+      :nest (recur g (nth p 2) k ys)
+      :empty (mk-union (one-liner (nil-beside g (reduce-doc (if g (hsep ys) (hcat ys)))))
+                       (delay (nil-above-nest false k (reduce-doc (vcat ys)))))
+      (sep1 g p k ys))))
+
+(defn- sep1 [g p k ys]
+  (let [p (fd p) k (long k)]
+    (case (tag p)
+      :nodoc :nodoc
+      :union (union_ (delay (sep1 g (nth p 1) k ys))
+                     (delay (above-nest (nth p 2) false k (reduce-doc (vcat ys)))))
+      :empty (mk-nest k (sep-x g ys))
+      :nest (let [n (long (nth p 1))] (nest_ n (sep1 g (nth p 2) (- k n) ys)))
+      :nil-above (nil-above_ (above-nest (nth p 1) false k (reduce-doc (vcat ys))))
+      :text (let [[_ s sl r] p] (text-beside s sl (sep-nb g r (- k (long sl)) ys))))))
+
+(defn- sep-x [g ps]
+  (if (empty? ps) :empty (sep1 g (reduce-doc (first ps)) 0 (rest ps))))
+
+(defn sep "Beside with spaces when it fits, else above" [ps] (sep-x true (vec ps)))
+(defn cat* "Beside when it fits, else above" [ps] (sep-x false (vec ps)))
+
+(declare fill fill1)
+
+(defn- elide-nest [d] (let [d (fd d)] (if (= :nest (tag d)) (nth d 2) d)))
+
+(defn- fill-nbe [g k y ys]
+  (let [k' (if g (dec (long k)) k)]
+    (mk-union (nil-beside g (fill1 g (elide-nest (one-liner (reduce-doc y))) k' ys))
+              (delay (nil-above-nest false k (fill g (cons y ys)))))))
+
+(defn- fill-nb [g p k ys]
+  (let [p (fd p)]
+    (cond
+      (= :nest (tag p)) (recur g (nth p 2) k ys)
+      (and (= :empty p) (empty? ys)) :empty
+      (and (= :empty p) (= :empty (fd (first ys)))) (recur g :empty k (rest ys))
+      (= :empty p) (fill-nbe g k (first ys) (rest ys))
+      :else (fill1 g p k ys))))
+
+(defn- fill1 [g p k ys]
+  (let [p (fd p) k (long k)]
+    (case (tag p)
+      :nodoc :nodoc
+      :union (union_ (delay (fill1 g (nth p 1) k ys)) (delay (above-nest (nth p 2) false k (fill g ys))))
+      :empty (mk-nest k (fill g ys))
+      :nest (let [n (long (nth p 1))] (nest_ n (fill1 g (nth p 2) (- k n) ys)))
+      :nil-above (nil-above_ (above-nest (nth p 1) false k (fill g ys)))
+      :text (let [[_ s sl r] p] (text-beside s sl (fill-nb g r (- k (long sl)) ys))))))
+
+(defn- fill [g ps]
+  (let [ps (seq ps)]
+    (if (empty? ps) :empty (fill1 g (reduce-doc (first ps)) 0 (rest ps)))))
+
+(defn fsep "Fill with spaces" [ps] (fill true (seq ps)))
+(defn fcat "Fill" [ps] (fill false (seq ps)))
+
+(defn hang [d1 n d2] (sep [d1 (nest n d2)]))
+
+(defn punctuate [p ds]
+  (let [ds (vec ds)]
+    (if (empty? ds) [] (conj (mapv #(<> % p) (pop ds)) (peek ds)))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; best and display (PageMode)
+
+(defn- fits-first?
+  "fits n (the first line of best's choice): n the space left, w the line's width, r the ribbon,
+  sl the line's text so far; a union inside the line chosen as best's get1 chooses it"
+  [^long n ^long w ^long r ^long sl d]
+  (loop [n n sl sl d (fd d)]
+    (if (neg? n)
+      false
+      (case (tag d)
+        :nodoc false
+        :empty true
+        :nil-above true
+        :text (let [tl (long (nth d 2))] (recur (- n tl) (+ sl tl) (fd (nth d 3))))
+        :nest (recur n sl (fd (nth d 2)))
+        :union (let [p (fd (nth d 1))]
+                 (recur n sl (if (fits-first? (- (min w r) sl) w r sl p) p (fd (nth d 2)))))))))
+
+(defn render
+  "The text of a doc as printDoc_ writes it in PageMode at line-length (default 100) and 1.5
+  ribbons a line, without the final newline printDoc adds: best's choices (nicest: an
+  alternative whose first line fits the line and the ribbon) and display's layout in one loop"
+  ([d] (render d 100))
+  ([d ^long line-length]
+   (let [r (Math/round (/ (double line-length) 1.5))
+         sb (StringBuilder.)]
+     ;; mid: within a line (best's get1, display's lay2); w the line's width left to best; col
+     ;; display's column; sl the line's text width (best's)
+     (loop [d (fd (reduce-doc d)) mid false w line-length col 0 sl 0]
+       (case (tag d)
+         :empty nil
+         :nest (let [k (long (nth d 1))]
+                 (if mid
+                   (recur (fd (nth d 2)) true w col sl)
+                   (recur (fd (nth d 2)) false (- w k) (+ col k) sl)))
+         :nil-above (do (.append sb \newline)
+                        (if mid
+                          (recur (fd (nth d 1)) false (- w sl) col 0)
+                          (recur (fd (nth d 1)) false w col 0)))
+         :text (let [[_ s tl p] d tl (long tl)]
+                 (when-not mid (dotimes [_ col] (.append sb \space)))
+                 (.append sb ^String s)
+                 (recur (fd p) true w (+ col tl) (+ (if mid sl 0) tl)))
+         :union (let [p (fd (nth d 1))
+                      sl' (if mid sl 0)]
+                  (recur (if (fits-first? (- (min w r) sl') w r sl' p) p (fd (nth d 2))) mid w col sl))
+         :nodoc (throw (ex-info "render: no document" {}))))
+     (.toString sb))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Outputable's combinators (the user style of diagnostics)
+
+(defn parens [d] (<> (char* \() d (char* \))))
+(defn brackets [d] (<> (char* \[) d (char* \])))
+(defn braces [d] (<> (char* \{) d (char* \})))
+(defn angle-brackets [d] (<> (char* \<) d (char* \>)))
+(defn double-quotes [d] (<> (char* \") d (char* \")))
+(defn quotes "Unicode quotes (sdocCanUseUnicode)" [d] (<> (char* (char 0x2018)) d (char* (char 0x2019))))
+(defn quote* [d] (<> (char* \') d))
+(def comma (char* \,))
+(def semi (char* \;))
+(def colon (char* \:))
+(def equals (char* \=))
+(def dot (char* \.))
+(def vbar (char* \|))
+(def space (char* \space))
+(def underscore (char* \_))
+(def blank-line empty-text)
+(def dcolon (text "::"))
+(def arrow (text "->"))
+(def larrow (text "<-"))
+(def darrow (text "=>"))
+(def bullet (char* (char 0x2022)))
+(defn cparen [b d] (if b (parens d) d))
+
+(defn ppr-with-commas [pp xs] (fsep (punctuate comma (map pp xs))))
+(defn interpp-sp [ds] (sep ds))
+(defn interpp'-sp [ds] (sep (punctuate comma ds)))
+(defn quoted-list [ds] (fsep (punctuate comma (map quotes ds))))
+(defn quoted-list-with [w ds]
+  (let [ds (vec ds)]
+    (if (>= (count ds) 2)
+      (<+> (quoted-list (pop ds)) (text w) (quotes (peek ds)))
+      (quoted-list ds))))
+(defn unquoted-list-with [w ds]
+  (let [ds (vec ds)
+        ul #(fsep (punctuate comma %))]
+    (if (>= (count ds) 2) (<+> (ul (pop ds)) w (peek ds)) (ul ds))))
+
+(defn speak-n [^long n]
+  (case n 0 (text "none") 1 (text "one") 2 (text "two") 3 (text "three") 4 (text "four")
+        5 (text "five") 6 (text "six") 7 (text "seven") 8 (text "eight") 9 (text "nine")
+        10 (text "ten") (int* n)))
+
+(defn speak-n-of [^long n d]
+  (case n 0 (<> (text "no") (<+> empty d) (char* \s))
+        1 (<+> (text "one") d)
+        (<> (<+> (speak-n n) d) (char* \s))))
