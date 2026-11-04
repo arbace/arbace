@@ -231,12 +231,12 @@ the plain round trip's judges too (forms, objects and bitcode equal).
 
 ### 6.2 The verifier (LL4, LLS6 (a))
 
-`bin/repr-llvm verify FILE.ll|FILE.ae...` (`arbace.repr.llvm.verify`): each invalid file's first error in LLVM's words
-with its rule, `FILE: error: MESSAGE [RULE]`, exit 1 when one is invalid. It runs in two phases, as the pin's `opt
--passes=verify` does: LLParser's checks beyond the grammar (`llvm/lib/AsmParser/LLParser.cpp`), in the text's order and
+`bin/repr-llvm verify FILE.ll|FILE.ae...` (`arbace.repr.llvm.verify`): what `opt -passes=verify` prints for each invalid
+file, line for line (§6.2.2; until LL4c, each invalid file's first error in LLVM's words with its rule), exit 1 when one is
+invalid. It runs in two phases, as the pin's `opt -passes=verify` does: LLParser's checks beyond the grammar (`llvm/lib/AsmParser/LLParser.cpp`), in the text's order and
 stopping at the first; then, when they pass, the Verifier's rules (`llvm/lib/IR/Verifier.cpp`), each function in the
-module's order (visitFunction, then each block's visitBasicBlock and its instructions' visitors), then the module's. The
-message is the first line opt prints, without its file and position (the forms have no positions).
+module's order (visitFunction, then each block's visitBasicBlock and its instructions' visitors), then the module's, all of
+its failed visits. The messages of the table are LLVM's words; their positions and the values opt prints after them are §6.2.2's.
 
 Ported (the namespace's `rules`):
 
@@ -263,13 +263,11 @@ Ported (the namespace's `rules`):
 | | `md-range`, `md-nonnull`, `md-align`, `md-dereferenceable` | metadata attachments' placement and types (`Ranges are only for loads, calls and invokes!`, `nonnull applies only to pointer types`, ...) |
 | | `comdat-declaration` | `Declaration may not be in a Comdat!` |
 
-Not ported: LLParser's syntax errors with their positions (the reader refuses a text outside the grammar with its own
-message); GC statepoints and the per-intrinsic checks of visitIntrinsicCall beyond `lifetime`, `ptrmask` and the
+Not ported: LLParser's syntax errors (the reader refuses a text outside the grammar with its own message; the positions of the
+errors that are ported are §6.2.2's); GC statepoints and the per-intrinsic checks of visitIntrinsicCall beyond `lifetime`, `ptrmask` and the
 signatures of the table (the coroutine, statepoint, vector-predication, matrix and constrained-FP intrinsics have no
-entry); Windows EH's sibling and nesting rules (`Unwind edges out of a funclet pad must have the same unwind dest`, `A
-cleanupret must exit its cleanup`, `A single unwind edge may only enter one EH pad`, which need the funclets' coloring);
-swifterror's argument rules, `clang.arc.attachedcall`, VFABI names, the `memory(...)` and `PIC Level` module flag
-values' syntax; atomic orderings' constraints; DI nodes beyond the list of §6.2.1; aliases' and ifuncs' rules, global
+entry); Windows EH's coloring (the nesting and sibling rules of §6.2.2 are ported without it); swifterror's rules for
+loads and stores (its calls' are §6.2.2's), the `memory(...)` attribute's syntax; atomic orderings' constraints; DI nodes beyond the list of §6.2.1; aliases' and ifuncs' rules, global
 ctors and dtors, use-list orders' validity, `blockaddress`; AutoUpgrade beyond the old intrinsic forms of
 `old-form-pattern`. Known divergences: a label defined twice (`a:` ... `a:`) is a second block here, LLParser appends
 the second's instructions to the first's block; opt aborts (`PLEASE submit a bug report`) on a call to an intrinsic
@@ -370,9 +368,126 @@ and unnamed values, unlabelled blocks, hex floats and laid-out metadata; `test/l
 repository's root; the round trips of §6.1 and `verify-check` take it) and `test/llvm/probes/` (478 small modules, one
 rule each, by family: `verify/` the 73 of LL4, `attrs/`, `cc/`, `musttail/`, `funclets/`, `metadata/`, `debug/` (from
 `hw/dbg.ll`), `intrinsics/` (`good.ll`: a valid declaration of every intrinsic of the table); `test/llvm/probes.list`):
-`bin/repr-llvm verify-check test/llvm/probes.list WORK` gives opt's verdicts on 467 of 478, first messages 310 of 323 (the others: syntax outside the
+`bin/repr-llvm verify-check test/llvm/probes.list WORK` gave opt's verdicts on 467 of 478, first messages 310 of 323 (the others: syntax outside the
 reader's grammar, the twice-defined label, swifterror's call rules, `clang.arc.attachedcall`, VFABI names, `PIC Level`, a
-funclet's parent of itself).
+funclet's parent of itself); §6.2.2 ported those rules and compares the whole of opt's stderr: verdicts 472 of 478, first messages 319 of 323,
+whole stderr 470 of 478, the eight others and the two modules the reader refuses classed with their reasons in `test/llvm/probes-known.tsv`.
+
+### 6.2.2 opt's whole stderr (LL4c)
+
+The rules of §6.2 and §6.2.1 gave opt's verdict and its first message. Since 2026-11-04 (branch `llvm-verify3`)
+`bin/repr-llvm verify FILE.ll` prints what `opt -passes=verify -disable-output FILE.ll` prints to stderr, line for line,
+and `verify-check` compares the whole of it (`WORK/full.tsv`; opt's in `WORK/opt/NAME.log`, verify's in
+`WORK/arb/NAME.err`; the program's name as opt's, `REPR_LLVM_OPT`). What opt prints, and where it comes from here:
+
+```
+$ bin/repr-llvm verify test/llvm/probes/verify/addf.ll test/llvm/probes/funclets/v8.ll
+/usr/lib/llvm23/bin/opt: test/llvm/probes/verify/addf.ll:2:12: error: invalid operand type for instruction
+  %x = add float %c, %c
+           ^
+A single unwind edge may only enter one EH pad
+  invoke void @g()
+          to label %ok unwind label %cp
+FuncletPadInst must not be nested within itself
+  %p = cleanuppad within %p []
+/usr/lib/llvm23/bin/opt: test/llvm/probes/funclets/v8.ll: error: input module is broken!
+```
+
+- **A parser error** (LLParser's, the first one, which stops opt): `PROG: FILE:LINE:COL: error: MESSAGE`, the source line
+  and a caret line (SMDiagnostic). The position comes from the reader's side table: `arbace.repr.llvm.read/read-module-items`
+  gives each top-level form's items (a definition's header, label, instruction, debug record, `}`) with their offsets in the
+  text, the verifier's context says which item a check runs at, and the check's **hint** says which token of the item
+  LLParser reports it at (`arbace.repr.llvm.diag`: `[:ty]` an instruction's type, `[:op N]`, `[:call-arg N]`, `[:param N]`,
+  `[:find W]`, `[:attr-val NAME]` the value of an attribute, `[:comma N]`, `[:next]` the next top-level form, ...; the
+  names of undefined values are searched for in their function or the module: `[:fn-find W]`, `[:mod-find W]`). A `.ae` text
+  has no source, its error has no position (`PROG: FILE: error: MESSAGE`). The hints were found by probing opt; each rule
+  of §6.2's parser table has one.
+- **The Verifier's messages**, all of them: the Verifier goes on after a failed check, each visit ending at its first failure
+  (visitFunction, a block's phis, each instruction, a module flag, ...; `visiting` in `verify.ae`), so a module broken in
+  two places prints two messages; some checks print more than one message from one visit (an invoke of an intrinsic twice,
+  a `branch_weights` where none is allowed and then its count, every operand of a dominance check, `CheckFailed` against
+  `Check`). After the message, **the values it names**, one a line (the `culprits` of `verr`, `:inst` by default for an
+  instruction's check, `ptr @f` for a function's, `label %bb`, `:none` for those that print nothing): an instruction in the
+  AsmWriter's form, a function as `ptr @f` or whole (`declare ...`, for an intrinsic's signature), a metadata node
+  (`!N = ...`), an argument (`ptr %x`), a constant (`i32 0`). Then `PROG: FILE: error: input module is broken!`, or, for a
+  module with `!llvm.dbg.cu` (every such module, observed: opt ends in the pass's `report_fatal_error`),
+  `LLVM ERROR: Broken module found, compilation aborted!`, the bug report line and the first two lines of the stack dump
+  (`Stack dump:`, `0.	Program arguments: ...`). The debug info's messages end with `warning: ignoring invalid debug info in FILE`,
+  an unknown `Debug Info Version` with `warning: ignoring debug info with an invalid version (N) in FILE` before the
+  others.
+- **The AsmWriter's forms** of what is printed, by the printer of §6 (which prints what clang printed, so most of it holds)
+  and these, each found from opt's output and checked against the 282 modules' own text:
+  a load, store or alloca written without `align` prints its type's ABI alignment from the module's data layout
+  (`dl-specs`, LLVM's defaults and the `target datalayout` string's `i`, `f`, `v`, `p` entries); a floating constant prints as
+  `%e` when that reads back to the same value, else as the double's bits (`canon-fp`); typed pointers as `ptr`; the attributes
+  of a parameter, a return value or a declaration in Attribute's order (enum attributes by their enum's name, type
+  attributes, integer ones, ranges, strings: `sort-attrs`), a declaration with its `; Function Attrs:` line; **the numbers**
+  the slot tracker gives: a function attribute set is `#N` by first use, the functions' sets in module order, then the sets of
+  the calls **of the function printed** (`group-numbers`; `group-mismatches` finds none in 281 of the 282 modules, the
+  hand-written one apart), and a metadata node is `!N` by the traversal (`arbace.repr.llvm.diag/md-slots`, a node before its
+  operands, in the operand order of each DI kind: the globals' attachments, named metadata, then each function's attachments,
+  the debug records' value, variable and location, a call's metadata arguments and the attachments: `md-slots` renumbers none
+  of the 281 modules' nodes, so a mutant whose instructions moved prints the numbers opt does; `slots-check`, `groups-check`
+  of `bin/repr-llvm`'s namespace).
+- **Order**: a block's predecessors and a phi's entries are sorted by the order the parser creates the blocks in (a block
+  when first mentioned, `bb-ranks`; LLVM sorts them by pointer).
+
+The rules ported since §6.2.1: the funclet nesting (`A single unwind edge may only enter one EH pad`, `EH pad jumps through a
+cycle of pads`, `A cleanupret must exit its cleanup`, `FuncletPadInst must not be nested within itself`, `Unwind edges out of a
+funclet pad must have the same unwind dest`) and the sibling rule (`EH pads can't handle each other's exceptions`,
+`check-sibling-unwinds`); swifterror arguments of a call (`swifterror argument for call has mismatched alloca` and `... parameter`,
+`... should come from an alloca or parameter`); `clang.arc.attachedcall` (the return type, one function as its argument, one bundle);
+VFABI names (`invalid name for a VFABI variant`, the grammar `_ZGV<isa><mask><vlen><params>_<name>[(<vector name>)]`, one parameter
+for each of the function's); `llvm.is.fpclass`'s mask (`unsupported bits for llvm.is.fpclass test mask`), `eh.exceptionpointer`'s
+argument; the `PIC Level` module flag (an `error` flag of `PIC Level`, `sign-return-address{,-all,-with-bkey}` and
+`branch-target-enforcement` is a `min` one, `PIE Level` a `max` one: AutoUpgrade), `SemanticInterposition`; `DbgLoc uses atomGroup
+but DISubprogram doesn't have Key Instructions enabled`, `scope points into the type hierarchy`, the parser's positions of the DI
+fields' errors; and the culprits and the second messages of the rules of §6.2.1 (a failed check of a call's attributes no longer
+ends the call's visit, a failed parameter's attributes no longer end the function's).
+
+**The check, whole stderr.** On 2026-11-04, the sets of §6.2.1 regenerated (indices from 0, the same mutants, the rules had been
+fitted to their first messages, not to the rest of the output), `verify-check`, **whole stderr as opt's**, with the verdicts and
+first messages beside it (the table of §6.2.1 had them; they hold, but for the first messages of `base`, 1 and 3 fewer, and
+the verdicts of the funclets, 150 of 150, and of the debug info, 198 of 200, which are more):
+
+| set | mutants | whole stderr as opt's (and verdicts, first messages) |
+|---|---|---|
+| attrs | 200 | 198 of 200 (verdicts 200 of 200, first messages 168 of 168) |
+| cc | 100 | 99 of 100 (verdicts 100 of 100, first messages 74 of 74) |
+| musttail | 100 | 98 of 100 (verdicts 100 of 100, first messages 95 of 95) |
+| bundles | 100 | 95 of 100 (verdicts 100 of 100, first messages 88 of 88) |
+| intrinsics | 150 | 138 of 150 (verdicts 150 of 150, first messages 120 of 130) |
+| funclets (16 modules with EH) | 150 | 148 of 150 (verdicts 150 of 150, first messages 144 of 144) |
+| metadata | 97 | 95 of 97 (verdicts 97 of 97, first messages 91 of 91) |
+| debug | 200 | 188 of 200 (verdicts 198 of 200, first messages 160 of 164) |
+| base, indices 0 on (the 278 modules of §6.1) | 294 | 287 of 294 (verdicts 294 of 294, first messages 283 of 284) |
+| base, indices 1,000 on | 294 | 289 of 294 (verdicts 294 of 294, first messages 284 of 287) |
+
+and the held-out sets of this round, generated after the rules were fixed and run once, at the end (all kinds together, indices
+500,000 and 600,000 on, 600 asked of the 282 modules and the eight hand-written funclet modules, as §6.2.1's): the first, 543 mutants: **541 of 543 verdicts, 522 of 543 whole stderr** (480 of 488 first messages); the second, 539 mutants: **538 of 539 verdicts, 518 of 539 whole stderr** (479 of 488 first messages): 1,040 of 1,082 whole stderr, 96.1 %. Of the 42 that differ, by kind of mutant: 9 `intr-rename`, 8 `phiblock`, 6 `di-retarget`, 3 each `md-attach`, `intr-decl`, `attr-place`, 2 each `musttail`, `di-attach`, `attr-type`, 1 each `intr-arg`, `bundle`, `attr-pair`, `attr-dup`.
+(Two sets of indices 300,000 and 400,000 served while the rules were written: 526 of 543 and 524 of 544 at the end of that work,
+they found a hang of the funclet checks, a pad whose parent chain loops without returning to it, fixed.)
+The 282 valid modules: **282 of 282 whole stderr as opt's** (empty but `misc`'s warning), the four hand-written ones 4 of 4.
+The probes: **whole stderr 470 of 478, verdicts 472 of 478, first messages 319 of 323**. The 8 that differ and the two valid modules the reader refuses are in `test/llvm/probes-known.tsv`
+(`REPR_LLVM_KNOWN`, `NAME<tab>CLASS<tab>reason`; `verify-check` counts them apart): a label defined twice (`a:` ... `a:`,
+LLParser appends the second block's instructions to the first's), syntax the reader takes and LLParser rejects (`initializes()`,
+`alloc_size` without its argument, `memory(bogus: read)`), a metadata operand opt prints by its address (`metadata <0x7f...>`), a
+node written inline in a module flag (the slot tracker gives it a number and moves the rest) and equal nodes LLParser merges.
+
+What still differs in the sets (by reason; each a few mutants):
+- the attributes and group of an intrinsic's declaration: opt gives a declaration whose name is an intrinsic the intrinsic's own
+  attributes and group (Intrinsics.td), not the text's, so its `; Function Attrs:` line and `#N` differ after a rename or a
+  mismatching declaration; an intrinsic renamed so that its signature mismatches is rewritten by AutoUpgrade, opt prints the
+  upgraded declaration (`declare ptr @llvm.ctlz.p0(ptr, i1)`) or aborts;
+- the pointer order of blocks: opt sorts a block's predecessors by address, here by the order of their first mention, which
+  differs for blocks referenced before they are defined (`PHI node entries do not match predecessors!`, the labels printed);
+  the order of two incoming values of one block is the sort's, not stable here;
+- metadata numbers of nodes written inline, of the uniqued nodes, and of a call whose `!dbg` opt numbers as the first node of a
+  later function (a `convergencectrl` bundle: the printed instruction's slot tracker is not the module's);
+- debug info rules not ported: a node reached twice printed twice, `invalid tag`, `DILocation not allowed within this metadata
+  node`, `invalid retained nodes, retained node is not local`, the global variable list's elements;
+- `immarg`/swifterror rules' second messages, `Attribute writable and memory without argmem: write are incompatible!`;
+- two messages from one `CheckFailed` of `vscale_range` and attribute pairs.
 
 ## 7. The lowering (`arbace.cpp.lower`)
 
