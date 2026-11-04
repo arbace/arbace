@@ -260,3 +260,16 @@ On branch `night-fix` (from `b2a4911f`), not merged while `--full` ran on main:
 - Python on the Mac VM: PY1-PY3 done (spec and pins; read and print over 2,800 files; `:full` byte for byte with
   `marshal` equal on 2,795), the user's decisions: two parses for type comments, 20 pinned site-packages apks,
   `:code-lines` by design for `:lines`, `:charset` by design; PY4 running.
+
+## 2026-11-04: the day and the night; the staging branch `next`
+
+- The user pinned the night shift to 12 hours, 19:00-07:00 UTC, for gating, testing, details and the bugs checks find; the
+  day for development and design with sample checks and occasional light gating. Asked for my opinion, I proposed: plan 8
+  of the 12 hours (4 of slack for fixes and reruns), the clean run in one night (two at most, resumed by `--clean --only`,
+  `main` frozen between), and day merges through a staging branch rather than an essential gate per merge (the alternative
+  considered: one or two batched essential gates a day). The user decided all three, with the staging branch:
+  doc/GATE-SURVEY.md "Decided (2026-11-04, the user): the day and the night" (GTS224-GTS226, amending GTS209), doc/AGENDA.md's
+  tier table.
+- `bin/lib/gate-cache.bash`'s `arbace_main_checkout` no longer writes `${TMPDIR:-.}/gate-cache-git.err`: unset TMPDIR left an
+  empty file in the checkout's root; git's error now joins the output (not a directory: the fallback).
+

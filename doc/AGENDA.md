@@ -68,9 +68,14 @@ in bounded time. The tiers, for all ten planned crops (Clojure, Java, Go, C, C++
 
 | tier | budget | when |
 |---|---|---|
-| essential | at most 15 minutes | every merge (the essential gate) |
-| nightly | at most 6 hours | each night, a keyed `--full` over compressed corpora |
-| clean | at most 24 hours | a fresh clone, every step audited, at a tag |
+| essential | at most 15 minutes (a goal) | each night's first step, on `next` (the staging branch); by hand rarely by day |
+| nightly | 8 hours planned in the 12-hour night shift, 4 of slack for fixes and reruns | each night, a keyed `--nightly` over compressed corpora |
+| clean | one night (about 10 hours planned), two at most | a fresh clone, every step audited, at a tag; it replaces that night's nightly |
+
+The day and the night (the user, 2026-11-04; GATE-SURVEY.md, "Decided (2026-11-04)"): the night shift is 19:00-07:00 UTC,
+for gating, testing, details and the bugs the checks find; the day is for development and design with sample checks.
+Day merges go to the branch `next` after their sample checks; the night's first step gates `next` (the essential gate) and
+fast-forwards `main` to it.
 
 The methods: deduplication (byte-identical and equivalent files counted once: `torture-execute-mirror`'s collapse, VM
 report 156, the first case, GATE-SURVEY.md's note beside GT7), coverage subsets (the files that keep every back-end

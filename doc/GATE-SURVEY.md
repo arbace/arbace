@@ -3279,6 +3279,22 @@ the nightly tier every step over its subset plus a rotating slice, seven nights;
 checking the rotation's record; the C subset rule for every crop; Go's coverage builds kept by key, run at night; synthetic
 corpora against the same references; Java's `speed` curation inside GT8; acceptance as GTS209.
 
+## Decided (2026-11-04, the user): the day and the night (GTS224-GTS226, amending GTS209)
+
+The night shift is nominally 12 hours, 19:00 to 07:00 UTC: gating, testing, working out details and fixing the bugs the
+checks find. The day is for development, design and grand concepts, with sample checks and occasional light gating.
+
+- **GTS224 The nightly tier.** 8 hours of planned runs in the 12-hour night (6 before), 4 hours of slack for the fixes and
+  `--only failed` reruns a night's failures need, so a broken run still ends by 07:00.
+- **GTS225 The clean run.** Within one night (about 10 hours planned: the clean run over GT8's compressed corpora; the
+  whole corpora rotate through the nights), two nights at most (`bin/gate --clean --only` resumes the record; `main`
+  frozen at the candidate between them). A tag's night runs the clean run instead of the nightly. GTS209's acceptance reads
+  so: the four crops' clean run within the night, the nightly within its 8 hours.
+- **GTS226 The staging branch.** By day, merges go to the branch `next` after their sample checks; the night's first step
+  runs the essential gate on `next` and fast-forwards `main` to it (then pushes), so `main` stays gated and the day free of
+  gate runs. The essential gate's 15 minutes stays a goal, off the day's critical path. (Before: the essential gate at each
+  merge into `main`, 2026-10-26.)
+
 ## As built: GT8.4, GT8.7 (write-ahead, branch `gt8-nightly`, 2026-11-03)
 
 GTS202 (a), GTS203 (a), GTS204 (a) in the planner's way: the rotation is data in `test/gate/steps.edn`, decided by
