@@ -416,7 +416,11 @@ cmd_python() {
       *) file=$1; have=f; shift; break ;;
     esac
   done
-  local d src argv0
+  local d src argv0 p
+  # the directories of earlier runs whose interpreter has ended (each exec'd, below, so none removes its own)
+  for p in "$WORK"/python.*/pid; do
+    [ -f "$p" ] && ! kill -0 "$(cat "$p")" 2>/dev/null && rm -rf "${p%/pid}"
+  done
   d=$(mktemp -d "$WORK/python.XXXXXX")
   case $have in
     c) argv0=-c; src=$d/__pyi_c.py; printf 'import sys as __pyi_sys; __pyi_sys.path[0] = ""; del __pyi_sys\n%s\n' "$code" > "$src" ;;
@@ -454,8 +458,25 @@ PYI_M
   echo "$name" > "$d/list"
   py pydump.py tree --full --base "$dir" --list "$d/list" --out "$d/dumps" --tsv "$d/tsv" >/dev/null
   pyi_env
-  (cd "$caller_pwd" && pa_arbace run --dump "$d/dumps/$name.ae" --file "$src" --lib "$(stdlib_lib)" --argv0 "$argv0" -- "$@") || rc=$?
-  rm -rf "$d"
+  # the interpreter exec'd in this process, so the pid the caller holds is the interpreter's: a test's kill of its child
+  # (subprocess's timeout, Popen.kill) ends the run. Run as a child, the interpreter outlived the kill with parent 1
+  # (test_subprocess's test_call_timeout, test_signal's SiginterruptTest; queue 200, round 7). $d goes with the next
+  # bin/pyi python once this pid has ended.
+  local lib; lib=$(stdlib_lib)
+  echo $$ > "$d/pid"
+  cd "$caller_pwd"
+  ARBACE_PATH="$root" GOMEMLIMIT=${PYI_GOMEMLIMIT:-1500MiB} GOMAXPROCS=${PYI_THREADS:-4} \
+    exec "$(arbace_exe)" -m arbace.python run --dump "$d/dumps/$name.ae" --file "$src" --lib "$lib" --argv0 "$argv0" -- "$@"
+}
+
+# in_group CMD...: CMD in a session and process group of its own (setsid), waited for, then the whole group killed: a
+# test's child that outlives its module's run (a timeout's, or one the test's own kill missed) does not run on with
+# parent 1 (queue 200, round 7)
+in_group() {
+  local pid rc=0
+  setsid "$@" & pid=$!
+  wait "$pid" || rc=$?
+  kill -KILL -- "-$pid" 2>/dev/null || true
   return $rc
 }
 
@@ -496,16 +517,16 @@ cmd_lib_test() {
       if [ "$running" -ge "$jobs" ]; then wait -n || true; running=$((running - 1)); fi
       (
         if [ -n "$oracle" ]; then
-          (cd "$d" && timeout 900 env PYTHONHASHSEED=0 LC_ALL=C.UTF-8 TZ=UTC PYTHONIOENCODING=utf-8 HOME="$WORK" TMPDIR="$WORK" PYTHONPATH="$lib" \
+          (cd "$d" && in_group timeout 900 env PYTHONHASHSEED=0 LC_ALL=C.UTF-8 TZ=UTC PYTHONIOENCODING=utf-8 HOME="$WORK" TMPDIR="$WORK" PYTHONPATH="$lib" \
             python3 -s -P -B "$root/test/python/libtest.py" "$m" > "$d/$m.out" 2> "$d/$m.err"; echo $? > "$d/$m.status") || true
         else
           local tmo=1800; case $m in test_queue|test_subprocess|test_socket|test_os|test_pickle) tmo=5400 ;; esac
           if [ -n "$drv" ]; then
             (cd "$d" && PYI_LIB_TEST_SKIP="${PYI_LIB_TEST_SKIP-$root/test/python/lib-test-skip.tsv}" \
-              timeout "${PYI_LIB_TEST_TIMEOUT:-$tmo}" env PYI_AOT_COMPILER="$AOT/compiler.sh" "$drv" "$root/test/python/libtest.py" "$m" > "$d/$m.out" 2> "$d/$m.err"; echo $? > "$d/$m.status") || true
+              in_group timeout "${PYI_LIB_TEST_TIMEOUT:-$tmo}" env PYI_AOT_COMPILER="$AOT/compiler.sh" "$drv" "$root/test/python/libtest.py" "$m" > "$d/$m.out" 2> "$d/$m.err"; echo $? > "$d/$m.status") || true
           else
             (cd "$d" && PYI_LIB_TEST_SKIP="${PYI_LIB_TEST_SKIP-$root/test/python/lib-test-skip.tsv}" \
-              timeout "${PYI_LIB_TEST_TIMEOUT:-$tmo}" "$root/bin/pyi" run "$root/test/python/libtest.py" "$m" > "$d/$m.out" 2> "$d/$m.err"; echo $? > "$d/$m.status") || true
+              in_group timeout "${PYI_LIB_TEST_TIMEOUT:-$tmo}" "$root/bin/pyi" run "$root/test/python/libtest.py" "$m" > "$d/$m.out" 2> "$d/$m.err"; echo $? > "$d/$m.status") || true
           fi
         fi
         echo "lib-test: $m run"
