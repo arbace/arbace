@@ -491,7 +491,7 @@
       (verr :parser/align "alignment is not a power of two"))
     (when (> (long a) 4294967296) (verr :parser/align "huge alignments are not supported yet"))))
 
-(declare use-value)
+(declare use-value check-di-parse node-of di-kind)
 
 (defn- note-md! [x]
   (letfn [(walk [y] (cond (md-ref? y) (.add *mrefs* y)
@@ -764,7 +764,7 @@
       (llvm/define llvm/declare) (parse-function f)
       llvm/global (parse-global f)
       (llvm/alias llvm/ifunc) (parse-alias f)
-      llvm/meta (do (.add *mdefs* (second f)) (note-md! (drop 2 f)))
+      llvm/meta (do (.add *mdefs* (second f)) (note-md! (drop 2 f)) (check-di-parse (second f) (nth f 2) (:distinct (apply hash-map (drop 3 f)))))
       llvm/named-meta (note-md! (nth f 2))
       llvm/attributes (do (check-attr-placement :fn (nth f 2)) (check-attr-values (nth f 2)))
       llvm/uselistorder (let [[_ [t v]] f] (use-value nil v (norm-type t)))
@@ -775,7 +775,12 @@
     (when (seq named) (verr :parser/undefined-global (str "use of undefined value '@" (first named) "'")))
     (when (seq nums) (verr :parser/undefined-global (str "use of undefined value '@" (first nums) "'"))))
   (let [missing (sort (map #(Long/parseLong (subs (name %) 1)) (remove #(.contains *mdefs* %) *mrefs*)))]
-    (when (seq missing) (verr :parser/undefined-metadata (str "use of undefined metadata '!" (first missing) "'")))))
+    (when (seq missing) (verr :parser/undefined-metadata (str "use of undefined metadata '!" (first missing) "'"))))
+  ;; a debug record's location must be a DILocation (resolved at the module's end)
+  (doseq [f forms :when (= (first f) 'llvm/define) [_ _ & items] (:body (apply hash-map (drop 4 f))) x items
+          :let [b (body x)] :when (and (dbg-record? b) (#{'dbg_declare 'dbg_value 'dbg_declare_value} (first b)))]
+    (let [loc (nth b 4 nil) n (when loc (node-of loc))]
+      (when (and n (di-kind n) (not= "DILocation" (di-kind n))) (verr :parser/dbg-record "invalid debug location")))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Phase 2: the Verifier's rules
@@ -1324,6 +1329,146 @@
       (when-not (= 1 (count ops)) (verr :verifier/md-misc (str "incorrect number of operands in " nm " metadata")))
       (when-not (md-str (first ops)) (verr :verifier/md-misc (str "invalid value for " nm " metadata entry operand(the operand should be a string)"))))))
 
+;; ---------------------------------------------------------------------------------------------
+;; Debug info (Verifier's DebugInfoCheck: opt takes a module whose debug info is broken, warns and strips it)
+
+(def ^:dynamic *distinct* #{})   ; the ids of the distinct nodes
+
+(def ^:private di-required
+  "LLParser's required fields by DI node kind (derived from opt: each field dropped from a node that has it)."
+  {"DICommonBlock" [:scope] "DICompileUnit" [:file] "DICompositeType" [:tag] "DIDerivedType" [:tag :baseType]
+   "DIEnumerator" [:name :value] "DIFile" [:filename :directory] "DIGlobalVariableExpression" [:var :expr]
+   "DIImportedEntity" [:tag :scope] "DILabel" [:scope :name :file :line] "DILexicalBlock" [:scope]
+   "DILexicalBlockFile" [:scope :discriminator] "DILocalVariable" [:scope] "DILocation" [:scope] "DIMacro" [:type :name]
+   "DIMacroFile" [:file] "DIModule" [:scope :name] "DINamespace" [:scope] "DISubprogram" [:type] "DISubroutineType" [:types]
+   "DITemplateTypeParameter" [:type] "DITemplateValueParameter" [:value]})
+
+(defn- di-kind [n] (when (and (seq? n) (symbol? (first n)) (str/starts-with? (name (first n)) "!DI")) (subs (name (first n)) 1)))
+(defn- di-fields [n] (when (and (di-kind n) (not (#{"DIExpression" "DIArgList" "DIAssignID"} (di-kind n)))) (apply hash-map (rest n))))
+(defn- node-of [x] (cond (md-ref? x) (get *meta* x) (seq? x) x))
+(defn- flag? [v nm] (or (= v (symbol nm)) (and (seq? v) (= (first v) '|) (some #{(symbol nm)} (rest v)))))
+
+(defn check-di-parse
+  "LLParser's checks of a DI node's text: required fields, `distinct`, paired fields."
+  [id node distinct?]
+  (when-let [k (di-kind node)]
+    (when-let [fs (di-fields node)]
+      (doseq [r (get di-required k)] (when-not (contains? fs r) (verr :parser/di-field (str "missing required field '" (name r) "'"))))
+      (when (and (= k "DISubprogram") (flag? (:spFlags fs) "DISPFlagDefinition") (not distinct?))
+        (verr :parser/di-field "missing 'distinct', required for !DISubprogram that is a Definition"))
+      (when (and (= k "DICompileUnit") (not distinct?)) (verr :parser/di-field "missing 'distinct', required for !DICompileUnit"))
+      (when (and (= k "DIFile") (not= (contains? fs :checksumkind) (contains? fs :checksum)))
+        (verr :parser/di-field "'checksumkind' and 'checksum' must be provided together")))))
+
+(def ^:private local-scope-kinds #{"DISubprogram" "DILexicalBlock" "DILexicalBlockFile"})
+(def ^:private scope-kinds #{"DISubprogram" "DILexicalBlock" "DILexicalBlockFile" "DIFile" "DICompileUnit" "DINamespace" "DIModule"
+                             "DICompositeType" "DIDerivedType" "DIBasicType" "DISubroutineType" "DICommonBlock"})
+
+(defn- di-sp
+  "The id of the DISubprogram a scope belongs to (through lexical blocks), nil when the chain ends elsewhere."
+  [x]
+  (loop [x x n 0]
+    (let [nd (node-of x)]
+      (when (< n 1000)
+        (case (di-kind nd)
+          "DISubprogram" x
+          ("DILexicalBlock" "DILexicalBlockFile") (recur (:scope (di-fields nd)) (inc n))
+          nil)))))
+
+(defn- di-loc-sp
+  "The subprogram of a location's outermost scope (following inlinedAt)."
+  [x]
+  (loop [x x n 0]
+    (let [nd (node-of x) fs (di-fields nd)]
+      (cond (not= "DILocation" (di-kind nd)) nil
+            (and (:inlinedAt fs) (< n 1000) (not= (:inlinedAt fs) 'null)) (recur (:inlinedAt fs) (inc n))
+            :else (di-sp (:scope fs))))))
+
+(defn- check-di-node [id node]
+  (let [k (di-kind node) fs (di-fields node)]
+    (when fs
+      (let [kind-of (fn [x] (when (and x (not= x 'null)) (di-kind (node-of x))))]
+        (when (and (#{"DICompositeType" "DIDerivedType" "DISubprogram" "DISubrangeType"} k) (not (contains? fs :file)) (some? (:line fs)) (not (zero? (long (:line fs)))))
+          (verr :di/node "line specified with no file"))
+        (case k
+          "DILocation" (do (when-not (local-scope-kinds (kind-of (:scope fs))) (verr :di/node "location requires a valid scope"))
+                           (when (and (:inlinedAt fs) (not= (:inlinedAt fs) 'null) (not= "DILocation" (kind-of (:inlinedAt fs))))
+                             (verr :di/node "inlined-at should be a location")))
+          "DILocalVariable" (when-not (local-scope-kinds (kind-of (:scope fs))) (verr :di/node "local variable requires a valid scope"))
+          "DILexicalBlock" (when (and (some? (:column fs)) (not (zero? (long (:column fs)))) (zero? (long (or (:line fs) 0))))
+                             (verr :di/node "cannot have column info without line info"))
+          "DISubprogram"
+          (let [def? (flag? (:spFlags fs) "DISPFlagDefinition")]
+            (when (and (:type fs) (not= (:type fs) 'null) (not= "DISubroutineType" (kind-of (:type fs)))) (verr :di/node "invalid subroutine type"))
+            (if def?
+              (do (when-not (and (:unit fs) (not= (:unit fs) 'null)) (verr :di/node "subprogram definitions must have a compile unit"))
+                  (when-not (= "DICompileUnit" (kind-of (:unit fs))) (verr :di/node "invalid unit type")))
+              (do (when (and (:unit fs) (not= (:unit fs) 'null)) (verr :di/node "subprogram declarations must not have a compile unit"))
+                  (when (and (:declaration fs) (not= (:declaration fs) 'null)) (verr :di/node "subprogram declaration must not have a declaration field")))))
+          "DICompositeType" (do (when (and (= (:tag fs) 'DW_TAG_array_type) (or (nil? (:baseType fs)) (= (:baseType fs) 'null)))
+                                  (verr :di/node "array types must have a base type"))
+                                (when (and (:elements fs) (not= (:elements fs) 'null) (not (md-ops (:elements fs))))
+                                  (verr :di/node "invalid composite elements")))
+          "DISubrange" (when (and (contains? fs :count) (contains? fs :upperBound)) (verr :di/node "Subrange can have any one of count or upperBound"))
+          "DIDerivedType" (when (and (contains? fs :dwarfAddressSpace) (not (#{'DW_TAG_pointer_type 'DW_TAG_reference_type 'DW_TAG_rvalue_reference_type} (:tag fs))))
+                            (verr :di/node "DWARF address space only applies to pointer or reference types"))
+          "DIGlobalVariable" (when (or (nil? (:type fs)) (= (:type fs) 'null)) (verr :di/node "missing global variable type"))
+          nil)))))
+
+(defn- phase-debug
+  "Debug info checks: nothing here makes the module invalid (opt warns and strips), the first message is the result."
+  [forms]
+  (let [nodes (for [f forms :when (= (first f) 'llvm/meta) :let [n (nth f 2)] :when (di-kind n)] [(second f) n])
+        defs (filter #(= (first %) 'llvm/define) forms)
+        dbg? (fn [md] (some #(= % '!dbg) (take-nth 2 md)))
+        has-di? (or (seq nodes)
+                    (some (fn [f] (case (first f)
+                                    (llvm/define llvm/declare) (let [o (apply hash-map (drop 4 f))]
+                                                                 (or (dbg? (:md o))
+                                                                     (some (fn [[_ _ & items]] (some #(let [b (body %)] (and (not (dbg-record? b)) (dbg? (:md (nth (split-inst b) 2))))) items)) (:body o))))
+                                    llvm/global (let [[_ _ _ & more] f] (dbg? (:md (apply hash-map (if (and (seq more) (not (keyword? (first more)))) (rest more) more)))))
+                                    false))
+                          forms))]
+    (when has-di?
+      (let [flag (first (filter (fn [n] (let [ops (md-ops n)] (and (= 3 (count ops)) (= (md-str (second ops)) "Debug Info Version"))))
+                                (mapcat #(when (and (= (first %) 'llvm/named-meta) (= (second %) '!llvm.module.flags)) (nth % 2)) forms)))
+            v (if flag (.longValue ^java.math.BigInteger (md-int-val (nth (md-ops flag) 2))) 0)]
+        (do
+          (when-not (= v 3) (verr :di/version (str "ignoring debug info with an invalid version (" v ")")))
+          (do
+            (doseq [[id n] nodes] (check-di-node id n))
+            (doseq [f forms :when (#{'llvm/define 'llvm/declare} (first f))]
+              (let [o (apply hash-map (drop 4 f)) md (apply hash-map (:md o))
+                    sp (get md '!dbg) spn (node-of sp)]
+                (when sp
+                  (when-not (= "DISubprogram" (di-kind spn)) (verr :di/function "function !dbg attachment must be a subprogram"))
+                  (when (and (= (first f) 'llvm/declare) (flag? (:spFlags (di-fields spn)) "DISPFlagDefinition"))
+                    (verr :di/function "function declaration may only have a unique !dbg attachment")))
+                (when (and sp (= (first f) 'llvm/define))
+                  (doseq [[_ _ & items] (:body o) x items]
+                    (let [b (body x)]
+                      (if (dbg-record? b)
+                        nil
+                        (let [loc (get (apply hash-map (:md (nth (split-inst b) 2))) '!dbg)]
+                          (when (and loc (not= (di-loc-sp loc) sp))
+                            (verr :di/function "!dbg attachment points at wrong subprogram for function"))))))
+                  (doseq [[_ _ & items] (:body o) x items :let [b (body x)] :when (dbg-record? b)]
+                    (case (first b)
+                      (dbg_declare dbg_value dbg_declare_value)
+                      (let [[_ _ var expr loc] b vn (node-of var) en (node-of expr) ln (node-of loc)]
+                        (when-not (= "DILocalVariable" (di-kind vn)) (verr :di/record "invalid #dbg record variable"))
+                        (when-not (= "DIExpression" (di-kind en)) (verr :di/record "invalid #dbg record expression"))
+                        (when (and (= "DILocation" (di-kind ln)) (not= (di-sp (:scope (di-fields vn))) (di-sp (:scope (di-fields ln)))))
+                          (verr :di/record "mismatched subprogram between #dbg record variable and DILocation"))
+                        (when (and (= "DILocation" (di-kind ln)) (not= (di-loc-sp loc) sp))
+                          (verr :di/function "!dbg attachment points at wrong subprogram for function")))
+                      nil))))))
+          (doseq [f forms :when (= (first f) 'llvm/global)]
+            (let [o (apply hash-map (let [[_ _ _ & more] f] (if (and (seq more) (not (keyword? (first more)))) (rest more) more)))
+                  d (get (apply hash-map (:md o)) '!dbg)]
+              (when (and d (not= "DIGlobalVariableExpression" (di-kind (node-of d))))
+                (verr :di/global "!dbg attachment of global variable must be a DIGlobalVariableExpression")))))))))
+
 (defn- verify-function
   "The Verifier's rules over one definition (visitFunction, visitBasicBlock and the instructions' visitors)."
   [f users]
@@ -1483,6 +1628,7 @@
     (try
       (phase-parser forms)
       (phase-verifier forms)
+      (phase-debug forms)
       nil
       (catch arbace.lang.ExceptionInfo e
         (if-let [r (:llvm/verify (ex-data e))] {:rule r :message (.getMessage e)} (throw e))))))
@@ -1517,7 +1663,7 @@
     (if (instance? Throwable forms)
       ["unread" (str/replace (str (.getMessage ^Throwable forms)) #"[\t\n]" " ") ""]
       (if-let [e (try (verify-forms forms) (catch Throwable e {:rule :crash :message (str (.getMessage e))}))]
-        ["invalid" (:message e) (str (:rule e))]
+        [(if (= "di" (namespace (:rule e))) "debug" "invalid") (:message e) (str (:rule e))]
         ["valid" "" ""]))))
 
 (defn verify-main
@@ -1527,8 +1673,8 @@
     (doseq [f files]
       (let [[v m r] (verify-file f)]
         (when-not (= v "valid")
-          (vswap! bad inc)
-          (println (str f ": error: " m (when (seq r) (str " [" (subs r 1) "]")))))))
+          (when (= v "invalid") (vswap! bad inc))
+          (println (str f ": " (if (= v "debug") "warning" "error") ": " m (when (seq r) (str " [" (subs r 1) "]")))))))
     (flush)
     (if (pos? @bad) 1 0)))
 
