@@ -1,0 +1,194 @@
+;; Ported from CPython 3.14.10 (https://www.python.org/ftp/python/3.14.10/Python-3.14.10.tar.xz, SHA-256
+;; de414a57119abef52784d8993e341d53aed635fc2b05c2607d9f98a2c5b72032): Modules/unicodedata.c's _getcode (the names' packed
+;; DAWG lookup, the Hangul syllables, the derived names) as \N{...} escapes use it, Copyright (c) 2001 Python Software
+;; Foundation, All Rights Reserved, under the PSF License Agreement for Python 3.14 (LICENSE.md, "CPython: the PSF License
+;; Agreement for Python 3.14").
+
+(ns arbace.repr.python.ucn
+  "A \\N{NAME} escape's character as CPython's string parser finds it (unicodedata.c's _getcode, with_named_seq 0:
+  names, aliases, Hangul syllables and derived names; named sequences refused): over the same tables as pyi's runtime
+  (go/arbace/py's builtins_unicodedata_table.go's ucdBlob, tools/pyi/unicodedata_table.py from the pinned tarball's
+  Modules/unicodename_db.h), read once from the checkout's Go forms (queue 202c: the platform's Character/codePointOf
+  knew neither the aliases nor CPython's Unicode version)"
+  (:require [arbace.string :as str]))
+
+(set! *warn-on-reflection* true)
+
+(def ^:private table-path "go/arbace/py/builtins_unicodedata_table.ae")
+
+(defn- table-file
+  "The tables' Go forms: the first ARBACE_PATH entry (the checkout first), PYI_ROOT or the working directory that has them"
+  ^java.io.File []
+  (let [dirs (concat (remove str/blank? (str/split (or (System/getenv "ARBACE_PATH") "") #":"))
+                     [(System/getenv "PYI_ROOT") "."])]
+    (or (some #(when % (let [f (java.io.File. (str % "/" table-path))] (when (.isFile f) f))) dirs)
+        (throw (ex-info (str "arbace.repr.python.ucn: no " table-path " (ARBACE_PATH names the checkout)") {})))))
+
+(defn- le ^long [^bytes b ^long p ^long w signed]
+  (case w
+    1 (if signed (long (aget b p)) (bit-and (long (aget b p)) 0xff))
+    2 (let [v (bit-or (bit-and (long (aget b p)) 0xff) (bit-shift-left (bit-and (long (aget b (inc p))) 0xff) 8))]
+        (if (and signed (>= v 0x8000)) (- v 0x10000) v))
+    (bit-or (bit-and (long (aget b p)) 0xff) (bit-shift-left (bit-and (long (aget b (+ p 1))) 0xff) 8)
+            (bit-shift-left (bit-and (long (aget b (+ p 2))) 0xff) 16) (bit-shift-left (bit-and (long (aget b (+ p 3))) 0xff) 24))))
+
+(defn- read-tables
+  "The arrays the names need and the constants, from ucdBlob (base64 of zlib: per array a name's length and name, a
+  width byte (0x80 signed), a little-endian count and the values) and the Go consts"
+  []
+  (let [text (slurp (table-file))
+        blob (or (second (re-find #"ucdBlob \"([A-Za-z0-9+/=]+)\"" text))
+                 (throw (ex-info "arbace.repr.python.ucn: no ucdBlob in the tables" {})))
+        const (fn [n] (let [[_ v] (re-find (re-pattern (str "\\} " n " (0x[0-9a-fA-F]+|[0-9]+)\\]")) text)]
+                        (when-not v (throw (ex-info (str "arbace.repr.python.ucn: no const " n) {})))
+                        (if (str/starts-with? v "0x") (Long/parseLong (subs v 2) 16) (Long/parseLong v))))
+        z (.decode (java.util.Base64/getDecoder) ^String blob)
+        out (java.io.ByteArrayOutputStream.)
+        _ (with-open [in (java.util.zip.InflaterInputStream. (java.io.ByteArrayInputStream. z))] (.transferTo in out))
+        ^bytes b (.toByteArray out)
+        wanted #{"packedNameDawg" "dawgPosToCodepoint" "nameAliases" "derivedNameRanges"}
+        arrays (loop [p 0 m {}]
+                 (if (>= p (alength b))
+                   m
+                   (let [n (bit-and (long (aget b p)) 0xff)
+                         name (String. b (int (inc p)) (int n) "UTF-8")
+                         p (+ p 1 n)
+                         w (bit-and (long (aget b p)) 0x7f)
+                         signed (not (zero? (bit-and (long (aget b p)) 0x80)))
+                         cnt (le b (inc p) 4 false)
+                         p (+ p 5)]
+                     (recur (long (+ p (* w cnt)))
+                            (if (wanted name)
+                              (assoc m name (let [a (long-array cnt)]
+                                              (dotimes [i cnt] (aset a i (le b (+ p (* i w)) w signed)))
+                                              a))
+                              m)))))]
+    (merge arrays (into {} (for [n ["nameMaxlen" "aliasesStart" "aliasesEnd" "namedSequencesStart" "namedSequencesEnd"]]
+                             [n (const n)])))))
+
+(def ^:private tables (delay (read-tables)))
+
+(defn- t [k] (get @tables k))
+
+;; ---- the packed DAWG (_lookup_dawg_packed)
+
+(defn- varint
+  "[next-index value] of the varint at index"
+  [^longs d ^long index]
+  (loop [i index res 0 shift 0]
+    (let [b (aget d i) res (bit-or res (bit-shift-left (bit-and b 0x7f) shift))]
+      (if (zero? (bit-and b 0x80)) [(inc i) res] (recur (inc i) res (+ shift 7))))))
+
+(defn- decode-edge
+  "[last size label target] of an edge, nil past a final node's edges"
+  [^longs d first? ^long prev ^long edge]
+  (let [[edge num] (varint d edge) num (long num) edge (long edge)]
+    (when-not (and (zero? num) first?)
+      (let [last-edge (bit-and num 1) num (bit-shift-right num 1) len1 (not (zero? (bit-and num 1))) num (bit-shift-right num 1)
+            target (+ prev num)]
+        (if len1 [last-edge 1 edge target] [last-edge (aget d edge) (inc edge) target])))))
+
+(defn- upper-ascii ^long [^long c] (if (and (>= c 97) (<= c 122)) (- c 32) c))
+
+(defn- lookup-dawg
+  "The name's position in the DAWG, -1 when none (ASCII case folded)"
+  ^long [^String name]
+  (let [^longs d (t "packedNameDawg") n (.length name)]
+    (loop [pos 0 node 0 result 0]
+      (if (< pos n)
+        (let [[edge num] (varint d node) final (not (zero? (bit-and (long num) 1)))
+              r (loop [prev (long edge) edge (long edge) first? true result result]
+                  (if-let [[last-edge size label target] (decode-edge d first? prev edge)]
+                    (let [size (long size) label (long label) target (long target)
+                          matched (if (and (> size 1) (> (+ pos size) n))
+                                    0
+                                    (loop [i 0]
+                                      (cond
+                                        (>= i size) 1
+                                        (or (>= (+ pos i) n) (not= (aget d (+ label i)) (upper-ascii (int (.charAt name (int (+ pos i)))))))
+                                        (if (pos? i) -1 0)
+                                        :else (recur (inc i)))))]
+                      (cond
+                        (== matched -1) nil
+                        (== matched 1) [(+ pos size) target (if final (inc result) result)]
+                        (== (long last-edge) 1) nil
+                        :else (recur target (+ label size) false (+ result (bit-shift-right (long (second (varint d target))) 1)))))
+                    nil))]
+          (if r (recur (long (r 0)) (long (r 1)) (long (r 2))) -1))
+        (if (not (zero? (bit-and (long (second (varint d node))) 1))) result -1)))))
+
+;; ---- the algorithmic names
+
+(def ^:private hangul
+  [["G" "A" ""] ["GG" "AE" "G"] ["N" "YA" "GG"] ["D" "YAE" "GS"] ["DD" "EO" "N"] ["R" "E" "NJ"] ["M" "YEO" "NH"]
+   ["B" "YE" "D"] ["BB" "O" "L"] ["S" "WA" "LG"] ["SS" "WAE" "LM"] ["" "OE" "LB"] ["J" "YO" "LS"] ["JJ" "U" "LT"]
+   ["C" "WEO" "LP"] ["K" "WE" "LH"] ["T" "WI" "M"] ["P" "YU" "B"] ["H" "EU" "BS"] ["" "YI" "S"] ["" "I" "SS"]
+   ["" "" "NG"] ["" "" "J"] ["" "" "C"] ["" "" "K"] ["" "" "T"] ["" "" "P"] ["" "" "H"]])
+
+(def ^:private derived-prefixes ["HANGUL SYLLABLE " "CJK UNIFIED IDEOGRAPH-" "TANGUT IDEOGRAPH-"])
+
+(defn- find-syllable
+  "find_syllable: [length index] of the longest syllable of `column` that starts s (index -1, length 0: none)"
+  [^String s column count]
+  (loop [i 0 len -1 pos -1]
+    (if (< i (long count))
+      (let [^String syl ((hangul i) column)]
+        (if (and (> (.length syl) (long len)) (>= (.length s) (.length syl)) (.equalsIgnoreCase (subs s 0 (.length syl)) syl))
+          (recur (inc i) (.length syl) i)
+          (recur (inc i) len pos)))
+      [(max 0 (long len)) pos])))
+
+(defn- parse-hex
+  "The code of a derived name's hex part (4 to 6 digits, no leading 0), -1 when none"
+  ^long [^String s]
+  (if (or (< (.length s) 4) (> (.length s) 6) (= (.charAt s 0) \0))
+    -1
+    (loop [i 0 v 0]
+      (if (< i (.length s))
+        (let [c (upper-ascii (int (.charAt s i)))]
+          (cond (and (>= c 48) (<= c 57)) (recur (inc i) (long (+ (* v 16) (- c 48))))
+                (and (>= c 65) (<= c 70)) (recur (inc i) (long (+ (* v 16) (- c 55))))
+                :else -1))
+        (if (> v 0x10FFFF) -1 v)))))
+
+(defn- prefix-id
+  "find_prefix_id: the derived name prefix of a code point, -1 when none"
+  ^long [^long code]
+  (let [^longs r (t "derivedNameRanges")]
+    (loop [i 0]
+      (cond (>= (+ i 2) (alength r)) -1
+            (< code (aget r i)) -1
+            (<= code (aget r (inc i))) (aget r (+ i 2))
+            :else (recur (+ i 3))))))
+
+(defn- getcode
+  "_getcode: the code of a name (an alias or a named sequence as its private-use code), nil when none"
+  [^String name]
+  (let [i (or (first (keep-indexed (fn [i ^String p] (when (and (>= (.length name) (.length p))
+                                                                (.equalsIgnoreCase (subs name 0 (.length p)) p)) i))
+                                   derived-prefixes))
+              -1)]
+    (case (long i)
+      0 (let [s (subs name 16)
+              [n1 l] (find-syllable s 0 19) s (subs s n1)
+              [n2 v] (find-syllable s 1 21) s (subs s n2)
+              [n3 tt] (find-syllable s 2 28)]
+          (when (and (not= l -1) (not= v -1) (not= tt -1) (== (+ 16 (long n1) (long n2) (long n3)) (.length name)))
+            (+ 0xAC00 (* (+ (* (long l) 21) (long v)) 28) (long tt))))
+      (1 2) (let [v (parse-hex (subs name (.length ^String (derived-prefixes i))))]
+              (when (and (>= v 0) (== (prefix-id v) (long i))) v))
+      (let [pos (lookup-dawg name)]
+        (when-not (neg? pos) (aget ^longs (t "dawgPosToCodepoint") pos))))))
+
+(defn lookup
+  "A \\N{NAME} escape's code point (an alias as its character), nil when CPython's parser does not know the name (a
+  named sequence among them, as _PyUnicode_DecodeUnicodeEscapeInternal2 asks with_named_seq 0)"
+  [^String name]
+  (when (<= (.length name) (long (t "nameMaxlen")))
+    (when-let [code (getcode name)]
+      (let [code (long code)]
+        (cond
+          (and (>= code (long (t "namedSequencesStart"))) (< code (long (t "namedSequencesEnd")))) nil
+          (and (>= code (long (t "aliasesStart"))) (< code (long (t "aliasesEnd"))))
+          (aget ^longs (t "nameAliases") (- code (long (t "aliasesStart"))))
+          :else code)))))
