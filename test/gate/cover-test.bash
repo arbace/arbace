@@ -174,6 +174,19 @@ else no "another build's run: status $s2, '$x2', $(cat "$t/claim2.err")"; fi
 if [ "$sb" = 1 ] && grep -q 'holds the data of cover build key1' "$t/blocks.out"; then ok "bin/cover blocks refuses a run of another build than its cover cache's"
 else no "bin/cover blocks on another build's run: status $sb, $(cat "$t/blocks.out")"; fi
 
+# night 3's java-interp: bin/cover blocks over a run of more tests than one command line holds (xargs ran the tool twice,
+# the second's tests.tsv, 131 tests, overwriting the first's 3,190): every directory in one tests.tsv and summary
+if [ -x "$tg/bin/go" ]; then
+  mkdir -p "$t/big/java-interp"; echo key1 > "$t/big/key"; echo arbace/jrt > "$t/c1/pkgs-arbace.txt"
+  long=$(printf 'x%.0s' $(seq 1 100))
+  for i in $(seq 1 3000); do d=$t/big/java-interp/t$i-$long; mkdir "$d"; echo "t$i" > "$d/id"; done
+  (unset ARBACE_COVER_DIR; ARBACE_COVER_CACHE=$t/c1 "$here/bin/cover" blocks "$t/big") > "$t/big.out" 2>&1; sb=$?
+  if [ "$sb" = 0 ] && [ "$(wc -c < "$t/big/blocks/java-interp.dirs")" -gt 262144 ] && [ "$(wc -l < "$t/big/blocks/java-interp/tests.tsv")" = 3000 ] \
+     && [ "$(grep -c '^tests' "$t/big.out")" = 3 ] && grep -qx 'tests	3000' "$t/big.out"; then
+    ok "bin/cover blocks: 3,000 tests' directories ($(wc -c < "$t/big/blocks/java-interp.dirs") bytes of paths) read by one run of the tool, all in tests.tsv"
+  else no "bin/cover blocks over 3,000 tests: status $sb, $(wc -l < "$t/big/blocks/java-interp/tests.tsv" 2>&1) in tests.tsv, $(grep '^tests' "$t/big.out" | tr '\n\t' ' :')"; fi
+fi
+
 # review 195's medium 2: bin/cover subset --corpus C, a corpus's subset from a whole record's classes and keep: only C/'s ids
 # (the reducer, tools/covsubset, built by TamaGo's go as bin/cover builds it)
 if [ -x "$tg/bin/go" ]; then
