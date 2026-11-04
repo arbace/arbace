@@ -1117,7 +1117,7 @@
                   (vec (map-indexed (fn [j k] (if (and (nil? ds) (sub-type j)) (designate p (sub-type j) k) k)) kids)))]
       (assoc (dissoc x :_desigs) :inner inner))))
 
-(declare dependent-type? designate)
+(declare dependent-type? designate pack-indexed)
 
 (defn- class-type? [t]
   (and (#{:n :elab :tn} (:t t))
@@ -1271,8 +1271,16 @@
             en (:ent qn)
             lp (peek (:parts qn))]
         (cond
-          (and (type-ent? en) (or (is? p "(") (is? p "{")) (or (:s lp)))
-          (construct-node p b {:t :n :s (name-str p qn) :ent en :qn qn} false)
+          (and (type-ent? en) (or (is? p "(") (is? p "{") (and (is? p "...") (is-at? p 1 "["))) (or (:s lp)))
+          (let [t (pack-indexed p {:t :n :s (name-str p qn) :ent en :qn qn})]
+            (if (or (is? p "(") (is? p "{")) (construct-node p b t false) (perr p "a functional cast")))
+          ;; C++26's pack indexing: pack...[I]
+          (and (is? p "...") (is-at? p 1 "[") (= 1 (count (:parts qn))))
+          (let [r (node p "DeclRefExpr" b (:e qn) {:referencedDecl {:name (or (:s lp) "")}})]
+            (adv! p) (adv! p)
+            (let [i (with-gt p true (parse-expr p))]
+              (expect! p "]")
+              (node p "PackIndexingExpr" b (last-ix p) {:inner [r i]})))
           ;; a member of an anonymous union or struct of a block or a namespace: clang's member access through its implicit object
           (and (:anon en) (= 1 (count (:parts qn))))
           (node p "MemberExpr" b (:e qn) {:name (:s lp) :isArrow false :inner [(node p "DeclRefExpr" b (:e qn) {:referencedDecl {:name ""}})]})
@@ -1520,12 +1528,13 @@
               (node p "CXXForRangeStmt" b (ne s)
                     {:inner [(or init none) {:kind "DeclStmt" :inner [{:kind "VarDecl" :inner [r]}]} none none none none
                              {:kind "DeclStmt" :inner [lv]} s]}))
-            (let [c (if (is? p ";") none (parse-expr p))
+            (let [cv (when (and (not (is? p ";")) (= :cond-decl (condition-kind p false false))) (parse-condition-decl p))
+                  c (cond cv {:kind "DeclRefExpr"} (is? p ";") none :else (parse-expr p))
                   _ (expect! p ";")
                   inc (if (is? p ")") none (parse-expr p))
                   _ (expect! p ")")
                   s (sub-statement p)]
-              (node p "ForStmt" b (ne s) {:inner [(or init none) none c inc s]}))))))))
+              (node p "ForStmt" b (ne s) {:inner [(or init none) (or cv none) c inc s]}))))))))
 
 (defn- parse-try [^P p ^long b]
   (adv! p)
@@ -1739,6 +1748,15 @@
              (adv! p)
              (let [ok (skip-balanced! p) r (and ok (is? p "->"))] (seek! p save) r))))))
 
+(defn- pack-indexed
+  "A type `t` followed by C++26's pack index ...[I]: the PackIndexingType clang prints T...[I]; else `t`."
+  [^P p t]
+  (if (and (is? p "...") (is-at? p 1 "["))
+    (let [_ (adv! p) ob (ix p)]
+      (skip-balanced! p)
+      (assoc t :s (str (:s t) "...[" (tok-text p (inc ob) (- (ix p) 2)) "]")))
+    t))
+
 (defn parse-decl-specs
   "A decl-specifier-seq: {:b :e :type :storage :typedef :friend :inline :virtual :explicit :constexpr :consteval
   :constinit :mutable :tls :attrs :tag-node}, :b its first token after the leading attribute-specifier-seq (clang's
@@ -1810,7 +1828,7 @@
             (cond
               (nil? qn) (assoc ds :e (last-ix p))
               (or (:op lp) (:dtor lp) (:conv lp) (:lit lp)) (do (seek! p save) (assoc ds :e (last-ix p)))
-              (type-ent? e) (recur (assoc ds :type {:t :n :s (name-str p qn) :ent e :qn qn}) words)
+              (type-ent? e) (recur (assoc ds :type (pack-indexed p {:t :n :s (name-str p qn) :ent e :qn qn})) words)
               (and (concept-ent? e) (or (is? p "auto") (and (is? p "decltype") (is-at? p 2 "auto"))))
               (let [cn (name-str p qn)]
                 (if (is? p "auto") (adv! p) (dotimes [_ 4] (adv! p)))
@@ -1819,7 +1837,9 @@
               (and decl-ctx (nil? e) (or (:q qn) (> (count (:parts qn)) 1))
                    (or (id? p) (is? p "*") (is? p "&") (is? p "&&")
                        ;; an abstract parameter declarator: B(T::type); (clang's implicit typename, an extension before C++20)
-                       (and (= ctx :param) (or (is? p ")") (is? p ",") (is? p "=") (is? p "...")))))
+                       (and (= ctx :param) (or (is? p ")") (is? p ",") (is? p "=") (is? p "...")))
+                       ;; a friend-type-specifier (friend Ts::Y..., Us...;)
+                       (and (:friend ds) (or (is? p "...") (is? p ",") (is? p ";")))))
               (recur (assoc ds :type {:t :n :s (name-str p qn) :qn qn}) words)
               (and decl-ctx (nil? e) (id? p) (not (#{"final" "override"} (ts (cur p)))))
               (recur (assoc ds :type {:t :n :s (name-str p qn) :qn qn :unknown true}) words)
@@ -2107,7 +2127,7 @@
                  (.add order [(:s lp) virt])
                  ;; (i) a base class template's injected name, found in the derived class, is the base's type
                  (when (and (:args lp) (:ent qn)) (sc/declare! cs {:k :type :name (:s lp) :scope (ent-scope (:ent qn)) :tmpl true :inj-full (name-str p qn)}))
-                 {:t :n :s (name-str p qn)}))
+                 (pack-indexed p {:t :n :s (name-str p qn)})))
           pack (accept! p "...")
           b (cond-> {:type {:qualType (qt ty)} :writtenAccess (or acc "none")} virt (assoc :isVirtual true) pack (assoc :isPackExpansion true))
           out (conj out b)]
@@ -2397,6 +2417,15 @@
         (doseq [[k v] (sc/names-of (:cs base0)) :when (#{:var :fn} (:k v))]
           (declare! p (cond-> {:k :var :name k} (not= ctx :member) (assoc :anon true))))
         [pre (node p (if (= ctx :member) "FieldDecl" "VarDecl") (:b ds) e {:isImplicit true :type {:qualType (qt base0)}})])
+      ;; C++26's friend-type-specifier-list: friend T, Us...;
+      (and (:friend ds) base0 (nil? pre) (or (is? p ",") (and (is? p "...") (or (is-at? p 1 ";") (is-at? p 1 ",")))))
+      (loop [t base0 tb (:b ds) out []]
+        (let [pack (accept! p "...")
+              te (last-ix p)
+              out (conj out (node p "FriendDecl" (:b ds) te (cond-> {:type {:qualType (qt t)} :loc (loc p tb)} pack (assoc :isPackExpansion true))))]
+          (if (accept! p ",")
+            (let [b2 (ix p) t2 (parse-type-specs p :friend)] (recur t2 b2 out))
+            (do (expect! p ";") out))))
       (is? p ";")
       (do (adv! p)
           (cond (and (nil? base0) (nil? pre) (not (:friend ds)) (= ctx :top) (> (long (:b ds)) b0)) [(node p "EmptyDecl" (last-ix p) (last-ix p) {})]
@@ -2959,12 +2988,21 @@
         ns (parse-external-decl p :block)]
     (node p "DeclStmt" b (last-ix p) {:inner ns})))
 
+(declare parse-condition-var)
+
 (defn parse-condition-decl
-  "A condition's declaration (if (T x = e)): a DeclStmt holding its VarDecl, the name declared."
+  "A condition's declaration (if (T x = e), if (auto [a, b] = e)): a DeclStmt holding its VarDecl or its
+  DecompositionDecl, the names declared."
   [^P p]
   (let [ds (parse-decl-specs p :block)
-        base (or (ds-type ds) (perr p "a condition's type"))
-        d (parse-declarator p :named)
+        base (or (ds-type ds) (perr p "a condition's type"))]
+    (if (or (is? p "[") (and (or (is? p "&") (is? p "&&")) (is-at? p 1 "[")))
+      ;; a structured binding declaration as a condition (C++26's P0963, an extension before)
+      {:kind "DeclStmt" :inner [(parse-decomposition p ds :block base)]}
+      (parse-condition-var p ds base))))
+
+(defn- parse-condition-var [^P p ds base]
+  (let [d (parse-declarator p :named)
         qn (:name (last (name-chain d)))
         nm (name-plain qn)
         ty (build-type base d)
