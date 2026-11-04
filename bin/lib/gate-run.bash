@@ -29,6 +29,11 @@
 # HEAVY_LOCK_WAITS). A caller that holds the lock already (flock .tmp/big.lock bin/gate) sets
 # GATE_HEAVY_CMD=env: then ARBACE_HEAVY_HELD=1 for every step, nothing locks again.
 #
+# The memory lanes (GTS227 (a), "As built: GTS227 (a)"): with GATE_LANES=1 (bin/gate --full [--clean] --concurrent)
+# every step of the plan runs under bin/gate-lane in place of GATE_HEAVY_CMD, admitted by its declared :mem-gib
+# (run_one's step_lane) and its index in the plan (ordix), ARBACE_HEAVY_HELD=1 inside (the run holds the big lock);
+# the admission's state and events in LOGS/lanes/.
+
 # Outputs (GT5): a step with :outputs writes into GATE_OUT (.tmp/gate/out/NAME), kept with its pass
 # (STORE/NAME/KEY.out) and put back when it is skipped; a step whose :uses name them reads them under
 # GATE_OUTS, their digests in its key: known at the plan when the producers are skipped, else computed
@@ -169,6 +174,15 @@ step() {  # step NAME HEAVY COMMAND...: one step, logged, timed, measured (GT1);
   [ "$hv" = yes ] || hv=
   rm -f "${logs:?}/${name:?}.start" "${logs:?}/${name:?}.waits"
   [ -n "$hv" ] && read -r -a pre <<< "$GATE_HEAVY_CMD"
+  # GTS227 (a), the memory lanes (GATE_LANES=1: bin/gate --full --concurrent, --full --clean --concurrent): every step of
+  # the plan (run_one's step_lane, its declared :mem-gib) admitted by bin/gate-lane, by its declared memory and its place
+  # in the plan, in place of the heavy lock; the run holds the host's big lock as a whole, so its tools take none
+  # (ARBACE_HEAVY_HELD=1: the admission is the step's, :inner ones too)
+  if [ -n "${GATE_LANES:-}" ] && [ -n "${step_lane:-}" ]; then
+    pre=(env GATE_LANE_DIR="$logs/lanes" GATE_LANE_STEP="$name" GATE_LANE_GIB="$step_lane" GATE_LANE_ORDER="${ordix[$name]:-0}"
+         "$root/bin/gate-lane")
+    hv=yes
+  fi
   # GT7: the step's own run under the audit (audit_step, bin/gate --clean): strace into a FIFO its
   # reducer reads at once (NAME.paths), the namespaces loaded in NAME.loaded; the programs' CPU times
   # (GTS33 (a), bin/lib/limit.bash) in NAME.cpu.tsv
@@ -287,11 +301,12 @@ record_pass() {  # record_pass NAME: its pass in the store at its key (GTS7 (a))
 # the plan's steps, from plan.tsv: NAME DECISION KEY PHASE CHAIN NEEDS START-AFTER HEAVY MEM BUDGET
 # SUMMARY-N SUMMARY-RE WHY AUDIT-CMD OUTPUTS USES KIND CMD
 order=()
-declare -A dec key phase chain needs after heavy memgib budget sum_n sum_re why acmd outputs uses kind cmd
-load_plan() {  # load_plan: plan.tsv into the arrays (again after a second plan: the order anew)
+declare -A dec key phase chain needs after heavy memgib budget sum_n sum_re why acmd outputs uses kind cmd ordix
+load_plan() {  # load_plan: plan.tsv into the arrays (again after a second plan: the order anew; ordix, a step's index in it)
   local n d k p c ne a hv mg bu sn sre w ac ou us ki cm
   order=()
   while IFS=$'\t' read -r n d k p c ne a hv mg bu sn sre w ac ou us ki cm; do
+    ordix[$n]=${#order[@]}
     order+=("$n"); dec[$n]=$d key[$n]=$k phase[$n]=$p chain[$n]=$c needs[$n]=${ne//,/ } after[$n]=$a
     heavy[$n]=$hv memgib[$n]=$mg budget[$n]=$bu sum_n[$n]=$sn sum_re[$n]=$sre why[$n]=$w acmd[$n]=$ac
     outputs[$n]=$ou uses[$n]=${us//,/ } kind[$n]=$ki cmd[$n]=$cm
@@ -359,6 +374,7 @@ run_one() {  # run_one NAME: a step of the plan, as decided (once: a build of th
     # GATE_FAIL_LINES (review 181 L3): a file the step's judge writes every failure line into, in its log's format (the
     # log shows the first 40), which rotation_note and judge_note read with the log
     rm -f "${logs:?}/$n.fail-lines"
+    step_lane=$( [ "$hv" = cached ] || { m=${memgib[$n]:--}; [ "$m" = - ] && m=1; echo "$m"; } ) \
     audit_step=$aud GATE_OUT=$logs/out/$n GATE_OUTS=$logs/out GATE_LIST=$logs/rotation/$n.list GATE_USES="${uses[$n]}" GATE_FAIL_LINES=$logs/$n.fail-lines step "$n" "$hv" bash -c "${cmd[$n]}"; st=$?
     # GT4: strace -f aborts (ptrace(PTRACE_LISTEN): I/O error) when a traced process dies in a group
     # stop; an aborted trace is no audit and its run no run: again, twice at most
