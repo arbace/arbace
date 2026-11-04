@@ -18,7 +18,8 @@
             [arbace.repr.cpp.native :as native]
             [arbace.repr.cpp.convert :as convert]
             [arbace.repr.c.layout :as layout]
-            [arbace.string :as str])
+            [arbace.string :as str]
+            [arbace.set :as set])
   (:import [java.util.concurrent Executors Callable Future]))
 
 (set! *warn-on-reflection* true)
@@ -363,6 +364,17 @@
 
 (def ^:private max-dump 4000000)
 
+(def classes-file "test/repr/cpp/native-tree-classes.edn")
+
+(def ^:private rules
+  "The classes of the read differences: [[class regex] ...] over a difference's detail line, the first match (the file
+  test/repr/cpp/native-tree-classes.edn)."
+  (delay (let [f (java.io.File. ^String classes-file)]
+           (if (.exists f) (mapv (fn [[c re]] [c (re-pattern re)]) (read-string (slurp f))) []))))
+
+(defn- class-of [^String d]
+  (or (some (fn [[c re]] (when (re-find re d) c)) @rules) :unclassed))
+
 (defn compare-file
   "One file: a map {:name :status :forms :cn :nn :paired :unequal :missing :extra :read :ignored :first :units :text}."
   [^String work ^String nm ^String std ^String cargs ^String path]
@@ -395,7 +407,8 @@
                     text (str "forms " (if (= base-c base-n) "same" "differ") "; clang nodes " (count-nodes cn) ", native " (count-nodes nn)
                               ", paired " (:paired stats) " (" (:unequal stats) " with a differing field), missing " (:missing stats) ", extra " (:extra stats) "\n"
                               "READ differences (" (count rd) "):\n"
-                              (str/join (for [d rd] (str "  " (:path d) " :: " (detail d)  "\n")))
+                              (str/join (for [d rd] (str "  " (:path d) " :: " (detail d) "  [" (name (class-of (detail d))) "]\n")))
+                              (when (seq unk) (str "UNKNOWN (" (count unk) ", the time of the classification spent):\n" (str/join (for [d (take 20 unk)] (str "  " (:path d) " :: " (detail d) "\n")))))
                               "IGNORED differences (" (count ig) "), by unit:\n"
                               (str/join (for [[[u _] v] (sort-by (fn [[[u _] v]] [(- (long (:n v))) u]) (filter (fn [[[_ ign] _]] ign) units))]
                                           (str "  " (:n v) "\t" u "\t" (:first v) "\n"))))]
@@ -404,6 +417,7 @@
                  :cn (count-nodes cn) :nn (count-nodes nn) :paired (:paired stats) :unequal (:unequal stats)
                  :missing (:missing stats) :extra (:extra stats) :read (count rd) :unknown (count unk) :ignored (count ig)
                  :first (when-let [d (first rd)] (str (:path d) " :: " (detail d)))
+                 :classes (frequencies (map #(class-of (detail %)) rd))
                  :units units :declines (or (:declines u) 0) :secs (/ (double (- (System/nanoTime) t0)) 1e9)})))))
       (catch Throwable e (res "crash" (str/replace (str e) #"[\t\n]" " "))))))
 
@@ -440,10 +454,20 @@
     (let [known (let [f (java.io.File. ^String known-file)] (if (.exists f) (read-string (slurp f)) {}))
           kf (get known :files {})
           q #(str corpus "/" %)
-          bad (vec (for [r rs :when (and (not (#{"same" "clang-rejects" "skipped"} (:status r))) (not (contains? kf (q (:name r)))))] (str (q (:name r)) " " (:status r))))
+          ;; a file that differs is judged by its classes: each must be among those the known file lists for it
+          fails (fn [r] (let [cs (set (keys (:classes r)))
+                              kn (get kf (q (:name r)))
+                              kn (if (keyword? kn) #{kn} (set kn))]
+                          (set/difference cs kn)))
+          bad (vec (for [r rs
+                         :let [st (:status r)]
+                         :when (or (not (#{"same" "clang-rejects" "skipped" "differ"} st))
+                                   (and (= "differ" st) (seq (fails r))))]
+                     (str (q (:name r)) " " st (when (= "differ" st) (str " " (str/join "," (map name (fails r))))))))
           better (vec (for [r rs :when (and (= "same" (:status r)) (contains? kf (q (:name r))))] (q (:name r))))
-          classes (frequencies (keep #(get kf (q (:name %))) (filter #(= "differ" (:status %)) rs)))]
-      (when (seq classes) (println (str "known: " (pr-str (into (sorted-map) classes)))))
+          classes (reduce (fn [m r] (reduce (fn [m [c n]] (-> m (update-in [c :diffs] (fnil + 0) n) (update-in [c :files] (fnil inc 0)))) m (:classes r))) {} (filter #(= "differ" (:status %)) rs))]
+      (doseq [[c v] (sort-by (fn [[c v]] (- (long (:diffs v)))) classes)]
+        (println (str "  class " (name c) ": " (:diffs v) " differences in " (:files v) " files")))
       (when (seq better) (println (str (count better) " known files now the same: " (str/join " " better))))
       (when (seq bad) (println (str (count bad) " failing: " (str/join "; " bad))))
       (if (or (pos? (long (get by "crash" 0))) (seq bad)) 1 0))))
