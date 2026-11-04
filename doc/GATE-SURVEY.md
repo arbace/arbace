@@ -3296,8 +3296,10 @@ compiled level on a subset. The user's decisions, each (a):
 - **GTS230 The rotation's record:** one keyed `--full` of the rotated parts on the re-seed's night (a whole run counts for
   every slice), so the clean run finds the rotation complete.
 
-GTS231-GTS234 (the parked parts if lane 1 fits; the clean clone's caches empty; nothing reused from v2's record; the
-second night for failures only) stand as proposed, recommended (a), not yet asked.
+GTS231-GTS234, decided (a) by the user later the same day: the parked parts kept in the clean run if lane 1 fits; the
+clean clone's caches empty; nothing reused from v2's record; the second night for failures only. Also decided then: the
+re-seed's night runs GTS230's keyed `--full` with the lanes (`--full --concurrent`), and it may run on into the morning
+(keyed: nothing is lost); the clean run the night after.
 
 ## As built: GTS227 (a), the memory lanes (write-ahead, branch `gate-lanes`, 2026-11-04)
 
