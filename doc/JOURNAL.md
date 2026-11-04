@@ -273,3 +273,48 @@ On branch `night-fix` (from `b2a4911f`), not merged while `--full` ran on main:
 - `bin/lib/gate-cache.bash`'s `arbace_main_checkout` no longer writes `${TMPDIR:-.}/gate-cache-git.err`: unset TMPDIR left an
   empty file in the checkout's root; git's error now joins the output (not a directory: the fallback).
 
+## 2026-11-04: the day's development, held for after the tag
+
+The user asked for deep-thinking development by day (the tokens otherwise lost) with sample checks only, no corpus runs
+and no gates: "bringing all the crops' readers and printers on par". Agents (Opus at max or high effort, Sonnet for the
+smaller parts), each on a branch of its own, held for after the tag (the merge plan: `.tmp/tag-v2/merge-plan.md`):
+
+- **Native readers.**
+  - OCaml (`ocaml-native`): Menhir's LALR construction ported, its tables generated from OCaml 5's `parser.mly` and
+    checked state for state against the tarball's `boot/menhir/parser.ml` (2,327 states); `lexer.mll` ported.
+  - Haskell (`haskell-native`): Happy's construction ported, the tables from GHC 9.14.1's `Parser.y` equal to the
+    tarball's `Parser.hs` (1,537 states); `Lexer.x` hand-ported with the layout rule; PostProcess and the Haddock pass.
+  - Rust (`rust-native`): `rustc_lexer` and `rustc_parse` of rustc 1.99.1 ported rule for rule; the identifier tables
+    from the `unicode-ident` and `unicode-properties` crates rustc pins (`rust-unicode`).
+  - C++ (`cpp-native`, `cpp-native2`, `cpp-sema`, `cpp-tree`): CX11, the standard's grammar with clang's disambiguation,
+    clang's AST as data, a minimal Sema (defaulted noexcept, init-list forms, CTAD, dependent members), a node-by-node tree
+    check against tools/cxxdump.
+  - LLVM IR (`llvm-read`, `llvm-full`, `llvm-verify2`, `llvm-verify3`): the reader's gaps (debug records, structured DI
+    nodes, callbr, Windows EH, summaries, ptrtoaddr), mode `:full`, and a verifier ported from LLVM 23's Verifier.cpp and
+    LLParser's checks, judged against `opt -passes=verify`'s whole stderr; its messages taken from libLLVM-23's strings
+    (LLVM's Apache-2.0 with the LLVM exception: LICENSE.md at the merge).
+- **Error messages equal to the compilers':** OCaml's (`ocaml-errors`, `ocaml-errors2`), Haskell's (`haskell-errors`,
+  `-errors2`, `-errors3`: GHC's pretty-printer and its 123 parser codes ported), Rust's first error (`rust-errors`,
+  `-errors2`).
+- **Haskell's preprocessing:** native unlit and a traditional cpp. The first cpp was a port of GCC 15.2's (GPL-3.0); the
+  user decided (2026-11-04) to reimplement it clean, written from the documented behaviour and judged against gcc's
+  `cpp -traditional` as a black box (`haskell-cpp`); haskell-pp and haskell-cpp merge as one squashed commit so the port
+  never enters main's history.
+- **The C++ lowering takes -g IR** (`cpp-lower-dbg`); the embedding of C++, Scheme and OCaml's oi prepared (`embed-crops`,
+  `embed-gaps`; CP191 decided (a) by the user: ci's `arbace/c` reloaded by RT.toolSource); negative controls for the
+  crops' read and print checks (`crop-controls*`); the evaluator's speed (`eval-speed`, doc/go/EVAL-SPEED.md: calls,
+  arrays, reflection, protocols; a runtime change, held for the re-seed window).
+- **goi:** its classes reduced (`goi-classes`: gc's build flags in the reference, gc's type-size checks, `//line`
+  directives, types2's go/defer check) and the frames class (`goi-frames`: runtime.Caller and gc's traces from the
+  interpreted stack): 1,620 → 1,664 of 1,837; both merged into `next` for night 4's gate. Its checker now rejects
+  `for _ := range x` ("no new variables", main 01d3ce9f).
+- **GT9** (`gate-crops`, doc/GATE-SURVEY.md "GT9: the crops' gate"): the seven ungated crops' gating plan; GTS210-GTS223
+  decided (a) by the user, implemented after the tag.
+- **The Zed survey** (`zed-survey`, zedlanguage/zed at d00a13469e30): parked by the user, "let Zed reach maturity".
+- **Python on the Mac VM:** PY6 done (104 modules, 14,132 methods, 0 failing); queue 201 done as one branch,
+  `mac/201-python-py7-py11` 45ce1e92 (PY6-PY10, PY11 prepared); the user's decisions: finalization's 47 methods by design
+  (PYS9 (a)), no re-seed before Python's tag, the compiled loop judged in its clean run, expat ported to Go forms
+  (pyexpat (a)); queue 202 next.
+- **Housekeeping:** the disk from 83% to 47% (merged and old worktrees removed, the user's OK for the older lines;
+  night 3's raw coverage and the speed reruns' work directories; `bin/gate --prune`); a stray `/.tmp/tmp` (an empty root
+  in a TMPDIR, 2026-11-03) removed. The account switched (`/login`): both hosts switch together next time.
