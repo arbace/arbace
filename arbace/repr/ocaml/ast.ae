@@ -193,20 +193,54 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; The dump: ocdump.ml's tree (A atom, Str string, L list, V vector, M map) and its two printers
 
-(deftype A [t])
-(deftype L [items])
-(deftype M [kvs])
-;; Str is a java.lang.String, V a vector
+;; A is an atom (its UTF-8 length), L a list and M a map, each with the length of its flat text and the offset of
+;; its last check point (ocdump's flat_within checks the length after each atom, string and map: a node prints flat
+;; when its last check point is within the width; -1 when it has none); Str is a java.lang.String, V a vector
+
+(deftype A [t ^long n])
+(deftype L [items ^long flen ^long lastchk])
+(deftype M [kvs ^long flen ^long lastchk])
+
+(declare quoted)
+
+(defn- utf8-len ^long [^String s] (alength (.getBytes s "UTF-8")))
+
+(defn- measure
+  "[flat-length last-check] of a node"
+  [x]
+  (cond
+    (instance? A x) (let [n (.-n ^A x)] [n n])
+    (string? x) (let [n (utf8-len (quoted x))] [n n])
+    (instance? L x) [(.-flen ^L x) (.-lastchk ^L x)]
+    (instance? M x) [(.-flen ^M x) (.-lastchk ^M x)]
+    :else (let [k (count x)]
+            (loop [i 0 off 1 last -1]
+              (if (= i k)
+                [(if (pos? k) off (inc off)) last]
+                (let [[fl lc] (measure (nth x i))]
+                  (recur (inc i) (+ off fl 1) (if (>= lc 0) (+ off lc) last))))))))
+
+(defn- mk-l [items]
+  (let [items (vec items) [fl lc] (measure items)] (L. items fl lc)))
+
+(defn- mk-m [kvs]
+  (let [kvs (vec kvs)
+        fl (loop [i 0 n 1]
+             (if (= i (count kvs))
+               (inc n)
+               (let [[k v] (nth kvs i)]
+                 (recur (inc i) (+ n (if (pos? i) 1 0) 2 (count k) (first (measure v)))))))]
+    (M. kvs fl fl)))
 
 (def ^:dynamic *with-loc* false)
 
-(defn- a [t] (A. t))
-(def ^:private anil (A. "nil"))
-(defn- kw [k] (A. (str ":" k)))
-(defn- int-a [n] (A. (str n)))
-(defn- bool-a [b] (A. (if b "true" "false")))
-(defn- l [& xs] (L. (vec xs)))
-(defn- lv [xs] (L. (vec xs)))
+(defn- a [^String t] (A. t (utf8-len t)))
+(def ^:private anil (a "nil"))
+(defn- kw [k] (a (str ":" k)))
+(defn- int-a [n] (a (str n)))
+(defn- bool-a [b] (a (if b "true" "false")))
+(defn- l [& xs] (mk-l xs))
+(defn- lv [xs] (mk-l xs))
 
 (defn- text
   "A byte string's text for the dump (the helper writes the bytes: valid UTF-8 is its text)"
@@ -234,7 +268,7 @@
   ([head fields] (node nil nil nil head fields))
   ([attrs stack lc head fields]
    (let [m (meta-of attrs stack lc)]
-     (L. (cond-> (into [(A. head)] fields) (seq m) (conj (M. m)))))))
+     (mk-l (cond-> (into [(a head)] fields) (seq m) (conj (mk-m m)))))))
 
 (defn- at [lc x] (if *with-loc* (l (a "at") x (pos-vec lc)) x))
 
@@ -244,7 +278,7 @@
   (and (pos? (count c)) (alpha? (int (.charAt c 0))) (every? #(alnum? (int %)) c)))
 (defn- bare-name? [c] (and (bare-component? c) (not (#{"true" "false" "nil"} c))))
 
-(defn- name-s [c] (if (bare-name? c) (A. c) (l (a "name") (text c))))
+(defn- name-s [c] (if (bare-name? c) (a c) (l (a "name") (text c))))
 (defn- name-loc [n] (at (:loc n) (name-s (:txt n))))
 
 (defn- lident-special [s]
@@ -264,7 +298,7 @@
             (let [cs (letfn [(comps [x] (case (first x) :Lident [(nth x 1)] :Ldot (conj (comps (:txt (nth x 1))) (:txt (nth x 2)))))]
                        (comps lid))]
               (if (and (every? bare-component? cs) (bare-name? (peek cs)))
-                (A. (lid-text lid))
+                (a (lid-text lid))
                 (l (a "name") (text (lid-text lid))))))
     :Lapply (l (a "lapply") (lid-form (:txt (nth lid 1))) (lid-form (:txt (nth lid 2))))))
 
@@ -299,8 +333,8 @@
       :Pconst_integer (node nil nil lc "int" (into [(text (nth d 1))] (opt-tail int-a (nth d 2))))
       :Pconst_char (node nil nil lc "char" [(int-a (nth d 1))])
       :Pconst_string (let [m (into (meta-of nil nil lc) (when *with-loc* [["content-loc" (pos-vec (nth d 2))]]))]
-                       (L. (cond-> (into [(A. "string") (bytes-or-string (nth d 1))] (when (nth d 3) [(text (nth d 3))]))
-                             (seq m) (conj (M. m)))))
+                       (mk-l (cond-> (into [(a "string") (bytes-or-string (nth d 1))] (when (nth d 3) [(text (nth d 3))]))
+                             (seq m) (conj (mk-m m)))))
       :Pconst_float (node nil nil lc "float" (into [(text (nth d 1))] (opt-tail int-a (nth d 2)))))))
 
 (declare payload)
@@ -680,7 +714,7 @@
 (defn top-form
   "The helper's top form of a parse: kind :impl (a structure), :intf (a signature) or :toplevel (phrases)"
   [kind x fname]
-  (let [m (M. [["file" (text fname)] ["ocaml" "5.5.0"]])]
+  (let [m (mk-m [["file" (text fname)] ["ocaml" "5.5.0"]])]
     (case kind
       :impl (l (a "ocaml/impl") (structure x) m)
       :intf (l (a "ocaml/intf") (signature x) m)
@@ -690,7 +724,7 @@
   "The helper's error form: (ocaml/error KIND MESSAGE {:loc ...})"
   [kind msg lc]
   (let [m (if lc (meta-of nil nil lc) [])]
-    (L. (cond-> [(A. "ocaml/error") (kw (name kind)) msg] (seq m) (conj (M. m))))))
+    (mk-l (cond-> [(a "ocaml/error") (kw (name kind)) msg] (seq m) (conj (mk-m m))))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; The dump's text, as ocdump's printer writes it (flat when a node fits in the width, else broken after its head)
@@ -698,27 +732,26 @@
 (defn- blen
   "The UTF-8 length of a string"
   [^String s]
-  (loop [i 0 n 0]
-    (if (>= i (count s))
-      n
-      (let [c (int (.charAt s i))]
-        (cond (< c 0x80) (recur (inc i) (inc n))
-              (< c 0x800) (recur (inc i) (+ n 2))
-              (and (>= c 0xD800) (<= c 0xDBFF)) (recur (+ i 2) (+ n 4))
-              :else (recur (inc i) (+ n 3)))))))
+  (alength (.getBytes s "UTF-8")))
+
+(def ^:private needs-escape #"[\"\\\x00-\x1f\x7f]")
 
 (defn- escape [^StringBuilder b ^String s]
-  (dotimes [i (count s)]
-    (let [c (.charAt s i)]
-      (case c
-        \" (.append b "\\\"")
-        \\ (.append b "\\\\")
-        \newline (.append b "\\n")
-        \tab (.append b "\\t")
-        \return (.append b "\\r")
-        (if (or (< (int c) 0x20) (= (int c) 0x7f))
-          (.append b (format "\\u%04X" (int c)))
-          (.append b c))))))
+  (if-not (re-find needs-escape s)
+    (.append b s)
+    (dotimes [i (count s)]
+      (let [c (.charAt s i)]
+        (case c
+          \" (.append b "\\\"")
+          \\ (.append b "\\\\")
+          \newline (.append b "\\n")
+          \tab (.append b "\\t")
+          \return (.append b "\\r")
+          (if (or (< (int c) 0x20) (= (int c) 0x7f))
+            (.append b (format "\\u%04X" (int c)))
+            (.append b c)))))))
+
+(defn- quoted ^String [^String s] (let [b (StringBuilder.)] (.append b "\"") (escape b s) (.append b "\"") (str b)))
 
 (defn- flat [^StringBuilder b x]
   (cond
@@ -736,38 +769,15 @@
 
 (defn- flat-string [x] (let [b (StringBuilder.)] (flat b x) (str b)))
 
-(defn- flat-within
-  "The flat text when its UTF-8 length stays within n at each atom and map end (ocdump's chk), else nil"
-  [x n]
-  (let [b (StringBuilder.) len (volatile! 0)
-        add (fn [^String s] (.append b s) (vswap! len + (blen s)))
-        chk (fn [] (when (> @len n) (throw (ex-info "too long" {::too-long true}))))]
-    (letfn [(go [x]
-              (cond
-                (instance? A x) (do (add (.-t ^A x)) (chk))
-                (string? x) (let [sb (StringBuilder.)] (.append sb "\"") (escape sb x) (.append sb "\"") (add (str sb)) (chk))
-                (instance? L x) (do (add "(") (sq (.-items ^L x)) (add ")"))
-                (vector? x) (do (add "[") (sq x) (add "]"))
-                (instance? M x) (do (add "{")
-                                    (let [kvs (.-kvs ^M x)]
-                                      (dotimes [i (count kvs)]
-                                        (let [[k v] (nth kvs i)]
-                                          (when (pos? i) (add " "))
-                                          (add (str ":" k " ")) (go v))))
-                                    (add "}") (chk))))
-            (sq [xs] (dotimes [i (count xs)] (when (pos? i) (add " ")) (go (nth xs i))))]
-      (try (go x) (str b)
-           (catch arbace.lang.ExceptionInfo e (if (::too-long (ex-data e)) nil (throw e)))))))
-
 (def ^:private max-indent 60)
 
 (defn- spaces [^StringBuilder b n] (dotimes [_ n] (.append b \space)))
 
 (defn- pretty [^StringBuilder b ind width x]
   (let [ind (min ind max-indent)
-        f (if (or (instance? A x) (string? x)) (flat-string x) (flat-within x (- width ind)))]
-    (if f
-      (.append b ^String f)
+        fits (or (instance? A x) (string? x) (<= (second (measure x)) (- width ind)))]
+    (if fits
+      (flat b x)
       (cond
         (and (instance? L x) (seq (.-items ^L x)))
         (let [[h & rest] (.-items ^L x)]
