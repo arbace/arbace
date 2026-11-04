@@ -343,7 +343,7 @@
         (when-let [k (and (string? v) (re-matches #"[0-9]+" v) (Long/parseLong v))]
           (when-not (and (pos? k) (zero? (bit-and k (dec k)))) (verr :parser/attr-value "stack alignment is not a power of two" {:at [:attr-val n]})))
         "align"
-        (when (and (integer? v) (pos? v) (not (zero? (bit-and (long v) (dec (long v)))))) (verr :parser/align "alignment is not a power of two" {:at [:attr-val n]}))
+        (when (and (integer? v) (pos? v) (not (zero? (bit-and (long v) (dec (long v)))))) (verr :parser/align "alignment is not a power of two" {:at [:attr-val-of n (str v)]}))
         "initializes"
         (let [nums (when (string? v) (mapv #(Long/parseLong %) (re-seq #"-?[0-9]+" v)))
               prs (when nums (partition 2 nums))]
@@ -529,8 +529,8 @@
 (defn- check-align [a]
   (when (some? a)
     (when-not (and (integer? a) (pos? a) (zero? (bit-and (long a) (dec (long a)))))
-      (verr :parser/align "alignment is not a power of two" {:at [:attr-val "align"]}))
-    (when (> (long a) 4294967296) (verr :parser/align "huge alignments are not supported yet" {:at [:attr-val "align"]}))))
+      (verr :parser/align "alignment is not a power of two" {:at [:attr-val-of "align" (str a)]}))
+    (when (> (long a) 4294967296) (verr :parser/align "huge alignments are not supported yet" {:at [:attr-val-of "align" (str a)]}))))
 
 (declare use-value check-di-parse node-of di-kind)
 
@@ -818,7 +818,7 @@
                               (cond
                                 (md-ref? op) nil
                                 (vector? op) (verr :parser/syntax "Expected '!' here" {:at [:brace-item oi 0]})
-                                (and (seq? op) (= (first op) '!) (string? (second op))) (verr :parser/syntax "expected integer" {:at [:brace-item oi 0]})))
+                                (and (seq? op) (= (first op) '!) (string? (second op))) (verr :parser/syntax "expected integer" {:at [:plus [:brace-item oi 0] 1]})))
                             (note-md! (nth f 2)))
         llvm/attributes (do (check-attr-placement :fn (nth f 2)) (check-attr-values (nth f 2)))
         llvm/uselistorder (let [[_ [t v]] f] (use-value nil v (norm-type t)))
@@ -1572,7 +1572,7 @@
                              (verr :di/node "scope points into the type hierarchy" [:md id]))
                            (when (and (:inlinedAt fs) (not= (:inlinedAt fs) 'null) (not= "DILocation" (kind-of (:inlinedAt fs))))
                              (verr :di/node "inlined-at should be a location")))
-          "DILocalVariable" (when-not (local-scope-kinds (kind-of (:scope fs))) (verr :di/node "local variable requires a valid scope"))
+          "DILocalVariable" (when-not (local-scope-kinds (kind-of (:scope fs))) (apply verr :di/node "local variable requires a valid scope" (N :scope)))
           "DILexicalBlock" (when (and (some? (:column fs)) (not (zero? (long (:column fs)))) (zero? (long (or (:line fs) 0))))
                              (verr :di/node "cannot have column info without line info"))
           "DISubprogram"
@@ -1999,6 +1999,76 @@
       (and (seq? t) (= (first t) 'struct)) (reduce max 1 (map #(type-align sp %) (rest t)))
       :else 1)))
 
+;; ---------------------------------------------------------------------------------------------
+;; The order of an attribute set (Attribute::operator<): enum attributes by their enum's name, type attributes, integer
+;; attributes, constant range ones, then strings by key; the AsmWriter prints a set in that order.
+
+(def ^:private enum-attr-names
+  {"allocalign" "AllocAlign" "allocptr" "AllocatedPointer" "alwaysinline" "AlwaysInline" "builtin" "Builtin" "cold" "Cold"
+   "convergent" "Convergent" "coro_only_destroy_when_complete" "CoroDestroyOnlyWhenComplete" "coro_elide_safe" "CoroElideSafe"
+   "dead_on_unwind" "DeadOnUnwind" "dead_on_return" "DeadOnReturn" "disable_sanitizer_instrumentation" "DisableSanitizerInstrumentation"
+   "fn_ret_thunk_extern" "FnRetThunkExtern" "hot" "Hot" "immarg" "ImmArg" "inreg" "InReg" "inlinehint" "InlineHint" "jumptable" "JumpTable"
+   "minsize" "MinSize" "mustprogress" "MustProgress" "naked" "Naked" "nest" "Nest" "noalias" "NoAlias" "nobuiltin" "NoBuiltin"
+   "nocallback" "NoCallback" "nocf_check" "NoCfCheck" "noduplicate" "NoDuplicate" "nofree" "NoFree" "noimplicitfloat" "NoImplicitFloat"
+   "noinline" "NoInline" "nomerge" "NoMerge" "norecurse" "NoRecurse" "noredzone" "NoRedZone" "noreturn" "NoReturn"
+   "nosanitize_bounds" "NoSanitizeBounds" "nosanitize_coverage" "NoSanitizeCoverage" "nosync" "NoSync" "noundef" "NoUndef"
+   "nounwind" "NoUnwind" "nonlazybind" "NonLazyBind" "nonnull" "NonNull" "null_pointer_is_valid" "NullPointerIsValid"
+   "optforfuzzing" "OptForFuzzing" "optdebug" "OptimizeForDebugging" "optsize" "OptimizeForSize" "optnone" "OptimizeNone"
+   "presplitcoroutine" "PresplitCoroutine" "readnone" "ReadNone" "readonly" "ReadOnly" "returned" "Returned" "returns_twice" "ReturnsTwice"
+   "safestack" "SafeStack" "sanitize_address" "SanitizeAddress" "sanitize_hwaddress" "SanitizeHWAddress" "sanitize_memory" "SanitizeMemory"
+   "sanitize_memtag" "SanitizeMemTag" "sanitize_numerical_stability" "SanitizeNumericalStability" "sanitize_realtime" "SanitizeRealtime"
+   "sanitize_thread" "SanitizeThread" "shadowcallstack" "ShadowCallStack" "signext" "SExt" "skipprofile" "SkipProfile"
+   "speculatable" "Speculatable" "speculative_load_hardening" "SpeculativeLoadHardening" "ssp" "StackProtect" "sspreq" "StackProtectReq"
+   "sspstrong" "StackProtectStrong" "strictfp" "StrictFP" "swiftasync" "SwiftAsync" "swifterror" "SwiftError" "swiftself" "SwiftSelf"
+   "willreturn" "WillReturn" "writeonly" "WriteOnly" "zeroext" "ZExt" "noext" "NoExt" "nofpclass" "NoFPClass"})
+
+(def ^:private type-attr-names {"byref" "ByRef" "byval" "ByVal" "elementtype" "ElementType" "inalloca" "InAlloca" "preallocated" "Preallocated" "sret" "StructRet"})
+(def ^:private int-attr-names
+  {"align" "Alignment" "allockind" "AllocKind" "allocsize" "AllocSize" "captures" "Captures" "dereferenceable" "Dereferenceable"
+   "dereferenceable_or_null" "DereferenceableOrNull" "memory" "Memory" "alignstack" "StackAlignment" "uwtable" "UWTable"
+   "vscale_range" "VScaleRange"})
+
+(defn- attr-sort-key [a]
+  (let [n (aname a)]
+    (cond
+      (nil? n) [4 (str (first a))]
+      (contains? type-attr-names n) [1 (get type-attr-names n)]
+      (contains? int-attr-names n) [2 (get int-attr-names n)]
+      (#{"range" "initializes"} n) [3 n]
+      :else [0 (get enum-attr-names n n)])))
+
+(defn- sort-attrs [as] (vec (sort-by attr-sort-key (vec as))))
+
+(defn- sort-arg
+  "An argument or parameter [type attr... value] with its attributes in the set's order."
+  [a]
+  (if (and (vector? a) (> (count a) 2))
+    (let [mid (butlast (rest a))]
+      (if (every? attr-item? mid) (vec (concat [(first a)] (sort-attrs mid) [(peek a)])) a))
+    a))
+
+(defn- set-opt
+  "The form `x` with the value of option `k` changed by `f`."
+  [x k f]
+  (let [v (vec x) i (first (keep-indexed (fn [i y] (when (= y k) i)) v))]
+    (if (and i (< (inc i) (count v))) (apply list (assoc v (inc i) (f (nth v (inc i))))) x)))
+
+(defn- canon-attr-order
+  "A call, invoke or callbr (or a function header) with its parameter and return attributes in the AsmWriter's order."
+  [x]
+  (let [b (body x) h (first b)
+        fix (fn [b]
+              (let [b (if (#{'call 'invoke 'callbr} h)
+                        (apply list (map-indexed (fn [i y] (if (and (= i 3) (vector? y)) (mapv sort-arg y) y)) b))
+                        b)]
+                (set-opt b :ret-attrs sort-attrs)))
+        nb (cond
+             (#{'call 'invoke 'callbr} h) (fix b)
+             (#{'llvm/define 'llvm/declare} h)
+             (set-opt (apply list (map-indexed (fn [i y] (if (and (= i 3) (vector? y)) (mapv #(if (vector? %) (sort-arg %) %) y) y)) b)) :ret-attrs sort-attrs)
+             :else b)]
+    (if (= (first x) '=) (list '= (second x) nb) nb)))
+
 (defn- canon-fp
   "A floating constant as the AsmWriter prints it: %e when it reads back to the same value, else the double's bits."
   [^String text ty]
@@ -2047,10 +2117,10 @@
   [c ctx metaforms]
   (cond
     (string? c) c
-    (= c :inst) (let [x (canon-fps (with-default-align (:inst ctx))) b (body x)] (if (dbg-record? b) (pr/item-inst-str x) (str "  " (pr/item-inst-str x))))
+    (= c :inst) (let [x (canon-fps (canon-attr-order (with-default-align (:inst ctx)))) b (body x)] (if (dbg-record? b) (pr/item-inst-str x) (str "  " (pr/item-inst-str x))))
     (= c :fn) (fn-operand (:fn ctx))
     (= c :decl) (let [f (:fn ctx) o (apply hash-map (drop 4 f)) as (group-items (:attrs o))]
-                  (str (when (seq as) (str "; Function Attrs: " (str/join " " (map pr/attr-str as)) "\n")) (pr/fn-head-str f)))
+                  (str (when (seq as) (str "; Function Attrs: " (str/join " " (map pr/attr-str as)) "\n")) (pr/fn-head-str (canon-attr-order f))))
     (= c :bb) (label-text (:bb ctx))
     (= c :global) (fn-operand (:global ctx))
     (and (vector? c) (= (first c) :md)) (if-let [f (get metaforms (second c))] (pr/top-str f) (str (second c)))
@@ -2059,7 +2129,7 @@
                                                  (and (symbol? v) (get metaforms v)) (pr/top-str (get metaforms v))
                                                  (vector? v) (pr/typed-str v)
                                                  :else (pr/md-str v)))
-    (and (vector? c) (= (first c) :inst)) (let [x (canon-fps (with-default-align (second c))) b (body x)] (if (dbg-record? b) (pr/item-inst-str x) (str "  " (pr/item-inst-str x))))
+    (and (vector? c) (= (first c) :inst)) (let [x (canon-fps (canon-attr-order (with-default-align (second c)))) b (body x)] (if (dbg-record? b) (pr/item-inst-str x) (str "  " (pr/item-inst-str x))))
     (and (vector? c) (= (first c) :fn)) (fn-operand (second c))
     (and (vector? c) (= (first c) :bb)) (label-text (second c))
     :else (str c)))
