@@ -1,11 +1,12 @@
 # repr/cpp's native parser (CX11)
 
-Status: CX11's first part, on the branch `cpp-native` from `cpp-cx9` (2026-11-04). The survey's §4.4 and its CX11 row
+Status: CX11's first part, on the branch `cpp-native` from `cpp-cx9` (2026-11-04); its second part on `cpp-native2` from
+`cpp-native` (2026-11-04, §7). The survey's §4.4 and its CX11 row
 ([CPP-SURVEY.md](CPP-SURVEY.md) §11) planned a C++ parser of Arbace's own, "name-kind tracking, a port of the grammar", so that
 repr/cpp reads C++23 without the oracle's AST dump at read time; clang stays the oracle. This note is its design: what C++'s
 parsing needs beyond C's (§1), the reference model and why (§2), the design as built (§3), the check (§4), what is left (§5).
 
-Words: **the parser** is `arbace.repr.cpp.parse`; **the converter** `arbace.repr.cpp.convert`, unchanged (CX4-CX9's); **the
+Words: **the parser** is `arbace.repr.cpp.parse`; **the converter** `arbace.repr.cpp.convert` (CX4-CX9's; the second part fixed four of its bugs, §7); **the
 oracle's tree** is clang 23.1.4's `-ast-dump=json` as `tools/cxxdump` keeps it; **the native tree** the parser's.
 
 ## 1. What C++'s parsing needs beyond C's
@@ -111,9 +112,8 @@ one an int); a string's code units after concatenation, escaped as clang prints 
 `APFloat::toString` prints it (FormatPrecision 0: 9 and 21 significant digits, its truncating and rounding steps), a double's any
 spelling of its value.
 
-**3.8 What clang's tree has that the parser writes too**: a lambda's capture initializers, one an explicit capture (the converter
-reads an init-capture's initializer as the next of them: with a simple capture before it, the wrong one; a converter bug the check
-surfaced, kept so that the forms agree); a static assertion without a message has an empty second child; an anonymous union in a
+**3.8 What clang's tree has that the parser writes too**: an init-capture's initializer (the converter finds it by its offset among
+the initializers clang lists, one a capture: the parser writes the init-captures' alone, §7); a static assertion without a message has an empty second child; an anonymous union in a
 block or a namespace has its implicit object, and a use of its member is a member access through it; a scoped enumeration's fixed
 type `int`; a using-declaration through a qualifier whose template arguments depend on a template parameter is
 `UnresolvedUsingValueDecl`; the builtins that are expressions of their own (`__atomic_*` outside templates, `__builtin_offsetof`, type
@@ -139,10 +139,40 @@ in the class's scope as it fills (so `Kind Kind;` names the enumeration `Kind` d
 **3.9 Declines.** A main-file statement or declaration the parser cannot read is a node of kind `NativeDecline` over its tokens: the
 converter writes it as its text (`(cpp/text "...")`) and counts it under that kind; the parse goes on after it.
 
+**3.10 Designated initializers** in clang's semantic form: by the declaration's or the functional cast's type, an aggregate's
+designated elements at their members' places in declaration order (the skim of a class records its fields and their types), an
+array's at their indices, a member skipped before a written one value-initialized (an `ImplicitValueInitExpr`: the converter writes
+such a list as its text), the trailing ones left out; a nested designator (`.a.y = 2`) a list of the member's own without braces;
+a nested list designated by its member's type. A list the parser cannot place (an index not a literal, a class with bases, a union,
+an unknown type: a function's argument, whose parameter only overload resolution knows) is kept as written (`init-list-form`).
+
+**3.11 Modules** ([module.unit], [module.import]): `module;`, `export? module NAME[:PARTITION] attrs;`, `module :private;` and
+`export? import NAME|:PARTITION|<h>|"h" attrs;` parsed; clang's AST has no node for a module declaration (the converter reads its
+line from the text, as before) and an `ImportDecl` for an import. The names and partitions are not macro-expanded (P3034R1, as
+clang reads them: `module :PRIVATE_SEMI` with `#define PRIVATE_SEMI private ;` names the partition `PRIVATE_SEMI`, and clang's
+recovery then skips to the next `;` of the file, taking the declaration after it); a missing `;` is recovered to the next one or
+the end.
+
+**3.12 C++26's constructs** g++.dg/cpp26 exercises and clang 23 reads: pack indexing (`Ts...[I]` as a type, clang's
+`PackIndexingType` printed `T...[I]`; `pack...[I]` as an expression, a `PackIndexingExpr`; a base-specifier's), structured bindings
+as conditions (P0963), variadic friends and friend-type-specifier lists (`friend Ts::Y..., Us...;`, P2893), a `for`'s condition
+declaration, name-independent declarations (`_`).
+
+**3.13 The headers' cache** (`arbace.repr.cpp.skim`): the parser's state after a unit's leading run of header tokens (20,000 or
+more: the declarations its first `#include`s bring, skimmed) is kept in `.tmp/repr-cpp/skim-cache/KEY.skim` (`REPR_CPP_SKIM_CACHE`
+names another directory, `off` none), KEY the SHA-256 of the run's tokens as the preprocessor gave them (kind, spelling, offset,
+length, file, macro expansion, glue, scratch), the standard, the main file's name and the parser's own sources (`parse.ae`,
+`scope.ae`, `lit.ae`, `skim.ae`: a change to the parser misses every entry). The state is a graph (the global namespace's scope and
+everything reachable from it: scopes, entities, the classes' fields; the member templates' names; the cursor): written as a table of
+its objects, each once and referred to by its index, gzipped, and read back with the same sharing (a scope built after its parent
+and entity, its containers filled after). io.cpp (`<iostream>`, `<vector>`, `<algorithm>`, 368,465 tokens): the parse 14.4 s cold,
+4.5 s warm (the skim's 9 s now the key's 1 s and the read's 0.5 s; the tokens' conversion 1.8 s and the preprocessor's 4.7 s
+remain); the light lists' forms are the same cold and warm. `REPR_CPP_TIME=1` prints a read's times on stderr.
+
 ## 4. The check
 
 `bin/repr-cpp read --reader native FILE [--main NAME] [--std S] [-- ARGS]` reads with no oracle. `bin/repr-cpp native-check
-LIST|samples|native|gxx-a|gxx-b WORK` (`bin/lib/repr-cpp/native-check`, `arbace.repr.cpp.ncheck`) reads each file twice, from the
+LIST|samples|native|gxx-a|gxx-b|gxx-26|gxx-mod WORK` (`bin/lib/repr-cpp/native-check`, `arbace.repr.cpp.ncheck`) reads each file twice, from the
 oracle's dump and natively, and compares the two units' forms item by item, each written by repr/c's layout on one line; the result
 is judged against `test/repr/cpp/native-known.edn`, where each file that differs is listed with its class:
 
@@ -155,10 +185,13 @@ is judged against `test/repr/cpp/native-known.edn`, where each file that differs
 | `dependent-member` | a member named in a class template's member function, which clang leaves unresolved (an `UnresolvedMemberExpr`: the converter writes its text) |
 | `implicit-argument` | a call's argument clang adds (a default argument of the `operator new` a new-expression calls) |
 | `clang-recovery` | an ill-formed construct clang reads by its error recovery |
+| `deduced-type` | a function's deduced return type, held in its type (`auto f() { return [=](int b) {...}; }`: a closure type, which the converter writes as the function's text) |
 
 The lists: `samples` (test/cpp/samples, 9 files), `native` (test/repr/cpp/native/samples: `subset.cpp`, one construct of each kind
 of §1's subset), `gxx-a` and `gxx-b` (test/repr/cpp/native/: of the recorded round-trip passes of g++.dg's every-10th sample, every
-16th, 62 files, and every 6th of the rest from the 4th, 163; their `{gcc-15.2.0}` an extraction of the pinned tarball).
+16th, 62 files, and every 6th of the rest from the 4th, 163; their `{gcc-15.2.0}` an extraction of the pinned tarball), `gxx-26`
+(g++.dg/cpp26's files the oracle reads, at c++26, 38) and `gxx-mod` (every 4th of g++.dg/modules' recorded round-trip passes and the
+four that differ, 109).
 
 Numbers (2026-11-04, the light tier, 4 jobs): samples 9 of 9 files the same (68 of 68 items); native 1 of 1 (30 of 30); gxx-a 60 of
 62 (291 of 293 items), 2 known; gxx-b 156 of 163 (737 of 744), 7 known; no failure. A wider measurement, not a committed list: all 977
@@ -166,24 +199,37 @@ recorded round-trip passes of g++.dg's every-10th sample, 942 the same (5,064 of
 the classes above (defaulted-noexcept 10, init-list-form 8, ctad 5, dependent-member 5, builtin-signature 2, implicit-argument 1,
 clang-recovery 1) and 3 not classed (§5); 7 constructs declined in all.
 
-## 5. What is left
+Numbers of the second part (2026-11-04, the light tier, 4 jobs, §7): samples 9 of 9 (68 of 68 items); native 1 of 1 (30 of 30);
+gxx-a 60 of 62 (291 of 293), 2 known; gxx-b 156 of 163 (737 of 744), 7 known; gxx-26 37 of 38 (237 of 244), 1 known; gxx-mod 105 of
+109 (382 of 389), 4 known; no failure. The wide measurement again: 945 of 977 the same (5,080 of 5,135 items) in 105 s, the 32 that
+differ all in the classes (the three unclassed files now the same), 2 constructs declined (7 before). Over g++.dg/modules' 422
+recorded round-trip passes: 417 the same, 5 classed.
 
-- **The wide measurement's three unclassed files**: `cpp0x/noexcept50.C` (a `noexcept`'s member found through the complete scope
-  is printed without clang's `this->` where the member is declared later: the late scope is not consulted from a declarator's
-  qualifiers yet), `cpp2a/typename15.C` (`B(T::type);` in a class template, P0634's constructor: the check finds no `T` among the
-  template parameters there), `template/sfinae9.C` (declarations a macro writes, whose texts clang's converter keeps).
+**The native reader in the round trip and the dg check**: `bin/repr-cpp roundtrip LIST WORK --reader native` reads each file and its
+print with the native parser (rtcheck's `REPR_CPP_READER=native`; the options the modelled ones and `-iquote` the original's
+directory, as the dumps'), the oracle's dumps still made for its rejections and for level 3; `bin/repr-cpp dg --reader native` reads
+the dg-error part's accepted units natively (the oracle still judging acceptance and errors) and runs the modules part's round trip
+natively (`--record` and `--record-ref` refused: the records are the clang reader's). The clang reader stays the default. The
+samples' round trip natively: 8 pass, 1 known (`gxx-objects-location`), the forms and prints byte for byte the clang reader's; gxx-a
+natively, without objects: 62 of 62 pass; dg over cpp26 and five modules files: the clang reader's results.
+
+## 5. What is left
 
 - **Sema's facts** of §4's classes, and the instantiation-dependent kinds (`S<int>::x` a type or a value by the specialization a
   program selects; a name declared only in a template's instance): a checker's work (CX12's), or classes.
 - **The tree level**: the native tree against the oracle's node for node (the fields the converter reads), as JN8's parse-check;
   mutants for the error recovery; the whole g++.dg compile corpus, libstdc++'s headers as a read corpus (the survey's stress test),
   the other corpora; CX11's exit: trees equal over the corpora or known.
-- **The grammar's remainder**: designated initializers out of order (clang's semantic form needs the fields' order), C++26 (pack
-  indexing, contracts, reflection), module declarations (read by the converter from the text; the parser skips their lines),
-  Objective-C++, `__declspec`, nested functions, `asm` operands, `if consteval`'s forms (the converter's gap), generic lambdas' forms
-  (the converter's gap).
-- **Speed**: the headers' skim (9 s for three headers) cached by their digests as the preprocessor caches its groups.
-- **Uses**: `bin/repr-cpp roundtrip` and `dg` with the native reader; syntax errors of Arbace's own for the dg check (CP8's classes).
+- **The grammar's remainder**: designated initializers in a function's argument (overload resolution's) and brace elision (the
+  `init-list-form` class: the elided braces restored by the members' types, which the skim now records: a next step), C++26's
+  contracts and reflection (clang 23 rejects them), header units (`import <h>;`: clang without `-fmodule-header` rejects them, so the
+  parser does not read the header's names), Objective-C++, `__declspec`, nested functions, `asm` operands, `if consteval`'s forms
+  (the converter's gap), generic lambdas' forms (the converter's gap).
+- **Speed**: the cache covers a unit's leading run of headers only (an `#include` after the first declaration is skimmed each
+  time); the tokens' conversion (1.8 s for io.cpp) and the key's digest (1 s) are what a warm read of three headers costs beyond the
+  preprocessor.
+- **Uses**: the native round trip and dg over whole corpora (recorded results of their own); syntax errors of Arbace's own for the
+  dg check (CP8's classes).
 
 ## 6. Sources
 
@@ -192,3 +238,30 @@ behaviour as `tools/cxxdump`'s dumps show it (the host's `Alpine clang version 2
 `llvmorg-23.1.4`, `test/cpp/corpora.edn`'s pin; not on the host: followed from the functions' documented algorithm and checked on
 probes, `.tmp/cx11/probe/` of the worktree); LLVM's `APFloat::toString` (llvm/lib/Support/APFloat.cpp) for the floating literals,
 checked on 13 probes against clang's dumps; gcc 15.2.0's g++.dg (the pinned tarball) for the corpus.
+
+## 7. The second part (2026-11-04)
+
+On `cpp-native2`, each step a commit, checked in the light tier (`native-check` samples, native, gxx-a, gxx-b, gxx-26, gxx-mod and
+the samples' round trip; no whole corpus, no gate):
+
+1. **The three unclassed files**, fixed in the parser: a qualified declarator-id's rest (its parameters, its `noexcept`) is in its
+   class's scope, as clang's DeclScopeObj makes it (noexcept50: `this->fn()`); a qualified constructor `X::X` (and an operator, a
+   destructor, a conversion function: not an identifier, Declarator::mayBeFollowedByCXXDirectInit) takes its `(` as a parameter
+   list, a qualified declarator-id naming a member function too (Sema::isDeclaratorFunctionLike), and a dependent qualified name is
+   an abstract parameter's type (clang's implicit typename, an extension before C++20; typename15); a dependent type's
+   construction is a `CXXUnresolvedConstructExpr` (Sema::BuildCXXTypeConstructExpr; sfinae9: the converter writes it in a macro as
+   the invocation's text).
+2. **The converter's init-capture bug**: `lambda-form` took an init-capture's initializer as the next of clang's per-capture list,
+   so `[&n, m = n * 2]` was `(= m n)`; it takes the initializer that begins within the capture's text, and the parser lists the
+   init-captures' initializers alone. No known file changed (no recorded round-trip file has an init-capture after a simple
+   capture; the dg records do not depend on the forms).
+3. **Grammar**: designated initializers (§3.10; the converter writes a list with a skipped member before a written one as its text,
+   a default member initializer's too, where it wrote `}`, and one in a nested designator's list, where it wrote `.y = 2`), C++26
+   (§3.12; the converter keeps a friend's pack expansion, `(cpp/friend (pack-expand Ts))`, where it wrote `friend Ts;`), modules
+   (§3.11) with the modules part's differences: implicit typename in an alias's and a trailing return type (P0634), a friend
+   template's class named as written (not the injected `T<H>`), a friend specialization's template arguments
+   (`friend void ns::f<int>();`), GNU vector types in an alias or a typedef (`__attribute__((__vector_size__(N))) T`, which the
+   converter writes as the declaration's text); the lists gxx-26 and gxx-mod; the class `deduced-type`.
+4. **The headers' cache** (§3.13).
+5. **The native reader as an option** of `roundtrip` and `dg` (§4); the native host configuration takes `-iquote`.
+
