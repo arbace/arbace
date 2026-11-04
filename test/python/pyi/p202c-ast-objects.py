@@ -118,3 +118,9 @@ t = ast.parse("x.y = f(a, k=1)\nimport m as n\nglobal g")
 import sys
 print(t.body[0].targets[0].value.id is sys.intern("x"), t.body[0].targets[0].attr is sys.intern("y"),
       t.body[1].names[0].asname is sys.intern("n"), t.body[2].names[0] is sys.intern("g"))
+# AST's own tp_name, "ast.AST"
+print(repr(ast.AST()))
+saved = ast.AST._fields
+del ast.AST._fields
+print(err(lambda: ast.AST()), err(lambda: ast.AST(arg1=123)))
+ast.AST._fields = saved
