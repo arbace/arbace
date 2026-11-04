@@ -1,0 +1,774 @@
+;; Ported from rustc 1.99.1 (https://github.com/rust-lang/rust at 58cf8f9c3, the sources of Alpine's
+;; rust-src-1.99.1-r0, pinned by tools/rsdump/apks.sha256): compiler/rustc_lexer/src/lib.rs (the raw
+;; lexer), compiler/rustc_parse/src/lexer/mod.rs and lexer/tokentrees.rs (the cooking of tokens and the
+;; token trees), compiler/rustc_ast/src/token.rs (Token::glue, Token::is_punct) and the checks of the
+;; rustc_literal_escaper crate rustc calls; rustc is dual-licensed MIT OR Apache-2.0 (LICENSE.md,
+;; "Rust (rustc 1.99.1)").
+
+(ns arbace.repr.rust.lex
+  "Rust's lexer in Arbace (doc/rust/NATIVE-READER.md): rustc 1.99.1's rustc_lexer and the token cooking
+  and token trees of rustc_parse::lexer, ported function by function. Positions are code point
+  indices into the text as rustc's source map holds it (a byte order mark removed, \\r\\n made \\n):
+  rustc's spans count bytes, its columns characters, and every span the parser computes from a token's
+  bytes moves over ASCII punctuation, so code points give rustc's lines and columns.
+
+  (source raw) normalizes a file's text; (token-trees src edition strip) gives the cooked tokens of
+  rustc_parse::lexer::lex_token_trees as one flat array (delimiters included, each token with its
+  spacing; a delimiter's spacing is its DelimSpacing half) and the index of each delimiter's partner;
+  (raw-tokens src edition comments-only expr) the helper's rsdump/tokens (or rsdump/comments)."
+  (:require [arbace.string :as str]))
+
+(set! *warn-on-reflection* true)
+
+;; ---------------------------------------------------------------------------------------------
+;; The text
+
+(deftype Src [^String text ^ints cps ^long n ^ints u16 ^ints lines ^long nlines])
+
+(defn source
+  "The text as rustc's source map holds it (SourceFile::new's normalize_src): a leading UTF-8 byte
+  order mark removed, \\r\\n made \\n; its code points, their UTF-16 offsets and the lines' starts."
+  ^Src [^String raw]
+  (let [s (if (.startsWith raw "﻿") (subs raw 1) raw)
+        s (if (>= (.indexOf s "\r\n") 0) (.replace s "\r\n" "\n") s)
+        len (.length s)
+        n (.codePointCount s 0 len)
+        cps (int-array (inc n))
+        u16 (int-array (inc n))
+        ls (java.util.ArrayList.)]
+    (.add ls (Long/valueOf 0))
+    (loop [i 0 k 0]
+      (when (< i len)
+        (let [c (.codePointAt s i)]
+          (aset cps k (int c))
+          (aset u16 k (int i))
+          (when (== c 10) (.add ls (Long/valueOf (inc k))))
+          (recur (+ i (Character/charCount c)) (inc k)))))
+    (aset u16 n (int len))
+    (let [nl (.size ls) lines (int-array nl)]
+      (dotimes [i nl] (aset lines i (int (long (.get ls i)))))
+      (Src. s cps n u16 lines nl))))
+
+(defn text-of
+  "The text from code point a to b"
+  ^String [^Src src ^long a ^long b]
+  (.substring ^String (.-text src) (aget ^ints (.-u16 src) (int a)) (aget ^ints (.-u16 src) (int b))))
+
+(defn line-of
+  "The line (from 1) of a position"
+  ^long [^Src src ^long pos]
+  (let [^ints ls (.-lines src)]
+    (loop [lo 0 hi (dec (.-nlines src))]
+      (if (>= lo hi)
+        (inc lo)
+        (let [mid (long (quot (+ lo hi 1) 2))]
+          (if (<= (aget ls (int mid)) pos) (recur mid hi) (recur lo (dec mid))))))))
+
+(defn col-of
+  "The column (characters from 1) of a position on its line"
+  ^long [^Src src ^long pos ^long line]
+  (inc (- pos (aget ^ints (.-lines src) (int (dec line))))))
+
+(defn span-vec
+  "A span as rsdump writes it: [l1 c1 l2 c2], nil for rustc's dummy span (0, 0)"
+  [^Src src ^long lo ^long hi]
+  (if (and (zero? lo) (zero? hi))
+    nil
+    (let [l1 (line-of src lo) l2 (if (== hi lo) l1 (line-of src hi))]
+      [l1 (col-of src lo l1) l2 (col-of src hi l2)])))
+
+;; ---------------------------------------------------------------------------------------------
+;; Character classes (rustc_lexer)
+
+(defn ws?
+  "is_whitespace: Pattern_White_Space"
+  [^long c]
+  (or (== c 32) (== c 9) (== c 10) (== c 11) (== c 12) (== c 13) (== c 0x85) (== c 0x2028)
+      (== c 0x2029) (== c 0x200E) (== c 0x200F)))
+
+(defn- hws? [^long c] (or (== c 32) (== c 9)))
+
+(defn id-start?
+  "is_id_start: XID_Start or _ (outside ASCII after Java's Unicode identifier tables, doc/rust/NATIVE-READER.md)"
+  [^long c]
+  (if (< c 128)
+    (or (and (>= c 97) (<= c 122)) (and (>= c 65) (<= c 90)) (== c 95))
+    (and (Character/isUnicodeIdentifierStart (int c)) (not (Character/isIdentifierIgnorable (int c))))))
+
+(defn id-continue?
+  "is_id_continue: XID_Continue"
+  [^long c]
+  (if (< c 128)
+    (or (and (>= c 97) (<= c 122)) (and (>= c 65) (<= c 90)) (and (>= c 48) (<= c 57)) (== c 95))
+    (or (== c 0x200C) (== c 0x200D)
+        (and (Character/isUnicodeIdentifierPart (int c)) (not (Character/isIdentifierIgnorable (int c)))))))
+
+(defn- emoji?
+  "is_emoji_char (unicode_properties), approximated: the error paths of invalid identifiers alone use it"
+  [^long c]
+  (and (>= c 128)
+       (or (== 28 (Character/getType (int c)))
+           (and (>= c 0x1F000) (<= c 0x1FAFF)))))
+
+(defn- digit? [^long c] (and (>= c 48) (<= c 57)))
+(defn- hex? [^long c] (or (digit? c) (and (>= c 97) (<= c 102)) (and (>= c 65) (<= c 70))))
+
+;; ---------------------------------------------------------------------------------------------
+;; The raw lexer (rustc_lexer::Cursor): each function takes the position after what it has eaten and
+;; returns the position after what it eats
+
+(defmacro ^:private at [cps n p] `(let [p# ~p] (if (< p# ~n) (long (aget ~cps (int p#))) 0)))
+
+(defn- eat-while-idc ^long [^ints cps ^long n ^long p]
+  (loop [p p] (if (and (< p n) (id-continue? (aget cps (int p)))) (recur (inc p)) p)))
+
+(defn- eat-identifier ^long [^ints cps ^long n ^long p]
+  (if (and (< p n) (id-start? (aget cps (int p)))) (eat-while-idc cps n (inc p)) p))
+
+(defn- eat-until-nl ^long [^ints cps ^long n ^long p]
+  (loop [p p] (if (and (< p n) (not= 10 (aget cps (int p)))) (recur (inc p)) p)))
+
+(defn- find-str
+  "The position of the code points of s in cps from p, or -1"
+  ^long [^ints cps ^long n ^long p ^String s]
+  (let [k (.length s)]
+    (loop [i p]
+      (cond (> (+ i k) n) -1
+            (loop [j 0] (cond (== j k) true
+                              (== (aget cps (int (+ i j))) (int (.charAt s j))) (recur (inc j))
+                              :else false)) i
+            :else (recur (inc i))))))
+
+(defn- starts-with? [^ints cps ^long n ^long p ^String s]
+  (let [k (.length s)]
+    (and (<= (+ p k) n)
+         (loop [j 0] (cond (== j k) true
+                           (== (aget cps (int (+ p j))) (int (.charAt s j))) (recur (inc j))
+                           :else false)))))
+
+(defn- frontmatter
+  "Given one - eaten (p after it), the rest of a front matter: [p invalid-infostring]"
+  [^ints cps ^long n ^long p0 ^long start]
+  (let [p (loop [p p0] (if (and (< p n) (== 45 (aget cps (int p)))) (recur (inc p)) p))
+        len-opening (inc (- p p0))
+        p (loop [p p] (if (and (< p n) (not= 10 (aget cps (int p))) (hws? (aget cps (int p)))) (recur (inc p)) p))
+        p (if (and (< p n) (id-start? (aget cps (int p))))
+            (loop [p (inc p)] (if (and (< p n) (let [c (aget cps (int p))] (or (id-continue? c) (== c 45) (== c 46)))) (recur (inc p)) p))
+            p)
+        p (loop [p p] (if (and (< p n) (not= 10 (aget cps (int p))) (hws? (aget cps (int p)))) (recur (inc p)) p))
+        invalid-infostring (not= 10 (at cps n p))
+        fence (str "\n" (apply str (repeat len-opening "-")))
+        closing (find-str cps n p fence)]
+    (if (>= closing 0)
+      [(eat-until-nl cps n (+ closing (.length fence))) invalid-infostring]
+      (let [pc (let [x (find-str cps n p "\n---")]
+                 (cond (>= x 0) (inc x)
+                       (>= (find-str cps n p "\nuse ") 0) (find-str cps n p "\nuse ")
+                       (>= (find-str cps n p "\n//!") 0) (find-str cps n p "\n//!")
+                       (>= (find-str cps n p "\n#![") 0) (find-str cps n p "\n#![")
+                       :else
+                       (loop [q p]
+                         (let [c (find-str cps n q "---")]
+                           (if (< c 0)
+                             -1
+                             (let [ls (loop [k (dec c)] (cond (< k q) q (== 10 (aget cps (int k))) (inc k) :else (recur (dec k))))]
+                               (if (loop [k ls] (cond (>= k c) true (hws? (aget cps (int k))) (recur (inc k)) :else false))
+                                 c
+                                 (recur (+ c 3)))))))))]
+        (if (>= pc 0)
+          [(eat-until-nl cps n pc) invalid-infostring]
+          [n invalid-infostring])))))
+
+(defn- block-comment
+  "Given /* eaten: [p doc-style terminated]"
+  [^ints cps ^long n ^long p]
+  (let [c1 (at cps n p) c2 (at cps n (inc p))
+        doc (cond (== c1 33) :inner
+                  (and (== c1 42) (not (or (== c2 42) (== c2 47)))) :outer
+                  :else nil)]
+    (loop [p p depth 1]
+      (if (>= p n)
+        [p doc false]
+        (let [c (aget cps (int p))]
+          (cond (and (== c 47) (== 42 (at cps n (inc p)))) (recur (+ p 2) (inc depth))
+                (and (== c 42) (== 47 (at cps n (inc p))))
+                (if (== depth 1) [(+ p 2) doc true] (recur (+ p 2) (dec depth)))
+                :else (recur (inc p) depth)))))))
+
+(defn- eat-decimal-digits
+  "[p has-digits]"
+  [^ints cps ^long n ^long p]
+  (loop [p p has false]
+    (let [c (at cps n p)]
+      (cond (== c 95) (recur (inc p) has)
+            (digit? c) (recur (inc p) true)
+            :else [p has]))))
+
+(defn- eat-hex-digits [^ints cps ^long n ^long p]
+  (loop [p p has false]
+    (let [c (at cps n p)]
+      (cond (== c 95) (recur (inc p) has)
+            (hex? c) (recur (inc p) true)
+            :else [p has]))))
+
+(defn- eat-float-exponent
+  "Given e eaten: [p has-digits]"
+  [^ints cps ^long n ^long p]
+  (let [c (at cps n p)
+        p (if (or (== c 45) (== c 43)) (inc p) p)]
+    (eat-decimal-digits cps n p)))
+
+(defn- number
+  "Given the first digit eaten: [p kind base empty] kind :int or :float, empty: empty_int or
+  empty_exponent"
+  [^ints cps ^long n ^long p ^long d0]
+  (let [[p base early]
+        (if (== d0 48)
+          (let [c (at cps n p)]
+            (cond (== c 98) (let [[p h] (eat-decimal-digits cps n (inc p))] [p 2 (when-not h [p :int 2 true])])
+                  (== c 111) (let [[p h] (eat-decimal-digits cps n (inc p))] [p 8 (when-not h [p :int 8 true])])
+                  (== c 120) (let [[p h] (eat-hex-digits cps n (inc p))] [p 16 (when-not h [p :int 16 true])])
+                  (or (digit? c) (== c 95)) [(first (eat-decimal-digits cps n p)) 10 nil]
+                  (or (== c 46) (== c 101) (== c 69)) [p 10 nil]
+                  :else [p 10 [p :int 10 false]]))
+          [(first (eat-decimal-digits cps n p)) 10 nil])]
+    (or early
+        (let [c (at cps n p) c2 (at cps n (inc p))]
+          (cond (and (== c 46) (not= c2 46) (not (id-start? c2)))
+                (let [p (inc p)]
+                  (if (digit? (at cps n p))
+                    (let [[p _] (eat-decimal-digits cps n p)
+                          c (at cps n p)]
+                      (if (or (== c 101) (== c 69))
+                        (let [[p h] (eat-float-exponent cps n (inc p))] [p :float base (not h)])
+                        [p :float base false]))
+                    [p :float base false]))
+                (or (== c 101) (== c 69))
+                (let [[p h] (eat-float-exponent cps n (inc p))] [p :float base (not h)])
+                :else [p :int base false])))))
+
+(defn- single-quoted-string
+  "Given ' eaten: [p terminated]"
+  [^ints cps ^long n ^long p]
+  (if (and (== 39 (at cps n (inc p))) (not= 92 (at cps n p)))
+    [(+ p 2) true]
+    (loop [p p]
+      (let [c (at cps n p)]
+        (cond (and (== c 39) (< p n)) [(inc p) true]
+              (== c 47) [p false]
+              (and (== c 10) (not= 39 (at cps n (inc p)))) [p false]
+              (>= p n) [p false]
+              (== c 92) (recur (+ p 2))
+              :else (recur (inc p)))))))
+
+(defn- double-quoted-string
+  "Given \" eaten: [p terminated]"
+  [^ints cps ^long n ^long p]
+  (loop [p p]
+    (if (>= p n)
+      [p false]
+      (let [c (aget cps (int p))]
+        (cond (== c 34) [(inc p) true]
+              (and (== c 92) (let [d (at cps n (inc p))] (or (== d 92) (== d 34)))) (recur (+ p 2))
+              :else (recur (inc p)))))))
+
+(defn- raw-double-quoted-string
+  "Given the prefix eaten (p at the first # or \"): [p n-hashes-or-nil]"
+  [^ints cps ^long n ^long p]
+  (let [p1 (loop [q p] (if (== 35 (at cps n q)) (recur (inc q)) q))
+        nh (- p1 p)]
+    (if (not= 34 (at cps n p1))
+      [(if (< p1 n) (inc p1) p1) nil]
+      (loop [q (inc p1)]
+        (let [q (loop [q q] (if (and (< q n) (not= 34 (aget cps (int q)))) (recur (inc q)) q))]
+          (if (>= q n)
+            [q nil]
+            (let [q (inc q)
+                  e (loop [k 0] (if (and (< k nh) (== 35 (at cps n (+ q k)))) (recur (inc k)) k))]
+              (if (== e nh)
+                [(+ q e) (if (> nh 255) nil nh)]
+                (recur (+ q e))))))))))
+
+(defn- ident-or-unknown-prefix
+  "Given an identifier's start eaten: [p kind]"
+  [^ints cps ^long n ^long p]
+  (let [p (eat-while-idc cps n p)
+        c (at cps n p)]
+    (cond (or (== c 35) (== c 34) (== c 39)) [p :unknown-prefix]
+          (emoji? c) [(loop [q p] (if (and (< q n) (let [c (aget cps (int q))] (or (id-continue? c) (emoji? c) (== c 0x200D)))) (recur (inc q)) q))
+                      :invalid-ident]
+          :else [p :ident])))
+
+(defn- literal-with-suffix [^ints cps ^long n ^long p kind detail terminated]
+  (let [suffix-start p
+        p (if terminated (eat-identifier cps n p) p)]
+    [p :literal kind suffix-start detail]))
+
+(defn- c-or-byte-string
+  "Given b or c eaten (byte: single quotes allowed)"
+  [^ints cps ^long n ^long p byte]
+  (let [c1 (at cps n p) c2 (at cps n (inc p))]
+    (cond (and byte (== c1 39))
+          (let [[p t] (single-quoted-string cps n (inc p))] (literal-with-suffix cps n p :byte t t))
+          (== c1 34)
+          (let [[p t] (double-quoted-string cps n (inc p))] (literal-with-suffix cps n p (if byte :byte-str :c-str) t t))
+          (and (== c1 114) (or (== c2 34) (== c2 35)))
+          (let [[p h] (raw-double-quoted-string cps n (inc p))]
+            (literal-with-suffix cps n p (if byte :raw-byte-str :raw-c-str) h (some? h)))
+          :else (let [[p k] (ident-or-unknown-prefix cps n p)] [p k]))))
+
+(defn- lifetime-or-char
+  "Given ' eaten"
+  [^ints cps ^long n ^long p]
+  (let [c1 (at cps n p) c2 (at cps n (inc p))
+        can-be-lt (if (== c2 39) false (or (id-start? c1) (digit? c1)))]
+    (cond
+      (not can-be-lt)
+      (let [[p t] (single-quoted-string cps n p)] (literal-with-suffix cps n p :char t t))
+      (and (== c1 114) (== c2 35) (id-start? (at cps n (+ p 2))))
+      [(eat-while-idc cps n (+ p 3)) :raw-lifetime]
+      :else
+      (let [swn (digit? c1)
+            p (eat-while-idc cps n (inc p))
+            c (at cps n p)]
+        (cond (== c 39) [(inc p) :literal :char (inc p) true]
+              (and (== c 35) (not swn)) [p :unknown-prefix-lifetime]
+              :else [p :lifetime swn])))))
+
+(def ^:private punct1
+  {59 :Semi 44 :Comma 46 :Dot 40 :OpenParen 41 :CloseParen 123 :OpenBrace 125 :CloseBrace
+   91 :OpenBracket 93 :CloseBracket 64 :At 35 :Pound 126 :Tilde 63 :Question 58 :Colon 36 :Dollar
+   61 :Eq 33 :Bang 60 :Lt 62 :Gt 45 :Minus 38 :And 124 :Or 43 :Plus 42 :Star 94 :Caret 37 :Percent})
+
+(defn advance-token
+  "Cursor::advance_token: the raw token at p, as [end kind a b c]: :line-comment a doc style;
+  :block-comment a doc style, b terminated; :frontmatter a invalid preceding white space, b invalid
+  infostring; :literal a kind (:int :float :char :byte :str :byte-str :c-str :raw-str :raw-byte-str
+  :raw-c-str), b the suffix's start, c its detail (terminated, the hashes, or [base empty]);
+  :lifetime a starts with a number; punctuation by rustc_lexer's names (:Semi ...); :eof at the end"
+  [^ints cps ^long n ^long p0 fm]
+  (if (>= p0 n)
+    [p0 :eof]
+    (let [c (aget cps (int p0))
+          p (inc p0)]
+      (cond
+        (and fm (ws? c))
+        (let [[p last] (loop [p p last c] (if (and (< p n) (ws? (aget cps (int p)))) (recur (inc p) (aget cps (int p))) [p last]))]
+          (if (and (not= last 10) (starts-with? cps n p "---"))
+            (let [[q inv] (frontmatter cps n (inc p) p0)] [q :frontmatter true inv])
+            [p :whitespace]))
+        (and fm (== c 45) (starts-with? cps n p "--"))
+        (let [[q inv] (frontmatter cps n p p0)] [q :frontmatter false inv])
+        (== c 47)
+        (let [d (at cps n p)]
+          (cond (== d 47)
+                (let [p (inc p) e (at cps n p)
+                      doc (cond (== e 33) :inner
+                                (and (== e 47) (not= 47 (at cps n (inc p)))) :outer
+                                :else nil)]
+                  [(eat-until-nl cps n p) :line-comment doc])
+                (== d 42) (let [[q doc t] (block-comment cps n (inc p))] [q :block-comment doc t])
+                :else [p :Slash]))
+        (ws? c) [(loop [p p] (if (and (< p n) (ws? (aget cps (int p)))) (recur (inc p)) p)) :whitespace]
+        (== c 114)
+        (let [d (at cps n p) e (at cps n (inc p))]
+          (cond (and (== d 35) (id-start? e)) [(eat-identifier cps n (inc p)) :raw-ident]
+                (or (== d 35) (== d 34))
+                (let [[q h] (raw-double-quoted-string cps n p)] (literal-with-suffix cps n q :raw-str h (some? h)))
+                :else (ident-or-unknown-prefix cps n p)))
+        (== c 98) (c-or-byte-string cps n p true)
+        (== c 99) (c-or-byte-string cps n p false)
+        (id-start? c) (ident-or-unknown-prefix cps n p)
+        (digit? c) (let [[q k base empty] (number cps n p c)] (literal-with-suffix cps n q k [base empty] true))
+        (and (== c 35) (let [d (at cps n p)] (or (== d 34) (== d 35)))) [(inc p) :guarded-str-prefix]
+        (== c 39) (lifetime-or-char cps n p)
+        (== c 34) (let [[q t] (double-quoted-string cps n p)] (literal-with-suffix cps n q :str t t))
+        (emoji? c) [(loop [q p] (if (and (< q n) (let [c (aget cps (int q))] (or (id-continue? c) (emoji? c) (== c 0x200D)))) (recur (inc q)) q))
+                    :invalid-ident]
+        :else (if-let [k (punct1 c)] [p k] [p :unknown])))))
+
+(defn strip-shebang
+  "rustc_lexer::strip_shebang: the length of a first #! line that is no inner attribute, or nil"
+  [^ints cps ^long n]
+  (when (and (> n 1) (== 35 (aget cps 0)) (== 33 (aget cps 1)))
+    (let [nxt (loop [p 2]
+                (let [r (advance-token cps n p false) k (nth r 1)]
+                  (cond (= k :eof) nil
+                        (or (= k :whitespace)
+                            (and (contains? #{:line-comment :block-comment} k) (nil? (nth r 2))))
+                        (recur (long (nth r 0)))
+                        :else k)))]
+      (when-not (= nxt :OpenBracket)
+        (eat-until-nl cps n 2)))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Escapes (rustc_literal_escaper): the checks rustc_parse's lexer makes, and the unescaping of
+;; ast::LitKind::from_token_lit
+
+(defn- unescape-error [msg] (throw (ex-info msg {:rust-lex true})))
+
+(defn unescape
+  "The units of a literal's content in a mode (:char :byte :str :byte-str :c-str): a vector of code
+  points (and for bytes and C strings, bytes as longs with a :byte mark: [:b n]); an invalid content
+  throws with rustc's reason"
+  [^String s mode]
+  (let [len (.length s)
+        units (java.util.ArrayList.)
+        unicode? (contains? #{:char :str :c-str} mode)
+        bytes? (contains? #{:byte :byte-str} mode)]
+    (loop [i 0]
+      (when (< i len)
+        (let [c (.codePointAt s i) w (Character/charCount c)]
+          (cond
+            (== c 92)
+            (let [i (+ i 1)]
+              (when (>= i len) (unescape-error "lone backslash"))
+              (let [e (.charAt s i)]
+                (case e
+                  \n (do (.add units 10) (recur (inc i)))
+                  \r (do (.add units 13) (recur (inc i)))
+                  \t (do (.add units 9) (recur (inc i)))
+                  \\ (do (.add units 92) (recur (inc i)))
+                  \0 (do (when (= mode :c-str) (unescape-error "null characters in C string literals are not supported"))
+                         (.add units 0) (recur (inc i)))
+                  \' (do (.add units 39) (recur (inc i)))
+                  \" (do (.add units 34) (recur (inc i)))
+                  \x (let [h (subs s (inc i) (min len (+ i 3)))]
+                       (when-not (and (= 2 (count h)) (every? #(hex? (long %)) h))
+                         (unescape-error "numeric character escape is too short or invalid"))
+                       (let [v (Long/parseLong h 16)]
+                         (when (and (> v 0x7f) (contains? #{:char :str} mode)) (unescape-error "out of range hex escape"))
+                         (when (and (zero? v) (= mode :c-str)) (unescape-error "null characters in C string literals are not supported"))
+                         (.add units (if (and (= mode :c-str) (> v 0x7f)) [:b v] v))
+                         (recur (+ i 3))))
+                  \u (do
+                       (when bytes? (unescape-error "unicode escape in byte string"))
+                       (when-not (and (< (inc i) len) (= \{ (.charAt s (inc i)))) (unescape-error "incorrect unicode escape sequence"))
+                       (let [close (.indexOf s "}" (int (inc i)))]
+                         (when (neg? close) (unescape-error "unterminated unicode escape"))
+                         (let [ds (subs s (+ i 2) close)
+                               digits (.replace ds "_" "")]
+                           (when (or (empty? digits) (str/starts-with? ds "_")) (unescape-error "empty unicode escape"))
+                           (when (> (count digits) 6) (unescape-error "overlong unicode escape"))
+                           (when-not (every? #(hex? (long %)) digits) (unescape-error "invalid character in unicode escape"))
+                           (let [v (Long/parseLong digits 16)]
+                             (when (or (> v 0x10FFFF) (and (>= v 0xD800) (<= v 0xDFFF))) (unescape-error "invalid unicode character escape"))
+                             (when (and (zero? v) (= mode :c-str)) (unescape-error "null characters in C string literals are not supported"))
+                             (.add units v)
+                             (recur (long (inc close)))))))
+                  \newline (do (when-not (contains? #{:str :byte-str :c-str} mode) (unescape-error "unknown character escape"))
+                               (recur (long (loop [k (inc i)]
+                                              (if (and (< k len) (let [d (.charAt s k)] (or (= d \space) (= d \tab) (= d \newline) (= d \return))))
+                                                (recur (inc k)) k)))))
+                  (unescape-error "unknown character escape"))))
+            (== c 13) (unescape-error "bare CR not allowed in string")
+            :else
+            (do (when (and bytes? (> c 127)) (unescape-error "non-ASCII character in byte literal"))
+                (when (and (= mode :char) (or (== c 39) (== c 10) (== c 9))) (unescape-error "character constant must be escaped"))
+                (when (and (zero? c) (= mode :c-str)) (unescape-error "null characters in C string literals are not supported"))
+                (.add units c)
+                (recur (+ i w)))))))
+    (when (and (contains? #{:char :byte} mode) (not= 1 (.size units)))
+      (unescape-error (if (zero? (.size units)) "empty character literal" "character literal may only contain one codepoint")))
+    (vec units)))
+
+(defn- check-raw
+  "The checks of a raw literal's content: no bare CR; ASCII only in raw byte strings; no NUL in raw C
+  strings"
+  [^String s mode]
+  (when (>= (.indexOf s "\r") 0) (unescape-error "bare CR not allowed in raw string"))
+  (when (and (= mode :raw-byte-str) (some #(> (long %) 127) (map long s))) (unescape-error "non-ASCII character in raw byte string literal"))
+  (when (and (= mode :raw-c-str) (>= (.indexOf s "\u0000") 0)) (unescape-error "null characters in C string literals are not supported")))
+
+;; ---------------------------------------------------------------------------------------------
+;; Cooked tokens (rustc_ast::token::Token): kind is rustc's TokenKind's name (:Ident, :Lifetime,
+;; :Literal, :DocComment, :Eof, the punctuation and delimiters: :Eq :Lt :Le :EqEq ... :OpenParen
+;; :CloseBrace); sym an identifier's, lifetime's, literal's symbol or a doc comment's text; x the raw
+;; flag of an identifier or lifetime, a literal's kind (:Integer :Float :Str :StrRaw :ByteStr
+;; :ByteStrRaw :CStr :CStrRaw :Char :Byte :Err), a doc comment's kind (:Line :Block); y a literal's
+;; suffix, a doc comment's style (:Outer :Inner); z a raw literal's hashes; sp the spacing (:Alone
+;; :Joint :JointHidden; a delimiter's half of its DelimSpacing)
+
+(deftype Tok [kind ^long lo ^long hi sym x y ^long z sp])
+
+(defn tok [kind lo hi sym x y z sp] (Tok. kind lo hi sym x y z sp))
+
+(defn- with-sp ^Tok [^Tok t sp] (Tok. (.-kind t) (.-lo t) (.-hi t) (.-sym t) (.-x t) (.-y t) (.-z t) sp))
+
+(def punct-kinds
+  "Token::is_punct's kinds"
+  #{:Eq :Lt :Le :EqEq :Ne :Ge :Gt :AndAnd :OrOr :Bang :Tilde :Plus :Minus :Star :Slash :Percent :Caret
+    :And :Or :Shl :Shr :PlusEq :MinusEq :StarEq :SlashEq :PercentEq :CaretEq :AndEq :OrEq :ShlEq :ShrEq
+    :At :Dot :DotDot :DotDotDot :DotDotEq :Comma :Semi :Colon :PathSep :RArrow :LArrow :FatArrow
+    :Pound :Dollar :Question :SingleQuote})
+
+(def ^:private glue-table
+  "Token::glue: [a b] to the glued kind"
+  {[:Eq :Eq] :EqEq [:Eq :Gt] :FatArrow
+   [:Lt :Eq] :Le [:Lt :Lt] :Shl [:Lt :Le] :ShlEq [:Lt :Minus] :LArrow
+   [:Gt :Eq] :Ge [:Gt :Gt] :Shr [:Gt :Ge] :ShrEq
+   [:Bang :Eq] :Ne
+   [:Plus :Eq] :PlusEq
+   [:Minus :Eq] :MinusEq [:Minus :Gt] :RArrow
+   [:Star :Eq] :StarEq
+   [:Slash :Eq] :SlashEq
+   [:Percent :Eq] :PercentEq
+   [:Caret :Eq] :CaretEq
+   [:And :Eq] :AndEq [:And :And] :AndAnd
+   [:Or :Eq] :OrEq [:Or :Or] :OrOr
+   [:Shl :Eq] :ShlEq
+   [:Shr :Eq] :ShrEq
+   [:Dot :Dot] :DotDot [:Dot :DotDot] :DotDotDot
+   [:DotDot :Dot] :DotDotDot [:DotDot :Eq] :DotDotEq
+   [:Colon :Colon] :PathSep})
+
+(def open-delims {:OpenParen :Parenthesis :OpenBrace :Brace :OpenBracket :Bracket})
+(def close-delims {:CloseParen :Parenthesis :CloseBrace :Brace :CloseBracket :Bracket})
+
+;; ---------------------------------------------------------------------------------------------
+;; The cooking (rustc_parse::lexer::Lexer::next_token_from_cursor)
+
+(defn- lex-error [msg] (throw (ex-info msg {:rust-lex true})))
+
+(defn- nfc
+  "nfc_normalize"
+  ^String [^String s]
+  (if (every? #(< (long %) 128) (map long s))
+    s
+    (java.text.Normalizer/normalize s java.text.Normalizer$Form/NFC)))
+
+(def ^:private reserved-always
+  #{"$crate" "{{root}}" "_" "as" "break" "const" "continue" "crate" "else" "enum" "extern" "false" "fn"
+    "for" "if" "impl" "in" "let" "loop" "match" "mod" "move" "mut" "pub" "ref" "return" "self" "Self"
+    "static" "struct" "super" "trait" "true" "type" "unsafe" "use" "where" "while" "abstract" "become"
+    "box" "do" "final" "macro" "override" "priv" "typeof" "unsized" "virtual" "yield"})
+
+(defn reserved?
+  "Symbol::is_reserved in an edition"
+  [^String s ^long ed]
+  (or (contains? reserved-always s)
+      (and (>= ed 2018) (contains? #{"async" "await" "dyn" "try"} s))
+      (and (>= ed 2024) (= s "gen"))))
+
+(defn path-segment-keyword? [^String s] (contains? #{"super" "self" "Self" "crate" "{{root}}" "$crate"} s))
+
+(defn can-be-raw? [^String s] (and (not= s "") (not= s "_") (not (path-segment-keyword? s))))
+
+(defn- check-literal
+  "cook_lexer_literal's checks and kind: [kind symbol-start symbol-end z] (the symbol's range, z the
+  hashes); an invalid literal throws"
+  [^Src src kind start content-end end detail ^long ed]
+  (let [txt (fn [a b] (text-of src a b))]
+    (case kind
+      :char (do (when-not detail (lex-error "unterminated character literal"))
+                (unescape (txt (inc start) (dec content-end)) :char) [:Char (inc start) (dec content-end) 0])
+      :byte (do (when-not detail (lex-error "unterminated byte constant"))
+                (unescape (txt (+ start 2) (dec content-end)) :byte) [:Byte (+ start 2) (dec content-end) 0])
+      :str (do (when-not detail (lex-error "unterminated double quote string"))
+               (unescape (txt (inc start) (dec content-end)) :str) [:Str (inc start) (dec content-end) 0])
+      :byte-str (do (when-not detail (lex-error "unterminated double quote byte string"))
+                    (unescape (txt (+ start 2) (dec content-end)) :byte-str) [:ByteStr (+ start 2) (dec content-end) 0])
+      :c-str (do (when-not detail (lex-error "unterminated C string"))
+                 (unescape (txt (+ start 2) (dec content-end)) :c-str) [:CStr (+ start 2) (dec content-end) 0])
+      (:raw-str :raw-byte-str :raw-c-str)
+      (let [h (long (or detail (lex-error "unterminated raw string")))
+            pre (if (= kind :raw-str) 2 3)
+            a (+ start pre h) b (- content-end 1 h)]
+        (check-raw (txt a b) kind)
+        [(case kind :raw-str :StrRaw :raw-byte-str :ByteStrRaw :CStrRaw) a b h])
+      :int (let [[base empty] detail]
+             (when empty (lex-error "no valid digits found for number"))
+             (when (contains? #{2 8} base)
+               (doseq [c (txt (+ start 2) content-end)]
+                 (when (and (not= c \_) (neg? (Character/digit (char c) (int base))))
+                   (lex-error (str "invalid digit for a base " base " literal")))))
+             [:Integer start content-end 0])
+      :float (let [[base empty] detail]
+               (when empty (lex-error "expected at least one digit in exponent"))
+               (when (not= base 10) (lex-error "float literals with a non-decimal base are not supported"))
+               [:Float start content-end 0]))))
+
+(deftype Lx [^Src src ^long ed ^longs st fm-allowed])
+;; st: [pos]
+
+(defn- next-token
+  "next_token_from_cursor: [tok preceded-by-whitespace] (tok without spacing)"
+  [^Lx lx]
+  (let [^Src src (.-src lx) ^ints cps (.-cps src) n (.-n src) ^longs st (.-st lx) ed (.-ed lx)]
+    (loop [ws false]
+      (let [start (aget st 0)
+            fm (and (.-fm-allowed lx) (== 1 (aget st 1)))
+            r (advance-token cps n start fm)
+            end (long (nth r 0))
+            k (nth r 1)]
+        (when (and fm (not= k :whitespace)) (aset st 1 0))
+        (aset st 0 end)
+        (case k
+          :eof [(Tok. :Eof end end nil nil nil 0 nil) ws]
+          :whitespace (recur true)
+          :frontmatter (recur true)
+          :line-comment
+          (if-let [doc (nth r 2)]
+            (let [s (text-of src (+ start 3) end)]
+              (when (>= (.indexOf s "\r") 0) (lex-error "bare CR not allowed in doc-comment"))
+              [(Tok. :DocComment start end s :Line (if (= doc :inner) :Inner :Outer) 0 nil) ws])
+            (recur true))
+          :block-comment
+          (let [doc (nth r 2) term (nth r 3)]
+            (when-not term (lex-error (if doc "unterminated block doc-comment" "unterminated block comment")))
+            (if doc
+              (let [s (text-of src (+ start 3) (- end 2))]
+                (when (>= (.indexOf s "\r") 0) (lex-error "bare CR not allowed in block doc-comment"))
+                [(Tok. :DocComment start end s :Block (if (= doc :inner) :Inner :Outer) 0 nil) ws])
+              (recur true)))
+          :ident [(Tok. :Ident start end (nfc (text-of src start end)) false nil 0 nil) ws]
+          :raw-ident (let [s (nfc (text-of src (+ start 2) end))]
+                       (when-not (can-be-raw? s) (lex-error (str "`" s "` cannot be a raw identifier")))
+                       [(Tok. :Ident start end s true nil 0 nil) ws])
+          :unknown-prefix (do (when (>= ed 2021) (lex-error (str "prefix `" (text-of src start end) "` is unknown")))
+                              [(Tok. :Ident start end (nfc (text-of src start end)) false nil 0 nil) ws])
+          :unknown-prefix-lifetime (do (when (>= ed 2021) (lex-error (str "prefix `" (text-of src start end) "` is unknown")))
+                                       [(Tok. :Lifetime start end (text-of src start end) false nil 0 nil) ws])
+          :invalid-ident (lex-error "identifiers cannot contain emoji")
+          :guarded-str-prefix
+          (if (>= ed 2024)
+            (lex-error "invalid string literal")
+            (do (aset st 0 (inc start))
+                [(Tok. :Pound start (inc start) nil nil nil 0 nil) ws]))
+          :literal
+          (let [lk (nth r 2) ss (long (nth r 3)) detail (nth r 4)]
+            (if (and (contains? #{:c-str :raw-c-str} lk) (< ed 2021))
+              ;; split into an identifier and a string before 2021
+              (let [plen (if (= lk :c-str) 1 2)]
+                (aset st 0 (+ start plen))
+                [(Tok. :Ident start (+ start plen) (text-of src start (+ start plen)) false nil 0 nil) ws])
+              (let [[lkind a b z] (check-literal src lk start ss end detail ed)
+                    suffix (when (< ss end) (text-of src ss end))]
+                (when (= suffix "_") (lex-error "underscore literal suffix is not allowed"))
+                [(Tok. :Literal start end (text-of src a b) lkind suffix z nil) ws])))
+          :lifetime (let [swn (nth r 2)]
+                      (when swn (lex-error "lifetimes cannot start with a number"))
+                      [(Tok. :Lifetime start end (nfc (text-of src start end)) false nil 0 nil) ws])
+          :raw-lifetime
+          (if (>= ed 2021)
+            (let [nm (text-of src (+ start 3) end)]
+              (when (== 39 (long (at cps n end))) (lex-error "character literal may only contain one codepoint"))
+              (when-not (can-be-raw? nm) (lex-error (str "`" nm "` cannot be a raw lifetime")))
+              [(Tok. :Lifetime start end (nfc (str "'" nm)) true nil 0 nil) ws])
+            (do (aset st 0 (+ start 2))
+                [(Tok. :Lifetime start (+ start 2) (text-of src start (+ start 2)) false nil 0 nil) ws]))
+          :unknown (let [c (aget cps (int start))]
+                     (if (== c 0xA0)
+                       (lex-error "unknown start of token: \\u{a0}")
+                       (lex-error (str "unknown start of token: " (String. (int-array [c]) 0 1)))))
+          ;; one-character punctuation
+          [(Tok. k start end nil nil nil 0 nil) ws])))))
+
+(defn- glue [^Tok a ^Tok b]
+  (when-let [k (glue-table [(.-kind a) (.-kind b)])]
+    (Tok. k (min (.-lo a) (.-lo b)) (max (.-hi a) (.-hi b)) nil nil nil 0 nil)))
+
+(defn- spacing-for [^Tok next ws]
+  (cond ws :Alone
+        (contains? punct-kinds (.-kind next)) :Joint
+        (= :Eof (.-kind next)) :Alone
+        :else :JointHidden))
+
+(defn token-trees
+  "lex_token_trees over the file (strip :shebang-and-frontmatter, as rustc parses a crate root, or
+  :nothing, an expression file of include!): {:toks Tok[] (the delimiters included, a last :Eof)
+  :mt int[] (each delimiter's partner's index)}; an error of the lexer or an unmatched delimiter
+  throws (ex-info with :rust-lex)"
+  [^Src src ^long ed strip]
+  (let [^ints cps (.-cps src) n (.-n src)
+        start (long (if (= strip :nothing) 0 (or (strip-shebang cps n) 0)))
+        st (long-array [start (if (= strip :nothing) 0 1)])
+        lx (Lx. src ed st (not= strip :nothing))
+        out (java.util.ArrayList.)
+        stack (java.util.ArrayList.)]
+    ;; tokentrees.rs: self.token the current token; bump glues and computes its spacing
+    (loop [[cur _] (next-token lx)]
+      (let [k (.-kind ^Tok cur)]
+        (cond
+          (contains? open-delims k)
+          (let [[nt ws] (next-token lx)]
+            (.add stack (Long/valueOf (.size out)))
+            (.add out (with-sp cur (spacing-for nt ws)))
+            (recur [nt]))
+          (contains? close-delims k)
+          (do (when (zero? (.size stack)) (lex-error (str "unexpected closing delimiter: `" (text-of src (.-lo ^Tok cur) (.-hi ^Tok cur)) "`")))
+              (let [oi (long (.remove stack (dec (.size stack))))
+                    ^Tok o (.get out (int oi))]
+                (when-not (= (open-delims (.-kind o)) (close-delims k))
+                  (lex-error (str "mismatched closing delimiter: `" (text-of src (.-lo ^Tok cur) (.-hi ^Tok cur)) "`")))
+                (let [[nt ws] (next-token lx)]
+                  (.add out (with-sp cur (spacing-for nt ws)))
+                  (recur [nt]))))
+          (= k :Eof)
+          (do (when (pos? (.size stack)) (lex-error "this file contains an unclosed delimiter"))
+              (.add out cur))
+          :else
+          (let [[cur nt ws] (loop [cur cur]
+                              (let [[nt ws] (next-token lx)]
+                                (if ws
+                                  [cur nt true]
+                                  (if-let [g (glue cur nt)]
+                                    (recur g)
+                                    [cur nt false]))))]
+            (.add out (with-sp cur (spacing-for nt ws)))
+            (recur [nt])))))
+    (let [toks (.toArray out)
+          cnt (alength toks)
+          mt (int-array cnt -1)
+          stk (java.util.ArrayList.)]
+      (dotimes [i cnt]
+        (let [k (.-kind ^Tok (aget toks i))]
+          (cond (contains? open-delims k) (.add stk (Long/valueOf i))
+                (contains? close-delims k) (let [o (long (.remove stk (dec (.size stk))))]
+                                             (aset mt (int o) (int i))
+                                             (aset mt i (int o))))))
+      {:toks toks :mt mt :start start})))
+
+;; ---------------------------------------------------------------------------------------------
+;; The helper's rsdump/tokens and rsdump/comments: rustc_lexer::tokenize over the file
+
+(def ^:private punct1-kinds (conj (set (vals punct1)) :Slash))
+
+(defn raw-tokens
+  "The helper's lex (tools/rsdump/rsdump.rs): rustc_lexer's tokens of the file but white space, each
+  [KIND L C L2 C2] (KIND :c a plain comment, :doc a doc comment, :id an identifier, :lt a lifetime,
+  :lit a literal, :p one punctuation character, :shebang, :fm a front matter, :x anything else), or
+  with comments-only the plain comments alone, [L C L2 C2]; before edition 2024 a guarded string's
+  prefix #\" is a # and the rest lexed again; for an expression file (expr) nothing stripped"
+  [^Src src ^long ed comments-only expr]
+  (let [^ints cps (.-cps src) n (.-n src)
+        out (java.util.ArrayList.)
+        sb (when-not expr (strip-shebang cps n))
+        lc (fn [p] (let [l (line-of src p)] [l (col-of src p l)]))]
+    (when (and sb (not comments-only))
+      (.add out [:shebang 1 1 1 (inc (long sb))]))
+    (loop [p (long (or sb 0)) fm (not expr)]
+      (let [[q k a] (advance-token cps n p fm)
+            q (long q)
+            guarded (and (= k :guarded-str-prefix) (< ed 2024))
+            q (if guarded (inc p) q)
+            fm (and fm (= k :whitespace))]
+        (when-not (= k :eof)
+          (let [kind (cond guarded :p
+                           (= k :whitespace) nil
+                           (and (contains? #{:line-comment :block-comment} k) (nil? a)) :c
+                           comments-only nil
+                           (contains? #{:line-comment :block-comment} k) :doc
+                           (contains? #{:ident :raw-ident :invalid-ident} k) :id
+                           (contains? #{:lifetime :raw-lifetime} k) :lt
+                           (= k :literal) :lit
+                           (= k :frontmatter) :fm
+                           (contains? punct1-kinds k) :p
+                           :else :x)]
+            (when (and kind (not (and comments-only guarded)))
+              (let [[l1 c1] (lc p) [l2 c2] (lc q)]
+                (.add out (if comments-only [l1 c1 l2 c2] [kind l1 c1 l2 c2]))))
+            ;; a guarded prefix: lexed again after the #, front matter no longer allowed
+            (recur q (if guarded false fm))))))
+    (vec out)))
+

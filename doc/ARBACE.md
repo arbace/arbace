@@ -74,7 +74,16 @@ code. Three kinds of things live here:
   PY5a"; evaluated from the checkout, not embedded, PYS18 (a)): its scope analysis, `python/scope.ae`, ports CPython
   3.14.10's `Python/symtable.c` and `Python/future.c`'s future parse (the release tarball
   https://www.python.org/ftp/python/3.14.10/Python-3.14.10.tar.xz, SHA-256 `de414a57...b72032`), by hand on
-  2026-11-03, the file carrying its notice (LICENSE.md: the PSF License Agreement); the rest is Arbace's own.
+  2026-11-03, the file carrying its notice (LICENSE.md: the PSF License Agreement); the rest is Arbace's own;
+  `repr/rust.ae` and `repr/rust/` (repr/rust, Rust's bridge, `arbace.repr.rust` and `arbace.repr.rust.*`;
+  doc/rust/SPEC.md; evaluated from the checkout, not embedded): its native reader's lexer and parser,
+  `repr/rust/lex.ae`, `parse.ae` and `parse/{expr,pat,item}.ae`, with the meta items, literals and
+  identifiers' names of `repr/rust/native.ae`, port rustc 1.99.1, https://github.com/rust-lang/rust at
+  `58cf8f9c3` (the sources of Alpine's `rust-src-1.99.1-r0`, pinned by `tools/rsdump/apks.sha256`):
+  `compiler/rustc_lexer`, `rustc_parse`'s `lexer/` and `parser/`, parts of `rustc_ast` and `rustc_span`
+  and the escapes' checks of the crate rustc-literal-escaper 0.0.8 (LICENSE.md names the files; MIT OR
+  Apache-2.0), by hand on 2026-11-04, each file's header naming its sources (doc/rust/NATIVE-READER.md);
+  the rest of `repr/rust/` is Arbace's own.
 - Arbace's own namespaces of the program, not derived from Clojure: `box.ae` and `box/`
   (`arbace.box`, the store, over its host layer `arbace.box.host`; the box's build driver
   `arbace.box.build`, its plan `arbace.box.plan` (since GP2 also repr/go's native loader's go
