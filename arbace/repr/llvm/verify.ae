@@ -419,6 +419,16 @@
 
 (defn- fn-has [attrs n] (has-attr? attrs n))
 
+(defn- vfabi-ok?
+  "VFABI::tryDemangleForVFABI's grammar: _ZGV<isa><mask><vlen><parameters>_<scalar name>[(<vector name>)], one parameter
+  for each of the scalar function's `n`."
+  [^String name n]
+  (if-let [[_ isa mask vlen params scalar] (re-matches #"_ZGV([a-z])([MN])([0-9]+|x)((?:(?:[vu]|[lLRU](?:n?[0-9]*|s[0-9]+))(?:a[0-9]+)?)+)_([^(]+)(?:\(.+\))?" name)]
+    (let [ps (re-seq #"(?:[vu]|[lLRU](?:n?[0-9]*|s[0-9]+))(?:a[0-9]+)?" params)]
+      (and (not= vlen "0")
+           (= (count ps) n)))
+    false))
+
 (defn- check-fn-attr-values
   "The function attributes' own rules (verifyFunctionAttrs after its param loop); `call?`: a call site's."
   [attrs ptypes call?]
@@ -446,6 +456,10 @@
         (when-not (pow2? lo) (verr :verifier/attr-value "'vscale_range' minimum must be power-of-two value"))
         (when (and (pos? hi) (not (pow2? hi))) (verr :verifier/attr-value "'vscale_range' maximum must be power-of-two value"))
         (when (and (pos? hi) (> lo hi)) (verr :verifier/attr-value "'vscale_range' minimum cannot be greater than maximum"))))
+    (when-let [a (str-attr attrs "vector-function-abi-variant")]
+      (doseq [v (str/split (str (second a)) #",")]
+        (when-not (vfabi-ok? (str/trim v) (count ptypes))
+          (verr :verifier/attr-value (str "invalid name for a VFABI variant: " (str/trim v))))))
     (when-let [a (str-attr attrs "frame-pointer")]
       (when-not (#{"all" "non-leaf" "none" "reserved" "non-leaf-no-reserve"} (second a))
         (verr :verifier/attr-value (str "invalid value for 'frame-pointer' attribute: " (second a)))))
@@ -1063,7 +1077,7 @@
 (defn- check-bundles
   "The operand bundles of a call (visitCallBase's loop over them); `defs` finds a local's defining body; `direct?`: the callee
   is a function."
-  [bundles defs direct?]
+  [bundles defs direct? rt noreturn?]
   (let [seen (java.util.HashSet.)]
     (doseq [[tag & ops] bundles]
       (letfn [(once [t msg] (when (.contains seen t) (verr :verifier/bundle msg)) (.add seen t))]
@@ -1086,6 +1100,12 @@
                      (when-not (= 1 (count ops)) (verr :verifier/bundle "Expected exactly one kcfi bundle operand"))
                      (when-not (= 'i32 (first (first ops))) (verr :verifier/bundle "Kcfi bundle operand must be an i32 constant")))
           "gc-live" (once "gc-live" "Multiple gc-live operand bundles")
+          "clang.arc.attachedcall"
+          (do (once "clang.arc.attachedcall" "Multiple \"clang.arc.attachedcall\" operand bundles")
+              (when-not (or (ptr-type? rt) (and noreturn? (= rt 'void)))
+                (verr :verifier/bundle "a call with operand bundle \"clang.arc.attachedcall\" must call a function returning a pointer or a non-returning function that has a void return type"))
+              (when-not (and (= 1 (count ops)) (global? (peek (first ops))) (= :function (:kind (.get *gdefs* (global-key (peek (first ops)))))))
+                (verr :verifier/bundle "operand bundle \"clang.arc.attachedcall\" requires one function as an argument")))
           "convergencectrl" (when-not (and (= 1 (count ops)) (= 'token (first (first ops))))
                               (verr :verifier/bundle "The 'convergencectrl' bundle requires exactly one token use."))
           nil)))))
@@ -1134,7 +1154,23 @@
         (when (= t 'token) (verr :verifier/function-type "Function has token parameter but isn't an intrinsic")))
       (when-not (global? c)
         (when (= (norm-type (second fty)) 'token) (verr :verifier/function-type "Return type cannot be token for indirect call!"))))
-    (check-bundles (:bundles o) defs (global? c))))
+    ;; swifterror arguments come from a swifterror alloca or parameter
+    (doseq [[i a] (map-indexed vector args) :when (has-attr? (nth pattrs i) "swifterror")]
+      (let [v (peek a) k (when (local? v) (local-key v))
+            d (when k (.get ^java.util.Map defs k))
+            fps (nth (:fn *ctx*) 3 nil)
+            param (when k (first (filter #(and (vector? %) (local? (peek %)) (= (local-key (peek %)) k)) fps)))]
+        (cond
+          d (when-not (some #{:swifterror} (second (split-inst (nth d 2))))
+              (when (= 'alloca (first (nth d 2)))
+                (verr :verifier/attr-misc "swifterror argument for call has mismatched alloca" [:inst (nth d 3)] :inst)))
+          param (when-not (has-attr? (group-items (param-attrs param)) "swifterror")
+                  (verr :verifier/attr-misc "swifterror argument for call has mismatched parameter" (pr/typed-str [(norm-type (first param)) v]) :inst))
+          :else (verr :verifier/attr-misc "swifterror argument should come from an alloca or parameter" (pr/typed-str [(norm-type (first a)) v]) :inst))))
+    (check-bundles (:bundles o) defs (global? c) (norm-type (second fty))
+                   (or (has-attr? fattrs "noreturn")
+                       (when-let [d (when (global? c) (.get *gdefs* (global-key c)))]
+                         (when (= (:kind d) :function) (has-attr? (group-items (:attrs (apply hash-map (drop 4 (:form d))))) "noreturn")))))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Funclets: catchswitch, catchpad, cleanuppad, catchret, cleanupret, resume
@@ -1391,7 +1427,11 @@
         (when-not (= 3 (count ops)) (verr :verifier/md-flags "incorrect number of operands in module flag" [:mdv f]))
         (let [[b id v] ops]
           (when-not (md-int-op? b) (verr :verifier/md-flags "invalid behavior operand in module flag (expected constant integer)" [:mdv b]))
-          (let [bv (.longValue ^java.math.BigInteger (md-int-val b))]
+          (let [bv0 (.longValue ^java.math.BigInteger (md-int-val b))
+                ;; AutoUpgrade: an `error` flag of these names is a `min` (`max`) one
+                bv (cond (and (= bv0 1) (#{"PIC Level" "sign-return-address" "sign-return-address-all" "sign-return-address-with-bkey" "branch-target-enforcement"} (md-str id))) 8
+                         (and (= bv0 1) (= (md-str id) "PIE Level")) 7
+                         :else bv0)]
             (when-not (<= 1 bv 8) (verr :verifier/md-flags "invalid behavior operand in module flag (unexpected constant)" [:mdv b]))
             (when-not (md-str id) (verr :verifier/md-flags "invalid ID operand in module flag (expected metadata string)" [:mdv id]))
             (case bv
@@ -1402,8 +1442,8 @@
               7 (when-not (md-int-op? v) (verr :verifier/md-flags "invalid value for 'max' module flag (expected constant integer)" [:mdv v]))
               8 (when-not (and (md-int-op? v) (not (neg? (.signum ^java.math.BigInteger (md-int-val v))))) (verr :verifier/md-flags "invalid value for 'min' module flag (expected constant non-negative integer)" [:mdv v]))
               nil)
-            (when (and (= (md-str id) "wchar_size") (not (md-int-op? v)))
-              (verr :verifier/md-flags "wchar_size metadata requires constant integer argument" [:mdv v]))
+            (when (and (#{"wchar_size" "SemanticInterposition"} (md-str id)) (not (md-int-op? v)))
+              (verr :verifier/md-flags (str (md-str id) " metadata requires constant integer argument") [:mdv v]))
             (when (and (not= bv 3) (.containsKey ids (md-str id)))
               (verr :verifier/md-flags "module flag identifiers must be unique (or of 'require' type)" [:mdv id]))
             (when (not= bv 3) (.put ids (md-str id) true)))))))
@@ -1781,6 +1821,14 @@
                                   (verr :verifier/intrinsic-call "llvm.ptrmask intrinsic second argument bitwidth must match pointer index type size of first argument"))
                                 (when-not (= (vec-type? a) (vec-type? m)) (verr :verifier/intrinsic-call "llvm.ptrmask intrinsic arguments must be both scalars or both vectors"))
                                 (when (and (vec-type? a) (not= (nth a 1) (nth m 1))) (verr :verifier/intrinsic-call "llvm.ptrmask intrinsic arguments must have the same number of elements"))))
+                            (when (re-find #"^llvm\.is\.fpclass\." (global-key c))
+                              (let [m (peek (second (nth ps 2)))]
+                                (when (and (integer? m) (or (neg? m) (> m 1023)))
+                                  (verr :verifier/intrinsic-call "unsupported bits for llvm.is.fpclass test mask" :none))))
+                            (when (re-find #"^llvm\.eh\.exceptionpointer\." (global-key c))
+                              (let [t (peek (first (nth ps 2)))]
+                                (when-not (and (local? t) (when-let [[_ _ db] (.get defs (local-key t))] (= 'catchpad (first db))))
+                                  (verr :verifier/intrinsic-call "eh.exceptionpointer argument must be a catchpad"))))
                             (when (re-find #"^llvm\.lifetime\.(start|end)" (global-key c))
                               (let [a (peek (last (nth ps 2)))]
                                 (when-not (or (= a 'poison)
@@ -1921,7 +1969,7 @@
   "The text opt prints for a Verifier error: its message and the values it names, a line each."
   ^String [e metaforms slots]
   (let [d (ex-data e) ctx (:ctx d)
-        cs (if (seq (:culprits d)) (:culprits d) (default-culprits ctx))]
+        cs (cond (= [:none] (:culprits d)) [] (seq (:culprits d)) (:culprits d) :else (default-culprits ctx))]
     (apply str (.getMessage ^Throwable e) "\n" (map #(str (diag/renumber (culprit-text % ctx metaforms) slots) "\n") cs))))
 
 (defn- parse-offset
