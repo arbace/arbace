@@ -1,33 +1,66 @@
 ;; Ported from rustc 1.99.1's compiler/rustc_parse/src/parser/pat.rs (rustc at 58cf8f9c3; MIT OR
-;; Apache-2.0, LICENSE.md, "Rust (rustc 1.99.1)"). Part of arbace.repr.rust.parse (parse.ae loads it).
+;; Apache-2.0, LICENSE.md, "Rust (rustc 1.99.1)"), with the pattern recoveries of
+;; parser/diagnostics.rs that decide rustc's first error. Part of arbace.repr.rust.parse (parse.ae
+;; loads it).
 
 (in-ns 'arbace.repr.rust.parse)
 
+(defn- expected-str
+  "Expected::to_string_or_fallback"
+  ^String [expected]
+  (case expected
+    :parameter-name "parameter name" :argument-name "argument name" :identifier "identifier"
+    :binding-pattern "binding pattern" "pattern"))
+
+(defn- skip-pat-list
+  "skip_pat_list: patterns separated by commas (its errors are rustc's to cancel)"
+  [^P p]
+  (loop []
+    (when-not (check p :CloseParen)
+      (parse-pat-no-top-alt p nil nil)
+      (when (eat p :Comma) (recur)))))
 
 (defn- maybe-recover-unexpected-comma
   "maybe_recover_unexpected_comma: a comma after a top-level pattern is an error"
   [^P p]
-  (when (check p :Comma) (fail p "unexpected `,` in pattern")))
+  (when (is? :Comma)
+    (let [cs (tsp)]
+      (bump p)
+      (try (skip-pat-list p)
+           (catch Throwable e (if (and (identical? e perr) (pending p)) (clear-pending! p) (throw e))))
+      (fail p "unexpected `,` in pattern" cs))))
+
+(defn- recover-trailing-vert
+  "recover_trailing_vert: a `|` or `||` before the pattern's end (TrailingVertNotAllowed, emitted)"
+  [^P p]
+  (let [^Tok t (la p 1)
+        end-ahead (or (contains? #{:FatArrow :Eq :Semi :Colon :Comma :CloseBracket :CloseParen :CloseBrace} (.-kind t))
+                      (kw? t "if"))]
+    (when (and end-ahead (or (is? :Or) (is? :OrOr)))
+      (emit p (str "a trailing `" (token-str (tok)) "` is not allowed in an or-pattern")))))
 
 (defn- eat-or-separator
-  "eat_or_separator: :ate or :none (a trailing vert and a || are errors)"
+  "eat_or_separator: :ate or :none"
   [^P p]
-  (let [end-ahead (let [^Tok t (la p 1)]
-                    (or (contains? #{:FatArrow :Eq :Semi :Colon :Comma :CloseBracket :CloseParen :CloseBrace} (.-kind t))
-                        (kw? t "if")))]
-    (cond (and end-ahead (or (check p :Or) (check p :OrOr))) (fail p "a trailing `|` is not allowed in an or-pattern")
-          (check p :OrOr) (fail p "unexpected token `||` in pattern")
-          (eat p :Or) :ate
-          :else :none)))
+  (recover-trailing-vert p)
+  (cond (is? :OrOr) (emit p "unexpected token `||` in pattern")
+        (eat p :Or) :ate
+        :else :none))
 
 (defn- parse-pat-no-top-guard-inner
   "parse_pat_no_top_guard_inner: a pattern with top-level alternatives"
   [^P p expected rc ra syntax-loc]
   (let [leading (when (= :ate (eat-or-separator p)) (psp))
-        first-pat (parse-pat-no-top-alt p expected syntax-loc)]
+        first-pat (on-err p (parse-pat-no-top-alt p expected syntax-loc)
+                          (fn [e]
+                            (when (and (reserved-ident? (tok) (ed)) (not (kw? (tok) "in")) (not (kw? (tok) "if")))
+                              (emit-diag p (pending p)))
+                            (throw e)))]
     (when (and rc (not (could-be-never-pattern? first-pat))) (maybe-recover-unexpected-comma p))
-    (if (and (not (check p :Or)) (not (check p :OrOr)))
-      (do (when (and ra (check p :Colon)) (fail p "expected one of `@` or `|`, found `:`"))
+    (if (and (not (check p :Or)) (not (is? :OrOr)))
+      (do (when (and ra (is? :Colon))
+            ;; recover_colon_colon_in_pat_typo: the error of the expected set, emitted
+            (on-err p (unexpected p) (fn [_] (emit-diag p (pending p)))))
           (if leading
             (mk-pat (sp-to leading (psp)) (list 'Or [first-pat]))
             first-pat))
@@ -59,34 +92,44 @@
 (defn parse-pat-no-top-alt [^P p expected syntax-loc] (parse-pat-with-range-pat p true expected syntax-loc))
 
 (defn- parse-pat-before-ty
-  "parse_pat_before_ty: [pat colon]; a top-level or-pattern is an error"
+  "parse_pat_before_ty: [pat colon]; a top-level or-pattern is an error (emitted)"
   [^P p expected rc syntax-loc]
   (let [pat (parse-pat-no-top-guard-inner p expected (= rc :recover-comma) false syntax-loc)
         colon (eat p :Colon)]
-    (when (variant? (pat-kind pat) 'Or) (fail p "top-level or-patterns are not allowed here"))
+    (when (variant? (pat-kind pat) 'Or)
+      (emit p (if (= syntax-loc :function-parameter)
+                "function parameters require top-level or-patterns in parentheses"
+                "`let` bindings require top-level or-patterns in parentheses")
+            (pat-span pat)))
     [pat colon]))
 
 (defn parse-fn-param-pat-colon [^P p]
-  (when (check p :OrOr) (fail p "unexpected `||` before function parameter"))
+  (when (is? :OrOr) (emit p "unexpected `||` before function parameter"))
   (parse-pat-before-ty p :parameter-name nil :function-parameter))
 
 (defn- maybe-recover-trailing-expr
-  "maybe_recover_trailing_expr: a method call, field or operator after a pattern is an error"
+  "maybe_recover_trailing_expr: a method call, field or operator after a pattern: the expression
+  parsed in its place and the error (UnexpectedExpressionInPattern) stashed, as rustc stashes it
+  (emitted at the statement's end); true when it recovered"
   [^P p ^Sp pat-span is-end-bound]
   (when-not (kw? (prev) "_")
     (let [^Tok n (la p 1)
-          dot-expr (and (check p :Dot)
+          dot-expr (and (is? :Dot)
                         (or (ident-tok? n) (and (int-lit? n) (nil? (.-y n)))
                             (and (lit? n) (identical? (.-x n) :Float) (nil? (.-y n)) (re-matches #"[0-9_]+\.[0-9_]+" (.-sym n)))))
           operator (or (contains? #{:Plus :Minus :Star :Slash :Percent :Caret :And :Shl :Shr :Question} (tk))
-                       (and (check p :OpenBracket) (not (identical? (.-kind n) :CloseBracket)))
+                       (and (is? :OpenBracket) (not (identical? (.-kind n) :CloseBracket)))
                        (kw? (tok) "as"))]
       (when (or dot-expr operator)
-        (when (attempt (with-res (bit-or (nget RESTR) R-PAT)
-                         (let [e (parse-expr-dot-or-call-with p [] (mk-expr pat-span 'Dummy) pat-span)]
-                           (parse-expr-assoc-rest p -1 false e)))
-                       true)
-          (fail p "expected a pattern, found an expression"))))))
+        (when-let [e (attempt (with-res (bit-or (nget RESTR) R-PAT)
+                                (let [e (parse-expr-dot-or-call-with p [] (mk-expr pat-span 'Dummy) pat-span)]
+                                  (first (parse-expr-assoc-rest p -1 false e)))))]
+          (let [bound (or is-end-bound (range-sep? (tok))
+                          (and (is? :CloseParen) (range-sep? (la p 1))))]
+            (stash! (diag (if bound "expected a pattern range bound, found an expression"
+                              "expected a pattern, found an expression")
+                          (expr-span e)))
+            true))))))
 
 (defn- parse-range-end
   "parse_range_end: (Spanned :node RangeEnd :span s) or nil"
@@ -106,25 +149,36 @@
                  (pat-range-end-start? p (inc dist)))))))
 
 (defn- parse-pat-range-end [^P p]
-  (when (check p :OpenParen) (fail p "range pattern bounds cannot have parentheses"))
-  (let [bound (cond (check-inline-const p 0) (parse-const-block p (tsp) true)
+  (let [open (when (eat-ne p :OpenParen) (psp))
+        bound (cond (check-inline-const p 0) (parse-const-block p (tsp) true)
                     (check-path p)
                     (let [lo (tsp)
                           [qself path] (if (eat-lt p) (parse-qpath p :pat) [nil (parse-path p :pat)])]
                       (mk-expr (sp-to lo (psp)) (list 'Path (opt qself) path)))
                     :else (parse-literal-maybe-minus p))]
     (maybe-recover-trailing-expr p (expr-span bound) true)
+    (when open
+      (expect p :CloseParen)
+      (emit p "range pattern bounds cannot have parentheses" open))
     bound))
+
+(defn- inclusive-range-with-incorrect-end
+  "inclusive_range_with_incorrect_end (emitted)"
+  [^P p]
+  (let [s (psp) no-space (== (.-lo (tok)) (.-hi s))]
+    (cond (and (is? :Eq) no-space) (emit p "unexpected `=` after inclusive range" (sp-to s (tsp)))
+          (and (is? :Gt) (identical? (.-kind (prev)) :DotDotEq) no-space) (emit p "unexpected `>` after inclusive range")
+          :else (emit p "inclusive range with no end" s "E0586"))))
 
 (defn- parse-pat-range-begin-with [^P p begin re]
   (let [end (if (pat-range-end-start? p 0)
               (parse-pat-range-end p)
-              (do (when (variant? (fget re :node) 'Included) (fail p "inclusive range with no end")) nil))]
+              (do (when (variant? (fget re :node) 'Included) (inclusive-range-with-incorrect-end p)) nil))]
     (list 'Range (list 'Some begin) (opt end) re)))
 
 (defn- parse-pat-range-to [^P p re]
   (let [end (parse-pat-range-end p)]
-    (when (= (fget re :node) (list 'Included 'DotDotDot)) (fail p "range-to patterns with `...` are not allowed"))
+    (when (= (fget re :node) (list 'Included 'DotDotDot)) (emit p "range-to patterns with `...` are not allowed" (fget re :span)))
     (list 'Range 'None (list 'Some end) re)))
 
 (defn- start-of-pat-with-path? [^P p]
@@ -134,16 +188,27 @@
   (and (check-ident p) (not (bool-lit? (tok))) (not (path-seg-kw? (tok))) (not (kw? (tok) "in"))
        (not (contains? #{:OpenParen :OpenBrace :DotDotDot :DotDotEq :DotDot :PathSep :Bang} (.-kind (la p 1))))))
 
+(defn- parse-ident-norecover
+  "parse_ident_common(false): a reserved identifier is the error returned"
+  ^Id [^P p]
+  (let [^Tok t (tok)]
+    (when-not (ident-tok? t) (expected-ident-found p false))
+    (when (and (not (raw? t)) (lx/reserved? (.-sym t) (ed)))
+      (fail p (str "expected identifier, found " (describe t))))
+    (bump p)
+    (id (.-sym t) (tspan t))))
+
 (defn- parse-pat-ident
   "parse_pat_ident: ident @ pat"
   [^P p binding syntax-loc]
-  (let [ident (parse-ident-common p)]
-    (when (and (not= syntax-loc :function-parameter) (check p :Lt) (can-begin-type? (la p 1) (ed)))
+  (let [ident (parse-ident-norecover p)]
+    (when (and (not= syntax-loc :function-parameter) (is? :Lt) (can-begin-type? (la p 1) (ed)))
       (fail p "generic args in patterns require the turbofish syntax"))
     (let [sub (when (eat p :At) (parse-pat-no-top-alt p :binding-pattern nil))]
-      (when (check p :OpenParen) (fail p "expected identifier, found enum pattern"))
-      (when-not sub (maybe-recover-trailing-expr p (id-span ident) false))
-      (list 'Ident binding ident (opt sub)))))
+      (when (is? :OpenParen) (fail p "expected identifier, found enum pattern" (psp)))
+      (if (and (not sub) (maybe-recover-trailing-expr p (id-span ident) false))
+        (list 'Err)
+        (list 'Ident binding ident (opt sub))))))
 
 (defn- parse-pat-field [^P p ^Sp lo attrs]
   (if (identical? (.-kind (la p 1)) :Colon)
@@ -155,36 +220,52 @@
           boxed-span (tsp)
           m (parse-mutability p)
           by-ref (parse-byref p)
-          fname (parse-ident-common p)
+          fname (parse-ident-norecover p)
           hi (psp)
           fieldpat (mk-pat (sp-to boxed-span hi) (list 'Ident (list 'BindingMode by-ref m) fname 'None))
           sub (if is-box (mk-pat (sp-to lo hi) (list 'Box fieldpat)) fieldpat)]
       (list 'PatField :ident fname :pat sub :is_shorthand true :attrs attrs :span (sp-to lo hi) :is_placeholder false))))
 
 (defn- parse-pat-fields
-  "parse_pat_fields: [fields rest]"
+  "parse_pat_fields: [fields rest]; a delayed error (a `..` before more fields) emitted before the next"
   [^P p]
-  (loop [fields (transient []) ate-comma true]
-    (if (check p :CloseBrace)
-      [(persistent! fields) 'None]
-      (do (when-not ate-comma
-            (fail p (if (check p :At) "`@` is not allowed in a struct pattern" "expected `,`")))
-          (if (or (check p :DotDot) (check p :DotDotDot) (check-kw p "_"))
-            (let [etc (tsp)]
-              (when-not (check p :DotDot) (fail p "expected field pattern, found `...`"))
+  (let [delayed (volatile! nil)
+        flush! (fn [] (when-let [d @delayed] (vreset! delayed nil) (when *errs* (.add *errs* d))))
+        throwing (fn [f] (on-err p (f) (fn [e] (let [d (pending p)] (flush!) (fail-diag p d)))))]
+    (loop [fields (transient []) ate-comma true etc 'None]
+      (if (is? :CloseBrace)
+        (do (when-let [d @delayed] (emit-diag p d)) [(persistent! fields) etc])
+        (do (when-not ate-comma
+              (do
+                (flush!)
+                (if (is? :At)
+                  (let [^Id prev-field (fget (nth fields (dec (count fields))) :ident)
+                        s (sp-to (id-span prev-field) (tsp))]
+                    (if (identical? (.-kind (la p 1)) :DotDot)
+                      (fail p "`@ ..` is not supported in struct patterns" (sp-to s (tspan (la p 1))))
+                      (fail p "unexpected `@` in struct pattern" s)))
+                  (fail p "expected `,`"))))
+          (if (or (check p :DotDot) (is? :DotDotDot) (check-kw p "_"))
+            (let [etc (list 'Rest (tsp))]
+              (when-not (is? :DotDot) (emit p (str "expected field pattern, found `" (token-str (tok)) "`")))
               (bump p)
-              (if (check p :CloseBrace)
-                [(persistent! fields) (list 'Rest etc)]
-                (fail p "expected `}`")))
-            (let [attrs (parse-outer-attrs p)
+              (if (is? :CloseBrace)
+                (recur fields false etc)
+                (let [d (diag (str "expected `}`, found " (describe (tok))) (tsp))
+                      ate (when (is? :Comma) (bump p) true)]
+                  (cond (is? :CloseBrace) (emit-diag p d)
+                        (and (ident-tok? (tok)) ate)
+                        (if @delayed (do (flush!) (fail-diag p d)) (do (vreset! delayed d) (recur fields true etc)))
+                        :else (do (flush!) (fail-diag p d))))))
+            (let [attrs (throwing #(parse-outer-attrs p))
                   lo (tsp)
-                  f (parse-pat-field p lo attrs)
+                  f (throwing #(parse-pat-field p lo attrs))
                   ate (eat p :Comma)]
-              (recur (conj! fields f) ate)))))))
+              (recur (conj! fields f) ate etc))))))))
 
 (defn- parse-pat-struct [^P p qself path]
   (bump p)
-  (let [[fields etc] (parse-pat-fields p)]
+  (let [[fields etc] (on-err p (parse-pat-fields p) (fn [_] (emit-diag p (pending p))))]
     (bump p)
     (list 'Struct (opt qself) path fields etc)))
 
@@ -194,7 +275,9 @@
 
 (defn- parse-pat-deref [^P p expected]
   (expect-and p)
-  (when (lifetime? (tok)) (fail p "unexpected lifetime in pattern"))
+  (when (lifetime? (tok))
+    (bump p)
+    (emit p (str "unexpected lifetime `" (.-sym ^Tok (prev)) "` in pattern") (psp)))
   (let [[pin m] (parse-pin-and-mut p)
         sub (parse-pat-with-range-pat p false expected nil)]
     (list 'Ref sub pin m)))
@@ -205,12 +288,11 @@
         paren (and (= 1 (count fields)) (not (or trailing (= 'Rest (pat-kind (first fields))))))
         kind (if paren
                (let [pat (first fields)]
-                 (when (and (or (variant? (pat-kind pat) 'Expr) (variant? (pat-kind pat) 'Err)) (range-sep? (tok)))
-                   (fail p "range pattern bounds cannot have parentheses"))
-                 (list 'Paren pat))
+                 (if (and (or (variant? (pat-kind pat) 'Expr) (variant? (pat-kind pat) 'Err)) (range-sep? (tok)))
+                   (do (parse-range-end p) (emit p "range pattern bounds cannot have parentheses" open))
+                   (list 'Paren pat)))
                (list 'Tuple fields))]
-    (maybe-recover-trailing-expr p (sp-to open (psp)) false)
-    kind))
+    (if (maybe-recover-trailing-expr p (sp-to open (psp)) false) (list 'Err) kind)))
 
 (defn- make-all-value-bindings-mutable
   "make_all_value_bindings_mutable: [pat changed]"
@@ -234,34 +316,48 @@
                 (mk-pat (pat-span pat) k)))]
       [(walk pat) @changed])))
 
+(defn- recover-additional-muts
+  "recover_additional_muts: `mut mut` (RepeatedMutInPattern, emitted)"
+  [^P p]
+  (let [lo (tsp)]
+    (loop [] (when (eat-kw p "mut") (recur)))
+    (when-not (== (.-lo lo) (.-lo (tok)))
+      (emit p "`mut` on a binding may not be repeated" (sp-to lo (psp))))))
+
 (defn- parse-pat-ident-mut [^P p]
-  (when (check-kw p "mut") (fail p "`mut` on a binding may not be repeated"))
-  (let [byref (parse-byref p)]
-    (when (check-kw p "mut") (fail p "`mut` on a binding may not be repeated"))
-    (let [pat (parse-pat-no-top-alt p :identifier nil)
-          k (pat-kind pat)]
-      (if (and (variant? k 'Ident) (= (list 'BindingMode 'No 'Not) (nth k 1)))
-        (list 'Ident (list 'BindingMode byref 'Mut) (nth k 2) (nth k 3))
-        (fail p "`mut` must be attached to each individual binding")))))
+  (let [mut-span (psp)]
+    (recover-additional-muts p)
+    (let [byref (parse-byref p)]
+      (recover-additional-muts p)
+      (let [pat (parse-pat-no-top-alt p :identifier nil)
+            k (pat-kind pat)]
+        (if (and (variant? k 'Ident) (= (list 'BindingMode 'No 'Not) (nth k 1)))
+          (list 'Ident (list 'BindingMode byref 'Mut) (nth k 2) (nth k 3))
+          (let [[_ changed] (make-all-value-bindings-mutable pat)]
+            (if changed
+              (emit p "`mut` must be attached to each individual binding" (sp-to mut-span (pat-span pat)))
+              (emit p "`mut` must be followed by a named binding" (sp-until mut-span (pat-span pat))))))))))
 
 (defn- parse-pat-box [^P p]
-  (when (contains? #{:Eq :Colon :Comma :Semi :At :OpenBrace :CloseBrace :CloseParen} (tk))
-    (fail p "expected pattern, found `box`"))
-  (list 'Box (parse-pat-with-range-pat p false nil nil)))
+  (if (contains? #{:Eq :Colon :Comma :Semi :At :OpenBrace :CloseBrace :CloseParen} (tk))
+    (emit p (str "expected pattern, found " (describe (tok))))
+    (list 'Box (parse-pat-with-range-pat p false nil nil))))
 
 (defn parse-pat-with-range-pat
   "parse_pat_with_range_pat"
   [^P p allow-range expected syntax-loc]
-  (let [lo (tsp)]
-    (when (and (kw? (tok) "let") (can-begin-pattern? (la p 1) false)) (fail p "expected pattern, found `let`"))
-    (let [kind
+  (let [lo0 (tsp)]
+    (when (and (kw? (tok) "let") (can-begin-pattern? (la p 1) false))
+      (bump p) (emit p "expected pattern, found `let`" lo0))
+    (let [lo (tsp)
+          kind
           (cond
-            (or (check p :And) (check p :AndAnd)) (parse-pat-deref p expected)
+            (or (check p :And) (is? :AndAnd)) (parse-pat-deref p expected)
             (check p :OpenParen) (parse-pat-tuple-or-parens p)
             (check p :OpenBracket)
             (list 'Slice (first (delim-comma-seq p :OpenBracket :CloseBracket #(parse-pat-allow-top-guard p nil nil nil :either-tuple-or-pipe))))
             (and (check p :DotDot) (not (pat-range-end-start? p 1))) (do (bump p) 'Rest)
-            (and (check p :DotDotDot) (not (pat-range-end-start? p 1))) (fail p "unexpected `...`")
+            (and (check p :DotDotDot) (not (pat-range-end-start? p 1))) (do (bump p) (emit p "unexpected `...`" lo))
             :else
             (if-let [form (parse-range-end p)]
               (parse-pat-range-to p form)
@@ -269,15 +365,18 @@
                 (eat p :Bang) 'Never
                 (eat-kw p "_") 'Wild
                 (eat-kw p "mut") (parse-pat-ident-mut p)
-                (eat-kw p "ref") (do (when (check-kw p "box") (fail p "switch the order of `ref` and `box`"))
+                (eat-kw p "ref") (do (when (check-kw p "box")
+                                       (let [s (sp-to (psp) (tsp))] (bump p) (emit p "switch the order of `ref` and `box`" s)))
                                      (let [[pin m] (parse-pin-and-mut p)]
                                        (parse-pat-ident p (list 'BindingMode (list 'Yes pin m) 'Not) syntax-loc)))
                 (eat-kw p "box") (parse-pat-box p)
-                (check-inline-const p 0) (parse-const-block p (sp-to lo (tsp)) true)
+                (check-inline-const p 0)
+                (let [c (parse-const-block p (sp-to lo (tsp)) true)]
+                  (if-let [re (parse-range-end p)] (parse-pat-range-begin-with p c re) (list 'Expr c)))
                 (builtin? p) (parse-builtin p (fn [_ nm]
                                                 (when (= nm "deref")
                                                   (list 'Deref (parse-pat-allow-top-guard p nil :recover-comma :recover-colon :likely-tuple)))))
-                (can-be-ident-pat? p) (parse-pat-ident p (list 'BindingMode 'No 'Not) syntax-loc)
+                (or (can-be-ident-pat? p) (lit-bad-ident? (tok))) (parse-pat-ident p (list 'BindingMode 'No 'Not) syntax-loc)
                 (start-of-pat-with-path? p)
                 (let [[qself path] (if (eat-lt p) (parse-qpath p :pat) [nil (parse-path p :pat)])
                       s (sp-to lo (psp))]
@@ -287,22 +386,30 @@
                           (parse-pat-range-begin-with p (mk-expr s (list 'Path (opt qself) path)) form)
                           (cond (check p :OpenBrace) (parse-pat-struct p qself path)
                                 (check p :OpenParen) (parse-pat-tuple-struct p qself path)
-                                :else (do (maybe-recover-trailing-expr p s false)
-                                          (list 'Path (opt qself) path))))))
+                                :else (if (maybe-recover-trailing-expr p s false)
+                                        (list 'Err)
+                                        (list 'Path (opt qself) path))))))
                 (and (lifetime? (tok)) (not (raw? (tok))) (could-be-unclosed-char-literal? (.-sym ^Tok (tok)))
                      (not (identical? (.-kind (la p 1)) :Colon)))
-                (fail p "unterminated character literal")
+                (let [lt (tsp)]
+                  (bump p)
+                  (emit p "unterminated character literal" lt "E0762"))
                 :else
-                (let [begin (try (parse-literal-maybe-minus p)
-                                 (catch Throwable e
-                                   (if (identical? e perr) (fail p (str "expected pattern, found " (describe (tok)))) (throw e))))]
+                (let [begin (on-err p (parse-literal-maybe-minus p)
+                                    (fn [_] (fail p (str "expected " (expected-str expected) ", found " (describe (tok))))))]
                   (maybe-recover-trailing-expr p (expr-span begin) false)
                   (if-let [form (parse-range-end p)]
                     (parse-pat-range-begin-with p begin form)
                     (list 'Expr begin))))))
           pat (mk-pat (sp-to lo (psp)) kind)
           pat (maybe-recover-from-bad-qpath p pat)]
-      (when (check p :At) (fail p "pattern on the left of `@`"))
+      (when (eat-ne p :At)
+        (let [rhs (parse-pat-no-top-alt p nil nil)
+              whole (sp-to (pat-span pat) (pat-span rhs))
+              rk (pat-kind rhs)]
+          (if (and (variant? rk 'Ident) (= 'None (nth rk 3)))
+            (emit p "pattern on wrong side of `@`" whole)
+            (emit p "left-hand side of `@` must be a binding" whole))))
       (when (and (not allow-range) (variant? kind 'Range) (not= (fget (nth kind 3) :node) (list 'Included 'DotDotDot)))
-        (fail p "the range pattern here has ambiguous interpretation"))
+        (emit p "the range pattern here has ambiguous interpretation" (pat-span pat)))
       pat)))

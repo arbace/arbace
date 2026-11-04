@@ -177,7 +177,7 @@
   [^P p ^long min-prec starts-stmt lhs]
   (if-not (should-continue-as-assoc-expr p lhs)
     [lhs false]
-    (loop [lhs lhs parsed false]
+    (loop [lhs (do (add-exp! p :tt/Operator) lhs) parsed false]
       (let [op (check-assoc-op p)]
         (if (or (nil? op) (below-min? (op-prec op) min-prec))
           [lhs parsed]
@@ -409,12 +409,13 @@
   (let [res (loop [e e]
               (let [ret (kw? (prev) "return")]
                 (cond
-                  (check p :Question) (do (bump p) (recur (mk-expr (sp-to lo (psp)) (list 'Try e))))
-                  (check p :Dot) (do (bump p) (recur (parse-dot-suffix-expr p lo e)))
-                  (and (not ret) (check p :RArrow)) (fail p "`->` used for field access or method call")
+                  (if ret (check-ne p :Question) (check p :Question)) (do (bump p) (recur (mk-expr (sp-to lo (psp)) (list 'Try e))))
+                  (if ret (check-ne p :Dot) (or (is? :RArrow) (check p :Dot)))
+                  (do (when (is? :RArrow) (emit p "`->` is not valid syntax for field accesses and method calls"))
+                      (bump p) (recur (parse-dot-suffix-expr p lo e)))
                   (expr-is-complete p e) e
-                  (check p :OpenParen) (recur (let [args (parse-expr-paren-seq p)] (mk-expr (sp-to lo (psp)) (list 'Call e args))))
-                  (check p :OpenBracket) (recur (parse-expr-index p lo e))
+                  (is? :OpenParen) (recur (let [args (parse-expr-paren-seq p)] (mk-expr (sp-to lo (psp)) (list 'Call e args))))
+                  (is? :OpenBracket) (recur (parse-expr-index p lo e))
                   :else e)))]
     (if (seq attrs) (with-attrs res (into (vec attrs) (expr-attrs res))) res)))
 
@@ -714,7 +715,7 @@
         inputs (if (eat p :OrOr)
                  []
                  (do (expect p :Or)
-                     (let [[args _] (seq-before p #{:Or :OrOr} :Comma true #(parse-fn-block-param p))]
+                     (let [[args _] (seq-before p [:Or] #{:OrOr} :Comma true #(parse-fn-block-param p))]
                        (expect-or p)
                        args)))
         arg-span (sp-with-lo (psp) arg-start)
@@ -1060,7 +1061,14 @@
         (mk-stmt (sp-to lo (psp)) (list 'Expr e))))))
 
 
+(declare parse-stmt-without-recovery-)
+
 (defn parse-stmt-without-recovery
+  "parse_stmt_without_recovery, then the errors stashed in the statement emitted"
+  [^P p force-full-expr]
+  (let [st (parse-stmt-without-recovery- p force-full-expr)] (unstash!) st))
+
+(defn- parse-stmt-without-recovery-
   "parse_stmt_without_recovery"
   [^P p force-full-expr]
   (let [attrs (parse-outer-attrs p)
@@ -1089,14 +1097,17 @@
                 (when (and (variant? (expr-kind e) 'Assign) (check-kw p "else")) (fail p "`else` is not allowed after a destructuring assignment"))
                 (mk-stmt (sp-to lo (expr-span e)) (list 'Expr e)))))))))
 
-(defn- ternary?
-  "maybe_recover_from_ternary_operator: c ? a : b after a ? the expression parser took as a try"
-  [^P p]
+(defn ternary-span
+  "maybe_recover_from_ternary_operator: c ? a : b after a ? the expression parser took as a try: the
+  span of the TernaryOperator error (from cond-lo, else the `?`), or nil (the state restored)"
+  [^P p cond-lo]
   (when (identical? (.-kind ^Tok (prev)) :Question)
     (let [s (snap p)
-          r (and (or (some? (attempt (parse-expr p))) (check p :Colon))
-                 (eat p :Colon)
-                 (some? (attempt (parse-expr p))))]
+          lo (long (or cond-lo (.-lo ^Tok (prev))))
+          r (when (and (or (some? (attempt (parse-expr p))) (is? :Colon))
+                       (eat-ne p :Colon)
+                       (some? (attempt (parse-expr p))))
+              (sp lo (.-hi ^Tok (prev))))]
       (restore! p s)
       r)))
 
@@ -1116,10 +1127,21 @@
           (and (variant? k 'Expr) (requires-semi-to-be-stmt? (second k)) (seq (expr-attrs (second k)))
                (not (contains? #{:Eof :Semi :CloseBrace} (tk))))
           (fail p "attributes on expressions are experimental")
-          (and (variant? k 'Expr) (not (check p :Eof)) (requires-semi-to-be-stmt? (second k)))
-          (do (when (ternary? p) (fail p "Rust has no ternary operator"))
-              (when-not (or (check p :Semi) (check p :CloseBrace))
-                (fail p (str "expected one of `.`, `;`, `?`, `}`, or an operator, found " (describe (tok)))))
+          (and (variant? k 'Expr) (not (is? :Eof)) (requires-semi-to-be-stmt? (second k)))
+          (do (when-let [ts (ternary-span p (.-lo (expr-span (second k))))] (fail p "Rust has no ternary operator" ts))
+              (on-err p (expect-one-of p [] [:Semi :CloseBrace])
+                      (fn [e]
+                        (recover-colon-as-semi p)
+                        (let [ex (second k)]
+                          (when (and (variant? (expr-kind ex) 'Path) (= 'None (nth (expr-kind ex) 1))
+                                     (= 1 (count (path-segs (nth (expr-kind ex) 2))))
+                                     (is? :Colon)
+                                     (let [n (la p 1)] (or (kw? n "for") (kw? n "loop") (kw? n "while") (identical? (.-kind n) :OpenBrace))))
+                            (let [d (pending p) seg (first (path-segs (nth (expr-kind ex) 2))) ^Id i (seg-ident seg)]
+                              (when (attempt (parse-expr-labeled p (list 'label (id (str "'" (id-name i)) (id-span i))) false))
+                                (emit p "malformed loop label" (id-span i)))
+                              (fail-diag p d))))
+                        (throw e)))
               true)
           (or (variant? k 'Expr) (variant? k 'MacCall)) true
           (variant? k 'Let) (do (expect-semi p) false)
