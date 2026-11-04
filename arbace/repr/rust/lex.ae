@@ -726,6 +726,39 @@
                (lex-error (str (case (long base) 16 "hexadecimal" 8 "octal" 2 "binary") " float literal is not supported") start ss))
              [:Float start ss 0])))
 
+(defn- validate-frontmatter
+  "validate_frontmatter: the errors of a front matter token [start, end) in rustc's order (each emitted, so
+  the first decides): a preceding white space, an invalid infostring, a bare CR, an unclosed one, white
+  space before the close, a close that does not match, characters after it"
+  [^ints cps ^long start ^long end inv-ws inv-info]
+  (let [ix (fn [^long from pred] (loop [i from] (cond (>= i end) -1 (pred (aget cps (int i))) i :else (recur (inc i)))))
+        dash? (fn [c] (== c 45))
+        real-start (loop [i start] (if (starts-with? cps end i "---") i (recur (inc i))))
+        open-end (loop [i real-start] (if (and (< i end) (dash? (aget cps (int i)))) (recur (inc i)) i))
+        len-opening (- open-end real-start)
+        line-start (loop [i real-start] (cond (<= i start) start (== 10 (aget cps (int (dec i)))) i :else (recur (dec i))))
+        nl (ix real-start #(== % 10))
+        line-end (if (neg? nl) end nl)                       ; absolute position of the first newline
+        last-nl (loop [i (dec end)] (cond (< i real-start) -1 (== 10 (aget cps (int i))) i :else (recur (dec i))))
+        last-line-start (if (neg? last-nl) line-end (inc last-nl))]
+    (when inv-ws
+      (lex-error "invalid preceding whitespace for frontmatter opening" line-start open-end))
+    (when inv-info
+      (lex-error "invalid infostring for frontmatter" open-end line-end))
+    (let [cr (loop [i line-end] (cond (>= i last-line-start) -1 (== 13 (aget cps (int i))) i :else (recur (inc i))))]
+      (when (>= cr 0) (lex-error "bare CR not allowed in frontmatter" cr (inc cr))))
+    (let [trim-start (loop [i last-line-start] (if (and (< i end) (hws? (aget cps (int i)))) (recur (inc i)) i))]
+      (when-not (starts-with? cps end trim-start "---")
+        (lex-error "unclosed frontmatter" real-start end))
+      (when (not= trim-start last-line-start)
+        (lex-error "invalid preceding whitespace for frontmatter close" last-line-start end))
+      (let [rest-start (loop [i trim-start] (if (and (< i end) (dash? (aget cps (int i)))) (recur (inc i)) i))
+            len-close (- rest-start trim-start)]
+        (when (not= len-close len-opening)
+          (lex-error "frontmatter close does not match the opening" real-start end))
+        (when (loop [i rest-start] (cond (>= i end) false (hws? (aget cps (int i))) (recur (inc i)) :else true))
+          (lex-error "extra characters after frontmatter close are not allowed" last-line-start end))))))
+
 (deftype Lx [^Src src ^long ed ^longs st fm-allowed])
 ;; st: [pos]
 
@@ -744,7 +777,7 @@
         (case k
           :eof [(Tok. :Eof end end nil nil nil 0 nil) ws]
           :whitespace (recur true)
-          :frontmatter (recur true)
+          :frontmatter (do (validate-frontmatter cps start end (nth r 2) (nth r 3)) (recur true))
           :line-comment
           (if-let [doc (nth r 2)]
             (let [s (text-of src (+ start 3) end)]
