@@ -137,7 +137,7 @@
       (let [sp (nth (nth cv i) 0)]
         (aset starts i (long (nth sp 5)))
         (aset cols i (long (nth sp 2)))))
-    (object-array [cv starts cols (boolean-array n) (java.util.ArrayList.)])))
+    (object-array [cv starts cols (boolean-array n) (java.util.ArrayList.) (java.util.ArrayList.)])))
 
 (defn- lower-bound
   "The first index of the sorted a whose value is at least x"
@@ -175,8 +175,11 @@
   "peekHdkM: m's result, the state as it was before"
   [^objects st m]
   (let [^java.util.ArrayList jr (aget st 4) ^booleans taken (aget st 3)
+        ^java.util.ArrayList ws (aget st 5)
         mark (.size jr)
+        wmark (.size ws)
         x (m)]
+    (while (> (.size ws) wmark) (.remove ws (int (dec (.size ws)))))
     (loop [k (dec (.size jr))]
       (when (>= k mark)
         (aset taken (int (.get jr k)) false)
@@ -235,9 +238,12 @@
     GeneratedDocString (= "" (second (nth ds 1)))))
 
 (defn- select-doc-string
-  "selectDocString: the first non-empty one (the others are warnings), or nil"
-  [docs]
-  (first (remove (fn [d] (empty-doc? (nth d 2))) docs)))
+  "selectDocString: the first non-empty one (the others are warnings: reportExtraDocs, kept in the
+  state's list), or nil"
+  [^objects st docs]
+  (let [ds (remove (fn [d] (empty-doc? (nth d 2))) docs)]
+    (doseq [d (rest ds)] (.add ^java.util.ArrayList (aget st 5) {:con :PsWarnHaddockIgnoreMulti :span (nth d 1) :args []}))
+    (first ds)))
 
 (defn- maybe-ldoc
   "lexLHsDocString <$> doc: (Just (L span (WithHsDocIdentifiers ...))), or Nothing"
@@ -249,7 +255,7 @@
   [st r l]
   (let [nexts (take-comments st (restrict r nil (start-pos l)) mk-doc-next)
         prevs (take-comments st (restrict r (end-pos l) nil) mk-doc-prev)]
-    (select-doc-string (into nexts prevs))))
+    (select-doc-string st (into nexts prevs))))
 
 ;;; ------------------------------------------------------------------------------------------
 ;;; HdkA: [bufspan run], run (fn [st range] result)
@@ -672,7 +678,7 @@
     (extend-hdk l
       (lift (fn [st r]
               (let [docs (take-comments st (restrict r (end-pos l) nil) mk-doc-prev)
-                    mb (maybe-ldoc (select-doc-string docs))]
+                    mb (maybe-ldoc (select-doc-string st docs))]
                 (L l (case (first ie)
                        (IEVar IEThingAbs IEThingAll) (list (nth ie 0) (nth ie 1) (nth ie 2) mb)
                        IEThingWith (list 'IEThingWith (nth ie 1) (nth ie 2) (nth ie 3) (nth ie 4) mb)
@@ -709,7 +715,7 @@
                    [modspan (fn [st r]
                               (let [docs (take-comments st (restrict r nil (when modspan (nth modspan 0)))
                                                         mk-doc-next)]
-                                (maybe-ldoc (select-doc-string docs))))])
+                                (maybe-ldoc (select-doc-string st docs))))])
                  (hdk-pure 'Nothing))
         exports' (if (just? exports)
                    (fmap-hdk just (hdk-exports (second exports)))
@@ -724,5 +730,14 @@
   "addHaddockToModule: the module (L span (HsModule ...)) with the documentation comments
   inserted, hdk-comments the lexer's ([span hdk-comment]... in order); the annotations the pass
   reads written nil"
-  [lmod hdk-comments]
-  ((nth (hdk-module lmod) 1) (make-st hdk-comments) range0))
+  [lmod hdk-comments & [on-warning]]
+  (let [st (make-st hdk-comments)
+        r ((nth (hdk-module lmod) 1) st range0)]
+    (when on-warning
+      ;; collectHdkWarnings: the comments left (reportHdkWarning: PsWarnHaddockInvalidPos), then the
+      ;; warnings of the pass, the last made first
+      (let [^booleans taken (aget st 3) cv (aget st 0)]
+        (dotimes [i (count cv)]
+          (when-not (aget taken i) (on-warning {:con :PsWarnHaddockInvalidPos :span (nth (nth cv i) 0) :args []})))
+        (doseq [w (reverse (vec (aget st 5)))] (on-warning w))))
+    r))
