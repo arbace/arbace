@@ -302,7 +302,7 @@
   (doseq [a attrs :let [n (aname a)] :when n]
     (case kind
       :fn (when (and (not= n "align") (not-on-fn? n)) (verr :parser/attr-placement "this attribute does not apply to functions"))
-      :ret (when (and (not= n "captures") (not-on-ret? n)) (verr :parser/attr-placement "this attribute does not apply to return values"))
+      :ret (when (and (not (and (= n "captures") (keyword? a))) (not-on-ret? n)) (verr :parser/attr-placement "this attribute does not apply to return values"))
       :param (when (not-on-param? n) (verr :parser/attr-placement "this attribute does not apply to parameters")))))
 
 (defn- check-attr-values
@@ -336,7 +336,7 @@
 
 (defn- ptr-scalar? [t] (ptr-type? t))
 (def ^:private ptr-only-attrs
-  #{"align" "allocptr" "byref" "byval" "captures" "dead_on_return" "dead_on_unwind" "dereferenceable" "dereferenceable_or_null"
+  #{"align" "allocptr" "byref" "byval" "captures" "elementtype" "dead_on_return" "dead_on_unwind" "dereferenceable" "dereferenceable_or_null"
     "inalloca" "initializes" "nest" "noalias" "nonnull" "preallocated" "readnone" "readonly" "sret" "swifterror" "writable"})
 
 (defn- type-incompatible?
@@ -394,8 +394,8 @@
 (defn- fn-has [attrs n] (has-attr? attrs n))
 
 (defn- check-fn-attr-values
-  "The function attributes' own rules (verifyFunctionAttrs after its param loop)."
-  [attrs ptypes]
+  "The function attributes' own rules (verifyFunctionAttrs after its param loop); `call?`: a call site's."
+  [attrs ptypes call?]
   (let [has #(fn-has attrs %)]
     (when (and (has "noinline") (has "alwaysinline")) (verr :verifier/attr-pair "Attributes 'noinline and alwaysinline' are incompatible!"))
     (when (has "optnone")
@@ -436,15 +436,16 @@
             k (count (filter ws ["alloc" "realloc" "free"]))]
         (when-not (= k 1) (verr :verifier/attr-value "'allockind()' requires exactly one of alloc, realloc, and free"))
         (when (and (ws "zeroed") (ws "uninitialized")) (verr :verifier/attr-value "'allockind()' can't be both zeroed and uninitialized"))))
-    (when (has "jumptable") (verr :verifier/attr-value "Attribute 'jumptable' requires 'unnamed_addr'"))))
+    (when (and (has "jumptable") (not call?)) (verr :verifier/attr-value "Attribute 'jumptable' requires 'unnamed_addr'"))))
 
 (defn- check-function-attrs
   "Verifier::verifyFunctionAttrs over a function type's parts: `ret-attrs`, per-parameter attribute vectors `pattrs`
-  (their types `ptypes`), the function attributes `fattrs`; `intrinsic?`, `asm?`: the callee."
-  [ret-attrs rt pattrs ptypes fattrs intrinsic? asm?]
+  (their types `ptypes`), the function attributes `fattrs`; `intrinsic?`, `asm?`: the callee; `call?`: a call site's."
+  ([ret-attrs rt pattrs ptypes fattrs intrinsic? asm?] (check-function-attrs ret-attrs rt pattrs ptypes fattrs intrinsic? asm? false))
+  ([ret-attrs rt pattrs ptypes fattrs intrinsic? asm? call?]
   (when (or (seq ret-attrs) (some seq pattrs) (seq fattrs))
     (doseq [a ret-attrs :let [n (aname a)] :when n]
-      (when (and (= n "captures")) (verr :verifier/attr-placement (str "Attribute '" (attr-str a) "' does not apply to function return values"))))
+      (when (and (= n "captures") (keyword? a)) (verr :verifier/attr-placement (str "Attribute '" (attr-str a) "' does not apply to function return values"))))
     (check-param-attrs ret-attrs rt)
     (let [saw (java.util.HashSet.)]
       (doseq [[i attrs] (map-indexed vector pattrs) :let [t (nth ptypes i)]]
@@ -471,7 +472,7 @@
         (when (has-attr? attrs "inalloca")
           (when-not (= i (dec (count ptypes))) (verr :verifier/attr-misc "inalloca isn't on the last parameter!")))))
     (when (seq fattrs)
-      (check-fn-attr-values fattrs ptypes))))
+      (check-fn-attr-values fattrs ptypes call?)))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Phase 1: LLParser's checks
@@ -713,7 +714,9 @@
     (check-linkage o what)
     (check-attr-placement :ret (:ret-attrs o)) (check-attr-values (:ret-attrs o))
     (doseq [p ps :when (vector? p)] (let [as (param-attrs p)] (check-attr-placement :param as) (check-attr-values as)))
-    (let [as (remove integer? (:attrs o))] (check-attr-placement :fn as) (check-attr-values as))
+    (let [as (remove integer? (:attrs o))]
+      (check-attr-placement :fn as) (check-attr-values as)
+      (when (has-attr? as "builtin") (verr :parser/attr-placement "'builtin' attribute not valid on function")))
     (when (and (not= (norm-type rt) 'void) (some #(has-attr? (param-attrs %) "sret") (remove #{'&} ps)))
       (verr :parser/sret-return "functions with 'sret' argument must return void"))
     (doseq [p (remove #{'&} ps) :let [t (norm-type (first p))]]
@@ -938,7 +941,9 @@
         pattrs (mapv #(group-items (param-attrs %)) pl)
         cc (:cconv o)]
     (when-not intr?
-      (when (has-attr? fattrs "builtin") (verr :verifier/attr-misc "Attribute 'builtin' can only be applied to a callsite.")))
+      (when (has-attr? fattrs "builtin") (verr :verifier/attr-misc "Attribute 'builtin' can only be applied to a callsite."))
+      (when (or (has-attr? (group-items (:ret-attrs o)) "elementtype") (some #(has-attr? % "elementtype") pattrs))
+        (verr :verifier/attr-misc "Attribute 'elementtype' can only be applied to a callsite.")))
     (when (and (has-attr? fattrs "naked") (= h 'llvm/define))
       (let [names (set (keep #(when (local? (peek %)) (local-key (peek %))) pl))]
         (doseq [[_ _ & items] blocks x items :when (not (dbg-record? (body x)))
@@ -1059,7 +1064,7 @@
         fattrs (group-items (:attrs o))]
     (when (contains? cc-no-calls (:cconv o)) (verr :verifier/cc "calling convention does not permit calls"))
     (check-function-attrs (group-items (:ret-attrs o)) (norm-type (second fty)) (subvec pattrs 0 (min nparams (count pattrs)))
-                          (subvec ptypes 0 (min nparams (count ptypes))) fattrs direct-intr? (and (seq? c) (= (first c) 'asm)))
+                          (subvec ptypes 0 (min nparams (count ptypes))) fattrs direct-intr? (and (seq? c) (= (first c) 'asm)) true)
     (when (has-attr? fattrs "speculatable") (verr :verifier/attr-misc "speculatable attribute may not apply to call sites"))
     (let [d (when (global? c) (.get *gdefs* (global-key c)))
           dps (when (and d (= (:kind d) :function)) (vec (remove #{'&} (nth (:form d) 3))))]
