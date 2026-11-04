@@ -572,8 +572,20 @@ cmd_lib_test() {
 AOT="$WORK/aot"
 aot_go() {
   (cd "$AOT/mod" && env GOROOT="${ARBACE_GOROOT:-/root/tamago-go}" GOTOOLCHAIN=local GOFLAGS= GOWORK=off GO111MODULE=on \
-     GOPROXY=off CGO_ENABLED=0 GOCACHE="${PYI_AOT_GOCACHE:-$AOT/gocache}" GOMAXPROCS=${GOMAXPROCS:-4} \
+     GOPROXY=off CGO_ENABLED=0 GOCACHE="${PYI_AOT_GOCACHE:-$(aot_shared)/gocache}" GOMAXPROCS=${GOMAXPROCS:-4} \
      "${ARBACE_GOROOT:-/root/tamago-go}/bin/go" "$@")
+}
+# aot_shared: what pyi's AOT keeps across worktrees (R4, queue 201: a cold check --aot paid once per runtime, not in
+# every worktree): the compiled modules' printed packages (pkgs-GEN, by the generator's digest and each module's IR hash)
+# and Go's build cache, under the main checkout's .tmp/repr-python/pyi/aot-shared (PYI_AOT_SHARED another; =$AOT: the
+# worktree's own); the runtime's module, the programs and their logs stay the worktree's ($AOT)
+aot_shared() {
+  local d=${PYI_AOT_SHARED:-}
+  if [ -z "$d" ]; then
+    local main; main=$(cd "$root" && cd "$(git rev-parse --git-common-dir 2>/dev/null || echo .git)/.." 2>/dev/null && pwd) || main=$root
+    d="$main/.tmp/repr-python/pyi/aot-shared"
+  fi
+  mkdir -p "$d"; echo "$d"
 }
 aot_gen() { cat "$root/arbace/python/aot.ae" | sha256sum | cut -c1-16; }
 # aot_module: the module the compiled programs build in: the runtime (go/arbace/py and go/arbace/libm printed,
@@ -602,7 +614,7 @@ SH
 # compile-time error of the program OUT.cout, .cerr, .crc its outcome (CPython's: the SyntaxError, status 1)
 aot_compile() {
   local pkg=$1 file=$2 out=$3 gen; gen=$(aot_gen)
-  local src="$AOT/src/$pkg" w="$AOT/print/$pkg" log="$AOT/log/$pkg" cache="$AOT/pkgs-$gen"
+  local src="$AOT/src/$pkg" w="$AOT/print/$pkg" log="$AOT/log/$pkg" cache="$(aot_shared)/pkgs-$gen"
   mkdir -p "$AOT/log" "$cache" "$(dirname "$out")"
   rm -rf "$src" "$w" "$AOT/mod/pyaot/$pkg" "$out" "$out".{refused,cout,cerr,crc}
   local rc=0
@@ -623,7 +635,13 @@ aot_compile() {
   fi
   local nm st
   while read -r nm st; do
-    if [ "$st" = new ]; then rm -rf "$cache/$nm"; cp -r "$w/mod/pyaot/$nm" "$cache/$nm"; fi
+    # into the shared cache through a name of its own, then renamed (another worktree may write the same package:
+    # its content is the same, keyed by the IR's hash)
+    if [ "$st" = new ] || [ ! -d "$cache/$nm" ]; then
+      rm -rf "$cache/.$nm.$$"; cp -r "$w/mod/pyaot/$nm" "$cache/.$nm.$$"
+      rm -rf "$cache/$nm.old.$$"; [ ! -d "$cache/$nm" ] || mv "$cache/$nm" "$cache/$nm.old.$$" 2>/dev/null || true
+      mv "$cache/.$nm.$$" "$cache/$nm" 2>/dev/null || rm -rf "$cache/.$nm.$$"; rm -rf "$cache/$nm.old.$$"
+    fi
     [ -d "$AOT/mod/pyaot/$nm" ] || cp -r "$cache/$nm" "$AOT/mod/pyaot/$nm"
   done < <(awk '$1 == "module" && $4 != "-" {print $4, $5} $1 == "main" {print $2, $3}' "$log.compile")
   mkdir -p "$AOT/mod/pyaot/$pkg"; cp -r "$w/mod/pyaot/$pkg/prog" "$AOT/mod/pyaot/$pkg/"
@@ -721,7 +739,7 @@ pa_arbace_aot() {
 }
 # aot_cache_trim: Go's cache of the compiled programs kept under 2 GB
 aot_cache_trim() {
-  local c=${PYI_AOT_GOCACHE:-$AOT/gocache}
+  local c=${PYI_AOT_GOCACHE:-$(aot_shared)/gocache}
   [ -d "$c" ] || return 0
   if [ "$(du -sm "$c" | cut -f1)" -gt "${PYI_AOT_GOCACHE_MB:-2000}" ]; then aot_go clean -cache; fi
 }
