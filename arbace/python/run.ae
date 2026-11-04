@@ -4,15 +4,14 @@
   configuration (go.arbace.py/Configure: sys.argv, sys.path). Evaluated from the checkout on stage 0, as
   arbace.python is (PYS18 (a)).
 
-  The compiler: source text read by the helper (tools/pydump/pydump.py tree --full: the reader until PY9's native
-  one), converted (arbace.repr.python.convert) and compiled (arbace.python.compile); the IR's text, or
+  The compiler: source text read by the native reader (PY9; before it the helper, tools/pydump/pydump.py tree --full),
+  converted (arbace.repr.python.convert) and compiled (arbace.python.compile); the IR's text, or
   \"SyntaxError: MESSAGE\", or for mode single \"incomplete\" (codeop's rule). The modes are the compiler's
   (arbace.python.compile/compile-source: exec; eval, the expression's value returned; single, each expression statement
   displayed by print-expr, sys.displayhook). Compiled code is kept by the SHA-256 of the mode, the source and the
   compiler's sources, in WORK/ir-cache."
   (:require [arbace.python.compile :as pc]
             [arbace.repr.python.convert :as cv]
-            [arbace.java.shell :as sh]
             [arbace.string :as str])
   (:import [java.io File]
            [java.security MessageDigest]))
@@ -27,31 +26,22 @@
     (hex (.digest md (.getBytes s "UTF-8")))))
 
 (def ^:private compiler-digest
-  (delay (sha256 (apply str (for [f ["arbace/python/compile.ae" "arbace/python/ir.ae" "arbace/python/scope.ae"
-                                     "arbace/python/run.ae" "arbace/repr/python/convert.ae" "tools/pydump/pydump.py"
-                                     "tools/pyi/ast_json.py"]
+  (delay (sha256 (apply str (for [f (concat ["arbace/python/compile.ae" "arbace/python/ir.ae" "arbace/python/scope.ae"
+                                             "arbace/python/run.ae"]
+                                            ;; the native reader (PY9): arbace/repr/python's namespaces
+                                            (sort (for [^File x (.listFiles (File. (str root "/arbace/repr/python")))
+                                                        :when (.endsWith (.getName x) ".ae")]
+                                                    (str "arbace/repr/python/" (.getName x)))))
                                   :let [ff (File. (str root "/" f))] :when (.exists ff)]
                               (str f "\u0000" (slurp ff) "\u0000"))))))
 
 (def ^:private counter (atom 0))
 
 (defn- read-dump
-  "The helper's dump of source: the module's forms or its (python/error ...)"
+  "The native reader's forms of source (PY9: arbace.repr.python.astjson/read-forms, mode :full, as the helper's
+  tools/pydump/pydump.py tree --full gave them): the module's forms or its (python/error ...)"
   [source]
-  (let [d (str work "/compile/" (System/getenv "PYI_RUN_ID") "-" (swap! counter inc))
-        dd (File. d)]
-    (.mkdirs dd)
-    (spit (str d "/src.py") source)
-    (spit (str d "/list") "src.py\n")
-    (let [r (sh/sh "python3" "-I" "-S" "-B" (str root "/tools/pydump/pydump.py") "tree" "--full" "--base" d
-                   "--list" (str d "/list") "--out" (str d "/dumps") "--tsv" (str d "/tsv"))
-          f (File. (str d "/dumps/src.py.ae"))]
-      (try
-        (if (.exists f)
-          (cv/convert (slurp f))
-          (list 'python/error 'SystemError (str "the reader failed: " (:err r))))
-        (finally
-          (doseq [^File x (reverse (file-seq dd))] (.delete x)))))))
+  ((requiring-resolve 'arbace.repr.python.astjson/read-forms) source))
 
 (defn- node-head [x] (when (seq? x) (first x)))
 
@@ -97,16 +87,11 @@
   [form]
   (second (drop-while #(not= :pos %) form)))
 
-(defn- ast-answer
-  "compile()'s PyCF_ONLY_AST (mode \"ast:MODE:FLAGS:FEATURE:OPTIMIZE\"): the host's CPython parses (tools/pyi/ast_json.py,
-  the reader until PY9's native one), \"AST:\" and the tree as JSON, or the SyntaxError answer (PY6h's REQUEST, queue 200)"
+(defn- native-answer
+  "compile()'s PyCF_ONLY_AST (mode \"ast:MODE:FLAGS:FEATURE:OPTIMIZE\") and _tokenize's tokens (mode \"tokenize:EXTRA\"):
+  the native reader's answers (PY9, arbace.repr.python.astjson/compile-answer; tools/pyi/ast_json.py's form)"
   [mode file source]
-  (let [[_ m flags feature opt] (str/split mode #":")
-        r (sh/sh "python3" "-I" "-S" "-B" (str root "/tools/pyi/ast_json.py") (or file "<unknown>") m flags feature opt
-                 :in source)]
-    (if (and (zero? (:exit r)) (seq (:out r)))
-      (:out r)
-      (str "SystemError: pyi's ast reader: " (str/replace (str (:err r)) #"\n" " ")))))
+  ((requiring-resolve 'arbace.repr.python.astjson/compile-answer) mode file source))
 
 (defn- compile-uncached [mode source]
   (let [form (read-dump source)]
@@ -127,8 +112,11 @@
         cf (File. (str work "/ir-cache/" (subs key 0 2) "/" key))]
     (if (.exists cf)
       (slurp cf)
-      (let [r (if (str/starts-with? mode "ast:") (ast-answer mode file source) (compile-uncached mode source))]
-        (when (or (str/starts-with? r "{") (str/starts-with? r "AST:") (= r "incomplete") (str/starts-with? r "SyntaxError: "))
+      (let [r (if (or (str/starts-with? mode "ast:") (str/starts-with? mode "tokenize:"))
+                (native-answer mode file source)
+                (compile-uncached mode source))]
+        (when (or (str/starts-with? r "{") (str/starts-with? r "AST:") (str/starts-with? r "TOK:") (= r "incomplete")
+                  (str/starts-with? r "SyntaxError: "))
           (.mkdirs (.getParentFile cf))
           (let [tmp (File. (str (.getPath cf) ".tmp" (swap! counter inc)))]
             (spit tmp r)
