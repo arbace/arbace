@@ -1,0 +1,2 @@
+module PostEmptyQuotes where
+f = ''
