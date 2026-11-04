@@ -13,7 +13,9 @@
 #                          files above: the tool's output, which names the key; the suite's
 #                          fixtures, the test build's input) and the check scripts of
 #                          bin/lib/repr-* and bin/lib/frozen.bash (they run the tool, they do not
-#                          build it)
+#                          build it), and the crops' Go forms (go/arbace/{oi,scm,scminterp,py,libm}{.ae,/},
+#                          the user, 2026-11-03: a crop's Go change rebuilds no javac tool; javac's world
+#                          calls none of them)
 #   arbace_javac_fresh WHO EXE
 #                          prints EXE's key, recorded beside it by the tool build (EXE.key), when
 #                          it is the checkout's; else stops (status 1) with a message naming the
@@ -28,7 +30,10 @@ arbace_javac_key() {
     find arbace go overlay jdk x509roots bin/lib tamago/goroot tools/godump -type f ! -path jdk/provenance.edn ! -path jdk/javac/provenance.edn \
          ! -path 'bin/lib/repr-java/*' ! -path 'bin/lib/repr-go/*' ! -path 'bin/lib/repr-clojure/*' \
          ! -path 'bin/lib/repr-haskell/*' ! -path 'bin/lib/repr-rust/*' ! -path bin/lib/frozen.bash ! -path bin/lib/java26.bash \
-         ! -path bin/lib/gate-run.bash | LC_ALL=C sort
+         ! -path bin/lib/gate-run.bash \
+         ! -path go/arbace/oi.ae ! -path 'go/arbace/oi/*' ! -path go/arbace/scm.ae ! -path 'go/arbace/scm/*' \
+         ! -path go/arbace/scminterp.ae ! -path 'go/arbace/scminterp/*' \
+         ! -path go/arbace/py.ae ! -path 'go/arbace/py/*' ! -path go/arbace/libm.ae ! -path 'go/arbace/libm/*' | LC_ALL=C sort
     printf '%s\n' seed/arbace-seed-go.tar.xz.sha256 seed/goroot.sha256 bin/arbace-go bin/j2g bin/repr-go bin/build-go bin/jrt bin/seed bin/goi bin/javac-vendor
   } | xargs -d '\n' sha256sum
     cat "${ARBACE_GOROOT:-/root/tamago-go}/VERSION") | sha256sum | cut -c1-64
