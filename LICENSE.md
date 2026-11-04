@@ -13,8 +13,8 @@ covers what.
 
 - `arbace/`: the vendored Clojure in it (everything outside the tools `arbace/classes/`,
   `arbace/repr/`, `arbace/build/`, `arbace/j2g/` and `arbace/c2j/`, which are Arbace's own but
-  for repr/java's native lexer and parser, ports of jdk26u's javac, and repr/c's lexer and
-  preprocessor, ports of cc, below) is
+  for repr/java's native lexer and parser, ports of jdk26u's javac, repr/c's lexer and
+  preprocessor, ports of cc, and repr/haskell's native reader, ports of GHC, below) is
   derived from Clojure, https://github.com/clojure/clojure at `98d735fab02f337cee654cb0629bddc09883a75a`,
   with ASM, https://gitlab.ow2.org/asm/asm at `0460f74ba64230e5b846967c81a52628b5dd0596`: the frozen tree `clojure/` that this repository
   held until the freeze (it remains on the branch `arbace-for-java-26`), renamed to `arbace.*`,
@@ -597,6 +597,22 @@ covers what.
   members' original annotations) and `comp/MemberEnter.java` (`handleDeprecatedAnnotations`):
   Copyright (c) Oracle and/or its affiliates, under the GNU General Public License version 2 with the
   Classpath Exception (text below; each file carries the notice).
+- `arbace/repr/haskell/lex.ae`, `header.ae`, `post.ae`, `post_decl.ae`, `rules_module.ae`,
+  `rules_decl.ae`, `rules_expr.ae`, `haddock.ae` and `haddocklex.ae` (repr/haskell's native reader,
+  doc/haskell/NATIVE.md): ports of GHC 9.14.1, https://downloads.haskell.org/ghc/9.14.1/ghc-9.14.1-src.tar.xz
+  (SHA-256 `2a83779c9af86554a3289f2787a38d6aa83d00d136aa9f920361dd693c101e77`, the corpus's pin):
+  `compiler/GHC/Parser/Lexer.x` (with `Lexer/String.x`, `Lexer/Interface.hs`, `String.hs`,
+  `CharClass.hs`), `GHC/Parser/Header.hs`, the language extensions of `GHC/Driver/{DynFlags,Flags,Session}.hs`,
+  `GHC/Parser.y`'s actions, `GHC/Parser/PostProcess.hs`, `GHC/Parser/PostProcess/Haddock.hs`,
+  `GHC/Parser/HaddockLex.x` and the builders of `GHC/Hs/{Utils,Type}.hs` they use (the tarball names
+  the Alex and Happy sources `*.x.source` and `Parser.y.source`), by hand on 2026-11-04, each file
+  carrying GHC's notice: Copyright 2002, The University Court of the University
+  of Glasgow, under the Glasgow Haskell Compiler License, a BSD 3-Clause License ("GHC: the Glasgow
+  Haskell Compiler License" below). `arbace/repr/haskell/tables.ae` is generated from that tarball's
+  `compiler/GHC/Parser.y.source` (its grammar, the same Glasgow license) by `happy.ae`, Arbace's own port of
+  Happy's LALR(1) construction (no Happy code: Happy is a tool, its tables in GHC's generated
+  `Parser.hs` the check); `happy.ae`, `ast.ae`, `parse.ae` and `native.ae` are Arbace's own, under the
+  Eclipse Public License 1.0.
 - `decodeUTF16` and `encodeUTF16` in `go/arbace/jrt/codec.ae`, and `indent`, `stripIndent` and
   `translateEscapes` in `go/arbace/jrt/string.ae`: jrt's hand-written Go forms following the code
   of https://github.com/openjdk/jdk26u at `baf63fb`
@@ -2812,6 +2828,45 @@ DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
 THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
 THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+```
+
+## GHC: the Glasgow Haskell Compiler License
+
+The `LICENSE` of GHC 9.14.1's source tarball (above), covering what repr/haskell's native reader
+ports from GHC:
+
+```
+The Glasgow Haskell Compiler License
+
+Copyright 2002, The University Court of the University of Glasgow.
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+- Redistributions of source code must retain the above copyright notice,
+this list of conditions and the following disclaimer.
+
+- Redistributions in binary form must reproduce the above copyright notice,
+this list of conditions and the following disclaimer in the documentation
+and/or other materials provided with the distribution.
+
+- Neither name of the University nor the names of its contributors may be
+used to endorse or promote products derived from this software without
+specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE UNIVERSITY COURT OF THE UNIVERSITY OF
+GLASGOW AND THE CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES,
+INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND
+FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
+UNIVERSITY COURT OF THE UNIVERSITY OF GLASGOW OR THE CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
+DAMAGE.
 ```
 
 ## CPython: the PSF License Agreement for Python 3.14

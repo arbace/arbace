@@ -42,7 +42,21 @@ code. Three kinds of things live here:
   2026-10-27, the files carrying their notice; "As built: JN9e" (the read without javac itself,
   `repr/java.ae`'s `convert-units-nojavac`, `resolve.ae`'s native class infos and `split.ae`'s summary,
   is Arbace's own);
-  `repr/java/classfile.ae`, `nattr.ae` are Arbace's own), `repr/c/` (repr/c, C's bridge,
+  `repr/java/classfile.ae`, `nattr.ae` are Arbace's own), `repr/haskell.ae` and `repr/haskell/`
+  (repr/haskell, Haskell's bridge, `arbace.repr.haskell.*`; doc/haskell/SPEC.md, HASKELL-NOTES.md: the
+  converter, the printer and the checks are Arbace's own; its native reader, doc/haskell/NATIVE.md,
+  ports GHC 9.14.1, https://downloads.haskell.org/ghc/9.14.1/ghc-9.14.1-src.tar.xz (SHA-256
+  `2a83779c...101e77`, the corpus's pin): `repr/haskell/lex.ae` ports `compiler/GHC/Parser/Lexer.x` with
+  `Lexer/String.x`, `Lexer/Interface.hs`, `String.hs`, `CharClass.hs`; `header.ae` `GHC/Parser/Header.hs` and
+  the extension flags of `GHC/Driver/{DynFlags,Flags,Session}.hs`; `rules_module.ae`, `rules_decl.ae`
+  and `rules_expr.ae` the actions of `GHC/Parser.y`; `post.ae` and `post_decl.ae`
+  `GHC/Parser/PostProcess.hs` with the builders of `GHC/Hs/{Utils,Type}.hs`; `haddock.ae` and
+  `haddocklex.ae` `GHC/Parser/PostProcess/Haddock.hs` and `GHC/Parser/HaddockLex.x`; ported by hand on
+  2026-11-04 (the tarball names the Alex and Happy sources `*.x.source`, `Parser.y.source`), the files
+  carrying GHC's notice; `tables.ae` is generated from the tarball's `Parser.y.source` by
+  `happy.ae`, Arbace's own port of Happy's LALR(1) construction, checked equal to the tables of the
+  tarball's `Parser.hs` (Happy 1.20.1.1's output); `ast.ae`, `parse.ae`, `native.ae` are Arbace's own),
+  `repr/c/` (repr/c, C's bridge,
   `arbace.repr.c.*`; doc/C23-SURVEY.md, doc/c/SPEC.md: its lexer and preprocessor, `repr/c/lex.ae` and
   `pp.ae`, are ports of modernc.org/cc/v4 v4.29.7 as go-whim carries it, https://github.com/arbace/go-whim
   at `80c49bf53cd6340487ac623f3d6d135b77ac1db6`, `crefactor/cc/scanner.go` and `cpp.go` with the parts of

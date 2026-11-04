@@ -260,3 +260,41 @@ On branch `night-fix` (from `b2a4911f`), not merged while `--full` ran on main:
 - Python on the Mac VM: PY1-PY3 done (spec and pins; read and print over 2,800 files; `:full` byte for byte with
   `marshal` equal on 2,795), the user's decisions: two parses for type comments, 20 pinned site-packages apks,
   `:code-lines` by design for `:lines`, `:charset` by design; PY4 running.
+
+## 2026-11-04: repr/haskell's native reader (branch `haskell-native`)
+
+- **What:** Haskell text read into GHC 9.14.1's parsed tree by Arbace code alone, no GHC at read time,
+  written as the helper's dump of mode `:lines` so that the converter makes the same forms
+  (doc/haskell/NATIVE.md). Ported by hand from the corpus's pinned tarball,
+  https://downloads.haskell.org/ghc/9.14.1/ghc-9.14.1-src.tar.xz (SHA-256
+  `2a83779c9af86554a3289f2787a38d6aa83d00d136aa9f920361dd693c101e77`), read in place:
+  `compiler/GHC/Parser/Lexer.x.source` (with `Lexer/String.x.source`, `Lexer/Interface.hs`, `String.hs`,
+  `CharClass.hs`) into `arbace/repr/haskell/lex.ae`; `GHC/Parser/Header.hs` and the extension flags of
+  `GHC/Driver/{DynFlags,Flags,Session}.hs` into `header.ae`; `GHC/Parser.y.source`'s actions into
+  `rules_module.ae`, `rules_decl.ae`, `rules_expr.ae`; `GHC/Parser/PostProcess.hs` with the builders of
+  `GHC/Hs/{Utils,Type}.hs` into `post.ae`, `post_decl.ae`; `GHC/Parser/PostProcess/Haddock.hs` and
+  `GHC/Parser/HaddockLex.x.source` into `haddock.ae`, `haddocklex.ae`. Licenses: GHC's BSD-style
+  Glasgow license, its text added to LICENSE.md; origins in doc/ARBACE.md.
+- **Decided: a generated LALR(1) parser**, not a hand-written one following `Parser.y`. `happy.ae`
+  ports Happy's construction (LR(0), DeRemer-Pennello lookaheads, `%shift`, the default actions) and
+  `tables.ae` is its output for the pinned grammar, proven equal to Happy 1.20.1.1's tables in the
+  tarball's `Parser.hs`, state for state (907 productions, 1,537 states; `bin/repr-haskell tables
+  --check`). Why: the layout's parse-error(t) rule is Parser.y's `close : error {% popContext }`,
+  decided by where the automaton has no action; the 264 `%shift`-resolved conflicts and the one
+  grammar of expressions, patterns and commands stay GHC's; a new GHC regenerates the tables and
+  shows its new rules as actions missing. The alternative, decoding `Parser.hs`'s tables, would keep
+  generated data with no generator; it is the check instead. The lexer is hand-ported with Alex's
+  semantics rather than a port of Alex's DFA construction (small regular expressions, code actions).
+- **CPP, unlit, hsc2hs** stay GHC's driver's: the helper's new verb `cpp` writes the text GHC parses
+  (`FILE.hspp`) and its configuration (`FILE.hspp.edn`); the native reader parses that text with its
+  line markers as GHC does. A native preprocessor is a later step, as are rejected files' messages.
+- **Wired:** `bin/repr-haskell read --reader native` (dumps, then the converter's forms),
+  `native-check [LIST]` (default `test/haskell/native-check.txt`), `tables [--check]`; the Makefile's
+  `repr-haskell-native-check`, `repr-haskell-tables-check`.
+- **Results:** `native-check` 54 of 54 equal (the crop's 17 samples and 37 boot-library modules of 22
+  packages, 12 preprocessed), trees, pragmas and forms, 7.6 s natively, 21 s with the helper's runs.
+  While building: 119 more modules without preprocessing, 88 preprocessed, the 25 `.hs-boot` files and
+  three modules of rare syntax, equal (the converter rejects the three, the helper's dumps too:
+  arrows' `HsProc`, `{-# ANN module #-}`, a quasi-quote in a type: the converter's gaps, not the
+  reader's). The declarations' port was also run over the corpus's existing dumps, 1,316 of 1,345
+  modules, trees equal: wider than the light check intended for this step.

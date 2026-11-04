@@ -1163,3 +1163,12 @@ are R6's. The run of `roundtrip --iface --text --layout`: 616 s through the slot
 bin/repr-haskell roundtrip --iface --text --layout
 bin/repr-haskell test                                # step 9: test/haskell/hr26/
 ```
+
+## The native reader (2026-11-04)
+
+`bin/repr-haskell read --reader native` reads a module with no GHC: Arbace's ports of GHC 9.14.1's
+lexer, of its Happy grammar (LALR(1) tables generated from `Parser.y` and checked equal to Happy's),
+of PostProcess and of the Haddock pass give the helper's dump of mode `:lines`, which the converter
+turns into the same forms. The helper stays the oracle (`bin/repr-haskell native-check`); CPP, unlit
+and hsc2hs stay GHC's driver's (the helper's `cpp` verb). Design, results and what is left:
+[NATIVE.md](NATIVE.md).
