@@ -1203,7 +1203,7 @@
   (when-let [ops (md-ops x)]
     (when (empty? ops) (verr :verifier/md-misc "TBAA metadata cannot have 0 operands"))
     (let [acc (md-ops (second ops))]
-      (when-not (and (>= (count ops) 2) acc (= 3 (count acc)) (md-str (first acc)) (md-int-op? (nth acc 2)) (zero? (.signum ^java.math.BigInteger (md-int-val (nth acc 2)))))
+      (when-not (and (>= (count ops) 3) acc (= 3 (count acc)) (md-str (first acc)) (md-int-op? (nth acc 2)) (zero? (.signum ^java.math.BigInteger (md-int-val (nth acc 2)))))
         (verr :verifier/md-misc "Access type node must be a valid scalar type"))
       (when (and (>= (count ops) 3) (md-int-op? (nth ops 2)) (not= (norm-type (first (nth ops 2))) (norm-type (first (nth acc 2)))))
         (verr :verifier/md-misc "Access bit-width not the same as description bit-width")))))
@@ -1437,10 +1437,39 @@
           "DIGlobalVariable" (when (or (nil? (:type fs)) (= (:type fs) 'null)) (verr :di/node "missing global variable type"))
           nil)))))
 
+(defn- md-refs-in [x]
+  (let [out (java.util.ArrayList.)]
+    (letfn [(walk [y] (cond (md-ref? y) (.add out y) (or (seq? y) (vector? y)) (doseq [z y] (walk z))))] (walk x))
+    out))
+
+(defn- reachable-md
+  "The metadata ids reachable from the named metadata, the attachments and the debug records (what the Verifier visits)."
+  [forms]
+  (let [seen (java.util.HashSet.) work (java.util.ArrayDeque.)
+        push! (fn [r] (when (.add seen r) (.add work r)))]
+    (doseq [f forms]
+      (case (first f)
+        llvm/named-meta (doseq [r (md-refs-in (nth f 2))] (push! r))
+        (llvm/define llvm/declare) (let [o (apply hash-map (drop 4 f))]
+                                     (doseq [r (md-refs-in (:md o))] (push! r))
+                                     (doseq [[_ _ & items] (:body o) x items]
+                                       (let [b (body x)]
+                                         (if (dbg-record? b)
+                                           (doseq [r (md-refs-in (rest b))] (push! r))
+                                           (doseq [r (md-refs-in (:md (nth (split-inst b) 2)))] (push! r))))))
+        llvm/global (doseq [r (md-refs-in (drop 3 f))] (push! r))
+        nil))
+    (loop []
+      (when-let [r (.poll work)]
+        (doseq [s (md-refs-in (get *meta* r))] (push! s))
+        (recur)))
+    seen))
+
 (defn- phase-debug
   "Debug info checks: nothing here makes the module invalid (opt warns and strips), the first message is the result."
   [forms]
-  (let [nodes (for [f forms :when (= (first f) 'llvm/meta) :let [n (nth f 2)] :when (di-kind n)] [(second f) n])
+  (let [reach (reachable-md forms)
+        nodes (for [f forms :when (= (first f) 'llvm/meta) :let [n (nth f 2)] :when (and (di-kind n) (.contains ^java.util.Set reach (second f)))] [(second f) n])
         defs (filter #(= (first %) 'llvm/define) forms)
         dbg? (fn [md] (some #(= % '!dbg) (take-nth 2 md)))
         has-di? (or (seq nodes)
@@ -1594,6 +1623,11 @@
                                 (when-not (or (= a 'poison)
                                               (and (local? a) (when-let [[_ _ db] (.get defs (local-key a))] (= 'alloca (first db)))))
                                   (verr :verifier/lifetime "llvm.lifetime.start/end can only be used on alloca or poison")))))))
+                      (when (= hd 'invoke)
+                        (let [c (second (nth (split-inst b) 1))]
+                          (when (and (global? c) (intr/recognized? (global-key c))
+                                     (not (re-find #"^llvm\.(donothing|experimental\.patchpoint|experimental\.gc\.statepoint|coro\.resume|coro\.destroy|seh\.|wasm\.(re)?throw)" (global-key c))))
+                            (verr :verifier/intrinsic-call "Cannot invoke an intrinsic other than donothing, patchpoint, statepoint, coro_resume, coro_destroy, clang.arc.attachedcall or wasm.(re)throw"))))
                       (when ('#{call invoke callbr} hd)
                         (check-call-site b defs)
                         (when (and (= hd 'call) (= :musttail (:tail (nth (split-inst b) 2))))
