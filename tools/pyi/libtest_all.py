@@ -22,13 +22,15 @@ usage: python3 -I -S -B libtest_all.py VERB ...
       wall past its cap (default 3600), stops: no DONE, the judge's "crash" lines, status 124 for the cap. Modules
       already run in DIR (a .status) are kept: the run resumes. Each run's TMPDIR a short directory under D (default
       DIR/_tmp), removed after its module; after each module what the runs left in /tmp (perf-PID.map, pymp-*,
-      tempfile's names) removed and logged into DIR/tmp-leftovers.log (the VM forbids /tmp).
+      tempfile's names) removed and logged into DIR/tmp-leftovers.log (the VM forbids /tmp). PYI_LIB_TEST_ONLY (PY7, bin/pyi
+      check --only): the driver runs only the listed MODULE/TEST-ID of a module it names. PYI_LIB_TEST_DRIVER_EXE (PY7, bin/pyi
+      cover): the driver compiled by pyi's AOT runs each module (on its loop), PYI_LIB_TEST_COVER/MODULE its GOCOVERDIR.
   owned --owners FILE --modules FILE [--invert]
       the modules of the list a family owns (FILE's FAMILY<TAB>REGEX lines), or with --invert the others
   table --dir DIR --summary FILE --out FILE [--owners FILE --modules FILE]
       the whole Lib/test table (Markdown): per module (a module a family owns: its row "the family's", out of the sums), imports or not with the first cause, methods equal, classed,
       failing (the judge's summary.tsv), the first cause of its failing methods; then the causes summed over modules
-  controls --dir DIR --controls FILE --ref REF --judge CMD...
+  controls --dir DIR --controls FILE --ref REF[,REF...] --judge CMD...
       GTS81 (a)'s negative controls: each pair's subject run judged as the reference module (its files copied under the
       reference's name into DIR/_controls/ID) by the judge with no classes; the judge must fail. Exit 1 when a control
       passes ("control passed") or was not judged; a control whose subject was not run is printed and left.
@@ -202,6 +204,19 @@ def run_module(m, root, d, oracle, test_timeout, module_timeout, tmp):
         if oracle:
             cmd = ["python3", "-s", "-P", "-B", driver, m, skipfile]
             e = dict(env(os.path.join(d, "_work")), PYTHONPATH=oracle, TMPDIR=tmp)
+            if os.environ.get("PYI_LIB_TEST_ONLY"):
+                e["PYI_LIB_TEST_ONLY"] = os.environ["PYI_LIB_TEST_ONLY"]
+        elif os.environ.get("PYI_LIB_TEST_DRIVER_EXE"):
+            # the driver compiled by pyi's AOT (bin/pyi cover: built with Go's -cover), the module on its loop; each
+            # module's counters in PYI_LIB_TEST_COVER/MODULE (Go writes them at the process's exit, one file a run)
+            cmd = [os.environ["PYI_LIB_TEST_DRIVER_EXE"], driver, m, skipfile]
+            e = dict(os.environ, TMPDIR=tmp)
+            if os.environ.get("PYI_LIB_TEST_COVER"):
+                cov = os.path.join(os.environ["PYI_LIB_TEST_COVER"], m)
+                os.makedirs(cov, exist_ok=True)
+                with open(os.path.join(cov, "id"), "w") as f:
+                    f.write(m + "\n")
+                e["GOCOVERDIR"] = cov
         else:
             cmd = [os.path.join(root, "bin", "pyi"), "run", driver, m, skipfile]
             e = dict(os.environ, TMPDIR=tmp)
@@ -438,7 +453,7 @@ def cmd_controls(args):
             src = os.path.join(d, subj + "." + ext)
             if os.path.exists(src):
                 shutil.copy(src, os.path.join(cd, refm + "." + ext))
-        p = subprocess.run(judge + ["--dir", cd, "--ref", ref, "--known", os.devnull, "--no-known", refm],
+        p = subprocess.run(judge + ["--dir", cd] + sum((["--ref", r] for r in ref.split(",")), []) + ["--no-classes", refm],
                            capture_output=True, text=True)
         summ = [l for l in p.stdout.split("\n") if l.startswith("lib-test " + refm + ":")]
         if not summ:

@@ -1,55 +1,122 @@
-;; The judge of bin/pyi lib-test (queue 194, PY6a): Lib/test's language-core modules run by pyi through
-;; test/python/libtest.py, each test method's outcome against CPython 3.14.10's (test/python/ref-cpython314-lib-test.edn),
-;; a method that is not equal passing only when test/python/lib-test-known.edn names it with a class of its :classes.
+;; The judge of Lib/test under pyi (bin/pyi check, divergences, lib-test and lib-test-all; queue 194 PY6a, queue 201 PY7):
+;; each test method's outcome under pyi against CPython 3.14.10's (the references, test/python/ref-cpython314-lib-test*.edn),
+;; a method that is not equal in a class of test/python/divergences.edn (GR10's format, as test/goi/divergences.edn and
+;; test/java/divergences.edn), and against the check's record (test/python/check-lib-test-linux-amd64.edn), as goi's check
+;; judges a run against its reference: a method the record passes that does not pass now fails (a regression).
 ;;
-;; A method's line, what the classes' :match regexes see: "import MESSAGE" (the module does not import: its first error),
-;; "import MESSAGE" also for a method of a package's submodule the loader could not import (its _FailedTest's error);
-;; "stopped-in MESSAGE" (the driver stopped in the method: the last line of its standard error, or a timeout), "crash
-;; MESSAGE" (the driver stopped before the method), else pyi's
-;; "OUTCOME REASON" (ok, skipped, failure, error; "not-run" when the driver finished without it).
+;; A method's row: ID ("MODULE/TEST-ID", the references' ids), RESULT, REASON, CORPUS. RESULT is pass when pyi's outcome
+;; is CPython's, else the first word of the method's line and REASON the rest; the classes' :match regexes see
+;; "RESULT REASON", the line:
+;;   "import MESSAGE"      the module does not import (its first error), also a method of a package's submodule the loader
+;;                         could not import (its _FailedTest's error) or skipped at its import ("import SkipTest: REASON")
+;;   "stopped-in MESSAGE"  the driver stopped in the method (the last line of its standard error, or a timeout)
+;;   "crash MESSAGE"       the driver stopped before the method
+;;   "OUTCOME REASON"      pyi's outcome: ok, skipped, failure, error (and the restartable runner's timeout, crash)
+;;   "not-run"             the driver finished without it
+;; A non-pass's class is the first class of the file that names it in :tests or one of whose :match regexes finds
+;; "RESULT REASON" (test/reap/main.ae's classify, test/cover/classes.ae's, java.check's: one rule everywhere).
 ;;
-;; usage: arbace test/python/libtest_judge.ae --dir DIR --ref REF --known KNOWN [--record] [--no-known] MODULE...
-;;   DIR/MODULE.out is the driver's output, DIR/MODULE.err its standard error. Prints each module's counts (equal,
-;;   classed by class, failing) and every failing method; DIR/summary.tsv gets a line per module.
-;;   Exit 0 when no method fails, 1 when one does.
-;;   --record: rewrites KNOWN's :methods for the modules run (the other modules' kept): every method not equal, with its
-;;   class kept when KNOWN names one, else the first class whose :match finds its line; a method of no class is printed,
-;;   left out, and the run exits 3 (no placeholder class is ever written, as CS265 (a) and CS266 (a)'s writers).
-;;   --no-known: no method classed (the --oracle control: every method equal but the references' :excluded).
+;; usage: arbace test/python/libtest_judge.ae [OPTION...] [MODULE...]
+;;   --dir DIR           a run: DIR/MODULE.out (the driver's output), .err, .status; the modules: --modules FILE (lines
+;;                       MODULE<TAB>CORPUS) and the arguments (of --corpus C, default lib-test)
+;;   --results FILE      (repeatable) no run: saved rows (--save's, ID<TAB>RESULT<TAB>REASON<TAB>CORPUS) judged again
+;;   --ref FILE          (repeatable) the references; a method is a reference's :outcome line (not :module, not :excluded)
+;;   --classes FILE      the classes (test/python/divergences.edn); none, or --no-classes: no method classed (the
+;;                       oracle's control, the negative controls: every method equal but the references' :excluded)
+;;   --record FILE       the record judged against (absent: "no record yet", regressions not judged)
+;;   --write-record      the record's rows of the judged modules written again (the others kept); refused with --only
+;;   --only FILE         a selection: lines MODULE (its every method) or MODULE/TEST-ID, # and blank lines ignored; what
+;;                       ran is judged (no "no result" line for the record's other rows)
+;;   --save FILE         the rows judged, tab-separated (FILE: bin/cover classes' RESULTS too)
+;;   --name NAME         the lines' prefix (default lib-test)
+;;   --divergences       no run, no judging: the record's (or --results') non-passes classified, each class's count
+;;                       (--table: as a Markdown table; --methods: every method by class); problems: a non-pass in no
+;;                       class, a name of :tests another class takes first (it cannot be that class's)
+;; Prints each module's counts (equal, classed by class, failing), every failing method ("  FAIL ID: LINE (CPython X)",
+;; then "   failing: ID", the gate's rotation's line), DIR/summary.tsv a line per module (with --dir). Exit 0 when no
+;; method fails, 1 when one does, 3 with --write-record when one is in no class (no placeholder class is ever written).
 (require '[arbace.string :as str])
 (import '[java.io File])
 
 (defn parse-args [args]
-  (loop [a args o {:mods []}]
+  (loop [a args o {:mods [] :refs [] :results [] :corpus "lib-test" :name "lib-test"}]
     (if-let [x (first a)]
       (case x
         "--dir" (recur (nnext a) (assoc o :dir (second a)))
-        "--ref" (recur (nnext a) (assoc o :ref (second a)))
-        "--known" (recur (nnext a) (assoc o :known (second a)))
-        "--record" (recur (next a) (assoc o :record true))
-        "--no-known" (recur (next a) (assoc o :no-known true))
+        "--ref" (recur (nnext a) (update o :refs conj (second a)))
+        "--results" (recur (nnext a) (update o :results conj (second a)))
+        "--classes" (recur (nnext a) (assoc o :classes (second a)))
+        "--record" (recur (nnext a) (assoc o :record (second a)))
+        "--modules" (recur (nnext a) (assoc o :modules (second a)))
+        "--corpus" (recur (nnext a) (assoc o :corpus (second a)))
+        "--only" (recur (nnext a) (assoc o :only (second a)))
+        "--save" (recur (nnext a) (assoc o :save (second a)))
+        "--name" (recur (nnext a) (assoc o :name (second a)))
+        "--write-record" (recur (next a) (assoc o :write-record true))
+        "--no-classes" (recur (next a) (assoc o :no-classes true))
+        "--divergences" (recur (next a) (assoc o :divergences true))
+        "--table" (recur (next a) (assoc o :table true))
+        "--methods" (recur (next a) (assoc o :methods true))
         (recur (next a) (update o :mods conj x)))
       o)))
 
 (def opts (parse-args *command-line-args*))
+(def pfx (:name opts))
 
-(defn read-ref
-  "The references: id -> outcome keyword, the :excluded and :module lines left out"
-  [path]
+(defn exists? [p] (and p (.exists (File. ^String p))))
+
+;; the references, the classes, the record, the selection
+
+(defn read-refs
+  "The references: id -> outcome name, the :excluded and :module lines left out"
+  [paths]
   (into {}
-        (for [l (str/split-lines (slurp path))
+        (for [p paths :when (exists? p)
+              l (str/split-lines (slurp p))
               :when (str/starts-with? l "{:id ")
               :let [m (read-string l)]
               :when (and (:outcome m) (not (:module m)) (not (:excluded m)))]
-          [(:id m) (:outcome m)])))
+          [(:id m) (name (:outcome m))])))
 
-(defn read-known [path]
-  (if (and path (.exists (File. path)))
-    (read-string (slurp path))
-    {:classes {} :methods {}}))
+(defn read-classes
+  "The classes, their :tests as sets"
+  [path]
+  (if (and path (not (:no-classes opts)))
+    (mapv #(assoc % :tests-set (set (:tests %))) (read-string (slurp path)))
+    []))
+
+(defn classify
+  "The first class naming ID in :tests or one of whose :match finds \"RESULT REASON\"; nil when none does"
+  [classes id result reason]
+  (let [s (str/trim (str result " " reason))]
+    (some (fn [c] (when (or (contains? (:tests-set c) id) (some #(re-find % s) (:match c))) c)) classes)))
+
+(defn read-record
+  "The record: id -> [result reason corpus], in its order (:order)"
+  [path]
+  (if (exists? path)
+    (let [rows (read-string (slurp path))]
+      {:present true
+       :rows (into {} (for [[id r why c] rows] [id [(name r) (str why) (if c (name c) "")]]))
+       :order (mapv first rows)})
+    {:present false :rows {} :order []}))
+
+(defn read-only
+  "The selection: {:mods #{MODULE ...} :ids #{ID ...}} (a module line selects its every method)"
+  [path]
+  (when path
+    (let [ls (for [l (str/split-lines (slurp path)) :let [l (str/trim l)] :when (and (seq l) (not (str/starts-with? l "#")))] l)]
+      {:mods (set (remove #(str/includes? % "/") ls))
+       :ids (set (filter #(str/includes? % "/") ls))
+       :mods-of-ids (set (map #(first (str/split % #"/" 2)) (filter #(str/includes? % "/") ls)))})))
+
+(defn selected? [only id]
+  (or (nil? only) (contains? (:ids only) id) (contains? (:mods only) (first (str/split id #"/" 2)))))
+
+;; a run's lines (the driver's output)
 
 (defn last-line [path]
-  (let [f (File. path)]
+  (let [f (File. ^String path)]
     (when (.exists f)
       (last (remove #(or (str/blank? %) (str/starts-with? % " ")) (str/split-lines (slurp f)))))))
 
@@ -99,77 +166,170 @@
     (:crash run) (str "crash " (:crash run))
     :else "not-run"))
 
-(defn rule-class [classes line]
-  (some (fn [[id c]] (when (some #(re-find % line) (:match c)) id)) (sort-by key classes)))
+(defn split-line [line]
+  (let [[r why] (str/split line #" " 2)] [r (or why "")]))
 
-(def refs (read-ref (:ref opts)))
-(def known (if (:no-known opts) {:classes {} :methods {}} (read-known (:known opts))))
-(def classes (:classes known))
-(def kmethods (:methods known))
+;; the rows
 
-(def results
-  (vec
-   (for [m (:mods opts)]
-     (let [prefix (str m "/")
-           run (read-run (:dir opts) m)
-           ts (sort (for [[id _] refs :when (str/starts-with? id prefix)] id))
-           rows (for [id ts
-                      :let [t (subs id (count prefix))
-                            want (name (get refs id))
-                            got (when-not (:import run) (first (get (:cases run) t)))
-                            line (method-line run t)]]
-                  (if (= got want)
-                    {:id id :equal true}
-                    (let [k (get kmethods id)
-                          cls (if (and k (contains? classes k)) k
-                                  (when (:record opts) (rule-class classes line)))]
-                      {:id id :want want :line line :class cls :listed (boolean (and k (contains? classes k)))})))]
-       {:module m :run run :rows (vec rows)}))))
+(def refs (read-refs (:refs opts)))
+(def classes (read-classes (:classes opts)))
+(def record (read-record (:record opts)))
+(def only (read-only (:only opts)))
 
-(def recording? (:record opts))
-(def unclassed (atom 0))
+(def mod-corpus
+  "MODULE -> CORPUS, in the order given"
+  (let [listed (when (:modules opts)
+                 (for [l (str/split-lines (slurp (:modules opts))) :when (not (str/blank? l))
+                       :let [[m c] (str/split l #"\t")]]
+                   [m (or c (:corpus opts))]))]
+    (vec (distinct (concat listed (for [m (:mods opts)] [m (:corpus opts)]))))))
 
-(doseq [{:keys [module run rows]} results]
-  (let [n (count rows)
-        eq (count (filter :equal rows))
-        classed (filter #(and (not (:equal %)) (:class %) (or recording? (:listed %))) rows)
-        failing (filter #(and (not (:equal %)) (not (and (:class %) (or recording? (:listed %))))) rows)
-        by-class (frequencies (map :class classed))]
-    (doseq [r failing]
-      (swap! unclassed inc)
-      (println (str "  FAIL " (:id r) ": " (:line r) " (CPython " (:want r) ")"
-                    (when recording? " -- no class: left out of the known file"))))
-    (println (str "lib-test " module ": " n " methods: " eq " equal, " (count classed) " classed"
-                  (when (seq by-class)
-                    (str " (" (str/join ", " (for [[c k] (sort-by key by-class)] (str (name c) " " k))) ")"))
-                  ", " (count failing) " failing"
-                  (when (:import run) (str " (does not import: " (:import run) ")"))
-                  (when (:crash run) (str " (the driver stopped" (when-let [t (:stopped-in run)] (str " in " t))
-                                          ": " (:crash run) ")"))))
-    (spit (str (:dir opts) "/summary.tsv")
-          (str module "\t" n "\t" eq "\t" (count classed) "\t" (count failing) "\t"
-               (str/join "," (for [[c k] (sort-by key by-class)] (str (name c) "=" k))) "\n")
-          :append true)))
+(defn run-rows
+  "A run's rows: for each module, each reference method of it (selected) as [id result reason corpus want]"
+  []
+  (let [by-mod (group-by #(first (str/split % #"/" 2)) (keys refs))]
+    (vec (for [[m c] mod-corpus
+               :let [run (read-run (:dir opts) m) prefix (str m "/")]
+               id (sort (get by-mod m))
+               :when (selected? only id)
+               :let [t (subs id (count prefix)) want (get refs id)
+                     got (when-not (:import run) (first (get (:cases run) t)))]]
+           (if (= got want)
+             [id "pass" "" c want]
+             (let [[r why] (split-line (method-line run t))] [id r why c want]))))))
 
-(defn write-known [path]
-  (let [text (slurp path)
-        i (.indexOf ^String text "\n :methods")
-        _ (when (neg? i) (throw (ex-info (str path ": no :methods key at a line's start") {})))
-        run-mods (set (map #(str % "/") (:mods opts)))
-        in-run? (fn [id] (some #(str/starts-with? id %) run-mods))
-        kept (remove (fn [[id _]] (in-run? id)) kmethods)
-        new (for [{:keys [rows]} results r rows :when (and (not (:equal r)) (:class r))] [(:id r) (:class r)])
-        all (sort-by first (concat kept new))]
-    (spit path (str (subs text 0 i) "\n :methods\n {"
-                    (str/join "\n  " (for [[id c] all] (str (pr-str id) " " c)))
-                    "}}\n"))
-    (println (str "lib-test: " path " written, " (count all) " methods classed"))))
+(defn saved-rows
+  "Saved rows (--save's files): [id result reason corpus want]"
+  []
+  (vec (for [f (:results opts) l (str/split-lines (slurp f)) :when (not (str/blank? l))
+             :let [[id r why c] (str/split l #"\t" -1)]
+             :when (selected? only id)]
+         [id r (or why "") (or c "") (get refs id)])))
 
-(when recording? (write-known (:known opts)))
+(defn record-rows []
+  (vec (for [id (:order record) :let [[r why c] (get-in record [:rows id])] :when (selected? only id)]
+         [id r why c nil])))
 
-(let [n (reduce + (map #(count (:rows %)) results))
-      eq (reduce + (map #(count (filter :equal (:rows %))) results))]
-  (println (str "lib-test: " (count results) " modules, " n " methods: " eq " equal, " (- n eq @unclassed) " classed, "
-                @unclassed " failing")))
+;; --divergences: the record classified (no run)
 
-(System/exit (cond (and recording? (pos? @unclassed)) 3 (pos? @unclassed) 1 :else 0))
+(defn divergences []
+  (let [rows (if (seq (:results opts)) (saved-rows) (record-rows))
+        np (remove #(= "pass" (second %)) rows)
+        cls-of (into {} (for [[id r why] np] [id (classify classes id r why)]))
+        by (group-by #(some-> (cls-of (first %)) :id) np)
+        unclassed (get by nil)
+        ;; a name of a class's :tests that an earlier class takes (its :tests or :match): it cannot be this class's
+        shadowed (for [[id r why] np :let [c (cls-of id)] :when c
+                       k classes :when (and (not= (:id k) (:id c)) (contains? (:tests-set k) id))]
+                   (str id " is in " (name (:id k)) "'s :tests, but " (name (:id c)) " takes it first: " r " " why))
+        passing (set (for [[id r] rows :when (= "pass" r)] id))
+        stale (for [k classes id (:tests k) :when (contains? passing id)] [(:id k) id])
+        src (if (seq (:results opts)) (str/join ", " (:results opts)) (:record opts))]
+    (cond
+      (:table opts)
+      (do (println "| class | kind | owner | methods | why | decided |")
+          (println "|---|---|---|---:|---|---|")
+          (doseq [c classes]
+            (println (str "| " (:title c) " (`" (name (:id c)) "`) | " (name (:kind c)) " | " (:owner c) " | "
+                          (count (get by (:id c))) " | " (:why c) " | " (:decided c) " |"))))
+      (:methods opts)
+      (doseq [c classes :let [ms (get by (:id c))] :when (seq ms)]
+        (println (str (name (:id c)) " (" (count ms) "): " (str/join ", " (sort (map first ms))))))
+      :else
+      (do (println (str pfx " divergences: " src ": " (count rows) " methods, " (- (count rows) (count np)) " pass, "
+                        (count np) " in " (count (filter #(seq (get by (:id %))) classes)) " classes"))
+          (doseq [c classes :let [n (count (get by (:id c)))] :when (pos? n)]
+            (println (format "   %6d %s (%s, %s; %s)" n (name (:id c)) (name (:kind c)) (:owner c) (:title c))))))
+    (when (seq stale)
+      (println (str pfx " divergences: " (count stale) " names of :tests the record passes (stale; "
+                    (str/join ", " (for [[k n] (frequencies (map first stale))] (str (name k) " " n))) ")")))
+    (doseq [[id r why] unclassed] (println (str "   " id " in no class: " r " " why)))
+    (doseq [s shadowed] (println (str "   " s)))
+    (System/exit (if (or (seq unclassed) (seq shadowed)) 1 0))))
+
+;; the judgment
+
+(defn judge []
+  (let [rows (cond (:dir opts) (run-rows) (seq (:results opts)) (saved-rows) :else (throw (ex-info "no --dir and no --results" {})))
+        partial? (some? only)
+        rec? (:present record)
+        judged (for [[id r why c want] rows]
+                 (let [rec (get-in record [:rows id])
+                       cls (when (not= "pass" r) (classify classes id r why))
+                       regression (and rec (= "pass" (first rec)) (not= "pass" r))]
+                   {:id id :module (first (str/split id #"/" 2)) :result r :reason why :corpus c :want want
+                    :class cls :fails (or (and (not= "pass" r) (nil? cls)) regression)
+                    :regression regression :fixed (and rec (not= "pass" (first rec)) (= "pass" r))}))
+        ids (set (map :id judged))
+        mods (set (map :module judged))
+        ;; a whole run: a record row of a judged module with no row now (its reference gone, or renamed)
+        missing (when (and rec? (not partial?))
+                  (for [id (:order record) :when (and (contains? mods (first (str/split id #"/" 2))) (not (contains? ids id)))] id))
+        by-mod (group-by :module judged)
+        mod-order (distinct (map :module judged))]
+    (when (:save opts)
+      (spit (:save opts) (apply str (for [{:keys [id result reason corpus]} judged]
+                                      (str id "\t" result "\t" (str/replace (str reason) #"[\t\n]" " ") "\t" corpus "\n")))))
+    (when (:dir opts) (.delete (File. (str (:dir opts) "/summary.tsv"))))
+    (doseq [m mod-order :let [rs (get by-mod m)
+                              eq (count (filter #(= "pass" (:result %)) rs))
+                              classed (filter #(and (:class %) (not (:fails %))) rs)
+                              failing (filter :fails rs)
+                              by-class (frequencies (map #(name (:id (:class %))) classed))
+                              run (when (:dir opts) (read-run (:dir opts) m))]]
+      (doseq [r failing]
+        (println (str "  FAIL " (:id r) ": " (str/trim (str (:result r) " " (:reason r)))
+                      (when (:want r) (str " (CPython " (:want r) ")"))
+                      (cond (:regression r) " -- a regression: the record passes it"
+                            (:write-record opts) " -- no class: left out of the record"
+                            :else " -- in no class of the divergences")))
+        (println (str "   failing: " (:id r))))
+      (println (str pfx " " m ": " (count rs) " methods: " eq " equal, " (count classed) " classed"
+                    (when (seq by-class) (str " (" (str/join ", " (for [[c k] (sort by-class)] (str c " " k))) ")"))
+                    ", " (count failing) " failing"
+                    (when (:import run) (str " (does not import: " (:import run) ")"))
+                    (when (:crash run) (str " (the driver stopped" (when-let [t (:stopped-in run)] (str " in " t))
+                                            ": " (:crash run) ")"))))
+      (when (:dir opts)
+        (spit (str (:dir opts) "/summary.tsv")
+              (str m "\t" (count rs) "\t" eq "\t" (count classed) "\t" (count failing) "\t"
+                   (str/join "," (for [[c k] (sort by-class)] (str c "=" k))) "\n")
+              :append true)))
+    (doseq [id missing]
+      (println (str "  FAIL " id ": no result (the record has it)"))
+      (println (str "   failing: " id)))
+    (let [n (count judged) eq (count (filter #(= "pass" (:result %)) judged))
+          nf (count (filter :fails judged)) nreg (count (filter :regression judged)) nfix (count (filter :fixed judged))]
+      (println (str pfx ": " (count mod-order) " modules, " n " methods: " eq " equal, " (- n eq nf) " classed, " nf " failing"
+                    (when (pos? nreg) (str " (" nreg " regressions)"))
+                    (when (seq missing) (str ", " (count missing) " with no result"))))
+      (cond
+        (:no-classes opts) nil
+        (not rec?) (println (str pfx ": no record yet (" (:record opts) "): regressions not judged"))
+        :else (println (str pfx ": against the record: " nreg " regressions, " nfix " now pass"
+                            (when partial? " (a selection)"))))
+      (when (:write-record opts)
+        (when partial? (throw (ex-info "--write-record of a selection (--only): refused" {})))
+        (let [path (:record opts)
+              keep (for [id (:order record) :when (not (contains? mods (first (str/split id #"/" 2))))]
+                     (into [id] (get-in record [:rows id])))
+              new (for [r judged :when (not (and (not= "pass" (:result r)) (nil? (:class r))))]
+                    [(:id r) (:result r) (:reason r) (:corpus r)])
+              corder (into {} (map-indexed (fn [i [_ c]] [c i]) (distinct (map (fn [[m c]] [nil c]) mod-corpus))))
+              all (sort-by (fn [[id _ _ c]] [(get corder c 99) id]) (concat keep new))
+              header (let [t (when (exists? path) (slurp path)) i (when t (.indexOf ^String t "\n["))]
+                       (if (and i (pos? i))
+                         (subs t 0 (inc i))
+                         (str ";; bin/pyi check's record (doc/python/PYTHON-SURVEY.md, \"As built: PY7 (the check)\"): every test method of\n"
+                              ";; Lib/test the check judges, [ID RESULT REASON CORPUS], ID MODULE/TEST-ID (the references'), RESULT pass (pyi's\n"
+                              ";; outcome CPython's) or the first word of its line (import, stopped-in, crash, not-run, ok, skipped, failure,\n"
+                              ";; error, timeout) and REASON the rest; every non-pass in a class of test/python/divergences.edn. Written by\n"
+                              ";; bin/pyi check --record on the main host (linux/amd64); the check fails on a method it passes that does not\n"
+                              ";; pass. The gate's universe of the check's parts (a part a CORPUS). Read with the Clojure reader.\n")))]
+          (spit path (str header "[\n"
+                          (str/join "\n" (for [[id r why c] all] (str "[" (pr-str id) " :" r " " (pr-str (str why)) " :" c "]")))
+                          "\n]\n"))
+          (println (str pfx ": " path " written, " (count all) " methods"))))
+      (System/exit (cond (and (:write-record opts) (pos? nf)) 3 (or (pos? nf) (seq missing)) 1 :else 0)))))
+
+(if (:divergences opts) (divergences) (judge))

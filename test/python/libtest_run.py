@@ -113,6 +113,20 @@ def main():
 
     Result.subfailed = set()
 
+    # bin/pyi cover (PY7): the cover build's _pyi_cover writes the runtime's counters after each test, the test's own
+    # (tools/pyi/libtest_cover.go); the module's import counted with its first test
+    import os
+    if os.environ.get("PYI_LIB_TEST_COVER_TESTS"):
+        try:
+            import _pyi_cover
+
+            def stopTest(self, test, _flush=_pyi_cover.flush):
+                unittest.TestResult.stopTest(self, test)
+                _flush(name + "/" + test_id(test))
+            Result.stopTest = stopTest
+        except ImportError:
+            pass
+
     _plain_runs = (unittest.TestSuite.run, unittest.BaseTestSuite.run)
 
     def flatten(s, out):
@@ -128,8 +142,16 @@ def main():
     loader = unittest.TestLoader()
     tests = []
     flatten(loader.loadTestsFromModule(mod), tests)
-    # PYI_LIB_TEST_SKIP's tests (libtest.py's list, ID<TAB>REASON): run as an error naming the reason
+    # PYI_LIB_TEST_ONLY (bin/pyi check --only, PY7): lines MODULE/TEST-ID; when it names some of this module's tests,
+    # only those run (a suite of its own run() kept whole); a module it does not name runs whole
     import os
+    if os.environ.get("PYI_LIB_TEST_ONLY"):
+        with open(os.environ["PYI_LIB_TEST_ONLY"], encoding="utf-8") as f:
+            pre = name + "/"
+            only = set(l.strip()[len(pre):] for l in f if l.strip().startswith(pre))
+        if only:
+            tests = [t for t in tests if not isinstance(t, unittest.TestCase) or test_id(t) in only]
+    # PYI_LIB_TEST_SKIP's tests (libtest.py's list, ID<TAB>REASON): run as an error naming the reason
     listed = {}
     if os.environ.get("PYI_LIB_TEST_SKIP"):
         with open(os.environ["PYI_LIB_TEST_SKIP"], encoding="utf-8") as f:
