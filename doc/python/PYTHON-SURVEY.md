@@ -636,6 +636,9 @@ Each with options, the recommended one first.
   - Options: (a) repr/python and pyi evaluated from the checkout, out of `gate_key`, until the row fits the budget,
     then embedded at a re-seed batched with the other crops'; (b) embedded from PY5.
   - *Recommended: (a)*, as the crops since CS250.
+  - When (PY10's DECISION 1, decided: the user, 2026-11-04, (a)): Python's tag does not wait for the re-seed; pyi is
+    embedded at the first re-seed after the tag, batched with C++'s and Scheme's. The eval level's synthetic source is the
+    compiled loop in every tier, pyi on goi rotated a seventh a night (PY10's DECISION 2, decided: the user, 2026-11-04, (a)).
 - **PYS19 The crop's place in the order.**
   - Options: (a) after the tag `arbace-reaps-4-crops-v1` and GT8's compressed corpora, PY1-PY3 (light: a script,
     a converter, a printer) any time beside Haskell's and Rust's eval surveys, PY5 onward when the night budget has
@@ -1049,3 +1052,8 @@ The row, as §10.1 planned it and C's was added (doc/C23-SURVEY.md §10); the st
 - **Measured on the VM** (samples, not records): `bin/pyi check --aot --no-pyi` over the 151 programs, 138 pass, 13 classed,
   0 failing, 6 min 39 s cold; `scope-check` and `compile-check` over the stdlib, 28 s and 43 s; pyi on goi 10 s of startup
   a process, then 4 to 15 times the compiled loop (PY11-PREP.md §4).
+- **Decided (the user, 2026-11-04): both of PY10's DECISIONs (a).** (1) The tag does not wait for the re-seed: pyi is
+  embedded at the first re-seed after it, batched with C++'s and Scheme's (PYS18). (2) The eval level's synthetic source is
+  the compiled loop in every tier: `cells.edn`'s source reads `check --aot`'s loop column (`:column :loop`, `test/reap/main.ae`),
+  pyi on goi's column beside it; pyi on goi's 35 min run rotates a seventh a night (PY11-PREP.md's `pyi-check-aot-goi`)
+  and stays in the main host's record.

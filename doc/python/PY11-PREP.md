@@ -85,9 +85,15 @@ applied on this branch: the existing `reap` step's `:inputs` gain `"test/python/
 {:name pyi-check-aot :mem-gib 3 :phase :full :chain python-full
  :cmd "bin/pyi runtime check && bin/pyi record-ref --check && bin/pyi check --aot --no-pyi"   ; 151 programs: about 5 min warm
  :hosts [:stage0 :go :python] :never-loads [arbace.j2g] :pins ["test/python/corpora.edn"] :inputs [:lib-tools :tools :python :pyi]
- :parts [{:part light}
-         {:part with-pyi :clean-only true :cmd "bin/pyi check --aot"}]                       ; pyi on goi: about 35 min (DECISION 2)
+ :parts [{:part light}]                    ; the eval level's synthetic source in every tier: the loop (DECISION 2, decided: the user, 2026-11-04, (a))
  :summary ["^check --aot:|classed|failing|negative control|FAIL" 5]}
+{:name pyi-check-aot-goi :mem-gib 3 :phase :full :chain python-full        ; pyi on goi: 35 min whole, a seventh a night (DECISION 2 (a))
+ :cmd "bin/pyi check --aot {only}"
+ :hosts [:stage0 :go :python] :never-loads [arbace.j2g] :pins ["test/python/corpora.edn"] :inputs [:lib-tools :tools :python :pyi]
+ :parts [{:part with-pyi}] :summary ["^check --aot:|classed|failing|negative control|FAIL" 5]
+ :rotate {:only "--only-list {list}" :universe "test/python/check-aot-linux-amd64.edn"   ; the main host's record, made with pyi's runs
+          :id-re "^\\{:id \"([^\"]+)\"" :subset "test/python/corpora.edn"       ; a {:id :with-pyi :subset [...]} map: essential-aot.txt's 20
+          :failed-re "^  failed ([^ ]+) .*$"}}
 {:name pyi-check :mem-gib 4 :phase :full :chain python-full
  :cmd "bin/pyi check --corpus {part} {only}"                                          ; PY7-check's verb, its universe and subsets
  :hosts [:stage0 :go :python] :never-loads [arbace.j2g] :pins ["test/python/corpora.edn"] :inputs [:lib-tools :tools :python :pyi]
@@ -103,7 +109,7 @@ applied on this branch: the existing `reap` step's `:inputs` gain `"test/python/
  :parts [{:part pyperformance :clean-only true}] :summary ["benchmarks|classed|FAIL" 3]}
 
 ;; :crops (test/gate/costs.ae's known set gains :python)
-:python [pyi-aot-runtime python-read-essential pyi-aot-essential python-roundtrip python-front python-native pyi-check-aot pyi-check pyi-bench]
+:python [pyi-aot-runtime python-read-essential pyi-aot-essential python-roundtrip python-front python-native pyi-check-aot pyi-check-aot-goi pyi-check pyi-bench]
 ```
 
 **The negative controls before entry** (GTS218 (a)): each step's family must have one that fails. Present: `check --aot`'s
@@ -180,16 +186,25 @@ across the three ways):
   speed now.
 
 ```
-DECISION: Does Python's milestone tag wait for the batched re-seed that embeds pyi (PYS18 (a)'s second half)?
+DECISION 1 (decided: the user, 2026-11-04, (a)): Does Python's milestone tag wait for the batched re-seed that embeds pyi (PYS18 (a)'s second half)?
 - (a) No (recommended): tag with repr/python and pyi evaluated from the checkout and the checks on the compiled loop; embed at the first re-seed after the tag, batched with C++'s and Scheme's (CP180, SC230): no re-seed on Python's critical path, and the budget holds either way (the loop is the embedded speed).
 - (b) Yes: re-seed for Python before its clean run: the clean run checks the shipped form, at the cost of a re-seed (bin/seed --make, --verify) and gate_key growing by pyi's runtime before the tag.
 ```
 
 ```
-DECISION: What does the eval level's synthetic source judge in the clean run: pyi on goi, or the compiled loop?
+DECISION 2 (decided: the user, 2026-11-04, (a)): What does the eval level's synthetic source judge in the clean run: pyi on goi, or the compiled loop?
 - (a) The loop in every tier (recommended): check --aot's loop column (the same runtime and compiler, pyi's dispatch loop compiled), about 5 min for the 151 programs; pyi on goi's runs (35 min) rotate a seventh a night (`with-pyi` as a rotated part) and stay in `bin/pyi check --aot --record`'s record when the main host records it: within GTS225's one-night clean run.
-- (b) pyi on goi in every clean run (the :clean-only `with-pyi` part as written above): the evaluated form judged at the tag, 35 min more, Python's clean share (about 54 min under GTS225) exceeded.
+- (b) pyi on goi in every clean run (a :clean-only `with-pyi` part): the evaluated form judged at the tag, 35 min more, Python's clean share (about 54 min under GTS225) exceeded.
 ```
+
+**Decided (the user, 2026-11-04): both (a).**
+- **DECISION 1 (a):** Python's tag does not wait for the re-seed. pyi is embedded at the first re-seed after the tag, batched
+  with C++'s and Scheme's (CP180, SC230; PYS18 (a)'s second half). Until then repr/python and pyi are evaluated from the
+  checkout, out of `gate_key`, and the checks run on the compiled loop.
+- **DECISION 2 (a):** the eval level's synthetic source is the compiled loop in every tier: `test/reap/cells.edn`'s source
+  reads the record's loop column (`:column :loop`, applied at the integration, queue 201), with pyi on goi's column beside it
+  (`:role :beside`, still judged when the record holds pyi's runs). pyi on goi's 35 min run is the step `pyi-check-aot-goi`
+  above, rotated a seventh a night, and the main host's `bin/pyi check --aot --record` keeps pyi's runs in the record.
 
 ## 5. The budget
 
@@ -207,11 +222,11 @@ of planned nightly runs, so a crop about 43 min; GTS225: the clean run within on
 | | `pyi-check`: PY7's coverage subset and a seventh of Lib/test (the whole about 15 job-hours on the VM: 1/7 at 8 jobs about 16 min) | 26 *est.* | |
 | | **sum** | **about 43 *est.*** | 43.2 (GTS224) / 32.4 (GT9) |
 | clean | the subsets of the rotated parts | 30 *est.* | |
-| | the `:clean-only` parts: the mutants (5), `pyi-bench` (7), `with-pyi` (35, or 0 under DECISION 2 (a)) | 12 to 47 *est.* | |
+| | the `:clean-only` parts: the mutants (5), `pyi-bench` (7); `pyi-check-aot-goi`'s subset (DECISION 2 (a): no whole pyi run) | 12 *est.* | |
 | | `pins --check`, the helper's dumps (cached, GTS217) and the AOT's cold build | 8 *est.* | |
 | | **sum** | **about 50 *est.* (85 with (b))** | 54 (GTS225) / 130 (GT9) |
 
-Python is at its nightly share and within its clean share under DECISION 2 (a), both estimates from a loaded aarch64 VM; the
+Python is at its nightly share and within its clean share under DECISION 2 (a) (decided: the user, 2026-11-04), both estimates from a loaded aarch64 VM; the
 nightly figure rests on PY7's coverage subset, whose cover run is the main host's.
 
 ## 6. The main host's commands (expected output)
