@@ -197,6 +197,40 @@
 ;;; ------------------------------------------------------------------------------------------
 ;;; processArgs over flagsDynamic
 
+;;; Response files: processArgs' `@file` (GHC.Driver.CmdLine's parseResponseFile, over
+;;; GHC.Internal.ResponseFile's unescapeArgs, BSD-style, The University of Glasgow)
+
+(def ^:dynamic *cwd*
+  "The directory a response file is looked for in (the directory ghc ran in), nil the process's"
+  nil)
+
+(defn unescape-args
+  "unescapeArgs: a response file's text as arguments, split at white space, with gcc's quoting
+  (single and double quotes, a backslash escaping the next character), none empty"
+  [^String text]
+  (let [n (count text)]
+    (loop [i 0 q nil bs false cur [] out []]
+      (if (>= i n)
+        (filterv seq (conj out (apply str cur)))
+        (let [c (.charAt text i)]
+          (cond
+            bs (recur (inc i) q false (conj cur c) out)
+            (= c \\) (recur (inc i) q true cur out)
+            (= q \') (if (= c \') (recur (inc i) nil false cur out) (recur (inc i) q false (conj cur c) out))
+            (= q \") (if (= c \") (recur (inc i) nil false cur out) (recur (inc i) q false (conj cur c) out))
+            (Character/isWhitespace c) (recur (inc i) nil false [] (conj out (apply str cur)))
+            (= c \') (recur (inc i) \' false cur out)
+            (= c \") (recur (inc i) \" false cur out)
+            :else (recur (inc i) nil false (conj cur c) out)))))))
+
+(defn- response-args
+  "The arguments of the response file path, located at the file's name (mkGeneralLocated), or nil
+  when it cannot be read (GHC's `Could not open response file` error)"
+  [^String path]
+  (let [f (if (and *cwd* (not (.isAbsolute (java.io.File. path)))) (java.io.File. ^String *cwd* path) (java.io.File. path))]
+    (when (.isFile f)
+      (mapv (fn [t] [t path]) (unescape-args (slurp f))))))
+
 (def ^:private deprecated
   "The deprecated flags by name: the message, %s the flag's argument (flags.ae, probed from GHC)"
   (delay (into {} fl/deprecated-flags)))
@@ -272,10 +306,20 @@
                               (err (str "malformed float argument in " arg)))
             (:opt-prefix :any-suffix) keep-on))))))
 
+(declare step*)
+
 (defn- step
   "One argument of processArgs, then the deprecation GHC's `deprecate` adds when the flag took its
   argument without an error"
   [[as d leftover errs warns :as st]]
+  (let [[arg span] (first as)]
+    (if (and (str/starts-with? arg "@") (> (count arg) 1))
+      (if-let [more (response-args (subs arg 1))]
+        [(concat more (rest as)) d leftover errs warns]
+        [(rest as) d leftover (conj errs [span "Could not open response file"]) warns])
+      (step* st))))
+
+(defn- step* [[as d leftover errs warns :as st]]
   (let [[arg span] (first as)
         found (when (str/starts-with? arg "-") (find-arg (subs arg 1)))
         r (step1 st)]
@@ -299,8 +343,10 @@
 
 (defn- span-ppr
   "ppr of a SrcSpan, as errorsToGhcException prints the flag's location"
-  [[f l1 c1 l2 c2]]
+  [[f l1 c1 l2 c2 :as sp]]
   (cond
+    (string? sp) sp
+    (= :commandline sp) "on the commandline"
     (and (= l1 l2) (<= (- c2 c1) 1)) (str f ":" l1 ":" c1)
     (= l1 l2) (str f ":" l1 ":" c1 "-" (dec c2))
     :else (str f ":(" l1 "," c1 ")-(" l2 "," (if (zero? c2) c2 (dec c2)) ")")))
@@ -331,3 +377,15 @@
              :pre (delay (let [on? (fn [m] (hd/warning-on? d0 (er/warning-flag m)))]
                            [(filterv on? @(:misplaced r))
                             (into [] (keep (fn [m] (let [f (er/warning-flag m)] (when (hd/warning-on? d f) (if (contains? (:fatal d) f) (assoc m :fatal true) m))))) warns)]))}))))))
+
+(defn command-line
+  "The command line's flags (the helper's --ghc, strings) through processArgs from the default
+  state: {:d the flags state :warns [messages at the span :commandline, as ghc's main prints them:
+  the final state decides which are on and which fatal (-Werror)]} (a flag that fails is skipped)"
+  [flags]
+  (let [{:keys [d warns]} (process-args (hd/dyn-flags []) (mapv (fn [f] [f :commandline]) flags))]
+    {:d d
+     :warns (into [] (keep (fn [m] (let [f (er/warning-flag m)]
+                                     (when (hd/warning-on? d f)
+                                       (if (contains? (:fatal d) f) (assoc m :fatal true) m)))))
+                  warns)}))

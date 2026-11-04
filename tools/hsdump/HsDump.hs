@@ -210,7 +210,8 @@ main = do
   runGhc (Just libdir) $ do
     dflags0 <- getSessionDynFlags
     logger <- getLogger
-    (dflags1, leftover, _) <- parseDynamicFlagsCmdLine logger dflags0 (map noLoc (oGhc o))
+    (dflags1, leftover, cmdWarns) <- parseDynamicFlagsCmdLine logger dflags0 (map (mkGeneralLocated "on the commandline") (oGhc o))
+    liftIO (writeIORef cmdWarnRef (dflags1, cmdWarns))
     unless (null leftover) $ liftIO $ do
       hPutStrLn stderr ("hsdump: unknown GHC flags: " ++ unwords (map unLoc leftover))
       exitWith (ExitFailure 2)
@@ -281,9 +282,22 @@ main = do
         -- failure parseText recorded
         "errors" -> do
           out <- outFile o file ".errors"
-          fl <- readIORef failureRef
+          fl0 <- readIORef failureRef
           writeIORef failureRef Nothing
-          case (res, fl) of
+          -- the command line's flag warnings (ghc's main prints them before it compiles anything; a
+          -- fatal one stops it there): the first batch, with the command line's flags
+          (cmdDfl, cmdMsgs) <- readIORef cmdWarnRef
+          let cmdPrinter :: Printer
+              cmdPrinter h lg _ = ghcPrinter (GhcDriverMessage <$> cmdMsgs) h lg cmdDfl
+              cmdAny = not (isEmptyMessages cmdMsgs)
+              cmdFatal = errorsOrFatalWarningsFound cmdMsgs
+          src <- B.readFile file
+          let fl = case (cmdFatal, fl0) of
+                (True, _) -> Just (cmdDfl, src, [cmdPrinter])
+                (False, Just (dfl, text, msgs)) | cmdAny -> Just (dfl, text, cmdPrinter : msgs)
+                _ -> fl0
+              res' = if cmdFatal then Left "the command line's flags" else res
+          case (res', fl) of
             (Left _, Just (dfl, text, msgs)) -> do
               B.writeFile (out ++ ".hspp") text
               withFile out WriteMode $ \h -> do
@@ -569,6 +583,10 @@ parseText hsc_env dflagsIn file src text cpp view lit hsc = do
 
 -- the failure of the last module parsed: its flags, the text parsed and the messages ghc prints
 -- (the errors verb's; a helper of one thread)
+{-# NOINLINE cmdWarnRef #-}
+cmdWarnRef :: IORef (DynFlags, Messages DriverMessage)
+cmdWarnRef = unsafePerformIO (newIORef (undefined, mempty))
+
 {-# NOINLINE failureRef #-}
 failureRef :: IORef (Maybe (DynFlags, B.ByteString, [Printer]))
 failureRef = unsafePerformIO (newIORef Nothing)
