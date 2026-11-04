@@ -23,11 +23,13 @@
 #   bin/pyi scope-check [--record] [CORPUS...]
 #                                  PY5a: every read file's symbol table by arbace.python.scope against CPython's own
 #                                  (tools/pydump/pydump.py scopes): the corpora of test/python/corpora.edn (default:
-#                                  samples synthetic errors stdlib site-packages lib-test), against test/python/scope-known.edn
+#                                  samples synthetic errors stdlib site-packages lib-test), against test/python/scope-known.edn;
+#                                  then its negative control (PY7, GTS81 (a)): classes.py's tree against functions.py's tables
 #   bin/pyi compile-check [--full] [--record] [CORPUS...]
 #                                  PY5a: every read file compiled to pyi's IR (arbace.python.compile) and the IR
 #                                  verified (doc/python/PYI-SPEC.md §4), against test/python/compile-known.edn;
-#                                  --full (PY5b): the forms of mode :full, the runs' (check :compile-full)
+#                                  --full (PY5b): the forms of mode :full, the runs' (check :compile-full); then its negative
+#                                  control (PY7, GTS81 (a)): classes.py's tree judged as errors/annotated-global.py
 #   bin/pyi run FILE.py            PY5b0: FILE read in mode :full (tools/pydump/pydump.py tree --full: its lines), compiled to
 #                                  the IR and run by pyi's runtime go/arbace/py, interpreted by goi on stage 0 (PY5a's DECISION
 #                                  (a)); the program's stdout, stderr and exit status
@@ -333,7 +335,39 @@ cmd_scope_check() {
     echo "  $(( $(date +%s) - t0 )) s"
     [ $rc -gt $worst ] && worst=$rc
   done
+  cscontrol scope || { [ $worst -gt 0 ] || worst=1; }
   return $worst
+}
+
+# cscontrol KIND [FULL] (GTS81 (a), PY10's R3, queue 201): the negative control of scope-check (KIND scope)
+# and compile-check (KIND compile): a crossed pair judged by the check's own judge, which must fail it. scope: the
+# sample classes.py's tree judged against functions.py's CPython symbol tables; compile: the sample classes.py's
+# tree under the name of the error program annotated-global.py, against that program's CPython row (a compile error
+# CPython raises and pyi, compiling classes.py, does not). Seconds; "control passed" or "control not judged" fails
+cscontrol() {
+  local kind=$1 full=${2:-} c="$WORK/controls/$1${2:+-full}" sb eb rc=0 out
+  rm -rf "$c"; mkdir -p "$c/s" "$c/run/dumps" "$c/run/scopes"
+  sb=$(corpus_list samples "$c/s")
+  printf 'classes.py\nfunctions.py\n' > "$c/s/list"
+  py pydump.py tree ${full:+--full} --base "$sb" --list "$c/s/list" --out "$c/s/dumps" --tsv "$c/s/dumps.tsv"
+  if [ "$kind" = scope ]; then
+    py pydump.py scopes --base "$sb" --list "$c/s/list" --out "$c/s/scopes"
+    cp "$c/s/dumps/classes.py.ae" "$c/run/dumps/classes.py.ae"
+    cp "$c/s/scopes/functions.py.scopes.ae" "$c/run/scopes/classes.py.scopes.ae"
+    grep '^classes\.py	' "$c/s/dumps.tsv" > "$c/run/dumps.tsv"; echo classes.py > "$c/run/list"
+    out=$(pa_arbace scope-check --corpus samples --dumps "$c/run/dumps" --scopes "$c/run/scopes" --known "$root/test/python/scope-known.edn" \
+      --results "$c/run/results.edn" 2>&1) || rc=$?
+  else
+    mkdir -p "$c/e"; eb=$(corpus_list errors "$c/e"); echo annotated-global.py > "$c/e/list"
+    py pydump.py tree ${full:+--full} --base "$eb" --list "$c/e/list" --out "$c/e/dumps" --tsv "$c/e/dumps.tsv"
+    cp "$c/s/dumps/classes.py.ae" "$c/run/dumps/annotated-global.py.ae"
+    cp "$c/e/dumps.tsv" "$c/run/dumps.tsv"
+    out=$(pa_arbace compile-check ${full:+--check compile-full} --corpus errors --dumps "$c/run/dumps" --tsv "$c/run/dumps.tsv" \
+      --known "$root/test/python/compile-known.edn" --results "$c/run/results.edn" --ops "$c/run/ops.edn" 2>&1) || rc=$?
+  fi
+  if ! grep -q ': 1 files: ' <<< "$out"; then echo "control not judged: $kind${full:+ --full}: $(tail -2 <<< "$out")"; return 1
+  elif [ $rc = 0 ] || grep -q ': 1 files: 1 equal' <<< "$out"; then echo "control passed: $kind${full:+ --full}: $(grep ': 1 files: ' <<< "$out")"; return 1
+  else echo "control failed as it must: $kind${full:+ --full}: $(grep ': 1 files: ' <<< "$out")"; fi
 }
 
 cmd_compile_check() {
@@ -352,6 +386,7 @@ cmd_compile_check() {
     echo "  $(( $(date +%s) - t0 )) s"
     [ $rc -gt $worst ] && worst=$rc
   done
+  cscontrol compile "$full" || { [ $worst -gt 0 ] || worst=1; }
   return $worst
 }
 
