@@ -239,6 +239,23 @@ The C forms are those of doc/c/SPEC.md, printed by repr/c's printer at `:gnu23` 
   `eh.typeid.for` (a number per type_info), the math functions (`fabs`, `sqrt`, `floor`, ... as `__builtin_*`). Others
   are refused (`:intrinsic`), `llvm.coro.*` among them (`:coroutine`; clang's `-O0` pipeline runs CoroSplit, so the
   IR it writes holds none: the coroutine sample lowers and runs).
+- **Debug information** (2026-11-04, with the reader's debug records and structured DI nodes, §1, §4, §5): a body's debug
+  records (`dbg_value`, `dbg_declare`, `dbg_assign`, `dbg_label`, `dbg_declare_value`) and its instructions' metadata
+  attachments (`:md`, `!dbg` among them) are dropped before it is lowered (`dbg-free`), and the DI nodes (`llvm/meta`) are
+  not read: `-g` IR lowers to the C of its `-g0` build. No-ops rather than debug info of cppi's: the C forms' one channel
+  for a position is `#line` (`c/directive`, doc/c/SPEC.md), which holds a line and not a variable's location, the variables
+  the records describe are SSA values and allocas the lowering renames (`l$...`), and nothing downstream reads them (ci has
+  no debugger; gcc's `-g` of the lowered C describes the C, not the C++). A debugger of cppi would take the `!dbg` lines as
+  `#line` directives and the records as a table beside the C, from `dbg-free`'s place. Checked: the samples and the
+  runtime's samples (16) built `-g` and `-g0` lower to the same C byte for byte but the coroutine sample's (clang's
+  CoroSplit keeps more frame allocas at `-g`: the IR differs), and run alike; the essential list (CX10's
+  `test/cpp/essential-lower.txt`) passes `bin/cppi lower-check` with `-g`.
+- **Metadata as a value** (`!N`, `(! ...)`, a structured node `(!DILocation ...)`, `(!DIExpression ...)` ...: `md-head?`,
+  a symbol beginning with `!`) is refused `:metadata`.
+- **`callbr`** (asm goto): an empty template without outputs never jumps, so it is its fall-through edge (`:to`), a `br`;
+  any other template is refused `:callbr` (cppi runs no assembly, and its indirect edges are the template's to take).
+  **Windows EH**'s funclets (`catchswitch`, `catchpad`, `cleanuppad`, `catchret`, `cleanupret`) are refused `:windows-eh`:
+  the target is x86-64 Linux (a Windows triple's data layout is refused `:datalayout` before).
 - **Constants**: integers as `(lit unsigned N)`/`(lit unsigned-long N)` (an `i128` by shifts), doubles as their
   shortest decimal, floats `(lit float x)`, NaNs by their payload (`__builtin_nan("0x...")`, `__builtin_nans` for a
   signaling one, negated for the sign: constant expressions, also in static initializers), `x86_fp80` as the exact decimal of its 64-bit
@@ -300,7 +317,7 @@ Every file of `bin/cppi lower-check` that does not pass is in a class of `test/c
 |---|---|
 | `uncaught-cleanups` | an uncaught exception runs cleanups that print before `std::terminate` (§8) |
 | `native-callback-throw` | an exception thrown through a native frame of the C library (§8) |
-| a refusal's class (`inline-asm`, `vector`, `intrinsic`, `coroutine`, `datalayout`, ...) | the lowering refuses the construct |
+| a refusal's class (`inline-asm`, `vector`, `intrinsic`, `coroutine`, `datalayout`, `metadata`, `callbr`, `windows-eh`, ...) | the lowering refuses the construct |
 
 Since CX7 the lowered program links the lowered runtime (§10), not libstdc++.so, and the testsuite's own library
 (`util/`'s `testsuite_*.cc`) is lowered with it: clang compiles it to IR in each run, the lowering and gcc make
