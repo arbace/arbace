@@ -23,13 +23,13 @@
 
 (deftype Parser [lx ^java.util.ArrayList toks ^longs st ^java.util.HashMap memo ^java.util.Map keywords
                  ^java.util.Set soft ^java.util.ArrayList type-ignores ^objects types])
-;; st: [mark fill call-invalid barry feature-version]; types: [an int array of the tokens' types]
+;; st: [mark fill call-invalid barry feature-version last-stmt-lineno last-stmt-col-offset]; types: [an int array of the tokens' types]
 
 (defn parser
   "A parser over `text` (the string tokenizer's input: new-lines translated, ending in one), with type comments
   when `type-comments`"
   ^Parser [^String text keywords soft type-comments]
-  (let [p (Parser. (lex/lexer text false type-comments true) (java.util.ArrayList.) (long-array 5) (java.util.HashMap.)
+  (let [p (Parser. (lex/lexer text false type-comments true) (java.util.ArrayList.) (long-array 7) (java.util.HashMap.)
                    keywords (set soft) (java.util.ArrayList.) (object-array [(int-array 1024)]))]
     (aset ^longs (.-st p) 4 14)
     p))
@@ -453,7 +453,25 @@
 (defn make-module [^Parser p a]
   {:t :Module :body (or a []) :type_ignores (vec (for [[l tag] (.-type-ignores p)] {:t :TypeIgnore :lineno l :tag tag}))})
 
-(defn register-stmts [p s] s)
+(defn register-stmts
+  "_PyPegen_register_stmts: in the second pass, the last statement's start as p->last_stmt_location (a SyntaxError's
+  _metadata, traceback's keyword typos), unless one later was registered"
+  [^Parser p s]
+  (when (and (call-invalid? p) (seq s))
+    (let [st (.-st p) last-stmt (peek (vec s))]
+      (when-not (> (aget ^longs st 5) (long (:lineno last-stmt)))
+        (aset ^longs st 5 (long (:lineno last-stmt)))
+        (aset ^longs st 6 (long (:col_offset last-stmt))))))
+  s)
+
+(defn- with-metadata
+  "_PyPegen_set_syntax_error_metadata: a SyntaxError (or subclass) `e` with :metadata [LINENO COL_OFFSET], the last
+  statement's location of the second pass (0 0 when there was none)"
+  [^Parser p e]
+  (let [[cls] (:python-error (ex-data e))]
+    (if (contains? #{"SyntaxError" "IndentationError" "TabError"} cls)
+      (ex-info (.getMessage ^Throwable e) (assoc (ex-data e) :metadata [(aget ^longs (.-st p) 5) (aget ^longs (.-st p) 6)]))
+      e)))
 (defn interactive-exit [p] nil)
 
 (defn checked-future-import
@@ -916,4 +934,4 @@
                          (reset p 0)
                          (set-call-invalid p true)
                          (caught #(rule p))))]
-          (throw (set-syntax-error p last-token e2)))))))
+          (throw (with-metadata p (set-syntax-error p last-token e2))))))))

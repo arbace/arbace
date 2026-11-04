@@ -1,7 +1,8 @@
 """The reference of repr/python's ast check (bin/repr-python ast-check; doc/python/PYTHON-SURVEY.md, "As built: PY9
 (errors, pyi)"): each file of a list parsed by CPython's compile() with PyCF_ONLY_AST, as pyi's compile() asks for it,
 and its answer written in tools/pyi/ast_json.py's form (the node as JSON, "AST:" before it), an error as the compiler's
-answer ("TYPE: MSG" and, after NULs, the line, offset, end line, end offset, p and the text), the answer pyi's _ast module rebuilds nodes from
+answer ("TYPE: MSG" and, after NULs, the line, offset, end line, end offset, p (or m, the SyntaxError's _metadata line
+and column) and the text), the answer pyi's _ast module rebuilds nodes from
 (go/arbace/py/builtins_ast_parse.go). The native answer (arbace.repr.python.astjson) must be the same text.
 
     astdump.py --base DIR --list FILE --out DIR [--mode exec|eval|single] [--flags N]
@@ -46,10 +47,14 @@ def answer(src, filename, mode, flags):
     try:
         tree = compile(src, filename, mode, flags | ast.PyCF_ONLY_AST, dont_inherit=True)
     except SyntaxError as e:
-        # the compiler's answer (arbace.python.run's form): the class, the message, the location, p and the text
+        # the compiler's answer (arbace.python.run's form): the class, the message, the location, p (m with the
+        # exception's _metadata line and column, queue 202c) and the text
         loc = [e.lineno, e.offset, e.end_lineno, e.end_offset]
-        cls = type(e).__name__ if type(e).__name__ in ("IndentationError", "TabError") else "SyntaxError"
-        return (cls + ": " + str(e.msg) + "".join("\0" + ("" if v is None else str(v)) for v in loc) + "\0p"
+        names = {"IndentationError": "IndentationError", "TabError": "TabError", "_IncompleteInputError": "IncompleteInputError"}
+        cls = names.get(type(e).__name__, "SyntaxError")
+        md = getattr(e, "_metadata", None)
+        kind = "\0p" if md is None else "\0m\0%d\0%d" % (md[0], md[1])
+        return (cls + ": " + str(e.msg) + "".join("\0" + ("" if v is None else str(v)) for v in loc) + kind
                 + ("" if e.text is None else "\0" + e.text))
     except (ValueError, TypeError) as e:
         return "%s: %s" % (type(e).__name__, e)
