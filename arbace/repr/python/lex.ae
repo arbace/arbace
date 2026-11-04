@@ -78,7 +78,11 @@
   (zipmap [:cur :inp :buf :line-start :start :done :lineno :first-lineno :start-col :col :atbol :pendin :indent
            :level :cont-line :mls :implicit :comment-nl :midx :extra :type-comments :next-line :n :err
            ;; the token made: type, p_start, p_end, lineno, end_lineno, col_offset, end_col_offset (bytes)
-           :t-type :t-start :t-end :t-line :t-end-line :t-col :t-end-col :t-level :fake]
+           :t-type :t-start :t-end :t-line :t-end-line :t-col :t-end-col :t-level :fake
+           ;; the string tokenizer's input (ast.parse's, string_tokenizer.c), not readline's
+           :string
+           ;; tok->barry_as_bdfl (from __future__ import barry_as_FLUFL): <> is NOTEQUAL
+           :barry]
           (range)))
 (def ^:private nfields (count fields))
 
@@ -122,8 +126,10 @@
 
 (defn lexer
   "The lexer's state over `text` (a String): readline's lines (split at \\n; a last line without one given a fake
-  one), extra tokens when `extra`, type comments when `type-comments`"
-  ^Lx [^String text extra type-comments]
+  one), extra tokens when `extra`, type comments when `type-comments`; `string-input`: the string tokenizer's reading
+  (ast.parse's: tok->buf moved only when a line is read), the text ending in a new-line"
+  (^Lx [^String text extra type-comments] (lexer text extra type-comments false))
+  (^Lx [^String text extra type-comments string-input]
   (let [n0 (.codePointCount text 0 (.length text))
         fake (not (str/ends-with? text "\n"))
         n (if (and fake (pos? n0)) (inc n0) n0)
@@ -154,7 +160,8 @@
       (aset ^longs (.-modes lx) (+ 0 (long (mfields :expr))) -1)
       (aset ^objects (.-box lx) 1 nil)
       (aset st (fields :fake) (if (and fake (pos? n0)) 1 0))
-      lx)))
+      (aset st (fields :string) (if string-input 1 0))
+      lx))))
 
 
 ;; ---------------------------------------------------------------------------------------------
@@ -185,12 +192,14 @@
 ;; Reading (readline_tokenizer.c's underflow over the text's lines; lexer.c's tok_nextc and tok_backup)
 
 (defl underflow []
-  (let [n (g :n) nl (g :next-line)]
-    (when (and (< (g :start) 0) (zero? (g :midx)))
+  (let [n (g :n) nl (g :next-line) string (== 1 (g :string))]
+    ;; readline_tokenizer.c resets its buffer before reading; string_tokenizer.c moves tok->buf only for a line read
+    (when (and (not string) (< (g :start) 0) (zero? (g :midx)))
       (s! :buf (g :cur)))
     (if (>= nl n)
       (do (s! :done E_EOF) false)
-      (let [end (loop [i nl] (if (and (< i n) (not= (aget cs i) 10)) (recur (inc i)) (if (< i n) (inc i) i)))]
+      (let [_ (when (and string (< (g :start) 0)) (s! :buf (g :cur)))
+            end (loop [i nl] (if (and (< i n) (not= (aget cs i) 10)) (recur (inc i)) (if (< i n) (inc i) i)))]
         (s! :line-start (g :cur))
         (s! :inp end)
         (s! :next-line end)
@@ -763,7 +772,7 @@
       r
       (let [c2 (nextc lx)
             t2 (two-chars c c2)
-            t2 (if (and (== c 60) (== c2 62)) OP t2)]
+            t2 (if (and (== c 60) (== c2 62)) (if (== 1 (g :barry)) 28 OP) t2)]
         (if (not= t2 OP)
           (let [c3 (nextc lx) t3 (three-chars c c2 c3)]
             (if (not= t3 OP)
@@ -789,7 +798,7 @@
         (let [lv (g :level)]
           (aset ^ints (.-parenstack lx) lv (int c))
           (aset ^ints (.-parenline lx) lv (int (g :lineno)))
-          (aset ^ints (.-parencol lx) lv (int (- (g :start) (g :line-start))))
+          (aset ^ints (.-parencol lx) lv (int (- (aget ^ints (.-boff lx) (g :start)) (aget ^ints (.-boff lx) (g :line-start)))))
           (s! :level (inc lv))
           (when inside (cm! :depth (inc (cm :depth))))
           nil))
@@ -939,6 +948,43 @@
      (aget ^objects (.-box lx) 1)]))
 
 ;; ---------------------------------------------------------------------------------------------
+;; The state the parser's errors read (Parser/pegen_errors.c: tok->cur, tok->line_start, tok->done, the paren stack)
+
+(defn state
+  "A scalar of the tokenizer's state: :cur :inp :buf :line-start (code point indices into the text), :lineno :done
+  :level :midx (the f-string mode stack's index)"
+  ^long [^Lx lx k]
+  (aget ^longs (.-st lx) (long (fields k))))
+
+(defn byte-index "The UTF-8 offset of code point index `i`" ^long [^Lx lx ^long i] (aget ^ints (.-boff lx) i))
+
+(defn text-range "The text's code points [a, b) as a String" ^String [^Lx lx ^long a ^long b] (substr (.-cs lx) a b))
+
+(defn set-barry! "tok->barry_as_bdfl = 1" [^Lx lx] (aset ^longs (.-st lx) (long (fields :barry)) 1))
+
+(defn char-at "The code point at index `i`" ^long [^Lx lx ^long i] (aget ^ints (.-cs lx) i))
+
+(defn text-length ^long [^Lx lx] (aget ^longs (.-st lx) (long (fields :n))))
+
+(defn paren-top
+  "The innermost open bracket: [CHAR LINENO COL] (COL in UTF-8 bytes, as the C tokenizer's parencolstack), or nil"
+  [^Lx lx]
+  (let [lv (dec (state lx :level))]
+    (when (>= lv 0)
+      [(aget ^ints (.-parenstack lx) lv) (aget ^ints (.-parenline lx) lv) (aget ^ints (.-parencol lx) lv)])))
+
+(defn raw-fstring?
+  "INSIDE_FSTRING(tok) && TOK_GET_MODE(tok)->raw"
+  [^Lx lx]
+  (let [^longs st (.-st lx) ^longs modes (.-modes lx)]
+    (and (pos? (g :midx)) (== 1 (m :raw)))))
+
+(defn string-prefix-char
+  "TOK_GET_STRING_PREFIX: \"t\" when the current mode is a t-string's, else \"f\""
+  ^String [^Lx lx]
+  (prefix-char lx))
+
+;; ---------------------------------------------------------------------------------------------
 ;; tokenize's iterator (Python/Python-tokenize.c's tokenizeriter_next and _tokenizer_error)
 
 (defn- done-error
@@ -1044,7 +1090,7 @@
    "iso_8859_15" "ISO-8859-15" "latin9" "ISO-8859-15" "l9" "ISO-8859-15" "iso8859_2" "ISO-8859-2" "latin2" "ISO-8859-2"
    "euc_jp" "EUC-JP" "shift_jis" "Shift_JIS" "gb2312" "GB2312" "gbk" "GBK" "big5" "Big5" "cp1251" "windows-1251"})
 
-(defn- codec
+(defn codec
   "The Java charset name of Python's codec `name` (codecs.lookup's normalization), or nil when unknown"
   [^String name]
   (let [n (-> (str/lower-case name) (str/replace #"[^a-z0-9.]+" "_") (str/replace #"^_|_$" ""))]

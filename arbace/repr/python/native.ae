@@ -6,7 +6,7 @@
   doc/python/SPEC.md, the literals' spellings scanned in the source), so that the native dump of a file is the helper's
   text, byte for byte. read-dump: the dump's text of a file."
   (:require [arbace.repr.python.lex :as lex]
-            [arbace.repr.python.peg :as pk]
+            [arbace.repr.python.peg :as pk :refer [byte-offset->char]]
             [arbace.repr.python.parser :as ps]
             [arbace.string :as str]))
 
@@ -15,18 +15,33 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; The parse
 
+;; the future features (Python/future.c's future_parse, as compile()'s AST preprocessing runs it for ast.parse)
+(def ^:private future-features
+  #{"nested_scopes" "generators" "division" "absolute_import" "with_statement" "print_function" "unicode_literals"
+    "barry_as_FLUFL" "generator_stop" "annotations"})
+
+(defn future-check
+  "future_parse over the leading future imports (after a docstring): \"not a chance\" for braces, an undefined feature
+  rejected, at the alias (UTF-8 offsets, no text); the tree"
+  [tree]
+  (let [body (:body tree)
+        doc? (let [s (first body)] (and (= :Expr (:t s)) (= :Constant (:t (:value s))) (= [:str] (:value (:value s)))))]
+    (loop [ss (if doc? (rest body) body)]
+      (when-let [s (first ss)]
+        (when (and (= :ImportFrom (:t s)) (pk/c= 0 (:level s)) (= "__future__" (:module s)))
+          (doseq [a (:names s) :let [f (:name a)] :when (not (future-features f))]
+            (throw (ex-info "future" {:python-error ["SyntaxError" (if (= f "braces") "not a chance" (str "future feature " f " is not defined"))
+                                                     (:lineno a) (inc (long (:col_offset a))) (:end_lineno a) (inc (long (:end_col_offset a))) nil]})))
+          (recur (rest ss)))))
+    tree))
+
 (defn parse-text
   "The module's tree of `text` (decoded, its BOM stripped), or throws the parser's error (ex-data :python-error)"
   [^String text type-comments]
   (let [t (-> text (str/replace "\r\n" "\n") (str/replace "\r" "\n"))
         t (if (str/ends-with? t "\n") t (str t "\n"))
-        p (pk/parser t ps/keywords ps/soft-keywords type-comments)
-        tree (ps/r-file p)]
-    (if (nil? tree)
-      (let [tok (pk/token-at p (dec (pk/fill p)))]
-        (throw (ex-info "invalid syntax" {:python-error ["SyntaxError" "invalid syntax" (:lineno tok) (inc (long (:col_offset tok))) nil nil]
-                                          :first-pass true})))
-      tree)))
+        p (pk/parser t ps/keywords ps/soft-keywords type-comments)]
+    (future-check (pk/run-parser p ps/r-file))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; The writer (tools/pydump/pydump.py's Writer, the spec's vocabulary)
@@ -484,31 +499,208 @@
                line col line col text])
             (if (== (aget bs i) 10) (recur (inc i) (inc line) (inc i)) (recur (+ i len) line ls))))))))
 
+(defn- translate-newlines
+  "_PyTokenizer_translate_newlines over bytes: CR LF and CR to LF, a last LF added (exec input)"
+  ^bytes [^bytes bs ^long from]
+  (let [out (java.io.ByteArrayOutputStream. (+ 2 (alength bs))) n (alength bs)]
+    (loop [i from last 0]
+      (if (< i n)
+        (let [b (aget bs i)]
+          (if (== b 13)
+            (do (.write out 10) (recur (if (and (< (inc i) n) (== (aget bs (inc i)) 10)) (+ i 2) (inc i)) 10))
+            (do (.write out (int b)) (recur (inc i) (long b)))))
+        (when (and (not= last 10) (not= last 0)) (.write out 10))))
+    (.toByteArray out)))
+
+(defn- normal-name
+  "helpers.c's get_normal_name (utf-8 and latin-1 by their first 12 characters)"
+  ^String [^String r]
+  (let [b (-> (subs r 0 (min 12 (count r))) (str/replace "_" "-") str/lower-case)]
+    (cond
+      (or (= b "utf-8") (str/starts-with? b "utf-8-")) "utf-8"
+      (or (#{"latin-1" "iso-8859-1" "iso-latin-1"} b) (some #(str/starts-with? b %) ["latin-1-" "iso-8859-1-" "iso-latin-1-"])) "iso-8859-1"
+      :else r)))
+
+(defn- coding-spec
+  "helpers.c's get_coding_spec over the line bs[a, a+size): the coding spec, :none (no comment-only line), or nil"
+  [^bytes bs ^long a ^long size]
+  (let [at (fn ^long [^long i] (if (< (+ a i) (alength bs)) (bit-and (aget bs (+ a i)) 0xFF) 0))
+        lim (- size 6)
+        i0 (loop [i 0] (cond (>= i lim) i (== (at i) 35) i (not (#{32 9 12} (at i))) -1 :else (recur (inc i))))]
+    (if (neg? i0)
+      :code
+      (loop [i i0]
+        (when (< i lim)
+          (if (and (== (at i) 99) (== (at (+ i 1)) 111) (== (at (+ i 2)) 100) (== (at (+ i 3)) 105) (== (at (+ i 4)) 110)
+                   (== (at (+ i 5)) 103) (#{58 61} (at (+ i 6))))
+            (let [b (loop [t (+ i 7)] (if (#{32 9} (at t)) (recur (inc t)) t))
+                  e (loop [t b] (let [c (at t)] (if (or (Character/isLetterOrDigit (char c)) (#{45 95 46} c)) (if (< c 128) (recur (inc t)) t) t)))]
+              (if (< b e)
+                (normal-name (String. bs (int (+ a b)) (int (- e b)) "ISO-8859-1"))
+                (recur (inc i))))
+            (recur (inc i))))))))
+
+(defn- code-line?
+  "check_coding_spec without a spec: the line holds something before a comment (the cookie's search stops)"
+  [^bytes bs ^long a ^long size]
+  (loop [i 0]
+    (if (>= i size)
+      false
+      (let [c (aget bs (+ a i))]
+        (cond (#{35 10 13} c) false
+              (not (#{32 9 12} c)) true
+              :else (recur (inc i)))))))
+
+(defn- decode-error-text
+  "str() of the UnicodeDecodeError strict decoding raises (the codecs whose errors the corpora meet), or nil"
+  [^String enc ^bytes bs]
+  (let [name (case (lex/codec enc) "UTF-8" "utf-8" "US-ASCII" "ascii" nil)]
+    (when name
+      (loop [i 0]
+        (when (< i (alength bs))
+          (let [b (bit-and (aget bs i) 0xFF)]
+            (if (= name "ascii")
+              (if (>= b 128) (format "'ascii' codec can't decode byte 0x%02x in position %d: ordinal not in range(128)" b i) (recur (inc i)))
+              (let [k (valid-utf8-len bs i)]
+                (if (pos? k)
+                  (recur (+ i k))
+                  (let [n (alength bs)
+                        cont? (fn [j] (and (< j n) (== 0x80 (bit-and (aget bs j) 0xC0))))
+                        need (cond (and (>= b 0xC2) (<= b 0xDF)) 1 (and (>= b 0xE0) (<= b 0xEF)) 2 (and (>= b 0xF0) (<= b 0xF4)) 3 :else 0)]
+                    (cond
+                      (zero? need) (format "'utf-8' codec can't decode byte 0x%02x in position %d: invalid start byte" b i)
+                      ;; a valid prefix cut by the end of the data
+                      (and (every? cont? (range (inc i) n)) (< (- n i 1) need)) (format "'utf-8' codec can't decode byte%s in position %s: unexpected end of data" (if (== n (inc i)) (format " 0x%02x" b) "s") (if (== n (inc i)) (str i) (str i "-" (dec n))))
+                      :else (let [j (loop [j (inc i)] (if (and (< j n) (cont? j) (< (- j i) (inc need))) (recur (inc j)) j))]
+                              (if (== j (inc i))
+                                (format "'utf-8' codec can't decode byte 0x%02x in position %d: invalid continuation byte" b i)
+                                (format "'utf-8' codec can't decode bytes in position %d-%d: invalid continuation byte" i (dec j)))))))))))))))
+
+;; Python's codecs on Linux (Lib/encodings' modules and encodings.aliases' names of them, normalized; the pinned
+;; tarball's): a coding spec naming one the runtime has no charset for is the runtime's refusal, not "unknown encoding"
+(def ^:private python-codecs
+  (set (str/split (str/join " " [
+   "037 1026 1125 1140 1250 1251 1252 1253 1254 1255 1256 1257 1258 273 424 437 500 646 775 850 852 855 857 858"
+   "860 861 862 863 864 865 866 869 874 8859 932 936 949 950 ansi_x3.4_1968 ansi_x3.4_1986 ansi_x3_4_1968 arabic"
+   "ascii asmo_708 base64 base64_codec base_64 big5 big5_hkscs big5_tw big5hkscs bz2 bz2_codec charmap chinese"
+   "cp00858 cp01140 cp037 cp1006 cp1026 cp1051 cp1125 cp1140 cp1250 cp1251 cp1252 cp1253 cp1254 cp1255 cp1256"
+   "cp1257 cp1258 cp1361 cp154 cp273 cp367 cp424 cp437 cp500 cp65001 cp720 cp737 cp775 cp819 cp850 cp852 cp855"
+   "cp856 cp857 cp858 cp860 cp861 cp862 cp863 cp864 cp865 cp866 cp866u cp869 cp874 cp875 cp932 cp936 cp949 cp950"
+   "cp_gr cp_is csHPRoman8 csascii csbig5 cseuckr csibm00858 csibm01140 csibm037 csibm1026 csibm273 csibm424"
+   "csibm500 csibm855 csibm857 csibm858 csibm860 csibm861 csibm863 csibm864 csibm865 csibm866 csibm869 csiso2022jp"
+   "csiso2022kr csiso58gb231280 csisolatin1 csisolatin2 csisolatin3 csisolatin4 csisolatin5 csisolatin6"
+   "csisolatinarabic csisolatincyrillic csisolatingreek csisolatinhebrew cskoi8r cspc775baltic cspc850multilingual"
+   "cspc862latinhebrew cspc8codepage437 cspcp852 csptcp154 csshiftjis cyrillic cyrillic_asian ebcdic_cp_be"
+   "ebcdic_cp_ca ebcdic_cp_ch ebcdic_cp_he ebcdic_cp_nl ebcdic_cp_us ebcdic_cp_wt ebcdic_us_37_euro ecma_114"
+   "ecma_118 elot_928 euc_cn euc_jis2004 euc_jis_2004 euc_jisx0213 euc_jp euc_kr euccn eucgb2312_cn eucjis2004"
+   "eucjisx0213 eucjp euckr gb18030 gb18030_2000 gb2312 gb2312_1980 gb2312_80 gbk greek greek8 hebrew hex"
+   "hex_codec hkscs hp_roman8 hz hz_gb hz_gb_2312 hzgb ibm00858 ibm01140 ibm037 ibm039 ibm1026 ibm1051 ibm1125"
+   "ibm1140 ibm273 ibm367 ibm424 ibm437 ibm500 ibm775 ibm819 ibm850 ibm852 ibm855 ibm857 ibm858 ibm860 ibm861"
+   "ibm862 ibm863 ibm864 ibm865 ibm866 ibm869 idna iso2022_jp iso2022_jp_1 iso2022_jp_2 iso2022_jp_2004"
+   "iso2022_jp_3 iso2022_jp_ext iso2022_kr iso2022jp iso2022jp_1 iso2022jp_2 iso2022jp_2004 iso2022jp_3"
+   "iso2022jp_ext iso2022kr iso646_us iso8859 iso8859_1 iso8859_10 iso8859_11 iso8859_13 iso8859_14 iso8859_15"
+   "iso8859_16 iso8859_2 iso8859_3 iso8859_4 iso8859_5 iso8859_6 iso8859_7 iso8859_8 iso8859_9 iso_2022_jp"
+   "iso_2022_jp_1 iso_2022_jp_2 iso_2022_jp_2004 iso_2022_jp_3 iso_2022_jp_ext iso_2022_kr iso_646.irv_1991"
+   "iso_8859_1 iso_8859_10 iso_8859_10_1992 iso_8859_11 iso_8859_11_2001 iso_8859_13 iso_8859_14 iso_8859_14_1998"
+   "iso_8859_15 iso_8859_16 iso_8859_16_2001 iso_8859_1_1987 iso_8859_2 iso_8859_2_1987 iso_8859_3 iso_8859_3_1988"
+   "iso_8859_4 iso_8859_4_1988 iso_8859_5 iso_8859_5_1988 iso_8859_6 iso_8859_6_1987 iso_8859_7 iso_8859_7_1987"
+   "iso_8859_8 iso_8859_8_1988 iso_8859_8_e iso_8859_8_i iso_8859_9 iso_8859_9_1989 iso_celtic iso_ir_100"
+   "iso_ir_101 iso_ir_109 iso_ir_110 iso_ir_126 iso_ir_127 iso_ir_138 iso_ir_144 iso_ir_148 iso_ir_157 iso_ir_166"
+   "iso_ir_199 iso_ir_226 iso_ir_58 iso_ir_6 jisx0213 johab koi8_r koi8_t koi8_u korean ks_c_5601 ks_c_5601_1987"
+   "ks_x_1001 ksc5601 ksx1001 kz1048 kz_1048 l1 l10 l2 l3 l4 l5 l6 l7 l8 l9 latin latin1 latin10 latin2 latin3"
+   "latin4 latin5 latin6 latin7 latin8 latin9 latin_1 mac_arabic mac_centeuro mac_croatian mac_cyrillic mac_farsi"
+   "mac_greek mac_iceland mac_latin2 mac_roman mac_romanian mac_turkish maccentraleurope maccyrillic macgreek"
+   "maciceland macintosh maclatin2 macroman macturkish ms1361 ms874 ms932 ms936 ms949 ms950 ms_kanji mskanji"
+   "palmos pc_multilingual_850_euro pt154 ptcp154 punycode quopri quopri_codec quoted_printable quotedprintable r8"
+   "raw_unicode_escape rk1048 roman8 rot13 rot_13 ruscii s_jis s_jis_2004 s_jisx0213 shift_jis shift_jis_2004"
+   "shift_jisx0213 shiftjis shiftjis2004 shiftjisx0213 sjis sjis_2004 sjisx0213 strk1048_2002 thai tis620 tis_620"
+   "tis_620_0 tis_620_2529_0 tis_620_2529_1 u16 u32 u7 u8 u_jis uhc ujis undefined unicode_1_1_utf_7"
+   "unicode_escape unicodebigunmarked unicodelittleunmarked us us_ascii utf utf16 utf32 utf7 utf8 utf8_ucs2"
+   "utf8_ucs4 utf_16 utf_16_be utf_16_le utf_16be utf_16le utf_32 utf_32_be utf_32_le utf_32be utf_32le utf_7"
+   "utf_8 utf_8_sig uu uu_codec windows_1250 windows_1251 windows_1252 windows_1253 windows_1254 windows_1255"
+   "windows_1256 windows_1257 windows_1258 windows_31j windows_874 x_mac_japanese x_mac_korean x_mac_simp_chinese"
+   "x_mac_trad_chinese zip zlib zlib_codec"])
+                  #" ")))
+
+(defn- python-codec? [^String cs]
+  (let [n (-> (str/lower-case cs) (str/replace #"[^a-z0-9.]+" "_") (str/replace #"^_|_$" ""))]
+    (or (contains? python-codecs n) (contains? python-codecs (str/replace n "." "_")))))
+
+(defn source-text
+  "compile()'s reading of a source's bytes, ast.parse's (Python/pythonrun.c's _Py_SourceAsString, then
+  string_tokenizer.c's decode_str: new-lines translated, the BOM, the coding spec of the first two lines, the text
+  decoded, or UTF-8 checked when none is declared): {:text TEXT} (ending in a new-line) or {:error [CLASS MSG L O EL EO
+  TEXT]}"
+  [^bytes bs]
+  (if (some #(zero? (long %)) bs)
+    {:error ["SyntaxError" "source code string cannot contain null bytes" nil nil nil nil nil]}
+    (let [tr (translate-newlines bs 0)
+          n (alength tr)
+          bom (and (>= n 3) (== (aget tr 0) (unchecked-byte 0xEF)) (== (aget tr 1) (unchecked-byte 0xBB)) (== (aget tr 2) (unchecked-byte 0xBF)))
+          a (if bom 3 0)
+          nl (fn [i] (loop [i i] (cond (>= i n) nil (== (aget tr i) 10) i :else (recur (inc i)))))
+          n1 (nl a)
+          n2 (when n1 (nl (inc n1)))
+          init-error (fn [msg] {:error ["SyntaxError" msg 0 -1 nil nil nil]})
+          spec (fn [lineno la size]
+                 (let [cs (coding-spec tr la size)]
+                   (cond
+                     (= cs :code) :code
+                     (nil? cs) (if (code-line? tr la size) :code nil)
+                     (and bom (not= cs "utf-8"))
+                     (let [line (String. tr (int la) (int (- (long (nl la)) la)) "UTF-8")]
+                       {:error ["SyntaxError" (str "encoding problem: " cs " with BOM") lineno 0 lineno
+                                (byte-offset->char line size) line]})
+                     :else {:cs cs})))
+          r1 (when n1 (spec 1 a (- (long n1) a)))
+          r (cond
+              (:error r1) r1
+              (:cs r1) r1
+              (and (nil? r1) n2) (spec 2 (inc (long n1)) (- (long n2) (long n1)))
+              :else nil)]
+      (cond
+        (:error r) r
+        (and (:cs r) (not= (:cs r) "utf-8"))
+        (let [cs (:cs r) charset (lex/codec cs) body (java.util.Arrays/copyOfRange tr (int a) (int n))]
+          (cond
+            (and (nil? charset) (python-codec? cs))
+            (throw (ex-info (str "the runtime has no charset for Python's codec " cs) {:class :charset}))
+            (nil? charset) (init-error (str "unknown encoding: " cs))
+            :else (if-let [m (decode-error-text cs body)]
+                    (init-error m)
+                    {:text (str/replace (try (String. body ^String charset)
+                                               (catch Throwable e
+                                                 (throw (ex-info (str "the runtime has no charset " charset " (" (.getMessage e) ")") {:class :charset}))))
+                                             #"\r\n?" "\n")})))
+        :else
+        (if-let [e (utf8-error tr a)]
+          {:error e}
+          {:text (String. tr (int a) (int (- n a)) "UTF-8")})))))
+
 (defn read-dump
   "A file's bytes as the helper's tree mode writes them (mode :lines, or :full when `full`): (python/module ...) or
   (python/error ...), and a newline"
   ^String [^bytes bs ^String rel & [full]]
-  (let [{:keys [error text encoding]} (lex/decode-source bs)]
-    (if-let [error (or error
-                       (when (= encoding "utf-8")
-                         (utf8-error bs (if (and (>= (alength bs) 3) (== (aget bs 0) (unchecked-byte 0xEF)) (== (aget bs 1) (unchecked-byte 0xBB))
-                                                 (== (aget bs 2) (unchecked-byte 0xBF))) 3 0))))]
+  (let [{:keys [error] stext :text} (source-text bs)]
+    (if error
       (str (error-text error) "\n")
-      (try
-        (let [tree (parse-text text false)
-              tc-tree (if (re-find #"#[ \t]*type[ \t]*:" text)
-                        (try (parse-text text true) (catch arbace.lang.ExceptionInfo e (if (:python-error (ex-data e)) :rejected (throw e))))
-                        tree)
-              extra (cond-> []
-                      (= tc-tree :rejected) (conj [":type-comments" ":rejected"])
-                      (and (map? tc-tree) (seq (:type_ignores tc-tree)))
-                      (conj [":type-ignores" (vecs (for [t (:type_ignores tc-tree)] (form "type-ignore" [(str (:lineno t)) (qstr (:tag t))] [] nil)))])
-                      (and full (not= encoding "utf-8")) (conj [":encoding" (qstr encoding)])
-                      (and full (>= (alength bs) 3) (== (aget bs 0) (unchecked-byte 0xEF)) (== (aget bs 1) (unchecked-byte 0xBB))
-                           (== (aget bs 2) (unchecked-byte 0xBF))) (conj [":bom" "true"])
-                      full (conj [":tokens" (tokens-text text)]))]
-          (str (module-text text tree (when (map? tc-tree) tc-tree) rel (boolean full) extra) "\n"))
-        (catch arbace.lang.ExceptionInfo e
-          (if-let [pe (:python-error (ex-data e))]
-            (str (error-text pe) "\n")
-            (throw e)))))))
+      (let [{:keys [text encoding]} (let [d (try (lex/decode-source bs) (catch Throwable _ nil))]
+                                      (if (and d (:text d)) d {:text stext :encoding "utf-8"}))]
+        (try
+          (let [tree (parse-text stext false)
+                tc-tree (if (re-find #"#[ \t]*type[ \t]*:" stext)
+                          (try (parse-text stext true) (catch arbace.lang.ExceptionInfo e (if (:python-error (ex-data e)) :rejected (throw e))))
+                          tree)
+                extra (cond-> []
+                        (= tc-tree :rejected) (conj [":type-comments" ":rejected"])
+                        (and (map? tc-tree) (seq (:type_ignores tc-tree)))
+                        (conj [":type-ignores" (vecs (for [t (:type_ignores tc-tree)] (form "type-ignore" [(str (:lineno t)) (qstr (:tag t))] [] nil)))])
+                        (and full (not= encoding "utf-8")) (conj [":encoding" (qstr encoding)])
+                        (and full (>= (alength bs) 3) (== (aget bs 0) (unchecked-byte 0xEF)) (== (aget bs 1) (unchecked-byte 0xBB))
+                             (== (aget bs 2) (unchecked-byte 0xBF))) (conj [":bom" "true"])
+                        full (conj [":tokens" (tokens-text text)]))]
+            (str (module-text text tree (when (map? tc-tree) tc-tree) rel (boolean full) extra) "\n"))
+          (catch arbace.lang.ExceptionInfo e
+            (if-let [pe (:python-error (ex-data e))]
+              (str (error-text pe) "\n")
+              (throw e))))))))
