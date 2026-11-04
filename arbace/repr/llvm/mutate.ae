@@ -531,6 +531,83 @@
     (let [b (body x) o (apply hash-map (drop 4 b))]
       (set-inst forms fi bi ii [(rebody x (opt-update b :unwind 4 (constantly (:to o))))]))))
 
+;; ---------------------------------------------------------------------------------------------
+;; Metadata (LL4b)
+
+(defn- md-id? [x] (and (symbol? x) (nil? (namespace x)) (boolean (re-matches #"![0-9]+" (name x)))))
+
+(defn- max-md-id [forms]
+  (reduce max 0 (for [f forms :when (= (first f) 'llvm/meta)] (Long/parseLong (subs (name (second f)) 1)))))
+
+(defn- md-add
+  "The forms with a new node `ops` (a tuple) as the next metadata id; [forms id]."
+  [forms ops]
+  (let [id (symbol (str "!" (inc (max-md-id forms))))]
+    [(conj (vec forms) (list 'llvm/meta id (list '! (vec ops)))) id]))
+
+(defn- m-md-attach
+  "A metadata attachment that the Verifier checks, with a node that breaks its rules, on an instruction of the wrong kind
+  or type or with the wrong operands."
+  [r forms]
+  (let [places (filter #(let [b (body (nth % 3))] (not (or (str/starts-with? (name (first b)) "dbg_") (and (terminators (first b)) (not= 'br (first b)))))) (inst-places forms))
+        loads (filter #(= 'load (first (body (nth % 3)))) places)
+        [fi bi ii x] (pick r (if (and (seq loads) (< (.nextInt ^java.util.Random r 10) 7)) loads places))]
+    (when x
+      (let [b (body x) t (vf/result-type b) h (first b)
+            has? (fn [k] (some #{k} (:md (apply hash-map (drop 4 (vec b))))))
+            i32 (fn [n] ['i32 n]) i64 (fn [n] ['i64 n])
+            tt (if (int-t? t) t 'i32) ot (if (= tt 'i32) 'i64 'i32)
+            ldptr (and (= h 'load) (ptr? t))
+            cands [['!range [[tt 0] [tt 0]]] ['!range [[tt 0]]] ['!range []] ['!range [[ot 0] [ot 4]]] ['!range [[tt 0] [tt 4] [tt 2] [tt 6]]]
+                   ['!range [[tt 0] [tt 4] [tt 4] [tt 6]]] ['!range [(list '! "a") (list '! "b")]] ['!range [[tt 1] [tt 4]]]
+                   ['!nonnull [(i32 1)]] ['!noundef [(i32 1)]] ['!noundef []] ['!align [(i32 8)]] ['!align [(i64 3)]] ['!align []]
+                   ['!dereferenceable [(i32 8)]] ['!dereferenceable [(i64 8) (i64 9)]] ['!dereferenceable_or_null []]
+                   ['!invariant.load []] ['!invariant.group []] ['!fpmath [['float '(fp "1.0")]]] ['!fpmath [['double '(fp "1.0")]]]
+                   ['!fpmath [['float '(fp "-1.0")]]] ['!prof [(list '! "branch_weights") (i32 1) (i32 2)]]
+                   ['!prof [(list '! "branch_weights") (i32 1)]] ['!prof [(list '! "bogus") (i32 1)]] ['!prof [(i32 1) (i32 2)]]
+                   ['!prof [(list '! "branch_weights")]] ['!tbaa []] ['!alias.scope [(i32 1)]] ['!noalias [(list '! [(list '! "x")])]]
+                   ['!noalias.addrspace [(i64 0) (i64 1)]]]
+            legal (fn [k] (case k
+                            !range (and (#{'load 'call 'invoke} h) (int-t? t))
+                            (!nonnull !align !dereferenceable !dereferenceable_or_null) ldptr
+                            (!noundef !invariant.load) (= h 'load)
+                            !invariant.group (#{'load 'store} h)
+                            !fpmath (boolean (#{'float 'double} t))
+                            !prof (#{'br 'switch 'select 'call} h)
+                            (!tbaa !alias.scope !noalias !noalias.addrspace) (#{'load 'store} h)
+                            false))
+            ok (remove #(has? (first %)) cands)
+            on-kind (filter #(legal (first %)) ok)
+            [k ops] (pick r (if (and (seq on-kind) (< (.nextInt ^java.util.Random r 10) 8)) on-kind ok))]
+        (when k
+          (let [[forms2 id] (md-add forms ops)]
+            (set-inst forms2 fi bi ii [(rebody x (opt-update b :md 4 #(vec (concat % [k id]))))])))))))
+
+(defn- node-refs
+  "Metadata ids with the way they are used: [kind id], kind a symbol `!range` ..., `:flag` or `:ident`."
+  [forms]
+  (concat
+   (for [[_ _ _ x] (inst-places forms) :let [b (body x) md (partition 2 (:md (apply hash-map (drop (if (= 'call (first b)) 4 2) (vec b)))))]
+         [k id] md :when (md-id? id)] [k id])
+   (for [f forms :when (and (= (first f) 'llvm/named-meta) (#{'!llvm.module.flags '!llvm.ident} (second f)))
+         id (nth f 2) :when (md-id? id)] [(if (= (second f) '!llvm.ident) :ident :flag) id])))
+
+(defn- m-md-edit
+  "A node used by a !range, !prof, !tbaa, module flag or llvm.ident edited: an operand dropped, added, or replaced."
+  [r forms]
+  (let [byid (into {} (keep-indexed (fn [i f] (when (= (first f) 'llvm/meta) [(second f) i])) forms))
+        refs (filter (fn [[k id]] (and (byid id) (let [n (nth (nth forms (byid id)) 2)] (and (seq? n) (= (first n) '!) (vector? (second n))))))
+                     (node-refs forms))]
+    (when-let [[k id] (pick r (filter (fn [[k _]] (#{'!range '!prof '!tbaa '!align '!nonnull '!alias.scope :flag :ident} k)) refs))]
+      (let [fi (byid id) f (nth forms fi) ops (second (nth f 2)) n (count ops)
+            ops2 (case (.nextInt ^java.util.Random r 5)
+                   0 (when (pos? n) (subvec ops 0 (dec n)))
+                   1 (when (pos? n) (subvec ops 1))
+                   2 (conj ops (pick r [['i32 7] ['i64 1] (list '! "x")]))
+                   3 (when (pos? n) (assoc ops (.nextInt ^java.util.Random r n) (pick r [(list '! "x") ['i64 3] ['float '(fp "1.0")] ['i32 99] ['i1 true]])))
+                   4 (when (pos? n) (conj ops (peek ops))))]
+        (when ops2 (assoc forms fi (apply list (assoc (vec f) 2 (list '! ops2)))))))))
+
 (def kinds
   [[:type m-type] [:hoist m-hoist] [:noterm m-noterm] [:phiblock m-phiblock] [:phimove m-phimove] [:align m-align]
    [:linkage m-linkage] [:undef m-undef] [:dupdef m-dupdef] [:lpad m-lpad] [:intrinsic m-intrinsic]
@@ -539,7 +616,8 @@
    [:attr-type m-attr-type] [:attr-pair m-attr-pair] [:attr-place m-attr-place] [:attr-dup m-attr-dup] [:attr-returned m-attr-returned]
    [:attr-value m-attr-value] [:attr-immarg m-attr-immarg] [:cc-def m-cc-def] [:cc-call m-cc-call] [:musttail m-musttail]
    [:bundle m-bundle] [:intr-decl m-intr-decl*] [:intr-arg m-intr-arg] [:intr-rename m-intr-rename]
-   [:funclet m-funclet] [:personality m-personality] [:unwind-dest m-unwind-dest]])
+   [:funclet m-funclet] [:personality m-personality] [:unwind-dest m-unwind-dest]
+   [:md-attach m-md-attach] [:md-edit m-md-edit]])
 
 (def families
   "The kinds by rule family, for `bin/repr-llvm mutants LIST OUT N FIRST FAMILY`."
@@ -549,7 +627,8 @@
    "musttail" [:musttail]
    "bundles" [:bundle]
    "intrinsics" [:intr-decl :intr-arg :intr-rename :intrinsic]
-   "funclets" [:funclet :personality :unwind-dest :lpad :lpadr]})
+   "funclets" [:funclet :personality :unwind-dest :lpad :lpadr]
+   "metadata" [:md-attach :md-edit]})
 
 (defn -main
   "LIST OUT N [FIRST [FAMILY]]: N mutants of LIST's modules (NAME<tab>PATH.ll), the K-th of them K = FIRST (default 0) ...,

@@ -1141,6 +1141,189 @@
       resume (when-not personality? (verr :verifier/funclet "ResumeInst needs to be in a function with a personality."))
       nil)))
 
+;; ---------------------------------------------------------------------------------------------
+;; Metadata structure (Verifier::visitRangeMetadata, visitAlignMetadata, visitProfMetadata, visitModuleFlag, ...)
+
+(def ^:dynamic *meta* {})   ; !N -> its definition
+
+(defn- md-ops
+  "The operands of a metadata tuple `x` (a reference or an inline node), nil for any other node."
+  [x]
+  (cond (md-ref? x) (recur (get *meta* x))
+        (and (seq? x) (= (first x) '!) (vector? (second x))) (second x)
+        :else nil))
+
+(defn- md-str [op] (when (and (seq? op) (= (first op) '!) (string? (second op))) (second op)))
+(defn- md-int-op? [op] (and (vector? op) (int-type? (norm-type (first op))) (or (integer? (second op)) (boolean? (second op)) (and (seq? (second op)) (= 'int (first (second op)))))))
+(defn- md-int-val [op] (let [v (second op)] (cond (integer? v) (biginteger v) (true? v) (biginteger 1) :else (biginteger 0))))
+(defn- md-fp-val [op] (when (and (vector? op) (fp-type? (norm-type (first op))) (seq? (second op)) (= 'fp (first (second op))))
+                        (try (Double/parseDouble (second (second op))) (catch Throwable _ 0.0))))
+
+(defn- bi-mod ^java.math.BigInteger [x w] (.mod (biginteger x) (.shiftLeft java.math.BigInteger/ONE (int w))))
+
+(defn- md-in-range? [lo hi x w]
+  (let [lo (bi-mod lo w) hi (bi-mod hi w) x (bi-mod x w)]
+    (if (neg? (.compareTo lo hi))
+      (and (<= (.compareTo lo x) 0) (neg? (.compareTo x hi)))
+      (or (>= (.compareTo x lo) 0) (neg? (.compareTo x hi))))))
+
+(defn- check-range-md [x rt]
+  (let [ops (md-ops x)]
+    (when ops
+      (when (empty? ops) (verr :verifier/md-range "It should have at least one range!"))
+      (when (odd? (count ops)) (verr :verifier/md-range "Unfinished range!"))
+      (let [w (when (int-type? (elem rt)) (int-bits (elem rt)))]
+        (loop [pairs (partition 2 ops) last nil]
+          (when-let [[lo hi] (first pairs)]
+            (when-not (md-int-op? lo) (verr :verifier/md-range "The lower limit must be an integer!"))
+            (when-not (md-int-op? hi) (verr :verifier/md-range "The upper limit must be an integer!"))
+            (when-not (and (= (norm-type (first lo)) (elem rt)) (= (norm-type (first hi)) (elem rt)))
+              (verr :verifier/md-range "Range types must match instruction type!"))
+            (let [l (md-int-val lo) h (md-int-val hi)]
+              (when (= (bi-mod l w) (bi-mod h w)) (verr :verifier/md-range "Range must not be empty!"))
+              (when last
+                (let [[ll lh] last]
+                  (when (or (md-in-range? ll lh l w) (md-in-range? l h ll w)) (verr :verifier/md-range "Intervals are overlapping"))
+                  (when-not (> l ll) (verr :verifier/md-range "Intervals are not in order"))
+                  (when (= (bi-mod l w) (bi-mod lh w)) (verr :verifier/md-range "Intervals are contiguous"))))
+              (recur (rest pairs) [l h]))))))))
+
+(defn- check-tbaa-tag [x]
+  (when-let [ops (md-ops x)]
+    (when (empty? ops) (verr :verifier/md-misc "TBAA metadata cannot have 0 operands"))
+    (let [acc (md-ops (second ops))]
+      (when-not (and (>= (count ops) 2) acc (= 3 (count acc)) (md-str (first acc)) (md-int-op? (nth acc 2)) (zero? (.signum ^java.math.BigInteger (md-int-val (nth acc 2)))))
+        (verr :verifier/md-misc "Access type node must be a valid scalar type"))
+      (when (and (>= (count ops) 3) (md-int-op? (nth ops 2)) (not= (norm-type (first (nth ops 2))) (norm-type (first (nth acc 2)))))
+        (verr :verifier/md-misc "Access bit-width not the same as description bit-width")))))
+
+(defn- check-prof-md [x hd b]
+  (let [ops (md-ops x)]
+    (when ops
+      (when (< (count ops) 1) (verr :verifier/md-prof "!prof annotations should have at least 1 operand"))
+      (when-not (md-str (first ops)) (verr :verifier/md-prof "expected string with name of the !prof annotation"))
+      (when (< (count ops) 2) (verr :verifier/md-prof "!prof annotations should have no less than 2 operands"))
+      (let [nm (md-str (first ops)) [_ ps o] (split-inst b)]
+        (cond
+          (= nm "branch_weights")
+          (let [ws (if (md-str (second ops)) (drop 2 ops) (rest ops))   ; an MDString after the name is the origin ("expected")
+                n (count ws)
+                expected (case hd
+                           br (when (= 4 (count ps)) 2)
+                           switch (inc (count (nth ps 3)))
+                           call 1
+                           invoke 2
+                           indirectbr (count (nth ps 2))
+                           select 2
+                           callbr (inc (count (:indirect o)))
+                           nil)]
+            (when-not expected (verr :verifier/md-prof "!prof branch_weights are not allowed for this instruction"))
+            (when-not (= n expected)
+              (verr :verifier/md-prof (if (= hd 'invoke) "Wrong number of InvokeInst branch_weights operands" "Wrong number of operands")))
+            (doseq [w ws] (when-not (md-int-op? w) (verr :verifier/md-prof "!prof brunch_weights operand is not a const int"))))
+          (= nm "VP") nil
+          :else (verr :verifier/md-prof "expected either branch_weights or VP profile name"))))))
+
+(defn- check-inst-metadata
+  "The attachments of an instruction `hd` (result type `rt`, body `b`): their placement and their operands."
+  [md hd rt b]
+  (when-let [x (get md '!range)]
+    (when-not ('#{load call invoke} hd) (verr :verifier/md-range "Ranges are only for loads, calls and invokes!"))
+    (check-range-md x rt))
+  (when-let [x (get md '!noalias.addrspace)]
+    (when-let [ops (md-ops x)]
+      (when-not ('#{load store atomicrmw cmpxchg call invoke} hd) (verr :verifier/md-misc "noalias.addrspace are only for memory operations!"))
+      (doseq [op ops] (when-not (and (vector? op) (= 'i32 (norm-type (first op)))) (verr :verifier/md-misc "noalias.addrspace type must be i32!")))))
+  (when (get md '!invariant.group)
+    (when-not ('#{load store} hd) (verr :verifier/md-misc "invariant.group metadata is only for loads and stores")))
+  (when (get md '!invariant.load)
+    (when-not (= hd 'load) (verr :verifier/md-misc "invariant.load metadata is only for loads and readonly intrinsic calls")))
+  (when-let [x (get md '!fpmath)]
+    (when-not (fp-ish? rt) (verr :verifier/md-misc "fpmath requires a floating point result!"))
+    (when-let [ops (md-ops x)]
+      (when-not (= 1 (count ops)) (verr :verifier/md-misc "fpmath takes one operand!"))
+      (let [op (first ops)]
+        (when-not (and (vector? op) (= 'float (norm-type (first op)))) (verr :verifier/md-misc "fpmath accuracy must have float type"))
+        (let [v (md-fp-val op)]
+          (when-not (and v (> v 0.0)) (verr :verifier/md-misc "fpmath accuracy not a positive number!"))))))
+  (when-let [x (get md '!nonnull)]
+    (when-not (ptr-type? rt) (verr :verifier/md-nonnull "nonnull applies only to pointer types"))
+    (when-not (= hd 'load) (verr :verifier/md-nonnull "nonnull applies only to load instructions, use attributes for calls or invokes"))
+    (when-let [ops (md-ops x)] (when (seq ops) (verr :verifier/md-nonnull "nonnull metadata must be empty"))))
+  (when-let [x (get md '!noundef)]
+    (when-not (= hd 'load) (verr :verifier/md-misc "noundef applies only to load instructions"))
+    (when-let [ops (md-ops x)] (when (seq ops) (verr :verifier/md-misc "noundef metadata must be empty"))))
+  (when-let [x (get md '!align)]
+    (when-not (ptr-type? rt) (verr :verifier/md-align "align applies only to pointer types"))
+    (when-not (= hd 'load) (verr :verifier/md-align "align applies only to load instructions, use attributes for calls or invokes"))
+    (when-let [ops (md-ops x)]
+      (when-not (= 1 (count ops)) (verr :verifier/md-align "align takes one operand!"))
+      (let [op (first ops)]
+        (when-not (and (vector? op) (= 'i64 (norm-type (first op)))) (verr :verifier/md-align "align metadata value must be an i64!"))
+        (when-not (pow2? (.longValue ^java.math.BigInteger (md-int-val op))) (verr :verifier/md-align "align metadata value must be a power of 2!")))))
+  (doseq [k ['!dereferenceable '!dereferenceable_or_null] :let [x (get md k)] :when x]
+    (when-not (ptr-type? rt) (verr :verifier/md-dereferenceable "dereferenceable, dereferenceable_or_null apply only to pointer types"))
+    (when-not ('#{load inttoptr} hd) (verr :verifier/md-dereferenceable "dereferenceable, dereferenceable_or_null apply only to load and inttoptr instructions, use attributes for calls or invokes"))
+    (when-let [ops (md-ops x)]
+      (when-not (= 1 (count ops)) (verr :verifier/md-dereferenceable "dereferenceable, dereferenceable_or_null take one operand!"))
+      (when-not (and (vector? (first ops)) (= 'i64 (norm-type (first (first ops))))) (verr :verifier/md-dereferenceable "dereferenceable, dereferenceable_or_null metadata value must be an i64!"))))
+  (doseq [k ['!alias.scope '!noalias] :let [x (get md k)] :when x]
+    (when-let [ops (md-ops x)]
+      (doseq [s ops]
+        (let [sops (md-ops s)]
+          (when-not (or (md-ref? s) (and (seq? s) (= (first s) '!))) (verr :verifier/md-misc "scope list must consist of MDNodes"))
+          (when (and sops (not (<= 2 (count sops) 3))) (verr :verifier/md-misc "scope must have two or three operands"))))))
+  (when-let [x (get md '!tbaa)] (check-tbaa-tag x))
+  (when-let [x (get md '!prof)] (check-prof-md x hd b)))
+
+(defn- check-function-md
+  "A function's metadata attachments (visitFunction): !prof."
+  [md]
+  (when-let [x (get md '!prof)]
+    (when-let [ops (md-ops x)]
+      (when (< (count ops) 1) (verr :verifier/md-prof "!prof annotations should have at least 1 operand"))
+      (when-not (md-str (first ops)) (verr :verifier/md-prof "expected string with name of the !prof annotation"))
+      (when (< (count ops) 2) (verr :verifier/md-prof "!prof annotations should have no less than 2 operands"))
+      (when-not (#{"function_entry_count" "synthetic_function_entry_count"} (md-str (first ops)))
+        (verr :verifier/md-prof "first operand should be 'function_entry_count' or 'synthetic_function_entry_count'"))
+      (when-not (md-int-op? (second ops)) (verr :verifier/md-prof "expected integer argument to function_entry_count")))))
+
+(defn- check-module-flags [forms]
+  (let [flags (vec (mapcat #(when (and (= (first %) 'llvm/named-meta) (= (second %) '!llvm.module.flags)) (nth % 2)) forms))
+        ids (java.util.HashMap.)]
+    (doseq [f flags]
+      (let [ops (md-ops f)]
+        (when-not (= 3 (count ops)) (verr :verifier/md-flags "incorrect number of operands in module flag"))
+        (let [[b id v] ops]
+          (when-not (md-int-op? b) (verr :verifier/md-flags "invalid behavior operand in module flag (expected constant integer)"))
+          (let [bv (.longValue ^java.math.BigInteger (md-int-val b))]
+            (when-not (<= 1 bv 8) (verr :verifier/md-flags "invalid behavior operand in module flag (unexpected constant)"))
+            (when-not (md-str id) (verr :verifier/md-flags "invalid ID operand in module flag (expected metadata string)"))
+            (case bv
+              3 (let [pr (md-ops v)]
+                  (when-not (= 2 (count pr)) (verr :verifier/md-flags "invalid value for 'require' module flag (expected metadata pair)"))
+                  (when-not (md-str (first pr)) (verr :verifier/md-flags "invalid value for 'require' module flag (first value operand should be a string)")))
+              (5 6) (when-not (md-ops v) (verr :verifier/md-flags "invalid value for 'append'-type module flag (expected a metadata node)"))
+              7 (when-not (md-int-op? v) (verr :verifier/md-flags "invalid value for 'max' module flag (expected constant integer)"))
+              8 (when-not (and (md-int-op? v) (not (neg? (.signum ^java.math.BigInteger (md-int-val v))))) (verr :verifier/md-flags "invalid value for 'min' module flag (expected constant non-negative integer)"))
+              nil)
+            (when (and (= (md-str id) "wchar_size") (not (md-int-op? v)))
+              (verr :verifier/md-flags "wchar_size metadata requires constant integer argument"))
+            (when (and (not= bv 3) (.containsKey ids (md-str id)))
+              (verr :verifier/md-flags "module flag identifiers must be unique (or of 'require' type)"))
+            (when (not= bv 3) (.put ids (md-str id) true))))))
+    (doseq [f flags]
+      (let [[b _ v] (md-ops f)]
+        (when (= 3 (.longValue ^java.math.BigInteger (md-int-val b)))
+          (let [[rid rv] (md-ops v)]
+            (when-not (.containsKey ids (md-str rid)) (verr :verifier/md-flags "invalid requirement on flag, flag is not present in module"))))))))
+
+(defn- check-module-ident [forms]
+  (doseq [f forms :when (and (= (first f) 'llvm/named-meta) (#{'!llvm.ident '!llvm.commandline} (second f))) n (nth f 2)]
+    (let [ops (md-ops n) nm (if (= (second f) '!llvm.ident) "llvm.ident" "llvm.commandline")]
+      (when-not (= 1 (count ops)) (verr :verifier/md-misc (str "incorrect number of operands in " nm " metadata")))
+      (when-not (md-str (first ops)) (verr :verifier/md-misc (str "invalid value for " nm " metadata entry operand(the operand should be a string)"))))))
+
 (defn- verify-function
   "The Verifier's rules over one definition (visitFunction, visitBasicBlock and the instructions' visitors)."
   [f users]
@@ -1160,6 +1343,7 @@
         (doseq [u (get users k)]
           (when-not (= u (:fty (.get *gdefs* k))) (verr :verifier/intrinsic-user "Invalid user of intrinsic instruction!")))))
     (when (and (:comdat o) (= h 'llvm/declare)) (verr :verifier/comdat-declaration "Declaration may not be in a Comdat!"))
+    (check-function-md (apply hash-map (:md o)))
     (when (= h 'llvm/define)
       (let [blocks (vec (:body o))
             ;; the numbers LLParser gives unlabelled blocks and unnamed values
@@ -1265,18 +1449,7 @@
                                          (= hd 'phi) true
                                          :else (< (long dii) ii))]
                                 (when-not ok (verr :verifier/dominance "Instruction does not dominate all uses!")))))))
-                      (let [[_ _ io] (split-inst b) md (apply hash-map (:md io)) rt (result-type b)]
-                        (when (get md '!range)
-                          (when-not ('#{load call invoke} hd) (verr :verifier/md-range "Ranges are only for loads, calls and invokes!")))
-                        (when (get md '!nonnull)
-                          (when-not (ptr-type? rt) (verr :verifier/md-nonnull "nonnull applies only to pointer types"))
-                          (when-not (= hd 'load) (verr :verifier/md-nonnull "nonnull applies only to load instructions, use attributes for calls or invokes")))
-                        (when (get md '!align)
-                          (when-not (ptr-type? rt) (verr :verifier/md-align "align applies only to pointer types"))
-                          (when-not (= hd 'load) (verr :verifier/md-align "align applies only to load instructions, use attributes for calls or invokes")))
-                        (when (or (get md '!dereferenceable) (get md '!dereferenceable_or_null))
-                          (when-not (ptr-type? rt) (verr :verifier/md-dereferenceable "dereferenceable, dereferenceable_or_null apply only to pointer types"))
-                          (when-not ('#{load inttoptr} hd) (verr :verifier/md-dereferenceable "dereferenceable, dereferenceable_or_null apply only to load and inttoptr instructions, use attributes for calls or invokes"))))
+                      (let [[_ _ io] (split-inst b)] (check-inst-metadata (apply hash-map (:md io)) hd (result-type b) b))
                       (when (= hd 'invoke)
                         (let [[_ _ io] (split-inst b) u (get (:idx g) (local-key (:unwind io)))]
                           (when (and u (not (eh-pad? (drop 2 (nth blocks u)))))
@@ -1296,13 +1469,16 @@
       (verify-function f (into {} users)))
     (doseq [f forms :when (= (first f) 'llvm/global)]
       (let [[_ _ _ & more] f o (apply hash-map (if (and (seq more) (not (keyword? (first more)))) (rest more) more))]
-        (when (and (:comdat o) (#{:external :extern_weak} (:linkage o))) (verr :verifier/comdat-declaration "Declaration may not be in a Comdat!"))))))
+        (when (and (:comdat o) (#{:external :extern_weak} (:linkage o))) (verr :verifier/comdat-declaration "Declaration may not be in a Comdat!"))))
+    (check-module-flags forms)
+    (check-module-ident forms)))
 
 (defn verify-forms
   "A module's first error, {:rule R :message M}, or nil when it is valid."
   [forms]
   (binding [*types* (into {} (keep #(when (= (first %) 'llvm/type) [(second %) (norm-type (nth % 2))]) forms))
             *groups* (into {} (keep #(when (= (first %) 'llvm/attributes) [(second %) (nth % 2)]) forms))
+            *meta* (into {} (keep #(when (= (first %) 'llvm/meta) [(second %) (nth % 2)]) forms))
             *gdefs* (java.util.HashMap.) *gfwd* (java.util.TreeMap.) *mdefs* (java.util.HashSet.) *mrefs* (java.util.HashSet.)]
     (try
       (phase-parser forms)
