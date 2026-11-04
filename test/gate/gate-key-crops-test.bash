@@ -26,8 +26,10 @@ ok() { echo "ok:   $1"; }
 bad() { echo "FAIL: $1"; fails=$((fails + 1)); }
 for f in gate_key gate_rest_key; do sed -n "/^$f() {/,/^}/p" "$ago"; done > "$d/fns.bash"
 sed -n '/^arbace_embedded_sources() {/,/^}/p' "$ver" >> "$d/fns.bash"
+sed -n '/^arbace_embedded_resources() {/,/^}/p' "$ver" >> "$d/fns.bash"
 grep -q '^gate_rest_key() {' "$d/fns.bash" && grep -q '^arbace_embedded_sources() {' "$d/fns.bash" \
-  || { echo "FAIL: gate_key, gate_rest_key or arbace_embedded_sources not found"; exit 1; }
+  && grep -q '^arbace_embedded_resources() {' "$d/fns.bash" \
+  || { echo "FAIL: gate_key, gate_rest_key, arbace_embedded_sources or arbace_embedded_resources not found"; exit 1; }
 
 excluded="bin/lib/ci/check bin/lib/oi/suite.bash bin/lib/repr-cpp/roundtrip bin/lib/crops/c2j-check bin/lib/hsi/check
 go/arbace/oi.ae go/arbace/oi/apply.ae go/arbace/scm.ae go/arbace/scm/eval.ae go/arbace/hs.ae go/arbace/hs/machine.ae go/arbace/libm.ae go/arbace/libm/libm.ae jdk/ocaml/ocaml/rt.ae jdk/ocaml/ocaml/rt/NInt.ae

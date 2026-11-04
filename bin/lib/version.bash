@@ -137,6 +137,14 @@ arbace_embedded_sources() {
   (cd "$1" && find arbace -type f ! -path arbace/repr/java.ae ! -path 'arbace/repr/java/*' "${arbace_not_crops[@]}" | LC_ALL=C sort)
 }
 
+# arbace_embedded_resources ROOT: the checkout's files a shipped build's generated resources are made from, one path a line,
+# sorted (arbace/j2g/embed.ae's generated: si's psyntax.pp as Scheme text, arbace.scheme.resource, from
+# scheme/psyntax/psyntax.pp.ae; doc/scheme/SCHEME-SURVEY.md, SC240, "As built: the embedding's gaps"): gate_key hashes them
+# beside the sources (the generators are embedded sources), arbace_aot_key not (no namespace is compiled from them)
+arbace_embedded_resources() {
+  (cd "$1" && find scheme/psyntax/psyntax.pp.ae -type f | LC_ALL=C sort)
+}
+
 # arbace_aot_key ROOT: the key of a build's compiled namespaces (bin/arbace-go's aot_key, the
 # shipped build's aot.key; bin/java-check's --essential-compiled compares it): the runtime key
 # and the embedded sources (the namespaces compiled and c2j, which compiles them)
