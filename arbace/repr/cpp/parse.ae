@@ -15,6 +15,7 @@
   and counts."
   (:require [arbace.repr.cpp.lit :as lit]
             [arbace.repr.cpp.scope :as sc]
+            [arbace.repr.cpp.skim :as skim]
             [arbace.string :as str])
   (:import [arbace.repr.c.lex Tok CFile]
            [arbace.repr.cpp.scope Scope]
@@ -3227,17 +3228,75 @@
   ["__builtin_va_list" "__int128_t" "__uint128_t" "__NSConstantString" "__builtin_ms_va_list" "__size_t" "__signed_size_t"
    "__ptrdiff_t" "__bf16" "__fp16"])
 
+(def ^:private skim-cache-min
+  "The fewest header tokens worth a cache file."
+  20000)
+
+(defn- tokens-text
+  "The tokens 0..k-1 as one text, every field of each (the header-skim cache's key): its kind, spelling, offset and
+  length, its file when it changes, its macro expansion's length when it has one, its glue and scratch flags."
+  ^String [^P p ^long k]
+  (let [sb (StringBuilder.)]
+    (loop [i 0 f nil]
+      (when (< i k)
+        (let [^T t (tok-at p i)
+              tf (.-f t)]
+          (when-not (identical? tf f) (.append sb \u0003) (.append sb (str tf)))
+          (.append sb (str (.-k t))) (.append sb \u0001) (.append sb (.-s t)) (.append sb \u0001) (.append sb (.-o t))
+          (.append sb \u0001) (.append sb (.-n t))
+          (when-let [m (.-mac t)] (.append sb \u0004) (.append sb (str m)))
+          (when (.-glue t) (.append sb \u0005))
+          (when (.-scr t) (.append sb \u0006) (.append sb (str (.-scr t))))
+          (.append sb \u0002)
+          (recur (inc i) tf))))
+    (.toString sb)))
+
+(defn- skim-headers!
+  "The leading run of header tokens skimmed (decl-seq's skim), its state taken from the header-skim cache when it holds
+  it (arbace.repr.cpp.skim, keyed by the run's tokens and `parts`), else written into it: :hit, :stored or nil."
+  [^P p parts]
+  (let [n (.-cnt p)
+        k (long (loop [i 0] (if (or (>= i (dec n)) (main-tok? p i)) i (recur (inc i)))))
+        run (fn [] (skimming p true
+                     (loop []
+                       (when (and (not (eof? p)) (not (main-tok? p (ix p))))
+                         (if (is? p "}") (adv! p) (decl-or-decline p :top))
+                         (recur)))))
+        dir (when (and parts (>= k (long skim-cache-min))) (skim/cache-dir))]
+    (if-not dir
+      (do (run) nil)
+      (let [t00 (System/nanoTime)
+            path (str dir "/" (skim/digest (concat parts [(.-year p) (.-gnu p) (.-main p) (tokens-text p k)])) ".skim")
+            _ (when (System/getenv "REPR_CPP_TIME") (binding [*out* *err*] (println (format "repr/cpp native: the skim key %.2f s" (/ (- (System/nanoTime) t00) 1e9)))))
+            t0 (System/nanoTime)
+            st (try (skim/read-state path) (catch Exception _ nil))
+            _ (when (System/getenv "REPR_CPP_TIME") (binding [*out* *err*] (println (format "repr/cpp native: the skim cache read %.2f s" (/ (- (System/nanoTime) t0) 1e9)))))]
+        (if st
+          (let [[root mt i] st]
+            (st! p SCOPE root) (st! p ROOT root) (st! p MTMPL mt) (seek! p (long i))
+            :hit)
+          (let [root (stv p ROOT)]
+            (run)
+            (when (and (identical? root (stv p SCOPE)) (nil? (stv p CLS)) (nil? (stv p THDR)))
+              (try (skim/write-state path [root (stv p MTMPL) (ix p)]) :stored
+                   (catch Exception e
+                     (binding [*out* *err*] (println "repr/cpp: the header-skim cache not written:" (ex-message e)))
+                     nil)))))))))
+
 (defn parse-unit
   "The main file's top-level declarations as clang's AST nodes, from the parser's tokens `toks` (tokens'):
-  {:nodes [...] :declines n :reasons {why n}}. `main` the main file's name in locations, `src` its text, `year` the
-  standard's year, `gnu` a GNU mode."
-  [^objects toks ^String main ^String src ^long year gnu]
+  {:nodes [...] :declines n :reasons {why n} :skim-cache :hit|:stored|nil}. `main` the main file's name in locations,
+  `src` its text, `year` the standard's year, `gnu` a GNU mode; `cache-parts`, when given, what else keys the
+  header-skim cache (the run's tokens key it too; nil: no cache)."
+  ([toks main src year gnu] (parse-unit toks main src year gnu nil))
+  ([^objects toks ^String main ^String src ^long year gnu cache-parts]
   (let [root (sc/new-scope :ns nil {:k :ns :name ""})
         p (P. toks (alength toks) (long-array 1) (object-array 16) main src year gnu)]
     (st! p SCOPE root) (st! p ROOT root) (st! p SKIM false) (st! p MTMPL (HashSet.)) (st! p DECLINES 0) (st! p GTOP true)
     (st! p UNNAMED 0) (st! p REASONS (HashMap.)) (st! p CLS nil) (st! p THDR nil) (st! p PATTRS (ArrayList.))
     (doseq [nm builtin-types] (sc/declare! root {:k :type :name nm}))
-    (let [nodes (loop [out []]
+    (let [cached (skim-headers! p cache-parts)
+          nodes (loop [out []]
                   (let [out (into out (decl-seq p :top))]
                     (if (eof? p) out (do (adv! p) (recur out)))))]
-      {:nodes nodes :declines (stv p DECLINES) :reasons (into {} (stv p REASONS)) :root root})))
+      {:nodes nodes :declines (stv p DECLINES) :reasons (into {} (stv p REASONS)) :root (stv p ROOT) :skim-cache cached}))))
