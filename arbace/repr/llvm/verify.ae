@@ -582,6 +582,7 @@
       (cast-ops h) (let [[t _ t2] ps* a (norm-type t) c (norm-type t2)]
                      (when-not (cast-valid? h a c)
                        (verr :parser/cast (str "invalid cast opcode for cast from '" (tstr a) "' to '" (tstr c) "'"))))
+      (= h 'catchpad) (when (= (first ps) 'none) (verr :parser/syntax "expected scope value for catchpad"))
       (= h 'alloca) (check-align (:align o))
       (= h 'load) (do (when-not (ptr-type? (norm-type (first (second ps)))) (verr :parser/load "load operand must be a pointer to a first class type"))
                       (when (and (:atomic o) (nil? (:align o))) (verr :parser/atomic-align "atomic load must have explicit non-zero alignment"))
@@ -1078,6 +1079,68 @@
         (when (= (norm-type (second fty)) 'token) (verr :verifier/function-type "Return type cannot be token for indirect call!"))))
     (check-bundles (:bundles o) defs (global? c))))
 
+;; ---------------------------------------------------------------------------------------------
+;; Funclets: catchswitch, catchpad, cleanuppad, catchret, cleanupret, resume
+
+(defn- first-non-phi [items]
+  (first (remove #(let [b (body %)] (or (= 'phi (first b)) (dbg-record? b))) items)))
+
+(defn- pad-head [blocks idx lbl]
+  (when-let [bi (get idx (local-key lbl))]
+    (let [x (first-non-phi (drop 2 (nth blocks bi)))] (when x (first (body x))))))
+
+(defn- check-funclet
+  "The Verifier's rules of the funclet instructions, `x` (head `hd`) at item `ii` of block `bi`."
+  [hd b x bi blocks items insts g defs personality?]
+  (let [[_ ps o] (split-inst b) idx (:idx g)
+        pad-of (fn [v] (when (local? v) (when-let [[_ _ db] (.get ^java.util.Map defs (local-key v))] (first db))))]
+    (when (#{'catchswitch 'catchpad 'cleanuppad} hd)
+      (let [nm (case hd catchswitch "CatchSwitchInst" catchpad "CatchPadInst" cleanuppad "CleanupPadInst")]
+        (when-not personality? (verr :verifier/funclet (str nm " needs to be in a function with a personality.")))
+        (when-not (= x (first-non-phi items)) (verr :verifier/funclet (str nm " not the first non-PHI instruction in the block.")))
+        (let [parent (if (= hd 'catchswitch) (first ps) (first ps))
+              pk (when (local? parent) (pad-of parent))]
+          (when-not (or (= parent 'none) (#{'catchpad 'cleanuppad 'catchswitch} pk))
+            (verr :verifier/funclet (str nm " has an invalid parent.")))
+          (when (and (= hd 'catchpad) (not= pk 'catchswitch))
+            (verr :verifier/funclet "CatchPadInst needs to be directly nested in a CatchSwitchInst.")))
+        (when (zero? bi) (verr :verifier/eh-pad-entry "EH pad cannot be in entry block."))
+        (doseq [p (nth (:preds g) bi)]
+          (let [t (last (nth blocks p)) [th _ to] (split-inst (body t))
+                lbl-is-me (fn [l] (and l (= (get idx (local-key l)) bi)))]
+            (if (= hd 'catchpad)
+              (when-not (and (= th 'catchswitch) (= (result t) (first ps)))
+                (verr :verifier/funclet "Block containg CatchPadInst must be jumped to only by its catchswitch."))
+              (when-not (case th
+                          invoke (and (lbl-is-me (:unwind to)) (not (lbl-is-me (:to to))))
+                          catchswitch (lbl-is-me (:unwind to))
+                          cleanupret (lbl-is-me (:unwind to))
+                          false)
+                (verr :verifier/funclet "EH pad must be jumped to via an unwind edge")))))
+        (when (= hd 'catchswitch)
+          (doseq [l (second ps)]
+            (when-not (= 'catchpad (pad-head blocks idx l)) (verr :verifier/funclet "CatchSwitchInst handlers must be catchpads")))
+          (when-let [u (:unwind o)]
+            (when-not (= u 'caller)
+              (when (= 'landingpad (pad-head blocks idx u)) (verr :verifier/funclet "CatchSwitchInst must unwind to an EH block which is not a landingpad.")))))))
+    (when (#{'catchswitch 'cleanupret 'invoke} hd)
+      (let [u (:unwind o) ub (when (and u (not= u 'caller)) (get idx (local-key u)))
+            home (case hd
+                   catchswitch bi
+                   cleanupret (when-let [[db] (when (local? (first ps)) (.get ^java.util.Map defs (local-key (first ps))))] db)
+                   invoke (when-let [f (first (filter #(= (first %) "funclet") (:bundles o)))]
+                            (let [t (peek (second f))] (when (local? t) (first (.get ^java.util.Map defs (local-key t))))))
+                   nil)]
+        (when (and ub home (= ub home)) (verr :verifier/funclet "EH pad cannot handle exceptions raised within it"))))
+    (case hd
+      catchret (when-not (= 'catchpad (pad-of (first ps))) (verr :verifier/funclet "CatchReturnInst needs to be provided a CatchPad"))
+      cleanupret (do (when-not (= 'cleanuppad (pad-of (first ps))) (verr :verifier/funclet "CleanupReturnInst needs to be provided a CleanupPad"))
+                     (when-let [u (:unwind o)]
+                       (when-not (= u 'caller)
+                         (when (= 'landingpad (pad-head blocks idx u)) (verr :verifier/funclet "CleanupReturnInst must unwind to an EH block which is not a landingpad.")))))
+      resume (when-not personality? (verr :verifier/funclet "ResumeInst needs to be in a function with a personality."))
+      nil)))
+
 (defn- verify-function
   "The Verifier's rules over one definition (visitFunction, visitBasicBlock and the instructions' visitors)."
   [f users]
@@ -1160,6 +1223,7 @@
                           (when-not (:personality o) (verr :verifier/landingpad "LandingPadInst needs to be in a function with a personality."))
                           (when-not (= x (first (remove #(= 'phi (first (body %))) insts)))
                             (verr :verifier/landingpad "LandingPadInst not the first non-PHI instruction in the block."))))
+                      (check-funclet hd b x bi blocks items insts g defs (some? (:personality o)))
                       ;; visitCallBase
                       (when-let [c (callee-of b)]
                         (when (and (global? c) (str/starts-with? (global-key c) "llvm."))

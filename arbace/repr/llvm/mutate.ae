@@ -483,6 +483,54 @@
       (when-not (some #(= (second (nth forms %)) to) (intrinsic-decls forms))
         (mapv #(rename-global % from to) forms)))))
 
+;; ---------------------------------------------------------------------------------------------
+;; Funclets and exception handling (LL4b)
+
+(def ^:private funclet-heads '#{catchswitch catchpad cleanuppad catchret cleanupret})
+
+(defn- m-funclet
+  "A funclet instruction changed: the pad it names, its parent, its place in its block, a handler of a catchswitch, a
+  funclet bundle's token; or the personality of its function dropped."
+  [r forms]
+  (let [places (inst-places forms)
+        pads (filter #(funclet-heads (first (body (nth % 3)))) places)]
+    (when-let [[fi bi ii x] (pick r pads)]
+      (let [b (body x) h (first b)
+            f (nth forms fi)
+            [_ blocks] (body-of f)
+            others (vec (keep (fn [[fj _ _ y]] (when (and (= fj fi) (result y) (#{'catchpad 'cleanuppad 'catchswitch} (first (body y)))) (result y)))
+                              places))]
+        (case (.nextInt ^java.util.Random r 5)
+          0 (when (#{'catchret 'cleanupret} h)
+              (let [t (pick r (conj (vec (remove #{(second b)} others)) (second b)))
+                    t2 (pick r (vec (remove #{(second b)} (map (fn [[_ _ _ y]] (result y)) (filter #(= (first %) fi) places)))))]
+                (set-inst forms fi bi ii [(rebody x (apply list h (or t2 t) (drop 2 b)))])))
+          1 (when (#{'catchpad 'cleanuppad 'catchswitch} h)
+              (set-inst forms fi bi ii [(rebody x (apply list h (if (= (second b) 'none) (or (pick r (remove #{(result x)} others)) 'none) 'none) (drop 2 b)))]))
+          2 (when (#{'catchpad 'cleanuppad 'catchswitch} h)
+              (let [items (vec (drop 2 (nth blocks bi)))]
+                (when (> (count items) (+ ii 2))
+                  (set-inst (set-inst forms fi bi (inc ii) [x]) fi bi ii [(nth items (inc ii))]))))
+          3 (when (= h 'catchswitch)
+              (let [ls (labels-of f) l2 (or (pick r (remove (set (second (rest b))) ls)) (first ls))]
+                (set-inst forms fi bi ii [(rebody x (apply list h (second b) (assoc (vec (nth b 2)) 0 l2) (drop 3 b)))])))
+          4 (let [v (vec f)] (when (some #{:personality} v)
+                               (assoc forms fi (apply list (let [i (.indexOf ^java.util.List v :personality)] (concat (subvec v 0 i) (subvec v (+ i 2)))))))))))))
+
+(defn- m-personality
+  "A function with exception handling and no personality."
+  [r forms]
+  (when-let [fi (pick r (filter #(and (= 'llvm/define (first (nth forms %))) (some #{:personality} (nth forms %))) (range (count forms))))]
+    (let [v (vec (nth forms fi)) i (.indexOf ^java.util.List v :personality)]
+      (assoc forms fi (apply list (concat (subvec v 0 i) (subvec v (+ i 2))))))))
+
+(defn- m-unwind-dest
+  "An invoke's unwind edge sent to its normal destination, a block without an exception handling instruction."
+  [r forms]
+  (when-let [[fi bi ii x] (pick r (filter #(= 'invoke (first (body (nth % 3)))) (inst-places forms)))]
+    (let [b (body x) o (apply hash-map (drop 4 b))]
+      (set-inst forms fi bi ii [(rebody x (opt-update b :unwind 4 (constantly (:to o))))]))))
+
 (def kinds
   [[:type m-type] [:hoist m-hoist] [:noterm m-noterm] [:phiblock m-phiblock] [:phimove m-phimove] [:align m-align]
    [:linkage m-linkage] [:undef m-undef] [:dupdef m-dupdef] [:lpad m-lpad] [:intrinsic m-intrinsic]
@@ -490,7 +538,8 @@
    [:phicount m-phicount] [:selfref m-selfref]
    [:attr-type m-attr-type] [:attr-pair m-attr-pair] [:attr-place m-attr-place] [:attr-dup m-attr-dup] [:attr-returned m-attr-returned]
    [:attr-value m-attr-value] [:attr-immarg m-attr-immarg] [:cc-def m-cc-def] [:cc-call m-cc-call] [:musttail m-musttail]
-   [:bundle m-bundle] [:intr-decl m-intr-decl*] [:intr-arg m-intr-arg] [:intr-rename m-intr-rename]])
+   [:bundle m-bundle] [:intr-decl m-intr-decl*] [:intr-arg m-intr-arg] [:intr-rename m-intr-rename]
+   [:funclet m-funclet] [:personality m-personality] [:unwind-dest m-unwind-dest]])
 
 (def families
   "The kinds by rule family, for `bin/repr-llvm mutants LIST OUT N FIRST FAMILY`."
@@ -499,7 +548,8 @@
    "cc" [:cc-def :cc-call]
    "musttail" [:musttail]
    "bundles" [:bundle]
-   "intrinsics" [:intr-decl :intr-arg :intr-rename :intrinsic]})
+   "intrinsics" [:intr-decl :intr-arg :intr-rename :intrinsic]
+   "funclets" [:funclet :personality :unwind-dest :lpad :lpadr]})
 
 (defn -main
   "LIST OUT N [FIRST [FAMILY]]: N mutants of LIST's modules (NAME<tab>PATH.ll), the K-th of them K = FIRST (default 0) ...,
