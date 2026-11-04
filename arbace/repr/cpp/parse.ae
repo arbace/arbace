@@ -1117,7 +1117,7 @@
                   (vec (map-indexed (fn [j k] (if (and (nil? ds) (sub-type j)) (designate p (sub-type j) k) k)) kids)))]
       (assoc (dissoc x :_desigs) :inner inner))))
 
-(declare dependent-type? designate pack-indexed)
+(declare dependent-type? designate pack-indexed targ-nodes)
 
 (defn- class-type? [t]
   (and (#{:n :elab :tn} (:t t))
@@ -1701,7 +1701,10 @@
                               ;; format with a kind of gcc's own (__gcc_diag__ ...): clang drops the attribute
                               gcc-kind (and (is-at? p 1 "(") (re-matches #"__gcc_\w+__|gcc_\w+" (ts (tok-at p (+ b 2)))))]
                           (adv! p) (when (is? p "(") (skip-balanced! p))
-                          (recur (if (and (known-gnu-attr? (ts (tok-at p b))) (not gcc-kind)) (conj out (node p "NativeAttr" b (last-ix p) {:_gnu (ts (tok-at p b))})) out)))
+                          (recur (if (and (known-gnu-attr? (ts (tok-at p b))) (not gcc-kind))
+                                   (conj out (node p "NativeAttr" b (last-ix p) (cond-> {:_gnu (ts (tok-at p b))}
+                                                                                  (t= (tok-at p (inc b)) "(") (assoc :_arg (tok-text p (+ b 2) (- (ix p) 2))))))
+                                   out)))
                         :else (perr p "a GNU attribute")))]
             (recur out)))
       (and (or (is? p "alignas") (is? p "_Alignas")) (is-at? p 1 "("))
@@ -1715,6 +1718,14 @@
 (declare parse-class-specifier parse-enum-specifier parse-declarator parse-external-decl decl-seq parse-template-decl)
 
 (defn- class-ctx [^P p] (first (stv p CLS)))
+
+(defn- vectorized
+  "A type with GNU's vector_size among the declaration's attributes `attrs`: the vector type, as clang prints it
+  __attribute__((__vector_size__(N))) T (its size as written: the converter has no form for a vector type)."
+  [t attrs]
+  (if-let [a (first (filter #(and (#{"vector_size" "__vector_size__"} (:_gnu %)) (:_arg %)) attrs))]
+    {:t :n :s (str "__attribute__((__vector_size__(" (:_arg a) "))) " (qt t))}
+    t))
 
 (defn- ctor-name-here?
   "In a class (`ctx` :member) the cursor at the class's own name followed by a parameter list: a constructor's
@@ -1834,8 +1845,8 @@
                 (if (is? p "auto") (adv! p) (dotimes [_ 4] (adv! p)))
                 (recur (assoc ds :type {:t :auto :cn cn}) words))
               ;; a dependent name where only a type can stand (P0634: a parameter's, an alias's, a return type's)
-              (and decl-ctx (nil? e) (or (:q qn) (> (count (:parts qn)) 1))
-                   (or (id? p) (is? p "*") (is? p "&") (is? p "&&")
+              (and (nil? e) (or (:q qn) (> (count (:parts qn)) 1)) (or decl-ctx (= ctx :alias))
+                   (or (= ctx :alias) (id? p) (is? p "*") (is? p "&") (is? p "&&")
                        ;; an abstract parameter declarator: B(T::type); (clang's implicit typename, an extension before C++20)
                        (and (= ctx :param) (or (is? p ")") (is? p ",") (is? p "=") (is? p "...")))
                        ;; a friend-type-specifier (friend Ts::Y..., Us...;)
@@ -2049,7 +2060,7 @@
   "A type-id (a cast's, sizeof's, a template argument's, a trailing return type's...): its type. `ctx` :conv (a
   conversion-type-id: ptr-operators alone after the specifiers)."
   [^P p ctx]
-  (let [ds (parse-decl-specs p :type-id)
+  (let [ds (parse-decl-specs p (if (= ctx :trailing) :alias :type-id))
         base (or (ds-type ds) (perr p "a type"))]
     (if (= ctx :conv)
       (reduce (fn [t op] (assoc op :of t)) base (ptr-ops p))
@@ -2433,7 +2444,7 @@
                                     (cond-> {:type {:qualType (qt (or base0 {:t :n :s ""}))} :loc (loc p (:e ds))}
                                       (and (= :elab (:t base0)) (:ni base0) (#{"class" "struct" "union"} (:kw base0)))
                                       (assoc :_elab {:kw (:kw base0) :kb (:kb base0) :ni (:ni base0) :e (:e base0)}
-                                             :_name (let [s (:s base0)] (last (str/split s #"::"))))))]
+                                             :_name (ts (tok-at p (long (:ni base0)))))))]
                 pre [pre]
                 :else []))
       (and base0 (= :auto (:t (:type ds))) (or (and (is? p "[") (not (is-at? p 1 "["))) (and (or (is? p "&") (is? p "&&")) (is-at? p 1 "["))))
@@ -2463,8 +2474,8 @@
             ;; a typedef
             (:typedef ds)
             (let [base' (if (= :unnamed (:t base)) (assoc base :t :elab :s (or nm "")) base)
-                  ty (build-type (with-cv base' (:c ds) (:v ds)) d)
                   as (attr-nodes p)
+                  ty (vectorized (build-type (with-cv base' (:c ds) (:v ds)) d) (concat (:attrs ds) (:attrs d) as))
                   n (node p "TypedefDecl" (:b ds) e0 {:name nn :loc (loc p ni) :type {:qualType (qt ty)} :inner (vec (concat (:attrs ds) (:attrs d) as))})]
               (when nm (declare! p {:k :type :name nm :target (:ent base) :scope (ent-scope (:ent base))}))
               (cond (accept! p ",") (recur (conj out n))
@@ -2518,6 +2529,10 @@
                             del (assoc :explicitlyDeleted true)
                             (:va fs) (assoc :variadic true)
                             (:args lp) (assoc :_args (:args lp))))
+                  ;; a friend naming a function template's specialization (friend void ns::f<int>();): its arguments
+                  n (if (and (:friend ds) (:args lp) (nil? tmpl))
+                      (-> n (dissoc :_args) (update :inner (fn [xs] (vec (concat (targ-nodes p (:args lp)) xs)))))
+                      n)
                   n (if (:friend ds) (node p "FriendDecl" (:b ds) e {:loc (loc p ni) :inner [n]}) n)]
               (when (:lit lp) (declare! p {:k :fn :name (str "operator\"\"" (:lit lp))}))
               (when (and nm (nil? (:args lp)) (not (:friend ds)) (not ctor) (not guide))
@@ -2900,8 +2915,9 @@
         (adv! p)
         (let [as (attr-nodes p)
               _ (expect! p "=")
-              ds (parse-decl-specs p :type-id)
-              ty (build-type (or (ds-type ds) (perr p "an alias's type")) (parse-declarator p :abstract))
+              ds (parse-decl-specs p :alias)
+              ad (parse-declarator p :abstract)
+              ty (vectorized (build-type (or (ds-type ds) (perr p "an alias's type")) ad) (concat (:attrs ds) (:attrs ad)))
               e (last-ix p)]
           (expect! p ";")
           (declare! p {:k :type :name nm :tmpl (boolean (and tmpl (pos? (long (:n tmpl))))) :target (:ent ty) :scope (ent-scope (:ent ty))})
@@ -2937,13 +2953,58 @@
               [(node p "StaticAssertDecl" b e {:inner (if m [c m] [c {}])})]))))))
 
 (defn- module-line?
-  "A module declaration or an import at the cursor (clang's AST has no node for them: the converter reads them from the text)."
+  "A module declaration or an import at the cursor (parse-module-line's)."
   [^P p]
   (let [i (if (is? p "export") 1 0)
         ^T t (nxt p i)]
     (and (identical? :id (.-k t))
          (or (and (= "module" (.-s t)) (let [^T n (nxt p (inc i))] (or (t= n ";") (t= n ":") (identical? :id (.-k n)))))
              (and (= "import" (.-s t)) (let [^T n (nxt p (inc i))] (or (t= n "<") (t= n ":") (identical? :id (.-k n)) (identical? :str (.-k n)))))))))
+
+(defn- module-name!
+  "A module-name (a.b.c) or a partition's at the cursor, consumed. Its identifiers are not macro-expanded (P3034R1, as
+  clang reads them): a name a macro's expansion begins is the macro's name, the expansion's tokens consumed with it
+  (`module :PRIVATE_SEMI` with `#define PRIVATE_SEMI private ;` names the partition PRIVATE_SEMI)."
+  [^P p]
+  (let [^T t (cur p)]
+    (if (.-mac t)
+      (let [o (.-o t)] (loop [] (let [^T c (cur p)] (when (and (.-mac c) (= o (.-o c)) (not (identical? :eof (.-k c)))) (adv! p) (recur)))))
+      (loop []
+        (if (id? p) (adv! p) (perr p "a module name"))
+        (when (and (is? p ".") (identical? :id (tk (nxt p 1)))) (adv! p) (recur))))))
+
+(defn- module-semi!
+  "A module declaration's or an import's ;: one missing is recovered as clang does, the tokens to the next ; skipped."
+  [^P p]
+  (when-not (is? p ";") (skip-until! p #{";"}))
+  (expect! p ";"))
+
+(defn- parse-module-line
+  "A module declaration or an import ([module.unit], [module.import]): `module;` (the global module fragment), `export?
+  module NAME [:PARTITION] attrs;`, `module :private;`, `export? import NAME|:PARTITION|<header>|\"header\" attrs;`.
+  clang's AST has no node for a module declaration (the converter reads its line from the text) and an ImportDecl for
+  an import (which the forms leave to the line as well)."
+  [^P p]
+  (let [b (ix p)]
+    (accept! p "export")
+    (if (id-is? p "module")
+      (do (adv! p)
+          (cond
+            (is? p ";") (do (adv! p) [])
+            (and (is? p ":") (is-at? p 1 "private") (not (.-mac ^T (nxt p 1)))) (do (adv! p) (adv! p) (module-semi! p) [])
+            :else (do (when-not (is? p ":") (module-name! p))
+                      (when (accept! p ":") (module-name! p))
+                      (attr-nodes p)
+                      (module-semi! p)
+                      [])))
+      (do (adv! p) ; import
+          (cond
+            (accept! p ":") (module-name! p)
+            (identical? :str (tk (cur p))) (adv! p)
+            (is? p "<") (do (skip-until! p #{">"}) (expect! p ">"))
+            :else (module-name! p))
+          (attr-nodes p)
+          (let [e (ix p)] (module-semi! p) [(node p "ImportDecl" b e {})])))))
 
 (defn parse-external-decl
   "A declaration at the cursor in context `ctx` (:top, :member, :block): its nodes, its ; or } consumed."
@@ -2958,7 +3019,7 @@
       (or (t= t "static_assert") (t= t "_Static_assert")) (parse-static-assert p)
       (and (= ctx :member) (#{"public" "private" "protected"} (.-s t)) (sym? t) (is-at? p 1 ":"))
       (do (adv! p) (adv! p) [(node p "AccessSpecDecl" b (last-ix p) {:access (.-s t) :loc (loc p b)})])
-      (and (= ctx :top) (module-line? p)) (do (skip-until! p #{";"}) (accept! p ";") [])
+      (and (= ctx :top) (module-line? p)) (parse-module-line p)
       (and (= ctx :top) (t= t "export"))
       (do (adv! p)
           (if (accept! p "{")
