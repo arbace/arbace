@@ -868,6 +868,7 @@
   [^String nm ps n]
   (cond
     (and (re-find #"^llvm\.(memcpy|memmove|memset)\." nm) (= n 5)) (into (subvec ps 0 3) ['(ov 98 :any) '(ov 99 :any)])
+    (and (re-find #"^llvm\.lifetime\.(start|end)\." nm) (= n 2)) ['i64 '(ov 0 :ptr)]
     (and (re-find #"^llvm\.(ctlz|cttz)\." nm) (= n 1)) (subvec ps 0 1)
     (and (re-find #"^llvm\.objectsize\." nm) (= n 3)) (subvec ps 0 3)
     (and (re-find #"^llvm\.masked\.load\." nm) (= n 4)) (into [(first ps) 'i32] (rest ps))
@@ -1384,14 +1385,30 @@
             (and (:inlinedAt fs) (< n 1000) (not= (:inlinedAt fs) 'null)) (recur (:inlinedAt fs) (inc n))
             :else (di-sp (:scope fs))))))
 
+(def ^:dynamic *inst-locs* #{})   ; the DILocations that instructions carry as !dbg
+
+(def ^:private di-type-kinds #{"DIBasicType" "DIDerivedType" "DICompositeType" "DISubroutineType" "DIStringType" "DIFixedPointType" "DISubrangeType"})
+(def ^:private di-file-checked #{"DICompileUnit" "DISubprogram" "DILocalVariable" "DIGlobalVariable" "DICompositeType" "DIDerivedType" "DILexicalBlock"})
+
 (defn- check-di-node [id node]
   (let [k (di-kind node) fs (di-fields node)]
     (when fs
-      (let [kind-of (fn [x] (when (and x (not= x 'null)) (di-kind (node-of x))))]
+      (let [kind-of (fn [x] (when (and x (not= x 'null)) (di-kind (node-of x))))
+            set? (fn [f] (and (contains? fs f) (not= (get fs f) 'null)))
+            tuple? (fn [x] (some? (md-ops x)))]
+        (when (and (di-file-checked k) (set? :file) (not= "DIFile" (kind-of (:file fs)))) (verr :di/node "invalid file"))
+        (when (and (#{"DIGlobalVariable" "DILocalVariable" "DITemplateTypeParameter"} k) (set? :type) (not (di-type-kinds (kind-of (:type fs)))))
+          (verr :di/node "invalid type ref"))
+        (when (and (#{"DISubprogram" "DILexicalBlock" "DICompositeType" "DIDerivedType"} k) (set? :scope) (not (scope-kinds (kind-of (:scope fs)))))
+          (verr :di/node "invalid scope"))
+        (when (and (= k "DICompileUnit") (set? :globals) (not (tuple? (:globals fs)))) (verr :di/node "invalid global variable list"))
+        (when (and (= k "DISubprogram") (set? :retainedNodes) (not (tuple? (:retainedNodes fs)))) (verr :di/node "invalid retained nodes list"))
+        (when (and (= k "DISubroutineType") (set? :types) (not (tuple? (:types fs)))) (verr :di/node "invalid composite elements"))
         (when (and (#{"DICompositeType" "DIDerivedType" "DISubprogram" "DISubrangeType"} k) (not (contains? fs :file)) (some? (:line fs)) (not (zero? (long (:line fs)))))
           (verr :di/node "line specified with no file"))
         (case k
-          "DILocation" (do (when-not (local-scope-kinds (kind-of (:scope fs))) (verr :di/node "location requires a valid scope"))
+          "DILocation" (do (when-not (local-scope-kinds (kind-of (:scope fs)))
+                             (verr :di/node (if (contains? *inst-locs* id) "DILocation's scope must be a DILocalScope" "location requires a valid scope")))
                            (when (and (:inlinedAt fs) (not= (:inlinedAt fs) 'null) (not= "DILocation" (kind-of (:inlinedAt fs))))
                              (verr :di/node "inlined-at should be a location")))
           "DILocalVariable" (when-not (local-scope-kinds (kind-of (:scope fs))) (verr :di/node "local variable requires a valid scope"))
@@ -1436,7 +1453,10 @@
         (do
           (when-not (= v 3) (verr :di/version (str "ignoring debug info with an invalid version (" v ")")))
           (do
-            (doseq [[id n] nodes] (check-di-node id n))
+            (binding [*inst-locs* (set (for [f defs [_ _ & items] (:body (apply hash-map (drop 4 f))) x items
+                                             :let [b (body x)] :when (not (dbg-record? b))
+                                             :let [l (get (apply hash-map (:md (nth (split-inst b) 2))) '!dbg)] :when l] l))]
+              (doseq [[id n] nodes] (check-di-node id n)))
             (doseq [f forms :when (#{'llvm/define 'llvm/declare} (first f))]
               (let [o (apply hash-map (drop 4 f)) md (apply hash-map (:md o))
                     sp (get md '!dbg) spn (node-of sp)]

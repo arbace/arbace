@@ -608,6 +608,71 @@
                    4 (when (pos? n) (conj ops (peek ops))))]
         (when ops2 (assoc forms fi (apply list (assoc (vec f) 2 (list '! ops2)))))))))
 
+;; ---------------------------------------------------------------------------------------------
+;; Debug info (LL4b)
+
+(def ^:private di-plain-kinds #(and (seq? %) (symbol? (first %)) (str/starts-with? (name (first %)) "!DI")
+                                    (not (#{"!DIExpression" "!DIArgList" "!DIAssignID"} (name (first %))))))
+
+(defn- di-places [forms]
+  (keep-indexed (fn [i f] (when (and (= (first f) 'llvm/meta) (di-plain-kinds (nth f 2))) i)) forms))
+
+(defn- di-with-fields [forms i fields]
+  (let [f (vec (nth forms i)) n (nth f 2)]
+    (assoc forms i (apply list (assoc f 2 (apply list (first n) (apply concat fields)))))))
+
+(defn- m-di-drop
+  "A field of a DI node dropped."
+  [r forms]
+  (when-let [i (pick r (di-places forms))]
+    (let [fields (vec (partition 2 (rest (nth (nth forms i) 2))))]
+      (when (seq fields)
+        (di-with-fields forms i (let [k (.nextInt ^java.util.Random r (count fields))] (vec (concat (subvec fields 0 k) (subvec fields (inc k))))))))))
+
+(defn- m-di-retarget
+  "A reference of a DI node (scope, type, file, unit ...) sent to a node of another kind."
+  [r forms]
+  (let [ids (vec (keep (fn [i] (second (nth forms i))) (di-places forms)))]
+    (when-let [i (pick r (di-places forms))]
+      (let [fields (vec (partition 2 (rest (nth (nth forms i) 2))))
+            refs (keep-indexed (fn [k [_ v]] (when (md-id? v) k)) fields)]
+        (when-let [k (pick r refs)]
+          (when-let [to (pick r (remove #{(second (nth fields k))} ids))]
+            (di-with-fields forms i (assoc fields k [(first (nth fields k)) to]))))))))
+
+(defn- m-di-record
+  "A debug record's variable, expression or location replaced by another node's."
+  [r forms]
+  (let [ids (vec (keep (fn [i] (second (nth forms i))) (di-places forms)))
+        recs (filter #(#{'dbg_declare 'dbg_value 'dbg_declare_value} (first (body (nth % 3)))) (inst-places forms))]
+    (when-let [[fi bi ii x] (pick r recs)]
+      (let [b (vec (body x)) k (pick r [2 3 4])]
+        (when (and (> (count b) k) (pick r ids))
+          (set-inst forms fi bi ii [(apply list (assoc b k (pick r ids)))]))))))
+
+(defn- m-di-attach
+  "A function's, an instruction's or a global's !dbg attachment sent to another node."
+  [r forms]
+  (let [ids (vec (keep (fn [i] (second (nth forms i))) (di-places forms)))
+        fns (filter #(some #{'!dbg} (:md (apply hash-map (drop 4 (nth forms %))))) (fn-forms forms))
+        insts (filter #(some #{'!dbg} (:md (apply hash-map (drop 4 (vec (body (nth % 3))))))) (inst-places forms))]
+    (when (seq ids)
+      (case (.nextInt ^java.util.Random r 3)
+        0 (when-let [fi (pick r fns)]
+            (assoc forms fi (opt-update (nth forms fi) :md 4 (fn [md] (vec (mapcat (fn [[k v]] [k (if (= k '!dbg) (pick r ids) v)]) (partition 2 md)))))))
+        1 (when-let [[fi bi ii x] (pick r insts)]
+            (set-inst forms fi bi ii [(rebody x (opt-update (body x) :md 4 (fn [md] (vec (mapcat (fn [[k v]] [k (if (= k '!dbg) (pick r ids) v)]) (partition 2 md))))))]))
+        2 (when-let [i (pick r (filter #(and (= 'llvm/global (first (nth forms %))) (some #{'!dbg} (:md (apply hash-map (drop 3 (nth forms %)))))) (range (count forms))))]
+            (assoc forms i (opt-update (nth forms i) :md 3 (fn [md] (vec (mapcat (fn [[k v]] [k (if (= k '!dbg) (pick r ids) v)]) (partition 2 md)))))))))))
+
+(defn- m-di-version
+  "The Debug Info Version module flag changed or removed."
+  [r forms]
+  (when-let [i (first (keep-indexed (fn [i f] (when (and (= (first f) 'llvm/meta) (= (first (nth f 2)) '!) (vector? (second (nth f 2)))
+                                                         (= (second (second (nth f 2))) '(! "Debug Info Version"))) i)) forms))]
+    (let [f (vec (nth forms i)) ops (second (nth f 2))]
+      (assoc forms i (apply list (assoc f 2 (list '! (assoc ops 2 ['i32 (pick r [0 1 2 4 7])]))))))))
+
 (def kinds
   [[:type m-type] [:hoist m-hoist] [:noterm m-noterm] [:phiblock m-phiblock] [:phimove m-phimove] [:align m-align]
    [:linkage m-linkage] [:undef m-undef] [:dupdef m-dupdef] [:lpad m-lpad] [:intrinsic m-intrinsic]
@@ -617,7 +682,8 @@
    [:attr-value m-attr-value] [:attr-immarg m-attr-immarg] [:cc-def m-cc-def] [:cc-call m-cc-call] [:musttail m-musttail]
    [:bundle m-bundle] [:intr-decl m-intr-decl*] [:intr-arg m-intr-arg] [:intr-rename m-intr-rename]
    [:funclet m-funclet] [:personality m-personality] [:unwind-dest m-unwind-dest]
-   [:md-attach m-md-attach] [:md-edit m-md-edit]])
+   [:md-attach m-md-attach] [:md-edit m-md-edit]
+   [:di-drop m-di-drop] [:di-retarget m-di-retarget] [:di-record m-di-record] [:di-attach m-di-attach] [:di-version m-di-version]])
 
 (def families
   "The kinds by rule family, for `bin/repr-llvm mutants LIST OUT N FIRST FAMILY`."
@@ -628,7 +694,8 @@
    "bundles" [:bundle]
    "intrinsics" [:intr-decl :intr-arg :intr-rename :intrinsic]
    "funclets" [:funclet :personality :unwind-dest :lpad :lpadr]
-   "metadata" [:md-attach :md-edit]})
+   "metadata" [:md-attach :md-edit]
+   "debug" [:di-drop :di-retarget :di-record :di-attach :di-version]})
 
 (defn -main
   "LIST OUT N [FIRST [FAMILY]]: N mutants of LIST's modules (NAME<tab>PATH.ll), the K-th of them K = FIRST (default 0) ...,
