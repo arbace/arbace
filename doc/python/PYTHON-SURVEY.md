@@ -916,3 +916,30 @@ PY8's first part, the AOT itself, specified in [PYI-SPEC.md](PYI-SPEC.md) §10:
 - **`_decimal` and `_datetime` stay absent** (PY6g's DECISION 1). decimal and datetime run as their pure-Python twins
   (`_pydecimal`, `_pydatetime`), as pickle and json do (§6.6, PYS11). The tests of their C variants are classed by
   design (`:c-accelerators`), as are those of `_pickle` and `_json`.
+
+## As built: PY10 (2026-11-04, the Mac VM, queue 201)
+
+The row, as §10.1 planned it and C's was added (doc/C23-SURVEY.md §10); the steps and the milestone's preparation in
+[PY11-PREP.md](PY11-PREP.md) (not applied to the gate: the main host merges and gates them).
+
+- **`bin/reap`'s fifth row** (`test/reap/cells.edn`'s `:python`, `test/reap/main.ae`): read, the round trip's `:lines` levels
+  (`roundtrip-known.edn`) and the native reader's `lex-check` and `parse-check --full` (PY9's known files), each file counted
+  once, the mutants not counted (C's rule, queue 132 F3); eval, `bin/pyi check` over Lib/test (PY7's record
+  `check-lib-test-linux-amd64.edn`, its classes `divergences.edn`, its methods held to the references of the modules it holds)
+  and pyi on goi over the synthetic corpus and the samples (`check --aot`'s record read at its pyi runs: the reader
+  `:pyi-aot`, `:column :pyi`; a record made with `--no-pyi` is a problem there), `scope-check` and `compile-check` beside;
+  AOT, `check --aot`'s compiled runs (a run the rule `:as-pyi` takes, the interpreter's own divergence, classed by the eval
+  classes of the same program); print, the `:full` round trip (`full-known.edn`). The checks not recorded on the branch are
+  `:until` sources (the main host's records, PY9's merge). The known files count no passes until their results files exist
+  (GTS219 (a)).
+- **The classes files**: `test/python/divergences-read.edn`, `-print.edn` (the known files' classes in GR10's format) and
+  `-synth.edn` (the synthetic corpus's 13 programs the VM's sample run found `:as-pyi`, each classed by diffing its output
+  against python3's: bytes' methods, `from_number`, `reversed(dict)`, range's and memoryview's methods, `__buffer__`,
+  `__bytes__`, generator `close()`'s value, `~bool`'s warning, finalization; all deferred to the runtime); PY8's
+  `divergences-aot.edn` read as it is (`{:classes [...]}`, `:ids`).
+- **The essential subset** `test/python/essential-aot.txt` (20 programs) and `make python-essential`: 40 s warm on the VM
+  (the read part 13 s, the 20 programs compiled and on the loop 27 s; cold, the runtime's print and the stdlib's modules,
+  6.6 min more). `make pyi-check`, `pyi-check-record`, `pyi-divergences` for PY7's verbs.
+- **Measured on the VM** (samples, not records): `bin/pyi check --aot --no-pyi` over the 151 programs, 138 pass, 13 classed,
+  0 failing, 6 min 39 s cold; `scope-check` and `compile-check` over the stdlib, 28 s and 43 s; pyi on goi 10 s of startup
+  a process, then 4 to 15 times the compiled loop (PY11-PREP.md §4).
