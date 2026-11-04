@@ -1217,11 +1217,19 @@ The user's decision on PY7-runtime's DECISION (2026-11-04): (a), expat ported to
   `xmltok_impl.c`, which C instantiates three times, is one copy whose macros dispatch on the encoding's kind. One C
   undefined behaviour is modelled: epilogProcessor's `NULL - s`, which the tracker tolerates in C, is computed with a
   heap-like address. Not in any executable: out of `gate_key` and the audit's `:gate`, as `go/arbace/libm`.
-- **`go/arbace/py/builtins_pyexpat.ae`**: `Modules/pyexpat.c` over it. Includes the xmlparser type with its 22 handlers,
+- **`go/arbace/pyexpat`** (package `arbace/pyexpat`): `Modules/pyexpat.c` over it. Includes the xmlparser type with its 22 handlers,
   `buffer_text`, the ordered and specified attributes, `intern`, the reentrancy guard, a handler's exception stopping
   the parser, and the unknown encoding handler from a codec. Also `ErrorString`, `ExpatError`, the `errors` and `model`
   submodules, `features`, `version_info`, and the `expat_CAPI` capsule (C's `PyExpat_CAPI`, the functions `_elementtree`
   would call: a comment lists them; `_elementtree` is not ported, ElementTree runs its Python).
+- **Loaded on the first `import pyexpat`** (the user's decision on 202e's DECISION, (a)): `arbace/pyexpat` is a package of
+  its own over `arbace/py` and `arbace/expat`, not linked into py, so a run that never imports pyexpat never loads
+  expat's forms (they cost goi about 2.8 s of every start). py names it in `lazyModules`
+  (`builtins_pyexpat_api.go`): its first import calls the host's `SetPackageLoader` callback (arbace.python.run
+  requires `go.arbace.pyexpat`), whose init registers the module (`RegisterBuiltinModule`); py then readies the types
+  the package registered (`readyLoadedTypes`, readyTypes' passes over the late ones). The package reaches py's
+  helpers through exported `Ext*` wrappers. A compiled program imports it blank (arbace.python.aot's main), so AOT
+  links it as before.
 - **Checks** (samples, run on the VM):
   - Go against C: the vendored C compiled by gcc and the port, through one driver each, every event with its line,
     column and byte index, the errors' codes and positions. 14,385 parses of 3,638 documents equal: the tarball's XML

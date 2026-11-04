@@ -321,7 +321,7 @@ covers what.
   of the CPython 3.14.10 release tarball, https://www.python.org/ftp/python/3.14.10/Python-3.14.10.tar.xz, SHA-256
   `de414a57...b72032`; xmlparse.c's first line names Expat's commit `e3ca8454...` "2.9.0+"), its `xmlparse.c`,
   `xmltok.c`, `xmltok_impl.c`, `xmltok_ns.c`, `xmlrole.c`, `xcs.c`, `siphash.h` and the headers they need ported to Go
-  statement for statement; and `go/arbace/py/builtins_pyexpat.ae`, a port of the same tarball's `Modules/pyexpat.c`
+  statement for statement; and `go/arbace/pyexpat.ae` and `go/arbace/pyexpat/` (package `arbace/pyexpat`), a port of the same tarball's `Modules/pyexpat.c`
   (under the PSF License Agreement, section "CPython: the PSF License Agreement for Python 3.14" below). Expat:
   Copyright (c) 1998-2000 Thai Open Source Software Center Ltd and Clark Cooper, Copyright (c) 2001-2025 Expat
   maintainers, each file with its own list of copyright holders, and the Arbace authors for the port, under the MIT
