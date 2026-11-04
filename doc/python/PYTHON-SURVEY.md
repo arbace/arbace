@@ -652,39 +652,39 @@ Each with options, the recommended one first.
 
 ### After PY11 (PYS21-PYS31; queue 202d, 2026-11-04)
 
-The reasoning, measures and probes are in [AFTER-PY11.md](AFTER-PY11.md), its tags run, probed or read. None is decided.
+The reasoning, measures and probes are in [AFTER-PY11.md](AFTER-PY11.md), its tags run, probed or read. All decided by the user, 2026-11-04: (a) for every one (PYS30 a request to the main host).
 
-- **PYS21 Third-party C extensions.** (a) None for now: `:extension-modules` stays design, packages run on their pure
+- **PYS21 Third-party C extensions.** *(decided: the user, 2026-11-04, (a))* (a) None for now: `:extension-modules` stays design, packages run on their pure
   fallbacks, the C API revisited on a named need; (b) the limited API (735 functions, 133 data) over pyi's objects as
   proxies in ci's memory, through ci and cf2g, from sdists only (no cgo, no `dlopen`: no binary wheel loads), 25-45 days;
   (c) the full API as PyPy's cpyext, 55-105 days, never complete; (d) HPy. *Recommended: (a).*
-- **PYS22 The stdlib's C modules.** (a) By module: Go ports for small glue modules (`_csv` first: pip imports csv; `mmap`),
+- **PYS22 The stdlib's C modules.** *(decided: the user, 2026-11-04, (a))* (a) By module: Go ports for small glue modules (`_csv` first: pip imports csv; `mmap`),
   self-contained C libraries through cf2g with Go-forms glue (`_sqlite3`, `_lzma`, `_bz2`, `_zstd`; libmpdec for `_decimal`
   only if its speed matters), `_ssl` over Go's TLS; the twins of PY6g's DECISION 1 stay; (b) every one ported by hand;
   (c) all classes. *Recommended: (a).*
-- **PYS23 Packages beyond the 20 apks.** (a) Pinned pure-Python wheels from PyPI (name, version, SHA-256), the references
+- **PYS23 Packages beyond the 20 apks.** *(decided: the user, 2026-11-04, (a))* (a) Pinned pure-Python wheels from PyPI (name, version, SHA-256), the references
   CPython's runs with the same wheels on the main host; (b) sdists built by pyi; (c) Alpine's apks only. *Recommended: (a).*
-- **PYS24 The installer.** (a) Arbace's own wheel installer (`bin/pyi install`, PEP 427/491), pip on pyi an eval target;
+- **PYS24 The installer.** *(decided: the user, 2026-11-04, (a))* (a) Arbace's own wheel installer (`bin/pyi install`, PEP 427/491), pip on pyi an eval target;
   (b) pip on pyi; (c) the host CPython's pip. *Recommended: (a).*
-- **PYS25 Where packages live.** (a) A site directory built from the pins (`.tmp/cache/python/site-KEY/` for the checks,
+- **PYS25 Where packages live.** *(decided: the user, 2026-11-04, (a))* (a) A site directory built from the pins (`.tmp/cache/python/site-KEY/` for the checks,
   the program's work directory for `--build-program`'s `:python {:wheels ...}`); (b) committed as forms; (c) a user site.
   *Recommended: (a).*
-- **PYS26 When to move to Python 3.15.** (a) After Python's tag, when Alpine edge's python3 is 3.15 (on 2026-11-04 it is
+- **PYS26 When to move to Python 3.15.** *(decided: the user, 2026-11-04, (a))* (a) After Python's tag, when Alpine edge's python3 is 3.15 (on 2026-11-04 it is
   3.14.10-r1; python.org has 3.15.0 since 2026-10-09 and 3.15.2), a round of its own, about 12-24 days; (b) now, CPython
   built from the tarball as the oracle (PYS1 (b)); (c) both versions supported. *Recommended: (a).*
-- **PYS27 3.14.10's oracle once edge moves.** (a) The oracle's apk, its libraries' apks and the 20 py3-* apks kept in the
+- **PYS27 3.14.10's oracle once edge moves.** *(decided: the user, 2026-11-04, (a))* (a) The oracle's apk, its libraries' apks and the 20 py3-* apks kept in the
   shared cache, pinned, installable offline; (b) CPython built from the tarball then; (c) nothing (a forced move).
   *Recommended: (a).*
-- **PYS28 pyi in the executable (the re-seed of PYS18).** (a) Listed in goi's table (`arbace/py`, `arbace/libm`; PY5a's
+- **PYS28 pyi in the executable (the re-seed of PYS18).** *(decided: the user, 2026-11-04, (a))* (a) Listed in goi's table (`arbace/py`, `arbace/libm`; PY5a's
   DECISION (a)); (b) copied into the program as ci is, with a runtime class; (c) stay as today, the compiled loop and the
   compile server on stage 0. *Recommended: (a).*
-- **PYS29 The embedded pyi's stdlib.** (a) Not embedded at the first re-seed: a configured `Lib` directory (the pinned
+- **PYS29 The embedded pyi's stdlib.** *(decided: the user, 2026-11-04, (a))* (a) Not embedded at the first re-seed: a configured `Lib` directory (the pinned
   tarball's); (b) embedded compressed (4.0 MB xz); (c) committed as Python forms and embedded (the box's end).
   *Recommended: (a).*
-- **PYS30 The crops out of `arbace_runtime_key` and `arbace_javac_key`.** Both hash `go/arbace/py` today, and the javac
+- **PYS30 The crops out of `arbace_runtime_key` and `arbace_javac_key`.** *(decided: the user, 2026-11-04, (a))* Both hash `go/arbace/py` today, and the javac
   key `arbace/python/` too (run): a pyi commit makes the builds take the two-run path and javac's tool rebuild. (a) One
   exclusion list in `bin/lib/version.bash` for `gate_key` and both keys, now; (b) leave. *Recommended: (a).*
-- **PYS31 The eval cell after the embedding.** (a) pyi on the executable judged in every tier, once a night measures
+- **PYS31 The eval cell after the embedding.** *(decided: the user, 2026-11-04, (a))* (a) pyi on the executable judged in every tier, once a night measures
   its 151 programs under 10 minutes; (b) PY10's DECISION 2 (a) kept. *Recommended: (a).*
 
 ## 13. What to decide first

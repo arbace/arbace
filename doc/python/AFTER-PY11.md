@@ -1,6 +1,6 @@
 # After PY11: C extensions, packaging, Python 3.15 and the embedding (a design note)
 
-Status: a design note, queue 202d, 2026-11-04, on the Mac VM. Nothing is adopted. The proposals are PYS21-PYS31, each
+Status: a design note, queue 202d, 2026-11-04, on the Mac VM. Decided by the user, 2026-11-04: (a) for every proposal (PYS30 sent to the main host as a request). The proposals are PYS21-PYS31, each
 with its options and the recommended one first; they are also listed in doc/python/PYTHON-SURVEY.md §12 ("After PY11").
 The calls are the user's. Base: `mac/201-python-py7-py11` 45ce1e92. No code changed.
 
@@ -175,7 +175,7 @@ What the table shows:
 
 ### 1.7 Proposals
 
-**PYS21 Third-party C extensions (the general C API).**
+**PYS21 Third-party C extensions (the general C API).** *(decided: the user, 2026-11-04, (a))*
 - (a) **None for now** (recommended). Extension modules stay `:extension-modules` (design). Packages run on their pure
   fallbacks. The C API is revisited only on a named need: a package the user wants, with no fallback, C source, and
   limited-API buildable.
@@ -186,7 +186,7 @@ What the table shows:
 - Why (a): no binary wheel can load (no cgo, no `dlopen`), so every path starts from sources and reaches little. The
   stdlib's own gaps have cheaper routes (PYS22). On ci, an accelerator is slower than its pure twin.
 
-**PYS22 The stdlib's C modules after the tag.**
+**PYS22 The stdlib's C modules after the tag.** *(decided: the user, 2026-11-04, (a))*
 - (a) **By module, the cheapest exact route** (recommended):
   - **Go ports (B)** for the small glue-heavy modules: `_csv` first (pip imports csv: §2.1), then `mmap`.
   - **cf2g with Go glue (C)** for library cores: `_sqlite3` after C9.3's SQLite corpus, `_lzma`, `_bz2`, `_zstd`, and
@@ -228,7 +228,7 @@ runs with the same wheels installed into a virtual environment under `.tmp/` by 
 
 ### 2.3 Proposals
 
-**PYS23 Packages beyond the 20 apks.**
+**PYS23 Packages beyond the 20 apks.** *(decided: the user, 2026-11-04, (a))*
 - (a) **Pinned pure-Python wheels from PyPI** (recommended). `py3-none-any` only. A first set is chosen by the user:
   jinja2's and requests' own dependencies are in the apks already; candidates are attrs-free pure ones such as
   `six`, `toml` or `tomli`, `click`, `rich`, `pygments`, `docutils`. The list is a pin file, the references CPython's runs.
@@ -236,7 +236,7 @@ runs with the same wheels installed into a virtual environment under `.tmp/` by 
   reaches pure sdists only.
 - (c) Alpine's apks only: their versions move with edge (§3).
 
-**PYS24 The installer.**
+**PYS24 The installer.** *(decided: the user, 2026-11-04, (a))*
 - (a) **An installer of Arbace's own** (recommended). It would be a verb, `bin/pyi install`, in `arbace.python`, and
   implement only the wheel format: PEP 427 and 491, unzip, `RECORD` checked, `.dist-info`, `entry_points.txt`'s console
   scripts as launchers of pyi. It runs on the tools' host, reproducible and needing no Python. pip on pyi stays an eval
@@ -246,7 +246,7 @@ runs with the same wheels installed into a virtual environment under `.tmp/` by 
 - (c) The host's CPython pip installing into a directory pyi reads: CPython becomes a build tool, against the
   standalone goal.
 
-**PYS25 Where packages live.**
+**PYS25 Where packages live.** *(decided: the user, 2026-11-04, (a))*
 - (a) **A site directory built from the pins** (recommended):
   - for the checks, `.tmp/cache/python/site-KEY/` (KEY the pin set's digest), shared by the worktrees as the AOT's
     packages are (R4);
@@ -344,7 +344,7 @@ It also names the profiling package (PEP 799), typing's PEPs 728, 747 and 800, a
 
 ### 3.5 Proposals
 
-**PYS26 When to move to 3.15.**
+**PYS26 When to move to 3.15.** *(decided: the user, 2026-11-04, (a))*
 - (a) **After Python's tag, when Alpine edge's python3 is 3.15** (recommended). The oracle is the host's apk again, as
   PYS1 (a) wants. The move is a round of its own (PY12: the delta above), and 3.14.10's records stay at the tag.
 - (b) Now, the oracle CPython 3.15.x built from the tarball into `.tmp/` (PYS1 (b)). The site-packages apks would stay
@@ -352,7 +352,7 @@ It also names the profiling package (PEP 799), typing's PEPs 728, 747 and 800, a
 - (c) Support both versions: a version parameter through the reader, pyi and every record. CPython itself does not do
   this, and it doubles the records.
 
-**PYS27 Keeping 3.14.10's oracle once edge moves.**
+**PYS27 Keeping 3.14.10's oracle once edge moves.** *(decided: the user, 2026-11-04, (a))*
 - (a) **Keep copies of the oracle's apks** (recommended):
   - `python3-3.14.10-r1`, its dependencies' apks (`apk info -R`: libexpat, libmpdec, sqlite-libs, xz-libs, libbz2,
     zlib, libffi, openssl, readline, ncurses) and the 20 py3-* apks;
@@ -448,7 +448,7 @@ compiled ahead into packages.
 
 ### 4.4 Proposals
 
-**PYS28 How pyi's runtime enters the executable.**
+**PYS28 How pyi's runtime enters the executable.** *(decided: the user, 2026-11-04, (a))*
 - (a) **Listed in goi's table** (recommended; PY5a's DECISION (a)): `arbace/py` and `arbace/libm` in `gotable.edn`, the
   size recorded by `bin/goi table --size`. `bin/pyi run` keeps its path and its code becomes compiled. PYS20's REPL
   reaches pyi through goi.
@@ -457,7 +457,7 @@ compiled ahead into packages.
 - (c) Stay as today: the compiled loop by TamaGo's go plus the compile server on stage 0. That means no re-seed for
   Python, and pyi absent from the shipped `arbace`.
 
-**PYS29 The stdlib of the embedded pyi.**
+**PYS29 The stdlib of the embedded pyi.** *(decided: the user, 2026-11-04, (a))*
 - (a) **Not embedded at the first re-seed** (recommended). It is read at run time from a configured `Lib` directory: the
   pinned tarball's, fetched by `bin/repr-python pins --fetch`, or a `--python-lib DIR`/`ARBACE_PYTHON_LIB`.
   `sys.path` follows. The seed and the build stay free of a new external.
@@ -467,7 +467,7 @@ compiled ahead into packages.
 - (c) Committed as Python forms, `python/Lib/` (survey §6.6's plan, `bin/python-vendor`), and embedded. This is the
   standalone end (the box has no host filesystem). It is large, and its moment is the box's revival.
 
-**PYS30 The crops' files out of `arbace_runtime_key` and `arbace_javac_key` (not a re-seed question).**
+**PYS30 The crops' files out of `arbace_runtime_key` and `arbace_javac_key` (not a re-seed question).** *(decided: the user, 2026-11-04, (a))*
 - (a) **One exclusion list in `bin/lib/version.bash`, used by `gate_key`, `arbace_runtime_key` and `arbace_javac_key`**
   (recommended), now:
   - `go/arbace/{py,libm,oi,scm}` and their `.ae` go out of the runtime key. They are never what c2j's compilation of the
@@ -479,7 +479,7 @@ compiled ahead into packages.
   - The cost: one function, and `test/gate/gate-key-crops-test.bash` extended to the two keys.
 - (b) Leave them. Each crop commit keeps costing a two-run build and a 26 GiB tool build in the next `--full`.
 
-**PYS31 The eval cell after the embedding.**
+**PYS31 The eval cell after the embedding.** *(decided: the user, 2026-11-04, (a))*
 - (a) **pyi on the executable judged in every tier** (recommended, once measured): `pyi-check-aot-goi` becomes a whole
   run each night, if the first night measures it under 10 minutes. PY10's DECISION 2 (a), the loop as the judged
   source, was made for goi's 35 minutes.
@@ -492,7 +492,7 @@ REQUEST to `bin/pyi`'s owner, and is listed in §6.
 
 ## 5. The proposals in brief
 
-| | proposal | recommended |
+| | proposal | recommended (each decided: the user, 2026-11-04, (a)) |
 |---|---|---|
 | PYS21 | third-party C extensions | (a) none for now; the limited API through ci and cf2g only on a named need |
 | PYS22 | the stdlib's C modules | (a) by module: Go ports (`_csv` first, `mmap`), cf2g with Go glue for library cores (`_sqlite3`, `_lzma`, `_bz2`, `_zstd`; libmpdec if decimal's speed matters), `_ssl` over Go's TLS; the twins stay |
