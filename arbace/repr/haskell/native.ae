@@ -17,12 +17,14 @@
         each module to DIR/FILE.edn, the native dump (DIR default .tmp/repr-haskell/native); a
         module of --cpp-files read from HSPP/FILE.hspp, the helper's cpp verb's text, with its
         configuration HSPP/FILE.hspp.edn
-    check --list FILE [--report FILE]
+    check --list FILE [--report FILE] [--controls FILE]
         the native check over a list of lines `DUMP SOURCE MODULE-FILE` (a helper dump of mode
         :lines, the text to read: the module's file, or the preprocessed text when the module needs
         CPP, unlit or hsc2hs; the module's file as the helper names it): each module read natively
         with the dump's configuration, its tree and header pragmas compared with the dump's as
-        data, then both converted and their forms compared as text"
+        data, then both converted and their forms compared as text. The negative controls (GT9; --controls
+        FILE, test/haskell/native-controls.txt, `ID SUBJECT REFERENCE`): the subject's text read against the
+        reference's dump by the same comparison must differ; one judged equal fails the check"
   (:require [arbace.repr.haskell.ast :as a]
             [arbace.repr.haskell.header :as hd]
             [arbace.repr.haskell.lex :as lx]
@@ -158,6 +160,32 @@
           {:status :error :ms (- (System/currentTimeMillis) t0) :error (ex-message e)
            :span (:span (ex-data e)) :at (some-> (.getStackTrace e) seq first str)})))))
 
+(defn check-controls
+  "The negative controls of the native check (GT9, doc/GATE-SURVEY.md, GTS81 (a), \"As built: GT9's controls\"; CONTROLS-FILE, test/haskell/
+  native-controls.txt: lines `ID SUBJECT REFERENCE`, modules named by the list's MODULE-FILE): the REFERENCE's helper dump judged by
+  `check-one` against the SUBJECT's text (read natively with the reference's configuration), which must give a difference of the trees,
+  the pragmas or the forms (`control ID fails as it must`); :equal (or :converter, which the check counts as a pass) is `control passed`,
+  any other status (the reader's error on the subject) `control not judged`; both fail. A control whose modules the list lacks is left.
+  LINES: the list's [dump source module-file] triples. Returns the number that passed or were not judged."
+  [^String controls-file lines]
+  (if-not (and controls-file (.exists (File. controls-file)))
+    0
+    (let [by (into {} (map (fn [[d s m]] [m [d s]]) lines))
+          bad (atom 0)]
+      (doseq [l (str/split-lines (slurp controls-file))
+              :let [[id subject reference] (str/split (str/trim l) #"\s+")]
+              :when (and id reference (not (str/starts-with? id "#")))]
+        (if-not (and (by subject) (by reference))
+          (println (str "control " id " left: " (if (by subject) reference subject) " is not in the list"))
+          (let [r (check-one (first (by reference)) (second (by subject)) subject)]
+            (cond (#{:pragmas :tree :forms} (:status r))
+                  (println (str "control " id " fails as it must (" subject " read natively against the helper's dump of " reference ": " (name (:status r)) " differs)"))
+                  (#{:equal :converter} (:status r))
+                  (do (swap! bad inc) (println (str "control passed: " id " (" subject " against " reference ") is judged " (name (:status r)) " by the check")))
+                  :else
+                  (do (swap! bad inc) (println (str "control not judged: " id " (" subject " against " reference "): the check says " (name (:status r)) ", not a difference")))))))
+      @bad)))
+
 (defn- parse-args [args]
   (loop [as args opts {} pos []]
     (if (empty? as)
@@ -226,8 +254,11 @@
     (case verb
       ;; a module the converter rejects (the helper's dump too) counts for the reader: its trees
       ;; are equal
-      "check" (let [c (check-list (get opts "--list") :report (get opts "--report"))]
-                (System/exit (if (every? #{:equal :converter} (keys c)) 0 1)))
+      "check" (let [c (check-list (get opts "--list") :report (get opts "--report"))
+                    lines (->> (str/split-lines (slurp (get opts "--list"))) (map str/trim) (remove #(or (empty? %) (str/starts-with? % "#")))
+                               (mapv #(str/split % #"\s+")))
+                    ctl (check-controls (get opts "--controls") lines)]
+                (System/exit (if (and (every? #{:equal :converter} (keys c)) (zero? ctl)) 0 1)))
       "read" (let [n (read-files (or (get opts "-o") ".tmp/repr-haskell/native")
                                  (remove empty? (str/split (or (get opts "--flags") "") #"\s+"))
                                  pos :hspp (get opts "--hspp")
