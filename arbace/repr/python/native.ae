@@ -35,6 +35,20 @@
           (recur (rest ss)))))
     tree))
 
+(defn parse-source
+  "compile(SOURCE, ...)'s parse of a str source (_PyTokenizer_FromUTF8: no coding spec; new-lines translated, exec
+  input ending in one) in `mode` :exec, :eval, :single or :func_type; opts :type-comments, :incomplete. The tree, or
+  throws the error (ex-data :python-error)"
+  [^String source mode opts]
+  (when (str/includes? source "\u0000")
+    (throw (ex-info "null bytes" {:python-error ["SyntaxError" "source code string cannot contain null bytes" nil nil nil nil nil]})))
+  (let [t (-> source (str/replace "\r\n" "\n") (str/replace "\r" "\n"))
+        t (if (and (= mode :exec) (seq t) (not (str/ends-with? t "\n"))) (str t "\n") t)
+        p (pk/parser t ps/keywords ps/soft-keywords (:type-comments opts))
+        rule (case mode :exec ps/r-file :eval ps/r-eval :single ps/r-interactive :func_type ps/r-func_type)
+        tree (pk/run-parser p rule {:incomplete (:incomplete opts) :single (= mode :single)})]
+    (if (#{:exec :single} mode) (future-check tree) tree)))
+
 (defn parse-text
   "The module's tree of `text` (decoded, its BOM stripped), or throws the parser's error (ex-data :python-error)"
   [^String text type-comments]
@@ -497,7 +511,7 @@
               ["SyntaxError" (format "Non-UTF-8 code starting with '\\x%02x' on line %d, but no encoding declared; see https://peps.python.org/pep-0263/ for details"
                                      (bit-and (aget bs i) 0xFF) line)
                line col line col text])
-            (if (== (aget bs i) 10) (recur (inc i) (inc line) (inc i)) (recur (+ i len) line ls))))))))
+            (if (== (aget bs i) 10) (recur (inc i) (inc line) (inc i)) (recur (+ i (long len)) line (long ls)))))))))
 
 (defn- translate-newlines
   "_PyTokenizer_translate_newlines over bytes: CR LF and CR to LF, a last LF added (exec input)"
@@ -563,7 +577,7 @@
               (if (>= b 128) (format "'ascii' codec can't decode byte 0x%02x in position %d: ordinal not in range(128)" b i) (recur (inc i)))
               (let [k (valid-utf8-len bs i)]
                 (if (pos? k)
-                  (recur (+ i k))
+                  (recur (+ i (long k)))
                   (let [n (alength bs)
                         cont? (fn [j] (and (< j n) (== 0x80 (bit-and (aget bs j) 0xC0))))
                         need (cond (and (>= b 0xC2) (<= b 0xDF)) 1 (and (>= b 0xE0) (<= b 0xEF)) 2 (and (>= b 0xF0) (<= b 0xF4)) 3 :else 0)]

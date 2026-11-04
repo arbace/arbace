@@ -79,7 +79,7 @@
           (recur (inc i) (inc k))
           (let [b (bit-and (aget bs i) 0xFF)
                 w (cond (< b 0x80) 1 (== (bit-and b 0xE0) 0xC0) 2 (== (bit-and b 0xF0) 0xE0) 3 (== (bit-and b 0xF8) 0xF0) 4 :else 1)]
-            (recur (+ i w) (inc k))))))))
+            (recur (+ i (long w)) (inc k))))))))
 
 (defn- lx ^arbace.repr.python.lex.Lx [^Parser p] (.-lx p))
 
@@ -98,7 +98,7 @@
                 (if (>= k (dec lineno))
                   cur
                   (let [x (nl cur)]
-                    (if (or (neg? x) (> (inc x) (max inp cur))) cur (recur (inc x) (inc k))))))
+                    (if (or (neg? x) (> (inc (long x)) (max inp cur))) cur (recur (inc (long x)) (inc k))))))
         e (nl start)]
     (lex/text-range l start (if (neg? e) n e))))
 
@@ -519,7 +519,7 @@
                         (>= e n) (err start n "malformed \\N character escape")
                         (== e st) (err start e "malformed \\N character escape")
                         :else (if (try (Character/codePointOf (subs b st e)) true (catch Throwable _ false))
-                                (recur (inc e))
+                                (recur (inc (long e)))
                                 (err start (inc e) "unknown Unicode character name"))))
                     :else (err start s "malformed \\N character escape"))
                   (recur s))))))))))
@@ -592,7 +592,7 @@
                     (let [e (loop [k (inc i) m 0] (if (and (< k n) (< m 3) (<= (int \0) (int (.charAt body k)) (int \7))) (recur (inc k) (inc m)) k))
                           v (Integer/parseInt (subs body (inc i) e) 8)]
                       (if bytes? (.append sb (char (bit-and v 0xFF))) (.appendCodePoint sb v))
-                      (recur e))
+                      (recur (long e)))
                     \x (do (if bytes? (.append sb (char (hex (+ i 2) (+ i 4)))) (.appendCodePoint sb (hex (+ i 2) (+ i 4)))) (recur (+ i 4)))
                     \u (if bytes?
                          (do (.append sb \\) (.append sb d) (recur (+ i 2)))
@@ -605,7 +605,7 @@
                          (do (.append sb \\) (.append sb d) (recur (+ i 2)))
                          (let [e (.indexOf body "}" (int (+ i 3)))]
                            (.appendCodePoint sb (int (Character/codePointOf (subs body (+ i 3) e))))
-                           (recur (inc e))))
+                           (recur (inc (long e)))))
                     (do (.append sb \\) (.append sb d) (recur (+ i 2)))))))))
         (chars (str sb))))))
 
@@ -861,14 +861,32 @@
                (raise-error p "IndentationError" false (if (== lex/INDENT (long (:type last-token))) "unexpected indent" "unexpected unindent"))))
           (full-source-check p (caught #(syntax-error-at p last-token "invalid syntax")))))))
 
+(defn- bad-single-statement?
+  "bad_single_statement: something but white space and comments after the statement"
+  [^Parser p]
+  (let [l (lx p) n (lex/text-length l)]
+    (loop [i (lex/state l :cur)]
+      (let [i (loop [i i] (if (and (< i n) (#{32 9 10 12} (lex/char-at l i))) (recur (inc i)) i))]
+        (cond
+          (>= i n) false
+          (not= 35 (lex/char-at l i)) true
+          :else (recur (loop [i i] (if (and (< i n) (not= 10 (lex/char-at l i))) (recur (inc i)) i))))))))
+
 (defn run-parser
   "_PyPegen_run_parser: the tree of start rule `rule`, or throws the error ast.parse raises (ex-data :python-error):
-  on a failure the second pass, with the invalid_ rules, then the error by the parser's and tokenizer's state"
-  [^Parser p rule]
+  on a failure the second pass, with the invalid_ rules, then the error by the parser's and tokenizer's state.
+  Options: :incomplete (PyPARSE_ALLOW_INCOMPLETE_INPUT: a failure at the end of the source is \"incomplete input\"),
+  :single (Py_single_input: one statement)"
+  [^Parser p rule & [opts]]
   (let [res (try (rule p) (catch arbace.lang.ExceptionInfo e (if (error-of-ex e) e (throw e))))]
     (if (and (some? res) (not (instance? arbace.lang.ExceptionInfo res)))
-      res
-      (let [e1 (when (instance? arbace.lang.ExceptionInfo res) res)]
+      (if (and (:single opts) (bad-single-statement? p))
+        (raise-error p "SyntaxError" false "multiple statements found while compiling a single statement")
+        res)
+      (let [e1 (when (instance? arbace.lang.ExceptionInfo res) res)
+            done (lex/state (lx p) :done)]
+        (when (and (:incomplete opts) (#{lex/E_EOF lex/E_EOFS lex/E_EOLS} done))
+          (raise-error p "IncompleteInputError" false "incomplete input"))
         (when (and e1 (not (syntax-class? (first (error-of-ex e1))))) (throw e1))
         (let [^java.util.ArrayList toks (.-toks p)
               last-token (when (pos? (.size toks)) (.get toks (dec (.size toks))))

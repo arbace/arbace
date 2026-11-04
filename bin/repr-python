@@ -584,12 +584,66 @@ cmd_parse_check() {
   return $worst
 }
 
+# ---- PY9: pyi's _ast on the native reader against compile()'s PyCF_ONLY_AST ----
+
+# ast-check [--limit N] [--mode M] [CORPUS...]: each file's answer to pyi's "ast:" compile (tools/pydump/astdump.py on
+# CPython, arbace.repr.python.astjson natively) byte for byte; CORPUS a corpus of corpora.edn, lex-errors or
+# syntax-errors; --limit: the first N files of each (a sample). Files that are not UTF-8 are left out (pyi's sources are
+# text). Work in .tmp/repr-python/ast/CORPUS/
+cmd_ast_check() {
+  local ids=() limit=0 mode=exec id worst=0
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --limit) limit=$2; shift 2 ;;
+      --mode) mode=$2; shift 2 ;;
+      *) ids+=("$1"); shift ;;
+    esac
+  done
+  [ ${#ids[@]} -gt 0 ] || ids=(samples lex-errors syntax-errors)
+  fetch_tarball >/dev/null; fetch_apks >/dev/null
+  local AST="$WORK/ast"
+  for id in "${ids[@]}"; do
+    local d="$AST/$id" base
+    rm -rf "$d"; mkdir -p "$d"
+    case $id in
+      lex-errors) base="$root/test/python/lex-errors"; (cd "$base" && ls | LC_ALL=C sort) > "$d/all" ;;
+      syntax-errors) base="$d/src"; py syntax_cases.py --src "$(TOP)" --out "$base" > "$d/all" ;;
+      *) local -a info; mapfile -t info < <(corpus_base "$id"); base=${info[0]}
+         local -a args=(); IFS=, read -ra pa <<< "${info[1]}"; args+=("${pa[@]}")
+         if [ "${info[2]}" != - ]; then IFS=, read -ra ea <<< "${info[2]}"; for e in "${ea[@]}"; do args+=(--exclude "$e"); done; fi
+         (cd "$base" && py corpus.py list "$base" "${args[@]}") > "$d/all" ;;
+    esac
+    # UTF-8 files only
+    (if [ "$limit" != 0 ]; then head -n "$limit" "$d/all"; else cat "$d/all"; fi) | python3 -I -S -B -c '
+import sys
+for rel in sys.stdin.read().split("\n"):
+    if rel:
+        try:
+            open(sys.argv[1] + "/" + rel, "rb").read().decode("utf-8")
+            print(rel)
+        except UnicodeDecodeError:
+            pass' "$base" > "$d/list"
+    py astdump.py --base "$base" --list "$d/list" --out "$d/ref" --mode "$mode"
+    ARBACE_PATH="$root" GOMEMLIMIT=${REPR_PYTHON_GOMEMLIMIT:-1500MiB} "$(arbace_exe)" -m arbace.repr.python.astjson dump \
+      --base "$base" --list "$d/list" --out "$d/out" --mode "$mode" 2> "$d/stderr" || { echo "ast-check $id: the native run failed"; worst=1; continue; }
+    local n=0 eq=0 bad=()
+    while IFS= read -r rel; do
+      n=$((n + 1))
+      if cmp -s "$d/ref/$rel.json" "$d/out/$rel.json"; then eq=$((eq + 1)); else bad+=("$rel"); fi
+    done < "$d/list"
+    echo "ast-check $id: $n files ($mode): equal $eq, differ ${#bad[@]}"
+    for rel in "${bad[@]:0:20}"; do echo "  DIFFER $rel"; done
+    [ ${#bad[@]} -eq 0 ] || worst=1
+  done
+  return $worst
+}
+
 cmd_check_all() {
   cmd_spec_check && cmd_samples && cmd_roundtrip && cmd_roundtrip --text
 }
 
 command -v python3 >/dev/null || die "no python3 (the oracle, doc/ALPINE.md)"
-case "${1:-}" in pins|spec-check|roundtrip|lex-check|parse-check|check) load_rows ;; esac
+case "${1:-}" in pins|spec-check|roundtrip|lex-check|parse-check|ast-check|check) load_rows ;; esac
 case "${1:-}" in
   pins)
     case "${2:-}" in
@@ -605,6 +659,7 @@ case "${1:-}" in
   roundtrip) shift; cmd_roundtrip "$@" ;;
   lex-check) shift; cmd_lex_check "$@" ;;
   parse-check) shift; cmd_parse_check "$@" ;;
+  ast-check) shift; cmd_ast_check "$@" ;;
   pegen) shift; load_rows; cmd_pegen "$@" ;;
   check) cmd_check_all ;;
   *) sed -n '2,72p' "$0"; exit 2 ;;
