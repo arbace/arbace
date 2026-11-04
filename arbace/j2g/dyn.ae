@@ -422,6 +422,54 @@ method: doc/go/EVAL-SPEED.md).\n"
                   '(case ["V"] (return nil))]))
         'r))
 
+(defn- define-class-native
+  "Compiler$Dyn.defineClass (apart from forms, whose constants are at the JVM's limit of a static
+  initializer): its class's isInstance a Go assertion to *Dyn, the type of its objects (a proxy's
+  DynSub_C is of another class), where an assertion to the interface dynObject was a lookup of
+  its itab (doc/go/EVAL-SPEED.md, round 2)."
+  [n]
+  (list 'go/func (symbol (native-name "defineClass" "(Ljava/lang/String;[Ljava/lang/Class;[Ljava/lang/String;)Ljava/lang/Class;"))
+         (with-meta [(tag 'name '(* jrt/String)) (tag 'interfaces '(* jrt/RefArray)) (tag 'fieldNames '(* jrt/RefArray))]
+           {:tag '(* jrt/Class)})
+         (list 'let ['info '(addr (lit jrt/ClassInfo :Name (.String (jrt/NN name)) :Modifiers (bit-or jrt/AccPublic jrt/AccFinal)
+                                      :Kind jrt/KindClass :Super jrt/Object_class :Go "arbace/lang.Dyn"))
+                     'dc (list 'addr (list 'lit 'DynClass :Slots (list 'make '(slice IFn) n) :SlotMap 'dynSlots
+                                           :Ifaces '(make (map (* jrt/Class) bool)) :ByKey '(make (map string IFn))))]
+               '(when (!= interfaces nil)
+                  (range [_ x (.-A interfaces)]
+                    (let [c (assert (* jrt/Class) x)]
+                      (set! (.-Interfaces info) (append (.-Interfaces info) c))
+                      (dynAddInterface dc c))))
+               '(when (!= fieldNames nil)
+                  (range [i x (.-A fieldNames)]
+                    (let [k i]
+                      (set! (.-Fields info)
+                            (append (.-Fields info)
+                                    (lit jrt/FieldInfo :Name (.String (assert (* jrt/String) x)) :Type jrt/Object_class
+                                         :Modifiers jrt/AccPublic
+                                         :Get (fn ^any [^any o] (aget (arbace.core/deref (.DynFields (dynOf o))) k))
+                                         :Set (fn [^any o ^any v] (aset (arbace.core/deref (.DynFields (dynOf o))) k v))))))))
+               '(let [c (jrt/DefineDynamic info)]
+                  (set! (.-Cls dc) c)
+                  (set! (.-IsInstance info) (fn ^bool [^any x] (let [(values d ok) (assert (* Dyn) x)] (and ok (== (.-D d) dc)))))
+                  (.Lock dynMu)
+                  (aset dynClasses c dc)
+                  (.Unlock dynMu)
+                  c))))
+
+(defn- method-impl-native
+  "Compiler$Dyn.methodImpl: the fn of the method of key on o's class (ByKey), o an object of a
+  deftype, defrecord or reify made at run time (a Dyn: not a proxy, nor an interpreted Java
+  class's, whose members may be published again); else nil (the evaluator's CodeImplEntry,
+  doc/go/EVAL-SPEED.md, round 2)."
+  []
+  (list 'go/func (symbol (native-name "methodImpl" "(Ljava/lang/Object;Ljava/lang/String;)Larbace/lang/IFn;"))
+        (with-meta [(tag 'o 'any) (tag 'key '(* jrt/String))] {:tag 'IFn})
+        '(let [(values d ok) (assert (* Dyn) o)]
+           (when (or (not ok) (!= (.-CF (.-D d)) nil) (.-Proxy (.-D d)))
+             (return nil))
+           (aget (.-ByKey (.-D d)) (.String (jrt/NN key))))))
+
 (defn forms
   "The forms of j2g_dyn.go (package arbace/lang) for the translated classes T."
   [T]
@@ -511,34 +559,7 @@ interfaces made at run time).\n"
       (let [nobj (count object-slots)]
         (m/par-mapv (m/jobs) (fn [i] (method-form ifaces i (nth ks i))) (range nobj (count ks))))
       ;; the natives of Compiler$Dyn
-      [(list 'go/func (symbol (native-name "defineClass" "(Ljava/lang/String;[Ljava/lang/Class;[Ljava/lang/String;)Ljava/lang/Class;"))
-             (with-meta [(tag 'name '(* jrt/String)) (tag 'interfaces '(* jrt/RefArray)) (tag 'fieldNames '(* jrt/RefArray))]
-               {:tag '(* jrt/Class)})
-             (list 'let ['info '(addr (lit jrt/ClassInfo :Name (.String (jrt/NN name)) :Modifiers (bit-or jrt/AccPublic jrt/AccFinal)
-                                          :Kind jrt/KindClass :Super jrt/Object_class :Go "arbace/lang.Dyn"))
-                         'dc (list 'addr (list 'lit 'DynClass :Slots (list 'make '(slice IFn) n) :SlotMap 'dynSlots
-                                               :Ifaces '(make (map (* jrt/Class) bool)) :ByKey '(make (map string IFn))))]
-                   '(when (!= interfaces nil)
-                      (range [_ x (.-A interfaces)]
-                        (let [c (assert (* jrt/Class) x)]
-                          (set! (.-Interfaces info) (append (.-Interfaces info) c))
-                          (dynAddInterface dc c))))
-                   '(when (!= fieldNames nil)
-                      (range [i x (.-A fieldNames)]
-                        (let [k i]
-                          (set! (.-Fields info)
-                                (append (.-Fields info)
-                                        (lit jrt/FieldInfo :Name (.String (assert (* jrt/String) x)) :Type jrt/Object_class
-                                             :Modifiers jrt/AccPublic
-                                             :Get (fn ^any [^any o] (aget (arbace.core/deref (.DynFields (dynOf o))) k))
-                                             :Set (fn [^any o ^any v] (aset (arbace.core/deref (.DynFields (dynOf o))) k v))))))))
-                   '(let [c (jrt/DefineDynamic info)]
-                      (set! (.-Cls dc) c)
-                      (set! (.-IsInstance info) (fn ^bool [^any x] (let [(values d ok) (assert dynObject x)] (and ok (== (.DynClassOf d) dc)))))
-                      (.Lock dynMu)
-                      (aset dynClasses c dc)
-                      (.Unlock dynMu)
-                      c)))
+      [(define-class-native n)
        '(go/func dynAddInterface [^{:tag (* DynClass)} dc ^{:tag (* jrt/Class)} c]
           (when (aget (.-Ifaces dc) c) (return))
           (aset (.-Ifaces dc) c true)
@@ -612,6 +633,8 @@ interfaces made at run time).\n"
                     c (jrt/DefineDynamic info)]
                 (set! (.-IsInstance info)
                       (fn ^bool [^any x]
+                        (let [(values d ok) (assert (* Dyn) x)]
+                          (when ok (return (aget (.-Ifaces (.-D d)) c))))
                         (let [(values d ok) (assert dynObject x)]
                           (and ok (.DynImplements d c)))))
                 c))
@@ -640,6 +663,7 @@ interfaces made at run time).\n"
                                             :Go "arbace/lang.Compiler_EvalFn (fn)"))))
        (fn-field-native)
        (aot-fn-fields-native)
+       (method-impl-native)
        '(go/func dynTypeName "dynTypeName: Class.getTypeName (int, java.lang.Object, byte[])." ^string [^{:tag (* jrt/Class)} c]
           (when (.IsArray__Z c)
             (return (+ (dynTypeName (.GetComponentType__Class c)) "[]")))
@@ -683,6 +707,8 @@ arguments, boxed.\n"
                 d))
        (list 'go/func (symbol (native-name "getField" "(Ljava/lang/Object;I)Ljava/lang/Object;"))
              (with-meta [(tag 'o 'any) (tag 'i 'int32)] {:tag 'any})
+             '(let [(values d ok) (assert (* Dyn) o)]
+                (when ok (return (aget (.-F d) i))))
              '(aget (arbace.core/deref (.DynFields (dynOf o))) i))
        (list 'go/func (symbol (native-name "setField" "(Ljava/lang/Object;ILjava/lang/Object;)V"))
              [(tag 'o 'any) (tag 'i 'int32) (tag 'v 'any)]
