@@ -61,7 +61,7 @@ applied on this branch: the existing `reap` step's `:inputs` gain `"test/python/
 {:name pyi-aot-essential :mem-gib 2 :phase :essential :chain python-essential :needs [python-read-essential pyi-aot-runtime]
  :cmd "bin/pyi check --aot --no-pyi --only-list test/python/essential-aot.txt"                             ; REQUEST R2 (on this branch)
  :hosts [:stage0 :go :python] :never-loads [arbace.j2g] :pins ["test/python/corpora.edn"] :inputs [:lib-tools :tools :python :pyi]
- :summary ["^check --aot:|classed|failing|negative control" 4]}                                           ; 27 s: 19 pass, 1 classed
+ :summary ["^check --aot:|classed|failing|negative control" 4]}                                           ; 27 s: 20 pass, 1 classed (21 since PY7-runtime)
 
 ;; ---- the full tier (nightly: a rotated part as its subset and a seventh; clean: the subsets, the :clean-only parts)
 {:name python-roundtrip :mem-gib 2 :phase :full :chain python-full
@@ -233,7 +233,7 @@ nightly figure rests on PY7's coverage subset, whose cover run is the main host'
 
 On this branch alone (stage 0 of the seed `a59cc441`):
 - `bin/reap` → `reap: 18 of 20 cells checked, 2 with no check yet; 0 problems` (Python read `0+ / 34 / 0`, print `0+ / 5 / 0`).
-- `make python-essential` → about a minute warm; ends `check --aot: 20 programs: 19 pass, 1 classed, 0 failing` and
+- `make python-essential` → about a minute warm; ends `check --aot: 21 programs: 20 pass, 1 classed, 0 failing` (since PY7-runtime: dict.py passes, del.py the classed one) and
   `the negative control: ... do not pass`.
 
 At the merges, in order:
