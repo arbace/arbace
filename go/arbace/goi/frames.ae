@@ -114,6 +114,33 @@ directives applied).\n"
         :else (set! file (+ (.-Dir (.-c f)) "/" (.-file d))))))
   (return))
 
+(go/func CodeWrapper
+  "CodeWrapper makes code c (a *Code) a wrapper's, a method set entry's thunk (gc's wrappers, which
+its traces never show): its frame, entered, records the depth of the first frame below its run of
+wrappers (wskip), cleared when it returns, so that a stack walk skips a chain of wrappers at once
+(a method promoted through 10,000 embedded interfaces: gc's tail calls, issue 75764).\n"
+  [^any c]
+  (let [(values code ok) (assert (* Code) c)]
+    (when (or (not ok) (== code nil))
+      (return))
+    (set! (.-Wrapper code) true)
+    (set! (.-Pro code) (append (lit (slice (func [(* Frame)]))
+                                    (fn [^{:tag (* Frame)} fr]
+                                      (let [d (- (.-depth fr) 1)]
+                                        (set! (.-wskip fr) d)
+                                        (when (and (> d 0) (< (conv int d) (len (.-frames (.-Th fr)))))
+                                          (let [below (aget (.-frames (.-Th fr)) d)]
+                                            (when (and (> (.-wskip below) 0) (isWrapper below))
+                                              (set! (.-wskip fr) (.-wskip below))))))))
+                               (spread (.-Pro code))))
+    (set! (.-Epi code) (append (.-Epi code) (fn [^{:tag (* Frame)} fr] (set! (.-wskip fr) 0))))))
+
+(go/func isWrapper "isWrapper says whether frame f runs a wrapper's code (CodeWrapper).\n" ^bool [^{:tag (* Frame)} f]
+  (when (== (.-Fn f) nil)
+    (return false))
+  (let [c (.Load (.-code (.-Fn f)))]
+    (and (!= c nil) (.-Wrapper c))))
+
 (go/func AtLineR
   "AtLineR is x evaluated at line l of its frame (a select case's channel, on a line of its own:
 gc's line of a panic there).\n"
@@ -214,12 +241,20 @@ panicmem and sigpanic, a bounds check's, a division's, a type assertion's).\n"
 frame whose body has started (a frame entered for a call whose arguments are being evaluated has
 line 0 and is not one yet; a compiled callee's has no function), after a deferred call that
 runs in a panic gc's panic frames (gopanic ...), then gc's runtime frames under the goroutine's
-first function (runtime.main's, a go statement's goexit).\n"
-  ^{:tag (slice pcFrame)} [^{:tag (* Thread)} th]
-  (let [out (make (slice pcFrame) 0 (+ (.-depth th) 4))]
-    (for [d (.-depth th)] (>= d 1) (dec! d)
+first function (runtime.main's, a go statement's goexit); at most max frames when max > 0 (the
+walk stops there: runtime.Callers into a small buffer costs what it asks, not the stack's depth).\n"
+  ^{:tag (slice pcFrame)} [^{:tag (* Thread)} th ^int max]
+  (let [n (+ (conv int (.-depth th)) 4)]
+    (when (and (> max 0) (< max n))
+      (set! n max))
+    (let [out (make (slice pcFrame) 0 n)]
+    (for [d (.-depth th)] (and (>= d 1) (or (<= max 0) (< (len out) max))) (dec! d)
       (when (< (conv int d) (len (.-frames th)))
         (let [f (aget (.-frames th) d)]
+          ;; a run of wrappers' frames, skipped at once
+          (when (and (== (.-Line f) 0) (> (.-wskip f) 0) (< (.-wskip f) d) (isWrapper f))
+            (set! d (+ (.-wskip f) 1))
+            (continue))
           (when (and (!= (.-Fn f) nil) (!= (.-Line f) 0))
             (set! out (append out (lit pcFrame (funcOf (.-Fn f)) (.-Line f))))
             (when (and (!= (.-rec f) nil) (!= (.-val (.-rec f)) nil))
@@ -228,7 +263,9 @@ first function (runtime.main's, a go statement's goexit).\n"
       (case [bottomInit] (set! out (append out (frameAt0 rtDoInit1) (frameAt0 rtDoInit) (frameAt0 rtMainInit) (frameAt0 rtGoexit))))
       (case [bottomMain] (set! out (append out (frameAt0 rtMain) (frameAt0 rtGoexit))))
       (case [bottomGo] (set! out (append out (frameAt0 rtGoexit)))))
-    out))
+    (when (and (> max 0) (> (len out) max))
+      (set! out (subslice out _ max)))
+    out)))
 
 (go/func pcOf "pcOf is goi's program counter of frame fr: a return address in its function at its line.\n"
   ^uintptr [^pcFrame fr]
@@ -269,8 +306,10 @@ or names no function.\n"
   "RTCaller is runtime.Caller for interpreted code: the frame skip frames above the caller's,
 from the goroutine's interpreted frames.\n"
   [^int skip] :results [^uintptr pc ^string file ^int line ^bool ok]
-  (let [fs (.stack (CurrentThread))]
-    (when (or (< skip 0) (>= skip (len fs)))
+  (when (< skip 0)
+    (return))
+  (let [fs (.stack (CurrentThread) (+ skip 1))]
+    (when (>= skip (len fs))
       (return))
     (let [fr (aget fs skip)
           (values fl l) (.pos (.-f fr) (.-line fr))]
@@ -280,10 +319,12 @@ from the goroutine's interpreted frames.\n"
   "RTCallers is runtime.Callers for interpreted code: runtime.Callers' own frame, then the
 goroutine's, from the skip-th on, as goi's program counters.\n"
   ^int [^int skip ^{:tag (slice uintptr)} pcs]
-  (let [fs (append (lit (slice pcFrame) (frameAt0 rtCallers)) (spread (.stack (CurrentThread))))
+  (when (< skip 0)
+    (set! skip 0))
+  (when (== (len pcs) 0)
+    (return 0))
+  (let [fs (append (lit (slice pcFrame) (frameAt0 rtCallers)) (spread (.stack (CurrentThread) (+ skip (len pcs)))))
         n 0]
-    (when (< skip 0)
-      (set! skip 0))
     (for [i skip] (and (< i (len fs)) (< n (len pcs))) (inc! i)
       (aset pcs n (pcOf (aget fs i)))
       (inc! n))
@@ -375,7 +416,7 @@ hidden but a panic's, shown as panic(...) when not the first), the go statement 
 it; debug, debug.Stack's (its own frame first).\n"
   ^string [^{:tag (* Thread)} th ^bool debug]
   (let [b (lit strings/Builder)
-        fs (.stack th)
+        fs (.stack th 0)
         goid (.-goid th)]
     (when (== goid 0)
       (set! goid 1))
