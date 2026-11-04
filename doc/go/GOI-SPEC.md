@@ -4687,6 +4687,61 @@ counts. GC157 (b) and GS14 (a) (2026-10-24, "As built: GC157 (b) and GS14 (a)" b
 deferred programs pass, the two deferred classes are gone: 1,618 of 1,837 pass, 138 unsupported, 63
 known, 18 skipped, every program not passing in a class by design.
 
+**Since v1: the classes reduced (2026-11-04, branch `goi-classes`).** The classes ranked by their programs
+and by whether a fix is bounded (a missing check or a harness's choice, not a design such as gc's frames,
+escape analysis or the scheduler): four fixes, each proven on its class's programs (`bin/goi check --only`)
+against gc's recorded runs and errors, then on every errorcheck program (`--list
+.tmp/godump/corpus/linux-errtest-programs.txt`: no other line of the record changed), with `bin/goi test` and
+`bin/goi check --essential` (801 of 801) after each; the record's lines of the programs run merged into
+`test/goi/check-linux-amd64.edn`, every other line kept. **1,620 of 1,837 pass before, 1,643 after**; 194 in
+16 classes, all by design.
+
+- **Since v1: gc's flags of run actions** (`bin/goi`'s `action_parse` and `check_dir`). A run action's go build
+  flags (`-gcflags`, `-ldflags`, `-tags`) were a skip ("the action needs gc flags"); they build gc's reference
+  alone now (`gc_ref`, its key with the flags), goi running the program as written: they choose gc's code
+  generation (checkptr's instrumentation, inlining, softfloat, the SSA checks, the linker's duplicate checks),
+  not what the program prints; a quoted action (`-gcflags='all=-N -l'`) split as the test driver splits it
+  (`action_words`); a directory test's against its golden output as before. Of the 15: 9 pass
+  (`fixedbugs/issue28688`, `issue30908`, `issue32680`, `issue35027`, `issue35073a`, `issue40917`, `issue46938`,
+  `issue59334`, `issue68525`), 5 known by what the flag makes gc's code do (`test/goi/check-known.edn`:
+  `inline_caller`, `inline_callers`, `fixedbugs/issue19467`, runtime.Callers' frames under `-l=4`, in the
+  frames' class; `convert5`, `-d=converthash=qy`'s saturating float-to-integer conversions, and
+  `maymorestack`, `-d=maymorestack`'s prologue hook, in the flags' class, `^known gc flags: `), and
+  `fixedbugs/issue68415` refused at `unique`'s import (the class of standard packages out of scope, which
+  names `unique` beside `weak`).
+- **Since v1: gc's size checks** (`arbace/go/check/env.ae`'s `*sizes*` and `size-type!`,
+  `arbace/go/check/code.ae`'s `size-errors`, `arbace/go/run.ae`). gc reports its types' sizes in its reader
+  (`cmd/compile/internal/types/size.go`, `CalcSize`, `CalcArraySize`), which go/types does not: a channel's
+  element of 64 kB or more, a map's element or key of 2 GB or more, an array beyond the address space
+  (`MaxWidth` 1<<50). With `--gc-front` the checker records the array, map and channel types it resolves
+  (`typexpr`), and when neither the parse, the checker nor noder's writer reports an error, their sizes are
+  checked as gc's: each type written in place (an array, a struct, a channel of either) a type of its own,
+  reported at its line; a map or channel type of a named or basic element one type, at its first line. Six
+  programs of "errors of gc's phases after type checking" pass (`fixedbugs/issue20027`, `issue42058a`,
+  `issue42058b`, `issue49767`, `issue49814`, `issue78355`); seven are left, `stack frame too large`, the frame
+  gc's back end lays out (`bug385_64`, `issue20529`, `issue20780`, `issue22200`, `issue22200b`, `issue25507`,
+  `issue52697`).
+- **Since v1: line directives** (`arbace/go/run.ae`'s `line-map`, `go/arbace/repr/go/gcsyntax/errors.ae`'s
+  `errorList`, `bin/goi`'s `check_err`). The checker's lines are mapped through the file's `//line` directives
+  as gc's `updateBase` reads them (the next line LINE of FILE; an empty FILE with a column the file before);
+  gc's syntax driver prints a position after a directive as `base.FmtPos` does, its file and relative line
+  (sorted still by the position in the file; the driver's `Revision` 3); a program is judged on gc's syntax
+  errors before the directives are asked, and only a `/*line` directive, a position within a line the forms do
+  not keep, is unsupported. Six of the seven pass (`linkname3`, `fixedbugs/bug305`, `issue15611`,
+  `issue18393`, `issue32133`, `issue67141`); `fixedbugs/issue24339` (`/*line :20:1*/` per token) is left.
+- **Since v1: types2's go and defer check** (`go/arbace/repr/go/gcsyntax/errors.ae`'s `suspendedCalls`,
+  `Revision` 4). A file go/parser rejects has no forms; when gc's syntax reports no syntax error, gc goes on to
+  types2, whose `suspendedCall` reports a go or defer statement's expression that is not a call (`expression in
+  go must be function call`). The driver reports it on syntax's tree beside the parse's errors (a statement
+  go/parser accepts never fails it, so a file with forms is unchanged): `fixedbugs/issue23586` and `issue4468`
+  pass (their lines left `test/goi/check-known.edn`); `issue50372` (range over a typed operand) and `slice3err`
+  (types2's slice checks) need the rest of types2 and stay known.
+
+The interpreted driver: the executables built before this branch list gcsyntax at `Revision` 2, so
+`arbace.repr.go.syntax` interprets the checkout's (about 4 s per process, the errorcheck programs about
+twice as slow until the next gate build compiles it). The whole check (`bin/goi check --jobs 8`) is the
+night's; goi is embedded (in `gate_key`), so the essential gate's build proves it.
+
 The totals by result: 281 unsupported (9 + 2 + 134 + 96 + 5 + 7 + 21 + 7), 67 known (21 + 17 + 2 +
 6 + 1 + 3 + 11 + 6), 18 skipped (15 + 3). Of the agenda's by-design list, every class has its
 programs above; `go:embed` is deferred rather than by design, by GS14's decision. The classes
