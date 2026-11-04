@@ -286,62 +286,85 @@
          (if (:refused c) [:refused (str (:refused c))] (mapv layout/form-str (:forms c))))
        (catch Throwable e [:error (str e)])))
 
-(def ^:private budget 400)
+(def ^:private budget 600)
+
+(defn- int-path [path] (vec (remove keyword? path)))
+
+(defn- apply-diffs
+  "The tree with the differences `ds` applied at their paths (`pk` :cpath or :npath), deepest and last first so that the
+  paths of the others stay: f gives each difference's change of a node."
+  [tree ds pk f]
+  (reduce (fn [t d] (upd-path t (pk d) (f d)))
+          tree
+          (sort (fn [a b] (compare (int-path (pk b)) (int-path (pk a)))) ds)))
+
+(defn- bisect
+  "The differences of `ds` (a vector) whose application changes the forms, `test` taking a vector of differences: the
+  whole group first, halves when it does; true, false or :unknown for each: [d result] pairs."
+  [ds test]
+  (if (empty? ds)
+    []
+    (let [r (test ds)]
+      (cond (false? r) (mapv (fn [d] [d false]) ds)
+            (= :unknown r) (mapv (fn [d] [d :unknown]) ds)
+            (= 1 (count ds)) [[(first ds) true]]
+            :else (let [h (quot (count ds) 2)
+                        a (bisect (subvec ds 0 h) test)
+                        b (bisect (subvec ds h) test)
+                        all (into a b)]
+                    ;; the halves each leave the forms alone but the whole does not: the differences act together
+                    (if (every? #(false? (second %)) all) (mapv (fn [d] [d true]) ds) all))))))
 
 (defn- classify
-  "Each difference with :read true (the forms change when it is applied), false, or :unknown (the budget of
-  conversions was spent)."
+  "Each difference with :read true (the forms change when it is applied), false, or :unknown (the conversions' budget or
+  time was spent). A unit of differences (a node kind missing, a field absent, ...) is first tried on every node of its
+  kind (the converter reads the kind or the field at all, or not): all units of a type at once, then each; the
+  differences of a unit that changes the forms are tried by halves, each applied alone to the tree."
   [diffs cn nn base-c base-n src main cexec nexec]
   (let [left (atom budget)
         t0 (System/nanoTime)
         spent? (fn [] (> (- (System/nanoTime) t0) 120000000000))
-        cache (atom {})
         try-c (fn [nodes] (if (and (pos? @left) (not (spent?))) (do (swap! left dec) (not= base-c (items-of nodes src main cexec))) :unknown))
         try-n (fn [nodes] (if (and (pos? @left) (not (spent?))) (do (swap! left dec) (not= base-n (items-of nodes src main nexec))) :unknown))
-        agg (fn [ukey f] (if (contains? @cache ukey) (get @cache ukey) (let [r (f)] (swap! cache assoc ukey r) r)))]
-    ;; the groups first: every unit of a kind of difference at once; when the forms stay, none of its units is read
-    (let [by (group-by :t diffs)
-          kinds (fn [ds] (set (map :kind ds)))
-          dels (fn [ds] (reduce (fn [m d] (update m (:kind d) (fnil conj #{}) (:kp d))) {} ds))
-          del-all (fn [m] (fn [n] (reduce (fn [n kp] (if (get-in n kp) (dissoc-in n kp) n)) n (get m (:kind n)))))
-          rm-all (fn [ks] (fn [n] (if (contains? ks (:kind n)) (removal n) n)))]
-      (when-let [ds (seq (concat (:missing by) (:wrapper by)))]
-        (let [ks (kinds ds)]
-          (when (false? (try-c (map-nodes (rm-all ks) cn))) (doseq [k ks] (swap! cache assoc [:c :rm k] false)))))
-      (when-let [ds (seq (:extra by))]
-        (let [ks (kinds ds)]
-          (when (false? (try-n (map-nodes (rm-all ks) nn))) (doseq [k ks] (swap! cache assoc [:n :rm k] false)))))
-      (when-let [ds (seq (:absent-n by))]
-        (let [m (dels ds)]
-          (when (false? (try-c (map-nodes (del-all m) cn)))
-            (doseq [[k kps] m kp kps] (swap! cache assoc [:c :del k kp] false)))))
-      (when-let [ds (seq (:absent-c by))]
-        (let [m (dels ds)]
-          (when (false? (try-n (map-nodes (del-all m) nn)))
-            (doseq [[k kps] m kp kps] (swap! cache assoc [:n :del k kp] false))))))
-    (mapv
-     (fn [d]
-       (let [k (:kind d) t (:t d) kp (:kp d)
-             r (case t
-                 (:missing :wrapper)
-                 (if (false? (agg [:c :rm k] #(try-c (map-nodes (fn [n] (if (= (:kind n) k) (removal n) n)) cn))))
-                   false
-                   (try-c (upd-path cn (:cpath d) removal)))
-                 :extra
-                 (if (false? (agg [:n :rm k] #(try-n (map-nodes (fn [n] (if (= (:kind n) k) (removal n) n)) nn))))
-                   false
-                   (try-n (upd-path nn (:npath d) removal)))
-                 :absent-n
-                 (if (false? (agg [:c :del k kp] #(try-c (map-nodes (fn [n] (if (and (= (:kind n) k) (get-in n kp)) (dissoc-in n kp) n)) cn))))
-                   false
-                   (try-c (upd-path cn (:cpath d) #(dissoc-in % kp))))
-                 :absent-c
-                 (if (false? (agg [:n :del k kp] #(try-n (map-nodes (fn [n] (if (and (= (:kind n) k) (get-in n kp)) (dissoc-in n kp) n)) nn))))
-                   false
-                   (try-n (upd-path nn (:npath d) #(dissoc-in % kp))))
-                 :value (try-c (upd-path cn (:cpath d) #(assoc-in % kp (:nv d)))))]
-         (assoc d :read r)))
-     diffs)))
+        dd (vec (map-indexed (fn [i d] (assoc d :ix i)) diffs))
+        by (group-by :t dd)
+        rm-c (vec (concat (:missing by) (:wrapper by)))
+        ;; [diffs, side, the whole-kind change of a unit's nodes, the change of one difference's node]
+        sides [[rm-c :c (fn [d] (:kind d)) (fn [ks] (fn [n] (if (contains? ks (:kind n)) (removal n) n))) :cpath (fn [d] removal)]
+               [(vec (:extra by)) :n (fn [d] (:kind d)) (fn [ks] (fn [n] (if (contains? ks (:kind n)) (removal n) n))) :npath (fn [d] removal)]
+               [(vec (:absent-n by)) :c (fn [d] [(:kind d) (:kp d)])
+                (fn [us] (let [m (reduce (fn [m [k kp]] (update m k (fnil conj #{}) kp)) {} us)]
+                           (fn [n] (reduce (fn [n kp] (if (get-in n kp) (dissoc-in n kp) n)) n (get m (:kind n))))))
+                :cpath (fn [d] #(dissoc-in % (:kp d)))]
+               [(vec (:absent-c by)) :n (fn [d] [(:kind d) (:kp d)])
+                (fn [us] (let [m (reduce (fn [m [k kp]] (update m k (fnil conj #{}) kp)) {} us)]
+                           (fn [n] (reduce (fn [n kp] (if (get-in n kp) (dissoc-in n kp) n)) n (get m (:kind n))))))
+                :npath (fn [d] #(dissoc-in % (:kp d)))]
+               [(vec (:value by)) :c nil nil :cpath (fn [d] #(assoc-in % (:kp d) (:nv d)))]]
+        res (mapcat
+             (fn [[ds side unit-of mk-f pk change]]
+               (let [try-side (if (= side :c) try-c try-n)
+                     tree (if (= side :c) cn nn)
+                     whole (fn [us] (try-side (map-nodes (mk-f (set us)) tree)))
+                     units (when unit-of (group-by unit-of ds))
+                     ;; the screen: every unit at once, then each
+                     screened (if unit-of
+                                (let [all (whole (keys units))]
+                                  (if (false? all)
+                                    {}
+                                    (into {} (map (fn [[u _]] [u (whole [u])]) units))))
+                                nil)]
+                 (if unit-of
+                   (mapcat (fn [[u uds]]
+                             (let [r (get screened u false)]
+                               (cond (false? r) (map (fn [d] [d false]) uds)
+                                     (= :unknown r) (map (fn [d] [d :unknown]) uds)
+                                     :else (bisect (vec uds) (fn [x] (try-side (apply-diffs tree x pk change)))))))
+                           units)
+                   (bisect (vec ds) (fn [x] (try-side (apply-diffs tree x pk change)))))))
+             sides)
+        got (into {} (map (fn [[d r]] [(:ix d) r]) res))]
+    (mapv (fn [d] (assoc (dissoc d :ix) :read (get got (:ix d) false))) dd)))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; A file
