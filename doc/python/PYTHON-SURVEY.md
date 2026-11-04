@@ -1202,3 +1202,40 @@ CPython 3.14.10:
 - **Finalization (PYS9 (a)) is not built yet:** goi does not run a `runtime.SetFinalizer` finalizer (a probe:
   an object dropped, `runtime.GC()` twice, a second's wait, the finalizer never ran), so the finalizer queue
   `:finalization-collect` needs goi's finalizers first, or a mark phase of pyi's own at `gc.collect()`.
+
+## As built: pyexpat (2026-11-04, the Mac VM, queue 202e)
+
+The user's decision on PY7-runtime's DECISION (2026-11-04): (a), expat ported to Go forms. Built:
+
+- **`go/arbace/expat`** (package `arbace/expat`, about 17,300 lines of Go with its comments and tables): Expat 2.9.0 as CPython 3.14.10 vendors it
+  (`Modules/expat/`; configuration of its `expat_config.h`: XML_NS, XML_DTD, XML_GE, XML_CONTEXT_BYTES 1024),
+  `xmlparse.c`, `xmltok.c`, `xmltok_impl.c`, `xmltok_ns.c`, `xmlrole.c`, `xcs.c`, `siphash.h` and the headers, statement for
+  statement under C's names. C's integer types are kept (int is int32, size_t uint64, ...). A `char *` is a `Ptr`, an
+  allocation and an offset, so C's pointer arithmetic, comparisons and NULL survive. The allocation tracker
+  (`expat_malloc`) accounts C's LP64 sizes (measured with gcc), so its amplification limits refuse what C's refuse.
+  The encodings (UTF-8, UTF-16LE/BE, Latin-1, ASCII, an unknown encoding by its map) are expat's tables.
+  `xmltok_impl.c`, which C instantiates three times, is one copy whose macros dispatch on the encoding's kind. One C
+  undefined behaviour is modelled: epilogProcessor's `NULL - s`, which the tracker tolerates in C, is computed with a
+  heap-like address. Not in any executable: out of `gate_key` and the audit's `:gate`, as `go/arbace/libm`.
+- **`go/arbace/py/builtins_pyexpat.ae`**: `Modules/pyexpat.c` over it. Includes the xmlparser type with its 22 handlers,
+  `buffer_text`, the ordered and specified attributes, `intern`, the reentrancy guard, a handler's exception stopping
+  the parser, and the unknown encoding handler from a codec. Also `ErrorString`, `ExpatError`, the `errors` and `model`
+  submodules, `features`, `version_info`, and the `expat_CAPI` capsule (C's `PyExpat_CAPI`, the functions `_elementtree`
+  would call: a comment lists them; `_elementtree` is not ported, ElementTree runs its Python).
+- **Checks** (samples, run on the VM):
+  - Go against C: the vendored C compiled by gcc and the port, through one driver each, every event with its line,
+    column and byte index, the errors' codes and positions. 14,385 parses of 3,638 documents equal: the tarball's XML
+    files (`Lib/test/xmltestdata`, `Modules/_xxtestfuzz`'s etree corpus, PCbuild, Tools/msi), 80 hand-written
+    documents (DTDs, entities, namespaces, encodings, errors), and 3,300 seeded mutants, whole, in 7-byte chunks and
+    byte by byte, with and without namespaces.
+  - pyi against CPython: the same 638 documents of the first corpus through pyexpat in 5 configurations, every
+    handler's event with the parser's position, the errors and the external entity parsers. 3,057 runs equal to
+    CPython 3.14.10 with the tarball's own pyexpat and expat 2.9.0 built by gcc (the host's python3 links expat 2.10.0,
+    equal on this corpus too); on goi and through pyi's AOT.
+  - Lib/test, 2 jobs: test_pyexpat, test_xml_etree (ElementTree's Python on pyexpat), test_minidom and test_sax: 644
+    methods, from 0 equal (453 in `:pyexpat`, test_sax's 191 skipped "no XML parsers available") to 632 equal, 3
+    classed, 9 failing. No failing method is pyexpat's: list.remove and slice assignment with an `__eq__` or
+    `__index__` that mutates the list panic in pyi's list (6 of test_xml_etree's BadElementTest), weak references'
+    callbacks after `del` (test_weakref, test_cyclic_gc: PYS9's finalization), 500,000 nested SubElements past the
+    300 s timeout (test_deeply_nested_deepcopy), and test_error_path_no_crash, which needs `_testcapi`'s memory-error
+    injection as its class's other two tests do.
