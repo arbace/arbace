@@ -3548,7 +3548,10 @@ digest); L6 the planner warns when `:always` names a file of the part its univer
 after the 40 failures; L8 the refusals' wording; L9 `c-check`'s and `c-aot`'s `:rotate` `:always` their control's two
 files (`benchmarksgame/fannkuchredux.c`, `fasta.c`).
 
-## GT9: the crops' gate (proposal) (2026-11-04, branch `gate-crops`; GTS210-GTS223, none decided)
+## GT9: the crops' gate (2026-11-04, branch `gate-crops`; GTS210-GTS223 decided)
+
+Decided (2026-11-04, the user): GTS210-GTS223, each its option (a), all implemented after `arbace-reaps-4-crops-v1`'s tag
+(GT9 gates the crops beyond the four; v1's clean run is GT8's).
 
 **The question** (the coordinator, 2026-11-04): seven crops have checks but no gate step: C++ with LLVM IR as its "+1"
 (LLS17), OCaml, Scheme, Haskell, Rust and Python. Only Clojure, Java, Go and C are in `bin/gate`. For each crop, this
