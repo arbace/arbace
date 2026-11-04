@@ -190,8 +190,9 @@ covers what.
   `arbace/repr/python/pegen.ae` (a port of `Tools/peg_generator/pegen`'s metagrammar, `grammar.py`, `parser_generator.py`,
   `sccutils.py` and `c_generator.py`'s code shapes), `arbace/repr/python/peg.ae` (of `Parser/pegen.c` and
   `Parser/action_helpers.c`) and `arbace/repr/python/parser.ae` (generated from `Grammar/python.gram`, its actions
-  translated), from the same tarball. The rest of `arbace/repr/python/` and `tools/pydump/` are Arbace's own, under the
-  Eclipse Public License 1.0.
+  translated), from the same tarball; since queue 202 (202c) `arbace/repr/python/ucn.ae` (of `Modules/unicodedata.c`'s
+  `_getcode` and its DAWG lookup, from the same tarball). The rest of `arbace/repr/python/` and `tools/pydump/` are
+  Arbace's own, under the Eclipse Public License 1.0.
 - `go/arbace/oi.ae` and `go/arbace/oi/` (oi, the interpreter of OCaml's Lambda; doc/ocaml/OCAML-SURVEY.md, "As
   built: O5 (write-ahead)"): the interpreter's core (values, the compiler of Lambda, application, exceptions,
   effects, the toplevel) is Arbace's own, under the Eclipse Public License 1.0; the externals are ports to Go

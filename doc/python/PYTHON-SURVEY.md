@@ -1296,6 +1296,11 @@ the whole-corpus `parse-check` with the mutants is the main host's night run. Th
   the compiler's answer kind `m`), and a module `_suggestions` (Python/suggestions.c): traceback's keyword typos
   ("invalid syntax. Did you mean 'for'?") as CPython's. `ast-check`'s reference writes CPython's `_metadata` too:
   lex-errors 58 and syntax-errors 864 equal with it.
+- **\N{NAME}** (`arbace.repr.python.ucn`, a follow-up from 202a): the native reader resolved names by the host's
+  `Character/codePointOf`, which knows neither the aliases nor CPython's derived names (test_configparser's `'\N{RS}'`
+  did not import). It now ports `unicodedata.c`'s `_getcode` over pyi's own tables (`ucdBlob`, read once from the
+  checkout's Go forms): names, aliases, Hangul syllables, CJK and Tangut derived names; named sequences refused.
+  test_configparser 381 of 383 (2 `:recursion-limit`), test_ucn 18 of 18.
 - Samples (the VM, 2 jobs): test_ast 122 -> 201 of 217 methods equal (`bin/pyi lib-test-all test_ast`; the rest
   classed `:ast-objects` and `:cpython-only`); test_syntax's doctest 25 -> 1 example failing of 510 (all 23 keyword
   suggestions pass; left: a symtable error printed with its file, "no binding for nonlocal"); `bin/pyi lib-test
