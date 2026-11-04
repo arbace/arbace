@@ -4856,8 +4856,11 @@ traces at positions within a line"): `fixedbugs/issue22662` and `issue29504` (`/
 directives within a line or an expression) and `devirtualization_nil_panics` (a call `v.\n A()` at its
 operator's line in gc's, at its statement's in the forms). `test/goi/check-linux-amd64.edn`'s lines of
 the 21 are `:pass`, the three's reasons rewritten, every other line kept: **1,643 of 1,837 pass before,
-1,664 after**. `bin/goi test` and `bin/goi check --essential` (801 of 801) pass on the executable built
-from this branch.
+1,664 after**. On the executable built from this branch: `bin/goi test` passes, `bin/goi check
+--essential` 801 of 801, and the whole check (`bin/goi check --jobs 8`, 2026-11-04) no regression, 1,669
+pass (beyond the reference's 1,664: `abi/fibish`, `abi/fibish_closure`, `divmod` and `gc2`, known for
+speed and memory, passed on a quiet host, and `typeparam/dictionaryCapture-noinline`, a program this
+checkout's corpus lists that the reference does not; their lines left as they were).
 
 ## Decided (2026-10-24): GC157 (b), GS14 (a) and GC161 (b)
 
