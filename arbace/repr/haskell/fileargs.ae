@@ -197,6 +197,17 @@
 ;;; ------------------------------------------------------------------------------------------
 ;;; processArgs over flagsDynamic
 
+(def ^:private deprecated
+  "The deprecated flags by name: the message, %s the flag's argument (flags.ae, probed from GHC)"
+  (delay (into {} fl/deprecated-flags)))
+
+(defn- deprecation
+  "The warning GHC's deprecate makes for the flag nm (found with its rest) written arg, or nil"
+  [span arg nm ^String rst]
+  (when-let [m (get @deprecated nm)]
+    (when-not (= "#include" nm)
+      (msg :DriverDeprecatedFlag span arg (str/replace m "%s" (let [r (str/trim rst)] (if (str/starts-with? r "=") (subs r 1) r)))))))
+
 (def ^:private flag-table
   (delay (vec (for [[nm kind] fl/dynamic-flags] [nm (count nm) kind]))))
 
@@ -220,7 +231,7 @@
 
 (defn- parse-int [^String s] (when (re-matches #"-?[0-9]+|0[xX][0-9a-fA-F]+|0[oO][0-7]+" s) s))
 
-(defn- step
+(defn- step1
   "One argument of processArgs: the state [more d leftover errs warns] after it"
   [[as d leftover errs warns]]
   (let [[arg span] (first as) more (rest as)
@@ -260,6 +271,19 @@
             :float-suffix (if (re-matches #"-?[0-9]+(\.[0-9]+)?([eE][-+]?[0-9]+)?" rest-no-eq) keep-on
                               (err (str "malformed float argument in " arg)))
             (:opt-prefix :any-suffix) keep-on))))))
+
+(defn- step
+  "One argument of processArgs, then the deprecation GHC's `deprecate` adds when the flag took its
+  argument without an error"
+  [[as d leftover errs warns :as st]]
+  (let [[arg span] (first as)
+        found (when (str/starts-with? arg "-") (find-arg (subs arg 1)))
+        r (step1 st)]
+    (if (and found (= (count (nth r 3)) (count errs)) (= (count (nth r 2)) (count leftover)))
+      (if-let [w (deprecation span arg (nth found 2) (first found))]
+        (assoc r 4 (conj (nth r 4) w))
+        r)
+      r)))
 
 (defn process-args
   "processArgs over the located arguments [[arg span ...]] from state d: {:d :leftover :errs
@@ -306,4 +330,4 @@
             {:d d
              :pre (delay (let [on? (fn [m] (hd/warning-on? d0 (er/warning-flag m)))]
                            [(filterv on? @(:misplaced r))
-                            (filterv #(hd/warning-on? d (er/warning-flag %)) warns)]))}))))))
+                            (into [] (keep (fn [m] (let [f (er/warning-flag m)] (when (hd/warning-on? d f) (if (contains? (:fatal d) f) (assoc m :fatal true) m))))) warns)]))}))))))
