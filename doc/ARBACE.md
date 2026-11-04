@@ -87,7 +87,7 @@ code. Three kinds of things live here:
   carrying CPython's notice; since 202c (queue 202, 2026-11-04) `repr/python/ucn.ae` ports `Modules/unicodedata.c`'s
   `_getcode` (the \N{NAME} lookup) over pyi's own copy of the tables, carrying CPython's notice; `repr/python/native.ae` ports `tools/pydump/pydump.py`'s Writer (Arbace's own) and
   `repr/python/parsecheck.ae` is Arbace's own.
-  pyi's module `pyexpat` (`go/arbace/py/builtins_pyexpat.ae`, queue 202e, 2026-11-04) ports the same tarball's
+  pyi's module `pyexpat` (`go/arbace/pyexpat.ae` and `go/arbace/pyexpat/`, package `arbace/pyexpat`, queue 202e, 2026-11-04) ports the same tarball's
   `Modules/pyexpat.c`, and the Go forms it imports, `go/arbace/expat.ae` and `go/arbace/expat/` (package `arbace/expat`,
   outside `arbace/` but recorded here with the binding), port the tarball's vendored Expat 2.9.0 (`Modules/expat/`:
   `xmlparse.c`, `xmltok.c`, `xmltok_impl.c`, `xmltok_ns.c`, `xmlrole.c`, `xcs.c`, `siphash.h` and their headers; Expat's
