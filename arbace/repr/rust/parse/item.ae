@@ -1,0 +1,771 @@
+;; Ported from rustc 1.99.1's compiler/rustc_parse/src/parser/item.rs and function.rs (rustc at
+;; 58cf8f9c3; MIT OR Apache-2.0, LICENSE.md, "Rust (rustc 1.99.1)"). Part of arbace.repr.rust.parse
+;; (parse.ae loads it).
+
+(in-ns 'arbace.repr.rust.parse)
+
+;; A FnParseMode is {:req-name (fn [edition dot-dot-dot] bool) :context :free|:impl|:trait|:fn-ptr :req-body bool}
+(def ^:private FREE-FN {:req-name (fn [_ _] true) :context :free :req-body true})
+
+;; ---------------------------------------------------------------------------------------------
+;; function.rs
+
+
+(def ^:private fn-quals ["pub" "gen" "const" "async" "unsafe" "safe" "extern"])
+
+(defn check-fn-front-matter
+  "check_fn_front_matter"
+  [^P p check-pub case]
+  (let [quals (if check-pub fn-quals (rest fn-quals))]
+    (or (check-kw-case p "fn" case)
+        (and (some #(check-kw-case p % case) quals)
+             (let [^Tok t (la p 1)]
+               (or (kw-case? t "fn" case)
+                   (and (or (and (ident-tok? t) (not (raw? t)) (some #(= % (.-sym t)) quals) (lx/reserved? (.-sym t) (ed)))
+                            (and (= case :insensitive) (ident-tok? t) (not (raw? t))
+                                 (some #(= % (.toLowerCase ^String (.-sym t))) quals)))
+                        (not (unsafe-foreign-mod? p))
+                        (not (async-gen-block? p))
+                        (not (kw-ahead? p 2 ["auto" "trait" "impl"]))))))
+        (and (check-kw-case p "extern" case)
+             (lit? (la p 1))
+             (or (when-let [^Tok t (tree-la p 2)] (and (not (contains? lx/open-delims (.-kind t))) (kw-case? t "fn" case)))
+                 (and (when-let [^Tok t (tree-la p 2)] (and (not (contains? lx/open-delims (.-kind t))) (some #(kw? t %) fn-quals)))
+                      (when-let [^Tok t (tree-la p 3)] (and (not (contains? lx/open-delims (.-kind t))) (kw-case? t "fn" case))))))
+        false)))
+
+(defn parse-fn-front-matter
+  "parse_fn_front_matter: FnHeader; mode :function or :fn-ptr"
+  [^P p orig-vis case mode]
+  (let [constness (parse-constness p case)]
+    (when (and (= mode :fn-ptr) (not= constness 'No)) (fail p "an `fn` pointer type cannot be `const`"))
+    (let [ck (parse-coroutine-kind p case)]
+      (when (and (= mode :fn-ptr) ck (= 'Async (first ck))) (fail p "an `fn` pointer type cannot be `async`"))
+      (let [safety (parse-safety p case)
+            ext (parse-extern p case)]
+        (when (and ck (= 'Async (first ck)) (< (ed) 2018)) (fail p "`async fn` is not permitted in Rust 2015"))
+        (when-not (eat-kw-case p "fn" case)
+          (fail p (str "expected `fn`, found " (describe (tok)))))
+        (list 'FnHeader :constness constness :coroutine_kind (opt ck) :safety safety :ext ext)))))
+
+(defn parse-fn-decl
+  "parse_fn_decl: FnDecl; allow-plus for the return type"
+  [^P p mode allow-plus recover-return-sign]
+  (list 'FnDecl :inputs (parse-fn-params p mode)
+        :output (parse-ret-ty p (if allow-plus :plus :no-plus) true recover-return-sign)))
+
+(defn- isolated-self? [^P p ^long n] (and (kw-ahead? p n ["self"]) (not (identical? (.-kind (la p (inc n))) :PathSep))))
+(defn- isolated-mut-self? [^P p ^long n] (and (kw-ahead? p n ["mut"]) (isolated-self? p (inc n))))
+(defn- isolated-pin-const-self? [^P p ^long n]
+  (and (named? (la p n) "pin") (kw-ahead? p (inc n) ["const"]) (isolated-self? p (+ n 2))))
+(defn- isolated-pin-mut-self? [^P p ^long n] (and (named? (la p n) "pin") (isolated-mut-self? p (inc n))))
+
+(defn- param-from-self
+  "Param::from_self"
+  [attrs ^Sp eself-span eself ^Id ident]
+  (let [s (sp-to eself-span (id-span ident))
+        infer (mk-ty (id-span ident) 'ImplicitSelf)
+        [m ty] (case (first eself)
+                 :explicit [(nth eself 2) (nth eself 1)]
+                 :value [(nth eself 1) infer]
+                 :region ['Not (mk-ty s (list 'Ref (opt (nth eself 1)) (mut-ty infer (nth eself 2))))]
+                 :pinned ['Not (mk-ty s (list 'PinnedRef (opt (nth eself 1)) (mut-ty infer (nth eself 2))))])]
+    (list 'Param :attrs attrs :ty ty :pat (mk-pat s (list 'Ident (list 'BindingMode 'No m) ident 'None))
+          :span s :is_placeholder false)))
+
+(defn- parse-self-param
+  "parse_self_param: a self parameter, or nil"
+  [^P p]
+  (let [lo (tsp)
+        self-ident (fn [] (let [^Tok t (tok)] (bump p) (id (.-sym t) (tspan t))))
+        typed (fn [m] (let [i (self-ident) hi (psp)
+                            e (if (eat p :Colon) [:explicit (parse-ty p) m] [:value m])]
+                        [e i hi]))
+        not-typed (fn [] (let [i (self-ident)]
+                           (when (check p :Colon)
+                             (when (attempt (bump p) (parse-ty p) true) (fail p "incorrect type on `self`")))
+                           i))
+        r (case (tk)
+            :And
+            (let [has-lt (lifetime? (la p 1))
+                  skip (if has-lt 1 0)]
+              (cond (isolated-self? p (inc skip))
+                    (do (bump p) (let [lt (when has-lt (expect-lifetime p)) hi (tsp)] [[:region lt 'Not] (not-typed) hi]))
+                    (isolated-mut-self? p (inc skip))
+                    (do (bump p) (let [lt (when has-lt (expect-lifetime p))] (bump p) (let [hi (tsp)] [[:region lt 'Mut] (not-typed) hi])))
+                    (isolated-pin-const-self? p (inc skip))
+                    (do (bump p) (let [lt (when has-lt (expect-lifetime p))] (bump p) (bump p) (let [hi (tsp)] [[:pinned lt 'Not] (not-typed) hi])))
+                    (isolated-pin-mut-self? p (inc skip))
+                    (do (bump p) (let [lt (when has-lt (expect-lifetime p))] (bump p) (bump p) (let [hi (tsp)] [[:pinned lt 'Mut] (not-typed) hi])))
+                    :else nil))
+            :Star (when (or (isolated-self? p 1) (and (mutability? (la p 1)) (isolated-self? p 2)))
+                    (fail p "cannot pass `self` by raw pointer"))
+            :Ident (cond (isolated-self? p 0) (typed 'Not)
+                         (isolated-mut-self? p 0) (do (bump p) (typed 'Mut))
+                         :else nil)
+            nil)]
+    (when r
+      (let [[e i hi] r]
+        (param-from-self [] (sp-to lo hi) e i)))))
+
+(defn- named-param? [^P p]
+  (let [off (if (or (check p :And) (check p :AndAnd) (kw? (tok) "mut")) 1 0)]
+    (and (ident-tok? (la p off)) (identical? (.-kind (la p (inc off))) :Colon))))
+
+(defn parse-param-general
+  "parse_param_general"
+  [^P p mode first-param recover-arg-parse]
+  (let [lo (tsp)
+        attrs (parse-outer-attrs p)]
+    (if-let [prm (parse-self-param p)]
+      (do (when-not first-param (fail p "unexpected `self` parameter in function"))
+          (fset prm :attrs attrs))
+      (let [dots (check p :DotDotDot)
+            req ((:req-name mode) (ed) dots)
+            req (if (and req dots) false req)
+            [pat ty]
+            (if (or req (named-param? p))
+              (let [[pat colon] (parse-fn-param-pat-colon p)]
+                (when-not colon (fail p (str "expected one of `:`, `@`, or `|`, found " (describe (tok)))))
+                (when (check p :DocComment) (fail p "documentation comments cannot be applied to a function parameter's type"))
+                [pat (parse-ty-for-param p)])
+              (do (when (check p :DocComment) (fail p "documentation comments cannot be applied to a function parameter's type"))
+                  (let [ty (parse-ty-for-param p)]
+                    (when (variant? (ty-kind ty) 'Path)
+                      (check-trailing-angle-brackets p (peek (path-segs (nth (ty-kind ty) 2))) #{:CloseParen}))
+                    (when-not (or (check p :Comma) (check p :CloseParen))
+                      (fail p "expected one of `,` or `)`"))
+                    [(mk-pat (ty-span ty) 'Missing) ty])))]
+        (list 'Param :attrs attrs :ty ty :pat pat :span (sp-to lo (psp)) :is_placeholder false)))))
+
+(defn parse-fn-params
+  "parse_fn_params"
+  [^P p mode]
+  (when-not (or (check p :OpenParen) (kw? (tok) "for")) (fail p "missing parameters for function definition"))
+  (let [fst (volatile! true)]
+    (vec (first (paren-comma-seq p #(let [r (parse-param-general p mode @fst true)] (vreset! fst false) r))))))
+
+(defn- parse-fn-body
+  "parse_fn_body: [body inner-attrs sig-hi]"
+  [^P p ^Sp sig-hi req-body]
+  (cond (check p :Semi) (do (expect-semi p) [nil [] (psp)])
+        (check p :OpenBrace)
+        (let [prev-in (nget INFN)]
+          (nset INFN 1)
+          (let [[attrs body] (parse-block-common p (tsp) 'Default)]
+            (nset INFN prev-in)
+            [body attrs sig-hi]))
+        (check p :Eq) (fail p "function body cannot be `= expression;`")
+        :else (fail p (str "expected one of `->`, `where`, or `{`, found " (describe (tok))))))
+
+(defn- parse-fn
+  "parse_fn: [ident sig generics contract body inner-attrs]"
+  [^P p mode ^Sp sig-lo v case]
+  (let [header (parse-fn-front-matter p v case :function)
+        ident (parse-ident p)
+        g (parse-generics p)
+        decl (parse-fn-decl p mode true :yes)
+        contract (parse-contract p)
+        wc (parse-where-clause p)
+        g (fset g :where_clause wc)
+        [body inner sig-hi] (parse-fn-body p (psp) (:req-body mode))]
+    [ident (list 'FnSig :header header :decl decl :span (sp-to sig-lo sig-hi)) g contract body inner]))
+
+;; ---------------------------------------------------------------------------------------------
+;; item.rs
+
+
+(defn- parse-mod
+  "parse_mod(term): [inner-attrs items mod-spans]"
+  [^P p term]
+  (let [lo (tsp)
+        attrs (parse-inner-attrs p)
+        post (tsp)
+        items (loop [items (transient [])]
+                (when (check p :Semi) (fail p "expected item, found `;`"))
+                (if-let [item (parse-item p :yes)]
+                  (recur (conj! items item))
+                  (persistent! items)))]
+    (when-not (eat p term) (fail p (str "expected item, found " (describe (tok)))))
+    [attrs items (list 'ModSpans :inner_span (sp-to lo (psp)) :inject_use_span (sp (.-lo post) (.-lo post)))]))
+
+(defn parse-crate-mod
+  "parse_crate_mod: the Crate"
+  [^P p]
+  (let [[attrs items spans] (parse-mod p :Eof)]
+    (list 'Crate :attrs attrs :items items :spans spans :is_placeholder false)))
+
+(defn- parse-defaultness [^P p]
+  (cond (and (check-kw p "default") (let [^Tok t (la p 1)] (and (ident-tok? t) (not (raw? t)) (not= "as" (.-sym t)))))
+        (do (bump p) (list 'Default (psp)))
+        (eat-kw p "final") (list 'Final (psp))
+        :else 'Implicit))
+
+(defn- use-closure? [^P p]
+  (and (kw? (tok) "use")
+       (let [t (la p 1) d (if (or (kw? t "move") (kw? t "async")) 2 1)]
+         (contains? #{:Or :OrOr} (.-kind (la p d))))))
+
+(defn- unsafe-foreign-mod? [^P p]
+  (and (kw? (tok) "unsafe") (kw-ahead? p 1 ["extern"])
+       (let [n (if (lit? (la p 2)) 3 2)
+             ^Tok t (tree-la p n)]
+         (boolean (and t (identical? (.-kind t) :OpenBrace))))))
+
+(defn- async-gen-block? [^P p] (and (kw? (tok) "async") (gen-block? p "gen" 1)))
+
+(defn- check-impl-frontmatter [^P p ^long look-ahead]
+  (if (check-kw p "impl")
+    true
+    (loop [i 0]
+      (if (< i 2)
+        (let [^Tok t (la p (+ i look-ahead))]
+          (cond (kw? t "impl") true
+                (or (kw? t "const") (kw? t "unsafe")) (recur (inc i))
+                :else false))
+        (kw-ahead? p i ["impl"])))))
+
+(def ^:private trait-suffixes
+  [["trait"] ["auto" "trait"] ["unsafe" "trait"] ["unsafe" "auto" "trait"] ["const" "trait"]
+   ["const" "auto" "trait"] ["const" "unsafe" "trait"] ["const" "unsafe" "auto" "trait"]])
+
+(defn- check-trait-front-matter [^P p]
+  (if (and (check-kw p "impl") (identical? (.-kind (la p 1)) :OpenParen))
+    (or (kw-ahead? p 2 ["in"])
+        (and (kw-ahead? p 2 ["crate" "self" "super"]) (identical? (.-kind (la p 3)) :CloseParen)
+             (some (fn [suf] (every? (fn [[i k]] (kw-ahead? p (+ i 4) [k])) (map-indexed vector suf))) trait-suffixes))
+        (boolean (some (fn [suf] (every? (fn [[i k]] (when-let [^Tok t (tree-la p (+ i 2))] (and (not (contains? lx/open-delims (.-kind t))) (kw? t k))))
+                                         (map-indexed vector suf)))
+                       trait-suffixes)))
+    (boolean (some (fn [suf] (every? (fn [[i k]] (kw-ahead? p i [k])) (map-indexed vector suf))) trait-suffixes))))
+
+(defn- macro-rules-item?
+  "is_macro_rules_item: :bang, :no-bang (an error) or nil"
+  [^P p]
+  (when (check-kw p "macro_rules")
+    (cond (and (identical? (.-kind (la p 1)) :Bang) (ident-tok? (la p 2))) :bang
+          (ident-tok? (la p 1)) (fail p "expected `!` after `macro_rules`")
+          :else nil)))
+
+(defn- reuse-item?
+  "is_reuse_item: :path, :impl or nil"
+  [^P p]
+  (when (kw? (tok) "reuse")
+    (cond (let [t (la p 1)] (and (path-start? t (ed)) (not (identical? (.-kind t) :PathSep)))) :path
+          (check-impl-frontmatter p 1) :impl
+          :else nil)))
+
+(defn path-start-item? [^P p]
+  (boolean (or (kw-followed-by-ident? p "union") (reuse-item? p) (check-trait-front-matter p)
+               (and (kw? (tok) "async") (kw-ahead? p 1 ["fn"])) (macro-rules-item? p))))
+
+(defn- isnt-macro-invocation? [^P p]
+  (and (check-ident p) (not (contains? #{:Bang :PathSep} (.-kind (la p 1))))))
+
+(defn- recover-missing-kw-before-item
+  "recover_missing_kw_before_item: a struct, enum or fn without its keyword is an error"
+  [^P p]
+  (let [is-const (kw? (prev) "const")]
+    (when (and (ident-tok? (tok))
+               (or (not is-const) (identical? (.-kind (la p 1)) :OpenParen))
+               (contains? #{:Lt :OpenBrace :OpenParen} (.-kind (la p 1))))
+      (fail p "missing keyword before an item"))))
+
+(defn- parse-rename [^P p]
+  (when (eat-kw p "as")
+    (if (kw? (tok) "_")
+      (let [^Tok t (tok)] (bump p) (id "_" (tspan t)))
+      (parse-ident p))))
+
+
+(defn- parse-use-tree-glob-or-nested [^P p]
+  (if (eat p :Star)
+    (list 'Glob (psp))
+    (let [lo (tsp)
+          [items _] (delim-comma-seq p :OpenBrace :CloseBrace #(list 'tuple (parse-use-tree p)))]
+      (list 'Nested :items items :span (sp-to lo (psp))))))
+
+(defn- parse-use-tree [^P p]
+  (let [lo (tsp)]
+    (if (or (check p :OpenBrace) (check p :Star) (import-coupler? p))
+      (let [root (when (eat-path-sep p) (mk-seg (id "{{root}}" (sp-lo lo)) nil))
+            kind (parse-use-tree-glob-or-nested p)]
+        (list 'UseTree :prefix (mk-path (sp-lo lo) (if root [root] [])) :kind kind))
+      (let [prefix (parse-path p :mod)]
+        (if (eat-path-sep p)
+          (list 'UseTree :prefix prefix :kind (parse-use-tree-glob-or-nested p))
+          (do (when (check p :Colon) (fail p "expected `::`, found `:`"))
+              (list 'UseTree :prefix prefix :kind (list 'Simple (opt (parse-rename p))))))))))
+
+(defn- parse-use-item [^P p]
+  (let [tree (parse-use-tree p)]
+    (expect-semi p)
+    (list 'Use tree)))
+
+(defn- parse-item-list
+  "parse_item_list: [items inner-attrs]"
+  [^P p f]
+  (when (check p :Semi) (fail p "expected `{}`, found `;`"))
+  (expect p :OpenBrace)
+  (let [inner (parse-inner-attrs p)
+        items (loop [items (transient [])]
+                (if (eat p :CloseBrace)
+                  (persistent! items)
+                  (do (when (and (check p :DocComment) (identical? (.-kind (la p 1)) :CloseBrace))
+                        (fail p "found a documentation comment that doesn't document anything"))
+                      (if-let [item (f)]
+                        (recur (conj! items item))
+                        (fail p "non-item in item list")))))]
+    [items inner]))
+
+(defn- parse-item-extern-crate [^P p]
+  (let [orig (if (kw? (tok) "self") (parse-path-segment-ident p) (parse-ident p))]
+    (when (check p :Minus) (fail p "crate name using dashes are not valid in `extern crate` statements"))
+    (let [rename (parse-rename p)]
+      (expect-semi p)
+      (if rename
+        (list 'ExternCrate (list 'Some (id-name orig)) rename)
+        (list 'ExternCrate 'None orig)))))
+
+(defn- parse-item-foreign-mod
+  "parse_item_foreign_mod: [kind inner-attrs]"
+  [^P p safety]
+  (let [extern-span (psp)
+        abi (parse-abi p)]
+    (when (and (= safety 'Default) (kw? (tok) "unsafe") (identical? (.-kind (la p 1)) :OpenBrace))
+      (fail p "expected `{`, found keyword `unsafe`"))
+    (let [[items inner] (parse-item-list p #(parse-foreign-item p))]
+      [(list 'ForeignMod (list 'ForeignMod :extern_span extern-span :safety safety :abi (opt abi) :items items)) inner])))
+
+(defn- parse-global-static-front-matter [^P p case]
+  (let [global (if (check-kw-case p "static" case)
+                 (let [t (la p 1)] (not (or (kw-case? t "move" case) (kw-case? t "use" case) (contains? #{:Or :OrOr} (.-kind t)))))
+                 (and (or (check-kw-case p "unsafe" case) (check-kw-case p "safe" case)) (kw-case? (la p 1) "static" case)))]
+    (when global
+      (let [safety (parse-safety p case)]
+        (eat-kw-case p "static" case)
+        safety))))
+
+(defn- recover-const-mut [^P p]
+  (when (or (kw? (tok) "mut") (kw? (tok) "let")) (fail p "const globals cannot be mutable")))
+
+(defn- parse-static-item [^P p safety m]
+  (let [ident (parse-ident p)]
+    (when (check p :Lt) (fail p "static items may not have generic parameters"))
+    (let [colon (eat p :Colon)
+          ty (if (and colon (not (or (check p :Eq) (check p :Semi)))) (parse-ty p) (fail p "missing type for `static` item"))
+          e (when (eat p :Eq) (parse-expr p))]
+      (expect-semi p)
+      (list 'Static (list 'StaticItem :ident ident :ty ty :safety safety :mutability m :expr (opt e)
+                          :define_opaque 'None :eii_impl 'None)))))
+
+(defn- parse-const-item
+  "parse_const_item: [ident generics ty body]"
+  [^P p]
+  (let [ident (if (kw? (tok) "_") (let [^Tok t (tok)] (bump p) (id "_" (tspan t))) (parse-ident p))
+        g (parse-generics p)
+        colon (eat p :Colon)
+        ty (if (and colon (not (or (check p :Eq) (check p :Semi) (check-kw p "where"))))
+             (parse-ty p)
+             (fail p "missing type for `const` item"))
+        before (parse-where-clause p)
+        rhs (when (eat p :Eq) (parse-expr p))
+        after (parse-where-clause p)]
+    (when (and (fget before :has_where_token) rhs) (fail p "where clauses are not allowed before const item bodies"))
+    (let [wc (where-clause (or (fget before :has_where_token) (fget after :has_where_token))
+                           (into (fget before :predicates) (fget after :predicates))
+                           (if (fget after :has_where_token) (fget after :span) (fget before :span)))]
+      (expect-semi p)
+      [ident (fset g :where_clause wc) ty rhs])))
+
+(defn- parse-type-alias [^P p defaultness]
+  (let [ident (parse-ident p)
+        g (parse-generics p)
+        bounds (if (eat p :Colon) (parse-generic-bounds p) [])
+        g (fset g :where_clause (parse-where-clause p))
+        ty (when (eat p :Eq) (parse-ty p))
+        after (parse-where-clause p)]
+    (expect-semi p)
+    (list 'TyAlias (list 'TyAlias :defaultness defaultness :ident ident :generics g :after_where_clause after
+                         :bounds bounds :ty (opt ty)))))
+
+(defn- parse-field-ident
+  "parse_field_ident: an identifier (a keyword is an error; _ names an enum's variant)"
+  ^Id [^P p adt]
+  (let [^Tok t (tok)]
+    (when-not (ident-tok? t) (fail p (str "expected identifier, found " (describe t))))
+    (when (and (not (raw? t)) (lx/reserved? (.-sym t) (ed)) (not (and (= "_" (.-sym t)) (= adt "enum"))))
+      (fail p (str "expected identifier, found keyword `" (.-sym t) "`")))
+    (bump p)
+    (id (.-sym t) (tspan t))))
+
+(defn- field-def-extras [safety mr default]
+  (if (and (= safety 'Default) (= 'Unrestricted (fget mr :kind)) (nil? default))
+    'None
+    (list 'Some (list 'FieldDefExtras :safety safety :mut_restriction mr :default (opt default)))))
+
+(defn parse-tuple-struct-body [^P p]
+  (first (paren-comma-seq p #(let [attrs (parse-outer-attrs p)
+                                   lo (tsp)
+                                   v (parse-visibility p true)
+                                   mr (parse-mut-restriction p)
+                                   ty (parse-ty p)
+                                   default (when (check p :Eq) (attempt (bump p) (parse-expr-anon-const p)))]
+                               (list 'FieldDef :attrs attrs :span (sp-to lo (ty-span ty)) :vis v
+                                     :extras (field-def-extras 'Default mr default) :ident 'None :ty ty :is_placeholder false)))))
+
+(defn- parse-name-and-ty [^P p adt ^Sp lo v mr safety attrs]
+  (let [name (parse-field-ident p adt)]
+    (when (check p :Bang) (fail p "macros cannot expand to struct fields"))
+    (when-not (eat p :Colon) (fail p (str "expected `:`, found " (describe (tok)))))
+    (let [ty (parse-ty p)]
+      (when (and (check p :Colon) (not (identical? (.-kind (la p 1)) :Colon))) (fail p "found single colon in a struct field type path"))
+      (let [default (when (eat p :Eq) (parse-expr-anon-const p))]
+        (list 'FieldDef :attrs attrs :span (sp-to lo (psp)) :vis v :extras (field-def-extras safety mr default)
+              :ident (list 'Some name) :ty ty :is_placeholder false)))))
+
+(defn- parse-field-def [^P p adt]
+  (let [attrs (parse-outer-attrs p)
+        lo (tsp)
+        v (parse-visibility p false)
+        mr (parse-mut-restriction p)
+        safety (if (eat-kw p "unsafe") (list 'Unsafe (psp)) 'Default)
+        f (parse-name-and-ty p adt lo v mr safety attrs)]
+    (case (tk)
+      :Comma (bump p)
+      :CloseBrace nil
+      :Semi (fail p (str adt " fields are separated by `,`"))
+      (fail p (str "expected `,`, or `}`, found " (describe (tok)))))
+    f))
+
+(defn- parse-record-struct-body [^P p adt]
+  (if (eat p :OpenBrace)
+    (let [fields (loop [fs (transient [])] (if (check p :CloseBrace) (persistent! fs) (recur (conj! fs (parse-field-def p adt)))))]
+      (expect p :CloseBrace)
+      fields)
+    (fail p (str "expected `where`, or `{` after struct name, found " (describe (tok))))))
+
+(defn- recover-nested-adt-item [^P p]
+  (when (and (or (kw? (tok) "enum") (kw? (tok) "struct") (kw? (tok) "union")) (ident-tok? (la p 1)))
+    (fail p "nested items are not allowed in enums")))
+
+(defn- parse-enum-variant [^P p]
+  (let [attrs (parse-outer-attrs p)
+        vlo (tsp)
+        v (parse-visibility p false)]
+    (recover-nested-adt-item p)
+    (let [ident (parse-field-ident p "enum")]
+      (when (check p :Bang) (fail p "macros cannot expand to enum variants"))
+      (let [data (cond (check p :OpenBrace) (list 'Struct :fields (parse-record-struct-body p "struct") :recovered 'No)
+                       (check p :OpenParen) (list 'Tuple (parse-tuple-struct-body p))
+                       :else (list 'Unit))
+            disr (when (eat p :Eq) (parse-expr-anon-const p))]
+        (list 'Variant :attrs attrs :span (sp-to vlo (psp)) :vis v :ident ident :data data :disr_expr (opt disr) :is_placeholder false)))))
+
+(defn- parse-item-enum [^P p]
+  (when (kw? (tok) "struct") (fail p "`enum` and `struct` are mutually exclusive"))
+  (let [ident (parse-ident p)
+        g (parse-generics p)
+        g (fset g :where_clause (parse-where-clause p))]
+    (when (check p :Semi) (fail p "expected `{}`, found `;`"))
+    (let [[vs _] (delim-comma-seq p :OpenBrace :CloseBrace #(parse-enum-variant p))]
+      (list 'Enum ident g (list 'EnumDef :variants vs)))))
+
+(defn- parse-item-struct [^P p]
+  (let [ident (parse-ident p)
+        g (parse-generics p)]
+    (cond (kw? (tok) "where")
+          (let [wc (parse-where-clause p) g (fset g :where_clause wc)]
+            (cond (eat p :Semi) (list 'Struct ident g (list 'Unit))
+                  :else (list 'Struct ident g (list 'Struct :fields (parse-record-struct-body p "struct") :recovered 'No))))
+          (eat p :Semi) (list 'Struct ident g (list 'Unit))
+          (check p :OpenBrace) (list 'Struct ident g (list 'Struct :fields (parse-record-struct-body p "struct") :recovered 'No))
+          (check p :OpenParen) (let [body (parse-tuple-struct-body p)
+                                     g (fset g :where_clause (parse-where-clause p))]
+                                 (expect-semi p)
+                                 (list 'Struct ident g (list 'Tuple body)))
+          :else (fail p (str "expected `where`, `{`, `(`, or `;` after struct name, found " (describe (tok)))))))
+
+(defn- parse-item-union [^P p]
+  (let [ident (parse-ident p)
+        g (parse-generics p)
+        g (if (kw? (tok) "where") (fset g :where_clause (parse-where-clause p)) g)]
+    (when-not (check p :OpenBrace) (fail p (str "expected `where` or `{` after union name, found " (describe (tok)))))
+    (list 'Union ident g (list 'Struct :fields (parse-record-struct-body p "union") :recovered 'No))))
+
+(defn- complain-if-pub-macro [^P p v]
+  (when-not (= 'Inherited (fget v :kind)) (fail p "can't qualify macro invocation with `pub`")))
+
+(defn- eat-semi-for-macro-if-needed [^P p args]
+  (when (and (not= 'Brace (fget args :delim)) (not (eat p :Semi)))
+    (fail p "macros that expand to items must be delimited with braces or followed by a semicolon")))
+
+(defn- parse-item-macro [^P p v]
+  (let [path (parse-path p :mod)]
+    (expect p :Bang)
+    (let [args (parse-delim-args p)]
+      (eat-semi-for-macro-if-needed p args)
+      (complain-if-pub-macro p v)
+      (list 'MacCall :path path :args args))))
+
+(defn- tok-tree-span ^Sp [^P p ^long i]
+  (sp-to (tspan (aget ^objects (.-toks p) (int i))) (tspan (aget ^objects (.-toks p) (aget ^ints (.-mt p) (int i))))))
+
+(defn- parse-item-decl-macro [^P p]
+  (let [ident (parse-ident p)
+        body (cond (check p :OpenBrace) (parse-delim-args p)
+                   (check p :OpenParen)
+                   (let [pi (parse-token-tree p)
+                         ps (tok-tree-span p pi)]
+                     (when-not (check p :OpenBrace) (unexpected p))
+                     (let [bi (parse-token-tree p)
+                           bs (tok-tree-span p bi)
+                           arrow (list 'Token (list 'Token :kind 'FatArrow :span (sp-between ps bs)) 'Alone)]
+                       (list 'DelimArgs :dspan (list 'DelimSpan :open (sp-lo ps) :close (sp-hi bs)) :delim 'Brace
+                             :tokens (list 'TokenStream [(TT. pi) arrow (TT. bi)]))))
+                   :else (unexpected p))]
+    (list 'MacroDef ident (list 'MacroDef :body body :macro_rules false :eii_declaration 'None))))
+
+(defn- parse-item-macro-rules [^P p v has-bang]
+  (expect-kw p "macro_rules")
+  (when has-bang (expect p :Bang))
+  (let [ident (parse-ident p)]
+    (when (check p :Bang) (fail p "macro names aren't followed by a `!`"))
+    (let [body (parse-delim-args p)]
+      (eat-semi-for-macro-if-needed p body)
+      (complain-if-pub-macro p v)
+      (list 'MacroDef ident (list 'MacroDef :body body :macro_rules true :eii_declaration 'None)))))
+
+(defn- parse-delegation-body [^P p]
+  (if (check p :OpenBrace) (parse-block p) (do (expect p :Semi) nil)))
+
+(defn- parse-path-like-delegation [^P p]
+  (let [[qself path] (if (eat-lt p) (parse-qpath p :expr) [nil (parse-path p :expr)])
+        rename (fn [] (when (eat-kw p "as") (parse-ident p)))]
+    (if (eat-path-sep p)
+      (let [suffixes (if (eat p :Star)
+                       (list 'Glob (psp))
+                       (list 'List (first (delim-comma-seq p :OpenBrace :CloseBrace
+                                                           #(let [i (parse-path-segment-ident p)] (list 'tuple i (opt (rename))))))))]
+        (list 'DelegationMac (list 'DelegationMac :qself (opt qself) :prefix path :suffixes suffixes :body (opt (parse-delegation-body p)))))
+      (let [r (rename)
+            ident (or r (seg-ident (peek (path-segs path))))]
+        (list 'Delegation (list 'Delegation :qself (opt qself) :path path :ident ident :rename (opt r)
+                                :body (opt (parse-delegation-body p)) :source 'Single))))))
+
+
+(defn- parse-item-delegation
+  "parse_item_delegation: [kind inner-attrs]"
+  [^P p defaultness kind]
+  (let [s (tsp)]
+    (expect-kw p "reuse")
+    (if (= kind :path)
+      [(parse-path-like-delegation p) []]
+      (let [[impl inner] (parse-item-impl p defaultness true)
+            im (second impl)
+            until (sp-to s (psp))]
+        (when (= 'None (fget im :of_trait)) (fail p "only trait impls can be reused"))
+        (let [body (parse-delegation-body p)
+              whole (sp-to s (psp))
+              item (list 'Item :attrs [] :span whole :vis (vis 'Inherited whole)
+                         :kind (list 'DelegationMac (list 'DelegationMac :qself 'None
+                                                          :prefix (fget (fget (unopt (fget im :of_trait)) :trait_ref) :path)
+                                                          :suffixes (list 'Glob whole) :body (opt body))))]
+          [(list 'Impl (fset im :items (conj (fget im :items) item))) inner])))))
+
+(defn- parse-polarity [^P p]
+  (if (and (check p :Bang) (can-begin-type? (la p 1) (ed)))
+    (do (bump p) "negative")
+    "positive"))
+
+(defn- parse-item-impl
+  "parse_item_impl: [kind inner-attrs]"
+  [^P p defaultness is-reuse]
+  (let [constness (parse-constness p :sensitive)
+        safety (parse-safety p :sensitive)]
+    (expect-kw p "impl")
+    (let [g (if (choose-generics-over-qpath p 0)
+              (parse-generics p)
+              (generics [] (where-clause false [] DUMMY) (sp-hi (psp))))]
+      (when (or (and (>= (ed) 2018) (kw? (tok) "async")) (kw-followed-by-ident? p "async"))
+        (fail p "`async` trait implementations are unsupported"))
+      (let [polarity (parse-polarity p)
+            ty-first (if (and (kw? (tok) "for") (not (identical? (.-kind (la p 1)) :Lt)))
+                       (fail p "missing trait in a trait impl")
+                       (parse-ty-common p {:ty-generics g}))
+            has-for (eat-kw p "for")
+            ty-second (cond (check p :DotDot) (do (bump p) (mk-ty (psp) 'Dummy))
+                            (or has-for (can-begin-type? (tok) (ed))) (parse-ty p)
+                            :else nil)
+            g (fset g :where_clause (parse-where-clause p))
+            [items inner] (if is-reuse [[] []] (parse-item-list p #(parse-assoc-item p {:req-name (fn [_ _] true) :context :impl :req-body true})))
+            [of-trait self-ty]
+            (if ty-second
+              (do (when-not has-for (fail p "missing `for` in a trait impl"))
+                  (let [k (ty-kind ty-first)]
+                    (when-not (and (variant? k 'Path) (= 'None (nth k 1))) (fail p "expected a trait, found type"))
+                    [(list 'Some (list 'TraitImplHeader :defaultness defaultness :safety safety :polarity polarity
+                                       :trait_ref (list 'TraitRef :path (nth k 2))))
+                     ty-second]))
+              (do (when (variant? safety 'Unsafe) (fail p "inherent impls cannot be unsafe"))
+                  (when (= polarity "negative") (fail p "inherent impls cannot be negative"))
+                  (when (variant? defaultness 'Default) (fail p "inherent impls cannot be default"))
+                  ['None ty-first]))]
+        [(list 'Impl (list 'Impl :generics g :constness constness :of_trait of-trait :self_ty self-ty :items items)) inner]))))
+
+(defn- parse-item-trait
+  "parse_item_trait: [kind inner-attrs]"
+  [^P p ^Sp lo]
+  (let [ir (parse-impl-restriction p)
+        constness (parse-constness p :sensitive)
+        safety (parse-safety p :sensitive)
+        is-auto (if (eat-kw p "auto") 'Yes 'No)]
+    (expect-kw p "trait")
+    (let [ident (parse-ident p)
+          g (parse-generics p)
+          had-colon (eat p :Colon)
+          bounds (if had-colon (parse-generic-bounds p) [])]
+      (if (eat p :Eq)
+        (do (when had-colon (fail p "bounds are not allowed on trait aliases"))
+            (let [bounds (parse-generic-bounds p)
+                  g (fset g :where_clause (parse-where-clause p))]
+              (expect-semi p)
+              (when (= is-auto 'Yes) (fail p "trait aliases cannot be `auto`"))
+              (when (variant? safety 'Unsafe) (fail p "trait aliases cannot be `unsafe`"))
+              (when (variant? (fget ir :kind) 'Restricted) (fail p "trait aliases cannot be `impl`-restricted"))
+              [(list 'TraitAlias (list 'TraitAlias :constness constness :ident ident :generics g :bounds bounds)) []]))
+        (let [g (fset g :where_clause (parse-where-clause p))
+              [items inner] (parse-item-list p #(parse-assoc-item p {:req-name (fn [ed _] (>= (long ed) 2018)) :context :trait :req-body false}))]
+          [(list 'Trait (list 'Trait :impl_restriction ir :constness constness :safety safety :is_auto is-auto
+                              :ident ident :generics g :bounds bounds :items items))
+           inner])))))
+
+(defn- parse-item-mod
+  "parse_item_mod: [kind inner-attrs]"
+  [^P p]
+  (let [safety (parse-safety p :sensitive)]
+    (expect-kw p "mod")
+    (let [ident (parse-ident p)]
+      (if (eat p :Semi)
+        [(list 'Mod safety ident 'Unloaded) []]
+        (do (expect p :OpenBrace)
+            (let [[inner items spans] (parse-mod p :CloseBrace)]
+              [(list 'Mod safety ident (list 'Loaded items 'Yes spans)) inner]))))))
+
+(defn- parse-const-block-item [^P p]
+  (expect-kw p "const")
+  (let [cs (psp) b (parse-block p)]
+    (list 'ConstBlock (list 'ConstBlockItem :span (sp-to cs (block-span b)) :block b))))
+
+(defn- parse-item-kind
+  "parse_item_kind: [kind-or-nil inner-attrs defaultness-left]"
+  [^P p macros-allowed allow-cbi ^Sp lo v def mode case]
+  (let [check-pub (= def 'Implicit)
+        dv (volatile! def)
+        def! (fn [] (let [d @dv] (vreset! dv 'Implicit) d))
+        r (cond
+            (and (not (use-closure? p)) (eat-kw-case p "use" case)) [(parse-use-item p) []]
+            (check-fn-front-matter p check-pub case)
+            (let [d (def!)
+                  [ident sig g contract body inner] (parse-fn p mode lo v case)]
+              [(list 'Fn (list 'Fn :defaultness d :ident ident :generics g :sig sig :contract (opt contract)
+                               :define_opaque 'None :body (opt body) :eii_impl 'None))
+               inner])
+            (eat-kw-case p "extern" case)
+            (if (eat-kw-case p "crate" case) [(parse-item-extern-crate p) []] (parse-item-foreign-mod p 'Default))
+            (unsafe-foreign-mod? p) (let [s (parse-safety p :sensitive)] (expect-kw p "extern") (parse-item-foreign-mod p s))
+            :else
+            (if-let [safety (parse-global-static-front-matter p case)]
+              [(parse-static-item p safety (parse-mutability p)) []]
+              (cond
+                (or (check-kw-case p "trait" case) (check-trait-front-matter p)) (parse-item-trait p lo)
+                (check-impl-frontmatter p 0) (parse-item-impl p (def!) false)
+                (and (contains? #{:yes :does-not-matter} allow-cbi) (check-inline-const p 0)) [(parse-const-block-item p) []]
+                :else
+                (let [c (parse-constness p case)]
+                  (if (not= c 'No)
+                    (do (recover-const-mut p) (recover-missing-kw-before-item p)
+                        (let [[ident g ty body] (parse-const-item p)]
+                          [(list 'Const (list 'ConstItem :defaultness (def!) :ident ident :generics g :ty ty :body (opt body)
+                                              :kind 'Body :define_opaque 'None))
+                           []]))
+                    (if-let [rk (reuse-item? p)]
+                      (parse-item-delegation p (def!) rk)
+                      (cond
+                        (or (check-kw-case p "mod" case) (and (check-kw-case p "unsafe" case) (kw-ahead? p 1 ["mod"]))) (parse-item-mod p)
+                        (eat-kw-case p "type" case)
+                        (let [c (parse-constness p case)]
+                          (if (not= c 'No)
+                            (do (recover-const-mut p) (recover-missing-kw-before-item p)
+                                (let [[ident g ty body] (parse-const-item p)]
+                                  [(list 'Const (list 'ConstItem :defaultness (def!) :ident ident :generics g :ty ty :body (opt body)
+                                                      :kind 'TypeConst :define_opaque 'None))
+                                   []]))
+                            [(parse-type-alias p (def!)) []]))
+                        (eat-kw-case p "enum" case) [(parse-item-enum p) []]
+                        (eat-kw-case p "struct" case) [(parse-item-struct p) []]
+                        (kw-followed-by-ident? p "union") (do (bump p) [(parse-item-union p) []])
+                        (builtin? p) :none
+                        (eat-kw-case p "macro" case) [(parse-item-decl-macro p) []]
+                        :else
+                        (if-let [mr (macro-rules-item? p)]
+                          [(parse-item-macro-rules p v (= mr :bang)) []]
+                          (cond
+                            (and (isnt-macro-invocation? p) (some #(named? (tok) %) ["import" "using" "include" "require"]))
+                            (do (when (attempt (bump p) (parse-use-item p) true) (fail p "expected item, found an import statement"))
+                                :none)
+                            (and (isnt-macro-invocation? p) (= 'Public (fget v :kind)))
+                            (do (recover-missing-kw-before-item p) :none)
+                            (and (isnt-macro-invocation? p) (= case :sensitive)) :retry
+                            (and macros-allowed (check-path p))
+                            (do (when (isnt-macro-invocation? p) (recover-missing-kw-before-item p))
+                                [(list 'MacCall (parse-item-macro p v)) []])
+                            :else :none)))))))))]
+    (cond (= r :retry) (parse-item-kind p macros-allowed allow-cbi lo v @dv mode :insensitive)
+          (= r :none) [nil [] @dv]
+          :else (conj r @dv))))
+
+(defn parse-item-common
+  "parse_item_common: the Item or nil"
+  [^P p attrs mac-allowed attrs-allowed mode allow-cbi]
+  (let [lo (tsp)
+        v (parse-visibility p false)
+        def (parse-defaultness p)
+        [kind inner def-left] (parse-item-kind p mac-allowed allow-cbi lo v def mode :sensitive)]
+    (if kind
+      (do (when-not (= def-left 'Implicit) (fail p "this item cannot be `default`/`final`"))
+          (list 'Item :attrs (into attrs inner) :span (sp-to lo (psp)) :vis v :kind kind))
+      (do (when-not (= 'Inherited (fget v :kind)) (fail p "visibility `pub` is not followed by an item"))
+          (when-not (= def-left 'Implicit) (fail p "`default` is not followed by an item"))
+          (when (and (not attrs-allowed) (seq attrs)) (fail p "expected item after attributes"))
+          nil))))
+
+(defn parse-item
+  "parse_item"
+  [^P p allow-cbi]
+  (let [attrs (parse-outer-attrs p)]
+    (parse-item-common p attrs true false FREE-FN allow-cbi)))
+
+(def ^:private assoc-kinds '#{Const Fn TyAlias MacCall Delegation DelegationMac})
+
+(defn parse-assoc-item
+  "parse_assoc_item: the AssocItem or nil"
+  [^P p mode]
+  (let [attrs (parse-outer-attrs p)]
+    (when-let [item (parse-item-common p attrs true false mode :does-not-matter)]
+      (let [k (fget item :kind)]
+        (cond (variant? k 'TyAlias) (fset item :kind (list 'Type (second k)))
+              (contains? assoc-kinds (first k)) item
+              (variant? k 'Static) (fail p "associated `static` items are not allowed")
+              :else (fail p "item kind not supported in `trait`s or `impl`s"))))))
+
+(defn parse-foreign-item
+  "parse_foreign_item: the ForeignItem or nil"
+  [^P p]
+  (let [attrs (parse-outer-attrs p)]
+    (when-let [item (parse-item-common p attrs true false {:req-name (fn [_ dots] (not dots)) :context :free :req-body false}
+                                       :does-not-matter)]
+      (let [k (fget item :kind)]
+        (cond (contains? '#{Static Fn TyAlias MacCall} (first k)) item
+              (variant? k 'Const) (fail p "extern items cannot be `const`")
+              :else (fail p "item kind not supported in `extern` blocks"))))))
