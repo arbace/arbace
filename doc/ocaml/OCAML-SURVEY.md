@@ -1865,9 +1865,9 @@ main `46d04247` under light rules: no gate, no Arbace build, no re-seed; every r
 
 | corpus | files | equal | rejected by both | differ |
 |---|---:|---:|---:|---:|
-| samples (also their `:full` layouts, 8 of 8) | 8 | 8 | 0 | 0 |
-| stdlib | 150 | 148 | 2 (the `templates/`) | 0 |
-| compiler sources (parsing, typing, lambda, utils, driver) | 248 | 248 | 0 | 0 |
+| samples (their `:full` layouts too: 8 of 8) | 8 | 8 | 0 | 0 |
+| stdlib (layouts: 150 of 150) | 150 | 148 | 2 (the `templates/`) | 0 |
+| compiler sources: parsing, typing, lambda, utils, driver (layouts: 248 of 248) | 248 | 248 | 0 | 0 |
 | testsuite: parsing, lexing, typing-objects, effects, effect-syntax, exotic-syntax, let-syntax, generalized-open, formatting, functors, extension-constructor, typing-modules, typing-poly, typing-labeled-tuples, typing-misc, parsetree | 234 | 231 | 3 | 0 |
 | `--use-file` (the toplevel's phrases): tool-toplevel and typing-modules, first 40 | 40 | 37 | 3 | 0 |
 
