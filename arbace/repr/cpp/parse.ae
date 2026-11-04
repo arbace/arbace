@@ -321,7 +321,7 @@
 
 (defn- find-member [e ^String s] (when-let [sc (ent-scope e)] (sc/find-in sc s)))
 
-(defn- tmpl-ent? [e] (boolean (and e (or (:tmpl e) (:inj e)))))
+(defn- tmpl-ent? [e] (boolean (and e (or (:tmpl e) (:inj e) (= :concept (:k e))))))
 (defn- type-ent? [e] (= :type (:k e)))
 (defn- concept-ent? [e] (= :concept (:k e)))
 
@@ -847,7 +847,11 @@
                                ;; a declaration: which kind is decided by what follows its first declarator
                                (tp-consume-decl-spec! p)
                                (loop [] (when (not= :false (tp-decl-spec p :false)) (when (not= :error (tp-consume-decl-spec! p)) (recur))))
-                               (tp-declarator! p false true false (is? p "auto"))
+                               ;; a structured binding: [ ... ] after the specifiers (and & or &&)
+                               (when (or (is? p "&") (is? p "&&")) (when (is-at? p 1 "[") (adv! p)))
+                               (if (and (is? p "[") (not (is-at? p 1 "[")))
+                                 (skip-balanced! p)
+                                 (tp-declarator! p false true false (is? p "auto")))
                                (cond (or (is? p "=") (is? p "{")) (if (and can-init (let [b (ix p)] (skip-until! p #{";" ")"}) (let [r (is? p ";")] (seek! p b) r))) :init-decl :cond-decl)
                                      (and can-range (is? p ":")) :for-range
                                      :else :init-decl)))
@@ -2732,18 +2736,19 @@
                       (is? p "]") (do (adv! p) inits)
                       (is? p ",") (do (adv! p) (recur inits))
                       (and (or (is? p "&") (is? p "=")) (or (is-at? p 1 "]") (is-at? p 1 ","))) (do (adv! p) (recur inits))
-                      (is? p "this") (do (adv! p) (recur inits))
-                      (and (is? p "*") (is-at? p 1 "this")) (do (adv! p) (adv! p) (recur inits))
+                      ;; clang's children: one initializer an explicit capture (a simple one's the variable it names)
+                      (is? p "this") (let [i (ix p)] (adv! p) (recur (conj inits (node p "CXXThisExpr" i i {}))))
+                      (and (is? p "*") (is-at? p 1 "this")) (let [i (ix p)] (adv! p) (adv! p) (recur (conj inits (node p "CXXThisExpr" (inc i) (inc i) {}))))
                       :else
                       (do (accept! p "&") (accept! p "...")
                           (if (id? p)
-                            (let [nm (ts (cur p))]
+                            (let [nm (ts (cur p)) i (ix p)]
                               (adv! p) (accept! p "...")
                               (sc/declare! (scope p) {:k :var :name nm})
                               (cond (accept! p "=") (recur (conj inits (parse-init-clause p)))
                                     (is? p "{") (recur (conj inits (parse-braced-init p)))
                                     (is? p "(") (let [as (paren-args p)] (recur (into inits (take 1 as))))
-                                    :else (recur inits)))
+                                    :else (recur (conj inits (node p "DeclRefExpr" i i {:referencedDecl {:name nm}})))))
                             (perr p "a capture")))))
             tmpl (when (is? p "<") (with-scope p :tparams nil (adv! p) (parse-template-params p) (expect! p ">") true))
             _ (when (is? p "requires") (skip-requires-clause! p))
