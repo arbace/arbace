@@ -643,9 +643,13 @@
     (doseq [x (rest b)]
       (if (vector? x) (use-value st (second x) (norm-type (first x))) (note-md! x)))))
 
+(def ^:dynamic *caller-varargs* false)
+
 (defn- parse-call-attrs
   "LLParser's attribute checks of a call's text: return value, arguments, function attributes."
   [ps o]
+  (when (and *caller-varargs* (= (:tail o) :musttail))
+    (verr :parser/musttail "expected '...' at end of argument list for musttail call in varargs function"))
   (check-attr-placement :ret (:ret-attrs o)) (check-attr-values (:ret-attrs o))
   (doseq [a (nth ps 2)] (let [as (param-attrs a)] (check-attr-placement :param as) (check-attr-values as)))
   (let [as (remove integer? (:attrs o))] (check-attr-placement :fn as) (check-attr-values as)))
@@ -730,7 +734,7 @@
     (when-let [p (:prologue o)] (use-value nil (second p) (norm-type (first p))))
     (.put *gdefs* k {:kind :function :fty (list 'fn (norm-type rt) (mapv #(if (= % '&) % (norm-type (first %))) ps)) :form f})
     (.remove *gfwd* k)
-    (when (= what :define) (parse-body st f (norm-type rt)))))
+    (when (= what :define) (binding [*caller-varargs* (boolean (some #{'&} ps))] (parse-body st f (norm-type rt))))))
 
 (defn- parse-global [f]
   (let [[h nm t & more] f
@@ -965,8 +969,8 @@
     (when (and (seq? callee) (= (first callee) 'asm)) (verr :verifier/musttail "cannot use musttail call with inline asm"))
     (let [intr? (and (global? callee) (str/starts-with? (global-key callee) "llvm."))]
       (when-not intr?
-        (when-not (= cvar? ty-var?) (verr :verifier/musttail "cannot guarantee tail call due to mismatched varargs"))
-        (when-not (congruent? crt (norm-type (second cty))) (verr :verifier/musttail "cannot guarantee tail call due to mismatched return types")))
+        (when-not (= cvar? ty-var?) (verr :verifier/musttail "cannot guarantee tail call due to mismatched varargs")))
+      (when-not (congruent? crt (norm-type (second cty))) (verr :verifier/musttail "cannot guarantee tail call due to mismatched return types"))
       (when-not (= (:cconv fo) (:cconv o)) (verr :verifier/musttail "cannot guarantee tail call due to mismatched calling conv"))
       (let [nxt (first (remove #(dbg-record? (body %)) (drop (inc ii) items)))
             nb (when nxt (body nxt))]
@@ -985,8 +989,9 @@
           (verr :verifier/musttail "cannot guarantee tail call due to mismatched ABI impacting function attributes"))))))
 
 (defn- check-bundles
-  "The operand bundles of a call (visitCallBase's loop over them); `defs` finds a local's defining body."
-  [bundles defs]
+  "The operand bundles of a call (visitCallBase's loop over them); `defs` finds a local's defining body; `direct?`: the callee
+  is a function."
+  [bundles defs direct?]
   (let [seen (java.util.HashSet.)]
     (doseq [[tag & ops] bundles]
       (letfn [(once [t msg] (when (.contains seen t) (verr :verifier/bundle msg)) (.add seen t))]
@@ -1003,7 +1008,8 @@
           "ptrauth" (do (once "ptrauth" "Multiple ptrauth operand bundles")
                         (when-not (= 2 (count ops)) (verr :verifier/bundle "Expected exactly two ptrauth bundle operands"))
                         (when-not (= 'i32 (first (first ops))) (verr :verifier/bundle "Ptrauth bundle key operand must be an i32 constant"))
-                        (when-not (= 'i64 (first (second ops))) (verr :verifier/bundle "Ptrauth bundle discriminator operand must be an i64")))
+                        (when-not (= 'i64 (first (second ops))) (verr :verifier/bundle "Ptrauth bundle discriminator operand must be an i64"))
+                        (when direct? (verr :verifier/bundle "Direct call cannot have a ptrauth bundle")))
           "kcfi" (do (once "kcfi" "Multiple kcfi operand bundles")
                      (when-not (= 1 (count ops)) (verr :verifier/bundle "Expected exactly one kcfi bundle operand"))
                      (when-not (= 'i32 (first (first ops))) (verr :verifier/bundle "Kcfi bundle operand must be an i32 constant")))
@@ -1027,6 +1033,13 @@
     (check-function-attrs (group-items (:ret-attrs o)) (norm-type (second fty)) (subvec pattrs 0 (min nparams (count pattrs)))
                           (subvec ptypes 0 (min nparams (count ptypes))) fattrs direct-intr? (and (seq? c) (= (first c) 'asm)))
     (when (has-attr? fattrs "speculatable") (verr :verifier/attr-misc "speculatable attribute may not apply to call sites"))
+    (let [d (when (global? c) (.get *gdefs* (global-key c)))
+          dps (when (and d (= (:kind d) :function)) (vec (remove #{'&} (nth (:form d) 3))))]
+      (doseq [[i a] (map-indexed vector args) :when (< i nparams)]
+        (when (or (has-attr? (nth pattrs i) "immarg") (and dps (< i (count dps)) (vector? (nth dps i)) (has-attr? (group-items (param-attrs (nth dps i))) "immarg")))
+          (let [x (peek a)]
+            (when-not (or (integer? x) (boolean? x) (and (seq? x) (#{'fp 'int} (first x))))
+              (verr :verifier/attr-misc "immarg operand has non-immediate parameter"))))))
     (when (has-attr? fattrs "preallocated") (verr :verifier/attr-misc "preallocated as a call site attribute can only be on llvm.call.preallocated.arg"))
     (doseq [[i a] (map-indexed vector pattrs) :when (>= i nparams)]
       (when (has-attr? a "sret") (verr :verifier/attr-misc "Attribute 'sret' cannot be used for vararg call arguments!")))
@@ -1042,7 +1055,7 @@
         (when (= t 'token) (verr :verifier/function-type "Function has token parameter but isn't an intrinsic")))
       (when-not (global? c)
         (when (= (norm-type (second fty)) 'token) (verr :verifier/function-type "Return type cannot be token for indirect call!"))))
-    (check-bundles (:bundles o) defs)))
+    (check-bundles (:bundles o) defs (global? c))))
 
 (defn- verify-function
   "The Verifier's rules over one definition (visitFunction, visitBasicBlock and the instructions' visitors)."

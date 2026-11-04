@@ -274,17 +274,179 @@
   (when-let [[fi bi ii x] (pick r (filter #(let [y (nth % 3)] (and (result y) (not= 'phi (first (body y))) (seq (operands-of y)))) (inst-places forms)))]
     (set-inst forms fi bi ii [(rename-first x (pick r (operands-of x)) (result x))])))
 
+;; ---------------------------------------------------------------------------------------------
+;; Attribute, calling convention, musttail and operand bundle kinds (LL4b)
+
+(defn- fn-forms [forms] (keep-indexed (fn [i f] (when (#{'llvm/define 'llvm/declare} (first f)) i)) forms))
+
+(defn- opt-update
+  "Form (a vector or list) `f` with its option `k` (after the fixed positions `from`) replaced by (g old)."
+  [f k from g]
+  (let [v (vec f) i (first (keep-indexed (fn [j x] (when (and (>= j from) (= x k)) j)) v))]
+    (apply list (if i (assoc v (inc i) (g (nth v (inc i)))) (conj v k (g nil))))))
+
+(defn- param-sites
+  "Every parameter of a define or declare and every argument of a call: {:type T :ret R :n N :set (fn [attrs] forms) :call?}
+  where `set` gives the forms with `attrs` added after the type."
+  [forms]
+  (concat
+   (for [fi (fn-forms forms) :let [f (nth forms fi) ps (nth f 3)]
+         [pi p] (map-indexed vector ps) :when (vector? p)]
+     {:type (first p) :ret (nth f 2) :n (count (remove #{'&} ps)) :pi pi :fn? true :fi fi
+      :set (fn [attrs] (assoc forms fi (apply list (assoc (vec f) 3 (assoc ps pi (into [(first p)] (concat attrs (rest p))))))))})
+   (for [[fi bi ii x] (inst-places forms) :let [b (body x)] :when (= 'call (first b))
+         [ai a] (map-indexed vector (nth b 3)) :when (vector? a)]
+     {:type (first a) :ret (nth b 1) :n (count (nth b 3)) :pi ai :call? true
+      :set (fn [attrs] (set-inst forms fi bi ii [(rebody x (apply list (assoc (vec b) 3 (assoc (nth b 3) ai (into [(first a)] (concat attrs (rest a)))))))]))})))
+
+(defn- attr-sites
+  "Where function attributes (`:attrs`) and return attributes (`:ret-attrs`) go: {:key K :set (fn [attrs] forms) :call?}."
+  [forms k]
+  (concat
+   (for [fi (fn-forms forms) :let [f (nth forms fi)]]
+     {:ret (nth f 2) :fn? true :fi fi :set (fn [attrs] (assoc forms fi (opt-update f k 4 #(vec (concat % attrs)))))})
+   (for [[fi bi ii x] (inst-places forms) :let [b (body x)] :when (= 'call (first b))]
+     {:ret (nth b 1) :call? true :set (fn [attrs] (set-inst forms fi bi ii [(rebody x (opt-update b k 4 #(vec (concat % attrs))))]))})))
+
+(defn- ptr? [t] (or (= t 'ptr) (and (seq? t) (= (first t) 'ptr))))
+(defn- int-t? [t] (boolean (and (symbol? t) (re-matches #"i[0-9]+" (name t)))))
+
+(defn- m-attr-type
+  "A pointer-only attribute on a non-pointer, an integer-only one on a pointer."
+  [r forms]
+  (when-let [s (pick r (param-sites forms))]
+    (let [t (:type s)]
+      ((:set s) [(if (ptr? t)
+                   (pick r [:zeroext :signext '(:range "i32 0, 5") '(:nofpclass "nan") '(:range "i64 0, 9")])
+                   (pick r [:nonnull '(:sret i32) '(:byval i32) '(:align 4) :noalias '(:dereferenceable "8") :readonly :writable
+                            '(:inalloca i32) '(:byref i32) :nest :swifterror '(:preallocated i32) :readnone :nocapture '(:initializes "(0, 4)")]))]))))
+
+(defn- m-attr-pair
+  "Two attributes that exclude each other, on a parameter, an argument or the function."
+  [r forms]
+  (if (pos? (.nextInt ^java.util.Random r 3))
+    (when-let [s (pick r (filter #(or (ptr? (:type %)) (int-t? (:type %))) (param-sites forms)))]
+      ((:set s) (if (ptr? (:type s))
+                  (pick r [[:readonly :writeonly] [:readnone :readonly] [:readnone :writeonly] ['(:byval i32) '(:sret i32)] ['(:byval i32) :inreg]
+                           ['(:inalloca i32) :readonly] ['(:sret i32) :returned] [:writable :readonly] [:nest '(:byref i32)] [:nocapture :immarg]])
+                  (pick r [[:zeroext :signext] [:immarg :noundef :signext] [:inreg :nest]]))))
+    (when-let [s (pick r (attr-sites forms :attrs))]
+      ((:set s) (pick r [[:noinline :alwaysinline] [:optnone] [:optnone :noinline :minsize] [:optnone :noinline :optsize]
+                         [:optnone :noinline :optdebug] [:optdebug :optsize] [:optdebug :minsize] [:jumptable]])))))
+
+(defn- m-attr-place
+  "An attribute where Attributes.td does not allow it: parameter-only on a return value or function, function-only on a
+  parameter or return value."
+  [r forms]
+  (case (.nextInt ^java.util.Random r 3)
+    0 (when-let [s (pick r (attr-sites forms :ret-attrs))]
+        ((:set s) [(pick r [:nounwind :noinline '(:sret i32) :nest :swifterror :returned :cold :willreturn '(:byval i32)])]))
+    1 (when-let [s (pick r (attr-sites forms :attrs))]
+        ((:set s) [(pick r [:nonnull :zeroext '(:sret i32) :returned :nest :noalias '(:dereferenceable "8") :signext :swiftself :noundef])]))
+    2 (when-let [s (pick r (param-sites forms))]
+        ((:set s) [(pick r [:nounwind :noinline :alwaysinline :cold :norecurse :willreturn '(:uwtable "sync") :optnone :hot])]))))
+
+(defn- m-attr-dup
+  "The same once-only attribute on two parameters."
+  [r forms]
+  (let [cands (for [fi (fn-forms forms) :let [f (nth forms fi) ps (nth f 3)]
+                    :let [ptrs (keep-indexed (fn [i p] (when (and (vector? p) (ptr? (first p))) i)) ps)]
+                    :when (>= (count ptrs) 2)] [fi f ps ptrs])]
+    (when-let [[fi f ps ptrs] (pick r cands)]
+      (let [a (pick r [:nest :returned :swifterror :swiftself :swiftasync '(:sret i32) :nest])
+            add (fn [ps i] (assoc ps i (let [p (nth ps i)] (into [(first p)] (concat [a] (rest p))))))
+            [i j] [(first ptrs) (second ptrs)]]
+        (assoc forms fi (apply list (assoc (vec f) 3 (add (add ps i) j))))))))
+
+(defn- m-attr-returned
+  "`returned` on a parameter whose type is not the return type's."
+  [r forms]
+  (when-let [s (pick r (filter #(and (:type %) (not= (:type %) (:ret %))) (param-sites forms)))]
+    ((:set s) [:returned])))
+
+(defn- m-attr-value
+  "A function or parameter attribute with an invalid value."
+  [r forms]
+  (if (.nextBoolean ^java.util.Random r)
+    (when-let [s (pick r (attr-sites forms :attrs))]
+      ((:set s) [(pick r ['(:vscale_range "0,4") '(:vscale_range "3,5") '(:vscale_range "4,2") ["frame-pointer" "bogus"] '(:allocsize "9")
+                          '(:allocsize "0, 1") ["patchable-function-entry" "x"] ["warn-stack-size" "-1"] '(:alignstack "3")
+                          '(:allockind "\"alloc,free\"") '(:allockind "\"alloc,zeroed,uninitialized\"") ["sign-return-address" "bogus"]
+                          ["branch-target-enforcement" "x"] '(:allockind "\"bogus\"")])]))
+    (when-let [s (pick r (param-sites forms))]
+      ((:set s) [(pick r ['(:dereferenceable "0") '(:align 3) '(:nofpclass "0") '(:initializes "(4, 8), (0, 2)") '(:byval void)])]))))
+
+(defn- m-attr-immarg
+  "`immarg` on a parameter of a function that is not an intrinsic."
+  [r forms]
+  (when-let [s (pick r (param-sites forms))] ((:set s) [:immarg])))
+
+(defn- m-cc-def
+  "A calling convention that restricts the function it names."
+  [r forms]
+  (when-let [fi (pick r (filter #(let [f (nth forms %)] (not (some #{:cconv} f))) (fn-forms forms)))]
+    (let [f (nth forms fi) ps (nth f 3) varargs? (some #{'&} ps)
+          cc (cond varargs? (pick r ["fastcc" "coldcc" "ptx_kernel" "amdgpu_ps" "spir_kernel"])
+                   (not= (nth f 2) 'void) (pick r ["spir_kernel" "amdgpu_kernel" "amdgpu_cs_chain" "fastcc"])
+                   (and (seq ps) (vector? (first ps)) (not (some #(and (seq? %) (= (first %) :byval)) (first ps)))) (pick r ["x86_intrcc" "amdgpu_ps" "fastcc"])
+                   :else (pick r ["amdgpu_ps" "spir_kernel" "amdgpu_kernel" "x86_intrcc" "fastcc"]))]
+      (assoc forms fi (opt-update f :cconv 4 (constantly cc))))))
+
+(defn- m-cc-call
+  "A call with the calling convention of a kernel or shader, which no call may use."
+  [r forms]
+  (when-let [[fi bi ii x] (pick r (filter #(= 'call (first (body (nth % 3)))) (inst-places forms)))]
+    (set-inst forms fi bi ii [(rebody x (opt-update (body x) :cconv 4 (constantly (pick r ["spir_kernel" "amdgpu_kernel" "amdgpu_ps" "ptx_kernel" "amdgpu_cs_chain"]))))])))
+
+(defn- m-musttail
+  "A call marked musttail: wrong place, prototype, calling convention or result."
+  [r forms]
+  (let [places (inst-places forms)
+        followed (for [[fi bi ii x] places :when (= 'call (first (body x)))
+                       :let [[_ blocks] (body-of (nth forms fi)) items (vec (drop 2 (nth blocks bi)))
+                             nx (get items (inc ii))]
+                       :when (and nx (= 'ret (first (body nx))))] [fi bi ii x])
+        any (filter #(= 'call (first (body (nth % 3)))) places)]
+    (when-let [[fi bi ii x] (pick r (if (and (seq followed) (.nextBoolean ^java.util.Random r)) followed any))]
+      (set-inst forms fi bi ii [(rebody x (opt-update (body x) :tail 4 (constantly :musttail)))]))))
+
+(defn- m-bundle
+  "An operand bundle on a call: repeated, with the wrong operands, or of the funclet kind on a non-pad."
+  [r forms]
+  (when-let [[fi bi ii x] (pick r (filter #(and (= 'call (first (body (nth % 3)))) (not (some #{:bundles} (body (nth % 3))))) (inst-places forms)))]
+    (let [bs (pick r [[["deopt"] ["deopt"]] [["funclet" '[token none]]] [["funclet" '[i32 0]]] [["cfguardtarget"]] [["ptrauth" '[i32 0]]]
+                      [["ptrauth" '[i32 0] '[i64 1]]] [["kcfi" '[i32 1] '[i32 2]]] [["kcfi" '[i64 1]]] [["convergencectrl"]]
+                      [["gc-transition"] ["gc-transition"]] [["gc-live"] ["gc-live"]] [["deopt"]] [["foo" '[i32 1]]]
+                      [["funclet" '[token none]] ["funclet" '[token none]]]])]
+      (set-inst forms fi bi ii [(rebody x (opt-update (body x) :bundles 4 (constantly bs)))]))))
+
 (def kinds
   [[:type m-type] [:hoist m-hoist] [:noterm m-noterm] [:phiblock m-phiblock] [:phimove m-phimove] [:align m-align]
    [:linkage m-linkage] [:undef m-undef] [:dupdef m-dupdef] [:lpad m-lpad] [:intrinsic m-intrinsic]
    [:hoistr (renumbered m-hoist)] [:phimover (renumbered m-phimove)] [:lpadr (renumbered m-lpad)] [:entrybr (renumbered m-entrybr)]
-   [:phicount m-phicount] [:selfref m-selfref]])
+   [:phicount m-phicount] [:selfref m-selfref]
+   [:attr-type m-attr-type] [:attr-pair m-attr-pair] [:attr-place m-attr-place] [:attr-dup m-attr-dup] [:attr-returned m-attr-returned]
+   [:attr-value m-attr-value] [:attr-immarg m-attr-immarg] [:cc-def m-cc-def] [:cc-call m-cc-call] [:musttail m-musttail]
+   [:bundle m-bundle]])
+
+(def families
+  "The kinds by rule family, for `bin/repr-llvm mutants LIST OUT N FIRST FAMILY`."
+  {"base" [:type :hoist :noterm :phiblock :phimove :align :linkage :undef :dupdef :lpad :intrinsic :hoistr :phimover :lpadr :entrybr :phicount :selfref]
+   "attrs" [:attr-type :attr-pair :attr-place :attr-dup :attr-returned :attr-value :attr-immarg]
+   "cc" [:cc-def :cc-call]
+   "musttail" [:musttail]
+   "bundles" [:bundle]})
 
 (defn -main
-  "LIST OUT N [FIRST]: N mutants of LIST's modules (NAME<tab>PATH.ll), the K-th of them K = FIRST (default 0) ...,
-  OUT/NAME.KIND.K.ll and OUT/mutants.list."
-  [lst out n & [first-k]]
-  (let [rows (vec (for [l (str/split-lines (slurp lst)) :when (seq l)] (str/split l #"\t")))
+  "LIST OUT N [FIRST [FAMILY]]: N mutants of LIST's modules (NAME<tab>PATH.ll), the K-th of them K = FIRST (default 0) ...,
+  OUT/NAME.KIND.K.ll and OUT/mutants.list; FAMILY (`families`) restricts the kinds to its."
+  [lst out n & [first-k family]]
+  (let [kinds (if (seq family)
+                (let [ks (set (get families family))]
+                  (when (empty? ks) (throw (ex-info (str "unknown family " family) {})))
+                  (vec (filter #(ks (first %)) kinds)))
+                kinds)
+        rows (vec (for [l (str/split-lines (slurp lst)) :when (seq l)] (str/split l #"\t")))
         n (Integer/parseInt n)
         cache (java.util.HashMap.)
         forms-of (fn [p] (or (.get cache p) (let [f (try (rd/read-module (latin1 p)) (catch Throwable _ [])) ] (.put cache p f) f)))
