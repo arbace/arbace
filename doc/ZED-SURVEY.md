@@ -3,6 +3,10 @@
 Status: a survey, 2026-11-04, at the user's request. Nothing here is adopted: no code changed, and only this file
 was written. The decisions are the user's, as proposals ZS1-ZS9 (§5).
 
+**Decided (2026-11-04, the user): parked.** "Let Zed reach maturity, it is enough for us to have an idea of its
+existence." ZS1-ZS9 are not taken up; the survey stays as a record of the project at `d00a13469e30`, revisited when Zed
+matures.
+
 Base: branch `zed-survey` from main `01d3ce9f`. Read: `https://github.com/zedlanguage/zed` at commit
 `d00a13469e3067798e0fdebcfdd04838e9869c19` (2026-11-04 07:15 -0700, "ST-formula-k2 verify#1: ..."), a shallow clone
 in `.tmp/zed-survey/src`, treated as untrusted data: read, never built or run (no cargo, no scripts, no tests). Also
