@@ -427,6 +427,10 @@
    :dir (when-let [pf (:pf @st)] (.getParent (.getAbsoluteFile (File. (str pf)))))
    :ctx-of ctx-of
    :source (let [ns (str (:ns @st))] (fn [fname] [ns (display-file fname)]))
+   ;; each Go file's //line directives, which apply to the rest of their file (GOI-SPEC.md, "Since
+   ;; v1: frames"): by file name, read when a function's code is first built
+   :line-dirs (let [files (:files @st)]
+                (delay (into {} (for [fi files] [(:name fi) (b/file-line-dirs (:decls fi))]))))
    :compiled? listed?
    :table-type? table-type?
    :pkg-scope digest-scope
@@ -659,10 +663,20 @@
                 ordered (if-let [names (or init-names only)]
                           (filter #(some (fn [x] (contains? names (e/o x :name))) (:lhs %)) ordered)
                           ordered)]
-            ;; the initializers' frames name the file of the first (§10.6; GOI-SPEC.md, "Since v1: frames")
-            (when-let [x (some #(first (:lhs %)) ordered)]
-              (let [[ns f] ((:source ctx) (e/o x :file))] (b/op "FuncSource" inits ns f)))
-            (b/op "SetCode" inits (b/build-inits ordered) nil)
+            ;; the initializers' frames name their files (§10.6; GOI-SPEC.md, "Since v1: frames"):
+            ;; the first's the cell's, each other file's a cell of its own with the same code, the
+            ;; frame's function while its initializers run (an executable without FrameFn: the
+            ;; first's for all)
+            (let [file-of #(some-> (first (:lhs %)) (e/o :file))
+                  files (distinct (keep file-of ordered))
+                  cells (into {} (map-indexed (fn [i f] [f (if (zero? i) inits (b/op "FuncCell" "init.vars" (:name old) nil))])
+                                              (if (b/frame-fn?) files (take 1 files))))]
+              (doseq [[f cell] cells]
+                (let [[ns sf] ((:source ctx) f)] (b/op "FuncSource" cell ns sf)))
+              (let [code (b/build-inits ordered (when (> (count cells) 1) (fn [tr] (get cells (file-of tr)))))]
+                (doseq [cell (vals cells) :when (not (identical? cell inits))]
+                  (b/op "SetCode" cell code nil))
+                (b/op "SetCode" inits code nil)))
             ;; the namespace's vars (§2.1)
             (when vars?
               (let [ns (create-ns (:ns old))]
@@ -815,6 +829,15 @@
             (when-not (:loading @st) st))))))
 
 ;;; Declaring at the REPL (§2.5)
+
+(defn directive!
+  "A go/directive form between declarations (the macro's): kept among its file's declarations in a
+  load (the checker skips it; the builder reads its file's //line directives), else nothing."
+  [form ns-sym]
+  (when-let [st (when (str/starts-with? (str ns-sym) "go.") (package-state ns-sym false))]
+    (when (:loading @st)
+      (update-file st (:current @st) #(update % :decls conj form))))
+  nil)
 
 (defn declare!
   "A declaration macro's form (go/func, go/var ...): queued in a load, else checked against the

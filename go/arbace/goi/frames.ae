@@ -117,8 +117,9 @@ directives applied).\n"
 (go/func CodeWrapper
   "CodeWrapper makes code c (a *Code) a wrapper's, a method set entry's thunk (gc's wrappers, which
 its traces never show): its frame, entered, records the depth of the first frame below its run of
-wrappers (wskip), cleared when it returns, so that a stack walk skips a chain of wrappers at once
-(a method promoted through 10,000 embedded interfaces: gc's tail calls, issue 75764).\n"
+wrappers (wskip), cleared when it returns (and by enter, for the frame a panic left at its depth),
+so that a stack walk skips a chain of wrappers at once (a method promoted through 10,000 embedded
+interfaces: gc's tail calls, issue 75764).\n"
   [^any c]
   (let [(values code ok) (assert (* Code) c)]
     (when (or (not ok) (== code nil))
@@ -148,6 +149,15 @@ gc's line of a panic there).\n"
   (fn ^any [^{:tag (* Frame)} fr]
     (set! (.-Line fr) l)
     (x fr)))
+
+(go/func FrameFn
+  "FrameFn is a statement that makes cell f its frame's function (the package's initializers, one
+function in gc's, each initializer's frame naming its own file: a cell per file with the
+initializers' code, FuncSource giving each its file).\n"
+  ^Stmt [^{:tag (* Func)} f]
+  (fn ^Ctl [^{:tag (* Frame)} fr]
+    (set! (.-Fn fr) f)
+    0))
 
 ;; gc's runtime functions goi shows (go1.27.1's lines; the files under this executable's runtime)
 (go/var ^{:tag (* pcFunc)} rtGopanic)
@@ -197,7 +207,8 @@ file of runtime.GC's code), else runtime.\n"
     (set! rtGoexit (rt "runtime.goexit" asm 1264 false))
     (set! rtCallers (rt "runtime.Callers" "extern.go" 341 true))
     (set! rtDebugStack (rt "runtime/debug.Stack" "debug/stack.go" 26 false))
-    (.Unlock pcMu)))
+    (.Unlock pcMu))
+  (checkFramesLayout))
 
 (go/const
   [^{:tag int32 :doc "bottomInit: the program's goroutine running the packages' initialization.\n"} bottomInit 1]
@@ -365,14 +376,32 @@ function's last line), else gc's.\n"
         (return (.pos f l))
         (return (.pos f (.-entry f)))))))
 
-(go/type pcFrames "pcFrames is the state of a runtime.Frames over goi's program counters.\n"
-  (struct ^{:tag (slice uintptr)} pcs ^int i))
+(go/type framesLayout
+  "framesLayout is runtime.Frames' first two fields (go1.27.1's runtime/symtab.go: callers, the
+program counters not yet expanded, and nextPC, an inlined frame's to expand first; checked by init):
+a runtime.Frames over goi's program counters holds them in callers, nextPC pcBase marking it (gc's
+Next sets nextPC only to an address of gc's code), so its state is the Frames' own: nothing is kept
+for it beside it.\n"
+  (struct ^{:tag (slice uintptr)} callers ^uintptr nextPC))
 
-(go/var ^{:tag sync/Map :doc "framesOf are the runtime.Frames RTCallersFrames made (their addresses) to their states.\n"} framesOf)
+(go/func layoutOf "layoutOf is runtime.Frames ci's first fields (framesLayout).\n"
+  ^{:tag (* framesLayout)} [^{:tag (* runtime/Frames)} ci]
+  (conv (* framesLayout) (conv unsafe/Pointer ci)))
+
+(go/func checkFramesLayout
+  "checkFramesLayout panics when runtime.Frames' first fields are not framesLayout's (another Go's
+runtime): a Frames gc's CallersFrames made holds the slice it was given in callers, nextPC 0.\n"
+  []
+  (let [buf (make (slice uintptr) 4)
+        n (runtime/Callers 0 buf)
+        l (layoutOf (runtime/CallersFrames (subslice buf _ n)))]
+    (when (or (== n 0) (!= (len (.-callers l)) n) (!= (addr (aget (.-callers l) 0)) (addr (aget buf 0))) (!= (.-nextPC l) 0))
+      (panic "goi: runtime.Frames' first fields are not go1.27.1's (go/arbace/goi/frames.ae, framesLayout)"))))
 
 (go/func RTCallersFrames
   "RTCallersFrames is runtime.CallersFrames: gc's for gc's program counters alone, else a
-runtime.Frames whose Next is goi's (RTFramesNext).\n"
+runtime.Frames whose Next is goi's (RTFramesNext), its counters in its own callers, marked by its
+nextPC (framesLayout).\n"
   ^{:tag (* runtime/Frames)} [^{:tag (slice uintptr)} callers]
   (let [mine false]
     (range [_ pc callers]
@@ -380,34 +409,32 @@ runtime.Frames whose Next is goi's (RTFramesNext).\n"
         (set! mine true)))
     (when (not mine)
       (return (runtime/CallersFrames callers)))
-    (let [ci (new runtime/Frames)]
-      (.Store framesOf (conv unsafe/Pointer ci) (addr (lit pcFrames :pcs callers)))
+    (let [ci (new runtime/Frames)
+          l (layoutOf ci)]
+      (set! (.-callers l) callers)
+      (set! (.-nextPC l) pcBase)
       ci)))
 
 (go/func RTFramesNext
   "RTFramesNext is (*runtime.Frames).Next over goi's program counters (a gc one's frame by gc's).\n"
   [^{:tag (* runtime/Frames)} ci] :results [^{:tag runtime/Frame} frame ^bool more]
-  (let [(values x ok) (.Load framesOf (conv unsafe/Pointer ci))]
-    (when (not ok)
+  (let [l (layoutOf ci)]
+    (when (!= (.-nextPC l) pcBase)
       (return (.Next ci)))
-    (let [st (assert (* pcFrames) x)]
-      (when (>= (.-i st) (len (.-pcs st)))
-        (.Delete framesOf (conv unsafe/Pointer ci))
-        (return))
-      (let [pc (aget (.-pcs st) (.-i st))]
-        (inc! (.-i st))
-        (set! more (< (.-i st) (len (.-pcs st))))
-        (when (not more)
-          (.Delete framesOf (conv unsafe/Pointer ci)))
-        (if (< pc pcBase)
-          (let [(values fr _) (.Next (runtime/CallersFrames (lit (slice uintptr) pc)))]
-            (set! frame fr))
-          (let [(values f line) (decodePC pc)]
-            (when (!= f nil)
-              (let [(values file l) (.pos f line)]
-                (set! frame (lit runtime/Frame :PC (- pc 1) :Func (rtFunc f) :Function (.-name f) :File file
-                                 :Line l :Entry (entryOf f)))))))
-        (return)))))
+    (when (== (len (.-callers l)) 0)
+      (return))
+    (let [pc (aget (.-callers l) 0)]
+      (set! (.-callers l) (subslice (.-callers l) 1))
+      (set! more (> (len (.-callers l)) 0))
+      (if (< pc pcBase)
+        (let [(values fr _) (.Next (runtime/CallersFrames (lit (slice uintptr) pc)))]
+          (set! frame fr))
+        (let [(values f line) (decodePC pc)]
+          (when (!= f nil)
+            (let [(values file ln) (.pos f line)]
+              (set! frame (lit runtime/Frame :PC (- pc 1) :Func (rtFunc f) :Function (.-name f) :File file
+                               :Line ln :Entry (entryOf f)))))))
+      (return))))
 
 (go/func traceText
   "traceText is the thread's goroutine trace as gc's traceback prints it (runtime.Stack, an

@@ -4765,21 +4765,31 @@ deferred calls `unwind` runs, at the depths above). So the stack runtime's API a
 frames from its depth down, read on demand; nothing is recorded per call beyond what was. What is new:
 
 - each function's code knows its frames' data (`Code`'s `GoName`, `Dir`, `Line0`, `End`, `Args`; the
-  builder's op `CodeFrame`): gc's name (`pkg.f`, `pkg.T.M`, `pkg.(*T).M`, a literal's `pkg.f.funcN`
+  builder's op `CodeFrame`): gc's name (`pkg.f`, `pkg.T.M`, `pkg.(*T).M`, a generic type's
+  `pkg.T[...].M` and `pkg.(*T[...]).M`, a generic function's `pkg.F[...]`, a literal's `pkg.f.funcN`
   and `pkg.f.funcN.M` numbered per enclosing function as gc does, the initializers' `pkg.init`, the
   init functions' `pkg.init.N`; `main` for the main package, else the package's path), its source
   directory (the package file's: the forms' corpus mirrors the Go tree, so the file is gc's shape,
   `DIR/issue7690.go`), its first line and its last as gc's line table has it (the closing brace's,
   `:go/end`, where a function that ends without a return returns; its last return's line when it ends
-  with one), and its body's `//line` directives (`CodeLineDirs`: gc's `updateBase`, a frame's line
-  shown as the directive's file and line; `//line :N` names `??`);
+  with one), and the `//line` directives that apply to it (`CodeLineDirs`: gc's `updateBase`, a
+  frame's line shown as the directive's file and line; `//line :N` names `??`): every directive of
+  its Go file before its end, as gc applies one to the rest of its file (between declarations, in
+  its own body and in earlier functions' bodies; the build context's `:line-dirs`, read from the
+  package's files when a code is first built; `go/directive` between declarations is kept among its
+  file's declarations in a load, and a program run's package state holds its files);
 - a `let`'s declarations after its first, each on a line of its own (Go's separate statements), store
   their lines as statements do (they did not: `n := runtime.Stack(...)` showed the `let`'s first line);
-  the package's initializers store theirs, and their frame (`pkg.init`) names their file;
+  the package's initializers store theirs, and their frame (`pkg.init`) names each initializer's
+  own file (a function cell per file with the initializers' one code, `FuncSource` giving each its
+  file, made the frame's function by the statement `FrameFn` before the first initializer of
+  another file runs);
 - a function that defers and ends without a return stores its closing brace's line before its deferred
   calls run (gc's line of that frame), in `runDeferring` alone;
 - a select case's channel, on a line of its own, is evaluated at that line (`AtLineR`; gc's line of a
-  panic there);
+  panic there); with two cases or more that communicate the select's line is stored again after
+  they are evaluated (gc's `selectgo` runs at the select statement's line, `walk/select.go`; one
+  case, with or without a default, is its case's single operation, at the case's line);
 - a compiled function called through a func value takes a frame without a function (`callValue`), which
   traces skip;
 - each thread knows its goroutine's number, what gc's runtime has under its first function (the
@@ -4791,7 +4801,8 @@ a function and a line (a frame entered for a call whose arguments are being eval
 yet; a method set entry's thunk, gc's wrapper, which gc's traces never show, has no lines either), as
 many as asked (`runtime.Callers` into a buffer of 10 walks 10 frames, `Caller(skip)` skip + 1), a run of
 wrappers' frames skipped at once (`CodeWrapper`: a wrapper's frame records, in its prologue, the depth
-below its run, cleared by its epilogue; so `Callers` through 10,000 promoted methods costs what it does
+below its run, cleared by its epilogue, and by `enter` for every frame it takes, as a panic skips
+the epilogue of a wrapper it leaves; so `Callers` through 10,000 promoted methods costs what it does
 through 1,000, as gc's tail-call wrappers, `fixedbugs/issue75764`, which the first build of this design
 failed); after a frame that is a deferred call running in a panic (its `rec` holds the panic), gc's
 runtime frames of the panic, `runtime.gopanic` and the run-time error's own (`panicmem` and `sigpanic` of
@@ -4811,7 +4822,7 @@ address: `pc-1`, the idiom of `FuncForPC(pc-1)`, is the same line), a function's
 | `runtime.Callers(skip, pcs)` | `runtime.Callers`' own frame, then the stack, from `skip` |
 | `runtime.FuncForPC(pc)` | goi's: the `pcFunc` as a `*runtime.Func` (nil past the function's lines, so `pc++` walks end); gc's: gc's |
 | `(*runtime.Func).Name`, `Entry`, `FileLine` | a `pcFunc`'s (recognized by its address), else gc's |
-| `runtime.CallersFrames`, `(*runtime.Frames).Next` | over goi's counters a `runtime.Frames` whose state goi keeps (by its address), each `Frame` with `Func`, `Function`, `File`, `Line`, `Entry`; gc's counters by gc's |
+| `runtime.CallersFrames`, `(*runtime.Frames).Next` | over goi's counters a `runtime.Frames` that holds its own state: the counters in its `callers`, its `nextPC` `pcBase` to mark it (gc's `Next` sets `nextPC` only to an address of gc's code), through `framesLayout`, the struct's first two fields as go1.27.1's `runtime/symtab.go` has them (checked when the package initializes: a panic on another runtime's layout), so nothing is kept for it beside it; each `Frame` with `Func`, `Function`, `File`, `Line`, `Entry`; gc's counters by gc's |
 | `runtime.Stack(buf, all)`, `runtime/debug.Stack`, `PrintStack` | the goroutine's trace in gc's format (below; `all`: the current goroutine only) |
 | `reflect.Value.Pointer` | an interpreted function's (a closure made a Go func, §4.6 S29) entry as goi's counter, else reflect's |
 
@@ -4825,27 +4836,32 @@ with its own frame, `runtime/debug.Stack()`, as gc's.
 **What it does not do.** Frames of compiled code between interpreted ones (a `sort.Slice` calling an
 interpreted less) are not shown: goi knows only its own. Positions within a line (`/*line` directives,
 gc's operator line of an expression spread over lines: `v.\n A()`) are not kept by the forms (SPEC.md
-§10.1). `//line` directives are applied to frames only within a function's body (a directive between
-declarations is not in any function's forms). Program
+§10.1). The initializers' own lines are not mapped by `//line` directives (one code over every
+file's initializers; the literals in them are). Program
 counters of gc's code taken by unsafe means (a func value's code word read through pointers, mprotect
 over the text) are gc's.
 
 **Executables built before it.** The builder asks once whether the back end has `CodeFrame` (an
 executable of before this branch has not) and then gives no frame data and no `AtLineR`, `CodeLineDirs`
 or `CodeWrapper`: the checkout's builder runs on an older executable as before; goi's frames need an
-executable built from this branch (go/arbace/goi is compiled into it, in `gate_key`).
+executable built from this branch (go/arbace/goi is compiled into it, in `gate_key`). It asks
+apart whether the back end has `FrameFn` (an executable of `goi-frames` before the review's fixes has
+not): without it the initializers' frames name the first initializer's file, as before.
 `reflect.Value.Pointer` of two different interpreted functions now differs (it was the shared code of
 their adapters, §4.6).
 
-**The cost.** None on a call: `enter` stores the function and line 0 as before, statements store their
-lines as before; what is added runs only when a function that defers ends without a return (one
+**The cost.** One store on a call: `enter` stores the function and line 0 as before and clears the
+frame's `wskip` (the review's fixes, below), statements store their lines as before; what is added runs only when a function that defers ends without a return (one
 store), when a compiled function is called through a func value (one store), when a `let`'s later
 declaration can call or panic (one store), in a wrapper's prologue and epilogue (a load and two
 stores), and when the program asks (`funcOf` builds a function's
 `pcFunc` once per code, under a lock). Measured on `fib 27` (635,621 interpreted calls) and `dfib 22`
 (57,313 calls that defer), best of five, three alternations against an executable of `next` before the
 change: 27.7-28.3 ms against 27.7-29.0 ms (about 44 ns a call either way), 13.8-14.0 ms against
-13.5-15.2 ms (about 240 ns): within the noise.
+13.5-15.2 ms (about 240 ns): within the noise. With `enter`'s store of `wskip` (the review's fixes,
+measured the same way against the executable of `goi-frames` before them, on a loaded host): `fib 27`
+27.7-29.4 ms against 27.7-28.7 ms (still about 44 ns a call), `dfib 22` 13.8-14.0 ms against 13.5-13.6
+ms (about 240 ns): within the noise.
 
 **Results** (`bin/goi check --list` over the class's 24 programs, against gc's recorded runs): 21 pass,
 `inline_literal`, `inline_caller`, `inline_callers`, `fixedbugs/bug347`, `bug348`, `issue11656`,
@@ -4861,6 +4877,37 @@ the 21 are `:pass`, the three's reasons rewritten, every other line kept: **1,64
 pass (beyond the reference's 1,664: `abi/fibish`, `abi/fibish_closure`, `divmod` and `gc2`, known for
 speed and memory, passed on a quiet host, and `typeparam/dictionaryCapture-noinline`, a program this
 checkout's corpus lists that the reference does not; their lines left as they were).
+
+**The review's fixes** (2026-11-04, branch `goi-frames2`, from `next`). A review of the branch found six
+differences from gc; each is proved by a probe written in Go (`.tmp/goi-frames2-scratch/mod/`), read
+into forms by `bin/repr-go read` (so the forms' lines are the Go file's) and run by goi and by gc
+(TamaGo's `go run`), the outputs equal after the fixes and different before:
+
+1. A leak in `CallersFrames`: a `Frames` whose last frame was never read (`runtime.CallersFrames(pcs).Next()`
+   once, a loop left early) stayed in goi's map, keyed by the `Frames`' address, which kept it alive
+   (200,000 calls kept 85 MB). A first fix keyed the map by a `uintptr` with a cleanup
+   (`runtime.AddCleanup`) deleting the entry; it ended the leak but not the retention after a GC (the
+   states live until the cleanups run, a cycle later), so the state is now the `Frames`' own
+   (`framesLayout`, above): nothing beside it. The probe's 200,000 calls with an early break retain
+   20 KiB (before: 86,896 KiB), as gc.
+2. A stale `wskip` after a recovered panic: a wrapper's epilogue clears it, a panic skips the epilogue,
+   and a later wrapper's frame at the same depth, still evaluating its arguments, skipped real frames
+   (`runtime.Caller(1)` gave `main.g` for `main.h`); `enter` clears it (one store, measured above).
+3. A select's panic line: with two cases or more that communicate, gc's `selectgo` runs at the select's
+   line; goi left the last case's. The probe's four selects (two cases; one with a default; one alone;
+   three with a default) give gc's lines.
+4. The initializers' frames named the first initializer's file for all; each names its own (`FrameFn`).
+5. `//line` directives applied only to their own function's body; they apply to the rest of their file,
+   later functions, literals and the initializers' literals included (a directive between declarations
+   too: `go/directive` now keeps it among its file's declarations in a load, and a program run's
+   package state holds its files).
+6. Methods of generic types are named `pkg.(*T[...]).M` and `pkg.T[...].M` (with their literals'
+   `.funcN`), as gc.
+
+The review's own probes (`go.p.*`) give the same on the executable built from this branch. Checks on it:
+`bin/goi test` passes, `bin/goi check --essential` 801 of 801, the class's programs (`--list`, 25 with
+`fixedbugs/issue75764`) 22 pass and 3 known as before, and the check's programs matching
+`select|line|init|chan|recover|defer|stack|caller` (77) no regression.
 
 ## Decided (2026-10-24): GC157 (b), GS14 (a) and GC161 (b)
 

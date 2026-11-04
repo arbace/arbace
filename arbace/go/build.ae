@@ -42,6 +42,15 @@
   frames\"); an executable built before it does not."
   (delay (try (op "CodeFrame" nil "" "" 0 0 false) true (catch Throwable _ false))))
 
+(def ^:private frame-fn*
+  (delay (try (op "FrameFn" nil) true (catch Throwable _ false))))
+
+(defn frame-fn?
+  "Whether goi's back end has FrameFn (the initializers' frames naming each its own file: GOI-SPEC.md,
+  \"Since v1: frames\"); an executable built before it has not."
+  []
+  @frame-fn*)
+
 (defn unsupported!
   "Ends the build of a form goi does not support yet (§3.4): what, the milestone that brings it."
   [what gr]
@@ -2528,12 +2537,13 @@ GR9a)."
 
 (defn- gc-func-name
   "gc's name of the function of tree (built as fname): a literal's or an initialization's given
-  (:gc-name), a method's pkg.T.M or pkg.(*T).M, else pkg.fname."
+  (:gc-name), a method's pkg.T.M or pkg.(*T).M (a generic type's pkg.T[...].M, pkg.(*T[...]).M),
+  else pkg.fname."
   [tree fname]
   (or (:gc-name tree)
       (let [o (:obj tree)]
         (if (and o (e/o o :method) (e/o o :recv-named))
-          (let [base (:name (t/info (e/o o :recv-named)))]
+          (let [base (str (:name (t/info (e/o o :recv-named))) (if (seq (e/o o :rtparams)) "[...]" ""))]
             (str (gc-prefix) "." (if (e/o o :ptr-recv) (str "(*" base ")") base) "." (e/o o :name)))
           (str (gc-prefix) "." fname)))))
 
@@ -2558,21 +2568,44 @@ GR9a)."
       (:line last-stmt)
       end)))
 
+(defn file-line-dirs
+  "The //line directives of a Go file's declaration forms decls, between the declarations and in
+  the functions' bodies, in order: [{:line :text}] (gc applies one to the rest of its file)."
+  [decls]
+  (let [out (java.util.ArrayList.)
+        walk (fn walk [f]
+               (cond
+                 (and (seq? f) (= "go/directive" (code/head-name f)))
+                 (let [t (second f) l (code/fline f)]
+                   (when (and (string? t) (str/starts-with? t "//line ") l)
+                     (.add out {:line (long l) :text t})))
+                 (or (seq? f) (vector? f)) (doseq [x f] (walk x))
+                 (map? f) (doseq [x (vals f)] (walk x))
+                 :else nil))]
+    (doseq [d decls] (walk d))
+    (vec (sort-by :line (vec out)))))
+
 (defn- line-dirs!
-  "Gives code the //line directives of function tree's body (gc's updateBase: a comment //line
-  FILE:LINE or FILE:LINE:COL makes the next line LINE of FILE; an empty FILE is ?? without COL,
-  the file before with it), for its frames (GOI-SPEC.md, \"Since v1: frames\")."
-  [code tree src-file]
+  "Gives code the //line directives that apply to function tree (gc's updateBase: a comment //line
+  FILE:LINE or FILE:LINE:COL makes the next line LINE of FILE, to the next directive or the file's
+  end; an empty FILE is ?? without COL, the file before with it), for its frames (GOI-SPEC.md,
+  \"Since v1: frames\"): its Go file's (go-file; the context's :line-dirs, every directive before
+  the function's end, between declarations and in other functions' bodies too), else its body's."
+  [code tree src-file go-file]
   (when @code-frames?
     (let [walk (fn walk [n]
                  (cond
                    (vector? n) (mapcat walk n)
                    (map? n) (if (= :directive (:op n)) [n] (mapcat #(walk (get n %)) [:stmts :body :then :else :clauses :stmt]))
                    :else nil))
-          ds (->> (walk (:body tree))
-                  (filter #(and (string? (:text %))
-                                (str/starts-with? (:text %) "//line ") (:line %)))
-                  (sort-by :line))]
+          end (code-end tree)
+          file-ds (when-let [lds (:line-dirs *ctx*)] (get @lds go-file))
+          ds (if file-ds
+               (cond->> file-ds end (filter #(< (long (:line %)) (long end))))
+               (->> (walk (:body tree))
+                    (filter #(and (string? (:text %))
+                                  (str/starts-with? (:text %) "//line ") (:line %)))
+                    (sort-by :line)))]
       (when (seq ds)
         (let [rows (loop [ds ds prev src-file acc []]
                      (if-let [d (first ds)]
@@ -2600,9 +2633,10 @@ GR9a)."
         rty (or (:recv-type tree) (when (and (:obj tree) (e/o (:obj tree) :method)) (recv-type-of (:obj tree))))
         {:keys [params results counts recv]} (slot-layout sig rty)
         src (or (when-let [o (:obj tree)] (when-let [sf (:source *ctx*)] (sf (e/o o :file)))) (:src *fn*))
+        go-file (or (some-> (:obj tree) (e/o :file)) (:go-file *fn*))
         f {:slots (volatile! (assoc counts :C 0)) :locs (IdentityHashMap.) :code (volatile! 2)
            :defer (volatile! false) :targets [] :labels (HashMap.) :calls (IdentityHashMap.) :name fname
-           :src src :has-defer (has-defer? (:body tree)) :gc-name gc-name :gc-lits (volatile! 0) :gc-lit (boolean (:gc-lit tree))}]
+           :src src :go-file go-file :has-defer (has-defer? (:body tree)) :gc-name gc-name :gc-lits (volatile! 0) :gc-lit (boolean (:gc-lit tree))}]
     (binding [*fn* f]
       ;; the captured cells, the first C slots
       (doseq [x captures]
@@ -2644,7 +2678,7 @@ GR9a)."
                                            (or @(:defer *fn*) (has-defer? (:body tree))) (oa @epi))
                                        gc-name (:line tree) (code-end tree)
                                        (or (seq (:params tree)) (:recv tree)))
-                          tree (second src)))))))))
+                          tree (second src) go-file))))))))
 
 (defn build-fn-lit
   "A function literal's closure node (its code built now)."
@@ -2670,8 +2704,11 @@ GR9a)."
 
 (defn build-inits
   "The code of a package's initialization: its variables' initializers in initialization order
-  (trees {:op :var-init :lhs :rhs}), as a function of no parameters."
-  [inits]
+  (trees {:op :var-init :lhs :rhs}), as a function of no parameters. cell-of, when given: an
+  initializer's function cell (its file's), made its frame's function before it runs when it is
+  not the one before's (FrameFn: gc's package init function, one function whose lines are in each
+  initializer's file)."
+  [inits cell-of]
   (let [f {:slots (volatile! {:I 0 :F 0 :S 0 :R 0 :C 0}) :locs (IdentityHashMap.) :code (volatile! 2)
            :defer (volatile! false) :targets [] :labels (HashMap.) :calls (IdentityHashMap.) :name "init"
            :gc-name (str (gc-prefix) ".init") :gc-lits (volatile! 0)}]
@@ -2679,9 +2716,22 @@ GR9a)."
       (let [ss (vec (for [tr inits]
                       (let [lhs (:lhs tr)
                             places (mapv (fn [x] (if (= "_" (e/o x :name)) :blank {:op :place-global :obj x :type (e/o x :type)})) lhs)]
-                        (assign-stmt {:lhs places :rhs (:rhs tr)}))))
+                        ;; its Go file: its literals' //line directives (line-dirs!)
+                        (binding [*fn* (assoc *fn* :go-file (some-> (first lhs) (e/o :file)))]
+                          (assign-stmt {:lhs places :rhs (:rhs tr)})))))
             ;; each initializer's line, its frame's (gc's package init function's lines)
             lines (mapv #(long (or (:line %) (some-> (first (:lhs %)) (e/o :line)) 0)) inits)
+            ;; each file's cell before its initializers (cell-of)
+            [ss lines] (if cell-of
+                         (loop [ts inits ss ss ls lines cur ::none acc-s [] acc-l []]
+                           (if (empty? ts)
+                             [acc-s acc-l]
+                             (let [c (cell-of (first ts))
+                                   sw? (and c (not (identical? c cur)))]
+                               (recur (rest ts) (rest ss) (rest ls) (if sw? c cur)
+                                      (cond-> (if sw? (conj acc-s (op "FrameFn" c)) acc-s) true (conj (first ss)))
+                                      (cond-> (if sw? (conj acc-l 0) acc-l) true (conj (first ls)))))))
+                         [ss lines])
             body (op "SeqL" (oa ss) (oa []) (oa (if (some pos? lines) lines [])))
             {:keys [I F S R C]} @(:slots *fn*)
             ls (filter pos? lines)]
