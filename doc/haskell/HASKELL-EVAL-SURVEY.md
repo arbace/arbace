@@ -1589,3 +1589,7 @@ four negative controls failing as they must.
   RTS OS-thread calls); (b) `pthread_create` in hsi as a Haskell-side green thread running the C function on ci's
   thread state (ci has one C stack, `Thread` per call chain: a second stack and the scheduler's switch between them, the C
   crop's work). *Recommended: (a)*, (b) when ci's REPL needs threads.
+
+## Decided (2026-11-05, the user: HES65-HES68)
+
+HES65: the stub writer a separate step now (a), folded into the helper at the next helper change that re-keys the dumps (b); HES66 (a): record-ref compiles the Haskell before the C; HES67 (a): Cmm a class until HE8; HES68 (a): C threads a class until ci has threads.
