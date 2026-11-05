@@ -1,0 +1,217 @@
+;; Sockets (doc/ocaml/DEFERRED-TRIAGE.md, §3 fix 6, "As built: OT9's fixes 6-8"), the AOT runtime's mirror of oi's ext_unix_sock.go
+;; over java.net: a socket of Fd's table (Fd's sock) is TCP over IPv4 or IPv6 (PF_INET, PF_INET6 and SOCK_STREAM; Unix sockets
+;; and the datagrams' traffic are oi's alone: EPROTONOSUPPORT, a datagram socket made but carrying nothing). Java's socket is made by its use: bind records the address, listen makes the
+;; ServerSocket, connect the Socket, accept the accepted one. The calls that may block (accept, connect, read, write) run outside
+;; the Gil; select tests a socket's readiness by the bytes available (a listening socket's by a pending connection it accepts
+;; ahead), a pipe's by its count, a file's always.
+
+(in-ns 'ocaml.rt)
+
+(import '(java.io InputStream OutputStream IOException)
+        '(java.net InetAddress InetSocketAddress ServerSocket Socket SocketTimeoutException))
+
+(defclass ^:public ^:final Sock
+  (field ^:public ^long domain)
+  ;; socket_type: 0 SOCK_STREAM, 1 SOCK_DGRAM (a datagram socket is made, for channels' checks, but carries nothing)
+  (field ^:public ^long typ)
+  (field ^:public ^InetSocketAddress bound)
+  (field ^:public ^ServerSocket server)
+  (field ^:public ^Socket conn)
+  (field ^:public ^InputStream in)
+  (field ^:public ^OutputStream out)
+  ;; a connection select accepted ahead of accept
+  (field ^:public ^Socket ahead)
+
+  (method ^:public ^:static ofFd ^Sock [^long fd ^String fn]
+    (let [d (Fd/get fd)]
+      (when (nil? d) (throw (ExtUnix/error 9 fn "")))
+      (when (nil? (.-sock d)) (throw (ExtUnix/error 88 fn "")))
+      (.-sock d)))
+
+  (method ^:static errno ^int [^Throwable t]
+    (let [^String m (if (nil? (.getMessage t)) "" (.getMessage t))]
+      (cond (.contains m "refused") 111
+            (.contains m "in use") 98
+            (.contains m "reset") 104
+            (.contains m "closed") 9
+            :else 5)))
+
+  (method ^:public ^:static install ^long [^Sock s]
+    (let [d (Fd.)]
+      (set! (.-sock d) s)
+      (set! (.-readable d) true)
+      (set! (.-writable d) true)
+      (Fd/install d)))
+
+  (method ^:static addrOf ^InetSocketAddress [sa ^String fn]
+    (let [b (cast Block sa)]
+      (when (== (.-tag b) 0) (throw (ExtUnix/error 97 fn "")))
+      (InetSocketAddress. (InetAddress/getByAddress (cast byte/1 (aget (.-f b) 0))) (Rt/ii (aget (.-f b) 1)))))
+
+  (method ^:static valueOf [^InetSocketAddress a]
+    (Block. 1 (new Object/1 [(.getAddress (.getAddress a)) (Long/valueOf (long (.getPort a)))])))
+
+  (method ^:public ^:static caml_unix_socket [cloexec dom typ proto]
+    (let [dm (Rt/l dom)]
+      (when (or (== dm 0) (> (Rt/l typ) 1)) (throw (ExtUnix/error 93 "socket" "")))
+      (let [s (Sock.)]
+        (set! (.-domain s) dm)
+        (set! (.-typ s) (Rt/l typ))
+        (Long/valueOf (Sock/install s)))))
+
+  (method ^:public ^:static caml_unix_bind [fd sa]
+    (let [s (Sock/ofFd (Rt/l fd) "bind")]
+      (set! (.-bound s) (Sock/addrOf sa "bind"))
+      Rt/UNIT))
+
+  (method ^:public ^:static caml_unix_listen [fd n]
+    (let [s (Sock/ofFd (Rt/l fd) "listen")]
+      (try
+        (let [ss (ServerSocket.)]
+          (.setReuseAddress ss true)
+          (.bind ss (or (.-bound s) (InetSocketAddress. 0)) (Rt/ii n))
+          (set! (.-server s) ss))
+        (catch IOException e (throw (ExtUnix/error (Sock/errno e) "listen" ""))))
+      Rt/UNIT))
+
+  (method ^:static attach ^void [^Sock s ^Socket c]
+    (set! (.-conn s) c)
+    (set! (.-in s) (.getInputStream c))
+    (set! (.-out s) (.getOutputStream c)))
+
+  (method ^:public ^:static caml_unix_accept [cloexec fd]
+    (let [s (Sock/ofFd (Rt/l fd) "accept")]
+      (when (nil? (.-server s)) (throw (ExtUnix/error 22 "accept" "")))
+      (let [c (if (some? (.-ahead s))
+                (let [a (.-ahead s)] (set! (.-ahead s) nil) a)
+                (do (Gil/unlock)
+                    (try (.accept (.-server s))
+                         (catch IOException e (Gil/lock) (throw (ExtUnix/error (Sock/errno e) "accept" "")))
+                         (finally (Gil/lock)))))
+            n (Sock.)]
+        (set! (.-domain n) (.-domain s))
+        (Sock/attach n c)
+        (Rt/tuple (new Object/1 [(Long/valueOf (Sock/install n)) (Sock/valueOf (cast InetSocketAddress (.getRemoteSocketAddress c)))])))))
+
+  (method ^:public ^:static caml_unix_connect [fd sa]
+    (let [s (Sock/ofFd (Rt/l fd) "connect")
+          a (Sock/addrOf sa "connect")
+          c (Socket.)]
+      (Gil/unlock)
+      (try (.connect c a)
+           (catch IOException e (Gil/lock) (throw (ExtUnix/error (Sock/errno e) "connect" "")))
+           (finally (Gil/lock)))
+      (Sock/attach s c)
+      Rt/UNIT))
+
+  (method ^:public ^:static caml_unix_shutdown [fd cmd]
+    (let [s (Sock/ofFd (Rt/l fd) "shutdown")
+          c (Rt/l cmd)]
+      (when (nil? (.-conn s)) (throw (ExtUnix/error 107 "shutdown" "")))
+      (try
+        (when (not (== c 1)) (.shutdownInput (.-conn s)))
+        (when (not (== c 0)) (.shutdownOutput (.-conn s)))
+        (catch IOException e (throw (ExtUnix/error (Sock/errno e) "shutdown" ""))))
+      Rt/UNIT))
+
+  (method ^:public ^:static caml_unix_getsockname [fd]
+    (let [s (Sock/ofFd (Rt/l fd) "getsockname")]
+      (cond (some? (.-server s)) (Sock/valueOf (cast InetSocketAddress (.getLocalSocketAddress (.-server s))))
+            (some? (.-conn s)) (Sock/valueOf (cast InetSocketAddress (.getLocalSocketAddress (.-conn s))))
+            (some? (.-bound s)) (Sock/valueOf (.-bound s))
+            :else (Sock/valueOf (InetSocketAddress. (InetAddress/getByAddress (new byte/1 4)) 0)))))
+
+  (method ^:public ^:static caml_unix_getpeername [fd]
+    (let [s (Sock/ofFd (Rt/l fd) "getpeername")]
+      (when (nil? (.-conn s)) (throw (ExtUnix/error 107 "getpeername" "")))
+      (Sock/valueOf (cast InetSocketAddress (.getRemoteSocketAddress (.-conn s))))))
+
+  ;; read(2) of a socket: the count (0 at the end) or -errno, outside the Gil
+  (method ^:public ^:static read ^long [^Sock s ^byte/1 buf ^int off ^int len]
+    (if (nil? (.-in s))
+      (long -107)
+      (do (Gil/unlock)
+          (try (let [n (.read (.-in s) buf off len)] (if (< n 0) (long 0) (long n)))
+               (catch IOException e (long (unchecked-negate (Sock/errno e))))
+               (finally (Gil/lock))))))
+
+  (method ^:public ^:static write ^long [^Sock s ^byte/1 buf ^int off ^int len]
+    (if (nil? (.-out s))
+      (long -107)
+      (do (Gil/unlock)
+          (try (.write (.-out s) buf off len) (.flush (.-out s)) (long len)
+               (catch IOException e (long (unchecked-negate (Sock/errno e))))
+               (finally (Gil/lock))))))
+
+  (method ^:public ^:static close ^void [^Sock s]
+    (try
+      (when (some? (.-conn s)) (.close (.-conn s)))
+      (when (some? (.-server s)) (.close (.-server s)))
+      (catch IOException e nil)))
+
+  (method ^:public ^:static caml_unix_recv [fd buf ofs len flags]
+    (let [s (Sock/ofFd (Rt/l fd) "recv")
+          n (Sock/read s (cast byte/1 buf) (Rt/ii ofs) (unchecked-int (min (Rt/ii len) 65536)))]
+      (when (< n 0) (throw (ExtUnix/error (unchecked-int (unchecked-negate n)) "recv" "")))
+      (Long/valueOf n)))
+
+  (method ^:public ^:static caml_unix_send [fd buf ofs len flags]
+    (let [s (Sock/ofFd (Rt/l fd) "send")
+          n (Sock/write s (cast byte/1 buf) (Rt/ii ofs) (unchecked-int (min (Rt/ii len) 65536)))]
+      (when (< n 0) (throw (ExtUnix/error (unchecked-int (unchecked-negate n)) "send" "")))
+      (Long/valueOf n)))
+
+  ;; socket options are accepted and kept by no one (SO_REUSEADDR is the server's anyway); get answers false or 0
+  (method ^:public ^:static caml_unix_setsockopt [kind fd opt v] (Sock/ofFd (Rt/l fd) "setsockopt") Rt/UNIT)
+  (method ^:public ^:static caml_unix_getsockopt [kind fd opt]
+    (Sock/ofFd (Rt/l fd) "getsockopt")
+    (let [k (Rt/l kind)] (if (or (== k 2) (== k 4)) Rt/NONE (if (== k 3) (Double/valueOf 0.0) (Long/valueOf 0)))))
+
+  ;; select's readiness of a descriptor for reading
+  (method ^:static readable ^boolean [^long fd]
+    (let [d (Fd/get fd)]
+      (cond (nil? d) false
+            (some? (.-sock d))
+            (let [s (.-sock d)]
+              (cond (some? (.-ahead s)) true
+                    (some? (.-server s))
+                    (try (.setSoTimeout (.-server s) 1)
+                         (let [c (.accept (.-server s))] (set! (.-ahead s) c) true)
+                         (catch SocketTimeoutException e false)
+                         (catch IOException e true)
+                         (finally (try (.setSoTimeout (.-server s) 0) (catch IOException e nil))))
+                    (some? (.-in s)) (try (> (.available (.-in s)) 0) (catch IOException e true))
+                    :else false))
+            (some? (.-pipe d)) (or (> (.-count (.-pipe d)) 0) (== (.-writers (.-pipe d)) 0))
+            :else true)))
+
+  (method ^:public ^:static caml_unix_select [r w e t]
+    (let [rl (ExtUnixFd/ints r)
+          wl (ExtUnixFd/ints w)
+          timeout (Rt/d t)
+          deadline (if (< timeout 0.0) Long/MAX_VALUE (unchecked-add (System/currentTimeMillis) (unchecked-long (* timeout 1000.0))))]
+      (loop []
+        (let [ro (java.util.ArrayList.)]
+          (loop [^int i 0]
+            (when (< i (.size rl))
+              (when (Sock/readable (Rt/l (.get rl i))) (.add ro (.get rl i)))
+              (recur (unchecked-inc-int i))))
+          (if (or (> (.size ro) 0) (> (.size wl) 0) (>= (System/currentTimeMillis) deadline))
+            (Rt/tuple (new Object/1 [(Rt/list (.toArray ro)) (Rt/list (.toArray wl)) (Long/valueOf 0)]))
+            (do (Gil/unlock)
+                (try (Thread/sleep 2) (catch InterruptedException x nil) (finally (Gil/lock)))
+                (recur)))))))
+
+  (method ^:public ^:static caml_unix_gethostbyaddr [a]
+    (let [b (cast byte/1 a)]
+      (when (not (or (== (alength b) 4) (== (alength b) 16))) (throw (Exn. Rt/Not_found)))
+      (let [name (try (.getHostName (InetAddress/getByAddress b)) (catch Exception x nil))]
+        (when (nil? name) (throw (Exn. Rt/Not_found)))
+        (Rt/tuple (new Object/1 [(Rt/ofUtf8 name) (Block. 0 (new Object/1 0)) (Long/valueOf (if (== (alength b) 4) 1 2))
+                                 (Block. 0 (new Object/1 [(java.util.Arrays/copyOf b (alength b))]))])))))
+
+  ;; getaddrinfo: numeric hosts and the loopback (the triage's program asks names holding NUL: none)
+  (method ^:public ^:static caml_unix_getaddrinfo [node serv opts]
+    (if (or (not (ExtSys/cSafe node)) (not (ExtSys/cSafe serv)))
+      (Long/valueOf 0)
+      (throw (Rt/invalidArg "getaddrinfo")))))
