@@ -1150,3 +1150,7 @@ files; harmless, against the conventions). No process left running. Scratch in t
 read, `rs/` the Rust programs, their IR and native builds, `c/` the C programs, `cout/`, `rout-*/` the translations and their logs,
 `mod/` the Go module, the executables), `ci-aot-lib/` (the prebuilt units), `ci/`, `ci-musl/`, `ci-runtime/` (copied from `rust-re5`'s;
 the musl forms cache is at main's key, not this branch's older repr/c: read in place, `bin/ci musl ensure` bypassed), `gocache/`.
+
+## Decided (2026-11-05, the user: RES40-RES45)
+
+All as recommended: the cache shared across worktrees by key with RES32; bin/gate --prune calls bin/ci aot-lib prune at the runner's next change; whole and prebuilt compared once at night, a control in c-aot-essential at the re-seed; the link's cost measured in the night's shards first; C++ adopts the path in RES28's fold; RES45 (a), prebuilt musl in the gate from the next re-seed.
