@@ -1457,3 +1457,7 @@ server alone, from the GHC API, with no evaluation). The scripted session compar
 (GHC compiles it as an expression returning the new bindings) and how the session's earlier names resolve in later STG
 (by name: `Ghci1.it` style external names). A spike of one `1 + 1` is the first step (about 1 to 2 days); HE7's estimate of
 3 to 5 days holds if the hook is enough.
+
+## Decided (2026-11-05, the user)
+
+HES60-HES64, each (a) as recommended: the helper dumps foreign exports' and wrappers' helpers and hsi makes real callbacks (decided at the next night by what the stgToCmm hook sees); descriptors waited on by poll with HE4f's scheduler work; coverage subsets by a counting mode and greedy cover at HE10; forkProcess a design class; a program's own C through ci beside hsi at HE6's second half.
