@@ -332,7 +332,9 @@ corpus_list() {
 }
 
 pa_arbace() {
-  ARBACE_PATH="$root" GOMEMLIMIT=${PYI_GOMEMLIMIT:-3GiB} GOMAXPROCS=${PYI_THREADS:-4} "$(arbace_exe)" -m arbace.python "$@"
+  # x509roots/ is a source root of its own: _ssl's fallback store (arbace/pyssl over arbace/x509roots/fallback/bundle,
+  # queue 209) loads its forms from there
+  ARBACE_PATH="$root:$root/x509roots" GOMEMLIMIT=${PYI_GOMEMLIMIT:-3GiB} GOMAXPROCS=${PYI_THREADS:-4} "$(arbace_exe)" -m arbace.python "$@"
 }
 
 cmd_scope_check() {
@@ -545,7 +547,7 @@ PYI_M
   local lib; lib=$(stdlib_lib)
   echo $$ > "$d/pid"
   cd "$caller_pwd"
-  ARBACE_PATH="$root" GOMEMLIMIT=${PYI_GOMEMLIMIT:-3GiB} GOMAXPROCS=${PYI_THREADS:-4} \
+  ARBACE_PATH="$root:$root/x509roots" GOMEMLIMIT=${PYI_GOMEMLIMIT:-3GiB} GOMAXPROCS=${PYI_THREADS:-4} \
     exec "$(arbace_exe)" -m arbace.python run --dump "$d/dumps/$name.ae" --file "$src" --lib "$lib" ${site_args[@]+"${site_args[@]}"} --argv0 "$argv0" -- "$@"
 }
 
@@ -650,15 +652,18 @@ aot_gen() { cat "$root/arbace/python/aot.ae" | sha256sum | cut -c1-16; }
 aot_module() {
   mkdir -p "$AOT/mod/pyaot"
   printf 'module arbace\n\ngo 1.27\n' > "$AOT/mod/go.mod"
-  local key; key=$( (cd "$root" && find go/arbace/py.ae go/arbace/py go/arbace/libm.ae go/arbace/libm go/arbace/expat.ae go/arbace/expat go/arbace/pyexpat.ae go/arbace/pyexpat -type f | LC_ALL=C sort | xargs sha256sum) | sha256sum | cut -c1-16)
+  local key; key=$( (cd "$root" && find go/arbace/py.ae go/arbace/py go/arbace/libm.ae go/arbace/libm go/arbace/expat.ae go/arbace/expat go/arbace/pyexpat.ae go/arbace/pyexpat go/arbace/pyssl.ae go/arbace/pyssl x509roots/go -type f | LC_ALL=C sort | xargs sha256sum) | sha256sum | cut -c1-16)
   if [ "$(cat "$AOT/mod/runtime.key" 2>/dev/null)" != "$key" ]; then
     runtime_print "$AOT/rt"
-    rm -rf "$AOT/mod/py" "$AOT/mod/libm" "$AOT/mod/expat" "$AOT/mod/pyexpat"; mkdir -p "$AOT/mod/py" "$AOT/mod/libm" "$AOT/mod/expat" "$AOT/mod/pyexpat"
+    rm -rf "$AOT/mod/py" "$AOT/mod/libm" "$AOT/mod/expat" "$AOT/mod/pyexpat" "$AOT/mod/pyssl" "$AOT/mod/x509roots"
+    mkdir -p "$AOT/mod/py" "$AOT/mod/libm" "$AOT/mod/expat" "$AOT/mod/pyexpat" "$AOT/mod/pyssl" "$AOT/mod/x509roots/fallback/bundle"
     local f
     for f in "$AOT/rt"/py/*.go; do case $f in *_test.go) ;; *) cp "$f" "$AOT/mod/py/" ;; esac; done
     for f in "$AOT/rt"/libm/*.go; do case $f in *_test.go) ;; *) cp "$f" "$AOT/mod/libm/" ;; esac; done
     for f in "$AOT/rt"/expat/*.go; do case $f in *_test.go) ;; *) cp "$f" "$AOT/mod/expat/" ;; esac; done
     for f in "$AOT/rt"/pyexpat/*.go; do case $f in *_test.go) ;; *) cp "$f" "$AOT/mod/pyexpat/" ;; esac; done
+    for f in "$AOT/rt"/pyssl/*.go; do case $f in *_test.go) ;; *) cp "$f" "$AOT/mod/pyssl/" ;; esac; done
+    for f in "$AOT/rt"/x509roots/fallback/bundle/*; do case $f in *_test.go) ;; *) cp "$f" "$AOT/mod/x509roots/fallback/bundle/" ;; esac; done
     echo "$key" > "$AOT/mod/runtime.key"
   fi
   # the host's compiler for what a compiled program compiles at run time (arbace.python.aot compile-server); its IR
@@ -1112,6 +1117,13 @@ runtime_print() {
   # pyexpat's package (go/arbace/pyexpat, over py and expat), loaded on the module's first import: printed beside them
   mkdir -p "$out/pyexpat"
   ARBACE_PATH="$root" "$root/bin/repr-go" print "$root/go/arbace/pyexpat.ae" "$out/pyexpat" >/dev/null
+  # _ssl's fallback store (queue 209): arbace/pyssl over x509roots/'s bundle (its bundle.der beside it, as go:embed
+  # wants), printed beside them, not read back
+  mkdir -p "$out/pyssl" "$out/x509roots/fallback/bundle"
+  ARBACE_PATH="$root" "$root/bin/repr-go" print "$root/go/arbace/pyssl.ae" "$out/pyssl" >/dev/null
+  ARBACE_PATH="$root:$root/x509roots" "$root/bin/repr-go" print "$root/x509roots/go/arbace/x509roots/fallback/bundle.ae" \
+    "$out/x509roots/fallback/bundle" >/dev/null
+  cp "$root/x509roots/go/arbace/x509roots/fallback/bundle/bundle.der" "$out/x509roots/fallback/bundle/"
 }
 
 runtime_read() {
@@ -1146,7 +1158,7 @@ cmd_runtime() {
         echo "runtime: go/arbace/py printed and read again DIFFERS (diff -r go/arbace/py $t/forms/go/arbace/py)"; rc=1
       fi
       # expat's port and pyexpat's package (queue 202e): printed and read again the same forms
-      for p in expat pyexpat; do
+      for p in expat pyexpat pyssl; do
         (cd "$t/src" && "$root/bin/repr-go" read --full --tests --goos linux --goarch amd64 --out "$t/$p-forms" "./$p") \
           > "$t/$p-forms.log" 2>&1 || { cat "$t/$p-forms.log" >&2; rc=1; }
         if diff -r "$root/go/arbace/$p" "$t/$p-forms/go/arbace/$p" >/dev/null \
