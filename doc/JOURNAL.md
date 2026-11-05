@@ -381,3 +381,15 @@ Alternatives considered: judging `-ddump-deriv`'s text (needs a printer of GHC's
 for less than the Core comparison gives); generating source text and renaming it (the derived code names `GHC.Classes`'
 functions whatever the module imports, so it would need the renamer's wired-in scope). Proposals 1-4 in the survey.
 
+
+## 2026-11-05: HF4b, the deriving strategy keywords and DerivingVia (branch `haskell-deriving-via`)
+
+HF4's proposal 3 (b), decided by the user. Strategies written in a deriving clause or a standalone declaration
+(`stock`, `newtype`, `anyclass`, `via T`) now set the request's strategy in `arbace/repr/haskell/typecheck.ae`
+(`strategy-of`, `rep-of`, `gnd-of`); `via T` is the newtype strategy's coercion with `T` as the representation. Source read:
+GHC 9.14.1's `compiler/GHC/Tc/Deriv.hs` (strategy choice, `mkNewTypeEqn`, via) from the pinned tarball, as the specification;
+nothing new ported (origin as HF4's, `LICENSE.md`, `doc/ARBACE.md`). Judge findings fixed: a one-method, no-superclass class's
+coerced method is the dictionary; a superclass dictionary applying a dictionary function to the instance's parameters alone is
+inlined; standalone deriving with a strategy binds implicit type variables at the strategy's span (`rename.ae`). Samples
+T23Strategies, T24Via; results in the survey ("As built: HF4b"). Alternative considered: checking the via type's
+coercibility now (needs a Coercible solver; left to HF5's Core).
