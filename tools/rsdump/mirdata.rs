@@ -260,6 +260,14 @@ impl<'tcx> W<'tcx> {
         }
     }
 
+    /// `(loc "FILE" LINE COL)`: what `span_as_caller_location` gives the panic location of an assertion
+    fn caller_location(&self, span: rustc_span::Span) -> String {
+        let topmost = span.ctxt().outer_expn().expansion_cause().unwrap_or(span);
+        let caller = self.tcx.sess.source_map().lookup_char_pos(topmost.lo());
+        let name = caller.file.name.display(rustc_span::RemapPathScopeComponents::MACRO).to_string_lossy().to_string();
+        format!("(loc {} {} {})", q(&name), caller.line, caller.col_display + 1)
+    }
+
     fn terminator(&self, t: &Terminator<'tcx>) -> String {
         use TerminatorKind::*;
         let b = |x: &BasicBlock| x.index().to_string();
@@ -285,8 +293,8 @@ impl<'tcx> W<'tcx> {
             ),
             TailCall { func, args: a, .. } => format!("(tailcall {} {})", self.operand(func), args(a)),
             Assert { cond, expected, msg, target, unwind } => format!(
-                "(assert {} {} {} {} {})",
-                self.operand(cond), expected, self.assert_msg(msg), b(target), self.unwind(unwind)
+                "(assert {} {} {} {} {} {})",
+                self.operand(cond), expected, self.assert_msg(msg), b(target), self.unwind(unwind), self.caller_location(t.source_info.span)
             ),
             Yield { value, resume, resume_arg, drop } => format!(
                 "(yield {} {} {} {})",

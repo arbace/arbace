@@ -291,9 +291,36 @@
     :pair (list 'struct (symbol (:imm (first (:pair l)))) (symbol (:imm (second (:pair l)))))
     (unsupported "memory aggregate as a return")))
 
+(defn new-globals
+  "The module's interned constants and external declarations: pass it to codegen-fn, read it with `module-extras`."
+  [] (volatile! {:consts {} :decls {} :n 0}))
+
+(defn- le-bytes [n k] (apply str (map (fn [i] (char (bit-and (bit-shift-right n (* 8 i)) 255))) (range k))))
+
+(defn intern-const!
+  "A private constant global of the module, interned by content: its name."
+  [gl ty value align]
+  (let [k [ty value align]]
+    (or (get-in @gl [:consts k])
+        (let [n (symbol "g" (str "alloc" (:n @gl)))]
+          (vswap! gl (fn [m] (-> m (update :n inc) (assoc-in [:consts k] n))))
+          n))))
+
+(defn module-extras
+  "The globals' and declarations' forms of a module codegen made."
+  [gl]
+  (vec (concat
+        (for [[[ty value align] n] (sort-by (comp name val) (:consts @gl))]
+          (list 'llvm/global n ty value :linkage :private :unnamed-addr :unnamed_addr :constant true :align align))
+        (vals (:decls @gl)))))
+
+(defn declare!
+  [gl name ret params]
+  (vswap! gl assoc-in [:decls name] (list 'llvm/declare name ret params)))
+
 (defn codegen-fn
-  "One body's LLVM define form; `lt` is the layouts table."
-  [body lt]
+  "One body's LLVM define form; `lt` is the layouts table, `gl` the module's globals (new-globals)."
+  [body lt gl]
   (let [blocks (:blocks body)
         order (rpo blocks)
         idom (dominators blocks order)
@@ -309,6 +336,10 @@
                         (when-not (some #{nm} (:bb-order @st)) (vswap! st update :bb-order conj nm))
                         (symbol (str "%" nm))))
         br-or-merge (fn [bb t target] (if-let [m (mergeable t)] m (do (emit! bb (list 'br (llbb! target))) nil)))
+        new-block! (fn [prefix]
+                     (let [nm (loop [i 0] (let [c (if (zero? i) prefix (str prefix i))] (if (some #{c} (:bb-order @st)) (recur (inc i)) c)))]
+                       (vswap! st update :bb-order conj nm)
+                       nm))
         alloca! (fn [l] (let [ly (nth lay l) nm (symbol (str "%a" l))]
                           (vswap! st update :start #(into [(list '= nm (list 'alloca (list 'array (:size ly) 'i8) :align (:align ly)))] %))
                           (vswap! st assoc-in [:allocas l] nm)))
@@ -433,12 +464,37 @@
                      "Lt" (cmp (if sg :slt :ult)) "Le" (cmp (if sg :sle :ule))
                      "Gt" (cmp (if sg :sgt :ugt)) "Ge" (cmp (if sg :sge :uge))
                      (unsupported (str "binop " op))))))
-        shift! (fn [bb op a b sc]
+        ;; a shift: the right operand cast to the left's type, masked, then shl / lshr / ashr
+        shift! (fn [bb op a b sc bsc]
                  (let [t (symbol (:imm sc))
-                       _ (when-not (number? (:v b)) (unsupported "variable shift amount"))
+                       bv (cond (= (:ibits sc) (:ibits bsc)) (:v b)
+                                (number? (:v b)) (:v b)
+                                (< (:ibits bsc) (:ibits sc)) (let [r (fresh!)] (emit! bb (list '= r (list 'zext (symbol (:imm bsc)) (:v b) t))) r)
+                                :else (let [r (fresh!)] (emit! bb (list '= r (list 'trunc (symbol (:imm bsc)) (:v b) t))) r))
+                       mask (dec (:ibits sc))
+                       masked (if (number? bv)
+                                (bit-and bv mask)
+                                (let [r (fresh!)] (emit! bb (list '= r (list 'and t bv mask))) r))
                        r (fresh!)]
-                   (emit! bb (list '= r (list (if (= op "Shl") 'shl (if (:signed sc) 'ashr 'lshr)) t (:v a) (:v b))))
+                   (emit! bb (list '= r (list (if (#{"Shl" "ShlUnchecked"} op) 'shl (if (:signed sc) 'ashr 'lshr)) t (:v a) masked)))
                    {:ty (:imm sc) :v r}))
+        ;; checked arithmetic: the pair (value, overflowed)
+        overflow! (fn [bb op a b sc]
+                    (let [t (symbol (:imm sc))
+                          base (case op "AddWithOverflow" "add" "SubWithOverflow" "sub" "MulWithOverflow" "mul")]
+                      (if (and (= base "sub") (not (:signed sc)))
+                        (let [r (fresh!) f (fresh!)]
+                          (emit! bb (list '= r (list 'sub t (:v a) (:v b))))
+                          (emit! bb (list '= f (list 'icmp :ult t (:v a) (:v b))))
+                          {:pair [{:ty (:imm sc) :v r} {:ty "i1" :v f}]})
+                        (let [iname (symbol "g" (str "llvm." (if (:signed sc) "s" "u") base ".with.overflow.i" (:ibits sc)))
+                              rt (list 'struct t 'i1)
+                              c (fresh!) v (fresh!) f (fresh!)]
+                          (declare! gl iname rt [[t] [t]])
+                          (emit! bb (list '= c (list 'call rt iname [[t (:v a)] [t (:v b)]])))
+                          (emit! bb (list '= v (list 'extractvalue [rt c] 0)))
+                          (emit! bb (list '= f (list 'extractvalue [rt c] 1)))
+                          {:pair [{:ty (:imm sc) :v v} {:ty "i1" :v f}]}))))
         cast! (fn [bb o to-sc from-sc]
                 (let [v (operand! bb o)
                       fb (:ibits from-sc) tb (:ibits to-sc)]
@@ -478,9 +534,10 @@
                   (case (name (first r))
                     ("use" "use-noretag") (operand! bb (second r))
                     "binop" (let [[_ op a b] r sc (scalar-of-op a)]
-                              (if (#{"Shl" "Shr"} op)
-                                (shift! bb op (operand! bb a) (operand! bb b) sc)
-                                (bin! bb op (operand! bb a) (operand! bb b) sc)))
+                              (cond
+                                (#{"Shl" "Shr" "ShlUnchecked" "ShrUnchecked"} op) (shift! bb op (operand! bb a) (operand! bb b) sc (scalar-of-op b))
+                                (#{"AddWithOverflow" "SubWithOverflow" "MulWithOverflow"} op) (overflow! bb op (operand! bb a) (operand! bb b) sc)
+                                :else (bin! bb op (operand! bb a) (operand! bb b) sc)))
                     "unop" (let [[_ op a] r sc (scalar-of-op a) v (operand! bb a) x (fresh!)]
                              (case op
                                "Not" (do (emit! bb (list '= x (list 'xor (symbol (:imm sc)) (:v v) (if (:bool sc) 'true -1))))
@@ -541,10 +598,35 @@
                         "goto" (br-or-merge bb t (second t))
                         "return" (ret-value! bb)
                         "unreachable" (emit! bb '(unreachable))
-                        "assert" (let [[_ c expected _ target] t v (operand! bb c)]
+                        "assert" (let [[_ c expected msg target _ loc] t v (operand! bb c)]
                                    (if (and (boolean? (:v v)) (= (:v v) expected))
                                      (br-or-merge bb t target)
-                                     (unsupported "assert with a runtime condition")))
+                                     (let [lltarget (llbb! target)
+                                           pb (new-block! "panic")
+                                           [_ file line col] loc
+                                           fname (str file "\u0000")
+                                           fg (intern-const! gl (list 'array (count fname) 'i8) (list 'c-string fname) 1)
+                                           lg (intern-const! gl (list 'packed 'ptr (list 'array 16 'i8))
+                                                             (list 'packed ['ptr fg] [(list 'array 16 'i8) (list 'c-string (str (le-bytes (count file) 8) (le-bytes line 4) (le-bytes col 4)))]) 8)
+                                           mk (name (first msg))
+                                           panic-name (case mk
+                                                        "overflow" (str "panic_const_" (str/lower-case (nth msg 1)) "_overflow")
+                                                        "overflow-neg" "panic_const_neg_overflow"
+                                                        "div-zero" "panic_const_div_by_zero"
+                                                        "rem-zero" "panic_const_rem_by_zero"
+                                                        "bounds-check" "panic_bounds_check"
+                                                        (unsupported (str "assert message " mk)))
+                                           ;; `Div`/`Rem` overflow are asserts of their own kind in MIR: (overflow "Div") -> div_overflow
+                                           callee (symbol "g" (if (= mk "bounds-check") "panicking.panic_bounds_check" (str "panicking.panic_const." panic-name)))]
+                                       (let [pbs (symbol (str "%" pb))] (emit! bb (if expected (list 'br 'i1 (:v v) lltarget pbs) (list 'br 'i1 (:v v) pbs lltarget))))
+                                       (if (= mk "bounds-check")
+                                         (let [idx (operand! pb (nth msg 2)) len (operand! pb (nth msg 1))]
+                                           (declare! gl callee 'void [['i64] ['i64] ['ptr (list :align 8)]])
+                                           (emit! pb (list 'call 'void callee [['i64 (:v idx)] ['i64 (:v len)] ['ptr (list :align 8) lg]])))
+                                         (do (declare! gl callee 'void [['ptr (list :align 8)]])
+                                             (emit! pb (list 'call 'void callee [['ptr (list :align 8) lg]]))))
+                                       (emit! pb '(unreachable))
+                                       nil)))
                         "switch" (let [[_ d vals other] t
                                        dv (operand! bb d) sc (scalar-of-op d)
                                        key (fn [v] (if (:signed sc) (long (sext-const (:bits sc) v)) (long v)))]
