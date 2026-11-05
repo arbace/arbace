@@ -193,6 +193,11 @@ covers what.
   translated), from the same tarball; since queue 202 (202c) `arbace/repr/python/ucn.ae` (of `Modules/unicodedata.c`'s
   `_getcode` and its DAWG lookup, from the same tarball). The rest of `arbace/repr/python/` and `tools/pydump/` are
   Arbace's own, under the Eclipse Public License 1.0.
+- `go/arbace/py/builtins_csv.ae` and `builtins_mmap.ae` (queue 204, PYS22 (a): pyi's modules `_csv` and `mmap`;
+  doc/python/PYTHON-SURVEY.md, "As built: 204"): ports to Go of CPython 3.14.10's `Modules/_csv.c` with
+  `Modules/clinic/_csv.c.h`, and of `Modules/mmapmodule.c`'s UNIX paths with `Modules/clinic/mmapmodule.c.h`, from the same release
+  tarball, by hand on 2026-11-05: Copyright (c) 2001 Python Software Foundation, All Rights Reserved, under the PSF
+  License Agreement for Python 3.14 (text below).
 - `go/arbace/oi.ae` and `go/arbace/oi/` (oi, the interpreter of OCaml's Lambda; doc/ocaml/OCAML-SURVEY.md, "As
   built: O5 (write-ahead)"): the interpreter's core (values, the compiler of Lambda, application, exceptions,
   effects, the toplevel) is Arbace's own, under the Eclipse Public License 1.0; the externals are ports to Go
