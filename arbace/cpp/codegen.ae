@@ -278,6 +278,20 @@
 (def ^:dynamic *extend* nil) ; atom: a reference's temporary is lifetime-extended into these cleanups
 (def ^:dynamic *extend-now* false) ; the temporary being pushed is the one a declared reference binds
 
+(def ^:dynamic *extend-root* nil) ; the complete temporary a declared reference binds through subobjects ([class.temporary])
+
+(defn- extend-root
+  "The expression whose temporary a reference bound to the glvalue `e` extends: `e` itself, or the object whose
+  subobject (a member, a base, an element of an array member) `e` designates."
+  [e]
+  (loop [e e]
+    (case (:op e)
+      :field (recur (:obj e))
+      (:base-lv :derived-lv) (recur (:e e))
+      :deref (let [p (:e e)] (if (= :ptradd (:op p)) (recur (:p p)) e))
+      :decay (recur (:e e))
+      e)))
+
 (declare emit-rv emit-lv emit-into emit-init call-dtor! eh-typeinfo!)
 
 (defn- nontrivial-dtor? [cid] (and cid (not (sema/trivial-dtor? cid))))
@@ -711,7 +725,7 @@
   [e]
   (let [t (slot! (:ty e))]
     (emit-into e t)
-    (push-temp-cleanup! (:id (abi/unq (:ty e))) t)
+    (binding [*extend-now* (or *extend-now* (identical? e *extend-root*))] (push-temp-cleanup! (:id (abi/unq (:ty e))) t))
     t))
 
 (defn- short-circuit! [e]
@@ -951,7 +965,8 @@
                (emit! '(unreachable))
                (close-block!) (start! ok)
                r)
-    :temp (let [t (slot! (:ty e))] (emit-init t (:ty e) (:init e)) (push-temp-cleanup! (:id (abi/unq (:ty e))) t) t)
+    :temp (let [t (slot! (:ty e))] (emit-init t (:ty e) (:init e))
+                (binding [*extend-now* (or *extend-now* (identical? e *extend-root*))] (push-temp-cleanup! (:id (abi/unq (:ty e))) t)) t)
     :assign (let [v (emit-rv (:r e)) a (emit-lv (:l e))] (store! (:ty e) v a) a)
     :cassign (let [a (emit-lv (:l e)) t (abi/unq (:ty e)) old (load! t a)
                    r (emit-rv (:r e))
@@ -1017,7 +1032,7 @@
       (:copy :copy-bytes) (memcpy! addr (emit-lv (:e init)) (abi/size-of tu))
       :string (let [s (:s (:e init)) n (long (or (:n init) (inc (count s))))]
                 (memcpy! addr (gsym (string-global (subs (str s (apply str (repeat n (char 0)))) 0 (dec n)))) n))
-      :bind (store! (abi/ptr abi/void) (emit-lv (:e init)) addr)
+      :bind (store! (abi/ptr abi/void) (let [e (:e init)] (binding [*extend-root* (when *extend* (extend-root e))] (emit-lv e))) addr)
       :bind-temp (let [tt (:ty init) tmpa (slot! tt)]
                    (emit-init tmpa tt (:init init))
                    (binding [*extend-now* true] (push-temp-cleanup! (when (abi/class? tt) (:id tt)) tmpa))
