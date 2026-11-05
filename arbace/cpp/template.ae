@@ -180,6 +180,191 @@
         (= ty "int") (long (unchecked-int (long v)))
         :else (long v)))
 
+;; ---------------------------------------------------------------------------------------------
+(declare expand-type-pack)
+
+;; The type-trait builtins (G4; clang's lib/Sema/SemaTypeTraits.cpp, EvaluateUnaryTypeTrait, EvaluateBinaryTypeTrait,
+;; EvaluateBooleanTypeTrait, and the transform traits of BuiltinTypes' TransformTypeTraits): the ones libstdc++ 15's
+;; <type_traits> uses when __has_builtin says so, each a constant or a type of its type arguments; written from the
+;; standard's [meta] definitions with clang's functions as the model
+
+(defn- declval-node
+  "An expression of type `t` as std::declval<T>() is: an lvalue for T&, an xvalue for T&& and for an object type."
+  [t]
+  (cond (= :ref (:k t)) {:op :declval :ty (:to t) :cat :lv}
+        (= :rref (:k t)) {:op :declval :ty (:to t) :cat :xv}
+        :else {:op :declval :ty t :cat :xv}))
+
+(defn- works? [f] (try (f) true (catch arbace.lang.ExceptionInfo _ false)))
+
+(defn- complete-class? [t] (and (abi/class? (abi/unq t)) (seq (:fields (abi/cls (:id (abi/unq t))))) true))
+
+(defn- object-type? [t] (not (or (abi/ref? t) (abi/fn? t) (abi/void? t))))
+
+(defn- trait-constructible? [scope t args]
+  (cond
+    (abi/void? (abi/unq t)) false
+    (abi/fn? t) false
+    (and (abi/arr? t) (nil? (:n t))) false
+    (and (abi/arr? t) (seq args)) false
+    (and (abi/ref? t) (empty? args)) false
+    :else (works? #(sema/init-for t (cond (empty? args) nil
+                                         (= 1 (count args)) (if (abi/class? (abi/unq t)) [(declval-node (first args))] (declval-node (first args)))
+                                         :else (mapv declval-node args))
+                                  {:scope scope :statics (atom [])} (cond (empty? args) :value (= 1 (count args)) :direct :else :direct)))))
+
+(defn- trait-convertible? [scope from to]
+  (cond (abi/void? (abi/unq to)) (abi/void? (abi/unq from))
+        (or (abi/fn? to) (abi/arr? to)) false
+        :else (and (some? (try (sema/ics (declval-node from) to) (catch arbace.lang.ExceptionInfo _ nil)))
+                   (works? #(sema/init-for to (declval-node from) {:scope scope :statics (atom [])} :copy)))))
+
+(defn- trait-assignable? [scope t u]
+  (works? #(#'sema/assign-node {:scope scope :statics (atom [])} (declval-node t) (declval-node u))))
+
+(defn- trivial-class? [t pred]
+  (let [u (abi/unq t)]
+    (if (abi/class? u) (boolean (pred (:id u))) true)))
+
+(defn- trivially-default? [id]
+  (let [c (abi/cls id)]
+    (and (not (abi/dynamic? id))
+         (every? #(let [f (sema/fnd %)] (or (seq (:ps (:ty f))) (and (or (:implicit f) (:defaulted f)) (not (:tinits f)) true))) (:ctors c))
+         (every? (fn [fl] (and (nil? (:init fl)) (trivial-class? (loop [t (:ty fl)] (if (abi/arr? t) (recur (:of t)) t)) trivially-default?))) (:fields c))
+         (every? #(trivially-default? (:cls %)) (:bases c)))))
+
+(def ^:private value-traits
+  {"__is_same" (fn [_ [a b]] (= a b))
+   "__is_void" (fn [_ [a]] (abi/void? (abi/unq a)))
+   "__is_integral" (fn [_ [a]] (contains? abi/int-ranks (abi/bn (abi/unq a))))
+   "__is_floating_point" (fn [_ [a]] (boolean (abi/floating? (abi/unq a))))
+   "__is_arithmetic" (fn [_ [a]] (abi/arith? (abi/unq a)))
+   "__is_fundamental" (fn [_ [a]] (= :b (:k a)))
+   "__is_class" (fn [_ [a]] (and (abi/class? (abi/unq a)) (not (:union (abi/cls (:id (abi/unq a)))))))
+   "__is_union" (fn [_ [a]] (and (abi/class? (abi/unq a)) (boolean (:union (abi/cls (:id (abi/unq a)))))))
+   "__is_enum" (fn [_ [a]] (abi/enum? (abi/unq a)))
+   "__is_scoped_enum" (fn [_ [a]] (and (abi/enum? (abi/unq a)) (boolean (:scoped (abi/enm (:id (abi/unq a)))))))
+   "__is_array" (fn [_ [a]] (abi/arr? a))
+   "__is_bounded_array" (fn [_ [a]] (and (abi/arr? a) (some? (:n a))))
+   "__is_unbounded_array" (fn [_ [a]] (and (abi/arr? a) (nil? (:n a))))
+   "__is_pointer" (fn [_ [a]] (abi/ptr? a))
+   "__is_reference" (fn [_ [a]] (boolean (abi/ref? a)))
+   "__is_lvalue_reference" (fn [_ [a]] (= :ref (:k a)))
+   "__is_rvalue_reference" (fn [_ [a]] (= :rref (:k a)))
+   "__is_function" (fn [_ [a]] (abi/fn? a))
+   "__is_member_pointer" (fn [_ [a]] (abi/mptr? a))
+   "__is_member_function_pointer" (fn [_ [a]] (abi/mfn-ptr? a))
+   "__is_member_object_pointer" (fn [_ [a]] (and (abi/mptr? a) (not (abi/mfn-ptr? a))))
+   "__is_const" (fn [_ [a]] (boolean (:c (loop [t a] (if (abi/arr? t) (recur (:of t)) t)))))
+   "__is_volatile" (fn [_ [a]] (boolean (:v (loop [t a] (if (abi/arr? t) (recur (:of t)) t)))))
+   "__is_object" (fn [_ [a]] (object-type? a))
+   "__is_scalar" (fn [_ [a]] (abi/scalar? (abi/unq a)))
+   "__is_signed" (fn [_ [a]] (let [u (abi/unq a)] (or (abi/floating? u) (and (contains? abi/int-ranks (abi/bn u)) (not (contains? abi/unsigned-ns (abi/bn u)))))))
+   "__is_unsigned" (fn [_ [a]] (let [u (abi/unq a)] (contains? abi/unsigned-ns (abi/bn u))))
+   "__is_empty" (fn [_ [a]] (let [u (abi/unq a)] (and (abi/class? u) (not (:union (abi/cls (:id u)))) (abi/empty-class? (:id u)))))
+   "__is_polymorphic" (fn [_ [a]] (let [u (abi/unq a)] (and (abi/class? u) (boolean (abi/dynamic? (:id u))))))
+   "__is_abstract" (fn [_ [a]] (let [u (abi/unq a)] (and (abi/class? u) (boolean (some #(:pure (sema/fnd (:fn %))) (:vtable (abi/cls (:id u))))))))
+   "__is_final" (fn [_ [a]] (let [u (abi/unq a)] (and (abi/class? u) (boolean (:final (abi/cls (:id u)))))))
+   "__is_aggregate" (fn [_ [a]] (let [u (abi/unq a)] (or (abi/arr? u) (and (abi/class? u) (boolean (sema/aggregate? (:id u)))))))
+   "__has_virtual_destructor" (fn [_ [a]] (let [u (abi/unq a)] (and (abi/class? u) (boolean (some-> (:dtor (abi/cls (:id u))) sema/fnd :virtual)))))
+   "__is_base_of" (fn [_ [b d]] (let [b (abi/unq b) d (abi/unq d)] (and (abi/class? b) (abi/class? d) (or (= b d) (boolean (abi/derived-from? (:id d) (:id b)))))))
+   "__is_convertible" (fn [scope [f t]] (trait-convertible? scope f t))
+   "__is_convertible_to" (fn [scope [f t]] (trait-convertible? scope f t))
+   "__is_nothrow_convertible" (fn [scope [f t]] (trait-convertible? scope f t))
+   "__is_constructible" (fn [scope [t & as]] (trait-constructible? scope t as))
+   "__is_nothrow_constructible" (fn [scope [t & as]] (trait-constructible? scope t as))
+   "__is_trivially_constructible"
+   (fn [scope [t & as]]
+     (and (trait-constructible? scope t as)
+          (let [u (abi/unq (loop [t t] (if (abi/arr? t) (recur (:of t)) t)))]
+            (cond (not (abi/class? u)) true
+                  (empty? as) (trivially-default? (:id u))
+                  (and (= 1 (count as)) (= u (abi/unq (abi/non-ref (first as))))) (sema/trivial-copy? (:id u))
+                  :else false))))
+   "__is_assignable" (fn [scope [t u]] (trait-assignable? scope t u))
+   "__is_nothrow_assignable" (fn [scope [t u]] (trait-assignable? scope t u))
+   "__is_trivially_assignable" (fn [scope [t u]] (and (trait-assignable? scope t u)
+                                                      (let [c (abi/unq (abi/non-ref t))] (or (not (abi/class? c)) (sema/trivial-copy? (:id c))))))
+   "__is_destructible" (fn [_ [a]] (not (or (abi/void? (abi/unq a)) (abi/fn? a) (and (abi/arr? a) (nil? (:n a))))))
+   "__is_nothrow_destructible" (fn [_ [a]] (not (or (abi/void? (abi/unq a)) (abi/fn? a) (and (abi/arr? a) (nil? (:n a))))))
+   "__is_trivially_destructible" (fn [_ [a]] (and (not (abi/void? (abi/unq a))) (trivial-class? (loop [t a] (if (abi/arr? t) (recur (:of t)) t)) sema/trivial-dtor?)))
+   "__has_trivial_destructor" (fn [_ [a]] (trivial-class? (loop [t a] (if (abi/arr? t) (recur (:of t)) t)) sema/trivial-dtor?))
+   "__is_trivially_copyable" (fn [_ [a]] (let [u (abi/unq (loop [t a] (if (abi/arr? t) (recur (:of t)) t)))]
+                                           (or (abi/scalar? u) (and (abi/class? u) (sema/trivial-copy? (:id u)) (sema/trivial-dtor? (:id u))))))
+   "__is_trivial" (fn [_ [a]] (let [u (abi/unq (loop [t a] (if (abi/arr? t) (recur (:of t)) t)))]
+                                (or (abi/scalar? u) (and (abi/class? u) (sema/trivial-copy? (:id u)) (sema/trivial-dtor? (:id u)) (trivially-default? (:id u))))))
+   "__is_standard_layout" (fn [_ [a]] (let [u (abi/unq (loop [t a] (if (abi/arr? t) (recur (:of t)) t)))]
+                                        (or (abi/scalar? u) (and (abi/class? u) (not (abi/dynamic? (:id u)))))))
+   "__is_pod" (fn [_ [a]] (let [u (abi/unq (loop [t a] (if (abi/arr? t) (recur (:of t)) t)))]
+                            (or (abi/scalar? u) (and (abi/class? u) (not (abi/dynamic? (:id u))) (sema/trivial-copy? (:id u)) (sema/trivial-dtor? (:id u))))))
+   "__is_literal_type" (fn [_ [a]] (let [u (abi/unq a)] (or (abi/scalar? u) (abi/ref? a) (abi/void? u) (and (abi/class? u) (sema/trivial-dtor? (:id u))))))
+   "__has_unique_object_representations" (fn [_ [a]] (let [u (abi/unq a)] (or (contains? abi/int-ranks (abi/bn u)) (abi/ptr? u) (abi/enum? u))))
+   "__reference_binds_to_temporary" (fn [_ _] false)
+   "__reference_constructs_from_temporary"
+   (fn [_ [t u]] (and (abi/ref? t) (not (abi/ref? u)) (or (= :rref (:k t)) (:c (:to t))) (= (abi/unq (:to t)) (abi/unq u))))
+   "__reference_converts_from_temporary"
+   (fn [_ [t u]] (and (abi/ref? t) (not (abi/ref? u)) (or (= :rref (:k t)) (:c (:to t))) (= (abi/unq (:to t)) (abi/unq u))))})
+
+(defn- decay [t]
+  (let [t (abi/non-ref t)]
+    (cond (abi/arr? t) (abi/ptr (:of t))
+          (abi/fn? t) (abi/ptr t)
+          :else (abi/unq t))))
+
+(def ^:private type-traits
+  {"__remove_cv" (fn [[a]] (if (abi/arr? a) (assoc a :of (abi/unq (:of a))) (abi/unq a)))
+   "__remove_const" (fn [[a]] (dissoc a :c))
+   "__remove_volatile" (fn [[a]] (dissoc a :v))
+   "__remove_reference" (fn [[a]] (abi/non-ref a))
+   "__remove_cvref" (fn [[a]] (let [t (abi/non-ref a)] (if (abi/arr? t) (assoc t :of (abi/unq (:of t))) (abi/unq t))))
+   "__decay" (fn [[a]] (decay a))
+   "__remove_pointer" (fn [[a]] (if (abi/ptr? (abi/unq a)) (:to (abi/unq a)) a))
+   "__add_pointer" (fn [[a]] (if (or (abi/fn? a) (abi/void? (abi/unq a)) (object-type? a) (abi/ref? a)) (abi/ptr (abi/non-ref a)) a))
+   "__add_lvalue_reference" (fn [[a]] (if (abi/void? (abi/unq a)) a (abi/lref (abi/non-ref a))))
+   "__add_rvalue_reference" (fn [[a]] (cond (abi/void? (abi/unq a)) a (abi/ref? a) a :else (abi/rref a)))
+   "__remove_extent" (fn [[a]] (if (abi/arr? a) (:of a) a))
+   "__remove_all_extents" (fn [[a]] (loop [t a] (if (abi/arr? t) (recur (:of t)) t)))
+   "__underlying_type" (fn [[a]] (abi/underlying (abi/unq a)))})
+
+(defn- split-top-commas
+  "A text split at its commas outside brackets and parentheses."
+  [^String t]
+  (loop [i 0 d 0 start 0 out []]
+    (if (>= i (count t))
+      (let [x (str/trim (subs t start))] (if (seq x) (conj out x) out))
+      (let [c (.charAt t i)]
+        (cond (#{\( \< \[ \{} c) (recur (inc i) (inc d) start out)
+              (#{\) \> \] \}} c) (recur (inc i) (max 0 (dec d)) start out)
+              (and (zero? d) (= c \,)) (recur (inc i) d (inc i) (conj out (str/trim (subs t start i))))
+              :else (recur (inc i) d start out))))))
+
+(defn trait-name? [x] (let [n (str x)] (or (contains? value-traits n) (contains? type-traits n))))
+
+(defn- trait-args [scope forms]
+  (vec (mapcat (fn [f]
+                 (cond (and (seq? f) (= 'pack-expand (first f))) (expand-type-pack scope (second f))
+                       (and (seq? f) (= 'cpp/text (first f))) [(sema/resolve-type scope (second f))]
+                       :else [(sema/resolve-type-form scope f)]))
+               forms)))
+
+(defn trait-value
+  "A value trait's constant (0 or 1) of its type arguments' forms, or a dependent {:k :texpr :o :trait} in a template's
+  signature."
+  [scope ^String nm forms]
+  (let [ts (trait-args scope forms)]
+    (if (some dependent? ts)
+      {:k :texpr :o :trait :name nm :types ts}
+      (if ((value-traits nm) scope ts) 1 0))))
+
+(defn trait-type
+  "A transform trait's type of its type arguments' forms (__remove_cv(T), __decay(T), ...), dependent in a signature."
+  [scope ^String nm forms]
+  (let [ts (trait-args scope forms)]
+    (cond
+      (some dependent? ts) {:k :tdep :trait nm :base (first ts) :types ts :names []}
+      (contains? type-traits nm) ((type-traits nm) ts)
+      :else (fail :template "the type trait " nm))))
+
 (defn- template-name? [scope ^String nm]
   (let [es (sema/lookup scope nm)]
     (some #(or (= :tmpl (:e %)) (and (= :type (:e %)) (abi/class? (:ty %)) (:tmpl (abi/cls (:id (:ty %)))))) es)))
@@ -227,6 +412,10 @@
                   (= t "sizeof") (let [_ (next!)
                                        ty (abi/non-ref (sema/resolve-type scope (run "(" ")")))]
                                    (if (dependent? ty) {:k :texpr :o "sizeof" :type ty} (abi/size-of ty)))
+                  ;; a value trait (G4): __is_same(T, U), its arguments types
+                  (and (= k :id) (= "(" (peek)) (contains? value-traits t))
+                  (let [_ (next!) txt (run "(" ")")]
+                    (trait-value scope t (mapv (fn [a] (list 'cpp/text a)) (split-top-commas txt))))
                   (= k :num) (num t)
                   (= k :chr) (long (int (.charAt ^String t 1)))
                   ;; a call of a constexpr function (an array bound `int[sq(3)]`) on constant arguments
@@ -278,6 +467,16 @@
                     (const-entity scope parts)))
     (and (seq? f) (= 'cpp/scope (first f))) (member-constant (sema/resolve-type-form scope (second f)) (name (last f)))
     (and (seq? f) (= 'cpp/text (first f))) (eval-text scope (second f))
+    ;; a type trait's value (G4: __is_same(T, U))
+    (and (seq? f) (= 'fn (first f)) (vector? (second f)) (symbol? (nth f 2 nil)) (contains? value-traits (str (nth f 2))))
+    (trait-value scope (str (nth f 2)) (second f))
+    ;; a functional cast T(e) of a constant (G4: the headers' bool(_Bn::value))
+    (and (seq? f) (= 'fn (first f)) (vector? (second f)) (= 1 (count (second f))))
+    (let [v (const-form scope (first (second f)))
+          t (abi/unq (sema/resolve-type-form scope (nth f 2)))]
+      (cond (map? v) v
+            (= :bool (abi/bn t)) (if (zero? (long v)) 0 1)
+            :else (long v)))
     :else (fail :template "constant " (pr-str f))))
 
 (defn- value-arg [v ^String _ t]
@@ -403,7 +602,7 @@
   "The :pack-expand hook: the types a pack expansion's pattern (Ts&... in a parameter list or argument list) stands
   for, one per element of its packs; in a template's signature, the pattern as {:k :pack-exp}."
   [scope X]
-  (let [names (distinct (map name (filter #(not (namespace %)) (form-symbols X))))
+  (let [names (distinct (map #(if (namespace %) (first (str/split (namespace %) #"/")) (name %)) (form-symbols X)))
         packs (packs-named scope names)]
     (if (seq packs)
       (mapv #(sema/resolve-type-form % X) (elementwise scope packs))
@@ -865,8 +1064,13 @@
         (let [args (or (complete-args t args) (fail :template "missing template arguments for " nm))]
           (sema/resolve-type (bind-scope (:scope t) (:params t) args nil) (get-in (:pattern t) [:type :qualType])))
       (if (dependent? args)
-        (do (when (< (count args) (count (:params t))) (fail :template "a dependent template-id with default arguments"))
-            {:k :tspec :tmpl tid :name (:name t) :path (:path t) :args args})
+        ;; the defaults completed in a scope binding the dependent arguments before them (G4: enable_if<C>, the
+        ;; headers' defaulted parameters); one that cannot be (a dependent value) is refused
+        (let [args (if (< (count args) (count (:params t)))
+                     (or (try (complete-args t args) (catch arbace.lang.ExceptionInfo _ nil))
+                         (fail :template "a dependent template-id with default arguments"))
+                     args)]
+          {:k :tspec :tmpl tid :name (:name t) :path (:path t) :args args})
         (instantiate-class tid (or (complete-args t args) (fail :template "missing template arguments for " nm))))))))))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -900,9 +1104,9 @@
 (defn- ool-qualifier
   "[name template-id-text] of the template-id a member's qualifier ends with (`Box<int>::`), or nil."
   [n]
-  (let [b (get-in n [:range :begin :offset]) l (get-in n [:loc :offset])]
-    (when (and b l (< (long b) (long l)))
-      (let [t (str/trim (str/replace (subs sema/*src* b l) #"~\s*$" ""))]
+  (let [t0 (sema/text-before-name n)]
+    (when t0
+      (let [t (str/trim (str/replace t0 #"~\s*$" ""))]
         ;; Name<...>:: at the end: the brackets matched backward from the last >
         (when (str/ends-with? t "::")
           (let [t (str/trim (subs t 0 (- (count t) 2)))]
@@ -1069,7 +1273,7 @@
   specialization declared once; defined (linkonce_odr) only when odr-used."
   [ctx e n]
   (let [t (tmpl (:id e))
-        args (or (complete-args t (or (explicit-args t (node-text n) (:scope ctx)) [])) (fail :template "missing template arguments for " (:name t)))]
+        args (or (complete-args t (or (explicit-args t (sema/written-targs n (:name t)) (:scope ctx)) [])) (fail :template "missing template arguments for " (:name t)))]
     (or (get-in @*tmpls* [(:id t) :insts args])
         (let [ps (bind-scope (:scope t) (:params t) args nil)
               vid (binding [sema/*cutoff* Long/MAX_VALUE] (#'sema/declare-var! ps (:pattern t) :global))]
@@ -1229,7 +1433,18 @@
           old (some #(when (and (= :tmpl (:e %)) (= :fn (:tk %)) (= qt (get-in (:pattern (tmpl (:id %))) [:type :qualType]))
                                 (= (map (juxt :kind :qt :pack) (tparams n)) (map (juxt :kind :qt :pack) (:params (tmpl (:id %))))))
                        (:id %))
-                    (.get ^java.util.HashMap (:names scope) (:name n)))]
+                    (.get ^java.util.HashMap (:names scope) (:name n)))
+          ;; a functionally equivalent redeclaration spelled otherwise ([temp.over.link]/5; G4: <type_traits>'s
+          ;; `_Require<...> swap(_Tp&, _Tp&)` and <bits/move.h>'s `typename enable_if<...>::type swap(...)`): the same
+          ;; signature with the template's own parameters
+          old (or old
+                  (let [ps (tparams n)
+                        cands (filter #(and (= :tmpl (:e %)) (= :fn (:tk %))
+                                            (= (map (juxt :kind :pack) ps) (map (juxt :kind :pack) (:params (tmpl (:id %))))))
+                                      (.get ^java.util.HashMap (:names scope) (:name n)))]
+                    (when (seq cands)
+                      (when-let [sig (try (dissoc (sema/resolve-type (bind-scope scope ps nil -1) qt) :cq) (catch arbace.lang.ExceptionInfo _ nil))]
+                        (some #(when (= (canonical sig) (canonical (try (sym-sig (tmpl (:id %))) (catch arbace.lang.ExceptionInfo _ nil)))) (:id %)) cands)))))]
       (if old
         ;; the definition replaces the declaration; the declarations' default arguments are kept ([dcl.fct.default]/4)
         (when body? (upd-tmpl! old #(assoc % :pattern pattern :params (tparams n) :sig nil :decls (conj (vec (:decls %)) (:pattern %)))))
@@ -1410,5 +1625,6 @@
                            (let [es (sema/lookup scope (first parts)) e (first (filter #(= :type (:e %)) es))]
                              (when (and e (#{:tparam :tdep :tspec} (:k (:ty e))))
                                [{:e :type :ty {:k :tdep :base (:ty e) :names (vec (rest parts))} :pos -1}])))
+         :trait-type (fn [scope nm forms] (if (contains? type-traits nm) (trait-type scope nm forms) (fail :type "unknown type " nm)))
          :pending pending
          :wrap (fn [f] (binding [*tmpls* (atom {}) *scanned* (atom #{})] (f)))})

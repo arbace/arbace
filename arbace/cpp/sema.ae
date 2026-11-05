@@ -214,12 +214,34 @@
 
 (defn- type-entity [es] (first (filter #(= :type (:e %)) es)))
 
+(def ^:dynamic *decltypes* nil) ; G4: the native parser's decltype operands {text-without-spaces node}
+
+(declare analyze)
+
+(defn- decltype-of
+  "decltype(e) ([dcl.type.decltype]/1): the operand the native parser kept for the text `t`, analyzed in `scope`
+  (unevaluated: its result is not kept); an unparenthesized id-expression or member access its entity's declared type,
+  else T& for an lvalue, T&& for an xvalue, T for a prvalue."
+  [scope ^String t]
+  (let [n (get *decltypes* (str/replace t #"\s+" ""))]
+    (when-not n (fail :decltype "decltype(" t ")"))
+    (let [x (analyze {:scope scope :statics (atom [])} n)]
+      (cond
+        (and (= "DeclRefExpr" (:kind n)) (= :var (:op x))) (:ty (var* (:id x)))
+        (#{"DeclRefExpr" "MemberExpr"} (:kind n)) (:ty x)
+        (= :lv (:cat x)) (abi/lref (:ty x))
+        (= :xv (:cat x)) (abi/rref (:ty x))
+        :else (:ty x)))))
+
 (defn resolve-type-form [scope f]
   (cond
     (symbol? f)
     (if-let [n (builtin-syms f)]
       (abi/b n)
-      (if (= 'auto f) {:k :auto}
+      (cond (= 'auto f) {:k :auto}
+            ;; x86-64's va_list (the SysV ABI §3.5.7): struct __va_list_tag[1], the struct opaque here
+            (= '__builtin_va_list f) (abi/arr 1 (opaque-class "__va_list_tag"))
+            :else
       (let [parts (name-parts f)
             es (if (= 1 (count parts)) (lookup scope (first parts))
                    (or (when-let [h (:dependent-name @hooks)] (h scope parts)) (lookup-qualified scope parts)))
@@ -239,7 +261,10 @@
               (abi/arr nil (resolve-type-form scope (second f)))
               (abi/arr (let [b (second f)] (cond (number? b) b (and b (:const-bound @hooks)) ((:const-bound @hooks) scope b) :else nil))
                        (resolve-type-form scope (nth f 2))))
-      fn (let [[_ ps r] f
+      fn (if-let [tt (when (and (symbol? (nth f 2 nil)) (str/starts-with? (str (nth f 2)) "__")) (:trait-type @hooks))]
+           ;; a transform trait's type (G4: __remove_cv(T)), spelled as a function type returning the trait's name
+           (tt scope (str (nth f 2)) (second f))
+         (let [[_ ps r] f
                va (some #{'&} ps)
                ps (remove #{'&} ps)
                ps (if (= ['void] (vec ps)) [] ps)]
@@ -250,7 +275,7 @@
                                  (if-let [h (:pack-expand @hooks)] (h scope (second %)) (fail :pack "a pack expansion"))
                                  [(resolve-type-form scope %)])
                               ps))
-            :va (boolean va)})
+            :va (boolean va)}))
       cpp/elaborated (resolve-type-form scope (nth f 2))
       typename (resolve-type-form scope (second f))
       ;; decltype of the two forms headers name types by (typedef decltype(nullptr) nullptr_t; ... decltype(sizeof 0)
@@ -258,7 +283,7 @@
       decltype (let [x (second f) t (str/trim (if (and (seq? x) (= 'cpp/text (first x))) (second x) (str x)))]
                  (cond (= t "nullptr") abi/nullptr-t
                        (re-find #"^(sizeof|alignof)\b" t) abi/ulong*
-                       :else (fail :decltype "decltype(" t ")")))
+                       :else (decltype-of scope t)))
       <> (if-let [h (:template-id @hooks)] (h scope f) (fail :template "template-id " (pr-str f)))
       cpp/scope (loop [t (resolve-type-form scope (second f)) [p & more] (nnext f)]
                   (cond
@@ -283,29 +308,87 @@
       (fail :type "type form " (pr-str f)))
     :else (fail :type "type form " (pr-str f))))
 
+(defn- strip-type-attrs
+  "A spelling without its GNU attributes (`void () noexcept __attribute__((noreturn))`): none of them changes the type
+  the analysis needs (G4: the headers' declarations)."
+  ^String [^String s]
+  (if (str/includes? s "__attribute__")
+    (loop [s s]
+      (let [i (.indexOf s "__attribute__")]
+        (if (neg? i)
+          (str/trim s)
+          (let [j (.indexOf s "((" i)
+                k (when (>= j 0) (loop [k (+ j 2) d 2] (cond (>= k (count s)) nil (= \( (.charAt s k)) (recur (inc k) (inc d))
+                                                             (= \) (.charAt s k)) (if (= d 1) (inc k) (recur (inc k) (dec d))) :else (recur (inc k) d))))]
+            (if k (recur (str (subs s 0 i) (subs s k))) (str/trim s))))))
+    s))
+
 (defn resolve-type
   "The semantic type of clang's spelling `s` in `scope`."
-  [scope ^String s]
+  [scope ^String s0]
+  (let [s (strip-type-attrs s0)]
   (if (re-find #"\((unnamed|anonymous) (union|struct|class|enum) at " s)
     (let [t @*last-anon*] (cond-> t (re-find #"^const " s) (assoc :c true)))
   (try (resolve-type-form scope (ct/parse-type s))
-       (catch arbace.lang.ExceptionInfo e (if (:codegen/refused (ex-data e)) (throw e) (fail :type "type " s ": " (.getMessage e)))))))
+       (catch arbace.lang.ExceptionInfo e (if (:codegen/refused (ex-data e)) (throw e) (fail :type "type " s ": " (.getMessage e))))))))
 
 (defn- method-const? [^String qt] (boolean (re-find #"\)\s*const(\s|$|&)" qt)))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; The main file's text: qualifiers the tree does not keep
 
+(def ^:dynamic *main-name* nil) ; the main file's name in the native tree's locations (its text is *src*)
+(def ^:private file-texts (atom {}))
+
+(defn- loc-of
+  "A location's file position: its own, or a macro token's expansion location."
+  [l]
+  (if (:offset l) l (:expansionLoc l)))
+
+(defn text-of
+  "The text of the file `file` names in the tree's locations: the main file's *src*, a header's read once (G4: header
+  bodies are parsed, so their nodes' text is their own file's)."
+  ^String [file]
+  (if (or (nil? file) (= file *main-name*))
+    *src*
+    (or (get @file-texts file)
+        (let [f (java.io.File. ^String file)]
+          (if (.isFile f)
+            (let [t (String. (java.nio.file.Files/readAllBytes (.toPath f)) "ISO-8859-1")]
+              (swap! file-texts assoc file t)
+              t)
+            *src*)))))
+
+(defn header-node?
+  "Whether a node is a header's (G4: its location's file a header's path, not the main file's)."
+  [n]
+  (let [f (:file (loc-of (get-in n [:range :begin])))]
+    (boolean (and (string? f) (not= f *main-name*) (str/starts-with? f "/")))))
+
 (defn- node-text ^String [n]
-  (let [b (get-in n [:range :begin :offset]) e (get-in n [:range :end :offset]) l (get-in n [:range :end :tokLen])]
-    (when (and b e) (subs *src* b (min (count *src*) (+ (long e) (long (or l 0))))))))
+  (let [bl (loc-of (get-in n [:range :begin])) el (loc-of (get-in n [:range :end]))
+        b (:offset bl) e (:offset el) l (:tokLen el)]
+    (when (and b e (= (:file bl) (:file el)))
+      (let [src (text-of (:file bl))]
+        (when (<= (long b) (count src))
+          (subs src b (max (long b) (min (count src) (+ (long e) (long (or l 0)))))))))))
+
+(defn text-before-name
+  "The text a declaration's node has before its name (its location), in its own file, or nil."
+  ^String [n]
+  (let [bl (loc-of (get-in n [:range :begin])) ll (loc-of (:loc n))
+        b (:offset bl) l (:offset ll)]
+    (when (and b l (< (long b) (long l)) (= (:file bl) (:file ll)))
+      (let [src (text-of (:file bl))] (subs src b (min (count src) (long l)))))))
 
 (defn- qualifier-before
   "The parts of the nested-name-specifier written before a declaration's name (`int ns::P::get()`: [\"ns\" \"P\"])."
   [n]
-  (let [b (get-in n [:range :begin :offset]) l (get-in n [:loc :offset])]
-    (when (and b l (< (long b) (long l)))
-      (let [t (subs *src* b l)
+  (let [bl (loc-of (get-in n [:range :begin])) ll (loc-of (:loc n))
+        b (:offset bl) l (:offset ll)]
+    (when (and b l (< (long b) (long l)) (= (:file bl) (:file ll)))
+      (let [src (text-of (:file bl))
+            t (subs src b (min (count src) (long l)))
             m (re-find #"((?:[A-Za-z_][A-Za-z_0-9]*\s*::\s*)+)(~\s*)?$" t)]
         (when m (vec (map str/trim (remove str/blank? (str/split (second m) #"::")))))))))
 
@@ -323,34 +406,49 @@
           :else (recur (inc i) d start out))))))
 
 (defn- ref-qualifier
-  "A DeclRefExpr's written qualifier's parts and whether it starts with ::."
+  "A DeclRefExpr's written qualifier's parts and whether it starts with :: (the tree's, P13; else its text's)."
   [n]
+  (if (:_wn n)
+    (when (or (:globalQualifier n) (seq (:qualifier n))) [(boolean (:globalQualifier n)) (vec (:qualifier n))])
   (let [t (node-text n)]
     (when (and t (str/includes? t "::"))
       (let [g (str/starts-with? (str/trim t) "::")
             parts (vec (map str/trim (remove str/blank? (split-scope t))))]
-        [g (vec (butlast parts))]))))
+        [g (vec (butlast parts))])))))
+
+(defn written-targs
+  "The text `name<args>` of a name expression's explicit template arguments (the tree's, P13 (b)), or nil; a node of
+  no written name (the parser's own) by its text."
+  [n ^String nm]
+  (if (:_wn n)
+    (when-let [as (:explicitTemplateArgs n)] (str nm "<" (str/join ", " as) ">"))
+    (let [t (node-text n)] (when (and t (str/includes? t "<")) t))))
 
 (defn lookup-qualified
   "The entities of a qualified name's last part, its qualifiers looked up from `scope` (the first unqualified)."
   ([scope parts] (lookup-qualified scope parts false))
   ([scope parts global?]
    (let [root (loop [s scope] (if (:parent s) (recur (:parent s)) s))]
-     (loop [s (if global? root nil) [p & more] parts]
-       (let [es (when-not (str/includes? p "<") (if s (find-here s p) (lookup scope p)))]
+     (loop [s (if global? root nil) [p & more] parts done []]
+       (let [es (when-not (str/includes? p "<") (if s (find-here s p) (lookup scope p)))
+             ;; a template-id after a qualifier: its arguments resolved where the name is written, its template
+             ;; through the qualifier (ns::X<T>::v in a template's body)
+             tid-type (fn [] (if (seq done)
+                               (resolve-type scope (str (when global? "::") (str/join "::" (conj done p))))
+                               (resolve-type (or s scope) p)))]
          (if (empty? more)
            (if (str/includes? p "<")
-             [{:e :type :ty (resolve-type (or s scope) p) :pos -1}] ; a template-id names a type (A<int>)
+             [{:e :type :ty (tid-type) :pos -1}] ; a template-id names a type (A<int>)
              (or (seq es) (when (and (nil? s) (= :ns (:kind scope))) nil) (header-entities parts)))
            (let [e (if (str/includes? p "<")
-                     {:e :type :ty (resolve-type (or s scope) p)} ; a template-id (Box<int>::count)
+                     {:e :type :ty (tid-type)} ; a template-id (Box<int>::count)
                      (first (filter #(#{:ns :type} (:e %)) es)))
                  s2 (cond (= :ns (:e e)) (:scope e)
                           (abi/class? (:ty e)) (:scope (abi/cls-of (:ty e)))
                           (abi/enum? (:ty e)) (:scope (abi/enm (:id (:ty e))))
                           :else nil)]
              (if s2
-               (recur s2 more)
+               (recur s2 more (conj done p))
                ;; a namespace only the headers declare (std::printf)
                (or (header-entities parts) (fail :lookup "no scope " p))))))))))
 
@@ -429,9 +527,12 @@
       (upd-fn! id (fn [g] (cond-> (merge g (select-keys pinfo (if body [:param-names] [])))
                             (some some? (:defaults pinfo)) (assoc :defaults (:defaults pinfo))
                             body (assoc :body body :node n :def-scope scope :inits (filter #(= "CXXCtorInitializer" (:kind %)) (kids n))
-                                        :inline (or (:inline g) (boolean (:inline n)))))))
+                                        :inline (or (:inline g) (boolean (:inline n))))
+                            ;; a header's definition: analyzed when used (G4), as clang emits an inline function
+                            (and body (header-node? n)) (assoc :lazy true))))
       (do (swap! *fns* assoc id (merge f pinfo {:id id :node n :def-scope scope}
-                                      (when body {:body body :inits (filter #(= "CXXCtorInitializer" (:kind %)) (kids n))})))
+                                      (when body {:body body :inits (filter #(= "CXXCtorInitializer" (:kind %)) (kids n))})
+                                      (when (and body (header-node? n)) {:lazy true})))
           (enter! home (if (= k :ctor) " ctor" (if (= k :dtor) " dtor" nm)) {:e :fn :id id :pos (:pos f)})
           (when (= k :ctor) (abi/update-cls! cid update :ctors (fnil conj []) id))
           (when (= k :dtor) (abi/update-cls! cid assoc :dtor id))
@@ -530,8 +631,26 @@
       (when-not nm (reset! *last-anon* t)))
     t))
 
+(declare declare-node*!)
+
+(def ^:dynamic *header-drops* nil) ; atom [[kind name message] ...]: the header declarations not declared (G4)
+
 (defn declare-node!
-  "Enters a declaration node of namespace or class scope."
+  "Enters a declaration node of namespace or class scope. A header's declaration that the analysis refuses is dropped
+  (G4: a use of it fails later as an unknown name; CPP_HDR_TRACE=1 prints each)."
+  [scope n]
+  (if (header-node? n)
+    (try (declare-node*! scope n)
+         (catch arbace.lang.ExceptionInfo e
+           (if (:codegen/refused (ex-data e))
+             (do (when *header-drops* (swap! *header-drops* conj [(:kind n) (:name n) (.getMessage e)]))
+                 (when (System/getenv "CPP_HDR_TRACE")
+                   (binding [*out* *err*] (println "header drop:" (:kind n) (:name n) (get-in n [:range :begin :offset]) (.getMessage e))))
+                 nil)
+             (throw e))))
+    (declare-node*! scope n)))
+
+(defn- declare-node*!
   [scope n]
   (if-let [r (when-let [h (:declare @hooks)] (h scope n))]
     r
@@ -1353,8 +1472,8 @@
     ;; nothing visible: a call's argument-dependent lookup may still find a function (template)
     (when (and (empty? es) (or g (seq q))) (fail :name "unknown name " nm))
     (let [e (entity-expr ctx es n)]
-      (if (and (seq (:tmpls e)) (str/includes? (or (node-text n) "") "<"))
-        (assoc e :targs-text (node-text n) :targs-scope (:scope ctx))
+      (if-let [tt (when (seq (:tmpls e)) (written-targs n nm))]
+        (assoc e :targs-text tt :targs-scope (:scope ctx))
         e))))
 
 (defn- arith-binop [o l r]
@@ -1459,10 +1578,12 @@
         cid (class-id (:ty obj))
         nm (:name n)
         ;; a qualified member (o.B::f): looked up in B, called without virtual dispatch
-        q (let [t (or (node-text n) "")
-                m (re-find #"(?:\.|->)\s*((?:[A-Za-z_][A-Za-z_0-9]*\s*(?:<[^.]*>)?\s*::\s*)+)~?[A-Za-z_][A-Za-z_0-9]*\s*(?:<.*>)?\s*$" t)]
-            ;; the qualifier's parts, a template-id among them (o.A<int>::f)
-            (when m (vec (map str/trim (remove str/blank? (split-scope (second m)))))))
+        q (if (:_wn n)
+            (not-empty (vec (:qualifier n)))
+            (let [t (or (node-text n) "")
+                  m (re-find #"(?:\.|->)\s*((?:[A-Za-z_][A-Za-z_0-9]*\s*(?:<[^.]*>)?\s*::\s*)+)~?[A-Za-z_][A-Za-z_0-9]*\s*(?:<.*>)?\s*$" t)]
+              ;; the qualifier's parts, a template-id among them (o.A<int>::f)
+              (when m (vec (map str/trim (remove str/blank? (split-scope (second m))))))))
         qcid (when (seq q) (let [e (first (filter #(= :type (:e %)) (lookup-qualified (:scope ctx) q)))] (class-id (:ty e))))]
     (when-not cid (fail :member "member of a non-class"))
     (let [[fcid fids e] (method-set-of (or qcid cid) nm)
@@ -1476,7 +1597,8 @@
         (let [tm (vec (keep (fn [[_ x]] (when (= :tmpl (:e x)) (:id x))) (class-lookup (or qcid cid) nm)))
               t (or (node-text n) "")]
           (cond-> {:op :fnset :fns fids :tmpls tm :name nm :obj (if (= :pr (:cat obj)) (materialize obj) obj) :ty {:k :overload} :cat :lv :qualified (boolean qcid)}
-            (and (seq tm) (re-find #"<[^<>]*(?:<[^<>]*>[^<>]*)*>\s*$" t)) (assoc :targs-text (second (re-find #"(?:\.|->)\s*(?:template\s+)?(.*)$" t)) :targs-scope (:scope ctx))))
+            (and (seq tm) (:_wn n) (:explicitTemplateArgs n)) (assoc :targs-text (written-targs n nm) :targs-scope (:scope ctx))
+            (and (seq tm) (not (:_wn n)) (re-find #"<[^<>]*(?:<[^<>]*>[^<>]*)*>\s*$" t)) (assoc :targs-text (second (re-find #"(?:\.|->)\s*(?:template\s+)?(.*)$" t)) :targs-scope (:scope ctx))))
         (= :enumerator (:e e)) {:op :int :v (:val e) :ty (:ty e) :cat :pr}
         :else (fail :member "member " nm)))))
 
@@ -1831,7 +1953,7 @@
           args (analyze-args ctx an)]
       (if (and (abi/class? (abi/unq (:ty callee))) (not= :fnset (:op callee)))
         (or (operator-call ctx "()" (into [callee] args)) (fail :call "no operator()"))
-        (analyze-call ctx (if (and (= :fnset (:op callee)) (str/includes? (or (node-text cn) "") "::")) (assoc callee :qualified true) callee) args)))
+        (analyze-call ctx (if (and (= :fnset (:op callee)) (if (:_wn cn) (boolean (or (:globalQualifier cn) (seq (:qualifier cn)))) (str/includes? (or (node-text cn) "") "::"))) (assoc callee :qualified true) callee) args)))
     "MemberExpr" (member-expr ctx n)
     ;; a member named in a template's pattern whose lookup clang left to the instantiation (f<T>() in a member)
     "UnresolvedMemberExpr" (if (seq (kids n))
@@ -1906,7 +2028,7 @@
                            t (abi/unq (:ty r))]
                        {:op :throw :ety t :init (init-for t e ctx :copy) :ty abi/void :cat :pr})
                      {:op :throw :ty abi/void :cat :pr})
-    (fail :expr "expression " (:kind n))))
+    (fail :expr "expression " (:kind n) (when (System/getenv "CPP_HDR_TRACE") (str " at " (pr-str (loc-of (get-in n [:range :begin]))))))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Statements
@@ -2017,7 +2139,12 @@
                                  a (if (and (= :var (:op a)) (#{:local :param} (:storage (var* (:id a)))) (abi/class? (abi/unq (:ty a))))
                                      (assoc a :cat :xv :nrvo-var (:id a)) a)]
                              {:s :return :init (init-for rt a ctx (if (= :init-list (:op a)) :list :copy)) :nrvo-var (:nrvo-var a)})))
-    "IfStmt" (let [c (block-ctx ctx)
+    "IfStmt" (if (:isConsteval n)
+               ;; if consteval ([stmt.if]/4): at run time the branch of a context not constant-evaluated (G4: the
+               ;; headers' std::__is_constant_evaluated)
+               (let [[a e] (:inner n)]
+                 (if (:isNegatedConsteval n) (stmt (block-ctx ctx) a) (if e (stmt (block-ctx ctx) e) {:s :null})))
+             (let [c (block-ctx ctx)
                    ks (vec (:inner n))
                    ;; clang's IfStmt: [init?] [condvar decl?] cond then else?, the flags say which
                    [init ks] (if (:hasInit n) [(first ks) (subvec ks 1)] [nil ks])
@@ -2034,7 +2161,7 @@
                                                    (stmt (block-ctx c) (nth ks 1))
                                                    (if (:hasElse n) (stmt (block-ctx c) (nth ks 2)) {:s :null}))]
                                                 [{:s :if :cond (cond-of c cn) :then (stmt (block-ctx c) (nth ks 1))
-                                                  :else (when (:hasElse n) (stmt (block-ctx c) (nth ks 2)))}])))})
+                                                  :else (when (:hasElse n) (stmt (block-ctx c) (nth ks 2)))}])))}))
     "WhileStmt" (let [c (block-ctx ctx) ks (vec (:inner n))
                       [cvar ks] (if (:hasVar n) [(first ks) (subvec ks 1)] [nil ks])]
                   (when cvar (fail :stmt "a while condition's declaration (destroyed each iteration)"))
@@ -2295,7 +2422,8 @@ protected:
     (do
       ((or (:wrap @hooks) (fn [f] (f)))
        (fn []
-         (when (re-find #"\btypeid\b|\btype_info\b" src)
+         ;; (the headers parsed in full, G4: <typeinfo>'s own class)
+         (when (and (re-find #"\btypeid\b|\btype_info\b" src) (not-any? header-node? nodes))
            (binding [*src* prelude-typeinfo]
              (doseq [n (prelude-nodes)] (declare-node! root n))))
          (doseq [n nodes] (declare-node! root n))

@@ -132,6 +132,7 @@
 (def ^:private ^:const THDR 9)
 (def ^:private ^:const USES 11)     ; the special members' uses (arbace.repr.cpp.sema's resolve-uses: an ArrayList)
 (def ^:private ^:const RET 12)      ; the return type of the function whose body is being parsed
+(def ^:private ^:const DECLTYPES 13) ; G4: decltype's operands parsed ({text-without-spaces node}, a HashMap; *full-headers* only)
 (def ^:private ^:const PATTRS 10)   ; the attributes the ptr-operators of the declarator being parsed carried     ; the template header the next declaration is under: its parameters' names (for the injected class name)
 
 (defn- stv [^P p k] (aget ^objects (.-st p) (int k)))
@@ -168,6 +169,11 @@
 ;; the language linkage of the declarations being parsed ("C" inside extern "C"): kept in a function's entity for
 ;; the code generator (arbace.cpp.sema), whose header functions are known by their entities alone
 (def ^:dynamic *linkage* nil)
+
+;; G4 (doc/cpp/CODEGEN.md): the headers' declarations parsed in full, bodies and all, their nodes given with the main
+;; file's (the code generator's mode: arbace.cpp.codegen binds it); a header construct the parser cannot read is dropped
+;; (CPP_HDR_TRACE=1 prints each, its file and offset). Off: the headers skimmed for their names (the converter's mode)
+(def ^:dynamic *full-headers* false)
 
 (defn- in-template?
   "Whether the cursor is in a template (a parameter list with parameters encloses it; an explicit specialization's has none)."
@@ -532,6 +538,18 @@
       :else
       (str (when (:g qn) "::") (str/join "::" (map #(part-str p %) parts))))))
 
+(defn- written-name
+  "A name expression's written parts as clang's DeclRefExpr and MemberExpr keep them (CODEGEN.md P13 (b)): the explicit
+  template arguments of its last part (`:explicitTemplateArgs`, each argument's text; DeclRefExpr::template_arguments)
+  and the nested-name-specifier's parts (`:qualifier`, each part's text with its arguments; `:globalQualifier` for a
+  leading ::)."
+  [^P p qn]
+  (let [parts (:parts qn) lp (peek parts) q (butlast parts)]
+    (cond-> {:_wn true}
+      (:args lp) (assoc :explicitTemplateArgs (mapv #(arg-str p %) (:args lp)))
+      (seq q) (assoc :qualifier (mapv #(part-str p %) q))
+      (:g qn) (assoc :globalQualifier true))))
+
 (defn- name-plain
   "A name's last part's identifier, nil for an operator, a destructor or a qualified name."
   [qn]
@@ -828,6 +846,16 @@
               (not= r :ambig) r
               (and (not (is? p ";")) (not (and allow-for-range (is? p ":")))) :false
               :else :ambig)))))))
+
+(defn- angle-paren-close
+  "The index of the ) closing the ( at token `i`, or nil."
+  [^P p ^long i]
+  (loop [j (inc i) d 1]
+    (let [^T t (tok-at p j)]
+      (cond (identical? :eof (.-k t)) nil
+            (t= t "(") (recur (inc j) (inc d))
+            (t= t ")") (if (= d 1) j (recur (inc j) (dec d)))
+            :else (recur (inc j) d)))))
 
 (defn- tentatively
   "Runs (f p) with the cursor put back after."
@@ -1547,12 +1575,13 @@
           (and (:unres en) (= 1 (count (:parts qn))) (not (:g qn)) (or (in-template? p) (dep-this? p)))
           (node p "UnresolvedMemberExpr" b (:e qn) {})
           :else
-          (node p "DeclRefExpr" b (:e qn) {:_ent en
+          (node p "DeclRefExpr" b (:e qn) (merge (written-name p qn)
+                                          {:_ent en
                                            :_mfn (when (and (= :fn (:k en)) (= 1 (count (:parts qn))) (not (:g qn)) (:s lp) (or (in-template? p) (dep-this? p))
                                                             (class-member? p (:s lp)))
                                                    en)
                                            :_objdep (dep-this? p)
-                                           :referencedDecl {:name (or (:s lp) (when (:op lp) (if (re-find #"^[a-z]" (:op lp)) (str "operator " (:op lp)) (str "operator" (:op lp)))) "")}})))
+                                           :referencedDecl {:name (or (:s lp) (when (:op lp) (if (re-find #"^[a-z]" (:op lp)) (str "operator " (:op lp)) (str "operator" (:op lp)))) "")}}))))
       :else (perr p "an expression"))))
 
 (defn- member-node [^P p base arrow]
@@ -1566,7 +1595,7 @@
                       (let [e (sc/lookup (scope p) (:s lp))] (when (and (= :fn (:k e)) (class-member? p (:s lp))) [e (dep-this? p)]))
                       (when-let [[ce d] (object-class p base arrow)]
                         (let [e (sc/find-in (:scope ce) (:s lp))] (when (= :fn (:k e)) [e d])))))]
-    (node p "MemberExpr" (nb base) (:e qn) (cond-> {:name nm :isArrow arrow :inner [base]} mfn (assoc :_mfn mfn :_objdep dep)))))
+    (node p "MemberExpr" (nb base) (:e qn) (cond-> (merge (written-name p qn) {:name nm :isArrow arrow :inner [base]}) mfn (assoc :_mfn mfn :_objdep dep)))))
 
 (defn parse-postfix [^P p x]
   (loop [x x]
@@ -1731,7 +1760,10 @@
            (if (:cpp/parse (ex-data x))
              (let [_ (when debug? (binding [*out* *err*] (println "decline:" (ex-message x))))
                    [e _] (skip-statement! p b)]
-               (decline! p (str "statement: " (:why (ex-data x))))
+               (if (main-tok? p b)
+                 (decline! p (str "statement: " (:why (ex-data x))))
+                 (when (System/getenv "CPP_HDR_TRACE")
+                   (binding [*out* *err*] (println "header statement decline:" (.-f (tok-at p b)) (.-o (tok-at p b)) (ex-message x)))))
                (node p "NativeDecline" b (max b (long e)) {}))
              (throw x))))))
 
@@ -2087,7 +2119,13 @@
                 (if (and qn (> (count (:parts qn)) 1))
                   (do (seek! p save) (let [qn (parse-name p :parse)] (recur (assoc ds :type {:t :n :s (name-str p qn)}) words)))
                   (do (seek! p save) (adv! p)
-                      (let [ob (ix p)] (skip-balanced! p)
+                      (let [ob (ix p)]
+                        ;; G4: the operand parsed for the code generator's decltype, keyed by its text
+                        (when (and *full-headers* (not (skim? p)))
+                          (let [x (tentatively p (fn [p] (adv! p) (let [x (with-gt p true (parse-expr p))] (when (is? p ")") x))))]
+                            (when (map? x) (let [^HashMap m (stv p DECLTYPES)] (.put m (str/replace (tok-text p (inc ob) (dec (long (or (some-> (angle-paren-close p ob) long) ob))))
+                                                                                                  #"\s+" "") x)))))
+                        (skip-balanced! p)
                         (recur (assoc ds :type {:t :dt :s (tok-text p (inc ob) (- (ix p) 2))}) words))))))
             (and (#{"__typeof__" "__typeof" "typeof"} s) (not has-type) (is-at? p 1 "("))
             (do (adv! p) (let [ob (ix p)] (skip-balanced! p) (recur (assoc ds :type {:t :n :s (str s "(" (tok-text p (inc ob) (- (ix p) 2)) ")")}) words)))
@@ -3593,7 +3631,9 @@
                    e (skip-declaration! p b)]
                (when (= (ix p) b) (adv! p))
                (if (or (skim? p) (not (main-tok? p b)))
-                 []
+                 (do (when (and *full-headers* (not (skim? p)) (System/getenv "CPP_HDR_TRACE"))
+                       (binding [*out* *err*] (println "header decline:" (.-f (tok-at p b)) (.-o (tok-at p b)) (ex-message x))))
+                     [])
                  (do (decline! p (str "declaration: " (:why (ex-data x))))
                      [(node p "NativeDecline" b (max b (long e)) {})])))
              (throw x))))))
@@ -3605,7 +3645,7 @@
   (loop [out []]
     (cond
       (or (eof? p) (is? p "}")) out
-      (and (not (skim? p)) (not (main-tok? p (ix p))))
+      (and (not (skim? p)) (not *full-headers*) (not (main-tok? p (ix p))))
       (do (skimming p true
             (loop []
               (when (and (not (eof? p)) (not (main-tok? p (ix p))))
@@ -3683,13 +3723,14 @@
   (let [root (sc/new-scope :ns nil {:k :ns :name ""})
         p (P. toks (alength toks) (long-array 1) (object-array 16) main src year gnu)]
     (st! p SCOPE root) (st! p ROOT root) (st! p SKIM false) (st! p MTMPL (HashSet.)) (st! p DECLINES 0) (st! p GTOP true)
-    (st! p UNNAMED 0) (st! p REASONS (HashMap.)) (st! p CLS nil) (st! p THDR nil) (st! p PATTRS (ArrayList.)) (st! p USES (ArrayList.))
+    (st! p UNNAMED 0) (st! p REASONS (HashMap.)) (st! p CLS nil) (st! p THDR nil) (st! p PATTRS (ArrayList.)) (st! p USES (ArrayList.)) (st! p DECLTYPES (HashMap.))
     (doseq [nm builtin-types] (sc/declare! root {:k :type :name nm}))
-    (let [cached (skim-headers! p cache-parts)
+    (let [cached (when-not *full-headers* (skim-headers! p cache-parts))
           nodes (loop [out []]
                   (let [out (into out (decl-seq p :top))]
                     (if (eof? p) out (do (adv! p) (recur out)))))]
       {:nodes (let [^ArrayList us (stv p USES)
                     r (when (seq us) (sema/resolve-uses (vec us) year))]
                 (if (seq r) (sema/patch-defaulted nodes r) nodes))
-       :declines (stv p DECLINES) :reasons (into {} (stv p REASONS)) :root (stv p ROOT) :skim-cache cached}))))
+       :declines (stv p DECLINES) :reasons (into {} (stv p REASONS)) :root (stv p ROOT) :skim-cache cached
+       :decltypes (into {} (stv p DECLTYPES))}))))
