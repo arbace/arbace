@@ -1583,6 +1583,12 @@ trees' `eval`, not a second machine.
   limits: `:vs-hsi`, diffcheck's kind): **all 66 the same** as hsi's (status, stdout, stderr), and `:hsi-run` beside `:run`
   the two levels' seconds of the same run. Every closure the runs entered in the compiled modules was installed (none refused by shape) but those of `GHC.Internal.Classes`, whose 5.8 MB
   package is over the day's `HSI_AOT_MAX_KB`.
+- **GT8's essential list** (`test/haskell/hsi/essential.txt`: 14 samples, 36 synthetic programs and 73 of the testsuite's run
+  tests, chosen by HE4d for speed), `bin/hsi check --aot --corpus samples,synthetic,testsuite-core --only
+  @test/haskell/hsi/essential.txt` at 2 jobs after the morning's gate: **123 of 123 equal** to GHC's runs and **all 123 the same
+  as hsi's**, the four controls failing as they must; 25 minutes of builds (the testsuite's programs' library modules compiled
+  for the first time; the longest build 4.8 minutes, a program entering many new modules). With the runs above,
+  `test/haskell/check-hsi-aot.edn` holds 139 programs: 138 pass, AsyncRerun in its class, every one the same as on hsi.
 - **The builds**: the check's first pass at 1 job, every library package compiled for the first time, 23 minutes of builds
   for 62 programs (the 211 library modules the samples and the synthetic programs enter: 85 MB of Go); the second pass, those
   packages from Go's build cache, the program's own packages alone compiled: 0.4 to 15 s a program (the synthetic programs'
