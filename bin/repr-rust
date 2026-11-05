@@ -7,6 +7,8 @@
 # the printer are Arbace (arbace.repr.rust, .convert, .print), evaluated from the checkout:
 # repr/rust is not one of the tools the executable embeds (arbace/j2g/embed.ae's excluded list).
 #
+#   bin/repr-rust pins check      (GT9; bin/gate --pins) the pins hold, no fetch: the host's rustc, driver library and rustdoc at
+#                                 tools/rsdump/RUSTC_VERSION, and each pinned apk, crate and the UI tarball that is there at its SHA-256
 #   bin/repr-rust helper          build the helper into .tmp/repr-rust/rsdump (the host's rustc,
 #                                 with a sysroot of links to its std and rustc-dev's crates; rebuilt
 #                                 when its source, its pins or rustc --version change)
@@ -50,8 +52,9 @@
 #                                 .tmp/repr-rust/printed), at its rs/file's :path; mode :lines' layout,
 #                                 the pretty layout (any forms, their positions ignored: RR4), or the
 #                                 full layout of forms of mode :full (the original text)
-#   bin/repr-rust roundtrip [--only REGEX | --iface] [--text | --text-only] [--pretty | --pretty-only]
+#   bin/repr-rust roundtrip [--only REGEX | --only-list FILE | --iface] [--text | --text-only] [--pretty | --pretty-only]
 #                           [--run | --run-only] [--code | --code-only] [--std] [CORPUS... | all]
+#                                 (--only-list FILE, GT9: the files FILE names, a path a line, as one --only regex of the names alone)
 #                                 the round trip's tree level (SPEC §11.1, §11.2; RR1) over the
 #                                 corpus: dump, read, print into .tmp/repr-rust/cand/CORPUS/, and
 #                                 compare rustc's trees (rsdump tree: the parsed tree's Debug text
@@ -104,11 +107,12 @@
 #                                 other, all: the five. A crate set's interface level is Cargo's
 #                                 (crates_docs: the lock test/rust/CORPUS.lock, a directory source
 #                                 of the pinned .crate files)
-#   bin/repr-rust test            the spec's cases (test/rust/; bin/lib/repr-rust/test): the reader's
+#   bin/repr-rust test [--samples] the spec's cases (test/rust/; bin/lib/repr-rust/test): the reader's
 #                                 samples, the worked example converted and its round trip, the
 #                                 interface level's cases, mode :full's cases, edition 2015's, the
 #                                 pretty layout's, the behaviour level's, the lowered and code levels'
-#                                 and an expression file of include!
+#                                 and an expression file of include!; --samples (GT9, the gate's essential tier): cases 1-4 and 6-8 alone (no rustdoc,
+#                                 no program built and run: the interface, behaviour, lowered and code levels left out)
 #
 # Environment: REPR_RUST_APKS (a directory of apks to take the pinned ones from, checked by their
 # SHA-256, before apk fetch); REPR_RUST_SRC (a directory holding rustc-1.99.1-src.tar.xz, before
@@ -374,17 +378,48 @@ read_files() {
   arbace_tool -m arbace.repr.rust read --pin "$root/tools/rsdump/RUSTC_VERSION" "$@"
 }
 
+# pins_check (GT9, GTS211; the gate's `bin/gate --pins`): the pins hold, no fetch and no network: the host's rustc, its driver library and rustdoc
+# at tools/rsdump/RUSTC_VERSION, and each pinned file that is there by its SHA-256: rustc-dev's and rust-src's apks (tools/rsdump/apks.sha256, in
+# $apks or REPR_RUST_APKS), the crates (test/rust/crates-2026-10-18.sha256, in the crates' cache, REPR_RUST_CRATES or Cargo's), the UI suite's source
+# tarball (the corpus's :tarball, in $work/src or REPR_RUST_SRC); one not fetched yet is said, not a failure (the fetch checks it)
+pins_check() {
+  local bad=0 n=0 absent=() sha f d have found tsha tf
+  rustc_check || bad=1
+  have=$(rustdoc --version 2>/dev/null | sed -n 's/^rustdoc \([0-9.]*\) (\([0-9a-f]*\) .*$/\1 \2/p')
+  [ "$have" = "$(pin version) $(pin commit)" ] || { echo "  PIN rustdoc is '$have', RUSTC_VERSION pins $(pin version) $(pin commit)"; bad=1; }
+  while read -r sha f; do
+    found=""
+    for d in "$apks" ${REPR_RUST_APKS:-}; do [ -f "$d/$f" ] && { found=$d/$f; break; }; done
+    if [ -z "$found" ]; then absent+=("$f"); continue; fi
+    n=$((n + 1)); [ "$(sha256sum < "$found" | cut -c1-64)" = "$sha" ] || { echo "  PIN $found: SHA-256 is not $sha (tools/rsdump/apks.sha256)"; bad=1; }
+  done < "$root/tools/rsdump/apks.sha256"
+  while read -r sha f; do
+    [ -n "$f" ] || continue
+    found=""
+    for d in "$work/crates/cache" ${REPR_RUST_CRATES:-} "${CARGO_HOME:-$HOME/.cargo}"/registry/cache/*; do [ -f "$d/$f" ] && { found=$d/$f; break; }; done
+    if [ -z "$found" ]; then absent+=("$f"); continue; fi
+    n=$((n + 1)); [ "$(sha256sum < "$found" | cut -c1-64)" = "$sha" ] || { echo "  PIN $found: SHA-256 is not $sha (test/rust/crates-2026-10-18.sha256)"; bad=1; }
+  done < "$root/test/rust/crates-2026-10-18.sha256"
+  read -r tf tsha < <(arbace_tool -e "(let [t (:tarball (read-string (slurp \"$(corpus_file rustc-1.99.1-ui)\")))] (println (:file t) (:sha256 t)))")
+  found=""; for d in "$work/src" ${REPR_RUST_SRC:-}; do [ -f "$d/$tf" ] && { found=$d/$tf; break; }; done
+  if [ -z "$found" ]; then absent+=("$tf"); else n=$((n + 1)); [ "$(sha256sum < "$found" | cut -c1-64)" = "$tsha" ] || { echo "  PIN $found: SHA-256 is not $tsha (the UI corpus's :tarball)"; bad=1; }; fi
+  if [ $bad = 0 ]; then
+    echo "rust pins: rustc $(pin version) ($(pin commit)), its driver library and rustdoc; $n pinned files at their SHA-256${absent[*]:+; not fetched yet (the fetch checks them): ${#absent[@]} files}"
+  else echo "rust pins: NOT held" >&2; return 1; fi
+}
+
 # the corpora (SPEC §11.4): std's five crates (RR1-RR3), then RR4's, then RR5's UI suite
 all_corpora="rustc-1.99.1 rustc-1.99.1-library rustc-1.99.1-compiler crates-2026-10-18 rustc-1.99.1-ui"
 
 roundtrip() {
-  local cs=() only="" iface=0 text=0 text_only=0 pretty=0 pretty_only=0 st=0 c
+  local cs=() only="" only_list="" iface=0 text=0 text_only=0 pretty=0 pretty_only=0 st=0 c
   run=0; run_only=0; std=0; code=0; code_only=0
   while [ $# -gt 0 ]; do
     case $1 in
       --code) code=1; shift ;;
       --code-only) code=1; code_only=1; shift ;;
       --only) only=$2; shift 2 ;;
+      --only-list) only_list=$2; shift 2 ;;
       --run) run=1; shift ;;
       --run-only) run=1; run_only=1; shift ;;
       --std) std=1; shift ;;
@@ -398,6 +433,15 @@ roundtrip() {
     esac
   done
   [ ${#cs[@]} -gt 0 ] || cs=(rustc-1.99.1)
+  # GT9 --only-list FILE (the gate's rotation): the corpus files FILE names, one a line (the paths of the corpus's :files, as `corpus list` prints
+  # them), as one --only regex: each name as written, not inside a longer name (a name, not followed by a word character, a - or a /, and not
+  # preceded by a word character, a . or a -); not with --only
+  if [ -n "$only_list" ]; then
+    [ -z "$only" ] || { echo "repr-rust: --only-list and --only are two ways to the same selection" >&2; return 2; }
+    [ -s "$only_list" ] || { echo "repr-rust: --only-list $only_list: no such file or empty" >&2; return 2; }
+    only=$(awk 'NF { printf "%s\\Q%s\\E", (n++ ? "|" : ""), $0 }' "$only_list")
+    only="(?<![\\w.-])(?:$only)(?![\\w/-])"
+  fi
   if [ "$iface" = 1 ] && [ -n "$only" ]; then echo "repr-rust: --iface documents whole crates: not with --only" >&2; return 2; fi
   build
   if [ "$std" = 1 ]; then
@@ -1038,5 +1082,6 @@ case $cmd in
   print) arbace_tool -m arbace.repr.rust print --jobs "$jobs" "$@" ;;
   roundtrip) rustc_check; roundtrip "$@" ;;
   test) exec "$root/bin/lib/repr-rust/test" "$@" ;;
+  pins) case ${1:-} in check|--check) pins_check ;; *) echo "usage: bin/repr-rust pins check" >&2; exit 2 ;; esac ;;
   *) sed -n '2,/^set -euo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac
