@@ -958,3 +958,7 @@ and `steps.edn` with GT9's fragment and, apart, this branch's spliced in; `bin/g
     manifest format for this crop); (c) raise Haskell's cap to 3.5 MB.
   - Costs: (a) none beyond the overrun; (b) a second format next to `oracle.bash`'s; (c) a precedent.
   - *Recommended: (a)*: the overrun is 3%, and the manifests are what makes a tampered member visible.
+
+## Decided (2026-11-05, the user: ORS20, ORS21)
+
+ORS20: (a) now, the round trip and test's print halves in the oracle tier and native-check on :ghc, then (c) haskell-native merged and the print's tree level native in the gate; ORS21 (a): the committed side's 3% overrun accepted.
