@@ -221,7 +221,10 @@ covers what.
   `translmod.ae` (lambda/translmod.ml), `format.ae` (stdlib/format.ml's engine) and `printtyp.ae` (typing/oprint.ml's
   printers), with `env.ae` extended by env.ml's module components, subst.ml and mtype.ml (T8), and their polymorphic
   variants' parts of the same files (types.ml, btype.ml, ctype.ml, typetexp.ml, typecore.ml, parmatch.ml, out_type.ml,
-  matching.ml, switch.ml, translcore.ml, translprim.ml; T9), are ports of the same OCaml 5.5.0 tarball (SHA-256
+  matching.ml, switch.ml, translcore.ml, translprim.ml; T9), `typeclass.ae` (typing/typeclass.ml with ctype.ml's class
+  signatures and objects, T9) and `translclass.ae` (lambda/translobj.ml, translclass.ml, T9) with the object parts of
+  the files above (types.ml, ctype.ml, typetexp.ml, typecore.ml, out_type.ml, oprint.ml, translcore.ml, translprim.ml,
+  simplif.ml), are ports of the same OCaml 5.5.0 tarball (SHA-256
   `fcc6ae665d1ec51d52510eaac7834a86a9806bf5a258bb7cca78733fccf015ba`, Copyright INRIA), by hand on 2026-11-05, the
   files carrying the notices: under the GNU Lesser General Public License version 2.1 with the OCaml LGPL linking
   exception (below). `arbace/repr/ocaml/typer.ae` (the driver and the judge) and `bin/lib/oi/typer.bash` are Arbace's own,

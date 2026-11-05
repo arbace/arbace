@@ -96,8 +96,16 @@ code. Three kinds of things live here:
   unify_row, unify_row_field, copy_row, build_subtype and enlarge_type, typetexp.ml's Ptyp_variant, typecore.ml's
   variant expressions and patterns, build_or_pat, finalize_variant and type_coerce, parmatch.ml's full_match,
   close_variant and pressure_variants, out_type.ml's rows and aliases, matching.ml's divide_variant and
-  combine_variant, switch.ml's test_sequence, translcore.ml's Texp_variant and translprim.ml's %loc_ primitives, by
-  hand, the files carrying OCaml's notice (LICENSE.md: the OCaml Core System); the driver and its judge are Arbace's own.
+  combine_variant, switch.ml's test_sequence, translcore.ml's Texp_variant and translprim.ml's %loc_ primitives, then (T9's
+  objects and classes, TYPER.md §13) typeclass.ml (`typer/typeclass.ae`: class_structure, type_object, class_expr,
+  class_type, class_declarations, class_type_declarations) with ctype.ml's class signatures, object fields,
+  unify_fields, filter_method, limited_generalize, subtype_fields and build_subtype on objects, typetexp.ml's
+  Ptyp_object, Ptyp_class and transl_poly_type, typecore.ml's object expressions (type_send, instance variables,
+  overrides, Pexp_poly), out_type.ml's and oprint.ml's object types and class declarations, translobj.ml and
+  translclass.ml (`typer/translclass.ae`: shared constants, oo_wrap, the object and class initialisers, builtin
+  methods, cached classes), translcore.ml's object expressions and fuse_method_arity, translprim.ml's %send primitives
+  and simplif.ml's Lifused, by hand, the files carrying OCaml's notice (LICENSE.md: the OCaml Core System); the driver
+  and its judge are Arbace's own.
 - Arbace's own namespaces of the program, not derived from Clojure: `box.ae` and `box/`
   (`arbace.box`, the store, over its host layer `arbace.box.host`; the box's build driver
   `arbace.box.build`, its plan `arbace.box.plan` (since GP2 also repr/go's native loader's go

@@ -350,7 +350,18 @@
         np (count params)]
     [(vec (take np ts)) (rebuild-class-type cty (atom (drop np ts)))]))
 
-(defn generalize-class-type! [params cty] (run! ty/generalize (concat params (class-type-types cty))))
+(defn- generalize-all!
+  "Ctype.with_local_level_generalize's pool: every node above the current level made generic, also under generic nodes"
+  [types]
+  (let [seen (java.util.IdentityHashMap.) lv @ty/current-level]
+    (letfn [(go [t] (let [t (ty/repr t)]
+                      (when-not (.containsKey seen t)
+                        (.put seen t true)
+                        (when (and (> (ty/level t) lv) (not= ty/generic-level (ty/level t))) (ty/set-level! t ty/generic-level))
+                        (run! go (ty/children (ty/desc t))))))]
+      (run! go types))))
+
+(defn generalize-class-type! [params cty] (generalize-all! (concat params (class-type-types cty))))
 
 (defn limited-generalize!
   "Ctype.limited_generalize: of the nodes of the types above the current level, the row variable ty0 and the nodes
@@ -623,9 +634,8 @@
     ;; generalized (with_local_level_generalize_for_class)
     (doseq [c res]
       (generalize-class-type! (:params (:decl c)) (:type (:decl c)))
-      (some-> (:new (:decl c)) ty/generalize)
-      (run! ty/generalize (:obj-params c)) (ty/generalize (:obj-ty c))
-      (run! ty/generalize (:params (:hash (:decl c)))) (ty/generalize (:manifest (:hash (:decl c)))))
+      (some-> (:new (:decl c)) vector generalize-all!)
+      (generalize-all! (concat (:obj-params c) [(:obj-ty c)] (:params (:hash (:decl c))) [(:manifest (:hash (:decl c)))])))
     (let [env (reduce (fn [e c]
                         (let [obj-path [:Pident (:obj-id c)]
                               d {:path obj-path :params (:obj-params c) :kind [:abstract] :manifest (:obj-ty c)
@@ -643,6 +653,7 @@
   "Typeclass.class_type_declarations: [[info...] env'], info {:name :ty-id :obj-id :decl}; the object types' temporary
   abbreviations bound while the class types are typed (recursive references)"
   [env scls]
+  (ty/begin-def)
   (let [pre (mapv (fn [scl]
                     (let [n (:txt (:pci_name scl)) ty-id (ty/ident-create n) obj-id (ty/ident-create n)
                           arity (count (:pci_params scl))
@@ -662,7 +673,7 @@
                                                                   :hash {:params (:cl-params c) :manifest (:cl-ty c)}}})))
                      env pre)
         res
-        (ty/with-local-level
+        (try
           (mapv (fn [c]
                   (let [scl (:scl c) vars (atom {})
                         [params typ] (ty/with-local-level
@@ -689,11 +700,11 @@
                         _ (set-object-name! obj-path hparams hty)
                         decl {:params params :type typ :path obj-path :virt (:pci_virt scl) :hash {:params hparams :manifest hty}}]
                     (assoc c :decl decl)))
-                pre))]
+                pre)
+          (finally (ty/end-def)))]
     (doseq [c res]
       (generalize-class-type! (:params (:decl c)) (:type (:decl c)))
-      (run! ty/generalize (:obj-params c)) (ty/generalize (:obj-ty c))
-      (run! ty/generalize (:params (:hash (:decl c)))) (ty/generalize (:manifest (:hash (:decl c))))
+      (generalize-all! (concat (:obj-params c) [(:obj-ty c)] (:params (:hash (:decl c))) [(:manifest (:hash (:decl c)))]))
       (let [obj-path [:Pident (:obj-id c)]]
         (env/add-decl! obj-path {:path obj-path :params (:obj-params c) :kind [:abstract] :manifest (:obj-ty c)
                                  :arity (count (:obj-params c)) :variance (repeat :inv) :class-ghost true :hash (:hash (:decl c))})))
