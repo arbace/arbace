@@ -34,8 +34,11 @@
 
 (defn- derive-text
   "One derive's impls as text, the fields' types as fragments (frags: an atom of N -> {:frag :ty :ast})"
-  [trait {:keys [kind name tparams shape variants copy? ord?]} frags]
+  [trait {:keys [kind name tparams ptoks shape variants copy? ord?]} frags]
   (let [fr (fn [ty] (let [n (count @frags)] (swap! frags assoc n {:frag :ty :ast ty}) (str "__rf_frag_" n)))
+        ;; the type parameters' names are the item's own tokens (generic/mod.rs copies the parameters with their spans)
+        tparams (map (fn [nm t] (if t (let [n (count @frags)] (swap! frags assoc n (titem t 0)) (str "__rf_frag_" n)) nm))
+                     tparams (concat ptoks (repeat nil)))
         self-ty (if (seq tparams) (str name "<" (str/join ", " tparams) ">") name)
         gens (fn [bound] (if (seq tparams) (str "<" (str/join ", " (map #(str % ": " bound) tparams)) ">") ""))
         head (fn [attrs unsafe? path bound body]
@@ -181,6 +184,15 @@
         (vector? x) (mapv expr-stmts x)
         :else x))
 
+(defn- impl-generics-span
+  "A derived impl's generics have the item's generics' span (at the expansion's context)"
+  [d gsp m]
+  (let [k (fget d :kind)]
+    (if (and (vector? gsp) (seq? k) (= 'Impl (first k)))
+      (let [imp (second k) g (fget imp :generics)]
+        (fset d :kind (list 'Impl (fset imp :generics (fset g :span (conj (vec (take 4 gsp)) m))))))
+      d)))
+
 (defn expand-derives
   "An item's #[derive(...)]: [the item without the attribute, the derived impls]"
   [it]
@@ -192,7 +204,16 @@
       (let [[kw idf gens data] k
             tparams (vec (for [p (fget gens :params) :let [pk (fget p :kind)] :when (and (seq? pk) (= 'Type (first pk)))]
                            (second (fget p :ident))))
-            info {:kind (if (= 'Struct kw) :struct :enum) :name (second idf) :tparams tparams
+            gsp (fget gens :span)
+            ptoks (when (vector? gsp)
+                    (let [^objects toks (:toks *root*) ^Src src (root-src)
+                          in-gens (filter (fn [^Tok t] (let [[l c] (lx/span-vec src (.-lo t) (.-hi t))]
+                                                         (and (= :Ident (.-kind t))
+                                                              (or (> l (nth gsp 0)) (and (= l (nth gsp 0)) (>= c (nth gsp 1))))
+                                                              (or (< l (nth gsp 2)) (and (= l (nth gsp 2)) (< c (nth gsp 3)))))))
+                                          (take (dec (alength toks)) toks))]
+                      (for [nm tparams] (first (filter #(= nm (.-sym ^Tok %)) in-gens)))))
+            info {:kind (if (= 'Struct kw) :struct :enum) :name (second idf) :tparams tparams :ptoks ptoks
                   :shape (when (= 'Struct kw) (variant-shape data))
                   :variants (when (= 'Enum kw) (mapv (fn [v] [(second (fget v :ident)) (variant-shape (fget v :data))]) (fget data :variants)))
                   :copy? (some #{"Copy"} names) :ord? (some #{"Ord"} names)}
@@ -200,7 +221,8 @@
             derived (vec (mapcat (fn [trait]
                                    (let [m (fresh-mark) frags (atom {})
                                          text (derive-text trait info frags)]
-                                     (map (if (= trait "Hash") (comp expr-stmts no-colon-spans) no-colon-spans)
+                                     (map (comp (fn [d] (impl-generics-span d gsp m))
+                                                (if (= trait "Hash") (comp expr-stmts no-colon-spans) no-colon-spans))
                                           (parse-fragment (text->items text m @frags) :items))))
                                  names))]
         [it' derived]))))
