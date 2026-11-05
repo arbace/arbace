@@ -613,6 +613,15 @@ covers what.
   Happy's LALR(1) construction (no Happy code: Happy is a tool, its tables in GHC's generated
   `Parser.hs` the check); `happy.ae`, `ast.ae`, `parse.ae` and `native.ae` are Arbace's own, under the
   Eclipse Public License 1.0.
+- `arbace/repr/haskell/rename.ae` (repr/haskell's renamer, HF2, doc/haskell/FRONTEND-SURVEY.md, "As built: HF1-HF2"):
+  ports of GHC 9.14.1, https://downloads.haskell.org/ghc/9.14.1/ghc-9.14.1-src.tar.xz (SHA-256
+  `2a83779c9af86554a3289f2787a38d6aa83d00d136aa9f920361dd693c101e77`, the corpus's pin): `mkOpAppRn`,
+  `mkNegAppRn`, `mkConOpPatRn` and `mkHsOpTyRn` of `compiler/GHC/Rename/HsType.hs` and `compareFixity` of
+  `compiler/GHC/Types/Fixity.hs`, by hand on 2026-11-05, the file carrying GHC's notice (Copyright 2002, The
+  University Court of the University of Glasgow, the Glasgow Haskell Compiler License, a BSD 3-Clause License,
+  "GHC: the Glasgow Haskell Compiler License" below); the rest of `compiler/GHC/Rename/` read as the
+  specification of the scoping and of the dependency analyses. The helper's `rn` and `iface` verbs,
+  `tools/hsdump/HsRn.hs`, are Arbace's own, written against GHC's API.
 - `decodeUTF16` and `encodeUTF16` in `go/arbace/jrt/codec.ae`, and `indent`, `stripIndent` and
   `translateEscapes` in `go/arbace/jrt/string.ae`: jrt's hand-written Go forms following the code
   of https://github.com/openjdk/jdk26u at `baf63fb`

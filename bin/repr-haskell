@@ -114,8 +114,22 @@
 #                                 reader's samples, the worked example converted and its round trip,
 #                                 the interface level's normalizations (test/haskell/iface/), the
 #                                 worked example in mode :full printed back byte for byte
+#   bin/repr-haskell rn-dump [-o DIR] FILE... [--ghc FLAG...]
+#                                 HF1: GHC's renamer's output (the helper's rn verb, tools/hsdump/HsRn.hs) as the
+#                                 reduced GhcRn forms, one DIR/FILE.rn.edn per module (the modules load together,
+#                                 in dependency order; -i. finds the ones the others import): every located name
+#                                 resolved, the operator trees, the binding groups, the imports, the exports
+#   bin/repr-haskell iface [-o DIR] MODULE... [--ghc FLAG...]
+#                                 HF1: the libraries' interfaces as forms (the helper's iface verb: exports with
+#                                 each name's defining module, fixities, the things defined with their types as
+#                                 GHC prints them), the modules defining the names too; one DIR/MODULE.iface.edn each
+#   bin/repr-haskell rename-check [LIST]
+#                                 HF2: the renamer (arbace.repr.haskell.rename) against the rn dump over the lists'
+#                                 modules (default test/haskell/rename-check.txt: 40 samples and 28 modules of
+#                                 ghc-internal's source); the names, operator trees, groups, imports and exports
+#                                 equal; reports in .tmp/repr-haskell/rename-check/NAME/
 #
-# Environment: REPR_HASKELL_JOBS (parallel helper and converter runs, default the cores, at most
+# Environment: REPR_HASKELL_HELPER (a helper executable already built, for the verbs that run it); REPR_HASKELL_JOBS (parallel helper and converter runs, default the cores, at most
 # 32); REPR_HASKELL_PACKAGES (the packages the interface level compiles at once, default 4);
 # ARBACE_HOST_EXE (the Arbace executable, bin/lib/host.bash; default stage 0).
 set -euo pipefail
@@ -123,7 +137,7 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 . "$root/bin/lib/tmpdir.bash" # TMPDIR: .tmp/tmp when unset
 . "$root/bin/lib/tools.bash"
 work=$root/.tmp/hsdump
-helper=$work/hsdump
+helper=${REPR_HASKELL_HELPER:-$work/hsdump}
 rh=$root/.tmp/repr-haskell
 jobs=${REPR_HASKELL_JOBS:-$(nproc)}
 [ "$jobs" -gt 32 ] && jobs=32
@@ -152,6 +166,7 @@ helper_hash() {
 
 build() {
   ghc_check
+  [ -z "${REPR_HASKELL_HELPER:-}" ] || return 0
   mkdir -p "$work"
   local key
   key="$(helper_hash) $(ghc_unit)"
@@ -160,7 +175,7 @@ build() {
     if [ -x "$helper" ] && [ -f "$work/key" ] && [ "$(cat "$work/key")" = "$key" ]; then exit 0; fi
     echo "== repr-haskell: building the helper (ghc $pin, $(ghc_unit))" >&2
     mkdir -p "$work/obj"
-    ghc -O1 -package ghc "-optP-DGHC_PIN=\"$pin\"" -outputdir "$work/obj" -o "$helper.new.$$" \
+    ghc -O1 -package ghc "-optP-DGHC_PIN=\"$pin\"" "-i$root/tools/hsdump" -outputdir "$work/obj" -o "$helper.new.$$" \
       "$root/tools/hsdump/HsDump.hs" > "$work/build.log" 2>&1 ||
       { cat "$work/build.log" >&2; rm -f "$helper.new.$$"; exit 1; }
     mv -f "$helper.new.$$" "$helper"
@@ -653,6 +668,53 @@ tables() {
   fi
 }
 
+
+# rename_check [LIST]: the renamer's check (test/haskell/rename-check.txt by default; HF2): GHC's renamer by the
+# helper's rn verb (the reduced GhcRn forms, tools/hsdump/HsRn.hs) against arbace.repr.haskell.rename over the native
+# reader's trees, each list entry in .tmp/repr-haskell/rename-check/NAME/
+rename_check() {
+  local list=${1:-$root/test/haskell/rename-check.txt} w=$rh/rename-check kind a b rest st=0
+  local tb=$rh/corpus/ghc-9.14.1-src.tar.xz
+  mkdir -p "$w"
+  while read -r kind a b rest; do
+    case $kind in ''|'#'*) continue ;; esac
+    local d name files=() own="" need="" m f ifs
+    if [ "$kind" = samples ]; then
+      name=samples; d=$root/$a; ifs="$b $rest"
+      rm -rf "${w:?}/$name"; mkdir -p "$w/$name"
+      files=($(cd "$d" && ls R*.hs))
+      (cd "$d" && "$helper" rn --libdir "$libdir" -o "$w/$name/ghc" --ghc -XGHC2021 -i. --files "${files[@]}") 2> "$w/$name/ghc.err" || { tail -5 "$w/$name/ghc.err" >&2; st=1; continue; }
+      need=$ifs
+    else
+      name=$a; d=$w/$name/src
+      [ -f "$tb" ] || { echo "rename-check: $tb is missing (bin/repr-haskell corpus fetch)" >&2; st=1; continue; }
+      rm -rf "${w:?}/$name"; mkdir -p "$d"
+      local paths=() fl=($b $rest)
+      for f in "${fl[@]}"; do paths+=("ghc-9.14.1/libraries/ghc-internal/src/GHC/Internal/$f.hs"); done
+      tar -xJf "$tb" -C "$d" --strip-components=4 "${paths[@]}"
+      for f in "${fl[@]}"; do files+=("GHC/Internal/$f.hs"); own="$own $(echo "GHC/Internal/$f" | tr / .)"; done
+      (cd "$d" && "$helper" rn --libdir "$libdir" -o "$w/$name/ghc" --ghc -XGHC2021 -package ghc-internal -this-unit-id ghc-internal-x --files "${files[@]}") 2> "$w/$name/ghc.err" || { tail -5 "$w/$name/ghc.err" >&2; st=1; continue; }
+      for m in $(cd "$d" && grep -h '^import' "${files[@]}" | sed 's/{-# SOURCE #-}//; s/qualified//' | awk '{print $2}' | sed 's/(.*//' | sort -u); do
+        case " $own " in *" $m "*) ;; *) need="$need $m" ;; esac
+      done
+      need="Prelude $need"
+    fi
+    # the interfaces of what the modules import (and of the modules defining those names)
+    local pk=""; [ "$kind" = prelude ] && pk="-package ghc-internal"
+    # shellcheck disable=SC2086
+    "$helper" iface --libdir "$libdir" -o "$w/$name/if" --ghc -XGHC2021 $pk --files $need 2> "$w/$name/if.err" || true
+    # the native reader's trees
+    local dumps=()
+    (cd "$d" && arbace_tool -m arbace.repr.haskell.native read -o "$w/$name/nd" --flags "-XGHC2021" "${files[@]}" > "$w/$name/read.log") || { tail -5 "$w/$name/read.log" >&2; st=1; continue; }
+    for f in "${files[@]}"; do dumps+=("$w/$name/nd/$f.edn"); done
+    echo "== rename-check $name: ${#files[@]} modules"
+    arbace_tool -m arbace.repr.haskell.rename check --ifaces "$w/$name/if" --local "$w/$name/ifl" --root "$w/$name/nd" \
+      --ghc "$w/$name/ghc" -o "$w/$name/out" "${dumps[@]}" | tee "$w/$name/report.txt" | grep -v '^ok' || true
+    grep -q '^rename-check: \([0-9]*\) of \1 modules equal' "$w/$name/report.txt" || st=1
+  done < "$list"
+  return $st
+}
+
 # native_check [LIST]: the native check (test/haskell/native-check.txt by default)
 native_check() {
   local list=${1:-$root/test/haskell/native-check.txt} w=$rh/native-check dir flags key src
@@ -752,6 +814,13 @@ case $cmd in
   roundtrip) ghc_check; roundtrip "$@" ;;
   native-check) ghc_check; build; native_check "$@" ;;
   tables) ghc_check; tables "$@" ;;
+  rn-dump) ghc_check; build; out=$work/out; [ "${1:-}" = -o ] && { out=$2; shift 2; }; flags=(); files=()
+           while [ $# -gt 0 ]; do case $1 in --ghc) shift; flags=("$@"); break ;; *) files+=("$1"); shift ;; esac; done
+           hsdump rn -o "$out" --ghc "${flags[@]}" --files "${files[@]}" ;;
+  iface) ghc_check; build; out=$work/out; [ "${1:-}" = -o ] && { out=$2; shift 2; }; flags=(); mods=()
+         while [ $# -gt 0 ]; do case $1 in --ghc) shift; flags=("$@"); break ;; *) mods+=("$1"); shift ;; esac; done
+         hsdump iface -o "$out" --ghc "${flags[@]}" --files "${mods[@]}" ;;
+  rename-check) ghc_check; build; rename_check "$@" ;;
   test) exec "$root/bin/lib/repr-haskell/test" "$@" ;;
   *) sed -n '2,/^set -euo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac
