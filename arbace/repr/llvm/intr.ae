@@ -293,9 +293,38 @@
 (defn- t-with-elem [v e] (list (first v) (nth v 1) e))
 (defn- t-ext [t f] (if (t-vec? t) (t-with-elem t (f (nth t 2))) (f t)))
 
+(declare signature-check)
+
 (defn signature-error
   "isSignatureValid: nil when the function type `fty` ((fn R [P...])) is the intrinsic `entry`'s, else the message
   matchIntrinsicType prints. `tstr` prints a type, `resolve` resolves a named type."
+  [entry fty tstr resolve]
+  (:error (signature-check entry fty tstr resolve)))
+
+(defn- mangled-type
+  "getMangledTypeStr: an overload type's part of an intrinsic's name."
+  ^String [t resolve]
+  (cond
+    (t-ptr? t) (str "p" (t-as t))
+    (and (seq? t) (= 'array (first t))) (str "a" (nth t 1) (mangled-type (nth t 2) resolve))
+    (and (seq? t) (#{'struct 'packed} (first t))) (str "sl_" (apply str (map #(mangled-type % resolve) (rest t))) "s")
+    (and (symbol? t) (str/starts-with? (name t) "%")) (str "s_" (subs (name t) 1) "s")
+    (and (seq? t) (= 'fn (first t))) (str "f_" (mangled-type (second t) resolve) (apply str (map #(if (= % '&) "vararg" (mangled-type % resolve)) (nth t 2))) "f")
+    (t-vec? t) (str (when (= 'vscale (first t)) "nx") "v" (nth t 1) (mangled-type (nth t 2) resolve))
+    (and (seq? t) (= 'target (first t))) (str "t" (second t) (apply str (map #(str "_" (if (integer? %) % (mangled-type % resolve))) (nnext t))) "t")
+    :else (get '{void "isVoid" metadata "Metadata" half "f16" bfloat "bf16" float "f32" double "f64" x86_fp80 "f80" fp128 "f128"
+                 ppc_fp128 "ppcf128" x86_amx "x86amx"} t (name t))))
+
+(defn mangled-name
+  "Intrinsic::getName with the overload types of the call type `fty`: the name LLParser declares an intrinsic by when a
+  module calls it without declaring it (nil when `fty` is not the intrinsic's)."
+  [entry fty tstr resolve]
+  (let [{:keys [error ovs]} (signature-check entry fty tstr resolve)]
+    (when-not error
+      (apply str (:name entry) (map #(str "." (mangled-type % resolve)) ovs)))))
+
+(defn- signature-check
+  "isSignatureValid's work: {:error message-or-nil :ovs the overload types}."
   [entry fty tstr resolve]
   (let [[ds nargs va?] (decode (:sig entry))
         ds (vec ds)
@@ -406,6 +435,7 @@
       (let [[_ r ps] fty
             va-call? (some #{'&} ps)
             ps (vec (remove #{'&} ps))]
+       (let [err
         (or (match r [true 0 []] false)
             (when-not (= (count ps) nargs) (str "intrinsic has incorrect number of args. Expected " nargs ", but got " (count ps)))
             (some (fn [[i t]] (match t [false i []] false)) (map-indexed vector ps))
@@ -419,4 +449,5 @@
                   (or (match t p true) (recur (inc i))))))
             (when (< end (count ds)) "intrinsic has too few arguments!")))
             (when-not (= (boolean va-call?) (boolean va?))
-              (if va? "intrinsic was not defined with variable arguments!" "intrinsic was defined with variable arguments!")))))))
+              (if va? "intrinsic was not defined with variable arguments!" "intrinsic was defined with variable arguments!")))]
+         {:error err :ovs (vec ovs)})))))

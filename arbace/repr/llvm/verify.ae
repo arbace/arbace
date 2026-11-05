@@ -41,7 +41,7 @@
 
 (set! *warn-on-reflection* true)
 
-(declare label-text parse-offset)
+(declare label-text parse-offset check-intrinsic-call verify-function*)
 (def ^:dynamic *ctx* nil)   ; where a check runs: {:fn F :bb LABEL :inst X} (the Verifier), {:form I :item K} (the parser)
 (def ^:dynamic ^java.util.List *errs* nil)   ; the Verifier's errors, in order (it goes on after a failed visit)
 
@@ -63,6 +63,7 @@
 ;; Types
 
 (def ^:dynamic *types* {})
+(def ^:dynamic *renames* {})   ; implicit intrinsic declarations: the name written -> the mangled name LLParser gives
 (def ^:dynamic *partial* false)
 (def ^:dynamic *dbg-format* nil)   ; LLParser's SeenOldDbgInfoFormat / SeenNewDbgInfoFormat (a volatile of #{:old :new})   ; the forms end at an LLParser error the reader met: no end-of-function/module checks
 (def ^:dynamic *alloca-as* 0)   ; the data layout's alloca address space (A), program address space (P)
@@ -599,7 +600,7 @@
       (verr :parser/align "alignment is not a power of two" {:at [:attr-val-of "align" (str a)]}))
     (when (> (long a) 4294967296) (verr :parser/align "huge alignments are not supported yet" {:at [:attr-val-of "align" (str a)]}))))
 
-(declare use-value check-di-parse node-of di-kind callee-of phase-parser* check-uselistorder fp-class-compatible?)
+(declare use-value check-di-parse node-of di-kind callee-of phase-parser* check-uselistorder fp-class-compatible? resolve-type)
 
 (defn- note-md! [x]
   (letfn [(walk [y] (cond (md-ref? y) (.add *mrefs* y)
@@ -658,6 +659,7 @@
                (cond
                  ('#{struct packed} h)
                  (let [rt (resolve-type t) at {:at [:str value-brace]}]
+                   (doseq [e (rest v)] (when (vector? e) (use-value st (second e) (norm-type (first e)))))   ; the elements are parsed first
                    (if (and (seq? rt) ('#{struct packed} (first rt)))
                      (do (when-not (= (count (rest rt)) (count (rest v))) (verr :parser/constant-type "initializer with struct type has wrong # elements" at))
                          (when-not (= (first rt) h) (verr :parser/constant-type "packed'ness of initializer and type don't match" at))
@@ -1026,6 +1028,19 @@
             (= 1 n) (verr :parser/uselistorder "value only has one use" {:at :start})
             (not= n k) (verr :parser/uselistorder (str "wrong number of indexes, expected " n) {:at :start})))))
 
+(defn- implicit-renames
+  "The intrinsics a module calls undeclared, by the names LLParser declares them with (the overload types mangled)."
+  [forms]
+  (into {} (for [k (filter #(str/starts-with? % "llvm.") (keys *gfwd*))
+                 :let [e (intr/lookup k)] :when (and e (:overloaded e))
+                 :let [fty (first (for [f forms :when (= (first f) 'llvm/define)
+                                        blk (:body (apply hash-map (drop 4 f))) x (drop 2 blk)
+                                        :let [b (body x) c (callee-of b)] :when (and c (global? c) (= (global-key c) k))]
+                                    (let [[_ ps] (split-inst b)] (call-fty (first ps) (nth ps 2)))))
+                       m (when fty (intr/mangled-name e fty tstr resolve-type))]
+                 :when (and m (not= m k))]
+             [k m])))
+
 (defn- phase-parser [forms]
   (binding [*dbg-format* (volatile! {})]
     (phase-parser* forms)))
@@ -1348,6 +1363,81 @@
                               (verr :verifier/bundle "The 'convergencectrl' bundle requires exactly one token use."))
           nil)))))
 
+(def ^:dynamic *fn-seen* nil)
+
+
+(def ^:private assume-bundle-tags
+  #{"align" "cold" "dereferenceable" "dereferenceable_or_null" "ignore" "nonnull" "noundef" "separate_storage"})
+
+(defn- static-alloca?
+  "AllocaInst::isStaticAlloca: an alloca of the entry block whose count is a constant."
+  [v defs]
+  (when (local? v)
+    (when-let [[dbi _ db] (.get ^java.util.Map defs (local-key v))]
+      (and (zero? (long dbi)) (= 'alloca (first db))
+           (let [[_ ps] (split-inst db) c (second (strip-flags ps))] (or (nil? c) (not (vector? c)) (not (local? (peek c)))))))))
+
+(defn- check-intrinsic-call
+  "Verifier::visitIntrinsicCall: the rules of particular intrinsics at their calls (each visit ends at its first failure)."
+  [^String nm b defs]
+  (let [[h ps o] (split-inst b) args (nth ps 2) f (:fn *ctx*) fo (apply hash-map (drop 4 f))
+        arg (fn [i] (peek (nth args i nil))) aty (fn [i] (norm-type (first (nth args i nil))))
+        id (or (:name (intr/lookup nm)) nm)
+        has-gc (some? (:gc fo))]
+    (doseq [a args :when (and (vector? a) (= 'x86_amx (norm-type (first a)))) :when (not (local? (peek a)))]
+      (verr :verifier/intrinsic-call "const x86_amx is not allowed in argument!" :none))
+    (case id
+      "llvm.assume"
+      (do (when (seq (:bundles o)) (when-not (#{1 true} (arg 0)) (verr :verifier/intrinsic-call "assume with operand bundles must have i1 true condition" :inst)))
+          (doseq [[tag & ins] (:bundles o)]
+            (let [n (count ins) t (fn [i] (norm-type (first (nth ins i nil))))
+                  int64? (fn [i] (let [x (t i)] (and (int-type? x) (<= (int-bits x) 64))))]
+              (case tag
+                "align" (do (when-not (<= 2 n 3) (verr :verifier/intrinsic-call "alignment assumptions should have 2 or 3 arguments" :inst))
+                            (when-not (ptr-type? (t 0)) (verr :verifier/intrinsic-call "first argument should be a pointer" :inst))
+                            (when-not (int64? 1) (verr :verifier/intrinsic-call "second argument should be an integer with a maximum width of 64 bits" :inst))
+                            (when (and (= n 3) (not (int64? 2))) (verr :verifier/intrinsic-call "third argument should be an integer with a maximum width of 64 bits if present" :inst)))
+                "cold" (when-not (zero? n) (verr :verifier/intrinsic-call "cold assumptions should have no arguments" :inst))
+                ("dereferenceable" "dereferenceable_or_null")
+                (do (when-not (= n 2) (verr :verifier/intrinsic-call "dereferenceable assumptions should have 2 arguments" :inst))
+                    (when-not (ptr-type? (t 0)) (verr :verifier/intrinsic-call "first argument should be a pointer" :inst))
+                    (when-not (int64? 1) (verr :verifier/intrinsic-call "second argument should be an integer with a maximum width of 64 bits" :inst)))
+                "ignore" nil
+                "nonnull" (do (when-not (= n 1) (verr :verifier/intrinsic-call "nonnull assumptions should have 1 argument" :inst))
+                              (when-not (ptr-type? (t 0)) (verr :verifier/intrinsic-call "first argument should be a pointer" :inst)))
+                "noundef" (when-not (= n 1) (verr :verifier/intrinsic-call "noundef assumptions should have 1 argument" :inst))
+                "separate_storage" (do (when-not (= n 2) (verr :verifier/intrinsic-call "separate_storage assumptions should have 2 arguments" :inst))
+                                       (when-not (and (ptr-type? (t 0)) (ptr-type? (t 1))) (verr :verifier/intrinsic-call "arguments to separate_storage assumptions should be pointers" :inst)))
+                (verr :verifier/intrinsic-call "tags must be valid attribute names" :inst)))))
+      ("llvm.gcroot" "llvm.gcwrite" "llvm.gcread")
+      (when-not has-gc (verr :verifier/intrinsic-call "Enclosing function does not use GC." :inst))
+      "llvm.localescape"
+      (do (when-not (zero? (long (or (:bi *ctx*) 0))) (verr :verifier/intrinsic-call "llvm.localescape used outside of entry block" :inst))
+          (when (:localescape @*fn-seen*) (verr :verifier/intrinsic-call "multiple calls to llvm.localescape in one function" :inst))
+          (doseq [a args :let [v (peek a)] :when (not= v 'null)]
+            (when-not (static-alloca? v defs) (verr :verifier/intrinsic-call "llvm.localescape only accepts static allocas" :inst)))
+          (vswap! *fn-seen* assoc :localescape true))
+      "llvm.localrecover"
+      (let [fa (arg 0) d (when (global? fa) (.get *gdefs* (global-key fa)))]
+        (when-not (and d (= :function (:kind d)) (= 'llvm/define (first (:form d))))
+          (verr :verifier/intrinsic-call "llvm.localrecover first argument must be function defined in this module" :inst)))
+      "llvm.experimental.gc.statepoint"
+      (do (when (and (= h 'call) (seq? (second ps)) (= 'asm (first (second ps))))
+            (verr :verifier/intrinsic-call "gc.statepoint support for inline assembly unimplemented" :inst))
+          (when-not has-gc (verr :verifier/intrinsic-call "Enclosing function does not use GC." :inst))
+          (let [a2 (nth args 2 nil) et (attr-of (group-items (param-attrs a2)) "elementtype")]
+            (when-not et (verr :verifier/intrinsic-call "gc.statepoint callee argument must have elementtype attribute" :inst))
+            (let [ft (norm-type (second et))]
+              (when-not (and (seq? ft) (= 'fn (first ft))) (verr :verifier/intrinsic-call "gc.statepoint callee elementtype must be function type" :inst)))))
+      "llvm.experimental.get.vector.length"
+      (let [v (arg 1)] (when (and (integer? v) (<= (long v) 0)) (verr :verifier/intrinsic-call "get_vector_length: VF must be positive" :inst)))
+      "llvm.structured.alloca"
+      (when-not (has-attr? (group-items (:ret-attrs o)) "elementtype")
+        (verr :verifier/intrinsic-call "@llvm.structured.alloca calls require elementtype attribute." :inst))
+      ("llvm.nvvm.setmaxnreg.inc.sync.aligned.u32" "llvm.nvvm.setmaxnreg.dec.sync.aligned.u32")
+      (let [v (arg 0)] (when (and (integer? v) (not (zero? (mod (long v) 8)))) (verr :verifier/intrinsic-call "reg_count argument to nvvm.setmaxnreg must be in multiples of 8" :none)))
+      nil)))
+
 (defn- check-call-site
   "visitCallBase after the arguments' types: the calling convention, the attributes of the call, immediate arguments,
   vararg and inalloca arguments, indirect calls' return types, operand bundles."
@@ -1429,6 +1519,7 @@
           param (when-not (has-attr? (group-items (param-attrs param)) "swifterror")
                   (verr :verifier/attr-misc "swifterror argument for call has mismatched parameter" (pr/typed-str [(norm-type (first param)) v]) :inst))
           :else (verr :verifier/attr-misc "swifterror argument should come from an alloca or parameter" (pr/typed-str [(norm-type (first a)) v]) :inst))))
+    (when direct-intr? (visiting (check-intrinsic-call (global-key c) b defs)))
     (check-bundles (:bundles o) defs (global? c) (norm-type (second fty))
                    (or (has-attr? fattrs "noreturn")
                        (when-let [d (when (global? c) (.get *gdefs* (global-key c)))]
@@ -2073,6 +2164,10 @@
 (defn- verify-function
   "The Verifier's rules over one definition (visitFunction, visitBasicBlock and the instructions' visitors)."
   [f users]
+  (binding [*fn-seen* (volatile! {})] (verify-function* f users)))
+
+(defn- verify-function*
+  [f users]
   (let [[h nm rt ps & opts] f
         o (apply hash-map opts)
         k (global-key nm)]
@@ -2138,7 +2233,7 @@
                     (recur (inc ii) seen-non-phi)
                     (do
                      (visiting
-                      (binding [*ctx* {:fn f :bb l :inst x :defs defs}]
+                      (binding [*ctx* {:fn f :bb l :bi bi :inst x :defs defs}]
                       (when (and (terminator? x) (< ii (dec (count items))))
                         (verr :verifier/terminator-middle "Terminator found in the middle of a basic block!"))
                       (when (and (= hd 'phi) seen-non-phi) (verr :verifier/phi-grouped "PHI nodes not grouped at top of basic block!" :inst :bb))
@@ -2255,14 +2350,16 @@
             *groups* (into {} (keep #(when (= (first %) 'llvm/attributes) [(second %) (nth % 2)]) forms))
             *meta* (into {} (keep #(when (= (first %) 'llvm/meta) [(second %) (nth % 2)]) forms))
             *gdefs* (java.util.HashMap.) *gfwd* (java.util.TreeMap.) *mdefs* (java.util.HashSet.) *mrefs* (java.util.HashSet.)
-            *errs* (java.util.ArrayList.)]
+            *errs* (java.util.ArrayList.)
+            *renames* {}]
     (try
       (phase-parser forms)
+      (set! *renames* (implicit-renames forms))
       (try (phase-verifier forms) (catch arbace.lang.ExceptionInfo e (if (:llvm/verify (ex-data e)) (.add *errs* e) (throw e))))
       (try (phase-debug forms) (catch arbace.lang.ExceptionInfo e (if (:llvm/verify (ex-data e)) (.add *errs* e) (throw e))))
-      [nil (vec *errs*)]
+      [nil (vec *errs*) *renames*]
       (catch arbace.lang.ExceptionInfo e
-        (if (:llvm/verify (ex-data e)) [e []] (throw e))))))
+        (if (:llvm/verify (ex-data e)) [e [] {}] (throw e))))))
 
 (defn- run-phases-parser
   "LLParser's checks alone over the forms: [parser-error]."
@@ -2530,9 +2627,10 @@
 (defn- fn-operand [f] (str "ptr " (pr/global-str (nth f 1))))
 
 (defn- canon-ptr0
-  "`ptr addrspace(0)` written as `ptr`, as the AsmWriter prints it."
+  "`ptr addrspace(0)` written as `ptr`, as the AsmWriter prints it; an implicitly declared intrinsic by its mangled name."
   [x]
   (cond (and (seq? x) (= (first x) 'ptr) (= (second x) 0) (= 2 (count x))) 'ptr
+        (and (global? x) (contains? *renames* (global-key x))) (symbol "g" (get *renames* (global-key x)))
         (seq? x) (apply list (map canon-ptr0 x))
         (vector? x) (mapv canon-ptr0 x)
         (map? x) (into (empty x) (map (fn [[k v]] [k (canon-ptr0 v)]) x))
@@ -2597,7 +2695,7 @@
   "[verdict message rule text] of forms: verdict valid, invalid or debug; the text what `opt -passes=verify` prints to
   stderr (empty when valid). `src`, `spans` (reader's items) and `file` give the parser errors their position."
   [forms ^String src spans ^String file]
-  (let [[pe es] (run-phases forms)
+  (let [[pe es renames] (run-phases forms)
         metaforms (into {} (keep #(when (= (first %) 'llvm/meta) [(second %) %]) forms))
         slots (when (or pe (seq es)) (try (diag/md-slots forms) (catch Throwable _ {})))
         rule-of #(:llvm/verify (ex-data %))
@@ -2619,7 +2717,8 @@
             src (diag/parse-error-text (prog) file src (parse-offset src spans forms pe) (.getMessage ^Throwable pe))
             :else (str (prog) ": " file ": error: " (.getMessage ^Throwable pe) "\n"))]
       :else
-      (binding [*groups* (into {} (keep #(when (= (first %) 'llvm/attributes) [(second %) (nth % 2)]) forms))
+      (binding [*renames* (or renames {})
+                *groups* (into {} (keep #(when (= (first %) 'llvm/attributes) [(second %) (nth % 2)]) forms))
                 *group-numbers* (try (group-numbers forms) (catch Throwable _ nil))
                 *group-forms* forms *group-memo* (atom {})
                 *dl* (or (some #(when (= (first %) 'llvm/datalayout) (second %)) forms) "")
