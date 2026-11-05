@@ -41,8 +41,7 @@ causes; the columns of section 2 are as the Java triage's: **touches**, **alone*
 weak and ephemerons, plugins, the compiler's output).
 
 **Calibration.** "Unblocked" means the library exists; a test can still fail on a behaviour (timing, `torture`, `Gc` counters). The Java triage
-measured 0.7 of "alone" regained; this plan uses the same factor. oi's passes show the base rate: 273 of 556 programs of the run corpus pass,
-of the 309 not classed by header 273 (88%).
+measured 0.7 of "alone" regained; this plan uses the same factor. oi's passes show the base rate: of the 556 programs of the run corpus 247 are classed by header and not run; of the other 309, 273 pass (88%).
 
 ## 2. The causes: touches, alone, +deps, design (eval; AOT the same plus the light level)
 
@@ -108,9 +107,9 @@ checks' time. **Rate** = tests unblocked (the `+deps`-closure's new tests, desig
 | 10 | `Str` | 2 | 2 + 1 | 1.0 | none |
 | 11 | bigarray.c (kinds, layouts, overflow, marshalling) | 3 (+2 unix, +4 C) | 3 + 1.5 | 1.0 | 4 for `map_file` |
 
-Total 1-11: eval **49 + 22 AOT mirror = 71 days**, **126 tests at eval, 155 at AOT**; every fix above 8 is under 2.5 tests a day. The first five (1-5):
+Total 1-11: eval **44 + 16.5 AOT mirror = about 61 days**, **109 tests at eval, 138 at AOT** (item 1 is AOT only); every fix after 7 is under 2.6 tests a day. The first five (1-5):
 **19 days eval (+ 8 AOT mirror)**, **54 tests at eval (13 + 9 + 17 + 15), 83 at AOT** (adding the 29 light). 0.7 × alone: about 38 / 58.
-After every fix and every Proposed move, the deferred programs left are the 8-10 of tails (the `torture`-like timing tests, `bank`...).
+After every fix and every Proposed move, the deferred programs left are the tails (the timing tests such as `torture`, programs that also touch the GC's counters).
 
 ## 4. The first five, designed
 
@@ -127,7 +126,7 @@ of 10^7 steps and more; expect 20 to 24 to pass, the rest `tailcalls`/`chi2`-lik
 **2. The Unix core.** (a) Load `otherlibs/unix`'s OCaml units (`unix.ml`, `unixLabels.ml`; `-I +unix`) into the library set as the stdlib's are (`bin/oi stdlib`:
 oi's library is the units' Lambda dumped by ocdump; add the two units and the `Unix` alias module); today ocamlc prints the alert "unix subdirectory ... added to the search path" for a
 program, the `-I +unix` flag silences it (the harness passes it for `include unix`). (b) Externals in a new `ext_unix.ae`: registered under their C names (`unix_sleep`,
-`unix_sleep` the 5.x name `caml_unix_sleep`; get the list from the units: `bin/oi aot-lib` reports missing ones, as for the stdlib), the core ones real (time, `gettimeofday`, `getpid`,
+the names as the units declare them (`caml_unix_*` in 5.x); get the list from the units: `bin/oi aot-lib` reports missing ones, as for the stdlib), the core ones real (time, `gettimeofday`, `getpid`,
 `getppid`, `environment`, `getenv`/`putenv`/`unsetenv`, `sleep`/`sleepf`, `times`, `error_message`), every other `unix_*` registered as a stub raising
 `Unix_error(ENOSYS, name, "")` so the unit links. (c) `Unix_error`: `Callback.register_exception "Unix.Unix_error"` and the errno table of
 `unixsupport.c` (the 68 error constructors from Go's `syscall.Errno`; `unix_error_message` the C library's strerror text: Go's `syscall.Errno.Error()` differs in case for a few, a table). (d) AOT: the same in a new `ExtUnix.ae` and `Fd.ae`'s table. Probe `lib-unix/win-env/test_env`, `parallel/backup_thread`.
@@ -181,11 +180,12 @@ programs and `callstack`/`boundscheck`/`moved_while_blocking` (backtraces and co
 - **OT6 C stubs.** (a) by design for the 21 that use the runtime's internals (`embedded/cmcaml`, `gc-roots` 3, `ephe-c-api`, `c-api` 3, the thread registrations 3, `statmemprof` 2, `regression/pr3612` and `pr11865`, `locale`, `win-stat`, `output-complete-obj/test2`, `lib-runtime-events/test`, `lib-dynlink-native`, `backtrace_c_exn`), (b) also for the 20 of the stable C API; (c) a C API shim on ci for the 20 (10 + 4 days): `value` as an int (tagged ints as OCaml's, blocks as handles of a table), a clean-room
   `caml/mlvalues.h`, `memory.h`, `callback.h`, `alloc.h`, `fail.h` over oi's Values; the stubs' C compiled by `arbace.c`. *Recommended: (a) for the 21 and (c) kept as item 9 of the ranking, last in the order*: it is 2.0 tests a day and the biggest risk.
 - **OT7 `Marshal` with Closures.** (a) by design (2, suite: `lib-marshal/fuzzy`, `runtime-objects/Tests`): closures marshal as code pointers and program digests (O7, OC103); (b) a code-pointer scheme keyed by the program's Lambda digest: 3 days for 2 tests. *Recommended: (a)*.
-- **OT8 The AOT cell's level.** (a) the compiled level when recorded (fix 1), the light level kept as the quick check and its classes `:light-*` by design; the matrix's AOT cell judged from the compiled record (29 deferred gone, the 100%-by-class light rows no longer counted); (b) both levels counted: the light level's 29 stay deferred. *Recommended: (a)*; the 3 depth programs are fixed by the compiled level's stack (OC92) and the 26 speed ones by its speed.
+- **OT8 The AOT cell's level.** (a) the compiled level when recorded (fix 1), the light level kept as the quick check and its classes `:light-*` by design; the matrix's AOT cell judged from the compiled record (the 29 light rows no longer counted); (b) both levels counted: the light level's 29 stay deferred. *Recommended: (a)*; the 3 depth programs are fixed by the compiled level's stack (OC92) and the 26 speed ones by its speed.
 - **OT9 The order of the libraries.** OC63 (a) says unix and str, then bigarray, then systhreads; the counts say unix core, the harness, descriptors, threads, sockets, processes, then compiler-libs; Str (1.0 a day) and bigarray (1.0) after the C shim. (a) as ranked here; (b) OC63's order. *Recommended: (a)*; it supersedes OC63's order only.
 - **OT10 Where the library units live.** (a) the units of `otherlibs` (`unix.ml`, `thread.ml`, `event.ml`, `str.ml`, `compiler-libs`) built into the library set like the stdlib, every program of every check loading them (a start-up cost: the stdlib's 10 CPU seconds at the light level, OC88, are shared per process; Unix is 4,000 lines of OCaml); (b) loaded only for a program that names them (`include unix`, found by the header or by the program's free modules), the way the stdlib's units are loaded on demand. *Recommended: (b)*: no cost for the 273 passing programs, and the AOT's `ocaml.u` package stays the stdlib's.
 
 ## 7. After all of it
 
-If OT1-OT9 are accepted and items 1-11 built (71 days): eval 360 + about 100 = **460 pass**, 114 + 79 = **193 by design**, about 11 deferred; AOT 337 + about 125 =
-**460 pass**, 108 + 79 = 187 by design, about 15 deferred. By the 0.7 factor, minus 30%: eval about **430**, AOT about **425**. The first five alone, 19 days: eval 360 to about 400, AOT 337 to about 395.
+If OT1-OT9 are accepted and items 1-11 built (about 61 days): eval 360 + at most 109 = **469 pass** at best, 114 + 79 = **193 by design**, 2 deferred; AOT 337 + at most 138
+= **475**, 108 + 79 = **187 by design**, 5 deferred. With the 0.7 factor on the new passes: eval about **436**, AOT about **434**, the 30% that fail on a behaviour staying deferred (about 33 and 41).
+The first five alone, 19 days: eval 360 to about 400, AOT 337 to about 395.
