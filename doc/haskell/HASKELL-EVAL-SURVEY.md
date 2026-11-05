@@ -1647,3 +1647,7 @@ as written: `hscCompileCoreExprHook` is enough, and the spike (`1 + 1`) came out
 - **HES69 Judging the REPL's stderr.** (a) as built: stdout byte for byte, stderr reported; (b) stderr judged too, line for
   line after normalising `<interactive>:L:C` and `GhciN` numbers, once the exception text matches in every case; (c) stderr
   byte for byte. *Recommended: (b)* when `:i` and `:load` are in, the diagnostics' text being GHC's own.
+
+## Decided (2026-11-05, the user: HES69)
+
+HES69 (b): the REPL's stderr judged too, line for line after normalising positions and GhciN, once :i and :load exist.
