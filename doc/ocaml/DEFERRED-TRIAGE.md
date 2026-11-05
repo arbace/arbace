@@ -552,6 +552,7 @@ find_first_mono,overflow_detection,test_strongly_connected_components}`, `misc/s
 | level | fix 6 | fix 7 | fix 8 |
 |---|---|---|---|
 | eval (oi) | run 5 of 5, suite 2 of 2 | run 9 of 9, suite 2 of 2 | 6 of 7 (`errors_batch` `:compiler-libs-parser`) |
+| AOT, light | run 5 of 5; suite `getaddrinfo` passes, `recvfrom_unix` known unix (Unix sockets, OT23) | run 8 of 9 (`mctest` `:light-speed`, as before); suite 2 of 2 | 5 of 7 (`stable_matching_test` `:light-speed`, `aot-slow.edn`; `errors_batch` the class) |
 
 ### The night's record commands (after this branch; in this order, the compiled level heavy)
 
