@@ -206,23 +206,29 @@
 
 (defn- string-lit? [a] (and (head? a 'lit) (re-matches #"(?s)\".*\"#?" (second a))))
 
+(declare floatable-con)
+
 (defn- atom-of
-  "An argument as an atom: [atom binding-or-nil] (binding [name stg-rhs])"
+  "An argument as an atom: [atom [[name stg-rhs]...]], the bindings outermost first; a saturated constructor
+  application's own arguments' bindings floated out before it (CorePrep floats out of a value's right-hand side)"
   [a]
   (cond
-    (lv? a) [(local-name a) nil]
-    (and (head? a 'v) (con-name? (second a)) (newtype-con? (as-data (second a)))) (let [n (fresh "sat")] [n [n (rhs a)]])
-    (head? a 'v) [(gname (second a)) nil]
-    (and (head? a 'lit) (not (string-lit? a))) [(first (lit-form (second a))) nil]
-    :else (let [n (fresh "sat")] [n [n (rhs a)]])))
+    (lv? a) [(local-name a) []]
+    (and (head? a 'v) (con-name? (second a)) (newtype-con? (as-data (second a)))) (let [n (fresh "sat")] [n [[n (rhs a)]]])
+    (head? a 'v) [(gname (second a)) []]
+    (and (head? a 'lit) (not (string-lit? a))) [(first (lit-form (second a))) []]
+    (floatable-con a) (let [[c args] (floatable-con a) rs (mapv atom-of args) n (fresh "sat")]
+                        [n (conj (vec (mapcat second (reverse rs))) [n (list 'rcon (gname c) (mapv first rs))])])
+    :else (let [n (fresh "sat")] [n [[n (rhs a)]]])))
+
+(defn- wrap-binds [bnds body]
+  (reduce (fn [b [n r]] (list 'let (list 'bind [n :L] r) b)) body (reverse bnds)))
 
 (defn- with-atoms
   "Atoms for the arguments, their bindings let around k's expression, the last argument's outermost"
   [args k]
-  (let [rs (mapv atom-of args)
-        body (k (mapv first rs))]
-    (reduce (fn [b [_ bnd]] (if bnd (list 'let (list 'bind [(first bnd) :L] (second bnd)) b) b))
-            body rs)))
+  (let [rs (mapv atom-of args)]
+    (wrap-binds (vec (mapcat second (reverse rs))) (k (mapv first rs)))))
 
 (defn- rep-of [n] (get @*reps* n :L))
 
@@ -234,6 +240,16 @@
         body (list 'con (gname c) (mapv (fn [[a a2]] (or a2 a)) evald))]
     (reduce (fn [b [a a2]] (if a2 (list 'case (list 'app a []) [a2 :L] '(poly) [(list 'alt :default [] b)]) b))
             body (reverse evald))))
+
+(defn- floatable-con
+  "A saturated application of a constructor without strict fields: [CON ARGS]"
+  [e]
+  (let [e (flatten-app e)]
+    (when (and (head? e 'app) (head? (second e) 'v) (con-name? (second (second e))))
+      (let [g (second (second e)) c (as-data g) args (nth e 2)]
+        (when (and (not (newtype-con? c)) (not (and (class-of-dcon g) (newtype-class? (class-of-dcon g))))
+                   (= (:arity (con-info c)) (count args)) (not (some true? (con-strict c))))
+          [c args])))))
 
 (defn- app-expr [f args]
   (cond
@@ -282,7 +298,12 @@
       lit (first (lit-form (second e)))
       app (app-expr (second e) (nth e 2))
       lam (let [n (fresh "sat")] (list 'let (list 'bind [n :L] (rhs e)) (list 'app n [])))
-      let (reduce (fn [b bd] (let [[bn r] (bind-pair bd)] (list 'let (list 'bind bn r) b)))
+      let (reduce (fn [b [_ x e2 :as bd]]
+                    (if-let [[c args] (floatable-con e2)]
+                      (let [rs (mapv atom-of args)]
+                        (wrap-binds (vec (mapcat second (reverse rs)))
+                                    (list 'let (list 'bind [(local-name x) :L] (list 'rcon (gname c) (mapv first rs))) b)))
+                      (let [[bn r] (bind-pair bd)] (list 'let (list 'bind bn r) b))))
                   (expr (nth e 2)) (reverse (second e)))
       letrec (list 'let (apply list 'rec (map (fn [bd] (let [[bn r] (bind-pair bd)] (list 'bind bn r))) (second e)))
                    (expr (nth e 2)))
@@ -305,7 +326,11 @@
                                             bs (mapv (fn [x r] (let [n (local-name x)] (swap! *reps* assoc n r) [n r]))
                                                      xs (concat reps (repeat :L)))]
                                         (list 'alt (gname c) bs (expr body))))))]
-             (list 'case (expr s) [bn brep] at salts)))
+             ;; the scrutinee's lets floated out of the case (CorePrep's cpeBody floats)
+             (loop [se (expr s) wraps []]
+               (if (head? se 'let)
+                 (recur (nth se 2) (conj wraps (second se)))
+                 (reduce (fn [b bd] (list 'let bd b)) (list 'case se [bn brep] at salts) (reverse wraps))))))
       (do (binding [*out* *err*] (println "tostg: expression not handled:" (pr-str (first e)))) (list 'int 0)))))
 
 (defn- atomic-args? [args]
@@ -337,9 +362,8 @@
   (let [e (flatten-app e)
         f (when (head? e 'app) (second e))
         args (when f (nth e 2))
-        float! (fn [rs] (doseq [[_ b] (reverse rs) :when b]
-                          (let [n (str (clean-occ occ) "_" (first b))] (swap! *floats* conj [b n]))))
-        rename (fn [rs] (mapv (fn [[a b]] (if b (str (clean-occ occ) "_" (first b)) a)) rs))]
+        float! (fn [rs] (doseq [b (mapcat second (reverse rs))] (swap! *floats* conj [b (first b)])))
+        rename (fn [rs] (mapv first rs))]
     (cond
       (or (nil? f) (head? e 'lam) (string-lit? (first args))) (rhs e)
       (and (head? f 'v) (con-name? (second f)))
