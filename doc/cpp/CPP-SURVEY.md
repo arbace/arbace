@@ -2817,7 +2817,7 @@ Each under the heavy lock (`bin/heavy-lock CMD`; `CPPI_THREADS=3`, a process up 
    corpora's (`:ref-corpora ["samples" "runtime" "gxx-dg-run"]`; the every-25 record of it is a subset and is dropped, with its part).
 3. libstdcxx whole (3,504 programs, about 23 h at 3 threads, CX8): not a night's; it waits for CP220.
 
-### Proposals (CP220-CP222; none decided)
+### Proposed (CP220-CP222; none decided)
 
 - **CP220 The run checks' cost.** ci's build holds the lowered runtime's checked units in each build process (7.5 GB at samples' peak, about
   10 GB on libstdcxx) and dominates (CX8: 59 s a libstdcxx program). Options: (a) a ci library of prebuilt nodes for the runtime (CX8's report:
