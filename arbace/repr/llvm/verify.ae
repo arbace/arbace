@@ -71,6 +71,10 @@
 
 (def ^:dynamic *types* {})
 (def ^:dynamic *renames* {})   ; implicit intrinsic declarations: the name written -> the mangled name LLParser gives
+(def ^:dynamic ^java.util.Map *gdefs* nil)   ; global name -> {:kind :type}
+(def ^:dynamic ^java.util.Map *gfwd* nil)    ; global name referenced before its definition -> true
+(def ^:dynamic ^java.util.Set *mdefs* nil)   ; !N defined
+(def ^:dynamic ^java.util.Set *mrefs* nil)   ; !N referenced
 (def ^:dynamic *distinct* #{})   ; the ids of the distinct nodes
 (def ^:dynamic *partial* false)
 (def ^:dynamic *dbg-format* nil)   ; LLParser's SeenOldDbgInfoFormat / SeenNewDbgInfoFormat (a volatile of #{:old :new})   ; the forms end at an LLParser error the reader met: no end-of-function/module checks
@@ -664,6 +668,22 @@
         (when (and (ws "free") (some ws ["uninitialized" "zeroed" "aligned"]))
           (soft! :verifier/attr-value "'allockind(\"free\")' doesn't allow uninitialized, zeroed, or aligned modifiers." :none))
         (when (and (ws "zeroed") (ws "uninitialized")) (soft! :verifier/attr-value "'allockind()' can't be both zeroed and uninitialized" :none))))
+    (when-let [a (str-attr attrs "alloc-variant-zeroed")]
+      (let [v (or (second a) "")]
+        (when (= "" v) (verr :verifier/attr-value "'alloc-variant-zeroed' must not be empty" :none))
+        (when-let [d (.get *gdefs* v)]
+          (when (= :function (:kind d))
+            (let [vo (apply hash-map (drop 4 (:form d))) va (group-items (:attrs vo))
+                  fam (str-attr attrs "alloc-family") vfam (str-attr va "alloc-family")
+                  me (when-not call? (:fn *ctx*))]
+              (when (and fam (not (and vfam (= (second vfam) (second fam)))))
+                (verr :verifier/attr-value "'alloc-variant-zeroed' must name a function belonging to the same 'alloc-family'" :none))
+              (when-not (when-let [k (attr-of va "allockind")] (str/includes? (str (second k)) "zeroed"))
+                (verr :verifier/attr-value "'alloc-variant-zeroed' must name a function with 'allockind(\"zeroed\")'" :none))
+              (when (and me (not= (:fty d) (:fty (.get *gdefs* (global-key (nth me 1))))))
+                (verr :verifier/attr-value "'alloc-variant-zeroed' must name a function with the same signature" :none))
+              (when (and me (not= (:cconv vo) (:cconv (apply hash-map (drop 4 me)))))
+                (verr :verifier/attr-value "'alloc-variant-zeroed' must name a function with the same calling convention" :none)))))))
     (when (and (has "jumptable") (not call?)) (verr :verifier/attr-value "Attribute 'jumptable' requires 'unnamed_addr'"))))
 
 (defn- check-function-attrs
@@ -707,10 +727,6 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; Phase 1: LLParser's checks
 
-(def ^:dynamic ^java.util.Map *gdefs* nil)   ; global name -> {:kind :type}
-(def ^:dynamic ^java.util.Map *gfwd* nil)    ; global name referenced before its definition -> true
-(def ^:dynamic ^java.util.Set *mdefs* nil)   ; !N defined
-(def ^:dynamic ^java.util.Set *mrefs* nil)   ; !N referenced
 
 (deftype Fn [^java.util.Map vals ^java.util.Map fwd ^longs next])
 
