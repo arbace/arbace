@@ -3,12 +3,17 @@
 ;; is a Java thread of its domain under the Gil (the master lock), counted in Effects/domainsRunning while it runs so that Rt/tick
 ;; lets the others run; the lock is given up in blocking calls (sleeps, pipes' reads and writes, joins, a mutex's or a condition's
 ;; wait). A Thread.t is the block [| id |] (the main thread's id 0), its end a flag join waits on with the lock released. exit in a
-;; thread (Stdlib.exit ran the at_exit functions) ends the process with its status, as a C program's exit does.
+;; thread (Stdlib.exit ran the at_exit functions) ends the process with its status, as a C program's exit does; a runtime's fatal
+;; error in a thread (an external the runtime lacks) is reported as the main program's and ends the process. Threads first take
+;; the lock in their creation order.
 
 (in-ns 'ocaml.rt)
 
 (defclass ^:public ^:final ExtThread
   (field ^:public ^:static ^long seq 0)
+  ;; the last thread that took the lock for the first time: threads start in their creation order (oi's ext_thread.go)
+  (field ^:public ^:static ^long started 0)
+  (field ^:public ^:static ^long made 0)
 
   (method ^:static descr [^TState s]
     (when (nil? (.-sys s))
@@ -26,10 +31,15 @@
   (method ^:public ^:static caml_thread_new [f]
     (set! seq (unchecked-inc seq))
     (set! Effects/domainsRunning (unchecked-inc Effects/domainsRunning))
+    (set! made (unchecked-inc made))
     (let [d (Block. 0 (new Object/1 [(Long/valueOf seq) Boolean/FALSE]))
+          ticket made
           dom (.-dom (Effects/st))
           t (Thread. (lambda Runnable []
                        (Gil/lock)
+                       (while (not (== started (unchecked-dec ticket))) (Gil/await))
+                       (set! started ticket)
+                       (Gil/broadcast)
                        (let [s (TState. nil dom)]
                          (set! (.-sys s) d)
                          (.set Effects/CUR s))
@@ -37,6 +47,11 @@
                          (Rt/ap1 f Rt/UNIT)
                          (catch Exit x
                            (Main/flushStd)
+                           (System/exit (.-code x)))
+                         (catch Fatal x
+                           (Main/flushQuiet)
+                           (.println System/err (.getMessage x))
+                           (.flush System/err)
                            (System/exit (.-code x)))
                          (catch Exn e
                            (.print System/err (java-str "Thread " (Rt/l (aget (.-f d) 0)) " killed on uncaught exception " (Rt/formatException (.-v e)) "\n"))
