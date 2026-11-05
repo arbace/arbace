@@ -63,7 +63,8 @@
 ;; Types
 
 (def ^:dynamic *types* {})
-(def ^:dynamic *partial* false)   ; the forms end at an LLParser error the reader met: no end-of-function/module checks
+(def ^:dynamic *partial* false)
+(def ^:dynamic *dbg-format* nil)   ; LLParser's SeenOldDbgInfoFormat / SeenNewDbgInfoFormat (a volatile of #{:old :new})   ; the forms end at an LLParser error the reader met: no end-of-function/module checks
 (def ^:dynamic *alloca-as* 0)   ; the data layout's alloca address space (A), program address space (P)
 (def ^:dynamic *prog-as* 0)
 
@@ -186,6 +187,31 @@
                 (and (seq? t) (= (first t) 'array)) (if (< -1 i (nth t 1)) (nth t 2) (reduced nil))
                 :else (reduced nil))))
           t idxs))
+
+(defn- splat-int
+  "The integer a constant index `v` is, or splats (nil when it is not one constant)."
+  [v]
+  (cond (integer? v) v
+        (= v 'zeroinitializer) 0
+        (and (seq? v) (= (first v) 'splat)) (splat-int (second (second v)))
+        (and (seq? v) (= (first v) 'vector)) (let [xs (map #(splat-int (second %)) (rest v))] (when (and (seq xs) (every? some? xs) (apply = xs)) (first xs)))
+        :else nil))
+
+(defn- gep-indexed-type
+  "GetElementPtrInst::getIndexedType: the type the indices after the first select in `t`, nil when they are invalid (a
+  struct's index a constant i32, or a splat of one, inside it; an array's or a vector's any integer)."
+  [t idxs]
+  (reduce (fn [t [it v]]
+            (let [t (resolve-type t) it (norm-type it)]
+              (cond
+                (and (seq? t) (#{'struct 'packed} (first t)))
+                (let [k (when (and (= (elem it) 'i32) (not= 'vscale (first (shape it)))) (splat-int v))]
+                  (if (and k (< -1 k (dec (count t)))) (nth t (inc k)) (reduced nil)))
+                (not (int-ish? it)) (reduced nil)
+                (and (seq? t) (= (first t) 'array)) (nth t 2)
+                (vec-type? t) (nth t 2)
+                :else (reduced nil))))
+          t (rest idxs)))
 
 (defn- call-fty
   "A call's function type: its written (fn R [P...]) or R with its arguments' types."
@@ -377,6 +403,10 @@
         (when (= (norm-type v) 'void) (verr :parser/attr-value "void type only allowed for function results" {:at [:find-last "void"]}))
         "nofpclass"
         (when (and (string? v) (= (str/trim v) "0")) (verr :parser/attr-value "invalid mask value for 'nofpclass'" {:at [:attr-close n]}))
+        "range"
+        (when (and (string? v) (not (re-find #"^\s*i[0-9]+\s" v))) (verr :parser/attr-value "the range must have integer type!" {:at [:attr-val n]}))
+        "uwtable"
+        (when-not (#{"sync" "async"} (str/trim (str v))) (verr :parser/attr-value "expected unwind table kind" {:at [:attr-val n]}))
         "allockind"
         (doseq [w (str/split (str/replace (str v) "\"" "") #",")]
           (when-not (contains? #{"alloc" "realloc" "free" "uninitialized" "zeroed" "aligned"} (str/trim w))
@@ -567,7 +597,7 @@
       (verr :parser/align "alignment is not a power of two" {:at [:attr-val-of "align" (str a)]}))
     (when (> (long a) 4294967296) (verr :parser/align "huge alignments are not supported yet" {:at [:attr-val-of "align" (str a)]}))))
 
-(declare use-value check-di-parse node-of di-kind)
+(declare use-value check-di-parse node-of di-kind callee-of phase-parser* check-uselistorder fp-class-compatible?)
 
 (defn- note-md! [x]
   (letfn [(walk [y] (cond (md-ref? y) (.add *mrefs* y)
@@ -577,7 +607,7 @@
 (defn- use-global [^Fn st x t]
   (when-not (ptr-type? t) (verr :parser/global-type "global variable reference must have pointer type" {:at [:val {:text (pr/value-str x)}]}))
   (let [k (global-key x)]
-    (when-not (.containsKey *gdefs* k) (.put *gfwd* k true))))
+    (when-not (or (.containsKey *gdefs* k) (.containsKey *gfwd* k)) (.put *gfwd* k t))))
 
 (defn- use-local [^Fn st x t]
   (let [k (local-key x)
@@ -591,6 +621,17 @@
       have nil
       :else (.put ^java.util.Map (.fwd st) k t))))
 
+(defn- value-brace
+  "The token index of a struct constant's `{` among an item's tokens: the first `{` after a type's end."
+  [toks]
+  (first (keep-indexed (fn [i t] (when (and (#{"{" "<"} (:t t)) (pos? i)
+                                            (or (= "{" (:t t)) (= "{" (:t (nth toks (inc i) nil))))
+                                            (let [pt (nth toks (dec i))]
+                                              (or (#{"}" ">" "]"} (:t pt)) (= :lname (:k pt))
+                                                  (re-matches #"i[0-9]+|half|bfloat|float|double|fp128|x86_fp80|ppc_fp128|ptr" (:t pt)))))
+                                   i))
+                       toks)))
+
 (defn- use-const [st v t]
   (cond
     (or (integer? v) (and (seq? v) (= (first v) 'int)))
@@ -599,13 +640,37 @@
     (when-not (fp-type? t) (verr :parser/fp-constant "floating-point constant invalid for type" {:at [:val {:text (pr/value-str v) :fp true}]}))
     (boolean? v) (when-not (= t 'i1) (verr :parser/constant-type (str "constant expression type mismatch: got type 'i1' but expected '" (tstr t) "'") {:at [:val {:text (pr/value-str v)}]}))
     (= v 'null) (when-not (ptr-type? t) (verr :parser/null "null must be a pointer type" {:at [:val {:text "null"}]}))
+    ('#{undef poison zeroinitializer} v)
+    (let [rt (resolve-type t)]
+      (when (or (not (first-class? rt)) (= rt 'opaque) (= rt 'label))
+        (verr :parser/constant-type (str "invalid type for " ('{undef "undef" poison "poison" zeroinitializer "null"} v) " constant") {:at [:val {:text (str v)}]})))
+    (= v 'none) (when-not (= t 'token) (verr :parser/constant-type "invalid type for none constant" {:at [:val {:text "none"}]}))
+    (and (seq? v) ('#{struct packed} (first v)) (not (vector? (second v))) (empty? (rest v))) nil
     (seq? v) (let [h (first v)]
                (cond
-                 ('#{struct packed array vector} h) (doseq [e (rest v)] (when (vector? e) (use-value st (second e) (norm-type (first e)))))
+                 ('#{struct packed} h)
+                 (let [rt (resolve-type t) at {:at [:str value-brace]}]
+                   (if (and (seq? rt) ('#{struct packed} (first rt)))
+                     (do (when-not (= (count (rest rt)) (count (rest v))) (verr :parser/constant-type "initializer with struct type has wrong # elements" at))
+                         (when-not (= (first rt) h) (verr :parser/constant-type "packed'ness of initializer and type don't match" at))
+                         (doseq [[i e] (map-indexed vector (rest v))]
+                           (when (and (vector? e) (not= (norm-type (first e)) (norm-type (nth rt (inc i)))))
+                             (verr :parser/constant-type (str "element " i " of struct initializer doesn't match struct element type") at))))
+                     (verr :parser/constant-type "constant expression type mismatch" at))
+                   (doseq [e (rest v)] (when (vector? e) (use-value st (second e) (norm-type (first e))))))
+                 ('#{array vector} h) (doseq [e (rest v)] (when (vector? e) (use-value st (second e) (norm-type (first e)))))
                  (= h 'splat) (let [[et ev] (second v)] (use-value st ev (norm-type et)))
                  (cast-ops h) (let [[t x] (strip-flags (rest v))] (use-value st x (norm-type t)))
                  (bin-ops h) (let [[t a b] (strip-flags (rest v))] (use-value st a (norm-type t)) (use-value st b (norm-type t)))
-                 (or (= h 'getelementptr) ('#{extractelement insertelement shufflevector ptrauth} h))
+                 (= h 'ptrauth)
+                 (let [[p k d a ds] (rest v) at {:at [:val {:text "ptrauth"}]}]
+                   (doseq [e (rest v)] (when (vector? e) (use-value st (second e) (norm-type (first e)))))
+                   (when-not (ptr-type? (norm-type (first p))) (verr :parser/ptrauth "constant ptrauth base pointer must be a pointer" at))
+                   (when-not (and (= 'i32 (norm-type (first k))) (integer? (second k))) (verr :parser/ptrauth "constant ptrauth key must be i32 constant" at))
+                   (when (and d (not (and (= 'i64 (norm-type (first d))) (integer? (second d))))) (verr :parser/ptrauth "constant ptrauth integer discriminator must be i64 constant" at))
+                   (when (and a (not (ptr-type? (norm-type (first a))))) (verr :parser/ptrauth "constant ptrauth address discriminator must be a pointer" at))
+                   (when (and ds (not (ptr-type? (norm-type (first ds))))) (verr :parser/ptrauth "constant ptrauth deactivation symbol must be a pointer" at)))
+                 (or (= h 'getelementptr) ('#{extractelement insertelement shufflevector} h))
                  (doseq [e (rest v)] (when (vector? e) (use-value st (second e) (norm-type (first e)))))
                  :else nil))
     :else nil))
@@ -667,9 +732,20 @@
                        (when-not (first-class? (norm-type (first (first ps)))) (verr :parser/store "store operand must be a first class value" {:at [:ty]}))
                        (when (and (:atomic o) (nil? (:align o))) (verr :parser/atomic-align "atomic store must have explicit non-zero alignment"))
                        (check-align (:align o)))
-      (= h 'getelementptr) (when-not (ptr-ish? (norm-type (first (second ps*)))) (verr :parser/gep "base of getelementptr must be a pointer" {:at [:op 1]}))
+      (= h 'getelementptr) (let [[st base & idxs] ps*]
+                             (when-not (ptr-ish? (norm-type (first base))) (verr :parser/gep "base of getelementptr must be a pointer" {:at [:op 1]}))
+                             (let [w (volatile! (when (vec-type? (norm-type (first base))) (shape (norm-type (first base)))))]
+                               (doseq [[k ix] (map-indexed vector idxs) :let [it (norm-type (first ix))]]
+                                 (when-not (int-ish? it) (verr :parser/gep "getelementptr index must be an integer" {:at [:op (+ 2 k)]}))
+                                 (when (vec-type? it)
+                                   (when (and @w (not= @w (shape it))) (verr :parser/gep "getelementptr vector index has a wrong number of elements" {:at [:op (+ 2 k)]}))
+                                   (vreset! w (shape it)))))
+                             (when (and (seq idxs) (not (sized? (norm-type st)))) (verr :parser/gep "base element of getelementptr must be sized" {:at [:op 1]}))
+                             (when-not (gep-indexed-type (norm-type st) idxs) (verr :parser/gep "invalid getelementptr indices" {:at [:op 1]})))
       (= h 'phi) (when-not (first-class? (norm-type (first ps*))) (verr :parser/phi "phi node must have first class type" {:at [:ty]}))
       (= h 'select) (let [[[ct] [at] [bt]] ps* ct (norm-type ct)]
+                      (when (and (some keyword? ps) (not (fp-class-compatible? (norm-type at))))
+                        (verr :parser/select "fast-math-flags specified for select without floating-point scalar or vector return type" {:at [:body 0]}))
                       (cond
                         (not (or (= ct 'i1) (and (vec-type? ct) (= (elem ct) 'i1)))) (verr :parser/select "select condition must be i1 or <n x i1>" {:at [:ty]})
                         (not= (norm-type at) (norm-type bt)) (verr :parser/select "both values to select must have same type" {:at [:ty]})))
@@ -707,8 +783,29 @@
       (= h 'insertelement) (let [[[vt] [et] [it]] ps vt (norm-type vt)]
                              (when-not (and (vec-type? vt) (= (elem vt) (norm-type et)) (int-type? (norm-type it))) (verr :parser/vector "invalid insertelement operands")))
       (= h 'shufflevector) (let [[[at] [bt]] ps] (when-not (and (vec-type? (norm-type at)) (= (norm-type at) (norm-type bt))) (verr :parser/vector "invalid shufflevector operands")))
-      (= h 'atomicrmw) (do (when-not (ptr-type? (norm-type (first (nth ps 1)))) (verr :parser/atomicrmw "atomicrmw operand must be a pointer")) (check-align (:align o)))
-      (= h 'cmpxchg) (do (when-not (ptr-type? (norm-type (first (nth ps 0)))) (verr :parser/cmpxchg "cmpxchg operand must be a pointer")) (check-align (:align o)))
+      (= h 'atomicrmw) (let [[op pv v ord] ps vt (norm-type (first v)) opn (name op)
+                             ew (:elementwise o)
+                             st (if ew (when (= 'vector (first (shape vt))) (elem vt)) vt)]
+                         (when (= ord :unordered) (verr :parser/atomicrmw "atomicrmw cannot be unordered" {:at [:inst-end]}))
+                         (when (and ew (= ord :seq_cst)) (verr :parser/atomicrmw "atomicrmw elementwise cannot be sequentially consistent" {:at [:inst-end]}))
+                         (when-not (ptr-type? (norm-type (first pv))) (verr :parser/atomicrmw "atomicrmw operand must be a pointer" {:at [:op 0 1]}))
+                         (when (= 'vscale (first (shape vt))) (verr :parser/atomicrmw "atomicrmw operand may not be scalable" {:at [:op 1]}))
+                         (when (and ew (nil? st)) (verr :parser/atomicrmw "atomicrmw elementwise operand must be a fixed vector type" {:at [:op 1]}))
+                         (cond
+                           (= opn "xchg") (when-not (or (int-type? st) (fp-type? st) (ptr-type? st))
+                                            (verr :parser/atomicrmw "atomicrmw xchg operand must be an integer, floating point, or pointer type" {:at [:op 1]}))
+                           (str/starts-with? opn "f") (when-not (fp-ish? st)
+                                                        (verr :parser/atomicrmw (str "atomicrmw " opn " operand must be a floating point or fixed vector of floating point type") {:at [:op 1]}))
+                           :else (when-not (int-ish? st)
+                                   (verr :parser/atomicrmw (str "atomicrmw " opn " operand must be an integer or fixed vector of integer type") {:at [:op 1]})))
+                         (check-align (:align o)))
+      (= h 'cmpxchg) (let [[pv c n so fo] ps]
+                       (when (= so :unordered) (verr :parser/cmpxchg "invalid cmpxchg success ordering" {:at [:inst-end]}))
+                       (when (#{:unordered :release :acq_rel} fo) (verr :parser/cmpxchg "invalid cmpxchg failure ordering" {:at [:inst-end]}))
+                       (when-not (ptr-type? (norm-type (first pv))) (verr :parser/cmpxchg "cmpxchg operand must be a pointer" {:at [:op 0]}))
+                       (when-not (= (norm-type (first c)) (norm-type (first n))) (verr :parser/cmpxchg "compare value and new value type do not match" {:at [:op 2]}))
+                       (when-not (first-class? (norm-type (first n))) (verr :parser/cmpxchg "cmpxchg operand must be a first class value" {:at [:op 2]}))
+                       (check-align (:align o)))
       :else nil)))
 
 (def ^:private dbg-arity '{dbg_value 4 dbg_declare 4 dbg_declare_value 4 dbg_assign 7 dbg_label 2})
@@ -756,16 +853,27 @@
           (binding [*ctx* (assoc (at) :inst x :bb l)]
             (let [b (body x)]
               (if (dbg-record? b)
-                (parse-dbg st b)
+                (do (when (:old @*dbg-format*) (verr :parser/dbg-record "debug record should not appear in a module containing debug info intrinsics" {:at :start}))
+                    (vswap! *dbg-format* assoc :new true)
+                    (parse-dbg st b))
                 (do (inst-uses! st b)
                     (check-inst st b ret-type)
+                    (when-let [c (callee-of b)]
+                      (when (and (= 'call (first b)) (global? c) (re-find #"^llvm\.dbg\.(declare|value|assign)(\.|$)" (global-key c)))
+                        (when (:new @*dbg-format*) (verr :parser/dbg-record "llvm.dbg intrinsic should not appear in a module using non-intrinsic debug info" {:at [:body 1]}))
+                        (vswap! *dbg-format* assoc :old true)))
                     (let [t (result-type b) r (result x)]
                       (cond
                         (and r (= t 'void)) (verr :parser/void-name "instructions returning void cannot have a name" {:at :start})
                         (not= t 'void) (define-value st r t "instruction"))))))))
         (when-not (or *partial* (and (seq items) (terminator? (last items))))
           (binding [*ctx* (assoc *ctx* :item (inc @ic))] (verr :parser/terminator "expected instruction opcode")))))
-    (doseq [u (:uselistorder o)] (note-md! u))
+    (doseq [[k u] (map-indexed vector (:uselistorder o))]
+      (binding [*ctx* (assoc *ctx* :item (+ @ic 1 k))]
+        (let [[_ [t v] idxs] u]
+          (use-value st v (norm-type t))
+          (check-uselistorder v idxs (when (local? v) (count (for [blk blocks x (drop 2 blk) :let [b (body x)] :when (not (dbg-record? b))
+                                                                   [u] (uses b) :when (and (local? u) (= (local-key u) (local-key v)))] u)))))))
     (when-not *partial*
     (let [named (sort (remove numbered? (keys (.fwd st))))
           nums (sort (map #(Long/parseLong %) (filter numbered? (keys (.fwd st)))))]
@@ -814,10 +922,18 @@
           (verr :parser/numbering (str "argument expected to be numbered '%" (aget ^longs (.next ^Fn st) 0) "' or greater") {:at [:param pi]}))
         (when (= what :define) (define-value st nmx (norm-type (first p)) "argument"))))
     (check-align (:align o))
+    (when-let [a (:prefalign o)]
+      (when-not (pow2? a) (verr :parser/align "alignment is not a power of two" {:at [:after "prefalign"]}))
+      (when (> a 4294967296) (verr :parser/align "huge alignments are not supported yet" {:at [:after "prefalign"]})))
     (note-md! (:md o))
     (when-let [p (:personality o)] (use-value nil (second p) (norm-type (first p))))
     (when-let [p (:prefix o)] (use-value nil (second p) (norm-type (first p))))
     (when-let [p (:prologue o)] (use-value nil (second p) (norm-type (first p))))
+    (when-let [ft (.get *gfwd* k)]
+      (let [pft (norm-type (list 'ptr (or (:addrspace o) *prog-as*)))]
+        (when (and (not= ft true) (not= (norm-type ft) pft))
+          (verr :parser/forward-type (str "invalid forward reference to function '" k "' with wrong type: expected '" (tstr pft) "' but was '" (tstr (norm-type ft)) "'")
+                {:at [:mod-find (pr/global-str nm)]}))))
     (.put *gdefs* k {:kind :function :fty (list 'fn (norm-type rt) (mapv #(if (= % '&) % (norm-type (first %))) ps)) :form f})
     (.remove *gfwd* k)
     (when (= what :define) (binding [*caller-varargs* (boolean (some #{'&} ps))] (parse-body st f (norm-type rt))))))
@@ -878,7 +994,24 @@
              (catch arbace.lang.ExceptionInfo e
                (if (:llvm/verify (ex-data e)) (verr :parser/intrinsic (.getMessage e) at) (throw e)))))))))
 
+(defn- check-uselistorder
+  "LLParser::parseUseListOrderIndexes and sortUseListOrder: the indexes a permutation of [0, size) that changes the order,
+  as many as the value's uses (`n`, nil for a value without a use list)."
+  [v idxs n]
+  (let [at {:at [:find "{"]} k (count idxs)]
+    (when (< k 2) (verr :parser/uselistorder "expected >= 2 uselistorder indexes" at))
+    (when-not (= (set idxs) (set (range k))) (verr :parser/uselistorder "expected distinct uselistorder indexes in range [0, size)" at))
+    (when (= (vec idxs) (vec (range k))) (verr :parser/uselistorder "expected uselistorder indexes to change the order" at))
+    (when n
+      (cond (zero? (long n)) (verr :parser/uselistorder "value has no uses" {:at :start})
+            (= 1 n) (verr :parser/uselistorder "value only has one use" {:at :start})
+            (not= n k) (verr :parser/uselistorder (str "wrong number of indexes, expected " n) {:at :start})))))
+
 (defn- phase-parser [forms]
+  (binding [*dbg-format* (volatile! {})]
+    (phase-parser* forms)))
+
+(defn- phase-parser* [forms]
   (doseq [[fi f] (map-indexed vector forms)]
     (binding [*ctx* {:form fi :item 0}]
       (case (first f)
@@ -893,7 +1026,17 @@
                                 (and (seq? op) (= (first op) '!) (string? (second op))) (verr :parser/syntax "expected integer" {:at [:plus [:brace-item oi 0] 1]})))
                             (note-md! (nth f 2)))
         llvm/attributes (do (check-attr-placement :fn (nth f 2)) (check-attr-values (nth f 2)))
-        llvm/uselistorder (let [[_ [t v]] f] (use-value nil v (norm-type t)))
+        llvm/uselistorder (let [[_ [t v] idxs] f]
+                            (use-value nil v (norm-type t))
+                            (check-uselistorder v idxs
+                                                (when (global? v)
+                                                  (let [n (volatile! 0) k (global-key v)]
+                                                    (letfn [(walk [y] (cond (and (global? y) (= (global-key y) k)) (vswap! n inc)
+                                                                            (or (seq? y) (vector? y)) (doseq [z y] (walk z))
+                                                                            (map? y) (doseq [z (vals y)] (walk z))))]
+                                                      (doseq [g (take fi forms) :when (not (#{'llvm/meta 'llvm/named-meta 'llvm/uselistorder} (first g)))]
+                                                        (walk (if (#{'llvm/global 'llvm/define 'llvm/declare 'llvm/alias 'llvm/ifunc} (first g)) (drop 2 g) g))))
+                                                    @n))))
         nil)))
   ;; validateEndOfModule's order: comdats, metadata, debug locations, implicit intrinsics, then undefined globals
   (when-not *partial*
@@ -2411,6 +2554,12 @@
         item (when sp (nth sp (min k (dec (count sp))) nil))]
     (cond
       (= hint [:next]) (if-let [nx (some-> (nth spans (inc fi) nil) first first)] nx (count src))
+      ;; the token after an instruction's operands: its metadata's `,`, else the text's next token
+      (and (= hint [:inst-end]) item)
+      (let [toks (diag/tokens src (first item) (second item))
+            i (first (keep-indexed (fn [i t] (when (and (= "," (:t t)) (= :meta (:k (nth toks (inc i) nil)))) i)) toks))]
+        (if i (long (:s (nth toks i)))
+            (let [m (re-matcher #"(?:[ \t\r\n]+|;[^\n]*)*" src)] (.region m (int (second item)) (count src)) (.lookingAt m) (.end m))))
       (and (vector? hint) (= (first hint) :mod-find)) (+ (diag/offset-of src 0 (count src) [:find (second hint)]) (long (or (nth hint 2 nil) 0)))
       (and (vector? hint) (= (first hint) :fn-find) whole) (diag/offset-of src (first whole) (second whole) [:find (second hint)])
       item (diag/offset-of src (first item) (second item) hint)

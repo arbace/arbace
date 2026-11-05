@@ -46,7 +46,7 @@
         add (fn [k t s e] (.add ks k) (.add ts t) (.add ss (int s)) (.add es (int e)))
         n (count src)]
     (loop [i (long 0)]
-      (when (and (< i n) (not= :bad (when (pos? (.size ks)) (.get ks (dec (.size ks))))))
+      (when (and (< i n) (not (#{:bad :nul} (when (pos? (.size ks)) (.get ks (dec (.size ks)))))))
         (.region m (int i) (int n))
         (if-not (.lookingAt m)
           ;; a character LLLexer would refuse: one :bad token to the end, the parser refuses when it reaches it (LLParser
@@ -58,6 +58,8 @@
               (.group m 2) (add :mspec (.group m 2) i e)
               (.group m 3) (add :dbgrec (.group m 3) i e)
               (.group m 4) (add :sumid (.group m 4) i e)
+              (and (or (.group m 5) (.group m 8)) (not= "!" (.group m 5)) (str/includes? (unescape (or (.group m 6) (.group m 8))) "\u0000"))
+              (do (add :nul "" i n) (.region m (int n) (int n)))   ; LLLexer: NUL character is not allowed in names
               (.group m 5) (add ({"%" :lname "@" :gname "$" :comdat "!" :mstr} (.group m 5)) (if (= (.group m 5) "!") (.group m 6) (unescape (.group m 6))) i e)
               (.group m 7) (add :cstr (.group m 7) i e)
               (.group m 8) (add :qlabel (.group m 8) i e)
@@ -121,6 +123,10 @@
 (defn- bad-token!
   "At a character LLLexer refuses (the :bad token): its error. `/*` without `*/` is LLLexer's unterminated comment."
   []
+  (when (= (kind) :nul)
+    (let [off (aget ^ints (.starts *t*) (p))]
+      (throw (ex-info (str "llvm: line " (line-of off) ": NUL character is not allowed in names")
+                      {:llvm/refused :llparser :llvm/message "NUL character is not allowed in names" :llvm/offset off}))))
   (when (= (kind) :bad)
     (let [off (aget ^ints (.starts *t*) (p))]
       (throw (if (str/starts-with? (text) "/*")
@@ -201,15 +207,23 @@
   "addrspace(N), or a symbolic one, addrspace(\"A\") (the data layout's name): N or \"A\"."
   []
   (expect! "addrspace") (expect! "(")
+  (when (and (= (kind) :int) (>= (bigint (text)) 16777216)) (llerr "invalid address space, must be a 24-bit integer"))
   (let [n (if (= (kind) :str) (take-str!) (take-num!))] (expect! ")") n))
 
 (defn- parse-base-type []
+  (when (and (= (kind) :word) (re-matches #"[ib][0-9]+" (text)) (let [n (bigint (subs (text) 1))] (or (< n 1) (> n 8388608))))
+    (llerr "bitwidth for integer or byte type out of range"))
   (case (kind)
     :word (let [w (take-word!)]
             (cond
               (= w "ptr") (if (word? "addrspace") (list 'ptr (parse-addrspace)) 'ptr)
               (= w "target") (let [_ (expect! "(") nm (take-str!)
-                                   args (loop [out []] (if (accept! ",") (recur (conj out (if (= (kind) :int) (take-num!) (parse-type)))) out))]
+                                   args (loop [out [] seen-int false]
+                                          (if (accept! ",")
+                                            (cond (= (kind) :int) (recur (conj out (take-num!)) true)
+                                                  seen-int (llerr "expected uint32 param")
+                                                  :else (recur (conj out (parse-type)) false))
+                                            out))]
                                (expect! ")") (apply list 'target nm args))
               :else (symbol w)))
     :lname (let [n (local-name (text))] (adv!) n)
@@ -251,7 +265,7 @@
                                     (and (punct? "...") (do (adv!) true)) (do (expect! ")") (conj out '&))
                                     :else (let [pt (parse-type)] (accept! ",") (recur (conj out pt)))))]
                          (recur (list 'fn t ps))))
-      (punct? "*") (do (adv!) (recur (list '* t)))
+      (punct? "*") (do (when (= t 'ptr) (llerr "ptr* is invalid - use ptr instead")) (adv!) (recur (list '* t)))
       (typed-pointer-addrspace?) (let [a (parse-addrspace)] (adv!) (recur (list '* t a)))
       :else t)))
 
@@ -420,7 +434,11 @@
     :int (take-num!)
     :hexint (let [s (text)] (adv!) (list 'int s))
     :float (let [s (text)] (adv!) (list 'fp s))
-    :hexfp (let [s (text)] (adv!) (list 'fp s))
+    :hexfp (let [s (text)]
+             ;; LLLexer: a half or bfloat by its bits fits 16 bits
+             (when (and (re-matches #"0x[HR][0-9A-Fa-f]+" s) (>= (bigint (java.math.BigInteger. (subs s 3) (int 16))) 65536))
+               (llerr (str "hexadecimal constant too large for " (if (= \H (.charAt ^String s 2)) "half" "bfloat") " (16-bit)")))
+             (adv!) (list 'fp s))
     :cstr (let [s (unescape (text))] (adv!) (list 'c-string s))
     (:meta :mstr :mspec) (parse-md-value)
     :punct (case (text)
@@ -467,6 +485,7 @@
                      (expect! "}") (list '! xs))))
              (parse-typed))
     :word (if (word? "null") (do (adv!) 'null) (parse-typed))
+    :eof (llerr "expected metadata operand")
     (parse-typed)))
 
 (defn- md-list-start?
@@ -744,9 +763,12 @@
   "A debug record, #dbg_KIND(operand, ...) (value, declare, assign, label, declare_value): (dbg_KIND md...), its
   operands metadata (a value as [T v], !N, an inline !DIExpression(...) or !DIArgList(...))."
   []
-  (let [k (text)]
+  (let [k (text)
+        md-op (fn [i] (when (and (or (pos? i) (= k "label")) (not (#{:meta :mstr :mspec} (kind))) (not (punct? "!")))
+                        (llerr "expected '!' here"))
+                (parse-md-value))]
     (adv!) (expect! "(")
-    (let [ops (if (punct? ")") [] (comma-list parse-md-value))]
+    (let [ops (if (punct? ")") [] (loop [out [(md-op 0)]] (if (accept! ",") (recur (conj out (md-op (count out)))) out)))]
       (expect! ")")
       (apply list (symbol (str "dbg_" k)) ops))))
 
@@ -950,10 +972,21 @@
             "target" (do (adv!) (let [w (take-word!)] (expect! "=") (list (symbol "llvm" w) (take-str!))))
             "declare" (do (adv!) (let [md (parse-fn-md)] (parse-function false md)))
             "define" (do (adv!) (parse-function true nil))
-            "attributes" (do (adv!) (let [n (Long/parseLong (text))] (adv!) (expect! "=") (expect! "{")
+            "attributes" (do (adv!) (let [n (if (= (kind) :attrgrp) (Long/parseLong (text)) (llerr "expected attribute group id"))] (adv!) (expect! "=") (expect! "{")
                                          (let [as (loop [out []] (if (accept! "}") out (recur (conj out (parse-attr false)))))]
                                            (list 'llvm/attributes n as))))
-            "module" (do (adv!) (expect! "asm") (list 'llvm/module-asm (take-str!)))
+            "module" (do (adv!) (expect! "asm")
+                         (let [props (when (accept! "(")
+                                       (loop [out []]
+                                         (when-not (= (kind) :label) (llerr "expected property name followed by ':'"))
+                                         (let [k0 (tok-start) k (text)]
+                                           (adv!)
+                                           (let [v (take-str!)]
+                                             (when-not (#{"target_features"} k) (llerr "unknown property name" k0))
+                                             (cond (accept! ")") (conj out [k v])
+                                                   (accept! ",") (recur (conj out [k v]))
+                                                   :else (llerr "expected ',' or ')'"))))))]
+                           (if props (list 'llvm/module-asm (take-str!) :props props) (list 'llvm/module-asm (take-str!)))))
             "uselistorder" (apply list 'llvm/uselistorder (parse-uselistorder))
             (llerr "expected top-level entity"))
     :lname (let [n (local-name (text))] (adv!) (expect! "=") (expect! "type")
