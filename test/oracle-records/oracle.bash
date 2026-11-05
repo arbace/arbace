@@ -55,6 +55,7 @@ oracle_make() {  # PIN DIR IDS CMD HOST
   local pin=$1 dir=$2 ids=$3 cmd=$4 host=$5 name man store sha id key f s n
   name=$(oracle_pin_name "$pin"); man=$(oracle_manifest "$pin"); store=$(oracle_store)
   [ -d "$dir/$name" ] || { echo "oracle: no $dir/$name to pack" >&2; return 1; }
+  [ -s "$ids" ] || { echo "oracle: no members listed for $name ($ids)" >&2; return 1; }
   # every file under DIR/NAME is a listed member, and every listed member is there
   (cd "$dir/$name" && find . -type f -printf '%P\n' | LC_ALL=C sort) > "$TMPDIR/oracle-make.files"
   awk -F'\t' '{id=$1; sub(/^\//, "", id); print id}' "$ids" | LC_ALL=C sort > "$TMPDIR/oracle-make.ids"
@@ -136,11 +137,96 @@ oracle_host_id() {  # TOOL
         if [ -f "$c" ]; then sha256sum < "$c" | cut -c1-64; else echo "no cc1"; fi
         awk '{print $2}' "$root/test/c/host/headers.sha256" 2>"$TMPDIR/oracle-gcc.err" | while read -r h; do
           if [ -f "$h" ]; then sha256sum "$h"; else echo "missing $h"; fi; done; } | sha256sum | cut -c1-64 ;;
+    chez) oracle_scheme_id "${CHEZ:-chez}" --version /usr/lib/csv10.3.0/ta6le/petite.boot /usr/lib/csv10.3.0/ta6le/scheme.boot /usr/lib/csv10.3.0/ta6le/chez.boot ;;
+    chibi) oracle_scheme_id "${CHIBI:-chibi-scheme}" -V ;;
+    ghc) oracle_ghc_id ;;
+    rustc) oracle_rustc_id ;;
+    cxx) oracle_cxx_id ;;
+    llvm) oracle_llvm_id ;;
+    ocaml) oracle_ocaml_id ;;
     *) echo "oracle: no identity recipe for $1" >&2; echo none ;;
   esac
 }
+oracle_scheme_id() {  # CMD VERSION-FLAG FILE...: bin/lib/gate-run.bash's gate_scheme_id (:chez, :chibi): the version line, the executable's
+  # SHA-256 through its links, the FILEs' (Chez's boot files); none when the command is not installed
+  local c=$1 v=$2 x f; shift 2
+  x=$(command -v "$c") || { echo none; return; }
+  { "$c" "$v" 2>&1 | head -1
+    sha256sum < "$(readlink -f "$x")" | cut -c1-64
+    for f in "$@"; do if [ -f "$f" ]; then sha256sum < "$f" | cut -c1-64; else echo "missing $f"; fi; done; } | sha256sum | cut -c1-64
+}
+oracle_ghc_id() {  # GT9's :host-ids :ghc recipe (test/gate/crops/haskell.edn, steps.edn): ghc's --version line, then the SHA-256 of
+  # {libdir}/../bin/ghc-[0-9]* and of {libdir}/package.conf.d/ghc-[0-9]*.conf (a glob with no file: "missing GLOB"); none without ghc
+  command -v ghc > "$TMPDIR/oracle-ghc.err" || { echo none; return; }
+  local d g p m
+  d=$(ghc --print-libdir 2>"$TMPDIR/oracle-ghc.err")
+  { ghc --version 2>"$TMPDIR/oracle-ghc.err" | head -1
+    for g in "$d/../bin/ghc-[0-9]*" "$d/package.conf.d/ghc-[0-9]*.conf"; do
+      m=0
+      for p in $g; do [ -f "$p" ] && { sha256sum < "$p" | cut -c1-64; m=1; }; done
+      [ $m = 1 ] || echo "missing $g"
+    done; } | sha256sum | cut -c1-64
+}
+oracle_rustc_id() {  # GT9's :host-ids :rustc recipe (test/gate/crops/llvm-rust.edn, steps.edn): `rustc --version -v` (all of it), the executable's
+  # SHA-256 through its links, then the SHA-256 of {sysroot}/lib/librustc_driver-*.so (the helper links to it); none without rustc
+  command -v rustc > "$TMPDIR/oracle-rustc.err" || { echo none; return; }
+  local d p m x
+  d=$(rustc --print sysroot 2>"$TMPDIR/oracle-rustc.err")
+  x=$(readlink -f "$(command -v rustc)")
+  { rustc --version -v 2>"$TMPDIR/oracle-rustc.err"
+    sha256sum < "$x" | cut -c1-64
+    m=0
+    for p in "$d"/lib/librustc_driver-*.so; do [ -f "$p" ] && { sha256sum < "$p" | cut -c1-64; m=1; }; done
+    [ $m = 1 ] || echo "missing $d/lib/librustc_driver-*.so"; } | sha256sum | cut -c1-64
+}
+oracle_cxx_id() {  # bin/lib/gate-run.bash's gate_cxx_id (the :cxx host, CX10; GT9's :host-ids :cxx): g++'s and clang++'s --version lines, the digests of
+  # their drivers, cc1plus and clang's binary through their links, and of the headers C++'s checks read (test/cpp/host/headers.sha256's); none without either
+  local g c p
+  g=$(command -v g++) && c=$(command -v clang++) || { echo none; return; }
+  g=$(readlink -f "$g"); c=$(readlink -f "$c"); p=$(readlink -f "$(g++ -print-prog-name=cc1plus 2>"$TMPDIR/oracle-cxx.err")" 2>"$TMPDIR/oracle-cxx.err")
+  { g++ --version 2>"$TMPDIR/oracle-cxx.err" | head -1
+    clang++ --version 2>"$TMPDIR/oracle-cxx.err" | head -1
+    sha256sum < "$g" | cut -c1-64
+    if [ -f "$p" ]; then sha256sum < "$p" | cut -c1-64; else echo "no cc1plus"; fi
+    sha256sum < "$c" | cut -c1-64
+    awk '{print $2}' "$root/test/cpp/host/headers.sha256" 2>"$TMPDIR/oracle-cxx.err" | while read -r h; do
+      if [ -f "$h" ]; then sha256sum "$h"; else echo "missing $h"; fi; done; } | sha256sum | cut -c1-64
+}
+oracle_llvm_id() {  # GT9's :host-ids :llvm recipe (gt9-verbs: test/gate/steps.edn): llvm-as's --version lines, the digests of llvm-as, opt, lli and FileCheck of
+  # ${REPR_LLVM_BIN:-/usr/lib/llvm23/bin} and of ../lib/libLLVM.so.*; none without llvm-as
+  local b=${REPR_LLVM_BIN:-/usr/lib/llvm23/bin} f p m
+  [ -x "$b/llvm-as" ] || { echo none; return; }
+  { "$b/llvm-as" --version 2>"$TMPDIR/oracle-llvm.err"
+    for f in llvm-as opt lli FileCheck; do
+      if [ -f "$b/$f" ]; then sha256sum < "$(readlink -f "$b/$f")" | cut -c1-64; else echo "missing $b/$f"; fi; done
+    m=0
+    for p in "$b"/../lib/libLLVM.so.*; do [ -f "$p" ] && { sha256sum < "$(readlink -f "$p")" | cut -c1-64; m=1; }; done
+    [ $m = 1 ] || echo "missing $b/../lib/libLLVM.so.*"; } | sha256sum | cut -c1-64
+}
+oracle_ocaml_id() {  # bin/lib/gate-run.bash's gate_ocaml_id (:ocaml, O8; GT9's :host-ids :ocaml is the same recipe): ocamlc's and ocamlopt's version lines, the
+  # SHA-256 of their executables through their links, of compiler-libs' ocamlcommon (.cmxa, .a, .cma) and of the installed stdlib's archives
+  # (.cma, .cmxa, .a), "missing FILE" for one that is not there; none without ocamlc and ocamlopt
+  local c o w f
+  c=$(command -v ocamlc) && o=$(command -v ocamlopt) || { echo none; return; }
+  w=$(ocamlc -where 2>"$TMPDIR/oracle-ocaml.err")
+  { ocamlc -version 2>"$TMPDIR/oracle-ocaml.err"; ocamlopt -version 2>"$TMPDIR/oracle-ocaml.err"
+    sha256sum < "$(readlink -f "$c")" | cut -c1-64; sha256sum < "$(readlink -f "$o")" | cut -c1-64
+    for f in "$w/compiler-libs/ocamlcommon.cmxa" "$w/compiler-libs/ocamlcommon.a" "$w/compiler-libs/ocamlcommon.cma" \
+             "$w/stdlib.cma" "$w/stdlib.cmxa" "$w/stdlib.a"; do
+      if [ -f "$f" ]; then sha256sum < "$f" | cut -c1-64; else echo "missing $f"; fi; done; } | sha256sum | cut -c1-64
+}
 oracle_host_version() {  # TOOL: its version line
-  case $1 in gcc) gcc --version 2>"$TMPDIR/oracle-gcc.err" | head -1 ;; *) echo unknown ;; esac
+  case $1 in
+    cxx) { g++ --version 2>"$TMPDIR/oracle-cxx.err" | head -1; clang++ --version 2>"$TMPDIR/oracle-cxx.err" | head -1; } | tr '\n' ';' | sed 's/;$//' ;;
+    llvm) "${REPR_LLVM_BIN:-/usr/lib/llvm23/bin}/llvm-as" --version 2>"$TMPDIR/oracle-llvm.err" | sed -n 2p | sed 's/^ *//' ;;
+    gcc) gcc --version 2>"$TMPDIR/oracle-gcc.err" | head -1 ;;
+    chez) "${CHEZ:-chez}" --version 2>&1 | head -1 ;;
+    chibi) "${CHIBI:-chibi-scheme}" -V 2>&1 | head -1 ;;
+    ghc) ghc --version 2>"$TMPDIR/oracle-ghc.err" | head -1 ;;
+    rustc) rustc --version 2>"$TMPDIR/oracle-rustc.err" | head -1 ;;
+    ocaml) echo "ocamlc $(ocamlc -version 2>"$TMPDIR/oracle-ocaml.err")" ;;
+    *) echo unknown ;;
+  esac
 }
 oracle_record_header() {  # PREFIX TOOL CMD
   local p=$1
