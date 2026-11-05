@@ -754,3 +754,7 @@ All under `bin/heavy-lock` if run on the loaded host; `ARBACE_HOST_EXE` unset in
    the target directories.
 2. **Whether the interim gate step takes `llvm-test-valid.list` as a part** (LLS20): 300 modules, one minute at 2 threads, 3 GiB: in budget. The sample's records
    (`-valid-rt/judges/verify.tsv`) are the expected outputs.
+
+## Decided (2026-11-05, the user: after LL1)
+
+Both as recommended: (1) LL4 closed as a corpus loop over the wrongly accepted rejections and the false errors, the full loop (opt's messages) for Assembler/ and Verifier/, acceptance only for the target directories; (2) GT9's interim llvm-roundtrip step takes llvm-test-valid.list (300 modules) as a part.
