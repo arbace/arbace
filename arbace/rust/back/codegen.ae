@@ -319,12 +319,15 @@
         visit-place (fn [p ctx loc]
                       (let [projs (place-projs p) l (place-local p)]
                         (doseq [e projs] (when (= "index" (proj-kind e)) (use! (second e) :copy loc)))
+                        ;; a downcast makes even a zero-sized local live in memory
+                        (when (and (= :zst (nth @kinds l)) (some #(= "downcast" (proj-kind %)) projs)) (vswap! kinds assoc l :mem))
                         (cond
                           (empty? projs) (use! l ctx loc)
                           (= :mem (nth @kinds l)) nil
                           (= "deref" (proj-kind (first projs))) (use! l :copy loc)
                           (#{:store :call :borrow :rawborrow} ctx) (vswap! kinds assoc l :mem)
-                          (every? #(= "field" (proj-kind %)) projs) (use! l ctx loc)
+                          (and (every? #(#{"field" "downcast"} (proj-kind %)) projs)
+                               (or (not-any? #(= "downcast" (proj-kind %)) projs) (= :single (:kind (:variants (layout lt (:ty (nth locs l)))))))) (use! l ctx loc)
                           :else (vswap! kinds assoc l :mem))))
         visit-operand (fn [o loc]
                         (case (name (first o))
@@ -864,12 +867,17 @@
                        (cond
                          (and (empty? projs) (zst? (nth lay l))) nil
                          (and (empty? projs) (not (contains? mem l))) (get-in @st [:vals l])
-                         (and (seq projs) (not (contains? mem l)) (every? #(= "field" (proj-kind %)) projs))
-                         (let [ty (reduce (fn [[val ly] e]
-                                            (let [fl (layout lt (nth e 2))
-                                                  fi (second e)]
-                                              [(when-not (zst? fl) (field-of-value val ly fi)) fl]))
-                                          [(get-in @st [:vals l]) (nth lay l)] projs)]
+                         (and (seq projs) (not (contains? mem l)) (every? #(#{"field" "downcast"} (proj-kind %)) projs))
+                         (let [ty (reduce (fn [[val ly var] e]
+                                            (if (= "downcast" (proj-kind e))
+                                              [val ly (nth e 2)]
+                                              (let [fl (layout lt (nth e 2))
+                                                    fi (second e)
+                                                    ly' (if (and var (= :multiple (:kind (:variants ly))))
+                                                          (assoc ly :offsets (:offsets (nth (:vs (:variants ly)) var)))
+                                                          ly)]
+                                                [(when-not (zst? fl) (field-of-value val ly' fi)) fl nil])))
+                                          [(get-in @st [:vals l]) (nth lay l) nil] projs)]
                            (first ty))
                          :else (load-place! bb (place-of! bb p))))
                      "const" (let [v (const-val lt o alloc-sym! alloc-const!)]
