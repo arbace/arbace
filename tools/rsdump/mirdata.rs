@@ -196,6 +196,39 @@ impl<'tcx> W<'tcx> {
 
     fn constant(&self, c: &ConstOperand<'tcx>) -> String {
         let text = c.to_string();
+        // a monomorphic body: unevaluated constants evaluated (promoteds, associated constants), function items given the
+        // symbol a function pointer to them has
+        let tcx = self.tcx;
+        let env = ty::TypingEnv::fully_monomorphized();
+        let ev = if self.mono {
+            match c.const_ {
+                Const::Unevaluated(..) => c.const_.eval(tcx, env, c.span).ok(),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        if let Some(cv) = ev {
+            let t = c.const_.ty();
+            return format!("(const {} {} {})", q(&text), self.ty(t), self.constval(cv));
+        }
+        let fnref = if self.mono {
+            if let ty::FnDef(d, a) = *c.const_.ty().kind() {
+                let a = tcx.erase_and_anonymize_regions(a.skip_binder());
+                if tcx.is_closure_like(d) {
+                    String::new()
+                } else {
+                    match ty::Instance::resolve_for_fn_ptr(tcx, env, d, a) {
+                        Some(i) => format!(" :fn-symbol {}", q(&tcx.symbol_name(i).name.to_string())),
+                        None => String::new(),
+                    }
+                }
+            } else {
+                String::new()
+            }
+        } else {
+            String::new()
+        };
         let v = match c.const_ {
             Const::Ty(_, k) => match c.const_.try_to_scalar_int() {
                 Some(i) => format!("(scalar {} {})", i.to_bits_unchecked(), i.size().bytes()),
@@ -209,7 +242,11 @@ impl<'tcx> W<'tcx> {
             ),
             Const::Val(v, _) => self.constval(v),
         };
-        format!("(const {} {} {})", q(&text), self.ty(c.const_.ty()), v)
+        if fnref.is_empty() {
+            format!("(const {} {} {})", q(&text), self.ty(c.const_.ty()), v)
+        } else {
+            format!("(const {} {} {}{})", q(&text), self.ty(c.const_.ty()), v, fnref)
+        }
     }
 
     fn operand(&self, o: &Operand<'tcx>) -> String {

@@ -240,10 +240,11 @@
           (case (name (first t))
             "goto" nil
             ("resume" "terminate") nil
-            "drop" (let [[_ p _ _ _ _ glue] t]
-                     (if (seq (place-projs p))
-                       (vswap! kinds assoc (place-local p) :mem)
-                       (when glue (vswap! kinds assoc (place-local p) :mem))))
+            "drop" (let [[_ p _ _ _ _ glue] t projs (place-projs p)]
+                     (cond
+                       (and (seq projs) (= "deref" (proj-kind (first projs)))) (use! (place-local p) :copy loc)
+                       (seq projs) (vswap! kinds assoc (place-local p) :mem)
+                       glue (vswap! kinds assoc (place-local p) :mem)))
             "switch" (visit-operand (second t) loc)
             "return" (use! 0 :move loc)
             "unreachable" nil
@@ -356,7 +357,10 @@
                             (if (:bool sc) [:zeroext]
                                 (when (and (= :ptr (:prim sc)) ra) [(list :align ra)]))
                             [nm]))])
-    :pair (mapv (fn [sc nm] (vec (concat [(symbol (:imm sc))] (sc-attrs sc) [nm]))) (take 2 (:pair l)) names-or-vals)
+    :pair (vec (map-indexed (fn [i [sc nm]] (vec (concat [(symbol (:imm sc))] (sc-attrs sc)
+                                                                  (when (and (zero? i) (= :ptr (:prim sc)) ra) [(list :align ra)])
+                                                                  [nm])))
+                            (map vector (take 2 (:pair l)) names-or-vals)))
     (unsupported "memory aggregate as a parameter")))
 
 (defn ref-align
@@ -365,7 +369,11 @@
   [lt t]
   (let [k (ty-kind t)]
     (cond
-      (= k "ref") (let [pl (layout lt (pointee-type t))] (when (and (not (zst? pl)) (> (:align pl) 1)) (:align pl)))
+      (= k "ref") (let [pt (pointee-type t) pk (ty-kind pt)]
+                    (cond
+                      (= pk "slice") (let [el (layout lt (second (ty-struct pt)))] (when (and (not (zst? el)) (> (:align el) 1)) (:align el)))
+                      (#{"str" "dyn"} pk) nil
+                      :else (let [pl (layout lt pt)] (when (and (not (zst? pl)) (> (:align pl) 1)) (:align pl)))))
       (= k "adt") (some (fn [a] (when (and (seq? a) (= "ty" (name (first a))) (= "ref" (ty-kind a))) (ref-align lt a))) (nth (ty-struct t) 3))
       :else nil)))
 
@@ -622,7 +630,9 @@
                      "Add" (ins 'add t (:v a) (:v b))
                      "Sub" (ins 'sub t (:v a) (:v b))
                      "Mul" (ins 'mul t (:v a) (:v b))
-                     "Div" (ins (if sg 'sdiv 'udiv) t (:v a) (:v b))
+                     ("AddUnchecked" "SubUnchecked" "MulUnchecked")
+                   (ins (case op "AddUnchecked" 'add "SubUnchecked" 'sub "MulUnchecked" 'mul) (if sg :nsw :nuw) t (:v a) (:v b))
+                   "Div" (ins (if sg 'sdiv 'udiv) t (:v a) (:v b))
                      "Rem" (ins (if sg 'srem 'urem) t (:v a) (:v b))
                      "BitAnd" (ins 'and t (:v a) (:v b))
                      "BitOr" (ins 'or t (:v a) (:v b))
@@ -798,6 +808,13 @@
                     ("use" "use-noretag") (operand! bb (second r))
                     "binop" (let [[_ op a b] r sc (scalar-of-op a)]
                               (cond
+                                (= op "Offset")
+                                (let [pv (operand! bb a) nv (operand! bb b)
+                                      el (layout lt (second (ty-struct (ty-of a))))
+                                      rr (fresh!)]
+                                  (when-not (= :scalar (:kind el)) (unsupported "Offset of a non-scalar pointee"))
+                                  (emit! bb (list '= rr (list 'getelementptr :inbounds (symbol (:mem (:scalar el))) ['ptr (:v pv)] [(symbol (:ty nv)) (:v nv)])))
+                                  {:ty "ptr" :v rr})
                                 (#{"Shl" "Shr" "ShlUnchecked" "ShrUnchecked"} op) (shift! bb op (operand! bb a) (operand! bb b) sc (scalar-of-op b))
                                 (#{"AddWithOverflow" "SubWithOverflow" "MulWithOverflow"} op) (overflow! bb op (operand! bb a) (operand! bb b) sc)
                                 :else (bin! bb op (operand! bb a) (operand! bb b) sc)))
@@ -811,6 +828,13 @@
                              (cond
                                (= kind "IntToInt") (cast! bb o (or (:scalar (layout lt t)) (unsupported "cast to a non-scalar")) (scalar-of-op o))
                                ;; a pointer cast between thin pointers changes nothing in LLVM's opaque pointers
+                               (.startsWith ^String kind "PointerCoercion(ReifyFnPointer")
+                               (if-let [sym (second (drop-while #(not= :fn-symbol %) o))]
+                                 {:ty "ptr" :v (symbol "g" sym)}
+                                 (unsupported "reified function without a symbol"))
+                               (and (.startsWith ^String kind "PointerCoercion(Unsize") (= "array" (ty-kind (pointee-type (ty-of o)))) (= "slice" (ty-kind (pointee-type t))))
+                               (let [v (operand! bb o) n (Long/parseLong (nth (ty-struct (pointee-type (ty-of o))) 2))]
+                                 {:pair [v {:ty "i64" :v n}]})
                                (= kind "PtrToPtr")
                                (let [fl (layout lt (ty-of o)) tl (layout lt t) v (operand! bb o)]
                                  (cond (and (= :scalar (:kind fl)) (= :scalar (:kind tl))) v
@@ -878,7 +902,10 @@
                                                 (when (and (= :ptr (:prim sc)) (ref-align lt (ty-of o)))
                                                   [(list :align (ref-align lt (ty-of o)))])
                                                 [(:v v)])))]
-                        :pair (mapv (fn [c sc] (vec (concat [(symbol (:ty c))] (sc-attrs sc) [(:v c)]))) (:pair v) (take 2 (:pair l)))
+                        :pair (vec (map-indexed (fn [i [c sc]] (vec (concat [(symbol (:ty c))] (sc-attrs sc)
+                                                                            (when (and (zero? i) (= :ptr (:prim sc)) (ref-align lt (ty-of o))) [(list :align (ref-align lt (ty-of o)))])
+                                                                            [(:v c)])))
+                                                (map vector (:pair v) (take 2 (:pair l)))))
                         :memory (let [pl (:ref v) ci (cast-int l) r (fresh!)]
                                   (emit! bb (list '= r (list 'load ci ['ptr (:ptr pl)] :align (:align pl))))
                                   [[ci r]])
@@ -1017,8 +1044,9 @@
                                                  (emit! bb (list '= c (list 'icmp :eq (symbol (:ty dv)) (:v dv) (key v))))
                                                  (emit! bb (list 'br 'i1 c lt* lf))))]
                                    (cond
-                                     (number? (:v dv))
-                                     (let [target (or (some (fn [[v tg]] (when (= (bigint v) (let [x (bigint (:v dv))] (if (neg? x) (+ x (.pow (java.math.BigInteger/valueOf 2) (:bits sc))) x))) tg)) vals) other)]
+                                     (or (number? (:v dv)) (boolean? (:v dv)))
+                                     (let [dvv (cond (true? (:v dv)) 1 (false? (:v dv)) 0 :else (let [x (bigint (:v dv))] (if (neg? x) (+ x (.pow (java.math.BigInteger/valueOf 2) (:bits sc))) x)))
+                                           target (or (some (fn [[v tg]] (when (= (bigint v) (bigint dvv)) tg)) vals) other)]
                                        (emit! bb (list 'br (llbb! target))))
                                      (= 1 (count vals))
                                      (let [[v target] (first vals)
@@ -1122,7 +1150,7 @@
                                      (if (contains? mem a)
                                        (store-val! "start" {:ptr (get-in @st [:allocas a]) :align (:align ly) :ly ly} val)
                                        (vswap! st assoc-in [:vals a] val))
-                                     (param-forms ly nil [n0 n1]))
+                                     (param-forms ly (ref-align lt (:ty (nth locs a))) [n0 n1]))
                              :memory (let [nm (symbol (str "%_" a)) ci (cast-int ly)]
                                        (when-not (contains? mem a) (unsupported "SSA memory aggregate"))
                                        (store-cast! "start" ci nm {:ptr (get-in @st [:allocas a]) :align (:align ly)} (:size ly))
@@ -1139,6 +1167,12 @@
                 (when-let [m (let [r (terminator! bb b (:term blk))] (when (number? r) r))]
                   (vswap! st update :skip conj m)
                   (recur m)))))))
+      ;; the blocks no traversal reached (and no merge took) are codegen'd as `unreachable`, in index order
+      (doseq [b (range (count blocks))]
+        (when-not (or (some #{b} order) (contains? (:skip @st) b))
+          (let [nm (if (zero? b) "start" (str "bb" b))]
+            (llbb! b)
+            (emit! nm '(unreachable)))))
       (let [params (if (:track-caller body) (conj params ['ptr (list :align 8) (symbol "%_loc")]) params)
             s @st
             start-code (into (:start s) (get-in s [:bbs "start"]))

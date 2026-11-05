@@ -138,7 +138,40 @@
   (when-let [m (module-forms dir n)]
     (llvm/spit-latin1 (str dir "/" n ".ours.ll") (llvm/print-ll m))))
 
+(def datalayout "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128")
+(def triple "x86_64-alpine-linux-musl")
+
+(defn emit-mono
+  "DIR/NAME.mono.edn (the helper's --mono-mir) to DIR/NAME.ours.ll: every function instance of the program codegen'd, the panic
+  functions stubbed to abort, or the first refusal: [:unsupported WHAT]."
+  [dir n]
+  (let [all (mir/read-all (slurp (str dir "/" n ".mono.edn")))
+        lt (:layouts all)
+        gl (cg/new-globals)
+        fns (try (doall (map (fn [b] (cg/codegen-fn b lt gl)) (filter #(= :body (:form %)) (:bodies all))))
+                 (catch Throwable e [:unsupported (or (:codegen/unsupported (ex-data e)) (.getMessage e))]))]
+    (if (= :unsupported (first fns))
+      fns
+      (let [extras (cg/module-extras gl)
+            defined (set (map (comp name second) fns))
+            decls (filter #(and (= 'llvm/declare (first %)) (not (defined (name (second %))))) extras)
+            real (filter #(and (not (.startsWith (name (second %)) "llvm.")) ) decls)
+            stubs (for [f real]
+                    (list 'llvm/define (second f) 'void (vec (map-indexed (fn [i [t & _]] [t (symbol (str "%p" i))]) (nth f 3)))
+                          :body [(list 'block '%start (list 'call 'void (symbol "g" "abort") []) '(unreachable))]))
+            forms (vec (concat [(list 'llvm/source-filename n) (list 'llvm/datalayout datalayout) (list 'llvm/triple triple)]
+                               (filter #(= 'llvm/global (first %)) extras)
+                               (filter #(and (= 'llvm/declare (first %)) (.startsWith (name (second %)) "llvm.")) decls)
+                               (when (seq real) [(list 'llvm/declare (symbol "g" "abort") 'void [])])
+                               stubs fns))]
+        (llvm/spit-latin1 (str dir "/" n ".ours.ll") (llvm/print-ll forms))
+        [:ok (count fns)]))))
+
 (defn -main [dir & names]
+  (when (= "--emit-mono" dir)
+    (let [[st what] (emit-mono (first names) (second names))]
+      (println (name st) what)
+      (System/exit (if (= st :ok) 0 3))))
   (when (= "--emit" dir)
     (doseq [n (rest names)] (emit-ll (first names) n))
     (System/exit 0))

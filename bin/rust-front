@@ -63,6 +63,24 @@ case ${1:-} in
       names=($(cd "$work/oracles" && ls *.mir.txt | sed 's/\.mir\.txt$//'))
     fi
     cd "$root" && arbace_tool -m arbace.rust.front.mir-check "$work/oracles" "${names[@]}" ;;
+  run)
+    # RF3, bin/rsi run --front mir: a program through the helper's mono items (rustc's collector, for now), arbace.rust.back.codegen's
+    # LLVM forms, rsi's lowering (bin/rsi lower: LLVM forms to C), gcc -O0 and the run; the exit status is the program's. Only what
+    # the codegen takes (no_std programs with an extern "C" main, today): else status 125 with the refusal's reason
+    shift
+    f=$(realpath "$1"); shift; [ "${1:-}" = -- ] && shift
+    n=$(basename "$f" .rs); out=$work/run/$n; mkdir -p "$out"
+    pf=""; grep -q '^#!\[no_std\]' "$f" && ! grep -q eh_personality "$f" && pf="-C panic=abort"
+    oc=-Coverflow-checks=off; grep -q '^// rf: overflow-checks' "$f" && oc=-Coverflow-checks=on
+    (cd "$out" && "$helper" rustc --mono-mir "$n.mono.edn" -- --edition 2024 --crate-type bin -A warnings -C opt-level=0 -C debuginfo=0 $pf $oc -Zshare-generics=no -o "$n.bin" "$f" > "$n.log" 2>&1) || { echo "rust-front run: the helper failed ($out/$n.log)" >&2; exit 1; }
+    cd "$root"
+    arbace_tool -m arbace.rust.back.check --emit-mono "$out" "$n" 2>&1 | grep -v -E '^Reflection warning|recur arg|^Auto-boxing' >&2
+    [ -f "$out/$n.ours.ll" ] || { echo "rust-front run: unsupported by the front (see above)" >&2; exit 125; }
+    "$root/bin/rsi" lower "$out/$n.ours.ll" -o "$out/$n.ours.c" 2>&1 | grep -v -E '^Reflection warning|recur arg|^Auto-boxing' >&2
+    printf '#include <stdlib.h>\n_Thread_local int cx$pending;\nvoid cx$uncaught(void) { abort(); }\nvoid cx$resume(void *o) { abort(); }\nvoid *cx$exception(void) { return 0; }\nint cx$catches(void *t) { return 0; }\n' > "$out/driver.c"
+    gcc -std=gnu23 -O0 -w -fno-builtin -fno-strict-aliasing -ffp-contract=off "$out/$n.ours.c" "$out/driver.c" -o "$out/$n.exe" 2>&1 | head -5 >&2
+    [ -x "$out/$n.exe" ] || { echo "rust-front run: gcc refused the lowered C" >&2; exit 125; }
+    "$out/$n.exe" "$@"; exit $? ;;
   coverage)
     # RF3's coverage: the mono items rustc collects for each program (the helper's --mono-mir: monomorphic MIR, symbols, resolved
     # callees) through arbace.rust.back.codegen, each function judged against rustc's own IR of the same symbol
