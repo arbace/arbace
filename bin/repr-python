@@ -83,6 +83,9 @@
 #   parse-check's corpora also syntax-errors (PY9:
 #   tools/pydump/syntax_cases.py, CPython's own syntax-error cases from the tarball's Lib/test)
 #   bin/repr-python check          spec-check, samples, then the round trips (:lines, then --text) over the default corpora
+#   bin/repr-python records record|verify [--sample N] [CORPUS...|outcomes]
+#                                  queue 213: the oracle's records (test/python/records/) made by the checks in mode record
+#                                  (by hand, on the host with python3) or checked in mode verify (the oracle tier's)
 # The oracle (queue 213; doc/ORACLE-RECORDS-SURVEY.md, "As built: Python"; tools/pydump/records.bash): REPR_PYTHON_ORACLE
 # records (the default with the shared tooling, test/oracle-records/oracle.bash: no python3; the originals' dumps, the
 # syntax-errors corpus and the verdicts of spec-check and samples from test/python/records/, a missing or stale entry a
@@ -306,7 +309,8 @@ cmd_check() {
     diff <(echo "$want") <(echo "$have") | sed 's/^/    /' || true
     bad=1
   else
-    echo "  corpora: $(echo "$have" | grep -c '^corpus') corpora, their files, lines, digests, tests and rejected files as recorded"
+    if type -P python3 >/dev/null; then echo "  corpora: $(echo "$have" | grep -c '^corpus') corpora, their files, lines, digests, tests and rejected files as recorded"
+    else echo "  corpora: $(echo "$have" | grep -c '^corpus') corpora, their files, lines and digests as recorded (tests and rejected files: python3's)"; fi
   fi
   # the site-packages of every other fetched architecture: the same .py files (corpora.edn's claim)
   local arch rec got
@@ -317,7 +321,7 @@ cmd_check() {
     if [ "$got" = "$rec" ]; then echo "  site-packages of $arch: the same files, lines and digest"
     else echo "  site-packages of $arch: $got, recorded $rec"; bad=1; fi
   done
-  if [ $bad = 0 ]; then echo "pins --check: the oracle, the tarball, the apks and the corpora hold"; else echo "pins --check: FAILED"; return 1; fi
+  if [ $bad = 0 ]; then echo "pins --check: $(type -P python3 >/dev/null && echo "the oracle, ")the tarball, the apks and the corpora hold"; else echo "pins --check: FAILED"; return 1; fi
 }
 
 cmd_spec_check() {
@@ -755,6 +759,58 @@ for rel in sys.stdin.read().split("\n"):
   return $worst
 }
 
+# records record|verify [--sample N] [CORPUS...|outcomes]... (queue 213; doc/ORACLE-RECORDS-SURVEY.md "As built: Python"): every
+# record a gate step reads, made (record: by hand, on the host with python3, ORS5 (a)) or checked against python3 afresh
+# (verify: the oracle tier's), by the checks themselves in that mode (tools/pydump/records.bash). CORPUS: samples, synthetic,
+# errors, lex-errors, syntax-errors, stdlib, site-packages, lib-test, mutants (default every one, then outcomes); outcomes:
+# spec-check's and samples' verdicts, bin/pyi gen --check's, runtime check's smoke runs and REPL sessions, wheels check's
+# CPython runs and pip's layout. --sample N (verify): the round trips, lex-check and parse-check over N files of each big
+# corpus, evenly spread (bin/pyi's scope-check and compile-check whole only on the essential corpora)
+cmd_records() {
+  local mode=${1:-}; shift || true
+  case $mode in record|verify) ;; *) die "usage: bin/repr-python records record|verify [--sample N] [CORPUS...|outcomes]" ;; esac
+  local sample="" ids=() id rc=0
+  while [ $# -gt 0 ]; do case $1 in --sample) sample=$2; shift 2 ;; *) ids+=("$1"); shift ;; esac; done
+  [ ${#ids[@]} -gt 0 ] || ids=(samples synthetic errors lex-errors syntax-errors stdlib site-packages lib-test mutants outcomes)
+  need_python "records $mode"
+  [ -f "$PYREC_LIB" ] || die "records $mode: no $PYREC_LIB (the shared tooling, oracle-records-c)"
+  local rp="$root/bin/repr-python" pyi="$root/bin/pyi" o=() t0=$SECONDS
+  run() { echo "== records $mode: $*"; REPR_PYTHON_ORACLE=$mode "$@" > "$WORK/records-$mode.log" 2>&1 || {
+            grep -q '^pyrec\|^UNRECORDED\|^STALE\|^REFUSED\|FAILED' "$WORK/records-$mode.log" && rc=1; true; }
+          grep '^verify\|^oracle: packed\|^pyrec\|UNRECORDED\|STALE\|REFUSED' "$WORK/records-$mode.log" || true; }
+  for id in "${ids[@]}"; do
+    o=()
+    if [ -n "$sample" ] && [ "$mode" = verify ]; then
+      case $id in stdlib|site-packages|lib-test)
+        local -a info; mapfile -t info < <(corpus_base "$id")
+        local -a args=(); IFS=, read -ra pa <<< "${info[1]}"; args+=("${pa[@]}")
+        if [ "${info[2]}" != - ]; then IFS=, read -ra ea <<< "${info[2]}"; for e in "${ea[@]}"; do args+=(--exclude "$e"); done; fi
+        pyrec_list "${info[0]}" "${args[@]}" | awk -v n="$sample" -v id="$id" '{ a[NR] = $0 } END { for (i = 0; i < n && i < NR; i++) print id "/" a[int(i * NR / n) + 1] }' > "$WORK/records-sample-$id.txt"
+        o=(--only-list "$WORK/records-sample-$id.txt") ;;
+      esac
+    fi
+    case $id in
+      samples) run "$rp" roundtrip samples; run "$rp" roundtrip --text samples; run "$rp" lex-check --no-mutants samples
+               run "$rp" parse-check --no-mutants samples; run "$rp" parse-check --full --no-mutants samples
+               run "$pyi" scope-check samples; run "$pyi" compile-check --full samples ;;
+      synthetic|errors) run "$pyi" scope-check "$id"; run "$pyi" compile-check "$id"; run "$pyi" compile-check --full "$id" ;;
+      lex-errors) run "$rp" lex-check --no-mutants lex-errors; run "$rp" parse-check --no-mutants lex-errors; run "$rp" parse-check --full --no-mutants lex-errors ;;
+      syntax-errors) run "$rp" parse-check --no-mutants syntax-errors; run "$rp" parse-check --full --no-mutants syntax-errors ;;
+      stdlib|site-packages|lib-test)
+        run "$rp" roundtrip ${o[@]+"${o[@]}"} "$id"; run "$rp" roundtrip --text ${o[@]+"${o[@]}"} "$id"
+        run "$rp" lex-check --no-mutants ${o[@]+"${o[@]}"} "$id"; run "$rp" parse-check --no-mutants ${o[@]+"${o[@]}"} "$id"
+        run "$rp" parse-check --full --no-mutants ${o[@]+"${o[@]}"} "$id"
+        [ ${#o[@]} -gt 0 ] || { run "$pyi" scope-check "$id"; run "$pyi" compile-check --full "$id"; } ;;
+      mutants) run "$rp" lex-check samples; run "$rp" parse-check --full samples ;;
+      outcomes) run "$rp" spec-check; run "$rp" samples; run "$pyi" gen --check; run "$pyi" runtime check
+                run "$pyi" wheels fetch; run "$pyi" wheels check ;;
+      *) die "records: no corpus $id" ;;
+    esac
+  done
+  echo "records $mode: ${ids[*]}: $((SECONDS - t0)) s$([ $rc = 0 ] || echo ', FAILED')"
+  return $rc
+}
+
 cmd_check_all() {
   cmd_spec_check && cmd_samples && cmd_roundtrip && cmd_roundtrip --text
 }
@@ -781,5 +837,6 @@ case "${1:-}" in
   ast-check) shift; cmd_ast_check "$@" ;;
   pegen) shift; load_rows; cmd_pegen "$@" ;;
   check) cmd_check_all ;;
+  records) shift; cmd_records "$@" ;;
   *) sed -n '2,72p' "$0"; exit 2 ;;
 esac
