@@ -1082,6 +1082,11 @@
             (if (some #(= :tv (first %)) (tree-seq vector? seq t)) [p] []))
       [p])))
 
+(defn- distinct-last
+  "Duplicates dropped keeping the last occurrence: the order GHC's solver leaves an inferred derived context in"
+  [xs]
+  (vec (reverse (distinct (reverse xs)))))
+
 (defn- derive-all!
   "The derived instances of the module: their heads entered, the contexts inferred by fixpoint, their bindings generated"
   [m]
@@ -1142,8 +1147,8 @@
                                                                                     (deriv/fun-subtypes (:var (:desc r)) t)))
                                                                     (:tys c)))
                                                      (:cons (:desc r)))))
-                   :else (vec (distinct (mapcat (fn [c] (mapcat (fn [t] (simplify-pred [(:cls r) [t]])) (:tys c)))
-                                                (:cons (:desc r)))))))]
+                   :else (distinct-last (mapcat (fn [c] (mapcat (fn [t] (simplify-pred [(:cls r) [t]])) (:tys c)))
+                                                (:cons (:desc r))))))]
     (doseq [r reqs] (swap! *insts* conj {:dfun (dfun r) :tvs (:tvs r) :ctx (if (:standalone? r) (:ctx r) []) :head [(:cls r) (:ts r)]}))
     (dotimes [_ 5]
       (doseq [r reqs :when (not (:standalone? r))]
@@ -1258,7 +1263,8 @@
         methods (for [mn (:methods info)]
                   (let [cm (fresh-lv (str "$c" (occ mn)))
                         b (get defined (occ mn))]
-                    [cm (if gnd
+                    [(if (and gnd (seq params)) nil cm)
+                     (if gnd
                           ;; the newtype strategy: the representation type's method, coerced
                           (let [d (or (solve-pred [cls [(subst skol gnd)]] givens 0)
                                       (do (error! "no representation dictionary " (occ cls)) (list 'lit "?")))
@@ -1267,7 +1273,11 @@
                                 iparams (if (= :forall (first mty)) (mapv dict-param (nth mty 2)) [])
                                 c (list 'app (list 'v mn) (into [d] iparams))
                                 ps (into params iparams)]
-                            (if (empty? ps) c (list 'lam ps c)))
+                            ;; an instance with a context has its coerced methods in the dictionary itself, as GHC's
+                            ;; dictionary function; without one they are bindings of their own
+                            (if (seq params)
+                              (if (empty? iparams) c (list 'lam iparams c))
+                              (if (empty? ps) c (list 'lam ps c))))
                           (if b
                           (binding [*self-givens* self-givens] (check-method env b (method-type mn cls ts) givens params))
                           (if-let [dm (get (:defaults info) mn)]
@@ -1290,11 +1300,11 @@
                                      supers))
         sc-binds (vec (filter first sc-entries))
         sc-fields (map (fn [[x term]] (cond (nil? x) term (seq params) (list 'app x params) :else x)) sc-entries)
-        fields (concat sc-fields (map (fn [[cm _]] (if (empty? params) cm (list 'app cm params))) methods))
+        fields (concat sc-fields (map (fn [[cm c]] (cond (nil? cm) c (empty? params) cm :else (list 'app cm params))) methods))
         dict (list 'app dcon (vec fields))]
     (into [(list 'bind dfun (if (empty? params) dict (list 'lam params dict)))]
           (concat (map (fn [[x c]] (list 'bind x c)) sc-binds)
-                  (map (fn [[cm c]] (list 'bind cm c)) methods)))))
+                  (map (fn [[cm c]] (list 'bind cm c)) (filter first methods))))))
 
 ;;; ------------------------------------------------------------------------------------------
 ;;; Defaulting and the end of the module
