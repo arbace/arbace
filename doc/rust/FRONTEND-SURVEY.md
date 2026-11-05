@@ -1023,3 +1023,7 @@ the rest; the judge (text for text, comments included) is stricter than planned,
 - **RFP12 What next.** Options: (a) **RF7 (collection: generics, predicates, `type_of`, HIR type lowering) over this HIR, judged
   against the helper's `iface`**; (b) the HIR ids' judge first (`-Zunpretty=hir-tree`, owners and local ids per node). *Recommended:
   (a)*: no later stage reads the ids' numbering, only their identity; (b) when a stage needs it.
+
+## Decided (2026-11-05, the user: RFP10-RFP12)
+
+All as recommended: std's generic parameters from --std-names now, the 20-name table dropped; hir-check in the UI run-pass night run, differences as classes; RF7 (collection) next, judged against the helper's iface, before a judge of the HIR ids.
