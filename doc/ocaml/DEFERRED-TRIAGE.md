@@ -325,3 +325,77 @@ their classes), `bin/reap record`. Until the compiled record covers the corpus t
 - **OT15 The compiled level's builds.** A shard's build peaks at 3 to 4 GB (one package of 1,640 classes). (a) at night under the heavy lock;
   (b) the JDK's translated classes in a package of their own built once (the shards share jrt's and the JDK's compiled objects in Go's cache).
   *Recommended: (a) now, (b) when the gate step is added*: it would turn a shard into j2g plus a small link.
+
+## As built: OT9's next three fixes (2026-11-05, branch `ocaml-libs2`)
+
+Built on the light tier of the day, as the first two (no gate, no build of Arbace's executables, no corpus run, stage 0 of main as the
+tools' host): each check a list of programs (`--only-list`), the records merged (`--record` with a list), the compiled level one shard at
+a time. The AOT runtime's mirror of fixes 4 and 5 (`jdk/ocaml/ocaml/rt`) is the section "The AOT mirror" below.
+
+### Fix 3: the harness (§4 item 3)
+
+- **One row a program across the two corpora.** A program the run corpus's header reading (`bin/lib/oi/header.awk`) classes but the
+  suite's reading (`actions.awk`: `modules`, `readonly_files`, explicit build steps) runs is now the suite corpus's alone: `bin/oi corpus`
+  leaves it out, so `bin/oi suite corpus` takes it. Before, 6 programs (`basic-modules/main`, `basic-multdef/usemultdef`,
+  `basic-private/tlength`, `misc-kb/kbmain`, `raise-counts/main`, `typing-shadowing-of-pervasives-submodules/redefine_largefile`) passed
+  in the suite and were deferred in the run corpus at once: the matrix's eval and AOT cells counted them twice. Their stale run-corpus
+  rows (and those of the 7 other moved programs) are dropped from `check-oi.edn` and `check-aot.edn`.
+- `readonly_files` of data of any plain name (a C file stays a class): `basic-io-2/io`; `not-bsd` (a platform filter):
+  `memory-model/{forbidden,publish}`; `flags = -safer-matching`, passed through by the oracle (`tools/ocdump`'s new `-safer-matching`,
+  `Clflags.safer_matching`): `basic-more/safer_matching` (run corpus).
+- **ocamltest's explicit build steps** (`actions.awk`'s build mode): from `setup-ocamlc.byte-build-env` to its `check-program-output`, the
+  modules compiled one by one, a library made of some (`program = "lib.cma"`, `-a`), the program linked from `all_modules` and run: the
+  run's units are the link's, a library expanded to its modules (`badly-ordered-deps/coccinelle`, `required-external/main`). A pack
+  (`-pack`), a second executable (OT3's subprocess tests: `lib-filename/quotecommand`) and steps that end without a run stay classes;
+  ocamltest's `${test_build_directory}` no longer splits the header (an argument naming it stays a class).
+- One place for a program's libraries, both corpora: `inc_I`, `inc_units`, `inc_ref` (the reference compilers' flags) in `bin/oi`;
+  `bin/oi suite record-ref --only-list` merges (`record-ref-only`), as the run corpus's did; the suite reads `include unix` and
+  `include systhreads` too.
+- `link-test/test` stays a class (packs: `-for-pack P`, `-pack`, a pack is not a unit of oi's): **12 of the 13** run.
+
+| level | the 13 |
+|---|---|
+| eval (oi) | **12 pass**: 6 new (`basic-more/safer_matching` in the run corpus; `basic-io-2/io`, `memory-model/forbidden`, `memory-model/publish`, `badly-ordered-deps/coccinelle`, `required-external/main` in the suite), 6 already passing in the suite now counted once; `link-test/test` a class |
+| AOT, light | the 6 new: **4 pass**, `memory-model/{forbidden,publish}` `:light-speed` (`aot-slow.edn`: 10^6 iterations of a litmus test each, over 120 s interpreted) |
+
+### Fix 4: Unix's descriptors and files (§4 item 4)
+
+- oi: `go/arbace/oi/ext_unix_fd.ae`, over Go's syscall, a `Unix.file_descr` the OS's descriptor: `open` (the `open_flag` list, `O_CLOEXEC`
+  as asked), `close`, `fsync`, `read`, `write` (the whole buffer, retried; `EAGAIN` after a partial write returns the count), `single_write`,
+  the bigarray read and write, `in_channel_of_descr`/`out_channel_of_descr` (oi's channels over the descriptor), `lseek` and its 64-bit form,
+  `truncate`, `ftruncate`, `fstat` and the `LargeFile` stats, `isatty` (`TCGETS`), `unlink`, `rename`, `link`, `realpath`, `chmod`, `fchmod`,
+  `access`, `dup`, `dup2` (`?cloexec`), `set_nonblock`/`clear_nonblock`, the close-on-exec flags, `mkdir`, `rmdir`, `mkfifo`, `readlink`,
+  `symlink`, `has_symlink`, `utimes` (0.0 and 0.0: now), `pipe`, the directories (`opendir` reads getdents64's entries, `.` and `..` among
+  them, `readdir`, `rewinddir`, `closedir`), `Unix._exit` (no `at_exit`, the channels not flushed). Each call that may block runs outside the
+  interpreter's lock (the other threads and domains run meanwhile). `select`, `lockf`, the processes, signals and sockets stay
+  `:unix-unported` (fixes 6 and 7).
+- `Unix.fork` by design, OT1 (a): the class `:unix-fork` (`:kind :design`) in the six run-level classes files.
+- `lib-channels/close_during_flush` needs a signal (`Unix.alarm`'s handler empties a full pipe a write blocks on): without it the exit's
+  flush blocks until the wall cap (4 × `OI_TIMEOUT`); a known entry (`oi-known.edn`, "unix:"), `:unix-unported` until fix 7.
+
+| level | |
+|---|---|
+| eval, run corpus (the 16 `:unix-unported` of fix 2) | **6 pass**: `lib-unix/common/{dup,bigarrays,rename,truncate}`, `lib-unix/realpath/test`, `parallel/backup_thread_pipe`; 10 classed: `fork_cleanup` (`:unix-fork`), `process_pid`, `pipe_eof`, `parallel/recommended_domain_count_unix` (`create_process`, fix 7), `channel_of`, `gethostbyaddr` (sockets, fix 6), `lib-sys/signal` (`kill`), `parallel/mctest` (`select`), `lib-bigarray-file/mapfile` (`map_file`, fix 11), `close_during_flush` (above) |
+| eval, suite (newly read: `include unix`) | **3 pass**: `lib-unix/common/{append,utimes,uexit}`; 5 classed: `getaddrinfo`, `sigwait` (`sigprocmask`), `recvfrom_unix` (sockets), `multicore_fork_domain_alone{,2}` (`:unix-fork`) |
+
+### Fix 5: threads (§4 item 5)
+
+- `bin/oi stdlib` compiles `otherlibs/systhreads`' `thread.ml{,i}` and `event.ml{,i}` against unix.cmi into `.tmp/oi/threadlib/` (`Thread.ae`,
+  `Event.ae`), loaded after Unix's units by the programs that `include systhreads` (OT10 (b)); `hassysthreads` is read, and a later
+  alternative that skips (`{ include systhreads; hassysthreads; }{ reason = ...; skip; ... }`, lib-threads' headers) leaves the first.
+- oi: `go/arbace/oi/ext_thread.ae`: a thread is a goroutine of its domain under the interpreter's lock, which plays OCaml's master lock (given
+  up in the blocking calls and at the calls' polls while more than one goroutine runs, as the tick thread's forced yield); `Thread.t` the block
+  `[| id |]`, `join` waits outside the lock; threads first take the lock in the order they were created (OCaml's master lock is a FIFO:
+  `lib-threads/tls`); `caml_thread_uncaught_exception` prints st_stubs.c's message; `exit` in a thread ends the process; an internal error in a
+  thread is reported as the main program's. Mutex and Condition are the stdlib's (ext_domain.go, already); `Thread.delay` is `Unix.sleepf`.
+
+| level | the 28 run-corpus and 7 suite programs `include systhreads` now runs |
+|---|---|
+| eval, run corpus | **17 pass**: `lib-domain/DLS_thread_safety`, `lib-systhreads/{boundscheck,multicore_lifecycle,testpreempt}`, `lib-threads/{bank,beat,bufchan,close,fileio,mutex_errors,pr7638,prodcons,prodcons2,swapchan,tls,torture}`, `parallel/multicore_systhreads`; 11 classed: 3 `:unix-fork` (`testfork`, `testfork2`, `fork_cleanup_systhreads`), 5 `:unix-unported` (sockets: `pr4466`, `pr5325`, `sockets`; `sigprocmask`: `eintr`, `threadsigmask`), `backtrace/callstack` (backtraces), `statmemprof/moved_while_blocking` (gc), `parallel/fib_threads` (speed: fib 42 on four domains, `oi-slow.edn`) |
+| eval, suite | **4 pass**: `lib-channels/input_all`, `lib-systhreads/testyield`, `lib-threads/backtrace_threads`, `lib-threads/pr8857`; 3 classed (`parallel/catch_break`'s `sigprocmask`, 2 statmemprof gc) |
+
+### The numbers (eval)
+
+The run corpus 333 to **362 run programs** (543 with a `.reference` in it: 13 moved to the suite), oi **281 to 305 pass**, 0 failing
+(`bin/oi divergences`); the suite corpus 98 to **118 run programs**, **87 to 99 pass**, 0 failing (`bin/oi suite divergences`). The matrix's
+eval cell (`check-oi.edn` + `check-suite-oi.edn`) **368 to 404 pass**, the 6 double-counted programs counted once. oi's essential subset: 58 of 58.

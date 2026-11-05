@@ -188,10 +188,13 @@ covers what.
   (lexing.c, parsing.c), `ext_bigstring.ae` (bigarray.c), and the parts of `ext.ae`, `ext_domain.ae`,
   `exn.ae`, `run.ae` and `thread.ae` that follow obj.c, sync.c, domain.c, fiber.c and printexc.c, and `ext_unix.ae`
   (the Unix library's core, otherlibs/unix's `unixsupport.c`'s error table and the C stubs of the externals unix.ml
-  declares; doc/ocaml/DEFERRED-TRIAGE.md, "As built: OT9's second fix"): under the
+  declares; doc/ocaml/DEFERRED-TRIAGE.md, "As built: OT9's second fix"), `ext_unix_fd.ae` (otherlibs/unix's C stubs of
+  descriptors, files and directories) and `ext_thread.ae` (otherlibs/systhreads' `st_stubs.c`; "As built: OT9's next
+  three fixes"): under the
   GNU Lesser General Public License version 2.1 with the OCaml LGPL linking exception (below). The Unix library's
   OCaml units (`otherlibs/unix/unix.mli`, `unix_unix.ml`, `unixLabels.ml{,i}` of the same tarball, same license) are not
-  copied into the tree: `bin/oi stdlib` compiles them from the pinned tarball into `.tmp/oi/unixlib/`. The test
+  copied into the tree: `bin/oi stdlib` compiles them from the pinned tarball into `.tmp/oi/unixlib/`, and the threads
+  library's (`otherlibs/systhreads/thread.ml{,i}`, `event.ml{,i}`) into `.tmp/oi/threadlib/`. The test
   data `test/ocaml/oi/testdata/` and the tables in `go/arbace/oi/lexdata*_test.ae` and `parsedata_test.ae`
   are outputs of the host's OCaml 5.5.0 (ocaml, ocamllex, ocamlyacc) over Arbace's own test programs.
 - `jdk/ocaml/` (OCaml's runtime as Java forms, the package `ocaml.rt`; doc/ocaml/OCAML-SURVEY.md, "As built: O6
