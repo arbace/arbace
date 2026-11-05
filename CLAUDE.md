@@ -240,7 +240,10 @@ Prior art:
     the oracle and `read`'s default): `arbace/repr/ocaml/menhir.ae` builds parser.mly's LALR(1) automaton as Menhir does into the
     generated `tables.ae` (`bin/repr-ocaml menhir`, `--check` against Menhir's own tables in the tarball, `--verify`), `lex.ae`,
     `docstrings.ae`, `actions.ae` and `parser.ae` port lexer.mll, docstrings.ml, parser.mly's actions and MenhirLib's engine;
-    `bin/repr-ocaml read --reader native`, `native-check` (the dumps against the helper's, byte for byte).
+    `bin/repr-ocaml read --reader native`, `native-check` (the dumps against the helper's, byte for byte). oi's native front end
+    (doc/ocaml/TYPER.md): `arbace/repr/ocaml/typer/` ports typing/ and lambda/'s Translcore with Matching for the core
+    language, the native Parsetree typed and translated to Lambda without ocamlc (`bin/oi run-native`; `bin/oi typer-check`:
+    test/ocaml/typer/'s samples' signatures and raw Lambda against the oracle's, their runs on oi against the toplevel's).
   - `arbace/repr/clojure{.ae,/}`: `arbace.repr.clojure`, Clojure's bridge (`doc/REPR-CLOJURE.md`;
     `bin/repr-clojure read`, `print`, `roundtrip`, `check`): Clojure source into Arbace's, the
     names of the vendored Clojure, `.clj`/`.cljc` into `.ae`, a table of rules for the dialects'

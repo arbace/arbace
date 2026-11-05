@@ -287,3 +287,25 @@ On branch `night-fix` (from `b2a4911f`), not merged while `--full` ran on main:
   directories 231 of 234 (3 rejected by both), 37 of 40 `#use` files; the rejected files' messages are the later step
   (OC172), their locations agree. `read --reader native` gives the helper path's forms exactly in `:lines` and `:full`.
   About 40 KB/s on stage 0, peak 1.0 GB. Not run: the gate, whole corpora, mutants. Proposals OC170-OC174, none decided.
+
+## 2026-11-05: oi's native front end, the first slice (branch ocaml-typer)
+
+OC4 (b)'s route begun: OCaml 5.5.0's typing/ and lambda/'s Translcore with Matching ported to Arbace, so the native
+reader's Parsetree becomes Lambda without the host's ocamlc (doc/ocaml/TYPER.md). Sources: the pinned release tarball
+(https://caml.inria.fr/pub/distrib/ocaml-5.5/ocaml-5.5.0.tar.xz, SHA-256 fcc6ae66...f015ba): typing/types.ml, btype.ml,
+ctype.ml, predef.ml, printtyp.ml (out_type.ml, oprint.ml), typeopt.ml, env.ml, typetexp.ml, typedecl.ml, datarepr.ml,
+patterns.ml, parmatch.ml, typecore.ml, typemod.ml's structure items; lambda/lambda.ml's helpers, switch.ml,
+printlambda.ml's names, matching.ml, translcore.ml, translprim.ml, translmod.ml's bytecode structure; LGPL-2.1 with the
+linking exception, the notices in the files, LICENSE.md and doc/ARBACE.md extended. Built under the day's light rules
+on main's stage 0: `arbace/repr/ocaml/typer/` (types, env, parmatch, typecore, lambda, matching, translcore; 3,900
+lines) and the driver `arbace.repr.ocaml.typer` (types, lambda, check), `bin/oi typer-check` and `run-native`
+(bin/lib/oi/typer.bash), `make oi-typer-check`. The stdlib's interfaces are read by the native reader and translated
+by the port (no .cmi). Judged against tools/ocdump: signatures as text, the raw Lambda (before Simplif) equal up to
+identifier stamps and static exit numbers renamed in order of appearance, and oi's runs of the native Lambda against
+the toplevel's: test/ocaml/typer/'s 36 samples (30 written first, 6 more after the port, passing on their first run)
+36 of 36 at each level. A probe over testsuite/tests/basic/'s first 40 files (36 that ocamlc accepts): 15 equal, 20
+refused with the slice's reasons (Printf formats, modules, open, GADTs), 1 printer difference (Format's breaking of a
+long val line). Alternatives considered: a hand-written checker (rejected: Translcore and Matching need OCaml's
+Typedtree as it is, and equality of Lambda needs their port), translating the Typedtree from the oracle (it keeps
+ocamlc). Next (TYPER.md §6): Simplif (T7), the module system and the stdlib typed natively (T8). Proposals TY1-TY6,
+none decided.

@@ -1901,3 +1901,11 @@ lexing; the helper reads about 2 MB/s.
   objects; (c) embedded and compiled with the program at a re-seed (OC30). *Recommended: (b)* when a corpus run needs it.
 - **OC174 The actions' translation.** (a) by hand, keyed by text (as built; the loader refuses tables with an
   untranslated action); (b) by machine from parser.mly through this reader. *Recommended: (a)*; (b) at a new OCaml.
+
+## As built: oi's native front end, the first slice (2026-11-05)
+
+OC4 (b)'s route, begun on the branch `ocaml-typer`: doc/ocaml/TYPER.md (the port of typing/ and lambda/'s Translcore
+with Matching, `arbace/repr/ocaml/typer/`; `bin/oi typer-check`, `run-native`). The core language's samples
+(test/ocaml/typer/, 36) are typed with the toplevel's printed types, translated to Lambda equal to the oracle's raw
+translation, and run on oi with the toplevel's output; modules, formats, objects and the rest are TYPER.md's T7-T12.
+Proposals TY1-TY6 there.
