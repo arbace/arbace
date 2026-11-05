@@ -879,3 +879,7 @@ without touching them.
 1. Add `fmodf`/`fmodl` to ci's `builtin-aliases` (arbace/c/build.ae) with LLS21 (a): the last vector module passes and `frem` in
    general; recommended, one line and a ci rebuild.
 2. A whole `bin/llvmi check --aot --record` at night (LLVMI_AOT_HEAVY=1) to replace the hand-set AOT rows by a recorded run; recommended.
+
+## Decided (2026-11-05, the user: LL5's proposals)
+
+LL5's two as recommended: fmodf/fmodl via ci's builtin-aliases (built on ci-lls21, LLS21 (a)); a whole bin/llvmi check --aot --record with LLVMI_AOT_HEAVY=1 at night replacing the hand-set rows.
