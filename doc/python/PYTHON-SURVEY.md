@@ -1408,3 +1408,57 @@ over all 71 rewrites `test/python/bench-aot-linux-amd64.edn` (the night's).
 Not taken (the profile's next items, for later): a load-method form in the IR (a method call still makes a bound method
 for the call to unwrap; CPython's LOAD_ATTR method variant), global loads cached by the dicts' keys version, a fused
 to-bool/jump (AotToBool pushes a bool AotTruthy pops), frame reuse for generator frames.
+
+## As built: 204, PYS22 (a)'s first Go ports, `_csv` and `mmap` (2026-11-05, the Mac VM, queue 204)
+
+The user's decision PYS22 (a) (2026-11-04): the stdlib's C modules by module, Go ports first. Both modules are files of
+pyi's runtime (`go/arbace/py`, loaded with it; together about 1,900 lines of Go), ported by hand from the release tarball
+`Python-3.14.10.tar.xz` (SHA-256 `de414a57119abef52784d8993e341d53aed635fc2b05c2607d9f98a2c5b72032`, the survey's pin),
+under the PSF License Agreement (LICENSE.md's entry for them). `Lib/csv.py` and the tests run unchanged.
+
+- **`_csv`** (`go/arbace/py/builtins_csv.ae`, from `Modules/_csv.c` and `Modules/clinic/_csv.c.h`): function for function
+  under C's names. `dialect_new` with its `_set_*` converters, `dialect_check_*`, the reuse of a Dialect instance and
+  getargs' unnamed-format messages. The reader's `parse_process_char` state machine, with `parse_save_field`'s
+  QUOTE_NONNUMERIC/STRINGS/NOTNULL fields and `parse_add_char`'s field limit. The writer's `join_append_data`, which
+  counts and then copies, `join_check_rec_size` and the empty-field rules. Also the registry, `field_size_limit`,
+  `_csv.Error`, `Reader`/`Writer` not instantiable, and `Dialect.__reduce_ex__` refusing to pickle. A Py_UCS4 is a
+  rune; NOT_SET and EOL are -1 and -2.
+  - *Deviation:* the module state is one per process. The types are runtime built-ins, not heap types made per module
+    object.
+- **`mmap`** (`go/arbace/py/builtins_mmap.ae`, from `Modules/mmapmodule.c`'s UNIX paths and its clinic file): over Go's
+  `syscall` package, no cgo, no `unsafe`.
+  - **Mapping and access:** `syscall.Mmap`; the fd duplicated with `F_DUPFD_CLOEXEC`; the regular file's size checks.
+  - **Methods:** reading, readline, write, write_byte, find/rfind (`_PyBytes_Find`'s offsets), seek, move, size (fstat),
+    and the context manager.
+  - **flush:** `msync(MS_SYNC)` at the slice's address, obtained with `reflect`'s `Pointer`. So `flush(1, n)` is EINVAL,
+    as on Linux.
+  - **madvise:** `syscall.Madvise`.
+  - **Subscripts and assignment:** `__index__` and `__buffer__` run before the bounds are checked, as gh-157335's fix
+    has it.
+  - **Iteration:** over sq_item, yielding length-1 bytes.
+  - **Constants:** Linux's (amd64 and arm64 alike); `PAGESIZE` is `syscall.Getpagesize()`.
+  - **Deviations:**
+    - *resize:* Go's syscall has no mremap. Shrinking shortens the window in place. Growing makes a new mapping;
+      a private mapping's bytes are copied, a shared one's come from the file. Linux's refusals are kept (a shared
+      anonymous mapping cannot grow; a size of 0 is EINVAL after the ftruncate).
+    - *Unmapping:* a mapping is never unmapped while the process runs. `close()` and a growing resize put an
+      anonymous read-only zero mapping over the old pages (`MAP_FIXED`). The file's pages are released (the
+      program's `/proc/self/maps` check), and a Go slice of them that a caller still holds reads zeros instead of
+      faulting the process.
+    - *Buffers:* pyi's buffer protocol has no export count, so `close()` and `resize()` never raise BufferError.
+      The DECISION in 204's report covers this.
+    - No `sys.audit` event.
+  - **Runtime hook:** writableBuffer's last case asks an exporter's `WritableBytes()` (the REQUEST commit in
+    `builtins_binascii.ae`), so `memoryview(m)[i] = v` writes into the mapping.
+  - **Tamago:** pyi's runtime is read for linux (`runtime read --goos linux`) and does not run on tamago. A tamago
+    build of it would need these syscalls (mmap, msync, madvise, ftruncate) from the board, and has none.
+
+Samples (run on the VM, `bin/pyi lib-test-all --fresh test_csv test_mmap`, 2 jobs; no record written):
+
+| module | before | after |
+|---|---|---|
+| test_csv | 0 equal, 134 classed (`:c-modules-deferred`, "No module named '_csv'") | 132 equal, 2 classed (cpython-only), 0 failing |
+| test_mmap | 0 equal, 53 failing (SkipTest: no module) | 52 equal, 1 classed (`test_weakref`: `:finalization-collect`), 0 failing |
+
+The programs `test/python/pyi/d-csv.py`, `d-csv-fuzz.py` (700 generated reader and writer cases) and `d-mmap.py` print
+the same as CPython's under `bin/pyi run`. `:c-modules-deferred` no longer names `_csv`.
