@@ -520,6 +520,7 @@
       (let [a (first (nth (ty-struct t) 3))]
         (when (and (seq? a) (= "ty" (name (first a))) (not (#{"dyn" "slice" "str"} (ty-kind a))))
           (let [pl (layout lt a)] (when (and (not (zst? pl)) (> (:align pl) 1)) (:align pl)))))
+      (= k "tuple") (some (fn [a] (let [l (layout lt a)] (when-not (zst? l) (ref-align lt a)))) (rest (ty-struct t)))
       (= k "adt") (some (fn [a] (when (and (seq? a) (= "ty" (name (first a))) (= "ref" (ty-kind a))) (ref-align lt a))) (nth (ty-struct t) 3))
       :else nil)))
 
@@ -1452,6 +1453,37 @@
                                      "is_val_statically_known"
                                      (do (assign! bb dest {:ty "i1" :v 'false})
                                          (when target (br-or-merge bb t target)))
+                                     "arith_offset"
+                                     (let [pv (operand! bb (first args)) nv (operand! bb (second args))
+                                           r (fresh!)]
+                                       (emit! bb (list '= r (list 'getelementptr (backend-type lt gl (second (ty-struct (ty-of (first args))))) ['ptr (:v pv)] [(symbol (:ty nv)) (:v nv)])))
+                                       (assign! bb dest {:ty "ptr" :v r})
+                                       (when target (br-or-merge bb t target)))
+                                     "size_of_val"
+                                     (let [a (operand! bb (first args)) pt (second (ty-struct (ty-of (first args)))) k (ty-kind pt)]
+                                       (when-not (#{"slice" "str"} k) (unsupported (str "intrinsic size_of_val of " k)))
+                                       (let [unit (if (= k "str") 1 (:size (layout lt (second (ty-struct pt)))))
+                                             len (second (:pair a)) r (fresh!)]
+                                         (if (number? (:v len))
+                                           (assign! bb dest {:ty "i64" :v (* unit (:v len))})
+                                           (do (emit! bb (list '= r (list 'mul 'i64 (:v len) unit)))
+                                               (assign! bb dest {:ty "i64" :v r})))
+                                         (when target (br-or-merge bb t target))))
+                                     "compare_bytes"
+                                     (let [a (operand! bb (first args)) b (operand! bb (second args)) n (operand! bb (nth args 2))
+                                           nm (symbol "g" "memcmp") r (fresh!)]
+                                       (declare! gl nm 'i32 [['ptr] ['ptr] ['i64]])
+                                       (emit! bb (list '= r (list 'call 'i32 nm [['ptr (:v a)] ['ptr (:v b)] ['i64 (:v n)]])))
+                                       (assign! bb dest {:ty "i32" :v r})
+                                       (when target (br-or-merge bb t target)))
+                                     "copy"
+                                     (let [s (operand! bb (first args)) d (operand! bb (second args)) c (operand! bb (nth args 2))
+                                           el (layout lt (second (ty-struct (ty-of (first args)))))
+                                           nm (symbol "g" "llvm.memmove.p0.p0.i64")
+                                           bytes (if (number? (:v c)) (* (:size el) (:v c)) (let [r (fresh!)] (emit! bb (list '= r (list 'mul 'i64 (:size el) (:v c)))) r))]
+                                       (declare! gl nm 'void [['ptr] ['ptr] ['i64] ['i1]])
+                                       (emit! bb (list 'call 'void nm [['ptr (list :align (:align el)) (:v d)] ['ptr (list :align (:align el)) (:v s)] ['i64 bytes] ['i1 'false]]))
+                                       (when target (br-or-merge bb t target)))
                                      "write_bytes"
                                      (let [d (operand! bb (first args)) v (operand! bb (second args)) c (operand! bb (nth args 2))
                                            el (layout lt (second (ty-struct (ty-of (first args)))))
