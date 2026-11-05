@@ -635,3 +635,7 @@ For the user's decision; recommendations only.
 
 What to decide first: RFS1 (the route) and RFS3 (the order); RFS2, RFS4 and RFS7 follow. RF1-RF3 are a cheap trial with no
 commitment to the front half (25 to 40 days): the back half is useful alone and its exact judge re-estimates the rest.
+
+## Decided (2026-11-05, the user)
+
+RFS1-RFS13 as recommended: RFS1 (b), rustc's code ported for the paths programs it accepts take, in tiers; MIR forms out, LLVM forms the target; Tier B first with expansion and resolution beside it; std's interface and MIR as helper data in Tier U; no lifetimes, borrowck, exhaustiveness or lints; the new trait solver if RF1's census confirms it; every generic instantiated locally; proc macros a class until RF11, then mrustc's token protocol on rsi; a clean MIR interpreter for constants; Tier S decided at RF11; rustc's front end on rsi measured as an oracle only; rustc's text ported under MIT, rust-analyzer and mrustc read as design, gccrs never; the code in arbace/rust/front and arbace/rust/back, out of gate_key. RF1-RF3 start as a trial.
