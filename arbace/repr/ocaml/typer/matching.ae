@@ -1,0 +1,1077 @@
+;; Ported from OCaml 5.5.0 (the release tarball, SHA-256 fcc6ae665d1ec51d52510eaac7834a86a9806bf5a258bb7cca78733fccf015ba):
+;; lambda/matching.ml, the compilation of pattern matching (half-simplification, the or-matrix and the splits, the
+;; precompilation of variables and or-patterns, contexts, default environments, jump summaries, the divisions by
+;; constants, constructors, tuples and records, the failure actions, the combinations into switches and tests,
+;; for_function, for_trywith, for_let, for_multiple_match, for_optional_arg_default), for the patterns of the core
+;; language (doc/ocaml/TYPER.md), whose notice follows (LICENSE.md, "The OCaml Core System"):
+;;
+;;                                 OCaml
+;;
+;;             Luc Maranget, projet Moscova, INRIA Rocquencourt
+;;
+;;   Copyright 2000 Institut National de Recherche en Informatique et
+;;     en Automatique.
+;;
+;;   All rights reserved.  This file is distributed under the terms of
+;;   the GNU Lesser General Public License version 2.1, with the
+;;   special exception on linking described in the file LICENSE.
+
+(ns arbace.repr.ocaml.typer.matching
+  "Matching (doc/ocaml/TYPER.md, T5). Clauses are [row action], a row a vector of typed patterns; an argument
+  {:arg lambda :kind :strict|:alias|:strictopt :mut bool}; split arguments {:first {:arg [:var id]|[:tuple l] ...}
+  :rest [arg]}; a default environment {:env [[exit matrix]] :final n}; a context a vector of rows {:left :right};
+  a jump summary {:env [[exit ctx]] (exits decreasing) :partial :total|:partial}."
+  (:require [arbace.repr.ocaml.typer.types :as ty]
+            [arbace.repr.ocaml.typer.parmatch :as pm]
+            [arbace.repr.ocaml.typer.lambda :as l]
+            [arbace.string :as str]))
+
+(set! *warn-on-reflection* false)
+
+(def match-context-rows 32)
+
+(defn- pdesc [p] (:desc p))
+(defn- ptag [p] ((:desc p) 0))
+
+(defn- unused! [] (throw (ex-info "Unused" {::unused true})))
+(defn- unused? [e] (boolean (::unused (ex-data e))))
+(defmacro ^:private catch-unused [expr on-unused]
+  `(try ~expr (catch arbace.lang.ExceptionInfo e# (if (unused? e#) ~on-unused (throw e#)))))
+(defn- no-match! [] (throw (ex-info "NoMatch" {::nomatch true})))
+(defmacro ^:private catch-nomatch [expr on]
+  `(try ~expr (catch arbace.lang.ExceptionInfo e# (if (::nomatch (ex-data e#)) ~on (throw e#)))))
+
+(def ^:dynamic *transl-ext-path* (fn [path] (throw (ex-info "no extension path translator" {}))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Records and aliases
+
+(defn all-record-args [lbls]
+  (let [all (ty/label-all (ffirst lbls))
+        t (reduce (fn [t [lbl p]] (assoc t (:pos lbl) [lbl p])) (mapv (fn [l] [l pm/omega]) all) lbls)]
+    t))
+
+(defn expand-record-head [h]
+  (let [d (:desc h)]
+    (if (and (= :Record (d 0)) (seq (d 1))) (assoc h :desc [:Record (ty/label-all (first (d 1)))]) h)))
+
+(defn bind-alias [p id arg action]
+  (l/bind-with-value-kind :alias [id (ty/value-kind (:type p))] arg action))
+
+;; ---------------------------------------------------------------------------------------------
+;; Half_simple, Simple
+
+(defn- simpl-under-orpat [p]
+  (let [d (:desc p)]
+    (case (d 0)
+      (:Tpat_any :Tpat_var) p
+      :Tpat_alias (assoc p :desc [:Tpat_alias (simpl-under-orpat (d 1)) (d 2) (d 3)])
+      :Tpat_or (let [p1 (simpl-under-orpat (d 1)) p2 (simpl-under-orpat (d 2))]
+                 (if (pm/le-pat p1 p2) p1 (assoc p :desc [:Tpat_or p1 p2])))
+      :Tpat_record (assoc p :desc [:Tpat_record (all-record-args (d 1)) (d 2)])
+      p)))
+
+(defn half-simplify
+  "Half_simple.of_clause: aliases (and variables) at the head become bindings of the action"
+  [arg [row action]]
+  (let [p (first row) d (:desc p)]
+    (case (d 0)
+      :Tpat_any [row action]
+      :Tpat_var (half-simplify arg [(assoc row 0 (assoc p :desc [:Tpat_alias pm/omega (d 1) (d 2)])) action])
+      :Tpat_alias (half-simplify arg [(assoc row 0 (d 1)) (bind-alias (d 1) (d 2) arg action)])
+      :Tpat_record (if (empty? (d 1)) [row action] [(assoc row 0 (assoc p :desc [:Tpat_record (all-record-args (d 1)) (d 2)])) action])
+      :Tpat_or (let [orp (simpl-under-orpat p)]
+                 (if (= :Tpat_or (ptag orp)) [(assoc row 0 orp) action] (half-simplify arg [(assoc row 0 orp) action])))
+      [row action])))
+
+(defn simple-head [p] (first (pm/deconstruct p)))
+
+(defn explode-or-pat
+  "Simple.explode_or_pat: [(pattern action)...] for each alternative, its variables freshened"
+  [arg p mk-action patbound-vars]
+  (letfn [(explode [p aliases rem]
+            (let [d (:desc p)]
+              (case (d 0)
+                :Tpat_or (explode (d 1) aliases (explode (d 2) aliases rem))
+                :Tpat_alias (explode (d 1) (cons (d 2) aliases) rem)
+                :Tpat_var (explode (assoc p :desc [:Tpat_alias pm/omega (d 1) (d 2)]) aliases rem)
+                (letfn [(fresh [arg-id action-vars renaming vars]
+                          (if (empty? vars)
+                            [(pm/alpha-pat renaming p) (mk-action (reverse action-vars))]
+                            (let [pat-id (first vars) more (rest vars)]
+                              (if-not (some #(= % pat-id) aliases)
+                                (let [f (ty/ident-rename pat-id)]
+                                  (fresh arg-id (cons f action-vars) (assoc renaming pat-id f) more))
+                                (cond
+                                  arg-id (fresh arg-id (cons arg-id action-vars) renaming more)
+                                  (= :Lvar (arg 0)) (fresh arg-id (cons (arg 1) action-vars) renaming more)
+                                  :else (let [id (ty/ident-rename pat-id)
+                                              [pat action] (fresh id (cons id action-vars) renaming more)]
+                                          [pat (bind-alias pat id arg action)]))))))]
+                  (cons (fresh nil () {} patbound-vars) rem)))))]
+    (vec (explode p () ()))))
+
+;; ---------------------------------------------------------------------------------------------
+;; The matcher (specialization by a head)
+
+(defn matcher [discr p rem]
+  (let [discr (expand-record-head discr)
+        p (let [d (:desc p)] (if (= :Tpat_record (d 0)) (assoc p :desc [:Tpat_record (all-record-args (d 1)) :Closed]) p))
+        n (pm/head-arity discr)
+        [ph args] (pm/deconstruct p)
+        yes (fn [] (vec (concat args rem)))
+        yesif (fn [b] (if b (yes) (no-match!)))
+        dd (:desc discr) pd (:desc ph)]
+    (cond
+      (= :Any (dd 0)) rem
+      (= :Any (pd 0)) (vec (concat (pm/omegas n) rem))
+      (not= (dd 0) (pd 0)) (no-match!)
+      :else (case (dd 0)
+              :Constant (yesif (= (dd 1) (pd 1)))
+              :Construct (yesif (pm/may-equal-constr (dd 1) (pd 1)))
+              :Array (yesif (= (dd 1) (pd 1)))
+              :Tuple (yesif (= (dd 1) (pd 1)))
+              :Record (yesif (= (count (dd 1)) (count (pd 1))))
+              :Lazy (yes)))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Contexts
+
+(defn- rev-split-at [n ps] [(vec (take n ps)) (vec (drop n ps))])
+
+(defn- row-le [c1 c2] (and (pm/le-pats (:left c1) (:left c2)) (pm/le-pats (:right c1) (:right c2))))
+
+(def ctx-empty [])
+(defn ctx-start [n] [{:left [] :right (pm/omegas n)}])
+(defn ctx-lshift [ctx]
+  (if (< (count ctx) match-context-rows)
+    (mapv (fn [{:keys [left right]}] {:left (vec (cons (first right) left)) :right (vec (rest right))}) ctx)
+    (pm/get-mins row-le (mapv (fn [{:keys [left right]}] {:left (vec (cons pm/omega left)) :right (vec (rest right))}) ctx))))
+(defn ctx-rshift [ctx] (mapv (fn [{:keys [left right]}] {:left (vec (rest left)) :right (vec (cons (first left) right))}) ctx))
+(defn ctx-erase-first-col [ctx] (mapv (fn [{:keys [left right]}] {:left left :right (vec (cons pm/omega (rest right)))}) ctx))
+(defn ctx-rshift-num [n ctx]
+  (mapv (fn [{:keys [left right]}] (let [[sh left] (rev-split-at n left)] {:left left :right (vec (concat sh right))})) ctx))
+(defn ctx-combine [ctx]
+  (mapv (fn [{:keys [left right]}] {:left (vec (rest left)) :right (pm/set-args (first left) right)}) ctx))
+
+(defn ctx-specialize [head ctx]
+  (letfn [(filt [rows]
+            (if (empty? rows)
+              []
+              (let [[left p right] (first rows) more (rest rows) d (:desc p)]
+                (case (d 0)
+                  :Tpat_or (filt (concat [[left (d 1) right] [left (d 2) right]] more))
+                  :Tpat_alias (filt (cons [left (d 1) right] more))
+                  :Tpat_var (filt (cons [left pm/omega right] more))
+                  (let [r (catch-nomatch (matcher head p right) ::no)]
+                    (if (= r ::no)
+                      (filt more)
+                      (cons {:left (vec (cons (pm/to-omega-pattern head) left)) :right r} (filt more))))))))]
+    (vec (filt (map (fn [{:keys [left right]}] [left (first right) (vec (rest right))]) ctx)))))
+
+(defn ctx-select-columns [pss ctx]
+  (let [n (count (first pss))]
+    (vec (mapcat (fn [ps]
+                   (keep (fn [{:keys [left right]}]
+                           (let [[transfer right] (rev-split-at n right)]
+                             (try {:left (vec (concat (mapv pm/lub transfer ps) left)) :right right}
+                                  (catch arbace.lang.ExceptionInfo e (if (pm/empty-ex? e) nil (throw e))))))
+                         ctx))
+                 pss))))
+
+(defn ctx-lub [p ctx]
+  (vec (keep (fn [{:keys [left right]}]
+               (try {:left left :right (vec (cons (pm/lub p (first right)) (rest right)))}
+                    (catch arbace.lang.ExceptionInfo e (if (pm/empty-ex? e) nil (throw e)))))
+             ctx)))
+
+(defn ctx-matches [ctx pss]
+  (boolean (some (fn [{qs :right}] (some #(pm/compats qs %) pss)) ctx)))
+
+(defn ctx-union [a b] (pm/get-mins row-le (vec (concat a b))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Default environments
+
+(defn def-empty [final] {:env [] :final final})
+(defn def-raise-final [d] [:Lstaticraise (:final d) []])
+(defn def-cons [matrix i d] (if (empty? matrix) d (update d :env #(vec (cons [i matrix] %)))))
+
+(defn- specialize-matrix [arity mtch pss]
+  (letfn [(filt [rows]
+            (if (empty? rows)
+              []
+              (let [[p ps] (first rows) more (rest rows) d (:desc p)]
+                (case (d 0)
+                  :Tpat_alias (filt (cons [(d 1) ps] more))
+                  :Tpat_var (filt (cons [pm/omega ps] more))
+                  :Tpat_or (filt-or (d 1) (d 2) ps more)
+                  (let [r (catch-nomatch (mtch p ps) ::no)]
+                    (if (= r ::no) (filt more) (cons r (filt more))))))))
+          (filt-one [p ps] (vec (filt [[p ps]])))
+          (filt-or [p1 p2 ps more]
+            (case arity
+              0 (let [m (filt-one p1 ps)] (if (empty? m) (filt (cons [p2 ps] more)) (concat m (filt more))))
+              1 (let [a (filt-one p1 ps) b (filt-one p2 ps)]
+                  (cond (empty? a) (concat b (filt more))
+                        (empty? b) (concat a (filt more))
+                        :else (let [arg1 (first (first a)) arg2 (first (first b))]
+                                (cons (vec (cons (assoc arg1 :desc [:Tpat_or arg1 arg2]) ps)) (filt more)))))
+              (filt (concat [[p1 ps] [p2 ps]] more))))]
+    (vec (filt pss))))
+
+(defn- def-specialize* [arity mtch d]
+  (letfn [(mk [env]
+            (if (empty? env)
+              []
+              (let [[i pss] (first env)]
+                (if (empty? (first pss))
+                  [[i [[]]]]
+                  (let [r (specialize-matrix arity mtch (map (fn [row] [(first row) (vec (rest row))]) pss))]
+                    (cond (empty? r) (mk (rest env))
+                          (empty? (first r)) [[i [[]]]]
+                          :else (cons [i r] (mk (rest env)))))))))]
+    (assoc d :env (vec (mk (:env d))))))
+
+(defn def-specialize [head d] (def-specialize* (pm/head-arity head) (fn [p ps] (matcher head p ps)) d))
+(defn def-pop-column [d] (def-specialize* 0 (fn [_ rem] rem) d))
+(defn def-pop-compat [p d] (def-specialize* 0 (fn [q rem] (if (pm/compat p q) rem (no-match!))) d))
+(defn def-pop [d] (when (seq (:env d)) [(first (:env d)) (assoc d :env (vec (rest (:env d))))]))
+
+(defn- flatten-pat-line [size p k]
+  (let [d (:desc p)]
+    (case (d 0)
+      (:Tpat_any :Tpat_var) (cons (pm/omegas size) k)
+      :Tpat_tuple (cons (mapv second (d 1)) k)
+      :Tpat_or (flatten-pat-line size (d 1) (flatten-pat-line size (d 2) k))
+      :Tpat_alias (flatten-pat-line size (d 1) k))))
+(defn- flatten-matrix [size pss] (vec (reduce (fn [r ps] (flatten-pat-line size (first ps) r)) () (reverse pss))))
+(defn def-flatten [size d] (update d :env (fn [env] (mapv (fn [[i pss]] [i (flatten-matrix size pss)]) env))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Jump summaries
+
+(defn jumps-empty [partial] {:env [] :partial partial})
+(defn jumps-add [i ctx j]
+  (if (empty? ctx)
+    j
+    (letfn [(add [env]
+              (if (empty? env)
+                [[i ctx]]
+                (let [[jj qss :as x] (first env)]
+                  (cond (> jj i) (cons x (add (rest env)))
+                        (< jj i) (cons [i ctx] env)
+                        :else (cons [i (ctx-union ctx qss)] (rest env))))))]
+      (assoc j :env (vec (add (:env j)))))))
+(defn jumps-singleton [i ctx] (jumps-add i ctx (jumps-empty :total)))
+(defn jumps-union [j1 j2]
+  (letfn [(u [e1 e2]
+            (cond (empty? e1) e2 (empty? e2) e1
+                  :else (let [[i1 p1 :as x1] (first e1) [i2 p2 :as x2] (first e2)]
+                          (cond (= i1 i2) (cons [i1 (ctx-union p1 p2)] (u (rest e1) (rest e2)))
+                                (> i1 i2) (cons x1 (u (rest e1) e2))
+                                :else (cons x2 (u e1 (rest e2)))))))]
+    {:env (vec (u (:env j1) (:env j2)))
+     :partial (if (and (= :total (:partial j1)) (= :total (:partial j2))) :total :partial)}))
+(defn jumps-unions [envs]
+  (cond (empty? envs) (jumps-empty :total)
+        (= 1 (count envs)) (first envs)
+        :else (recur (loop [es envs acc []]
+                       (if (>= (count es) 2) (recur (drop 2 es) (conj acc (jumps-union (first es) (second es))))
+                           (into acc es))))))
+(defn jumps-map [f j] (update j :env (fn [e] (mapv (fn [[i c]] [i (f c)]) e))))
+(defn jumps-remove [i j] (update j :env (fn [e] (vec (remove #(= i (first %)) e)))))
+(defn jumps-extract [i j]
+  (loop [env (:env j) acc []]
+    (cond (empty? env) [ctx-empty (assoc j :env acc)]
+          :else (let [[jj c :as x] (first env)]
+                  (cond (= i jj) [c (assoc j :env (into acc (rest env)))]
+                        (< jj i) [ctx-empty (assoc j :env (into acc env))]
+                        :else (recur (rest env) (conj acc x)))))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Splitting and precompilation
+
+(defn- arg-of-pure [a] (case (a 0) :var [:Lvar (a 1)] :tuple (a 1)))
+
+(defn- same-actions [cases]
+  (cond (empty? cases) nil
+        (= 1 (count cases)) (second (first cases))
+        :else (let [k0 (l/make-key (second (first cases)))]
+                (when (and k0 (every? #(= k0 (l/make-key (second %))) (rest cases))) (second (first cases))))))
+
+(defn- safe-before [[row act-p] cls]
+  (every? (fn [[qrow act-q]]
+            (or (let [k1 (l/make-key act-p) k2 (l/make-key act-q)] (and k1 k2 (= k1 k2)))
+                (not (pm/compats row qrow))))
+          cls))
+
+(defn- what-is-cases [skip-any cases]
+  (or (some (fn [[row _]] (let [h (simple-head (first row))] (when-not (and skip-any (= :Any ((:desc h) 0))) h))) cases)
+      {:desc [:Any] :type nil}))
+
+(defn- pm-free-variables [cases]
+  (let [s (atom #{})]
+    (letfn [(go [x] (cond (and (vector? x) (= :Lvar (first x))) (swap! s conj (x 1))
+                          (vector? x) (run! go x)
+                          (map? x) (run! go (vals x))
+                          (sequential? x) (run! go x)
+                          :else nil))]
+      (run! (fn [[_ act]] (go act)) cases))
+    @s))
+
+(defn- can-group [discr p]
+  (let [d (:desc discr) h (:desc (simple-head p))]
+    (case (d 0)
+      :Any (= :Any (h 0))
+      :Constant (and (= :Constant (h 0)) (= ((d 1) 0) ((h 1) 0)))
+      :Construct (and (= :Construct (h 0))
+                      (let [t1 (:tag (d 1)) t2 (:tag (h 1))]
+                        (if (and (= :Cstr_extension (t1 0)) (= :Cstr_extension (t2 0))) (= (t1 1) (t2 1)) true)))
+      :Tuple (#{:Tuple :Any} (h 0))
+      :Record (#{:Record :Any} (h 0))
+      :Array (= :Array (h 0))
+      :Lazy (= :Lazy (h 0)))))
+
+(defn- or? [p] (= :Tpat_or (ptag p)))
+(defn- omega-like [p]
+  (let [d (:desc p)]
+    (case (d 0) (:Tpat_any :Tpat_var) true :Tpat_alias (omega-like (d 1)) :Tpat_or (or (omega-like (d 1)) (omega-like (d 2))) false)))
+(defn- simple-omega-like [p] (= :Any ((:desc (simple-head p)) 0)))
+(defn- equiv-pat [p q] (and (pm/le-pat p q) (pm/le-pat q p)))
+(defn- extract-equiv-head [p cls]
+  (loop [cls cls acc []]
+    (if (and (seq cls) (equiv-pat p (first (first (first cls)))))
+      (recur (rest cls) (conj acc (first cls)))
+      [acc (vec cls)])))
+
+(defn- guarded-act? [act] (l/guarded? act))
+
+(defn- insert-or-append [[head ps act] rev-ors rev-no]
+  (let [disjoint (fn [p q] (not (pm/compat p q)))
+        safe-below (fn [[ps act] qs] (and (not (guarded-act? act)) (pm/le-pats ps qs)))
+        safe-below-or-matrix (fn [cls [q qs]]
+                               (every? (fn [[[p & ps] act-p]]
+                                         (if (or? p) (or (disjoint p q) (safe-below [(vec ps) act-p] qs)) true))
+                                       cls))
+        safe-to-insert (fn [rem [p ps] seen]
+                         (let [[_ not-e] (extract-equiv-head p rem)]
+                           (and (safe-below-or-matrix not-e [p ps])
+                                (every? (fn [[[q] _]] (disjoint p q)) seen))))]
+    (loop [seen () rem rev-ors]
+      (if (empty? rem)
+        [(cons [(vec (cons head ps)) act] rev-ors) rev-no]
+        (let [[[q & qs] act-q :as cl] (first rem) p head]
+          (cond
+            (or (not (or? q)) (disjoint p q)) (recur (cons cl seen) (rest rem))
+            (and (empty? (pm/bound-idents p)) (empty? (pm/bound-idents q)) (equiv-pat p q))
+            (if (safe-to-insert (rest rem) [p ps] seen)
+              [(concat (reverse seen) [[(vec (cons head ps)) act] cl] (rest rem)) rev-no]
+              [rev-ors (cons [(vec (cons head ps)) act] rev-no)])
+            (safe-below [(vec qs) act-q] ps) (recur (cons cl seen) (rest rem))
+            :else [rev-ors (cons [(vec (cons head ps)) act] rev-no)]))))))
+
+(defn- as-matrix [cases] (pm/get-mins pm/le-pats (mapv first cases)))
+(defn- add-omega-column [pss] (mapv #(vec (cons pm/omega %)) pss))
+
+(declare split-or split-no-or precompile-var do-not-precompile precompile-or)
+
+(defn split-or [cls args d]
+  (letfn [(do-split [rev-before rev-ors rev-no cls]
+            (if (empty? cls)
+              (cons-next (reverse rev-before) (reverse rev-ors) (reverse rev-no))
+              (let [cl (first cls) rem (rest cls) p (first (first cl))]
+                (cond
+                  (not (safe-before cl rev-no)) (do-split rev-before rev-ors (cons cl rev-no) rem)
+                  (and (not (or? p)) (safe-before cl rev-ors)) (do-split (cons cl rev-before) rev-ors rev-no rem)
+                  :else (let [[ors no] (insert-or-append [p (vec (rest (first cl))) (second cl)] rev-ors rev-no)]
+                          (do-split rev-before ors no rem))))))
+          (cons-next [yes yesor no]
+            (let [[d nexts] (if (empty? no)
+                              [d []]
+                              (let [[{next :me matrix :matrix d2 :top-default} nexts] (do-split () () () no)
+                                    idef (l/next-raise-count)]
+                                [(def-cons matrix idef d2) (vec (cons [idef next] nexts))]))]
+              (if (empty? yesor)
+                (split-no-or (vec yes) args d nexts)
+                (precompile-or (vec yes) (vec yesor) args d nexts))))]
+    (do-split () () () cls)))
+
+(defn split-no-or [cls args d k]
+  (letfn [(split [cls] (collect (what-is-cases false cls) () () cls))
+          (collect [discr rev-yes rev-no cls]
+            (cond
+              (and (= 1 (count cls)) (seq rev-yes) (simple-omega-like (first (first (first cls))))
+                   (every? omega-like (rest (first (first cls)))))
+              (collect discr rev-yes (cons (first cls) rev-no) [])
+              (seq cls)
+              (let [cl (first cls) p (first (first cl))]
+                (cond
+                  (and (can-group discr p) (safe-before cl rev-no)) (collect discr (cons cl rev-yes) rev-no (rest cls))
+                  (should-split discr) (insert-split discr (vec (reverse rev-yes)) (vec cls) d k)
+                  :else (collect discr rev-yes (cons cl rev-no) (rest cls))))
+              :else (insert-split discr (vec (reverse rev-yes)) (vec (reverse rev-no)) d k)))
+          (insert-split [discr yes no d k]
+            (let [pre (if (= :Any ((:desc discr) 0)) precompile-var do-not-precompile)]
+              (if (empty? no)
+                (pre args yes d k)
+                (let [[{next :me matrix :matrix d2 :top-default} nexts] (split no)
+                      idef (l/next-raise-count)]
+                  (pre args yes (def-cons matrix idef d2) (vec (cons [idef next] nexts)))))))
+          (should-split [discr]
+            (let [d (:desc discr)] (and (= :Construct (d 0)) (= :Cstr_extension ((:tag (d 1)) 0)))))]
+    (split cls)))
+
+(defn- rebuild-matrix [pmh]
+  (case (pmh 0)
+    :pm (as-matrix (:cases (pmh 1)))
+    :pmor (:or-matrix (pmh 1))
+    :pmvar (add-omega-column (rebuild-matrix (pmh 1)))))
+
+(defn precompile-var [args cls d k]
+  (let [r (first (:rest args))]
+    (if (and r (= :Lvar ((:arg r) 0)) (> (count cls) 1))
+      (let [v ((:arg r) 1)
+            var-args {:first (assoc r :arg [:var v]) :rest (vec (rest (:rest args)))}
+            var-cls (mapv (fn [[row act]] (half-simplify [:Lvar v] [(vec (rest row)) act])) cls)
+            var-def (def-pop-column d)
+            [{first-me :me matrix :matrix} nexts] (split-or var-cls var-args var-def)]
+        (if (empty? nexts)
+          (do-not-precompile args cls d k)
+          (let [rdef (reduce (fn [dd [e pmh]] (def-cons (add-omega-column (rebuild-matrix pmh)) e dd)) d (reverse nexts))]
+            [{:me [:pmvar first-me] :matrix (add-omega-column matrix) :top-default rdef}
+             (vec (concat (map (fn [[e pmh]] [e [:pmvar pmh]]) nexts) k))])))
+      (do-not-precompile args cls d k))))
+
+(defn do-not-precompile [args cls d k]
+  [{:me [:pm {:cases cls :args args :default d}] :matrix (as-matrix cls) :top-default d} k])
+
+(defn precompile-or [cls ors args d k]
+  (letfn [(do-cases [ors]
+            (if (empty? ors)
+              [[] []]
+              (let [[row action :as cl] (first ors) p (first row) patl (vec (rest row))]
+                (if-not (or? p)
+                  (let [[o c] (do-cases (rest ors))] [(vec (cons cl o)) c])
+                  (let [[others rem] (extract-equiv-head p (rest ors))
+                        orpm {:cases (vec (cons [patl action] (map (fn [[r a]] [(vec (rest r)) a]) others)))
+                              :args (:rest args)
+                              :default (def-pop-compat p d)}
+                        fv (pm-free-variables (:cases orpm))
+                        pbv (->> (pm/bound-idents-full p) (filter #(fv (first %))) (mapv (fn [[id _ t]] [id (ty/value-kind t)])))
+                        or-num (l/next-raise-count)
+                        new-patl (pm/omegas (count patl))
+                        mk-action (fn [vars] [:Lstaticraise or-num (mapv (fn [v] [:Lvar v]) vars)])
+                        new-cases (mapv (fn [[p act]] [(vec (cons p new-patl)) act])
+                                        (explode-or-pat (arg-of-pure (:arg (:first args))) p mk-action (mapv first pbv)))
+                        handler {:provenance [[p]] :exit or-num :vars pbv :pm orpm}
+                        [rc rh] (do-cases rem)]
+                    [(vec (concat new-cases rc)) (vec (cons handler rh))])))))]
+    (let [[cases handlers] (do-cases ors)
+          matrix (as-matrix (vec (concat cls ors)))
+          body {:cases (vec (concat cls cases)) :args args :default d}]
+      [{:me [:pmor {:body body :handlers handlers :or-matrix matrix}] :matrix matrix :top-default d} k])))
+
+;; ---------------------------------------------------------------------------------------------
+;; Divisions
+
+(defn- make-matching [get-expr-args head d ctx {:keys [first rest]}]
+  {:pm {:cases [] :args (get-expr-args head (assoc first :arg (arg-of-pure (:arg first))) rest)
+        :default (def-specialize head d)}
+   :ctx (ctx-specialize head ctx) :discr head})
+
+(defn- divide [get-expr-args eq-key get-key get-pat-args ctx pmt]
+  (let [cells (reduce (fn [cells [row action]]
+                        (let [p (first row) ph (simple-head p) k (get-key p)
+                              line [(get-pat-args p (vec (rest row))) action]
+                              idx (first (keep-indexed (fn [i [k2 _]] (when (eq-key k k2) i)) cells))]
+                          (if idx
+                            (update-in cells [idx 1 :pm :cases] conj line)
+                            (conj cells [k (assoc-in (make-matching get-expr-args ph (:default pmt) ctx (:args pmt))
+                                                     [:pm :cases] [line])]))))
+                      [] (:cases pmt))]
+    {:args (:args pmt) :cells cells}))
+
+(defn- divide-line [make-ctx get-expr-args get-pat-args discr ctx pmt]
+  (let [{:keys [first rest]} (:args pmt)]
+    {:pm {:cases (mapv (fn [[row action]] [(get-pat-args (arbace.core/first row) (vec (arbace.core/rest row))) action]) (:cases pmt))
+          :args (get-expr-args discr (assoc first :arg (arg-of-pure (:arg first))) rest)
+          :default (def-specialize discr (:default pmt))}
+     :ctx (make-ctx ctx) :discr discr}))
+
+(defn- get-expr-args-constr [head {:keys [arg mut]} rem]
+  (let [c ((:desc head) 1)
+        fields (fn [from to] (mapv (fn [pos] {:arg [:Lprim (l/pfield pos :pointer false) [arg]] :mut mut :kind :alias})
+                                   (range from (inc to))))]
+    (case ((:tag c) 0)
+      (:Cstr_constant :Cstr_block) (vec (concat (fields 0 (dec (:arity c))) rem))
+      :Cstr_extension (vec (concat (fields 1 (:arity c)) rem)))))
+
+(defn- divide-constructor [ctx pmt]
+  (divide get-expr-args-constr pm/equal-constr (fn [p] ((:desc p) 1)) (fn [p rem] (vec (concat ((:desc p) 2) rem))) ctx pmt))
+
+(defn- divide-constant [ctx pmt]
+  (divide (fn [_ _ rem] rem) = (fn [p] ((:desc p) 1)) (fn [_ rem] rem) ctx pmt))
+
+(defn- divide-var [ctx pmt]
+  (divide-line ctx-lshift (fn [_ _ rem] rem) (fn [_ rem] rem) {:desc [:Any]} ctx pmt))
+
+(defn- divide-tuple [head ctx pmt]
+  (let [n (pm/head-arity head)]
+    (divide-line #(ctx-specialize head %)
+                 (fn [_ {:keys [arg mut]} rem]
+                   (vec (concat (mapv (fn [pos] {:arg [:Lprim (l/pfield pos :pointer false) [arg]] :kind :alias :mut mut}) (range n)) rem)))
+                 (fn [p rem] (if (= :Tpat_any (ptag p)) (vec (concat (pm/omegas n) rem)) (vec (concat (map second ((:desc p) 1)) rem))))
+                 head ctx pmt)))
+
+(defn- divide-record [all head ctx pmt]
+  (let [head (expand-record-head head) n (count all)]
+    (divide-line #(ctx-specialize head %)
+                 (fn [_ {:keys [arg mut]} rem]
+                   (vec (concat (mapv (fn [lbl]
+                                        (let [ptr (ty/maybe-pointer (ty/instance (:arg lbl)))
+                                              acc (if (= :float (:repres lbl))
+                                                    [:Lprim (l/prim (str "floatfield " (:pos lbl))) [arg]]
+                                                    [:Lprim (l/pfield (:pos lbl) ptr (:mut lbl)) [arg]])]
+                                          {:arg acc :kind (if (:mut lbl) :strictopt :alias) :mut (or mut (:mut lbl))}))
+                                      all)
+                                rem)))
+                 (fn [p rem] (let [v (if (= :Tpat_any (ptag p)) (pm/omegas n)
+                                         (reduce (fn [v [lbl q]] (assoc v (:pos lbl) q)) (pm/omegas n) ((:desc p) 1)))]
+                               (vec (concat v rem))))
+                 head ctx pmt)))
+
+;; ---------------------------------------------------------------------------------------------
+;; Tests and switches
+
+(defn- bind-sw [arg k]
+  (if (= :Lvar (arg 0)) (k arg) (let [id (ty/ident-create "switch")] [:Llet :strict "" id arg (k [:Lvar id])])))
+
+(defn- make-catch [d k]
+  (if (and (= :Lstaticraise (d 0)) (empty? (d 2)))
+    (k d)
+    (let [e (l/next-raise-count)] [:Lstaticcatch (k (l/make-exit e)) [e []] d])))
+
+(defn- handle-shared []
+  (let [hs (atom identity)]
+    [hs (fn [[k act]]
+          (if (= k :single)
+            act
+            (let [[i h] (l/make-catch-delayed act) ohs @hs]
+              (reset! hs (fn [x] (h (ohs x))))
+              (l/make-exit i))))]))
+
+(defn- share-actions-tree [sw d]
+  (let [st (l/mk-store)
+        d (when d (l/act-store-shared! st d))
+        sw (mapv (fn [[c act]] [c (l/act-store! st act)]) sw)
+        acts (l/act-get-shared st)
+        [hs handle] (handle-shared)
+        acts (mapv handle acts)]
+    [@hs (mapv (fn [[c j]] [c (acts j)]) sw) (when d (acts d))]))
+
+(defn- const-key [c] (case (c 0) (:int :char) (c 1) :string (c 1) c))
+(defn- const-cmp [a b]
+  (case (a 0)
+    (:int :char :int32 :int64 :nativeint) (compare (a 1) (b 1))
+    :string (compare (a 1) (b 1))
+    :float (compare (Double/parseDouble (str/replace (a 1) "_" "")) (Double/parseDouble (str/replace (b 1) "_" "")))))
+
+(defn- sort-lambda-list [ll]
+  (let [s (sort-by first const-cmp ll)]
+    (loop [s s acc []]
+      (cond (empty? s) acc
+            (and (seq acc) (zero? (const-cmp (first (peek acc)) (first (first s))))) (recur (rest s) acc)
+            :else (recur (rest s) (conj acc (first s)))))))
+
+(defn- strings-test-sequence [arg sw d]
+  (let [[d sw] (if d [d sw] [(second (first sw)) (rest sw)])]
+    (bind-sw arg (fn [arg] (reduce (fn [k [s lam]] [:Lifthenelse [:Lprim (l/pccall "caml_string_notequal") [arg [:Lconst [:string s]]]] k lam])
+                                   d (reverse sw))))))
+
+(defn- mk-test-sequence [fail tst lt-tst arg cll]
+  (let [cll (sort-lambda-list cll)
+        [hs cll fail] (share-actions-tree cll fail)
+        lc (fn [c] [:Lconst c])]
+    (letfn [(seq-nofail [l] (if (= 1 (count l)) (second (first l))
+                                (let [[c act] (first l)] [:Lifthenelse [:Lprim tst [arg (lc c)]] (seq-nofail (rest l)) act])))
+            (seq-fail [l] (if (empty? l) fail
+                              (let [[c act] (first l)] [:Lifthenelse [:Lprim tst [arg (lc c)]] (seq-fail (rest l)) act])))
+            (mts [l] (if (and (>= (count l) 4) lt-tst)
+                       (let [[l1 l2] (rev-split-at (quot (count l) 2) l)]
+                         [:Lifthenelse [:Lprim lt-tst [arg (lc (first (first l2)))]] (mts l1) (mts l2)])
+                       (if fail (seq-fail l) (seq-nofail l))))]
+      (hs (mts cll)))))
+
+(defn- as-interval-canfail [fail low high ll]
+  (let [st (l/mk-store)
+        store (fn [act] (l/act-store! st act))]
+    (store fail)
+    (letfn [(nofail [cl ch ca l]
+              (if (empty? l)
+                (if (= ch high) [[cl ch ca]] [[cl ch ca] [(inc ch) high 0]])
+                (let [[i act] (first l) ai (store act)]
+                  (if (= (inc ch) i)
+                    (cond (= ai ca) (nofail cl i ca (rest l))
+                          (zero? ai) (cons [cl (dec i) ca] (failr i i (rest l)))
+                          :else (cons [cl (dec i) ca] (nofail i i ai (rest l))))
+                    (if (zero? ai)
+                      (cons [cl ch ca] (failr (inc ch) (inc ch) l))
+                      (concat [[cl ch ca] [(inc ch) (dec i) 0]] (nofail i i ai (rest l))))))))
+            (failr [cl ch l]
+              (if (empty? l)
+                [[cl ch 0]]
+                (let [[i act] (first l) idx (store act)]
+                  (if (zero? idx) (failr cl i (rest l)) (cons [cl (dec i) 0] (nofail i i idx (rest l)))))))]
+      (let [r (if (empty? ll)
+                [[low high 0]]
+                (let [[i act] (first ll) idx (store act)]
+                  (cond (zero? idx) (failr low i (rest ll))
+                        (< low i) (cons [low (dec i) 0] (nofail i i idx (rest ll)))
+                        :else (nofail i i idx (rest ll)))))]
+        [(vec r) st]))))
+
+(defn- as-interval-nofail [ll]
+  (let [st (l/mk-store)
+        some-hole (some (fn [[[i _] [j _]]] (> j (inc i))) (partition 2 1 (rest ll)))
+        [i act] (first ll)
+        _ (if some-hole (l/act-store-shared! st act) (l/act-store! st act))]
+    (loop [l (rest ll) cl i ch i ca 0 acc []]
+      (if (empty? l)
+        [(conj acc [cl ch ca]) st]
+        (let [[i act] (first l) ai (l/act-store! st act)]
+          (if (= ai ca) (recur (rest l) cl i ca acc) (recur (rest l) i i ai (conj acc [cl ch ca]))))))))
+
+(defn call-switcher [fail arg low high ill]
+  (let [ill (vec (sort-by first ill))
+        edges (if (empty? ill) [low high] [(first (first ill)) (first (last ill))])
+        [cases st] (if fail (as-interval-canfail fail low high ill) (as-interval-nofail ill))]
+    (l/zyva edges arg cases st)))
+
+(defn- comp-exit [partial ctx d]
+  (if-let [[[i _] _] (def-pop d)]
+    [[:Lstaticraise i []] (jumps-singleton i ctx)]
+    (when (= :partial (:global partial)) [(def-raise-final d) (jumps-empty :partial)])))
+
+(defn- mk-failaction-neg [arg-partial ctx d]
+  (if (= :total (:current arg-partial))
+    [nil (jumps-empty :total)]
+    (if-let [[lam jumps] (comp-exit arg-partial ctx d)] [lam jumps] [nil (jumps-empty :total)])))
+
+(defn- list-as-pat [pats]
+  (if (= 1 (count pats)) (first pats) (assoc (first pats) :desc [:Tpat_or (first pats) (list-as-pat (rest pats))])))
+
+(defn- mk-failaction-pos [arg-partial seen ctx defs]
+  (let [c0 ((:desc (first seen)) 1)
+        input-fail-pats (mapv (fn [c] (pm/to-omega-pattern {:desc [:Construct c] :type (:type (first seen))}))
+                              (pm/complete-constrs c0 (map #((:desc %) 1) seen)))]
+    (if (>= (count input-fail-pats) match-context-rows)
+      (let [[f j] (mk-failaction-neg arg-partial ctx defs)] [f [] j])
+      (let [in-ctx (keep (fn [p] (let [pc (ctx-lub p ctx)] (when (seq pc) [p pc]))) input-fail-pats)
+            mk-fails (fn [pats action] (mapv (fn [p] [((:desc p) 1) action]) pats))]
+        (letfn [(fj [defs fps]
+                  (if (empty? fps)
+                    [[] (jumps-empty :total)]
+                    (if-let [[[idef pss] rem] (def-pop defs)]
+                      (let [now (vec (keep (fn [[p pc]] (when (ctx-matches pc pss) p)) fps))
+                            later (vec (remove (fn [[_ pc]] (ctx-matches pc pss)) fps))]
+                        (if (empty? now)
+                          (fj rem later)
+                          (let [[fails jumps] (fj rem later)]
+                            [(vec (concat (mk-fails now [:Lstaticraise idef []]) fails))
+                             (jumps-add idef (ctx-lub (list-as-pat now) ctx) jumps)])))
+                      (if (= :total (:global arg-partial))
+                        [[] (jumps-empty :total)]
+                        [(mk-fails (mapv first fps) (def-raise-final defs)) (jumps-empty :partial)]))))]
+          (let [[fails jumps] (fj defs (vec in-ctx))] [nil fails jumps]))))))
+
+(defn- combine-constant [arg cst partial ctx d [cll total _]]
+  (let [[fail local-jumps] (mk-failaction-neg partial ctx d)
+        lam (case (cst 0)
+              :int (call-switcher fail arg Long/MIN_VALUE Long/MAX_VALUE (mapv (fn [[c x]] [(c 1) x]) cll))
+              :char (call-switcher fail arg 0 255 (mapv (fn [[c x]] [(c 1) x]) cll))
+              :string (let [sw (mapv (fn [[c act]] [(c 1) act]) (sort-lambda-list cll))
+                            [hs sw fail] (share-actions-tree sw fail)]
+                        (hs [:Lstringswitch arg sw fail]))
+              :float (mk-test-sequence fail (l/prim "!=.") (l/prim "<.") arg cll)
+              (:int32 :int64 :nativeint)
+              (let [k (name (cst 0)) m (case k "int32" "Int32" "int64" "Int64" "nativeint" "Nativeint")]
+                (mk-test-sequence fail (l/prim (str m ".!=")) (l/prim (str m ".<")) arg cll)))]
+    [lam (jumps-union local-jumps total)]))
+
+(defn- split-cases [tll]
+  (let [cs (keep (fn [[t a]] (when (= :Cstr_constant (t 0)) [(t 1) a])) tll)
+        bs (keep (fn [[t a]] (when (= :Cstr_block (t 0)) [(t 1) a])) tll)]
+    [(vec (sort-by first cs)) (vec (sort-by first bs))]))
+
+(defn- share-actions-sw [sw]
+  (let [st (l/mk-store)
+        fail (when (:fail sw) (l/act-store-shared! st (:fail sw)))
+        consts (mapv (fn [[i e]] [i (l/act-store! st e)]) (:consts sw))
+        blocks (mapv (fn [[i e]] [i (l/act-store! st e)]) (:blocks sw))
+        acts (l/act-get-shared st)
+        [hs handle] (handle-shared)
+        acts (mapv handle acts)]
+    [@hs (assoc sw :consts (mapv (fn [[i j]] [i (acts j)]) consts)
+                :blocks (mapv (fn [[i j]] [i (acts j)]) blocks)
+                :fail (when fail (acts fail)))]))
+
+(defn- reintroduce-fail [sw]
+  (if (:fail sw)
+    sw
+    (let [t (frequencies (keep (fn [[_ l]] (l/as-simple-exit l)) (concat (:consts sw) (:blocks sw))))
+          cmax (if (empty? t) -1 (apply max (vals t)))
+          imax (if (empty? t) nil (apply min (keep (fn [[i c]] (when (= c cmax) i)) t)))]
+      (if (>= cmax 3)
+        (let [rm (fn [cs] (vec (remove (fn [[_ lam]] (= imax (l/as-simple-exit lam))) cs)))]
+          (assoc sw :consts (rm (:consts sw)) :blocks (rm (:blocks sw)) :fail (l/make-exit imax)))
+        sw))))
+
+(defn- combine-constructor [arg cstr partial ctx d [dll total1 pats]]
+  (if (= :Cstr_extension ((:tag cstr) 0))
+    ;; combine_extension_constructor
+    (let [[fail local-jumps] (mk-failaction-neg partial ctx d)
+          consts (vec (keep (fn [[c a]] (when ((:tag c) 2) [((:tag c) 1) a])) dll))
+          nonconsts (vec (keep (fn [[c a]] (when-not ((:tag c) 2) [((:tag c) 1) a])) dll))
+          [default consts nonconsts] (if fail [fail consts nonconsts]
+                                         (if (seq nonconsts) [(second (first nonconsts)) consts (vec (rest nonconsts))]
+                                             [(second (first consts)) (vec (rest consts)) nonconsts]))
+          nonconst-lam (if (empty? nonconsts)
+                         default
+                         (let [tag (ty/ident-create "tag")]
+                           [:Llet :alias "" tag [:Lprim (l/pfield 0 :pointer false) [arg]]
+                            (reduce (fn [rem [path act]] [:Lifthenelse [:Lprim (l/pintcomp :eq) [[:Lvar tag] (*transl-ext-path* path)]] act rem])
+                                    default (reverse nonconsts))]))
+          lam (reduce (fn [rem [path act]] [:Lifthenelse [:Lprim (l/pintcomp :eq) [arg (*transl-ext-path* path)]] act rem])
+                      nonconst-lam (reverse consts))]
+      [lam (jumps-union local-jumps total1)])
+    (let [ncases (count dll) nconstrs (+ (:consts cstr) (:nonconsts cstr))
+          [fail-opt fails local-jumps]
+          (if (= ncases nconstrs)
+            [nil [] (jumps-empty :total)]
+            (mk-failaction-pos partial (mapv (fn [[c _] p] (assoc p :desc [:Construct c])) dll pats) ctx d))
+          dll (vec (concat fails dll))
+          [consts nonconsts] (split-cases (mapv (fn [[c a]] [(:tag c) a]) dll))
+          sa (same-actions dll)
+          lam (if (and (nil? fail-opt) sa)
+                sa
+                (let [nc (:consts cstr) nn (:nonconsts cstr)]
+                  (cond
+                    (and (= 1 nc nn) (= 1 (count consts) (count nonconsts)) (= 0 (first (first consts))) (= 0 (first (first nonconsts))))
+                    [:Lifthenelse arg (second (first nonconsts)) (second (first consts))]
+                    (and (zero? nn) (empty? nonconsts))
+                    (call-switcher fail-opt arg 0 (dec nc) consts)
+                    :else
+                    (let [act0 (cond (and fail-opt (empty? nonconsts)) fail-opt
+                                     fail-opt (when (= (count nonconsts) nn) (same-actions nonconsts))
+                                     :else (same-actions nonconsts))]
+                      (if act0
+                        [:Lifthenelse [:Lprim (l/prim "isint") [arg]] (call-switcher fail-opt arg 0 (dec nc) consts) act0]
+                        (let [[hs sw] (share-actions-sw {:numconsts nc :consts consts :numblocks nn :blocks nonconsts :fail fail-opt})]
+                          (hs [:Lswitch arg (reintroduce-fail sw)])))))))]
+      [lam (jumps-union local-jumps total1)])))
+
+;; ---------------------------------------------------------------------------------------------
+;; The compiler
+
+(defn- compile-list [compile-fun cells]
+  (loop [cells cells totals [] acc [] discrs []]
+    (if (empty? cells)
+      [acc (jumps-unions (reverse totals)) discrs]
+      (let [[k cell] (first cells)]
+        (if (empty? (:ctx cell))
+          (recur (rest cells) totals acc discrs)
+          (let [r (catch-unused (compile-fun (:ctx cell) (:pm cell)) ::unused)]
+            (if (= r ::unused)
+              (recur (rest cells) totals acc discrs)
+              (let [[lam total] r]
+                (recur (rest cells) (conj totals (jumps-map ctx-combine total)) (conj acc [k lam])
+                       (conj discrs (pm/to-omega-pattern (:discr cell))))))))))))
+
+(defn- compile-orhandlers [compile-fun lam1 total1 ctx handlers]
+  (loop [r lam1 total-r total1 hs handlers]
+    (if (empty? hs)
+      [r total-r]
+      (let [{mat :provenance i :exit vars :vars pmt :pm} (first hs)
+            ctx (ctx-select-columns mat ctx)
+            res (catch-unused (compile-fun ctx pmt) ::unused)]
+        (if (= res ::unused)
+          (recur [:Lstaticcatch r [i vars] l/lambda-unit] total-r (rest hs))
+          (let [[handler total-i] res
+                ra (let [k (l/make-key r)] (or k r))]
+            (if (= :Lstaticraise (ra 0))
+              (if (= i (ra 1))
+                [(reduce (fn [body [v a]] (l/bind-with-value-kind :alias v a body)) handler (reverse (map vector vars (ra 2))))
+                 (jumps-map #(ctx-rshift-num (count (first mat)) %) total-i)]
+                (recur r total-r (rest hs)))
+              (recur [:Lstaticcatch r [i vars] handler]
+                     (jumps-union (jumps-remove i total-r) (jumps-map #(ctx-rshift-num (count (first mat)) %) total-i))
+                     (rest hs)))))))))
+
+(defn- compile-test [compile-fun arg-partial divide combine ctx to-match]
+  (let [division (divide ctx to-match)
+        c-div (compile-list compile-fun (:cells division))]
+    (if (empty? (first c-div))
+      (let [[f total] (mk-failaction-neg arg-partial ctx (:default to-match))]
+        (if f [f total] (unused!)))
+      (combine ctx (:default to-match) c-div))))
+
+(defn- approx-present [v lam]
+  (case (lam 0)
+    :Lconst false
+    :Lstaticraise (boolean (some #(approx-present v %) (lam 2)))
+    :Lprim (boolean (some #(approx-present v %) (lam 2)))
+    :Llet (if (= :alias (lam 1)) (or (approx-present v (lam 4)) (approx-present v (lam 5))) true)
+    :Lvar (= v (lam 1))
+    true))
+
+(defn- lower-bind [v arg lam]
+  (case (lam 0)
+    :Lifthenelse (let [pc (approx-present v (lam 1)) ps (approx-present v (lam 2)) pn (approx-present v (lam 3))]
+                   (cond (and (not pc) (not ps) (not pn)) lam
+                         (and (not pc) ps (not pn)) [:Lifthenelse (lam 1) (lower-bind v arg (lam 2)) (lam 3)]
+                         (and (not pc) (not ps) pn) [:Lifthenelse (lam 1) (lam 2) (lower-bind v arg (lam 3))]
+                         :else (l/bind :alias v arg lam)))
+    :Lswitch (let [sw (lam 2)]
+               (cond (and (= 1 (count (:consts sw))) (empty? (:blocks sw)) (not (approx-present v (lam 1))))
+                     [:Lswitch (lam 1) (assoc sw :consts [[(first (first (:consts sw))) (lower-bind v arg (second (first (:consts sw))))]])]
+                     (and (empty? (:consts sw)) (= 1 (count (:blocks sw))) (not (approx-present v (lam 1))))
+                     [:Lswitch (lam 1) (assoc sw :blocks [[(first (first (:blocks sw))) (lower-bind v arg (second (first (:blocks sw))))]])]
+                     :else (l/bind :alias v arg lam)))
+    :Llet (if (= :alias (lam 1))
+            (if (approx-present v (lam 4)) (l/bind :alias v arg lam)
+                [:Llet :alias (lam 2) (lam 3) (lam 4) (lower-bind v arg (lam 5))])
+            (l/bind :alias v arg lam))
+    (l/bind :alias v arg lam)))
+
+(defn- bind-check [kind v arg lam]
+  (cond (= :Lvar (arg 0)) (l/bind kind v arg lam)
+        (= :alias kind) (lower-bind v arg lam)
+        :else (l/bind kind v arg lam)))
+
+(defn- comp-match-handlers [comp-fun partial ctx first-match next-matches]
+  (if (empty? next-matches)
+    (comp-fun partial ctx first-match)
+    (letfn [(c-rec [body jumps-body rem]
+              (if (empty? rem)
+                [body jumps-body]
+                (let [[i pm-i] (first rem)
+                      partial (assoc partial :tempo :following)
+                      [ctx-i jumps-rem] (jumps-extract i jumps-body)]
+                  (if (empty? ctx-i)
+                    (c-rec body jumps-body (rest rem))
+                    (let [partial (if (empty? (rest rem)) partial (assoc partial :current :partial))
+                          r (catch-unused (comp-fun partial ctx-i pm-i) ::unused)]
+                      (if (= r ::unused)
+                        (c-rec [:Lstaticcatch body [i []] l/lambda-unit] jumps-rem (rest rem))
+                        (let [[lam-i jumps-i] r]
+                          (c-rec [:Lstaticcatch body [i []] lam-i] (jumps-union jumps-i jumps-rem) (rest rem)))))))))]
+      (let [r (catch-unused (comp-fun (assoc partial :current :partial) ctx first-match) ::unused)]
+        (if (= r ::unused)
+          (let [[_ second-match] (first next-matches)]
+            (comp-match-handlers comp-fun partial ctx second-match (rest next-matches)))
+          (c-rec (first r) (second r) next-matches))))))
+
+(defn- name-pattern [default cases]
+  (or (some (fn [[row _]] (let [d (:desc (first row))] (case (d 0) :Tpat_var (d 1) :Tpat_alias (d 2) nil))) cases)
+      (ty/ident-create default)))
+
+(defn- arg-to-var [arg cls] (if (= :Lvar (arg 0)) (arg 1) (name-pattern "*match*" cls)))
+
+(declare compile-match compile-match-nonempty do-compile-matching)
+
+(defn- compute-arg-partial [partial mut]
+  (if (and (= :following (:tempo partial)) mut) (assoc partial :global :partial) partial))
+
+(defn- bind-match-arg [kind v arg [lam jumps]]
+  [(bind-check kind v arg lam) (if (= :strictopt kind) (jumps-map ctx-erase-first-col jumps) jumps)])
+
+(defn- combine-handlers [partial ctx first-match rem]
+  (comp-match-handlers do-compile-matching partial ctx first-match rem))
+
+(defn compile-match [partial ctx m]
+  (let [cases (:cases m)]
+    (if (and (seq cases) (empty? (first (first cases))))
+      (let [action (second (first cases))]
+        (if (l/guarded? action)
+          (let [[lam total] (compile-match partial ctx (assoc m :cases (vec (rest cases))))]
+            [(l/patch-guarded lam action) total])
+          [action (jumps-empty :total)]))
+      (compile-match-nonempty partial ctx m))))
+
+(defn compile-match-nonempty [partial ctx m]
+  (if (and (empty? (:cases m)) (empty? (:args m)))
+    (or (comp-exit partial ctx (:default m)) (throw (ex-info "Matching: impossible empty matrix in a Total match" {})))
+    (let [{arg :arg kind :kind :as first-arg} (first (:args m))
+          v (arg-to-var arg (:cases m))]
+      (bind-match-arg kind v arg
+                      (let [args {:first (assoc first-arg :arg [:var v]) :rest (vec (rest (:args m)))}
+                            cases (mapv #(half-simplify [:Lvar v] %) (:cases m))
+                            [{first-match :me} rem] (split-or cases args (:default m))]
+                        (combine-handlers partial ctx first-match rem))))))
+
+(defn- compile-match-simplified [partial ctx m]
+  (let [[{first-match :me} rem] (split-no-or (:cases m) (:args m) (:default m) [])]
+    (combine-handlers partial ctx first-match rem)))
+
+(defn- compile-no-test [divide up-ctx partial ctx to-match]
+  (let [{this-match :pm this-ctx :ctx} (divide ctx to-match)
+        [lam total] (compile-match partial this-ctx this-match)]
+    [lam (jumps-map up-ctx total)]))
+
+(defn do-compile-matching [partial ctx pmh]
+  (case (pmh 0)
+    :pm (let [pmt (pmh 1)
+              fst (:first (:args pmt))
+              arg (arg-of-pure (:arg fst))
+              arg-partial (compute-arg-partial partial (:mut fst))
+              ph (what-is-cases true (:cases pmt))
+              d (:desc ph)
+              ctest (fn [divide combine] (compile-test (fn [c m] (compile-match partial c m)) arg-partial divide combine ctx pmt))]
+          (case (d 0)
+            :Any (compile-no-test divide-var ctx-rshift partial ctx pmt)
+            :Tuple (compile-no-test #(divide-tuple ph %1 %2) ctx-combine partial ctx pmt)
+            :Record (compile-no-test #(divide-record (ty/label-all (first (d 1))) ph %1 %2) ctx-combine partial ctx pmt)
+            :Constant (ctest divide-constant (fn [c dd cdiv] (combine-constant arg (d 1) arg-partial c dd cdiv)))
+            :Construct (ctest divide-constructor (fn [c dd cdiv] (combine-constructor arg (d 1) arg-partial c dd cdiv)))
+            (throw (ex-info (str "Matching: " (d 0) " patterns are outside the slice") {:ocaml-type-error "matching"}))))
+    :pmvar (let [[lam total] (do-compile-matching partial (ctx-lshift ctx) (pmh 1))] [lam (jumps-map ctx-rshift total)])
+    :pmor (let [{:keys [body handlers]} (pmh 1)
+                [lam total] (compile-match-simplified partial ctx body)]
+            (compile-orhandlers (fn [c m] (compile-match partial c m)) lam total ctx handlers))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Entry points
+
+(def ^:dynamic *match-failure* (fn [loc] (throw (ex-info "no Match_failure translator" {}))))
+
+(defn- failure-handler [loc failer]
+  (case (failer 0)
+    :reraise [:Lprim (l/praise :reraise) [(failer 1)]]
+    :match-failure (*match-failure* loc)))
+
+(defn- toplevel-handler [loc failer partial args cases compile-fun]
+  (let [final (l/next-raise-count)
+        d (def-empty final)
+        pmt {:args args :cases cases :default d}
+        partial (if (empty? cases) :partial partial)
+        partial {:current partial :global partial :tempo :first}
+        [lam jumps] (compile-fun partial pmt)]
+    (if (= :total (:partial jumps))
+      lam
+      [:Lstaticcatch lam [final []] (failure-handler loc failer)])))
+
+(defn- root-arg [arg kind] {:arg arg :kind kind :mut false})
+
+(defn compile-matching [loc failer arg pat-act-list partial]
+  (toplevel-handler loc failer partial [(root-arg arg :strict)] (mapv (fn [[p a]] [[p] a]) pat-act-list)
+                    (fn [partial pmt] (compile-match-nonempty partial (ctx-start 1) pmt))))
+
+(defn for-function [loc param pat-act-list partial]
+  (compile-matching loc [:match-failure] param pat-act-list partial))
+
+(defn for-trywith [loc param pat-act-list]
+  (compile-matching loc [:reraise param] param pat-act-list :partial))
+
+(defn simple-for-let [loc param pat body]
+  (compile-matching loc [:match-failure] param [[pat body]] :partial))
+
+(defn- map-return [f lam]
+  (case (lam 0)
+    :Llet [:Llet (lam 1) (lam 2) (lam 3) (lam 4) (map-return f (lam 5))]
+    :Lmutlet [:Lmutlet (lam 1) (lam 2) (lam 3) (map-return f (lam 4))]
+    :Lletrec [:Lletrec (lam 1) (map-return f (lam 2))]
+    :Lifthenelse [:Lifthenelse (lam 1) (map-return f (lam 2)) (map-return f (lam 3))]
+    :Lsequence [:Lsequence (lam 1) (map-return f (lam 2))]
+    :Ltrywith [:Ltrywith (map-return f (lam 1)) (lam 2) (map-return f (lam 3))]
+    :Lstaticcatch [:Lstaticcatch (map-return f (lam 1)) (lam 2) (map-return f (lam 3))]
+    :Lswitch (let [sw (lam 2) mc (fn [cs] (mapv (fn [[i x]] [i (map-return f x)]) cs))]
+               [:Lswitch (lam 1) (assoc sw :consts (mc (:consts sw)) :blocks (mc (:blocks sw))
+                                        :fail (when (:fail sw) (map-return f (:fail sw))))])
+    :Lstringswitch [:Lstringswitch (lam 1) (mapv (fn [[s x]] [s (map-return f x)]) (lam 2)) (when (lam 3) (map-return f (lam 3)))]
+    :Lstaticraise lam
+    :Lprim (if (= :raise (:kind (lam 1))) lam (f lam))
+    (f lam)))
+
+(defn- assign-pat [opt nraise catch-ids loc pat lam]
+  (letfn [(collect [acc pat lam]
+            (let [d (:desc pat)]
+              (cond
+                (and (= :Tpat_tuple (d 0)) (= :Lprim (lam 0)) (= :makeblock (:kind (lam 1))))
+                (do (reset! opt true) (reduce (fn [acc [[_ p] x]] (collect acc p x)) acc (map vector (d 1) (lam 2))))
+                (and (= :Tpat_tuple (d 0)) (= :Lconst (lam 0)) (= :block ((lam 1) 0)))
+                (do (reset! opt true) (reduce (fn [acc [[_ p] sc]] (collect acc p [:Lconst sc])) acc (map vector (d 1) ((lam 1) 2))))
+                :else (let [ids (pm/bound-idents pat)
+                            fresh (mapv (fn [id] [id (ty/ident-rename id)]) ids)]
+                        (cons [fresh (pm/alpha-pat (into {} fresh) pat) lam] acc)))))]
+    (let [rev-sublets (reverse (collect () pat lam))
+          tbl (into {} (mapcat first rev-sublets))
+          exit [:Lstaticraise nraise (mapv (fn [id] [:Lvar (get tbl id)]) catch-ids)]]
+      (reduce (fn [code [_ p lm]] (simple-for-let loc lm p code)) exit rev-sublets))))
+
+(defn for-let [loc param pat body]
+  (let [d (:desc pat)]
+    (case (d 0)
+      :Tpat_any [:Lsequence param body]
+      :Tpat_var [:Llet :strict (ty/value-kind (:type pat)) (d 1) param body]
+      (let [opt (atom false)
+            nraise (l/next-raise-count)
+            catch-ids (pm/bound-idents-full pat)
+            ids-kinds (mapv (fn [[id _ t]] [id (ty/value-kind t)]) catch-ids)
+            ids (mapv first catch-ids)
+            bnd (map-return #(assign-pat opt nraise ids loc pat %) param)]
+        (if @opt
+          [:Lstaticcatch bnd [nraise ids-kinds] body]
+          (simple-for-let loc param pat body))))))
+
+(defn- flatten-cases [size cases]
+  (mapv (fn [[row action]]
+          (let [p (first row) d (:desc p)
+                ps (case (d 0) :Tpat_tuple (mapv second (d 1)) :Tpat_any (pm/omegas size))]
+            [ps action]))
+        cases))
+
+(defn- flatten-pm [size args pmt]
+  {:args args :cases (flatten-cases size (:cases pmt)) :default (def-flatten size (:default pmt))})
+
+(defn- flatten-precompiled [size args pmh]
+  (case (pmh 0)
+    :pm [:fpm (flatten-pm size args (pmh 1))]
+    :pmor (let [{:keys [body handlers]} (pmh 1)]
+            [:fpmor {:body (flatten-pm size args body)
+                     :handlers (mapv #(update % :provenance (fn [m] (flatten-matrix size m))) handlers)}])))
+
+(defn- compile-flattened [partial ctx pmh]
+  (case (pmh 0)
+    :fpm (compile-match-nonempty partial ctx (pmh 1))
+    :fpmor (let [{:keys [body handlers]} (pmh 1)
+                 [lam total] (compile-match-nonempty partial ctx body)]
+             (compile-orhandlers (fn [c m] (compile-match partial c m)) lam total ctx handlers))))
+
+(defn- do-for-multiple-match [loc idl pat-act-list partial]
+  (let [arg [:Lprim (l/pmakeblock 0 false nil) (mapv (fn [id] [:Lvar id]) idl)]
+        input-args {:first (assoc (root-arg [:tuple arg] :strict) :arg [:tuple arg]) :rest []}]
+    (toplevel-handler loc [:match-failure] partial input-args (mapv (fn [[p a]] [[p] a]) pat-act-list)
+                      (fn [partial pm1]
+                        (let [pm1h (assoc pm1 :cases (mapv #(half-simplify arg %) (:cases pm1)))
+                              [{nxt :me} nexts] (split-or (:cases pm1h) (:args pm1h) (:default pm1h))
+                              size (count idl)
+                              args (mapv (fn [id] (root-arg [:Lvar id] :alias)) idl)]
+                          (comp-match-handlers compile-flattened partial (ctx-start size)
+                                               (flatten-precompiled size args nxt)
+                                               (mapv (fn [[e pmh]] [e (flatten-precompiled size args pmh)]) nexts)))))))
+
+(defn for-multiple-match [loc paraml pat-act-list partial]
+  (let [vps (mapv (fn [p] (if (= :Lvar (p 0)) [(p 1) nil] [(ty/ident-create "*match*") p])) paraml)]
+    (reduce (fn [k [v e]] (if e (l/bind :strict v e k) k))
+            (do-for-multiple-match loc (mapv first vps) pat-act-list partial)
+            (reverse vps))))
+
+(defn for-optional-arg-default [loc pat default-arg param body]
+  (for-let loc [:Lifthenelse [:Lvar param] [:Lprim (l/pfield 0 :pointer false) [[:Lvar param]]] default-arg] pat body))
+
+(defn name-pattern*
+  "Typecore.name_pattern over patterns: the first variable or alias names the argument, else a fresh default"
+  [default pats]
+  (or (some (fn [p] (let [d (:desc p)] (case (d 0) :Tpat_var (d 1) :Tpat_alias (d 2) nil))) pats)
+      (ty/ident-create default)))

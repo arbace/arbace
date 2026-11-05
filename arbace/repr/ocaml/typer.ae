@@ -1,0 +1,151 @@
+(ns arbace.repr.ocaml.typer
+  "oi's native front end (doc/ocaml/TYPER.md): OCaml text read by the native reader, typed by Arbace's port of
+  OCaml 5.5.0's typing/ (arbace.repr.ocaml.typer.*) and translated to Lambda by its port of lambda/'s Translcore
+  and Matching, written as the oracle tools/ocdump writes `--mode lambda` (the raw translation, before Simplif) and
+  the signature as `--mode types` prints it. Run as -m arbace.repr.ocaml.typer VERB ...:
+
+    types --file NAME FILE              the signature (Printtyp's text), as (ocaml/typed SIG [] {...})
+    lambda --file NAME FILE             the Lambda program, as (ocaml/lambda (lambda-program ...) {...})
+    check --dir DIR --oracle ODIR [--report FILE] NAME...
+                                        typer-check: each sample DIR/NAME.ml typed and translated, its signature
+                                        against ODIR/NAME.types' and its Lambda against ODIR/NAME.lambda's (equal
+                                        up to the identifiers' stamps and the static exits' numbers, both renamed
+                                        in order of appearance), the Lambda written to ODIR/../native/NAME.ae"
+  (:require [arbace.repr.ocaml.typer.types :as ty]
+            [arbace.repr.ocaml.typer.env :as env]
+            [arbace.repr.ocaml.typer.typecore :as tc]
+            [arbace.repr.ocaml.typer.translcore :as tr]
+            [arbace.repr.ocaml.typer.lambda :as lam]
+            [arbace.repr.ocaml.parser :as parser]
+            [arbace.string :as str])
+  (:import [java.io File]))
+
+(set! *warn-on-reflection* false)
+
+;; ---------------------------------------------------------------------------------------------
+;; The signature as Printtyp prints it
+
+(defn- decl-text [first? [name _ decl]]
+  (let [params (:params decl)
+        names (into {} (map (fn [p] [(ty/repr p) (str "'" (or ((ty/desc p) 1) "a"))]) params))
+        tt (fn [t prec] (ty/type-text names t prec))
+        head (str (if first? "type " "and ")
+                  (case (count params) 0 "" 1 (str (tt (first params) 0) " ")
+                        (str "(" (str/join ", " (map #(tt % 0) params)) ") "))
+                  name)
+        man (when (:manifest decl) (tt (:manifest decl) 0))
+        k (:kind decl)
+        cstr (fn [c] (if (empty? (:args c)) (:name c) (str (:name c) " of " (str/join " * " (map #(tt % 2) (:args c))))))
+        fld (fn [l] (str (when (:mut l) "mutable ") (:name l) " : " (tt (:type l) 0) ";"))]
+    (case (k 0)
+      :abstract (if man (str head " = " man) head)
+      :open (str head " = ..")
+      :variant (let [pre (str head " =" (when man (str " " man " =")))
+                     one (str pre " " (str/join " | " (map cstr (k 1))))]
+                 (if (<= (count one) 77)
+                   one
+                   (str pre "\n" (str/join "\n" (map-indexed (fn [i c] (str (if (zero? i) "    " "  | ") (cstr c))) (k 1))))))
+      :record (let [pre (str head " =" (when man (str " " man " =")))
+                    one (str pre " { " (str/join " " (map fld (k 1))) " }")]
+                (if (<= (count one) 77)
+                  one
+                  (str pre " {\n" (str/join "\n" (map #(str "  " (fld %)) (k 1))) "\n}"))))))
+
+(defn signature-text [sig]
+  (str/join "\n"
+            (mapcat (fn [item]
+                      (case (item 0)
+                        :val [(str "val " (let [n (item 1)] (if (re-matches #"[a-z_][A-Za-z0-9_']*" n) n (str "( " n " )")))
+                                   " : " (ty/type-scheme-text (item 3)))]
+                        :type (map-indexed (fn [i d] (decl-text (zero? i) d)) (item 1))
+                        :exn (let [c (item 3) names (atom {})]
+                               [(str "exception " (item 1)
+                                     (when (seq (:args c))
+                                       (str " of " (str/join " * " (ty/types-text-prec (:args c) 2)))))])))
+                    sig)))
+
+;; ---------------------------------------------------------------------------------------------
+;; The pipeline
+
+(defn- read-bytes ^bytes [^String path] (java.nio.file.Files/readAllBytes (.toPath (File. path))))
+
+(defn unit-name [^String fname]
+  (let [b (.getName (File. fname)) b (if (str/ends-with? b ".ml") (subs b 0 (- (count b) 3)) b)]
+    (str (str/upper-case (subs b 0 1)) (subs b 1))))
+
+(defn compile-file
+  "{:sig text :lambda form} of a file, or throws"
+  [^String path ^String fname]
+  (ty/reset-stamps!)
+  (binding [ty/*find-type* env/find-decl ty/*path-name* env/path-name]
+    (let [r (parser/parse (read-bytes path) fname :impl)
+          _ (when-not (= :ok (first r)) (env/type-error (str "syntax error: " (nth r 2))))
+          uname (unit-name fname)
+          [items sig _] (tc/type-structure (env/initial-env) (second r) uname)
+          stext (signature-text sig)]
+      {:sig stext :lambda (tr/transl-implementation uname items sig)})))
+
+(defn- typed-text [s fname]
+  (str "(ocaml/typed\n " (pr-str s) "\n []\n {:file " (pr-str fname) " :ocaml \"5.5.0\"})\n"))
+
+(defn- parse-args [args with-value]
+  (loop [as args opts {} pos []]
+    (if (empty? as)
+      {:opts opts :args pos}
+      (let [[a & more] as]
+        (cond (contains? with-value a) (recur (rest more) (assoc opts a (first more)) pos)
+              (str/starts-with? a "--") (recur more (assoc opts a true) pos)
+              :else (recur more opts (conj pos a)))))))
+
+(defn- with-stdlib [opts f]
+  (binding [env/*stdlib-dir* (or (get opts "--stdlib") env/*stdlib-dir*)] (f)))
+
+(defn- do-types [{:keys [opts args]}]
+  (with-stdlib opts
+    #(let [f (first args) fname (or (get opts "--file") f)]
+       (print (typed-text (:sig (compile-file f fname)) fname)) (flush))))
+
+(defn- do-lambda [{:keys [opts args]}]
+  (with-stdlib opts
+    #(let [f (first args) fname (or (get opts "--file") f)]
+       (print (lam/program-text (:lambda (compile-file f fname)) fname)) (flush))))
+
+(defn- oracle-sig [^String text]
+  (second (read-string text)))
+
+(defn- do-check [{:keys [opts args]}]
+  (with-stdlib opts
+    #(let [dir (get opts "--dir") odir (get opts "--oracle") ndir (get opts "--out")
+           results (atom [])]
+       (doseq [n args]
+         (let [fname (str n ".ml")
+               r (try (compile-file (str dir "/" fname) fname)
+                      (catch Throwable t {:error (str (.getMessage t))}))
+               osig (oracle-sig (slurp (str odir "/" n ".types")))
+               olam (read-string (slurp (str odir "/" n ".lambda")))
+               types-ok (= (:sig r) osig)
+               mine (when (:lambda r) (read-string (lam/program-text (:lambda r) fname)))
+               lam-ok (and mine (= (lam/canonical mine) (lam/canonical olam)))]
+           (when (and ndir (:lambda r))
+             (.mkdirs (File. ^String ndir))
+             (spit (str ndir "/" (unit-name fname) ".ae") (lam/program-text (:lambda r) fname)))
+           (swap! results conj {:name n :types types-ok :lambda (boolean lam-ok) :error (:error r)})
+           (println (format "%-22s types %-4s lambda %-4s%s" n (if types-ok "ok" "DIFF") (if lam-ok "ok" "DIFF")
+                            (if (:error r) (str "  error: " (:error r))
+                                (if types-ok "" (str "\n   mine:   " (pr-str (:sig r)) "\n   oracle: " (pr-str osig))))))
+           (when (and mine (not lam-ok) (get opts "--diff"))
+             (println (lam/first-difference (lam/canonical olam) (lam/canonical mine))))))
+       (let [rs @results
+             t (count (filter :types rs)) l (count (filter :lambda rs))]
+         (println (str "typer-check: " (count rs) " samples: types equal " t ", Lambda equal " l))
+         (when-let [rep (get opts "--report")] (spit rep (pr-str rs)))
+         (System/exit (if (and (= t (count rs)) (= l (count rs))) 0 1))))))
+
+(defn -main [& args]
+  (let [[verb & more] args
+        pa (fn [wv] (parse-args more wv))]
+    (case verb
+      "types" (do-types (pa #{"--file" "--stdlib"}))
+      "lambda" (do-lambda (pa #{"--file" "--stdlib"}))
+      "check" (do-check (pa #{"--dir" "--oracle" "--report" "--stdlib" "--out"}))
+      (do (println "usage: -m arbace.repr.ocaml.typer types|lambda|check ...") (System/exit 2)))))

@@ -1,0 +1,573 @@
+;; Ported from OCaml 5.5.0 (the release tarball, SHA-256 fcc6ae665d1ec51d52510eaac7834a86a9806bf5a258bb7cca78733fccf015ba):
+;; of lambda/lambda.ml the helpers the translation uses (bind, make_key, staticfail, is_guarded, patch_guarded,
+;; next_raise_count), lambda/switch.ml (the Switcher: stores of actions, interval tests and jump tables, its cost
+;; heuristics) and lambda/printlambda.ml's names of the primitives and kinds, whose notices follow (LICENSE.md, "The
+;; OCaml Core System"):
+;;
+;;                                 OCaml
+;;
+;;             Xavier Leroy, projet Cristal, INRIA Rocquencourt
+;;            Luc Maranget, projet Moscova, INRIA Rocquencourt
+;;
+;;   Copyright 1996 Institut National de Recherche en Informatique et
+;;     en Automatique.
+;;
+;;   All rights reserved.  This file is distributed under the terms of
+;;   the GNU Lesser General Public License version 2.1, with the
+;;   special exception on linking described in the file LICENSE.
+
+(ns arbace.repr.ocaml.typer.lambda
+  "Lambda as Arbace data (doc/ocaml/TYPER.md, T4): a node is a vector [:Lvar id] [:Lmutvar id] [:Lconst c]
+  [:Lapply f [arg]] [:Lfunction kind [[id vk]] vk body] [:Llet kind vk id def body] [:Lmutlet vk id def body]
+  [:Lletrec [[id fn]] body] [:Lprim prim [arg]] [:Lswitch arg sw] [:Lstringswitch arg [[s l]] default]
+  [:Lstaticraise n [arg]] [:Lstaticcatch body [n [[id vk]]] handler] [:Ltrywith body id handler] [:Lifthenelse c a
+  b] [:Lsequence a b] [:Lwhile c b] [:Lfor id lo hi dir body] [:Lassign id e]; a primitive {:name NAME :kind K}
+  (NAME as Printlambda prints it); a value kind the printed one (\"\", \"[int]\"...); a structured constant [:int n]
+  [:char n] [:string s] [:float s] [:int32 n] [:int64 n] [:nativeint n] [:block tag [c]] [:float-array [s]].
+  The program text is tools/ocdump's `--mode lambda` (SPEC.md §11.2)."
+  (:require [arbace.repr.ocaml.typer.types :as ty]
+            [arbace.string :as str]))
+
+(set! *warn-on-reflection* false)
+
+;; ---------------------------------------------------------------------------------------------
+;; Primitives (printlambda.ml)
+
+(defn prim [name & [kind extra]] (merge {:name name :kind (or kind :other)} extra))
+
+(defn field-name [n ptr mut]
+  (str (cond (= ptr :immediate) "field_int " mut "field_mut " :else "field_imm ") n))
+(defn pfield [n ptr mut] (prim (field-name n ptr mut) :field {:pos n}))
+(defn block-shape [shape]
+  (if (or (empty? shape) (every? #(= "" %) shape))
+    ""
+    (str " (" (str/join "," (map #(case % "" "*" "[int]" "int" "[float]" "float" "[int32]" "int32" "[int64]" "int64"
+                                      "[nativeint]" "nativeint")
+                                 shape)) ")")))
+(defn pmakeblock [tag mut shape] (prim (str (if mut "makemutable " "makeblock ") tag (block-shape shape)) :makeblock))
+(defn psetfield [n ptr] (prim (str "setfield_" (if (= ptr :immediate) "imm" "ptr") " " n)))
+(defn pgetglobal [id] (prim (str "global " (ty/ident-print id)) :getglobal))
+(defn psetglobal [id] (prim (str "setglobal " (ty/ident-print id))))
+(defn praise [k] (prim (case k :regular "raise" :reraise "reraise" :notrace "raise_notrace") :raise))
+(defn pccall [name] (prim name :ccall))
+(def pintcomp-names {:eq "==" :ne "!=" :lt "<" :le "<=" :gt ">" :ge ">="})
+(defn pintcomp [c] (prim (pintcomp-names c)))
+(defn poffsetint [n] (prim (str n "+")))
+
+;; ---------------------------------------------------------------------------------------------
+;; Constructors and helpers (lambda.ml)
+
+(def lambda-unit [:Lconst [:int 0]])
+(defn lconst-int [n] [:Lconst [:int n]])
+(def staticfail [:Lstaticraise 0 []])
+
+(def raise-count (atom 0))
+(defn reset-exits! [] (reset! raise-count 0))
+(defn next-raise-count [] (swap! raise-count inc))
+
+(defn bind-with-value-kind [kind [v vk] e body]
+  (if (and (= :Lvar (e 0)) (= (e 1) v)) body [:Llet kind vk v e body]))
+(defn bind [kind v e body] (bind-with-value-kind kind [v ""] e body))
+
+(defn guarded? [l]
+  (case (l 0)
+    :Lifthenelse (= (l 3) staticfail)
+    :Llet (recur (l 5))
+    false))
+
+(defn patch-guarded [patch l]
+  (case (l 0)
+    :Lifthenelse [:Lifthenelse (l 1) (l 2) patch]
+    :Llet [:Llet (l 1) (l 2) (l 3) (l 4) (patch-guarded patch (l 5))]))
+
+(def max-raw 32)
+
+(defn make-key
+  "Lambda.make_key: the action's key, let-bound names normalized and aliases substituted, or nil when it is not
+  simple (functions, loops, too big)"
+  [e]
+  (let [cnt (atom 0) keys (atom 0)]
+    (letfn [(tr [env e]
+              (swap! cnt inc)
+              (when (> @cnt max-raw) (throw (ex-info "not simple" {::not-simple true})))
+              (case (e 0)
+                (:Lvar :Lmutvar) (get env (e 1) e)
+                :Lconst e
+                :Lapply [:Lapply (tr env (e 1)) (mapv #(tr env %) (e 2))]
+                :Llet (cond
+                        (= :alias (e 1)) (let [ex (tr env (e 4))] (tr (assoc env (e 3) ex) (e 5)))
+                        (and (#{:strict :strictopt} (e 1)) (= [:Lvar (e 3)] (e 5))) (tr env (e 4))
+                        :else (let [ex (tr env (e 4)) y {:name "key" :stamp (swap! keys inc) :key true}]
+                                [:Llet (e 1) (e 2) y ex (tr (assoc env (e 3) [:Lvar y]) (e 5))]))
+                :Lmutlet (let [ex (tr env (e 3)) y {:name "key" :stamp (swap! keys inc) :key true}]
+                           [:Lmutlet (e 1) y ex (tr (assoc env (e 2) [:Lmutvar y]) (e 4))])
+                :Lprim [:Lprim (e 1) (mapv #(tr env %) (e 2))]
+                :Lswitch (let [sw (e 2)]
+                           [:Lswitch (tr env (e 1))
+                            (assoc sw :consts (mapv (fn [[i x]] [i (tr env x)]) (:consts sw))
+                                   :blocks (mapv (fn [[i x]] [i (tr env x)]) (:blocks sw))
+                                   :fail (when (:fail sw) (tr env (:fail sw))))])
+                :Lstringswitch [:Lstringswitch (tr env (e 1)) (mapv (fn [[s x]] [s (tr env x)]) (e 2))
+                                (when (e 3) (tr env (e 3)))]
+                :Lstaticraise [:Lstaticraise (e 1) (mapv #(tr env %) (e 2))]
+                :Lstaticcatch [:Lstaticcatch (tr env (e 1)) (e 2) (tr env (e 3))]
+                :Ltrywith [:Ltrywith (tr env (e 1)) (e 2) (tr env (e 3))]
+                :Lifthenelse [:Lifthenelse (tr env (e 1)) (tr env (e 2)) (tr env (e 3))]
+                :Lsequence [:Lsequence (tr env (e 1)) (tr env (e 2))]
+                :Lassign [:Lassign (e 1) (tr env (e 2))]
+                (throw (ex-info "not simple" {::not-simple true}))))]
+      (try (tr {} e)
+           (catch arbace.lang.ExceptionInfo x (if (::not-simple (ex-data x)) nil (throw x)))))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Switch.Store
+
+(defn mk-store
+  "Switch.Store with Lambda.make_key: an atom {:map key->[shared i] :acts [[mustshare act]...]}"
+  []
+  (atom {:map {} :acts []}))
+
+(defn- store-add! [st must act]
+  (let [i (count (:acts @st))] (swap! st update :acts conj [must act]) i))
+
+(defn act-store!
+  ([st act] (act-store! st false act))
+  ([st must act]
+   (if-let [k (make-key act)]
+     (if-let [[shared i] (get (:map @st) k)]
+       (do (when-not shared (swap! st assoc-in [:map k] [true i])) i)
+       (let [i (store-add! st must act)] (swap! st assoc-in [:map k] [must i]) i))
+     (store-add! st must act))))
+(defn act-store-shared! [st act] (act-store! st true act))
+(defn act-get [st] (mapv second (:acts @st)))
+(defn act-get-shared
+  "[[:shared act] | [:single act]...]"
+  [st]
+  (let [acts (mapv (fn [[sh a]] [(if sh :shared :single) a]) (:acts @st))]
+    (reduce (fn [acts [_ [sh i]]] (if sh (assoc acts i [:shared (second (acts i))]) acts)) acts (:map @st))))
+
+;; ---------------------------------------------------------------------------------------------
+;; The static catches of shared actions (matching.ml's make_catch_delayed, make_exit)
+
+(defn make-exit [i] [:Lstaticraise i []])
+
+(defn as-simple-exit [l]
+  (case (l 0)
+    :Lstaticraise (when (empty? (l 2)) (l 1))
+    :Llet (when (= :alias (l 1)) (recur (l 5)))
+    nil))
+
+(defn make-catch-delayed [handler]
+  (if-let [i (as-simple-exit handler)]
+    [i identity]
+    (let [i (next-raise-count)]
+      [i (fn [body]
+           (if (= :Lstaticraise (body 0))
+             (if (= i (body 1)) handler body)
+             [:Lstaticcatch body [i []] handler]))])))
+
+;; ---------------------------------------------------------------------------------------------
+;; The switcher (switch.ml's Make with matching.ml's SArg)
+
+(defn- sarg-bind [arg body]
+  (if (= :Lvar (arg 0))
+    (body arg)
+    (let [v (ty/ident-create "switcher")] (bind :alias v arg (body [:Lvar v])))))
+(defn- make-offset [arg n] (if (zero? n) arg [:Lprim (poffsetint n) [arg]]))
+(defn- make-isout [h arg] [:Lprim (prim "isout") [h arg]])
+(defn- make-isin [h arg] [:Lprim (prim "not") [(make-isout h arg)]])
+(defn- make-if [c a b] [:Lifthenelse c a b])
+
+(defn- sarg-make-switch [arg cases acts]
+  (let [acts (atom (vec acts))
+        uses (frequencies cases)
+        wrapper (atom identity)]
+    (doseq [j (range (count @acts))]
+      (when (> (get uses j 0) 1)
+        (let [[nfail wrap] (make-catch-delayed (@acts j))
+              prev @wrapper]
+          (swap! acts assoc j (make-exit nfail))
+          (reset! wrapper (fn [lam] (wrap (prev lam)))))))
+    (@wrapper [:Lswitch arg {:numconsts (count cases) :consts (vec (map-indexed (fn [i c] [i (@acts c)]) cases))
+                             :numblocks 0 :blocks [] :fail nil}])))
+
+(defn- too-much [] [Long/MAX_VALUE Long/MAX_VALUE])
+(defn- less-tests [[n1 ni1] [n2 ni2]] (or (< n1 n2) (and (= n1 n2) (< ni1 ni2))))
+(defn- less2tests [[c1 d1] [c2 d2]] (if (= c1 c2) (less-tests d1 d2) (less-tests c1 c2)))
+(defn- add-test [[a b] [c d]] [(+ a c) (+ b d)])
+
+(defn- coupe [cases i] [((cases i) 0) (subvec cases 0 i) (subvec cases i)])
+
+(defn- case-append [c1 c2]
+  (let [l1n (count c1) l2n (count c2)]
+    (cond
+      (zero? l1n) c2
+      (zero? l2n) c1
+      :else
+      (let [[l1 h1 a1] (c1 (dec l1n)) [l2 h2 a2] (c2 0)]
+        (cond
+          (= a1 a2) (let [l (if (< l1n 2) l1 (min (inc ((c1 (- l1n 2)) 1)) l1))
+                          h (if (< l2n 2) h2 (max h2 (dec ((c2 1) 0))))]
+                      (vec (concat (subvec c1 0 (dec l1n)) [[l h a1]] (subvec c2 1))))
+          (> h1 l1) (vec (concat (subvec c1 0 (dec l1n)) [[l1 (dec l2) a1]] c2))
+          (> h2 l2) (vec (concat c1 [[(inc h1) h2 a2]] (subvec c2 1)))
+          :else (vec (concat c1 c2)))))))
+
+(defn- coupe-inter [i j cases]
+  (let [n (count cases) [low _ _] (cases i) [_ high _] (cases j)]
+    [low high (subvec cases i (inc j)) (case-append (subvec cases 0 i) (subvec cases (inc j) n))]))
+
+(def ^:private ok-inter (atom false))
+(def ^:private opt-table (atom {}))
+
+(defn- switch-key [cases]
+  (let [seen (atom []) cnt (atom 0)
+        got (fn [act] (or (some (fn [[a i]] (when (= a act) i)) @seen)
+                          (let [r @cnt] (swap! seen conj [act r]) (swap! cnt inc) r)))
+        one (fn [l h act] (if (= l h) [:v (got act)] [:i (got act)]))
+        n (count cases)
+        [l h act] (cases (dec n))
+        first-k (one l h act)]
+    (loop [i (- n 2) pl l acc [first-k]]
+      (if (neg? i)
+        acc
+        (let [[l h act] (cases i)]
+          (if (= pl (inc h))
+            (recur (dec i) l (conj acc (one l h act)))
+            (recur (dec i) l (conj acc :empty (one l h act)))))))))
+
+(defn- same-act [cases] (apply = (map #(% 2) cases)))
+
+(declare opt-count)
+
+(defn- sw-divide [cases]
+  (let [m (quot (count cases) 2)
+        [_ left right] (coupe cases m)
+        [_ [cml cleft]] (opt-count left)
+        [_ [cmr cright]] (opt-count right)
+        ci (add-test (add-test [1 0] cleft) cright)
+        cm (if (less-tests cml cmr) (add-test [1 0] cmr) (add-test [1 0] cml))]
+    [[:sep m] [cm ci]]))
+
+(defn- sw-heuristic [cases]
+  (let [n (count cases)
+        [sep csep] (sw-divide cases)
+        [inter cinter]
+        (if @ok-inter
+          (let [a0 ((cases 0) 2) a1 ((cases (dec n)) 2)]
+            (if (= a0 a1)
+              (let [[low high inside outside] (coupe-inter 1 (- n 2) cases)
+                    [_ [cmi cinside]] (opt-count inside)
+                    [_ [cmo coutside]] (opt-count outside)
+                    base [1 (if (= low high) 0 1)]
+                    cij (add-test (add-test base cinside) coutside)
+                    cmij (if (less-tests cmi cmo) (add-test base cmo) (add-test base cmi))]
+                [[:inter 1 (- n 2)] [cmij cij]])
+              [[:inter -1 -1] [(too-much) (too-much)]]))
+          [[:inter -1 -1] [(too-much) (too-much)]])]
+    (if (less2tests csep cinter) [sep csep] [inter cinter])))
+
+(defn- sw-enum [cases]
+  (let [n (count cases)
+        [lim with-sep]
+        (loop [i 1 best -1 bc [(too-much) (too-much)]]
+          (if (> i (dec n))
+            [best bc]
+            (let [[_ left right] (coupe cases i)
+                  [_ [cml cleft]] (opt-count left)
+                  [_ [cmr cright]] (opt-count right)
+                  ci (add-test (add-test [1 0] cleft) cright)
+                  cm (if (less-tests cml cmr) (add-test [1 0] cmr) (add-test [1 0] cml))]
+              (if (less2tests [cm ci] bc) (recur (inc i) i [cm ci]) (recur (inc i) best bc)))))
+        [ilow ihigh with-inter]
+        (if-not @ok-inter
+          (loop [i 1 rl -1 rh -1 bc [(too-much) (too-much)]]
+            (if (> i (- n 2))
+              [rl rh bc]
+              (let [[low high inside outside] (coupe-inter i i cases)]
+                (if (= low high)
+                  (let [[_ [cmi cinside]] (opt-count inside)
+                        [_ [cmo coutside]] (opt-count outside)
+                        cij (add-test (add-test [1 0] cinside) coutside)
+                        cmij (if (less-tests cmi cmo) (add-test [1 0] cmo) (add-test [1 0] cmi))]
+                    (if (less2tests [cmij cij] bc) (recur (inc i) i i [cmij cij]) (recur (inc i) rl rh bc)))
+                  (recur (inc i) rl rh bc)))))
+          (let [best (atom [-1 -1 [(too-much) (too-much)]])]
+            (doseq [i (range 1 (- n 1)) j (range i (- n 1))]
+              (let [[low high inside outside] (coupe-inter i j cases)
+                    [_ [cmi cinside]] (opt-count inside)
+                    [_ [cmo coutside]] (opt-count outside)
+                    base [1 (if (= low high) 0 1)]
+                    cij (add-test (add-test base cinside) coutside)
+                    cmij (if (less-tests cmi cmo) (add-test base cmo) (add-test base cmi))]
+                (when (less2tests [cmij cij] (nth @best 2)) (reset! best [i j [cmij cij]]))))
+            @best))]
+    (if (less2tests with-sep with-inter) [[:sep lim] with-sep] [[:inter ilow ihigh] with-inter])))
+
+(defn- opt-count [cases]
+  (let [k (switch-key cases)]
+    (or (get @opt-table k)
+        (let [n (count cases)
+              r (cond (same-act cases) [[:no] [[0 0] [0 0]]]
+                      (< n 8) (sw-enum cases)
+                      (< n 16) (sw-heuristic cases)
+                      :else (sw-divide cases))]
+          (swap! opt-table assoc k r)
+          r))))
+
+(defn- make-if-test [test arg i ifso ifnot] (make-if [:Lprim (pintcomp test) [arg (lconst-int i)]] ifso ifnot))
+(defn- make-if-lt [arg i ifso ifnot] (if (= i 1) (make-if-test :le arg 0 ifso ifnot) (make-if-test :lt arg i ifso ifnot)))
+(defn- make-if-ge [arg i ifso ifnot] (if (= i 1) (make-if-test :gt arg 0 ifso ifnot) (make-if-test :ge arg i ifso ifnot)))
+
+(defn- make-if-out [ctx l d mk-ifso mk-ifno]
+  (if (zero? l)
+    (make-if (make-isout (lconst-int d) (:arg ctx)) (mk-ifso ctx) (mk-ifno ctx))
+    (sarg-bind (make-offset (:arg ctx) (- l))
+               (fn [arg] (let [ctx {:off (+ (- l) (:off ctx)) :arg arg}]
+                           (make-if (make-isout (lconst-int d) arg) (mk-ifso ctx) (mk-ifno ctx)))))))
+
+(defn- make-if-in [ctx l d mk-ifso mk-ifno]
+  (if (zero? l)
+    (make-if (make-isin (lconst-int d) (:arg ctx)) (mk-ifso ctx) (mk-ifno ctx))
+    (sarg-bind (make-offset (:arg ctx) (- l))
+               (fn [arg] (let [ctx {:off (+ (- l) (:off ctx)) :arg arg}]
+                           (make-if (make-isin (lconst-int d) arg) (mk-ifso ctx) (mk-ifno ctx)))))))
+
+(defn- c-test [ctx {:keys [cases actions] :as s}]
+  (let [n (count cases)]
+    (if (= n 1)
+      ((actions ((cases 0) 2)) ctx)
+      (let [[w _] (opt-count cases)]
+        (case (w 0)
+          :no ((actions ((cases 0) 2)) ctx)
+          :inter (let [[_ i j] w
+                       [low high inside outside] (coupe-inter i j cases)
+                       [_ [cinside _]] (opt-count inside)
+                       [_ [coutside _]] (opt-count outside)]
+                   (if (= low high)
+                     (if (less-tests coutside cinside)
+                       (make-if-test :eq (:arg ctx) (+ low (:off ctx)) (c-test ctx (assoc s :cases inside))
+                                     (c-test ctx (assoc s :cases outside)))
+                       (make-if-test :ne (:arg ctx) (+ low (:off ctx)) (c-test ctx (assoc s :cases outside))
+                                     (c-test ctx (assoc s :cases inside))))
+                     (if (less-tests coutside cinside)
+                       (make-if-in ctx (+ low (:off ctx)) (- high low)
+                                   #(c-test % (assoc s :cases inside)) #(c-test % (assoc s :cases outside)))
+                       (make-if-out ctx (+ low (:off ctx)) (- high low)
+                                    #(c-test % (assoc s :cases outside)) #(c-test % (assoc s :cases inside))))))
+          :sep (let [i (w 1)
+                     [lim left right] (coupe cases i)
+                     [_ [cleft _]] (opt-count left)
+                     [_ [cright _]] (opt-count right)
+                     ls (assoc s :cases left) rs (assoc s :cases right)]
+                 (cond
+                   (and (= i 1) (= 1 (+ lim (:off ctx))) (= 0 (+ ((cases 0) 0) (:off ctx))))
+                   (if (and (= n 2) (= 1 (+ ((cases 1) 1) (:off ctx))))
+                     (make-if (:arg ctx) (c-test ctx rs) (c-test ctx ls))
+                     (make-if (:arg ctx) (c-test ctx rs) (c-test ctx ls)))
+                   (less-tests cright cleft) (make-if-lt (:arg ctx) (+ lim (:off ctx)) (c-test ctx ls) (c-test ctx rs))
+                   :else (make-if-ge (:arg ctx) (+ lim (:off ctx)) (c-test ctx rs) (c-test ctx ls)))))))))
+
+(defn- particular-case [cases i j]
+  (and (= 2 (- j i))
+       (let [[l1 _ a1] (cases i) [l2 _ _] (cases (inc i)) [l3 h3 a3] (cases (+ i 2))]
+         (and (= (inc l1) l2) (= (inc l2) l3) (= l3 h3) (not= a1 a3)))))
+
+(defn- approx-count [cases i j]
+  (let [l (inc (- j i))]
+    (if (< l 8)
+      (let [[_ [_ [ntests _]]] (opt-count (subvec cases i (+ i l)))] ntests)
+      (dec l))))
+
+(defn- dense [{:keys [cases]} i j]
+  (if (= i j)
+    true
+    (let [[l _ _] (cases i) [_ h _] (cases j) ntests (approx-count cases i j)]
+      (or (particular-case cases i j)
+          (and (>= ntests 3) (>= (+ (double ntests) 1.0) (* 0.33333 (+ (- (double h) (double l)) 1.0))))))))
+
+(defn- comp-clusters [s]
+  (let [n (count (:cases s))
+        mins (atom (vec (repeat n Long/MAX_VALUE)))
+        k (atom (vec (repeat n 0)))
+        get-min (fn [i] (if (neg? i) 0 (@mins i)))]
+    (doseq [i (range n) j (range (inc i))]
+      (when (and (dense s j i) (< (inc (get-min (dec j))) (@mins i)))
+        (swap! k assoc i j)
+        (swap! mins assoc i (inc (get-min (dec j))))))
+    [(@mins (dec n)) @k]))
+
+(defn- make-switch-fn [{:keys [cases actions]} i j]
+  (let [[ll _ _] (cases i) [_ hh _] (cases j)
+        index (atom {}) order (atom [])
+        get-index (fn [act] (or (get @index act) (let [n (count @order)] (swap! index assoc act n) (swap! order conj act) n)))
+        tbl (atom (vec (repeat (inc (- hh ll)) 0)))]
+    (doseq [kk (range i (inc j))]
+      (let [[l h act] (cases kk) idx (get-index act)]
+        (doseq [x (range (- l ll) (inc (- h ll)))] (swap! tbl assoc x idx))))
+    (let [acts (mapv #(actions %) @order)]
+      (fn [ctx]
+        (let [off (- (- ll) (:off ctx))]
+          (if (zero? off)
+            (sarg-make-switch (:arg ctx) @tbl acts)
+            (sarg-bind (make-offset (:arg ctx) off) (fn [arg] (sarg-make-switch arg @tbl acts)))))))))
+
+(defn- make-clusters [{:keys [cases actions] :as s} nclusters k]
+  (let [n (count cases)
+        r (atom (vec (repeat nclusters [0 0 0])))
+        index (atom {}) acts (atom [])
+        get-index (fn [act] (or (get @index act)
+                                (let [i (count @acts)] (swap! index assoc act i) (swap! acts conj (fn [_] (actions act))) i)))
+        add-index (fn [f] (let [i (count @acts)] (swap! acts conj f) i))]
+    (loop [j (dec n) ir (dec nclusters)]
+      (let [i (k j)]
+        (if (= i j)
+          (let [[l h act] (cases i)] (swap! r assoc ir [l h (get-index act)]))
+          (let [[l _ _] (cases i) [_ h _] (cases j)]
+            (swap! r assoc ir [l h (add-index (make-switch-fn s i j))])))
+        (when (> i 0) (recur (dec i) (dec ir)))))
+    ;; the actions' functions; the inner action functions take the ctx (jump tables do)
+    {:cases @r :actions @acts}))
+
+(defn- abstract-shared [actions]
+  (let [handlers (atom identity)
+        acts (mapv (fn [[k act]]
+                     (if (= k :single)
+                       act
+                       (let [[i h] (make-catch-delayed act) oh @handlers]
+                         (reset! handlers (fn [a] (h (oh a))))
+                         (make-exit i))))
+                   actions)]
+    [@handlers acts]))
+
+(defn zyva
+  "Switch.Make.zyva: the integer switch on arg, cases [[low high action-index]...] over the store's actions"
+  [[low high] arg cases store]
+  (let [[hs actions] (abstract-shared (act-get-shared store))
+        old @ok-inter]
+    (reset! ok-inter (and (<= (Math/abs (long low)) 65536) (<= (Math/abs (long high)) 65536)))
+    (when-not (= old @ok-inter) (reset! opt-table {}))
+    (let [s {:cases (vec cases) :actions actions}
+          [nc k] (comp-clusters s)
+          clusters (make-clusters s nc k)]
+      (hs (c-test {:arg arg :off 0} clusters)))))
+
+;; ---------------------------------------------------------------------------------------------
+;; The printed program (tools/ocdump --mode lambda)
+
+(defn- const-form [c]
+  (case (c 0)
+    :int (list 'int (c 1))
+    :char (list 'char (c 1))
+    :string (list 'immstring (c 1))
+    :float (list 'float (c 1))
+    (:int32 :int64 :nativeint) (list (symbol (name (c 0))) (str (c 1)))
+    :block (list 'block (c 1) (mapv const-form (c 2)))
+    :float-array (list 'float-array (vec (c 1)))))
+
+(defn- idn [id] (ty/unique-name id))
+
+(defn form
+  "The node as the oracle's dump form"
+  [l]
+  (case (l 0)
+    :Lvar (list 'var (idn (l 1)))
+    :Lmutvar (list 'mutvar (idn (l 1)))
+    :Lconst (list 'const (const-form (l 1)))
+    :Lapply (list 'apply (form (l 1)) (mapv form (l 2)))
+    :Lfunction (list 'function (l 1) (mapv (fn [[id vk]] [(idn id) vk]) (l 2)) (l 3) (form (l 4)))
+    :Llet (list 'let (l 1) (l 2) (idn (l 3)) (form (l 4)) (form (l 5)))
+    :Lmutlet (list 'mutlet (l 1) (idn (l 2)) (form (l 3)) (form (l 4)))
+    :Lletrec (list 'letrec (mapv (fn [[id f]] [(idn id) (form f)]) (l 1)) (form (l 2)))
+    :Lprim (list 'prim (:name (l 1)) (mapv form (l 2)))
+    :Lswitch (let [sw (l 2)]
+               (list 'switch (form (l 1)) (:numconsts sw) (mapv (fn [[i x]] [i (form x)]) (:consts sw))
+                     (:numblocks sw) (mapv (fn [[i x]] [i (form x)]) (:blocks sw)) (when (:fail sw) (form (:fail sw)))))
+    :Lstringswitch (list 'stringswitch (form (l 1)) (mapv (fn [[s x]] [s (form x)]) (l 2)) (when (l 3) (form (l 3))))
+    :Lstaticraise (list 'staticraise (l 1) (mapv form (l 2)))
+    :Lstaticcatch (let [[n vars] (l 2)]
+                    (list 'staticcatch (form (l 1)) [n (mapv (fn [[id vk]] [(idn id) vk]) vars)] (form (l 3))))
+    :Ltrywith (list 'trywith (form (l 1)) (idn (l 2)) (form (l 3)))
+    :Lifthenelse (list 'ifthenelse (form (l 1)) (form (l 2)) (form (l 3)))
+    :Lsequence (list 'sequence (form (l 1)) (form (l 2)))
+    :Lwhile (list 'while (form (l 1)) (form (l 2)))
+    :Lfor (list 'for (idn (l 1)) (form (l 2)) (form (l 3)) (l 4) (form (l 5)))
+    :Lassign (list 'assign (idn (l 1)) (form (l 2)))))
+
+(defn- write-form [^StringBuilder sb x]
+  (cond
+    (seq? x) (do (.append sb "(") (loop [xs x first? true]
+                                    (when (seq xs)
+                                      (when-not first? (.append sb " "))
+                                      (write-form sb (first xs)) (recur (rest xs) false)))
+                 (.append sb ")"))
+    (vector? x) (do (.append sb "[") (loop [xs (seq x) first? true]
+                                       (when xs
+                                         (when-not first? (.append sb " "))
+                                         (write-form sb (first xs)) (recur (next xs) false)))
+                    (.append sb "]"))
+    (map? x) (do (.append sb "{") (loop [xs (seq x) first? true]
+                                    (when xs
+                                      (when-not first? (.append sb " "))
+                                      (let [[k v] (first xs)] (write-form sb k) (.append sb " ") (write-form sb v))
+                                      (recur (next xs) false)))
+                 (.append sb "}"))
+    (nil? x) (.append sb "nil")
+    :else (.append sb (pr-str x))))
+
+(defn program-text
+  "The program [:program unit-name size required code] as the dump's text"
+  [[_ uname size required code] fname]
+  (let [sb (StringBuilder.)]
+    (write-form sb (list 'ocaml/lambda (list 'lambda-program (str uname "_0") size (vec required) (form code))
+                         (array-map :file fname :ocaml "5.5.0")))
+    (.append sb "\n")
+    (str sb)))
+
+;; ---------------------------------------------------------------------------------------------
+;; The judge's canonical form: identifiers and static exits renamed in order of appearance
+
+(defn canonical [x]
+  (let [ids (atom {}) exits (atom {})
+        id! (fn [s] (if (string? s)
+                      (let [base (str/replace s #"_[0-9]+$" "")]
+                        (or (get @ids s) (let [n (str base "#" (count @ids))] (swap! ids assoc s n) n)))
+                      s))
+        ex! (fn [n] (or (get @exits n) (let [m (count @exits)] (swap! exits assoc n m) m)))]
+    (letfn [(go [x]
+              (cond
+                (seq? x)
+                (let [h (first x) a (vec (rest x))]
+                  (case h
+                    (var mutvar) (list h (id! (a 0)))
+                    function (list h (a 0) (mapv (fn [[i k]] [(id! i) k]) (a 1)) (a 2) (go (a 3)))
+                    let (list h (a 0) (a 1) (id! (a 2)) (go (a 3)) (go (a 4)))
+                    mutlet (list h (a 0) (id! (a 1)) (go (a 2)) (go (a 3)))
+                    letrec (let [bs (mapv (fn [[i f]] [(id! i) f]) (a 0))]
+                             (list h (mapv (fn [[i f]] [i (go f)]) bs) (go (a 1))))
+                    staticraise (list h (ex! (a 0)) (mapv go (a 1)))
+                    staticcatch (let [b (go (a 0)) [n vs] (a 1)]
+                                  (list h b [(ex! n) (mapv (fn [[i k]] [(id! i) k]) vs)] (go (a 2))))
+                    trywith (let [b (go (a 0))] (list h b (id! (a 1)) (go (a 2))))
+                    for (list h (id! (a 0)) (go (a 1)) (go (a 2)) (a 3) (go (a 4)))
+                    assign (list h (id! (a 0)) (go (a 1)))
+                    const x
+                    (apply list (map go x))))
+                (vector? x) (mapv go x)
+                (map? x) (dissoc x :file)
+                :else x))]
+      (go x))))
+
+(defn first-difference
+  "A short text of where a and b first differ"
+  [a b]
+  (letfn [(go [a b path]
+            (cond
+              (= a b) nil
+              (and (seq? a) (seq? b) (= (count a) (count b)) (= (first a) (first b)))
+              (some identity (map-indexed (fn [i [x y]] (go x y (conj path i))) (map vector a b)))
+              (and (vector? a) (vector? b) (= (count a) (count b)))
+              (some identity (map-indexed (fn [i [x y]] (go x y (conj path i))) (map vector a b)))
+              :else (str "at " path ":\n   oracle: " (subs (pr-str a) 0 (min 700 (count (pr-str a))))
+                         "\n   mine:   " (subs (pr-str b) 0 (min 700 (count (pr-str b)))))))]
+    (or (go a b []) "equal")))
