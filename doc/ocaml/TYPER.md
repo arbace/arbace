@@ -361,10 +361,10 @@ OCaml's functions; two new namespaces, the rest into the existing ones:
 
 | set | files | types equal | raw Lambda equal | simplified Lambda equal | oi's run equal |
 |---|---:|---:|---:|---:|---:|
-| `test/ocaml/typer/` (68 samples; t61-t68 new: immediate objects, objects under functions, classes, inheritance, class types, self types, polymorphic methods, class type abbreviations) | 68 | 68 | 68 | 68 | 68 |
-| the stdlib's units (`bin/oi stdlib-check`) | 71 | - | - | 69 | the samples on the native units: 67 of 67 (t68 added after the run) |
+| `test/ocaml/typer/` (70 samples; t61-t70 new: immediate objects, objects under functions, classes, inheritance, class types, self types, polymorphic methods, class type abbreviations, classes that re-export a class, generalized objects) | 70 | 70 | 70 | 70 | 70 |
+| the stdlib's units (`bin/oi stdlib-check`) | 71 | - | - | 69 | the samples on the native units: 70 of 70 |
 | probe: `testsuite/tests/basic/`'s first 40 files, the 36 ocamlc accepts | 36 | 34 | 34 | 34 | - |
-| probe: run tests with objects and classes (typing-objects-bugs' `*_ok`, typing-poly-bugs' pr5322 pr5673 pr6922, letrec-compilation's class_1 class_2, translprim/sendcache, tool-ocaml/t301-object, parsing/anonymous_class_parameter, typing-recmod's t13ok t16ok, backtrace/methods, typing-labels' mixin2 mixin3, typing-extensions/cast, typing-typeparam/newtype, typing-polyvariants-bugs/pr10664, generalized-open/shadowing) | 23 | 10 | 12 | 12 | - |
+| probe: run tests with objects and classes (typing-objects-bugs' `*_ok`, typing-poly-bugs' pr5322 pr5673 pr6922, letrec-compilation's class_1 class_2, translprim's sendcache and locs, tool-ocaml/t301-object, parsing/anonymous_class_parameter, typing-recmod's t13ok t16ok, backtrace's methods and names, typing-labels' mixin2 mixin3, typing-extensions/cast, typing-typeparam/newtype, typing-polyvariants-bugs/pr10664, generalized-open/shadowing, regression/pr7426, misc/nucleic, exotic-syntax/exotic, typing-modules-bugs/pr7036_ok) | 29 | 16 | 18 | 18 | - |
 
 The stdlib's new units: CamlinternalOO and Oo (object types, `%sendself`), Dynarray (an immediate object under a
 function, a class whose table is cached; also `[@@unboxed]` and unify2's expansion of the phantom abbreviation `'stamp
@@ -372,12 +372,14 @@ dummy = < >`). The 2 left: CamlinternalFormat (GADT-aware exhaustiveness, T10) a
 TY10 (a): T10). The basic/ probe's objects and includestruct are equal now (includestruct also needed an include to
 rename an exception's constructor); its 2 others are recursive values (recvalues, tailcalls), and patmatch's and sets'
 signatures differ as before (§11). The objects probe's 11 whose Lambda is not equal: class_2 (recursive values, T10);
-newtype (a toplevel test whose phrases OCaml rejects); pr5156_ok (a class parameter constrained to the self type
-through an abbreviation); pr10664 (a universal variable aliased to a row, `'ab. ([< `A | `B ] as 'ab) -> 'ab`); pr5673,
-pr6922, mixin2, mixin3, yamagata021012_ok (constraints on class parameters and class types through `#`-types and rows);
-t16ok (a class in a recursive module's signature); shadowing (`open struct ... end`, T8's slice). Of the 12 whose
-Lambda is equal, 2 signatures differ by a class parameter's `constraint 'a = ...` (pr4766_ok, t13ok: OCaml's
-tree_of_constraints, not ported) and cast's by a toplevel phrase OCaml rejects.
+mixin2, mixin3 and exotic (a functor application's path, `MoreLabels.Map.Make (...)` bound by Translmod, T8's slice);
+shadowing (`open struct ... end`, T8's slice); locs (`%loc_FUNCTION`, which needs the scoped locations Translcore
+keeps: not ported); newtype (a toplevel test whose phrases OCaml rejects); pr5156_ok (a class's self constrained
+through an abbreviation `'a obj = (< .. > as 'a)`); pr6922_ok (class parameters constrained through `#`-types and
+rows); pr7036_ok (a polymorphic method defined by `fun (type a) ...` over a first-class module); t16ok (a class whose
+abbreviation must match a recursive module's private object type: Includemod on object types). Of the 18 whose Lambda
+is equal, 3 signatures differ: cast (a toplevel phrase OCaml rejects), pr5673_ok (polymorphic record fields, T10) and
+yamagata021012_ok (an annotation's abbreviation `uchar` printed expanded, TY11, and a coercion's #-type).
 
 Faithfulness notes. Method types are polytypes only when written `'a. t` (OCaml makes every method type `Tpoly (t, [])`
 and its printer and generalization see through it): no accepted program's output was found to depend on it. Two
