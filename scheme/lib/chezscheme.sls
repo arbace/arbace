@@ -122,7 +122,8 @@
     machine-type threaded? -1+ logior logtest logbit? logbit1 logbit0
     isqrt flonum->fixnum fx+/wraparound fx-/wraparound fx*/wraparound fxsll/wraparound fxlogior fxlogtest
     fxlogbit? fxlogbit1 fxlogbit0 flnonpositive? flnonnegative? conjugate magnitude-squared sinh
-    cosh tanh asinh acosh atanh hashtable-values hashtable-cells make-weak-eq-hashtable
+    cosh tanh asinh acosh atanh hashtable-values hashtable-cells $hashtable-cells weak-cons ephemeron-cons weak-pair? ephemeron-pair? fxpopcount fxpopcount16 fxpopcount32
+    make-weak-eq-hashtable
     make-weak-eqv-hashtable make-ephemeron-eq-hashtable make-ephemeron-eqv-hashtable make-weak-hashtable make-ephemeron-hashtable hashtable-weak? hashtable-ephemeron? eq-hashtable-ref
     eq-hashtable-set! eq-hashtable-contains? eq-hashtable-delete! eq-hashtable-update! eq-hashtable-weak? eq-hashtable-ephemeron? putprop getprop
     remprop merge! immutable-string? mutable-string? immutable-vector? mutable-vector? immutable-bytevector? mutable-bytevector?
@@ -141,9 +142,9 @@
   ;; SC170 (b): Chez's wider forms of eval (the environment optional), dynamic-wind (a leading critical flag), fx+ fx* fx-
   ;; (any number of arguments) and the file procedures' options ('replace, 'truncate) replace (rnrs)'s
   (import (except (rnrs) file-options fx+ fx* fx- for-each dynamic-wind open-output-file call-with-output-file with-output-to-file
-                  string->number number->string record-constructor)
-          (rename (only (rnrs) string->number number->string record-constructor) (string->number r6-string->number) (number->string r6-number->string)
-                  (record-constructor r6-record-constructor))
+                  string->number number->string record-constructor hashtable-keys hashtable-entries)
+          (rename (only (rnrs) string->number number->string record-constructor hashtable-keys hashtable-entries) (string->number r6-string->number) (number->string r6-number->string)
+                  (record-constructor r6-record-constructor) (hashtable-keys r6-hashtable-keys) (hashtable-entries r6-hashtable-entries))
           (rename (only (rnrs) fx+ fx* fx- for-each dynamic-wind open-output-file call-with-output-file with-output-to-file)
                   (fx+ fx2+) (fx* fx2*) (fx- fx2-) (dynamic-wind r6-dynamic-wind) (for-each r6-for-each) (open-output-file r6-open-output-file)
                   (call-with-output-file r6-call-with-output-file) (with-output-to-file r6-with-output-to-file))
@@ -497,10 +498,28 @@
           ((zero-complex? x) x)
           (else (* 1/2 (- (log (+ 1 x)) (log (- 1 x)))))))
   ;; hashtables beyond R6RS's: the values and cells, the weak and ephemeron kinds (strong tables, marked), the eq-hashtable names
-  (define (hashtable-values h)
-    (call-with-values (lambda () (hashtable-entries h)) (lambda (ks vs) vs)))
-  (define (hashtable-cells h)
-    (call-with-values (lambda () (hashtable-entries h)) (lambda (ks vs) (vector-map cons ks vs))))
+  ;; Chez's hashtable-keys, -entries, -values and -cells take an optional size (at most that many entries)
+  (define (size-arg who n)
+    (unless (and (integer? n) (exact? n) (>= n 0)) (assertion-violation who "invalid size" n))
+    n)
+  (define (take-vector v n) (if (< n (vector-length v)) (vector-copy v 0 n) v))
+  (define hashtable-keys
+    (case-lambda ((h) (r6-hashtable-keys h)) ((h n) (take-vector (r6-hashtable-keys h) (size-arg 'hashtable-keys n)))))
+  (define hashtable-entries
+    (case-lambda
+      ((h) (r6-hashtable-entries h))
+      ((h n) (let ((n (size-arg 'hashtable-entries n)))
+               (call-with-values (lambda () (r6-hashtable-entries h)) (lambda (ks vs) (values (take-vector ks n) (take-vector vs n))))))))
+  (define hashtable-values
+    (case-lambda
+      ((h) (call-with-values (lambda () (r6-hashtable-entries h)) (lambda (ks vs) vs)))
+      ((h n) (take-vector (hashtable-values h) (size-arg 'hashtable-values n)))))
+  ;; the cells are fresh pairs (a mutation of one does not reach the table)
+  (define hashtable-cells
+    (case-lambda
+      ((h) (call-with-values (lambda () (r6-hashtable-entries h)) (lambda (ks vs) (vector-map cons ks vs))))
+      ((h n) (take-vector (hashtable-cells h) (size-arg 'hashtable-cells n)))))
+  (define $hashtable-cells hashtable-cells)
   (define table-kinds (make-eq-hashtable))
   (define (mark-table! h kind) (hashtable-set! table-kinds h kind) h)
   (define (make-weak-eq-hashtable . n) (mark-table! (make-eq-hashtable) 'weak))
@@ -511,6 +530,21 @@
   (define (make-ephemeron-hashtable hash eqv . n) (mark-table! (make-hashtable hash eqv) 'ephemeron))
   (define (hashtable-weak? h) (unless (hashtable? h) (assertion-violation 'hashtable-weak? "not a hashtable" h)) (eq? (hashtable-ref table-kinds h #f) 'weak))
   (define (hashtable-ephemeron? h) (unless (hashtable? h) (assertion-violation 'hashtable-ephemeron? "not a hashtable" h)) (eq? (hashtable-ref table-kinds h #f) 'ephemeron))
+  ;; weak and ephemeron pairs are pairs that are marked (nothing is collected here)
+  (define pair-kinds (make-eq-hashtable))
+  (define (weak-cons a d) (let ((p (cons a d))) (hashtable-set! pair-kinds p 'weak) p))
+  (define (ephemeron-cons a d) (let ((p (cons a d))) (hashtable-set! pair-kinds p 'ephemeron) p))
+  (define (weak-pair? x) (and (pair? x) (eq? (hashtable-ref pair-kinds x #f) 'weak)))
+  (define (ephemeron-pair? x) (and (pair? x) (eq? (hashtable-ref pair-kinds x #f) 'ephemeron)))
+  (define (fxpopcount x)
+    (unless (and (fixnum? x) (fx>=? x 0)) (assertion-violation 'fxpopcount "not a nonnegative fixnum" x))
+    (fxbit-count x))
+  (define (fxpopcount16 x)
+    (unless (and (fixnum? x) (fx>=? x 0) (fx<=? x #xFFFF)) (assertion-violation 'fxpopcount16 "not a 16-bit fixnum" x))
+    (fxbit-count x))
+  (define (fxpopcount32 x)
+    (unless (and (fixnum? x) (fx>=? x 0) (fx<=? x #xFFFFFFFF)) (assertion-violation 'fxpopcount32 "not a 32-bit fixnum" x))
+    (fxbit-count x))
   (define eq-hashtable-ref hashtable-ref)
   (define eq-hashtable-set! hashtable-set!)
   (define eq-hashtable-contains? hashtable-contains?)

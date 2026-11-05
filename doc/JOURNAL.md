@@ -245,3 +245,17 @@ On branch `night-fix` (from `b2a4911f`), not merged while `--full` ran on main:
 - Also today: Haskell and Rust checked after unparking (nothing broke; tests pass, 40 s and 58 s; sample round trips
   clean; whole text levels about 1 to 1.5 h and 40 to 60 min, night jobs); their eval needs GHC's Core/STG and a lazy
   runtime, and Rust's MIR and a Miri-like runtime, each a survey of its own.
+
+## 2026-11-05, Scheme: SMR6 the Chez identifier tail (branch `scheme-smr6`)
+
+- Decided by the user the same day (MATURITY-REVIEW.md, "Decided"): the stub experiment first, then the simple identifiers. Built: `SI_MAT_STUB` in the mats
+  harness (`test/scheme/mats/run.sps`: an unbound identifier is bound to a stub that raises `STUBHIT X`, the clause evaluated again), run over the 37 files
+  (1,344 identifiers stubbed, 588 bound in Chez 10.3.0, the rest the mats' own names; `bin/si mats` takes `module` as a definition now: one family of eight
+  names of `bytevector.ms` was a mat-local module). Ranked, then 146 identifiers written in Scheme in `scheme/lib/chezscheme.sls` (no new primitive, no psyntax
+  re-boot), probed against Chez 10.3.0 (`chez --script`); the compiler's (cp0 and the like, 114 mats) stay out as decided.
+- Alternatives left: Go primitives for the file system (`mkdir`, `directory-list`, ...: a psyntax re-boot on Chez), live write-through `hashtable-cells`, real
+  immutability and a distinct fxvector type (a change of the value model); `threaded?` `#t` and `print-graph` were tried and undone (a mat forks a thread
+  and exits the harness; a cyclic `format "~s"` overflows the Go stack).
+- Result, whole mats run before and after: 340 / 62 / 669 mats pass / fail / not run to 436 / 99 / 536, `mats-chez-identifier` items 665 to 524; four new classes
+  (`mats-chez-runtime-params`, `mats-chez-compiler-loader`, `mats-chez-immutable-typed` design, `mats-after-smr6` deferred), 0 items in no class.
+  Regression: `bin/si r7rs`, `srfi`, `test --si`, `unit`, `check`, `check --aot` essential: no regression.

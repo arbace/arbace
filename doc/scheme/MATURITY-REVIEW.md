@@ -254,6 +254,75 @@ beyond the flonum range (`(/ 1.0+1.0i (make-rectangular (* 4 (expt 10 400)) (* 4
 **The night's command** (as SMR3's, the records of every file): `bin/heavy-lock bin/si mats --record` (the three files here are recorded; the unrun files' lines are older), `bin/si r7rs --record`,
 `bin/si check --record` and `bin/si check --aot --record` for the one new program (written by hand in both records here), then `bin/si ecraven --only` on a few float printers as the measure of the speed.
 
+## 8. As built: SMR6, the Chez identifier tail (2026-11-05, as decided: the stub experiment, then the simple identifiers)
+
+**The experiment.** `SI_MAT_STUB=1` (the mats harness, `test/scheme/mats/run.sps`; off, nothing changes): a clause, a definition or a mat's prelude form that fails with
+"unbound identifier X" binds X in the mat's environment to a stub that raises `STUBHIT X` and is evaluated again (up to 40 times each), so a mat runs to its end and says
+which identifiers it needs (`STUB MAT X` lines) and which its clauses really call (`STUBHIT X` in a failing clause). All 37 files, 1,075 mats (355 pass, 608 fail, 106 not run
+with every identifier stubbed; the 106 are syntax: `fluid-let-syntax`, `define-ftype`, a reader's `#!bwp` as an expression): 1,344 distinct identifiers were stubbed, 588 of them bound in
+Chez 10.3.0 (`top-level-bound?` in `chez --script`), the rest names the mats define themselves (a `module` or a macro of the file, pattern variables). Ranking (mats that need the
+identifier / mats whose clauses call it / mats where it is the only stub they hit):
+
+| identifier | needed | called | sole | |
+|---|---|---|---|---|
+| `test-cp0-expansion` | 83 | 83 | 58 | cp0, out of scope |
+| `enable-cp0` | 64 | 39 | 18 | cp0, out of scope |
+| `optimize-level` | 50 | 36 | 11 | a parameter, now there |
+| `separate-eval`, `separate-compile` | 27, 23 | 26, 22 | 2, 0 | compiler, out of scope |
+| `collect-maximum-generation`, `collect`, `collect-request-handler` | 26, 29, 14 | 23, 14, 13 | 0, 0, 2 | parameters, now there |
+| `load` | 22 | 18 | 0 | source only, now there |
+| `cfl~=` | 18 | 15 | 7 | cfl.ms's helper, out of scope |
+| `hashtable-values`, `hashtable-cells` | 15 | 14 | 0 | now there |
+| `native->signed`, `big-endian->signed` ... (eight names) | 11 to 13 | 11 to 13 | 2 to 4 | a mat-local `module` of bytevector.ms: the harness did not take `module` as a definition |
+| `threaded?`, `machine-type` | 11, 8 | 11, 8 | 0, 3 | now there (si has no threads) |
+
+The greedy order by mats completed (a mat is complete when its failing clauses call only the identifiers chosen so far): `test-cp0-expansion` +58, `enable-cp0` +18, `optimize-level` +16, `cfl~=` +10, `run-cp0` +6,
+`$suppress-primitive-inlining` +6 (the compiler's, 114 mats of `cp0.ms`, `cptypes.ms`, `cfl.ms`, `7.ms`: out of scope as decided), then `make-record-type` +5, `machine-type` +4, `timer-interrupt-handler` +4,
+the mats' own `native->signed` family +4 each, `statistics`, `trace-output-port`, `fxvector` +3 each, ... a tail of 60 names that unlock one or two mats each. 442 mats end with failures only at stubs.
+
+**What was built** (no new primitive: psyntax's boot list and `psyntax.pp.ae` are untouched; everything is Scheme in `scheme/lib/chezscheme.sls`, 146 exports, each probed against Chez 10.3.0 and all bound in it):
+`machine-type` (`a6le`) and `threaded?` (`#f`: si has no threads; `#t` made `exceptions.ms` call `fork-thread` and exit the harness, tried, undone), `-1+`, `logior`, `logtest`, `logbit?`, `logbit0`,
+`logbit1`, `isqrt` (flonum integers too), `flonum->fixnum`, `fx+/wraparound`, `fx-/wraparound`, `fx*/wraparound`, `fxsll/wraparound`, `fxlogior` and relatives, `fxpopcount*`, `flnonpositive?`, `flnonnegative?`,
+`conjugate`, `magnitude-squared`; `sinh cosh tanh asinh acosh atanh` (flonum answers for exact arguments, signed zeros, infinities, the complex answers outside the real range as Chez's; last digit
+may differ from libm's); the hashtable names (`hashtable-values`, `hashtable-cells` and the size argument of `hashtable-keys`, `-entries`, `-values`, `-cells`, `$hashtable-cells`, the weak and
+ephemeron constructors, `hashtable-weak?`, `hashtable-ephemeron?`, `eq-hashtable-ref` and relatives); `weak-cons`, `ephemeron-cons` and their predicates; `putprop`, `getprop`, `remprop`; `merge!`;
+the immutable family (`string->immutable-string`, `vector->immutable-vector`, `bytevector->immutable-bytevector`, `immutable-vector`, `-copy`, `-append`, `-set/copy`, the predicates, `string-append-immutable`);
+`vector-copy` (Chez 10.3's start and count), `vector-append`, `vector-set/copy`, `vector-set-fixnum!`, `string-copy!` (Chez's five arguments), `substring-fill!`; `bytevector->s8-list`, `s8-list->bytevector`, the 24, 40, 48
+and 56 bit `bytevector-s/u...-ref/set!`; `fxvector` and `flvector` with their operations; `top-level-bound?`, `top-level-value`, `set-top-level-value!`, `define-top-level-value`, `scheme-environment`,
+`load`, `record-constructor` of a record-type descriptor and `make-record-type`; `with-input-from-string`, `console-input-port`, `console-output-port`, `console-error-port`, `trace-output-port`, `char-ready?`, `directory-separator`;
+and the runtime's parameters with Chez's defaults and no effect: `collect`, `collect-request-handler`, `collect-maximum-generation`, `collect-trip-bytes`, `collect-generation-radix`, `bytes-allocated`,
+`timer-interrupt-handler`, `keyboard-interrupt-handler`, `enable-interrupts`, `disable-interrupts`, `optimize-level` (0 to 3), `debug-level`, `enable-unsafe-application`, `print-radix`, `print-gensym`, `print-length`,
+`print-level`, `print-brackets`, `print-vector-length`. The harness takes `module` as a definition (bytevector.ms's `native->signed` family and its eight names).
+
+**Where the model differs from Chez** (the classes below): fxvectors and flvectors are vectors (si's reader reads `#vfx(` as a vector since SMR3), so `fxvector?` is true of any vector of fixnums; an immutable
+string, vector or bytevector is a marked copy and a mutation of it does not raise (a literal is not immutable; `symbol->string` is not); empty vectors are not one object; the weak tables are strong and marked; the
+cells of `hashtable-cells` are fresh pairs; the collector, the interrupts and the printer limits are parameters with no effect. `print-graph` is not defined: with it the mats' `read-graph` writes a cyclic datum through `format "~s"`, which
+si writes without labels, and the Go stack overflows (it takes the rest of `6.ms` down, 30 mats). Not built: the file system (`mkdir`, `rename-file`, `directory-list`, `file-directory?`: Go primitives, a psyntax re-boot), the compiler and loader
+(`compile-file`, `compile-library`, `load-program`, `expand`, `interpret`), engines, guardians, `oblist`, time and date objects, the foreign interface and the inspector.
+
+**What moved**, the whole mats run (`bin/si mats --record`, 37 files, light, main's stage 0 as host), at the branch before this work (SMR5 built) and after:
+
+| | before | after |
+|---|---|---|
+| mats | 1,077 | 1,077 |
+| pass / fail / not run / skipped | 340 / 62 / 669 / 6 | 436 / 99 / 536 / 6 |
+| `mats-chez-identifier` items | 665 | 524 |
+| failing clauses of mats not run, run alone | 511 | 729 (more mats stop later) |
+
+Per file (pass / fail / not run, before then after, the files that moved): `bytevector.ms` 11/0/58 to 55/1/13, `5_6.ms` 4/3/34 to 14/14/13, `ieee.ms` 26/1/9 to 35/1/0, `5_3.ms` 71/5/44 to 79/5/36, `fx.ms` 1/0/72 to 6/0/67,
+`5_5.ms` 14/7/6 to 18/8/1, `primvars.ms` 1/3/25 to 4/12/13, `6.ms` 5/1/28 to 7/3/24, `fl.ms` 39/0/12 to 41/0/10, `7.ms` 3/2/43 to 5/3/40, `cfl.ms` 0/0/13 to 2/0/11, `8.ms` 7/3/61 to 8/3/60, `5_1.ms` 25/0/3 to 26/2/0,
+`misc.ms` 5/1/47 to 6/3/44, `3.ms` 9/0/8 to 10/0/7, `hash.ms` 0/0/34 to 0/2/32; the others by one. 96 mats start and pass; the 37 that start and fail are the new classes: `mats-chez-runtime-params` (187 items: the collector, weak tables,
+interrupts and printer limits that si accepts and does not act on), `mats-chez-compiler-loader` (178: `7.ms`'s compile and load interfaces, the profiler, the compiler's output), `mats-chez-immutable-typed` (76: the model's differences above), and the deferred
+`mats-after-smr6` (110: mats of `4.ms`, `6.ms`, `8.ms`, `io.ms`, `record.ms` that now run to a clause that fails, by mat). The whole record is rewritten (`test/scheme/check-mats-linux-amd64.edn`, 0 items in no class), so the files this work did not touch carry SMR2 to SMR5's moves as well (the record of those files was older than the code).
+After the build, the stub experiment run again: 579 mats still need a stub (668 before), the remainder is the compiler's names and one-mat names (`oblist` 5, `statistics`, `make-engine`, `make-time`, `copy-environment`, `compile-file`, `rename-file`, `mkdir`).
+
+Checks run (light, `ARBACE_HOST_EXE` main's stage 0, no gate; once after the main work and again at the end): `bin/si r7rs` 1,230 of 1,232 (the 2 `e+308` tests of SMR5), no regression; `bin/si srfi` 11 programs, 1,231 checks pass, no regression; `bin/si test --si` 61 of 64, 3 known, 0 failing;
+`bin/si unit` ok (no Go changed); `bin/si check` (all 50 programs) 49 of 50, the one known (`chez-conditions`), no regression; `bin/si check --aot --only test/scheme/essential-aot.txt` 10 of 11 the compiled run the same as the interpreted
+one, 1 refused (`racket/syntax-case`, a constant that does not read back: as before). Not measured: the speed of `(chezscheme)` programs' load (the library has 146 more definitions: its expansion is a little longer; `bin/si bench` at the night).
+
+**The night's command** (as SMR3's and SMR4's): `bin/heavy-lock bin/si mats --record` (the whole record again; this branch's is from a light run on the day), `bin/si r7rs --record`, `bin/si check --record` and `bin/si check --aot --record`
+(unchanged programs), and the stub experiment again for what is left: `SI_MAT_STUB=1 bin/si mats FILE.ms...` (a partial run; its `.tmp/si/mats/FILE.out` then holds the `STUB MAT X` and `STUBHIT X` lines; judge nothing from it and do not `--record` it), read by counting those lines per mat.
+
 ## Proposed (SMR1 onward; none decided)
 
 - **SMR1 include.** (a) keep the built `include`/`include-ci`, add it to `base.chezscheme.sls` and the include sample to `programs.edn` with a Chez run, at the next
