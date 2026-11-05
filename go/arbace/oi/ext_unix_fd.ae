@@ -74,6 +74,20 @@
               (set! names (append names (conv string (subslice name 0 k))))
               (set! b (subslice b reclen)))))))))
 
+(go/func checkStream "checkStream is channels.c's stream semantics check: a regular file, a character device, a pipe or a stream socket.\n" [^int fd ^string fn]
+  (let [^syscall/Stat_t st (zero syscall/Stat_t)]
+    (when [err (syscall/Fstat fd (addr st))] (!= err nil)
+      (RaiseUnixError (errnoOf err) fn ""))
+    (switch (bit-and (.-Mode st) syscall/S_IFMT)
+      (case [syscall/S_IFREG syscall/S_IFCHR syscall/S_IFIFO])
+      (case [syscall/S_IFSOCK]
+        (let [(values t err) (syscall/GetsockoptInt fd syscall/SOL_SOCKET syscall/SO_TYPE)]
+          (when (!= err nil)
+            (RaiseUnixError (errnoOf err) fn ""))
+          (when (!= t syscall/SOCK_STREAM)
+            (RaiseUnixError syscall/EINVAL fn ""))))
+      (default (RaiseUnixError syscall/EINVAL fn "")))))
+
 (go/func dirOf ^{:tag (* unixDir)} [^Value v] (assert (* unixDir) (.-V (assert (* Custom) v))))
 
 (go/func unixWrite "unixWrite is caml_unix_write (all of it, retried) or caml_unix_single_write (one write).\n"
@@ -86,6 +100,11 @@
           (set! k unixBufferSize))
         (let [chunk (append (lit (slice byte)) (spread (subslice (.-B (assert (* Bytes) buf)) ofs (+ ofs k))))
               r 0 ^error err nil]
+          (when (waitFd curTh fd pollOut)
+            (when (> written 0)
+              (.processSignals curTh)
+              (return written))
+            (interruptedCall curTh fn))
           (Blocking (fn [] (set! (values r err) (syscall/Write fd chunk))))
           (when (!= err nil)
             (let [e (errnoOf err)]
@@ -104,6 +123,8 @@
     (set! n unixBufferSize))
   (let [chunk (make (slice byte) n)
         r 0 ^error err nil]
+    (when (waitFd curTh fd pollIn)
+      (interruptedCall curTh "read"))
     (Blocking (fn [] (set! (values r err) (syscall/Read fd chunk))))
     (when (!= err nil)
       (RaiseUnixError (errnoOf err) "read" ""))
@@ -197,8 +218,12 @@
         (range [i _ buf]
           (aset buf i (conv byte (bigInt (aget (.-data ba) (+ ofs i))))))
         (unixWrite (aget a 0) (addr (lit Bytes :B buf)) 0 n (!= (AsInt (aget a 4)) 0) "write_bigarray"))))
-    (r "caml_unix_inchannel_of_filedescr" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (openChannel (AsInt (aget a 0)) false)))
-    (r "caml_unix_outchannel_of_filedescr" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (openChannel (AsInt (aget a 0)) true)))
+    (r "caml_unix_inchannel_of_filedescr" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (checkStream (AsInt (aget a 0)) "in_channel_of_descr")
+      (openChannel (AsInt (aget a 0)) false)))
+    (r "caml_unix_outchannel_of_filedescr" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (checkStream (AsInt (aget a 0)) "out_channel_of_descr")
+      (openChannel (AsInt (aget a 0)) true)))
     (r "caml_unix_lseek" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
       (let [p (unixSeek (aget a 0) (conv int64 (AsInt (aget a 1))) (aget a 2))]
         (when (> p (conv int64 4611686018427387903))

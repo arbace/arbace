@@ -133,10 +133,21 @@
         (syscall/Getrusage syscall/RUSAGE_CHILDREN (addr kids))
         (addr (lit FloatArray :F (lit (slice float64) (tv (.-Utime self)) (tv (.-Stime self)) (tv (.-Utime kids)) (tv (.-Stime kids))))))))
     ;; sleep (a float of seconds since OCaml 4.12's sleepf), outside the interpreter's lock
-    (r "caml_unix_sleep" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+    (r "caml_unix_sleep" (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a]
       (let [d (AsFloat (aget a 0))]
         (when (> d 0)
-          (Blocking (fn [] (time/Sleep (conv time/Duration (* d 1e9))))))
+          (if (not (sigInPlay))
+            (Blocking (fn [] (time/Sleep (conv time/Duration (* d 1e9)))))
+            ;; with signals in play the sleep is a wait on the thread's wake pipe: a signal it takes runs its handlers
+            ;; and the sleep goes on for the time left (unix_sleep's EINTR loop)
+            (let [deadline (.Add (time/Now) (conv time/Duration (* d 1e9)))]
+              (while true
+                (let [left (.Seconds (time/Until deadline))]
+                  (when (<= left 0)
+                    (break))
+                  (let [(values _ intr _) (waitFds th nil left)]
+                    (when intr
+                      (.processSignals th))))))))
         Unit)))
     (r "caml_unix_getcwd" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
       (let [(values d err) (syscall/Getwd)]

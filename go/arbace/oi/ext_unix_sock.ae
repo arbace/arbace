@@ -1,0 +1,502 @@
+(in-ns 'go.arbace.oi) (go/file "ext_unix_sock.go" :imports [
+    [bufio "bufio"]
+    [net "net"]
+    [os "os"]
+    [strconv "strconv"]
+    [strings "strings"]
+    [syscall "syscall"]
+    [unsafe "unsafe"]])
+
+;; The Unix library's sockets and select (doc/ocaml/DEFERRED-TRIAGE.md, §3 fix 6, "As built: OT9's fixes 6-8"): the
+;; caml_unix_* primitives of otherlibs/unix's socket.c, socketaddr.c, accept.c, bind.c, connect.c, listen.c, shutdown.c,
+;; getsockname.c, getpeername.c, sendrecv.c, sockopt.c, gethost.c, getaddrinfo.c, getnameinfo.c, getproto.c, getserv.c,
+;; gethostname.c and select.c (OCaml 5.5.0, LGPL-2.1 with the linking exception; read for their behaviour, written anew
+;; over Go's syscall; the host database by Go's net, which reads /etc/hosts first). A socket is the OS's descriptor, as
+;; every Unix.file_descr; a call that may block waits outside the interpreter's lock, interrupted by a signal the thread
+;; takes (ext_signal.go). A sockaddr is ADDR_UNIX path (tag 0) or ADDR_INET (addr, port) (tag 1), an inet_addr its 4 or
+;; 16 bytes.
+
+(go/var ^{:doc "sockDomains are socket_domain's constructors' address families.\n"} sockDomains (lit (slice int) syscall/AF_UNIX syscall/AF_INET syscall/AF_INET6))
+
+(go/var ^{:doc "sockTypes are socket_type's constructors' socket types.\n"} sockTypes (lit (slice int) syscall/SOCK_STREAM syscall/SOCK_DGRAM syscall/SOCK_RAW syscall/SOCK_SEQPACKET))
+
+(go/func sockDomainOf "sockDomainOf is an address family as socket_domain.\n" ^int [^int af]
+  (range [i x sockDomains]
+    (when (== x af)
+      (return i)))
+  0)
+
+(go/func sockTypeOf "sockTypeOf is a socket type as socket_type.\n" ^int [^int t]
+  (range [i x sockTypes]
+    (when (== x t)
+      (return i)))
+  0)
+
+(go/func sockaddrOf "sockaddrOf is a Unix.sockaddr as a syscall.Sockaddr (get_sockaddr).\n" ^syscall/Sockaddr [^Value v ^string fn]
+  (let [b (AsBlock v)]
+    (when (== (.-Tag b) 0)
+      (let [p (GoString (aget (.-F b) 0))]
+        (when (>= (len p) 108)
+          (RaiseUnixError syscall/ENAMETOOLONG fn ""))
+        (return (addr (lit syscall/SockaddrUnix :Name p)))))
+    (let [ip (.-B (AsBytes (aget (.-F b) 0)))
+          port (AsInt (aget (.-F b) 1))]
+      (when (== (len ip) 16)
+        (let [sa (addr (lit syscall/SockaddrInet6 :Port port))]
+          (copy (subslice (.-Addr sa)) ip)
+          (return sa)))
+      (let [sa (addr (lit syscall/SockaddrInet4 :Port port))]
+        (copy (subslice (.-Addr sa)) ip)
+        sa))))
+
+(go/func sockaddrValue "sockaddrValue is a syscall.Sockaddr as a Unix.sockaddr (alloc_sockaddr).\n" ^Value [^syscall/Sockaddr sa]
+  (type-switch [x sa]
+    (case [(* syscall/SockaddrInet4)]
+      (let [ip (make (slice byte) 4)]
+        (copy ip (subslice (.-Addr x)))
+        (return (NewBlock 1 (addr (lit Bytes :B ip)) (.-Port x)))))
+    (case [(* syscall/SockaddrInet6)]
+      (let [ip (make (slice byte) 16)]
+        (copy ip (subslice (.-Addr x)))
+        (return (NewBlock 1 (addr (lit Bytes :B ip)) (.-Port x)))))
+    (case [(* syscall/SockaddrUnix)]
+      (return (NewBlock 0 (Str (.-Name x))))))
+  (NewBlock 0 (Str "")))
+
+(go/func msgFlags "msgFlags is a msg_flag list as MSG_* bits.\n" ^int [^Value l]
+  (let [f 0]
+    (range [_ x (listInts l)]
+      (switch x
+        (case [0] (set! f (bit-or f syscall/MSG_OOB)))
+        (case [1] (set! f (bit-or f syscall/MSG_DONTROUTE)))
+        (case [2] (set! f (bit-or f syscall/MSG_PEEK)))))
+    f))
+
+(go/var ^{:doc "sockBoolOpts are socket_bool_option's (level, option) pairs.\n"} sockBoolOpts (lit (slice (array 2 int))
+    (lit (array 2 int) syscall/SOL_SOCKET syscall/SO_DEBUG) (lit (array 2 int) syscall/SOL_SOCKET syscall/SO_BROADCAST)
+    (lit (array 2 int) syscall/SOL_SOCKET syscall/SO_REUSEADDR) (lit (array 2 int) syscall/SOL_SOCKET syscall/SO_KEEPALIVE)
+    (lit (array 2 int) syscall/SOL_SOCKET syscall/SO_DONTROUTE) (lit (array 2 int) syscall/SOL_SOCKET syscall/SO_OOBINLINE)
+    (lit (array 2 int) syscall/SOL_SOCKET syscall/SO_ACCEPTCONN) (lit (array 2 int) syscall/IPPROTO_TCP syscall/TCP_NODELAY)
+    (lit (array 2 int) syscall/IPPROTO_IPV6 syscall/IPV6_V6ONLY) (lit (array 2 int) syscall/SOL_SOCKET 15)))
+
+(go/var ^{:doc "sockIntOpts are socket_int_option's options (SOL_SOCKET).\n"} sockIntOpts (lit (slice int)
+    syscall/SO_SNDBUF syscall/SO_RCVBUF syscall/SO_ERROR syscall/SO_TYPE syscall/SO_RCVLOWAT syscall/SO_SNDLOWAT))
+
+(go/func sockOpt "sockOpt is the (level, option) of kind's option constructor n (sockopt.c's tables).\n" [^int kind ^int n] :results [int int]
+  (switch kind
+    (case [0] (return (aget (aget sockBoolOpts n) 0) (aget (aget sockBoolOpts n) 1)))
+    (case [1] (return syscall/SOL_SOCKET (aget sockIntOpts n)))
+    (case [2] (return syscall/SOL_SOCKET syscall/SO_LINGER))
+    (case [3]
+      (when (== n 0)
+        (return syscall/SOL_SOCKET syscall/SO_RCVTIMEO))
+      (return syscall/SOL_SOCKET syscall/SO_SNDTIMEO)))
+  (return syscall/SOL_SOCKET syscall/SO_ERROR))
+
+(go/func waitSock "waitSock waits for fd to be ready (events) under the signal rules; Unix_error (EINTR, fn) when interrupted.\n" [^{:tag (* Thread)} th ^int fd ^int16 events ^string fn]
+  (when (waitFd th fd events)
+    (interruptedCall th fn)))
+
+(go/func hostEntry "hostEntry is the record Unix.host_entry.\n" ^Value [^string name ^{:tag (slice string)} aliases ^int dom ^{:tag (slice (slice byte))} addrs]
+  (let [^{:tag (slice Value)} al nil
+        ^{:tag (slice Value)} ad nil]
+    (range [_ a aliases] (set! al (append al (Str a))))
+    (range [_ a addrs] (set! ad (append ad (addr (lit Bytes :B a)))))
+    (Tuple (Str name) (addr (lit Block :Tag 0 :F al)) dom (addr (lit Block :Tag 0 :F ad)))))
+
+(go/func readDb "readDb is the lines of /etc/protocols or /etc/services as fields, comments dropped.\n" ^{:tag (slice (slice string))} [^string path]
+  (let [(values f err) (os/Open path)
+        ^{:tag (slice (slice string))} out nil]
+    (when (!= err nil)
+      (return nil))
+    (defer (.Close f))
+    (let [sc (bufio/NewScanner f)]
+      (while (.Scan sc)
+        (let [l (.Text sc)]
+          (when [i (strings/IndexByte l 35)] (>= i 0)
+            (set! l (subslice l 0 i)))
+          (when [fs (strings/Fields l)] (>= (len fs) 2)
+            (set! out (append out fs))))))
+    out))
+
+(go/func strSlice ^Value [^{:tag (slice string)} ss]
+  (let [^{:tag (slice Value)} out nil]
+    (range [_ s ss] (set! out (append out (Str s))))
+    (addr (lit Block :Tag 0 :F out))))
+
+(go/func ipBytes "ipBytes is an IP's 4 or 16 bytes.\n" ^{:tag (slice byte)} [^net/IP ip]
+  (when [v4 (.To4 ip)] (!= v4 nil)
+    (return (conv (slice byte) v4)))
+  (conv (slice byte) (.To16 ip)))
+
+(go/func getsockoptRaw "getsockoptRaw is getsockopt(2) into the size bytes at p.\n" ^syscall/Errno [^int fd ^int lvl ^int opt ^unsafe/Pointer p ^uintptr size]
+  (let [n (conv uint32 size)
+        (values _ _ e) (syscall/Syscall6 syscall/SYS_GETSOCKOPT (conv uintptr fd) (conv uintptr lvl) (conv uintptr opt) (conv uintptr p) (conv uintptr (unsafe/Pointer (addr n))) 0)]
+    e))
+
+(go/func init []
+  (let [r RegisterExt]
+    (r "caml_unix_string_of_inet_addr" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (let [b (.-B (AsBytes (aget a 0)))]
+        (when (and (!= (len b) 4) (!= (len b) 16))
+          (Failwith "string_of_inet_addr"))
+        (Str (.String (conv net/IP b))))))
+    (r "caml_unix_socket" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (let [t (aget sockTypes (AsInt (aget a 2)))]
+        (when (optBool (aget a 0) false)
+          (set! t (bit-or t syscall/SOCK_CLOEXEC)))
+        (let [(values fd err) (syscall/Socket (aget sockDomains (AsInt (aget a 1))) t (AsInt (aget a 3)))]
+          (when (!= err nil)
+            (RaiseUnixError (errnoOf err) "socket" ""))
+          fd))))
+    (r "caml_unix_socketpair" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (let [t (aget sockTypes (AsInt (aget a 2)))]
+        (when (optBool (aget a 0) false)
+          (set! t (bit-or t syscall/SOCK_CLOEXEC)))
+        (let [(values fds err) (syscall/Socketpair (aget sockDomains (AsInt (aget a 1))) t (AsInt (aget a 3)))]
+          (when (!= err nil)
+            (RaiseUnixError (errnoOf err) "socketpair" ""))
+          (Tuple (aget fds 0) (aget fds 1))))))
+    (r "caml_unix_accept" (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a]
+      (let [fd (AsInt (aget a 1))
+            fl 0]
+        (when (optBool (aget a 0) false)
+          (set! fl syscall/SOCK_CLOEXEC))
+        (waitSock th fd pollIn "accept")
+        (let [nfd 0 ^syscall/Sockaddr sa nil ^error err nil]
+          (Blocking (fn [] (set! (values nfd sa err) (syscall/Accept4 fd fl))))
+          (when (!= err nil)
+            (RaiseUnixError (errnoOf err) "accept" ""))
+          (Tuple nfd (sockaddrValue sa))))))
+    (r "caml_unix_bind" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (when [err (syscall/Bind (AsInt (aget a 0)) (sockaddrOf (aget a 1) "bind"))] (!= err nil)
+        (RaiseUnixError (errnoOf err) "bind" ""))
+      Unit))
+    (r "caml_unix_connect" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (let [fd (AsInt (aget a 0))
+            sa (sockaddrOf (aget a 1) "connect")]
+        (when [e (sysCall (fn ^error [] (syscall/Connect fd sa)))] (!= e 0)
+          (RaiseUnixError e "connect" ""))
+        Unit)))
+    (r "caml_unix_listen" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (when [err (syscall/Listen (AsInt (aget a 0)) (AsInt (aget a 1)))] (!= err nil)
+        (RaiseUnixError (errnoOf err) "listen" ""))
+      Unit))
+    (r "caml_unix_shutdown" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (when [err (syscall/Shutdown (AsInt (aget a 0)) (AsInt (aget a 1)))] (!= err nil)
+        (RaiseUnixError (errnoOf err) "shutdown" ""))
+      Unit))
+    (r "caml_unix_getsockname" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (let [(values sa err) (syscall/Getsockname (AsInt (aget a 0)))]
+        (when (!= err nil)
+          (RaiseUnixError (errnoOf err) "getsockname" ""))
+        (sockaddrValue sa))))
+    (r "caml_unix_getpeername" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (let [(values sa err) (syscall/Getpeername (AsInt (aget a 0)))]
+        (when (!= err nil)
+          (RaiseUnixError (errnoOf err) "getpeername" ""))
+        (sockaddrValue sa))))
+    (r "caml_unix_recv" (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a]
+      (let [fd (AsInt (aget a 0))
+            n (AsInt (aget a 3))
+            ofs (AsInt (aget a 2))]
+        (when (> n unixBufferSize)
+          (set! n unixBufferSize))
+        (waitSock th fd pollIn "recv")
+        (let [buf (make (slice byte) n)
+              k 0 ^error err nil]
+          (Blocking (fn [] (set! (values k _ err) (syscall/Recvfrom fd buf (msgFlags (aget a 4))))))
+          (when (!= err nil)
+            (RaiseUnixError (errnoOf err) "recv" ""))
+          (copy (subslice (.-B (AsBytes (aget a 1))) ofs) (subslice buf 0 k))
+          k))))
+    (r "caml_unix_recvfrom" (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a]
+      (let [fd (AsInt (aget a 0))
+            n (AsInt (aget a 3))
+            ofs (AsInt (aget a 2))]
+        (when (> n unixBufferSize)
+          (set! n unixBufferSize))
+        (waitSock th fd pollIn "recvfrom")
+        (let [buf (make (slice byte) n)
+              k 0 ^syscall/Sockaddr sa nil ^error err nil]
+          (Blocking (fn [] (set! (values k sa err) (syscall/Recvfrom fd buf (msgFlags (aget a 4))))))
+          (when (!= err nil)
+            (RaiseUnixError (errnoOf err) "recvfrom" ""))
+          (copy (subslice (.-B (AsBytes (aget a 1))) ofs) (subslice buf 0 k))
+          (when (== sa nil)
+            ;; an unnamed peer: an empty path for a Unix socket
+            (set! sa (addr (lit syscall/SockaddrUnix))))
+          (Tuple k (sockaddrValue sa))))))
+    (r "caml_unix_send" (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a]
+      (let [fd (AsInt (aget a 0))
+            n (AsInt (aget a 3))
+            ofs (AsInt (aget a 2))]
+        (when (> n unixBufferSize)
+          (set! n unixBufferSize))
+        (waitSock th fd pollOut "send")
+        (let [buf (append (lit (slice byte)) (spread (subslice (.-B (AsBytes (aget a 1))) ofs (+ ofs n))))
+              k 0 ^error err nil]
+          (Blocking (fn [] (set! (values k err) (syscall/SendmsgN fd buf nil nil (msgFlags (aget a 4))))))
+          (when (!= err nil)
+            (RaiseUnixError (errnoOf err) "send" ""))
+          k))))
+    (r "caml_unix_sendto" (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a]
+      (let [fd (AsInt (aget a 0))
+            n (AsInt (aget a 3))
+            ofs (AsInt (aget a 2))
+            sa (sockaddrOf (aget a 5) "sendto")]
+        (when (> n unixBufferSize)
+          (set! n unixBufferSize))
+        (waitSock th fd pollOut "sendto")
+        (let [buf (append (lit (slice byte)) (spread (subslice (.-B (AsBytes (aget a 1))) ofs (+ ofs n))))
+              k 0 ^error err nil]
+          (Blocking (fn [] (set! (values k err) (syscall/SendmsgN fd buf nil sa (msgFlags (aget a 4))))))
+          (when (!= err nil)
+            (RaiseUnixError (errnoOf err) "sendto" ""))
+          k))))
+    (r "caml_unix_getsockopt" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (let [kind (AsInt (aget a 0))
+            fd (AsInt (aget a 1))
+            (values lvl opt) (sockOpt kind (AsInt (aget a 2)))]
+        (switch kind
+          (case [2]
+            (let [^syscall/Linger l (zero syscall/Linger)]
+              (when [e (getsockoptRaw fd lvl opt (unsafe/Pointer (addr l)) (unsafe/Sizeof l))] (!= e 0)
+                (RaiseUnixError e "getsockopt" ""))
+              (when (== (.-Onoff l) 0)
+                (return None))
+              (return (Some (conv int (.-Linger l))))))
+          (case [3]
+            (let [^syscall/Timeval tv (zero syscall/Timeval)]
+              (when [e (getsockoptRaw fd lvl opt (unsafe/Pointer (addr tv)) (unsafe/Sizeof tv))] (!= e 0)
+                (RaiseUnixError e "getsockopt" ""))
+              (return (tvSeconds tv)))))
+        (let [(values v err) (syscall/GetsockoptInt fd lvl opt)]
+          (when (!= err nil)
+            (RaiseUnixError (errnoOf err) "getsockopt" ""))
+          (switch kind
+            (case [0] (return (Bool (!= v 0))))
+            (case [4]
+              (when (== v 0)
+                (return None))
+              (return (Some (unixErrorValue (conv syscall/Errno v))))))
+          v))))
+    (r "caml_unix_setsockopt" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (let [kind (AsInt (aget a 0))
+            fd (AsInt (aget a 1))
+            (values lvl opt) (sockOpt kind (AsInt (aget a 2)))
+            v (aget a 3)
+            ^error err nil]
+        (switch kind
+          (case [2]
+            (let [l (lit syscall/Linger)]
+              (when [(values b ok) (assert (* Block) v)] ok
+                (set! (.-Onoff l) 1)
+                (set! (.-Linger l) (conv int32 (AsInt (aget (.-F b) 0)))))
+              (set! err (syscall/SetsockoptLinger fd lvl opt (addr l)))))
+          (case [3]
+            (let [tv (secondsTv (AsFloat v))]
+              (set! err (syscall/SetsockoptTimeval fd lvl opt (addr tv)))))
+          (default
+            (set! err (syscall/SetsockoptInt fd lvl opt (AsInt v)))))
+        (when (!= err nil)
+          (RaiseUnixError (errnoOf err) "setsockopt" ""))
+        Unit)))
+    (r "caml_unix_gethostname" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (let [(values h err) (os/Hostname)]
+        (when (!= err nil)
+          (RaiseUnixError (errnoOf err) "gethostname" ""))
+        (Str h))))
+    (r "caml_unix_gethostbyaddr" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (let [b (.-B (AsBytes (aget a 0)))
+            ^{:tag (slice string)} names nil
+            ^error err nil]
+        (when (and (!= (len b) 4) (!= (len b) 16))
+          (RaiseNotFound))
+        (Blocking (fn [] (set! (values names err) (net/LookupAddr (.String (conv net/IP b))))))
+        (when (or (!= err nil) (== (len names) 0))
+          (RaiseNotFound))
+        (let [dom 1]
+          (when (== (len b) 16)
+            (set! dom 2))
+          (hostEntry (strings/TrimSuffix (aget names 0) ".") nil dom (lit (slice (slice byte)) (append (lit (slice byte)) (spread b))))))))
+    (r "caml_unix_gethostbyname" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (let [name (GoString (aget a 0))
+            ^{:tag (slice net/IP)} ips nil
+            ^error err nil]
+        (when (not (cSafe (aget a 0)))
+          (RaiseNotFound))
+        (Blocking (fn [] (set! (values ips err) (net/LookupIP name))))
+        (when (or (!= err nil) (== (len ips) 0))
+          (RaiseNotFound))
+        (let [^{:tag (slice (slice byte))} v4 nil]
+          (range [_ ip ips]
+            (when (!= (.To4 ip) nil)
+              (set! v4 (append v4 (ipBytes ip)))))
+          (when (> (len v4) 0)
+            (return (hostEntry name nil 1 v4)))
+          (hostEntry name nil 2 (lit (slice (slice byte)) (ipBytes (aget ips 0))))))))
+    (r "caml_unix_getprotobyname" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (let [name (GoString (aget a 0))]
+        (range [_ fs (readDb "/etc/protocols")]
+          (let [hit (== (aget fs 0) name)]
+            (range [_ x (subslice fs 2)]
+              (when (== x name) (set! hit true)))
+            (when hit
+              (let [(values n _) (strconv/Atoi (aget fs 1))]
+                (return (Tuple (Str (aget fs 0)) (strSlice (subslice fs 2)) n))))))
+        (RaiseNotFound)
+        Unit)))
+    (r "caml_unix_getprotobynumber" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (let [want (AsInt (aget a 0))]
+        (range [_ fs (readDb "/etc/protocols")]
+          (when [(values n err) (strconv/Atoi (aget fs 1))] (and (== err nil) (== n want))
+            (return (Tuple (Str (aget fs 0)) (strSlice (subslice fs 2)) n))))
+        (RaiseNotFound)
+        Unit)))
+    (r "caml_unix_getservbyname" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (let [name (GoString (aget a 0))
+            proto (GoString (aget a 1))]
+        (range [_ fs (readDb "/etc/services")]
+          (let [pp (strings/SplitN (aget fs 1) "/" 2)
+                hit (== (aget fs 0) name)]
+            (range [_ x (subslice fs 2)]
+              (when (== x name) (set! hit true)))
+            (when (and hit (== (len pp) 2) (or (== proto "") (== (aget pp 1) proto)))
+              (let [(values n _) (strconv/Atoi (aget pp 0))]
+                (return (Tuple (Str (aget fs 0)) (strSlice (subslice fs 2)) n (Str (aget pp 1))))))))
+        (RaiseNotFound)
+        Unit)))
+    (r "caml_unix_getservbyport" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (let [port (AsInt (aget a 0))
+            proto (GoString (aget a 1))]
+        (range [_ fs (readDb "/etc/services")]
+          (let [pp (strings/SplitN (aget fs 1) "/" 2)]
+            (when (== (len pp) 2)
+              (let [(values n _) (strconv/Atoi (aget pp 0))]
+                (when (and (== n port) (or (== proto "") (== (aget pp 1) proto)))
+                  (return (Tuple (Str (aget fs 0)) (strSlice (subslice fs 2)) n (Str (aget pp 1)))))))))
+        (RaiseNotFound)
+        Unit)))
+    ;; getaddrinfo.c: node and service resolved by Go's net (numeric, /etc/hosts, DNS), each address once a socket type
+    (r "caml_unix_getaddrinfo" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (let [node (GoString (aget a 0))
+            serv (GoString (aget a 1))
+            fam -1 st -1 proto 0 numeric false passive false canon false]
+        (when (or (not (cSafe (aget a 0))) (not (cSafe (aget a 1))))
+          (return None))
+        (let [l (aget a 2)]
+          (while true
+            (let [(values b ok) (assert (* Block) l)]
+              (when (not ok) (break))
+              (let [o (aget (.-F b) 0)]
+                (if [(values ob ok) (assert (* Block) o)] ok
+                  (switch (.-Tag ob)
+                    (case [0] (set! fam (AsInt (aget (.-F ob) 0))))
+                    (case [1] (set! st (AsInt (aget (.-F ob) 0))))
+                    (case [2] (set! proto (AsInt (aget (.-F ob) 0)))))
+                  (switch (AsInt o)
+                    (case [0] (set! numeric true))
+                    (case [1] (set! canon true))
+                    (case [2] (set! passive true)))))
+              (set! l (aget (.-F b) 1)))))
+        (let [port 0]
+          (when (!= serv "")
+            (let [(values n err) (strconv/Atoi serv)]
+              (if (== err nil)
+                (set! port n)
+                (let [(values p err) (net/LookupPort "tcp" serv)]
+                  (when (!= err nil)
+                    (return None))
+                  (set! port p)))))
+          (let [^{:tag (slice net/IP)} ips nil]
+            (if (== node "")
+              (if passive
+                (set! ips (lit (slice net/IP) (net/IPv4 0 0 0 0) net/IPv6zero))
+                (set! ips (lit (slice net/IP) (net/IPv4 127 0 0 1) net/IPv6loopback)))
+              (if [ip (net/ParseIP node)] (!= ip nil)
+                (set! ips (lit (slice net/IP) ip))
+                (do (when numeric
+                      (return None))
+                    (let [^error err nil]
+                      (Blocking (fn [] (set! (values ips err) (net/LookupIP node))))
+                      (when (!= err nil)
+                        (return None))))))
+            (let [^{:tag (slice Value)} out nil
+                  types (lit (slice int) 0 1 2)]
+              (when (>= st 0)
+                (set! types (lit (slice int) st)))
+              (range [_ ip ips]
+                (let [d 1]
+                  (when (== (.To4 ip) nil)
+                    (set! d 2))
+                  (when (or (< fam 0) (== fam d))
+                    (range [_ t types]
+                      (let [pr proto cn ""]
+                        (when (== pr 0)
+                          (switch t
+                            (case [0] (set! pr syscall/IPPROTO_TCP))
+                            (case [1] (set! pr syscall/IPPROTO_UDP))))
+                        (when canon
+                          (set! cn node))
+                        (set! out (append out (Tuple d t pr (NewBlock 1 (addr (lit Bytes :B (ipBytes ip))) port) (Str cn)))))))))
+              (List (spread out))))))))
+    (r "caml_unix_getnameinfo" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (let [sa (AsBlock (aget a 0))
+            numHost false numServ false nameReqd false dgram false]
+        (range [_ o (listInts (aget a 1))]
+          (switch o
+            (case [1] (set! numHost true))
+            (case [2] (set! nameReqd true))
+            (case [3] (set! numServ true))
+            (case [4] (set! dgram true))))
+        (when (== (.-Tag sa) 0)
+          (return (Tuple (Str "") (aget (.-F sa) 0))))
+        (let [ip (conv net/IP (.-B (AsBytes (aget (.-F sa) 0))))
+              port (AsInt (aget (.-F sa) 1))
+              host (.String ip)
+              serv (strconv/Itoa port)]
+          (when (not numHost)
+            (let [^{:tag (slice string)} names nil ^error err nil]
+              (Blocking (fn [] (set! (values names err) (net/LookupAddr host))))
+              (if (and (== err nil) (> (len names) 0))
+                (set! host (strings/TrimSuffix (aget names 0) "."))
+                (when nameReqd
+                  (RaiseNotFound)))))
+          (when (not numServ)
+            (let [proto "tcp"]
+              (when dgram (set! proto "udp"))
+              (range [_ fs (readDb "/etc/services")]
+                (when (== (aget fs 1) (+ serv "/" proto))
+                  (set! serv (aget fs 0))
+                  (break)))))
+          (Tuple (Str host) (Str serv))))))
+    ;; select.c over poll(2): the descriptors of the three lists ready, in their lists' order
+    (r "caml_unix_select" (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a]
+      (let [rl (listInts (aget a 0))
+            wl (listInts (aget a 1))
+            el (listInts (aget a 2))
+            ^{:tag (slice pollFd)} fds nil]
+        (range [_ fd rl] (set! fds (append fds (lit pollFd :fd (conv int32 fd) :events pollIn))))
+        (range [_ fd wl] (set! fds (append fds (lit pollFd :fd (conv int32 fd) :events pollOut))))
+        (range [_ fd el] (set! fds (append fds (lit pollFd :fd (conv int32 fd) :events pollPri))))
+        (let [(values _ intr e) (waitFds th fds (AsFloat (aget a 3)))]
+          (when intr
+            (interruptedCall th "select"))
+          (when (!= e 0)
+            (RaiseUnixError e "select" ""))
+          (let [^{:tag (slice Value)} ro nil
+                ^{:tag (slice Value)} wo nil
+                ^{:tag (slice Value)} eo nil]
+            (range [i p fds]
+              (when (!= (bit-and (.-revents p) pollNval) 0)
+                (RaiseUnixError syscall/EBADF "select" ""))
+              (if (< i (len rl))
+                (when (!= (bit-and (.-revents p) (bit-or pollIn pollHup pollErr)) 0)
+                  (set! ro (append ro (conv int (.-fd p)))))
+                (if (< i (+ (len rl) (len wl)))
+                  (when (!= (bit-and (.-revents p) (bit-or pollOut pollHup pollErr)) 0)
+                    (set! wo (append wo (conv int (.-fd p)))))
+                  (when (!= (bit-and (.-revents p) pollPri) 0)
+                    (set! eo (append eo (conv int (.-fd p))))))))
+            (Tuple (List (spread ro)) (List (spread wo)) (List (spread eo))))))))))
