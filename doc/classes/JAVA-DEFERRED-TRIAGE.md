@@ -557,6 +557,59 @@ untried.
   and here (both append at the end). The resolution is the union in each place; `java-jc9-pki` merges cleanly
   with either.
 
+## As built: the REPL's exports (JCS136 (a), JCS142 (a); branch `java-internal-pkgs`, 2026-11-05)
+
+**How `@modules` reached the check.** It did not: `categorize` (`test/java/check.ae`) filed every test with an
+`@modules` tag as `:run-modules`, a category no corpus takes, so the tests that export an internal package were not
+in the reference at all (`ref-jdk26.edn` has none), whatever the world held. Two things stood between them and a pass:
+the tests were not in the corpora, and the REPL's member tables left the packages' classes out
+(`arbace.j2g.main/repl-visible?`: the edge's `:unexported` set, `jdk/edge.edn`).
+
+**What was built.**
+- `jdk/repl-exports.txt`: the packages, one a line, exact: F1's (JCS136 (a): `com.sun.crypto.provider`,
+  `sun.security.{util,x509,pkcs,provider,rsa,ec,ec.ed,ec.point,util.math,util.math.intpoly,internal.spec}`), `sun.security.jca`
+  (the JCA's registry, in F1's closure and named by the tests' `@modules`; not on JCS136's list) and F2's (JCS142 (a):
+  `sun.security.{pkcs12,provider.certpath,validator,timestamp,tools}`). It lies under `jdk/`, so it is in
+  `arbace_runtime_key` and the gate's keys.
+- `repl-visible?` takes a class of a listed package as visible (the edge's `:unexported` is not consulted for it):
+  the executable's member tables keep its public members and the REPL names them. Checked on stage 0: `AlgorithmDecomposer`,
+  `SHA`, `AESCipher`, `X509CertImpl`, `IntegerModuloP`, `PKIX`, `Validator` visible; `jdk.internal.misc.Unsafe`,
+  `sun.net.www.URLConnection`, `sun.nio.fs.Util` still not.
+- `test/java/check.ae`: a test whose `@modules` entries are all `java.base/PKG` of that list is not `:run-modules` (its
+  other categories apply), and its entries become javac options `--add-exports=java.base/PKG=ALL-UNNAMED` in its plan
+  (`:javac` in the reference); an entry of another module or package keeps it `:run-modules`. A main class of a
+  module (`java.base/PKG.Main`: the test patches the module) is skipped with its reason.
+- `bin/java-check`: `--record-ref` passes the options to the JDK's `javac` (the source set, the classes) and to its
+  `java`; `read_opts` passes them to repr/java's read (`--javac`: javac's attribution of the unexported package would
+  fail without them: AssertionError, ClassCastException, observed); the classes level already passed all `:javac`
+  options to javac on Arbace.
+- The REPL needs nothing per test (the visibility is the executable's, as option (a) says): the JVM's refusal without
+  `--add-exports` has no counterpart in the interpreter.
+
+**Checked (light, the gate's executable of the previous key: its tables predate the change).** `--record-ref --only` of
+three tests that need no F1/F2 class (`DecomposeAlgorithms`, `ExpandAndEncode`, `DigestKAT`: t08362, t08376, t08351, the
+reference by the JDK 26 build, the 4,850 other lines kept byte for byte), then `--levels read,interp,classes`: read 3
+of 3, classes 3 of 3 (javac on Arbace with the exports, byte for byte the JDK's), interpreted `ExpandAndEncode`
+passes; `DecomposeAlgorithms` fails with `j2g: not translated: sun.security.util.AlgorithmDecomposer.<clinit>` (the
+class is in the world, unrooted: the failure `repl-visible?` removes at the next executable build, to confirm then),
+`DigestKAT` stops at `ClassNotFoundException: sun.security.provider.MD4` (an F1 class). A sample of 15 essential tests
+at read and interp: 15 of 15 as recorded, 0 regressions (the change touches only tests with an `--add-exports` option).
+
+**The tests to judge when F1 and F2 land.** The scan finds 86 tests (4,936 in the corpora instead of 4,850; 81 not
+skipped): by option, `sun.security.util` 51, `x509` 28, `util.math` and `util.math.intpoly` 15 each (one test),
+`provider.certpath` 6, `provider` 5, `internal.spec` 4, `pkcs` 3, `validator`, `rsa`, `com.sun.crypto.provider` 1;
+by area `sun/security/util` 29, `x509` 19, `com/sun/crypto` 11, `sun/security/provider` 10, `com/sun/security` 4,
+`java/security/cert` 3, the rest 1-2. The 68 and 25 of JCS136 and JCS142 were estimates of the same set; the count
+is 86 with `sun.security.util` and `x509`, which F1 and F2 share. The night's commands: after F1's classes are in the
+executable, `bin/java-check --record-ref --only 'add-exports'` (the new tests' reference and ids, the other lines
+kept), then the levels read, interp, compiled and classes with `--only` on those ids, `--record`; `bin/reap --record`.
+Not run here: the executable's rebuild (a build), the compiled level (needs the world's classes).
+
+**Left.** The ids t08351, t08362 and t08376 are in `test/java/ref-jdk26.edn` (the other 83 come with the nights'
+`--record-ref`, since a full one rewrites the scan's plans); their `check-LEVEL.edn` lines are not recorded (a record
+needs the new executable). If F1's night finds a listed package that tests need beyond `repl-exports.txt`, one line
+adds it.
+
 ## Proposed
 
 JCS140-JCS142 are F4's and F2's ("As built: F4 (write-ahead)", "As built: F2 (write-ahead)", branch
