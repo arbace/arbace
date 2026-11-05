@@ -1,0 +1,171 @@
+#!/bin/bash
+# The oracles' records and packs (doc/ORACLE-RECORDS-SURVEY.md, ORS1-ORS14 decided (a); "As built: the tooling and C"):
+# what a gate reads of a host toolchain, recorded by hand on the host that has it (ORS5 (a)) and verified there, so that no
+# step of the essential gate, --full or the clean run needs the toolchain. The kinds: test/oracle-records/kinds.edn; the
+# packs' format, store and checks: test/oracle-records/oracle.bash.
+#
+# Usage: bin/oracle-records VERB ...
+#   list                       the kinds, with their records' or packs' state here
+#   record CROP KIND [--corpus C,...]
+#                              the kind's record rewritten by its :record command (by hand only; a commit of its own whose
+#                              message names the toolchain's identity, which the record's header holds)
+#   verify CROP [KIND...] [--corpus C,...] [--sample N]
+#                              the live oracle over the kinds' entries (each :verify command), compared; exit 1 when an
+#                              entry differs under the identity the record names, 0 when the toolchain moved (reported,
+#                              ORS6 (a)); a kind with no :verify is listed as such. Then the crossed pair (ORS7 (a)) where
+#                              the kind's command runs one. Where the toolchain is absent: "absent", exit 0
+#   pack PIN DIR IDS CMD HOST  the low-level packer (test/oracle-records/oracle.bash's oracle_make): DIR/NAME/ID for each "ID<TAB>KEY"
+#                              line of IDS into the store, the manifest and the pin written (the crops' :record commands use it)
+#   unpack PIN...              each pack unpacked into the store and checked; prints the directories
+#   pins                       every pin of the checkout (test/*/records/*.sha256): the pack in the store with its bytes, its
+#                              members as the manifest says (bin/gate --pins runs it); then the controls
+#   controls                   the tampered-pack control (ORS7 (a)): test/oracle-records/controls/'s pack, its bytes as pinned
+#                              and one member one byte off its manifest's digest, must be refused by oracle_unpack and
+#                              oracle_get; exit 1 when it is taken
+#   check [CROP]               pins and controls: what a gate step runs before it reads a pack (C's c-dg-essential)
+#   mirror [--push]            ORS3 (a): each pinned pack committed to the orphan branch oracle-packs (one commit a pack,
+#                              NAME/SHA256.tar.xz) in the store's mirror repository and, with --push, pushed to the Mac's
+#                              bare repository (git push mac oracle-packs; never origin); without --push the commands printed
+#   fetch NAME...              the packs the checkout pins under NAME fetched from the mirror into the store (the store's
+#                              mirror.git fetches oracle-packs from the main checkout's remote mac)
+#   ARBACE_ORACLE_PACKS: the store (default the main checkout's .tmp/oracle-packs/).
+set -uo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+. "$root/bin/lib/tmpdir.bash"
+. "$root/test/oracle-records/oracle.bash"
+cd "$root"
+kinds=test/oracle-records/kinds.edn
+
+field() { # LINE KEY: the string value of :KEY on a kinds line
+  printf '%s\n' "$1" | sed -n "s/.*:$2 \"\([^\"]*\)\".*/\1/p"
+}
+kind_lines() { # CROP [KIND...]: the kinds' lines
+  local crop=$1; shift
+  grep '^{:crop ' "$kinds" | while IFS= read -r l; do
+    [ "$(field "$l" crop)" = "$crop" ] || continue
+    if [ $# -gt 0 ]; then local k ok=; for k in "$@"; do [ "$(field "$l" kind)" = "$k" ] && ok=1; done; [ -n "$ok" ] || continue; fi
+    printf '%s\n' "$l"
+  done
+}
+subst() { # CMD CORPUS SAMPLE
+  local c=$1
+  c=${c//\{corpus\}/$2}
+  if [ -n "$2" ]; then c=${c//\{only\}/--corpus $2}; else c=${c//\{only\}/}; fi
+  if [ -n "$3" ]; then c=${c//\{sample\}/--sample $3}; else c=${c//\{sample\}/}; fi
+  printf '%s\n' "$c" | tr -s ' '
+}
+all_pins() { ls test/*/records/*.sha256 test/*/*/records/*.sha256 2>"$TMPDIR/oracle-pins.err" | LC_ALL=C sort; }
+
+controls() {
+  local d=test/oracle-records/controls st=0 out
+  [ -f "$d/tampered.sha256" ] || { echo "controls: FAILED: no $d/tampered.sha256"; return 1; }
+  # the control's pack is committed beside its pin (bytes, not a store's): a store of its own in scratch
+  local s=$TMPDIR/oracle-controls.$$; rm -rf "$s"; mkdir -p "$s/tampered"
+  cp "$d/tampered.tar.xz" "$s/tampered/$(oracle_pin_sha "$d/tampered.sha256").tar.xz"
+  if out=$(ARBACE_ORACLE_PACKS=$s oracle_unpack "$d/tampered.sha256" 2>&1); then
+    echo "controls: FAILED: the tampered pack was unpacked and taken ($out)"; st=1
+  else echo "controls: the tampered pack refused at unpack ($(printf '%s\n' "$out" | grep -m1 'refused\|differs' | cut -c1-120))"; fi
+  # oracle_get on the member: unpacked by hand (as a store left it), its digest checked at the read
+  local sha; sha=$(oracle_pin_sha "$d/tampered.sha256"); mkdir -p "$s/unpacked/$sha"; xz -dc "$d/tampered.tar.xz" | tar -C "$s/unpacked/$sha" -xf -
+  if out=$(ARBACE_ORACLE_PACKS=$s oracle_get "$d/tampered.sha256" member.txt 2>&1); then
+    echo "controls: FAILED: oracle_get took the tampered member ($out)"; st=1
+  else echo "controls: the tampered member refused by oracle_get"; fi
+  # and the untampered sibling is taken (the control is not a store that refuses everything)
+  if out=$(ARBACE_ORACLE_PACKS=$s oracle_get "$d/tampered.sha256" good.txt 2>&1); then echo "controls: its untampered member taken"
+  else echo "controls: FAILED: the untampered member refused too ($out)"; st=1; fi
+  rm -rf "$s"
+  return $st
+}
+
+pins() {
+  local p st=0 d
+  for p in $(all_pins); do
+    if d=$(oracle_unpack "$p" 2>"$TMPDIR/oracle-pins.err"); then
+      echo "pins: $(oracle_pin_name "$p") $(oracle_pin_sha "$p" | cut -c1-16): in the store, $(grep -vc '^#' "$(oracle_manifest "$p")") members as $(oracle_manifest "$p") says"
+    else echo "pins: FAILED: $p: $(head -1 "$TMPDIR/oracle-pins.err")"; st=1; fi
+  done
+  return $st
+}
+
+verb=${1:-}; [ $# -gt 0 ] && shift
+case $verb in
+  list)
+    grep '^{:crop ' "$kinds" | while IFS= read -r l; do
+      f=$(field "$l" file); s=missing
+      if [ -f "$f" ]; then
+        case $f in */records/*.sha256) if oracle_unpack "$f" > "$TMPDIR/oracle-list.out" 2>&1; then s="pack in the store"; else s="pack NOT in the store"; fi ;;
+                   *) s="$(grep -vc '^[;#]' "$f") lines" ;; esac
+      fi
+      printf '%-3s %-16s %s  %-46s %s\n' "$(field "$l" crop)" "$(field "$l" kind)" "$(field "$l" class)" "$f" "$s"
+    done ;;
+  record|verify)
+    crop=${1:-}; [ -n "$crop" ] || { sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }; shift
+    ks=() corpus= sample=
+    while [ $# -gt 0 ]; do
+      case $1 in --corpus) corpus=$2; shift 2 ;; --sample) sample=$2; shift 2 ;; *) ks+=("$1"); shift ;; esac
+    done
+    [ "$verb" = record ] && [ ${#ks[@]} != 1 ] && { echo "oracle-records record: one kind" >&2; exit 2; }
+    st=0 n=0
+    while IFS= read -r l; do
+      n=$((n + 1)); k=$(field "$l" kind); host=$(field "$l" host); cmd=$(field "$l" "$verb")
+      if [ "$cmd" = - ]; then echo "$verb: $crop $k: no :$verb command yet"; continue; fi
+      if [ "$(oracle_host_id "$host")" = none ]; then
+        [ "$verb" = record ] && { echo "record: $crop $k needs :$host, which this host lacks" >&2; exit 1; }
+        echo "verify: $crop $k: absent (no :$host here)"; continue
+      fi
+      c=$(subst "$cmd" "$corpus" "$sample")
+      echo "== $verb $crop $k: $c"
+      bash -c "$c" || st=1
+    done < <(kind_lines "$crop" ${ks[@]+"${ks[@]}"})
+    [ $n -gt 0 ] || { echo "oracle-records: no kind ${ks[*]:-} of crop $crop in $kinds" >&2; exit 2; }
+    exit $st ;;
+  pack) [ $# = 5 ] || { echo "oracle-records pack PIN DIR IDS CMD HOST" >&2; exit 2; }; oracle_make "$@" ;;
+  unpack) st=0; for p in "$@"; do oracle_unpack "$p" || st=1; done; exit $st ;;
+  pins) st=0; pins || st=1; controls || st=1; exit $st ;;
+  controls) controls ;;
+  check) st=0; pins || st=1; controls || st=1; exit $st ;;
+  mirror)
+    push=; [ "${1:-}" = --push ] && push=1
+    store=$(oracle_store); m=$store/mirror.git
+    cmds=$(cat <<EOF
+git init -q --bare "$m" 2>"$TMPDIR/oracle-mirror.err" || true
+# one commit a pinned pack not on the branch yet, on the orphan branch oracle-packs (NAME/SHA256.tar.xz)
+EOF
+)
+    for p in $(all_pins); do
+      nm=$(oracle_pin_name "$p"); sha=$(oracle_pin_sha "$p")
+      cmds+=$'\n'"oracle_mirror_add \"$m\" \"$nm\" \"$sha\" \"$(oracle_pack_path "$p")\""
+    done
+    cmds+=$'\n'"git -C \"$m\" remote add mac \"$(git -C "$(oracle_main)" remote get-url mac 2>"$TMPDIR/oracle-mirror.err")\" 2>\"\$TMPDIR/oracle-mirror.err\" || true"
+    cmds+=$'\n'"git -C \"$m\" push mac oracle-packs  # the Mac's bare repository (ORS3 (a)), the main checkout's remote mac; never origin"
+    if [ -z "$push" ]; then echo "mirror: the commands (--push runs them):"; printf '%s\n' "$cmds" | sed 's/^/   /'; exit 0; fi
+    oracle_mirror_add() { # MIRROR NAME SHA PACK: a commit of the pack on oracle-packs unless the branch holds it
+      local m=$1 nm=$2 sha=$3 pack=$4 blob tree parent idx
+      git -C "$m" cat-file -e "oracle-packs:$nm/$sha.tar.xz" 2>"$TMPDIR/oracle-mirror.err" && return 0
+      blob=$(git -C "$m" hash-object -w "$pack") || return 1
+      idx=$TMPDIR/oracle-mirror.index; rm -f "$idx"
+      parent=$(git -C "$m" rev-parse -q --verify oracle-packs 2>"$TMPDIR/oracle-mirror.err") || parent=
+      [ -n "$parent" ] && GIT_INDEX_FILE=$idx git -C "$m" read-tree "$parent"
+      GIT_INDEX_FILE=$idx git -C "$m" update-index --add --cacheinfo "100644,$blob,$nm/$sha.tar.xz" || return 1
+      tree=$(GIT_INDEX_FILE=$idx git -C "$m" write-tree) || return 1
+      c=$(git -C "$m" commit-tree "$tree" ${parent:+-p "$parent"} -m "oracle pack $nm $sha") || return 1
+      git -C "$m" update-ref refs/heads/oracle-packs "$c"
+    }
+    eval "$cmds" ;;
+  fetch)
+    m=$(oracle_store)/mirror.git
+    [ -d "$m" ] || git init -q --bare "$m" || exit 1
+    git -C "$m" remote get-url mac > "$TMPDIR/oracle-fetch.url" 2>&1 || git -C "$m" remote add mac "$(git -C "$(oracle_main)" remote get-url mac)" || exit 1
+    git -C "$m" fetch mac oracle-packs:refs/heads/oracle-packs || exit 1
+    st=0
+    for nm in "$@"; do
+      for p in $(all_pins); do
+        [ "$(oracle_pin_name "$p")" = "$nm" ] || continue
+        f=$(oracle_pack_path "$p"); mkdir -p "$(dirname "$f")"
+        git -C "$m" show "oracle-packs:$nm/$(oracle_pin_sha "$p").tar.xz" > "$f.part" && mv "$f.part" "$f" \
+          && oracle_unpack "$p" || { rm -f "$f.part"; st=1; }
+      done
+    done
+    exit $st ;;
+  *) sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+esac
