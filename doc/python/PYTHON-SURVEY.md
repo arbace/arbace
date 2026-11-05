@@ -2077,3 +2077,69 @@ runs at native speed under goi; pyi's own Go around it is interpreted. `Lib/ssl.
     - the test leaf through the fallback, accepted unconstrained and with a later date, then refused with a date
       before its issue (28);
     - with a store again, the fallback not consulted.
+## As built: 210, pyi's speed, round two (2026-11-05, the Mac VM, queue 210)
+
+Profile first: `PYI_CPUPROFILE` on the compiled benchmarks of `bin/pyi bench` (20 of the 71, the slowest against
+CPython and the call-, attribute- and generator-heavy ones), read with TamaGo's `go tool pprof`; each change measured
+on the benchmarks it was for, back to back with the build before it (the least CPU seconds of 3 alternated runs), and
+kept only when it paid. What the profiles showed, and what was done:
+
+| profile's finding | change | where | measured (compiled, VM) |
+|---|---|---|---|
+| bm_pprint: 46% in memmove, a bytearray's slice assignment copying the whole buffer (`_pyio`'s BytesIO writes `b[pos:pos+n]` at its end: io.StringIO quadratic) | in place when the length is kept or the tail replaced | bytearray.go | pprint 34 s -> 7.5 s |
+| bm_mdp: 47% in hashTuple (nested namedtuple states as dict keys, rehashed at every lookup) | a tuple's hash kept once computed, as CPython 3.14's `ob_hash` | containers.go | mdp 6.9 -> 3.5 s |
+| richards, deltablue, go, raytrace: attribute loads 20-38% (the instance dict's Go map; a monomorphic cache missing on richards' four task classes, lookupAttr's string map behind it), globals 5-10% | load-attr/store-attr caches of four types, the instance dict's entry found by identity (interned names) before the index; load-global's per-instruction cache (the globals' entry, or the builtins' while the globals' version holds); a dict's 64-bit mask of its keys' hash bits (a method's name absent from an instance dict without the index); object's method descriptors marked on the Builtin | attr.go, eval.go, aot.go, code.go, dict.go, func.go | 10-25% |
+| calls: bound built-in methods copied their arguments twice; bindArgs' general path for every call; a class's `__init__` called through a nested loop | the arguments made once with self first; the all-positional call first; `__init__` pushed in the caller's loop (CPython's CALL_ALLOC_AND_ENTER_INIT) | eval.go, func.go, frame.go, type.go | 5-10% on calls, 10% on a class's call |
+| every method call made a bound method for the call to unwrap | the compiled code's load-attr of a call with simple arguments as `AotLoadMethod`/`AotCallMethod` (CPython's LOAD_ATTR method variant): a Python method of an instance, or a built-in container's method descriptor, pushed with self, no bound object | aot.ae, aot.go | richards 16%, deltablue 14%, bpe_tokeniser 8% |
+| to-bool pushed a bool the conditional jump popped | fused in the compiled code | aot.ae | richards 5% |
+| bm_coroutines: newFrame 25% (a frame per coroutine, never reused) | a generator's or coroutine's frame reused once it returned (nothing escaped it) | frame.go, gen.go | coroutines 36% |
+| bm_fannkuch: a Slice made at every slice assignment; a list's slice copied out and back | the slice used as it is when its bounds are ints; same-length assignment in place | slice.go, containers.go | fannkuch 28% |
+| spectral_norm, nbody: mixed float and int operands through floatBinary's conversions | float +, -, *, / of a float and a float or an int64 directly | abstract.go | 4-6% |
+| a short program's start: the IR of each imported module read, a fifth of a short benchmark | strings without escapes sliced, an instruction's pair in one allocation | load.go | start 8% CPU |
+
+**The table** (the process's wall seconds, the least of 3 rounds; each round runs CPython, the base and this branch
+back to back on the same benchmark; the VM's load 6-13, four other agents running: differences under 10% are noise;
+CPython 3.14.10 `python3 -s -B`; base c3488342, after this branch's head; loops as test/python/bench/benchmarks.tsv):
+
+| benchmark | loops | CPython | base | after | base / CPython | after / CPython |
+|---|---:|---:|---:|---:|---:|---:|
+| raytrace | 1 | 0.21 | 0.96 | 0.73 | 4.6x | 3.5x |
+| deltablue | 50 | 0.13 | 0.74 | 0.49 | 5.7x | 3.8x |
+| fannkuch | 1 | 0.29 | 1.21 | 0.82 | 4.2x | 2.8x |
+| generators | 4 | 0.16 | 0.90 | 0.80 | 5.6x | 5.0x |
+| nqueens | 4 | 0.27 | 0.86 | 0.76 | 3.2x | 2.8x |
+| go | 1 | 0.10 | 0.45 | 0.33 | 4.5x | 3.3x |
+| richards | 10 | 0.33 | 1.30 | 0.83 | 3.9x | 2.5x |
+| chaos | 1 | 0.08 | 0.33 | 0.28 | 4.1x | 3.5x |
+| json_dumps | 1 | 0.03 | 0.29 | 0.25 | 9.7x | 8.3x |
+| spectral_norm | 4 | 0.36 | 1.10 | 1.02 | 3.1x | 2.8x |
+| unpack_sequence | 20000 | 0.24 | 0.90 | 0.91 | 3.8x | 3.8x |
+| coroutines | 20 | 0.38 | 1.40 | 0.84 | 3.7x | 2.2x |
+| float | 4 | 0.23 | 0.68 | 0.62 | 3.0x | 2.7x |
+| nbody | 3 | 0.32 | 0.60 | 0.62 | 1.9x | 1.9x |
+| hexiom | 1 | 0.03 | 0.12 | 0.11 | 4.0x | 3.7x |
+| base64 | 1 | 1.67 | 4.57 | 3.83 | 2.7x | 2.3x |
+| bpe_tokeniser | 1 | 3.51 | 10.89 | 8.35 | 3.1x | 2.4x |
+| async_tree | 1 | 0.24 | 1.61 | 1.26 | 6.7x | 5.2x |
+| mdp | 1 | 0.85 | 7.63 | 3.63 | 9.0x | 4.3x |
+| pprint | 1 | 1.40 | 34.06 | 5.24 | 24.3x | 3.7x |
+
+Over the 20, CPython 10.8 s, the base 70.6 s (6.5x), this branch 31.7 s (2.9x); without pprint 3.9x -> 2.8x; the
+median benchmark 4.0x -> 3.3x. The brief's aim, about 2x CPython or better, is met by nbody (1.9x) and nearly by
+coroutines, base64, bpe_tokeniser and richards (2.2-2.5x), not by the rest: what is left is the compiled loop's design,
+not one hot spot. Every instruction is a helper call over the frame's heap stack (a push and a pop through memory,
+`f.Lasti` stored each time); a call of a Python function returns to runFrames and enters the callee through
+guardedStep's deferred recover; a generator's or coroutine's resumption from Go (for-iter over a generator, await, a
+genexp's consumer) is a nested run; every int and float is a heap object. The profiles are flat now (no function above
+10% flat on the call-heavy benchmarks). The next steps, by their weight in the profiles:
+- values kept in Go locals across a basic block (a register allocation of the stack in arbace.python.aot), with
+  f.Lasti stored only at the instructions that may raise;
+- a call of a compiled function from compiled code without the return to runFrames (the callee's native function
+  entered directly; the C-level depth and the tracebacks as runFrames keeps them);
+- for-iter over a generator and yield-from resuming the generator's frame in the caller's loop (CPython's
+  FOR_ITER_GEN and SEND_GEN);
+- small ints and floats unboxed or cached (an allocation per loop step today);
+- dicts without the Go map index up to 8 entries (202b's open addressing: 3-11% compiled, but goi 15% slower, so
+  decided for after the re-seed that compiles pyi into stage 0).
+
+Not changed: Go's collector stays at GOGC 400 (GOGC 800 measured 3-7% faster for 1.6-1.9x the peak RSS).
