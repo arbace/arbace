@@ -427,15 +427,24 @@
       (when (== y 0)
         (AssertionViolation who "undefined for ~s" b))
 
+      ;; SMR4: an exact 0 stays the exact 0 and a zero remainder is +0.0, as Chez's
+      (when (pnExZero a)
+        (return (conv int64 0)))
+
       (switch kind
         (case [0]
           (return (math/Trunc (/ x y))))
         (case [1]
-          (return (math/Mod x y))))
+          (let [r (math/Mod x y)]
+            (when (== r 0)
+              (return 0.0))
+            (return r))))
 
       (let [m (math/Mod x y)]
         (when (and (!= m 0) (!= (< m 0) (< y 0)))
           (set! m + y))
+        (when (== m 0)
+          (return 0.0))
 
         m))))
 
@@ -832,11 +841,30 @@
 
         (return res))))
 
+  ;; SMR4: a signed zero or infinity to a bignum power keeps its sign for an odd one
+  (when [(values yb isBig) (assert (* big/Int) y)] isBig
+    (when (or (== x 0) (math/IsInf x 0))
+      (let [neg (and (math/Signbit x) (== (.Bit yb 0) 1))
+            ^bool pos (> (.Sign yb) 0)
+            ^float64 r 0.0]
+        (if (== (math/IsInf x 0) pos)
+          (set! r (math/Inf 1))
+          (set! r 0.0))
+        (when neg
+          (set! r (- r)))
+        (return r))))
+
   (pnPow x (ToFloat y)))
 
 (go/func pnExpt ^any [^any x ^any y]
   (pnNum "expt" x)
   (pnNum "expt" y)
+  ;; SMR4: the exact 1 to any power is 1 (Chez's, a complex one too)
+  (when [(values n ok) (assert int64 x)] (and ok (== n 1))
+    (return (pnI 1)))
+  (when [(values fx ok) (assert float64 x)] (and ok (math/IsInf fx -1))
+    (when [(values fy oky) (assert float64 y)] (and oky (math/IsInf fy 0))
+      (return (MkRect (math/NaN) (math/NaN)))))
   (when (or (isComplex x) (isComplex y))
     (return (cxExpt x y)))
 
@@ -1624,8 +1652,11 @@
         m)))
 
   (Def "fl+" 0 -1 (fn ^any [^{:tag (slice any)} args]
-      (let [r 0.0]
-        (range [_ x args]
+      (when (== (len args) 0)
+        (return 0.0))
+      ;; SMR4: the sum starts at the first argument, so (fl+ -0.0 -0.0) is -0.0, as Chez's
+      (let [r (pnFl "fl+" (aget args 0))]
+        (range [_ x (subslice args 1)]
           (set! r + (pnFl "fl+" x)))
 
         r)))
@@ -1791,6 +1822,12 @@
         (when (< e s)
           (AssertionViolation "bitwise-rotate-bit-field" "invalid end index ~s" (aget args 2)))
 
+        ;; SMR4: a bignum count rotates by its remainder modulo the field's width
+        (let [(values cb isBig) (assert (* big/Int) (aget args 3))]
+          (when (and isBig (>= (.Sign cb) 0))
+            (when (== e s)
+              (return (NormInt x)))
+            (return (NormInt (pnRotateField x s e (.Int64 (.Mod (new big/Int) cb (big/NewInt (- e s)))))))))
         (let [c (pnBitIdx "bitwise-rotate-bit-field" (aget args 3) "invalid count ~s")]
           (NormInt (pnRotateField x s e c))))))
 

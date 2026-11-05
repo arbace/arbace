@@ -198,6 +198,62 @@ checks pass, regressions: none; `bin/si test --si` 61 of 64, 3 known, 0 failing;
 `bin/si check --aot --only si/list-checks` for the AOT record line (here added by hand after a `bin/si aot` run equal to Chez's); the classes
 then show what the unrun files moved (`mats-chez-reader` and `mats-error-checks` first).
 
+## 7. As built: SMR4 and SMR5 (2026-11-05, as decided: SMR4 all parts, SMR5 in R7RS mode)
+
+**Two string->numbers.** Probed against Chez (`chez --script` and `chez --program`): Chez's own `string->number` and `number->string` read and write more than
+`(rnrs)`'s (a Chez program run as `--program` with `(import (rnrs))` gets the strict ones: `#x1.8`, `1#`, `#12r10`, `#b1e1`, `1/2e3` are `#f`, radix 3 or 36 an
+error), and the mats test both (`string->number` and `r6rs:string->number`). si's primitives (`go/arbace/scm/prim_number.ae`) stay R6RS's, and `(chezscheme)`
+(`scheme/lib/chezscheme.sls`) defines its own `string->number` and `number->string` over them with one mark in the place (rnrs)'s do not take (a third argument
+`#t` for `string->number`, a fourth for `number->string`; any other value there is an error, as the arity is in Chez's `(rnrs)`): no new primitive, so psyntax's boot
+list and `psyntax.pp.ae` are untouched. The mark is `StringToNumberX`'s `ext` (`numtext.ae`).
+
+**SMR4 (1), the extended syntax** (`numtext.ae`: `StringToNumberX`, `parseGeneral`, a fallback after the R6RS grammar fails, so every number that read before reads
+the same): prefixes `#e #i #x #b #o #d` in any order and `#Nr` (radix 2 to 36, with `#e`/`#i`), a radix argument 2 to 36; digits then `#` placeholders (`98##`, `2.###d3`,
+`21##.####`, `1#/5##`) which make the number inexact unless `#e`; a point in any radix (`#x1.8` is 1.5); an exponent marker `e s f d l` that is no digit of the radix, its digits
+and sign in the radix and the radix the base (`#b1e10` is 4.0, `1.0e10` in radix 12 is 12^12); a rational with an exponent (`1/5S4`, `#e2/3e4`) and with `#`; `1/0#`, `0/0e20`
+(`+inf.0` and `+nan.0` when the number is inexact by a `#` of the denominator, an exponent or `#i`; a `#` of the numerator alone is no number: `1#/0` is `#f`); `#e1@1` is `#f`
+(an exact polar number of a nonzero angle), also in R6RS's; the exponent of any size (beyond 10^6 an exact one is `#f`, an inexact one 0.0 or infinity), the mantissa of 8,000
+digits exact. **(2)** `number->string`'s precision: `(number->string z radix p)` writes `|p` after every finite flonum part (Chez's, with `p` at least 53, bignum `p`
+too; precision 0 or a non-integer is an error; an exact number with a precision is an error; Chez's accepts every radix with a precision, `(rnrs)`'s only 10); radix 2 to 36
+for Chez's (digits to `Z`; a flonum is laid out positionally from radix 16, as Chez does). **(3) Flonum corners**: every NaN is `eqv?` and `equal?` to every NaN, and one key
+of a hashtable (Chez's; si compared the bits: `(eqv? (/ 0.0 0.0) +nan.0)` was `#f`, which alone failed about 40 clauses of `fl.ms`, `ieee.ms`, `5_3.ms`: `flmin`, `flmax`,
+`div-and-mod` of zeros and infinities, `-`, `sin`, `cos`, `tan`, `magnitude` of NaNs); `fl+` starts at its first argument (`(fl+ -0.0 -0.0)` is -0.0); `remainder` and `modulo` of
+flonums return +0.0 for a zero result and the exact 0 for an exact 0 dividend; `expt` of the exact 1 is 1 whatever the power, of a signed zero or infinity to a bignum power keeps its
+sign for an odd one, of -inf.0 to an infinite power is NaN+NaNi; `bitwise-rotate-bit-field` takes a bignum count (modulo the width); `sqrt` of a complex with a NaN part and no
+infinite one is NaN+NaNi; `exp` of a complex with a large real part scales (`exp 800.0+1e-200i` has the finite imaginary part 2.7263745721125063e147); a flonum complex over an
+exact complex divisor divides by its flonum parts when they are finite and nonzero (the exact products overflowed to NaN).
+
+**SMR5, denormals in R7RS mode.** The R7RS mode is the reader's global (`R7RS` in `read.ae`, set from the program's first datum, as the `write` of `(scheme write)` uses it): in it
+`number->string` and `write` print a denormal without Chez's `|N` suffix and with `d.0e-N` for a one-digit mantissa (`5.0e-324`, the digits are Chez's shortest, the suffix and the `.0`
+are all that changes); R6RS programs keep `5e-324|1`. A `(chezscheme)` program is R7RS-mode too (the reader mode follows the imports), so it prints `5.0e-324` where Chez prints
+`5e-324|1`, the one divergence of the rule. The exponent keeps Chez's spelling (`e308`, no `+`): writing `e+308` in R7RS mode would pass the last two tests of the suite but make
+every large flonum of every `(chezscheme)` program differ from Chez's output (tried, the whole `bin/si check` run showed it, undone; the two tests stay in the class
+`r7rs-float-printing`).
+
+**What moved**, on the mats run (`bin/si mats --record 5_3.ms fl.ms ieee.ms`, 207 mats, light, main's stage 0 as host; before and after):
+
+| | before | after |
+|---|---|---|
+| `mats-numeric` items | 186 | 2 (`5_3.ms` `expt` 96: a negative flonum to a ratnum power with a huge numerator, Chez gives an infinite complex; `ieee.ms` `expt` 26: `(expt +inf.0+2.0i 2)` is `+inf.0+0.0i` on Chez) |
+| `mats-chez-checks` items | 3 | 0 |
+| all non-pass items of the three files | 263 | 76 (the rest: `mats-chez-identifier` 65, `mats-arity-one` 5, `mats-chez-reader` 3, `mats-chez-syntax` 1) |
+| mats passing / failing / not run | 116 / 26 / 65 | 136 / 6 / 65 |
+| failing clauses (`CLAUSEFAIL`) | 139 + 16 + 39 | 6 + 0 + 1 (5 of them `=`, `<` ... `22`, `30`: `mats-arity-one`) |
+
+`bin/si r7rs`: 1,216 of 1,225 before SMR5, now 1,230 of 1,232 (the 9 float-printing tests: 7 pass, 2 are the `e+308` ones; 7 more tests run because the numeric syntax tests now
+read); `bin/si srfi` 11 programs, 1,231 checks pass, no regression; `bin/si test --si` 61 of 64 (3 known, 0 failing); `bin/si unit` ok (new: `numbers_ext_test.ae`, 174 of Chez's
+answers to `string->number` recorded in `numbers_ext_data_test.ae`, and a test that the strict one keeps R6RS's); `bin/si check` (all 50 programs) 49 of 50, the one known
+(`chez-conditions`), no regression; `bin/si check --only test/scheme/essential-check.txt` 48 of 49 (the same one); the new program `si/numeric-corners` (`test/scheme/si/programs/numeric-corners.sps`, 278
+expressions of the probes, its Chez run recorded, in the essential subset, in the record by hand as `si/list-checks` was) passes interpreted and compiled (`bin/si check --aot --only si/numeric-corners`,
+output equal to Chez's). Not measured: the speed (`eqv?` of flonums has one more test; the NaN keys of hashtables, `canon`), `bin/si ecraven`: the programs that print flonums in R7RS
+mode (`(scheme base)`), because of SMR5's `d.0e-N` only on denormals, none expected.
+
+Left, by the probes: `(expt -2.0 100000000000000000001/3)` (Chez `-inf.0+inf.0i`, si `+inf.0`), `(expt +inf.0+2.0i 2)`, `(sqrt -inf.0+nan.0i)`'s sign of the infinite part, `/` of a flonum complex by an exact complex
+beyond the flonum range (`(/ 1.0+1.0i (make-rectangular (* 4 (expt 10 400)) (* 4 (expt 10 400))))`: Chez `0.0+0.0i`, si NaN+NaNi), `fx` and `fl` names of the identifier class (SMR6).
+
+**The night's command** (as SMR3's, the records of every file): `bin/heavy-lock bin/si mats --record` (the three files here are recorded; the unrun files' lines are older), `bin/si r7rs --record`,
+`bin/si check --record` and `bin/si check --aot --record` for the one new program (written by hand in both records here), then `bin/si ecraven --only` on a few float printers as the measure of the speed.
+
 ## Proposed (SMR1 onward; none decided)
 
 - **SMR1 include.** (a) keep the built `include`/`include-ci`, add it to `base.chezscheme.sls` and the include sample to `programs.edn` with a Chez run, at the next

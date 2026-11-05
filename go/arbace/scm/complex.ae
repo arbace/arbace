@@ -72,6 +72,15 @@
     (Violation CondAssertion "/" "undefined for ~s" (conv int64 0)))
   (when (IsExactZero d)
     (return (MkRect (Div a c) (Div b c))))
+  ;; SMR4: a flonum dividend over an exact complex divisor of a large or small magnitude divides by the divisor's flonum parts (Smith's
+  ;; way), as Chez's: the exact products overflow to infinities
+  (when (not (IsExact (MkRect a b)))
+    (let [(values _ cfl) (assert float64 c)]
+      (when (not cfl)
+        (let [fc (ToFloat c)
+              fd (ToFloat d)]
+          (when (and (!= fc 0) (!= fd 0) (not (math/IsInf fc 0)) (not (math/IsInf fd 0)))
+            (return (cxDiv a b fc fd)))))))
   (let [(values _ fl) (assert float64 c)]
     (when fl
       (if (>= (math/Abs (ToFloat c)) (math/Abs (ToFloat d)))
@@ -115,6 +124,11 @@
               (when (< (Sign "sqrt" b) 0)
                 (set! i (Neg i)))
               (return (MkRect r i)))))))
+    ;; SMR4: a NaN part without an infinite one makes both parts NaN (Chez's)
+    (let [fa (ToFloat a)
+          fb (ToFloat b)]
+      (when (and (or (math/IsNaN fa) (math/IsNaN fb)) (not (math/IsInf fa 0)) (not (math/IsInf fb 0)))
+        (return (MkRect (math/NaN) (math/NaN)))))
     (return (cxF (cmplx/Sqrt (cxC x))))))
 
 (go/func cxLogF "cxLogF is the logarithm of re+im i (flonums).\n" ^any [^float64 re ^float64 im]
@@ -130,8 +144,20 @@
 (go/func cxLogReal "cxLogReal is the logarithm of a negative real: ln |x| + pi i.\n" ^any [^any x]
   (cxLogF (ToFloat x) 0.0))
 
+(go/func cxExpScaled "cxExpScaled is e^a times t for a finite a and t, without the overflow of e^a alone when t is small (SMR4: exp of 800+1e-200i has a finite imaginary part).\n" ^float64 [^float64 a ^float64 t]
+  (let [r (* (math/Exp a) t)]
+    (when (and (math/IsInf r 0) (!= t 0))
+      (let [m (math/Exp (+ a (math/Log (math/Abs t))))]
+        (if (< t 0) (return (- m)) (return m))))
+    r))
+
 (go/func cxExp ^any [^any x]
-  (cxF (cmplx/Exp (cxC x))))
+  (let [(values a b) (cxParts x)
+        fa (ToFloat a)
+        fb (ToFloat b)]
+    (when (and (> fa 700) (not (math/IsInf fa 0)) (not (math/IsInf fb 0)) (not (math/IsNaN fb)))
+      (return (MkRect (cxExpScaled fa (math/Cos fb)) (cxExpScaled fa (math/Sin fb)))))
+    (cxF (cmplx/Exp (cxC x)))))
 
 ;; cxExpt is x^y where one of them is complex or x is a negative real and y not an integer.
 (go/func cxExpt ^any [^any x ^any y]
