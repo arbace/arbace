@@ -745,11 +745,11 @@ Results (`test/rust/front/coverage-2026-11-05.edn`, `.tmp/rust-front/mono/*.cove
   `bin/rust-front codegen-check`): **every function equal**, and the programs built from our IR (`bin/rsi run --front mir`: the LLVM forms
   lowered by rsi's lowering to C, gcc `-O0`) give the exit statuses rustc's executables give (5, 212, 41, 17, 45); `a6` (drops,
   unwinding, as a monomorphic dump) 9 of 11;
-- the corpus: **8,023 of 11,453 mono items' functions equal rustc's IR (70.1 %)** over the 81 programs, **13 programs with every
+- the corpus: **8,342 of 11,453 mono items' functions equal rustc's IR (72.8 %)** over the 81 programs, **13 programs with every
   item equal** (the six samples, `abort`, `exit-code`, `panic-assert`, `panic-assert-eq`, `panic-todo`, `panic-unwrap-err`, `trap`). The progress of the
   day: the scalar subset 391 of 4,526 (the first run; nine programs were not readable then), then aggregates, enums, unwinding,
   `track_caller` and the shims, then folding, constants in memory, indirect aggregates and nop landing pads (62.1 %), then the bit intrinsics, floats, pointer
-  constants and partly uninitialized allocations;
+  constants, partly uninitialized allocations, constant GEPs into globals and the pointer attributes of boxes (72.8 %);
 - **runs**: seven of those synthetic programs (`abort` 134, `exit-code` 37, `panic-assert`, `panic-assert-eq`, `panic-todo`,
   `panic-unwrap-err` 101, `trap` 132) built with their own unit made of our IR, linked with the host's native std as rsi's native-std leg links the oracle's
   (`bin/rust-front run-native`, `RSI_FRONT_IR` in `bin/lib/rsi/link`), give rustc's status, stdout and stderr (thread ids
@@ -758,7 +758,7 @@ Results (`test/rust/front/coverage-2026-11-05.edn`, `.tmp/rust-front/mono/*.cove
 - what blocks the rest, by items (the last run's refusals, `test/rust/front/coverage-2026-11-05.edn`): `Offset` of non-scalar
   pointees 465 (rustc types them as named structs or byte arrays by rules not ported), an ABI the slice does not take (`abi other`:
   vectors) 234, arrays of non-scalars 91, `size_of_val` 75, `BoxDerefTransmute` 55, unsizing of other pointers 53, `arith_offset`
-  42, `repeat` 40, a tail; 1,879 items differ (classes seen: an extra alloca or block where rustc's analysis differs, parameter
+  42, `repeat` 40, a tail; 1,560 items differ (classes seen: an extra alloca or block where rustc's analysis differs, parameter
   attributes of newtype pointers, `nuw` flags on some arithmetic) and 209 raise errors (bugs of the slice, counted by item).
 
 Findings worth keeping (the surprises of the first runs): the oracle IR needs `-C no-prepopulate-passes`; unsigned `AddWithOverflow`
@@ -775,7 +775,7 @@ can fold (shifts, comparisons, int-to-pointer) never reach the IR as instruction
 
 RF1 (6-9 days planned): the modes the table names for RF3's judging are in (`mir`, `iface`, `layout` as the layouts table, the
 mono-items run, the census); `expanded`, `resolve`, `typeck` and `consts` (RF4-RF10's oracles) are not built. RF2 (3-5): done
-in under a day, the spec, reader, printer and check. RF3 (16-26 days): the first day took the code generation from nothing to 70.1 %
+in under a day, the spec, reader, printer and check. RF3 (16-26 days): the first day took the code generation from nothing to 72.8 %
 of the mono items of 81 programs, the collector's traversal to all 81 item sets, and seven programs to running; what is left of the 16 to 26 is the remaining codegen
 (LLVM's types of aggregates for `Offset` and arrays, vectors, virtual calls, `size_of_val`, the intrinsics' tail, the classes of the
 1,879 items that differ: about 3 to 5 days by the refusal counts), then the pieces the helper still answers: layout (`rustc_abi`, about 2,500 lines), the collector and instance
@@ -787,7 +787,7 @@ resolution with specialization, v0 symbols (the crates' disambiguator hashes), v
 - **RFP1 What next in RF3.** Options: (a) **finish the codegen on rustc's data first (memory aggregates, floats, the intrinsics,
   virtual calls, constants in memory) to reach most of the corpus's mono items, then replace the oracle's answers one at a time (layout,
   then the collector with resolution, then symbols), each judged against the helper's**; (b) port layout and the collector first, with
-  the codegen at today's 70 %; (c) stop at the trial. *Recommended: (a)*: every step stays judged exactly and the program runs grow
+  the codegen at today's 73 %; (c) stop at the trial. *Recommended: (a)*: every step stays judged exactly and the program runs grow
   with it.
 - **RFP2 Running std.** Options: (a) **keep the native-std leg for RF3's runs (the unit replaced, std native) and the ci leg after the
   lowered std exists at the checkout's key (RE3/RE4, heavy)**; (b) build the lowered std in a worktree for the trial's runs. *Recommended:
