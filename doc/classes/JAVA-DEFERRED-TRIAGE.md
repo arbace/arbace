@@ -917,3 +917,7 @@ JCS128-JCS135, each as recommended: :management split (:jmx by design, :mxbeans 
 ## Decided (2026-11-05, the user: JCS140-JCS142)
 
 JCS140 (a): jdk26u's cacerts as data from the build tree; JCS141 (b): jar verification a later small fix, outside F2; JCS142 (a): F2's internal packages visible at the REPL.
+
+## Decided (2026-11-05, the user: JCS155-JCS157)
+
+JCS155: (b) SSLLogger as built for F3's night, then (a) System.Logger in jrt as its own fix; JCS156 (a): QUIC's TLS engine in, amending JCS131; JCS157 (a): java.net.IDN in.
