@@ -3873,3 +3873,7 @@ night rekeys them anyway (cx9's `arbace/c/dg.ae`, the rows' `bin/arbace-go` and 
 ## Decided (2026-11-05, the user)
 
 GTS240-GTS245, each as recommended: the hosts wrapper and concurrency into gate-run.bash with the runner's next all-rekeying change; the six arbace/ steps narrowed by :crop-out after a night --audit; the real controls built and the two waivers accepted; the planner's requests batched with GTS240; crop pins verbs needing stage 0 run after it in the clean run; 3.6 s a plan for the hosts' identities accepted.
+
+## Decided (2026-11-05, the user)
+
+GTS246 (a): C++'s overshoot accepted until GTS222's first two nightly runs, then cx9's dg-error rotated; GTS247: Rust's and Haskell's round trips whole or :clean-only until a share is exceeded, then their ids files generated.
