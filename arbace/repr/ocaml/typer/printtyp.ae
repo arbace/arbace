@@ -261,7 +261,7 @@
                                                (binding [*unaliased* (ty/repr p)] (out-type names p)))))
                    cstrs))))
 
-(declare mty-doc)
+(declare mty-doc unalias)
 
 (defn- class-type-types* [cty]
   (case (cty 0)
@@ -291,7 +291,10 @@
                             (if poly (d 1) t)
                             (if poly (merge names (dissoc (ty/name-vars (d 2)) ::ty/aliased ::ty/printed)) names))))
                   (into (sorted-map) (:meths s)))
-          items (concat vs ms)]
+          cs (map (fn [p] (f/box :b 2 (f/text (str "constraint " (get names (ty/type-proxy p) "_") " =")) f/sp
+                                 (out-type names (unalias p))))
+                  (::constraints names))
+          items (concat cs vs ms)]
       (f/box :hv 2 (f/box :b 2 (f/text "object") (if-let [a (::self-alias names)] (f/docs f/sp (f/text (str "(" a ")"))) []))
              f/sp (f/join f/sp items) (f/brk 1 -2) (f/text "end")))
     :Cty_arrow (f/box :b 0 (f/text (label-text (cty 1)))
@@ -311,7 +314,11 @@
   (let [params (:params decl)
         s @(let [c (:type decl)] (loop [c c] (case (c 0) :Cty_signature (c 1) (recur (c 3)))))
         self (:self s)
-        names (ty/name-vars (concat params (when (= :Cty_signature ((ty-of-class-body (:type decl)) 0)) [self]) (class-type-types* (:type decl))))
+        ;; Aliases.add params: a parameter that is not a variable (constrained) printed by its alias
+        cparams (remove ty/tvar? (map ty/repr params))
+        names (ty/name-vars (concat params (when (= :Cty_signature ((ty-of-class-body (:type decl)) 0)) [self]) (class-type-types* (:type decl)))
+                            (map ty/type-proxy cparams))
+        _ (doseq [p cparams] (swap! (::ty/printed names) conj (ty/type-proxy p)))
         px (ty/type-proxy self)
         self-alias (when (contains? (::ty/aliased names) px) (swap! (::ty/printed names) conj px) (get names px))
         virt (if cltype
@@ -324,10 +331,25 @@
                    _ (letfn [(go [t] (let [t (ty/repr t)] (when-not (@seen t) (swap! seen conj t) (let [d (ty/desc t)] (run! go (if (= :Tobject (d 0)) [(d 1)] (ty/children d)))))))]
                        (run! go (cons self (class-type-types* (:type decl)))))
                    pname (fn [p] (let [p (ty/repr p)]
-                                   (if (and (ty/tvar? p) (nil? ((ty/desc p) 1)) (not (@seen p))) "_" (get names p "_"))))]
+                                   (cond (and (ty/tvar? p) (nil? ((ty/desc p) 1)) (not (@seen p))) "_"
+                                         (ty/tvar? p) (get names p "_")
+                                         :else (get names (ty/type-proxy p) "_"))))]
                (f/docs (f/box :b 1 (f/text "[") (f/join (f/text ", ") (map #(f/text (pname %)) params)) (f/text "]")) f/sp))
              [])
-           (f/text n) f/sp (f/text (if cltype "=" ":")) f/sp (class-type-doc (assoc names ::self-alias self-alias) (:type decl)))))
+           (f/text n) f/sp (f/text (if cltype "=" ":")) f/sp
+           (class-type-doc (assoc names ::self-alias self-alias ::constraints (vec cparams)) (:type decl)))))
+
+(defn- unalias
+  "Ctype.unalias: a copy of an object or variant node with a fresh row variable (so printed unaliased)"
+  [t]
+  (let [t (ty/repr t) d (ty/desc t)]
+    (case (d 0)
+      :Tobject (let [[fs r] (ty/fields-in-order (d 1))
+                     r' (if (ty/tvar? r) (ty/newty2 (ty/level r) [:Tvar nil]) r)]
+                 ;; the name kept (OCaml's unalias), unless the object is one of its own arguments
+                 (ty/newty2 (ty/level t) [:Tobject (reduce (fn [rest [n k x]] (ty/newty2 (ty/level t) [:Tfield n k x rest])) r' (reverse fs))
+                                          nil]))
+      (ty/newty2 (ty/level t) d))))
 
 (defn- item-doc [item]
   (case (item 0)
