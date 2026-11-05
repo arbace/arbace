@@ -2245,3 +2245,50 @@ samples on the VM; nothing recorded is committed (the main host's night records 
   without it.
 - **Sizes**, extrapolated from 24 files a corpus: the packs about 410 MB raw, 50 MB xz (stdlib 18, site-packages 11,
   lib-test 21; scopes besides), within ORS11's 100 MB; committed: the essential dumps 1.9 MB and the manifests about 4 MB.
+
+## As built: 214, pyi's embedding for the re-seed window W2 (2026-11-05, the Mac VM, queue 214; PYS28 (a))
+
+The work doc/W-WINDOW.md §5 lists for pyi (W-P1-W-P10 decided), built on `mac/214-python-embed` for the main host to take into W2's
+candidate `window-w2`. Nothing here is built into an executable: no seed, no `bin/arbace-go`, no gate run (light checks only).
+
+- **goi's table lists pyi's runtime** (`go/arbace/gotable.edn`): `arbace/py` and the libm port it imports, `arbace/libm` (the Haskell
+  line's), and ci's back end `arbace/ci` and `arbace/crt` (queue 208's DECISION 1 (a), decided for this re-seed: pyi's C library cores
+  run ci's interpreter compiled under goi). `arbace.go.table/program-path?` takes the four as packages of the program's go/;
+  j2g --program copies `go/arbace/py` and `go/arbace/libm` into the program beside ci's (`arbace/j2g/main.ae`).
+- **Not listed** (W-P6 (a)): pyexpat and expat, and by the same rule the other lazy modules, the C library host `clib`, the glue
+  `pybz2`, `pylzma`, `pyzstd` (queue 208z) and `_ssl`'s fallback store `pyssl`: each is interpreted from its forms on its module's
+  first import, none is imported by `arbace/py`, so the table need not name them. They stay out of every key (the crop list).
+- **The front end embedded**: `arbace/j2g/embed.ae` drops `arbace/python{.ae,/}` and `arbace/repr/python{.ae,/}` (PYS29 (a): no
+  stdlib embedded). On this branch's keys (Python's, before gt9's keys commit): `arbace_embedded_sources`, `gate_key`, the audit's
+  `:gate` and `steps.edn`'s `:tools` follow; `gate-key-crops-test.bash` moves them to the kept side. In W2's form (gt9's
+  `arbace_crop_paths`) the same is a patch for the main host: the four paths leave the list and `crop-rules`, `go/arbace/{py,libm}`
+  join `arbace_runtime_not` (W-P3 (a): out of the runtime key, in `gate_key` and the javac key), and `go/arbace/{clib,pybz2,pylzma,
+  pyzstd,pyssl}` join the list (queue 212's finding 3, and pyzstd).
+- **`RT.toolSource` takes `arbace/python`** (a REQUEST: arbace/lang is the runtime): `arbace/python.ae` and `arbace/python/*` are
+  reloaded from the checkout when they differ from the embedded copy, as repr/python's already are (`arbace/repr/`).
+- **pyi's runtime builds for tamago** (found by the table's check, run): goi's table checks a listed package in all four
+  configurations, and `arbace/py` had 464 errors of goi's checker in tamago/amd64 and tamago/arm64 (TamaGo's syscall has no Linux
+  sockets, mmap, fcntl, select, resource, spawn, umask, rusage). Twelve files are now `//go:build linux` (`builtins_{socket,
+  socket_table,select,mmap,fcntl,fcntl_table,resource,posix_ext,posix_ids,posix_table,posix_spawn,posixsubprocess}.go`) and one new
+  file, `builtins_os_other.go` (`//go:build !linux`), gives the rest of the runtime what it names of them on tamago: Linux's numbers,
+  no process time, no umask, no `*at` path but the current directory's, a socket type that is never made. `posix.go`, `signal.go` and
+  `time.go` name four helpers in place of Linux-only syscall names (`sysUmask`, `ignorePipeSignals`, `cpuTimeNs`, `oNofollow()`; the
+  last a function, as O_NOFOLLOW differs between amd64 and arm64 and a constant's `:val` would be one architecture's). On linux
+  nothing changes. `bin/pyi runtime read` reads the `!linux` files under tamago/arm64 and merges them into `go/arbace/py.ae`
+  (`runtime_read_other`), so the round trip keeps them.
+- **goi honours `//go:build` in a loaded package** (a REQUEST: arbace/go is goi's): the REPL's package state (`arbace.go.repl/
+  source-of`) checked every file of a namespace it loaded, a `!linux` file included; it now selects them as `load/package-source`
+  does. And the checker verifies a package's `:init-order` (written for the package's own `:config`) in a configuration that leaves
+  files out as the order of what is left (`load/package-source`'s `:excluded`, `arbace.go.check`).
+- **crt builds for tamago** (a REQUEST for C's owner): `arbace/crt` had 8 checker errors on tamago (`syscall.Access`, `Stat_t`'s
+  `Atim`/`Mtim`/`Ctim`); `sys_linux.go` and `sys_other.go` hold them now.
+- **`bin/pyi table-check [--configs C,...] [--tables]`** (`test/python/table_check.ae`, as `bin/oi table-check`): the four packages
+  listed, taken by `program-path?`, checked by goi's checker in every configuration (linux's by `bin/goi table-configs`, embed-gaps'),
+  `--tables` the generator over them alone. On the VM, tamago/amd64 and tamago/arm64: ok (py 138 files, about 20 s a configuration;
+  with `--tables` 123 s, 3.7 GB). The generator over the four alone: 332 signatures, 82 invokers, 28 adapters, 19 stub families
+  (784 stubs), 9 files; each tamago configuration 368 functions, 231 methods, 102 types, 144 variables, 250 members without a typed
+  invoker (called by reflection); the digest 845,330 bytes (184,961 compressed) a configuration. The linux configurations need linux's
+  std converted (`bin/goi table-configs`): the main host's.
+- **The table's size** (W-P7 (a)): `bin/goi table --size` links the executable with and without the table, so it needs W2's build;
+  its line is recorded here by day after W2 (the main host's command: `bin/goi table --size` after `ARBACE_GO_ARCHES=amd64
+  bin/arbace-go --build`, W2's step 05).
