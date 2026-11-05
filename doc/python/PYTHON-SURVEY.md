@@ -1645,3 +1645,35 @@ The user's decision on 205's DECISION (a), 2026-11-05: the constructors now, as 
   `typing._generic_class_getitem`'s `typing._GenericAlias`, so its `__mro_entries__` keeps Generic where CPython's
   returns `()` before a later generic alias. This is not chased here (the brief). It is in no class yet: every
   `class X(Generic[T], SomeABC[T])` stops there.
+
+## As built: 211, test_ast's last methods and test_dict's leftovers (2026-11-05, the Mac VM, queue 211)
+
+- **Interned constants.** A str constant of `[a-zA-Z0-9_]*` is interned when its code is loaded (`load.go`'s
+  `loadConst`, codeobject.c's `intern_constants` with `should_intern_string` of the default build; in tuples too, as
+  `loadConst` recurses). `nameStr`'s own table (the names GetStr, SetStr and `co_names` use, 202b) is merged into
+  `sys.intern`'s `internTable`, so a name, a constant, a parser's identifier (202c) and `sys.intern(s)` are one object, as
+  in CPython's one table. `node.id is 'x'` inside a method holds: test_ast's three CopyTests replace tests.
+- **`b''` is one object** (`emptyBytes`, the constant's load): test_singletons. Only the constant: `bytes()` and the
+  empty results of operations stay new objects (no test needs them).
+- **ast.parse's int digits limit**: `_PyPegen_number_token`'s SyntaxError ("Exceeds the limit (N digits) for integer
+  string conversion: value has M digits; use sys.set_int_max_str_digits() to increase the limit - Consider hexadecimal
+  for huge integer literals to avoid decimal conversion limits.", the literal's line, offsets 0) for a decimal literal
+  past `sys.get_int_max_str_digits()`. The host's parser does not know the runtime's limit and answers the value in
+  decimal, so `builtins_ast_parse.go` reads the literal's radix from the source at the Constant's position:
+  test_literal_eval_str_int_limit. A huge literal in exec'd or imported source still compiles (a low of 211's report).
+- **Pickling the dict iterators**: their `__reduce__` is `dictiter_reduce`'s `(iter, (list,))` of a copy, the
+  iterator not advanced; list_iterator's and tuple_iterator's `__reduce__` and `__setstate__` are
+  `listiter_reduce_general`'s and `tupleiter_reduce`'s (an unpickled dict iterator is a list_iterator, which the tests
+  pickle again). test_dict's six `*iterator_pickling` tests. `:pickle-iterators` keeps the other built-in iterators.
+- **Classes.** `:ast-objects` is narrowed to two causes: a `**{object(): v}` or `**{FakeStr('id'): v}` keyword refused
+  by `CALL_FUNCTION_EX` ("keywords must be strings") before a node's `__init__` or `__replace__` sees it, because pyi's
+  calls carry keyword names as strs (`kwnames []*Str`) where CPython hands a builtin the dict (test_non_str_kwarg,
+  test_replace_non_str_kwarg; the call protocol's owner, PY-core); and test_pickling's 300 s limit (it passed on the VM).
+  test_AST_garbage_collection moves to `:finalization-collect` (a cycle through a weak reference cleared at
+  gc.collect(), PYS9 (a)). test_dict's three finalization methods stay classed: test_container_iterator and
+  test_free_after_iterating call gc.collect() and need the finalizer queue (`:finalization-collect`), and
+  test_oob_indexing_dictiter_iternextitem needs `X.__del__` run when `d[2] = None` drops the last reference
+  (`:finalization`, by design).
+- **The sample**: `bin/pyi lib-test-all --fresh test_ast test_dict`, 339 methods: 316 equal, 23 classed, 0 failing
+  (the base: 305, 34, 0). test_ast 207 of 217 (the 10: 7 `:cpython-only`, 2 `:ast-objects`, 1
+  `:finalization-collect`); test_dict 109 of 122 (10 `:cpython-only`, 3 finalization).
