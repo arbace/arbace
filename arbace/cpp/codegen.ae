@@ -262,7 +262,9 @@
   "The function's symbol (a constructor's or destructor's variant `v`), its definition queued (or its declaration
   written)."
   [fid & [v]]
-  (let [f (sema/fnd fid) v (fn-variant f (or v 2)) nm (fn-name fid v)]
+  (let [f (sema/fnd fid) c1 (when (and (= 1 v) (#{:ctor :dtor} (:kind f))) (abi/mangle-fn f 1))
+        v (fn-variant f (or v 2)) nm (fn-name fid v)]
+    (when c1 (swap! *top* update :c1 (fnil conj #{}) c1))
     (when-not (contains? (:wanted @*top*) [fid v])
       (swap! *top* update :wanted conj [fid v])
       (if (or (:tbody f) (and (:implicit f) (not (:trivial f))) (and (:defaulted f) (not (:trivial f))) (:tinits f) (:tassign f))
@@ -530,7 +532,7 @@
       (and (:trivial f) (= :ctor (:kind f)) (empty? (:ps (:ty f)))) nil
       :else
       (let [plan (nth (fn-sig f v) 3)
-            callee (if virtual (vcall-target (:cls f) fid nil obj) (want-fn! fid v))]
+            callee (if virtual (vcall-target (:cls f) fid nil obj) (want-fn! fid (if ab 2 v)))]
         (binding [*as-base* nil]
           (emit-call! plan callee va (:ty f) inits (when (and (:cls f) (not (:static f))) obj) dest (nothrow-fn? f)
                       (when (takes-vtt? f v) (:vtt ab))))))))
@@ -1670,7 +1672,8 @@
                                  [:body body])))
         ;; the complete object's constructor and destructor: aliases of the base ones for a strong definition
         (when (and (#{:ctor :dtor} (:kind f)) (empty? (linkage-of f)) (not vbc))
-          (add-top! (list 'llvm/alias (gsym (abi/mangle-fn f 1)) (list 'fn ret (vec ps)) ['ptr (gsym nm)])))
+          ;; written where the complete object's constructor or destructor is called, as clang emits it
+          (swap! *top* assoc-in [:aliases (abi/mangle-fn f 1)] (list 'llvm/alias (gsym (abi/mangle-fn f 1)) (list 'fn ret (vec ps)) ['ptr (gsym nm)])))
         nil))))
 
 (defn emit-d0!
@@ -1914,6 +1917,8 @@
                 init (:ginit v)
                 leaves (when-not (abi/ref? t) (const-leaves t init 0))
                 link (cond (:internal v) [:linkage :internal] (:linkonce v) [:linkage :linkonce_odr] :else [])]
+            ;; a use through an earlier `extern` declaration of the same object needs no declaration of its own
+            (swap! *top* update :declared conj nm)
             (cond
               (and leaves (abi/scalar? (abi/unq t)) (<= (count leaves) 1))
               ((if (:internal v) #(swap! *top* assoc-in [:lazy nm] %) add-top!)
@@ -2003,6 +2008,7 @@
               (swap! *top* update :declared conj key)
               (if (= k :group) (group! x) (vtt! x))))
           (recur))))
+    (doseq [[nm a] (sort-by key (:aliases @*top*))] (when (contains? (:c1 @*top*) nm) (add-top! a)))
     (when (:dso @*top*) (add-top! (list 'llvm/global (gsym "__dso_handle") 'i8 :linkage :external :visibility :hidden)))
     (vec (concat [(list 'llvm/source-filename file)
                   (list 'llvm/datalayout "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128")
