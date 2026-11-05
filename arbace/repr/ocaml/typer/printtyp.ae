@@ -1,0 +1,180 @@
+;; Ported from OCaml 5.5.0 (the release tarball, SHA-256 fcc6ae665d1ec51d52510eaac7834a86a9806bf5a258bb7cca78733fccf015ba):
+;; typing/oprint.ml's printers of types, type declarations, constructors, values, modules, module types and
+;; signatures (their Format boxes and break hints), over the trees typing/printtyp.ml and out_type.ml make, whose
+;; notice follows (LICENSE.md, "The OCaml Core System"):
+;;
+;;                                 OCaml
+;;
+;;  Projet Cristal, INRIA Rocquencourt
+;;
+;;   Copyright 2002 Institut National de Recherche en Informatique et
+;;     en Automatique.
+;;
+;;   All rights reserved.  This file is distributed under the terms of
+;;   the GNU Lesser General Public License version 2.1, with the
+;;   special exception on linking described in the file LICENSE.
+
+(ns arbace.repr.ocaml.typer.printtyp
+  "Printtyp's signature as Format prints it (doc/ocaml/TYPER.md, T8): the items of a signature, [:val name id
+  type] [:type [[name path decl]...]] [:exn name id cstr] [:module name id mty] [:modtype name id mty-or-nil], as
+  Oprint's documents (arbace.repr.ocaml.typer.format) rendered at Format's margin. A module type is [:Mty_ident
+  path] [:Mty_signature items] [:Mty_functor param res] (param nil for (), else [id-or-nil mty]) [:Mty_alias path]."
+  (:require [arbace.repr.ocaml.typer.types :as ty]
+            [arbace.repr.ocaml.typer.format :as f]
+            [arbace.string :as str]))
+
+(set! *warn-on-reflection* false)
+
+;; ---------------------------------------------------------------------------------------------
+;; Types (oprint.ml's print_out_type and its levels)
+
+(defn- label-text [l] (case (l 0) :Nolabel "" :Labelled (str (l 1) ":") :Optional (str "?" (l 1) ":")))
+
+(declare out-type out-type-1 simple-out-type)
+
+(defn- typlist [elem sep ts]
+  (f/join (f/docs (f/text sep) f/sp) (map elem ts)))
+
+(defn- typargs [names ts]
+  (case (count ts)
+    0 []
+    1 (f/docs (simple-out-type names (first ts)) f/sp)
+    (f/docs (f/box :b 1 (f/text "(") (typlist #(out-type names %) "," ts) (f/text ")")) f/sp)))
+
+(defn- tuple? [t] (= :Ttuple ((ty/desc t) 0)))
+(defn- arrow? [t] (= :Tarrow ((ty/desc t) 0)))
+
+(defn- out-type-2 [names t arg]
+  (let [d (ty/desc t)]
+    (if (= :Ttuple (d 0))
+      (let [els (d 1)
+            parens (and arg (some? (first (first els))))]
+        (f/docs (when parens (f/text "("))
+               (f/box :b 0 (typlist (fn [[l x]] (f/box :b 0 (when l (f/text (str l ":"))) (simple-out-type names x)))
+                                    " *" els))
+               (when parens (f/text ")"))))
+      (simple-out-type names t))))
+
+(defn simple-out-type [names t]
+  (let [t (ty/repr t) d (ty/desc t)]
+    (case (d 0)
+      :Tvar (f/text (get names t "'_"))
+      :Tconstr (f/box :b 0 (typargs names (d 2)) (f/text (ty/*path-name* (d 1))))
+      (:Tarrow :Ttuple) (f/box :b 1 (f/text "(") (out-type names t) (f/text ")"))
+      (f/text "?"))))
+
+(defn out-type-1 [names t]
+  (let [t (ty/repr t) d (ty/desc t)]
+    (if (= :Tarrow (d 0))
+      (let [l (d 1)
+            a (if (ty/is-optional l)
+                (let [x (ty/expand-head (d 2)) xd (ty/desc x)]
+                  (if (and (= :Tconstr (xd 0)) (= (xd 1) ty/path-option)) (first (xd 2)) (d 2)))
+                (d 2))]
+        (f/box :b 0 (f/text (label-text l)) (out-type-2 names a true) (f/text " ->") f/sp (out-type-1 names (d 3))))
+      (out-type-2 names t false))))
+
+(defn out-type [names t] (out-type-1 names t))
+
+(defn type-scheme-doc [t] (out-type (ty/name-vars [t]) t))
+
+;; ---------------------------------------------------------------------------------------------
+;; Signature items (print_out_sig_item, print_out_type_decl, print_out_constr)
+
+(def ^:private operator-chars (set "!$%&*+-./:<=>?@^|~#"))
+(defn- value-ident [n]
+  (if (or (operator-chars (first n)) (#{"mod" "land" "lor" "lxor" "lsl" "lsr" "asr" "or"} n))
+    (str "( " n " )")
+    n))
+
+(defn- constr-doc [names c simple?]
+  (let [n (if (= "::" (:name c)) "(::)" (:name c))]
+    (if (empty? (:args c))
+      (f/text n)
+      (f/box :b 2 (f/text (str n " of")) f/sp (typlist #(simple-out-type names %) " *" (:args c))))))
+
+(defn- decl-doc [kwd [name _ decl]]
+  (let [params (:params decl)
+        names (into {} (map (fn [p] [(ty/repr p) (str "'" (or ((ty/desc p) 1) "a"))]) params))
+        type-defined (case (count params)
+                       0 (f/text name)
+                       1 (f/box :b 0 (f/text (names (ty/repr (first params)))) f/sp (f/text name))
+                       (f/box :b 0 (f/text "(")
+                              (f/box :b 0 (f/join (f/docs (f/text ",") f/sp) (map #(f/text (names (ty/repr %))) params))
+                                     (f/text ")"))
+                              f/sp (f/text name)))
+        manifest (:manifest decl)
+        k (:kind decl)
+        priv (if (:private decl) " private" "")
+        name-params (f/docs (f/text (str kwd " ")) type-defined (when (and manifest (not= :abstract (k 0)))
+                                                                (f/docs (f/text " =") f/sp (out-type names manifest))))
+        tkind (case (k 0)
+                :abstract (if manifest (f/docs (f/text (str " =" priv)) (f/brk 1 2) (out-type names manifest)) [])
+                :open (f/text (str " =" priv " .."))
+                :variant (f/docs (f/text (str " =" priv)) (f/brk 1 2)
+                                (if (empty? (k 1)) (f/text "|")
+                                    (f/join (f/docs f/sp (f/text "| ")) (map #(constr-doc names % true) (k 1)))))
+                :record (f/docs (f/text (str " =" priv " "))
+                               (f/text "{")
+                               (mapcat (fn [l] (f/docs f/sp (f/box :b 2 (f/text (str (when (:mut l) "mutable ") (:name l) " :")) f/sp
+                                                                  (out-type names (:type l)))
+                                                      (f/text ";")))
+                                       (k 1))
+                               (f/brk 1 -2) (f/text "}")))]
+    (f/box :b 2 (f/box :hv 2 name-params tkind))))
+
+(declare mty-doc)
+
+(defn- item-doc [item]
+  (case (item 0)
+    :val (f/box :b 2 (f/text (str "val " (value-ident (item 1)) " :")) f/sp (type-scheme-doc (item 3)))
+    :type (f/join f/sp (map-indexed (fn [i d] (decl-doc (if (zero? i) "type" "and") d)) (item 1)))
+    :exn (let [c (item 3) names (ty/name-vars (:args c))]
+           (f/box :b 2 (f/text "exception ") (constr-doc names c true)))
+    :module (let [mty (item 3)]
+              (if (= :Mty_alias (mty 0))
+                (f/box :b 2 (f/text (str "module " (item 1) " =")) f/sp (f/text (ty/*path-name* (mty 1))))
+                (f/box :b 2 (f/text (str "module " (item 1) " :")) f/sp (mty-doc mty))))
+    :modtype (if-let [mty (item 3)]
+               (f/box :b 2 (f/text (str "module type " (item 1) " =")) f/sp (mty-doc mty))
+               (f/box :b 2 (f/text (str "module type " (item 1)))))))
+
+(defn- signature-doc [items] (f/join f/sp (map item-doc items)))
+
+(defn- simple-mty-doc [mty]
+  (case (mty 0)
+    :Mty_ident (f/text (ty/*path-name* (mty 1)))
+    :Mty_signature (if (empty? (mty 1))
+                     (f/text "sig end")
+                     (f/box :hv 2 (f/text "sig") f/sp (signature-doc (mty 1)) (f/brk 1 -2) (f/text "end")))
+    :Mty_alias (f/text (str "(module " (ty/*path-name* (mty 1)) ")"))
+    :Mty_functor (f/docs (f/text "(") (mty-doc mty) (f/text ")"))))
+
+(defn- functor-args [mty]
+  (loop [m mty acc []] (if (= :Mty_functor (m 0)) (recur (m 2) (conj acc (m 1))) [acc m])))
+
+(defn- functor-params-doc [params]
+  (let [anon? (fn [p] (and p (nil? (first p))))]
+    (letfn [(args [ps]
+              (cond
+                (empty? ps) []
+                (anon? (first ps)) (f/docs (simple-mty-doc (second (first ps))) (f/text " ->") f/sp (args (rest ps)))
+                :else (let [rv (reverse ps)
+                            suffix (reverse (take-while anon? rv))
+                            named (vec (take (- (count ps) (count suffix)) ps))]
+                        (f/docs (f/box :b 0 (f/join f/sp (map (fn [p] (if p
+                                                                       (f/docs (f/text (str "(" (or (some-> (first p) :name) "_") " : "))
+                                                                              (mty-doc (second p)) (f/text ")"))
+                                                                       (f/text "()")))
+                                                             named)))
+                               f/sp (f/text "->") f/sp (args suffix)))))]
+      (args params))))
+
+(defn mty-doc [mty]
+  (let [[params res] (functor-args mty)]
+    (f/box :b 2 (functor-params-doc params) (simple-mty-doc res))))
+
+(defn signature-text
+  "Printtyp.signature: the items in a vertical box, rendered"
+  [items]
+  (f/render (f/box :v 0 (signature-doc items))))
