@@ -41,7 +41,7 @@
 
 (set! *warn-on-reflection* true)
 
-(declare label-text)
+(declare label-text parse-offset)
 (def ^:dynamic *ctx* nil)   ; where a check runs: {:fn F :bb LABEL :inst X} (the Verifier), {:form I :item K} (the parser)
 (def ^:dynamic ^java.util.List *errs* nil)   ; the Verifier's errors, in order (it goes on after a failed visit)
 
@@ -63,6 +63,7 @@
 ;; Types
 
 (def ^:dynamic *types* {})
+(def ^:dynamic *partial* false)   ; the forms end at an LLParser error the reader met: no end-of-function/module checks
 (def ^:dynamic *alloca-as* 0)   ; the data layout's alloca address space (A), program address space (P)
 (def ^:dynamic *prog-as* 0)
 
@@ -744,7 +745,7 @@
         blocks (:body o)
         ic (volatile! 0)   ; the item of the text: the header is 0
         at (fn [] (assoc *ctx* :item @ic))]
-    (when (or (empty? blocks) (and (= 1 (count blocks)) (nil? (second (first blocks))) (empty? (drop 2 (first blocks)))))
+    (when (and (not *partial*) (or (empty? blocks) (and (= 1 (count blocks)) (nil? (second (first blocks))) (empty? (drop 2 (first blocks))))))
       (binding [*ctx* (assoc *ctx* :item 1)] (verr :parser/syntax "function body requires at least one basic block" {:at :start})))
     (doseq [[i blk] (map-indexed vector blocks)]
       (let [[_ l & items] blk]
@@ -762,13 +763,14 @@
                       (cond
                         (and r (= t 'void)) (verr :parser/void-name "instructions returning void cannot have a name" {:at :start})
                         (not= t 'void) (define-value st r t "instruction"))))))))
-        (when-not (and (seq items) (terminator? (last items)))
+        (when-not (or *partial* (and (seq items) (terminator? (last items))))
           (binding [*ctx* (assoc *ctx* :item (inc @ic))] (verr :parser/terminator "expected instruction opcode")))))
     (doseq [u (:uselistorder o)] (note-md! u))
+    (when-not *partial*
     (let [named (sort (remove numbered? (keys (.fwd st))))
           nums (sort (map #(Long/parseLong %) (filter numbered? (keys (.fwd st)))))]
       (when (seq named) (verr :parser/undefined-value (str "use of undefined value '%" (first named) "'") {:at [:fn-find (str "%" (first named))]}))
-      (when (seq nums) (verr :parser/undefined-value (str "use of undefined value '%" (first nums) "'") {:at [:fn-find (str "%" (first nums))]})))))
+      (when (seq nums) (verr :parser/undefined-value (str "use of undefined value '%" (first nums) "'") {:at [:fn-find (str "%" (first nums))]}))))))
 
 (defn- local-linkage? [l] (#{:internal :private} l))
 
@@ -854,7 +856,7 @@
                       blk (:body (apply hash-map (drop 4 f))) x (drop 2 blk)
                       :let [b (body x) c (callee-of b)]
                       :when (and c (global? c) (= (global-key c) k))]
-                  (let [[_ ps] (split-inst b)] (call-fty (first ps) (nth ps 2))))
+                  (let [[_ ps] (split-inst b)] [(call-fty (first ps) (nth ps 2)) (nth ps 2)]))
           n-refs (let [n (volatile! 0)]
                    (letfn [(walk [y] (cond (and (global? y) (= (global-key y) k)) (vswap! n inc)
                                            (or (seq? y) (vector? y)) (doseq [z y] (walk z))
@@ -863,10 +865,18 @@
                    @n)]
       (when (> n-refs (count calls)) (verr :parser/intrinsic "intrinsic can only be used as callee" at))
       (when-not (intr/recognized? k) (verr :parser/intrinsic (str "unknown intrinsic '" k "'") at))
-      (doseq [fty (reverse calls) :when (not (old-form-decl? k fty))]
+      (doseq [[fty args] (reverse calls)]
+        (if (old-form-decl? k fty)
+          ;; AutoUpgrade's masked intrinsics with their alignment argument (UpgradeIntrinsicCall): a fatal error for a bad one
+          (when-let [[_ op] (re-find #"^llvm\.masked\.(load|gather|store|scatter)" k)]
+            (let [a (peek (nth args (if (#{"load" "gather"} op) 1 2) nil))
+                  fatal #(verr :parser/fatal (str "LLVM ERROR: " %) {:fatal true})]
+              (cond (not (integer? a)) (fatal "Invalid alignment argument")
+                    (zero? (long a)) (when (#{"load" "store"} op) (fatal "Invalid zero alignment argument"))
+                    (not (pow2? a)) (fatal "Invalid alignment argument"))))
         (try (check-intrinsic-signature k fty)
              (catch arbace.lang.ExceptionInfo e
-               (if (:llvm/verify (ex-data e)) (verr :parser/intrinsic (.getMessage e) at) (throw e))))))))
+               (if (:llvm/verify (ex-data e)) (verr :parser/intrinsic (.getMessage e) at) (throw e)))))))))
 
 (defn- phase-parser [forms]
   (doseq [[fi f] (map-indexed vector forms)]
@@ -886,6 +896,7 @@
         llvm/uselistorder (let [[_ [t v]] f] (use-value nil v (norm-type t)))
         nil)))
   ;; validateEndOfModule's order: comdats, metadata, debug locations, implicit intrinsics, then undefined globals
+  (when-not *partial*
   (let [cdefs (set (keep #(when (= (first %) 'llvm/comdat) (second %)) forms))
         crefs (sort (distinct (for [f forms :when (#{'llvm/global 'llvm/define 'llvm/declare 'llvm/alias 'llvm/ifunc} (first f))
                                     :let [c (:comdat (apply hash-map (drop-while #(not (keyword? %)) (drop 2 f))))]
@@ -912,7 +923,7 @@
         named (remove numbered? undef)
         nums (sort (map #(Long/parseLong %) (filter numbered? undef)))]
     (when (seq named) (verr :parser/undefined-global (str "use of undefined value '@" (first named) "'") {:at [:mod-find (str "@" (first named))]}))
-    (when (seq nums) (verr :parser/undefined-global (str "use of undefined value '@" (first nums) "'") {:at [:mod-find (str "@" (first nums))]}))))
+    (when (seq nums) (verr :parser/undefined-global (str "use of undefined value '@" (first nums) "'") {:at [:mod-find (str "@" (first nums))]})))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Phase 2: the Verifier's rules
@@ -2082,6 +2093,17 @@
       (catch arbace.lang.ExceptionInfo e
         (if (:llvm/verify (ex-data e)) [e []] (throw e))))))
 
+(defn- run-phases-parser
+  "LLParser's checks alone over the forms: [parser-error]."
+  [forms]
+  (binding [*types* (into {} (keep #(when (= (first %) 'llvm/type) [(second %) (norm-type (nth % 2))]) forms))
+            *groups* (into {} (keep #(when (= (first %) 'llvm/attributes) [(second %) (nth % 2)]) forms))
+            *meta* (into {} (keep #(when (= (first %) 'llvm/meta) [(second %) (nth % 2)]) forms))
+            *gdefs* (java.util.HashMap.) *gfwd* (java.util.TreeMap.) *mdefs* (java.util.HashSet.) *mrefs* (java.util.HashSet.)
+            *errs* (java.util.ArrayList.)]
+    (try (phase-parser forms) [nil]
+         (catch arbace.lang.ExceptionInfo e (if (:llvm/verify (ex-data e)) [e] (throw e))))))
+
 (defn verify-forms
   "A module's first error, {:rule R :message M}, or nil when it is valid."
   [forms]
@@ -2415,9 +2437,10 @@
       (and (nil? first-e) tm-warning) ["debug" (str/trim-newline tm-warning) "" tm-warning]
       (nil? first-e) ["valid" "" "" ""]
       pe ["invalid" (.getMessage ^Throwable pe) (str (rule-of pe))
-          (if src
-            (diag/parse-error-text (prog) file src (parse-offset src spans forms pe) (.getMessage ^Throwable pe))
-            (str (prog) ": " file ": error: " (.getMessage ^Throwable pe) "\n"))]
+          (cond
+            (:fatal (:opts (ex-data pe))) (str (.getMessage ^Throwable pe) "\n")
+            src (diag/parse-error-text (prog) file src (parse-offset src spans forms pe) (.getMessage ^Throwable pe))
+            :else (str (prog) ": " file ": error: " (.getMessage ^Throwable pe) "\n"))]
       :else
       (binding [*groups* (into {} (keep #(when (= (first %) 'llvm/attributes) [(second %) (nth % 2)]) forms))
                 *group-numbers* (try (group-numbers forms) (catch Throwable _ nil))
@@ -2448,14 +2471,28 @@
         [(vec (remove #(and (seq? %) (= (first %) 'in-ns))
                       (loop [out []] (let [x (read r false eof)] (if (identical? x eof) out (recur (conj out x)))))))
          nil nil])
-      (let [[forms spans] (rd/read-module-items s)] [forms s spans]))))
+      (let [[forms spans e] (rd/read-module-items s true)] [forms s spans e]))))
 
 (defn verify-file
   "[verdict message rule text] of a file: valid, invalid, debug, or unread (the reader's refusal)."
   [^String path]
-  (let [r (try (forms-of-file path) (catch Throwable e e))]
-    (if (instance? Throwable r)
+  (let [r (try (forms-of-file path) (catch Throwable e e))
+        d (when (instance? Throwable r) (ex-data r))]
+    (cond
+      (:llvm/message d)   ; the reader refused where LLParser does, with its message
+      (let [src (String. (java.nio.file.Files/readAllBytes (.toPath (java.io.File. path))) "ISO-8859-1")]
+        ["invalid" (:llvm/message d) ":parser/syntax" (diag/parse-error-text (prog) path src (long (:llvm/offset d)) (:llvm/message d))])
+      (instance? Throwable r)
       ["unread" (str/replace (str (.getMessage ^Throwable r)) #"[\t\n]" " ") "" ""]
+      (nth r 3 nil)
+      ;; the reader met an LLParser error: what LLParser checked before it, in the forms read so far, may fail first
+      (let [[forms src spans e] r d (ex-data e) off (long (:llvm/offset d))
+            [pe] (try (binding [*partial* true] (run-phases-parser forms)) (catch Throwable _ [nil]))
+            poff (when pe (try (parse-offset src spans forms pe) (catch Throwable _ nil)))]
+        (if (and pe poff (< (long poff) off))
+          ["invalid" (.getMessage ^Throwable pe) (str (:llvm/verify (ex-data pe))) (diag/parse-error-text (prog) path src (long poff) (.getMessage ^Throwable pe))]
+          ["invalid" (:llvm/message d) ":parser/syntax" (diag/parse-error-text (prog) path src off (:llvm/message d))]))
+      :else
       (let [[forms src spans] r]
         (try (diagnose forms src spans path)
              (catch Throwable e ["invalid" (str (.getMessage e)) ":crash" ""]))))))

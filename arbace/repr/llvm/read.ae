@@ -46,10 +46,12 @@
         add (fn [k t s e] (.add ks k) (.add ts t) (.add ss (int s)) (.add es (int e)))
         n (count src)]
     (loop [i (long 0)]
-      (when (< i n)
+      (when (and (< i n) (not= :bad (when (pos? (.size ks)) (.get ks (dec (.size ks))))))
         (.region m (int i) (int n))
         (if-not (.lookingAt m)
-          (throw (ex-info (str "llvm: unexpected character " (pr-str (str (.charAt src (int i)))) " at offset " i) {:llvm/refused :lex}))
+          ;; a character LLLexer would refuse: one :bad token to the end, the parser refuses when it reaches it (LLParser
+          ;; reports the first error in the text's order)
+          (do (add :bad (subs src (int i)) i n) (.region m (int n) (int n)))
           (let [e (long (.end m))]
             (cond
               (.group m 1) nil
@@ -89,6 +91,7 @@
 ;; Mode :full's item spans (arbace.repr.llvm.full): when bound, each item's [start end] offsets in the text's order (a
 ;; top-level form, or a definition's header up to `{`, its labels, instructions, debug records, use-list orders and `}`).
 (def ^:dynamic ^java.util.ArrayList *items* nil)
+(def ^:dynamic *pending* nil)   ; when bound (a volatile), an LLParser error inside a function body ends the reading there
 (def ^:dynamic ^"[J" *top* nil)
 
 (defn- tok-start ^long [] (aget ^ints (.starts *t*) (p)))
@@ -98,16 +101,36 @@
   (let [^String s (.src *t*)]
     (loop [i 0 n 1] (if (>= i (min off (count s))) n (recur (inc i) (if (= (.charAt s (int i)) \newline) (inc n) n))))))
 
+(declare bad-token!)
+
 (defn- refuse
   ([msg] (refuse :parse msg))
   ([cls msg]
+   (bad-token!)
    (throw (ex-info (str "llvm: line " (line-of (aget ^ints (.starts *t*) (p))) ": " msg " (at " (pr-str (text)) ")")
-                   {:llvm/refused cls}))))
+                   {:llvm/refused cls :llvm/offset (aget ^ints (.starts *t*) (p))}))))
+
+(defn- llerr
+  "LLParser's error at the offset `off` (the cursor's token by default): its message in LLVM's words, the reader's
+  refusal (verify prints it as opt does: arbace.repr.llvm.verify/verify-file)."
+  ([msg] (llerr msg (aget ^ints (.starts *t*) (p))))
+  ([msg off]
+   (bad-token!)
+   (throw (ex-info (str "llvm: line " (line-of off) ": " msg) {:llvm/refused :llparser :llvm/message msg :llvm/offset off}))))
+
+(defn- bad-token!
+  "At a character LLLexer refuses (the :bad token): its error. `/*` without `*/` is LLLexer's unterminated comment."
+  []
+  (when (= (kind) :bad)
+    (let [off (aget ^ints (.starts *t*) (p))]
+      (throw (if (str/starts-with? (text) "/*")
+               (ex-info (str "llvm: line " (line-of off) ": unterminated comment") {:llvm/refused :llparser :llvm/message "unterminated comment" :llvm/offset off})
+               (ex-info (str "llvm: unexpected character " (pr-str (subs (text) 0 1)) " at offset " off) {:llvm/refused :lex :llvm/offset off}))))))
 
 (defn- punct? [^String s] (and (= (kind) :punct) (= (text) s)))
 (defn- punct-at? [^long d ^String s] (and (= (kind d) :punct) (= (text d) s)))
 (defn- word? [^String s] (and (= (kind) :word) (= (text) s)))
-(defn- expect! [^String s] (if (and (#{:punct :word} (kind)) (= (text) s)) (adv!) (refuse (str "expected " s))))
+(defn- expect! [^String s] (if (and (#{:punct :word} (kind)) (= (text) s)) (adv!) (if (#{"(" ")" "{" "}" "[" "]" "<" ">" "," "=" "!" "x"} s) (llerr (str "expected '" s "'")) (refuse (str "expected " s)))))
 (defn- accept! [^String s] (when (and (#{:punct :word} (kind)) (= (text) s)) (adv!) true))
 (defn- take-word! ^String [] (if (= (kind) :word) (let [w (text)] (adv!) w) (refuse "expected a word")))
 (defn- take-int! [] (if (= (kind) :int) (let [w (text)] (adv!) (bigint w)) (refuse "expected an integer")))
@@ -279,9 +302,12 @@
              [k]))
     :word (let [w (take-word!) kw (keyword w)]
             (cond
+              (and (#{"align" "alignstack"} w) (punct? "(") (= (kind 1) :int) (not (punct-at? 2 ")")))
+              (llerr "expected ')'")
               (punct? "(") (if (type-attrs w)
-                             (do (adv!) (let [t (parse-type)] (expect! ")") (list kw t)))
+                             (do (adv!) (when-not (type-start?) (llerr "expected type")) (let [t (parse-type)] (expect! ")") (list kw t)))
                              (list kw (raw-parens)))
+              (type-attrs w) (llerr "expected '('")
               (and (= w "align") (= (kind) :int)) (list kw (take-num!))
               (and params? (= w "dereferenceable") (= (kind) :int)) (list kw (take-num!))
               (punct? "=") (do (adv!) (list (keyword (str w "=")) (take-num!)))
@@ -612,7 +638,8 @@
 (defn parse-inst-body
   "An instruction after its result's `%r =` (if any)."
   []
-  (let [op (take-word!)]
+  (let [op0 (tok-start)
+        op (if (= (kind) :word) (take-word!) (llerr "expected instruction opcode"))]
     (cond
       (bin-ops op) (let [fl (parse-flags) [t a] (parse-typed) _ (expect! ",") b (parse-value t)]
                      (apply list (symbol op) (concat fl [t a b])))
@@ -701,13 +728,15 @@
       (= op "cmpxchg") (let [wk (accept! "weak") vol (accept! "volatile") pv (parse-typed) _ (expect! ",") c (parse-typed) _ (expect! ",") n (parse-typed)
                              ss (parse-syncscope) s (parse-ordering) f (parse-ordering) al (opt-align)]
                          (with-opts ['cmpxchg pv c n s f] [[:weak wk] [:volatile vol] [:syncscope ss] [:align al]]))
-      :else (refuse :instruction (str "the instruction " op)))))
+      (opcodes op) (refuse :instruction (str "the instruction " op))
+      :else (llerr "expected instruction opcode" op0))))
 
 (defn- parse-inst []
   (let [res (when (and (= (kind) :lname) (punct-at? 1 "="))
               (let [n (local-name (text))] (adv!) (adv!) n))
         body (parse-inst-body)
         md (parse-md-attachments)
+        _ (when (and (punct? ",") (not (#{"align" "addrspace" "!"} (text 1)))) (adv!) (llerr "expected metadata after comma"))
         body (if (seq md) (with-opts body [[:md md]]) body)]
     (if res (list '= res body) body)))
 
@@ -757,10 +786,17 @@
                                               (do (item! s) out)
                                               (let [o (apply list 'uselistorder (parse-uselistorder))] (item! s) (recur (conj out o))))))]
                                  [(close) os])
-        (= (kind) :eof) (refuse "unterminated function body")
+        (= (kind) :eof) (llerr "found end of file when expecting more instructions")
         ended (recur (close) nil [] false)
         (= (kind) :dbgrec) (let [r (parse-dbg-record)] (item! s) (recur blocks cur (conj insts r) false))
-        :else (let [x (parse-inst)] (item! s) (recur blocks cur (conj insts x) (boolean (terminator? x))))))))
+        :else (let [x (if *pending*
+                        (try (parse-inst)
+                             (catch arbace.lang.ExceptionInfo e
+                               (if (= :llparser (:llvm/refused (ex-data e))) (do (vreset! *pending* e) ::stop) (throw e))))
+                        (parse-inst))]
+                (if (= x ::stop)
+                  [(close) []]   ; the function so far: the module's checks before the error run on it (read-module-items)
+                  (do (item! s) (recur blocks cur (conj insts x) (boolean (terminator? x))))))))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Module summaries (^N = module: (...), gv: (...), typeid: (...), typeidCompatibleVTable: (...), flags: N, blockcount: N)
@@ -919,7 +955,7 @@
                                            (list 'llvm/attributes n as))))
             "module" (do (adv!) (expect! "asm") (list 'llvm/module-asm (take-str!)))
             "uselistorder" (apply list 'llvm/uselistorder (parse-uselistorder))
-            (refuse "unexpected word at top level"))
+            (llerr "expected top-level entity"))
     :lname (let [n (local-name (text))] (adv!) (expect! "=") (expect! "type")
              (if (word? "opaque") (do (adv!) (list 'llvm/type n 'opaque)) (list 'llvm/type n (parse-type))))
     :gname (let [n (global-name (text))] (adv!) (expect! "=") (parse-global n))
@@ -934,7 +970,7 @@
     :sumid (let [n (Long/parseLong (text))] (adv!) (expect! "=")
              (when-not (= (kind) :label) (refuse "expected a summary entry's kind"))
              (let [k (keyword (text))] (adv!) (list 'llvm/summary n k (parse-summary-value))))
-    (refuse "unexpected token at top level")))
+    (llerr "expected top-level entity")))
 
 (defn read-module
   "The LLVM forms of an IR text: a vector of top-level forms in the text's order."
@@ -945,13 +981,22 @@
 
 (defn read-module-items
   "Mode :full's reading: [forms spans], spans a vector per top-level form of its items' [start end] offsets."
-  [^String src]
-  (binding [*t* (lex src) *items* (java.util.ArrayList.) *top* (long-array 1)]
+  ([^String src] (let [[f s e] (read-module-items src true)] (if e (throw e) [f s])))
+  ([^String src partial?]
+  ;; partial?: [forms spans error], an LLParser error (llerr) ending the reading with the forms read before it (a function
+  ;; cut at the failing instruction), so that the checks of what LLParser parsed before the error can run first
+  (binding [*t* (lex src) *items* (java.util.ArrayList.) *top* (long-array 1) *pending* (when partial? (volatile! nil))]
     (loop [out [] spans []]
       (if (= (kind) :eof)
-        [out spans]
+        [out spans nil]
         (let [s (tok-start) n (.size *items*)
               _ (aset ^"[J" *top* 0 (long s))
-              f (parse-top)]
-          (when (= (.size *items*) n) (item! s))
-          (recur (conj out f) (conj spans (vec (.subList *items* n (.size *items*))))))))))
+              f (try (parse-top)
+                     (catch arbace.lang.ExceptionInfo e
+                       (if (and partial? (= :llparser (:llvm/refused (ex-data e)))) (do (vreset! *pending* e) ::stop) (throw e))))]
+          (cond
+            (= f ::stop) [out spans @*pending*]
+            :else
+            (do (when (= (.size *items*) n) (item! s))
+                (let [out (conj out f) spans (conj spans (vec (.subList *items* n (.size *items*))))]
+                  (if @*pending* [out spans @*pending*] (recur out spans)))))))))))
