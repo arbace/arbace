@@ -356,7 +356,7 @@ impl<'tcx> W<'tcx> {
                 let sym = if matches!(i.def, ty::InstanceKind::Intrinsic(_) | ty::InstanceKind::Virtual(..)) { String::new() } else { tcx.symbol_name(i).name.to_string() };
                 let intr = if let ty::InstanceKind::Intrinsic(d) = i.def { tcx.intrinsic(d).map(|x| x.name.as_str().to_string()) } else { None };
                 let can_unwind = match i.def {
-                    ty::InstanceKind::Item(d) if tcx.def_kind(d).is_fn_like() => {
+                    ty::InstanceKind::Item(d) if matches!(tcx.def_kind(d), rustc_hir::def::DefKind::Fn | rustc_hir::def::DefKind::AssocFn) => {
                         let never = tcx.codegen_fn_attrs(d).flags.contains(rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrFlags::NEVER_UNWIND);
                         let abi = tcx.fn_sig(d).skip_binder().skip_binder().abi();
                         let abi_unwinds = match abi {
@@ -368,7 +368,7 @@ impl<'tcx> W<'tcx> {
                     ty::InstanceKind::Intrinsic(_) => false,
                     _ => true,
                 };
-                format!("(callee {{:kind {} :symbol {} :def {} :can-unwind {}{}{}}})", q(kind), q(&sym), q(&self.path(i.def_id())), can_unwind,
+                format!("(callee {{:kind {} :symbol {} :def {} :can-unwind {} :track-caller {}{}{}}})", q(kind), q(&sym), q(&self.path(i.def_id())), can_unwind, i.def.requires_caller_location(tcx),
                     intr.map(|n| format!(" :intrinsic {}", q(&n))).unwrap_or_default(),
                     if tcx.is_mir_available(i.def_id()) || !matches!(i.def, ty::InstanceKind::Item(_)) { "" } else { " :external true" })
             }
@@ -417,14 +417,15 @@ impl<'tcx> W<'tcx> {
                 "(drop {} {} {} {} {} {})",
                 self.place(place), b(target), self.unwind(unwind), replace, ob(drop), self.drop_glue(place, b_)
             ),
-            Call { func, args: a, destination, target, unwind, .. } => format!(
-                "(call {} {} {} {} {} {})",
-                self.operand(func), args(a), self.place(destination), ob(target), self.unwind(unwind), self.callee(func)
+            Call { func, args: a, destination, target, unwind, fn_span, .. } => format!(
+                "(call {} {} {} {} {} {} {} {})",
+                self.operand(func), args(a), self.place(destination), ob(target), self.unwind(unwind), self.callee(func),
+                self.caller_location(*fn_span), t.source_info.scope.index()
             ),
             TailCall { func, args: a, .. } => format!("(tailcall {} {})", self.operand(func), args(a)),
             Assert { cond, expected, msg, target, unwind } => format!(
-                "(assert {} {} {} {} {} {})",
-                self.operand(cond), expected, self.assert_msg(msg), b(target), self.unwind(unwind), self.caller_location(t.source_info.span)
+                "(assert {} {} {} {} {} {} {})",
+                self.operand(cond), expected, self.assert_msg(msg), b(target), self.unwind(unwind), self.caller_location(t.source_info.span), t.source_info.scope.index()
             ),
             Yield { value, resume, resume_arg, drop } => format!(
                 "(yield {} {} {} {})",
@@ -487,6 +488,12 @@ impl<'tcx> W<'tcx> {
             let _ = write!(o, " :promoted {}", p.index());
         }
         let _ = write!(o, " :instance {}", q(&format!("{:?}", b.source.instance)));
+        if b.source.instance.requires_caller_location(tcx) {
+            o.push_str(" :track-caller true");
+        }
+        if let Some(sa) = b.spread_arg {
+            let _ = write!(o, " :spread-arg {}", sa.index());
+        }
         if let Some(sy) = symbol {
             let _ = write!(o, " :symbol {}", q(sy));
         }
@@ -523,14 +530,16 @@ impl<'tcx> W<'tcx> {
         }));
         let _ = write!(o, "\n :scopes [{}]", join(b.source_scopes.iter(), |s| {
             let p = s.parent_scope.map(|p| p.index().to_string()).unwrap_or("nil".into());
-            let inl = match s.inlined {
-                Some((callee, _)) => {
-                    let rt = if callee.def.requires_caller_location(tcx) { "#[track_caller] " } else { "" };
-                    q(&format!(" (inlined {rt}{callee})"))
+            let (inl, site, tc) = match s.inlined {
+                Some((callee, sp)) => {
+                    let tc = callee.def.requires_caller_location(tcx);
+                    let rt = if tc { "#[track_caller] " } else { "" };
+                    (q(&format!(" (inlined {rt}{callee})")), self.caller_location(sp), tc.to_string())
                 }
-                None => "nil".into(),
+                None => ("nil".into(), "nil".into(), "false".into()),
             };
-            format!("[{p} {inl}]")
+            let ip = s.inlined_parent_scope.map(|p| p.index().to_string()).unwrap_or("nil".into());
+            format!("[{p} {inl} {ip} {site} {tc}]")
         }));
         let _ = write!(o, "\n :debug [{}]", join(b.var_debug_info.iter(), |v| {
             let value = match &v.value {

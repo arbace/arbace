@@ -335,7 +335,7 @@
     (and (seq? callee) (= "callee" (name (first callee))))
     (let [c (second callee)]
       (case (:kind c)
-        "item" (symbol "g" (:symbol c))
+        ("item" "fnptr-shim" "closure-once-shim" "drop-glue" "vtable-shim" "reify-shim" "clone-shim" "shim") (symbol "g" (:symbol c))
         (unsupported (str "callee of kind " (:kind c)) {:callee c})))
     :else (callee-symbol (fn-callee f))))
 
@@ -427,7 +427,8 @@
         idom (dominators blocks order)
         locs (:locals body)
         lay (mapv #(layout lt (:ty %)) locs)
-        mem (non-ssa-locals body lt order idom)
+        spread (:spread-arg body)
+        mem (cond-> (non-ssa-locals body lt order idom) spread (conj spread))
         preds (reduce (fn [m b] (reduce (fn [m s] (update m s (fnil conj []) b)) m (successors (:term (nth blocks b))))) {} (range (count blocks)))
         mergeable (fn [t] (let [ss (successors t)] (when (and (= 1 (count ss)) (= 1 (count (get preds (first ss))))) (first ss))))
         allocs (into {} (:alloc-data body))
@@ -593,7 +594,13 @@
                                           [(get-in @st [:vals l]) (nth lay l)] projs)]
                            (first ty))
                          :else (load-place! bb (place-of! bb p))))
-                     "const" (const-val lt o alloc-sym!)))
+                     "const" (const-val lt o alloc-sym!)
+                     ;; the session's checks, decided at codegen: ub checks follow debug assertions (on at -O0), overflow
+                     ;; checks the flag of the run, contract checks are off
+                     "runtime-checks" {:ty "i1" :v (case (second o)
+                                                     "UbChecks" 'true
+                                                     "OverflowChecks" (if (= "0" (System/getenv "RF_OVERFLOW_CHECKS")) 'false 'true)
+                                                     'false)}))
         assign! (fn [bb p val]
                   (let [l (place-local p) projs (place-projs p)]
                     (cond
@@ -601,6 +608,7 @@
                       (and (empty? projs) (not (contains? mem l))) (vswap! st assoc-in [:vals l] val)
                       :else (store-val! bb (place-of! bb p) val))))
         ty-of (fn [o] (case (name (first o))
+                        "runtime-checks" '(ty "bool" bool)
                         "const" (nth o 2)
                         ("copy" "move") (place-type body (second o))))
         bin! (fn [bb op a b sc]
@@ -928,21 +936,33 @@
                          (zst? (nth lay l)) nil
                          (and (empty? projs) (not (contains? mem l))) (vswap! st assoc-in [:vals l] val)
                          :else (store-val! rbb (place-of! rbb p) val))))
+        ;; a `Location` constant for (loc FILE LINE COL): the file's name and the packed location, interned
+        loc-global! (fn [[_ file line col]]
+                      (let [fname (str file "\u0000")
+                            fg (intern-const! gl (list 'array (count fname) 'i8) (list 'c-string fname) 1)]
+                        (intern-const! gl (list 'packed 'ptr (list 'array 16 'i8))
+                                       (list 'packed ['ptr fg] [(list 'array 16 'i8) (list 'c-string (str (le-bytes (count file) 8) (le-bytes line 4) (le-bytes col 4)))]) 8)))
+        ;; get_caller_location: walk the inlined scopes while their callee is track_caller, then pass the function's own
+        ;; location parameter on when it is track_caller itself
+        caller-location! (fn [loc scope]
+                           (loop [loc loc scope (or scope 0)]
+                             (let [[_ inl ip site tc] (nth (:scopes body) scope)
+                                   [loc stop] (if inl (if tc [site false] [loc true]) [loc false])]
+                               (cond stop (loc-global! loc)
+                                     ip (recur loc ip)
+                                     (:track-caller body) (symbol "%_loc")
+                                     :else (loc-global! loc)))))
         terminator! (fn [bb b t]
                       (case (name (first t))
                         "goto" (br-or-merge bb t (second t))
                         "return" (ret-value! bb)
                         "unreachable" (emit! bb '(unreachable))
-                        "assert" (let [[_ c expected msg target unwind loc] t v (operand! bb c)]
+                        "assert" (let [[_ c expected msg target unwind loc scope] t v (operand! bb c)]
                                    (if (and (boolean? (:v v)) (= (:v v) expected))
                                      (br-or-merge bb t target)
                                      (let [lltarget (llbb! target)
                                            pb (new-block! "panic")
-                                           [_ file line col] loc
-                                           fname (str file "\u0000")
-                                           fg (intern-const! gl (list 'array (count fname) 'i8) (list 'c-string fname) 1)
-                                           lg (intern-const! gl (list 'packed 'ptr (list 'array 16 'i8))
-                                                             (list 'packed ['ptr fg] [(list 'array 16 'i8) (list 'c-string (str (le-bytes (count file) 8) (le-bytes line 4) (le-bytes col 4)))]) 8)
+                                           lg (caller-location! loc scope)
                                            mk (name (first msg))
                                            panic-name (case mk
                                                         "overflow" (str "panic_const_" (str/lower-case (nth msg 1)) "_overflow")
@@ -980,7 +1000,7 @@
                                    (br-or-merge bb t target)
                                    (let [pl (place-of! bb p)
                                          callee (symbol "g" (:symbol (second glue)))
-                                         argv [['ptr (list :align (:align (:ly pl))) (:ptr pl)]]
+                                         argv [(vec (concat ['ptr] (when (> (:align (:ly pl)) 1) [(list :align (:align (:ly pl)))]) [(:ptr pl)]))]
                                          unw (unwind-block! b unwind)]
                                      (if unw
                                        (let [ret-bb (llbb-wc! b target)]
@@ -1026,10 +1046,13 @@
                                      (let [ld (llbb! other)
                                            cases (mapv (fn [[v target]] [(symbol (:ty dv)) (key v) (llbb! target)]) vals)]
                                        (emit! bb (list 'switch (symbol (:ty dv)) (:v dv) ld cases)))))
-                        "call" (let [[_ f args dest target unwind callee-info] t
+                        "call" (let [[_ f args dest target unwind callee-info fn-loc scope] t
                                      callee (call-symbol f callee-info)
                                      can-unwind (if (and (seq? callee-info) (map? (second callee-info))) (:can-unwind (second callee-info)) true)
                                      argfs (vec (mapcat #(arg-forms bb %) args))
+                                     argfs (if (and (seq? callee-info) (map? (second callee-info)) (:track-caller (second callee-info)))
+                                             (conj argfs ['ptr (list :align 8) (caller-location! fn-loc scope)])
+                                             argfs)
                                      dl (nth lay (place-local dest))
                                      dl (if (seq (place-projs dest)) (layout lt (place-type body dest)) dl)
                                      ret (llvm-type dl)
@@ -1056,9 +1079,10 @@
                                                           (store-cast! rbb ci r pl (:size dl)))
                                                 (unsupported "aggregate returned")))]
                                  (handle (apply list callf))
-                                 (if unw
-                                   nil
-                                   (when target (br-or-merge bb t target))))
+                                 (cond
+                                   unw nil
+                                   target (br-or-merge bb t target)
+                                   :else (emit! bb '(unreachable))))
                         (unsupported (str "terminator " (first t)))))]
     (llbb! 0)
     (doseq [l (concat (range 1 (inc (:args body))) [0] (range (inc (:args body)) (count locs)))]
@@ -1067,6 +1091,25 @@
     (let [params (vec (mapcat
                        (fn [a]
                          (let [ly (nth lay a)]
+                           (if (= a spread)
+                             ;; a "rust-call" ABI tuple argument arrives spread over one parameter per field and is rebuilt in
+                             ;; a place of its own
+                             (let [tys (rest (ty-struct (:ty (nth locs a))))
+                                   pl {:ptr (get-in @st [:allocas a]) :align (:align ly) :ly ly}]
+                               (vec (mapcat
+                                     (fn [i ft]
+                                       (let [fl (layout lt ft) off (nth (:offsets ly) i)
+                                             fp {:ptr (gep! "start" (:ptr pl) off) :align (restrict-align (:align pl) off) :ly fl}
+                                             n (fn [k] (symbol (str "%_" a "." i (when k (str "." k)))))]
+                                         (case (:kind fl)
+                                           :zst []
+                                           :scalar (do (store-val! "start" fp {:ty (:imm (:scalar fl)) :v (n nil)})
+                                                       (param-forms fl (ref-align lt ft) [(n nil)]))
+                                           :pair (let [[sa sb _] (:pair fl)]
+                                                   (store-val! "start" fp {:pair [{:ty (:imm sa) :v (n 0)} {:ty (:imm sb) :v (n 1)}]})
+                                                   (param-forms fl nil [(n 0) (n 1)]))
+                                           (unsupported "memory aggregate in a spread argument"))))
+                                     (range) tys)))
                            (case (:kind ly)
                              :zst []
                              :scalar (let [sc (:scalar ly) nm (symbol (str "%_" a))]
@@ -1084,7 +1127,7 @@
                                        (when-not (contains? mem a) (unsupported "SSA memory aggregate"))
                                        (store-cast! "start" ci nm {:ptr (get-in @st [:allocas a]) :align (:align ly)} (:size ly))
                                        [[ci nm]])
-                             (unsupported "aggregate parameter"))))
+                             (unsupported "aggregate parameter")))))
                        (range 1 (inc (:args body)))))]
       (doseq [b order]
         (when-not (contains? (:skip @st) b)
@@ -1096,7 +1139,8 @@
                 (when-let [m (let [r (terminator! bb b (:term blk))] (when (number? r) r))]
                   (vswap! st update :skip conj m)
                   (recur m)))))))
-      (let [s @st
+      (let [params (if (:track-caller body) (conj params ['ptr (list :align 8) (symbol "%_loc")]) params)
+            s @st
             start-code (into (:start s) (get-in s [:bbs "start"]))
             bbs (for [nm (:bb-order s)] (list* 'block (symbol (str "%" nm)) (if (= nm "start") start-code (get-in s [:bbs nm]))))
             rl (first lay)]
