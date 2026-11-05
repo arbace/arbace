@@ -1574,3 +1574,25 @@ the same as CPython's under `bin/pyi run`. `:c-modules-deferred` no longer names
   and types.CellType called". Any `class X(NamedTuple)` with annotations stops there on pyi.
 - Not done: `.data/scripts`' `#!python` rewritten but no pin exercises it; `bin/pyi aot` does not take `PYI_SITE`;
   `--build-program`'s `:python {:wheels ...}` (PYS25 (a)'s second half) waits for pyi in the executable (PYS28).
+## As built: 206, the re-seed window's light check (2026-11-05, the Mac VM, queue 206)
+
+`bin/pyi c2j-check` (AFTER-PY11.md §4.4, the REQUEST to `bin/pyi`'s owner; `make pyi-c2j-check`): the 19 namespaces of
+`arbace/python{.ae,/}` and `arbace/repr/python{.ae,/}` compiled by c2j alone on stage 0, as `bin/ci c2j-check` does for C
+(the units `ARBACE_COMPILE` records, `arbace.c2j.main/run`; no j2g, no Go build), under `ARBACE_NO_AOT=1 ARBACE_NO_IMAGE=1
+ARBACE_PATH_FIRST=1`, so the check keeps counting the sources after PYS28's re-seed embeds them compiled (C9's trap: 0
+sources). It prints `c2j-check: 19 namespaces: 19 compiled, 0 failed; 2080 classes`, a failure as `c2j-check: not
+compiled: SOURCE MESSAGE` (c2j's), and fails on a namespace that does not load, on a count short of the 19, or on any
+failure. Run: every namespace compiles as committed; nothing in the Python namespaces needed a change, and no c2j limit
+was met. 20 s wall, 30 s CPU, 2.9 GiB peak on the VM (arm64, 8 cores).
+
+Its negative control (GTS81 (a)), in the same run: `test/python/c2j/pyi/c2j_control.ae` (namespace `pyi.c2j-control`, on
+`ARBACE_PATH` after the checkout), a macro expanding to an evaluated fn that closes over the macro's parameter, a constant
+the evaluator takes and c2j refuses ("a fn closing over locals as a constant", emit.ae's `constant`). It is judged apart
+from the 19: compiled ("control passed") or refused with another message ("control not judged") fails the check. An
+unreadable object as a constant (a macro returning `(Object.)`) was tried first and is not a control: c2j refuses it
+in `pool-encode`, after the per-source compile, as an exception that ends the whole run (print-dup's "No method in
+multimethod" before c2j's own "can't embed unreadable object"), not as one source's failure (a low of c2j, the main
+host's).
+
+The proposed gate step `pyi-c2j` (essential, chain `python-essential`, stage 0, its `:inputs` as strace found them) is in
+PY11-PREP.md §2's list, not applied to `test/gate/steps.edn`.

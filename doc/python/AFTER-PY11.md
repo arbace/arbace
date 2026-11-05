@@ -516,7 +516,7 @@ None of these is a record. Each one measures something this note estimates.
   with `git checkout HEAD -- go/arbace/py/frame.ae`.
 - PYS28's size, on a branch that lists `arbace/py` and `arbace/libm`: `bin/goi table --size`. It prints the executable
   with and without the table, and the difference goes into `gotable.edn`'s comment.
-- The window's light check (to write, REQUEST to `bin/pyi`'s owner): `bin/pyi c2j-check` ends with
+- The window's light check (written: queue 206): `bin/pyi c2j-check` ends with
   `0 failed` for the namespaces of `arbace/python` and `arbace/repr/python`.
 - After the re-seed, PYS31's measure: `time bin/pyi check --aot` (pyi on the executable). The expectation is about
   5 minutes for the 151 programs, against 35 on goi.
