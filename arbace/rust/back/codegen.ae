@@ -602,6 +602,21 @@
     :memory (if (indirect? l) 'void (cast-int l))
     (unsupported "aggregate as a return")))
 
+(def ^:private int-codes {"i8" "a" "u8" "h" "i16" "s" "u16" "t" "i32" "l" "u32" "m" "i64" "x" "u64" "y" "i128" "n" "u128" "o" "isize" "i" "usize" "j"})
+
+(defn fallback-symbol
+  "The symbol of the instance of the intrinsic `name` (a fallback body rustc calls) for the integer type `t`, from the symbols
+  of the dump's bodies kept in the globals (`set-def-symbols!`)."
+  [g name t]
+  (let [code (get int-codes (second t))
+        pre (str "_RINvNtCskxcxmcSlRLD_4core10intrinsics" (count name) name code "E")]
+    (when code (first (filter #(.startsWith ^String % pre) (get-in g [:defsyms (str "std::intrinsics::" name)]))))))
+
+(defn set-def-symbols!
+  "Keep the symbols of the dump's bodies by definition path."
+  [gl bodies]
+  (vswap! gl assoc :defsyms (reduce (fn [m b] (if (and (= :body (:form b)) (:symbol b)) (update m (:def b) (fnil conj []) (:symbol b)) m)) {} bodies)))
+
 (defn new-globals
   "The module's interned constants and external declarations: pass it to codegen-fn, read it with `module-extras`; `langs`
   the symbols of the lang items codegen calls (the dump's mir/langsyms)."
@@ -1469,7 +1484,12 @@
                                      (let [ld (llbb! other)
                                            cases (mapv (fn [[v target]] [(symbol (:ty dv)) (key v) (llbb! target)]) vals)]
                                        (emit! bb (list 'switch (symbol (:ty dv)) (:v dv) ld cases)))))
-                        "call" (let [[_ f args dest target unwind callee-info fn-loc scope] t
+                        "call" (let [[_ f args dest target unwind callee-info0 fn-loc scope] t
+                                     ci0 (when (and (seq? callee-info0) (map? (second callee-info0))) (second callee-info0))
+                                     ;; the intrinsics rustc's LLVM backend leaves to their fallback bodies are calls of that instance
+                                     fb (when (and (= "intrinsic" (:kind ci0)) (#{"rotate_left" "rotate_right"} (:intrinsic ci0)))
+                                          (fallback-symbol @gl (:intrinsic ci0) (ty-of (first args))))
+                                     callee-info (if fb (list 'callee (assoc ci0 :kind "item" :symbol fb)) callee-info0)
                                      ci (when (and (seq? callee-info) (map? (second callee-info))) (second callee-info))
                                      intrinsic (when (= "intrinsic" (:kind ci)) (:intrinsic ci))]
                                  (if (= "drop-glue-empty" (:kind ci))
