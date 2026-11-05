@@ -2378,3 +2378,16 @@ instruction's line per statement (`stmt*!`'s `:line`), so in a multi-line expres
 statement's first line where CPython locates each sub-expression's instructions at the sub-expression (`b.missing` on
 the next line of `y = (x +`, the third item of a list display, a call's argument); tracebacks, `f_lineno` and warnings
 show the first line. And pyi's `frame.f_locals` is a snapshot, not PEP 667's write-through proxy. Both are the loop's too.
+
+## After 216's decisions (2026-11-05 evening, the user: 1 (a), 2 (a))
+
+- **2 (a), per-expression lines (8f23d75e):** arbace.python.compile's `expr!` sets the expression's line while it
+  compiles and restores the statement's after (CPython's codegen locates each instruction at the node that emits it).
+  Tracebacks, `f_lineno` and warnings' stack levels in multi-line expressions are now CPython's: of tb.py's 16 known
+  diff lines 15 are gone (the one left is `frame.f_locals`' write-through, pre-existing). Every module's IR changes
+  (its line table only). Checked (run, the VM): `t/check216.sh` PASS (1 known), `t/check210.sh` PASS,
+  `make python-essential` 0 failing, `bin/pyi runtime check` 136 of 136 programs equal and the REPL equal,
+  `bin/pyi lib-test --aot test_exceptions` 109 methods, 0 failing. The main host's night: `bin/pyi check --aot --record`
+  and Lib/test's traceback-sensitive modules (test_traceback, test_exceptions, test_warnings, test_sys_settrace,
+  test_dis, test_compile, test_code, test_frame, test_inspect, test_doctest, test_pdb).
+- **1 (a), direct calls between compiled functions** (210's option (b)): the next step, a follow-up after 216's merge.
