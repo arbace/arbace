@@ -1011,6 +1011,18 @@
 (def constructor-classes
   #{"Functor" "Applicative" "Monad" "Foldable" "Traversable" "MonadFail" "Alternative" "MonadPlus" "MonadFix" "MonadZip"})
 
+;; a deriving strategy written in a clause or a standalone declaration (a Maybe of an LDerivStrategy): [:stock],
+;; [:newtype], [:anyclass] or [:via SIG]; nil when none is written
+(defn- strategy-of [mb]
+  (when (and (seq? mb) (= 'Just (first mb)))
+    (let [s (lval (second mb))]
+      (case (con s)
+        StockStrategy [:stock]
+        NewtypeStrategy [:newtype]
+        AnyclassStrategy [:anyclass]
+        ViaStrategy [:via (arg (arg s 1) 2)]
+        nil))))
+
 (defn- data-decl! [m d]
   (let [tn (nm (arg d 2)) tvn (qtvs-names (arg d 3))
         names (mapv #(str (occ %) "_" (str/join "_" (drop 3 %))) tvn)
@@ -1050,6 +1062,17 @@
               cls (when (= 'HsTyVar (con body)) (nm (arg body 3)))]
           (when cls
             (cond
+              ;; a strategy written in the clause (DerivingStrategies, DerivingVia): the request carries it
+              (strategy-of (arg cv 2))
+              (let [[kw via] (strategy-of (arg cv 2))
+                    ctor? (and (contains? constructor-classes (occ cls)) (seq names))]
+                (if (= kw :anyclass)
+                  (swap! *derivs* conj {:cls cls :tn tn :tvs names :ts [res] :ctor? false :anyclass? true :strat :anyclass
+                                        :desc (assoc desc :var (last names))})
+                  (swap! *derivs* conj {:cls cls :tn tn :tvs (if ctor? (vec (butlast names)) names)
+                                        :ts [(if ctor? [:tc tn (mapv (fn [x] [:tv x]) (butlast names))] res)]
+                                        :ctor? ctor? :desc (assoc desc :var (last names)) :stock? (= kw :stock)
+                                        :strat kw :via (when via (nth (sig-type via) 3))})))
               (or (contains? deriv/generators (occ cls))
                   (and (:newtype? desc) (contains? *exts* "GeneralizedNewtypeDeriving") (not (contains? *exts* "DeriveAnyClass"))
                        (not (contains? #{"Show" "Read"} (occ cls)))))
@@ -1121,12 +1144,14 @@
   [decls]
   (vec (for [d decls :let [v (lval d)] :when (and (= 'DerivD (con v)) (= 'DerivDecl (con (arg v 2))))
              :let [dd (arg v 2) st (sig-type (arg (arg dd 2) 2)) head (nth st 3)
+                   [kw via] (strategy-of (arg dd 3))
                    cls (second head) ts (nth head 2) t0 (first ts)
                    tn (when (= :tc (first t0)) (second t0))
                    info (get @*ddescs* tn)]
              :when (and info (= :tc (first head)))]
          {:cls cls :tn tn :tvs (:names st) :ts ts :ctx (nth st 2) :ctor? (contains? constructor-classes (occ cls))
-          :desc (assoc (:desc info) :var (last (:names info))) :stock? (contains? deriv/generators (occ cls)) :standalone? true})))
+          :desc (assoc (:desc info) :var (last (:names info))) :stock? (if kw (= kw :stock) (contains? deriv/generators (occ cls))) :standalone? true
+          :strat kw :anyclass? (= kw :anyclass) :via (when via (nth (sig-type via) 3)) :dnames (:names info)})))
 
 (defn- derive-all!
   "The derived instances of the module (deriving clauses and standalone declarations): their heads entered, the
@@ -1135,15 +1160,24 @@
   [m decls]
   (let [reqs (into @*derivs* (standalone-requests decls))
         dfun (fn [r] (ext-name "var" m (str "$f" (occ (:cls r)) (occ (:tn r)))))
+        rep-of (fn [r]
+                 (let [t (first (:tys (first (:cons (:desc r)))))
+                       t (if (:ctor? r)
+                           (case (first t) :tc [:tc (second t) (vec (butlast (nth t 2)))] :app (nth t 1) t)
+                           t)
+                       t0 (first (:ts r))]
+                   ;; a standalone declaration names the type's parameters as it likes
+                   (if (:standalone? r) (subst (zipmap (:dnames r) (nth t0 2)) t) t)))
         gnd-of (fn [r]
-                 (when (and (:newtype? (:desc r)) (not (:standalone? r))
-                            (or (contains? #{"Eq" "Ord" "Ix" "Bounded"} (occ (:cls r)))
-                                (and (contains? *exts* "GeneralizedNewtypeDeriving") (not (contains? *exts* "DeriveAnyClass"))
-                                     (not (contains? #{"Show" "Read"} (occ (:cls r)))))))
-                   (let [t (first (:tys (first (:cons (:desc r)))))]
-                     (if (:ctor? r)
-                       (case (first t) :tc [:tc (second t) (vec (butlast (nth t 2)))] :app (nth t 1) t)
-                       t))))
+                 (case (:strat r)
+                   (:stock :anyclass) nil
+                   :via (:via r)
+                   :newtype (rep-of r)
+                   (when (and (:newtype? (:desc r)) (not (:standalone? r))
+                              (or (contains? #{"Eq" "Ord" "Ix" "Bounded"} (occ (:cls r)))
+                                  (and (contains? *exts* "GeneralizedNewtypeDeriving") (not (contains? *exts* "DeriveAnyClass"))
+                                       (not (contains? #{"Show" "Read"} (occ (:cls r)))))))
+                     (rep-of r))))
         ctx-of (fn [r]
                  (cond
                    (:standalone? r) (:ctx r)
@@ -1165,7 +1199,7 @@
            {:dfun (dfun r) :tvs (:tvs r) :ctx (:ctx (some #(when (= (:dfun %) (dfun r)) %) @*insts*))
             :cls (:cls r) :ts (:ts r)
             :gnd (gnd-of r)
-            :binds (when-not (gnd-of r) (deriv/derive-binds (occ (:cls r)) (:desc r)))}))))
+            :binds (when-not (or (gnd-of r) (:anyclass? r)) (deriv/derive-binds (occ (:cls r)) (:desc r)))}))))
 
 (defn- syn-decl! [d]
   (let [tn (nm (arg d 2)) tvn (qtvs-names (arg d 3))
@@ -1253,6 +1287,12 @@
            (let [ty (subst (zipmap tvs (map (fn [x] [:tv (str "sk_" x)]) tvs)) (nth (get @*genv* n) 3))]
              (list 'bind (get (:defaults info) n) (check-method env b ty givens [p])))))))
 
+;; a superclass dictionary that applies a dictionary function to the instance's own parameters alone: GHC's simple
+;; optimiser inlines it into the dictionary (a $cpN binding used once)
+(defn- trivial-sc? [term params]
+  (and (seq? term) (= 'app (first term)) (seq? (second term)) (= 'v (first (second term)))
+       (seq (nth term 2)) (every? (fn [a] (some #(= a %) params)) (nth term 2))))
+
 (defn- instance-binds
   "An instance's dictionary function and its methods, as GHC's desugarer gives them"
   [env {:keys [dfun tvs ctx cls ts binds gnd]}]
@@ -1273,7 +1313,10 @@
                         ;; a coerced method whose representation dictionary is one of the instance's own parameters is
                         ;; trivial: GHC's simple optimiser inlines it into the dictionary function
                         gd (when gnd (solve-pred [cls [(subst skol gnd)]] givens 0))
-                        gnd-inline? (and gd (seq params) (= 'lv (first gd)))]
+                        gnd-inline? (and gd (or (and (seq params) (= 'lv (first gd)))
+                                                 ;; a class of one method and no superclass has a newtype dictionary: the
+                                                 ;; coerced method is the dictionary
+                                                 (and (= 1 (count (:methods info))) (empty? (:supers info)))))]
                     [(if gnd-inline? nil cm)
                      (if gnd
                           ;; the newtype strategy: the representation type's method, coerced
@@ -1305,7 +1348,8 @@
         ;; dictionaries ($cp1Cls), as GHC's tcSuperClasses makes it; without one the dictionary inline
         ;; (also without a context when the dictionary is not a variable: GHC binds it apart, $cpNCls)
         sc-entries (vec (map-indexed (fn [i term]
-                                       (if (or (seq params) (not (and (seq? term) (= 'v (first term)))))
+                                       (if (and (or (seq params) (not (and (seq? term) (= 'v (first term)))))
+                                                (not (trivial-sc? term params)))
                                          [(fresh-lv (str "$cp" (inc i) (occ cls))) (if (seq params) (list 'lam params term) term)]
                                          [nil term]))
                                      supers))
