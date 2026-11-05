@@ -31,6 +31,11 @@
 #                                              print does not build where the original does) or `none` (the original does
 #                                              not build: a target the back end does not take). Exit 1 unless every file's
 #                                              forms are equal, no judge differs, and each file has one judge `same`
+#   bin/repr-llvm list hw|probes|runtime|all   the lists of the records (NAME<tab>PATH): the hand-written modules, the probes, C++'s lowered runtime's IR
+#   bin/repr-llvm record-orig LIST | verify-orig LIST [--sample N]   ORS12 (a), by hand on a host with clang and llvm-as: the originals' `clang -c` and llvm-as
+#                                              digests (test/llvm/records/roundtrip-orig.tsv); the round trip reads them, the print's half (class D) is
+#                                              REPR_LLVM_LIVE=1, the oracle tier's
+#   bin/repr-llvm record-opt LIST | verify-opt LIST [--sample N]     opt -passes=verify's answers (the pack llvm-opt-verify), which verify-check reads
 #   bin/repr-llvm roundtrip --text LIST WORK   mode :full's round trip: each file read in :full, its .ae text read
 #                                              back (forms and layer equal, the forms the plain mode's), printed back
 #                                              byte for byte, and the plain print read in :full without a layer
@@ -39,6 +44,9 @@ set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 . "$root/bin/lib/tmpdir.bash"
 . "$root/bin/lib/tools.bash"
+. "$root/test/oracle-records/oracle.bash"
+. "$root/test/oracle-records/cpp.bash"
+. "$root/test/oracle-records/llvm.bash"
 export GOMAXPROCS=${GOMAXPROCS:-4} GOMEMLIMIT=${GOMEMLIMIT:-1500MiB}
 
 # judge NAME ORIG PRINT CMD...: CMD ORIG ORIG-OUT, CMD PRINT PRINT-OUT, the verdict on the two outputs
@@ -49,7 +57,72 @@ judge() {
   else echo differs; fi
 }
 
+record_orig() { # record-orig LIST: the record rewritten for LIST's modules (the others' rows kept)
+  local list=$1 n p key d tmp=$TMPDIR/lrr-orig.$$
+  command -v clang > "$TMPDIR/lrr.err" && [ -x "${REPR_LLVM_AS:-/usr/lib/llvm23/bin/llvm-as}" ] || { echo "record-orig: needs clang and llvm-as" >&2; exit 2; }
+  mkdir -p "$(dirname "$lrr_orig")"
+  [ -f "$lrr_orig" ] && grep -v '^;;' "$lrr_orig" > "$tmp.old" || : > "$tmp.old"
+  while IFS=$'\t' read -r n p; do
+    [ -n "$n" ] || continue
+    printf '%s\t%s\t%s\n' "$n" "$(lrr_key "$p")" "$(lrr_orig_digests "$p")"
+  done < "$list" > "$tmp.new"
+  awk -F'\t' 'NR == FNR { new[$1] = 1; next } !($1 in new)' "$tmp.new" "$tmp.old" | cat - "$tmp.new" | LC_ALL=C sort -t "$(printf '\t')" -k1,1 > "$tmp.all"
+  { echo ";; The round trip's originals as records (doc/ORACLE-RECORDS-SURVEY.md, ORS12): NAME<TAB>KEY<TAB>OBJECT<TAB>BITCODE, the SHA-256 of clang -c's object for the module's own triple"
+    echo ";; and of llvm-as's bitcode, none when the original does not build (test/oracle-records/llvm.bash)."
+    oracle_record_header ';;' llvm 'bin/repr-llvm record-orig LIST' 
+    cat "$tmp.all"; } > "$lrr_orig"
+  rm -f "$tmp".*
+  echo "record-orig: $(grep -vc '^;;' "$lrr_orig") modules in $lrr_orig"
+}
+verify_orig() { # verify-orig LIST [--sample N]
+  local list=$1 n=0 bad=0 want got p name k=0 sample=${3:-}
+  [ "${2:-}" = --sample ] || sample=
+  while IFS=$'\t' read -r name p; do
+    [ -n "$name" ] || continue
+    k=$((k+1)); [ -z "$sample" ] || [ $((k % sample)) = 1 ] || continue
+    n=$((n+1)); want=$(lrr_orig_get "$name" "$p" 2>"$TMPDIR/lrr.err") || { bad=$((bad+1)); continue; }
+    got=$(lrr_orig_digests "$p"); [ "$got" = "$want" ] || bad=$((bad+1))
+  done < "$list"
+  oracle_verdict llvm "$lrr_orig" "$bad" "$n"
+}
+opt_live() { # NAME FILE DIR: opt -passes=verify -disable-output into DIR/log, DIR/rc
+  local opt=${REPR_LLVM_OPT:-/usr/lib/llvm23/bin/opt}
+  local rc=0
+  "$opt" -passes=verify -disable-output "$2" > "$3/log" 2>&1 || rc=$?
+  echo "$rc" > "$3/rc"
+}
+record_opt() { # record-opt LIST
+  local list=$1 n p st=$root/.tmp/repr-llvm/record-opt d
+  [ -x "${REPR_LLVM_OPT:-/usr/lib/llvm23/bin/opt}" ] || { echo "record-opt: needs opt" >&2; exit 2; }
+  rm -rf "$st"; mkdir -p "$st/llvm-opt-verify"; : > "$st/ids.tsv"
+  while IFS=$'\t' read -r n p; do
+    [ -n "$n" ] || continue
+    d=$st/llvm-opt-verify/$n; mkdir -p "$d"; opt_live "$n" "$p" "$d"
+    # the module's own path in opt's messages: the file as named (a message names no directory but the file's name as given)
+    lrr_norm "$d/log"
+    printf '%s/rc\t%s\n%s/log\t%s\n' "$n" "$(lrr_key "$p")" "$n" "$(lrr_key "$p")" >> "$st/ids.tsv"
+  done < "$list"
+  oracle_make "$lrr_opt_pin" "$st" "$st/ids.tsv" "bin/repr-llvm record-opt LIST" llvm
+}
+verify_opt() { # verify-opt LIST [--sample N]
+  local list=$1 n=0 bad=0 name p k=0 d=$root/.tmp/repr-llvm/verify-opt sample=${3:-}
+  [ "${2:-}" = --sample ] || sample=
+  mkdir -p "$d"
+  while IFS=$'\t' read -r name p; do
+    [ -n "$name" ] || continue
+    k=$((k+1)); [ -z "$sample" ] || [ $((k % sample)) = 1 ] || continue
+    n=$((n+1)); opt_live "$name" "$p" "$d"; lrr_norm "$d/log"
+    cmp -s "$d/log" "$(oracle_get "$lrr_opt_pin" "$name/log" 2>"$TMPDIR/lrr.err")" && cmp -s "$d/rc" "$(oracle_get "$lrr_opt_pin" "$name/rc" 2>"$TMPDIR/lrr.err")" || bad=$((bad+1))
+  done < "$list"
+  oracle_verdict llvm "$(oracle_manifest "$lrr_opt_pin")" "$bad" "$n"
+}
+
 case ${1:-} in
+  list) lrr_list "${2:-all}" ;;
+  record-orig) record_orig "$2" ;;
+  verify-orig) shift; verify_orig "$@" ;;
+  record-opt) record_opt "$2" ;;
+  verify-opt) shift; verify_opt "$@" ;;
   read|print|verify) arbace_tool -m arbace.repr.llvm "$@" ;;
   roundtrip)
     if [ "${2:-}" = --text ]; then
@@ -67,6 +140,31 @@ case ${1:-} in
     llvm_as=${REPR_LLVM_AS:-/usr/lib/llvm23/bin/llvm-as}
     [ -x "$llvm_as" ] || llvm_as=
     : > "$work/objects.tsv"; : > "$work/bitcode.tsv"
+    if ! lrr_live; then
+      # ORS12 (a): no clang or llvm-as. The originals' objects and bitcode are the records' (test/llvm/records/roundtrip-orig.tsv, found and not stale: `skipped`,
+      # else `unrecorded`); the print's half, clang -c and llvm-as on Arbace's own output (class D), is REPR_LLVM_LIVE=1, the oracle tier's; the substitute
+      # here is the native verifier (arbace.repr.llvm.verify, LLVM 23's LLParser and Verifier rules): each print must be as valid as opt found the original
+      : > "$work/print-verify.list"; rec_bad=0
+      while IFS=$'\t' read -r n p; do
+        [ -n "$n" ] || continue
+        if lrr_orig_get "$n" "$p" > /dev/null 2> "$work/orig-record.err"; then v=skipped; else v=$(head -c 9 "$work/orig-record.err" | tr -d ':'); rec_bad=$((rec_bad+1)); fi
+        printf '%s\t%s\n' "$n" "$v" >> "$work/objects.tsv"; printf '%s\t%s\n' "$n" "$v" >> "$work/bitcode.tsv"
+        [ -f "$work/print/$n.ll" ] && printf '%s\t%s\n' "$n" "$work/print/$n.ll" >> "$work/print-verify.list"
+      done < "$list"
+      mkdir -p "$work/print-verify"
+      REPR_LLVM_THREADS=${REPR_LLVM_THREADS:-4} arbace_tool -m arbace.repr.llvm verify-list "$work/print-verify.list" "$work/print-verify.tsv" "$work/print-verify"
+      pv_bad=0
+      while IFS=$'\t' read -r n v m; do
+        d=$work/pv; mkdir -p "$d"; lrr_opt_get "$n" "$work/print/$n.ll" "$d" 2>/dev/null || continue
+        if [ "$(cat "$d/rc")" = 0 ]; then want=valid; else want=invalid; fi
+        got=$v; [ "$got" = valid ] || got=invalid
+        if [ "$want" != "$got" ]; then pv_bad=$((pv_bad+1)); printf '%s\tdiffers\n' "$n" >> "$work/objects.tsv"; fi
+      done < "$work/print-verify.tsv"
+      nf=$(wc -l < "$work/rt.tsv"); nok=$(cut -f2 "$work/rt.tsv" | grep -c '^ok$' || true)
+      echo "roundtrip: $nok of $nf forms equal; records mode: $((nf - rec_bad)) originals' objects and bitcode recorded ($rec_bad not), $pv_bad prints the native verifier judges otherwise than opt the original; the print's objects and bitcode are the oracle tier's"
+      [ "$nf" -gt 0 ] && [ "$nok" = "$nf" ] && [ "$rec_bad" = 0 ] && [ "$pv_bad" = 0 ] && [ "$nf" = "$(grep -c . "$list")" ]
+      exit
+    fi
     while IFS=$'\t' read -r n p; do
       [ -n "$n" ] || continue
       mkdir -p "$work/obj/$(dirname "$n")"
@@ -93,13 +191,20 @@ case ${1:-} in
     list=$2 work=$3
     mkdir -p "$work/opt"; work=$(cd "$work" && pwd)
     opt=${REPR_LLVM_OPT:-/usr/lib/llvm23/bin/opt}
+    ! lrr_live && { oracle_unpack "$lrr_opt_pin" > "$TMPDIR/lrr-unpack.out" || exit 1; }
     rm -rf "$work/arb"; mkdir -p "$work/arb"
     REPR_LLVM_OPT=$opt REPR_LLVM_THREADS=${REPR_LLVM_THREADS:-4} arbace_tool -m arbace.repr.llvm verify-list "$list" "$work/arbace.tsv" "$work/arb"
     # opt's verdict and first message: the first line that is not a warning, without its program and position
     : > "$work/opt.tsv"
     while IFS=$'\t' read -r n p; do
       [ -n "$n" ] || continue
-      if ( "$opt" -passes=verify -disable-output "$p"; ) > "$work/opt/$n.log" 2>&1; then
+      if ! lrr_live; then
+        # ORS12 (a): opt's answer from the pack llvm-opt-verify (a module not in it is UNRECORDED: the check fails)
+        mkdir -p "$work/opt/$n.d"
+        if lrr_opt_get "$n" "$p" "$work/opt/$n.d" 2> "$work/opt/$n.rec"; then cp "$work/opt/$n.d/log" "$work/opt/$n.log"; orc=$(cat "$work/opt/$n.d/rc")
+        else cp "$work/opt/$n.rec" "$work/opt/$n.log"; orc=99; fi
+      else orc=0; ( "$opt" -passes=verify -disable-output "$p"; ) > "$work/opt/$n.log" 2>&1 || orc=$?; fi
+      if [ "$orc" = 0 ]; then
         # opt takes a module whose debug info is broken: it prints the message, then warns and strips the debug info (the
         # verdict `debug`, the message its first line); a debug info version it does not know is stripped with a warning only
         v=valid m=

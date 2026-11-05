@@ -7,7 +7,7 @@
 #                               macros per standard (predefined/{gxx,clang}/STD.h, sorted, the date macros at the fixed
 #                               epoch), their search lists, their __has_cpp_attribute/__has_attribute/__has_include answers,
 #                               the sizes and alignments both agree on (sizes.tsv), the digests of libstdc++'s headers
-#   bin/repr-cpp host check     the host's compilers still give the recorded answers and the headers their digests
+#   bin/repr-cpp host check [--headers]  the host's compilers still give the recorded answers and the headers their digests
 #   bin/repr-cpp pins check     the pins of test/cpp/corpora.edn: the gcc tarball (when .tmp/c1/gcc/ holds it), the
 #                               llvm-project tarball (when .tmp/llvm/ or REPR_CPP_LLVM_TARBALL holds it), the APKBUILD (.tmp/cpp-pins/), the SHA-512 in it, the compilers' versions
 #   bin/repr-cpp spec-check     every ```clojure block of doc/cpp/SPEC.md read by Arbace's reader (stage 0, the tools' host)
@@ -44,6 +44,12 @@
 #   bin/repr-cpp roundtrip-corpus KEY [WORK] [roundtrip's options]
 #                               the round trip over a recorded list made by its key (CX10; bin/lib/repr-cpp/roundtrip-corpus, its header):
 #                               CORPUS-every-N, CORPUS-all, CORPUS-essential (test/cpp/essential-print.txt), samples; the gate's steps
+#   bin/repr-cpp record-dumps KEY [--jobs N]
+#                               ORS12 (a), by hand on a host with clang: the originals' dumps of the round trip's list KEY (roundtrip-corpus's keys) made live into
+#                               a fresh cache and packed as cxxdump-KEY (test/repr/cpp/records/; class B: each cache entry, the dump and its -norm form, the
+#                               clang status and errors, the dependencies' digests), which `roundtrip` and `roundtrip-corpus` read (cxxdump -records) with no clang
+#   bin/repr-cpp verify-dumps KEY [--sample N]
+#                               the pack's entries against a live run of the list (a moved toolchain reported, not failed: ORS6 (a))
 #   bin/repr-cpp dg [--corpus dg-error,preprocess,modules] [--dirs D,...] [--only LIST] [--sample N] [--record] [--record-ref] [--judge]
 #                               C++'s dg check (CX9; bin/lib/repr-cpp/dg, its header): g++.dg's error tests judged on the oracle's
 #                               rejection and the errors' lines, the dg-do preprocess tests on the shared preprocessor's, modules/
@@ -51,6 +57,8 @@
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 . "$root/bin/lib/tmpdir.bash"
+. "$root/test/oracle-records/oracle.bash"
+. "$root/test/oracle-records/cpp.bash"
 
 EPOCH=1793145600 # 2026-10-28 00:00:00 UTC, as test/c/host (CS43 (a))
 host_dir=$root/test/cpp/host
@@ -167,6 +175,12 @@ EOS
 
 host_check() {
   local bad=0 who s cxx e tmp
+  # ORS12 (a): --headers, the installed libstdc++ headers against their pin alone (class E: what the token check reads; no compiler runs); the whole
+  # check, the compilers' answers too, is the oracle tier's
+  if [ "${1:-}" = --headers ]; then
+    ( cd / && sha256sum --quiet -c "$host_dir/headers.sha256" ) || return 1
+    echo "host check: the headers stand ($(wc -l < "$host_dir/headers.sha256") files)"; return 0
+  fi
   e=$(empty); tmp=$TMPDIR/repr-cpp-chk.h
   for who in gxx clang; do
     cxx=$(cxx_for $who)
@@ -239,10 +253,48 @@ has_add() { # has-add OP:NAME...: the answers of both compilers appended to has-
   LC_ALL=C sort -o "$f" "$f"
 }
 
+record_dumps() { # record-dumps KEY [--jobs N] / verify-dumps KEY [--sample N] (verify=1)
+  local verify=$1 key=${2:?KEY: a roundtrip-corpus list key (gxx-dg-essential, samples, ...)}; shift 2
+  local jobs=${REPR_CPP_THREADS:-4} sample= st=$root/.tmp/repr-cpp/record-dumps/$key pack=cxxdump-$key f id k n=0 bad=0 all want
+  while [ $# -gt 0 ]; do case $1 in --jobs) jobs=$2; shift 2 ;; --sample) sample=$2; shift 2 ;; *) echo "record-dumps: unknown option $1" >&2; exit 2 ;; esac; done
+  command -v clang++ > "$TMPDIR/repr-cpp-rec.err" || { echo "record-dumps: needs clang++ (the host :cxx)" >&2; exit 2; }
+  [ -x "$root/.tmp/repr-cpp/cxxdump" ] || cxxdump_build >&2
+  rm -rf "$st"; mkdir -p "$st/cache"
+  REPR_CPP_LIVE=1 REPR_CPP_CXXDUMP_CACHE=$st/cache "$root/bin/lib/repr-cpp/roundtrip-corpus" "$key" "$st/work" --dumps-only --jobs "$jobs" > "$st/run.log" 2>&1 \
+    || { tail -5 "$st/run.log" >&2; exit 1; }
+  mkdir -p "$st/stage/$pack"; : > "$st/ids.tsv"
+  # the entries of the run: every file of the cache, but the stats (seconds and memory: they differ from run to run)
+  ( cd "$st/cache" && find . -type f ! -name '*.tmp' ! -name '*.d' -printf '%P\n' ) | LC_ALL=C sort > "$st/files.txt"
+  while IFS= read -r f; do
+    mkdir -p "$st/stage/$pack/$(dirname "$f")"; cp "$st/cache/$f" "$st/stage/$pack/$f"
+    k=$(basename "$f"); k=${k%%.*}
+    printf '%s\t%s\n' "$f" "$k" >> "$st/ids.tsv"
+  done < "$st/files.txt"
+  local pin=$root/test/repr/cpp/records/$pack.sha256
+  if [ "$verify" = 1 ]; then
+    all=$(grep -v '\.stats$' "$st/ids.tsv" | cut -f1 | sed 's/\.[a-z]*$//' | LC_ALL=C sort -u)
+    [ -z "$sample" ] || all=$(echo "$all" | awk -v n="$sample" 'NR % n == 1')
+    for id in $all; do
+      n=$((n+1)); k=0
+      for f in out status err deps; do
+        [ -f "$st/stage/$pack/$id.$f" ] || continue
+        want=$(oracle_get "$pin" "$id.$f" 2>"$TMPDIR/repr-cpp-ver.err") || { k=1; continue; }
+        cmp -s "$st/stage/$pack/$id.$f" "$want" || k=1
+      done
+      bad=$((bad+k))
+    done
+    oracle_verdict cxx "$(oracle_manifest "$pin")" "$bad" "$n"; return
+  fi
+  mkdir -p "$(dirname "$pin")"
+  oracle_make "$pin" "$st/stage" "$st/ids.tsv" "bin/repr-cpp record-dumps $key" cxx
+}
+
 case ${1:-} in
+  record-dumps) shift; record_dumps 0 "$@" ;;
+  verify-dumps) shift; record_dumps 1 "$@" ;;
   host) case ${2:-} in
           record) host_record ;;
-          check) host_check ;;
+          check) host_check "${3:-}" ;;
           *) echo "host: record or check" >&2; exit 2 ;;
         esac ;;
   pins) case ${2:-} in
