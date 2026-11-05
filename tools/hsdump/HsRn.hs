@@ -18,7 +18,7 @@
 --   hsdump iface -o OUTDIR [--libdir DIR] [--ghc FLAG... --files] MODULE...
 --       one OUTDIR/MODULE.iface.edn per module: (hsiface/module ...) its exports (with the defining
 --       module of each), its fixities, and the things it defines (types as GHC prints them)
-module HsRn (rnVerb, ifaceVerb) where
+module HsRn (rnVerb, ifaceVerb, tcVerb) where
 
 import GHC
 import GHC.Driver.Session
@@ -48,6 +48,16 @@ import GHC.Unit.External (ExternalPackageState(..))
 import Data.Char (ord)
 import GHC.Core.Type (Type, PredType)
 import GHC.Unit.Module.ModIface
+import GHC.Core.Coercion.Axiom (CoAxiom(..), CoAxBranch(..), fromBranches, Role(..))
+import GHC.Core.FamInstEnv (FamInst(..), famInstEnvElts)
+import GHC.Types.Id (idArity, idDmdSig, isDataConWorkId, isDFunId)
+import GHC.Types.Var (isTyVar, isCoVar, Var, varUnique)
+import GHC.Core (CoreExpr, Expr(..), Bind(..), Alt(..), AltCon(..), CoreBind)
+import GHC.Types.Literal (Literal(..))
+import GHC.Unit.Module.ModGuts (ModGuts(..))
+import GHC.Types.TypeEnv (typeEnvElts)
+import GHC.Types.Unique (getKey)
+import GHC.Types.Name.Env ()
 
 import GHC.Unit.Types (moduleName)
 import GHC.Utils.Outputable (SDoc, showSDocUnsafe, ppr)
@@ -63,7 +73,7 @@ import GHC.Driver.Monad (reifyGhc, reflectGhc)
 import Control.Exception (try)
 import Control.Monad (forM_, forM, unless, when)
 import Control.Monad.IO.Class (liftIO)
-import Data.Data hiding (Fixity, tyConName)
+import Data.Data hiding (Fixity, tyConName, TyCon)
 import qualified Data.Data as DD
 import GHC.Core.ConLike (ConLike(..))
 import Data.List (sortOn, sort, nub, isPrefixOf, intercalate)
@@ -334,6 +344,7 @@ ifaceOf outDir m = do
           hPutStrLn h ("(hsiface/things [" ++ intercalate "\n  " (sort (map thingF defined)) ++ "])")
           hPutStrLn h ("(hsiface/instances [" ++ intercalate "\n  " (sort [ "(instance " ++ nameF (getName (is_dfun i)) ++ " " ++ typeF (varType (is_dfun i)) ++ ")"
                                                                       | i <- insts, nameModule_maybe (getName (is_dfun i)) == Just m ]) ++ "])")
+          hPutStrLn h ("(hsiface/fam-instances [" ++ intercalate "\n  " (sort [ famInstF fi | fi <- famInstEnvElts (eps_fam_inst_env eps), nameModule_maybe (getName (fi_axiom fi)) == Just m ]) ++ "])")
       return (True, nubMods [nameModule n | a <- mi_exports iface, n <- availNames a, not (isInternalName n), not (isSystemName n), isExternalName n])
   where unitString' = pprS . moduleUnit
 
@@ -346,20 +357,41 @@ nubNames = foldr (\x acc -> if x `elem` acc then acc else x : acc) []
 
 thingF :: TyThing -> String
 thingF t = case t of
-  AnId i -> "(id " ++ nameF (getName i) ++ " " ++ esc (pprS (varType i)) ++ " " ++ typeF (varType i) ++ ")"
+  AnId i -> "(id " ++ nameF (getName i) ++ " " ++ esc (pprS (varType i)) ++ " " ++ typeF (varType i)
+    ++ " {:arity " ++ show (idArity i) ++ " :strictness " ++ esc (pprS (idDmdSig i)) ++ "})"
   AConLike (RealDataCon dc) ->
     "(datacon " ++ nameF (getName dc) ++ " " ++ esc (pprS (dataConWrapperType dc)) ++ " " ++ show (dataConSourceArity dc)
-      ++ " " ++ vec (map (esc . pprS . flLabel) (dataConFieldLabels dc)) ++ " " ++ typeF (dataConWrapperType dc) ++ ")"
+      ++ " " ++ vec (map (esc . pprS . flLabel) (dataConFieldLabels dc)) ++ " " ++ typeF (dataConWrapperType dc)
+      ++ " {:src-bangs " ++ vec (map (esc . pprS) (dataConSrcBangs dc)) ++ " :impl-bangs " ++ vec (map (esc . pprS) (dataConImplBangs dc))
+      ++ " :tag " ++ show (dataConTag dc) ++ "})"
   AConLike (PatSynCon ps) -> "(patsyn " ++ nameF (getName ps) ++ ")"
   ATyCon tc
     | Just cls <- tyConClass_maybe tc ->
         "(class " ++ nameF (getName tc) ++ " " ++ vec (map (esc . pprS) (classSCTheta cls)) ++ " "
           ++ vec [ "(" ++ nameF (getName op) ++ " " ++ esc (pprS (varType op)) ++ " " ++ typeF (varType op) ++ ")" | op <- classMethods cls ]
-          ++ " " ++ vec (map typeF (classSCTheta cls)) ++ ")"
+          ++ " " ++ vec (map typeF (classSCTheta cls))
+          ++ " {:tvs " ++ vec (map (esc . occNameString . getOccName) (classTyVars cls))
+          ++ " :fundeps " ++ vec [ vec [vec (map (esc . occNameString . getOccName) l), vec (map (esc . occNameString . getOccName) r)] | (l, r) <- snd (classTvsFds cls) ]
+          ++ " :defaults " ++ vec [ "[" ++ nameF (getName op) ++ " " ++ (case dm of Nothing -> "nil"; Just (n, _) -> nameF n) ++ "]" | (op, dm) <- classOpItems cls ]
+          ++ " :ats " ++ vec (map (nameF . getName) (classATs cls))
+          ++ " :roles " ++ rolesF tc ++ "})"
     | otherwise ->
         "(tycon " ++ nameF (getName tc) ++ " " ++ esc (pprS (tyConKind tc)) ++ " "
           ++ (if isNewTyCon tc then "newtype" else if isAlgTyCon tc then "data" else if isTypeSynonymTyCon tc then "synonym" else if isFamilyTyCon tc then "family" else "other")
-          ++ " " ++ vec (map (nameF . getName) (tyConDataCons tc)) ++ " " ++ typeF (tyConKind tc) ++ ")"
+          ++ " " ++ vec (map (nameF . getName) (tyConDataCons tc)) ++ " " ++ typeF (tyConKind tc)
+          ++ " {:roles " ++ rolesF tc ++ " :arity " ++ show (tyConArity tc)
+          ++ (case synTyConDefn_maybe tc of
+                Just (tvs, rhs) -> " :synonym [" ++ vec (map (esc . occNameString . getOccName) tvs) ++ " " ++ typeF rhs ++ "]"
+                Nothing -> "")
+          ++ (case famTyConFlav_maybe tc of
+                Just (ClosedSynFamilyTyCon (Just ax)) -> " :family closed :equations " ++ vec (map branchF (fromBranches (co_ax_branches ax)))
+                Just (ClosedSynFamilyTyCon Nothing) -> " :family closed :equations []"
+                Just OpenSynFamilyTyCon -> " :family open"
+                Just (DataFamilyTyCon _) -> " :family data"
+                Just AbstractClosedSynFamilyTyCon -> " :family abstract"
+                Just (BuiltInSynFamTyCon _) -> " :family builtin"
+                Nothing -> "")
+          ++ "})"
   ACoAxiom _ -> "(axiom)"
 
 -- a type as forms: (tv "a"), (tycon-app NAME [args]), (app f x), (fun c|t MULT ARG RES) (c: a constraint arrow),
@@ -378,6 +410,17 @@ typeF ty = case ty of
   CoercionTy _ -> "(coercion)"
   where flagS str | "Inferred" `isPrefixOf` str = "inferred" | "Required" `isPrefixOf` str = "required" | otherwise = "specified"
 
+rolesF :: TyCon -> String
+rolesF tc = vec (map roleS (tyConRoles tc))
+  where roleS r = case r of Nominal -> "nominal"; Representational -> "representational"; Phantom -> "phantom"
+
+-- an equation of a family: (eqn [tv...] [lhs...] rhs)
+branchF :: CoAxBranch -> String
+branchF b = "(eqn " ++ vec (map (esc . occNameString . getOccName) (cab_tvs b)) ++ " " ++ vec (map typeF (cab_lhs b)) ++ " " ++ typeF (cab_rhs b) ++ ")"
+
+famInstF :: FamInst -> String
+famInstF fi = "(fam-instance " ++ nameF (getName (fi_axiom fi)) ++ " " ++ nameF (fi_fam fi) ++ " " ++ vec (map typeF (fi_tys fi)) ++ " " ++ typeF (fi_rhs fi) ++ ")"
+
 nubMods :: [Module] -> [Module]
 nubMods = foldr (\x acc -> if x `elem` acc then acc else x : acc) []
 
@@ -391,3 +434,93 @@ safely h act = do
   case r of
     Right a -> return a
     Left (e :: SomeException) -> h (show e)
+
+-- ----------------------------------------------------------------------------------------
+-- the tc verb (HF3): the typed output of each module the front end's checker and desugarer are judged against:
+-- (hstc/module "M"), (hstc/things [...]) the module's own things as the iface verb writes them (types of every
+-- top-level binder, its classes, types and constructors), (hstc/instances [...]) its instances by their dictionary
+-- functions, and (hstc/core [...]) its desugared Core (desugarModule: -ddump-ds's program, -O0) with the types erased:
+-- (bind NAME e) and (rec [(bind NAME e)...]); e is (v NAME) (lv "occ" UNIQUE) (lit "text") (app F [ARG...])
+-- (lam [B...] E) (let [(bind B E)] E) (letrec [(bind B E)...] E) (case E B [(alt CON [B...] E)...]), type and
+-- coercion arguments and binders dropped, casts and ticks read through, (type) and (co) for a type or coercion left alone
+
+tcVerb :: FilePath -> [String] -> FilePath -> [FilePath] -> IO Bool
+tcVerb libdir flags outDir files = runGhc (Just libdir) $ do
+  setup libdir flags
+  targets <- mapM (\f -> guessTarget f Nothing Nothing) files
+  setTargets targets
+  _ <- load LoadAllTargets
+  graph <- depanal [] False
+  ok <- forM (mgModSummaries graph) $ \ms -> do
+    let mn = moduleNameString (ms_mod_name ms)
+        file = ms_hspp_file ms
+        out = outDir </> file ++ ".tc.edn"
+    p <- parseModule ms
+    t <- typecheckModule p
+    d <- desugarModule t
+    let (gbl, _) = tm_internals_ t
+        m = tcg_mod gbl
+        things = [th | th <- typeEnvElts (tcg_type_env gbl), nameModule_maybe (getName th) == Just m]
+        binds = mg_binds (dm_core_module d)
+    liftIO $ do
+      createDirectoryIfMissing True (takeDirectory out)
+      withFile out WriteMode $ \h -> do
+        hSetEncoding h utf8
+        hPutStrLn h ("(hstc/module " ++ esc mn ++ ")")
+        hPutStrLn h ("(hstc/things [" ++ intercalate "\n  " (sort (map thingF things)) ++ "])")
+        hPutStrLn h ("(hstc/instances [" ++ intercalate "\n  " (sort [ "(instance " ++ nameF (getName (is_dfun i)) ++ " " ++ typeF (varType (is_dfun i)) ++ ")" | i <- tcg_insts gbl ]) ++ "])")
+        hPutStrLn h ("(hstc/fam-instances [" ++ intercalate "\n  " (sort (map famInstF (tcg_fam_insts gbl))) ++ "])")
+        hPutStrLn h ("(hstc/core [" ++ intercalate "\n  " (map topBindF binds) ++ "])")
+    return True
+  return (and ok)
+
+topBindF :: CoreBind -> String
+topBindF b = case b of
+  NonRec v e -> bindF v e
+  Rec bs -> "(rec " ++ vec [bindF v e | (v, e) <- bs] ++ ")"
+
+bindF :: Var -> CoreExpr -> String
+bindF v e = "(bind " ++ bndrF v ++ " " ++ coreF e ++ ")"
+
+bndrF :: Var -> String
+bndrF v = case nameModule_maybe (getName v) of
+  Just _ | isExternalName (getName v) -> nameF (getName v)
+  _ -> "(lv " ++ esc (occNameString (getOccName v)) ++ " " ++ show (getKey (varUnique v)) ++ ")"
+
+erased :: Var -> Bool
+erased v = isTyVar v || isCoVar v
+
+coreF :: CoreExpr -> String
+coreF ex = case ex of
+  Var v -> if isExternalName (getName v) then "(v " ++ nameF (getName v) ++ ")" else bndrF v
+  Lit l -> "(lit " ++ esc (pprS l) ++ ")"
+  App _ _ ->
+    let (f, as) = collect ex []
+        as' = [a | a <- as, not (isTyArg a)]
+    in if null as' then coreF f else "(app " ++ coreF f ++ " " ++ vec (map coreF as') ++ ")"
+  Lam _ _ ->
+    let (bs, body) = lams ex []
+        bs' = filter (not . erased) bs
+    in if null bs' then coreF body else "(lam " ++ vec (map bndrF bs') ++ " " ++ coreF body ++ ")"
+  Let (NonRec v r) body
+    | erased v -> coreF body
+    | otherwise -> "(let [" ++ bindF v r ++ "] " ++ coreF body ++ ")"
+  Let (Rec bs) body -> "(letrec " ++ vec [bindF v r | (v, r) <- bs] ++ " " ++ coreF body ++ ")"
+  Case s b _ alts -> "(case " ++ coreF s ++ " " ++ bndrF b ++ " " ++ vec (map altF alts) ++ ")"
+  Cast e _ -> coreF e
+  Tick _ e -> coreF e
+  Type _ -> "(type)"
+  Coercion _ -> "(co)"
+  where
+    collect (App f a) acc = collect f (a : acc)
+    collect (Cast e _) acc = collect e acc
+    collect (Tick _ e) acc = collect e acc
+    collect f acc = (f, acc)
+    lams (Lam b e) acc = lams e (acc ++ [b])
+    lams e acc = (acc, e)
+    isTyArg a = case a of Type _ -> True; Coercion _ -> True; Cast x _ -> isTyArg x; _ -> False
+    altF (Alt c bs rhs) = "(alt " ++ conF c ++ " " ++ vec (map bndrF (filter (not . erased) bs)) ++ " " ++ coreF rhs ++ ")"
+    conF c = case c of
+      DataAlt dc -> nameF (getName dc)
+      LitAlt l -> "(lit " ++ esc (pprS l) ++ ")"
+      DEFAULT -> "default"

@@ -26,9 +26,11 @@
 --       OUTDIR/FILE.hspp.edn, the dump's (hsdump/config {...}) of it (the preprocessing's keys)
 --   hsdump rn    -o OUTDIR [--libdir DIR] [--ghc FLAG... --files] FILE...
 --   hsdump iface -o OUTDIR [--libdir DIR] [--ghc FLAG... --files] MODULE...
+--   hsdump tc    -o OUTDIR [--libdir DIR] [--ghc FLAG... --files] FILE...
 --       HF1 (doc/haskell/FRONTEND-SURVEY.md, "As built: HF1-HF2"), in HsRn.hs: GHC's renamer's output reduced to the
 --       resolved names, operator trees, binding groups, imports and exports (OUTDIR/FILE.rn.edn), and the libraries'
---       interfaces (OUTDIR/MODULE.iface.edn)
+--       interfaces (OUTDIR/MODULE.iface.edn); tc (HF3): each module's typed things in the iface verb's forms and its
+--       desugared Core with the types erased (OUTDIR/FILE.tc.edn)
 -- FILE is relative to the current directory (the package's directory: it is the file name of
 -- every span). R6: an .hsc FILE is run through the host's hsc2hs first (--hsc2hs-arg A, repeated:
 -- its arguments; the output X.hs written beside X.hsc, as Cabal's build writes it, recorded in
@@ -39,7 +41,7 @@
 module Main (main) where
 
 import GHC
-import HsRn (rnVerb, ifaceVerb)
+import HsRn (rnVerb, ifaceVerb, tcVerb)
 import GHC.Driver.Session
 import GHC.Driver.Env (HscEnv(..), hscSetFlags)
 import GHC.Driver.Config.Parser (initParserOpts, supportedLanguagePragmas)
@@ -146,9 +148,12 @@ main = do
       exitWith (ExitFailure 2)
     Just _ -> return ()
   -- HF1: the front end's oracles (HsRn.hs), their own session
-  when (oVerb o `elem` ["rn", "iface"]) $ do
+  when (oVerb o `elem` ["rn", "iface", "tc"]) $ do
     let out = fromMaybe ".tmp/hsdump/out" (oOut o)
-    ok <- if oVerb o == "rn" then rnVerb libdir (oGhc o) out (oFiles o) else ifaceVerb libdir (oGhc o) out True (oFiles o)
+    ok <- case oVerb o of
+      "rn" -> rnVerb libdir (oGhc o) out (oFiles o)
+      "tc" -> tcVerb libdir (oGhc o) out (oFiles o)
+      _ -> ifaceVerb libdir (oGhc o) out True (oFiles o)
     exitWith (if ok then ExitSuccess else ExitFailure 1)
   failures <- newIORef (0 :: Int)
   runGhc (Just libdir) $ do
