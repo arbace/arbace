@@ -1146,7 +1146,7 @@ Not steps and not migrated: `bin/oi record-ref`, `suite record-ref` (ocamlc's an
 - **`bin/repr-ocaml record-dumps [CORPUS...]`, `verify-dumps [--sample N]`**: packs `ocaml-dumps-CORPUS` (members `parse/REL.ae`, `tokens/REL.ae`; the spec's `parse/` and `check/ID.dump`), one key a file; `dump_one`, `layout_one`
   and `spec-check` read them unless `REPR_OCAML_LIVE=1`; an unusable record is named in a file and fails the step (never an `(ocaml/error` a known reject could hide behind). `roundtrip --oracle` is the live run, including the print's
   redump and the `.cmi` level; in the records mode those two are reported as the oracle tier's. The verifies run a crossed pair (the first live output against the last record: must differ).
-- **`bin/oi judges-test --records`**: `judges_test` with `OI_JUDGES_NO_LIVE=1` (the expect action's 7 cases left out and counted as run), `floors_test`, `oi_key_test` (its live-key case under `OI_LIVE=1`; its scratch root takes
+- **`bin/oi judges-test --records`**: `judges_test` with `OI_JUDGES_NO_LIVE=1` (the expect action's 7 cases left out and counted as run), `floors_test`, `oi_key_test` (its live-key case, a missing `OI_OCDUMP_KEY`, under `OI_LIVE=1` and left out of `--records`; its scratch root takes
   `test/oracle-records/` too), `aot_oi_column_test`; without `--records` every test, the helper's and the expect tool's too.
 - Kinds in `test/oracle-records/kinds.edn`: `ocaml lambda-stdlib` (C), `lambda-progs` (C), `lambda-suite` (C), `repl` (C, committed), `dumps` (B), `roundtrip` (D, nothing to record). Makefile targets `oi-*-record`, `oi-*-verify`,
   `repr-ocaml-record-dumps`, `repr-ocaml-verify-dumps`, `repr-ocaml-oracle`, `ocaml-judges-records`.
@@ -1193,7 +1193,8 @@ on each, stage 0 linked from the main checkout, the hosts each step names read f
 - With `ocamlc` and `ocamlopt` stubs (exit 99) first on `PATH` and `.tmp/ocdump` moved away (so no ocdump either): `bin/oi check --only-list test/ocaml/essential-check.txt` (58 programs: 58 pass, the control differs), `bin/oi repl-check`
   (24 phrases equal), `bin/oi check --aot --only-list` of four programs, `bin/oi suite check --only-list` of two suite programs, and the repr/ocaml step's commands (`roundtrip --text samples stdlib`, `--spec`, `spec-check`, `embed-check`: samples
   8 and stdlib 148 of 150 text equal, the 2 the parse rejects as classed, 218 of 218 spec examples equal), 1 min 8 s.
-- `bin/oi judges-test --records` under the same stubs: see Left.
+- `bin/oi judges-test --records` under the same stubs (4 min 44 s): `judges_test` 46 cases run (the expect's 7 counted), `floors_test`, `aot_oi_column_test` ok; `oi_key_test` failed on the first run (its two
+  "missing part" cases and the scratch root, all fixed as above) and passes alone under the stubs (the live-key case skipped, said).
 - `bin/oi stdlib --verify` (the stdlib built afresh by ocamlc: 72 entries equal), `bin/oi verify-lambda --sample 5` and `bin/repr-ocaml verify-dumps --sample 4 samples` (equal, crossed pairs differ), `bin/oi repl-check --verify-records`
   (72 equal), `bin/oracle-records verify ocaml lambda-stdlib lambda-progs repl dumps --sample 6` (all equal, `:ocaml c7205b33cdf0c5f6`), `bin/oracle-records pins` (the six packs found with their members, the tampered-pack control refused),
   `roundtrip --oracle --cmi samples` (the live levels still pass: 8 equal, 1 `.cmi` equal).

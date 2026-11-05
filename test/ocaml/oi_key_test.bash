@@ -27,7 +27,12 @@ cmp -s "$root/.tmp/repr-ocaml/opam-pins.txt" "$root/.tmp/w/opam-pins.changed" &&
 chk "the program corpus's key does not hold the opam pins (a pin bump must not rerun its rows)" same "$(OI_OPAM_PINS=$root/.tmp/w/opam-pins.changed bin/oi key)"
 chk "the opam pins are in the suite's key" differ "$(OI_OPAM_PINS=$root/.tmp/w/opam-pins.changed bin/oi suite key)" "$(bin/oi suite key)"
 for v in OI_OPAM_PINS OI_OCDUMP_KEY; do
-  OI_LIVE=1 OI_TIMEOUT=30 env "$v=$root/.tmp/w/missing" bin/oi suite key > "$root/.tmp/w/key.out" 2> "$root/.tmp/w/key.err"; st=$?
+  # the live key (OI_LIVE=1) holds ocdump's key file, which needs the toolchain: the oracle tier's (OI_JUDGES_NO_LIVE leaves it out)
+  live=""; if [ "$v" = OI_OCDUMP_KEY ]; then
+    if [ -n "${OI_JUDGES_NO_LIVE:-}" ]; then echo "skip a missing part ($v): the live key needs ocamlc (OI_JUDGES_NO_LIVE)"; continue; fi
+    live=1
+  fi
+  OI_LIVE=$live OI_TIMEOUT=30 env "$v=$root/.tmp/w/missing" bin/oi suite key > "$root/.tmp/w/key.out" 2> "$root/.tmp/w/key.err"; st=$?
   if [ "$st" != 0 ] && [ ! -s "$root/.tmp/w/key.out" ] && grep -q '^oi: key: ' "$root/.tmp/w/key.err"; then echo "ok   a missing part ($v) fails the key"; else echo "FAIL a missing part ($v): exit $st, key $(cat "$root/.tmp/w/key.out")"; bad=1; fi
 done
 
