@@ -32,10 +32,10 @@
 
 (defn- add-top! [f] (swap! *top* update :forms conj f))
 
-(defn- declare! [^String nm ret ps & {:keys [va nounwind]}]
+(defn- declare! [^String nm ret ps & {:keys [va nounwind pattrs]}]
   (when-not (contains? (:declared @*top*) nm)
     (swap! *top* update :declared conj nm)
-    (add-top! (apply list 'llvm/declare (gsym nm) ret (cond-> (mapv vector ps) va (conj '&)) (when nounwind [:attrs [:nounwind]])))))
+    (add-top! (apply list 'llvm/declare (gsym nm) ret (cond-> (mapv (fn [t i] (into [t] (nth pattrs i nil))) ps (range)) va (conj '&)) (when nounwind [:attrs [:nounwind]])))))
 
 (defn- string-global [^String s]
   (or (get-in @*top* [:strings s])
@@ -158,16 +158,91 @@
 
 (defn- fn-name ^String [fid] (let [f (sema/fnd fid)] (abi/mangle-fn f (when (#{:ctor :dtor} (:kind f)) 2))))
 
-(defn- class-ret? [f] (abi/class? (abi/unq (:ret (:ty f)))))
+;; The calling convention (CODEGEN.md's P3, decided (b)): scalars and references as clang passes them; a class whose
+;; copy and destruction are trivial by the SysV psABI's classes (arbace.cpp.abi/classify-class) in up to two registers'
+;; eightbytes, as separate arguments and as a return value of one type or a struct of two, an empty one not at all, a
+;; MEMORY one (and one that no longer fits the six integer and eight SSE registers) by address; a class with a
+;; non-trivial copy or destructor by the address of the caller's copy, its result by sret
+
+(defn- part-ltype [[c ^long b]]
+  (if (= c :sse) (if (<= b 4) 'float 'double) (case b 1 'i8 2 'i16 (3 4) 'i32 'i64)))
+
+(defn- class-pass
+  "How a class type passes by value: :ignore, :ind (by address) or the eightbytes' parts."
+  [t]
+  (let [id (:id (abi/unq t))]
+    (if (and (sema/trivial-copy? id) (sema/trivial-dtor? id))
+      (let [c (abi/classify-class id)] (if (= :memory c) :ind c))
+      :ind)))
+
+(defn- byval-class? [t] (let [id (:id (abi/unq t))] (and (sema/trivial-copy? id) (sema/trivial-dtor? id))))
+
+(defn sig-plan
+  "{:ret llvm-type :ret-k :sret|:regs|:ignore|:direct :ret-parts :ps [llvm-types] :params [{:k :direct|:regs|:ind|:ignore
+  :parts}]} of a function type (`this?`: a method's object first)."
+  [ret-t ps-t this?]
+  (let [rc (when (abi/class? (abi/unq ret-t)) (class-pass ret-t))
+        ret-k (cond (nil? rc) :direct (= :ind rc) :sret (= :ignore rc) :ignore :else :regs)
+        ints (atom (- 6 (if (= ret-k :sret) 1 0) (if this? 1 0)))
+        sses (atom 8)
+        params (vec (for [t ps-t]
+                      (cond
+                        (abi/ref? t) (do (swap! ints dec) {:k :direct :t 'ptr})
+                        (abi/class? (abi/unq t))
+                        (let [c (class-pass t)]
+                          (cond
+                            (= :ignore c) {:k :ignore}
+                            ;; a MEMORY class on the stack (byval); a non-trivial one by the copy's address
+                            (= :ind c) (if (byval-class? t)
+                                         {:k :ind :t 'ptr :attrs [(list :byval (list 'array (abi/size-of t) 'i8)) (list :align (max 8 (abi/align-of t)))]}
+                                         (do (swap! ints dec) {:k :ind :t 'ptr}))
+                            :else (let [ni (count (filter #(= :integer (first %)) c)) ns (- (count c) ni)]
+                                    (if (and (<= ni (long @ints)) (<= ns (long @sses)))
+                                      (do (swap! ints - ni) (swap! sses - ns) {:k :regs :parts c})
+                                      {:k :ind :t 'ptr :attrs [(list :byval (list 'array (abi/size-of t) 'i8)) (list :align (max 8 (abi/align-of t)))]}))))
+                        :else (let [lt (abi/llvm-type t true)]
+                                (if (#{'float 'double} lt) (swap! sses dec) (swap! ints dec))
+                                {:k :direct :t lt}))))]
+    {:ret (case ret-k :direct (if (abi/ref? ret-t) 'ptr (abi/llvm-type ret-t true)) (:sret :ignore) 'void
+                :regs (if (= 1 (count rc)) (part-ltype (first rc)) (apply list 'struct (map part-ltype rc))))
+     :ret-k ret-k :ret-parts (when (= ret-k :regs) rc)
+     :ps (vec (concat (when (= ret-k :sret) ['ptr]) (when this? ['ptr])
+                      (mapcat (fn [p] (case (:k p) :regs (map part-ltype (:parts p)) :ignore [] [(:t p)])) params)))
+     :pattrs (vec (concat (when (= ret-k :sret) [[]]) (when this? [[]])
+                          (mapcat (fn [p] (case (:k p) :regs (map (constantly []) (:parts p)) :ignore [] [(vec (:attrs p))])) params)))
+     :params params}))
+
+(defn- class-ret? [f] (= :sret (:ret-k (sig-plan (:ret (:ty f)) (:ps (:ty f)) false))))
 
 (defn- param-ltype [t] (if (or (abi/ref? t) (abi/class? (abi/unq t))) 'ptr (abi/llvm-type t true)))
 
 (defn- fn-sig
-  "[ret-type param-types variadic] of a function as this code generator calls it: sret first, this, the parameters."
+  "[ret-type param-types variadic plan] of a function as this code generator calls it: sret first, this, the
+  parameters."
   [f]
-  (let [ty (:ty f)
-        ret (cond (class-ret? f) 'void (abi/ref? (:ret ty)) 'ptr :else (abi/llvm-type (:ret ty) true))]
-    [ret (vec (concat (when (class-ret? f) ['ptr]) (when (and (:cls f) (not (:static f))) ['ptr]) (map param-ltype (:ps ty)))) (:va ty)]))
+  (let [plan (sig-plan (:ret (:ty f)) (:ps (:ty f)) (boolean (and (:cls f) (not (:static f)))))]
+    [(:ret plan) (:ps plan) (:va (:ty f)) plan]))
+
+(declare val! emit! alloca! memcpy!)
+
+(defn- coerce-out!
+  "The eightbytes of the object at `addr` (`size` bytes) as [[type value] ...]."
+  [addr parts ^long size]
+  (let [buf (alloca! '(array 16 i8) 8)]
+    (memcpy! buf addr size)
+    (vec (map-indexed (fn [i p] (let [t (part-ltype p)
+                                      a (if (zero? i) buf (val! (list 'getelementptr :inbounds 'i8 ['ptr buf] ['i64 8])))]
+                                  [t (val! (list 'load t ['ptr a] :align 8))]))
+                      parts))))
+
+(defn- coerce-in!
+  "Stores the eightbytes' values `vs` into the object at `addr` (`size` bytes)."
+  [vs parts addr ^long size]
+  (let [buf (alloca! '(array 16 i8) 8)]
+    (doseq [[i p v] (map vector (range) parts vs)]
+      (let [a (if (zero? i) buf (val! (list 'getelementptr :inbounds 'i8 ['ptr buf] ['i64 8])))]
+        (emit! (list 'store [(part-ltype p) v] ['ptr a] :align 8))))
+    (memcpy! addr buf size)))
 
 (declare nothrow-fn?)
 
@@ -179,7 +254,7 @@
       (swap! *top* update :wanted conj fid)
       (if (or (:tbody f) (and (:implicit f) (not (:trivial f))) (and (:defaulted f) (not (:trivial f))) (:tinits f) (:tassign f))
         (swap! *top* update :queue conj fid)
-        (let [[r ps va] (fn-sig f)] (declare! nm r ps :va va :nounwind (nothrow-fn? f)))))
+        (let [[r ps va plan] (fn-sig f)] (declare! nm r ps :va va :nounwind (nothrow-fn? f) :pattrs (:pattrs plan)))))
     (gsym nm)))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -383,6 +458,31 @@
         slot (val! (list 'getelementptr :inbounds 'ptr ['ptr vp] ['i64 (vtable-index cid fid variant)]))]
     (val! (list 'load 'ptr ['ptr slot] :align 8))))
 
+(defn- emit-call!
+  "A call by the plan (sig-plan) of the function type `ft`: the parameters' initializers' operands coerced, the object
+  `obj`, the result's (a class's into `dest`)."
+  [plan callee va ft inits obj dest nounwind]
+  (let [vals (arg-values (:ps ft) inits)
+        args (vec (apply concat
+                         (map-indexed (fn [i [t v]]
+                                        (let [pp (nth (:params plan) i nil)]
+                                          (case (:k pp)
+                                            :regs (coerce-out! v (:parts pp) (abi/size-of (nth (:ps ft) i)))
+                                            :ignore []
+                                            [(vec (concat [t] (:attrs pp) [v]))])))
+                                      vals)))
+        args (vec (concat (when (= :sret (:ret-k plan)) [['ptr dest]]) (when obj [['ptr obj]]) args))
+        ret (:ret plan)
+        fty (if va (list 'fn ret (conj (:ps plan) '&)) ret)
+        r (call-insn! ret fty callee args nounwind)]
+    (case (:ret-k plan)
+      :regs (let [parts (:ret-parts plan)
+                  vs (if (= 1 (count parts)) [r] (vec (for [i (range (count parts))] (val! (list 'extractvalue [ret r] i)))))]
+              (coerce-in! vs parts dest (abi/size-of (:ret ft)))
+              nil)
+      :ignore nil
+      r)))
+
 (defn- call!
   "Calls the function `fid` (the object's address `obj` for a method, `dest` for a class result) with the parameters'
   initializers; the result's operand (an address for a reference result)."
@@ -398,11 +498,9 @@
       (and (:trivial f) (= :dtor (:kind f))) nil
       (and (:trivial f) (= :ctor (:kind f)) (empty? (:ps (:ty f)))) nil
       :else
-      (let [args (arg-values (:ps (:ty f)) inits)
-            args (vec (concat (when (class-ret? f) [['ptr dest]]) (when (and (:cls f) (not (:static f))) [['ptr obj]]) args))
-            callee (if virtual (vcall-target (:cls f) fid nil obj) (want-fn! fid))
-            fty (if va (list 'fn ret (conj ps '&)) ret)]
-        (call-insn! ret fty callee args (nothrow-fn? f))))))
+      (let [plan (nth (fn-sig f) 3)
+            callee (if virtual (vcall-target (:cls f) fid nil obj) (want-fn! fid))]
+        (emit-call! plan callee va (:ty f) inits (when (and (:cls f) (not (:static f))) obj) dest (nothrow-fn? f))))))
 
 (defn call-dtor!
   "Calls the class's complete destructor on the object at `addr` (nothing for a trivial one)."
@@ -431,22 +529,13 @@
       (br! le) (close-block!) (start! ln)
       (let [nf (val! (list 'inttoptr 'i64 p 'ptr)) fn* (:label @*f*)]
         (begin! le)
-        (let [callee (val! (list 'phi 'ptr [vf fv] [nf fn*]))
-              args (arg-values (:ps ft) (:args e))
-              cret (abi/class? (abi/unq (:ret ft)))
-              ret (cond cret 'void (abi/ref? (:ret ft)) 'ptr :else (abi/llvm-type (:ret ft) true))
-              args (vec (concat (when cret [['ptr dest]]) [['ptr this]] args))]
-          (call-insn! ret ret callee args false))))))
+        (let [callee (val! (list 'phi 'ptr [vf fv] [nf fn*]))]
+          (emit-call! (sig-plan (:ret ft) (:ps ft) true) callee (:va ft) ft (:args e) this dest false))))))
 
 (defn- icall! [e dest]
   (let [ft (:fty e)
-        p (emit-rv (:callee e))
-        args (arg-values (:ps ft) (:args e))
-        cret (abi/class? (abi/unq (:ret ft)))
-        ret (cond cret 'void (abi/ref? (:ret ft)) 'ptr :else (abi/llvm-type (:ret ft) true))
-        ps (vec (concat (when cret ['ptr]) (map param-ltype (:ps ft))))
-        args (vec (concat (when cret [['ptr dest]]) args))]
-    (call-insn! ret (if (:va ft) (list 'fn ret (conj ps '&)) ret) p args false)))
+        p (emit-rv (:callee e))]
+    (emit-call! (sig-plan (:ret ft) (:ps ft) false) p (:va ft) ft (:args e) nil dest false)))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Expressions
@@ -1141,13 +1230,16 @@
   [fid]
   (let [f (sema/fnd fid)
         nm (fn-name fid)
-        [ret ps va] (fn-sig f)
+        [ret ps va plan] (fn-sig f)
         pnames (vec (map-indexed (fn [i _] (symbol (str "%a" i))) ps))
         state (atom {:blocks [] :label '%entry :insts [] :n 0 :allocas [] :addr {} :cleanups [] :loops [] :entry-stores []
                      :fn f :nrvo (:nrvo f) :ret-label '%return})]
     (binding [*f* state]
       (let [k (atom 0)
-            sret (when (class-ret? f) (let [p (nth pnames @k)] (swap! k inc) p))
+            sret (case (:ret-k plan)
+                   :sret (let [p (nth pnames @k)] (swap! k inc) p)
+                   (:regs :ignore) (slot! (abi/unq (:ret (:ty f))))
+                   nil)
             this (when (and (:cls f) (not (:static f))) (let [p (nth pnames @k)] (swap! k inc) p))]
         (swap! *f* assoc :sret sret)
         (when (nothrow-fn? f) (push-cleanup! {:terminate true}))
@@ -1156,12 +1248,18 @@
             (emit! (list 'store ['ptr this] ['ptr s] :align 8))
             (swap! *f* assoc :this-slot s)))
         (doseq [[i pid] (map-indexed vector (:params f))]
-          (let [p (nth pnames (+ @k i)) t (:ty (sema/var* pid))]
+          (let [t (:ty (sema/var* pid)) pp (nth (:params plan) i)
+                n (case (:k pp) :regs (count (:parts pp)) :ignore 0 1)
+                pv (subvec pnames @k (+ (long @k) (long n)))
+                p (first pv)]
+            (swap! k + n)
             (cond
+              (= :regs (:k pp)) (let [s (slot! (abi/unq t))] (coerce-in! pv (:parts pp) s (abi/size-of t)) (swap! *f* assoc-in [:addr pid] s))
+              (= :ignore (:k pp)) (swap! *f* assoc-in [:addr pid] (slot! (abi/unq t)))
               (abi/ref? t) (let [s (alloca! 'ptr 8)] (emit! (list 'store ['ptr p] ['ptr s] :align 8)) (swap! *f* assoc-in [:addr pid] s))
               (abi/class? (abi/unq t)) (swap! *f* assoc-in [:addr pid] p)
               :else (let [s (slot! t)] (store! t p s) (swap! *f* assoc-in [:addr pid] s)))))
-        (when-not (or (= 'void ret) sret)
+        (when-not (or (= 'void ret) sret (= :regs (:ret-k plan)))
           (let [rt (if (abi/ref? (:ret (:ty f))) (abi/ptr abi/void) (:ret (:ty f)))]
             (swap! *f* assoc :ret-slot (slot! rt) :ret-ty rt)))
         (when (= "main" nm) (emit! (list 'store ['i32 0] ['ptr (:ret-slot @*f*)] :align 4)))
@@ -1200,21 +1298,28 @@
           ;; falling off the end
           (when-not (:term @*f*)
             (cond
-              (or (= 'void ret) sret (= "main" nm) (:tassign f)) (do (unwind-to! 0) (br! '%return))
+              (or (= 'void ret) sret (= "main" nm) (:tassign f) (= :regs (:ret-k plan))) (do (unwind-to! 0) (br! '%return))
               :else (emit! '(unreachable))))
           (close-block!)
           (start! '%return)
-          (if (or (= 'void ret) sret)
-            (emit! '(ret void))
-            (let [v (load! (:ret-ty @*f*) (:ret-slot @*f*))]
-              (emit! (list 'ret ret v))))
+          (cond
+            (= :regs (:ret-k plan))
+            (let [parts (:ret-parts plan)
+                  vs (map second (coerce-out! sret parts (abi/size-of (:ret (:ty f)))))]
+              (if (= 1 (count parts))
+                (emit! (list 'ret ret (first vs)))
+                (let [v (reduce (fn [acc [i v]] (val! (list 'insertvalue [ret acc] [(part-ltype (nth parts i)) v] i))) 'poison (map-indexed vector vs))]
+                  (emit! (list 'ret ret v)))))
+            (or (= 'void ret) sret) (emit! '(ret void))
+            :else (let [v (load! (:ret-ty @*f*) (:ret-slot @*f*))]
+                    (emit! (list 'ret ret v))))
           (close-block!)))
       (let [s @state
             blocks (:blocks s)
             entry (first blocks)
             entry (apply list 'block (second entry) (concat (:allocas s) (:entry-stores s) (drop 2 entry)))
             body (vec (concat [entry] (rest blocks) (:pad-blocks s)))
-            params (mapv (fn [t p] [t p]) ps pnames)]
+            params (mapv (fn [t a p] (vec (concat [t] a [p]))) ps (:pattrs plan) pnames)]
         (when (:personality s) (declare! "__gxx_personality_v0" 'i32 [] :va true))
         (add-top! (apply list 'llvm/define (gsym nm) ret (cond-> params va (conj '&))
                          (concat (linkage-of f)
@@ -1282,13 +1387,14 @@
         nm (str "_ZTh" (if (neg? adj) (str "n" (- adj)) adj) "_" (subs (abi/mangle-fn f (if (= :dtor (:kind f)) (or v 1) nil)) 2))]
     (when-not (contains? (:declared @*top*) nm)
       (swap! *top* update :declared conj nm)
-      (let [[ret ps va] (if (= :dtor (:kind f)) ['void '[ptr] false] (fn-sig f))
+      (let [[ret ps va plan] (if (= :dtor (:kind f)) ['void '[ptr] false {:pattrs [[]]}] (fn-sig f))
             sret (class-ret? f)
             pn (vec (map-indexed (fn [i _] (symbol (str "%a" i))) ps))
             ti (if sret 1 0)
-            args (vec (map-indexed (fn [i [t p]] [t (if (= i ti) '%t1 p)]) (map vector ps pn)))
+            pa (:pattrs plan)
+            args (vec (map-indexed (fn [i [t p]] (vec (concat [t] (nth pa i nil) [(if (= i ti) '%t1 p)]))) (map vector ps pn)))
             call (list 'call (if va (list 'fn ret (conj ps '&)) ret) target args)]
-        (add-top! (apply list 'llvm/define (gsym nm) ret (mapv vector ps pn) :linkage (if (:internal f) :internal :linkonce_odr)
+        (add-top! (apply list 'llvm/define (gsym nm) ret (mapv (fn [t a p] (vec (concat [t] a [p]))) ps pa pn) :linkage (if (:internal f) :internal :linkonce_odr)
                          (concat (when (nothrow-fn? f) [:attrs [:nounwind]])
                                  [:body [(list 'block nil
                                                (list '= '%t1 (list 'getelementptr :inbounds 'i8 ['ptr (nth pn ti)] ['i64 adj]))

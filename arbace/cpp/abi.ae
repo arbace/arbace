@@ -388,3 +388,66 @@
   "The mangling of a class type alone (for _ZTV, _ZTI, _ZTS)."
   ^String [t]
   (binding [*subs* (atom [])] (mangle-type* t)))
+
+;; ---------------------------------------------------------------------------------------------
+;; The SysV x86-64 psABI's classification of a class passed or returned by value (§3.2.3; in the structure of clang's
+;; X86_64ABIInfo::classify, its Lo/Hi eightbytes, merge and postMerge; written from the psABI's text, clang's output
+;; the oracle: CODEGEN.md's P3)
+
+(defn- merge-class [a b]
+  (cond (= a b) a (= a :none) b (= b :none) a (or (= a :memory) (= b :memory)) :memory
+        (or (= a :integer) (= b :integer)) :integer (or (= a :x87) (= b :x87)) :memory :else :sse))
+
+(defn- scalar-class [t]
+  (let [t (unq t)]
+    (cond (floating? t) (if (= :ldouble (bn t)) :x87 :sse)
+          (= :mptr (:k t)) :integer
+          :else :integer)))
+
+(defn- mark! [acc ^long e cls ^long end]
+  (when (< e 2) (swap! acc #(-> % (update e merge-class cls) (update (+ 2 e) max end)))))
+
+(defn- classify-into!
+  "Merges the classes of the object of type `t` at byte `off` into the eightbytes (`acc`, an atom of [lo hi lo-end
+  hi-end])."
+  [acc t ^long off]
+  (let [t (unq t)]
+    (cond
+      (= :arr (:k t))
+      (let [et (:of t) es (size-of et)] (dotimes [i (long (or (:n t) 0))] (classify-into! acc et (+ off (* i es)))))
+      (= :class (:k t))
+      (let [id (:id t) c (cls id) l (layout id)]
+        (when (:vptr l) (mark! acc (quot off 8) :integer (+ (rem off 8) 8)))
+        (doseq [[i b] (map-indexed vector (:bases c))]
+          (classify-into! acc {:k :class :id (:cls b)} (+ off (long (nth (:bases l) i)))))
+        (doseq [[i f] (map-indexed vector (:fields c))]
+          (let [bo (nth (:bitoffs l) i)]
+            (cond
+              (nil? bo) (classify-into! acc (:ty f) (+ off (long (nth (:fields l) i))))
+              (pos? (long (:bits f)))
+              (let [b0 (+ (* 8 off) (long bo)) b1 (+ b0 (long (:bits f)) -1)]
+                (doseq [e (range (quot b0 64) (inc (quot b1 64)))]
+                  (mark! acc e :integer (min 8 (- (quot (+ b1 8) 8) (* 8 e))))))
+              :else nil))))
+      (= :mptr (:k t))
+      (doseq [e (range (quot off 8) (inc (quot (+ off (size-of t) -1) 8)))] (mark! acc e :integer 8))
+      :else
+      (let [e (quot off 8)] (mark! acc e (scalar-class t) (- (+ off (size-of t)) (* 8 e)))))))
+
+(defn classify-class
+  "How a class of trivially copyable type passes by value: :ignore (an empty class), :memory, or the eightbytes'
+  [[:integer|:sse bytes] ...]."
+  [id]
+  (let [sz (size-of {:k :class :id id})]
+    (cond
+      (and (empty-class? id) (= 1 sz)) :ignore
+      (> sz 16) :memory
+      :else
+      (let [acc (atom [:none :none 0 0])]
+        (classify-into! acc {:k :class :id id} 0)
+        (let [[lo hi e0 e1] @acc
+              n (if (> sz 8) 2 1)]
+          (if (or (= lo :memory) (= hi :memory) (= lo :x87) (= hi :x87))
+            :memory
+            (vec (for [e (range n) :let [c (nth [lo hi] e) c (if (= c :none) :sse c)]]
+                   [c (max 1 (long (nth [e0 e1] e)))]))))))))
