@@ -319,3 +319,30 @@ the corpus's pin), read in place: `compiler/GHC/Rename/*.hs`, `compiler/GHC/Hs/*
   Decision: the renamer writes the facts of HF1 (judged by data equality) and does not yet build a renamed tree; HF3's
   first step is to (survey, "As built: HF1-HF2", Proposed 1).
 - Wider sweeps (ghc-internal alone, mtl/parsec/containers..., 36 more nofib programs) found and fixed a dozen cases; see the survey's "As built". Instances and structured types were added to `iface` afterwards.
+
+## 2026-11-05: HF3's start, the renamed tree, the interfaces and the elaborator's first slice (branch `haskell-hf3`, from `haskell-hf12`)
+
+Done by an agent in one session (from 13:26 UTC), light on the host (samples and single-module nofib programs, the
+host's GHC 9.14.1 for the helper at `-O0`, main's stage 0 as the tools' host, no gate, no build). The user decided the
+four proposals of "As built: HF1-HF2" as recommended; recorded in doc/haskell/FRONTEND-SURVEY.md, "Decided".
+
+- Proposal 1 (a), the renamed tree inside `rename.ae`: the walk records the resolutions, operator shapes, implicit
+  names and binding groups keyed by the parse tree's objects (an `IdentityHashMap`), and `rtree` substitutes them after
+  the walk. Alternative considered and not taken (the user's decision): a second pass joining the facts to the tree by
+  span (spans collide: puns, wildcards). The facts became the tree's projection: `rename-check` also requires the
+  tree's located names to be among the facts; 101 of 101 modules equal, none outside, none absent.
+- Proposal 2: the helper's `iface` gains roles, arity, synonyms, family equations, fundeps, default methods, bangs,
+  arity and strictness of ids, family instances; type variables carry their uniques (GHC's inferred types repeat `t`);
+  the new verb `tc` dumps a module's typed things and its desugared Core (`desugarModule`, `-O0`) with types erased. The
+  renamer writes a module's own things as far as it knows them; the elaborator writes the typed interface.
+- The elaborator, `arbace/repr/haskell/typecheck.ae` (1,531 lines, Arbace's own; GHC's `compiler/GHC/Tc/` of
+  `ghc-9.14.1-src.tar.xz` and Jones's "Typing Haskell in Haskell" read as the specification, nothing ported, so no
+  LICENSE.md change): HM by levels, groups by the renamer's SCCs, the monomorphism restriction, classes and instances
+  as dictionaries with GHC's names, superclasses, defaulting, `HasCallStack` at the call site. Judge decided: types
+  (canonical forms) and evidence (applications of names to dictionaries after a little of GHC's simple optimiser), full
+  Core reported only (the match compiler is HF5's); the alternative, judging Core now, would need GHC's match compiler
+  first. A negative control (defaulting reversed, superclass-implied constraints kept) must differ.
+- Results: `bin/repr-haskell typecheck-check` 16 of 16 samples (`test/haskell/typecheck/`), types 194 of 194, evidence 202
+  of 202; nofib/spectral's 21 programs by hand, 17 of 21; the four others in two recorded classes (GHC inlines `INLINE`
+  library default methods; the order of two constraints of one class). Proposals 1-5 in the survey (the judge, the
+  `INLINE` unfoldings, the constraint order, the gate step of decision 3, HF3's next steps).
