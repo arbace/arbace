@@ -280,10 +280,17 @@
 (def ^:dynamic *wanteds* nil)   ; atom [{:ev ID :pred pred}]
 (def ^:dynamic *evidence* nil)  ; atom {ID term}
 
+(defn- eq-pred?
+  "An equality constraint (a ~ b, its kind first): solved by unification, its evidence a coercion, erased"
+  [[c _]]
+  (and (vector? c) (= "~" (nth c 3 nil))))
+
 (defn- want! [pred]
+  (if (eq-pred? pred)
+    (do (unify (last (butlast (second pred))) (last (second pred))) (list 'co))
   (let [i (fresh-id)]
     (swap! *wanteds* conj {:ev i :pred pred})
-    (list 'ev i)))
+    (list 'ev i))))
 
 (defn- zonk-pred [[c ts]] [c (mapv (comp deep-expand zonk) ts)])
 
@@ -322,6 +329,8 @@
   "A dictionary term for pred from the givens or the instances, nil when none applies yet"
   [pred givens depth]
   (let [[c ts] (zonk-pred pred)]
+    (if (eq-pred? [c ts])
+      (do (unify (last (butlast ts)) (last ts)) (list 'co))
     (or (some (fn [[[gc gts] term]] (when (and (= gc c) (= (mapv zonk gts) ts)) term)) givens)
         (when (and (< depth 30) (seq ts) (not= :mv (first (first ts))) (not= :tv (first (first ts))))
           (some (fn [{:keys [dfun tvs ctx head]}]
@@ -330,7 +339,7 @@
                       (let [subs (map (fn [[pc pts]] (solve-pred [pc (mapv #(subst m %) pts)] givens (inc depth))) ctx)]
                         (when (every? some? subs)
                           (if (empty? ctx) (list 'v dfun) (list 'app (list 'v dfun) (vec subs))))))))
-                @*insts*)))))
+                @*insts*))))))
 
 ;;; ------------------------------------------------------------------------------------------
 ;;; Converting written types (the renamed tree's HsType)
@@ -531,6 +540,7 @@
                (unify tn (fn-ty t r))
                [r (app* cn [c])])
       HsPar (infer env (arg v 2))
+      HsPragE (infer env (arg v 3))
       HsOverLit (overlit v)
       HsLit (hslit v)
       SectionL (let [[te ce] (infer env (arg v 2)) [to co] (infer env (arg v 3)) b (fresh-meta) r (fresh-meta)]
@@ -806,14 +816,17 @@
                      (if (empty? ws)
                        out
                        (let [w (first ws) [c ts] (zonk-pred (:pred w))
-                             inst (when (and (seq ts) (= :tc (first (first ts)))) (reduce-by-instance [c ts]))]
-                         (if inst
+                             inst (when (and (seq ts) (= :tc (first (first ts))) (not (eq-pred? [c ts]))) (reduce-by-instance [c ts]))]
+                         (cond
+                           (eq-pred? [c ts])
+                           (do (unify (last (butlast ts)) (last ts)) (swap! *evidence* assoc (:ev w) (list 'co)) (recur (rest ws) out))
+                           inst
                            (let [[dfun subs] inst
                                  sws (mapv (fn [p] {:ev (fresh-id) :pred p}) subs)]
                              (swap! *evidence* assoc (:ev w)
                                     (if (empty? sws) (list 'v dfun) (list 'app (list 'v dfun) (mapv #(list 'ev (:ev %)) sws))))
                              (recur (concat (rest ws) sws) out))
-                           (recur (rest ws) (conj out (assoc w :pred [c ts])))))))
+                           :else (recur (rest ws) (conj out (assoc w :pred [c ts])))))))
         local (fn [w] (some inner? (mapcat metas-of (second (:pred w)))))
         [cands outer] [(vec (filter local simplified)) (vec (remove local simplified))]
         quant? (fn [w] (and (not restricted) (every? (set ty-metas) (filter inner? (mapcat metas-of (second (:pred w)))))))
@@ -1238,6 +1251,11 @@
       (let [tycl (for [d decls :let [v (lval d)] :when (= 'TyClD (con v))] (arg v 2))
             _ (doseq [t tycl] (case (con t) SynDecl (syn-decl! t) nil))
             _ (doseq [t tycl] (case (con t) DataDecl (data-decl! m t) ClassDecl (class-decl! m t) nil))
+            ;; foreign imports: their signature is their type
+            fimports (vec (for [d decls :let [v (lval d)] :when (and (= 'ForD (con v)) (= 'ForeignImport (con (arg v 2))))
+                                :let [fi (arg v 2) n (nm (arg fi 2))]]
+                            (do (swap! *genv* assoc n (sig-type (arg fi 3)))
+                                (list 'bind n (list 'lit (str "foreign import " (occ n)))))))
             insts (vec (for [d decls :let [v (lval d)] :when (and (= 'InstD (con v)) (= 'ClsInstD (con (arg v 2))))]
                          (inst-decl! m (arg (arg v 2) 2))))
             top-sigs (sigs-of sigs)
@@ -1264,7 +1282,7 @@
          :cons (into {} (filter (fn [[n _]] (= m (nmod n))) @*cons*))
          :classes (into {} (for [[n info] @*classes* :when (= m (nmod n))] [n (dissoc info :binds)]))
          :insts (vec (filter (fn [i] (= m (nmod (:dfun i)))) @*insts*))
-         :core (mapv resolve-core (concat core dms ibs sels))
+         :core (mapv resolve-core (concat fimports core dms ibs sels))
          :errors @*errors*}))))
 
 ;;; ------------------------------------------------------------------------------------------

@@ -653,7 +653,7 @@ interface (`typecheck.ae`'s `iface-text`, `--local`): ids, selectors, constructo
 superclasses, synonyms and instances, read back for the modules that import it (samples `T14Lib`, `T15Use`). Proposals 3
 and 4: `rename-check` is not in the gate yet (with this step, Proposed below), the groups' order stays unjudged.
 
-**3. The elaborator's first slice** (`arbace/repr/haskell/typecheck.ae`, 1,627 lines, namespace
+**3. The elaborator's first slice** (`arbace/repr/haskell/typecheck.ae`, 1,645 lines, namespace
 `arbace.repr.haskell.typecheck`; `bin/repr-haskell typecheck-check`, `make repr-haskell-typecheck-check`). Clean (HFS1
 (b)), no GHC code ported (GHC's `Tc/` and Jones's "Typing Haskell in Haskell" read as the specification):
 
@@ -724,14 +724,15 @@ differs on 10 of 17. In about 30 s for the 17 (most of it reading the interfaces
 Wider, run by hand (scratch scripts, not committed as checks): the 21 nofib/spectral programs of rename-check, **17 of 21
 equal**, types 626 of 626 binders, evidence 597 of 608 bindings, up to 1,124 lines (`simple`, 125 bindings, 6.6 s); and
 the 36 single-module programs of nofib's other directories that rename equal (gc, imaginary, real/maillist, shake,
-shootout, smp), **27 of 36 equal**, types 345 of 347, evidence 309 of 322. The non-passes fall in recorded classes:
+shootout, smp), **31 of 36 equal**, types 352 of 352, evidence 316 of 327. The non-passes fall in recorded classes:
 (1) the order of two constraints of one class or of classes GHC's solver orders otherwise (life's `elt`, simple's
 `table_search`: GHC's inert set's order; one binding each); (2) superclass bindings of some instances without a
 context whose superclass is a variable (exact-reals: GHC binds `$cp1Ord = $fEqCR`, T02 inlines `$fShapeSq`; the rule
 is not found yet) and the inner lets of inlined unfoldings (exact-reals, power); (3) extensions outside the slice:
-foreign imports (smp/callback), `printf`'s equality-constrained instances (smp/threads005), pragmas in expressions
-(`HsPragE`: binary-trees, k-nucleotide, reverse-complement), `IO ()`'s defaulting of `main` through `~`
-(spectral-norm), higher-rank arguments trusted (`runST`: kahan passes). Bugs the programs found that the samples did
+unboxed tuples (k-nucleotide), a newtype-derived instance of a C type (reverse-complement), `printf`'s
+variadic instances (smp/threads005); foreign imports (their signature their type), equality constraints `~` (solved by
+unification, their evidence erased), pragmas in expressions and higher-rank arguments (`runST`, trusted: no escape
+check) were added for the programs that needed them. Bugs the programs found that the samples did
 not: a lazy `filter` that read the metas' levels after their adjustment (the ambiguous constraints of a binding were
 quantified), NPat's equality before the literal, record patterns, derived instances (and their heads for constructor
 classes), synonyms in instance heads, instance methods of the same name in two instances, local recursive groups.
@@ -744,7 +745,7 @@ GADTs, existentials, type families, kinds, `Typeable`/`Coercible` evidence, impl
 cases beyond the standard rule, error messages.
 
 **On the estimates.** The survey gave HF3 20 to 30 working days for 14,000 to 20,000 lines (Tier S). The first slice,
-Haskell 2010 with classes, is about 1,630 lines and took this session (the renamed tree and the interfaces included,
+Haskell 2010 with classes, is about 1,650 lines and took this session (the renamed tree and the interfaces included,
 about two hours of the agent's wall clock): the checker's core is small; the remaining cost is in the extensions of the list above and in matching
 GHC's choices exactly where they leave no trace in the types (the two classes above).
 

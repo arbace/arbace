@@ -358,5 +358,5 @@ passes without it; the alternative, leaving it to HF5, kept as the proposal's op
 superclass bindings `$cpNCls`; an instance's own dictionary as a given; pattern bindings bound once; `MonadFail` in `do`;
 dictionary functions' names; and in the judge, GHC's `simpleOptPgm` inlining of once-used unexported top-level bindings
 and `:Main.main`. Results now: 17 of 17 samples (types 194 of 194, evidence 220 of 220), nofib/spectral 17 of 21, 36 more
-nofib programs 27 of 36, every non-pass in the survey's three recorded classes ("As built: HF3 (start)"). `typecheck.ae`
-is 1,627 lines.
+nofib programs 31 of 36 (with foreign imports, `~` and expression pragmas added), every non-pass in the survey's three recorded classes ("As built: HF3 (start)"). `typecheck.ae`
+is about 1,650 lines.
