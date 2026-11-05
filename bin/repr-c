@@ -11,6 +11,10 @@
 #                              check's run found missing; the headers' digests the checks read)
 #   bin/repr-c host check      the host's gcc still gives the recorded predefined macros and search
 #                              list, and the recorded headers their digests
+#   bin/repr-c host pack       ORS9 (a): the installed headers packed as c-headers-gcc15 (test/c/records/; bin/lib/repr-c/
+#                              sysroot.bash): gcc's include directory, musl-dev's and fortify-headers' /usr/include and the
+#                              headers test/c/host/headers.sha256 names, by hand on the host with gcc (bin/oracle-records)
+#   bin/repr-c host verify-pack  the host's headers against the pack (another gcc reported, not failed: ORS6 (a))
 #   bin/repr-c ccdump-build [--upstream]
 #                              build tools/ccdump into .tmp/repr-c/ccdump/ (--upstream: against
 #                              modernc.org/cc/v4 v4.29.7, .tmp/repr-c/ccdump-upstream/): a generated
@@ -70,8 +74,14 @@ set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 . "$root/bin/lib/tmpdir.bash"
 . "$root/bin/lib/tools.bash"
+# ORS9 (a) (doc/ORACLE-RECORDS-SURVEY.md): the installed headers C reads from the pack c-headers-gcc15, never the host's
+# (bin/lib/repr-c/sysroot.bash; ARBACE_C_SYSROOT=/ the host's own)
+. "$root/test/oracle-records/oracle.bash"
+. "$root/bin/lib/repr-c/sysroot.bash"
+case "${1:-}" in host|gcc-tests|ccdump-build|corpus-dedup|"") ;; *) c_sysroot || exit 1 ;; esac
 
-GCC_INCLUDE=${REPR_C_GCC_INCLUDE:-$(gcc -print-file-name=include 2>"$TMPDIR/repr-c-gcc.err" || true)}
+# gcc's include directory, asked only by the verbs that run gcc (host record, check, pack: ORS14 (a))
+gcc_include() { echo "${REPR_C_GCC_INCLUDE:-$(gcc -print-file-name=include 2>"$TMPDIR/repr-c-gcc.err" || true)}"; }
 EPOCH=1793145600 # 2026-10-28 00:00:00 UTC (CS43 (a))
 host_dir=$root/test/c/host
 gowhim=${GOWHIM:-$(cd "$root/.." && pwd)/go-whim}
@@ -145,7 +155,7 @@ gcc_tests() {
 }
 
 host_record() {
-  local gi=$GCC_INCLUDE s empty=$TMPDIR/repr-c-empty.c names=$TMPDIR/repr-c-has-names.txt
+  local gi; gi=$(gcc_include); local s empty=$TMPDIR/repr-c-empty.c names=$TMPDIR/repr-c-has-names.txt
   [ -d "$gi" ] || { echo "host record: no gcc include directory ($gi)" >&2; return 1; }
   mkdir -p "$host_dir/predefined"
   : > "$empty"
@@ -197,7 +207,7 @@ EOF
 }
 
 host_check() {
-  local gi=$GCC_INCLUDE s bad=0 empty=$TMPDIR/repr-c-empty.c
+  local gi; gi=$(gcc_include); local s bad=0 empty=$TMPDIR/repr-c-empty.c
   : > "$empty"
   for f in "$host_dir"/predefined/*.h; do
     s=$(basename "$f" .h)
@@ -210,13 +220,55 @@ host_check() {
   return $bad
 }
 
+# ORS9 (a): the installed headers as the pack c-headers-gcc15 (bin/lib/repr-c/sysroot.bash): gcc's include directory whole,
+# musl-dev's and fortify-headers' files under /usr/include (apk's lists) and every header test/c/host/headers.sha256 names
+# (the token check's reads: gmp-dev's and pcre2-dev's too), each with the digest the headers list records, and roots.txt
+# (search.txt's directories, which the readers take from the pack alone)
+headers_pin=$root/test/c/records/c-headers-gcc15.sha256
+host_pack() {
+  local gi; gi=$(gcc_include); local st=$TMPDIR/repr-c-hpack.$$ ids=$TMPDIR/repr-c-hpack.ids f
+  [ -d "$gi" ] || { echo "host pack: no gcc include directory ($gi)" >&2; return 1; }
+  [ "$gi" = "$(sed -n 's/^ *:gcc-include "\(.*\)".*/\1/p' "$host_dir/host.edn")" ] || { echo "host pack: gcc's include directory $gi is not test/c/host/host.edn's" >&2; return 1; }
+  host_check > "$TMPDIR/repr-c-hpack.check" 2>&1 || { echo "host pack: the host is not test/c/host/'s (bin/repr-c host check):" >&2; head -5 "$TMPDIR/repr-c-hpack.check" >&2; return 1; }
+  { find "$gi" -type f
+    apk info -L musl-dev fortify-headers 2>"$TMPDIR/repr-c-apk.err" | grep '^usr/include/' | sed 's#^#/#'
+    awk '{print $2}' "$host_dir/headers.sha256"; } | while read -r f; do [ -f "$f" ] && printf '%s\n' "$f"; done | LC_ALL=C sort -u > "$ids.paths"
+  rm -rf "$st"; mkdir -p "$st/c-headers-gcc15"
+  while read -r f; do mkdir -p "$st/c-headers-gcc15$(dirname "$f")"; cp "$f" "$st/c-headers-gcc15$f"; done < "$ids.paths"
+  awk 'NF' "$host_dir/search.txt" > "$st/c-headers-gcc15/roots.txt"
+  { awk '{print $0 "\ttree"}' "$ids.paths"; printf 'roots.txt\ttree\n'; } > "$ids"
+  oracle_make "$headers_pin" "$st" "$ids" "bin/repr-c host pack" gcc || return 1
+  rm -rf "$st"
+  # the headers list's digests are the pack's
+  host_pack_list_check
+}
+host_pack_list_check() {  # every header of test/c/host/headers.sha256 in the manifest with its digest
+  local man; man=$(oracle_manifest "$headers_pin")
+  awk -F'\t' 'NR == FNR {if ($0 !~ /^#/) d[$1] = $3; next} {if (d[$2] != $1) {print "not the pack'"'"'s: " $2; bad = 1}} END {exit bad}' \
+    "$man" FS='  ' "$host_dir/headers.sha256" || { echo "host pack: test/c/host/headers.sha256 and the pack disagree" >&2; return 1; }
+  echo "host pack: test/c/host/headers.sha256's $(wc -l < "$host_dir/headers.sha256") headers are the pack's"
+}
+host_verify_pack() {  # the live tree against the pack (ORS6 (a): another gcc reported, not failed)
+  local man n=0 d=0 id want got
+  man=$(oracle_manifest "$headers_pin")
+  while IFS=$'\t' read -r id _ want _; do
+    case $id in '#'*|''|roots.txt) continue ;; esac
+    n=$((n + 1)); got=$(sha256sum < "$id" 2>"$TMPDIR/repr-c-vp.err" | cut -c1-64)
+    [ "$got" = "$want" ] || { d=$((d + 1)); [ $d -le 5 ] && echo "verify: $id: ${got:-missing} here, $want in the pack"; }
+  done < "$man"
+  [ "$(awk -F'\t' '$1 == "roots.txt" {print $3}' "$man")" = "$(awk 'NF' "$host_dir/search.txt" | sha256sum | cut -c1-64)" ] || { echo "verify: roots.txt is not search.txt's directories"; d=$((d + 1)); }
+  oracle_verdict gcc "$man" "$d" "$n" && host_pack_list_check
+}
+
 cmd=${1:-}
 [ $# -gt 0 ] && shift
 case $cmd in
   host) case ${1:-} in
           record) host_record ;;
           check) host_check ;;
-          *) echo "host: record or check" >&2; exit 2 ;;
+          pack) . "$root/test/oracle-records/oracle.bash"; host_pack ;;
+          verify-pack) . "$root/test/oracle-records/oracle.bash"; host_verify_pack ;;
+          *) echo "host: record, check, pack or verify-pack" >&2; exit 2 ;;
         esac ;;
   ccdump-build) ccdump_build "$@" ;;
   gcc-tests) gcc_tests ;;

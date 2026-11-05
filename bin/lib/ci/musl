@@ -11,6 +11,10 @@
 #            cache is keyed (CS211): forms/key holds the digest of repr/c's files, the libc's reader (arbace/repr/c{.ae,/},
 #            arbace/c/musl.ae), the host (test/c/host) and configure's generated headers, and a read whose key differs rereads the whole cache
 #   fresh    exit 0 when the cache's key is the checkout's; `ensure`: prepare, then read when the key differs
+#   pack     ORS9 (a) (doc/ORACLE-RECORDS-SURVEY.md): configure's products (config.mak, alltypes.h, syscall.h, version.h) made
+#            afresh by gcc in scratch and packed as c-musl-1.2.6-x86_64 (test/c/records/), by hand on the host with gcc;
+#            prepare takes them from the pack, and configures with gcc only when the store lacks it
+#   verify-pack  configure's products made afresh against the pack (another gcc reported, not failed: ORS6 (a))
 set -euo pipefail
 root=$(cd "$(dirname "$0")/../../.." && pwd)
 . "$root/bin/lib/tmpdir.bash"
@@ -23,6 +27,34 @@ key() { (cd "$root" && { find arbace/repr/c.ae arbace/repr/c arbace/c/musl.ae te
                          for h in "$m/obj/include/bits/alltypes.h" "$m/obj/include/bits/syscall.h"; do
                            [ -f "$h" ] && sha256sum < "$h"; done; true; } | sha256sum | cut -d' ' -f1); }
 fresh() { [ -f "$forms/key" ] && [ "$(cat "$forms/key")" = "$(key)" ]; }
+. "$root/test/oracle-records/oracle.bash"
+# ORS9 (a) (doc/ORACLE-RECORDS-SURVEY.md): configure's products, the pack c-musl-1.2.6-x86_64 (test/c/records/)
+pin=$root/test/c/records/c-musl-1.2.6-x86_64.sha256
+generated="config.mak obj/include/bits/alltypes.h obj/include/bits/syscall.h obj/src/internal/version.h"
+configure_tree() { # DIR: configured by the host's gcc, its generated headers made
+  mkdir -p "$d"
+  (cd "$1" && CC=gcc ./configure --disable-shared --target=x86_64 > "$d/configure.log" 2>&1 \
+     && make obj/include/bits/alltypes.h obj/include/bits/syscall.h obj/src/internal/version.h > "$d/make.log" 2>&1)
+}
+tarball() { # the checked tarball's path (fetched when absent)
+  local url sum tb cmain c1
+  url=$(sed -n '/:musl-1.2.6/,/:top/s/^ *:url "\(.*\)"/\1/p' "$root/test/c/corpora.edn")
+  sum=$(sed -n '/:musl-1.2.6/,/:top/s/^ *:sha256 "\(.*\)"/\1/p' "$root/test/c/corpora.edn")
+  tb=${CI_MUSL_TARBALL:-$d/musl-1.2.6.tar.gz}
+  cmain=${root%%/.tmp/gate-clean/*}; cmain=${cmain%%/.tmp/worktrees/*}
+  c1=$cmain/.tmp/c1/musl/musl-1.2.6.tar.gz
+  if [ ! -f "$tb" ] && [ -f "$c1" ]; then tb=$c1; fi
+  echo "$sum  $tb" | sha256sum -c --quiet >&2 || { echo "musl: $tb does not match the pin" >&2; return 1; }
+  echo "$tb"
+}
+pack_tree() { # the products configured afresh in scratch, under DIR/c-musl-1.2.6-x86_64
+  local w=$1 tb; tb=$(tarball) || return 1
+  rm -rf "$w"; mkdir -p "$w/src"; tar -xzf "$tb" -C "$w/src" || return 1
+  configure_tree "$w/src/musl-1.2.6" || { echo "musl: configure failed ($d/configure.log)" >&2; return 1; }
+  mkdir -p "$w/c-musl-1.2.6-x86_64"
+  for f in $generated; do mkdir -p "$w/c-musl-1.2.6-x86_64/$(dirname "$f")"; cp "$w/src/musl-1.2.6/$f" "$w/c-musl-1.2.6-x86_64/$f"; done
+  rm -rf "$w/src"
+}
 case ${1:-} in
   prepare)
     [ -f "$m/obj/include/bits/alltypes.h" ] && [ -f "$d/ldbl53/bits/float.h" ] && grep -qx 'ARCH = x86_64' "$m/config.mak" && exit 0
@@ -42,10 +74,29 @@ case ${1:-} in
     fi
     echo "$sum  $tb" | sha256sum -c --quiet || { echo "musl: $tb does not match the pin" >&2; exit 1; }
     rm -rf "$m"; tar -xzf "$tb" -C "$d"
-    (cd "$m" && CC=gcc ./configure --disable-shared --target=x86_64 > "$d/configure.log" 2>&1 \
-       && make obj/include/bits/alltypes.h obj/include/bits/syscall.h obj/src/internal/version.h > "$d/make.log" 2>&1)
+    # ORS9 (a): configure's products from the pack c-musl-1.2.6-x86_64 (no gcc); without the pack in the store, configured by
+    # gcc when the host has it (ORS14 (a): the toolchain asked only by a miss)
+    if pd=$(oracle_unpack "$pin" 2>"$TMPDIR/ci-musl-pack.err"); then
+      for f in $generated; do mkdir -p "$m/$(dirname "$f")"; cp "$pd/c-musl-1.2.6-x86_64/$f" "$m/$f"; done
+      echo "musl: configure's products from the pack $(oracle_pin_sha "$pin" | cut -c1-16)"
+    elif command -v gcc > "$TMPDIR/ci-musl-gcc.out" 2>&1; then
+      echo "musl: $(head -1 "$TMPDIR/ci-musl-pack.err"); configured by the host's gcc" >&2
+      configure_tree "$m" || { echo "musl: configure failed ($d/configure.log, $d/make.log)" >&2; exit 1; }
+    else
+      cat "$TMPDIR/ci-musl-pack.err" >&2; echo "musl: no pack c-musl-1.2.6-x86_64 and no gcc to configure musl" >&2; exit 1
+    fi
     mkdir -p "$d/ldbl53/bits"; cp "$m/arch/arm/bits/float.h" "$d/ldbl53/bits/float.h"
     echo "musl prepared in $m" ;;
+  pack)
+    w=$TMPDIR/ci-musl-pack.$$; pack_tree "$w" || exit 1
+    for f in $generated; do printf '%s\ttree\n' "$f"; done > "$w.ids"
+    oracle_make "$pin" "$w" "$w.ids" "bin/ci musl pack" gcc && rm -rf "$w" "$w.ids" ;;
+  verify-pack)
+    w=$TMPDIR/ci-musl-vpack.$$; pack_tree "$w" || exit 1
+    man=$(oracle_manifest "$pin")
+    dn=0; oracle_check_members "$w/c-musl-1.2.6-x86_64" "$man" 2>"$w.diff" || dn=$(grep -c 'FAILED\|not in the manifest\|No such' "$w.diff" || echo 1)
+    n=$(grep -vc '^#' "$man")
+    st=0; oracle_verdict gcc "$man" "$dn" "$n" || st=1; rm -rf "$w" "$w.diff"; exit $st ;;
   key) key ;;
   fresh) fresh ;;
   ensure) "$0" prepare && { fresh || "$0" read; } ;;
