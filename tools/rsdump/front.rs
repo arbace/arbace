@@ -168,6 +168,8 @@ pub fn std_names<'tcx>(tcx: TyCtxt<'tcx>) -> String {
     let mut o = String::new();
     let mut seen = std::collections::HashSet::new();
     let mut macros: Vec<DefId> = Vec::new();
+    let mut gen_seen = std::collections::HashSet::new();
+    let mut gens: Vec<String> = Vec::new();
     let mut todo: Vec<DefId> = Vec::new();
     for &cnum in tcx.crates(()) {
         let n = tcx.crate_name(cnum);
@@ -191,6 +193,23 @@ pub fn std_names<'tcx>(tcx: TyCtxt<'tcx>) -> String {
                 continue;
             };
             kids.push(format!("({} {} {} {})", ns_name(k), q(c.ident.name.as_str()), kind(k), q(&def_path(tcx, d))));
+            // RFP10: each type's generic parameters (kind and name), for elided lifetimes in signatures (`Formatter<'_>`)
+            if matches!(k, DefKind::Struct | DefKind::Enum | DefKind::Union | DefKind::TyAlias | DefKind::Trait) && gen_seen.insert(d) {
+                let ps: Vec<String> = tcx
+                    .generics_of(d)
+                    .own_params
+                    .iter()
+                    .map(|p| {
+                        let pk = match p.kind {
+                            rustc_middle::ty::GenericParamDefKind::Lifetime => "lifetime",
+                            rustc_middle::ty::GenericParamDefKind::Type { .. } => "type",
+                            rustc_middle::ty::GenericParamDefKind::Const { .. } => "const",
+                        };
+                        format!("({} {})", pk, q(p.name.as_str()))
+                    })
+                    .collect();
+                gens.push(format!("(names/generics {} [{}])", q(&def_path(tcx, d)), ps.join(" ")));
+            }
             match k {
                 DefKind::Mod | DefKind::Enum | DefKind::Trait => next.push(d),
                 DefKind::Macro(_) => {
@@ -202,6 +221,10 @@ pub fn std_names<'tcx>(tcx: TyCtxt<'tcx>) -> String {
         let _ = writeln!(o, "(names/mod {} {} [{}])", q(&def_path(tcx, m)), kind(tcx.def_kind(m)), kids.join(" "));
         next.reverse();
         todo.extend(next);
+    }
+    gens.sort();
+    for g in gens {
+        let _ = writeln!(o, "{g}");
     }
     let cstore = rustc_metadata::creader::CStore::from_tcx(tcx);
     for d in macros {

@@ -969,7 +969,7 @@ not show them, `-Zunpretty=hir-tree` would), paths with their `:res`. After `lib
 - items: `use` trees split into one item per leaf with a `ListStem` for each nested tree, functions with implicit `self`, generics whose
   parameters' bounds move into the where clause, `impl Trait` arguments as synthetic type parameters named by their text, elided
   lifetimes printed `'_` in signatures, statics and consts (references and the types std and the crate declare with a lifetime parameter:
-  std's by a name table, see RFP10), structs, enums, unions, impls, traits with associated types and consts, modules, `macro_rules!`;
+  std's by their generics from the helper's data, RFP10), structs, enums, unions, impls, traits with associated types and consts, modules, `macro_rules!`;
 - patterns: an identifier that resolves to a unit struct or variant, a constant or a static is a path pattern (the resolutions decide);
   expression paths whose resolution is partial (no resolution at the whole path) and that carry generic arguments before their last segment
   are type-relative (`Pair<u8, 4>::len`);
@@ -1003,7 +1003,7 @@ comments of other files' spans, 78 with the parsed attributes.
 Not taken yet: `async` and coroutines (Tier S), `asm!`, `yield`, `become`, contracts, delegation, foreign items' printing, inline
 `const` blocks, `offset_of!`, unsafe binders, trait aliases, `impl` restrictions, closures' `for<>` binders, `box` patterns' lang items,
 the `hir-tree` view and the HIR ids' judge, the parsed attributes beyond the corpus's (each is a line of the table), std's types' lifetime
-parameters from data (RFP10).
+parameters from data (done, RFP10: below).
 
 ### Estimates, revisited
 
@@ -1027,3 +1027,23 @@ the rest; the judge (text for text, comments included) is stricter than planned,
 ## Decided (2026-11-05, the user: RFP10-RFP12)
 
 All as recommended: std's generic parameters from --std-names now, the 20-name table dropped; hir-check in the UI run-pass night run, differences as classes; RF7 (collection) next, judged against the helper's iface, before a judge of the HIR ids.
+
+## As built: RFP10 (2026-11-05)
+
+std's types' generic parameters come from the helper's data; the 20-name table of `lower.ae` is gone.
+
+- `tools/rsdump/front.rs`'s `--std-names` writes, after the modules and before the macros, one `(names/generics "DEFPATH" [(KIND NAME) ...])`
+  per struct, enum, union, type alias and trait of std, core and alloc reachable through public module children (the definition's
+  path once, sorted; `generics_of(d).own_params`: KIND `lifetime`, `type` or `const`; 1,078 lines). The data file's digest
+  (`test/rust/front/std-names.sha256`) is re-pinned; the helper rebuilt by `bin/repr-rust helper`. The other readers of the file
+  (`load-std-names`, `load-std-macros`) skip the new lines.
+- `arbace.rust.front.lower/load-std-generics` reads them, `lower-crate`'s `:std-generics` option carries them, `hir-check` loads them from
+  the file beside the oracles. A signature's elided path (`Formatter`, `Ref<T>`, `Cow<str>`) prints one `'_` per lifetime parameter of
+  the type its last segment resolves to (the resolution's `(def KIND DEFPATH)`; the table printed exactly one, and `PhantomData`, `Iter`
+  and `Ref` had to be taken out of it by hand: `Iter` and `Ref` of the programs are the crate's own or lifetime-less names). The crate's
+  own types keep their by-name set (`crate-lt-types`; a local definition's resolution is `local-def`).
+- A path that expansion generated has no resolution (a builtin derive's `$crate::fmt::Formatter`): its written text with `$crate` as
+  the macro's crate (core for a derive) is the definition's path.
+- Checked (helper rebuilt, std-names regenerated, light runs): `bin/rust-front hir-check` 89 of 89 byte for byte, `--ours` 88 of 89 and 1
+  more equal but for whitespace (as before); `expand-check` 90 of 90 crates, 786 of 786 items; `resolve-check` and `--ours` 5,138 of
+  5,138 paths, 88 of 88 programs.

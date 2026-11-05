@@ -52,7 +52,9 @@
 (def ^:dynamic *owners* nil)
 (def ^:dynamic *res* {})
 (def ^:dynamic *sig* false)         ; lowering a function signature: elided lifetimes are fresh ('_)
-(def ^:dynamic *lt-types* #{})      ; types with lifetime parameters (the crate's and std's known ones)
+(def ^:dynamic *lt-types* #{})      ; the crate's own types with lifetime parameters (by name)
+(def ^:dynamic *seg-res* nil)       ; the resolution of the path's last segment (its type), while its arguments are lowered
+(def ^:dynamic *std-lts* {})        ; std's types: def path -> number of lifetime parameters (RFP10: the helper's --std-names data)
 
 (defn- next-id [] (when *owner* [(first @*owner*) (second (swap! *owner* update 1 inc))]))
 (defn- node [m] (assoc m :hir-id (next-id)))
@@ -175,12 +177,22 @@
 
 (defn- res-at [span] (get *res* span))
 
-(defn- lower-seg [s]
-  {:ident (id-name (fv s :ident)) :args (lower-generic-args (some-val (fv s :args)) (id-name (fv s :ident)))})
+;; a path the expansion generated (a derive's) has no resolution: written out from std's crate, its text is the definition's path
+;; (a builtin derive's $crate, a root-file span with a mark, is core's: the lookup finds no def at another path)
+(defn- written-std-res [segs krate]
+  (let [names (mapv #(id-name (fv % :ident)) segs)
+        names (if (= "{{root}}" (first names)) (subvec names 1) names)
+        names (if (and (= "$crate" (first names)) (not= krate "crate")) (assoc names 0 (if (string? krate) krate "core")) names)]
+    (when (and (> (count names) 1) (#{"std" "core" "alloc"} (first names)))
+      [(list 'def nil (str/join "::" names))])))
+
+(defn- lower-seg [s & [res]]
+  {:ident (id-name (fv s :ident))
+   :args (binding [*seg-res* res] (lower-generic-args (some-val (fv s :args)) (id-name (fv s :ident))))})
 
 (defn- lower-path [p]
   (let [segs (fv p :segments)]
-    {:span (span-of p) :res (res-at (span-of p)) :segs (mapv lower-seg segs)
+    {:span (span-of p) :res (res-at (span-of p)) :segs (let [r (or (res-at (span-of p)) (written-std-res segs (let [sp (fv p :span)] (if (and (seq? sp) (= 'span (first sp))) (get *mark-crates* (last sp)) "core")))) n (count segs)] (vec (map-indexed (fn [i s] (lower-seg s (when (= i (dec n)) r))) segs)))
      ;; a path of std's macros: its file names the crate $crate stands for
      :file (let [s (fv p :span)] (when (and (seq? s) (= 'span (first s))) (second s)))
      :krate (let [s (fv p :span)] (when (and (seq? s) (= 'span (first s))) (let [k (get *mark-crates* (last s))] (when (string? k) k))))}))
@@ -188,11 +200,38 @@
 (defn- lang-path [name & [args]] {:segs [{:ident name :args args}] :lang true})
 (defn- lang-path* [names] {:segs (mapv (fn [n] {:ident n}) names) :lang true})
 
-(defn- lt-type? [name] (contains? *lt-types* name))
+(defn load-std-generics
+  "the helper's --std-names (names/generics PATH [(KIND NAME) ...]) forms: def path -> [(kind name) ...] (RFP10)"
+  [file]
+  (let [rdr (java.io.PushbackReader. (java.io.StringReader. (slurp file)))]
+    (loop [m {}]
+      (let [x (read rdr false ::eof)]
+        (cond (= x ::eof) m
+              (= 'names/generics (head x)) (recur (assoc m (second x) (vec (nth x 2))))
+              :else (recur m))))))
+
+(defn std-lifetime-counts
+  "def path -> its number of lifetime parameters, for the types that have some"
+  [generics]
+  (into {} (for [[p ps] generics
+                 :let [n (count (filter #(= 'lifetime (first %)) ps))]
+                 :when (pos? n)]
+             [p n])))
+
+(defn- elided-lts
+  "the lifetime arguments an elided path stands for in a signature: one '_ per lifetime parameter of the type it resolves to"
+  [seg-name]
+  (if-not *sig*
+    []
+    (let [dp (some (fn [r] (when (and (seq? r) (= 'def (first r))) (nth r 2))) *seg-res*)
+          n (cond dp (get *std-lts* dp 0)
+                  (contains? *lt-types* seg-name) 1
+                  :else 0)]
+      (vec (repeat n {:lifetime "'_" :fresh true})))))
 
 (defn- lower-generic-args [ga seg-name]
   (cond
-    (nil? ga) (when (and *sig* (lt-type? seg-name)) {:args [{:lifetime "'_" :fresh true}] :constraints []})
+    (nil? ga) (let [e (elided-lts seg-name)] (when (seq e) {:args e :constraints []}))
     (= 'AngleBracketed (head ga))
     (let [a (second ga)
           items (fv a :args)
@@ -203,7 +242,7 @@
                           Lifetime (let [n (second (second g))] {:lifetime n :fresh (and *sig* (= n "'_"))})
                           Const {:const (lower-expr (fv (second g) :value))}
                           {:ty {:node :ty :kind :err}}))))
-          args (if (and *sig* (lt-type? seg-name) (not-any? :lifetime args)) (into [{:lifetime "'_" :fresh true}] args) args)
+          args (if (not-any? :lifetime args) (into (elided-lts seg-name) args) args)
           cons (vec (for [x items :when (= 'Constraint (head x))]
                       (let [c (second x)]
                         {:ident (id-name (fv c :ident))
@@ -805,12 +844,6 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; The crate
 
-(def ^:private std-lt-types
-  "std's types with a lifetime parameter that the corpus names in signatures (their elided lifetimes print '_)"
-  #{"Formatter" "PanicInfo" "Arguments" "Location" "Chars" "CharIndices" "Bytes" "Split" "SplitWhitespace" "Lines"
-    "Iter" "IterMut" "Drain" "Ref" "RefMut" "Peekable" "Cow" "StdoutLock" "StderrLock" "MutexGuard" "Entry"
-    "PhantomData" "Context"})
-
 (defn- crate-lt-types [items]
   ;; the crate's own structs, enums and unions with a lifetime parameter
   (set (for [it items
@@ -819,12 +852,13 @@
              :when (some #(= 'Lifetime (fv % :kind)) (fv (nth k 2) :params))]
          (id-name (second k)))))
 
-(defn lower-crate [crate res & [{:keys [file mark-crates]}]]
+(defn lower-crate [crate res & [{:keys [file mark-crates std-generics]}]]
   (binding [*owners* (atom -1)
             *mark-crates* (or mark-crates {})
             *source-file* (or file "main.rs")
             *res* res
-            *lt-types* (into (disj std-lt-types "PhantomData" "Iter" "Ref") (crate-lt-types (fv crate :items)))]
+            *std-lts* (std-lifetime-counts (or std-generics {}))
+            *lt-types* (crate-lt-types (fv crate :items))]
     (let [attrs (lower-attrs (fv crate :attrs))
           items (vec (mapcat lower-item (fv crate :items)))]
       {:attrs attrs :items items :owners (inc @*owners*)})))

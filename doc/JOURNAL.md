@@ -320,3 +320,11 @@ on the host (samples, each process under 2 GiB, no gate, no build of stage 0). M
   `rustc_codegen_ssa/src/mir/{mod,analyze,block,operand,place,rvalue,statement}.rs`, `rustc_mir_transform/src/remove_noop_landing_pads.rs`,
   `rustc_monomorphize/src/collector.rs`, `rustc_middle/src/mir/traversal.rs`), the sources of Alpine's `rustc-dev-1.99.1-r0` and
   `rust-src-1.99.1-r0`; recorded in LICENSE.md and doc/ARBACE.md.
+
+## 2026-11-05: RFP10, std's generic parameters from the helper's data (branch rust-rfp10)
+
+`tools/rsdump/front.rs`'s `--std-names` now writes `(names/generics PATH [(KIND NAME)...])` for std, core and alloc's structs, enums,
+unions, aliases and traits (rustc 1.99.1 `58cf8f9c3`, `generics_of(..).own_params`); `test/rust/front/std-names.sha256` re-pinned.
+`arbace/rust/front/lower.ae` counts a type's lifetime parameters from it by the resolved definition (a derive's unresolved
+`$crate` path by its text) and the 20-name table is dropped. hir-check 89/89, `--ours` 88/89 (+1 whitespace), expand-check 90/90,
+resolve-check 88/88 unchanged. Alternative (b), keeping the table until RF7's `iface`, rejected by the user (RFP10 decided (a)).
