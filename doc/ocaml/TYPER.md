@@ -336,3 +336,7 @@ Size: about 8,100 lines of Arbace under `arbace/repr/ocaml/typer/` (and the driv
   scopes; the port approximates the first (rows built by enlarge_type and build_as_type unnamed) and has no escape
   check. (a) port Ident's scopes and update_scope with T11 if its corpus shows printed names differing; (b) now (about
   a day, every type node gaining a scope). *Recommended: (a)*.
+
+## Decided (2026-11-05, the user: TY11, TY12)
+
+TY11 (b): sharing in unification waits for T11's corpus; TY12 (a): scopes ported with T11 if the corpus shows differing names.
