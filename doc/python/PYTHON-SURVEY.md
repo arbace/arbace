@@ -2319,3 +2319,51 @@ samples on the VM; nothing recorded is committed (the main host's night records 
   5. Proof: test_sqlite3's sample compiled against the CPython reference. Alpine's python3 has `_sqlite3`, but over
      the system's SQLite 3.54.1, not the pinned 3.50.4 (`sqlite3.sqlite_version`, and the tests that branch on it):
      the reference's `_sqlite3` then built by `tools/pyi/clib/refmod.bash` over the pinned amalgamation, as `_zstd`'s.
+
+## Decided (2026-11-05 evening, the user): 215's DECISIONs
+
+- **DECISION 1 (a), decided:** SQLite's node program is committed as forms, as zstd's is (checked by `bin/pyi-clib verify`,
+  the same loading path: lazy on goi, cf2g's Go compiled), superseding 208's DECISION 2 (a) for SQLite.
+- **DECISION 2 (a), decided:** the main host re-records `ref-cpython314-lib-test-all.edn` at night with the reference's
+  `_zstd` (and `_sqlite3`) of `tools/pyi/clib/refmod.bash` on the oracle's PYTHONPATH.
+
+## After the decisions: `_sqlite3` (2026-11-05, the Mac VM, queue 215)
+
+- **bzip2's and xz's node programs rebuilt** (only their `Key` moved, 213's change to `bin/pyi-clib`): `bin/pyi-clib
+  verify bzip2` and `verify xz` say byte for byte again (30 s and 3 min 22 s).
+- **SQLite's node program, `go/arbace/clib/sqlite`**, built with the options CPython's own build of the amalgamation
+  gives it (PCbuild/sqlite3.vcxproj: math functions, FTS4, FTS5, R*Tree, `SQLITE_OMIT_AUTOINIT`) beside the first slice's
+  (`SQLITE_THREADSAFE=0`, `SQLITE_OMIT_LOAD_EXTENSION`, `SQLITE_DEFAULT_MEMSTATUS=0`, `SQLITE_DISABLE_INTRINSIC`, plain
+  atomics, `NDEBUG`): 7,865,270 bytes of node program, 8.3 MB of forms, 7 min 45 s and 8.1 GB on the VM; no absolute path.
+  `tools/pyi/clib/sqlite/pysqlite.c` holds the callbacks' extern natives and their registering wrappers
+  (`pysqlite_create_function`, `_window_function`, `_collation`, `pysqlite_set_authorizer`, `_progress_handler`,
+  `pysqlite_set_trace`), the doubles as their bits (`pysqlite_column_double`, `_value_double`, `pysqlite_bind_double`,
+  `_result_double`) and `sqlite3_db_config`'s boolean form. Compiled, cf2g's `arbace/clib/sqlite/aot`.
+- **`go/arbace/pysqlite3`** (package `arbace/pysqlite3`, 4,800 lines of Go): CPython 3.14.10's `Modules/_sqlite/`
+  (module.c, connection.c, cursor.c, statement.c, row.c, blob.c, microprotocols.c, prepare_protocol.c, util.c, clinic's
+  argument parsing and its deprecation warnings) ported statement for statement. Connection (its `__init__`, so subclasses
+  and `factory=` work; the statement cache an `lru_cache` over the connection, as CPython's), Cursor, Row, Blob (the
+  mapping protocol, slices), Statement, PrepareProtocol, the adapters (`__adapt__`, `__conform__`, the registry) and
+  converters (declared types and column names), the legacy and PEP 249 transaction control, `executescript`, `backup`,
+  `serialize`/`deserialize`, limits and config, `iterdump`, the audit events, the exceptions with `sqlite_errorcode` and
+  `sqlite_errorname`. The callbacks (functions, aggregates, window functions, collations, the authorizer, progress and
+  trace handlers) are ci's natives (`ci.Natives`, registered before the library opens): SQLite's context pointers are
+  handles of the package's table standing for the Go values; a callback's exception that CPython's thread state keeps
+  across `sqlite3_step` (a collation's) is held pending and raised where CPython tests `PyErr_Occurred`. `strerror` is a
+  native too: musl's is not in the node program the builder linked (SQLite's unix VFS calls it only to log). py gains
+  `ExtWarn`, `ExtWriteUnraisable`, `ExtCurrentIdent`, `ExtImportModule` (`builtins_sqlite3_api.go`).
+- **Threads and memory.** One C thread under the GIL (`sqlite3.threadsafety` 0, accepted by test_dbapi). A connection and
+  its statement cache form a cycle Go's collector does not finalize: a connection never closed keeps its database open
+  to the process's end, and gives no ResourceWarning (`:finalization`). crt's fcntl takes no lock, so two processes are
+  not excluded (`:sqlite-process-locks`; connections of one process are, by SQLite's own lock table).
+- **The reference's `_sqlite3`.** Alpine's python3 links SQLite 3.54.1; `tools/pyi/clib/refmod.bash sqlite` builds
+  CPython's `Modules/_sqlite` over the pinned 3.50.4 with lib.conf's flags (its pyconfig.h taking back
+  `PY_SQLITE_ENABLE_LOAD_EXTENSION`), on record-ref's PYTHONPATH with `_zstd`'s. test_sqlite3 over it: 510 ok, 4 skipped,
+  as the committed record (Alpine's).
+- **Samples (the VM, run).** `s1.py` (the module's surface: rows, errors with their codes, text factories, adapters and
+  converters, functions, aggregates, window functions, collations, trace, authorizer, progress, autocommit, blobs,
+  iterdump, backup, serialize, limits, config, a file database through a Connection subclass): 59 lines equal to CPython
+  over the reference `_sqlite3`, compiled and on goi (36 s). test_sqlite3: 514 methods, 506 equal, 8 classed
+  (`:testcapi` 3, `:finalization-collect` 2, `:finalization` 1, `:surrogate-pairs` 1, `:sqlite-process-locks` 1), 0
+  failing, on goi (`bin/pyi lib-test-all --fresh test_sqlite3`, 13 min, against the committed record) and compiled (about
+  70 s). SQLite through ci under goi is quick enough for the whole module, unlike zstd's dictionary training.
