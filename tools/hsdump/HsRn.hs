@@ -40,7 +40,12 @@ import GHC.Types.TyThing
 import GHC.Core.TyCon
 import GHC.Core.DataCon
 import GHC.Core.Class
-import GHC.Core.InstEnv (ClsInst(..))
+import GHC.Core.InstEnv (ClsInst(..), instEnvElts)
+import GHC.Core.TyCo.Rep (Type(..), TyLit(..))
+import GHC.Types.Var (VarBndr(..), isInvisibleFunArg)
+import GHC.Driver.Env (hscEPS)
+import GHC.Unit.External (ExternalPackageState(..))
+import Data.Char (ord)
 import GHC.Core.Type (Type, PredType)
 import GHC.Unit.Module.ModIface
 
@@ -307,6 +312,9 @@ ifaceOf outDir m = do
   case mi >>= modInfoIface of
     Nothing -> liftIO (hPutStrLn stderr ("hsdump: no interface of " ++ moduleNameString (moduleName m))) >> return (False, [])
     Just iface -> do
+      hsc <- getSession
+      eps <- liftIO (hscEPS hsc)
+      let insts = instEnvElts (eps_inst_env eps)
       let dnames = nubNames [n | a <- mi_exports iface, n <- availNames a, nameModule_maybe n == Just m]
       things <- fmap catMaybes (mapM lookupName dnames)
       let mn = moduleNameString (moduleName m)
@@ -324,31 +332,51 @@ ifaceOf outDir m = do
           hPutStrLn h ("(hsiface/exports [" ++ intercalate "\n  " exps ++ "])")
           hPutStrLn h ("(hsiface/fixities [" ++ intercalate "\n  " (map snd fixes) ++ "])")
           hPutStrLn h ("(hsiface/things [" ++ intercalate "\n  " (sort (map thingF defined)) ++ "])")
+          hPutStrLn h ("(hsiface/instances [" ++ intercalate "\n  " (sort [ "(instance " ++ nameF (getName (is_dfun i)) ++ " " ++ typeF (varType (is_dfun i)) ++ ")"
+                                                                      | i <- insts, nameModule_maybe (getName (is_dfun i)) == Just m ]) ++ "])")
       return (True, nubMods [nameModule n | a <- mi_exports iface, n <- availNames a, not (isInternalName n), not (isSystemName n), isExternalName n])
   where unitString' = pprS . moduleUnit
 
 nubNames :: [Name] -> [Name]
 nubNames = foldr (\x acc -> if x `elem` acc then acc else x : acc) []
 
--- instances: GHC's getModuleInfo does not give a package module's (Inspect.hs: "unimplemented"),
--- and mi_insts of a loaded interface panics ("No mi_insts in PIT"): HF3's loader reads them (HF1 left)
+-- instances: GHC's getModuleInfo does not give a package module's (Inspect.hs: "unimplemented") and mi_insts of
+-- a loaded interface panics ("No mi_insts in PIT"); the external package state holds every instance of the
+-- interfaces loaded so far, those whose dictionary function this module defines are its own
 
 thingF :: TyThing -> String
 thingF t = case t of
-  AnId i -> "(id " ++ nameF (getName i) ++ " " ++ esc (pprS (varType i)) ++ ")"
+  AnId i -> "(id " ++ nameF (getName i) ++ " " ++ esc (pprS (varType i)) ++ " " ++ typeF (varType i) ++ ")"
   AConLike (RealDataCon dc) ->
     "(datacon " ++ nameF (getName dc) ++ " " ++ esc (pprS (dataConWrapperType dc)) ++ " " ++ show (dataConSourceArity dc)
-      ++ " " ++ vec (map (esc . pprS . flLabel) (dataConFieldLabels dc)) ++ ")"
+      ++ " " ++ vec (map (esc . pprS . flLabel) (dataConFieldLabels dc)) ++ " " ++ typeF (dataConWrapperType dc) ++ ")"
   AConLike (PatSynCon ps) -> "(patsyn " ++ nameF (getName ps) ++ ")"
   ATyCon tc
     | Just cls <- tyConClass_maybe tc ->
         "(class " ++ nameF (getName tc) ++ " " ++ vec (map (esc . pprS) (classSCTheta cls)) ++ " "
-          ++ vec [ "(" ++ nameF (getName op) ++ " " ++ esc (pprS (varType op)) ++ ")" | op <- classMethods cls ] ++ ")"
+          ++ vec [ "(" ++ nameF (getName op) ++ " " ++ esc (pprS (varType op)) ++ " " ++ typeF (varType op) ++ ")" | op <- classMethods cls ]
+          ++ " " ++ vec (map typeF (classSCTheta cls)) ++ ")"
     | otherwise ->
         "(tycon " ++ nameF (getName tc) ++ " " ++ esc (pprS (tyConKind tc)) ++ " "
           ++ (if isNewTyCon tc then "newtype" else if isAlgTyCon tc then "data" else if isTypeSynonymTyCon tc then "synonym" else if isFamilyTyCon tc then "family" else "other")
-          ++ " " ++ vec (map (nameF . getName) (tyConDataCons tc)) ++ ")"
+          ++ " " ++ vec (map (nameF . getName) (tyConDataCons tc)) ++ " " ++ typeF (tyConKind tc) ++ ")"
   ACoAxiom _ -> "(axiom)"
+
+-- a type as forms: (tv "a"), (tycon-app NAME [args]), (app f x), (fun c|t MULT ARG RES) (c: a constraint arrow),
+-- (forall "a" required|specified|inferred KIND BODY), (lit N|"s")
+typeF :: Type -> String
+typeF ty = case ty of
+  TyVarTy v -> "(tv " ++ esc (occNameString (getOccName v)) ++ ")"
+  AppTy f x -> "(app " ++ typeF f ++ " " ++ typeF x ++ ")"
+  TyConApp tc args -> "(tycon-app " ++ nameF (getName tc) ++ " " ++ vec (map typeF args) ++ ")"
+  ForAllTy (Bndr tv fl) body -> "(forall " ++ esc (occNameString (getOccName tv)) ++ " " ++ flagS (pprS fl) ++ " " ++ typeF (varType tv) ++ " " ++ typeF body ++ ")"
+  FunTy af m a r -> "(fun " ++ (if isInvisibleFunArg af then "c" else "t") ++ " " ++ typeF m ++ " " ++ typeF a ++ " " ++ typeF r ++ ")"
+  LitTy (NumTyLit n) -> "(lit " ++ show n ++ ")"
+  LitTy (StrTyLit s) -> "(lit " ++ esc (unpackFS s) ++ ")"
+  LitTy (CharTyLit c) -> "(lit-char " ++ show (ord c) ++ ")"
+  CastTy t _ -> typeF t
+  CoercionTy _ -> "(coercion)"
+  where flagS str | "Inferred" `isPrefixOf` str = "inferred" | "Required" `isPrefixOf` str = "required" | otherwise = "specified"
 
 nubMods :: [Module] -> [Module]
 nubMods = foldr (\x acc -> if x `elem` acc then acc else x : acc) []
