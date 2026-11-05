@@ -873,3 +873,7 @@ dump more (the vector layouts, the vtable slots), RFP13 below; the 565 differing
 ## Decided (2026-11-05, the user: RFP1-RFP4)
 
 All as recommended: the codegen finished on rustc's data first, then layout, the collector with resolution and v0 symbols ported, each judged against the helper; the native-std leg now, the ci leg once the lowered std exists; `bin/rsi run --front mir` as built; no gate step until the row fits GT8's budget. The branch's early commits without trailers are squashed into commits that carry them at its merge (no rewrite of the branch).
+
+## Decided (2026-11-05, the user: RFP13)
+
+(a) with (c) meanwhile: the helper's --mono-mir extended (vector layouts, vtable slots, ADT field types), rebuilt once in a night's heavy lane, the 81 dumps regenerated, then the vector ABI and virtual calls ported; the items stay classed until then.
