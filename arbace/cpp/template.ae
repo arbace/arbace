@@ -750,7 +750,7 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; Class templates: instantiation, explicit and partial specializations
 
-(declare attach-ool!)
+(declare attach-ool! attach-one!)
 
 (declare name-pack-params!)
 
@@ -816,7 +816,12 @@
             (cond
               (empty? ms) (do (when-not (:pattern t) (fail :template "an incomplete class template " (:name t)))
                               (declare-instance! t args (:pattern t) (:params t) args false))
-              (= 1 (count best)) (let [[pt b] (first best)] (declare-instance! t args (:node pt) (:params pt) b false))
+              (= 1 (count best)) (let [[pt b] (first best)
+                                       c (declare-instance! t args (:node pt) (:params pt) b false)]
+                                   ;; its out-of-line members
+                                   (abi/update-cls! (:id c) assoc :from-partial [(:id pt) (:params pt) b])
+                                   (doseq [o (:ool pt)] (attach-one! (:id t) (:id c) o [(:params pt) b]))
+                                   c)
               :else (fail :template "ambiguous partial specializations of " (:name t))))))))
 
 (defn- tmpl-of-entity [es]
@@ -900,12 +905,15 @@
                           (let [pre (re-find #"((?:[A-Za-z_][A-Za-z_0-9]*\s*::\s*)*)$" (subs t 0 (- i (count (first m)))))]
                             [(second m) (str (str/replace (or (second pre) "") #"\s" "") (second m) (subs t i))])))))))))))
 
-(defn- attach-one! [tid cid o]
+(defn- attach-one!
+  "An out-of-line member definition `o` given to the class `cid`, made from the primary (its arguments bound to the
+  header's names) or from a partial specialization (its deduced arguments, `pb` [params args])."
+  [tid cid o & [pb]]
   (let [t (tmpl tid)
         c (abi/cls cid)
         n (:node o)
-        s (bind-scope (:scope c) (mapv (fn [nm p] {:name nm :kind (:kind p)}) (:pnames o) (:params t))
-                      (:targs c) nil)]
+        [params bargs] (or pb [(:params t) (:targs c)])
+        s (bind-scope (:scope c) (mapv (fn [nm p] {:name nm :kind (:kind p)}) (:pnames o) params) bargs nil)]
     (case (:k o)
       :fn (let [k (case (:kind n) "CXXConstructorDecl" :ctor "CXXDestructorDecl" :dtor :method)
                 qt (get-in n [:type :qualType])
@@ -1263,11 +1271,26 @@
           (explicit-fn-spec! scope n))
         ;; a member of a class template defined outside it
         (and (re-find #"^\s*template\s*<\s*[^>\s]" text) (ool-class-name n))
-        (let [cn (ool-class-name n)
+        (let [[cn qt] (ool-qualifier n)
               tid (or (some #(when (and (= :tmpl (:e %)) (= :class (:tk %))) (:id %)) (sema/lookup scope cn)) (fail :template "no class template " cn))
-              o {:k (if (= "VarDecl" (:kind n)) :var :fn) :node n :pnames (header-params text)}]
-          (upd-tmpl! tid update :ool conj o)
-          (doseq [[_ cid] (:insts (tmpl tid))] (when (:from-primary (abi/cls cid)) (attach-one! tid cid o)))
+              t (tmpl tid)
+              pnames (header-params text)
+              o {:k (if (= "VarDecl" (:kind n)) :var :fn) :node n :pnames pnames}
+              ;; a partial specialization's member: the qualifier's arguments, with the header's names standing for the
+              ;; partial's parameters, are the partial's
+              forms (let [f (ct/parse-type qt)] (when (and (seq? f) (= '<> (first f))) (nnext f)))
+              pt (first (for [pt (:partials t)
+                              :when (= (count pnames) (count (:params pt)))
+                              :let [ss (bind-scope (:scope t) (mapv (fn [nm p] (assoc p :name nm)) pnames (:params pt)) nil (:id pt))
+                                    qa (try (resolve-args ss t forms true) (catch arbace.lang.ExceptionInfo _ nil))]
+                              :when (and qa (= (canonical qa) (canonical (:args pt))))]
+                          pt))]
+          (if pt
+            (do (upd-tmpl! tid update :partials (fn [ps] (mapv #(if (= (:id %) (:id pt)) (update % :ool (fnil conj []) o) %) ps)))
+                (doseq [[_ cid] (:insts (tmpl tid))]
+                  (when-let [pb (:from-partial (abi/cls cid))] (when (= (:id pt) (first pb)) (attach-one! tid cid o (rest pb))))))
+            (do (upd-tmpl! tid update :ool conj o)
+                (doseq [[_ cid] (:insts (tmpl tid))] (when (:from-primary (abi/cls cid)) (attach-one! tid cid o)))))
           :template)
         ;; an explicit specialization of a member template of a class specialization (template <> template <> R A<int>::f<7>(...))
         (re-find #"^\s*template\s*<\s*>\s*template\s*<\s*>" text)
