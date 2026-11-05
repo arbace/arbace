@@ -50,7 +50,7 @@ applied on this branch: the existing `reap` step's `:inputs` gain `"test/python/
 ;; map as :python {:pins-check true :oracle "3.14.10 python3-3.14.10-r1"}; the copies in the main checkout's
 ;; .tmp/repr-python/src (GTS212 (a), REPR_PYTHON_SRC for worktrees and the clean clone)
 
-;; ---- the essential tier: one chain, 40 s warm on the VM (GTS215 (a): <= 2 min, <= 4 threads, <= 3 GiB, no lock)
+;; ---- the essential tier: one chain, 40 s warm on the VM, 60 s with pyi-c2j (queue 206) (GTS215 (a): <= 2 min, <= 4 threads, <= 3 GiB, no lock)
 {:name pyi-aot-runtime :phase :build :kind :build :mem-gib 3          ; cold: 6.6 min (the runtime printed, the stdlib modules compiled)
  :cmd "bin/pyi check --aot --no-pyi --only samples/functions.py"      ; warms the AOT cache (R4, abd7071a: shared from the main checkout)
  :hosts [:stage0 :go] :inputs [:lib-tools :tools :pyi]}
@@ -62,6 +62,17 @@ applied on this branch: the existing `reap` step's `:inputs` gain `"test/python/
  :cmd "bin/pyi check --aot --no-pyi --only-list test/python/essential-aot.txt"                             ; REQUEST R2 (on this branch)
  :hosts [:stage0 :go :python] :never-loads [arbace.j2g] :pins ["test/python/corpora.edn"] :inputs [:lib-tools :tools :python :pyi]
  :summary ["^check --aot:|classed|failing|negative control" 4]}                                           ; 27 s: 20 pass, 1 classed (21 since PY7-runtime)
+;; queue 206 (AFTER-PY11.md §4.4, the re-seed window's light check): arbace/python's and arbace/repr/python's 19 namespaces
+;; compiled by c2j alone on stage 0, as c-c2j for C; its negative control test/python/c2j/pyi/c2j_control.ae in the same run.
+;; :inputs as strace on stage 0 found them (the VM, 2026-11-05: c-c2j's c2j closure, the runtime's sources under ARBACE_NO_AOT,
+;; repr/go's printer, go/arbace/jrt's forms), :c2j-runtime the group c-c2j declares
+{:name pyi-c2j :mem-gib 3 :phase :essential :chain python-essential           ; 20 s, 3.0 GB peak RSS on the VM (arm64)
+ :cmd "bin/pyi c2j-check"
+ :hosts [:stage0]                     ; no :never-loads arbace.j2g: c2j's emit requires arbace.j2g.jrt and names (c-c2j's)
+ :inputs [:lib-base "bin/pyi" "arbace/python.ae" "arbace/python/" "arbace/repr/python.ae" "arbace/repr/python/" "test/python/c2j/"
+          :c2j-runtime "arbace/c2j/" "arbace/j2g/jrt.ae" "arbace/j2g/names.ae" "arbace/classes/types.ae"
+          "arbace/repr/go/print.ae" "arbace/repr/go/print_*.ae" "go/arbace/jrt/*.ae"]
+ :summary ["^c2j-check: " 4]}                                                   ; "19 namespaces: 19 compiled, 0 failed", the control
 
 ;; ---- the full tier (nightly: a rotated part as its subset and a seventh; clean: the subsets, the :clean-only parts)
 {:name python-roundtrip :mem-gib 2 :phase :full :chain python-full
@@ -109,10 +120,10 @@ applied on this branch: the existing `reap` step's `:inputs` gain `"test/python/
  :parts [{:part pyperformance :clean-only true}] :summary ["benchmarks|classed|FAIL" 3]}
 
 ;; :crops (test/gate/costs.ae's known set gains :python)
-:python [pyi-aot-runtime python-read-essential pyi-aot-essential python-roundtrip python-front python-native pyi-check-aot pyi-check-aot-goi pyi-check pyi-bench]
+:python [pyi-aot-runtime python-read-essential pyi-aot-essential pyi-c2j python-roundtrip python-front python-native pyi-check-aot pyi-check-aot-goi pyi-check pyi-bench]
 ```
 
-**The negative controls before entry** (GTS218 (a)): each step's family must have one that fails. Present: `check --aot`'s
+**The negative controls before entry** (GTS218 (a)): each step's family must have one that fails. Present: `c2j-check`'s (queue 206: `test/python/c2j/pyi/c2j_control.ae`, which c2j must refuse, in the same run), `check --aot`'s
 judge (two passing programs against each other's references; the essential's 20 hold it), `lex-check`'s, PY7's
 `test/python/controls.edn` (`bin/pyi check`), `lib-test-all`'s. Missing: the round trips (both modes), `parse-check`,
 `scope-check` and `compile-check` (R3: present since PY7-check's dc8aa6d1, judged by their own judge). Until R1's exist,
@@ -136,7 +147,7 @@ judge (two passing programs against each other's references; the essential's 20 
 
 ## 3. What the clean run takes from Python
 
-**Steps:** the nine above, every part (the `:clean-only` ones too), under the audit; the rotation's record complete
+**Steps:** the nine above and `pyi-c2j` (queue 206), every part (the `:clean-only` ones too), under the audit; the rotation's record complete
 (`bin/gate --rotation-status`) for `python-roundtrip`, `python-native` and `pyi-check`.
 
 **Pins** (checked first, `bin/gate --pins`): `tools/pydump/PYTHON_VERSION` (the oracle: version, `sys.version`, the apk
@@ -214,7 +225,7 @@ of planned nightly runs, so a crop about 43 min; GTS225: the clean run within on
 
 | tier | Python's content | measured or estimated | share |
 |---|---|---|---|
-| essential | `python-read-essential` 13 s, `pyi-aot-essential` 27 s | **40 s warm, measured**; cold +6.6 min in the `:build` step `pyi-aot-runtime` | 2 min (GTS215) |
+| essential | `python-read-essential` 13 s, `pyi-aot-essential` 27 s, `pyi-c2j` 20 s (queue 206; 30 s CPU, 1.6 threads on average, 2.9 GiB peak) | **40 s warm, measured**, 60 s with `pyi-c2j`; cold +6.6 min in the `:build` step `pyi-aot-runtime` | 2 min (GTS215) |
 | nightly | round trips: subset and a seventh (whole: 4.5 + 8.5 min) | 3 *est.* | |
 | | front: scope and compile over the three corpora (stdlib measured 28 s + 43 s; 2,980 files) | 5 *est.* | |
 | | native: lex and parse, subset and a seventh (whole 6.5 and 11.5-13 min, PY9's) | 4 *est.* | |
