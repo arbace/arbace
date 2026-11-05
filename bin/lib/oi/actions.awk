@@ -27,11 +27,49 @@ END {
     if (depth == 1) body = body substr(text, k, 1)
   }
   sub(/^ *TEST/, "", body)
+  # ocamltest's variables (${test_build_directory}) are not blocks
+  gsub(/\$\{[a-z_]*\}/, "$VAR", body)
   gsub(/[{}]/, ";", body)
   m = split(body, st, ";")
   flags = ""; incs = ""; args = ""; env = ""; mods = ""
+  build = 0
   for (j = 1; j <= m; j++) {
     s = trim(st[j]); if (s == "") continue
+    # ocamltest's explicit build steps (OT9's third fix: badly-ordered-deps/coccinelle, required-external/main): from
+    # setup-ocamlc.byte-build-env to its check-program-output, the modules compiled one by one, a library (.cma) made of some, the
+    # program linked from all_modules and run; the run's units are the link's in order, a library's expanded to its modules (the test
+    # file last, as every run's). The other branches (ocamlopt's) are not read; a pack (-pack) stays a class.
+    if (build) {
+      if (match(s, /^[a-z_]+ *= *"/)) {
+        key = s; sub(/ *=.*/, "", key)
+        val = s; sub(/^[^"]*"/, "", val); sub(/"[^"]*$/, "", val)
+        if (key == "module") { bmod = val; continue }
+        if (key == "program") { bprog = val; continue }
+        if (key == "all_modules") { ball = val; continue }
+        if (key == "flags") { if (val ~ /(^| )-pack( |$)/) { print "class\theader: flags " val; exit }; continue }
+        print "class\theader: " key " = " val; exit
+      }
+      if (s == "ocamlc.byte") { if (bmod == "") { if (bprog ~ /\.cma$/) cma[bprog] = ball; else { blink = ball; nlink++ } }; continue }
+      if (s == "check-ocamlc.byte-output") continue
+      if (s == "run") { bran = 1; continue }
+      if (s == "check-program-output") {
+        # a second executable the test runs (OT3 (a), by design: its subprocess) stays a class
+        if (!bran || blink == "" || nlink > 1) { print "class\theader: setup-ocamlc.byte-build-env"; exit }
+        self = FILENAME; sub(/.*\//, "", self); sub(/\.ml$/, "", self)
+        mods = ""; c = split(blink, lk, " ")
+        for (q = 1; q <= c; q++) {
+          if (lk[q] in cma) { e = split(cma[lk[q]], ex, " ") } else { e = 1; ex[1] = lk[q] }
+          for (r = 1; r <= e; r++) {
+            b = ex[r]; sub(/\.(cmo|ml)$/, "", b)
+            if (b != self) mods = mods (mods == "" ? "" : " ") b ".ml"
+          }
+        }
+        bdone = 1
+        break
+      }
+      print "class\theader: " s; exit
+    }
+    if (s == "setup-ocamlc.byte-build-env") { build = 1; bmod = ""; bprog = ""; ball = ""; blink = ""; bran = 0; nlink = 0; continue }
     if (match(s, /^[a-z_]+ *\+?= *"/)) {
       key = s; sub(/ *\+?=.*/, "", key)
       val = s; sub(/^[^"]*"/, "", val); sub(/"[^"]*$/, "", val)
@@ -59,6 +97,7 @@ END {
         continue
       }
       if (key == "ocamlopt_flags" || key == "reason" || key == "exit_status") continue
+      if (key == "program" && trim(st[j + 1]) == "setup-ocamlc.byte-build-env") continue
       if (key == "arguments") { args = val; continue }
       if (key == "ocamlrunparam") { print "class\theader: ocamlrunparam " val; exit }
       print "class\theader: " key " = " val; exit
@@ -79,5 +118,8 @@ END {
     if (s == "bytecode" || s == "native" || s == "no-tsan" || s == "not-target-windows" || s == "multicore" || s == "native-compiler" || s == "arch64" || s == "not-macos" || s == "no-flambda" || s == "linux" || s == "not-windows" || s == "not-bsd" || s == "hasunix" || s == "hassysthreads") continue
     print "class\theader: " s; exit
   }
+  # explicit build steps that do not end in a run of the program (the compiler's own checks), and arguments naming ocamltest's directories
+  if (build && !bdone) { print "class\theader: setup-ocamlc.byte-build-env"; exit }
+  if (args ~ /\$VAR/) { print "class\theader: arguments = " args; exit }
   print "run\t" trim(flags) "\t" trim(incs) "\t" args "\t" trim(env) "\t" mods
 }

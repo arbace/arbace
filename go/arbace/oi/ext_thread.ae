@@ -17,6 +17,8 @@
 
 (go/var ^{:doc "sysThreads are the threads created, by their descriptor.\n"} sysThreads (make (map Value (* sysThread))))
 
+(go/var ^{:tag (chan (struct)) :doc "lastStarted is closed when the last thread created holds the lock for the first time: threads start in the\norder of their creation, as OCaml's master lock (a FIFO of waiters) starts them (lib-threads/tls).\n"} lastStarted)
+
 (go/method threadDescr "threadDescr is th's Thread.t, made at its first use (a domain's first thread).\n" ^Value [^{:tag (* Thread)} th]
   (when (== (.-sys th) nil)
     (if (== (.-ID (.-Dom th)) 0)
@@ -29,11 +31,17 @@
   (inc! threadSeq)
   (let [descr (Tuple threadSeq)
         st (addr (lit sysThread :done (make (chan (struct)))))
-        dom (.-Dom th)]
+        dom (.-Dom th)
+        prev lastStarted
+        mine (make (chan (struct)))]
+    (set! lastStarted mine)
     (aset sysThreads descr st)
     (.Add domainsRun 1)
     (go ((fn []
+      (when (!= prev nil)
+        (<! prev))
       (.Lock gil)
+      (close mine)
       (let [nt (addr (lit Thread :Dom dom :sys descr))]
         ((fn []
           (defer ((fn []
@@ -45,6 +53,11 @@
                 ;; thread.ml's wrapper catches the function's exceptions; one that escapes it ends the thread
                 (fmt/Fprintf os/Stderr "Thread %d killed on uncaught exception %s\n" (AsInt (aget (.-F (AsBlock descr)) 0)) (FormatException (.-V e)))
                 (return))
+              (when [(values ie ok) (assert (* InternalError) r)] ok
+                ;; an internal error in a thread (an external oi lacks): reported as the main program's, the process ends
+                (flushStdQuiet)
+                (fmt/Fprintf os/Stderr "%v\n" ie)
+                (os/Exit StatusInternal))
               (panic r)))))
           (.Apply nt f Unit))))
       (.Add domainsRun -1)
