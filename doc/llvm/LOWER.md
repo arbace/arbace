@@ -7,6 +7,8 @@ Pieces of the lowering:
 - `arbace.cpp.lower` (`arbace/cpp/lower.ae`): LLVM forms -> C forms; `bin/cppi lower`, `bin/cppi lower-check`.
 - The runtime (CX7, section 10): libsupc++ and libstdc++-v3/src compiled to IR by the oracle and lowered by `arbace.cpp.lower` (`bin/cppi runtime-build`, `test/cpp/runtime/units.edn`), and the pending-flag layer of exceptions, `arbace/cpp/rt/eh.c.ae`: C forms written by hand, printed by repr/c (`bin/cppi runtime`).
 
+Since cpp-codegen (2026-11-05, [CODEGEN.md](../cpp/CODEGEN.md)) a second producer of LLVM forms: `arbace.cpp.codegen` writes them from the native parser's tree with a semantic analysis of its own (`arbace.cpp.sema`), no clang; the lowering and the runtime take them as they take clang's (`bin/cppi codegen`, `codegen-check`).
+
 ## 7. The lowering (`arbace.cpp.lower`)
 
 The C forms are those of doc/c/SPEC.md, printed by repr/c's printer at `:gnu23` and judged by

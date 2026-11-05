@@ -1,0 +1,620 @@
+(ns arbace.repr.cpp.sema
+  "The native parser's minimum of clang's semantic analysis (doc/cpp/NATIVE.md, \"Sema's facts\"; CX11): the facts of
+  clang's tree a parser with the names' kinds alone does not have, computed as clang's Sema computes them, on the
+  name-kind tables the parser keeps (arbace.repr.cpp.scope) and the types it builds, as far as the converter's forms
+  need them, and no further:
+  - an initializer list's semantic form (SemaInit.cpp's InitListChecker: CheckListElementTypes, CheckSubElementType,
+    CheckImplicitInitList, CheckStructUnionTypes, CheckArrayType, FillInEmptyInitializations): the braces an aggregate's
+    initialization elides restored as lists of their own, the members a short list leaves out filled where clang's
+    tree holds a node for them (a member of class type: an empty list); on the classes' fields and bases, their
+    access and constructors (whether the class is an aggregate, [dcl.init.aggr]/1 by the standard's year), the arrays'
+    bounds and the elements' types where an expression's type decides ([dcl.init.aggr]/16: an expression that can
+    initialize the member does, else the braces are elided). A list whose decision needs a type this table does not
+    know (a dependent one, an expression's whose type only overload resolution gives) is left as written.
+  A class entity's facts are a map of its own under :info (a HashMap: the parser fills it as it skims the class's
+  body): :done (the body skimmed), :acc (the current access), :user-ctor, :provided-ctor, :explicit-ctor, :virtual,
+  :nonpublic-field, :dmi (a default member initializer), :finit (the fields that have one), :bases (each base's
+  {:ty :virt :acc})."
+  (:require [arbace.repr.cpp.scope :as sc]
+            [arbace.string :as str])
+  (:import [java.util ArrayList HashMap HashSet]))
+
+(set! *warn-on-reflection* true)
+
+;; ---------------------------------------------------------------------------------------------
+;; Types
+
+(defn new-info
+  "A class's facts for its class-key `kw`, `id` its class-key's token (the same class's skimmed and parsed entities share
+  it)."
+  ^HashMap [^String kw id]
+  (doto (HashMap.) (.put :id id) (.put :acc (if (= kw "class") "private" "public")) (.put :finit (HashSet.)) (.put :bases (ArrayList.))))
+
+(defn info ^HashMap [e] (:info e))
+
+(defn- resolve-type
+  "`t` through its typedefs and aliases (their entities' :ty), its cv-qualifiers dropped."
+  [t]
+  (loop [t t n 0]
+    (let [e (:ent t)]
+      (if (and (#{:n :elab} (:t t)) (:ty e) (< n 32))
+        (recur (:ty e) (inc n))
+        t))))
+
+(defn- bound
+  "An array type's bound: a number, nil (none: an incomplete array) or :unknown (an expression)."
+  [t]
+  (let [n (or (:n t) (:sn t))]
+    (if (nil? n)
+      nil
+      (let [s (str/replace (str/trim (str n)) #"(?i)[ul]+$" "")]
+        (if (re-matches #"[0-9]+|0[xX][0-9a-fA-F]+" s)
+          (try (Long/decode s) (catch Exception _ :unknown))
+          :unknown)))))
+
+(defn aggregate?
+  "Whether the class entity `e` (its body skimmed) is an aggregate in the standard of `year` ([dcl.init.aggr]/1)."
+  [e ^long year]
+  (let [^HashMap i (info e)]
+    (and i (.get i :done)
+         (not (.get i :virtual)) (not (.get i :nonpublic-field))
+         (if (>= year 2020) (not (.get i :user-ctor)) (not (or (.get i :provided-ctor) (and (>= year 2017) (.get i :explicit-ctor)))))
+         (let [^ArrayList bs (.get i :bases)]
+           (or (empty? bs) (and (>= year 2017) (every? #(and (not (:virt %)) (= "public" (:acc %))) bs))))
+         (not (and (= year 2011) (.get i :dmi))))))
+
+(defn class-ent
+  "The class entity a type names, its body known (skimmed in the main file, not a template), or nil."
+  [t]
+  (let [t (resolve-type t)
+        e (:ent t)
+        e (if (and e (nil? (info e)) (info (:target e))) (:target e) e)]
+    (when (and (#{:n :elab :unnamed} (:t t)) e (info e) (.get (info e) :done) (not (:tmpl e))
+               (not (some :args (:parts (:qn t)))))
+      e)))
+
+(defn tinfo
+  "What initialization needs of type `t`: {:k :scalar}, {:k :ref}, {:k :array :of T :n BOUND}, {:k :class :ent E} (an
+  aggregate), {:k :record :ent E} (a class that is not), or nil (not known)."
+  [t ^long year]
+  (let [r (resolve-type t)]
+    (case (:t r)
+      :b {:k :scalar}
+      (:p :mp) {:k :scalar}
+      (:lr :rr) {:k :ref}
+      :a {:k :array :of (:of r) :n (bound r)}
+      (:n :elab :unnamed)
+      (let [e (:ent r)]
+        (cond
+          (and e (:scope e) (= :enum (sc/kind-of (:scope e)))) {:k :scalar}
+          (class-ent r) (let [c (class-ent r)] (if (aggregate? c year) {:k :class :ent c} {:k :record :ent c}))
+          :else nil))
+      nil)))
+
+(defn- record-elem?
+  "A type whose base element type is a class (C++11's empty initialization of such a member is from {})."
+  [ti year]
+  (case (:k ti)
+    (:class :record) true
+    :array (boolean (some-> (tinfo (:of ti) year) (record-elem? year)))
+    false))
+
+(defn- char-array? [ti year]
+  (let [e (resolve-type (:of ti))]
+    (and (= :b (:t e)) (some #{"char" "wchar_t" "char8_t" "char16_t" "char32_t"} (:w e)))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Expressions' types, as far as an aggregate's initialization asks
+
+(declare xclass)
+
+(defn- type-class
+  "An expression of type `t`: :scalar (not a class: arithmetic, a pointer, an enumeration, an array that decays),
+  [:class E] or nil."
+  [t year]
+  (when t
+    (let [ti (tinfo t year)]
+      (case (:k ti)
+        (:scalar :array) :scalar
+        (:class :record) [:class (:ent ti)]
+        :ref (type-class (:of (resolve-type t)) year)
+        nil))))
+
+(defn xclass
+  "The type of the expression node `x` as an aggregate's initialization asks it: :scalar, :string (a string literal),
+  [:class E], or nil (not known: a call, a member, a dependent expression)."
+  [x year]
+  (case (:kind x)
+    ("IntegerLiteral" "FloatingLiteral" "CharacterLiteral" "CXXBoolLiteralExpr" "CXXNullPtrLiteralExpr" "GNUNullExpr"
+     "UnaryExprOrTypeTraitExpr" "CXXNoexceptExpr" "SizeOfPackExpr" "ImaginaryLiteral") :scalar
+    "StringLiteral" :string
+    "ParenExpr" (xclass (first (:inner x)) year)
+    "UnaryOperator" (if (= "&" (:opcode x)) :scalar (when (= :scalar (xclass (first (:inner x)) year)) :scalar))
+    "BinaryOperator" (if (= "," (:opcode x))
+                       (xclass (second (:inner x)) year)
+                       (when (every? #(#{:scalar :string} (xclass % year)) (:inner x)) :scalar))
+    ("CStyleCastExpr" "CXXStaticCastExpr" "CXXReinterpretCastExpr" "CXXConstCastExpr" "CXXFunctionalCastExpr"
+     "CXXTemporaryObjectExpr" "CXXScalarValueInitExpr") (type-class (:_t x) year)
+    "DeclRefExpr" (let [e (:_ent x)]
+                    (cond (nil? e) nil
+                          (:enumerator e) :scalar
+                          (= :fn (:k e)) (when-not (:ovl e) :scalar)
+                          (:ty e) (type-class (:ty e) year)
+                          :else nil))
+    nil))
+
+;; ---------------------------------------------------------------------------------------------
+;; InitListChecker
+
+(defn- bail! [why] (throw (ex-info (str "sema: " why) {:cpp/sema true})))
+
+(declare explicit-list fill)
+
+(defn- slots
+  "The subobjects an aggregate's list initializes, in order: its bases, then its fields (a union's first alone):
+  [{:ty T :dmi bool}]."
+  [e]
+  (let [^HashMap i (info e)
+        bs (map (fn [b] {:ty (:ty b) :base true}) (.get i :bases))
+        ^HashSet fi (.get i :finit)
+        ^java.util.Map ft (:ftypes e)
+        fs (map (fn [f] {:ty (.get ft f) :dmi (.contains fi f) :name f}) (:fields e))]
+    (when (some (comp nil? :ty) fs) (bail! "a field's type"))
+    (if (:union e) (vec (take 1 fs)) (vec (concat bs fs)))))
+
+(defn- empty-init
+  "A member's initialization from {} as clang's tree holds it, or :ivie (ImplicitValueInitExpr)."
+  [t year]
+  (let [ti (or (tinfo t year) (bail! "a member's type"))]
+    (cond
+      (= :ref (:k ti)) (bail! "a reference member")
+      (not (record-elem? ti year)) :ivie
+      (= :class (:k ti)) {:kind "InitListExpr" :inner (vec (let [ss (slots (:ent ti))]
+                                                              (if (:union (:ent ti)) [] (fill ss [] year))))}
+      ;; a class with constructors (its CXXConstructExpr from {}), an array of classes (its filler): an empty list
+      :else {:kind "InitListExpr" :inner []})))
+
+(defn- fill
+  "FillInEmptyInitializations of a class's list: `items` the initialized subobjects of `ss`; the rest filled (a
+  default member initializer's CXXDefaultInitExpr, a class member's list, a scalar's ImplicitValueInitExpr), the
+  trailing value-initializations not held (clang does not append them)."
+  [ss items year]
+  (let [fs (mapv (fn [s] (cond
+                           (:dmi s) {:kind "CXXDefaultInitExpr"}
+                           ;; a base of a class whose default constructor is not user-provided: clang's tree holds no
+                           ;; list for it (the converter's forms none)
+                           (and (:base s) (let [ti (tinfo (:ty s) year)]
+                                            (and (= :record (:k ti)) (not (.get ^HashMap (info (:ent ti)) :provided-ctor)))))
+                           {:kind "ImplicitValueInitExpr"}
+                           :else (let [x (empty-init (:ty s) year)] (if (= x :ivie) {:kind "ImplicitValueInitExpr"} x))))
+                 (drop (count items) ss))
+        all (into (vec items) fs)]
+    (loop [all all] (if (and (seq all) (= "ImplicitValueInitExpr" (:kind (peek all)))) (recur (pop all)) all))))
+
+(declare sub-elem)
+
+(defn- elems
+  "Elements ks[i..] into the subobjects `ss` (or an array's elements of type `of`, at most `n`): [items next-i]."
+  [ss ks i year desig]
+  (loop [items [] j (long i) ss (seq ss)]
+    (if (or (nil? ss) (>= j (count ks)))
+      [items j]
+      (let [[it j2] (sub-elem (:ty (first ss)) ks j year desig)]
+        (recur (conj items it) (long j2) (next ss))))))
+
+(defn- array-elems [of n ks i year desig]
+  (loop [items [] j (long i) c 0]
+    (if (or (>= j (count ks)) (and n (>= c (long n))))
+      [items j]
+      (let [[it j2] (sub-elem of ks j year desig)]
+        (recur (conj items it) (long j2) (inc c))))))
+
+(defn- implicit-list
+  "CheckImplicitInitList: a list of type `t` without braces of its own, from ks[i]: [list next-i]."
+  [t ti ks i year desig]
+  (let [[items j] (case (:k ti)
+                    :array (let [n (:n ti)] (when (= n :unknown) (bail! "an array's bound")) (array-elems (:of ti) n ks i year desig))
+                    :class (let [ss (slots (:ent ti)) [items j] (elems ss ks i year desig)] [(fill ss items year) j]))
+        f (ks i) l (ks (dec (long j)))]
+    [{:kind "InitListExpr" :inner items :range {:begin (:begin (:range f)) :end (:end (:range l))} :_b (:_b f) :_e (:_e l)} j]))
+
+(defn- sub-elem
+  "CheckSubElementType: the element ks[i] for a subobject of type `t`: [item next-i]."
+  [t ks i year desig]
+  (let [x (ks i)
+        ti (tinfo t year)]
+    (cond
+      (= "InitListExpr" (:kind x))
+      (cond (nil? ti) (bail! "an element's type")
+            (:_desigs x) [(desig t x) (inc (long i))]
+            (#{:array :class} (:k ti)) [(explicit-list t ti x year desig) (inc (long i))]
+            :else [x (inc (long i))])
+      (#{"PackExpansionExpr"} (:kind x)) (bail! "a pack expansion")
+      (nil? ti) (bail! "an element's type")
+      (#{:scalar :ref :record} (:k ti)) [x (inc (long i))]
+      (= :array (:k ti)) (if (= :string (xclass x year)) [x (inc (long i))] (implicit-list t ti ks i year desig))
+      :else (let [c (xclass x year)]
+              (cond (and (vector? c) (identical? (info (second c)) (info (:ent ti)))) [x (inc (long i))]
+                    (#{:scalar :string} c) (implicit-list t ti ks i year desig)
+                    :else (bail! "an element's class"))))))
+
+(defn- explicit-list
+  "CheckExplicitInitList: the braced list `x` for an object of type `t`."
+  [t ti x year desig]
+  (let [ks (vec (:inner x))]
+    (case (:k ti)
+      :array (let [[items j] (array-elems (:of ti) (when (number? (:n ti)) (:n ti)) ks 0 year desig)]
+               (when (< (long j) (count ks)) (bail! "too many elements"))
+               (assoc x :inner items))
+      :class (let [e (:ent ti)
+                   ss (slots e)
+                   _ (when (and (:union e) (empty? ks) (seq ss) (record-elem? (or (tinfo (:ty (first ss)) year) {}) year)) (bail! "an empty union"))
+                   [items j] (elems ss ks 0 year desig)]
+               (when (< (long j) (count ks)) (bail! "too many elements"))
+               (assoc x :inner (if (:union e) items (fill ss items year))))
+      x)))
+
+(defn- known-leaves?
+  "Every element of the list `x` (through its braced lists) of a type this table knows (a template's list is left as
+  written when an element may be type-dependent: clang checks it at instantiation)."
+  [x year]
+  (every? (fn [k] (if (= "InitListExpr" (:kind k)) (known-leaves? k year) (some? (xclass k year)))) (:inner x)))
+
+(defn semantic-list
+  "The semantic form of the braced list `x` (no designators) initializing an object of type `t`, or nil when it cannot
+  be decided here (the caller keeps the list as written). `desig` gives a designated sub-list's form; `tmpl` whether
+  the list is in a template."
+  [t x ^long year tmpl desig]
+  (try
+    (let [ti (tinfo t year)]
+      (cond
+        (nil? ti) nil
+        (not (#{:array :class} (:k ti))) nil
+        (and tmpl (not (known-leaves? x year))) nil
+        :else (explicit-list t ti x year desig)))
+    (catch arbace.lang.ExceptionInfo e
+      (if (:cpp/sema (ex-data e)) nil (throw e)))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Defaulted special members' exception specifications (SemaExceptionSpec.cpp, SemaDeclCXX.cpp's
+;; ComputeDefaultedSpecialMemberExceptionSpec): clang leaves a defaulted member's specification unevaluated until the
+;; member is used (Sema::MarkFunctionReferenced resolves it: a variable that default-constructs its class, a copy
+;; from an lvalue, an implicit move on return, an assignment, a comparison, a nothrow trait), then computes it from
+;; the functions it invokes on the class's bases and members: noexcept when every one is, noexcept(false) else. A
+;; class's special members are recorded as {:dflt :del :ns} under :sm by kind (:ctor0 :copy :move :copy= :move= :eq),
+;; :ns the written specification (true, false, :unknown, nil none); the uses are recorded by the parser as [ENT KIND].
+
+(defn sm-kind
+  "The kind of special member a declaration in the class `e` (named `nm`) is: `ctor` a constructor, `lp` its name's
+  last part, `types` its parameters' types, `friend` a friend's (two operands), or nil."
+  [e nm ctor lp types friend]
+  (let [i (info e)
+        own? (fn [t] (and (#{:n :elab} (:t t)) (or (identical? (info (:ent t)) i) (= (:s t) nm))))
+        ref-kind (fn [t] (case (:t t)
+                           :lr (when (own? (:of t)) :copy)
+                           :rr (when (and (own? (:of t)) (not (:c (:of t)))) :move)
+                           nil))
+        n (count types)]
+    (cond
+      ctor (case n 0 :ctor0 1 (ref-kind (first types)) nil)
+      (and (= "=" (:op lp)) (not friend) (= 1 n)) ({:copy :copy= :move :move=} (ref-kind (first types)))
+      (and (= "==" (:op lp)) (not friend) (= 1 n) (let [t (first types)] (or (own? t) (= :copy (ref-kind t))))) :eq
+      (and (= "==" (:op lp)) friend (= 2 n) (every? #(or (own? %) (= :copy (ref-kind %))) types)) :eq
+      :else nil)))
+
+(defn written-spec
+  "A declaration's written exception specification from its qualifiers `m` and their text `q`: true, false, :unknown
+  (an expression) or nil (none)."
+  [m ^String q]
+  (cond
+    (:throw m) (if (re-find #"throw\(\s*\)" q) true false)
+    (:noexcept m) (cond (re-find #"noexcept\(\s*false\s*\)" q) false
+                        (re-find #"noexcept\(\s*true\s*\)" q) true
+                        (re-find #"noexcept\(" q) :unknown
+                        :else true)
+    :else nil))
+
+(defn record-member!
+  "Records the special member of kind `k` declared in the class `e`."
+  [e k d]
+  (when-let [^HashMap i (info e)]
+    (let [^HashMap sm (or (.get i :sm) (let [m (HashMap.)] (.put i :sm m) m))]
+      (.put sm k d))))
+
+(defn- sm [e k] (some-> ^HashMap (info e) ^HashMap (.get :sm) (.get k)))
+
+(defn- user-ctor? [e] (some-> ^HashMap (info e) (.get :user-ctor)))
+
+(defn- eff-kind
+  "The member overload resolution picks for kind `k`: a move without a move constructor (or assignment), declared or
+  implicit ([class.copy.ctor]/8: none when a copy operation or the destructor is user-declared), is a copy."
+  [e k]
+  (case k
+    (:move :move=) (if (or (sm e k)
+                           (not (or (sm e :copy) (sm e :copy=) (sm e :move) (sm e :move=) (some-> ^HashMap (info e) (.get :user-dtor)))))
+                     k
+                     ({:move :copy :move= :copy=} k))
+    k))
+
+(defn- subobjects
+  "The class's bases' and members' classes for kind `k`'s invocations: [[ENT-or-:scalar-or-:unknown dmi] ...]."
+  [e ^long year]
+  (let [^HashMap i (info e)
+        ^HashSet fi (.get i :finit)
+        ^java.util.Map ft (:ftypes e)
+        cls (fn [t] (loop [t t n 0]
+                      (let [ti (tinfo t year)]
+                        (case (:k ti)
+                          (:class :record) (:ent ti)
+                          :scalar :scalar
+                          :ref :scalar
+                          :array (if (< n 8) (recur (:of ti) (inc n)) :unknown)
+                          :unknown))))]
+    (vec (concat (map (fn [b] [(cls (:ty b)) false]) (.get i :bases))
+                 (map (fn [f] [(cls (.get ft f)) (.contains fi f)]) (:fields e))))))
+
+(defn- spec*
+  [e k ^long year ^java.util.Map memo]
+  (let [k (eff-kind e k)
+        key [(.get ^HashMap (info e) :id) k]]
+    (if (.containsKey memo key)
+      (.get memo key)
+      (do
+        (.put memo key :unknown)              ; a cycle is not known
+        (let [d (sm e k)
+              r (cond
+                  (and d (not (:dflt d))) (cond (:del d) true (nil? (:ns d)) false :else (:ns d))
+                  (and d (some? (:ns d))) (:ns d)
+                  (and (nil? d) (= k :ctor0) (user-ctor? e)) :unknown
+                  (and (nil? d) (= k :eq)) :unknown
+                  :else
+                  (reduce (fn [acc [s dmi]]
+                            (let [v (cond (= s :scalar) true
+                                          (= s :unknown) :unknown
+                                          (and dmi (= k :ctor0)) true
+                                          :else (spec* s k year memo))]
+                              (cond (= acc :unknown) :unknown (= v :unknown) :unknown :else (and acc v))))
+                          true (subobjects e year)))]
+          (.put memo key r)
+          r)))))
+
+(defn- cascade!
+  "The member of kind `k` of the class `e` used: a defaulted one resolved (into `resolved`: [id kind] -> the class), a
+  defaulted or implicit one's definition using its bases' and members' members in turn."
+  [e k ^long year ^HashMap resolved ^HashSet seen]
+  (when (and (info e) (.get ^HashMap (info e) :done))
+    (let [k (eff-kind e k)
+          key [(.get ^HashMap (info e) :id) k]]
+      (when (.add seen key)
+        (let [d (sm e k)]
+          (when (and d (:dflt d) (not (:del d))) (.put resolved key e))
+          (when (and (or (nil? d) (:dflt d)) (not (and d (:del d))) (not (:union e))
+                     (not (and (nil? d) (= k :ctor0) (user-ctor? e))))
+            (doseq [[s dmi] (subobjects e year) :when (map? s) :when (not (and dmi (= k :ctor0)))]
+              (cascade! s k year resolved seen))))))))
+
+(defn resolve-uses
+  "The defaulted members the uses `uses` ([ENT KIND], or [:def ENT NAMES]: a user-provided constructor's definition,
+  NAMES its mem-initializers') resolve: {[id kind] true|false}, the ones not known left out."
+  [uses ^long year]
+  (let [resolved (HashMap.) seen (HashSet.) memo (HashMap.)]
+    (doseq [u uses]
+      (if (= :def (first u))
+        (let [[_ e names] u]
+          (when (and (info e) (.get ^HashMap (info e) :done))
+            (let [nms (set names)
+                  nb (count (.get ^HashMap (info e) :bases))]
+              (doseq [[[s dmi] f] (map vector (subobjects e year) (concat (repeat nb nil) (:fields e)))
+                      :when (and (map? s) (not dmi) (not (and f (nms f))) (not (and (nil? f) (nms (:name s)))))]
+                (cascade! s :ctor0 year resolved seen)))))
+        (let [[e k] u] (cascade! e k year resolved seen))))
+    (into {} (keep (fn [^java.util.Map$Entry en]
+                     (let [[_ k :as key] (.getKey en) v (spec* (.getValue en) k year memo)]
+                       (when (boolean? v) [key v])))
+                   (seq resolved)))))
+
+(defn vclass
+  "An expression's value category and class, as a copy or a move asks it: [:lvalue|:xvalue|:prvalue ENT], or nil."
+  [x ^long year]
+  (case (:kind x)
+    "ParenExpr" (vclass (first (:inner x)) year)
+    "DeclRefExpr" (when-let [t (:ty (:_ent x))]
+                    (let [r (resolve-type t)]
+                      (if (#{:lr :rr} (:t r))
+                        (when-let [e (class-ent (:of r))] [:lvalue e])
+                        (when-let [e (class-ent r)] [:lvalue e]))))
+    "CXXStaticCastExpr" (let [r (resolve-type (:_t x))] (when (= :rr (:t r)) (when-let [e (class-ent (:of r))] [:xvalue e])))
+    "CallExpr" (let [[f a & more] (:inner x)]
+                 (when (and a (nil? more) (= "DeclRefExpr" (:kind f)) (= "move" (get-in f [:referencedDecl :name])))
+                   (when-let [[c e] (vclass a year)] (when (= c :lvalue) [:xvalue e]))))
+    ("CXXTemporaryObjectExpr" "CXXFunctionalCastExpr") (when-let [e (class-ent (:_t x))] [:prvalue e])
+    nil))
+
+(defn same-class? [a b] (and a b (= (.get ^HashMap (info a) :id) (.get ^HashMap (info b) :id))))
+
+(defn patch-defaulted
+  "The nodes `nodes` with each defaulted member that `resolved` ({[id kind] bool}) resolves given its specification in
+  its type (clang prints the evaluated noexcept or noexcept(false))."
+  [nodes resolved]
+  (letfn [(w [n]
+            (if (map? n)
+              (let [n (if-let [k (:_dflt n)]
+                        (if (contains? resolved k)
+                          (update-in n [:type :qualType] str (if (get resolved k) " noexcept" " noexcept(false)"))
+                          n)
+                        n)]
+                (if (vector? (:inner n)) (assoc n :inner (mapv w (:inner n))) n))
+              n))]
+    (mapv w nodes)))
+
+;; ---------------------------------------------------------------------------------------------
+;; Class template argument deduction (SemaTemplateDeduction.cpp, SemaTemplateDeductionGuide.cpp; [over.match.class.deduct]):
+;; a variable declared with a class template's name and no arguments gets the specialization the deduction guides
+;; deduce from its initializer: the implicit guides of the template's constructors, the copy deduction candidate
+;; C(C<P...>), for a braced initializer first the initializer-list constructors, through an alias template its target's
+;; guides with the alias's parameters ([over.match.class.deduct]/3). Each guide's parameters are matched against the
+;; arguments' types ([temp.deduct.call]: references and top-level cv-qualifiers dropped, arrays decayed, a template-id
+;; matched against the argument's type or its bases'); a parameter not deduced takes its default argument. The
+;; deduction is kept only when it is certain: one guide viable (or every viable one deducing the same type), every
+;; argument's type known, no user-declared guide, no pack.
+
+(defn- bail-ctad! [why] (throw (ex-info (str "ctad: " why) {:cpp/sema true})))
+
+(defn- tparam-ent? [t] (and (= :n (:t t)) (:tparam (:ent t))))
+
+(defn- subst
+  "The type `t` with the template parameters `env` binds (an IdentityHashMap: entity -> type) replaced; `respell`
+  respells a template-id from its substituted arguments."
+  [t ^java.util.IdentityHashMap env respell]
+  (cond
+    (nil? t) nil
+    (and (= :n (:t t)) (:ent t) (.containsKey env (:ent t)))
+    (let [b (.get env (:ent t))] (cond-> b (:c t) (assoc :c true) (:v t) (assoc :v true)))
+    (and (= :n (:t t)) (some :args (:parts (:qn t))))
+    (let [qn (update (:qn t) :parts (fn [ps] (mapv (fn [part] (if (:args part)
+                                                                (assoc part :args (mapv (fn [a] (if (= :type (:k a)) (assoc a :t (subst (:t a) env respell)) a)) (:args part)))
+                                                                part))
+                                                   ps)))]
+      (respell (assoc t :qn qn)))
+    (#{:p :lr :rr :a} (:t t)) (assoc t :of (subst (:of t) env respell))
+    :else t))
+
+(declare match!)
+
+(defn- template-of [t] (when (and (= :n (:t t)) (some :args (:parts (:qn t)))) (:ent t)))
+
+(defn- match-args! [p-args a-args env tps qt respell]
+  (when-not (= (count p-args) (count a-args)) (bail-ctad! "arity"))
+  (every? identity (map (fn [pa aa] (and (= :type (:k pa)) (= :type (:k aa)) (match! (:t pa) (:t aa) env tps qt respell))) p-args a-args)))
+
+(defn- match!
+  "Deduces the parameters `tps` (a set of entities) of the type `pt` from the type `at`; true when they match."
+  [pt at ^java.util.IdentityHashMap env tps qt respell]
+  (cond
+    (and (tparam-ent? pt) (or (.containsKey ^java.util.IdentityHashMap tps (:ent pt)) (.containsKey env (:ent pt))))
+    (let [at (dissoc at :c :v)]
+      (if (.containsKey env (:ent pt))
+        (= (qt (.get env (:ent pt))) (qt at))
+        (do (.put env (:ent pt) at) true)))
+    (template-of pt)
+    (let [ps (:args (peek (:parts (:qn pt))))
+          cands (cons at (map :ty (some-> ^HashMap (info (class-ent at)) ^ArrayList (.get :bases) seq)))]
+      (boolean (some (fn [a] (and (template-of a) (identical? (info (template-of a)) (info (template-of pt)))
+                                  (match-args! ps (:args (peek (:parts (:qn a)))) env tps qt respell)))
+                     cands)))
+    (#{:p} (:t pt)) (and (= :p (:t at)) (match! (:of pt) (:of at) env tps qt respell))
+    :else
+    ;; a parameter that deduces nothing: viable when the argument converts (a scalar to a scalar, a class to itself)
+    (let [pk (:k (tinfo pt 2023)) ak (:k (tinfo at 2023))]
+      (cond (and (= pk :scalar) (= ak :scalar)) true
+            (and (#{:class :record} pk) (#{:class :record} ak)) (same-class? (class-ent pt) (class-ent at))
+            (or (nil? pk) (nil? ak)) (bail-ctad! "a parameter's type")
+            :else false))))
+
+(defn- arg-type
+  "An argument expression's type for deduction: [type lvalue?], or bail."
+  [x]
+  (case (:kind x)
+    "ParenExpr" (arg-type (first (:inner x)))
+    ("IntegerLiteral" "FloatingLiteral" "CharacterLiteral" "CXXBoolLiteralExpr")
+    [{:t :b :w (vec (str/split (get-in x [:type :qualType]) #" "))} false]
+    "StringLiteral" [{:t :p :of {:t :b :w ["char"] :c true}} true]
+    "DeclRefExpr" (if-let [t (:ty (:_ent x))] [(if (#{:lr :rr} (:t t)) (:of t) t) true] (bail-ctad! "an argument's type"))
+    ("CXXTemporaryObjectExpr" "CXXFunctionalCastExpr") (if-let [t (:_t x)] [t false] (bail-ctad! "an argument's type"))
+    (bail-ctad! "an argument's type")))
+
+(defn- deduce-guide
+  "The template parameters' types a guide with parameters `pts` deduces from `args` ([type lvalue?]), its template's
+  parameters `tps` ([{:ent :dflt}]) with the enclosing templates' arguments `outer`, or nil (not viable)."
+  [pts args tps outer qt respell]
+  (when (= (count pts) (count args))
+    (let [env (java.util.IdentityHashMap. ^java.util.Map outer)
+          ents (let [m (java.util.IdentityHashMap.)] (doseq [tp tps :when (:ent tp)] (.put m (:ent tp) true)) m)]
+      (when (every? identity
+                    (map (fn [pt [at lv]]
+                           (let [[pt at] (case (:t pt)
+                                           :lr [(:of pt) at]
+                                           :rr (if (and (tparam-ent? (:of pt)) (not (:c (:of pt)))) (bail-ctad! "a forwarding reference") [(:of pt) at])
+                                           [pt (case (:t at) :a {:t :p :of (:of at)} at)])]
+                             (match! (dissoc pt :c :v) at env ents qt respell)))
+                         pts args))
+        (doseq [tp tps :when (not (.containsKey env (:ent tp)))]
+          (if (:dflt tp) (.put env (:ent tp) (subst (:dflt tp) env respell)) (bail-ctad! "a parameter not deduced")))
+        env))))
+
+(defn ctad
+  "The type a variable declared as the class template or alias template `t` (no arguments) deduces from its initializer
+  `x` of kind `init` (\"call\", \"list\", \"c\"), spelled as clang prints it, or nil. `qt` prints a type, `respell` a
+  template-id's spelling from its arguments."
+  [t init x qt respell]
+  (try
+    (let [e (:ent t)
+          ;; an alias template: its target's guides, deducing the alias's own parameters
+          alias (:atps e)
+          target (when alias (:aty e))
+          ce (if alias (:ent target) e)
+          ^HashMap i (info ce)
+          _ (when-not (and i (.get i :done) (:tmpl ce) (.get i :tparams)) (bail-ctad! "a template not known"))
+          _ (when (.get i :user-guide) (bail-ctad! "a user-declared guide"))
+          ctps (vec (.get i :tparams))
+          _ (when (some #(or (:pack %) (:nontype %)) (concat ctps alias)) (bail-ctad! "a pack or a value parameter"))
+          ;; a member template of a specialization (A<int>::B): the enclosing template's arguments
+          outer (let [m (java.util.IdentityHashMap.)
+                      parts (:parts (:qn t))
+                      q (when (> (count parts) 1) (:q (:qn t)))
+                      qargs (:args (last (butlast parts)))]
+                  (when (and q qargs)
+                    (let [qtps (some-> ^HashMap (info q) (.get :tparams) vec)]
+                      (when-not (and qtps (= (count qtps) (count qargs)) (every? #(= :type (:k %)) qargs)) (bail-ctad! "the enclosing template"))
+                      (doseq [[tp a] (map vector qtps qargs)] (.put m (:ent tp) (:t a)))))
+                  m)
+          xs (cond (and (= init "list") (= "InitListExpr" (:kind x))) (:inner x)
+                   (= init "call") (if (= "ParenListExpr" (:kind x)) (:inner x) [x])
+                   (= init "c") [x]
+                   :else (bail-ctad! "an initializer"))
+          args (mapv arg-type xs)
+          ;; the guides: the constructors (their own template parameters with the class's), the copy deduction candidate
+          self {:t :n :s (:name ce) :ent ce
+                :qn {:parts [{:s (:name ce) :args (mapv (fn [tp] {:k :type :t {:t :n :s (:name tp) :ent (:ent tp)}}) ctps)}]}}
+          ctors (vec (.get i :ctors))
+          _ (when (some :pack ctors) (bail-ctad! "a constructor's pack"))
+          ;; through an alias template: the class's parameters stand for the target's arguments, written in the alias's
+          ;; parameters, which the guides deduce ([over.match.class.deduct]/3)
+          amap (when alias
+                 (let [targs (:args (peek (:parts (:qn target))))
+                       m (java.util.IdentityHashMap.)]
+                   (when-not (and (= (count targs) (count ctps)) (every? #(= :type (:k %)) targs)) (bail-ctad! "the alias's target"))
+                   (doseq [[tp a] (map vector ctps targs)] (.put m (:ent tp) (:t a)))
+                   m))
+          gtps (fn [c] (if alias (into (vec alias) (:mtps c)) (into ctps (:mtps c))))
+          gpts (fn [pts] (if alias (mapv #(subst % amap respell) pts) pts))
+          il? (fn [c] (and (= 1 (count (:types c))) (= "initializer_list" (some-> (:types c) first (#(if (#{:lr :rr} (:t %)) (:of %) %)) :qn :parts peek :s))))
+          guides (concat (map (fn [c] {:pts (gpts (:types c)) :tps (gtps c)}) ctors)
+                         [{:pts (gpts [self]) :tps (gtps {})}])
+          ;; through an alias: the class's parameters stand for the alias's target's arguments
+          ret (fn [env]
+                (if alias
+                  (qt (subst target env respell))
+                  ;; clang prints a deduced specialization without its trailing default arguments
+                  (let [as (mapv (fn [tp] (.get ^java.util.IdentityHashMap env (:ent tp))) ctps)
+                        dfl (mapv (fn [tp] (some-> (:dflt tp) (subst env respell))) ctps)
+                        n (loop [n (count as)] (if (and (pos? n) (get dfl (dec n)) (= (qt (get dfl (dec n))) (qt (get as (dec n))))) (recur (dec n)) n))]
+                    (str (:s t) "<" (str/join ", " (map qt (take n as))) ">"))))
+          try-guides (fn [gs args]
+                       (let [rs (distinct (keep (fn [g] (when-let [env (deduce-guide (:pts g) args (:tps g) outer qt respell)]
+                                                          (when (every? #(.containsKey ^java.util.IdentityHashMap env (:ent %)) (or alias ctps)) (ret env))))
+                                                gs))]
+                         (cond (= 1 (count rs)) (first rs) (empty? rs) nil :else (bail-ctad! "several guides"))))]
+      (or
+       ;; [over.match.list]: a braced list tries the initializer-list constructors first, its elements one argument
+       (when (and (= init "list") (some il? ctors))
+         (let [ils (filter il? ctors)]
+           (try-guides (map (fn [c] (let [lt (first (:types c)) lt (if (#{:lr :rr} (:t lt)) (:of lt) lt)
+                                          el (:t (first (:args (peek (:parts (:qn lt))))))]
+                                      {:pts (gpts (vec (repeat (count args) el))) :tps (gtps c)}))
+                            ils)
+                       args)))
+       (try-guides guides args)))
+    (catch arbace.lang.ExceptionInfo ex
+      (when (System/getenv "REPR_CPP_SEMA_DEBUG") (binding [*out* *err*] (println "sema:" (ex-message ex))))
+      (if (:cpp/sema (ex-data ex)) nil (throw ex)))))

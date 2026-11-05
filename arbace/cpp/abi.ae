@@ -1,0 +1,726 @@
+(ns arbace.cpp.abi
+  "The C++ code generator's types and the Itanium C++ ABI's parts it needs (doc/cpp/CODEGEN.md §3, §4): the semantic
+  types of arbace.cpp.sema (maps with :k), the program's classes and enumerations (a registry by id), sizes and
+  alignments on x86-64 (LP64), the class layout of the Itanium ABI (§2.4: the vptr, the primary base, empty bases at
+  offset 0, a non-POD base's tail padding reused) and the Itanium mangling of names (§5.1: nested names, the
+  substitutions S_ S0_ ..., the special members' C1 C2 D0 D1 D2, operators, local statics). Written from the ABI's text
+  (itanium-cxx-abi.github.io/cxx-abi/abi.html) and checked against clang 23's output on the samples; no code ported."
+  (:refer-clojure :exclude [class? fn?])
+  (:require [arbace.string :as str]))
+
+(set! *warn-on-reflection* true)
+
+(defn fail [cls & msg] (throw (ex-info (str "codegen: " (apply str msg)) {:codegen/refused cls})))
+
+;; ---------------------------------------------------------------------------------------------
+;; Types: {:k :b :n :int}, {:k :ptr :to T}, {:k :ref :to T}, {:k :rref :to T}, {:k :arr :n N :of T},
+;; {:k :fn :ret T :ps [T] :va bool :cq bool}, {:k :class :id N}, {:k :enum :id N}; any with :c true (const), :v true
+
+(defn b [n] {:k :b :n n})
+(def void (b :void)) (def bool* (b :bool)) (def char* (b :char)) (def int* (b :int)) (def uint* (b :uint))
+(def long* (b :long)) (def ulong* (b :ulong)) (def double* (b :double)) (def float* (b :float)) (def nullptr-t (b :nullptr))
+(defn ptr [t] {:k :ptr :to t})
+(defn lref [t] {:k :ref :to t})
+(defn rref [t] {:k :rref :to t})
+(defn arr [n t] {:k :arr :n n :of t})
+(defn unq [t] (dissoc t :c :v))
+(defn constq [t] (assoc t :c true))
+(defn kind [t] (:k t))
+(defn bn [t] (when (= :b (:k t)) (:n t)))
+(defn void? [t] (= :void (bn t)))
+(defn ref? [t] (#{:ref :rref} (:k t)))
+(defn non-ref [t] (if (ref? t) (:to t) t))
+(defn ptr? [t] (= :ptr (:k t)))
+(defn class? [t] (= :class (:k t)))
+(defn enum? [t] (= :enum (:k t)))
+(defn arr? [t] (= :arr (:k t)))
+(defn fn? [t] (= :fn (:k t)))
+(def int-ranks {:bool 0 :char 1 :schar 1 :uchar 1 :char8 1 :short 2 :ushort 2 :char16 2 :int 3 :uint 3 :char32 3 :wchar 3
+                :long 4 :ulong 4 :llong 5 :ullong 5})
+(def unsigned-ns #{:bool :uchar :ushort :uint :ulong :ullong :char8 :char16 :char32})
+(defn integral? [t] (or (contains? int-ranks (bn t)) (enum? t)))
+(defn floating? [t] (#{:float :double :ldouble} (bn t)))
+(defn arith? [t] (or (contains? int-ranks (bn t)) (floating? t)))
+(defn mptr? [t] (= :mptr (:k t)))
+(defn mfn-ptr? [t] (and (mptr? t) (= :fn (:k (:to t)))))
+(defn scalar? [t] (or (arith? t) (enum? t) (ptr? t) (= :nullptr (bn t)) (mptr? t)))
+(defn same-type? [a b] (= (unq a) (unq b)))
+
+;; ---------------------------------------------------------------------------------------------
+;; The registry: classes and enumerations by id
+
+(def ^:dynamic *classes* nil) ; atom {id class}
+(def ^:dynamic *enums* nil)   ; atom {id enum}
+
+(defn cls [id] (get @*classes* id))
+(defn cls-of [t] (cls (:id (unq t))))
+(defn update-cls! [id f & args] (apply swap! *classes* update id f args))
+(defn enm [id] (get @*enums* id))
+
+(defn underlying [t] (if (enum? t) (or (:under (enm (:id t))) int*) t))
+
+;; ---------------------------------------------------------------------------------------------
+;; Sizes and alignments (x86-64 SysV, LP64)
+
+(def ^:private scalar-size {:bool 1 :char 1 :schar 1 :uchar 1 :char8 1 :short 2 :ushort 2 :char16 2 :int 4 :uint 4 :char32 4
+                            :wchar 4 :long 8 :ulong 8 :llong 8 :ullong 8 :float 4 :double 8 :ldouble 16 :nullptr 8})
+
+(declare layout)
+
+(defn size-align
+  "[size align] of a complete object type."
+  [t]
+  (case (:k t)
+    :b (if-let [s (scalar-size (:n t))] [s s] (fail :type "no size for " (:n t)))
+    :ptr [8 8] (:ref :rref) [8 8]
+    :enum (size-align (underlying t))
+    :arr (let [[s a] (size-align (:of t))] [(* (long s) (long (or (:n t) 0))) a])
+    :class (let [l (layout (:id t))] [(:size l) (:align l)])
+    :fn [1 1]
+    :mptr (if (= :fn (:k (:to t))) [16 8] [8 8])
+    (fail :type "no size for " (pr-str t))))
+
+(defn size-of ^long [t] (long (first (size-align t))))
+(defn align-of ^long [t] (long (second (size-align t))))
+(defn align-up ^long [^long n ^long a] (* a (quot (+ n (dec a)) a)))
+
+;; ---------------------------------------------------------------------------------------------
+;; Class properties
+
+(defn vbases
+  "The class's virtual bases, direct and indirect, in inheritance graph order (Itanium §2.4 II.4: a pre-order of the
+  bases, each virtual base where first met)."
+  [id]
+  (let [seen (java.util.LinkedHashSet.)]
+    ((fn walk [x] (doseq [b (:bases (cls x))] (when (:virtual b) (.add seen (:cls b))) (walk (:cls b)))) id)
+    (vec seen)))
+
+(defn vbases-init
+  "The virtual bases in the order the complete object's constructor initializes them ([class.base.init]/13.1, as
+  clang's vbases(): a base's virtual bases before it)."
+  [id]
+  (let [seen (java.util.LinkedHashSet.)]
+    ((fn walk [x] (doseq [b (:bases (cls x))] (walk (:cls b)) (when (:virtual b) (.add seen (:cls b))))) id)
+    (vec seen)))
+
+(defn dynamic? "Whether the class has a vptr (virtual functions of its own, a dynamic base, a virtual base)." [id]
+  (let [c (cls id)] (boolean (or (seq (:virtuals c)) (some :virtual (:bases c)) (some #(dynamic? (:cls %)) (:bases c))))))
+
+(declare layout)
+
+(defn nearly-empty? "A dynamic class with no data but its vptr (§2.4 II.3)." [id]
+  (and (dynamic? id) (= 8 (long (:nvsize (layout id))))))
+
+(defn- indirect-primaries
+  "The virtual bases that are the primary base of a base class of `id` (its hierarchy's, `id` aside)."
+  [id]
+  (let [out (java.util.HashSet.)]
+    ((fn walk [x] (doseq [b (:bases (cls x))]
+                    (let [pb (:primary (layout (:cls b)))] (when (:virtual pb) (.add out (:cls pb))))
+                    (walk (:cls b))))
+     id)
+    out))
+
+(defn primary-base
+  "The primary base (Itanium §2.4 II.3): the first non-virtual dynamic base, else the first nearly empty virtual base
+  (in the inheritance graph's pre-order) that is not an indirect primary base, else the first nearly empty one: the
+  base's entry ({:cls :virtual ...}) or nil."
+  [id]
+  (let [c (cls id)]
+    (or (first (filter #(and (not (:virtual %)) (dynamic? (:cls %))) (:bases c)))
+        (when (dynamic? id)
+          (let [ip (indirect-primaries id)
+                first-ne (atom nil)
+                found ((fn sel [x]
+                         (some (fn [b]
+                                 (or (when (and (:virtual b) (nearly-empty? (:cls b)))
+                                       (if (.contains ^java.util.HashSet ip (:cls b))
+                                         (do (when-not @first-ne (reset! first-ne b)) nil)
+                                         b))
+                                     (when (seq (vbases (:cls b))) (sel (:cls b)))))
+                               (:bases (cls x))))
+                       id)]
+            (when-let [b (or found @first-ne)] {:cls (:cls b) :virtual true}))))))
+
+(defn empty-class? [id]
+  (let [c (cls id)] (and (empty? (:fields c)) (not (dynamic? id)) (every? #(empty-class? (:cls %)) (:bases c)))))
+
+(defn pod-for-layout?
+  "POD as C++03 defined it, which Itanium's layout uses to decide whether a base's tail padding is reused."
+  [id]
+  (let [c (cls id)]
+    (and (empty? (:bases c)) (not (dynamic? id)) (not (:user-ctor c)) (not (:user-dtor c)) (not (:user-copy-assign c))
+         (every? #(= :public (:access %)) (:fields c))
+         (every? (fn [f] (let [t (loop [t (:ty f)] (if (arr? t) (recur (:of t)) t))]
+                           (and (not (ref? t)) (or (not (class? t)) (pod-for-layout? (:id t))))))
+                 (:fields c)))))
+
+(defn- nonvirtual-subobjects
+  "[[class-id offset] ...] of the non-virtual subtree of class `x` at `off` (itself first)."
+  [x ^long off]
+  (let [c (cls x) l (layout x)]
+    (into [[x off]] (mapcat (fn [[i b]] (when-not (:virtual b) (nonvirtual-subobjects (:cls b) (+ off (long (nth (:bases l) i))))))
+                            (map-indexed vector (:bases c))))))
+
+(declare layout class-empties)
+
+(defn- field-empties
+  "[[class-id offset] ...] of the empty-class subobjects of a field of type `t` at `off`, as clang's EmptySubobjectMap
+  (RecordLayoutBuilder.cpp) tracks them: a class-typed member as a most-derived object, an array element by element."
+  [t ^long off]
+  (let [t (unq t)]
+    (cond
+      (class? t) (class-empties (:id t) off true)
+      (arr? t) (let [et (loop [x (unq (:of t))] (if (arr? x) (recur (unq (:of x))) x))
+                     n (loop [x t n 1] (if (arr? x) (recur (unq (:of x)) (* n (long (or (:n x) 0)))) n))]
+                 (if (class? et)
+                   (let [e0 (class-empties (:id et) 0 true)]
+                     (if (empty? e0)
+                       []
+                       (let [sz (long (first (size-align et)))]
+                         (vec (mapcat (fn [i] (class-empties (:id et) (+ off (* i sz)) true)) (range (min n 1024)))))))
+                   []))
+      :else [])))
+
+(defn- class-empties
+  "The empty subobjects of class `id` at `off`: `top` true for a member's class (virtual bases too), false for a base
+  subobject (its non-virtual bases and its primary virtual base)."
+  [id ^long off top]
+  (let [c (cls id) l (layout id)
+        own (when (empty-class? id) [[id off]])
+        bs (mapcat (fn [i b] (when-not (:virtual b) (class-empties (:cls b) (+ off (long (nth (:bases l) i))) false)))
+                   (range) (:bases c))
+        pv (let [p (:primary l)] (when (and (:virtual p) (not top)) (class-empties (:cls p) off false)))
+        vb (when top (mapcat (fn [[v vo]] (class-empties v (+ off (long vo)) false)) (:vbases l)))
+        fs (mapcat (fn [f o] (when-not (:bits f) (field-empties (:ty f) (+ off (long o))))) (:fields c) (:fields l))]
+    (vec (concat own bs pv vb fs))))
+
+(defn- can-place? [em lst] (not-any? (fn [[c o]] (contains? (get @em o #{}) c)) lst))
+(defn- place! [em lst] (doseq [[c o] lst] (swap! em update o (fnil conj #{}) c)))
+
+(defn layout
+  "The class's layout (Itanium §2.4), cached: {:size :align (the complete object's) :nvsize :nvalign :dsize (the
+  non-virtual part's, what a derived class lays out) :fields [offsets] :bitoffs [bit offsets of bit-fields] :bases
+  [offsets of the non-virtual bases, nil for virtual ones] :vbases {class-id offset} (in a complete object) :vptr bool
+  :primary {:cls :virtual}}."
+  [id]
+  (or (:layout (cls id))
+      (let [c (cls id)
+            dyn (dynamic? id)
+            ;; a placeholder while the primary base is chosen (nearly-empty? asks a base's layout, never this one's)
+            pb (primary-base id)
+            pbv (:virtual pb)
+            ;; a non-virtual primary base at 0 holds the vptr; else the class's own vptr at 0 (shared with a virtual primary)
+            start (if (and dyn (or (nil? pb) pbv)) 8 0)
+            init-align (if dyn 8 1)
+            bases (vec (:bases c))
+            pbi (when (and pb (not pbv)) (first (keep-indexed (fn [i b] (when (and (= (:cls b) (:cls pb)) (not (:virtual b))) i)) bases)))
+            em (atom {}) ; the empty subobjects placed so far: {offset #{class-id}} (clang's EmptySubobjectMap)
+            order (if pbi (cons pbi (remove #(= % pbi) (range (count bases)))) (range (count bases)))
+            [off align boffm]
+            (reduce (fn [[off align m] i]
+                      (let [b (nth bases i)
+                            bid (:cls b)
+                            bl (layout bid)
+                            ba (long (:nvalign bl))
+                            bsz (long (if (:pod bl) (:size bl) (:nvsize bl)))]
+                        (cond
+                          (:virtual b) [off align m]
+                          (= i pbi) (do (place! em (class-empties bid 0 false)) [(max (long off) bsz) (max (long align) ba) (assoc m i 0)])
+                          (and (empty-class? bid) (can-place? em (class-empties bid 0 false)))
+                          (do (place! em (class-empties bid 0 false)) [off (max (long align) ba) (assoc m i 0)])
+                          :else (let [o (loop [o (align-up off ba)]
+                                          (if (can-place? em (class-empties bid o false)) o (recur (+ o ba))))]
+                                  (place! em (class-empties bid o false))
+                                  [(if (empty-class? bid) off (+ o bsz)) (max (long align) ba) (assoc m i o)]))))
+                    [(long start) (long init-align) {}]
+                    order)
+            boffs (mapv #(get boffm %) (range (count bases)))
+            ;; the fields in bits (Itanium follows the SysV psABI for bit-fields: a bit-field of type T never crosses a
+            ;; boundary of T's alignment, a zero-width one aligns the next to T, an unnamed one does not align the class);
+            ;; a union's all at 0
+            uni (:union c)
+            [offb align foffs bitoffs]
+            (reduce (fn [[offb align foffs bitoffs] f]
+                      (let [[s a] (size-align (:ty f))
+                            s (long s) a (long a) offb (long offb)
+                            start (if uni 0 offb)]
+                        (if-let [w (:bits f)]
+                          (let [w (long w) ua (* 8 a)
+                                b (cond (zero? w) (align-up start ua)
+                                        (not= (quot start ua) (quot (+ start w -1) ua)) (align-up start ua)
+                                        :else start)]
+                            [(if uni (max offb (+ b w)) (+ b w)) (if (:name f) (max (long align) a) align) (conj foffs (* a (quot b ua))) (conj bitoffs b)])
+                          (let [o (align-up (quot (+ start 7) 8) a)
+                                dsz (quot (+ offb 7) 8)
+                                o (if (or uni (empty? (field-empties (:ty f) 0)))
+                                    o
+                                    (loop [o o]
+                                      (if (can-place? em (field-empties (:ty f) o))
+                                        o
+                                        (recur (if (and (zero? o) (not (zero? dsz))) (align-up dsz a) (+ o a))))))
+                                _ (when-not uni (place! em (field-empties (:ty f) o)))]
+                            [(if uni (max offb (* 8 (+ o s))) (* 8 (+ o s))) (max (long align) a) (conj foffs o) (conj bitoffs nil)]))))
+                    [(* 8 (long off)) align [] []]
+                    (:fields c))
+            nvsize (quot (+ (long offb) 7) 8)
+            nvalign align
+            pre {:nvsize nvsize :nvalign nvalign :dsize nvsize :fields foffs :bitoffs bitoffs :bases boffs :vptr dyn
+                 :pod (pod-for-layout? id) :primary pb}
+            _ (update-cls! id assoc :layout (assoc pre :size (max 1 (align-up nvsize nvalign)) :align nvalign :vbases {} :partial true))
+            ;; the virtual bases of the complete object: each indirect primary base where its class's subobject is,
+            ;; the others after the non-virtual part in inheritance graph order
+            ip (indirect-primaries id)
+            vbo (java.util.LinkedHashMap.)
+            mark! (fn [x ^long xoff]
+                    (doseq [[y yoff] (nonvirtual-subobjects x xoff)]
+                      (let [p (:primary (layout y))]
+                        (when (and (:virtual p) (not (.containsKey vbo (:cls p)))) (.put vbo (:cls p) yoff)))))
+            _ (when pbv (.put vbo (:cls pb) 0))
+            _ (mark! id 0)
+            [dsize align]
+            (reduce (fn [[ds al] v]
+                      (if (or (.containsKey vbo v) (.contains ^java.util.HashSet ip v))
+                        [ds al]
+                        (let [vl (layout v)
+                              va (long (:nvalign vl))
+                              o (if (and (empty-class? v) (can-place? em (class-empties v 0 false)))
+                                  0
+                                  (loop [o (align-up ds va)] (if (can-place? em (class-empties v o false)) o (recur (+ o va)))))
+                              _ (place! em (class-empties v o false))]
+                          (.put vbo v o)
+                          (mark! v o)
+                          [(if (empty-class? v) ds (+ o (long (:nvsize vl)))) (max (long al) (long (:nvalign vl)))])))
+                    [nvsize nvalign]
+                    (vbases id))
+            size (max 1 (align-up dsize align))
+            l (assoc pre :size size :align align :vbases (into {} vbo))]
+        (update-cls! id assoc :layout l)
+        l)))
+
+(defn field-offset ^long [id ^long i] (long (nth (:fields (layout id)) i)))
+
+(defn base-path
+  "The way from class `from` to its base `to`: [steps offset vbase] -- the [class-id base-index] steps, and the offset of
+  `to` from `from` when no step is virtual (vbase nil), else from the last virtual base on the way (vbase its id); nil
+  when `to` is not a base."
+  [from to]
+  (if (= from to)
+    [[] 0 nil]
+    (some (fn [[i bs]]
+            (when-let [[steps off vb] (base-path (:cls bs) to)]
+              [(into [[from i]] steps)
+               (cond vb off (:virtual bs) off :else (+ (long (nth (:bases (layout from)) i)) (long off)))
+               (or vb (when (:virtual bs) (:cls bs)))]))
+          (map-indexed vector (:bases (cls from))))))
+
+(defn derived-from? [d bse] (and (not= d bse) (some? (base-path d bse))))
+(defn has-vbases? [id] (boolean (seq (vbases id))))
+
+;; ---------------------------------------------------------------------------------------------
+;; LLVM types of values
+
+(defn llvm-type
+  "The LLVM type of a scalar value of type `t` in memory (bool i8) or as an operand (`:value`: bool i1)."
+  ([t] (llvm-type t false))
+  ([t value?]
+   (let [t (unq t)]
+     (case (:k t)
+       :b (case (:n t)
+            :void 'void
+            :bool (if value? 'i1 'i8)
+            (:char :schar :uchar :char8) 'i8
+            (:short :ushort :char16) 'i16
+            (:int :uint :char32 :wchar) 'i32
+            (:long :ulong :llong :ullong) 'i64
+            :float 'float :double 'double :ldouble 'x86_fp80
+            :nullptr 'ptr)
+       (:ptr :ref :rref) 'ptr
+       :enum (llvm-type (underlying t) value?)
+       :fn 'ptr
+       :mptr (if (= :fn (:k (:to t))) '(struct i64 i64) 'i64)
+       (list 'array (size-of t) 'i8)))))
+
+(defn signed? [t] (let [n (bn (underlying (unq t)))] (and (contains? int-ranks n) (not (unsigned-ns n)))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Itanium mangling (§5.1)
+;;
+;; The parts of templates (CODEGEN.md §G3: template-prefix, template-args, template-param, a function template's
+;; encoding with its return type, the <expression> of a dependent argument, a dependent member type) reimplement, after
+;; the ABI's text, clang's clang/lib/AST/ItaniumMangle.cpp at llvmorg-23.1.4 (commit
+;; 7a941dfb2877a0b8cf30323fefa85ad019e0b0f5): mangleTemplatePrefix, mangleTemplateArgs, mangleTemplateParameter,
+;; mangleIntegerLiteral, mangleFunctionEncodingBareType's return-type rule, mangleUnresolvedPrefix's sr form, read and
+;; reimplemented by hand on 2026-11-05. Their notice:
+;;   Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+;;   See https://llvm.org/LICENSE.txt for license information.
+;;   SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+
+(def op-codes
+  {"new" "nw" "new[]" "na" "delete" "dl" "delete[]" "da" "+" "pl" "-" "mi" "*" "ml" "/" "dv" "%" "rm" "&" "an" "|" "or"
+   "^" "eo" "=" "aS" "+=" "pL" "-=" "mI" "*=" "mL" "/=" "dV" "%=" "rM" "&=" "aN" "|=" "oR" "^=" "eO" "<<" "ls" ">>" "rs"
+   "<<=" "lS" ">>=" "rS" "==" "eq" "!=" "ne" "<" "lt" ">" "gt" "<=" "le" ">=" "ge" "<=>" "ss" "!" "nt" "&&" "aa" "||" "oo"
+   "++" "pp" "--" "mm" "," "cm" "->*" "pm" "->" "pt" "()" "cl" "[]" "ix" "~" "co"})
+(def unary-op-codes {"+" "ps" "-" "ng" "&" "ad" "*" "de"})
+
+(def ^:private builtin-codes
+  {:void "v" :bool "b" :char "c" :schar "a" :uchar "h" :short "s" :ushort "t" :int "i" :uint "j" :long "l" :ulong "m"
+   :llong "x" :ullong "y" :float "f" :double "d" :ldouble "e" :nullptr "Dn" :wchar "w" :char8 "Du" :char16 "Ds" :char32 "Di"})
+
+(defn- seq-id ^String [^long n]
+  (if (zero? n) "S_"
+      (str "S" (.toUpperCase (Long/toString (dec n) 36)) "_")))
+
+(defn source-name ^String [^String s] (str (count s) s))
+
+(def ^:dynamic ^:private *subs* nil) ; atom: vector of keys
+
+(defn- sub! [k ^String s]
+  (let [v @*subs* i (.indexOf ^java.util.List v k)]
+    (if (neg? i) (do (swap! *subs* conj k) s) (seq-id i))))
+
+(defn- sub-or [k f]
+  (let [i (.indexOf ^java.util.List @*subs* k)]
+    (if (neg? i) (let [s (f)] (swap! *subs* conj k) s) (seq-id i))))
+
+(def ^:dynamic *dollars* nil) ; atom {:names {class-id name} :counts {key n}}: clang's $_N, numbered as first mangled
+
+(defn- dollar-name!
+  "A closure's name in a function that is not inline: $_N, N counted per enclosing function in the order the closures
+  are first mangled (clang numbers them as its code generator first names them)."
+  ^String [c]
+  (let [a (or *dollars* (atom {}))]
+    (or (get-in @a [:names (:id c)])
+        (let [k (:dollar-key c) n (long (get-in @a [:counts k] 0))
+              nm (source-name (str "$_" n))]
+          (swap! a #(-> % (assoc-in [:names (:id c)] nm) (assoc-in [:counts k] (inc n))))
+          nm))))
+
+(defn- part-name ^String [p]
+  (case (first p)
+    :ns (source-name (second p))
+    :anon "12_GLOBAL__N_1"
+    :cls (let [c (cls (second p))] (or (:mname c) (when (:dollar-key c) (dollar-name! c)) (source-name (:name c))))
+    :enum (source-name (:name (enm (second p))))))
+
+(declare mangle-type* template-args)
+
+(defn- part-targs
+  "A class part's template arguments when the class is a template's specialization (CODEGEN.md §G3), else nil."
+  [p]
+  (when (= :cls (first p)) (let [c (cls (second p))] (when (:tmpl c) c))))
+
+(defn- template-prefix
+  "<template-prefix> ::= <prefix> <template unqualified-name>: `out` (the prefix as written so far) and the template's
+  name, or the template's substitution when it was seen (it stands for the prefix too); a new candidate otherwise."
+  ^String [^String out tid ^String nm]
+  (let [i (.indexOf ^java.util.List @*subs* [:tmpl tid])]
+    (if (neg? i)
+      (let [s (str out (source-name nm))] (swap! *subs* conj [:tmpl tid]) s)
+      (seq-id i))))
+
+(defn- mangle-prefix
+  "The prefix of the parts as written inside N ... E: the longest prefix already substituted as its S_, then each
+  further part, every prefix a new substitution candidate (a template specialization's part: its template-prefix a
+  candidate, then its arguments)."
+  ^String [parts]
+  (let [parts (vec parts)
+        n (count parts)
+        idx (fn [m] (.indexOf ^java.util.List @*subs* [:prefix (subvec parts 0 m)]))
+        best (loop [m n] (when (pos? m) (if (neg? (long (idx m))) (recur (dec m)) m)))
+        start (or best 0)]
+    (loop [i (inc start) out (if best (seq-id (idx best)) "")]
+      (if (> i n)
+        out
+        (if (and (= i 1) (= [:ns "std"] (first parts)))
+          (recur (inc i) "St") ; ::std:: is St, not a substitution candidate
+          (let [p (nth parts (dec i))
+                s (if-let [c (part-targs p)]
+                    (str (template-prefix out (:tmpl c) (:name c)) (template-args (:targs c)))
+                    (str out (part-name p)))]
+            (swap! *subs* conj [:prefix (subvec parts 0 i)])
+            (recur (inc i) s)))))))
+
+(defn path-of-type
+  "The scope path naming a class or enumeration type: its enclosing path and itself."
+  [t]
+  (case (:k t)
+    :class (conj (vec (:path (cls (:id t)))) [:cls (:id t)])
+    :enum (conj (vec (:path (enm (:id t)))) [:enum (:id t)])))
+
+(declare local-encoding)
+(defn- local-enc ^String [x] (if (string? x) x (local-encoding x)))
+
+(defn- mangle-named
+  "A class or enumeration type's name: a source name at the global scope, else N prefix E; a substitution candidate."
+  ^String [t]
+  (let [parts (path-of-type t)
+        k [:prefix parts]
+        i (.indexOf ^java.util.List @*subs* k)]
+    (cond
+      (not (neg? i)) (seq-id i)
+      ;; a local class: Z encoding E name ([local-name], §5.1.6)
+      (= :local (ffirst parts)) (let [r (vec (rest parts))
+                                      s (str "Z" (local-enc (second (first parts))) "E" (if (= 1 (count r)) (part-name (first r)) (str "N" (mangle-prefix r) "E")))]
+                                  (swap! *subs* conj k) s)
+      ;; at the global scope or ::std (St, no N ... E): mangle-prefix writes a template specialization's arguments
+      (= 1 (count parts)) (mangle-prefix parts)
+      (and (= 2 (count parts)) (= [:ns "std"] (first parts))) (mangle-prefix parts)
+      :else (str "N" (mangle-prefix parts) "E"))))
+
+(defn- template-param
+  "<template-param>: T_ for the first, T<n-2>_ after (a parameter of depth 0: CODEGEN.md §G3)."
+  ^String [^long i]
+  (if (zero? i) "T_" (str "T" (dec i) "_")))
+
+(defn- tspec-unwrapped
+  "A dependent template-id's <prefix> <template-name> <template-args>, without the N ... E around a nested one."
+  ^String [t]
+  (if-let [tt (:ttp t)]
+    ;; a template template parameter's template-id: <template-param> (a substitution candidate) <template-args>
+    (str (sub-or [:t tt] #(template-param (:i tt))) (template-args (:args t)))
+    (str (template-prefix (if (empty? (:path t)) "" (mangle-prefix (:path t))) (:tmpl t) (:name t)) (template-args (:args t)))))
+
+(def ^:private expr-op-codes
+  {"neg" "ng" "!" "nt" "~" "co" "?" "qu" "+" "pl" "-" "mi" "*" "ml" "/" "dv" "%" "rm" "<<" "ls" ">>" "rs" "&" "an" "|" "or"
+   "^" "eo" "<" "lt" ">" "gt" "<=" "le" ">=" "ge" "==" "eq" "!=" "ne" "&&" "aa" "||" "oo"})
+
+(defn- mangle-expr
+  "<expression> of a dependent template argument (5.1.6): an int literal L i n E, a non-type parameter T_, an
+  operator's code and operands, sizeof's st <type>, a member of a dependent class sr <type> <name> (a template-id's
+  levels then E, its names no substitution candidates, as clang writes them)."
+  ^String [x]
+  (cond
+    (number? x) (str "Li" (if (neg? (long x)) (str "n" (- (long x))) x) "E")
+    (= :tparam-v (:k x)) (template-param (:i x))
+    (= :texpr (:k x))
+    (case (:o x)
+      :sr (let [b (unq (:base x))]
+            (case (:k b)
+              :tparam (str "sr" (mangle-type* b) (source-name (:name x)))
+              :tspec (str "sr" (apply str (map part-name (:path b))) (source-name (:name b)) (template-args (:args b)) "E" (source-name (:name x)))
+              (fail :mangle "a member of " (pr-str b))))
+      "sizeof" (str "st" (mangle-type* (:type x)))
+      (str (or (expr-op-codes (:o x)) (fail :mangle "operator " (:o x))) (apply str (map mangle-expr (:args x)))))
+    :else (fail :mangle "expression " (pr-str x))))
+
+(defn- template-arg
+  "<template-arg>: a type, or an integral value as <expr-primary> L <type> <number> E (n for a minus, bool 0/1)."
+  ^String [a]
+  (cond
+    ;; a non-type parameter as an argument is an expression: X T_ E
+    (= :tparam-v (:k a)) (str "X" (template-param (:i a)) "E")
+    (= :texpr (:k a)) (str "X" (mangle-expr a) "E")
+    (contains? a :pack) (str "J" (apply str (map template-arg (:pack a))) "E")
+    ;; a function's or a variable's address (X ad L <mangled> E E), a reference's entity (L <mangled> E), a null pointer
+    (contains? a :decl) (cond (:null a) (str "L" (mangle-type* (:ty a)) "0E")
+                              (:ref a) (str "L" (:mangled a) "E")
+                              :else (str "XadL" (:mangled a) "EE"))
+    ;; a template template argument: the template's name, a substitution candidate
+    (and (contains? a :tmpl) (nil? (:k a))) (if (empty? (:path a))
+                          (template-prefix "" (:tmpl a) (:name a))
+                          (str "N" (template-prefix (mangle-prefix (:path a)) (:tmpl a) (:name a)) "E"))
+    (= :ttp (:k a)) (sub-or [:t a] #(template-param (:i a)))
+    (contains? a :val) (let [v (:val a) t (unq (:ty a))]
+                         (str "L" (mangle-type* t)
+                              (cond (= :bool (bn t)) (if (and v (not= 0 v) (not (false? v))) "1" "0")
+                                    (neg? (long v)) (str "n" (- (long v)))
+                                    :else v)
+                              "E"))
+    (contains? a :k) (mangle-type* a)
+    :else (fail :mangle "template argument " (pr-str a))))
+
+(defn template-args ^String [args] (str "I" (apply str (map template-arg args)) "E"))
+
+(defn- cvq ^String [t] (str (when (:v t) "V") (when (:c t) "K")))
+
+(defn- mangle-type* ^String [t]
+  (let [q (cvq t)
+        bare (unq t)
+        inner (fn []
+                (case (:k bare)
+                  :b (builtin-codes (:n bare))
+                  :class (mangle-named bare)
+                  :enum (mangle-named bare)
+                  :ptr (sub-or [:t bare] #(str "P" (mangle-type* (:to bare))))
+                  :ref (sub-or [:t bare] #(str "R" (mangle-type* (:to bare))))
+                  :rref (sub-or [:t bare] #(str "O" (mangle-type* (:to bare))))
+                  :arr (sub-or [:t bare] #(str "A" (let [n (:n bare)] (if (map? n) (template-param (:i n)) n)) "_" (mangle-type* (:of bare))))
+                  :mptr (sub-or [:t bare] #(str "M" (mangle-type* {:k :class :id (:cls bare)})
+                                                (if (= :fn (:k (:to bare))) (str (when (:cq (:to bare)) "K") (mangle-type* (dissoc (:to bare) :cq))) (mangle-type* (:to bare)))))
+                  :fn (sub-or [:t bare] #(str "F" (mangle-type* (:ret bare))
+                                              (if (and (empty? (:ps bare)) (not (:va bare))) "v" (apply str (map mangle-type* (:ps bare))))
+                                              (when (:va bare) "z") "E"))
+                  ;; a template's own parameter and a dependent template-id, in a function template's signature (§G3)
+                  :tparam (sub-or [:t bare] #(template-param (:i bare)))
+                  :pack-exp (sub-or [:t bare] #(str "Dp" (mangle-type* (:of bare))))
+                  ;; T::name, a dependent member type: N <prefix> <name> E
+                  :tdep (sub-or [:t bare] #(let [base (unq (:base bare))]
+                                             (str "N" (if (= :tspec (:k base)) (sub-or [:t base] (fn [] (tspec-unwrapped base))) (mangle-type* base))
+                                                  (apply str (map source-name (:names bare))) "E")))
+                  :tspec (sub-or [:t bare] #(if (empty? (:path bare)) (tspec-unwrapped bare) (str "N" (tspec-unwrapped bare) "E")))))]
+    (if (= "" q)
+      (inner)
+      (let [k [:t t] i (.indexOf ^java.util.List @*subs* k)]
+        (if (neg? i)
+          (let [s (str q (inner))] (swap! *subs* conj k) s)
+          (seq-id i))))))
+
+(defn- bare-params ^String [ps va]
+  (if (and (empty? ps) (not va)) "v" (str (apply str (map mangle-type* ps)) (when va "z"))))
+
+(defn mangle-params "A parameter list's mangling (v when empty), its own substitutions." ^String [ps]
+  (binding [*subs* (atom [])] (bare-params ps false)))
+
+(defn- unqualified-name
+  "A function's unqualified name: its source name, an operator's code, C1/C2/D0/D1/D2 for the special members."
+  ^String [f variant]
+  (case (:kind f)
+    :ctor (str "C" (or variant 2))
+    :dtor (str "D" (or variant 2))
+    :conv (str "cv" (mangle-type* (:ret (:ty f))))
+    (if-let [op (:op f)]
+      (or (when (and (#{"+" "-" "&" "*"} op) (= 1 (+ (count (:ps (:ty f))) (if (:cls f) 1 0))) (not (:static f)))
+            (unary-op-codes op))
+          (op-codes op)
+          (fail :mangle "operator " op))
+      (source-name (:name f)))))
+
+(defn mangle-fn
+  "A function's mangled name (variant: 1 or 2 for a constructor's C1/C2, 0/1/2 for a destructor's D0/D1/D2). A
+  function template's specialization (:tinst) writes its template arguments after its name, then its template's
+  signature with the return type (§5.1.3: the parameters as the template declares them, T_ for its own)."
+  (^String [f] (mangle-fn f nil))
+  (^String [f variant]
+   (cond
+     (= :c (:linkage f)) (:name f)
+     (and (= "main" (:name f)) (empty? (:path f)) (not (:cls f))) "main"
+     ;; a member of a local class (a closure's operator()): Z encoding E, then the name as if at namespace scope
+     (= :local (ffirst (:path f))) (str "_ZZ" (local-enc (second (first (:path f)))) "E" (subs (mangle-fn (assoc f :path (vec (rest (:path f)))) variant) 2))
+     :else
+     (binding [*subs* (atom [])]
+       (let [path (vec (:path f))
+             ti (:tinst f)
+             uname (fn [^String out]
+                     (if ti
+                       (str (if (#{:ctor :dtor :conv} (:kind f))
+                              (str out (unqualified-name f variant))
+                              (let [i (.indexOf ^java.util.List @*subs* [:tmpl (:tid ti)])]
+                                (if (neg? i)
+                                  (let [s (str out (unqualified-name f variant))] (swap! *subs* conj [:tmpl (:tid ti)]) s)
+                                  (seq-id i))))
+                            (str "I" (apply str (map-indexed (fn [i a] (str (when-let [t (get (:tn ti) i)] (str (when (:pack t) "Tp") "Tn" (mangle-type* (:ty t)))) (template-arg a))) (:args ti))) "E"))
+                       (str out (unqualified-name f variant))))
+             enc (cond
+                   (empty? path) (str (when (:internal-l f) "L") (uname ""))
+                   (and (= [[:ns "std"]] path) (not (:cq f))) (uname "St")
+                   :else (let [pre (mangle-prefix path)]
+                           (str "N" (when (:cq f) "K") (uname pre) "E")))
+             sig (if ti (:tsig ti) (:ty f))]
+         (str "_Z" enc
+              (when (and ti (not (#{:ctor :dtor :conv} (:kind f)))) (mangle-type* (:ret sig)))
+              (bare-params (:ps sig) (:va sig))))))))
+
+(defn mangle-var
+  "A variable's mangled name at namespace or class scope (a global in the global namespace keeps its name; static: L)."
+  ^String [v]
+  (let [path (vec (:path v))
+        ti (:tinst v)]
+    (cond
+      ;; a variable template's specialization: its name with the template arguments
+      ti (binding [*subs* (atom [])]
+           (if (empty? path)
+             (str "_Z" (template-prefix "" (:tid ti) (:name v)) (template-args (:args ti)))
+             (str "_ZN" (template-prefix (mangle-prefix path) (:tid ti) (:name v)) (template-args (:args ti)) "E")))
+      (= :c (:linkage v)) (:name v)
+      (and (empty? path) (not (:internal-l v))) (:name v)
+      :else (binding [*subs* (atom [])]
+              (if (empty? path)
+                (str "_ZL" (source-name (:name v)))
+                (str "_ZN" (mangle-prefix path) (source-name (:name v)) "E"))))))
+
+(defn local-encoding
+  "A function's encoding as a local name's prefix: its mangled name without _Z (main's: 4main)."
+  ^String [f]
+  (let [fm (mangle-fn f (when (#{:ctor :dtor} (:kind f)) 1))] ; a constructor's or destructor's locals: its C1's or D1's names
+    (cond (str/starts-with? fm "_Z") (subs fm 2) (= "main" fm) "4main" :else (source-name fm))))
+
+(defn mangle-local-static
+  "A static local's name in the function f (Itanium §5.1.6: Z encoding E name, the discriminator _N from the second)."
+  ^String [f ^String nm ^long disc]
+  (let [enc (local-encoding f)]
+    (str "_ZZ" enc "E" (source-name nm) (cond (zero? disc) "" (< disc 11) (str "_" (dec disc)) :else (str "__" (dec disc) "_")))))
+
+(defn mangle-type-name
+  "The mangling of a class type alone (for _ZTV, _ZTI, _ZTS)."
+  ^String [t]
+  (binding [*subs* (atom [])] (mangle-type* t)))
+
+(defn mangle-ctor-vtable-name
+  "A construction vtable's name, _ZTC <derived> <offset> _ <base>: one name, its substitutions shared by the two types
+  (ECPublicKeyIS0_E after 12ECPrivateKeyI4EC2NE)."
+  ^String [derived ^long off base]
+  (binding [*subs* (atom [])] (str "_ZTC" (mangle-type* derived) off "_" (mangle-type* base))))
+
+;; ---------------------------------------------------------------------------------------------
+;; The SysV x86-64 psABI's classification of a class passed or returned by value (§3.2.3; in the structure of clang's
+;; X86_64ABIInfo::classify, its Lo/Hi eightbytes, merge and postMerge; written from the psABI's text, clang's output
+;; the oracle: CODEGEN.md's P3)
+
+(defn- merge-class [a b]
+  (cond (= a b) a (= a :none) b (= b :none) a (or (= a :memory) (= b :memory)) :memory
+        (or (= a :integer) (= b :integer)) :integer (or (= a :x87) (= b :x87)) :memory :else :sse))
+
+(defn- scalar-class [t]
+  (let [t (unq t)]
+    (cond (floating? t) (if (= :ldouble (bn t)) :x87 :sse)
+          (= :mptr (:k t)) :integer
+          :else :integer)))
+
+(defn- mark! [acc ^long e cls ^long end]
+  (when (< e 2) (swap! acc #(-> % (update e merge-class cls) (update (+ 2 e) max end)))))
+
+(defn- classify-into!
+  "Merges the classes of the object of type `t` at byte `off` into the eightbytes (`acc`, an atom of [lo hi lo-end
+  hi-end])."
+  [acc t ^long off]
+  (let [t (unq t)]
+    (cond
+      (= :arr (:k t))
+      (let [et (:of t) es (size-of et)] (dotimes [i (long (or (:n t) 0))] (classify-into! acc et (+ off (* i es)))))
+      (= :class (:k t))
+      (let [id (:id t) c (cls id) l (layout id)]
+        (when (:vptr l) (mark! acc (quot off 8) :integer (+ (rem off 8) 8)))
+        (doseq [[i b] (map-indexed vector (:bases c))]
+          (classify-into! acc {:k :class :id (:cls b)} (+ off (long (nth (:bases l) i)))))
+        (doseq [[i f] (map-indexed vector (:fields c))]
+          (let [bo (nth (:bitoffs l) i)]
+            (cond
+              (nil? bo) (classify-into! acc (:ty f) (+ off (long (nth (:fields l) i))))
+              (pos? (long (:bits f)))
+              (let [b0 (+ (* 8 off) (long bo)) b1 (+ b0 (long (:bits f)) -1)]
+                (doseq [e (range (quot b0 64) (inc (quot b1 64)))]
+                  (mark! acc e :integer (min 8 (- (quot (+ b1 8) 8) (* 8 e))))))
+              :else nil))))
+      (= :mptr (:k t))
+      (doseq [e (range (quot off 8) (inc (quot (+ off (size-of t) -1) 8)))] (mark! acc e :integer 8))
+      :else
+      (let [e (quot off 8)] (mark! acc e (scalar-class t) (- (+ off (size-of t)) (* 8 e)))))))
+
+(defn classify-class
+  "How a class of trivially copyable type passes by value: :ignore (an empty class), :memory, or the eightbytes'
+  [[:integer|:sse bytes] ...]."
+  [id]
+  (let [sz (size-of {:k :class :id id})]
+    (cond
+      (and (empty-class? id) (= 1 sz)) :ignore
+      (> sz 16) :memory
+      :else
+      (let [acc (atom [:none :none 0 0])]
+        (classify-into! acc {:k :class :id id} 0)
+        (let [[lo hi e0 e1] @acc
+              n (if (> sz 8) 2 1)]
+          (if (or (= lo :memory) (= hi :memory) (= lo :x87) (= hi :x87))
+            :memory
+            (vec (for [e (range n) :let [c (nth [lo hi] e) c (if (= c :none) :sse c)]]
+                   [c (max 1 (long (nth [e0 e1] e)))]))))))))

@@ -873,7 +873,13 @@ Read and printed (the whole language but named-module interfaces, CP1) and not e
 
 - **Modules** (CP13): `export module a.b;`, `module a.b:part;`, `module :private;`, `import a.b;`, `import <h>;` (header units),
   `export` declarations: `(cpp/module a.b)`, `(cpp/module a.b :partition part)`, `(cpp/module-private)`, `(cpp/import a.b)`,
-  `(cpp/import "<h>")`, `^:export` on a declaration and `(cpp/export decl*)` for a block. `import std;` is not read by g++ 15
+  `(cpp/import "<h>")`, `^:export` on a declaration and `(cpp/export decl*)` for a block. As built (CX9): `^:export` marks
+  `export module` and `export import` too (`^:export (cpp/module a.b)`); `(cpp/module)` is the global module fragment's
+  `module;`; `(cpp/import :partition part)` is `import :part;`; `(cpp/import "\"h\"")` a quoted header unit. clang's AST has no
+  node for a module declaration and drops an import it cannot resolve, so these lines are read from the text, each a top-level
+  item placed between the declarations as the directives are; one the forms do not spell (an attribute on a module
+  declaration) is a `cpp/text` form. A unit is read alone (a single translation unit): an importer whose module the oracle has
+  no compiled interface for is the oracle's rejection (CP13 (a)). `import std;` is not read by g++ 15
   here (survey P10: the standard module is not built on the host) and clang has no `std` module for libstdc++; a class
   `modules` of the read corpora (`g++.dg/modules`, 1,655 files). Compiled module interfaces (gcm, pcm) are not forms.
 - **Threads** (`std::thread`, `std::jthread`, mutexes, `thread_local` in a multi-threaded program), **the filesystem**, locales
