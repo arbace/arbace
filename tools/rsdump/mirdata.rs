@@ -29,12 +29,14 @@ pub fn q(s: &str) -> String {
     o
 }
 
-fn join<T>(xs: impl IntoIterator<Item = T>, f: impl Fn(T) -> String) -> String {
-    xs.into_iter().map(f).collect::<Vec<_>>().join(" ")
+fn join<T>(xs: impl IntoIterator<Item = T>, mut f: impl FnMut(T) -> String) -> String {
+    xs.into_iter().map(|x| f(x)).collect::<Vec<_>>().join(" ")
 }
 
 pub struct W<'tcx> {
     pub tcx: TyCtxt<'tcx>,
+    /// the allocations the constants of the body being written reach: id -> form (see `alloc_form`)
+    pub allocs: std::cell::RefCell<std::collections::BTreeMap<String, String>>,
     /// bodies of monomorphic instances: a call's callee is resolved (rustc's `Instance::try_resolve`) and its symbol given
     pub mono: bool,
 }
@@ -125,10 +127,70 @@ impl<'tcx> W<'tcx> {
 
     fn constval(&self, v: ConstValue) -> String {
         match v {
-            ConstValue::Scalar(s) => self.scalar(s),
+            ConstValue::Scalar(s) => {
+                if let rustc_middle::mir::interpret::Scalar::Ptr(p, _) = s {
+                    self.note_alloc(p.provenance.alloc_id());
+                }
+                self.scalar(s)
+            }
             ConstValue::ZeroSized => "(zst)".to_string(),
-            ConstValue::Slice { alloc_id, meta } => format!("(slice {:?} {})", alloc_id, meta),
-            ConstValue::Indirect { alloc_id, offset } => format!("(indirect {:?} {})", alloc_id, offset.bytes()),
+            ConstValue::Slice { alloc_id, meta } => {
+                self.note_alloc(alloc_id);
+                format!("(slice {:?} {})", alloc_id, meta)
+            }
+            ConstValue::Indirect { alloc_id, offset } => {
+                self.note_alloc(alloc_id);
+                format!("(indirect {:?} {})", alloc_id, offset.bytes())
+            }
+        }
+    }
+
+    /// Records an allocation (and those its pointers reach) for the body's `:alloc-data`: `{:kind :memory :align A :mutable M
+    /// :bytes "HEX" :init "HEX" :relocs [[OFFSET "allocN"]...]}`, a function (`:kind :fn :symbol`), a static (`:kind :static
+    /// :symbol`), a vtable (its allocation, `:kind :memory :vtable "TEXT"`)
+    fn note_alloc(&self, id: rustc_middle::mir::interpret::AllocId) {
+        use rustc_middle::mir::interpret::GlobalAlloc;
+        let key = format!("{id:?}");
+        if self.allocs.borrow().contains_key(&key) {
+            return;
+        }
+        self.allocs.borrow_mut().insert(key.clone(), "(pending)".into());
+        let tcx = self.tcx;
+        let mem = |a: rustc_middle::mir::interpret::ConstAllocation<'tcx>, extra: String| -> (String, Vec<rustc_middle::mir::interpret::AllocId>) {
+            let a = a.inner();
+            let n = a.size().bytes_usize();
+            let bytes = a.inspect_with_uninit_and_ptr_outside_interpreter(0..n);
+            let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+            let mut init = String::new();
+            for i in 0..n {
+                init.push(if a.init_mask().is_range_initialized(rustc_middle::mir::interpret::alloc_range(rustc_abi::Size::from_bytes(i), rustc_abi::Size::from_bytes(1))).is_ok() { '1' } else { '0' });
+            }
+            let mut ids = Vec::new();
+            let relocs = join(a.provenance().ptrs().iter(), |(off, p)| {
+                ids.push(p.alloc_id());
+                format!("[{} {}]", off.bytes(), q(&format!("{:?}", p.alloc_id())))
+            });
+            (
+                format!("{{:kind :memory :align {} :mutable {} :bytes {} :init {} :relocs [{}]{}}}", a.align.bytes(), a.mutability.is_mut(), q(&hex), q(&init), relocs, extra),
+                ids,
+            )
+        };
+        let (form, ids) = match tcx.try_get_global_alloc(id) {
+            Some(GlobalAlloc::Memory(a)) => mem(a, String::new()),
+            Some(GlobalAlloc::Function { instance }) => (format!("{{:kind :fn :symbol {}}}", q(&tcx.symbol_name(instance).name.to_string())), vec![]),
+            Some(GlobalAlloc::Static(d)) => (format!("{{:kind :static :symbol {} :def {}}}", q(&tcx.symbol_name(ty::Instance::mono(tcx, d)).name.to_string()), q(&format!("{d:?}"))), vec![]),
+            Some(GlobalAlloc::VTable(t, d)) => {
+                let vid = tcx.vtable_allocation((t, d.principal().map(|p| tcx.instantiate_bound_regions_with_erased(p))));
+                match tcx.try_get_global_alloc(vid) {
+                    Some(GlobalAlloc::Memory(a)) => mem(a, format!(" :vtable {}", q(&format!("{t} as {d:?}")))),
+                    _ => ("{:kind :other}".to_string(), vec![]),
+                }
+            }
+            _ => ("{:kind :other}".to_string(), vec![]),
+        };
+        self.allocs.borrow_mut().insert(key, form);
+        for i in ids {
+            self.note_alloc(i);
         }
     }
 
@@ -293,7 +355,20 @@ impl<'tcx> W<'tcx> {
                 };
                 let sym = if matches!(i.def, ty::InstanceKind::Intrinsic(_) | ty::InstanceKind::Virtual(..)) { String::new() } else { tcx.symbol_name(i).name.to_string() };
                 let intr = if let ty::InstanceKind::Intrinsic(d) = i.def { tcx.intrinsic(d).map(|x| x.name.as_str().to_string()) } else { None };
-                format!("(callee {{:kind {} :symbol {} :def {}{}{}}})", q(kind), q(&sym), q(&self.path(i.def_id())),
+                let can_unwind = match i.def {
+                    ty::InstanceKind::Item(d) if tcx.def_kind(d).is_fn_like() => {
+                        let never = tcx.codegen_fn_attrs(d).flags.contains(rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrFlags::NEVER_UNWIND);
+                        let abi = tcx.fn_sig(d).skip_binder().skip_binder().abi();
+                        let abi_unwinds = match abi {
+                            rustc_abi::ExternAbi::Rust | rustc_abi::ExternAbi::RustCall | rustc_abi::ExternAbi::RustCold => true,
+                            a => a.is_rustic_abi() || format!("{a:?}").contains("Unwind"),
+                        };
+                        !never && abi_unwinds
+                    }
+                    ty::InstanceKind::Intrinsic(_) => false,
+                    _ => true,
+                };
+                format!("(callee {{:kind {} :symbol {} :def {} :can-unwind {}{}{}}})", q(kind), q(&sym), q(&self.path(i.def_id())), can_unwind,
                     intr.map(|n| format!(" :intrinsic {}", q(&n))).unwrap_or_default(),
                     if tcx.is_mir_available(i.def_id()) || !matches!(i.def, ty::InstanceKind::Item(_)) { "" } else { " :external true" })
             }
@@ -491,7 +566,9 @@ impl<'tcx> W<'tcx> {
         o.push(']');
         let mut al = Vec::new();
         let _ = rustc_middle::mir::pretty::write_allocations(tcx, b, &mut al);
-        let _ = write!(o, "\n :allocs {}}})", q(&String::from_utf8_lossy(&al)));
+        let _ = write!(o, "\n :allocs {}", q(&String::from_utf8_lossy(&al)));
+        let data = std::mem::take(&mut *self.allocs.borrow_mut());
+        let _ = write!(o, "\n :alloc-data [{}]}})", join(data.iter(), |(k, v)| format!("[{} {}]", q(k), v)));
         o
     }
 }
@@ -564,7 +641,7 @@ pub fn census<'tcx>(tcx: TyCtxt<'tcx>) -> String {
 /// trait refs (std's interface format for RF7's judge, doc/rust/FRONTEND-SURVEY.md §3.5)
 pub fn iface<'tcx>(tcx: TyCtxt<'tcx>) -> String {
     use rustc_hir::def::DefKind;
-    let w = W { tcx, mono: false };
+    let w = W { tcx, mono: false, allocs: Default::default() };
     let mut out = String::new();
     for local in tcx.iter_local_def_id() {
         let d = local.to_def_id();

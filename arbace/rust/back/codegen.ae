@@ -84,16 +84,45 @@
       "false-unwind" (let [[_ real u] t] (cond-> [real] (cl u) (conj (cl u))))
       (unsupported (str "terminator " k)))))
 
-(defn rpo
-  "Reverse postorder of the blocks reachable from bb0, rustc's Postorder (last successor first)."
+(defn- unwind-cleanup [t]
+  (let [u (case (name (first t)) "call" (nth t 5) "assert" (nth t 5) "drop" (nth t 3) "false-unwind" (nth t 2) nil)]
+    (when (and u (= "cleanup" (name (first u)))) (second u))))
+
+(defn nop-landing-pads
+  "find_noop_landing_pads: the cleanup blocks that do nothing but resume (through trivial statements, gotos to such blocks and
+  drops that need no glue): a call that unwinds to one is a plain call."
   [blocks]
-  (let [seen (volatile! #{0}) out (volatile! [])]
+  (let [trivial #{"nop" "storage-dead" "storage-live" "fake-read" "place-mention" "const-eval-counter"}
+        cleanup? #(:cleanup (nth blocks %))]
+    (loop [nops #{}]
+      (let [nops' (into nops
+                        (for [b (range (count blocks))
+                              :let [blk (nth blocks b)]
+                              :when (and (:cleanup blk) (not (nops b))
+                                         (every? #(trivial (name (first (if (= "dbg-stmt" (name (first %))) (second %) %)))) (:stmts blk))
+                                         (let [t (:term blk)]
+                                           (case (name (first t))
+                                             "resume" true
+                                             "goto" (boolean (nops (second t)))
+                                             "drop" (let [[_ _ target u _ _ glue] t] (and (nil? glue) (nops target) (or (not= "cleanup" (name (first u))) (nops (second u)))))
+                                             false)))]
+                          b))]
+        (if (= nops' nops) nops (recur nops'))))))
+
+(defn rpo
+  "Reverse postorder of the blocks reachable from bb0, rustc's Postorder (last successor first); an edge to a nop landing pad
+  is not followed (mono reachability)."
+  ([blocks] (rpo blocks #{}))
+  ([blocks nops]
+  (let [seen (volatile! #{0}) out (volatile! [])
+        succs (fn [b] (let [t (:term (nth blocks b)) u (unwind-cleanup t)]
+                        (if (and u (nops u)) (vec (remove #(= % u) (successors t))) (successors t))))]
     (letfn [(visit [b]
-              (doseq [s (reverse (successors (:term (nth blocks b))))]
+              (doseq [s (reverse (succs b))]
                 (when-not (@seen s) (vswap! seen conj s) (visit s)))
               (vswap! out conj b))]
       (visit 0))
-    (vec (reverse @out))))
+    (vec (reverse @out)))))
 
 (defn dominators
   "Immediate dominators by the iterative algorithm over the RPO: a map block -> idom (bb0 -> bb0)."
@@ -210,6 +239,11 @@
         (let [loc [b (count (:stmts bb))] t (:term bb)]
           (case (name (first t))
             "goto" nil
+            ("resume" "terminate") nil
+            "drop" (let [[_ p _ _ _ _ glue] t]
+                     (if (seq (place-projs p))
+                       (vswap! kinds assoc (place-local p) :mem)
+                       (when glue (vswap! kinds assoc (place-local p) :mem))))
             "switch" (visit-operand (second t) loc)
             "return" (use! 0 :move loc)
             "unreachable" nil
@@ -260,8 +294,8 @@
         nil))))
 
 (defn- const-val
-  "A constant operand's value: {:ty :v}, or nil for a zero-sized one."
-  [lt c]
+  "A constant operand's value: {:ty :v} or {:pair [...]}, or nil for a zero-sized one; `ag` gives the global of an allocation."
+  [lt c ag]
   (let [[_ _ t v] c
         l (layout lt t)]
     (case (name (first v))
@@ -271,7 +305,12 @@
                    :int (if (:bool sc)
                           {:ty "i1" :v (if (zero? bits) 'false 'true)}
                           {:ty (:imm sc) :v (as-num (sext-const (:bits sc) bits))})
-                   (unsupported "pointer const")))
+                   :ptr (unsupported "pointer scalar")))
+      "ptr" (let [[_ id off _] v]
+              (when-not (zero? off) (unsupported "pointer constant with an offset"))
+              {:ty "ptr" :v (ag id)})
+      "slice" (let [[_ id n] v]
+                {:pair [{:ty "ptr" :v (ag id)} {:ty "i64" :v n}]})
       "zst" nil
       (unsupported (str "const " (first v))))))
 
@@ -383,13 +422,41 @@
   "One body's LLVM define form; `lt` is the layouts table, `gl` the module's globals (new-globals)."
   [body lt gl]
   (let [blocks (:blocks body)
-        order (rpo blocks)
+        nops (nop-landing-pads blocks)
+        order (rpo blocks nops)
         idom (dominators blocks order)
         locs (:locals body)
         lay (mapv #(layout lt (:ty %)) locs)
         mem (non-ssa-locals body lt order idom)
         preds (reduce (fn [m b] (reduce (fn [m s] (update m s (fnil conj []) b)) m (successors (:term (nth blocks b))))) {} (range (count blocks)))
         mergeable (fn [t] (let [ss (successors t)] (when (and (= 1 (count ss)) (= 1 (count (get preds (first ss))))) (first ss))))
+        allocs (into {} (:alloc-data body))
+        alloc-sym! (fn alloc-sym! [id]
+                     (let [a (get allocs (str id))]
+                       (case (:kind a)
+                         :fn (symbol "g" (:symbol a))
+                         :static (symbol "g" (:symbol a))
+                         :memory
+                         (do
+                           (when (:mutable a) (unsupported "mutable allocation"))
+                           (when (some #(= \0 %) (:init a)) (unsupported "allocation with uninitialized bytes"))
+                           (let [bs (:bytes a)
+                                 chars (fn [from to] (apply str (map (fn [i] (char (Integer/parseInt (subs bs (* 2 i) (+ 2 (* 2 i))) 16))) (range from to))))
+                                 n (quot (count bs) 2)
+                                 relocs (sort-by first (:relocs a))]
+                             (if (empty? relocs)
+                               (intern-const! gl (list 'array n 'i8) (list 'c-string (chars 0 n)) (:align a))
+                               (let [segs (loop [pos 0 rs relocs out []]
+                                            (cond
+                                              (and (empty? rs) (= pos n)) out
+                                              (empty? rs) (conj out [:bytes pos n])
+                                              :else (let [[off tid] (first rs)]
+                                                      (recur (+ off 8) (rest rs)
+                                                             (cond-> out (> off pos) (conj [:bytes pos off]) true (conj [:ptr tid]))))))
+                                     tys (mapv (fn [[k a b]] (if (= k :ptr) 'ptr (list 'array (- b a) 'i8))) segs)
+                                     vals (mapv (fn [[k a b]] (if (= k :ptr) ['ptr (alloc-sym! a)] [(list 'array (- b a) 'i8) (list 'c-string (chars a b))])) segs)]
+                                 (intern-const! gl (apply list 'packed tys) (apply list 'packed vals) (:align a))))))
+                         (unsupported "allocation of this kind"))))
         st (volatile! {:n 0 :skip #{} :bbs {} :bb-order [] :vals {} :allocas {} :start []})
         fresh! (fn [] (let [n (:n @st)] (vswap! st assoc :n (inc n)) (symbol (str "%t" n))))
         emit! (fn [bb f] (vswap! st update-in [:bbs bb] (fnil conj []) f) nil)
@@ -526,7 +593,7 @@
                                           [(get-in @st [:vals l]) (nth lay l)] projs)]
                            (first ty))
                          :else (load-place! bb (place-of! bb p))))
-                     "const" (const-val lt o)))
+                     "const" (const-val lt o alloc-sym!)))
         assign! (fn [bb p val]
                   (let [l (place-local p) projs (place-projs p)]
                     (cond
@@ -808,12 +875,65 @@
                                   (emit! bb (list '= r (list 'load ci ['ptr (:ptr pl)] :align (:align pl))))
                                   [[ci r]])
                         (unsupported "aggregate as an argument"))))
+        ;; --- unwinding: landing pads, the personality slot, the terminate and unreachable blocks
+        slot! (fn [] (or (get @st :slot)
+                         (let [nm (symbol "%slot")]
+                           (vswap! st update :start #(into [(list '= nm (list 'alloca (list 'array 16 'i8) :align 8))] %))
+                           (vswap! st assoc :slot nm)
+                           nm)))
+        landing-pad! (fn [target]
+                       (or (get-in @st [:pads target])
+                           (let [ll (llbb! target)
+                                 nm (new-block! "cleanup")
+                                 lp (fresh!) e0 (fresh!) e1 (fresh!) sl (slot!) g (fresh!)]
+                             (vswap! st assoc :personality true)
+                             (emit! nm (list '= lp (list 'landingpad (list 'struct 'ptr 'i32) :cleanup)))
+                             (emit! nm (list '= e0 (list 'extractvalue [(list 'struct 'ptr 'i32) lp] 0)))
+                             (emit! nm (list '= e1 (list 'extractvalue [(list 'struct 'ptr 'i32) lp] 1)))
+                             (emit! nm (list 'store ['ptr e0] ['ptr sl] :align 8))
+                             (emit! nm (list '= g (list 'getelementptr :inbounds 'i8 ['ptr sl] ['i64 8])))
+                             (emit! nm (list 'store ['i32 e1] ['ptr g] :align 8))
+                             (emit! nm (list 'br ll))
+                             (let [r (symbol (str "%" nm))] (vswap! st assoc-in [:pads target] r) r))))
+        terminate-block! (fn [reason]
+                           (or (get-in @st [:terminate reason])
+                               (let [nm (new-block! "terminate") lp (fresh!)
+                                     callee (symbol "g" (if (= reason "cleanup") "panicking.panic_in_cleanup" "panicking.panic_cannot_unwind"))]
+                                 (vswap! st assoc :personality true)
+                                 (declare! gl callee 'void [])
+                                 (emit! nm (list '= lp (list 'landingpad (list 'struct 'ptr 'i32) (list 'filter (list 'array 0 'ptr) 'zeroinitializer))))
+                                 (emit! nm (list 'call 'void callee []))
+                                 (emit! nm '(unreachable))
+                                 (let [r (symbol (str "%" nm))] (vswap! st assoc-in [:terminate reason] r) r))))
+        unreachable-block! (fn []
+                             (or (get @st :unreachable)
+                                 (let [nm (new-block! "unreachable")]
+                                   (emit! nm '(unreachable))
+                                   (let [r (symbol (str "%" nm))] (vswap! st assoc :unreachable r) r))))
+        ;; llbb_with_cleanup: a jump from a block to a cleanup block goes through its landing pad
+        llbb-wc! (fn [from target]
+                   (if (and (not (:cleanup (nth blocks from))) (:cleanup (nth blocks target)))
+                     (landing-pad! target)
+                     (llbb! target)))
+        ;; the unwind destination of a call: nil (a plain call) or a block
+        unwind-block! (fn [from unwind]
+                        (case (name (first unwind))
+                          "cleanup" (when-not (contains? nops (second unwind)) (llbb-wc! from (second unwind)))
+                          "terminate" (terminate-block! (second unwind))
+                          nil))
+        assign-in! (fn [rbb p val]
+                     ;; the value of a call's result, stored (or bound) in the block the call continues in
+                     (let [l (place-local p) projs (place-projs p)]
+                       (cond
+                         (zst? (nth lay l)) nil
+                         (and (empty? projs) (not (contains? mem l))) (vswap! st assoc-in [:vals l] val)
+                         :else (store-val! rbb (place-of! rbb p) val))))
         terminator! (fn [bb b t]
                       (case (name (first t))
                         "goto" (br-or-merge bb t (second t))
                         "return" (ret-value! bb)
                         "unreachable" (emit! bb '(unreachable))
-                        "assert" (let [[_ c expected msg target _ loc] t v (operand! bb c)]
+                        "assert" (let [[_ c expected msg target unwind loc] t v (operand! bb c)]
                                    (if (and (boolean? (:v v)) (= (:v v) expected))
                                      (br-or-merge bb t target)
                                      (let [lltarget (llbb! target)
@@ -831,17 +951,43 @@
                                                         "rem-zero" "panic_const_rem_by_zero"
                                                         "bounds-check" "panic_bounds_check"
                                                         (unsupported (str "assert message " mk)))
-                                           ;; `Div`/`Rem` overflow are asserts of their own kind in MIR: (overflow "Div") -> div_overflow
-                                           callee (symbol "g" (if (= mk "bounds-check") "panicking.panic_bounds_check" (str "panicking.panic_const." panic-name)))]
-                                       (let [pbs (symbol (str "%" pb))] (emit! bb (if expected (list 'br 'i1 (:v v) lltarget pbs) (list 'br 'i1 (:v v) pbs lltarget))))
-                                       (if (= mk "bounds-check")
-                                         (let [idx (operand! pb (nth msg 2)) len (operand! pb (nth msg 1))]
-                                           (declare! gl callee 'void [['i64] ['i64] ['ptr (list :align 8)]])
-                                           (emit! pb (list 'call 'void callee [['i64 (:v idx)] ['i64 (:v len)] ['ptr (list :align 8) lg]])))
-                                         (do (declare! gl callee 'void [['ptr (list :align 8)]])
-                                             (emit! pb (list 'call 'void callee [['ptr (list :align 8) lg]]))))
-                                       (emit! pb '(unreachable))
+                                           callee (symbol "g" (if (= mk "bounds-check") "panicking.panic_bounds_check" (str "panicking.panic_const." panic-name)))
+                                           pbs (symbol (str "%" pb))
+                                           _ (emit! bb (if expected (list 'br 'i1 (:v v) lltarget pbs) (list 'br 'i1 (:v v) pbs lltarget)))
+                                           [cargs ptypes] (if (= mk "bounds-check")
+                                                            (let [idx (operand! pb (nth msg 2)) len (operand! pb (nth msg 1))]
+                                                              [[['i64 (:v idx)] ['i64 (:v len)] ['ptr (list :align 8) lg]] [['i64] ['i64] ['ptr (list :align 8)]]])
+                                                            [[['ptr (list :align 8) lg]] [['ptr (list :align 8)]]])
+                                           unw (unwind-block! b unwind)]
+                                       (declare! gl callee 'void ptypes)
+                                       (if unw
+                                         (emit! pb (list 'invoke 'void callee cargs :to (unreachable-block!) :unwind unw))
+                                         (do (emit! pb (list 'call 'void callee cargs))
+                                             (emit! pb '(unreachable))))
                                        nil)))
+                        "resume" (let [sl (slot!)
+                                       a (fresh!) g (fresh!) c (fresh!) i0 (fresh!) i1 (fresh!)
+                                       ty (list 'struct 'ptr 'i32)]
+                                   (emit! bb (list '= a (list 'load 'ptr ['ptr sl] :align 8)))
+                                   (emit! bb (list '= g (list 'getelementptr :inbounds 'i8 ['ptr sl] ['i64 8])))
+                                   (emit! bb (list '= c (list 'load 'i32 ['ptr g] :align 8)))
+                                   (emit! bb (list '= i0 (list 'insertvalue [ty 'poison] ['ptr a] 0)))
+                                   (emit! bb (list '= i1 (list 'insertvalue [ty i0] ['i32 c] 1)))
+                                   (emit! bb (list 'resume ty i1)))
+                        "terminate" (emit! bb (list 'br (terminate-block! (second t))))
+                        "drop" (let [[_ p target unwind _ _ glue] t]
+                                 (if (nil? glue)
+                                   (br-or-merge bb t target)
+                                   (let [pl (place-of! bb p)
+                                         callee (symbol "g" (:symbol (second glue)))
+                                         argv [['ptr (list :align (:align (:ly pl))) (:ptr pl)]]
+                                         unw (unwind-block! b unwind)]
+                                     (if unw
+                                       (let [ret-bb (llbb-wc! b target)]
+                                         (emit! bb (list 'invoke 'void callee argv :to ret-bb :unwind unw))
+                                         nil)
+                                       (do (emit! bb (list 'call 'void callee argv))
+                                           (br-or-merge bb t target))))))
                         "switch" (let [[_ d vals other] t
                                        dv (operand! bb d) sc (scalar-of-op d)
                                        key (fn [v] (as-num (sext-const (:bits sc) v)))
@@ -880,29 +1026,39 @@
                                      (let [ld (llbb! other)
                                            cases (mapv (fn [[v target]] [(symbol (:ty dv)) (key v) (llbb! target)]) vals)]
                                        (emit! bb (list 'switch (symbol (:ty dv)) (:v dv) ld cases)))))
-                        "call" (let [[_ f args dest target _ callee-info] t
+                        "call" (let [[_ f args dest target unwind callee-info] t
                                      callee (call-symbol f callee-info)
+                                     can-unwind (if (and (seq? callee-info) (map? (second callee-info))) (:can-unwind (second callee-info)) true)
                                      argfs (vec (mapcat #(arg-forms bb %) args))
                                      dl (nth lay (place-local dest))
                                      dl (if (seq (place-projs dest)) (layout lt (place-type body dest)) dl)
                                      ret (llvm-type dl)
                                      ret-attrs (when-let [ra (ret-attrs-of lt (place-type body dest) dl)] [:ret-attrs ra])
-                                     callf (concat (list 'call ret callee argfs) ret-attrs)]
-                                 (case (:kind dl)
-                                   :zst (emit! bb (apply list callf))
-                                   :scalar (let [r (fresh!)]
-                                             (emit! bb (list '= r (apply list callf)))
-                                             (assign! bb dest {:ty (:imm (:scalar dl)) :v r}))
-                                   :pair (let [r (fresh!) a (fresh!) c (fresh!) [sa sb] (:pair dl)]
-                                           (emit! bb (list '= r (apply list callf)))
-                                           (emit! bb (list '= a (list 'extractvalue [ret r] 0)))
-                                           (emit! bb (list '= c (list 'extractvalue [ret r] 1)))
-                                           (assign! bb dest {:pair [{:ty (:imm sa) :v a} {:ty (:imm sb) :v c}]}))
-                                   :memory (let [r (fresh!) ci (cast-int dl) pl (place-of! bb dest)]
-                                             (emit! bb (list '= r (apply list callf)))
-                                             (store-cast! bb ci r pl (:size dl)))
-                                   (unsupported "aggregate returned"))
-                                 (when target (br-or-merge bb t target)))
+                                     unw (when can-unwind (unwind-block! b unwind))
+                                     rbb (if unw (if target (if (zero? target) "start" (str "bb" target)) nil) bb)
+                                     ;; an invoke continues in its normal destination: the result is handled there
+                                     callf (if unw
+                                             (concat (list 'invoke ret callee argfs :to (if target (llbb-wc! b target) (unreachable-block!)) :unwind unw) ret-attrs)
+                                             (concat (list 'call ret callee argfs) ret-attrs))
+                                     handle (fn [instr-form]
+                                              (case (:kind dl)
+                                                :zst (emit! bb instr-form)
+                                                :scalar (let [r (fresh!)]
+                                                          (emit! bb (list '= r instr-form))
+                                                          (assign-in! rbb dest {:ty (:imm (:scalar dl)) :v r}))
+                                                :pair (let [r (fresh!) a (fresh!) c (fresh!) [sa sb] (:pair dl)]
+                                                        (emit! bb (list '= r instr-form))
+                                                        (emit! rbb (list '= a (list 'extractvalue [ret r] 0)))
+                                                        (emit! rbb (list '= c (list 'extractvalue [ret r] 1)))
+                                                        (assign-in! rbb dest {:pair [{:ty (:imm sa) :v a} {:ty (:imm sb) :v c}]}))
+                                                :memory (let [r (fresh!) ci (cast-int dl) pl (place-of! bb dest)]
+                                                          (emit! bb (list '= r instr-form))
+                                                          (store-cast! rbb ci r pl (:size dl)))
+                                                (unsupported "aggregate returned")))]
+                                 (handle (apply list callf))
+                                 (if unw
+                                   nil
+                                   (when target (br-or-merge bb t target))))
                         (unsupported (str "terminator " (first t)))))]
     (llbb! 0)
     (doseq [l (concat (range 1 (inc (:args body))) [0] (range (inc (:args body)) (count locs)))]
@@ -945,4 +1101,6 @@
             bbs (for [nm (:bb-order s)] (list* 'block (symbol (str "%" nm)) (if (= nm "start") start-code (get-in s [:bbs nm]))))
             rl (first lay)]
         (apply list 'llvm/define (body-symbol body) (llvm-type rl) params
-               (concat (when-let [ra (ret-attrs-of lt (:ret body) rl)] [:ret-attrs ra]) [:body (vec bbs)]))))))
+               (concat (when-let [ra (ret-attrs-of lt (:ret body) rl)] [:ret-attrs ra])
+                       (when (:personality s) [:personality ['ptr (symbol "g" "rust_eh_personality")]])
+                       [:body (vec bbs)]))))))

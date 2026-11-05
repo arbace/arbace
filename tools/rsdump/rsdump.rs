@@ -1030,7 +1030,7 @@ fn mir_data<'tcx>(tcx: rustc_middle::ty::TyCtxt<'tcx>) -> String {
     use rustc_hir::def::DefKind;
     use rustc_middle::mir::Const;
     use rustc_middle::ty::{InstanceKind, TypeVisitableExt};
-    let w = mirdata::W { tcx, mono: false };
+    let w = mirdata::W { tcx, mono: false, allocs: Default::default() };
     let mut out = String::new();
     for &def_id in tcx.mir_keys(()) {
         let mut one = |b: &rustc_middle::mir::Body<'tcx>, ph: &str, ctfe: bool, out: &mut String| {
@@ -1081,7 +1081,7 @@ fn mir_data<'tcx>(tcx: rustc_middle::ty::TyCtxt<'tcx>) -> String {
 fn mono_mir<'tcx>(tcx: rustc_middle::ty::TyCtxt<'tcx>) -> String {
     use rustc_middle::mono::MonoItem;
     use rustc_middle::ty::{self, TypeVisitableExt};
-    let w = mirdata::W { tcx, mono: true };
+    let w = mirdata::W { tcx, mono: true, allocs: Default::default() };
     let env = ty::TypingEnv::fully_monomorphized();
     let parts = tcx.collect_and_partition_mono_items(());
     let mut out = String::new();
