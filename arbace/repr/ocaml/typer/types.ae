@@ -229,6 +229,44 @@
                 more (:closed row) (:fixed row)
                 (when-let [[p args] (:name row)] [p (mapv f args)]))))
 
+;; ---------------------------------------------------------------------------------------------
+;; Objects (types.ml's Tobject, Tfield and field_kind; ctype.ml's flatten_fields, associate_fields, build_fields,
+;;   object_row, opened_object): [:Tobject fields name] (name nil or [path args], the class's #-type), [:Tfield name kind
+;;   t rest], [:Tnil]; a field kind an atom shared by the copies of its field, holding :public, :absent, nil
+;;   (Fprivate, undecided) or the kind it is linked to
+
+(defn field-public [] (atom :public))
+(defn field-private [] (atom nil))
+(defn field-kind-repr
+  "Types.field_kind_repr: :public :absent or :private"
+  [k]
+  (let [v @k] (cond (nil? v) :private (keyword? v) v :else (recur v))))
+(defn- field-kind-cell [k] (let [v @k] (if (or (nil? v) (keyword? v)) k (recur v))))
+(defn link-kind!
+  "Types.link_kind: the undecided kind inside linked to k"
+  [inside k]
+  (let [c (field-kind-cell inside)]
+    (when-not (identical? c (field-kind-cell k))
+      (log-change! c) (reset! c (if (keyword? @(field-kind-cell k)) @(field-kind-cell k) (field-kind-cell k))))))
+
+(defn flatten-fields
+  "Ctype.flatten_fields: [[[name kind t]...] sorted by name, the rest]"
+  [t]
+  (loop [l () t t]
+    (let [d (desc t)]
+      (if (= :Tfield (d 0)) (recur (cons [(d 1) (d 2) (d 3)] l) (d 4)) [(vec (sort-by first l)) (repr t)]))))
+(defn fields-in-order
+  "The fields of an object's chain in its order, and the rest"
+  [t]
+  (loop [l [] t t]
+    (let [d (desc t)]
+      (if (= :Tfield (d 0)) (recur (conj l [(d 1) (d 2) (d 3)]) (d 4)) [l (repr t)]))))
+(defn object-row
+  "Ctype.object_row: the rest of an object's fields"
+  [t]
+  (let [d (desc t)] (case (d 0) :Tobject (recur (d 1)) :Tfield (recur (d 4)) (repr t))))
+(defn opened-object [t] (#{:Tvar :Tunivar} ((desc (object-row t)) 0)))
+
 (defn begin-def [] (swap! current-level inc))
 (defn end-def [] (swap! current-level dec))
 (defmacro with-local-level
@@ -245,6 +283,8 @@
     :Tpoly [(d 1)]
     :Tpackage (mapv second (d 2))
     :Tvariant (row-children (d 1))
+    :Tobject (into [(d 1)] (second (d 2)))
+    :Tfield [(d 3) (d 4)]
     []))
 
 (defn map-desc [f d]
@@ -256,6 +296,8 @@
     :Tpoly [:Tpoly (f (d 1)) (d 2)]
     :Tpackage [:Tpackage (d 1) (mapv (fn [[n t]] [n (f t)]) (d 2))]
     :Tvariant (let [row (d 1)] [:Tvariant (map-row f row false (f (row-more row)))])
+    :Tobject [:Tobject (f (d 1)) (when-let [[p args] (d 2)] [p (mapv f args)])]
+    :Tfield [:Tfield (d 1) (field-kind-cell (d 2)) (f (d 3)) (f (d 4))]
     d))
 
 (defn is-optional [l] (= :Optional (l 0)))
@@ -448,7 +490,7 @@
                   ;; abbreviation retried on its expansion
                   (let [d (desc t)]
                     (case (d 0)
-                      :Tvariant nil
+                      (:Tvariant :Tobject) nil
                       :Tconstr (try (run! go (d 2))
                                     (catch arbace.lang.ExceptionInfo e
                                       (let [x (expand-head t)]
@@ -478,7 +520,7 @@
   (when-not (and *gadt-equation* t1 t2 (*gadt-equation* t1 t2))
     (throw (ex-info "Unify" {:unify :mismatch :t1 t1 :t2 t2}))))
 
-(declare unify unify-row)
+(declare unify unify-row unify-fields)
 
 (defn- unify-list [l1 l2]
   (when-not (= (count l1) (count l2)) (unify-error nil nil))
@@ -514,8 +556,75 @@
                                         (link! t1 t2)
                                         (try (unify-row (d1 1) (d2 1))
                                              (catch arbace.lang.ExceptionInfo e (reset! t1 saved) (throw e))))
+          (= :Tfield (d1 0) (d2 0)) (unify-fields t1 t2)
+          (= :Tobject (d1 0) (d2 0)) (let [saved @t1]
+                                       (link! t1 t2)
+                                       (try (unify-fields (d1 1) (d2 1))
+                                            ;; Ctype.unify3: the second's name set to the first's
+                                            (let [d2' (desc t2)]
+                                              (when (= :Tobject (d2' 0))
+                                                (when-not (when-let [[_ [va]] (d2' 2)] (#{:Tvar :Tunivar :Tnil} ((desc va) 0)))
+                                                  (log-change! (repr t2)) (swap! (repr t2) assoc :desc [:Tobject (d2' 1) (d1 2)]))))
+                                            (catch arbace.lang.ExceptionInfo e (reset! t1 saved) (throw e))))
+          (or (and (= :Tfield (d1 0)) (= :Tnil (d2 0))) (and (= :Tnil (d1 0)) (= :Tfield (d2 0))))
+          (let [[f k rem] (if (= :Tfield (d1 0)) [(d1 1) (d1 2) (d1 4)] [(d2 1) (d2 2) (d2 4)])]
+            (if (and (= :private (field-kind-repr k)) (not= f "*dummy method*"))
+              (do (link-kind! k (atom :absent))
+                  (if (= :Tnil (d2 0)) (unify rem t2) (unify (newgenty [:Tnil]) rem)))
+              (unify-error t1 t2)))
           (= :Tnil (d1 0) (d2 0)) nil
           :else (unify-error t1 t2))))))
+
+(defn- make-rowvar
+  "Ctype.make_rowvar"
+  [lv use1 rest1 use2 rest2]
+  (let [set-name (fn [t n] (when (= [:Tvar nil] (desc t)) (log-change! (repr t)) (swap! (repr t) assoc :desc [:Tvar n])))
+        n1 (let [d (desc rest1)] (when (= :Tvar (d 0)) (d 1)))
+        n2 (let [d (desc rest2)] (when (= :Tvar (d 0)) (d 1)))
+        name (cond (and n1 n2) (if (<= (level rest1) (level rest2)) n1 n2)
+                   n1 (do (when use2 (set-name rest2 n1)) n1)
+                   n2 (do (when use1 (set-name rest2 n2)) n2)
+                   :else nil)]
+    (cond use1 rest1 use2 rest2 :else (newty2 lv [:Tvar name]))))
+
+(defn- associate-fields
+  "Ctype.associate_fields over sorted field lists: [pairs miss1 miss2]"
+  [f1 f2]
+  (loop [p [] s [] s' [] a (seq f1) b (seq f2)]
+    (cond
+      (nil? b) [p (into s a) s']
+      (nil? a) [p s (into s' b)]
+      :else (let [[n k t] (first a) [n' k' t'] (first b) c (compare n n')]
+              (cond (zero? c) (recur (conj p [n k t k' t']) s s' (next a) (next b))
+                    (neg? c) (recur p (conj s (first a)) s' (next a) b)
+                    :else (recur p s (conj s' (first b)) a (next b)))))))
+
+(defn build-fields
+  "Ctype.build_fields"
+  [lv fields rest]
+  (reduce (fn [r [n k t]] (newty2 lv [:Tfield n k t r])) rest (reverse fields)))
+
+(defn- unify-kind [k1 k2]
+  (let [a (field-kind-repr k1) b (field-kind-repr k2)]
+    (cond (= :private a) (link-kind! k1 k2)
+          (= :private b) (link-kind! k2 k1)
+          (= a b) nil
+          :else (unify-error nil nil))))
+
+(defn unify-fields
+  "Ctype.unify_fields: the fields missing on each side added to the other's rest, the common ones unified"
+  [ty1 ty2]
+  (let [[fields1 rest1] (flatten-fields ty1)
+        [fields2 rest2] (flatten-fields ty2)
+        [pairs miss1 miss2] (associate-fields fields1 fields2)
+        l1 (level ty1) l2 (level ty2)
+        va (make-rowvar (min l1 l2) (empty? miss2) rest1 (empty? miss1) rest2)
+        s1 @rest1 s2 @rest2]
+    (try
+      (unify (build-fields l1 miss1 va) rest2)
+      (unify rest1 (build-fields l2 miss2 va))
+      (doseq [[_ k1 t1 k2 t2] pairs] (unify-kind k1 k2) (unify t1 t2))
+      (catch arbace.lang.ExceptionInfo e (reset! rest1 s1) (reset! rest2 s2) (throw e)))))
 
 (defn- unify-row-field
   "Ctype.unify_row_field"
@@ -790,7 +899,7 @@
                                    (go co (expand-head t))
                                    (let [vs (or (:variance decl) (repeat :inv))]
                                      (dorun (map (fn [v a] (go (and co (= v :co)) a)) vs (d 2))))))
-                      :Tvariant (run! #(go co %) (children d))
+                      (:Tvariant :Tobject :Tfield) (run! #(go co %) (children d))
                       nil)))))]
       (go true t))))
 
@@ -891,13 +1000,19 @@
           (vec (mapcat (fn [[_ f]] (let [v (field-view f)]
                                      (case (v 0) :Rpresent (if (v 1) [(v 1)] []) :Reither (v 2) [])))
                        (sort-row-fields (row-fields row))))))
-      (children d))))
+      (if (= :Tobject (d 0))
+        (if-let [[_ args] (d 2)]
+          (vec (rest args))
+          (vec (keep (fn [[_ k t]] (when (= :public (field-kind-repr k)) t)) (first (flatten-fields (d 1))))))
+        (children d)))))
 
 (defn type-proxy
   "Btype.proxy: an open row's more stands for the row"
   [t]
   (let [t (repr t) d (desc t)]
-    (if (and (= :Tvariant (d 0)) (not (static-row (d 1)))) (repr (row-more (d 1))) t)))
+    (cond (and (= :Tvariant (d 0)) (not (static-row (d 1)))) (repr (row-more (d 1)))
+          (= :Tobject (d 0)) (let [r (object-row t)] (if (= :Tnil ((desc r) 0)) t r))
+          :else t)))
 
 (defn- mark-loops
   "Out_type.mark_loops (with alias_nongen_row for a type scheme): the proxies printed with an alias, an open row met
@@ -906,16 +1021,20 @@
   (let [aliased (atom #{}) objects (atom #{})]
     (letfn [(go [visited t]
               (let [t (repr t) px (type-proxy t) d (desc t)]
-                (when (and (= :Tvariant (d 0)) (not= px t) (tvar? px) (not= generic-level (level px)))
+                (when (and (#{:Tvariant :Tobject} (d 0)) (not= px t) (tvar? px) (not= generic-level (level px)))
                   (swap! aliased conj px))
                 (if (and (visited px) (not (#{:Tvar :Tpoly} (d 0))))
                   (swap! aliased conj px)
                   (let [visited (conj visited px)]
-                    (if (= :Tvariant (d 0))
-                      (if (@objects px)
-                        (swap! aliased conj px)
-                        (do (when-not (static-row (d 1)) (swap! objects conj px))
-                            (run! #(go visited %) (printer-children t))))
+                    (case (d 0)
+                      :Tvariant (if (@objects px)
+                                  (swap! aliased conj px)
+                                  (do (when-not (static-row (d 1)) (swap! objects conj px))
+                                      (run! #(go visited %) (printer-children t))))
+                      :Tobject (if (@objects px)
+                                 (swap! aliased conj px)
+                                 (do (when (opened-object t) (swap! objects conj px))
+                                     (run! #(go visited %) (printer-children t))))
                       (run! #(go visited %) (printer-children t)))))))]
       (run! #(go #{} %) ts))
     @aliased))
@@ -981,6 +1100,10 @@
                                             fs))
                        (when (not= (count present) (count fs)) (str " > " (str/join " " (map #(str "`" (first %)) present))))
                        " ]"))
+      :Tobject (let [[fs r] (flatten-fields (d 1))
+                     fs (filter (fn [[_ k _]] (= :public (field-kind-repr k))) fs)
+                     open (not= :Tnil ((desc r) 0))]
+                 (str "< " (str/join "; " (concat (map (fn [[n _ x]] (str n " : " (type-text names x 0))) fs) (when open [".."]))) " >"))
       "?")))
 
 (defn type-scheme-text
