@@ -112,8 +112,8 @@ Prior art:
 - `bin/reap` (and `make reap`; REAP1, doc/FULL-SUPPORT-SURVEY.md, RPS3, RPS13): the REAP matrix,
   read, eval, AOT and print for Clojure, Java, Go, C and C++ (four rows, 16 cells since C8, doc/C23-SURVEY.md §10; five, 20 since CX10,
   doc/cpp/CPP-SURVEY.md, "As built: CX10 (write-ahead)": C++'s read the token check's `test/repr/cpp/pp-check-known.edn` with its results
-  `pp-check-results.edn` (`:c-known`'s `:id-sep "/"`) and CX9's dg record, eval and AOT CX8's `test/cpp/check{,-aot}-linux-amd64.edn` (no check yet
-  until they exist; the lowering's `test/cpp/lower-results.edn` beside, reader `:cpp-lower`), print the round trip's `test/repr/cpp/roundtrip-results/`
+  `pp-check-results.edn` (`:c-known`'s `:id-sep "/"`) and CX9's dg record, eval and AOT CX8's `test/cpp/check{,-aot}-linux-amd64.edn` and the sampling's
+  `check{,-aot}-every-25-linux-amd64.edn` (cppi-check; the lowering's `test/cpp/lower-results.edn` beside, reader `:cpp-lower`), print the round trip's `test/repr/cpp/roundtrip-results/`
   and known file (reader `:cpp-roundtrip`), classes `test/cpp/divergences{,-read,-aot,-print,-dg,-lower}.edn`), judged from the
   checks' recorded results alone (no runs): the cells and their sources in `test/reap/cells.edn`, the judging in
   `test/reap/main.ae`, each level's classes in `test/goi/divergences.edn`'s format
@@ -246,7 +246,11 @@ Prior art:
     `--record-results`), `cpp-print-essential` (`bin/repr-cpp roundtrip-corpus gxx-dg-essential` and `samples`: a recorded list made by its
     key, `test/cpp/essential-print.txt` held to `roundtrip-results/gxx-dg-essential.edn`), `cpp-lower-essential` (`bin/cppi lower-essential`,
     `test/cpp/essential-lower.txt`), about 2 minutes warm; `--full` `cpp-selftest`, `cpp-tokens`, `cpp-roundtrip` and `cpp-lower` (`bin/cppi
-    lower-corpus KEY`), a part a recorded list; `make cpp-essential`. CX8's `cpp-check`, `cpp-aot` and CX9's `cpp-dg` join with their records.
+    lower-corpus KEY`), a part a recorded list; `make cpp-essential`. Since cppi-check (2026-11-05; "As built: cppi-check") CX8's run checks too:
+    essential `cpp-check-essential` and `cpp-aot-essential` (`bin/cppi check [--aot] --only test/cpp/essential-check.txt`), `--full` `cpp-check` and
+    `cpp-aot`, parts the recorded corpora samples and runtime (`test/cpp/check{,-aot}-linux-amd64.edn`) and the sampling `--sample 25` of gxx-dg-run
+    (`test/cpp/check{,-aot}-every-25-linux-amd64.edn`: a `--sample N` run is held to and `--record`ed into its own record), against g++ 15.2's runs
+    `test/cpp/ref-gxx15.edn` (reap's `:ref-corpora`); CX9's `cpp-dg` joins later.
   - `arbace/repr/clojure{.ae,/}`: `arbace.repr.clojure`, Clojure's bridge (`doc/REPR-CLOJURE.md`;
     `bin/repr-clojure read`, `print`, `roundtrip`, `check`): Clojure source into Arbace's, the
     names of the vendored Clojure, `.clj`/`.cljc` into `.ae`, a table of rules for the dialects'
