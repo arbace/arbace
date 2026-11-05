@@ -983,7 +983,7 @@ Read from GT9's fragment (`git show gt9-verbs:test/gate/crops/llvm-rust.edn`), `
 | Step | Live call | Class | Now |
 |---|---|---|---|
 | rust-read-essential (`bin/repr-rust test`) | the helper's `dump` (both modes, the expression file) and `tree` of the 10 cases' fixed inputs; rustdoc's JSON of shapes, attrs and the mutated shapes; whether edition 2018 parses edition2015.rs | B | 43 files committed, `test/rust/records/test/` (1.22 MB, manifest `test.tsv`); no rustc; `:rustc` off |
-| the same, the print's half | the helper's `tree` of the printed files (cases 3, 4, 7, 8, 9, 10), rustdoc of the printed shapes and attrs, `run-program` and `code-unit` of the originals and the print | D | `bin/repr-rust test --oracle` (62 s), the oracle tier's `rust-test-oracle`; 15 checks listed as `skipped` in the records mode |
+| the same, the print's half | the helper's `tree` of the printed files (cases 3, 4, 7, 8, 9, 10), rustdoc of the printed shapes and attrs, `run-program` and `code-unit` of the originals and the print | D | `bin/repr-rust test --oracle` (62 s), the oracle tier's `rust-test-oracle`; 11 checks listed as `skipped` in the records mode |
 | rsi-essential, rsi-check, rsi-aot | `rustc --emit=llvm-ir,link` per program (wrap-ir, link-ir: the program's codegen unit and the allocator shim by `clang -S -emit-llvm`); std's IR (`bin/rsi std-build`, cargo) for `runtime-build` | C | packs `rust-ir-samples` (5 programs), `rust-ir-synthetic` (67) and `rust-std-ir` (110 units); `:rustc` off. rustc's runs are `ref-rustc-1.99.1.edn` (A) already |
 | rust-roundtrip, rust-iface (originals' half) | the helper's dump (both modes) and tree of every file of the corpus | B | packs `rust-{dumps,dumps-full,trees}-rustc-1.99.1` (1,074 files, 144 + 180 + 200 MB raw) |
 | rust-roundtrip, rust-iface, rust-behaviour (the print's half) | the helper's tree of the printed files, rustdoc of the mirror, `run-program` and `code-unit` builds, `cargo -Zbuild-std` of std from the print | D | the oracle tier's `rust-roundtrip-oracle`, `rust-iface-oracle`, `rust-behaviour-oracle` (class D until a native reader reads the print) |
@@ -1002,8 +1002,8 @@ Not steps: the UI suite's tarball and the crate set's `.crate` files (pinned sou
 - **`bin/repr-rust test [--oracle | --record | --verify-records]`**: the originals' calls are one function (`live_origs`) whose outputs are the records, the
   key one digest of the helper, every file under `test/rust/sample/` and `live_origs`' text. The dumps' `:abs` is the one path in any output (the converter
   reads the file it names): written `@WORK@/...` and `@ROOT@/...` in the records and put back at the unpack. Trees, lines and rustdoc's JSON hold no path.
-  `--record` 3 s, `--verify-records` 43 files equal, the crossed pair differs. With a `rustc` that exits 99 first on `PATH`: 21 checks `ok`, 15 skipped,
-  rc 0, 54 s; `--oracle` the old script's 36 `ok` lines, none failed. One case moves to the records side whole: the changed doc comment (rustdoc of two originals).
+  `--record` 3 s, `--verify-records` 43 files equal, the crossed pair differs. With a `rustc` that exits 99 first on `PATH`: 15 checks `ok`, 11 skipped,
+  rc 0, 54 s; `--oracle`: 28 `ok`, none failed. One case moves to the records side whole: the changed doc comment (rustdoc of two originals).
 - **`bin/repr-rust record-corpus [CORPUS]`, `verify-corpus [--sample N]`**: three packs (a pack a kind: `dumps`, `dumps-full`, `trees`), members `FILE.edn` or
   `FILE.tree`, `FILE.lines` (FILE relative to the corpus's source root), the dumps' `:abs` written `@SRC@/FILE`, keyed per crate (the corpus's source pin, the helper's
   identity, the kind, the crate's plan line); `REPR_RUST_ONLY_CRATES="core alloc"` selects crates and keeps the others from the pack in place. `read --corpus` and the
@@ -1037,7 +1037,7 @@ The larger corpora by the same ratios would not fit (ORS22): library, compiler a
 ### Checked (light, in the worktree, main's stage 0)
 
 - `bin/repr-rust test --record` then `--verify-records`: 43 entries equal (`:rustc b789fd432132e377`), the crossed pair differs. With a stub `rustc` and `rustdoc` first on `PATH` (exit 99):
-  rc 0, the 21 `ok` lines and 15 `skipped`. `--oracle`: every case, none `FAIL`.
+  rc 0, 15 `ok` lines and 11 `skipped`. `--oracle`: 28 `ok`, none `FAIL`.
 - `REPR_RUST_ONLY_CRATES="proc_macro test" bin/repr-rust record-corpus` (3 packs, 47 files, 18 s), `verify-corpus --sample 12`, `read --corpus` from the packs with the `.tmp/repr-rust/dumps` removed (47 dumps,
   47 converted, 1,779 forms), `roundtrip rustc-1.99.1` on the same crates (the originals' trees from the pack: 47 equal, the others `:no-original`, as a partial record must be); then the whole
   `record-corpus` of `rustc-1.99.1` (8 min) and `bin/oracle-records verify rust test-dumps corpus-dumps ir --sample 20`: 43, 60 and 15 entries equal, crossed pairs differ.
