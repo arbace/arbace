@@ -778,7 +778,7 @@ mono-items run, the census); `expanded`, `resolve`, `typeck` and `consts` (RF4-R
 in under a day, the spec, reader, printer and check. RF3 (16-26 days): the first day took the code generation from nothing to 72.8 %
 of the mono items of 81 programs, the collector's traversal to all 81 item sets, and seven programs to running; what is left of the 16 to 26 is the remaining codegen
 (LLVM's types of aggregates for `Offset` and arrays, vectors, virtual calls, `size_of_val`, the intrinsics' tail, the classes of the
-1,879 items that differ: about 3 to 5 days by the refusal counts), then the pieces the helper still answers: layout (`rustc_abi`, about 2,500 lines), the collector and instance
+1,560 items that differ: about 3 to 5 days by the refusal counts), then the pieces the helper still answers: layout (`rustc_abi`, about 2,500 lines), the collector and instance
 resolution with specialization, v0 symbols (the crates' disambiguator hashes), vtable and drop glue and shim MIR from data
 (about 8 to 12 days). The estimate stands; the exactness of the judge is what the day showed.
 
