@@ -43,14 +43,21 @@
 
 (defn cache-root ^String [^String root] (or (System/getenv "CI_AOT_LIB") (str root "/.tmp/ci-aot-lib")))
 
-(defn lib-key
-  "A prebuilt library's Go key: the units' Go format, its fragments' key (arbace.c.runtime's: the library's sources, ci's
-  checker and builder) and aot-sources as this process loaded them."
+(defn- lib-key*
   ^String [^String root lib]
   (let [sb @#'arbace.c.runtime/source-bytes]
     (sha256-hex (str "ci-aot-lib " aot-version "\n"
                      "fragments " (:runtime-key lib) "\n"
                      (str/join (for [f aot-sources :let [[how b] (sb root f)]] (str f " " how " " (bytes-hex b) "\n")))))))
+
+(def ^:private lib-keys (ConcurrentHashMap.))   ; the fragments' directory -> the Go key (once per process)
+
+(defn lib-key
+  "A prebuilt library's Go key: the units' Go format, its fragments' key (arbace.c.runtime's: the library's sources, ci's
+  checker and builder) and aot-sources as this process loaded them."
+  ^String [^String root lib]
+  (or (.get ^ConcurrentHashMap lib-keys (:frag-dir lib))
+      (let [k (lib-key* root lib)] (.put ^ConcurrentHashMap lib-keys (:frag-dir lib) k) k)))
 
 (defn lib-dir-name
   "The library's directory under the cache (and arbace/cilib/): its fragments' directory's name before the key, the Go key's
@@ -110,7 +117,10 @@
   [^String root {:keys [trace frag-libs]}]
   (if (or (System/getenv "CI_AOT_LIB_OFF") (nil? trace))
     nil
-    (let [used (java.util.TreeMap.)          ; frag index -> [alias manifest]
+    (let [;; each library's directory marked as used now (bin/ci aot-lib prune removes only keys unused for a day)
+          _ (doseq [lib (distinct (keep first frag-libs))]
+              (let [d (File. (str (cache-root root) "/" (lib-dir-name root lib)))] (when (.isDirectory d) (.setLastModified d (System/currentTimeMillis)))))
+          used (java.util.TreeMap.)          ; frag index -> [alias manifest]
           alias-of (fn [i m] (or (first (.get used i))
                                  (let [a (:pkg m)] (.put used i [a m]) a)))
           items (into {} (for [[line [i kind j]] (:items trace)
