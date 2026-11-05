@@ -243,7 +243,7 @@
 
 ;; C++'s round trip (CX10; doc/cpp/CPP-SURVEY.md, "As built: CX10 (write-ahead)"): bin/repr-cpp roundtrip's recorded results,
 ;; one file a list, :results-dir/KEY.edn (CP124 (b): {:key :summary :files {CORPUS/NAME verdict}}, the verdict :pass,
-;; the essential lists' KEY-essential.edn (subsets of the others, the gate's) not counted,
+;; the essential lists' KEY-essential.edn (subsets of the others, the gate's) not counted, nor CORPUS-every-N.edn beside CORPUS-all.edn,
 ;; [:known CLASS] (a bare :known the old format), :oracle-rejects or :oracle-fails), and the known file (:file,
 ;; test/repr/cpp/roundtrip-known.edn: :classes, :files CORPUS/NAME -> CLASS). Two parts of one check:
 ;;   :part :recorded  the recorded lists' files, each a case: the passes counted, a known one "CLASS: the class text" (the record's
@@ -256,11 +256,17 @@
 ;;                    without a record), each a non-pass; their passes are not recorded (the cell's count partial)
 
 (defn- cpp-records [src]
-  (let [d (File. ^String (path (:results-dir src)))]
-    (vec (for [^File f (sort-by #(.getName ^File %) (or (seq (.listFiles d)) []))
-               :let [n (.getName f)]
-               ;; the essential lists' records (gxx-dg-essential.edn: a subset of a recorded list, the gate's) are not counted again
-               :when (and (str/ends-with? n ".edn") (not= n "pending.edn") (not (str/ends-with? n "-essential.edn")))]
+  (let [d (File. ^String (path (:results-dir src)))
+        fs (sort-by #(.getName ^File %) (or (seq (.listFiles d)) []))
+        names (set (map #(.getName ^File %) fs))]
+    (vec (for [^File f fs
+               :let [n (.getName f)
+                     every (re-matches #"(.*)-every-\d+\.edn" n)]
+               ;; the essential lists' records (gxx-dg-essential.edn: a subset of a recorded list, the gate's) are not counted again,
+               ;; nor a sampling's (CORPUS-every-N.edn) when the corpus' whole list is recorded (CORPUS-all.edn: CX9's
+               ;; gxx-modules-all holds gxx-modules-every-10's files; cppi-check, 2026-11-05)
+               :when (and (str/ends-with? n ".edn") (not= n "pending.edn") (not (str/ends-with? n "-essential.edn"))
+                          (not (and every (contains? names (str (second every) "-all.edn")))))]
            (assoc (read-edn (str (:results-dir src) "/" n)) :file n)))))
 
 (defmethod read-source :cpp-roundtrip [src]
@@ -380,12 +386,19 @@
   "A source's cases (its rows' ids) against those it must have: a :java-check source's against
   :ref's tests of its :level (test/java/ref-jdk26.edn), a :results source's against the programs
   of :same-cases (goi's AOT level against its eval level's) or of :ref-runs (C's eval level against
-  the programs gcc built in test/c/ref-gcc15.edn, every form of it); an id recorded twice is a problem too."
+  the programs gcc built in test/c/ref-gcc15.edn, every form of it; with :ref-corpora, those of the corpora named); an id
+  recorded twice is a problem too."
   [src r]
   (when-let [ids (:ids r)]
     (let [want (cond (:ref src) (ref-ids (:ref src) (= :diagnostics (:level src)))
                      (:same-cases src) (set (map first (read-edn (:same-cases src))))
                      (:ref-runs src) (ref-run-ids (:ref-runs src)))
+          ;; :ref-corpora (C++'s run checks, cppi-check 2026-11-05): the cases wanted are those of these corpora only (a case
+          ;; CORPUS/NAME); test/cpp/ref-gxx15.edn holds the whole corpora samples and runtime and every 25th program of
+          ;; libstdcxx and gxx-dg-run, judged by two records (the whole corpora's and the sampling's, check-every-25)
+          want (if-let [cs (and want (seq (:ref-corpora src)))]
+                 (set (filter (fn [id] (some #(str/starts-with? id (str % "/")) cs)) want))
+                 want)
           have (set ids)
           some-of (fn [xs] (str (str/join " " (take 5 xs)) (when (> (count xs) 5) " ...")))]
       (concat

@@ -270,11 +270,19 @@
   [[work level & more]]
   (require 'arbace.c.run)
   (let [record (some #{"--record"} more)
-        corpora (remove #{"--record" ""} more)
+        ;; --sample N (cppi-check, 2026-11-05): a sampling of the corpora (every Nth program, bin/cppi check --sample N) held to
+        ;; its own record, test/cpp/check[-aot]-every-N-linux-amd64.edn, which --record writes (the sampled corpora's reference,
+        ;; test/cpp/ref-gxx15.edn, holds every 25th program of libstdcxx and gxx-dg-run)
+        sample (second (drop-while #(not= "--sample" %) more))
+        corpora (let [xs (vec more)
+                      i (.indexOf xs "--sample")
+                      xs (if (neg? i) xs (into (subvec xs 0 i) (subvec xs (min (count xs) (+ i 2)))))]
+                  (remove #{"--record" ""} xs))
         aot (= level "aot")
-        recf (if aot "test/cpp/check-aot-linux-amd64.edn" "test/cpp/check-linux-amd64.edn")
-        timesf (if aot "test/cpp/check-aot-times-linux-amd64.edn" "test/cpp/check-times-linux-amd64.edn")
-        _ (when-let [m (and record ((resolve 'arbace.c.run/subset-record-refusal) work corpora))]
+        every (when sample (str "-every-" sample))
+        recf (str "test/cpp/check" (when aot "-aot") every "-linux-amd64.edn")
+        timesf (str "test/cpp/check" (when aot "-aot") every "-times-linux-amd64.edn")
+        _ (when-let [m (and record (not sample) ((resolve 'arbace.c.run/subset-record-refusal) work corpora))]
             (println "cppi judge:" m) (System/exit 2))
         refs (into {} (map (juxt :id identity) (read-all-forms "test/cpp/ref-gxx15.edn")))
         classes (into (if aot (vec (read-string (slurp "test/cpp/divergences-aot.edn"))) [])
@@ -284,7 +292,7 @@
                   (some (fn [c] (when (some #(re-find % s) (:match c)) (:id c))) classes)))
         ;; test/cpp/check-known.edn: {ID REASON}, a program whose non-pass needs a reason its row cannot show (C's check-known.edn)
         known (let [f (java.io.File. "test/cpp/check-known.edn")] (if (.exists f) (read-string (slurp f)) {}))
-        interp (when aot (let [f (java.io.File. "test/cpp/check-linux-amd64.edn")] (if (.exists f) (into {} (map (juxt first identity) (read-string (slurp f)))) {})))
+        interp (when aot (let [f (java.io.File. (str "test/cpp/check" every "-linux-amd64.edn"))] (if (.exists f) (into {} (map (juxt first identity) (read-string (slurp f)))) {})))
         rows (vec (for [c corpora
                         :let [nodes (into {} (map (juxt first identity) (tsv (str work "/" c "/nodes.tsv"))))
                               runs (into {} (map (juxt first identity) (tsv (str work "/" c "/run.tsv"))))]
@@ -341,8 +349,9 @@
             tnew (into {} (for [c corpora [id ir lw b r] (tsv (str work "/" c "/times.tsv"))]
                             [id (mapv #(if (re-matches #"[0-9.]+" (str %)) (Double/parseDouble %) nil) [ir lw b r])]))
             tall (into (sorted-map) (concat (remove (comp in? key) told) tnew))]
-        (spit recf (str ";; cppi's " (if aot "AOT check (bin/cppi check --aot --record): each program of the run corpora compiled by cf2g"
-                                         "check (bin/cppi check --record): each program of the run corpora run on ci")
+        (spit recf (str ";; cppi's " (if aot (str "AOT check (bin/cppi check --aot" (when sample (str " --sample " sample)) " --record): each program of the run corpora compiled by cf2g")
+                                         (str "check (bin/cppi check" (when sample (str " --sample " sample)) " --record): each program of the run corpora run on ci"))
+                        (when sample (str ",\n;; a sampling: every " sample "th program of each corpus's list (bin/lib/cppi/lists.bash), not the whole corpora"))
                         ",\n;; [ID RESULT REASON], against g++ 15.2's -O0 run (test/cpp/ref-gxx15.edn); its classes "
                         (if aot "test/cpp/divergences-aot.edn, then " "") "test/cpp/divergences.edn.\n[\n"
                         (str/join "\n" (map pr-str all)) "\n]\n"))
@@ -356,11 +365,11 @@
       (System/exit (if (seq failing) 1 0)))))
 
 (defn divergences
-  "divergences LEVEL: the recorded check's non-passes (test/cpp/check-linux-amd64.edn, aot: check-aot-linux-amd64.edn), each in a
-  class or listed UNCLASSED."
-  [level]
+  "divergences LEVEL [N]: the recorded check's non-passes (test/cpp/check-linux-amd64.edn, aot: check-aot-linux-amd64.edn; with N
+  the sampling's record, check[-aot]-every-N-linux-amd64.edn), each in a class or listed UNCLASSED."
+  [level & [n]]
   (let [aot (= level "aot")
-        rows (read-string (slurp (if aot "test/cpp/check-aot-linux-amd64.edn" "test/cpp/check-linux-amd64.edn")))
+        rows (read-string (slurp (str "test/cpp/check" (when aot "-aot") (when n (str "-every-" n)) "-linux-amd64.edn")))
         classes (into (if aot (vec (read-string (slurp "test/cpp/divergences-aot.edn"))) []) (read-string (slurp "test/cpp/divergences.edn")))
         klass (fn [[_ r reason]] (let [s (str (name r) " " reason)] (some (fn [c] (when (some #(re-find % s) (:match c)) (:id c))) classes)))
         non (remove #(= :pass (second %)) rows)
@@ -377,5 +386,5 @@
     "judge" (let [[work known results recorded] args] (judge work known results recorded))
     "runtime-judge" (runtime-judge (first args))
     "run-judge" (run-judge args)
-    "divergences" (divergences (or (first args) "eval"))
+    "divergences" (divergences (or (first args) "eval") (second args))
     (do (println "cppi check: judge or runtime-judge") (System/exit 2))))
