@@ -297,7 +297,7 @@
                                     (and (punct? "...") (do (adv!) true)) (do (expect! ")") (conj out '&))
                                     :else (let [pt (parse-type)] (accept! ",") (recur (conj out pt)))))]
                          (recur (list 'fn t ps))))
-      (punct? "*") (do (when (= t 'ptr) (llerr "ptr* is invalid - use ptr instead")) (adv!) (recur (list '* t)))
+      (punct? "*") (do (when (or (= t 'ptr) (and (seq? t) (= 'ptr (first t)))) (llerr "ptr* is invalid - use ptr instead")) (adv!) (recur (list '* t)))
       (typed-pointer-addrspace?) (let [a (parse-addrspace)] (adv!) (recur (list '* t a)))
       :else t)))
 
@@ -358,6 +358,7 @@
                              (do (adv!) (when-not (type-start?) (llerr "expected type")) (let [t (parse-type)] (expect! ")") (list kw t)))
                              (list kw (raw-parens)))
               (type-attrs w) (llerr "expected '('")
+              (#{"captures" "initializes" "denormal_fpenv" "memory" "range" "nofpclass" "allockind" "allocsize" "vscale_range"} w) (llerr "expected '('")
               (and (= w "align") (= (kind) :int)) (list kw (take-num!))
               (and params? (= w "dereferenceable") (= (kind) :int)) (list kw (take-num!))
               (punct? "=") (do (adv!) (list (keyword (str w "=")) (take-num!)))
@@ -371,7 +372,7 @@
 
 (defn- parse-param-attrs [] (loop [out []] (if (param-attr?) (recur (conj out (parse-attr true))) out)))
 
-(def ^:private fn-attr-stop #{"section" "partition" "comdat" "align" "prefalign" "gc" "prefix" "prologue" "personality" "to"
+(def ^:private fn-attr-stop #{"section" "partition" "comdat" "align" "prefalign" "gc" "prefix" "prologue" "personality" "to" "alias" "ifunc"
                                "unwind" "declare" "define" "attributes" "source_filename" "target" "module" "uselistorder"})
 
 (defn- parse-fn-attrs
@@ -430,7 +431,7 @@
   "getelementptr's operands after its flags: T, ptr p, idx... (the constant form's inside parentheses)."
   [head flags const?]
   (when const? (expect! "("))
-  (let [t (parse-type) _ (expect! ",") base (parse-typed)
+  (let [t (parse-type) _ (when-not (punct? ",") (llerr "expected comma after getelementptr's type")) _ (adv!) base (parse-typed)
         idxs (loop [out []]
                (if (and (punct? ",") (not (= (kind 1) :meta)) (not (and (= (kind 1) :word) (= (text 1) "align"))))
                  (do (adv!) (recur (conj out (parse-typed))))
@@ -449,7 +450,7 @@
       (= w "getelementptr")
       (let [flags (loop [out (parse-flags)]
                     (if (word? "inrange")
-                      (do (adv!) (let [r (raw-parens)] (recur (into (conj out (list :inrange r)) (parse-flags)))))
+                      (do (adv!) (when (and (punct? "(") (not= (kind 1) :int)) (adv!) (llerr "expected integer")) (let [r (raw-parens)] (recur (into (conj out (list :inrange r)) (parse-flags)))))
                       out))]
         (parse-gep-body 'getelementptr flags true))
       (cast-ops w) (let [fl (parse-flags)]
@@ -799,6 +800,7 @@
         ra (parse-param-attrs)
         as (when (word? "addrspace") (parse-addrspace))
         t (parse-type)
+        _ (when (#{:hexfp :float} (kind)) (llerr "unexpected floating-point literal"))
         callee (parse-value nil)
         ell (volatile! nil)
         args (binding [*ellipsis* ell] (parse-args))
@@ -850,16 +852,18 @@
                             t (parse-type)
                             cnt (when (and (punct? ",") (not (#{"align" "addrspace"} (text 1))) (not= (kind 1) :meta)) (adv!) (parse-typed))
                             al (opt-align)
-                            as (when (and (punct? ",") (= (text 1) "addrspace")) (adv!) (parse-addrspace))]
+                            as (when (and (punct? ",") (= (text 1) "addrspace")) (adv!) (parse-addrspace))
+                            _ (when (and as (punct? ",") (not= (kind 1) :meta)) (adv!) (llerr "expected metadata after comma"))]
                         (with-opts (concat ['alloca] fl [t]) [[:count cnt] [:align al] [:addrspace as]]))
-      (= op "load") (let [at (accept! "atomic") vol (accept! "volatile") t (parse-type) _ (expect! ",") pv (parse-typed)
+      (= op "load") (let [at (accept! "atomic") vol (accept! "volatile") t (parse-type) _ (when-not (punct? ",") (llerr "expected comma after load's type")) _ (adv!) pv (parse-typed)
                           ss (when at (parse-syncscope)) ord (when at (parse-ordering)) al (opt-align)]
                       (with-opts ['load t pv] [[:atomic ord] [:syncscope ss] [:volatile vol] [:align al]]))
       (= op "store") (let [at (accept! "atomic") vol (accept! "volatile") v (parse-typed) _ (expect! ",") pv (parse-typed)
                            ss (when at (parse-syncscope)) ord (when at (parse-ordering)) al (opt-align)]
                        (with-opts ['store v pv] [[:atomic ord] [:syncscope ss] [:volatile vol] [:align al]]))
       (= op "getelementptr") (parse-gep-body 'getelementptr (parse-flags) false)
-      (= op "phi") (let [fl (parse-flags) t (parse-type)
+      (= op "phi") (let [fl (parse-flags) t0 (tok-start) t (parse-type)
+                         _ (when (or ('#{void label metadata} t) (and (seq? t) (= 'fn (first t)))) (llerr "phi node must have first class type" t0))
                          ins (loop [out []]
                                (expect! "[") (let [v (parse-value t) _ (expect! ",") b (parse-value 'label)] (expect! "]")
                                                (let [out (conj out [v b])]
@@ -909,7 +913,10 @@
       (= op "catchret") (let [_ (expect! "from") pad (parse-value 'token) _ (expect! "to") b (parse-label)] (list 'catchret pad :to b))
       (= op "cleanupret") (let [_ (expect! "from") pad (parse-value 'token) _ (expect! "unwind") u (parse-unwind-dest)]
                             (list 'cleanupret pad :unwind u))
-      (= op "extractvalue") (let [a (parse-typed) is (loop [out []] (if (and (punct? ",") (= (kind 1) :int)) (do (adv!) (recur (conj out (take-num!)))) out))]
+      (= op "extractvalue") (let [a (parse-typed)
+                                  _ (when-not (punct? ",") (llerr "expected ',' as start of index list"))
+                                  _ (when (= (kind 1) :meta) (adv!) (llerr "expected index"))
+                                  is (loop [out []] (if (and (punct? ",") (= (kind 1) :int)) (do (adv!) (recur (conj out (take-num!)))) out))]
                               (apply list 'extractvalue a is))
       (= op "insertvalue") (let [a (parse-typed) _ (expect! ",") v (parse-typed)
                                  is (loop [out []] (if (and (punct? ",") (= (kind 1) :int)) (do (adv!) (recur (conj out (take-num!)))) out))]
@@ -973,7 +980,8 @@
   block after a terminator: LLParser numbers it), each item an instruction or a debug record in the text's order; then
   the use-list orders after the last block: [blocks orders]."
   []
-  (expect! "{")
+  (when-not (punct? "{") (llerr "expected '{' in function body"))
+  (adv!)
   (when *top* (item! (aget *top* 0)))
   (loop [blocks [] cur nil insts [] ended false]
     (let [close (fn [] (if (or cur (seq insts)) (conj blocks (apply list 'block cur insts)) blocks))
@@ -1178,7 +1186,7 @@
             (llerr "expected top-level entity"))
     :lname (let [n (local-name (text))] (adv!) (expect! "=") (expect! "type")
              (if (word? "opaque") (do (adv!) (list 'llvm/type n 'opaque)) (list 'llvm/type n (parse-type))))
-    :gname (let [n (global-name (text))] (adv!) (expect! "=") (parse-global n))
+    :gname (let [n (global-name (text))] (adv!) (when-not (punct? "=") (llerr "expected '=' in global variable")) (adv!) (parse-global n))
     :comdat (let [n (text)] (adv!) (expect! "=") (expect! "comdat") (list 'llvm/comdat n (keyword (take-word!))))
     :meta (let [n (symbol (str "!" (text)))] (adv!) (expect! "=")
             (if (re-matches #"![0-9]+" (str n))
