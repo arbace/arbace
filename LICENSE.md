@@ -622,6 +622,16 @@ covers what.
   "GHC: the Glasgow Haskell Compiler License" below); the rest of `compiler/GHC/Rename/` read as the
   specification of the scoping and of the dependency analyses. The helper's `rn` and `iface` verbs,
   `tools/hsdump/HsRn.hs`, are Arbace's own, written against GHC's API.
+- `arbace/repr/haskell/deriv.ae` (repr/haskell's deriving, HF4, doc/haskell/FRONTEND-SURVEY.md, "As built: HF4", HFS5 (a)):
+  ports of GHC 9.14.1, https://downloads.haskell.org/ghc/9.14.1/ghc-9.14.1-src.tar.xz (SHA-256
+  `2a83779c9af86554a3289f2787a38d6aa83d00d136aa9f920361dd693c101e77`, the corpus's pin): the generators of
+  `compiler/GHC/Tc/Deriv/Generate.hs` (`gen_Eq_binds`, `gen_Ord_binds`, `gen_Enum_binds`, `gen_Bounded_binds`,
+  `gen_Ix_binds`, `gen_Read_binds`, `gen_Show_binds`) and of `compiler/GHC/Tc/Deriv/Functor.hs` (`gen_Functor_binds`,
+  `gen_Foldable_binds`, `gen_Traversable_binds`, `functorLikeTraverse`), by hand on 2026-11-05, the file carrying GHC's
+  notice (Copyright 2002, The University Court of the University of Glasgow, the Glasgow Haskell Compiler License, a
+  BSD 3-Clause License, "GHC: the Glasgow Haskell Compiler License" below); the context inference and the choice of
+  strategy of `compiler/GHC/Tc/Deriv/{Infer,Utils}.hs` and `Deriv.hs` read as the specification, written anew in
+  `typecheck.ae`.
 - `decodeUTF16` and `encodeUTF16` in `go/arbace/jrt/codec.ae`, and `indent`, `stripIndent` and
   `translateEscapes` in `go/arbace/jrt/string.ae`: jrt's hand-written Go forms following the code
   of https://github.com/openjdk/jdk26u at `baf63fb`
