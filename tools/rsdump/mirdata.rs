@@ -345,6 +345,8 @@ impl<'tcx> W<'tcx> {
             let _ = write!(o, " :promoted {}", p.index());
         }
         let _ = write!(o, " :instance {}", q(&format!("{:?}", b.source.instance)));
+        let name = ty::print::with_forced_impl_filename_line!(tcx.def_path_str(def));
+        let _ = write!(o, " :name {}", q(&name));
         let kind = {
             use rustc_hir::def::DefKind;
             let k = tcx.def_kind(def);
@@ -372,7 +374,7 @@ impl<'tcx> W<'tcx> {
                 Some(u) => format!(" :user-ty [{}]", join(u.projections(), |x| q(&format!("{x:?}")))),
                 None => String::new(),
             };
-            format!("{{:mut {} :ty {}{}}}", d.mutability.is_mut(), self.ty(d.ty), up)
+            format!("{{:mut {} :scope {} :ty {}{}}}", d.mutability.is_mut(), d.source_info.scope.index(), self.ty(d.ty), up)
         }));
         let _ = write!(o, "\n :scopes [{}]", join(b.source_scopes.iter(), |s| {
             let p = s.parent_scope.map(|p| p.index().to_string()).unwrap_or("nil".into());
