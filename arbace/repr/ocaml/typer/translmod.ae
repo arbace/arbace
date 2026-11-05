@@ -22,7 +22,8 @@
             [arbace.repr.ocaml.typer.env :as env]
             [arbace.repr.ocaml.typer.lambda :as l]
             [arbace.repr.ocaml.typer.matching :as m]
-            [arbace.repr.ocaml.typer.translcore :as tr]))
+            [arbace.repr.ocaml.typer.translcore :as tr]
+            [arbace.repr.ocaml.typer.simplif :as s]))
 
 (set! *warn-on-reflection* false)
 
@@ -111,6 +112,70 @@
       :Tmod_constraint (transl-module (compose-coercions cc (d 3)) rootpath (d 1))
       :Tmod_unpack (apply-coercion :strict cc (tr/transl-exp (d 1))))))
 
+(defn- mod-prim [n]
+  (tr/transl-value-path (get-in (env/find-unit "CamlinternalMod") [:values n])))
+
+(defn- init-shape
+  "Translmod.init_shape: the shape of a recursive module's signature (functions 0, lazy values 1), or nil when a
+  component cannot be initialized so (the binding is evaluated before the others)"
+  [mty]
+  (letfn [(shape-mod [mty]
+            (let [m (env/scrape mty)]
+              (if (= :Mty_signature (m 0))
+                [:block 0 [[:block 0 (shape-struct (m 1))]]]
+                (throw (ex-info "unsafe" {::unsafe true})))))
+          (shape-struct [items]
+            (vec (mapcat (fn [item]
+                           (case (item 0)
+                             :val (if (= :prim (first (get item 4)))
+                                    []
+                                    (let [t (binding [ty/*find-type* env/find-decl] (ty/expand-head (item 3))) d (ty/desc t)]
+                                      (cond (= :Tarrow (d 0)) [[:int 0]]
+                                            (and (= :Tconstr (d 0)) (= (d 1) ty/path-lazy-t)) [[:int 1]]
+                                            :else (throw (ex-info "unsafe" {::unsafe true})))))
+                             :module (if (= :absent (get item 4)) [] [(shape-mod (item 3))])
+                             (:exn :hole) (throw (ex-info "unsafe" {::unsafe true}))
+                             []))
+                         items)))]
+    (try (shape-mod mty)
+         (catch arbace.lang.ExceptionInfo e (if (::unsafe (ex-data e)) nil (throw e))))))
+
+(defn- compile-recmodule
+  "Translmod.compile_recmodule: reorder_rec_bindings, then eval_rec_bindings (init_mod, the unsafe ones, update_mod)"
+  [bindings next]
+  (let [bs (mapv (fn [[id tm loc]]
+                   (let [sh (init-shape (:mty tm))
+                         [f line ch] (tr/pos-info loc)]
+                     {:id id :init (when sh [[:Lconst [:block 0 [[:string f] [:int line] [:int ch]]]] [:Lconst sh]])
+                      :rhs (transl-module nil nil tm)}))
+                 bindings)
+        ;; reorder: an unsafe binding after the bindings its right-hand side needs
+        n (count bs) status (atom (vec (repeat n :undefined))) res (atom [])
+        fv (mapv #(s/free-variables (:rhs %)) bs)]
+    (letfn [(emit [i]
+              (when (= :undefined (@status i))
+                (when-not (:init (bs i))
+                  (swap! status assoc i :inprogress)
+                  (dotimes [j n] (when (contains? (fv i) (:id (bs j))) (emit j))))
+                (swap! res conj (bs i))
+                (swap! status assoc i :defined)))]
+      (dotimes [i n] (emit i)))
+    (let [ordered @res
+          patch (fn patch [bs] (if (empty? bs) (next)
+                                   (let [b (first bs)]
+                                     (if (:init b)
+                                       [:Lsequence [:Lapply (mod-prim "update_mod") [(second (:init b)) [:Lvar (:id b)] (:rhs b)]] (patch (rest bs))]
+                                       (patch (rest bs))))))
+          strict (fn strict [bs] (if (empty? bs) (patch ordered)
+                                     (let [b (first bs)]
+                                       (if (:init b) (strict (rest bs)) [:Llet :strict "" (:id b) (:rhs b) (strict (rest bs))]))))
+          inits (fn inits [bs] (if (empty? bs) (strict ordered)
+                                   (let [b (first bs)]
+                                     (if (:init b)
+                                       [:Llet :strict "" (:id b) [:Lapply (mod-prim "init_mod") (:init b)] (inits (rest bs))]
+                                       (inits (rest bs))))))]
+      (inits ordered))))
+
 (defn- rebind-fields [mid ids pos next]
   (if (empty? ids)
     (next)
@@ -134,6 +199,7 @@
                    (let [tm (item 2)
                          body (transl-module nil nil tm)]
                      [:Llet (pure-module tm) "" (item 1) body (next)]))
+    :Tstr_recmodule (compile-recmodule (item 1) next)
     :Tstr_include (let [tm (item 1) mid (ty/ident-create "include")]
                     [:Llet (pure-module tm) "" mid (transl-module nil nil tm) (rebind-fields mid (item 2) 0 next)])))
 
