@@ -1099,3 +1099,116 @@ fixed, a stub `cpp-runtime`, and `steps.edn` with GT9's fragment (its LLVM step 
 ## Decided (2026-11-05, the user: ORS22, ORS23)
 
 ORS22 (a): as built, the larger corpora live in the oracle tier, the UI suite's IR pack recorded at night, rust-native's native-check with its merge; ORS23 (a): the packs name rustc's identity only.
+
+## As built: C++ and LLVM IR (write-ahead, 2026-11-05)
+
+ORS12's last crops, on branch `oracle-records-cpp` (from `oracle-records-ocaml` at `500b3a13f`, which already held C, Scheme, Haskell, Rust and OCaml's gate steps), with `cppi-check` and `llvm-row`
+merged. **The merges**, resolved as both sides. `cppi-check` (C++'s four REAP cells, the run checks, the steps `cpp-check*` and `cpp-aot*`, the sampling's records): `CLAUDE.md` (the two C++
+paragraphs beside the Scheme and OCaml ones), `Makefile` (the `.PHONY` list: the union of both, a backslash lost on the way and put back; the `reap` target's `##` line names Scheme, OCaml and C++),
+`bin/gate` (the pins record: `:oracle-packs` and a new `:cpp {:pins-check :host-check}` in one `printf`), `bin/lib/gate-run.bash` (`gate_cxx_id` beside `gate_scheme_id` and `gate_ocaml_id`; the hosts file's
+printf chain one line a host), `bin/reap` (the header), `test/gate/steps.edn` (the reap step's inputs and summary; the C oracle block closed before C++'s steps), `test/reap/cells.edn` (`:languages`,
+`:names`, the comment lines, the cells: the earlier crops' map closed once, after C++'s), `test/reap/main.ae` (`:results-dir` in `missing-files` beside `:parts`), `arbace/cpp/lower.ae` (the other crops'
+`packed-vector-c-size-align` beside cppi-check's `sha256-hex`); `test/reap/matrix.edn` recorded afresh. `llvm-row` conflicted in `test/reap/cells.edn` alone (the languages, names and the end of the cells).
+`bin/reap` after both: 37 of 40 cells checked (the three "no check yet" are cells of other crops' checks not recorded yet), 0 problems. It was run twice, after each merge; the first time
+it showed the Java eval and AOT rows one test off (`pass 1847, recorded 1848`), the drift the Rust section names, and the record made here holds the checks' present numbers.
+
+Read from the scripts: `bin/cppi`, `bin/lib/cppi/{check,check-aot,lists.bash,record-ref}`, `bin/repr-cpp` and `bin/lib/repr-cpp/{pp-check,roundtrip,roundtrip-corpus,dg,cxxdump-check}`, `tools/cxxdump`, `bin/repr-llvm`,
+`bin/lib/repr-llvm/results`, `test/cpp/selftest/`, GT9's fragments (`git show gt9-verbs:test/gate/crops/cpp.edn`, `llvm-rust.edn`).
+
+### What the steps asked of the toolchain, and what each became
+
+| Step | Live call | Class | Now |
+|---|---|---|---|
+| cpp-read-essential, cpp-tokens (`bin/repr-cpp pp-check`) | none: g++ `-E` and clang's raw tokens only with `--record`, their digests are `test/repr/cpp/pp-gxx.sha256`, `lex-clang.sha256`; the installed libstdc++ headers are read | A, E | `:cxx` dropped. With `g++`, `clang++` and `clang` first on `PATH` as stubs exiting 99, `pp-check --essential` runs: 17 s, the three corpora's lines agree. The headers (class E) are checked against `test/cpp/host/headers.sha256` by `bin/repr-cpp host check --headers` (`bin/gate --pins` runs it; the compilers' own answers are the oracle tier's `host check`) |
+| cpp-print-essential, cpp-roundtrip (originals' half) | `tools/cxxdump` (clang's `-ast-dump=json`, filtered) on each file and its `-norm` form | B | packs `cxxdump-KEY` (test/repr/cpp/records/), one per list, **the cache's own layout**: each entry's dump, status, errors and dependencies' digests, which `cxxdump -records DIRS` reads with no clang. Recorded here: `samples` (9 files), `gxx-dg-essential` (33) |
+| the same, the print's half | cxxdump of the print (level 1: forms again; level 3: the AST equal), `g++ -c` and `clang++ -c` of both (level 4) | D | the oracle tier's `cpp-roundtrip-oracle` (`REPR_CPP_LIVE=1`): all the levels, every list. In records mode the judge (`rtcheck judge ... records`) does not judge levels 1, 3, 4 and says so (a line on standard output); no native substitute yet: CX11's reader of the print is not merged here. The gate's level is the read, the print and the forms' round trip of the originals |
+| cpp-lower-essential, cpp-lower | `clang++ -O0 -S -emit-llvm` per program; `clang++ x.ll` link and run of the original; `clang -c x.ll`; g++'s build and run (the reference's opinion); `clang -c print.ll` (print's object) | C, A, D | pack `cpp-ir-samples` (programs of samples and runtime): members `x.ll`, `ir.status`, `ir.log`, the original's link and run (`orig*`), g++'s (`gxx*`), the digest of `clang -c x.ll`. The print's object comparison: `object` = `skipped` from the records, judged in the oracle tier's `cpp-lower-oracle` (`CPPI_LIVE=1`); the lowered C under gcc stays on `:gcc` |
+| cpp-runtime (`runtime-build`) | 52 libsupc++/libstdc++ units compiled to IR by clang; the headers' pin and the gcc tarball's extraction | C | pack `cpp-runtime-ir`: the 198 units' IR (the runtime has grown since the survey counted), keyed by the unit's line, its shim, the tarball's pin, the recorded clang line and the recipe; `test/cpp/runtime/ir.sha256` still holds (a build in records mode compares it). `runtime_key` takes the recorded clang line, not `clang --version` |
+| cpp-check(-aot) (cppi-check) | `clang++ -emit-llvm` per program (`ir1`); the testsuite's util library IR | C | the same pack; `ir1` reads it; g++'s runs are `ref-gxx15.edn` (A, already). `libstdcxx` and `gxx-dg-run`: packs `cpp-ir-libstdcxx`, `cpp-ir-gxx-dg-run` (the night's) |
+| cpp-selftest | clang, g++, gcc, llvm-as, opt, lli and cxxdump in 28 of its 33 tests (three of them by their live build) | A | `test/cpp/selftest/toolchain.txt` names them: the gate's step runs `--no-toolchain` (5 tests: `ctor-throw`, `odd-width`, `oracle-key`, `results-hold`, `results-nonpass`), the oracle tier's `cpp-selftest-oracle` `--toolchain` live. Three (`headers-pin`, `results-record`, `runtime-key`) exercise the live build and moved with them |
+| llvm-roundtrip | `clang -c` of the original and the print, `llvm-as` of both, byte for byte | A, D | `test/llvm/records/roundtrip-orig.tsv` (680 modules: the originals' digests, `none` when the original does not build); the print's half is `llvm-roundtrip-oracle` (`REPR_LLVM_LIVE=1`). The substitute in records mode: **the native verifier** (`arbace.repr.llvm.verify`, llvm-ll4's) must judge each print as valid or invalid as opt did the original (the pack below), `print-verify.tsv` |
+| llvm-verify (`verify-check`) | `opt -passes=verify -disable-output` on each module | B | pack `llvm-opt-verify`: status and whole stderr of 680 modules (paths as `@ROOT@`, addresses `<0xADDR>`); `verify-check` reads it; the live opt is `llvm-verify-oracle` |
+| cpp-dg (CX9), cpp-native, cpp-codegen | | | not on this branch (cpp-dg joins later; cpp-native and cpp-codegen are other branches): their cxxdump calls would take `-records` the same way |
+
+Not steps: `bin/repr-cpp host record|check` (class A, the compilers' answers: `test/cpp/host/`), `record-ref` (g++'s runs), `dg --record-ref`: they stay the by-hand recorders, listed as kinds below.
+
+### What the tooling is
+
+- **Identities** in `test/oracle-records/oracle.bash`: `:cxx` (`oracle_cxx_id`, the text of `gate_cxx_id`: g++'s and clang++'s version lines, their drivers, `cc1plus`, clang, the headers' digests: `:cxx 778e744abed1efac`, g++ 15.2.0 and clang 23.1.4)
+  and `:llvm` (`oracle_llvm_id`, GT9's recipe: `llvm-as --version`, `llvm-as`, `opt`, `lli`, `FileCheck`, `libLLVM.so.*`: `:llvm b584dbaff8a679a5`, LLVM 23.1.4). `bin/lib/gate-run.bash` gains `gate_llvm_id` and the `:llvm` entry of `hosts.edn` (the oracle steps name it).
+- **`test/oracle-records/cpp.bash`** (out of `gate_key`): `cpr_live` (`CPPI_LIVE`), `cpr_key` (the source's bytes, the standard, the arguments with the checkout's path as `@ROOT@`, the recorded clang line, the headers' pin, the recipe),
+  `cpr_ir_get` (the members of an ID into a directory: exit 3 UNRECORDED, 4 STALE, 1 refused), `cpr_ir_or_fail` (a failure written as `ir.status` 99 and the message in `ir.log`: the program then fails the check), `cpr_prepare`
+  (the packs unpacked once before a parallel run: `oracle_check_members` keeps scratch files that two `xargs` workers would share), `cpr_dump_dirs` (the unpacked cxxdump packs, colon-joined).
+- **`bin/cppi record-ir [--corpus C,...] [--runtime] [--verify [--sample N]]`**: by hand, with clang++ and g++. `one` (the lowering's native steps) and the run checks' `ir1` read the pack unless `CPPI_LIVE=1`; `rt_ir` the runtime pack (`runtime_ir`, split out of
+  `runtime_build`, needs neither tarball nor headers in records mode). `two` and `rt_two` write `object` = `skipped`; `arbace/cpp/check.ae`'s judge takes `skipped` as the print's object judged elsewhere.
+- **`tools/cxxdump -records DIRS [-clang-id LINE | CXXDUMP_CLANG_ID]`**: the cache's lookup over recorded entries (a miss is an error, "unrecorded"; an entry whose dependency is on the host with another digest, "stale"; a dependency not on the host is not stale: the record stands),
+  the key's clang part the recorded line. **`bin/repr-cpp record-dumps KEY`, `verify-dumps KEY [--sample N]`** (a list's dumps made into a fresh cache and packed, minus the stats; verified entry by entry); `roundtrip --dumps-only`; `REPR_CPP_LIVE=1` is the live mode.
+- **`bin/repr-llvm list hw|probes|runtime|valid|all`** (the lists of the records: the runtime's IR is the pack's members), `record-orig`, `verify-orig`, `record-opt`, `verify-opt`; `roundtrip`, `roundtrip --text` and `verify-check` take a list name for LIST. The verifies print their crossed pair
+  (one module's live answer against another's record: must differ).
+- Kinds in `test/oracle-records/kinds.edn` (crop `cpp`: `ir`, `runtime-ir`, `cxxdump`, `host`, `runs`, `dg`, `tokens`; crop `llvm`: `roundtrip-orig`, `opt-verify`), `bin/oracle-records verify cpp ir runtime-ir`, `verify llvm`.
+- Gate: the steps' `:hosts` below; `bin/gate`'s pins record gains `:cpp` (the headers' pin); the group `:cpp` of `steps.edn` gains the tooling's directories and `test/llvm/`.
+
+### Sizes (ORS11)
+
+| Pack or record | Members | Raw | xz | Ratio |
+|---|---|---|---|---|
+| `cpp-ir-samples` | 244 | 3.74 MB | 266,964 | 14x |
+| `cpp-runtime-ir` | 990 | 38.2 MB | 1,270,392 | 30x |
+| `cxxdump-samples` | 90 | 0.61 MB | 35,328 | 17x |
+| `cxxdump-gxx-dg-essential` | 318 | 1.74 MB | 58,052 | 30x |
+| `llvm-opt-verify` | 1,360 | 62 KB | 22,644 | 3x |
+| `test/llvm/records/roundtrip-orig.tsv` (committed) | 680 rows | 106 KB | | |
+
+Committed: manifests 200 KB (cpp) + 19 KB + 66 KB, the LLVM record 312 KB with the opt manifest: about 0.6 MB, inside ORS11's 3 MB. The packs recorded here total 1.65 MB. **The night's** (estimated from these ratios and the recorded lists' counts): `cpp-ir-libstdcxx` (the testsuite's
+3,874 run tests: 234 are the every-15th list, 17 KB xz a program as the samples') about 65 MB, `cpp-ir-gxx-dg-run` (about 1,675: 67 every-25th) about 12 MB, the round trip's dump packs (`gxx-dg-every-10` 1,807 files, `gxx-old-deja-every-10` 323, `c-c++-common-every-10`, `libstdcxx-testsuite-every-40`;
+the essential list's 33 files are 58 KB xz, 1.8 KB a file) about 8 to 12 MB the four, the modules lists (`gxx-modules`, 1,181 files) 2 MB. The crop's total about 100 MB: **at ORS11's cap** (ORS24).
+
+### Checked (light, in the worktree, main's stage 0, `clang`, `clang++`, `g++`, `clang-23`, `opt` and `llvm-as` first on `PATH` as stubs exiting 99 where it says so)
+
+- `bin/cppi record-ir` (25 s), `record-ir --runtime` (1 min 26 s, 198 units); `bin/oracle-records verify cpp ir --sample 4`: 4 entries equal. `cpr_ir_get`: the same source gives 16 members; another standard, an edited source: STALE (rc 4); a name not in the pack, a corpus with no pack: UNRECORDED (rc 3).
+- `bin/cppi runtime-build` with the stubs: IR from the pack in 11 s, `ir.sha256` equal to the pin, 198 units lowered, built and judged, 198 pass (3 min 43 s). `bin/cppi lower-essential` with the stubs: 6 files, 6 pass, the negative control differs as it must (28 s).
+- `bin/repr-cpp record-dumps samples` (21 s), `record-dumps gxx-dg-essential`; `roundtrip-corpus samples` with the stubs: 9 pass (3 s); `roundtrip-corpus gxx-dg-essential` with the stubs: 33 files, 31 pass and 2 rejected by the oracle as recorded, rc 0.
+  (A first run read the print's dumps in records mode too and failed all nine: the print's dump, forms again and objects are skipped in records mode now.)
+- `bin/repr-cpp pp-check --essential` with the stubs: ok, 17 s. `bin/cppi selftest --no-toolchain` with the stubs: the first run, 8 tests, 5 pass and 3 fail (`headers-pin`, `results-record`, `runtime-key`, which exercise the live build: moved to `toolchain.txt`, leaving the five); `selftest headers-pin results-record` live: pass. `runtime-key` live was not rerun here.
+- `bin/repr-llvm record-orig all` (680 modules, 70 s), `record-opt all` (46 s; a first record held a heap address of opt's messages: normalized), `verify-orig`, `verify-opt` with `--sample 10` to `60`: all equal, the crossed pairs differ.
+  `roundtrip` over the four hand-written modules with the stubs: 4 of 4 forms equal, 4 originals recorded, 0 prints judged otherwise by the native verifier than opt the original (3.5 s); `verify-check` over 60 probes with the stubs: 59 of 60 verdicts as opt's, 52 of 53 first messages, 59 of 60 whole stderr (the probes' known file holds the rest).
+- `bin/oracle-records verify cpp ir --sample 4`, `verify llvm --sample 30` (23 entries a kind): equal.
+- CHECKESSENTIAL
+
+### The plan (scratch overlay)
+
+`.tmp/overlay/` here: a copy of the tracked files at this branch's tree with `test/ocaml/subsets.edn` emptied (the OCaml branch's subsets name runs its records lack: `bin/gate --plan` refused the real tree on it, not part of this work), the stage 0 of main by symlinks;
+`bin/gate --full --plan` and `--oracle --plan`.
+
+- **Before** (the merged `steps.edn` of cppi-check): 20 C++ steps and parts name `:cxx`; with `g++` and `clang++` stubs printing 9.99.9 first on `PATH` **all 20 keys change**.
+- **After**: the 15 steps and parts of C++ and LLVM in `--full` (`cpp-read-essential`, `cpp-print-essential`, `cpp-lower-essential`, `cpp-check-essential`, `cpp-aot-essential`, `cpp-selftest`, `cpp-tokens` (3 parts), `cpp-roundtrip.samples`, `cpp-lower.samples`,
+  `cpp-check.samples-runtime`, `cpp-aot.samples-runtime`, `llvm-roundtrip`, `llvm-verify`) name neither `:cxx` nor `:llvm`: **all 15 keys are equal** with the stubs first on `PATH`. `:gcc` stays on `cpp-lower-essential` and `cpp-lower` (the lowered C under gcc, class D with no native substitute here).
+- The only steps with `:cxx` or `:llvm` in `:hosts`: `cpp-roundtrip-oracle` (6 parts), `cpp-lower-oracle` (2), `cpp-check-oracle` (2), `cpp-selftest-oracle`, `llvm-roundtrip-oracle`, `llvm-verify-oracle`, `cpp-records-verify`, `llvm-records-verify`, all `:phase :oracle`; `bin/gate --oracle --plan` lists them with the C crop's.
+- The parts that wait for records left the gate (ORS22's precedent): `cpp-roundtrip`'s four sampled lists, `cpp-lower`'s `libstdcxx-every-15th`, `cpp-check` and `cpp-aot`'s `gxx-dg-run-every-25` run live in the oracle tier until the night records them; a part's records that are missing fail as UNRECORDED or STALE, they are never taken on trust.
+
+### The night's commands (a commit of its own naming `:cxx 778e744abed1efac` and `:llvm b584dbaff8a679a5`: ORS5 (a); record from the main checkout, its path is in the IR)
+
+1. `bin/cppi record-ir` and `bin/cppi record-ir --runtime` again in the main checkout (the IR names the source by its path in `source_filename` and the program's own strings: the packs here were made in this worktree and read anywhere, but a fresh record from `/root/arbace` is the one whose digests do not depend on a worktree's name).
+2. The run corpora's IR: `bin/cppi testsuite`, then `bin/cppi record-ir --corpus libstdcxx` and `--corpus gxx-dg-run` (the libstdcxx util library's four IR members as `libstdcxx/util/NAME.cc`: not made by `record-ir` yet, ORS24's second half).
+3. The round trip's dumps: `bin/repr-cpp record-dumps KEY` for `gxx-dg-every-10`, `gxx-old-deja-every-10`, `c-c++-common-every-10`, `libstdcxx-testsuite-every-40`, `gxx-modules-every-10`: 8 min for the g++.dg tenth live (CP124), 4 threads; `verify-dumps KEY --sample 100` after.
+4. `bin/repr-llvm record-opt` over the mutants and held-out sets (`bin/repr-llvm mutants LIST OUT N`; the names `NAME.KIND.INDEX`), and `record-orig` for the 278 modules of the round trip's lists that are not the runtime's.
+5. `bin/oracle-records verify cpp ir runtime-ir cxxdump host` and `verify llvm` whole, then `bin/gate --oracle`; `bin/oracle-records mirror --push` once the user agrees (the packs here are 1.7 MB, the night's about 100 MB).
+
+### Left
+
+- **The print's levels** of the round trip (clang's dump of Arbace's print, g++ and clang objects) and the lowering's print object are the oracle tier's only: the gate no longer sees them. CX11's native reader of the print, or `cpp-codegen`'s IR, would bring level 1 back; the native substitutes noted: llvm-ll4's verifier on the print (wired in `roundtrip` of repr/llvm; not in cppi's `rt` level) and cpp-codegen's IR (not merged).
+- **`:gcc`** on `cpp-lower-essential` and `cpp-lower` (gcc compiling the lowered C): the survey's "replace by the ci run" is `cpp-check`'s already; the lowering's own gcc stage stays until it is retired (ORS25).
+- Recorded here: samples, runtime, `gxx-dg-essential`, hw, probes, the runtime's IR as modules. Not recorded: the other corpora and the mutants (above). `bin/repr-cpp dg` (CX9), `cpp-native` and `libstdcxx` util IR: not on this branch.
+- `selftest runtime-key` in live mode, `bin/cppi check` past the IR on the packs (heavy; started, see Checked), `bin/repr-llvm roundtrip` over the 198 runtime modules (it reads the unpacked pack: the hand-written four were run).
+- `rsi` (the Rust branch's) still names `:cxx` and `:gcc` for the lowering and `lli`; on merge its steps take `bin/cppi`'s records the same way.
+
+## Proposed (2026-11-05, C++ and LLVM IR): ORS24-ORS25
+
+- **ORS24 The C++ crop's night size.** The IR of `libstdcxx` and `gxx-dg-run` and the round trip's dump packs come to about 100 MB, ORS11's cap.
+  - Options: (a) record them all (about 100 MB, mirror and store the same); (b) record `gxx-dg-run`, the run lists' samplings (every 15th and 25th: 234 and 67 programs, about 5 MB) and the dumps of the essential lists and the every-40th/every-10th lists, the rest live in the oracle tier (about 25 MB); (c) record the samplings alone, the dumps live.
+  - Costs: (a) the cap's boundary and a mirror of 100 MB; (b) the gate's parts are the samplings it runs already, every other list the oracle tier's, as ORS22 (a); (c) the round trip's gate level is the essential list only.
+  - *Recommended: (b)*: the gate runs these samplings, nothing else reads the whole lists.
+- **ORS25 The lowering's gcc stage.** `cpp-lower*` keep `:gcc` (class D with no native substitute).
+  - Options: (a) as built: C's `:gcc` stays on them until the lowering is retired in favour of `cpp-check`'s ci run; (b) move the gcc half to the oracle tier now (the lowering step then checks forms and the lowered C's reading by repr/c and ci's checker); (c) record gcc's compile of the lowered C (it changes with every lowering change: not recordable).
+  - Costs: (a) none, C's agent takes `:gcc` out of its own steps; (b) the lowering's gate step loses its gcc and run levels (ci's run in `cpp-check` covers the run); (c) none works.
+  - *Recommended: (a)* now, (b) once `cpp-check-essential` covers every program of `essential-lower.txt`.
