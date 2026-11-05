@@ -2779,3 +2779,64 @@ generator's item, one resumption per level (resume, run, runFrames' entry, the y
   `check-depths` on, and the 73-program sample with it on: 73 pass, 0 failing, no code object on the stack generator.
 - `make python-essential`: check --aot 21 programs, 20 pass, 1 classed, 0 failing, the control refused.
 - `bin/pyi runtime check`: the seven packages the same forms, the unicodedata and CJK tables equal, runtime-ops equal, 136 programs of test/python/pyi run by pyi as by the oracle: 136 equal, the REPL session 1 equal (40 min at load 4; the check runs the loop, not compiled code: it covers runFrames' new parameter, guardedStep and the free list).
+## Design: 218, the finalizer queue (2026-11-05, the Mac VM, queue 218; PYS9 (a), decided 2026-11-04)
+
+pyi has no reference counts: `weakref.ref` holds its referent, `gc.collect()` returns 0, no `__del__` runs, and
+`identityHash`'s map keeps every object ever hashed by identity (`id()`, the default `__hash__`) alive for good. This
+section is what CPython guarantees, what Go's collector can give of it, and what stays by design.
+
+**What CPython guarantees** (3.14's Objects/typeobject.c, weakrefobject.c, genobject.c, Python/gc.c):
+- *Refcount death* (subtype_dealloc): `__del__` (tp_finalize, slot_tp_finalize) first; when it did not resurrect the object,
+  its weak references are cleared and their callbacks called (PyObject_ClearWeakRefs). The list's order: the basic ref
+  (no callback, reused by `ref(o)`), the basic proxy, then the refs with callbacks, the newest first (insert_after); the
+  callbacks are called in that order with the weak reference, an exception going to `sys.unraisablehook` as "Exception
+  ignored while calling weakref callback %R". A weak reference that died first is out of the list: no callback.
+- *PEP 442*: `__del__` runs at most once per object; an object it resurrects is not finalized again. Cyclic trash: weak
+  references to it are cleared (callbacks only for refs outside the trash), the finalizers called, the cycle broken.
+  `gc.garbage` holds what cannot be freed (DEBUG_SAVEALL); `gc.callbacks` are called with ("start", info) and ("stop",
+  info), info's `generation`, `collected`, `uncollectable`; an exception "Exception ignored while calling GC callback %R".
+- *`__del__`'s exception*: "Exception ignored while calling deallocator %R" (the bound `__del__`).
+- *Generators* (_PyGen_Finalize): a generator suspended at its death is closed (GeneratorExit thrown in; an exception
+  "Exception ignored while closing generator %R"); a coroutine never started warns "coroutine '...' was never awaited"
+  (RuntimeWarning through `warnings._warn_unawaited_coroutine`); an async generator with sys's finalizer hook (asyncio's
+  `_asyncgen_finalizer_hook`) is handed to the hook instead ("Exception ignored while finalizing generator %R").
+- *Sockets* (sock_finalize): an open socket warns ResourceWarning "unclosed %R" (source the socket) and is closed.
+- *`weakref.finalize` at exit*: Lib/weakref.py's own atexit hook, over weak references with callbacks.
+
+**How Go's collector serves it.**
+- *Weak references.* Go's `weak` package is out of goi's scope (gotable.edn's `:out`), and pyi's runtime runs interpreted
+  by goi until W2 lists it compiled (and whenever the checkout's runtime differs from the embedded one). So the weak
+  reference keeps its referent's address hidden from the collector (a `uintptr` and the pointer's element type) and
+  rebuilds the object through `reflect.NewAt`; the referent gets a Go finalizer at its first weak reference (probed,
+  compiled and under goi: `.tmp/q218/probe/refl`). Go's heap does not move, and an object with a finalizer is kept
+  until its finalizer ran: the finalizer clears the address under a mutex before anything can free it, so no weak
+  reference ever yields freed memory. `runtime.AddCleanup` would not resurrect the object (no `__del__`), and is generic:
+  goi cannot call it.
+- *A tracked object's record* (finTrack) lives in a table keyed by its address, never holding it: its weak references in
+  CPython's order, whether a `__del__`, a generator's close or a socket's warning is due, and its identity once hashed.
+  `identityHash` moves an object's number there (an instance keeps it in its own field), so hashing no longer pins it.
+- *The queue.* Go's finalizer goroutine only moves the dead object (resurrected by Go for the call) into pyi's queue and
+  sets an eval-breaker bit; the thread holding the GIL drains it at the eval breaker (a frame's start, a backward jump)
+  and in `gc.collect()`. Python code never runs on Go's finalizer goroutine.
+- *The order, refcount's*: an object with a `__del__` due is finalized first and its Go finalizer set again without it
+  (PEP 442's once-only); found unreachable again, its weak references are cleared and their callbacks called, newest
+  first, the basic `ref(o)` reused as CPython does. A resurrecting `__del__` simply keeps the object reachable.
+- *`gc.collect()`*: the callbacks' "start"; rounds of `runtime.GC()`, a wait until Go's finalizer goroutine has been quiet
+  for a moment (there is no public barrier: `blockUntilEmptyFinalizerQueue` is the runtime's tests' own) and a drain,
+  until a round drains nothing (at most 8); "stop" with the count; that count returned.
+- *Generators and coroutines*: a generator gets the finalizer when it first suspends inside a try region (its code has
+  handlers: only then can `close()` be observed); a coroutine at its creation (the unawaited warning), an async
+  generator when sys's finalizer hook is set at its first iteration. *Sockets*: at creation, the warning and close.
+- *`sys.unraisablehook`*: `writeUnraisable` with CPython's messages, the queue's exceptions never escaping into the code
+  the drain interrupted.
+
+**What cannot be served** (stays by design, with its class):
+- *The moment* (`:finalization`, PYS9 (a)): nothing happens when the last reference goes, only at a collection.
+- *Cycles through a finalized object*: Go never frees a cycle that reaches an object with a finalizer from itself
+  (SetFinalizer's documented rule), so such an object's `__del__` never runs and its weak references are never cleared:
+  CPython 2's uncollectable cycles, without `gc.garbage`. That includes every class (its MRO holds it) and module-level
+  functions (their globals). A new class `:finalization-cycle` (`:kind :design`) takes the methods that need it.
+- *goi's registers* (the runtime interpreted): an interpreted frame still running may keep the last value it handled in
+  a slot, so an object can survive one more collection than compiled; the compiled runtime (AOT, W2's table) is exact.
+- *The weak references themselves* are held by their referent's record: a dropped weak reference's callback still runs.
+- `gc.garbage`, `get_referrers`, `get_objects`, `is_tracked`, thresholds and counts keep their shapes, not CPython's values.
