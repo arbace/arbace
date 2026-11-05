@@ -90,6 +90,13 @@ code. Three kinds of things live here:
   `iface` modes, walking rustc_middle's `Body` as `pretty.rs` does) port rustc 1.99.1, the same revision and sources as above, by
   hand on 2026-11-05 (RF1-RF3, doc/rust/FRONTEND-SURVEY.md, "As built: RF1-RF3 (trial)"; LICENSE.md names the files; MIT OR
   Apache-2.0); evaluated from the checkout, not embedded, out of `gate_key` (RFS13).
+  `arbace/rust/front/expand.ae` with `expand_format.ae` and `expand_derive.ae` (macro expansion: macro_rules! after
+  `rustc_expand/src/mbe/`, the builtins after `rustc_builtin_macros/src/{format,assert,edition_panic,source_util,concat,cfg}.rs` and
+  `rustc_parse_format`, the derives after `rustc_builtin_macros/src/deriving/`, cfg after `rustc_expand/src/config.rs`),
+  `arbace/rust/front/resolve.ae` (name resolution after `rustc_resolve/src/{build_reduced_graph,imports,ident,late}.rs`) and
+  `tools/rsdump/front.rs` (the helper's `expanded`, `resolve` and `std-names` modes) port rustc 1.99.1, the same revision and sources,
+  by hand on 2026-11-05 (RF4-RF5, doc/rust/FRONTEND-SURVEY.md, "As built: RF4-RF5 start"; LICENSE.md names the files; MIT OR
+  Apache-2.0); evaluated from the checkout, not embedded, out of `gate_key` (RFS13).
 - Arbace's own namespaces of the program, not derived from Clojure: `box.ae` and `box/`
   (`arbace.box`, the store, over its host layer `arbace.box.host`; the box's build driver
   `arbace.box.build`, its plan `arbace.box.plan` (since GP2 also repr/go's native loader's go

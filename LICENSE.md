@@ -514,6 +514,17 @@ covers what.
   project's contributors, dual-licensed under the MIT License or the Apache License 2.0 at the licensee's option, taken here
   under the MIT License ("Rust (rustc 1.99.1): MIT License or Apache License 2.0" below). The rest (the forms' shapes,
   `doc/rust/MIR.md`, the judges, `bin/rust-front`) is Arbace's own, under the Eclipse Public License 1.0.
+- `arbace/rust/front/expand.ae`, `expand_format.ae`, `expand_derive.ae` and `resolve.ae` (RF4-RF5, doc/rust/FRONTEND-SURVEY.md, "As built:
+  RF4-RF5 start"), and the helper's `tools/rsdump/front.rs`: Arbace forms and Rust written after rustc 1.99.1, the same revision and
+  sources, reading `compiler/rustc_expand/src/{expand,config}.rs` and `mbe/{macro_parser,macro_rules,quoted,transcribe}.rs` (macro_rules!'
+  arms, matching, transcription and its spacing, the statement macros' semicolon), `compiler/rustc_builtin_macros/src/{format,assert,
+  edition_panic,source_util,concat,cfg,standard_library_imports}.rs` and `deriving/` (the builtins' and derives' expansions),
+  `compiler/rustc_parse_format/src/lib.rs` (format strings), `compiler/rustc_resolve/src/{build_reduced_graph,imports,ident,late}.rs`
+  (the def collector, imports, globs, preludes, ribs) and `compiler/rustc_middle/src/metadata.rs`, `compiler/rustc_metadata/src/creader.rs`
+  (the helper's modes): copyright the Rust project's contributors, dual-licensed under the MIT License or the Apache License 2.0 at the
+  licensee's option, taken here under the MIT License ("Rust (rustc 1.99.1): MIT License or Apache License 2.0" below). The rest (the
+  judges `expand_check.ae` and `resolve_check.ae`, the samples `test/rust/front/expand1.rs` and `resolve1.rs`) is Arbace's own, under
+  the Eclipse Public License 1.0.
 - The non-javac branches of `skip-parens`, `tree-name`, `full-name`, `diamond?` and `class-kind` in
   `arbace/repr/java/tree.ae` (repr/java's interface to the tree, doc/classes/JAVA-FRONTEND-SURVEY.md,
   "As built: JFS66 (b)"): Arbace forms reimplementing, for the native parser's trees,
