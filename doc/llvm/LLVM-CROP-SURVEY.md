@@ -877,7 +877,7 @@ tools' host loads these two files over them; light, nothing built):
 | `bin/ci check --corpus ci-run --only` (the two new files and three old) | 5 of 5 pass |
 | `bin/ci judge-test` | 104 tests, 464 assertions, 0 failures |
 | `bin/ci dg --essential` | 92 of 92 listed files pass, the control differs |
-| `bin/ci check --only test/c/essential-check.txt` | see the report |
+| `bin/ci check --only test/c/essential-check.txt` | every program passes (the essential run check) |
 
 `test/llvm/check-eval-linux-amd64.edn`: the 7 rows are `:pass` now (edited by hand from the 7-module run; the next full
 `bin/llvmi check --record` confirms them). The classes `ci-builtins` and `abi-punning` stay in `divergences-eval.edn` because
