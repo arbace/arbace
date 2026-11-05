@@ -302,7 +302,7 @@
        (fn [s]
          (let [nm (str (:name s))]
            (concat
-            (when-not (#{:pre :build :essential :full} (:phase s)) [(str nm ": unknown :phase " (:phase s))])
+            (when-not (#{:pre :build :essential :full :oracle} (:phase s)) [(str nm ": unknown :phase " (:phase s))])
             (when-not (contains? #{nil :check :build :always} (:kind s)) [(str nm ": unknown :kind " (:kind s))])
             (for [x (:needs s) :when (not (known (str x)))] (str nm ": :needs names no step: " x))
             (when (and (:start-after s) (not (known (str (:start-after s)))))
@@ -598,7 +598,11 @@
         steps (expand-parts steps)
         files (files-table (str logs "/files.sha256"))
         hosts (read-file (str logs "/hosts.edn"))
-        phases (if (#{"full" "nightly"} mode) #{:pre :build :essential :full} #{:pre :build :essential})
+        ;; the oracle tier (doc/ORACLE-RECORDS-SURVEY.md, ORS1 (a), §3.6): bin/gate --oracle, its :oracle steps alone (with --full,
+        ;; mode full-oracle, beside --full's); an :oracle step one of whose hosts is none here is absent, not failed
+        phases (cond-> (case mode ("full" "nightly" "full-oracle") #{:pre :build :essential :full} "oracle" #{:pre :build} #{:pre :build :essential})
+                 (#{"oracle" "full-oracle"} mode) (conj :oracle))
+        full? (#{"full" "nightly" "full-oracle"} mode)
         cache (atom {})
         problems (validate groups steps files hosts cache)
         _ (when (seq problems)
@@ -609,11 +613,11 @@
         ;; GT8.4: the rotated parts (--nightly: the subset and the night's slice; the clean run: the subset)
         _ (when (and (= mode "nightly") (not (integer? rotation)))
             (println "gate plan: nightly needs --night N") (System/exit 2))
-        _ (when-let [ps (seq (when (#{"full" "nightly"} mode) (rotation-problems root steps)))]
+        _ (when-let [ps (seq (when full? (rotation-problems root steps)))]
             (println (str "gate plan: the rotation's subsets have " (count ps) " problem(s):"))
             (doseq [p ps] (println (str "   " p)))
             (System/exit 1))
-        steps (rotate-steps root store steps (when (#{"full" "nightly"} mode) (or rotation :whole)))
+        steps (rotate-steps root store steps (when full? (or rotation :whole)))
         pdir (File. (str logs "/plan"))
         _ (.mkdirs pdir)
         rdir (File. (str logs "/rotation"))
@@ -640,8 +644,17 @@
          (fn [acc s]
            (let [nm (str (:name s)) kind (or (:kind s) :check)
                  by (:by acc)]
-             (if (not= kind :check)
+             (cond
+               (not= kind :check)
                (-> acc (update :v conj {:step s :name nm :kind kind}))
+               ;; ORS1 (a): an oracle-tier step where its toolchain is absent (a host's identity none) is absent: no key, no run,
+               ;; no failure
+               (and (= :oracle (:phase s)) (some #(= "none" (get hosts %)) (:hosts s)))
+               (let [d {:step s :name nm :kind kind :decision "absent"
+                        :why (str "host " (str/join ", " (map str (filter #(= "none" (get hosts %)) (:hosts s))))
+                                  " none here: the oracle tier runs where its toolchain is (ORS1 (a))")}]
+                 (-> acc (update :v conj d) (assoc-in [:by nm] d)))
+               :else
                (let [lines (vec (material s (expand groups (:inputs s)) files hosts cache))
                      pending (some #(re-find #"^host \S+ pending$" %) lines)
                      prods (distinct (map producer (:uses s)))
@@ -736,7 +749,7 @@
                         "\n"))))
     (let [freq (frequencies (map :decision decided))]
       (println (str "gate plan (" mode "): " (count decided) " steps; "
-                    (str/join ", " (for [k ["always" "build" "run" "after" "skip" "none"] :when (freq k)]
+                    (str/join ", " (for [k ["always" "build" "run" "after" "skip" "absent" "none"] :when (freq k)]
                                      (str (freq k) " " k))))))
     (when (some #(:rotation (:step %)) decided)
       (println (str "   rotation (GT8.4): " (if (integer? rotation) (str "night " rotation ", slices of " period) "the subsets alone (the clean run)")
