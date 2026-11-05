@@ -407,3 +407,27 @@ smaller parts), each on a branch of its own, held for after the tag (the merge p
 - Results: `bin/hsi runtime check` the same forms; `bin/hsi check` (samples, synthetic) 62 of 63, none unclassed, the controls
   failing; `bin/hsi check --aot` on GT8's essential list 123 of 123, every run the same as on hsi; `bin/hsi repl-session` 7 of
   7 byte for byte, the control failing; `bin/reap --record`, `bin/reap` 20 of 20 cells, 0 problems.
+
+## 2026-11-05: HES73 (a), the compiled code's typed locals and direct calls, on branch haskell-speed
+
+- Branch `haskell-speed` from `haskell-integrate` (`7bda6b88`), light work by day, the main checkout's stage 0, the
+  integration's `.tmp/hsi` caches copied (no dump rebuilt). The method: hsi's runtime printed once as Go (`bin/hsi runtime
+  print`), edited and built as Go against the AOT (`bin/lib/hsi/aot`'s new `HSI_RT_MOD`, `HSI_RT_KEY` with `HSI_EXE`), each
+  step measured on nfib, then read back into the forms by `bin/hsi runtime read` (`go/arbace/hs/aot.ae`, `aotapi.ae`,
+  `machine.ae`, `hs.ae`'s init order); the printed Go of the committed forms equal to the edited files.
+- Profiled first (Go's pprof on HE8's compiled nfib): the machine's frames and allocation dominate, and
+  `GHC.Internal.Classes`, over `HSI_AOT_MAX_KB`, was interpreted whole. Built: an oversized library module compiled in part
+  (the profile's closures, kept by their list's digest; `HSI_AOT_PARTS=0` the old way); typed Go locals for the inline
+  primops' unlifted results, flushed into the frame only before something else reads it; call sites resolved once (a
+  global's function, a class method of a global dictionary) and entered directly; direct Go calls between compiled code,
+  bounded (`HSI_AOT_DEPTH`, default 4: 16 measured slower, none a little slower); the machine's case and update frames
+  pushed and popped in place (hsi gains 4-11 % too). Not done: a frameless evaluation of a case's scrutinee (designed,
+  estimated 1.15-1.3 times for 3-4 days, risky for exceptions, STM and `control0#`: HES74 (a)).
+- Results: compiled now against HE8's hsi 1.45 times on nfib 32 (5.84 → 4.04 s), tak 1.34, rfib 1.45, fibheaps 1.12, sphere
+  1.17 (against HE8's compiled 1.07-1.32); 3 times not reached: the survey's "As built: HES73", HES74 (recommended (c) then
+  (a): `-O1` STG for the compiled level, then frameless evaluation) and HES75. `bin/hsi check --aot` on GT8's essential list
+  123 of 123, all the same as hsi; samples and synthetic 62 of 63 (AsyncRerun in its class), all 63 the same as hsi; `bin/hsi
+  check` on the essential list 123 of 123; `bin/hsi runtime check` the same forms.
+- `bin/hsi cnodes`: the integration's race fixed, `bin/ci musl ensure` under a lock (`.tmp/hsi/cnodes-musl.lock`), a log per
+  job; two runs at once gave byte-identical node programs. Considered: preparing musl once in `bin/lib/hsi/check` before
+  the jobs (only the check would be safe; the lock covers every caller).
