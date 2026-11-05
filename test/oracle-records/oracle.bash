@@ -141,6 +141,8 @@ oracle_host_id() {  # TOOL
     chibi) oracle_scheme_id "${CHIBI:-chibi-scheme}" -V ;;
     ghc) oracle_ghc_id ;;
     rustc) oracle_rustc_id ;;
+    cxx) oracle_cxx_id ;;
+    llvm) oracle_llvm_id ;;
     *) echo "oracle: no identity recipe for $1" >&2; echo none ;;
   esac
 }
@@ -176,8 +178,34 @@ oracle_rustc_id() {  # GT9's :host-ids :rustc recipe (test/gate/crops/llvm-rust.
     for p in "$d"/lib/librustc_driver-*.so; do [ -f "$p" ] && { sha256sum < "$p" | cut -c1-64; m=1; }; done
     [ $m = 1 ] || echo "missing $d/lib/librustc_driver-*.so"; } | sha256sum | cut -c1-64
 }
+oracle_cxx_id() {  # bin/lib/gate-run.bash's gate_cxx_id (the :cxx host, CX10; GT9's :host-ids :cxx): g++'s and clang++'s --version lines, the digests of
+  # their drivers, cc1plus and clang's binary through their links, and of the headers C++'s checks read (test/cpp/host/headers.sha256's); none without either
+  local g c p
+  g=$(command -v g++) && c=$(command -v clang++) || { echo none; return; }
+  g=$(readlink -f "$g"); c=$(readlink -f "$c"); p=$(readlink -f "$(g++ -print-prog-name=cc1plus 2>"$TMPDIR/oracle-cxx.err")" 2>"$TMPDIR/oracle-cxx.err")
+  { g++ --version 2>"$TMPDIR/oracle-cxx.err" | head -1
+    clang++ --version 2>"$TMPDIR/oracle-cxx.err" | head -1
+    sha256sum < "$g" | cut -c1-64
+    if [ -f "$p" ]; then sha256sum < "$p" | cut -c1-64; else echo "no cc1plus"; fi
+    sha256sum < "$c" | cut -c1-64
+    awk '{print $2}' "$root/test/cpp/host/headers.sha256" 2>"$TMPDIR/oracle-cxx.err" | while read -r h; do
+      if [ -f "$h" ]; then sha256sum "$h"; else echo "missing $h"; fi; done; } | sha256sum | cut -c1-64
+}
+oracle_llvm_id() {  # GT9's :host-ids :llvm recipe (gt9-verbs: test/gate/steps.edn): llvm-as's --version lines, the digests of llvm-as, opt, lli and FileCheck of
+  # ${REPR_LLVM_BIN:-/usr/lib/llvm23/bin} and of ../lib/libLLVM.so.*; none without llvm-as
+  local b=${REPR_LLVM_BIN:-/usr/lib/llvm23/bin} f p m
+  [ -x "$b/llvm-as" ] || { echo none; return; }
+  { "$b/llvm-as" --version 2>"$TMPDIR/oracle-llvm.err"
+    for f in llvm-as opt lli FileCheck; do
+      if [ -f "$b/$f" ]; then sha256sum < "$(readlink -f "$b/$f")" | cut -c1-64; else echo "missing $b/$f"; fi; done
+    m=0
+    for p in "$b"/../lib/libLLVM.so.*; do [ -f "$p" ] && { sha256sum < "$(readlink -f "$p")" | cut -c1-64; m=1; }; done
+    [ $m = 1 ] || echo "missing $b/../lib/libLLVM.so.*"; } | sha256sum | cut -c1-64
+}
 oracle_host_version() {  # TOOL: its version line
   case $1 in
+    cxx) { g++ --version 2>"$TMPDIR/oracle-cxx.err" | head -1; clang++ --version 2>"$TMPDIR/oracle-cxx.err" | head -1; } | tr '\n' ';' | sed 's/;$//' ;;
+    llvm) "${REPR_LLVM_BIN:-/usr/lib/llvm23/bin}/llvm-as" --version 2>"$TMPDIR/oracle-llvm.err" | sed -n 2p | sed 's/^ *//' ;;
     gcc) gcc --version 2>"$TMPDIR/oracle-gcc.err" | head -1 ;;
     chez) "${CHEZ:-chez}" --version 2>&1 | head -1 ;;
     chibi) "${CHIBI:-chibi-scheme}" -V 2>&1 | head -1 ;;

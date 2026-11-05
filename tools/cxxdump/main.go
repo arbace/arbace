@@ -604,7 +604,13 @@ func main() {
 	layouts := flag.Bool("layouts", false, "also run a CodeGen pass with -fdump-record-layouts and write the main file's record layouts")
 	statsName := flag.String("stats", "", "write the run's numbers (bytes, declarations, seconds, peak memory) as one Clojure-reader map to FILE")
 	cacheDir := flag.String("cache", "", "keep the output in DIR by key (the arguments, the main file, clang's version), checked against the digests of every file the unit read")
+	records := flag.String("records", "", "serve the unit from recorded entries (a cache's layout, the unpacked packs: DIR[:DIR...]) with no clang: a miss is an error (ORS12 (a))")
+	clangIDFlag := flag.String("clang-id", "", "the clang line the key names, in place of clang --version's first line (with -records: the recorded one)")
 	flag.Parse()
+	clangID = *clangIDFlag
+	if clangID == "" {
+		clangID = os.Getenv("CXXDUMP_CLANG_ID")
+	}
 	args := flag.Args()
 	if *mainFile == "" && len(args) > 0 {
 		*mainFile = args[len(args)-1]
@@ -628,6 +634,21 @@ func main() {
 		os.Exit(2)
 	}
 	j := job{clang: *clang, args: args, opts: o, layouts: *layouts}
+	if *records != "" {
+		recordsOnly = true
+		k, err := j.key()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "cxxdump:", err)
+			os.Exit(exitOwn)
+		}
+		*cacheDir = strings.Split(*records, ":")[0]
+		for _, d := range strings.Split(*records, ":") {
+			if _, err := os.Stat(filepath.Join(d, k[:2], k+".status")); err == nil {
+				*cacheDir = d
+				break
+			}
+		}
+	}
 	if *cacheDir != "" {
 		st, hit, err := cached(*cacheDir, j, *outName)
 		if err != nil {

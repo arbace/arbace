@@ -428,7 +428,18 @@ func fileDigest(p string) (string, error) {
 	return hex.EncodeToString(h[:]), nil
 }
 
+// recordsOnly (ORS12 (a), -records): the cache is a pack of recorded entries read without clang: a miss is an error (unrecorded), clangID names the
+// recorded clang line in place of `clang --version`'s (the key's one clang part), and a dependency that is not on the host is not a stale entry (the
+// host has no such header or file: the record stands) while one that is there with another digest is.
+var (
+	recordsOnly bool
+	clangID     string
+)
+
 func clangVersion(clang string) string {
+	if clangID != "" {
+		return clangID
+	}
 	out, err := exec.Command(clang, "--version").Output()
 	if err != nil {
 		return "unknown"
@@ -495,6 +506,9 @@ func depsValid(depsFile string) bool {
 			return false
 		}
 		d, err := fileDigest(f[1])
+		if err != nil && recordsOnly && os.IsNotExist(err) {
+			continue
+		}
 		if err != nil || d != f[0] {
 			return false
 		}
@@ -543,6 +557,12 @@ func cached(dir string, j job, outName string) (stats, bool, error) {
 			fmt.Sscanf(string(b), "{:json-bytes %d :out-bytes %d :kept %d :dropped %d", &st.in, &st.out, &st.kept, &st.dropped)
 		}
 		return st, true, nil
+	}
+	if recordsOnly {
+		if _, err := os.Stat(base + ".status"); err == nil {
+			return st, false, fmt.Errorf("stale record %s: a file the unit read has another digest than the record's (bin/repr-cpp record-dumps, by hand)", k)
+		}
+		return st, false, fmt.Errorf("unrecorded: no record %s in the packs (bin/repr-cpp record-dumps, by hand on a host with clang)", k)
 	}
 	tmp := fmt.Sprintf("%s.%d.tmp", base, os.Getpid())
 	fh, err := os.Create(tmp)
