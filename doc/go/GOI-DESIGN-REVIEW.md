@@ -473,3 +473,7 @@ Expected: 11 programs from known or unsupported to pass, no other change; then `
    programs that observe positions: their source names `runtime.Caller`, `runtime.Callers` or a `/*line` directive
    (a rule, not a list; 0.2 day). *Recommended: (c)*: the positions programs pass and the rest keep testing the lines
    layout.
+
+## Decided (2026-11-05, the user: Proposed 8)
+
+Proposed 8 (c): the AOT level uses :full forms only for programs whose source names runtime.Caller/Callers or holds a /*line directive.
