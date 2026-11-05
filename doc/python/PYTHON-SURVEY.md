@@ -1751,7 +1751,7 @@ runs at native speed under goi; pyi's own Go around it is interpreted. `Lib/ssl.
   - SSLv3 and compression;
   - the cipher each side picks (Go's preference order, not OpenSSL's).
 - **Deferred** (class `:ssl-finalization`, PYS9's finalizer queue): an SSL object freed by `gc.collect()`.
-- **Not in this slice:** the x509roots/ bundle as the fallback store (DECISION in the report); an engine goroutine
+- **Not in this slice:** an engine goroutine
   is not ended when its SSL object dies (it waits on its channels for ever: one goroutine an abandoned connection);
   tamago (pyi's runtime is read for linux; Go's TLS would run there, the sockets would not).
 
@@ -1777,3 +1777,31 @@ runs at native speed under goi; pyi's own Go around it is interpreted. `Lib/ssl.
   SSLZeroReturnError once both shutdowns are seen. Fixed.
 - `test_ssl`'s `test_session` failed once in three runs: a resumed session's id changed when the server renewed the
   ticket. Fixed: a resumed session keeps its id and time, and the renewed ticket only replaces its state.
+
+### After the decisions (the user, 2026-11-05: (a) for both of 209's DECISIONs)
+
+- **DECISION 2, (a):** `OPENSSL_VERSION` stays "OpenSSL 3.5.0 (compatible; Go crypto/tls)", as built.
+- **DECISION 1, (a): the fallback store.** `set_default_verify_paths` (so `load_default_certs` and
+  `create_default_context`) keeps CPython's system store. When that store holds nothing (no certificate in the default
+  file, no certificate file in the default directories, after `$SSL_CERT_FILE` and `$SSL_CERT_DIR`), it takes the
+  checkout's x509roots/ bundle: Mozilla's 120 roots, each with its distrust-after date as a constraint on the chain
+  (Go's `CertPool.AddCertWithConstraint`; the bundle's rule: no certificate of the chain issued after the date). A chain
+  the rule refuses fails with code 28, "certificate rejected", as `_ssl`'s distrusted SPKIs do.
+  - The bundle reaches pyi's runtime through `go/arbace/pyssl` (package `arbace/pyssl` over `arbace/py` and
+    `arbace/x509roots/fallback/bundle`), a package apart as `arbace/pyexpat` is. Its `init` registers the roots
+    (`py.SetSSLFallbackRoots`). The interpreted runtime loads it on first need through the host's package loader, so a
+    run with a system store never loads the bundle's forms. goi interprets the bundle's forms, its `go:embed` of
+    `bundle.der` and its range-over-func iterator included. A compiled program links it (arbace.python.aot's main
+    imports it blank).
+  - bin/pyi: `x509roots/` is a source root of the interpreted runs (`ARBACE_PATH`), and the runtime's print, the AOT
+    module and its key carry `pyssl` and the bundle with `bundle.der`. `runtime check` reads `pyssl` back. This was
+    the REQUEST commit for the integration.
+  - Tests: `PYI_SSL_FALLBACK_ROOTS` names a PEM file that stands in for the bundle (no bundle root signs a test leaf).
+    A block's `Distrust-After: RFC 3339` header is its constraint. `_ssl._x509roots()` lists the fallback's roots as
+    (subject, distrust-after).
+  - Proof, `test/python/pyi/ssl/fallback.py` (its output in `fallback.out`, the same under `bin/pyi run` and
+    `bin/pyi aot`). It points the store at an empty directory and shows:
+    - the bundle's 120 roots, one with a date (Izenpe.com, 2026-04-15);
+    - the test leaf through the fallback, accepted unconstrained and with a later date, then refused with a date
+      before its issue (28);
+    - with a store again, the fallback not consulted.
