@@ -251,3 +251,215 @@ it). (b) `bin/cppi codegen-check` as an essential step once C++'s crop has a row
 ## Decided (2026-11-05, the user)
 
 P1-P7, each as recommended: LLVM forms as the output; the native tree as input now, C++ forms at G6; SysV's classification in G2; nounwind with G2; the headers in dependency order; clang's code (Apache-2.0 with the LLVM exception) ported for templates and the ABI classification only, recorded in LICENSE.md and doc/ARBACE.md; codegen-check essential once C++ has its row.
+
+## G3. Templates (branch `cpp-templates`, 2026-11-05)
+
+Status: the design and a first slice, built on `cpp-codegen` (P1-P7 decided), for the user's acceptance. It runs beside
+G2 (`cpp-codegen2`: exceptions, lambdas, inheritance, SysV) and keeps out of G2's areas; its code is a namespace of its
+own, `arbace.cpp.template` (`arbace/cpp/template.ae`), with hooks in `arbace.cpp.sema`, the template parts of
+`arbace.cpp.abi`'s mangling and one line of `arbace.cpp.codegen` (a linkonce_odr static), so that the two merge.
+
+Contents: G3.1 What clang does · G3.2 What the native tree gives · G3.3 The design · G3.4 Ported and written ·
+G3.5 Mangling · G3.6 What the libstdc++ headers demand first · G3.7 The check and the numbers · G3.8 What is not
+done · G3.9 The staged plan · G3.10 Proposed · G3.11 Sources.
+
+### G3.1 What clang does
+
+By clang's sources at `llvmorg-23.1.4` (the tarball pinned in `test/cpp/corpora.edn`, read from
+`.tmp/llvm/llvm-project-23.1.4.src.tar.xz`, its SHA-256 checked against the pin):
+
+| part | clang | what it does |
+|---|---|---|
+| the parser's hooks | `SemaTemplate.cpp`: `ActOnTemplateParameterList`, `ActOnTypeParameter`, `ActOnNonTypeTemplateParameter`, `ActOnClassTemplateSpecialization`, `CheckTemplateIdType`, `CheckTemplateArgumentList` | a template's parameter list and pattern entered; a template-id's arguments checked against the parameters (defaults added, packs gathered) and its type made (a specialization, dependent or not) |
+| deduction | `SemaTemplateDeduction.cpp`: `DeduceTemplateArguments` (a call's, a declaration's, a partial specialization's), `AdjustFunctionParmAndArgTypesForDeduction`, `DeduceTemplateArgumentsByTypeMatch`, `DeduceTemplateSpecArguments`/`DeduceTemplateBases`, `FinishTemplateArgumentDeduction` | P and A adjusted ([temp.deduct.call]/2-4), matched structurally under flags (`TDF_*`), the results checked for consistency, defaults substituted, the signature substituted (a failure there is SFINAE) |
+| partial ordering | `SemaTemplateDeduction.cpp`: `isAtLeastAsSpecializedAs`, `getMoreSpecializedTemplate`, `getMoreSpecializedPartialSpecialization` | deduction of each template's parameters from the other's types in a "partial ordering" mode ([temp.deduct.partial]: references and cv removed, the lvalue-reference and cv rules of /9; a trailing pack less specialized) |
+| instantiation | `SemaTemplateInstantiate.cpp` (`InstantiateClass`, `InstantiateClassMembers`, `SubstType`, `getPatternForClassTemplateSpecialization`), `SemaTemplateInstantiateDecl.cpp` (`InstantiateFunctionDefinition`, `InstantiateVariableDefinition`, `PerformPendingInstantiations`), `TreeTransform.h` | a class specialization's members declared from the pattern (TreeTransform substituting the arguments); a function's or member's definition instantiated when odr-used, queued as a pending instantiation and done at the end of the unit; the pattern chosen among the primary, the partial specializations (the most specialized matching) and an explicit specialization |
+| specializations | `SemaTemplate.cpp`: `CheckFunctionTemplateSpecialization`, `CheckMemberSpecialization` | `template <>` declarations matched to their template (deduction from the declared type for a function's) |
+| mangling | `ItaniumMangle.cpp`: `mangleTemplatePrefix`, `mangleTemplateArgs`, `mangleTemplateParameter`, `mangleIntegerLiteral`, `mangleFunctionEncodingBareType`, `mangleUnresolvedPrefix`, `mangleExpression` | `<template-args>` `I ... E`, `T_`, the template-prefix as a substitution candidate, a function template's specialization mangled with its template's signature and return type, dependent names (`N T_ 4type E`) and expressions (`X ... E`, `sr`) |
+
+### G3.2 What the native tree gives
+
+The native parser keeps a template as clang's dump shows it before instantiation: `ClassTemplateDecl`,
+`FunctionTemplateDecl`, `TypeAliasTemplateDecl`, `VarTemplateDecl` with their parameter declarations
+(`TemplateTypeParmDecl`, `NonTypeTemplateParmDecl` with the default as a `TemplateArgument` kid, `TemplateTemplateParmDecl`,
+`isParameterPack`) and the pattern; `ClassTemplatePartialSpecializationDecl` and `ClassTemplateSpecializationDecl`
+(the latter with its `TemplateArgument`s); out-of-line members as plain declarations whose text starts with `template
+<...>`; inside a pattern, every type as its spelling (`T (&)[N]`, `typename T::type`, `const Box<T> &`) and every name
+as its identifier, the dependent nodes clang's dump has (`CXXUnresolvedConstructExpr`, `UnresolvedMemberExpr`,
+`PackExpansionExpr`, `SizeOfPackExpr`, `DeclRefExpr`s without a resolved declaration). Not in the tree: a template-id's
+explicit arguments in an expression (`f<int>(x)`, `Box<int>::count`, `o.as<double>()`) and a partial
+specialization's arguments, which are read from the main file's text at the node's range (as G1 reads qualifiers).
+
+### G3.3 The design
+
+1. **Instantiation is re-analysis.** A pattern is syntax with spellings, and `arbace.cpp.sema` analyzes syntax: so a
+   specialization is the pattern declared again (`declare-node!`, `declare-fn!`, `declare-var!`) in a scope that binds the
+   template's parameter names to the arguments (a type to a type entity, a value to an enumerator's entity, a template
+   to the template, a pack to a pack entity). That is what clang's TreeTransform does by substitution; here no tree is
+   transformed and no dependent node needs a case of its own: `CXXUnresolvedConstructExpr` is analyzed as a construction,
+   a dependent call as a call, `T::type` as a qualified name, all at the instantiation. Two-phase lookup's first phase is
+   approximated by the cutoff G1 already has: a function template's body sees the names declared before its definition
+   (and ADL at the call adds the arguments' namespaces' functions and function templates).
+2. **A template's signature has its parameters as types.** For deduction, ordering and mangling, a function template's
+   declared type is resolved in a scope where each parameter stands for itself: `{:k :tparam :i i :tid tid}` (a type),
+   `{:k :tparam-v ...}` (a value: an array bound, an argument), `{:k :ttp ...}` (a template), and the dependent forms
+   built from them: `{:k :tspec}` (a template-id of dependent arguments, `Box<T>`), `{:k :tdep}` (`typename T::type`,
+   `remove_reference<T>::type`), `{:k :texpr}` (a dependent expression: `X<T>::value`, `!B`, `N + 1`, `sizeof(T)`),
+   `{:k :pack-exp}` (`Ts...`). Arguments are types, `{:val n :ty T}`, `{:tmpl tid}` and `{:pack [...]}`.
+3. **On use only.** A class specialization's members are declared with the class but their definitions are analyzed
+   only when a round of analysis references them (`:lazy`, made eager by the `:pending` hook: the functions a body
+   calls, the classes it names with their destructors and, when dynamic, every virtual function of their vtable, the
+   static members it reads), clang's pending instantiations; a body that does not compile for the arguments
+   (`never_used()` in `tmpl-stack.cpp`) is never analyzed. A function template's specialization is declared when a call
+   deduces it and defined when used. All are emitted `linkonce_odr` (codegen's inline linkage), static data members
+   included; explicit specializations are ordinary definitions.
+4. **Memoized by arguments.** Each template keeps `{args id}`; a class specialization is registered before its members
+   are declared, so a member naming the class (`Num<T>& twice()`, the injected-class-name) finds it.
+5. **SFINAE is a refusal caught.** A specialization whose declaration fails to analyze (`typename T::type` for `int`,
+   `enable_if<false>::type`) is not a candidate; deduction failures are nil (`CPP_TMPL_TRACE=1` prints each template
+   that drops out and why).
+6. **Overload resolution** takes the specializations each function template deduces with the plain candidates; the
+   tie-breaks of [over.match.best]/2.4-2.5 are a sema hook: a non-template over a specialization, then the more
+   specialized template by partial ordering.
+7. **Pattern selection** for a class: an explicit specialization, else the matching partial specializations (each one's
+   parameters deduced from the arguments, the non-deduced expressions checked against what was deduced) ordered by
+   [temp.class.order], else the primary.
+8. **Packs** are entities: a template parameter pack's name stands for its elements; a function parameter pack's name
+   for its parameters (`:param-packs`); a pack expansion in a parameter list, an argument list or an expression is
+   resolved or analyzed once per element in a scope binding each pack named in its pattern to that element.
+9. **The rest by the same means**: alias templates resolve their pattern's type in the binding scope (transparent, as
+   [temp.alias]/2 says); variable templates declare a variable per specialization (folded where used as a constant,
+   defined when odr-used); `if constexpr` evaluates its condition and analyzes the taken branch only; constructor
+   templates are candidates of a class's initialization; member templates and member class templates live in their
+   class's scope; out-of-line members of a class template are attached to each specialization of the primary, their own
+   header's names bound.
+
+The hooks sema calls (`arbace.cpp.sema/hooks`, installed by `arbace.cpp.template`): `:declare` (a template's nodes),
+`:template-id` (`(<> name args...)`), `:dependent-name` (`T::x` in a signature), `:const-bound` (an array bound),
+`:call-candidates`, `:ctor-candidates`, `:tiebreak`, `:pack-expand` (types), `:expand-pack` (expressions),
+`:var-template`, `:pending`, `:wrap` (the templates' state around an analysis). Sema itself changed where G3 needed the
+general rule: reference collapsing, a parameter's array or function type adjusted to a pointer ([dcl.fct]/5), the
+qualification adjustment's rank ([over.ics.rank]/3.2.6), an array's cv at its elements in reference binding, `if
+constexpr`, `sizeof...`, comparisons and logical operators in constant evaluation, a constant local's initializer
+kept, value-initialization by `T()`, a qualified name whose parts are template-ids split at the top level only, the
+analysis of a program as a worklist (declarations, then each round's pending definitions). repr/cpp's type reader
+(`arbace.repr.cpp.types`) now ends a template argument at a `,` or `>` outside parentheses only (`X<(a > b)>`).
+
+### G3.4 Ported and written (P6 (b))
+
+| part | origin |
+|---|---|
+| `deduce-by-type-match` | ported: `DeduceTemplateArgumentsByTypeMatch` (the flags `TDF_SkipNonDependent`, `TDF_ParamWithReferenceType`, `TDF_IgnoreQualifiers`, `TDF_DerivedClass`; the partial-ordering kind `Call` and its reference and cv rules; template type parameters with their qualifiers; pointers, references, arrays with a deduced bound, function types, template specializations, non-deduced contexts) for the types the slice has |
+| `adjust-for-deduction`, `forwarding-reference?` | ported: `AdjustFunctionParmAndArgTypesForDeduction`, `isForwardingReference` |
+| `deduce-template-spec` | ported: `DeduceTemplateSpecArguments` with `DeduceTemplateBases` (the unique base) |
+| `bind-arg!`, `inconsistent-or-superset?` | ported: `checkDeducedTemplateArguments`, `hasInconsistentOrSupersetQualifiersOf` |
+| `at-least-as-specialized?`, `more-specialized-fn?` | ported: `isAtLeastAsSpecializedAs` (a call's context) and `getMoreSpecializedTemplate`'s variadic rule |
+| the template parts of `arbace.cpp.abi`'s mangling | reimplemented after `ItaniumMangle.cpp`'s functions named in G3.1 and the ABI's §5.1 |
+| everything else (`declare-template`, instantiation, pattern selection, packs, the constant expressions of text, the pending definitions) | written, from the standard ([temp]) with clang's functions as the model; TreeTransform is not ported (G3.3, 1) |
+
+The ported functions keep their names' sense and structure, not their C++; the files carry clang's notice and
+LICENSE.md and doc/ARBACE.md record the origin (llvm-project at `llvmorg-23.1.4`, commit
+`7a941dfb2877a0b8cf30323fefa85ad019e0b0f5`; Apache-2.0 with the LLVM exceptions).
+
+### G3.5 Mangling
+
+Equal to clang's on every sample (the check's names level) and on the corpus files that pass: a class specialization's
+`<name> I <args> E` with the template-prefix and the specialization as substitution candidates (`3BoxIiE`,
+`N2ns3BoxIiEE`, `NS0_IcEE`); a value argument `L <type> <n> E` (`Li3E`, `Lin3E`, `Lb1E`, `Lm4E`); a function template's
+specialization with its template's signature and return type (`_Z4max2IiET_S0_S0_`, `_Z3lenIiLm4EEmRAT0__T_`); member
+templates (`_ZNK2ns3BoxIiE2asIdEET_v`), constructor templates (`_ZN4PairIliEC2IicEERKS_IT_T0_E`); dependent member
+types (`N9enable_ifIX...EiE4typeE`) and expressions (`Xsr6is_intIT_EE5valueE`, `XntsrT_5valueE`, `XgtplT_Li1ELi2EE`);
+packs (`IJidcEE`, `DpT_`); template template arguments and parameters (`I1DE`, `T_IiE`); variable template
+specializations (`_Z5widthIlE`).
+
+### G3.6 What the libstdc++ headers demand first
+
+From the host's libstdc++ 15.2.0 headers (`/usr/include/c++/15.2.0`, the ones the native parser reads, read here as
+input, never ported: GPL with the runtime exception): `<utility>` (`bits/move.h`, `bits/stl_pair.h`, `bits/utility.h`)
+and `<type_traits>` (4,197 lines) need, beyond this slice,
+
+- **the headers' bodies parsed and their text at hand**: the native parser skims headers into declarations; templates
+  need their patterns (G4's first task), and this slice reads explicit template arguments and qualifiers from the main
+  file's text (`node-text`), which must become the text of the node's own file;
+- **the type-trait builtins** clang provides and `<type_traits>` uses when `__has_builtin` says so: 47 distinct
+  (`__is_same`, `__is_class`, `__is_enum`, `__is_union`, `__is_trivially_copyable`, `__is_constructible`,
+  `__is_convertible`, `__is_base_of`, `__remove_reference`, `__remove_cv`, `__remove_cvref`, `__decay`,
+  `__add_pointer`, `__add_lvalue_reference`, `__add_rvalue_reference`, `__underlying_type`, `__type_pack_element`,
+  `__make_integer_seq`, ...), each a type or a constant of the arguments: a table in sema, each checked by a sample
+  against clang;
+- **inline namespaces and abi tags** (`std::__cxx11`, `B5cxx11`), `__attribute__((__always_inline__))`, `noexcept(expr)`,
+  `decltype` (the corpus's `decltype` refusals), `constexpr` functions evaluated (`std::forward` is constexpr, used in
+  constant contexts), defaulted template arguments that are SFINAE (`typename = _Require<...>`: already the slice's
+  shape, `tmpl-enable-if.cpp`), `__and_`/`__or_` (class templates over packs: the slice's packs);
+- `std::pair` itself needs its constructors' constraints (C++20 `requires` and `explicit(bool)` in libstdc++ 15 at
+  `-std=c++23`): concepts and `explicit(...)` are G3's next stage.
+
+The slice's `tmpl-utility.cpp`, `tmpl-traits.cpp` and `tmpl-enable-if.cpp` are those headers' shapes written out
+(`remove_reference`, `move`, `forward`, `pair`, `make_pair`, `swap`, `integral_constant`, `is_same`, `enable_if`).
+
+### G3.7 The check and the numbers
+
+The 32 samples `test/cpp/codegen/tmpl-*.cpp` (each with a header comment saying what it exercises) are judged by
+`bin/cppi codegen-check` with G1's 38, all three levels (run, native, names), against the empty known file.
+
+| check (2026-11-05, light) | result |
+|---|---|
+| `bin/cppi codegen-check` over `test/cpp/codegen` (38 + 32) | 70 of 70 pass; generate and lower about 50 s, gcc, clang and runs 6 s |
+| gcc 15.2.0's template run tests (`g++.dg/template`, `g++.old-deja/g++.pt`, `g++.dg/cpp0x`: the `dg-do run` files including no header beyond C's that clang accepts at `-std=c++23`, 288 files; read in place from the pinned tarball's extraction, not committed) | GXX_RESULT |
+| `bin/repr-cpp native-check samples` after repr/cpp's type reader change | 9 of 9 the same, 68 of 68 items |
+| the existing samples refused on templates at G1 (`auto.cpp`, `classes.cpp`, `p1-first.cpp`) | past their templates; refused next on `auto` return types, `try` (G2) and a concept |
+
+GXX_CLASSES
+
+### G3.8 What is not done (refused with a class)
+
+Concepts and `requires` (`ConceptDecl`, constrained parameters), class template argument deduction, `explicit(bool)`,
+conversion function templates (with G2's conversion functions), templates' friends (`friend` functions defined in a
+class template), explicit specializations of member templates (`template <> template <> ...`), pointer and reference
+non-type parameters (`template <void (*F)(int)>`, `template <const char *N>`), defaults of template template parameters,
+`decltype` and `auto` (deduced return types: G2's `auto`), a class template's static member initialized dynamically (its
+guard variable, `_ZGV...`), packs in partial specializations and in a class's pattern beyond a trailing parameter,
+dependent expressions of kinds beyond G3.5's (calls, casts in signatures), and two-phase lookup's exact first phase.
+
+### G3.9 The staged plan
+
+| stage | what | target | estimate |
+|---|---|---|---|
+| **G3a** (this branch) | G3.3-G3.5 as built | 32 samples; the gcc corpus as measured | done |
+| **G3b** | the refusals of G3.8 that the corpus counts most: pointer and reference non-type parameters, friends of class templates, member templates' explicit specializations, template template defaults, `decltype` in signatures (with G2's `auto`), guarded statics of templates | 80 % of the gcc template corpus that needs nothing of G2 | 1-2 |
+| **G3c** | concepts (`SemaConcept.cpp`'s satisfaction, constrained overloads ordered by subsumption, `requires` expressions), CTAD (`SemaTemplateDeductionGuide.cpp`), `explicit(bool)`, `noexcept(expr)` | the libstdc++ 15 constructs of G3.6 at `-std=c++23` | 2-3 |
+| **G3d** | with G4: header bodies parsed, each node's text from its own file, the type-trait builtins | `<utility>` and `<type_traits>` samples by our route | with G4 |
+
+### G3.10 Proposed
+
+**P8. The template corpus.** (a) gcc's run tests as measured here, read in place from the gcc tarball's extraction, the
+list made by a rule (no header beyond C's, accepted by clang at `-std=c++23`), not committed. (b) The same with the list
+and its recorded results committed (`test/cpp/codegen/gxx-templates.tsv`, `gxx-templates-results.edn`, a judge as
+`lower-check`'s with a known file), `bin/cppi codegen-check --corpus gxx-templates`; costs a known file to keep. (c)
+(b) plus llvm-test-suite's `SingleSource` C++ programs (not fetched). **Recommended: (b)**: the measure becomes a
+regression check at light cost (the 288 files run in about 3 minutes).
+
+**P9. Instantiation by re-analysis or by substitution.** (a) Re-analysis of the pattern in a binding scope (as built):
+small, every construct sema knows works in templates at once; costs the first phase of two-phase lookup's exactness
+(a name visible at the definition but declared after it is approximated by the cutoff) and repeats the analysis per
+specialization. (b) A port of TreeTransform's substitution over analyzed patterns: clang's exact behaviour; costs
+analyzing dependent patterns (a dependent type system in sema) and a port of TreeTransform's 18,000 lines' worth of
+cases. **Recommended: (a)**, revisited if the corpus finds a program whose meaning differs by lookup phase.
+
+**P10. Where explicit template arguments come from.** (a) The main file's text at the node's range (as built). (b) The
+native parser records them in its tree (a `TemplateArgument` list on `DeclRefExpr` and `MemberExpr`, the explicit arguments clang's
+`DeclRefExpr::template_arguments` holds): no text reading, headers work as the main file; costs a parser change
+and native-check's comparison of the new field. **Recommended: (b) before G4**, which needs it for the headers.
+
+### G3.11 Sources
+
+- The standard: ISO/IEC 14882:2024, [temp] (in particular [temp.param], [temp.names], [temp.arg], [temp.class.spec],
+  [temp.class.order], [temp.func.order], [temp.deduct], [temp.deduct.call], [temp.deduct.partial], [temp.deduct.type],
+  [temp.inst], [temp.expl.spec], [temp.variadic], [temp.alias]), [over.match.best], [over.ics.rank], [dcl.fct], [dcl.ref].
+- The Itanium C++ ABI §5.1 (mangling: templates, substitutions, expressions).
+- clang at `llvmorg-23.1.4`, commit `7a941dfb2877a0b8cf30323fefa85ad019e0b0f5`: `clang/lib/Sema/SemaTemplate.cpp`,
+  `SemaTemplateDeduction.cpp` (ported in part, G3.4), `SemaTemplateInstantiate.cpp`, `SemaTemplateInstantiateDecl.cpp`,
+  `SemaTemplateVariadic.cpp`, `TreeTransform.h` (read as the model), `clang/lib/AST/ItaniumMangle.cpp` (reimplemented in
+  part), `clang/LICENSE.TXT`; extracted from the pinned tarball into the worktree's `.tmp/llvm/`.
+- gcc 15.2.0's testsuite (the tarball pinned for repr/c, extracted in `.tmp/repr-c/`): the corpus of G3.7, read as input.
+- libstdc++ 15.2.0's headers on the host (G3.6), read as input.

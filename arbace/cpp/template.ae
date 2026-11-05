@@ -395,7 +395,7 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; Deduction ([temp.deduct.type]): P (a signature's type with the template's parameters) matched against A
 
-(defn- tparam-of? [x tid] (and (map? x) (= tid (:tid x)) (#{:tparam :tparam-v} (:k x))))
+(defn- tparam-of? [x tid] (and (map? x) (= tid (:tid x)) (#{:tparam :tparam-v :ttp} (:k x))))
 
 ;; Qualifiers: an array's are its elements' ([basic.type.qualifier]/3), as clang's getUnqualifiedArrayType sees them
 (defn- arr-cv [t] (if (abi/arr? t) (arr-cv (:of t)) t))
@@ -690,6 +690,14 @@
     (enter! ps (:name t) {:e :type :ty {:k :class :id cid} :pos -1})
     (upd-tmpl! tid assoc-in [:insts args] cid)
     (when (:completeDefinition node)
+      ;; the bases dependent in the pattern, which unqualified lookup in the specialization does not search
+      (when-not explicit?
+        (let [ss (bind-scope (:scope t) params nil (next-id))]
+          (abi/update-cls! cid assoc :dep-bases
+                           (set (keep-indexed (fn [i bs] (when (try (dependent? (sema/resolve-type ss (get-in bs [:type :qualType])))
+                                                                    (catch arbace.lang.ExceptionInfo _ true))
+                                                           i))
+                                              (:bases node))))))
       (binding [sema/*cutoff* Long/MAX_VALUE]
         (sema/declare-node! ps (assoc (strip-tparam-kids node) :kind "CXXRecordDecl")))
       ;; the members' definitions: instantiated when used ([temp.inst]/11), linkonce_odr as clang writes them
@@ -842,13 +850,24 @@
              (when-not vid (fail :template "no static member " (:name n) " of " (:name t) " to define"))
              (upd-var! vid assoc :init (first (kids n)) :init-style (:init n) :def-scope s :pending-def true :linkonce true :internal (boolean (:internal (:outer c))) :internal-l false)))))
 
+(declare attach-member-template!)
+
 (defn- attach-ool!
   "The out-of-line member definitions of the template `tid` given to its specialization `cid`."
   [tid cid]
-  (doseq [o (:ool (tmpl tid))] (attach-one! tid cid o)))
+  (doseq [o (:ool (tmpl tid))] (attach-one! tid cid o))
+  (doseq [o (:ool-tmpls (tmpl tid))] (attach-member-template! cid o (:params (tmpl tid)))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Function templates: specializations
+
+(defn- tn-types
+  "For a function template (overloadable, so its arguments name their parameters when not natural:
+  ItaniumMangle.cpp's needToMangleTemplateParam): each non-type parameter's declared type when it is dependent
+  (template <class T, T v>: Tn T_), else nil."
+  [t]
+  (let [ss (sym-scope t)]
+    (mapv (fn [p] (when (= :value (:kind p)) (let [ty (param-type ss p)] (when (dependent? ty) ty)))) (:params t))))
 
 (defn- name-pack-params!
   "A specialization's parameters from a function parameter pack (Ts... ts): their names, the pack's name standing for
@@ -876,7 +895,7 @@
             fid (binding [sema/*cutoff* Long/MAX_VALUE] (#'sema/declare-fn! ps (:pattern t)))
             ;; the specialization is found through its template, not by its name in the parameters' scope
             _ (.remove ^java.util.HashMap (:names ps) (:name (:pattern t)))]
-        (upd-fn! fid assoc :lazy true :inline true :keep-def-scope true :tinst {:tid tid :args args :tsig (sym-sig t)})
+        (upd-fn! fid assoc :lazy true :inline true :keep-def-scope true :tinst {:tid tid :args args :tsig (sym-sig t) :tn (tn-types t)})
         (name-pack-params! fid (:pattern t))
         (upd-tmpl! tid assoc-in [:insts args] fid)
         fid)))
@@ -925,7 +944,7 @@
         ps (new-scope :tparams scope :internal (:internal scope))
         fid (#'sema/declare-fn! ps n)
         _ (.remove ^java.util.HashMap (:names ps) (:name n))]
-    (upd-fn! fid assoc :tinst {:tid (:id t) :args args :tsig (sym-sig t)} :keep-def-scope true)
+    (upd-fn! fid assoc :tinst {:tid (:id t) :args args :tsig (sym-sig t) :tn (tn-types t)} :keep-def-scope true)
     (upd-tmpl! (:id t) assoc-in [:insts args] fid)
     :template))
 
@@ -994,6 +1013,36 @@
                           (dissoc :lazy :keep-def-scope :analyzed)))))
     :template))
 
+(defn- attach-member-template!
+  "A member template defined outside its class (o: {:node FunctionTemplateDecl :pnames outer names}) given to the
+  class `cid`'s member template of its name: its pattern, parameters and a scope binding the outer names."
+  [cid o outer-params]
+  (let [n (:node o)
+        c (abi/cls cid)
+        params (tparams n)
+        mid (some #(when (and (= :tmpl (:e %)) (= :fn (:tk %)) (= (count params) (count (:params (tmpl (:id %)))))) (:id %))
+                  (.get ^java.util.HashMap (:names (:scope c)) (:name n)))]
+    (when-not mid (fail :template "no member template " (:name n) " to define"))
+    (upd-tmpl! mid assoc :pattern (first (filter #(#{"FunctionDecl" "CXXMethodDecl"} (:kind %)) (kids n))) :params params :sig nil
+               :scope (if (seq (:pnames o))
+                        (bind-scope (:scope c) (mapv (fn [nm p] {:name nm :kind (:kind p)}) (:pnames o) outer-params) (:targs c) nil)
+                        (:scope c)))))
+
+(defn- ool-member-template!
+  "template <class T> template <class U> R A<T>::f(U) {...}: the member template's definition for each specialization
+  of the primary; template <> template <class U> R A<int>::f(U): for that specialization only."
+  [scope n [cn qt]]
+  ;; the pattern's range starts at the outer template header (the FunctionTemplateDecl's at the inner one)
+  (let [text (or (node-text (first (filter #(#{"FunctionDecl" "CXXMethodDecl"} (:kind %)) (kids n)))) "")]
+    (if (re-find #"^\s*template\s*<\s*>" text)
+      (let [cls (sema/resolve-type scope qt)]
+        (attach-member-template! (:id cls) {:node n :pnames []} []))
+      (let [tid (or (some #(when (and (= :tmpl (:e %)) (= :class (:tk %))) (:id %)) (sema/lookup scope cn)) (fail :template "no class template " cn))
+            o {:node n :pnames (header-params text)}]
+        (upd-tmpl! tid update :ool-tmpls (fnil conj []) o)
+        (doseq [[_ cid] (:insts (tmpl tid))] (when (:from-primary (abi/cls cid)) (attach-member-template! cid o (:params (tmpl tid)))))))
+    :template))
+
 (defn declare-template
   "The :declare hook: a template's declaration node entered (nil when the node is not one of a template's)."
   [scope n]
@@ -1009,6 +1058,8 @@
             (enter! scope (:name n) {:e :tmpl :tk :class :id tid :pos (long (or (:_b n) 0))})))
       :template)
     "FunctionTemplateDecl"
+    (if-let [q (ool-qualifier (first (filter #(#{"FunctionDecl" "CXXMethodDecl" "CXXConstructorDecl" "CXXConversionDecl"} (:kind %)) (kids n))))]
+      (ool-member-template! scope n q)
     (let [pattern (first (filter #(#{"FunctionDecl" "CXXMethodDecl" "CXXConstructorDecl" "CXXConversionDecl"} (:kind %)) (kids n)))
           _ (when (= "CXXConversionDecl" (:kind pattern)) (fail :template "a conversion function template"))
           ctor? (= "CXXConstructorDecl" (:kind pattern))
@@ -1028,7 +1079,7 @@
           (if ctor?
             (abi/update-cls! (:cls scope) update :ctor-tmpls (fnil conj []) tid)
             (enter! scope (:name n) {:e :tmpl :tk :fn :id tid :pos (long (or (:_b n) 0))}))))
-      :template)
+      :template))
     ;; an explicit instantiation (template struct A<int>; extern template ...): the definitions clang emits weak_odr are
     ;; emitted here only when used (the names check takes ours among clang's)
     "ExplicitInstantiationDecl" :template
@@ -1075,6 +1126,7 @@
           (upd-tmpl! tid update :ool conj o)
           (doseq [[_ cid] (:insts (tmpl tid))] (when (:from-primary (abi/cls cid)) (attach-one! tid cid o)))
           :template)
+        (re-find #"^\s*template\s*<\s*>\s*template" text) (fail :template "an explicit specialization of a member template")
         ;; an explicit specialization of a member of a class template's specialization (template <> int Box<int>::get())
         (re-find #"^\s*template\s*<\s*>" text) (explicit-member-spec! scope n)
         :else nil))
@@ -1129,7 +1181,6 @@
         (upd-fn! id dissoc :lazy)
         (swap! out conj [:fn id]))
       (doseq [id (:vars @acc) :let [v (sema/var* id)] :when (:pending-def v)]
-        (when (and (:init v) (not (re-find #"^(c|list)$" (str (:init-style v))))) nil)
         (upd-var! id #(-> % (assoc :defined true) (dissoc :pending-def)))
         ;; a constant integral variable's initializer folded, as clang emits it (a constant, no guard)
         (let [t (:ty v)]

@@ -68,7 +68,7 @@
   "The entities `nm` names in `scope` itself (a class: with its bases', [class.member.lookup])."
   [scope ^String nm]
   (if (= :class (:kind scope))
-    (seq (map second (class-lookup (:cls scope) nm)))
+    (seq (map second (class-lookup (:cls scope) nm true)))
     (seq (own-names scope nm))))
 
 (declare header-entities)
@@ -86,12 +86,15 @@
 (defn class-lookup
   "[[class-id entity] ...]: the members named `nm` in class `id` or, if none, in its bases (the first base that has
   them, depth first: single inheritance's answer)."
-  [id ^String nm]
-  (let [c (abi/cls id)
-        own (seq (.get ^java.util.HashMap (:names (:scope c)) nm))]
-    (if own
-      (mapv (fn [e] [id e]) own)
-      (some #(seq (class-lookup (:cls %) nm)) (:bases c)))))
+  ([id ^String nm] (class-lookup id nm false))
+  ([id ^String nm unqualified?]
+   (let [c (abi/cls id)
+         own (seq (.get ^java.util.HashMap (:names (:scope c)) nm))]
+     (if own
+       (mapv (fn [e] [id e]) own)
+       ;; an unqualified name in a template's specialization does not look into a base that was dependent in the
+       ;; pattern ([temp.dep]/4: two-phase lookup's first phase; this-> and qualified names do)
+       (some #(seq (class-lookup (:cls %) nm unqualified?)) (if unqualified? (remove :dependent (:bases c)) (:bases c)))))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Types from clang's qualType strings
@@ -122,6 +125,14 @@
 (defn header-entities
   "Our entities for the header declaration the parts name ([\"printf\"], [\"std\" \"printf\"]), or nil."
   [parts]
+  (if (= parts ["__builtin_abort"])
+    ;; the builtin clang calls as abort (CodeGen's EmitBuiltinExpr for __builtin_abort)
+    (or (get @*header-cache* parts)
+        (let [id (next-id)]
+          (swap! *fns* assoc id {:id id :name "abort" :kind :fn :ty {:k :fn :ret abi/void :ps [] :va false} :linkage :c :path []
+                                 :scope *root* :param-names [] :defaults [] :pos -1 :header true})
+          (swap! *header-cache* assoc parts [{:e :fn :id id :pos -1}])
+          [{:e :fn :id id :pos -1}]))
   (when *proot*
     (or (get @*header-cache* parts)
         (let [pe (loop [s *proot* [p & more] parts]
@@ -140,7 +151,7 @@
                      :type (when (and (:ty pe) (not (:tag pe)) (not (:tmpl pe))) [{:e :type :ty (ptype->type (:ty pe)) :pos -1}])
                      nil))]
           (swap! *header-cache* assoc parts es)
-          es))))
+          es)))))
 
 (def ^:private builtin-syms
   {'void :void 'bool :bool 'char :char 'signed-char :schar 'unsigned-char :uchar 'short :short 'unsigned-short :ushort
@@ -262,7 +273,9 @@
      (loop [s (if global? root nil) [p & more] parts]
        (let [es (when-not (str/includes? p "<") (if s (find-here s p) (lookup scope p)))]
          (if (empty? more)
-           (or (seq es) (when (and (nil? s) (= :ns (:kind scope))) nil) (header-entities parts))
+           (if (str/includes? p "<")
+             [{:e :type :ty (resolve-type (or s scope) p) :pos -1}] ; a template-id names a type (A<int>)
+             (or (seq es) (when (and (nil? s) (= :ns (:kind scope))) nil) (header-entities parts)))
            (let [e (if (str/includes? p "<")
                      {:e :type :ty (resolve-type (or s scope) p)} ; a template-id (Box<int>::count)
                      (first (filter #(#{:ns :type} (:e %)) es)))
@@ -416,11 +429,13 @@
       (when (= "union" (:tagUsed n)) (fail :union "union " nm))
       (when nm (.put ^java.util.HashMap (:names cs) nm [{:e :type :ty t :pos -1}])) ; the injected-class-name
       (abi/update-cls! id assoc :complete true
-                       :bases (vec (for [bs (:bases n)]
+                       :bases (vec (for [[bi bs] (map-indexed vector (:bases n))]
                                      (let [bt (resolve-type scope (get-in bs [:type :qualType]))]
                                        (when (:isVirtual bs) (fail :virtual-base "virtual base"))
-                                       {:cls (:id bt) :access (keyword (or (#{"public" "protected" "private"} (:writtenAccess bs))
-                                                                            (if (= "class" (:tagUsed n)) "private" "public")))}))))
+                                       (cond-> {:cls (:id bt) :access (keyword (or (#{"public" "protected" "private"} (:writtenAccess bs))
+                                                                                    (if (= "class" (:tagUsed n)) "private" "public")))}
+                                         ;; a base dependent in a template's pattern (CODEGEN.md G3: [temp.dep]/4)
+                                         (contains? (:dep-bases (abi/cls id)) bi) (assoc :dependent true))))))
       (when (> (count (filter #(abi/dynamic? (:cls %)) (:bases (abi/cls id)))) 1) (fail :multiple-inheritance "two dynamic bases"))
       (when (> (count (:bases (abi/cls id))) 1) (fail :multiple-inheritance "multiple bases"))
       (let [access (atom (if (= "class" (:tagUsed n)) :private :public))]
@@ -463,7 +478,7 @@
     "UsingDecl" (let [t (node-text n)
                       [_ target] (re-find #"using\s+([^;]+);?\s*$" (or t ""))
                       parts (vec (map str/trim (remove str/blank? (str/split (str/trim target) #"::"))))
-                      es (lookup-qualified scope parts)]
+                      es (lookup-qualified scope parts (str/starts-with? (str/trim target) "::"))]
                   (doseq [e es] (enter! scope (last parts) (assoc e :pos (long (or (:_b n) 0))))))
     ("EmptyDecl" "StaticAssertDecl" "AccessSpecDecl" "FriendDecl") nil
     (fail :decl "declaration " (:kind n)))))
@@ -1109,8 +1124,9 @@
         nm (:name n)
         ;; a qualified member (o.B::f): looked up in B, called without virtual dispatch
         q (let [t (or (node-text n) "")
-                m (re-find #"(?:\.|->)\s*((?:[A-Za-z_][A-Za-z_0-9]*\s*::\s*)+)~?[A-Za-z_][A-Za-z_0-9]*\s*$" t)]
-            (when m (vec (map str/trim (remove str/blank? (str/split (second m) #"::"))))))
+                m (re-find #"(?:\.|->)\s*((?:[A-Za-z_][A-Za-z_0-9]*\s*(?:<[^.]*>)?\s*::\s*)+)~?[A-Za-z_][A-Za-z_0-9]*\s*(?:<.*>)?\s*$" t)]
+            ;; the qualifier's parts, a template-id among them (o.A<int>::f)
+            (when m (vec (map str/trim (remove str/blank? (split-scope (second m)))))))
         qcid (when (seq q) (let [e (first (filter #(= :type (:e %)) (lookup-qualified (:scope ctx) q)))] (class-id (:ty e))))]
     (when-not cid (fail :member "member of a non-class"))
     (let [[fcid fids e] (method-set-of (or qcid cid) nm)
