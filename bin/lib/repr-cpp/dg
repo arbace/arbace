@@ -1,0 +1,132 @@
+#!/bin/bash
+# C++'s dg check (doc/cpp/CPP-SURVEY.md, "As built: CX9 (write-ahead)"; arbace.repr.cpp.dg, its header): gcc 15.2.0's g++.dg
+# tests by their DejaGnu directives, in three parts, each file of g++.dg in at most one:
+#   dg-error    the files with a dg-error directive (not preprocess, not modules/): each run as DejaGnu runs it at one
+#               standard; the oracle (clang 23.1.4 through tools/cxxdump) accepts the unit, then repr/cpp reads it into
+#               forms, or rejects it with its errors; the errors' lines judged against the dg-error lines (C's verdicts);
+#   preprocess  the dg-do preprocess files: the shared preprocessor's errors judged the same way;
+#   modules     modules/ but its preprocess files: each file read and printed as a single translation unit by the round
+#               trip (bin/lib/repr-cpp/roundtrip --no-objects, key gxx-modules-*: test/repr/cpp/roundtrip-oracle.edn,
+#               roundtrip-results/gxx-modules-*.edn, roundtrip-known.edn), an importer the oracle's rejection.
+# g++ 15.2, the reference, is run on the dg-error and preprocess files with the same options (-S, -E for preprocess) only
+# with --record-ref (its errors by line recorded in test/cpp/ref-dg-gxx15.edn; the judge reads the record).
+#
+# Usage: bin/repr-cpp dg [--corpus dg-error,preprocess,modules] [--dirs D,...] [--only LIST] [--sample N]
+#                        [--record] [--record-ref] [--judge]
+#   --corpus   the parts (default dg-error,preprocess)
+#   --dirs     only the files under these directories of g++.dg (`.` its top level)
+#   --only     only the files of LIST (names under g++.dg/ or gxx-dg/NAME, one a line)
+#   --sample   every Nth file of the part
+#   --record   the part's record rewritten from the run (test/cpp/check-dg-linux-amd64.edn, the preprocess part's
+#              test/repr/cpp/dg-preprocess-results.edn; the rows of files not run kept) and the seconds (test/cpp/dg-times.edn);
+#              for modules, the round trip's --record-oracle --record-results
+#   --record-ref  g++ run on the files, its errors merged into test/cpp/ref-dg-gxx15.edn
+#   --judge    the last run judged again, nothing run
+# Writes under .tmp/repr-cpp-dg/ (REPR_CPP_DG_WORK): PART/{dg.edn,run.tsv,clang/,forms/,read.edn,rows.edn,gxx/}.
+# The light tier: REPR_CPP_THREADS (default 4) jobs, GOMAXPROCS=4 and GOMEMLIMIT=1500MiB unless set.
+set -uo pipefail
+root=$(cd "$(dirname "$0")/../../.." && pwd)
+. "$root/bin/lib/tmpdir.bash"
+. "$root/bin/lib/tools.bash"
+cd "$root"
+parts=dg-error,preprocess dirs= only= sample= record= recref= judge=
+while [ $# -gt 0 ]; do
+  case $1 in
+    --corpus) parts=$2; shift 2 ;;
+    --dirs) dirs=$2; shift 2 ;;
+    --only) only=$(cd "$(dirname "$2")" && pwd)/$(basename "$2"); shift 2 ;;
+    --sample) sample=$2; shift 2 ;;
+    --record) record=1; shift ;;
+    --record-ref) recref=1; shift ;;
+    --judge) judge=1; shift ;;
+    *) sed -n '15,28p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+  esac
+done
+export GOMAXPROCS=${GOMAXPROCS:-4} GOMEMLIMIT=${GOMEMLIMIT:-1500MiB}
+jobs=${REPR_CPP_THREADS:-4}; export REPR_CPP_THREADS=$jobs
+work=${REPR_CPP_DG_WORK:-$root/.tmp/repr-cpp-dg}
+mkdir -p "$work"; work=$(cd "$work" && pwd)
+main=$root
+case $root in */.tmp/worktrees/*) main=${root%%/.tmp/worktrees/*} ;; esac
+# g++.dg: the pinned tarball's tree (pp-check's extraction, else C's), its count checked by the lists
+gxxdg=${REPR_CPP_GXX_DG:-}
+for c in "$root/.tmp/cpp-gcc/gcc-15.2.0/gcc/testsuite/g++.dg" "$main/.tmp/cpp-gcc/gcc-15.2.0/gcc/testsuite/g++.dg" "$main/.tmp/repr-c/gcc-15.2.0/gcc/testsuite/g++.dg"; do
+  [ -n "$gxxdg" ] || { [ -d "$c" ] && gxxdg=$c; }
+done
+[ -n "$gxxdg" ] || { echo "repr-cpp dg: no g++.dg tree (bin/repr-cpp pp-check extracts the pinned tarball; or REPR_CPP_GXX_DG)" >&2; exit 1; }
+exe=${REPR_CPP_CXXDUMP_EXE:-$root/.tmp/repr-cpp/cxxdump}
+[ -x "$exe" ] || "$root/bin/repr-cpp" cxxdump-build >&2
+cache=${REPR_CPP_CXXDUMP_CACHE:-$root/.tmp/repr-cpp/cxxdump-cache}
+mkdir -p "$cache"
+# arbace.c.dg is embedded in the executable (C9): -s loads the checkout's (its dg-line names, review 196's finding 4)
+filt() { grep -v 'Reflection\|recur arg\|Auto-boxing' | head -c 200000; }
+
+# the --dirs filter as an --only list
+if [ -n "$dirs" ] && [ -z "$only" ]; then
+  only=$work/dirs.list; : > "$only"
+  IFS=, read -r -a ds <<< "$dirs"
+  for d in "${ds[@]}"; do
+    if [ "$d" = . ]; then (cd "$gxxdg" && find . -maxdepth 1 -type f | sed 's#^\./##') >> "$only"
+    else (cd "$gxxdg" && find "$d" -type f) >> "$only"; fi
+  done
+fi
+
+clang1() { # NAME CLANG-ARGS: the oracle's dump of the file, its status, diagnostics and seconds
+  local n=$1 cargs=$2 o t0 t1
+  o=$wd/clang/${n//\//__}
+  t0=$(date +%s%N)
+  # shellcheck disable=SC2086
+  (cd "$gxxdg" && timeout 300 "$exe" -implicit=false -cache "$cache" -o "$o.edn" -- -x c++ -std=$3 $cargs -ferror-limit=0 -Wno-unknown-warning-option -iquote "$(dirname "$gxxdg/$n")" "$n") > "$o.err" 2>&1
+  echo $? > "$o.status"
+  t1=$(date +%s%N)
+  echo "$(( (t1 - t0) / 1000000 ))" | awk '{printf "%.3f\n", $1/1000}' > "$o.secs"
+}
+gxx1() { # NAME STD G++-ARGS ACTION: g++'s diagnostics of the file (-S, or -E), filtered to its diagnostic lines
+  local n=$1 std=$2 gargs=$3 act=$4 o
+  o=$wd/gxx/${n//\//__}
+  # shellcheck disable=SC2086
+  (cd "$gxxdg" && LC_ALL=C timeout 300 g++ -x c++ -std=$std $gargs -fdiagnostics-plain-output -iquote "$(dirname "$gxxdg/$n")" $([ "$act" = preprocess ] && printf %s -E || printf %s -S) -o "$o.out" "$n") 2>&1 \
+    | grep -a -E '^[^ ][^ ]*:[0-9]+:([0-9]+:)? (fatal error|error|warning|note): |^[^ :][^ :]*: (fatal error|error): ' | head -c 1000000 > "$o.txt"
+  echo "${PIPESTATUS[0]}" > "$o.status"
+  rm -f "$o.out"
+}
+export -f clang1 gxx1; export exe cache gxxdg
+
+status=0
+IFS=, read -r -a ps <<< "$parts"
+for part in "${ps[@]}"; do
+  wd=$work/$part; export wd
+  if [ "$part" = modules ]; then
+    if [ -z "$judge" ]; then
+      arbace_tool -s arbace.c.dg -m arbace.repr.cpp.dg lists "$work" "$gxxdg" modules "${only:--}" "${sample:--}" 2>&1 | filt
+    fi
+    rt=(--no-objects)
+    [ -z "$record" ] || rt+=(--record-oracle --replace-oracle --record-results --replace-results)
+    "$root/bin/lib/repr-cpp/roundtrip" "$wd/roundtrip.list" "$wd/rt" "${rt[@]}" --jobs "$jobs" 2>&1 | filt
+    [ "${PIPESTATUS[0]}" -eq 0 ] || status=1
+    continue
+  fi
+  if [ -z "$judge" ]; then
+    rm -rf "${wd:?}/clang" "$wd/forms" "$wd/gxx" "$wd/read.edn" "$wd/gxx.edn"
+    mkdir -p "$wd/clang" "$wd/gxx"
+    arbace_tool -s arbace.c.dg -m arbace.repr.cpp.dg lists "$work" "$gxxdg" "$part" "${only:--}" "${sample:--}" 2>&1 | filt
+    [ "${PIPESTATUS[0]}" -eq 0 ] || { echo "repr-cpp dg: the lists failed" >&2; exit 1; }
+    t0=$(date +%s)
+    if [ "$part" = dg-error ]; then
+      tr '\t\n' '\037\0' < "$wd/run.tsv" | xargs -0 -r -P "$jobs" -I{} nice bash -c 'IFS=$'"'"'\037'"'"' read -r n s g c <<< "$1"; clang1 "$n" "$c" "$s"' _ {}
+    fi
+    t1=$(date +%s)
+    arbace_tool -s arbace.c.dg -m arbace.repr.cpp.dg read "$work" "$part" 2>&1 | filt
+    t2=$(date +%s)
+    if [ -n "$recref" ]; then
+      act=compile; [ "$part" = preprocess ] && act=preprocess
+      tr '\t\n' '\037\0' < "$wd/run.tsv" | xargs -0 -r -P "$jobs" -I{} nice bash -c 'IFS=$'"'"'\037'"'"' read -r n s g c <<< "$1"; gxx1 "$n" "$s" "$g" '"$act" _ {}
+      arbace_tool -s arbace.c.dg -m arbace.repr.cpp.dg ref "$work" "$part" --record 2>&1 | filt
+    fi
+    t3=$(date +%s)
+    echo "$part: oracle $((t1-t0)) s, read $((t2-t1)) s, g++ $((t3-t2)) s" | tee "$wd/times.txt"
+  fi
+  arbace_tool -s arbace.c.dg -m arbace.repr.cpp.dg judge "$work" ${record:+--record} "$part" 2>&1 | filt
+  [ "${PIPESTATUS[0]}" -eq 0 ] || status=1
+done
+exit $status
